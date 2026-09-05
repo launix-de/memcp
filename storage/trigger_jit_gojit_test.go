@@ -109,20 +109,12 @@ func TestInternalTriggerUsesJIT(t *testing.T) {
 	requireCompiledTrigger(t, trigger)
 }
 
-func TestHiddenPhysicalTriggerKeepsCallbackCompilationBoundary(t *testing.T) {
+func TestHiddenPhysicalTriggerUsesJIT(t *testing.T) {
 	trigger := TriggerDescription{
 		Name:   "generated-physical-plan",
 		Func:   scm.Eval(triggerJITTestPlan(), &scm.Globalenv),
 		Hidden: true,
 	}
 	finalizeTriggerCompilation(&trigger)
-	if trigger.Func.Proc() == nil {
-		t.Fatalf("hidden trigger function is not a procedure: %s", scm.String(trigger.Func))
-	}
-	if trigger.Func.Proc().Compiled != nil || trigger.Func.Proc().JITCode != 0 {
-		t.Fatal("hidden physical trigger unexpectedly compiled its outer orchestration")
-	}
-	if got := scm.Apply(trigger.Func, scm.NewNil(), scm.NewNil(), scm.NewNil(), scm.NewNil()); !scm.Equal(got, scm.NewInt(42)) {
-		t.Fatalf("hidden trigger fallback returned %s, want 42", scm.String(got))
-	}
+	requireCompiledTrigger(t, trigger)
 }

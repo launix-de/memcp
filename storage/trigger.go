@@ -373,24 +373,16 @@ func finalizeTriggerCompilation(trigger *TriggerDescription) {
 		return
 	}
 	// Vectorization inspects the retained Scheme body, so it must run before
-	// native compilation. Compile the outer trigger afterwards: nested physical
-	// callbacks retain their own scan specialization and compilation boundary.
-	// Apply then dispatches directly to the native trigger entry point, while
-	// unsupported bodies and non-JIT builds keep the interpreter fallback.
+	// native compilation. Recursive compilation is intentional: maintenance
+	// triggers spend their time in filter/map/reduce callbacks, while the outer
+	// procedure is only orchestration. Apply dispatches directly to native code;
+	// unsupported bodies and non-JIT builds retain the interpreter fallback.
 	if (trigger.IsSystem || trigger.Hidden || trigger.Language == "") && trigger.VectorFunc.IsNil() {
 		if vf := VectorizeTrigger(trigger.Func); !vf.IsNil() {
 			trigger.VectorFunc = vf
 		}
 	}
-	// Hidden relational-maintenance triggers already consist of physically
-	// specialized scan/DML callbacks. Compiling their often very large outer
-	// orchestration duplicates those compilation boundaries and can turn lazy
-	// group-cache creation into a long synchronous JIT job. Visible language
-	// triggers and compact Go-created system triggers benefit from native outer
-	// dispatch; generated physical plans keep their callback-owned JIT boundary.
-	if !trigger.Hidden || trigger.IsSystem {
-		trigger.Func = scm.CompileJIT(scm.CloseProcedure(trigger.Func), false)
-	}
+	trigger.Func = scm.CompileJIT(scm.CloseProcedure(trigger.Func), true)
 }
 
 func evaluateTriggerPlan(plan scm.Scmer) scm.Scmer {

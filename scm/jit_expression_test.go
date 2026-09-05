@@ -130,6 +130,56 @@ func TestJITFunctionValueCarriesOriginalProcAndInlineCaptures(t *testing.T) {
 	}
 }
 
+func TestJITScanShapedMaintenanceCallbacksCaptureOuterRow(t *testing.T) {
+	const name = "jit_test_scan_shaped_maintenance_callbacks"
+	called := false
+	params := []*TypeDescriptor{
+		{Kind: "any"}, {Kind: "any"}, {Kind: "list"},
+		{Kind: "func", NoEscape: true, Params: []*TypeDescriptor{{Kind: "any", Variadic: true}}, Return: &TypeDescriptor{Kind: "bool"}},
+		{Kind: "list"},
+		{Kind: "func", NoEscape: true, Params: []*TypeDescriptor{{Kind: "any", Variadic: true}}, Return: &TypeDescriptor{Kind: "any"}},
+		{Kind: "any", Optional: true}, {Kind: "func", NoEscape: true, Optional: true}, {Kind: "bool", Optional: true},
+	}
+	Declare(&Globalenv, &Declaration{
+		Name: name,
+		Fn: func(args ...Scmer) Scmer {
+			result := make(chan Scmer, 1)
+			filter := PrepareSerialProc(args[3])
+			mapReduce := PrepareSerialProc(args[5])
+			go func() {
+				if ToBool(filter.Function(NewInt(7))) {
+					result <- mapReduce.Function(NewNil(), NewFunc(func(...Scmer) Scmer {
+						called = true
+						return NewNil()
+					}))
+					return
+				}
+				result <- NewNil()
+			}()
+			return <-result
+		},
+		Type: &TypeDescriptor{Kind: "func", HasSideEffects: true, Params: params, Return: &TypeDescriptor{Kind: "any"}},
+	})
+	if !jitEnabled {
+		t.Skip("requires GOEXPERIMENT=jit")
+	}
+	raw := Eval(Read(t.Name(), `(lambda (OLD NEW session tx)
+		(jit_test_scan_shaped_maintenance_callbacks session nil (quote ("k0"))
+			(lambda (value) (equal? value (get_assoc OLD "id")))
+			(quote ("$invalidate:value"))
+			(lambda (acc update) (begin (update) acc)) nil nil false))`), &Globalenv)
+	compiled := CompileJIT(raw, true)
+	if !compiled.IsProc() || compiled.Proc().Compiled == nil {
+		t.Fatal("raw maintenance procedure did not compile")
+	}
+	old := NewFastDictValue(1)
+	old.Set(NewString("id"), NewInt(7), nil)
+	Apply(compiled, NewFastDict(old), NewNil(), NewNil(), NewNil())
+	if !called {
+		t.Fatal("scan-shaped maintenance callback lost its captured trigger row")
+	}
+}
+
 func TestJITProcForFunctionRejectsOrdinaryGoFunction(t *testing.T) {
 	ordinary := func(...Scmer) Scmer { return NewNil() }
 	if got := JITProcForFunction(ordinary); got != nil {
