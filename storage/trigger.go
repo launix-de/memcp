@@ -388,8 +388,12 @@ func finalizeTriggerCompilation(trigger *TriggerDescription) {
 func evaluateTriggerPlan(plan scm.Scmer) scm.Scmer {
 	// JIT consumes optimizer-normalized procedures. This is the same phase order
 	// used for cached SQL query plans and is required for numbered mutable locals
-	// in trigger sequences such as SET followed by a conditional SET.
-	return scm.Eval(scm.Optimize(plan, &scm.Globalenv, nil), &scm.Globalenv)
+	// in trigger sequences such as SET followed by a conditional SET. Optimize
+	// rewrites AST containers in place, while CREATE TRIGGER plans are cacheable
+	// and may install the same source repeatedly. Transfer a private copy so one
+	// trigger's local-variable numbering never corrupts the cached plan.
+	ownedPlan := scm.CloneOptimizerExpression(plan)
+	return scm.Eval(scm.Optimize(ownedPlan, &scm.Globalenv, nil), &scm.Globalenv)
 }
 
 func compileTriggerForUse(schemaName, tableName string, trigger *TriggerDescription) {
