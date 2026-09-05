@@ -407,6 +407,9 @@ type JITValueDesc struct {
 	// RelocatablePointer distinguishes an unboxed address from ordinary scalar
 	// integers. Such values need stack-map coverage while live across a Go call.
 	RelocatablePointer bool
+	// GoArray marks a one-word descriptor as the data address of a Go array.
+	// Unlike a slice it has no adjacent length/capacity header.
+	GoArray bool
 	// Rooted means a pointer-bearing runtime value has an independently live Go
 	// owner or an invocation-local slot covered by every later safepoint map.
 	Rooted bool
@@ -477,6 +480,8 @@ const (
 	CondUnsignedAboveOrEqual
 	CondUnsignedBelowOrEqual
 	CondUnsignedAbove
+	CondParity
+	CondNotParity
 )
 
 // Short condition names keep generated emitters source-compatible. New
@@ -582,10 +587,12 @@ type jitStackRoot struct {
 // absent: the one-pass emitter only knows the final static frame size after the
 // complete function has been written.
 type jitSafepoint struct {
-	pcOffset  int32
-	dynamicSP int32
-	roots     []jitStackRoot
-	entry     bool
+	pcOffset        int32
+	dynamicSP       int32
+	roots           []jitStackRoot
+	entry           bool
+	entryFrameWords uintptr
+	entryPointerMap []byte
 }
 
 // jitSortedFrameRoots returns the permanent frame words registered by the
@@ -613,7 +620,32 @@ type jitStackMap struct {
 	frameWords uintptr
 	pointerMap []byte
 	entry      bool
+	// Entry maps describe the caller-owned register spill area used while a
+	// JIT prologue calls morestack. The variadic Scheme ABI and typed storage
+	// ABIs have different spill layouts, so these cannot be hard-coded by the
+	// runtime adapter.
+	entryFrameWords uintptr
+	entryPointerMap []byte
 }
+
+// JITStorageGetValueFunc is the native scalar column-reader ABI.
+type JITStorageGetValueFunc func(uint32) Scmer
+
+// JITStorageGetValueRangeFunc is the native consecutive-range column-reader ABI.
+type JITStorageGetValueRangeFunc func(uint32, uint32, []Scmer, int)
+
+// JITStorageGetValueMultiFunc is the native arbitrary-record column-reader ABI.
+type JITStorageGetValueMultiFunc func([]uint32, []Scmer, int)
+
+// JITStorageGetValueEmitter emits one scalar storage read. The bound method
+// receiver is the concrete finished storage; index and result use the typed Go ABI.
+type JITStorageGetValueEmitter func(*JITContext, JITValueDesc, JITValueDesc) JITValueDesc
+
+// JITStorageGetValueRangeEmitter emits one consecutive bulk storage read.
+type JITStorageGetValueRangeEmitter func(*JITContext, JITValueDesc, JITValueDesc, JITValueDesc, JITValueDesc, JITValueDesc) JITValueDesc
+
+// JITStorageGetValueMultiEmitter emits one arbitrary-record bulk storage read.
+type JITStorageGetValueMultiEmitter func(*JITContext, JITValueDesc, JITValueDesc, JITValueDesc, JITValueDesc) JITValueDesc
 
 // JITContext is the central structure for descriptor-based JIT compilation.
 // W is a self-reference for backward compatibility with hand-written emitters
@@ -2558,6 +2590,43 @@ type goCallArgWord struct {
 	reg      Reg
 	imm      uint64
 	stackOff int32
+	// groupWords is set on the first word of each source argument. Go's
+	// ABIInternal assigns an aggregate wholly to the stack when all of its words
+	// do not fit in the remaining registers; it must never split a slice header.
+	groupWords uint8
+}
+
+type goCallArgLocation struct {
+	inReg    bool
+	reg      Reg
+	stackOff int32
+}
+
+func layoutGoCallArgs(words []goCallArgWord) ([]goCallArgLocation, int) {
+	locations := make([]goCallArgLocation, len(words))
+	regIndex, stackIndex := 0, 0
+	for index := 0; index < len(words); {
+		width := int(words[index].groupWords)
+		if width == 0 {
+			width = 1
+		}
+		if index+width > len(words) {
+			panic("jit: invalid Go ABI argument group")
+		}
+		if regIndex+width <= len(GoABIIntRegs) {
+			for part := 0; part < width; part++ {
+				locations[index+part] = goCallArgLocation{inReg: true, reg: GoABIIntRegs[regIndex+part]}
+			}
+			regIndex += width
+		} else {
+			for part := 0; part < width; part++ {
+				locations[index+part] = goCallArgLocation{stackOff: int32(stackIndex * 8)}
+				stackIndex++
+			}
+		}
+		index += width
+	}
+	return locations, stackIndex
 }
 
 func (ctx *JITContext) collectLiveRegsForCall(buf *[16]Reg) []Reg {
@@ -2625,8 +2694,16 @@ type jitRegMove struct {
 }
 
 // emitParallelRegMoves preserves every source until its last consumer has
-// moved. R11 is reserved as emitter scratch and breaks register cycles.
+// moved. R12 breaks cycles, but it is also the long-lived input-slice base, so
+// cycle resolution preserves it on the stack. R11 cannot be scratch here
+// because it is Go ABIInternal's ninth integer argument register.
 func (ctx *JITContext) emitParallelRegMoves(moves []jitRegMove) {
+	scratchSaved := false
+	defer func() {
+		if scratchSaved {
+			ctx.EmitPopReg(RegR12)
+		}
+	}()
 	for len(moves) > 0 {
 		emitIdx := -1
 		for i := range moves {
@@ -2643,13 +2720,17 @@ func (ctx *JITContext) emitParallelRegMoves(moves []jitRegMove) {
 			}
 		}
 		if emitIdx == -1 {
+			if !scratchSaved {
+				ctx.EmitPushReg(RegR12)
+				scratchSaved = true
+			}
 			cycleDst := moves[0].dst
-			if cycleDst != RegR11 {
-				ctx.emitMovRegReg(RegR11, cycleDst)
+			if cycleDst != RegR12 {
+				ctx.emitMovRegReg(RegR12, cycleDst)
 			}
 			for i := range moves {
 				if moves[i].src == cycleDst {
-					moves[i].src = RegR11
+					moves[i].src = RegR12
 				}
 			}
 			continue
@@ -2679,11 +2760,28 @@ func (ctx *JITContext) EmitGoCallToFrame(funcAddr uint64, argWords []goCallArgWo
 	ctx.emitGoCall(funcAddr, argWords, len(resultFrameOffs), &resultsBuf, nil, ctx.FrameReg, resultFrameOffs)
 }
 
+// JITEmitGoCallScmerToFrame emits a Go call whose Scmer result is produced
+// directly into a rooted, frame-pointer-relative spill slot. CFG producers use
+// this to avoid a transient result pair that would immediately be spilled at
+// the outgoing edge.
+func JITEmitGoCallScmerToFrame(ctx *JITContext, funcAddr uint64, args []JITValueDesc) JITValueDesc {
+	off := ctx.AllocSpill(16)
+	var wordsBuf [16]goCallArgWord
+	words := ctx.flattenArgs(args, &wordsBuf)
+	ctx.EmitGoCallToFrame(funcAddr, words, []int32{off, off + 8})
+	ctx.setStackPointer(jitStackRootFrameBP, off, true)
+	return JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: off, Rooted: true}
+}
+
 func (ctx *JITContext) emitGoCall(funcAddr uint64, argWords []goCallArgWord, numResultWords int, resultsBuf *[16]Reg, resultTargets []Reg, resultSlotBase Reg, resultSlotOffs []int32) []Reg {
 	ctx.NeedsStableArgs = true
 	entryDynamicSP := ctx.DynamicSP
 	if numResultWords > len(GoABIIntRegs) {
 		panic("jit: too many result words for Go ABI")
+	}
+	argLocations, stackArgWords := layoutGoCallArgs(argWords)
+	if stackArgWords*8 > int(jitGoSpillBytes) {
+		panic("jit: Go call arguments exceed reserved spill area")
 	}
 	// Owner-aware liveness with conservative fallback.
 	var liveRegsArr [16]Reg
@@ -2713,8 +2811,11 @@ func (ctx *JITContext) emitGoCall(funcAddr uint64, argWords []goCallArgWord, num
 		// Stack arguments are written before register shuffling, while every
 		// source descriptor still names its original value. Go ABIInternal puts
 		// words after the eighth integer register at consecutive caller-SP slots.
-		for i := len(GoABIIntRegs); i < len(argWords); i++ {
-			dstOff := int32((i - len(GoABIIntRegs)) * 8)
+		for i := range argWords {
+			if argLocations[i].inReg {
+				continue
+			}
+			dstOff := argLocations[i].stackOff
 			switch argWords[i].loc {
 			case LocReg:
 				ctx.EmitStoreRegMem(argWords[i].reg, RegRSP, dstOff)
@@ -2737,20 +2838,22 @@ func (ctx *JITContext) emitGoCall(funcAddr uint64, argWords []goCallArgWord, num
 		}
 
 		moves := make([]jitRegMove, 0, len(argWords))
-		regWordCount := len(argWords)
-		if regWordCount > len(GoABIIntRegs) {
-			regWordCount = len(GoABIIntRegs)
-		}
-		for i := 0; i < regWordCount; i++ {
-			target := GoABIIntRegs[i]
+		for i := range argWords {
+			if !argLocations[i].inReg {
+				continue
+			}
+			target := argLocations[i].reg
 			if argWords[i].loc == LocReg && argWords[i].reg != target {
 				moves = append(moves, jitRegMove{dst: target, src: argWords[i].reg})
 			}
 		}
 		ctx.emitParallelRegMoves(moves)
 
-		for i := 0; i < regWordCount; i++ {
-			target := GoABIIntRegs[i]
+		for i := range argWords {
+			if !argLocations[i].inReg {
+				continue
+			}
+			target := argLocations[i].reg
 			switch argWords[i].loc {
 			case LocReg:
 				// Already handled by move planner (including no-op src==target).
@@ -2910,6 +3013,7 @@ func (ctx *JITContext) emitGoCall(funcAddr uint64, argWords []goCallArgWord, num
 func (ctx *JITContext) flattenArgs(args []JITValueDesc, buf *[16]goCallArgWord) []goCallArgWord {
 	n := 0
 	for index := range args {
+		groupStart := n
 		ctx.SyncDesc(&args[index])
 		if args[index].Loc == LocClosurePair {
 			ctx.EnsureDesc(&args[index])
@@ -2986,6 +3090,7 @@ func (ctx *JITContext) flattenArgs(args []JITValueDesc, buf *[16]goCallArgWord) 
 		default:
 			panic(fmt.Sprintf("jit: unsupported arg desc location in flattenArgs: %d", a.Loc))
 		}
+		buf[groupStart].groupWords = uint8(n - groupStart)
 	}
 	return buf[:n]
 }
@@ -3038,6 +3143,21 @@ func (ctx *JITContext) EmitGoCallScalarInto(funcAddr uint64, args []JITValueDesc
 // not consume an intermediate register pair.
 func (ctx *JITContext) EmitMovPairToResult(src *JITValueDesc, dst *JITValueDesc) {
 	ctx.SyncDesc(src)
+	ctx.SyncDesc(dst)
+	if dst.Loc == LocStackPair {
+		ctx.EmitCopyScmerToDesc(dst, src)
+		base := jitStackRootFrameSP
+		offset := dst.StackOff - ctx.DynamicSP
+		if dst.StackOff < 0 {
+			base = jitStackRootFrameBP
+			offset = dst.StackOff
+		}
+		ctx.setStackPointer(base, offset, true)
+		return
+	}
+	if dst.Loc != LocRegPair {
+		panic("jit: pair result destination requires a register or stack pair")
+	}
 	if src.Loc == LocStackPair {
 		base := ctx.StackReg
 		if src.StackOff < 0 {
@@ -5302,7 +5422,7 @@ func init_jit() {
 					ps49.OverlayValues[29] = d29
 					ps49.OverlayValues[32] = d32
 					ps49.OverlayValues[48] = d48
-					return bbs[7].RenderPS(ps49)
+					return bbs[8].RenderPS(ps49)
 					return result
 				}
 				bbs[3].RenderPS = func(ps PhiState) JITValueDesc {
@@ -6885,7 +7005,6 @@ func init_jit() {
 						return bbs[7].RenderPS(ps146)
 					}
 					return result
-					ctx.FreeDesc(&d1)
 					return result
 				}
 				bbs[9].RenderPS = func(ps PhiState) JITValueDesc {
@@ -7427,7 +7546,7 @@ func init_jit() {
 				for i := range args {
 					ctx.StabilizeDescForControlFlow(&args[i])
 				}
-				d0 := JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(false)}
+				d0 := JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(true)}
 				if result.Loc == LocAny {
 					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 					ctx.BindReg(result.Reg, &result)

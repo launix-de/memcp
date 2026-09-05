@@ -186,28 +186,9 @@ func init_window() {
 					ctx.BindReg(result.Reg, &result)
 					ctx.BindReg(result.Reg2, &result)
 				}
-				ctx.SyncDesc(&d7)
-				if d7.Loc == LocRegPair || d7.Loc == LocStackPair || d7.Loc == LocInputPair {
-					ctx.EmitMovPairToResult(&d7, &result)
-					result.Type = d7.Type
-				} else {
-					switch d7.Type {
-					case tagBool:
-						ctx.EmitMakeBool(result, d7)
-						result.Type = tagBool
-					case tagInt:
-						ctx.EmitMakeInt(result, d7)
-						result.Type = tagInt
-					case tagFloat:
-						ctx.EmitMakeFloat(result, d7)
-						result.Type = tagFloat
-					case tagNil:
-						ctx.EmitMakeNil(result)
-						result.Type = tagNil
-					default:
-						panic("jit: single-block scalar return with unknown type")
-					}
-				}
+				d8 := JITPrepareScmerGoArg(ctx, d7)
+				ctx.EmitMovPairToResult(&d8, &result)
+				result.Type = d8.Type
 				return result
 				return result
 			},
@@ -1953,6 +1934,7 @@ func init_window() {
 					}
 					ctx.EnsureDesc(&d101)
 					ctx.EnsureDesc(&d37)
+					ctx.EnsureDescsTogether(&d101, &d37)
 					var d102 JITValueDesc
 					if d101.Loc == LocImm && d37.Loc == LocImm {
 						d102 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d101.Imm.Int() % d37.Imm.Int())}
@@ -3149,7 +3131,6 @@ func init_window() {
 						d225 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r26}
 						ctx.BindReg(r26, &d225)
 					}
-					ctx.FreeDesc(&d98)
 					d226 = d225
 					ctx.EnsureDesc(&d226)
 					if d226.Loc != LocImm && d226.Loc != LocReg {
@@ -6306,6 +6287,7 @@ func init_window() {
 					d468 = d44
 					_ = d468
 					ctx.StabilizeDescForControlFlow(&d468)
+					ctx.StabilizeDescForControlFlow(&d44)
 					bbpos_1_0 := int32(-1)
 					_ = bbpos_1_0
 					lbl29 := ctx.ReserveLabel()
@@ -6337,7 +6319,6 @@ func init_window() {
 					ctx.BindReg(d470.Reg2, &d470)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d470)
-					ctx.FreeDesc(&d4)
 					d471 = args[0]
 					d471.ID = 0
 					ctx.SyncDesc(&d471)
@@ -7578,6 +7559,7 @@ func init_window() {
 					}
 					ctx.EnsureDesc(&d72)
 					ctx.EnsureDesc(&d31)
+					ctx.EnsureDescsTogether(&d72, &d31)
 					var d73 JITValueDesc
 					if d72.Loc == LocImm && d31.Loc == LocImm {
 						d73 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d72.Imm.Int() % d31.Imm.Int())}
@@ -9905,7 +9887,6 @@ func init_window() {
 					ctx.EnsureDesc(&d270)
 					ctx.EmitStoreToStack(d270, int32(bbs[10].PhiBase)+int32(0))
 					ctx.StabilizeDescForControlFlow(&d270)
-					ctx.FreeDesc(&d2)
 					if ps.General {
 					}
 					ps271 := PhiState{General: ps.General}
@@ -10255,7 +10236,6 @@ func init_window() {
 					ctx.BindReg(d284.Reg2, &d284)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d284)
-					ctx.FreeDesc(&d5)
 					ctx.EnsureDesc(&d1)
 					ctx.EnsureDesc(&d1)
 					var d285 JITValueDesc
@@ -10275,7 +10255,6 @@ func init_window() {
 					ctx.EnsureDesc(&d285)
 					ctx.EmitStoreToStack(d285, int32(bbs[7].PhiBase)+int32(0))
 					ctx.StabilizeDescForControlFlow(&d285)
-					ctx.FreeDesc(&d1)
 					if ps.General {
 					}
 					ps286 := PhiState{General: ps.General}

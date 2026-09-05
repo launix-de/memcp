@@ -41,7 +41,7 @@ func buildBenchStorageInt(n int) *StorageInt {
 
 // jitBuildRawFunc compiles JIT code for StorageInt and returns func(int64) scm.Scmer.
 // Go ABI: int64 arg in RAX, Scmer result in RAX+RBX. Zero allocations per call.
-func jitBuildRawFunc(tb testing.TB, s *StorageInt, constThisptr bool) (fn func(int64) scm.Scmer, cleanup func()) {
+func jitBuildRawFunc(tb testing.TB, s *StorageInt, _ bool) (fn func(int64) scm.Scmer, cleanup func()) {
 	tb.Helper()
 	if runtime.GOARCH != "amd64" {
 		tb.Skip("JIT benchmarks only on amd64")
@@ -66,17 +66,8 @@ func jitBuildRawFunc(tb testing.TB, s *StorageInt, constThisptr bool) (fn func(i
 	ctx.EmitMovRegReg(idxReg, scm.RegRAX)
 	idx := scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: idxReg}
 
-	var thisptr scm.JITValueDesc
-	if constThisptr {
-		thisptr = scm.JITValueDesc{Loc: scm.LocImm, Imm: scm.NewInt(int64(uintptr(unsafe.Pointer(s))))}
-	} else {
-		ptrReg := ctx.AllocReg()
-		ctx.EmitMovRegImm64(ptrReg, uint64(uintptr(unsafe.Pointer(s))))
-		thisptr = scm.JITValueDesc{Loc: scm.LocReg, Reg: ptrReg}
-	}
-
 	result := scm.JITValueDesc{Loc: scm.LocRegPair, Reg: scm.RegRAX, Reg2: scm.RegRBX}
-	desc := s.JITEmit(ctx, thisptr, idx, result)
+	desc := s.JITEmit(ctx, idx, result)
 	ctx.EmitMovPairToResult(&desc, &result)
 	ctx.EmitByte(0xC3) // RET
 
@@ -103,7 +94,7 @@ func jitBuildRawFunc(tb testing.TB, s *StorageInt, constThisptr bool) (fn func(i
 	hdrPtr := unsafe.Pointer(hdr)
 	jitFn := *(*func(int64) scm.Scmer)(unsafe.Pointer(&hdrPtr))
 
-	tb.Logf("JIT code size: %d bytes (constThisptr=%v)", codeLen, constThisptr)
+	tb.Logf("JIT code size: %d bytes (storage-specialized)", codeLen)
 
 	return jitFn, func() {
 		runtime.KeepAlive(ctx) // keeps compile-time roots alive through the native call
@@ -114,7 +105,7 @@ func jitBuildRawFunc(tb testing.TB, s *StorageInt, constThisptr bool) (fn func(i
 
 // jitBuildSumFunc compiles a JIT function that loops 0..count-1, reads each
 // value via JITEmit and accumulates SUM in R14. Returns func() int64.
-func jitBuildSumFunc(tb testing.TB, s *StorageInt, count int64, constThisptr bool) (fn func() int64, cleanup func()) {
+func jitBuildSumFunc(tb testing.TB, s *StorageInt, count int64, _ bool) (fn func() int64, cleanup func()) {
 	tb.Helper()
 	if runtime.GOARCH != "amd64" {
 		tb.Skip("JIT benchmarks only on amd64")
@@ -122,7 +113,7 @@ func jitBuildSumFunc(tb testing.TB, s *StorageInt, count int64, constThisptr boo
 
 	codeBuf := make([]byte, 65536)
 	// R15 = loop counter, R14 = accumulator (SUM), R12 = slice base (unused but reserved)
-	// R13 = thisptr for LocReg case
+	// R13 remains available to the specialized storage emitter.
 	freeRegs := uint64((1 << uint(scm.RegRCX)) | (1 << uint(scm.RegRDX)) |
 		(1 << uint(scm.RegRSI)) | (1 << uint(scm.RegRDI)) |
 		(1 << uint(scm.RegR8)) | (1 << uint(scm.RegR9)) | (1 << uint(scm.RegR10)) |
@@ -134,15 +125,6 @@ func jitBuildSumFunc(tb testing.TB, s *StorageInt, count int64, constThisptr boo
 		End:      unsafe.Add(unsafe.Pointer(&codeBuf[0]), len(codeBuf)-256),
 		FreeRegs: freeRegs,
 		AllRegs:  freeRegs,
-	}
-
-	var thisptr scm.JITValueDesc
-	if constThisptr {
-		thisptr = scm.JITValueDesc{Loc: scm.LocImm, Imm: scm.NewInt(int64(uintptr(unsafe.Pointer(s))))}
-	} else {
-		ctx.FreeRegs &^= 1 << uint(scm.RegR13)
-		ctx.EmitMovRegImm64(scm.RegR13, uint64(uintptr(unsafe.Pointer(s))))
-		thisptr = scm.JITValueDesc{Loc: scm.LocReg, Reg: scm.RegR13}
 	}
 
 	// PUSH R14 (save Go's g pointer)
@@ -167,7 +149,7 @@ func jitBuildSumFunc(tb testing.TB, s *StorageInt, count int64, constThisptr boo
 
 	// Emit JITEmit body — result goes wherever JITEmit chooses
 	result := scm.JITValueDesc{Loc: scm.LocRegPair, Reg: scm.RegRAX, Reg2: scm.RegRBX}
-	desc := s.JITEmit(ctx, thisptr, idx, result)
+	desc := s.JITEmit(ctx, idx, result)
 
 	// Scmer LocRegPair: Reg=sentinel ptr, Reg2=int value (aux field).
 	// For null: EmitMakeNil zeroes both, so adding Reg2=0 is correct for SUM.
@@ -220,7 +202,7 @@ func jitBuildSumFunc(tb testing.TB, s *StorageInt, count int64, constThisptr boo
 	hdrPtr := unsafe.Pointer(hdr)
 	jitFn := *(*func() int64)(unsafe.Pointer(&hdrPtr))
 
-	tb.Logf("JIT SUM code size: %d bytes (constThisptr=%v, count=%d)", codeLen, constThisptr, count)
+	tb.Logf("JIT SUM code size: %d bytes (storage-specialized, count=%d)", codeLen, count)
 
 	return jitFn, func() {
 		runtime.KeepAlive(hdr)
@@ -358,6 +340,76 @@ func BenchmarkStorageIntJITCompile(b *testing.B) {
 		for i := 0; i < b.N; i++ {
 			_, cleanup := jitBuildRawFunc(b, s, false)
 			cleanup()
+		}
+	})
+}
+
+// BenchmarkStorageIntFinishedReaders compares the normal immutable storage
+// methods with the three typed functions installed by finish(). The fixtures,
+// record order, targets, warmup and sample size are identical within each pair.
+func BenchmarkStorageIntFinishedReaders(b *testing.B) {
+	if !scm.JITEnabled() {
+		b.Skip("requires the JIT experiment")
+	}
+	s := buildBenchStorageInt(benchN)
+	scalar := s.GetJITGetValue()
+	rangeReader := s.GetJITGetValueRange()
+	multiReader := s.GetJITGetValueMulti()
+	if scalar == nil || rangeReader == nil || multiReader == nil {
+		b.Fatal("finish did not install every JIT reader")
+	}
+
+	b.Run("Scalar/Go", func(b *testing.B) {
+		var sum int64
+		b.ReportAllocs()
+		b.ResetTimer()
+		for sample := 0; sample < b.N; sample++ {
+			for recid := uint32(0); recid < benchN; recid++ {
+				sum += s.GetValue(recid).Int()
+			}
+		}
+		runtime.KeepAlive(sum)
+	})
+	b.Run("Scalar/JIT", func(b *testing.B) {
+		var sum int64
+		b.ReportAllocs()
+		b.ResetTimer()
+		for sample := 0; sample < b.N; sample++ {
+			for recid := uint32(0); recid < benchN; recid++ {
+				sum += scalar(recid).Int()
+			}
+		}
+		runtime.KeepAlive(sum)
+	})
+
+	target := make([]scm.Scmer, benchN)
+	b.Run("Range/Go", func(b *testing.B) {
+		b.ReportAllocs()
+		for sample := 0; sample < b.N; sample++ {
+			s.GetValueRange(0, benchN, target, 1)
+		}
+	})
+	b.Run("Range/JIT", func(b *testing.B) {
+		b.ReportAllocs()
+		for sample := 0; sample < b.N; sample++ {
+			rangeReader(0, benchN, target, 1)
+		}
+	})
+
+	recids := make([]uint32, benchN)
+	for index := range recids {
+		recids[index] = uint32((index * 7919) % benchN)
+	}
+	b.Run("Multi/Go", func(b *testing.B) {
+		b.ReportAllocs()
+		for sample := 0; sample < b.N; sample++ {
+			s.GetValueMulti(recids, target, 1)
+		}
+	})
+	b.Run("Multi/JIT", func(b *testing.B) {
+		b.ReportAllocs()
+		for sample := 0; sample < b.N; sample++ {
+			multiReader(recids, target, 1)
 		}
 	})
 }

@@ -83,6 +83,7 @@ func (r *orderedComputeProxyReader) GetValueMulti(recids []uint32, target []scm.
 // scan code: selective preparation may change work scheduling, never which
 // values the StorageComputeProxy represents.
 type StorageComputeProxy struct {
+	storageJITFunctions
 	main       ColumnStorage                       // after Compress() — typically StorageSCMER or compressed type
 	delta      map[uint32]scm.Scmer                // sparse overwrites (lazy-computed values before Compress)
 	validMask  NonLockingReadMap.NonBlockingBitMap // 1=valid, 0=needs compute
@@ -1145,15 +1146,10 @@ func (s *StorageComputeProxy) DistinctCount() uint {
 }
 
 // JITEmit preserves lazy compute semantics by calling the ordinary reader.
-func (s *StorageComputeProxy) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc {
+func (s *StorageComputeProxy) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc {
 	/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 	ctx.TrackPointer(unsafe.Pointer(s))
-	thisptrPinned := thisptr.Loc == scm.LocReg
-	thisptrPinnedReg := thisptr.Reg
-	if thisptrPinned {
-		ctx.ProtectReg(thisptrPinnedReg)
-		defer ctx.UnprotectReg(thisptrPinnedReg)
-	}
+	thisptr := scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(int64(uintptr(unsafe.Pointer(s)))), NoHeapPointer: true}
 	var idxInt scm.JITValueDesc
 	if idx.Loc == scm.LocImm {
 		idxInt = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(idx.Imm.Int())}
@@ -1208,28 +1204,9 @@ func (s *StorageComputeProxy) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueD
 		ctx.BindReg(result.Reg, &result)
 		ctx.BindReg(result.Reg2, &result)
 	}
-	ctx.SyncDesc(&d1)
-	if d1.Loc == scm.LocRegPair || d1.Loc == scm.LocStackPair || d1.Loc == scm.LocInputPair {
-		ctx.EmitMovPairToResult(&d1, &result)
-		result.Type = d1.Type
-	} else {
-		switch d1.Type {
-		case scm.TagBool:
-			ctx.EmitMakeBool(result, d1)
-			result.Type = scm.TagBool
-		case scm.TagInt:
-			ctx.EmitMakeInt(result, d1)
-			result.Type = scm.TagInt
-		case scm.TagFloat:
-			ctx.EmitMakeFloat(result, d1)
-			result.Type = scm.TagFloat
-		case scm.TagNil:
-			ctx.EmitMakeNil(result)
-			result.Type = scm.TagNil
-		default:
-			panic("jit: single-block scalar return with unknown type")
-		}
-	}
+	d2 := scm.JITPrepareScmerGoArg(ctx, d1)
+	ctx.EmitMovPairToResult(&d2, &result)
+	result.Type = d2.Type
 	return result
 	return result
 }
