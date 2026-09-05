@@ -994,6 +994,13 @@ func sortedBoundariesCoverCondition(conditionCols []string, condition scm.Scmer,
 	return true
 }
 
+func scanAccessProvesCondition(conditionCols []string, condition scm.Scmer, access scanAccess) bool {
+	if scanAccessCoversResidual(access) {
+		return true
+	}
+	return access.len() > 0 && sortedBoundariesCoverCondition(conditionCols, condition, access)
+}
+
 // extractBoundariesGeneral retains the complete recursive analyzer for OR
 // widening, computed columns and any future shape not handled by the simple
 // allocation-free path.

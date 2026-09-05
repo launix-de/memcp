@@ -1299,9 +1299,8 @@ func (t *storageShard) scan_order(boundaries scanAccess, lower []scm.Scmer, uppe
 	}
 	recsetBoundaryCoversCondition := recSetHooksCoverCondition(boundaries, lower, t.t, conditionCols, condition)
 	conditionProgram := scm.PrepareSerialProc(condition)
-	conditionAlwaysTrue := scanAccessCoversResidual(boundaries) ||
-		scanConditionAlwaysTrue(&conditionProgram, len(conditionCols)) ||
-		sortedBoundariesCoverCondition(conditionCols, condition, boundaries)
+	conditionAlwaysTrue := scanConditionAlwaysTrue(&conditionProgram, len(conditionCols)) ||
+		scanAccessProvesCondition(conditionCols, condition, boundaries)
 	var acceptProgram *scm.SerialProc
 	if !accept.IsNil() {
 		prepared := scm.PrepareSerialProc(accept)
@@ -1463,8 +1462,7 @@ func (t *storageShard) scan_order(boundaries scanAccess, lower []scm.Scmer, uppe
 		var mainIdsBuf, acceptMainIdsBuf []uint32
 		colBufs := make([][]scm.Scmer, len(conditionCols))
 		acceptColBufs := make([][]scm.Scmer, len(acceptCols))
-		boundaryCoveredLimit := acceptProgram == nil && (conditionAlwaysTrue ||
-			sortedBoundariesCoverCondition(conditionCols, condition, boundaries))
+		boundaryCoveredLimit := acceptProgram == nil && conditionAlwaysTrue
 		access := boundaries
 		t.iterateIndexOrdered(currentTx, access, lower, upperLast, maxInsertIndex, buf, usageWeight, limit, boundaryCoveredLimit, func(index *StorageIndex, active bool) {
 			if len(sortcols) > 0 {

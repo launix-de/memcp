@@ -118,8 +118,9 @@ var emptyScanAccessSchema = newScanAccessSchema(scanAccessConsumerScan, nil, -1)
 // fit in these inline buffers; unusual wide predicates retain the ordinary
 // append fallback without changing analyzer semantics.
 type scanAnalyzeScratch struct {
-	runtime scanAccessRuntime
-	lower   [scanAnalyzeScratchCapacity]scm.Scmer
+	runtime         scanAccessRuntime
+	batchBoundaries [scanAnalyzeScratchCapacity]columnboundaries
+	lower           [scanAnalyzeScratchCapacity]scm.Scmer
 }
 
 var scanAnalyzeScratchPool = sync.Pool{
@@ -132,6 +133,7 @@ func acquireScanAnalyzeScratch() *scanAnalyzeScratch {
 
 func releaseScanAnalyzeScratch(scratch *scanAnalyzeScratch) {
 	scratch.runtime = scanAccessRuntime{}
+	clear(scratch.batchBoundaries[:])
 	clear(scratch.lower[:])
 	scanAnalyzeScratchPool.Put(scratch)
 }
@@ -1800,9 +1802,8 @@ func (t *storageShard) scanFirstRecord(boundaries scanAccess, lower []scm.Scmer,
 		ss = SessionStateFromTx(currentTx)
 	}
 	conditionProgram := scm.PrepareSerialProc(condition)
-	conditionAlwaysTrue := scanAccessCoversResidual(boundaries) ||
-		scanConditionAlwaysTrue(&conditionProgram, len(conditionCols)) ||
-		sortedBoundariesCoverCondition(conditionCols, condition, boundaries)
+	conditionAlwaysTrue := scanConditionAlwaysTrue(&conditionProgram, len(conditionCols)) ||
+		scanAccessProvesCondition(conditionCols, condition, boundaries)
 
 	t.ensureLoaded()
 	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
@@ -1983,8 +1984,7 @@ func (t *storageShard) scan(boundaries scanAccess, lower []scm.Scmer, upperLast 
 	// read may trust its exact access proof, but a mutation must recheck the
 	// visible row before applying update/delete pseudo-columns.
 	conditionAlwaysTrue = conditionAlwaysTrue || !hasMutationCallback &&
-		(sortedBoundariesCoverCondition(conditionCols, condition, boundaries) ||
-			scanAccessCoversResidual(boundaries))
+		scanAccessProvesCondition(conditionCols, condition, boundaries)
 
 	// Ensure shard is loaded from disk before accessing columns.
 	// ensureLoaded() must run before getColumnStorageOrPanic so that COLD
@@ -2315,8 +2315,7 @@ func (t *storageShard) scanBatch(boundaries scanAccess, lower []scm.Scmer, upper
 		}
 	}
 	conditionAlwaysTrue = conditionAlwaysTrue || !hasMutationCallback &&
-		(sortedBoundariesCoverCondition(conditionCols, condition, boundaries) ||
-			scanAccessCoversResidual(boundaries))
+		scanAccessProvesCondition(conditionCols, condition, boundaries)
 
 	t.ensureLoaded()
 	ownsWrite := false
@@ -2419,8 +2418,11 @@ func (t *storageShard) scanBatch(boundaries scanAccess, lower []scm.Scmer, upper
 	hadValue := false
 	batchCount := len(batchdata) / stride
 	batchBoundaries := hasBatchScanAccess(boundaries)
-	var activeBoundaryStorage [scanAnalyzeScratchCapacity]columnboundaries
-	var activeLowerStorage [scanAnalyzeScratchCapacity]scm.Scmer
+	var batchAccessScratch *scanAnalyzeScratch
+	if batchBoundaries {
+		batchAccessScratch = acquireScanAnalyzeScratch()
+		defer releaseScanAnalyzeScratch(batchAccessScratch)
+	}
 	activeBoundaries := scanAccess{plannerFilterCovered: scanAccessCoversResidual(boundaries)}
 
 	for batchid := 0; batchid < batchCount; batchid++ {
@@ -2431,9 +2433,9 @@ func (t *storageShard) scanBatch(boundaries scanAccess, lower []scm.Scmer, upper
 		activeLower := lower
 		activeUpperLast := upperLast
 		if batchBoundaries {
-			activeBoundaries.native = materializeBatchScanAccessInto(activeBoundaryStorage[:0], boundaries, stride, batchdata, uint32(batchid))
+			activeBoundaries.native = materializeBatchScanAccessInto(batchAccessScratch.batchBoundaries[:0], boundaries, stride, batchdata, uint32(batchid))
 			currentBoundaries = activeBoundaries
-			activeLower, activeUpperLast = indexFromScanAccessInto(activeLowerStorage[:0], currentBoundaries)
+			activeLower, activeUpperLast = indexFromScanAccessInto(batchAccessScratch.lower[:0], currentBoundaries)
 		}
 
 		t.iterateIndex(currentTx, currentBoundaries, activeLower, activeUpperLast, maxInsertIndex, buf, 1, nil, func(batch []uint32) bool {
