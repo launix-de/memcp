@@ -920,6 +920,19 @@ func Init(en scm.Env) {
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
+		Name: "compile_scan_computed_index",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			return compileComputedScanIndex(a[0], scmerSliceToStrings(mustScmerSlice(a[1], "computed index columns")))
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "binds runtime constants into a planner-validated computed scan formula",
+			Params: []*scm.TypeDescriptor{
+				{Kind: "func", Label: "mapper"},
+				{Kind: "list", Label: "columns"},
+			},
+			Return: &scm.TypeDescriptor{Kind: "list"},
+		},
+	})
+	scm.Declare(&en, &scm.Declaration{
 		Name: "compile_scan_plan",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			if len(a) < 5 {

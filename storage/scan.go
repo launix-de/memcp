@@ -204,6 +204,10 @@ func shiftCompiledScanAccessSlots(schemaValue scm.Scmer, shift int) scm.Scmer {
 				shifted[offset+slotOffset] = scm.NewInt(int64(slot + shift))
 			}
 		}
+		flags := scm.ToInt(shifted[offset+4])
+		if mapperSlot := flags >> 3; mapperSlot > 0 {
+			shifted[offset+4] = scm.NewInt(int64((flags & 7) | ((mapperSlot + shift) << 3)))
+		}
 	}
 	return scm.NewSlice(shifted)
 }
@@ -318,6 +322,80 @@ type compiledScanBoundary struct {
 	upperInclusive bool
 	nullSafe       bool
 	collation      string
+	mapCols        []string
+	mapFn          scm.Scmer
+}
+
+func scanCompiledColumn(expr scm.Scmer, params, columns []scm.Scmer) (string, []string, scm.Scmer, bool) {
+	if column, ok := scanParamColumn(expr, params, columns); ok {
+		return column, nil, scm.NewNil(), true
+	}
+	expr = expr.WithoutSourceInfo()
+	if !expr.IsSlice() || isIndependent(params, expr) || !scanComputedExpressionSafe(expr, params) {
+		return "", nil, scm.NewNil(), false
+	}
+	mapCols := make([]string, len(columns))
+	for i, column := range columns {
+		if !column.IsString() {
+			return "", nil, scm.NewNil(), false
+		}
+		mapCols[i] = column.String()
+		if isScanPseudoColName(mapCols[i]) && computedExprUsesParameter(expr, params, i) {
+			return "", nil, scm.NewNil(), false
+		}
+	}
+	mapFn := scm.NewSlice([]scm.Scmer{
+		scm.NewSymbol("lambda"),
+		scm.NewSlice(append([]scm.Scmer(nil), params...)),
+		expr,
+	})
+	return canonicalColName(expr, params, mapCols), mapCols, mapFn, true
+}
+
+func scanComputedExpressionSafe(expr scm.Scmer, params []scm.Scmer) bool {
+	expr = expr.WithoutSourceInfo()
+	if isIndependent(params, expr) {
+		return scanExprSafeToHoist(expr, false)
+	}
+	if expr.IsSymbol() || expr.IsNthLocalVar() {
+		return true
+	}
+	if !expr.IsSlice() {
+		return false
+	}
+	items := expr.Slice()
+	if len(items) == 0 || items[0].IsNthLocalVar() {
+		return false
+	}
+	declaration := scm.DeclarationForValue(items[0])
+	if declaration == nil || !declaration.IsFoldable() {
+		return false
+	}
+	for _, item := range items[1:] {
+		if !scanComputedExpressionSafe(item, params) {
+			return false
+		}
+	}
+	return true
+}
+
+func compileComputedScanIndex(mapper scm.Scmer, mapCols []string) scm.Scmer {
+	ctx, ok := conditionAnalyzeContext(mapCols, mapper)
+	if !ok {
+		panic("compiled scan index mapper must be a procedure")
+	}
+	expr := ctx.materializeComputedExpr(ctx.proc.Body)
+	if !isRawDataset(ctx.params, expr) {
+		panic("compiled scan index mapper contains a runtime-dependent formula")
+	}
+	cols, fn := buildComputedFn(expr, ctx.proc.Params, ctx.proc.En, mapCols)
+	if fn.IsNil() || len(cols) != len(mapCols) {
+		panic("compiled scan index mapper could not be materialized")
+	}
+	return scm.NewSlice([]scm.Scmer{
+		scm.NewString(canonicalColName(expr, ctx.params, mapCols)),
+		fn,
+	})
 }
 
 func scanBatchParamSlot(expr scm.Scmer, params, columns []scm.Scmer) (int, bool) {
@@ -346,16 +424,18 @@ func compileScanComparison(node scm.Scmer, params, columns []scm.Scmer, allowBat
 	if !named {
 		return compiledScanBoundary{}, false
 	}
-	leftColumn, leftIsColumn := scanParamColumn(items[1], params, columns)
-	rightColumn, rightIsColumn := scanParamColumn(items[2], params, columns)
+	leftColumn, leftMapCols, leftMapFn, leftIsColumn := scanCompiledColumn(items[1], params, columns)
+	rightColumn, rightMapCols, rightMapFn, rightIsColumn := scanCompiledColumn(items[2], params, columns)
 	if leftIsColumn == rightIsColumn {
 		return compiledScanBoundary{}, false
 	}
 	column := leftColumn
+	mapCols, mapFn := leftMapCols, leftMapFn
 	value := items[2]
 	reversed := false
 	if rightIsColumn {
 		column, value, reversed = rightColumn, items[1], true
+		mapCols, mapFn = rightMapCols, rightMapFn
 	}
 	batchSlot, batchValue := 0, false
 	if allowBatch {
@@ -369,14 +449,14 @@ func compileScanComparison(node scm.Scmer, params, columns []scm.Scmer, allowBat
 	case "equal?", "equal??":
 		return compiledScanBoundary{kind: "equal", column: column, lower: value, upper: value, lowerSet: true, upperSet: true,
 			lowerBatch: batchValue, upperBatch: batchValue, lowerBatchSlot: batchSlot, upperBatchSlot: batchSlot,
-			lowerInclusive: true, upperInclusive: true, nullSafe: operator == "equal??"}, true
+			lowerInclusive: true, upperInclusive: true, nullSafe: operator == "equal??", mapCols: mapCols, mapFn: mapFn}, true
 	case "<", "<=", ">", ">=":
 		inclusive := operator == "<=" || operator == ">="
 		lower := operator == ">" || operator == ">="
 		if reversed {
 			lower = !lower
 		}
-		boundary := compiledScanBoundary{kind: "range", column: column}
+		boundary := compiledScanBoundary{kind: "range", column: column, mapCols: mapCols, mapFn: mapFn}
 		if lower {
 			boundary.lower, boundary.lowerSet, boundary.lowerInclusive = value, true, inclusive
 			boundary.lowerBatch, boundary.lowerBatchSlot = batchValue, batchSlot
@@ -590,9 +670,16 @@ func compileScanAccessMode(columnExpr, filterExpr scm.Scmer, allowBatch bool) (s
 		}
 		return compiled[i].column < compiled[j].column
 	})
-	schema := make([]scm.Scmer, 0, scanAccessSchemaHeaderSize+len(compiled)*scanAccessBoundaryStride)
+	var mapCols []string
+	for _, boundary := range compiled {
+		if !boundary.mapFn.IsNil() {
+			mapCols = boundary.mapCols
+			break
+		}
+	}
+	schema := make([]scm.Scmer, 0, scanAccessSchemaHeaderSize+len(compiled)*scanAccessBoundaryStride+len(mapCols))
 	schema = append(schema, scm.NewString(scanAccessSchemaName), scm.NewInt(int64(len(compiled))),
-		scm.NewString(scanAccessConsumerScan), scm.NewInt(0), scm.NewInt(-1))
+		scm.NewString(scanAccessConsumerScan), scm.NewInt(int64(len(mapCols))), scm.NewInt(-1))
 	bindings := make([]scm.Scmer, 0, len(compiled)*2)
 	for _, boundary := range compiled {
 		lowerSlot, upperSlot := int64(-1), int64(-1)
@@ -622,9 +709,25 @@ func compileScanAccessMode(columnExpr, filterExpr scm.Scmer, allowBatch bool) (s
 		if boundary.nullSafe {
 			flags |= 4
 		}
+		if !boundary.mapFn.IsNil() {
+			mapperSlot := len(bindings)
+			mapColValues := make([]scm.Scmer, len(boundary.mapCols))
+			for i, column := range boundary.mapCols {
+				mapColValues[i] = scm.NewString(column)
+			}
+			bindings = append(bindings, scm.NewSlice([]scm.Scmer{
+				scm.NewSymbol("compile_scan_computed_index"),
+				boundary.mapFn,
+				scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), scm.NewSlice(mapColValues)}),
+			}))
+			flags |= int64(mapperSlot+1) << 3
+		}
 		schema = append(schema,
 			scm.NewString(boundary.kind), scm.NewString(boundary.column),
 			scm.NewInt(lowerSlot), scm.NewInt(upperSlot), scm.NewInt(flags), scm.NewString(boundary.collation))
+	}
+	for _, column := range mapCols {
+		schema = append(schema, scm.NewString(column))
 	}
 	return scm.NewSlice(schema), bindings, true
 }

@@ -78,6 +78,50 @@ func TestCompileScanAccessReadsRuntimeValuesWithoutAllocation(t *testing.T) {
 	}
 }
 
+func TestCompileScanAccessCarriesComputedFormulaRuntimeConstants(t *testing.T) {
+	columns := scm.NewSlice([]scm.Scmer{scm.NewSymbol("list"), scm.NewString("doc")})
+	path := scm.NewSlice([]scm.Scmer{scm.NewSymbol("session"), scm.NewString("v1")})
+	wanted := scm.NewSlice([]scm.Scmer{scm.NewSymbol("session"), scm.NewString("v2")})
+	filter := scm.NewSlice([]scm.Scmer{
+		scm.NewSymbol("lambda"),
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("doc")}),
+		scm.NewSlice([]scm.Scmer{
+			scm.NewSymbol("equal??"),
+			scm.NewSlice([]scm.Scmer{
+				scm.Globalenv.Vars[scm.Symbol("json_value")], scm.NewSymbol("doc"), path, scm.NewString("UNSIGNED"),
+			}),
+			wanted,
+		}),
+	})
+	schema, bindings, ok := compileScanAccess(columns, filter)
+	if !ok || len(bindings) != 2 {
+		t.Fatalf("computed access compilation returned ok=%v bindings=%d", ok, len(bindings))
+	}
+	items := schema.Slice()
+	if scm.ToInt(items[3]) != 1 || items[len(items)-1].String() != "doc" {
+		t.Fatalf("computed access schema omitted mapper columns: %s", scm.String(schema))
+	}
+	flags := scm.ToInt(items[scanAccessSchemaHeaderSize+4])
+	if mapperSlot := int(flags>>3) - 1; mapperSlot != 1 {
+		t.Fatalf("computed mapper slot = %d, want 1", mapperSlot)
+	}
+
+	mapper := scm.Eval(scm.NewSlice([]scm.Scmer{
+		scm.NewSymbol("lambda"),
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("doc")}),
+		scm.NewSlice([]scm.Scmer{
+			scm.Globalenv.Vars[scm.Symbol("json_value")], scm.NewSymbol("doc"), scm.NewString("$.tenant"), scm.NewString("UNSIGNED"),
+		}),
+	}), &scm.Globalenv)
+	descriptor := compileComputedScanIndex(mapper, []string{"doc"})
+	access, valid := scanAccessFromScheme(schema, []scm.Scmer{scm.NewInt(17), descriptor}, nil)
+	bound := access.boundary(0)
+	if !valid || bound.col != ".(json_value doc \"$.tenant\" \"UNSIGNED\")" ||
+		len(bound.mapCols) != 1 || bound.mapCols[0] != "doc" || !bound.mapFn.IsProc() {
+		t.Fatalf("unexpected computed access boundary: valid=%v boundary=%#v", valid, bound)
+	}
+}
+
 func TestCompileScanAccessRejectsDisjunction(t *testing.T) {
 	columns := scm.NewSlice([]scm.Scmer{scm.NewSymbol("list"), scm.NewString("id")})
 	filter := scm.NewSlice([]scm.Scmer{

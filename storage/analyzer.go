@@ -162,6 +162,9 @@ type boundaries []columnboundaries
 type scanAccess struct {
 	schema []scm.Scmer
 	values []scm.Scmer
+	// computedMapCols is populated only for compiled computed-index probes.
+	// Ordinary scans keep this nil and retain their allocation-free binder.
+	computedMapCols []string
 	// inserted contains runtime-only ordered boundaries. insertAt places them
 	// between the compiled sorted prefix and advisory matchers without copying
 	// either segment.
@@ -210,6 +213,19 @@ func (a scanAccess) boundary(index int) columnboundaries {
 		upper:          scm.NewNil(),
 		upperInclusive: flags&2 != 0,
 		collation:      a.schema[offset+5].String(),
+	}
+	mapperSlot := int(flags>>3) - 1
+	if mapperSlot >= 0 {
+		if !a.values[mapperSlot].IsSlice() {
+			panic("scan access computed-index descriptor is invalid")
+		}
+		descriptor := a.values[mapperSlot].Slice()
+		if len(descriptor) != 2 || !descriptor[0].IsString() {
+			panic("scan access computed-index descriptor is invalid")
+		}
+		boundary.col = descriptor[0].String()
+		boundary.mapCols = a.computedMapCols
+		boundary.mapFn = descriptor[1]
 	}
 	switch a.schema[offset].String() {
 	case "equal":
@@ -323,6 +339,7 @@ func scanAccessFromScheme(schemaValue scm.Scmer, values []scm.Scmer, suffix boun
 	if count < 0 || projectionCount < 0 || len(schema) != scanAccessSchemaHeaderSize+count*scanAccessBoundaryStride+projectionCount {
 		panic("scan access schema has an invalid boundary count")
 	}
+	computed := false
 	for offset, remaining := scanAccessSchemaHeaderSize, count; remaining > 0; offset, remaining = offset+scanAccessBoundaryStride, remaining-1 {
 		for _, slotOffset := range []int{2, 3} {
 			slot := int(scm.ToInt(schema[offset+slotOffset]))
@@ -330,9 +347,24 @@ func scanAccessFromScheme(schemaValue scm.Scmer, values []scm.Scmer, suffix boun
 				panic("scan access value slot is out of bounds")
 			}
 		}
+		mapperSlot := int(scm.ToInt(schema[offset+4])>>3) - 1
+		if mapperSlot >= 0 {
+			if mapperSlot >= len(values) {
+				panic("scan access mapper slot is out of bounds")
+			}
+			computed = true
+		}
+	}
+	var computedMapCols []string
+	if computed {
+		projectionAt := scanAccessSchemaHeaderSize + count*scanAccessBoundaryStride
+		computedMapCols = make([]string, projectionCount)
+		for i := range computedMapCols {
+			computedMapCols[i] = schema[projectionAt+i].String()
+		}
 	}
 	return scanAccess{
-		schema: schema, values: values, suffix: suffix,
+		schema: schema, values: values, computedMapCols: computedMapCols, suffix: suffix,
 		filterCovered: schema[2].String() == scanAccessConsumerCoveredScan,
 	}, true
 }
