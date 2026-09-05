@@ -298,7 +298,8 @@ func restoredTriggerRequiresRuntimeTarget(name string) bool {
 	// internal trigger families whose bodies address an evictable cache target.
 	return strings.HasPrefix(name, ".kt_cleanup:") ||
 		strings.HasPrefix(name, ".cache:") ||
-		strings.HasPrefix(name, ".orcdep:")
+		strings.HasPrefix(name, ".orcdep:") ||
+		strings.HasPrefix(name, ".prejoin:")
 }
 
 func triggerScmerMissing(v scm.Scmer) bool {

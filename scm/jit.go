@@ -3132,8 +3132,10 @@ type jitCodeReservation struct {
 }
 
 // complete publishes arena metadata in allocation order. Compilation itself
-// may run concurrently, but an entry point does not become reachable before
-// every earlier reservation has either published its maps or reported failure.
+// may run concurrently. Before an entry point becomes reachable, complete also
+// waits for every reservation allocated up to that compiler's completion. That
+// set includes deferred lambdas embedded in the entry point even when another
+// compiler's reservation was interleaved between parent and child.
 func (a *jitArena) complete(reservation *jitCodeReservation, maps []jitStackMap) {
 	a.completeMode(reservation, maps, true, nil)
 }
@@ -3154,6 +3156,10 @@ func (a *jitArena) completeMode(reservation *jitCodeReservation, maps []jitStack
 	reservation.maps = maps
 	reservation.onPublish = onPublish
 	reservation.done = true
+	waitThrough := 0
+	if wait {
+		waitThrough = len(a.reservations)
+	}
 	for a.metaNext < len(a.reservations) && a.reservations[a.metaNext].done {
 		ready := a.reservations[a.metaNext]
 		publishJITStackMaps(a, ready.maps)
@@ -3166,7 +3172,7 @@ func (a *jitArena) completeMode(reservation *jitCodeReservation, maps []jitStack
 	}
 	a.metaCond.Broadcast()
 	if wait {
-		for !reservation.published {
+		for a.metaNext < waitThrough {
 			a.metaCond.Wait()
 		}
 	}

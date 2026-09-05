@@ -249,3 +249,33 @@ func TestJITArenaDefersCallbackUntilStackMapPublication(t *testing.T) {
 		t.Fatal("deferred entry was not installed with its stack maps")
 	}
 }
+
+func TestJITArenaParentWaitsForInterleavedDeferredStackMaps(t *testing.T) {
+	parent := &jitCodeReservation{}
+	otherCompiler := &jitCodeReservation{}
+	child := &jitCodeReservation{}
+	arena := &jitArena{reservations: []*jitCodeReservation{parent, otherCompiler, child}}
+	arena.metaCond = sync.NewCond(&arena.metaMu)
+	arena.completeDeferred(child, nil, nil)
+
+	parentComplete := make(chan struct{})
+	go func() {
+		arena.complete(parent, nil)
+		close(parentComplete)
+	}()
+	select {
+	case <-parentComplete:
+		t.Fatal("parent became reachable before its interleaved child stack maps")
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	arena.complete(otherCompiler, nil)
+	select {
+	case <-parentComplete:
+	case <-time.After(time.Second):
+		t.Fatal("parent did not become reachable after its child stack maps")
+	}
+	if !parent.published || !otherCompiler.published || !child.published {
+		t.Fatal("interleaved stack maps were not published as one reachable prefix")
+	}
+}

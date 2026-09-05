@@ -264,6 +264,88 @@ func TestCreateTableIfNotExistsReturnsFalseWithoutSaving(t *testing.T) {
 	}
 }
 
+func TestSchemaReloadInvalidatesPlannerCacheOnInit(t *testing.T) {
+	stale := scm.NewFunc(func(...scm.Scmer) scm.Scmer {
+		panic("stale planner callback must not run")
+	})
+	plannerCache := &table{Name: ".grp:items:old", PersistencyMode: Cache, OnInit: &stale}
+	invalidatePersistedPlannerCodeAfterLoad(plannerCache)
+	if plannerCache.OnInit != nil {
+		t.Fatal("schema reload retained planner-generated cache oninit")
+	}
+
+	for _, durable := range []*table{
+		{Name: "application_cache", PersistencyMode: Cache, OnInit: &stale},
+		{Name: ".internal", PersistencyMode: Safe, OnInit: &stale},
+		{Name: ".memory_helper", PersistencyMode: Memory, OnInit: &stale},
+	} {
+		invalidatePersistedPlannerCodeAfterLoad(durable)
+		if durable.OnInit == nil {
+			t.Fatalf("schema reload invalidated non-planner table %s", durable.Name)
+		}
+	}
+}
+
+func TestCreateTableRefreshesInvalidatedPlannerCacheOnInit(t *testing.T) {
+	dir, err := os.MkdirTemp("", "memcp-planner-oninit-refresh-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	oldBasepath := Basepath
+	Basepath = dir
+	defer func() { Basepath = oldBasepath }()
+
+	Init(scm.Globalenv)
+	LoadDatabases()
+	defer databases.Remove("tplanneroninitrefresh")
+	CreateDatabase("tplanneroninitrefresh", false)
+
+	cols := scm.NewSlice([]scm.Scmer{
+		scm.NewSlice([]scm.Scmer{
+			scm.NewString("column"), scm.NewString("id"), scm.NewString("int"),
+			scm.NewSlice(nil), scm.NewSlice(nil),
+		}),
+	})
+	var staleCalls atomic.Int64
+	stale := scm.NewFunc(func(...scm.Scmer) scm.Scmer {
+		staleCalls.Add(1)
+		return scm.NewNil()
+	})
+	options := scm.NewSlice([]scm.Scmer{
+		scm.NewString("engine"), scm.NewString("cache"),
+		scm.NewString("oninit"), stale,
+	})
+	callBuiltin(t, "createtable",
+		scm.NewString("tplanneroninitrefresh"), scm.NewString(".grp:items:old"),
+		cols, options, scm.NewBool(true), scm.NewNil())
+	if staleCalls.Load() != 1 {
+		t.Fatalf("initial planner callback ran %d times, want 1", staleCalls.Load())
+	}
+
+	plannerCache := GetDatabase("tplanneroninitrefresh").GetTable(".grp:items:old")
+	plannerCache.onInitComplete = false // restart-only state is deliberately not persisted
+	invalidatePersistedPlannerCodeAfterLoad(plannerCache)
+	var currentCalls atomic.Int64
+	current := scm.NewFunc(func(...scm.Scmer) scm.Scmer {
+		currentCalls.Add(1)
+		return scm.NewNil()
+	})
+	options = scm.NewSlice([]scm.Scmer{
+		scm.NewString("engine"), scm.NewString("cache"),
+		scm.NewString("oninit"), current,
+	})
+	created := callBuiltin(t, "createtable",
+		scm.NewString("tplanneroninitrefresh"), scm.NewString(".grp:items:old"),
+		cols, options, scm.NewBool(true), scm.NewNil())
+	if scm.ToBool(created) {
+		t.Fatal("refreshing the planner callback recreated the cache table")
+	}
+	if staleCalls.Load() != 1 || currentCalls.Load() != 1 {
+		t.Fatalf("refresh ran stale=%d current=%d callbacks, want 1 and 1", staleCalls.Load(), currentCalls.Load())
+	}
+}
+
 func TestRegisteredCreateTableTriggerRunsOnCreate(t *testing.T) {
 	dir, err := os.MkdirTemp("", "memcp-createtable-trigger-*")
 	if err != nil {

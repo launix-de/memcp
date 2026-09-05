@@ -507,6 +507,7 @@ func (db *database) ensureLoaded() {
 		// restore back-references; do not touch on-disk columns yet
 		for _, t := range db.tables.GetAll() {
 			t.schema = db
+			invalidatePersistedPlannerCodeAfterLoad(t)
 			if t.Name == ".blobs" {
 				db.blobRefState().table.Store(t)
 			}
@@ -554,6 +555,17 @@ func (db *database) ensureLoaded() {
 			}
 		}
 	})
+}
+
+// invalidatePersistedPlannerCodeAfterLoad drops executable code derived from a
+// physical query plan. Planner-owned CACHE tables contain no durable rows, and
+// the current createtable guard supplies their authoritative oninit callback on
+// first use. Retaining an older callback across a physical operator ABI change
+// would execute stale generated code before that guard can refresh it.
+func invalidatePersistedPlannerCodeAfterLoad(t *table) {
+	if t.isEphemeralQueryTable() {
+		t.OnInit = nil
+	}
 }
 
 // SharedResource impl for database
