@@ -86,7 +86,7 @@ func TestJITScalarPointerSpillRemainsInStackMap(t *testing.T) {
 	ctx := &JITContext{
 		Start:      start,
 		Ptr:        start,
-		End:        unsafe.Add(start, len(code)),
+		End:        unsafe.Add(start, len(code)-1),
 		AllRegs:    1 << uint(RegRAX),
 		FrameReg:   RegRBP,
 		StackReg:   RegRSP,
@@ -101,6 +101,84 @@ func TestJITScalarPointerSpillRemainsInStackMap(t *testing.T) {
 	root := jitStackRoot{base: jitStackRootFrameBP, offset: -8}
 	if _, ok := ctx.StackRoots[root]; !ok {
 		t.Fatal("relocatable scalar spill is missing from the stack map")
+	}
+}
+
+func newJITStackMapTestContext(code []byte) *JITContext {
+	start := unsafe.Pointer(&code[0])
+	return &JITContext{
+		Start:      start,
+		Ptr:        start,
+		End:        unsafe.Add(start, len(code)-1),
+		AllRegs:    1<<uint(RegRAX) | 1<<uint(RegRBX),
+		FreeRegs:   1<<uint(RegRAX) | 1<<uint(RegRBX),
+		FrameReg:   RegRBP,
+		StackReg:   RegRSP,
+		ScratchReg: RegR11,
+	}
+}
+
+func TestJITUnboxedScalarStabilizationDoesNotCreateGCStackRoot(t *testing.T) {
+	t.Run("control flow", func(t *testing.T) {
+		code := make([]byte, 128)
+		ctx := newJITStackMapTestContext(code)
+		value := JITValueDesc{Loc: LocReg, Type: tagInt, Reg: RegRAX}
+		ctx.BindReg(RegRAX, &value)
+
+		ctx.StabilizeDescForControlFlow(&value)
+		if _, exists := ctx.StackRoots[jitStackRoot{base: jitStackRootFrameSP, offset: 0}]; exists {
+			t.Fatal("unboxed control-flow scalar is marked as a GC pointer")
+		}
+	})
+
+	t.Run("nested call", func(t *testing.T) {
+		code := make([]byte, 128)
+		ctx := newJITStackMapTestContext(code)
+		value := JITValueDesc{Loc: LocReg, Type: tagBool, Reg: RegRAX}
+		ctx.BindReg(RegRAX, &value)
+
+		ctx.StabilizeDescAcrossNestedCall(&value)
+		if _, exists := ctx.StackRoots[jitStackRoot{base: jitStackRootFrameBP, offset: -8}]; exists {
+			t.Fatal("unboxed nested-call scalar is marked as a GC pointer")
+		}
+	})
+
+	t.Run("parser environment", func(t *testing.T) {
+		code := make([]byte, 128)
+		ctx := newJITStackMapTestContext(code)
+		value := JITValueDesc{Loc: LocReg, Type: tagInt, Reg: RegRAX}
+		ctx.BindReg(RegRAX, &value)
+
+		stable := ctx.StabilizeJITEnv(&JITEnv{Vars: map[Symbol]JITValueDesc{"value": value}})
+		if _, exists := ctx.StackRoots[jitStackRoot{base: jitStackRootFrameBP, offset: -8}]; exists {
+			t.Fatal("unboxed parser-environment scalar is marked as a GC pointer")
+		}
+		if got := stable.Vars["value"]; got.Loc != LocStack || got.RelocatablePointer {
+			t.Fatalf("unexpected stabilized scalar: %+v", got)
+		}
+	})
+}
+
+func TestJITRelocatableScalarStabilizationCreatesGCStackRoot(t *testing.T) {
+	code := make([]byte, 128)
+	ctx := newJITStackMapTestContext(code)
+	value := JITValueDesc{Loc: LocReg, Type: tagInt, Reg: RegRAX, RelocatablePointer: true}
+	ctx.BindReg(RegRAX, &value)
+
+	ctx.StabilizeDescAcrossNestedCall(&value)
+	if _, exists := ctx.StackRoots[jitStackRoot{base: jitStackRootFrameBP, offset: -8}]; !exists {
+		t.Fatal("relocatable nested-call scalar is missing from the GC stack map")
+	}
+}
+
+func TestJITSavedFramePointerIsNotAHeapRoot(t *testing.T) {
+	ctx := &JITContext{Safepoints: []jitSafepoint{{}}}
+	maps := ctx.finalizeStackMaps(16, 0)
+	if len(maps) != 1 || maps[0].frameWords != 3 {
+		t.Fatalf("unexpected stack map: %+v", maps)
+	}
+	if maps[0].pointerMap[0]&(1<<2) != 0 {
+		t.Fatal("saved caller frame pointer is encoded as a GC heap root")
 	}
 }
 

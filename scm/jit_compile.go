@@ -831,7 +831,7 @@ func (ctx *JITContext) stabilizeForNested(value JITValueDesc) JITValueDesc {
 	regs := [...]Reg{value.Reg, value.Reg2, value.Reg3}
 	for i := int32(0); i < words; i++ {
 		ctx.EmitStoreRegMem(regs[i], ctx.FrameReg, off+i*8)
-		ctx.setStackPointer(jitStackRootFrameBP, off+i*8, !value.NoHeapPointer && i == 0)
+		ctx.setStackPointer(jitStackRootFrameBP, off+i*8, jitValueWordIsPointer(value, i))
 		if owner := ctx.RegOwners[regs[i]]; owner == nil || owner.ID == originalID {
 			ctx.RegOwners[regs[i]] = nil
 			ctx.FreeRegs |= 1 << uint(regs[i])
@@ -977,7 +977,7 @@ func (ctx *JITContext) StabilizeDescForControlFlow(desc *JITValueDesc) {
 	regs := [...]Reg{desc.Reg, desc.Reg2, desc.Reg3}
 	for i := int32(0); i < words; i++ {
 		ctx.EmitStoreRegMem(regs[i], ctx.StackReg, off+i*8)
-		ctx.setStackPointer(jitStackRootFrameSP, off+i*8-ctx.DynamicSP, !desc.NoHeapPointer && i == 0)
+		ctx.setStackPointer(jitStackRootFrameSP, off+i*8-ctx.DynamicSP, jitValueWordIsPointer(*desc, i))
 		owner := ctx.RegOwners[regs[i]]
 		ownsReg := owner == desc || (owner != nil && desc.ID != 0 && owner.ID == desc.ID)
 		if ownsReg {
@@ -1026,13 +1026,13 @@ func (ctx *JITContext) StabilizeDescAcrossNestedCall(desc *JITValueDesc) {
 		for i := int32(0); i < words; i++ {
 			ctx.EmitMovRegMem(ctx.ScratchReg, ctx.StackReg, desc.StackOff+i*8)
 			ctx.EmitStoreRegMem(ctx.ScratchReg, ctx.FrameReg, off+i*8)
-			ctx.setStackPointer(jitStackRootFrameBP, off+i*8, !desc.NoHeapPointer && i == 0)
+			ctx.setStackPointer(jitStackRootFrameBP, off+i*8, jitValueWordIsPointer(*desc, i))
 		}
 	} else {
 		regs := [...]Reg{desc.Reg, desc.Reg2, desc.Reg3}
 		for i := int32(0); i < words; i++ {
 			ctx.EmitStoreRegMem(regs[i], ctx.FrameReg, off+i*8)
-			ctx.setStackPointer(jitStackRootFrameBP, off+i*8, !desc.NoHeapPointer && i == 0)
+			ctx.setStackPointer(jitStackRootFrameBP, off+i*8, jitValueWordIsPointer(*desc, i))
 			owner := ctx.RegOwners[regs[i]]
 			if owner == desc || (owner != nil && desc.ID != 0 && owner.ID == desc.ID) {
 				ctx.RegOwners[regs[i]] = nil
@@ -1074,7 +1074,7 @@ func (ctx *JITContext) StabilizeCallbackArgs(args []JITValueDesc) []JITValueDesc
 		ctx.EmitMovRegMem(scratch, ctx.StackReg, arg.StackOff+8)
 		ctx.EmitStoreRegMem(scratch, ctx.FrameReg, off+8)
 		ctx.FreeReg(scratch)
-		ctx.setStackPointer(jitStackRootFrameBP, off, true)
+		ctx.setStackPointer(jitStackRootFrameBP, off, jitValueWordIsPointer(arg, 0))
 		stable[i] = JITValueDesc{Loc: LocStackPair, Type: arg.Type, StackOff: off, NoHeapPointer: arg.NoHeapPointer, Rooted: true}
 	}
 	return stable
@@ -1134,8 +1134,8 @@ func (ctx *JITContext) stabilizeJITEnvValue(value JITValueDesc) JITValueDesc {
 		Rooted:             value.Rooted,
 	}
 	ctx.EmitCopyDescWords(&stable, &value, words)
-	if !value.NoHeapPointer {
-		ctx.setStackPointer(jitStackRootFrameBP, off, !value.NoHeapPointer)
+	if jitValueWordIsPointer(value, 0) {
+		ctx.setStackPointer(jitStackRootFrameBP, off, true)
 		stable.Rooted = true
 	}
 	return stable
