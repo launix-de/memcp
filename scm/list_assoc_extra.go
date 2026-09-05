@@ -808,13 +808,7 @@ func init_list_assoc_extra() {
 						} else {
 							ctx.Coverage.DynamicCalls++
 							d62 := jitCopyScmerToPair(ctx, d5)
-							callbackCallArgs := make([]JITValueDesc, 0, 2)
-							callbackCallArgs = append(callbackCallArgs, d62)
-							callbackCallArgs = append(callbackCallArgs, callbackArgs56...)
-							d55 = ctx.EmitGoCallScalarInto(GoFuncAddr(jitInvokeCallback1), callbackCallArgs, JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: RegRAX, Reg2: RegRBX, ID: 0})
-							ctx.EmitStoreScmerToStack(d55, int32(callbackResultOff57))
-							ctx.FreeDesc(&d55)
-							d55 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(callbackResultOff57), ID: 0}
+							d55 = jitEmitDynamicCallableAt(ctx, d62, callbackArgs56, int32(stackArray53), JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(callbackResultOff57), ID: 0})
 						}
 					}
 					d63 = args[3]
@@ -1873,13 +1867,7 @@ func init_list_assoc_extra() {
 						} else {
 							ctx.Coverage.DynamicCalls++
 							d62 := jitCopyScmerToPair(ctx, d5)
-							callbackCallArgs := make([]JITValueDesc, 0, 2)
-							callbackCallArgs = append(callbackCallArgs, d62)
-							callbackCallArgs = append(callbackCallArgs, callbackArgs56...)
-							d55 = ctx.EmitGoCallScalarInto(GoFuncAddr(jitInvokeCallback1), callbackCallArgs, JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: RegRAX, Reg2: RegRBX, ID: 0})
-							ctx.EmitStoreScmerToStack(d55, int32(callbackResultOff57))
-							ctx.FreeDesc(&d55)
-							d55 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(callbackResultOff57), ID: 0}
+							d55 = jitEmitDynamicCallableAt(ctx, d62, callbackArgs56, int32(stackArray53), JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(callbackResultOff57), ID: 0})
 						}
 					}
 					d63 = JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}
@@ -1915,13 +1903,7 @@ func init_list_assoc_extra() {
 						} else {
 							ctx.Coverage.DynamicCalls++
 							d73 := jitCopyScmerToPair(ctx, d8)
-							callbackCallArgs := make([]JITValueDesc, 0, 3)
-							callbackCallArgs = append(callbackCallArgs, d73)
-							callbackCallArgs = append(callbackCallArgs, callbackArgs67...)
-							d66 = ctx.EmitGoCallScalarInto(GoFuncAddr(jitInvokeCallback2), callbackCallArgs, JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: RegRAX, Reg2: RegRBX, ID: 0})
-							ctx.EmitStoreScmerToStack(d66, int32(callbackResultOff68))
-							ctx.FreeDesc(&d66)
-							d66 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(callbackResultOff68), ID: 0}
+							d66 = jitEmitDynamicCallableAt(ctx, d73, callbackArgs67, int32(stackArray64), JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(callbackResultOff68), ID: 0})
 						}
 					}
 					ctx.EnsureDesc(&d16)
@@ -2989,13 +2971,7 @@ func init_list_assoc_extra() {
 						} else {
 							ctx.Coverage.DynamicCalls++
 							d63 := jitCopyScmerToPair(ctx, d5)
-							callbackCallArgs := make([]JITValueDesc, 0, 3)
-							callbackCallArgs = append(callbackCallArgs, d63)
-							callbackCallArgs = append(callbackCallArgs, callbackArgs57...)
-							d56 = ctx.EmitGoCallScalarInto(GoFuncAddr(jitInvokeCallback2), callbackCallArgs, JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: RegRAX, Reg2: RegRBX, ID: 0})
-							ctx.EmitStoreScmerToStack(d56, int32(callbackResultOff58))
-							ctx.FreeDesc(&d56)
-							d56 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(callbackResultOff58), ID: 0}
+							d56 = jitEmitDynamicCallableAt(ctx, d63, callbackArgs57, int32(stackArray54), JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(callbackResultOff58), ID: 0})
 						}
 					}
 					d64 = JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}
@@ -3031,13 +3007,7 @@ func init_list_assoc_extra() {
 						} else {
 							ctx.Coverage.DynamicCalls++
 							d74 := jitCopyScmerToPair(ctx, d8)
-							callbackCallArgs := make([]JITValueDesc, 0, 3)
-							callbackCallArgs = append(callbackCallArgs, d74)
-							callbackCallArgs = append(callbackCallArgs, callbackArgs68...)
-							d67 = ctx.EmitGoCallScalarInto(GoFuncAddr(jitInvokeCallback2), callbackCallArgs, JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: RegRAX, Reg2: RegRBX, ID: 0})
-							ctx.EmitStoreScmerToStack(d67, int32(callbackResultOff69))
-							ctx.FreeDesc(&d67)
-							d67 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(callbackResultOff69), ID: 0}
+							d67 = jitEmitDynamicCallableAt(ctx, d74, callbackArgs68, int32(stackArray65), JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(callbackResultOff69), ID: 0})
 						}
 					}
 					ctx.EnsureDesc(&d16)
@@ -3336,9 +3306,10 @@ func init_list_assoc_extra() {
 			Return:    &TypeDescriptor{Kind: "assoc", Transfer: true, Length: UnknownLength, Element: &TypeDescriptor{Kind: "list", Transfer: true, Length: UnknownLength}},
 			Const:     true,
 			Forbidden: true,
-			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				// JITGen native call boundary: leg count varies per call site.
-				return jitEmitGoVariadicCallFromDescs(ctx, declarations["group_assoc_multi_append_reduce"].Fn, args, result)
+			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				ctx.Coverage.NativeCalls++
+				declaration := declarations["group_assoc_multi_append_reduce"]
+				return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 			},
 			JITVirtualArgs:     true,
 			JITInlineCallbacks: false,
@@ -3370,9 +3341,10 @@ func init_list_assoc_extra() {
 			Return:    &TypeDescriptor{Kind: "assoc", Transfer: true, Length: UnknownLength, Element: &TypeDescriptor{Kind: "int", Transfer: true}},
 			Const:     true,
 			Forbidden: true,
-			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				// JITGen native call boundary: leg count varies per call site.
-				return jitEmitGoVariadicCallFromDescs(ctx, declarations["group_assoc_multi_count_reduce"].Fn, args, result)
+			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				ctx.Coverage.NativeCalls++
+				declaration := declarations["group_assoc_multi_count_reduce"]
+				return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 			},
 			JITVirtualArgs:     true,
 			JITInlineCallbacks: false,
@@ -4111,13 +4083,7 @@ func init_list_assoc_extra() {
 						} else {
 							ctx.Coverage.DynamicCalls++
 							d57 := jitCopyScmerToPair(ctx, d5)
-							callbackCallArgs := make([]JITValueDesc, 0, 2)
-							callbackCallArgs = append(callbackCallArgs, d57)
-							callbackCallArgs = append(callbackCallArgs, callbackArgs51...)
-							d50 = ctx.EmitGoCallScalarInto(GoFuncAddr(jitInvokeCallback1), callbackCallArgs, JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: RegRAX, Reg2: RegRBX, ID: 0})
-							ctx.EmitStoreScmerToStack(d50, int32(callbackResultOff52))
-							ctx.FreeDesc(&d50)
-							d50 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(callbackResultOff52), ID: 0}
+							d50 = jitEmitDynamicCallableAt(ctx, d57, callbackArgs51, int32(stackArray48), JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(callbackResultOff52), ID: 0})
 						}
 					}
 					ctx.EnsureDesc(&d13)
@@ -5091,13 +5057,7 @@ func init_list_assoc_extra() {
 						} else {
 							ctx.Coverage.DynamicCalls++
 							d58 := jitCopyScmerToPair(ctx, d5)
-							callbackCallArgs := make([]JITValueDesc, 0, 3)
-							callbackCallArgs = append(callbackCallArgs, d58)
-							callbackCallArgs = append(callbackCallArgs, callbackArgs52...)
-							d51 = ctx.EmitGoCallScalarInto(GoFuncAddr(jitInvokeCallback2), callbackCallArgs, JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: RegRAX, Reg2: RegRBX, ID: 0})
-							ctx.EmitStoreScmerToStack(d51, int32(callbackResultOff53))
-							ctx.FreeDesc(&d51)
-							d51 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(callbackResultOff53), ID: 0}
+							d51 = jitEmitDynamicCallableAt(ctx, d58, callbackArgs52, int32(stackArray49), JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(callbackResultOff53), ID: 0})
 						}
 					}
 					ctx.EnsureDesc(&d13)

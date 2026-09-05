@@ -479,23 +479,6 @@ func jitApplyCallableSlice(callable Scmer, env *Env, args []Scmer) Scmer {
 	return ApplyEx(callable, args, env)
 }
 
-//go:noinline
-func jitInvokeCallback1(callback, arg0 Scmer) Scmer {
-	return Apply(callback, arg0)
-}
-
-func jitInvokeCallback2(callback, arg0, arg1 Scmer) Scmer {
-	return Apply(callback, arg0, arg1)
-}
-
-func jitInvokeCallback3(callback, arg0, arg1, arg2 Scmer) Scmer {
-	return Apply(callback, arg0, arg1, arg2)
-}
-
-func jitInvokeCallback4(callback, arg0, arg1, arg2, arg3 Scmer) Scmer {
-	return Apply(callback, arg0, arg1, arg2, arg3)
-}
-
 func jitInvokeCallbackSlice(callback Scmer, args []Scmer) Scmer {
 	return Apply(callback, args...)
 }
@@ -2015,7 +1998,18 @@ func jitCompileDynamicCall(ctx *JITContext, callableExpr Scmer, operands []Scmer
 		}
 		operandValues[index] = jitCompileRootedCallValueAtResult(ctx, operand, sliceBase, operandOff+int32(index*16), expected)
 	}
+	out := jitEmitDynamicCallableAt(ctx, callable, operandValues, operandOff, result)
+	ctx.FreeStack(ctx.BPOffset - stackStart)
+	return out
+}
 
+// jitEmitDynamicCallableAt lowers a runtime callable whose arguments already
+// occupy a contiguous invocation-frame array. Both Scheme procedures and Go
+// funcvals are called directly; only unsupported callable kinds retain the
+// interpreter boundary. Generated higher-order builtins use this entry point
+// so their dynamic callback path gets the same stack-aware dispatch as an
+// ordinary Scheme call.
+func jitEmitDynamicCallableAt(ctx *JITContext, callable JITValueDesc, operandValues []JITValueDesc, operandOff int32, result JITValueDesc) JITValueDesc {
 	resultOff := ctx.AllocSpill(16)
 	callResult := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: resultOff, Rooted: true}
 	ctx.EmitZeroDescWords(&callResult, 2)
@@ -2050,7 +2044,7 @@ func jitCompileDynamicCall(ctx *JITContext, callableExpr Scmer, operands []Scmer
 	arityOK := ctx.ReserveLabel()
 	arity := ctx.AllocRegExcept(callableValue.Reg, callableValue.Reg2, metadata)
 	ctx.EmitMovRegMem(arity, metadata, int32(unsafe.Offsetof(JITEntryPoint{}.JITArity)))
-	ctx.EmitCmpRegImm32(arity, int32(len(operands)))
+	ctx.EmitCmpRegImm32(arity, int32(len(operandValues)))
 	ctx.EmitJcc(CcE, arityOK)
 	ctx.EmitCmpRegImm32(arity, -1)
 	ctx.EmitJcc(CcNE, fallbackLabel)
@@ -2067,7 +2061,7 @@ func jitCompileDynamicCall(ctx *JITContext, callableExpr Scmer, operands []Scmer
 	fnValue := JITValueDesc{Loc: LocReg, Type: tagFunc, Reg: fnReg, RelocatablePointer: true}
 	ctx.BindReg(fnReg, &fnValue)
 	ctx.FreeDesc(&callableValue)
-	argsSlice := jitEmitDynamicCallArgs(ctx, fnReg, operandOff, len(operands))
+	argsSlice := jitEmitDynamicCallArgs(ctx, fnReg, operandOff, len(operandValues))
 	ctx.EmitProcCall(fnValue, argsSlice, callResult)
 	ctx.FreeDesc(&fnValue)
 	ctx.FreeDesc(&argsSlice)
@@ -2097,7 +2091,7 @@ func jitCompileDynamicCall(ctx *JITContext, callableExpr Scmer, operands []Scmer
 	fnValue = JITValueDesc{Loc: LocReg, Type: tagFunc, Reg: fnReg, RelocatablePointer: true}
 	ctx.BindReg(fnReg, &fnValue)
 	ctx.FreeDesc(&nativeCallable)
-	argsSlice = jitEmitDynamicCallArgs(ctx, fnReg, operandOff, len(operands))
+	argsSlice = jitEmitDynamicCallArgs(ctx, fnReg, operandOff, len(operandValues))
 	ctx.EmitGoFuncCall(fnValue, argsSlice, callResult)
 	ctx.FreeDesc(&fnValue)
 	ctx.FreeDesc(&argsSlice)
@@ -2105,12 +2099,12 @@ func jitCompileDynamicCall(ctx *JITContext, callableExpr Scmer, operands []Scmer
 	ctx.EmitJmp(endLabel)
 
 	ctx.MarkLabel(fallbackLabel)
-	args := make([]JITValueDesc, 0, len(operands)+2)
+	args := make([]JITValueDesc, 0, len(operandValues)+2)
 	args = append(args, callable)
 
 	env := jitCurrentRuntimeEnv(ctx)
 	args = append(args, env)
-	if len(operands) <= 2 {
+	if len(operandValues) <= 2 {
 		args = append(args, operandValues...)
 	} else {
 		// Keep the variadic backing array in the invocation-local JIT frame. Its
@@ -2122,7 +2116,7 @@ func jitCompileDynamicCall(ctx *JITContext, callableExpr Scmer, operands []Scmer
 		ctx.EmitLeaRegMem(ptr, ctx.StackReg, operandOff)
 		ctx.EmitStoreRegMem(ptr, ctx.StackReg, sliceOff)
 		ctx.FreeReg(ptr)
-		ctx.EmitMovRegImm64(ctx.ScratchReg, uint64(len(operands)))
+		ctx.EmitMovRegImm64(ctx.ScratchReg, uint64(len(operandValues)))
 		ctx.EmitStoreRegMem(ctx.ScratchReg, ctx.StackReg, sliceOff+8)
 		ctx.EmitStoreRegMem(ctx.ScratchReg, ctx.StackReg, sliceOff+16)
 		ctx.setStackPointer(jitStackRootFrameSP, sliceOff, true)
@@ -2130,7 +2124,7 @@ func jitCompileDynamicCall(ctx *JITContext, callableExpr Scmer, operands []Scmer
 	}
 
 	var fn any
-	switch len(operands) {
+	switch len(operandValues) {
 	case 0:
 		fn = jitApplyCallable0
 	case 1:
@@ -2157,7 +2151,6 @@ func jitCompileDynamicCall(ctx *JITContext, callableExpr Scmer, operands []Scmer
 		out = jitPlaceIntoPair(ctx, &callResult, out)
 		out.Type = JITTypeUnknown
 	}
-	ctx.FreeStack(ctx.BPOffset - stackStart)
 	return out
 }
 
@@ -2897,14 +2890,12 @@ func jitDeclarationHasCallback(decl *Declaration) bool {
 func jitCompileCallArgument(ctx *JITContext, decl *Declaration, index int, expr Scmer, sliceBase Reg) JITValueDesc {
 	param := jitDeclarationParam(decl, index)
 	if param != nil && param.Kind == "func" {
-		transfersInput := false
-		for _, callbackParam := range param.Params {
-			transfersInput = transfersInput || callbackParam != nil && callbackParam.Transfer
-		}
-		if !transfersInput {
-			if lambda, ok := jitLambdaTemplate(expr, ctx.Env); ok {
-				return JITValueDesc{Loc: LocLambdaTemplate, Type: tagProc, Lambda: lambda}
-			}
+		// Transfer describes ownership of the callback's runtime argument; it
+		// does not make the lambda body escape. The optimizer has already encoded
+		// mutable-vs-copying builtin choices in that body, so retain the template
+		// and let the generated callback site inline it like every other lambda.
+		if lambda, ok := jitLambdaTemplate(expr, ctx.Env); ok {
+			return JITValueDesc{Loc: LocLambdaTemplate, Type: tagProc, Lambda: lambda}
 		}
 	}
 	hasCallback := false
