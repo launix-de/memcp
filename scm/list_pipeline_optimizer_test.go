@@ -30,6 +30,67 @@ func optimizeListPipeline(t testing.TB, source string) (Scmer, *Env) {
 	return optimized, env
 }
 
+func TestJITFusedListPipelinesInlineKnownCallbacks(t *testing.T) {
+	if !jitEnabled {
+		t.Skip("requires GOEXPERIMENT=jit")
+	}
+	tests := []struct {
+		name   string
+		fused  string
+		source string
+	}{
+		{"filter map", "filter_map", `(lambda (values) (filter (map values (lambda (value) (+ value 1))) (lambda (value) (> value 2))))`},
+		{"map filter", "map_filter", `(lambda (values) (map (filter values (lambda (value) (> value 1))) (lambda (value) (+ value 1))))`},
+		{"map map", "map_map", `(lambda (values) (map (map values (lambda (value) (+ value 1))) (lambda (value) (* value 2))))`},
+		{"filter filter", "filter_filter", `(lambda (values) (filter (filter values (lambda (value) (> value 0))) (lambda (value) (< value 4))))`},
+		{"reduce map", "reduce_map", `(lambda (values) (reduce (map values (lambda (value) (+ value 1))) (lambda (acc value) (+ acc value))))`},
+		{"reduce filter", "reduce_filter", `(lambda (values) (reduce (filter values (lambda (value) (> value 1))) (lambda (acc value) (+ acc value))))`},
+		{"reduce filter map", "reduce_filter_map", `(lambda (values) (reduce (map (filter values (lambda (value) (> value 1))) (lambda (value) (* value 2))) (lambda (acc value) (+ acc value))))`},
+		{"group append reduce", "group_assoc_append_reduce", `(lambda (pairs) (reduce pairs (lambda (dict pair) (set_assoc dict (car pair) (append (get_assoc dict (car pair) '()) (cadr pair)))) '()))`},
+		{"group count reduce", "group_assoc_count_reduce", `(lambda (values) (reduce values (lambda (dict value) (set_assoc dict value (+ (get_assoc dict value 0) 1))) '()))`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			optimized, env := optimizeListPipeline(t, test.source)
+			serialized := serializedTestExpr(t, env, optimized)
+			if !strings.Contains(serialized, test.fused) {
+				t.Fatalf("pipeline was not fused to %s: %s", test.fused, serialized)
+			}
+			compiled := jitCompile(Eval(optimized, env))
+			if compiled.Proc() == nil || compiled.Proc().Compiled == nil {
+				t.Fatal("fused pipeline did not compile")
+			}
+			coverage := compiled.Proc().Compiled.Coverage
+			if coverage.DynamicCalls != 0 || coverage.InlinedCalls == 0 {
+				t.Fatalf("known callbacks were not fully inlined: %+v", coverage)
+			}
+		})
+	}
+}
+
+func BenchmarkJITFusedReduceFilterMap(b *testing.B) {
+	if !jitEnabled {
+		b.Skip("requires GOEXPERIMENT=jit")
+	}
+	optimized, env := optimizeListPipeline(b, `(lambda (values)
+		(reduce (map (filter values (lambda (value) (> value 31))) (lambda (value) (* value 2)))
+			(lambda (acc value) (+ acc value)) 0))`)
+	compiled := jitCompile(Eval(optimized, env))
+	if compiled.Proc() == nil || compiled.Proc().Compiled == nil {
+		b.Fatal("fused reduce/filter/map benchmark did not compile")
+	}
+	valuesSlice := make([]Scmer, 128)
+	for index := range valuesSlice {
+		valuesSlice[index] = NewInt(int64(index))
+	}
+	values := NewSlice(valuesSlice)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for index := 0; index < b.N; index++ {
+		jitListBenchmarkSink = Apply(compiled, values)
+	}
+}
+
 func TestOptimizeFusesFilterOverMap(t *testing.T) {
 	optimized, env := optimizeListPipeline(t, `(lambda (values)
 		(filter (map values (lambda (value) (+ value 1)))
