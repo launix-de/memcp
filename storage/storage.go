@@ -3773,7 +3773,7 @@ func Init(en scm.Env) {
 			}
 			body, deferredPlan := unwrapDeferredTriggerBody(a[5])
 			if triggerScmerMissing(body) && !triggerScmerMissing(deferredPlan) {
-				body = scm.Eval(deferredPlan, &scm.Globalenv)
+				body = evaluateTriggerPlan(deferredPlan)
 			}
 			if triggerScmerMissing(body) && scm.String(a[4]) == "" {
 				panic("create-table trigger body must not be empty")

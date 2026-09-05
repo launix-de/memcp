@@ -22,6 +22,31 @@ import (
 	"github.com/launix-de/memcp/scm"
 )
 
+func TestEvaluateTriggerPlanPreservesCachedAST(t *testing.T) {
+	plan := scm.Read(t.Name(), `(lambda (OLD NEW session tx) (begin
+		(define promise (newpromise))
+		(define resultrow (lambda (row)
+			(promise "once" (nth row 1) "scalar subselect returned more than one row")))
+		(if NEW (resultrow (list 0 (get_assoc NEW "value"))) nil)
+		(promise "value")))`)
+	want := scm.String(plan)
+
+	first := evaluateTriggerPlan(plan)
+	if got := scm.String(plan); got != want {
+		t.Fatalf("trigger compilation mutated cached AST:\nwant %s\n got %s", want, got)
+	}
+	second := evaluateTriggerPlan(plan)
+	newRow := scm.NewFastDictValue(1)
+	newRow.Set(scm.NewString("value"), scm.NewInt(42), nil)
+	args := []scm.Scmer{scm.NewNil(), scm.NewFastDict(newRow), scm.NewNil(), scm.NewNil()}
+	if got := scm.Apply(first, args...); !scm.Equal(got, scm.NewInt(42)) {
+		t.Fatalf("first compiled trigger returned %s, want 42", scm.String(got))
+	}
+	if got := scm.Apply(second, args...); !scm.Equal(got, scm.NewInt(42)) {
+		t.Fatalf("recompiled trigger returned %s, want 42", scm.String(got))
+	}
+}
+
 // TestVectorizeTriggerDeletePattern tests that the DELETE trigger pattern is recognized.
 func TestVectorizeTriggerDeletePattern(t *testing.T) {
 	// Build a trigger body that matches the prejoin DELETE pattern:
