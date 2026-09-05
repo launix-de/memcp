@@ -47,15 +47,16 @@ from run_sql_tests import (  # noqa: E402
     load_performance_scale,
     observe_atomic_json,
     performance_ab_threshold_ms,
-    performance_sample_ns,
+    performance_architecture,
     performance_case_fingerprint,
     performance_case_key,
-    performance_architecture,
     performance_regression_pct,
+    performance_sample_ns,
     performance_scale_from_samples,
     planner_time_limit_with_tolerance_ms,
     publish_performance_scale,
     request_shared_supervisor_restart,
+    revision_specific_scm,
     resolve_timing_samples,
     resolve_warmup_runs,
     run_test_specs,
@@ -430,6 +431,41 @@ class AtomicJSONObserverContractTest(unittest.TestCase):
 
 
 class FailFastParallelContractTest(unittest.TestCase):
+    def test_ab_record_uses_revision_specific_physical_scm(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            spec = root / "tests" / "performance" / "physical.yaml"
+            spec.parent.mkdir(parents=True)
+            spec.write_text(
+                "test_cases:\n"
+                "  - name: physical probe\n"
+                "    scm: '(old_scan_interface)'\n",
+                encoding="utf-8",
+            )
+            case = {
+                "name": "physical probe",
+                "scm": "(new_scan_interface)",
+                "revision_specific_scm": True,
+            }
+            with mock.patch("run_sql_tests.PERF_AB_MODE", "record"), \
+                    mock.patch.dict(os.environ, {"MEMCP_TEST_WORKTREE": str(root)}):
+                self.assertEqual(
+                    revision_specific_scm(case, "tests/performance/physical.yaml"),
+                    "(old_scan_interface)",
+                )
+
+    def test_normal_run_keeps_current_revision_physical_scm(self) -> None:
+        case = {
+            "name": "physical probe",
+            "scm": "(new_scan_interface)",
+            "revision_specific_scm": True,
+        }
+        with mock.patch("run_sql_tests.PERF_AB_MODE", ""):
+            self.assertEqual(
+                revision_specific_scm(case, "tests/performance/physical.yaml"),
+                "(new_scan_interface)",
+            )
+
     def test_ab_mode_skips_non_measurement_cases_in_performance_suite(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             spec = Path(tmp) / "performance.yaml"

@@ -108,7 +108,11 @@ test_cases:
       result_not_contains:
         - '(join_driver \"p\")'
 
-  - name: "WordPress handwritten equivalent-driver batched scan_join_order correctness"
+  - name: "WordPress handwritten equivalent-driver batched scan_join_order"
+    warmup: 10
+    timing_samples: 100
+    threshold_ms: 8
+    revision_specific_scm: true
     scm: |
       (begin
         (define posts (table "memcp-tests" "wordpress_perf_posts"))
