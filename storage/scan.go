@@ -39,6 +39,8 @@ const scanAccessBoundaryStride = 6
 
 const scanAccessConsumerScan = "scan"
 
+var emptyScanAccessSchema = newScanAccessSchema(scanAccessConsumerScan, nil, -1)
+
 // scanAnalyzeScratch owns the short-lived physical analyzer output until all
 // parallel shard consumers have completed. A pool is preferable to a caller
 // stack array here: the shard callback escapes into goroutines, which would
@@ -1082,6 +1084,25 @@ func (t *table) hasBoundUniquePoint(boundaries scanAccess) bool {
 			}
 		}
 		if covered && len(unique.Cols) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func (t *table) hasUniqueColumns(columns []string) bool {
+	for _, unique := range t.Unique {
+		if len(unique.Cols) != len(columns) {
+			continue
+		}
+		matched := true
+		for i, column := range columns {
+			if unique.Cols[i] != column {
+				matched = false
+				break
+			}
+		}
+		if matched && len(columns) > 0 {
 			return true
 		}
 	}

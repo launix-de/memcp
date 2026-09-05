@@ -912,7 +912,16 @@ func probeScanJoinOrderInput(currentTx *TxContext, spec *scanJoinOrderSpec, tupl
 	combine := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
 		return scm.NewSlice(append(values[0].Slice(), values[1].Slice()...))
 	})
-	rows := input.table.scanWithBatchFrom(currentTx, nil, input.accessSchema, input.accessValues, scanAccess{suffix: required}, conditionCols, condition,
+	accessSchema := input.accessSchema
+	accessValues := input.accessValues
+	if input.table.hasUniqueColumns(input.targetKeyCols) {
+		// A complete dynamic unique-key probe dominates every local access
+		// boundary. Keep the local predicates in the residual callback so this
+		// path reads at most one candidate instead of building a wider index.
+		accessSchema = emptyScanAccessSchema
+		accessValues = nil
+	}
+	rows := input.table.scanWithBatchFrom(currentTx, nil, accessSchema, accessValues, scanAccess{suffix: required}, conditionCols, condition,
 		callbackCols, mapReduce, scm.NewSlice(nil), combine, false,
 		stride, batchdata).Slice()
 	hits := make([][]*scanJoinOrderRecord, len(tuples))

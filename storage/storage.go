@@ -946,7 +946,10 @@ func Init(en scm.Env) {
 				if schemas == nil {
 					panic("compile_scan_plan expects matching static multi-scan filters")
 				}
-				filterColumns, filters := pruneScanResidualList(args[2], args[3], compiled, false)
+				filterColumns, filters := args[2], args[3]
+				if head != "scan_join_order" {
+					filterColumns, filters = pruneScanResidualList(args[2], args[3], compiled, false)
+				}
 				result := []scm.Scmer{scm.NewSymbol(head), args[0], args[1],
 					scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), scm.NewSlice(schemas)}),
 					scm.NewSlice(append([]scm.Scmer{scm.NewSymbol("list")}, values...)), filterColumns, filters}

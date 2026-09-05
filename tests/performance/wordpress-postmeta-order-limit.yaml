@@ -112,30 +112,16 @@ test_cases:
     warmup: 2
     timing_samples: 5
     threshold_ms: 8
-    scm: |
-      (begin
-        (define posts (table "memcp-tests" "wordpress_perf_posts"))
-        (define postmeta (table "memcp-tests" "wordpress_perf_postmeta"))
-        (define found
-          (scan_join_order (session "__memcp_tx")
-            (list postmeta posts)
-            (list (list "meta_key") (list "post_type" "post_status"))
-            (list
-              (lambda (meta_key) (equal?? meta_key "custom_color"))
-              (lambda (post_type post_status)
-                (and (equal?? post_type "post") (equal?? post_status "publish"))))
-            (list (list (list 0 "post_id" "ID")))
-            (list) nil
-            (list (list 0 "post_id"))
-            (list (collate "utf8mb4" true))
-            0 0 20
-            (list (list 1 "ID") (list 1 "post_title") (list 0 "meta_value"))
-            (lambda (acc _id _title _value) (+ acc 1))
-            0 nil false 0 true))
-        (if (equal? found 20) "ok"
-          (error "wrong WordPress scan_join_order row count")))
-    expect:
-      data: ["ok"]
+    sql: |
+      SELECT p.ID, p.post_title, pm.meta_value
+      FROM wordpress_perf_posts p
+      JOIN wordpress_perf_postmeta pm ON pm.post_id = p.ID
+      WHERE p.post_type = 'post'
+        AND p.post_status = 'publish'
+        AND pm.meta_key = 'custom_color'
+      ORDER BY p.ID DESC
+      LIMIT 20
+    expect: {rows: 20}
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS wordpress_perf_postmeta"
