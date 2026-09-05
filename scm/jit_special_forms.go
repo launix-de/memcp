@@ -606,6 +606,15 @@ func jitEmitSpecialLambda(ctx *JITContext, args []Scmer, _ []JITValueDesc, resul
 	if len(args) > 2 {
 		numVars = int(ToInt(args[2]))
 	}
+	// Raw internal ASTs do not carry the optimizer's explicit local-slot count.
+	// Public parameters still occupy the leading numbered slots: captures must
+	// start after them or the first callback argument aliases the first captured
+	// outer value. Optimized lambdas already provide at least this value.
+	if params.IsSlice() && numVars < len(params.Slice()) {
+		numVars = len(params.Slice())
+	} else if params.IsSymbol() && numVars < 1 {
+		numVars = 1
+	}
 	numVars = jitRequiredLocalSlots(body, numVars)
 	argExprs := make([]Scmer, 0, 16)
 	argExprs = append(argExprs, NewSlice([]Scmer{NewSymbol("quote"), params}))

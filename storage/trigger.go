@@ -372,11 +372,28 @@ func finalizeTriggerCompilation(trigger *TriggerDescription) {
 	if triggerScmerMissing(trigger.Func) {
 		return
 	}
+	// Vectorization inspects the retained Scheme body, so it must run before
+	// native compilation. Recursive compilation is intentional: maintenance
+	// triggers spend their time in filter/map/reduce callbacks, while the outer
+	// procedure is only orchestration. Apply dispatches directly to native code;
+	// unsupported bodies and non-JIT builds retain the interpreter fallback.
 	if (trigger.IsSystem || trigger.Hidden || trigger.Language == "") && trigger.VectorFunc.IsNil() {
 		if vf := VectorizeTrigger(trigger.Func); !vf.IsNil() {
 			trigger.VectorFunc = vf
 		}
 	}
+	trigger.Func = scm.CompileJIT(scm.CloseProcedure(trigger.Func), true)
+}
+
+func evaluateTriggerPlan(plan scm.Scmer) scm.Scmer {
+	// JIT consumes optimizer-normalized procedures. This is the same phase order
+	// used for cached SQL query plans and is required for numbered mutable locals
+	// in trigger sequences such as SET followed by a conditional SET. Optimize
+	// rewrites AST containers in place, while CREATE TRIGGER plans are cacheable
+	// and may install the same source repeatedly. Transfer a private copy so one
+	// trigger's local-variable numbering never corrupts the cached plan.
+	ownedPlan := scm.CloneOptimizerExpression(plan)
+	return scm.Eval(scm.Optimize(ownedPlan, &scm.Globalenv, nil), &scm.Globalenv)
 }
 
 func compileTriggerForUse(schemaName, tableName string, trigger *TriggerDescription) {
@@ -385,14 +402,14 @@ func compileTriggerForUse(schemaName, tableName string, trigger *TriggerDescript
 		return
 	}
 	if !triggerScmerMissing(trigger.FuncPlan) {
-		trigger.Func = scm.Eval(trigger.FuncPlan, &scm.Globalenv)
+		trigger.Func = evaluateTriggerPlan(trigger.FuncPlan)
 		trigger.FuncPlan = scm.NewNil()
 		finalizeTriggerCompilation(trigger)
 		return
 	}
 	loadPersistedTriggerPlan(schemaName, tableName, trigger)
 	if !triggerScmerMissing(trigger.FuncPlan) {
-		trigger.Func = scm.Eval(trigger.FuncPlan, &scm.Globalenv)
+		trigger.Func = evaluateTriggerPlan(trigger.FuncPlan)
 		trigger.FuncPlan = scm.NewNil()
 	}
 	finalizeTriggerCompilation(trigger)
