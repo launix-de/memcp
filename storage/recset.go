@@ -514,7 +514,8 @@ func (t *table) scanRecSet(currentTx *TxContext, accessSchema scm.Scmer, accessV
 
 func (t *storageShard) collectRecSet(boundaries scanAccess, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, currentTx *TxContext, ss *scm.SessionState) recSetShard {
 	conditionProgram := scm.PrepareSerialProc(condition)
-	conditionAlwaysTrue := conditionProgram.Kind == scm.SerialProcConstant && scm.ToBool(conditionProgram.Value)
+	conditionAlwaysTrue := scanAccessCoversResidual(boundaries) ||
+		conditionProgram.Kind == scm.SerialProcConstant && scm.ToBool(conditionProgram.Value)
 	t.ensureLoaded()
 	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
 	t.ensureMainCount(skipShardReadLock)
@@ -1444,7 +1445,8 @@ func (t *storageShard) scanRecSetPart(part *recSetShard, conditionCols []string,
 // mandant filter already narrowed a table down to, not the full table.
 func (t *storageShard) filterRecSetPart(part *recSetShard, conditionCols []string, condition scm.Scmer, access scanAccess, currentTx *TxContext, ss *scm.SessionState) recSetShard {
 	conditionProgram := scm.PrepareSerialProc(condition)
-	conditionAlwaysTrue := conditionProgram.Kind == scm.SerialProcConstant && scm.ToBool(conditionProgram.Value)
+	conditionAlwaysTrue := scanAccessCoversResidual(access) ||
+		conditionProgram.Kind == scm.SerialProcConstant && scm.ToBool(conditionProgram.Value)
 	t.ensureLoaded()
 	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
 	t.ensureMainCount(skipShardReadLock)

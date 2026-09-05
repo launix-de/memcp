@@ -196,6 +196,9 @@ func scanStaticColumns(expr scm.Scmer) ([]scm.Scmer, bool) {
 
 func shiftCompiledScanAccessSlots(schemaValue scm.Scmer, shift int) scm.Scmer {
 	schema := schemaValue.Slice()
+	if len(schema) == 0 {
+		return schemaValue
+	}
 	shifted := append([]scm.Scmer(nil), schema...)
 	for offset, count := scanAccessSchemaHeaderSize, int(scm.ToInt(shifted[1])); count > 0; offset, count = offset+scanAccessBoundaryStride, count-1 {
 		for _, slotOffset := range []int{2, 3} {
@@ -258,15 +261,26 @@ func markCoveredScanAccessSchemas(schemas []scm.Scmer, filtersExpr scm.Scmer) []
 		return schemas
 	}
 	for i, filter := range filters {
-		_, body, lambda := scanLambdaParts(filter)
-		if !lambda || !(body.SymbolEquals("true") || (body.IsBool() && body.Bool())) {
-			continue
-		}
-		items := append([]scm.Scmer(nil), schemas[i].Slice()...)
-		items[2] = scm.NewString(scanAccessConsumerCoveredScan)
-		schemas[i] = scm.NewSlice(items)
+		schemas[i] = markCoveredScanAccessSchema(schemas[i], filter)
 	}
 	return schemas
+}
+
+func markCoveredScanAccessSchema(schema, residual scm.Scmer) scm.Scmer {
+	if !schema.IsSlice() || len(schema.Slice()) < scanAccessSchemaHeaderSize {
+		return schema
+	}
+	_, body, lambda := scanLambdaParts(residual)
+	if !lambda || !(body.SymbolEquals("true") || (body.IsBool() && body.Bool())) {
+		return schema
+	}
+	items := append([]scm.Scmer(nil), schema.Slice()...)
+	items[2] = scm.NewString(scanAccessConsumerCoveredScan)
+	return scm.NewSlice(items)
+}
+
+func scanAccessCoversResidual(access scanAccess) bool {
+	return access.filterCovered || access.plannerFilterCovered
 }
 
 func scanParamColumn(expr scm.Scmer, params, columns []scm.Scmer) (string, bool) {
@@ -1343,8 +1357,14 @@ func (t *table) scanWithBatchFrom(currentTx *TxContext, source *recSet, accessSc
 	// Measure analysis time (boundary extraction, sharding hints)
 	analyzeStart := time.Now()
 	/* analyze query */
-	suffix := append(boundaries(nil), requiredAccess.suffix...)
-	suffix = appendRecSetBoundary(suffix, source)
+	suffix := requiredAccess.suffix
+	if source != nil {
+		// requiredAccess may be shared by every batch invocation. Copy only when
+		// a RecSet boundary must be appended; the common dynamic point probe can
+		// borrow its immutable suffix directly.
+		suffix = append(boundaries(nil), suffix...)
+		suffix = appendRecSetBoundary(suffix, source)
+	}
 	access, compiled := scanAccessFromScheme(accessSchema, accessValues, suffix)
 	if !compiled {
 		panic("scan received an invalid compiled access schema")
@@ -1556,6 +1576,10 @@ func (t *storageShard) filterNativeArgConstantScanBatch(batch []uint32, conditio
 	if argument < 0 || argument >= len(conditionCols) {
 		panic("serial filter argument outside condition columns")
 	}
+	// Passing two interface values directly to an escaping variadic function
+	// makes the compiler allocate its argument slice for every row. Keep one
+	// caller-owned frame on the stack and overwrite it in the loop instead.
+	var call [2]scm.Scmer
 	outN := 0
 	for _, idx := range batch {
 		var value scm.Scmer
@@ -1568,13 +1592,12 @@ func (t *storageShard) filterNativeArgConstantScanBatch(batch []uint32, conditio
 		} else {
 			value = t.getDelta(int(idx-t.main_count), conditionCols[argument])
 		}
-		var accepted scm.Scmer
 		if condition.ConstantFirst {
-			accepted = condition.Function(condition.Value, value)
+			call[0], call[1] = condition.Value, value
 		} else {
-			accepted = condition.Function(value, condition.Value)
+			call[0], call[1] = value, condition.Value
 		}
-		if !scm.ToBool(accepted) {
+		if !scm.ToBool(condition.Function(call[:]...)) {
 			continue
 		}
 		batch[outN] = idx
@@ -1623,7 +1646,8 @@ func (t *storageShard) scanFirstRecord(boundaries scanAccess, lower []scm.Scmer,
 		ss = SessionStateFromTx(currentTx)
 	}
 	conditionProgram := scm.PrepareSerialProc(condition)
-	conditionAlwaysTrue := conditionProgram.Kind == scm.SerialProcConstant && scm.ToBool(conditionProgram.Value)
+	conditionAlwaysTrue := scanAccessCoversResidual(boundaries) ||
+		conditionProgram.Kind == scm.SerialProcConstant && scm.ToBool(conditionProgram.Value)
 
 	t.ensureLoaded()
 	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
@@ -1799,6 +1823,7 @@ func (t *storageShard) scan(boundaries scanAccess, lower []scm.Scmer, upperLast 
 			break
 		}
 	}
+	conditionAlwaysTrue = conditionAlwaysTrue || !hasMutationCallback && scanAccessCoversResidual(boundaries)
 
 	// Ensure shard is loaded from disk before accessing columns.
 	// ensureLoaded() must run before getColumnStorageOrPanic so that COLD
@@ -2128,6 +2153,7 @@ func (t *storageShard) scanBatch(boundaries scanAccess, lower []scm.Scmer, upper
 			break
 		}
 	}
+	conditionAlwaysTrue = conditionAlwaysTrue || !hasMutationCallback && scanAccessCoversResidual(boundaries)
 
 	t.ensureLoaded()
 	ownsWrite := false

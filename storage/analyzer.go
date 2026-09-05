@@ -171,10 +171,12 @@ type scanAccess struct {
 	insertAt int
 	inserted boundaries
 	suffix   boundaries
-	// filterCovered is used only by internal callers which construct mandatory
-	// physical boundaries directly. Planner-produced scans establish the same
-	// proof by pruning the residual filter to constant true.
+	// filterCovered is an unconditional proof supplied by internal callers which
+	// construct mandatory physical boundaries directly.
 	filterCovered bool
+	// plannerFilterCovered records the complete-subtree proof encoded in a
+	// static access schema. Mutating scans still retain their callback.
+	plannerFilterCovered bool
 }
 
 func (a scanAccess) len() int {
@@ -368,7 +370,7 @@ func scanAccessFromScheme(schemaValue scm.Scmer, values []scm.Scmer, suffix boun
 	}
 	return scanAccess{
 		schema: schema, values: values, computedMapCols: computedMapCols, suffix: suffix,
-		filterCovered: schema[2].String() == scanAccessConsumerCoveredScan,
+		plannerFilterCovered: schema[2].String() == scanAccessConsumerCoveredScan,
 	}, true
 }
 

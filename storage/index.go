@@ -1753,6 +1753,15 @@ start_scan:
 
 	rawCallback := callback
 	matchers := s.bindRowMatchers(tx, bounds, lower, upperLast, upperInclusive, cols, snapIndexHooks, true, exactMain)
+	// For one constrained sorted key, the two binary searches define the exact
+	// main-row interval. Non-sorted access hooks still run in emitRowMatchers.
+	// Composite prefixes keep their row checks because their lower search uses
+	// only the first sorted key.
+	mainRangeCovered := false
+	if firstSorted >= 0 && lastSorted < 64 {
+		constrainedSorted := sortedMask &^ unboundedMask
+		mainRangeCovered = constrainedSorted == uint64(1)<<firstSorted
+	}
 	adaptiveSwitchRows := int64(0)
 	if options != nil && hasRecSetBoundary && maxInsertIndex == 0 {
 		adaptiveSwitchRows = orderedRecSetSwitchRows(recsetPart.count)
@@ -1768,6 +1777,9 @@ start_scan:
 			}
 			recid := getRecid(mainIdx)
 			mainIdx++
+			if mainRangeCovered {
+				return recid, true
+			}
 			inRange, beyond := s.rowWithinBounds(bounds, cmpCols, lastSorted, sortedMask, unboundedMask, lower, upperLast, lowerInclusive, upperInclusive, func(i int) scm.Scmer {
 				return cols[i].get(recid)
 			})

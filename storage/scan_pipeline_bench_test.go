@@ -91,6 +91,10 @@ func BenchmarkScanPipelineOLTP(b *testing.B) {
 
 	trueFilter := optimizedScanProc(b, "(lambda () true)")
 	lastIDFilter := optimizedScanProc(b, "(lambda (id) (equal?? id 59999))")
+	lastIDAccessSchema, lastIDAccessValues := testEqualScanAccess("id", scm.NewInt(59999))
+	lastIDSchemaItems := append([]scm.Scmer(nil), lastIDAccessSchema.Slice()...)
+	lastIDSchemaItems[2] = scm.NewString(scanAccessConsumerCoveredScan)
+	lastIDAccessSchema = scm.NewSlice(lastIDSchemaItems)
 	countMapReduce := scm.Globalenv.Vars[scm.Symbol("scan_count")]
 	sumMapReduce := scm.Globalenv.Vars[scm.Symbol("sql_sum_reduce")]
 	takeRightMapReduce := optimizedScanProc(b, "(lambda (acc value) value)")
@@ -101,23 +105,29 @@ func BenchmarkScanPipelineOLTP(b *testing.B) {
 		name          string
 		conditionCols []string
 		condition     scm.Scmer
+		accessSchema  scm.Scmer
+		accessValues  []scm.Scmer
 		mapCols       []string
 		mapReducer    scm.Scmer
 		combine       scm.Scmer
 		neutral       scm.Scmer
 	}{
 		{name: "count", condition: trueFilter, mapReducer: countMapReduce, combine: plus, neutral: scm.NewInt(0)},
-		{name: "filtered_count", conditionCols: []string{"id"}, condition: lastIDFilter, mapReducer: countMapReduce, combine: plus, neutral: scm.NewInt(0)},
+		{name: "filtered_count", conditionCols: []string{"id"}, condition: lastIDFilter, accessSchema: lastIDAccessSchema, accessValues: lastIDAccessValues, mapReducer: countMapReduce, combine: plus, neutral: scm.NewInt(0)},
 		{name: "sum", condition: trueFilter, mapCols: []string{"amount"}, mapReducer: sumMapReduce, combine: sqlSum, neutral: scm.NewNil()},
 		{name: "take_right", condition: trueFilter, mapCols: []string{"amount"}, mapReducer: takeRightMapReduce, combine: takeRightMapReduce, neutral: scm.NewNil()},
 	}
 
 	for _, benchmark := range benchmarks {
 		b.Run(benchmark.name, func(b *testing.B) {
+			accessSchema := benchmark.accessSchema
+			if accessSchema.IsNil() {
+				accessSchema = newScanAccessSchema(scanAccessConsumerScan, nil, -1)
+			}
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				tbl.scan(nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, benchmark.conditionCols, benchmark.condition, benchmark.mapCols, benchmark.mapReducer,
+				tbl.scan(nil, accessSchema, benchmark.accessValues, benchmark.conditionCols, benchmark.condition, benchmark.mapCols, benchmark.mapReducer,
 					benchmark.neutral, benchmark.combine, false)
 			}
 		})

@@ -345,6 +345,25 @@ func TestSortedBoundariesCoverCondition(t *testing.T) {
 	}
 }
 
+func TestCoveredScanAccessSuppressesReadResiduals(t *testing.T) {
+	plannerAccess := scanAccess{plannerFilterCovered: true}
+	if !scanAccessCoversResidual(plannerAccess) {
+		t.Fatal("planner coverage should suppress read residuals, including autocommit")
+	}
+	if !scanAccessCoversResidual(scanAccess{filterCovered: true}) {
+		t.Fatal("mandatory internal boundaries should remain unconditionally covered")
+	}
+}
+
+func TestCompileScanAccessListKeepsEmptySchemas(t *testing.T) {
+	columns := scm.NewSlice([]scm.Scmer{scm.NewSymbol("list"), scm.NewSlice([]scm.Scmer{scm.NewSymbol("list")})})
+	filters := scm.NewSlice([]scm.Scmer{scm.NewSymbol("list"), buildProc(nil, scm.NewBool(true))})
+	schemas, values, compiled, compiledAny := compileScanAccessList(columns, filters, false)
+	if compiledAny || len(schemas) != 1 || len(schemas[0].Slice()) != 0 || len(values) != 0 || len(compiled) != 1 || compiled[0] {
+		t.Fatalf("empty access list compiled as schemas=%v values=%v compiled=%v compiledAny=%v", schemas, values, compiled, compiledAny)
+	}
+}
+
 func TestBoundaryConstantThroughCapturedCallable(t *testing.T) {
 	dictionary := scm.NewFastDictValue(1)
 	dictionary.Set(scm.NewString("id"), scm.NewInt(424), nil)

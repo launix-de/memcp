@@ -1298,7 +1298,7 @@ func (t *storageShard) scan_order(boundaries scanAccess, lower []scm.Scmer, uppe
 	}
 	recsetBoundaryCoversCondition := recSetHooksCoverCondition(boundaries, lower, t.t, conditionCols, condition)
 	conditionProgram := scm.PrepareSerialProc(condition)
-	conditionAlwaysTrue := boundaries.filterCovered ||
+	conditionAlwaysTrue := scanAccessCoversResidual(boundaries) ||
 		(conditionProgram.Kind == scm.SerialProcConstant && scm.ToBool(conditionProgram.Value))
 	var acceptProgram *scm.SerialProc
 	if !accept.IsNil() {

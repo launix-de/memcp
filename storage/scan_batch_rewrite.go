@@ -398,6 +398,8 @@ func rewriteInnerScanToBatch(inner []scm.Scmer, pseudocols, pseudoparams []scm.S
 		if compiledSchema, bindings, compiled := compileScanAccessMode(filterColumns, filterFn, true); compiled {
 			accessSchema = scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), compiledSchema})
 			accessValues = scm.NewSlice(append([]scm.Scmer{scm.NewSymbol("list")}, bindings...))
+			_, residual := pruneScanResidual(filterColumns, filterFn, true)
+			accessSchema = scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), markCoveredScanAccessSchema(compiledSchema, residual)})
 		}
 	}
 	// [3..4] common access schema and runtime values
