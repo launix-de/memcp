@@ -2466,6 +2466,33 @@ def run_test_specs(spec_files: List[str], base_url: str, port: int, log_times: b
             runner.set_restart_handler(restart_handler)
         return runner.run_test_spec(spec_files[0])
 
+    if PERF_TEST_ENABLED and len(spec_files) > 1:
+        exclusive_specs = [
+            spec_file for spec_file in spec_files
+            if Path(spec_file).is_file() and suite_execution_mode(spec_file) == "exclusive"
+        ]
+        if exclusive_specs:
+            shared_specs = [
+                spec_file for spec_file in spec_files
+                if spec_file not in exclusive_specs
+            ]
+            all_ok = True
+            for spec_file in exclusive_specs:
+                all_ok = run_test_specs(
+                    [spec_file], base_url, port, log_times, jobs,
+                    restart_handler=restart_handler,
+                    connect_only=connect_only,
+                    fail_fast=fail_fast,
+                ) and all_ok
+            if shared_specs:
+                all_ok = run_test_specs(
+                    shared_specs, base_url, port, log_times, jobs,
+                    restart_handler=restart_handler,
+                    connect_only=connect_only,
+                    fail_fast=fail_fast,
+                ) and all_ok
+            return all_ok
+
     if PERF_TEST_ENABLED:
         max_jobs = normalize_jobs(jobs)
         print(

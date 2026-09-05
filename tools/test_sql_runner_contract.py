@@ -510,6 +510,43 @@ class FailFastParallelContractTest(unittest.TestCase):
 
         self.assertCountEqual(events[2:], [("measure", specs[0]), ("measure", specs[1])])
 
+    def test_performance_isolated_suites_run_as_separate_phases(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            specs = [Path(tmp) / "first.yaml", Path(tmp) / "second.yaml"]
+            for spec in specs:
+                spec.write_text(
+                    "metadata: {isolated: true}\n"
+                    "test_cases:\n"
+                    "  - {name: measured, sql: SELECT 1, threshold_ms: 100}\n",
+                    encoding="utf-8",
+                )
+            events = []
+
+            def prepare(_runner, spec_file):
+                events.append(("prepare", Path(spec_file).name))
+                return True
+
+            def measure(_runner, spec_file, setup_done=False):
+                self.assertTrue(setup_done)
+                events.append(("measure", Path(spec_file).name))
+                return True
+
+            with mock.patch("run_sql_tests.PERF_TEST_ENABLED", True), \
+                    mock.patch("run_sql_tests.performance_measurement_count", return_value=1), \
+                    mock.patch.object(SQLTestRunner, "prepare_test_spec", prepare), \
+                    mock.patch.object(SQLTestRunner, "run_test_spec", measure):
+                self.assertTrue(run_test_specs(
+                    [str(spec) for spec in specs],
+                    "http://localhost:1", 1, True, 2,
+                ))
+
+        self.assertEqual(events, [
+            ("prepare", "first.yaml"),
+            ("measure", "first.yaml"),
+            ("prepare", "second.yaml"),
+            ("measure", "second.yaml"),
+        ])
+
     def test_performance_setup_restart_runs_once_before_measurements(self) -> None:
         specs = ["tests/performance/a.yaml", "tests/performance/b.yaml"]
         events = []

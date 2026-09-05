@@ -325,6 +325,40 @@ func TestJITTransferringCallbackCrossesGoroutineWithMaterializedFrame(t *testing
 	}
 }
 
+func TestJITCaptureFreeTransferringCallbackStaysDirect(t *testing.T) {
+	const name = "jit_test_capture_free_transfer_callback"
+	consumer := func(args ...Scmer) Scmer {
+		prepared := PrepareSerialProc(args[0])
+		return prepared.Call(args[1:2])
+	}
+	Declare(&Globalenv, &Declaration{
+		Name: name,
+		Fn:   consumer,
+		Type: &TypeDescriptor{Kind: "func", Forbidden: true, Params: []*TypeDescriptor{
+			{Kind: "func", NoEscape: true, Params: []*TypeDescriptor{{Kind: "any", Transfer: true}}, Return: &TypeDescriptor{Kind: "any", Transfer: true}},
+			{Kind: "any"},
+		}, Return: &TypeDescriptor{Kind: "any"}},
+	})
+	defer func() {
+		delete(Globalenv.Vars, Symbol(name))
+		delete(declarations, name)
+		delete(declarationsByFunction, FunctionIdentity(consumer))
+	}()
+	compiled := compileJITExpressionTestProc(t, `(lambda (value)
+		(jit_test_capture_free_transfer_callback (lambda (item) (+ item 1)) value))`)
+	args := []Scmer{NewInt(7)}
+	if got := compiled.Proc().jitFunction()(args...); !Equal(got, NewInt(8)) {
+		t.Fatalf("capture-free transfer callback returned %s, want 8", String(got))
+	}
+	if allocations := testing.AllocsPerRun(100, func() {
+		if got := compiled.Proc().jitFunction()(args...); !Equal(got, NewInt(8)) {
+			t.Fatalf("capture-free transfer callback returned %s, want 8", String(got))
+		}
+	}); allocations != 0 {
+		t.Fatalf("capture-free transfer callback allocated %.2f objects, want 0", allocations)
+	}
+}
+
 func TestJITEscapingCallbackUsesOneTypedAllocation(t *testing.T) {
 	compiled := compileJITExpressionTestProc(t, `(lambda (captured)
 		(lambda (value) (+ captured value)))`)
