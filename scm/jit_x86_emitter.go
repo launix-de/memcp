@@ -1974,7 +1974,6 @@ func (ctx *JITContext) finalizeStackMaps(frameSize int32, arenaOffset int) []jit
 				panic("jit: invalid stack root base")
 			}
 		}
-		mark(frameBytes, jitStackRoot{}) // saved Go RBP must move with a growing goroutine stack
 		maps[i] = jitStackMap{
 			pcOffset:   uintptr(arenaOffset) + uintptr(safepoint.pcOffset),
 			frameWords: frameWords,
