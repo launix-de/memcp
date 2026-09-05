@@ -9838,6 +9838,27 @@ protocol callback receives only the calibration row. */
 					(reduce tail (lambda (total item)
 						(+ total (tree_count item))) 0))
 				_ 1)))
+		(define scan_access_head? (lambda (head)
+			(or (equal? head (quote scan))
+				(or (equal? head (quote scan_order))
+					(or (equal? head (quote scan_order_multi))
+						(or (equal? head (quote scan_batch))
+							(or (equal? head (quote scan_recset))
+								(or (equal? head (quote scan_exists))
+									(or (equal? head (quote scan_selectivity_estimate))
+										(or (equal? head (quote scan_join_order))
+											(or (equal? head (quote scan_lookup))
+												(equal? head (quote scan_order_batch_accept)))))))))))))
+		(define static_scan_access_nodes (lambda (node)
+			(match node
+				(cons head tail) (+
+					(if (and (scan_access_head? head) (> (count tail) 2))
+						(- (tree_count (nth tail 2)) 1)
+						0)
+					(static_scan_access_nodes head)
+					(reduce tail (lambda (total item)
+						(+ total (static_scan_access_nodes item))) 0))
+				_ 0)))
 		(define started_ns (nanotime))
 		(define ir (decorrelate_logical_query query))
 		(define untangled_ns (nanotime))
@@ -9849,12 +9870,25 @@ protocol callback receives only the calibration row. */
 		(define emitted_ns (nanotime))
 		/* Read every raw-plan metric before transferring plan ownership to optimize. */
 		(define plan_text (pretty_print plan (settings "ExplainWidth")))
-		(define raw_plan_nodes (tree_count plan))
 		(define raw_scans (plan_count plan (quote scan)))
 		(define raw_ordered_scans (+
 			(plan_count plan (quote scan_order))
 			(plan_count plan (quote scan_order_multi))))
 		(define raw_exists_scans (plan_count plan (quote scan_exists)))
+		/* Access schema and values are immutable data carriers, not executable
+		plan operations. Discount their two mandatory leaf slots so plan_nodes
+		remains comparable to the pre-ABI execution-complexity budget. The raw
+		optimizer node counters and plan_bytes still include the complete data. */
+		(define raw_scan_access_slots (* 2 (+ raw_scans raw_ordered_scans raw_exists_scans
+			(plan_count plan (quote scan_batch))
+			(plan_count plan (quote scan_recset))
+			(plan_count plan (quote scan_selectivity_estimate))
+			(plan_count plan (quote scan_join_order))
+			(plan_count plan (quote scan_lookup))
+			(plan_count plan (quote scan_order_batch_accept)))))
+		(define raw_plan_nodes (- (tree_count plan)
+			raw_scan_access_slots
+			(static_scan_access_nodes plan)))
 		(define raw_group_caches (plan_count plan (quote touch_keytable)))
 		(define serialized_ns (nanotime))
 		(define optimizer_telemetry (newsession))

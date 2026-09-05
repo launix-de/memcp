@@ -910,9 +910,7 @@ test_cases:
     max_compile_phase_ms:
       recipe_emit_ns: 1000
     max_compile_metrics:
-      # Each physical scan now carries the common access-schema and value-list
-      # operands; keep the scaling guard while accounting for that fixed ABI.
-      plan_nodes: 6500
+      plan_nodes: 6000
       ordered_scans: 64
       exists_scans: 64
     setup:

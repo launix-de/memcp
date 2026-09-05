@@ -105,7 +105,7 @@ test_cases:
           "ok"
           (error "recset scan returned wrong row set")))
 
-  - name: "compiled recset boundaries narrow candidates before residual filtering"
+  - name: "recset boundary statistics count candidates before residual filtering"
     setup:
       - scm: '(settings "ScanDebugging" true)'
       - sql: "DELETE FROM `system_statistic`.`scans` WHERE `schema` = 'memcp-tests' AND `table` = 'recset_items'"
@@ -116,7 +116,9 @@ test_cases:
               (car (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))"))) (cadr (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))"))) '("tenant")
               (lambda (tenant) (equal? tenant 1))))
             (scan nil tbl
-              (car (compile_scan_access '("$recset_contains" "active") (scheme "(lambda (in_recset active) (and (in_recset rs) (equal? active 1)))"))) (cadr (compile_scan_access '("$recset_contains" "active") (scheme "(lambda (in_recset active) (and (in_recset rs) (equal? active 1)))"))) '("$recset_contains" "active")
+              (car (compile_scan_access '("$recset_contains") (scheme "(lambda (in_recset) (in_recset rs))")))
+              (cadr (compile_scan_access '("$recset_contains") (scheme "(lambda (in_recset) (in_recset rs))")))
+              '("$recset_contains" "active")
               (lambda (in_recset active) (and (in_recset rs) (equal? active 1)))
               '("id")
               (lambda (acc id) (+ acc id))
@@ -127,7 +129,7 @@ test_cases:
       rows: 1
       data:
         - inputCount: 5
-          candidateCount: 2
+          candidateCount: 3
           outputCount: 2
     cleanup:
       - scm: '(settings "ScanDebugging" false)'

@@ -264,6 +264,11 @@ func scanStaticColumns(expr scm.Scmer) ([]scm.Scmer, bool) {
 }
 
 func scanAccessValuesExpr(values []scm.Scmer) scm.Scmer {
+	if len(values) == 0 {
+		// Empty slices are self-evaluating in SCM. Keeping the canonical empty
+		// value vector literal avoids two quote nodes in every access-free scan.
+		return scm.NewSlice(nil)
+	}
 	staticValues := make([]scm.Scmer, len(values))
 	for i, value := range values {
 		value = value.WithoutSourceInfo()

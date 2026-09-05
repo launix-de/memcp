@@ -1000,8 +1000,12 @@ func Init(en scm.Env) {
 					filterColumns, filter = prunedColumns, residual
 				}
 			}
+			schemaExpr := schema
+			if schema.IsSlice() && len(schema.Slice()) > 0 {
+				schemaExpr = scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), schema})
+			}
 			result := []scm.Scmer{scm.NewSymbol(head), args[0], args[1],
-				scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), schema}),
+				schemaExpr,
 				scanAccessValuesExpr(values), filterColumns, filter}
 			return scm.NewSlice(append(result, args[4:]...))
 		},
