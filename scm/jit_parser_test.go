@@ -32,6 +32,10 @@ func TestJITParserMemoSeparatesRulesAndPositions(t *testing.T) {
 	program := &jitParserProgram{rules: make([]jitParserRule, 10)}
 	for index := range program.rules {
 		program.rules[index].lexicalParent = -1
+		// A self reference makes each rule directly left recursive, so
+		// analyzeMemoNeed keeps it memoized - this test exercises the memo
+		// table indexing, not the necessity analysis.
+		program.rules[index].root = &jitParserNode{kind: jitParserRuleRef, rule: index}
 	}
 	program.prepareMemoLayout()
 	state := &jitParserState{

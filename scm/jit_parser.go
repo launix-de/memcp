@@ -170,12 +170,17 @@ func jitBuildParserTemplateProgram(template *JITParserTemplate) (*jitParserProgr
 }
 
 func (program *jitParserProgram) prepareMemoLayout() {
+	needMemo := program.analyzeMemoNeed()
 	program.memoRuleIndex = make([]int32, len(program.rules))
 	for index := range program.memoRuleIndex {
 		program.memoRuleIndex[index] = -1
 	}
 	for rule := range program.rules {
-		if program.rules[rule].lexicalParent < 0 {
+		// A lexical sub-rule is inlined and never memoized. A non-lexical rule
+		// gets a dense memo slot only when analyzeMemoNeed could not prove it is
+		// entered at most once per position - otherwise every write to it would
+		// be dead and it only inflates the per-position block.
+		if program.rules[rule].lexicalParent < 0 && needMemo[rule] {
 			program.memoRuleIndex[rule] = int32(program.memoRuleCount)
 			program.memoRuleCount++
 		}
@@ -898,7 +903,7 @@ func jitParserEnterRule(stateValue, ruleValue, successValue, failureValue, posit
 	frame := jitParserCallFrame{
 		rule: ruleID, success: int(successValue.Int()), failure: int(failureValue.Int()),
 		position: int(positionValue.Int()), valueBase: len(state.values), bindingBase: len(state.bindings),
-		mutationBase: len(state.mutations), memoize: rule.lexicalParent < 0,
+		mutationBase: len(state.mutations), memoize: state.program.memoRuleIndex[ruleID] >= 0,
 	}
 	state.frames = append(state.frames, frame)
 	for range rule.bindings {
@@ -912,7 +917,7 @@ func jitParserPushRuleFrame(state *jitParserState, ruleID, success, failure, pos
 	state.frames = append(state.frames, jitParserCallFrame{
 		rule: ruleID, success: success, failure: failure, position: position,
 		valueBase: len(state.values), bindingBase: len(state.bindings), mutationBase: len(state.mutations),
-		memoize: rule.lexicalParent < 0, memoInitial: memoInitial, transient: transient,
+		memoize: state.program.memoRuleIndex[ruleID] >= 0, memoInitial: memoInitial, transient: transient,
 	})
 	for range rule.bindings {
 		state.bindings = append(state.bindings, NewNil())
@@ -1282,7 +1287,7 @@ func jitParserEnterRuleNative(state *jitParserState, ruleValue, success, failure
 	if rule < 0 || rule >= len(state.program.rules) {
 		panic("jit: parser rule index out of range")
 	}
-	if state.program.rules[rule].lexicalParent < 0 {
+	if state.program.memoRuleIndex[rule] >= 0 {
 		key := jitParserMemoKey{rule: rule, position: int(position)}
 		memo, exists := state.memoGet(key)
 		var head *jitParserLeftRecursionHead
