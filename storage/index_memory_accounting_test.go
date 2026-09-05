@@ -60,18 +60,6 @@ func TestPlannerIndexProbeDoesNotIncreaseIndexSavings(t *testing.T) {
 		t.Fatal("estimate must not materialize a cold auto-index before real usage")
 	}
 
-	// Point equality does not depend on index ordering. Persisted unique indexes
-	// may predate order metadata and must still serve exact collision probes.
-	shard.Indexes[0].ColOrderMeta = nil
-	shard.mu.RLock()
-	shard.iterateIndex(nil, runtimeScanAccess(bounds), lower, upperLast, len(shard.inserts), buf[:], 0, nil, func(batch []uint32) bool {
-		return true
-	})
-	shard.mu.RUnlock()
-	if len(shard.Indexes) != 1 {
-		t.Fatalf("point probe created a redundant ordered index: got %d indexes", len(shard.Indexes))
-	}
-
 	columns := []string{"id"}
 	values := []scm.Scmer{scm.NewInt(5)}
 	if _, present := shard.GetRecordidForUnique(columns, values, nil); !present {

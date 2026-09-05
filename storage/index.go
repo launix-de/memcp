@@ -168,6 +168,39 @@ func boundaryOrder(t *table, boundary columnboundaries) (func(scm.Scmer, scm.Scm
 	return canonicalColumnOrder(t, boundary.col)
 }
 
+func ascendingOrderMetaMatches(meta, collation string) bool {
+	return len(meta) == len(collation)+len(":asc") &&
+		meta[:len(collation)] == collation && meta[len(collation):] == ":asc"
+}
+
+func indexOrderMatchesBoundary(t *table, index *StorageIndex, column int, boundary columnboundaries) bool {
+	if column >= len(index.ColOrderMeta) {
+		return false
+	}
+	meta := index.ColOrderMeta[column]
+	if boundary.order != nil {
+		required := boundary.orderMeta
+		if required == "" {
+			required = orderRelationMeta(boundary.order)
+		}
+		return meta == required
+	}
+	if boundary.collation != "" && strings.HasPrefix(t.Name, ".grp:") &&
+		(boundary.lower.IsString() || boundary.lower.IsSymbol()) {
+		return ascendingOrderMetaMatches(meta, boundary.collation)
+	}
+	collation := "bin"
+	for _, definition := range t.Columns {
+		if definition.Name == boundary.col {
+			if definition.Collation != "" {
+				collation = definition.Collation
+			}
+			break
+		}
+	}
+	return ascendingOrderMetaMatches(meta, collation)
+}
+
 func (s *StorageIndex) lessAt(col int, a, b scm.Scmer) bool {
 	if col < len(s.ColOrder) && s.ColOrder[col] != nil {
 		return s.ColOrder[col](a, b)
@@ -657,9 +690,8 @@ func (t *storageShard) iterateIndexEx(tx *TxContext, cols scanAccess, lower []sc
 					if !indexMatcherCompatible(bound.matcher, indexedMatcher) {
 						goto skip_index // matcher kind mismatch
 					}
-					if bound.matcher.IsSorted() && !boundaryIsPoint(bound) {
-						_, requiredOrderMeta := boundaryOrder(t.t, bound)
-						if len(index.ColOrderMeta) <= i || requiredOrderMeta != index.ColOrderMeta[i] {
+					if bound.matcher.IsSorted() {
+						if !indexOrderMatchesBoundary(t.t, index, i, bound) {
 							goto skip_index
 						}
 					}
@@ -695,9 +727,8 @@ func (t *storageShard) iterateIndexEx(tx *TxContext, cols scanAccess, lower []sc
 						covered = false
 						break
 					}
-					if bound.matcher.IsSorted() && !boundaryIsPoint(bound) {
-						_, requiredOrderMeta := boundaryOrder(t.t, bound)
-						if len(index.ColOrderMeta) <= i || requiredOrderMeta != index.ColOrderMeta[i] {
+					if bound.matcher.IsSorted() {
+						if !indexOrderMatchesBoundary(t.t, index, i, bound) {
 							covered = false
 							break
 						}
