@@ -48,12 +48,12 @@ func TestScanPipelineSpecializationsPreserveMainAndDeltaResults(t *testing.T) {
 	assertResults := func(stage string) {
 		t.Helper()
 		for _, condition := range []scm.Scmer{greaterEqualTwo, reversedLessThan} {
-			count := tbl.scan(nil, []string{"id"}, condition, nil, countMapReduce,
+			count := tbl.scan(nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, []string{"id"}, condition, nil, countMapReduce,
 				scm.NewInt(0), plus, false)
 			if got := scm.ToInt(count); got != 2 {
 				t.Fatalf("%s count = %d, want 2", stage, got)
 			}
-			sum := tbl.scan(nil, []string{"id"}, condition, []string{"id"}, sumMapReduce,
+			sum := tbl.scan(nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, []string{"id"}, condition, []string{"id"}, sumMapReduce,
 				scm.NewNil(), scm.Globalenv.Vars[scm.Symbol("sql_sum_reduce")], false)
 			if got := scm.ToInt(sum); got != 5 {
 				t.Fatalf("%s sum = %d, want 5", stage, got)
@@ -117,7 +117,7 @@ func BenchmarkScanPipelineOLTP(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				tbl.scan(nil, benchmark.conditionCols, benchmark.condition, benchmark.mapCols, benchmark.mapReducer,
+				tbl.scan(nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, benchmark.conditionCols, benchmark.condition, benchmark.mapCols, benchmark.mapReducer,
 					benchmark.neutral, benchmark.combine, false)
 			}
 		})

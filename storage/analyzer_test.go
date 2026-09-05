@@ -160,7 +160,7 @@ func TestPruneScanResidualDropsExactProbesAndKeepsLike(t *testing.T) {
 		scm.NewSlice([]scm.Scmer{scm.NewSymbol("id"), scm.NewSymbol("age"), scm.NewSymbol("name")}),
 		scm.NewSlice([]scm.Scmer{
 			scm.NewSymbol("and"),
-			scm.NewSlice([]scm.Scmer{scm.NewSymbol("equal??"), scm.NewSymbol("id"), scm.NewSymbol("wanted_id")}),
+			scm.NewSlice([]scm.Scmer{scm.NewSymbol("equal?"), scm.NewSymbol("id"), scm.NewSymbol("wanted_id")}),
 			scm.NewSlice([]scm.Scmer{scm.NewSymbol(">="), scm.NewSymbol("age"), scm.NewInt(18)}),
 			scm.NewSlice([]scm.Scmer{scm.NewSymbol("strlike"), scm.NewSymbol("name"), scm.NewString("A%")}),
 		}),
@@ -221,17 +221,35 @@ func TestScanAccessNullProbeIsImpossibleWithoutTreatingNilCheckAsImpossible(t *t
 	if !valid || nilCheck.impossible() {
 		t.Fatal("IS NULL access must remain executable")
 	}
+	nullSafeCall := scm.Read(t.Name(), `(scan nil table_value
+		'("scan_access" 0 "scan" 0 -1) '()
+		(list "id") (lambda (id) (equal?? id wanted_id))
+		(list "id") (lambda (acc id) id) nil nil false)`)
+	nullSafeItems, ok := scmerSlice(nullSafeCall)
+	if !ok {
+		t.Fatal("failed to parse null-safe scan")
+	}
+	nullSafeSchema, _, compiled := compileScanAccess(nullSafeItems[5], nullSafeItems[6])
+	nullSafe, valid := scanAccessFromScheme(nullSafeSchema, []scm.Scmer{scm.NewNil()}, nil)
+	if !compiled || !valid || nullSafe.impossible() {
+		t.Fatal("null-safe equality must retain its residual NULL match")
+	}
+	_, residual := pruneScanResidual(nullSafeItems[5], nullSafeItems[6], false)
+	if _, body, lambda := scanLambdaParts(residual); !lambda || scanExprIsTrue(body) {
+		t.Fatal("null-safe equality must not be pruned from the residual filter")
+	}
 }
 
 func TestCompileScanAccessAcceptsParsedSourceInfo(t *testing.T) {
 	call := scm.Read(t.Name(), `(scan nil table_value
+		'("scan_access" 0 "scan" 0 -1) '()
 		(list "id") (lambda (id) (equal?? id wanted_id))
 		(list "id") (lambda (acc id) id) nil nil false)`)
 	items, ok := scmerSlice(call)
 	if !ok || len(items) < 5 {
 		t.Fatalf("unexpected parsed scan expression: %s", scm.SerializeToString(call, &scm.Globalenv))
 	}
-	if _, bindings, compiled := compileScanAccess(items[3], items[4]); !compiled || len(bindings) != 1 {
+	if _, bindings, compiled := compileScanAccess(items[5], items[6]); !compiled || len(bindings) != 1 {
 		t.Fatalf("parsed scan access compiled=%v bindings=%d", compiled, len(bindings))
 	}
 }

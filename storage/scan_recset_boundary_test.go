@@ -42,9 +42,9 @@ func setupAdaptiveRecSetOrderTable(t *testing.T, database string, rows int) *tab
 }
 
 func recSetForIDs(tbl *table, ids map[int64]bool) *recSet {
-	return tbl.scanRecSet(nil, []string{"id"}, scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
+	return tbl.scanRecSet(nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, []string{"id"}, scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
 		return scm.NewBool(ids[values[0].Int()])
-	}), newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil)
+	}))
 }
 
 func scanOrderedRecSetIDs(tbl *table, source *recSet, limit int) []int64 {
@@ -60,6 +60,7 @@ func scanOrderedRecSetIDsWithOrder(tbl *table, source *recSet, limit int, order 
 func scanOrderedRecSetIDsWithCondition(tbl *table, source *recSet, limit int, order func(...scm.Scmer) scm.Scmer, condition scm.Scmer) []int64 {
 	result := make([]int64, 0, limit)
 	source.scan_order(nil,
+		newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil,
 		[]string{"id"}, condition,
 		[]scm.Scmer{scm.NewString("rank")}, []func(...scm.Scmer) scm.Scmer{order},
 		0, 0, limit, []string{"id"},
@@ -67,7 +68,7 @@ func scanOrderedRecSetIDsWithCondition(tbl *table, source *recSet, limit int, or
 			result = append(result, values[1].Int())
 			return values[0]
 		}),
-		scm.NewNil(), false, scm.NewNil(), nil, scm.NewNil(), newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil)
+		scm.NewNil(), false, scm.NewNil(), nil, scm.NewNil())
 	return result
 }
 
@@ -96,18 +97,18 @@ func TestRecSetScanSourceAddsExactBoundary(t *testing.T) {
 		return scm.NewBool(values[0].Int() >= 100)
 	})
 	got := make([]int64, 0, 2)
-	source.scan(nil, []string{"id"}, condition, []string{"id"},
+	source.scan(nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, []string{"id"}, condition, []string{"id"},
 		scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
 			got = append(got, values[1].Int())
 			return values[0]
-		}), scm.NewNil(), scm.NewNil(), false, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil)
+		}), scm.NewNil(), scm.NewNil(), false)
 
 	if want := []int64{103, 150}; !equalInt64s(got, want) {
 		t.Fatalf("RecSet boundary scan rows = %v, want %v", got, want)
 	}
-	if !source.scanExists(nil, []string{"id"}, scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
+	if !source.scanExists(nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, []string{"id"}, scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
 		return scm.NewBool(values[0].Int() == 150)
-	}), newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil) {
+	})) {
 		t.Fatal("scan_exists did not consume the RecSet boundary")
 	}
 }
@@ -121,11 +122,11 @@ func TestRepeatedUnorderedRecSetScanDoesNotBuildMembershipIndex(t *testing.T) {
 
 	for range 4 {
 		got := make([]int64, 0, 2)
-		source.scan(nil, []string{"id"}, condition, []string{"id"},
+		source.scan(nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, []string{"id"}, condition, []string{"id"},
 			scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
 				got = append(got, values[1].Int())
 				return values[0]
-			}), scm.NewNil(), scm.NewNil(), false, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil)
+			}), scm.NewNil(), scm.NewNil(), false)
 		if want := []int64{103, 1_503}; !equalInt64s(got, want) {
 			t.Fatalf("repeated RecSet scan rows = %v, want %v", got, want)
 		}
@@ -207,9 +208,9 @@ func TestDenseOrderedRecSetKeepsIndexDrivenTraversal(t *testing.T) {
 	const rows = 4_000
 	tbl := setupAdaptiveRecSetOrderTable(t, "trecsetdenseorder", rows)
 	order := buildRankOrderIndex(t, tbl)
-	source := tbl.scanRecSet(nil, []string{"id"}, scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
+	source := tbl.scanRecSet(nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, []string{"id"}, scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
 		return scm.NewBool(values[0].Int()%10 != 0)
-	}), newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil)
+	}))
 
 	got := scanOrderedRecSetIDsWithOrder(tbl, source, 3, order)
 	if want := []int64{rows/2 + 1, rows/2 + 2, rows/2 + 3}; !equalInt64s(got, want) {

@@ -44,11 +44,12 @@ test_cases:
           '("source_id")
           (lambda (source_id)
             (scan nil (table "memcp-tests" "lookup_invalidation_source")
+              '("scan_access" 1 "scan" 0 -1 "equal" "id" 0 0 3 "") (list source_id)
               '("id") (lambda (id) (equal? id (outer 1 source_id)))
               '("val") (lambda (acc val) val)
               0 (lambda (old value) value) false)))
         (scan nil (table "memcp-tests" "lookup_invalidation_driver")
-          '() (lambda () true)
+          (car (compile_scan_access '() (scheme "(lambda () true)"))) (cadr (compile_scan_access '() (scheme "(lambda () true)"))) '() (lambda () true)
           '(".lookup:value") (lambda (acc value) (+ acc value))
           0 + false))
 

@@ -838,11 +838,11 @@ consumer stage. */
 										(list (quote cons) map_body (quote __scan_acc))))
 									(match order_head
 										'(col dir)
-										(list (quote scan_order) nil (list (quote table) schema "rdf")
+										(compile_scan_plan (quote scan_order) nil (list (quote table) schema "rdf")
 											filter_cols filter_fn
 											(list (quote list) col) (list (quote list) (match dir "DESC" > <)) 0 0 -1
 											map_cols cons_mapreduce nil false)
-										(list (quote scan) nil (list (quote table) schema "rdf") filter_cols filter_fn map_cols side_effect_mapreduce nil nil false)
+										(compile_scan_plan (quote scan) nil (list (quote table) schema "rdf") filter_cols filter_fn map_cols side_effect_mapreduce nil nil false)
 									)
 							)))
 					))

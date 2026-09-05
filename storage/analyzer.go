@@ -247,9 +247,10 @@ func (a scanAccess) impossible() bool {
 	for i := 0; i < compiled; i++ {
 		offset := scanAccessSchemaHeaderSize + i*scanAccessBoundaryStride
 		kind := a.schema[offset].String()
+		flags := scm.ToInt(a.schema[offset+4])
 		lowerSlot := int(scm.ToInt(a.schema[offset+2]))
 		upperSlot := int(scm.ToInt(a.schema[offset+3]))
-		if lowerSlot >= 0 && a.values[lowerSlot].IsNil() && (kind == "equal" || kind == "range") {
+		if lowerSlot >= 0 && a.values[lowerSlot].IsNil() && (kind == "range" || (kind == "equal" && flags&4 == 0)) {
 			return true
 		}
 		if upperSlot >= 0 && a.values[upperSlot].IsNil() && kind == "range" {
@@ -270,9 +271,10 @@ func (a scanAccess) impossibleBatch(stride int, batchdata []scm.Scmer, batchid i
 	for i := 0; i < compiled; i++ {
 		offset := scanAccessSchemaHeaderSize + i*scanAccessBoundaryStride
 		kind := a.schema[offset].String()
+		flags := scm.ToInt(a.schema[offset+4])
 		for _, slotOffset := range []int{2, 3} {
 			slot := int(scm.ToInt(a.schema[offset+slotOffset]))
-			if slot <= -2 && (kind == "equal" || kind == "range") {
+			if slot <= -2 && (kind == "range" || (kind == "equal" && flags&4 == 0)) {
 				subindex := -slot - 2
 				position := batchid*stride + subindex
 				if position < 0 || position >= len(batchdata) || batchdata[position].IsNil() {

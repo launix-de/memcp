@@ -34,17 +34,18 @@ func tryScanOrderBatchRewrite(v []scm.Scmer) scm.Scmer {
 }
 
 func tryScanBatchRewrite(v []scm.Scmer) scm.Scmer {
-	// scan: [fn, tx, tbl, filtercols, filterfn, mapcols, mapreduce, neutral, combine, isOuter]
+	// scan: [fn, tx, tbl, accessSchema, accessValues, filtercols, filterfn,
+	// mapcols, mapreduce, neutral, combine, isOuter]
 	// v[2] (tbl) is always a table reference — shape-agnostic (TagTable at
 	// runtime, (table schema tbl) list or tbl:schema:name symbol at optimize
 	// time). We trust that and just pass it through unchanged.
-	if len(v) < 7 {
+	if len(v) < 9 {
 		return scm.NewNil()
 	}
-	if len(v) > 9 && scm.ToBool(v[9]) {
+	if len(v) > 11 && scm.ToBool(v[11]) {
 		return scm.NewNil()
 	}
-	return tryScanBatchRewriteMapReduce(v, 5, 6)
+	return tryScanBatchRewriteMapReduce(v, 7, 8)
 }
 
 // tryScanBatchRewriteMapReduce rewrites a non-reducing fused callback. The
@@ -84,16 +85,16 @@ func tryScanBatchRewriteMapReduce(v []scm.Scmer, mapcolsIdx, mapReduceIdx int) s
 
 	// Inner scan — v[2] is always a table reference (see tryScanBatchRewrite);
 	// we only check arity and that it's not an outer scan.
-	if len(innerScanSlice) < 7 {
+	if len(innerScanSlice) < 9 {
 		return scm.NewNil()
 	}
-	if len(innerScanSlice) > 9 && scm.ToBool(innerScanSlice[9]) {
+	if len(innerScanSlice) > 11 && scm.ToBool(innerScanSlice[11]) {
 		return scm.NewNil()
 	}
 	// Batch rewriting delays the inner mapper until a flush. Keep effectful
 	// mappers in their original nested pipeline so result emission, cache
 	// initialization, and other declared effects retain row-by-row semantics.
-	if scanExprMayHaveSideEffects(innerScanSlice[6]) {
+	if scanExprMayHaveSideEffects(innerScanSlice[8]) {
 		return scm.NewNil()
 	}
 
@@ -109,12 +110,15 @@ func tryScanBatchRewriteMapReduce(v []scm.Scmer, mapcolsIdx, mapReduceIdx int) s
 	for i := range outerLabels {
 		outerSlots[i+1] = true
 	}
-	// Check inner filterfn and mapfn bodies for outer param references
+	// Check access values, residual filter, and mapfn for outer references.
 	if len(innerScanSlice) > 4 {
 		hasOuterRef = hasOuterRef || astContainsSymbol(innerScanSlice[4], outerParamSet) || astContainsOuterSlot(innerScanSlice[4], outerSlots)
 	}
 	if len(innerScanSlice) > 6 {
 		hasOuterRef = hasOuterRef || astContainsSymbol(innerScanSlice[6], outerParamSet) || astContainsOuterSlot(innerScanSlice[6], outerSlots)
+	}
+	if len(innerScanSlice) > 8 {
+		hasOuterRef = hasOuterRef || astContainsSymbol(innerScanSlice[8], outerParamSet) || astContainsOuterSlot(innerScanSlice[8], outerSlots)
 	}
 	if !hasOuterRef {
 		return scm.NewNil()
@@ -135,6 +139,9 @@ func tryScanBatchRewriteMapReduce(v []scm.Scmer, mapcolsIdx, mapReduceIdx int) s
 
 	// Rewrite inner scan → scan_batch
 	rewrittenInner := rewriteInnerScanToBatch(innerScanSlice, batchPseudocols, batchParams, replaceMap, replaceSlots, stride)
+	if rewrittenInner == nil {
+		return scm.NewNil()
+	}
 
 	// Replace inner scan in mapfn body with the rewritten scan_batch
 	newBody := replacer(scm.NewSlice(rewrittenInner))
@@ -370,30 +377,95 @@ func astContainsOuterSlot(expr scm.Scmer, slots map[int]bool) bool {
 // 4. Replacing outer param symbols in filter/map bodies with #N symbols
 // 5. Inserting stride and __batchbuf after mapreduce
 func rewriteInnerScanToBatch(inner []scm.Scmer, pseudocols, pseudoparams []scm.Scmer, replaceMap map[string]string, replaceSlots map[int]string, stride int) []scm.Scmer {
-	// inner = [scan, tx, tbl, filtercols, filterfn, mapcols, mapreduce, neutral, combine, isOuter]
+	// inner = [scan, tx, tbl, accessSchema, accessValues, filtercols, filterfn,
+	// mapcols, mapreduce, neutral, combine, isOuter]
 	result := make([]scm.Scmer, 0, len(inner)+2)
 
 	// [0] scan_batch
 	result = append(result, scm.NewSymbol("scan_batch"))
 	// [1..2] tx, tbl
 	result = append(result, inner[1], inner[2])
-	// [3] filtercols: append #N
-	result = append(result, appendToScmerList(inner[3], pseudocols))
-	// [4] filterfn: extend params + replace body symbols
-	result = append(result, extendAndRewriteLambda(inner[4], pseudoparams, replaceMap, replaceSlots))
-	// [5] mapcols: append #N
-	result = append(result, appendToScmerList(inner[5], pseudocols))
-	// [6] mapreduce: extend params + replace body symbols
-	result = append(result, extendAndRewriteLambda(inner[6], pseudoparams, replaceMap, replaceSlots))
-	// [7] stride
+	filterColumns := appendToScmerList(inner[5], pseudocols)
+	filterFn := extendAndRewriteLambda(inner[6], pseudoparams, replaceMap, replaceSlots)
+	accessSchema, accessValues, ok := rewriteBatchScanAccess(inner[3], inner[4], replaceMap, replaceSlots)
+	if !ok {
+		return nil
+	}
+	// A direct SCM caller may provide an empty access schema. Compile the
+	// rewritten residual once here so scan_batch still receives the one ABI.
+	if schemaItems, schemaOK := scanStaticListElements(accessSchema); schemaOK && len(schemaItems) >= scanAccessSchemaHeaderSize && scm.ToInt(schemaItems[1]) == 0 {
+		if compiledSchema, bindings, compiled := compileScanAccessMode(filterColumns, filterFn, true); compiled {
+			accessSchema = scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), compiledSchema})
+			accessValues = scm.NewSlice(append([]scm.Scmer{scm.NewSymbol("list")}, bindings...))
+			filterColumns, filterFn = pruneScanResidual(filterColumns, filterFn, true)
+		}
+	}
+	// [3..4] common access schema and runtime values
+	result = append(result, accessSchema, accessValues)
+	// [5] filtercols: append #N
+	result = append(result, filterColumns)
+	// [6] filterfn: extend params + replace body symbols
+	result = append(result, filterFn)
+	// [7] mapcols: append #N
+	result = append(result, appendToScmerList(inner[7], pseudocols))
+	// [8] mapreduce: extend params + replace body symbols
+	result = append(result, extendAndRewriteLambda(inner[8], pseudoparams, replaceMap, replaceSlots))
+	// [9] stride
 	result = append(result, scm.NewInt(int64(stride)))
-	// [8] batchdata (symbol __batchbuf from the flush lambda)
+	// [10] batchdata (symbol __batchbuf from the flush lambda)
 	result = append(result, scm.NewSymbol("__batchbuf"))
-	// [9..] neutral, combine, isOuter from original
-	for i := 7; i < len(inner) && i <= 9; i++ {
+	// [11..] neutral, combine, isOuter from original
+	for i := 9; i < len(inner) && i <= 11; i++ {
 		result = append(result, inner[i])
 	}
 	return result
+}
+
+// rewriteBatchScanAccess converts runtime access-value slots which directly
+// reference an outer row into the negative #N slots understood by scan_batch.
+// More complex outer-dependent access expressions are deliberately rejected:
+// they need a distinct vector expression contract, not per-row evaluation in
+// the storage loop.
+func rewriteBatchScanAccess(schemaExpr, valuesExpr scm.Scmer, mapping map[string]string, slots map[int]string) (scm.Scmer, scm.Scmer, bool) {
+	schema, ok := scanStaticListElements(schemaExpr)
+	if !ok || len(schema) < scanAccessSchemaHeaderSize || schema[0].String() != scanAccessSchemaName {
+		return scm.NewNil(), scm.NewNil(), false
+	}
+	values, ok := scanStaticListElements(valuesExpr)
+	if !ok {
+		return scm.NewNil(), scm.NewNil(), false
+	}
+	rewrittenSchema := append([]scm.Scmer(nil), schema...)
+	rewrittenValues := append([]scm.Scmer(nil), values...)
+	for valueSlot, value := range values {
+		rewritten := replaceSymbolsInAST(value, mapping, slots)
+		name, named := scanSymbolName(rewritten)
+		batchSlot, batch := 0, false
+		if named {
+			batchSlot, batch = parseBatchPseudoColName(name)
+		}
+		if !batch {
+			if rewritten != value {
+				return scm.NewNil(), scm.NewNil(), false
+			}
+			rewrittenValues[valueSlot] = value
+			continue
+		}
+		rewrittenValues[valueSlot] = scm.NewNil()
+		encodedSlot := scm.NewInt(int64(-2 - batchSlot))
+		boundaryCount := int(scm.ToInt(rewrittenSchema[1]))
+		for boundary := 0; boundary < boundaryCount; boundary++ {
+			base := scanAccessSchemaHeaderSize + boundary*scanAccessBoundaryStride
+			if int(scm.ToInt(rewrittenSchema[base+2])) == valueSlot {
+				rewrittenSchema[base+2] = encodedSlot
+			}
+			if int(scm.ToInt(rewrittenSchema[base+3])) == valueSlot {
+				rewrittenSchema[base+3] = encodedSlot
+			}
+		}
+	}
+	return scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), scm.NewSlice(rewrittenSchema)}),
+		scm.NewSlice(append([]scm.Scmer{scm.NewSymbol("list")}, rewrittenValues...)), true
 }
 
 // appendToScmerList appends extra items to a (list ...) AST node.

@@ -239,7 +239,7 @@ func benchmarkScanColumnMatrix(b *testing.B, name string, rows int, filterPasses
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				tbl.scan(nil, filterCols, condition, mapCols, callback,
+				tbl.scan(nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, filterCols, condition, mapCols, callback,
 					scm.NewNil(), scm.NewNil(), false)
 			}
 		})
@@ -276,7 +276,7 @@ func BenchmarkScanMapColumnCostBySelectivity(b *testing.B) {
 				b.ReportAllocs()
 				b.ResetTimer()
 				for i := 0; i < b.N; i++ {
-					tbl.scan(nil, allCols[:1], condition, mapCols, callback,
+					tbl.scan(nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, allCols[:1], condition, mapCols, callback,
 						scm.NewNil(), scm.NewNil(), false)
 				}
 			})
@@ -345,7 +345,7 @@ func BenchmarkScanColumnCostByType(b *testing.B) {
 					b.ReportAllocs()
 					b.ResetTimer()
 					for i := 0; i < b.N; i++ {
-						tbl.scan(nil, filterCols, condition, mapCols, callback,
+						tbl.scan(nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, filterCols, condition, mapCols, callback,
 							scm.NewNil(), scm.NewNil(), false)
 					}
 				})
@@ -392,7 +392,7 @@ func BenchmarkScanFilterExpressionCost(b *testing.B) {
 				b.ReportAllocs()
 				b.ResetTimer()
 				for i := 0; i < b.N; i++ {
-					tbl.scan(nil, filterCols, condition, nil, callback,
+					tbl.scan(nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, filterCols, condition, nil, callback,
 						scm.NewNil(), scm.NewNil(), false)
 				}
 			})

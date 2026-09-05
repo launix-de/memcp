@@ -412,9 +412,9 @@ func recSetNot(currentTx *TxContext, item *recSet) *recSet {
 	if item == nil || item.table == nil {
 		panic("recset_not requires a recset with a base table")
 	}
-	visible := item.table.scanRecSet(currentTx, nil, scm.NewFunc(func(...scm.Scmer) scm.Scmer {
+	visible := item.table.scanRecSet(currentTx, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, nil, scm.NewFunc(func(...scm.Scmer) scm.Scmer {
 		return scm.NewBool(true)
-	}), newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil)
+	}))
 	return recSetDifference(currentTx, []*recSet{visible, item})
 }
 
@@ -453,7 +453,7 @@ type recSetKeyResult struct {
 	err  scanError
 }
 
-func (t *table) scanRecSet(currentTx *TxContext, conditionCols []string, condition scm.Scmer, accessSchema scm.Scmer, accessValues []scm.Scmer) *recSet {
+func (t *table) scanRecSet(currentTx *TxContext, accessSchema scm.Scmer, accessValues []scm.Scmer, conditionCols []string, condition scm.Scmer) *recSet {
 	ss := SessionStateFromTx(currentTx)
 	querySeq := querySeqFromTx(currentTx)
 	scratch := acquireScanAnalyzeScratch()
@@ -1173,7 +1173,7 @@ func (t *storageShard) projectJoinTargetMatches(idx uint32, key []scm.Scmer, tar
 	return true
 }
 
-func (r *recSet) scan(currentTx *TxContext, conditionCols []string, condition scm.Scmer, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, combine scm.Scmer, isOuter bool, accessSchema scm.Scmer, accessValues []scm.Scmer) scm.Scmer {
+func (r *recSet) scan(currentTx *TxContext, accessSchema scm.Scmer, accessValues []scm.Scmer, conditionCols []string, condition scm.Scmer, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, combine scm.Scmer, isOuter bool) scm.Scmer {
 	if r == nil || r.table == nil {
 		return neutral
 	}
@@ -1184,15 +1184,15 @@ func (r *recSet) scan(currentTx *TxContext, conditionCols []string, condition sc
 			panic("recset scan mutation callbacks are not implemented")
 		}
 	}
-	return r.table.scanWithBatchFrom(currentTx, r, conditionCols, condition,
-		callbackCols, mapReduce, neutral, combine, isOuter, 0, nil, nil, accessSchema, accessValues)
+	return r.table.scanWithBatchFrom(currentTx, r, accessSchema, accessValues, scanAccess{}, conditionCols, condition,
+		callbackCols, mapReduce, neutral, combine, isOuter, 0, nil)
 }
 
-func (r *recSet) scanExists(currentTx *TxContext, conditionCols []string, condition scm.Scmer, accessSchema scm.Scmer, accessValues []scm.Scmer) bool {
+func (r *recSet) scanExists(currentTx *TxContext, accessSchema scm.Scmer, accessValues []scm.Scmer, conditionCols []string, condition scm.Scmer) bool {
 	if r == nil || r.table == nil {
 		return false
 	}
-	return r.table.scanExistsFrom(currentTx, r, conditionCols, condition, accessSchema, accessValues)
+	return r.table.scanExistsFrom(currentTx, r, accessSchema, accessValues, conditionCols, condition)
 }
 
 func (t *storageShard) recSetPartExists(part *recSetShard, conditionCols []string, conditionFn func(...scm.Scmer) scm.Scmer, currentTx *TxContext, ss *scm.SessionState, stop *atomic.Bool) bool {

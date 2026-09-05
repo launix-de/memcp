@@ -1,3 +1,5 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+
 metadata:
   version: "1.0"
   description: "ORC trigger dependencies: nested scans register precise source triggers"
@@ -54,7 +56,8 @@ test_cases:
                         (begin
                           (define value
                             (scan nil (table "memcp-tests" "orc_dep_src")
-                            '("ref_id")
+                              '("scan_access" 1 "scan" 0 -1 "equal" "ref_id" 0 0 3 "") (list ref_id)
+                              '("ref_id")
                             (lambda (src.ref_id) (equal? src.ref_id (outer 1 ref_id)))
                             '("val")
                             (lambda (inner_acc val) (+ inner_acc val))
@@ -141,7 +144,8 @@ test_cases:
                         (begin
                           (define value
                             (scan nil (table "memcp-tests" "orc_dep_fb_src")
-                            '("ref_id")
+                              '("scan_access" 0 "scan" 0 -1) '()
+                              '("ref_id")
                             (lambda (src.ref_id) (equal? (+ src.ref_id 0) (outer 1 ref_id)))
                             '("val")
                             (lambda (inner_acc val) (+ inner_acc val))

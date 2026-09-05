@@ -150,7 +150,7 @@ func (db *database) IncrBlobRefcount(hash string) {
 	aggr := sumProc()
 	incrementExisting := func() bool {
 		result := t.scan(
-			nil,
+			nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil,
 			[]string{"hash"}, blobCondition(hashVal),
 			[]string{"refcount", "$update"}, callback,
 			scm.NewInt(0), aggr, false,
@@ -221,7 +221,7 @@ func (db *database) DecrBlobRefcount(hash string) {
 
 	aggr := sumProc()
 	result := t.scan(
-		nil,
+		nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil,
 		[]string{"hash"}, blobCondition(hashVal),
 		[]string{"refcount", "$update"}, callback,
 		scm.NewInt(0), aggr, false,

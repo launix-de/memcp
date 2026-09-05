@@ -42,6 +42,8 @@ func scanHoistTestCall(condition scm.Scmer) []scm.Scmer {
 	})
 	return []scm.Scmer{
 		scm.NewSymbol("scan"), scm.NewNil(), scm.NewSymbol("table_value"),
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), newScanAccessSchema(scanAccessConsumerScan, nil, -1)}),
+		listAst(),
 		scm.NewSlice([]scm.Scmer{scm.NewString("value")}), filter,
 		scm.NewSlice([]scm.Scmer{scm.NewString("value")}),
 		scm.NewSlice([]scm.Scmer{scm.NewSymbol("lambda"), scm.NewSlice([]scm.Scmer{scm.NewSymbol("acc"), scm.NewSymbol("row")}), row, scm.NewInt(1)}),
@@ -80,6 +82,8 @@ func TestScanKeepsRowDependentFilterConditionInsideLambda(t *testing.T) {
 func TestScanKeepsEffectfulFilterConditionInsideLambda(t *testing.T) {
 	condition := scm.NewSlice([]scm.Scmer{
 		scm.NewSymbol("scan_exists"), scm.NewNil(), scm.NewSymbol("other_table"),
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), newScanAccessSchema(scanAccessConsumerScan, nil, -1)}),
+		listAst(),
 		scm.NewSlice(nil),
 		scm.NewSlice([]scm.Scmer{scm.NewSymbol("lambda"), scm.NewSlice(nil), scm.NewBool(true)}),
 	})

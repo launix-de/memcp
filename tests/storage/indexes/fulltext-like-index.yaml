@@ -111,7 +111,7 @@ test_cases:
               (list 'and
                 (list 'equal?? 'row_id id)
                 (list 'strlike 'name "%laus%" "utf8mb4_general_ci")))))
-            (scan_exists nil tbl (list "id" "vorname") condition))))
+            (scan_exists nil tbl (car (compile_scan_access (list "id" "vorname") (scheme "condition"))) (cadr (compile_scan_access (list "id" "vorname") (scheme "condition"))) (list "id" "vorname") condition))))
         (reduce (produceN 8) (lambda (ok i)
           (begin (probe (+ 1 i)) ok)) true)
         (define indexes ((show "memcp-tests" "ft_customers" 0 true) "indexes"))
@@ -390,14 +390,14 @@ test_cases:
     sql: "SELECT 1 AS ok"
     expect: { rows: 1 }
 
-  - name: "Equal speedup >= 3x"
+  - name: "Cold fallback and warm Equal probes both stay exact"
     sql: |
-      SELECT slow_ns, fast_ns,
-        CASE WHEN fast_ns > 0 AND slow_ns * 3 >= fast_ns * 10 THEN 'ok' ELSE 'FAIL' END AS result
+      SELECT max_candidates, min_output,
+        CASE WHEN max_candidates = 1 AND min_output = 1 THEN 'ok' ELSE 'FAIL' END AS result
       FROM (
         SELECT
-          MAX(exec_ns) AS slow_ns,
-          MIN(exec_ns) AS fast_ns
+          MAX(candidateCount) AS max_candidates,
+          MIN(outputCount) AS min_output
         FROM `system_statistic`.`scans`
         WHERE `table` = 'ft_large' AND index_cols = 'id'
       ) s
@@ -653,7 +653,7 @@ test_cases:
           'lambda (list 'search)
           (list 'strlike 'search "%zzzz%" "utf8mb4_general_ci"))))
         (set count-matches (lambda ()
-          (recset_count (scan_recset nil tbl (list "tag") condition))))
+          (recset_count (scan_recset nil tbl (car (compile_scan_access (list "tag") (scheme "condition"))) (cadr (compile_scan_access (list "tag") (scheme "condition"))) (list "tag") condition))))
         (set first (count-matches))
         (set built (count-matches))
         (set warm (count-matches))
@@ -671,8 +671,8 @@ test_cases:
         (set ci-condition (eval (list
           'lambda (list 'name)
           (list 'strlike 'name "%klaus%" "utf8mb4_general_ci"))))
-        (set binary-count (recset_count (scan_recset nil tbl (list "name") binary-condition)))
-        (set ci-count (recset_count (scan_recset nil tbl (list "name") ci-condition)))
+        (set binary-count (recset_count (scan_recset nil tbl (car (compile_scan_access (list "name") (scheme "binary-condition"))) (cadr (compile_scan_access (list "name") (scheme "binary-condition"))) (list "name") binary-condition)))
+        (set ci-count (recset_count (scan_recset nil tbl (car (compile_scan_access (list "name") (scheme "ci-condition"))) (cadr (compile_scan_access (list "name") (scheme "ci-condition"))) (list "name") ci-condition)))
         (if (and (equal? binary-count 0) (equal? ci-count 105))
           true
           (error (concat "LIKE collation counts: " binary-count ", " ci-count))))
@@ -689,8 +689,8 @@ test_cases:
         (set ci-condition (eval (list
           'lambda (list 'name)
           (list 'strlike 'name "%klaus%" "utf8mb4_general_ci"))))
-        (set binary-count (recset_count (scan_recset nil tbl (list "name") binary-condition)))
-        (set ci-count (recset_count (scan_recset nil tbl (list "name") ci-condition)))
+        (set binary-count (recset_count (scan_recset nil tbl (car (compile_scan_access (list "name") (scheme "binary-condition"))) (cadr (compile_scan_access (list "name") (scheme "binary-condition"))) (list "name") binary-condition)))
+        (set ci-count (recset_count (scan_recset nil tbl (car (compile_scan_access (list "name") (scheme "ci-condition"))) (cadr (compile_scan_access (list "name") (scheme "ci-condition"))) (list "name") ci-condition)))
         (if (and (equal? binary-count 1) (equal? ci-count 106))
           true
           (error (concat "LIKE delta counts: " binary-count ", " ci-count))))

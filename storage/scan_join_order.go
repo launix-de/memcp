@@ -24,28 +24,22 @@ import "github.com/launix-de/memcp/scm"
 
 func optimizeScanJoinOrder(v []scm.Scmer, oc *scm.OptimizerContext, _ bool) (scm.Scmer, *scm.TypeDescriptor) {
 	const mapReduceIdx, neutralIdx, combineIdx, outerIdx, notFoundIdx = 16, 17, 18, 19, 20
-	if len(v) >= 15 && len(v) <= 20 {
-		schemas, bindings, compiled, _ := compileScanAccessList(v[3], v[4], false)
-		v[3], v[4] = pruneScanResidualList(v[3], v[4], compiled, false)
-		if len(v) == 15 {
-			v = append(v, scm.NewNil())
-		}
-		if len(v) == 16 {
-			v = append(v, scm.NewNil())
-		}
+	if len(v) >= 17 && len(v) <= 21 {
 		if len(v) == 17 {
-			v = append(v, scm.NewBool(false))
+			v = append(v, scm.NewNil())
 		}
 		if len(v) == 18 {
-			v = append(v, v[15])
+			v = append(v, scm.NewNil())
 		}
 		if len(v) == 19 {
 			v = append(v, scm.NewBool(false))
 		}
-		v = append(v[:3], append([]scm.Scmer{
-			scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), scm.NewSlice(schemas)}),
-			oc.OptimizeNoEscapeList(bindings),
-		}, v[3:]...)...)
+		if len(v) == 20 {
+			v = append(v, v[17])
+		}
+		if len(v) == 21 {
+			v = append(v, scm.NewBool(false))
+		}
 	}
 	rawMapReduce := v[mapReduceIdx]
 	rawCombine := scm.NewNil()
@@ -918,9 +912,9 @@ func probeScanJoinOrderInput(currentTx *TxContext, spec *scanJoinOrderSpec, tupl
 	combine := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
 		return scm.NewSlice(append(values[0].Slice(), values[1].Slice()...))
 	})
-	rows := input.table.scanWithBatchFrom(currentTx, nil, conditionCols, condition,
+	rows := input.table.scanWithBatchFrom(currentTx, nil, input.accessSchema, input.accessValues, scanAccess{suffix: required}, conditionCols, condition,
 		callbackCols, mapReduce, scm.NewSlice(nil), combine, false,
-		stride, batchdata, required, input.accessSchema, input.accessValues).Slice()
+		stride, batchdata).Slice()
 	hits := make([][]*scanJoinOrderRecord, len(tuples))
 	for _, rowValue := range rows {
 		row := rowValue.Slice()

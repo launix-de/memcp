@@ -27,6 +27,8 @@ func nestedScanBatchRewriteCall(innerMapBody scm.Scmer) []scm.Scmer {
 	outerID := scm.NewSymbol("outer_id")
 	innerScan := scm.NewSlice([]scm.Scmer{
 		scm.NewSymbol("scan"), scm.NewNil(), scm.NewSymbol("inner_table"),
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), newScanAccessSchema(scanAccessConsumerScan, nil, -1)}),
+		listAst(),
 		scm.NewSlice([]scm.Scmer{scm.NewString("ID")}),
 		scm.NewSlice([]scm.Scmer{
 			scm.NewSymbol("lambda"), scm.NewSlice([]scm.Scmer{scm.NewSymbol("inner_id")}),
@@ -40,6 +42,8 @@ func nestedScanBatchRewriteCall(innerMapBody scm.Scmer) []scm.Scmer {
 	})
 	return []scm.Scmer{
 		scm.NewSymbol("scan"), scm.NewNil(), scm.NewSymbol("outer_table"),
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), newScanAccessSchema(scanAccessConsumerScan, nil, -1)}),
+		listAst(),
 		scm.NewSlice(nil),
 		scm.NewSlice([]scm.Scmer{scm.NewSymbol("lambda"), scm.NewSlice(nil), scm.NewBool(true)}),
 		scm.NewSlice([]scm.Scmer{scm.NewString("ID")}),
@@ -83,9 +87,9 @@ func TestScanBatchRewriteStillBatchesPureInnerMapper(t *testing.T) {
 
 func TestScanBatchRewriteRecognizesNumberedOuterReference(t *testing.T) {
 	call := nestedScanBatchRewriteCall(scm.NewNthLocalVar(1))
-	outerReducer := call[6].Slice()
+	outerReducer := call[8].Slice()
 	inner := outerReducer[2].Slice()
-	innerFilter := inner[4].Slice()
+	innerFilter := inner[6].Slice()
 	innerFilter[2] = scm.NewSlice([]scm.Scmer{
 		scm.NewSymbol("equal??"), scm.NewNthLocalVar(0),
 		scm.NewSlice([]scm.Scmer{scm.NewSymbol("outer"), scm.NewInt(1), scm.NewNthLocalVar(1)}),
@@ -100,16 +104,24 @@ func TestScanBatchRewriteRecognizesNumberedOuterReference(t *testing.T) {
 	}
 }
 
-func TestScanBatchOptimizerCompilesBatchAccess(t *testing.T) {
+func TestScanBatchOptimizerPreservesCompiledBatchAccess(t *testing.T) {
 	Init(scm.Globalenv)
+	filterColumns := scm.NewSlice([]scm.Scmer{scm.NewSymbol("list"), scm.NewString("id"), scm.NewString("#0")})
+	filterFn := scm.NewSlice([]scm.Scmer{
+		scm.NewSymbol("lambda"),
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("id"), scm.NewSymbol("wanted_id")}),
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("equal??"), scm.NewSymbol("id"), scm.NewSymbol("wanted_id")}),
+	})
+	accessSchema, accessValues, ok := compileScanAccessMode(filterColumns, filterFn, true)
+	if !ok {
+		t.Fatal("failed to compile batch access fixture")
+	}
 	expr := scm.NewSlice([]scm.Scmer{
 		scm.NewSymbol("scan_batch"), scm.NewNil(), scm.NewSymbol("table_value"),
-		scm.NewSlice([]scm.Scmer{scm.NewSymbol("list"), scm.NewString("id"), scm.NewString("#0")}),
-		scm.NewSlice([]scm.Scmer{
-			scm.NewSymbol("lambda"),
-			scm.NewSlice([]scm.Scmer{scm.NewSymbol("id"), scm.NewSymbol("wanted_id")}),
-			scm.NewSlice([]scm.Scmer{scm.NewSymbol("equal??"), scm.NewSymbol("id"), scm.NewSymbol("wanted_id")}),
-		}),
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), accessSchema}),
+		scm.NewSlice(append([]scm.Scmer{scm.NewSymbol("list")}, accessValues...)),
+		filterColumns,
+		filterFn,
 		scm.NewSlice([]scm.Scmer{scm.NewSymbol("list"), scm.NewString("id")}),
 		scm.NewSlice([]scm.Scmer{
 			scm.NewSymbol("lambda"),
@@ -118,10 +130,6 @@ func TestScanBatchOptimizerCompilesBatchAccess(t *testing.T) {
 		}),
 		scm.NewInt(1), scm.NewSymbol("batch_values"), scm.NewInt(0), scm.NewNil(), scm.NewBool(false),
 	})
-	items := expr.Slice()
-	if _, _, ok := compileScanAccessMode(items[3], items[4], true); !ok {
-		t.Fatal("batch access compiler rejected the optimizer input")
-	}
 	optimized := scm.Optimize(expr, &scm.Globalenv, nil)
 	plan := scm.SerializeToString(optimized, &scm.Globalenv)
 	if !strings.Contains(plan, scanAccessSchemaName) {

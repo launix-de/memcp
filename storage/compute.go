@@ -473,6 +473,7 @@ func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard,
 		scanCallbackCols = append(scanCallbackCols, col.OrcMapCols...)
 		t.scan_order(
 			nil,
+			newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil,
 			col.OrcFilterCols, domainCondFn,
 			sortcolsScmer, sortdirsFns,
 			0, 0, -1,
@@ -483,8 +484,6 @@ func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard,
 			col.OrcReduceInit,
 			nil,
 			scm.NewNil(),
-			newScanAccessSchema(scanAccessConsumerScan, nil, -1),
-			nil,
 		)
 		// Speculative callback-column prefetch may read rows rejected by the
 		// predicate. Publish those holes as valid nils after every accepted row
@@ -545,6 +544,7 @@ func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard,
 
 	t.scan_order(
 		nil,
+		newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil,
 		condCols, condFn,
 		sortcolsScmer, sortdirsFns,
 		0, 0, -1,
@@ -555,8 +555,6 @@ func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard,
 		col.OrcReduceInit,
 		nil,
 		scm.NewNil(),
-		newScanAccessSchema(scanAccessConsumerScan, nil, -1),
-		nil,
 	)
 }
 
@@ -1243,11 +1241,12 @@ func mapReduceParts(mapReduceFn scm.Scmer) ([]scm.Scmer, scm.Scmer, bool) {
 // isAdditiveAggregate checks whether a scan node represents an additive aggregate
 // (combine=+, neutral=0) whose fused callback contains no inner scans.
 func isAdditiveAggregate(scanNode []scm.Scmer) bool {
-	if len(scanNode) < 9 {
+	if len(scanNode) < 11 {
 		return false
 	}
-	// scan layout: [fn, tx, table, filterCols, filter, mapCols, mapreduce, neutral, combine, ...]
-	mapReduceIdx, neutralIdx, combineIdx := 6, 7, 8
+	// scan layout: [fn, tx, table, accessSchema, accessValues, filterCols,
+	// filter, mapCols, mapreduce, neutral, combine, ...]
+	mapReduceIdx, neutralIdx, combineIdx := 8, 9, 10
 	reduce := scanNode[combineIdx]
 	neutral := scanNode[neutralIdx]
 	if !isAdditiveReduce(reduce) {
@@ -1262,6 +1261,12 @@ func isAdditiveAggregate(scanNode []scm.Scmer) bool {
 		return false
 	}
 	return true
+}
+
+func compiledScanAccessExpressions(filterCols, filter scm.Scmer) (scm.Scmer, scm.Scmer) {
+	schema, bindings, _ := compileScanAccess(filterCols, filter)
+	return scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), schema}),
+		scm.NewSlice(append([]scm.Scmer{scm.NewSymbol("list")}, bindings...))
 }
 
 // COUNT-style helper columns use a literal 1 map function. Their value also
@@ -1412,6 +1417,9 @@ func buildKeytableScanFilter(targetTable string, srcCols, inputCols []string, di
 // closure to update the proxy's cached value in-place. No shard rebuild needed.
 func buildIncrementScan(targetSchema, targetTable, colName string, srcCols, inputCols []string, dictSym string, deltaExpr scm.Scmer, negate bool) scm.Scmer {
 	filterColElems, filterParams, filterBody := buildKeytableScanFilter(targetTable, srcCols, inputCols, dictSym)
+	filterCols := scm.NewSlice(filterColElems)
+	filter := scm.NewSlice(append([]scm.Scmer{scm.NewSymbol("lambda"), scm.NewSlice(filterParams)}, filterBody))
+	accessSchema, accessValues := compiledScanAccessExpressions(filterCols, filter)
 
 	// Compute value expression: deltaExpr or (- 0 deltaExpr) for negation
 	var valueExpr scm.Scmer
@@ -1437,8 +1445,10 @@ func buildIncrementScan(targetSchema, targetTable, colName string, srcCols, inpu
 		scm.NewSymbol("scan"),
 		scm.NewSymbol("session"),
 		tableExpr,
-		scm.NewSlice(filterColElems),
-		scm.NewSlice(append([]scm.Scmer{scm.NewSymbol("lambda"), scm.NewSlice(filterParams)}, filterBody)),
+		accessSchema,
+		accessValues,
+		filterCols,
+		filter,
 		resultCols,
 		mapReduceFn,
 		scm.NewInt(0), scm.NewSymbol("+"), scm.NewBool(false),
@@ -1632,6 +1642,9 @@ func buildInvalidateScan(targetSchema, targetTable, colName string, srcCols, inp
 		}
 		filterBody = scm.NewSlice(parts)
 	}
+	filterCols := scm.NewSlice(filterColElems)
+	filter := scm.NewSlice(append([]scm.Scmer{scm.NewSymbol("lambda"), scm.NewSlice(filterParams)}, filterBody))
+	accessSchema, accessValues := compiledScanAccessExpressions(filterCols, filter)
 
 	// Build result col list: '("$invalidate:colName")
 	invColName := "$invalidate:" + colName
@@ -1641,8 +1654,10 @@ func buildInvalidateScan(targetSchema, targetTable, colName string, srcCols, inp
 		scm.NewSymbol("scan"),
 		scm.NewSymbol("session"),
 		tableExpr,
-		scm.NewSlice(filterColElems),
-		scm.NewSlice(append([]scm.Scmer{scm.NewSymbol("lambda"), scm.NewSlice(filterParams)}, filterBody)),
+		accessSchema,
+		accessValues,
+		filterCols,
+		filter,
 		scm.NewSlice([]scm.Scmer{scm.NewSymbol("list"), scm.NewString(invColName)}),
 		scm.NewSlice([]scm.Scmer{scm.NewSymbol("lambda"), scm.NewSlice([]scm.Scmer{scm.NewSymbol("acc"), scm.NewSymbol("$inv")}),
 			scm.NewSlice([]scm.Scmer{scm.NewSymbol("begin"),
@@ -1678,6 +1693,9 @@ func buildSelectiveInvalidationBody(targetSchema, targetTable, colName string, s
 
 func buildInvalidateORCScan(targetSchema, targetTable, colName string, sortCols, srcCols, inputCols []string, dictSym string) scm.Scmer {
 	filterColElems, filterParams, filterBody := buildKeytableScanFilter(targetTable, srcCols, inputCols, dictSym)
+	filterCols := scm.NewSlice(filterColElems)
+	filter := scm.NewSlice(append([]scm.Scmer{scm.NewSymbol("lambda"), scm.NewSlice(filterParams)}, filterBody))
+	accessSchema, accessValues := compiledScanAccessExpressions(filterCols, filter)
 	resultCols := make([]scm.Scmer, 1+len(sortCols))
 	resultCols[0] = scm.NewSymbol("list")
 	mapParams := make([]scm.Scmer, len(sortCols))
@@ -1705,8 +1723,10 @@ func buildInvalidateORCScan(targetSchema, targetTable, colName string, sortCols,
 		scm.NewSymbol("scan"),
 		scm.NewSymbol("session"),
 		tblExpr,
-		scm.NewSlice(filterColElems),
-		scm.NewSlice(append([]scm.Scmer{scm.NewSymbol("lambda"), scm.NewSlice(filterParams)}, filterBody)),
+		accessSchema,
+		accessValues,
+		filterCols,
+		filter,
 		scm.NewSlice(resultCols),
 		scm.NewSlice([]scm.Scmer{scm.NewSymbol("lambda"), scm.NewSlice(mapReduceParams), mapReduceBody}),
 		scm.NewNil(), scm.NewNil(), scm.NewBool(false),
@@ -1839,8 +1859,9 @@ func (t *table) registerComputeTriggers(name string, computor scm.Scmer) {
 			if !exists {
 				var body scm.Scmer
 				if incremental && timing != AfterInvalidate {
-					// scan layout: [fn, tx, table, filterCols, filter, mapCols, mapreduce, ...]
-					mapColsIdx, mapReduceIdx := 5, 6
+					// scan layout: [fn, tx, table, accessSchema, accessValues,
+					// filterCols, filter, mapCols, mapreduce, ...]
+					mapColsIdx, mapReduceIdx := 7, 8
 					tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewString(t.Name)})
 					if isConstantOneAggregate(scanNode[mapReduceIdx]) {
 						body = scm.NewSlice([]scm.Scmer{

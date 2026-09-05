@@ -54,7 +54,7 @@ func BenchmarkScanFixedCosts_NoSession(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		tbl.scan(
-			nil,
+			nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil,
 			[]string{"id"}, trueFn,
 			[]string{"id"}, mapReduceFn,
 			neutral, nilFn, false,
@@ -73,7 +73,7 @@ func BenchmarkScanFixedCosts_WithExplicitTx(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		tbl.scan(tx, []string{"id"}, trueFn, []string{"id"}, mapReduceFn, neutral, nilFn, false)
+		tbl.scan(tx, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, []string{"id"}, trueFn, []string{"id"}, mapReduceFn, neutral, nilFn, false)
 	}
 }
 
@@ -92,6 +92,7 @@ func BenchmarkScanFixedCosts_WithAutocommit(b *testing.B) {
 		WithAutocommit(session, nil, 0, "benchmark scan", scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
 			return tbl.scan(
 				scmerToTxContext(a[0]),
+				newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil,
 				[]string{"id"}, trueFn,
 				[]string{"id"}, mapReduceFn,
 				neutral, nilFn, false,
@@ -124,7 +125,7 @@ func BenchmarkScanFixedCosts_DeepStack(b *testing.B) {
 		// simulate ~80 extra frames of Scheme evaluation above the scan call
 		recurse(80, func() {
 			tbl.scan(
-				nil,
+				nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil,
 				[]string{"id"}, trueFn,
 				[]string{"id"}, mapReduceFn,
 				neutral, nilFn, false,
@@ -151,12 +152,12 @@ func benchmarkUniquePointScan(b *testing.B, name string, currentTx *TxContext) {
 	mapReduceFn := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return a[1] })
 	nilFn := scm.NewNil()
 	// Warm the lazily built index before measuring regular probe overhead.
-	tbl.scan(currentTx, []string{"id"}, condition, []string{"label"}, mapReduceFn, scm.NewNil(), nilFn, false)
+	tbl.scan(currentTx, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, []string{"id"}, condition, []string{"label"}, mapReduceFn, scm.NewNil(), nilFn, false)
 
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		tbl.scan(currentTx, []string{"id"}, condition, []string{"label"}, mapReduceFn, scm.NewNil(), nilFn, false)
+		tbl.scan(currentTx, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, []string{"id"}, condition, []string{"label"}, mapReduceFn, scm.NewNil(), nilFn, false)
 	}
 }
 
@@ -193,14 +194,14 @@ func BenchmarkScanUniquePointCompiledAccessWithTx(b *testing.B) {
 		scm.NewString("id"), scm.NewInt(0), scm.NewInt(0), scm.NewInt(3), scm.NewString(""),
 	})
 	values := []scm.Scmer{scm.NewInt(511)}
-	tbl.scanWithBatchFrom(tx, nil, []string{"id"}, condition, []string{"label"}, mapReduceFn,
-		scm.NewNil(), scm.NewNil(), false, 0, nil, nil, schema, values)
+	tbl.scanWithBatchFrom(tx, nil, schema, values, scanAccess{}, []string{"id"}, condition, []string{"label"}, mapReduceFn,
+		scm.NewNil(), scm.NewNil(), false, 0, nil)
 
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		tbl.scanWithBatchFrom(tx, nil, []string{"id"}, condition, []string{"label"}, mapReduceFn,
-			scm.NewNil(), scm.NewNil(), false, 0, nil, nil, schema, values)
+		tbl.scanWithBatchFrom(tx, nil, schema, values, scanAccess{}, []string{"id"}, condition, []string{"label"}, mapReduceFn,
+			scm.NewNil(), scm.NewNil(), false, 0, nil)
 	}
 }
 
@@ -227,13 +228,13 @@ func benchmarkUniqueMainPointScan(b *testing.B, name string, currentTx *TxContex
 	nilFn := scm.NewNil()
 	// The first two probes cross the adaptive-index threshold and build the
 	// main-storage index. Only steady-state point probes are measured.
-	tbl.scan(currentTx, []string{"id"}, condition, []string{"label"}, mapReduceFn, scm.NewNil(), nilFn, false)
-	tbl.scan(currentTx, []string{"id"}, condition, []string{"label"}, mapReduceFn, scm.NewNil(), nilFn, false)
+	tbl.scan(currentTx, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, []string{"id"}, condition, []string{"label"}, mapReduceFn, scm.NewNil(), nilFn, false)
+	tbl.scan(currentTx, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, []string{"id"}, condition, []string{"label"}, mapReduceFn, scm.NewNil(), nilFn, false)
 
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		tbl.scan(currentTx, []string{"id"}, condition, []string{"label"}, mapReduceFn, scm.NewNil(), nilFn, false)
+		tbl.scan(currentTx, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, []string{"id"}, condition, []string{"label"}, mapReduceFn, scm.NewNil(), nilFn, false)
 	}
 }
 
@@ -388,7 +389,7 @@ func BenchmarkScanUpdate(b *testing.B) {
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		tbl.scan(
-			nil,
+			nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil,
 			[]string{"id"}, trueFn,
 			[]string{"id", "$increment:cached_val"}, mapReduceFn,
 			neutral, nilFn, false,

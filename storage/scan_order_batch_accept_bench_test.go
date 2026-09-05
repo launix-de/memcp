@@ -106,10 +106,11 @@ func newBatchAcceptBenchmarkFixture(b *testing.B) *batchAcceptBenchmarkFixture {
 
 func (f *batchAcceptBenchmarkFixture) scanOrder(postOrderCols []string, postOrderFilter scm.Scmer) scm.Scmer {
 	return f.documents.scan_order(nil,
+		newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil,
 		nil, scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewBool(true) }),
 		f.sortCols, f.sortDirs, 0, 0, batchAcceptBenchmarkPageSize,
 		[]string{"id"}, f.mapReduceFn, scm.NewNil(), false, scm.NewNil(),
-		postOrderCols, postOrderFilter, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil)
+		postOrderCols, postOrderFilter)
 }
 
 func (f *batchAcceptBenchmarkFixture) batchAccept(batchFilter scm.Scmer) scm.Scmer {
@@ -171,12 +172,12 @@ func BenchmarkScanOrderBatchAcceptMillion(b *testing.B) {
 		allowedCondition := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
 			return scm.NewBool(values[0].Int() < threshold)
 		})
-		allowedFiles := fixture.files.scanRecSet(nil, []string{"bucket"}, allowedCondition, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil)
+		allowedFiles := fixture.files.scanRecSet(nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, []string{"bucket"}, allowedCondition)
 		rowACLFilter := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
 			fileID := values[0].Int()
-			return scm.NewBool(allowedFiles.scanExists(nil, []string{"id"}, scm.NewFunc(func(candidate ...scm.Scmer) scm.Scmer {
+			return scm.NewBool(allowedFiles.scanExists(nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, []string{"id"}, scm.NewFunc(func(candidate ...scm.Scmer) scm.Scmer {
 				return scm.NewBool(candidate[0].Int() == fileID)
-			}), scm.NewNil(), nil))
+			})))
 		})
 		batchACLFilter := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
 			batch := RecSetFromScmer(values[0])

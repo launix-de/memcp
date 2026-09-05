@@ -177,7 +177,7 @@ test_cases:
   - name: "Recursive scan rewrites consume the shared rewrite budget once"
     scm: |
       (begin
-        (define code (scheme "(scan nil nil (list) (lambda () (if (> 2 1) true false)) (list) (lambda (acc) acc) nil nil false)"))
+        (define code (scheme "(scan nil nil '(\"scan_access\" 0 \"scan\" 0 -1) '() (list) (lambda () (if (> 2 1) true false)) (list) (lambda (acc) acc) nil nil false)"))
         (define telemetry (newsession))
         (optimize code (lambda (stats) (telemetry "stats" stats)))
         (define stats (telemetry "stats"))

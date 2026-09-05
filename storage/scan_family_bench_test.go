@@ -46,7 +46,7 @@ func BenchmarkScanFamilyFixedCosts(b *testing.B) {
 	recSetInputTable := benchScanTable(b, "family_recset_input")
 	recSetInputTable.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(1)}}, nil, scm.NewNil(), false, nil)
 	RebuildTable(recSetInputTable, true, false)
-	recSetInput := recSetInputTable.scanRecSet(nil, nil, trueFn, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil)
+	recSetInput := recSetInputTable.scanRecSet(nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, nil, trueFn)
 	identityRecSet := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[0] })
 
 	benchmarks := []struct {
@@ -56,7 +56,7 @@ func BenchmarkScanFamilyFixedCosts(b *testing.B) {
 		{
 			name: "recset",
 			run: func() {
-				tbl.scanRecSet(nil, nil, trueFn, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil)
+				tbl.scanRecSet(nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, nil, trueFn)
 			},
 		},
 		{
@@ -69,30 +69,30 @@ func BenchmarkScanFamilyFixedCosts(b *testing.B) {
 		{
 			name: "exists",
 			run: func() {
-				tbl.scanExists(nil, nil, trueFn)
+				tbl.scanExists(nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, nil, trueFn)
 			},
 		},
 		{
 			name: "batch",
 			run: func() {
-				tbl.scanWithBatch(nil, []string{"#0"}, trueFn, []string{"id"}, mapReduceFn,
+				tbl.scanWithBatch(nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, []string{"#0"}, trueFn, []string{"id"}, mapReduceFn,
 					nilValue, nilValue, false, 1, []scm.Scmer{scm.NewInt(1)})
 			},
 		},
 		{
 			name: "order",
 			run: func() {
-				tbl.scan_order(nil, nil, trueFn, sortCols, sortDirs, 0, 0, 72,
+				tbl.scan_order(nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, nil, trueFn, sortCols, sortDirs, 0, 0, 72,
 					[]string{"id"}, mapReduceFn, nilValue, false, nilValue, nil, nilValue,
-					newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil)
+				)
 			},
 		},
 		{
 			name: "order_recset",
 			run: func() {
-				recSetInput.scan_order(nil, nil, trueFn, sortCols, sortDirs, 0, 0, 72,
+				recSetInput.scan_order(nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, nil, trueFn, sortCols, sortDirs, 0, 0, 72,
 					[]string{"id"}, mapReduceFn, nilValue, false, nilValue, nil, nilValue,
-					newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil)
+				)
 			},
 		},
 		{
