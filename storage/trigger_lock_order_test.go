@@ -145,13 +145,23 @@ func TestPersistedKeytableTriggerWaitsForRuntimeTarget(t *testing.T) {
 }
 
 func TestLegacyPersistedCacheTriggerWaitsForRuntimeTarget(t *testing.T) {
-	encoded := []byte(`{"name":".cache:.grp:query:test:agg|scan0|items|AFTER DELETE","timing":5,"is_system":true}`)
-	var restored TriggerDescription
-	if err := json.Unmarshal(encoded, &restored); err != nil {
-		t.Fatal(err)
-	}
-	if restored.acquireTarget(nil) {
-		t.Fatal("legacy cache trigger ran before its ephemeral target was rebound")
+	for _, name := range []string{
+		".cache:.grp:query:test:agg|scan0|items|AFTER DELETE",
+		".prejoin:abc|items|after_delete",
+	} {
+		encoded, err := json.Marshal(map[string]any{
+			"name": name, "timing": "after_delete", "is_system": true,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var restored TriggerDescription
+		if err := json.Unmarshal(encoded, &restored); err != nil {
+			t.Fatal(err)
+		}
+		if restored.acquireTarget(nil) {
+			t.Fatalf("persisted cache trigger %s ran before its ephemeral target was rebound", name)
+		}
 	}
 }
 
