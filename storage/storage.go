@@ -905,20 +905,28 @@ func Init(en scm.Env) {
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
 	})
-	scm.Declare(&en, &scm.Declaration{
+	scm.DeclareSpecialForm(&en, &scm.Declaration{
 		Name: "compile_scan_access",
-		Fn: func(a ...scm.Scmer) scm.Scmer {
-			schema, values, _ := compileScanAccess(a[0], a[1])
-			return scm.NewSlice([]scm.Scmer{schema, scm.NewSlice(values)})
-		},
-		Type: &scm.TypeDescriptor{Kind: "func", Description: "compiles filter AST data into the common immutable scan_access schema and a list of runtime value expressions",
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "compiles filter AST data into the common immutable scan access schema and binds its flat runtime values in the caller scope",
 			Params: []*scm.TypeDescriptor{
 				{Kind: "list", Label: "filterColumns", Description: "physical columns corresponding to the filter lambda parameters"},
 				{Kind: "list", Label: "filterExpression", Description: "unevaluated filter lambda AST"},
 			},
-			Return: &scm.TypeDescriptor{Kind: "list", Description: "pair of static schema and runtime value expressions"},
+			Return: &scm.TypeDescriptor{Kind: "list", Description: "pair of static schema and bound runtime values"},
 		},
-	})
+	}, func(code []scm.Scmer, caller *scm.Env) scm.Scmer {
+		if len(code) != 2 {
+			panic("compile_scan_access expects filter columns and a filter expression")
+		}
+		columns := scm.Eval(code[0], caller)
+		filter := scm.Eval(code[1], caller)
+		schema, valueExprs, _ := compileScanAccess(columns, filter)
+		values := make([]scm.Scmer, len(valueExprs))
+		for i, expression := range valueExprs {
+			values[i] = scm.Eval(expression, caller)
+		}
+		return scm.NewSlice([]scm.Scmer{schema, scm.NewSlice(values)})
+	}, nil)
 	scm.Declare(&en, &scm.Declaration{
 		Name: "compile_scan_computed_index",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
@@ -943,12 +951,26 @@ func Init(en scm.Env) {
 				panic("compile_scan_plan expects a scan operator symbol")
 			}
 			args := a[1:]
-			if schema, static := scanStaticListElements(args[2]); static && len(schema) >= scanAccessSchemaHeaderSize && schema[0].IsString() && schema[0].String() == scanAccessSchemaName {
-				return scm.NewSlice(append([]scm.Scmer{scm.NewSymbol(head)}, args...))
+			if schema, static := scanStaticListElements(args[2]); static && len(schema) >= scanAccessSchemaHeaderSize {
+				if _, valid := decodeScanAccessHeader(schema[0]); valid {
+					if len(args) > 5 {
+						schema = markCoveredScanAccessSchema(scm.NewSlice(schema), args[5]).Slice()
+						args = append([]scm.Scmer(nil), args...)
+						args[2] = scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), scm.NewSlice(schema)})
+					}
+					return scm.NewSlice(append([]scm.Scmer{scm.NewSymbol(head)}, args...))
+				}
 			}
 			if schemas, static := scanStaticListElements(args[2]); static && len(schemas) > 0 {
-				if schema, schemaStatic := scanStaticListElements(schemas[0]); schemaStatic && len(schema) >= scanAccessSchemaHeaderSize && schema[0].IsString() && schema[0].String() == scanAccessSchemaName {
-					return scm.NewSlice(append([]scm.Scmer{scm.NewSymbol(head)}, args...))
+				if schema, schemaStatic := scanStaticListElements(schemas[0]); schemaStatic && len(schema) >= scanAccessSchemaHeaderSize {
+					if _, valid := decodeScanAccessHeader(schema[0]); valid {
+						if len(args) > 5 {
+							schemas = markCoveredScanAccessSchemas(append([]scm.Scmer(nil), schemas...), args[5])
+							args = append([]scm.Scmer(nil), args...)
+							args[2] = scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), scm.NewSlice(schemas)})
+						}
+						return scm.NewSlice(append([]scm.Scmer{scm.NewSymbol(head)}, args...))
+					}
 				}
 			}
 			if head == "scan_order_multi" || head == "scan_join_order" {
@@ -959,11 +981,11 @@ func Init(en scm.Env) {
 				if schemas == nil {
 					panic("compile_scan_plan expects matching static multi-scan filters")
 				}
-				_, prunedFilters := pruneScanResidualList(args[2], args[3], compiled, false)
-				schemas = markCoveredScanAccessSchemas(schemas, prunedFilters)
+				filterColumns, filters := pruneScanResidualList(args[2], args[3], compiled, false)
+				schemas = markCoveredScanAccessSchemas(schemas, filters)
 				result := []scm.Scmer{scm.NewSymbol(head), args[0], args[1],
 					scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), scm.NewSlice(schemas)}),
-					scm.NewSlice(append([]scm.Scmer{scm.NewSymbol("list")}, values...)), args[2], args[3]}
+					scanAccessValuesExpr(values), filterColumns, filters}
 				return scm.NewSlice(append(result, args[4:]...))
 			}
 			if head != "scan" && head != "scan_order" && head != "scan_recset" && head != "scan_exists" && head != "scan_selectivity_estimate" {
@@ -972,12 +994,15 @@ func Init(en scm.Env) {
 			schema, values, compiled := compileScanAccess(args[2], args[3])
 			filterColumns, filter := args[2], args[3]
 			if compiled {
-				_, residual := pruneScanResidual(filterColumns, filter, false)
+				prunedColumns, residual := pruneScanResidual(filterColumns, filter, false)
 				schema = markCoveredScanAccessSchema(schema, residual)
+				if head != "scan" || !scanCallbackColumnsMutate(args[4]) {
+					filterColumns, filter = prunedColumns, residual
+				}
 			}
 			result := []scm.Scmer{scm.NewSymbol(head), args[0], args[1],
 				scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), schema}),
-				scm.NewSlice(append([]scm.Scmer{scm.NewSymbol("list")}, values...)), filterColumns, filter}
+				scanAccessValuesExpr(values), filterColumns, filter}
 			return scm.NewSlice(append(result, args[4:]...))
 		},
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "lowers one functional scan rule to the single physical scan ABI before optimizer/JIT execution",
@@ -4025,6 +4050,20 @@ func Init(en scm.Env) {
 	})
 	initTransaction(en)
 	initFKBuiltins(en)
+}
+
+func scanCallbackColumnsMutate(columnsExpr scm.Scmer) bool {
+	columns, static := scanStaticColumns(columnsExpr)
+	if !static {
+		return true
+	}
+	for _, column := range columns {
+		name := column.String()
+		if name == "$update" || strings.HasPrefix(name, "$increment:") {
+			return true
+		}
+	}
+	return false
 }
 
 func PrintMemUsage() string {

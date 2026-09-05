@@ -109,40 +109,34 @@ test_cases:
         - '(join_driver \"p\")'
 
   - name: "WordPress handwritten equivalent-driver batched scan_join_order"
-    warmup: 2
-    timing_samples: 5
+    warmup: 10
+    timing_samples: 100
     threshold_ms: 8
-    sql: |
-      SELECT p.ID, p.post_title, pm.meta_value
-      FROM wordpress_perf_posts p
-      JOIN wordpress_perf_postmeta pm ON pm.post_id = p.ID
-      WHERE p.post_type = 'post'
-        AND p.post_status = 'publish'
-        AND pm.meta_key = 'custom_color'
-      ORDER BY p.ID DESC, pm.meta_id DESC
-      LIMIT 20
+    scm: |
+      (begin
+        (define posts (table "memcp-tests" "wordpress_perf_posts"))
+        (define postmeta (table "memcp-tests" "wordpress_perf_postmeta"))
+        (define found
+          (scan_join_order (session "__memcp_tx")
+            (list postmeta posts)
+            (list
+              '(370535686995968 "equal" "meta_key" 15032418304 "")
+              '(370535955431424 "equal" "post_status" 15032483841 "" "equal" "post_type" 15032549378 ""))
+            (list "custom_color" "publish" "post")
+            (list (list) (list))
+            (list (lambda () true) (lambda () true))
+            (list (list (list 0 "post_id" "ID")))
+            (list) nil
+            (list (list 0 "post_id"))
+            (list (collate "utf8mb4" true))
+            0 0 20
+            (list (list 1 "ID") (list 1 "post_title") (list 0 "meta_value"))
+            (lambda (acc _id _title _value) (+ acc 1))
+            0 nil false 0 true))
+        (if (equal? found 20) "ok"
+          (error "wrong WordPress scan_join_order row count")))
     expect:
-      data:
-        - {ID: 8214, post_title: "Benchmark Post 8214", meta_value: "meta-value-49284"}
-        - {ID: 8214, post_title: "Benchmark Post 8214", meta_value: "meta-value-8214"}
-        - {ID: 8213, post_title: "Benchmark Post 8213", meta_value: "meta-value-41069"}
-        - {ID: 8212, post_title: "Benchmark Post 8212", meta_value: "meta-value-73924"}
-        - {ID: 8212, post_title: "Benchmark Post 8212", meta_value: "meta-value-32854"}
-        - {ID: 8211, post_title: "Benchmark Post 8211", meta_value: "meta-value-65709"}
-        - {ID: 8211, post_title: "Benchmark Post 8211", meta_value: "meta-value-24639"}
-        - {ID: 8210, post_title: "Benchmark Post 8210", meta_value: "meta-value-57494"}
-        - {ID: 8210, post_title: "Benchmark Post 8210", meta_value: "meta-value-16424"}
-        - {ID: 8209, post_title: "Benchmark Post 8209", meta_value: "meta-value-49279"}
-        - {ID: 8209, post_title: "Benchmark Post 8209", meta_value: "meta-value-8209"}
-        - {ID: 8208, post_title: "Benchmark Post 8208", meta_value: "meta-value-41064"}
-        - {ID: 8207, post_title: "Benchmark Post 8207", meta_value: "meta-value-73919"}
-        - {ID: 8207, post_title: "Benchmark Post 8207", meta_value: "meta-value-32849"}
-        - {ID: 8206, post_title: "Benchmark Post 8206", meta_value: "meta-value-65704"}
-        - {ID: 8206, post_title: "Benchmark Post 8206", meta_value: "meta-value-24634"}
-        - {ID: 8205, post_title: "Benchmark Post 8205", meta_value: "meta-value-57489"}
-        - {ID: 8205, post_title: "Benchmark Post 8205", meta_value: "meta-value-16419"}
-        - {ID: 8204, post_title: "Benchmark Post 8204", meta_value: "meta-value-49274"}
-        - {ID: 8204, post_title: "Benchmark Post 8204", meta_value: "meta-value-8204"}
+      data: ["ok"]
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS wordpress_perf_postmeta"

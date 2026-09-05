@@ -26,8 +26,8 @@ var benchmarkBoundaries boundaries
 
 func testEqualScanAccess(column string, value scm.Scmer) (scm.Scmer, []scm.Scmer) {
 	return scm.NewSlice([]scm.Scmer{
-		scm.NewString(scanAccessSchemaName), scm.NewInt(1), scm.NewString(scanAccessConsumerScan), scm.NewInt(0), scm.NewInt(-1),
-		scm.NewString("equal"), scm.NewString(column), scm.NewInt(0), scm.NewInt(0), scm.NewInt(3), scm.NewString(""),
+		newScanAccessHeader(1, scanAccessConsumerScan, 0, -1),
+		scm.NewString("equal"), scm.NewString(column), newScanAccessBoundaryMeta(0, 0, 3), scm.NewString(""),
 	}), []scm.Scmer{value}
 }
 
@@ -37,8 +37,8 @@ func testUpperScanAccess(column string, value scm.Scmer, inclusive bool) (scm.Sc
 		flags = 2
 	}
 	return scm.NewSlice([]scm.Scmer{
-		scm.NewString(scanAccessSchemaName), scm.NewInt(1), scm.NewString(scanAccessConsumerScan), scm.NewInt(0), scm.NewInt(-1),
-		scm.NewString("range"), scm.NewString(column), scm.NewInt(-1), scm.NewInt(0), scm.NewInt(flags), scm.NewString(""),
+		newScanAccessHeader(1, scanAccessConsumerScan, 0, -1),
+		scm.NewString("range"), scm.NewString(column), newScanAccessBoundaryMeta(-1, 0, flags), scm.NewString(""),
 	}), []scm.Scmer{value}
 }
 
@@ -78,6 +78,19 @@ func TestCompileScanAccessReadsRuntimeValuesWithoutAllocation(t *testing.T) {
 	}
 }
 
+func TestScanAccessValuesExprCachesConstantsAndBindsDynamicValues(t *testing.T) {
+	static := scanAccessValuesExpr([]scm.Scmer{scm.NewString("ready"), scm.NewInt(7)})
+	staticItems, ok := scmerSlice(static)
+	if !ok || len(staticItems) != 2 || !scanSymbolIs(staticItems[0], "quote") {
+		t.Fatalf("constant access values = %s, want quoted cached vector", scm.String(static))
+	}
+	dynamic := scanAccessValuesExpr([]scm.Scmer{scm.NewSymbol("outer_id")})
+	dynamicItems, ok := scmerSlice(dynamic)
+	if !ok || len(dynamicItems) != 2 || !scanSymbolIs(dynamicItems[0], "list") {
+		t.Fatalf("dynamic access values = %s, want runtime list", scm.String(dynamic))
+	}
+}
+
 func TestCompileScanAccessCarriesComputedFormulaRuntimeConstants(t *testing.T) {
 	columns := scm.NewSlice([]scm.Scmer{scm.NewSymbol("list"), scm.NewString("doc")})
 	path := scm.NewSlice([]scm.Scmer{scm.NewSymbol("session"), scm.NewString("v1")})
@@ -98,11 +111,12 @@ func TestCompileScanAccessCarriesComputedFormulaRuntimeConstants(t *testing.T) {
 		t.Fatalf("computed access compilation returned ok=%v bindings=%d", ok, len(bindings))
 	}
 	items := schema.Slice()
-	if scm.ToInt(items[3]) != 1 || items[len(items)-1].String() != "doc" {
+	meta, _ := decodeScanAccessHeader(items[0])
+	if meta.projections != 1 || items[len(items)-1].String() != "doc" {
 		t.Fatalf("computed access schema omitted mapper columns: %s", scm.String(schema))
 	}
-	flags := scm.ToInt(items[scanAccessSchemaHeaderSize+4])
-	if mapperSlot := int(flags>>3) - 1; mapperSlot != 1 {
+	boundaryMeta := decodeScanAccessBoundaryMeta(items[scanAccessSchemaHeaderSize+2])
+	if mapperSlot := int(boundaryMeta.flags>>3) - 1; mapperSlot != 1 {
 		t.Fatalf("computed mapper slot = %d, want 1", mapperSlot)
 	}
 
@@ -251,6 +265,34 @@ func TestPruneScanResidualKeepsSecondRangeColumn(t *testing.T) {
 	}
 }
 
+func TestCompileScanAccessKeepsPointProbeWithDuplicatePredicate(t *testing.T) {
+	columns := scm.Read(t.Name(), `(list "id")`)
+	filter := scm.Read(t.Name(), `(lambda (id) (and (equal?? id wanted) (equal?? id wanted)))`)
+	schema, bindings, compiled := compileScanAccess(columns, filter)
+	if !compiled || len(bindings) != 1 {
+		t.Fatalf("duplicate equality compiled=%v bindings=%d", compiled, len(bindings))
+	}
+	access, valid := scanAccessFromScheme(schema, []scm.Scmer{scm.NewInt(7)}, nil)
+	if !valid || access.len() != 1 || access.boundary(0).col != "id" {
+		t.Fatalf("duplicate equality access = %#v", access)
+	}
+}
+
+func TestPruneScanResidualKeepsConflictingDuplicatePredicate(t *testing.T) {
+	columns := scm.Read(t.Name(), `(list "id")`)
+	filter := scm.Read(t.Name(), `(lambda (id) (and (equal?? id 1) (equal?? id 2)))`)
+	residualColumns, residualFilter := pruneScanResidual(columns, filter, false)
+	columnItems, ok := scanStaticColumns(residualColumns)
+	if !ok || len(columnItems) != 1 || columnItems[0].String() != "id" {
+		t.Fatalf("conflicting residual columns = %s", scm.SerializeToString(residualColumns, &scm.Globalenv))
+	}
+	_, body, ok := scanLambdaParts(residualFilter)
+	items, sliced := scmerSlice(body)
+	if !ok || !sliced || len(items) != 3 || !scanSymbolIs(items[0], "equal??") || scm.ToInt(items[2]) != 2 {
+		t.Fatalf("conflicting residual = %s, want id = 2", scm.SerializeToString(residualFilter, &scm.Globalenv))
+	}
+}
+
 func TestScanAccessNullProbeIsImpossibleWithoutTreatingNilCheckAsImpossible(t *testing.T) {
 	exactSchema, _ := testEqualScanAccess("id", scm.NewNil())
 	exact, valid := scanAccessFromScheme(exactSchema, []scm.Scmer{scm.NewNil()}, nil)
@@ -258,8 +300,8 @@ func TestScanAccessNullProbeIsImpossibleWithoutTreatingNilCheckAsImpossible(t *t
 		t.Fatal("runtime NULL equality probe must be impossible")
 	}
 	nilCheckSchema := scm.NewSlice([]scm.Scmer{
-		scm.NewString(scanAccessSchemaName), scm.NewInt(1), scm.NewString(scanAccessConsumerScan), scm.NewInt(0), scm.NewInt(-1),
-		scm.NewString("equal"), scm.NewString("id"), scm.NewInt(-1), scm.NewInt(-1), scm.NewInt(3), scm.NewString(""),
+		newScanAccessHeader(1, scanAccessConsumerScan, 0, -1),
+		scm.NewString("equal"), scm.NewString("id"), newScanAccessBoundaryMeta(-1, -1, 3), scm.NewString(""),
 	})
 	nilCheck, valid := scanAccessFromScheme(nilCheckSchema, nil, nil)
 	if !valid || nilCheck.impossible() {
@@ -269,7 +311,7 @@ func TestScanAccessNullProbeIsImpossibleWithoutTreatingNilCheckAsImpossible(t *t
 		t.Fatal("IS NULL access must bind explicit NULL endpoints")
 	}
 	nullSafeCall := scm.Read(t.Name(), `(scan nil table_value
-		'("scan_access" 0 "scan" 0 -1) '()
+		'(369435906932736) '()
 		(list "id") (lambda (id) (equal?? id wanted_id))
 		(list "id") (lambda (acc id) id) nil nil false)`)
 	nullSafeItems, ok := scmerSlice(nullSafeCall)
@@ -299,7 +341,7 @@ func TestScanAccessNullProbeIsImpossibleWithoutTreatingNilCheckAsImpossible(t *t
 
 func TestCompileScanAccessAcceptsParsedSourceInfo(t *testing.T) {
 	call := scm.Read(t.Name(), `(scan nil table_value
-		'("scan_access" 0 "scan" 0 -1) '()
+		'(369435906932736) '()
 		(list "id") (lambda (id) (equal?? id wanted_id))
 		(list "id") (lambda (acc id) id) nil nil false)`)
 	items, ok := scmerSlice(call)
@@ -336,12 +378,52 @@ func TestSortedBoundariesCoverCondition(t *testing.T) {
 	})
 	condition := buildProc([]string{"value"}, body)
 	bounds := extractBoundaries([]string{"meta_key"}, condition)
-	if !sortedBoundariesCoverCondition([]string{"meta_key"}, condition, bounds) {
+	if !sortedBoundariesCoverCondition([]string{"meta_key"}, condition, runtimeScanAccess(bounds)) {
 		t.Fatal("simple equality should be covered by its extracted boundary")
 	}
 	bounds[0].upper = scm.NewString("other")
-	if sortedBoundariesCoverCondition([]string{"meta_key"}, condition, bounds) {
+	if sortedBoundariesCoverCondition([]string{"meta_key"}, condition, runtimeScanAccess(bounds)) {
 		t.Fatal("different boundary must not cover the condition")
+	}
+}
+
+func TestSortedBoundariesCoverRuntimeNullSafeEquality(t *testing.T) {
+	body := scm.NewSlice([]scm.Scmer{
+		scm.NewSymbol("equal??"),
+		scm.NewSymbol("value"),
+		scm.NewString("needle"),
+	})
+	condition := buildProc([]string{"value"}, body)
+	bounds := extractBoundaries([]string{"meta_key"}, condition)
+	if len(bounds) != 1 || !bounds[0].nullSafe || bounds[0].collation != "utf8mb4_general_ci" {
+		t.Fatalf("NULL-aware equality boundary = %#v", bounds)
+	}
+	if !sortedBoundariesCoverCondition([]string{"meta_key"}, condition, runtimeScanAccess(bounds)) {
+		t.Fatal("non-NULL equal?? should be covered by its identical runtime boundary")
+	}
+
+	nullBody := scm.NewSlice([]scm.Scmer{
+		scm.NewSymbol("equal??"),
+		scm.NewSymbol("value"),
+		scm.NewNil(),
+	})
+	nullCondition := buildProc([]string{"value"}, nullBody)
+	nullBounds := extractBoundaries([]string{"meta_key"}, nullCondition)
+	if sortedBoundariesCoverCondition([]string{"meta_key"}, nullCondition, runtimeScanAccess(nullBounds)) {
+		t.Fatal("runtime NULL equal?? must retain its residual predicate")
+	}
+}
+
+func TestSortedBoundariesDoNotCoverAfterRangeSuffix(t *testing.T) {
+	condition := buildProc([]string{"row_number"}, scm.NewSlice([]scm.Scmer{
+		scm.NewSymbol("<="), scm.NewSymbol("row_number"), scm.NewInt(1),
+	}))
+	access := runtimeScanAccess(boundaries{
+		{col: "ID", matcher: RangeMatcher, upper: scm.NewInt(2), upperInclusive: true},
+		{col: "row_number", matcher: RangeMatcher, upper: scm.NewInt(1), upperInclusive: true},
+	})
+	if sortedBoundariesCoverCondition([]string{"row_number"}, condition, access) {
+		t.Fatal("a boundary after the first range dimension is not enforced by the index prefix")
 	}
 }
 
@@ -350,7 +432,7 @@ func TestCoveredScanAccessSuppressesReadResiduals(t *testing.T) {
 	if !scanAccessCoversResidual(plannerAccess) {
 		t.Fatal("planner coverage should suppress read residuals, including autocommit")
 	}
-	if !scanAccessCoversResidual(scanAccess{filterCovered: true}) {
+	if !scanAccessCoversResidual(coveredRuntimeScanAccess(nil)) {
 		t.Fatal("mandatory internal boundaries should remain unconditionally covered")
 	}
 }
@@ -754,18 +836,18 @@ func TestScanBufferSizeUsesSmallBufferOnlyForBoundUniqueKey(t *testing.T) {
 		}
 	}
 
-	if got := tbl.scanBufferSize(scanAccess{suffix: boundaries{point("tenant_id", scm.NewInt(9)), point("id", scm.NewInt(42))}}); got != uniquePointScanBufferSize {
+	if got := tbl.scanBufferSize(runtimeScanAccess(boundaries{point("tenant_id", scm.NewInt(9)), point("id", scm.NewInt(42))})); got != uniquePointScanBufferSize {
 		t.Fatalf("fully bound unique key buffer = %d, want %d", got, uniquePointScanBufferSize)
 	}
-	if got := tbl.scanBufferSize(scanAccess{suffix: boundaries{point("id", scm.NewInt(42))}}); got != defaultScanBufferSize {
+	if got := tbl.scanBufferSize(runtimeScanAccess(boundaries{point("id", scm.NewInt(42))})); got != defaultScanBufferSize {
 		t.Fatalf("partially bound unique key buffer = %d, want %d", got, defaultScanBufferSize)
 	}
-	if got := tbl.scanBufferSize(scanAccess{suffix: boundaries{point("tenant_id", scm.NewInt(9)), point("id", scm.NewNil())}}); got != defaultScanBufferSize {
+	if got := tbl.scanBufferSize(runtimeScanAccess(boundaries{point("tenant_id", scm.NewInt(9)), point("id", scm.NewNil())})); got != defaultScanBufferSize {
 		t.Fatalf("NULL unique key buffer = %d, want %d", got, defaultScanBufferSize)
 	}
 	rangeBoundary := point("id", scm.NewInt(42))
 	rangeBoundary.matcher = RangeMatcher
-	if got := tbl.scanBufferSize(scanAccess{suffix: boundaries{point("tenant_id", scm.NewInt(9)), rangeBoundary}}); got != defaultScanBufferSize {
+	if got := tbl.scanBufferSize(runtimeScanAccess(boundaries{point("tenant_id", scm.NewInt(9)), rangeBoundary})); got != defaultScanBufferSize {
 		t.Fatalf("range-bound unique key buffer = %d, want %d", got, defaultScanBufferSize)
 	}
 }
@@ -827,7 +909,7 @@ func TestEffectiveBoundaryInclusivenessUsesIndexedRange(t *testing.T) {
 		{col: "quantity", matcher: RangeMatcher, lowerInclusive: false, upperInclusive: false},
 	}
 	lower, _ := indexFromBoundaries(bounds)
-	lowerInclusive, upperInclusive := effectiveBoundaryInclusiveness(scanAccess{suffix: bounds}, lower)
+	lowerInclusive, upperInclusive := effectiveBoundaryInclusiveness(runtimeScanAccess(bounds), lower)
 	if !lowerInclusive || !upperInclusive {
 		t.Fatalf("effective boundary inclusiveness = (%t, %t), want (true, true)", lowerInclusive, upperInclusive)
 	}
@@ -877,8 +959,8 @@ func TestBoundaryLikeNonPrefix(t *testing.T) {
 func TestRecSetFilterBoundariesKeepLikeAndMembershipHooks(t *testing.T) {
 	owner := &recSet{}
 	schema := scm.NewSlice([]scm.Scmer{
-		scm.NewString(scanAccessSchemaName), scm.NewInt(1), scm.NewString(scanAccessConsumerScan), scm.NewInt(0), scm.NewInt(-1),
-		scm.NewString("like"), scm.NewString("search"), scm.NewInt(0), scm.NewInt(0), scm.NewInt(3), scm.NewString(""),
+		newScanAccessHeader(1, scanAccessConsumerScan, 0, -1),
+		scm.NewString("like"), scm.NewString("search"), newScanAccessBoundaryMeta(0, 0, 3), scm.NewString(""),
 	})
 	access := recSetScanAccess(owner, schema, []scm.Scmer{scm.NewString("%needle%")})
 	if access.len() != 2 {

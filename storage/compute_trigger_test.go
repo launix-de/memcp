@@ -18,6 +18,7 @@ package storage
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -226,7 +227,7 @@ func TestLookupComputeTriggersInvalidateMatchingRows(t *testing.T) {
 
 	computorSource := `(lambda (ref_id)
 		(scan nil (table "tlookuptrigger" "src")
-			'("scan_access" 0 "scan" 0 -1) '()
+			'(369435906932736) '()
 			'("ref_id") (lambda (source_ref_id) (equal? source_ref_id (outer 1 ref_id)))
 			'("val") (lambda (acc val) val)
 			0 (lambda (old value) value) false))`
@@ -254,13 +255,15 @@ func TestLookupComputeTriggersInvalidateMatchingRows(t *testing.T) {
 }
 
 func TestExtractScanJoinInfoUsesCompiledAccessWhenResidualIsEmpty(t *testing.T) {
-	source := `(lambda (ref_id)
+	header := scm.ToInt(newScanAccessHeader(1, scanAccessConsumerScan, 0, -1))
+	boundaryMeta := scm.ToInt(newScanAccessBoundaryMeta(0, 0, 3))
+	source := fmt.Sprintf(`(lambda (ref_id)
 		(scan nil (table "tcompileddependency" "src")
-			'("scan_access" 1 "scan" 0 -1 "equal" "source_ref" 0 0 3 "")
+			'(%d "equal" "source_ref" %d "")
 			(list ref_id)
 			'() (lambda () true)
 			'("value") (lambda (acc value) value)
-			nil nil false))`
+			nil nil false))`, header, boundaryMeta)
 	computor := scm.Read(t.Name(), source)
 	refs := extractScanJoinInfo(computor)
 	if len(refs) != 1 || refs[0].schema != "tcompileddependency" || refs[0].table != "src" ||

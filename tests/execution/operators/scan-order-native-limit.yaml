@@ -90,7 +90,6 @@ test_cases:
       rows: 1
       result_contains:
         - "scan_order"
-        - "scan_access"
         - "range"
 
   - name: "Cleanup"

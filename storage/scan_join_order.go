@@ -870,7 +870,6 @@ func probeScanJoinOrderInput(currentTx *TxContext, spec *scanJoinOrderSpec, tupl
 	if len(batchdata) == 0 {
 		return nil
 	}
-
 	conditionCols := append([]string(nil), input.filterCols...)
 	conditionCols = append(conditionCols, input.targetKeyCols...)
 	for keyIndex := 0; keyIndex < keyWidth; keyIndex++ {
@@ -921,7 +920,7 @@ func probeScanJoinOrderInput(currentTx *TxContext, spec *scanJoinOrderSpec, tupl
 		accessSchema = emptyScanAccessSchema
 		accessValues = nil
 	}
-	rows := input.table.scanWithBatchFrom(currentTx, nil, accessSchema, accessValues, scanAccess{suffix: required}, conditionCols, condition,
+	rows := input.table.scanWithBatchFrom(currentTx, nil, accessSchema, accessValues, runtimeScanAccess(required), conditionCols, condition,
 		callbackCols, mapReduce, scm.NewSlice(nil), combine, false,
 		stride, batchdata).Slice()
 	hits := make([][]*scanJoinOrderRecord, len(tuples))
@@ -1201,6 +1200,7 @@ func collectScanJoinOrderShardStreams(currentTx *TxContext, input *scanJoinOrder
 	if !compiled {
 		panic("scan_join_order received an invalid compiled access schema")
 	}
+	bounds = bounds.useScratch(scratch)
 	if bounds.impossible() {
 		return nil
 	}

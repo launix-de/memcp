@@ -40,13 +40,9 @@ func testScanLookupSchema(consumer string, matchCols, mapCols []string) scm.Scme
 	if consumer == "map" {
 		mapperSlot = len(matchCols)
 	}
-	schema := []scm.Scmer{
-		scm.NewString(scanAccessSchemaName), scm.NewInt(int64(len(matchCols))), scm.NewString(consumer),
-		scm.NewInt(int64(len(mapCols))), scm.NewInt(int64(mapperSlot)),
-	}
+	schema := []scm.Scmer{newScanAccessHeader(len(matchCols), consumer, len(mapCols), mapperSlot)}
 	for i, col := range matchCols {
-		schema = append(schema, scm.NewString("equal"), scm.NewString(col), scm.NewInt(int64(i)),
-			scm.NewInt(int64(i)), scm.NewInt(3), scm.NewString(""))
+		schema = append(schema, scm.NewString("equal"), scm.NewString(col), newScanAccessBoundaryMeta(i, i, 3), scm.NewString(""))
 	}
 	for _, col := range mapCols {
 		schema = append(schema, scm.NewString(col))

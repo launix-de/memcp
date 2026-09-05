@@ -105,7 +105,7 @@ test_cases:
           "ok"
           (error "recset scan returned wrong row set")))
 
-  - name: "recset boundary statistics count candidates before residual filtering"
+  - name: "compiled recset boundaries narrow candidates before residual filtering"
     setup:
       - scm: '(settings "ScanDebugging" true)'
       - sql: "DELETE FROM `system_statistic`.`scans` WHERE `schema` = 'memcp-tests' AND `table` = 'recset_items'"
@@ -127,7 +127,7 @@ test_cases:
       rows: 1
       data:
         - inputCount: 5
-          candidateCount: 3
+          candidateCount: 2
           outputCount: 2
     cleanup:
       - scm: '(settings "ScanDebugging" false)'
@@ -390,7 +390,7 @@ test_cases:
         (define ordered
           (scan_order_multi nil
             (list rs1 rs2)
-            (map (list rs1 rs2) (lambda (_) (list "scan_access" 0 "scan" 0 -1))) '() (list (list "active") (list "active"))
+            (map (list rs1 rs2) (lambda (_) (list 369435906932736))) '() (list (list "active") (list "active"))
             (list
               (lambda (active) (equal? active 1))
               (lambda (active) (equal? active 1)))

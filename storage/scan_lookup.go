@@ -46,31 +46,39 @@ type scanLookupPlan struct {
 func executeCompiledScanLookup(t *table, currentTx *TxContext, schemaValue, valuesValue scm.Scmer) scm.Scmer {
 	schema := mustScmerSlice(schemaValue, "scan_lookup schema")
 	values := mustScmerSlice(valuesValue, "scan_lookup values")
+	meta := scanAccessSchemaMeta{}
+	validHeader := false
+	if len(schema) > 0 {
+		meta, validHeader = decodeScanAccessHeader(schema[0])
+	}
 	// The overwhelmingly common authentication and scalar-subquery shapes use
 	// fixed schema offsets. Keep validation and generic multidimensional binding
 	// out of this path so a cached plan adds no allocation or decoder dispatch.
 	if len(values) == 1 && len(schema) >= scanAccessSchemaHeaderSize+scanAccessBoundaryStride &&
-		schema[0].String() == scanAccessSchemaName && scm.ToInt(schema[1]) == 1 &&
+		validHeader && meta.count == 1 &&
 		schema[scanAccessSchemaHeaderSize].String() == "equal" &&
-		scm.ToInt(schema[scanAccessSchemaHeaderSize+2]) == 0 &&
-		scm.ToInt(schema[scanAccessSchemaHeaderSize+3]) == 0 &&
-		scm.ToInt(schema[scanAccessSchemaHeaderSize+4]) == 3 {
+		scanAccessBoundaryIsExactSlot(schema[scanAccessSchemaHeaderSize+2], 0) {
 		if values[0].IsNil() {
-			return scanLookupMiss(schema[2].String() != "exists")
+			return scanLookupMiss(meta.consumer != "exists")
 		}
 		projectionAt := scanAccessSchemaHeaderSize + scanAccessBoundaryStride
-		switch schema[2].String() {
+		switch meta.consumer {
 		case "exists":
-			if len(schema) == projectionAt && scm.ToInt(schema[3]) == 0 {
+			if len(schema) == projectionAt && meta.projections == 0 {
 				return t.scanLookupOne(currentTx, schema[scanAccessSchemaHeaderSize+1].String(), values[0], "", false)
 			}
 		case "value":
-			if len(schema) == projectionAt+1 && scm.ToInt(schema[3]) == 1 {
+			if len(schema) == projectionAt+1 && meta.projections == 1 {
 				return t.scanLookupOne(currentTx, schema[scanAccessSchemaHeaderSize+1].String(), values[0], schema[projectionAt].String(), true)
 			}
 		}
 	}
 	return t.executeScanLookup(currentTx, parseScanLookupPlanSlices(schema, values))
+}
+
+func scanAccessBoundaryIsExactSlot(value scm.Scmer, slot int) bool {
+	meta := decodeScanAccessBoundaryMeta(value)
+	return meta.lowerSlot == slot && meta.upperSlot == slot && meta.flags == 3
 }
 
 func parseScanLookupPlan(schemaValue, valuesValue scm.Scmer) scanLookupPlan {
@@ -84,7 +92,8 @@ func parseScanLookupPlanSlices(schema, values []scm.Scmer) scanLookupPlan {
 	if !valid {
 		panic("scan_lookup needs a scan_access schema")
 	}
-	matchCount := int(scm.ToInt(schema[1]))
+	meta, _ := decodeScanAccessHeader(schema[0])
+	matchCount := meta.count
 	if matchCount <= 0 {
 		panic("scan_lookup schema has an invalid match-column count")
 	}
@@ -95,14 +104,14 @@ func parseScanLookupPlanSlices(schema, values []scm.Scmer) scanLookupPlan {
 			panic("scan_lookup requires exact equality access entries")
 		}
 	}
-	projectionCount := int(scm.ToInt(schema[3]))
+	projectionCount := meta.projections
 	projectionAt := scanAccessSchemaHeaderSize + matchCount*scanAccessBoundaryStride
 
 	plan := scanLookupPlan{
 		access:  access,
 		mapCols: schema[projectionAt : projectionAt+projectionCount],
 	}
-	switch schema[2].String() {
+	switch meta.consumer {
 	case "exists":
 		plan.consumer = scanLookupExists
 		if projectionCount != 0 {
@@ -115,7 +124,7 @@ func parseScanLookupPlanSlices(schema, values []scm.Scmer) scanLookupPlan {
 		}
 	case "map":
 		plan.consumer = scanLookupMap
-		mapperSlot := int(scm.ToInt(schema[4]))
+		mapperSlot := meta.mapperSlot
 		if mapperSlot < 0 || mapperSlot >= len(values) {
 			panic("scan_lookup map values need one mapper after the match values")
 		}
@@ -262,7 +271,7 @@ func (t *table) scanLookupMapOne(currentTx *TxContext, lookupCol string, lookupV
 	var values []scm.Scmer
 	matches := 0
 	var panicValue any
-	done := t.iterateShardsParallel(currentTx, scanAccess{suffix: boundaries{boundary}}, func(shard *storageShard, solo bool) {
+	done := t.iterateShardsParallel(currentTx, runtimeScanAccess(boundaries{boundary}), func(shard *storageShard, solo bool) {
 		defer func() {
 			if recovered := recover(); recovered != nil {
 				mu.Lock()
@@ -319,7 +328,7 @@ func (t *storageShard) scanLookupMapOne(boundary columnboundaries, lookupValue s
 	mainCount := t.main_count
 	acidMode := currentTx != nil && currentTx.Mode == TxACID
 	var ids [8]uint32
-	t.iterateIndexForce(currentTx, scanAccess{suffix: boundaries{boundary}}, []scm.Scmer{lookupValue}, lookupValue, len(t.inserts), ids[:], true, func(batch []uint32) bool {
+	t.iterateIndexForce(currentTx, runtimeScanAccess(boundaries{boundary}), []scm.Scmer{lookupValue}, lookupValue, len(t.inserts), ids[:], true, func(batch []uint32) bool {
 		for _, recid := range batch {
 			var actual scm.Scmer
 			if recid < mainCount {
@@ -396,7 +405,7 @@ func (t *table) scanLookupOne(currentTx *TxContext, lookupCol string, lookupValu
 		matches    int
 		panicValue any
 	}{result: scm.NewNil()}
-	done := t.iterateShardsParallel(currentTx, scanAccess{suffix: boundaries}, func(shard *storageShard, solo bool) {
+	done := t.iterateShardsParallel(currentTx, runtimeScanAccess(boundaries), func(shard *storageShard, solo bool) {
 		defer func() {
 			if recovered := recover(); recovered != nil {
 				state.mu.Lock()
@@ -471,7 +480,7 @@ func (t *storageShard) scanLookupOne(lookupCol string, lookupValue scm.Scmer, re
 	mainCount := t.main_count
 	acidMode := currentTx != nil && currentTx.Mode == TxACID
 	var ids [8]uint32
-	t.iterateIndexForce(currentTx, scanAccess{suffix: bounds}, lower, lookupValue, len(t.inserts), ids[:], true, func(batch []uint32) bool {
+	t.iterateIndexForce(currentTx, runtimeScanAccess(bounds), lower, lookupValue, len(t.inserts), ids[:], true, func(batch []uint32) bool {
 		for _, recid := range batch {
 			var actual scm.Scmer
 			if recid < mainCount {
@@ -535,7 +544,7 @@ func (t *table) scanLookupMany(currentTx *TxContext, lookupCols []string, lookup
 	result := scm.NewBool(false)
 	matches := 0
 	var panicValue any
-	done := t.iterateShardsParallel(currentTx, scanAccess{suffix: boundaries}, func(shard *storageShard, solo bool) {
+	done := t.iterateShardsParallel(currentTx, runtimeScanAccess(boundaries), func(shard *storageShard, solo bool) {
 		if stop.Load() {
 			return
 		}
@@ -611,7 +620,7 @@ func (t *storageShard) scanLookupMany(bounds boundaries, lookupValues []scm.Scme
 	mainCount := t.main_count
 	acidMode := currentTx != nil && currentTx.Mode == TxACID
 	var ids [8]uint32
-	t.iterateIndexForce(currentTx, scanAccess{suffix: bounds}, lookupValues, lookupValues[len(lookupValues)-1], len(t.inserts), ids[:], true, func(batch []uint32) bool {
+	t.iterateIndexForce(currentTx, runtimeScanAccess(bounds), lookupValues, lookupValues[len(lookupValues)-1], len(t.inserts), ids[:], true, func(batch []uint32) bool {
 		if stop.Load() {
 			return false
 		}
@@ -668,7 +677,7 @@ func (t *table) scanLookupMapMany(currentTx *TxContext, lookupCols []string, loo
 	var values []scm.Scmer
 	matches := 0
 	var panicValue any
-	done := t.iterateShardsParallel(currentTx, scanAccess{suffix: boundaries}, func(shard *storageShard, solo bool) {
+	done := t.iterateShardsParallel(currentTx, runtimeScanAccess(boundaries), func(shard *storageShard, solo bool) {
 		if stop.Load() {
 			return
 		}
@@ -735,7 +744,7 @@ func (t *storageShard) scanLookupMapMany(bounds boundaries, lookupValues []scm.S
 	mainCount := t.main_count
 	acidMode := currentTx != nil && currentTx.Mode == TxACID
 	var ids [8]uint32
-	t.iterateIndexForce(currentTx, scanAccess{suffix: bounds}, lookupValues, lookupValues[len(lookupValues)-1], len(t.inserts), ids[:], true, func(batch []uint32) bool {
+	t.iterateIndexForce(currentTx, runtimeScanAccess(bounds), lookupValues, lookupValues[len(lookupValues)-1], len(t.inserts), ids[:], true, func(batch []uint32) bool {
 		if stop.Load() {
 			return false
 		}

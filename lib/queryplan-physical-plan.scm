@@ -4220,7 +4220,7 @@ RecSet; membership edges retain their own physical operators. */
 								(list (quote scan_order_batch_accept)
 									(physical_query_tx_symbol)
 									table_expr
-									(list (quote quote) (list "scan_access" 0 "scan" 0 -1))
+									(list (quote quote) (list 369435906932736))
 									(list (quote list))
 									batch_filter
 									(cons (quote list) batch_ordercols)
@@ -5332,7 +5332,7 @@ until the caller has selected this physical alternative. */
 		(define scan_expr (if use_batch_accept
 			(list (quote scan_order_batch_accept)
 				(physical_query_tx_symbol) table_expr
-				(list (quote quote) (list "scan_access" 0 "scan" 0 -1))
+				(list (quote quote) (list 369435906932736))
 				(list (quote list)) batch_filter
 				(cons (quote list) physical_ordercols)
 				(cons (quote list) physical_orderdirs)
@@ -6535,7 +6535,7 @@ the costgen threshold. */
 		(if (nil? candidates)
 			0
 			(scan current_tx candidates
-				'("scan_access" 1 "scan" 0 -1 "equal" "canonical_name" 0 0 3 "") (list canonical_name)
+				'(369436175368192 "equal" "canonical_name" 15032418304 "") (list canonical_name)
 				'() (lambda () true)
 				'("$update")
 				(lambda (acc $update) (begin ($update) (+ acc 1)))
@@ -7002,7 +7002,7 @@ carrier remains on the measured direct path and is never built eagerly. */
 								(list (quote scan_order_batch_accept)
 									(physical_query_tx_symbol)
 									table_expr
-									(list (quote quote) (list "scan_access" 0 "scan" 0 -1))
+									(list (quote quote) (list 369435906932736))
 									(list (quote list)) batch_filter
 									(cons (quote list) (merge (list ordercols tiebreaker_cols)))
 									(cons (quote list) (merge (list

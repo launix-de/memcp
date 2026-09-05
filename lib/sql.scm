@@ -618,7 +618,7 @@ if the user is not allowed to access this property, the function will throw an e
 (define sql_policy (lambda (username)
 	(begin
 		(define is_admin (scan_lookup nil (table "system" "user")
-			'("scan_access" 1 "value" 1 -1 "equal" "username" 0 0 3 "" "admin") (list username)))
+			'(372734710317056 "equal" "username" 15032418304 "" "admin") (list username)))
 		(if is_admin (lambda (schema tblname write) true) /* admin -> allow all */
 			/* else: complicated policy */
 			(lambda (schema tblname write)
@@ -627,7 +627,7 @@ if the user is not allowed to access this property, the function will throw an e
 					(if (equal?? schema "information_schema") true (begin
 						/* Database-level check via system.access */
 						(define has_access (scan_lookup nil (table "system" "access")
-							'("scan_access" 2 "exists" 0 -1 "equal" "username" 0 0 3 "" "equal" "database" 1 1 3 "") (list username schema)))
+							'(371635467059200 "equal" "username" 15032418304 "" "equal" "database" 15032483841 "") (list username schema)))
 						(if has_access true (error (concat "access denied: user '" username "' may not " (if write "write" "read") " " schema "." tblname)))
 					))
 			))
@@ -654,7 +654,7 @@ if the user is not allowed to access this property, the function will throw an e
 			true
 			(begin
 				(createcolumn (table "system" "user") "admin" "boolean" '() '())
-				(scan nil (table "system" "user") '("scan_access" 0 "scan" 0 -1) '() '() (lambda () true) '("$update") (lambda (acc $update) (begin ($update '("admin" true)) acc)))
+				(scan nil (table "system" "user") '(369435906932736) '() '() (lambda () true) '("$update") (lambda (acc $update) (begin ($update '("admin" true)) acc)))
 			)
 		)
 	) true)
@@ -672,7 +672,7 @@ if the user is not allowed to access this property, the function will throw an e
 /* migration: ensure root always has admin=true */
 (try (lambda () (begin
 	(if (has? (show "system") "user")
-		(scan nil (table "system" "user") '("scan_access" 1 "scan" 0 -1 "equal" "username" 0 0 3 "") '("root") '() (lambda () true) '("$update") (lambda (acc $update) (begin ($update '("admin" true)) acc)))
+		(scan nil (table "system" "user") '(369436175368192 "equal" "username" 15032418304 "") '("root") '() (lambda () true) '("$update") (lambda (acc $update) (begin ($update '("admin" true)) acc)))
 		true)
 )) (lambda (e) true))
 
@@ -739,7 +739,7 @@ the latter is expanded before logical planning and never materialized. */
 )) (lambda (e) true))
 
 (sql_view_catalog_set_count
-	(scan nil (table "system" "views") '("scan_access" 0 "scan" 0 -1) '() '() (lambda () true) '() (lambda (acc) (+ acc 1)) 0 +))
+	(scan nil (table "system" "views") '(369435906932736) '() '() (lambda () true) '() (lambda (acc) (+ acc 1)) 0 +))
 
 /* migration: ensure unique (username, database) constraint on system.access */
 (try (lambda () (begin
@@ -775,7 +775,7 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 	(set old_handler http_handler)
 	(define handle_query (lambda (req res schema query) (begin
 		/* check for password */
-		(set pw (scan_lookup nil (table "system" "user") '("scan_access" 1 "value" 1 -1 "equal" "username" 0 0 3 "" "password") (list (req "username"))))
+		(set pw (scan_lookup nil (table "system" "user") '(372734710317056 "equal" "username" 15032418304 "" "password") (list (req "username"))))
 		(if (and pw (equal? pw (password (req "password"))))
 			(begin
 				(try (lambda () (time (begin
@@ -820,7 +820,7 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 	)))
 	(define handle_query_postgres (lambda (req res schema query) (begin
 		/* check for password */
-		(set pw (scan_lookup nil (table "system" "user") '("scan_access" 1 "value" 1 -1 "equal" "username" 0 0 3 "" "password") (list (req "username"))))
+		(set pw (scan_lookup nil (table "system" "user") '(372734710317056 "equal" "username" 15032418304 "" "password") (list (req "username"))))
 		(if (and pw (equal? pw (password (req "password"))))
 			(begin
 				(try (lambda () (time (begin
@@ -882,7 +882,7 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 	(define handle_scm (lambda (req res code) (begin
 		/* check for password - must be admin */
 		(set pw (scan_lookup nil (table "system" "user")
-			'("scan_access" 1 "map" 2 1 "equal" "username" 0 0 3 "" "password" "admin")
+			'(373834222010370 "equal" "username" 15032418304 "" "password" "admin")
 			(list (req "username") (lambda (password admin) (list password admin)))))
 		(if (and pw (equal? (car pw) (password (req "password"))) (car (cdr pw)))
 			(begin
@@ -953,7 +953,7 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 
 /* shared callbacks for mysql protocol (TCP and Unix socket) */
 (set mysql_auth (lambda (username_)
-	(scan_lookup nil (table "system" "user") '("scan_access" 1 "value" 1 -1 "equal" "username" 0 0 3 "" "password") (list username_))))
+	(scan_lookup nil (table "system" "user") '(372734710317056 "equal" "username" 15032418304 "" "password") (list username_))))
 (set mysql_schema (lambda (username schema) (or (equal?? schema "information_schema") (list? (show schema)))))
 
 /* Top-level so the interpreter compiles this body once instead of rebuilding a

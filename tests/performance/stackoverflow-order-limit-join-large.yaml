@@ -89,7 +89,7 @@ test_cases:
           (lambda (project_1) (equal? project_1 1))))
         (define lookup (recset_key_index tx selected '("unique_id")))
         (define found (scan_order_batch_accept tx images
-          '("scan_access" 0 "scan" 0 -1) '() (lambda (input) (scan_recset tx input (car (compile_scan_access '("product_unique_id") (scheme "(lambda (product_unique_id) (lookup product_unique_id))"))) (cadr (compile_scan_access '("product_unique_id") (scheme "(lambda (product_unique_id) (lookup product_unique_id))"))) '("product_unique_id")
+          '(369435906932736) '() (lambda (input) (scan_recset tx input (car (compile_scan_access '("product_unique_id") (scheme "(lambda (product_unique_id) (lookup product_unique_id))"))) (cadr (compile_scan_access '("product_unique_id") (scheme "(lambda (product_unique_id) (lookup product_unique_id))"))) '("product_unique_id")
             (lambda (product_unique_id) (lookup product_unique_id))))
           '("id") '(<) 0 0 1000 '() (lambda () 1) + 0 false 0))
         (if (equal? found 1000) "ok" (error "wrong batch result")))

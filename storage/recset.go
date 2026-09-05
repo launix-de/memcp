@@ -462,6 +462,7 @@ func (t *table) scanRecSet(currentTx *TxContext, accessSchema scm.Scmer, accessV
 	if !compiled {
 		panic("scan_recset received an invalid compiled access schema")
 	}
+	boundaries = boundaries.useScratch(scratch)
 	result := &recSet{table: t}
 	if boundaries.impossible() {
 		return result
@@ -1129,7 +1130,7 @@ func (t *storageShard) projectJoinKeysPart(currentTx *TxContext, targetKeyCols [
 		}
 		reorderByFrequency(bounds, t.t)
 		lower, upperLast := indexFromBoundaries(bounds)
-		t.iterateIndexForce(currentTx, scanAccess{suffix: bounds}, lower, upperLast, maxInsertIndex, buf[:], true, func(batch []uint32) bool {
+		t.iterateIndexForce(currentTx, runtimeScanAccess(bounds), lower, upperLast, maxInsertIndex, buf[:], true, func(batch []uint32) bool {
 			for _, idx := range batch {
 				if idx >= visibleUpper {
 					continue
@@ -1458,6 +1459,7 @@ func (t *storageShard) filterRecSetPart(part *recSetShard, conditionCols []strin
 	// scan_recset whose input is a RecSet gets the same combined boundaries.
 	scratch := acquireScanAnalyzeScratch()
 	defer releaseScanAnalyzeScratch(scratch)
+	access = access.useScratch(scratch)
 	lower, upperLast := indexFromScanAccessInto(scratch.lower[:0], access)
 
 	var ccols []ColumnStorage

@@ -93,7 +93,8 @@ func BenchmarkScanPipelineOLTP(b *testing.B) {
 	lastIDFilter := optimizedScanProc(b, "(lambda (id) (equal?? id 59999))")
 	lastIDAccessSchema, lastIDAccessValues := testEqualScanAccess("id", scm.NewInt(59999))
 	lastIDSchemaItems := append([]scm.Scmer(nil), lastIDAccessSchema.Slice()...)
-	lastIDSchemaItems[2] = scm.NewString(scanAccessConsumerCoveredScan)
+	meta, _ := decodeScanAccessHeader(lastIDSchemaItems[0])
+	lastIDSchemaItems[0] = newScanAccessHeader(meta.count, scanAccessConsumerCoveredScan, meta.projections, meta.mapperSlot)
 	lastIDAccessSchema = scm.NewSlice(lastIDSchemaItems)
 	countMapReduce := scm.Globalenv.Vars[scm.Symbol("scan_count")]
 	sumMapReduce := scm.Globalenv.Vars[scm.Symbol("sql_sum_reduce")]

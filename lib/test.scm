@@ -1647,7 +1647,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		4
 		"length hook: count folds parallelN length")
 	/* scan callback ownership: mapreduce accumulator enables _mut inside its body */
-	(assert (serialize (optimize '('scan nil '('table "db" "tbl") '(quote '("scan_access" 0 "scan" 0 -1)) '(list) '("x") '('lambda '('x) true) '("x") '('lambda '('acc 'x) '(set_assoc 'acc 'x true)) '(list) nil false))) "(scan nil (table \"db\" \"tbl\") (quote (\"scan_access\" 0 \"scan\" 0 -1)) '() (\"x\") (lambda (x) true 1) (\"x\") (lambda (acc x) (set_assoc_mut (var 0) (var 1) true) 2) '() nil false)" "scan hook: mapreduce acc enables set_assoc_mut")
+	(assert (serialize (optimize '('scan nil '('table "db" "tbl") '(quote '(369435906932736)) '(list) '("x") '('lambda '('x) true) '("x") '('lambda '('acc 'x) '(set_assoc 'acc 'x true)) '(list) nil false))) "(scan nil (table \"db\" \"tbl\") (quote (3.69435906932736e+14)) '() (\"x\") (lambda (x) true 1) (\"x\") (lambda (acc x) (set_assoc_mut (var 0) (var 1) true) 2) '() nil false)" "scan hook: mapreduce acc enables set_assoc_mut")
 	(define opt_merge_unique_ser (serialize (optimize
 		(list 'lambda
 			(list 'a 'b 'c)
@@ -2116,7 +2116,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(jit-warn-if-fallback jit_scan_filter "jit: scan filter callback")
 	(jit-warn-if-fallback jit_scan_mapreduce "jit: scan mapreduce callback")
 	(assert (scan nil (list (list "value" 1) (list "value" 2) (list "value" 3))
-		'("scan_access" 0 "scan" 0 -1) '()
+		'(369435906932736) '()
 		'("value") jit_scan_filter '("value") jit_scan_mapreduce 0 +)
 		5 "jit: storage scan executes compiled filter/mapreduce callbacks")
 	(define jit_pointer_callee (lambda (value) (list value "rooted")))

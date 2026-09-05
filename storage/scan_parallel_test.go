@@ -98,7 +98,7 @@ func TestCollectRelevantShardsUsesPartitionBounds(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := collectRelevantShards(schema, scanAccess{suffix: boundaries{tt.boundary}}, shards)
+			got := collectRelevantShards(schema, runtimeScanAccess(boundaries{tt.boundary}), shards)
 			if len(got) != len(tt.wantShards) {
 				t.Fatalf("collectRelevantShards returned %d shards, want %d", len(got), len(tt.wantShards))
 			}
@@ -353,14 +353,14 @@ func TestIterateShardsParallelMarksPartitionSingleShardSolo(t *testing.T) {
 
 	calls := 0
 	sawSolo := false
-	done := tbl.iterateShardsParallel(nil, scanAccess{suffix: boundaries{{
+	done := tbl.iterateShardsParallel(nil, runtimeScanAccess(boundaries{{
 		col:            "id",
 		matcher:        EqualMatcher,
 		lower:          scm.NewInt(15),
 		lowerInclusive: true,
 		upper:          scm.NewInt(15),
 		upperInclusive: true,
-	}}}, func(s *storageShard, solo bool) {
+	}}), func(s *storageShard, solo bool) {
 		calls++
 		sawSolo = solo
 	})

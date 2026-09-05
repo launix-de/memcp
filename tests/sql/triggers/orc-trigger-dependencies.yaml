@@ -56,7 +56,7 @@ test_cases:
                         (begin
                           (define value
                             (scan nil (table "memcp-tests" "orc_dep_src")
-                              '("scan_access" 1 "scan" 0 -1 "equal" "ref_id" 0 0 3 "") (list ref_id)
+                              '(369436175368192 "equal" "ref_id" 15032418304 "") (list ref_id)
                               '("ref_id")
                             (lambda (src.ref_id) (equal? src.ref_id (outer 1 ref_id)))
                             '("val")
@@ -144,7 +144,7 @@ test_cases:
                         (begin
                           (define value
                             (scan nil (table "memcp-tests" "orc_dep_fb_src")
-                              '("scan_access" 0 "scan" 0 -1) '()
+                              '(369435906932736) '()
                               '("ref_id")
                             (lambda (src.ref_id) (equal? (+ src.ref_id 0) (outer 1 ref_id)))
                             '("val")

@@ -154,7 +154,7 @@ test_cases:
         (define found
           (scan_join_order (session "__memcp_tx")
             (list plots links)
-            (map (list plots links) (lambda (_) (list "scan_access" 0 "scan" 0 -1))) '() (list (list) (list "table_2_id"))
+            (map (list plots links) (lambda (_) (list 369435906932736))) '() (list (list) (list "table_2_id"))
             (list (lambda () true)
               (lambda (table_2_id) (equal? table_2_id "target")))
             (list (list (list 0 "id" "plot_id")))
@@ -184,7 +184,7 @@ test_cases:
         (define found
           (scan_join_order (session "__memcp_tx")
             (list foos bars)
-            (map (list foos bars) (lambda (_) (list "scan_access" 0 "scan" 0 -1))) '() (list (list) (list "baz_id"))
+            (map (list foos bars) (lambda (_) (list 369435906932736))) '() (list (list) (list "baz_id"))
             (list (lambda () true) (lambda (baz_id) (equal? baz_id 13266)))
             (list (list (list 0 "bar_id" "id")))
             (list) nil
@@ -222,7 +222,7 @@ test_cases:
           (recset_key_index tx selected_products '("unique_id")))
         (define found
           (scan_order_batch_accept tx images
-            '("scan_access" 0 "scan" 0 -1) '() (lambda (input)
+            '(369435906932736) '() (lambda (input)
               (scan_recset tx input (car (compile_scan_access '("product_unique_id") (scheme "(lambda (product_unique_id) (product_lookup product_unique_id))"))) (cadr (compile_scan_access '("product_unique_id") (scheme "(lambda (product_unique_id) (product_lookup product_unique_id))"))) '("product_unique_id")
                 (lambda (product_unique_id) (product_lookup product_unique_id))))
           '("id") '(<) 0 0 1000 '() (lambda (acc) (+ acc 1)) 0 false 0))
@@ -253,7 +253,7 @@ test_cases:
         (define found
           (scan_join_order (session "__memcp_tx")
             (list images products)
-            (map (list images products) (lambda (_) (list "scan_access" 0 "scan" 0 -1))) '() (list (list) (list "project_1"))
+            (map (list images products) (lambda (_) (list 369435906932736))) '() (list (list) (list "project_1"))
             (list (lambda () true) (lambda (project_1) (equal? project_1 1)))
             (list (list (list 0 "product_unique_id" "unique_id")))
             (list) nil
@@ -315,7 +315,7 @@ test_cases:
         (define minimum
           (scan_join_order (session "__memcp_tx")
             (list a b c d)
-            (map (list a b c d) (lambda (_) (list "scan_access" 0 "scan" 0 -1))) '() (list (list) (list) (list) (list))
+            (map (list a b c d) (lambda (_) (list 369435906932736))) '() (list (list) (list) (list) (list))
             (list (lambda () true) (lambda () true) (lambda () true) (lambda () true))
             (list
               (list (list 0 "apk" "ak"))
@@ -338,7 +338,7 @@ test_cases:
         (define d (table "memcp-tests" "so_perf_d"))
         (define minimum
           (scan_order_batch_accept tx a
-            '("scan_access" 0 "scan" 0 -1) '() (lambda (a_batch)
+            '(369435906932736) '() (lambda (a_batch)
               (begin
                 (define b_batch
                   (recset_project_join tx a_batch '("apk") b '("ak")))
@@ -373,7 +373,7 @@ test_cases:
         (define found
           (scan_join_order (session "__memcp_tx")
             (list measures nodes sensors)
-            (map (list measures nodes sensors) (lambda (_) (list "scan_access" 0 "scan" 0 -1))) '() (list (list "ts") (list "serial") (list "type"))
+            (map (list measures nodes sensors) (lambda (_) (list 369435906932736))) '() (list (list "ts") (list "serial") (list "type"))
             (list
               (lambda (ts) (and (>= ts 0) (<= ts 120000)))
               (lambda (serial) (equal? serial "TEST0000003"))

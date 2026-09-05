@@ -2118,16 +2118,28 @@ probe. */
 (define compiled_scan_lookup_boundaries (lambda (lookup_cols slot)
 	(if (empty_list? lookup_cols)
 		'()
-		(merge (list "equal" (car lookup_cols) slot slot 3 "")
+		(merge (list "equal" (car lookup_cols) (+ 15032418304 (* slot 65537)) "")
 			(compiled_scan_lookup_boundaries (cdr lookup_cols) (+ slot 1))))))
+
+(define compiled_scan_access_header (lambda (count consumer projections mapper_slot)
+	(+ 369435906932736
+		(* (match consumer
+			"scan_covered" 1
+			"exists" 2
+			"value" 3
+			"map" 4
+			_ 0) 1099511627776)
+		(* count 268435456)
+		(* projections 65536)
+		(+ mapper_slot 1))))
 
 (define compiled_scan_lookup_expr (lambda (tx table lookup_cols lookup_values consumer map_cols mapper)
 	(list (quote scan_lookup)
 		tx
 		table
 		(list (quote quote) (merge
-			(list "scan_access" (count lookup_cols) consumer (count map_cols)
-				(if (equal? consumer "map") (count lookup_cols) -1))
+			(list (compiled_scan_access_header (count lookup_cols) consumer (count map_cols)
+				(if (equal? consumer "map") (count lookup_cols) -1)))
 			(compiled_scan_lookup_boundaries lookup_cols 0)
 			map_cols))
 		(cons (quote list) (if (equal? consumer "map")

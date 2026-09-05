@@ -147,7 +147,7 @@ func collectPartitionOrderedCandidateBatch(currentTx *TxContext, source scanOrde
 				queue := func() *shardqueue {
 					defer release()
 					defer shard.activeScanners.Add(-1)
-					return shard.scan_order(scanAccess{suffix: bounds}, lower, upperLast, nil, condition,
+					return shard.scan_order(runtimeScanAccess(bounds), lower, upperLast, nil, condition,
 						nil, scm.NewNil(), sortcols, sortdirs, 0, remainingOffset,
 						limit-len(records), nil, currentTx, sessionState)
 				}()

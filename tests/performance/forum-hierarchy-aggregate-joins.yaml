@@ -247,11 +247,11 @@ test_cases:
             (lambda (count forumID)
               (begin
                 (define child_count
-                  (scan tx forums '("scan_access" 1 "scan" 0 -1 "equal" "parentID" 0 0 3 "") (list forumID)
+                  (scan tx forums '(369436175368192 "equal" "parentID" 15032418304 "") (list forumID)
                     '("parentID") (lambda (parentID) (equal?? parentID forumID))
                     '() (lambda (acc) (+ acc 1)) 0 + false))
                 (define thread_stats
-                  (scan tx threads '("scan_access" 1 "scan" 0 -1 "equal" "forumID" 0 0 3 "") (list forumID)
+                  (scan tx threads '(369436175368192 "equal" "forumID" 15032418304 "") (list forumID)
                     '("forumID") (lambda (threadForumID) (equal?? threadForumID forumID))
                     '("postCount" "lastPostID")
                     (lambda (acc postCount lastPostID)
@@ -260,14 +260,14 @@ test_cases:
                     (lambda (acc row) (list (+ (car acc) (car row)) (max (cadr acc) (cadr row))))
                     false))
                 (define post
-                  (scan tx posts '("scan_access" 1 "scan" 0 -1 "equal" "postID" 0 0 3 "") (list (cadr thread_stats))
+                  (scan tx posts '(369436175368192 "equal" "postID" 15032418304 "") (list (cadr thread_stats))
                     '("postID") (lambda (postID) (equal?? postID (cadr thread_stats)))
                     '("authorID" "datePosted")
                     (lambda (_old authorID datePosted) (list authorID datePosted))
                     nil (lambda (_old row) row) true))
                 (define username
                   (if (nil? post) nil
-                    (scan tx users '("scan_access" 1 "scan" 0 -1 "equal" "userID" 0 0 3 "") (list (car post))
+                    (scan tx users '(369436175368192 "equal" "userID" 15032418304 "") (list (car post))
                       '("userID") (lambda (userID) (equal?? userID (car post)))
                       '("username") (lambda (_old value) value)
                       nil (lambda (_old value) value) true)))

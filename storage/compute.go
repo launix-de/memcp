@@ -683,7 +683,7 @@ func (t *table) invalidateORCFromSortKey(colName string, sortKeys []scm.Scmer) {
 			s.ensureMainCount(false)
 			var buf [1024]uint32
 			rowVals := make([]scm.Scmer, nCols)
-			s.iterateIndex(nil, scanAccess{suffix: bounds}, lower, upperLast, len(s.inserts), buf[:], 1, nil, func(batch []uint32) bool {
+			s.iterateIndex(nil, runtimeScanAccess(bounds), lower, upperLast, len(s.inserts), buf[:], 1, nil, func(batch []uint32) bool {
 				for _, idx := range batch {
 					if s.deletions.Get(uint(idx)) {
 						continue
@@ -941,21 +941,26 @@ func extractCompiledScanEqualityJoins(schemaExpr, valuesExpr scm.Scmer, computor
 	if !schemaOK {
 		return nil, nil
 	}
-	if len(schema) < scanAccessSchemaHeaderSize || stripSourceInfo(schema[0]).String() != scanAccessSchemaName {
+	if len(schema) < scanAccessSchemaHeaderSize {
+		return nil, nil
+	}
+	meta, valid := decodeScanAccessHeader(stripSourceInfo(schema[0]))
+	if !valid {
 		return nil, nil
 	}
 	valueItems, valuesOK := scanStaticListElements(valuesExpr)
 	if !valuesOK {
 		return nil, nil
 	}
-	count := int(scm.ToInt(stripSourceInfo(schema[1])))
+	count := meta.count
 	for i := 0; i < count; i++ {
 		offset := scanAccessSchemaHeaderSize + i*scanAccessBoundaryStride
 		if offset+scanAccessBoundaryStride > len(schema) || stripSourceInfo(schema[offset]).String() != "equal" {
 			continue
 		}
-		lowerSlot := int(scm.ToInt(stripSourceInfo(schema[offset+2])))
-		upperSlot := int(scm.ToInt(stripSourceInfo(schema[offset+3])))
+		boundaryMeta := decodeScanAccessBoundaryMeta(stripSourceInfo(schema[offset+2]))
+		lowerSlot := boundaryMeta.lowerSlot
+		upperSlot := boundaryMeta.upperSlot
 		if lowerSlot < 0 || lowerSlot != upperSlot || lowerSlot >= len(valueItems) {
 			continue
 		}
@@ -1297,7 +1302,7 @@ func isAdditiveAggregate(scanNode []scm.Scmer) bool {
 func compiledScanAccessExpressions(filterCols, filter scm.Scmer) (scm.Scmer, scm.Scmer) {
 	schema, bindings, _ := compileScanAccess(filterCols, filter)
 	return scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), schema}),
-		scm.NewSlice(append([]scm.Scmer{scm.NewSymbol("list")}, bindings...))
+		scanAccessValuesExpr(bindings)
 }
 
 // COUNT-style helper columns use a literal 1 map function. Their value also

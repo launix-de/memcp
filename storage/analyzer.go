@@ -137,6 +137,7 @@ type columnboundaries struct {
 	upperBatch       bool
 	upperBatchSubidx int
 	collation        string // non-empty only for collation-sensitive matchers
+	nullSafe         bool   // equality originated from SQL's NULL-aware equal??
 	// order is the complete strict relation for an ORDER BY suffix, including
 	// direction, collation, and NULL placement. Nil means the column is only a
 	// filter boundary and uses its schema's canonical ascending relation.
@@ -153,17 +154,8 @@ type columnboundaries struct {
 
 type boundaries []columnboundaries
 
-// scanAccess is the allocation-free runtime view of the physical access
-// contract. The common SQL path reads static boundary metadata directly from
-// the optimizer-produced Scheme schema and binds only values supplied in the
-// adjacent flat runtime array. suffix is reserved for physical constraints
-// introduced after local-filter compilation, such as a RecSet input or join
-// batch keys; it is never used to re-materialize the compiled schema.
-type scanAccess struct {
-	schema []scm.Scmer
-	values []scm.Scmer
+type scanAccessRuntime struct {
 	// computedMapCols is populated only for compiled computed-index probes.
-	// Ordinary scans keep this nil and retain their allocation-free binder.
 	computedMapCols []string
 	// inserted contains runtime-only ordered boundaries. insertAt places them
 	// between the compiled sorted prefix and advisory matchers without copying
@@ -174,49 +166,117 @@ type scanAccess struct {
 	// filterCovered is an unconditional proof supplied by internal callers which
 	// construct mandatory physical boundaries directly.
 	filterCovered bool
+	// The first access dimension is consulted by every physical layer. Keeping
+	// this scalar decode beside the pooled scan scratch avoids both repeated SCM
+	// decoding and the old materialized boundaries array.
+	firstBoundary    columnboundaries
+	hasFirstBoundary bool
+}
+
+// scanAccess is the allocation-free runtime view of the physical access
+// contract. The common SQL path reads static boundary metadata directly from
+// the optimizer-produced Scheme schema and binds only values supplied in the
+// adjacent flat runtime array. suffix is reserved for physical constraints
+// introduced after local-filter compilation, such as a RecSet input or join
+// batch keys; it is never used to re-materialize the compiled schema.
+type scanAccess struct {
+	schema        []scm.Scmer
+	values        []scm.Scmer
+	compiledCount int
+	runtime       *scanAccessRuntime
+	// native is an invocation-local, already decoded view used only while an
+	// index loop is running (not part of the Scheme scan ABI or cached plan).
+	// Batched probes populate it from bounded scratch so the index hot path has
+	// the same direct slice access as precompiled storage constraints.
+	native boundaries
 	// plannerFilterCovered records the complete-subtree proof encoded in a
 	// static access schema. Mutating scans still retain their callback.
 	plannerFilterCovered bool
 }
 
-func (a scanAccess) len() int {
-	if len(a.schema) == 0 {
-		return len(a.inserted) + len(a.suffix)
+func runtimeScanAccess(suffix boundaries) scanAccess {
+	if len(suffix) == 0 {
+		return scanAccess{}
 	}
-	return int(scm.ToInt(a.schema[1])) + len(a.inserted) + len(a.suffix)
+	return scanAccess{runtime: &scanAccessRuntime{suffix: suffix}}
+}
+
+func coveredRuntimeScanAccess(suffix boundaries) scanAccess {
+	return scanAccess{runtime: &scanAccessRuntime{suffix: suffix, filterCovered: true}}
+}
+
+func (a *scanAccess) ensureRuntime() *scanAccessRuntime {
+	if a.runtime == nil {
+		a.runtime = &scanAccessRuntime{}
+	}
+	return a.runtime
+}
+
+func (a scanAccess) useScratch(scratch *scanAnalyzeScratch) scanAccess {
+	if a.runtime != nil {
+		scratch.runtime = *a.runtime
+	}
+	a.runtime = &scratch.runtime
+	if a.compiledCount > 0 {
+		a.runtime.firstBoundary = a.decodeBoundary(0)
+		a.runtime.hasFirstBoundary = true
+	}
+	return a
+}
+
+func (a scanAccess) len() int {
+	if a.native != nil {
+		return len(a.native)
+	}
+	if a.runtime == nil {
+		return a.compiledCount
+	}
+	return a.compiledCount + len(a.runtime.inserted) + len(a.runtime.suffix)
 }
 
 func (a scanAccess) boundary(index int) columnboundaries {
-	compiled := 0
-	if len(a.schema) != 0 {
-		compiled = int(scm.ToInt(a.schema[1]))
+	if a.native != nil {
+		return a.native[index]
 	}
-	insertAt := a.insertAt
+	compiled := a.compiledCount
+	insertAt := compiled
+	var inserted, suffix boundaries
+	if a.runtime != nil {
+		insertAt = a.runtime.insertAt
+		inserted = a.runtime.inserted
+		suffix = a.runtime.suffix
+	}
 	if insertAt < 0 || insertAt > compiled {
 		insertAt = compiled
 	}
-	if index >= insertAt && index < insertAt+len(a.inserted) {
-		return a.inserted[index-insertAt]
+	if index >= insertAt && index < insertAt+len(inserted) {
+		return inserted[index-insertAt]
 	}
-	if index >= insertAt+len(a.inserted) {
-		index -= len(a.inserted)
+	if index >= insertAt+len(inserted) {
+		index -= len(inserted)
 	}
 	if index >= compiled {
-		return a.suffix[index-compiled]
+		return suffix[index-compiled]
 	}
+	if index == 0 && a.runtime != nil && a.runtime.hasFirstBoundary {
+		return a.runtime.firstBoundary
+	}
+	return a.decodeBoundary(index)
+}
+
+func (a scanAccess) decodeBoundary(index int) columnboundaries {
 	offset := scanAccessSchemaHeaderSize + index*scanAccessBoundaryStride
-	lowerSlot := int(scm.ToInt(a.schema[offset+2]))
-	upperSlot := int(scm.ToInt(a.schema[offset+3]))
-	flags := scm.ToInt(a.schema[offset+4])
+	meta := decodeScanAccessBoundaryMeta(a.schema[offset+2])
 	boundary := columnboundaries{
 		col:            a.schema[offset+1].String(),
 		lower:          scm.NewNil(),
-		lowerInclusive: flags&1 != 0,
+		lowerInclusive: meta.flags&1 != 0,
 		upper:          scm.NewNil(),
-		upperInclusive: flags&2 != 0,
-		collation:      a.schema[offset+5].String(),
+		upperInclusive: meta.flags&2 != 0,
+		collation:      a.schema[offset+3].String(),
+		nullSafe:       meta.flags&4 != 0,
 	}
-	mapperSlot := int(flags>>3) - 1
+	mapperSlot := int(meta.flags>>3) - 1
 	if mapperSlot >= 0 {
 		if !a.values[mapperSlot].IsSlice() {
 			panic("scan access computed-index descriptor is invalid")
@@ -226,7 +286,7 @@ func (a scanAccess) boundary(index int) columnboundaries {
 			panic("scan access computed-index descriptor is invalid")
 		}
 		boundary.col = descriptor[0].String()
-		boundary.mapCols = a.computedMapCols
+		boundary.mapCols = a.runtime.computedMapCols
 		boundary.mapFn = descriptor[1]
 	}
 	switch a.schema[offset].String() {
@@ -241,17 +301,17 @@ func (a scanAccess) boundary(index int) columnboundaries {
 	default:
 		panic("scan access schema has an unknown matcher")
 	}
-	if lowerSlot >= 0 {
-		boundary.lower = a.values[lowerSlot]
-	} else if lowerSlot <= -2 {
+	if meta.lowerSlot >= 0 {
+		boundary.lower = a.values[meta.lowerSlot]
+	} else if meta.lowerSlot <= -2 {
 		boundary.lowerBatch = true
-		boundary.lowerBatchSubidx = -lowerSlot - 2
+		boundary.lowerBatchSubidx = -meta.lowerSlot - 2
 	}
-	if upperSlot >= 0 {
-		boundary.upper = a.values[upperSlot]
-	} else if upperSlot <= -2 {
+	if meta.upperSlot >= 0 {
+		boundary.upper = a.values[meta.upperSlot]
+	} else if meta.upperSlot <= -2 {
 		boundary.upperBatch = true
-		boundary.upperBatchSubidx = -upperSlot - 2
+		boundary.upperBatchSubidx = -meta.upperSlot - 2
 	}
 	return boundary
 }
@@ -260,20 +320,15 @@ func (a scanAccess) boundary(index int) columnboundaries {
 // NULL is otherwise also the unbounded-range sentinel, so this check must use
 // the schema slot rather than the materialized boundary value.
 func (a scanAccess) impossible() bool {
-	compiled := 0
-	if len(a.schema) != 0 {
-		compiled = int(scm.ToInt(a.schema[1]))
-	}
+	compiled := a.compiledCount
 	for i := 0; i < compiled; i++ {
 		offset := scanAccessSchemaHeaderSize + i*scanAccessBoundaryStride
 		kind := a.schema[offset].String()
-		flags := scm.ToInt(a.schema[offset+4])
-		lowerSlot := int(scm.ToInt(a.schema[offset+2]))
-		upperSlot := int(scm.ToInt(a.schema[offset+3]))
-		if lowerSlot >= 0 && a.values[lowerSlot].IsNil() && (kind == "range" || (kind == "equal" && flags&4 == 0)) {
+		meta := decodeScanAccessBoundaryMeta(a.schema[offset+2])
+		if meta.lowerSlot >= 0 && a.values[meta.lowerSlot].IsNil() && (kind == "range" || (kind == "equal" && meta.flags&4 == 0)) {
 			return true
 		}
-		if upperSlot >= 0 && a.values[upperSlot].IsNil() && kind == "range" {
+		if meta.upperSlot >= 0 && a.values[meta.upperSlot].IsNil() && kind == "range" {
 			return true
 		}
 	}
@@ -284,17 +339,13 @@ func (a scanAccess) impossibleBatch(stride int, batchdata []scm.Scmer, batchid i
 	if a.impossible() {
 		return true
 	}
-	compiled := 0
-	if len(a.schema) != 0 {
-		compiled = int(scm.ToInt(a.schema[1]))
-	}
+	compiled := a.compiledCount
 	for i := 0; i < compiled; i++ {
 		offset := scanAccessSchemaHeaderSize + i*scanAccessBoundaryStride
 		kind := a.schema[offset].String()
-		flags := scm.ToInt(a.schema[offset+4])
-		for _, slotOffset := range []int{2, 3} {
-			slot := int(scm.ToInt(a.schema[offset+slotOffset]))
-			if slot <= -2 && (kind == "range" || (kind == "equal" && flags&4 == 0)) {
+		meta := decodeScanAccessBoundaryMeta(a.schema[offset+2])
+		for _, slot := range []int{meta.lowerSlot, meta.upperSlot} {
+			if slot <= -2 && (kind == "range" || (kind == "equal" && meta.flags&4 == 0)) {
 				subindex := -slot - 2
 				position := batchid*stride + subindex
 				if position < 0 || position >= len(batchdata) || batchdata[position].IsNil() {
@@ -328,31 +379,54 @@ func materializeBatchScanAccess(access scanAccess, stride int, batchdata []scm.S
 	return materializeBatchBoundaries(materializeScanAccess(access), stride, batchdata, batchid)
 }
 
+func materializeBatchScanAccessInto(storage []columnboundaries, access scanAccess, stride int, batchdata []scm.Scmer, batchid uint32) boundaries {
+	count := access.len()
+	if cap(storage) < count {
+		storage = make(boundaries, count)
+	} else {
+		storage = storage[:count]
+	}
+	base := int(batchid) * stride
+	for i := range storage {
+		boundary := access.boundary(i)
+		if boundary.lowerBatch {
+			boundary.lower = batchdata[base+boundary.lowerBatchSubidx]
+		}
+		if boundary.upperBatch {
+			boundary.upper = batchdata[base+boundary.upperBatchSubidx]
+		}
+		storage[i] = boundary
+	}
+	return storage
+}
+
 func scanAccessFromScheme(schemaValue scm.Scmer, values []scm.Scmer, suffix boundaries) (scanAccess, bool) {
 	if !schemaValue.IsSlice() {
 		return scanAccess{}, false
 	}
 	schema := schemaValue.Slice()
 	if len(schema) == 0 {
-		return scanAccess{suffix: suffix}, true
+		return runtimeScanAccess(suffix), true
 	}
-	if len(schema) < scanAccessSchemaHeaderSize || schema[0].String() != scanAccessSchemaName {
+	if len(schema) < scanAccessSchemaHeaderSize {
 		return scanAccess{}, false
 	}
-	count := int(scm.ToInt(schema[1]))
-	projectionCount := int(scm.ToInt(schema[3]))
+	meta, valid := decodeScanAccessHeader(schema[0])
+	if !valid {
+		return scanAccess{}, false
+	}
+	count := meta.count
+	projectionCount := meta.projections
 	if count < 0 || projectionCount < 0 || len(schema) != scanAccessSchemaHeaderSize+count*scanAccessBoundaryStride+projectionCount {
 		panic("scan access schema has an invalid boundary count")
 	}
 	computed := false
 	for offset, remaining := scanAccessSchemaHeaderSize, count; remaining > 0; offset, remaining = offset+scanAccessBoundaryStride, remaining-1 {
-		for _, slotOffset := range []int{2, 3} {
-			slot := int(scm.ToInt(schema[offset+slotOffset]))
-			if slot >= len(values) {
-				panic("scan access value slot is out of bounds")
-			}
+		boundaryMeta := decodeScanAccessBoundaryMeta(schema[offset+2])
+		if boundaryMeta.lowerSlot >= len(values) || boundaryMeta.upperSlot >= len(values) {
+			panic("scan access value slot is out of bounds")
 		}
-		mapperSlot := int(scm.ToInt(schema[offset+4])>>3) - 1
+		mapperSlot := int(boundaryMeta.flags>>3) - 1
 		if mapperSlot >= 0 {
 			if mapperSlot >= len(values) {
 				panic("scan access mapper slot is out of bounds")
@@ -368,10 +442,12 @@ func scanAccessFromScheme(schemaValue scm.Scmer, values []scm.Scmer, suffix boun
 			computedMapCols[i] = schema[projectionAt+i].String()
 		}
 	}
-	return scanAccess{
-		schema: schema, values: values, computedMapCols: computedMapCols, suffix: suffix,
-		plannerFilterCovered: schema[2].String() == scanAccessConsumerCoveredScan,
-	}, true
+	access := scanAccess{schema: schema, values: values, compiledCount: count,
+		plannerFilterCovered: meta.consumer == scanAccessConsumerCoveredScan}
+	if computed || len(suffix) > 0 {
+		access.runtime = &scanAccessRuntime{computedMapCols: computedMapCols, suffix: suffix}
+	}
+	return access, true
 }
 
 // IndexBoundary is the public boundary value returned by custom analyzers. Its
@@ -794,10 +870,18 @@ func extractSingleBoundary(ctx *indexAnalyzeContext, node scm.Scmer) (columnboun
 		return columnboundaries{}, false
 	}
 	if len(v) >= 3 && (ctx.FunctionIs(v[0], "equal?") || ctx.FunctionIs(v[0], "equal??")) {
-		if bound, found := makeComparison(v[1], v[2], EqualMatcher, true, true); found {
-			return bound, true
+		nullSafe := ctx.FunctionIs(v[0], "equal??")
+		finish := func(bound columnboundaries, found bool) (columnboundaries, bool) {
+			if found && nullSafe {
+				bound.nullSafe = true
+				bound.collation = "utf8mb4_general_ci"
+			}
+			return bound, found
 		}
-		return makeComparison(v[2], v[1], EqualMatcher, true, true)
+		if bound, found := makeComparison(v[1], v[2], EqualMatcher, true, true); found {
+			return finish(bound, true)
+		}
+		return finish(makeComparison(v[2], v[1], EqualMatcher, true, true))
 	}
 	if len(v) >= 3 && (ctx.FunctionIs(v[0], "<") || ctx.FunctionIs(v[0], "<=")) {
 		inclusive := ctx.FunctionIs(v[0], "<=")
@@ -864,7 +948,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 // lowered into an identical sorted boundary. Ordered scans may use this proof
 // to size their index batches from LIMIT without turning residual rejection
 // into a sequence of tiny batches. Additional ORDER-only boundaries are fine.
-func sortedBoundariesCoverCondition(conditionCols []string, condition scm.Scmer, bounds boundaries) bool {
+func sortedBoundariesCoverCondition(conditionCols []string, condition scm.Scmer, access scanAccess) bool {
 	ctx, ok := conditionAnalyzeContext(conditionCols, condition)
 	if !ok {
 		return false
@@ -877,16 +961,30 @@ func sortedBoundariesCoverCondition(conditionCols []string, condition scm.Scmer,
 		if want.matcher == nil || !want.matcher.IsSorted() || want.lowerBatch || want.upperBatch {
 			return false
 		}
+		// A runtime NULL bound intentionally widens equal?? to an unbounded
+		// candidate scan so the residual can implement NULL-aware equality.
+		if want.nullSafe && want.lower.IsNil() {
+			return false
+		}
 		covered := false
-		for _, have := range bounds {
+		rangeSeen := false
+		for i := 0; i < access.len(); i++ {
+			have := access.boundary(i)
+			if have.matcher == nil || !have.matcher.IsSorted() || rangeSeen {
+				break
+			}
 			if have.col != want.col || have.matcher == nil ||
 				!matcherKindEqual(have.matcher, want.matcher) ||
 				have.lowerBatch || have.upperBatch ||
 				have.lowerInclusive != want.lowerInclusive ||
 				have.upperInclusive != want.upperInclusive ||
+				have.nullSafe != want.nullSafe ||
 				have.collation != want.collation ||
 				!boundaryValueEqual(have.lower, want.lower) ||
 				!boundaryValueEqual(have.upper, want.upper) {
+				if have.matcher == RangeMatcher {
+					rangeSeen = true
+				}
 				continue
 			}
 			covered = true

@@ -393,11 +393,10 @@ func rewriteInnerScanToBatch(inner []scm.Scmer, pseudocols, pseudoparams []scm.S
 	}
 	// A direct SCM caller may provide an empty access schema. Compile the
 	// rewritten residual once here so scan_batch still receives the one ABI.
-	if schemaItems, schemaOK := scanStaticListElements(accessSchema); schemaOK &&
-		(len(schemaItems) == 0 || len(schemaItems) >= scanAccessSchemaHeaderSize && scm.ToInt(schemaItems[1]) == 0) {
+	if schemaItems, schemaOK := scanStaticListElements(accessSchema); schemaOK && scanAccessSchemaIsEmpty(schemaItems) {
 		if compiledSchema, bindings, compiled := compileScanAccessMode(filterColumns, filterFn, true); compiled {
 			accessSchema = scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), compiledSchema})
-			accessValues = scm.NewSlice(append([]scm.Scmer{scm.NewSymbol("list")}, bindings...))
+			accessValues = scanAccessValuesExpr(bindings)
 			_, residual := pruneScanResidual(filterColumns, filterFn, true)
 			accessSchema = scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), markCoveredScanAccessSchema(compiledSchema, residual)})
 		}
@@ -423,6 +422,14 @@ func rewriteInnerScanToBatch(inner []scm.Scmer, pseudocols, pseudoparams []scm.S
 	return result
 }
 
+func scanAccessSchemaIsEmpty(schema []scm.Scmer) bool {
+	if len(schema) == 0 {
+		return true
+	}
+	meta, valid := decodeScanAccessHeader(schema[0])
+	return valid && meta.count == 0
+}
+
 // rewriteBatchScanAccess converts runtime access-value slots which directly
 // reference an outer row into the negative #N slots understood by scan_batch.
 // More complex outer-dependent access expressions are deliberately rejected:
@@ -436,7 +443,10 @@ func rewriteBatchScanAccess(schemaExpr, valuesExpr scm.Scmer, mapping map[string
 	if len(schema) == 0 {
 		return schemaExpr, valuesExpr, true
 	}
-	if len(schema) < scanAccessSchemaHeaderSize || schema[0].String() != scanAccessSchemaName {
+	if len(schema) < scanAccessSchemaHeaderSize {
+		return scm.NewNil(), scm.NewNil(), false
+	}
+	if _, valid := decodeScanAccessHeader(schema[0]); !valid {
 		return scm.NewNil(), scm.NewNil(), false
 	}
 	values, ok := scanStaticListElements(valuesExpr)
@@ -460,16 +470,22 @@ func rewriteBatchScanAccess(schemaExpr, valuesExpr scm.Scmer, mapping map[string
 			continue
 		}
 		rewrittenValues[valueSlot] = scm.NewNil()
-		encodedSlot := scm.NewInt(int64(-2 - batchSlot))
-		boundaryCount := int(scm.ToInt(rewrittenSchema[1]))
+		encodedSlot := -2 - batchSlot
+		header, valid := decodeScanAccessHeader(rewrittenSchema[0])
+		if !valid {
+			return scm.NewNil(), scm.NewNil(), false
+		}
+		boundaryCount := header.count
 		for boundary := 0; boundary < boundaryCount; boundary++ {
 			base := scanAccessSchemaHeaderSize + boundary*scanAccessBoundaryStride
-			if int(scm.ToInt(rewrittenSchema[base+2])) == valueSlot {
-				rewrittenSchema[base+2] = encodedSlot
+			meta := decodeScanAccessBoundaryMeta(rewrittenSchema[base+2])
+			if meta.lowerSlot == valueSlot {
+				meta.lowerSlot = encodedSlot
 			}
-			if int(scm.ToInt(rewrittenSchema[base+3])) == valueSlot {
-				rewrittenSchema[base+3] = encodedSlot
+			if meta.upperSlot == valueSlot {
+				meta.upperSlot = encodedSlot
 			}
+			rewrittenSchema[base+2] = newScanAccessBoundaryMeta(meta.lowerSlot, meta.upperSlot, meta.flags)
 		}
 	}
 	return scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), scm.NewSlice(rewrittenSchema)}),

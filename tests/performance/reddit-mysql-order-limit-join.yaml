@@ -81,7 +81,7 @@ test_cases:
               (table "memcp-tests" "reddit_mysql_account"))
             (map (list
               (table "memcp-tests" "reddit_mysql_test2")
-              (table "memcp-tests" "reddit_mysql_account")) (lambda (_) (list "scan_access" 0 "scan" 0 -1))) '() (list (list "id" "active") (list "age" "gender"))
+              (table "memcp-tests" "reddit_mysql_account")) (lambda (_) (list 369435906932736))) '() (list (list "id" "active") (list "age" "gender"))
             (list
               (lambda (id active) (and (> id 0) (equal? active true)))
               (lambda (age gender)

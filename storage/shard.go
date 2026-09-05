@@ -2716,7 +2716,7 @@ func (t *storageShard) GetRecordidForUnique(columns []string, values []scm.Scmer
 	// Use iterateIndex for O(log n) lookup (builds index lazily if needed)
 	// Small buffer for existence check: stop early after first match
 	var buf [8]uint32
-	t.iterateIndex(currentTx, scanAccess{suffix: bounds}, lower, upperLast, len(t.inserts), buf[:], 1, nil, func(batch []uint32) bool {
+	t.iterateIndex(currentTx, runtimeScanAccess(bounds), lower, upperLast, len(t.inserts), buf[:], 1, nil, func(batch []uint32) bool {
 		for _, idx := range batch {
 			// Verify all columns match (iterateIndex may return superset for range boundaries)
 			matched := true

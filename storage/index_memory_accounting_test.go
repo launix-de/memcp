@@ -40,7 +40,7 @@ func TestPlannerIndexProbeDoesNotIncreaseIndexSavings(t *testing.T) {
 	lower, upperLast := indexFromBoundaries(bounds)
 	var buf [8]uint32
 	shard.mu.RLock()
-	shard.iterateIndex(nil, scanAccess{suffix: bounds}, lower, upperLast, len(shard.inserts), buf[:], 0, nil, func(batch []uint32) bool {
+	shard.iterateIndex(nil, runtimeScanAccess(bounds), lower, upperLast, len(shard.inserts), buf[:], 0, nil, func(batch []uint32) bool {
 		return true
 	})
 	shard.mu.RUnlock()

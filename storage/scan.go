@@ -32,13 +32,82 @@ type scanError struct {
 
 const scanAnalyzeScratchCapacity = 8
 
-const scanAccessSchemaName = "scan_access"
-
-const scanAccessSchemaHeaderSize = 5
-const scanAccessBoundaryStride = 6
+const scanAccessSchemaHeaderSize = 1
+const scanAccessBoundaryStride = 4
 
 const scanAccessConsumerScan = "scan"
 const scanAccessConsumerCoveredScan = "scan_covered"
+
+const scanAccessHeaderMagic = 0x15 << 44
+
+type scanAccessSchemaMeta struct {
+	count, projections, mapperSlot int
+	consumer                       string
+}
+
+type scanAccessBoundaryMeta struct {
+	lowerSlot, upperSlot int
+	flags                int64
+}
+
+func newScanAccessBoundaryMeta(lowerSlot, upperSlot int, flags int64) scm.Scmer {
+	if lowerSlot < -1<<15 || lowerSlot >= 1<<15 || upperSlot < -1<<15 || upperSlot >= 1<<15 || flags < 0 || flags >= 1<<16 {
+		panic("scan access boundary metadata exceeds packed limits")
+	}
+	return scm.NewInt(int64(lowerSlot+1<<15) | int64(upperSlot+1<<15)<<16 | flags<<32)
+}
+
+func decodeScanAccessBoundaryMeta(value scm.Scmer) scanAccessBoundaryMeta {
+	raw := scm.ToInt(value)
+	return scanAccessBoundaryMeta{
+		lowerSlot: int(raw&0xffff) - 1<<15,
+		upperSlot: int(raw>>16&0xffff) - 1<<15,
+		flags:     int64(raw >> 32 & 0xffff),
+	}
+}
+
+func newScanAccessHeader(count int, consumer string, projections int, mapperSlot int) scm.Scmer {
+	consumerID := int64(0)
+	switch consumer {
+	case scanAccessConsumerScan:
+	case scanAccessConsumerCoveredScan:
+		consumerID = 1
+	case "exists":
+		consumerID = 2
+	case "value":
+		consumerID = 3
+	case "map":
+		consumerID = 4
+	default:
+		panic("unknown scan access consumer " + consumer)
+	}
+	if count < 0 || count >= 1<<12 || projections < 0 || projections >= 1<<12 || mapperSlot < -1 || mapperSlot >= 1<<12-1 {
+		panic("scan access header exceeds packed limits")
+	}
+	return scm.NewInt(int64(scanAccessHeaderMagic) | consumerID<<40 | int64(count)<<28 | int64(projections)<<16 | int64(mapperSlot+1))
+}
+
+func decodeScanAccessHeader(value scm.Scmer) (scanAccessSchemaMeta, bool) {
+	raw := scm.ToInt(value)
+	if raw&(0xff<<44) != scanAccessHeaderMagic {
+		return scanAccessSchemaMeta{}, false
+	}
+	consumer := scanAccessConsumerScan
+	switch raw >> 40 & 0xf {
+	case 0:
+	case 1:
+		consumer = scanAccessConsumerCoveredScan
+	case 2:
+		consumer = "exists"
+	case 3:
+		consumer = "value"
+	case 4:
+		consumer = "map"
+	default:
+		return scanAccessSchemaMeta{}, false
+	}
+	return scanAccessSchemaMeta{count: int(raw >> 28 & 0xfff), projections: int(raw >> 16 & 0xfff), mapperSlot: int(raw&0xfff) - 1, consumer: consumer}, true
+}
 
 var emptyScanAccessSchema = newScanAccessSchema(scanAccessConsumerScan, nil, -1)
 
@@ -49,8 +118,8 @@ var emptyScanAccessSchema = newScanAccessSchema(scanAccessConsumerScan, nil, -1)
 // fit in these inline buffers; unusual wide predicates retain the ordinary
 // append fallback without changing analyzer semantics.
 type scanAnalyzeScratch struct {
-	boundaries [scanAnalyzeScratchCapacity]columnboundaries
-	lower      [scanAnalyzeScratchCapacity]scm.Scmer
+	runtime scanAccessRuntime
+	lower   [scanAnalyzeScratchCapacity]scm.Scmer
 }
 
 var scanAnalyzeScratchPool = sync.Pool{
@@ -62,7 +131,7 @@ func acquireScanAnalyzeScratch() *scanAnalyzeScratch {
 }
 
 func releaseScanAnalyzeScratch(scratch *scanAnalyzeScratch) {
-	clear(scratch.boundaries[:])
+	scratch.runtime = scanAccessRuntime{}
 	clear(scratch.lower[:])
 	scanAnalyzeScratchPool.Put(scratch)
 }
@@ -194,23 +263,47 @@ func scanStaticColumns(expr scm.Scmer) ([]scm.Scmer, bool) {
 	return columns, true
 }
 
+func scanAccessValuesExpr(values []scm.Scmer) scm.Scmer {
+	staticValues := make([]scm.Scmer, len(values))
+	for i, value := range values {
+		value = value.WithoutSourceInfo()
+		if value.IsSymbol() {
+			return scm.NewSlice(append([]scm.Scmer{scm.NewSymbol("list")}, values...))
+		}
+		if value.IsSlice() {
+			items := value.Slice()
+			if len(items) != 2 || !scanSymbolIs(items[0], "quote") {
+				return scm.NewSlice(append([]scm.Scmer{scm.NewSymbol("list")}, values...))
+			}
+			value = items[1]
+		}
+		staticValues[i] = value
+	}
+	return scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), scm.NewSlice(staticValues)})
+}
+
 func shiftCompiledScanAccessSlots(schemaValue scm.Scmer, shift int) scm.Scmer {
 	schema := schemaValue.Slice()
 	if len(schema) == 0 {
 		return schemaValue
 	}
 	shifted := append([]scm.Scmer(nil), schema...)
-	for offset, count := scanAccessSchemaHeaderSize, int(scm.ToInt(shifted[1])); count > 0; offset, count = offset+scanAccessBoundaryStride, count-1 {
-		for _, slotOffset := range []int{2, 3} {
-			slot := scm.ToInt(shifted[offset+slotOffset])
-			if slot >= 0 {
-				shifted[offset+slotOffset] = scm.NewInt(int64(slot + shift))
-			}
+	meta, valid := decodeScanAccessHeader(shifted[0])
+	if !valid {
+		panic("invalid scan access header")
+	}
+	for offset, count := scanAccessSchemaHeaderSize, meta.count; count > 0; offset, count = offset+scanAccessBoundaryStride, count-1 {
+		boundaryMeta := decodeScanAccessBoundaryMeta(shifted[offset+2])
+		if boundaryMeta.lowerSlot >= 0 {
+			boundaryMeta.lowerSlot += shift
 		}
-		flags := scm.ToInt(shifted[offset+4])
-		if mapperSlot := flags >> 3; mapperSlot > 0 {
-			shifted[offset+4] = scm.NewInt(int64((flags & 7) | ((mapperSlot + shift) << 3)))
+		if boundaryMeta.upperSlot >= 0 {
+			boundaryMeta.upperSlot += shift
 		}
+		if mapperSlot := boundaryMeta.flags >> 3; mapperSlot > 0 {
+			boundaryMeta.flags = boundaryMeta.flags&7 | (mapperSlot+int64(shift))<<3
+		}
+		shifted[offset+2] = newScanAccessBoundaryMeta(boundaryMeta.lowerSlot, boundaryMeta.upperSlot, boundaryMeta.flags)
 	}
 	return scm.NewSlice(shifted)
 }
@@ -275,12 +368,26 @@ func markCoveredScanAccessSchema(schema, residual scm.Scmer) scm.Scmer {
 		return schema
 	}
 	items := append([]scm.Scmer(nil), schema.Slice()...)
-	items[2] = scm.NewString(scanAccessConsumerCoveredScan)
+	meta, valid := decodeScanAccessHeader(items[0])
+	if !valid {
+		return schema
+	}
+	items[0] = newScanAccessHeader(meta.count, scanAccessConsumerCoveredScan, meta.projections, meta.mapperSlot)
 	return scm.NewSlice(items)
 }
 
 func scanAccessCoversResidual(access scanAccess) bool {
-	return access.filterCovered || access.plannerFilterCovered
+	return access.runtime != nil && access.runtime.filterCovered || access.plannerFilterCovered
+}
+
+// A zero-argument predicate is row-independent in Scheme's functional model.
+// Evaluate it once at scan setup even when an optimizer/JIT wrapper prevents
+// PrepareSerialProc from representing it as SerialProcConstant.
+func scanConditionAlwaysTrue(program *scm.SerialProc, parameterCount int) bool {
+	if program.Kind == scm.SerialProcConstant {
+		return scm.ToBool(program.Value)
+	}
+	return parameterCount == 0 && scm.ToBool(program.Call(nil))
 }
 
 func scanParamColumn(expr scm.Scmer, params, columns []scm.Scmer) (string, bool) {
@@ -548,7 +655,12 @@ func collectCompiledScanBoundaries(node scm.Scmer, params, columns []scm.Scmer, 
 		for i, existing := range result {
 			if existing.column == boundary.column {
 				if existing.kind != "range" || boundary.kind != "range" {
-					return result, false
+					// One physical index dimension can carry only one matcher. Keep
+					// the first useful probe and leave duplicate or conflicting
+					// predicates to the residual filter; rejecting the complete
+					// access program here would turn correlated point lookups into
+					// full scans.
+					return result, true
 				}
 				if (existing.lowerSet || existing.lowerBatch) && (boundary.lowerSet || boundary.lowerBatch) {
 					return result, false
@@ -586,6 +698,27 @@ func scanLiteralDefinitelyNonNil(value scm.Scmer) bool {
 	return value.IsBool() || value.IsInt() || value.IsFloat() || value.IsDate() || value.IsString() || value.IsBSON()
 }
 
+func compiledScanBoundaryCovers(have, want compiledScanBoundary) bool {
+	if have.kind != want.kind || have.column != want.column || have.collation != want.collation || have.nullSafe != want.nullSafe {
+		return false
+	}
+	if want.lowerSet && (!have.lowerSet || have.lowerInclusive != want.lowerInclusive ||
+		!scm.Equal(have.lower.WithoutSourceInfo(), want.lower.WithoutSourceInfo())) {
+		return false
+	}
+	if want.upperSet && (!have.upperSet || have.upperInclusive != want.upperInclusive ||
+		!scm.Equal(have.upper.WithoutSourceInfo(), want.upper.WithoutSourceInfo())) {
+		return false
+	}
+	if want.lowerBatch && (!have.lowerBatch || have.lowerInclusive != want.lowerInclusive || have.lowerBatchSlot != want.lowerBatchSlot) {
+		return false
+	}
+	if want.upperBatch && (!have.upperBatch || have.upperInclusive != want.upperInclusive || have.upperBatchSlot != want.upperBatchSlot) {
+		return false
+	}
+	return true
+}
+
 // pruneScanResidual removes only predicates which the exact physical
 // enumerator guarantees. Candidate hooks such as LIKE and RecSet remain in the
 // residual callback, as do expressions the access compiler did not recognize.
@@ -612,13 +745,13 @@ func pruneScanResidual(columnExpr, filterExpr scm.Scmer, allowBatch bool) (scm.S
 		}
 		return compiled[i].column < compiled[j].column
 	})
-	covered := make(map[string]string, len(compiled))
+	covered := make(map[string]compiledScanBoundary, len(compiled))
 	for _, boundary := range compiled {
 		switch boundary.kind {
 		case "equal":
-			covered[boundary.column] = boundary.kind
+			covered[boundary.column] = boundary
 		case "range":
-			covered[boundary.column] = boundary.kind
+			covered[boundary.column] = boundary
 			// A lexicographic index can enforce only one range suffix.
 			// Later range columns remain residual predicates.
 			goto coverageComplete
@@ -648,7 +781,9 @@ coverageComplete:
 			}
 		}
 		boundary, exact := compileScanComparison(node, params, columns, allowBatch)
-		if exact && (!boundary.nullSafe || scanLiteralDefinitelyNonNil(boundary.lower)) && covered[boundary.column] == boundary.kind {
+		have, physicallyCovered := covered[boundary.column]
+		if exact && physicallyCovered && compiledScanBoundaryCovers(have, boundary) &&
+			(!boundary.nullSafe || scanLiteralDefinitelyNonNil(boundary.lower)) {
 			return scm.NewBool(true)
 		}
 		return node
@@ -696,8 +831,7 @@ func compileScanAccessMode(columnExpr, filterExpr scm.Scmer, allowBatch bool) (s
 		}
 	}
 	schema := make([]scm.Scmer, 0, scanAccessSchemaHeaderSize+len(compiled)*scanAccessBoundaryStride+len(mapCols))
-	schema = append(schema, scm.NewString(scanAccessSchemaName), scm.NewInt(int64(len(compiled))),
-		scm.NewString(scanAccessConsumerScan), scm.NewInt(int64(len(mapCols))), scm.NewInt(-1))
+	schema = append(schema, newScanAccessHeader(len(compiled), scanAccessConsumerScan, len(mapCols), -1))
 	bindings := make([]scm.Scmer, 0, len(compiled)*2)
 	for _, boundary := range compiled {
 		lowerSlot, upperSlot := int64(-1), int64(-1)
@@ -742,7 +876,7 @@ func compileScanAccessMode(columnExpr, filterExpr scm.Scmer, allowBatch bool) (s
 		}
 		schema = append(schema,
 			scm.NewString(boundary.kind), scm.NewString(boundary.column),
-			scm.NewInt(lowerSlot), scm.NewInt(upperSlot), scm.NewInt(flags), scm.NewString(boundary.collation))
+			newScanAccessBoundaryMeta(int(lowerSlot), int(upperSlot), flags), scm.NewString(boundary.collation))
 	}
 	for _, column := range mapCols {
 		schema = append(schema, scm.NewString(column))
@@ -755,8 +889,7 @@ func newScanAccessSchema(consumer string, projections []scm.Scmer, mapperSlot in
 		return scm.NewSlice(nil)
 	}
 	schema := make([]scm.Scmer, 0, scanAccessSchemaHeaderSize+len(projections))
-	schema = append(schema, scm.NewString(scanAccessSchemaName), scm.NewInt(0), scm.NewString(consumer),
-		scm.NewInt(int64(len(projections))), scm.NewInt(int64(mapperSlot)))
+	schema = append(schema, newScanAccessHeader(0, consumer, len(projections), mapperSlot))
 	schema = append(schema, projections...)
 	return scm.NewSlice(schema)
 }
@@ -1271,6 +1404,7 @@ func (t *table) scanExistsFrom(currentTx *TxContext, source *recSet, accessSchem
 	if access.len() > 0 {
 		scratch = acquireScanAnalyzeScratch()
 		defer releaseScanAnalyzeScratch(scratch)
+		access = access.useScratch(scratch)
 	}
 	var lowerStorage []scm.Scmer
 	if scratch != nil {
@@ -1357,7 +1491,10 @@ func (t *table) scanWithBatchFrom(currentTx *TxContext, source *recSet, accessSc
 	// Measure analysis time (boundary extraction, sharding hints)
 	analyzeStart := time.Now()
 	/* analyze query */
-	suffix := requiredAccess.suffix
+	var suffix boundaries
+	if requiredAccess.runtime != nil {
+		suffix = requiredAccess.runtime.suffix
+	}
 	if source != nil {
 		// requiredAccess may be shared by every batch invocation. Copy only when
 		// a RecSet boundary must be appended; the common dynamic point probe can
@@ -1381,6 +1518,7 @@ func (t *table) scanWithBatchFrom(currentTx *TxContext, source *recSet, accessSc
 	if access.len() > 0 {
 		scratch = acquireScanAnalyzeScratch()
 		defer releaseScanAnalyzeScratch(scratch)
+		access = access.useScratch(scratch)
 	}
 	var lowerStorage []scm.Scmer
 	if scratch != nil {
@@ -1647,7 +1785,8 @@ func (t *storageShard) scanFirstRecord(boundaries scanAccess, lower []scm.Scmer,
 	}
 	conditionProgram := scm.PrepareSerialProc(condition)
 	conditionAlwaysTrue := scanAccessCoversResidual(boundaries) ||
-		conditionProgram.Kind == scm.SerialProcConstant && scm.ToBool(conditionProgram.Value)
+		scanConditionAlwaysTrue(&conditionProgram, len(conditionCols)) ||
+		sortedBoundariesCoverCondition(conditionCols, condition, boundaries)
 
 	t.ensureLoaded()
 	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
@@ -1815,7 +1954,8 @@ func (t *storageShard) scan(boundaries scanAccess, lower []scm.Scmer, upperLast 
 	}
 
 	conditionProgram := scm.PrepareSerialProc(condition)
-	conditionAlwaysTrue := conditionProgram.Kind == scm.SerialProcConstant && scm.ToBool(conditionProgram.Value)
+	conditionAlwaysTrue := scanConditionAlwaysTrue(&conditionProgram, len(conditionCols)) ||
+		sortedBoundariesCoverCondition(conditionCols, condition, boundaries)
 	hasMutationCallback := false
 	for _, c := range callbackCols {
 		if c == "$update" || (len(c) > 11 && c[:11] == "$increment:") {
@@ -2145,7 +2285,8 @@ func (t *storageShard) scanBatch(boundaries scanAccess, lower []scm.Scmer, upper
 	}
 
 	conditionProgram := scm.PrepareSerialProc(condition)
-	conditionAlwaysTrue := conditionProgram.Kind == scm.SerialProcConstant && scm.ToBool(conditionProgram.Value)
+	conditionAlwaysTrue := scanConditionAlwaysTrue(&conditionProgram, len(conditionCols)) ||
+		sortedBoundariesCoverCondition(conditionCols, condition, boundaries)
 	hasMutationCallback := false
 	for _, c := range callbackCols {
 		if c == "$update" || (len(c) > 11 && c[:11] == "$increment:") {
@@ -2256,20 +2397,24 @@ func (t *storageShard) scanBatch(boundaries scanAccess, lower []scm.Scmer, upper
 	hadValue := false
 	batchCount := len(batchdata) / stride
 	batchBoundaries := hasBatchScanAccess(boundaries)
+	var activeBoundaryStorage [scanAnalyzeScratchCapacity]columnboundaries
+	var activeLowerStorage [scanAnalyzeScratchCapacity]scm.Scmer
+	activeBoundaries := scanAccess{plannerFilterCovered: scanAccessCoversResidual(boundaries)}
 
 	for batchid := 0; batchid < batchCount; batchid++ {
 		if boundaries.impossibleBatch(stride, batchdata, batchid) {
 			continue
 		}
-		activeBoundaries := boundaries
+		currentBoundaries := boundaries
 		activeLower := lower
 		activeUpperLast := upperLast
 		if batchBoundaries {
-			activeBoundaries = scanAccess{suffix: materializeBatchScanAccess(boundaries, stride, batchdata, uint32(batchid))}
-			activeLower, activeUpperLast = indexFromScanAccessInto(nil, activeBoundaries)
+			activeBoundaries.native = materializeBatchScanAccessInto(activeBoundaryStorage[:0], boundaries, stride, batchdata, uint32(batchid))
+			currentBoundaries = activeBoundaries
+			activeLower, activeUpperLast = indexFromScanAccessInto(activeLowerStorage[:0], currentBoundaries)
 		}
 
-		t.iterateIndex(currentTx, activeBoundaries, activeLower, activeUpperLast, maxInsertIndex, buf, 1, nil, func(batch []uint32) bool {
+		t.iterateIndex(currentTx, currentBoundaries, activeLower, activeUpperLast, maxInsertIndex, buf, 1, nil, func(batch []uint32) bool {
 			candidateCount += int64(len(batch))
 			outN := t.filterVisibleBatchedScanBatch(batch, batchBuf[:], uint32(batchid), visibleUpper, hasMutationCallback, currentTx, mutationSeen)
 			if !conditionAlwaysTrue {

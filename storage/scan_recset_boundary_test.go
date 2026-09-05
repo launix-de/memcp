@@ -85,7 +85,7 @@ func buildRankOrderIndex(t *testing.T, tbl *table) func(...scm.Scmer) scm.Scmer 
 	shard.mu.RLock()
 	defer shard.mu.RUnlock()
 	var buf [8]uint32
-	shard.iterateIndexForce(nil, scanAccess{suffix: bounds}, lower, upper, len(shard.inserts), buf[:], false,
+	shard.iterateIndexForce(nil, runtimeScanAccess(bounds), lower, upper, len(shard.inserts), buf[:], false,
 		func([]uint32) bool { return false })
 	return order
 }

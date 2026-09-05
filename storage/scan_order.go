@@ -557,12 +557,10 @@ func extendScanAccessWithSortCols(access scanAccess, sortcols []scm.Scmer, sortd
 				mapCols: mapCols, mapFn: mapFn})
 		}
 	}
-	compiledCount := 0
-	if len(access.schema) != 0 {
-		compiledCount = int(scm.ToInt(access.schema[1]))
-	}
-	access.insertAt = compiledCount
-	access.inserted = inserted
+	compiledCount := access.compiledCount
+	runtime := access.ensureRuntime()
+	runtime.insertAt = compiledCount
+	runtime.inserted = inserted
 	return access, true
 }
 
@@ -765,8 +763,10 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 			stats[ti].analyzeNs = time.Since(analyzeStart).Nanoseconds()
 			continue
 		}
+		bounds = bounds.useScratch(scratch)
 		bounds, _ = extendScanAccessWithSortCols(bounds, spec.sortcols, sortdirs)
-		bounds.suffix = appendRecSetBoundary(bounds.suffix, spec.recset)
+		runtime := bounds.ensureRuntime()
+		runtime.suffix = appendRecSetBoundary(runtime.suffix, spec.recset)
 		lower, upperLast := indexFromScanAccessInto(scratch.lower[:0], bounds)
 
 		if Settings.ScanDebugging {
@@ -1192,6 +1192,7 @@ func (t *table) scanOrderFirst(currentTx *TxContext, accessSchema scm.Scmer, acc
 	if bounds.impossible() {
 		return notFoundValue
 	}
+	bounds = bounds.useScratch(scratch)
 	lower, upperLast := indexFromScanAccessInto(scratch.lower[:0], bounds)
 
 	var mu sync.Mutex
@@ -1299,7 +1300,8 @@ func (t *storageShard) scan_order(boundaries scanAccess, lower []scm.Scmer, uppe
 	recsetBoundaryCoversCondition := recSetHooksCoverCondition(boundaries, lower, t.t, conditionCols, condition)
 	conditionProgram := scm.PrepareSerialProc(condition)
 	conditionAlwaysTrue := scanAccessCoversResidual(boundaries) ||
-		(conditionProgram.Kind == scm.SerialProcConstant && scm.ToBool(conditionProgram.Value))
+		scanConditionAlwaysTrue(&conditionProgram, len(conditionCols)) ||
+		sortedBoundariesCoverCondition(conditionCols, condition, boundaries)
 	var acceptProgram *scm.SerialProc
 	if !accept.IsNil() {
 		prepared := scm.PrepareSerialProc(accept)
@@ -1458,10 +1460,11 @@ func (t *storageShard) scan_order(boundaries scanAccess, lower []scm.Scmer, uppe
 		// buffer per non-getter condition column, so a batch's main-storage rows
 		// are fetched with one GetValueMulti call per column instead of one
 		// GetValue call per row per column.
-		var survivedBuf, mainIdsBuf, acceptMainIdsBuf []uint32
+		var mainIdsBuf, acceptMainIdsBuf []uint32
 		colBufs := make([][]scm.Scmer, len(conditionCols))
 		acceptColBufs := make([][]scm.Scmer, len(acceptCols))
-		boundaryCoveredLimit := acceptProgram == nil && conditionAlwaysTrue
+		boundaryCoveredLimit := acceptProgram == nil && (conditionAlwaysTrue ||
+			sortedBoundariesCoverCondition(conditionCols, condition, boundaries))
 		access := boundaries
 		t.iterateIndexOrdered(currentTx, access, lower, upperLast, maxInsertIndex, buf, usageWeight, limit, boundaryCoveredLimit, func(index *StorageIndex, active bool) {
 			if len(sortcols) > 0 {
@@ -1472,7 +1475,10 @@ func (t *storageShard) scan_order(boundaries scanAccess, lower []scm.Scmer, uppe
 
 			// pass 1: data-independent skip checks (recset/visibility/deletion),
 			// producing the ordered surviving-id list without touching column data.
-			survived := survivedBuf[:0]
+			// Compact visibility in place. iterateIndex owns batch until this
+			// callback returns, and the write cursor never overtakes the read
+			// cursor, so a separate survivor slice only adds hot-path allocations.
+			survived := batch[:0]
 			for _, idx := range batch {
 				if idx >= visibleUpper {
 					continue
@@ -1486,8 +1492,6 @@ func (t *storageShard) scan_order(boundaries scanAccess, lower []scm.Scmer, uppe
 				}
 				survived = append(survived, idx)
 			}
-			survivedBuf = survived
-
 			outN := len(survived)
 			if conditionAlwaysTrue {
 				copy(batch, survived)
@@ -1641,16 +1645,19 @@ func (t *storageShard) scan_order(boundaries scanAccess, lower []scm.Scmer, uppe
 	for i, relation := range adjustedSortdirs {
 		result.sortless[i] = scm.OrderRelationLess(relation)
 	}
-	itemPos := make(map[uint32]int, len(result.items))
-	for i, idx := range result.items {
-		itemPos[idx] = i
-	}
 	// Computed sort callbacks may contain nested point scans. Evaluate each key
 	// once per candidate instead of repeating the callback for every comparison.
 	// The cache is local to this physical scan and is released with its queue.
+	var itemPos map[uint32]int
 	for c, sortcol := range sortcols {
 		if sortcol.IsString() {
 			continue
+		}
+		if itemPos == nil {
+			itemPos = make(map[uint32]int, len(result.items))
+			for i, idx := range result.items {
+				itemPos[idx] = i
+			}
 		}
 		values := make([]scm.Scmer, len(result.items))
 		for i, idx := range result.items {

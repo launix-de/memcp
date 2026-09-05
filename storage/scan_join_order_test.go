@@ -20,7 +20,7 @@ import "testing"
 import "sync/atomic"
 import "github.com/launix-de/memcp/scm"
 
-func setupScanJoinOrderTable(t *testing.T, database string, name string, columns []string, rows [][]scm.Scmer) *table {
+func setupScanJoinOrderTable(t testing.TB, database string, name string, columns []string, rows [][]scm.Scmer) *table {
 	t.Helper()
 	table, _ := CreateTable(database, name, Memory, true)
 	for _, column := range columns {
@@ -28,6 +28,59 @@ func setupScanJoinOrderTable(t *testing.T, database string, name string, columns
 	}
 	table.Insert(columns, rows, nil, scm.NewNil(), false, nil)
 	return table
+}
+
+func BenchmarkScanJoinOrderBatchedPointProbe(b *testing.B) {
+	const rowsN = 8_000
+	database := "bench_scan_join_order_point_probe"
+	databases.Remove(database)
+	CreateDatabase(database, true)
+	postRows := make([][]scm.Scmer, rowsN)
+	metaRows := make([][]scm.Scmer, rowsN)
+	for i := range postRows {
+		id := scm.NewInt(int64(i + 1))
+		postRows[i] = []scm.Scmer{id, scm.NewInt(1)}
+		metaRows[i] = []scm.Scmer{id, id, scm.NewInt(1)}
+	}
+	posts := setupScanJoinOrderTable(b, database, "posts", []string{"id", "enabled"}, postRows)
+	posts.Unique = append(posts.Unique, uniqueKey{Id: "PRIMARY", Cols: []string{"id"}})
+	meta := setupScanJoinOrderTable(b, database, "meta", []string{"meta_id", "post_id", "kind"}, metaRows)
+	result := GetDatabase(database).rebuild(true, false, true)
+	if len(result.errors) > 0 {
+		b.Fatalf("rebuild errors: %v", result.errors)
+	}
+	trueFn := scanJoinTrue()
+	filterAST := scm.Read("scan join order benchmark filter", "(lambda (kind) (equal?? kind 1))")
+	filterColumns := scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), scm.NewSlice([]scm.Scmer{scm.NewString("kind")})})
+	accessSchema, accessValues, ok := compileScanAccess(filterColumns, filterAST)
+	if !ok {
+		b.Fatal("point access did not compile")
+	}
+	accessSchema = markCoveredScanAccessSchema(accessSchema,
+		scm.Read("scan join order benchmark residual", "(lambda () true)"))
+	_, descending := integerOrder(true)
+	spec := scanJoinOrderSpec{
+		inputs: []scanJoinOrderInput{
+			{table: meta, filter: trueFn, accessSchema: accessSchema, accessValues: accessValues},
+			{table: posts, filter: trueFn, accessSchema: emptyScanAccessSchema,
+				sourceKeyCols: []scanJoinOrderColumn{{table: 0, column: "post_id"}}, targetKeyCols: []string{"id"}},
+		},
+		orderCols:    []scanJoinOrderColumn{{table: 0, column: "meta_id"}},
+		orderDirs:    []func(...scm.Scmer) scm.Scmer{descending},
+		limit:        20,
+		mapCols:      []scanJoinOrderColumn{{table: 1, column: "id"}},
+		mapReduceFn:  scm.Globalenv.Vars[scm.Symbol("scan_count")],
+		neutral:      scm.NewInt(0),
+		batchedProbe: true,
+	}
+	for range 3 {
+		scanJoinOrder(nil, spec)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		scanJoinOrder(nil, spec)
+	}
 }
 
 func TestScanJoinOrderFiltersJoinsAndBrakesInDriverOrder(t *testing.T) {
