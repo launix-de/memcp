@@ -447,9 +447,13 @@ func compileScanComparison(node scm.Scmer, params, columns []scm.Scmer, allowBat
 	value = scanLiftOutOfLambda(value)
 	switch operator {
 	case "equal?", "equal??":
+		collation := ""
+		if operator == "equal??" {
+			collation = "utf8mb4_general_ci"
+		}
 		return compiledScanBoundary{kind: "equal", column: column, lower: value, upper: value, lowerSet: true, upperSet: true,
 			lowerBatch: batchValue, upperBatch: batchValue, lowerBatchSlot: batchSlot, upperBatchSlot: batchSlot,
-			lowerInclusive: true, upperInclusive: true, nullSafe: operator == "equal??", mapCols: mapCols, mapFn: mapFn}, true
+			lowerInclusive: true, upperInclusive: true, nullSafe: operator == "equal??", collation: collation, mapCols: mapCols, mapFn: mapFn}, true
 	case "<", "<=", ">", ">=":
 		inclusive := operator == "<=" || operator == ">="
 		lower := operator == ">" || operator == ">="
@@ -733,6 +737,9 @@ func compileScanAccessMode(columnExpr, filterExpr scm.Scmer, allowBatch bool) (s
 }
 
 func newScanAccessSchema(consumer string, projections []scm.Scmer, mapperSlot int) scm.Scmer {
+	if consumer == scanAccessConsumerScan && len(projections) == 0 && mapperSlot < 0 {
+		return scm.NewSlice(nil)
+	}
 	schema := make([]scm.Scmer, 0, scanAccessSchemaHeaderSize+len(projections))
 	schema = append(schema, scm.NewString(scanAccessSchemaName), scm.NewInt(0), scm.NewString(consumer),
 		scm.NewInt(int64(len(projections))), scm.NewInt(int64(mapperSlot)))

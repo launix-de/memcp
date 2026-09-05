@@ -955,17 +955,11 @@ func Init(en scm.Env) {
 				if len(args) < 4 {
 					panic("compile_scan_plan expects multi-scan filter lists")
 				}
-				schemas, values, compiled, _ := compileScanAccessList(args[2], args[3], false)
+				schemas, values, _, _ := compileScanAccessList(args[2], args[3], false)
 				if schemas == nil {
 					panic("compile_scan_plan expects matching static multi-scan filters")
 				}
 				filterColumns, filters := args[2], args[3]
-				prunedColumns, prunedFilters := pruneScanResidualList(args[2], args[3], compiled, false)
-				if head == "scan_join_order" {
-					schemas = markCoveredScanAccessSchemas(schemas, prunedFilters)
-				} else {
-					filterColumns, filters = prunedColumns, prunedFilters
-				}
 				result := []scm.Scmer{scm.NewSymbol(head), args[0], args[1],
 					scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), scm.NewSlice(schemas)}),
 					scm.NewSlice(append([]scm.Scmer{scm.NewSymbol("list")}, values...)), filterColumns, filters}
@@ -974,11 +968,8 @@ func Init(en scm.Env) {
 			if head != "scan" && head != "scan_order" && head != "scan_recset" && head != "scan_exists" && head != "scan_selectivity_estimate" {
 				panic("compile_scan_plan received unsupported operator " + head)
 			}
-			schema, values, compiled := compileScanAccess(args[2], args[3])
+			schema, values, _ := compileScanAccess(args[2], args[3])
 			filterColumns, filter := args[2], args[3]
-			if compiled {
-				filterColumns, filter = pruneScanResidual(filterColumns, filter, false)
-			}
 			result := []scm.Scmer{scm.NewSymbol(head), args[0], args[1],
 				scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), schema}),
 				scm.NewSlice(append([]scm.Scmer{scm.NewSymbol("list")}, values...)), filterColumns, filter}

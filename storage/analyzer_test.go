@@ -311,6 +311,23 @@ func TestCompileScanAccessAcceptsParsedSourceInfo(t *testing.T) {
 	}
 }
 
+func TestCompileScanAccessPreservesSQLEqualityCollation(t *testing.T) {
+	columns := scm.NewSlice([]scm.Scmer{scm.NewSymbol("list"), scm.NewString("name")})
+	filter := scm.NewSlice([]scm.Scmer{
+		scm.NewSymbol("lambda"),
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("name")}),
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("equal??"), scm.NewSymbol("name"), scm.NewString("alpha")}),
+	})
+	schema, values, compiled := compileScanAccess(columns, filter)
+	access, valid := scanAccessFromScheme(schema, values, nil)
+	if !compiled || !valid || access.len() != 1 {
+		t.Fatalf("SQL equality access compiled=%v valid=%v boundaries=%d", compiled, valid, access.len())
+	}
+	if got := access.boundary(0).collation; got != "utf8mb4_general_ci" {
+		t.Fatalf("SQL equality access collation = %q, want utf8mb4_general_ci", got)
+	}
+}
+
 func TestSortedBoundariesCoverCondition(t *testing.T) {
 	body := scm.NewSlice([]scm.Scmer{
 		scm.NewSymbol("equal??"),

@@ -108,3 +108,34 @@ func TestStrLikeEscapedWildcards(t *testing.T) {
 		t.Fatal("escaped percent should match a literal percent")
 	}
 }
+
+func TestGeneralCIFoldCompare(t *testing.T) {
+	tests := []struct {
+		left, right string
+		want        int
+	}{
+		{"Publish", "publish", 0},
+		{"alpha", "BETA", -1},
+		{"view_count", "VIEW_COUNTS", -1},
+		{"Straße", "STRASSE", 1},
+	}
+	for _, test := range tests {
+		got := generalCIFoldCompare(test.left, test.right)
+		if got < 0 {
+			got = -1
+		} else if got > 0 {
+			got = 1
+		}
+		if got != test.want {
+			t.Fatalf("generalCIFoldCompare(%q, %q) = %d, want %d", test.left, test.right, got, test.want)
+		}
+	}
+	allocations := testing.AllocsPerRun(1000, func() {
+		if generalCIFoldCompare("custom_color", "CUSTOM_COLOR") != 0 {
+			t.Fatal("ASCII fold comparison changed equality")
+		}
+	})
+	if allocations != 0 {
+		t.Fatalf("ASCII general_ci comparison allocated %.2f objects per call, want 0", allocations)
+	}
+}

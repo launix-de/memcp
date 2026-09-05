@@ -910,7 +910,8 @@ test_cases:
     max_compile_phase_ms:
       recipe_emit_ns: 1000
     max_compile_metrics:
-      plan_nodes: 6000
+      # The unified scan ABI carries static access schemas in the physical plan.
+      plan_nodes: 7000
       ordered_scans: 64
       exists_scans: 64
     setup:

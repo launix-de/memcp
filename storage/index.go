@@ -145,6 +145,16 @@ func boundaryOrder(t *table, boundary columnboundaries) (func(scm.Scmer, scm.Scm
 		}
 		return scm.OrderRelationLess(boundary.order), meta
 	}
+	// Materialized group keys currently carry "any" column metadata. Preserve
+	// the EqualSQL order encoded by the compiled predicate there. Base-table
+	// columns retain their declared canonical order; their residual callback is
+	// still authoritative for SQL equality semantics.
+	if boundary.collation != "" && strings.HasPrefix(t.Name, ".grp:") &&
+		(boundary.lower.IsString() || boundary.lower.IsSymbol()) {
+		value := scm.Apply(scm.Globalenv.Vars[scm.Symbol("collate")], scm.NewString(boundary.collation), scm.NewBool(false))
+		order := scm.OptimizeProcToSerialFunction(value)
+		return scm.OrderRelationLess(order), orderRelationMeta(order)
+	}
 	return canonicalColumnOrder(t, boundary.col)
 }
 
@@ -631,7 +641,7 @@ func (t *storageShard) iterateIndexEx(tx *TxContext, cols scanAccess, lower []sc
 					if !indexMatcherCompatible(bound.matcher, indexedMatcher) {
 						goto skip_index // matcher kind mismatch
 					}
-					if bound.matcher.IsSorted() && !boundaryIsPoint(bound) {
+					if bound.matcher.IsSorted() {
 						_, requiredOrderMeta := boundaryOrder(t.t, bound)
 						if len(index.ColOrderMeta) <= i || requiredOrderMeta != index.ColOrderMeta[i] {
 							goto skip_index
@@ -669,7 +679,7 @@ func (t *storageShard) iterateIndexEx(tx *TxContext, cols scanAccess, lower []sc
 						covered = false
 						break
 					}
-					if bound.matcher.IsSorted() && !boundaryIsPoint(bound) {
+					if bound.matcher.IsSorted() {
 						_, requiredOrderMeta := boundaryOrder(t.t, bound)
 						if len(index.ColOrderMeta) <= i || requiredOrderMeta != index.ColOrderMeta[i] {
 							covered = false

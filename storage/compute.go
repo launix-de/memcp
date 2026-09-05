@@ -831,29 +831,28 @@ func (t *table) registerORCTriggers(name string) {
 
 type tableRef struct{ schema, table string }
 
-// extractScannedTables walks a Scheme expression tree and returns all
-// (schema, table) pairs referenced by scan/scan_order/scalar_scan/scalar_scan_order.
-func extractScannedTables(expr scm.Scmer) []tableRef {
+func scanTableReference(expr scm.Scmer) (tableRef, bool) {
 	expr = stripSourceInfo(expr)
-	if expr.IsProc() {
-		return extractScannedTables(expr.Proc().Body)
+	if expr.IsCustom(TagTable) {
+		t := TableFromScmer(expr)
+		return tableRef{schema: t.schema.Name, table: t.Name}, true
 	}
-	if !expr.IsSlice() {
-		return nil
-	}
-	items := expr.Slice()
-	if len(items) >= 3 && callHeadIs(items[0], "scan", "scan_order", "scalar_scan", "scalar_scan_order") {
-		result := []tableRef{{scm.String(items[1]), scm.String(items[2])}}
-		for _, item := range items[3:] {
-			result = append(result, extractScannedTables(item)...)
+	if expr.IsSlice() {
+		items := expr.Slice()
+		if len(items) == 3 && callHeadIs(items[0], "table") {
+			return tableRef{schema: scm.String(items[1]), table: scm.String(items[2])}, true
 		}
-		return result
 	}
-	var result []tableRef
-	for _, item := range items {
-		result = append(result, extractScannedTables(item)...)
+	if expr.IsSymbol() {
+		name := scm.String(expr)
+		if strings.HasPrefix(name, "tbl:") {
+			parts := strings.SplitN(name[4:], ":", 2)
+			if len(parts) == 2 {
+				return tableRef{schema: parts[0], table: parts[1]}, true
+			}
+		}
 	}
-	return result
+	return tableRef{}, false
 }
 
 // scanJoinInfo describes a source table scanned by a computor and the equality
@@ -903,29 +902,8 @@ func extractScanJoinInfoBody(expr scm.Scmer, outerParams []scm.Scmer) []scanJoin
 			return nil
 		}
 		var info scanJoinInfo
-		tableExpr := stripSourceInfo(items[tableIdx])
-		if tableExpr.IsCustom(TagTable) {
-			t := TableFromScmer(tableExpr)
-			info.schema = t.schema.Name
-			info.table = t.Name
-		} else if tableExpr.IsSlice() {
-			sl := tableExpr.Slice()
-			if len(sl) == 3 && callHeadIs(sl[0], "table") {
-				info.schema = scm.String(sl[1])
-				info.table = scm.String(sl[2])
-			}
-		} else if tableExpr.IsSymbol() {
-			symStr := scm.String(tableExpr)
-			if strings.HasPrefix(symStr, "tbl:") {
-				parts := strings.SplitN(symStr[4:], ":", 2)
-				if len(parts) == 2 {
-					info.schema = parts[0]
-					info.table = parts[1]
-				}
-			}
-		} else {
-			info.schema = ""
-			info.table = scm.String(tableExpr)
+		if ref, ok := scanTableReference(items[tableIdx]); ok {
+			info.schema, info.table = ref.schema, ref.table
 		}
 		condCols := extractStringListFromAST(items[condColsIdx])
 		info.condCols = condCols
@@ -935,13 +913,17 @@ func extractScanJoinInfoBody(expr scm.Scmer, outerParams []scm.Scmer) []scanJoin
 		if len(condCols) > 0 {
 			info.srcCols, info.inputCols = extractEqualityJoins(items[filterIdx], condCols, outerParams)
 		}
+		if len(info.srcCols) == 0 {
+			info.srcCols, info.inputCols = extractCompiledScanEqualityJoins(items[3], items[4], outerParams)
+			info.condCols = mergeUniqueStrings(info.condCols, info.srcCols)
+		}
 		// A physical table expression can itself be a plan (for example a
 		// recset_project_join whose producer prepares correlated stage caches).
 		// Those nested scans are dependencies of this computed column just as
 		// scans in the filter and mapper are; otherwise source mutations leave a
 		// cached aggregate valid even though its projected input changed.
 		result := []scanJoinInfo{info}
-		result = append(result, extractScanJoinInfoBody(tableExpr, outerParams)...)
+		result = append(result, extractScanJoinInfoBody(items[tableIdx], outerParams)...)
 		for _, item := range items[filterIdx+1:] {
 			result = append(result, extractScanJoinInfoBody(item, outerParams)...)
 		}
@@ -952,6 +934,72 @@ func extractScanJoinInfoBody(expr scm.Scmer, outerParams []scm.Scmer) []scanJoin
 		result = append(result, extractScanJoinInfoBody(item, outerParams)...)
 	}
 	return result
+}
+
+func extractCompiledScanEqualityJoins(schemaExpr, valuesExpr scm.Scmer, computorParams []scm.Scmer) (srcCols, inputCols []string) {
+	schema, schemaOK := scanStaticListElements(schemaExpr)
+	if !schemaOK {
+		return nil, nil
+	}
+	if len(schema) < scanAccessSchemaHeaderSize || stripSourceInfo(schema[0]).String() != scanAccessSchemaName {
+		return nil, nil
+	}
+	valueItems, valuesOK := scanStaticListElements(valuesExpr)
+	if !valuesOK {
+		return nil, nil
+	}
+	count := int(scm.ToInt(stripSourceInfo(schema[1])))
+	for i := 0; i < count; i++ {
+		offset := scanAccessSchemaHeaderSize + i*scanAccessBoundaryStride
+		if offset+scanAccessBoundaryStride > len(schema) || stripSourceInfo(schema[offset]).String() != "equal" {
+			continue
+		}
+		lowerSlot := int(scm.ToInt(stripSourceInfo(schema[offset+2])))
+		upperSlot := int(scm.ToInt(stripSourceInfo(schema[offset+3])))
+		if lowerSlot < 0 || lowerSlot != upperSlot || lowerSlot >= len(valueItems) {
+			continue
+		}
+		if inputCol, ok := compiledScanOuterColumn(valueItems[lowerSlot], computorParams); ok {
+			srcCols = append(srcCols, stripSourceInfo(schema[offset+1]).String())
+			inputCols = append(inputCols, inputCol)
+		}
+	}
+	return srcCols, inputCols
+}
+
+func compiledScanOuterColumn(expr scm.Scmer, computorParams []scm.Scmer) (string, bool) {
+	expr = stripSourceInfo(expr)
+	if depth, inner, ok := scanOuterReference(expr); ok {
+		if depth != 0 && depth != 1 {
+			return "", false
+		}
+		expr = stripSourceInfo(inner)
+	}
+	if expr.IsSymbol() {
+		for _, param := range computorParams {
+			param = stripSourceInfo(param)
+			if param.IsSymbol() && param.String() == expr.String() {
+				return expr.String(), true
+			}
+		}
+		return "", false
+	}
+	if expr.IsNthLocalVar() {
+		idx := int(expr.NthLocalVar())
+		if idx >= 0 && idx < len(computorParams) {
+			param := stripSourceInfo(computorParams[idx])
+			if param.IsSymbol() {
+				return param.String(), true
+			}
+		}
+	}
+	if expr.IsSlice() {
+		items := expr.Slice()
+		if len(items) >= 4 && callHeadIs(items[0], "get_column") {
+			return scm.String(items[3]), true
+		}
+	}
+	return "", false
 }
 
 // extractStringListFromAST parses both (list "a" "b" ...) and the quoted
@@ -1152,25 +1200,8 @@ func findScanNode(expr scm.Scmer, schema, table string) []scm.Scmer {
 	if len(items) >= 4 {
 		tableIdx := 2
 		if callHeadIs(items[0], "scan", "scan_order", "scalar_scan", "scalar_scan_order") {
-			var tSchema, tName string
-			if len(items) > tableIdx && items[tableIdx].IsCustom(TagTable) {
-				t := TableFromScmer(items[tableIdx])
-				tSchema, tName = t.schema.Name, t.Name
-			} else if len(items) > tableIdx && items[tableIdx].IsSlice() {
-				sl := items[tableIdx].Slice()
-				if len(sl) == 3 && scm.String(sl[0]) == "table" {
-					tSchema, tName = scm.String(sl[1]), scm.String(sl[2])
-				}
-			} else if len(items) > tableIdx && items[tableIdx].IsSymbol() {
-				symStr := scm.String(items[tableIdx])
-				if strings.HasPrefix(symStr, "tbl:") {
-					parts := strings.SplitN(symStr[4:], ":", 2)
-					if len(parts) == 2 {
-						tSchema, tName = parts[0], parts[1]
-					}
-				}
-			}
-			if tSchema == schema && tName == table {
+			ref, ok := scanTableReference(items[tableIdx])
+			if ok && ref.schema == schema && ref.table == table {
 				return items
 			}
 		}

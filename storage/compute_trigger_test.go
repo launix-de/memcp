@@ -253,6 +253,23 @@ func TestLookupComputeTriggersInvalidateMatchingRows(t *testing.T) {
 	}
 }
 
+func TestExtractScanJoinInfoUsesCompiledAccessWhenResidualIsEmpty(t *testing.T) {
+	source := `(lambda (ref_id)
+		(scan nil (table "tcompileddependency" "src")
+			'("scan_access" 1 "scan" 0 -1 "equal" "source_ref" 0 0 3 "")
+			(list ref_id)
+			'() (lambda () true)
+			'("value") (lambda (acc value) value)
+			nil nil false))`
+	computor := scm.Read(t.Name(), source)
+	refs := extractScanJoinInfo(computor)
+	if len(refs) != 1 || refs[0].schema != "tcompileddependency" || refs[0].table != "src" ||
+		len(refs[0].srcCols) != 1 || refs[0].srcCols[0] != "source_ref" ||
+		len(refs[0].inputCols) != 1 || refs[0].inputCols[0] != "ref_id" {
+		t.Fatalf("compiled access dependency was not extracted: %#v; plan=%s", refs, serializeScmerForTest(computor))
+	}
+}
+
 func TestLookupInvalidationIncludesComputedDeltaRows(t *testing.T) {
 	db := newDatabase()
 	db.Name = "tlookupdelta"

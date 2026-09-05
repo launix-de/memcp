@@ -331,6 +331,9 @@ func scanAccessFromScheme(schemaValue scm.Scmer, values []scm.Scmer, suffix boun
 		return scanAccess{}, false
 	}
 	schema := schemaValue.Slice()
+	if len(schema) == 0 {
+		return scanAccess{suffix: suffix}, true
+	}
 	if len(schema) < scanAccessSchemaHeaderSize || schema[0].String() != scanAccessSchemaName {
 		return scanAccess{}, false
 	}

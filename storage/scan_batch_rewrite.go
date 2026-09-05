@@ -393,11 +393,11 @@ func rewriteInnerScanToBatch(inner []scm.Scmer, pseudocols, pseudoparams []scm.S
 	}
 	// A direct SCM caller may provide an empty access schema. Compile the
 	// rewritten residual once here so scan_batch still receives the one ABI.
-	if schemaItems, schemaOK := scanStaticListElements(accessSchema); schemaOK && len(schemaItems) >= scanAccessSchemaHeaderSize && scm.ToInt(schemaItems[1]) == 0 {
+	if schemaItems, schemaOK := scanStaticListElements(accessSchema); schemaOK &&
+		(len(schemaItems) == 0 || len(schemaItems) >= scanAccessSchemaHeaderSize && scm.ToInt(schemaItems[1]) == 0) {
 		if compiledSchema, bindings, compiled := compileScanAccessMode(filterColumns, filterFn, true); compiled {
 			accessSchema = scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), compiledSchema})
 			accessValues = scm.NewSlice(append([]scm.Scmer{scm.NewSymbol("list")}, bindings...))
-			filterColumns, filterFn = pruneScanResidual(filterColumns, filterFn, true)
 		}
 	}
 	// [3..4] common access schema and runtime values
@@ -428,7 +428,13 @@ func rewriteInnerScanToBatch(inner []scm.Scmer, pseudocols, pseudoparams []scm.S
 // the storage loop.
 func rewriteBatchScanAccess(schemaExpr, valuesExpr scm.Scmer, mapping map[string]string, slots map[int]string) (scm.Scmer, scm.Scmer, bool) {
 	schema, ok := scanStaticListElements(schemaExpr)
-	if !ok || len(schema) < scanAccessSchemaHeaderSize || schema[0].String() != scanAccessSchemaName {
+	if !ok {
+		return scm.NewNil(), scm.NewNil(), false
+	}
+	if len(schema) == 0 {
+		return schemaExpr, valuesExpr, true
+	}
+	if len(schema) < scanAccessSchemaHeaderSize || schema[0].String() != scanAccessSchemaName {
 		return scm.NewNil(), scm.NewNil(), false
 	}
 	values, ok := scanStaticListElements(valuesExpr)
