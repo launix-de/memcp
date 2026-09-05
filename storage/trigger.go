@@ -382,7 +382,15 @@ func finalizeTriggerCompilation(trigger *TriggerDescription) {
 			trigger.VectorFunc = vf
 		}
 	}
-	trigger.Func = scm.CompileJIT(scm.CloseProcedure(trigger.Func), false)
+	// Hidden relational-maintenance triggers already consist of physically
+	// specialized scan/DML callbacks. Compiling their often very large outer
+	// orchestration duplicates those compilation boundaries and can turn lazy
+	// group-cache creation into a long synchronous JIT job. Visible language
+	// triggers and compact Go-created system triggers benefit from native outer
+	// dispatch; generated physical plans keep their callback-owned JIT boundary.
+	if !trigger.Hidden || trigger.IsSystem {
+		trigger.Func = scm.CompileJIT(scm.CloseProcedure(trigger.Func), false)
+	}
 }
 
 func evaluateTriggerPlan(plan scm.Scmer) scm.Scmer {

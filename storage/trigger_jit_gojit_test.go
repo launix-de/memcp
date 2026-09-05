@@ -98,7 +98,8 @@ func TestLazyTriggerPlanIsOptimizedBeforeJIT(t *testing.T) {
 
 func TestInternalTriggerUsesJIT(t *testing.T) {
 	trigger := TriggerDescription{
-		Name: "internal",
+		Name:     "internal",
+		IsSystem: true,
 		Func: buildFKProc(scm.NewSlice([]scm.Scmer{
 			scm.NewSymbol("+"), scm.NewInt(40), scm.NewInt(2),
 		})),
@@ -106,4 +107,22 @@ func TestInternalTriggerUsesJIT(t *testing.T) {
 	}
 	finalizeTriggerCompilation(&trigger)
 	requireCompiledTrigger(t, trigger)
+}
+
+func TestHiddenPhysicalTriggerKeepsCallbackCompilationBoundary(t *testing.T) {
+	trigger := TriggerDescription{
+		Name:   "generated-physical-plan",
+		Func:   scm.Eval(triggerJITTestPlan(), &scm.Globalenv),
+		Hidden: true,
+	}
+	finalizeTriggerCompilation(&trigger)
+	if trigger.Func.Proc() == nil {
+		t.Fatalf("hidden trigger function is not a procedure: %s", scm.String(trigger.Func))
+	}
+	if trigger.Func.Proc().Compiled != nil || trigger.Func.Proc().JITCode != 0 {
+		t.Fatal("hidden physical trigger unexpectedly compiled its outer orchestration")
+	}
+	if got := scm.Apply(trigger.Func, scm.NewNil(), scm.NewNil(), scm.NewNil(), scm.NewNil()); !scm.Equal(got, scm.NewInt(42)) {
+		t.Fatalf("hidden trigger fallback returned %s, want 42", scm.String(got))
+	}
 }
