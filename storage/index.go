@@ -74,6 +74,16 @@ type colGetter struct {
 	mapFn   func(...scm.Scmer) scm.Scmer // non-nil for computed columns
 }
 
+const inlineIndexGetters = 8
+
+type indexGetterScratch struct {
+	getters [inlineIndexGetters]colGetter
+}
+
+var indexGetterScratchPool = sync.Pool{
+	New: func() any { return new(indexGetterScratch) },
+}
+
 func (g colGetter) get(recid uint32) scm.Scmer {
 	if g.mapFn != nil {
 		vals := make([]scm.Scmer, len(g.mapCols))
@@ -196,8 +206,14 @@ func (s *StorageIndex) usesNaturalAscendingOrder(col int) bool {
 
 // buildGetters returns per-column value getters for this index, reading from the
 // shard under a currently-held RLock. Must be called with s.t.mu.RLock held.
-func (s *StorageIndex) buildGetters(_ *TxContext) []colGetter {
-	getters := make([]colGetter, len(s.Cols))
+func (s *StorageIndex) buildGetters(_ *TxContext, storage []colGetter) []colGetter {
+	var getters []colGetter
+	if cap(storage) >= len(s.Cols) {
+		getters = storage[:len(s.Cols)]
+		clear(getters)
+	} else {
+		getters = make([]colGetter, len(s.Cols))
+	}
 	for i, col := range s.Cols {
 		if !s.columnIsSorted(i) && isScanPseudoColName(col) {
 			continue
@@ -641,7 +657,7 @@ func (t *storageShard) iterateIndexEx(tx *TxContext, cols scanAccess, lower []sc
 					if !indexMatcherCompatible(bound.matcher, indexedMatcher) {
 						goto skip_index // matcher kind mismatch
 					}
-					if bound.matcher.IsSorted() {
+					if bound.matcher.IsSorted() && !boundaryIsPoint(bound) {
 						_, requiredOrderMeta := boundaryOrder(t.t, bound)
 						if len(index.ColOrderMeta) <= i || requiredOrderMeta != index.ColOrderMeta[i] {
 							goto skip_index
@@ -679,7 +695,7 @@ func (t *storageShard) iterateIndexEx(tx *TxContext, cols scanAccess, lower []sc
 						covered = false
 						break
 					}
-					if bound.matcher.IsSorted() {
+					if bound.matcher.IsSorted() && !boundaryIsPoint(bound) {
 						_, requiredOrderMeta := boundaryOrder(t.t, bound)
 						if len(index.ColOrderMeta) <= i || requiredOrderMeta != index.ColOrderMeta[i] {
 							covered = false
@@ -1495,7 +1511,12 @@ func (s *StorageIndex) iterate(tx *TxContext, bounds scanAccess, lower []scm.Scm
 	// (scan, scan_order, GetRecordidForUnique) already holds s.t.mu.RLock().
 	// Re-acquiring RLock via getColumnStorageOrPanic would deadlock when a
 	// concurrent writer is waiting for s.t.mu.Lock() (write-preferring RWMutex).
-	cols := s.buildGetters(tx)
+	getterScratch := indexGetterScratchPool.Get().(*indexGetterScratch)
+	cols := s.buildGetters(tx, getterScratch.getters[:])
+	defer func() {
+		clear(getterScratch.getters[:])
+		indexGetterScratchPool.Put(getterScratch)
+	}()
 	state := &s.baseState
 	currentRevisions := s.computedRevisionsRLocked()
 	s.mu.Lock()

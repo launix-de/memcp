@@ -195,14 +195,11 @@ type scanAccess struct {
 }
 
 func runtimeScanAccess(suffix boundaries) scanAccess {
-	if len(suffix) == 0 {
-		return scanAccess{}
-	}
-	return scanAccess{runtime: &scanAccessRuntime{suffix: suffix}}
+	return scanAccess{native: suffix}
 }
 
 func coveredRuntimeScanAccess(suffix boundaries) scanAccess {
-	return scanAccess{runtime: &scanAccessRuntime{suffix: suffix, filterCovered: true}}
+	return scanAccess{native: suffix, plannerFilterCovered: true}
 }
 
 func (a *scanAccess) ensureRuntime() *scanAccessRuntime {

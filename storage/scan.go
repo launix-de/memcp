@@ -1497,7 +1497,9 @@ func (t *table) scanWithBatchFrom(currentTx *TxContext, source *recSet, accessSc
 	analyzeStart := time.Now()
 	/* analyze query */
 	var suffix boundaries
-	if requiredAccess.runtime != nil {
+	if requiredAccess.native != nil {
+		suffix = requiredAccess.native
+	} else if requiredAccess.runtime != nil {
 		suffix = requiredAccess.runtime.suffix
 	}
 	if source != nil {
