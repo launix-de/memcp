@@ -23,27 +23,22 @@ import "container/heap"
 import "github.com/launix-de/memcp/scm"
 
 func optimizeScanJoinOrder(v []scm.Scmer, oc *scm.OptimizerContext, _ bool) (scm.Scmer, *scm.TypeDescriptor) {
-	const mapReduceIdx, neutralIdx, combineIdx, outerIdx, notFoundIdx = 14, 15, 16, 17, 18
-	if len(v) >= 15 && len(v) <= 20 {
-		if schemas, bindings, ok := compileScanAccessList(v[3], v[4], false); ok {
-			if len(v) == 15 {
-				v = append(v, scm.NewNil())
-			}
-			if len(v) == 16 {
-				v = append(v, scm.NewNil())
-			}
-			if len(v) == 17 {
-				v = append(v, scm.NewBool(false))
-			}
-			if len(v) == 18 {
-				v = append(v, v[neutralIdx])
-			}
-			if len(v) == 19 {
-				v = append(v, scm.NewBool(false))
-			}
-			v = append(v,
-				scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), scm.NewSlice(schemas)}),
-				oc.OptimizeNoEscapeList(bindings))
+	const mapReduceIdx, neutralIdx, combineIdx, outerIdx, notFoundIdx = 16, 17, 18, 19, 20
+	if len(v) >= 17 && len(v) <= 21 {
+		if len(v) == 17 {
+			v = append(v, scm.NewNil())
+		}
+		if len(v) == 18 {
+			v = append(v, scm.NewNil())
+		}
+		if len(v) == 19 {
+			v = append(v, scm.NewBool(false))
+		}
+		if len(v) == 20 {
+			v = append(v, v[17])
+		}
+		if len(v) == 21 {
+			v = append(v, scm.NewBool(false))
 		}
 	}
 	rawMapReduce := v[mapReduceIdx]
@@ -310,6 +305,8 @@ func collectScanJoinOrderRecords(currentTx *TxContext, input *scanJoinOrderInput
 	records := make([]orderedBatchRecord, 0)
 	source := scanOrderTableSpec{
 		table:          input.table,
+		accessSchema:   input.accessSchema,
+		accessValues:   input.accessValues,
 		conditionCols:  input.filterCols,
 		condition:      input.filter,
 		acceptCols:     acceptCols,
@@ -873,7 +870,6 @@ func probeScanJoinOrderInput(currentTx *TxContext, spec *scanJoinOrderSpec, tupl
 	if len(batchdata) == 0 {
 		return nil
 	}
-
 	conditionCols := append([]string(nil), input.filterCols...)
 	conditionCols = append(conditionCols, input.targetKeyCols...)
 	for keyIndex := 0; keyIndex < keyWidth; keyIndex++ {
@@ -915,9 +911,18 @@ func probeScanJoinOrderInput(currentTx *TxContext, spec *scanJoinOrderSpec, tupl
 	combine := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
 		return scm.NewSlice(append(values[0].Slice(), values[1].Slice()...))
 	})
-	rows := input.table.scanWithBatchFrom(currentTx, nil, conditionCols, condition,
+	accessSchema := input.accessSchema
+	accessValues := input.accessValues
+	if input.table.hasUniqueColumns(input.targetKeyCols) {
+		// A complete dynamic unique-key probe dominates every local access
+		// boundary. Keep the local predicates in the residual callback so this
+		// path reads at most one candidate instead of building a wider index.
+		accessSchema = emptyScanAccessSchema
+		accessValues = nil
+	}
+	rows := input.table.scanWithBatchFrom(currentTx, nil, accessSchema, accessValues, runtimeScanAccess(required), conditionCols, condition,
 		callbackCols, mapReduce, scm.NewSlice(nil), combine, false,
-		stride, batchdata, required, scm.NewNil(), nil).Slice()
+		stride, batchdata).Slice()
 	hits := make([][]*scanJoinOrderRecord, len(tuples))
 	for _, rowValue := range rows {
 		row := rowValue.Slice()
@@ -1191,20 +1196,18 @@ func scanJoinOrderRangesOverlap(left scanJoinOrderShardRange, right scanJoinOrde
 func collectScanJoinOrderShardStreams(currentTx *TxContext, input *scanJoinOrderInput, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer) []*scanJoinOrderShardStream {
 	scratch := acquireScanAnalyzeScratch()
 	defer releaseScanAnalyzeScratch(scratch)
-	var bounds boundaries
-	if input.accessSchema.IsNil() {
-		bounds = extractBoundariesInto(scratch.boundaries[:0], input.filterCols, input.filter)
-		reorderByFrequency(bounds, input.table)
-	} else {
-		var compiled bool
-		bounds, compiled = bindCompiledScanAccess(input.accessSchema, input.accessValues, scratch.boundaries[:0])
-		if !compiled {
-			panic("scan_join_order received an invalid compiled access schema")
-		}
+	bounds, compiled := scanAccessFromScheme(input.accessSchema, input.accessValues, nil)
+	if !compiled {
+		panic("scan_join_order received an invalid compiled access schema")
 	}
-	bounds, _ = extendBoundariesWithSortCols(bounds, sortcols, sortdirs)
-	lower, upperLast := indexFromBoundariesInto(scratch.lower[:0], bounds)
-	for _, boundary := range bounds {
+	bounds = bounds.useScratch(scratch)
+	if bounds.impossible() {
+		return nil
+	}
+	bounds, _ = extendScanAccessWithSortCols(bounds, sortcols, sortdirs)
+	lower, upperLast := indexFromScanAccessInto(scratch.lower[:0], bounds)
+	for i := 0; i < bounds.len(); i++ {
+		boundary := bounds.boundary(i)
 		input.table.AddPartitioningScore([]string{boundary.col})
 	}
 
@@ -1618,45 +1621,41 @@ func declareScanJoinOrder(en *scm.Env) {
 		Name: "scan_join_order",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			tables := mustScmerSlice(a[1], "tables")
-			sortDirections := mustScmerSlice(a[8], "sortDirections")
+			accessSchemas := mustScmerSlice(a[2], "scan_join_order access schemas")
+			accessValues := mustScmerSlice(a[3], "scan_join_order access values")
+			if len(accessSchemas) != len(tables) {
+				panic("scan_join_order: access schemas must match the table count")
+			}
+			sortDirections := mustScmerSlice(a[10], "sortDirections")
 			orderDirs := make([]func(...scm.Scmer) scm.Scmer, len(sortDirections))
 			for i, direction := range sortDirections {
 				orderDirs[i] = scm.OptimizeProcToSerialFunction(direction)
 			}
 			neutral := scm.NewNil()
-			if len(a) > 14 {
-				neutral = a[14]
+			if len(a) > 16 {
+				neutral = a[16]
 			}
 			combine := scm.NewNil()
-			if len(a) > 15 {
-				combine = a[15]
-			}
-			isOuter := len(a) > 16 && scm.ToBool(a[16])
-			notFoundValue := neutral
 			if len(a) > 17 {
-				notFoundValue = a[17]
+				combine = a[17]
 			}
-			batchedProbe := len(a) > 18 && scm.ToBool(a[18])
-			var accessSchemas []scm.Scmer
-			var accessValues []scm.Scmer
-			if len(a) > 20 {
-				accessSchemas = mustScmerSlice(a[19], "scan_join_order access schemas")
-				accessValues = mustScmerSlice(a[20], "scan_join_order access values")
-				if len(accessSchemas) != len(tables) {
-					panic("scan_join_order: access schemas must match the table count")
-				}
+			isOuter := len(a) > 18 && scm.ToBool(a[18])
+			notFoundValue := neutral
+			if len(a) > 19 {
+				notFoundValue = a[19]
 			}
+			batchedProbe := len(a) > 20 && scm.ToBool(a[20])
 			return scanJoinOrder(scmerToTxContext(a[0]), scanJoinOrderSpec{
-				inputs:             decodeScanJoinOrderInputs(tables, a[2], a[3], a[4], accessSchemas, accessValues),
-				joinFilterCols:     decodeScanJoinOrderColumns(a[5], "joinFilterColumns"),
-				joinFilter:         a[6],
-				orderCols:          decodeScanJoinOrderColumns(a[7], "orderColumns"),
+				inputs:             decodeScanJoinOrderInputs(tables, a[4], a[5], a[6], accessSchemas, accessValues),
+				joinFilterCols:     decodeScanJoinOrderColumns(a[7], "joinFilterColumns"),
+				joinFilter:         a[8],
+				orderCols:          decodeScanJoinOrderColumns(a[9], "orderColumns"),
 				orderDirs:          orderDirs,
-				limitPartitionCols: int(scm.ToInt(a[9])),
-				offset:             int(scm.ToInt(a[10])),
-				limit:              int(scm.ToInt(a[11])),
-				mapCols:            decodeScanJoinOrderColumns(a[12], "mapColumns"),
-				mapReduceFn:        a[13],
+				limitPartitionCols: int(scm.ToInt(a[11])),
+				offset:             int(scm.ToInt(a[12])),
+				limit:              int(scm.ToInt(a[13])),
+				mapCols:            decodeScanJoinOrderColumns(a[14], "mapColumns"),
+				mapReduceFn:        a[15],
 				combineFn:          combine,
 				neutral:            neutral,
 				isOuter:            isOuter,
@@ -1671,6 +1670,8 @@ func declareScanJoinOrder(en *scm.Env) {
 			Params: []*scm.TypeDescriptor{
 				{Kind: "any", Label: "tx", Description: "transaction context"},
 				{Kind: "list", Label: "tables", Description: "driver table followed by inner equi-join tables"},
+				{Kind: "list", Label: "accessSchemas", Description: "optimizer-compiled static local-filter access schemas, one per table", NoEscape: true},
+				{Kind: "list", Label: "accessValues", Description: "flat runtime values shared by accessSchemas", NoEscape: true},
 				{Kind: "list", Label: "filterColumns", Description: "one physical filter-column list per table"},
 				{Kind: "list", Label: "filterFns", Description: "one table-local filter callback per table"},
 				{Kind: "list", Label: "joins", Description: "one join description per inner table; every clause is (outer_table_index outer_column inner_column)"},
@@ -1688,8 +1689,6 @@ func declareScanJoinOrder(en *scm.Env) {
 				{Kind: "bool", Label: "isOuter", Description: "optional whole-scan NULL fallback", Optional: true},
 				{Kind: "any", Label: "notFoundValue", Description: "optional result when no joined row is emitted", Optional: true},
 				{Kind: "bool", Label: "batchedProbe", Description: "probe inner equality indexes from growing ordered-driver batches instead of materializing inner inputs", Optional: true},
-				{Kind: "list", Label: "accessSchemas", Description: "optimizer-compiled static local-filter access schemas, one per table", Optional: true, NoEscape: true},
-				{Kind: "list", Label: "accessValues", Description: "flat runtime values shared by accessSchemas", Optional: true, NoEscape: true},
 			},
 			Return: &scm.TypeDescriptor{Kind: "any"},
 		},

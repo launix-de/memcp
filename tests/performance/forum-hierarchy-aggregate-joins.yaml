@@ -237,20 +237,22 @@ test_cases:
         (define posts (table "memcp-tests" "forum_hierarchy_posts"))
         (define users (table "memcp-tests" "forum_hierarchy_users"))
         (define selected_heritage
-          (scan tx forums '("forumID") (lambda (forumID) (equal? forumID 8))
+          (scan tx forums (car (compile_scan_access '("forumID") (scheme "(lambda (forumID) (equal? forumID 8))"))) (cadr (compile_scan_access '("forumID") (scheme "(lambda (forumID) (equal? forumID 8))"))) '("forumID") (lambda (forumID) (equal? forumID 8))
             '("heritage") (lambda (_old heritage) heritage)
             nil (lambda (_old value) value) false))
         (define found
-          (scan tx forums '("heritage")
+          (scan tx forums (car (compile_scan_access '("heritage") (scheme "(lambda (heritage) (strlike selected_heritage (concat heritage \"%\")))"))) (cadr (compile_scan_access '("heritage") (scheme "(lambda (heritage) (strlike selected_heritage (concat heritage \"%\")))"))) '("heritage")
             (lambda (heritage) (strlike selected_heritage (concat heritage "%")))
             '("forumID")
             (lambda (count forumID)
               (begin
                 (define child_count
-                  (scan tx forums '("parentID") (lambda (parentID) (equal?? parentID forumID))
+                  (scan tx forums '(369436175368192 "equal" "parentID" 15032418304 "") (list forumID)
+                    '("parentID") (lambda (parentID) (equal?? parentID forumID))
                     '() (lambda (acc) (+ acc 1)) 0 + false))
                 (define thread_stats
-                  (scan tx threads '("forumID") (lambda (threadForumID) (equal?? threadForumID forumID))
+                  (scan tx threads '(369436175368192 "equal" "forumID" 15032418304 "") (list forumID)
+                    '("forumID") (lambda (threadForumID) (equal?? threadForumID forumID))
                     '("postCount" "lastPostID")
                     (lambda (acc postCount lastPostID)
                       (list (+ (car acc) postCount) (max (cadr acc) lastPostID)))
@@ -258,13 +260,15 @@ test_cases:
                     (lambda (acc row) (list (+ (car acc) (car row)) (max (cadr acc) (cadr row))))
                     false))
                 (define post
-                  (scan tx posts '("postID") (lambda (postID) (equal?? postID (cadr thread_stats)))
+                  (scan tx posts '(369436175368192 "equal" "postID" 15032418304 "") (list (cadr thread_stats))
+                    '("postID") (lambda (postID) (equal?? postID (cadr thread_stats)))
                     '("authorID" "datePosted")
                     (lambda (_old authorID datePosted) (list authorID datePosted))
                     nil (lambda (_old row) row) true))
                 (define username
                   (if (nil? post) nil
-                    (scan tx users '("userID") (lambda (userID) (equal?? userID (car post)))
+                    (scan tx users '(369436175368192 "equal" "userID" 15032418304 "") (list (car post))
+                      '("userID") (lambda (userID) (equal?? userID (car post)))
                       '("username") (lambda (_old value) value)
                       nil (lambda (_old value) value) true)))
                 (+ count 1)))

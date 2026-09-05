@@ -53,7 +53,7 @@ test_cases:
       (define tbl (table "memcp-tests" "drcv_warm_index"))
       (define warm (lambda ()
         (scan_order nil tbl
-          '("acl_visible")
+          (car (compile_scan_access '("acl_visible") (scheme "(lambda (acl_visible) (equal? acl_visible true))"))) (cadr (compile_scan_access '("acl_visible") (scheme "(lambda (acl_visible) (equal? acl_visible true))"))) '("acl_visible")
           (lambda (acl_visible) (equal? acl_visible true))
           '("sort_key")
           '(<)
@@ -66,11 +66,11 @@ test_cases:
       (warm)
       (define selected
         (scan_recset nil tbl
-          '("acl_visible")
+          (car (compile_scan_access '("acl_visible") (scheme "(lambda (acl_visible) (equal? acl_visible true))"))) (cadr (compile_scan_access '("acl_visible") (scheme "(lambda (acl_visible) (equal? acl_visible true))"))) '("acl_visible")
           (lambda (acl_visible) (equal? acl_visible true))))
       (define counted
         (scan nil selected
-          '("acl_visible")
+          (car (compile_scan_access '("acl_visible") (scheme "(lambda (acl_visible) (equal? acl_visible true))"))) (cadr (compile_scan_access '("acl_visible") (scheme "(lambda (acl_visible) (equal? acl_visible true))"))) '("acl_visible")
           (lambda (acl_visible) (equal? acl_visible true))
           '("id")
           (lambda (acc id) (+ acc 1))
@@ -86,11 +86,11 @@ test_cases:
       (define tbl (table "memcp-tests" "drcv_item"))
       (define before_delete
         (scan_recset nil tbl
-          '("bucket_id")
+          (car (compile_scan_access '("bucket_id") (scheme "(lambda (bucket_id) (equal? bucket_id 7))"))) (cadr (compile_scan_access '("bucket_id") (scheme "(lambda (bucket_id) (equal? bucket_id 7))"))) '("bucket_id")
           (lambda (bucket_id) (equal? bucket_id 7))))
       (define deleted
         (scan nil tbl
-          '("id")
+          (car (compile_scan_access '("id") (scheme "(lambda (id) (equal? id 12))"))) (cadr (compile_scan_access '("id") (scheme "(lambda (id) (equal? id 12))"))) '("id")
           (lambda (id) (equal? id 12))
           '("$update")
           (lambda (acc $update) (+ acc (if ($update) 1 0)))
@@ -98,7 +98,7 @@ test_cases:
           +))
       (define unordered
         (scan nil before_delete
-          '("id")
+          (car (compile_scan_access '("id") (scheme "(lambda (id) true)"))) (cadr (compile_scan_access '("id") (scheme "(lambda (id) true)"))) '("id")
           (lambda (id) true)
           '("id")
           (lambda (acc id) (+ acc id))
@@ -106,7 +106,7 @@ test_cases:
           +))
       (define ordered
         (scan_order nil before_delete
-          '("id")
+          (car (compile_scan_access '("id") (scheme "(lambda (id) true)"))) (cadr (compile_scan_access '("id") (scheme "(lambda (id) true)"))) '("id")
           (lambda (id) true)
           '("sort_key" "id")
           '(< <)
@@ -117,14 +117,14 @@ test_cases:
           false))
       (define narrowed
         (scan_recset nil before_delete
-          '("id")
+          (car (compile_scan_access '("id") (scheme "(lambda (id) true)"))) (cadr (compile_scan_access '("id") (scheme "(lambda (id) true)"))) '("id")
           (lambda (id) true)))
       (if (and (equal? deleted 1)
         (equal? unordered 63)
         (equal? ordered (list (list 31) (list 21) (list 11)))
         (equal? (recset_count narrowed) 3)
         (not (scan_exists nil before_delete
-          '("id")
+          (car (compile_scan_access '("id") (scheme "(lambda (id) (equal? id 12))"))) (cadr (compile_scan_access '("id") (scheme "(lambda (id) (equal? id 12))"))) '("id")
           (lambda (id) (equal? id 12)))))
         "ok"
         (error "a RecSet consumer emitted a row deleted after RecSet construction")))

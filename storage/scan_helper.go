@@ -290,6 +290,20 @@ func boundaryIndexCols(b boundaries) string {
 	return sb.String()
 }
 
+func scanAccessIndexCols(access scanAccess) string {
+	if access.len() == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	for i := 0; i < access.len(); i++ {
+		if i > 0 {
+			sb.WriteByte(',')
+		}
+		sb.WriteString(access.boundary(i).col)
+	}
+	return sb.String()
+}
+
 // touchTempColumns updates lastAccessed on all temp columns of the table (lock-free).
 // Touching every temp column (not just the ones in the scan's column lists) prevents
 // a concurrent eviction from modifying t.Columns while the scan is in progress.
@@ -299,5 +313,25 @@ func touchTempColumns(t *table, colSets ...[]string) {
 		if c.IsTemp {
 			atomic.StoreInt64(&c.lastAccessed, now)
 		}
+	}
+}
+
+// ensureScanAccessColumns loads every physical source column referenced by an
+// access plan before the scan takes the shard read lock. Exact predicates may
+// be absent from the residual filter, so its column preflight is intentionally
+// not relied upon here.
+func (t *storageShard) ensureScanAccessColumns(access scanAccess, alreadyLocked bool, currentTx *TxContext) {
+	for i := 0; i < access.len(); i++ {
+		boundary := access.boundary(i)
+		if len(boundary.mapCols) > 0 {
+			for _, col := range boundary.mapCols {
+				t.getColumnStorageOrPanic(col, alreadyLocked, currentTx)
+			}
+			continue
+		}
+		if boundary.col == "" || boundary.col[0] == '$' {
+			continue
+		}
+		t.getColumnStorageOrPanic(boundary.col, alreadyLocked, currentTx)
 	}
 }

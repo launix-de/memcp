@@ -1794,7 +1794,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			(begin (if policy (policy "system" true true) true)
 				(cons '!begin (list
 					'((quote protect_sql_root_admin) username "drop")
-					'((quote scan) '(session "__memcp_tx") '('table "system" "access")
+					(compile_scan_plan (quote scan) '(session "__memcp_tx") '('table "system" "access")
 						'('list "username")
 						'((quote lambda) '('username) '((quote equal??) (quote username) username))
 						'(list "$update")
@@ -1802,7 +1802,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 						0
 						(quote +)
 						false)
-					'((quote scan) '(session "__memcp_tx") '('table "system" "user")
+					(compile_scan_plan (quote scan) '(session "__memcp_tx") '('table "system" "user")
 						'('list "username")
 						'((quote lambda) '('username) '((quote equal??) (quote username) username))
 						'(list "$update")
@@ -1820,7 +1820,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(parser '((atom "ALTER" true) (atom "USER" true) (define username sql_user_ident)
 			(? '((atom "IDENTIFIED" true) (atom "BY" true) (define password sql_expression))))
 			(begin (if policy (policy "system" true true) true)
-				'((quote scan) '(session "__memcp_tx") '('table "system" "user") '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('__scan_acc '$update) '('begin '('$update '('list "password" '('password password))) '__scan_acc)) nil nil false)
+				(compile_scan_plan (quote scan) '(session "__memcp_tx") '('table "system" "user") '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('__scan_acc '$update) '('begin '('$update '('list "password" '('password password))) '__scan_acc)) nil nil false)
 		))
 
 		/* FLUSH PRIVILEGES / FLUSH TABLES / FLUSH ... — no-op in memcp */
@@ -1830,7 +1830,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		/* GRANT ALL [PRIVILEGES] ON *.* TO user -> set admin true */
 		(parser '((atom "GRANT" true) (atom "ALL" true) (? (atom "PRIVILEGES" true)) (atom "ON" true) (atom "*" true) (atom "." true) (atom "*" true) (atom "TO" true) (define username sql_user_ident))
 			(begin (if policy (policy "system" true true) true)
-				'((quote scan) '(session "__memcp_tx") '('table "system" "user") '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('__scan_acc '$update) '('begin '('$update '('list "admin" true)) '__scan_acc)) nil nil false)
+				(compile_scan_plan (quote scan) '(session "__memcp_tx") '('table "system" "user") '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('__scan_acc '$update) '('begin '('$update '('list "admin" true)) '__scan_acc)) nil nil false)
 		))
 		/* GRANT <anything> ON db.* TO user -> insert access (idempotent) */
 		(parser '((atom "GRANT" true) (+ (or sql_identifier "," (atom "SELECT" true) (atom "ALL" true) (atom "PRIVILEGES" true))) (atom "ON" true) (define db sql_identifier) (atom "." true) (or (atom "*" true) sql_identifier) (atom "TO" true) (define username sql_user_ident))
@@ -1847,12 +1847,12 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		/* REVOKE ALL [PRIVILEGES] ON *.* FROM user -> set admin false */
 		(parser '((atom "REVOKE" true) (atom "ALL" true) (? (atom "PRIVILEGES" true)) (atom "ON" true) (atom "*" true) (atom "." true) (atom "*" true) (atom "FROM" true) (define username sql_user_ident))
 			(begin (if policy (policy "system" true true) true)
-				'((quote scan) '(session "__memcp_tx") '('table "system" "user") '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('__scan_acc '$update) '('begin '('$update '('list "admin" '('protected_sql_admin_revoke_value username))) '__scan_acc)) nil nil false)
+				(compile_scan_plan (quote scan) '(session "__memcp_tx") '('table "system" "user") '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('__scan_acc '$update) '('begin '('$update '('list "admin" '('protected_sql_admin_revoke_value username))) '__scan_acc)) nil nil false)
 		))
 		/* REVOKE <anything> ON db.* FROM user -> delete access entry */
 		(parser '((atom "REVOKE" true) (+ (or sql_identifier "," (atom "SELECT" true) (atom "ALL" true) (atom "PRIVILEGES" true))) (atom "ON" true) (define db sql_identifier) (atom "." true) (or (atom "*" true) sql_identifier) (atom "FROM" true) (define username sql_user_ident))
 			(begin (if policy (policy "system" true true) true)
-				'((quote scan)
+				(compile_scan_plan (quote scan)
 					'(session "__memcp_tx")
 					'('table "system" "access")
 					'(list "username" "database")
@@ -1866,7 +1866,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		/* REVOKE <anything> ON db.table FROM user -> treat as db-level and delete access entry */
 		(parser '((atom "REVOKE" true) (+ (or sql_identifier "," (atom "SELECT" true) (atom "ALL" true) (atom "PRIVILEGES" true))) (atom "ON" true) (define db sql_identifier) (atom "." true) sql_identifier (atom "FROM" true) (define username sql_user_ident))
 			(begin (if policy (policy "system" true true) true)
-				'((quote scan)
+				(compile_scan_plan (quote scan)
 					'(session "__memcp_tx")
 					'('table "system" "access")
 					'(list "username" "database")

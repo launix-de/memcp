@@ -90,7 +90,8 @@ func recSetModuloFilter(batchSizes *[]int64, divisor int, remainder int) scm.Scm
 	return scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
 		batch := RecSetFromScmer(values[0])
 		*batchSizes = append(*batchSizes, batch.count)
-		return NewRecSetScmer(batch.filterToRecSet(nil, []string{"id"}, condition))
+		return NewRecSetScmer(batch.filterToRecSet(nil, []string{"id"}, condition,
+			newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil))
 	})
 }
 
@@ -100,7 +101,7 @@ func runBatchAcceptIDs(table *table, input *recSet, batchFilter scm.Scmer, sortc
 		got = append(got, int64(scm.ToInt(values[1])))
 		return values[0]
 	})
-	source := scanOrderTableSpec{table: table}
+	source := scanOrderTableSpec{table: table, accessSchema: newScanAccessSchema(scanAccessConsumerScan, nil, -1)}
 	if input != nil {
 		source.table = nil
 		source.recset = input
@@ -132,7 +133,7 @@ func TestScanOrderBatchAcceptSupportsRecSetInput(t *testing.T) {
 	even := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
 		return scm.NewBool(scm.ToInt(values[0])%2 == 0)
 	})
-	input := table.scanRecSet(nil, []string{"id"}, even, scm.NewNil(), nil)
+	input := table.scanRecSet(nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, []string{"id"}, even)
 	_, descending := integerOrder(true)
 	batchSizes := make([]int64, 0)
 	got := runBatchAcceptIDs(table, input, recSetModuloFilter(&batchSizes, 4, 0),
@@ -232,7 +233,7 @@ func TestCollectOrderedCandidateBatchPrunesRangePartitions(t *testing.T) {
 
 func TestScanOrderBatchAcceptRejectsNonSubset(t *testing.T) {
 	table := setupBatchAcceptTable(t, "tbatchacceptsubset", 10)
-	allRows := table.scanRecSet(nil, nil, scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewBool(true) }), scm.NewNil(), nil)
+	allRows := table.scanRecSet(nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, nil, scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewBool(true) }))
 	badFilter := scm.NewFunc(func(...scm.Scmer) scm.Scmer { return NewRecSetScmer(allRows) })
 	_, ascending := integerOrder(false)
 
@@ -258,6 +259,8 @@ func TestScanOrderBatchAcceptDeclarationSignature(t *testing.T) {
 	scm.Apply(scm.Globalenv.Vars[scm.Symbol("scan_order_batch_accept")],
 		scm.NewNil(),
 		NewTableScmer(table),
+		newScanAccessSchema(scanAccessConsumerScan, nil, -1),
+		scm.NewSlice(nil),
 		identityFilter,
 		scm.NewSlice([]scm.Scmer{scm.NewString("id")}),
 		scm.NewSlice([]scm.Scmer{relation}),

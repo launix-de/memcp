@@ -48,12 +48,12 @@ func TestScanPipelineSpecializationsPreserveMainAndDeltaResults(t *testing.T) {
 	assertResults := func(stage string) {
 		t.Helper()
 		for _, condition := range []scm.Scmer{greaterEqualTwo, reversedLessThan} {
-			count := tbl.scan(nil, []string{"id"}, condition, nil, countMapReduce,
+			count := tbl.scan(nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, []string{"id"}, condition, nil, countMapReduce,
 				scm.NewInt(0), plus, false)
 			if got := scm.ToInt(count); got != 2 {
 				t.Fatalf("%s count = %d, want 2", stage, got)
 			}
-			sum := tbl.scan(nil, []string{"id"}, condition, []string{"id"}, sumMapReduce,
+			sum := tbl.scan(nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, []string{"id"}, condition, []string{"id"}, sumMapReduce,
 				scm.NewNil(), scm.Globalenv.Vars[scm.Symbol("sql_sum_reduce")], false)
 			if got := scm.ToInt(sum); got != 5 {
 				t.Fatalf("%s sum = %d, want 5", stage, got)
@@ -91,6 +91,11 @@ func BenchmarkScanPipelineOLTP(b *testing.B) {
 
 	trueFilter := optimizedScanProc(b, "(lambda () true)")
 	lastIDFilter := optimizedScanProc(b, "(lambda (id) (equal?? id 59999))")
+	lastIDAccessSchema, lastIDAccessValues := testEqualScanAccess("id", scm.NewInt(59999))
+	lastIDSchemaItems := append([]scm.Scmer(nil), lastIDAccessSchema.Slice()...)
+	meta, _ := decodeScanAccessHeader(lastIDSchemaItems[0])
+	lastIDSchemaItems[0] = newScanAccessHeader(meta.count, scanAccessConsumerCoveredScan, meta.projections, meta.mapperSlot)
+	lastIDAccessSchema = scm.NewSlice(lastIDSchemaItems)
 	countMapReduce := scm.Globalenv.Vars[scm.Symbol("scan_count")]
 	sumMapReduce := scm.Globalenv.Vars[scm.Symbol("sql_sum_reduce")]
 	takeRightMapReduce := optimizedScanProc(b, "(lambda (acc value) value)")
@@ -101,23 +106,29 @@ func BenchmarkScanPipelineOLTP(b *testing.B) {
 		name          string
 		conditionCols []string
 		condition     scm.Scmer
+		accessSchema  scm.Scmer
+		accessValues  []scm.Scmer
 		mapCols       []string
 		mapReducer    scm.Scmer
 		combine       scm.Scmer
 		neutral       scm.Scmer
 	}{
 		{name: "count", condition: trueFilter, mapReducer: countMapReduce, combine: plus, neutral: scm.NewInt(0)},
-		{name: "filtered_count", conditionCols: []string{"id"}, condition: lastIDFilter, mapReducer: countMapReduce, combine: plus, neutral: scm.NewInt(0)},
+		{name: "filtered_count", conditionCols: []string{"id"}, condition: lastIDFilter, accessSchema: lastIDAccessSchema, accessValues: lastIDAccessValues, mapReducer: countMapReduce, combine: plus, neutral: scm.NewInt(0)},
 		{name: "sum", condition: trueFilter, mapCols: []string{"amount"}, mapReducer: sumMapReduce, combine: sqlSum, neutral: scm.NewNil()},
 		{name: "take_right", condition: trueFilter, mapCols: []string{"amount"}, mapReducer: takeRightMapReduce, combine: takeRightMapReduce, neutral: scm.NewNil()},
 	}
 
 	for _, benchmark := range benchmarks {
 		b.Run(benchmark.name, func(b *testing.B) {
+			accessSchema := benchmark.accessSchema
+			if accessSchema.IsNil() {
+				accessSchema = newScanAccessSchema(scanAccessConsumerScan, nil, -1)
+			}
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				tbl.scan(nil, benchmark.conditionCols, benchmark.condition, benchmark.mapCols, benchmark.mapReducer,
+				tbl.scan(nil, accessSchema, benchmark.accessValues, benchmark.conditionCols, benchmark.condition, benchmark.mapCols, benchmark.mapReducer,
 					benchmark.neutral, benchmark.combine, false)
 			}
 		})

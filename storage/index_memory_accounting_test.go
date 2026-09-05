@@ -40,7 +40,7 @@ func TestPlannerIndexProbeDoesNotIncreaseIndexSavings(t *testing.T) {
 	lower, upperLast := indexFromBoundaries(bounds)
 	var buf [8]uint32
 	shard.mu.RLock()
-	shard.iterateIndex(nil, bounds, lower, upperLast, len(shard.inserts), buf[:], 0, nil, func(batch []uint32) bool {
+	shard.iterateIndex(nil, runtimeScanAccess(bounds), lower, upperLast, len(shard.inserts), buf[:], 0, nil, func(batch []uint32) bool {
 		return true
 	})
 	shard.mu.RUnlock()
@@ -58,6 +58,19 @@ func TestPlannerIndexProbeDoesNotIncreaseIndexSavings(t *testing.T) {
 	}
 	if shard.Indexes[0].baseState.active {
 		t.Fatal("estimate must not materialize a cold auto-index before real usage")
+	}
+
+	columns := []string{"id"}
+	values := []scm.Scmer{scm.NewInt(5)}
+	if _, present := shard.GetRecordidForUnique(columns, values, nil); !present {
+		t.Fatal("warm unique point probe did not find its row")
+	}
+	if allocations := testing.AllocsPerRun(1000, func() {
+		if _, present := shard.GetRecordidForUnique(columns, values, nil); !present {
+			t.Fatal("unique point probe did not find its row")
+		}
+	}); allocations != 0 {
+		t.Fatalf("warm unique point probe allocated %.2f times per run, want 0", allocations)
 	}
 }
 

@@ -445,6 +445,32 @@ def performance_case_fingerprint(
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def revision_specific_scm(test_case: Dict[str, Any], spec_file: str) -> str:
+    """Resolve an ABI-bound SCM probe from the worktree under measurement."""
+    scm_code = test_case.get("scm")
+    if PERF_AB_MODE != "record" or not test_case.get("revision_specific_scm"):
+        return scm_code
+    worktree = os.environ.get("MEMCP_TEST_WORKTREE")
+    if not worktree:
+        raise ValueError("revision_specific_scm requires MEMCP_TEST_WORKTREE in A/B record mode")
+    normalized = Path(spec_file).as_posix()
+    marker = "tests/"
+    position = normalized.rfind(marker)
+    relative = normalized[position:] if position >= 0 else normalized
+    revision_spec = Path(worktree) / relative
+    with revision_spec.open("r", encoding="utf-8") as handle:
+        suite = yaml.safe_load(handle) or {}
+    matches = [
+        case.get("scm") for case in suite.get("test_cases", [])
+        if isinstance(case, dict) and case.get("name") == test_case.get("name")
+    ]
+    if len(matches) != 1 or not isinstance(matches[0], str):
+        raise ValueError(
+            f"revision_specific_scm could not resolve one SCM case named {test_case.get('name')!r}"
+        )
+    return matches[0]
+
+
 def performance_regression_pct(test_case: Dict[str, Any], metadata: Dict[str, Any]) -> float:
     value = test_case.get(
         "max_regression_pct",
@@ -1316,7 +1342,14 @@ class SQLTestRunner:
                 )
 
         # Scheme code execution via /scm endpoint
-        scm_code = test_case.get("scm")
+        try:
+            scm_code = revision_specific_scm(
+                test_case, self.current_spec_file or "",
+            )
+        except (OSError, ValueError, yaml.YAMLError) as exc:
+            return self._record_fail(
+                name, str(exc), None, None, None, is_noncritical,
+            )
         if scm_code:
             if is_perf_test:
                 scm_code = scm_code.replace("{rows}", str(perf_rows)).replace("{database}", database)
@@ -1650,6 +1683,19 @@ class SQLTestRunner:
             with gate:
                 for _ in range(warmup_runs):
                     self.execute_sparql(database, query, auth_header, timeout=sql_timeout) if is_sparql else self.execute_sql(database, query, auth_header, active_syntax, timeout=sql_timeout)
+
+                # Scans publish telemetry asynchronously after returning the
+                # query result. Let warmup-triggered writes, group-cache hooks,
+                # and rebuild work settle before the measured request starts.
+                # Otherwise their cost is charged nondeterministically to the
+                # first sample, which is especially visible for one-shot DML.
+                if is_perf_test and warmup_runs > 0:
+                    if not wait_for_performance_setup_quiescence(self.base_url):
+                        return self._record_fail(
+                            name,
+                            "Warmup work did not quiesce before measurement",
+                            query, None, test_case.get("expect"), is_noncritical,
+                        )
 
                 memcp_pid = find_memcp_pid() if is_perf_test else None
                 start_cpu = get_process_cpu_times(memcp_pid) if memcp_pid else None
@@ -2432,6 +2478,33 @@ def run_test_specs(spec_files: List[str], base_url: str, port: int, log_times: b
         if restart_handler is not None:
             runner.set_restart_handler(restart_handler)
         return runner.run_test_spec(spec_files[0])
+
+    if PERF_TEST_ENABLED and len(spec_files) > 1:
+        exclusive_specs = [
+            spec_file for spec_file in spec_files
+            if Path(spec_file).is_file() and suite_execution_mode(spec_file) == "exclusive"
+        ]
+        if exclusive_specs:
+            shared_specs = [
+                spec_file for spec_file in spec_files
+                if spec_file not in exclusive_specs
+            ]
+            all_ok = True
+            for spec_file in exclusive_specs:
+                all_ok = run_test_specs(
+                    [spec_file], base_url, port, log_times, jobs,
+                    restart_handler=restart_handler,
+                    connect_only=connect_only,
+                    fail_fast=fail_fast,
+                ) and all_ok
+            if shared_specs:
+                all_ok = run_test_specs(
+                    shared_specs, base_url, port, log_times, jobs,
+                    restart_handler=restart_handler,
+                    connect_only=connect_only,
+                    fail_fast=fail_fast,
+                ) and all_ok
+            return all_ok
 
     if PERF_TEST_ENABLED:
         max_jobs = normalize_jobs(jobs)

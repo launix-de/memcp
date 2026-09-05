@@ -2544,9 +2544,13 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 	case tagSlice:
 		list := expr.Slice()
 		if len(list) == 0 {
-			imm := NewNil()
+			// Match Eval: an empty slice is a self-evaluating empty list, not
+			// Scheme nil. This distinction matters for typed native parameters
+			// such as the scan access-values vector.
+			imm := expr
 			ctx.TrackImm(imm)
-			return JITValueDesc{Loc: LocImm, Type: tagNil, Imm: imm}
+			return JITValueDesc{Loc: LocImm, Type: tagSlice, Imm: imm,
+				KnownSliceLen: 0, KnownSliceCap: 0, SliceSizeKnown: true}
 		}
 		// Resolve operator
 		head, headOK := scmerSymbol(list[0])
@@ -2900,15 +2904,47 @@ func jitDeclarationHasCallback(decl *Declaration) bool {
 	return false
 }
 
+func jitLambdaTemplateCapturesFrame(ctx *JITContext, lambda *JITLambdaTemplate) bool {
+	if lambda == nil || jitExpressionConsumesRuntimeEnv(lambda.Proc.Body) {
+		return true
+	}
+	for _, symbol := range jitLambdaFreeSymbols(lambda.Proc.Params, lambda.Proc.Body) {
+		if ctx.Env != nil {
+			if _, ok := ctx.Env.Lookup(symbol); ok {
+				return true
+			}
+		}
+		if _, ok := Globalenv.Vars[symbol]; ok {
+			continue
+		}
+		if runtimeEnv, ok := ctx.RuntimeEnv.Any().(*Env); ok && runtimeEnv != nil {
+			if binding := runtimeEnv.FindRead(symbol); binding != nil && binding != &Globalenv {
+				if _, exists := binding.Vars[symbol]; exists {
+					return true
+				}
+			}
+		}
+	}
+	outerCaptures, namedOuterCaptures := jitLambdaOuterCaptures(lambda.Proc.Body, true)
+	return len(outerCaptures) != 0 || len(namedOuterCaptures) != 0
+}
+
 func jitCompileCallArgument(ctx *JITContext, decl *Declaration, index int, expr Scmer, sliceBase Reg) JITValueDesc {
 	param := jitDeclarationParam(decl, index)
 	if param != nil && param.Kind == "func" {
-		// Transfer describes ownership of the callback's runtime argument; it
-		// does not make the lambda body escape. The optimizer has already encoded
-		// mutable-vs-copying builtin choices in that body, so retain the template
-		// and let the generated callback site inline it like every other lambda.
+		transfersInput := false
+		for _, callbackParam := range param.Params {
+			transfersInput = transfersInput || callbackParam != nil && callbackParam.Transfer
+		}
 		if lambda, ok := jitLambdaTemplate(expr, ctx.Env); ok {
-			return JITValueDesc{Loc: LocLambdaTemplate, Type: tagProc, Lambda: lambda}
+			// A transferring callback can retain or return storage rooted in its
+			// invocation frame. Cross-goroutine consumers therefore need an
+			// independently materialized procedure only when the lambda actually
+			// captures that frame. Capture-free scan callbacks remain safe direct
+			// calls and avoid an allocation on every query execution.
+			if !transfersInput || param.SameGoroutine || !jitLambdaTemplateCapturesFrame(ctx, lambda) {
+				return JITValueDesc{Loc: LocLambdaTemplate, Type: tagProc, Lambda: lambda}
+			}
 		}
 	}
 	hasCallback := false

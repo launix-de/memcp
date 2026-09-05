@@ -47,7 +47,7 @@ test_cases:
   - name: "legacy system-table scan shape stays accepted"
     scm: |
       (scan nil (table "system" "user")
-        '() (lambda () true)
+        (car (compile_scan_access '() (scheme "(lambda () true)"))) (cadr (compile_scan_access '() (scheme "(lambda () true)"))) '() (lambda () true)
         '("username") (lambda (acc u) u)
         "" (lambda (a b) b))
 

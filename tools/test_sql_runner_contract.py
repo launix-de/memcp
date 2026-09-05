@@ -47,15 +47,16 @@ from run_sql_tests import (  # noqa: E402
     load_performance_scale,
     observe_atomic_json,
     performance_ab_threshold_ms,
-    performance_sample_ns,
+    performance_architecture,
     performance_case_fingerprint,
     performance_case_key,
-    performance_architecture,
     performance_regression_pct,
+    performance_sample_ns,
     performance_scale_from_samples,
     planner_time_limit_with_tolerance_ms,
     publish_performance_scale,
     request_shared_supervisor_restart,
+    revision_specific_scm,
     resolve_timing_samples,
     resolve_warmup_runs,
     run_test_specs,
@@ -430,6 +431,41 @@ class AtomicJSONObserverContractTest(unittest.TestCase):
 
 
 class FailFastParallelContractTest(unittest.TestCase):
+    def test_ab_record_uses_revision_specific_physical_scm(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            spec = root / "tests" / "performance" / "physical.yaml"
+            spec.parent.mkdir(parents=True)
+            spec.write_text(
+                "test_cases:\n"
+                "  - name: physical probe\n"
+                "    scm: '(old_scan_interface)'\n",
+                encoding="utf-8",
+            )
+            case = {
+                "name": "physical probe",
+                "scm": "(new_scan_interface)",
+                "revision_specific_scm": True,
+            }
+            with mock.patch("run_sql_tests.PERF_AB_MODE", "record"), \
+                    mock.patch.dict(os.environ, {"MEMCP_TEST_WORKTREE": str(root)}):
+                self.assertEqual(
+                    revision_specific_scm(case, "tests/performance/physical.yaml"),
+                    "(old_scan_interface)",
+                )
+
+    def test_normal_run_keeps_current_revision_physical_scm(self) -> None:
+        case = {
+            "name": "physical probe",
+            "scm": "(new_scan_interface)",
+            "revision_specific_scm": True,
+        }
+        with mock.patch("run_sql_tests.PERF_AB_MODE", ""):
+            self.assertEqual(
+                revision_specific_scm(case, "tests/performance/physical.yaml"),
+                "(new_scan_interface)",
+            )
+
     def test_ab_mode_skips_non_measurement_cases_in_performance_suite(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             spec = Path(tmp) / "performance.yaml"
@@ -473,6 +509,43 @@ class FailFastParallelContractTest(unittest.TestCase):
             self.assertTrue(run_test_specs(specs, "http://localhost:1", 1, True, 2))
 
         self.assertCountEqual(events[2:], [("measure", specs[0]), ("measure", specs[1])])
+
+    def test_performance_isolated_suites_run_as_separate_phases(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            specs = [Path(tmp) / "first.yaml", Path(tmp) / "second.yaml"]
+            for spec in specs:
+                spec.write_text(
+                    "metadata: {isolated: true}\n"
+                    "test_cases:\n"
+                    "  - {name: measured, sql: SELECT 1, threshold_ms: 100}\n",
+                    encoding="utf-8",
+                )
+            events = []
+
+            def prepare(_runner, spec_file):
+                events.append(("prepare", Path(spec_file).name))
+                return True
+
+            def measure(_runner, spec_file, setup_done=False):
+                self.assertTrue(setup_done)
+                events.append(("measure", Path(spec_file).name))
+                return True
+
+            with mock.patch("run_sql_tests.PERF_TEST_ENABLED", True), \
+                    mock.patch("run_sql_tests.performance_measurement_count", return_value=1), \
+                    mock.patch.object(SQLTestRunner, "prepare_test_spec", prepare), \
+                    mock.patch.object(SQLTestRunner, "run_test_spec", measure):
+                self.assertTrue(run_test_specs(
+                    [str(spec) for spec in specs],
+                    "http://localhost:1", 1, True, 2,
+                ))
+
+        self.assertEqual(events, [
+            ("prepare", "first.yaml"),
+            ("measure", "first.yaml"),
+            ("prepare", "second.yaml"),
+            ("measure", "second.yaml"),
+        ])
 
     def test_performance_setup_restart_runs_once_before_measurements(self) -> None:
         specs = ["tests/performance/a.yaml", "tests/performance/b.yaml"]

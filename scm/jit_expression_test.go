@@ -344,6 +344,71 @@ func TestJITNoEscapeCallbackUsesStackFuncval(t *testing.T) {
 	}
 }
 
+func TestJITTransferringCallbackCrossesGoroutineWithMaterializedFrame(t *testing.T) {
+	const name = "jit_test_cross_goroutine_callback"
+	consumer := func(args ...Scmer) Scmer {
+		result := make(chan Scmer, 1)
+		go func(callback, value Scmer) {
+			prepared := PrepareSerialProc(callback)
+			result <- prepared.Call([]Scmer{value})
+		}(args[0], args[1])
+		return <-result
+	}
+	Declare(&Globalenv, &Declaration{
+		Name: name,
+		Fn:   consumer,
+		Type: &TypeDescriptor{Kind: "func", Forbidden: true, Params: []*TypeDescriptor{
+			{Kind: "func", NoEscape: true, Params: []*TypeDescriptor{{Kind: "any", Transfer: true}}, Return: &TypeDescriptor{Kind: "any", Transfer: true}},
+			{Kind: "any"},
+		}, Return: &TypeDescriptor{Kind: "any"}},
+	})
+	defer func() {
+		delete(Globalenv.Vars, Symbol(name))
+		delete(declarations, name)
+		delete(declarationsByFunction, FunctionIdentity(consumer))
+	}()
+	compiled := compileJITExpressionTestProc(t, `(lambda (captured value)
+		(jit_test_cross_goroutine_callback (lambda (item) (list captured item)) value))`)
+	want := NewSlice([]Scmer{NewInt(5), NewInt(7)})
+	if got := Apply(compiled, NewInt(5), NewInt(7)); !Equal(got, want) {
+		t.Fatalf("cross-goroutine callback returned %s, want %s", String(got), String(want))
+	}
+}
+
+func TestJITCaptureFreeTransferringCallbackStaysDirect(t *testing.T) {
+	const name = "jit_test_capture_free_transfer_callback"
+	consumer := func(args ...Scmer) Scmer {
+		prepared := PrepareSerialProc(args[0])
+		return prepared.Call(args[1:2])
+	}
+	Declare(&Globalenv, &Declaration{
+		Name: name,
+		Fn:   consumer,
+		Type: &TypeDescriptor{Kind: "func", Forbidden: true, Params: []*TypeDescriptor{
+			{Kind: "func", NoEscape: true, Params: []*TypeDescriptor{{Kind: "any", Transfer: true}}, Return: &TypeDescriptor{Kind: "any", Transfer: true}},
+			{Kind: "any"},
+		}, Return: &TypeDescriptor{Kind: "any"}},
+	})
+	defer func() {
+		delete(Globalenv.Vars, Symbol(name))
+		delete(declarations, name)
+		delete(declarationsByFunction, FunctionIdentity(consumer))
+	}()
+	compiled := compileJITExpressionTestProc(t, `(lambda (value)
+		(jit_test_capture_free_transfer_callback (lambda (item) (+ item 1)) value))`)
+	args := []Scmer{NewInt(7)}
+	if got := compiled.Proc().jitFunction()(args...); !Equal(got, NewInt(8)) {
+		t.Fatalf("capture-free transfer callback returned %s, want 8", String(got))
+	}
+	if allocations := testing.AllocsPerRun(100, func() {
+		if got := compiled.Proc().jitFunction()(args...); !Equal(got, NewInt(8)) {
+			t.Fatalf("capture-free transfer callback returned %s, want 8", String(got))
+		}
+	}); allocations != 0 {
+		t.Fatalf("capture-free transfer callback allocated %.2f objects, want 0", allocations)
+	}
+}
+
 func TestJITEscapingCallbackUsesOneTypedAllocation(t *testing.T) {
 	compiled := compileJITExpressionTestProc(t, `(lambda (captured)
 		(lambda (value) (+ captured value)))`)
@@ -1100,6 +1165,23 @@ func TestJITExpressionConsTailOfSingleElementList(t *testing.T) {
 	want := NewSlice(nil)
 	if !Equal(got, want) {
 		t.Fatalf("unexpected cons tail: got %s, want %s", String(got), String(want))
+	}
+}
+
+func TestJITExpressionPreservesSelfEvaluatingEmptyList(t *testing.T) {
+	if !jitEnabled {
+		t.Skip("requires GOEXPERIMENT=jit")
+	}
+	root := NewProcStruct(Proc{
+		Params:  NewSlice(nil),
+		Body:    NewSlice(nil),
+		En:      &Globalenv,
+		NumVars: 0,
+	})
+	compiled := jitCompile(root)
+	got := Apply(compiled)
+	if !got.IsSlice() || len(got.Slice()) != 0 {
+		t.Fatalf("self-evaluating empty list became %s, want empty list", SerializeToString(got, &Globalenv))
 	}
 }
 

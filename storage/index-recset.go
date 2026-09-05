@@ -47,10 +47,11 @@ func appendRecSetBoundary(bounds boundaries, source *recSet) boundaries {
 // suffix. Other RecSet boundaries remain ordinary matchers and are intersected
 // by bindRowMatchers. This permits several independent RecSet hooks without
 // creating another scan-source shape.
-func smallestRecSetBoundary(bounds boundaries, shard *storageShard) (*recSetShard, bool) {
+func smallestRecSetBoundary(bounds scanAccess, shard *storageShard) (*recSetShard, bool) {
 	var smallest *recSetShard
 	found := false
-	for _, bound := range bounds {
+	for i := 0; i < bounds.len(); i++ {
+		bound := bounds.boundary(i)
 		if !matcherKindEqual(bound.matcher, RecSetMatcher) || !bound.lower.IsCustom(TagRecSet) {
 			continue
 		}

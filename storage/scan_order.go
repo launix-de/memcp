@@ -28,41 +28,37 @@ import "container/heap"
 import "github.com/launix-de/memcp/scm"
 
 func optimizeScanOrderMulti(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) (scm.Scmer, *scm.TypeDescriptor) {
-	// scan_order_multi args: 0=fn, 1=tx, 2=tables, 3=filterCols, 4=filterFns,
-	// 5=sortcols, 6=sortdirs, 7=perTableOffset, 8=perTableLimit,
-	// 9=partCols, 10=offset, 11=limit, 12=mapReduceCols,
-	// 13=mapReduceFns, 14=neutral, 15=isOuter, 16=notFoundValue
-	if len(v) >= 14 && len(v) <= 17 {
-		if schemas, bindings, ok := compileScanAccessList(v[3], v[4], false); ok {
-			for len(v) < 17 {
-				switch len(v) {
-				case 14:
-					v = append(v, scm.NewNil())
-				case 15:
-					v = append(v, scm.NewBool(false))
-				case 16:
-					v = append(v, v[14])
-				}
+	// scan_order_multi args: 0=fn, 1=tx, 2=tables, 3=accessSchemas,
+	// 4=accessValues, 5=filterCols, 6=filterFns, 7=sortcols, 8=sortdirs,
+	// 9=perTableOffset, 10=perTableLimit, 11=partCols, 12=offset,
+	// 13=limit, 14=mapReduceCols, 15=mapReduceFns, 16=neutral,
+	// 17=isOuter, 18=notFoundValue
+	if len(v) >= 16 && len(v) <= 18 {
+		for len(v) < 19 {
+			switch len(v) {
+			case 16:
+				v = append(v, scm.NewNil())
+			case 17:
+				v = append(v, scm.NewBool(false))
+			case 18:
+				v = append(v, v[16])
 			}
-			v = append(v,
-				scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), scm.NewSlice(schemas)}),
-				oc.OptimizeNoEscapeList(bindings))
 		}
 	}
-	for i := 1; i <= 13 && i < len(v); i++ {
+	for i := 1; i <= 15 && i < len(v); i++ {
 		v[i], _ = oc.OptimizeSub(v[i], true)
 	}
 	neutralType := unknownScanType()
-	if len(v) > 14 {
-		v[14], neutralType = oc.OptimizeSub(v[14], true)
+	if len(v) > 16 {
+		v[16], neutralType = oc.OptimizeSub(v[16], true)
 		neutralType = normalizeScanType(neutralType)
 	}
 	oc.Ome.IncrLoopDepth()
-	if len(v) > 15 {
-		v[15], _ = oc.OptimizeSub(v[15], true)
+	if len(v) > 17 {
+		v[17], _ = oc.OptimizeSub(v[17], true)
 	}
-	if len(v) > 16 {
-		v[16], _ = oc.OptimizeSub(v[16], true)
+	if len(v) > 18 {
+		v[18], _ = oc.OptimizeSub(v[18], true)
 	}
 	oc.Ome.DecrLoopDepth()
 	return scm.NewSlice(v), nil
@@ -82,27 +78,22 @@ func optimizeScanOrder(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) 
 	// if rewritten := tryScanOrderBatchRewrite(v); !rewritten.IsNil() {
 	// 	return oc.OptimizeSub(rewritten, useResult)
 	// }
-	if len(v) >= 14 && len(v) <= 17 {
-		if schema, bindings, ok := compileScanAccess(v[3], v[4]); ok {
-			if len(v) == 14 {
-				// notFoundValue defaults to the neutral accumulator.
-				v = append(v, scm.CloneOptimizerExpression(v[12]))
-			}
-			if len(v) == 15 {
-				v = append(v, scm.NewSlice([]scm.Scmer{scm.NewSymbol("list")}))
-			}
-			if len(v) == 16 {
-				v = append(v, scm.NewNil())
-			}
-			// Planner-generated neutral and not-found expressions can share
-			// mutable AST lists. They are optimized independently below.
-			v[14] = scm.CloneOptimizerExpression(v[14])
-			v = append(v,
-				scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), schema}),
-				oc.OptimizeNoEscapeList(bindings))
+	if len(v) >= 16 && len(v) <= 18 {
+		if len(v) == 16 {
+			// notFoundValue defaults to the neutral accumulator.
+			v = append(v, scm.CloneOptimizerExpression(v[14]))
 		}
+		if len(v) == 17 {
+			v = append(v, scm.NewSlice([]scm.Scmer{scm.NewSymbol("list")}))
+		}
+		if len(v) == 18 {
+			v = append(v, scm.NewNil())
+		}
+		// Planner-generated neutral and not-found expressions can share
+		// mutable AST lists. They are optimized independently below.
+		v[16] = scm.CloneOptimizerExpression(v[16])
 	}
-	mapReduceIdx, neutralIdx, outerIdx, notFoundIdx, postOrderColsIdx, postOrderFilterIdx := 11, 12, 13, 14, 15, 16
+	mapReduceIdx, neutralIdx, outerIdx, notFoundIdx, postOrderColsIdx, postOrderFilterIdx := 13, 14, 15, 16, 17, 18
 	reuseNeutralForNotFound := len(v) > notFoundIdx && scm.Equal(v[neutralIdx], v[notFoundIdx])
 	rawMapReduce := v[mapReduceIdx]
 	for i := 1; i <= mapReduceIdx && i < len(v); i++ {
@@ -204,7 +195,7 @@ type scanOrderResult struct {
 }
 
 type scanOrderStats struct {
-	boundaries     boundaries
+	access         scanAccess
 	inputCount     int64
 	candidateCount int64
 	outputCount    int64
@@ -500,12 +491,86 @@ func extendBoundariesWithSortCols(b boundaries, sortcols []scm.Scmer, sortdirs [
 	return b, len(sortcols) > 0
 }
 
-func indexCoversBoundaryOrder(index *StorageIndex, active bool, bounds boundaries, effectiveCols int) bool {
+// extendScanAccessWithSortCols adds only the runtime ORDER BY portion to the
+// immutable compiled access view. Unlike extendBoundariesWithSortCols it never
+// copies the planner-provided filter boundaries into a runtime array.
+func extendScanAccessWithSortCols(access scanAccess, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer) (scanAccess, bool) {
+	for i := 0; i < access.len(); i++ {
+		if !boundaryIsPoint(access.boundary(i)) {
+			return access, false
+		}
+	}
+	if len(sortcols) == 0 || len(sortdirs) < len(sortcols) {
+		return access, false
+	}
+	inserted := make(boundaries, 0, len(sortcols))
+	hasSorted := func(column string) bool {
+		for i := 0; i < access.len(); i++ {
+			boundary := access.boundary(i)
+			if boundary.col == column && boundary.matcher.IsSorted() {
+				return true
+			}
+		}
+		for _, boundary := range inserted {
+			if boundary.col == column && boundary.matcher.IsSorted() {
+				return true
+			}
+		}
+		return false
+	}
+	for i, sortcol := range sortcols {
+		if sortdirs[i] == nil {
+			return access, false
+		}
+		orderMeta := orderRelationMeta(sortdirs[i])
+		if sortcol.IsString() {
+			column := sortcol.String()
+			if !hasSorted(column) {
+				inserted = append(inserted, columnboundaries{col: column, matcher: RangeMatcher,
+					lower: scm.NewNil(), upper: scm.NewNil(), order: sortdirs[i], orderMeta: orderMeta})
+			}
+			continue
+		}
+		proc, ok := sortcol.Any().(scm.Proc)
+		if !ok && sortcol.IsProc() {
+			proc, ok = *sortcol.Proc(), true
+		}
+		if !ok || !proc.Params.IsSlice() || len(proc.Params.Slice()) == 0 {
+			return access, false
+		}
+		params := proc.Params.Slice()
+		conditionCols := make([]string, len(params))
+		for j, param := range params {
+			conditionCols[j] = scm.String(param)
+		}
+		if !isRawDataset(params, proc.Body) {
+			return access, false
+		}
+		canonical := canonicalColName(proc.Body, params, conditionCols)
+		mapCols, mapFn := buildComputedFn(proc.Body, proc.Params, proc.En, conditionCols)
+		if mapFn.IsNil() || mapCols == nil {
+			return access, false
+		}
+		if !hasSorted(canonical) {
+			inserted = append(inserted, columnboundaries{col: canonical, matcher: RangeMatcher,
+				lower: scm.NewNil(), upper: scm.NewNil(), order: sortdirs[i], orderMeta: orderMeta,
+				mapCols: mapCols, mapFn: mapFn})
+		}
+	}
+	compiledCount := access.compiledCount
+	runtime := access.ensureRuntime()
+	runtime.insertAt = compiledCount
+	runtime.inserted = inserted
+	return access, true
+}
+
+func indexCoversBoundaryOrder(index *StorageIndex, active bool, bounds scanAccess, effectiveCols int) bool {
 	if !active || index == nil {
 		return false
 	}
 	orderCols := 0
-	for i, boundary := range bounds {
+	for i := 0; i < bounds.len(); i++ {
+		boundary := bounds.boundary(i)
 		if boundary.order == nil || boundaryIsPoint(boundary) {
 			continue
 		}
@@ -547,8 +612,9 @@ func orderedIndexUsageWeight(rows, kept int) float64 {
 // it must train the autoindex at the normal rate even when the result window is
 // tiny. Unbounded order boundaries only accelerate Top-k and retain the lower
 // build weight above.
-func orderedScanIndexUsageWeight(bounds boundaries, rows, kept int) float64 {
-	for _, bound := range bounds {
+func orderedScanIndexUsageWeight(bounds scanAccess, rows, kept int) float64 {
+	for i := 0; i < bounds.len(); i++ {
+		bound := bounds.boundary(i)
 		if !boundaryIsUnboundedOrder(bound) {
 			return 1
 		}
@@ -605,14 +671,14 @@ func recSetBoundaryCallCount(conditionCols []string, condition scm.Scmer) int {
 	return walk(p.Body)
 }
 
-func recSetHooksCoverCondition(bounds boundaries, lower []scm.Scmer, backingTable *table, conditionCols []string, condition scm.Scmer) bool {
+func recSetHooksCoverCondition(bounds scanAccess, lower []scm.Scmer, backingTable *table, conditionCols []string, condition scm.Scmer) bool {
 	want := recSetBoundaryCallCount(conditionCols, condition)
 	if want == 0 {
 		return false
 	}
 	covered := 0
-	for i := 0; i < len(lower) && i < len(bounds); i++ {
-		bound := bounds[i]
+	for i := 0; i < len(lower) && i < bounds.len(); i++ {
+		bound := bounds.boundary(i)
 		if !matcherKindEqual(bound.matcher, RecSetMatcher) {
 			continue
 		}
@@ -689,35 +755,36 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 		analyzeStart := time.Now()
 		scratch := acquireScanAnalyzeScratch()
 		defer releaseScanAnalyzeScratch(scratch)
-		var bounds boundaries
-		if spec.accessSchema.IsNil() {
-			bounds = extractBoundariesInto(scratch.boundaries[:0], spec.conditionCols, spec.condition)
-			reorderByFrequency(bounds, t)
-		} else {
-			var compiled bool
-			bounds, compiled = bindCompiledScanAccess(spec.accessSchema, spec.accessValues, scratch.boundaries[:0])
-			if !compiled {
-				panic("scan_order received an invalid compiled access schema")
-			}
+		bounds, compiled := scanAccessFromScheme(spec.accessSchema, spec.accessValues, nil)
+		if !compiled {
+			panic("scan_order received an invalid compiled access schema")
 		}
-		bounds, _ = extendBoundariesWithSortCols(bounds, spec.sortcols, sortdirs)
-		bounds = appendRecSetBoundary(bounds, spec.recset)
-		lower, upperLast := indexFromBoundariesInto(scratch.lower[:0], bounds)
+		if bounds.impossible() {
+			stats[ti].analyzeNs = time.Since(analyzeStart).Nanoseconds()
+			continue
+		}
+		bounds = bounds.useScratch(scratch)
+		bounds, _ = extendScanAccessWithSortCols(bounds, spec.sortcols, sortdirs)
+		runtime := bounds.ensureRuntime()
+		runtime.suffix = appendRecSetBoundary(runtime.suffix, spec.recset)
+		lower, upperLast := indexFromScanAccessInto(scratch.lower[:0], bounds)
 
 		if Settings.ScanDebugging {
 			dbg := fmt.Sprintf("[SCAN_ORDER_MULTI] %s.%s", t.schema.Name, t.Name)
-			for _, b := range bounds {
+			for i := 0; i < bounds.len(); i++ {
+				b := bounds.boundary(i)
 				dbg += fmt.Sprintf(" %s:[%v..%v]", b.col, b.lower, b.upper)
 			}
 			dbg += fmt.Sprintf(" lower=%v upper=%v", lower, upperLast)
 			fmt.Println(dbg)
 		}
 
-		for _, b := range bounds {
+		for i := 0; i < bounds.len(); i++ {
+			b := bounds.boundary(i)
 			t.AddPartitioningScore([]string{b.col})
 		}
 		analyzeNs := time.Since(analyzeStart).Nanoseconds()
-		stats[ti].boundaries = bounds
+		stats[ti].access = bounds
 		stats[ti].analyzeNs = analyzeNs
 
 		// Capture closure variables
@@ -1080,19 +1147,19 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 			}
 		}
 		orderEnc := sb.String()
-		indexColsEnc := boundaryIndexCols(tableStats.boundaries)
+		indexColsEnc := scanAccessIndexCols(tableStats.access)
 		go safeLogScan(tbl.schema.Name, tbl.Name, true, filterEnc, orderEnc, indexColsEnc, tableStats.inputCount, tableStats.candidateCount, tableStats.outputCount, tableStats.analyzeNs, execNs)
 	}
 	return akkumulator
 }
 
 // scan_order delegates to scanOrderMulti with a single-element table spec.
-func (t *table) scan_order(currentTx *TxContext, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, isOuter bool, notFoundValue scm.Scmer, postOrderCols []string, postOrderFilter scm.Scmer, accessSchema scm.Scmer, accessValues []scm.Scmer) scm.Scmer {
+func (t *table) scan_order(currentTx *TxContext, accessSchema scm.Scmer, accessValues []scm.Scmer, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, isOuter bool, notFoundValue scm.Scmer, postOrderCols []string, postOrderFilter scm.Scmer) scm.Scmer {
 	// The general path owns per-scan debugging and telemetry. Debugging is
 	// explicitly allowed to add overhead, so keep it visible instead of letting
 	// the LIMIT 1 fast path silently omit this scan from system statistics.
 	if !Settings.ScanDebugging && postOrderFilter.IsNil() && len(sortcols) == 0 && limitPartitionCols == 0 && offset == 0 && limit == 1 && !isOuter {
-		return t.scanOrderFirst(currentTx, conditionCols, condition, callbackCols, mapReduce, neutral, notFoundValue, accessSchema, accessValues)
+		return t.scanOrderFirst(currentTx, accessSchema, accessValues, conditionCols, condition, callbackCols, mapReduce, neutral, notFoundValue)
 	}
 	return scanOrderMulti(currentTx, []scanOrderTableSpec{{
 		table:           t,
@@ -1113,23 +1180,20 @@ func (t *table) scan_order(currentTx *TxContext, conditionCols []string, conditi
 // scanOrderFirst is the no-order LIMIT 1 specialization of scan_order. It
 // preserves the scan operator contract while avoiding the queues, channels,
 // and global merge needed by the general ordered multi-shard implementation.
-func (t *table) scanOrderFirst(currentTx *TxContext, conditionCols []string, condition scm.Scmer, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, notFoundValue scm.Scmer, accessSchema scm.Scmer, accessValues []scm.Scmer) scm.Scmer {
+func (t *table) scanOrderFirst(currentTx *TxContext, accessSchema scm.Scmer, accessValues []scm.Scmer, conditionCols []string, condition scm.Scmer, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, notFoundValue scm.Scmer) scm.Scmer {
 	ss := SessionStateFromTx(currentTx)
 	querySeq := querySeqFromTx(currentTx)
 	scratch := acquireScanAnalyzeScratch()
 	defer releaseScanAnalyzeScratch(scratch)
-	var bounds boundaries
-	if accessSchema.IsNil() {
-		bounds = extractBoundariesInto(scratch.boundaries[:0], conditionCols, condition)
-		reorderByFrequency(bounds, t)
-	} else {
-		var compiled bool
-		bounds, compiled = bindCompiledScanAccess(accessSchema, accessValues, scratch.boundaries[:0])
-		if !compiled {
-			panic("scan_order received an invalid compiled access schema")
-		}
+	bounds, compiled := scanAccessFromScheme(accessSchema, accessValues, nil)
+	if !compiled {
+		panic("scan_order received an invalid compiled access schema")
 	}
-	lower, upperLast := indexFromBoundariesInto(scratch.lower[:0], bounds)
+	if bounds.impossible() {
+		return notFoundValue
+	}
+	bounds = bounds.useScratch(scratch)
+	lower, upperLast := indexFromScanAccessInto(scratch.lower[:0], bounds)
 
 	var mu sync.Mutex
 	var foundShard *storageShard
@@ -1189,7 +1253,7 @@ func (t *table) scanOrderFirst(currentTx *TxContext, conditionCols []string, con
 	return result
 }
 
-func (r *recSet) scan_order(currentTx *TxContext, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, isOuter bool, notFoundValue scm.Scmer, postOrderCols []string, postOrderFilter scm.Scmer, accessSchema scm.Scmer, accessValues []scm.Scmer) scm.Scmer {
+func (r *recSet) scan_order(currentTx *TxContext, accessSchema scm.Scmer, accessValues []scm.Scmer, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, isOuter bool, notFoundValue scm.Scmer, postOrderCols []string, postOrderFilter scm.Scmer) scm.Scmer {
 	return scanOrderMulti(currentTx, []scanOrderTableSpec{{
 		recset:          r,
 		conditionCols:   conditionCols,
@@ -1224,15 +1288,19 @@ func streamOrBreak(mapper *ShardMapReducer, acc scm.Scmer, recids []uint32) (res
 	return
 }
 
-func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, acceptCols []string, accept scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, currentTx *TxContext, ss *scm.SessionState) (result *shardqueue) {
+func (t *storageShard) scan_order(boundaries scanAccess, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, acceptCols []string, accept scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, currentTx *TxContext, ss *scm.SessionState) (result *shardqueue) {
 	result = new(shardqueue)
 	result.shard = t
+	t.ensureLoaded()
+	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
+	t.ensureScanAccessColumns(boundaries, skipShardReadLock, currentTx)
 	if ss == nil {
 		ss = SessionStateFromTx(currentTx)
 	}
 	recsetBoundaryCoversCondition := recSetHooksCoverCondition(boundaries, lower, t.t, conditionCols, condition)
 	conditionProgram := scm.PrepareSerialProc(condition)
-	conditionAlwaysTrue := conditionProgram.Kind == scm.SerialProcConstant && scm.ToBool(conditionProgram.Value)
+	conditionAlwaysTrue := scanConditionAlwaysTrue(&conditionProgram, len(conditionCols)) ||
+		scanAccessProvesCondition(conditionCols, condition, boundaries)
 	var acceptProgram *scm.SerialProc
 	if !accept.IsNil() {
 		prepared := scm.PrepareSerialProc(accept)
@@ -1299,7 +1367,6 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 
 	adjustedSortdirs := sortdirs
 
-	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
 	if t.t.hasTableLock() {
 		t.t.waitTableLock(ss, querySeqFromTx(currentTx), false)
 	}
@@ -1392,21 +1459,24 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 		// buffer per non-getter condition column, so a batch's main-storage rows
 		// are fetched with one GetValueMulti call per column instead of one
 		// GetValue call per row per column.
-		var survivedBuf, mainIdsBuf, acceptMainIdsBuf []uint32
+		var mainIdsBuf, acceptMainIdsBuf []uint32
 		colBufs := make([][]scm.Scmer, len(conditionCols))
 		acceptColBufs := make([][]scm.Scmer, len(acceptCols))
-		boundaryCoveredLimit := acceptProgram == nil &&
-			sortedBoundariesCoverCondition(conditionCols, condition, boundaries)
-		t.iterateIndexOrdered(currentTx, boundaries, lower, upperLast, maxInsertIndex, buf, usageWeight, limit, boundaryCoveredLimit, func(index *StorageIndex, active bool) {
+		boundaryCoveredLimit := acceptProgram == nil && conditionAlwaysTrue
+		access := boundaries
+		t.iterateIndexOrdered(currentTx, access, lower, upperLast, maxInsertIndex, buf, usageWeight, limit, boundaryCoveredLimit, func(index *StorageIndex, active bool) {
 			if len(sortcols) > 0 {
-				resultAlreadySorted = indexCoversBoundaryOrder(index, active, boundaries, len(lower))
+				resultAlreadySorted = indexCoversBoundaryOrder(index, active, access, len(lower))
 			}
 		}, func(batch []uint32) bool {
 			result.candidateCount += int64(len(batch))
 
 			// pass 1: data-independent skip checks (recset/visibility/deletion),
 			// producing the ordered surviving-id list without touching column data.
-			survived := survivedBuf[:0]
+			// Compact visibility in place. iterateIndex owns batch until this
+			// callback returns, and the write cursor never overtakes the read
+			// cursor, so a separate survivor slice only adds hot-path allocations.
+			survived := batch[:0]
 			for _, idx := range batch {
 				if idx >= visibleUpper {
 					continue
@@ -1420,8 +1490,6 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 				}
 				survived = append(survived, idx)
 			}
-			survivedBuf = survived
-
 			outN := len(survived)
 			if conditionAlwaysTrue {
 				copy(batch, survived)
@@ -1575,16 +1643,19 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 	for i, relation := range adjustedSortdirs {
 		result.sortless[i] = scm.OrderRelationLess(relation)
 	}
-	itemPos := make(map[uint32]int, len(result.items))
-	for i, idx := range result.items {
-		itemPos[idx] = i
-	}
 	// Computed sort callbacks may contain nested point scans. Evaluate each key
 	// once per candidate instead of repeating the callback for every comparison.
 	// The cache is local to this physical scan and is released with its queue.
+	var itemPos map[uint32]int
 	for c, sortcol := range sortcols {
 		if sortcol.IsString() {
 			continue
+		}
+		if itemPos == nil {
+			itemPos = make(map[uint32]int, len(result.items))
+			for i, idx := range result.items {
+				itemPos[idx] = i
+			}
 		}
 		values := make([]scm.Scmer, len(result.items))
 		for i, idx := range result.items {

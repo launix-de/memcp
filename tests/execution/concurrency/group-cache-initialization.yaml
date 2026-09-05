@@ -65,11 +65,11 @@ test_cases:
                   (lambda (emit)
                     (scan nil
                       (table "memcp-tests" "stream_cache_source")
-                      '() (lambda () true)
+                      (car (compile_scan_access '() (scheme "(lambda () true)"))) (cadr (compile_scan_access '() (scheme "(lambda () true)"))) '() (lambda () true)
                       '("id") (lambda (acc id) (begin (emit 1) acc)))))))
               '() (lambda () true) false nil nil)))
         (scan nil cache
-          '() (lambda () true)
+          (car (compile_scan_access '() (scheme "(lambda () true)"))) (cadr (compile_scan_access '() (scheme "(lambda () true)"))) '() (lambda () true)
           '("row_count") (lambda (acc row_count) (+ acc row_count))
           0 +))
     expect:
@@ -99,7 +99,7 @@ test_cases:
               false nil nil)))
         (scan nil
           (table "memcp-tests" ".transactionless_cache_init")
-          (list) (lambda () true)
+          (car (compile_scan_access (list) (scheme "(lambda () true)"))) (cadr (compile_scan_access (list) (scheme "(lambda () true)"))) (list) (lambda () true)
           (list) (lambda (acc) (+ acc 1))
           0 +))
     expect:

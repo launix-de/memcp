@@ -898,11 +898,13 @@ test_cases:
       result_contains:
         - "scan_exists"
         - "__query_presence_value_"
-        - "(equal?? (var 0) 20)"
+        - "second_ref"
+        - "equal"
       result_not_contains:
         - ".grp:dtl_global_access"
         - "(and (begin"
         - "(and (coalesceNil (__scalar_query_probe_"
+        - "(equal?? (var 0) 20)"
 
   - name: "Ordered root LEFT JOIN streams nested scans"
     sql: |

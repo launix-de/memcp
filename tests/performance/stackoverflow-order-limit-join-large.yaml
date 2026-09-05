@@ -45,7 +45,7 @@ setup:
   - scm: |
       (scan_order nil
         (table "memcp-tests" "so_730_large_images")
-        '() (lambda () true) '("id") '(<) 0 0 1
+        (car (compile_scan_access '() (scheme "(lambda () true)"))) (cadr (compile_scan_access '() (scheme "(lambda () true)"))) '() (lambda () true) '("id") '(<) 0 0 1
         '() (lambda () true) (lambda (acc _row) acc) true false)
   - sql: "ALTER TABLE so_730_large_products ENGINE=sloppy"
   - sql: "ALTER TABLE so_730_large_images ENGINE=sloppy"
@@ -85,11 +85,11 @@ test_cases:
         (define tx (session "__memcp_tx"))
         (define products (table "memcp-tests" "so_730_large_products"))
         (define images (table "memcp-tests" "so_730_large_images"))
-        (define selected (scan_recset tx products '("project_1")
+        (define selected (scan_recset tx products (car (compile_scan_access '("project_1") (scheme "(lambda (project_1) (equal? project_1 1))"))) (cadr (compile_scan_access '("project_1") (scheme "(lambda (project_1) (equal? project_1 1))"))) '("project_1")
           (lambda (project_1) (equal? project_1 1))))
         (define lookup (recset_key_index tx selected '("unique_id")))
         (define found (scan_order_batch_accept tx images
-          (lambda (input) (scan_recset tx input '("product_unique_id")
+          '(369435906932736) '() (lambda (input) (scan_recset tx input (car (compile_scan_access '("product_unique_id") (scheme "(lambda (product_unique_id) (lookup product_unique_id))"))) (cadr (compile_scan_access '("product_unique_id") (scheme "(lambda (product_unique_id) (lookup product_unique_id))"))) '("product_unique_id")
             (lambda (product_unique_id) (lookup product_unique_id))))
           '("id") '(<) 0 0 1000 '() (lambda () 1) + 0 false 0))
         (if (equal? found 1000) "ok" (error "wrong batch result")))
@@ -100,11 +100,11 @@ test_cases:
         (define tx (session "__memcp_tx"))
         (define products (table "memcp-tests" "so_730_large_products"))
         (define images (table "memcp-tests" "so_730_large_images"))
-        (define selected (scan_recset tx products '("project_late")
+        (define selected (scan_recset tx products (car (compile_scan_access '("project_late") (scheme "(lambda (project_late) (equal? project_late 1))"))) (cadr (compile_scan_access '("project_late") (scheme "(lambda (project_late) (equal? project_late 1))"))) '("project_late")
           (lambda (project_late) (equal? project_late 1))))
         (define projected (recset_project_join tx selected '("unique_id")
           images '("product_unique_id")))
-        (define found (scan_order tx projected '() (lambda () true)
+        (define found (scan_order tx projected (car (compile_scan_access '() (scheme "(lambda () true)"))) (cadr (compile_scan_access '() (scheme "(lambda () true)"))) '() (lambda () true)
           '("id") '(<) 0 0 1000 '() (lambda () 1) + 0 false 0))
         (if (equal? found 1000) "ok" (error "wrong projected result")))
 
