@@ -1684,6 +1684,19 @@ class SQLTestRunner:
                 for _ in range(warmup_runs):
                     self.execute_sparql(database, query, auth_header, timeout=sql_timeout) if is_sparql else self.execute_sql(database, query, auth_header, active_syntax, timeout=sql_timeout)
 
+                # Scans publish telemetry asynchronously after returning the
+                # query result. Let warmup-triggered writes, group-cache hooks,
+                # and rebuild work settle before the measured request starts.
+                # Otherwise their cost is charged nondeterministically to the
+                # first sample, which is especially visible for one-shot DML.
+                if is_perf_test and warmup_runs > 0:
+                    if not wait_for_performance_setup_quiescence(self.base_url):
+                        return self._record_fail(
+                            name,
+                            "Warmup work did not quiesce before measurement",
+                            query, None, test_case.get("expect"), is_noncritical,
+                        )
+
                 memcp_pid = find_memcp_pid() if is_perf_test else None
                 start_cpu = get_process_cpu_times(memcp_pid) if memcp_pid else None
                 samples_ns: list = []
