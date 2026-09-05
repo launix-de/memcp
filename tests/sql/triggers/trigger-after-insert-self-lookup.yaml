@@ -81,6 +81,35 @@ test_cases:
           source_id: 31
           label: "Administration"
 
+  - name: "drop the trigger before recompiling the same source"
+    sql: "DROP TRIGGER trigger_self_lookup_source_ai"
+
+  - name: "a cached CREATE TRIGGER plan can install the trigger again"
+    sql: |
+      CREATE TRIGGER trigger_self_lookup_source_ai
+      AFTER INSERT ON trigger_self_lookup_source FOR EACH ROW BEGIN
+        INSERT INTO trigger_self_lookup_child (account_id, source_id, label)
+        VALUES (
+          (SELECT account_id
+             FROM trigger_self_lookup_source
+            WHERE ID = NEW.ID),
+          NEW.ID,
+          'Administration'
+        );
+      END
+
+  - name: "recreated trigger executes the scalar self lookup"
+    sql: "INSERT INTO trigger_self_lookup_source (ID, account_id, label) VALUES (40, 12, 'recreated')"
+
+  - name: "recreated trigger retains source row identity"
+    sql: "SELECT account_id, source_id, label FROM trigger_self_lookup_child WHERE source_id = 40"
+    expect:
+      rows: 1
+      data:
+        - account_id: 12
+          source_id: 40
+          label: "Administration"
+
 cleanup:
   - sql: "DROP TRIGGER IF EXISTS trigger_self_lookup_source_ai"
   - sql: "DROP TABLE IF EXISTS trigger_self_lookup_child"
