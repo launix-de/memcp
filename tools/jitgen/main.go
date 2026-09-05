@@ -2092,26 +2092,10 @@ func (g *codeGen) emitSerialCallableCall(name string, producer ssa.Value, callab
 	g.emit("\t\tctx.Coverage.DynamicCalls++")
 	callbackCallable := g.allocDesc()
 	g.emit("\t\t%s := jitCopyScmerToPair(ctx, %s)", callbackCallable, callable.goVar)
-	callbackHelper := ""
-	switch callArgs.stackLen {
-	case 1:
-		callbackHelper = "jitInvokeCallback1"
-	case 2:
-		callbackHelper = "jitInvokeCallback2"
-	case 3:
-		callbackHelper = "jitInvokeCallback3"
-	case 4:
-		callbackHelper = "jitInvokeCallback4"
-	default:
+	if callArgs.stackLen < 1 || callArgs.stackLen > 4 {
 		panic(fmt.Sprintf("dynamic callback with unsupported arity: %d", callArgs.stackLen))
 	}
-	g.emit("\t\tcallbackCallArgs := make([]JITValueDesc, 0, %d)", callArgs.stackLen+1)
-	g.emit("\t\tcallbackCallArgs = append(callbackCallArgs, %s)", callbackCallable)
-	g.emit("\t\tcallbackCallArgs = append(callbackCallArgs, %s...)", argsVar)
-	g.emit("\t\t%s = ctx.EmitGoCallScalarInto(GoFuncAddr(%s), callbackCallArgs, JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: RegRAX, Reg2: RegRBX, ID: 0})", dv, callbackHelper)
-	g.emit("\t\tctx.EmitStoreScmerToStack(%s, %s)", dv, callbackTargetOff)
-	g.emit("\t\tctx.FreeDesc(&%s)", dv)
-	g.emit("\t\t%s = %s", dv, callbackTarget)
+	g.emit("\t\t%s = jitEmitDynamicCallableAt(ctx, %s, %s, int32(%s), %s)", dv, callbackCallable, argsVar, callArgs.stackBase, callbackTarget)
 	g.emit("\t}")
 	g.emit("}")
 	g.vals[name] = genVal{goVar: dv, isDesc: true}

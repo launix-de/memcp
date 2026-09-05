@@ -692,9 +692,7 @@ func TestJITExpressionConditionalBorrowedListResult(t *testing.T) {
 func TestJITExpressionReduceLambdaArgumentOrder(t *testing.T) {
 	compiled := compileJITExpressionTestProc(t,
 		`(lambda (items initial) (reduce items (lambda (acc item) (list acc item)) initial))`)
-	if coverage := compiled.Proc().Compiled.Coverage; coverage.DynamicCalls != 1 {
-		t.Fatalf("expected reduce to use one generic callback fallback, got %+v", coverage)
-	}
+	requireNoDynamicJITCalls(t, compiled)
 	got := Apply(compiled,
 		NewSlice([]Scmer{NewString("a"), NewString("b")}),
 		NewString("initial"))
