@@ -1118,6 +1118,23 @@ func TestJITExpressionConsTailOfSingleElementList(t *testing.T) {
 	}
 }
 
+func TestJITExpressionPreservesSelfEvaluatingEmptyList(t *testing.T) {
+	if !jitEnabled {
+		t.Skip("requires GOEXPERIMENT=jit")
+	}
+	root := NewProcStruct(Proc{
+		Params:  NewSlice(nil),
+		Body:    NewSlice(nil),
+		En:      &Globalenv,
+		NumVars: 0,
+	})
+	compiled := jitCompile(root)
+	got := Apply(compiled)
+	if !got.IsSlice() || len(got.Slice()) != 0 {
+		t.Fatalf("self-evaluating empty list became %s, want empty list", SerializeToString(got, &Globalenv))
+	}
+}
+
 func TestJITExpressionTailSelfCallAdvancesArguments(t *testing.T) {
 	if !jitEnabled {
 		t.Skip("requires GOEXPERIMENT=jit")

@@ -2544,9 +2544,13 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 	case tagSlice:
 		list := expr.Slice()
 		if len(list) == 0 {
-			imm := NewNil()
+			// Match Eval: an empty slice is a self-evaluating empty list, not
+			// Scheme nil. This distinction matters for typed native parameters
+			// such as the scan access-values vector.
+			imm := expr
 			ctx.TrackImm(imm)
-			return JITValueDesc{Loc: LocImm, Type: tagNil, Imm: imm}
+			return JITValueDesc{Loc: LocImm, Type: tagSlice, Imm: imm,
+				KnownSliceLen: 0, KnownSliceCap: 0, SliceSizeKnown: true}
 		}
 		// Resolve operator
 		head, headOK := scmerSymbol(list[0])
