@@ -294,6 +294,37 @@ func TestJITNoEscapeCallbackUsesStackFuncval(t *testing.T) {
 	}
 }
 
+func TestJITTransferringCallbackCrossesGoroutineWithMaterializedFrame(t *testing.T) {
+	const name = "jit_test_cross_goroutine_callback"
+	consumer := func(args ...Scmer) Scmer {
+		result := make(chan Scmer, 1)
+		go func(callback, value Scmer) {
+			prepared := PrepareSerialProc(callback)
+			result <- prepared.Call([]Scmer{value})
+		}(args[0], args[1])
+		return <-result
+	}
+	Declare(&Globalenv, &Declaration{
+		Name: name,
+		Fn:   consumer,
+		Type: &TypeDescriptor{Kind: "func", Forbidden: true, Params: []*TypeDescriptor{
+			{Kind: "func", NoEscape: true, Params: []*TypeDescriptor{{Kind: "any", Transfer: true}}, Return: &TypeDescriptor{Kind: "any", Transfer: true}},
+			{Kind: "any"},
+		}, Return: &TypeDescriptor{Kind: "any"}},
+	})
+	defer func() {
+		delete(Globalenv.Vars, Symbol(name))
+		delete(declarations, name)
+		delete(declarationsByFunction, FunctionIdentity(consumer))
+	}()
+	compiled := compileJITExpressionTestProc(t, `(lambda (captured value)
+		(jit_test_cross_goroutine_callback (lambda (item) (list captured item)) value))`)
+	want := NewSlice([]Scmer{NewInt(5), NewInt(7)})
+	if got := Apply(compiled, NewInt(5), NewInt(7)); !Equal(got, want) {
+		t.Fatalf("cross-goroutine callback returned %s, want %s", String(got), String(want))
+	}
+}
+
 func TestJITEscapingCallbackUsesOneTypedAllocation(t *testing.T) {
 	compiled := compileJITExpressionTestProc(t, `(lambda (captured)
 		(lambda (value) (+ captured value)))`)

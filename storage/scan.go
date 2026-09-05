@@ -1959,8 +1959,7 @@ func (t *storageShard) scan(boundaries scanAccess, lower []scm.Scmer, upperLast 
 	}
 
 	conditionProgram := scm.PrepareSerialProc(condition)
-	conditionAlwaysTrue := scanConditionAlwaysTrue(&conditionProgram, len(conditionCols)) ||
-		sortedBoundariesCoverCondition(conditionCols, condition, boundaries)
+	conditionAlwaysTrue := scanConditionAlwaysTrue(&conditionProgram, len(conditionCols))
 	hasMutationCallback := false
 	for _, c := range callbackCols {
 		if c == "$update" || (len(c) > 11 && c[:11] == "$increment:") {
@@ -1968,7 +1967,13 @@ func (t *storageShard) scan(boundaries scanAccess, lower []scm.Scmer, upperLast 
 			break
 		}
 	}
-	conditionAlwaysTrue = conditionAlwaysTrue || !hasMutationCallback && scanAccessCoversResidual(boundaries)
+	// An index may return a historical record ID that visibility resolution
+	// forwards to a newer primary record whose predicate columns changed. A
+	// read may trust its exact access proof, but a mutation must recheck the
+	// visible row before applying update/delete pseudo-columns.
+	conditionAlwaysTrue = conditionAlwaysTrue || !hasMutationCallback &&
+		(sortedBoundariesCoverCondition(conditionCols, condition, boundaries) ||
+			scanAccessCoversResidual(boundaries))
 
 	// Ensure shard is loaded from disk before accessing columns.
 	// ensureLoaded() must run before getColumnStorageOrPanic so that COLD
@@ -2290,8 +2295,7 @@ func (t *storageShard) scanBatch(boundaries scanAccess, lower []scm.Scmer, upper
 	}
 
 	conditionProgram := scm.PrepareSerialProc(condition)
-	conditionAlwaysTrue := scanConditionAlwaysTrue(&conditionProgram, len(conditionCols)) ||
-		sortedBoundariesCoverCondition(conditionCols, condition, boundaries)
+	conditionAlwaysTrue := scanConditionAlwaysTrue(&conditionProgram, len(conditionCols))
 	hasMutationCallback := false
 	for _, c := range callbackCols {
 		if c == "$update" || (len(c) > 11 && c[:11] == "$increment:") {
@@ -2299,7 +2303,9 @@ func (t *storageShard) scanBatch(boundaries scanAccess, lower []scm.Scmer, upper
 			break
 		}
 	}
-	conditionAlwaysTrue = conditionAlwaysTrue || !hasMutationCallback && scanAccessCoversResidual(boundaries)
+	conditionAlwaysTrue = conditionAlwaysTrue || !hasMutationCallback &&
+		(sortedBoundariesCoverCondition(conditionCols, condition, boundaries) ||
+			scanAccessCoversResidual(boundaries))
 
 	t.ensureLoaded()
 	ownsWrite := false

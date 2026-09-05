@@ -2903,12 +2903,19 @@ func jitDeclarationHasCallback(decl *Declaration) bool {
 func jitCompileCallArgument(ctx *JITContext, decl *Declaration, index int, expr Scmer, sliceBase Reg) JITValueDesc {
 	param := jitDeclarationParam(decl, index)
 	if param != nil && param.Kind == "func" {
-		// Transfer describes ownership of the callback's runtime argument; it
-		// does not make the lambda body escape. The optimizer has already encoded
-		// mutable-vs-copying builtin choices in that body, so retain the template
-		// and let the generated callback site inline it like every other lambda.
-		if lambda, ok := jitLambdaTemplate(expr, ctx.Env); ok {
-			return JITValueDesc{Loc: LocLambdaTemplate, Type: tagProc, Lambda: lambda}
+		transfersInput := false
+		for _, callbackParam := range param.Params {
+			transfersInput = transfersInput || callbackParam != nil && callbackParam.Transfer
+		}
+		// A transferring callback can retain or return storage rooted in its
+		// invocation frame. Keep it stack-bound only when the declaration also
+		// guarantees same-goroutine execution; shard-parallel scan reducers need
+		// an independently materialized procedure. Non-transferring callbacks
+		// retain the established no-escape direct path.
+		if !transfersInput || param.SameGoroutine {
+			if lambda, ok := jitLambdaTemplate(expr, ctx.Env); ok {
+				return JITValueDesc{Loc: LocLambdaTemplate, Type: tagProc, Lambda: lambda}
+			}
 		}
 	}
 	hasCallback := false
