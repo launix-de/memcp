@@ -1,0 +1,116 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+
+metadata:
+  version: "1.0"
+  description: "AFTER INSERT trigger that copies data through a scalar self lookup"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS trigger_self_lookup_child"
+  - sql: "DROP TABLE IF EXISTS trigger_self_lookup_source"
+  - sql: |
+      CREATE TABLE trigger_self_lookup_source (
+        ID INT PRIMARY KEY AUTO_INCREMENT,
+        account_id INT,
+        label VARCHAR(40)
+      )
+  - sql: |
+      CREATE TABLE trigger_self_lookup_child (
+        ID INT PRIMARY KEY AUTO_INCREMENT,
+        account_id INT,
+        source_id INT,
+        label VARCHAR(40)
+      )
+  - sql: |
+      CREATE TRIGGER trigger_self_lookup_source_ai
+      AFTER INSERT ON trigger_self_lookup_source FOR EACH ROW BEGIN
+        INSERT INTO trigger_self_lookup_child (account_id, source_id, label)
+        VALUES (
+          (SELECT account_id
+             FROM trigger_self_lookup_source
+            WHERE ID = NEW.ID),
+          NEW.ID,
+          'Administration'
+        );
+      END
+
+test_cases:
+  - name: "single inserted row is visible to its AFTER INSERT scalar lookup"
+    sql: "INSERT INTO trigger_self_lookup_source (ID, account_id, label) VALUES (10, 7, 'first')"
+
+  - name: "self lookup feeds the inserted child row"
+    sql: "SELECT account_id, source_id, label FROM trigger_self_lookup_child WHERE source_id = 10"
+    expect:
+      rows: 1
+      data:
+        - account_id: 7
+          source_id: 10
+          label: "Administration"
+
+  - name: "multi-row INSERT fires the lookup trigger once per source row"
+    sql: "INSERT INTO trigger_self_lookup_source (ID, account_id, label) VALUES (20, 8, 'second'), (30, 9, 'third')"
+
+  - name: "multi-row trigger lookups retain row identity"
+    sql: "SELECT account_id, source_id, label FROM trigger_self_lookup_child ORDER BY source_id"
+    expect:
+      rows: 3
+      data:
+        - account_id: 7
+          source_id: 10
+          label: "Administration"
+        - account_id: 8
+          source_id: 20
+          label: "Administration"
+        - account_id: 9
+          source_id: 30
+          label: "Administration"
+
+  - name: "auto increment value is available to the lookup and target insert"
+    sql: "INSERT INTO trigger_self_lookup_source (account_id, label) VALUES (11, 'generated')"
+
+  - name: "generated source identity and looked-up value stay paired"
+    sql: "SELECT account_id, source_id, label FROM trigger_self_lookup_child WHERE account_id = 11"
+    expect:
+      rows: 1
+      data:
+        - account_id: 11
+          source_id: 31
+          label: "Administration"
+
+  - name: "drop the trigger before recompiling the same source"
+    sql: "DROP TRIGGER trigger_self_lookup_source_ai"
+
+  - name: "a cached CREATE TRIGGER plan can install the trigger again"
+    sql: |
+      CREATE TRIGGER trigger_self_lookup_source_ai
+      AFTER INSERT ON trigger_self_lookup_source FOR EACH ROW BEGIN
+        INSERT INTO trigger_self_lookup_child (account_id, source_id, label)
+        VALUES (
+          (SELECT account_id
+             FROM trigger_self_lookup_source
+            WHERE ID = NEW.ID),
+          NEW.ID,
+          'Administration'
+        );
+      END
+
+  - name: "recreated trigger executes the scalar self lookup"
+    sql: "INSERT INTO trigger_self_lookup_source (ID, account_id, label) VALUES (40, 12, 'recreated')"
+
+  - name: "recreated trigger retains source row identity"
+    sql: "SELECT account_id, source_id, label FROM trigger_self_lookup_child WHERE source_id = 40"
+    expect:
+      rows: 1
+      data:
+        - account_id: 12
+          source_id: 40
+          label: "Administration"
+
+cleanup:
+  - sql: "DROP TRIGGER IF EXISTS trigger_self_lookup_source_ai"
+  - sql: "DROP TABLE IF EXISTS trigger_self_lookup_child"
+  - sql: "DROP TABLE IF EXISTS trigger_self_lookup_source"
