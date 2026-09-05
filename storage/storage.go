@@ -215,6 +215,9 @@ type ColumnStorage interface {
 	// encoding has state worth amortizing across a batch.
 	GetValueMulti(recids []uint32, target []scm.Scmer, stride int)
 	GetValueRange(recid uint32, count uint32, target []scm.Scmer, stride int)
+	GetJITGetValue() scm.JITStorageGetValueFunc
+	GetJITGetValueMulti() scm.JITStorageGetValueMultiFunc
+	GetJITGetValueRange() scm.JITStorageGetValueRangeFunc
 	GetCachedReader() ColumnReader // returns a per-goroutine cached reader for O(1) sequential access
 	String() string                // self-description
 	scm.Sizable
@@ -233,11 +236,68 @@ type ColumnStorage interface {
 	DistinctCount() uint // estimated number of distinct values in this shard column
 
 	// JIT compilation
-	JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc
+	JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc
+	JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, stride, result scm.JITValueDesc) scm.JITValueDesc
+	JITEmitGetValueRange(ctx *scm.JITContext, recid, count, target, stride, result scm.JITValueDesc) scm.JITValueDesc
 
 	// persistency (the callee takes ownership of the file handle, so he can close it immediately or set a finalizer)
 	Serialize(io.Writer)        // write content to Writer
 	Deserialize(io.Reader) uint // read from Reader (note that first byte is already read, so the reader starts at the second byte)
+}
+
+// storageJITFunctions stores typed native readers on the immutable finished
+// storage object. Consumers resolve these getters once before entering their
+// row or batch loop.
+type storageJITFunctions struct {
+	getValue      scm.JITStorageGetValueFunc
+	getValueRange scm.JITStorageGetValueRangeFunc
+	getValueMulti scm.JITStorageGetValueMultiFunc
+}
+
+func (j *storageJITFunctions) GetJITGetValue() scm.JITStorageGetValueFunc {
+	return j.getValue
+}
+
+func (j *storageJITFunctions) GetJITGetValueRange() scm.JITStorageGetValueRangeFunc {
+	return j.getValueRange
+}
+
+func (j *storageJITFunctions) GetJITGetValueMulti() scm.JITStorageGetValueMultiFunc {
+	return j.getValueMulti
+}
+
+func (j *storageJITFunctions) GetValue(recid uint32) scm.Scmer {
+	return j.getValue(recid)
+}
+
+func (j *storageJITFunctions) GetValueRange(recid uint32, count uint32, target []scm.Scmer, stride int) {
+	j.getValueRange(recid, count, target, stride)
+}
+
+func (j *storageJITFunctions) GetValueMulti(recids []uint32, target []scm.Scmer, stride int) {
+	j.getValueMulti(recids, target, stride)
+}
+
+func (j *storageJITFunctions) reader(fallback ColumnReader) ColumnReader {
+	if j.getValue != nil && j.getValueRange != nil && j.getValueMulti != nil {
+		return j
+	}
+	return fallback
+}
+
+type storageJITEmitter interface {
+	JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc
+	JITEmitGetValueRange(ctx *scm.JITContext, recid, count, target, stride, result scm.JITValueDesc) scm.JITValueDesc
+	JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, stride, result scm.JITValueDesc) scm.JITValueDesc
+}
+
+func (j *storageJITFunctions) finish(owner storageJITEmitter) {
+	if !scm.JITEnabled() {
+		return
+	}
+	j.getValue = scm.CompileJITStorageGetValue(owner.JITEmit)
+	j.getValueRange = scm.CompileJITStorageGetValueRange(owner.JITEmitGetValueRange)
+	j.getValueMulti = scm.CompileJITStorageGetValueMulti(owner.JITEmitGetValueMulti)
 }
 
 // storages maps the on-disk magic byte to the Go type used for deserialization.

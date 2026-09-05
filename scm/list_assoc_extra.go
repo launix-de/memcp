@@ -510,7 +510,6 @@ func init_list_assoc_extra() {
 						d22 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r4}
 						ctx.BindReg(r4, &d22)
 					}
-					ctx.FreeDesc(&d17)
 					d23 = d22
 					ctx.EnsureDesc(&d23)
 					if d23.Loc != LocImm && d23.Loc != LocReg {
@@ -1029,7 +1028,6 @@ func init_list_assoc_extra() {
 						ctx.BindReg(r6, &d67)
 						d16.Loc = LocNone
 					}
-					ctx.FreeDesc(&d16)
 					ctx.SyncDesc(&d67)
 					if d67.Loc == LocRegPair || d67.Loc == LocStackPair || d67.Loc == LocInputPair {
 						ctx.EmitMovPairToResult(&d67, &result)
@@ -1569,7 +1567,6 @@ func init_list_assoc_extra() {
 						d22 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r4}
 						ctx.BindReg(r4, &d22)
 					}
-					ctx.FreeDesc(&d17)
 					d23 = d22
 					ctx.EnsureDesc(&d23)
 					if d23.Loc != LocImm && d23.Loc != LocReg {
@@ -2127,7 +2124,6 @@ func init_list_assoc_extra() {
 						ctx.BindReg(r6, &d77)
 						d16.Loc = LocNone
 					}
-					ctx.FreeDesc(&d16)
 					ctx.SyncDesc(&d77)
 					if d77.Loc == LocRegPair || d77.Loc == LocStackPair || d77.Loc == LocInputPair {
 						ctx.EmitMovPairToResult(&d77, &result)
@@ -2668,7 +2664,6 @@ func init_list_assoc_extra() {
 						d22 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r4}
 						ctx.BindReg(r4, &d22)
 					}
-					ctx.FreeDesc(&d17)
 					d23 = d22
 					ctx.EnsureDesc(&d23)
 					if d23.Loc != LocImm && d23.Loc != LocReg {
@@ -3235,7 +3230,6 @@ func init_list_assoc_extra() {
 						ctx.BindReg(r6, &d78)
 						d16.Loc = LocNone
 					}
-					ctx.FreeDesc(&d16)
 					ctx.SyncDesc(&d78)
 					if d78.Loc == LocRegPair || d78.Loc == LocStackPair || d78.Loc == LocInputPair {
 						ctx.EmitMovPairToResult(&d78, &result)
@@ -3802,7 +3796,6 @@ func init_list_assoc_extra() {
 						d19 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r4}
 						ctx.BindReg(r4, &d19)
 					}
-					ctx.FreeDesc(&d14)
 					d20 = d19
 					ctx.EnsureDesc(&d20)
 					if d20.Loc != LocImm && d20.Loc != LocReg {
@@ -4274,7 +4267,6 @@ func init_list_assoc_extra() {
 						ctx.BindReg(r6, &d61)
 						d13.Loc = LocNone
 					}
-					ctx.FreeDesc(&d13)
 					ctx.SyncDesc(&d61)
 					if d61.Loc == LocRegPair || d61.Loc == LocStackPair || d61.Loc == LocInputPair {
 						ctx.EmitMovPairToResult(&d61, &result)
@@ -4771,7 +4763,6 @@ func init_list_assoc_extra() {
 						d19 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r4}
 						ctx.BindReg(r4, &d19)
 					}
-					ctx.FreeDesc(&d14)
 					d20 = d19
 					ctx.EnsureDesc(&d20)
 					if d20.Loc != LocImm && d20.Loc != LocReg {
@@ -5252,7 +5243,6 @@ func init_list_assoc_extra() {
 						ctx.BindReg(r6, &d62)
 						d13.Loc = LocNone
 					}
-					ctx.FreeDesc(&d13)
 					ctx.SyncDesc(&d62)
 					if d62.Loc == LocRegPair || d62.Loc == LocStackPair || d62.Loc == LocInputPair {
 						ctx.EmitMovPairToResult(&d62, &result)

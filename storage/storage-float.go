@@ -25,7 +25,8 @@ import "github.com/launix-de/memcp/scm"
 
 // main type for storage: can store any value, is inefficient but does type analysis how to optimize
 type StorageFloat struct {
-	values []float64
+	storageJITFunctions
+	values []float64 `jit:"immutable-after-finish"`
 }
 
 func (s *StorageFloat) ComputeSize() uint {
@@ -54,7 +55,7 @@ const storageFloatVersion = 0
 //	             of a 7-byte ASCII dummy "1234567" (byte value '1'=49).
 //	             Legacy detection: if version byte == '1' (49), treat as v0 legacy.
 
-func (s *StorageFloat) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc {
+func (s *StorageFloat) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc {
 	var d0 scm.JITValueDesc
 	_ = d0
 	var d1 scm.JITValueDesc
@@ -77,14 +78,11 @@ func (s *StorageFloat) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, id
 	_ = d20
 	var d21 scm.JITValueDesc
 	_ = d21
+	var d22 scm.JITValueDesc
+	_ = d22
 	/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 	ctx.TrackPointer(unsafe.Pointer(s))
-	thisptrPinned := thisptr.Loc == scm.LocReg
-	thisptrPinnedReg := thisptr.Reg
-	if thisptrPinned {
-		ctx.ProtectReg(thisptrPinnedReg)
-		defer ctx.UnprotectReg(thisptrPinnedReg)
-	}
+	thisptr := scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(int64(uintptr(unsafe.Pointer(s)))), NoHeapPointer: true}
 	standaloneFrame := ctx.BeginStandaloneFrame()
 	var idxInt scm.JITValueDesc
 	if idx.Loc == scm.LocImm {
@@ -160,36 +158,36 @@ func (s *StorageFloat) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, id
 		}
 		ctx.ReclaimUntrackedRegs()
 		var d0 scm.JITValueDesc
+		r2 := ctx.AllocReg()
+		r3 := ctx.AllocRegExcept(r2)
+		r4 := ctx.AllocRegExcept(r2, r3)
 		if thisptr.Loc == scm.LocImm {
 			fieldAddr := uintptr(thisptr.Imm.Int()) + unsafe.Offsetof((*StorageFloat)(nil).values)
-			r2 := ctx.AllocReg()
-			r3 := ctx.AllocRegExcept(r2)
-			r4 := ctx.AllocRegExcept(r2, r3)
-			ctx.EmitMovRegMem64(r2, fieldAddr)
-			ctx.EmitMovRegMem64(r3, fieldAddr+8)
-			ctx.EmitMovRegMem64(r4, fieldAddr+16)
-			d0 = scm.JITValueDesc{Loc: scm.LocRegTriple, Reg: r2, Reg2: r3, Reg3: r4}
-			ctx.BindReg(r2, &d0)
-			ctx.BindReg(r3, &d0)
-			ctx.BindReg(r4, &d0)
+			dataPtr := *(*uintptr)(unsafe.Pointer(fieldAddr))
+			sliceLen := *(*int)(unsafe.Pointer(fieldAddr + 8))
+			sliceCap := *(*int)(unsafe.Pointer(fieldAddr + 16))
+			ctx.EmitMovRegImm64(r2, uint64(dataPtr))
+			ctx.EmitMovRegImm64(r3, uint64(sliceLen))
+			ctx.EmitMovRegImm64(r4, uint64(sliceCap))
 		} else {
 			off := int32(unsafe.Offsetof((*StorageFloat)(nil).values))
-			r5 := ctx.AllocReg()
-			r6 := ctx.AllocRegExcept(r5)
-			r7 := ctx.AllocRegExcept(r5, r6)
-			ctx.EmitMovRegMem(r5, thisptr.Reg, off)
-			ctx.EmitMovRegMem(r6, thisptr.Reg, off+8)
-			ctx.EmitMovRegMem(r7, thisptr.Reg, off+16)
-			d0 = scm.JITValueDesc{Loc: scm.LocRegTriple, Reg: r5, Reg2: r6, Reg3: r7}
-			ctx.BindReg(r5, &d0)
-			ctx.BindReg(r6, &d0)
-			ctx.BindReg(r7, &d0)
+			ctx.EmitMovRegMem(r2, thisptr.Reg, off)
+			ctx.EmitMovRegMem(r3, thisptr.Reg, off+8)
+			ctx.EmitMovRegMem(r4, thisptr.Reg, off+16)
 		}
+		d0 = scm.JITValueDesc{Loc: scm.LocRegTriple, Type: scm.TagSlice, Reg: r2, Reg2: r3, Reg3: r4}
+		ctx.BindReg(r2, &d0)
+		ctx.BindReg(r3, &d0)
+		ctx.BindReg(r4, &d0)
+		ctx.BindReg(r2, &d0)
+		ctx.BindReg(r3, &d0)
+		ctx.BindReg(r4, &d0)
 		ctx.EnsureDesc(&idxInt)
 		d2 = ctx.EmitSliceElementAddress(&d0, &idxInt, 8)
 		ctx.EnsureDesc(&d2)
 		ctx.EmitMovRegMem(d2.Reg, d2.Reg, 0)
 		d1 = d2
+		d1.Type = scm.TagFloat
 		ctx.EnsureDesc(&d1)
 		d3 = d1
 		_ = d3
@@ -210,24 +208,24 @@ func (s *StorageFloat) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, id
 		if d3.Loc == scm.LocImm {
 			d4 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagBool, Imm: scm.NewBool(d3.Imm.Float() != d3.Imm.Float())}
 		} else if d3.Loc == scm.LocImm {
-			r8 := ctx.AllocRegExcept(d3.Reg)
+			r5 := ctx.AllocRegExcept(d3.Reg)
 			_, yBits := d3.Imm.RawWords()
 			ctx.EmitMovRegImm64(scm.RegR11, yBits)
-			ctx.EmitCmpFloat64Setcc(r8, d3.Reg, scm.RegR11, scm.CondNotEqual)
-			d4 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagBool, Reg: r8}
-			ctx.BindReg(r8, &d4)
+			ctx.EmitCmpFloat64Setcc(r5, d3.Reg, scm.RegR11, scm.CondNotEqual)
+			d4 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagBool, Reg: r5}
+			ctx.BindReg(r5, &d4)
 		} else if d3.Loc == scm.LocImm {
-			r9 := ctx.AllocRegExcept(d3.Reg)
+			r6 := ctx.AllocRegExcept(d3.Reg)
 			_, xBits := d3.Imm.RawWords()
 			ctx.EmitMovRegImm64(scm.RegR11, xBits)
-			ctx.EmitCmpFloat64Setcc(r9, scm.RegR11, d3.Reg, scm.CondNotEqual)
-			d4 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagBool, Reg: r9}
-			ctx.BindReg(r9, &d4)
+			ctx.EmitCmpFloat64Setcc(r6, scm.RegR11, d3.Reg, scm.CondNotEqual)
+			d4 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagBool, Reg: r6}
+			ctx.BindReg(r6, &d4)
 		} else {
-			r10 := ctx.AllocRegExcept(d3.Reg, d3.Reg)
-			ctx.EmitCmpFloat64Setcc(r10, d3.Reg, d3.Reg, scm.CondNotEqual)
-			d4 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagBool, Reg: r10}
-			ctx.BindReg(r10, &d4)
+			r7 := ctx.AllocRegExcept(d3.Reg, d3.Reg)
+			ctx.EmitCmpFloat64Setcc(r7, d3.Reg, d3.Reg, scm.CondNotEqual)
+			d4 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagBool, Reg: r7}
+			ctx.BindReg(r7, &d4)
 		}
 		ctx.ReclaimUntrackedRegs()
 		ctx.EnsureDesc(&d4)
@@ -422,31 +420,57 @@ func (s *StorageFloat) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, id
 			d18 = ps.OverlayValues[18]
 		}
 		ctx.ReclaimUntrackedRegs()
+		var d19 scm.JITValueDesc
+		r8 := ctx.AllocReg()
+		r9 := ctx.AllocRegExcept(r8)
+		r10 := ctx.AllocRegExcept(r8, r9)
+		if thisptr.Loc == scm.LocImm {
+			fieldAddr := uintptr(thisptr.Imm.Int()) + unsafe.Offsetof((*StorageFloat)(nil).values)
+			dataPtr := *(*uintptr)(unsafe.Pointer(fieldAddr))
+			sliceLen := *(*int)(unsafe.Pointer(fieldAddr + 8))
+			sliceCap := *(*int)(unsafe.Pointer(fieldAddr + 16))
+			ctx.EmitMovRegImm64(r8, uint64(dataPtr))
+			ctx.EmitMovRegImm64(r9, uint64(sliceLen))
+			ctx.EmitMovRegImm64(r10, uint64(sliceCap))
+		} else {
+			off := int32(unsafe.Offsetof((*StorageFloat)(nil).values))
+			ctx.EmitMovRegMem(r8, thisptr.Reg, off)
+			ctx.EmitMovRegMem(r9, thisptr.Reg, off+8)
+			ctx.EmitMovRegMem(r10, thisptr.Reg, off+16)
+		}
+		d19 = scm.JITValueDesc{Loc: scm.LocRegTriple, Type: scm.TagSlice, Reg: r8, Reg2: r9, Reg3: r10}
+		ctx.BindReg(r8, &d19)
+		ctx.BindReg(r9, &d19)
+		ctx.BindReg(r10, &d19)
+		ctx.BindReg(r8, &d19)
+		ctx.BindReg(r9, &d19)
+		ctx.BindReg(r10, &d19)
 		ctx.EnsureDesc(&idxInt)
-		d20 = ctx.EmitSliceElementAddress(&d0, &idxInt, 8)
-		ctx.EnsureDesc(&d20)
-		ctx.EmitMovRegMem(d20.Reg, d20.Reg, 0)
-		d19 = d20
+		d21 = ctx.EmitSliceElementAddress(&d19, &idxInt, 8)
+		ctx.EnsureDesc(&d21)
+		ctx.EmitMovRegMem(d21.Reg, d21.Reg, 0)
+		d20 = d21
+		d20.Type = scm.TagFloat
 		ctx.FreeDesc(&idxInt)
-		ctx.EnsureDesc(&d19)
-		d21 = scm.JITValueDesc{Loc: scm.LocRegPair, Reg: r0, Reg2: r1}
-		ctx.BindReg(r0, &d21)
-		ctx.BindReg(r1, &d21)
-		ctx.EnsureDesc(&d19)
-		ctx.EmitMakeFloat(d21, d19)
-		if d19.Loc == scm.LocReg {
-			ctx.FreeReg(d19.Reg)
+		ctx.EnsureDesc(&d20)
+		d22 = scm.JITValueDesc{Loc: scm.LocRegPair, Reg: r0, Reg2: r1}
+		ctx.BindReg(r0, &d22)
+		ctx.BindReg(r1, &d22)
+		ctx.EnsureDesc(&d20)
+		ctx.EmitMakeFloat(d22, d20)
+		if d20.Loc == scm.LocReg {
+			ctx.FreeReg(d20.Reg)
 		}
 		ctx.EmitJmp(lbl0)
 		return result
 	}
-	ps22 := scm.PhiState{General: false}
-	_ = bbs[0].RenderPS(ps22)
+	ps23 := scm.PhiState{General: false}
+	_ = bbs[0].RenderPS(ps23)
 	ctx.MarkLabel(lbl0)
-	d23 := scm.JITValueDesc{Loc: scm.LocRegPair, Reg: r0, Reg2: r1}
-	ctx.BindReg(r0, &d23)
-	ctx.BindReg(r1, &d23)
-	ctx.EmitMovPairToResult(&d23, &result)
+	d24 := scm.JITValueDesc{Loc: scm.LocRegPair, Reg: r0, Reg2: r1}
+	ctx.BindReg(r0, &d24)
+	ctx.BindReg(r1, &d24)
+	ctx.EmitMovPairToResult(&d24, &result)
 	ctx.FreeReg(r0)
 	ctx.FreeReg(r1)
 	ctx.ResolveFixups()
@@ -498,7 +522,7 @@ func (s *StorageFloat) deserializeFloatV0(f io.Reader) uint {
 	return uint(l)
 }
 
-func (s *StorageFloat) GetCachedReader() ColumnReader { return s }
+func (s *StorageFloat) GetCachedReader() ColumnReader { return s.storageJITFunctions.reader(s) }
 
 func (s *StorageFloat) GetValue(i uint32) scm.Scmer {
 	// NULL is encoded as NaN in SQL
@@ -558,6 +582,7 @@ func (s *StorageFloat) build(i uint32, value scm.Scmer) {
 	}
 }
 func (s *StorageFloat) finish() {
+	s.storageJITFunctions.finish(s)
 }
 
 func (s *StorageFloat) proposeCompression(i uint32) ColumnStorage {

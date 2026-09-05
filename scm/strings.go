@@ -536,28 +536,9 @@ func init_strings() {
 					ctx.BindReg(result.Reg, &result)
 					ctx.BindReg(result.Reg2, &result)
 				}
-				ctx.SyncDesc(&d4)
-				if d4.Loc == LocRegPair || d4.Loc == LocStackPair || d4.Loc == LocInputPair {
-					ctx.EmitMovPairToResult(&d4, &result)
-					result.Type = d4.Type
-				} else {
-					switch d4.Type {
-					case tagBool:
-						ctx.EmitMakeBool(result, d4)
-						result.Type = tagBool
-					case tagInt:
-						ctx.EmitMakeInt(result, d4)
-						result.Type = tagInt
-					case tagFloat:
-						ctx.EmitMakeFloat(result, d4)
-						result.Type = tagFloat
-					case tagNil:
-						ctx.EmitMakeNil(result)
-						result.Type = tagNil
-					default:
-						panic("jit: single-block scalar return with unknown type")
-					}
-				}
+				d5 := JITPrepareScmerGoArg(ctx, d4)
+				ctx.EmitMovPairToResult(&d5, &result)
+				result.Type = d5.Type
 				return result
 				return result
 			},
@@ -1205,7 +1186,6 @@ func init_strings() {
 					ctx.BindReg(r10, &d39)
 					ctx.BindReg(r9, &d39)
 					ctx.BindReg(r10, &d39)
-					ctx.FreeDesc(&d5)
 					ctx.EnsureDesc(&d39)
 					d40 = ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d39}, 2)
 					ctx.EmitMovPairToResult(&d40, &result)
@@ -3961,7 +3941,6 @@ func init_strings() {
 					ctx.EnsureDesc(&d206)
 					ctx.EmitStoreToStack(d206, int32(bbs[10].PhiBase)+int32(0))
 					ctx.StabilizeDescForControlFlow(&d206)
-					ctx.FreeDesc(&d22)
 					if ps.General {
 					}
 					ps207 := PhiState{General: ps.General}
@@ -5017,7 +4996,6 @@ func init_strings() {
 						ctx.TransferReg(d1.Reg)
 						d1.Loc = LocNone
 					}
-					ctx.FreeDesc(&d2)
 					ctx.EnsureDesc(&d1)
 					ctx.EnsureDesc(&d273)
 					ctx.EnsureDesc(&d20)
@@ -5075,7 +5053,6 @@ func init_strings() {
 					ctx.BindReg(r22, &d277)
 					ctx.BindReg(r21, &d277)
 					ctx.BindReg(r22, &d277)
-					ctx.FreeDesc(&d1)
 					ctx.FreeDesc(&d273)
 					ctx.EnsureDesc(&d277)
 					d278 = ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d277}, 2)
@@ -5184,28 +5161,9 @@ func init_strings() {
 					ctx.BindReg(result.Reg, &result)
 					ctx.BindReg(result.Reg2, &result)
 				}
-				ctx.SyncDesc(&d3)
-				if d3.Loc == LocRegPair || d3.Loc == LocStackPair || d3.Loc == LocInputPair {
-					ctx.EmitMovPairToResult(&d3, &result)
-					result.Type = d3.Type
-				} else {
-					switch d3.Type {
-					case tagBool:
-						ctx.EmitMakeBool(result, d3)
-						result.Type = tagBool
-					case tagInt:
-						ctx.EmitMakeInt(result, d3)
-						result.Type = tagInt
-					case tagFloat:
-						ctx.EmitMakeFloat(result, d3)
-						result.Type = tagFloat
-					case tagNil:
-						ctx.EmitMakeNil(result)
-						result.Type = tagNil
-					default:
-						panic("jit: single-block scalar return with unknown type")
-					}
-				}
+				d4 := JITPrepareScmerGoArg(ctx, d3)
+				ctx.EmitMovPairToResult(&d4, &result)
+				result.Type = d4.Type
 				return result
 				return result
 			},
@@ -9676,7 +9634,6 @@ func init_strings() {
 						d39 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r3}
 						ctx.BindReg(r3, &d39)
 					}
-					ctx.FreeDesc(&d34)
 					d40 = d39
 					ctx.EnsureDesc(&d40)
 					if d40.Loc != LocImm && d40.Loc != LocReg {
@@ -10864,7 +10821,6 @@ func init_strings() {
 					d41.NoHeapPointer = false
 					ctx.BindReg(d41.Reg, &d41)
 					ctx.BindReg(d41.Reg2, &d41)
-					ctx.FreeDesc(&d16)
 					ctx.EnsureDesc(&d41)
 					d42 = ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d41}, 2)
 					ctx.EmitMovPairToResult(&d42, &result)
@@ -12747,7 +12703,7 @@ func init_strings() {
 					d46.ID = 0
 					d48 = d46
 					d48.ID = 0
-					d47 = ctx.EmitTagEqualsBorrowed(&d48, tagString, JITValueDesc{Loc: LocAny})
+					d47 = ctx.EmitIsStringBorrowed(&d48, JITValueDesc{Loc: LocAny})
 					ctx.FreeDesc(&d46)
 					d49 = d47
 					ctx.EnsureDesc(&d49)
@@ -15857,7 +15813,7 @@ func init_strings() {
 					d45.ID = 0
 					d46 = ctx.EmitSliceElementAddress(&d44, &d45, int32(1))
 					ctx.FreeDesc(&d45)
-					ctx.EmitStoreScmerAt(&d46, &d43)
+					ctx.EmitStoreScalarAt(&d46, &d43, 1)
 					ctx.FreeDesc(&d46)
 					ctx.FreeDesc(&d37)
 					ctx.FreeDesc(&d43)
@@ -15960,7 +15916,7 @@ func init_strings() {
 					d57.ID = 0
 					d58 = ctx.EmitSliceElementAddress(&d56, &d57, int32(1))
 					ctx.FreeDesc(&d57)
-					ctx.EmitStoreScmerAt(&d58, &d55)
+					ctx.EmitStoreScalarAt(&d58, &d55, 1)
 					ctx.FreeDesc(&d58)
 					ctx.FreeDesc(&d49)
 					ctx.FreeDesc(&d55)
@@ -15983,7 +15939,6 @@ func init_strings() {
 					ctx.EnsureDesc(&d59)
 					ctx.EmitStoreToStack(d59, int32(bbs[1].PhiBase)+int32(0))
 					ctx.StabilizeDescForControlFlow(&d59)
-					ctx.FreeDesc(&d1)
 					if ps.General {
 					}
 					ps60 := PhiState{General: ps.General}
@@ -16854,7 +16809,7 @@ func init_strings() {
 					d45.ID = 0
 					d46 = ctx.EmitSliceElementAddress(&d44, &d45, int32(1))
 					ctx.FreeDesc(&d45)
-					ctx.EmitStoreScmerAt(&d46, &d43)
+					ctx.EmitStoreScalarAt(&d46, &d43, 1)
 					ctx.FreeDesc(&d46)
 					ctx.FreeDesc(&d37)
 					ctx.FreeDesc(&d43)
@@ -16957,7 +16912,7 @@ func init_strings() {
 					d57.ID = 0
 					d58 = ctx.EmitSliceElementAddress(&d56, &d57, int32(1))
 					ctx.FreeDesc(&d57)
-					ctx.EmitStoreScmerAt(&d58, &d55)
+					ctx.EmitStoreScalarAt(&d58, &d55, 1)
 					ctx.FreeDesc(&d58)
 					ctx.FreeDesc(&d49)
 					ctx.FreeDesc(&d55)
@@ -16980,7 +16935,6 @@ func init_strings() {
 					ctx.EnsureDesc(&d59)
 					ctx.EmitStoreToStack(d59, int32(bbs[1].PhiBase)+int32(0))
 					ctx.StabilizeDescForControlFlow(&d59)
-					ctx.FreeDesc(&d1)
 					if ps.General {
 					}
 					ps60 := PhiState{General: ps.General}
@@ -18204,13 +18158,12 @@ func init_strings() {
 					if d2.Loc == LocImm {
 						d19 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d2.Imm.Int() > 0)}
 					} else {
-						r1 := ctx.AllocReg()
+						r1 := ctx.AllocRegExcept(d2.Reg)
 						ctx.EmitCmpRegImm32(d2.Reg, 0)
 						ctx.EmitSetcc(r1, CondSignedGreater)
 						d19 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r1}
 						ctx.BindReg(r1, &d19)
 					}
-					ctx.FreeDesc(&d2)
 					d20 = d19
 					ctx.EnsureDesc(&d20)
 					if d20.Loc != LocImm && d20.Loc != LocReg {
@@ -19375,7 +19328,6 @@ func init_strings() {
 					d45.NoHeapPointer = false
 					ctx.BindReg(d45.Reg, &d45)
 					ctx.BindReg(d45.Reg2, &d45)
-					ctx.FreeDesc(&d18)
 					ctx.EnsureDesc(&d45)
 					d46 = ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d45}, 2)
 					ctx.EmitMovPairToResult(&d46, &result)
@@ -21929,7 +21881,6 @@ func init_strings() {
 					ctx.EmitAndRegImm32(d67.Reg, 1)
 					d67.Type = tagBool
 					ctx.BindReg(d67.Reg, &d67)
-					ctx.FreeDesc(&d18)
 					ctx.EnsureDesc(&d67)
 					if d67.Loc == LocImm {
 						ctx.EmitMakeBool(result, d67)

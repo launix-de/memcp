@@ -28,6 +28,7 @@ import "encoding/binary"
 import "github.com/launix-de/memcp/scm"
 
 type OverlayBlob struct {
+	storageJITFunctions
 	// every overlay has a base
 	Base ColumnStorage
 	// values: used during build() for dedup, and for legacy inline data
@@ -68,15 +69,10 @@ const overlayBlobVersion = 0
 //	0 (current): layout as above; the version byte was previously the first byte
 //	             of a 7-byte ASCII dummy "1234567" (byte value '1'=49).
 //	             Legacy: version byte '1'=49 → treat as v0 (inline blobs still possible).
-func (s *OverlayBlob) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc {
+func (s *OverlayBlob) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc {
 	/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 	ctx.TrackPointer(unsafe.Pointer(s))
-	thisptrPinned := thisptr.Loc == scm.LocReg
-	thisptrPinnedReg := thisptr.Reg
-	if thisptrPinned {
-		ctx.ProtectReg(thisptrPinnedReg)
-		defer ctx.UnprotectReg(thisptrPinnedReg)
-	}
+	thisptr := scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(int64(uintptr(unsafe.Pointer(s)))), NoHeapPointer: true}
 	var idxInt scm.JITValueDesc
 	if idx.Loc == scm.LocImm {
 		idxInt = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(idx.Imm.Int())}
@@ -102,15 +98,21 @@ func (s *OverlayBlob) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx
 	if thisptr.Loc == scm.LocImm {
 		fieldAddr := uintptr(thisptr.Imm.Int()) + unsafe.Offsetof((*OverlayBlob)(nil).Base)
 		r0 := ctx.AllocReg()
+		r1 := ctx.AllocRegExcept(r0)
 		ctx.EmitMovRegMem64(r0, fieldAddr)
-		d0 = scm.JITValueDesc{Loc: scm.LocReg, Reg: r0}
+		ctx.EmitMovRegMem64(r1, fieldAddr+8)
+		d0 = scm.JITValueDesc{Loc: scm.LocRegPair, Reg: r0, Reg2: r1}
 		ctx.BindReg(r0, &d0)
+		ctx.BindReg(r1, &d0)
 	} else {
 		off := int32(unsafe.Offsetof((*OverlayBlob)(nil).Base))
-		r1 := ctx.AllocReg()
-		ctx.EmitMovRegMem(r1, thisptr.Reg, off)
-		d0 = scm.JITValueDesc{Loc: scm.LocReg, Reg: r1}
-		ctx.BindReg(r1, &d0)
+		r2 := ctx.AllocReg()
+		r3 := ctx.AllocRegExcept(r2)
+		ctx.EmitMovRegMem(r2, thisptr.Reg, off)
+		ctx.EmitMovRegMem(r3, thisptr.Reg, off+8)
+		d0 = scm.JITValueDesc{Loc: scm.LocRegPair, Reg: r2, Reg2: r3}
+		ctx.BindReg(r2, &d0)
+		ctx.BindReg(r3, &d0)
 	}
 	ctx.EnsureDesc(&d0)
 	ctx.EnsureDesc(&idxInt)
@@ -141,28 +143,9 @@ func (s *OverlayBlob) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx
 		ctx.BindReg(result.Reg, &result)
 		ctx.BindReg(result.Reg2, &result)
 	}
-	ctx.SyncDesc(&d2)
-	if d2.Loc == scm.LocRegPair || d2.Loc == scm.LocStackPair || d2.Loc == scm.LocInputPair {
-		ctx.EmitMovPairToResult(&d2, &result)
-		result.Type = d2.Type
-	} else {
-		switch d2.Type {
-		case scm.TagBool:
-			ctx.EmitMakeBool(result, d2)
-			result.Type = scm.TagBool
-		case scm.TagInt:
-			ctx.EmitMakeInt(result, d2)
-			result.Type = scm.TagInt
-		case scm.TagFloat:
-			ctx.EmitMakeFloat(result, d2)
-			result.Type = scm.TagFloat
-		case scm.TagNil:
-			ctx.EmitMakeNil(result)
-			result.Type = scm.TagNil
-		default:
-			panic("jit: single-block scalar return with unknown type")
-		}
-	}
+	d3 := scm.JITPrepareScmerGoArg(ctx, d2)
+	ctx.EmitMovPairToResult(&d3, &result)
+	result.Type = d3.Type
 	return result
 	return result
 }
@@ -267,7 +250,7 @@ func gunzipValue(gzipped string) scm.Scmer {
 	return value
 }
 
-func (s *OverlayBlob) GetCachedReader() ColumnReader { return s }
+func (s *OverlayBlob) GetCachedReader() ColumnReader { return s.storageJITFunctions.reader(s) }
 
 func (s *OverlayBlob) GetValue(i uint32) scm.Scmer {
 	return s.resolveBlob(s.Base.GetValue(i))
@@ -422,6 +405,7 @@ func (s *OverlayBlob) finish() {
 		s.size = 0
 	}
 	s.Base.finish()
+	s.storageJITFunctions.finish(s)
 }
 
 // appendBlobReferences adds the content-addressed objects owned by this column

@@ -60,12 +60,9 @@ func jitExecStorageInt(t *testing.T, s *StorageInt) func(...scm.Scmer) scm.Scmer
 	ctx.EmitLoadArgPair(idxReg, idxReg2, scm.RegR12, 0)
 	idx := scm.JITValueDesc{Loc: scm.LocRegPair, Reg: idxReg, Reg2: idxReg2}
 
-	// thisptr is compile-time known (the *StorageInt pointer as LocImm)
-	thisptr := scm.JITValueDesc{Loc: scm.LocImm, Imm: scm.NewInt(int64(uintptr(unsafe.Pointer(s))))}
-
 	// Result into RAX+RBX
 	result := scm.JITValueDesc{Loc: scm.LocRegPair, Reg: scm.RegRAX, Reg2: scm.RegRBX}
-	desc := s.JITEmit(ctx, thisptr, idx, result)
+	desc := s.JITEmit(ctx, idx, result)
 
 	// Move result to RAX+RBX if not already there
 	ctx.EmitMovPairToResult(&desc, &result)
@@ -120,6 +117,64 @@ func TestStorageIntJITEmit(t *testing.T) {
 			t.Errorf("idx=%d: nil mismatch: JIT=%v GetValue=%v", i, got, expected)
 		} else if !expected.IsNil() && got.Int() != expected.Int() {
 			t.Errorf("idx=%d: JIT got %v, GetValue got %v", i, got, expected)
+		}
+	}
+}
+
+func TestStorageIntFinishedJITReadersMatchBulkMethods(t *testing.T) {
+	if !scm.JITEnabled() {
+		t.Skip("requires the JIT experiment")
+	}
+	values := make([]scm.Scmer, 257)
+	for i := range values {
+		if i%17 == 0 {
+			values[i] = scm.NewNil()
+		} else {
+			values[i] = scm.NewInt(int64(i*3 - 71))
+		}
+	}
+	s := buildStorageInt(values)
+	scalar := s.GetJITGetValue()
+	rangeReader := s.GetJITGetValueRange()
+	multiReader := s.GetJITGetValueMulti()
+	if scalar == nil || rangeReader == nil || multiReader == nil {
+		t.Fatalf("finish did not install all native readers: scalar=%v range=%v multi=%v", scalar != nil, rangeReader != nil, multiReader != nil)
+	}
+
+	var growAndCollect func(int)
+	growAndCollect = func(depth int) {
+		var padding [256]byte
+		padding[0] = byte(depth)
+		if depth > 0 {
+			growAndCollect(depth - 1)
+			return
+		}
+		runtime.GC()
+		if got, want := scalar(91), s.GetValue(91); !scmerEqual(got, want) {
+			t.Fatalf("scalar mismatch after stack growth and GC: got %v want %v", got, want)
+		}
+	}
+	growAndCollect(64)
+
+	wantRange := make([]scm.Scmer, 80)
+	gotRange := make([]scm.Scmer, len(wantRange))
+	s.GetValueRange(31, 40, wantRange, 2)
+	rangeReader(31, 40, gotRange, 2)
+	for i := 0; i < 80; i += 2 {
+		if !scmerEqual(gotRange[i], wantRange[i]) {
+			t.Fatalf("range mismatch at target %d: got %v want %v", i, gotRange[i], wantRange[i])
+		}
+	}
+
+	recids := []uint32{256, 0, 17, 128, 3, 200, 42}
+	wantMulti := make([]scm.Scmer, len(recids)*3)
+	gotMulti := make([]scm.Scmer, len(wantMulti))
+	s.GetValueMulti(recids, wantMulti, 3)
+	multiReader(recids, gotMulti, 3)
+	for i := range recids {
+		at := i * 3
+		if !scmerEqual(gotMulti[at], wantMulti[at]) {
+			t.Fatalf("multi mismatch for recid %d: got %v want %v", recids[i], gotMulti[at], wantMulti[at])
 		}
 	}
 }

@@ -729,7 +729,21 @@ func (ctx *JITContext) EmitCmpFloat64Setcc(dst, left, right Reg, cc JITCondition
 	ctx.emitMovqGprToXmm(RegX1, right)
 	// UCOMISD XMM0, XMM1
 	ctx.emitBytes(0x66, 0x0F, 0x2E, 0xC1)
-	ctx.EmitSetcc(dst, cc)
+	switch cc {
+	case CcE, CcB, CcBE:
+		// EQ/LT/LE must reject unordered operands. UCOMISD sets PF for NaN.
+		ctx.EmitSetcc(dst, cc)
+		ctx.EmitSetcc(RegR11, CondNotParity)
+		ctx.EmitAndInt64(dst, RegR11)
+	case CcNE:
+		// Go's != is true for unordered operands.
+		ctx.EmitSetcc(dst, cc)
+		ctx.EmitSetcc(RegR11, CondParity)
+		ctx.EmitOrInt64(dst, RegR11)
+	default:
+		// GT/GE already reject unordered operands through CF/ZF.
+		ctx.EmitSetcc(dst, cc)
+	}
 }
 
 // --- Conversion emitters ---
@@ -903,6 +917,10 @@ func x86ConditionCode(cc JITCondition) byte {
 		return 0x02
 	case CcAE:
 		return 0x03
+	case CondParity:
+		return 0x0A
+	case CondNotParity:
+		return 0x0B
 	default:
 		panic("jit: unsupported x86 condition")
 	}
@@ -1975,10 +1993,12 @@ func (ctx *JITContext) finalizeStackMaps(frameSize int32, arenaOffset int) []jit
 			}
 		}
 		maps[i] = jitStackMap{
-			pcOffset:   uintptr(arenaOffset) + uintptr(safepoint.pcOffset),
-			frameWords: frameWords,
-			pointerMap: pointerMap,
-			entry:      safepoint.entry,
+			pcOffset:        uintptr(arenaOffset) + uintptr(safepoint.pcOffset),
+			frameWords:      frameWords,
+			pointerMap:      pointerMap,
+			entry:           safepoint.entry,
+			entryFrameWords: safepoint.entryFrameWords,
+			entryPointerMap: safepoint.entryPointerMap,
 		}
 	}
 	return maps
@@ -2328,6 +2348,54 @@ func (ctx *JITContext) emitAluRegReg(opcode byte, dst, src Reg) {
 // MOV [base+disp], src (64-bit store).
 func (ctx *JITContext) EmitStoreRegMem(src, base Reg, disp int32) {
 	ctx.emitStoreRegMem(src, base, disp)
+}
+
+func (ctx *JITContext) emitStoreRegMemWidth(src, base Reg, disp int32, opcode byte, rexW bool) {
+	rex := byte(0x40)
+	if rexW {
+		rex |= 0x08
+	}
+	if src >= 8 {
+		rex |= 0x04
+	}
+	if base >= 8 {
+		rex |= 0x01
+	}
+	baseEnc := byte(base & 7)
+	srcEnc := byte(src & 7)
+	mod := byte(0)
+	if disp == 0 && baseEnc != 5 {
+		mod = 0x00
+	} else if disp >= -128 && disp <= 127 {
+		mod = 0x40
+	} else {
+		mod = 0x80
+	}
+	ctx.emitBytes(rex, opcode, mod|(srcEnc<<3)|baseEnc)
+	if baseEnc == 4 {
+		ctx.emitBytes(0x24)
+	}
+	if mod == 0x40 {
+		ctx.emitBytes(byte(int8(disp)))
+	} else if mod == 0x80 {
+		ctx.emitU32(uint32(disp))
+	}
+}
+
+// EmitStoreRegMemB stores the low byte of src at [base+disp].
+func (ctx *JITContext) EmitStoreRegMemB(src, base Reg, disp int32) {
+	ctx.emitStoreRegMemWidth(src, base, disp, 0x88, false)
+}
+
+// EmitStoreRegMemW stores the low word of src at [base+disp].
+func (ctx *JITContext) EmitStoreRegMemW(src, base Reg, disp int32) {
+	ctx.emitBytes(0x66)
+	ctx.emitStoreRegMemWidth(src, base, disp, 0x89, false)
+}
+
+// EmitStoreRegMemL stores the low doubleword of src at [base+disp].
+func (ctx *JITContext) EmitStoreRegMemL(src, base Reg, disp int32) {
+	ctx.emitStoreRegMemWidth(src, base, disp, 0x89, false)
 }
 
 // EmitSubRSP emits SUB RSP, imm8 to reserve stack space.
