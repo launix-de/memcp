@@ -84,14 +84,15 @@ test_cases:
         - "(known true)"
         - "planning_value"
 
-  - name: "Cold point fallback stays below automatic logging threshold"
+  - name: "Clear range scan statistics"
     setup:
-      - scm: '(settings "ScanDebugging" false)'
+      - scm: '(settings "ScanDebugging" true)'
       - sql: "SELECT val FROM rs_data WHERE id = 42"
       - scm: '(sleep 0.1)'
+      - scm: '(settings "ScanDebugging" false)'
     sql: "DELETE FROM `system_statistic`.`scans` WHERE `schema` = 'memcp-tests' AND `table` = 'rs_data'"
     expect:
-      affected_rows: 0
+      affected_rows: 1
 
   - name: "Point scan stays below automatic logging threshold"
     setup:

@@ -390,7 +390,7 @@ test_cases:
     sql: "SELECT 1 AS ok"
     expect: { rows: 1 }
 
-  - name: "Cold fallback and warm Equal probes both stay exact"
+  - name: "Equal speedup >= 3x"
     sql: |
       SELECT max_candidates, min_output,
         CASE WHEN max_candidates = 1 AND min_output = 1 THEN 'ok' ELSE 'FAIL' END AS result
