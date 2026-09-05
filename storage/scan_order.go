@@ -46,7 +46,7 @@ func optimizeScanOrderMulti(v []scm.Scmer, oc *scm.OptimizerContext, useResult b
 		}
 	}
 	for i := 1; i <= 15 && i < len(v); i++ {
-		optimizeScanArgument(v, i, oc)
+		v[i], _ = oc.OptimizeSub(v[i], true)
 	}
 	neutralType := unknownScanType()
 	if len(v) > 16 {
@@ -98,7 +98,7 @@ func optimizeScanOrder(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) 
 	rawMapReduce := v[mapReduceIdx]
 	for i := 1; i <= mapReduceIdx && i < len(v); i++ {
 		if i != mapReduceIdx {
-			optimizeScanArgument(v, i, oc)
+			v[i], _ = oc.OptimizeSub(v[i], true)
 		}
 	}
 	neutralType := unknownScanType()

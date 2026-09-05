@@ -47,7 +47,7 @@ func optimizeScanJoinOrder(v []scm.Scmer, oc *scm.OptimizerContext, _ bool) (scm
 		rawCombine = v[combineIdx]
 	}
 	for i := 1; i < mapReduceIdx && i < len(v); i++ {
-		optimizeScanArgument(v, i, oc)
+		v[i], _ = oc.OptimizeSub(v[i], true)
 	}
 	neutralType := unknownScanType()
 	if len(v) > neutralIdx {

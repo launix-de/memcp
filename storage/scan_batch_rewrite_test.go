@@ -137,15 +137,15 @@ func TestScanBatchOptimizerPreservesCompiledBatchAccess(t *testing.T) {
 	}
 }
 
-func TestScanOptimizerKeepsDynamicAccessValuesOnTheFrame(t *testing.T) {
+func TestParallelScanOptimizerAvoidsFrameLocalAccessValues(t *testing.T) {
 	Init(scm.Globalenv)
-	expr := scm.Read("scan access noescape test", `(lambda (table_value wanted_id)
+	expr := scm.Read("parallel scan access lifetime test", `(lambda (table_value wanted_id)
 		(scan nil table_value '() (list wanted_id)
 			'("id" "#0") (lambda (id probe) (equal?? id probe))
 			'("id") (lambda (acc id) (+ acc id)) 0 nil false))`)
 	optimized := scm.Optimize(expr, &scm.Globalenv, nil)
 	plan := scm.SerializeToString(optimized, &scm.Globalenv)
-	if !strings.Contains(plan, "(!list ") {
-		t.Fatalf("dynamic scan access values were heap allocated: %s", plan)
+	if strings.Contains(plan, "(!list ") {
+		t.Fatalf("parallel scan access values use frame-local storage: %s", plan)
 	}
 }
