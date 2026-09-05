@@ -17,6 +17,8 @@ Copyright (C) 2026  Carl-Philip Hänsch
 
 package scm
 
+import "unsafe"
+
 func jitStaticParserForExpr(ctx *JITContext, expr Scmer) (*ScmParser, bool) {
 	for expr.IsSourceInfo() {
 		expr = expr.SourceInfo().value
@@ -141,6 +143,21 @@ type jitParserEmitter struct {
 	skipLabel         JITLabel
 	inlineActions     bool
 	skipperRule       int
+	// memoCheck{Rule,Accepted,Rejected}Off and memoCheckLabel implement
+	// emitMemoCheckedRuleRef as one shared, outlined block instead of
+	// inlining it at every rule-reference call site: a call site is a
+	// three-word store (rule id, accepted/rejected continuation ids) plus
+	// a jmp, and the one shared block does the actual native memo-table
+	// read, keeping the per-site cost small regardless of how many
+	// thousands of rule references the grammar contains.
+	memoCheckRuleOff     int32
+	memoCheckAcceptedOff int32
+	memoCheckRejectedOff int32
+	memoCheckLabel       JITLabel
+	// failLabel is jitEmitParserProgramCore's overall parse-failure label,
+	// needed by emitMemoCheckBlock's defensive (never actually reachable -
+	// node.rule always names a real rule) invalid-jump-table-index arms.
+	failLabel JITLabel
 	// noMemoDepth counts enclosing repeat nodes whose grammar author marked
 	// noMemo (the (* sub sep #t) form). Left-to-right, unbranched repeat
 	// bodies revisit no position twice, so rule references emitted while this
@@ -446,28 +463,67 @@ func (emitter *jitParserEmitter) emitRuleRef(node *jitParserNode, success, failu
 		emitter.emitLexicalRuleRef(node, success, failure)
 		return
 	}
-	accepted, rejected := emitter.ctx.ReserveLabel(), emitter.ctx.ReserveLabel()
-	position := emitter.loadPosition()
-	statePointer := emitter.statePointer()
-	enterArgs := []JITValueDesc{statePointer, jitParserScalar(int64(node.rule)), jitParserScalar(emitter.continuation(accepted)),
-		jitParserScalar(emitter.continuation(rejected)), position}
-	var wordsBuf [16]goCallArgWord
-	words := emitter.ctx.flattenArgs(enterArgs, &wordsBuf)
-	var resultsBuf [16]Reg
-	results := emitter.ctx.EmitGoCall(GoFuncAddr(jitParserEnterRuleNative), words, 3, &resultsBuf, nil)
-	emitter.ctx.FreeDesc(&statePointer)
-	emitter.ctx.FreeDesc(&position)
-	emitter.ctx.EmitCmpRegImm32(results[2], 0)
-	for _, reg := range results {
-		emitter.ctx.FreeReg(reg)
+	emitter.emitMemoCheckedRuleRef(node, success, failure)
+}
+
+// sliceElemAddr computes &slice[index] for a Go slice field living
+// fieldOffset bytes into the struct pointed to by base, where the slice's
+// elements are 1<<elemShift bytes wide. Returns a fresh, caller-owned
+// register holding the address. index is only read (via a copy), never
+// mutated, so it stays valid for further use by the caller afterwards.
+func (emitter *jitParserEmitter) sliceElemAddr(base Reg, fieldOffset int32, index Reg, elemShift uint8) Reg {
+	addr := emitter.ctx.AllocReg()
+	emitter.ctx.EmitMovRegMem(addr, base, fieldOffset) // slice.Data
+	scaled := emitter.ctx.AllocRegExcept(addr, index)
+	emitter.ctx.EmitMovRegReg(scaled, index)
+	emitter.ctx.EmitShlRegImm8(scaled, elemShift)
+	emitter.ctx.EmitAddInt64(addr, scaled)
+	emitter.ctx.FreeReg(scaled)
+	return addr
+}
+
+// loadScratchInt reads a persistent int64 scratch stack slot into a fresh,
+// bound register - the same shape as loadPosition, just parameterized by
+// offset, for the memo-check block's small set of call-site parameters.
+func (emitter *jitParserEmitter) loadScratchInt(offset int32) JITValueDesc {
+	value := JITValueDesc{Loc: LocReg, Type: tagInt, Reg: emitter.ctx.AllocReg(), NoHeapPointer: true}
+	emitter.ctx.BindReg(value.Reg, &value)
+	emitter.ctx.EmitMovRegMem(value.Reg, emitter.ctx.StackReg, offset)
+	return value
+}
+
+// storeScratchImm writes a compile-time-known int64 into a persistent
+// scratch stack slot via the shared scratch register.
+func (emitter *jitParserEmitter) storeScratchImm(value int64, offset int32) {
+	emitter.ctx.EmitMovRegImm64(emitter.ctx.ScratchReg, uint64(value))
+	emitter.ctx.EmitStoreRegMem(emitter.ctx.ScratchReg, emitter.ctx.StackReg, offset)
+}
+
+// emitMemoCheckedRuleRef is the general-case rule reference: node.rule is
+// neither a lexical sub-rule nor reached from inside a noMemo repeat (see
+// emitRuleRef), so a prior visit to this (rule, position) pair may really be
+// memoized. The actual native memo-table read lives once, in the shared
+// emitMemoCheckBlock (reachable from every such call site in the grammar -
+// there can be thousands): a call site only has to hand it its three
+// site-specific values (which rule, and where to resume on hit/miss) and
+// jump there, instead of inlining the whole read-the-memo-table sequence
+// (and, in the rare case, the jitParserEnterRuleNative fallback call) again
+// at every single site. That keeps the per-site cost at a handful of
+// instructions regardless of grammar size, matching how the interpreter's
+// own bytecode would call a shared routine rather than duplicating it.
+func (emitter *jitParserEmitter) emitMemoCheckedRuleRef(node *jitParserNode, success, failure JITLabel) {
+	if emitter.program.memoRuleIndex[node.rule] < 0 {
+		panic("jit: memo-checked rule ref on a non-memoizable rule")
 	}
-	cacheMiss := emitter.ctx.ReserveLabel()
-	emitter.ctx.EmitJump(CondEqual, cacheMiss)
-	emitter.ctx.EmitStoreRegMem(results[0], emitter.ctx.StackReg, emitter.continuationOff)
-	emitter.ctx.EmitStoreRegMem(results[1], emitter.ctx.StackReg, emitter.positionOff)
-	emitter.ctx.EmitJmp(emitter.dispatchLabel)
-	emitter.ctx.MarkLabel(cacheMiss)
-	emitter.ctx.EmitJmp(emitter.ruleLabels[node.rule])
+	accepted, rejected := emitter.ctx.ReserveLabel(), emitter.ctx.ReserveLabel()
+	acceptedContinuation := emitter.continuation(accepted)
+	rejectedContinuation := emitter.continuation(rejected)
+
+	emitter.storeScratchImm(int64(node.rule), emitter.memoCheckRuleOff)
+	emitter.storeScratchImm(acceptedContinuation, emitter.memoCheckAcceptedOff)
+	emitter.storeScratchImm(rejectedContinuation, emitter.memoCheckRejectedOff)
+	emitter.ctx.EmitJmp(emitter.memoCheckLabel)
+
 	emitter.ctx.MarkLabel(accepted)
 	if node.ignoreResult {
 		emitter.discardValue()
@@ -475,6 +531,209 @@ func (emitter *jitParserEmitter) emitRuleRef(node *jitParserNode, success, failu
 	emitter.ctx.EmitJmp(success)
 	emitter.ctx.MarkLabel(rejected)
 	emitter.ctx.EmitJmp(failure)
+}
+
+// emitMemoCheckBlock emits the one shared body every emitMemoCheckedRuleRef
+// call site jumps into (via emitter.memoCheckLabel), reading its rule id and
+// accepted/rejected continuation ids from the fixed scratch slots the call
+// site stored them in. Reading the packrat memo table
+// (jitParserState.heads/memoOffsets/memoRules/memoEntries) is pure
+// scalar/pointer arithmetic over Go's stable slice-header layout, so the two
+// cases that make up virtually all rule references - a definite first visit
+// (miss) and an already-resolved, non-left-recursive hit - are handled
+// entirely natively, with no Go call: jitParserRecordFirstVisitNative for a
+// miss (jitParserPushRuleFrame's void call plus the memo-active bookkeeping,
+// nothing else), and an inline read of the cached value for a hit. Since
+// this block is shared, neither case can jump directly to a call site's own
+// accepted/rejected label the way the earlier per-site version did; both
+// route through the continuation/dispatchLabel mechanism the miss/fallback
+// paths already relied on before this change, and a genuine hit resolves
+// via one indirect jump through that same jump table instead of a direct
+// one - a small price for turning O(sites) duplicated code into O(1).
+// Neither case changes what jitParserCompleteRule eventually writes to the
+// memo - that still happens unconditionally, gated only by the target
+// rule's own memoize bit set at frame-push time - so this only changes how
+// an existing entry is discovered, never what ends up in it. The rare cases
+// - a left-recursion head already registered at this position, or a memo
+// entry still "active" (mid-evaluation, i.e. real left recursion) - fall
+// back verbatim to jitParserEnterRuleNative, the only place implementing
+// Warth-et-al iterative left-recursion growth; that fallback, too, exists
+// only once here rather than once per call site.
+func (emitter *jitParserEmitter) emitMemoCheckBlock() {
+	ctx := emitter.ctx
+	headsOff := int32(unsafe.Offsetof(jitParserState{}.heads))
+	memoOffsetsOff := int32(unsafe.Offsetof(jitParserState{}.memoOffsets))
+	memoRulesOff := int32(unsafe.Offsetof(jitParserState{}.memoRules))
+	memoEntriesOff := int32(unsafe.Offsetof(jitParserState{}.memoEntries))
+	programOff := int32(unsafe.Offsetof(jitParserState{}.program))
+	memoRuleIndexOff := int32(unsafe.Offsetof(jitParserProgram{}.memoRuleIndex))
+	entryPositionOff := int32(unsafe.Offsetof(jitParserMemoEntry{}.position))
+	entrySuccessOff := int32(unsafe.Offsetof(jitParserMemoEntry{}.success))
+	entryActiveOff := int32(unsafe.Offsetof(jitParserMemoEntry{}.active))
+	entryValueOff := int32(unsafe.Offsetof(jitParserMemoEntry{}.value))
+	entryValuePtrOff := entryValueOff + int32(unsafe.Offsetof(Scmer{}.ptr))
+	entryValueAuxOff := entryValueOff + int32(unsafe.Offsetof(Scmer{}.aux))
+
+	fallback, miss, hitFailure := ctx.ReserveLabel(), ctx.ReserveLabel(), ctx.ReserveLabel()
+	ctx.MarkLabel(emitter.memoCheckLabel)
+
+	// head := state.heads[position]; head != nil -> fallback (left
+	// recursion may be in play).
+	position := emitter.loadPosition()
+	statePointer := emitter.statePointer()
+	headAddr := emitter.sliceElemAddr(statePointer.Reg, headsOff, position.Reg, 3)
+	ctx.FreeDesc(&statePointer)
+	ctx.FreeDesc(&position)
+	head := ctx.AllocReg()
+	ctx.EmitMovRegMem(head, headAddr, 0)
+	ctx.FreeReg(headAddr)
+	ctx.EmitCmpRegImm32(head, 0)
+	ctx.FreeReg(head)
+	ctx.EmitJump(CondNotEqual, fallback)
+
+	// offset := state.memoOffsets[position]; offset == 0 -> miss.
+	position = emitter.loadPosition()
+	statePointer = emitter.statePointer()
+	offsetAddr := emitter.sliceElemAddr(statePointer.Reg, memoOffsetsOff, position.Reg, 2)
+	ctx.FreeDesc(&statePointer)
+	ctx.FreeDesc(&position)
+	offset := ctx.AllocReg()
+	ctx.EmitMovRegMemL(offset, offsetAddr, 0)
+	ctx.FreeReg(offsetAddr)
+	ctx.EmitCmpRegImm32(offset, 0)
+	ctx.EmitJump(CondEqual, miss)
+
+	// denseRule := state.program.memoRuleIndex[ruleID]. Unlike a per-site
+	// design, ruleID is a runtime value in this shared block, so denseRule
+	// costs one extra memory read instead of being a baked-in immediate.
+	// Always >= 0 here: emitRuleRef only reaches this block for
+	// non-lexical rules, and prepareMemoLayout gives every non-lexical
+	// rule a non-negative dense index.
+	ruleID := emitter.loadScratchInt(emitter.memoCheckRuleOff)
+	statePointer = emitter.statePointer()
+	programPtr := ctx.AllocRegExcept(statePointer.Reg, ruleID.Reg)
+	ctx.EmitMovRegMem(programPtr, statePointer.Reg, programOff)
+	ctx.FreeDesc(&statePointer)
+	denseRuleAddr := emitter.sliceElemAddr(programPtr, memoRuleIndexOff, ruleID.Reg, 2)
+	ctx.FreeReg(programPtr)
+	ctx.FreeDesc(&ruleID)
+	denseRule := ctx.AllocReg()
+	ctx.EmitMovRegMemL(denseRule, denseRuleAddr, 0)
+	ctx.FreeReg(denseRuleAddr)
+
+	// index = offset - 1 + denseRule; state.memoRules[index] == 0 -> miss.
+	ctx.EmitAddInt64(offset, denseRule)
+	ctx.FreeReg(denseRule)
+	ctx.EmitSubRegImm32(offset, 1)
+	statePointer = emitter.statePointer()
+	rulesAddr := emitter.sliceElemAddr(statePointer.Reg, memoRulesOff, offset, 2)
+	ctx.FreeDesc(&statePointer)
+	ctx.FreeReg(offset)
+	entryIndex := ctx.AllocReg()
+	ctx.EmitMovRegMemL(entryIndex, rulesAddr, 0)
+	ctx.FreeReg(rulesAddr)
+	ctx.EmitCmpRegImm32(entryIndex, 0)
+	ctx.EmitJump(CondEqual, miss)
+
+	// Fallthrough: a resolved memo entry exists at this position for this
+	// rule and no left-recursion head is registered here - a definite hit.
+	ctx.EmitSubRegImm32(entryIndex, 1)
+	statePointer = emitter.statePointer()
+	entryAddr := emitter.sliceElemAddr(statePointer.Reg, memoEntriesOff, entryIndex, 5)
+	ctx.FreeDesc(&statePointer)
+	ctx.FreeReg(entryIndex)
+
+	active := ctx.AllocReg()
+	ctx.EmitMovRegMemB(active, entryAddr, entryActiveOff)
+	ctx.EmitCmpRegImm32(active, 0)
+	ctx.FreeReg(active)
+	ctx.EmitJump(CondNotEqual, fallback)
+
+	entryPosition := ctx.AllocReg()
+	ctx.EmitMovRegMemL(entryPosition, entryAddr, entryPositionOff)
+	ctx.EmitStoreRegMem(entryPosition, ctx.StackReg, emitter.positionOff)
+	ctx.FreeReg(entryPosition)
+
+	entrySuccess := ctx.AllocReg()
+	ctx.EmitMovRegMemB(entrySuccess, entryAddr, entrySuccessOff)
+	ctx.EmitCmpRegImm32(entrySuccess, 0)
+	ctx.FreeReg(entrySuccess)
+	ctx.EmitJump(CondEqual, hitFailure)
+
+	valuePtr := ctx.AllocReg()
+	ctx.EmitMovRegMem(valuePtr, entryAddr, entryValuePtrOff)
+	valueAux := ctx.AllocRegExcept(valuePtr)
+	ctx.EmitMovRegMem(valueAux, entryAddr, entryValueAuxOff)
+	ctx.FreeReg(entryAddr)
+	cachedValue := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: valuePtr, Reg2: valueAux}
+	ctx.BindReg(valuePtr, &cachedValue)
+	ctx.BindReg(valueAux, &cachedValue)
+	emitter.pushValue(cachedValue)
+	acceptedCont := emitter.loadScratchInt(emitter.memoCheckAcceptedOff)
+	ctx.EmitStoreRegMem(acceptedCont.Reg, ctx.StackReg, emitter.continuationOff)
+	ctx.FreeDesc(&acceptedCont)
+	ctx.EmitJmp(emitter.dispatchLabel)
+
+	ctx.MarkLabel(hitFailure)
+	rejectedCont := emitter.loadScratchInt(emitter.memoCheckRejectedOff)
+	ctx.EmitStoreRegMem(rejectedCont.Reg, ctx.StackReg, emitter.continuationOff)
+	ctx.FreeDesc(&rejectedCont)
+	ctx.EmitJmp(emitter.dispatchLabel)
+
+	// miss: definite first visit - record it and run the rule body. The
+	// target rule is only known at runtime here (shared block), so
+	// dispatch through the same jump table jitEmitParserProgramCore's own
+	// entry dispatch uses, instead of a compile-time-constant jump.
+	ctx.MarkLabel(miss)
+	missRuleID := emitter.loadScratchInt(emitter.memoCheckRuleOff)
+	missAccepted := emitter.loadScratchInt(emitter.memoCheckAcceptedOff)
+	missRejected := emitter.loadScratchInt(emitter.memoCheckRejectedOff)
+	missPosition := emitter.loadPosition()
+	missState := emitter.statePointer()
+	emitter.emitVoid(jitParserRecordFirstVisitNative, missState, missRuleID, missAccepted, missRejected, missPosition)
+	ctx.FreeDesc(&missState)
+	ctx.FreeDesc(&missPosition)
+	ctx.FreeDesc(&missAccepted)
+	ctx.FreeDesc(&missRejected)
+	invalidMiss := ctx.ReserveLabel()
+	ctx.EmitJumpTable(missRuleID.Reg, emitter.ruleLabels, invalidMiss)
+	ctx.FreeDesc(&missRuleID)
+	ctx.MarkLabel(invalidMiss)
+	ctx.EmitJmp(emitter.failLabel)
+
+	// fallback: left recursion may be in play - defer to the full
+	// jitParserEnterRuleNative logic, unchanged from before this change.
+	ctx.MarkLabel(fallback)
+	fallbackRuleID := emitter.loadScratchInt(emitter.memoCheckRuleOff)
+	fallbackAccepted := emitter.loadScratchInt(emitter.memoCheckAcceptedOff)
+	fallbackRejected := emitter.loadScratchInt(emitter.memoCheckRejectedOff)
+	position = emitter.loadPosition()
+	statePointer = emitter.statePointer()
+	enterArgs := []JITValueDesc{statePointer, fallbackRuleID, fallbackAccepted, fallbackRejected, position}
+	var wordsBuf [16]goCallArgWord
+	words := ctx.flattenArgs(enterArgs, &wordsBuf)
+	var resultsBuf [16]Reg
+	results := ctx.EmitGoCall(GoFuncAddr(jitParserEnterRuleNative), words, 3, &resultsBuf, nil)
+	ctx.FreeDesc(&statePointer)
+	ctx.FreeDesc(&position)
+	ctx.FreeDesc(&fallbackAccepted)
+	ctx.FreeDesc(&fallbackRejected)
+	ctx.EmitCmpRegImm32(results[2], 0)
+	for _, reg := range results {
+		ctx.FreeReg(reg)
+	}
+	cacheMiss := ctx.ReserveLabel()
+	ctx.EmitJump(CondEqual, cacheMiss)
+	ctx.EmitStoreRegMem(results[0], ctx.StackReg, emitter.continuationOff)
+	ctx.EmitStoreRegMem(results[1], ctx.StackReg, emitter.positionOff)
+	ctx.FreeDesc(&fallbackRuleID)
+	ctx.EmitJmp(emitter.dispatchLabel)
+	ctx.MarkLabel(cacheMiss)
+	invalidFallback := ctx.ReserveLabel()
+	ctx.EmitJumpTable(fallbackRuleID.Reg, emitter.ruleLabels, invalidFallback)
+	ctx.FreeDesc(&fallbackRuleID)
+	ctx.MarkLabel(invalidFallback)
+	ctx.EmitJmp(emitter.failLabel)
 }
 
 // emitLexicalRuleRef is the entry-check-free fast path carved out of
@@ -679,7 +938,12 @@ func jitEmitParserProgramCore(ctx *JITContext, program *jitParserProgram, input,
 	}
 	emitter.dispatchLabel = ctx.ReserveLabel()
 	emitter.skipLabel = ctx.ReserveLabel()
+	emitter.memoCheckRuleOff = ctx.AllocStack(8)
+	emitter.memoCheckAcceptedOff = ctx.AllocStack(8)
+	emitter.memoCheckRejectedOff = ctx.AllocStack(8)
+	emitter.memoCheckLabel = ctx.ReserveLabel()
 	finished, failed := ctx.ReserveLabel(), ctx.ReserveLabel()
+	emitter.failLabel = failed
 	finishedID, failedID := emitter.continuation(finished), emitter.continuation(failed)
 
 	entryDesc := emitter.entry
@@ -726,6 +990,8 @@ func jitEmitParserProgramCore(ctx *JITContext, program *jitParserProgram, input,
 		ctx.MarkLabel(rejected)
 		emitter.emitRuleReturn(ruleID, false)
 	}
+
+	emitter.emitMemoCheckBlock()
 
 	ctx.MarkLabel(finished)
 	skipped := ctx.ReserveLabel()
