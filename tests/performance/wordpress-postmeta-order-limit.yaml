@@ -109,9 +109,10 @@ test_cases:
         - '(join_driver \"p\")'
 
   - name: "WordPress handwritten equivalent-driver batched scan_join_order"
-    warmup: 2
-    timing_samples: 5
+    warmup: 10
+    timing_samples: 100
     threshold_ms: 8
+    revision_specific_scm: true
     scm: |
       (begin
         (define posts (table "memcp-tests" "wordpress_perf_posts"))
@@ -119,11 +120,12 @@ test_cases:
         (define found
           (scan_join_order (session "__memcp_tx")
             (list postmeta posts)
-            (list (list "meta_key") (list "post_type" "post_status"))
             (list
-              (lambda (meta_key) (equal?? meta_key "custom_color"))
-              (lambda (post_type post_status)
-                (and (equal?? post_type "post") (equal?? post_status "publish"))))
+              '(370535686995968 "equal" "meta_key" 15032418304 "")
+              '(370535955431424 "equal" "post_status" 15032483841 "" "equal" "post_type" 15032549378 ""))
+            (list "custom_color" "publish" "post")
+            (list (list) (list))
+            (list (lambda () true) (lambda () true))
             (list (list (list 0 "post_id" "ID")))
             (list) nil
             (list (list 0 "post_id"))

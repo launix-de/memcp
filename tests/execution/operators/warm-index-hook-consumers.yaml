@@ -36,12 +36,12 @@ test_cases:
       (begin
         (define tbl (table "memcp-tests" "wicm_rows"))
         (define warm_equal (lambda ()
-          (scan_order nil tbl '("enabled")
+          (scan_order nil tbl (car (compile_scan_access '("enabled") (scheme "(lambda (enabled) (equal? enabled true))"))) (cadr (compile_scan_access '("enabled") (scheme "(lambda (enabled) (equal? enabled true))"))) '("enabled")
             (lambda (enabled) (equal? enabled true))
             '("sort_key") '(<) 0 0 16 '("id")
             (lambda (acc id) (+ acc id)) 0 false)))
         (define warm_like (lambda ()
-          (scan_order nil tbl '("label")
+          (scan_order nil tbl (car (compile_scan_access '("label") (scheme "(lambda (label) (strlike label \"%needle%\" \"utf8mb4_general_ci\"))"))) (cadr (compile_scan_access '("label") (scheme "(lambda (label) (strlike label \"%needle%\" \"utf8mb4_general_ci\"))"))) '("label")
             (lambda (label) (strlike label "%needle%" "utf8mb4_general_ci"))
             '("sort_key") '(<) 0 0 16 '("id")
             (lambda (acc id) (+ acc id)) 0 false)))
@@ -57,19 +57,19 @@ test_cases:
     scm: |
       (begin
         (define tbl (table "memcp-tests" "wicm_rows"))
-        (define selected (scan_recset nil tbl '("id") (lambda (id) (<= id 32))))
-        (define unordered (scan nil selected '("label")
+        (define selected (scan_recset nil tbl (car (compile_scan_access '("id") (scheme "(lambda (id) (<= id 32))"))) (cadr (compile_scan_access '("id") (scheme "(lambda (id) (<= id 32))"))) '("id") (lambda (id) (<= id 32))))
+        (define unordered (scan nil selected (car (compile_scan_access '("label") (scheme "(lambda (label) (strlike label \"%needle%\" \"utf8mb4_general_ci\"))"))) (cadr (compile_scan_access '("label") (scheme "(lambda (label) (strlike label \"%needle%\" \"utf8mb4_general_ci\"))"))) '("label")
           (lambda (label) (strlike label "%needle%" "utf8mb4_general_ci"))
           '("id") (lambda (acc _id) (+ acc 1)) 0 +))
-        (define exists_hit (scan_exists nil selected '("label")
+        (define exists_hit (scan_exists nil selected (car (compile_scan_access '("label") (scheme "(lambda (label) (strlike label \"%needle%\" \"utf8mb4_general_ci\"))"))) (cadr (compile_scan_access '("label") (scheme "(lambda (label) (strlike label \"%needle%\" \"utf8mb4_general_ci\"))"))) '("label")
           (lambda (label) (strlike label "%needle%" "utf8mb4_general_ci"))))
-        (define exists_miss (scan_exists nil selected '("label")
+        (define exists_miss (scan_exists nil selected (car (compile_scan_access '("label") (scheme "(lambda (label) (strlike label \"%absent%\" \"utf8mb4_general_ci\"))"))) (cadr (compile_scan_access '("label") (scheme "(lambda (label) (strlike label \"%absent%\" \"utf8mb4_general_ci\"))"))) '("label")
           (lambda (label) (strlike label "%absent%" "utf8mb4_general_ci"))))
-        (define ordered (scan_order nil selected '("label")
+        (define ordered (scan_order nil selected (car (compile_scan_access '("label") (scheme "(lambda (label) (strlike label \"%needle%\" \"utf8mb4_general_ci\"))"))) (cadr (compile_scan_access '("label") (scheme "(lambda (label) (strlike label \"%needle%\" \"utf8mb4_general_ci\"))"))) '("label")
           (lambda (label) (strlike label "%needle%" "utf8mb4_general_ci"))
           '("sort_key") '(<) 0 0 4 '("id")
           (lambda (rows id) (append rows (list id))) '() false))
-        (define narrowed (scan_recset nil selected '("label")
+        (define narrowed (scan_recset nil selected (car (compile_scan_access '("label") (scheme "(lambda (label) (strlike label \"%needle%\" \"utf8mb4_general_ci\"))"))) (cadr (compile_scan_access '("label") (scheme "(lambda (label) (strlike label \"%needle%\" \"utf8mb4_general_ci\"))"))) '("label")
           (lambda (label) (strlike label "%needle%" "utf8mb4_general_ci"))))
         (if (and (equal? unordered 16) exists_hit (not exists_miss)
           (equal? ordered (list (list 31) (list 29) (list 27) (list 25)))
@@ -84,14 +84,14 @@ test_cases:
       (begin
         (define tbl (table "memcp-tests" "wicm_rows"))
         (rebuild tbl true false)
-        (define selected (scan_recset nil tbl '("id") (lambda (id) (<= id 4))))
-        (define narrowed (scan_recset nil selected '("label")
+        (define selected (scan_recset nil tbl (car (compile_scan_access '("id") (scheme "(lambda (id) (<= id 4))"))) (cadr (compile_scan_access '("id") (scheme "(lambda (id) (<= id 4))"))) '("id") (lambda (id) (<= id 4))))
+        (define narrowed (scan_recset nil selected (car (compile_scan_access '("label") (scheme "(lambda (label) (strlike label \"%needle%\" \"utf8mb4_general_ci\"))"))) (cadr (compile_scan_access '("label") (scheme "(lambda (label) (strlike label \"%needle%\" \"utf8mb4_general_ci\"))"))) '("label")
           (lambda (label) (strlike label "%needle%" "utf8mb4_general_ci"))))
         (define indexes ((show "memcp-tests" "wicm_rows" 0 true) "indexes"))
         (define like_indexes (reduce indexes (lambda (count index)
           (if (strlike (get_assoc index "cols") "%label(like)%" "utf8mb4_bin")
             (+ count 1) count)) 0))
-        (define ordered (scan_order nil selected '("label")
+        (define ordered (scan_order nil selected (car (compile_scan_access '("label") (scheme "(lambda (label) (strlike label \"%needle%\" \"utf8mb4_general_ci\"))"))) (cadr (compile_scan_access '("label") (scheme "(lambda (label) (strlike label \"%needle%\" \"utf8mb4_general_ci\"))"))) '("label")
           (lambda (label) (strlike label "%needle%" "utf8mb4_general_ci"))
           '("sort_key") '(<) 0 0 10 '("id")
           (lambda (rows id) (append rows (list id))) '() false))
@@ -113,7 +113,7 @@ test_cases:
     scm: |
       (begin
         (define tbl (table "memcp-tests" "wicm_rows"))
-        (define selected (scan_recset nil tbl '("id") (lambda (id) (>= id 4097))))
+        (define selected (scan_recset nil tbl (car (compile_scan_access '("id") (scheme "(lambda (id) (>= id 4097))"))) (cadr (compile_scan_access '("id") (scheme "(lambda (id) (>= id 4097))"))) '("id") (lambda (id) (>= id 4097))))
         (recset_count selected))
     expect:
       data: [2]
@@ -122,8 +122,8 @@ test_cases:
     scm: |
       (begin
         (define tbl (table "memcp-tests" "wicm_rows"))
-        (define selected (scan_recset nil tbl '("id") (lambda (id) (>= id 4097))))
-        (define count_like (scan nil selected '("label")
+        (define selected (scan_recset nil tbl (car (compile_scan_access '("id") (scheme "(lambda (id) (>= id 4097))"))) (cadr (compile_scan_access '("id") (scheme "(lambda (id) (>= id 4097))"))) '("id") (lambda (id) (>= id 4097))))
+        (define count_like (scan nil selected (car (compile_scan_access '("label") (scheme "(lambda (label) (strlike label \"%needle%\" \"utf8mb4_general_ci\"))"))) (cadr (compile_scan_access '("label") (scheme "(lambda (label) (strlike label \"%needle%\" \"utf8mb4_general_ci\"))"))) '("label")
           (lambda (label) (strlike label "%needle%" "utf8mb4_general_ci"))
           '("id") (lambda (acc _id) (+ acc 1)) 0 +))
         count_like)
@@ -134,8 +134,8 @@ test_cases:
     scm: |
       (begin
         (define tbl (table "memcp-tests" "wicm_rows"))
-        (define selected (scan_recset nil tbl '("id") (lambda (id) (>= id 4097))))
-        (scan_exists nil selected '("label")
+        (define selected (scan_recset nil tbl (car (compile_scan_access '("id") (scheme "(lambda (id) (>= id 4097))"))) (cadr (compile_scan_access '("id") (scheme "(lambda (id) (>= id 4097))"))) '("id") (lambda (id) (>= id 4097))))
+        (scan_exists nil selected (car (compile_scan_access '("label") (scheme "(lambda (label) (strlike label \"%needle%\" \"utf8mb4_general_ci\"))"))) (cadr (compile_scan_access '("label") (scheme "(lambda (label) (strlike label \"%needle%\" \"utf8mb4_general_ci\"))"))) '("label")
           (lambda (label) (strlike label "%needle%" "utf8mb4_general_ci"))))
     expect:
       data: [true]
@@ -144,8 +144,8 @@ test_cases:
     scm: |
       (begin
         (define tbl (table "memcp-tests" "wicm_rows"))
-        (define selected (scan_recset nil tbl '("id") (lambda (id) (>= id 4097))))
-        (scan_order nil selected '("label")
+        (define selected (scan_recset nil tbl (car (compile_scan_access '("id") (scheme "(lambda (id) (>= id 4097))"))) (cadr (compile_scan_access '("id") (scheme "(lambda (id) (>= id 4097))"))) '("id") (lambda (id) (>= id 4097))))
+        (scan_order nil selected (car (compile_scan_access '("label") (scheme "(lambda (label) (strlike label \"%needle%\" \"utf8mb4_general_ci\"))"))) (cadr (compile_scan_access '("label") (scheme "(lambda (label) (strlike label \"%needle%\" \"utf8mb4_general_ci\"))"))) '("label")
           (lambda (label) (strlike label "%needle%" "utf8mb4_general_ci"))
           '("sort_key") '(<) 0 0 4 '("id")
           (lambda (rows id) (append rows (list id))) '() false))

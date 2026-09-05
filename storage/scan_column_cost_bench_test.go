@@ -62,7 +62,8 @@ func TestEstimateFilteredRowsReportsExaminedSample(t *testing.T) {
 	if len(shards) != 1 {
 		t.Fatalf("active shards = %d, want 1", len(shards))
 	}
-	estimate := shards[0].EstimateFilteredRows(cols[:1], condition, 3, nil, scm.NewNil(), nil)
+	accessSchema, accessValues := newScanAccessSchema(scanAccessConsumerScan, nil, -1), []scm.Scmer(nil)
+	estimate := shards[0].EstimateFilteredRows(cols[:1], condition, 3, nil, accessSchema, accessValues)
 	if estimate.rows != 3 || !estimate.capped || estimate.examined != 5 ||
 		estimate.population != "table_rows" || estimate.coverage != "sampled" {
 		t.Fatalf("estimate = %+v; want 3 sampled matches after 5 table rows", estimate)
@@ -84,12 +85,13 @@ func TestEstimateFilteredRowsRecognizesCompleteCappedIndexRange(t *testing.T) {
 	var buf [16]uint32
 	for range 2 {
 		shard.mu.RLock()
-		shard.iterateIndex(nil, bounds, lower, upperLast, len(shard.inserts), buf[:], 1, nil,
+		shard.iterateIndex(nil, runtimeScanAccess(bounds), lower, upperLast, len(shard.inserts), buf[:], 1, nil,
 			func([]uint32) bool { return true })
 		shard.mu.RUnlock()
 	}
 
-	estimate := shard.EstimateFilteredRows(cols[:1], condition, 1, nil, scm.NewNil(), nil)
+	accessSchema, accessValues := testEqualScanAccess("c0", scm.NewInt(4))
+	estimate := shard.EstimateFilteredRows(cols[:1], condition, 1, nil, accessSchema, accessValues)
 	if estimate.rows != 1 || estimate.capped || estimate.examined != 1 ||
 		estimate.population != "index_candidates" || estimate.coverage != "exact" {
 		t.Fatalf("estimate = %+v; want complete one-row index range", estimate)
@@ -125,15 +127,16 @@ func TestScanSelectivityEstimateScalesIndexCandidatesByShardPopulation(t *testin
 		lower, upperLast := indexFromBoundaries(bounds)
 		var buf [128]uint32
 		shard.mu.RLock()
-		shard.iterateIndex(nil, bounds, lower, upperLast, len(shard.inserts), buf[:], 100, nil,
+		shard.iterateIndex(nil, runtimeScanAccess(bounds), lower, upperLast, len(shard.inserts), buf[:], 100, nil,
 			func([]uint32) bool { return true })
 		shard.mu.RUnlock()
 	}
-	shardEstimate := shard.EstimateFilteredRows([]string{"tenant"}, condition, 512, nil, scm.NewNil(), nil)
+	accessSchema, accessValues := testEqualScanAccess("tenant", scm.NewInt(4))
+	shardEstimate := shard.EstimateFilteredRows([]string{"tenant"}, condition, 512, nil, accessSchema, accessValues)
 	if shardEstimate.population != "index_candidates" || shardEstimate.examined != 100 {
 		t.Fatalf("shard estimate = %+v, want 100 index candidates", shardEstimate)
 	}
-	boundedEstimate := shard.EstimateFilteredRows([]string{"tenant"}, condition, 50, nil, scm.NewNil(), nil)
+	boundedEstimate := shard.EstimateFilteredRows([]string{"tenant"}, condition, 50, nil, accessSchema, accessValues)
 	if boundedEstimate.rows != 100 || boundedEstimate.capped ||
 		boundedEstimate.population != "index_candidates" || boundedEstimate.coverage != "upper_bound" {
 		t.Fatalf("bounded shard estimate = %+v, want 100-row index upper bound", boundedEstimate)
@@ -141,6 +144,7 @@ func TestScanSelectivityEstimateScalesIndexCandidatesByShardPopulation(t *testin
 
 	estimate := scm.Apply(scm.Globalenv.Vars[scm.Symbol("scan_selectivity_estimate")],
 		scm.NewNil(), NewTableScmer(tbl),
+		accessSchema, scm.NewSlice(accessValues),
 		scm.NewSlice([]scm.Scmer{scm.NewString("tenant")}), condition, scm.NewInt(512))
 	fields := mustScmerSlice(estimate, "selectivity estimate")
 	fieldInt := func(name string) int64 {
@@ -187,8 +191,10 @@ func TestScanSelectivityEstimateLoadsColdPersistentShard(t *testing.T) {
 		}),
 		En: &scm.Globalenv,
 	})
+	accessSchema, accessValues := testUpperScanAccess("id", scm.NewInt(50), true)
 	estimate := scm.Apply(scm.Globalenv.Vars[scm.Symbol("scan_selectivity_estimate")],
 		scm.NewNil(), NewTableScmer(coldTable),
+		accessSchema, scm.NewSlice(accessValues),
 		scm.NewSlice([]scm.Scmer{scm.NewString("id")}), condition, scm.NewInt(512))
 	fields := mustScmerSlice(estimate, "cold selectivity estimate")
 	values := make(map[string]int64, len(fields))
@@ -233,7 +239,7 @@ func benchmarkScanColumnMatrix(b *testing.B, name string, rows int, filterPasses
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				tbl.scan(nil, filterCols, condition, mapCols, callback,
+				tbl.scan(nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, filterCols, condition, mapCols, callback,
 					scm.NewNil(), scm.NewNil(), false)
 			}
 		})
@@ -270,7 +276,7 @@ func BenchmarkScanMapColumnCostBySelectivity(b *testing.B) {
 				b.ReportAllocs()
 				b.ResetTimer()
 				for i := 0; i < b.N; i++ {
-					tbl.scan(nil, allCols[:1], condition, mapCols, callback,
+					tbl.scan(nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, allCols[:1], condition, mapCols, callback,
 						scm.NewNil(), scm.NewNil(), false)
 				}
 			})
@@ -339,7 +345,7 @@ func BenchmarkScanColumnCostByType(b *testing.B) {
 					b.ReportAllocs()
 					b.ResetTimer()
 					for i := 0; i < b.N; i++ {
-						tbl.scan(nil, filterCols, condition, mapCols, callback,
+						tbl.scan(nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, filterCols, condition, mapCols, callback,
 							scm.NewNil(), scm.NewNil(), false)
 					}
 				})
@@ -386,7 +392,7 @@ func BenchmarkScanFilterExpressionCost(b *testing.B) {
 				b.ReportAllocs()
 				b.ResetTimer()
 				for i := 0; i < b.N; i++ {
-					tbl.scan(nil, filterCols, condition, nil, callback,
+					tbl.scan(nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, filterCols, condition, nil, callback,
 						scm.NewNil(), scm.NewNil(), false)
 				}
 			})

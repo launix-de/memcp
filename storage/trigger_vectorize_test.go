@@ -45,6 +45,8 @@ func TestVectorizeTriggerDeletePattern(t *testing.T) {
 		scm.NewSymbol("scan"),
 		scm.NewNil(),
 		scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString("mydb"), scm.NewString(".prejoin:mytable")}),
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), newScanAccessSchema(scanAccessConsumerScan, nil, -1)}),
+		listAst(),
 		scm.NewSlice([]scm.Scmer{scm.NewSymbol("list"), scm.NewString("grp")}),
 		filterFn,
 		scm.NewSlice([]scm.Scmer{scm.NewSymbol("list"), scm.NewString("$update")}),

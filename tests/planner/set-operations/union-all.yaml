@@ -303,7 +303,7 @@ test_cases:
       rows: 1
       result_contains:
         - "scan_order_multi"
-        - "scan_access_v1"
+        - "range"
 
   # === UNION ALL in subquery / derived table ===
 

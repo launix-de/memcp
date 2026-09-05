@@ -24,7 +24,7 @@ import "github.com/launix-de/memcp/scm"
 //
 // Currently recognizes the prejoin DELETE pattern:
 //
-//	(lambda (OLD NEW) (scan nil (table schema tbl) condCols
+//	(lambda (OLD NEW) (scan nil (table schema tbl) accessSchema accessValues condCols
 //	    (lambda (cols...) (equal? col (get_assoc OLD key)))
 //	    (list "$update") (lambda (acc $update) (begin ($update) acc)) nil nil false))
 //
@@ -32,7 +32,7 @@ import "github.com/launix-de/memcp/scm"
 //
 //	(lambda (OLD_batch NEW_batch)
 //	    (define vals (map OLD_batch (lambda (OLD) (get_assoc OLD key))))
-//	    (scan nil (table schema tbl) condCols
+//	    (scan nil (table schema tbl) accessSchema accessValues condCols
 //	        (lambda (cols...) (has? vals col))
 //	        (list "$update") (lambda (acc $update) (begin ($update) acc)) nil nil false))
 func VectorizeTrigger(triggerFn scm.Scmer) scm.Scmer {
@@ -53,10 +53,10 @@ func VectorizeTrigger(triggerFn scm.Scmer) scm.Scmer {
 		return scm.NewNil()
 	}
 	items := body.Slice()
-	if len(items) < 5 {
+	if len(items) < 9 {
 		return scm.NewNil()
 	}
-	// Check for (scan tx table condCols filterFn ...)
+	// Check for (scan tx table accessSchema accessValues condCols filterFn ...)
 	// Handle both symbol "scan" and resolved tagFunc references.
 	headName := ""
 	if items[0].IsSymbol() {
@@ -68,9 +68,9 @@ func VectorizeTrigger(triggerFn scm.Scmer) scm.Scmer {
 		return scm.NewNil()
 	}
 
-	// Extract filter function (items[4])
+	// Extract filter function (items[6])
 	// After eval, this is a Proc. In AST form, it's a (lambda ...) list.
-	filterFn := items[4]
+	filterFn := items[6]
 	if !filterFn.IsProc() && !filterFn.IsSlice() {
 		return scm.NewNil()
 	}
@@ -82,12 +82,9 @@ func VectorizeTrigger(triggerFn scm.Scmer) scm.Scmer {
 	}
 
 	// Check that this is a $update scan (DELETE pattern)
-	if len(items) < 6 {
-		return scm.NewNil()
-	}
 	// Check that callback columns contain "$update" (DELETE pattern).
 	// The mapCols can be (list "$update") as AST or ["$update"] as evaluated list.
-	if !containsUpdateCol(items[5]) {
+	if !containsUpdateCol(items[7]) {
 		return scm.NewNil()
 	}
 
@@ -144,7 +141,11 @@ func VectorizeTrigger(triggerFn scm.Scmer) scm.Scmer {
 		// Build new scan call with the batch filter
 		newItems := make([]scm.Scmer, len(items))
 		copy(newItems, items)
-		newItems[4] = newFilter
+		newItems[3] = scm.NewSlice([]scm.Scmer{
+			scm.NewSymbol("quote"), newScanAccessSchema(scanAccessConsumerScan, nil, -1),
+		})
+		newItems[4] = scm.NewSlice([]scm.Scmer{scm.NewSymbol("list")})
+		newItems[6] = newFilter
 
 		// Execute the single batched scan
 		return scm.Eval(scm.NewSlice(newItems), proc.En)

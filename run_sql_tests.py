@@ -445,6 +445,32 @@ def performance_case_fingerprint(
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def revision_specific_scm(test_case: Dict[str, Any], spec_file: str) -> str:
+    """Resolve an ABI-bound SCM probe from the worktree under measurement."""
+    scm_code = test_case.get("scm")
+    if PERF_AB_MODE != "record" or not test_case.get("revision_specific_scm"):
+        return scm_code
+    worktree = os.environ.get("MEMCP_TEST_WORKTREE")
+    if not worktree:
+        raise ValueError("revision_specific_scm requires MEMCP_TEST_WORKTREE in A/B record mode")
+    normalized = Path(spec_file).as_posix()
+    marker = "tests/"
+    position = normalized.rfind(marker)
+    relative = normalized[position:] if position >= 0 else normalized
+    revision_spec = Path(worktree) / relative
+    with revision_spec.open("r", encoding="utf-8") as handle:
+        suite = yaml.safe_load(handle) or {}
+    matches = [
+        case.get("scm") for case in suite.get("test_cases", [])
+        if isinstance(case, dict) and case.get("name") == test_case.get("name")
+    ]
+    if len(matches) != 1 or not isinstance(matches[0], str):
+        raise ValueError(
+            f"revision_specific_scm could not resolve one SCM case named {test_case.get('name')!r}"
+        )
+    return matches[0]
+
+
 def performance_regression_pct(test_case: Dict[str, Any], metadata: Dict[str, Any]) -> float:
     value = test_case.get(
         "max_regression_pct",
@@ -1316,7 +1342,14 @@ class SQLTestRunner:
                 )
 
         # Scheme code execution via /scm endpoint
-        scm_code = test_case.get("scm")
+        try:
+            scm_code = revision_specific_scm(
+                test_case, self.current_spec_file or "",
+            )
+        except (OSError, ValueError, yaml.YAMLError) as exc:
+            return self._record_fail(
+                name, str(exc), None, None, None, is_noncritical,
+            )
         if scm_code:
             if is_perf_test:
                 scm_code = scm_code.replace("{rows}", str(perf_rows)).replace("{database}", database)

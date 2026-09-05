@@ -103,7 +103,7 @@ func queryBlobsTable(t *testing.T, db *database) map[string]int {
 	}
 	result := make(map[string]int)
 	bt.scan(
-		nil,
+		nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil,
 		[]string{},
 		scm.NewProcStruct(scm.Proc{
 			Params:  scm.NewSlice([]scm.Scmer{}),
@@ -219,7 +219,7 @@ func TestBlobInsertRebuildAndRead(t *testing.T) {
 	}{{1, len(longA)}, {2, len(longA)}, {3, len(longB)}, {4, len(longB)}} {
 		var readLen int
 		tbl.scan(
-			nil,
+			nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil,
 			[]string{"id"}, scanCondition("id", scm.NewInt(tc.id)),
 			[]string{"content"},
 			scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
@@ -283,7 +283,7 @@ func TestBlobDeleteRowsAndRebuild(t *testing.T) {
 	// Rows 1, 4, 5 (longA) remain — 3 longStrings keeps OverlayBlob.
 	for _, id := range []int64{2, 3} {
 		tbl.scan(
-			nil,
+			nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil,
 			[]string{"id"}, scanCondition("id", scm.NewInt(id)),
 			[]string{"$update"},
 			scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
@@ -320,7 +320,7 @@ func TestBlobDeleteRowsAndRebuild(t *testing.T) {
 	for _, id := range []int64{1, 4, 5} {
 		var readLen int
 		tbl.scan(
-			nil,
+			nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil,
 			[]string{"id"}, scanCondition("id", scm.NewInt(id)),
 			[]string{"content"},
 			scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
@@ -455,7 +455,7 @@ func TestBlobSharedAcrossTables(t *testing.T) {
 	// Data in t2 still readable
 	var readLen int
 	tbl2.scan(
-		nil,
+		nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil,
 		[]string{"id"}, scanCondition("id", scm.NewInt(1)),
 		[]string{"content"},
 		scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
@@ -619,7 +619,7 @@ func TestDoubleRebuildPreservesShardFiles(t *testing.T) {
 	}{{1, "alpha"}, {2, "beta"}, {3, "gamma"}} {
 		var readName string
 		tbl.scan(
-			nil,
+			nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil,
 			[]string{"id"}, scanCondition("id", scm.NewInt(tc.id)),
 			[]string{"name"},
 			scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {

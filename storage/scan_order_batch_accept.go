@@ -147,7 +147,7 @@ func collectPartitionOrderedCandidateBatch(currentTx *TxContext, source scanOrde
 				queue := func() *shardqueue {
 					defer release()
 					defer shard.activeScanners.Add(-1)
-					return shard.scan_order(bounds, lower, upperLast, nil, condition,
+					return shard.scan_order(runtimeScanAccess(bounds), lower, upperLast, nil, condition,
 						nil, scm.NewNil(), sortcols, sortdirs, 0, remainingOffset,
 						limit-len(records), nil, currentTx, sessionState)
 				}()
@@ -213,8 +213,8 @@ func validateAcceptedBatch(batch *recSet, acceptedValue scm.Scmer) *recSet {
 }
 
 func optimizeScanOrderBatchAccept(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) (scm.Scmer, *scm.TypeDescriptor) {
-	const mapReduceIdx = 10
-	const neutralIdx = 11
+	const mapReduceIdx = 12
+	const neutralIdx = 13
 	rawMapReduce := v[mapReduceIdx]
 	for i := 1; i <= mapReduceIdx && i < len(v); i++ {
 		if i != mapReduceIdx {
@@ -235,7 +235,7 @@ func optimizeScanOrderBatchAccept(v []scm.Scmer, oc *scm.OptimizerContext, useRe
 		}
 	}
 	v[mapReduceIdx], _ = oc.OptimizeReducerCallback(rawMapReduce, neutralType, columnTypes...)
-	for i := 12; i < len(v); i++ {
+	for i := 14; i < len(v); i++ {
 		v[i], _ = oc.OptimizeSub(v[i], true)
 	}
 	oc.Ome.DecrLoopDepth()

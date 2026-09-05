@@ -18,6 +18,7 @@ package storage
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -90,6 +91,8 @@ func nestedScanAst(schema, table, outerParam string) scm.Scmer {
 		scm.NewSymbol("scan"),
 		scm.NewSlice([]scm.Scmer{scm.NewSymbol("session"), scm.NewString("__memcp_tx")}),
 		scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(schema), scm.NewString(table)}),
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), newScanAccessSchema(scanAccessConsumerScan, nil, -1)}),
+		listAst(),
 		listAst(scm.NewString("ref_id")),
 		lambdaAst([]string{"src.ref_id"}, scm.NewSlice([]scm.Scmer{
 			scm.NewSymbol("equal?"),
@@ -119,6 +122,8 @@ func TestExtractScanJoinInfoIncludesDynamicTablePlan(t *testing.T) {
 		scm.NewSymbol("scan"),
 		scm.NewNil(),
 		dynamicTable,
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), newScanAccessSchema(scanAccessConsumerScan, nil, -1)}),
+		listAst(),
 		listAst(),
 		lambdaAst(nil, scm.NewBool(true)),
 		listAst(),
@@ -222,6 +227,7 @@ func TestLookupComputeTriggersInvalidateMatchingRows(t *testing.T) {
 
 	computorSource := `(lambda (ref_id)
 		(scan nil (table "tlookuptrigger" "src")
+			'(369435906932736) '()
 			'("ref_id") (lambda (source_ref_id) (equal? source_ref_id (outer 1 ref_id)))
 			'("val") (lambda (acc val) val)
 			0 (lambda (old value) value) false))`
@@ -245,6 +251,25 @@ func TestLookupComputeTriggersInvalidateMatchingRows(t *testing.T) {
 	}
 	if strings.Contains(plan, `(invalidatecolumn`) {
 		t.Fatalf("lookup-shaped compute trigger must not invalidate the complete cache:\n%s", plan)
+	}
+}
+
+func TestExtractScanJoinInfoUsesCompiledAccessWhenResidualIsEmpty(t *testing.T) {
+	header := scm.ToInt(newScanAccessHeader(1, scanAccessConsumerScan, 0, -1))
+	boundaryMeta := scm.ToInt(newScanAccessBoundaryMeta(0, 0, 3))
+	source := fmt.Sprintf(`(lambda (ref_id)
+		(scan nil (table "tcompileddependency" "src")
+			'(%d "equal" "source_ref" %d "")
+			(list ref_id)
+			'() (lambda () true)
+			'("value") (lambda (acc value) value)
+			nil nil false))`, header, boundaryMeta)
+	computor := scm.Read(t.Name(), source)
+	refs := extractScanJoinInfo(computor)
+	if len(refs) != 1 || refs[0].schema != "tcompileddependency" || refs[0].table != "src" ||
+		len(refs[0].srcCols) != 1 || refs[0].srcCols[0] != "source_ref" ||
+		len(refs[0].inputCols) != 1 || refs[0].inputCols[0] != "ref_id" {
+		t.Fatalf("compiled access dependency was not extracted: %#v; plan=%s", refs, serializeScmerForTest(computor))
 	}
 }
 

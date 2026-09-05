@@ -154,7 +154,7 @@ test_cases:
         (define found
           (scan_join_order (session "__memcp_tx")
             (list plots links)
-            (list (list) (list "table_2_id"))
+            (map (list plots links) (lambda (_) (list 369435906932736))) '() (list (list) (list "table_2_id"))
             (list (lambda () true)
               (lambda (table_2_id) (equal? table_2_id "target")))
             (list (list (list 0 "id" "plot_id")))
@@ -184,7 +184,7 @@ test_cases:
         (define found
           (scan_join_order (session "__memcp_tx")
             (list foos bars)
-            (list (list) (list "baz_id"))
+            (map (list foos bars) (lambda (_) (list 369435906932736))) '() (list (list) (list "baz_id"))
             (list (lambda () true) (lambda (baz_id) (equal? baz_id 13266)))
             (list (list (list 0 "bar_id" "id")))
             (list) nil
@@ -216,14 +216,14 @@ test_cases:
         (define images (table "memcp-tests" "so_perf_images"))
         (define products (table "memcp-tests" "so_perf_products"))
         (define selected_products
-          (scan_recset tx products '("project_1")
+          (scan_recset tx products (car (compile_scan_access '("project_1") (scheme "(lambda (project_1) (equal? project_1 1))"))) (cadr (compile_scan_access '("project_1") (scheme "(lambda (project_1) (equal? project_1 1))"))) '("project_1")
             (lambda (project_1) (equal? project_1 1))))
         (define product_lookup
           (recset_key_index tx selected_products '("unique_id")))
         (define found
           (scan_order_batch_accept tx images
-            (lambda (input)
-              (scan_recset tx input '("product_unique_id")
+            '(369435906932736) '() (lambda (input)
+              (scan_recset tx input (car (compile_scan_access '("product_unique_id") (scheme "(lambda (product_unique_id) (product_lookup product_unique_id))"))) (cadr (compile_scan_access '("product_unique_id") (scheme "(lambda (product_unique_id) (product_lookup product_unique_id))"))) '("product_unique_id")
                 (lambda (product_unique_id) (product_lookup product_unique_id))))
           '("id") '(<) 0 0 1000 '() (lambda (acc) (+ acc 1)) 0 false 0))
         (if (equal? found 1000) "ok" (error "wrong batch carrier row count")))
@@ -235,13 +235,13 @@ test_cases:
         (define images (table "memcp-tests" "so_perf_images"))
         (define products (table "memcp-tests" "so_perf_products"))
         (define selected_products
-          (scan_recset tx products '("project_1")
+          (scan_recset tx products (car (compile_scan_access '("project_1") (scheme "(lambda (project_1) (equal? project_1 1))"))) (cadr (compile_scan_access '("project_1") (scheme "(lambda (project_1) (equal? project_1 1))"))) '("project_1")
             (lambda (project_1) (equal? project_1 1))))
         (define selected_images
           (recset_project_join tx selected_products '("unique_id")
             images '("product_unique_id")))
         (define found
-          (scan_order tx selected_images '() (lambda () true)
+          (scan_order tx selected_images (car (compile_scan_access '() (scheme "(lambda () true)"))) (cadr (compile_scan_access '() (scheme "(lambda () true)"))) '() (lambda () true)
           '("id") '(<) 0 0 1000 '() (lambda (acc) (+ acc 1)) 0 false 0))
         (if (equal? found 1000) "ok" (error "wrong projected carrier row count")))
 
@@ -253,7 +253,7 @@ test_cases:
         (define found
           (scan_join_order (session "__memcp_tx")
             (list images products)
-            (list (list) (list "project_1"))
+            (map (list images products) (lambda (_) (list 369435906932736))) '() (list (list) (list "project_1"))
             (list (lambda () true) (lambda (project_1) (equal? project_1 1)))
             (list (list (list 0 "product_unique_id" "unique_id")))
             (list) nil
@@ -275,12 +275,12 @@ test_cases:
         (define accounts (table "memcp-tests" "so_perf_accounts"))
         (define transactions (table "memcp-tests" "so_perf_transactions"))
         (define selected_accounts
-          (scan_recset tx accounts '("project_id")
+          (scan_recset tx accounts (car (compile_scan_access '("project_id") (scheme "(lambda (project_id) (equal? project_id 7))"))) (cadr (compile_scan_access '("project_id") (scheme "(lambda (project_id) (equal? project_id 7))"))) '("project_id")
             (lambda (project_id) (equal? project_id 7))))
         (define selected_transactions
           (recset_project_join tx selected_accounts '("id") transactions '("account_id")))
         (define total
-          (scan tx selected_transactions '("created_at")
+          (scan tx selected_transactions (car (compile_scan_access '("created_at") (scheme "(lambda (created_at) (>= created_at 100000))"))) (cadr (compile_scan_access '("created_at") (scheme "(lambda (created_at) (>= created_at 100000))"))) '("created_at")
             (lambda (created_at) (>= created_at 100000))
             '("amount") (lambda (acc amount) (+ acc amount)) 0 +))
         (if (equal? total 250) "ok" (error "wrong projected SUM result")))
@@ -315,7 +315,7 @@ test_cases:
         (define minimum
           (scan_join_order (session "__memcp_tx")
             (list a b c d)
-            (list (list) (list) (list) (list))
+            (map (list a b c d) (lambda (_) (list 369435906932736))) '() (list (list) (list) (list) (list))
             (list (lambda () true) (lambda () true) (lambda () true) (lambda () true))
             (list
               (list (list 0 "apk" "ak"))
@@ -338,7 +338,7 @@ test_cases:
         (define d (table "memcp-tests" "so_perf_d"))
         (define minimum
           (scan_order_batch_accept tx a
-            (lambda (a_batch)
+            '(369435906932736) '() (lambda (a_batch)
               (begin
                 (define b_batch
                   (recset_project_join tx a_batch '("apk") b '("ak")))
@@ -373,7 +373,7 @@ test_cases:
         (define found
           (scan_join_order (session "__memcp_tx")
             (list measures nodes sensors)
-            (list (list "ts") (list "serial") (list "type"))
+            (map (list measures nodes sensors) (lambda (_) (list 369435906932736))) '() (list (list "ts") (list "serial") (list "type"))
             (list
               (lambda (ts) (and (>= ts 0) (<= ts 120000)))
               (lambda (serial) (equal? serial "TEST0000003"))
@@ -396,22 +396,22 @@ test_cases:
         (define sensors (table "memcp-tests" "so_perf_sensors"))
         (define measures (table "memcp-tests" "so_perf_measures"))
         (define selected_nodes
-          (scan_recset tx nodes '("serial")
+          (scan_recset tx nodes (car (compile_scan_access '("serial") (scheme "(lambda (serial) (equal? serial \"TEST0000003\"))"))) (cadr (compile_scan_access '("serial") (scheme "(lambda (serial) (equal? serial \"TEST0000003\"))"))) '("serial")
             (lambda (serial) (equal? serial "TEST0000003"))))
         (define selected_sensors
-          (scan_recset tx sensors '("type")
+          (scan_recset tx sensors (car (compile_scan_access '("type") (scheme "(lambda (type) (equal? type \"ca1\"))"))) (cadr (compile_scan_access '("type") (scheme "(lambda (type) (equal? type \"ca1\"))"))) '("type")
             (lambda (type) (equal? type "ca1"))))
         (define node_measures
           (recset_project_join tx selected_nodes '("id") measures '("node_id")))
         (define sensor_measures
           (recset_project_join tx selected_sensors '("id") measures '("sensor_id")))
         (define time_measures
-          (scan_recset tx measures '("ts")
+          (scan_recset tx measures (car (compile_scan_access '("ts") (scheme "(lambda (ts) (and (>= ts 0) (<= ts 120000)))"))) (cadr (compile_scan_access '("ts") (scheme "(lambda (ts) (and (>= ts 0) (<= ts 120000)))"))) '("ts")
             (lambda (ts) (and (>= ts 0) (<= ts 120000)))))
         (define selected
           (recset_intersect tx (list node_measures sensor_measures time_measures)))
         (define rows
-          (scan_order tx selected '() (lambda () true) '("ts") '(>) 0 0 4
+          (scan_order tx selected (car (compile_scan_access '() (scheme "(lambda () true)"))) (cadr (compile_scan_access '() (scheme "(lambda () true)"))) '() (lambda () true) '("ts") '(>) 0 0 4
             '("ts" "sensor_id" "val")
             (lambda (acc ts sensor_id val) (cons (list ts sensor_id val) acc))
             '() false))
@@ -434,13 +434,13 @@ test_cases:
         (define t1 (table "memcp-tests" "so_perf_t1"))
         (define t2 (table "memcp-tests" "so_perf_t2"))
         (define t3 (table "memcp-tests" "so_perf_t3"))
-        (define all_t1 (scan_recset tx t1 '() (lambda () true)))
+        (define all_t1 (scan_recset tx t1 (car (compile_scan_access '() (scheme "(lambda () true)"))) (cadr (compile_scan_access '() (scheme "(lambda () true)"))) '() (lambda () true)))
         (define nonnull_t2
-          (scan_recset tx t2 '("pid") (lambda (pid) (not (nil? pid)))))
+          (scan_recset tx t2 (car (compile_scan_access '("pid") (scheme "(lambda (pid) (not (nil? pid)))"))) (cadr (compile_scan_access '("pid") (scheme "(lambda (pid) (not (nil? pid)))"))) '("pid") (lambda (pid) (not (nil? pid)))))
         (define nonnull_t3
-          (scan_recset tx t3 '("pid") (lambda (pid) (not (nil? pid)))))
+          (scan_recset tx t3 (car (compile_scan_access '("pid") (scheme "(lambda (pid) (not (nil? pid)))"))) (cadr (compile_scan_access '("pid") (scheme "(lambda (pid) (not (nil? pid)))"))) '("pid") (lambda (pid) (not (nil? pid)))))
         (define other_t1
-          (scan_recset tx t1 '("otherpid")
+          (scan_recset tx t1 (car (compile_scan_access '("otherpid") (scheme "(lambda (otherpid) (not (nil? otherpid)))"))) (cadr (compile_scan_access '("otherpid") (scheme "(lambda (otherpid) (not (nil? otherpid)))"))) '("otherpid")
             (lambda (otherpid) (not (nil? otherpid)))))
         (define excluded2
           (recset_project_join tx nonnull_t2 '("pid") t1 '("pid")))
@@ -452,7 +452,7 @@ test_cases:
           (recset_union tx (list excluded2 excluded3 excluded1)))
         (define allowed (recset_difference tx (list all_t1 excluded)))
         (define row_count
-          (scan tx allowed '() (lambda () true) '() (lambda (acc) (+ acc 1)) 0 +))
+          (scan tx allowed (car (compile_scan_access '() (scheme "(lambda () true)"))) (cadr (compile_scan_access '() (scheme "(lambda () true)"))) '() (lambda () true) '() (lambda (acc) (+ acc 1)) 0 +))
         (if (equal? row_count 60000) "ok" (error "wrong anti-membership result")))
 
   - name: "SO 79828237 DISTINCT cursor join"
@@ -468,21 +468,21 @@ test_cases:
         (define performance (table "memcp-tests" "so_perf_performance"))
         (define players (table "memcp-tests" "so_perf_players"))
         (define selected_org
-          (scan_recset tx org_players '("org_id")
+          (scan_recset tx org_players (car (compile_scan_access '("org_id") (scheme "(lambda (org_id) (equal? org_id 1))"))) (cadr (compile_scan_access '("org_id") (scheme "(lambda (org_id) (equal? org_id 1))"))) '("org_id")
             (lambda (org_id) (equal? org_id 1))))
         (define selected_performance
           (recset_project_join tx selected_org '("player_id") performance '("player_id")))
         (define year_performance
-          (scan_recset tx selected_performance '("year")
+          (scan_recset tx selected_performance (car (compile_scan_access '("year") (scheme "(lambda (year) (equal? year 2019))"))) (cadr (compile_scan_access '("year") (scheme "(lambda (year) (equal? year 2019))"))) '("year")
             (lambda (year) (equal? year 2019))))
         (define row_count
-          (scan_order tx year_performance '() (lambda () true)
+          (scan_order tx year_performance (car (compile_scan_access '() (scheme "(lambda () true)"))) (cadr (compile_scan_access '() (scheme "(lambda () true)"))) '() (lambda () true)
             '("hashed_player_id") '(<) 0 0 5000
             '("player_id" "fps_score" "hashed_player_id")
             (lambda (acc player_id fps_score hashed_player_id)
               (begin
                 (define row
-                  (scan tx players '("player_id")
+                  (scan tx players (car (compile_scan_access '("player_id") (scheme "(lambda (id) (equal? id (outer 1 player_id)))"))) (cadr (compile_scan_access '("player_id") (scheme "(lambda (id) (equal? id (outer 1 player_id)))"))) '("player_id")
                     (lambda (id) (equal? id (outer 1 player_id)))
                     '("business_name" "first_name" "last_name")
                     (lambda (_old business_name first_name last_name)

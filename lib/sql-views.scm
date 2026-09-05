@@ -31,6 +31,7 @@ derived SELECT before untangle_query sees the complete query. */
 		(begin
 			(define normalized_query (toLower query))
 			(define references_view (scan nil (table "system" "views")
+				'(369435906932736) '()
 				'("name")
 				(lambda (name) (> (count (split normalized_query (toLower name))) 1))
 				'() (lambda (acc) true) false (lambda (a b) (or a b))))
@@ -58,9 +59,8 @@ derived SELECT before untangle_query sees the complete query. */
 
 (define sql_find_view (lambda (schema name)
 	(scan nil (table "system" "views")
-		'("database" "name")
-		(lambda (view_schema view_name)
-			(and (equal?? view_schema schema) (equal?? view_name name)))
+		'(369436443803648 "equal" "database" 15032418304 "" "equal" "name" 15032483841 "") (list schema name)
+		'() (lambda () true)
 		'("dialect" "sql" "ir")
 		(lambda (acc dialect sql ir) (list dialect sql ir))
 		nil (lambda (a b) b))))
@@ -121,18 +121,16 @@ derived SELECT before untangle_query sees the complete query. */
 (define create_sql_view (lambda (tx schema name dialect sql ir mode) (begin
 	(define serialized_ir (json_encode ir))
 	(define existing (scan tx (table "system" "views")
-		'("database" "name")
-		(lambda (view_schema view_name)
-			(and (equal?? view_schema schema) (equal?? view_name name)))
+		'(369436443803648 "equal" "database" 15032418304 "" "equal" "name" 15032483841 "") (list schema name)
+		'() (lambda () true)
 		'() (lambda (acc) (+ acc 1)) 0 +))
 	(define result
 		(if (> existing 0)
 			(match mode
 				"replace"
 				(scan tx (table "system" "views")
-					'("database" "name")
-					(lambda (view_schema view_name)
-						(and (equal?? view_schema schema) (equal?? view_name name)))
+					'(369436443803648 "equal" "database" 15032418304 "" "equal" "name" 15032483841 "") (list schema name)
+					'() (lambda () true)
 					'("$update")
 					(lambda (acc $update) (begin
 						($update (list "dialect" dialect "sql" sql "ir" serialized_ir))
@@ -154,9 +152,8 @@ derived SELECT before untangle_query sees the complete query. */
 
 (define drop_sql_view (lambda (tx schema name if_exists) (begin
 	(define removed (scan tx (table "system" "views")
-		'("database" "name")
-		(lambda (view_schema view_name)
-			(and (equal?? view_schema schema) (equal?? view_name name)))
+		'(369436443803648 "equal" "database" 15032418304 "" "equal" "name" 15032483841 "") (list schema name)
+		'() (lambda () true)
 		'("$update")
 		(lambda (acc $update) (begin ($update) (+ acc 1)))
 		0 +))
@@ -174,14 +171,14 @@ metadata. */
 	(define dropped (dropdatabase schema if_exists))
 	(if dropped (begin
 		(scan tx (table "system" "access")
-			'("database")
-			(lambda (database) (equal?? database schema))
+			'(369436175368192 "equal" "database" 15032418304 "") (list schema)
+			'() (lambda () true)
 			'("$update")
 			(lambda (acc $update) (begin ($update) (+ acc 1)))
 			0 +)
 		(define removed_views (scan tx (table "system" "views")
-			'("database")
-			(lambda (database) (equal?? database schema))
+			'(369436175368192 "equal" "database" 15032418304 "") (list schema)
+			'() (lambda () true)
 			'("$update")
 			(lambda (acc $update) (begin ($update) (+ acc 1)))
 			0 +))

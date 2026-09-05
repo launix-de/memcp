@@ -2839,9 +2839,12 @@ floor avoids pretending that an unseen word is impossible. */
 						(map filtercols (lambda (col) (symbol (concat alias "." col))))
 						(planner_bind_session_values
 							(lower_column_expr_for_alias src condition) planning_session))))
+					(define access (compile_scan_access filtercols filter_expr))
 					(define estimate (scan_selectivity_estimate
 						tx
 						(table (source_schema src) (source_relation src))
+						(nth access 0)
+						(map (nth access 1) (lambda (value_expr) (eval value_expr)))
 						filtercols
 						(eval filter_expr)
 						max_rows))

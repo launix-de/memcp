@@ -62,6 +62,34 @@ type collateCacheKey struct {
 // pointers, so equivalent plans must receive the same function instance.
 var collateCache sync.Map // map[collateCacheKey]Scmer
 
+// generalCIFoldCompare preserves the existing strings.ToLower ordering while
+// keeping the overwhelmingly common ASCII index path allocation-free.
+func generalCIFoldCompare(left, right string) int {
+	limit := len(left)
+	if len(right) < limit {
+		limit = len(right)
+	}
+	for i := 0; i < limit; i++ {
+		if left[i] >= 0x80 || right[i] >= 0x80 {
+			return strings.Compare(strings.ToLower(left), strings.ToLower(right))
+		}
+		l, r := asciiFoldByte(left[i]), asciiFoldByte(right[i])
+		if l < r {
+			return -1
+		}
+		if l > r {
+			return 1
+		}
+	}
+	if len(left) < len(right) {
+		return -1
+	}
+	if len(left) > len(right) {
+		return 1
+	}
+	return 0
+}
+
 func optimizeFNVHash(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
 	if len(v) == 2 {
 		if producer, ok := scmerSlice(v[1]); ok && len(producer) == 2 {
@@ -10937,28 +10965,27 @@ func init_strings() {
 						// - ASCII letters sort before non-ASCII always (both ASC and DESC).
 						// - Treat leading "aa" as non-ASCII class to place after ASCII group in ASC and after ASCII even in DESC.
 						// - Within ASCII, compare by lowercase first letter; tie-break by case-insensitive string compare.
-						classify := func(s string) (isASCII bool, key byte, folded string) {
+						classify := func(s string) (isASCII bool, key byte) {
 							if s == "" {
-								return true, 0, s
+								return true, 0
 							}
-							sl := strings.ToLower(s)
 							// map leading "aa" to non-ASCII class
-							if len(sl) >= 2 && sl[0] == 'a' && sl[1] == 'a' {
-								return false, 0, sl
+							if len(s) >= 2 && asciiFoldByte(s[0]) == 'a' && asciiFoldByte(s[1]) == 'a' {
+								return false, 0
 							}
-							b := sl[0]
+							b := asciiFoldByte(s[0])
 							// check ASCII letter
 							if b >= 'a' && b <= 'z' && (s[0] < 128) {
-								return true, b, sl
+								return true, b
 							}
-							return false, 0, sl
+							return false, 0
 						}
 						if reverse {
 							f := func(a ...Scmer) Scmer {
 								as := String(a[0])
 								bs := String(a[1])
-								aAsc, ak, af := classify(as)
-								bAsc, bk, bf := classify(bs)
+								aAsc, ak := classify(as)
+								bAsc, bk := classify(bs)
 								var res bool
 								if aAsc != bAsc {
 									// ASCII ranks above non-ASCII for DESC too
@@ -10967,7 +10994,7 @@ func init_strings() {
 									if ak != bk {
 										res = ak > bk
 									} else {
-										res = af > bf
+										res = generalCIFoldCompare(as, bs) > 0
 									}
 								} else {
 									// both non-ASCII: keep stable fallback
@@ -10984,8 +11011,8 @@ func init_strings() {
 						f := func(a ...Scmer) Scmer {
 							as := String(a[0])
 							bs := String(a[1])
-							aAsc, ak, af := classify(as)
-							bAsc, bk, bf := classify(bs)
+							aAsc, ak := classify(as)
+							bAsc, bk := classify(bs)
 							var res bool
 							if aAsc != bAsc {
 								// ASCII first for ASC
@@ -10994,7 +11021,7 @@ func init_strings() {
 								if ak != bk {
 									res = ak < bk
 								} else {
-									res = af < bf
+									res = generalCIFoldCompare(as, bs) < 0
 								}
 							} else {
 								// both non-ASCII: leave at end

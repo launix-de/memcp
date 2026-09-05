@@ -340,7 +340,7 @@ partner. */
 					(define filtercols (extract_columns_for_alias src condition))
 					(define mapcols (extract_columns_for_alias src value_expr))
 					(define check_cardinality (equal? on_overflow (quote error)))
-					(define raw_probe (list (quote scan_order)
+					(define raw_probe (compile_scan_plan (quote scan_order)
 						(physical_query_tx_symbol)
 						(source_table_expr src)
 						(cons (quote list) filtercols)
@@ -1244,7 +1244,7 @@ both names therefore bind to the same parameter. */
 		(define filtercols (merge_unique (list
 			(extract_columns_for_alias src condition)
 			(extract_columns_for_alias src key_expr))))
-		(list (quote scan_exists)
+		(compile_scan_plan (quote scan_exists)
 			(physical_query_tx_symbol)
 			(source_table_expr src)
 			(cons (quote list) filtercols)
@@ -1387,7 +1387,7 @@ through to reach the base table -- src already is it. */
 		(define cache_relation (group_cache_relation cache))
 		(list (quote begin)
 			(lower_group_stage_prepare_using stage_catalog stage_catalog physical_stage true nil)
-			(list (quote scan_order)
+			(compile_scan_plan (quote scan_order)
 				(physical_query_tx_symbol)
 				(list (quote table) cache_schema cache_relation)
 				(cons (quote list) (list "k0"))
@@ -1538,7 +1538,7 @@ lexical outer row. Projection and key-index consumers can both reuse the same
 						(qassoc_get (gs_facts stage) (quote condition) true) true))
 					(define filtercols (extract_columns_for_alias src condition))
 					(list true
-						(list (quote scan_recset)
+						(compile_scan_plan (quote scan_recset)
 							(physical_query_tx_symbol)
 							(source_table_expr src)
 							(cons (quote list) filtercols)
@@ -1764,7 +1764,7 @@ the emitter and failing after the ordinary carrier has been discarded. */
 							(lower_recset_stage_prepare_once_expr stage_catalog physical_stage)
 							(lower_group_stage_prepare_using
 								stage_catalog stage_catalog physical_stage true nil))
-						(list (quote scan_recset)
+						(compile_scan_plan (quote scan_recset)
 							(physical_query_tx_symbol)
 							(list (quote table) cache_schema cache_relation)
 							(quoted_runtime_list (list requested_col))
@@ -1905,7 +1905,7 @@ would still have to project that value over the segment. */
 		(define value_cols (extract_columns_for_alias src value_expr))
 		(define filtercols (merge_unique (list condition_cols key_cols order_cols)))
 		(define mapcols (merge_unique (list value_cols)))
-		(list (quote scan_order)
+		(compile_scan_plan (quote scan_order)
 			tx_expr
 			(source_table_expr src)
 			(cons (quote list) filtercols)
@@ -2077,7 +2077,7 @@ would still have to project that value over the segment. */
 				(define key_cols (merge_unique (map keys (lambda (expr) (extract_columns_for_alias src expr)))))
 				(define value_cols (extract_columns_for_alias src value_expr))
 				(define filtercols (merge_unique (list condition_cols key_cols)))
-				(list (quote scan)
+				(compile_scan_plan (quote scan)
 					tx_expr
 					(source_table_expr src)
 					(cons (quote list) filtercols)
@@ -2112,17 +2112,35 @@ would still have to project that value over the segment. */
 					(lower_column_expr_for_join sources default_alias key))))
 			nil))))
 
-/* Point probes use the same physical operator for EXISTS, direct projection,
-and computed projection. The quoted schema is persistent plan data; only the
-flat values expression is evaluated for each probe. */
+/* Point probes and ordinary scans share one access schema. Boundary metadata
+is cached with the plan; only the adjacent flat values list is evaluated for a
+probe. */
+(define compiled_scan_lookup_boundaries (lambda (lookup_cols slot)
+	(if (empty_list? lookup_cols)
+		'()
+		(merge (list "equal" (car lookup_cols) (+ 15032418304 (* slot 65537)) "")
+			(compiled_scan_lookup_boundaries (cdr lookup_cols) (+ slot 1))))))
+
+(define compiled_scan_access_header (lambda (count consumer projections mapper_slot)
+	(+ 369435906932736
+		(* (match consumer
+			"scan_covered" 1
+			"exists" 2
+			"value" 3
+			"map" 4
+			_ 0) 1099511627776)
+		(* count 268435456)
+		(* projections 65536)
+		(+ mapper_slot 1))))
+
 (define compiled_scan_lookup_expr (lambda (tx table lookup_cols lookup_values consumer map_cols mapper)
 	(list (quote scan_lookup)
 		tx
 		table
 		(list (quote quote) (merge
-			(list "scan_lookup_v1" (count lookup_cols))
-			lookup_cols
-			(list consumer (count map_cols))
+			(list (compiled_scan_access_header (count lookup_cols) consumer (count map_cols)
+				(if (equal? consumer "map") (count lookup_cols) -1)))
+			(compiled_scan_lookup_boundaries lookup_cols 0)
 			map_cols))
 		(cons (quote list) (if (equal? consumer "map")
 			(merge lookup_values (list mapper))
@@ -2209,7 +2227,7 @@ flat values expression is evaluated for each probe. */
 				(define filtercols (merge_unique (list condition_cols key_cols)))
 				(define unset (list (quote quote) (quote __scalar_cardinality_unset)))
 				(define partition_limit (stage_partition_limit stage))
-				(define scan_expr (list (quote scan_order)
+				(define scan_expr (compile_scan_plan (quote scan_order)
 					(physical_query_tx_symbol)
 					(source_table_expr src)
 					(cons (quote list) filtercols)
@@ -2630,7 +2648,7 @@ retain the scalar's complete value, including SQL NULL. */
 		(define map_expr (list (quote lambda)
 			(cons (quote __scan_acc) (map lookup_map_cols (lambda (col) (symbol (concat lookup_alias "." col)))))
 			(lower_column_expr_for_join sources default_alias expr)))
-		(define probe (list (quote scan_order)
+		(define probe (compile_scan_plan (quote scan_order)
 			(physical_query_tx_symbol)
 			(source_table_expr_using stages lookup)
 			(cons (quote list) lookup_filter_cols)
@@ -2793,7 +2811,7 @@ is still available. Explicit COLLATE and user callbacks pass through intact. */
 		(define filtercols (extract_columns_for_alias group_src session_filter))
 		(define ordercols (order_cols_for_alias group_src replaced_order))
 		(define valuecols (extract_columns_for_alias group_src value_expr))
-		(list (quote scan_order)
+		(compile_scan_plan (quote scan_order)
 			(physical_query_tx_symbol)
 			(list (quote table) schema grouptbl)
 			(cons (quote list) filtercols)
@@ -2822,7 +2840,7 @@ is still available. Explicit COLLATE and user callbacks pass through intact. */
 		(define alias (source_alias src))
 		(define condition (combine_where (qb_where branch) (source_join_expr src)))
 		(define filtercols (extract_columns_for_alias src condition))
-		(list (quote scan)
+		(compile_scan_plan (quote scan)
 			(physical_query_tx_symbol)
 			(source_table_expr src)
 			(cons (quote list) filtercols)
@@ -2859,7 +2877,7 @@ is still available. Explicit COLLATE and user callbacks pass through intact. */
 			(list (quote equal??)
 				(lower_column_expr_for_alias src rhs_expr)
 				(lower_column_expr_for_join sources default_alias probe))))
-		(list (quote scan)
+		(compile_scan_plan (quote scan)
 			(physical_query_tx_symbol)
 			(source_table_expr src)
 			(cons (quote list) filtercols)
@@ -2901,7 +2919,7 @@ cache identity or a logical fallback. */
 				(if (query_block? raw_input) (query_block_stage_catalog raw_input) '())))))
 		(list (quote begin)
 			(lower_group_stage_prepare_using stage_catalog stage_catalog stage true nil)
-			(list (quote scan_exists)
+			(compile_scan_plan (quote scan_exists)
 				(physical_query_tx_symbol)
 				(list (quote table) (group_stage_cache_schema stage) (group_stage_cache_relation stage))
 				(cons (quote list) filtercols)
@@ -2950,7 +2968,7 @@ would lose nested-stage and join semantics. */
 						(define lookup_parts (direct_exact_scan_lookup_parts
 							sources default_alias input_src condition keys lookup_keys))
 						(if (nil? lookup_parts)
-							(list (quote scan_exists)
+							(compile_scan_plan (quote scan_exists)
 								(physical_query_tx_symbol)
 								(source_table_expr input_src)
 								(cons (quote list) filtercols)
@@ -2981,7 +2999,7 @@ would lose nested-stage and join semantics. */
 			(list (quote equal??)
 				(symbol (nth key_names i))
 				(lower_column_expr_for_join sources default_alias (nth lookup_keys i))))))
-		(list (quote scan_exists)
+		(compile_scan_plan (quote scan_exists)
 			(physical_query_tx_symbol)
 			(list (quote table) cache_schema (group_stage_cache_relation stage))
 			(cons (quote list) filter_key_names)
@@ -3150,7 +3168,7 @@ here: their UNKNOWN rows are in neither SQL truth set. */
 	(begin
 		(define alias (source_alias src))
 		(define cols (extract_columns_for_alias src condition))
-		(list (quote scan_recset)
+		(compile_scan_plan (quote scan_recset)
 			(physical_query_tx_symbol)
 			input
 			(cons (quote list) cols)
@@ -3214,7 +3232,7 @@ here: their UNKNOWN rows are in neither SQL truth set. */
 				(define condition (combine_where (qb_where branch) (source_join_expr src)))
 				(define filtercols (extract_columns_for_alias src condition))
 				(list src source_col
-					(list (quote scan_recset)
+					(compile_scan_plan (quote scan_recset)
 						(physical_query_tx_symbol)
 						(source_table_expr src)
 						(cons (quote list) filtercols)
@@ -3245,7 +3263,7 @@ here: their UNKNOWN rows are in neither SQL truth set. */
 				(define filtercols (extract_columns_for_alias src condition))
 				(list (quote recset_project_join)
 					(physical_query_tx_symbol)
-					(list (quote scan_recset)
+					(compile_scan_plan (quote scan_recset)
 						(physical_query_tx_symbol)
 						(source_table_expr src)
 						(cons (quote list) filtercols)
@@ -3274,7 +3292,7 @@ rows outside the current batch. */
 				(quoted_runtime_list (list target_col))
 				(source_table_expr src)
 				(quoted_runtime_list (list source_col))))
-			(define source_matches (list (quote scan_recset)
+			(define source_matches (compile_scan_plan (quote scan_recset)
 				(physical_query_tx_symbol)
 				source_candidates
 				(cons (quote list) filtercols)
@@ -3310,7 +3328,7 @@ rows outside the current batch. */
 					(quoted_runtime_list (list target_col))
 					(source_table_expr src)
 					(quoted_runtime_list (list source_col))))
-				(define source_matches (list (quote scan_recset)
+				(define source_matches (compile_scan_plan (quote scan_recset)
 					(physical_query_tx_symbol)
 					source_candidates
 					(cons (quote list) filtercols)
@@ -3418,7 +3436,7 @@ alternative is a raw RecSet or direct probe. */
 	(begin
 		(define cache (group_stage_cache stage))
 		(prepared_group_cache_expr stage
-			(list (quote scan_recset)
+			(compile_scan_plan (quote scan_recset)
 				(physical_query_tx_symbol)
 				(list (quote table) (group_cache_schema cache) (group_cache_relation cache))
 				(list (quote list))
@@ -3449,7 +3467,7 @@ alternative is a raw RecSet or direct probe. */
 					(lower_group_stage_prepare_using stage_catalog stage_catalog stage true nil)
 					(list (quote recset_project_join)
 						(physical_query_tx_symbol)
-						(list (quote scan_recset)
+						(compile_scan_plan (quote scan_recset)
 							(physical_query_tx_symbol)
 							(list (quote table) cache_schema cache_relation)
 							(cons (quote list) filtercols)
@@ -3642,7 +3660,7 @@ still rechecks current data and autoindex statistics. */
 	(begin
 		(define alias (source_alias src))
 		(define cols (extract_columns_for_alias src condition))
-		(define estimate_expr (list (quote scan_selectivity_estimate)
+		(define estimate_expr (compile_scan_plan (quote scan_selectivity_estimate)
 			(physical_query_tx_symbol)
 			(list (quote table) (source_schema src) (source_relation src))
 			(cons (quote list) cols)
@@ -4909,7 +4927,7 @@ self-joins of the same base table still describe two distinct row roles. */
 				(define cols (map pairs (lambda (pair) (nth pair 1))))
 				(define params (map cols (lambda (col) (symbol (concat grouptbl "." col)))))
 				(list (quote not)
-					(list (quote scan_exists)
+					(compile_scan_plan (quote scan_exists)
 						(physical_query_tx_symbol)
 						(list (quote table) schema grouptbl)
 						(cons (quote list) cols)
@@ -5409,7 +5427,7 @@ every group row and its canonical identity stays independent of bound values. */
 			(cons (quote list) key_names)
 			(list (quote lambda)
 				(map key_names (lambda (col) (symbol col)))
-				(list (quote scan_order)
+				(compile_scan_plan (quote scan_order)
 					nil
 					(list (quote table) schema tbl)
 					(cons (quote list) filtercols)
@@ -5457,7 +5475,7 @@ every group row and its canonical identity stays independent of bound values. */
 		(list
 			(list (quote lambda) (list (quote grouped))
 				(group_insert_finish_expr schema grouptbl key_names agg_cols false))
-			(list (quote scan_order)
+			(compile_scan_plan (quote scan_order)
 				(physical_query_tx_symbol)
 				(list (quote table) schema tbl)
 				(cons (quote list) filtercols)
@@ -5531,7 +5549,7 @@ every group row and its canonical identity stays independent of bound values. */
 						(concat "__group_count_recset_" (stable_structural_hash membership_expr true))
 						(quote tx)
 						(list (quote lambda) (list (quote tx)) membership_expr)))
-				(list (quote scan)
+				(compile_scan_plan (quote scan)
 					/* Persistent computed columns read committed storage independently
 					from the request which first creates or later repairs them. */
 					nil
@@ -5726,7 +5744,7 @@ otherwise unnecessary one-entry associative group. */
 			(aggregate_payload_merge_expr ags 0)))
 		(define merge_groups (list (quote lambda) (list (quote acc) (quote grouped))
 			(list (quote merge_assoc) (quote acc) (quote grouped) merge_payload)))
-		(list (quote scan)
+		(compile_scan_plan (quote scan)
 			(physical_query_tx_symbol)
 			table_expr
 			(cons (quote list) filtercols)
@@ -5756,7 +5774,7 @@ otherwise unnecessary one-entry associative group. */
 			(define mapped_expr (if (equal? ag aggregate_count_descriptor)
 				1
 				(aggregate_map_value_expr ag (lower_column_expr_for_alias src agg_expr))))
-			(list (quote scan)
+			(compile_scan_plan (quote scan)
 				(physical_query_tx_symbol)
 				table_expr
 				(cons (quote list) filtercols)
@@ -6016,7 +6034,7 @@ join reducer aggregate shard-local states and merge them once at the root. */
 	(begin
 		(define key_symbols (map key_names (lambda (col) (symbol col))))
 		(define key_expr (runtime_cons_list_expr key_symbols))
-		(list (quote scan)
+		(compile_scan_plan (quote scan)
 			(physical_query_tx_symbol)
 			(list (quote table) schema grouptbl)
 			(quoted_runtime_list '())
@@ -6404,7 +6422,7 @@ one ordinary scan_recset, while stage leaves use the carrier projection above. *
 	(begin
 		(define alias (source_alias domain_src))
 		(define filtercols (extract_columns_for_alias domain_src expr))
-		(list (quote scan_recset)
+		(compile_scan_plan (quote scan_recset)
 			(physical_query_tx_symbol)
 			(source_table_expr domain_src)
 			(cons (quote list) filtercols)

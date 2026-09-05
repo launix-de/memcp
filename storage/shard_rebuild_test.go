@@ -1326,7 +1326,7 @@ func TestMutationScanRepairsInvalidOrderedComputeColumnBeforeTakingShardLock(t *
 	go func() {
 		values := make([]int64, 0, 2)
 		tbl.scan(
-			nil,
+			nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil,
 			[]string{},
 			trueCondition(),
 			[]string{"$update", "running"},

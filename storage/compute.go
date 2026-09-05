@@ -473,6 +473,7 @@ func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard,
 		scanCallbackCols = append(scanCallbackCols, col.OrcMapCols...)
 		t.scan_order(
 			nil,
+			newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil,
 			col.OrcFilterCols, domainCondFn,
 			sortcolsScmer, sortdirsFns,
 			0, 0, -1,
@@ -483,8 +484,6 @@ func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard,
 			col.OrcReduceInit,
 			nil,
 			scm.NewNil(),
-			scm.NewNil(),
-			nil,
 		)
 		// Speculative callback-column prefetch may read rows rejected by the
 		// predicate. Publish those holes as valid nils after every accepted row
@@ -545,6 +544,7 @@ func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard,
 
 	t.scan_order(
 		nil,
+		newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil,
 		condCols, condFn,
 		sortcolsScmer, sortdirsFns,
 		0, 0, -1,
@@ -555,8 +555,6 @@ func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard,
 		col.OrcReduceInit,
 		nil,
 		scm.NewNil(),
-		scm.NewNil(),
-		nil,
 	)
 }
 
@@ -685,7 +683,7 @@ func (t *table) invalidateORCFromSortKey(colName string, sortKeys []scm.Scmer) {
 			s.ensureMainCount(false)
 			var buf [1024]uint32
 			rowVals := make([]scm.Scmer, nCols)
-			s.iterateIndex(nil, bounds, lower, upperLast, len(s.inserts), buf[:], 1, nil, func(batch []uint32) bool {
+			s.iterateIndex(nil, runtimeScanAccess(bounds), lower, upperLast, len(s.inserts), buf[:], 1, nil, func(batch []uint32) bool {
 				for _, idx := range batch {
 					if s.deletions.Get(uint(idx)) {
 						continue
@@ -833,29 +831,28 @@ func (t *table) registerORCTriggers(name string) {
 
 type tableRef struct{ schema, table string }
 
-// extractScannedTables walks a Scheme expression tree and returns all
-// (schema, table) pairs referenced by scan/scan_order/scalar_scan/scalar_scan_order.
-func extractScannedTables(expr scm.Scmer) []tableRef {
+func scanTableReference(expr scm.Scmer) (tableRef, bool) {
 	expr = stripSourceInfo(expr)
-	if expr.IsProc() {
-		return extractScannedTables(expr.Proc().Body)
+	if expr.IsCustom(TagTable) {
+		t := TableFromScmer(expr)
+		return tableRef{schema: t.schema.Name, table: t.Name}, true
 	}
-	if !expr.IsSlice() {
-		return nil
-	}
-	items := expr.Slice()
-	if len(items) >= 3 && callHeadIs(items[0], "scan", "scan_order", "scalar_scan", "scalar_scan_order") {
-		result := []tableRef{{scm.String(items[1]), scm.String(items[2])}}
-		for _, item := range items[3:] {
-			result = append(result, extractScannedTables(item)...)
+	if expr.IsSlice() {
+		items := expr.Slice()
+		if len(items) == 3 && callHeadIs(items[0], "table") {
+			return tableRef{schema: scm.String(items[1]), table: scm.String(items[2])}, true
 		}
-		return result
 	}
-	var result []tableRef
-	for _, item := range items {
-		result = append(result, extractScannedTables(item)...)
+	if expr.IsSymbol() {
+		name := scm.String(expr)
+		if strings.HasPrefix(name, "tbl:") {
+			parts := strings.SplitN(name[4:], ":", 2)
+			if len(parts) == 2 {
+				return tableRef{schema: parts[0], table: parts[1]}, true
+			}
+		}
 	}
-	return result
+	return tableRef{}, false
 }
 
 // scanJoinInfo describes a source table scanned by a computor and the equality
@@ -898,44 +895,27 @@ func extractScanJoinInfoBody(expr scm.Scmer, outerParams []scm.Scmer) []scanJoin
 			return extractScanJoinInfoBody(items[2], paramExpr.Slice())
 		}
 	}
-	if len(items) >= 5 && callHeadIs(items[0], "scan", "scan_order", "scalar_scan", "scalar_scan_order") {
+	if len(items) >= 7 && callHeadIs(items[0], "scan", "scan_order", "scalar_scan", "scalar_scan_order") {
 		tableIdx := 2
-		condColsIdx, filterIdx := 3, 4
+		condColsIdx, filterIdx := 5, 6
 		if len(items) <= filterIdx {
 			return nil
 		}
 		var info scanJoinInfo
-		tableExpr := stripSourceInfo(items[tableIdx])
-		if tableExpr.IsCustom(TagTable) {
-			t := TableFromScmer(tableExpr)
-			info.schema = t.schema.Name
-			info.table = t.Name
-		} else if tableExpr.IsSlice() {
-			sl := tableExpr.Slice()
-			if len(sl) == 3 && callHeadIs(sl[0], "table") {
-				info.schema = scm.String(sl[1])
-				info.table = scm.String(sl[2])
-			}
-		} else if tableExpr.IsSymbol() {
-			symStr := scm.String(tableExpr)
-			if strings.HasPrefix(symStr, "tbl:") {
-				parts := strings.SplitN(symStr[4:], ":", 2)
-				if len(parts) == 2 {
-					info.schema = parts[0]
-					info.table = parts[1]
-				}
-			}
-		} else {
-			info.schema = ""
-			info.table = scm.String(tableExpr)
+		if ref, ok := scanTableReference(items[tableIdx]); ok {
+			info.schema, info.table = ref.schema, ref.table
 		}
 		condCols := extractStringListFromAST(items[condColsIdx])
 		info.condCols = condCols
-		if len(items) > 5 {
-			info.mapCols = extractStringListFromAST(items[5])
+		if len(items) > 7 {
+			info.mapCols = extractStringListFromAST(items[7])
 		}
 		if len(condCols) > 0 {
 			info.srcCols, info.inputCols = extractEqualityJoins(items[filterIdx], condCols, outerParams)
+		}
+		if len(info.srcCols) == 0 {
+			info.srcCols, info.inputCols = extractCompiledScanEqualityJoins(items[3], items[4], outerParams)
+			info.condCols = mergeUniqueStrings(info.condCols, info.srcCols)
 		}
 		// A physical table expression can itself be a plan (for example a
 		// recset_project_join whose producer prepares correlated stage caches).
@@ -943,7 +923,7 @@ func extractScanJoinInfoBody(expr scm.Scmer, outerParams []scm.Scmer) []scanJoin
 		// scans in the filter and mapper are; otherwise source mutations leave a
 		// cached aggregate valid even though its projected input changed.
 		result := []scanJoinInfo{info}
-		result = append(result, extractScanJoinInfoBody(tableExpr, outerParams)...)
+		result = append(result, extractScanJoinInfoBody(items[tableIdx], outerParams)...)
 		for _, item := range items[filterIdx+1:] {
 			result = append(result, extractScanJoinInfoBody(item, outerParams)...)
 		}
@@ -954,6 +934,77 @@ func extractScanJoinInfoBody(expr scm.Scmer, outerParams []scm.Scmer) []scanJoin
 		result = append(result, extractScanJoinInfoBody(item, outerParams)...)
 	}
 	return result
+}
+
+func extractCompiledScanEqualityJoins(schemaExpr, valuesExpr scm.Scmer, computorParams []scm.Scmer) (srcCols, inputCols []string) {
+	schema, schemaOK := scanStaticListElements(schemaExpr)
+	if !schemaOK {
+		return nil, nil
+	}
+	if len(schema) < scanAccessSchemaHeaderSize {
+		return nil, nil
+	}
+	meta, valid := decodeScanAccessHeader(stripSourceInfo(schema[0]))
+	if !valid {
+		return nil, nil
+	}
+	valueItems, valuesOK := scanStaticListElements(valuesExpr)
+	if !valuesOK {
+		return nil, nil
+	}
+	count := meta.count
+	for i := 0; i < count; i++ {
+		offset := scanAccessSchemaHeaderSize + i*scanAccessBoundaryStride
+		if offset+scanAccessBoundaryStride > len(schema) || stripSourceInfo(schema[offset]).String() != "equal" {
+			continue
+		}
+		boundaryMeta := decodeScanAccessBoundaryMeta(stripSourceInfo(schema[offset+2]))
+		lowerSlot := boundaryMeta.lowerSlot
+		upperSlot := boundaryMeta.upperSlot
+		if lowerSlot < 0 || lowerSlot != upperSlot || lowerSlot >= len(valueItems) {
+			continue
+		}
+		if inputCol, ok := compiledScanOuterColumn(valueItems[lowerSlot], computorParams); ok {
+			srcCols = append(srcCols, stripSourceInfo(schema[offset+1]).String())
+			inputCols = append(inputCols, inputCol)
+		}
+	}
+	return srcCols, inputCols
+}
+
+func compiledScanOuterColumn(expr scm.Scmer, computorParams []scm.Scmer) (string, bool) {
+	expr = stripSourceInfo(expr)
+	if depth, inner, ok := scanOuterReference(expr); ok {
+		if depth != 0 && depth != 1 {
+			return "", false
+		}
+		expr = stripSourceInfo(inner)
+	}
+	if expr.IsSymbol() {
+		for _, param := range computorParams {
+			param = stripSourceInfo(param)
+			if param.IsSymbol() && param.String() == expr.String() {
+				return expr.String(), true
+			}
+		}
+		return "", false
+	}
+	if expr.IsNthLocalVar() {
+		idx := int(expr.NthLocalVar())
+		if idx >= 0 && idx < len(computorParams) {
+			param := stripSourceInfo(computorParams[idx])
+			if param.IsSymbol() {
+				return param.String(), true
+			}
+		}
+	}
+	if expr.IsSlice() {
+		items := expr.Slice()
+		if len(items) >= 4 && callHeadIs(items[0], "get_column") {
+			return scm.String(items[3]), true
+		}
+	}
+	return "", false
 }
 
 // extractStringListFromAST parses both (list "a" "b" ...) and the quoted
@@ -1154,25 +1205,8 @@ func findScanNode(expr scm.Scmer, schema, table string) []scm.Scmer {
 	if len(items) >= 4 {
 		tableIdx := 2
 		if callHeadIs(items[0], "scan", "scan_order", "scalar_scan", "scalar_scan_order") {
-			var tSchema, tName string
-			if len(items) > tableIdx && items[tableIdx].IsCustom(TagTable) {
-				t := TableFromScmer(items[tableIdx])
-				tSchema, tName = t.schema.Name, t.Name
-			} else if len(items) > tableIdx && items[tableIdx].IsSlice() {
-				sl := items[tableIdx].Slice()
-				if len(sl) == 3 && scm.String(sl[0]) == "table" {
-					tSchema, tName = scm.String(sl[1]), scm.String(sl[2])
-				}
-			} else if len(items) > tableIdx && items[tableIdx].IsSymbol() {
-				symStr := scm.String(items[tableIdx])
-				if strings.HasPrefix(symStr, "tbl:") {
-					parts := strings.SplitN(symStr[4:], ":", 2)
-					if len(parts) == 2 {
-						tSchema, tName = parts[0], parts[1]
-					}
-				}
-			}
-			if tSchema == schema && tName == table {
+			ref, ok := scanTableReference(items[tableIdx])
+			if ok && ref.schema == schema && ref.table == table {
 				return items
 			}
 		}
@@ -1243,11 +1277,12 @@ func mapReduceParts(mapReduceFn scm.Scmer) ([]scm.Scmer, scm.Scmer, bool) {
 // isAdditiveAggregate checks whether a scan node represents an additive aggregate
 // (combine=+, neutral=0) whose fused callback contains no inner scans.
 func isAdditiveAggregate(scanNode []scm.Scmer) bool {
-	if len(scanNode) < 9 {
+	if len(scanNode) < 11 {
 		return false
 	}
-	// scan layout: [fn, tx, table, filterCols, filter, mapCols, mapreduce, neutral, combine, ...]
-	mapReduceIdx, neutralIdx, combineIdx := 6, 7, 8
+	// scan layout: [fn, tx, table, accessSchema, accessValues, filterCols,
+	// filter, mapCols, mapreduce, neutral, combine, ...]
+	mapReduceIdx, neutralIdx, combineIdx := 8, 9, 10
 	reduce := scanNode[combineIdx]
 	neutral := scanNode[neutralIdx]
 	if !isAdditiveReduce(reduce) {
@@ -1262,6 +1297,12 @@ func isAdditiveAggregate(scanNode []scm.Scmer) bool {
 		return false
 	}
 	return true
+}
+
+func compiledScanAccessExpressions(filterCols, filter scm.Scmer) (scm.Scmer, scm.Scmer) {
+	schema, bindings, _ := compileScanAccess(filterCols, filter)
+	return scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), schema}),
+		scanAccessValuesExpr(bindings)
 }
 
 // COUNT-style helper columns use a literal 1 map function. Their value also
@@ -1412,6 +1453,9 @@ func buildKeytableScanFilter(targetTable string, srcCols, inputCols []string, di
 // closure to update the proxy's cached value in-place. No shard rebuild needed.
 func buildIncrementScan(targetSchema, targetTable, colName string, srcCols, inputCols []string, dictSym string, deltaExpr scm.Scmer, negate bool) scm.Scmer {
 	filterColElems, filterParams, filterBody := buildKeytableScanFilter(targetTable, srcCols, inputCols, dictSym)
+	filterCols := scm.NewSlice(filterColElems)
+	filter := scm.NewSlice(append([]scm.Scmer{scm.NewSymbol("lambda"), scm.NewSlice(filterParams)}, filterBody))
+	accessSchema, accessValues := compiledScanAccessExpressions(filterCols, filter)
 
 	// Compute value expression: deltaExpr or (- 0 deltaExpr) for negation
 	var valueExpr scm.Scmer
@@ -1437,8 +1481,10 @@ func buildIncrementScan(targetSchema, targetTable, colName string, srcCols, inpu
 		scm.NewSymbol("scan"),
 		scm.NewSymbol("session"),
 		tableExpr,
-		scm.NewSlice(filterColElems),
-		scm.NewSlice(append([]scm.Scmer{scm.NewSymbol("lambda"), scm.NewSlice(filterParams)}, filterBody)),
+		accessSchema,
+		accessValues,
+		filterCols,
+		filter,
 		resultCols,
 		mapReduceFn,
 		scm.NewInt(0), scm.NewSymbol("+"), scm.NewBool(false),
@@ -1632,6 +1678,9 @@ func buildInvalidateScan(targetSchema, targetTable, colName string, srcCols, inp
 		}
 		filterBody = scm.NewSlice(parts)
 	}
+	filterCols := scm.NewSlice(filterColElems)
+	filter := scm.NewSlice(append([]scm.Scmer{scm.NewSymbol("lambda"), scm.NewSlice(filterParams)}, filterBody))
+	accessSchema, accessValues := compiledScanAccessExpressions(filterCols, filter)
 
 	// Build result col list: '("$invalidate:colName")
 	invColName := "$invalidate:" + colName
@@ -1641,8 +1690,10 @@ func buildInvalidateScan(targetSchema, targetTable, colName string, srcCols, inp
 		scm.NewSymbol("scan"),
 		scm.NewSymbol("session"),
 		tableExpr,
-		scm.NewSlice(filterColElems),
-		scm.NewSlice(append([]scm.Scmer{scm.NewSymbol("lambda"), scm.NewSlice(filterParams)}, filterBody)),
+		accessSchema,
+		accessValues,
+		filterCols,
+		filter,
 		scm.NewSlice([]scm.Scmer{scm.NewSymbol("list"), scm.NewString(invColName)}),
 		scm.NewSlice([]scm.Scmer{scm.NewSymbol("lambda"), scm.NewSlice([]scm.Scmer{scm.NewSymbol("acc"), scm.NewSymbol("$inv")}),
 			scm.NewSlice([]scm.Scmer{scm.NewSymbol("begin"),
@@ -1678,6 +1729,9 @@ func buildSelectiveInvalidationBody(targetSchema, targetTable, colName string, s
 
 func buildInvalidateORCScan(targetSchema, targetTable, colName string, sortCols, srcCols, inputCols []string, dictSym string) scm.Scmer {
 	filterColElems, filterParams, filterBody := buildKeytableScanFilter(targetTable, srcCols, inputCols, dictSym)
+	filterCols := scm.NewSlice(filterColElems)
+	filter := scm.NewSlice(append([]scm.Scmer{scm.NewSymbol("lambda"), scm.NewSlice(filterParams)}, filterBody))
+	accessSchema, accessValues := compiledScanAccessExpressions(filterCols, filter)
 	resultCols := make([]scm.Scmer, 1+len(sortCols))
 	resultCols[0] = scm.NewSymbol("list")
 	mapParams := make([]scm.Scmer, len(sortCols))
@@ -1705,8 +1759,10 @@ func buildInvalidateORCScan(targetSchema, targetTable, colName string, sortCols,
 		scm.NewSymbol("scan"),
 		scm.NewSymbol("session"),
 		tblExpr,
-		scm.NewSlice(filterColElems),
-		scm.NewSlice(append([]scm.Scmer{scm.NewSymbol("lambda"), scm.NewSlice(filterParams)}, filterBody)),
+		accessSchema,
+		accessValues,
+		filterCols,
+		filter,
 		scm.NewSlice(resultCols),
 		scm.NewSlice([]scm.Scmer{scm.NewSymbol("lambda"), scm.NewSlice(mapReduceParams), mapReduceBody}),
 		scm.NewNil(), scm.NewNil(), scm.NewBool(false),
@@ -1839,8 +1895,9 @@ func (t *table) registerComputeTriggers(name string, computor scm.Scmer) {
 			if !exists {
 				var body scm.Scmer
 				if incremental && timing != AfterInvalidate {
-					// scan layout: [fn, tx, table, filterCols, filter, mapCols, mapreduce, ...]
-					mapColsIdx, mapReduceIdx := 5, 6
+					// scan layout: [fn, tx, table, accessSchema, accessValues,
+					// filterCols, filter, mapCols, mapreduce, ...]
+					mapColsIdx, mapReduceIdx := 7, 8
 					tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewString(t.Name)})
 					if isConstantOneAggregate(scanNode[mapReduceIdx]) {
 						body = scm.NewSlice([]scm.Scmer{

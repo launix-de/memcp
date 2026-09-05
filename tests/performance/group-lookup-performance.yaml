@@ -338,7 +338,7 @@ test_cases:
     scm: |
       (begin
         (define plan (serialize (optimize
-          (list 'scan nil (list 'table "memcp-tests" "lookup_group_items")
+          (compile_scan_plan 'scan nil (list 'table "memcp-tests" "lookup_group_items")
             (list "id") (list 'lambda (list 'id) true)
             (list "id") (list 'lambda (list 'acc 'id)
               (list 'set_assoc 'acc 'id
@@ -352,7 +352,7 @@ test_cases:
     scm: |
       (begin
         (define plan (serialize (optimize
-          (list 'scan nil (list 'table "memcp-tests" "lookup_group_items")
+          (compile_scan_plan 'scan nil (list 'table "memcp-tests" "lookup_group_items")
             (list "id") (list 'lambda (list 'id) true)
             (list "id") (list 'lambda (list 'acc 'id)
               (list 'begin
@@ -367,7 +367,7 @@ test_cases:
     scm: |
       (begin
         (define plan (serialize (optimize
-          (list 'scan nil (list 'table "memcp-tests" "lookup_group_items")
+          (compile_scan_plan 'scan nil (list 'table "memcp-tests" "lookup_group_items")
             (list "id") (list 'lambda (list 'id) true)
             (list "id") (list 'lambda (list 'acc 'id)
               (list 'set_assoc 'acc 'id true))
@@ -380,7 +380,7 @@ test_cases:
     scm: |
       (begin
         (define plan (serialize (optimize
-          (list 'scan nil (list 'table "memcp-tests" "lookup_group_items")
+          (compile_scan_plan 'scan nil (list 'table "memcp-tests" "lookup_group_items")
             (list "id") (list 'lambda (list 'id) true)
             (list "id") (list 'lambda (list 'acc 'id)
               (list 'begin (list 'set_assoc 'acc 'id true) 'id))
@@ -401,7 +401,7 @@ test_cases:
             'acc
             (list merge 'acc 'value))))
         (define plan (serialize (optimize
-          (list 'scan nil (list 'table "memcp-tests" "lookup_group_items")
+          (compile_scan_plan 'scan nil (list 'table "memcp-tests" "lookup_group_items")
             (list "id") (list 'lambda (list 'id) true)
             (list "id") (list 'lambda (list 'acc 'id)
               (list wrapped 'acc

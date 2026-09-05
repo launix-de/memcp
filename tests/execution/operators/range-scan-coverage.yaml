@@ -86,9 +86,10 @@ test_cases:
 
   - name: "Clear range scan statistics"
     setup:
-      - scm: '(settings "ScanDebugging" false)'
+      - scm: '(settings "ScanDebugging" true)'
       - sql: "SELECT val FROM rs_data WHERE id = 42"
       - scm: '(sleep 0.1)'
+      - scm: '(settings "ScanDebugging" false)'
     sql: "DELETE FROM `system_statistic`.`scans` WHERE `schema` = 'memcp-tests' AND `table` = 'rs_data'"
     expect:
       affected_rows: 1
@@ -122,7 +123,7 @@ test_cases:
     setup:
       - scm: '(settings "ScanDebugging" true)'
       - sql: "DELETE FROM `system_statistic`.`scans` WHERE `schema` = 'memcp-tests' AND `table` = 'rs_data'"
-      - sql: "SELECT id FROM rs_data WHERE id BETWEEN 40 AND 49 AND MOD(id, 4) = 0"
+      - sql: "SELECT id FROM rs_data WHERE id BETWEEN 40 AND 49 AND (id = 40 OR id = 44 OR id = 48)"
       - scm: '(sleep 0.1)'
     sql: "SELECT inputCount, candidateCount, outputCount FROM `system_statistic`.`scans` WHERE `schema` = 'memcp-tests' AND `table` = 'rs_data' AND ordered = FALSE ORDER BY timestamp DESC LIMIT 1"
     expect:

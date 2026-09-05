@@ -1687,7 +1687,7 @@ outer joins. */
 		'(_ _id src col _sortcols _sortdirs _partitioncount _mapcols _mapfn _reducefn _reduceinit _facts)
 		(if (not (source_is_base_table? src))
 			(neumann_fail "build_queryplan" "ORC materialization expects base table source")
-			(list (quote scan)
+			(compile_scan_plan (quote scan)
 				(physical_query_tx_symbol)
 				(source_table_expr src)
 				(quoted_runtime_list '())
@@ -1709,7 +1709,7 @@ outer joins. */
 				(define filtercols (qassoc_get facts (quote physical_filtercols) '()))
 				(define filterfn (qassoc_get facts (quote physical_filterfn)
 					(list (quote lambda) '() true)))
-				(list (quote scan)
+				(compile_scan_plan (quote scan)
 					(physical_query_tx_symbol)
 					(source_table_expr src)
 					(quoted_runtime_list filtercols)
@@ -2142,7 +2142,7 @@ logical window-stage remains unchanged and contains no createcolumn artifact. */
 								(define mapreduce_expr (list (quote lambda)
 									(cons (quote state) map_params)
 									(list reduce_expr (quote state) mapped_expr)))
-								(define scan_expr (list (quote scan_order)
+								(define scan_expr (compile_scan_plan (quote scan_order)
 									(physical_query_tx_symbol)
 									(source_table_expr src)
 									(cons (quote list) filtercols)
@@ -2174,7 +2174,7 @@ logical window-stage remains unchanged and contains no createcolumn artifact. */
 				(cons src src_rest) (if (or (not (empty_list? src_rest)) (not (source_is_base_table? src)))
 					nil
 					(match stage
-						'(_ _id stage_src col sortcols sortdirs _partitioncount mapcols _mapfn _reducefn _reduceinit _facts)
+						'(_ _id stage_src col sortcols sortdirs partitioncount mapcols _mapfn _reducefn _reduceinit _facts)
 						(if (or (not (equal? (source_schema stage_src) (source_schema src)))
 							(not (equal? (source_relation stage_src) (source_relation src))))
 							nil
@@ -2217,7 +2217,7 @@ logical window-stage remains unchanged and contains no createcolumn artifact. */
 													nil)))
 											(define map_params (map scan_mapcols (lambda (map_col) (symbol (concat (source_alias src) "." map_col)))))
 											(define mapped_expr (list (quote list)
-												(row_number_scan_partition_expr (source_alias src) mapcols)
+												(row_number_scan_partition_expr (source_alias src) partitioncount mapcols)
 												continuation_expr))
 											(define reduce_expr (list (quote lambda) (list (quote state) (quote mapped))
 												(list (quote begin)
@@ -2234,7 +2234,7 @@ logical window-stage remains unchanged and contains no createcolumn artifact. */
 											(define mapreduce_expr (list (quote lambda)
 												(cons (quote state) map_params)
 												(list reduce_expr (quote state) mapped_expr)))
-											(define scan_expr (list (quote scan_order)
+											(define scan_expr (compile_scan_plan (quote scan_order)
 												(physical_query_tx_symbol)
 												(source_table_expr src)
 												(cons (quote list) filtercols)
@@ -2262,7 +2262,7 @@ logical window-stage remains unchanged and contains no createcolumn artifact. */
 		(list (quote resultrow)
 			(list (quote list) title
 				(list (quote car)
-					(list (quote scan_order)
+					(compile_scan_plan (quote scan_order)
 						(physical_query_tx_symbol)
 						(list (quote table) schema relation)
 						(quoted_runtime_list '())
@@ -3510,7 +3510,7 @@ lookup for each ordered driver candidate. */
 		(define filtercols (list key_name value_col))
 		(prepared_group_cache_expr stage
 			(list (quote lambda) (list probe_var)
-				(list (quote scan_exists)
+				(compile_scan_plan (quote scan_exists)
 					(physical_query_tx_symbol)
 					(list (quote table) (group_cache_schema cache) (group_cache_relation cache))
 					(cons (quote list) filtercols)
@@ -3571,7 +3571,7 @@ lookup for each ordered driver candidate. */
 				(list
 					(source_table_expr input_src)
 					source_col
-					(list (quote scan_recset)
+					(compile_scan_plan (quote scan_recset)
 						(physical_query_tx_symbol)
 						(source_table_expr input_src)
 						(cons (quote list) filtercols)
@@ -3650,7 +3650,7 @@ lookup for each ordered driver candidate. */
 		(if (empty_list? markers)
 			(begin
 				(define cols (extract_columns_for_alias src branch))
-				(list (quote scan_recset)
+				(compile_scan_plan (quote scan_recset)
 					(physical_query_tx_symbol)
 					source_table
 					(cons (quote list) cols)
@@ -3710,7 +3710,7 @@ factoring, or other proven set transformations without adding SQL-shape cases. *
 		input
 		(begin
 			(define cols (extract_columns_for_alias src condition))
-			(list (quote scan_recset)
+			(compile_scan_plan (quote scan_recset)
 				(physical_query_tx_symbol)
 				input
 				(cons (quote list) cols)
@@ -3806,7 +3806,7 @@ so complex ACL trees receive the same per-node physical choices as any scan. */
 					residual_probe_work_rows))
 				(define accepted_expr (if (equal? acceptance_probe true)
 					late_batch
-					(list (quote scan_recset)
+					(compile_scan_plan (quote scan_recset)
 						(physical_query_tx_symbol)
 						late_batch
 						(cons (quote list) acceptance_cols)
@@ -3837,7 +3837,7 @@ RecSet; membership edges retain their own physical operators. */
 			(begin
 				(define alias (source_alias src))
 				(define cols (extract_columns_for_alias src driver_condition))
-				(list (quote scan_recset)
+				(compile_scan_plan (quote scan_recset)
 					(physical_query_tx_symbol)
 					source_table
 					(cons (quote list) cols)
@@ -4091,7 +4091,7 @@ RecSet; membership edges retain their own physical operators. */
 				(define membership_formula_expr (if membership_formula_difference_driver
 					(begin
 						(define base_cols (extract_columns_for_alias src membership_formula_residual))
-						(define base_recset (list (quote scan_recset)
+						(define base_recset (compile_scan_plan (quote scan_recset)
 							(physical_query_tx_symbol)
 							source_table
 							(cons (quote list) base_cols)
@@ -4204,7 +4204,7 @@ RecSet; membership edges retain their own physical operators. */
 					(cons (symbol "__scan_acc") (map mapcols (lambda (col) (symbol (concat alias "." col)))))
 					map_row))
 				(define scan_plan (if (and (empty_list? order_items) (not bounded))
-					(list (quote scan)
+					(compile_scan_plan (quote scan)
 						(physical_query_tx_symbol)
 						table_expr
 						(cons (quote list) filtercols)
@@ -4220,6 +4220,8 @@ RecSet; membership edges retain their own physical operators. */
 								(list (quote scan_order_batch_accept)
 									(physical_query_tx_symbol)
 									table_expr
+									(list (quote quote) (list 369435906932736))
+									(list (quote list))
 									batch_filter
 									(cons (quote list) batch_ordercols)
 									(cons (quote list) batch_orderdirs)
@@ -4230,7 +4232,7 @@ RecSet; membership edges retain their own physical operators. */
 									mapreduce_expr
 									nil
 									(source_outer? src))
-								(list (quote scan_order)
+								(compile_scan_plan (quote scan_order)
 									(physical_query_tx_symbol)
 									table_expr
 									(cons (quote list) filtercols)
@@ -4461,7 +4463,7 @@ either bound a real row or supplied the synthetic NULL row. */
 						(list
 							bundle_symbol
 							(rewrite_scalar_projection_bundle_expr entries bundle_symbol fields)
-							(list (quote scan_order)
+							(compile_scan_plan (quote scan_order)
 								(physical_query_tx_symbol)
 								(source_table_expr src)
 								(cons (quote list) filtercols)
@@ -4702,7 +4704,7 @@ carrier into thousands of fictional downstream probes. */
 						lookup_input_rows lookup_rows requested_rows cost_work))
 					(define batch_cost (ordered_batch_accept_cost cost_work))
 					(define lookup_cols (extract_columns_for_alias lookup lookup_condition))
-					(define lookup_recset (list (quote scan_recset)
+					(define lookup_recset (compile_scan_plan (quote scan_recset)
 						(physical_query_tx_symbol)
 						(source_table_expr lookup)
 						(cons (quote list) lookup_cols)
@@ -5329,12 +5331,14 @@ until the caller has selected this physical alternative. */
 			scalar_carrier))
 		(define scan_expr (if use_batch_accept
 			(list (quote scan_order_batch_accept)
-				(physical_query_tx_symbol) table_expr batch_filter
+				(physical_query_tx_symbol) table_expr
+				(list (quote quote) (list 369435906932736))
+				(list (quote list)) batch_filter
 				(cons (quote list) physical_ordercols)
 				(cons (quote list) physical_orderdirs)
 				0 offset limit
 				(cons (quote list) mapcols) map_expr nil false nil)
-			(list (quote scan_order)
+			(compile_scan_plan (quote scan_order)
 				(physical_query_tx_symbol) table_expr
 				(cons (quote list) filtercols) filter_expr
 				(cons (quote list) physical_ordercols)
@@ -5389,7 +5393,7 @@ until the caller has selected this physical alternative. */
 			'(nil params body) (list (quote lambda)
 				(cons (quote __scan_acc) params) body)
 			'(reducer params body) (scan_mapreduce_expr params reducer body)))
-		(list (quote scan_join_order)
+		(compile_scan_plan (quote scan_join_order)
 			(physical_query_tx_symbol)
 			(cons (quote list) (map sources (lambda (src)
 				(source_table_expr_using stages src))))
@@ -5601,12 +5605,14 @@ ordered operator's Costgen-owned scan, map and expression coefficients. */
 (define without_col (lambda (cols col)
 	(filter (coalesceNil cols '()) (lambda (item) (not (equal? item col))))))
 
-(define row_number_scan_partition_expr (lambda (alias mapcols)
-	(if (empty_list? mapcols)
-		true
-		(if (single_source? mapcols)
-			(symbol (concat alias "." (car mapcols)))
-			(cons (quote list) (map mapcols (lambda (col) (symbol (concat alias "." col)))))))))
+(define row_number_scan_partition_expr (lambda (alias partitioncount mapcols)
+	(begin
+		(define partitioncols (slice mapcols 0 partitioncount))
+		(if (empty_list? partitioncols)
+			true
+			(if (single_source? partitioncols)
+				(symbol (concat alias "." (car partitioncols)))
+				(cons (quote list) (map partitioncols (lambda (col) (symbol (concat alias "." col))))))))))
 
 (define replace_lowered_row_number_symbol (lambda (alias col expr)
 	(if (equal? expr (symbol (concat alias "." col)))
@@ -5625,7 +5631,7 @@ ordered operator's Costgen-owned scan, map and expression coefficients. */
 		(define limit (nth filter 1))
 		(define stripped_condition (nth filter 2))
 		(match stage
-			'(_ _id _stage_src col sortcols sortdirs _partitioncount mapcols _mapfn _reducefn _reduceinit _facts)
+			'(_ _id _stage_src col sortcols sortdirs partitioncount mapcols _mapfn _reducefn _reduceinit _facts)
 			(begin
 				(define membership_filter_expr (if membership_filter
 					(recset_contains_call_expr membership_var)
@@ -5650,7 +5656,7 @@ ordered operator's Costgen-owned scan, map and expression coefficients. */
 				(define map_expr (list (quote lambda)
 					(map scan_mapcols (lambda (map_col) (symbol (concat alias "." map_col))))
 					(list (quote list)
-						(row_number_scan_partition_expr alias mapcols)
+						(row_number_scan_partition_expr alias partitioncount mapcols)
 						continuation_expr)))
 				(define row_number_reduce_expr (list (quote lambda) (list (quote state) (quote mapped))
 					(list (quote begin)
@@ -5693,7 +5699,7 @@ ordered operator's Costgen-owned scan, map and expression coefficients. */
 					(cons (quote state) (map scan_mapcols (lambda (map_col) (symbol (concat alias "." map_col)))))
 					(list dataset_reduce_expr (quote state)
 						(cons map_expr (map scan_mapcols (lambda (map_col) (symbol (concat alias "." map_col))))))))
-				(define scan_expr (list (quote scan_order)
+				(define scan_expr (compile_scan_plan (quote scan_order)
 					(physical_query_tx_symbol)
 					table_expr
 					(cons (quote list) filtercols)
@@ -6099,7 +6105,7 @@ topology inequality by bounded binary search and guard that crossover. */
 		(define alias (source_alias src))
 		(define predicate (qassoc_get candidate (quote predicate) true))
 		(define cols (extract_columns_for_alias src predicate))
-		(list (quote scan_recset)
+		(compile_scan_plan (quote scan_recset)
 			(physical_query_tx_symbol)
 			(source_table_expr_using stages src)
 			(cons (quote list) cols)
@@ -6396,7 +6402,7 @@ only the structural work counts are specific to this operator. */
 				(lower_scalar_aggregate_probe_expr all_sources default_alias stage
 					(aggregate_col_name_using src (car ags))
 					(physical_query_tx_at_depth tx_depth))))
-			(list (quote scan)
+			(compile_scan_plan (quote scan)
 				(physical_query_tx_at_depth tx_depth)
 				(source_table_expr src)
 				(cons (quote list) filtercols)
@@ -6424,7 +6430,7 @@ only the structural work counts are specific to this operator. */
 			(aggregate_col_name_using (gs_input stage) ag))))
 		(define neutral_payload
 			(runtime_cons_list_expr (map ags (lambda (ag) (nth ag 2)))))
-		(list (quote scan)
+		(compile_scan_plan (quote scan)
 			(physical_query_tx_at_depth tx_depth)
 			table_expr
 			(cons (quote list) key_names)
@@ -6529,8 +6535,8 @@ the costgen threshold. */
 		(if (nil? candidates)
 			0
 			(scan current_tx candidates
-				'("canonical_name")
-				(lambda (candidate_name) (equal? candidate_name canonical_name))
+				'(369436175368192 "equal" "canonical_name" 15032418304 "") (list canonical_name)
+				'() (lambda () true)
 				'("$update")
 				(lambda (acc $update) (begin ($update) (+ acc 1)))
 				0 + false)))))
@@ -6995,7 +7001,9 @@ carrier remains on the measured direct path and is never built eagerly. */
 									(lambda (col) (not (contains? ordercols col)))))
 								(list (quote scan_order_batch_accept)
 									(physical_query_tx_symbol)
-									table_expr batch_filter
+									table_expr
+									(list (quote quote) (list 369435906932736))
+									(list (quote list)) batch_filter
 									(cons (quote list) (merge (list ordercols tiebreaker_cols)))
 									(cons (quote list) (merge (list
 										(order_relations_for_source src current_order_items)
@@ -7007,7 +7015,7 @@ carrier remains on the measured direct path and is never built eagerly. */
 									(join_scan_neutral_expr result_mode)
 									(or outer_scan (source_outer? src))))
 							(if (and (empty_list? current_order_items) (not (query_limit_active? offset_value limit_value)))
-								(list (quote scan)
+								(compile_scan_plan (quote scan)
 									(physical_query_tx_symbol)
 									table_expr
 									(cons (quote list) filtercols)
@@ -7017,7 +7025,7 @@ carrier remains on the measured direct path and is never built eagerly. */
 									(join_scan_neutral_expr result_mode)
 									(join_scan_shard_reduce_expr result_mode)
 									(or outer_scan (source_outer? src)))
-								(list (quote scan_order)
+								(compile_scan_plan (quote scan_order)
 									(physical_query_tx_symbol)
 									table_expr
 									(cons (quote list) filtercols)
@@ -7384,7 +7392,7 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 		(define params (map cache_cols symbol))
 		(define terms (map (produceN (count key_cols)) (lambda (i)
 			(list (quote equal?) (nth params i) (list (quote get_assoc) dict_symbol (nth key_cols i))))))
-		(list (quote scan)
+		(compile_scan_plan (quote scan)
 			(physical_query_tx_symbol)
 			(list (quote table) (qb_schema block) table_name)
 			(cons (quote list) cache_cols)
@@ -7436,7 +7444,7 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 		(define reduce_expr (list (quote lambda) (list (quote _old) (quote new)) (quote new)))
 		(define computor (list (quote lambda)
 			(map input_cols symbol)
-			(list (quote scan)
+			(compile_scan_plan (quote scan)
 				nil
 				(source_table_expr src)
 				(cons (quote list) key_cols)
@@ -8154,7 +8162,7 @@ every title. */
 			(neumann_fail "build_queryplan" "multi-target DELETE requires a primary key on every target")
 			true)
 		(define keyparams (map keycols (lambda (col) (symbol (concat alias "." col)))))
-		(list (quote scan)
+		(compile_scan_plan (quote scan)
 			(physical_query_tx_symbol)
 			(source_table_expr target_src)
 			(cons (quote list) keycols)
@@ -8317,7 +8325,7 @@ every title. */
 					(list (quote if) (list (quote $update)) 1 0)
 					(list (quote if) (list (quote $update) update_values) 1 0)))))
 		(if (and (empty_list? order_items) (not bounded))
-			(list (quote scan)
+			(compile_scan_plan (quote scan)
 				(physical_query_tx_symbol)
 				(list (quote table) target_schema target_tbl)
 				(cons (quote list) filtercols)
@@ -8327,7 +8335,7 @@ every title. */
 				0
 				(quote +)
 				false)
-			(list (quote scan_order)
+			(compile_scan_plan (quote scan_order)
 				(physical_query_tx_symbol)
 				(list (quote table) target_schema target_tbl)
 				(cons (quote list) filtercols)
@@ -8573,7 +8581,7 @@ stars through the same catalog-aware path used by physical lowering. */
 							(qb_hidden branch)
 							(qb_stages branch)
 							(qb_facts branch)))
-						(define lookup_recset (list (quote scan_recset)
+						(define lookup_recset (compile_scan_plan (quote scan_recset)
 							(physical_query_tx_symbol)
 							(source_table_expr lookup)
 							(quoted_runtime_list '())
@@ -8739,7 +8747,7 @@ stars through the same catalog-aware path used by physical lowering. */
 				(define specs (map plans (lambda (plan)
 					(union_ordered_scan_spec (nth plan 1) titles order_positions (nth plan 2)))))
 				(define membership_bindings (merge_unique (map specs (lambda (spec) (nth spec 6)))))
-				(define scan_plan (list (quote scan_order_multi)
+				(define scan_plan (compile_scan_plan (quote scan_order_multi)
 					(physical_query_tx_symbol)
 					(cons (quote list) (map specs (lambda (spec) (nth spec 0))))
 					(cons (quote list) (map specs (lambda (spec) (cons (quote list) (nth spec 1)))))
@@ -9367,7 +9375,7 @@ ordering run. Storage artifacts begin in build_queryplan. */
 		(define recset_source (physical_recset_source_expr? table_expr))
 		(define contains_probe (or
 			(physical_recset_contains_expr? (nth scan_expr 3))
-			(physical_recset_contains_expr? (nth scan_expr 4))))
+			(physical_recset_contains_expr? (nth scan_expr 6))))
 		(if (not (or recset_source contains_probe))
 			nil
 			(begin
@@ -9378,9 +9386,9 @@ ordering run. Storage artifacts begin in build_queryplan. */
 					(list "reason" "runtime_cardinality_and_index_span")
 					(list "inputs" (list
 						(list "source" (pretty_print table_expr (settings "ExplainWidth")))
-						(list "sort_columns" (pretty_print (nth scan_expr 5) (settings "ExplainWidth")))
-						(list "offset" (nth scan_expr 8))
-						(list "limit" (nth scan_expr 9))))
+						(list "sort_columns" (pretty_print (nth scan_expr 7) (settings "ExplainWidth")))
+						(list "offset" (nth scan_expr 10))
+						(list "limit" (nth scan_expr 11))))
 					(list "alternatives" (list
 						(list
 							(list "plan" "ordered_inverse_recset")
@@ -9422,10 +9430,10 @@ ordering run. Storage artifacts begin in build_queryplan. */
 
 (define physical_prefiltered_membership_expr? (lambda (expr)
 	(match expr
-		((symbol scan_recset) _tx source _cols _filter)
+		((symbol scan_recset) _tx source _schema _values _cols _filter)
 		(or (physical_expr_has_head? source (quote recset_project_join))
 			(physical_prefiltered_membership_expr? source))
-		((quote scan_recset) _tx source _cols _filter)
+		((quote scan_recset) _tx source _schema _values _cols _filter)
 		(or (physical_expr_has_head? source (quote recset_project_join))
 			(physical_prefiltered_membership_expr? source))
 		(cons head tail) (or
@@ -9830,6 +9838,27 @@ protocol callback receives only the calibration row. */
 					(reduce tail (lambda (total item)
 						(+ total (tree_count item))) 0))
 				_ 1)))
+		(define scan_access_head? (lambda (head)
+			(or (equal? head (quote scan))
+				(or (equal? head (quote scan_order))
+					(or (equal? head (quote scan_order_multi))
+						(or (equal? head (quote scan_batch))
+							(or (equal? head (quote scan_recset))
+								(or (equal? head (quote scan_exists))
+									(or (equal? head (quote scan_selectivity_estimate))
+										(or (equal? head (quote scan_join_order))
+											(or (equal? head (quote scan_lookup))
+												(equal? head (quote scan_order_batch_accept)))))))))))))
+		(define static_scan_access_nodes (lambda (node)
+			(match node
+				(cons head tail) (+
+					(if (and (scan_access_head? head) (> (count tail) 2))
+						(- (tree_count (nth tail 2)) 1)
+						0)
+					(static_scan_access_nodes head)
+					(reduce tail (lambda (total item)
+						(+ total (static_scan_access_nodes item))) 0))
+				_ 0)))
 		(define started_ns (nanotime))
 		(define ir (decorrelate_logical_query query))
 		(define untangled_ns (nanotime))
@@ -9841,12 +9870,25 @@ protocol callback receives only the calibration row. */
 		(define emitted_ns (nanotime))
 		/* Read every raw-plan metric before transferring plan ownership to optimize. */
 		(define plan_text (pretty_print plan (settings "ExplainWidth")))
-		(define raw_plan_nodes (tree_count plan))
 		(define raw_scans (plan_count plan (quote scan)))
 		(define raw_ordered_scans (+
 			(plan_count plan (quote scan_order))
 			(plan_count plan (quote scan_order_multi))))
 		(define raw_exists_scans (plan_count plan (quote scan_exists)))
+		/* Access schema and values are immutable data carriers, not executable
+		plan operations. Discount their two mandatory leaf slots so plan_nodes
+		remains comparable to the pre-ABI execution-complexity budget. The raw
+		optimizer node counters and plan_bytes still include the complete data. */
+		(define raw_scan_access_slots (* 2 (+ raw_scans raw_ordered_scans raw_exists_scans
+			(plan_count plan (quote scan_batch))
+			(plan_count plan (quote scan_recset))
+			(plan_count plan (quote scan_selectivity_estimate))
+			(plan_count plan (quote scan_join_order))
+			(plan_count plan (quote scan_lookup))
+			(plan_count plan (quote scan_order_batch_accept)))))
+		(define raw_plan_nodes (- (tree_count plan)
+			raw_scan_access_slots
+			(static_scan_access_nodes plan)))
 		(define raw_group_caches (plan_count plan (quote touch_keytable)))
 		(define serialized_ns (nanotime))
 		(define optimizer_telemetry (newsession))

@@ -105,42 +105,46 @@ func scmerToTxContext(v scm.Scmer) *TxContext {
 }
 
 type scanArgLayout struct {
-	tx            *TxContext
-	tableIdx      int
-	filterColsIdx int
-	filterFnIdx   int
-	mapColsIdx    int
-	mapReduceIdx  int
-	neutralIdx    int
-	combineIdx    int
-	outerIdx      int
-	sortColsIdx   int
-	sortDirsIdx   int
-	partColsIdx   int
-	offsetIdx     int
-	limitIdx      int
-	strideIdx     int
-	batchDataIdx  int
+	tx              *TxContext
+	tableIdx        int
+	accessSchemaIdx int
+	accessValuesIdx int
+	filterColsIdx   int
+	filterFnIdx     int
+	mapColsIdx      int
+	mapReduceIdx    int
+	neutralIdx      int
+	combineIdx      int
+	outerIdx        int
+	sortColsIdx     int
+	sortDirsIdx     int
+	partColsIdx     int
+	offsetIdx       int
+	limitIdx        int
+	strideIdx       int
+	batchDataIdx    int
 }
 
 func scanLayout(a []scm.Scmer) scanArgLayout {
 	return scanArgLayout{
-		tx:            scmerToTxContext(a[0]),
-		tableIdx:      1,
-		filterColsIdx: 2,
-		filterFnIdx:   3,
-		mapColsIdx:    4,
-		mapReduceIdx:  5,
-		neutralIdx:    6,
-		combineIdx:    7,
-		outerIdx:      8,
-		sortColsIdx:   4,
-		sortDirsIdx:   5,
-		partColsIdx:   6,
-		offsetIdx:     7,
-		limitIdx:      8,
-		strideIdx:     6,
-		batchDataIdx:  7,
+		tx:              scmerToTxContext(a[0]),
+		tableIdx:        1,
+		accessSchemaIdx: 2,
+		accessValuesIdx: 3,
+		filterColsIdx:   4,
+		filterFnIdx:     5,
+		mapColsIdx:      6,
+		mapReduceIdx:    7,
+		neutralIdx:      8,
+		combineIdx:      9,
+		outerIdx:        10,
+		sortColsIdx:     6,
+		sortDirsIdx:     7,
+		partColsIdx:     8,
+		offsetIdx:       9,
+		limitIdx:        10,
+		strideIdx:       8,
+		batchDataIdx:    9,
 	}
 }
 
@@ -901,21 +905,129 @@ func Init(en scm.Env) {
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
 	})
+	scm.DeclareSpecialForm(&en, &scm.Declaration{
+		Name: "compile_scan_access",
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "compiles filter AST data into the common immutable scan access schema and binds its flat runtime values in the caller scope",
+			Params: []*scm.TypeDescriptor{
+				{Kind: "list", Label: "filterColumns", Description: "physical columns corresponding to the filter lambda parameters"},
+				{Kind: "list", Label: "filterExpression", Description: "unevaluated filter lambda AST"},
+			},
+			Return: &scm.TypeDescriptor{Kind: "list", Description: "pair of static schema and bound runtime values"},
+		},
+	}, func(code []scm.Scmer, caller *scm.Env) scm.Scmer {
+		if len(code) != 2 {
+			panic("compile_scan_access expects filter columns and a filter expression")
+		}
+		columns := scm.Eval(code[0], caller)
+		filter := scm.Eval(code[1], caller)
+		schema, valueExprs, _ := compileScanAccess(columns, filter)
+		values := make([]scm.Scmer, len(valueExprs))
+		for i, expression := range valueExprs {
+			values[i] = scm.Eval(expression, caller)
+		}
+		return scm.NewSlice([]scm.Scmer{schema, scm.NewSlice(values)})
+	}, nil)
+	scm.Declare(&en, &scm.Declaration{
+		Name: "compile_scan_computed_index",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			return compileComputedScanIndex(a[0], scmerSliceToStrings(mustScmerSlice(a[1], "computed index columns")))
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "binds runtime constants into a planner-validated computed scan formula",
+			Params: []*scm.TypeDescriptor{
+				{Kind: "func", Label: "mapper"},
+				{Kind: "list", Label: "columns"},
+			},
+			Return: &scm.TypeDescriptor{Kind: "list"},
+		},
+	})
+	scm.Declare(&en, &scm.Declaration{
+		Name: "compile_scan_plan",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			if len(a) < 5 {
+				panic("compile_scan_plan expects an operator, transaction, source, filter columns, and filter callback")
+			}
+			head, ok := scanSymbolName(a[0])
+			if !ok {
+				panic("compile_scan_plan expects a scan operator symbol")
+			}
+			args := a[1:]
+			if schema, static := scanStaticListElements(args[2]); static && len(schema) >= scanAccessSchemaHeaderSize {
+				if _, valid := decodeScanAccessHeader(schema[0]); valid {
+					if len(args) > 5 {
+						schema = markCoveredScanAccessSchema(scm.NewSlice(schema), args[5]).Slice()
+						args = append([]scm.Scmer(nil), args...)
+						args[2] = scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), scm.NewSlice(schema)})
+					}
+					return scm.NewSlice(append([]scm.Scmer{scm.NewSymbol(head)}, args...))
+				}
+			}
+			if schemas, static := scanStaticListElements(args[2]); static && len(schemas) > 0 {
+				if schema, schemaStatic := scanStaticListElements(schemas[0]); schemaStatic && len(schema) >= scanAccessSchemaHeaderSize {
+					if _, valid := decodeScanAccessHeader(schema[0]); valid {
+						if len(args) > 5 {
+							schemas = markCoveredScanAccessSchemas(append([]scm.Scmer(nil), schemas...), args[5])
+							args = append([]scm.Scmer(nil), args...)
+							args[2] = scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), scm.NewSlice(schemas)})
+						}
+						return scm.NewSlice(append([]scm.Scmer{scm.NewSymbol(head)}, args...))
+					}
+				}
+			}
+			if head == "scan_order_multi" || head == "scan_join_order" {
+				if len(args) < 4 {
+					panic("compile_scan_plan expects multi-scan filter lists")
+				}
+				schemas, values, compiled, _ := compileScanAccessList(args[2], args[3], false)
+				if schemas == nil {
+					panic("compile_scan_plan expects matching static multi-scan filters")
+				}
+				filterColumns, filters := pruneScanResidualList(args[2], args[3], compiled, false)
+				schemas = markCoveredScanAccessSchemas(schemas, filters)
+				result := []scm.Scmer{scm.NewSymbol(head), args[0], args[1],
+					scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), scm.NewSlice(schemas)}),
+					scanAccessValuesExpr(values), filterColumns, filters}
+				return scm.NewSlice(append(result, args[4:]...))
+			}
+			if head != "scan" && head != "scan_order" && head != "scan_recset" && head != "scan_exists" && head != "scan_selectivity_estimate" {
+				panic("compile_scan_plan received unsupported operator " + head)
+			}
+			schema, values, compiled := compileScanAccess(args[2], args[3])
+			filterColumns, filter := args[2], args[3]
+			if compiled {
+				prunedColumns, residual := pruneScanResidual(filterColumns, filter, false)
+				schema = markCoveredScanAccessSchema(schema, residual)
+				if head != "scan" || !scanCallbackColumnsMutate(args[4]) {
+					filterColumns, filter = prunedColumns, residual
+				}
+			}
+			schemaExpr := schema
+			if schema.IsSlice() && len(schema.Slice()) > 0 {
+				schemaExpr = scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), schema})
+			}
+			result := []scm.Scmer{scm.NewSymbol(head), args[0], args[1],
+				schemaExpr,
+				scanAccessValuesExpr(values), filterColumns, filter}
+			return scm.NewSlice(append(result, args[4:]...))
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "lowers one functional scan rule to the single physical scan ABI before optimizer/JIT execution",
+			Params: []*scm.TypeDescriptor{
+				{Kind: "symbol", Label: "operator", Description: "physical scan-family operator"},
+				{Kind: "any", Label: "arguments", Description: "functional scan arguments beginning with transaction and source", Variadic: true},
+			},
+			Return: &scm.TypeDescriptor{Kind: "list", Description: "physical scan AST with static access schema and flat runtime values"},
+		},
+	})
 	scm.Declare(&en, &scm.Declaration{
 		Name: "scan_selectivity_estimate",
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			currentTx := scmerToTxContext(a[0])
 			t := TableFromScmer(a[1])
-			conditionCols := scmerSliceToStrings(mustScmerSlice(a[2], "condition columns"))
-			condition := a[3]
-			limit := scm.ToInt(a[4])
-			accessSchema := scm.NewNil()
-			var accessValues []scm.Scmer
-			if len(a) > 6 {
-				accessSchema = a[5]
-				accessValues = mustScmerSlice(a[6], "scan_selectivity_estimate access values")
-			}
+			accessSchema := a[2]
+			accessValues := mustScmerSlice(a[3], "scan_selectivity_estimate access values")
+			conditionCols := scmerSliceToStrings(mustScmerSlice(a[4], "condition columns"))
+			condition := a[5]
+			limit := scm.ToInt(a[6])
 			if limit <= 0 {
 				limit = 1024
 			}
@@ -1007,11 +1119,11 @@ func Init(en scm.Env) {
 			Params: []*scm.TypeDescriptor{
 				{Kind: "any", Label: "tx", Description: "transaction context to use for visibility; usually ((context \"session\") \"__memcp_tx\")"},
 				{Kind: "table", Label: "table"},
+				{Kind: "list", Label: "accessSchema", Description: "optimizer-compiled static scan access schema", NoEscape: true},
+				{Kind: "list", Label: "accessValues", Description: "flat runtime values referenced by accessSchema", NoEscape: true},
 				columnList("condition_cols", "columns passed to the selectivity predicate"),
 				scanCallback("condition", "predicate sampled to estimate matching rows", "bool", "true when the sampled row matches"),
 				{Kind: "int", Label: "max_rows"},
-				{Kind: "list", Label: "accessSchema", Description: "optimizer-compiled static scan access schema", Optional: true, NoEscape: true},
-				{Kind: "list", Label: "accessValues", Description: "flat runtime values referenced by accessSchema", Optional: true, NoEscape: true},
 			},
 			Return: &scm.TypeDescriptor{Kind: "list"},
 		},
@@ -1036,28 +1148,24 @@ func Init(en scm.Env) {
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			currentTx := scmerToTxContext(a[0])
-			filtercols := scmerSliceToStrings(mustScmerSlice(a[2], "filterColumns"))
-			accessSchema := scm.NewNil()
-			var accessValues []scm.Scmer
-			if len(a) > 5 {
-				accessSchema = a[4]
-				accessValues = mustScmerSlice(a[5], "scan_recset access values")
-			}
+			accessSchema := a[2]
+			accessValues := mustScmerSlice(a[3], "scan_recset access values")
+			filtercols := scmerSliceToStrings(mustScmerSlice(a[4], "filterColumns"))
 			if a[1].IsCustom(TagRecSet) {
-				return NewRecSetScmer(RecSetFromScmer(a[1]).filterToRecSet(currentTx, filtercols, a[3]))
+				return NewRecSetScmer(RecSetFromScmer(a[1]).filterToRecSet(currentTx, filtercols, a[5], accessSchema, accessValues))
 			}
 			t := TableFromScmer(a[1])
-			return NewRecSetScmer(t.scanRecSet(currentTx, filtercols, a[3], accessSchema, accessValues))
+			return NewRecSetScmer(t.scanRecSet(currentTx, accessSchema, accessValues, filtercols, a[5]))
 		},
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "builds a query-local record-set handle from one table scan, or -- when given an existing recset instead of a table -- narrows that recset to the members which also satisfy filter, re-evaluating filter only over its existing membership. The latter is the cheap way to AND a further (possibly subscan-heavy) condition onto an already-narrowed recset without re-touching rows outside it (e.g. evaluating an expensive correlated check only over the rows a cheap selective filter already narrowed a table down to). The returned value is not persisted and can be scanned like a table",
 			HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
 				{Kind: "any", Label: "tx", Description: "transaction context to use for visibility; usually ((context \"session\") \"__memcp_tx\")"},
 				{Kind: "any", Label: "table", Description: "a table, or an existing recset to narrow further"},
+				{Kind: "list", Label: "accessSchema", Description: "optimizer-compiled static scan access schema", NoEscape: true},
+				{Kind: "list", Label: "accessValues", Description: "flat runtime values referenced by accessSchema", NoEscape: true},
 				columnList("filterColumns", scanFilterColumnsDesc),
 				scanCallback("filter", "lambda function that decides whether a row enters the recset", "bool", "true when the row belongs in the recset"),
-				{Kind: "list", Label: "accessSchema", Description: "optimizer-compiled static scan access schema", Optional: true, NoEscape: true},
-				{Kind: "list", Label: "accessValues", Description: "flat runtime values referenced by accessSchema", Optional: true, NoEscape: true},
 			},
 			Return: &scm.TypeDescriptor{Kind: "recset"},
 		},
@@ -1212,16 +1320,12 @@ func Init(en scm.Env) {
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			currentTx := scmerToTxContext(a[0])
-			filtercols := scmerSliceToStrings(mustScmerSlice(a[2], "filterColumns"))
-			accessSchema := scm.NewNil()
-			var accessValues []scm.Scmer
-			if len(a) > 5 {
-				accessSchema = a[4]
-				accessValues = mustScmerSlice(a[5], "scan_exists access values")
-			}
+			accessSchema := a[2]
+			accessValues := mustScmerSlice(a[3], "scan_exists access values")
+			filtercols := scmerSliceToStrings(mustScmerSlice(a[4], "filterColumns"))
 			tableArg := a[1]
 			if list, ok := scmerSlice(tableArg); ok {
-				filterfn := scm.OptimizeProcToSerialFunction(a[3])
+				filterfn := scm.OptimizeProcToSerialFunction(a[5])
 				filterparams := make([]scm.Scmer, len(filtercols))
 				for _, val := range list {
 					row := mustScmerSlice(val, "scan_exists list row")
@@ -1236,19 +1340,19 @@ func Init(en scm.Env) {
 				return scm.NewBool(false)
 			}
 			if tableArg.IsCustom(TagRecSet) {
-				return scm.NewBool(RecSetFromScmer(tableArg).scanExists(currentTx, filtercols, a[3], accessSchema, accessValues))
+				return scm.NewBool(RecSetFromScmer(tableArg).scanExists(currentTx, accessSchema, accessValues, filtercols, a[5]))
 			}
 			t := TableFromScmer(tableArg)
-			return scm.NewBool(t.scanExistsFrom(currentTx, nil, filtercols, a[3], accessSchema, accessValues))
+			return scm.NewBool(t.scanExistsFrom(currentTx, nil, accessSchema, accessValues, filtercols, a[5]))
 		},
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "returns true if a table contains at least one visible row matching the given filter; uses scan boundary analysis without map/reduce setup",
 			Params: []*scm.TypeDescriptor{
 				{Kind: "any", Label: "tx", Description: "transaction context to use for visibility; usually ((context \"session\") \"__memcp_tx\")"},
 				{Kind: "table|list|recset", Label: "table"},
+				{Kind: "list", Label: "accessSchema", Description: "optimizer-compiled static scan access schema", NoEscape: true},
+				{Kind: "list", Label: "accessValues", Description: "flat runtime values referenced by accessSchema", NoEscape: true},
 				columnList("filterColumns", scanFilterColumnsDesc),
 				scanCallback("filter", "lambda function that decides whether a row exists", "bool", "true when the row satisfies the existence test"),
-				{Kind: "list", Label: "accessSchema", Description: "optimizer-compiled static scan access schema", Optional: true, NoEscape: true},
-				{Kind: "list", Label: "accessValues", Description: "flat runtime values referenced by accessSchema", Optional: true, NoEscape: true},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
@@ -1279,7 +1383,7 @@ func Init(en scm.Env) {
 			Params: []*scm.TypeDescriptor{
 				{Kind: "any", Label: "tx", Description: "transaction context used for visibility"},
 				{Kind: "table", Label: "table"},
-				{Kind: "list", NoEscape: true, Label: "schema", Description: "static scan_lookup_v1 schema containing access, projection, and consumer layout"},
+				{Kind: "list", NoEscape: true, Label: "schema", Description: "static scan_access schema containing access, projection, and consumer layout"},
 				{Kind: "list", NoEscape: true, Label: "values", Description: "flat runtime match values followed by an optional mapper"},
 			},
 			Return: &scm.TypeDescriptor{Kind: "any", Description: "projected scalar, mapped scalar, or boolean existence result"},
@@ -1291,6 +1395,8 @@ func Init(en scm.Env) {
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			layout := scanLayout(a)
+			accessSchema := a[layout.accessSchemaIdx]
+			accessValues := mustScmerSlice(a[layout.accessValuesIdx], "scan access values")
 			filtercols := scmerSliceToStrings(mustScmerSlice(a[layout.filterColsIdx], "filterColumns"))
 			mapcols := scmerSliceToStrings(mustScmerSlice(a[layout.mapColsIdx], "mapColumns"))
 			tableArg := a[layout.tableIdx]
@@ -1351,7 +1457,7 @@ func Init(en scm.Env) {
 				if len(a) > layout.combineIdx {
 					combine = a[layout.combineIdx]
 				}
-				return rs.scan(layout.tx, filtercols, a[layout.filterFnIdx], mapcols, a[layout.mapReduceIdx], neutral, combine, isOuter)
+				return rs.scan(layout.tx, accessSchema, accessValues, filtercols, a[layout.filterFnIdx], mapcols, a[layout.mapReduceIdx], neutral, combine, isOuter)
 			}
 
 			t := TableFromScmer(tableArg)
@@ -1364,20 +1470,16 @@ func Init(en scm.Env) {
 			if len(a) > layout.combineIdx {
 				combine = a[layout.combineIdx]
 			}
-			accessSchema := scm.NewNil()
-			var accessValues []scm.Scmer
-			if len(a) > 10 {
-				accessSchema = a[9]
-				accessValues = mustScmerSlice(a[10], "scan access values")
-			}
-			return t.scanWithBatchFrom(layout.tx, nil, filtercols, a[layout.filterFnIdx], mapcols,
-				a[layout.mapReduceIdx], neutral, combine, isOuter, 0, nil, nil, accessSchema, accessValues)
+			return t.scanWithBatchFrom(layout.tx, nil, accessSchema, accessValues, scanAccess{}, filtercols, a[layout.filterFnIdx], mapcols,
+				a[layout.mapReduceIdx], neutral, combine, isOuter, 0, nil)
 		},
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "does an unordered parallel filtered reduction on a single table and returns the reduced result",
 			HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
 				{Kind: "any", Label: "tx", Description: "transaction context to use for visibility and mutations; usually ((context \"session\") \"__memcp_tx\")"},
 				{Kind: "table|list|recset", Label: "table", Description: "table handle, query-local recset, or a list for temporary data"},
+				{Kind: "list", Label: "accessSchema", Description: "optimizer-compiled static scan access schema", NoEscape: true},
+				{Kind: "list", Label: "accessValues", Description: "flat runtime values referenced by accessSchema", NoEscape: true},
 				columnList("filterColumns", scanFilterColumnsDesc),
 				scanCallback("filter", "lambda function that decides whether a dataset is passed to the map phase. Equality and range comparisons may be translated into indexed scans", "bool", "true when the row proceeds to map"),
 				columnList("mapReduceColumns", scanMapColumnsDesc),
@@ -1385,8 +1487,6 @@ func Init(en scm.Env) {
 				{Kind: "any", Label: "neutral", Description: "(optional) neutral accumulator, otherwise nil is assumed", Optional: true},
 				reducer("combine", "optional reducer combining shard-local accumulators"),
 				{Kind: "bool", Label: "isOuter", Description: "(optional) if true, call mapReduce once with the neutral accumulator and NULL columns when there are no hits", Optional: true},
-				{Kind: "list", Label: "accessSchema", Description: "optimizer-compiled static scan access schema", Optional: true, NoEscape: true},
-				{Kind: "list", Label: "accessValues", Description: "flat runtime values referenced by accessSchema", Optional: true, NoEscape: true},
 			},
 			Return: &scm.TypeDescriptor{Kind: "any"},
 		},
@@ -1397,6 +1497,8 @@ func Init(en scm.Env) {
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			layout := scanLayout(a)
+			accessSchema := a[layout.accessSchemaIdx]
+			accessValues := mustScmerSlice(a[layout.accessValuesIdx], "scan_batch access values")
 			filtercols := scmerSliceToStrings(mustScmerSlice(a[layout.filterColsIdx], "filterColumns"))
 			mapcols := scmerSliceToStrings(mustScmerSlice(a[layout.mapColsIdx], "mapColumns"))
 			stride := int(scm.ToInt(a[layout.strideIdx]))
@@ -1482,18 +1584,14 @@ func Init(en scm.Env) {
 			if len(a) > layout.combineIdx+sbShift {
 				combine = a[layout.combineIdx+sbShift]
 			}
-			accessSchema := scm.NewNil()
-			var accessValues []scm.Scmer
-			if len(a) > layout.outerIdx+sbShift+2 {
-				accessSchema = a[layout.outerIdx+sbShift+1]
-				accessValues = mustScmerSlice(a[layout.outerIdx+sbShift+2], "scan_batch access values")
-			}
-			return t.scanWithBatchFrom(layout.tx, source, filtercols, a[layout.filterFnIdx], mapcols, a[layout.mapReduceIdx], neutral, combine, isOuter, stride, batchdata, nil, accessSchema, accessValues)
+			return t.scanWithBatchFrom(layout.tx, source, accessSchema, accessValues, scanAccess{}, filtercols, a[layout.filterFnIdx], mapcols, a[layout.mapReduceIdx], neutral, combine, isOuter, stride, batchdata)
 		},
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "does an unordered parallel filtered reduction on a single table using batchdata-backed #N pseudo columns and returns the reduced result",
 			Params: []*scm.TypeDescriptor{
 				{Kind: "any", Label: "tx", Description: "transaction context to use for visibility and mutations; usually ((context \"session\") \"__memcp_tx\")"},
 				{Kind: "table|list|recset", Label: "table", Description: "table handle, query-local recset, or a list for temporary data"},
+				{Kind: "list", Label: "accessSchema", Description: "optimizer-compiled static scan access schema with optional batch slots", NoEscape: true},
+				{Kind: "list", Label: "accessValues", Description: "flat runtime values referenced by accessSchema", NoEscape: true},
 				columnList("filterColumns", "columns passed to filter; #0, #1, ... address batchdata slots"),
 				scanCallback("filter", "lambda function that decides whether a dataset is passed to the map phase", "bool", "true when this table row and batch row proceed to map"),
 				columnList("mapReduceColumns", "columns passed after the accumulator; #0, #1, ... address batchdata slots"),
@@ -1503,8 +1601,6 @@ func Init(en scm.Env) {
 				{Kind: "any", Label: "neutral", Description: "(optional) neutral accumulator, otherwise nil is assumed", Optional: true},
 				reducer("combine", "optional reducer combining shard-local accumulators"),
 				{Kind: "bool", Label: "isOuter", Description: "(optional) if true, in case of no hits, call map once anyway with NULL values", Optional: true},
-				{Kind: "list", Label: "accessSchema", Description: "optimizer-compiled static scan access schema with optional batch slots", Optional: true, NoEscape: true},
-				{Kind: "list", Label: "accessValues", Description: "flat runtime values referenced by accessSchema", Optional: true, NoEscape: true},
 			},
 			Return: &scm.TypeDescriptor{Kind: "any"},
 		},
@@ -1516,26 +1612,28 @@ func Init(en scm.Env) {
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			currentTx := scmerToTxContext(a[0])
 			tableArg := a[1]
-			batchFilter := a[2]
-			sortcolsVals := mustScmerSlice(a[3], "sortcols")
-			sortdirsVals := mustScmerSlice(a[4], "sortdirs")
+			accessSchema := a[2]
+			accessValues := mustScmerSlice(a[3], "scan_order_batch_accept access values")
+			batchFilter := a[4]
+			sortcolsVals := mustScmerSlice(a[5], "sortcols")
+			sortdirsVals := mustScmerSlice(a[6], "sortdirs")
 			sortdirs := make([]func(...scm.Scmer) scm.Scmer, len(sortdirsVals))
 			for i, dir := range sortdirsVals {
 				sortdirs[i] = scm.OptimizeProcToSerialFunction(dir)
 			}
-			limitPartitionCols := scm.ToInt(a[5])
-			offset := scm.ToInt(a[6])
-			limit := scm.ToInt(a[7])
-			mapcols := scmerSliceToStrings(mustScmerSlice(a[8], "mapColumns"))
-			mapReduce := a[9]
+			limitPartitionCols := scm.ToInt(a[7])
+			offset := scm.ToInt(a[8])
+			limit := scm.ToInt(a[9])
+			mapcols := scmerSliceToStrings(mustScmerSlice(a[10], "mapColumns"))
+			mapReduce := a[11]
 			neutral := scm.NewNil()
-			if len(a) > 10 {
-				neutral = a[10]
-			}
-			isOuter := len(a) > 11 && scm.ToBool(a[11])
-			notFoundValue := neutral
 			if len(a) > 12 {
-				notFoundValue = a[12]
+				neutral = a[12]
+			}
+			isOuter := len(a) > 13 && scm.ToBool(a[13])
+			notFoundValue := neutral
+			if len(a) > 14 {
+				notFoundValue = a[14]
 			}
 			source := scanOrderTableSpec{}
 			if tableArg.IsCustom(TagRecSet) {
@@ -1543,6 +1641,7 @@ func Init(en scm.Env) {
 			} else {
 				source.table = TableFromScmer(tableArg)
 			}
+			source.accessSchema, source.accessValues = accessSchema, accessValues
 			return scanOrderBatchAccept(currentTx, source, batchFilter, sortcolsVals, sortdirs,
 				limitPartitionCols, offset, limit, mapcols, mapReduce, neutral, isOuter, notFoundValue)
 		},
@@ -1551,6 +1650,8 @@ func Init(en scm.Env) {
 			Params: []*scm.TypeDescriptor{
 				{Kind: "any", Label: "tx", Description: "transaction context used consistently by the candidate scan and every batch filter operation; usually ((context \"session\") \"__memcp_tx\")"},
 				{Kind: "table|recset", Label: "table_or_recset", Description: "base table or complete existing query-local RecSet from which ordered candidate batches are drawn"},
+				{Kind: "list", Label: "accessSchema", Description: "optimizer-compiled static scan access schema", NoEscape: true},
+				{Kind: "list", Label: "accessValues", Description: "flat runtime values referenced by accessSchema", NoEscape: true},
 				{Kind: "func", NoEscape: true, Label: "batchFilter", Description: "function (lambda (input_recset) accepted_recset). It may naively narrow input_recset with scan_recset, or run arbitrary RecSet projections/search/ACL operations and project back. It must return a same-table, same-transaction subset of input_recset", Params: []*scm.TypeDescriptor{{Kind: "recset", Label: "input_recset"}}, Return: &scm.TypeDescriptor{Kind: "recset"}},
 				sortColumnList("sortcols", "same as scan_order: columns or computed sort functions. Include a unique tie-breaker for a total repeatable order; use an empty list for greedy unsorted collection"),
 				sortDirectionList("sortdirs", "same as scan_order: one relation per sort column; must also be empty when sortcols is empty"),
@@ -1572,6 +1673,8 @@ func Init(en scm.Env) {
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			layout := scanLayout(a)
+			accessSchema := a[layout.accessSchemaIdx]
+			accessValues := mustScmerSlice(a[layout.accessValuesIdx], "scan_order access values")
 			filtercols := scmerSliceToStrings(mustScmerSlice(a[layout.filterColsIdx], "filterColumns"))
 			sortcolsVals := mustScmerSlice(a[layout.sortColsIdx], "sortcols")
 			sortdirsVals := mustScmerSlice(a[layout.sortDirsIdx], "sortdirs")
@@ -1600,13 +1703,6 @@ func Init(en scm.Env) {
 				postOrderCols = scmerSliceToStrings(mustScmerSlice(a[layout.limitIdx+6], "postOrderFilterColumns"))
 				postOrderFilter = a[layout.limitIdx+7]
 			}
-			accessSchema := scm.NewNil()
-			var accessValues []scm.Scmer
-			if len(a) > layout.limitIdx+9 {
-				accessSchema = a[layout.limitIdx+8]
-				accessValues = mustScmerSlice(a[layout.limitIdx+9], "scan_order access values")
-			}
-
 			// TODO(planner-scalability): remove list-backed relational scans after
 			// metadata/RDF callers use physical scan sources. Query plans must never
 			// materialize cardinality-dependent rows into SCM lists.
@@ -1716,17 +1812,19 @@ func Init(en scm.Env) {
 			}
 
 			if tableArg.IsCustom(TagRecSet) {
-				return RecSetFromScmer(tableArg).scan_order(layout.tx, filtercols, a[layout.filterFnIdx], sortcolsVals, sortdirs, limitPartitionCols, scm.ToInt(a[layout.offsetIdx]), scm.ToInt(a[layout.limitIdx]), mapcols, a[layout.limitIdx+2], neutral, isOuter, notFoundValue, postOrderCols, postOrderFilter, accessSchema, accessValues)
+				return RecSetFromScmer(tableArg).scan_order(layout.tx, accessSchema, accessValues, filtercols, a[layout.filterFnIdx], sortcolsVals, sortdirs, limitPartitionCols, scm.ToInt(a[layout.offsetIdx]), scm.ToInt(a[layout.limitIdx]), mapcols, a[layout.limitIdx+2], neutral, isOuter, notFoundValue, postOrderCols, postOrderFilter)
 			}
 
 			t := TableFromScmer(a[layout.tableIdx])
 
-			return t.scan_order(layout.tx, filtercols, a[layout.filterFnIdx], sortcolsVals, sortdirs, limitPartitionCols, scm.ToInt(a[layout.offsetIdx]), scm.ToInt(a[layout.limitIdx]), mapcols, a[layout.limitIdx+2], neutral, isOuter, notFoundValue, postOrderCols, postOrderFilter, accessSchema, accessValues)
+			return t.scan_order(layout.tx, accessSchema, accessValues, filtercols, a[layout.filterFnIdx], sortcolsVals, sortdirs, limitPartitionCols, scm.ToInt(a[layout.offsetIdx]), scm.ToInt(a[layout.limitIdx]), mapcols, a[layout.limitIdx+2], neutral, isOuter, notFoundValue, postOrderCols, postOrderFilter)
 		},
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "does an ordered parallel filter and serial reduction pass on a single table and returns the reduced result",
 			Params: []*scm.TypeDescriptor{
 				{Kind: "any", Label: "tx", Description: "transaction context to use for visibility and mutations; usually ((context \"session\") \"__memcp_tx\")"},
 				{Kind: "table|list|recset", Label: "table", Description: "table handle, query-local RecSet, or a list for temporary data"},
+				{Kind: "list", Label: "accessSchema", Description: "optimizer-compiled static scan access schema", NoEscape: true},
+				{Kind: "list", Label: "accessValues", Description: "flat runtime values referenced by accessSchema", NoEscape: true},
 				columnList("filterColumns", scanFilterColumnsDesc),
 				scanCallback("filter", "lambda function that decides whether a dataset is passed to the map phase. Equality and range comparisons may be translated into indexed scans", "bool", "true when the row proceeds to ordering and map"),
 				sortColumnList("sortcols", "columns used for ordering; each entry corresponds to one relation in sortdirs"),
@@ -1749,8 +1847,6 @@ func Init(en scm.Env) {
 					value.Optional = true
 					return value
 				}(),
-				{Kind: "list", Label: "accessSchema", Description: "optimizer-compiled static scan access schema", Optional: true, NoEscape: true},
-				{Kind: "list", Label: "accessValues", Description: "flat runtime values referenced by accessSchema", Optional: true, NoEscape: true},
 			},
 			Return: &scm.TypeDescriptor{Kind: "any"},
 		},
@@ -1763,52 +1859,41 @@ func Init(en scm.Env) {
 			// Parameters:
 			// 0:  tx
 			// 1:  tables list (table handles)
-			// 2:  filterColumns per table (list of lists)
-			// 3:  filterFns per table (list of lambdas)
-			// 4:  sortcols per table (list of lists)
-			// 5:  sortdirs (shared list — used for both per-table top-K and outer merge)
-			// 6:  perTableOffset (list of int, or nil; -1 per entry = disable for that table)
-			// 7:  perTableLimit  (list of int, or nil; -1 per entry = disable for that table)
-			// 8:  limitPartitionCols (global Top-K-per-partition across merge)
-			// 9:  offset (global)
-			// 10: limit  (global; -1 = unlimited)
-			// 11: mapReduceColumns per table (list of lists)
-			// 12: mapReduceFns per table (list of lambdas)
-			// 13: neutral (optional)
-			// 14: isOuter (optional)
-			// 15: notFoundValue (optional)
+			// 2..3: compiled access schemas and their flat runtime values
+			// 4..5: filterColumns and filterFns per table
+			// 6..7: sortcols per table and shared sortdirs
+			// 8..9: per-table offsets and limits
+			// 10..12: global partition columns, offset and limit
+			// 13..14: mapReduceColumns and mapReduceFns per table
+			// 15..17: optional neutral, isOuter and notFoundValue
 			currentTx := scmerToTxContext(a[0])
 			tables := mustScmerSlice(a[1], "tables")
-			filterColsArr := mustScmerSlice(a[2], "filterColumns")
-			filterFnArr := mustScmerSlice(a[3], "filterFns")
-			sortcolsArr := mustScmerSlice(a[4], "sortcols")
-			sortdirsVals := mustScmerSlice(a[5], "sortdirs")
+			accessSchemas := mustScmerSlice(a[2], "accessSchemas")
+			accessValues := mustScmerSlice(a[3], "scan_order_multi access values")
+			filterColsArr := mustScmerSlice(a[4], "filterColumns")
+			filterFnArr := mustScmerSlice(a[5], "filterFns")
+			sortcolsArr := mustScmerSlice(a[6], "sortcols")
+			sortdirsVals := mustScmerSlice(a[7], "sortdirs")
 			n := len(tables)
-			perTableOffsets := decodePerTableInts(a[6], n, "perTableOffset")
-			perTableLimits := decodePerTableInts(a[7], n, "perTableLimit")
-			limitPartitionCols := scm.ToInt(a[8])
-			offset := scm.ToInt(a[9])
-			limit := scm.ToInt(a[10])
-			mapColsArr := mustScmerSlice(a[11], "mapReduceColumns")
-			mapReduceFnArr := mustScmerSlice(a[12], "mapReduceFns")
+			perTableOffsets := decodePerTableInts(a[8], n, "perTableOffset")
+			perTableLimits := decodePerTableInts(a[9], n, "perTableLimit")
+			limitPartitionCols := scm.ToInt(a[10])
+			offset := scm.ToInt(a[11])
+			limit := scm.ToInt(a[12])
+			mapColsArr := mustScmerSlice(a[13], "mapReduceColumns")
+			mapReduceFnArr := mustScmerSlice(a[14], "mapReduceFns")
 
 			neutral := scm.NewNil()
-			if len(a) > 13 {
-				neutral = a[13]
-			}
-			isOuter := len(a) > 14 && scm.ToBool(a[14])
-			notFoundValue := neutral
 			if len(a) > 15 {
-				notFoundValue = a[15]
+				neutral = a[15]
 			}
-			var accessSchemas []scm.Scmer
-			var accessValues []scm.Scmer
+			isOuter := len(a) > 16 && scm.ToBool(a[16])
+			notFoundValue := neutral
 			if len(a) > 17 {
-				accessSchemas = mustScmerSlice(a[16], "accessSchemas")
-				accessValues = mustScmerSlice(a[17], "scan_order_multi access values")
-				if len(accessSchemas) != n {
-					panic("scan_order_multi: accessSchemas must match the table count")
-				}
+				notFoundValue = a[17]
+			}
+			if len(accessSchemas) != n {
+				panic("scan_order_multi: accessSchemas must match the table count")
 			}
 
 			if len(filterColsArr) != n || len(filterFnArr) != n || len(sortcolsArr) != n || len(mapColsArr) != n || len(mapReduceFnArr) != n {
@@ -1848,6 +1933,8 @@ func Init(en scm.Env) {
 			Params: []*scm.TypeDescriptor{
 				{Kind: "any", Label: "tx", Description: "transaction context"},
 				{Kind: "list", Label: "tables", Description: "scan sources; all per-table lists must have this length", Element: &scm.TypeDescriptor{Kind: "table|recset", Label: "source", Description: "base table or query-local record set for one input stream"}},
+				{Kind: "list", Label: "accessSchemas", Description: "optimizer-compiled static scan access schemas, one per table", NoEscape: true},
+				{Kind: "list", Label: "accessValues", Description: "flat runtime values shared by accessSchemas", NoEscape: true},
 				{Kind: "list", Label: "filterColumns", Description: "filter column lists, one per table", Element: &scm.TypeDescriptor{Kind: "list", Label: "table filter columns", Description: "columns supplied to the matching filterFns entry", Element: &scm.TypeDescriptor{Kind: "string", Label: "column", Description: "column name in the corresponding table"}}},
 				{Kind: "list", Label: "filterFns", Description: "filter lambdas, one per table", Element: scanCallback("table filter", "predicate for the corresponding table and filterColumns entry", "bool", "true when the row enters that table's ordered stream")},
 				{Kind: "list", Label: "sortcols", Description: "sort column lists, one per table; every inner list must match sortdirs in length and result domains", Element: sortColumnList("table sort columns", "sort expressions for the corresponding table")},
@@ -1862,8 +1949,6 @@ func Init(en scm.Env) {
 				{Kind: "any", Label: "neutral", Description: "(optional) neutral accumulator", Optional: true},
 				{Kind: "bool", Label: "isOuter", Description: "(optional) if true, emit null row when no hits", Optional: true},
 				{Kind: "any", Label: "notFoundValue", Description: "(optional) result for no hits when isOuter is false; defaults to neutral", Optional: true},
-				{Kind: "list", Label: "accessSchemas", Description: "optimizer-compiled static scan access schemas, one per table", Optional: true, NoEscape: true},
-				{Kind: "list", Label: "accessValues", Description: "flat runtime values shared by accessSchemas", Optional: true, NoEscape: true},
 			},
 			Return: &scm.TypeDescriptor{Kind: "any"},
 		},
@@ -2877,13 +2962,18 @@ func Init(en scm.Env) {
 
 			// Build a fused count scan over matching base rows.
 			buildCountScan := func(dictSym string) scm.Scmer {
+				filterCols := scanFilterCols(baseCols)
+				filter := scm.NewSlice(append([]scm.Scmer{scm.NewSymbol("lambda"), scanFilterParams(tblvar, baseCols)},
+					buildAndEquals(scanParamSyms(tblvar, baseCols), getAssocs(dictSym, baseCols))))
+				accessSchema, accessValues := compiledScanAccessExpressions(filterCols, filter)
 				return scm.NewSlice([]scm.Scmer{
 					scm.NewSymbol("scan"),
 					scm.NewSymbol("tx"),
 					scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(baseSchema), scm.NewString(baseTable.Name)}),
-					scanFilterCols(baseCols),
-					scm.NewSlice(append([]scm.Scmer{scm.NewSymbol("lambda"), scanFilterParams(tblvar, baseCols)},
-						buildAndEquals(scanParamSyms(tblvar, baseCols), getAssocs(dictSym, baseCols)))),
+					accessSchema,
+					accessValues,
+					filterCols,
+					filter,
 					scm.NewSlice([]scm.Scmer{scm.NewSymbol("list")}),
 					scm.NewSlice([]scm.Scmer{scm.NewSymbol("lambda"), scm.NewSlice([]scm.Scmer{scm.NewSymbol("acc")}),
 						scm.NewSlice([]scm.Scmer{scm.NewSymbol("+"), scm.NewSymbol("acc"), scm.NewInt(1)})}),
@@ -2893,13 +2983,18 @@ func Init(en scm.Env) {
 
 			// Build a fused delete scan over matching keytable rows.
 			buildDeleteScan := func(dictSym string) scm.Scmer {
+				filterCols := scanFilterCols(ktCols)
+				filter := scm.NewSlice(append([]scm.Scmer{scm.NewSymbol("lambda"), scanFilterParams(ktName, ktCols)},
+					buildAndEquals(scanParamSyms(ktName, ktCols), getAssocs(dictSym, baseCols))))
+				accessSchema, accessValues := compiledScanAccessExpressions(filterCols, filter)
 				return scm.NewSlice([]scm.Scmer{
 					scm.NewSymbol("scan"),
 					scm.NewSymbol("tx"),
 					scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(ktSchema), scm.NewString(ktName)}),
-					scanFilterCols(ktCols),
-					scm.NewSlice(append([]scm.Scmer{scm.NewSymbol("lambda"), scanFilterParams(ktName, ktCols)},
-						buildAndEquals(scanParamSyms(ktName, ktCols), getAssocs(dictSym, baseCols)))),
+					accessSchema,
+					accessValues,
+					filterCols,
+					filter,
 					scm.NewSlice([]scm.Scmer{scm.NewSymbol("list"), scm.NewString("$update")}),
 					scm.NewSlice([]scm.Scmer{scm.NewSymbol("lambda"), scm.NewSlice([]scm.Scmer{scm.NewSymbol("acc"), scm.NewSymbol("$update")}),
 						scm.NewSlice([]scm.Scmer{scm.NewSymbol("begin"),
@@ -3961,6 +4056,20 @@ func Init(en scm.Env) {
 	initFKBuiltins(en)
 }
 
+func scanCallbackColumnsMutate(columnsExpr scm.Scmer) bool {
+	columns, static := scanStaticColumns(columnsExpr)
+	if !static {
+		return true
+	}
+	for _, column := range columns {
+		name := column.String()
+		if name == "$update" || strings.HasPrefix(name, "$increment:") {
+			return true
+		}
+	}
+	return false
+}
+
 func PrintMemUsage() string {
 	m := scm.CachedMemStats()
 	// For info on each, see: https://golang.org/pkg/runtime/#MemStats
@@ -4116,7 +4225,7 @@ func fkExistenceCheck(currentTx *TxContext, tbl *table, filterCols []string, val
 	combineFn := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
 		return scm.NewBool(scm.ToBool(a[0]) || scm.ToBool(a[1]))
 	})
-	return scm.ToBool(tbl.scan(currentTx, filterCols, condition, filterCols[:0], mapReduceFn, scm.NewBool(false), combineFn, false))
+	return scm.ToBool(tbl.scan(currentTx, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, filterCols, condition, filterCols[:0], mapReduceFn, scm.NewBool(false), combineFn, false))
 }
 
 // fkCascadeDelete deletes rows in childTbl where cols match vals.
@@ -4136,7 +4245,7 @@ func fkCascadeDelete(currentTx *TxContext, childTbl *table, cols []string, vals 
 		scm.Apply(a[len(cols)+1]) // $update() with no args = delete
 		return a[0]
 	})
-	childTbl.scan(currentTx, cols, condition, mapCols, mapReduceFn, scm.NewNil(), scm.NewNil(), false)
+	childTbl.scan(currentTx, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, cols, condition, mapCols, mapReduceFn, scm.NewNil(), scm.NewNil(), false)
 }
 
 // fkCascadeSetNull sets FK cols to NULL in childTbl where cols match vals.
@@ -4161,7 +4270,7 @@ func fkCascadeSetNull(currentTx *TxContext, childTbl *table, cols []string, vals
 		scm.Apply(a[len(cols)+1], scm.NewSlice(payload))
 		return a[0]
 	})
-	childTbl.scan(currentTx, cols, condition, mapCols, mapReduceFn, scm.NewNil(), scm.NewNil(), false)
+	childTbl.scan(currentTx, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, cols, condition, mapCols, mapReduceFn, scm.NewNil(), scm.NewNil(), false)
 }
 
 // fkCascadeUpdate updates FK cols in childTbl from oldVals to newVals.
@@ -4186,7 +4295,7 @@ func fkCascadeUpdate(currentTx *TxContext, childTbl *table, cols []string, oldVa
 		scm.Apply(a[len(cols)+1], scm.NewSlice(payload))
 		return a[0]
 	})
-	childTbl.scan(currentTx, cols, condition, mapCols, mapReduceFn, scm.NewNil(), scm.NewNil(), false)
+	childTbl.scan(currentTx, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, cols, condition, mapCols, mapReduceFn, scm.NewNil(), scm.NewNil(), false)
 }
 
 // initFKBuiltins declares the FK enforcement builtins used by trigger Procs.

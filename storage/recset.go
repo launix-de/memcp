@@ -412,9 +412,9 @@ func recSetNot(currentTx *TxContext, item *recSet) *recSet {
 	if item == nil || item.table == nil {
 		panic("recset_not requires a recset with a base table")
 	}
-	visible := item.table.scanRecSet(currentTx, nil, scm.NewFunc(func(...scm.Scmer) scm.Scmer {
+	visible := item.table.scanRecSet(currentTx, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, nil, scm.NewFunc(func(...scm.Scmer) scm.Scmer {
 		return scm.NewBool(true)
-	}), scm.NewNil(), nil)
+	}))
 	return recSetDifference(currentTx, []*recSet{visible, item})
 }
 
@@ -453,24 +453,21 @@ type recSetKeyResult struct {
 	err  scanError
 }
 
-func (t *table) scanRecSet(currentTx *TxContext, conditionCols []string, condition scm.Scmer, accessSchema scm.Scmer, accessValues []scm.Scmer) *recSet {
+func (t *table) scanRecSet(currentTx *TxContext, accessSchema scm.Scmer, accessValues []scm.Scmer, conditionCols []string, condition scm.Scmer) *recSet {
 	ss := SessionStateFromTx(currentTx)
 	querySeq := querySeqFromTx(currentTx)
 	scratch := acquireScanAnalyzeScratch()
 	defer releaseScanAnalyzeScratch(scratch)
-	var boundaries boundaries
-	if accessSchema.IsNil() {
-		boundaries = extractBoundariesInto(scratch.boundaries[:0], conditionCols, condition)
-		reorderByFrequency(boundaries, t)
-	} else {
-		var compiled bool
-		boundaries, compiled = bindCompiledScanAccess(accessSchema, accessValues, scratch.boundaries[:0])
-		if !compiled {
-			panic("scan_recset received an invalid compiled access schema")
-		}
+	boundaries, compiled := scanAccessFromScheme(accessSchema, accessValues, nil)
+	if !compiled {
+		panic("scan_recset received an invalid compiled access schema")
 	}
-	lower, upperLast := indexFromBoundariesInto(scratch.lower[:0], boundaries)
+	boundaries = boundaries.useScratch(scratch)
 	result := &recSet{table: t}
+	if boundaries.impossible() {
+		return result
+	}
+	lower, upperLast := indexFromScanAccessInto(scratch.lower[:0], boundaries)
 
 	values := make(chan recSetBuildResult, t.shardResultBufferSize())
 	done := t.iterateShardsParallel(currentTx, boundaries, func(shard *storageShard, solo bool) {
@@ -516,12 +513,14 @@ func (t *table) scanRecSet(currentTx *TxContext, conditionCols []string, conditi
 	return result
 }
 
-func (t *storageShard) collectRecSet(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, currentTx *TxContext, ss *scm.SessionState) recSetShard {
+func (t *storageShard) collectRecSet(boundaries scanAccess, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, currentTx *TxContext, ss *scm.SessionState) recSetShard {
 	conditionProgram := scm.PrepareSerialProc(condition)
-	conditionAlwaysTrue := conditionProgram.Kind == scm.SerialProcConstant && scm.ToBool(conditionProgram.Value)
+	conditionAlwaysTrue := scanAccessCoversResidual(boundaries) ||
+		conditionProgram.Kind == scm.SerialProcConstant && scm.ToBool(conditionProgram.Value)
 	t.ensureLoaded()
 	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
 	t.ensureMainCount(skipShardReadLock)
+	t.ensureScanAccessColumns(boundaries, skipShardReadLock, currentTx)
 	recsetBoundaryCoversCondition := recSetHooksCoverCondition(boundaries, lower, t.t, conditionCols, condition)
 
 	var ccols []ColumnStorage
@@ -576,8 +575,8 @@ func (t *storageShard) collectRecSet(boundaries boundaries, lower []scm.Scmer, u
 	maxInsertIndex := len(t.inserts)
 	visibleUpper := t.main_count + uint32(maxInsertIndex)
 	acidMode := currentTx != nil && currentTx.Mode == TxACID
-	completeTraversal := len(boundaries) == 0
-	singleExactLike := len(boundaries) == 1 && singleLikeBoundaryCoversCondition(conditionCols, condition, boundaries[0])
+	completeTraversal := boundaries.len() == 0
+	singleExactLike := boundaries.len() == 1 && singleLikeBoundaryCoversCondition(conditionCols, condition, boundaries.boundary(0))
 	exactLikeMain := false
 	builder := newRecSetShardBuilder(t, visibleUpper, completeTraversal, t.main_count)
 	evaluate := func(idx uint32) bool {
@@ -972,7 +971,7 @@ func (t *table) projectJoinKeysToRecSet(currentTx *TxContext, targetKeyCols []st
 		err  scanError
 	}
 	values := make(chan targetPartResult, t.shardResultBufferSize())
-	done := t.iterateShardsParallel(currentTx, nil, func(shard *storageShard, solo bool) {
+	done := t.iterateShardsParallel(currentTx, scanAccess{}, func(shard *storageShard, solo bool) {
 		withTxSession(currentTx, func() scm.Scmer {
 			defer func() {
 				if rec := recover(); rec != nil {
@@ -1131,7 +1130,7 @@ func (t *storageShard) projectJoinKeysPart(currentTx *TxContext, targetKeyCols [
 		}
 		reorderByFrequency(bounds, t.t)
 		lower, upperLast := indexFromBoundaries(bounds)
-		t.iterateIndexForce(currentTx, bounds, lower, upperLast, maxInsertIndex, buf[:], true, func(batch []uint32) bool {
+		t.iterateIndexForce(currentTx, runtimeScanAccess(bounds), lower, upperLast, maxInsertIndex, buf[:], true, func(batch []uint32) bool {
 			for _, idx := range batch {
 				if idx >= visibleUpper {
 					continue
@@ -1176,7 +1175,7 @@ func (t *storageShard) projectJoinTargetMatches(idx uint32, key []scm.Scmer, tar
 	return true
 }
 
-func (r *recSet) scan(currentTx *TxContext, conditionCols []string, condition scm.Scmer, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, combine scm.Scmer, isOuter bool) scm.Scmer {
+func (r *recSet) scan(currentTx *TxContext, accessSchema scm.Scmer, accessValues []scm.Scmer, conditionCols []string, condition scm.Scmer, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, combine scm.Scmer, isOuter bool) scm.Scmer {
 	if r == nil || r.table == nil {
 		return neutral
 	}
@@ -1187,15 +1186,15 @@ func (r *recSet) scan(currentTx *TxContext, conditionCols []string, condition sc
 			panic("recset scan mutation callbacks are not implemented")
 		}
 	}
-	return r.table.scanWithBatchFrom(currentTx, r, conditionCols, condition,
-		callbackCols, mapReduce, neutral, combine, isOuter, 0, nil, nil, scm.NewNil(), nil)
+	return r.table.scanWithBatchFrom(currentTx, r, accessSchema, accessValues, scanAccess{}, conditionCols, condition,
+		callbackCols, mapReduce, neutral, combine, isOuter, 0, nil)
 }
 
-func (r *recSet) scanExists(currentTx *TxContext, conditionCols []string, condition scm.Scmer, accessSchema scm.Scmer, accessValues []scm.Scmer) bool {
+func (r *recSet) scanExists(currentTx *TxContext, accessSchema scm.Scmer, accessValues []scm.Scmer, conditionCols []string, condition scm.Scmer) bool {
 	if r == nil || r.table == nil {
 		return false
 	}
-	return r.table.scanExistsFrom(currentTx, r, conditionCols, condition, accessSchema, accessValues)
+	return r.table.scanExistsFrom(currentTx, r, accessSchema, accessValues, conditionCols, condition)
 }
 
 func (t *storageShard) recSetPartExists(part *recSetShard, conditionCols []string, conditionFn func(...scm.Scmer) scm.Scmer, currentTx *TxContext, ss *scm.SessionState, stop *atomic.Bool) bool {
@@ -1445,19 +1444,23 @@ func (t *storageShard) scanRecSetPart(part *recSetShard, conditionCols []string,
 // subscans) without ever touching rows outside the incoming membership --
 // e.g. evaluating an expensive correlated ACL check only over the ~30k rows a
 // mandant filter already narrowed a table down to, not the full table.
-func (t *storageShard) filterRecSetPart(owner *recSet, part *recSetShard, conditionCols []string, condition scm.Scmer, currentTx *TxContext, ss *scm.SessionState) recSetShard {
+func (t *storageShard) filterRecSetPart(part *recSetShard, conditionCols []string, condition scm.Scmer, access scanAccess, currentTx *TxContext, ss *scm.SessionState) recSetShard {
 	conditionProgram := scm.PrepareSerialProc(condition)
-	conditionAlwaysTrue := conditionProgram.Kind == scm.SerialProcConstant && scm.ToBool(conditionProgram.Value)
+	conditionAlwaysTrue := scanAccessCoversResidual(access) ||
+		conditionProgram.Kind == scm.SerialProcConstant && scm.ToBool(conditionProgram.Value)
 	t.ensureLoaded()
 	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
 	t.ensureMainCount(skipShardReadLock)
+	t.ensureScanAccessColumns(access, skipShardReadLock, currentTx)
 	// Keep RecSet narrowing on the ordinary index-boundary path. The exact
 	// RecSet matcher and approximate hooks such as Bigram LIKE then prune the
 	// same candidate batches before the residual predicate reads any columns.
 	// This is an operator capability, not a planner shape rule: every
 	// scan_recset whose input is a RecSet gets the same combined boundaries.
-	boundaries := recSetFilterBoundaries(owner, conditionCols, condition)
-	lower, upperLast := indexFromBoundaries(boundaries)
+	scratch := acquireScanAnalyzeScratch()
+	defer releaseScanAnalyzeScratch(scratch)
+	access = access.useScratch(scratch)
+	lower, upperLast := indexFromScanAccessInto(scratch.lower[:0], access)
 
 	var ccols []ColumnStorage
 	var cReaders []ColumnReader
@@ -1558,26 +1561,32 @@ func (t *storageShard) filterRecSetPart(owner *recSet, part *recSetShard, condit
 	} else {
 		buf, pooledFullBuf, pooledPointBuf := acquireScanIDBuffer(defaultScanBufferSize)
 		defer releaseScanIDBuffer(pooledFullBuf, pooledPointBuf)
-		t.iterateIndexMatchAware(currentTx, boundaries, lower, upperLast, len(t.inserts), buf, true, nil, evaluateBatch)
+		t.iterateIndexMatchAware(currentTx, access, lower, upperLast, len(t.inserts), buf, true, nil, evaluateBatch)
 	}
 	return builder.finish()
 }
 
-func recSetFilterBoundaries(owner *recSet, conditionCols []string, condition scm.Scmer) boundaries {
-	result := extractBoundaries(conditionCols, condition)
-	return append(result, NewIndexBoundary("$recset_contains", RecSetMatcher, NewRecSetScmer(owner), ""))
+func recSetScanAccess(owner *recSet, schema scm.Scmer, values []scm.Scmer) scanAccess {
+	access, valid := scanAccessFromScheme(schema, values, boundaries{
+		NewIndexBoundary("$recset_contains", RecSetMatcher, NewRecSetScmer(owner), ""),
+	})
+	if !valid {
+		panic("scan_recset needs a scan_access schema")
+	}
+	return access
 }
 
 // filterToRecSet narrows r to the members that also satisfy condition,
 // re-evaluating condition only over r's existing membership. See
 // filterRecSetPart for why this is a distinct, cheaper operation than
 // building a fresh RecSet over the whole table and intersecting.
-func (r *recSet) filterToRecSet(currentTx *TxContext, conditionCols []string, condition scm.Scmer) *recSet {
+func (r *recSet) filterToRecSet(currentTx *TxContext, conditionCols []string, condition scm.Scmer, accessSchema scm.Scmer, accessValues []scm.Scmer) *recSet {
 	if r == nil {
 		return nil
 	}
 	ss := SessionStateFromTx(currentTx)
 	querySeq := querySeqFromTx(currentTx)
+	access := recSetScanAccess(r, accessSchema, accessValues)
 	result := &recSet{table: r.table}
 	values := make(chan recSetBuildResult, len(r.shards))
 	activeParts := make([]int, 0, len(r.shards))
@@ -1598,7 +1607,7 @@ func (r *recSet) filterToRecSet(currentTx *TxContext, conditionCols []string, co
 				panic("query killed")
 			}
 			values <- recSetBuildResult{
-				part: part.shard.filterRecSetPart(r, &part, conditionCols, condition, currentTx, ss),
+				part: part.shard.filterRecSetPart(&part, conditionCols, condition, access, currentTx, ss),
 			}
 			return scm.NewNil()
 		})

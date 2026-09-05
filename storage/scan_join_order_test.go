@@ -20,7 +20,7 @@ import "testing"
 import "sync/atomic"
 import "github.com/launix-de/memcp/scm"
 
-func setupScanJoinOrderTable(t *testing.T, database string, name string, columns []string, rows [][]scm.Scmer) *table {
+func setupScanJoinOrderTable(t testing.TB, database string, name string, columns []string, rows [][]scm.Scmer) *table {
 	t.Helper()
 	table, _ := CreateTable(database, name, Memory, true)
 	for _, column := range columns {
@@ -28,6 +28,59 @@ func setupScanJoinOrderTable(t *testing.T, database string, name string, columns
 	}
 	table.Insert(columns, rows, nil, scm.NewNil(), false, nil)
 	return table
+}
+
+func BenchmarkScanJoinOrderBatchedPointProbe(b *testing.B) {
+	const rowsN = 8_000
+	database := "bench_scan_join_order_point_probe"
+	databases.Remove(database)
+	CreateDatabase(database, true)
+	postRows := make([][]scm.Scmer, rowsN)
+	metaRows := make([][]scm.Scmer, rowsN)
+	for i := range postRows {
+		id := scm.NewInt(int64(i + 1))
+		postRows[i] = []scm.Scmer{id, scm.NewInt(1)}
+		metaRows[i] = []scm.Scmer{id, id, scm.NewInt(1)}
+	}
+	posts := setupScanJoinOrderTable(b, database, "posts", []string{"id", "enabled"}, postRows)
+	posts.Unique = append(posts.Unique, uniqueKey{Id: "PRIMARY", Cols: []string{"id"}})
+	meta := setupScanJoinOrderTable(b, database, "meta", []string{"meta_id", "post_id", "kind"}, metaRows)
+	result := GetDatabase(database).rebuild(true, false, true)
+	if len(result.errors) > 0 {
+		b.Fatalf("rebuild errors: %v", result.errors)
+	}
+	trueFn := scanJoinTrue()
+	filterAST := scm.Read("scan join order benchmark filter", "(lambda (kind) (equal?? kind 1))")
+	filterColumns := scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), scm.NewSlice([]scm.Scmer{scm.NewString("kind")})})
+	accessSchema, accessValues, ok := compileScanAccess(filterColumns, filterAST)
+	if !ok {
+		b.Fatal("point access did not compile")
+	}
+	accessSchema = markCoveredScanAccessSchema(accessSchema,
+		scm.Read("scan join order benchmark residual", "(lambda () true)"))
+	_, descending := integerOrder(true)
+	spec := scanJoinOrderSpec{
+		inputs: []scanJoinOrderInput{
+			{table: meta, filter: trueFn, accessSchema: accessSchema, accessValues: accessValues},
+			{table: posts, filter: trueFn, accessSchema: emptyScanAccessSchema,
+				sourceKeyCols: []scanJoinOrderColumn{{table: 0, column: "post_id"}}, targetKeyCols: []string{"id"}},
+		},
+		orderCols:    []scanJoinOrderColumn{{table: 0, column: "meta_id"}},
+		orderDirs:    []func(...scm.Scmer) scm.Scmer{descending},
+		limit:        20,
+		mapCols:      []scanJoinOrderColumn{{table: 1, column: "id"}},
+		mapReduceFn:  scm.Globalenv.Vars[scm.Symbol("scan_count")],
+		neutral:      scm.NewInt(0),
+		batchedProbe: true,
+	}
+	for range 3 {
+		scanJoinOrder(nil, spec)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		scanJoinOrder(nil, spec)
+	}
 }
 
 func TestScanJoinOrderFiltersJoinsAndBrakesInDriverOrder(t *testing.T) {
@@ -67,10 +120,10 @@ func TestScanJoinOrderFiltersJoinsAndBrakesInDriverOrder(t *testing.T) {
 
 	scanJoinOrder(nil, scanJoinOrderSpec{
 		inputs: []scanJoinOrderInput{
-			{table: orders},
-			{table: customers, filterCols: []string{"region"}, filter: equalOne,
+			{table: orders, accessSchema: newScanAccessSchema(scanAccessConsumerScan, nil, -1)},
+			{table: customers, accessSchema: newScanAccessSchema(scanAccessConsumerScan, nil, -1), filterCols: []string{"region"}, filter: equalOne,
 				sourceKeyCols: []scanJoinOrderColumn{{table: 0, column: "customer_id"}}, targetKeyCols: []string{"id"}},
-			{table: tags, filterCols: []string{"enabled"}, filter: equalOne,
+			{table: tags, accessSchema: newScanAccessSchema(scanAccessConsumerScan, nil, -1), filterCols: []string{"enabled"}, filter: equalOne,
 				sourceKeyCols: []scanJoinOrderColumn{{table: 1, column: "id"}}, targetKeyCols: []string{"customer_id"}},
 		},
 		orderCols:     []scanJoinOrderColumn{{table: 0, column: "id"}},
@@ -109,8 +162,8 @@ func TestScanJoinOrderDoesNotJoinNullKeys(t *testing.T) {
 	_, ascending := integerOrder(false)
 	result := scanJoinOrder(nil, scanJoinOrderSpec{
 		inputs: []scanJoinOrderInput{
-			{table: left},
-			{table: right, sourceKeyCols: []scanJoinOrderColumn{{table: 0, column: "key_col"}}, targetKeyCols: []string{"key_col"}},
+			{table: left, accessSchema: newScanAccessSchema(scanAccessConsumerScan, nil, -1)},
+			{table: right, accessSchema: newScanAccessSchema(scanAccessConsumerScan, nil, -1), sourceKeyCols: []scanJoinOrderColumn{{table: 0, column: "key_col"}}, targetKeyCols: []string{"key_col"}},
 		},
 		orderCols:     []scanJoinOrderColumn{{table: 0, column: "id"}},
 		orderDirs:     []func(...scm.Scmer) scm.Scmer{ascending},
@@ -153,6 +206,11 @@ func TestScanJoinOrderDeclarationSupportsOrderFromJoinedTable(t *testing.T) {
 	scm.Apply(scm.Globalenv.Vars[scm.Symbol("scan_join_order")],
 		scm.NewNil(),
 		scm.NewSlice([]scm.Scmer{NewTableScmer(left), NewTableScmer(right)}),
+		scm.NewSlice([]scm.Scmer{
+			newScanAccessSchema(scanAccessConsumerScan, nil, -1),
+			newScanAccessSchema(scanAccessConsumerScan, nil, -1),
+		}),
+		scm.NewSlice(nil),
 		scm.NewSlice([]scm.Scmer{scm.NewSlice(nil), scm.NewSlice(nil)}),
 		scm.NewSlice([]scm.Scmer{trueFn, trueFn}),
 		scm.NewSlice([]scm.Scmer{scm.NewSlice([]scm.Scmer{
@@ -205,8 +263,8 @@ func TestScanJoinOrderPrunesCompatibleJoinKeyShardPairs(t *testing.T) {
 	_, descending := integerOrder(true)
 	spec := scanJoinOrderSpec{
 		inputs: []scanJoinOrderInput{
-			{table: left},
-			{table: right, sourceKeyCols: []scanJoinOrderColumn{{table: 0, column: "key_col"}}, targetKeyCols: []string{"key_col"}},
+			{table: left, accessSchema: newScanAccessSchema(scanAccessConsumerScan, nil, -1)},
+			{table: right, accessSchema: newScanAccessSchema(scanAccessConsumerScan, nil, -1), sourceKeyCols: []scanJoinOrderColumn{{table: 0, column: "key_col"}}, targetKeyCols: []string{"key_col"}},
 		},
 		orderCols:   []scanJoinOrderColumn{{table: 0, column: "id"}},
 		orderDirs:   []func(...scm.Scmer) scm.Scmer{descending},
@@ -253,7 +311,7 @@ func TestScanJoinOrderRejectsCombineWithLimit(t *testing.T) {
 		}
 	}()
 	scanJoinOrder(nil, scanJoinOrderSpec{
-		inputs:      []scanJoinOrderInput{{table: table}},
+		inputs:      []scanJoinOrderInput{{table: table, accessSchema: newScanAccessSchema(scanAccessConsumerScan, nil, -1)}},
 		orderCols:   []scanJoinOrderColumn{{table: 0, column: "id"}},
 		orderDirs:   []func(...scm.Scmer) scm.Scmer{ascending},
 		limit:       1,
@@ -286,8 +344,8 @@ func TestScanJoinOrderCombineCombinesUnlimitedRunnerPartials(t *testing.T) {
 	var globalReduceCalls atomic.Int64
 	result := scanJoinOrder(nil, scanJoinOrderSpec{
 		inputs: []scanJoinOrderInput{
-			{table: left},
-			{table: right, sourceKeyCols: []scanJoinOrderColumn{{table: 0, column: "key_col"}}, targetKeyCols: []string{"key_col"}},
+			{table: left, accessSchema: newScanAccessSchema(scanAccessConsumerScan, nil, -1)},
+			{table: right, accessSchema: newScanAccessSchema(scanAccessConsumerScan, nil, -1), sourceKeyCols: []scanJoinOrderColumn{{table: 0, column: "key_col"}}, targetKeyCols: []string{"key_col"}},
 		},
 		limit:   -1,
 		mapCols: []scanJoinOrderColumn{{table: 0, column: "amount"}},
@@ -326,8 +384,8 @@ func TestScanJoinOrderUsesSerialCountPipeline(t *testing.T) {
 	mapReduceFn := scm.Eval(scm.Optimize(scm.Read("scan_join_order count mapreducer", "(lambda (acc value) (+ acc 1))"), &scm.Globalenv, nil), &scm.Globalenv)
 	result := scanJoinOrder(nil, scanJoinOrderSpec{
 		inputs: []scanJoinOrderInput{
-			{table: left},
-			{table: right, sourceKeyCols: []scanJoinOrderColumn{{table: 0, column: "key_col"}}, targetKeyCols: []string{"key_col"}},
+			{table: left, accessSchema: newScanAccessSchema(scanAccessConsumerScan, nil, -1)},
+			{table: right, accessSchema: newScanAccessSchema(scanAccessConsumerScan, nil, -1), sourceKeyCols: []scanJoinOrderColumn{{table: 0, column: "key_col"}}, targetKeyCols: []string{"key_col"}},
 		},
 		limit:       -1,
 		mapCols:     []scanJoinOrderColumn{{table: 0, column: "key_col"}},

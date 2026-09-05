@@ -161,7 +161,7 @@ func runParallelShardScans(currentTx *TxContext, shards []*storageShard, topolog
 	})
 }
 
-func (t *table) iterateShardsParallel(currentTx *TxContext, boundaries []columnboundaries, callback func(*storageShard, bool)) <-chan struct{} {
+func (t *table) iterateShardsParallel(currentTx *TxContext, access scanAccess, callback func(*storageShard, bool)) <-chan struct{} {
 	// Keep shard acquisition outside physical scan callbacks. In clustered mode
 	// this is the orchestration point that can choose a local SHARED copy or send
 	// the whole shard-local scan pipeline to a remote holder; row readers must not
@@ -173,12 +173,12 @@ func (t *table) iterateShardsParallel(currentTx *TxContext, boundaries []columnb
 			relevant = topology.shards
 			for _, shard := range relevant {
 				if shard == nil {
-					relevant = collectRelevantShards(nil, boundaries, topology.shards)
+					relevant = collectRelevantShards(nil, access, topology.shards)
 					break
 				}
 			}
 		} else {
-			relevant = collectRelevantShards(topology.dimensions, boundaries, topology.shards)
+			relevant = collectRelevantShards(topology.dimensions, access, topology.shards)
 		}
 		if len(relevant) == 0 {
 			return nil
@@ -222,9 +222,9 @@ func (s *storageShard) acquireReadForScan(currentTx *TxContext) func() {
 	return s.GetRead()
 }
 
-func collectRelevantShards(schema []shardDimension, boundaries []columnboundaries, shards []*storageShard) []*storageShard {
+func collectRelevantShards(schema []shardDimension, access scanAccess, shards []*storageShard) []*storageShard {
 	result := make([]*storageShard, 0, len(shards))
-	collectRelevantShardsIndex(schema, boundaries, shards, &result)
+	collectRelevantShardsIndex(schema, access, shards, &result)
 	return result
 }
 
@@ -240,7 +240,7 @@ func valueEqualsPivot(dimension shardDimension, partition int, value scm.Scmer) 
 		!scm.Less(dimension.Pivots[partition], value)
 }
 
-func collectRelevantShardsIndex(schema []shardDimension, boundaries []columnboundaries, shards []*storageShard, result *[]*storageShard) {
+func collectRelevantShardsIndex(schema []shardDimension, access scanAccess, shards []*storageShard, result *[]*storageShard) {
 	if len(schema) == 0 {
 		for _, s := range shards {
 			if s != nil {
@@ -254,7 +254,8 @@ func collectRelevantShardsIndex(schema []shardDimension, boundaries []columnboun
 		blockdim *= schema[i].NumPartitions
 	}
 
-	for _, b := range boundaries {
+	for boundaryIndex := 0; boundaryIndex < access.len(); boundaryIndex++ {
+		b := access.boundary(boundaryIndex)
 		if b.col == schema[0].Column {
 			// iterate this axis over boundaries
 			min := 0
@@ -271,7 +272,7 @@ func collectRelevantShardsIndex(schema []shardDimension, boundaries []columnboun
 			}
 
 			for i := min; i <= max; i++ {
-				collectRelevantShardsIndex(schema[1:], boundaries, shards[i*blockdim:(i+1)*blockdim], result)
+				collectRelevantShardsIndex(schema[1:], access, shards[i*blockdim:(i+1)*blockdim], result)
 			}
 			return // finish (don't run into next boundary, don't run into the all-loop)
 		}
@@ -279,7 +280,7 @@ func collectRelevantShardsIndex(schema []shardDimension, boundaries []columnboun
 
 	// else: no boundaries: iterate all
 	for i := 0; i < len(shards); i += blockdim {
-		collectRelevantShardsIndex(schema[1:], boundaries, shards[i:i+blockdim], result)
+		collectRelevantShardsIndex(schema[1:], access, shards[i:i+blockdim], result)
 	}
 }
 
