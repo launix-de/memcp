@@ -377,7 +377,7 @@ func compileScanSpecialBoundary(node scm.Scmer, params, columns []scm.Scmer) (co
 	}
 	if len(items) == 2 && scanSymbolIs(items[0], "nil?") {
 		if column, ok := scanParamColumn(items[1], params, columns); ok {
-			return compiledScanBoundary{kind: "equal", column: column, lowerSet: true, upperSet: true,
+			return compiledScanBoundary{kind: "equal", column: column, lower: scm.NewNil(), upper: scm.NewNil(), lowerSet: true, upperSet: true, nullSafe: true,
 				lowerInclusive: true, upperInclusive: true}, true
 		}
 	}
@@ -464,6 +464,10 @@ func compileScanAccess(columnExpr, filterExpr scm.Scmer) (scm.Scmer, []scm.Scmer
 	return compileScanAccessMode(columnExpr, filterExpr, false)
 }
 
+func scanLiteralDefinitelyNonNil(value scm.Scmer) bool {
+	return value.IsBool() || value.IsInt() || value.IsFloat() || value.IsDate() || value.IsString() || value.IsBSON()
+}
+
 // pruneScanResidual removes only predicates which the exact physical
 // enumerator guarantees. Candidate hooks such as LIKE and RecSet remain in the
 // residual callback, as do expressions the access compiler did not recognize.
@@ -526,7 +530,7 @@ coverageComplete:
 			}
 		}
 		boundary, exact := compileScanComparison(node, params, columns, allowBatch)
-		if exact && !boundary.nullSafe && covered[boundary.column] == boundary.kind {
+		if exact && (!boundary.nullSafe || scanLiteralDefinitelyNonNil(boundary.lower)) && covered[boundary.column] == boundary.kind {
 			return scm.NewBool(true)
 		}
 		return node

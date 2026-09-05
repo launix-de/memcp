@@ -3648,7 +3648,7 @@ still rechecks current data and autoindex statistics. */
 	(begin
 		(define alias (source_alias src))
 		(define cols (extract_columns_for_alias src condition))
-		(define estimate_expr (list (quote scan_selectivity_estimate)
+		(define estimate_expr (compile_scan_plan (quote scan_selectivity_estimate)
 			(physical_query_tx_symbol)
 			(list (quote table) (source_schema src) (source_relation src))
 			(cons (quote list) cols)

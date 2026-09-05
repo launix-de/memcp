@@ -221,6 +221,9 @@ func TestScanAccessNullProbeIsImpossibleWithoutTreatingNilCheckAsImpossible(t *t
 	if !valid || nilCheck.impossible() {
 		t.Fatal("IS NULL access must remain executable")
 	}
+	if boundary := nilCheck.boundary(0); !boundary.lower.IsNil() || !boundary.upper.IsNil() {
+		t.Fatal("IS NULL access must bind explicit NULL endpoints")
+	}
 	nullSafeCall := scm.Read(t.Name(), `(scan nil table_value
 		'("scan_access" 0 "scan" 0 -1) '()
 		(list "id") (lambda (id) (equal?? id wanted_id))
@@ -237,6 +240,16 @@ func TestScanAccessNullProbeIsImpossibleWithoutTreatingNilCheckAsImpossible(t *t
 	_, residual := pruneScanResidual(nullSafeItems[5], nullSafeItems[6], false)
 	if _, body, lambda := scanLambdaParts(residual); !lambda || scanExprIsTrue(body) {
 		t.Fatal("null-safe equality must not be pruned from the residual filter")
+	}
+	constantColumns := scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), scm.NewSlice([]scm.Scmer{scm.NewString("id")})})
+	constantFilter := scm.NewSlice([]scm.Scmer{scm.NewSymbol("lambda"), scm.NewSlice([]scm.Scmer{scm.NewSymbol("id")}),
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("equal??"), scm.NewSymbol("id"), scm.NewInt(42)})})
+	prunedColumns, prunedFilter := pruneScanResidual(constantColumns, constantFilter, false)
+	if columns, ok := scanStaticColumns(prunedColumns); !ok || len(columns) != 0 {
+		t.Fatalf("constant non-NULL equality retained columns: %#v", prunedColumns)
+	}
+	if _, body, lambda := scanLambdaParts(prunedFilter); !lambda || !scanExprIsTrue(body) {
+		t.Fatal("constant non-NULL equality must be pruned from the residual filter")
 	}
 }
 

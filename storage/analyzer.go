@@ -205,7 +205,9 @@ func (a scanAccess) boundary(index int) columnboundaries {
 	flags := scm.ToInt(a.schema[offset+4])
 	boundary := columnboundaries{
 		col:            a.schema[offset+1].String(),
+		lower:          scm.NewNil(),
 		lowerInclusive: flags&1 != 0,
+		upper:          scm.NewNil(),
 		upperInclusive: flags&2 != 0,
 		collation:      a.schema[offset+5].String(),
 	}

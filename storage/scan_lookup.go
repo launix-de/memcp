@@ -409,7 +409,7 @@ func (t *table) scanLookupOne(currentTx *TxContext, lookupCol string, lookupValu
 		if ss := SessionStateFromTx(currentTx); ss != nil && ss.IsKilledSeq(querySeqFromTx(currentTx)) {
 			panic("query killed")
 		}
-		value, count := shard.scanLookupOne(boundary, lookupValue, resultCol, returnValue, currentTx)
+		value, count := shard.scanLookupOne(lookupCol, lookupValue, resultCol, returnValue, currentTx)
 		if count == 0 {
 			return
 		}
@@ -440,7 +440,15 @@ func (t *table) scanLookupOne(currentTx *TxContext, lookupCol string, lookupValu
 	return state.result
 }
 
-func (t *storageShard) scanLookupOne(boundary columnboundaries, lookupValue scm.Scmer, resultCol string, returnValue bool, currentTx *TxContext) (scm.Scmer, int) {
+func (t *storageShard) scanLookupOne(lookupCol string, lookupValue scm.Scmer, resultCol string, returnValue bool, currentTx *TxContext) (scm.Scmer, int) {
+	boundary := columnboundaries{
+		col:            lookupCol,
+		matcher:        EqualMatcher,
+		lower:          lookupValue,
+		lowerInclusive: true,
+		upper:          lookupValue,
+		upperInclusive: true,
+	}
 	t.ensureLoaded()
 	t.ensureMainCount(false)
 	lookupStorage := t.getColumnStorageOrPanic(boundary.col, false, currentTx)
