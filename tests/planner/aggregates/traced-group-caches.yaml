@@ -117,6 +117,11 @@ setup:
         (insert (table "memcp-tests" "trace_multi_document")
           '("id" "access_id" "tenant_id" "owner_id") documents)
         2400)
+  - scm: |
+      (begin
+        (rebuild (table "memcp-tests" "trace_multi_document") true false)
+        (rebuild (table "memcp-tests" "trace_multi_access") true false)
+        (rebuild (table "memcp-tests" "trace_multi_tenant") true false))
 
 test_cases:
   - name: "COUNT pushes a selective correlated stage above an FK partition"
@@ -167,6 +172,25 @@ test_cases:
           (equal? (planner_aggregate_pushdown_group_estimate driver keys 2000) 3)
           (aggregate_pushdown_cost_preferred? 2000 3)
           (not (aggregate_pushdown_cost_preferred? 2000 1000))))
+    expect:
+      data: [true]
+
+  - name: "Only request-independent equalities become aggregate probe bindings"
+    scm: |
+      (begin
+        (define driver (list "document" "memcp-tests"
+          "trace_multi_document" false nil))
+        (define tenant_col (list (quote get_column)
+          "document" false "tenant_id" true))
+        (and
+          (equal? (aggregate_pushdown_bound_term_binding driver
+            (list (quote equal??) tenant_col 1))
+            (list "tenant_id" (quote equal??) 1))
+          (equal? (aggregate_pushdown_bound_term_binding driver
+            (list (quote equal?) 3 tenant_col))
+            (list "tenant_id" (quote equal?) 3))
+          (nil? (aggregate_pushdown_bound_term_binding driver
+            (list (quote equal??) tenant_col (list (quote session) "trace_tenant"))))))
     expect:
       data: [true]
 
@@ -289,6 +313,198 @@ test_cases:
         - "keys (\"access_id\")"
       not_contains:
         - "keys (\"access_id\" \"owner_id\")"
+
+  - name: "Bound group dimensions preserve filtered COUNT correctness"
+    max_time: 1
+    sql: |
+      SELECT COUNT(*) AS total
+      FROM trace_multi_document document
+      WHERE document.tenant_id = 1
+      AND COALESCE((
+        SELECT access.allowed
+        FROM trace_multi_access access
+        WHERE access.id = document.access_id
+        LIMIT 1
+      ), FALSE)
+    expect:
+      rows: 1
+      data:
+        - total: 400
+
+  - name: "The first bound value uses a lazy base-table aggregate carrier"
+    sql: |
+      EXPLAIN SELECT COUNT(*) AS total
+      FROM trace_multi_document document
+      WHERE document.tenant_id = 1
+      AND COALESCE((
+        SELECT access.allowed
+        FROM trace_multi_access access
+        WHERE access.id = document.access_id
+        LIMIT 1
+      ), FALSE)
+    expect:
+      result_contains:
+        - ".grp:trace_multi_document:"
+        - "createcolumn"
+        - "filtercols"
+
+  - name: "A different bound value reuses the lazy base-table aggregate carrier"
+    sql: |
+      EXPLAIN SELECT COUNT(*) AS total
+      FROM trace_multi_document document
+      WHERE document.tenant_id = 3
+      AND COALESCE((
+        SELECT access.allowed
+        FROM trace_multi_access access
+        WHERE access.id = document.access_id
+        LIMIT 1
+      ), FALSE)
+    expect:
+      result_contains:
+        - ".grp:trace_multi_document:"
+        - "createcolumn"
+        - "filtercols"
+
+  - name: "Bound values keep the base aggregate carrier identity canonical"
+    scm: |
+      (begin
+        (define plan_a (serialize (parse_sql "memcp-tests"
+          "EXPLAIN SELECT COUNT(*) AS total FROM trace_multi_document document WHERE document.tenant_id = 1 AND COALESCE((SELECT access.allowed FROM trace_multi_access access WHERE access.id = document.access_id LIMIT 1), FALSE)")))
+        (define plan_b (serialize (parse_sql "memcp-tests"
+          "EXPLAIN SELECT COUNT(*) AS total FROM trace_multi_document document WHERE document.tenant_id = 3 AND COALESCE((SELECT access.allowed FROM trace_multi_access access WHERE access.id = document.access_id LIMIT 1), FALSE)")))
+        (define carrier_a (regexp_replace plan_a ".*(\\.grp:trace_multi_document:[0-9a-f]+).*" "$1"))
+        (define carrier_b (regexp_replace plan_b ".*(\\.grp:trace_multi_document:[0-9a-f]+).*" "$1"))
+        (and
+          (strlike carrier_a ".grp:trace_multi_document:%")
+          (strlike carrier_b ".grp:trace_multi_document:%")
+          (equal? carrier_a carrier_b)))
+    expect:
+      data: [true]
+
+  - name: "Set the aggregate partition probe from session state"
+    session_id: "trace_group_probe"
+    sql: "SET @trace_tenant = 1"
+    expect:
+      affected_rows: 1
+
+  - name: "Session-bound aggregate probes read the first partition"
+    session_id: "trace_group_probe"
+    sql: |
+      SELECT COUNT(*) AS total
+      FROM trace_multi_document document
+      WHERE document.tenant_id = @trace_tenant
+      AND COALESCE((
+        SELECT access.allowed
+        FROM trace_multi_access access
+        WHERE access.id = document.access_id
+        LIMIT 1
+      ), FALSE)
+    expect:
+      rows: 1
+      data:
+        - total: 400
+
+  - name: "Change the aggregate partition probe in the same session"
+    session_id: "trace_group_probe"
+    sql: "SET @trace_tenant = 3"
+    expect:
+      affected_rows: 3
+
+  - name: "A changed session binding reads the new aggregate partition"
+    session_id: "trace_group_probe"
+    sql: |
+      SELECT COUNT(*) AS total
+      FROM trace_multi_document document
+      WHERE document.tenant_id = @trace_tenant
+      AND COALESCE((
+        SELECT access.allowed
+        FROM trace_multi_access access
+        WHERE access.id = document.access_id
+        LIMIT 1
+      ), FALSE)
+    expect:
+      rows: 1
+      data:
+        - total: 400
+
+  - name: "Insert invalidates the probed aggregate partition"
+    sql: "INSERT INTO trace_multi_document (id, access_id, tenant_id, owner_id) VALUES (3001, 10, 1, 3001)"
+    expect:
+      affected_rows: 1
+
+  - name: "Inserted rows appear in the probed aggregate partition"
+    sql: |
+      SELECT COUNT(*) AS total
+      FROM trace_multi_document document
+      WHERE document.tenant_id = 1
+      AND COALESCE((
+        SELECT access.allowed
+        FROM trace_multi_access access
+        WHERE access.id = document.access_id
+        LIMIT 1
+      ), FALSE)
+    expect:
+      rows: 1
+      data:
+        - total: 401
+
+  - name: "Foreign-key updates invalidate old and new aggregate partitions"
+    sql: "UPDATE trace_multi_document SET tenant_id = 3 WHERE id = 3001"
+    expect:
+      affected_rows: 1
+
+  - name: "The old aggregate partition drops a moved row"
+    sql: |
+      SELECT COUNT(*) AS total
+      FROM trace_multi_document document
+      WHERE document.tenant_id = 1
+      AND COALESCE((
+        SELECT access.allowed
+        FROM trace_multi_access access
+        WHERE access.id = document.access_id
+        LIMIT 1
+      ), FALSE)
+    expect:
+      rows: 1
+      data:
+        - total: 400
+
+  - name: "The new aggregate partition receives a moved row"
+    sql: |
+      SELECT COUNT(*) AS total
+      FROM trace_multi_document document
+      WHERE document.tenant_id = 3
+      AND COALESCE((
+        SELECT access.allowed
+        FROM trace_multi_access access
+        WHERE access.id = document.access_id
+        LIMIT 1
+      ), FALSE)
+    expect:
+      rows: 1
+      data:
+        - total: 401
+
+  - name: "Delete invalidates the probed aggregate partition"
+    sql: "DELETE FROM trace_multi_document WHERE id = 3001"
+    expect:
+      affected_rows: 1
+
+  - name: "Deleted rows disappear from the probed aggregate partition"
+    sql: |
+      SELECT COUNT(*) AS total
+      FROM trace_multi_document document
+      WHERE document.tenant_id = 3
+      AND COALESCE((
+        SELECT access.allowed
+        FROM trace_multi_access access
+        WHERE access.id = document.access_id
+        LIMIT 1
+      ), FALSE)
+    expect:
+      rows: 1
+      data:
+        - total: 400
 
   - name: "A high-cardinality filtered dimension rejects the combined partition"
     sql: |

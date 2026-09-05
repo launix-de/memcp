@@ -1389,6 +1389,8 @@ outer joins. */
 			lowering_ags))
 		(define key_names (group_key_cols keys))
 		(define aggregate_condition (replace_group_session_expr stage keys key_names condition))
+		(define aggregate_probe_bindings
+			(coalesceNil (qassoc_get (gs_facts stage) (quote aggregate_probe_bindings) '()) '()))
 		(define grouptbl (group_cache_relation cache))
 		(define initializer_owner (qassoc_get (gs_facts stage) (quote keytable_initializer_owner) true))
 		(define scalar_single_stage (scalar_value_stage? stage))
@@ -1483,7 +1485,11 @@ outer joins. */
 			(or scalar_order_base_stage (expr_refs_stage_output_alias? condition)))
 			nil
 			(build_base_group_into_plan schema tbl alias src grouptbl keys key_names condition
-				(non_scalar_order_aggregates ags))))
+				/* Probe-bound partitions discover their complete key domain once, but
+				leave aggregate values to the filtered lazy computed columns. */
+				(if (empty_list? aggregate_probe_bindings)
+					(non_scalar_order_aggregates ags)
+					'()))))
 		(define cleanup_plan (if (query_block? src)
 			nil
 			(build_group_keytable_cleanup schema tbl alias grouptbl keys key_names)))
