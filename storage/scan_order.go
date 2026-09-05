@@ -32,6 +32,23 @@ func optimizeScanOrderMulti(v []scm.Scmer, oc *scm.OptimizerContext, useResult b
 	// 5=sortcols, 6=sortdirs, 7=perTableOffset, 8=perTableLimit,
 	// 9=partCols, 10=offset, 11=limit, 12=mapReduceCols,
 	// 13=mapReduceFns, 14=neutral, 15=isOuter, 16=notFoundValue
+	if len(v) >= 14 && len(v) <= 17 {
+		if schemas, bindings, ok := compileScanAccessList(v[3], v[4], false); ok {
+			for len(v) < 17 {
+				switch len(v) {
+				case 14:
+					v = append(v, scm.NewNil())
+				case 15:
+					v = append(v, scm.NewBool(false))
+				case 16:
+					v = append(v, v[14])
+				}
+			}
+			v = append(v,
+				scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), scm.NewSlice(schemas)}),
+				oc.OptimizeNoEscapeList(bindings))
+		}
+	}
 	for i := 1; i <= 13 && i < len(v); i++ {
 		v[i], _ = oc.OptimizeSub(v[i], true)
 	}
@@ -65,7 +82,28 @@ func optimizeScanOrder(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) 
 	// if rewritten := tryScanOrderBatchRewrite(v); !rewritten.IsNil() {
 	// 	return oc.OptimizeSub(rewritten, useResult)
 	// }
+	if len(v) >= 14 && len(v) <= 17 {
+		if schema, bindings, ok := compileScanAccess(v[3], v[4]); ok {
+			if len(v) == 14 {
+				// notFoundValue defaults to the neutral accumulator.
+				v = append(v, scm.CloneOptimizerExpression(v[12]))
+			}
+			if len(v) == 15 {
+				v = append(v, scm.NewSlice([]scm.Scmer{scm.NewSymbol("list")}))
+			}
+			if len(v) == 16 {
+				v = append(v, scm.NewNil())
+			}
+			// Planner-generated neutral and not-found expressions can share
+			// mutable AST lists. They are optimized independently below.
+			v[14] = scm.CloneOptimizerExpression(v[14])
+			v = append(v,
+				scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), schema}),
+				oc.OptimizeNoEscapeList(bindings))
+		}
+	}
 	mapReduceIdx, neutralIdx, outerIdx, notFoundIdx, postOrderColsIdx, postOrderFilterIdx := 11, 12, 13, 14, 15, 16
+	reuseNeutralForNotFound := len(v) > notFoundIdx && scm.Equal(v[neutralIdx], v[notFoundIdx])
 	rawMapReduce := v[mapReduceIdx]
 	for i := 1; i <= mapReduceIdx && i < len(v); i++ {
 		if i != mapReduceIdx {
@@ -90,7 +128,11 @@ func optimizeScanOrder(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) 
 		v[outerIdx], _ = oc.OptimizeSub(v[outerIdx], true)
 	}
 	if len(v) > notFoundIdx {
-		v[notFoundIdx], _ = oc.OptimizeSub(v[notFoundIdx], true)
+		if reuseNeutralForNotFound {
+			v[notFoundIdx] = v[neutralIdx]
+		} else {
+			v[notFoundIdx], _ = oc.OptimizeSub(v[notFoundIdx], true)
+		}
 	}
 	if len(v) > postOrderColsIdx {
 		v[postOrderColsIdx], _ = oc.OptimizeSub(v[postOrderColsIdx], true)
@@ -336,6 +378,8 @@ type scanOrderTableSpec struct {
 	callback        scm.Scmer
 	postOrderCols   []string
 	postOrderFilter scm.Scmer
+	accessSchema    scm.Scmer
+	accessValues    []scm.Scmer
 	// recordVisitor is an internal sink used by scan_order_batch_accept. When
 	// present, globally ordered record IDs are delivered directly instead of
 	// being mapped. The visitor must consume the slice before returning.
@@ -643,11 +687,22 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 
 		// Boundary analysis per table
 		analyzeStart := time.Now()
-		bounds := extractBoundaries(spec.conditionCols, spec.condition)
-		reorderByFrequency(bounds, t)
+		scratch := acquireScanAnalyzeScratch()
+		defer releaseScanAnalyzeScratch(scratch)
+		var bounds boundaries
+		if spec.accessSchema.IsNil() {
+			bounds = extractBoundariesInto(scratch.boundaries[:0], spec.conditionCols, spec.condition)
+			reorderByFrequency(bounds, t)
+		} else {
+			var compiled bool
+			bounds, compiled = bindCompiledScanAccess(spec.accessSchema, spec.accessValues, scratch.boundaries[:0])
+			if !compiled {
+				panic("scan_order received an invalid compiled access schema")
+			}
+		}
 		bounds, _ = extendBoundariesWithSortCols(bounds, spec.sortcols, sortdirs)
 		bounds = appendRecSetBoundary(bounds, spec.recset)
-		lower, upperLast := indexFromBoundaries(bounds)
+		lower, upperLast := indexFromBoundariesInto(scratch.lower[:0], bounds)
 
 		if Settings.ScanDebugging {
 			dbg := fmt.Sprintf("[SCAN_ORDER_MULTI] %s.%s", t.schema.Name, t.Name)
@@ -1032,12 +1087,12 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 }
 
 // scan_order delegates to scanOrderMulti with a single-element table spec.
-func (t *table) scan_order(currentTx *TxContext, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, isOuter bool, notFoundValue scm.Scmer, postOrderCols []string, postOrderFilter scm.Scmer) scm.Scmer {
+func (t *table) scan_order(currentTx *TxContext, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, isOuter bool, notFoundValue scm.Scmer, postOrderCols []string, postOrderFilter scm.Scmer, accessSchema scm.Scmer, accessValues []scm.Scmer) scm.Scmer {
 	// The general path owns per-scan debugging and telemetry. Debugging is
 	// explicitly allowed to add overhead, so keep it visible instead of letting
 	// the LIMIT 1 fast path silently omit this scan from system statistics.
 	if !Settings.ScanDebugging && postOrderFilter.IsNil() && len(sortcols) == 0 && limitPartitionCols == 0 && offset == 0 && limit == 1 && !isOuter {
-		return t.scanOrderFirst(currentTx, conditionCols, condition, callbackCols, mapReduce, neutral, notFoundValue)
+		return t.scanOrderFirst(currentTx, conditionCols, condition, callbackCols, mapReduce, neutral, notFoundValue, accessSchema, accessValues)
 	}
 	return scanOrderMulti(currentTx, []scanOrderTableSpec{{
 		table:           t,
@@ -1048,6 +1103,8 @@ func (t *table) scan_order(currentTx *TxContext, conditionCols []string, conditi
 		callback:        mapReduce,
 		postOrderCols:   postOrderCols,
 		postOrderFilter: postOrderFilter,
+		accessSchema:    accessSchema,
+		accessValues:    accessValues,
 		perTableOffset:  -1,
 		perTableLimit:   -1,
 	}}, sortdirs, limitPartitionCols, offset, limit, neutral, isOuter, notFoundValue)
@@ -1056,12 +1113,23 @@ func (t *table) scan_order(currentTx *TxContext, conditionCols []string, conditi
 // scanOrderFirst is the no-order LIMIT 1 specialization of scan_order. It
 // preserves the scan operator contract while avoiding the queues, channels,
 // and global merge needed by the general ordered multi-shard implementation.
-func (t *table) scanOrderFirst(currentTx *TxContext, conditionCols []string, condition scm.Scmer, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, notFoundValue scm.Scmer) scm.Scmer {
+func (t *table) scanOrderFirst(currentTx *TxContext, conditionCols []string, condition scm.Scmer, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, notFoundValue scm.Scmer, accessSchema scm.Scmer, accessValues []scm.Scmer) scm.Scmer {
 	ss := SessionStateFromTx(currentTx)
 	querySeq := querySeqFromTx(currentTx)
-	bounds := extractBoundaries(conditionCols, condition)
-	reorderByFrequency(bounds, t)
-	lower, upperLast := indexFromBoundaries(bounds)
+	scratch := acquireScanAnalyzeScratch()
+	defer releaseScanAnalyzeScratch(scratch)
+	var bounds boundaries
+	if accessSchema.IsNil() {
+		bounds = extractBoundariesInto(scratch.boundaries[:0], conditionCols, condition)
+		reorderByFrequency(bounds, t)
+	} else {
+		var compiled bool
+		bounds, compiled = bindCompiledScanAccess(accessSchema, accessValues, scratch.boundaries[:0])
+		if !compiled {
+			panic("scan_order received an invalid compiled access schema")
+		}
+	}
+	lower, upperLast := indexFromBoundariesInto(scratch.lower[:0], bounds)
 
 	var mu sync.Mutex
 	var foundShard *storageShard
@@ -1121,7 +1189,7 @@ func (t *table) scanOrderFirst(currentTx *TxContext, conditionCols []string, con
 	return result
 }
 
-func (r *recSet) scan_order(currentTx *TxContext, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, isOuter bool, notFoundValue scm.Scmer, postOrderCols []string, postOrderFilter scm.Scmer) scm.Scmer {
+func (r *recSet) scan_order(currentTx *TxContext, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, isOuter bool, notFoundValue scm.Scmer, postOrderCols []string, postOrderFilter scm.Scmer, accessSchema scm.Scmer, accessValues []scm.Scmer) scm.Scmer {
 	return scanOrderMulti(currentTx, []scanOrderTableSpec{{
 		recset:          r,
 		conditionCols:   conditionCols,
@@ -1131,6 +1199,8 @@ func (r *recSet) scan_order(currentTx *TxContext, conditionCols []string, condit
 		callback:        mapReduce,
 		postOrderCols:   postOrderCols,
 		postOrderFilter: postOrderFilter,
+		accessSchema:    accessSchema,
+		accessValues:    accessValues,
 		perTableOffset:  -1,
 		perTableLimit:   -1,
 	}}, sortdirs, limitPartitionCols, offset, limit, neutral, isOuter, notFoundValue)

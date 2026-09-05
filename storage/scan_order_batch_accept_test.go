@@ -132,7 +132,7 @@ func TestScanOrderBatchAcceptSupportsRecSetInput(t *testing.T) {
 	even := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
 		return scm.NewBool(scm.ToInt(values[0])%2 == 0)
 	})
-	input := table.scanRecSet(nil, []string{"id"}, even)
+	input := table.scanRecSet(nil, []string{"id"}, even, scm.NewNil(), nil)
 	_, descending := integerOrder(true)
 	batchSizes := make([]int64, 0)
 	got := runBatchAcceptIDs(table, input, recSetModuloFilter(&batchSizes, 4, 0),
@@ -232,7 +232,7 @@ func TestCollectOrderedCandidateBatchPrunesRangePartitions(t *testing.T) {
 
 func TestScanOrderBatchAcceptRejectsNonSubset(t *testing.T) {
 	table := setupBatchAcceptTable(t, "tbatchacceptsubset", 10)
-	allRows := table.scanRecSet(nil, nil, scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewBool(true) }))
+	allRows := table.scanRecSet(nil, nil, scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewBool(true) }), scm.NewNil(), nil)
 	badFilter := scm.NewFunc(func(...scm.Scmer) scm.Scmer { return NewRecSetScmer(allRows) })
 	_, ascending := integerOrder(false)
 

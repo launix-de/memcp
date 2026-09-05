@@ -134,6 +134,18 @@ test_cases:
       data_contains:
         - code: "scan_batch"
 
+  - name: "EXPLAIN result-producing correlated join keeps compiled access"
+    sql: |
+      EXPLAIN SELECT c.name, o.amount
+      FROM sb_customers c, sb_orders o
+      WHERE o.cid = c.cid
+    expect:
+      rows: 1
+      result_contains:
+        - "scan_access_v1"
+      result_not_contains:
+        - "scan_batch"
+
   - name: "EXPLAIN cross-join does NOT use scan_batch"
     sql: |
       EXPLAIN SELECT COUNT(*) FROM sb_customers c, sb_orders o

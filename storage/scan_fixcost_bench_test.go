@@ -172,6 +172,38 @@ func BenchmarkScanUniquePointWithTx(b *testing.B) {
 	benchmarkUniquePointScan(b, "read_tx", NewTxContext(TxCursorStability))
 }
 
+func BenchmarkScanUniquePointCompiledAccessWithTx(b *testing.B) {
+	dbName := "bench_scan_point_compiled"
+	databases.Remove(dbName)
+	CreateDatabase(dbName, true)
+	tbl, _ := CreateTable(dbName, "items", Memory, true)
+	tbl.CreateColumn("id", "INT", nil, nil)
+	tbl.CreateColumn("label", "VARCHAR", nil, nil)
+	rows := make([][]scm.Scmer, 1024)
+	for i := range rows {
+		rows[i] = []scm.Scmer{scm.NewInt(int64(i)), scm.NewString("value")}
+	}
+	tbl.Insert([]string{"id", "label"}, rows, nil, scm.NewNil(), false, nil)
+	tbl.Unique = append(tbl.Unique, uniqueKey{Id: "PRIMARY", Cols: []string{"id"}})
+	tx := NewTxContext(TxCursorStability)
+	condition := scanCondition("id", scm.NewInt(511))
+	mapReduceFn := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return a[1] })
+	schema := scm.NewSlice([]scm.Scmer{
+		scm.NewString("scan_access_v1"), scm.NewInt(1), scm.NewString("equal"),
+		scm.NewString("id"), scm.NewInt(0), scm.NewInt(0), scm.NewInt(3), scm.NewString(""),
+	})
+	values := []scm.Scmer{scm.NewInt(511)}
+	tbl.scanWithBatchFrom(tx, nil, []string{"id"}, condition, []string{"label"}, mapReduceFn,
+		scm.NewNil(), scm.NewNil(), false, 0, nil, nil, schema, values)
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		tbl.scanWithBatchFrom(tx, nil, []string{"id"}, condition, []string{"label"}, mapReduceFn,
+			scm.NewNil(), scm.NewNil(), false, 0, nil, nil, schema, values)
+	}
+}
+
 func benchmarkUniqueMainPointScan(b *testing.B, name string, currentTx *TxContext) {
 	dbName := "bench_scan_main_point_" + name
 	databases.Remove(dbName)

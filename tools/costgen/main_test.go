@@ -652,11 +652,11 @@ func TestValidateScanLookupDominance(t *testing.T) {
 		{caseName: "point", decision: "scan_lookup", plan: "scan_lookup", y: 50},
 		{caseName: "point", decision: "scan_lookup", plan: "scan_order", y: 100},
 	}
-	if err := validateScanLookupDominance(rows); err != nil {
+	if err := validateScanLookupDominance(rows, "scan_lookup"); err != nil {
 		t.Fatalf("dominant scan_lookup rejected: %v", err)
 	}
 	rows[0].y = 101
-	if err := validateScanLookupDominance(rows); err == nil {
+	if err := validateScanLookupDominance(rows, "scan_lookup"); err == nil {
 		t.Fatal("slower scan_lookup accepted as dominant")
 	}
 }

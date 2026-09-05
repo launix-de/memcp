@@ -618,7 +618,7 @@ if the user is not allowed to access this property, the function will throw an e
 (define sql_policy (lambda (username)
 	(begin
 		(define is_admin (scan_lookup nil (table "system" "user")
-			'("username") (list username) "admin"))
+			'("scan_lookup_v1" 1 "username" "value" 1 "admin") (list username)))
 		(if is_admin (lambda (schema tblname write) true) /* admin -> allow all */
 			/* else: complicated policy */
 			(lambda (schema tblname write)
@@ -627,7 +627,7 @@ if the user is not allowed to access this property, the function will throw an e
 					(if (equal?? schema "information_schema") true (begin
 						/* Database-level check via system.access */
 						(define has_access (scan_lookup nil (table "system" "access")
-							'("username" "database") (list username schema)))
+							'("scan_lookup_v1" 2 "username" "database" "exists" 0) (list username schema)))
 						(if has_access true (error (concat "access denied: user '" username "' may not " (if write "write" "read") " " schema "." tblname)))
 					))
 			))
@@ -775,7 +775,7 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 	(set old_handler http_handler)
 	(define handle_query (lambda (req res schema query) (begin
 		/* check for password */
-		(set pw (scan_lookup nil (table "system" "user") '("username") (list (req "username")) "password"))
+		(set pw (scan_lookup nil (table "system" "user") '("scan_lookup_v1" 1 "username" "value" 1 "password") (list (req "username"))))
 		(if (and pw (equal? pw (password (req "password"))))
 			(begin
 				(try (lambda () (time (begin
@@ -820,7 +820,7 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 	)))
 	(define handle_query_postgres (lambda (req res schema query) (begin
 		/* check for password */
-		(set pw (scan_lookup nil (table "system" "user") '("username") (list (req "username")) "password"))
+		(set pw (scan_lookup nil (table "system" "user") '("scan_lookup_v1" 1 "username" "value" 1 "password") (list (req "username"))))
 		(if (and pw (equal? pw (password (req "password"))))
 			(begin
 				(try (lambda () (time (begin
@@ -951,7 +951,7 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 
 /* shared callbacks for mysql protocol (TCP and Unix socket) */
 (set mysql_auth (lambda (username_)
-	(scan_lookup nil (table "system" "user") '("username") (list username_) "password")))
+	(scan_lookup nil (table "system" "user") '("scan_lookup_v1" 1 "username" "value" 1 "password") (list username_))))
 (set mysql_schema (lambda (username schema) (or (equal?? schema "information_schema") (list? (show schema)))))
 
 /* Top-level so the interpreter compiles this body once instead of rebuilding a
@@ -963,7 +963,7 @@ statement inside the per-query transaction callback. */
 	single last-character check replaces a backtracking regex on the hot path */
 	(define sql_parse_input_len (strlen sql_parse_input))
 	(if (and (> sql_parse_input_len 0)
-			(equal? (substr sql_parse_input (- sql_parse_input_len 1) 1) ";"))
+		(equal? (substr sql_parse_input (- sql_parse_input_len 1) 1) ";"))
 		(set sql_parse_input (substr sql_parse_input 0 (- sql_parse_input_len 1)))
 		nil)
 	(define mysql_username (coalesce (session "username") "root"))

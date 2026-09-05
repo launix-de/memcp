@@ -301,8 +301,9 @@ test_cases:
       ORDER BY ID
     expect:
       rows: 1
-      data_contains:
-        - code: "scan_order_multi"
+      result_contains:
+        - "scan_order_multi"
+        - "scan_access_v1"
 
   # === UNION ALL in subquery / derived table ===
 

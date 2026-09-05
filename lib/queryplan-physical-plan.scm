@@ -7810,100 +7810,100 @@ physical decision and preserve its runtime recompile gate. */
 			(lower_zero_source_query_block_as_dataset_reduce
 				block fields row_mapper reduce_expr neutral_expr)
 			(begin
-		(define first_alias (source_alias (car sources)))
-		(define scan_sources sources)
-		(define scan_plan (query_block_join_plan block scan_sources))
-		(define driver_source (join_optimizer_source_by_alias scan_sources
-			(join_optimizer_tree_first_alias scan_plan)))
-		(define final_condition (coalesceNil (qb_where block) true))
-		(define order_items (coalesceNil (qb_order block) '()))
-		(define direct_order (order_items_supported_by_join_driver?
-			scan_sources first_alias driver_source order_items
-			(query_block_stage_catalog block) final_condition))
-		(define ordered_sources (join_optimizer_sources_for_order scan_sources
-			(join_optimizer_tree_aliases scan_plan)))
-		(define direct_order_safe (and direct_order
-			(not (ordered_join_limit_requires_complete_rows?
-				ordered_sources first_alias final_condition (qb_offset block) (qb_limit block)
-				(query_block_stage_catalog block) (planner_context_session (qb_facts block))))))
-		(define hierarchical_order (order_items_follow_join_tree?
-			ordered_sources first_alias order_items (query_block_stage_catalog block) final_condition))
-		(define field_exprs (extract_assoc fields (lambda (_title expr) expr)))
-		(define needed_exprs (merge (list
-			field_exprs
-			(list final_condition)
-			(order_exprs order_items)
-			(source_join_exprs scan_sources))))
-		/* Dataset fields are mapped only after the native window accepts a row.
-		Propagate that bound so nested scalar probes can compare direct work with
-		the cost of preparing their complete dependent carriers. An unlimited
-		reduce (e.g. a bare COUNT(*)) has no LIMIT window and no unique point
-		lookup to bound it, but its call count is still knowable: the driving
-		source's own row count, scaled by the residual condition's selectivity. */
-		(define unbounded_probe_work_rows (membership_probe_work_rows (qb_facts block) final_condition
-			(planner_row_count_after_selectivity
-				driver_source scan_sources first_alias final_condition nil)))
-		(define projection_probe_work_rows (if (query_limit_active? (qb_offset block) (qb_limit block))
-			(coalesceNil (probe_limit_work_rows (qb_limit block)
-				(planner_context_session (qb_facts block))) 0)
-			(if (probe_context_unique_point? scan_sources first_alias final_condition) 1
-				unbounded_probe_work_rows)))
-		(define scalar_carrier_probe_work_rows (if direct_order_safe
-			projection_probe_work_rows
-			unbounded_probe_work_rows))
-		(if (or direct_order_safe
-			(and hierarchical_order
-				(driver_limit_cannot_brake?
-					ordered_sources first_alias final_condition
-					(qb_offset block) (qb_limit block) (query_block_stage_catalog block)
-					(planner_context_session (qb_facts block)))))
-			(begin
-				(define scalar_plan (physical_scalar_truth_plan
-					scan_sources driver_source first_alias final_condition
-					scalar_carrier_probe_work_rows unbounded_probe_work_rows
-					(query_block_stage_catalog block)
-					(planner_context_session (qb_facts block))))
-				(define effective_condition (rewrite_physical_scalar_truth_plan scalar_plan final_condition))
-				(define effective_field_exprs (rewrite_physical_scalar_truth_plan scalar_plan field_exprs))
-				(define effective_needed_exprs (rewrite_physical_scalar_truth_plan scalar_plan needed_exprs))
-				(define row_expr (cons row_mapper (map effective_field_exprs (lambda (expr)
-					(lower_column_expr_for_join_in_context
-						scan_sources first_alias expr projection_probe_work_rows)))))
-				(define legacy_reduce_plan (build_join_scan_reduce_using_recipe
-					(qb_schema block)
-					scan_sources
-					scan_plan
-					first_alias
-					effective_needed_exprs
-					effective_condition
-					row_expr
-					order_items
-					(coalesceNil (qb_offset block) 0)
-					(coalesceNil (qb_limit block) -1)
-					true projection_probe_work_rows nil (query_block_stage_catalog block)
-					reduce_expr neutral_expr shard_reduce_expr scalar_plan (qb_facts block)))
-				(if (and (empty_list? order_items)
-					(and (equal? (coalesceNil (qb_offset block) 0) 0)
-						(equal? (coalesceNil (qb_limit block) -1) -1)))
-					(join_unordered_reduce_plan
-						scan_sources scan_plan first_alias effective_field_exprs
-						effective_condition (query_block_stage_catalog block) (qb_facts block)
-						(lambda (_probe_work_rows _scalar_probe) row_expr)
-						reduce_expr neutral_expr shard_reduce_expr legacy_reduce_plan)
-					legacy_reduce_plan))
-			(if hierarchical_order
-				(join_ordered_streaming_limit_plan
-					(qb_schema block) scan_sources scan_plan first_alias field_exprs needed_exprs final_condition
-					order_items (qb_offset block) (qb_limit block) (query_block_stage_catalog block)
-					(qb_facts block)
-					(lambda (probe_work_rows scalar_probe)
-						(cons row_mapper (map (if (nil? scalar_probe) field_exprs
-							(rewrite_physical_scalar_probe_as_true scalar_probe field_exprs)) (lambda (expr)
-								(lower_column_expr_for_join_in_context
-									scan_sources first_alias expr probe_work_rows)))))
-					reduce_expr neutral_expr)
-				(neumann_fail "build_queryplan"
-					"ordered dataset reduction has no streamable join-tree order"))))))))
+				(define first_alias (source_alias (car sources)))
+				(define scan_sources sources)
+				(define scan_plan (query_block_join_plan block scan_sources))
+				(define driver_source (join_optimizer_source_by_alias scan_sources
+					(join_optimizer_tree_first_alias scan_plan)))
+				(define final_condition (coalesceNil (qb_where block) true))
+				(define order_items (coalesceNil (qb_order block) '()))
+				(define direct_order (order_items_supported_by_join_driver?
+					scan_sources first_alias driver_source order_items
+					(query_block_stage_catalog block) final_condition))
+				(define ordered_sources (join_optimizer_sources_for_order scan_sources
+					(join_optimizer_tree_aliases scan_plan)))
+				(define direct_order_safe (and direct_order
+					(not (ordered_join_limit_requires_complete_rows?
+						ordered_sources first_alias final_condition (qb_offset block) (qb_limit block)
+						(query_block_stage_catalog block) (planner_context_session (qb_facts block))))))
+				(define hierarchical_order (order_items_follow_join_tree?
+					ordered_sources first_alias order_items (query_block_stage_catalog block) final_condition))
+				(define field_exprs (extract_assoc fields (lambda (_title expr) expr)))
+				(define needed_exprs (merge (list
+					field_exprs
+					(list final_condition)
+					(order_exprs order_items)
+					(source_join_exprs scan_sources))))
+				/* Dataset fields are mapped only after the native window accepts a row.
+				Propagate that bound so nested scalar probes can compare direct work with
+				the cost of preparing their complete dependent carriers. An unlimited
+				reduce (e.g. a bare COUNT(*)) has no LIMIT window and no unique point
+				lookup to bound it, but its call count is still knowable: the driving
+				source's own row count, scaled by the residual condition's selectivity. */
+				(define unbounded_probe_work_rows (membership_probe_work_rows (qb_facts block) final_condition
+					(planner_row_count_after_selectivity
+						driver_source scan_sources first_alias final_condition nil)))
+				(define projection_probe_work_rows (if (query_limit_active? (qb_offset block) (qb_limit block))
+					(coalesceNil (probe_limit_work_rows (qb_limit block)
+						(planner_context_session (qb_facts block))) 0)
+					(if (probe_context_unique_point? scan_sources first_alias final_condition) 1
+						unbounded_probe_work_rows)))
+				(define scalar_carrier_probe_work_rows (if direct_order_safe
+					projection_probe_work_rows
+					unbounded_probe_work_rows))
+				(if (or direct_order_safe
+					(and hierarchical_order
+						(driver_limit_cannot_brake?
+							ordered_sources first_alias final_condition
+							(qb_offset block) (qb_limit block) (query_block_stage_catalog block)
+							(planner_context_session (qb_facts block)))))
+					(begin
+						(define scalar_plan (physical_scalar_truth_plan
+							scan_sources driver_source first_alias final_condition
+							scalar_carrier_probe_work_rows unbounded_probe_work_rows
+							(query_block_stage_catalog block)
+							(planner_context_session (qb_facts block))))
+						(define effective_condition (rewrite_physical_scalar_truth_plan scalar_plan final_condition))
+						(define effective_field_exprs (rewrite_physical_scalar_truth_plan scalar_plan field_exprs))
+						(define effective_needed_exprs (rewrite_physical_scalar_truth_plan scalar_plan needed_exprs))
+						(define row_expr (cons row_mapper (map effective_field_exprs (lambda (expr)
+							(lower_column_expr_for_join_in_context
+								scan_sources first_alias expr projection_probe_work_rows)))))
+						(define legacy_reduce_plan (build_join_scan_reduce_using_recipe
+							(qb_schema block)
+							scan_sources
+							scan_plan
+							first_alias
+							effective_needed_exprs
+							effective_condition
+							row_expr
+							order_items
+							(coalesceNil (qb_offset block) 0)
+							(coalesceNil (qb_limit block) -1)
+							true projection_probe_work_rows nil (query_block_stage_catalog block)
+							reduce_expr neutral_expr shard_reduce_expr scalar_plan (qb_facts block)))
+						(if (and (empty_list? order_items)
+							(and (equal? (coalesceNil (qb_offset block) 0) 0)
+								(equal? (coalesceNil (qb_limit block) -1) -1)))
+							(join_unordered_reduce_plan
+								scan_sources scan_plan first_alias effective_field_exprs
+								effective_condition (query_block_stage_catalog block) (qb_facts block)
+								(lambda (_probe_work_rows _scalar_probe) row_expr)
+								reduce_expr neutral_expr shard_reduce_expr legacy_reduce_plan)
+							legacy_reduce_plan))
+					(if hierarchical_order
+						(join_ordered_streaming_limit_plan
+							(qb_schema block) scan_sources scan_plan first_alias field_exprs needed_exprs final_condition
+							order_items (qb_offset block) (qb_limit block) (query_block_stage_catalog block)
+							(qb_facts block)
+							(lambda (probe_work_rows scalar_probe)
+								(cons row_mapper (map (if (nil? scalar_probe) field_exprs
+									(rewrite_physical_scalar_probe_as_true scalar_probe field_exprs)) (lambda (expr)
+										(lower_column_expr_for_join_in_context
+											scan_sources first_alias expr probe_work_rows)))))
+							reduce_expr neutral_expr)
+						(neumann_fail "build_queryplan"
+							"ordered dataset reduction has no streamable join-tree order"))))))))
 
 (define scalar_order_lookup_input_keys (lambda (stage)
 	(begin

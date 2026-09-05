@@ -105,12 +105,16 @@ func tryScanBatchRewriteMapReduce(v []scm.Scmer, mapcolsIdx, mapReduceIdx int) s
 		outerParamSet[name] = true
 	}
 	hasOuterRef := false
+	outerSlots := make(map[int]bool, len(outerLabels))
+	for i := range outerLabels {
+		outerSlots[i+1] = true
+	}
 	// Check inner filterfn and mapfn bodies for outer param references
 	if len(innerScanSlice) > 4 {
-		hasOuterRef = hasOuterRef || astContainsSymbol(innerScanSlice[4], outerParamSet)
+		hasOuterRef = hasOuterRef || astContainsSymbol(innerScanSlice[4], outerParamSet) || astContainsOuterSlot(innerScanSlice[4], outerSlots)
 	}
 	if len(innerScanSlice) > 6 {
-		hasOuterRef = hasOuterRef || astContainsSymbol(innerScanSlice[6], outerParamSet)
+		hasOuterRef = hasOuterRef || astContainsSymbol(innerScanSlice[6], outerParamSet) || astContainsOuterSlot(innerScanSlice[6], outerSlots)
 	}
 	if !hasOuterRef {
 		return scm.NewNil()
@@ -118,17 +122,19 @@ func tryScanBatchRewriteMapReduce(v []scm.Scmer, mapcolsIdx, mapReduceIdx int) s
 
 	// Build replacement mapping: outer param symbol → #N symbol
 	replaceMap := make(map[string]string, stride)
+	replaceSlots := make(map[int]string, stride)
 	batchPseudocols := make([]scm.Scmer, stride)
 	batchParams := make([]scm.Scmer, stride)
 	for i, name := range outerLabels {
 		pseudo := fmt.Sprintf("#%d", i)
 		replaceMap[name] = pseudo
+		replaceSlots[i+1] = pseudo
 		batchPseudocols[i] = scm.NewString(pseudo)
 		batchParams[i] = scm.NewSymbol(pseudo)
 	}
 
 	// Rewrite inner scan → scan_batch
-	rewrittenInner := rewriteInnerScanToBatch(innerScanSlice, batchPseudocols, batchParams, replaceMap, stride)
+	rewrittenInner := rewriteInnerScanToBatch(innerScanSlice, batchPseudocols, batchParams, replaceMap, replaceSlots, stride)
 
 	// Replace inner scan in mapfn body with the rewritten scan_batch
 	newBody := replacer(scm.NewSlice(rewrittenInner))
@@ -269,8 +275,9 @@ func findFirstScan(expr scm.Scmer) (scanSlice []scm.Scmer, replacer func(scm.Scm
 	}
 	headStr := scmerHeadString(sl[0])
 
-	// Direct scan/scan_batch match
-	if headStr == "scan" || headStr == "scan_batch" {
+	// An existing scan_batch has already crossed this rewrite boundary. Treating
+	// it as a fresh scan would nest stride/batch arguments on every optimizer pass.
+	if headStr == "scan" {
 		return sl, func(replacement scm.Scmer) scm.Scmer { return replacement }
 	}
 
@@ -340,13 +347,29 @@ func astContainsSymbol(expr scm.Scmer, symbols map[string]bool) bool {
 	return false
 }
 
+func astContainsOuterSlot(expr scm.Scmer, slots map[int]bool) bool {
+	if !expr.IsSlice() {
+		return false
+	}
+	items := expr.Slice()
+	if len(items) == 3 && scanSymbolIs(items[0], "outer") && scm.ToInt(items[1]) == 1 && items[2].IsNthLocalVar() {
+		return slots[int(items[2].NthLocalVar())]
+	}
+	for _, item := range items {
+		if astContainsOuterSlot(item, slots) {
+			return true
+		}
+	}
+	return false
+}
+
 // rewriteInnerScanToBatch rewrites a (scan ...) call to (scan_batch ...) by:
 // 1. Changing the head to scan_batch
 // 2. Appending #N pseudo-columns to filtercols and mapcols
 // 3. Extending filterfn and mapfn lambdas with #N params
 // 4. Replacing outer param symbols in filter/map bodies with #N symbols
 // 5. Inserting stride and __batchbuf after mapreduce
-func rewriteInnerScanToBatch(inner []scm.Scmer, pseudocols, pseudoparams []scm.Scmer, replaceMap map[string]string, stride int) []scm.Scmer {
+func rewriteInnerScanToBatch(inner []scm.Scmer, pseudocols, pseudoparams []scm.Scmer, replaceMap map[string]string, replaceSlots map[int]string, stride int) []scm.Scmer {
 	// inner = [scan, tx, tbl, filtercols, filterfn, mapcols, mapreduce, neutral, combine, isOuter]
 	result := make([]scm.Scmer, 0, len(inner)+2)
 
@@ -357,17 +380,17 @@ func rewriteInnerScanToBatch(inner []scm.Scmer, pseudocols, pseudoparams []scm.S
 	// [3] filtercols: append #N
 	result = append(result, appendToScmerList(inner[3], pseudocols))
 	// [4] filterfn: extend params + replace body symbols
-	result = append(result, extendAndRewriteLambda(inner[4], pseudoparams, replaceMap))
+	result = append(result, extendAndRewriteLambda(inner[4], pseudoparams, replaceMap, replaceSlots))
 	// [5] mapcols: append #N
 	result = append(result, appendToScmerList(inner[5], pseudocols))
 	// [6] mapreduce: extend params + replace body symbols
-	result = append(result, extendAndRewriteLambda(inner[6], pseudoparams, replaceMap))
+	result = append(result, extendAndRewriteLambda(inner[6], pseudoparams, replaceMap, replaceSlots))
 	// [7] stride
 	result = append(result, scm.NewInt(int64(stride)))
 	// [8] batchdata (symbol __batchbuf from the flush lambda)
 	result = append(result, scm.NewSymbol("__batchbuf"))
 	// [9..] neutral, combine, isOuter from original
-	for i := 7; i < len(inner); i++ {
+	for i := 7; i < len(inner) && i <= 9; i++ {
 		result = append(result, inner[i])
 	}
 	return result
@@ -387,7 +410,7 @@ func appendToScmerList(listExpr scm.Scmer, extras []scm.Scmer) scm.Scmer {
 
 // extendAndRewriteLambda extends a lambda with extra params and replaces
 // symbols in its body according to replaceMap.
-func extendAndRewriteLambda(lambdaExpr scm.Scmer, extraParams []scm.Scmer, replaceMap map[string]string) scm.Scmer {
+func extendAndRewriteLambda(lambdaExpr scm.Scmer, extraParams []scm.Scmer, replaceMap map[string]string, replaceSlots map[int]string) scm.Scmer {
 	if !lambdaExpr.IsSlice() {
 		return lambdaExpr
 	}
@@ -409,7 +432,7 @@ func extendAndRewriteLambda(lambdaExpr scm.Scmer, extraParams []scm.Scmer, repla
 	copy(newParams[len(params):], extraParams)
 
 	// Replace symbols in body
-	newBody := replaceSymbolsInAST(body, replaceMap)
+	newBody := replaceSymbolsInAST(body, replaceMap, replaceSlots)
 
 	// Handle numvars (4th element): increase by number of extra params
 	if len(sl) >= 4 && !sl[3].IsNil() {
@@ -421,7 +444,7 @@ func extendAndRewriteLambda(lambdaExpr scm.Scmer, extraParams []scm.Scmer, repla
 }
 
 // replaceSymbolsInAST walks an AST and replaces symbol references according to the mapping.
-func replaceSymbolsInAST(expr scm.Scmer, mapping map[string]string) scm.Scmer {
+func replaceSymbolsInAST(expr scm.Scmer, mapping map[string]string, slots map[int]string) scm.Scmer {
 	if expr.IsSymbol() {
 		name := expr.String()
 		if replacement, ok := mapping[name]; ok {
@@ -442,12 +465,17 @@ func replaceSymbolsInAST(expr scm.Scmer, mapping map[string]string) scm.Scmer {
 	if len(sl) == 0 {
 		return expr
 	}
+	if len(sl) == 3 && scanSymbolIs(sl[0], "outer") && scm.ToInt(sl[1]) == 1 && sl[2].IsNthLocalVar() {
+		if replacement, ok := slots[int(sl[2].NthLocalVar())]; ok {
+			return scm.NewSymbol(replacement)
+		}
+	}
 	// Don't recurse into nested lambda param lists (only body)
 	head := sl[0]
 	headStr := scmerHeadString(head)
 	if headStr == "lambda" && len(sl) >= 3 {
 		// Only replace in body (sl[2]), not in params (sl[1])
-		newBody := replaceSymbolsInAST(sl[2], mapping)
+		newBody := replaceSymbolsInAST(sl[2], mapping, slots)
 		if len(sl) >= 4 {
 			return scm.NewSlice([]scm.Scmer{sl[0], sl[1], newBody, sl[3]})
 		}
@@ -457,7 +485,7 @@ func replaceSymbolsInAST(expr scm.Scmer, mapping map[string]string) scm.Scmer {
 	changed := false
 	newSl := make([]scm.Scmer, len(sl))
 	for i, elem := range sl {
-		newSl[i] = replaceSymbolsInAST(elem, mapping)
+		newSl[i] = replaceSymbolsInAST(elem, mapping, slots)
 		if newSl[i] != elem {
 			changed = true
 		}

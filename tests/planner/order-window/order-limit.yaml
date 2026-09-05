@@ -216,6 +216,20 @@ test_cases:
         - "(sort rows"
         - "(slice sorted"
 
+  - name: "Joined ordered driver carries compiled local access"
+    sql: |
+      EXPLAIN SELECT l.id
+      FROM ord_join_left l
+      JOIN ord_join_right r ON r.id = l.ref_id
+      WHERE r.rank_value >= 1
+      ORDER BY r.rank_value
+      LIMIT 1
+    expect:
+      rows: 1
+      result_contains:
+        - "scan_join_order"
+        - "scan_access_v1"
+
   - name: "Cross-source computed order uses a physical carrier"
     sql: |
       EXPLAIN SELECT l.id

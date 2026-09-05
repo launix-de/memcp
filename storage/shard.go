@@ -2769,15 +2769,26 @@ type filteredRowEstimate struct {
 	coverage   string
 }
 
-func (t *storageShard) EstimateFilteredRows(conditionCols []string, condition scm.Scmer, limit int, currentTx *TxContext) filteredRowEstimate {
+func (t *storageShard) EstimateFilteredRows(conditionCols []string, condition scm.Scmer, limit int, currentTx *TxContext, accessSchema scm.Scmer, accessValues []scm.Scmer) filteredRowEstimate {
 	if limit <= 0 {
 		limit = 1024
 	}
 	t.ensureMainCount(false)
 	ccols := make([]ColumnStorage, len(conditionCols))
 	conditionGetters := make([]mapArgGetter, len(conditionCols))
-	bounds := extractBoundaries(conditionCols, condition)
-	lower, upperLast := indexFromBoundaries(bounds)
+	scratch := acquireScanAnalyzeScratch()
+	defer releaseScanAnalyzeScratch(scratch)
+	var bounds boundaries
+	if accessSchema.IsNil() {
+		bounds = extractBoundariesInto(scratch.boundaries[:0], conditionCols, condition)
+	} else {
+		var compiled bool
+		bounds, compiled = bindCompiledScanAccess(accessSchema, accessValues, scratch.boundaries[:0])
+		if !compiled {
+			panic("scan_selectivity_estimate received an invalid compiled access schema")
+		}
+	}
+	lower, upperLast := indexFromBoundariesInto(scratch.lower[:0], bounds)
 	recsetBoundaryCoversCondition := recSetHooksCoverCondition(bounds, lower, t.t, conditionCols, condition)
 	for i, col := range conditionCols {
 		if col == "$recset_contains" {

@@ -24,6 +24,128 @@ import (
 
 var benchmarkBoundaries boundaries
 
+func TestCompileScanAccessBindsRuntimeValuesWithoutAllocation(t *testing.T) {
+	columns := scm.NewSlice([]scm.Scmer{
+		scm.NewSymbol("list"), scm.NewString("tenant"), scm.NewString("created_at"),
+	})
+	filter := scm.NewSlice([]scm.Scmer{
+		scm.NewSymbol("lambda"),
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("tenant"), scm.NewSymbol("created")}),
+		scm.NewSlice([]scm.Scmer{
+			scm.NewSymbol("and"),
+			scm.NewSlice([]scm.Scmer{scm.NewSymbol("equal??"), scm.NewSymbol("tenant"), scm.NewSymbol("wanted_tenant")}),
+			scm.NewSlice([]scm.Scmer{scm.NewSymbol(">="), scm.NewSymbol("created"), scm.NewSymbol("minimum_created")}),
+		}),
+	})
+	schema, bindingExprs, ok := compileScanAccess(columns, filter)
+	if !ok || len(bindingExprs) != 2 {
+		t.Fatalf("compileScanAccess returned ok=%v bindings=%d", ok, len(bindingExprs))
+	}
+	values := []scm.Scmer{scm.NewInt(7), scm.NewInt(100)}
+	var storage [scanAnalyzeScratchCapacity]columnboundaries
+	bound, valid := bindCompiledScanAccess(schema, values, storage[:0])
+	if !valid || len(bound) != 2 {
+		t.Fatalf("bindCompiledScanAccess returned valid=%v boundaries=%d", valid, len(bound))
+	}
+	if bound[0].col != "tenant" || bound[0].matcher != EqualMatcher || bound[0].lower.Int() != 7 {
+		t.Fatalf("unexpected compiled equality: %#v", bound[0])
+	}
+	if bound[1].col != "created_at" || bound[1].matcher != RangeMatcher || bound[1].lower.Int() != 100 || !bound[1].lowerInclusive {
+		t.Fatalf("unexpected compiled range: %#v", bound[1])
+	}
+	if allocs := testing.AllocsPerRun(1000, func() {
+		_, _ = bindCompiledScanAccess(schema, values, storage[:0])
+	}); allocs != 0 {
+		t.Fatalf("compiled scan access binding allocated %.2f times per run, want 0", allocs)
+	}
+}
+
+func TestCompileScanAccessRejectsDisjunction(t *testing.T) {
+	columns := scm.NewSlice([]scm.Scmer{scm.NewSymbol("list"), scm.NewString("id")})
+	filter := scm.NewSlice([]scm.Scmer{
+		scm.NewSymbol("lambda"),
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("id")}),
+		scm.NewSlice([]scm.Scmer{
+			scm.NewSymbol("or"),
+			scm.NewSlice([]scm.Scmer{scm.NewSymbol("equal??"), scm.NewSymbol("id"), scm.NewInt(1)}),
+			scm.NewSlice([]scm.Scmer{scm.NewSymbol("equal??"), scm.NewSymbol("id"), scm.NewInt(2)}),
+		}),
+	})
+	if _, _, ok := compileScanAccess(columns, filter); ok {
+		t.Fatal("compileScanAccess accepted a disjunction")
+	}
+}
+
+func TestCompileScanAccessEncodesBatchSlots(t *testing.T) {
+	columns := scm.NewSlice([]scm.Scmer{
+		scm.NewSymbol("list"), scm.NewString("id"), scm.NewString("#0"),
+	})
+	filter := scm.NewSlice([]scm.Scmer{
+		scm.NewSymbol("lambda"),
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("id"), scm.NewSymbol("batch_id")}),
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("equal??"), scm.NewSymbol("id"), scm.NewSymbol("batch_id")}),
+	})
+	schema, bindings, ok := compileScanAccessMode(columns, filter, true)
+	if !ok || len(bindings) != 0 {
+		t.Fatalf("batch access compilation returned ok=%v bindings=%d", ok, len(bindings))
+	}
+	var storage [scanAnalyzeScratchCapacity]columnboundaries
+	bound, valid := bindCompiledScanAccess(schema, nil, storage[:0])
+	if !valid || len(bound) != 1 || !bound[0].lowerBatch || !bound[0].upperBatch ||
+		bound[0].lowerBatchSubidx != 0 || bound[0].upperBatchSubidx != 0 {
+		t.Fatalf("unexpected compiled batch boundary: valid=%v boundary=%#v", valid, bound)
+	}
+}
+
+func TestCompileScanAccessKeepsCandidateHooksAfterSortedPrefix(t *testing.T) {
+	columns := scm.NewSlice([]scm.Scmer{
+		scm.NewSymbol("list"), scm.NewString("text"), scm.NewString("tenant"), scm.NewString("$recset_contains"),
+	})
+	filter := scm.NewSlice([]scm.Scmer{
+		scm.NewSymbol("lambda"),
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("text"), scm.NewSymbol("tenant"), scm.NewSymbol("in_set")}),
+		scm.NewSlice([]scm.Scmer{
+			scm.NewSymbol("and"),
+			scm.NewSlice([]scm.Scmer{scm.NewSymbol("strlike"), scm.NewSymbol("text"), scm.NewSymbol("pattern"), scm.NewString("utf8mb4_unicode_ci")}),
+			scm.NewSlice([]scm.Scmer{scm.NewSymbol("equal??"), scm.NewSymbol("tenant"), scm.NewSymbol("wanted_tenant")}),
+			scm.NewSlice([]scm.Scmer{scm.NewSymbol("in_set"), scm.NewSymbol("allowed_rows")}),
+		}),
+	})
+	schema, bindings, ok := compileScanAccess(columns, filter)
+	if !ok || len(bindings) != 3 {
+		t.Fatalf("hook access compilation returned ok=%v bindings=%d", ok, len(bindings))
+	}
+	values := []scm.Scmer{scm.NewInt(7), scm.NewNil(), scm.NewString("prefix%")}
+	var storage [scanAnalyzeScratchCapacity]columnboundaries
+	bound, valid := bindCompiledScanAccess(schema, values, storage[:0])
+	if !valid || len(bound) != 3 {
+		t.Fatalf("compiled hooks returned valid=%v boundaries=%d", valid, len(bound))
+	}
+	if bound[0].matcher != EqualMatcher || bound[0].col != "tenant" {
+		t.Fatalf("equality is not the leading physical boundary: %#v", bound)
+	}
+	if bound[1].matcher != RecSetMatcher {
+		t.Fatalf("compiled access omitted the RecSet hook: %#v", bound)
+	}
+	like := bound[2]
+	if like.matcher != LikeMatcher || like.collation != "utf8mb4_unicode_ci" || like.lower.String() != "prefix%" {
+		t.Fatalf("unexpected LIKE hook: %#v", like)
+	}
+}
+
+func TestCompileScanAccessAcceptsParsedSourceInfo(t *testing.T) {
+	call := scm.Read(t.Name(), `(scan nil table_value
+		(list "id") (lambda (id) (equal?? id wanted_id))
+		(list "id") (lambda (acc id) id) nil nil false)`)
+	items, ok := scmerSlice(call)
+	if !ok || len(items) < 5 {
+		t.Fatalf("unexpected parsed scan expression: %s", scm.SerializeToString(call, &scm.Globalenv))
+	}
+	if _, bindings, compiled := compileScanAccess(items[3], items[4]); !compiled || len(bindings) != 1 {
+		t.Fatalf("parsed scan access compiled=%v bindings=%d", compiled, len(bindings))
+	}
+}
+
 func TestSortedBoundariesCoverCondition(t *testing.T) {
 	body := scm.NewSlice([]scm.Scmer{
 		scm.NewSymbol("equal??"),

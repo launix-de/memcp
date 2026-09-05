@@ -3074,10 +3074,10 @@ their tighter direct bound; this product is only an additional candidate. */
 			(planner_group_distinct_estimate src keys rows)))
 		(and (direct_base_group_plan_eligible? stage)
 			(and (empty_list? (group_stage_session_domain_keys stage))
-					(and (not (nil? rows))
-						(and (>= rows 1024)
-							(and (not (nil? distinct))
-								(>= (* distinct 4) rows)))))))))
+				(and (not (nil? rows))
+					(and (>= rows 1024)
+						(and (not (nil? distinct))
+							(>= (* distinct 4) rows)))))))))
 
 (define source_join_present? (lambda (src)
 	(begin

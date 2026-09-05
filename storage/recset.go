@@ -414,7 +414,7 @@ func recSetNot(currentTx *TxContext, item *recSet) *recSet {
 	}
 	visible := item.table.scanRecSet(currentTx, nil, scm.NewFunc(func(...scm.Scmer) scm.Scmer {
 		return scm.NewBool(true)
-	}))
+	}), scm.NewNil(), nil)
 	return recSetDifference(currentTx, []*recSet{visible, item})
 }
 
@@ -453,12 +453,23 @@ type recSetKeyResult struct {
 	err  scanError
 }
 
-func (t *table) scanRecSet(currentTx *TxContext, conditionCols []string, condition scm.Scmer) *recSet {
+func (t *table) scanRecSet(currentTx *TxContext, conditionCols []string, condition scm.Scmer, accessSchema scm.Scmer, accessValues []scm.Scmer) *recSet {
 	ss := SessionStateFromTx(currentTx)
 	querySeq := querySeqFromTx(currentTx)
-	boundaries := extractBoundaries(conditionCols, condition)
-	reorderByFrequency(boundaries, t)
-	lower, upperLast := indexFromBoundaries(boundaries)
+	scratch := acquireScanAnalyzeScratch()
+	defer releaseScanAnalyzeScratch(scratch)
+	var boundaries boundaries
+	if accessSchema.IsNil() {
+		boundaries = extractBoundariesInto(scratch.boundaries[:0], conditionCols, condition)
+		reorderByFrequency(boundaries, t)
+	} else {
+		var compiled bool
+		boundaries, compiled = bindCompiledScanAccess(accessSchema, accessValues, scratch.boundaries[:0])
+		if !compiled {
+			panic("scan_recset received an invalid compiled access schema")
+		}
+	}
+	lower, upperLast := indexFromBoundariesInto(scratch.lower[:0], boundaries)
 	result := &recSet{table: t}
 
 	values := make(chan recSetBuildResult, t.shardResultBufferSize())
@@ -1177,14 +1188,14 @@ func (r *recSet) scan(currentTx *TxContext, conditionCols []string, condition sc
 		}
 	}
 	return r.table.scanWithBatchFrom(currentTx, r, conditionCols, condition,
-		callbackCols, mapReduce, neutral, combine, isOuter, 0, nil, nil)
+		callbackCols, mapReduce, neutral, combine, isOuter, 0, nil, nil, scm.NewNil(), nil)
 }
 
-func (r *recSet) scanExists(currentTx *TxContext, conditionCols []string, condition scm.Scmer) bool {
+func (r *recSet) scanExists(currentTx *TxContext, conditionCols []string, condition scm.Scmer, accessSchema scm.Scmer, accessValues []scm.Scmer) bool {
 	if r == nil || r.table == nil {
 		return false
 	}
-	return r.table.scanExistsFrom(currentTx, r, conditionCols, condition)
+	return r.table.scanExistsFrom(currentTx, r, conditionCols, condition, accessSchema, accessValues)
 }
 
 func (t *storageShard) recSetPartExists(part *recSetShard, conditionCols []string, conditionFn func(...scm.Scmer) scm.Scmer, currentTx *TxContext, ss *scm.SessionState, stop *atomic.Bool) bool {
