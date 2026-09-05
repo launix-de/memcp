@@ -519,14 +519,30 @@ func (emitter *jitRegexEmitter) emitSimpleRepeat(node *syntax.Regexp, width, min
 	done := emitter.ctx.ReserveLabel()
 	retry := emitter.ctx.ReserveLabel()
 	backtrack := emitter.ctx.ReserveLabel()
-	trial := emitter.ctx.AllocStack(8)
 	candidate := emitter.ctx.AllocStack(8)
-	emitter.ctx.MarkLabel(loop)
-	emitter.ctx.EmitStoreRegMem(emitter.cursor, emitter.ctx.StackReg, trial)
-	emitter.emitSimple(node, done)
-	emitter.ctx.EmitJmp(loop)
-	emitter.ctx.MarkLabel(done)
-	emitter.ctx.EmitMovRegMem(emitter.cursor, emitter.ctx.StackReg, trial)
+	// A single, non-Concat atom (a bare char class or any-char - by far the
+	// most common repeated node: [a-z]+, \w*, . anywhere) never advances
+	// the cursor before failing (emitAtom/emitByteClass/emitLiteral only
+	// touch the cursor on the success path, past every failure jump), so
+	// on reaching `done` the cursor already holds exactly the position one
+	// failed attempt short of the loop's current iteration - no separate
+	// "trial" save/restore is needed to revert a partial match, unlike a
+	// Concat of several atoms where an earlier sibling may have already
+	// advanced the cursor before a later one fails.
+	if node.Op != syntax.OpConcat {
+		emitter.ctx.MarkLabel(loop)
+		emitter.emitSimple(node, done)
+		emitter.ctx.EmitJmp(loop)
+		emitter.ctx.MarkLabel(done)
+	} else {
+		trial := emitter.ctx.AllocStack(8)
+		emitter.ctx.MarkLabel(loop)
+		emitter.ctx.EmitStoreRegMem(emitter.cursor, emitter.ctx.StackReg, trial)
+		emitter.emitSimple(node, done)
+		emitter.ctx.EmitJmp(loop)
+		emitter.ctx.MarkLabel(done)
+		emitter.ctx.EmitMovRegMem(emitter.cursor, emitter.ctx.StackReg, trial)
+	}
 	emitter.ctx.MarkLabel(retry)
 	emitter.ctx.EmitStoreRegMem(emitter.cursor, emitter.ctx.StackReg, candidate)
 	emitter.emitSequence(rest, successLabel, backtrack)
@@ -599,6 +615,15 @@ func (emitter *jitRegexEmitter) emitAtom(node *syntax.Regexp, failLabel JITLabel
 }
 
 func (emitter *jitRegexEmitter) emitBounds(width int, failLabel JITLabel) {
+	// The overwhelmingly common case (a single byte class or any-char atom)
+	// needs no scratch register at all: "end - cursor < 1" is exactly
+	// "cursor >= end", checked directly against the two live cursor/end
+	// registers already held throughout the whole regex program.
+	if width == 1 {
+		emitter.ctx.EmitCmpInt64(emitter.cursor, emitter.end)
+		emitter.ctx.EmitJump(CondUnsignedAboveOrEqual, failLabel)
+		return
+	}
 	remaining := emitter.ctx.AllocRegExcept(emitter.cursor, emitter.end, emitter.scan)
 	emitter.ctx.EmitMovRegReg(remaining, emitter.end)
 	emitter.ctx.EmitSubInt64(remaining, emitter.cursor)
@@ -694,6 +719,21 @@ func (emitter *jitRegexEmitter) emitByteClass(node *syntax.Regexp, failLabel JIT
 	if len(ranges) == 0 {
 		emitter.ctx.FreeReg(char)
 		emitter.ctx.EmitJmp(failLabel)
+		return
+	}
+	if len(ranges) == 1 {
+		// The single-contiguous-range shape ([a-z], [0-9], \w's own ranges,
+		// .) is by far the most common char class in the SQL grammar's
+		// tokenizing rules. It needs no "matched" accumulator at all - just
+		// a direct conditional jump on the one range test.
+		interval := ranges[0]
+		if interval[0] != 0 {
+			emitter.ctx.EmitSubRegImm32(char, int32(interval[0]))
+		}
+		emitter.ctx.EmitCmpRegImm32(char, int32(uint16(interval[1])-uint16(interval[0])))
+		emitter.ctx.FreeReg(char)
+		emitter.ctx.EmitJump(CondUnsignedAbove, failLabel)
+		emitter.ctx.EmitAddRegImm32(emitter.cursor, 1)
 		return
 	}
 	matched := emitter.ctx.AllocRegExcept(emitter.cursor, emitter.end, emitter.scan, char)
