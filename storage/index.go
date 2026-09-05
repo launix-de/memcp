@@ -402,19 +402,41 @@ func (s *StorageIndex) getDeltaColValueTx(tx *TxContext, recid uint32, data []sc
 // rowWithinBounds checks sorted (equal/range) columns using lower/upper directly.
 // Non-sorted columns (LIKE etc.) are skipped — handled by block-level skipping
 // in iterate(); the scan layer applies the full condition afterwards.
-func (s *StorageIndex) rowWithinBounds(bounds scanAccess, cmpCols int, lower []scm.Scmer, upperLast scm.Scmer, upperInclusive bool, getter func(int) scm.Scmer) (inRange bool, beyond bool) {
-	lastSorted := -1
-	for i := 0; i < cmpCols; i++ {
-		if s.columnIsSorted(i) {
-			lastSorted = i
-		}
-	}
+func (s *StorageIndex) boundKernel(bounds scanAccess, cmpCols int) (firstSorted int, lastSorted int, sortedMask uint64, unboundedMask uint64) {
+	firstSorted, lastSorted = -1, -1
 	for i := 0; i < cmpCols; i++ {
 		if !s.columnIsSorted(i) {
+			continue
+		}
+		if firstSorted < 0 {
+			firstSorted = i
+		}
+		lastSorted = i
+		if i < 64 {
+			sortedMask |= uint64(1) << i
+			bound := bounds.boundary(i)
+			if boundaryIsUnboundedOrder(bound) || boundaryIsUnboundedRange(bound) {
+				unboundedMask |= uint64(1) << i
+			}
+		}
+	}
+	return
+}
+
+func (s *StorageIndex) rowWithinBounds(bounds scanAccess, cmpCols int, lastSorted int, sortedMask uint64, unboundedMask uint64, lower []scm.Scmer, upperLast scm.Scmer, lowerInclusive bool, upperInclusive bool, getter func(int) scm.Scmer) (inRange bool, beyond bool) {
+	for i := 0; i < cmpCols; i++ {
+		if i < 64 && sortedMask&(uint64(1)<<i) == 0 {
 			continue // non-sorted: block-skip handles this, scan() filters exact
 		}
+		if i >= 64 && !s.columnIsSorted(i) {
+			continue
+		}
 		v := getter(i)
-		if i < bounds.len() {
+		if i < 64 {
+			if unboundedMask&(uint64(1)<<i) != 0 {
+				continue
+			}
+		} else if i < bounds.len() {
 			bound := bounds.boundary(i)
 			if boundaryIsUnboundedOrder(bound) || boundaryIsUnboundedRange(bound) {
 				continue // ordering or residual-only range, not an index restriction
@@ -432,7 +454,7 @@ func (s *StorageIndex) rowWithinBounds(bounds scanAccess, cmpCols int, lower []s
 			}
 			if len(lower) > i && !lower[i].IsNil() {
 				comparison := s.compareAt(i, v, lower[i])
-				if comparison < 0 || (comparison == 0 && i < bounds.len() && !bounds.boundary(i).lowerInclusive) {
+				if comparison < 0 || (comparison == 0 && !lowerInclusive) {
 					return false, false
 				}
 			}
@@ -1240,9 +1262,11 @@ func (s *StorageIndex) iterateRecSetFirst(tx *TxContext, state *storageIndexStat
 		}
 		if len(deltaItems) > 0 {
 			cmpCols := s.queryIndexPrefixLen(bounds, lower)
+			_, lastSorted, sortedMask, unboundedMask := s.boundKernel(bounds, cmpCols)
+			lowerInclusive, _ := effectiveBoundaryInclusiveness(bounds, lower)
 			keptDelta := deltaItems[:0]
 			for _, recid := range deltaItems {
-				inRange, _ := s.rowWithinBounds(bounds, cmpCols, lower, upperLast, upperInclusive, func(col int) scm.Scmer {
+				inRange, _ := s.rowWithinBounds(bounds, cmpCols, lastSorted, sortedMask, unboundedMask, lower, upperLast, lowerInclusive, upperInclusive, func(col int) scm.Scmer {
 					return valueAt(recid, col)
 				})
 				if inRange {
@@ -1328,6 +1352,7 @@ func (s *StorageIndex) bindRowMatchers(tx *TxContext, bounds scanAccess, lower [
 	if !persistent {
 		cmpCols := s.queryIndexPrefixLen(bounds, lower)
 		if cmpCols > 0 {
+			_, lastSorted, sortedMask, unboundedMask := s.boundKernel(bounds, cmpCols)
 			lowerInclusive, _ := effectiveBoundaryInclusiveness(bounds, lower)
 			matchers = append(matchers, func(ids []uint32) []uint32 {
 				out := 0
@@ -1338,7 +1363,7 @@ func (s *StorageIndex) bindRowMatchers(tx *TxContext, bounds scanAccess, lower [
 						}
 						return s.getDeltaColValueTx(tx, recid, s.t.inserts[recid-s.t.main_count], col)
 					}
-					inRange, _ := s.rowWithinBounds(bounds, cmpCols, lower, upperLast, upperInclusive, valueAt)
+					inRange, _ := s.rowWithinBounds(bounds, cmpCols, lastSorted, sortedMask, unboundedMask, lower, upperLast, lowerInclusive, upperInclusive, valueAt)
 					if inRange && !lowerInclusive {
 						lastSorted := cmpCols - 1
 						for lastSorted >= 0 && !s.columnIsSorted(lastSorted) {
@@ -1593,6 +1618,7 @@ start_scan:
 	// pooled buffer remains allocated at its normal size; only its visible slice
 	// is shortened, so the hot path adds no allocation.
 	cmpCols := s.queryIndexPrefixLen(bounds, lower)
+	firstSorted, lastSorted, sortedMask, unboundedMask := s.boundKernel(bounds, cmpCols)
 	if options != nil && options.boundaryCoveredLimit && options.orderedLimit > 0 &&
 		options.orderedLimit < len(buf) && indexCoversBoundaryOrder(s, true, bounds, cmpCols) {
 		buf = buf[:options.orderedLimit]
@@ -1613,14 +1639,6 @@ start_scan:
 	// Find the leading physical sort key. Non-sorted matchers such as LIKE are
 	// deliberately present in the logical boundary list but do not participate
 	// in buildIndex ordering and must never be used for binary search.
-	firstSorted := -1
-	for i := 0; i < cmpCols && i < bounds.len(); i++ {
-		if bounds.boundary(i).matcher.IsSorted() {
-			firstSorted = i
-			break
-		}
-	}
-
 	// Use last-hit hint to narrow binary search range (helps sorted outer loops).
 	// The hint is advisory: if stale or from a concurrent goroutine, we safely
 	// fall through to an unnarrowed search. No correctness dependency on the hint.
@@ -1660,12 +1678,6 @@ start_scan:
 	s.lastHit.Store(uint32(mainIdx))
 	// skip past equal values when lower bound is exclusive (col > 5)
 	// LIKE columns don't have lower/upper semantics, so skip this optimization.
-	lastSorted := -1
-	for i := 0; i < cmpCols && i < bounds.len(); i++ {
-		if bounds.boundary(i).matcher.IsSorted() {
-			lastSorted = i
-		}
-	}
 	if !lowerInclusive && lastSorted >= 0 && !lower[lastSorted].IsNil() {
 		for uint32(mainIdx) < s.t.main_count {
 			recid := getRecid(mainIdx)
@@ -1684,7 +1696,7 @@ start_scan:
 	if lastSorted >= 0 && !upperLast.IsNil() && mainIdx < mainEnd {
 		mainEnd = mainIdx + sort.Search(mainEnd-mainIdx, func(offset int) bool {
 			recid := getRecid(mainIdx + offset)
-			_, beyond := s.rowWithinBounds(bounds, cmpCols, lower, upperLast, upperInclusive, func(col int) scm.Scmer {
+			_, beyond := s.rowWithinBounds(bounds, cmpCols, lastSorted, sortedMask, unboundedMask, lower, upperLast, lowerInclusive, upperInclusive, func(col int) scm.Scmer {
 				return cols[col].get(recid)
 			})
 			return beyond
@@ -1746,7 +1758,7 @@ start_scan:
 			}
 			recid := getRecid(mainIdx)
 			mainIdx++
-			inRange, beyond := s.rowWithinBounds(bounds, cmpCols, lower, upperLast, upperInclusive, func(i int) scm.Scmer {
+			inRange, beyond := s.rowWithinBounds(bounds, cmpCols, lastSorted, sortedMask, unboundedMask, lower, upperLast, lowerInclusive, upperInclusive, func(i int) scm.Scmer {
 				return cols[i].get(recid)
 			})
 			if inRange {
@@ -1798,7 +1810,7 @@ start_scan:
 			if recid < s.t.main_count || p.itemid-int(s.t.main_count) >= maxInsertIndex {
 				return true
 			}
-			inRange, beyond := s.rowWithinBounds(bounds, cmpCols, lower, upperLast, upperInclusive, func(i int) scm.Scmer {
+			inRange, beyond := s.rowWithinBounds(bounds, cmpCols, lastSorted, sortedMask, unboundedMask, lower, upperLast, lowerInclusive, upperInclusive, func(i int) scm.Scmer {
 				if state.precomputedDelta {
 					return p.data[i]
 				}

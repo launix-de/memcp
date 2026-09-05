@@ -331,7 +331,10 @@ func scanAccessFromScheme(schemaValue scm.Scmer, values []scm.Scmer, suffix boun
 			}
 		}
 	}
-	return scanAccess{schema: schema, values: values, suffix: suffix}, true
+	return scanAccess{
+		schema: schema, values: values, suffix: suffix,
+		filterCovered: schema[2].String() == scanAccessConsumerCoveredScan,
+	}, true
 }
 
 // IndexBoundary is the public boundary value returned by custom analyzers. Its

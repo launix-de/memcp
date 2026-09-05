@@ -947,8 +947,11 @@ func Init(en scm.Env) {
 					panic("compile_scan_plan expects matching static multi-scan filters")
 				}
 				filterColumns, filters := args[2], args[3]
-				if head != "scan_join_order" {
-					filterColumns, filters = pruneScanResidualList(args[2], args[3], compiled, false)
+				prunedColumns, prunedFilters := pruneScanResidualList(args[2], args[3], compiled, false)
+				if head == "scan_join_order" {
+					schemas = markCoveredScanAccessSchemas(schemas, prunedFilters)
+				} else {
+					filterColumns, filters = prunedColumns, prunedFilters
 				}
 				result := []scm.Scmer{scm.NewSymbol(head), args[0], args[1],
 					scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), scm.NewSlice(schemas)}),

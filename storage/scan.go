@@ -38,6 +38,7 @@ const scanAccessSchemaHeaderSize = 5
 const scanAccessBoundaryStride = 6
 
 const scanAccessConsumerScan = "scan"
+const scanAccessConsumerCoveredScan = "scan_covered"
 
 var emptyScanAccessSchema = newScanAccessSchema(scanAccessConsumerScan, nil, -1)
 
@@ -245,6 +246,23 @@ func pruneScanResidualList(columnListsExpr, filtersExpr scm.Scmer, compiled []bo
 		}
 	}
 	return scm.NewSlice(prunedColumns), scm.NewSlice(prunedFilters)
+}
+
+func markCoveredScanAccessSchemas(schemas []scm.Scmer, filtersExpr scm.Scmer) []scm.Scmer {
+	filters, ok := scanStaticListElements(filtersExpr)
+	if !ok || len(filters) != len(schemas) {
+		return schemas
+	}
+	for i, filter := range filters {
+		_, body, lambda := scanLambdaParts(filter)
+		if !lambda || !(body.SymbolEquals("true") || (body.IsBool() && body.Bool())) {
+			continue
+		}
+		items := append([]scm.Scmer(nil), schemas[i].Slice()...)
+		items[2] = scm.NewString(scanAccessConsumerCoveredScan)
+		schemas[i] = scm.NewSlice(items)
+	}
+	return schemas
 }
 
 func scanParamColumn(expr scm.Scmer, params, columns []scm.Scmer) (string, bool) {
