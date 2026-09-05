@@ -426,6 +426,24 @@ type JITValueDesc struct {
 	StackFunc bool
 }
 
+// jitValueWordIsPointer reports whether word is a relocatable Go pointer in
+// the descriptor's machine representation. Scalar descriptors are unboxed;
+// unlike a two-word Scmer, their only word is a pointer exclusively when the
+// producer says so explicitly through RelocatablePointer.
+func jitValueWordIsPointer(value JITValueDesc, word int32) bool {
+	if word != 0 {
+		return false
+	}
+	switch value.Loc {
+	case LocReg, LocStack:
+		return value.RelocatablePointer
+	case LocRegPair, LocStackPair, LocInputPair, LocRegTriple, LocStackTriple:
+		return !value.NoHeapPointer
+	default:
+		return false
+	}
+}
+
 type JITLambdaTemplate struct {
 	Proc  Proc
 	Outer *JITEnv
