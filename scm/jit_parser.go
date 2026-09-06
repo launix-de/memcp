@@ -480,7 +480,13 @@ func (builder *jitParserBuilder) buildAccProc(lambda Scmer, outer *Env) *Proc {
 	if outer == nil {
 		outer = &Globalenv
 	}
-	value := Eval(Optimize(CloneOptimizerExpression(lambda), outer, nil), outer)
+	for lambda.IsSourceInfo() {
+		lambda = lambda.SourceInfo().value
+	}
+	value := lambda
+	if !value.IsProc() {
+		value = Eval(value, outer)
+	}
 	if !value.IsProc() || value.Proc() == nil {
 		panic("jit: parser repeat accumulation argument is not a lambda: " + String(lambda))
 	}
