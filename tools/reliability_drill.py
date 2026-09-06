@@ -291,25 +291,34 @@ def run_rebuild_crash(server: OwnedServer, wanted: dict[str, int], rng: random.R
 		journal: list[dict], round_index: int) -> None:
 	client = server.client
 	assert client is not None
-	result: list[object] = []
+	thread = None
+	delay = 0.0
+	attempt = 0
+	for attempt in range(1, 7):
+		result: list[object] = []
 
-	def rebuild() -> None:
-		try:
-			result.append(client.scm(f'(rebuild (table "{DATABASE}" "drill_entry") true true)', timeout=120))
-		except Exception as error:
-			result.append(error)
+		def rebuild() -> None:
+			try:
+				result.append(client.scm(f'(rebuild (table "{DATABASE}" "drill_rebuild") true true)', timeout=120))
+			except Exception as error:
+				result.append(error)
 
-	thread = threading.Thread(target=rebuild, name="reliability-rebuild", daemon=True)
-	thread.start()
-	delay = rng.uniform(0.0, 0.02)
-	time.sleep(delay)
-	if not thread.is_alive():
+		thread = threading.Thread(target=rebuild, name="reliability-rebuild", daemon=True)
+		thread.start()
+		# Fast machines may finish the fixture in a few milliseconds. Narrow the
+		# randomized delay until the request is demonstrably still in flight.
+		delay = rng.uniform(0.0, 0.02 / (2 ** (attempt - 1)))
+		time.sleep(delay)
+		if thread.is_alive():
+			break
+	else:
 		raise DrillFailure(
-			"rebuild completed before the crash window; increase the drill fixture"
+			"could not find an active rebuild crash window after six attempts"
 		)
+	assert thread is not None
 	journal.append({
 		"scenario": "rebuild-crash", "round": round_index,
-		"delay_seconds": delay, "expected": wanted,
+		"window_attempt": attempt, "delay_seconds": delay, "expected": wanted,
 	})
 	server.kill()
 	thread.join(timeout=2)

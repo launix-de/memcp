@@ -22,7 +22,9 @@ python3 tools/reliability_drill.py --mode all --workers 12 --operations 1000
 
 Use `--rebuild-crashes N` to change the default five randomized
 rebuild/kill/recovery rounds. Record `--seed` from the manifest to replay their
-delays exactly.
+delays exactly. If a fast machine completes a rebuild before a selected crash
+point, the drill narrows the delay and tries again; a round only counts when its
+rebuild request is still active at `SIGKILL` time.
 
 Every run creates a new `/tmp/memcp-reliability-*` directory containing the
 source data directory, one log per server generation, a replay seed,
