@@ -1,0 +1,194 @@
+# Copyright (C) 2026 Carl-Philip Haensch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+metadata:
+  version: "1.0"
+  description: "Committed ACID DML, trigger effects, and grouped read models recover together across SAFE shards"
+  isolated: true
+
+setup:
+  - scm: '(settings "ShardSize" 10)'
+  - sql: "DROP TABLE IF EXISTS patr_audit"
+  - sql: "DROP TABLE IF EXISTS patr_entry"
+  - sql: |
+      CREATE TABLE patr_entry (
+        id INT PRIMARY KEY,
+        bucket INT NOT NULL,
+        amount INT NOT NULL,
+        state VARCHAR(16) NOT NULL
+      ) ENGINE=safe
+  - sql: |
+      CREATE TABLE patr_audit (
+        event_name VARCHAR(16) NOT NULL,
+        item_id INT NOT NULL,
+        old_amount INT,
+        new_amount INT
+      ) ENGINE=safe
+  - scm: |
+      (begin
+        (insert (table "memcp-tests" "patr_entry") '("id" "bucket" "amount" "state")
+          (map (produceN 25) (lambda (i)
+            (list (+ i 1) (mod i 4) (* (+ i 1) 10) "original"))))
+        (rebuild)
+        true)
+  - sql: |
+      CREATE TRIGGER patr_entry_ai AFTER INSERT ON patr_entry FOR EACH ROW
+      INSERT INTO patr_audit(event_name, item_id, old_amount, new_amount)
+      VALUES ('insert', NEW.id, NULL, NEW.amount)
+  - sql: |
+      CREATE TRIGGER patr_entry_au AFTER UPDATE ON patr_entry FOR EACH ROW
+      INSERT INTO patr_audit(event_name, item_id, old_amount, new_amount)
+      VALUES ('update', NEW.id, OLD.amount, NEW.amount)
+  - sql: |
+      CREATE TRIGGER patr_entry_ad AFTER DELETE ON patr_entry FOR EACH ROW
+      INSERT INTO patr_audit(event_name, item_id, old_amount, new_amount)
+      VALUES ('delete', OLD.id, OLD.amount, NULL)
+
+test_cases:
+  - name: "Materialize the grouped read model before mutation"
+    sql: "SELECT bucket, COUNT(*) AS cnt, SUM(amount) AS total FROM patr_entry GROUP BY bucket ORDER BY bucket"
+    expect:
+      rows: 4
+
+  - name: "Commit mixed ACID DML and trigger writes across shards"
+    steps:
+      - session_id: "patr_writer"
+        sql: "START ACID TRANSACTION"
+      - session_id: "patr_writer"
+        sql: "UPDATE patr_entry SET bucket = bucket + 10, amount = amount + 100, state = 'committed' WHERE id <= 12"
+        expect:
+          affected_rows: 12
+      - session_id: "patr_writer"
+        sql: "DELETE FROM patr_entry WHERE id IN (3, 13, 23)"
+        expect:
+          affected_rows: 3
+      - session_id: "patr_writer"
+        sql: "INSERT INTO patr_entry VALUES (26, 2, 260, 'committed'), (27, 3, 270, 'committed')"
+        expect:
+          affected_rows: 2
+      - session_id: "patr_writer"
+        sql: "COMMIT"
+
+  - name: "Committed base rows are exact before crash"
+    sql: |
+      SELECT COUNT(*) AS cnt,
+             SUM(id) AS id_sum,
+             SUM(amount) AS amount_sum,
+             SUM(CASE WHEN state = 'committed' THEN 1 ELSE 0 END) AS committed_rows
+      FROM patr_entry
+    expect:
+      rows: 1
+      data:
+        - cnt: 24
+          id_sum: 339
+          amount_sum: 4490
+          committed_rows: 13
+
+  - name: "Every committed row mutation produced one audit row"
+    sql: |
+      SELECT COUNT(*) AS cnt,
+             SUM(CASE WHEN event_name = 'update' THEN 1 ELSE 0 END) AS updates,
+             SUM(CASE WHEN event_name = 'delete' THEN 1 ELSE 0 END) AS deletes,
+             SUM(CASE WHEN event_name = 'insert' THEN 1 ELSE 0 END) AS inserts
+      FROM patr_audit
+    expect:
+      rows: 1
+      data:
+        - cnt: 17
+          updates: 12
+          deletes: 3
+          inserts: 2
+
+  - name: "Grouped cache agrees with base rows before crash"
+    sql: |
+      SELECT SUM(bucket_count) AS total_rows, SUM(bucket_amount) AS total_amount
+      FROM (
+        SELECT bucket, COUNT(*) AS bucket_count, SUM(amount) AS bucket_amount
+        FROM patr_entry
+        GROUP BY bucket
+      ) grouped
+    expect:
+      rows: 1
+      data:
+        - total_rows: 24
+          total_amount: 4490
+
+  - name: "Hard crash after committed ACID transaction"
+    scm: '(crash)'
+    expect:
+      interrupted_ok: true
+
+  - name: "Restart after committed ACID transaction"
+    action: restart
+
+  - name: "Base rows recover as one committed state"
+    sql: "SELECT COUNT(*) AS cnt, SUM(id) AS id_sum, SUM(amount) AS amount_sum FROM patr_entry"
+    expect:
+      rows: 1
+      data:
+        - cnt: 24
+          id_sum: 339
+          amount_sum: 4490
+
+  - name: "Trigger side effects recover with their base transaction"
+    sql: "SELECT COUNT(*) AS cnt, SUM(item_id) AS item_sum FROM patr_audit"
+    expect:
+      rows: 1
+      data:
+        - cnt: 17
+          item_sum: 170
+
+  - name: "Recovered grouped cache still agrees with recovered base rows"
+    sql: |
+      SELECT SUM(bucket_count) AS total_rows, SUM(bucket_amount) AS total_amount
+      FROM (
+        SELECT bucket, COUNT(*) AS bucket_count, SUM(amount) AS bucket_amount
+        FROM patr_entry
+        GROUP BY bucket
+      ) grouped
+    expect:
+      rows: 1
+      data:
+        - total_rows: 24
+          total_amount: 4490
+
+  - name: "Persisted trigger remains executable after restart"
+    sql: "UPDATE patr_entry SET amount = amount + 1 WHERE id = 1"
+    expect:
+      affected_rows: 1
+
+  - name: "Post-restart trigger and grouped invalidation are both visible"
+    sql: |
+      SELECT
+        (SELECT amount FROM patr_entry WHERE id = 1) AS amount,
+        (SELECT COUNT(*) FROM patr_audit WHERE event_name = 'update') AS updates,
+        (SELECT SUM(bucket_amount) FROM (
+          SELECT bucket, SUM(amount) AS bucket_amount
+          FROM patr_entry
+          GROUP BY bucket
+        ) grouped) AS total_amount
+    expect:
+      rows: 1
+      data:
+        - amount: 111
+          updates: 13
+          total_amount: 4491
+
+  - name: "Restore default shard size"
+    scm: '(settings "ShardSize" 60000)'
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS patr_audit"
+  - sql: "DROP TABLE IF EXISTS patr_entry"
