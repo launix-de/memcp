@@ -170,8 +170,8 @@ test_cases:
         (and
           (equal? (planner_foreign_key_group_bound driver '("reference_id")) 3)
           (equal? (planner_aggregate_pushdown_group_estimate driver keys 2000) 3)
-          (aggregate_pushdown_cost_preferred? 2000 3)
-          (not (aggregate_pushdown_cost_preferred? 2000 1000))))
+          (aggregate_pushdown_cost_preferred? 2000 3 1)
+          (not (aggregate_pushdown_cost_preferred? 2000 1000 1))))
     expect:
       data: [true]
 
@@ -250,7 +250,7 @@ test_cases:
         (and
           (equal? (planner_foreign_key_product_bound driver columns 2400) 12)
           (equal? (planner_aggregate_pushdown_group_estimate driver keys 2400) 12)
-          (aggregate_pushdown_cost_preferred? 2400 12)))
+          (aggregate_pushdown_cost_preferred? 2400 12 2)))
     expect:
       data: [true]
 

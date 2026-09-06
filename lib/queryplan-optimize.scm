@@ -3045,21 +3045,68 @@ their tighter direct bound; this product is only an additional candidate. */
 				nil))
 			(if (nil? estimate) nil (min row_count estimate))))))
 
-(define aggregate_pushdown_cost_preferred? (lambda (driver_rows group_rows)
-	(and (number? driver_rows)
-		(and (>= driver_rows 1024)
-			(and (number? group_rows)
-				(< (* group_rows 4) driver_rows))))))
+(define aggregate_pushdown_direct_cost (lambda (driver_rows stage_count)
+	(planner_direct_presence_probe_cost (* driver_rows stage_count))))
 
-(define planner_aggregate_pushdown_driver_rows (lambda (src residual)
+(define aggregate_pushdown_partition_cost (lambda (driver_rows group_rows stage_count)
+	(planner_cost_add
+		(planner_cost
+			(+ planner_membership_group_cache_startup_ns
+				planner_membership_scan_invocation_ns)
+			(* driver_rows planner_membership_scan_row_ns)
+			0 0 0
+			(* driver_rows planner_group_relation_build_row_ns)
+			(* group_rows 16) 0 group_rows 0.7)
+		(planner_direct_presence_probe_cost (* group_rows stage_count))
+		group_rows 0.7)))
+
+/* Aggregate partitioning and direct row evaluation execute the same residual
+base-table predicate, so that scan work cancels. Partitioning additionally
+builds a grouped relation but evaluates each filtered stage only once per
+distinct key. Keep this as an ordinary Costgen-owned crossover: equality of
+driver and group cardinality makes direct evaluation dominate, while a broad
+fact table with a small FK domain still selects the reusable partition. */
+(define aggregate_pushdown_cost_preferred? (lambda (driver_rows group_rows stage_count)
+	(and (number? driver_rows)
+		(and (number? group_rows)
+			(planner_cost_better?
+				(aggregate_pushdown_partition_cost driver_rows group_rows stage_count)
+				(aggregate_pushdown_direct_cost driver_rows stage_count))))))
+
+(define planner_aggregate_pushdown_driver_rows (lambda (src residual tx planning_session)
 	(begin
 		(define total_rows (planner_source_row_count src))
 		(if (not (number? total_rows))
 			nil
 			(if (literal_true? residual)
 				total_rows
-				(planner_row_count_after_selectivity src (list src)
-					(source_alias src) residual total_rows))))))
+				(planner_estimated_matching_rows
+					(planner_source_filter_estimate src residual 512 tx planning_session)
+					total_rows
+					(planner_row_count_after_selectivity src (list src)
+						(source_alias src) residual total_rows)))))))
+
+/* Aggregate pushdown runs before physical lowering, but its cached decision
+must observe the same source-local statistic that a later access-path choice
+would consume. The emitted expression belongs to the query-plan guard, not to
+logical IR: it samples once per request and is shared by every guard binding. */
+(define aggregate_pushdown_runtime_driver_rows_expr (lambda (src residual)
+	(begin
+		(define total_rows_expr (list (quote planner_source_row_count)
+			(planner_quoted_value src)))
+		(if (literal_true? residual)
+			total_rows_expr
+			(begin
+				(define estimate_expr (query_scoped_source_filter_estimate_expr
+					src residual 512))
+				(define pattern_expr (expr_text_pattern_expr residual))
+				(define enriched_estimate (if (nil? pattern_expr)
+					estimate_expr
+					(list (quote qassoc_set) estimate_expr
+						(list (quote quote) (quote fallback_selectivity))
+						(list (quote text_pattern_selectivity_prior) pattern_expr))))
+				(list (quote planner_estimated_matching_rows)
+					enriched_estimate total_rows_expr total_rows_expr))))))
 
 (define direct_base_group_plan_eligible? (lambda (stage)
 	(and (source_is_base_table? (gs_input stage))
@@ -6361,7 +6408,7 @@ remain ordinary residual predicates. */
 			ir
 			(make_ir (ir_kind ir) outer_block all_stages (ir_context_of ir) (ir_return ir))))))
 
-(define aggregate_pushdown_logical (lambda (ir)
+(define aggregate_pushdown_logical (lambda (ir planning_session tx)
 	(begin
 		(define block (ir_root ir))
 		(if (or (not (equal? (ir_return ir) (quote rows)))
@@ -6385,22 +6432,27 @@ remain ordinary residual predicates. */
 					ir
 					(begin
 						(define residual (combine_where_terms residual_terms true))
-						(define driver_rows (planner_aggregate_pushdown_driver_rows driver residual))
+						(define stage_count (max 1 (count
+							(aggregate_pushdown_filtered_stage_sources block movable_terms))))
+						(define driver_rows (planner_aggregate_pushdown_driver_rows
+							driver residual tx planning_session))
 						(define keys (aggregate_pushdown_keys driver columns))
 						(define group_rows (planner_aggregate_pushdown_group_estimate driver keys driver_rows))
-						(define chosen (aggregate_pushdown_cost_preferred? driver_rows group_rows))
+						(define chosen (aggregate_pushdown_cost_preferred?
+							driver_rows group_rows stage_count))
 						(define driver_rows_expr (planner_guard_runtime_binding
-							(list (quote planner_aggregate_pushdown_driver_rows)
-								(planner_quoted_value driver)
-								(planner_quoted_value residual))))
+							(aggregate_pushdown_runtime_driver_rows_expr driver residual)
+							planning_session))
 						(define group_rows_expr (planner_guard_runtime_binding
 							(list (quote planner_aggregate_pushdown_group_estimate)
 								(planner_quoted_value driver)
 								(planner_quoted_value keys)
-								driver_rows_expr)))
+								driver_rows_expr)
+							planning_session))
 						(if (planner_guarded_choice chosen
 							(list (quote aggregate_pushdown_cost_preferred?)
-								driver_rows_expr group_rows_expr))
+								driver_rows_expr group_rows_expr stage_count)
+							planning_session)
 							(aggregate_pushdown_build_rewrite ir block driver movable_terms residual_terms
 								probe_bindings columns driver_rows group_rows)
 							ir))))))))
