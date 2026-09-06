@@ -765,6 +765,25 @@ func Init(en scm.Env) {
 	scm.CustomStringer[TagRecSet] = func(ptr unsafe.Pointer) string {
 		return (*recSet)(ptr).String()
 	}
+	scm.CustomStringer[TagScanBoundary] = scanBoundaryString
+
+	scm.Declare(&en, &scm.Declaration{
+		Name: "scan_boundary",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			if len(a) != 8 {
+				panic("scan_boundary expects kind, column, lower slot, upper slot, inclusiveness, collation, and null-safety")
+			}
+			return newScanBoundarySpec(scm.String(a[1]), scanBoundaryAnalyzer(scm.String(a[0])), scm.ToInt(a[2]), scm.ToInt(a[3]),
+				a[4].Bool(), a[5].Bool(), scm.String(a[6]), a[7].Bool(), -1, nil, nil, "", false)
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "construct an immutable physical scan boundary for a cached access schema",
+			Params: []*scm.TypeDescriptor{
+				{Kind: "string", Label: "kind"}, {Kind: "string", Label: "column"},
+				{Kind: "number", Label: "lower_slot"}, {Kind: "number", Label: "upper_slot"},
+				{Kind: "bool", Label: "lower_inclusive"}, {Kind: "bool", Label: "upper_inclusive"},
+				{Kind: "string", Label: "collation"}, {Kind: "bool", Label: "null_safe"},
+			}, Return: &scm.TypeDescriptor{Kind: "any", Label: "boundary"}},
+	})
 
 	scm.Declare(&en, &scm.Declaration{
 		Name: "table",

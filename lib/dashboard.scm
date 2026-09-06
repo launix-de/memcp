@@ -24,7 +24,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 /* check admin credentials against system.user table */
 (define dashboard_check_admin (lambda (req) (begin
 	(set pw (scan_lookup nil (table "system" "user")
-		'(373834222010370 "equal" "username" 15032418304 "" "password" "admin")
+		(list 373834222010370 (scan_boundary "equal" "username" 0 0 true true "" false) "password" "admin")
 		(list (req "username") (lambda (password admin) (list password admin)))))
 	(if (not (dashboard_auth_row_present? pw)) false
 		(and (equal? (car pw) (password (req "password"))) (car (cdr pw))))
@@ -33,7 +33,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 /* check any authenticated user (returns admin flag or false) */
 (define dashboard_check_user (lambda (req) (begin
 	(set pw (scan_lookup nil (table "system" "user")
-		'(373834222010370 "equal" "username" 15032418304 "" "password" "admin")
+		(list 373834222010370 (scan_boundary "equal" "username" 0 0 true true "" false) "password" "admin")
 		(list (req "username") (lambda (password admin) (list password admin)))))
 	(if (not (dashboard_auth_row_present? pw)) nil
 		(if (equal? (car pw) (password (req "password"))) (equal? (car (cdr pw)) 1) nil))
@@ -53,7 +53,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(begin
 			/* build list of db names the user has access to; nil neutral avoids pre-call quirk */
 			(define allowed (scan nil (table "system" "access")
-				'(369436175368192 "equal" "username" 15032418304 "") (list username)
+				(list 369436175368192 (scan_boundary "equal" "username" 0 0 true true "" false)) (list username)
 				'() (lambda () true)
 				'("database") (lambda (acc db) (if (nil? db) acc (cons db (if (nil? acc) (list) acc))))
 				nil (lambda (a b) (merge (list a b)))))
@@ -101,7 +101,9 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 (define dashboard_has_db_access (lambda (username is_admin dbname)
 	(if is_admin true
 		(scan_lookup nil (table "system" "access")
-			'(371635467059200 "equal" "username" 15032418304 "" "equal" "database" 15032483841 "") (list username dbname))
+			(list 371635467059200
+				(scan_boundary "equal" "username" 0 0 true true "" false)
+				(scan_boundary "equal" "database" 1 1 true true "" false)) (list username dbname))
 	)
 ))
 
@@ -135,11 +137,11 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 /* helper: build JSON for a single user entry (takes username string) */
 (define dashboard_build_user_json (lambda (uname) (begin
-	(set is_adm (scan_lookup nil (table "system" "user") '(372734710317056 "equal" "username" 15032418304 "" "admin") (list uname)))
+	(set is_adm (scan_lookup nil (table "system" "user") (list 372734710317056 (scan_boundary "equal" "username" 0 0 true true "" false) "admin") (list uname)))
 	/* get database access for non-admins */
 	(set dbs_csv (if is_adm ""
 		(scan nil (table "system" "access")
-			'(369436175368192 "equal" "username" 15032418304 "") (list uname)
+			(list 369436175368192 (scan_boundary "equal" "username" 0 0 true true "" false)) (list uname)
 			'() (lambda () true)
 			'("database") (lambda (acc db) (if (equal? acc "") (json_encode db) (concat acc "," (json_encode db))))
 			"" (lambda (a b) (if (equal? a "") b (if (equal? b "") a (concat a "," b)))))))
@@ -360,7 +362,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 					(dashboard_send_401 res)
 					(begin
 						(define default_pw (if is_admin
-							(equal? (scan_lookup nil (table "system" "user") '(372734710317056 "equal" "username" 15032418304 "" "password") '("root"))
+							(equal? (scan_lookup nil (table "system" "user") (list 372734710317056 (scan_boundary "equal" "username" 0 0 true true "" false) "password") '("root"))
 								(password "admin"))
 							false))
 						(dashboard_send_json res (concat

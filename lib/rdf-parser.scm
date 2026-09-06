@@ -641,7 +641,7 @@ consumer stage. */
 ))
 (define rdf_relation_targets (lambda (schema subj pred) (begin
 	(define out (newsession))
-	(scan nil (table schema "rdf") '(369436443803648 "equal" "p" 15032418304 "" "equal" "s" 15032483841 "") (list pred subj) '() (lambda () true) '("o") (lambda (acc o) (begin (out o true) acc)))
+	(scan nil (table schema "rdf") (list 369436443803648 (scan_boundary "equal" "p" 0 0 true true "" false) (scan_boundary "equal" "s" 1 1 true true "" false)) (list pred subj) '() (lambda () true) '("o") (lambda (acc o) (begin (out o true) acc)))
 	(out)
 )))
 (define rdf_path_targets (lambda (schema start pred include_self) (begin
@@ -671,7 +671,7 @@ consumer stage. */
 ))
 (define rdf_delete_triples (lambda (schema triples) (begin
 	(map triples (lambda (triple) (match triple '(subj pred obj)
-		(scan nil (table schema "rdf") '(369436712239104 "equal" "o" 15032418304 "" "equal" "p" 15032483841 "" "equal" "s" 15032549378 "") (list obj pred subj) '() (lambda () true) '("$update") (lambda (acc $update) (begin ($update) acc)))
+		(scan nil (table schema "rdf") (list 369436712239104 (scan_boundary "equal" "o" 0 0 true true "" false) (scan_boundary "equal" "p" 1 1 true true "" false) (scan_boundary "equal" "s" 2 2 true true "" false)) (list obj pred subj) '() (lambda () true) '("$update") (lambda (acc $update) (begin ($update) acc)))
 	)))
 	nil
 )))
@@ -1016,7 +1016,7 @@ consumer stage. */
 (define delete_ttl (lambda (schema s) (begin
 	(set triples (parse_ttl_triples schema s))
 	(map triples (lambda (triple) (match triple '(subj pred obj)
-		(scan nil (table schema "rdf") '(369436712239104 "equal" "o" 15032418304 "" "equal" "p" 15032483841 "" "equal" "s" 15032549378 "") (list obj pred subj) '() (lambda () true) '("$update") (lambda (acc $update) (begin ($update) acc)))
+		(scan nil (table schema "rdf") (list 369436712239104 (scan_boundary "equal" "o" 0 0 true true "" false) (scan_boundary "equal" "p" 1 1 true true "" false) (scan_boundary "equal" "s" 2 2 true true "" false)) (list obj pred subj) '() (lambda () true) '("$update") (lambda (acc $update) (begin ($update) acc)))
 	)))
 )))
 

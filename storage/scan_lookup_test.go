@@ -23,6 +23,16 @@ import (
 	"github.com/launix-de/memcp/scm"
 )
 
+func testLookupAccess(columns []string, values []scm.Scmer) scanAccess {
+	schema := make([]scm.Scmer, scanAccessSchemaHeaderSize+len(columns))
+	schema[0] = newScanAccessHeader(len(columns), "value", 0, -1)
+	for i, column := range columns {
+		schema[scanAccessSchemaHeaderSize+i] = newScanBoundarySpec(
+			column, EqualMatcher, i, i, true, true, "", false, -1, nil, nil, "", false)
+	}
+	return exactScanAccess(schema, values)
+}
+
 func setupScanLookupTable(tb testing.TB, database string, rows [][]scm.Scmer) *table {
 	tb.Helper()
 	databases.Remove(database)
@@ -42,7 +52,7 @@ func testScanLookupSchema(consumer string, matchCols, mapCols []string) scm.Scme
 	}
 	schema := []scm.Scmer{newScanAccessHeader(len(matchCols), consumer, len(mapCols), mapperSlot)}
 	for i, col := range matchCols {
-		schema = append(schema, scm.NewString("equal"), scm.NewString(col), newScanAccessBoundaryMeta(i, i, 3), scm.NewString(""))
+		schema = append(schema, newScanBoundarySpec(col, EqualMatcher, i, i, true, true, "", false, -1, nil, nil, "", false))
 	}
 	for _, col := range mapCols {
 		schema = append(schema, scm.NewString(col))
@@ -60,16 +70,16 @@ func TestScanLookupReturnsValueNullAndCardinalityError(t *testing.T) {
 	})
 	tx := NewTxContext(TxCursorStability)
 
-	if got := tbl.scanLookup(tx, []string{"key"}, []scm.Scmer{scm.NewInt(1)}, "value", true); !scm.Equal(got, scm.NewString("one")) {
+	if got := tbl.scanLookup(tx, testLookupAccess([]string{"key"}, []scm.Scmer{scm.NewInt(1)}), "value", true); !scm.Equal(got, scm.NewString("one")) {
 		t.Fatalf("scanLookup existing value = %s, want one", scm.String(got))
 	}
-	if got := tbl.scanLookup(tx, []string{"key"}, []scm.Scmer{scm.NewInt(2)}, "value", true); !got.IsNil() {
+	if got := tbl.scanLookup(tx, testLookupAccess([]string{"key"}, []scm.Scmer{scm.NewInt(2)}), "value", true); !got.IsNil() {
 		t.Fatalf("scanLookup NULL value = %s, want nil", scm.String(got))
 	}
-	if got := tbl.scanLookup(tx, []string{"key"}, []scm.Scmer{scm.NewInt(99)}, "value", true); !got.IsNil() {
+	if got := tbl.scanLookup(tx, testLookupAccess([]string{"key"}, []scm.Scmer{scm.NewInt(99)}), "value", true); !got.IsNil() {
 		t.Fatalf("scanLookup missing value = %s, want nil", scm.String(got))
 	}
-	if got := tbl.scanLookup(tx, []string{"key"}, []scm.Scmer{scm.NewNil()}, "", false); scm.ToBool(got) {
+	if got := tbl.scanLookup(tx, testLookupAccess([]string{"key"}, []scm.Scmer{scm.NewNil()}), "", false); scm.ToBool(got) {
 		t.Fatal("scanLookup matched a SQL NULL key")
 	}
 
@@ -78,7 +88,7 @@ func TestScanLookupReturnsValueNullAndCardinalityError(t *testing.T) {
 			t.Fatalf("scanLookup duplicate panic = %v, want %q", got, scalarSubselectOverflow)
 		}
 	}()
-	tbl.scanLookup(tx, []string{"key"}, []scm.Scmer{scm.NewInt(3)}, "value", true)
+	tbl.scanLookup(tx, testLookupAccess([]string{"key"}, []scm.Scmer{scm.NewInt(3)}), "value", true)
 }
 
 func TestScanLookupSchemeOperator(t *testing.T) {
@@ -135,16 +145,16 @@ func TestScanLookupCompositeValueAndExists(t *testing.T) {
 	tx := NewTxContext(TxCursorStability)
 	cols := []string{"tenant", "key"}
 
-	if got := tbl.scanLookup(tx, cols, []scm.Scmer{scm.NewInt(2), scm.NewInt(7)}, "value", true); !scm.Equal(got, scm.NewString("two-seven")) {
+	if got := tbl.scanLookup(tx, testLookupAccess(cols, []scm.Scmer{scm.NewInt(2), scm.NewInt(7)}), "value", true); !scm.Equal(got, scm.NewString("two-seven")) {
 		t.Fatalf("composite scanLookup = %s, want two-seven", scm.String(got))
 	}
-	if got := tbl.scanLookup(tx, cols, []scm.Scmer{scm.NewInt(9), scm.NewInt(7)}, "", false); scm.ToBool(got) {
+	if got := tbl.scanLookup(tx, testLookupAccess(cols, []scm.Scmer{scm.NewInt(9), scm.NewInt(7)}), "", false); scm.ToBool(got) {
 		t.Fatal("missing composite existence lookup returned true")
 	}
-	if got := tbl.scanLookup(tx, cols, []scm.Scmer{scm.NewInt(2), scm.NewInt(7)}, "", false); !scm.ToBool(got) {
+	if got := tbl.scanLookup(tx, testLookupAccess(cols, []scm.Scmer{scm.NewInt(2), scm.NewInt(7)}), "", false); !scm.ToBool(got) {
 		t.Fatal("matching composite existence lookup returned false")
 	}
-	if got := tbl.scanLookup(tx, []string{"key"}, []scm.Scmer{scm.NewInt(7)}, "", false); !scm.ToBool(got) {
+	if got := tbl.scanLookup(tx, testLookupAccess([]string{"key"}, []scm.Scmer{scm.NewInt(7)}), "", false); !scm.ToBool(got) {
 		t.Fatal("existence lookup with multiple matches returned false")
 	}
 }
@@ -174,8 +184,7 @@ func TestScanLookupMapReturnsComputedValueAfterCardinalityCheck(t *testing.T) {
 	}))
 
 	got := tbl.scanLookupMap(tx,
-		[]string{"tenant", "key"},
-		[]scm.Scmer{scm.NewInt(1), scm.NewInt(7)},
+		testLookupAccess([]string{"tenant", "key"}, []scm.Scmer{scm.NewInt(1), scm.NewInt(7)}),
 		[]string{"left_value", "right_value"},
 		&mapper,
 	)
@@ -184,8 +193,7 @@ func TestScanLookupMapReturnsComputedValueAfterCardinalityCheck(t *testing.T) {
 	}
 	RebuildTable(tbl, true, false)
 	got = tbl.scanLookupMap(tx,
-		[]string{"tenant", "key"},
-		[]scm.Scmer{scm.NewInt(1), scm.NewInt(7)},
+		testLookupAccess([]string{"tenant", "key"}, []scm.Scmer{scm.NewInt(1), scm.NewInt(7)}),
 		[]string{"left_value", "right_value"},
 		&mapper,
 	)
@@ -193,13 +201,13 @@ func TestScanLookupMapReturnsComputedValueAfterCardinalityCheck(t *testing.T) {
 		t.Fatalf("rebuilt scanLookupMap = %s with %d mapper calls, want 30 with two", scm.String(got), calls)
 	}
 	if got := tbl.scanLookupMap(tx,
-		[]string{"key"}, []scm.Scmer{scm.NewInt(99)},
+		testLookupAccess([]string{"key"}, []scm.Scmer{scm.NewInt(99)}),
 		[]string{"left_value", "right_value"}, &mapper,
 	); !got.IsNil() || calls != 2 {
 		t.Fatalf("missing scanLookupMap = %s with %d total mapper calls, want nil and two", scm.String(got), calls)
 	}
 	if got := tbl.scanLookupMap(tx,
-		[]string{"key"}, []scm.Scmer{scm.NewNil()},
+		testLookupAccess([]string{"key"}, []scm.Scmer{scm.NewNil()}),
 		[]string{"left_value", "right_value"}, &mapper,
 	); !got.IsNil() || calls != 2 {
 		t.Fatalf("NULL-key scanLookupMap = %s with %d total mapper calls, want nil and two", scm.String(got), calls)
@@ -212,8 +220,7 @@ func TestScanLookupMapReturnsComputedValueAfterCardinalityCheck(t *testing.T) {
 			}
 		}()
 		tbl.scanLookupMap(tx,
-			[]string{"tenant", "key"},
-			[]scm.Scmer{scm.NewInt(3), scm.NewInt(9)},
+			testLookupAccess([]string{"tenant", "key"}, []scm.Scmer{scm.NewInt(3), scm.NewInt(9)}),
 			[]string{"left_value", "right_value"},
 			&mapper,
 		)
@@ -263,12 +270,13 @@ func BenchmarkScanLookupWithTx(b *testing.B) {
 	cols := []string{"key"}
 	values := []scm.Scmer{key}
 	// Warm the adaptive index before measuring the steady-state operator.
-	tbl.scanLookup(tx, cols, values, "value", true)
+	access := testLookupAccess(cols, values)
+	tbl.scanLookup(tx, access, "value", true)
 
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		tbl.scanLookup(tx, cols, values, "value", true)
+		tbl.scanLookup(tx, access, "value", true)
 	}
 }
 
@@ -324,11 +332,12 @@ func BenchmarkScanLookupDimensions(b *testing.B) {
 	}
 	for _, bench := range cases {
 		b.Run(bench.name, func(b *testing.B) {
-			tbl.scanLookup(tx, bench.cols, bench.values, bench.resultCol, bench.returnValue)
+			access := testLookupAccess(bench.cols, bench.values)
+			tbl.scanLookup(tx, access, bench.resultCol, bench.returnValue)
 			b.ResetTimer()
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
-				tbl.scanLookup(tx, bench.cols, bench.values, bench.resultCol, bench.returnValue)
+				tbl.scanLookup(tx, access, bench.resultCol, bench.returnValue)
 			}
 		})
 	}
@@ -355,12 +364,13 @@ func BenchmarkScanLookupMap(b *testing.B) {
 	mapProgram := scm.PrepareSerialProc(scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
 		return scm.NewInt(values[0].Int() + values[1].Int())
 	}))
-	tbl.scanLookupMap(tx, lookupCols, lookupValues, mapCols, &mapProgram)
+	access := testLookupAccess(lookupCols, lookupValues)
+	tbl.scanLookupMap(tx, access, mapCols, &mapProgram)
 
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		tbl.scanLookupMap(tx, lookupCols, lookupValues, mapCols, &mapProgram)
+		tbl.scanLookupMap(tx, access, mapCols, &mapProgram)
 	}
 }
 

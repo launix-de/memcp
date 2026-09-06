@@ -18,7 +18,6 @@ package storage
 
 import (
 	"bytes"
-	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -255,16 +254,21 @@ func TestLookupComputeTriggersInvalidateMatchingRows(t *testing.T) {
 }
 
 func TestExtractScanJoinInfoUsesCompiledAccessWhenResidualIsEmpty(t *testing.T) {
-	header := scm.ToInt(newScanAccessHeader(1, scanAccessConsumerScan, 0, -1))
-	boundaryMeta := scm.ToInt(newScanAccessBoundaryMeta(0, 0, 3))
-	source := fmt.Sprintf(`(lambda (ref_id)
+	source := `(lambda (ref_id)
 		(scan nil (table "tcompileddependency" "src")
-			'(%d "equal" "source_ref" %d "")
+			'()
 			(list ref_id)
 			'() (lambda () true)
 			'("value") (lambda (acc value) value)
-			nil nil false))`, header, boundaryMeta)
+			nil nil false))`
 	computor := scm.Read(t.Name(), source)
+	root := stripSourceInfo(computor).Slice()
+	scan := stripSourceInfo(root[2]).Slice()
+	schema := scm.NewSlice([]scm.Scmer{
+		newScanAccessHeader(1, scanAccessConsumerScan, 0, -1),
+		newScanBoundarySpec("source_ref", EqualMatcher, 0, 0, true, true, "", false, -1, nil, nil, "", false),
+	})
+	scan[3] = scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), schema})
 	refs := extractScanJoinInfo(computor)
 	if len(refs) != 1 || refs[0].schema != "tcompileddependency" || refs[0].table != "src" ||
 		len(refs[0].srcCols) != 1 || refs[0].srcCols[0] != "source_ref" ||

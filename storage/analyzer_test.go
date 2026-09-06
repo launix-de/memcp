@@ -27,18 +27,14 @@ var benchmarkBoundaries boundaries
 func testEqualScanAccess(column string, value scm.Scmer) (scm.Scmer, []scm.Scmer) {
 	return scm.NewSlice([]scm.Scmer{
 		newScanAccessHeader(1, scanAccessConsumerScan, 0, -1),
-		scm.NewString("equal"), scm.NewString(column), newScanAccessBoundaryMeta(0, 0, 3), scm.NewString(""),
+		newScanBoundarySpec(column, EqualMatcher, 0, 0, true, true, "", false, -1, nil, nil, "", false),
 	}), []scm.Scmer{value}
 }
 
 func testUpperScanAccess(column string, value scm.Scmer, inclusive bool) (scm.Scmer, []scm.Scmer) {
-	flags := int64(0)
-	if inclusive {
-		flags = 2
-	}
 	return scm.NewSlice([]scm.Scmer{
 		newScanAccessHeader(1, scanAccessConsumerScan, 0, -1),
-		scm.NewString("range"), scm.NewString(column), newScanAccessBoundaryMeta(-1, 0, flags), scm.NewString(""),
+		newScanBoundarySpec(column, RangeMatcher, -1, 0, false, inclusive, "", false, -1, nil, nil, "", false),
 	}), []scm.Scmer{value}
 }
 
@@ -115,8 +111,8 @@ func TestCompileScanAccessCarriesComputedFormulaRuntimeConstants(t *testing.T) {
 	if meta.projections != 1 || items[len(items)-1].String() != "doc" {
 		t.Fatalf("computed access schema omitted mapper columns: %s", scm.String(schema))
 	}
-	boundaryMeta := decodeScanAccessBoundaryMeta(items[scanAccessSchemaHeaderSize+2])
-	if mapperSlot := int(boundaryMeta.flags>>3) - 1; mapperSlot != 1 {
+	boundary := ScanBoundaryFromScmer(items[scanAccessSchemaHeaderSize])
+	if mapperSlot := boundary.MapperSlot(); mapperSlot != 1 {
 		t.Fatalf("computed mapper slot = %d, want 1", mapperSlot)
 	}
 
@@ -177,8 +173,8 @@ func TestCompileScanAccessEncodesBatchSlots(t *testing.T) {
 	batchData := []scm.Scmer{scm.NewInt(7), scm.NewInt(11)}
 	boundAccess := access.withBatch(1, batchData, 1)
 	indexBounds := newScanIndexBounds(boundAccess)
-	if indexBounds.lower(0).Int() != 11 || indexBounds.upperLast().Int() != 11 {
-		t.Fatalf("batch index view = [%v,%v], want [11,11]", indexBounds.lower(0), indexBounds.upperLast())
+	if indexBounds.lower(access, 0).Int() != 11 || indexBounds.upperLast().Int() != 11 {
+		t.Fatalf("batch index view = [%v,%v], want [11,11]", indexBounds.lower(access, 0), indexBounds.upperLast())
 	}
 	if allocs := testing.AllocsPerRun(1000, func() {
 		boundAccess = access.withBatch(1, batchData, 1)
@@ -316,7 +312,7 @@ func TestScanAccessNullProbeIsImpossibleWithoutTreatingNilCheckAsImpossible(t *t
 	}
 	nilCheckSchema := scm.NewSlice([]scm.Scmer{
 		newScanAccessHeader(1, scanAccessConsumerScan, 0, -1),
-		scm.NewString("equal"), scm.NewString("id"), newScanAccessBoundaryMeta(-1, -1, 3), scm.NewString(""),
+		newScanBoundarySpec("id", EqualMatcher, -1, -1, true, true, "", false, -1, nil, nil, "", false),
 	})
 	nilCheck, valid := scanAccessFromScheme(nilCheckSchema, nil, nil)
 	if !valid || nilCheck.impossible() {
@@ -976,7 +972,7 @@ func TestRecSetFilterBoundariesKeepLikeAndMembershipHooks(t *testing.T) {
 	owner := &recSet{}
 	schema := scm.NewSlice([]scm.Scmer{
 		newScanAccessHeader(1, scanAccessConsumerScan, 0, -1),
-		scm.NewString("like"), scm.NewString("search"), newScanAccessBoundaryMeta(0, 0, 3), scm.NewString(""),
+		newScanBoundarySpec("search", LikeMatcher, 0, 0, true, true, "", false, -1, nil, nil, "", false),
 	})
 	access := recSetScanAccess(owner, schema, []scm.Scmer{scm.NewString("%needle%")})
 	if access.len() != 2 {

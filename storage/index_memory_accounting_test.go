@@ -61,11 +61,12 @@ func TestPlannerIndexProbeDoesNotIncreaseIndexSavings(t *testing.T) {
 
 	columns := []string{"id"}
 	values := []scm.Scmer{scm.NewInt(5)}
-	if _, present := shard.GetRecordidForUnique(columns, values, nil); !present {
+	access := exactScanAccess(newExactScanAccessSchema(columns), values)
+	if _, present := shard.GetRecordidForUnique(access, nil); !present {
 		t.Fatal("warm unique point probe did not find its row")
 	}
 	if allocations := testing.AllocsPerRun(1000, func() {
-		if _, present := shard.GetRecordidForUnique(columns, values, nil); !present {
+		if _, present := shard.GetRecordidForUnique(access, nil); !present {
 			t.Fatal("unique point probe did not find its row")
 		}
 	}); allocations != 0 {

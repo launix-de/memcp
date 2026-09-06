@@ -478,14 +478,17 @@ func rewriteBatchScanAccess(schemaExpr, valuesExpr scm.Scmer, mapping map[string
 		boundaryCount := header.count
 		for boundary := 0; boundary < boundaryCount; boundary++ {
 			base := scanAccessSchemaHeaderSize + boundary*scanAccessBoundaryStride
-			meta := decodeScanAccessBoundaryMeta(rewrittenSchema[base+2])
-			if meta.lowerSlot == valueSlot {
-				meta.lowerSlot = encodedSlot
+			spec := ScanBoundaryFromScmer(rewrittenSchema[base])
+			lowerSlot, upperSlot := spec.LowerSlot(), spec.UpperSlot()
+			if lowerSlot == valueSlot {
+				lowerSlot = encodedSlot
 			}
-			if meta.upperSlot == valueSlot {
-				meta.upperSlot = encodedSlot
+			if upperSlot == valueSlot {
+				upperSlot = encodedSlot
 			}
-			rewrittenSchema[base+2] = newScanAccessBoundaryMeta(meta.lowerSlot, meta.upperSlot, meta.flags)
+			rewrittenSchema[base] = newScanBoundarySpec(spec.ColumnName(), spec.Analyzer(), lowerSlot, upperSlot,
+				spec.LowerInclusive(), spec.UpperInclusive(), spec.Collation(), spec.NullSafe(), spec.MapperSlot(),
+				spec.MapColumns(), spec.Order(), spec.OrderMetadata(), spec.Mandatory())
 		}
 	}
 	return scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), scm.NewSlice(rewrittenSchema)}),

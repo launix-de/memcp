@@ -31,7 +31,7 @@ type scanError struct {
 }
 
 const scanAccessSchemaHeaderSize = 1
-const scanAccessBoundaryStride = 4
+const scanAccessBoundaryStride = 1
 
 const scanAccessConsumerScan = "scan"
 const scanAccessConsumerCoveredScan = "scan_covered"
@@ -291,17 +291,20 @@ func shiftCompiledScanAccessSlots(schemaValue scm.Scmer, shift int) scm.Scmer {
 		panic("invalid scan access header")
 	}
 	for offset, count := scanAccessSchemaHeaderSize, meta.count; count > 0; offset, count = offset+scanAccessBoundaryStride, count-1 {
-		boundaryMeta := decodeScanAccessBoundaryMeta(shifted[offset+2])
-		if boundaryMeta.lowerSlot >= 0 {
-			boundaryMeta.lowerSlot += shift
+		boundary := ScanBoundaryFromScmer(shifted[offset])
+		lowerSlot, upperSlot, mapperSlot := boundary.LowerSlot(), boundary.UpperSlot(), boundary.MapperSlot()
+		if lowerSlot >= 0 {
+			lowerSlot += shift
 		}
-		if boundaryMeta.upperSlot >= 0 {
-			boundaryMeta.upperSlot += shift
+		if upperSlot >= 0 {
+			upperSlot += shift
 		}
-		if mapperSlot := boundaryMeta.flags >> 3; mapperSlot > 0 {
-			boundaryMeta.flags = boundaryMeta.flags&7 | (mapperSlot+int64(shift))<<3
+		if mapperSlot >= 0 {
+			mapperSlot += shift
 		}
-		shifted[offset+2] = newScanAccessBoundaryMeta(boundaryMeta.lowerSlot, boundaryMeta.upperSlot, boundaryMeta.flags)
+		shifted[offset] = newScanBoundarySpec(boundary.ColumnName(), boundary.Analyzer(), lowerSlot, upperSlot,
+			boundary.LowerInclusive(), boundary.UpperInclusive(), boundary.Collation(), boundary.NullSafe(), mapperSlot,
+			boundary.MapColumns(), boundary.Order(), boundary.OrderMetadata(), boundary.Mandatory())
 	}
 	return scm.NewSlice(shifted)
 }
@@ -872,9 +875,19 @@ func compileScanAccessMode(columnExpr, filterExpr scm.Scmer, allowBatch bool) (s
 			}))
 			flags |= int64(mapperSlot+1) << 3
 		}
-		schema = append(schema,
-			scm.NewString(boundary.kind), scm.NewString(boundary.column),
-			newScanAccessBoundaryMeta(int(lowerSlot), int(upperSlot), flags), scm.NewString(boundary.collation))
+		matcher := EqualMatcher
+		switch boundary.kind {
+		case "range":
+			matcher = RangeMatcher
+		case "like":
+			matcher = LikeMatcher
+		case "recset":
+			matcher = RecSetMatcher
+		}
+		mapperSlot := int(flags>>3) - 1
+		schema = append(schema, newScanBoundarySpec(boundary.column, matcher, int(lowerSlot), int(upperSlot),
+			boundary.lowerInclusive, boundary.upperInclusive, boundary.collation, boundary.nullSafe,
+			mapperSlot, boundary.mapCols, nil, "", false))
 	}
 	for _, column := range mapCols {
 		schema = append(schema, scm.NewString(column))

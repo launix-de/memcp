@@ -2733,9 +2733,8 @@ func (t *storageShard) insertDatasetFromLog(columns []string, values [][]scm.Scm
 const uniqueLookupInlineColumns = 8
 
 type uniqueLookupScratch struct {
-	mcols  [uniqueLookupInlineColumns]ColumnStorage
-	bounds [uniqueLookupInlineColumns]columnboundaries
-	ids    [8]uint32
+	mcols [uniqueLookupInlineColumns]ColumnStorage
+	ids   [8]uint32
 }
 
 var uniqueLookupScratchPool = sync.Pool{
@@ -2751,34 +2750,23 @@ func releaseUniqueLookupScratch(scratch *uniqueLookupScratch, columns int) {
 		columns = uniqueLookupInlineColumns
 	}
 	clear(scratch.mcols[:columns])
-	clear(scratch.bounds[:columns])
 	uniqueLookupScratchPool.Put(scratch)
 }
 
-func (t *storageShard) GetRecordidForUnique(columns []string, values []scm.Scmer, currentTx *TxContext) (result uint32, present bool) {
+func (t *storageShard) GetRecordidForUnique(access scanAccess, currentTx *TxContext) (result uint32, present bool) {
 	// Preload main storages and establish main_count without holding any shard lock
 	t.ensureMainCount(false)
+	columns := access.len()
 	scratch := acquireUniqueLookupScratch()
-	defer releaseUniqueLookupScratch(scratch, len(columns))
+	defer releaseUniqueLookupScratch(scratch, columns)
 	mcols := scratch.mcols[:]
-	if len(columns) <= len(mcols) {
-		mcols = mcols[:len(columns)]
+	if columns <= len(mcols) {
+		mcols = mcols[:columns]
 	} else {
-		mcols = make([]ColumnStorage, len(columns))
+		mcols = make([]ColumnStorage, columns)
 	}
-	for i, col := range columns {
-		mcols[i] = t.getColumnStorageOrPanic(col, false, currentTx)
-	}
-
-	// Build equality boundaries for the index lookup
-	bounds := scratch.bounds[:]
-	if len(columns) <= len(bounds) {
-		bounds = bounds[:len(columns)]
-	} else {
-		bounds = make(boundaries, len(columns))
-	}
-	for i, col := range columns {
-		bounds[i] = columnboundaries{col: col, matcher: EqualMatcher, lower: values[i], lowerInclusive: true, upper: values[i], upperInclusive: true}
+	for i := range mcols {
+		mcols[i] = t.getColumnStorageOrPanic(access.boundaryColumn(i), false, currentTx)
 	}
 
 	// From here on, read under shard read lock for a consistent snapshot of deletions/inserts/deltaColumns
@@ -2790,13 +2778,14 @@ func (t *storageShard) GetRecordidForUnique(columns []string, values []scm.Scmer
 
 	// Use iterateIndex for O(log n) lookup (builds index lazily if needed)
 	// Small buffer for existence check: stop early after first match
-	t.iterateIndex(currentTx, runtimeScanAccess(bounds), len(t.inserts), scratch.ids[:], 1, nil, func(batch []uint32) bool {
+	t.iterateIndex(currentTx, access, len(t.inserts), scratch.ids[:], 1, nil, func(batch []uint32) bool {
 		for _, idx := range batch {
 			// Verify all columns match (iterateIndex may return superset for range boundaries)
 			matched := true
 			if idx < mainCount {
 				// Main storage: use ColumnStorage
-				for j, v := range values {
+				for j := 0; j < columns; j++ {
+					v := access.boundValue(j, false)
 					if !scm.Equal(mcols[j].GetValue(idx), v) {
 						matched = false
 						break
@@ -2804,8 +2793,8 @@ func (t *storageShard) GetRecordidForUnique(columns []string, values []scm.Scmer
 				}
 			} else {
 				// Delta storage: use getDelta
-				for j, v := range values {
-					if !scm.Equal(t.getDelta(int(idx-mainCount), columns[j]), v) {
+				for j := 0; j < columns; j++ {
+					if !scm.Equal(t.getDelta(int(idx-mainCount), access.boundaryColumn(j)), access.boundValue(j, false)) {
 						matched = false
 						break
 					}

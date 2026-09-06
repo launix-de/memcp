@@ -954,17 +954,20 @@ func extractCompiledScanEqualityJoins(schemaExpr, valuesExpr scm.Scmer, computor
 	count := meta.count
 	for i := 0; i < count; i++ {
 		offset := scanAccessSchemaHeaderSize + i*scanAccessBoundaryStride
-		if offset+scanAccessBoundaryStride > len(schema) || stripSourceInfo(schema[offset]).String() != "equal" {
+		if offset+scanAccessBoundaryStride > len(schema) || !stripSourceInfo(schema[offset]).IsCustom(TagScanBoundary) {
 			continue
 		}
-		boundaryMeta := decodeScanAccessBoundaryMeta(stripSourceInfo(schema[offset+2]))
-		lowerSlot := boundaryMeta.lowerSlot
-		upperSlot := boundaryMeta.upperSlot
+		boundary := ScanBoundaryFromScmer(stripSourceInfo(schema[offset]))
+		if boundary.Analyzer() != EqualMatcher {
+			continue
+		}
+		lowerSlot := boundary.LowerSlot()
+		upperSlot := boundary.UpperSlot()
 		if lowerSlot < 0 || lowerSlot != upperSlot || lowerSlot >= len(valueItems) {
 			continue
 		}
 		if inputCol, ok := compiledScanOuterColumn(valueItems[lowerSlot], computorParams); ok {
-			srcCols = append(srcCols, stripSourceInfo(schema[offset+1]).String())
+			srcCols = append(srcCols, boundary.ColumnName())
 			inputCols = append(inputCols, inputCol)
 		}
 	}
