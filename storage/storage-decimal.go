@@ -1456,15 +1456,14 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resu
 		} else {
 			r32 := ctx.AllocRegExcept(d86.Reg)
 			ctx.EmitCmpRegImm32(d86.Reg, 0)
-			ctx.EmitSetcc(r32, scm.CondSignedGreater)
-			d87 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagBool, Reg: r32}
+			d87 = scm.JITValueDesc{Loc: scm.LocFlags, Type: scm.TagBool, Reg: r32, Condition: scm.CondSignedGreater}
 			ctx.BindReg(r32, &d87)
 		}
 		ctx.FreeDesc(&d86)
 		d88 = d87
 		ctx.EnsureDesc(&d88)
-		if d88.Loc != scm.LocImm && d88.Loc != scm.LocReg {
-			panic("jit: If condition is neither scm.LocImm nor scm.LocReg")
+		if d88.Loc != scm.LocImm && d88.Loc != scm.LocFlags {
+			panic("jit: fused If condition is neither scm.LocImm nor scm.LocFlags")
 		}
 		if d88.Loc == scm.LocImm {
 			if d88.Imm.Bool() {
@@ -1552,8 +1551,7 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resu
 		}
 		lbl10 := ctx.ReserveLabel()
 		lbl11 := ctx.ReserveLabel()
-		ctx.EmitCmpRegImm32(d88.Reg, 0)
-		ctx.EmitJump(scm.CondNotEqual, lbl10)
+		ctx.EmitJump(d88.Condition, lbl10)
 		ctx.EmitJmp(lbl11)
 		snap91 := d0
 		snap92 := d1
@@ -1806,7 +1804,6 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resu
 			return bbs[4].RenderPS(ps125)
 		}
 		return result
-		ctx.FreeDesc(&d87)
 		return result
 	}
 	bbs[3].RenderPS = func(ps scm.PhiState) scm.JITValueDesc {
@@ -1954,28 +1951,25 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resu
 				ctx.EmitMovRegImm64(scm.RegR11, uint64(d161.Imm.Int()))
 				ctx.EmitCmpInt64(d22.Reg, scm.RegR11)
 			}
-			ctx.EmitSetcc(r34, scm.CondEqual)
-			d162 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagBool, Reg: r34}
+			d162 = scm.JITValueDesc{Loc: scm.LocFlags, Type: scm.TagBool, Reg: r34, Condition: scm.CondEqual}
 			ctx.BindReg(r34, &d162)
 		} else if d22.Loc == scm.LocImm {
 			r35 := ctx.AllocReg()
 			ctx.EmitMovRegImm64(scm.RegR11, uint64(d22.Imm.Int()))
 			ctx.EmitCmpInt64(scm.RegR11, d161.Reg)
-			ctx.EmitSetcc(r35, scm.CondEqual)
-			d162 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagBool, Reg: r35}
+			d162 = scm.JITValueDesc{Loc: scm.LocFlags, Type: scm.TagBool, Reg: r35, Condition: scm.CondEqual}
 			ctx.BindReg(r35, &d162)
 		} else {
 			r36 := ctx.AllocRegExcept(d22.Reg)
 			ctx.EmitCmpInt64(d22.Reg, d161.Reg)
-			ctx.EmitSetcc(r36, scm.CondEqual)
-			d162 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagBool, Reg: r36}
+			d162 = scm.JITValueDesc{Loc: scm.LocFlags, Type: scm.TagBool, Reg: r36, Condition: scm.CondEqual}
 			ctx.BindReg(r36, &d162)
 		}
 		ctx.FreeDesc(&d161)
 		d163 = d162
 		ctx.EnsureDesc(&d163)
-		if d163.Loc != scm.LocImm && d163.Loc != scm.LocReg {
-			panic("jit: If condition is neither scm.LocImm nor scm.LocReg")
+		if d163.Loc != scm.LocImm && d163.Loc != scm.LocFlags {
+			panic("jit: fused If condition is neither scm.LocImm nor scm.LocFlags")
 		}
 		if d163.Loc == scm.LocImm {
 			if d163.Imm.Bool() {
@@ -2069,8 +2063,7 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resu
 		}
 		lbl12 := ctx.ReserveLabel()
 		lbl13 := ctx.ReserveLabel()
-		ctx.EmitCmpRegImm32(d163.Reg, 0)
-		ctx.EmitJump(scm.CondNotEqual, lbl12)
+		ctx.EmitJump(d163.Condition, lbl12)
 		ctx.EmitJmp(lbl13)
 		snap166 := d0
 		snap167 := d1
@@ -2344,7 +2337,6 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resu
 			return bbs[1].RenderPS(ps203)
 		}
 		return result
-		ctx.FreeDesc(&d162)
 		return result
 	}
 	bbs[4].RenderPS = func(ps scm.PhiState) scm.JITValueDesc {

@@ -2888,8 +2888,13 @@ func (g *codeGen) emitIfClosure(v *ssa.If) {
 	condVar := g.allocDesc()
 	g.emit("%s := %s", condVar, cond.goVar)
 	g.emit("ctx.EnsureDesc(&%s)", condVar)
-	g.emit("if %s.Loc != LocImm && %s.Loc != LocReg {", condVar, condVar)
-	g.emit("\tpanic(\"jit: If condition is neither LocImm nor LocReg\")")
+	if cond.marker == "_flags" {
+		g.emit("if %s.Loc != LocImm && %s.Loc != LocFlags {", condVar, condVar)
+		g.emit("\tpanic(\"jit: fused If condition is neither LocImm nor LocFlags\")")
+	} else {
+		g.emit("if %s.Loc != LocImm && %s.Loc != LocReg {", condVar, condVar)
+		g.emit("\tpanic(\"jit: If condition is neither LocImm nor LocReg\")")
+	}
 	g.emit("}")
 
 	// Constant-pruned branch: recurse into exactly one successor.
@@ -2928,8 +2933,12 @@ func (g *codeGen) emitIfClosure(v *ssa.If) {
 	elseEdgeLbl := g.allocLabel()
 	g.emit("%s := ctx.ReserveLabel()", thenEdgeLbl)
 	g.emit("%s := ctx.ReserveLabel()", elseEdgeLbl)
-	g.emit("ctx.EmitCmpRegImm32(%s.Reg, 0)", condVar)
-	g.emit("ctx.EmitJump(CondNotEqual, %s)", thenEdgeLbl)
+	if cond.marker == "_flags" {
+		g.emit("ctx.EmitJump(%s.Condition, %s)", condVar, thenEdgeLbl)
+	} else {
+		g.emit("ctx.EmitCmpRegImm32(%s.Reg, 0)", condVar)
+		g.emit("ctx.EmitJump(CondNotEqual, %s)", thenEdgeLbl)
+	}
 	g.emit("ctx.EmitJmp(%s)", elseEdgeLbl)
 	// Edge helpers are mutually exclusive machine-code paths. Emitting the
 	// first helper may spill a live descriptor while preparing its phi moves;
@@ -2984,6 +2993,26 @@ func (g *codeGen) emitIfClosure(v *ssa.If) {
 		g.emit("}")
 	}
 	g.emit("return result")
+}
+
+// comparisonFeedsImmediateIf reports whether a comparison's machine flags can
+// be consumed directly by the block terminator. Keeping this proof in jitgen
+// makes LocFlags deliberately short-lived: the runtime emitter never performs
+// flags liveness analysis and remains a single pass.
+func comparisonFeedsImmediateIf(v *ssa.BinOp) bool {
+	if opToCC(v.Op) == "" {
+		return false
+	}
+	refs := v.Referrers()
+	if refs == nil || len(*refs) != 1 {
+		return false
+	}
+	branch, ok := (*refs)[0].(*ssa.If)
+	if !ok || branch.Cond != v || branch.Block() != v.Block() {
+		return false
+	}
+	instructions := v.Block().Instrs
+	return len(instructions) >= 2 && instructions[len(instructions)-2] == v && instructions[len(instructions)-1] == branch
 }
 
 func (g *codeGen) emitJumpClosure(v *ssa.Jump) {
@@ -4416,7 +4445,7 @@ func addScmPrefix(code string) string {
 		"Reg":          true,
 		"BBDescriptor": true, "PhiState": true,
 		"LocNone": true, "LocReg": true, "LocRegPair": true, "LocRegTriple": true,
-		"LocStack": true, "LocStackPair": true, "LocStackTriple": true, "LocInputPair": true, "LocMem": true, "LocImm": true, "LocAny": true,
+		"LocStack": true, "LocStackPair": true, "LocStackTriple": true, "LocInputPair": true, "LocMem": true, "LocImm": true, "LocAny": true, "LocFlags": true,
 		"NewInt": true, "NewFloat": true, "NewBool": true, "NewNil": true, "NewString": true,
 		"NewFastDict": true, "NewFastDictValue": true,
 		"Scmer": true, "GoFuncAddr": true, "JITBuildMergeClosure": true,
@@ -5720,9 +5749,9 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 					g.emit("\t%s := ctx.AllocReg()", ptrReg)
 					g.emit("\t%s := ctx.AllocRegExcept(%s)", lenReg, ptrReg)
 					g.emit("\t%s := ctx.AllocRegExcept(%s, %s)", capReg, ptrReg, lenReg)
-					g.emit("\tctx.EmitMovRegMem64(%s, fieldAddr)", ptrReg)    // data ptr
-					g.emit("\tctx.EmitMovRegMem64(%s, fieldAddr+8)", lenReg)  // length
-					g.emit("\tctx.EmitMovRegMem64(%s, fieldAddr+16)", capReg) // capacity
+					g.emit("\tctx.EmitMovRegMem64(%s, fieldAddr)", ptrReg)
+					g.emit("\tctx.EmitMovRegMem64(%s, fieldAddr+8)", lenReg)
+					g.emit("\tctx.EmitMovRegMem64(%s, fieldAddr+16)", capReg)
 					g.emit("\t%s = JITValueDesc{Loc: LocRegTriple, Reg: %s, Reg2: %s, Reg3: %s}", dv, ptrReg, lenReg, capReg)
 				case "interface":
 					itabReg := g.allocReg()
@@ -7099,8 +7128,9 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			xMultiUse = true
 		}
 		if g.storageMode {
-			// Conservative in storage emitters: SSA value reuse across phi edges
-			// and inlined blocks is subtle; prefer non-destructive BinOps.
+			// Storage emitters inline nested receivers and CFGs. Until their
+			// alias sets are part of the static plan, preserve operands across
+			// those boundaries rather than destructively reusing their registers.
 			xMultiUse = true
 		}
 		if g.isFieldCachedDesc(xVal.goVar) {
@@ -7196,6 +7226,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		}
 		goOp := goOpStr(v.Op)
 		if cc != "" {
+			flagsOnly := comparisonFeedsImmediateIf(v)
 			dv := g.allocDesc()
 			if c, ok := v.Y.(*ssa.Const); ok && c.Value == nil && (v.Op == token.EQL || v.Op == token.NEQ) {
 				nilComparable := false
@@ -7305,18 +7336,27 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 					g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(%s.Imm.Int() %s %d)}", dv, xVal.goVar, goOp, cmpVal)
 				}
 				g.emit("} else {")
-				// Fresh register for result — CMP is non-destructive, SetCC writes only the target.
-				// Protect xVal.Reg when multi-use: AllocReg must not return xVal.Reg (SetCC would clobber it).
-				rv := g.allocReg()
-				g.emitAllocRegExcept(rv, "\t", xMultiUse, xVal)
+				flagsReg := ""
+				if flagsOnly {
+					flagsReg = g.allocReg()
+					g.emitAllocRegExcept(flagsReg, "\t", xMultiUse, xVal)
+				}
 				if fitsInt32(cmpVal) {
 					g.emit("\tctx.EmitCmpRegImm32(%s.Reg, %d)", xVal.goVar, cmpVal)
 				} else {
 					g.emit("\tctx.EmitMovRegImm64(RegR11, 0x%x)", uint64(cmpVal))
 					g.emit("\tctx.EmitCmpInt64(%s.Reg, RegR11)", xVal.goVar)
 				}
-				g.emit("\tctx.EmitSetcc(%s, %s)", rv, cc)
-				g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: %s}", dv, rv)
+				if flagsOnly {
+					g.emit("\t%s = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: %s, Condition: %s}", dv, flagsReg, cc)
+					g.emit("\tctx.BindReg(%s, &%s)", flagsReg, dv)
+				} else {
+					// CMP is non-destructive, but SETcc requires a fresh result register.
+					rv := g.allocReg()
+					g.emitAllocRegExcept(rv, "\t", xMultiUse, xVal)
+					g.emit("\tctx.EmitSetcc(%s, %s)", rv, cc)
+					g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: %s}", dv, rv)
+				}
 				g.emit("}")
 			} else {
 				yVal := g.resolveValue(v.Y)
@@ -7329,35 +7369,68 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 					g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(%s.Imm.Int() %s %s.Imm.Int())}", dv, xVal.goVar, goOp, yVal.goVar)
 				}
 				g.emit("} else if %s.Loc == LocImm {", yVal.goVar)
-				// y is imm, x is reg → CmpRegImm32. Protect xVal.Reg when multi-use.
-				rv := g.allocReg()
-				g.emitAllocRegExcept(rv, "\t", xMultiUse, xVal)
+				flagsRegY := ""
+				if flagsOnly {
+					flagsRegY = g.allocReg()
+					g.emitAllocRegExcept(flagsRegY, "\t", xMultiUse, xVal)
+				}
 				g.emit("\tif %s.Imm.Int() >= -2147483648 && %s.Imm.Int() <= 2147483647 {", yVal.goVar, yVal.goVar)
 				g.emit("\t\tctx.EmitCmpRegImm32(%s.Reg, int32(%s.Imm.Int()))", xVal.goVar, yVal.goVar)
 				g.emit("\t} else {")
 				g.emit("\t\tctx.EmitMovRegImm64(RegR11, uint64(%s.Imm.Int()))", yVal.goVar)
 				g.emit("\t\tctx.EmitCmpInt64(%s.Reg, RegR11)", xVal.goVar)
 				g.emit("\t}")
-				g.emit("\tctx.EmitSetcc(%s, %s)", rv, cc)
-				g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: %s}", dv, rv)
+				if flagsOnly {
+					g.emit("\t%s = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: %s, Condition: %s}", dv, flagsRegY, cc)
+					g.emit("\tctx.BindReg(%s, &%s)", flagsRegY, dv)
+				} else {
+					rv := g.allocReg()
+					g.emitAllocRegExcept(rv, "\t", xMultiUse, xVal)
+					g.emit("\tctx.EmitSetcc(%s, %s)", rv, cc)
+					g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: %s}", dv, rv)
+				}
 				g.emit("} else if %s.Loc == LocImm {", xVal.goVar)
 				// x is imm, y is reg → materialize x, CMP
-				rv2 := g.allocReg()
-				g.emit("\t%s := ctx.AllocReg()", rv2)
+				flagsRegX := ""
+				if flagsOnly {
+					flagsRegX = g.allocReg()
+					g.emit("\t%s := ctx.AllocReg()", flagsRegX)
+				}
 				g.emit("\tctx.EmitMovRegImm64(RegR11, uint64(%s.Imm.Int()))", xVal.goVar)
 				g.emit("\tctx.EmitCmpInt64(RegR11, %s.Reg)", yVal.goVar)
-				g.emit("\tctx.EmitSetcc(%s, %s)", rv2, cc)
-				g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: %s}", dv, rv2)
+				if flagsOnly {
+					g.emit("\t%s = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: %s, Condition: %s}", dv, flagsRegX, cc)
+					g.emit("\tctx.BindReg(%s, &%s)", flagsRegX, dv)
+				} else {
+					rv2 := g.allocReg()
+					g.emit("\t%s := ctx.AllocReg()", rv2)
+					g.emit("\tctx.EmitSetcc(%s, %s)", rv2, cc)
+					g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: %s}", dv, rv2)
+				}
 				g.emit("} else {")
-				// Both regs: protect xVal.Reg when multi-use (SetCC would clobber if rv3==xVal.Reg).
-				rv3 := g.allocReg()
-				g.emitAllocRegExcept(rv3, "\t", xMultiUse, xVal)
+				flagsRegBoth := ""
+				if flagsOnly {
+					flagsRegBoth = g.allocReg()
+					g.emitAllocRegExcept(flagsRegBoth, "\t", xMultiUse, xVal)
+				}
 				g.emit("\tctx.EmitCmpInt64(%s.Reg, %s.Reg)", xVal.goVar, yVal.goVar)
-				g.emit("\tctx.EmitSetcc(%s, %s)", rv3, cc)
-				g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: %s}", dv, rv3)
+				if flagsOnly {
+					g.emit("\t%s = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: %s, Condition: %s}", dv, flagsRegBoth, cc)
+					g.emit("\tctx.BindReg(%s, &%s)", flagsRegBoth, dv)
+				} else {
+					// Protect xVal.Reg when multi-use: SETcc must not clobber it.
+					rv3 := g.allocReg()
+					g.emitAllocRegExcept(rv3, "\t", xMultiUse, xVal)
+					g.emit("\tctx.EmitSetcc(%s, %s)", rv3, cc)
+					g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: %s}", dv, rv3)
+				}
 				g.emit("}")
 			}
-			g.vals[name] = genVal{goVar: dv, isDesc: true}
+			marker := ""
+			if flagsOnly {
+				marker = "_flags"
+			}
+			g.vals[name] = genVal{goVar: dv, isDesc: true, marker: marker}
 		} else if aluOp := aluEmitFunc(v.Op); aluOp != "" {
 			// Arithmetic BinOp: ADD, SUB, MUL
 			dv := g.allocDesc()
@@ -8001,8 +8074,13 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		condVar := g.allocDesc()
 		g.emit("%s := %s", condVar, cond.goVar)
 		g.emit("ctx.EnsureDesc(&%s)", condVar)
-		g.emit("if %s.Loc != LocImm && %s.Loc != LocReg {", condVar, condVar)
-		g.emit("\tpanic(\"jit: If condition is neither LocImm nor LocReg\")")
+		if cond.marker == "_flags" {
+			g.emit("if %s.Loc != LocImm && %s.Loc != LocFlags {", condVar, condVar)
+			g.emit("\tpanic(\"jit: fused If condition is neither LocImm nor LocFlags\")")
+		} else {
+			g.emit("if %s.Loc != LocImm && %s.Loc != LocReg {", condVar, condVar)
+			g.emit("\tpanic(\"jit: If condition is neither LocImm nor LocReg\")")
+		}
 		g.emit("}")
 		// Ensure labels for both targets
 		thenLbl := g.ensureBBLabel(thenBB)
@@ -8028,8 +8106,12 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		g.emit("\t}")
 		g.emit("} else {")
 		// Runtime: CMP + JNE to then-edge helper, otherwise else-edge helper.
-		g.emit("\tctx.EmitCmpRegImm32(%s.Reg, 0)", condVar)
-		g.emit("\tctx.EmitJump(CondNotEqual, %s)", thenEdgeLbl)
+		if cond.marker == "_flags" {
+			g.emit("\tctx.EmitJump(%s.Condition, %s)", condVar, thenEdgeLbl)
+		} else {
+			g.emit("\tctx.EmitCmpRegImm32(%s.Reg, 0)", condVar)
+			g.emit("\tctx.EmitJump(CondNotEqual, %s)", thenEdgeLbl)
+		}
 		g.emit("\tctx.EmitJmp(%s)", elseEdgeLbl)
 		// Dynamic condition: both helper edges are reachable.
 		g.emit("\tctx.MarkLabel(%s)", thenEdgeLbl)

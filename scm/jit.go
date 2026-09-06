@@ -427,6 +427,11 @@ type JITValueDesc struct {
 	// StackFunc permits the outermost lambda produced for this exact result slot
 	// to use an invocation-local Go funcval. Nested expressions do not inherit it.
 	StackFunc bool
+	// Condition is valid only for LocFlags. LocFlags is an ephemeral result of
+	// a comparison that jitgen proved is consumed immediately by the terminating
+	// branch in the same basic block. No intervening machine instruction may
+	// clobber the architecture's condition state.
+	Condition JITCondition
 }
 
 // jitValueWordIsPointer reports whether word is a relocatable Go pointer in
@@ -525,6 +530,7 @@ const (
 	LocLambdaTemplate
 	LocParserTemplate
 	LocClosurePair // One Scmer in the current Go funcval's typed closure environment
+	LocFlags       // Ephemeral comparison result consumed immediately by a branch
 )
 
 // JITFixup records a forward reference that must be patched after all
@@ -1589,6 +1595,13 @@ func (ctx *JITContext) FreeDesc(desc *JITValueDesc) {
 			owner := ctx.RegOwners[r]
 			if owner == nil || owner == desc || (desc.ID != 0 && owner.ID == desc.ID) {
 				ctx.FreeReg(r)
+			}
+		}
+	case LocFlags:
+		if desc.Reg <= RegR15 {
+			owner := ctx.RegOwners[desc.Reg]
+			if owner == nil || owner == desc || (desc.ID != 0 && owner.ID == desc.ID) {
+				ctx.FreeReg(desc.Reg)
 			}
 		}
 	case LocStack:
