@@ -68,9 +68,10 @@ func planLoopPhiRegisters(fn *ssa.Function) staticRegisterPlan {
 			if isPhiTripleType(phi.Type()) {
 				continue
 			}
-			// Phi-to-phi assignments need a parallel-copy schedule. Retain their
-			// canonical stack transport until that is modeled by the planner.
-			if registerPlanHasPhiInput(phi) {
+			// Same-block phi cycles describe true parallel swaps. Cross-block phi
+			// chains are safe once their simultaneous-copy interference is added
+			// below and are important for branch-updated rolling loop cursors.
+			if registerPlanHasSameBlockPhiInput(phi) {
 				continue
 			}
 			if isPhiPairType(phi.Type()) {
@@ -154,6 +155,7 @@ func planRegisterClass(fn *ssa.Function, nodes []registerPlanNode) ([]int, int) 
 			}
 		}
 		addRegisterPlanClique(nodes, definitions)
+		addRegisterPlanPhiCopyInterference(block, index, nodes)
 	}
 	return colorRegisterPlan(nodes)
 }
@@ -235,13 +237,49 @@ func registerPlanLoopHeader(block *ssa.BasicBlock) bool {
 	return false
 }
 
-func registerPlanHasPhiInput(phi *ssa.Phi) bool {
+func registerPlanHasSameBlockPhiInput(phi *ssa.Phi) bool {
 	for _, edge := range phi.Edges {
-		if _, ok := edge.(*ssa.Phi); ok {
+		if source, ok := edge.(*ssa.Phi); ok && source.Block() == phi.Block() {
 			return true
 		}
 	}
 	return false
+}
+
+// addRegisterPlanPhiCopyInterference models simultaneous phi assignments on
+// each predecessor edge. A destination may coalesce with its own source, but
+// must not overwrite another source before that source reaches its destination.
+func addRegisterPlanPhiCopyInterference(block *ssa.BasicBlock, index map[ssa.Value]int, nodes []registerPlanNode) {
+	phis := make([]*ssa.Phi, 0)
+	for _, instruction := range block.Instrs {
+		phi, ok := instruction.(*ssa.Phi)
+		if !ok {
+			break
+		}
+		if _, planned := index[phi]; planned {
+			phis = append(phis, phi)
+		}
+	}
+	for edgeIndex := range block.Preds {
+		for _, target := range phis {
+			targetNode := index[target]
+			ownSource := -1
+			if edgeIndex < len(target.Edges) {
+				ownSource, _ = index[target.Edges[edgeIndex]]
+			}
+			for _, sourcePhi := range phis {
+				if edgeIndex >= len(sourcePhi.Edges) {
+					continue
+				}
+				sourceNode, planned := index[sourcePhi.Edges[edgeIndex]]
+				if !planned || sourceNode == ownSource || sourceNode == targetNode {
+					continue
+				}
+				nodes[targetNode].neighbors[sourceNode] = struct{}{}
+				nodes[sourceNode].neighbors[targetNode] = struct{}{}
+			}
+		}
+	}
 }
 
 type registerSet map[int]struct{}

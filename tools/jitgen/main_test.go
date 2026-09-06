@@ -230,6 +230,41 @@ func nested(rows, columns int) int {
 	}
 }
 
+func TestLoopPhiRegisterPlanKeepsBranchUpdatedCursor(t *testing.T) {
+	fn := buildTestSSAFunction(t, `package sample
+func rolling(limit int) int {
+	cursor := 0
+	for index := 0; index < limit; index++ {
+		if index&1 == 0 { cursor++ } else { cursor += 2 }
+	}
+	return cursor
+}
+`, "rolling")
+	foundCrossBlockPhi := false
+	for _, block := range fn.Blocks {
+		for _, instruction := range block.Instrs {
+			phi, ok := instruction.(*ssa.Phi)
+			if !ok {
+				break
+			}
+			for _, edge := range phi.Edges {
+				source, isPhi := edge.(*ssa.Phi)
+				if !isPhi || source.Block() == phi.Block() {
+					continue
+				}
+				foundCrossBlockPhi = true
+				plan := planLoopPhiRegisters(fn)
+				if _, planned := plan.colorByValue[phi.Name()]; !planned {
+					t.Fatalf("branch-updated cursor phi %s was left on the stack: %#v", phi.Name(), plan)
+				}
+			}
+		}
+	}
+	if !foundCrossBlockPhi {
+		t.Fatal("test SSA did not contain the expected cross-block phi chain")
+	}
+}
+
 func TestRegisterColoringIsExactForSmallComponent(t *testing.T) {
 	nodes := make([]registerPlanNode, 4)
 	for index := range nodes {
