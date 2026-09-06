@@ -104,6 +104,37 @@ func add(a ...Scmer) Scmer { return NewInt(a[0].Int() + a[1].Int()) }
 	}
 }
 
+func TestComparisonConsumedByBranchKeepsMachineFlags(t *testing.T) {
+	fn := buildTestSSAFunction(t, `package sample
+type Scmer struct{}
+func NewInt(int64) Scmer
+func (Scmer) Int() int64
+func minimum(a ...Scmer) Scmer {
+	if a[0].Int() < a[1].Int() {
+		return a[0]
+	}
+	return a[1]
+}
+`, "minimum")
+	code, errMsg := generateClosure("minimum", fn, nil)
+	if errMsg != "" {
+		t.Fatal(errMsg)
+	}
+	for _, want := range []string{
+		"Loc: LocFlags",
+		"Condition: CondSignedLess",
+		"ctx.EmitJump(",
+		".Condition,",
+	} {
+		if !strings.Contains(code, want) {
+			t.Fatalf("generated comparison branch does not contain %q:\n%s", want, code)
+		}
+	}
+	if strings.Contains(code, "ctx.EmitSetcc(") {
+		t.Fatalf("generated comparison branch materializes a boolean:\n%s", code)
+	}
+}
+
 func TestCollectOperatorsUsesRootFunctionTypeDescriptor(t *testing.T) {
 	const source = `package sample
 func init() {
