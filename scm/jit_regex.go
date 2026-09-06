@@ -325,10 +325,12 @@ func (emitter *jitRegexEmitter) emitResetCaptures(terms []jitRegexTerm) {
 	}
 }
 
-func (emitter *jitRegexEmitter) emitProgram(successLabel, failLabel JITLabel) {
-	attemptLabel := emitter.ctx.ReserveLabel()
-	attemptFailLabel := emitter.ctx.ReserveLabel()
-	emitter.ctx.MarkLabel(attemptLabel)
+// emitMatchAt tries the pattern once, anchored exactly at emitter.scan. On
+// matchLabel the emitter's cursor sits at the match end and every capture
+// (including capture 0, the whole match) is filled; on failLabel nothing about
+// scan has changed. It is the single reusable match attempt shared by the
+// forward scan of emitProgram and the replace loop of jitEmitRegexReplace.
+func (emitter *jitRegexEmitter) emitMatchAt(matchLabel, failLabel JITLabel) {
 	emitter.ctx.EmitMovRegReg(emitter.cursor, emitter.scan)
 	for index := range emitter.captures {
 		emitter.emitCaptureEmpty(index)
@@ -338,7 +340,14 @@ func (emitter *jitRegexEmitter) emitProgram(successLabel, failLabel JITLabel) {
 		terms = append([]jitRegexTerm{{kind: jitRegexCaptureBegin, capture: 0}}, terms...)
 		terms = append(terms, jitRegexTerm{kind: jitRegexCaptureEnd, capture: 0})
 	}
-	emitter.emitSequence(terms, successLabel, attemptFailLabel)
+	emitter.emitSequence(terms, matchLabel, failLabel)
+}
+
+func (emitter *jitRegexEmitter) emitProgram(successLabel, failLabel JITLabel) {
+	attemptLabel := emitter.ctx.ReserveLabel()
+	attemptFailLabel := emitter.ctx.ReserveLabel()
+	emitter.ctx.MarkLabel(attemptLabel)
+	emitter.emitMatchAt(successLabel, attemptFailLabel)
 
 	emitter.ctx.MarkLabel(attemptFailLabel)
 	if emitter.program.beginText {
