@@ -56,7 +56,7 @@ test_cases:
                         (begin
                           (define value
                             (scan nil (table "memcp-tests" "orc_dep_src")
-                              '(369436175368192 "equal" "ref_id" 15032418304 "") (list ref_id)
+                              (list 369436175368192 (scan_boundary "equal" "ref_id" 0 0 true true "" false)) (list ref_id)
                               '("ref_id")
                             (lambda (src.ref_id) (equal? src.ref_id (outer 1 ref_id)))
                             '("val")

@@ -2840,8 +2840,6 @@ func (t *storageShard) EstimateFilteredRows(conditionCols []string, condition sc
 	t.ensureMainCount(false)
 	ccols := make([]ColumnStorage, len(conditionCols))
 	conditionGetters := make([]mapArgGetter, len(conditionCols))
-	scratch := acquireScanAnalyzeScratch()
-	defer releaseScanAnalyzeScratch(scratch)
 	bounds, compiled := scanAccessFromScheme(accessSchema, accessValues, nil)
 	if !compiled {
 		panic("scan_selectivity_estimate received an invalid compiled access schema")

@@ -150,7 +150,7 @@ func canonicalColumnOrder(t *table, col string) (func(scm.Scmer, scm.Scmer) bool
 	return scm.OrderRelationLess(order), orderRelationMeta(order)
 }
 
-func boundaryOrder(t *table, boundary columnboundaries) (func(scm.Scmer, scm.Scmer) bool, string) {
+func boundaryOrder(t *table, boundary analyzedBoundary) (func(scm.Scmer, scm.Scmer) bool, string) {
 	if boundary.order != nil {
 		meta := boundary.orderMeta
 		if meta == "" {
@@ -194,7 +194,7 @@ func ascendingOrderMetaMatches(meta, collation string) bool {
 		meta[:len(collation)] == collation && meta[len(collation):] == ":asc"
 }
 
-func indexOrderMatchesBoundary(t *table, index *StorageIndex, column int, boundary columnboundaries) bool {
+func indexOrderMatchesBoundary(t *table, index *StorageIndex, column int, boundary analyzedBoundary) bool {
 	if column >= len(index.ColOrderMeta) {
 		return false
 	}

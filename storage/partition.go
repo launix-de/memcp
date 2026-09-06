@@ -200,20 +200,21 @@ func countRelevantShards(schema []shardDimension, access scanAccess, shards []*s
 		blockdim *= schema[i].NumPartitions
 	}
 	for boundaryIndex := 0; boundaryIndex < access.len(); boundaryIndex++ {
-		boundary := access.boundary(boundaryIndex)
-		if boundary.col != schema[0].Column {
+		if access.boundaryColumn(boundaryIndex) != schema[0].Column {
 			continue
 		}
+		lower := access.boundValue(boundaryIndex, false)
+		upper := access.boundValue(boundaryIndex, true)
 		minimum := 0
-		if !boundary.lower.IsNil() {
-			minimum = partitionForValue(schema[0], boundary.lower)
-			if !boundary.lowerInclusive && valueEqualsPivot(schema[0], minimum, boundary.lower) {
+		if !lower.IsNil() {
+			minimum = partitionForValue(schema[0], lower)
+			if !access.boundaryLowerInclusive(boundaryIndex) && valueEqualsPivot(schema[0], minimum, lower) {
 				minimum++
 			}
 		}
 		maximum := schema[0].NumPartitions - 1
-		if !boundary.upper.IsNil() {
-			maximum = partitionForValue(schema[0], boundary.upper)
+		if !upper.IsNil() {
+			maximum = partitionForValue(schema[0], upper)
 		}
 		for partition := minimum; partition <= maximum; partition++ {
 			countRelevantShards(schema[1:], access, shards[partition*blockdim:(partition+1)*blockdim], first, count)
@@ -334,20 +335,21 @@ func collectRelevantShardsIndex(schema []shardDimension, access scanAccess, shar
 	}
 
 	for boundaryIndex := 0; boundaryIndex < access.len(); boundaryIndex++ {
-		b := access.boundary(boundaryIndex)
-		if b.col == schema[0].Column {
+		if access.boundaryColumn(boundaryIndex) == schema[0].Column {
+			lower := access.boundValue(boundaryIndex, false)
+			upper := access.boundValue(boundaryIndex, true)
 			// iterate this axis over boundaries
 			min := 0
-			if !b.lower.IsNil() {
-				min = partitionForValue(schema[0], b.lower)
-				if !b.lowerInclusive && valueEqualsPivot(schema[0], min, b.lower) {
+			if !lower.IsNil() {
+				min = partitionForValue(schema[0], lower)
+				if !access.boundaryLowerInclusive(boundaryIndex) && valueEqualsPivot(schema[0], min, lower) {
 					min++
 				}
 			}
 
 			max := schema[0].NumPartitions - 1 // smaller than max
-			if !b.upper.IsNil() {
-				max = partitionForValue(schema[0], b.upper)
+			if !upper.IsNil() {
+				max = partitionForValue(schema[0], upper)
 			}
 
 			for i := min; i <= max; i++ {

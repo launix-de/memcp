@@ -315,9 +315,9 @@ func safeLogScan(schema, table string, ordered bool, filter, order, indexCols st
 	t.Insert(cols, [][]scm.Scmer{row}, nil, scm.NewNil(), false, nil)
 }
 
-// boundaryIndexCols returns a comma-separated list of column names from boundaries,
+// boundaryIndexCols returns a comma-separated list of column names from analyzed boundaries,
 // representing the columns used for index lookup in this scan.
-func boundaryIndexCols(b boundaries) string {
+func boundaryIndexCols(b analyzedBoundaries) string {
 	if len(b) == 0 {
 		return ""
 	}
@@ -340,7 +340,7 @@ func scanAccessIndexCols(access scanAccess) string {
 		if i > 0 {
 			sb.WriteByte(',')
 		}
-		sb.WriteString(access.boundary(i).col)
+		sb.WriteString(access.boundaryColumn(i))
 	}
 	return sb.String()
 }
@@ -363,16 +363,17 @@ func touchTempColumns(t *table, colSets ...[]string) {
 // not relied upon here.
 func (t *storageShard) ensureScanAccessColumns(access scanAccess, alreadyLocked bool, currentTx *TxContext) {
 	for i := 0; i < access.len(); i++ {
-		boundary := access.boundary(i)
-		if len(boundary.mapCols) > 0 {
-			for _, col := range boundary.mapCols {
+		mapCols, _ := access.boundaryMap(i)
+		if len(mapCols) > 0 {
+			for _, col := range mapCols {
 				t.getColumnStorageOrPanic(col, alreadyLocked, currentTx)
 			}
 			continue
 		}
-		if boundary.col == "" || boundary.col[0] == '$' {
+		column := access.boundaryColumn(i)
+		if column == "" || column[0] == '$' {
 			continue
 		}
-		t.getColumnStorageOrPanic(boundary.col, alreadyLocked, currentTx)
+		t.getColumnStorageOrPanic(column, alreadyLocked, currentTx)
 	}
 }

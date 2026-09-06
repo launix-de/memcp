@@ -402,7 +402,7 @@ func (s *scanOrderTableSpec) backingTable() *table {
 // extendBoundariesWithSortCols inserts sort columns before candidate matchers
 // when all existing filter boundaries are point lookups. The relation callback
 // is the complete ordering contract, including collation, direction and NULLs.
-func extendBoundariesWithSortCols(b boundaries, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer) (boundaries, bool) {
+func extendBoundariesWithSortCols(b analyzedBoundaries, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer) (analyzedBoundaries, bool) {
 	original := b
 	allEq := true
 	for _, bi := range b {
@@ -415,7 +415,7 @@ func extendBoundariesWithSortCols(b boundaries, sortcols []scm.Scmer, sortdirs [
 	if !allEq || !canAppendSortPrefix {
 		return b, false
 	}
-	insertSortedBoundary := func(bound columnboundaries) {
+	insertSortedBoundary := func(bound analyzedBoundary) {
 		at := len(b)
 		for i := range b {
 			if !b[i].matcher.IsSorted() {
@@ -423,7 +423,7 @@ func extendBoundariesWithSortCols(b boundaries, sortcols []scm.Scmer, sortdirs [
 				break
 			}
 		}
-		b = append(b, columnboundaries{})
+		b = append(b, analyzedBoundary{})
 		copy(b[at+1:], b[at:])
 		b[at] = bound
 	}
@@ -442,7 +442,7 @@ func extendBoundariesWithSortCols(b boundaries, sortcols []scm.Scmer, sortdirs [
 				}
 			}
 			if !already {
-				insertSortedBoundary(columnboundaries{col: col, matcher: RangeMatcher, lower: scm.NewNil(), upper: scm.NewNil(), order: sortdirs[i], orderMeta: orderMeta})
+				insertSortedBoundary(analyzedBoundary{col: col, matcher: RangeMatcher, lower: scm.NewNil(), upper: scm.NewNil(), order: sortdirs[i], orderMeta: orderMeta})
 			}
 			continue
 		}
@@ -485,7 +485,7 @@ func extendBoundariesWithSortCols(b boundaries, sortcols []scm.Scmer, sortdirs [
 			}
 		}
 		if !already {
-			insertSortedBoundary(columnboundaries{col: canon, matcher: RangeMatcher, lower: scm.NewNil(), upper: scm.NewNil(), order: sortdirs[i], orderMeta: orderMeta, mapCols: mc, mapFn: mf})
+			insertSortedBoundary(analyzedBoundary{col: canon, matcher: RangeMatcher, lower: scm.NewNil(), upper: scm.NewNil(), order: sortdirs[i], orderMeta: orderMeta, mapCols: mc, mapFn: mf})
 		}
 	}
 	return b, len(sortcols) > 0
@@ -493,21 +493,20 @@ func extendBoundariesWithSortCols(b boundaries, sortcols []scm.Scmer, sortdirs [
 
 // extendScanAccessWithSortCols adds only the runtime ORDER BY portion to the
 // immutable compiled access view. Unlike extendBoundariesWithSortCols it never
-// copies the planner-provided filter boundaries into a runtime array.
+// copies the analyzer-produced filter boundaries into a runtime array.
 func extendScanAccessWithSortCols(access scanAccess, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer) (scanAccess, bool) {
 	for i := 0; i < access.len(); i++ {
-		if !boundaryIsPoint(access.boundary(i)) {
+		if !scanAccessBoundaryIsPoint(access, i) {
 			return access, false
 		}
 	}
 	if len(sortcols) == 0 || len(sortdirs) < len(sortcols) {
 		return access, false
 	}
-	inserted := make(boundaries, 0, len(sortcols))
+	inserted := make(analyzedBoundaries, 0, len(sortcols))
 	hasSorted := func(column string) bool {
 		for i := 0; i < access.len(); i++ {
-			boundary := access.boundary(i)
-			if boundary.col == column && boundary.matcher.IsSorted() {
+			if access.boundaryColumn(i) == column && access.boundaryAnalyzer(i).IsSorted() {
 				return true
 			}
 		}
@@ -526,7 +525,7 @@ func extendScanAccessWithSortCols(access scanAccess, sortcols []scm.Scmer, sortd
 		if sortcol.IsString() {
 			column := sortcol.String()
 			if !hasSorted(column) {
-				inserted = append(inserted, columnboundaries{col: column, matcher: RangeMatcher,
+				inserted = append(inserted, analyzedBoundary{col: column, matcher: RangeMatcher,
 					lower: scm.NewNil(), upper: scm.NewNil(), order: sortdirs[i], orderMeta: orderMeta})
 			}
 			continue
@@ -552,7 +551,7 @@ func extendScanAccessWithSortCols(access scanAccess, sortcols []scm.Scmer, sortd
 			return access, false
 		}
 		if !hasSorted(canonical) {
-			inserted = append(inserted, columnboundaries{col: canonical, matcher: RangeMatcher,
+			inserted = append(inserted, analyzedBoundary{col: canonical, matcher: RangeMatcher,
 				lower: scm.NewNil(), upper: scm.NewNil(), order: sortdirs[i], orderMeta: orderMeta,
 				mapCols: mapCols, mapFn: mapFn})
 		}
@@ -560,7 +559,7 @@ func extendScanAccessWithSortCols(access scanAccess, sortcols []scm.Scmer, sortd
 	compiledCount := access.compiledCount
 	runtime := access.ensureRuntime()
 	runtime.insertAt = compiledCount
-	runtime.inserted = inserted
+	runtime.inserted = scanAccessSegmentFromAnalyzed(inserted)
 	return access, true
 }
 
@@ -570,19 +569,18 @@ func indexCoversBoundaryOrder(index *StorageIndex, active bool, bounds scanAcces
 	}
 	orderCols := 0
 	for i := 0; i < bounds.len(); i++ {
-		boundary := bounds.boundary(i)
-		if boundary.order == nil || boundaryIsPoint(boundary) {
+		order, orderMeta := bounds.boundaryOrder(i)
+		if order == nil || scanAccessBoundaryIsPoint(bounds, i) {
 			continue
 		}
 		orderCols++
 		if i >= effectiveCols || i >= len(index.Cols) || i >= len(index.ColOrder) {
 			return false
 		}
-		orderMeta := boundary.orderMeta
 		if orderMeta == "" {
-			orderMeta = orderRelationMeta(boundary.order)
+			orderMeta = orderRelationMeta(order)
 		}
-		if index.Cols[i] != boundary.col || i >= len(index.ColOrderMeta) || index.ColOrderMeta[i] != orderMeta {
+		if index.Cols[i] != bounds.boundaryColumn(i) || i >= len(index.ColOrderMeta) || index.ColOrderMeta[i] != orderMeta {
 			return false
 		}
 	}
@@ -614,8 +612,7 @@ func orderedIndexUsageWeight(rows, kept int) float64 {
 // build weight above.
 func orderedScanIndexUsageWeight(bounds scanAccess, rows, kept int) float64 {
 	for i := 0; i < bounds.len(); i++ {
-		bound := bounds.boundary(i)
-		if !boundaryIsUnboundedOrder(bound) {
+		if !scanAccessBoundaryIsUnboundedOrder(bounds, i) {
 			return 1
 		}
 	}
@@ -679,14 +676,14 @@ func recSetHooksCoverCondition(bounds scanAccess, backingTable *table, condition
 	covered := 0
 	indexBounds := newScanIndexBounds(bounds)
 	for i := 0; i < indexBounds.len() && i < bounds.len(); i++ {
-		bound := bounds.boundary(i)
-		if !matcherKindEqual(bound.matcher, RecSetMatcher) {
+		if !matcherKindEqual(bounds.boundaryAnalyzer(i), RecSetMatcher) {
 			continue
 		}
-		if !bound.lower.IsCustom(TagRecSet) {
+		lower := bounds.boundValue(i, false)
+		if !lower.IsCustom(TagRecSet) {
 			return false
 		}
-		set := RecSetFromScmer(bound.lower)
+		set := RecSetFromScmer(lower)
 		if set == nil || set.table != backingTable {
 			return false
 		}
@@ -767,12 +764,12 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 		bounds = bounds.useScratch(scratch)
 		bounds, _ = extendScanAccessWithSortCols(bounds, spec.sortcols, sortdirs)
 		runtime := bounds.ensureRuntime()
-		runtime.suffix = appendRecSetBoundary(runtime.suffix, spec.recset)
+		runtime.extra = scanAccessSegmentFromAnalyzed(appendRecSetBoundary(nil, spec.recset))
 		if Settings.ScanDebugging {
 			dbg := fmt.Sprintf("[SCAN_ORDER_MULTI] %s.%s", t.schema.Name, t.Name)
 			for i := 0; i < bounds.len(); i++ {
-				b := bounds.boundary(i)
-				dbg += fmt.Sprintf(" %s:[%v..%v]", b.col, b.lower, b.upper)
+				dbg += fmt.Sprintf(" %s:[%v..%v]", bounds.boundaryColumn(i),
+					bounds.boundValue(i, false), bounds.boundValue(i, true))
 			}
 			indexBounds := newScanIndexBounds(bounds)
 			dbg += fmt.Sprintf(" lower-count=%d upper=%v", indexBounds.len(), indexBounds.upperLast())
@@ -780,8 +777,7 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 		}
 
 		for i := 0; i < bounds.len(); i++ {
-			b := bounds.boundary(i)
-			t.AddPartitioningScore([]string{b.col})
+			t.AddPartitioningScore([]string{bounds.boundaryColumn(i)})
 		}
 		analyzeNs := time.Since(analyzeStart).Nanoseconds()
 		stats[ti].access = bounds
@@ -1188,8 +1184,6 @@ func (t *table) scan_order(currentTx *TxContext, accessSchema scm.Scmer, accessV
 func (t *table) scanOrderFirst(currentTx *TxContext, accessSchema scm.Scmer, accessValues []scm.Scmer, conditionCols []string, condition scm.Scmer, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, notFoundValue scm.Scmer) scm.Scmer {
 	ss := SessionStateFromTx(currentTx)
 	querySeq := querySeqFromTx(currentTx)
-	scratch := acquireScanAnalyzeScratch()
-	defer releaseScanAnalyzeScratch(scratch)
 	bounds, compiled := scanAccessFromScheme(accessSchema, accessValues, nil)
 	if !compiled {
 		panic("scan_order received an invalid compiled access schema")
@@ -1197,7 +1191,6 @@ func (t *table) scanOrderFirst(currentTx *TxContext, accessSchema scm.Scmer, acc
 	if bounds.impossible() {
 		return notFoundValue
 	}
-	bounds = bounds.useScratch(scratch)
 
 	var mu sync.Mutex
 	var foundShard *storageShard
@@ -1293,19 +1286,19 @@ func streamOrBreak(mapper *ShardMapReducer, acc scm.Scmer, recids []uint32) (res
 	return
 }
 
-func (t *storageShard) scan_order(boundaries scanAccess, conditionCols []string, condition scm.Scmer, acceptCols []string, accept scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, currentTx *TxContext, ss *scm.SessionState) (result *shardqueue) {
+func (t *storageShard) scan_order(access scanAccess, conditionCols []string, condition scm.Scmer, acceptCols []string, accept scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, currentTx *TxContext, ss *scm.SessionState) (result *shardqueue) {
 	result = new(shardqueue)
 	result.shard = t
 	t.ensureLoaded()
 	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
-	t.ensureScanAccessColumns(boundaries, skipShardReadLock, currentTx)
+	t.ensureScanAccessColumns(access, skipShardReadLock, currentTx)
 	if ss == nil {
 		ss = SessionStateFromTx(currentTx)
 	}
-	recsetBoundaryCoversCondition := recSetHooksCoverCondition(boundaries, t.t, conditionCols, condition)
+	recsetBoundaryCoversCondition := recSetHooksCoverCondition(access, t.t, conditionCols, condition)
 	conditionProgram := scm.PrepareSerialProc(condition)
 	conditionAlwaysTrue := scanConditionAlwaysTrue(&conditionProgram, len(conditionCols)) ||
-		scanAccessProvesCondition(conditionCols, condition, boundaries)
+		scanAccessProvesCondition(conditionCols, condition, access)
 	var acceptProgram *scm.SerialProc
 	if !accept.IsNil() {
 		prepared := scm.PrepareSerialProc(accept)
@@ -1447,7 +1440,7 @@ func (t *storageShard) scan_order(boundaries scanAccess, conditionCols []string,
 		result.universe = visibleUpper
 
 		// iterate over items (indexed)
-		// TODO(memcp): iterateIndexSorted(boundaries, sortcols) to emit tuples in ORDER BY sequence.
+		// TODO(memcp): iterateIndexSorted(access, sortcols) to emit tuples in ORDER BY sequence.
 		buf, pooledFullBuf, pooledPointBuf := acquireScanIDBuffer(defaultScanBufferSize)
 		defer releaseScanIDBuffer(pooledFullBuf, pooledPointBuf)
 		resultCap := 1024
@@ -1459,7 +1452,7 @@ func (t *storageShard) scan_order(boundaries scanAccess, conditionCols []string,
 		}
 		result.items = make([]uint32, resultCap)
 		resultN := 0
-		usageWeight := orderedScanIndexUsageWeight(boundaries, int(visibleUpper), limit)
+		usageWeight := orderedScanIndexUsageWeight(access, int(visibleUpper), limit)
 		// Reused across batches: survived/mainIds scratch lists and one value
 		// buffer per non-getter condition column, so a batch's main-storage rows
 		// are fetched with one GetValueMulti call per column instead of one
@@ -1468,7 +1461,6 @@ func (t *storageShard) scan_order(boundaries scanAccess, conditionCols []string,
 		colBufs := make([][]scm.Scmer, len(conditionCols))
 		acceptColBufs := make([][]scm.Scmer, len(acceptCols))
 		boundaryCoveredLimit := acceptProgram == nil && conditionAlwaysTrue
-		access := boundaries
 		indexBounds := newScanIndexBounds(access)
 		t.iterateIndexOrdered(currentTx, access, maxInsertIndex, buf, usageWeight, limit, boundaryCoveredLimit, func(index *StorageIndex, active bool) {
 			if len(sortcols) > 0 {

@@ -44,7 +44,7 @@ test_cases:
           '("source_id")
           (lambda (source_id)
             (scan nil (table "memcp-tests" "lookup_invalidation_source")
-              '(369436175368192 "equal" "id" 15032418304 "") (list source_id)
+              (list 369436175368192 (scan_boundary "equal" "id" 0 0 true true "" false)) (list source_id)
               '("id") (lambda (id) (equal? id (outer 1 source_id)))
               '("val") (lambda (acc val) val)
               0 (lambda (old value) value) false)))

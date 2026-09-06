@@ -64,7 +64,7 @@ func (m *likeMatcher) Analyze(ctx IndexAnalyzeContext, node scm.Scmer) (IndexBou
 		prefix := pattern[:wildcard]
 		upper := []byte(prefix)
 		upper[len(upper)-1]++
-		return columnboundaries{
+		return analyzedBoundary{
 			col: col, matcher: RangeMatcher, lower: scm.NewString(prefix), upper: scm.NewString(string(upper)),
 			lowerInclusive: true, upperInclusive: false,
 		}, true

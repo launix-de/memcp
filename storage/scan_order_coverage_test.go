@@ -28,7 +28,7 @@ func TestExtendBoundariesRejectsPartiallyCoveredOrder(t *testing.T) {
 		scm.NewSymbol("foreign_id"),
 		scm.NewSymbol("$tx"),
 	}))
-	original := boundaries{{
+	original := analyzedBoundaries{{
 		col: "tenant_id", matcher: EqualMatcher,
 		lower: scm.NewInt(7), lowerInclusive: true,
 		upper: scm.NewInt(7), upperInclusive: true,

@@ -765,7 +765,7 @@ func Init(en scm.Env) {
 	scm.CustomStringer[TagRecSet] = func(ptr unsafe.Pointer) string {
 		return (*recSet)(ptr).String()
 	}
-	scm.CustomStringer[TagScanBoundary] = scanBoundaryString
+	registerScanBoundaryFormats()
 
 	scm.Declare(&en, &scm.Declaration{
 		Name: "scan_boundary",

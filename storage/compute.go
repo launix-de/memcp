@@ -607,11 +607,11 @@ func (t *table) invalidateORCFromSortKey(colName string, sortKeys []scm.Scmer) {
 	}
 	partCount := analyzeOrcPartition(col)
 
-	// Build boundaries for index-accelerated lookup.
+	// Build analyzer results for index-accelerated lookup.
 	// Partition columns → equality points; order columns → range from mutation key.
-	var bounds boundaries
+	var bounds analyzedBoundaries
 	for i := 0; i < partCount && i < nCols; i++ {
-		bounds = append(bounds, columnboundaries{
+		bounds = append(bounds, analyzedBoundary{
 			col: col.OrcSortCols[i], matcher: EqualMatcher, lower: sortKeys[i], lowerInclusive: true,
 			upper: sortKeys[i], upperInclusive: true,
 		})
@@ -621,12 +621,12 @@ func (t *table) invalidateORCFromSortKey(colName string, sortKeys []scm.Scmer) {
 	for i := partCount; i < nCols; i++ {
 		desc := i < len(col.OrcSortDirs) && col.OrcSortDirs[i]
 		if desc {
-			bounds = append(bounds, columnboundaries{
+			bounds = append(bounds, analyzedBoundary{
 				col: col.OrcSortCols[i], matcher: RangeMatcher, lower: scm.NewNil(), lowerInclusive: false,
 				upper: sortKeys[i], upperInclusive: true,
 			})
 		} else {
-			bounds = append(bounds, columnboundaries{
+			bounds = append(bounds, analyzedBoundary{
 				col: col.OrcSortCols[i], matcher: RangeMatcher, lower: sortKeys[i], lowerInclusive: true,
 				upper: scm.NewNil(), upperInclusive: false,
 			})
