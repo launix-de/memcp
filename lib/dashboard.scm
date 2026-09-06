@@ -87,6 +87,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		"mem_available" (s "mem_available")
 		"mem_total" (s "mem_total")
 		"shard" (list "current_memory" (s "shard_memory") "persisted_budget" (s "persisted_budget") "memory_budget" (s "shard_budget") "persisted_memory" (s "persisted_memory") "cache_entry_count" (s "cache_entry_count") "cache_entry_size" (s "cache_entry_size"))
+		"maintenance" (list "current_memory" (s "maintenance_memory") "peak_memory" (s "maintenance_memory_peak") "memory_budget" (s "maintenance_memory_budget"))
 		"process_memory" (s "process_memory")
 		"connections" (active_connections)
 		"max_connections" (max_connections)
