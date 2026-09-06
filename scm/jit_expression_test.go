@@ -601,7 +601,7 @@ func requireNoDynamicJITCalls(t *testing.T, compiled Scmer) {
 	}
 }
 
-func TestJITGlobalCallableLookupWritesBranchResultDirectly(t *testing.T) {
+func TestJITGlobalCallableLookupPreservesBranchResult(t *testing.T) {
 	compiled := compileJITExpressionTestProc(t, `(lambda (add)
 		(if add + -))`)
 
