@@ -359,6 +359,44 @@ func TestJITRegisterHomesRetainMoreValuableOuterPlan(t *testing.T) {
 	ctx.ReleaseRegisterHomes(outer)
 }
 
+func TestJITRegisterBoundaryCanReleaseAndRestorePlannedHomes(t *testing.T) {
+	code := make([]byte, 256)
+	start := unsafe.Pointer(&code[0])
+	all := uint64(1<<uint(RegR13) | 1<<uint(RegR15) | 1<<uint(RegRCX))
+	ctx := &JITContext{
+		Start: start, Ptr: start, End: unsafe.Add(start, len(code)-1),
+		AllRegs: all, FreeRegs: all, FrameReg: RegRBP, StackReg: RegRSP,
+		RegisterBank: JITRegisterBank{Registers: [16]Reg{RegR13, RegR15, RegRCX}, Count: 3},
+	}
+	homes := ctx.AllocRegisterHomes(JITRegisterPlan{Slots: [16]JITRegisterSlot{{Color: 0, Width: 1, Cost: 10}}, Count: 1})
+	home := homes.Registers[0]
+	value := JITValueDesc{Loc: LocReg, Type: tagInt, Reg: home}
+	ctx.BindReg(home, &value)
+
+	boundary := ctx.PreserveRegisters(JITRegisterBoundaryOptions{ReleaseHomes: true})
+	if ctx.FreeRegs&all != all {
+		t.Fatalf("nested boundary free registers = %#x, want %#x", ctx.FreeRegs&all, all)
+	}
+	if ctx.ProtectedRegs&all != 0 || ctx.RegisterHomeID[home] != 0 {
+		t.Fatalf("released home remains protected/registered: protected=%#x homeID=%d", ctx.ProtectedRegs, ctx.RegisterHomeID[home])
+	}
+
+	// Model arbitrary nested emission taking the old physical home. Restore must
+	// discard this ownership and recover the outer value in the exact register.
+	nested := ctx.AllocReg()
+	nestedValue := JITValueDesc{Loc: LocReg, Type: tagInt, Reg: nested}
+	ctx.BindReg(nested, &nestedValue)
+	boundary.Restore(ctx)
+	ctx.SyncDesc(&value)
+	if value.Loc != LocReg || value.Reg != home {
+		t.Fatalf("restored outer value = %#v, want register %d", value, home)
+	}
+	if ctx.RegisterHomeID[home] == 0 || ctx.ProtectedRegs&(1<<uint(home)) == 0 {
+		t.Fatalf("restored home metadata missing: protected=%#x homeID=%d", ctx.ProtectedRegs, ctx.RegisterHomeID[home])
+	}
+	ctx.ReleaseRegisterHomes(homes)
+}
+
 func TestJITRegisterHomesSkipFoldedTagLane(t *testing.T) {
 	all := uint64(1<<uint(RegR13) | 1<<uint(RegR15))
 	ctx := &JITContext{

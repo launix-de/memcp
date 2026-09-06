@@ -22,10 +22,19 @@ import (
 	"golang.org/x/tools/go/ssa"
 )
 
-// staticRegisterPlan contains architecture-independent colors. Physical
-// registers and their constraints belong to the runtime architecture backend.
-// Colors are ordered by estimated avoided loop traffic, allowing a backend to
-// keep the most valuable subset when it has fewer persistent registers.
+// staticRegisterPlan is the offline half of the two-stage allocator.
+//
+// jitgen has the complete Go SSA graph, so it performs the expensive work here:
+// liveness, interference, coloring and an approximate reload-cost ordering. It
+// deliberately emits no architecture register names. During one-pass JIT
+// emission JITContext only maps the most profitable colors onto the currently
+// free registers supplied by the architecture backend; it never reconstructs
+// SSA or an interference graph.
+//
+// A color denotes a reusable physical home, not one permanent SSA owner. Values
+// with disjoint live ranges share colors. widthByValue records how many adjacent
+// logical lanes a value requires; dynamic type folding may later omit lanes
+// without invalidating this conservative offline plan.
 type staticRegisterPlan struct {
 	colorByValue map[string]int
 	widthByValue map[string]int
@@ -122,6 +131,11 @@ func planRegisterClass(fn *ssa.Function, nodes []registerPlanNode) ([]int, int) 
 	for i := range nodes {
 		index[nodes[i].value] = i
 	}
+	// Phi operands are edge uses, not ordinary reads in their destination BB.
+	// registerPlanLiveness models that distinction; the reverse instruction walk
+	// below then adds interference at every point within a block. Both are needed:
+	// block-only liveness would incorrectly coalesce short-lived values inside a
+	// loop, while instruction-only liveness would miss values crossing an edge.
 	liveIn, liveOut := registerPlanLiveness(fn, index)
 	for blockIndex, block := range fn.Blocks {
 		addRegisterPlanClique(nodes, liveIn[blockIndex])
@@ -197,6 +211,10 @@ func mapRegisterClassColors(plan *staticRegisterPlan, nodes []registerPlanNode, 
 }
 
 func registerPlanValueWeight(value *ssa.Phi, width int) int {
+	// This is a ranking heuristic, not a correctness input. Every read and loop
+	// backedge approximates traffic avoided by keeping the value resident. The
+	// runtime allocator may retain only a prefix of the resulting ordering when
+	// an outer emitter already occupies part of the architecture register bank.
 	weight := width
 	if refs := value.Referrers(); refs != nil {
 		for _, ref := range *refs {

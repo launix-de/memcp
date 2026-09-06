@@ -3716,8 +3716,7 @@ func init() {
 				}
 				var d3 JITValueDesc
 				if phiHomeOK2 {
-					d3 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r0}
-					ctx.BindReg(r0, &d3)
+					d3 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r0, ID: 0}
 				} else {
 					d3 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(0)}
 				}
@@ -3777,8 +3776,7 @@ func init() {
 						ctx.ResolveFixups()
 					}
 					if phiHomeOK2 {
-						d3 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r0}
-						ctx.BindReg(r0, &d3)
+						d3 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r0, ID: 0}
 					} else {
 						d3 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(0)}
 					}
@@ -3891,8 +3889,7 @@ func init() {
 						ctx.ResolveFixups()
 					}
 					if phiHomeOK2 {
-						d3 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r0}
-						ctx.BindReg(r0, &d3)
+						d3 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r0, ID: 0}
 					} else {
 						d3 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(0)}
 					}
@@ -3933,8 +3930,7 @@ func init() {
 						ctx.ResolveFixups()
 					}
 					if phiHomeOK2 {
-						d3 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r0}
-						ctx.BindReg(r0, &d3)
+						d3 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r0, ID: 0}
 					} else {
 						d3 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(0)}
 					}
@@ -4009,8 +4005,7 @@ func init() {
 						ctx.ResolveFixups()
 					}
 					if phiHomeOK2 {
-						d3 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r0}
-						ctx.BindReg(r0, &d3)
+						d3 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r0, ID: 0}
 					} else {
 						d3 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(0)}
 					}
@@ -4040,6 +4035,9 @@ func init() {
 					}
 					if !ps.General && len(ps.PhiValues) > 0 && ps.PhiValues[0].Loc != LocNone {
 						d3 = ps.PhiValues[0]
+					}
+					if phiHomeOK2 && d3.Loc == LocReg {
+						ctx.BindReg(r0, &d3)
 					}
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d3)
@@ -4238,8 +4236,7 @@ func init() {
 						ctx.ResolveFixups()
 					}
 					if phiHomeOK2 {
-						d3 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r0}
-						ctx.BindReg(r0, &d3)
+						d3 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r0, ID: 0}
 					} else {
 						d3 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(0)}
 					}
@@ -4445,8 +4442,7 @@ func init() {
 						ctx.ResolveFixups()
 					}
 					if phiHomeOK2 {
-						d3 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r0}
-						ctx.BindReg(r0, &d3)
+						d3 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r0, ID: 0}
 					} else {
 						d3 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(0)}
 					}
