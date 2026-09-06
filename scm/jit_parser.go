@@ -85,12 +85,14 @@ type jitParserRule struct {
 }
 
 type jitParserProgram struct {
-	rules         []jitParserRule
-	parserRule    map[*ScmParser]int
-	memoRuleIndex []int32
-	memoRuleCount int
-	inlineActions bool
-	pool          sync.Pool
+	rules          []jitParserRule
+	parserRule     map[*ScmParser]int
+	memoRuleIndex  []int32
+	memoRuleCount  int
+	ruleFirstBytes []firstByteSet
+	ruleNullable   []bool
+	inlineActions  bool
+	pool           sync.Pool
 }
 
 type jitParserBuilder struct {
@@ -153,6 +155,7 @@ func jitBuildParserPrograms(parsers []*ScmParser) *jitParserProgram {
 		builder.addScmParser(parser)
 	}
 	program.prepareMemoLayout()
+	program.computeFirstBytes()
 	program.pool.New = func() any { return new(jitParserState) }
 	return program
 }
@@ -165,6 +168,7 @@ func jitBuildParserTemplateProgram(template *JITParserTemplate) (*jitParserProgr
 	}
 	rule := builder.addTemplate(template, -1)
 	program.prepareMemoLayout()
+	program.computeFirstBytes()
 	program.pool.New = func() any { return new(jitParserState) }
 	return program, rule
 }
