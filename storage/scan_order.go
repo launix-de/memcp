@@ -283,7 +283,11 @@ func compileScanOrderAccess(schemaExpr, valuesExpr, sortColsExpr, sortDirsExpr s
 	if meta.projections > 0 {
 		result = append(result, schema[boundariesEnd:]...)
 	}
-	return scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), scm.NewSlice(result)}), scanAccessValuesExpr(newValues), true
+	valuesResult := valuesExpr
+	if len(newValues) != len(values) {
+		valuesResult = scanAccessValuesExpr(newValues)
+	}
+	return scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), scm.NewSlice(result)}), valuesResult, true
 }
 
 func compileScanOrderAccessList(schemasExpr, valuesExpr, sortColsExpr, sortDirsExpr scm.Scmer) (scm.Scmer, scm.Scmer, bool) {

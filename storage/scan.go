@@ -265,7 +265,7 @@ func scanAccessValuesExpr(values []scm.Scmer) scm.Scmer {
 	staticValues := make([]scm.Scmer, len(values))
 	for i, value := range values {
 		value = value.WithoutSourceInfo()
-		if value.IsSymbol() {
+		if value.IsSymbol() || value.IsNthLocalVar() {
 			return scm.NewSlice(append([]scm.Scmer{scm.NewSymbol("list")}, values...))
 		}
 		if value.IsSlice() {

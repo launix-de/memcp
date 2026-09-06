@@ -153,6 +153,11 @@ func TestScanAccessValuesExprCachesConstantsAndBindsDynamicValues(t *testing.T) 
 	if !ok || len(dynamicItems) != 2 || !scanSymbolIs(dynamicItems[0], "list") {
 		t.Fatalf("dynamic access values = %s, want runtime list", scm.String(dynamic))
 	}
+	local := scanAccessValuesExpr([]scm.Scmer{scm.NewNthLocalVar(1)})
+	localItems, ok := scmerSlice(local)
+	if !ok || len(localItems) != 2 || !scanSymbolIs(localItems[0], "list") {
+		t.Fatalf("optimized local access values = %s, want runtime list", scm.String(local))
+	}
 }
 
 func TestCompileScanAccessCarriesComputedFormulaRuntimeConstants(t *testing.T) {

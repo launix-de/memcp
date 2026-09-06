@@ -148,6 +148,29 @@ func TestCompileScanOrderAccessPreservesPointPrefixAndRuntimeValues(t *testing.T
 	}
 }
 
+func TestCompileScanOrderAccessPreservesOptimizedLocalValuesExpression(t *testing.T) {
+	directionValue, _ := integerOrder(true)
+	point := newScanBoundarySpec("tenant", EqualMatcher, 0, 0, true, true,
+		"", false, -1, nil, nil, "", false)
+	schema := scm.NewSlice([]scm.Scmer{
+		newScanAccessHeader(1, scanAccessConsumerCoveredScan, 0, -1), point,
+	})
+	values := scm.NewSlice([]scm.Scmer{scm.NewSymbol("list"), scm.NewNthLocalVar(1)})
+
+	_, valuesExpr, compiled := compileScanOrderAccess(
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), schema}), values,
+		scm.NewSlice([]scm.Scmer{scm.NewString("rank")}),
+		scm.NewSlice([]scm.Scmer{directionValue}),
+	)
+	if !compiled {
+		t.Fatal("point-prefix ORDER BY did not compile into scan access")
+	}
+	if valuesExpr != values {
+		t.Fatalf("compiled ORDER BY rewrote optimized local values: got %s, want %s",
+			scm.String(valuesExpr), scm.String(values))
+	}
+}
+
 func TestCompileScanOrderAccessStoresComputedOrderMapper(t *testing.T) {
 	Init(scm.Globalenv)
 	directionValue, _ := integerOrder(false)
