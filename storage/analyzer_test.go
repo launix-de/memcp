@@ -459,6 +459,29 @@ func TestCompileScanAccessPreservesSQLEqualityCollation(t *testing.T) {
 	}
 }
 
+func TestComputedScanAccessReusesCanonicalBinaryIndexOrder(t *testing.T) {
+	const computedColumn = ".(json_value doc \"$.tenant\" \"UNSIGNED\")"
+	schema := scm.NewSlice([]scm.Scmer{
+		newScanAccessHeader(1, scanAccessConsumerCoveredScan, 1, -1),
+		newScanBoundarySpec(computedColumn, EqualMatcher, 0, 0, true, true,
+			"utf8mb4_general_ci", true, 1, []string{"doc"}, nil, "", false),
+		scm.NewString("doc"),
+	})
+	values := []scm.Scmer{
+		scm.NewInt(17),
+		scm.NewSlice([]scm.Scmer{scm.NewString(computedColumn), scm.NewNil()}),
+	}
+	access, valid := scanAccessFromScheme(schema, values, nil)
+	if !valid {
+		t.Fatal("computed scan access did not compile")
+	}
+	table := &table{Name: "documents", Columns: []*column{{Name: "doc", Collation: "utf8mb4_general_ci"}}}
+	index := &StorageIndex{Cols: []string{computedColumn}, ColOrderMeta: []string{"bin:asc"}}
+	if !indexOrderMatchesScanAccess(table, index, 0, access) {
+		t.Fatal("computed access did not reuse its canonical binary index order")
+	}
+}
+
 func TestSortedBoundariesCoverCondition(t *testing.T) {
 	body := scm.NewSlice([]scm.Scmer{
 		scm.NewSymbol("equal??"),

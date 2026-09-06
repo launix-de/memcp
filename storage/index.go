@@ -239,6 +239,7 @@ func indexOrderMatchesScanAccess(t *table, index *StorageIndex, column int, acce
 	if collation != "" && strings.HasPrefix(t.Name, ".grp:") && (lower.IsString() || lower.IsSymbol()) {
 		return ascendingOrderMetaMatches(meta, collation)
 	}
+	collation = "bin"
 	for _, definition := range t.Columns {
 		if definition.Name == access.boundaryColumn(column) {
 			if definition.Collation != "" {
