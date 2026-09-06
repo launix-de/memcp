@@ -164,6 +164,7 @@ func (s *StoragePrefix) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 		lbl5 := ctx.ReserveLabel()
 		ctx.EmitJump(d3.Condition, lbl4)
 		ctx.EmitJmp(lbl5)
+		ctx.FreeDesc(&d2)
 		snap8 := d1
 		snap9 := d2
 		snap10 := d3
@@ -631,6 +632,7 @@ func (s *StoragePrefix) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 		lbl5 := ctx.ReserveLabel()
 		ctx.EmitJump(d3.Condition, lbl4)
 		ctx.EmitJmp(lbl5)
+		ctx.FreeDesc(&d2)
 		snap8 := d1
 		snap9 := d2
 		snap10 := d3
@@ -1403,6 +1405,7 @@ func (s *StorageInt) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 		lbl18 := ctx.ReserveLabel()
 		ctx.EmitJump(d10.Condition, lbl17)
 		ctx.EmitJmp(lbl18)
+		ctx.FreeDesc(&d9)
 		snap15 := d1
 		snap16 := d2
 		snap17 := d3
@@ -1794,6 +1797,7 @@ func (s *StorageInt) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 		lbl20 := ctx.ReserveLabel()
 		ctx.EmitJump(d51.Condition, lbl19)
 		ctx.EmitJmp(lbl20)
+		ctx.FreeDesc(&d50)
 		snap55 := d1
 		snap56 := d2
 		snap57 := d3
@@ -2678,6 +2682,7 @@ func (s *StorageInt) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 		lbl22 := ctx.ReserveLabel()
 		ctx.EmitJump(d115.Condition, lbl21)
 		ctx.EmitJmp(lbl22)
+		ctx.FreeDesc(&d114)
 		snap122 := d1
 		snap123 := d2
 		snap124 := d3
@@ -3384,6 +3389,7 @@ func (s *StorageInt) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 		lbl24 := ctx.ReserveLabel()
 		ctx.EmitJump(d213.Condition, lbl23)
 		ctx.EmitJmp(lbl24)
+		ctx.FreeDesc(&d212)
 		snap218 := d1
 		snap219 := d2
 		snap220 := d3
@@ -6156,6 +6162,7 @@ func (s *StorageInt) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 		lbl28 := ctx.ReserveLabel()
 		ctx.EmitJump(d480.Condition, lbl27)
 		ctx.EmitJmp(lbl28)
+		ctx.FreeDesc(&d479)
 		snap487 := d1
 		snap488 := d2
 		snap489 := d3
@@ -7716,6 +7723,7 @@ func (s *StorageInt) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 		lbl30 := ctx.ReserveLabel()
 		ctx.EmitJump(d658.Condition, lbl29)
 		ctx.EmitJmp(lbl30)
+		ctx.FreeDesc(&d657)
 		snap661 := d1
 		snap662 := d2
 		snap663 := d3
@@ -9823,6 +9831,7 @@ func (s *StorageInt) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 		lbl20 := ctx.ReserveLabel()
 		ctx.EmitJump(d12.Condition, lbl19)
 		ctx.EmitJmp(lbl20)
+		ctx.FreeDesc(&d11)
 		snap17 := d1
 		snap18 := d2
 		snap19 := d3
@@ -10269,6 +10278,7 @@ func (s *StorageInt) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 		lbl22 := ctx.ReserveLabel()
 		ctx.EmitJump(d58.Condition, lbl21)
 		ctx.EmitJmp(lbl22)
+		ctx.FreeDesc(&d57)
 		snap62 := d1
 		snap63 := d2
 		snap64 := d3
@@ -11216,6 +11226,7 @@ func (s *StorageInt) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 		lbl24 := ctx.ReserveLabel()
 		ctx.EmitJump(d132.Condition, lbl23)
 		ctx.EmitJmp(lbl24)
+		ctx.FreeDesc(&d131)
 		snap141 := d1
 		snap142 := d2
 		snap143 := d3
@@ -13363,6 +13374,7 @@ func (s *StorageInt) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 		lbl28 := ctx.ReserveLabel()
 		ctx.EmitJump(d372.Condition, lbl27)
 		ctx.EmitJmp(lbl28)
+		ctx.FreeDesc(&d371)
 		snap379 := d1
 		snap380 := d2
 		snap381 := d3
@@ -14413,6 +14425,7 @@ func (s *StorageInt) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 		lbl30 := ctx.ReserveLabel()
 		ctx.EmitJump(d527.Condition, lbl29)
 		ctx.EmitJmp(lbl30)
+		ctx.FreeDesc(&d526)
 		snap534 := d1
 		snap535 := d2
 		snap536 := d3
@@ -18083,6 +18096,7 @@ func (s *StorageInt) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 		lbl34 := ctx.ReserveLabel()
 		ctx.EmitJump(d920.Condition, lbl33)
 		ctx.EmitJmp(lbl34)
+		ctx.FreeDesc(&d919)
 		snap935 := d1
 		snap936 := d2
 		snap937 := d3
@@ -20438,6 +20452,7 @@ func (s *StorageInt) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 		lbl36 := ctx.ReserveLabel()
 		ctx.EmitJump(d1200.Condition, lbl35)
 		ctx.EmitJmp(lbl36)
+		ctx.FreeDesc(&d1199)
 		snap1203 := d1
 		snap1204 := d2
 		snap1205 := d3
@@ -22340,6 +22355,7 @@ func (s *StorageFloat) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, t
 		lbl11 := ctx.ReserveLabel()
 		ctx.EmitJump(d5.Condition, lbl10)
 		ctx.EmitJmp(lbl11)
+		ctx.FreeDesc(&d4)
 		snap10 := d1
 		snap11 := d2
 		snap12 := d3
@@ -23007,6 +23023,7 @@ func (s *StorageFloat) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, t
 		lbl13 := ctx.ReserveLabel()
 		ctx.EmitJump(d49.Condition, lbl12)
 		ctx.EmitJmp(lbl13)
+		ctx.FreeDesc(&d48)
 		snap54 := d1
 		snap55 := d2
 		snap56 := d3
@@ -24719,6 +24736,7 @@ func (s *StorageFloat) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target,
 		lbl11 := ctx.ReserveLabel()
 		ctx.EmitJump(d5.Condition, lbl10)
 		ctx.EmitJmp(lbl11)
+		ctx.FreeDesc(&d4)
 		snap10 := d1
 		snap11 := d2
 		snap12 := d3
@@ -25243,6 +25261,7 @@ func (s *StorageFloat) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target,
 		lbl13 := ctx.ReserveLabel()
 		ctx.EmitJump(d44.Condition, lbl12)
 		ctx.EmitJmp(lbl13)
+		ctx.FreeDesc(&d43)
 		snap49 := d1
 		snap50 := d2
 		snap51 := d3
@@ -26828,6 +26847,7 @@ func (s *StorageString) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 		lbl10 := ctx.ReserveLabel()
 		ctx.EmitJump(d4.Condition, lbl9)
 		ctx.EmitJmp(lbl10)
+		ctx.FreeDesc(&d3)
 		snap9 := d1
 		snap10 := d2
 		snap11 := d3
@@ -27111,6 +27131,7 @@ func (s *StorageString) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 		lbl12 := ctx.ReserveLabel()
 		ctx.EmitJump(d33.Condition, lbl11)
 		ctx.EmitJmp(lbl12)
+		ctx.FreeDesc(&d32)
 		snap37 := d1
 		snap38 := d2
 		snap39 := d3
@@ -27618,6 +27639,7 @@ func (s *StorageString) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 		lbl14 := ctx.ReserveLabel()
 		ctx.EmitJump(d75.Condition, lbl13)
 		ctx.EmitJmp(lbl14)
+		ctx.FreeDesc(&d74)
 		snap79 := d1
 		snap80 := d2
 		snap81 := d3
@@ -28434,6 +28456,7 @@ func (s *StorageString) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 		lbl7 := ctx.ReserveLabel()
 		ctx.EmitJump(d3.Condition, lbl6)
 		ctx.EmitJmp(lbl7)
+		ctx.FreeDesc(&d2)
 		snap8 := d1
 		snap9 := d2
 		snap10 := d3
@@ -28718,6 +28741,7 @@ func (s *StorageString) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 		lbl9 := ctx.ReserveLabel()
 		ctx.EmitJump(d31.Condition, lbl8)
 		ctx.EmitJmp(lbl9)
+		ctx.FreeDesc(&d30)
 		snap35 := d1
 		snap36 := d2
 		snap37 := d3
@@ -29301,6 +29325,7 @@ func (s *StorageEnum) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, ta
 		lbl8 := ctx.ReserveLabel()
 		ctx.EmitJump(d5.Condition, lbl7)
 		ctx.EmitJmp(lbl8)
+		ctx.FreeDesc(&d4)
 		snap10 := d1
 		snap11 := d2
 		snap12 := d3
@@ -29762,6 +29787,7 @@ func (s *StorageEnum) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, ta
 		lbl10 := ctx.ReserveLabel()
 		ctx.EmitJump(d42.Condition, lbl9)
 		ctx.EmitJmp(lbl10)
+		ctx.FreeDesc(&d41)
 		snap47 := d1
 		snap48 := d2
 		snap49 := d3
@@ -30523,6 +30549,7 @@ func (s *StorageEnum) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, 
 		lbl8 := ctx.ReserveLabel()
 		ctx.EmitJump(d5.Condition, lbl7)
 		ctx.EmitJmp(lbl8)
+		ctx.FreeDesc(&d4)
 		snap10 := d1
 		snap11 := d2
 		snap12 := d3
@@ -31024,6 +31051,7 @@ func (s *StorageEnum) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, 
 		lbl10 := ctx.ReserveLabel()
 		ctx.EmitJump(d44.Condition, lbl9)
 		ctx.EmitJmp(lbl10)
+		ctx.FreeDesc(&d43)
 		snap49 := d1
 		snap50 := d2
 		snap51 := d3
@@ -32148,6 +32176,7 @@ func (s *StorageSparse) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 		lbl20 := ctx.ReserveLabel()
 		ctx.EmitJump(d15.Condition, lbl19)
 		ctx.EmitJmp(lbl20)
+		ctx.FreeDesc(&d14)
 		snap20 := d1
 		snap21 := d2
 		snap22 := d3
@@ -32629,6 +32658,7 @@ func (s *StorageSparse) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 		lbl22 := ctx.ReserveLabel()
 		ctx.EmitJump(d66.Condition, lbl21)
 		ctx.EmitJmp(lbl22)
+		ctx.FreeDesc(&d65)
 		snap70 := d1
 		snap71 := d2
 		snap72 := d3
@@ -33526,6 +33556,7 @@ func (s *StorageSparse) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 		lbl24 := ctx.ReserveLabel()
 		ctx.EmitJump(d139.Condition, lbl23)
 		ctx.EmitJmp(lbl24)
+		ctx.FreeDesc(&d138)
 		snap147 := d1
 		snap148 := d2
 		snap149 := d3
@@ -37022,6 +37053,7 @@ func (s *StorageSparse) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 		lbl30 := ctx.ReserveLabel()
 		ctx.EmitJump(d581.Condition, lbl29)
 		ctx.EmitJmp(lbl30)
+		ctx.FreeDesc(&d580)
 		snap589 := d1
 		snap590 := d2
 		snap591 := d3
@@ -38332,6 +38364,7 @@ func (s *StorageSparse) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 		lbl32 := ctx.ReserveLabel()
 		ctx.EmitJump(d774.Condition, lbl31)
 		ctx.EmitJmp(lbl32)
+		ctx.FreeDesc(&d773)
 		snap784 := d1
 		snap785 := d2
 		snap786 := d3
@@ -43818,6 +43851,7 @@ func (s *StorageSparse) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 		lbl35 := ctx.ReserveLabel()
 		ctx.EmitJump(d1057.Condition, lbl34)
 		ctx.EmitJmp(lbl35)
+		ctx.FreeDesc(&d1056)
 		snap1060 := d1
 		snap1061 := d2
 		snap1062 := d3
@@ -45710,6 +45744,7 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 		lbl30 := ctx.ReserveLabel()
 		ctx.EmitJump(d19.Condition, lbl29)
 		ctx.EmitJmp(lbl30)
+		ctx.FreeDesc(&d18)
 		snap24 := d1
 		snap25 := d2
 		snap26 := d3
@@ -46282,6 +46317,7 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 		lbl32 := ctx.ReserveLabel()
 		ctx.EmitJump(d79.Condition, lbl31)
 		ctx.EmitJmp(lbl32)
+		ctx.FreeDesc(&d78)
 		snap83 := d1
 		snap84 := d2
 		snap85 := d3
@@ -47080,6 +47116,7 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 		lbl34 := ctx.ReserveLabel()
 		ctx.EmitJump(d149.Condition, lbl33)
 		ctx.EmitJmp(lbl34)
+		ctx.FreeDesc(&d148)
 		snap154 := d1
 		snap155 := d2
 		snap156 := d3
@@ -47674,6 +47711,7 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 		lbl36 := ctx.ReserveLabel()
 		ctx.EmitJump(d236.Condition, lbl35)
 		ctx.EmitJmp(lbl36)
+		ctx.FreeDesc(&d235)
 		snap239 := d1
 		snap240 := d2
 		snap241 := d3
@@ -50269,6 +50307,7 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 		lbl40 := ctx.ReserveLabel()
 		ctx.EmitJump(d457.Condition, lbl39)
 		ctx.EmitJmp(lbl40)
+		ctx.FreeDesc(&d456)
 		snap462 := d1
 		snap463 := d2
 		snap464 := d3
@@ -52162,6 +52201,7 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 		lbl42 := ctx.ReserveLabel()
 		ctx.EmitJump(d628.Condition, lbl41)
 		ctx.EmitJmp(lbl42)
+		ctx.FreeDesc(&d627)
 		snap636 := d1
 		snap637 := d2
 		snap638 := d3
@@ -57771,6 +57811,7 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 		lbl48 := ctx.ReserveLabel()
 		ctx.EmitJump(d1369.Condition, lbl47)
 		ctx.EmitJmp(lbl48)
+		ctx.FreeDesc(&d1368)
 		snap1377 := d1
 		snap1378 := d2
 		snap1379 := d3
@@ -59684,6 +59725,7 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 		lbl50 := ctx.ReserveLabel()
 		ctx.EmitJump(d1662.Condition, lbl49)
 		ctx.EmitJmp(lbl50)
+		ctx.FreeDesc(&d1661)
 		snap1672 := d1
 		snap1673 := d2
 		snap1674 := d3
@@ -66793,6 +66835,7 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 		lbl53 := ctx.ReserveLabel()
 		ctx.EmitJump(d2046.Condition, lbl52)
 		ctx.EmitJmp(lbl53)
+		ctx.FreeDesc(&d2045)
 		snap2049 := d1
 		snap2050 := d2
 		snap2051 := d3
@@ -68490,6 +68533,7 @@ func (s *StorageConst) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, t
 		lbl8 := ctx.ReserveLabel()
 		ctx.EmitJump(d5.Condition, lbl7)
 		ctx.EmitJmp(lbl8)
+		ctx.FreeDesc(&d4)
 		snap10 := d1
 		snap11 := d2
 		snap12 := d3
@@ -68942,6 +68986,7 @@ func (s *StorageConst) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, t
 		lbl10 := ctx.ReserveLabel()
 		ctx.EmitJump(d41.Condition, lbl9)
 		ctx.EmitJmp(lbl10)
+		ctx.FreeDesc(&d40)
 		snap46 := d1
 		snap47 := d2
 		snap48 := d3
@@ -69623,6 +69668,7 @@ func (s *StorageConst) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target,
 		lbl8 := ctx.ReserveLabel()
 		ctx.EmitJump(d5.Condition, lbl7)
 		ctx.EmitJmp(lbl8)
+		ctx.FreeDesc(&d4)
 		snap10 := d1
 		snap11 := d2
 		snap12 := d3
@@ -70114,6 +70160,7 @@ func (s *StorageConst) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target,
 		lbl10 := ctx.ReserveLabel()
 		ctx.EmitJump(d43.Condition, lbl9)
 		ctx.EmitJmp(lbl10)
+		ctx.FreeDesc(&d42)
 		snap48 := d1
 		snap49 := d2
 		snap50 := d3
@@ -70876,6 +70923,7 @@ func (s *StorageSCMER) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, t
 		lbl10 := ctx.ReserveLabel()
 		ctx.EmitJump(d5.Condition, lbl9)
 		ctx.EmitJmp(lbl10)
+		ctx.FreeDesc(&d4)
 		snap10 := d1
 		snap11 := d2
 		snap12 := d3
@@ -71177,6 +71225,7 @@ func (s *StorageSCMER) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, t
 		lbl12 := ctx.ReserveLabel()
 		ctx.EmitJump(d36.Condition, lbl11)
 		ctx.EmitJmp(lbl12)
+		ctx.FreeDesc(&d35)
 		snap40 := d1
 		snap41 := d2
 		snap42 := d3
@@ -72200,6 +72249,7 @@ func (s *StorageSCMER) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, t
 		lbl14 := ctx.ReserveLabel()
 		ctx.EmitJump(d99.Condition, lbl13)
 		ctx.EmitJmp(lbl14)
+		ctx.FreeDesc(&d98)
 		snap104 := d1
 		snap105 := d2
 		snap106 := d3
@@ -73206,6 +73256,7 @@ func (s *StorageSCMER) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target,
 		lbl8 := ctx.ReserveLabel()
 		ctx.EmitJump(d5.Condition, lbl7)
 		ctx.EmitJmp(lbl8)
+		ctx.FreeDesc(&d4)
 		snap10 := d1
 		snap11 := d2
 		snap12 := d3
@@ -73730,6 +73781,7 @@ func (s *StorageSCMER) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target,
 		lbl10 := ctx.ReserveLabel()
 		ctx.EmitJump(d44.Condition, lbl9)
 		ctx.EmitJmp(lbl10)
+		ctx.FreeDesc(&d43)
 		snap49 := d1
 		snap50 := d2
 		snap51 := d3
@@ -74404,6 +74456,7 @@ func (s *StorageDecimal) JITEmitGetValueRange(ctx *scm.JITContext, recid, count,
 		lbl5 := ctx.ReserveLabel()
 		ctx.EmitJump(d3.Condition, lbl4)
 		ctx.EmitJmp(lbl5)
+		ctx.FreeDesc(&d2)
 		snap8 := d1
 		snap9 := d2
 		snap10 := d3
@@ -74813,6 +74866,7 @@ func (s *StorageDecimal) JITEmitGetValueMulti(ctx *scm.JITContext, recids, targe
 		lbl5 := ctx.ReserveLabel()
 		ctx.EmitJump(d3.Condition, lbl4)
 		ctx.EmitJmp(lbl5)
+		ctx.FreeDesc(&d2)
 		snap8 := d1
 		snap9 := d2
 		snap10 := d3
@@ -75630,6 +75684,7 @@ func (s *StorageSeq) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 		lbl15 := ctx.ReserveLabel()
 		ctx.EmitJump(d16.Condition, lbl14)
 		ctx.EmitJmp(lbl15)
+		ctx.FreeDesc(&d15)
 		snap21 := d1
 		snap22 := d2
 		snap23 := d3
@@ -76129,6 +76184,7 @@ func (s *StorageSeq) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 		lbl17 := ctx.ReserveLabel()
 		ctx.EmitJump(d69.Condition, lbl16)
 		ctx.EmitJmp(lbl17)
+		ctx.FreeDesc(&d68)
 		snap73 := d1
 		snap74 := d2
 		snap75 := d3
@@ -77356,6 +77412,7 @@ func (s *StorageSeq) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 		lbl19 := ctx.ReserveLabel()
 		ctx.EmitJump(d158.Condition, lbl18)
 		ctx.EmitJmp(lbl19)
+		ctx.FreeDesc(&d157)
 		snap168 := d1
 		snap169 := d2
 		snap170 := d3
@@ -78416,6 +78473,7 @@ func (s *StorageSeq) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 		lbl21 := ctx.ReserveLabel()
 		ctx.EmitJump(d300.Condition, lbl20)
 		ctx.EmitJmp(lbl21)
+		ctx.FreeDesc(&d299)
 		snap314 := d1
 		snap315 := d2
 		snap316 := d3
@@ -84302,6 +84360,7 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 		lbl29 := ctx.ReserveLabel()
 		ctx.EmitJump(d21.Condition, lbl28)
 		ctx.EmitJmp(lbl29)
+		ctx.FreeDesc(&d20)
 		snap26 := d1
 		snap27 := d2
 		snap28 := d3
@@ -84910,6 +84969,7 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 		lbl31 := ctx.ReserveLabel()
 		ctx.EmitJump(d85.Condition, lbl30)
 		ctx.EmitJmp(lbl31)
+		ctx.FreeDesc(&d84)
 		snap89 := d1
 		snap90 := d2
 		snap91 := d3
@@ -85752,6 +85812,7 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 		lbl33 := ctx.ReserveLabel()
 		ctx.EmitJump(d159.Condition, lbl32)
 		ctx.EmitJmp(lbl33)
+		ctx.FreeDesc(&d158)
 		snap164 := d1
 		snap165 := d2
 		snap166 := d3
@@ -86372,6 +86433,7 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 		lbl35 := ctx.ReserveLabel()
 		ctx.EmitJump(d250.Condition, lbl34)
 		ctx.EmitJmp(lbl35)
+		ctx.FreeDesc(&d249)
 		snap253 := d1
 		snap254 := d2
 		snap255 := d3
@@ -89437,6 +89499,7 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 		lbl39 := ctx.ReserveLabel()
 		ctx.EmitJump(d497.Condition, lbl38)
 		ctx.EmitJmp(lbl39)
+		ctx.FreeDesc(&d496)
 		snap508 := d1
 		snap509 := d2
 		snap510 := d3
@@ -94331,6 +94394,7 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 		lbl43 := ctx.ReserveLabel()
 		ctx.EmitJump(d1015.Condition, lbl42)
 		ctx.EmitJmp(lbl43)
+		ctx.FreeDesc(&d1014)
 		snap1024 := d1
 		snap1025 := d2
 		snap1026 := d3
@@ -98734,6 +98798,7 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 		lbl45 := ctx.ReserveLabel()
 		ctx.EmitJump(d1350.Condition, lbl44)
 		ctx.EmitJmp(lbl45)
+		ctx.FreeDesc(&d1349)
 		snap1355 := d1
 		snap1356 := d2
 		snap1357 := d3
@@ -105861,6 +105926,7 @@ func (s *OverlayBlob) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, ta
 		lbl8 := ctx.ReserveLabel()
 		ctx.EmitJump(d5.Condition, lbl7)
 		ctx.EmitJmp(lbl8)
+		ctx.FreeDesc(&d4)
 		snap10 := d1
 		snap11 := d2
 		snap12 := d3
@@ -106349,6 +106415,7 @@ func (s *OverlayBlob) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, ta
 		lbl10 := ctx.ReserveLabel()
 		ctx.EmitJump(d42.Condition, lbl9)
 		ctx.EmitJmp(lbl10)
+		ctx.FreeDesc(&d41)
 		snap47 := d1
 		snap48 := d2
 		snap49 := d3
@@ -107065,6 +107132,7 @@ func (s *OverlayBlob) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, 
 		lbl8 := ctx.ReserveLabel()
 		ctx.EmitJump(d5.Condition, lbl7)
 		ctx.EmitJmp(lbl8)
+		ctx.FreeDesc(&d4)
 		snap10 := d1
 		snap11 := d2
 		snap12 := d3
@@ -107590,6 +107658,7 @@ func (s *OverlayBlob) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, 
 		lbl10 := ctx.ReserveLabel()
 		ctx.EmitJump(d44.Condition, lbl9)
 		ctx.EmitJmp(lbl10)
+		ctx.FreeDesc(&d43)
 		snap49 := d1
 		snap50 := d2
 		snap51 := d3

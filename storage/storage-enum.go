@@ -926,6 +926,7 @@ func (s *StorageEnum) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result 
 		lbl12 := ctx.ReserveLabel()
 		ctx.EmitJump(d8.Condition, lbl11)
 		ctx.EmitJmp(lbl12)
+		ctx.FreeDesc(&d7)
 		snap11 := d1
 		snap12 := d2
 		snap13 := d3
@@ -1291,6 +1292,7 @@ func (s *StorageEnum) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result 
 		lbl14 := ctx.ReserveLabel()
 		ctx.EmitJump(d38.Condition, lbl13)
 		ctx.EmitJmp(lbl14)
+		ctx.FreeDesc(&d37)
 		snap41 := d1
 		snap42 := d2
 		snap43 := d3
@@ -1680,6 +1682,7 @@ func (s *StorageEnum) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result 
 		lbl16 := ctx.ReserveLabel()
 		ctx.EmitJump(d80.Condition, lbl15)
 		ctx.EmitJmp(lbl16)
+		ctx.FreeDesc(&d79)
 		snap84 := d1
 		snap85 := d2
 		snap86 := d3
@@ -2702,6 +2705,7 @@ func (s *StorageEnum) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result 
 		lbl18 := ctx.ReserveLabel()
 		ctx.EmitJump(d154.Condition, lbl17)
 		ctx.EmitJmp(lbl18)
+		ctx.FreeDesc(&d153)
 		snap160 := d1
 		snap161 := d2
 		snap162 := d3

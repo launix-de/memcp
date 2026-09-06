@@ -1510,6 +1510,7 @@ func (s *StorageInt) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result s
 		lbl9 := ctx.ReserveLabel()
 		ctx.EmitJump(d89.Condition, lbl8)
 		ctx.EmitJmp(lbl9)
+		ctx.FreeDesc(&d88)
 		snap92 := d0
 		snap93 := d1
 		snap94 := d2

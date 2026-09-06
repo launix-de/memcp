@@ -1551,6 +1551,7 @@ func (s *StoragePrefix) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resul
 		lbl15 := ctx.ReserveLabel()
 		ctx.EmitJump(d83.Condition, lbl14)
 		ctx.EmitJmp(lbl15)
+		ctx.FreeDesc(&d82)
 		snap86 := d0
 		snap87 := d1
 		snap88 := d2
@@ -2583,6 +2584,7 @@ func (s *StoragePrefix) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resul
 		lbl17 := ctx.ReserveLabel()
 		ctx.EmitJump(d184.Condition, lbl16)
 		ctx.EmitJmp(lbl17)
+		ctx.FreeDesc(&d183)
 		snap187 := d0
 		snap188 := d1
 		snap189 := d2

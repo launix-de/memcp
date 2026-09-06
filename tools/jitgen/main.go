@@ -2940,6 +2940,9 @@ func (g *codeGen) emitIfClosure(v *ssa.If) {
 		g.emit("ctx.EmitJump(CondNotEqual, %s)", thenEdgeLbl)
 	}
 	g.emit("ctx.EmitJmp(%s)", elseEdgeLbl)
+	if cond.marker == "_flags" {
+		g.emit("ctx.FreeDesc(&%s)", cond.goVar)
+	}
 	// Edge helpers are mutually exclusive machine-code paths. Emitting the
 	// first helper may spill a live descriptor while preparing its phi moves;
 	// that edge-local spill does not dominate the other helper. Restore the
@@ -4617,7 +4620,8 @@ func (g *codeGen) useOperand(name string) {
 	if !ok || !gv.isDesc || gv.goVar == "" {
 		return
 	}
-	// Don't free markers or special values
+	// Don't free markers or special values. The If emitters release their
+	// short-lived LocFlags carrier immediately after emitting the Jcc.
 	if gv.marker != "" {
 		return
 	}
@@ -8113,6 +8117,9 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			g.emit("\tctx.EmitJump(CondNotEqual, %s)", thenEdgeLbl)
 		}
 		g.emit("\tctx.EmitJmp(%s)", elseEdgeLbl)
+		if cond.marker == "_flags" {
+			g.emit("\tctx.FreeDesc(&%s)", cond.goVar)
+		}
 		// Dynamic condition: both helper edges are reachable.
 		g.emit("\tctx.MarkLabel(%s)", thenEdgeLbl)
 		g.emitEdgePhiMoves(thenBB, 0)
