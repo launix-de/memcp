@@ -1256,10 +1256,14 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 				(match current '(next triples)
 					(begin
 						(define head (concat "_:list_" (uuid)))
-						(list head (merge (list
+						(define with_rest (cons
+							(list head "http://www.w3.org/1999/02/22-rdf-syntax-ns#rest" next)
+							triples))
+						(define with_item (reduce
 							(rdf_expand_ttl_object head "http://www.w3.org/1999/02/22-rdf-syntax-ns#first" item)
-							(list (list head "http://www.w3.org/1999/02/22-rdf-syntax-ns#rest" next))
-							triples))))))
+							(lambda (acc triple) (cons triple acc))
+							with_rest))
+						(list head with_item))))
 				(list "http://www.w3.org/1999/02/22-rdf-syntax-ns#nil" '())))
 			(match state '(head triples)
 				(cons (list subject pred head) triples))))
