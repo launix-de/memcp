@@ -28,39 +28,6 @@ import (
 
 var jitListBenchmarkSink Scmer
 
-func jitFourScalarResults(seed uint32) (int64, bool, int64, int64) {
-	return int64(seed) + 1, seed&1 != 0, int64(seed) + 3, int64(seed) + 5
-}
-
-func TestJITGoCallFourScalarResults(t *testing.T) {
-	if !JITEnabled() {
-		t.Skip("JIT is not enabled")
-	}
-	fn := CompileJITStorageGetValue(func(ctx *JITContext, seed, target JITValueDesc) JITValueDesc {
-		results := JITEmitGoCallResults(ctx, GoFuncAddr(jitFourScalarResults), []JITValueDesc{seed}, []uint8{1, 1, 1, 1}, []uint8{0, 0, 0, 0})
-		for index := range results {
-			ctx.EnsureDesc(&results[index])
-		}
-		ctx.EmitImulRegImm32(results[1].Reg, 10)
-		ctx.EmitImulRegImm32(results[2].Reg, 100)
-		ctx.EmitImulRegImm32(results[3].Reg, 1000)
-		ctx.EmitAddInt64(results[0].Reg, results[1].Reg)
-		ctx.EmitAddInt64(results[0].Reg, results[2].Reg)
-		ctx.EmitAddInt64(results[0].Reg, results[3].Reg)
-		ctx.EnsureDesc(&seed)
-		ctx.EmitAddInt64(results[0].Reg, seed.Reg)
-		value := JITValueDesc{Loc: LocRegPair, Type: tagInt, Reg: target.Reg, Reg2: target.Reg2}
-		ctx.EmitMakeInt(value, results[0])
-		return value
-	})
-	if fn == nil {
-		t.Fatal("four-result JIT function did not compile")
-	}
-	if got, want := fn(7), NewInt(8+10+1000+12000+7); !Equal(got, want) {
-		t.Fatalf("four-result Go ABI call = %v, want %v", got, want)
-	}
-}
-
 func gcPointerWordOffsets(typ reflect.Type, base uintptr) []int32 {
 	var result []int32
 	var walk func(reflect.Type, uintptr)

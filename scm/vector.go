@@ -3075,24 +3075,22 @@ func init_vector() {
 						d180 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: scratch}
 						ctx.BindReg(scratch, &d180)
 					} else if d5.Loc == LocImm {
-						scratch := ctx.AllocRegExcept(d4.Reg)
-						ctx.EmitMovRegReg(scratch, d4.Reg)
 						_, yBits := d5.Imm.RawWords()
 						ctx.EmitMovRegImm64(RegR11, yBits)
-						ctx.EmitMulFloat64(scratch, RegR11)
-						d180 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: scratch}
-						ctx.BindReg(scratch, &d180)
+						ctx.EmitMulFloat64(d4.Reg, RegR11)
+						d180 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: d4.Reg}
+						ctx.BindReg(d4.Reg, &d180)
 					} else {
-						r11 := ctx.AllocRegExcept(d4.Reg, d5.Reg)
-						ctx.EmitMovRegReg(r11, d4.Reg)
-						ctx.EmitMulFloat64(r11, d5.Reg)
-						d180 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r11}
-						ctx.BindReg(r11, &d180)
+						ctx.EmitMulFloat64(d4.Reg, d5.Reg)
+						d180 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: d4.Reg}
+						ctx.BindReg(d4.Reg, &d180)
 					}
 					if d180.Loc == LocReg && d4.Loc == LocReg && d180.Reg == d4.Reg {
 						ctx.TransferReg(d4.Reg)
 						d4.Loc = LocNone
 					}
+					ctx.FreeDesc(&d4)
+					ctx.FreeDesc(&d5)
 					ctx.EnsureDesc(&d180)
 					var d181 JITValueDesc
 					if d180.Loc == LocImm {
@@ -3129,19 +3127,15 @@ func init_vector() {
 						d183 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: scratch}
 						ctx.BindReg(scratch, &d183)
 					} else if d181.Loc == LocImm {
-						scratch := ctx.AllocRegExcept(d3.Reg)
-						ctx.EmitMovRegReg(scratch, d3.Reg)
 						_, yBits := d181.Imm.RawWords()
 						ctx.EmitMovRegImm64(RegR11, yBits)
-						ctx.EmitDivFloat64(scratch, RegR11)
-						d183 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: scratch}
-						ctx.BindReg(scratch, &d183)
+						ctx.EmitDivFloat64(d3.Reg, RegR11)
+						d183 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: d3.Reg}
+						ctx.BindReg(d3.Reg, &d183)
 					} else {
-						r12 := ctx.AllocRegExcept(d3.Reg, d181.Reg)
-						ctx.EmitMovRegReg(r12, d3.Reg)
-						ctx.EmitDivFloat64(r12, d181.Reg)
-						d183 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r12}
-						ctx.BindReg(r12, &d183)
+						ctx.EmitDivFloat64(d3.Reg, d181.Reg)
+						d183 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: d3.Reg}
+						ctx.BindReg(d3.Reg, &d183)
 					}
 					if d183.Loc == LocReg && d3.Loc == LocReg && d183.Reg == d3.Reg {
 						ctx.TransferReg(d3.Reg)
@@ -3150,6 +3144,7 @@ func init_vector() {
 					ctx.EnsureDesc(&d183)
 					ctx.EmitStoreToStack(d183, int32(bbs[4].PhiBase)+int32(0))
 					ctx.StabilizeDescForControlFlow(&d183)
+					ctx.FreeDesc(&d3)
 					ctx.FreeDesc(&d181)
 					if ps.General {
 					}
@@ -3487,30 +3482,31 @@ func init_vector() {
 					if d6.Loc == LocImm && d185.Loc == LocImm {
 						d186 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d6.Imm.Int() < d185.Imm.Int())}
 					} else if d185.Loc == LocImm {
-						r13 := ctx.AllocRegExcept(d6.Reg)
+						r11 := ctx.AllocReg()
 						if d185.Imm.Int() >= -2147483648 && d185.Imm.Int() <= 2147483647 {
 							ctx.EmitCmpRegImm32(d6.Reg, int32(d185.Imm.Int()))
 						} else {
 							ctx.EmitMovRegImm64(RegR11, uint64(d185.Imm.Int()))
 							ctx.EmitCmpInt64(d6.Reg, RegR11)
 						}
+						ctx.EmitSetcc(r11, CondSignedLess)
+						d186 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r11}
+						ctx.BindReg(r11, &d186)
+					} else if d6.Loc == LocImm {
+						r12 := ctx.AllocReg()
+						ctx.EmitMovRegImm64(RegR11, uint64(d6.Imm.Int()))
+						ctx.EmitCmpInt64(RegR11, d185.Reg)
+						ctx.EmitSetcc(r12, CondSignedLess)
+						d186 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r12}
+						ctx.BindReg(r12, &d186)
+					} else {
+						r13 := ctx.AllocReg()
+						ctx.EmitCmpInt64(d6.Reg, d185.Reg)
 						ctx.EmitSetcc(r13, CondSignedLess)
 						d186 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r13}
 						ctx.BindReg(r13, &d186)
-					} else if d6.Loc == LocImm {
-						r14 := ctx.AllocReg()
-						ctx.EmitMovRegImm64(RegR11, uint64(d6.Imm.Int()))
-						ctx.EmitCmpInt64(RegR11, d185.Reg)
-						ctx.EmitSetcc(r14, CondSignedLess)
-						d186 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r14}
-						ctx.BindReg(r14, &d186)
-					} else {
-						r15 := ctx.AllocRegExcept(d6.Reg)
-						ctx.EmitCmpInt64(d6.Reg, d185.Reg)
-						ctx.EmitSetcc(r15, CondSignedLess)
-						d186 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r15}
-						ctx.BindReg(r15, &d186)
 					}
+					ctx.FreeDesc(&d6)
 					ctx.FreeDesc(&d185)
 					d187 = d186
 					ctx.EnsureDesc(&d187)
@@ -4275,29 +4271,29 @@ func init_vector() {
 					if d8.Loc == LocImm && d266.Loc == LocImm {
 						d267 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d8.Imm.Int() < d266.Imm.Int())}
 					} else if d266.Loc == LocImm {
-						r16 := ctx.AllocRegExcept(d8.Reg)
+						r14 := ctx.AllocRegExcept(d8.Reg)
 						if d266.Imm.Int() >= -2147483648 && d266.Imm.Int() <= 2147483647 {
 							ctx.EmitCmpRegImm32(d8.Reg, int32(d266.Imm.Int()))
 						} else {
 							ctx.EmitMovRegImm64(RegR11, uint64(d266.Imm.Int()))
 							ctx.EmitCmpInt64(d8.Reg, RegR11)
 						}
+						ctx.EmitSetcc(r14, CondSignedLess)
+						d267 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r14}
+						ctx.BindReg(r14, &d267)
+					} else if d8.Loc == LocImm {
+						r15 := ctx.AllocReg()
+						ctx.EmitMovRegImm64(RegR11, uint64(d8.Imm.Int()))
+						ctx.EmitCmpInt64(RegR11, d266.Reg)
+						ctx.EmitSetcc(r15, CondSignedLess)
+						d267 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r15}
+						ctx.BindReg(r15, &d267)
+					} else {
+						r16 := ctx.AllocRegExcept(d8.Reg)
+						ctx.EmitCmpInt64(d8.Reg, d266.Reg)
 						ctx.EmitSetcc(r16, CondSignedLess)
 						d267 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r16}
 						ctx.BindReg(r16, &d267)
-					} else if d8.Loc == LocImm {
-						r17 := ctx.AllocReg()
-						ctx.EmitMovRegImm64(RegR11, uint64(d8.Imm.Int()))
-						ctx.EmitCmpInt64(RegR11, d266.Reg)
-						ctx.EmitSetcc(r17, CondSignedLess)
-						d267 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r17}
-						ctx.BindReg(r17, &d267)
-					} else {
-						r18 := ctx.AllocRegExcept(d8.Reg)
-						ctx.EmitCmpInt64(d8.Reg, d266.Reg)
-						ctx.EmitSetcc(r18, CondSignedLess)
-						d267 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r18}
-						ctx.BindReg(r18, &d267)
 					}
 					ctx.FreeDesc(&d266)
 					d268 = d267
@@ -5087,12 +5083,12 @@ func init_vector() {
 					ctx.EnsureDesc(&d8)
 					d355 = ctx.EmitSliceElementAddress(&d10, &d8, 16)
 					ctx.EnsureDesc(&d355)
-					r19 := ctx.AllocRegExcept(d355.Reg)
-					ctx.EmitMovRegMem(r19, d355.Reg, 8)
+					r17 := ctx.AllocRegExcept(d355.Reg)
+					ctx.EmitMovRegMem(r17, d355.Reg, 8)
 					ctx.EmitMovRegMem(d355.Reg, d355.Reg, 0)
-					d354 = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: d355.Reg, Reg2: r19}
+					d354 = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: d355.Reg, Reg2: r17}
 					ctx.BindReg(d355.Reg, &d354)
-					ctx.BindReg(r19, &d354)
+					ctx.BindReg(r17, &d354)
 					ctx.EnsureDesc(&d354)
 					d356 = d354
 					_ = d356
@@ -5129,12 +5125,12 @@ func init_vector() {
 					ctx.EnsureDesc(&d8)
 					d359 = ctx.EmitSliceElementAddress(&d12, &d8, 16)
 					ctx.EnsureDesc(&d359)
-					r20 := ctx.AllocRegExcept(d359.Reg)
-					ctx.EmitMovRegMem(r20, d359.Reg, 8)
+					r18 := ctx.AllocRegExcept(d359.Reg)
+					ctx.EmitMovRegMem(r18, d359.Reg, 8)
 					ctx.EmitMovRegMem(d359.Reg, d359.Reg, 0)
-					d358 = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: d359.Reg, Reg2: r20}
+					d358 = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: d359.Reg, Reg2: r18}
 					ctx.BindReg(d359.Reg, &d358)
-					ctx.BindReg(r20, &d358)
+					ctx.BindReg(r18, &d358)
 					ctx.EnsureDesc(&d358)
 					d360 = d358
 					_ = d360
@@ -5220,11 +5216,11 @@ func init_vector() {
 						d363 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: scratch}
 						ctx.BindReg(scratch, &d363)
 					} else {
-						r21 := ctx.AllocRegExcept(d7.Reg, d362.Reg)
-						ctx.EmitMovRegReg(r21, d7.Reg)
-						ctx.EmitAddFloat64(r21, d362.Reg)
-						d363 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r21}
-						ctx.BindReg(r21, &d363)
+						r19 := ctx.AllocRegExcept(d7.Reg, d362.Reg)
+						ctx.EmitMovRegReg(r19, d7.Reg)
+						ctx.EmitAddFloat64(r19, d362.Reg)
+						d363 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r19}
+						ctx.BindReg(r19, &d363)
 					}
 					if d363.Loc == LocReg && d7.Loc == LocReg && d363.Reg == d7.Reg {
 						ctx.TransferReg(d7.Reg)
@@ -5679,6 +5675,7 @@ func init_vector() {
 					ctx.EmitAndRegImm32(d369.Reg, 1)
 					d369.Type = tagBool
 					ctx.BindReg(d369.Reg, &d369)
+					ctx.FreeDesc(&d1)
 					d370 = d369
 					ctx.EnsureDesc(&d370)
 					if d370.Loc != LocImm && d370.Loc != LocReg {
@@ -6696,30 +6693,31 @@ func init_vector() {
 					if d8.Loc == LocImm && d478.Loc == LocImm {
 						d479 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d8.Imm.Int() < d478.Imm.Int())}
 					} else if d478.Loc == LocImm {
-						r22 := ctx.AllocRegExcept(d8.Reg)
+						r20 := ctx.AllocReg()
 						if d478.Imm.Int() >= -2147483648 && d478.Imm.Int() <= 2147483647 {
 							ctx.EmitCmpRegImm32(d8.Reg, int32(d478.Imm.Int()))
 						} else {
 							ctx.EmitMovRegImm64(RegR11, uint64(d478.Imm.Int()))
 							ctx.EmitCmpInt64(d8.Reg, RegR11)
 						}
+						ctx.EmitSetcc(r20, CondSignedLess)
+						d479 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r20}
+						ctx.BindReg(r20, &d479)
+					} else if d8.Loc == LocImm {
+						r21 := ctx.AllocReg()
+						ctx.EmitMovRegImm64(RegR11, uint64(d8.Imm.Int()))
+						ctx.EmitCmpInt64(RegR11, d478.Reg)
+						ctx.EmitSetcc(r21, CondSignedLess)
+						d479 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r21}
+						ctx.BindReg(r21, &d479)
+					} else {
+						r22 := ctx.AllocReg()
+						ctx.EmitCmpInt64(d8.Reg, d478.Reg)
 						ctx.EmitSetcc(r22, CondSignedLess)
 						d479 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r22}
 						ctx.BindReg(r22, &d479)
-					} else if d8.Loc == LocImm {
-						r23 := ctx.AllocReg()
-						ctx.EmitMovRegImm64(RegR11, uint64(d8.Imm.Int()))
-						ctx.EmitCmpInt64(RegR11, d478.Reg)
-						ctx.EmitSetcc(r23, CondSignedLess)
-						d479 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r23}
-						ctx.BindReg(r23, &d479)
-					} else {
-						r24 := ctx.AllocRegExcept(d8.Reg)
-						ctx.EmitCmpInt64(d8.Reg, d478.Reg)
-						ctx.EmitSetcc(r24, CondSignedLess)
-						d479 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r24}
-						ctx.BindReg(r24, &d479)
 					}
+					ctx.FreeDesc(&d8)
 					ctx.FreeDesc(&d478)
 					d480 = d479
 					ctx.EnsureDesc(&d480)

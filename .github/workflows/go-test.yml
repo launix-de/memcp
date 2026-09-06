@@ -87,12 +87,13 @@ jobs:
           set -euo pipefail
           bootstrap_goroot=$(go env GOROOT)
           (cd go-jit/src && GOROOT_BOOTSTRAP="$bootstrap_goroot" ./make.bash)
+          mv go-jit "$RUNNER_TEMP/go-jit"
 
       - name: Select patched Go compiler
         shell: bash
         run: |
-          printf '%s\n' "$GITHUB_WORKSPACE/go-jit/bin" >> "$GITHUB_PATH"
-          printf 'GOROOT=%s\n' "$GITHUB_WORKSPACE/go-jit" >> "$GITHUB_ENV"
+          printf '%s\n' "$RUNNER_TEMP/go-jit/bin" >> "$GITHUB_PATH"
+          printf 'GOROOT=%s\n' "$RUNNER_TEMP/go-jit" >> "$GITHUB_ENV"
           printf 'GOEXPERIMENT=jit\n' >> "$GITHUB_ENV"
 
       - name: Run Go tests with JIT enabled

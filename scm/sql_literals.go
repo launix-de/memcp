@@ -179,9 +179,28 @@ func declareSQLLiteralParameterizer() {
 					ctx.BindReg(result.Reg, &result)
 					ctx.BindReg(result.Reg2, &result)
 				}
-				d13 := JITPrepareScmerGoArg(ctx, d12)
-				ctx.EmitMovPairToResult(&d13, &result)
-				result.Type = d13.Type
+				ctx.SyncDesc(&d12)
+				if d12.Loc == LocRegPair || d12.Loc == LocStackPair || d12.Loc == LocInputPair {
+					ctx.EmitMovPairToResult(&d12, &result)
+					result.Type = d12.Type
+				} else {
+					switch d12.Type {
+					case tagBool:
+						ctx.EmitMakeBool(result, d12)
+						result.Type = tagBool
+					case tagInt:
+						ctx.EmitMakeInt(result, d12)
+						result.Type = tagInt
+					case tagFloat:
+						ctx.EmitMakeFloat(result, d12)
+						result.Type = tagFloat
+					case tagNil:
+						ctx.EmitMakeNil(result)
+						result.Type = tagNil
+					default:
+						panic("jit: single-block scalar return with unknown type")
+					}
+				}
 				return result
 				return result
 			},

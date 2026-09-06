@@ -1192,6 +1192,7 @@ func init_processlist() {
 						d38 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r3}
 						ctx.BindReg(r3, &d38)
 					}
+					ctx.FreeDesc(&d33)
 					d39 = d38
 					ctx.EnsureDesc(&d39)
 					if d39.Loc != LocImm && d39.Loc != LocReg {
@@ -1487,7 +1488,6 @@ func init_processlist() {
 					ctx.EnsureDesc(&d71)
 					ctx.EmitMovRegMem(d71.Reg, d71.Reg, 0)
 					d70 = d71
-					d70.Type = JITTypeUnknown
 					ctx.StabilizeDescForControlFlow(&d70)
 					if d70.Loc == LocRegPair || d70.Loc == LocStackPair || d70.Loc == LocRegTriple || d70.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
@@ -1794,6 +1794,7 @@ func init_processlist() {
 						return bbs[8].RenderPS(ps80)
 					}
 					return result
+					ctx.FreeDesc(&d1)
 					return result
 				}
 				bbs[5].RenderPS = func(ps PhiState) JITValueDesc {
@@ -4006,6 +4007,7 @@ func init_processlist() {
 						d34 = JITValueDesc{Loc: LocReg, Reg: r3}
 						ctx.BindReg(r3, &d34)
 					}
+					ctx.FreeDesc(&d13)
 					ctx.EnsureDesc(&d34)
 					ctx.EnsureDesc(&d34)
 					var d35 JITValueDesc

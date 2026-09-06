@@ -1634,9 +1634,28 @@ func init_sync() {
 					ctx.BindReg(result.Reg, &result)
 					ctx.BindReg(result.Reg2, &result)
 				}
-				d3 := JITPrepareScmerGoArg(ctx, d2)
-				ctx.EmitMovPairToResult(&d3, &result)
-				result.Type = d3.Type
+				ctx.SyncDesc(&d2)
+				if d2.Loc == LocRegPair || d2.Loc == LocStackPair || d2.Loc == LocInputPair {
+					ctx.EmitMovPairToResult(&d2, &result)
+					result.Type = d2.Type
+				} else {
+					switch d2.Type {
+					case tagBool:
+						ctx.EmitMakeBool(result, d2)
+						result.Type = tagBool
+					case tagInt:
+						ctx.EmitMakeInt(result, d2)
+						result.Type = tagInt
+					case tagFloat:
+						ctx.EmitMakeFloat(result, d2)
+						result.Type = tagFloat
+					case tagNil:
+						ctx.EmitMakeNil(result)
+						result.Type = tagNil
+					default:
+						panic("jit: single-block scalar return with unknown type")
+					}
+				}
 				return result
 				return result
 			},
@@ -2068,9 +2087,28 @@ func init_sync() {
 					ctx.BindReg(result.Reg, &result)
 					ctx.BindReg(result.Reg2, &result)
 				}
-				d25 := JITPrepareScmerGoArg(ctx, d24)
-				ctx.EmitMovPairToResult(&d25, &result)
-				result.Type = d25.Type
+				ctx.SyncDesc(&d24)
+				if d24.Loc == LocRegPair || d24.Loc == LocStackPair || d24.Loc == LocInputPair {
+					ctx.EmitMovPairToResult(&d24, &result)
+					result.Type = d24.Type
+				} else {
+					switch d24.Type {
+					case tagBool:
+						ctx.EmitMakeBool(result, d24)
+						result.Type = tagBool
+					case tagInt:
+						ctx.EmitMakeInt(result, d24)
+						result.Type = tagInt
+					case tagFloat:
+						ctx.EmitMakeFloat(result, d24)
+						result.Type = tagFloat
+					case tagNil:
+						ctx.EmitMakeNil(result)
+						result.Type = tagNil
+					default:
+						panic("jit: single-block scalar return with unknown type")
+					}
+				}
 				return result
 				return result
 			},
