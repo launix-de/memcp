@@ -3393,19 +3393,26 @@ func (g *codeGen) emitRegisterHomes() {
 		}
 		reg := g.allocReg()
 		available := g.allocTemp("phiHomeOK")
-		g.emit("var %s Reg", reg)
+		g.emit("var %s %s", reg, g.regTypeName())
 		mask := (1 << width) - 1
 		g.emit("%s := %s.Available&(uint16(%d)<<%d) == uint16(%d)<<%d", available, homes, mask, color, mask, color)
 		g.emit("if %s { %s = %s.Registers[%d] }", available, reg, homes, color)
 		g.phiHomeRegs[name] = reg
 		if width == 2 {
 			reg2 := g.allocReg()
-			g.emit("var %s Reg", reg2)
+			g.emit("var %s %s", reg2, g.regTypeName())
 			g.emit("if %s { %s = %s.Registers[%d] }", available, reg2, homes, color+1)
 			g.phiHomeRegs2[name] = reg2
 		}
 		g.phiHomeOK[name] = available
 	}
+}
+
+func (g *codeGen) regTypeName() string {
+	if g.storageMode {
+		return "scm.Reg"
+	}
+	return "Reg"
 }
 
 func (g *codeGen) phiRegisterHome(name string) (reg, available string, ok bool) {
@@ -4448,6 +4455,7 @@ func addScmPrefix(code string) string {
 	// Words that need the scm. prefix — these are exported identifiers from the scm package
 	scmIdents := map[string]bool{
 		"JITValueDesc": true, "JITTypeUnknown": true, "JITContext": true,
+		"JITRegisterPlan": true, "JITRegisterSlot": true,
 		"BBDescriptor": true, "PhiState": true,
 		"LocNone": true, "LocReg": true, "LocRegPair": true, "LocRegTriple": true,
 		"LocStack": true, "LocStackPair": true, "LocStackTriple": true, "LocInputPair": true, "LocMem": true, "LocImm": true, "LocAny": true,
@@ -4583,7 +4591,7 @@ func (g *codeGen) emitAllocResultAwareReg(dstVar, targetVar, indent string, dire
 		g.emit("%s%s := ctx.AllocRegExcept(%s)", indent, dstVar, strings.Join(excludes, ", "))
 		return
 	}
-	g.emit("%svar %s Reg", indent, dstVar)
+	g.emit("%svar %s %s", indent, dstVar, g.regTypeName())
 	if planned.reg != "" {
 		condition := planned.available
 		for _, exclude := range excludes {
@@ -6851,7 +6859,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagFloat, Imm: NewFloat(math.Trunc(%s.Imm.Float()))}", dv, arg.goVar)
 			g.emit("} else {")
 			g.emit("\tctx.EnsureDesc(&%s)", arg.goVar)
-			g.emit("\tvar truncSrc Reg")
+			g.emit("\tvar truncSrc %s", g.regTypeName())
 			g.emit("\tif %s.Loc == LocRegPair {", arg.goVar)
 			g.emit("\t\tctx.FreeReg(%s.Reg)", arg.goVar)
 			g.emit("\t\ttruncSrc = %s.Reg2", arg.goVar)
@@ -8848,8 +8856,8 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		// LocImm Scmer cannot represent Go string header (ptr+len) correctly.
 		finalPtr := g.allocReg()
 		finalLen := g.allocReg()
-		g.emit("var %s Reg", finalPtr)
-		g.emit("var %s Reg", finalLen)
+		g.emit("var %s %s", finalPtr, g.regTypeName())
+		g.emit("var %s %s", finalLen, g.regTypeName())
 		g.emit("ctx.SyncDesc(&%s)", ptrDesc)
 		g.emit("ctx.EnsureDesc(&%s)", ptrDesc)
 		g.emit("if %s.Loc == LocImm {", ptrDesc)

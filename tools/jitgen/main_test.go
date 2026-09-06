@@ -265,6 +265,17 @@ func rolling(limit int) int {
 	}
 }
 
+func TestStoragePrefixIncludesRegisterPlanTypes(t *testing.T) {
+	input := "plan := JITRegisterPlan{Slots: [16]JITRegisterSlot{}}\nvalue := JITValueDesc{Reg: r}\n"
+	want := "plan := scm.JITRegisterPlan{Slots: [16]scm.JITRegisterSlot{}}\nvalue := scm.JITValueDesc{Reg: r}\n"
+	if got := addScmPrefix(input); got != want {
+		t.Fatalf("storage register plan qualification:\n got: %q\nwant: %q", got, want)
+	}
+	if got := (&codeGen{storageMode: true}).regTypeName(); got != "scm.Reg" {
+		t.Fatalf("storage register type = %q, want scm.Reg", got)
+	}
+}
+
 func TestRegisterColoringIsExactForSmallComponent(t *testing.T) {
 	nodes := make([]registerPlanNode, 4)
 	for index := range nodes {
