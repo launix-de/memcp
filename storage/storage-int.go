@@ -1400,28 +1400,25 @@ func (s *StorageInt) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result s
 				ctx.EmitMovRegImm64(scm.RegR11, uint64(d87.Imm.Int()))
 				ctx.EmitCmpInt64(d22.Reg, scm.RegR11)
 			}
-			ctx.EmitSetcc(r32, scm.CondEqual)
-			d88 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagBool, Reg: r32}
+			d88 = scm.JITValueDesc{Loc: scm.LocFlags, Type: scm.TagBool, Reg: r32, Condition: scm.CondEqual}
 			ctx.BindReg(r32, &d88)
 		} else if d22.Loc == scm.LocImm {
 			r33 := ctx.AllocReg()
 			ctx.EmitMovRegImm64(scm.RegR11, uint64(d22.Imm.Int()))
 			ctx.EmitCmpInt64(scm.RegR11, d87.Reg)
-			ctx.EmitSetcc(r33, scm.CondEqual)
-			d88 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagBool, Reg: r33}
+			d88 = scm.JITValueDesc{Loc: scm.LocFlags, Type: scm.TagBool, Reg: r33, Condition: scm.CondEqual}
 			ctx.BindReg(r33, &d88)
 		} else {
 			r34 := ctx.AllocRegExcept(d22.Reg)
 			ctx.EmitCmpInt64(d22.Reg, d87.Reg)
-			ctx.EmitSetcc(r34, scm.CondEqual)
-			d88 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagBool, Reg: r34}
+			d88 = scm.JITValueDesc{Loc: scm.LocFlags, Type: scm.TagBool, Reg: r34, Condition: scm.CondEqual}
 			ctx.BindReg(r34, &d88)
 		}
 		ctx.FreeDesc(&d87)
 		d89 = d88
 		ctx.EnsureDesc(&d89)
-		if d89.Loc != scm.LocImm && d89.Loc != scm.LocReg {
-			panic("jit: If condition is neither scm.LocImm nor scm.LocReg")
+		if d89.Loc != scm.LocImm && d89.Loc != scm.LocFlags {
+			panic("jit: fused If condition is neither scm.LocImm nor scm.LocFlags")
 		}
 		if d89.Loc == scm.LocImm {
 			if d89.Imm.Bool() {
@@ -1511,8 +1508,7 @@ func (s *StorageInt) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result s
 		}
 		lbl8 := ctx.ReserveLabel()
 		lbl9 := ctx.ReserveLabel()
-		ctx.EmitCmpRegImm32(d89.Reg, 0)
-		ctx.EmitJump(scm.CondNotEqual, lbl8)
+		ctx.EmitJump(d89.Condition, lbl8)
 		ctx.EmitJmp(lbl9)
 		snap92 := d0
 		snap93 := d1
@@ -1772,7 +1768,6 @@ func (s *StorageInt) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result s
 			return bbs[1].RenderPS(ps127)
 		}
 		return result
-		ctx.FreeDesc(&d88)
 		return result
 	}
 	ps164 := scm.PhiState{General: false}
