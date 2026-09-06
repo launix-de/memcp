@@ -2333,7 +2333,12 @@ func jitCompileRuntimeSymbol(ctx *JITContext, symbol Scmer, result JITValueDesc)
 	symbolPair := jitAllocTrackedPair(ctx, tagSymbol)
 	symbolPair = jitPlaceIntoPair(ctx, &symbolImm, symbolPair)
 	target := jitEnsureResultPair(ctx, result)
-	out := ctx.EmitGoCallScalarInto(GoFuncAddr(jitResolveRuntimeSymbol), []JITValueDesc{env, symbolPair}, target)
+	// Resolve into temporary ABI-result registers before placement. The requested
+	// target can belong to a register-planned outer inline environment, and the
+	// direct-call target API does not establish the non-aliasing needed to treat
+	// those registers as dead across this lookup.
+	out := ctx.EmitGoCallScalar(GoFuncAddr(jitResolveRuntimeSymbol), []JITValueDesc{env, symbolPair}, 2)
+	out = jitPlaceIntoPair(ctx, &out, target)
 	out.Type = JITTypeUnknown
 	out = jitRootScmer(ctx, out)
 	ctx.FreeDesc(&env)
@@ -2348,7 +2353,9 @@ func jitCompileRuntimeGlobalSymbol(ctx *JITContext, symbol Scmer, result JITValu
 	symbolPair := jitAllocTrackedPair(ctx, tagSymbol)
 	symbolPair = jitPlaceIntoPair(ctx, &symbolImm, symbolPair)
 	target := jitEnsureResultPair(ctx, result)
-	out := ctx.EmitGoCallScalarInto(GoFuncAddr(jitResolveGlobalSymbol), []JITValueDesc{symbolPair}, target)
+	// Keep the same non-aliasing boundary as runtime-environment lookups above.
+	out := ctx.EmitGoCallScalar(GoFuncAddr(jitResolveGlobalSymbol), []JITValueDesc{symbolPair}, 2)
+	out = jitPlaceIntoPair(ctx, &out, target)
 	out.Type = JITTypeUnknown
 	out = jitRootScmer(ctx, out)
 	ctx.FreeDesc(&symbolPair)

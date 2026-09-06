@@ -3105,12 +3105,10 @@ func (g *codeGen) emitScalarPhiMove(phiName, phiOff, source string) {
 func (g *codeGen) emitPhiMov(phiName, phiOff string, v ssa.Value, phiType types.Type) {
 	phiTriple := isPhiTripleType(phiType)
 	phiPair := isPhiPairType(phiType)
-	phiOffHi := "(" + phiOff + ")+8"
 	if c, ok := v.(*ssa.Const); ok {
 		if c.Value == nil {
 			if phiPair {
-				g.emit("ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewInt(0)}, %s)", phiOff)
-				g.emit("ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, %s)", phiOffHi)
+				g.emit("ctx.EmitStoreScmerToStack(JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}, %s)", phiOff)
 			} else {
 				g.emitScalarPhiMove(phiName, phiOff, "JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewInt(0)}")
 			}
@@ -3123,14 +3121,13 @@ func (g *codeGen) emitPhiMov(phiName, phiOff string, v ssa.Value, phiType types.
 			}
 		} else if c.Value.Kind() == constant.Bool {
 			bval := constant.BoolVal(c.Value)
-			value := 0
-			if bval {
-				value = 1
-			}
 			if phiPair {
-				g.emit("ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewInt(%d)}, %s)", value, phiOff)
-				g.emit("ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, %s)", phiOffHi)
+				g.emit("ctx.EmitStoreScmerToStack(JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(%t)}, %s)", bval, phiOff)
 			} else {
+				value := 0
+				if bval {
+					value = 1
+				}
 				g.emitScalarPhiMove(phiName, phiOff, fmt.Sprintf("JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewInt(%d)}", value))
 			}
 		} else if c.Value.Kind() == constant.Int {
@@ -3139,16 +3136,14 @@ func (g *codeGen) emitPhiMov(phiName, phiOff string, v ssa.Value, phiType types.
 				ival = normalizeIntConstForType(ival, signed, bits)
 			}
 			if phiPair {
-				g.emit("ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(%d)}, %s)", ival, phiOff)
-				g.emit("ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, %s)", phiOffHi)
+				g.emit("ctx.EmitStoreScmerToStack(JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(%d)}, %s)", ival, phiOff)
 			} else {
 				g.emitScalarPhiMove(phiName, phiOff, fmt.Sprintf("JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(%d)}", ival))
 			}
 		} else if c.Value.Kind() == constant.Float {
 			fval, _ := constant.Float64Val(c.Value)
 			if phiPair {
-				g.emit("ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagFloat, Imm: NewFloat(%v)}, %s)", fval, phiOff)
-				g.emit("ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, %s)", phiOffHi)
+				g.emit("ctx.EmitStoreScmerToStack(JITValueDesc{Loc: LocImm, Type: tagFloat, Imm: NewFloat(%v)}, %s)", fval, phiOff)
 			} else {
 				g.emitScalarPhiMove(phiName, phiOff, fmt.Sprintf("JITValueDesc{Loc: LocImm, Type: tagFloat, Imm: NewFloat(%v)}", fval))
 			}
@@ -3191,18 +3186,7 @@ func (g *codeGen) emitPhiMov(phiName, phiOff string, v ssa.Value, phiType types.
 			}
 			if phiPair {
 				g.emit("ctx.SyncDesc(&%s)", edgeSrc)
-				g.emit("if %s.Loc == LocStackPair {", edgeSrc)
-				g.emit("\tctx.EmitCopyStackWords(%s, %s, 2)", edgeSrc, phiOff)
-				g.emit("} else if %s.Loc == LocInputPair {", edgeSrc)
-				g.emit("\tctx.EnsureDesc(&%s)", edgeSrc)
-				g.emit("\tctx.EmitStoreScmerToStack(%s, %s)", edgeSrc, phiOff)
-				g.emit("} else if %s.Loc == LocRegPair || %s.Loc == LocImm {", edgeSrc, edgeSrc)
-				g.emit("\tctx.EmitStoreScmerToStack(%s, %s)", edgeSrc, phiOff)
-				g.emit("} else {")
-				g.emit("\tctx.EnsureDesc(&%s)", edgeSrc)
-				g.emit("\tctx.EmitStoreToStack(%s, %s)", edgeSrc, phiOff)
-				g.emit("\tctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, %s)", phiOffHi)
-				g.emit("}")
+				g.emit("ctx.EmitStoreScmerToStack(%s, %s)", edgeSrc, phiOff)
 				return
 			}
 			g.emit("ctx.EnsureDesc(&%s)", edgeSrc)

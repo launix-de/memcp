@@ -2543,7 +2543,7 @@ func (ctx *JITContext) EmitStoreScmerToStack(desc JITValueDesc, disp int32) {
 		ctx.EmitStoreRegMem(value.Reg, RegRSP, disp)
 		ctx.EmitStoreRegMem(value.Reg2, RegRSP, disp+8)
 		ctx.FreeDesc(&value)
-	case LocStack:
+	case LocReg, LocStack:
 		if desc.Type == JITTypeUnknown {
 			panic("jit: an untyped scalar stack value cannot be boxed as Scmer")
 		}
