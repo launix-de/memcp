@@ -924,7 +924,8 @@ func TestEffectiveBoundaryInclusivenessUsesIndexedRange(t *testing.T) {
 		{col: "quantity", matcher: RangeMatcher, lowerInclusive: false, upperInclusive: false},
 	}
 	access := runtimeScanAccess(bounds)
-	lowerInclusive, upperInclusive := effectiveBoundaryInclusiveness(access, newScanIndexBounds(access))
+	indexBounds := newScanIndexBounds(access)
+	lowerInclusive, upperInclusive := effectiveBoundaryInclusiveness(access, &indexBounds)
 	if !lowerInclusive || !upperInclusive {
 		t.Fatalf("effective boundary inclusiveness = (%t, %t), want (true, true)", lowerInclusive, upperInclusive)
 	}
@@ -1022,11 +1023,11 @@ func TestRowWithinBoundsEqual(t *testing.T) {
 	access := runtimeScanAccess(boundaries{{col: "id", matcher: EqualMatcher, lower: scm.NewInt(5), upper: scm.NewInt(5)}})
 	indexBounds := newScanIndexBounds(access)
 
-	inRange, _ := idx.rowWithinBounds(access, indexBounds, 1, 0, 1, 0, true, true, func(i int) scm.Scmer { return scm.NewInt(5) })
+	inRange, _ := idx.rowWithinBounds(access, &indexBounds, 1, 0, 1, 0, true, true, func(i int) scm.Scmer { return scm.NewInt(5) })
 	if !inRange {
 		t.Error("expected match for equal value")
 	}
-	inRange, beyond := idx.rowWithinBounds(access, indexBounds, 1, 0, 1, 0, true, true, func(i int) scm.Scmer { return scm.NewInt(10) })
+	inRange, beyond := idx.rowWithinBounds(access, &indexBounds, 1, 0, 1, 0, true, true, func(i int) scm.Scmer { return scm.NewInt(10) })
 	if inRange {
 		t.Error("expected no match for different value")
 	}
@@ -1041,7 +1042,8 @@ func TestRowWithinBoundsLike(t *testing.T) {
 	access := runtimeScanAccess(boundaries{{col: "name", matcher: LikeMatcher, lower: scm.NewString("%Klaus%"), upper: scm.NewString("%Klaus%")}})
 
 	// rowWithinBounds skips non-sorted columns entirely
-	inRange, _ := idx.rowWithinBounds(access, newScanIndexBounds(access), 1, -1, 0, 0, true, true, func(i int) scm.Scmer { return scm.NewString("anything") })
+	indexBounds := newScanIndexBounds(access)
+	inRange, _ := idx.rowWithinBounds(access, &indexBounds, 1, -1, 0, 0, true, true, func(i int) scm.Scmer { return scm.NewString("anything") })
 	if !inRange {
 		t.Error("expected inRange=true (LIKE skipped in rowWithinBounds)")
 	}

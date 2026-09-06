@@ -1792,7 +1792,7 @@ func (b scanIndexBounds) upperLast() scm.Scmer {
 	return b.lastUpper
 }
 
-func (b scanIndexBounds) truncate(length int) scanIndexBounds {
+func (b *scanIndexBounds) truncate(length int) {
 	if b.effectiveLen > length {
 		b.effectiveLen = length
 	}
@@ -1804,5 +1804,4 @@ func (b scanIndexBounds) truncate(length int) scanIndexBounds {
 			b.lastUpper = scm.NewNil()
 		}
 	}
-	return b
 }

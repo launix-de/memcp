@@ -82,6 +82,10 @@ type indexGetterScratch struct {
 	indexBounds scanIndexBounds
 }
 
+var scanIndexBoundsPool = sync.Pool{
+	New: func() any { return new(scanIndexBounds) },
+}
+
 var indexGetterScratchPool = sync.Pool{
 	New: func() any { return new(indexGetterScratch) },
 }
@@ -484,7 +488,7 @@ func (s *StorageIndex) boundKernel(bounds scanAccess, cmpCols int) (firstSorted 
 	return
 }
 
-func (s *StorageIndex) rowWithinBounds(bounds scanAccess, indexBounds scanIndexBounds, cmpCols int, lastSorted int, sortedMask uint64, unboundedMask uint64, lowerInclusive bool, upperInclusive bool, getter func(int) scm.Scmer) (inRange bool, beyond bool) {
+func (s *StorageIndex) rowWithinBounds(bounds scanAccess, indexBounds *scanIndexBounds, cmpCols int, lastSorted int, sortedMask uint64, unboundedMask uint64, lowerInclusive bool, upperInclusive bool, getter func(int) scm.Scmer) (inRange bool, beyond bool) {
 	for i := 0; i < cmpCols; i++ {
 		if i < 64 && sortedMask&(uint64(1)<<i) == 0 {
 			continue // non-sorted: block-skip handles this, scan() filters exact
@@ -540,7 +544,7 @@ func (s *StorageIndex) rowWithinBounds(bounds scanAccess, indexBounds scanIndexB
 // must never be interpreted as the next column of a longer reusable index.
 // Matching the column and matcher kind here preserves prefix reuse without
 // coupling an invocation-only matcher to an unrelated physical suffix.
-func (s *StorageIndex) queryIndexPrefixLen(bounds scanAccess, indexBounds scanIndexBounds) int {
+func (s *StorageIndex) queryIndexPrefixLen(bounds scanAccess, indexBounds *scanIndexBounds) int {
 	limit := indexBounds.len()
 	if limit > bounds.len() {
 		limit = bounds.len()
@@ -626,7 +630,7 @@ func (t *storageShard) iterateIndexMatchAware(tx *TxContext, cols scanAccess, ma
 	t.iterateIndexEx(tx, cols, maxInsertIndex, buf, usageWeight, false, exactMain, nil, nil, nil, callback)
 }
 
-func effectiveBoundaryInclusiveness(cols scanAccess, indexBounds scanIndexBounds) (bool, bool) {
+func effectiveBoundaryInclusiveness(cols scanAccess, indexBounds *scanIndexBounds) (bool, bool) {
 	if indexBounds.len() == 0 {
 		return true, true
 	}
@@ -640,7 +644,12 @@ func effectiveBoundaryInclusiveness(cols scanAccess, indexBounds scanIndexBounds
 }
 
 func (t *storageShard) iterateIndexEx(tx *TxContext, cols scanAccess, maxInsertIndex int, buf []uint32, usageWeight float64, forceBuild bool, exactMain *bool, options *indexIterationOptions, candidateSpan *int64, selected func(*StorageIndex, bool), callback func([]uint32) bool) {
-	indexBounds := newScanIndexBounds(cols)
+	indexBounds := scanIndexBoundsPool.Get().(*scanIndexBounds)
+	*indexBounds = newScanIndexBounds(cols)
+	defer func() {
+		*indexBounds = scanIndexBounds{}
+		scanIndexBoundsPool.Put(indexBounds)
+	}()
 	if exactMain != nil {
 		*exactMain = false
 	}
@@ -654,7 +663,7 @@ func (t *storageShard) iterateIndexEx(tx *TxContext, cols scanAccess, maxInsertI
 			sortedEnd++
 		}
 		if sortedEnd < cols.len() && indexBounds.len() > sortedEnd {
-			indexBounds = indexBounds.truncate(sortedEnd)
+			indexBounds.truncate(sortedEnd)
 		}
 	}
 
@@ -1251,7 +1260,7 @@ func unorderedRecSetDominates(recsetRows, indexSpanRows int64) bool {
 // positions, then bulk-decodes the forward permutation back to RecIDs. If no
 // inverse exists yet, the same bounded buffer is sorted by the index key
 // callbacks; this keeps a cold sparse query from degrading to a full scan.
-func (s *StorageIndex) iterateRecSetFirst(tx *TxContext, state *storageIndexState, part *recSetShard, bounds scanAccess, indexBounds scanIndexBounds, upperInclusive bool, mainStart int, mainEnd int, maxInsertIndex int, buf []uint32, cols []colGetter, persistent bool, ordered bool, exactMain *bool, callback func([]uint32) bool) {
+func (s *StorageIndex) iterateRecSetFirst(tx *TxContext, state *storageIndexState, part *recSetShard, bounds scanAccess, indexBounds *scanIndexBounds, upperInclusive bool, mainStart int, mainEnd int, maxInsertIndex int, buf []uint32, cols []colGetter, persistent bool, ordered bool, exactMain *bool, callback func([]uint32) bool) {
 	if part == nil || part.count == 0 {
 		return
 	}
@@ -1408,7 +1417,7 @@ func (s *StorageIndex) iterateRecSetFirst(tx *TxContext, state *storageIndexStat
 // bindRowMatchers returns only matcher state. The terminal callback deliberately
 // stays outside this value: storing it in a returned wrapper closure makes the
 // complete shard scan state escape even though index iteration is synchronous.
-func (s *StorageIndex) bindRowMatchers(tx *TxContext, bounds scanAccess, indexBounds scanIndexBounds, upperInclusive bool, cols []colGetter, hooks []IndexHook, persistent bool, exactMain *bool) []IndexRowMatcher {
+func (s *StorageIndex) bindRowMatchers(tx *TxContext, bounds scanAccess, indexBounds *scanIndexBounds, upperInclusive bool, cols []colGetter, hooks []IndexHook, persistent bool, exactMain *bool) []IndexRowMatcher {
 	var matchers []IndexRowMatcher
 	if !persistent {
 		matchers = s.bindColdRangeMatcher(tx, bounds, indexBounds, upperInclusive, cols)
@@ -1463,7 +1472,7 @@ func (s *StorageIndex) bindRowMatchers(tx *TxContext, bounds scanAccess, indexBo
 // persistent-index branch where the closure is never constructed.
 //
 //go:noinline
-func (s *StorageIndex) bindColdRangeMatcher(tx *TxContext, bounds scanAccess, indexBounds scanIndexBounds, upperInclusive bool, cols []colGetter) []IndexRowMatcher {
+func (s *StorageIndex) bindColdRangeMatcher(tx *TxContext, bounds scanAccess, indexBounds *scanIndexBounds, upperInclusive bool, cols []colGetter) []IndexRowMatcher {
 	cmpCols := s.queryIndexPrefixLen(bounds, indexBounds)
 	if cmpCols == 0 {
 		return nil
@@ -1550,7 +1559,7 @@ func (s *StorageIndex) estimateHookCandidates(tx *TxContext, bounds scanAccess) 
 }
 
 // iterate over index using a caller-provided buffer for batching
-func (s *StorageIndex) iterate(tx *TxContext, bounds scanAccess, indexBounds scanIndexBounds, lowerInclusive bool, upperInclusive bool, maxInsertIndex int, buf []uint32, usageWeight float64, forceBuild bool, exactMain *bool, options *indexIterationOptions, candidateSpan *int64, selected func(*StorageIndex, bool), callback func([]uint32) bool) {
+func (s *StorageIndex) iterate(tx *TxContext, bounds scanAccess, indexBounds *scanIndexBounds, lowerInclusive bool, upperInclusive bool, maxInsertIndex int, buf []uint32, usageWeight float64, forceBuild bool, exactMain *bool, options *indexIterationOptions, candidateSpan *int64, selected func(*StorageIndex, bool), callback func([]uint32) bool) {
 
 	// Build column getters — use RLocked variant because the caller
 	// (scan, scan_order, GetRecordidForUnique) already holds s.t.mu.RLock().
@@ -1558,7 +1567,7 @@ func (s *StorageIndex) iterate(tx *TxContext, bounds scanAccess, indexBounds sca
 	// concurrent writer is waiting for s.t.mu.Lock() (write-preferring RWMutex).
 	getterScratch := indexGetterScratchPool.Get().(*indexGetterScratch)
 	cols := s.buildGetters(tx, getterScratch.getters[:])
-	getterScratch.indexBounds = indexBounds
+	getterScratch.indexBounds = *indexBounds
 	defer func() {
 		clear(getterScratch.getters[:])
 		getterScratch.indexBounds = scanIndexBounds{}
