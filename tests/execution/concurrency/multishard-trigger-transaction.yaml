@@ -85,3 +85,6 @@ test_cases:
           affected_rows: 4
       - session_id: "mtt_overlap"
         sql: "ROLLBACK"
+
+  - name: "Restore default shard size"
+    scm: '(settings "ShardSize" 60000)'

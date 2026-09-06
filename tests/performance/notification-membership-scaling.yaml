@@ -280,6 +280,9 @@ test_cases:
           data:
             - id: 4000
 
+  - name: "Restore default shard size"
+    scm: '(settings "ShardSize" 60000)'
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS nms_seen"
   - sql: "DROP TABLE IF EXISTS nms_assignment"

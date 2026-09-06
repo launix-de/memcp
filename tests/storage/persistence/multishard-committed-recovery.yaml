@@ -128,5 +128,8 @@ test_cases:
           id_sum: 631
           amount_sum: 6345
 
+  - name: "Restore default shard size"
+    scm: '(settings "ShardSize" 60000)'
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS mcr_entry"

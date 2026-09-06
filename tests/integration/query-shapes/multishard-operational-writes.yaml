@@ -275,6 +275,9 @@ test_cases:
           checksum: 630
           temporary_rows: 0
 
+  - name: "Restore default shard size"
+    scm: '(settings "ShardSize" 60000)'
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS mow_seen"
   - sql: "DROP TABLE IF EXISTS mow_document"

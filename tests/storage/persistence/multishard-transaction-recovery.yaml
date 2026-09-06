@@ -95,3 +95,6 @@ test_cases:
           id_sum: 630
           amount_sum: 6300
           pending_rows: 0
+
+  - name: "Restore default shard size"
+    scm: '(settings "ShardSize" 60000)'
