@@ -364,3 +364,14 @@ func TestCoveredOrderedLimitBrakesInsideIndexBatch(t *testing.T) {
 			queue.candidateCount)
 	}
 }
+
+func TestDirectScanOrderOuterRowSupportsWideProjection(t *testing.T) {
+	columns := make([]string, directScanOrderColumns+1)
+	callback := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
+		return scm.NewInt(int64(len(values)))
+	})
+	result := directScanOrderNullResult(columns, callback, scm.NewNil(), true, scm.NewNil())
+	if got, want := result.Int(), int64(len(columns)+1); got != want {
+		t.Fatalf("outer callback received %d arguments, want %d", got, want)
+	}
+}
