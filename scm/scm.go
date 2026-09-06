@@ -590,6 +590,17 @@ func ApplyAssoc(procedure Scmer, args []Scmer) (value Scmer) {
 func Apply(procedure Scmer, args ...Scmer) (value Scmer) {
 	return ApplyEx(procedure, args, &Globalenv)
 }
+// scmerCallable reports whether procedure can be invoked with Apply - a lambda,
+// a native func, a closure, or a compiled JIT entry (assoc-list slices are
+// callable too but are not what a "replacement function" argument means).
+func scmerCallable(procedure Scmer) bool {
+	switch procedure.GetTag() {
+	case tagFunc, tagFuncEnv, tagClosure, tagProc, tagJIT:
+		return true
+	}
+	return false
+}
+
 func ApplyEx(procedure Scmer, args []Scmer, en *Env) (value Scmer) {
 	// Native funcs
 	switch procedure.GetTag() {

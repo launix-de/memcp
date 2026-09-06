@@ -24,9 +24,23 @@ import (
 )
 
 const (
-	jitConstantRegexpTestName      = "jit-constant-regexp-test"
-	jitConstantRegexpPredicateName = "jit-constant-regexp-predicate"
+	jitConstantRegexpTestName        = "jit-constant-regexp-test"
+	jitConstantRegexpPredicateName    = "jit-constant-regexp-predicate"
+	jitConstantRegexpReplaceFuncName  = "jit-constant-regexp-replace-func"
 )
+
+// jitConstantRegexpReplaceFunc is the interpreter implementation of the hidden
+// declaration the optimizer synthesizes for `(regexp_replace s "<const>" f)`
+// where f is a function. The precompiled regex is applied once; the JIT emitter
+// below lowers the same operation to an inline byte walk.
+func jitConstantRegexpReplaceFunc(pattern, replacement, value Scmer) Scmer {
+	if value.IsNil() {
+		return NewNil()
+	}
+	return NewString(pattern.Regex().ReplaceAllStringFunc(String(value), func(match string) string {
+		return String(Apply(replacement, NewString(match)))
+	}))
+}
 
 // jitConstantRegexpTest is the interpreter implementation of the hidden
 // declaration. Its JIT emitter below never calls it or regexp at runtime.
@@ -311,10 +325,12 @@ func (emitter *jitRegexEmitter) emitResetCaptures(terms []jitRegexTerm) {
 	}
 }
 
-func (emitter *jitRegexEmitter) emitProgram(successLabel, failLabel JITLabel) {
-	attemptLabel := emitter.ctx.ReserveLabel()
-	attemptFailLabel := emitter.ctx.ReserveLabel()
-	emitter.ctx.MarkLabel(attemptLabel)
+// emitMatchAt tries the pattern once, anchored exactly at emitter.scan. On
+// matchLabel the emitter's cursor sits at the match end and every capture
+// (including capture 0, the whole match) is filled; on failLabel nothing about
+// scan has changed. It is the single reusable match attempt shared by the
+// forward scan of emitProgram and the replace loop of jitEmitRegexReplace.
+func (emitter *jitRegexEmitter) emitMatchAt(matchLabel, failLabel JITLabel) {
 	emitter.ctx.EmitMovRegReg(emitter.cursor, emitter.scan)
 	for index := range emitter.captures {
 		emitter.emitCaptureEmpty(index)
@@ -324,7 +340,14 @@ func (emitter *jitRegexEmitter) emitProgram(successLabel, failLabel JITLabel) {
 		terms = append([]jitRegexTerm{{kind: jitRegexCaptureBegin, capture: 0}}, terms...)
 		terms = append(terms, jitRegexTerm{kind: jitRegexCaptureEnd, capture: 0})
 	}
-	emitter.emitSequence(terms, successLabel, attemptFailLabel)
+	emitter.emitSequence(terms, matchLabel, failLabel)
+}
+
+func (emitter *jitRegexEmitter) emitProgram(successLabel, failLabel JITLabel) {
+	attemptLabel := emitter.ctx.ReserveLabel()
+	attemptFailLabel := emitter.ctx.ReserveLabel()
+	emitter.ctx.MarkLabel(attemptLabel)
+	emitter.emitMatchAt(successLabel, attemptFailLabel)
 
 	emitter.ctx.MarkLabel(attemptFailLabel)
 	if emitter.program.beginText {
@@ -1036,6 +1059,37 @@ func registerJITRegexBuiltins() {
 				}
 				predicate := jitEmitConstantRegexpPredicate(ctx, pattern.Regex(), args[1])
 				return jitPlaceScmerIntoTarget(ctx, predicate, result)
+			},
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		Name: jitConstantRegexpReplaceFuncName,
+		Fn: func(arguments ...Scmer) Scmer {
+			if len(arguments) != 3 || !arguments[0].IsRegex() {
+				panic("jit constant regexp replace expects a precompiled regex, a function and a value")
+			}
+			return jitConstantRegexpReplaceFunc(arguments[0], arguments[1], arguments[2])
+		},
+		Type: &TypeDescriptor{
+			Kind:      "func",
+			Forbidden: true,
+			Params: []*TypeDescriptor{
+				{Kind: "any", Label: "pattern"},
+				{Kind: "any", Label: "replacement"},
+				{Kind: "string", Label: "value"},
+			},
+			Return:         &TypeDescriptor{Kind: "string"},
+			Const:          true,
+			JITVirtualArgs: true,
+			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				if len(sourceArgs) != 3 || len(args) != 3 {
+					panic("jit: malformed constant regexp replace")
+				}
+				pattern := sourceArgs[0].WithoutSourceInfo()
+				if !pattern.IsRegex() {
+					panic("jit: constant regexp replace requires a precompiled regex")
+				}
+				return jitEmitConstantRegexpReplaceFunc(ctx, pattern.Regex(), sourceArgs[1].WithoutSourceInfo(), args, result)
 			},
 		},
 	})

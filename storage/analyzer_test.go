@@ -114,8 +114,10 @@ func TestCompileScanAccessKeepsRangeEndpointsInAdjacentValues(t *testing.T) {
 
 func TestScanBoundarySurvivesPersistedProcedureRoundTrip(t *testing.T) {
 	registerScanBoundaryFormats()
+	orderValue := scm.Apply(scm.Globalenv.Vars[scm.Symbol("collate")], scm.NewString("utf8mb4"), scm.NewBool(true))
+	order := scm.OptimizeProcToSerialFunction(orderValue)
 	boundary := newScanBoundarySpec("tenant", EqualMatcher, 0, 0, true, true,
-		"utf8mb4_general_ci", true, 1, []string{"document"}, nil, "", true)
+		"utf8mb4_general_ci", true, 1, []string{"document"}, order, "utf8mb4:desc", true)
 	procedure := scm.NewProcStruct(scm.Proc{
 		Params: scm.NewSlice(nil),
 		Body: scm.NewSlice([]scm.Scmer{
@@ -137,8 +139,11 @@ func TestScanBoundarySurvivesPersistedProcedureRoundTrip(t *testing.T) {
 	if restored.ColumnName() != "tenant" || restored.Analyzer() != EqualMatcher ||
 		restored.LowerSlot() != 0 || restored.UpperSlot() != 0 || !restored.NullSafe() ||
 		restored.MapperSlot() != 1 || len(restored.MapColumns()) != 1 || restored.MapColumns()[0] != "document" ||
-		!restored.Mandatory() {
+		restored.Order() == nil || restored.OrderMetadata() != "utf8mb4:desc" || !restored.Mandatory() {
 		t.Fatalf("persisted boundary was not restored: %#v", restored)
+	}
+	if collation, reverse, ok := scm.LookupCollate(restored.Order()); !ok || collation != "utf8mb4" || !reverse {
+		t.Fatalf("persisted boundary order = (%q, %t, %t), want (utf8mb4, true, true)", collation, reverse, ok)
 	}
 }
 
@@ -152,6 +157,11 @@ func TestScanAccessValuesExprCachesConstantsAndBindsDynamicValues(t *testing.T) 
 	dynamicItems, ok := scmerSlice(dynamic)
 	if !ok || len(dynamicItems) != 2 || !scanSymbolIs(dynamicItems[0], "list") {
 		t.Fatalf("dynamic access values = %s, want runtime list", scm.String(dynamic))
+	}
+	local := scanAccessValuesExpr([]scm.Scmer{scm.NewNthLocalVar(1)})
+	localItems, ok := scmerSlice(local)
+	if !ok || len(localItems) != 2 || !scanSymbolIs(localItems[0], "list") {
+		t.Fatalf("optimized local access values = %s, want runtime list", scm.String(local))
 	}
 }
 
