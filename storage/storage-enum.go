@@ -389,9 +389,11 @@ func (r *cachedEnumReader) GetValueMulti(recids []uint32, target []scm.Scmer, st
 }
 
 func (s *StorageEnum) GetCachedReader() ColumnReader {
-	if reader := s.storageJITFunctions.reader(nil); reader != nil {
-		return reader
-	}
+	// Enum decoding is stateful even though the finished storage is immutable.
+	// Keep one private rANS cursor per consumer: replacing it with the stateless
+	// scalar JIT entry would restart symbol lookup and decoding for every row.
+	// The separately exposed JIT range and multi readers remain available to
+	// consumers which do not request this stateful reader contract.
 	return &cachedEnumReader{s: s}
 }
 
