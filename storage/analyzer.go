@@ -274,6 +274,9 @@ func (a scanAccess) boundaryParts(index int) (*scanBoundaryBox, []scm.Scmer) {
 }
 
 func (a scanAccess) boundaryColumn(index int) string {
+	if a.exactAdjacent {
+		return a.compiledBoundary(index).column
+	}
 	spec, values := a.boundaryParts(index)
 	if spec.mapperSlot >= 0 {
 		descriptor := values[spec.mapperSlot].Slice()
@@ -1734,6 +1737,7 @@ type scanIndexBounds struct {
 	access       *scanAccess
 	effectiveLen int
 	usableSorted int
+	compareCols  int
 	firstLower   scm.Scmer
 	lastUpper    scm.Scmer
 }

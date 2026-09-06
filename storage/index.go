@@ -30,10 +30,9 @@ import "github.com/carli2/hybridsort"
 import "github.com/launix-de/memcp/scm"
 
 type indexPair struct {
-	itemid      int // -1 for reference items
-	data        []scm.Scmer
-	reference   *scanIndexBounds
-	compareCols int // reference-only prefix length; zero compares the complete key
+	itemid    int // -1 for reference items
+	data      []scm.Scmer
+	reference *scanIndexBounds
 }
 
 type storageIndexState struct {
@@ -1158,11 +1157,15 @@ func (s *StorageIndex) buildIndex(state *storageIndexState, cols []colGetter, tx
 	// skip non-sorted matcher columns (they don't participate in sort order)
 	state.deltaBtree = btree.NewG[indexPair](8, func(a, b indexPair) bool {
 		compareCols := len(s.Cols)
-		if a.compareCols > 0 && a.compareCols < compareCols {
-			compareCols = a.compareCols
+		if a.itemid == -1 && a.reference == nil && len(a.data) < compareCols {
+			compareCols = len(a.data)
+		} else if a.reference != nil && a.reference.compareCols > 0 && a.reference.compareCols < compareCols {
+			compareCols = a.reference.compareCols
 		}
-		if b.compareCols > 0 && b.compareCols < compareCols {
-			compareCols = b.compareCols
+		if b.itemid == -1 && b.reference == nil && len(b.data) < compareCols {
+			compareCols = len(b.data)
+		} else if b.reference != nil && b.reference.compareCols > 0 && b.reference.compareCols < compareCols {
+			compareCols = b.reference.compareCols
 		}
 		for colIdx := 0; colIdx < compareCols; colIdx++ {
 			if !s.columnIsSorted(colIdx) {
@@ -1170,14 +1173,22 @@ func (s *StorageIndex) buildIndex(state *storageIndexState, cols []colGetter, tx
 			}
 			var av, bv scm.Scmer
 			if a.itemid == -1 {
-				av = a.reference.referenceLower(colIdx)
+				if a.reference == nil {
+					av = a.data[colIdx]
+				} else {
+					av = a.reference.referenceLower(colIdx)
+				}
 			} else if state.precomputedDelta {
 				av = a.data[colIdx]
 			} else {
 				av = s.getDeltaColValue(uint32(a.itemid), a.data, colIdx)
 			}
 			if b.itemid == -1 {
-				bv = b.reference.referenceLower(colIdx)
+				if b.reference == nil {
+					bv = b.data[colIdx]
+				} else {
+					bv = b.reference.referenceLower(colIdx)
+				}
 			} else if state.precomputedDelta {
 				bv = b.data[colIdx]
 			} else {
@@ -1993,7 +2004,12 @@ start_scan:
 			// Reference pairs are marked with itemid -1 and interpreted in
 			// index-column order by the comparator, so lower is directly
 			// seekable without a per-probe reordered copy.
-			snapDeltaBtree.AscendGreaterOrEqual(indexPair{itemid: -1, reference: &getterScratch.indexBounds, compareCols: cmpCols}, iterFn)
+			if bounds.exactAdjacent && cmpCols == 1 {
+				snapDeltaBtree.AscendGreaterOrEqual(indexPair{itemid: -1, data: bounds.values[:1]}, iterFn)
+			} else {
+				getterScratch.indexBounds.compareCols = cmpCols
+				snapDeltaBtree.AscendGreaterOrEqual(indexPair{itemid: -1, reference: &getterScratch.indexBounds}, iterFn)
+			}
 		}
 	}
 
