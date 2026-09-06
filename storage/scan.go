@@ -1361,6 +1361,24 @@ func (t *table) hasBoundUniquePoint(access scanAccess) bool {
 			if matched {
 				return true
 			}
+			covered := len(unique.Cols) > 0
+			for _, column := range unique.Cols {
+				matched = false
+				for i := 0; i < access.len(); i++ {
+					if access.boundaryColumn(i) == column && !access.values[i].IsNil() {
+						matched = true
+						break
+					}
+				}
+				if !matched {
+					covered = false
+					break
+				}
+			}
+			if covered {
+				return true
+			}
+			continue
 		}
 		covered := true
 		for _, col := range unique.Cols {
