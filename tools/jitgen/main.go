@@ -931,8 +931,19 @@ func dumpSSA(fn *ssa.Function) {
 
 // --- codegen ---
 
-// genVal tracks how an SSA value is represented in the generated Go code.
-// goVar is a Go variable name: either a JITValueDesc (isDesc=true) or a Reg.
+// genVal tracks how an SSA value is represented in the generated Go emitter.
+// goVar does not name a value in the final machine program. It names a Go
+// variable which describes where that value will live when the emitted machine
+// program runs: either a JITValueDesc (isDesc=true) or a raw Reg.
+//
+// There are consequently two independent notions of lifetime here:
+//   - SSA lifetime decides whether two runtime values may share a planned home.
+//   - descriptor lifetime is the time during which jitgen-generated Go code may
+//     mutate allocator bookkeeping while it emits the machine program.
+//
+// Conflating the two is a correctness bug. In particular, graph coloring may
+// assign the same physical home to disjoint phis even though all of their Go
+// descriptor variables are declared together at the start of the emitter.
 //
 // Scmer runtime layout contract (important for emitter generation):
 //   - Scmer is split into two machine words: ptr + aux.
@@ -964,16 +975,20 @@ type genVal struct {
 	hasSliceInput    bool
 	lengthInput      int
 	hasLengthInput   bool
-	pinAcrossBlock   bool // mutable aggregate whose register identity is embedded in another block
-	tuple            []genVal
-	closureFn        *ssa.Function
-	closureBindings  []closureBinding
-	cellName         string
-	cellScope        uint32
-	fieldBaseType    types.Type
-	fieldType        types.Type
-	fieldName        string
-	aggregateType    types.Type
+	// pinAcrossBlock marks a descriptor whose placement is part of the machine
+	// code contract between separately rendered basic blocks. Such a value must
+	// be stabilized before another renderer is allowed to reuse its registers;
+	// copying the descriptor alone does not copy the runtime value.
+	pinAcrossBlock  bool
+	tuple           []genVal
+	closureFn       *ssa.Function
+	closureBindings []closureBinding
+	cellName        string
+	cellScope       uint32
+	fieldBaseType   types.Type
+	fieldType       types.Type
+	fieldName       string
+	aggregateType   types.Type
 }
 
 type closureBinding struct {
@@ -3468,9 +3483,11 @@ func (g *codeGen) initAllPhiDescs() {
 				if home, home2, available, planned := g.phiRegisterPairHome(name); planned {
 					g.emit("var %s JITValueDesc", dv)
 					g.emit("if %s {", available)
-					g.emit("\t%s = JITValueDesc{Loc: LocRegPair, Type: %s, Reg: %s, Reg2: %s}", dv, phiTag, home, home2)
-					g.emit("\tctx.BindReg(%s, &%s)", home, dv)
-					g.emit("\tctx.BindReg(%s, &%s)", home2, dv)
+					// A color may be reused by phi values whose SSA live ranges do not
+					// overlap. All phi descriptors are declared up front, however, so
+					// binding them here would make inactive phis compete for ownership of
+					// the same physical register. BB entry binds only its active phis.
+					g.emit("\t%s = JITValueDesc{Loc: LocRegPair, Type: %s, Reg: %s, Reg2: %s, ID: 0}", dv, phiTag, home, home2)
 					g.emit("} else {")
 					g.emit("\t%s = JITValueDesc{Loc: LocStackPair, Type: %s, StackOff: %sint32(%s)}", dv, phiTag, phiBaseExpr, phiOff)
 					g.emit("\tctx.PrepareScmerStackTarget(%sint32(%s))", phiBaseExpr, phiOff)
@@ -3483,7 +3500,7 @@ func (g *codeGen) initAllPhiDescs() {
 				if home, available, planned := g.phiRegisterHome(name); planned {
 					g.emit("var %s JITValueDesc", dv)
 					g.emit("if %s {", available)
-					g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: %s, Reg: %s}", dv, phiTag, home)
+					g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: %s, Reg: %s, ID: 0}", dv, phiTag, home)
 					g.emit("} else {")
 					g.emit("\t%s = JITValueDesc{Loc: LocStack, Type: %s, StackOff: %sint32(%s)}", dv, phiTag, phiBaseExpr, phiOff)
 					g.emit("}")
@@ -3755,6 +3772,7 @@ func (g *codeGen) inlineCallCaptured(callee *ssa.Function, callArgs []ssa.Value,
 			g.emit("ctx.ResolveFixups()")
 		}
 		g.resetAllPhiDescsToStack()
+		g.bindActivePhiRegisterHomes(bbIdx)
 		g.emit("ctx.ReclaimUntrackedRegs()")
 
 		block := callee.Blocks[bbIdx]
@@ -4140,6 +4158,7 @@ func (g *codeGen) emitRecursiveBBRenderers() {
 		g.curBlock = bbIdx
 		g.resetAllPhiDescsToStack()
 		g.applyPhiStateOverlay(bbIdx)
+		g.bindActivePhiRegisterHomes(bbIdx)
 		g.emit("ctx.ReclaimUntrackedRegs()")
 		g.emitPinDescVars(g.externalDescVars(block))
 		if blockEndsInPanic(block) && !g.storageMode && g.opName != "" {
@@ -4705,9 +4724,16 @@ func (g *codeGen) freeDeadOperands(instr ssa.Instruction) {
 	}
 }
 
-// resetAllPhiDescsToStack restores phi descriptors to their canonical
-// stack-backed locations at BB entry. This prevents stale descriptor state
-// from one emitted BB affecting compile-time lowering decisions in another BB.
+// resetAllPhiDescsToStack restores every phi descriptor to its canonical home
+// at BB-renderer entry. "Canonical" means the location written by predecessor
+// edge code in the final machine program; it does not mean that the descriptor
+// owns a register in the one-pass allocator yet.
+//
+// Renderer closures are invoked in code-generation order, not runtime control-
+// flow order. A descriptor may therefore still contain the register/spill state
+// left by whichever sibling renderer happened to be generated first. Resetting
+// removes that order dependency. Register homes deliberately use ID 0 here:
+// ownership becomes valid only for a phi in the BB where that phi is live.
 func (g *codeGen) resetAllPhiDescsToStack() {
 	phiNames := make([]string, 0, len(g.phiRegs))
 	for phiName := range g.phiRegs {
@@ -4744,7 +4770,10 @@ func (g *codeGen) resetAllPhiDescsToStack() {
 		} else if g.phiPair[phiName] {
 			if home, home2, available, planned := g.phiRegisterPairHome(phiName); planned {
 				g.emit("if %s {", available)
-				g.emit("\t%s = JITValueDesc{Loc: LocRegPair, Type: %s, Reg: %s, Reg2: %s}", gv.goVar, phiTag, home, home2)
+				// This assignment only describes the stable home. Ownership is
+				// time-dependent when graph colors are reused, so it is established
+				// separately for the phis of the BB currently being emitted.
+				g.emit("\t%s = JITValueDesc{Loc: LocRegPair, Type: %s, Reg: %s, Reg2: %s, ID: 0}", gv.goVar, phiTag, home, home2)
 				g.emit("} else {")
 				g.emit("\t%s = JITValueDesc{Loc: LocStackPair, Type: %s, StackOff: %s}", gv.goVar, phiTag, stackOff)
 				g.emit("}")
@@ -4754,13 +4783,44 @@ func (g *codeGen) resetAllPhiDescsToStack() {
 		} else {
 			if home, available, planned := g.phiRegisterHome(phiName); planned {
 				g.emit("if %s {", available)
-				g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: %s, Reg: %s}", gv.goVar, phiTag, home)
+				g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: %s, Reg: %s, ID: 0}", gv.goVar, phiTag, home)
 				g.emit("} else {")
 				g.emit("\t%s = JITValueDesc{Loc: LocStack, Type: %s, StackOff: %s}", gv.goVar, phiTag, stackOff)
 				g.emit("}")
 			} else {
 				g.emit("%s = JITValueDesc{Loc: LocStack, Type: %s, StackOff: %s}", gv.goVar, phiTag, stackOff)
 			}
+		}
+	}
+}
+
+// bindActivePhiRegisterHomes establishes spill ownership for the phi values
+// which are live at the current basic-block entry. A physical home is a stable
+// location, not a permanent descriptor owner: graph coloring intentionally
+// lets non-overlapping phis reuse a color. Binding every function phi at every
+// BB entry would therefore attach the register to an arbitrary inactive value,
+// and a later spill/free would update the wrong descriptor.
+//
+// resetAllPhiDescsToStack marks register-home descriptors as borrowed (ID 0) so
+// injectBindRegCalls leaves them alone. This function is the sole transition
+// from that declarative placement to active allocator ownership.
+func (g *codeGen) bindActivePhiRegisterHomes(bbIdx int) {
+	for _, phi := range g.blockPhis(bbIdx) {
+		generated, ok := g.vals[phi.Name()]
+		if !ok || !generated.isDesc || generated.goVar == "" {
+			continue
+		}
+		if home, home2, available, planned := g.phiRegisterPairHome(phi.Name()); planned {
+			g.emit("if %s && %s.Loc == LocRegPair {", available, generated.goVar)
+			g.emit("\tctx.BindReg(%s, &%s)", home, generated.goVar)
+			g.emit("\tctx.BindReg(%s, &%s)", home2, generated.goVar)
+			g.emit("}")
+			continue
+		}
+		if home, available, planned := g.phiRegisterHome(phi.Name()); planned {
+			g.emit("if %s && %s.Loc == LocReg {", available, generated.goVar)
+			g.emit("\tctx.BindReg(%s, &%s)", home, generated.goVar)
+			g.emit("}")
 		}
 	}
 }

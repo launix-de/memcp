@@ -345,48 +345,42 @@ func init_vector() {
 				_ = d9
 				var d10 JITValueDesc
 				if phiHomeOK2 {
-					d10 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r0}
-					ctx.BindReg(r0, &d10)
+					d10 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r0, ID: 0}
 				} else {
 					d10 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(32)}
 				}
 				_ = d10
 				var d11 JITValueDesc
 				if phiHomeOK3 {
-					d11 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r1}
-					ctx.BindReg(r1, &d11)
+					d11 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r1, ID: 0}
 				} else {
 					d11 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(48)}
 				}
 				_ = d11
 				var d12 JITValueDesc
 				if phiHomeOK4 {
-					d12 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r2}
-					ctx.BindReg(r2, &d12)
+					d12 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r2, ID: 0}
 				} else {
 					d12 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(64)}
 				}
 				_ = d12
 				var d13 JITValueDesc
 				if phiHomeOK5 {
-					d13 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r3}
-					ctx.BindReg(r3, &d13)
+					d13 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r3, ID: 0}
 				} else {
 					d13 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(80)}
 				}
 				_ = d13
 				var d14 JITValueDesc
 				if phiHomeOK6 {
-					d14 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r4}
-					ctx.BindReg(r4, &d14)
+					d14 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r4, ID: 0}
 				} else {
 					d14 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(96)}
 				}
 				_ = d14
 				var d15 JITValueDesc
 				if phiHomeOK7 {
-					d15 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r5}
-					ctx.BindReg(r5, &d15)
+					d15 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r5, ID: 0}
 				} else {
 					d15 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(112)}
 				}
@@ -484,38 +478,32 @@ func init_vector() {
 					d8 = JITValueDesc{Loc: LocStackPair, Type: tagString, StackOff: int32(phiBase0) + int32(0)}
 					d9 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(16)}
 					if phiHomeOK2 {
-						d10 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r0}
-						ctx.BindReg(r0, &d10)
+						d10 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r0, ID: 0}
 					} else {
 						d10 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(32)}
 					}
 					if phiHomeOK3 {
-						d11 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r1}
-						ctx.BindReg(r1, &d11)
+						d11 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r1, ID: 0}
 					} else {
 						d11 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(48)}
 					}
 					if phiHomeOK4 {
-						d12 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r2}
-						ctx.BindReg(r2, &d12)
+						d12 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r2, ID: 0}
 					} else {
 						d12 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(64)}
 					}
 					if phiHomeOK5 {
-						d13 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r3}
-						ctx.BindReg(r3, &d13)
+						d13 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r3, ID: 0}
 					} else {
 						d13 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(80)}
 					}
 					if phiHomeOK6 {
-						d14 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r4}
-						ctx.BindReg(r4, &d14)
+						d14 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r4, ID: 0}
 					} else {
 						d14 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(96)}
 					}
 					if phiHomeOK7 {
-						d15 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r5}
-						ctx.BindReg(r5, &d15)
+						d15 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r5, ID: 0}
 					} else {
 						d15 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(112)}
 					}
@@ -768,38 +756,32 @@ func init_vector() {
 					d8 = JITValueDesc{Loc: LocStackPair, Type: tagString, StackOff: int32(phiBase0) + int32(0)}
 					d9 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(16)}
 					if phiHomeOK2 {
-						d10 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r0}
-						ctx.BindReg(r0, &d10)
+						d10 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r0, ID: 0}
 					} else {
 						d10 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(32)}
 					}
 					if phiHomeOK3 {
-						d11 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r1}
-						ctx.BindReg(r1, &d11)
+						d11 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r1, ID: 0}
 					} else {
 						d11 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(48)}
 					}
 					if phiHomeOK4 {
-						d12 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r2}
-						ctx.BindReg(r2, &d12)
+						d12 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r2, ID: 0}
 					} else {
 						d12 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(64)}
 					}
 					if phiHomeOK5 {
-						d13 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r3}
-						ctx.BindReg(r3, &d13)
+						d13 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r3, ID: 0}
 					} else {
 						d13 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(80)}
 					}
 					if phiHomeOK6 {
-						d14 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r4}
-						ctx.BindReg(r4, &d14)
+						d14 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r4, ID: 0}
 					} else {
 						d14 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(96)}
 					}
 					if phiHomeOK7 {
-						d15 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r5}
-						ctx.BindReg(r5, &d15)
+						d15 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r5, ID: 0}
 					} else {
 						d15 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(112)}
 					}
@@ -996,38 +978,32 @@ func init_vector() {
 					d8 = JITValueDesc{Loc: LocStackPair, Type: tagString, StackOff: int32(phiBase0) + int32(0)}
 					d9 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(16)}
 					if phiHomeOK2 {
-						d10 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r0}
-						ctx.BindReg(r0, &d10)
+						d10 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r0, ID: 0}
 					} else {
 						d10 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(32)}
 					}
 					if phiHomeOK3 {
-						d11 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r1}
-						ctx.BindReg(r1, &d11)
+						d11 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r1, ID: 0}
 					} else {
 						d11 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(48)}
 					}
 					if phiHomeOK4 {
-						d12 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r2}
-						ctx.BindReg(r2, &d12)
+						d12 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r2, ID: 0}
 					} else {
 						d12 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(64)}
 					}
 					if phiHomeOK5 {
-						d13 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r3}
-						ctx.BindReg(r3, &d13)
+						d13 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r3, ID: 0}
 					} else {
 						d13 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(80)}
 					}
 					if phiHomeOK6 {
-						d14 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r4}
-						ctx.BindReg(r4, &d14)
+						d14 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r4, ID: 0}
 					} else {
 						d14 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(96)}
 					}
 					if phiHomeOK7 {
-						d15 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r5}
-						ctx.BindReg(r5, &d15)
+						d15 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r5, ID: 0}
 					} else {
 						d15 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(112)}
 					}
@@ -1408,38 +1384,32 @@ func init_vector() {
 					d8 = JITValueDesc{Loc: LocStackPair, Type: tagString, StackOff: int32(phiBase0) + int32(0)}
 					d9 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(16)}
 					if phiHomeOK2 {
-						d10 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r0}
-						ctx.BindReg(r0, &d10)
+						d10 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r0, ID: 0}
 					} else {
 						d10 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(32)}
 					}
 					if phiHomeOK3 {
-						d11 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r1}
-						ctx.BindReg(r1, &d11)
+						d11 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r1, ID: 0}
 					} else {
 						d11 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(48)}
 					}
 					if phiHomeOK4 {
-						d12 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r2}
-						ctx.BindReg(r2, &d12)
+						d12 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r2, ID: 0}
 					} else {
 						d12 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(64)}
 					}
 					if phiHomeOK5 {
-						d13 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r3}
-						ctx.BindReg(r3, &d13)
+						d13 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r3, ID: 0}
 					} else {
 						d13 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(80)}
 					}
 					if phiHomeOK6 {
-						d14 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r4}
-						ctx.BindReg(r4, &d14)
+						d14 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r4, ID: 0}
 					} else {
 						d14 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(96)}
 					}
 					if phiHomeOK7 {
-						d15 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r5}
-						ctx.BindReg(r5, &d15)
+						d15 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r5, ID: 0}
 					} else {
 						d15 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(112)}
 					}
@@ -1638,38 +1608,32 @@ func init_vector() {
 					d8 = JITValueDesc{Loc: LocStackPair, Type: tagString, StackOff: int32(phiBase0) + int32(0)}
 					d9 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(16)}
 					if phiHomeOK2 {
-						d10 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r0}
-						ctx.BindReg(r0, &d10)
+						d10 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r0, ID: 0}
 					} else {
 						d10 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(32)}
 					}
 					if phiHomeOK3 {
-						d11 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r1}
-						ctx.BindReg(r1, &d11)
+						d11 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r1, ID: 0}
 					} else {
 						d11 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(48)}
 					}
 					if phiHomeOK4 {
-						d12 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r2}
-						ctx.BindReg(r2, &d12)
+						d12 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r2, ID: 0}
 					} else {
 						d12 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(64)}
 					}
 					if phiHomeOK5 {
-						d13 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r3}
-						ctx.BindReg(r3, &d13)
+						d13 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r3, ID: 0}
 					} else {
 						d13 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(80)}
 					}
 					if phiHomeOK6 {
-						d14 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r4}
-						ctx.BindReg(r4, &d14)
+						d14 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r4, ID: 0}
 					} else {
 						d14 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(96)}
 					}
 					if phiHomeOK7 {
-						d15 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r5}
-						ctx.BindReg(r5, &d15)
+						d15 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r5, ID: 0}
 					} else {
 						d15 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(112)}
 					}
@@ -1825,38 +1789,32 @@ func init_vector() {
 					d8 = JITValueDesc{Loc: LocStackPair, Type: tagString, StackOff: int32(phiBase0) + int32(0)}
 					d9 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(16)}
 					if phiHomeOK2 {
-						d10 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r0}
-						ctx.BindReg(r0, &d10)
+						d10 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r0, ID: 0}
 					} else {
 						d10 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(32)}
 					}
 					if phiHomeOK3 {
-						d11 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r1}
-						ctx.BindReg(r1, &d11)
+						d11 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r1, ID: 0}
 					} else {
 						d11 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(48)}
 					}
 					if phiHomeOK4 {
-						d12 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r2}
-						ctx.BindReg(r2, &d12)
+						d12 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r2, ID: 0}
 					} else {
 						d12 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(64)}
 					}
 					if phiHomeOK5 {
-						d13 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r3}
-						ctx.BindReg(r3, &d13)
+						d13 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r3, ID: 0}
 					} else {
 						d13 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(80)}
 					}
 					if phiHomeOK6 {
-						d14 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r4}
-						ctx.BindReg(r4, &d14)
+						d14 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r4, ID: 0}
 					} else {
 						d14 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(96)}
 					}
 					if phiHomeOK7 {
-						d15 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r5}
-						ctx.BindReg(r5, &d15)
+						d15 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r5, ID: 0}
 					} else {
 						d15 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(112)}
 					}
@@ -2093,38 +2051,32 @@ func init_vector() {
 					d8 = JITValueDesc{Loc: LocStackPair, Type: tagString, StackOff: int32(phiBase0) + int32(0)}
 					d9 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(16)}
 					if phiHomeOK2 {
-						d10 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r0}
-						ctx.BindReg(r0, &d10)
+						d10 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r0, ID: 0}
 					} else {
 						d10 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(32)}
 					}
 					if phiHomeOK3 {
-						d11 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r1}
-						ctx.BindReg(r1, &d11)
+						d11 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r1, ID: 0}
 					} else {
 						d11 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(48)}
 					}
 					if phiHomeOK4 {
-						d12 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r2}
-						ctx.BindReg(r2, &d12)
+						d12 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r2, ID: 0}
 					} else {
 						d12 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(64)}
 					}
 					if phiHomeOK5 {
-						d13 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r3}
-						ctx.BindReg(r3, &d13)
+						d13 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r3, ID: 0}
 					} else {
 						d13 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(80)}
 					}
 					if phiHomeOK6 {
-						d14 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r4}
-						ctx.BindReg(r4, &d14)
+						d14 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r4, ID: 0}
 					} else {
 						d14 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(96)}
 					}
 					if phiHomeOK7 {
-						d15 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r5}
-						ctx.BindReg(r5, &d15)
+						d15 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r5, ID: 0}
 					} else {
 						d15 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(112)}
 					}
@@ -2271,6 +2223,18 @@ func init_vector() {
 					}
 					if !ps.General && len(ps.PhiValues) > 3 && ps.PhiValues[3].Loc != LocNone {
 						d13 = ps.PhiValues[3]
+					}
+					if phiHomeOK2 && d10.Loc == LocReg {
+						ctx.BindReg(r0, &d10)
+					}
+					if phiHomeOK3 && d11.Loc == LocReg {
+						ctx.BindReg(r1, &d11)
+					}
+					if phiHomeOK4 && d12.Loc == LocReg {
+						ctx.BindReg(r2, &d12)
+					}
+					if phiHomeOK5 && d13.Loc == LocReg {
+						ctx.BindReg(r3, &d13)
 					}
 					ctx.ReclaimUntrackedRegs()
 					var d116 JITValueDesc
@@ -2722,38 +2686,32 @@ func init_vector() {
 					d8 = JITValueDesc{Loc: LocStackPair, Type: tagString, StackOff: int32(phiBase0) + int32(0)}
 					d9 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(16)}
 					if phiHomeOK2 {
-						d10 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r0}
-						ctx.BindReg(r0, &d10)
+						d10 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r0, ID: 0}
 					} else {
 						d10 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(32)}
 					}
 					if phiHomeOK3 {
-						d11 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r1}
-						ctx.BindReg(r1, &d11)
+						d11 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r1, ID: 0}
 					} else {
 						d11 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(48)}
 					}
 					if phiHomeOK4 {
-						d12 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r2}
-						ctx.BindReg(r2, &d12)
+						d12 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r2, ID: 0}
 					} else {
 						d12 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(64)}
 					}
 					if phiHomeOK5 {
-						d13 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r3}
-						ctx.BindReg(r3, &d13)
+						d13 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r3, ID: 0}
 					} else {
 						d13 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(80)}
 					}
 					if phiHomeOK6 {
-						d14 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r4}
-						ctx.BindReg(r4, &d14)
+						d14 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r4, ID: 0}
 					} else {
 						d14 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(96)}
 					}
 					if phiHomeOK7 {
-						d15 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r5}
-						ctx.BindReg(r5, &d15)
+						d15 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r5, ID: 0}
 					} else {
 						d15 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(112)}
 					}
@@ -3458,38 +3416,32 @@ func init_vector() {
 					d8 = JITValueDesc{Loc: LocStackPair, Type: tagString, StackOff: int32(phiBase0) + int32(0)}
 					d9 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(16)}
 					if phiHomeOK2 {
-						d10 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r0}
-						ctx.BindReg(r0, &d10)
+						d10 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r0, ID: 0}
 					} else {
 						d10 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(32)}
 					}
 					if phiHomeOK3 {
-						d11 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r1}
-						ctx.BindReg(r1, &d11)
+						d11 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r1, ID: 0}
 					} else {
 						d11 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(48)}
 					}
 					if phiHomeOK4 {
-						d12 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r2}
-						ctx.BindReg(r2, &d12)
+						d12 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r2, ID: 0}
 					} else {
 						d12 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(64)}
 					}
 					if phiHomeOK5 {
-						d13 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r3}
-						ctx.BindReg(r3, &d13)
+						d13 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r3, ID: 0}
 					} else {
 						d13 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(80)}
 					}
 					if phiHomeOK6 {
-						d14 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r4}
-						ctx.BindReg(r4, &d14)
+						d14 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r4, ID: 0}
 					} else {
 						d14 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(96)}
 					}
 					if phiHomeOK7 {
-						d15 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r5}
-						ctx.BindReg(r5, &d15)
+						d15 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r5, ID: 0}
 					} else {
 						d15 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(112)}
 					}
@@ -3913,38 +3865,32 @@ func init_vector() {
 					d8 = JITValueDesc{Loc: LocStackPair, Type: tagString, StackOff: int32(phiBase0) + int32(0)}
 					d9 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(16)}
 					if phiHomeOK2 {
-						d10 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r0}
-						ctx.BindReg(r0, &d10)
+						d10 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r0, ID: 0}
 					} else {
 						d10 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(32)}
 					}
 					if phiHomeOK3 {
-						d11 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r1}
-						ctx.BindReg(r1, &d11)
+						d11 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r1, ID: 0}
 					} else {
 						d11 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(48)}
 					}
 					if phiHomeOK4 {
-						d12 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r2}
-						ctx.BindReg(r2, &d12)
+						d12 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r2, ID: 0}
 					} else {
 						d12 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(64)}
 					}
 					if phiHomeOK5 {
-						d13 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r3}
-						ctx.BindReg(r3, &d13)
+						d13 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r3, ID: 0}
 					} else {
 						d13 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(80)}
 					}
 					if phiHomeOK6 {
-						d14 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r4}
-						ctx.BindReg(r4, &d14)
+						d14 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r4, ID: 0}
 					} else {
 						d14 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(96)}
 					}
 					if phiHomeOK7 {
-						d15 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r5}
-						ctx.BindReg(r5, &d15)
+						d15 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r5, ID: 0}
 					} else {
 						d15 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(112)}
 					}
@@ -4805,38 +4751,32 @@ func init_vector() {
 					d8 = JITValueDesc{Loc: LocStackPair, Type: tagString, StackOff: int32(phiBase0) + int32(0)}
 					d9 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(16)}
 					if phiHomeOK2 {
-						d10 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r0}
-						ctx.BindReg(r0, &d10)
+						d10 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r0, ID: 0}
 					} else {
 						d10 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(32)}
 					}
 					if phiHomeOK3 {
-						d11 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r1}
-						ctx.BindReg(r1, &d11)
+						d11 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r1, ID: 0}
 					} else {
 						d11 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(48)}
 					}
 					if phiHomeOK4 {
-						d12 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r2}
-						ctx.BindReg(r2, &d12)
+						d12 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r2, ID: 0}
 					} else {
 						d12 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(64)}
 					}
 					if phiHomeOK5 {
-						d13 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r3}
-						ctx.BindReg(r3, &d13)
+						d13 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r3, ID: 0}
 					} else {
 						d13 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(80)}
 					}
 					if phiHomeOK6 {
-						d14 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r4}
-						ctx.BindReg(r4, &d14)
+						d14 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r4, ID: 0}
 					} else {
 						d14 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(96)}
 					}
 					if phiHomeOK7 {
-						d15 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r5}
-						ctx.BindReg(r5, &d15)
+						d15 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r5, ID: 0}
 					} else {
 						d15 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(112)}
 					}
@@ -5094,6 +5034,12 @@ func init_vector() {
 					}
 					if !ps.General && len(ps.PhiValues) > 1 && ps.PhiValues[1].Loc != LocNone {
 						d15 = ps.PhiValues[1]
+					}
+					if phiHomeOK6 && d14.Loc == LocReg {
+						ctx.BindReg(r4, &d14)
+					}
+					if phiHomeOK7 && d15.Loc == LocReg {
+						ctx.BindReg(r5, &d15)
 					}
 					ctx.ReclaimUntrackedRegs()
 					var d299 JITValueDesc
@@ -5755,38 +5701,32 @@ func init_vector() {
 					d8 = JITValueDesc{Loc: LocStackPair, Type: tagString, StackOff: int32(phiBase0) + int32(0)}
 					d9 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(16)}
 					if phiHomeOK2 {
-						d10 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r0}
-						ctx.BindReg(r0, &d10)
+						d10 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r0, ID: 0}
 					} else {
 						d10 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(32)}
 					}
 					if phiHomeOK3 {
-						d11 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r1}
-						ctx.BindReg(r1, &d11)
+						d11 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r1, ID: 0}
 					} else {
 						d11 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(48)}
 					}
 					if phiHomeOK4 {
-						d12 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r2}
-						ctx.BindReg(r2, &d12)
+						d12 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r2, ID: 0}
 					} else {
 						d12 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(64)}
 					}
 					if phiHomeOK5 {
-						d13 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r3}
-						ctx.BindReg(r3, &d13)
+						d13 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r3, ID: 0}
 					} else {
 						d13 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(80)}
 					}
 					if phiHomeOK6 {
-						d14 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r4}
-						ctx.BindReg(r4, &d14)
+						d14 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r4, ID: 0}
 					} else {
 						d14 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(96)}
 					}
 					if phiHomeOK7 {
-						d15 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r5}
-						ctx.BindReg(r5, &d15)
+						d15 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r5, ID: 0}
 					} else {
 						d15 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(112)}
 					}
@@ -6423,38 +6363,32 @@ func init_vector() {
 					d8 = JITValueDesc{Loc: LocStackPair, Type: tagString, StackOff: int32(phiBase0) + int32(0)}
 					d9 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(16)}
 					if phiHomeOK2 {
-						d10 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r0}
-						ctx.BindReg(r0, &d10)
+						d10 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r0, ID: 0}
 					} else {
 						d10 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(32)}
 					}
 					if phiHomeOK3 {
-						d11 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r1}
-						ctx.BindReg(r1, &d11)
+						d11 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r1, ID: 0}
 					} else {
 						d11 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(48)}
 					}
 					if phiHomeOK4 {
-						d12 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r2}
-						ctx.BindReg(r2, &d12)
+						d12 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r2, ID: 0}
 					} else {
 						d12 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(64)}
 					}
 					if phiHomeOK5 {
-						d13 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r3}
-						ctx.BindReg(r3, &d13)
+						d13 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r3, ID: 0}
 					} else {
 						d13 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(80)}
 					}
 					if phiHomeOK6 {
-						d14 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r4}
-						ctx.BindReg(r4, &d14)
+						d14 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r4, ID: 0}
 					} else {
 						d14 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(96)}
 					}
 					if phiHomeOK7 {
-						d15 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r5}
-						ctx.BindReg(r5, &d15)
+						d15 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r5, ID: 0}
 					} else {
 						d15 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(112)}
 					}
@@ -7576,38 +7510,32 @@ func init_vector() {
 					d8 = JITValueDesc{Loc: LocStackPair, Type: tagString, StackOff: int32(phiBase0) + int32(0)}
 					d9 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(16)}
 					if phiHomeOK2 {
-						d10 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r0}
-						ctx.BindReg(r0, &d10)
+						d10 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r0, ID: 0}
 					} else {
 						d10 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(32)}
 					}
 					if phiHomeOK3 {
-						d11 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r1}
-						ctx.BindReg(r1, &d11)
+						d11 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r1, ID: 0}
 					} else {
 						d11 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(48)}
 					}
 					if phiHomeOK4 {
-						d12 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r2}
-						ctx.BindReg(r2, &d12)
+						d12 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r2, ID: 0}
 					} else {
 						d12 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(64)}
 					}
 					if phiHomeOK5 {
-						d13 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r3}
-						ctx.BindReg(r3, &d13)
+						d13 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r3, ID: 0}
 					} else {
 						d13 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(80)}
 					}
 					if phiHomeOK6 {
-						d14 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r4}
-						ctx.BindReg(r4, &d14)
+						d14 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r4, ID: 0}
 					} else {
 						d14 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(96)}
 					}
 					if phiHomeOK7 {
-						d15 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r5}
-						ctx.BindReg(r5, &d15)
+						d15 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r5, ID: 0}
 					} else {
 						d15 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(112)}
 					}
@@ -8758,38 +8686,32 @@ func init_vector() {
 					d8 = JITValueDesc{Loc: LocStackPair, Type: tagString, StackOff: int32(phiBase0) + int32(0)}
 					d9 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(16)}
 					if phiHomeOK2 {
-						d10 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r0}
-						ctx.BindReg(r0, &d10)
+						d10 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r0, ID: 0}
 					} else {
 						d10 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(32)}
 					}
 					if phiHomeOK3 {
-						d11 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r1}
-						ctx.BindReg(r1, &d11)
+						d11 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r1, ID: 0}
 					} else {
 						d11 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(48)}
 					}
 					if phiHomeOK4 {
-						d12 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r2}
-						ctx.BindReg(r2, &d12)
+						d12 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r2, ID: 0}
 					} else {
 						d12 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(64)}
 					}
 					if phiHomeOK5 {
-						d13 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r3}
-						ctx.BindReg(r3, &d13)
+						d13 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r3, ID: 0}
 					} else {
 						d13 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(80)}
 					}
 					if phiHomeOK6 {
-						d14 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r4}
-						ctx.BindReg(r4, &d14)
+						d14 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r4, ID: 0}
 					} else {
 						d14 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase0) + int32(96)}
 					}
 					if phiHomeOK7 {
-						d15 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r5}
-						ctx.BindReg(r5, &d15)
+						d15 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r5, ID: 0}
 					} else {
 						d15 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(112)}
 					}

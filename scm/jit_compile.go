@@ -942,6 +942,11 @@ func (ctx *JITContext) PreparePointerStackTarget(off int32, words int) {
 // home at its producer. Machine code in successor blocks can then be entered
 // repeatedly without depending on the allocator state used while those blocks
 // were emitted once.
+//
+// This operation changes the canonical runtime location. Consumers must not
+// accidentally turn the canonical descriptor back into a register-resident
+// cross-block contract merely by loading it: a register reload is a block-local
+// materialization, while predecessor edges continue to write this stack slot.
 func (ctx *JITContext) StabilizeDescForControlFlow(desc *JITValueDesc) {
 	ctx.SyncDesc(desc)
 	words := int32(0)

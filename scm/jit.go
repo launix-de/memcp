@@ -367,9 +367,18 @@ type JITHiddenArg struct {
 	SourceInput int
 }
 
-// JITValueDesc describes a value during JIT compilation: its type and
-// storage location. Flows through expression compilation for type
-// propagation — analogous to optimizerMetainfo in the optimizer.
+// JITValueDesc describes a runtime value while machine code is being emitted.
+// The descriptor itself lives in Go and is mutable; the described value lives
+// in the future JIT invocation. An emitted load/store changes the latter only
+// when the generated code runs, while changing Loc/Reg/StackOff immediately
+// changes the emitter's belief about that future location. Every helper must
+// keep those two timelines separate.
+//
+// ID is allocator identity, not SSA identity. Descriptors with the same nonzero
+// ID are aliases of one spill owner and SyncDesc makes their placement agree.
+// ID 0 is a non-owning view: it may be passed to an emitter, but must not free or
+// steal the source descriptor's registers. A helper which materializes such a
+// view may assign it a fresh ID, thereby creating a new temporary owner.
 //
 // Type uses the tag constants (tagInt, tagFloat, tagBool, ...) directly,
 // or JITTypeUnknown (0xFF) when the type is not known at compile time.
@@ -739,7 +748,11 @@ type JITRegisterBank struct {
 }
 
 // JITRegisterSlot is an architecture-independent, statically colored value
-// bundle. Cost estimates the loop traffic avoided by retaining the bundle.
+// bundle. jitgen constructs these slots offline from Go SSA; runtime emission
+// only maps them onto the register bank offered by the current architecture.
+// Cost estimates the repeated load/store traffic avoided by retaining a slot.
+// Width describes the logical bundle, whereas Lanes describes the words still
+// required after runtime type information has folded tags or other components.
 type JITRegisterSlot struct {
 	Color uint8
 	Width uint8
@@ -779,6 +792,12 @@ type jitRegisterHomeEviction struct {
 
 // AllocRegisterHomes retains the most valuable planned colors while preserving
 // the backend's temporary-register budget. Excess colors keep their stack home.
+//
+// A selected register is protected for the lifetime of this nested emitter,
+// but protection is not descriptor ownership. Protection prevents ordinary
+// temporaries from taking the register; BindReg later attaches the currently
+// live SSA value. This distinction is required because graph colors are reused
+// by values with non-overlapping live ranges.
 func (ctx *JITContext) AllocRegisterHomes(plan JITRegisterPlan) JITRegisterHomes {
 	var homes JITRegisterHomes
 	if plan.Count == 0 {
@@ -1018,7 +1037,10 @@ func (ctx *JITContext) RequestOptimizedCallback(sourceInput int) JITValueDesc {
 }
 
 // jitAllocStateSnapshot captures allocator/spill bookkeeping so emitter
-// generation can render sibling BBs from identical allocator state.
+// generation can render sibling BBs from identical allocator state. It is not
+// runtime state and emits no save/restore instructions. Machine values which
+// must survive a runtime branch need explicit homes before this bookkeeping is
+// rewound; restoring only these Go fields cannot resurrect a runtime register.
 type jitAllocStateSnapshot struct {
 	freeRegs            uint64
 	protectedRegs       uint64
@@ -1331,27 +1353,55 @@ func (ctx *JITContext) ReclaimUntrackedRegs() {
 	}
 }
 
-type jitNestedPreservation struct {
+// JITRegisterBoundary is a reversible allocator boundary around nested
+// emission. It records where the outer machine program's live register values
+// were spilled; Restore reloads those exact registers and reinstates the
+// allocator metadata captured before the nested emitter ran.
+//
+// Fixed arrays are intentional. This operation sits on the JIT compilation
+// path and must not allocate merely because a callback emitter needs temporary
+// freedom on the register bank.
+type JITRegisterBoundary struct {
 	alloc jitAllocStateSnapshot
-	regs  []Reg
-	offs  []int32
+	regs  [16]Reg
+	offs  [16]int32
+	count uint8
 }
 
-// PreserveOuterRegs makes nested emission independent of registers whose
-// identities have already been embedded in outer control flow. The values are
-// saved in invocation-local spill slots, all allocator registers become
-// available to the nested emitter, and RestoreOuterRegs reloads the exact same
-// registers before outer code resumes.
-func (ctx *JITContext) PreserveOuterRegs() jitNestedPreservation {
+// JITRegisterBoundaryOptions controls which outer placements remain visible to
+// a nested emitter. ResultRegs are deliberately left in place so an inner
+// producer can write directly to its caller-selected destination. ReleaseHomes
+// trades residency for register capacity: false lets a nested weighted plan
+// evict only cheaper homes; true spills every outer home and is appropriate for
+// callbacks whose body needs the complete register bank.
+type JITRegisterBoundaryOptions struct {
+	ResultRegs   []Reg
+	ReleaseHomes bool
+}
+
+// PreserveOuterRegs makes nested emission independent of ordinary temporary
+// registers whose identities have already been embedded in outer control flow.
+// Weighted homes remain resident so the nested plan can compare costs and evict
+// them selectively. PreserveRegisters with ReleaseHomes is the stronger form
+// for callbacks which need the complete register bank.
+func (ctx *JITContext) PreserveOuterRegs() JITRegisterBoundary {
 	return ctx.PreserveOuterRegsExcept()
 }
 
 // PreserveOuterRegsExcept preserves the outer allocator state while leaving
 // result registers in place for a nested emitter to overwrite directly.
-func (ctx *JITContext) PreserveOuterRegsExcept(resultRegs ...Reg) jitNestedPreservation {
-	p := jitNestedPreservation{alloc: ctx.SnapshotAllocState()}
+func (ctx *JITContext) PreserveOuterRegsExcept(resultRegs ...Reg) JITRegisterBoundary {
+	return ctx.PreserveRegisters(JITRegisterBoundaryOptions{ResultRegs: resultRegs})
+}
+
+// PreserveRegisters opens a reusable register-allocation boundary. This is the
+// common mechanism for generated builtin callbacks, parser actions and manual
+// emitters such as regex walkers; those callers must not each invent their own
+// ProtectReg/spill convention.
+func (ctx *JITContext) PreserveRegisters(options JITRegisterBoundaryOptions) JITRegisterBoundary {
+	p := JITRegisterBoundary{alloc: ctx.SnapshotAllocState()}
 	var resultMask uint64
-	for _, r := range resultRegs {
+	for _, r := range options.ResultRegs {
 		resultMask |= 1 << uint(r)
 	}
 	for r := Reg(0); r <= RegR15; r++ {
@@ -1365,7 +1415,7 @@ func (ctx *JITContext) PreserveOuterRegsExcept(resultRegs ...Reg) jitNestedPrese
 		// one-pass emission. Keep them resident here; an inner register plan may
 		// selectively evict cheaper homes and restores their exact registers when
 		// it returns. Ordinary temporaries still take the conservative save path.
-		if ctx.RegisterHomeID[r] != 0 {
+		if !options.ReleaseHomes && ctx.RegisterHomeID[r] != 0 {
 			continue
 		}
 		off := ctx.AllocSpill(8)
@@ -1373,18 +1423,28 @@ func (ctx *JITContext) PreserveOuterRegsExcept(resultRegs ...Reg) jitNestedPrese
 		if ctx.regHoldsPointer(r) {
 			ctx.setStackPointer(jitStackRootFrameBP, off, true)
 		}
-		p.regs = append(p.regs, r)
-		p.offs = append(p.offs, off)
+		p.regs[p.count] = r
+		p.offs[p.count] = off
+		p.count++
 		ctx.RegOwners[r] = nil
 		ctx.FreeRegs |= 1 << uint(r)
+		if options.ReleaseHomes {
+			// The snapshot retains the home metadata for Restore. Leaving it on a
+			// now-free register would make a nested plan mistake its own register
+			// for an occupied outer bundle.
+			ctx.RegisterHomeCost[r] = 0
+			ctx.RegisterHomeID[r] = 0
+		}
 	}
 	homeMask := uint64(0)
 	for r := Reg(0); r <= RegR15; r++ {
-		if ctx.RegisterHomeID[r] != 0 {
+		if !options.ReleaseHomes && ctx.RegisterHomeID[r] != 0 {
 			homeMask |= 1 << uint(r)
 		}
 	}
-	ctx.PinnedRegisterHomes |= resultMask
+	// Released homes must not leave pin bits behind: a nested allocation may
+	// legitimately use those physical registers until this boundary is restored.
+	ctx.PinnedRegisterHomes &= homeMask | resultMask
 	ctx.ProtectedRegs &= resultMask | homeMask
 	for r := Reg(0); r <= RegR15; r++ {
 		if (resultMask|homeMask)&(1<<uint(r)) == 0 {
@@ -1394,9 +1454,16 @@ func (ctx *JITContext) PreserveOuterRegsExcept(resultRegs ...Reg) jitNestedPrese
 	return p
 }
 
-func (ctx *JITContext) RestoreOuterRegs(p jitNestedPreservation) {
-	for i, r := range p.regs {
-		ctx.EmitMovRegMem(r, RegRBP, p.offs[i])
+func (ctx *JITContext) RestoreOuterRegs(p JITRegisterBoundary) {
+	p.Restore(ctx)
+}
+
+// Restore closes a register boundary. Nested values must already have been
+// committed to their result/stack destinations; restoring intentionally
+// discards all allocator ownership created inside the boundary.
+func (p JITRegisterBoundary) Restore(ctx *JITContext) {
+	for i := uint8(0); i < p.count; i++ {
+		ctx.EmitMovRegMem(p.regs[i], RegRBP, p.offs[i])
 	}
 	ctx.RestoreAllocState(p.alloc)
 }

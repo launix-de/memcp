@@ -1144,6 +1144,24 @@ func TestJITExpressionTransferredMergeStackList(t *testing.T) {
 	}
 }
 
+func TestJITExpressionMergeInsideReducePreservesLoopHomes(t *testing.T) {
+	// reduce keeps its accumulator and cursor live while its known callback is
+	// emitted. merge has two independently planned loop cursors of its own. This
+	// composition exercises nested register-home allocation rather than the much
+	// easier case where merge owns the complete register bank.
+	compiled := compileJITExpressionTestProc(t, `(lambda (groups)
+		(reduce groups (lambda (acc group) (merge (list acc group))) '()))`)
+	groups := NewSlice([]Scmer{
+		NewSlice([]Scmer{NewInt(1), NewInt(2)}),
+		NewSlice([]Scmer{NewInt(3)}),
+		NewSlice([]Scmer{NewInt(4), NewInt(5)}),
+	})
+	want := NewSlice([]Scmer{NewInt(1), NewInt(2), NewInt(3), NewInt(4), NewInt(5)})
+	if got := Apply(compiled, groups); !Equal(got, want) {
+		t.Fatalf("nested merge returned %s, want %s", String(got), String(want))
+	}
+}
+
 func TestJITExpressionConsTailOfSingleElementList(t *testing.T) {
 	if !jitEnabled {
 		t.Skip("requires GOEXPERIMENT=jit")
