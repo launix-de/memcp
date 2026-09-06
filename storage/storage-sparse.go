@@ -203,13 +203,13 @@ func (s *StorageSparse) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, i
 		defer ctx.UnprotectReg(idxPinnedReg)
 	}
 	phiBase0 := ctx.AllocStack(int32(32))
-	var bbs [8]scm.BBDescriptor
-	bbs[1].PhiBase = int32(phiBase0) + int32(0)
-	bbs[1].PhiCount = uint16(2)
 	d1 := scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(phiBase0) + int32(0)}
 	_ = d1
 	d2 := scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(phiBase0) + int32(16)}
 	_ = d2
+	var bbs [8]scm.BBDescriptor
+	bbs[1].PhiBase = int32(phiBase0) + int32(0)
+	bbs[1].PhiCount = uint16(2)
 	if result.Loc == scm.LocAny {
 		result = scm.JITValueDesc{Loc: scm.LocRegPair, Type: scm.JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 		ctx.BindReg(result.Reg, &result)
