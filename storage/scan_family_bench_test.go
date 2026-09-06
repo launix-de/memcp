@@ -121,3 +121,49 @@ func BenchmarkScanFamilyFixedCosts(b *testing.B) {
 		})
 	}
 }
+
+// BenchmarkScanOrderPlannerCompiledFixedCosts includes optimizer lowering and
+// SCM dispatch while retaining the resulting cached procedure across calls.
+// It catches regressions where static ORDER BY access requirements fall back to
+// invocation-time boundary construction.
+func BenchmarkScanOrderPlannerCompiledFixedCosts(b *testing.B) {
+	Init(scm.Globalenv)
+	tbl := benchScanTable(b, "order_planner_compiled")
+	expr := scm.Read(b.Name(), `(lambda (table_value)
+		(scan_order nil table_value '() '() '() (lambda () true)
+			'("id") (list (collate "utf8mb4" false)) 0 0 72
+			'("id") (lambda (acc id) acc) nil false nil '() nil))`)
+	proc := scm.Eval(scm.Optimize(expr, &scm.Globalenv, nil), &scm.Globalenv)
+	tableValue := NewTableScmer(tbl)
+	for range 3 {
+		scm.Apply(proc, tableValue)
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		scm.Apply(proc, tableValue)
+	}
+}
+
+// BenchmarkScanBatchCoveredFixedCosts isolates the steady-state setup of a
+// planner-covered batch scan. Its access schema, batch values and column lists
+// are retained exactly as they are in a cached physical plan.
+func BenchmarkScanBatchCoveredFixedCosts(b *testing.B) {
+	tbl := benchScanTable(b, "batch_covered")
+	accessSchema := newScanAccessSchema(scanAccessConsumerCoveredScan, nil, -1)
+	trueFn := scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewBool(true) })
+	mapReduceFn := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[0] })
+	callbackCols := []string{"id"}
+	batchdata := []scm.Scmer{scm.NewInt(1)}
+	neutral := scm.NewNil()
+	tbl.scanWithBatch(nil, accessSchema, nil, nil, trueFn, callbackCols, mapReduceFn,
+		neutral, neutral, false, 1, batchdata)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		tbl.scanWithBatch(nil, accessSchema, nil, nil, trueFn, callbackCols, mapReduceFn,
+			neutral, neutral, false, 1, batchdata)
+	}
+}

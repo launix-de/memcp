@@ -122,9 +122,20 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 (define sql_number (parser (define x (regex "-?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:e-?[0-9]+)?" true)) (simplify x)))
 (define sql_interval_unit (parser '((define unit sql_identifier_unquoted) (? "(" (regex "[0-9]+") ")")) unit))
 
+/* strip one SQL string escape: doubled delimiter -> single, the six backslash
+   escapes MySQL decodes, everything else (\x) keeps its literal second byte */
+(define sql_string_unescape (lambda (m)
+	(match m
+		"''" "'"
+		"\"\"" "\""
+		"\\n" "\n"
+		"\\r" "\r"
+		"\\0" "\0"
+		(substr m 1))))
+
 (define sql_string (parser (or
-	(parser '((atom "'" false) (define x (regex "(\\\\.|''|[^\\'])*" false false)) (atom "'" false false)) (sql_unescape (replace x "''" "'")))
-	(parser '((atom "\"" false) (define x (regex "(\\\\.|\"\"|[^\\\"])*" false false)) (atom "\"" false false)) (sql_unescape (replace x "\"\"" "\"")))
+	(parser '((atom "'" false) (define x (regex "(\\\\.|''|[^\\'])*" false false)) (atom "'" false false)) (regexp_replace x "''|\\\\[\\\\'\"nr0]" sql_string_unescape))
+	(parser '((atom "\"" false) (define x (regex "(\\\\.|\"\"|[^\\\"])*" false false)) (atom "\"" false false)) (regexp_replace x "\"\"|\\\\[\\\\'\"nr0]" sql_string_unescape))
 )))
 (define sql_hex_literal (parser
 	(define x (regex "0[xX](?:[0-9A-Fa-f]{2})*"))
@@ -399,7 +410,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 						(list (list (symbol "insert") (list (symbol "table") schema tbl)
 							(cons (symbol "list") cols)
 							(cons (symbol "list") (map vals (lambda (row) (cons (symbol "list") (map row transform_trigger_expr)))))
-							(list (symbol "list")) (if ignore (list (symbol "lambda") '() 0) nil) false nil)))
+							(list (symbol "list")) (if ignore (list (symbol "lambda") '() 0) nil) false nil (symbol "tx"))))
 
 					/* INSERT INTO tbl (cols) <full SELECT> - stmt is (!insert_select tbl cols inner_select ignore) */
 					/* Reuses sql_select + build_queryplan_term (same as top-level INSERT...SELECT) */
@@ -443,7 +454,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 												(map select_names (lambda (name) (list (symbol "get_assoc") (symbol "item") name)))))
 										(list (symbol "list"))
 										(if ignore (list (symbol "lambda") '() 0) nil)
-										false nil)))
+										false nil (symbol "tx"))))
 							(build_queryplan_term (sql_expand_views inner_t policy) planning_session tx))))
 
 					/* UPDATE table SET ... WHERE ... - stmt is (!update tbl assignments where) */

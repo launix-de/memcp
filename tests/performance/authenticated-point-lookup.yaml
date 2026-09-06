@@ -1,0 +1,143 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+
+metadata:
+  version: "1.0"
+  description: "Authenticated point-query hot path with a composite database ACL lookup"
+  isolated: true
+  ci: true
+
+setup:
+  - sql: "DELETE FROM system.access WHERE username='point_lookup_perf'"
+  - sql: "DELETE FROM system.user WHERE username='point_lookup_perf'"
+  - sql: "DROP TABLE IF EXISTS authenticated_point_item"
+  - sql: "DROP TABLE IF EXISTS composite_lookup_driver"
+  - sql: "DROP TABLE IF EXISTS composite_lookup_target"
+  - sql: "CREATE TABLE authenticated_point_item (id INT PRIMARY KEY, payload VARCHAR(32)) ENGINE=memory"
+  - sql: "CREATE TABLE composite_lookup_target (tenant_id INT, lookup_id INT, payload INT, UNIQUE KEY lookup_key (tenant_id, lookup_id)) ENGINE=memory"
+  - sql: "CREATE TABLE composite_lookup_driver (seq INT PRIMARY KEY, tenant_id INT, lookup_id INT) ENGINE=memory"
+  - sql: "INSERT INTO authenticated_point_item (id, payload) VALUES (7, 'seven')"
+  - scm: |
+      (begin
+        (insert (table "memcp-tests" "composite_lookup_target") '("tenant_id" "lookup_id" "payload")
+          (map (produceN 1024) (lambda (i) (list (mod i 16) i i))))
+        (insert (table "memcp-tests" "composite_lookup_driver") '("seq" "tenant_id" "lookup_id")
+          (map (produceN 20000) (lambda (i)
+            (begin
+              (define lookup_id (mod i 1024))
+              (list i (mod lookup_id 16) lookup_id))))))
+  - sql: "CREATE USER point_lookup_perf IDENTIFIED BY 'secret123'"
+  - sql: "GRANT SELECT ON `memcp-tests`.* TO point_lookup_perf"
+
+test_cases:
+  - name: "Authenticated non-admin point lookup"
+    username: "point_lookup_perf"
+    password: "secret123"
+    warmup: 10
+    timing_samples: 100
+    threshold_ms: 2
+    sql: "SELECT payload FROM authenticated_point_item WHERE id = 7"
+    expect:
+      rows: 1
+      data:
+        - payload: "seven"
+
+  - name: "Composite value lookup carrier"
+    warmup: 3
+    timing_samples: 7
+    threshold_ms: 400
+    sql: |
+      SELECT SUM((
+        SELECT target.payload
+        FROM composite_lookup_target target
+        WHERE target.tenant_id = driver.tenant_id
+          AND target.lookup_id = driver.lookup_id
+      )) AS total
+      FROM composite_lookup_driver driver
+    expect:
+      rows: 1
+      data:
+        - total: 10099440
+
+  - name: "Composite mapped lookup carrier"
+    warmup: 3
+    timing_samples: 7
+    threshold_ms: 400
+    sql: |
+      SELECT SUM((
+        SELECT target.payload + 1
+        FROM composite_lookup_target target
+        WHERE target.tenant_id = driver.tenant_id
+          AND target.lookup_id = driver.lookup_id
+      )) AS total
+      FROM composite_lookup_driver driver
+    expect:
+      rows: 1
+      data:
+        - total: 10119440
+
+  - name: "Composite exists lookup carrier"
+    warmup: 3
+    timing_samples: 7
+    threshold_ms: 400
+    sql: |
+      SELECT SUM(CASE WHEN EXISTS (
+        SELECT 1
+        FROM composite_lookup_target target
+        WHERE target.tenant_id = driver.tenant_id
+          AND target.lookup_id = driver.lookup_id
+      ) THEN 1 ELSE 0 END) AS total
+      FROM composite_lookup_driver driver
+    expect:
+      rows: 1
+      data:
+        - total: 20000
+
+  - name: "Composite value carrier uses scan_lookup"
+    sql: |
+      EXPLAIN PHYSICAL
+      SELECT (SELECT target.payload
+         FROM composite_lookup_target target
+         WHERE target.tenant_id = driver.tenant_id
+           AND target.lookup_id = driver.lookup_id) AS value_result
+      FROM composite_lookup_driver driver
+      WHERE driver.seq = 1
+    expect:
+      rows: 1
+      result_contains:
+        - "scan_lookup"
+
+  - name: "Composite mapped carrier uses scan_lookup"
+    sql: |
+      EXPLAIN PHYSICAL
+      SELECT (SELECT target.payload + 1
+         FROM composite_lookup_target target
+         WHERE target.tenant_id = driver.tenant_id
+           AND target.lookup_id = driver.lookup_id) AS map_result
+      FROM composite_lookup_driver driver
+      WHERE driver.seq = 1
+    expect:
+      rows: 1
+      result_contains:
+        - "scan_lookup"
+
+  - name: "Composite exists carrier uses scan_lookup"
+    sql: |
+      EXPLAIN PHYSICAL
+      SELECT EXISTS (
+        SELECT 1
+          FROM composite_lookup_target target
+          WHERE target.tenant_id = driver.tenant_id
+            AND target.lookup_id = driver.lookup_id
+      ) AS exists_result
+      FROM composite_lookup_driver driver
+      WHERE driver.seq = 1
+    expect:
+      rows: 1
+      result_contains:
+        - "scan_lookup"
+
+cleanup:
+  - sql: "DROP USER IF EXISTS point_lookup_perf"
+  - sql: "DROP TABLE IF EXISTS composite_lookup_driver"
+  - sql: "DROP TABLE IF EXISTS composite_lookup_target"
+  - sql: "DROP TABLE IF EXISTS authenticated_point_item"

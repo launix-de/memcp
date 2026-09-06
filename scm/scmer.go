@@ -111,6 +111,16 @@ var CStringDecompress func(ptr *byte, val uint64) string
 // Registered by the storage package at init time. Key = tag ID.
 var CustomStringer [256]func(ptr unsafe.Pointer) string
 
+// CustomJSONCodec preserves immutable custom values embedded in persisted
+// Scheme procedures. Without a codec, custom values retain the historical
+// string fallback used by API responses.
+type CustomJSONCodec struct {
+	Encode func(ptr unsafe.Pointer) any
+	Decode func(value any) unsafe.Pointer
+}
+
+var CustomJSONCodecs [256]CustomJSONCodec
+
 // NewCString creates a lazy compressed-string Scmer.
 // ptr points into the StorageString dictionary (must stay alive as long as the Scmer).
 // format: storage.StringFormat value (4 bits); nibbleOff: 0 or 1; charLen: original char count.
@@ -1253,6 +1263,10 @@ func (s Scmer) MarshalJSON() ([]byte, error) {
 			}
 			return arr
 		default:
+			tag := v.GetTag()
+			if codec := CustomJSONCodecs[tag]; codec.Encode != nil {
+				return map[string]any{"scmer_custom": int(tag), "value": codec.Encode(unsafe.Pointer(v.ptr))}
+			}
 			// Unknown custom tag -> fall back to string form
 			return v.String()
 		}
@@ -1385,6 +1399,21 @@ func (s *Scmer) UnmarshalJSON(data []byte) error {
 		case string:
 			return NewString(t)
 		case map[string]any:
+			if encodedTag, ok := t["scmer_custom"]; ok && len(t) == 2 {
+				var tag int64 = -1
+				switch value := encodedTag.(type) {
+				case json.Number:
+					tag, _ = value.Int64()
+				case float64:
+					tag = int64(value)
+				}
+				if tag >= 0 && tag < int64(len(CustomJSONCodecs)) {
+					codec := CustomJSONCodecs[tag]
+					if codec.Decode != nil {
+						return NewCustom(uint8(tag), codec.Decode(t["value"]))
+					}
+				}
+			}
 			if sym, ok := t["symbol"]; ok {
 				if name, ok2 := sym.(string); ok2 {
 					return NewSymbol(name)

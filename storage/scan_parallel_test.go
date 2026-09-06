@@ -46,12 +46,12 @@ func TestCollectRelevantShardsUsesPartitionBounds(t *testing.T) {
 
 	tests := []struct {
 		name       string
-		boundary   columnboundaries
+		boundary   analyzedBoundary
 		wantShards []int
 	}{
 		{
 			name: "point between late pivots",
-			boundary: columnboundaries{
+			boundary: analyzedBoundary{
 				col: "id", matcher: EqualMatcher,
 				lower: scm.NewInt(35), lowerInclusive: true,
 				upper: scm.NewInt(35), upperInclusive: true,
@@ -60,7 +60,7 @@ func TestCollectRelevantShardsUsesPartitionBounds(t *testing.T) {
 		},
 		{
 			name: "point on pivot",
-			boundary: columnboundaries{
+			boundary: analyzedBoundary{
 				col: "id", matcher: EqualMatcher,
 				lower: scm.NewInt(20), lowerInclusive: true,
 				upper: scm.NewInt(20), upperInclusive: true,
@@ -69,7 +69,7 @@ func TestCollectRelevantShardsUsesPartitionBounds(t *testing.T) {
 		},
 		{
 			name: "closed range",
-			boundary: columnboundaries{
+			boundary: analyzedBoundary{
 				col: "id", matcher: RangeMatcher,
 				lower: scm.NewInt(15), lowerInclusive: true,
 				upper: scm.NewInt(35), upperInclusive: true,
@@ -78,7 +78,7 @@ func TestCollectRelevantShardsUsesPartitionBounds(t *testing.T) {
 		},
 		{
 			name: "exclusive lower pivot",
-			boundary: columnboundaries{
+			boundary: analyzedBoundary{
 				col: "id", matcher: RangeMatcher,
 				lower: scm.NewInt(20), lowerInclusive: false,
 				upper: scm.NewNil(), upperInclusive: false,
@@ -87,7 +87,7 @@ func TestCollectRelevantShardsUsesPartitionBounds(t *testing.T) {
 		},
 		{
 			name: "exclusive upper pivot remains conservative",
-			boundary: columnboundaries{
+			boundary: analyzedBoundary{
 				col: "id", matcher: RangeMatcher,
 				lower: scm.NewNil(), lowerInclusive: false,
 				upper: scm.NewInt(20), upperInclusive: false,
@@ -98,7 +98,7 @@ func TestCollectRelevantShardsUsesPartitionBounds(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := collectRelevantShards(schema, runtimeScanAccess(boundaries{tt.boundary}), shards)
+			got := collectRelevantShards(schema, runtimeScanAccess(analyzedBoundaries{tt.boundary}), shards)
 			if len(got) != len(tt.wantShards) {
 				t.Fatalf("collectRelevantShards returned %d shards, want %d", len(got), len(tt.wantShards))
 			}
@@ -353,7 +353,7 @@ func TestIterateShardsParallelMarksPartitionSingleShardSolo(t *testing.T) {
 
 	calls := 0
 	sawSolo := false
-	done := tbl.iterateShardsParallel(nil, runtimeScanAccess(boundaries{{
+	done := tbl.iterateShardsParallel(nil, runtimeScanAccess(analyzedBoundaries{{
 		col:            "id",
 		matcher:        EqualMatcher,
 		lower:          scm.NewInt(15),

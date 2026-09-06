@@ -2118,7 +2118,8 @@ probe. */
 (define compiled_scan_lookup_boundaries (lambda (lookup_cols slot)
 	(if (empty_list? lookup_cols)
 		'()
-		(merge (list "equal" (car lookup_cols) (+ 15032418304 (* slot 65537)) "")
+		(merge (list (list (quote scan_boundary) "equal" (car lookup_cols)
+			slot slot true true "" false))
 			(compiled_scan_lookup_boundaries (cdr lookup_cols) (+ slot 1))))))
 
 (define compiled_scan_access_header (lambda (count consumer projections mapper_slot)
@@ -2137,7 +2138,7 @@ probe. */
 	(list (quote scan_lookup)
 		tx
 		table
-		(list (quote quote) (merge
+		(cons (quote list) (merge
 			(list (compiled_scan_access_header (count lookup_cols) consumer (count map_cols)
 				(if (equal? consumer "map") (count lookup_cols) -1)))
 			(compiled_scan_lookup_boundaries lookup_cols 0)

@@ -23,6 +23,16 @@ import (
 	"github.com/launix-de/memcp/scm"
 )
 
+func testLookupAccess(columns []string, values []scm.Scmer) scanAccess {
+	schema := make([]scm.Scmer, scanAccessSchemaHeaderSize+len(columns))
+	schema[0] = newScanAccessHeader(len(columns), "value", 0, -1)
+	for i, column := range columns {
+		schema[scanAccessSchemaHeaderSize+i] = newScanBoundarySpec(
+			column, EqualMatcher, i, i, true, true, "", false, -1, nil, nil, "", false)
+	}
+	return exactScanAccess(schema, values)
+}
+
 func setupScanLookupTable(tb testing.TB, database string, rows [][]scm.Scmer) *table {
 	tb.Helper()
 	databases.Remove(database)
@@ -42,7 +52,7 @@ func testScanLookupSchema(consumer string, matchCols, mapCols []string) scm.Scme
 	}
 	schema := []scm.Scmer{newScanAccessHeader(len(matchCols), consumer, len(mapCols), mapperSlot)}
 	for i, col := range matchCols {
-		schema = append(schema, scm.NewString("equal"), scm.NewString(col), newScanAccessBoundaryMeta(i, i, 3), scm.NewString(""))
+		schema = append(schema, newScanBoundarySpec(col, EqualMatcher, i, i, true, true, "", false, -1, nil, nil, "", false))
 	}
 	for _, col := range mapCols {
 		schema = append(schema, scm.NewString(col))
@@ -60,16 +70,16 @@ func TestScanLookupReturnsValueNullAndCardinalityError(t *testing.T) {
 	})
 	tx := NewTxContext(TxCursorStability)
 
-	if got := tbl.scanLookup(tx, []string{"key"}, []scm.Scmer{scm.NewInt(1)}, "value", true); !scm.Equal(got, scm.NewString("one")) {
+	if got := tbl.scanLookup(tx, testLookupAccess([]string{"key"}, []scm.Scmer{scm.NewInt(1)}), "value", true); !scm.Equal(got, scm.NewString("one")) {
 		t.Fatalf("scanLookup existing value = %s, want one", scm.String(got))
 	}
-	if got := tbl.scanLookup(tx, []string{"key"}, []scm.Scmer{scm.NewInt(2)}, "value", true); !got.IsNil() {
+	if got := tbl.scanLookup(tx, testLookupAccess([]string{"key"}, []scm.Scmer{scm.NewInt(2)}), "value", true); !got.IsNil() {
 		t.Fatalf("scanLookup NULL value = %s, want nil", scm.String(got))
 	}
-	if got := tbl.scanLookup(tx, []string{"key"}, []scm.Scmer{scm.NewInt(99)}, "value", true); !got.IsNil() {
+	if got := tbl.scanLookup(tx, testLookupAccess([]string{"key"}, []scm.Scmer{scm.NewInt(99)}), "value", true); !got.IsNil() {
 		t.Fatalf("scanLookup missing value = %s, want nil", scm.String(got))
 	}
-	if got := tbl.scanLookup(tx, []string{"key"}, []scm.Scmer{scm.NewNil()}, "", false); scm.ToBool(got) {
+	if got := tbl.scanLookup(tx, testLookupAccess([]string{"key"}, []scm.Scmer{scm.NewNil()}), "", false); scm.ToBool(got) {
 		t.Fatal("scanLookup matched a SQL NULL key")
 	}
 
@@ -78,7 +88,7 @@ func TestScanLookupReturnsValueNullAndCardinalityError(t *testing.T) {
 			t.Fatalf("scanLookup duplicate panic = %v, want %q", got, scalarSubselectOverflow)
 		}
 	}()
-	tbl.scanLookup(tx, []string{"key"}, []scm.Scmer{scm.NewInt(3)}, "value", true)
+	tbl.scanLookup(tx, testLookupAccess([]string{"key"}, []scm.Scmer{scm.NewInt(3)}), "value", true)
 }
 
 func TestScanLookupSchemeOperator(t *testing.T) {
@@ -118,6 +128,86 @@ func TestScanLookupPlanBindingDoesNotAllocate(t *testing.T) {
 	}
 }
 
+func TestScanLookupPlanUsesExactAdjacentValuesOnlyWhenValid(t *testing.T) {
+	schema := testScanLookupSchema("exists", []string{"tenant", "key"}, nil)
+	values := scm.NewSlice([]scm.Scmer{scm.NewInt(1), scm.NewInt(7)})
+	plan := parseScanLookupPlan(schema, values)
+	if !plan.access.exactAdjacent {
+		t.Fatal("canonical scan_lookup schema did not use adjacent values")
+	}
+	reversedUnique := &table{Unique: []uniqueKey{{Id: "uq", Cols: []string{"key", "tenant"}}}}
+	if !reversedUnique.hasBoundUniquePoint(plan.access) {
+		t.Fatal("adjacent lookup values hid a unique key with different column order")
+	}
+
+	nonAdjacentSchema := scm.NewSlice([]scm.Scmer{
+		newScanAccessHeader(2, "exists", 0, -1),
+		newScanBoundarySpec("tenant", EqualMatcher, 1, 1, true, true, "", false, -1, nil, nil, "", false),
+		newScanBoundarySpec("key", EqualMatcher, 0, 0, true, true, "", false, -1, nil, nil, "", false),
+	})
+	nonAdjacent := parseScanLookupPlan(nonAdjacentSchema, values)
+	if nonAdjacent.access.exactAdjacent {
+		t.Fatal("non-adjacent scan_lookup slots used the adjacent fast path")
+	}
+	if got := nonAdjacent.access.boundValue(0, false); !scm.Equal(got, scm.NewInt(7)) {
+		t.Fatalf("non-adjacent first value = %s, want 7", scm.String(got))
+	}
+}
+
+func TestCompiledScanLookupCompositeAllocationLimits(t *testing.T) {
+	database := "test_compiled_scan_lookup_allocations"
+	databases.Remove(database)
+	t.Cleanup(func() { databases.Remove(database) })
+	CreateDatabase(database, true)
+	tbl, _ := CreateTable(database, "items", Memory, true)
+	tbl.CreateColumn("tenant", "INT", nil, nil)
+	tbl.CreateColumn("key", "INT", nil, nil)
+	tbl.CreateColumn("value", "INT", nil, nil)
+	tbl.Unique = append(tbl.Unique, uniqueKey{Id: "lookup_key", Cols: []string{"key", "tenant"}})
+	tbl.Insert([]string{"tenant", "key", "value"}, [][]scm.Scmer{
+		{scm.NewInt(1), scm.NewInt(7), scm.NewInt(17)},
+		{scm.NewInt(2), scm.NewInt(7), scm.NewInt(27)},
+	}, nil, scm.NewNil(), false, nil)
+	tx := NewTxContext(TxCursorStability)
+	mapper := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[0] })
+	cases := []struct {
+		name      string
+		schema    scm.Scmer
+		values    scm.Scmer
+		maxAllocs float64
+	}{
+		{
+			name:      "value",
+			schema:    testScanLookupSchema("value", []string{"tenant", "key"}, []string{"value"}),
+			values:    scm.NewSlice([]scm.Scmer{scm.NewInt(2), scm.NewInt(7)}),
+			maxAllocs: 3,
+		},
+		{
+			name:      "exists",
+			schema:    testScanLookupSchema("exists", []string{"tenant", "key"}, nil),
+			values:    scm.NewSlice([]scm.Scmer{scm.NewInt(2), scm.NewInt(7)}),
+			maxAllocs: 3,
+		},
+		{
+			name:      "map",
+			schema:    testScanLookupSchema("map", []string{"tenant", "key"}, []string{"value"}),
+			values:    scm.NewSlice([]scm.Scmer{scm.NewInt(2), scm.NewInt(7), mapper}),
+			maxAllocs: 5,
+		},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			executeCompiledScanLookup(tbl, tx, test.schema, test.values)
+			allocs := testing.AllocsPerRun(1000, func() {
+				executeCompiledScanLookup(tbl, tx, test.schema, test.values)
+			})
+			if allocs > test.maxAllocs {
+				t.Fatalf("composite scan_lookup allocated %.2f times, want at most %.0f", allocs, test.maxAllocs)
+			}
+		})
+	}
+}
+
 func TestScanLookupCompositeValueAndExists(t *testing.T) {
 	database := "test_scan_lookup_composite"
 	databases.Remove(database)
@@ -135,16 +225,16 @@ func TestScanLookupCompositeValueAndExists(t *testing.T) {
 	tx := NewTxContext(TxCursorStability)
 	cols := []string{"tenant", "key"}
 
-	if got := tbl.scanLookup(tx, cols, []scm.Scmer{scm.NewInt(2), scm.NewInt(7)}, "value", true); !scm.Equal(got, scm.NewString("two-seven")) {
+	if got := tbl.scanLookup(tx, testLookupAccess(cols, []scm.Scmer{scm.NewInt(2), scm.NewInt(7)}), "value", true); !scm.Equal(got, scm.NewString("two-seven")) {
 		t.Fatalf("composite scanLookup = %s, want two-seven", scm.String(got))
 	}
-	if got := tbl.scanLookup(tx, cols, []scm.Scmer{scm.NewInt(9), scm.NewInt(7)}, "", false); scm.ToBool(got) {
+	if got := tbl.scanLookup(tx, testLookupAccess(cols, []scm.Scmer{scm.NewInt(9), scm.NewInt(7)}), "", false); scm.ToBool(got) {
 		t.Fatal("missing composite existence lookup returned true")
 	}
-	if got := tbl.scanLookup(tx, cols, []scm.Scmer{scm.NewInt(2), scm.NewInt(7)}, "", false); !scm.ToBool(got) {
+	if got := tbl.scanLookup(tx, testLookupAccess(cols, []scm.Scmer{scm.NewInt(2), scm.NewInt(7)}), "", false); !scm.ToBool(got) {
 		t.Fatal("matching composite existence lookup returned false")
 	}
-	if got := tbl.scanLookup(tx, []string{"key"}, []scm.Scmer{scm.NewInt(7)}, "", false); !scm.ToBool(got) {
+	if got := tbl.scanLookup(tx, testLookupAccess([]string{"key"}, []scm.Scmer{scm.NewInt(7)}), "", false); !scm.ToBool(got) {
 		t.Fatal("existence lookup with multiple matches returned false")
 	}
 }
@@ -174,8 +264,7 @@ func TestScanLookupMapReturnsComputedValueAfterCardinalityCheck(t *testing.T) {
 	}))
 
 	got := tbl.scanLookupMap(tx,
-		[]string{"tenant", "key"},
-		[]scm.Scmer{scm.NewInt(1), scm.NewInt(7)},
+		testLookupAccess([]string{"tenant", "key"}, []scm.Scmer{scm.NewInt(1), scm.NewInt(7)}),
 		[]string{"left_value", "right_value"},
 		&mapper,
 	)
@@ -184,8 +273,7 @@ func TestScanLookupMapReturnsComputedValueAfterCardinalityCheck(t *testing.T) {
 	}
 	RebuildTable(tbl, true, false)
 	got = tbl.scanLookupMap(tx,
-		[]string{"tenant", "key"},
-		[]scm.Scmer{scm.NewInt(1), scm.NewInt(7)},
+		testLookupAccess([]string{"tenant", "key"}, []scm.Scmer{scm.NewInt(1), scm.NewInt(7)}),
 		[]string{"left_value", "right_value"},
 		&mapper,
 	)
@@ -193,13 +281,13 @@ func TestScanLookupMapReturnsComputedValueAfterCardinalityCheck(t *testing.T) {
 		t.Fatalf("rebuilt scanLookupMap = %s with %d mapper calls, want 30 with two", scm.String(got), calls)
 	}
 	if got := tbl.scanLookupMap(tx,
-		[]string{"key"}, []scm.Scmer{scm.NewInt(99)},
+		testLookupAccess([]string{"key"}, []scm.Scmer{scm.NewInt(99)}),
 		[]string{"left_value", "right_value"}, &mapper,
 	); !got.IsNil() || calls != 2 {
 		t.Fatalf("missing scanLookupMap = %s with %d total mapper calls, want nil and two", scm.String(got), calls)
 	}
 	if got := tbl.scanLookupMap(tx,
-		[]string{"key"}, []scm.Scmer{scm.NewNil()},
+		testLookupAccess([]string{"key"}, []scm.Scmer{scm.NewNil()}),
 		[]string{"left_value", "right_value"}, &mapper,
 	); !got.IsNil() || calls != 2 {
 		t.Fatalf("NULL-key scanLookupMap = %s with %d total mapper calls, want nil and two", scm.String(got), calls)
@@ -212,8 +300,7 @@ func TestScanLookupMapReturnsComputedValueAfterCardinalityCheck(t *testing.T) {
 			}
 		}()
 		tbl.scanLookupMap(tx,
-			[]string{"tenant", "key"},
-			[]scm.Scmer{scm.NewInt(3), scm.NewInt(9)},
+			testLookupAccess([]string{"tenant", "key"}, []scm.Scmer{scm.NewInt(3), scm.NewInt(9)}),
 			[]string{"left_value", "right_value"},
 			&mapper,
 		)
@@ -263,12 +350,13 @@ func BenchmarkScanLookupWithTx(b *testing.B) {
 	cols := []string{"key"}
 	values := []scm.Scmer{key}
 	// Warm the adaptive index before measuring the steady-state operator.
-	tbl.scanLookup(tx, cols, values, "value", true)
+	access := testLookupAccess(cols, values)
+	tbl.scanLookup(tx, access, "value", true)
 
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		tbl.scanLookup(tx, cols, values, "value", true)
+		tbl.scanLookup(tx, access, "value", true)
 	}
 }
 
@@ -287,6 +375,50 @@ func BenchmarkCompiledScanLookupWithTx(b *testing.B) {
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		executeCompiledScanLookup(tbl, tx, schema, values)
+	}
+}
+
+func BenchmarkCompiledScanLookupDimensions(b *testing.B) {
+	database := "bench_compiled_scan_lookup_dimensions"
+	databases.Remove(database)
+	b.Cleanup(func() { databases.Remove(database) })
+	CreateDatabase(database, true)
+	tbl, _ := CreateTable(database, "items", Memory, true)
+	tbl.CreateColumn("tenant", "INT", nil, nil)
+	tbl.CreateColumn("key", "INT", nil, nil)
+	tbl.CreateColumn("value", "VARCHAR", nil, nil)
+	// Deliberately reverse the planner boundary order to cover unordered
+	// composite unique-key detection in the measured hot path.
+	tbl.Unique = append(tbl.Unique, uniqueKey{Id: "lookup_key", Cols: []string{"key", "tenant"}})
+	rows := make([][]scm.Scmer, 1024)
+	for i := range rows {
+		rows[i] = []scm.Scmer{scm.NewInt(int64(i % 16)), scm.NewInt(int64(i)), scm.NewString("value")}
+	}
+	tbl.Insert([]string{"tenant", "key", "value"}, rows, nil, scm.NewNil(), false, nil)
+	tx := NewTxContext(TxCursorStability)
+	mapper := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[0] })
+
+	cases := []struct {
+		name   string
+		schema scm.Scmer
+		values scm.Scmer
+	}{
+		{name: "value_one", schema: testScanLookupSchema("value", []string{"key"}, []string{"value"}), values: scm.NewSlice([]scm.Scmer{scm.NewInt(511)})},
+		{name: "value_two", schema: testScanLookupSchema("value", []string{"tenant", "key"}, []string{"value"}), values: scm.NewSlice([]scm.Scmer{scm.NewInt(15), scm.NewInt(511)})},
+		{name: "exists_one", schema: testScanLookupSchema("exists", []string{"key"}, nil), values: scm.NewSlice([]scm.Scmer{scm.NewInt(511)})},
+		{name: "exists_two", schema: testScanLookupSchema("exists", []string{"tenant", "key"}, nil), values: scm.NewSlice([]scm.Scmer{scm.NewInt(15), scm.NewInt(511)})},
+		{name: "map_one", schema: testScanLookupSchema("map", []string{"key"}, []string{"value"}), values: scm.NewSlice([]scm.Scmer{scm.NewInt(511), mapper})},
+		{name: "map_two", schema: testScanLookupSchema("map", []string{"tenant", "key"}, []string{"value"}), values: scm.NewSlice([]scm.Scmer{scm.NewInt(15), scm.NewInt(511), mapper})},
+	}
+	for _, bench := range cases {
+		b.Run(bench.name, func(b *testing.B) {
+			executeCompiledScanLookup(tbl, tx, bench.schema, bench.values)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				executeCompiledScanLookup(tbl, tx, bench.schema, bench.values)
+			}
+		})
 	}
 }
 
@@ -324,11 +456,12 @@ func BenchmarkScanLookupDimensions(b *testing.B) {
 	}
 	for _, bench := range cases {
 		b.Run(bench.name, func(b *testing.B) {
-			tbl.scanLookup(tx, bench.cols, bench.values, bench.resultCol, bench.returnValue)
+			access := testLookupAccess(bench.cols, bench.values)
+			tbl.scanLookup(tx, access, bench.resultCol, bench.returnValue)
 			b.ResetTimer()
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
-				tbl.scanLookup(tx, bench.cols, bench.values, bench.resultCol, bench.returnValue)
+				tbl.scanLookup(tx, access, bench.resultCol, bench.returnValue)
 			}
 		})
 	}
@@ -355,12 +488,13 @@ func BenchmarkScanLookupMap(b *testing.B) {
 	mapProgram := scm.PrepareSerialProc(scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
 		return scm.NewInt(values[0].Int() + values[1].Int())
 	}))
-	tbl.scanLookupMap(tx, lookupCols, lookupValues, mapCols, &mapProgram)
+	access := testLookupAccess(lookupCols, lookupValues)
+	tbl.scanLookupMap(tx, access, mapCols, &mapProgram)
 
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		tbl.scanLookupMap(tx, lookupCols, lookupValues, mapCols, &mapProgram)
+		tbl.scanLookupMap(tx, access, mapCols, &mapProgram)
 	}
 }
 

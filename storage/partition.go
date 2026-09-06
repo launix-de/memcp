@@ -146,6 +146,86 @@ func runSingleShardScan(currentTx *TxContext, topology *tableShardTopology, shar
 	}
 }
 
+// pinSingleShardForScan returns a registered authoritative shard only when the
+// access resolves to exactly one shard. It deliberately avoids building the
+// relevant-shard slice used by the fanout path, allowing concrete scan kernels
+// to execute without an escaping callback frame.
+func (t *table) pinSingleShardForScan(access scanAccess) (*tableShardTopology, *storageShard, bool) {
+	for {
+		topology := t.activeTopology()
+		shard, single := singleRelevantShard(topology.dimensions, access, topology.shards)
+		if !single {
+			return nil, nil, false
+		}
+		if !topology.acquireOperation() {
+			continue
+		}
+		shard.activeScanners.Add(1)
+		if t.topology.Load() == topology {
+			return topology, shard, true
+		}
+		shard.activeScanners.Add(-1)
+		topology.releaseOperation()
+	}
+}
+
+func singleRelevantShard(schema []shardDimension, access scanAccess, shards []*storageShard) (*storageShard, bool) {
+	var first *storageShard
+	count := 0
+	countRelevantShards(schema, access, shards, &first, &count)
+	return first, count == 1
+}
+
+func countRelevantShards(schema []shardDimension, access scanAccess, shards []*storageShard, first **storageShard, count *int) {
+	if *count > 1 {
+		return
+	}
+	if len(schema) == 0 {
+		for _, shard := range shards {
+			if shard == nil {
+				continue
+			}
+			if *count == 0 {
+				*first = shard
+			}
+			*count = *count + 1
+			if *count > 1 {
+				return
+			}
+		}
+		return
+	}
+	blockdim := 1
+	for i := 1; i < len(schema); i++ {
+		blockdim *= schema[i].NumPartitions
+	}
+	for boundaryIndex := 0; boundaryIndex < access.len(); boundaryIndex++ {
+		if access.boundaryColumn(boundaryIndex) != schema[0].Column {
+			continue
+		}
+		lower := access.boundValue(boundaryIndex, false)
+		upper := access.boundValue(boundaryIndex, true)
+		minimum := 0
+		if !lower.IsNil() {
+			minimum = partitionForValue(schema[0], lower)
+			if !access.boundaryLowerInclusive(boundaryIndex) && valueEqualsPivot(schema[0], minimum, lower) {
+				minimum++
+			}
+		}
+		maximum := schema[0].NumPartitions - 1
+		if !upper.IsNil() {
+			maximum = partitionForValue(schema[0], upper)
+		}
+		for partition := minimum; partition <= maximum; partition++ {
+			countRelevantShards(schema[1:], access, shards[partition*blockdim:(partition+1)*blockdim], first, count)
+		}
+		return
+	}
+	for offset := 0; offset < len(shards); offset += blockdim {
+		countRelevantShards(schema[1:], access, shards[offset:offset+blockdim], first, count)
+	}
+}
+
 func runParallelShardScans(currentTx *TxContext, shards []*storageShard, topology *tableShardTopology, callback func(*storageShard, bool)) <-chan struct{} {
 	return runFanoutTasks(currentTx, len(shards), func(i int, _ bool) {
 		shard := shards[i]
@@ -255,20 +335,21 @@ func collectRelevantShardsIndex(schema []shardDimension, access scanAccess, shar
 	}
 
 	for boundaryIndex := 0; boundaryIndex < access.len(); boundaryIndex++ {
-		b := access.boundary(boundaryIndex)
-		if b.col == schema[0].Column {
+		if access.boundaryColumn(boundaryIndex) == schema[0].Column {
+			lower := access.boundValue(boundaryIndex, false)
+			upper := access.boundValue(boundaryIndex, true)
 			// iterate this axis over boundaries
 			min := 0
-			if !b.lower.IsNil() {
-				min = partitionForValue(schema[0], b.lower)
-				if !b.lowerInclusive && valueEqualsPivot(schema[0], min, b.lower) {
+			if !lower.IsNil() {
+				min = partitionForValue(schema[0], lower)
+				if !access.boundaryLowerInclusive(boundaryIndex) && valueEqualsPivot(schema[0], min, lower) {
 					min++
 				}
 			}
 
 			max := schema[0].NumPartitions - 1 // smaller than max
-			if !b.upper.IsNil() {
-				max = partitionForValue(schema[0], b.upper)
+			if !upper.IsNil() {
+				max = partitionForValue(schema[0], upper)
 			}
 
 			for i := min; i <= max; i++ {
@@ -535,14 +616,16 @@ func (t *table) proposerepartition(maincount uint) (shardCandidates []shardDimen
 // before invoking repartition). It manages its own shard-level locking.
 // maintenanceMu is already held and maintenanceKind is set to 2 by the caller.
 func (t *table) repartition(shardCandidates []shardDimension) {
+	maintenanceLease := GlobalMaintenanceRAMBudget.Acquire(estimateTableMaintenanceBytes(t))
+	defer maintenanceLease.Release()
 	t.schema.persistenceLifecycle.RLock()
 	defer t.schema.persistenceLifecycle.RUnlock()
 	t.ddlMu.RLock()
 	defer t.ddlMu.RUnlock()
-	t.repartitionDDLReadLocked(shardCandidates)
+	t.repartitionDDLReadLocked(shardCandidates, maintenanceLease)
 }
 
-func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension) {
+func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension, maintenanceLease *RAMLease) {
 	// Safety-net: if somehow called directly without the flag being set.
 	if t.maintenanceKind == 2 && t.PShards != nil {
 		return
@@ -725,139 +808,139 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension) {
 	if workers < 1 {
 		workers = 1
 	}
-	progress := make(chan int, workers)
-	for i := 0; i < workers; i++ {
-		go func() {
-			for si := range progress {
-				func() {
-					defer func() {
-						if r := recover(); r != nil {
-							fmt.Println("error: repartition shard build failed for", t.schema.Name+".", t.Name, "shard", si, ":", r)
-							buildErrMu.Lock()
-							buildErrors = append(buildErrors, r)
-							buildErrMu.Unlock()
-						}
-						done.Done()
-					}()
-					s := newshards[si]
-					built := &builtData[si]
-					built.columns = make(map[string]ColumnStorage)
-					// Count main rows for this new shard
-					mainCount := uint32(0)
-					for _, items := range datasetids[si] {
-						mainCount += uint32(len(items))
-					}
-					built.mainCount = mainCount
-					// Allocate column storage and build
-					values := make([]scm.Scmer, mainCount)
-					for _, col := range t.Columns {
-						// Check if ANY old shard has a StorageComputeProxy for this column.
-						// If so, port the proxy (computor + validMask) instead of evaluating values.
-						var proxyTemplate *StorageComputeProxy
-						for _, os := range oldshards {
-							os.mu.RLock()
-							if cs, ok := os.columns[col.Name]; ok {
-								if p, ok := cs.(*StorageComputeProxy); ok {
-									proxyTemplate = p
-									os.mu.RUnlock()
-									break
-								}
-							}
-							os.mu.RUnlock()
-						}
-
-						if proxyTemplate != nil {
-							// Port StorageComputeProxy: create new proxy for this PShard,
-							// copy valid values and validMask, leave invalid rows for lazy recompute.
-							newProxy := &StorageComputeProxy{
-								delta:     make(map[uint32]scm.Scmer),
-								computor:  proxyTemplate.computor,
-								inputCols: proxyTemplate.inputCols,
-								shard:     s, // back-reference to new PShard
-								colName:   proxyTemplate.colName,
-								count:     mainCount,
-								isOrdered: proxyTemplate.isOrdered,
-							}
-							// Port values and validMask from old shards
-							var newIdx uint32
-							for s2id, items := range datasetids[si] {
-								oldShard := oldshards[s2id]
-								oldShard.mu.RLock()
-								oldProxy, isProxy := oldShard.columns[col.Name].(*StorageComputeProxy)
-								oldShard.mu.RUnlock()
-								if !isProxy {
-									// Old shard has plain storage for this column — read values directly
-									reader := oldShard.ColumnReaderTx(nil, col.Name)
-									for _, item := range items {
-										val := reader(uint32(item))
-										newProxy.delta[newIdx] = val
-										newProxy.validMask.Set(uint(newIdx), true)
-										newIdx++
-									}
-								} else {
-									oldRowIDs := make([]uint32, len(items))
-									for i, item := range items {
-										oldRowIDs[i] = uint32(item)
-									}
-									newIdx = appendComputeProxyRows(newProxy, oldProxy, oldRowIDs, newIdx)
-								}
-							}
-							built.columns[col.Name] = newProxy
-							// Compute proxies are not serialized to disk
-						} else {
-							// Normal column: read values and compress
-							var i uint32
-							for s2id, items := range datasetids[si] {
-								reader := oldshards[s2id].ColumnReaderTx(nil, col.Name)
-								for _, item := range items {
-									values[i] = reader(uint32(item))
-									i++
-								}
-							}
-							// Compress into optimal storage format
-							var newcol ColumnStorage = new(StorageSCMER)
-							for {
-								newcol.prepare()
-								for j, v := range values {
-									newcol.scan(uint32(j), v)
-								}
-								newcol2 := newcol.proposeCompression(uint32(i))
-								if newcol2 == nil {
-									break
-								}
-								newcol = newcol2
-							}
-							if blob, ok := newcol.(*OverlayBlob); ok {
-								blob.schema = s.t.schema
-							}
-							// TODO: when source column is OverlayBlob, shuffle raw
-							// compressed blob data without decompressing+recompressing.
-							// Copy hash references and blob files directly to avoid
-							// the gzip round-trip during repartition.
-							newcol.init(uint32(mainCount))
-							for j, v := range values {
-								newcol.build(uint32(j), v)
-							}
-							newcol.finish()
-							// Store in temporary map (NOT on shard — shard is live for dual-write)
-							built.columns[col.Name] = newcol
-							// Write to disk
-							if s.t.PersistencyMode != Memory {
-								f := s.t.schema.persistence.WriteColumn(s.uuid.String(), col.Name)
-								newcol.Serialize(f)
-								finishColumnWrite(f, s.t.PersistencyMode == Safe)
-							}
-						}
-					}
-				}()
-			}
-		}()
-	}
+	workerRights := make(chan struct{}, workers)
 	for si := range newshards {
-		progress <- si
+		shardRows := int64(0)
+		for _, items := range datasetids[si] {
+			shardRows += int64(len(items))
+		}
+		workerRights <- struct{}{}
+		shardLease := maintenanceLease.Acquire(estimateShardMaintenanceBytes(maintenanceLease.Capacity(), shardRows, int64(total_count)))
+		go func(si int, shardLease *RAMLease) {
+			defer func() { <-workerRights }()
+			defer shardLease.Release()
+			defer func() {
+				if r := recover(); r != nil {
+					fmt.Println("error: repartition shard build failed for", t.schema.Name+".", t.Name, "shard", si, ":", r)
+					buildErrMu.Lock()
+					buildErrors = append(buildErrors, r)
+					buildErrMu.Unlock()
+				}
+				done.Done()
+			}()
+			s := newshards[si]
+			built := &builtData[si]
+			built.columns = make(map[string]ColumnStorage)
+			// Count main rows for this new shard
+			mainCount := uint32(0)
+			for _, items := range datasetids[si] {
+				mainCount += uint32(len(items))
+			}
+			built.mainCount = mainCount
+			// Allocate column storage and build
+			values := make([]scm.Scmer, mainCount)
+			for _, col := range t.Columns {
+				// Check if ANY old shard has a StorageComputeProxy for this column.
+				// If so, port the proxy (computor + validMask) instead of evaluating values.
+				var proxyTemplate *StorageComputeProxy
+				for _, os := range oldshards {
+					os.mu.RLock()
+					if cs, ok := os.columns[col.Name]; ok {
+						if p, ok := cs.(*StorageComputeProxy); ok {
+							proxyTemplate = p
+							os.mu.RUnlock()
+							break
+						}
+					}
+					os.mu.RUnlock()
+				}
+
+				if proxyTemplate != nil {
+					// Port StorageComputeProxy: create new proxy for this PShard,
+					// copy valid values and validMask, leave invalid rows for lazy recompute.
+					newProxy := &StorageComputeProxy{
+						delta:     make(map[uint32]scm.Scmer),
+						computor:  proxyTemplate.computor,
+						inputCols: proxyTemplate.inputCols,
+						shard:     s, // back-reference to new PShard
+						colName:   proxyTemplate.colName,
+						count:     mainCount,
+						isOrdered: proxyTemplate.isOrdered,
+					}
+					// Port values and validMask from old shards
+					var newIdx uint32
+					for s2id, items := range datasetids[si] {
+						oldShard := oldshards[s2id]
+						oldShard.mu.RLock()
+						oldProxy, isProxy := oldShard.columns[col.Name].(*StorageComputeProxy)
+						oldShard.mu.RUnlock()
+						if !isProxy {
+							// Old shard has plain storage for this column — read values directly
+							reader := oldShard.ColumnReaderTx(nil, col.Name)
+							for _, item := range items {
+								val := reader(uint32(item))
+								newProxy.delta[newIdx] = val
+								newProxy.validMask.Set(uint(newIdx), true)
+								newIdx++
+							}
+						} else {
+							oldRowIDs := make([]uint32, len(items))
+							for i, item := range items {
+								oldRowIDs[i] = uint32(item)
+							}
+							newIdx = appendComputeProxyRows(newProxy, oldProxy, oldRowIDs, newIdx)
+						}
+					}
+					built.columns[col.Name] = newProxy
+					// Compute proxies are not serialized to disk
+				} else {
+					// Normal column: read values and compress
+					var i uint32
+					for s2id, items := range datasetids[si] {
+						reader := oldshards[s2id].ColumnReaderTx(nil, col.Name)
+						for _, item := range items {
+							values[i] = reader(uint32(item))
+							i++
+						}
+					}
+					// Compress into optimal storage format
+					var newcol ColumnStorage = new(StorageSCMER)
+					for {
+						newcol.prepare()
+						for j, v := range values {
+							newcol.scan(uint32(j), v)
+						}
+						newcol2 := newcol.proposeCompression(uint32(i))
+						if newcol2 == nil {
+							break
+						}
+						newcol = newcol2
+					}
+					if blob, ok := newcol.(*OverlayBlob); ok {
+						blob.schema = s.t.schema
+					}
+					// TODO: when source column is OverlayBlob, shuffle raw
+					// compressed blob data without decompressing+recompressing.
+					// Copy hash references and blob files directly to avoid
+					// the gzip round-trip during repartition.
+					newcol.init(uint32(mainCount))
+					for j, v := range values {
+						newcol.build(uint32(j), v)
+					}
+					newcol.finish()
+					// Store in temporary map (NOT on shard — shard is live for dual-write)
+					built.columns[col.Name] = newcol
+					// Write to disk
+					if s.t.PersistencyMode != Memory {
+						f := s.t.schema.persistence.WriteColumn(s.uuid.String(), col.Name)
+						newcol.Serialize(f)
+						finishColumnWrite(f, s.t.PersistencyMode == Safe)
+					}
+				}
+			}
+		}(si, shardLease)
 		fmt.Println("rebuild", t.Name, si+1, "/", len(newshards))
 	}
-	close(progress) // signal workers to exit after processing all items
 	done.Wait()
 	if len(buildErrors) > 0 {
 		err := buildErrors[0]

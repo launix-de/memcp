@@ -305,8 +305,10 @@ run_memcp_forever() {
     if [ $rc -ne 0 ]; then
       echo "⚠️  MemCP exited unexpectedly (code=$rc). Restarting..."
       if [ -f "$memcp_log" ]; then
-        echo "--- MemCP log at unexpected exit (last 200 lines) ---"
-        tail -n 200 "$memcp_log"
+        echo "--- MemCP log at unexpected exit (last 2000 lines) ---"
+        # Runtime fatal reports include every goroutine. Keep enough context to
+        # retain the actual fault header instead of only its trailing stacks.
+        tail -n 2000 "$memcp_log"
         echo "--- end MemCP log at unexpected exit ---"
       fi
     fi

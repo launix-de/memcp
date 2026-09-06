@@ -36,11 +36,10 @@ func TestPlannerIndexProbeDoesNotIncreaseIndexSavings(t *testing.T) {
 	tbl.Insert([]string{"id"}, rows, nil, scm.NewNil(), false, nil)
 
 	shard := tbl.Shards[0]
-	bounds := boundaries{{col: "id", matcher: EqualMatcher, lower: scm.NewInt(5), lowerInclusive: true, upper: scm.NewInt(5), upperInclusive: true}}
-	lower, upperLast := indexFromBoundaries(bounds)
+	bounds := analyzedBoundaries{{col: "id", matcher: EqualMatcher, lower: scm.NewInt(5), lowerInclusive: true, upper: scm.NewInt(5), upperInclusive: true}}
 	var buf [8]uint32
 	shard.mu.RLock()
-	shard.iterateIndex(nil, runtimeScanAccess(bounds), lower, upperLast, len(shard.inserts), buf[:], 0, nil, func(batch []uint32) bool {
+	shard.iterateIndex(nil, runtimeScanAccess(bounds), len(shard.inserts), buf[:], 0, nil, func(batch []uint32) bool {
 		return true
 	})
 	shard.mu.RUnlock()
@@ -62,11 +61,12 @@ func TestPlannerIndexProbeDoesNotIncreaseIndexSavings(t *testing.T) {
 
 	columns := []string{"id"}
 	values := []scm.Scmer{scm.NewInt(5)}
-	if _, present := shard.GetRecordidForUnique(columns, values, nil); !present {
+	access := exactScanAccess(newExactScanAccessSchema(columns), values)
+	if _, present := shard.GetRecordidForUnique(access, nil); !present {
 		t.Fatal("warm unique point probe did not find its row")
 	}
 	if allocations := testing.AllocsPerRun(1000, func() {
-		if _, present := shard.GetRecordidForUnique(columns, values, nil); !present {
+		if _, present := shard.GetRecordidForUnique(access, nil); !present {
 			t.Fatal("unique point probe did not find its row")
 		}
 	}); allocations != 0 {

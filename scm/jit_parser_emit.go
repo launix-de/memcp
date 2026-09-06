@@ -218,12 +218,32 @@ func (emitter *jitParserEmitter) emitVoid(fn any, args ...JITValueDesc) {
 	emitter.ctx.EmitGoCallVoid(GoFuncAddr(fn), args)
 }
 
+// emitStateVoid emits a void Go-helper call taking the raw *jitParserState as
+// its first argument, materialized fresh from the boxed state and released
+// after the call. The parser helpers dropped their boxed-Scmer state parameter
+// (which cost an unbox + type assert on every emitted call) for this pointer.
+func (emitter *jitParserEmitter) emitStateVoid(fn any, args ...JITValueDesc) {
+	sp := emitter.statePointer()
+	emitter.emitVoid(fn, append([]JITValueDesc{sp}, args...)...)
+	emitter.ctx.FreeDesc(&sp)
+}
+
+// emitStateScalar is emitStateVoid for a helper returning result words.
+func (emitter *jitParserEmitter) emitStateScalar(fn any, numResultWords int, args ...JITValueDesc) JITValueDesc {
+	sp := emitter.statePointer()
+	out := emitter.ctx.EmitGoCallScalar(GoFuncAddr(fn), append([]JITValueDesc{sp}, args...), numResultWords)
+	emitter.ctx.FreeDesc(&sp)
+	return out
+}
+
 func (emitter *jitParserEmitter) pushValue(value JITValueDesc) {
 	original := value
 	if value.Loc != LocRegPair && value.Loc != LocStackPair && value.Loc != LocInputPair {
 		value = emitter.immPair(value.Imm)
 	}
-	emitter.emitVoid(jitParserPushValueNative, emitter.state, value)
+	sp := emitter.statePointer()
+	emitter.emitVoid(jitParserPushValueNative, sp, value)
+	emitter.ctx.FreeDesc(&sp)
 	if value.Loc == LocRegPair {
 		emitter.ctx.FreeDesc(&value)
 	}
@@ -233,23 +253,31 @@ func (emitter *jitParserEmitter) pushValue(value JITValueDesc) {
 }
 
 func (emitter *jitParserEmitter) discardValue() {
-	emitter.emitVoid(jitParserDiscardValueNative, emitter.state)
+	sp := emitter.statePointer()
+	emitter.emitVoid(jitParserDiscardValueNative, sp)
+	emitter.ctx.FreeDesc(&sp)
 }
 
 func (emitter *jitParserEmitter) pushCheckpoint() {
 	position := emitter.loadPosition()
-	emitter.emitVoid(jitParserPushCheckpointNative, emitter.state, position)
+	sp := emitter.statePointer()
+	emitter.emitVoid(jitParserPushCheckpointNative, sp, position)
+	emitter.ctx.FreeDesc(&sp)
 	emitter.ctx.FreeDesc(&position)
 }
 
 func (emitter *jitParserEmitter) restoreCheckpoint() {
-	position := emitter.ctx.EmitGoCallScalar(GoFuncAddr(jitParserRestoreCheckpointNative), []JITValueDesc{emitter.state}, 1)
+	sp := emitter.statePointer()
+	position := emitter.ctx.EmitGoCallScalar(GoFuncAddr(jitParserRestoreCheckpointNative), []JITValueDesc{sp}, 1)
+	emitter.ctx.FreeDesc(&sp)
 	position.Type = tagInt
 	emitter.storePosition(position)
 }
 
 func (emitter *jitParserEmitter) commitCheckpoint() {
-	emitter.emitVoid(jitParserCommitCheckpointNative, emitter.state)
+	sp := emitter.statePointer()
+	emitter.emitVoid(jitParserCommitCheckpointNative, sp)
+	emitter.ctx.FreeDesc(&sp)
 }
 
 func (emitter *jitParserEmitter) substringAtPosition() JITValueDesc {
@@ -351,7 +379,7 @@ func (emitter *jitParserEmitter) emitTerminal(node *jitParserNode, rule int, suc
 	emitter.ctx.MarkLabel(failed)
 	expected := emitter.immPair(NewString(node.description))
 	position := emitter.loadPosition()
-	emitter.emitVoid(jitParserRecordFailureNative, emitter.state, position, expected)
+	emitter.emitStateVoid(jitParserRecordFailureNative, position, expected)
 	emitter.ctx.FreeDesc(&position)
 	emitter.ctx.FreeDesc(&expected)
 	emitter.ctx.EmitJmp(failure)
@@ -361,7 +389,7 @@ func (emitter *jitParserEmitter) emitTerminal(node *jitParserNode, rule int, suc
 func (emitter *jitParserEmitter) emitSequence(node *jitParserNode, rule int, success, failure JITLabel) {
 	emitter.pushCheckpoint()
 	if !node.ignoreResult {
-		emitter.emitVoid(jitParserPushMarkNative, emitter.state)
+		emitter.emitStateVoid(jitParserPushMarkNative)
 	}
 	failed := emitter.ctx.ReserveLabel()
 	for _, child := range node.children {
@@ -370,7 +398,7 @@ func (emitter *jitParserEmitter) emitSequence(node *jitParserNode, rule int, suc
 		emitter.ctx.MarkLabel(next)
 	}
 	if !node.ignoreResult {
-		emitter.emitVoid(jitParserMergeMarkNative, emitter.state, jitParserBoolScalar(false))
+		emitter.emitStateVoid(jitParserMergeMarkNative, jitParserBoolScalar(false))
 	}
 	emitter.commitCheckpoint()
 	emitter.ctx.EmitJmp(success)
@@ -380,16 +408,113 @@ func (emitter *jitParserEmitter) emitSequence(node *jitParserNode, rule int, suc
 }
 
 func (emitter *jitParserEmitter) emitChoice(node *jitParserNode, rule int, success, failure JITLabel) {
-	for _, child := range node.children {
+	if d := emitter.program.choiceDispatchPlan(node); d.useful {
+		emitter.emitChoiceDispatch(node, rule, d, success, failure)
+		return
+	}
+	all := make([]int, len(node.children))
+	for i := range all {
+		all[i] = i
+	}
+	emitter.emitAltCascade(node, rule, all, success, failure)
+}
+
+// emitAltCascade tries the listed alternatives of node in order, each guarded by
+// its own checkpoint; on the last failure it jumps to failure. This is the
+// classic choice lowering, and the tail of every dispatch bucket.
+func (emitter *jitParserEmitter) emitAltCascade(node *jitParserNode, rule int, indices []int, success, failure JITLabel) {
+	for _, i := range indices {
 		emitter.pushCheckpoint()
 		accepted, rejected := emitter.ctx.ReserveLabel(), emitter.ctx.ReserveLabel()
-		emitter.emitNode(child, rule, accepted, rejected)
+		emitter.emitNode(node.children[i], rule, accepted, rejected)
 		emitter.ctx.MarkLabel(accepted)
 		emitter.commitCheckpoint()
 		emitter.ctx.EmitJmp(success)
 		emitter.ctx.MarkLabel(rejected)
 		emitter.restoreCheckpoint()
 	}
+	emitter.ctx.EmitJmp(failure)
+}
+
+func altListKey(list []int) string {
+	b := make([]byte, 0, len(list)*2)
+	for _, x := range list {
+		b = append(b, byte(x), byte(x>>8))
+	}
+	return string(b)
+}
+
+// jitParserPeekByteNative returns the byte at position, or -1 at end of input.
+func jitParserPeekByteNative(input Scmer, position int64) int64 {
+	text := input.String()
+	if position < 0 || position >= int64(len(text)) {
+		return -1
+	}
+	return int64(text[position])
+}
+
+// emitPeekByte returns a register with the byte at the current parse position
+// (0..255), or -1 at end of input. No position advance. A Go call keeps this
+// off the register-discipline critical path - it runs once per dispatched
+// choice, replacing dozens of per-alternative helper calls.
+func (emitter *jitParserEmitter) emitPeekByte() JITValueDesc {
+	position := emitter.loadPosition()
+	peek := emitter.ctx.EmitGoCallScalar(GoFuncAddr(jitParserPeekByteNative), []JITValueDesc{emitter.input, position}, 1)
+	peek.Type = tagInt
+	emitter.ctx.FreeDesc(&position)
+	return peek
+}
+
+// emitChoiceDispatch reads the leading byte once and jumps to the small cascade
+// of alternatives that could match it, instead of trying all ~N in turn.
+func (emitter *jitParserEmitter) emitChoiceDispatch(node *jitParserNode, rule int, d choiceDispatch, success, failure JITLabel) {
+	skipped := emitter.ctx.ReserveLabel()
+	emitter.emitSkip(rule, skipped)
+	emitter.ctx.MarkLabel(skipped)
+	peek := emitter.emitPeekByte()
+
+	fail := emitter.ctx.ReserveLabel()
+	wild := fail
+	if len(d.wild) > 0 {
+		wild = emitter.ctx.ReserveLabel()
+	}
+
+	labels := make([]JITLabel, 256)
+	type bucket struct {
+		label JITLabel
+		list  []int
+	}
+	var order []bucket
+	made := map[string]JITLabel{}
+	for b := 0; b < 256; b++ {
+		list := d.buckets[b]
+		if len(list) == 0 {
+			labels[b] = wild
+			continue
+		}
+		key := altListKey(list)
+		if l, ok := made[key]; ok {
+			labels[b] = l
+			continue
+		}
+		l := emitter.ctx.ReserveLabel()
+		made[key] = l
+		labels[b] = l
+		order = append(order, bucket{l, list})
+	}
+
+	emitter.ctx.EmitJumpTable(peek.Reg, labels, wild)
+	emitter.ctx.FreeDesc(&peek)
+
+	for _, bk := range order {
+		emitter.ctx.MarkLabel(bk.label)
+		emitter.emitAltCascade(node, rule, bk.list, success, fail)
+	}
+	if len(d.wild) > 0 {
+		emitter.ctx.MarkLabel(wild)
+		emitter.emitAltCascade(node, rule, d.wild, success, fail)
+	}
+	emitter.ctx.MarkLabel(fail)
 	emitter.ctx.EmitJmp(failure)
 }
 
@@ -412,7 +537,7 @@ func (emitter *jitParserEmitter) emitBind(node *jitParserNode, rule int, success
 	accepted := emitter.ctx.ReserveLabel()
 	emitter.emitNode(node.children[0], rule, accepted, failure)
 	emitter.ctx.MarkLabel(accepted)
-	emitter.emitVoid(jitParserBindValueNative, emitter.state, jitParserScalar(int64(node.binding)))
+	emitter.emitStateVoid(jitParserBindValueNative, jitParserScalar(int64(node.binding)))
 	if node.ignoreResult {
 		emitter.discardValue()
 	}
@@ -425,14 +550,14 @@ func (emitter *jitParserEmitter) emitCapture(node *jitParserNode, rule int, succ
 	emitter.emitSkip(rule, skipped)
 	emitter.ctx.MarkLabel(skipped)
 	start := emitter.loadPosition()
-	emitter.emitVoid(jitParserPushPositionNative, emitter.state, start)
+	emitter.emitStateVoid(jitParserPushPositionNative, start)
 	emitter.ctx.FreeDesc(&start)
 	accepted, rejected := emitter.ctx.ReserveLabel(), emitter.ctx.ReserveLabel()
 	emitter.emitNode(node.children[0], rule, accepted, rejected)
 	emitter.ctx.MarkLabel(accepted)
-	start = emitter.ctx.EmitGoCallScalar(GoFuncAddr(jitParserPopPositionNative), []JITValueDesc{emitter.state}, 1)
+	start = emitter.emitStateScalar(jitParserPopPositionNative, 1)
 	end := emitter.loadPosition()
-	emitter.emitVoid(jitParserCaptureValueNative, emitter.state, emitter.input, start, end)
+	emitter.emitStateVoid(jitParserCaptureValueNative, emitter.input, start, end)
 	emitter.ctx.FreeDesc(&start)
 	emitter.ctx.FreeDesc(&end)
 	emitter.commitCheckpoint()
@@ -451,7 +576,51 @@ func (emitter *jitParserEmitter) continuation(label JITLabel) int64 {
 	return index
 }
 
+// emitDirectReturnLeaf is the fast path for a literal-leaf rule
+// (analyzeLiteralLeaves): match the regex, run the compiled generator on the
+// matched text, push the result. No jitParserPushRuleFrame, no push/bind of the
+// capture through state.values/state.bindings, no memo, no
+// jitMaterializeVirtualGoSlice, no jitParserCompleteRule. The value left on
+// state.values top is identical to what the full path would have produced.
+func (emitter *jitParserEmitter) emitDirectReturnLeaf(p *directReturnPlan, success, failure JITLabel) {
+	ctx := emitter.ctx
+	skipped := ctx.ReserveLabel()
+	emitter.emitSkip(0, skipped)
+	ctx.MarkLabel(skipped)
+
+	matched, failed := ctx.ReserveLabel(), ctx.ReserveLabel()
+	captures := jitRegexCaptureTargets(ctx, p.regex.captures)
+	input := emitter.substringAtPosition()
+	jitEmitNativeRegex(ctx, p.regex, input, captures, matched, failed, failed, nil, false)
+
+	ctx.MarkLabel(matched)
+	emitter.advanceBy(captures[0])
+	entryValue := NewAny(p.action)
+	ctx.TrackImm(entryValue)
+	entry := emitter.immPair(entryValue)
+	value := ctx.EmitGoCallScalar(GoFuncAddr(jitParserApplyAction1Native), []JITValueDesc{entry, captures[0]}, 2)
+	ctx.FreeDesc(&entry)
+	value.Type = JITTypeUnknown
+	value.Rooted = true
+	emitter.pushValue(value)
+	ctx.EmitJmp(success)
+
+	ctx.MarkLabel(failed)
+	expected := emitter.immPair(NewString(p.desc))
+	position := emitter.loadPosition()
+	emitter.emitStateVoid(jitParserRecordFailureNative, position, expected)
+	ctx.FreeDesc(&position)
+	ctx.FreeDesc(&expected)
+	ctx.EmitJmp(failure)
+
+	ctx.FreeStack(int32(len(captures) * 16))
+}
+
 func (emitter *jitParserEmitter) emitRuleRef(node *jitParserNode, success, failure JITLabel) {
+	if p := emitter.program.rules[node.rule].directReturn; p != nil && !node.ignoreResult {
+		emitter.emitDirectReturnLeaf(p, success, failure)
+		return
+	}
 	// A lexical sub-rule (lexicalParent >= 0) is never memoized or left
 	// recursive, and a rule referenced from inside a noMemo-marked unbranched
 	// repeat body provably cannot have been visited at this position before
@@ -767,6 +936,41 @@ func (emitter *jitParserEmitter) emitLexicalRuleRef(node *jitParserNode, success
 	emitter.ctx.EmitJmp(failure)
 }
 
+// emitMemoFencePush / emitMemoCompact / emitMemoFencePop drive the per-iteration
+// memo compaction for a repeat that markFenceableRepeats proved can never roll
+// back a committed iteration (node.fenceMemo). The fence records the memo table
+// high-water mark at loop entry; every committed iteration's packrat entries are
+// dead the moment the iteration commits, so they are truncated back to that mark
+// instead of accumulating for the whole input.
+func (emitter *jitParserEmitter) emitMemoFencePush() {
+	position := emitter.loadPosition()
+	statePtr := emitter.statePointer()
+	emitter.emitVoid(jitParserMemoFencePushNative, statePtr, position)
+	emitter.ctx.FreeDesc(&statePtr)
+	emitter.ctx.FreeDesc(&position)
+}
+
+func (emitter *jitParserEmitter) emitMemoCompact() {
+	position := emitter.loadPosition()
+	statePtr := emitter.statePointer()
+	emitter.emitVoid(jitParserMemoCompactNative, statePtr, position)
+	emitter.ctx.FreeDesc(&statePtr)
+	emitter.ctx.FreeDesc(&position)
+}
+
+func (emitter *jitParserEmitter) emitMemoFencePop() {
+	statePtr := emitter.statePointer()
+	emitter.emitVoid(jitParserMemoFencePopNative, statePtr)
+	emitter.ctx.FreeDesc(&statePtr)
+}
+
+// emitMemoFenceExit compacts the last iteration's growth away and pops the fence
+// on every path that leaves the repeat.
+func (emitter *jitParserEmitter) emitMemoFenceExit() {
+	emitter.emitMemoCompact()
+	emitter.emitMemoFencePop()
+}
+
 func (emitter *jitParserEmitter) emitRepeat(node *jitParserNode, rule int, success, failure JITLabel) {
 	if node.noMemo {
 		emitter.noMemoDepth++
@@ -774,14 +978,17 @@ func (emitter *jitParserEmitter) emitRepeat(node *jitParserNode, rule int, succe
 	}
 	emitter.pushCheckpoint()
 	if !node.ignoreResult {
-		emitter.emitVoid(jitParserPushMarkNative, emitter.state)
+		emitter.emitStateVoid(jitParserPushMarkNative)
+	}
+	if node.fenceMemo {
+		emitter.emitMemoFencePush()
 	}
 	firstAccepted, firstRejected := emitter.ctx.ReserveLabel(), emitter.ctx.ReserveLabel()
 	emitter.pushCheckpoint()
 	emitter.emitNode(node.children[0], rule, firstAccepted, firstRejected)
 	emitter.ctx.MarkLabel(firstAccepted)
 	position := emitter.loadPosition()
-	progress := emitter.ctx.EmitGoCallScalar(GoFuncAddr(jitParserCommitProgressNative), []JITValueDesc{emitter.state, position}, 1)
+	progress := emitter.emitStateScalar(jitParserCommitProgressNative, 1, position)
 	emitter.ctx.FreeDesc(&position)
 	emitter.ctx.EmitCmpRegImm32(progress.Reg, 0)
 	emitter.ctx.FreeDesc(&progress)
@@ -793,11 +1000,17 @@ func (emitter *jitParserEmitter) emitRepeat(node *jitParserNode, rule int, succe
 	emitter.restoreCheckpoint()
 	if node.kind == jitParserOneOrMore {
 		emitter.restoreCheckpoint()
+		if node.fenceMemo {
+			emitter.emitMemoFenceExit()
+		}
 		emitter.ctx.EmitJmp(failure)
 	} else {
 		emitter.ctx.EmitJmp(done)
 	}
 	emitter.ctx.MarkLabel(loop)
+	if node.fenceMemo {
+		emitter.emitMemoCompact()
+	}
 	emitter.pushCheckpoint()
 	separatorAccepted, iterationAccepted, iterationRejected := emitter.ctx.ReserveLabel(), emitter.ctx.ReserveLabel(), emitter.ctx.ReserveLabel()
 	emitter.emitNode(node.children[1], rule, separatorAccepted, iterationRejected)
@@ -805,7 +1018,7 @@ func (emitter *jitParserEmitter) emitRepeat(node *jitParserNode, rule int, succe
 	emitter.emitNode(node.children[0], rule, iterationAccepted, iterationRejected)
 	emitter.ctx.MarkLabel(iterationAccepted)
 	position = emitter.loadPosition()
-	progress = emitter.ctx.EmitGoCallScalar(GoFuncAddr(jitParserCommitProgressNative), []JITValueDesc{emitter.state, position}, 1)
+	progress = emitter.emitStateScalar(jitParserCommitProgressNative, 1, position)
 	emitter.ctx.FreeDesc(&position)
 	emitter.ctx.EmitCmpRegImm32(progress.Reg, 0)
 	emitter.ctx.FreeDesc(&progress)
@@ -815,8 +1028,11 @@ func (emitter *jitParserEmitter) emitRepeat(node *jitParserNode, rule int, succe
 	emitter.restoreCheckpoint()
 	emitter.ctx.EmitJmp(done)
 	emitter.ctx.MarkLabel(done)
+	if node.fenceMemo {
+		emitter.emitMemoFenceExit()
+	}
 	if !node.ignoreResult {
-		emitter.emitVoid(jitParserMergeMarkNative, emitter.state, jitParserBoolScalar(false))
+		emitter.emitStateVoid(jitParserMergeMarkNative, jitParserBoolScalar(false))
 	}
 	emitter.commitCheckpoint()
 	emitter.ctx.EmitJmp(success)
@@ -835,24 +1051,24 @@ func (emitter *jitParserEmitter) emitExclude(node *jitParserNode, rule int, succ
 	emitter.ctx.EmitJmp(failure)
 	emitter.ctx.MarkLabel(mainAccepted)
 	continuation := emitter.loadPosition()
-	emitter.emitVoid(jitParserPushPositionNative, emitter.state, continuation)
+	emitter.emitStateVoid(jitParserPushPositionNative, continuation)
 	emitter.ctx.FreeDesc(&continuation)
 	for _, excluded := range node.children[1:] {
-		start := emitter.ctx.EmitGoCallScalar(GoFuncAddr(jitParserCheckpointPositionNative), []JITValueDesc{emitter.state}, 1)
+		start := emitter.emitStateScalar(jitParserCheckpointPositionNative, 1)
 		emitter.storePosition(start)
 		emitter.pushCheckpoint()
 		excludedAccepted, excludedRejected := emitter.ctx.ReserveLabel(), emitter.ctx.ReserveLabel()
 		emitter.emitNode(excluded, rule, excludedAccepted, excludedRejected)
 		emitter.ctx.MarkLabel(excludedAccepted)
 		emitter.restoreCheckpoint()
-		discardedPosition := emitter.ctx.EmitGoCallScalar(GoFuncAddr(jitParserPopPositionNative), []JITValueDesc{emitter.state}, 1)
+		discardedPosition := emitter.emitStateScalar(jitParserPopPositionNative, 1)
 		emitter.ctx.FreeDesc(&discardedPosition)
 		emitter.restoreCheckpoint()
 		emitter.ctx.EmitJmp(failure)
 		emitter.ctx.MarkLabel(excludedRejected)
 		emitter.restoreCheckpoint()
 	}
-	continuation = emitter.ctx.EmitGoCallScalar(GoFuncAddr(jitParserPopPositionNative), []JITValueDesc{emitter.state}, 1)
+	continuation = emitter.emitStateScalar(jitParserPopPositionNative, 1)
 	emitter.storePosition(continuation)
 	emitter.commitCheckpoint()
 	emitter.ctx.EmitJmp(success)
@@ -1011,7 +1227,7 @@ func jitEmitParserProgramCore(ctx *JITContext, program *jitParserProgram, input,
 	ctx.EmitJump(CondNotEqual, failed)
 	resultOff := ctx.AllocStack(16)
 	done := ctx.ReserveLabel()
-	out := ctx.EmitGoCallScalar(GoFuncAddr(jitParserFinish), []JITValueDesc{emitter.state}, 2)
+	out := emitter.emitStateScalar(jitParserFinish, 2)
 	out.Type = JITTypeUnknown
 	ctx.EmitStoreScmerToStack(out, resultOff)
 	ctx.FreeDesc(&out)
@@ -1031,7 +1247,7 @@ func jitEmitParserProgramCore(ctx *JITContext, program *jitParserProgram, input,
 	ctx.EmitJmp(failed)
 
 	ctx.MarkLabel(failed)
-	panicResult := ctx.EmitGoCallScalar(GoFuncAddr(jitParserPanic), []JITValueDesc{emitter.state, emitter.input}, 2)
+	panicResult := emitter.emitStateScalar(jitParserPanic, 2, emitter.input)
 	panicResult.Type = JITTypeUnknown
 	ctx.EmitStoreScmerToStack(panicResult, resultOff)
 	ctx.FreeDesc(&panicResult)
@@ -1049,7 +1265,7 @@ func (emitter *jitParserEmitter) emitRuleReturn(ruleID int, success bool) {
 		rule := &emitter.program.rules[ruleID]
 		var value JITValueDesc
 		if rule.generator.IsNil() {
-			value = emitter.ctx.EmitGoCallScalar(GoFuncAddr(jitParserRuleValueNative), []JITValueDesc{emitter.state}, 2)
+			value = emitter.emitStateScalar(jitParserRuleValueNative, 2)
 			value.Type = JITTypeUnknown
 		} else {
 			generatorAlloc := emitter.ctx.SnapshotAllocState()
@@ -1064,14 +1280,16 @@ func (emitter *jitParserEmitter) emitRuleReturn(ruleID int, success bool) {
 				lexicalRule := &emitter.program.rules[lexicalRuleID]
 				args := make([]JITValueDesc, len(lexicalRule.bindings))
 				for index := range args {
+					sp := emitter.statePointer()
 					callArgs := []JITValueDesc{
-						emitter.state, jitParserScalar(int64(lexicalRuleID)), jitParserScalar(int64(index)),
+						sp, jitParserScalar(int64(lexicalRuleID)), jitParserScalar(int64(index)),
 					}
 					var wordsBuf [16]goCallArgWord
 					words := emitter.ctx.flattenArgs(callArgs, &wordsBuf)
 					off := emitter.ctx.AllocSpill(16)
 					emitter.ctx.setStackPointer(jitStackRootFrameBP, off, true)
 					emitter.ctx.EmitGoCallToFrame(GoFuncAddr(jitParserBindingValueForRuleNative), words, []int32{off, off + 8})
+					emitter.ctx.FreeDesc(&sp)
 					args[index] = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: off, Rooted: true}
 				}
 				frameEnv := &JITEnv{Vars: make(map[Symbol]JITValueDesc, len(lexicalRule.bindings)), Numbered: args, Outer: bindingEnv}
@@ -1120,10 +1338,12 @@ func (emitter *jitParserEmitter) emitRuleReturn(ruleID int, success bool) {
 			value = jitCopyScmerToPair(emitter.ctx, value)
 		}
 		value = jitRootScmer(emitter.ctx, value)
+		sp := emitter.statePointer()
 		var argsBuf [16]goCallArgWord
-		args := emitter.ctx.flattenArgs([]JITValueDesc{emitter.state, position, value}, &argsBuf)
+		args := emitter.ctx.flattenArgs([]JITValueDesc{sp, position, value}, &argsBuf)
 		var resultsBuf [16]Reg
 		results := emitter.ctx.EmitGoCall(GoFuncAddr(jitParserReturnRuleValueNative), args, 3, &resultsBuf, nil)
+		emitter.ctx.FreeDesc(&sp)
 		emitter.ctx.FreeDesc(&value)
 		emitter.ctx.FreeDesc(&position)
 		emitter.ctx.EmitStoreRegMem(results[0], emitter.ctx.StackReg, emitter.continuationOff)
@@ -1136,10 +1356,12 @@ func (emitter *jitParserEmitter) emitRuleReturn(ruleID int, success bool) {
 		emitter.ctx.EmitJmp(emitter.ruleLabels[ruleID])
 		return
 	}
+	sp := emitter.statePointer()
 	var argsBuf [16]goCallArgWord
-	args := emitter.ctx.flattenArgs([]JITValueDesc{emitter.state, position, jitParserBoolScalar(success)}, &argsBuf)
+	args := emitter.ctx.flattenArgs([]JITValueDesc{sp, position, jitParserBoolScalar(success)}, &argsBuf)
 	var resultsBuf [16]Reg
 	results := emitter.ctx.EmitGoCall(GoFuncAddr(jitParserReturnRuleNative), args, 3, &resultsBuf, nil)
+	emitter.ctx.FreeDesc(&sp)
 	emitter.ctx.FreeDesc(&position)
 	emitter.ctx.EmitStoreRegMem(results[0], emitter.ctx.StackReg, emitter.continuationOff)
 	emitter.ctx.EmitStoreRegMem(results[1], emitter.ctx.StackReg, emitter.positionOff)

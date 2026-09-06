@@ -190,8 +190,8 @@ func BenchmarkScanUniquePointCompiledAccessWithTx(b *testing.B) {
 	condition := scanCondition("id", scm.NewInt(511))
 	mapReduceFn := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return a[1] })
 	schema := scm.NewSlice([]scm.Scmer{
-		newScanAccessHeader(1, scanAccessConsumerScan, 0, -1), scm.NewString("equal"),
-		scm.NewString("id"), newScanAccessBoundaryMeta(0, 0, 3), scm.NewString(""),
+		newScanAccessHeader(1, scanAccessConsumerScan, 0, -1),
+		newScanBoundarySpec("id", EqualMatcher, 0, 0, true, true, "", false, -1, nil, nil, "", false),
 	})
 	values := []scm.Scmer{scm.NewInt(511)}
 	tbl.scanWithBatchFrom(tx, nil, schema, values, scanAccess{}, []string{"id"}, condition, []string{"label"}, mapReduceFn,
@@ -201,6 +201,45 @@ func BenchmarkScanUniquePointCompiledAccessWithTx(b *testing.B) {
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		tbl.scanWithBatchFrom(tx, nil, schema, values, scanAccess{}, []string{"id"}, condition, []string{"label"}, mapReduceFn,
+			scm.NewNil(), scm.NewNil(), false, 0, nil)
+	}
+}
+
+// BenchmarkScanUniquePointCoveredCompiledAccessWithTx models the physical
+// shape emitted after compile_scan_plan proves an exact point predicate. All
+// immutable argument slices are prepared outside the timed loop, so this
+// reports storage execution allocations rather than caller construction.
+func BenchmarkScanUniquePointCoveredCompiledAccessWithTx(b *testing.B) {
+	dbName := "bench_scan_point_covered_compiled"
+	databases.Remove(dbName)
+	b.Cleanup(func() { databases.Remove(dbName) })
+	CreateDatabase(dbName, true)
+	tbl, _ := CreateTable(dbName, "items", Memory, true)
+	tbl.CreateColumn("id", "INT", nil, nil)
+	tbl.CreateColumn("label", "VARCHAR", nil, nil)
+	rows := make([][]scm.Scmer, 1024)
+	for i := range rows {
+		rows[i] = []scm.Scmer{scm.NewInt(int64(i)), scm.NewString("value")}
+	}
+	tbl.Insert([]string{"id", "label"}, rows, nil, scm.NewNil(), false, nil)
+	tbl.Unique = append(tbl.Unique, uniqueKey{Id: "PRIMARY", Cols: []string{"id"}})
+	tx := NewTxContext(TxCursorStability)
+	condition := scanCondition("id", scm.NewInt(511))
+	mapReduceFn := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return a[1] })
+	schema := scm.NewSlice([]scm.Scmer{
+		newScanAccessHeader(1, scanAccessConsumerCoveredScan, 0, -1),
+		newScanBoundarySpec("id", EqualMatcher, 0, 0, true, true, "", false, -1, nil, nil, "", false),
+	})
+	values := []scm.Scmer{scm.NewInt(511)}
+	conditionCols := []string{"id"}
+	callbackCols := []string{"label"}
+	tbl.scanWithBatchFrom(tx, nil, schema, values, scanAccess{}, conditionCols, condition, callbackCols, mapReduceFn,
+		scm.NewNil(), scm.NewNil(), false, 0, nil)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		tbl.scanWithBatchFrom(tx, nil, schema, values, scanAccess{}, conditionCols, condition, callbackCols, mapReduceFn,
 			scm.NewNil(), scm.NewNil(), false, 0, nil)
 	}
 }
@@ -248,6 +287,51 @@ func BenchmarkScanUniqueMainPoint(b *testing.B) {
 // by prepared SQL execution while retaining the same warm main-storage probe.
 func BenchmarkScanUniqueMainPointWithTx(b *testing.B) {
 	benchmarkUniqueMainPointScan(b, "read_tx", NewTxContext(TxCursorStability))
+}
+
+func benchmarkGetRecordIDForUnique(b *testing.B, value int64) {
+	dbName := "bench_unique_record_id"
+	databases.Remove(dbName)
+	b.Cleanup(func() { databases.Remove(dbName) })
+	CreateDatabase(dbName, true)
+	tbl, _ := CreateTable(dbName, "items", Memory, true)
+	tbl.CreateColumn("id", "INT", nil, nil)
+	tbl.CreateColumn("value", "INT", nil, nil)
+	rows := make([][]scm.Scmer, 1024)
+	for i := range rows {
+		rows[i] = []scm.Scmer{scm.NewInt(int64(i)), scm.NewInt(int64(i * 2))}
+	}
+	tbl.Insert([]string{"id", "value"}, rows, nil, scm.NewNil(), false, nil)
+	tbl.Unique = append(tbl.Unique, uniqueKey{Id: "PRIMARY", Cols: []string{"id"}})
+	result := GetDatabase(dbName).rebuild(true, false, true)
+	if len(result.errors) > 0 {
+		b.Fatalf("rebuild errors: %v", result.errors)
+	}
+	shard := tbl.Shards[0]
+	columns := []string{"id"}
+	values := []scm.Scmer{scm.NewInt(value)}
+	access := exactScanAccess(newExactScanAccessSchema(columns), values)
+	// Cross the adaptive threshold before measuring the steady-state lookup.
+	shard.GetRecordidForUnique(access, nil)
+	shard.GetRecordidForUnique(access, nil)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		shard.GetRecordidForUnique(access, nil)
+	}
+}
+
+// BenchmarkGetRecordIDForUniqueMainHit isolates the unique-constraint probe
+// used by INSERT and INSERT IGNORE once the main index is warm.
+func BenchmarkGetRecordIDForUniqueMainHit(b *testing.B) {
+	benchmarkGetRecordIDForUnique(b, 511)
+}
+
+// BenchmarkGetRecordIDForUniqueMainMiss measures the corresponding absent-key
+// path used for successful unique inserts.
+func BenchmarkGetRecordIDForUniqueMainMiss(b *testing.B) {
+	benchmarkGetRecordIDForUnique(b, 2048)
 }
 
 func TestOpenMapReducerAllocatesMutationMetadataLazily(t *testing.T) {

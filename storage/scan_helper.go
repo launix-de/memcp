@@ -28,6 +28,47 @@ import (
 	"github.com/launix-de/memcp/scm"
 )
 
+type scanLogEvent struct {
+	schema, table, filter, order, indexCols                    string
+	ordered                                                    bool
+	inputCount, candidateCount, outputCount, analyzeNs, execNs int64
+	condition                                                  scm.Scmer
+	conditionCols                                              []string
+	encodeCondition                                            bool
+}
+
+var scanLogQueue = make(chan scanLogEvent, 1024)
+
+func init() {
+	go func() {
+		for event := range scanLogQueue {
+			if event.encodeCondition {
+				if proc, ok := event.condition.Any().(scm.Proc); ok {
+					var params []scm.Scmer
+					if proc.Params.IsSlice() {
+						params = proc.Params.Slice()
+					} else if arr, ok := proc.Params.Any().([]scm.Scmer); ok {
+						params = arr
+					}
+					event.filter = encodeScmerToString(proc.Body, event.conditionCols, params)
+				}
+			}
+			safeLogScan(event.schema, event.table, event.ordered, event.filter, event.order, event.indexCols,
+				event.inputCount, event.candidateCount, event.outputCount, event.analyzeNs, event.execNs)
+		}
+	}()
+}
+
+// enqueueScanLog keeps statistics off the execution path without creating one
+// goroutine and callback frame per scan. Telemetry is best-effort; a saturated
+// sink must never apply backpressure to query execution.
+func enqueueScanLog(event scanLogEvent) {
+	select {
+	case scanLogQueue <- event:
+	default:
+	}
+}
+
 // encodeScmer prints a compact textual encoding of a Scheme AST to w.
 // Unknowns print as "?".
 // - Unknown symbols (not a global function and not one of the provided column names) => "?".
@@ -274,9 +315,9 @@ func safeLogScan(schema, table string, ordered bool, filter, order, indexCols st
 	t.Insert(cols, [][]scm.Scmer{row}, nil, scm.NewNil(), false, nil)
 }
 
-// boundaryIndexCols returns a comma-separated list of column names from boundaries,
+// boundaryIndexCols returns a comma-separated list of column names from analyzed boundaries,
 // representing the columns used for index lookup in this scan.
-func boundaryIndexCols(b boundaries) string {
+func boundaryIndexCols(b analyzedBoundaries) string {
 	if len(b) == 0 {
 		return ""
 	}
@@ -299,7 +340,7 @@ func scanAccessIndexCols(access scanAccess) string {
 		if i > 0 {
 			sb.WriteByte(',')
 		}
-		sb.WriteString(access.boundary(i).col)
+		sb.WriteString(access.boundaryColumn(i))
 	}
 	return sb.String()
 }
@@ -322,16 +363,17 @@ func touchTempColumns(t *table, colSets ...[]string) {
 // not relied upon here.
 func (t *storageShard) ensureScanAccessColumns(access scanAccess, alreadyLocked bool, currentTx *TxContext) {
 	for i := 0; i < access.len(); i++ {
-		boundary := access.boundary(i)
-		if len(boundary.mapCols) > 0 {
-			for _, col := range boundary.mapCols {
+		mapCols, _ := access.boundaryMap(i)
+		if len(mapCols) > 0 {
+			for _, col := range mapCols {
 				t.getColumnStorageOrPanic(col, alreadyLocked, currentTx)
 			}
 			continue
 		}
-		if boundary.col == "" || boundary.col[0] == '$' {
+		column := access.boundaryColumn(i)
+		if column == "" || column[0] == '$' {
 			continue
 		}
-		t.getColumnStorageOrPanic(boundary.col, alreadyLocked, currentTx)
+		t.getColumnStorageOrPanic(column, alreadyLocked, currentTx)
 	}
 }

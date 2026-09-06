@@ -137,7 +137,7 @@ func (s *storageShard) nextForMaintenanceLocked(deletedRecid *uint32) *storageSh
 
 // syncNextVisibilityLocked mirrors the final visibility of one source recid
 // when transaction commit/rollback changes it after the rebuild snapshot. A
-// A successor already tracked by the same transaction applies its own masks
+// successor already tracked by the same transaction applies its own masks
 // and must not be locked recursively here. Caller must hold s.mu.Lock().
 func (s *storageShard) syncNextVisibilityLocked(oldRecid uint32, trackedByTx map[*storageShard]struct{}) {
 	current := s
@@ -209,10 +209,15 @@ func (s *storageShard) catchUpRebuildLocked(next *storageShard, snapshotInsertCo
 			return
 		}
 		deleted := s.deletions.Get(uint(oldRecid))
+		wasDeleted := next.deletions.Get(uint(newRecid))
 		next.deletions.Set(uint(newRecid), deleted)
 		next.rollbackProtected.Set(uint(newRecid), s.rollbackProtected.Get(uint(oldRecid)))
-		if deleted && (next.t.PersistencyMode == Safe || next.t.PersistencyMode == Logged) && next.logfile != nil {
-			next.logfile.Write(LogEntryDelete{newRecid})
+		// A rebuild may snapshot a row while an ACID transaction still keeps its
+		// replacement hidden. The bounded catch-up then publishes the committed
+		// visibility. Persist both directions: omitting the undelete transition
+		// makes a correct in-memory commit reappear as deleted after WAL replay.
+		if wasDeleted != deleted {
+			next.logVisibilityChangeLocked(newRecid, deleted)
 		}
 	}
 
@@ -419,8 +424,16 @@ func (u *storageShard) load(t *table) {
 			case LogEntryUndelete:
 				u.deletions.Set(uint(l.idx), false)
 			case LogEntryInsert:
+				// WAL insert recids follow the persisted main rows. Resolve that
+				// boundary only when replay actually contains inserts: eager loading
+				// here would defeat cold-column loading for every empty WAL.
+				u.ensureMainCount(true)
 				u.insertDatasetFromLog(l.cols, l.values)
 			case LogEntryInsertHidden:
+				// Hidden transactional inserts use the same RecID namespace. Without
+				// the persisted boundary they would tombstone committed main rows and
+				// expose uncommitted delta rows after a crash.
+				u.ensureMainCount(true)
 				firstRecid := u.main_count + uint32(len(u.inserts))
 				u.insertDatasetFromLog(l.cols, l.values)
 				for i := range l.values {
@@ -1496,6 +1509,12 @@ type mapArgGetter func(uint32, uint32) scm.Scmer
 
 const inlineMapReducerColumns = 8
 
+type mapReducerBulkBuffer struct {
+	values []scm.Scmer
+}
+
+var mapReducerBulkBufferPools [inlineMapReducerColumns]sync.Pool
+
 // shardMapReducerWorkspace supplies bounded caller-owned storage for the common
 // read-only mapper. Wider projections fall back to sized heap slices; mutation
 // pseudo-columns use the retained general mapper because their closures may
@@ -1504,6 +1523,21 @@ type shardMapReducerWorkspace struct {
 	mainCols        [inlineMapReducerColumns]ColumnStorage
 	mainBulkReaders [inlineMapReducerColumns]ColumnReader
 	args            [inlineMapReducerColumns + 1]scm.Scmer
+}
+
+var shardMapReducerWorkspacePool = sync.Pool{
+	New: func() any { return new(shardMapReducerWorkspace) },
+}
+
+func acquireShardMapReducerWorkspace() *shardMapReducerWorkspace {
+	return shardMapReducerWorkspacePool.Get().(*shardMapReducerWorkspace)
+}
+
+func releaseShardMapReducerWorkspace(workspace *shardMapReducerWorkspace) {
+	clear(workspace.mainCols[:])
+	clear(workspace.mainBulkReaders[:])
+	clear(workspace.args[:])
+	shardMapReducerWorkspacePool.Put(workspace)
 }
 
 // ShardMapReducer pre-allocates args and applies a fused map-reducer over batches of record IDs.
@@ -1520,6 +1554,7 @@ type ShardMapReducer struct {
 	mainCols        []ColumnStorage        // direct main storage access (nil for $update/$invalidate/$increment cols)
 	mainBulkReaders []ColumnReader         // physical map columns gathered once per Stream main-record run
 	mainBulkValues  []scm.Scmer            // reusable row-major buffer for every physical map column
+	mainBulkBuffer  *mapReducerBulkBuffer  // non-nil when mainBulkValues belongs to a width bucket
 	colNames        []string               // column names for delta getDelta access
 	isUpdate        []bool                 // true for $update columns
 	isInvalidate    []bool                 // true for $invalidate: columns
@@ -1947,7 +1982,17 @@ func (m *ShardMapReducer) prefetchMainColumns(recids []uint32) {
 	}
 	needed := len(recids) * width
 	if cap(m.mainBulkValues) < needed {
-		m.mainBulkValues = make([]scm.Scmer, needed)
+		if m.mainBulkBuffer == nil && width <= inlineMapReducerColumns && needed <= defaultScanBufferSize*width {
+			pool := &mapReducerBulkBufferPools[width-1]
+			if pooled := pool.Get(); pooled != nil {
+				m.mainBulkBuffer = pooled.(*mapReducerBulkBuffer)
+			} else {
+				m.mainBulkBuffer = &mapReducerBulkBuffer{values: make([]scm.Scmer, defaultScanBufferSize*width)}
+			}
+			m.mainBulkValues = m.mainBulkBuffer.values[:needed]
+		} else {
+			m.mainBulkValues = make([]scm.Scmer, needed)
+		}
 	} else {
 		m.mainBulkValues = m.mainBulkValues[:needed]
 	}
@@ -2291,6 +2336,13 @@ func (m *ShardMapReducer) processDeltaBlockBatch(acc scm.Scmer, recids []uint32,
 // batches — that must happen after all shard locks are released.
 // Call FlushTriggerBatch() separately after the scan completes.
 func (m *ShardMapReducer) Close() {
+	if m.mainBulkBuffer != nil {
+		clear(m.mainBulkBuffer.values)
+		width := cap(m.mainBulkBuffer.values) / defaultScanBufferSize
+		mapReducerBulkBufferPools[width-1].Put(m.mainBulkBuffer)
+		m.mainBulkBuffer = nil
+		m.mainBulkValues = nil
+	}
 }
 
 // FlushSideEffects flushes all batched side effects (triggers, increments,
@@ -2694,10 +2746,8 @@ func (t *storageShard) insertDatasetFromLog(columns []string, values [][]scm.Scm
 const uniqueLookupInlineColumns = 8
 
 type uniqueLookupScratch struct {
-	mcols  [uniqueLookupInlineColumns]ColumnStorage
-	bounds [uniqueLookupInlineColumns]columnboundaries
-	lower  [uniqueLookupInlineColumns]scm.Scmer
-	ids    [8]uint32
+	mcols [uniqueLookupInlineColumns]ColumnStorage
+	ids   [8]uint32
 }
 
 var uniqueLookupScratchPool = sync.Pool{
@@ -2713,37 +2763,24 @@ func releaseUniqueLookupScratch(scratch *uniqueLookupScratch, columns int) {
 		columns = uniqueLookupInlineColumns
 	}
 	clear(scratch.mcols[:columns])
-	clear(scratch.bounds[:columns])
-	clear(scratch.lower[:columns])
 	uniqueLookupScratchPool.Put(scratch)
 }
 
-func (t *storageShard) GetRecordidForUnique(columns []string, values []scm.Scmer, currentTx *TxContext) (result uint32, present bool) {
+func (t *storageShard) GetRecordidForUnique(access scanAccess, currentTx *TxContext) (result uint32, present bool) {
 	// Preload main storages and establish main_count without holding any shard lock
 	t.ensureMainCount(false)
+	columns := access.len()
 	scratch := acquireUniqueLookupScratch()
-	defer releaseUniqueLookupScratch(scratch, len(columns))
+	defer releaseUniqueLookupScratch(scratch, columns)
 	mcols := scratch.mcols[:]
-	if len(columns) <= len(mcols) {
-		mcols = mcols[:len(columns)]
+	if columns <= len(mcols) {
+		mcols = mcols[:columns]
 	} else {
-		mcols = make([]ColumnStorage, len(columns))
+		mcols = make([]ColumnStorage, columns)
 	}
-	for i, col := range columns {
-		mcols[i] = t.getColumnStorageOrPanic(col, false, currentTx)
+	for i := range mcols {
+		mcols[i] = t.getColumnStorageOrPanic(access.boundaryColumn(i), false, currentTx)
 	}
-
-	// Build equality boundaries for the index lookup
-	bounds := scratch.bounds[:]
-	if len(columns) <= len(bounds) {
-		bounds = bounds[:len(columns)]
-	} else {
-		bounds = make(boundaries, len(columns))
-	}
-	for i, col := range columns {
-		bounds[i] = columnboundaries{col: col, matcher: EqualMatcher, lower: values[i], lowerInclusive: true, upper: values[i], upperInclusive: true}
-	}
-	lower, upperLast := indexFromBoundariesInto(scratch.lower[:0], bounds)
 
 	// From here on, read under shard read lock for a consistent snapshot of deletions/inserts/deltaColumns
 	t.mu.RLock()
@@ -2754,13 +2791,14 @@ func (t *storageShard) GetRecordidForUnique(columns []string, values []scm.Scmer
 
 	// Use iterateIndex for O(log n) lookup (builds index lazily if needed)
 	// Small buffer for existence check: stop early after first match
-	t.iterateIndex(currentTx, runtimeScanAccess(bounds), lower, upperLast, len(t.inserts), scratch.ids[:], 1, nil, func(batch []uint32) bool {
+	t.iterateIndex(currentTx, access, len(t.inserts), scratch.ids[:], 1, nil, func(batch []uint32) bool {
 		for _, idx := range batch {
 			// Verify all columns match (iterateIndex may return superset for range boundaries)
 			matched := true
 			if idx < mainCount {
 				// Main storage: use ColumnStorage
-				for j, v := range values {
+				for j := 0; j < columns; j++ {
+					v := access.boundValue(j, false)
 					if !scm.Equal(mcols[j].GetValue(idx), v) {
 						matched = false
 						break
@@ -2768,8 +2806,8 @@ func (t *storageShard) GetRecordidForUnique(columns []string, values []scm.Scmer
 				}
 			} else {
 				// Delta storage: use getDelta
-				for j, v := range values {
-					if !scm.Equal(t.getDelta(int(idx-mainCount), columns[j]), v) {
+				for j := 0; j < columns; j++ {
+					if !scm.Equal(t.getDelta(int(idx-mainCount), access.boundaryColumn(j)), access.boundValue(j, false)) {
 						matched = false
 						break
 					}
@@ -2815,8 +2853,6 @@ func (t *storageShard) EstimateFilteredRows(conditionCols []string, condition sc
 	t.ensureMainCount(false)
 	ccols := make([]ColumnStorage, len(conditionCols))
 	conditionGetters := make([]mapArgGetter, len(conditionCols))
-	scratch := acquireScanAnalyzeScratch()
-	defer releaseScanAnalyzeScratch(scratch)
 	bounds, compiled := scanAccessFromScheme(accessSchema, accessValues, nil)
 	if !compiled {
 		panic("scan_selectivity_estimate received an invalid compiled access schema")
@@ -2825,8 +2861,7 @@ func (t *storageShard) EstimateFilteredRows(conditionCols []string, condition sc
 		return filteredRowEstimate{population: "shard_rows", coverage: "exact"}
 	}
 	t.ensureScanAccessColumns(bounds, false, currentTx)
-	lower, upperLast := indexFromScanAccessInto(scratch.lower[:0], bounds)
-	recsetBoundaryCoversCondition := recSetHooksCoverCondition(bounds, lower, t.t, conditionCols, condition)
+	recsetBoundaryCoversCondition := recSetHooksCoverCondition(bounds, t.t, conditionCols, condition)
 	for i, col := range conditionCols {
 		if col == "$recset_contains" {
 			fnptr := recSetContainsClosure(t)
@@ -2860,11 +2895,12 @@ func (t *storageShard) EstimateFilteredRows(conditionCols []string, condition sc
 
 	var buf [256]uint32
 	access := bounds
-	t.iterateIndexEstimate(currentTx, access, lower, upperLast, len(t.inserts), buf[:], &candidateSpan, func(index *StorageIndex, active bool) {
+	indexBounds := newScanIndexBounds(access)
+	t.iterateIndexEstimate(currentTx, access, len(t.inserts), buf[:], &candidateSpan, func(index *StorageIndex, active bool) {
 		// Cold-index fallback now enforces the same exact sorted prefix before
 		// invoking the sampling callback, so its candidates have the same
 		// population semantics as an active index range.
-		indexRestricted = len(lower) > 0
+		indexRestricted = indexBounds.len() > 0
 		if active {
 			if candidates, universe, ok := index.estimateHookCandidates(currentTx, access); ok {
 				hookCandidates = int64(candidates) + int64(len(t.inserts))

@@ -49,6 +49,12 @@ func optimizeScanJoinOrder(v []scm.Scmer, oc *scm.OptimizerContext, _ bool) (scm
 	for i := 1; i < mapReduceIdx && i < len(v); i++ {
 		v[i], _ = oc.OptimizeSub(v[i], true)
 	}
+	if len(v) > 11 {
+		if schemas, values, compiled := compileScanJoinDriverOrderAccess(v[3], v[4], v[10], v[11]); compiled {
+			v[3] = schemas
+			v[4] = values
+		}
+	}
 	neutralType := unknownScanType()
 	if len(v) > neutralIdx {
 		v[neutralIdx], neutralType = oc.OptimizeSub(v[neutralIdx], true)
@@ -75,6 +81,28 @@ func optimizeScanJoinOrder(v []scm.Scmer, oc *scm.OptimizerContext, _ bool) (scm
 	}
 	oc.Ome.DecrLoopDepth()
 	return scm.NewSlice(v), resultType
+}
+
+func compileScanJoinDriverOrderAccess(schemasExpr, valuesExpr, orderColsExpr, sortDirsExpr scm.Scmer) (scm.Scmer, scm.Scmer, bool) {
+	schemas, schemasStatic := scanStaticListElements(schemasExpr)
+	orderRefs, orderStatic := scanStaticListElements(orderColsExpr)
+	if !schemasStatic || !orderStatic || len(schemas) == 0 || len(orderRefs) == 0 {
+		return schemasExpr, valuesExpr, false
+	}
+	driverColumns := make([]scm.Scmer, len(orderRefs))
+	for i, refValue := range orderRefs {
+		ref, static := scanStaticListElements(refValue)
+		if !static || len(ref) != 2 || !ref[0].IsInt() || scm.ToInt(ref[0]) != 0 || !ref[1].IsString() {
+			return schemasExpr, valuesExpr, false
+		}
+		driverColumns[i] = ref[1]
+	}
+	perTableColumns := make([]scm.Scmer, len(schemas))
+	for i := range perTableColumns {
+		perTableColumns[i] = scm.NewSlice(nil)
+	}
+	perTableColumns[0] = scm.NewSlice(driverColumns)
+	return compileScanOrderAccessList(schemasExpr, valuesExpr, scm.NewSlice(perTableColumns), sortDirsExpr)
 }
 
 // scanJoinOrderColumn identifies one physical column in the joined tuple.
@@ -890,9 +918,9 @@ func probeScanJoinOrderInput(currentTx *TxContext, spec *scanJoinOrderSpec, tupl
 		}
 		return scm.NewBool(true)
 	})
-	required := make(boundaries, keyWidth)
+	required := make(analyzedBoundaries, keyWidth)
 	for keyIndex, column := range input.targetKeyCols {
-		required[keyIndex] = columnboundaries{
+		required[keyIndex] = analyzedBoundary{
 			col: column, matcher: EqualMatcher,
 			lowerBatch: true, lowerBatchSubidx: keyIndex,
 			upperBatch: true, upperBatchSubidx: keyIndex,
@@ -1205,16 +1233,14 @@ func collectScanJoinOrderShardStreams(currentTx *TxContext, input *scanJoinOrder
 		return nil
 	}
 	bounds, _ = extendScanAccessWithSortCols(bounds, sortcols, sortdirs)
-	lower, upperLast := indexFromScanAccessInto(scratch.lower[:0], bounds)
 	for i := 0; i < bounds.len(); i++ {
-		boundary := bounds.boundary(i)
-		input.table.AddPartitioningScore([]string{boundary.col})
+		input.table.AddPartitioningScore([]string{bounds.boundaryColumn(i)})
 	}
 
 	values := make(chan *scanJoinOrderShardStream, input.table.shardResultBufferSize())
 	ss := SessionStateFromTx(currentTx)
 	done := input.table.iterateShardsParallel(currentTx, bounds, func(shard *storageShard, _ bool) {
-		queue := shard.scan_order(bounds, lower, upperLast, input.filterCols, input.filter,
+		queue := shard.scan_order(bounds, input.filterCols, input.filter,
 			nil, scm.NewNil(),
 			sortcols, sortdirs, 0, 0, -1, input.readCols, currentTx, ss)
 		refs := make([]orderedBatchRecord, len(queue.items))

@@ -395,6 +395,7 @@ type foreignKey struct {
 // the insert-time UNIQUE contract which permits multiple SQL NULL values.
 func (t *table) hasDuplicateUniqueValues(cols []string, currentTx *TxContext) bool {
 	shards := t.ActiveShards()
+	accessSchema := newExactScanAccessSchema(cols)
 	rows := make([]uniqueValidationRow, 0, t.CountEstimate())
 
 	for _, shard := range shards {
@@ -433,7 +434,7 @@ func (t *table) hasDuplicateUniqueValues(cols []string, currentTx *TxContext) bo
 			if shard == nil {
 				continue
 			}
-			recid, present := shard.GetRecordidForUnique(cols, row.key, currentTx)
+			recid, present := shard.GetRecordidForUnique(exactScanAccess(accessSchema, row.key), currentTx)
 			if present && (shard != row.shard || recid != row.recid) {
 				return true
 			}
@@ -2701,6 +2702,7 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 		return
 	}
 	uniq := t.Unique[idx]
+	accessSchema := newExactScanAccessSchema(uniq.Cols)
 	t.AddPartitioningScore(uniq.Cols) // increases partitioning score, so partitioning is improved
 	{
 		key := make([]scm.Scmer, len(uniq.Cols))
@@ -2807,7 +2809,7 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 			for _, s := range shardlist2 {
 				// ensure shard is loaded for read during unique check
 				r := s.GetRead()
-				uid, present := s.GetRecordidForUnique(uniq.Cols, key, currentTx)
+				uid, present := s.GetRecordidForUnique(exactScanAccess(accessSchema, key), currentTx)
 				if present {
 					// found a unique collision
 					if j != last_j {

@@ -641,7 +641,7 @@ consumer stage. */
 ))
 (define rdf_relation_targets (lambda (schema subj pred) (begin
 	(define out (newsession))
-	(scan nil (table schema "rdf") '(369436443803648 "equal" "p" 15032418304 "" "equal" "s" 15032483841 "") (list pred subj) '() (lambda () true) '("o") (lambda (acc o) (begin (out o true) acc)))
+	(scan nil (table schema "rdf") (list 369436443803648 (scan_boundary "equal" "p" 0 0 true true "" false) (scan_boundary "equal" "s" 1 1 true true "" false)) (list pred subj) '() (lambda () true) '("o") (lambda (acc o) (begin (out o true) acc)))
 	(out)
 )))
 (define rdf_path_targets (lambda (schema start pred include_self) (begin
@@ -671,15 +671,172 @@ consumer stage. */
 ))
 (define rdf_delete_triples (lambda (schema triples) (begin
 	(map triples (lambda (triple) (match triple '(subj pred obj)
-		(scan nil (table schema "rdf") '(369436712239104 "equal" "o" 15032418304 "" "equal" "p" 15032483841 "" "equal" "s" 15032549378 "") (list obj pred subj) '() (lambda () true) '("$update") (lambda (acc $update) (begin ($update) acc)))
+		(scan nil (table schema "rdf") (list 369436712239104 (scan_boundary "equal" "o" 0 0 true true "" false) (scan_boundary "equal" "p" 1 1 true true "" false) (scan_boundary "equal" "s" 2 2 true true "" false)) (list obj pred subj) '() (lambda () true) '("$update") (lambda (acc $update) (begin ($update) acc)))
 	)))
 	nil
 )))
 
-(define rdf_queryplan (lambda (schema query definitions ctx resultfunc /* function that gets cols + ctx */) (begin
+/* Basic graph patterns are ordinary self-joins over rdf(s, p, o). Lower them
+to the same neutral query-block consumed by the SQL frontend so decorrelation,
+join reordering, RecSet selection, and physical scan costing have one owner. */
+(define rdf_shared_column (lambda (alias column)
+	(list (quote get_column) alias false column false)
+))
+(define rdf_shared_lookup (lambda (bindings var)
+	(match (rdf_ctx_lookup bindings var) '(found value)
+		(if found value (error "SPARQL error: unbound shared-planner variable " var))
+	)
+))
+(define rdf_shared_bind_term (lambda (term column bindings filters outer_ctx)
+	(match term
+		'('get_var var)
+		(match (rdf_ctx_lookup outer_ctx var) '(outer_found outer_value)
+			(if outer_found
+				(list bindings (cons (list (quote equal??) column outer_value) filters))
+				(match (rdf_ctx_lookup bindings var) '(found value)
+					(if found
+						(list bindings (cons (list (quote equal??) column value) filters))
+						(list (append bindings var column) filters)))))
+		(string? value) (list bindings (cons (list (quote equal??) column value) filters))
+		(number? value) (list bindings (cons (list (quote equal??) column value) filters))
+		(error "SPARQL shared planner: unsupported triple term " term)
+	)
+))
+(define rdf_shared_add_pattern (lambda (pattern alias bindings filters outer_ctx)
+	(match pattern '(s p o)
+		(match (rdf_shared_bind_term s (rdf_shared_column alias "s") bindings filters outer_ctx) '(b1 f1)
+			(match (rdf_shared_bind_term p (rdf_shared_column alias "p") b1 f1 outer_ctx) '(b2 f2)
+				(rdf_shared_bind_term o (rdf_shared_column alias "o") b2 f2 outer_ctx)))
+	)
+))
+(define rdf_shared_build_sources (lambda (schema patterns outer_ctx index sources bindings filters)
+	(match patterns
+		(cons pattern tail)
+		(begin
+			(define alias (concat "__rdf_t" index))
+			(match (rdf_shared_add_pattern pattern alias bindings filters outer_ctx) '(next_bindings next_filters)
+				(rdf_shared_build_sources schema tail outer_ctx (+ index 1)
+					(append sources (list alias schema "rdf" false nil))
+					next_bindings next_filters)))
+		'() (list sources bindings filters)
+	)
+))
+(define rdf_shared_expr (lambda (expr bindings outer_ctx)
+	(match expr
+		'('get_var var)
+		(match (rdf_ctx_lookup outer_ctx var) '(outer_found outer_value)
+			(if outer_found outer_value (rdf_shared_lookup bindings var)))
+		(cons head tail) (cons head (map tail (lambda (item) (rdf_shared_expr item bindings outer_ctx))))
+		expr
+	)
+))
+(define rdf_shared_where (lambda (filters)
+	(match filters
+		'() true
+		(cons only '()) only
+		_ (cons (quote and) filters)
+	)
+))
+(define rdf_shared_order (lambda (order bindings outer_ctx)
+	(if (nil? order)
+		nil
+		(map order (lambda (entry) (match entry '(expr dir)
+			(list (rdf_shared_expr expr bindings outer_ctx) (if (equal? dir "DESC") > <)))))
+	)
+))
+(define rdf_shared_complete_fields (lambda (fields bindings)
+	(match bindings
+		(cons var (cons value tail))
+		(match (rdf_ctx_lookup fields var) '(found _existing)
+			(rdf_shared_complete_fields
+				(if found fields (append fields var value)) tail))
+		'() fields
+	)
+))
+(define rdf_shared_query_ast (lambda (schema query outer_ctx)
+	(match query '("select" cols "where" conditions "group" group "order" order "limit" limit "offset" offset "distinct" distinct)
+		(match (rdf_shared_build_sources schema conditions outer_ctx 0 '() '() '()) '(sources bindings filters)
+			(begin
+				(define selected_fields (map_assoc cols (lambda (title expr)
+					(rdf_shared_expr expr bindings outer_ctx))))
+				(define fields (rdf_shared_complete_fields
+					selected_fields bindings))
+				(define projected (extract_assoc selected_fields (lambda (_title expr) expr)))
+				(make_query_block schema sources fields (rdf_shared_where filters)
+					(if distinct projected nil) nil
+					(rdf_shared_order order bindings outer_ctx) limit offset '() '()
+					(if distinct (list (list (quote select_distinct) true)) '()))))
+		(error "SPARQL shared planner: expected SELECT query")
+	)
+))
+(define rdf_shared_term_supported? (lambda (term)
+	(match term
+		'('get_var _var) true
+		(string? _value) true
+		(number? _value) true
+		_ false
+	)
+))
+(define rdf_shared_pattern_supported? (lambda (pattern)
+	(match pattern
+		'("__bind__" _expr _var) false
+		'("__filter_exists__" _negate _conditions) false
+		'("__values__" _var _values) false
+		'(s p o) (and (rdf_shared_term_supported? s)
+			(and (rdf_shared_term_supported? p) (rdf_shared_term_supported? o)))
+		_ false
+	)
+))
+(define rdf_shared_order_supported? (lambda (order)
+	(if (nil? order) true
+		(reduce order (lambda (supported entry) (and supported (match entry
+			'(('get_var _var) _dir) true
+			_ false))) true)
+	)
+))
+(define rdf_shared_bgp_supported? (lambda (query)
+	(match query '("select" cols "where" conditions "group" group "order" order "limit" _limit "offset" _offset "distinct" distinct)
+		(and (not (rdf_select_has_aggregates cols))
+			(and (not distinct)
+				(and (equal? group '())
+					(and (not (equal? conditions '()))
+						(and (reduce conditions (lambda (supported pattern)
+							(and supported (rdf_shared_pattern_supported? pattern))) true)
+							(rdf_shared_order_supported? order))))))
+		_ false
+	)
+))
+(define rdf_shared_result_context (lambda (cols outer_ctx)
+	(match cols
+		(cons title (cons _expr tail))
+		(merge (rdf_shared_result_context tail outer_ctx)
+			(list title (list (quote rdf_row_lookup) (quote __rdf_values) title)))
+		'() outer_ctx
+	)
+))
+(define rdf_shared_queryplan (lambda (schema query outer_ctx resultfunc)
+	(begin
+		(define ast (rdf_shared_query_ast schema query outer_ctx))
+		(define plan (build_queryplan_term ast nil nil))
+		(define result_ctx (rdf_shared_result_context (qb_fields ast) outer_ctx))
+		(define result_body (resultfunc (nth query 1) result_ctx))
+		(list
+			(list (quote lambda) (list (quote __rdf_outer_resultrow))
+				(list (quote begin)
+					(list (quote set) (quote resultrow)
+						(list (quote lambda) (list (quote __rdf_values))
+							(list
+								(list (quote lambda) (list (quote resultrow)) result_body)
+								(quote __rdf_outer_resultrow))))
+					plan))
+			(quote resultrow)))
+))
+
+(define rdf_legacy_queryplan (lambda (schema query definitions ctx resultfunc /* function that gets cols + ctx */) (begin
 	(match query '("select" cols "where" conditions "group" group "order" order "limit" limit "offset" offset "distinct" distinct) (begin
 		/* ctx: array with predefined variables */
-		/* no join reordering yet */
+		/* Compatibility path for operators not yet represented in shared IR.
+		Do not add new lowering here; extend rdf_shared_query_ast instead. */
 		(define rdf_path_subject_value_local (lambda (expr ctx) (match expr
 			'('get_var var)
 			(if (rdf_ctx_bound ctx var)
@@ -857,6 +1014,12 @@ consumer stage. */
 	) (error "wrong rdf layout " query))
 )))
 
+(define rdf_queryplan (lambda (schema query definitions ctx resultfunc /* function that gets cols + ctx */)
+	(if (rdf_shared_bgp_supported? query)
+		(rdf_shared_queryplan schema query ctx resultfunc)
+		(rdf_legacy_queryplan schema query definitions ctx resultfunc))
+))
+
 (define parse_sparql (lambda (schema s) (match (ttl_header s)
 	'("prefixes" definitions "rest" rest) (begin
 		(set cleaned_rest (rdf_strip_leading_ws_comments rest))
@@ -911,7 +1074,10 @@ consumer stage. */
 				)
 				(set qhasagg (rdf_select_has_aggregates cols))
 				(set qrowvars (rdf_select_capture_vars cols qgroup))
-				(set needs_wrap (or (not (nil? qlimit)) (not (nil? qoffset)) (not (nil? qdistinct))))
+				(set shared_bgp (rdf_shared_bgp_supported? parsed))
+				/* query-block owns these relational operators on the shared path. */
+				(set needs_wrap (and (not shared_bgp)
+					(or (not (nil? qlimit)) (not (nil? qoffset)) (not (nil? qdistinct)))))
 				(set effective_offset (coalesce qoffset 0))
 				(set effective_limit (coalesce qlimit 999999999))
 				/* build resultfunc that includes limit/offset/distinct logic */
@@ -1016,7 +1182,7 @@ consumer stage. */
 (define delete_ttl (lambda (schema s) (begin
 	(set triples (parse_ttl_triples schema s))
 	(map triples (lambda (triple) (match triple '(subj pred obj)
-		(scan nil (table schema "rdf") '(369436712239104 "equal" "o" 15032418304 "" "equal" "p" 15032483841 "" "equal" "s" 15032549378 "") (list obj pred subj) '() (lambda () true) '("$update") (lambda (acc $update) (begin ($update) acc)))
+		(scan nil (table schema "rdf") (list 369436712239104 (scan_boundary "equal" "o" 0 0 true true "" false) (scan_boundary "equal" "p" 1 1 true true "" false) (scan_boundary "equal" "s" 2 2 true true "" false)) (list obj pred subj) '() (lambda () true) '("$update") (lambda (acc $update) (begin ($update) acc)))
 	)))
 )))
 

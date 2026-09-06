@@ -3045,21 +3045,68 @@ their tighter direct bound; this product is only an additional candidate. */
 				nil))
 			(if (nil? estimate) nil (min row_count estimate))))))
 
-(define aggregate_pushdown_cost_preferred? (lambda (driver_rows group_rows)
-	(and (number? driver_rows)
-		(and (>= driver_rows 1024)
-			(and (number? group_rows)
-				(< (* group_rows 4) driver_rows))))))
+(define aggregate_pushdown_direct_cost (lambda (driver_rows stage_count)
+	(planner_direct_presence_probe_cost (* driver_rows stage_count))))
 
-(define planner_aggregate_pushdown_driver_rows (lambda (src residual)
+(define aggregate_pushdown_partition_cost (lambda (driver_rows group_rows stage_count)
+	(planner_cost_add
+		(planner_cost
+			(+ planner_membership_group_cache_startup_ns
+				planner_membership_scan_invocation_ns)
+			(* driver_rows planner_membership_scan_row_ns)
+			0 0 0
+			(* driver_rows planner_group_relation_build_row_ns)
+			(* group_rows 16) 0 group_rows 0.7)
+		(planner_direct_presence_probe_cost (* group_rows stage_count))
+		group_rows 0.7)))
+
+/* Aggregate partitioning and direct row evaluation execute the same residual
+base-table predicate, so that scan work cancels. Partitioning additionally
+builds a grouped relation but evaluates each filtered stage only once per
+distinct key. Keep this as an ordinary Costgen-owned crossover: equality of
+driver and group cardinality makes direct evaluation dominate, while a broad
+fact table with a small FK domain still selects the reusable partition. */
+(define aggregate_pushdown_cost_preferred? (lambda (driver_rows group_rows stage_count)
+	(and (number? driver_rows)
+		(and (number? group_rows)
+			(planner_cost_better?
+				(aggregate_pushdown_partition_cost driver_rows group_rows stage_count)
+				(aggregate_pushdown_direct_cost driver_rows stage_count))))))
+
+(define planner_aggregate_pushdown_driver_rows (lambda (src residual tx planning_session)
 	(begin
 		(define total_rows (planner_source_row_count src))
 		(if (not (number? total_rows))
 			nil
 			(if (literal_true? residual)
 				total_rows
-				(planner_row_count_after_selectivity src (list src)
-					(source_alias src) residual total_rows))))))
+				(planner_estimated_matching_rows
+					(planner_source_filter_estimate src residual 512 tx planning_session)
+					total_rows
+					(planner_row_count_after_selectivity src (list src)
+						(source_alias src) residual total_rows)))))))
+
+/* Aggregate pushdown runs before physical lowering, but its cached decision
+must observe the same source-local statistic that a later access-path choice
+would consume. The emitted expression belongs to the query-plan guard, not to
+logical IR: it samples once per request and is shared by every guard binding. */
+(define aggregate_pushdown_runtime_driver_rows_expr (lambda (src residual)
+	(begin
+		(define total_rows_expr (list (quote planner_source_row_count)
+			(planner_quoted_value src)))
+		(if (literal_true? residual)
+			total_rows_expr
+			(begin
+				(define estimate_expr (query_scoped_source_filter_estimate_expr
+					src residual 512))
+				(define pattern_expr (expr_text_pattern_expr residual))
+				(define enriched_estimate (if (nil? pattern_expr)
+					estimate_expr
+					(list (quote qassoc_set) estimate_expr
+						(list (quote quote) (quote fallback_selectivity))
+						(list (quote text_pattern_selectivity_prior) pattern_expr))))
+				(list (quote planner_estimated_matching_rows)
+					enriched_estimate total_rows_expr total_rows_expr))))))
 
 (define direct_base_group_plan_eligible? (lambda (stage)
 	(and (source_is_base_table? (gs_input stage))
@@ -5269,11 +5316,15 @@ wrapped in an extra NOT. */
 						_ (cons (quote or) kept))))))))
 
 (define boolean_fold_if (lambda (folded_cond folded_then folded_else)
-	(if (and (boolean_fold_true_literal? folded_then) (boolean_fold_false_literal? folded_else))
-		folded_cond
-		(if (and (boolean_fold_false_literal? folded_then) (boolean_fold_true_literal? folded_else))
-			(boolean_fold_not folded_cond)
-			(list (quote if) folded_cond folded_then folded_else)))))
+	(if (boolean_fold_true_literal? folded_cond)
+		folded_then
+		(if (boolean_fold_false_literal? folded_cond)
+			folded_else
+			(if (and (boolean_fold_true_literal? folded_then) (boolean_fold_false_literal? folded_else))
+				folded_cond
+				(if (and (boolean_fold_false_literal? folded_then) (boolean_fold_true_literal? folded_else))
+					(boolean_fold_not folded_cond)
+					(list (quote if) folded_cond folded_then folded_else)))))))
 
 (define boolean_fold_expr (lambda (expr)
 	(match expr
@@ -5298,12 +5349,21 @@ wrapped in an extra NOT. */
 (define boolean_fold_maybe_expr (lambda (expr)
 	(if (nil? expr) nil (boolean_fold_expr expr))))
 
-(define fold_stage_facts_condition (lambda (facts)
+(define fold_stage_facts_condition (lambda (graph stage facts)
 	(begin
 		(define existing (qassoc_get facts (quote condition) nil))
 		(if (nil? existing)
 			facts
-			(qassoc_set facts (quote condition) (boolean_fold_expr existing))))))
+			(qassoc_set facts (quote condition)
+				(boolean_fold_typed_expr graph stage existing))))))
+
+/* SQL coerces non-NULL scalar literals at boolean operator boundaries. Keep
+this contextual: a string "0" is false inside AND/OR/NOT, but is still a
+string when returned by CASE or used as an aggregate value. */
+(define two_valued_boolean_operand? (lambda (graph stage expr)
+	(or (boolean_fold_true_literal? expr)
+		(or (boolean_fold_false_literal? expr)
+			(two_valued_boolean_expr? graph stage expr)))))
 
 (define two_valued_boolean_expr? (lambda (graph stage expr)
 	/* Numeric 0/1 have truth values inside AND/OR/NOT, but remain numeric
@@ -5316,11 +5376,11 @@ wrapped in an extra NOT. */
 			(match expr
 				(cons head tail) (if (or (expr_head_and? head) (expr_head_or? head))
 					(reduce tail (lambda (two_valued item)
-						(and two_valued (two_valued_boolean_expr? graph stage item)))
+						(and two_valued (two_valued_boolean_operand? graph stage item)))
 						true)
-					(if (expr_head_not? head)
+					(if (or (expr_head_not? head) (expr_head_sql_not? head))
 						(and (equal? (count tail) 1)
-							(two_valued_boolean_expr? graph stage (car tail)))
+							(two_valued_boolean_operand? graph stage (car tail)))
 						(if (expr_head_if? head)
 							(and (equal? (count tail) 3)
 								(and (two_valued_boolean_expr? graph stage (nth tail 1))
@@ -5333,11 +5393,35 @@ wrapped in an extra NOT. */
 								false))))
 				_ false)))))
 
+/* sql_not preserves SQL NULL only for nullable operands. Once the type walk
+proves an operand two-valued, normalize it to the internal `not` form used by
+the tautology detector. This lets A OR SQL_NOT A collapse without weakening
+three-valued expressions whose NULL behavior remains observable. */
+(define boolean_fold_typed_expr (lambda (graph stage expr)
+	(match expr
+		(cons head tail) (begin
+			(define folded_tail (map tail (lambda (item)
+				(boolean_fold_typed_expr graph stage item))))
+			(define candidate (cons head folded_tail))
+			(if (and (expr_head_sql_not? head)
+				(and (equal? (count folded_tail) 1)
+					(two_valued_boolean_operand? graph stage (car folded_tail))))
+				(boolean_fold_not (car folded_tail))
+				(if (and (expr_head_if? head)
+					(and (equal? (count folded_tail) 3)
+						(or (boolean_fold_true_literal? (car folded_tail))
+							(boolean_fold_false_literal? (car folded_tail)))))
+					(boolean_fold_if (nth folded_tail 0)
+						(nth folded_tail 1) (nth folded_tail 2))
+					(if (two_valued_boolean_expr? graph stage candidate)
+						(boolean_fold_expr candidate)
+						candidate))))
+		_ expr)))
+
 (define fold_boolean_stage_aggregate (lambda (graph stage ag)
 	(match ag
-		'(expr reduce_fn neutral) (if (two_valued_boolean_expr? graph stage expr)
-			(list (boolean_fold_expr expr) reduce_fn neutral)
-			ag)
+		'(expr reduce_fn neutral)
+		(list (boolean_fold_typed_expr graph stage expr) reduce_fn neutral)
 		_ ag)))
 
 (define fold_boolean_tautologies_stage (lambda (graph stage)
@@ -5354,7 +5438,7 @@ wrapped in an extra NOT. */
 			(gs_order stage)
 			(gs_limit stage)
 			(gs_offset stage)
-			(fold_stage_facts_condition (gs_facts stage)))
+			(fold_stage_facts_condition graph stage (gs_facts stage)))
 		stage)))
 
 (define stage_output_aggregate_fold_map_for_source (lambda (original_index folded_index src)
@@ -5438,17 +5522,147 @@ until both producers and all consumers agree. */
 				(make_ir (ir_kind ir) (nth propagated 0) (nth propagated 1)
 					(ir_context_of ir) (ir_return ir)))))))
 
+/* A decorrelated scalar/EXISTS stage is a LEFT-joined relation with at most
+one row per complete lookup key. Once no consumer references its output, that
+join is row-preserving and cannot affect multiplicity. Multi-row stages are
+deliberately retained: dropping one would change COUNT and other aggregates. */
+(define unused_single_row_stage_output? (lambda (stage_index referenced_aliases src)
+	(begin
+		(define relation (source_relation src))
+		(if (not (and (source_outer? src) (stage_output_relation? relation)))
+			false
+			(begin
+				(define stage (get_assoc stage_index (stage_output_relation_id relation)))
+				(and (not (nil? stage))
+					(and (or
+						(equal? (qassoc_get (gs_facts stage) (quote null_semantics) nil) (quote scalar))
+						(equal? (qassoc_get (gs_facts stage) (quote null_semantics) nil) (quote exists)))
+						(and (not (stage_has_residual_outer_refs? stage))
+						(and (equal? (count (gs_keys stage))
+							(count (qassoc_get (gs_facts stage) (quote lookup-keys) '())))
+							(and (equal? (stage_result_max_rows_per_partition stage) 1)
+								(not (has_assoc? referenced_aliases (source_alias src)))))))))))))
+
+(define prune_unused_stage_outputs_reversed (lambda (reversed_sources default_alias stage_index referenced_aliases)
+	(match (coalesceNil reversed_sources '())
+		(cons src rest) (if (unused_single_row_stage_output? stage_index referenced_aliases src)
+			(prune_unused_stage_outputs_reversed rest default_alias stage_index referenced_aliases)
+			(begin
+				(define tail (prune_unused_stage_outputs_reversed rest default_alias stage_index
+					(query_expr_alias_set default_alias (source_join_expr src) referenced_aliases)))
+				(cons src tail)))
+		_ '())))
+
+(define prune_unused_stage_output_sources (lambda (sources default_alias stage_index consumers)
+	(reverse (prune_unused_stage_outputs_reversed
+		(reverse (coalesceNil sources '())) default_alias stage_index
+		(query_exprs_alias_set default_alias consumers)))))
+
+(define query_block_stage_consumers (lambda (block extra_consumers)
+	(merge (list
+		(list (qb_fields block) (qb_where block) (qb_group block) (qb_having block)
+			(qb_order block) (qb_hidden block))
+		(coalesceNil extra_consumers '())))))
+
+(define query_block_with_demand_pruned_stage_sources (lambda (block stage_index extra_consumers)
+	(begin
+		(define default_alias (qassoc_get (qb_facts block) (quote default_alias)
+			(if (empty_list? (qb_sources block)) nil (source_alias (car (qb_sources block))))))
+		(make_query_block
+			(qb_schema block)
+			(prune_unused_stage_output_sources (qb_sources block) default_alias stage_index
+				(query_block_stage_consumers block extra_consumers))
+			(qb_fields block) (qb_where block) (qb_group block) (qb_having block)
+			(qb_order block) (qb_limit block) (qb_offset block) (qb_hidden block)
+			(qb_stages block) (qb_facts block)))))
+
+(define stage_with_demand_pruned_sources (lambda (stage stage_index)
+	(if (not (and (group_stage? stage) (query_block? (gs_input stage))))
+		stage
+		(make_group_stage
+			(gs_id stage)
+			(query_block_with_demand_pruned_stage_sources (gs_input stage) stage_index
+				(list (gs_domain stage) (gs_keys stage) (gs_aggregates stage)
+					(gs_having stage) (gs_output stage) (gs_order stage)
+					(qassoc_get (gs_facts stage) (quote condition) nil)))
+			(gs_domain stage) (gs_keys stage) (gs_aggregates stage) (gs_having stage)
+			(gs_output stage) (gs_order stage) (gs_limit stage) (gs_offset stage)
+			(gs_facts stage)))))
+
+(define reachable_stage_keys_visit (lambda (graph pending seen)
+	(match (coalesceNil pending '())
+		(cons stage rest) (begin
+			(define key (logical_stage_key stage))
+			(if (has_assoc? seen key)
+				(reachable_stage_keys_visit graph rest seen)
+				(reachable_stage_keys_visit graph
+					(merge (list (stage_direct_deps graph stage) rest))
+					(set_assoc seen key true))))
+		_ seen)))
+
+/* Boolean normalization may make complete decorrelated dependency branches
+dead. Prune their single-row LEFT sources first, then retain exactly the stage
+closure reachable from the root plus non-group stages (windows/unions keep
+their existing ownership rules). This is logical demand propagation; it emits
+no scan, RecSet, keytable, or other physical artifact. */
+(define prune_unreferenced_single_row_stage_outputs_ir (lambda (ir)
+	(begin
+		(define root (ir_root ir))
+		(if (not (query_block? root))
+			ir
+			(begin
+				(define original_stages (qb_stages root))
+				(define stage_index (stage_dependency_id_index original_stages))
+				(define pruned_stages (map original_stages (lambda (stage)
+					(stage_with_demand_pruned_sources stage stage_index))))
+				(define pruned_index (stage_dependency_id_index pruned_stages))
+				(define pruned_root (query_block_with_demand_pruned_stage_sources
+					(make_query_block
+						(qb_schema root) (qb_sources root) (qb_fields root) (qb_where root)
+						(qb_group root) (qb_having root) (qb_order root) (qb_limit root)
+						(qb_offset root) (qb_hidden root) pruned_stages (qb_facts root))
+					pruned_index '()))
+				/* Do not re-canonicalize or traverse ownership for plans where demand
+				pruning made no change. Besides keeping the common path cheap, this leaves
+				UNION/window ownership to their dedicated normalizers. */
+				(if (equal? pruned_root root)
+					ir
+					(begin
+						/* Removing a dead source can change the canonical role number of the
+						remaining aliases. Propagate the resulting aggregate-column rename through
+						the stage DAG before physical probe markers are introduced. */
+						(define propagated (propagate_stage_output_aggregate_columns
+							pruned_root original_stages pruned_stages))
+						(define propagated_root (nth propagated 0))
+						(define propagated_stages (nth propagated 1))
+						(define graph (stage_dependency_graph propagated_stages))
+						(define roots (merge (list
+							(stage_dependencies_from_output_sources
+								(stage_dependency_id_index propagated_stages) (qb_sources propagated_root))
+							(filter propagated_stages (lambda (stage) (not (group_stage? stage)))))))
+						(define reachable (reachable_stage_keys_visit graph roots '()))
+						(define kept_stages (filter propagated_stages (lambda (stage)
+							(has_assoc? reachable (logical_stage_key stage)))))
+						(define kept_root (make_query_block
+							(qb_schema propagated_root) (qb_sources propagated_root) (qb_fields propagated_root)
+							(qb_where propagated_root) (qb_group propagated_root) (qb_having propagated_root)
+							(qb_order propagated_root) (qb_limit propagated_root) (qb_offset propagated_root)
+							(qb_hidden propagated_root) kept_stages (qb_facts propagated_root)))
+						(make_ir (ir_kind ir) kept_root kept_stages
+							(ir_context_of ir) (ir_return ir))))))))))
+
 (define normalize_stage_dependencies (lambda (ir)
 	(begin
 		(define root_result (normalize_stage_dependencies_node (ir_root ir)))
-		(canonicalize_stage_output_interfaces
-			(fold_boolean_tautologies_ir
-				(merge_compatible_stage_output_left_joins_ir (make_ir
-					(ir_kind ir)
-					(nth root_result 0)
-					(if (query_block? (nth root_result 0)) (qb_stages (nth root_result 0)) (nth root_result 1))
-					(ir_context_of ir)
-					(ir_return ir))))))))
+		(prune_unreferenced_single_row_stage_outputs_ir
+			(canonicalize_stage_output_interfaces
+				(fold_boolean_tautologies_ir
+					(merge_compatible_stage_output_left_joins_ir (make_ir
+						(ir_kind ir)
+						(nth root_result 0)
+						(if (query_block? (nth root_result 0)) (qb_stages (nth root_result 0)) (nth root_result 1))
+						(ir_context_of ir)
+						(ir_return ir)))))))))
 
 /* Scalar stages are merged after decorrelation. Build their signatures bottom-up
 so generated aliases and dependency IDs do not hide equivalent stage graphs. */
@@ -5620,9 +5834,9 @@ so generated aliases and dependency IDs do not hide equivalent stage graphs. */
 			(if (and (equal? (count (gs_aggregates stage)) 1)
 				(or (equal? null_semantics (quote scalar)) (equal? null_semantics (quote exists))))
 				(if (equal? null_semantics (quote exists))
-					/* EXISTS stages from different decorrelation parents can have the
-					same value signature but live in different domain scopes. Derived
-					rebinding records the containing query scope in the stage ID. */
+					/* Correlated EXISTS stages from different parents can have the same
+					value signature but live in different domain scopes. Derived rebinding
+					records the containing query scope in the stage ID. */
 					(concat signature ":scope:" (serialize (list
 						(cdr (split (gs_id stage) ":derived:"))
 						(qassoc_get (gs_facts stage) (quote btw2025_parent) nil))))
@@ -6361,7 +6575,7 @@ remain ordinary residual predicates. */
 			ir
 			(make_ir (ir_kind ir) outer_block all_stages (ir_context_of ir) (ir_return ir))))))
 
-(define aggregate_pushdown_logical (lambda (ir)
+(define aggregate_pushdown_logical (lambda (ir planning_session tx)
 	(begin
 		(define block (ir_root ir))
 		(if (or (not (equal? (ir_return ir) (quote rows)))
@@ -6385,22 +6599,27 @@ remain ordinary residual predicates. */
 					ir
 					(begin
 						(define residual (combine_where_terms residual_terms true))
-						(define driver_rows (planner_aggregate_pushdown_driver_rows driver residual))
+						(define stage_count (max 1 (count
+							(aggregate_pushdown_filtered_stage_sources block movable_terms))))
+						(define driver_rows (planner_aggregate_pushdown_driver_rows
+							driver residual tx planning_session))
 						(define keys (aggregate_pushdown_keys driver columns))
 						(define group_rows (planner_aggregate_pushdown_group_estimate driver keys driver_rows))
-						(define chosen (aggregate_pushdown_cost_preferred? driver_rows group_rows))
+						(define chosen (aggregate_pushdown_cost_preferred?
+							driver_rows group_rows stage_count))
 						(define driver_rows_expr (planner_guard_runtime_binding
-							(list (quote planner_aggregate_pushdown_driver_rows)
-								(planner_quoted_value driver)
-								(planner_quoted_value residual))))
+							(aggregate_pushdown_runtime_driver_rows_expr driver residual)
+							planning_session))
 						(define group_rows_expr (planner_guard_runtime_binding
 							(list (quote planner_aggregate_pushdown_group_estimate)
 								(planner_quoted_value driver)
 								(planner_quoted_value keys)
-								driver_rows_expr)))
+								driver_rows_expr)
+							planning_session))
 						(if (planner_guarded_choice chosen
 							(list (quote aggregate_pushdown_cost_preferred?)
-								driver_rows_expr group_rows_expr))
+								driver_rows_expr group_rows_expr stage_count)
+							planning_session)
 							(aggregate_pushdown_build_rewrite ir block driver movable_terms residual_terms
 								probe_bindings columns driver_rows group_rows)
 							ir))))))))

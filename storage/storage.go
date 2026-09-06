@@ -825,6 +825,25 @@ func Init(en scm.Env) {
 	scm.CustomStringer[TagRecSet] = func(ptr unsafe.Pointer) string {
 		return (*recSet)(ptr).String()
 	}
+	registerScanBoundaryFormats()
+
+	scm.Declare(&en, &scm.Declaration{
+		Name: "scan_boundary",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			if len(a) != 8 {
+				panic("scan_boundary expects kind, column, lower slot, upper slot, inclusiveness, collation, and null-safety")
+			}
+			return newScanBoundarySpec(scm.String(a[1]), scanBoundaryAnalyzer(scm.String(a[0])), scm.ToInt(a[2]), scm.ToInt(a[3]),
+				a[4].Bool(), a[5].Bool(), scm.String(a[6]), a[7].Bool(), -1, nil, nil, "", false)
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "construct an immutable physical scan boundary for a cached access schema",
+			Params: []*scm.TypeDescriptor{
+				{Kind: "string", Label: "kind"}, {Kind: "string", Label: "column"},
+				{Kind: "number", Label: "lower_slot"}, {Kind: "number", Label: "upper_slot"},
+				{Kind: "bool", Label: "lower_inclusive"}, {Kind: "bool", Label: "upper_inclusive"},
+				{Kind: "string", Label: "collation"}, {Kind: "bool", Label: "null_safe"},
+			}, Return: &scm.TypeDescriptor{Kind: "any", Label: "boundary"}},
+	})
 
 	scm.Declare(&en, &scm.Declaration{
 		Name: "table",
@@ -3408,6 +3427,7 @@ func Init(en scm.Env) {
 				memTotal, memAvail := ReadMemInfo()
 				processMem := ReadProcessRSS()
 				cs := GlobalCache.Stat()
+				maintenance := GlobalMaintenanceRAMBudget.Stat()
 				nonEvictable := processMem - cs.CurrentMemory
 				if nonEvictable < 0 {
 					nonEvictable = 0
@@ -3432,6 +3452,9 @@ func Init(en scm.Env) {
 					scm.NewString("temp_keytable_count"), scm.NewInt(cs.CountByType[TypeTempKeytable]),
 					scm.NewString("string_dictionary_size"), scm.NewInt(cs.SizeByType[TypeStringDict]),
 					scm.NewString("string_dictionary_count"), scm.NewInt(cs.CountByType[TypeStringDict]),
+					scm.NewString("maintenance_memory"), scm.NewInt(maintenance.Used),
+					scm.NewString("maintenance_memory_peak"), scm.NewInt(maintenance.Peak),
+					scm.NewString("maintenance_memory_budget"), scm.NewInt(maintenance.Capacity),
 				})
 			} else if len(a) == 1 && a[0].IsCustom(TagTable) {
 				return scm.NewString(TableFromScmer(a[0]).PrintMemUsage())
@@ -3442,7 +3465,7 @@ func Init(en scm.Env) {
 			}
 			return scm.NewNil()
 		},
-		Type: &scm.TypeDescriptor{Kind: "func", Description: "return system statistics as assoc. process_memory is exact process RSS; evictable_memory and its per-owner size/count fields are disjoint estimated Go payload ownership; non_evictable_process_memory is the RSS remainder including allocator, runtime, stacks, and untracked shared overhead. shard_memory remains a compatibility alias for evictable_memory.\n(stat schema) and (stat schema tbl) return disjoint owner-payload estimates, not per-schema RSS.",
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "return system statistics as assoc. process_memory is exact process RSS; evictable_memory and its per-owner size/count fields are disjoint estimated Go payload ownership; non_evictable_process_memory is the RSS remainder including allocator, runtime, stacks, and untracked shared overhead. maintenance_memory reports estimated scratch RAM currently reserved by maintenance jobs. shard_memory remains a compatibility alias for evictable_memory.\n(stat schema) and (stat schema tbl) return disjoint owner-payload estimates, not per-schema RSS.",
 			Params: []*scm.TypeDescriptor{
 				{Kind: "string", Label: "schema", Description: "(optional) database name for detailed string output", Optional: true},
 				{Kind: "string", Label: "table", Description: "(optional) table name for detailed string output", Optional: true},
@@ -3456,7 +3479,7 @@ func Init(en scm.Env) {
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			return scm.NewInt(totalMemoryBytes())
 		},
-		Type: &scm.TypeDescriptor{Kind: "func", Description: "Returns total physical memory in bytes (from /proc/meminfo)",
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "Returns memory available to the process in bytes (physical RAM capped by cgroup v2 memory.max)",
 			Return: &scm.TypeDescriptor{Kind: "number"},
 			Const:  true,
 		},
@@ -4139,6 +4162,11 @@ func PrintMemUsage() string {
 	// CacheManager evictable memory breakdown
 	b.WriteString("\n\nCache\n======\n")
 	b.WriteString(GlobalCache.Stat().FormatStat())
+	maintenance := GlobalMaintenanceRAMBudget.Stat()
+	b.WriteString(fmt.Sprintf("MaintenanceBudget = %s\tReserved = %s\tPeak = %s\n",
+		units.BytesSize(float64(maintenance.Capacity)),
+		units.BytesSize(float64(maintenance.Used)),
+		units.BytesSize(float64(maintenance.Peak))))
 
 	for _, db := range databases.GetAll() {
 		b.WriteString("\n\n" + db.Name + " [" + sharedStateStr(db.srState) + "]\n======\n")
