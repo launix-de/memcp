@@ -874,54 +874,29 @@ func jitParserStateValue(value Scmer) *jitParserState {
 	return state
 }
 
-func jitParserPushValue(stateValue, value Scmer) Scmer {
-	state := jitParserStateValue(stateValue)
+func jitParserPushValueNative(state *jitParserState, value Scmer) {
 	state.values = append(state.values, value)
-	return value
 }
 
-func jitParserDiscardValue(stateValue Scmer) Scmer {
-	state := jitParserStateValue(stateValue)
+func jitParserDiscardValueNative(state *jitParserState) {
 	if len(state.values) == 0 {
 		panic("jit: parser value stack underflow")
 	}
 	state.values[len(state.values)-1] = NewNil()
 	state.values = state.values[:len(state.values)-1]
-	return NewNil()
 }
 
-func jitParserCaptureValue(stateValue, inputValue, startValue, endValue Scmer) Scmer {
-	state := jitParserStateValue(stateValue)
+func jitParserCaptureValueNative(state *jitParserState, inputValue Scmer, start, end int64) {
 	if len(state.values) == 0 {
 		panic("jit: parser capture without a value")
 	}
 	input := inputValue.String()
-	start, end := int(startValue.Int()), int(endValue.Int())
-	if start < 0 || end < start || end > len(input) {
+	lo, hi := int(start), int(end)
+	if lo < 0 || hi < lo || hi > len(input) {
 		panic("jit: invalid parser capture range")
 	}
-	result := NewSlice([]Scmer{NewString(input[start:end]), state.values[len(state.values)-1]})
+	result := NewSlice([]Scmer{NewString(input[lo:hi]), state.values[len(state.values)-1]})
 	state.values[len(state.values)-1] = result
-	return result
-}
-
-func jitParserEnterRule(stateValue, ruleValue, successValue, failureValue, positionValue Scmer) Scmer {
-	state := jitParserStateValue(stateValue)
-	ruleID := int(ruleValue.Int())
-	if ruleID < 0 || ruleID >= len(state.program.rules) {
-		panic("jit: parser rule index out of range")
-	}
-	rule := &state.program.rules[ruleID]
-	frame := jitParserCallFrame{
-		rule: ruleID, success: int(successValue.Int()), failure: int(failureValue.Int()),
-		position: int(positionValue.Int()), valueBase: len(state.values), bindingBase: len(state.bindings),
-		mutationBase: len(state.mutations), memoize: state.program.memoRuleIndex[ruleID] >= 0,
-	}
-	state.frames = append(state.frames, frame)
-	for range rule.bindings {
-		state.bindings = append(state.bindings, NewNil())
-	}
-	return NewNil()
 }
 
 func jitParserPushRuleFrame(state *jitParserState, ruleID, success, failure, position int, memoInitial, transient bool) {
@@ -1077,21 +1052,7 @@ func jitParserCompleteRule(state *jitParserState, position int, value Scmer, suc
 	return int64(frame.rule), int64(frame.position), true
 }
 
-func jitParserBindingValueNative(stateValue Scmer, binding int64) Scmer {
-	state := jitParserStateValue(stateValue)
-	if len(state.frames) == 0 {
-		panic("jit: parser binding outside a rule")
-	}
-	frame := state.frames[len(state.frames)-1]
-	index := frame.bindingBase + int(binding)
-	if index < frame.bindingBase || index >= len(state.bindings) {
-		panic("jit: parser binding index outside a rule")
-	}
-	return state.bindings[index]
-}
-
-func jitParserBindingValueForRuleNative(stateValue Scmer, ruleID, binding int64) Scmer {
-	state := jitParserStateValue(stateValue)
+func jitParserBindingValueForRuleNative(state *jitParserState, ruleID, binding int64) Scmer {
 	for index := len(state.frames) - 1; index >= 0; index-- {
 		frame := state.frames[index]
 		if int64(frame.rule) != ruleID {
@@ -1106,8 +1067,7 @@ func jitParserBindingValueForRuleNative(stateValue Scmer, ruleID, binding int64)
 	panic("jit: parser lexical rule is not active")
 }
 
-func jitParserRuleValueNative(stateValue Scmer) Scmer {
-	state := jitParserStateValue(stateValue)
+func jitParserRuleValueNative(state *jitParserState) Scmer {
 	if len(state.frames) == 0 {
 		panic("jit: parser value outside a rule")
 	}
@@ -1118,8 +1078,7 @@ func jitParserRuleValueNative(stateValue Scmer) Scmer {
 	return state.values[len(state.values)-1]
 }
 
-func jitParserReturnRuleValueNative(stateValue Scmer, position int64, value Scmer) (int64, int64, bool) {
-	state := jitParserStateValue(stateValue)
+func jitParserReturnRuleValueNative(state *jitParserState, position int64, value Scmer) (int64, int64, bool) {
 	// Parser actions cross from the nested generated expression into the parser
 	// machine state. Lists must own Go-managed backing storage at that boundary;
 	// an inlined variadic producer may otherwise describe its transient call
@@ -1146,40 +1105,34 @@ func jitParserReleaseStateNative(programValue, stateValue Scmer) {
 	program.releaseState(jitParserStateValue(stateValue))
 }
 
-func jitParserFinish(stateValue Scmer) Scmer {
-	state := jitParserStateValue(stateValue)
+func jitParserFinish(state *jitParserState) Scmer {
 	if len(state.values) != 1 || len(state.frames) != 0 {
 		panic("jit: parser finished with an invalid machine stack")
 	}
 	return state.values[0]
 }
 
-func jitParserBindValue(stateValue Scmer, binding Scmer) Scmer {
-	state := jitParserStateValue(stateValue)
+func jitParserBindValueNative(state *jitParserState, binding int64) {
 	if len(state.frames) == 0 || len(state.values) == 0 {
 		panic("jit: parser binding outside a rule")
 	}
 	frame := &state.frames[len(state.frames)-1]
-	index := frame.bindingBase + int(binding.Int())
+	index := frame.bindingBase + int(binding)
 	if index < frame.bindingBase || index >= len(state.bindings) {
 		panic("jit: parser binding index outside a rule")
 	}
 	state.mutations = append(state.mutations, jitParserMutation{index: index, old: state.bindings[index]})
 	state.bindings[index] = state.values[len(state.values)-1]
-	return state.values[len(state.values)-1]
 }
 
-func jitParserPushCheckpoint(stateValue, position Scmer) Scmer {
-	state := jitParserStateValue(stateValue)
+func jitParserPushCheckpointNative(state *jitParserState, position int64) {
 	state.checkpoints = append(state.checkpoints, jitParserCheckpoint{
-		position: int(position.Int()), valueLen: len(state.values), mutationLen: len(state.mutations), markLen: len(state.marks),
+		position: int(position), valueLen: len(state.values), mutationLen: len(state.mutations), markLen: len(state.marks),
 		positionLen: len(state.positions),
 	})
-	return position
 }
 
-func jitParserRestoreCheckpoint(stateValue Scmer) Scmer {
-	state := jitParserStateValue(stateValue)
+func jitParserRestoreCheckpointNative(state *jitParserState) int64 {
 	if len(state.checkpoints) == 0 {
 		panic("jit: parser checkpoint underflow")
 	}
@@ -1193,38 +1146,34 @@ func jitParserRestoreCheckpoint(stateValue Scmer) Scmer {
 	state.values = state.values[:checkpoint.valueLen]
 	state.marks = state.marks[:checkpoint.markLen]
 	state.positions = state.positions[:checkpoint.positionLen]
-	return NewInt(int64(checkpoint.position))
+	return int64(checkpoint.position)
 }
 
-func jitParserCommitCheckpoint(stateValue Scmer) Scmer {
-	state := jitParserStateValue(stateValue)
+func jitParserCommitCheckpointNative(state *jitParserState) {
 	if len(state.checkpoints) == 0 {
 		panic("jit: parser checkpoint underflow")
 	}
 	state.checkpoints = state.checkpoints[:len(state.checkpoints)-1]
-	return NewNil()
 }
 
-func jitParserCheckpointPosition(stateValue Scmer) Scmer {
-	state := jitParserStateValue(stateValue)
+func jitParserCheckpointPositionNative(state *jitParserState) int64 {
 	if len(state.checkpoints) == 0 {
 		panic("jit: parser checkpoint underflow")
 	}
-	return NewInt(int64(state.checkpoints[len(state.checkpoints)-1].position))
+	return int64(state.checkpoints[len(state.checkpoints)-1].position)
 }
 
-func jitParserCommitProgress(stateValue, positionValue Scmer) Scmer {
-	state := jitParserStateValue(stateValue)
+func jitParserCommitProgressNative(state *jitParserState, position int64) bool {
 	if len(state.checkpoints) == 0 {
 		panic("jit: parser checkpoint underflow")
 	}
 	checkpoint := state.checkpoints[len(state.checkpoints)-1]
-	if checkpoint.position == int(positionValue.Int()) {
-		jitParserRestoreCheckpoint(stateValue)
-		return NewBool(false)
+	if checkpoint.position == int(position) {
+		jitParserRestoreCheckpointNative(state)
+		return false
 	}
-	jitParserCommitCheckpoint(stateValue)
-	return NewBool(true)
+	jitParserCommitCheckpointNative(state)
+	return true
 }
 
 // jitParserMemoFence bounds the memo table around one iteration of a `*` node
@@ -1304,37 +1253,31 @@ func jitParserMemoCompactNative(state *jitParserState, position int64) {
 	fence.pos = end
 }
 
-func jitParserPushPosition(stateValue, positionValue Scmer) Scmer {
-	state := jitParserStateValue(stateValue)
-	state.positions = append(state.positions, int(positionValue.Int()))
-	return NewNil()
+func jitParserPushPositionNative(state *jitParserState, position int64) {
+	state.positions = append(state.positions, int(position))
 }
 
-func jitParserPopPosition(stateValue Scmer) Scmer {
-	state := jitParserStateValue(stateValue)
+func jitParserPopPositionNative(state *jitParserState) int64 {
 	if len(state.positions) == 0 {
 		panic("jit: parser position stack underflow")
 	}
 	position := state.positions[len(state.positions)-1]
 	state.positions = state.positions[:len(state.positions)-1]
-	return NewInt(int64(position))
+	return int64(position)
 }
 
-func jitParserPushMark(stateValue Scmer) Scmer {
-	state := jitParserStateValue(stateValue)
+func jitParserPushMarkNative(state *jitParserState) {
 	state.marks = append(state.marks, len(state.values))
-	return NewNil()
 }
 
-func jitParserMergeMark(stateValue, ignoreValue Scmer) Scmer {
-	state := jitParserStateValue(stateValue)
+func jitParserMergeMarkNative(state *jitParserState, ignore bool) {
 	if len(state.marks) == 0 {
 		panic("jit: parser value mark underflow")
 	}
 	base := state.marks[len(state.marks)-1]
 	state.marks = state.marks[:len(state.marks)-1]
 	var result Scmer
-	if ignoreValue.Bool() {
+	if ignore {
 		result = NewNil()
 	} else {
 		values := make([]Scmer, len(state.values)-base)
@@ -1343,12 +1286,10 @@ func jitParserMergeMark(stateValue, ignoreValue Scmer) Scmer {
 	}
 	state.values = state.values[:base]
 	state.values = append(state.values, result)
-	return result
 }
 
-func jitParserRecordFailure(stateValue, position, expected Scmer) Scmer {
-	state := jitParserStateValue(stateValue)
-	pos := int(position.Int())
+func jitParserRecordFailureNative(state *jitParserState, position int64, expected Scmer) {
+	pos := int(position)
 	if pos > state.farthest {
 		state.farthest = pos
 		state.expected = state.expected[:0]
@@ -1356,11 +1297,9 @@ func jitParserRecordFailure(stateValue, position, expected Scmer) Scmer {
 	if pos == state.farthest && len(state.expected) < 8 {
 		state.expected = append(state.expected, expected.String())
 	}
-	return NewNil()
 }
 
-func jitParserPanic(stateValue, input Scmer) Scmer {
-	state := jitParserStateValue(stateValue)
+func jitParserPanic(state *jitParserState, input Scmer) Scmer {
 	position := state.farthest
 	if position < 0 {
 		position = 0
@@ -1414,8 +1353,7 @@ func jitParserEnterRuleNative(state *jitParserState, ruleValue, success, failure
 	return 0, position, false
 }
 
-func jitParserReturnRuleNative(stateValue Scmer, position int64, success bool) (int64, int64, bool) {
-	state := jitParserStateValue(stateValue)
+func jitParserReturnRuleNative(state *jitParserState, position int64, success bool) (int64, int64, bool) {
 	value := NewNil()
 	if success {
 		if len(state.frames) == 0 {
@@ -1432,62 +1370,6 @@ func jitParserReturnRuleNative(stateValue Scmer, position int64, success bool) (
 		}
 	}
 	return jitParserCompleteRule(state, int(position), value, success)
-}
-
-func jitParserBindValueNative(state Scmer, binding int64) {
-	jitParserBindValue(state, NewInt(binding))
-}
-
-func jitParserPushCheckpointNative(state Scmer, position int64) {
-	jitParserPushCheckpoint(state, NewInt(position))
-}
-
-func jitParserRestoreCheckpointNative(state Scmer) int64 {
-	return jitParserRestoreCheckpoint(state).Int()
-}
-
-func jitParserCommitCheckpointNative(state Scmer) {
-	jitParserCommitCheckpoint(state)
-}
-
-func jitParserCheckpointPositionNative(state Scmer) int64 {
-	return jitParserCheckpointPosition(state).Int()
-}
-
-func jitParserCommitProgressNative(state Scmer, position int64) bool {
-	return jitParserCommitProgress(state, NewInt(position)).Bool()
-}
-
-func jitParserPushPositionNative(state Scmer, position int64) {
-	jitParserPushPosition(state, NewInt(position))
-}
-
-func jitParserPopPositionNative(state Scmer) int64 {
-	return jitParserPopPosition(state).Int()
-}
-
-func jitParserMergeMarkNative(state Scmer, ignore bool) {
-	jitParserMergeMark(state, NewBool(ignore))
-}
-
-func jitParserCaptureValueNative(state, input Scmer, start, end int64) {
-	jitParserCaptureValue(state, input, NewInt(start), NewInt(end))
-}
-
-func jitParserRecordFailureNative(state Scmer, position int64, expected Scmer) {
-	jitParserRecordFailure(state, NewInt(position), expected)
-}
-
-func jitParserPushValueNative(state, value Scmer) {
-	jitParserPushValue(state, value)
-}
-
-func jitParserDiscardValueNative(state Scmer) {
-	jitParserDiscardValue(state)
-}
-
-func jitParserPushMarkNative(state Scmer) {
-	jitParserPushMark(state)
 }
 
 func jitParserAtBreakNative(input Scmer, position int64) bool {
