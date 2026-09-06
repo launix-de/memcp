@@ -419,8 +419,16 @@ func (u *storageShard) load(t *table) {
 			case LogEntryUndelete:
 				u.deletions.Set(uint(l.idx), false)
 			case LogEntryInsert:
+				// WAL insert recids follow the persisted main rows. Resolve that
+				// boundary only when replay actually contains inserts: eager loading
+				// here would defeat cold-column loading for every empty WAL.
+				u.ensureMainCount(true)
 				u.insertDatasetFromLog(l.cols, l.values)
 			case LogEntryInsertHidden:
+				// Hidden transactional inserts use the same RecID namespace. Without
+				// the persisted boundary they would tombstone committed main rows and
+				// expose uncommitted delta rows after a crash.
+				u.ensureMainCount(true)
 				firstRecid := u.main_count + uint32(len(u.inserts))
 				u.insertDatasetFromLog(l.cols, l.values)
 				for i := range l.values {
