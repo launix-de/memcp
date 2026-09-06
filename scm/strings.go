@@ -21955,6 +21955,26 @@ func optimizeRegexpReplace(v []Scmer, oc *OptimizerContext, useResult bool) (Scm
 	if err != nil {
 		return result, td // let runtime handle the error
 	}
+	// A function replacement over a constant pattern is lowered to a declared
+	// identity the JIT emits as an inline byte walk (jit-constant-regexp-replace-func),
+	// mirroring optimizeRegexpTest -> jit-constant-regexp-test. Resolve a bare
+	// symbol to the callable it names so the emitter sees the lambda body.
+	replacement := rv[3]
+	if sym, ok := scmerSymbol(replacement.WithoutSourceInfo()); ok && oc != nil && oc.Env != nil {
+		if binding := oc.Env.FindRead(sym); binding != nil {
+			if bound, exists := binding.Vars[sym]; exists {
+				replacement = bound
+			}
+		}
+	}
+	if scmerCallable(replacement.WithoutSourceInfo()) {
+		return NewSlice([]Scmer{
+			NewSymbol(jitConstantRegexpReplaceFuncName),
+			NewRegex(re),
+			replacement,
+			rv[1],
+		}), td
+	}
 	// Replace call with a precompiled closure. The replacement stays a runtime
 	// argument (arg 1 after the rewrite) so a string ($1 expansion) and a
 	// function (match) -> string are both still accepted.
