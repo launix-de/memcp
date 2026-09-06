@@ -310,14 +310,14 @@ func init_vector() {
 					r0 = registerHomes1.Registers[1]
 				}
 				var r1 Reg
-				phiHomeOK3 := registerHomes1.Available&(uint16(1)<<2) == uint16(1)<<2
+				phiHomeOK3 := registerHomes1.Available&(uint16(1)<<3) == uint16(1)<<3
 				if phiHomeOK3 {
-					r1 = registerHomes1.Registers[2]
+					r1 = registerHomes1.Registers[3]
 				}
 				var r2 Reg
-				phiHomeOK4 := registerHomes1.Available&(uint16(1)<<3) == uint16(1)<<3
+				phiHomeOK4 := registerHomes1.Available&(uint16(1)<<2) == uint16(1)<<2
 				if phiHomeOK4 {
-					r2 = registerHomes1.Registers[3]
+					r2 = registerHomes1.Registers[2]
 				}
 				var r3 Reg
 				phiHomeOK5 := registerHomes1.Available&(uint16(1)<<0) == uint16(1)<<0
@@ -888,7 +888,18 @@ func init_vector() {
 							panic("jit: phi source has no location")
 						}
 						ctx.SyncDesc(&d51)
-						ctx.EmitStoreScmerToStack(d51, int32(bbs[2].PhiBase)+int32(0))
+						if d51.Loc == LocStackPair {
+							ctx.EmitCopyStackWords(d51, int32(bbs[2].PhiBase)+int32(0), 2)
+						} else if d51.Loc == LocInputPair {
+							ctx.EnsureDesc(&d51)
+							ctx.EmitStoreScmerToStack(d51, int32(bbs[2].PhiBase)+int32(0))
+						} else if d51.Loc == LocRegPair || d51.Loc == LocImm {
+							ctx.EmitStoreScmerToStack(d51, int32(bbs[2].PhiBase)+int32(0))
+						} else {
+							ctx.EnsureDesc(&d51)
+							ctx.EmitStoreToStack(d51, int32(bbs[2].PhiBase)+int32(0))
+							ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(bbs[2].PhiBase)+int32(0))+8)
+						}
 						if d50.Loc == LocReg {
 							ctx.UnprotectReg(d50.Reg)
 						} else if d50.Loc == LocRegPair {

@@ -36653,7 +36653,8 @@ func init_alu() {
 					d5 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(len(args)))}
 					ctx.StabilizeDescForControlFlow(&d5)
 					if ps.General {
-						ctx.EmitStoreScmerToStack(JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}, int32(bbs[1].PhiBase)+int32(0))
+						ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewInt(0)}, int32(bbs[1].PhiBase)+int32(0))
+						ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(bbs[1].PhiBase)+int32(0))+8)
 						if phiHomeOK2 {
 							ctx.EmitMovToReg(r0, JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(-1)})
 						} else {
@@ -37369,7 +37370,18 @@ func init_alu() {
 							panic("jit: phi source has no location")
 						}
 						ctx.SyncDesc(&d60)
-						ctx.EmitStoreScmerToStack(d60, int32(bbs[1].PhiBase)+int32(0))
+						if d60.Loc == LocStackPair {
+							ctx.EmitCopyStackWords(d60, int32(bbs[1].PhiBase)+int32(0), 2)
+						} else if d60.Loc == LocInputPair {
+							ctx.EnsureDesc(&d60)
+							ctx.EmitStoreScmerToStack(d60, int32(bbs[1].PhiBase)+int32(0))
+						} else if d60.Loc == LocRegPair || d60.Loc == LocImm {
+							ctx.EmitStoreScmerToStack(d60, int32(bbs[1].PhiBase)+int32(0))
+						} else {
+							ctx.EnsureDesc(&d60)
+							ctx.EmitStoreToStack(d60, int32(bbs[1].PhiBase)+int32(0))
+							ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(bbs[1].PhiBase)+int32(0))+8)
+						}
 						d61 = d11
 						if d61.Loc == LocNone {
 							panic("jit: phi source has no location")
@@ -37898,7 +37910,18 @@ func init_alu() {
 							panic("jit: phi source has no location")
 						}
 						ctx.SyncDesc(&d104)
-						ctx.EmitStoreScmerToStack(d104, int32(bbs[1].PhiBase)+int32(0))
+						if d104.Loc == LocStackPair {
+							ctx.EmitCopyStackWords(d104, int32(bbs[1].PhiBase)+int32(0), 2)
+						} else if d104.Loc == LocInputPair {
+							ctx.EnsureDesc(&d104)
+							ctx.EmitStoreScmerToStack(d104, int32(bbs[1].PhiBase)+int32(0))
+						} else if d104.Loc == LocRegPair || d104.Loc == LocImm {
+							ctx.EmitStoreScmerToStack(d104, int32(bbs[1].PhiBase)+int32(0))
+						} else {
+							ctx.EnsureDesc(&d104)
+							ctx.EmitStoreToStack(d104, int32(bbs[1].PhiBase)+int32(0))
+							ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(bbs[1].PhiBase)+int32(0))+8)
+						}
 						d105 = d11
 						if d105.Loc == LocNone {
 							panic("jit: phi source has no location")
@@ -38626,7 +38649,8 @@ func init_alu() {
 					d5 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(len(args)))}
 					ctx.StabilizeDescForControlFlow(&d5)
 					if ps.General {
-						ctx.EmitStoreScmerToStack(JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}, int32(bbs[1].PhiBase)+int32(0))
+						ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewInt(0)}, int32(bbs[1].PhiBase)+int32(0))
+						ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(bbs[1].PhiBase)+int32(0))+8)
 						if phiHomeOK2 {
 							ctx.EmitMovToReg(r0, JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(-1)})
 						} else {
@@ -39342,7 +39366,18 @@ func init_alu() {
 							panic("jit: phi source has no location")
 						}
 						ctx.SyncDesc(&d60)
-						ctx.EmitStoreScmerToStack(d60, int32(bbs[1].PhiBase)+int32(0))
+						if d60.Loc == LocStackPair {
+							ctx.EmitCopyStackWords(d60, int32(bbs[1].PhiBase)+int32(0), 2)
+						} else if d60.Loc == LocInputPair {
+							ctx.EnsureDesc(&d60)
+							ctx.EmitStoreScmerToStack(d60, int32(bbs[1].PhiBase)+int32(0))
+						} else if d60.Loc == LocRegPair || d60.Loc == LocImm {
+							ctx.EmitStoreScmerToStack(d60, int32(bbs[1].PhiBase)+int32(0))
+						} else {
+							ctx.EnsureDesc(&d60)
+							ctx.EmitStoreToStack(d60, int32(bbs[1].PhiBase)+int32(0))
+							ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(bbs[1].PhiBase)+int32(0))+8)
+						}
 						d61 = d11
 						if d61.Loc == LocNone {
 							panic("jit: phi source has no location")
@@ -39871,7 +39906,18 @@ func init_alu() {
 							panic("jit: phi source has no location")
 						}
 						ctx.SyncDesc(&d104)
-						ctx.EmitStoreScmerToStack(d104, int32(bbs[1].PhiBase)+int32(0))
+						if d104.Loc == LocStackPair {
+							ctx.EmitCopyStackWords(d104, int32(bbs[1].PhiBase)+int32(0), 2)
+						} else if d104.Loc == LocInputPair {
+							ctx.EnsureDesc(&d104)
+							ctx.EmitStoreScmerToStack(d104, int32(bbs[1].PhiBase)+int32(0))
+						} else if d104.Loc == LocRegPair || d104.Loc == LocImm {
+							ctx.EmitStoreScmerToStack(d104, int32(bbs[1].PhiBase)+int32(0))
+						} else {
+							ctx.EnsureDesc(&d104)
+							ctx.EmitStoreToStack(d104, int32(bbs[1].PhiBase)+int32(0))
+							ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(bbs[1].PhiBase)+int32(0))+8)
+						}
 						d105 = d11
 						if d105.Loc == LocNone {
 							panic("jit: phi source has no location")
