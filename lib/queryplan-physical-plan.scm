@@ -2305,6 +2305,32 @@ logical window-stage remains unchanged and contains no createcolumn artifact. */
 			(and (empty_list? (coalesceNil (qb_order block) '()))
 				(aggregate_pushdown_count_fields? (qb_fields block)))))))
 
+/* A selected predicate-RecSet is already the exact input relation consumed by
+the count scan. Building a one-row query group on top cannot reduce any work;
+it only materializes the same rows again. This capability check deliberately
+uses the common access-path enumerator and cost comparator, so new descriptor
+kinds inherit the global aggregate consumer without expression-specific code. */
+(define global_row_count_access_path_selected? (lambda (block)
+	(begin
+		(define sources (qb_sources block))
+		(define plan (if (empty_list? sources) nil
+			(query_block_join_plan block sources)))
+		(define driver (if (nil? plan) nil
+			(join_optimizer_source_by_alias sources
+				(join_optimizer_tree_first_alias plan))))
+		(if (or (nil? driver)
+			(or (not (source_is_base_table? driver))
+				(source_unique_point_condition? driver (qb_where block))))
+			false
+			(begin
+				(define default_alias (qassoc_get (qb_facts block) (quote default_alias)
+					(source_alias driver)))
+				(define candidates (scan_access_path_candidates
+					driver sources default_alias (qb_where block) nil
+					(planner_context_session (qb_facts block))
+					(planner_context_tx (qb_facts block))))
+				(not (nil? (scan_access_path_preferred_candidate driver candidates))))))))
+
 (define lower_grouped_query_block_with_stages (lambda (block)
 	(begin
 		(define fused_top_count (lower_row_number_top_count_block block))
@@ -2327,7 +2353,8 @@ logical window-stage remains unchanged and contains no createcolumn artifact. */
 				predicate-specific one-row group table. Selectivity-dependent choices
 				remain inside the ordinary membership and join cost models. */
 				(define direct_row_count (and (not (nil? direct_stage))
-					(expr_contains_driver_membership? (qb_where direct_core))))
+					(or (expr_contains_driver_membership? (qb_where direct_core))
+						(global_row_count_access_path_selected? direct_core))))
 				(if direct_row_count
 					(begin
 						(define direct_prelude (nth direct_prepared 0))
@@ -5924,7 +5951,9 @@ every other carrier instead. Logical join order remains owned by join_plan. */
 		(define alias (source_alias src))
 		(define aliases (source_aliases all_sources))
 		(define input_rows (planner_source_row_count src))
-		(if (or (not (number? input_rows)) (< input_rows 1024))
+		(define downstream_probe_branches (count (expr_probe_stages condition)))
+		(if (or (not (number? input_rows))
+			(< input_rows 1024))
 			'()
 			(filter
 				(map (split_and_terms (coalesceNil condition true)) (lambda (term)
@@ -5944,6 +5973,8 @@ every other carrier instead. Logical join order remains owned by join_plan. */
 									(list (quote rows) rows)
 									(list (quote input_rows) input_rows)
 									(list (quote ordered_window_rows) ordered_window_rows)
+									(list (quote downstream_probe_branches)
+										downstream_probe_branches)
 									(list (quote work) work)
 									(list (quote estimate) estimate))
 								nil)))))
@@ -5982,7 +6013,11 @@ this lowering boundary. */
 	(begin
 		(define input_rows (qassoc_get candidate (quote input_rows) 0))
 		(planner_cost_add
-			(scan_access_path_scan_cost src candidate)
+			(planner_cost_add
+				(scan_access_path_scan_cost src candidate)
+				(planner_membership_downstream_probe_cost (* input_rows
+					(qassoc_get candidate (quote downstream_probe_branches) 0)))
+				input_rows 0.65)
 			(planner_join_work_cost input_rows 0.65)
 			(qassoc_get candidate (quote rows) input_rows) 0.65))))
 
@@ -6015,22 +6050,44 @@ this lowering boundary. */
 		(define consumer (scan_access_path_adaptive_consumer candidate))
 		(planner_cost_add
 			(planner_cost_add
-				(scan_access_path_scan_cost src candidate)
-				(planner_cost planner_membership_recset_startup_ns
-					(+ (* (nth consumer 0) planner_membership_scan_row_ns)
-						(* (nth consumer 1)
-							planner_membership_ordered_recset_sort_unit_ns))
-					(* (nth consumer 2) planner_membership_recset_probe_row_ns) 0 0
-					(* rows planner_membership_recset_build_row_ns)
-					(* rows 8) 0 rows 0.65)
+				(planner_cost_add
+					(scan_access_path_scan_cost src candidate)
+					(planner_cost planner_membership_recset_startup_ns
+						(+ (* (nth consumer 0) planner_membership_scan_row_ns)
+							(* (nth consumer 1)
+								planner_membership_ordered_recset_sort_unit_ns))
+						(* (nth consumer 2) planner_membership_recset_probe_row_ns) 0 0
+						(* rows planner_membership_recset_build_row_ns)
+						(* rows 8) 0 rows 0.65)
+					rows 0.65)
+				(planner_join_work_cost rows 0.65)
 				rows 0.65)
-			(planner_join_work_cost rows 0.65)
+			(planner_membership_downstream_probe_cost (* rows
+				(qassoc_get candidate (quote downstream_probe_branches) 0)))
 			rows 0.65))))
 
 (define scan_access_path_candidate_cost (lambda (src candidate)
 	(match (qassoc_get candidate (quote kind) nil)
 		(quote predicate_recset) (scan_access_path_recset_cost src candidate)
 		_ (neumann_fail "build_queryplan" "unsupported physical scan access-path descriptor"))))
+
+(define best_scan_access_path_candidate (lambda (src candidates)
+	(reduce candidates (lambda (best item)
+		(if (or (nil? best)
+			(planner_cost_better?
+				(scan_access_path_candidate_cost src item)
+				(scan_access_path_candidate_cost src best)))
+			item best)) nil)))
+
+(define scan_access_path_preferred_candidate (lambda (src candidates)
+	(if (empty_list? candidates)
+		nil
+		(begin
+			(define candidate (best_scan_access_path_candidate src candidates))
+			(if (planner_cost_better?
+				(scan_access_path_candidate_cost src candidate)
+				(scan_access_path_base_cost src candidate))
+				candidate nil)))))
 
 (define scan_access_path_crossover_search (lambda (src candidate base_cost low high remaining)
 	(if (or (<= remaining 0) (>= low high))
@@ -6073,12 +6130,7 @@ topology inequality by bounded binary search and guard that crossover. */
 	(if (empty_list? candidates)
 		(list "fused_base_scan" nil)
 		(begin
-			(define candidate (reduce candidates (lambda (best item)
-				(if (or (nil? best)
-					(planner_cost_better?
-						(scan_access_path_candidate_cost src item)
-						(scan_access_path_candidate_cost src best)))
-					item best)) nil))
+			(define candidate (best_scan_access_path_candidate src candidates))
 			(define alias (source_alias src))
 			(define decision_id (concat "scan_access_path:" alias))
 			(define candidate_plan (qassoc_get candidate (quote plan) nil))
@@ -6122,6 +6174,8 @@ topology inequality by bounded binary search and guard that crossover. */
 					(list "candidate_broad_text_match_bytes" (qassoc_get work (quote broad_text_match_bytes) 0))
 					(list "candidate_filter_value_rows" (qassoc_get work (quote filter_value_rows) 0))
 					(list "candidate_expression_operation_rows" (qassoc_get work (quote expression_operation_rows) 0))
+					(list "downstream_probe_branches"
+						(qassoc_get candidate (quote downstream_probe_branches) 0))
 					(list "driver_rows" (qassoc_get candidate (quote rows) nil))
 					(list "driver_input_rows" (qassoc_get candidate (quote input_rows) nil))
 					(list "density" (/ (qassoc_get candidate (quote rows) 0)
@@ -6940,7 +6994,6 @@ carrier remains on the measured direct path and is never built eagerly. */
 				(define access_path_build_allowed (and
 					(not membership_driver)
 					(nil? row_number_stage_filter)
-					(> (count all_sources) 1)
 					(equal? alias (probe_work_context_driver_alias probe_context))))
 				(define access_path_order_window (if (and
 					(not (empty_list? current_order_items))
@@ -9288,8 +9341,38 @@ ordering run. Storage artifacts begin in build_queryplan. */
 (define decorrelate_logical_query (lambda (ast)
 	(untangle_query_term (normalize_sql_syntax ast) nil)))
 
+/* Aggregate partitioning is an equivalent logical alternative whose only
+benefit is reducing repeated stage evaluation. If the common physical
+access-path selector already chooses an exact predicate carrier, later
+lowering can evaluate the stages against that carrier and fuse the global
+count. Partitioning cannot reduce that work and would add a grouped relation.
+
+Run the same selector here rather than recognizing LIKE (or any future hook)
+again. It records its normal crossover guard even when aggregate partitioning
+wins today, so improved runtime statistics can invalidate that cached choice.
+The result is only a choice between equivalent logical trees; no scan or
+RecSet node is written into logical IR. */
+(define aggregate_pushdown_exact_access_dominates? (lambda (ir planning_session tx)
+	(begin
+		(define block (ir_root ir))
+		(if (or (not (query_block? block))
+			(not (aggregate_pushdown_root_shape? block)))
+			false
+			(begin
+				(define driver (car (aggregate_pushdown_base_sources block)))
+				(define candidates (scan_access_path_candidates
+					driver (qb_sources block)
+					(qassoc_get (qb_facts block) (quote default_alias) (source_alias driver))
+					(qb_where block) nil planning_session tx))
+				(not (nil? (cadr
+					(choose_scan_access_path driver candidates planning_session)))))))))
+
 (define optimize_logical_query (lambda (ir planning_session tx)
-	(join_reorder (aggregate_pushdown_logical ir) planning_session tx)))
+	(join_reorder
+		(if (aggregate_pushdown_exact_access_dominates? ir planning_session tx)
+			ir
+			(aggregate_pushdown_logical ir planning_session tx))
+		planning_session tx)))
 
 (define neumann_compile_pipeline (lambda (ast planning_session tx)
 	(begin

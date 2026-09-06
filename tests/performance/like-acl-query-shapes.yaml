@@ -444,3 +444,82 @@ test_cases:
       rows: 1
       data:
         - {total: 700, counted_count: 700}
+
+  - name: "Perf: selective direct LIKE count with compound ACL"
+    setup: *like_acl_fixture
+    performance_rows: 40000
+    threshold_ms: 3000
+    timeout: 30
+    sql: |
+      SELECT COUNT(*) AS total, COUNT(counted._count) AS counted_count
+      FROM (
+        SELECT d.id, 1 AS _count
+        FROM pla_document d
+        WHERE d.inventory_no LIKE '%inv-special%'
+          AND COALESCE((
+            SELECT CASE WHEN site.direct_flag = 1 THEN TRUE ELSE (
+              EXISTS (
+                SELECT TRUE
+                FROM pla_assignment assignment
+                WHERE assignment.site_id = site.id
+                  AND assignment.actor_id = 7
+                  AND assignment.allowed = 1
+                LIMIT 1
+              ) OR COALESCE((
+                SELECT override.allowed
+                FROM pla_override override
+                WHERE override.site_id = site.id
+                  AND override.actor_id = 7
+                LIMIT 1
+              ), FALSE)
+            ) END
+            FROM pla_site site
+            WHERE site.id = d.site_id
+            LIMIT 1
+          ), FALSE)
+          AND TRUE
+      ) counted
+    expect:
+      rows: 1
+
+  - name: "Plan: selective direct LIKE count uses exact query-local carrier"
+    setup: *like_acl_fixture
+    performance_rows: 40000
+    threshold_ms: 3000
+    timeout: 30
+    sql: |
+      EXPLAIN PHYSICAL
+      SELECT COUNT(*) AS total, COUNT(counted._count) AS counted_count
+      FROM (
+        SELECT d.id, 1 AS _count
+        FROM pla_document d
+        WHERE d.inventory_no LIKE '%inv-special%'
+          AND COALESCE((
+            SELECT CASE WHEN site.direct_flag = 1 THEN TRUE ELSE (
+              EXISTS (
+                SELECT TRUE
+                FROM pla_assignment assignment
+                WHERE assignment.site_id = site.id
+                  AND assignment.actor_id = 7
+                  AND assignment.allowed = 1
+                LIMIT 1
+              ) OR COALESCE((
+                SELECT override.allowed
+                FROM pla_override override
+                WHERE override.site_id = site.id
+                  AND override.actor_id = 7
+                LIMIT 1
+              ), FALSE)
+            ) END
+            FROM pla_site site
+            WHERE site.id = d.site_id
+            LIMIT 1
+          ), FALSE)
+          AND TRUE
+      ) counted
+    expect:
+      rows: 1
+      result_contains:
+        - "decision global_membership_row_count"
+        - "decision scan_access_path"
+        - "chosen scan_recset"
