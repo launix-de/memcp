@@ -48,6 +48,12 @@ func optimizeScanOrderMulti(v []scm.Scmer, oc *scm.OptimizerContext, useResult b
 	for i := 1; i <= 15 && i < len(v); i++ {
 		v[i], _ = oc.OptimizeSub(v[i], true)
 	}
+	if len(v) > 8 {
+		if schemas, values, compiled := compileScanOrderAccessList(v[3], v[4], v[7], v[8]); compiled {
+			v[3] = schemas
+			v[4] = values
+		}
+	}
 	neutralType := unknownScanType()
 	if len(v) > 16 {
 		v[16], neutralType = oc.OptimizeSub(v[16], true)
@@ -101,6 +107,12 @@ func optimizeScanOrder(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) 
 			v[i], _ = oc.OptimizeSub(v[i], true)
 		}
 	}
+	if len(v) > 8 {
+		if schema, values, compiled := compileScanOrderAccess(v[3], v[4], v[7], v[8]); compiled {
+			v[3] = schema
+			v[4] = values
+		}
+	}
 	neutralType := unknownScanType()
 	if len(v) > neutralIdx {
 		v[neutralIdx], neutralType = oc.OptimizeSub(v[neutralIdx], true)
@@ -133,6 +145,193 @@ func optimizeScanOrder(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) 
 	}
 	oc.Ome.DecrLoopDepth()
 	return scm.NewSlice(v), nil
+}
+
+// compileScanOrderAccess moves immutable ORDER BY access requirements into the
+// cached scan schema. Runtime execution then only resolves the currently
+// available index and decides whether its order covers the request. Dynamic or
+// otherwise unsupported order expressions retain the ordinary runtime path.
+func compileScanOrderAccess(schemaExpr, valuesExpr, sortColsExpr, sortDirsExpr scm.Scmer) (scm.Scmer, scm.Scmer, bool) {
+	staticList := func(expr scm.Scmer) ([]scm.Scmer, bool) {
+		if expr.IsNil() {
+			return nil, true
+		}
+		return scanStaticListElements(expr)
+	}
+	schema, schemaStatic := staticList(schemaExpr)
+	sortcols, columnsStatic := scanStaticListElements(sortColsExpr)
+	sortdirs, directionsStatic := scanStaticListElements(sortDirsExpr)
+	values, valuesStatic := staticList(valuesExpr)
+	if !schemaStatic || !columnsStatic || !directionsStatic || !valuesStatic || len(sortcols) == 0 || len(sortcols) != len(sortdirs) {
+		return schemaExpr, valuesExpr, false
+	}
+
+	meta := scanAccessSchemaMeta{consumer: scanAccessConsumerScan}
+	if len(schema) > 0 {
+		var valid bool
+		meta, valid = decodeScanAccessHeader(schema[0])
+		if !valid || len(schema) != scanAccessSchemaHeaderSize+meta.count*scanAccessBoundaryStride+meta.projections {
+			return schemaExpr, valuesExpr, false
+		}
+	}
+	for i := 0; i < meta.count; i++ {
+		boundary := ScanBoundaryFromScmer(schema[scanAccessSchemaHeaderSize+i*scanAccessBoundaryStride])
+		if !boundary.Analyzer().IsPointLike() {
+			return schemaExpr, valuesExpr, false
+		}
+	}
+
+	type compiledOrderBoundary struct {
+		column     string
+		mapColumns []string
+		mapper     scm.Scmer
+		order      func(...scm.Scmer) scm.Scmer
+		orderMeta  string
+	}
+	compiled := make([]compiledOrderBoundary, 0, len(sortcols))
+	hasSorted := func(column string) bool {
+		for i := 0; i < meta.count; i++ {
+			boundary := ScanBoundaryFromScmer(schema[scanAccessSchemaHeaderSize+i*scanAccessBoundaryStride])
+			if boundary.ColumnName() == column && boundary.Analyzer().IsSorted() {
+				return true
+			}
+		}
+		for _, boundary := range compiled {
+			if boundary.column == column {
+				return true
+			}
+		}
+		return false
+	}
+
+	for i, sortcol := range sortcols {
+		sortcol = sortcol.WithoutSourceInfo()
+		directionValue := sortdirs[i].WithoutSourceInfo()
+		if name, named := scanSymbolName(directionValue); named {
+			resolved, exists := scm.Globalenv.Vars[scm.Symbol(name)]
+			if !exists {
+				return schemaExpr, valuesExpr, false
+			}
+			directionValue = resolved
+		}
+		if items, ok := scmerSlice(directionValue); ok && len(items) == 3 && callHeadIs(items[0], "collate") {
+			collation := items[1].WithoutSourceInfo()
+			reverse := items[2].WithoutSourceInfo()
+			staticReverse := reverse.IsBool() || reverse.IsNil() || reverse.SymbolEquals("false") || reverse.SymbolEquals("true")
+			if !collation.IsString() || !staticReverse {
+				return schemaExpr, valuesExpr, false
+			}
+			directionValue = scm.Apply(scm.Globalenv.Vars[scm.Symbol("collate")], collation, scm.NewBool(scm.ToBool(reverse)))
+		}
+		// Only canonical collation relations are accepted below. Runtime-capturing
+		// procedures and arbitrary native callbacks retain the runtime fallback.
+		order := scm.OptimizeProcToSerialFunction(directionValue)
+		if order == nil {
+			return schemaExpr, valuesExpr, false
+		}
+		collation, reverse, persistable := scm.LookupCollate(order)
+		if !persistable {
+			return schemaExpr, valuesExpr, false
+		}
+		orderMeta := collation + ":asc"
+		if reverse {
+			orderMeta = collation + ":desc"
+		}
+		boundary := compiledOrderBoundary{order: order, orderMeta: orderMeta}
+		if sortcol.IsString() {
+			boundary.column = sortcol.String()
+		} else {
+			if !sortcol.IsProc() {
+				return schemaExpr, valuesExpr, false
+			}
+			proc := sortcol.Proc()
+			if proc == nil || !proc.Params.IsSlice() || len(proc.Params.Slice()) == 0 {
+				return schemaExpr, valuesExpr, false
+			}
+			params := proc.Params.Slice()
+			conditionCols := make([]string, len(params))
+			for j, param := range params {
+				conditionCols[j] = scm.String(param)
+			}
+			if !isRawDataset(params, proc.Body) {
+				return schemaExpr, valuesExpr, false
+			}
+			boundary.column = canonicalColName(proc.Body, params, conditionCols)
+			boundary.mapColumns, boundary.mapper = buildComputedFn(proc.Body, proc.Params, proc.En, conditionCols)
+			if boundary.mapper.IsNil() || boundary.mapColumns == nil {
+				return schemaExpr, valuesExpr, false
+			}
+		}
+		if !hasSorted(boundary.column) {
+			compiled = append(compiled, boundary)
+		}
+	}
+	if len(compiled) == 0 {
+		return schemaExpr, valuesExpr, true
+	}
+
+	boundariesEnd := scanAccessSchemaHeaderSize + meta.count*scanAccessBoundaryStride
+	result := make([]scm.Scmer, 0, len(schema)+len(compiled))
+	result = append(result, newScanAccessHeader(meta.count+len(compiled), meta.consumer, meta.projections, meta.mapperSlot))
+	if len(schema) > scanAccessSchemaHeaderSize {
+		result = append(result, schema[scanAccessSchemaHeaderSize:boundariesEnd]...)
+	}
+	newValues := append([]scm.Scmer(nil), values...)
+	for _, boundary := range compiled {
+		mapperSlot := -1
+		if !boundary.mapper.IsNil() {
+			mapperSlot = len(newValues)
+			mapcols := make([]scm.Scmer, len(boundary.mapColumns))
+			for i, column := range boundary.mapColumns {
+				mapcols[i] = scm.NewString(column)
+			}
+			newValues = append(newValues, scm.NewSlice([]scm.Scmer{
+				scm.NewSymbol("compile_scan_computed_index"), boundary.mapper,
+				scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), scm.NewSlice(mapcols)}),
+			}))
+		}
+		result = append(result, newScanBoundarySpec(boundary.column, RangeMatcher, -1, -1,
+			true, true, "", false, mapperSlot, boundary.mapColumns, boundary.order, boundary.orderMeta, false))
+	}
+	if meta.projections > 0 {
+		result = append(result, schema[boundariesEnd:]...)
+	}
+	valuesResult := valuesExpr
+	if len(newValues) != len(values) {
+		valuesResult = scanAccessValuesExpr(newValues)
+	}
+	return scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), scm.NewSlice(result)}), valuesResult, true
+}
+
+func compileScanOrderAccessList(schemasExpr, valuesExpr, sortColsExpr, sortDirsExpr scm.Scmer) (scm.Scmer, scm.Scmer, bool) {
+	schemas, schemasStatic := scanStaticListElements(schemasExpr)
+	sortcols, columnsStatic := scanStaticListElements(sortColsExpr)
+	if !schemasStatic || !columnsStatic || len(schemas) != len(sortcols) {
+		return schemasExpr, valuesExpr, false
+	}
+	result := append([]scm.Scmer(nil), schemas...)
+	compiledAny := false
+	for i := range result {
+		columns, static := scanStaticListElements(sortcols[i])
+		if !static || len(columns) == 0 {
+			continue
+		}
+		compiledSchema, compiledValues, compiled := compileScanOrderAccess(result[i], valuesExpr, sortcols[i], sortDirsExpr)
+		if !compiled {
+			continue
+		}
+		items, static := scanStaticListElements(compiledSchema)
+		if !static {
+			continue
+		}
+		result[i] = scm.NewSlice(items)
+		valuesExpr = compiledValues
+		compiledAny = true
+	}
+	if !compiledAny {
+		return schemasExpr, valuesExpr, false
+	}
+	return scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), scm.NewSlice(result)}), valuesExpr, true
 }
 
 // pkEqual compares two partition key slices element-wise.
