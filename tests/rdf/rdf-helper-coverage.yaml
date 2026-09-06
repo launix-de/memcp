@@ -43,7 +43,7 @@ test_cases:
         (if (not (equal? (get_assoc (nth star 1) "?value") (list (quote get_var) "?value"))) (fail (concat "SELECT * value " (nth star 1))))
         true)
 
-  - name: "RDF aggregates lower only to common aggregate IR"
+  - name: "RDF row and aggregate helper edge cases"
     scm: |
       (begin
         (define fail (lambda (msg) (error (concat "rdf aggregate coverage: " msg))))

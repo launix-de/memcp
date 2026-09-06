@@ -26,7 +26,7 @@ test_cases:
         (if (not (rdf_contains (concat (qb_where input)) "equal??")) (fail "join predicate missing"))
         true)
 
-  - name: "BIND lowers through the shared query-block IR"
+  - name: "Algebra markers are not mistaken for triple patterns"
     scm: |
       (begin
         (define parsed (rdf_query "SELECT ?x WHERE { BIND(\"hello\" AS ?x) }"))

@@ -1047,7 +1047,8 @@ class SQLTestRunner:
         text = response.text.strip()
         if not text:
             return []
-        if "application/sparql-results+json" in response.headers.get("Content-Type", ""):
+        response_headers = getattr(response, "headers", None) or {}
+        if "application/sparql-results+json" in response_headers.get("Content-Type", ""):
             try:
                 document = response.json()
                 bindings = document.get("results", {}).get("bindings")
