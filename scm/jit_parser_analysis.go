@@ -137,11 +137,144 @@ func (program *jitParserProgram) analyzeMemoNeed() []bool {
 	}
 	a.flagChoicesAndRepeats()
 	a.propagateToReferrers()
+	a.markFenceableRepeats()
 
 	if os.Getenv("MEMCP_DUMP_MEMO_ANALYSIS") != "" {
 		a.dump()
 	}
 	return a.needMemo
+}
+
+// markFenceableRepeats sets fenceMemo on a `*` node whose committed iterations
+// can never be rolled back: nothing that can fail follows the repeat before an
+// ordered-choice commit, walking the containing rule and every rule that
+// references it. PEG ordered choice is possessive - once the alternative the
+// repeat lives in succeeds it is final - and a repeat only ever advances. The
+// emitter then discards the memo an iteration produced the moment it commits;
+// without it the memo for `... VALUES (row), (row), ...` grows to millions of
+// live entries the GC rescans every cycle.
+func (a *memoNeedAnalysis) markFenceableRepeats() {
+	referrers := make([][]int, a.n)
+	for r := 0; r < a.n; r++ {
+		if a.program.rules[r].root == nil {
+			continue
+		}
+		refs := newParserRuleSet(a.n)
+		a.collectDirectRefs(a.program.rules[r].root, refs)
+		for q := 0; q < a.n; q++ {
+			if refs.has(q) {
+				referrers[q] = append(referrers[q], r)
+			}
+		}
+	}
+	for r := 0; r < a.n; r++ {
+		if a.program.rules[r].root != nil {
+			a.walkFence(a.program.rules[r].root, nil, r, referrers)
+		}
+	}
+}
+
+func (a *memoNeedAnalysis) walkFence(node *jitParserNode, path []*jitParserNode, rule int, referrers [][]int) {
+	if node.kind == jitParserZeroOrMore {
+		if a.noRollbackAfter(node, path, rule, referrers, map[int]bool{}) {
+			node.noMemo = true
+			node.fenceMemo = true
+		}
+	}
+	childPath := append(append([]*jitParserNode(nil), path...), node)
+	for _, c := range node.children {
+		a.walkFence(c, childPath, rule, referrers)
+	}
+}
+
+// noRollbackAfter reports whether, once `node` starts succeeding, no later
+// failure can force it to be parsed again. `path` is node's ancestor chain
+// (root first) inside `rule`.
+func (a *memoNeedAnalysis) noRollbackAfter(node *jitParserNode, path []*jitParserNode, rule int, referrers [][]int, seen map[int]bool) bool {
+	child := node
+	for i := len(path) - 1; i >= 0; i-- {
+		anc := path[i]
+		switch anc.kind {
+		case jitParserChoice:
+			return true // an ordered-choice alternative is final once it succeeds
+		case jitParserSequence:
+			idx := 0
+			for j, c := range anc.children {
+				if c == child {
+					idx = j
+					break
+				}
+			}
+			for _, sib := range anc.children[idx+1:] {
+				if a.failable(sib) {
+					return false
+				}
+			}
+		case jitParserZeroOrMore, jitParserOneOrMore, jitParserOptional, jitParserBind, jitParserCapture:
+			// transparent: a repeat/optional/binder above never re-parses a
+			// committed inner iteration - repeats only advance.
+		default:
+			return false
+		}
+		child = anc
+	}
+	if seen[rule] {
+		return false
+	}
+	seen[rule] = true
+	refs := referrers[rule]
+	if len(refs) == 0 {
+		return true // an entry rule is never retried
+	}
+	for _, r := range refs {
+		ok := true
+		a.forEachRef(a.program.rules[r].root, nil, rule, func(refNode *jitParserNode, refPath []*jitParserNode) {
+			if ok && !a.noRollbackAfter(refNode, refPath, r, referrers, seen) {
+				ok = false
+			}
+		})
+		if !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func (a *memoNeedAnalysis) forEachRef(node *jitParserNode, path []*jitParserNode, target int, fn func(*jitParserNode, []*jitParserNode)) {
+	if node.kind == jitParserRuleRef && node.rule == target {
+		fn(node, path)
+	}
+	childPath := append(append([]*jitParserNode(nil), path...), node)
+	for _, c := range node.children {
+		a.forEachRef(c, childPath, target, fn)
+	}
+}
+
+// failable reports whether a node can fail to match, as opposed to always
+// succeeding (possibly matching empty).
+func (a *memoNeedAnalysis) failable(node *jitParserNode) bool {
+	switch node.kind {
+	case jitParserZeroOrMore, jitParserOptional, jitParserEmpty:
+		return false
+	case jitParserBind, jitParserCapture:
+		return a.failable(node.children[0])
+	case jitParserSequence:
+		for _, c := range node.children {
+			if a.failable(c) {
+				return true
+			}
+		}
+		return false
+	case jitParserChoice:
+		for _, c := range node.children {
+			if !a.failable(c) {
+				return false
+			}
+		}
+		return true
+	default:
+		return true
+	}
 }
 
 func (a *memoNeedAnalysis) computeNullable() {
@@ -492,6 +625,30 @@ func (a *memoNeedAnalysis) dump() {
 	os.Stderr.WriteString("[memo-analysis] non-lexical rules: kept(memoized)=" +
 		itoa(kept) + " freed(no memo)=" + itoa(freed) + "\n")
 	os.Stderr.WriteString("[memo-analysis] freed sample: " + strings.Join(freedNames, ", ") + "\n")
+
+	fenced := 0
+	var fencedIn []string
+	for r := 0; r < a.n; r++ {
+		root := a.program.rules[r].root
+		if root == nil {
+			continue
+		}
+		var walk func(*jitParserNode)
+		walk = func(node *jitParserNode) {
+			if node.fenceMemo {
+				fenced++
+				if len(fencedIn) < 20 {
+					fencedIn = append(fencedIn, ruleDisplayName(&a.program.rules[r], r))
+				}
+			}
+			for _, c := range node.children {
+				walk(c)
+			}
+		}
+		walk(root)
+	}
+	os.Stderr.WriteString("[memo-analysis] fenced repeats: " + itoa(fenced) +
+		" in: " + strings.Join(fencedIn, ", ") + "\n")
 }
 
 func ruleDisplayName(rule *jitParserRule, id int) string {
