@@ -1002,25 +1002,44 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 				(define state (list sources bindings (merge (list filters filter_exprs)) (+ source_index (count patterns))))
 				(list (rdf_shared_relation_query schema state) (rdf_shared_relation_vars bindings)))))
 ))
-(define rdf_shared_expand_paths (lambda (conditions) (match conditions
+(define rdf_shared_fresh_path_var (lambda (state)
+	(begin
+		(define idx (state "next"))
+		(state "next" (+ idx 1))
+		(define candidate (symbol (concat "?__rdf_path_" idx)))
+		(if (rdf_key_in_list (state "used") candidate)
+			(rdf_shared_fresh_path_var state)
+			(begin
+				(state "used" (cons candidate (state "used")))
+				(list (quote get_var) candidate))))
+))
+(define rdf_shared_expand_paths_using (lambda (conditions state) (match conditions
 	(cons condition tail)
 	(match condition
 		'("__empty_pattern__" triple)
-		(rdf_shared_expand_paths (cons triple
-			(cons (list "__filter__" false) tail)))
+		(rdf_shared_expand_paths_using (cons triple
+			(cons (list "__filter__" false) tail)) state)
 		'(s p o)
 		(match p
 			'("__path_seq__" p1 p2)
 			(begin
-				(define intermediate (list (quote get_var) (symbol (concat "?__rdf_path_" (uuid)))))
-				(rdf_shared_expand_paths (cons (list s p1 intermediate) (cons (list intermediate p2 o) tail))))
+				(define intermediate (rdf_shared_fresh_path_var state))
+				(rdf_shared_expand_paths_using
+					(cons (list s p1 intermediate) (cons (list intermediate p2 o) tail)) state))
 			'("__path_alt__" p1 p2)
 			(cons (list "__union__" (list (list (list s p1 o)) (list (list s p2 o))))
-				(rdf_shared_expand_paths tail))
-			_ (cons condition (rdf_shared_expand_paths tail)))
-		_ (cons condition (rdf_shared_expand_paths tail)))
+				(rdf_shared_expand_paths_using tail state))
+			_ (cons condition (rdf_shared_expand_paths_using tail state)))
+		_ (cons condition (rdf_shared_expand_paths_using tail state)))
 	'() '()
 )))
+(define rdf_shared_expand_paths (lambda (conditions)
+	(begin
+		(define state (newsession))
+		(state "next" 0)
+		(state "used" (rdf_condition_vars conditions))
+		(rdf_shared_expand_paths_using conditions state))
+))
 (define rdf_shared_state_sources (lambda (state) (nth state 0)))
 (define rdf_shared_state_bindings (lambda (state) (nth state 1)))
 (define rdf_shared_state_filters (lambda (state) (nth state 2)))
