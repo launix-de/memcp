@@ -384,6 +384,8 @@ type shardqueue struct {
 	tableIdx        int       // index into scanOrderMulti tables slice; 0 for single-table scan_order
 }
 
+const directScanOrderColumns = 8
+
 // scanOrderResult bundles per-shard outputs for ordered scans.
 type scanOrderResult struct {
 	res            *shardqueue
@@ -1312,6 +1314,11 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 	if !hadValue && !isOuter {
 		akkumulator = notFoundValue
 	}
+	logScanOrderStats(execStart, tables, stats)
+	return akkumulator
+}
+
+func logScanOrderStats(execStart time.Time, tables []scanOrderTableSpec, stats []scanOrderStats) {
 	execNs := time.Since(execStart).Nanoseconds()
 	for i := range tables {
 		tableStats := stats[i]
@@ -1350,10 +1357,258 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 			outputCount: tableStats.outputCount, analyzeNs: tableStats.analyzeNs, execNs: execNs,
 		})
 	}
-	return akkumulator
 }
 
-// scan_order delegates to scanOrderMulti with a single-element table spec.
+func directScanOrderNullResult(callbackCols []string, callback, neutral scm.Scmer, isOuter bool, notFoundValue scm.Scmer) scm.Scmer {
+	if !isOuter {
+		return notFoundValue
+	}
+	var local [directScanOrderColumns + 1]scm.Scmer
+	var args []scm.Scmer
+	if len(callbackCols) > directScanOrderColumns {
+		args = make([]scm.Scmer, len(callbackCols)+1)
+	} else {
+		args = local[:len(callbackCols)+1]
+	}
+	args[0] = neutral
+	callbackProgram := scm.PrepareSerialProc(callback)
+	return callbackProgram.Call(args)
+}
+
+func flushDirectScanOrder(mapper *ShardMapReducer, accumulator scm.Scmer, stream []uint32, alreadyBroke bool) (scm.Scmer, bool, bool) {
+	if len(stream) == 0 || alreadyBroke {
+		return accumulator, alreadyBroke, false
+	}
+	accumulator, broke := streamOrBreak(mapper, accumulator, stream)
+	return accumulator, broke, true
+}
+
+func consumeDirectScanOrder(queue *shardqueue, spec *scanOrderTableSpec, currentTx *TxContext, limitPartitionCols, offset, limit int, neutral scm.Scmer, isOuter bool, notFoundValue scm.Scmer) (scm.Scmer, bool, int64) {
+	if len(queue.items) == 0 {
+		return directScanOrderNullResult(spec.callbackCols, spec.callback, neutral, isOuter, notFoundValue), false, 0
+	}
+
+	var mapperStorage ShardMapReducer
+	var mapperWorkspace shardMapReducerWorkspace
+	mapper := &mapperStorage
+	if mapReducerCanUseReadWorkspace(spec.callbackCols) {
+		prepareReadMapReducerStorage(&mapperStorage, &mapperWorkspace, len(spec.callbackCols))
+		queue.shard.initReadMapReducer(&mapperStorage, spec.callbackCols, spec.callback, false, currentTx)
+	} else {
+		mapper = queue.shard.OpenMapReducer(spec.callbackCols, spec.callback, false, 0, nil, currentTx)
+	}
+	defer mapper.Close()
+	var postOrderMapper *ShardMapReducer
+	if !spec.postOrderFilter.IsNil() {
+		postOrderMapper = queue.shard.OpenMapper(spec.postOrderCols, spec.postOrderFilter, false, currentTx)
+		defer postOrderMapper.Close()
+	}
+	if limitPartitionCols == 0 && postOrderMapper == nil {
+		start := offset
+		if start < 0 {
+			start = 0
+		}
+		if start > len(queue.items) {
+			start = len(queue.items)
+		}
+		end := len(queue.items)
+		if limit >= 0 && limit < end-start {
+			end = start + limit
+		}
+		accumulator := neutral
+		hadValue := false
+		for start < end {
+			batchEnd := start + defaultScanBufferSize
+			if batchEnd > end {
+				batchEnd = end
+			}
+			var broke bool
+			accumulator, broke = streamOrBreak(mapper, accumulator, queue.items[start:batchEnd])
+			hadValue = true
+			if broke {
+				break
+			}
+			start = batchEnd
+		}
+		mapper.FlushSideEffects()
+		if !hadValue {
+			return directScanOrderNullResult(spec.callbackCols, spec.callback, accumulator, isOuter, notFoundValue), false, int64(len(queue.items))
+		}
+		return accumulator, true, int64(len(queue.items))
+	}
+
+	var streamStorage [defaultScanBufferSize]uint32
+	stream := streamStorage[:0]
+	accumulator := neutral
+	hadValue := false
+	breakCaught := false
+	partOffset := offset
+	partLimit := limit
+	var previousStorage, currentStorage [directScanOrderColumns]scm.Scmer
+	var previous, current []scm.Scmer
+	if limitPartitionCols > 0 {
+		if limitPartitionCols <= directScanOrderColumns {
+			previous = previousStorage[:limitPartitionCols]
+			current = currentStorage[:limitPartitionCols]
+		} else {
+			previous = make([]scm.Scmer, limitPartitionCols)
+			current = make([]scm.Scmer, limitPartitionCols)
+		}
+	}
+	havePartition := false
+	acceptedCount := int64(len(queue.items))
+	if postOrderMapper != nil {
+		acceptedCount = 0
+	}
+
+	for _, item := range queue.items {
+		if limitPartitionCols > 0 {
+			for column := 0; column < limitPartitionCols && column < len(queue.scols); column++ {
+				current[column] = queue.scols[column](item)
+			}
+			if !havePartition || !pkEqual(previous, current) {
+				var flushed bool
+				accumulator, breakCaught, flushed = flushDirectScanOrder(mapper, accumulator, stream, breakCaught)
+				if flushed {
+					hadValue = true
+					stream = stream[:0]
+				}
+				if breakCaught {
+					break
+				}
+				partOffset = offset
+				partLimit = limit
+				previous, current = current, previous
+				havePartition = true
+			}
+		}
+		if postOrderMapper != nil && !scm.ToBool(postOrderMapper.MapOne(item)) {
+			continue
+		}
+		if postOrderMapper != nil {
+			acceptedCount++
+		}
+		if partOffset > 0 {
+			partOffset--
+			continue
+		}
+		if partLimit == 0 {
+			if limitPartitionCols == 0 {
+				break
+			}
+			continue
+		}
+		if partLimit > 0 {
+			partLimit--
+		}
+		stream = append(stream, item)
+		if len(stream) == cap(stream) {
+			var flushed bool
+			accumulator, breakCaught, flushed = flushDirectScanOrder(mapper, accumulator, stream, breakCaught)
+			if flushed {
+				hadValue = true
+				stream = stream[:0]
+			}
+			if breakCaught {
+				break
+			}
+		}
+	}
+	var flushed bool
+	accumulator, breakCaught, flushed = flushDirectScanOrder(mapper, accumulator, stream, breakCaught)
+	if flushed {
+		hadValue = true
+	}
+	mapper.FlushSideEffects()
+	if !hadValue {
+		return directScanOrderNullResult(spec.callbackCols, spec.callback, accumulator, isOuter, notFoundValue), false, acceptedCount
+	}
+	return accumulator, true, acceptedCount
+}
+
+func runDirectSingleShardOrder(currentTx *TxContext, topology *tableShardTopology, shard *storageShard, bounds scanAccess, spec *scanOrderTableSpec, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols, offset, limit, shardLimit int, neutral scm.Scmer, isOuter bool, notFoundValue scm.Scmer, ss *scm.SessionState, querySeq uint64) (value scm.Scmer, hadValue bool, inputCount, candidateCount, outputCount int64, scanErr scanError) {
+	pinned := true
+	defer func() {
+		if pinned {
+			shard.activeScanners.Add(-1)
+			topology.releaseOperation()
+		}
+	}()
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			scanErr = scanError{recovered, string(debug.Stack())}
+		}
+	}()
+	if ss != nil && ss.IsKilledSeq(querySeq) {
+		panic("query killed")
+	}
+	var queue *shardqueue
+	func() {
+		release := shard.acquireReadForScan(currentTx)
+		defer release()
+		if scm.Trace == nil {
+			queue = shard.scan_order(bounds, spec.conditionCols, spec.condition, spec.acceptCols, spec.accept, spec.sortcols, sortdirs, limitPartitionCols, offset, shardLimit, spec.callbackCols, currentTx, ss)
+		} else {
+			scm.Trace.Duration(fmt.Sprintf("%p", shard), "shard", func() {
+				queue = shard.scan_order(bounds, spec.conditionCols, spec.condition, spec.acceptCols, spec.accept, spec.sortcols, sortdirs, limitPartitionCols, offset, shardLimit, spec.callbackCols, currentTx, ss)
+			})
+		}
+		inputCount = int64(shard.Count())
+	}()
+	shard.activeScanners.Add(-1)
+	topology.releaseOperation()
+	pinned = false
+	value, hadValue, outputCount = consumeDirectScanOrder(queue, spec, currentTx, limitPartitionCols, offset, limit, neutral, isOuter, notFoundValue)
+	return value, hadValue, inputCount, queue.candidateCount, outputCount, scanError{}
+}
+
+func (t *table) scanOrderSingle(currentTx *TxContext, spec scanOrderTableSpec, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols, offset, limit int, neutral scm.Scmer, isOuter bool, notFoundValue scm.Scmer) (scm.Scmer, bool) {
+	execStart := time.Now()
+	ss := SessionStateFromTx(currentTx)
+	querySeq := querySeqFromTx(currentTx)
+	touchTempColumns(t, spec.conditionCols, spec.callbackCols)
+	touchTempColumns(t, spec.acceptCols, nil)
+	analyzeStart := time.Now()
+	scratch := acquireScanAnalyzeScratch()
+	defer releaseScanAnalyzeScratch(scratch)
+	bounds, compiled := scanAccessFromScheme(spec.accessSchema, spec.accessValues, nil)
+	if !compiled {
+		panic("scan_order received an invalid compiled access schema")
+	}
+	stats := [1]scanOrderStats{}
+	if bounds.impossible() {
+		stats[0].analyzeNs = time.Since(analyzeStart).Nanoseconds()
+		logScanOrderStats(execStart, []scanOrderTableSpec{spec}, stats[:])
+		return directScanOrderNullResult(spec.callbackCols, spec.callback, neutral, isOuter, notFoundValue), true
+	}
+	bounds = bounds.useScratch(scratch)
+	bounds, _ = extendScanAccessWithSortCols(bounds, spec.sortcols, sortdirs)
+	for i := 0; i < bounds.len(); i++ {
+		t.AddPartitioningScore([]string{bounds.boundaryColumn(i)})
+	}
+	stats[0].access = bounds
+	stats[0].analyzeNs = time.Since(analyzeStart).Nanoseconds()
+	topology, shard, single := t.pinSingleShardForScan(bounds)
+	if !single {
+		return scm.NewNil(), false
+	}
+	shardLimit := -1
+	if limitPartitionCols == 0 && limit >= 0 && spec.postOrderFilter.IsNil() {
+		shardLimit = offset + limit
+	}
+	value, _, inputCount, candidateCount, outputCount, scanErr := runDirectSingleShardOrder(currentTx, topology, shard, bounds, &spec, sortdirs, limitPartitionCols, offset, limit, shardLimit, neutral, isOuter, notFoundValue, ss, querySeq)
+	if scanErr.r != nil {
+		panic(scanErr)
+	}
+	stats[0].inputCount = inputCount
+	stats[0].candidateCount = candidateCount
+	stats[0].outputCount = outputCount
+	logScanOrderStats(execStart, []scanOrderTableSpec{spec}, stats[:])
+	return value, true
+}
+
+// scan_order dispatches a single relevant shard directly and reserves the
+// queue/channel merge machinery for actual fanout.
 func (t *table) scan_order(currentTx *TxContext, accessSchema scm.Scmer, accessValues []scm.Scmer, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, isOuter bool, notFoundValue scm.Scmer, postOrderCols []string, postOrderFilter scm.Scmer) scm.Scmer {
 	// The general path owns per-scan debugging and telemetry. Debugging is
 	// explicitly allowed to add overhead, so keep it visible instead of letting
@@ -1361,7 +1616,7 @@ func (t *table) scan_order(currentTx *TxContext, accessSchema scm.Scmer, accessV
 	if !Settings.ScanDebugging && postOrderFilter.IsNil() && len(sortcols) == 0 && limitPartitionCols == 0 && offset == 0 && limit == 1 && !isOuter {
 		return t.scanOrderFirst(currentTx, accessSchema, accessValues, conditionCols, condition, callbackCols, mapReduce, neutral, notFoundValue)
 	}
-	return scanOrderMulti(currentTx, []scanOrderTableSpec{{
+	spec := scanOrderTableSpec{
 		table:           t,
 		conditionCols:   conditionCols,
 		condition:       condition,
@@ -1374,7 +1629,13 @@ func (t *table) scan_order(currentTx *TxContext, accessSchema scm.Scmer, accessV
 		accessValues:    accessValues,
 		perTableOffset:  -1,
 		perTableLimit:   -1,
-	}}, sortdirs, limitPartitionCols, offset, limit, neutral, isOuter, notFoundValue)
+	}
+	if !Settings.ScanDebugging {
+		if result, handled := t.scanOrderSingle(currentTx, spec, sortdirs, limitPartitionCols, offset, limit, neutral, isOuter, notFoundValue); handled {
+			return result
+		}
+	}
+	return scanOrderMulti(currentTx, []scanOrderTableSpec{spec}, sortdirs, limitPartitionCols, offset, limit, neutral, isOuter, notFoundValue)
 }
 
 // scanOrderFirst is the no-order LIMIT 1 specialization of scan_order. It
@@ -1649,7 +1910,6 @@ func (t *storageShard) scan_order(access scanAccess, conditionCols []string, con
 		if resultCap < 1 {
 			resultCap = 1
 		}
-		result.items = make([]uint32, resultCap)
 		resultN := 0
 		usageWeight := orderedScanIndexUsageWeight(access, int(visibleUpper), limit)
 		// Reused across batches: survived/mainIds scratch lists and one value
@@ -1823,6 +2083,9 @@ func (t *storageShard) scan_order(access scanAccess, conditionCols []string, con
 				newItems := make([]uint32, resultCap)
 				copy(newItems, result.items[:resultN])
 				result.items = newItems
+			}
+			if result.items == nil && outN > 0 {
+				result.items = make([]uint32, resultCap)
 			}
 			copy(result.items[resultN:], batch[:outN])
 			resultN += outN
