@@ -1245,35 +1245,31 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 	(merge (map facts (lambda (triple) (match triple '(subject pred obj)
 		(rdf_expand_ttl_object subject pred obj)))))
 ))
-(define rdf_expand_ttl_collection (lambda (subject pred items)
-	(if (equal? items '())
-		(list (list subject pred "http://www.w3.org/1999/02/22-rdf-syntax-ns#nil"))
-		(begin
-			/* Materialize node identities and output cells independently. A session-backed
-			builder keeps JIT list ownership out of the parser's nested map callbacks. */
-			(define heads (map items (lambda (_item) (concat "_:list_" (uuid)))))
-			(define output (newsession))
-			(define emit (lambda (triple) (begin
-				(define index (coalesceNil (output "count") 0))
-				(output (concat "triple:" index) triple)
-				(output "count" (+ index 1)))))
-			(emit (list subject pred (car heads)))
-			(map (produceN (count items)) (lambda (idx) (begin
-				(define head (nth heads idx))
-				(define next (if (equal? (+ idx 1) (count heads))
-					"http://www.w3.org/1999/02/22-rdf-syntax-ns#nil"
-					(nth heads (+ idx 1))))
-				(map (rdf_expand_ttl_object head
-					"http://www.w3.org/1999/02/22-rdf-syntax-ns#first" (nth items idx)) emit)
-				(emit (list head "http://www.w3.org/1999/02/22-rdf-syntax-ns#rest" next)))))
-			(map (produceN (coalesceNil (output "count") 0)) (lambda (idx)
-				(output (concat "triple:" idx))))))
+(define rdf_expand_ttl_collection_cells (lambda (head item tail)
+	(begin
+		(define next (match tail
+			'() "http://www.w3.org/1999/02/22-rdf-syntax-ns#nil"
+			_ (concat head "_rest")))
+		(cons (list head "http://www.w3.org/1999/02/22-rdf-syntax-ns#first" item)
+			(cons (list head "http://www.w3.org/1999/02/22-rdf-syntax-ns#rest" next)
+				(match tail
+					(cons next_item remaining)
+					(rdf_expand_ttl_collection_cells next next_item remaining)
+					_ '()))))
+))
+(define rdf_expand_ttl_collection (lambda (subject pred items head)
+	(match items
+		'() (list (list subject pred "http://www.w3.org/1999/02/22-rdf-syntax-ns#nil"))
+		(cons item tail) (begin
+			(cons (list subject pred head)
+				(rdf_expand_ttl_collection_cells head item tail)))
+	)
 ))
 (define rdf_expand_ttl_object (lambda (subject pred obj) (match obj
 	'("__ttl_inline_node__" bn facts)
 	(cons (list subject pred bn) (rdf_expand_ttl_facts facts))
-	'("__ttl_collection__" items)
-	(rdf_expand_ttl_collection subject pred items)
+	'("__ttl_collection__" items head)
+	(rdf_expand_ttl_collection subject pred items head)
 	_ (list (list subject pred obj))
 )))
 
@@ -1306,7 +1302,7 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 				mis-specialized by the experimental JIT and silently lose their items. */
 				(define items (* ttl_simple_constant))
 				")"
-			) (list "__ttl_collection__" items))
+			) (list "__ttl_collection__" items (concat "_:list_" (uuid))))
 			ttl_simple_constant
 		)))
 		(define ttl_fact (parser '(
@@ -1372,7 +1368,7 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 				"("
 				(define items (* ttl_simple_constant))
 				")"
-			) (list "__ttl_collection__" items))
+			) (list "__ttl_collection__" items (concat "_:list_" (uuid))))
 			ttl_simple_constant
 		)))
 		(define ttl_fact (parser '(
