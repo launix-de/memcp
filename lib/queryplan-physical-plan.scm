@@ -6630,7 +6630,7 @@ the costgen threshold. */
 		(if (nil? candidates)
 			0
 			(scan current_tx candidates
-				'(369436175368192 "equal" "canonical_name" 15032418304 "") (list canonical_name)
+				(list 369436175368192 (scan_boundary "equal" "canonical_name" 0 0 true true "" false)) (list canonical_name)
 				'() (lambda () true)
 				'("$update")
 				(lambda (acc $update) (begin ($update) (+ acc 1)))

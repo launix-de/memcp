@@ -16,6 +16,8 @@ Copyright (C) 2023-2026  Carl-Philip Hänsch
 */
 package storage
 
+import "fmt"
+import "unsafe"
 import "github.com/carli2/hybridsort"
 import "github.com/launix-de/memcp/scm"
 
@@ -83,7 +85,7 @@ type IndexAnalyzer interface {
 	Deploy(IndexDeployContext, bool) IndexHook
 }
 
-// Built-in matcher singletons. Every columnboundaries.matcher points to one of these.
+// Built-in matcher singletons. Every analyzer result points to one of these.
 // Created once at startup, never reallocated.
 var (
 	EqualMatcher  IndexAnalyzer = &equalMatcher{}
@@ -125,7 +127,7 @@ func (m *rangeMatcher) Analyze(IndexAnalyzeContext, scm.Scmer) (IndexBoundary, b
 }
 func (m *rangeMatcher) Deploy(IndexDeployContext, bool) IndexHook { return nil }
 
-type columnboundaries struct {
+type analyzedBoundary struct {
 	col              string
 	matcher          IndexAnalyzer // always set: EqualMatcher, RangeMatcher, LikeMatcher, ...
 	lower            scm.Scmer
@@ -148,29 +150,33 @@ type columnboundaries struct {
 	mapFn   scm.Scmer // function: mapFn(mapCols values...) → index value
 	// mandatory marks a physical source constraint which has no duplicate in
 	// the residual SQL predicate. Optimizations may discard advisory candidate
-	// hooks after a unique point lookup, but must retain mandatory boundaries.
+	// hooks after a unique point lookup, but must retain mandatory constraints.
 	mandatory bool
 }
 
-type boundaries []columnboundaries
+type analyzedBoundaries []analyzedBoundary
+
+// scanAccessSegment is a non-owning physical view over Scheme-visible boundary
+// items and their adjacent runtime values. Segments let execution append an
+// order or RecSet constraint without copying the planner-owned prefix.
+type scanAccessSegment struct {
+	items  []scm.Scmer
+	values []scm.Scmer
+}
 
 type scanAccessRuntime struct {
 	// computedMapCols is populated only for compiled computed-index probes.
 	computedMapCols []string
-	// inserted contains runtime-only ordered boundaries. insertAt places them
+	// inserted contains runtime-only ordered constraints. insertAt places them
 	// between the compiled sorted prefix and advisory matchers without copying
 	// either segment.
 	insertAt int
-	inserted boundaries
-	suffix   boundaries
+	inserted scanAccessSegment
+	suffix   scanAccessSegment
+	extra    scanAccessSegment
 	// filterCovered is an unconditional proof supplied by internal callers which
-	// construct mandatory physical boundaries directly.
+	// construct mandatory physical constraints directly.
 	filterCovered bool
-	// The first access dimension is consulted by every physical layer. Keeping
-	// this scalar decode beside the pooled scan scratch avoids both repeated SCM
-	// decoding and the old materialized boundaries array.
-	firstBoundary    columnboundaries
-	hasFirstBoundary bool
 }
 
 // scanAccess is the allocation-free runtime view of the physical access
@@ -183,23 +189,30 @@ type scanAccess struct {
 	schema        []scm.Scmer
 	values        []scm.Scmer
 	compiledCount int
+	firstBoundary *scanBoundaryBox
 	runtime       *scanAccessRuntime
-	// native is an invocation-local, already decoded view used only while an
-	// index loop is running (not part of the Scheme scan ABI or cached plan).
-	// Batched probes populate it from bounded scratch so the index hot path has
-	// the same direct slice access as precompiled storage constraints.
-	native boundaries
+	batchValues   *scm.Scmer
 	// plannerFilterCovered records the complete-subtree proof encoded in a
 	// static access schema. Mutating scans still retain their callback.
 	plannerFilterCovered bool
+	exactAdjacent        bool
 }
 
-func runtimeScanAccess(suffix boundaries) scanAccess {
-	return scanAccess{native: suffix}
+func (a scanAccess) compiledBoundary(index int) *scanBoundaryBox {
+	if index == 0 && a.firstBoundary != nil {
+		return a.firstBoundary
+	}
+	return (*scanBoundaryBox)(a.schema[scanAccessSchemaHeaderSize+index].Custom(TagScanBoundary))
 }
 
-func coveredRuntimeScanAccess(suffix boundaries) scanAccess {
-	return scanAccess{native: suffix, plannerFilterCovered: true}
+func runtimeScanAccess(suffix analyzedBoundaries) scanAccess {
+	return scanAccessFromAnalyzed(suffix)
+}
+
+func coveredRuntimeScanAccess(suffix analyzedBoundaries) scanAccess {
+	access := scanAccessFromAnalyzed(suffix)
+	access.plannerFilterCovered = true
+	return access
 }
 
 func (a *scanAccess) ensureRuntime() *scanAccessRuntime {
@@ -214,118 +227,192 @@ func (a scanAccess) useScratch(scratch *scanAnalyzeScratch) scanAccess {
 		scratch.runtime = *a.runtime
 	}
 	a.runtime = &scratch.runtime
-	if a.compiledCount > 0 {
-		a.runtime.firstBoundary = a.decodeBoundary(0)
-		a.runtime.hasFirstBoundary = true
-	}
 	return a
 }
 
 func (a scanAccess) len() int {
-	if a.native != nil {
-		return len(a.native)
-	}
 	if a.runtime == nil {
 		return a.compiledCount
 	}
-	return a.compiledCount + len(a.runtime.inserted) + len(a.runtime.suffix)
+	return a.compiledCount + len(a.runtime.inserted.items) + len(a.runtime.suffix.items) + len(a.runtime.extra.items)
 }
 
-func (a scanAccess) boundary(index int) columnboundaries {
-	if a.native != nil {
-		return a.native[index]
-	}
+// boundaryParts resolves one Scheme boundary item and the adjacent value
+// segment addressed by its slots. Runtime order/RecSet segments use exactly
+// the same representation as the planner-owned prefix.
+func (a scanAccess) boundaryParts(index int) (*scanBoundaryBox, []scm.Scmer) {
 	compiled := a.compiledCount
 	insertAt := compiled
-	var inserted, suffix boundaries
+	var inserted, suffix, extra scanAccessSegment
 	if a.runtime != nil {
 		insertAt = a.runtime.insertAt
 		inserted = a.runtime.inserted
 		suffix = a.runtime.suffix
+		extra = a.runtime.extra
 	}
 	if insertAt < 0 || insertAt > compiled {
 		insertAt = compiled
 	}
-	if index >= insertAt && index < insertAt+len(inserted) {
-		return inserted[index-insertAt]
+	if index >= insertAt && index < insertAt+len(inserted.items) {
+		box := (*scanBoundaryBox)(inserted.items[index-insertAt].Custom(TagScanBoundary))
+		return box, inserted.values
 	}
-	if index >= insertAt+len(inserted) {
-		index -= len(inserted)
+	if index >= insertAt+len(inserted.items) {
+		index -= len(inserted.items)
 	}
 	if index >= compiled {
-		return suffix[index-compiled]
+		index -= compiled
+		if index < len(suffix.items) {
+			box := (*scanBoundaryBox)(suffix.items[index].Custom(TagScanBoundary))
+			return box, suffix.values
+		}
+		index -= len(suffix.items)
+		box := (*scanBoundaryBox)(extra.items[index].Custom(TagScanBoundary))
+		return box, extra.values
 	}
-	if index == 0 && a.runtime != nil && a.runtime.hasFirstBoundary {
-		return a.runtime.firstBoundary
-	}
-	return a.decodeBoundary(index)
+	return a.compiledBoundary(index), a.values
 }
 
-func (a scanAccess) decodeBoundary(index int) columnboundaries {
-	offset := scanAccessSchemaHeaderSize + index*scanAccessBoundaryStride
-	meta := decodeScanAccessBoundaryMeta(a.schema[offset+2])
-	boundary := columnboundaries{
-		col:            a.schema[offset+1].String(),
-		lower:          scm.NewNil(),
-		lowerInclusive: meta.flags&1 != 0,
-		upper:          scm.NewNil(),
-		upperInclusive: meta.flags&2 != 0,
-		collation:      a.schema[offset+3].String(),
-		nullSafe:       meta.flags&4 != 0,
+func (a scanAccess) boundaryColumn(index int) string {
+	if a.exactAdjacent {
+		return a.compiledBoundary(index).column
 	}
-	mapperSlot := int(meta.flags>>3) - 1
-	if mapperSlot >= 0 {
-		if !a.values[mapperSlot].IsSlice() {
-			panic("scan access computed-index descriptor is invalid")
+	spec, values := a.boundaryParts(index)
+	if spec.mapperSlot >= 0 {
+		descriptor := values[spec.mapperSlot].Slice()
+		return descriptor[0].String()
+	}
+	return spec.column
+}
+
+func (a scanAccess) boundaryAnalyzer(index int) IndexAnalyzer {
+	if a.exactAdjacent {
+		return EqualMatcher
+	}
+	if a.runtime == nil {
+		return a.compiledBoundary(index).analyzer
+	}
+	spec, _ := a.boundaryParts(index)
+	return spec.analyzer
+}
+
+func (a scanAccess) boundaryLowerInclusive(index int) bool {
+	if a.exactAdjacent {
+		return true
+	}
+	if a.runtime == nil {
+		return a.compiledBoundary(index).lowerInclusive
+	}
+	spec, _ := a.boundaryParts(index)
+	return spec.lowerInclusive
+}
+
+func (a scanAccess) boundaryUpperInclusive(index int) bool {
+	if a.exactAdjacent {
+		return true
+	}
+	if a.runtime == nil {
+		return a.compiledBoundary(index).upperInclusive
+	}
+	spec, _ := a.boundaryParts(index)
+	return spec.upperInclusive
+}
+
+func (a scanAccess) boundaryCollation(index int) string {
+	if a.exactAdjacent {
+		return ""
+	}
+	if a.runtime == nil {
+		return a.compiledBoundary(index).collation
+	}
+	spec, _ := a.boundaryParts(index)
+	return spec.collation
+}
+
+func (a scanAccess) boundaryOrder(index int) (func(...scm.Scmer) scm.Scmer, string) {
+	if a.exactAdjacent {
+		return nil, ""
+	}
+	if a.runtime == nil {
+		box := a.compiledBoundary(index)
+		return box.order, box.orderMetadata
+	}
+	spec, _ := a.boundaryParts(index)
+	return spec.order, spec.orderMetadata
+}
+
+func (a scanAccess) boundaryMap(index int) ([]string, scm.Scmer) {
+	if a.exactAdjacent {
+		return nil, scm.NewNil()
+	}
+	if a.runtime == nil {
+		spec := a.compiledBoundary(index)
+		if spec.mapperSlot < 0 {
+			return spec.mapColumns, scm.NewNil()
 		}
-		descriptor := a.values[mapperSlot].Slice()
-		if len(descriptor) != 2 || !descriptor[0].IsString() {
-			panic("scan access computed-index descriptor is invalid")
-		}
-		boundary.col = descriptor[0].String()
-		boundary.mapCols = a.runtime.computedMapCols
-		boundary.mapFn = descriptor[1]
+		descriptor := a.values[spec.mapperSlot].Slice()
+		return spec.mapColumns, descriptor[1]
 	}
-	switch a.schema[offset].String() {
-	case "equal":
-		boundary.matcher = EqualMatcher
-	case "range":
-		boundary.matcher = RangeMatcher
-	case "like":
-		boundary.matcher = LikeMatcher
-	case "recset":
-		boundary.matcher = RecSetMatcher
-	default:
-		panic("scan access schema has an unknown matcher")
+	spec, values := a.boundaryParts(index)
+	if spec.mapperSlot < 0 {
+		return spec.mapColumns, scm.NewNil()
 	}
-	if meta.lowerSlot >= 0 {
-		boundary.lower = a.values[meta.lowerSlot]
-	} else if meta.lowerSlot <= -2 {
-		boundary.lowerBatch = true
-		boundary.lowerBatchSubidx = -meta.lowerSlot - 2
+	descriptor := values[spec.mapperSlot].Slice()
+	return spec.mapColumns, descriptor[1]
+}
+
+func (a scanAccess) boundaryMandatory(index int) bool {
+	if a.exactAdjacent {
+		return false
 	}
-	if meta.upperSlot >= 0 {
-		boundary.upper = a.values[meta.upperSlot]
-	} else if meta.upperSlot <= -2 {
-		boundary.upperBatch = true
-		boundary.upperBatchSubidx = -meta.upperSlot - 2
+	if a.runtime == nil {
+		return a.compiledBoundary(index).mandatory
 	}
-	return boundary
+	spec, _ := a.boundaryParts(index)
+	return spec.mandatory
+}
+
+func (a scanAccess) withBatch(stride int, data []scm.Scmer, batchID int) scanAccess {
+	start := batchID * stride
+	a.batchValues = &data[start]
+	return a
+}
+
+func (a scanAccess) boundValue(index int, upper bool) scm.Scmer {
+	if a.exactAdjacent {
+		return a.values[index]
+	}
+	boundary, values := a.boundaryParts(index)
+	slot := boundary.lowerSlot
+	if upper {
+		slot = boundary.upperSlot
+	}
+	if slot >= 0 {
+		return values[slot]
+	}
+	if slot <= -2 {
+		return a.resolveBatchValue(scm.NewNil(), true, -slot-2)
+	}
+	return scm.NewNil()
+}
+
+func (a scanAccess) resolveBatchValue(value scm.Scmer, batched bool, subindex int) scm.Scmer {
+	if !batched || a.batchValues == nil {
+		return value
+	}
+	return *(*scm.Scmer)(unsafe.Add(unsafe.Pointer(a.batchValues), uintptr(subindex)*unsafe.Sizeof(value)))
 }
 
 // impossible reports SQL comparison probes whose runtime operand is NULL.
 // NULL is otherwise also the unbounded-range sentinel, so this check must use
 // the schema slot rather than the materialized boundary value.
 func (a scanAccess) impossible() bool {
-	compiled := a.compiledCount
-	for i := 0; i < compiled; i++ {
-		offset := scanAccessSchemaHeaderSize + i*scanAccessBoundaryStride
-		kind := a.schema[offset].String()
-		meta := decodeScanAccessBoundaryMeta(a.schema[offset+2])
-		if meta.lowerSlot >= 0 && a.values[meta.lowerSlot].IsNil() && (kind == "range" || (kind == "equal" && meta.flags&4 == 0)) {
+	for i := 0; i < a.len(); i++ {
+		boundary, values := a.boundaryParts(i)
+		if boundary.lowerSlot >= 0 && values[boundary.lowerSlot].IsNil() && (boundary.analyzer == RangeMatcher || (boundary.analyzer == EqualMatcher && !boundary.nullSafe)) {
 			return true
 		}
-		if meta.upperSlot >= 0 && a.values[meta.upperSlot].IsNil() && kind == "range" {
+		if boundary.upperSlot >= 0 && values[boundary.upperSlot].IsNil() && boundary.analyzer == RangeMatcher {
 			return true
 		}
 	}
@@ -336,13 +423,10 @@ func (a scanAccess) impossibleBatch(stride int, batchdata []scm.Scmer, batchid i
 	if a.impossible() {
 		return true
 	}
-	compiled := a.compiledCount
-	for i := 0; i < compiled; i++ {
-		offset := scanAccessSchemaHeaderSize + i*scanAccessBoundaryStride
-		kind := a.schema[offset].String()
-		meta := decodeScanAccessBoundaryMeta(a.schema[offset+2])
-		for _, slot := range []int{meta.lowerSlot, meta.upperSlot} {
-			if slot <= -2 && (kind == "range" || (kind == "equal" && meta.flags&4 == 0)) {
+	for i := 0; i < a.len(); i++ {
+		boundary, _ := a.boundaryParts(i)
+		for _, slot := range [2]int{boundary.lowerSlot, boundary.upperSlot} {
+			if slot <= -2 && (boundary.analyzer == RangeMatcher || (boundary.analyzer == EqualMatcher && !boundary.nullSafe)) {
 				subindex := -slot - 2
 				position := batchid*stride + subindex
 				if position < 0 || position >= len(batchdata) || batchdata[position].IsNil() {
@@ -354,56 +438,21 @@ func (a scanAccess) impossibleBatch(stride int, batchdata []scm.Scmer, batchid i
 	return false
 }
 
-func materializeScanAccess(access scanAccess) boundaries {
-	result := make(boundaries, access.len())
-	for i := range result {
-		result[i] = access.boundary(i)
+func scanAccessFromScheme(schemaValue scm.Scmer, values []scm.Scmer, suffix *scanAccessSegment) (scanAccess, bool) {
+	var suffixValue scanAccessSegment
+	if suffix != nil {
+		suffixValue = *suffix
 	}
-	return result
-}
-
-func hasBatchScanAccess(access scanAccess) bool {
-	for i := 0; i < access.len(); i++ {
-		boundary := access.boundary(i)
-		if boundary.lowerBatch || boundary.upperBatch {
-			return true
-		}
-	}
-	return false
-}
-
-func materializeBatchScanAccess(access scanAccess, stride int, batchdata []scm.Scmer, batchid uint32) boundaries {
-	return materializeBatchBoundaries(materializeScanAccess(access), stride, batchdata, batchid)
-}
-
-func materializeBatchScanAccessInto(storage []columnboundaries, access scanAccess, stride int, batchdata []scm.Scmer, batchid uint32) boundaries {
-	count := access.len()
-	if cap(storage) < count {
-		storage = make(boundaries, count)
-	} else {
-		storage = storage[:count]
-	}
-	base := int(batchid) * stride
-	for i := range storage {
-		boundary := access.boundary(i)
-		if boundary.lowerBatch {
-			boundary.lower = batchdata[base+boundary.lowerBatchSubidx]
-		}
-		if boundary.upperBatch {
-			boundary.upper = batchdata[base+boundary.upperBatchSubidx]
-		}
-		storage[i] = boundary
-	}
-	return storage
-}
-
-func scanAccessFromScheme(schemaValue scm.Scmer, values []scm.Scmer, suffix boundaries) (scanAccess, bool) {
 	if !schemaValue.IsSlice() {
 		return scanAccess{}, false
 	}
 	schema := schemaValue.Slice()
 	if len(schema) == 0 {
-		return runtimeScanAccess(suffix), true
+		access := scanAccess{}
+		if len(suffixValue.items) > 0 {
+			access.runtime = &scanAccessRuntime{suffix: suffixValue}
+		}
+		return access, true
 	}
 	if len(schema) < scanAccessSchemaHeaderSize {
 		return scanAccess{}, false
@@ -415,49 +464,50 @@ func scanAccessFromScheme(schemaValue scm.Scmer, values []scm.Scmer, suffix boun
 	count := meta.count
 	projectionCount := meta.projections
 	if count < 0 || projectionCount < 0 || len(schema) != scanAccessSchemaHeaderSize+count*scanAccessBoundaryStride+projectionCount {
-		panic("scan access schema has an invalid boundary count")
+		panic(fmt.Sprintf("scan access schema has an invalid boundary count: count=%d projections=%d items=%d schema=%s",
+			count, projectionCount, len(schema), scm.String(schemaValue)))
 	}
 	computed := false
+	var computedMapCols []string
 	for offset, remaining := scanAccessSchemaHeaderSize, count; remaining > 0; offset, remaining = offset+scanAccessBoundaryStride, remaining-1 {
-		boundaryMeta := decodeScanAccessBoundaryMeta(schema[offset+2])
-		if boundaryMeta.lowerSlot >= len(values) || boundaryMeta.upperSlot >= len(values) {
+		if !schema[offset].IsCustom(TagScanBoundary) {
+			panic("scan access schema contains a non-boundary item")
+		}
+		boundary := ScanBoundaryFromScmer(schema[offset])
+		if boundary.LowerSlot() >= len(values) || boundary.UpperSlot() >= len(values) {
 			panic("scan access value slot is out of bounds")
 		}
-		mapperSlot := int(boundaryMeta.flags>>3) - 1
+		mapperSlot := boundary.MapperSlot()
 		if mapperSlot >= 0 {
 			if mapperSlot >= len(values) {
 				panic("scan access mapper slot is out of bounds")
 			}
 			computed = true
-		}
-	}
-	var computedMapCols []string
-	if computed {
-		projectionAt := scanAccessSchemaHeaderSize + count*scanAccessBoundaryStride
-		computedMapCols = make([]string, projectionCount)
-		for i := range computedMapCols {
-			computedMapCols[i] = schema[projectionAt+i].String()
+			computedMapCols = boundary.MapColumns()
 		}
 	}
 	access := scanAccess{schema: schema, values: values, compiledCount: count,
 		plannerFilterCovered: meta.consumer == scanAccessConsumerCoveredScan}
-	if computed || len(suffix) > 0 {
-		access.runtime = &scanAccessRuntime{computedMapCols: computedMapCols, suffix: suffix}
+	if count > 0 {
+		access.firstBoundary = (*scanBoundaryBox)(schema[scanAccessSchemaHeaderSize].Custom(TagScanBoundary))
+	}
+	if computed || len(suffixValue.items) > 0 {
+		access.runtime = &scanAccessRuntime{computedMapCols: computedMapCols, suffix: suffixValue}
 	}
 	return access, true
 }
 
 // IndexBoundary is the public boundary value returned by custom analyzers. Its
 // storage stays equal to the internal boundary representation.
-type IndexBoundary = columnboundaries
+type IndexBoundary = analyzedBoundary
 
 func NewIndexBoundary(column string, analyzer IndexAnalyzer, binding scm.Scmer, collation string) IndexBoundary {
-	return columnboundaries{col: column, matcher: analyzer, lower: binding, upper: binding, lowerInclusive: true, upperInclusive: true, collation: collation}
+	return analyzedBoundary{col: column, matcher: analyzer, lower: binding, upper: binding, lowerInclusive: true, upperInclusive: true, collation: collation}
 }
 
-func (b columnboundaries) ColumnName() string { return b.col }
-func (b columnboundaries) Binding() scm.Scmer { return b.lower }
-func (b columnboundaries) Collation() string  { return b.collation }
+func (b analyzedBoundary) ColumnName() string { return b.col }
+func (b analyzedBoundary) Binding() scm.Scmer { return b.lower }
+func (b analyzedBoundary) Collation() string  { return b.collation }
 
 type indexAnalyzeContext struct {
 	proc          *scm.Proc
@@ -626,21 +676,30 @@ func boundaryValueEqual(a, b scm.Scmer) bool {
 }
 
 // boundaryIsPoint delegates to the matcher's IsPointLike.
-func boundaryIsPoint(b columnboundaries) bool {
+func boundaryIsPoint(b analyzedBoundary) bool {
 	return b.matcher.IsPointLike()
 }
 
-func boundaryIsUnboundedOrder(b columnboundaries) bool {
+func boundaryIsUnboundedOrder(b analyzedBoundary) bool {
 	return b.order != nil && b.lower.IsNil() && b.upper.IsNil()
 }
 
-func boundaryIsUnboundedRange(b columnboundaries) bool {
+func boundaryIsUnboundedRange(b analyzedBoundary) bool {
 	return b.matcher.IsSorted() && !boundaryIsPoint(b) && b.lower.IsNil() && b.upper.IsNil()
+}
+
+func scanAccessBoundaryIsPoint(access scanAccess, index int) bool {
+	return access.boundaryAnalyzer(index).IsPointLike()
+}
+
+func scanAccessBoundaryIsUnboundedOrder(access scanAccess, index int) bool {
+	order, _ := access.boundaryOrder(index)
+	return order != nil && access.boundValue(index, false).IsNil() && access.boundValue(index, true).IsNil()
 }
 
 // addConstraint merges a column boundary into an existing set, narrowing the
 // range for an already-present column (AND semantics) or appending a new entry.
-func addConstraint(in boundaries, b2 columnboundaries) boundaries {
+func addConstraint(in analyzedBoundaries, b2 analyzedBoundary) analyzedBoundaries {
 	for i, b := range in {
 		if b.col == b2.col {
 			// Non-ordering indexes are independent candidate filters. Preserve
@@ -679,7 +738,7 @@ func addConstraint(in boundaries, b2 columnboundaries) boundaries {
 // widenBounds widens a into the union with b (OR semantics).
 // Keeps only columns present in both; for shared columns, takes the wider range.
 // Modifies a in-place, zero allocations.
-func widenBounds(a, b boundaries) boundaries {
+func widenBounds(a, b analyzedBoundaries) analyzedBoundaries {
 	n := 0
 	for i := range a {
 		found := false
@@ -804,7 +863,7 @@ func conditionMayHaveBoundaries(condition scm.Scmer) bool {
 	return ok
 }
 
-func extractCustomBoundary(ctx indexAnalyzeContext, node scm.Scmer) (columnboundaries, bool) {
+func extractCustomBoundary(ctx indexAnalyzeContext, node scm.Scmer) (analyzedBoundary, bool) {
 	for _, analyzer := range boundaryMatchers {
 		if analyzer == EqualMatcher || analyzer == RangeMatcher {
 			continue
@@ -813,7 +872,7 @@ func extractCustomBoundary(ctx indexAnalyzeContext, node scm.Scmer) (columnbound
 			return boundary, true
 		}
 	}
-	return columnboundaries{}, false
+	return analyzedBoundary{}, false
 }
 
 func unwrapAnalyzeNode(ctx *indexAnalyzeContext, node scm.Scmer) scm.Scmer {
@@ -829,18 +888,18 @@ func unwrapAnalyzeNode(ctx *indexAnalyzeContext, node scm.Scmer) scm.Scmer {
 // extractSingleBoundary recognizes one indexable predicate without
 // constructing the recursive general-analyzer closure or an intermediate
 // singleton slice.
-func extractSingleBoundary(ctx *indexAnalyzeContext, node scm.Scmer) (columnboundaries, bool) {
+func extractSingleBoundary(ctx *indexAnalyzeContext, node scm.Scmer) (analyzedBoundary, bool) {
 	node = unwrapAnalyzeNode(ctx, node)
 	v, ok := scmerSlice(node)
 	if !ok || len(v) < 2 {
-		return columnboundaries{}, false
+		return analyzedBoundary{}, false
 	}
-	makeComparison := func(columnNode, valueNode scm.Scmer, matcher IndexAnalyzer, lower bool, inclusive bool) (columnboundaries, bool) {
+	makeComparison := func(columnNode, valueNode scm.Scmer, matcher IndexAnalyzer, lower bool, inclusive bool) (analyzedBoundary, bool) {
 		col, columnOK := ctx.ResolveColumn(columnNode)
 		if !columnOK {
-			return columnboundaries{}, false
+			return analyzedBoundary{}, false
 		}
-		bound := columnboundaries{col: col, matcher: matcher}
+		bound := analyzedBoundary{col: col, matcher: matcher}
 		if value, constant := ctx.ExtractConstant(valueNode); constant {
 			if matcher == EqualMatcher {
 				bound.lower, bound.upper = value, value
@@ -864,11 +923,11 @@ func extractSingleBoundary(ctx *indexAnalyzeContext, node scm.Scmer) (columnboun
 			}
 			return bound, true
 		}
-		return columnboundaries{}, false
+		return analyzedBoundary{}, false
 	}
 	if len(v) >= 3 && (ctx.FunctionIs(v[0], "equal?") || ctx.FunctionIs(v[0], "equal??")) {
 		nullSafe := ctx.FunctionIs(v[0], "equal??")
-		finish := func(bound columnboundaries, found bool) (columnboundaries, bool) {
+		finish := func(bound analyzedBoundary, found bool) (analyzedBoundary, bool) {
 			if found && nullSafe {
 				bound.nullSafe = true
 				bound.collation = "utf8mb4_general_ci"
@@ -896,7 +955,7 @@ func extractSingleBoundary(ctx *indexAnalyzeContext, node scm.Scmer) (columnboun
 	}
 	if ctx.FunctionIs(v[0], "nil?") {
 		if col, found := ctx.ResolveColumn(v[1]); found {
-			return columnboundaries{col: col, matcher: EqualMatcher, lower: scm.NewNil(), lowerInclusive: true, upper: scm.NewNil(), upperInclusive: true}, true
+			return analyzedBoundary{col: col, matcher: EqualMatcher, lower: scm.NewNil(), lowerInclusive: true, upper: scm.NewNil(), upperInclusive: true}, true
 		}
 	}
 	return extractCustomBoundary(*ctx, node)
@@ -905,7 +964,7 @@ func extractSingleBoundary(ctx *indexAnalyzeContext, node scm.Scmer) (columnboun
 // extractSimpleBoundaries appends the dominant simple predicate class directly
 // into caller-owned storage. Flat or nested AND trees remain allocation-free;
 // OR widening and computed-column synthesis retain the complete general path.
-func extractSimpleBoundaries(ctx *indexAnalyzeContext, node scm.Scmer, storage boundaries) (boundaries, bool) {
+func extractSimpleBoundaries(ctx *indexAnalyzeContext, node scm.Scmer, storage analyzedBoundaries) (analyzedBoundaries, bool) {
 	node = unwrapAnalyzeNode(ctx, node)
 	items, sliced := scmerSlice(node)
 	if sliced && len(items) > 1 && items[0].SymbolEquals("and") {
@@ -926,7 +985,7 @@ func extractSimpleBoundaries(ctx *indexAnalyzeContext, node scm.Scmer, storage b
 	return addConstraint(storage, boundary), true
 }
 
-func extractBoundariesInto(storage boundaries, conditionCols []string, condition scm.Scmer) boundaries {
+func extractBoundariesInto(storage analyzedBoundaries, conditionCols []string, condition scm.Scmer) analyzedBoundaries {
 	ctx, ok := conditionAnalyzeContext(conditionCols, condition)
 	if ok {
 		if result, simple := extractSimpleBoundaries(&ctx, ctx.proc.Body, storage); simple {
@@ -937,7 +996,7 @@ func extractBoundariesInto(storage boundaries, conditionCols []string, condition
 }
 
 // analyzes a lambda expression for value boundaries, so the best index can be found
-func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
+func extractBoundaries(conditionCols []string, condition scm.Scmer) analyzedBoundaries {
 	return extractBoundariesInto(nil, conditionCols, condition)
 }
 
@@ -966,20 +1025,20 @@ func sortedBoundariesCoverCondition(conditionCols []string, condition scm.Scmer,
 		covered := false
 		rangeSeen := false
 		for i := 0; i < access.len(); i++ {
-			have := access.boundary(i)
-			if have.matcher == nil || !have.matcher.IsSorted() || rangeSeen {
+			have, _ := access.boundaryParts(i)
+			if have.analyzer == nil || !have.analyzer.IsSorted() || rangeSeen {
 				break
 			}
-			if have.col != want.col || have.matcher == nil ||
-				!matcherKindEqual(have.matcher, want.matcher) ||
-				have.lowerBatch || have.upperBatch ||
+			if have.column != want.col ||
+				!matcherKindEqual(have.analyzer, want.matcher) ||
+				have.lowerSlot <= -2 || have.upperSlot <= -2 ||
 				have.lowerInclusive != want.lowerInclusive ||
 				have.upperInclusive != want.upperInclusive ||
 				have.nullSafe != want.nullSafe ||
 				have.collation != want.collation ||
-				!boundaryValueEqual(have.lower, want.lower) ||
-				!boundaryValueEqual(have.upper, want.upper) {
-				if have.matcher == RangeMatcher {
+				!boundaryValueEqual(access.boundValue(i, false), want.lower) ||
+				!boundaryValueEqual(access.boundValue(i, true), want.upper) {
+				if have.analyzer == RangeMatcher {
 					rangeSeen = true
 				}
 				continue
@@ -1004,7 +1063,7 @@ func scanAccessProvesCondition(conditionCols []string, condition scm.Scmer, acce
 // extractBoundariesGeneral retains the complete recursive analyzer for OR
 // widening, computed columns and any future shape not handled by the simple
 // allocation-free path.
-func extractBoundariesGeneral(conditionCols []string, condition scm.Scmer) boundaries {
+func extractBoundariesGeneral(conditionCols []string, condition scm.Scmer) analyzedBoundaries {
 	analyzeContextValue, ok := conditionAnalyzeContext(conditionCols, condition)
 	if !ok {
 		// native Go function - no boundary extraction possible (full scan)
@@ -1013,11 +1072,11 @@ func extractBoundariesGeneral(conditionCols []string, condition scm.Scmer) bound
 	analyzeContext := &analyzeContextValue
 	p := analyzeContext.proc
 	params := analyzeContext.params
-	// traverseCondition returns boundaries for a single AST node.
+	// traverseCondition returns analyzed boundaries for a single AST node.
 	// nil means "unknown node, no bounds extractable".
 	// AND: merge children (intersect). OR: widen children (union).
-	var traverseCondition func(scm.Scmer) boundaries
-	traverseCondition = func(node scm.Scmer) boundaries {
+	var traverseCondition func(scm.Scmer) analyzedBoundaries
+	traverseCondition = func(node scm.Scmer) analyzedBoundaries {
 		v, ok := scmerSlice(node)
 		if !ok {
 			return nil
@@ -1030,25 +1089,25 @@ func extractBoundariesGeneral(conditionCols []string, condition scm.Scmer) bound
 		}
 		for _, analyzer := range boundaryMatchers {
 			if boundary, ok := analyzer.Analyze(analyzeContext, node); ok {
-				return boundaries{boundary}
+				return analyzedBoundaries{boundary}
 			}
 		}
 		if analyzeContext.FunctionIs(v[0], "equal?") || analyzeContext.FunctionIs(v[0], "equal??") {
 			if col, ok := analyzeContext.ResolveColumn(v[1]); ok {
 				if v2, ok := analyzeContext.ExtractConstant(v[2]); ok {
-					return boundaries{columnboundaries{col: col, matcher: EqualMatcher, lower: v2, lowerInclusive: true, upper: v2, upperInclusive: true}}
+					return analyzedBoundaries{analyzedBoundary{col: col, matcher: EqualMatcher, lower: v2, lowerInclusive: true, upper: v2, upperInclusive: true}}
 				}
 				if subidx, ok := analyzeContext.resolveBatchSubidx(v[2]); ok {
-					return boundaries{columnboundaries{col: col, matcher: EqualMatcher, lowerInclusive: true, upperInclusive: true, lowerBatch: true, lowerBatchSubidx: subidx, upperBatch: true, upperBatchSubidx: subidx}}
+					return analyzedBoundaries{analyzedBoundary{col: col, matcher: EqualMatcher, lowerInclusive: true, upperInclusive: true, lowerBatch: true, lowerBatchSubidx: subidx, upperBatch: true, upperBatchSubidx: subidx}}
 				}
 			}
 			// reversed: (equal? const col)
 			if col, ok := analyzeContext.ResolveColumn(v[2]); ok {
 				if v2, ok := analyzeContext.ExtractConstant(v[1]); ok {
-					return boundaries{columnboundaries{col: col, matcher: EqualMatcher, lower: v2, lowerInclusive: true, upper: v2, upperInclusive: true}}
+					return analyzedBoundaries{analyzedBoundary{col: col, matcher: EqualMatcher, lower: v2, lowerInclusive: true, upper: v2, upperInclusive: true}}
 				}
 				if subidx, ok := analyzeContext.resolveBatchSubidx(v[1]); ok {
-					return boundaries{columnboundaries{col: col, matcher: EqualMatcher, lowerInclusive: true, upperInclusive: true, lowerBatch: true, lowerBatchSubidx: subidx, upperBatch: true, upperBatchSubidx: subidx}}
+					return analyzedBoundaries{analyzedBoundary{col: col, matcher: EqualMatcher, lowerInclusive: true, upperInclusive: true, lowerBatch: true, lowerBatchSubidx: subidx, upperBatch: true, upperBatchSubidx: subidx}}
 				}
 			}
 			// computed col: (equal? rawDataset independent) or reversed
@@ -1059,7 +1118,7 @@ func extractBoundariesGeneral(conditionCols []string, condition scm.Scmer) bound
 						canon := canonicalColName(computedExpr, params, conditionCols)
 						mc, mf := buildComputedFn(computedExpr, p.Params, p.En, conditionCols)
 						if !mf.IsNil() && mc != nil {
-							return boundaries{columnboundaries{col: canon, matcher: EqualMatcher, lower: v2, lowerInclusive: true, upper: v2, upperInclusive: true, mapCols: mc, mapFn: mf}}
+							return analyzedBoundaries{analyzedBoundary{col: canon, matcher: EqualMatcher, lower: v2, lowerInclusive: true, upper: v2, upperInclusive: true, mapCols: mc, mapFn: mf}}
 						}
 					}
 				} else if isRawDataset(params, computedExpr) {
@@ -1067,7 +1126,7 @@ func extractBoundariesGeneral(conditionCols []string, condition scm.Scmer) bound
 						canon := canonicalColName(computedExpr, params, conditionCols)
 						mc, mf := buildComputedFn(computedExpr, p.Params, p.En, conditionCols)
 						if !mf.IsNil() && mc != nil {
-							return boundaries{columnboundaries{col: canon, matcher: EqualMatcher, lowerInclusive: true, upperInclusive: true, lowerBatch: true, lowerBatchSubidx: subidx, upperBatch: true, upperBatchSubidx: subidx, mapCols: mc, mapFn: mf}}
+							return analyzedBoundaries{analyzedBoundary{col: canon, matcher: EqualMatcher, lowerInclusive: true, upperInclusive: true, lowerBatch: true, lowerBatchSubidx: subidx, upperBatch: true, upperBatchSubidx: subidx, mapCols: mc, mapFn: mf}}
 						}
 					}
 				}
@@ -1079,7 +1138,7 @@ func extractBoundariesGeneral(conditionCols []string, condition scm.Scmer) bound
 						canon := canonicalColName(computedExpr, params, conditionCols)
 						mc, mf := buildComputedFn(computedExpr, p.Params, p.En, conditionCols)
 						if !mf.IsNil() && mc != nil {
-							return boundaries{columnboundaries{col: canon, matcher: EqualMatcher, lower: v2, lowerInclusive: true, upper: v2, upperInclusive: true, mapCols: mc, mapFn: mf}}
+							return analyzedBoundaries{analyzedBoundary{col: canon, matcher: EqualMatcher, lower: v2, lowerInclusive: true, upper: v2, upperInclusive: true, mapCols: mc, mapFn: mf}}
 						}
 					}
 				} else if isRawDataset(params, computedExpr) {
@@ -1087,7 +1146,7 @@ func extractBoundariesGeneral(conditionCols []string, condition scm.Scmer) bound
 						canon := canonicalColName(computedExpr, params, conditionCols)
 						mc, mf := buildComputedFn(computedExpr, p.Params, p.En, conditionCols)
 						if !mf.IsNil() && mc != nil {
-							return boundaries{columnboundaries{col: canon, matcher: EqualMatcher, lowerInclusive: true, upperInclusive: true, lowerBatch: true, lowerBatchSubidx: subidx, upperBatch: true, upperBatchSubidx: subidx, mapCols: mc, mapFn: mf}}
+							return analyzedBoundaries{analyzedBoundary{col: canon, matcher: EqualMatcher, lowerInclusive: true, upperInclusive: true, lowerBatch: true, lowerBatchSubidx: subidx, upperBatch: true, upperBatchSubidx: subidx, mapCols: mc, mapFn: mf}}
 						}
 					}
 				}
@@ -1097,19 +1156,19 @@ func extractBoundariesGeneral(conditionCols []string, condition scm.Scmer) bound
 			incl := v[0].SymbolEquals("<=")
 			if col, ok := analyzeContext.ResolveColumn(v[1]); ok {
 				if v2, ok := analyzeContext.ExtractConstant(v[2]); ok {
-					return boundaries{columnboundaries{col: col, matcher: RangeMatcher, lower: scm.NewNil(), lowerInclusive: false, upper: v2, upperInclusive: incl}}
+					return analyzedBoundaries{analyzedBoundary{col: col, matcher: RangeMatcher, lower: scm.NewNil(), lowerInclusive: false, upper: v2, upperInclusive: incl}}
 				}
 				if subidx, ok := analyzeContext.resolveBatchSubidx(v[2]); ok {
-					return boundaries{columnboundaries{col: col, matcher: RangeMatcher, lower: scm.NewNil(), lowerInclusive: false, upperInclusive: incl, upperBatch: true, upperBatchSubidx: subidx}}
+					return analyzedBoundaries{analyzedBoundary{col: col, matcher: RangeMatcher, lower: scm.NewNil(), lowerInclusive: false, upperInclusive: incl, upperBatch: true, upperBatchSubidx: subidx}}
 				}
 			}
 			// reversed: (< const col) means col > const, (<= const col) means col >= const
 			if col, ok := analyzeContext.ResolveColumn(v[2]); ok {
 				if v2, ok := analyzeContext.ExtractConstant(v[1]); ok {
-					return boundaries{columnboundaries{col: col, matcher: RangeMatcher, lower: v2, lowerInclusive: incl, upper: scm.NewNil(), upperInclusive: false}}
+					return analyzedBoundaries{analyzedBoundary{col: col, matcher: RangeMatcher, lower: v2, lowerInclusive: incl, upper: scm.NewNil(), upperInclusive: false}}
 				}
 				if subidx, ok := analyzeContext.resolveBatchSubidx(v[1]); ok {
-					return boundaries{columnboundaries{col: col, matcher: RangeMatcher, lowerInclusive: incl, upper: scm.NewNil(), upperInclusive: false, lowerBatch: true, lowerBatchSubidx: subidx}}
+					return analyzedBoundaries{analyzedBoundary{col: col, matcher: RangeMatcher, lowerInclusive: incl, upper: scm.NewNil(), upperInclusive: false, lowerBatch: true, lowerBatchSubidx: subidx}}
 				}
 			}
 			// computed col: rawDataset < independent → rawDataset has upper bound
@@ -1120,7 +1179,7 @@ func extractBoundariesGeneral(conditionCols []string, condition scm.Scmer) bound
 						canon := canonicalColName(computedExpr, params, conditionCols)
 						mc, mf := buildComputedFn(computedExpr, p.Params, p.En, conditionCols)
 						if !mf.IsNil() && mc != nil {
-							return boundaries{columnboundaries{col: canon, matcher: RangeMatcher, lower: scm.NewNil(), lowerInclusive: false, upper: v2, upperInclusive: incl, mapCols: mc, mapFn: mf}}
+							return analyzedBoundaries{analyzedBoundary{col: canon, matcher: RangeMatcher, lower: scm.NewNil(), lowerInclusive: false, upper: v2, upperInclusive: incl, mapCols: mc, mapFn: mf}}
 						}
 					}
 				} else if isRawDataset(params, computedExpr) {
@@ -1128,7 +1187,7 @@ func extractBoundariesGeneral(conditionCols []string, condition scm.Scmer) bound
 						canon := canonicalColName(computedExpr, params, conditionCols)
 						mc, mf := buildComputedFn(computedExpr, p.Params, p.En, conditionCols)
 						if !mf.IsNil() && mc != nil {
-							return boundaries{columnboundaries{col: canon, matcher: RangeMatcher, lower: scm.NewNil(), lowerInclusive: false, upperInclusive: incl, upperBatch: true, upperBatchSubidx: subidx, mapCols: mc, mapFn: mf}}
+							return analyzedBoundaries{analyzedBoundary{col: canon, matcher: RangeMatcher, lower: scm.NewNil(), lowerInclusive: false, upperInclusive: incl, upperBatch: true, upperBatchSubidx: subidx, mapCols: mc, mapFn: mf}}
 						}
 					}
 				}
@@ -1141,7 +1200,7 @@ func extractBoundariesGeneral(conditionCols []string, condition scm.Scmer) bound
 						canon := canonicalColName(computedExpr, params, conditionCols)
 						mc, mf := buildComputedFn(computedExpr, p.Params, p.En, conditionCols)
 						if !mf.IsNil() && mc != nil {
-							return boundaries{columnboundaries{col: canon, matcher: RangeMatcher, lower: v2, lowerInclusive: incl, upper: scm.NewNil(), upperInclusive: false, mapCols: mc, mapFn: mf}}
+							return analyzedBoundaries{analyzedBoundary{col: canon, matcher: RangeMatcher, lower: v2, lowerInclusive: incl, upper: scm.NewNil(), upperInclusive: false, mapCols: mc, mapFn: mf}}
 						}
 					}
 				} else if isRawDataset(params, computedExpr) {
@@ -1149,7 +1208,7 @@ func extractBoundariesGeneral(conditionCols []string, condition scm.Scmer) bound
 						canon := canonicalColName(computedExpr, params, conditionCols)
 						mc, mf := buildComputedFn(computedExpr, p.Params, p.En, conditionCols)
 						if !mf.IsNil() && mc != nil {
-							return boundaries{columnboundaries{col: canon, matcher: RangeMatcher, lowerInclusive: incl, upper: scm.NewNil(), upperInclusive: false, lowerBatch: true, lowerBatchSubidx: subidx, mapCols: mc, mapFn: mf}}
+							return analyzedBoundaries{analyzedBoundary{col: canon, matcher: RangeMatcher, lowerInclusive: incl, upper: scm.NewNil(), upperInclusive: false, lowerBatch: true, lowerBatchSubidx: subidx, mapCols: mc, mapFn: mf}}
 						}
 					}
 				}
@@ -1159,19 +1218,19 @@ func extractBoundariesGeneral(conditionCols []string, condition scm.Scmer) bound
 			incl := v[0].SymbolEquals(">=")
 			if col, ok := analyzeContext.ResolveColumn(v[1]); ok {
 				if v2, ok := analyzeContext.ExtractConstant(v[2]); ok {
-					return boundaries{columnboundaries{col: col, matcher: RangeMatcher, lower: v2, lowerInclusive: incl, upper: scm.NewNil(), upperInclusive: false}}
+					return analyzedBoundaries{analyzedBoundary{col: col, matcher: RangeMatcher, lower: v2, lowerInclusive: incl, upper: scm.NewNil(), upperInclusive: false}}
 				}
 				if subidx, ok := analyzeContext.resolveBatchSubidx(v[2]); ok {
-					return boundaries{columnboundaries{col: col, matcher: RangeMatcher, lowerInclusive: incl, upper: scm.NewNil(), upperInclusive: false, lowerBatch: true, lowerBatchSubidx: subidx}}
+					return analyzedBoundaries{analyzedBoundary{col: col, matcher: RangeMatcher, lowerInclusive: incl, upper: scm.NewNil(), upperInclusive: false, lowerBatch: true, lowerBatchSubidx: subidx}}
 				}
 			}
 			// reversed: (> const col) means col < const, (>= const col) means col <= const
 			if col, ok := analyzeContext.ResolveColumn(v[2]); ok {
 				if v2, ok := analyzeContext.ExtractConstant(v[1]); ok {
-					return boundaries{columnboundaries{col: col, matcher: RangeMatcher, lower: scm.NewNil(), lowerInclusive: false, upper: v2, upperInclusive: incl}}
+					return analyzedBoundaries{analyzedBoundary{col: col, matcher: RangeMatcher, lower: scm.NewNil(), lowerInclusive: false, upper: v2, upperInclusive: incl}}
 				}
 				if subidx, ok := analyzeContext.resolveBatchSubidx(v[1]); ok {
-					return boundaries{columnboundaries{col: col, matcher: RangeMatcher, lower: scm.NewNil(), lowerInclusive: false, upperInclusive: incl, upperBatch: true, upperBatchSubidx: subidx}}
+					return analyzedBoundaries{analyzedBoundary{col: col, matcher: RangeMatcher, lower: scm.NewNil(), lowerInclusive: false, upperInclusive: incl, upperBatch: true, upperBatchSubidx: subidx}}
 				}
 			}
 			// computed col: rawDataset > independent → rawDataset has lower bound
@@ -1182,7 +1241,7 @@ func extractBoundariesGeneral(conditionCols []string, condition scm.Scmer) bound
 						canon := canonicalColName(computedExpr, params, conditionCols)
 						mc, mf := buildComputedFn(computedExpr, p.Params, p.En, conditionCols)
 						if !mf.IsNil() && mc != nil {
-							return boundaries{columnboundaries{col: canon, matcher: RangeMatcher, lower: v2, lowerInclusive: incl, upper: scm.NewNil(), upperInclusive: false, mapCols: mc, mapFn: mf}}
+							return analyzedBoundaries{analyzedBoundary{col: canon, matcher: RangeMatcher, lower: v2, lowerInclusive: incl, upper: scm.NewNil(), upperInclusive: false, mapCols: mc, mapFn: mf}}
 						}
 					}
 				} else if isRawDataset(params, computedExpr) {
@@ -1190,7 +1249,7 @@ func extractBoundariesGeneral(conditionCols []string, condition scm.Scmer) bound
 						canon := canonicalColName(computedExpr, params, conditionCols)
 						mc, mf := buildComputedFn(computedExpr, p.Params, p.En, conditionCols)
 						if !mf.IsNil() && mc != nil {
-							return boundaries{columnboundaries{col: canon, matcher: RangeMatcher, lowerInclusive: incl, upper: scm.NewNil(), upperInclusive: false, lowerBatch: true, lowerBatchSubidx: subidx, mapCols: mc, mapFn: mf}}
+							return analyzedBoundaries{analyzedBoundary{col: canon, matcher: RangeMatcher, lowerInclusive: incl, upper: scm.NewNil(), upperInclusive: false, lowerBatch: true, lowerBatchSubidx: subidx, mapCols: mc, mapFn: mf}}
 						}
 					}
 				}
@@ -1203,7 +1262,7 @@ func extractBoundariesGeneral(conditionCols []string, condition scm.Scmer) bound
 						canon := canonicalColName(computedExpr, params, conditionCols)
 						mc, mf := buildComputedFn(computedExpr, p.Params, p.En, conditionCols)
 						if !mf.IsNil() && mc != nil {
-							return boundaries{columnboundaries{col: canon, matcher: RangeMatcher, lower: scm.NewNil(), lowerInclusive: false, upper: v2, upperInclusive: incl, mapCols: mc, mapFn: mf}}
+							return analyzedBoundaries{analyzedBoundary{col: canon, matcher: RangeMatcher, lower: scm.NewNil(), lowerInclusive: false, upper: v2, upperInclusive: incl, mapCols: mc, mapFn: mf}}
 						}
 					}
 				} else if isRawDataset(params, computedExpr) {
@@ -1211,7 +1270,7 @@ func extractBoundariesGeneral(conditionCols []string, condition scm.Scmer) bound
 						canon := canonicalColName(computedExpr, params, conditionCols)
 						mc, mf := buildComputedFn(computedExpr, p.Params, p.En, conditionCols)
 						if !mf.IsNil() && mc != nil {
-							return boundaries{columnboundaries{col: canon, matcher: RangeMatcher, lower: scm.NewNil(), lowerInclusive: false, upperInclusive: incl, upperBatch: true, upperBatchSubidx: subidx, mapCols: mc, mapFn: mf}}
+							return analyzedBoundaries{analyzedBoundary{col: canon, matcher: RangeMatcher, lower: scm.NewNil(), lowerInclusive: false, upperInclusive: incl, upperBatch: true, upperBatchSubidx: subidx, mapCols: mc, mapFn: mf}}
 						}
 					}
 				}
@@ -1220,11 +1279,11 @@ func extractBoundariesGeneral(conditionCols []string, condition scm.Scmer) bound
 		} else if analyzeContext.FunctionIs(v[0], "nil?") && len(v) >= 2 {
 			// IS NULL: (nil? col)
 			if col, ok := analyzeContext.ResolveColumn(v[1]); ok {
-				return boundaries{columnboundaries{col: col, matcher: EqualMatcher, lower: scm.NewNil(), lowerInclusive: true, upper: scm.NewNil(), upperInclusive: true}}
+				return analyzedBoundaries{analyzedBoundary{col: col, matcher: EqualMatcher, lower: scm.NewNil(), lowerInclusive: true, upper: scm.NewNil(), upperInclusive: true}}
 			}
 			return nil
 		} else if v[0].SymbolEquals("and") {
-			var result boundaries
+			var result analyzedBoundaries
 			for i := 1; i < len(v); i++ {
 				child := traverseCondition(v[i])
 				if child == nil {
@@ -1246,10 +1305,10 @@ func extractBoundariesGeneral(conditionCols []string, condition scm.Scmer) bound
 				canon := canonicalColName(node, params, conditionCols)
 				mc, mf := buildComputedFn(node, p.Params, p.En, conditionCols)
 				if !mf.IsNil() && mc != nil {
-					return boundaries{columnboundaries{col: canon, matcher: EqualMatcher, lower: scm.NewBool(true), lowerInclusive: true, upper: scm.NewBool(true), upperInclusive: true, mapCols: mc, mapFn: mf}}
+					return analyzedBoundaries{analyzedBoundary{col: canon, matcher: EqualMatcher, lower: scm.NewBool(true), lowerInclusive: true, upper: scm.NewBool(true), upperInclusive: true, mapCols: mc, mapFn: mf}}
 				}
 			}
-			var result boundaries
+			var result analyzedBoundaries
 			for i := 1; i < len(v); i++ {
 				child := traverseCondition(v[i])
 				if child == nil {
@@ -1278,7 +1337,7 @@ func extractBoundariesGeneral(conditionCols []string, condition scm.Scmer) bound
 			canon := canonicalColName(node, params, conditionCols)
 			mc, mf := buildComputedFn(node, p.Params, p.En, conditionCols)
 			if !mf.IsNil() && mc != nil {
-				return boundaries{columnboundaries{col: canon, matcher: EqualMatcher, lower: scm.NewBool(true), lowerInclusive: true, upper: scm.NewBool(true), upperInclusive: true, mapCols: mc, mapFn: mf}}
+				return analyzedBoundaries{analyzedBoundary{col: canon, matcher: EqualMatcher, lower: scm.NewBool(true), lowerInclusive: true, upper: scm.NewBool(true), upperInclusive: true, mapCols: mc, mapFn: mf}}
 			}
 		}
 		return nil
@@ -1311,8 +1370,8 @@ func extractBoundariesGeneral(conditionCols []string, condition scm.Scmer) bound
 // of the LIKE call represented by bound. An exact main-row match set may bypass
 // residual evaluation only under this structural proof; deltas are never
 // covered because they are not part of the immutable set.
-func singleLikeBoundaryCoversCondition(conditionCols []string, condition scm.Scmer, bound columnboundaries) bool {
-	if bound.matcher != LikeMatcher {
+func singleLikeBoundaryCoversCondition(conditionCols []string, condition scm.Scmer, access scanAccess, boundaryIndex int) bool {
+	if access.boundaryAnalyzer(boundaryIndex) != LikeMatcher {
 		return false
 	}
 	var p scm.Proc
@@ -1349,46 +1408,23 @@ func singleLikeBoundaryCoversCondition(conditionCols []string, condition scm.Scm
 	}
 	if items[1].IsNthLocalVar() {
 		idx := int(items[1].NthLocalVar())
-		return idx < len(conditionCols) && conditionCols[idx] == bound.col
+		return idx < len(conditionCols) && conditionCols[idx] == access.boundaryColumn(boundaryIndex)
 	}
 	if items[1].IsSymbol() {
 		for i, param := range params {
 			if i < len(conditionCols) && param.IsSymbol() && param.String() == items[1].String() {
-				return conditionCols[i] == bound.col
+				return conditionCols[i] == access.boundaryColumn(boundaryIndex)
 			}
 		}
 	}
 	return false
 }
 
-func hasBatchBoundaries(bounds boundaries) bool {
-	for _, b := range bounds {
-		if b.lowerBatch || b.upperBatch {
-			return true
-		}
-	}
-	return false
-}
-
-func materializeBatchBoundaries(template boundaries, stride int, batchdata []scm.Scmer, batchid uint32) boundaries {
-	result := append(boundaries(nil), template...)
-	base := int(batchid) * stride
-	for i := range result {
-		if result[i].lowerBatch {
-			result[i].lower = batchdata[base+result[i].lowerBatchSubidx]
-		}
-		if result[i].upperBatch {
-			result[i].upper = batchdata[base+result[i].upperBatchSubidx]
-		}
-	}
-	return result
-}
-
 // reorderByFrequency keeps exact sorted points ahead of matcher-backed points.
 // A PK equality must be allowed to narrow a nested probe before an expensive LIKE
 // matcher is considered. Frequency only reorders boundaries with the same access
 // characteristics, preserving prefix reuse without overriding that cost property.
-func reorderByFrequency(bounds boundaries, t *table) {
+func reorderByFrequency(bounds analyzedBoundaries, t *table) {
 	for _, b := range bounds {
 		t.bumpColFreq(b.col)
 	}
@@ -1692,85 +1728,81 @@ func scmerStructEqual(a, b scm.Scmer) bool {
 	return false
 }
 
-func indexFromBoundariesInto(storage []scm.Scmer, cols boundaries) (lower []scm.Scmer, upperLast scm.Scmer) {
-	if len(cols) > 0 {
-		sortedEnd := 0
-		for sortedEnd < len(cols) && cols[sortedEnd].matcher.IsSorted() {
-			sortedEnd++
-		}
-		usableSorted := sortedEnd
-		for usableSorted >= 2 {
-			if !boundaryIsPoint(cols[usableSorted-2]) &&
-				!(boundaryIsUnboundedOrder(cols[usableSorted-2]) && boundaryIsUnboundedOrder(cols[usableSorted-1])) {
-				usableSorted--
-			} else {
-				break
-			}
-		}
-		// Hooks form a usable suffix only when no physical boundary between the
-		// retained prefix and that suffix had to be dropped.
-		effectiveLen := usableSorted
-		if usableSorted == sortedEnd {
-			effectiveLen = len(cols)
-		}
-		if effectiveLen == 0 {
-			return nil, scm.NewNil()
-		}
-		if cap(storage) >= effectiveLen {
-			lower = storage[:effectiveLen]
-		} else {
-			lower = make([]scm.Scmer, effectiveLen)
-		}
-		for i, v := range cols[:effectiveLen] {
-			lower[i] = v.lower
-		}
-		if usableSorted > 0 {
-			upperLast = cols[usableSorted-1].upper
-		}
-	}
-	return
+// scanIndexBounds is the allocation-free physical index view of a scan access
+// contract. Values stay in the planner-provided [values...] array (or the
+// caller's batch row) and are fetched by slot; no lower/upper copy is built.
+type scanIndexBounds struct {
+	// access is bound only after the compact view has been copied into pooled
+	// index scratch. Delta-tree comparison needs it for non-leading slots.
+	access       *scanAccess
+	effectiveLen int
+	usableSorted int
+	compareCols  int
+	firstLower   scm.Scmer
+	lastUpper    scm.Scmer
 }
 
-func indexFromBoundaries(cols boundaries) ([]scm.Scmer, scm.Scmer) {
-	return indexFromBoundariesInto(nil, cols)
-}
-
-func indexFromScanAccessInto(storage []scm.Scmer, access scanAccess) (lower []scm.Scmer, upperLast scm.Scmer) {
-	if access.len() == 0 {
-		return nil, scm.NewNil()
-	}
+func newScanIndexBounds(access scanAccess) scanIndexBounds {
 	sortedEnd := 0
-	for sortedEnd < access.len() && access.boundary(sortedEnd).matcher.IsSorted() {
+	for sortedEnd < access.len() && access.boundaryAnalyzer(sortedEnd).IsSorted() {
 		sortedEnd++
 	}
 	usableSorted := sortedEnd
 	for usableSorted >= 2 {
-		previous := access.boundary(usableSorted - 2)
-		last := access.boundary(usableSorted - 1)
-		if !boundaryIsPoint(previous) &&
-			!(boundaryIsUnboundedOrder(previous) && boundaryIsUnboundedOrder(last)) {
+		if !scanAccessBoundaryIsPoint(access, usableSorted-2) &&
+			!(scanAccessBoundaryIsUnboundedOrder(access, usableSorted-2) && scanAccessBoundaryIsUnboundedOrder(access, usableSorted-1)) {
 			usableSorted--
-		} else {
-			break
+			continue
 		}
+		break
 	}
 	effectiveLen := usableSorted
 	if usableSorted == sortedEnd {
 		effectiveLen = access.len()
 	}
-	if effectiveLen == 0 {
-		return nil, scm.NewNil()
-	}
-	if cap(storage) >= effectiveLen {
-		lower = storage[:effectiveLen]
-	} else {
-		lower = make([]scm.Scmer, effectiveLen)
-	}
-	for i := 0; i < effectiveLen; i++ {
-		lower[i] = access.boundary(i).lower
+	result := scanIndexBounds{effectiveLen: effectiveLen, usableSorted: usableSorted}
+	if effectiveLen > 0 {
+		result.firstLower = access.boundValue(0, false)
 	}
 	if usableSorted > 0 {
-		upperLast = access.boundary(usableSorted - 1).upper
+		result.lastUpper = access.boundValue(usableSorted-1, true)
 	}
-	return lower, upperLast
+	return result
+}
+
+func (b scanIndexBounds) len() int { return b.effectiveLen }
+
+func (b scanIndexBounds) lower(access scanAccess, index int) scm.Scmer {
+	if index == 0 {
+		return b.firstLower
+	}
+	return access.boundValue(index, false)
+}
+
+func (b scanIndexBounds) referenceLower(index int) scm.Scmer {
+	if index == 0 {
+		return b.firstLower
+	}
+	return b.access.boundValue(index, false)
+}
+
+func (b scanIndexBounds) upperLast() scm.Scmer {
+	if b.usableSorted == 0 {
+		return scm.NewNil()
+	}
+	return b.lastUpper
+}
+
+func (b *scanIndexBounds) truncate(access scanAccess, length int) {
+	if b.effectiveLen > length {
+		b.effectiveLen = length
+	}
+	if b.usableSorted > length {
+		b.usableSorted = length
+		if length > 0 {
+			b.lastUpper = access.boundValue(length-1, true)
+		} else {
+			b.lastUpper = scm.NewNil()
+		}
+	}
 }

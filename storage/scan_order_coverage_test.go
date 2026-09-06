@@ -28,7 +28,7 @@ func TestExtendBoundariesRejectsPartiallyCoveredOrder(t *testing.T) {
 		scm.NewSymbol("foreign_id"),
 		scm.NewSymbol("$tx"),
 	}))
-	original := boundaries{{
+	original := analyzedBoundaries{{
 		col: "tenant_id", matcher: EqualMatcher,
 		lower: scm.NewInt(7), lowerInclusive: true,
 		upper: scm.NewInt(7), upperInclusive: true,
@@ -80,15 +80,14 @@ func TestCoveredOrderedLimitBrakesInsideIndexBatch(t *testing.T) {
 	if !covered {
 		t.Fatal("bucket/rank index does not cover ORDER BY")
 	}
-	lower, upper := indexFromBoundaries(bounds)
 	shard := tbl.ActiveShards()[0]
 	shard.mu.RLock()
 	var buildBuf [8]uint32
-	shard.iterateIndexForce(nil, runtimeScanAccess(bounds), lower, upper, len(shard.inserts), buildBuf[:], false,
+	shard.iterateIndexForce(nil, runtimeScanAccess(bounds), len(shard.inserts), buildBuf[:], false,
 		func([]uint32) bool { return false })
 	shard.mu.RUnlock()
 	run := func(acceptCols []string, accept scm.Scmer) *shardqueue {
-		return shard.scan_order(coveredRuntimeScanAccess(bounds), lower, upper,
+		return shard.scan_order(coveredRuntimeScanAccess(bounds),
 			[]string{"bucket"}, condition, acceptCols, accept,
 			[]scm.Scmer{scm.NewString("rank")}, []func(...scm.Scmer) scm.Scmer{order},
 			0, 0, limit, nil, nil, nil)

@@ -890,9 +890,9 @@ func probeScanJoinOrderInput(currentTx *TxContext, spec *scanJoinOrderSpec, tupl
 		}
 		return scm.NewBool(true)
 	})
-	required := make(boundaries, keyWidth)
+	required := make(analyzedBoundaries, keyWidth)
 	for keyIndex, column := range input.targetKeyCols {
-		required[keyIndex] = columnboundaries{
+		required[keyIndex] = analyzedBoundary{
 			col: column, matcher: EqualMatcher,
 			lowerBatch: true, lowerBatchSubidx: keyIndex,
 			upperBatch: true, upperBatchSubidx: keyIndex,
@@ -1205,16 +1205,14 @@ func collectScanJoinOrderShardStreams(currentTx *TxContext, input *scanJoinOrder
 		return nil
 	}
 	bounds, _ = extendScanAccessWithSortCols(bounds, sortcols, sortdirs)
-	lower, upperLast := indexFromScanAccessInto(scratch.lower[:0], bounds)
 	for i := 0; i < bounds.len(); i++ {
-		boundary := bounds.boundary(i)
-		input.table.AddPartitioningScore([]string{boundary.col})
+		input.table.AddPartitioningScore([]string{bounds.boundaryColumn(i)})
 	}
 
 	values := make(chan *scanJoinOrderShardStream, input.table.shardResultBufferSize())
 	ss := SessionStateFromTx(currentTx)
 	done := input.table.iterateShardsParallel(currentTx, bounds, func(shard *storageShard, _ bool) {
-		queue := shard.scan_order(bounds, lower, upperLast, input.filterCols, input.filter,
+		queue := shard.scan_order(bounds, input.filterCols, input.filter,
 			nil, scm.NewNil(),
 			sortcols, sortdirs, 0, 0, -1, input.readCols, currentTx, ss)
 		refs := make([]orderedBatchRecord, len(queue.items))

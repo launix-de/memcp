@@ -38,7 +38,7 @@ this is how rdf works:
 	(set old_handler (coalesce http_handler handler_404))
 	(define handle_query (lambda (req res schema query) (begin
 		/* check for password */
-		(set pw (scan_lookup nil (table "system" "user") '(372734710317056 "equal" "username" 15032418304 "" "password") (list (req "username"))))
+		(set pw (scan_lookup nil (table "system" "user") (list 372734710317056 (scan_boundary "equal" "username" 0 0 true true "" false) "password") (list (req "username"))))
 		(if (and pw (equal? pw (password (req "password")))) (time (begin
 			((res "header") "Content-Type" "text/plain")
 			((res "status") 200)
@@ -59,7 +59,7 @@ this is how rdf works:
 	)))
 	(define handle_ttl_load (lambda (req res schema ttl_data) (begin
 		/* check for password */
-		(set pw (scan_lookup nil (table "system" "user") '(372734710317056 "equal" "username" 15032418304 "" "password") (list (req "username"))))
+		(set pw (scan_lookup nil (table "system" "user") (list 372734710317056 (scan_boundary "equal" "username" 0 0 true true "" false) "password") (list (req "username"))))
 		(if (and pw (equal? pw (password (req "password")))) (begin
 			((res "header") "Content-Type" "text/plain")
 			((res "status") 200)

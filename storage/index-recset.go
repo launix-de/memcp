@@ -24,7 +24,7 @@ type recSetMatcher struct{}
 // non-ordering boundary on its backing table. Scan operators retain one common
 // table/index pipeline; choosing whether the base index or this RecSet drives
 // iteration is an execution-kernel decision, not a second relational shape.
-func appendRecSetBoundary(bounds boundaries, source *recSet) boundaries {
+func appendRecSetBoundary(bounds analyzedBoundaries, source *recSet) analyzedBoundaries {
 	if source == nil {
 		return bounds
 	}
@@ -32,7 +32,7 @@ func appendRecSetBoundary(bounds boundaries, source *recSet) boundaries {
 		panic("recset scan source has no backing table")
 	}
 	value := NewRecSetScmer(source)
-	return append(bounds, columnboundaries{
+	return append(bounds, analyzedBoundary{
 		col:            "$recset_contains",
 		matcher:        RecSetMatcher,
 		lower:          value,
@@ -51,11 +51,14 @@ func smallestRecSetBoundary(bounds scanAccess, shard *storageShard) (*recSetShar
 	var smallest *recSetShard
 	found := false
 	for i := 0; i < bounds.len(); i++ {
-		bound := bounds.boundary(i)
-		if !matcherKindEqual(bound.matcher, RecSetMatcher) || !bound.lower.IsCustom(TagRecSet) {
+		if !matcherKindEqual(bounds.boundaryAnalyzer(i), RecSetMatcher) {
 			continue
 		}
-		source := RecSetFromScmer(bound.lower)
+		lower := bounds.boundValue(i, false)
+		if !lower.IsCustom(TagRecSet) {
+			continue
+		}
+		source := RecSetFromScmer(lower)
 		if source == nil || source.table != shard.t {
 			continue
 		}

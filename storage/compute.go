@@ -607,11 +607,11 @@ func (t *table) invalidateORCFromSortKey(colName string, sortKeys []scm.Scmer) {
 	}
 	partCount := analyzeOrcPartition(col)
 
-	// Build boundaries for index-accelerated lookup.
+	// Build analyzer results for index-accelerated lookup.
 	// Partition columns → equality points; order columns → range from mutation key.
-	var bounds boundaries
+	var bounds analyzedBoundaries
 	for i := 0; i < partCount && i < nCols; i++ {
-		bounds = append(bounds, columnboundaries{
+		bounds = append(bounds, analyzedBoundary{
 			col: col.OrcSortCols[i], matcher: EqualMatcher, lower: sortKeys[i], lowerInclusive: true,
 			upper: sortKeys[i], upperInclusive: true,
 		})
@@ -621,18 +621,17 @@ func (t *table) invalidateORCFromSortKey(colName string, sortKeys []scm.Scmer) {
 	for i := partCount; i < nCols; i++ {
 		desc := i < len(col.OrcSortDirs) && col.OrcSortDirs[i]
 		if desc {
-			bounds = append(bounds, columnboundaries{
+			bounds = append(bounds, analyzedBoundary{
 				col: col.OrcSortCols[i], matcher: RangeMatcher, lower: scm.NewNil(), lowerInclusive: false,
 				upper: sortKeys[i], upperInclusive: true,
 			})
 		} else {
-			bounds = append(bounds, columnboundaries{
+			bounds = append(bounds, analyzedBoundary{
 				col: col.OrcSortCols[i], matcher: RangeMatcher, lower: sortKeys[i], lowerInclusive: true,
 				upper: scm.NewNil(), upperInclusive: false,
 			})
 		}
 	}
-	lower, upperLast := indexFromBoundaries(bounds)
 
 	// Build condition function for post-index filtering (index may return superset).
 	condFn := func(rowVals []scm.Scmer) bool {
@@ -683,7 +682,7 @@ func (t *table) invalidateORCFromSortKey(colName string, sortKeys []scm.Scmer) {
 			s.ensureMainCount(false)
 			var buf [1024]uint32
 			rowVals := make([]scm.Scmer, nCols)
-			s.iterateIndex(nil, runtimeScanAccess(bounds), lower, upperLast, len(s.inserts), buf[:], 1, nil, func(batch []uint32) bool {
+			s.iterateIndex(nil, runtimeScanAccess(bounds), len(s.inserts), buf[:], 1, nil, func(batch []uint32) bool {
 				for _, idx := range batch {
 					if s.deletions.Get(uint(idx)) {
 						continue
@@ -955,17 +954,20 @@ func extractCompiledScanEqualityJoins(schemaExpr, valuesExpr scm.Scmer, computor
 	count := meta.count
 	for i := 0; i < count; i++ {
 		offset := scanAccessSchemaHeaderSize + i*scanAccessBoundaryStride
-		if offset+scanAccessBoundaryStride > len(schema) || stripSourceInfo(schema[offset]).String() != "equal" {
+		if offset+scanAccessBoundaryStride > len(schema) || !stripSourceInfo(schema[offset]).IsCustom(TagScanBoundary) {
 			continue
 		}
-		boundaryMeta := decodeScanAccessBoundaryMeta(stripSourceInfo(schema[offset+2]))
-		lowerSlot := boundaryMeta.lowerSlot
-		upperSlot := boundaryMeta.upperSlot
+		boundary := ScanBoundaryFromScmer(stripSourceInfo(schema[offset]))
+		if boundary.Analyzer() != EqualMatcher {
+			continue
+		}
+		lowerSlot := boundary.LowerSlot()
+		upperSlot := boundary.UpperSlot()
 		if lowerSlot < 0 || lowerSlot != upperSlot || lowerSlot >= len(valueItems) {
 			continue
 		}
 		if inputCol, ok := compiledScanOuterColumn(valueItems[lowerSlot], computorParams); ok {
-			srcCols = append(srcCols, stripSourceInfo(schema[offset+1]).String())
+			srcCols = append(srcCols, boundary.ColumnName())
 			inputCols = append(inputCols, inputCol)
 		}
 	}
