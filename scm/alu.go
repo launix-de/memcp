@@ -917,7 +917,7 @@ func init_alu() {
 				for i := range args {
 					ctx.StabilizeDescForControlFlow(&args[i])
 				}
-				registerHomes1 := ctx.AllocRegisterHomes(JITRegisterPlan{Slots: [16]JITRegisterSlot{{Color: 0, Width: 1, Cost: 11}, {Color: 1, Width: 1, Cost: 5}}, Count: 2})
+				registerHomes1 := ctx.AllocRegisterHomes(JITRegisterPlan{Slots: [16]JITRegisterSlot{{Color: 0, Width: 1, Cost: 65}, {Color: 1, Width: 1, Cost: 22}}, Count: 2})
 				defer ctx.ReleaseRegisterHomes(registerHomes1)
 				var r0 Reg
 				phiHomeOK2 := registerHomes1.Available&(uint16(1)<<1) == uint16(1)<<1
@@ -5834,7 +5834,7 @@ func init_alu() {
 				for i := range args {
 					ctx.StabilizeDescForControlFlow(&args[i])
 				}
-				registerHomes1 := ctx.AllocRegisterHomes(JITRegisterPlan{Slots: [16]JITRegisterSlot{{Color: 0, Width: 1, Cost: 20}, {Color: 1, Width: 1, Cost: 9}}, Count: 2})
+				registerHomes1 := ctx.AllocRegisterHomes(JITRegisterPlan{Slots: [16]JITRegisterSlot{{Color: 0, Width: 1, Cost: 160}, {Color: 1, Width: 1, Cost: 67}}, Count: 2})
 				defer ctx.ReleaseRegisterHomes(registerHomes1)
 				var r0 Reg
 				phiHomeOK2 := registerHomes1.Available&(uint16(1)<<0) == uint16(1)<<0
@@ -14517,7 +14517,7 @@ func init_alu() {
 				for i := range args {
 					ctx.StabilizeDescForControlFlow(&args[i])
 				}
-				registerHomes1 := ctx.AllocRegisterHomes(JITRegisterPlan{Slots: [16]JITRegisterSlot{{Color: 0, Width: 1, Cost: 14}}, Count: 1})
+				registerHomes1 := ctx.AllocRegisterHomes(JITRegisterPlan{Slots: [16]JITRegisterSlot{{Color: 0, Width: 1, Cost: 113}}, Count: 1})
 				defer ctx.ReleaseRegisterHomes(registerHomes1)
 				var r0 Reg
 				phiHomeOK2 := registerHomes1.Available&(uint16(1)<<0) == uint16(1)<<0
@@ -21084,7 +21084,7 @@ func init_alu() {
 				for i := range args {
 					ctx.StabilizeDescForControlFlow(&args[i])
 				}
-				registerHomes1 := ctx.AllocRegisterHomes(JITRegisterPlan{Slots: [16]JITRegisterSlot{{Color: 0, Width: 1, Cost: 7}, {Color: 1, Width: 1, Cost: 3}}, Count: 2})
+				registerHomes1 := ctx.AllocRegisterHomes(JITRegisterPlan{Slots: [16]JITRegisterSlot{{Color: 0, Width: 1, Cost: 41}, {Color: 1, Width: 1, Cost: 20}}, Count: 2})
 				defer ctx.ReleaseRegisterHomes(registerHomes1)
 				var r0 Reg
 				phiHomeOK2 := registerHomes1.Available&(uint16(1)<<0) == uint16(1)<<0
@@ -36174,7 +36174,7 @@ func init_alu() {
 				for i := range args {
 					ctx.StabilizeDescForControlFlow(&args[i])
 				}
-				registerHomes1 := ctx.AllocRegisterHomes(JITRegisterPlan{Slots: [16]JITRegisterSlot{{Color: 0, Width: 1, Cost: 3}}, Count: 1})
+				registerHomes1 := ctx.AllocRegisterHomes(JITRegisterPlan{Slots: [16]JITRegisterSlot{{Color: 0, Width: 1, Cost: 30}}, Count: 1})
 				defer ctx.ReleaseRegisterHomes(registerHomes1)
 				var r0 Reg
 				phiHomeOK2 := registerHomes1.Available&(uint16(1)<<0) == uint16(1)<<0
@@ -38198,7 +38198,7 @@ func init_alu() {
 				for i := range args {
 					ctx.StabilizeDescForControlFlow(&args[i])
 				}
-				registerHomes1 := ctx.AllocRegisterHomes(JITRegisterPlan{Slots: [16]JITRegisterSlot{{Color: 0, Width: 1, Cost: 3}}, Count: 1})
+				registerHomes1 := ctx.AllocRegisterHomes(JITRegisterPlan{Slots: [16]JITRegisterSlot{{Color: 0, Width: 1, Cost: 30}}, Count: 1})
 				defer ctx.ReleaseRegisterHomes(registerHomes1)
 				var r0 Reg
 				phiHomeOK2 := registerHomes1.Available&(uint16(1)<<0) == uint16(1)<<0

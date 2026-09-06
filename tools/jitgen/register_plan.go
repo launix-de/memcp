@@ -34,11 +34,10 @@ type staticRegisterPlan struct {
 }
 
 type staticRegisterSlot struct {
-	color     int
-	width     int
-	weight    int
-	oldColor  int
-	valueName string
+	color    int
+	width    int
+	weight   int
+	oldColor int
 }
 
 type registerPlanNode struct {
@@ -77,14 +76,14 @@ func planLoopPhiRegisters(fn *ssa.Function) staticRegisterPlan {
 			if isPhiPairType(phi.Type()) {
 				pairNodes = append(pairNodes, registerPlanNode{
 					value:     phi,
-					weight:    registerPlanValueWeight(phi) * 2,
+					weight:    registerPlanValueWeight(phi, 2),
 					neighbors: map[int]struct{}{},
 				})
 				continue
 			}
 			nodes = append(nodes, registerPlanNode{
 				value:     phi,
-				weight:    registerPlanValueWeight(phi),
+				weight:    registerPlanValueWeight(phi, 1),
 				neighbors: map[int]struct{}{},
 			})
 		}
@@ -93,6 +92,31 @@ func planLoopPhiRegisters(fn *ssa.Function) staticRegisterPlan {
 		return plan
 	}
 
+	colors, colorCount := planRegisterClass(fn, nodes)
+	pairColors, pairColorCount := planRegisterClass(fn, pairNodes)
+	var slots []staticRegisterSlot
+	slots = append(slots, registerClassSlots(nodes, colors, colorCount, 1)...)
+	slots = append(slots, registerClassSlots(pairNodes, pairColors, pairColorCount, 2)...)
+	sort.SliceStable(slots, func(i, j int) bool {
+		return slots[i].weight > slots[j].weight
+	})
+	kept := slots[:0]
+	for _, slot := range slots {
+		if plan.colorCount+slot.width > 16 {
+			continue
+		}
+		slot.color = plan.colorCount
+		plan.colorCount += slot.width
+		kept = append(kept, slot)
+	}
+	slots = kept
+	plan.slots = kept
+	mapRegisterClassColors(&plan, nodes, colors, slots, 1)
+	mapRegisterClassColors(&plan, pairNodes, pairColors, slots, 2)
+	return plan
+}
+
+func planRegisterClass(fn *ssa.Function, nodes []registerPlanNode) ([]int, int) {
 	index := make(map[ssa.Value]int, len(nodes))
 	for i := range nodes {
 		index[nodes[i].value] = i
@@ -105,7 +129,9 @@ func planLoopPhiRegisters(fn *ssa.Function) staticRegisterPlan {
 		for instructionIndex := len(block.Instrs) - 1; instructionIndex >= 0; instructionIndex-- {
 			instruction := block.Instrs[instructionIndex]
 			if phi, ok := instruction.(*ssa.Phi); ok {
-				delete(live, index[phi])
+				if node, exists := index[phi]; exists {
+					delete(live, node)
+				}
 				continue
 			}
 			for _, operand := range instruction.Operands(nil) {
@@ -129,8 +155,10 @@ func planLoopPhiRegisters(fn *ssa.Function) staticRegisterPlan {
 		}
 		addRegisterPlanClique(nodes, definitions)
 	}
+	return colorRegisterPlan(nodes)
+}
 
-	colors, colorCount := colorRegisterPlan(nodes)
+func registerClassSlots(nodes []registerPlanNode, colors []int, colorCount, width int) []staticRegisterSlot {
 	weights := make([]int, colorCount)
 	for node, color := range colors {
 		weights[color] += nodes[node].weight
@@ -142,39 +170,18 @@ func planLoopPhiRegisters(fn *ssa.Function) staticRegisterPlan {
 	sort.SliceStable(order, func(i, j int) bool {
 		return weights[order[i]] > weights[order[j]]
 	})
-	var slots []staticRegisterSlot
+	slots := make([]staticRegisterSlot, 0, colorCount)
 	for _, color := range order {
-		slots = append(slots, staticRegisterSlot{width: 1, weight: weights[color], oldColor: color})
+		slots = append(slots, staticRegisterSlot{width: width, weight: weights[color], oldColor: color})
 	}
-	for _, node := range pairNodes {
-		slots = append(slots, staticRegisterSlot{width: 2, weight: node.weight, oldColor: -1, valueName: node.value.Name()})
-	}
-	sort.SliceStable(slots, func(i, j int) bool {
-		return slots[i].weight > slots[j].weight
-	})
-	kept := slots[:0]
-	for _, slot := range slots {
-		if plan.colorCount+slot.width > 16 {
-			continue
-		}
-		slot.color = plan.colorCount
-		plan.colorCount += slot.width
-		kept = append(kept, slot)
-	}
-	slots = kept
-	plan.slots = kept
+	return slots
+}
 
-	for _, slot := range slots {
-		if slot.width != 2 {
-			continue
-		}
-		plan.colorByValue[slot.valueName] = slot.color
-		plan.widthByValue[slot.valueName] = 2
-	}
+func mapRegisterClassColors(plan *staticRegisterPlan, nodes []registerPlanNode, colors []int, slots []staticRegisterSlot, width int) {
 	for node, color := range colors {
 		newColor := -1
 		for _, slot := range slots {
-			if slot.width == 1 && slot.oldColor == color {
+			if slot.width == width && slot.oldColor == color {
 				newColor = slot.color
 				break
 			}
@@ -183,17 +190,40 @@ func planLoopPhiRegisters(fn *ssa.Function) staticRegisterPlan {
 			continue
 		}
 		plan.colorByValue[nodes[node].value.Name()] = newColor
-		plan.widthByValue[nodes[node].value.Name()] = 1
+		plan.widthByValue[nodes[node].value.Name()] = width
 	}
-	return plan
 }
 
-func registerPlanValueWeight(value ssa.Value) int {
-	weight := 2 // one definition and the loop-carried write
+func registerPlanValueWeight(value *ssa.Phi, width int) int {
+	weight := width
 	if refs := value.Referrers(); refs != nil {
-		weight += len(*refs)
+		for _, ref := range *refs {
+			weight += width * (1 + 4*registerPlanLoopDepth(ref.Block()))
+		}
+	}
+	for edgeIndex := range value.Edges {
+		if edgeIndex >= len(value.Block().Preds) {
+			continue
+		}
+		predecessor := value.Block().Preds[edgeIndex]
+		if value.Block().Dominates(predecessor) {
+			weight += width * (2 + 4*registerPlanLoopDepth(predecessor))
+		}
 	}
 	return weight
+}
+
+func registerPlanLoopDepth(block *ssa.BasicBlock) int {
+	if block == nil || block.Parent() == nil {
+		return 0
+	}
+	depth := 0
+	for _, candidate := range block.Parent().Blocks {
+		if registerPlanLoopHeader(candidate) && candidate.Dominates(block) {
+			depth++
+		}
+	}
+	return depth
 }
 
 func registerPlanLoopHeader(block *ssa.BasicBlock) bool {
