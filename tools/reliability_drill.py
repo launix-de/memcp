@@ -194,6 +194,36 @@ def scalar(client: HttpClient, statement: str) -> int:
 	return int(rows[0]["value"] or 0)
 
 
+def atomic_signature(client: HttpClient) -> dict[str, int]:
+	rows = client.sql(
+		"SELECT COUNT(*) AS row_count, MIN(x) AS min_x, MAX(x) AS max_x, "
+		"COALESCE(SUM(x), 0) AS x_sum FROM drill_atomic"
+	)
+	if len(rows) != 1:
+		raise DrillFailure(f"expected one atomicity signature row, got {rows}")
+	return {key: int(value or 0) for key, value in rows[0].items()}
+
+
+def classify_atomic_signature(observed: dict[str, int], rows: int,
+		committed_x: int) -> int:
+	old = {
+		"row_count": rows, "min_x": committed_x,
+		"max_x": committed_x, "x_sum": rows * committed_x,
+	}
+	new = {
+		"row_count": rows, "min_x": committed_x + 1,
+		"max_x": committed_x + 1, "x_sum": rows * (committed_x + 1),
+	}
+	if observed == old:
+		return committed_x
+	if observed == new:
+		return committed_x + 1
+	raise DrillFailure(
+		"crash recovery exposed a partial multi-shard commit: "
+		f"got {observed}, expected exactly {old} or {new}"
+	)
+
+
 def signature(client: HttpClient) -> dict[str, int]:
 	return {
 		"count": scalar(client, "SELECT COUNT(*) AS value FROM drill_entry"),
@@ -235,6 +265,65 @@ def initialize(client: HttpClient) -> None:
 		timeout=120,
 	)
 	client.scm(f'(rebuild (table "{DATABASE}" "drill_rebuild") true true)', timeout=120)
+
+
+def initialize_atomicity(client: HttpClient, rows: int) -> None:
+	client.sql(f"CREATE DATABASE IF NOT EXISTS {DATABASE}", database="system")
+	client.scm('(settings "ShardSize" 100)')
+	client.sql("CREATE TABLE drill_atomic (id INT PRIMARY KEY, x INT NOT NULL) ENGINE=safe")
+	client.scm(
+		f'(insert (table "{DATABASE}" "drill_atomic") \'("id" "x") '
+		f'(map (produceN {rows}) (lambda (i) (list (+ i 1) 0))))',
+		timeout=300,
+	)
+	client.scm(f'(rebuild (table "{DATABASE}" "drill_atomic") true true)', timeout=300)
+	expect(
+		atomic_signature(client),
+		{"row_count": rows, "min_x": 0, "max_x": 0, "x_sum": 0},
+		"atomicity fixture",
+	)
+
+
+def run_commit_crash(server: OwnedServer, rows: int, rounds: int,
+		rng: random.Random, journal: list[dict]) -> None:
+	committed_x = 0
+	for round_index in range(1, rounds + 1):
+		client = server.client
+		assert client is not None
+		session = f"drill-commit-crash-{round_index}"
+		client.sql("START ACID TRANSACTION", session=session)
+		updated = client.sql("UPDATE drill_atomic SET x = x + 1", session=session, timeout=300)
+		if not updated or int(updated[0].get("affected_rows", 0)) != rows:
+			raise DrillFailure(f"commit-crash update affected unexpected rows: {updated}")
+
+		commit_result: list[object] = []
+		commit_started = threading.Event()
+
+		def commit() -> None:
+			commit_started.set()
+			try:
+				commit_result.append(client.sql("COMMIT", session=session, timeout=300))
+			except Exception as error:
+				commit_result.append(error)
+
+		thread = threading.Thread(target=commit, name="reliability-commit", daemon=True)
+		thread.start()
+		commit_started.wait(timeout=server.timeout)
+		delay = rng.uniform(0.0, 0.05)
+		time.sleep(delay)
+		journal.append({
+			"scenario": "commit-crash",
+			"round": round_index,
+			"delay_seconds": delay,
+			"expected_old_x": committed_x,
+			"expected_new_x": committed_x + 1,
+		})
+		server.kill()
+		thread.join(timeout=2)
+		client = server.start()
+		observed = atomic_signature(client)
+		journal[-1]["observed"] = observed
+		committed_x = classify_atomic_signature(observed, rows, committed_x)
 
 
 def run_committed_crash(server: OwnedServer, journal: list[dict]) -> dict[str, int]:
@@ -421,19 +510,24 @@ def parse_args() -> argparse.Namespace:
 	parser.add_argument("--app", type=Path, default=ROOT / "lib/main.scm")
 	parser.add_argument("--artifacts", type=Path, help="new directory for data, logs, journal, and restore snapshot")
 	parser.add_argument("--seed", type=int, default=random.SystemRandom().randrange(2**63))
-	parser.add_argument("--mode", choices=("crash", "soak", "restore", "all"), default="all")
+	parser.add_argument("--mode", choices=("atomicity", "crash", "soak", "restore", "all"), default="all")
 	parser.add_argument("--workers", type=int, default=4)
 	parser.add_argument("--operations", type=int, default=25, help="rows written by each soak worker")
 	parser.add_argument("--rebuild-crashes", type=int, default=5,
 		help="number of randomized rebuild/kill/recovery rounds")
+	parser.add_argument("--commit-crashes", type=int, default=25,
+		help="number of ACID COMMIT/kill/recovery races in atomicity mode")
+	parser.add_argument("--atomicity-rows", type=int, default=100000,
+		help="rows updated across ShardSize=100 shards in atomicity mode")
 	parser.add_argument("--timeout", type=float, default=30)
 	return parser.parse_args()
 
 
 def main() -> int:
 	args = parse_args()
-	if args.workers < 1 or args.operations < 1 or args.rebuild_crashes < 1 or args.timeout <= 0:
-		raise DrillFailure("workers, operations, rebuild-crashes, and timeout must be positive")
+	if (args.workers < 1 or args.operations < 1 or args.rebuild_crashes < 1 or
+			args.commit_crashes < 1 or args.atomicity_rows < 1 or args.timeout <= 0):
+		raise DrillFailure("workers, operations, crash rounds, row counts, and timeout must be positive")
 	binary = args.binary.expanduser().resolve()
 	app = args.app.expanduser().resolve()
 	if not binary.is_file() or not os.access(binary, os.X_OK):
@@ -452,6 +546,12 @@ def main() -> int:
 	print(f"Seed: {args.seed}")
 	try:
 		client = server.start()
+		if args.mode == "atomicity":
+			initialize_atomicity(client, args.atomicity_rows)
+			run_commit_crash(server, args.atomicity_rows, args.commit_crashes, rng, journal)
+			write_manifest(manifest, args.seed, "passed", journal)
+			print(f"PASS: {len(journal)} reliability scenarios; manifest: {manifest}")
+			return 0
 		initialize(client)
 		wanted = run_committed_crash(server, journal)
 		run_uncommitted_crash(server, wanted, journal)

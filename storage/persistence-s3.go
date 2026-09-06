@@ -399,33 +399,25 @@ func (s *S3Storage) OpenLog(shard string) PersistenceLogfile {
 	return lf
 }
 
-func (s *S3Storage) ReplayLog(shard string) (chan interface{}, PersistenceLogfile) {
+func (s *S3Storage) ReplayLog(shard string) (map[string]struct{}, chan interface{}, PersistenceLogfile) {
 	s.ensureOpen()
 
 	out := make(chan interface{}, 64)
+	committed := make(map[string]struct{})
+	segments, err := listS3LogSegments(s, shard)
+	if err == nil {
+		hybridsort.Slice(segments, func(i, j int) bool { return segments[i].seg < segments[j].seg })
+		for _, seg := range segments {
+			collectS3LogStreamCommits(s.readLogSegment(seg), committed)
+		}
+	} else {
+		segments = nil
+	}
 
 	go func() {
 		defer close(out)
-		segments, err := listS3LogSegments(s, shard)
-		if err != nil {
-			return
-		}
-		hybridsort.Slice(segments, func(i, j int) bool { return segments[i].seg < segments[j].seg })
-
 		for _, seg := range segments {
-			resp, err := s.client.GetObject(context.Background(), &s3.GetObjectInput{
-				Bucket: aws.String(s.factory.Bucket),
-				Key:    aws.String(seg.key),
-			})
-			if err != nil {
-				continue
-			}
-			data, err := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			if err != nil || len(data) == 0 {
-				continue
-			}
-			decodeS3LogStream(data, out)
+			decodeS3LogStream(s.readLogSegment(seg), out)
 		}
 	}()
 
@@ -433,7 +425,23 @@ func (s *S3Storage) ReplayLog(shard string) (chan interface{}, PersistenceLogfil
 	if err != nil {
 		panic(err)
 	}
-	return out, lf
+	return committed, out, lf
+}
+
+func (s *S3Storage) readLogSegment(seg s3LogSegInfo) []byte {
+	resp, err := s.client.GetObject(context.Background(), &s3.GetObjectInput{
+		Bucket: aws.String(s.factory.Bucket),
+		Key:    aws.String(seg.key),
+	})
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil
+	}
+	return data
 }
 
 func (s *S3Storage) RemoveLog(shard string) {
@@ -544,29 +552,38 @@ func openOrCreateS3Logfile(s *S3Storage, shard string) (*S3Logfile, error) {
 
 // Log encoding (same as Ceph)
 type s3EncDelete struct {
-	T   string `json:"t"`
-	Idx uint32 `json:"idx"`
+	T    string `json:"t"`
+	Idx  uint32 `json:"idx"`
+	TxID string `json:"txid,omitempty"`
 }
 type s3EncInsert struct {
 	T      string        `json:"t"`
 	Cols   []string      `json:"cols"`
 	Values [][]scm.Scmer `json:"values"`
+	TxID   string        `json:"txid,omitempty"`
+}
+type s3EncCommit struct {
+	T    string `json:"t"`
+	TxID string `json:"txid"`
 }
 
 func encodeS3LogEntry(e interface{}) []byte {
 	var payload []byte
 	switch l := e.(type) {
 	case LogEntryDelete:
-		tmp, _ := json.Marshal(s3EncDelete{T: "delete", Idx: l.idx})
+		tmp, _ := json.Marshal(s3EncDelete{T: "delete", Idx: l.idx, TxID: l.txID})
 		payload = tmp
 	case LogEntryUndelete:
-		tmp, _ := json.Marshal(s3EncDelete{T: "undelete", Idx: l.idx})
+		tmp, _ := json.Marshal(s3EncDelete{T: "undelete", Idx: l.idx, TxID: l.txID})
 		payload = tmp
 	case LogEntryInsert:
-		tmp, _ := json.Marshal(s3EncInsert{T: "insert", Cols: l.cols, Values: l.values})
+		tmp, _ := json.Marshal(s3EncInsert{T: "insert", Cols: l.cols, Values: l.values, TxID: l.txID})
 		payload = tmp
 	case LogEntryInsertHidden:
-		tmp, _ := json.Marshal(s3EncInsert{T: "insert_hidden", Cols: l.cols, Values: l.values})
+		tmp, _ := json.Marshal(s3EncInsert{T: "insert_hidden", Cols: l.cols, Values: l.values, TxID: l.txID})
+		payload = tmp
+	case LogEntryCommit:
+		tmp, _ := json.Marshal(s3EncCommit{T: "commit", TxID: l.txID})
 		payload = tmp
 	default:
 		return nil
@@ -599,15 +616,20 @@ func decodeS3LogStream(data []byte, out chan interface{}) {
 			continue
 		}
 		switch head.T {
+		case "commit":
+			var commit s3EncCommit
+			if json.Unmarshal(payload, &commit) == nil && commit.TxID != "" {
+				out <- LogEntryCommit{txID: commit.TxID}
+			}
 		case "delete":
 			var d s3EncDelete
 			if json.Unmarshal(payload, &d) == nil {
-				out <- LogEntryDelete{idx: uint32(d.Idx)}
+				out <- LogEntryDelete{idx: uint32(d.Idx), txID: d.TxID}
 			}
 		case "undelete":
 			var d s3EncDelete
 			if json.Unmarshal(payload, &d) == nil {
-				out <- LogEntryUndelete{idx: uint32(d.Idx)}
+				out <- LogEntryUndelete{idx: uint32(d.Idx), txID: d.TxID}
 			}
 		case "insert", "insert_hidden":
 			var ins s3EncInsert
@@ -618,11 +640,27 @@ func decodeS3LogStream(data []byte, out chan interface{}) {
 					}
 				}
 				if head.T == "insert_hidden" {
-					out <- LogEntryInsertHidden{cols: ins.Cols, values: ins.Values}
+					out <- LogEntryInsertHidden{cols: ins.Cols, values: ins.Values, txID: ins.TxID}
 				} else {
-					out <- LogEntryInsert{cols: ins.Cols, values: ins.Values}
+					out <- LogEntryInsert{cols: ins.Cols, values: ins.Values, txID: ins.TxID}
 				}
 			}
+		}
+	}
+}
+
+func collectS3LogStreamCommits(data []byte, committed map[string]struct{}) {
+	for i := 0; i+4 <= len(data); {
+		n := int(binary.LittleEndian.Uint32(data[i : i+4]))
+		i += 4
+		if n <= 0 || i+n > len(data) {
+			return
+		}
+		payload := data[i : i+n]
+		i += n
+		var commit s3EncCommit
+		if json.Unmarshal(payload, &commit) == nil && commit.T == "commit" && commit.TxID != "" {
+			committed[commit.TxID] = struct{}{}
 		}
 	}
 }

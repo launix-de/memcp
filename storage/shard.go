@@ -139,7 +139,7 @@ func (s *storageShard) nextForMaintenanceLocked(deletedRecid *uint32) *storageSh
 // when transaction commit/rollback changes it after the rebuild snapshot. A
 // successor already tracked by the same transaction applies its own masks
 // and must not be locked recursively here. Caller must hold s.mu.Lock().
-func (s *storageShard) syncNextVisibilityLocked(oldRecid uint32, trackedByTx map[*storageShard]struct{}) {
+func (s *storageShard) syncNextVisibilityLocked(oldRecid uint32, trackedByTx map[*storageShard]struct{}, currentTx *TxContext) {
 	current := s
 	currentRecid := oldRecid
 	currentIsSource := true
@@ -166,7 +166,12 @@ func (s *storageShard) syncNextVisibilityLocked(oldRecid uint32, trackedByTx map
 		next.deletions.Set(uint(newRecid), deleted)
 		next.rollbackProtected.Set(uint(newRecid), protected)
 		if wasDeleted != deleted {
-			next.logVisibilityChangeLocked(newRecid, deleted)
+			txID := ""
+			if currentTx != nil {
+				txID = currentTx.durableID()
+				currentTx.RegisterTouchedShard(next)
+			}
+			next.logVisibilityChangeLocked(newRecid, deleted, txID)
 		}
 		if !currentIsSource {
 			current.mu.Unlock()
@@ -182,15 +187,15 @@ func (s *storageShard) syncNextVisibilityLocked(oldRecid uint32, trackedByTx map
 
 // logVisibilityChangeLocked persists a visibility transition without changing
 // row identity. Caller must hold s.mu.Lock().
-func (s *storageShard) logVisibilityChangeLocked(recid uint32, deleted bool) {
+func (s *storageShard) logVisibilityChangeLocked(recid uint32, deleted bool, txID string) {
 	if (s.t.PersistencyMode != Safe && s.t.PersistencyMode != Logged) || s.logfile == nil {
 		return
 	}
 	if deleted {
-		s.logfile.Write(LogEntryDelete{recid})
+		s.logfile.Write(LogEntryDelete{idx: recid, txID: txID})
 		return
 	}
-	s.logfile.Write(LogEntryUndelete{recid})
+	s.logfile.Write(LogEntryUndelete{idx: recid, txID: txID})
 }
 
 // catchUpRebuildLocked replays only mutations that happened after the rebuild
@@ -217,7 +222,7 @@ func (s *storageShard) catchUpRebuildLocked(next *storageShard, snapshotInsertCo
 		// visibility. Persist both directions: omitting the undelete transition
 		// makes a correct in-memory commit reappear as deleted after WAL replay.
 		if wasDeleted != deleted {
-			next.logVisibilityChangeLocked(newRecid, deleted)
+			next.logVisibilityChangeLocked(newRecid, deleted, "")
 		}
 	}
 
@@ -414,21 +419,41 @@ func (u *storageShard) load(t *table) {
 	if t.PersistencyMode == Safe || t.PersistencyMode == Logged {
 		// Replaying the log mutates inserts/deletions; caller holds u.mu.Lock
 		var log chan interface{}
-		log, u.logfile = u.t.schema.persistence.ReplayLog(u.uuid.String())
-		numEntriesRestored := 0
+		localCommitted, log, logfile := u.t.schema.persistence.ReplayLog(u.uuid.String())
+		u.logfile = logfile
+		isCommitted := func(txID string) bool {
+			if txID == "" {
+				return true
+			}
+			if _, exists := localCommitted[txID]; exists {
+				return true
+			}
+			return u.t.schema.transactionCommitted(txID)
+		}
+		entryCount := 0
 		for logentry := range log {
-			numEntriesRestored++
+			entryCount++
 			switch l := logentry.(type) {
 			case LogEntryDelete:
-				u.deletions.Set(uint(l.idx), true) // mark deletion
+				if isCommitted(l.txID) {
+					u.deletions.Set(uint(l.idx), true) // mark deletion
+				}
 			case LogEntryUndelete:
-				u.deletions.Set(uint(l.idx), false)
+				if isCommitted(l.txID) {
+					u.deletions.Set(uint(l.idx), false)
+				}
 			case LogEntryInsert:
 				// WAL insert recids follow the persisted main rows. Resolve that
 				// boundary only when replay actually contains inserts: eager loading
 				// here would defeat cold-column loading for every empty WAL.
 				u.ensureMainCount(true)
+				firstRecid := u.main_count + uint32(len(u.inserts))
 				u.insertDatasetFromLog(l.cols, l.values)
+				if !isCommitted(l.txID) {
+					for i := range l.values {
+						u.deletions.Set(uint(firstRecid+uint32(i)), true)
+					}
+				}
 			case LogEntryInsertHidden:
 				// Hidden transactional inserts use the same RecID namespace. Without
 				// the persisted boundary they would tombstone committed main rows and
@@ -439,12 +464,14 @@ func (u *storageShard) load(t *table) {
 				for i := range l.values {
 					u.deletions.Set(uint(firstRecid+uint32(i)), true)
 				}
+			case LogEntryCommit:
+				// Already consumed while building the shard-local commit set.
 			default:
 				panic("unknown log sequence: " + fmt.Sprint(l))
 			}
 		}
-		if numEntriesRestored > 0 {
-			fmt.Println("restoring delta storage from database "+u.t.schema.Name+" shard "+u.uuid.String()+":", numEntriesRestored, "entries")
+		if entryCount > 0 {
+			fmt.Println("restoring delta storage from database "+u.t.schema.Name+" shard "+u.uuid.String()+":", entryCount, "entries")
 		}
 		// Reconstruct Auto_increment counter from replayed delta rows so that
 		// cross-connection INSERT sequences never re-use IDs after server restart.
@@ -1284,7 +1311,7 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 					currentTx.AddToUndeleteMask(t, newRecid)
 					// Only log the insert (delete applied at commit)
 					if (t.t.PersistencyMode == Safe || t.t.PersistencyMode == Logged) && t.logfile != nil {
-						t.logfile.Write(LogEntryInsertHidden{payloadCols, [][]scm.Scmer{payloadRow}})
+						t.logfile.Write(LogEntryInsertHidden{cols: payloadCols, values: [][]scm.Scmer{payloadRow}, txID: currentTx.durableID()})
 					}
 				} else {
 					// Cursor-stability / no-tx: existing behavior
@@ -1292,8 +1319,12 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 						t.rollbackProtected.Set(uint(targetIdx), true)
 					}
 					if (t.t.PersistencyMode == Safe || t.t.PersistencyMode == Logged) && t.logfile != nil {
-						t.logfile.Write(LogEntryDelete{targetIdx})
-						t.logfile.Write(LogEntryInsert{payloadCols, [][]scm.Scmer{payloadRow}})
+						txID := ""
+						if currentTx != nil {
+							txID = currentTx.durableID()
+						}
+						t.logfile.Write(LogEntryDelete{idx: targetIdx, txID: txID})
+						t.logfile.Write(LogEntryInsert{cols: payloadCols, values: [][]scm.Scmer{payloadRow}, txID: txID})
 					}
 				}
 				maintenanceNext = t.nextForMaintenanceLocked(&targetIdx)
@@ -1397,7 +1428,11 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 						t.rollbackProtected.Set(uint(idx), true)
 					}
 					if (t.t.PersistencyMode == Safe || t.t.PersistencyMode == Logged) && t.logfile != nil {
-						t.logfile.Write(LogEntryDelete{idx})
+						txID := ""
+						if currentTx != nil {
+							txID = currentTx.durableID()
+						}
+						t.logfile.Write(LogEntryDelete{idx: idx, txID: txID})
 					}
 					maintenanceNext = t.nextForMaintenanceLocked(&idx)
 					result = true
@@ -2528,10 +2563,14 @@ func (t *storageShard) insertPreparedLocked(columns []string, values [][]scm.Scm
 	if (t.t.PersistencyMode == Safe || t.t.PersistencyMode == Logged) && t.logfile != nil {
 		// Log the actual inserted rows (not the original columns/values) so that
 		// auto-incremented IDs and column defaults are preserved across restarts.
+		txID := ""
+		if currentTx != nil {
+			txID = currentTx.durableID()
+		}
 		if currentTx != nil && currentTx.Mode == TxACID {
-			t.logfile.Write(LogEntryInsertHidden{payloadCols, payloadVals})
+			t.logfile.Write(LogEntryInsertHidden{cols: payloadCols, values: payloadVals, txID: txID})
 		} else {
-			t.logfile.Write(LogEntryInsert{payloadCols, payloadVals})
+			t.logfile.Write(LogEntryInsert{cols: payloadCols, values: payloadVals, txID: txID})
 		}
 	}
 	if propagateMaintenance {
@@ -3455,7 +3494,7 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 			}
 			result.deletions.Set(uint(newRecid), true)
 			if result.logfile != nil {
-				result.logfile.Write(LogEntryDelete{newRecid})
+				result.logfile.Write(LogEntryDelete{idx: newRecid})
 			}
 		}
 

@@ -23,9 +23,11 @@ import "bufio"
 import "bytes"
 import "strings"
 import "errors"
+import "strconv"
 import "path/filepath"
 import "crypto/sha256"
 import "encoding/json"
+
 import "github.com/launix-de/memcp/scm"
 
 type FileStorage struct {
@@ -255,10 +257,15 @@ func (s *FileStorage) OpenLog(shard string) PersistenceLogfile {
 	return FileLogfile{f}
 }
 
-func (s *FileStorage) ReplayLog(shard string) (chan interface{}, PersistenceLogfile) {
+func (s *FileStorage) ReplayLog(shard string) (map[string]struct{}, chan interface{}, PersistenceLogfile) {
 	os.MkdirAll(s.path, 0750)
 	f, err := os.OpenFile(s.path+shard+".log", os.O_RDWR|os.O_CREATE, 0750)
 	if err != nil {
+		panic(err)
+	}
+	committed := fileCommittedTransactions(f)
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		_ = f.Close()
 		panic(err)
 	}
 	replay := make(chan interface{}, 64)
@@ -272,7 +279,13 @@ func (s *FileStorage) ReplayLog(shard string) (chan interface{}, PersistenceLogf
 				if len(b) == 0 && errors.Is(err, io.EOF) {
 					break
 				}
-				if len(b) > 0 && b[len(b)-1] == '\n' {
+				complete := len(b) > 0 && b[len(b)-1] == '\n'
+				if errors.Is(err, io.EOF) && !complete {
+					// A record without its delimiter may be a torn final write. It
+					// was never a complete WAL frame and must not affect recovery.
+					break
+				}
+				if complete {
 					b = b[:len(b)-1]
 				}
 				if len(b) > 0 && b[len(b)-1] == '\r' {
@@ -280,20 +293,44 @@ func (s *FileStorage) ReplayLog(shard string) (chan interface{}, PersistenceLogf
 				}
 				if len(b) == 0 && err == nil {
 					// nop
+				} else if len(b) >= 10 && string(b[0:10]) == "commit-tx " {
+					fields := strings.Fields(string(b[10:]))
+					if len(fields) != 2 || fields[0] == "" || fields[1] != fileCommitChecksum(fields[0]) {
+						panic("corrupt commit log: " + string(b))
+					}
+					replay <- LogEntryCommit{txID: fields[0]}
+				} else if len(b) >= 10 && string(b[0:10]) == "delete-tx " {
+					txID, idx := decodeFileDeleteTx(b[10:])
+					replay <- LogEntryDelete{idx: idx, txID: txID}
+				} else if len(b) >= 12 && string(b[0:12]) == "undelete-tx " {
+					txID, idx := decodeFileDeleteTx(b[12:])
+					replay <- LogEntryUndelete{idx: idx, txID: txID}
+				} else if len(b) >= 17 && string(b[0:17]) == "insert-hidden-tx " {
+					txID, payload := decodeFileTxPrefix(b[17:])
+					cols, values := decodeFileInsertLog(payload)
+					replay <- LogEntryInsertHidden{cols: cols, values: values, txID: txID}
+				} else if len(b) >= 10 && string(b[0:10]) == "insert-tx " {
+					txID, payload := decodeFileTxPrefix(b[10:])
+					cols, values := decodeFileInsertLog(payload)
+					replay <- LogEntryInsert{cols: cols, values: values, txID: txID}
 				} else if len(b) >= 7 && string(b[0:7]) == "delete " {
 					var idx uint32
-					json.Unmarshal(b[7:], &idx)
-					replay <- LogEntryDelete{idx}
+					if decodeErr := json.Unmarshal(b[7:], &idx); decodeErr != nil {
+						panic("corrupt delete log: " + string(b))
+					}
+					replay <- LogEntryDelete{idx: idx}
 				} else if len(b) >= 9 && string(b[0:9]) == "undelete " {
 					var idx uint32
-					json.Unmarshal(b[9:], &idx)
-					replay <- LogEntryUndelete{idx}
+					if decodeErr := json.Unmarshal(b[9:], &idx); decodeErr != nil {
+						panic("corrupt undelete log: " + string(b))
+					}
+					replay <- LogEntryUndelete{idx: idx}
 				} else if len(b) >= 14 && string(b[0:14]) == "insert-hidden " {
 					cols, values := decodeFileInsertLog(b[14:])
-					replay <- LogEntryInsertHidden{cols, values}
+					replay <- LogEntryInsertHidden{cols: cols, values: values}
 				} else if len(b) >= 7 && string(b[0:7]) == "insert " {
 					cols, values := decodeFileInsertLog(b[7:])
-					replay <- LogEntryInsert{cols, values}
+					replay <- LogEntryInsert{cols: cols, values: values}
 				} else {
 					panic("unknown log sequence: " + string(b))
 				}
@@ -308,7 +345,60 @@ func (s *FileStorage) ReplayLog(shard string) (chan interface{}, PersistenceLogf
 	} else {
 		close(replay)
 	}
-	return replay, FileLogfile{f}
+	return committed, replay, FileLogfile{f}
+}
+
+func fileCommittedTransactions(f *os.File) map[string]struct{} {
+	committed := make(map[string]struct{})
+	reader := bufio.NewReaderSize(f, 256*1024)
+	for {
+		line, err := reader.ReadBytes('\n')
+		if len(line) == 0 && errors.Is(err, io.EOF) {
+			break
+		}
+		if errors.Is(err, io.EOF) && (len(line) == 0 || line[len(line)-1] != '\n') {
+			break
+		}
+		line = bytes.TrimSuffix(line, []byte{'\n'})
+		line = bytes.TrimSuffix(line, []byte{'\r'})
+		if bytes.HasPrefix(line, []byte("commit-tx ")) {
+			fields := strings.Fields(string(line[len("commit-tx "):]))
+			if len(fields) != 2 || fields[0] == "" || fields[1] != fileCommitChecksum(fields[0]) {
+				panic("corrupt commit log: " + string(line))
+			}
+			committed[fields[0]] = struct{}{}
+		}
+		if err != nil {
+			panic(err)
+		}
+	}
+	return committed
+}
+
+func decodeFileTxPrefix(payload []byte) (string, []byte) {
+	separator := bytes.IndexByte(payload, ' ')
+	if separator <= 0 {
+		panic("corrupt transactional WAL entry: " + string(payload))
+	}
+	txID := string(payload[:separator])
+	if txID == "" {
+		panic("corrupt transactional WAL id: " + string(payload))
+	}
+	return txID, payload[separator+1:]
+}
+
+func fileCommitChecksum(txID string) string {
+	checksum := sha256.Sum256([]byte(txID))
+	return fmt.Sprintf("%x", checksum[:])
+}
+
+func decodeFileDeleteTx(payload []byte) (string, uint32) {
+	txID, recidPayload := decodeFileTxPrefix(payload)
+	idx, err := strconv.ParseUint(string(recidPayload), 10, 32)
+	if err != nil {
+		panic("corrupt transactional visibility log: " + string(payload))
+	}
+	return txID, uint32(idx)
 }
 
 func decodeFileInsertLog(b []byte) ([]string, [][]scm.Scmer) {
@@ -317,8 +407,12 @@ func decodeFileInsertLog(b []byte) ([]string, [][]scm.Scmer) {
 		// new format: columns ][ values
 		var cols []string
 		var values [][]scm.Scmer
-		json.Unmarshal([]byte(body[:pos+1]), &cols)
-		json.Unmarshal([]byte(body[pos+1:]), &values)
+		if err := json.Unmarshal([]byte(body[:pos+1]), &cols); err != nil {
+			panic("corrupt insert columns log: " + string(b))
+		}
+		if err := json.Unmarshal([]byte(body[pos+1:]), &values); err != nil {
+			panic("corrupt insert values log: " + string(b))
+		}
 		for i := 0; i < len(values); i++ {
 			for j := 0; j < len(values[i]); j++ {
 				values[i][j] = scm.TransformFromJSON(values[i][j])
@@ -355,6 +449,10 @@ type FileLogfile struct {
 func (w FileLogfile) Write(logentry interface{}) {
 	switch l := logentry.(type) {
 	case LogEntryDelete:
+		if l.txID != "" {
+			fmt.Fprintf(w.w, "delete-tx %s %d\n", l.txID, l.idx)
+			return
+		}
 		var b bytes.Buffer
 		b.WriteString("delete ")
 		tmp, _ := json.Marshal(l.idx)
@@ -362,6 +460,10 @@ func (w FileLogfile) Write(logentry interface{}) {
 		b.WriteString("\n")
 		w.w.Write(b.Bytes())
 	case LogEntryUndelete:
+		if l.txID != "" {
+			fmt.Fprintf(w.w, "undelete-tx %s %d\n", l.txID, l.idx)
+			return
+		}
 		var b bytes.Buffer
 		b.WriteString("undelete ")
 		tmp, _ := json.Marshal(l.idx)
@@ -369,15 +471,24 @@ func (w FileLogfile) Write(logentry interface{}) {
 		b.WriteString("\n")
 		w.w.Write(b.Bytes())
 	case LogEntryInsert:
-		w.writeInsert("insert ", l.cols, l.values)
+		w.writeInsert("insert ", l.txID, l.cols, l.values)
 	case LogEntryInsertHidden:
-		w.writeInsert("insert-hidden ", l.cols, l.values)
+		w.writeInsert("insert-hidden ", l.txID, l.cols, l.values)
+	case LogEntryCommit:
+		fmt.Fprintf(w.w, "commit-tx %s %s\n", l.txID, fileCommitChecksum(l.txID))
 	}
 }
 
-func (w FileLogfile) writeInsert(prefix string, cols []string, values [][]scm.Scmer) {
+func (w FileLogfile) writeInsert(prefix string, txID string, cols []string, values [][]scm.Scmer) {
 	var b bytes.Buffer
-	b.WriteString(prefix)
+	if txID == "" {
+		b.WriteString(prefix)
+	} else {
+		b.WriteString(strings.TrimSuffix(prefix, " "))
+		b.WriteString("-tx ")
+		b.WriteString(txID)
+		b.WriteByte(' ')
+	}
 	tmp, _ := json.Marshal(cols)
 	b.Write(tmp)
 	tmp, _ = json.Marshal(values)

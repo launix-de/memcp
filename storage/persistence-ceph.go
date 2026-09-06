@@ -342,33 +342,26 @@ func (s *CephStorage) OpenLog(shard string) PersistenceLogfile {
 	return lf
 }
 
-func (s *CephStorage) ReplayLog(shard string) (chan interface{}, PersistenceLogfile) {
+func (s *CephStorage) ReplayLog(shard string) (map[string]struct{}, chan interface{}, PersistenceLogfile) {
 	s.ensureOpen()
 
 	out := make(chan interface{}, 64)
+	committed := make(map[string]struct{})
+	segments, err := listLogSegments(s, shard)
+	if err == nil {
+		hybridsort.Slice(segments, func(i, j int) bool { return segments[i].seg < segments[j].seg })
+		for _, seg := range segments {
+			data := s.readLogSegment(seg)
+			collectLogStreamCommits(data, committed)
+		}
+	} else {
+		segments = nil
+	}
 
-	// Replay existing segments synchronously; caller consumes channel.
 	go func() {
 		defer close(out)
-		segments, err := listLogSegments(s, shard)
-		if err != nil {
-			// no logs yet -> nothing to replay
-			return
-		}
-		hybridsort.Slice(segments, func(i, j int) bool { return segments[i].seg < segments[j].seg })
-
 		for _, seg := range segments {
-			stat, err := s.ioctx.Stat(seg.obj)
-			if err != nil || stat.Size == 0 {
-				continue
-			}
-			data := make([]byte, stat.Size)
-			n, err := s.ioctx.Read(seg.obj, data, 0)
-			if err != nil || n == 0 {
-				continue
-			}
-			// decode framed records
-			decodeLogStream(data[:n], out)
+			decodeLogStream(s.readLogSegment(seg), out)
 		}
 	}()
 
@@ -377,7 +370,20 @@ func (s *CephStorage) ReplayLog(shard string) (chan interface{}, PersistenceLogf
 	if err != nil {
 		panic(err)
 	}
-	return out, lf
+	return committed, out, lf
+}
+
+func (s *CephStorage) readLogSegment(seg logSegInfo) []byte {
+	stat, err := s.ioctx.Stat(seg.obj)
+	if err != nil || stat.Size == 0 {
+		return nil
+	}
+	data := make([]byte, stat.Size)
+	n, err := s.ioctx.Read(seg.obj, data, 0)
+	if err != nil || n == 0 {
+		return nil
+	}
+	return data[:n]
 }
 
 func (s *CephStorage) RemoveLog(shard string) {
@@ -492,29 +498,38 @@ func openOrCreateCephLogfile(s *CephStorage, shard string) (*CephLogfile, error)
 // - replace JSON with a binary codec (varint + column-id encoding + typed values).
 
 type encDelete struct {
-	T   string `json:"t"`
-	Idx uint32 `json:"idx"`
+	T    string `json:"t"`
+	Idx  uint32 `json:"idx"`
+	TxID string `json:"txid,omitempty"`
 }
 type encInsert struct {
 	T      string        `json:"t"`
 	Cols   []string      `json:"cols"`
 	Values [][]scm.Scmer `json:"values"`
+	TxID   string        `json:"txid,omitempty"`
+}
+type encCommit struct {
+	T    string `json:"t"`
+	TxID string `json:"txid"`
 }
 
 func encodeLogEntry(e interface{}) []byte {
 	var payload []byte
 	switch l := e.(type) {
 	case LogEntryDelete:
-		tmp, _ := json.Marshal(encDelete{T: "delete", Idx: l.idx})
+		tmp, _ := json.Marshal(encDelete{T: "delete", Idx: l.idx, TxID: l.txID})
 		payload = tmp
 	case LogEntryUndelete:
-		tmp, _ := json.Marshal(encDelete{T: "undelete", Idx: l.idx})
+		tmp, _ := json.Marshal(encDelete{T: "undelete", Idx: l.idx, TxID: l.txID})
 		payload = tmp
 	case LogEntryInsert:
-		tmp, _ := json.Marshal(encInsert{T: "insert", Cols: l.cols, Values: l.values})
+		tmp, _ := json.Marshal(encInsert{T: "insert", Cols: l.cols, Values: l.values, TxID: l.txID})
 		payload = tmp
 	case LogEntryInsertHidden:
-		tmp, _ := json.Marshal(encInsert{T: "insert_hidden", Cols: l.cols, Values: l.values})
+		tmp, _ := json.Marshal(encInsert{T: "insert_hidden", Cols: l.cols, Values: l.values, TxID: l.txID})
+		payload = tmp
+	case LogEntryCommit:
+		tmp, _ := json.Marshal(encCommit{T: "commit", TxID: l.txID})
 		payload = tmp
 	default:
 		// ignore unknown
@@ -549,15 +564,20 @@ func decodeLogStream(data []byte, out chan interface{}) {
 			continue
 		}
 		switch head.T {
+		case "commit":
+			var commit encCommit
+			if json.Unmarshal(payload, &commit) == nil && commit.TxID != "" {
+				out <- LogEntryCommit{txID: commit.TxID}
+			}
 		case "delete":
 			var d encDelete
 			if json.Unmarshal(payload, &d) == nil {
-				out <- LogEntryDelete{idx: uint32(d.Idx)}
+				out <- LogEntryDelete{idx: uint32(d.Idx), txID: d.TxID}
 			}
 		case "undelete":
 			var d encDelete
 			if json.Unmarshal(payload, &d) == nil {
-				out <- LogEntryUndelete{idx: uint32(d.Idx)}
+				out <- LogEntryUndelete{idx: uint32(d.Idx), txID: d.TxID}
 			}
 		case "insert", "insert_hidden":
 			var ins encInsert
@@ -569,11 +589,27 @@ func decodeLogStream(data []byte, out chan interface{}) {
 					}
 				}
 				if head.T == "insert_hidden" {
-					out <- LogEntryInsertHidden{cols: ins.Cols, values: ins.Values}
+					out <- LogEntryInsertHidden{cols: ins.Cols, values: ins.Values, txID: ins.TxID}
 				} else {
-					out <- LogEntryInsert{cols: ins.Cols, values: ins.Values}
+					out <- LogEntryInsert{cols: ins.Cols, values: ins.Values, txID: ins.TxID}
 				}
 			}
+		}
+	}
+}
+
+func collectLogStreamCommits(data []byte, committed map[string]struct{}) {
+	for i := 0; i+4 <= len(data); {
+		n := int(binary.LittleEndian.Uint32(data[i : i+4]))
+		i += 4
+		if n <= 0 || i+n > len(data) {
+			return
+		}
+		payload := data[i : i+n]
+		i += n
+		var commit encCommit
+		if json.Unmarshal(payload, &commit) == nil && commit.T == "commit" && commit.TxID != "" {
+			committed[commit.TxID] = struct{}{}
 		}
 	}
 }

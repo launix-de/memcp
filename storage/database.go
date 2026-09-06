@@ -62,6 +62,13 @@ type database struct {
 	// a read capability; cleanup takes the exclusive capability. Query and DML
 	// paths do not participate.
 	persistenceLifecycle sync.RWMutex `json:"-"`
+	// transactionLog is the database-wide commit authority for transactional
+	// shard WAL entries. Shard logs may contain prepared records after a crash;
+	// recovery exposes them only when this log contains their durable commit.
+	transactionOnce sync.Once           `json:"-"`
+	transactionMu   sync.RWMutex        `json:"-"`
+	transactionLog  PersistenceLogfile  `json:"-"`
+	committedTx     map[string]struct{} `json:"-"`
 
 	// lazy-loading/shared-resource state (not serialized)
 	srState SharedState `json:"-"`
@@ -86,7 +93,64 @@ func (db *database) blobRefState() *blobRefState {
 }
 
 func newDatabase() *database {
-	return &database{blobRefs: new(blobRefState)}
+	return &database{blobRefs: new(blobRefState), committedTx: make(map[string]struct{})}
+}
+
+const transactionLogName = ".transactions"
+
+func (db *database) initializeTransactionLog() {
+	db.transactionOnce.Do(func() {
+		committed := make(map[string]struct{})
+		_, entries, logfile := db.persistence.ReplayLog(transactionLogName)
+		for entry := range entries {
+			commit, ok := entry.(LogEntryCommit)
+			if !ok || commit.txID == "" {
+				panic("invalid entry in transaction commit log")
+			}
+			committed[commit.txID] = struct{}{}
+		}
+		db.transactionMu.Lock()
+		db.committedTx = committed
+		db.transactionLog = logfile
+		db.transactionMu.Unlock()
+	})
+}
+
+func (db *database) transactionCommitted(txID string) bool {
+	if txID == "" {
+		return true
+	}
+	db.initializeTransactionLog()
+	db.transactionMu.RLock()
+	_, committed := db.committedTx[txID]
+	db.transactionMu.RUnlock()
+	return committed
+}
+
+func (db *database) commitTransaction(txID string, durable bool) {
+	if txID == "" {
+		return
+	}
+	db.initializeTransactionLog()
+	db.transactionMu.Lock()
+	defer db.transactionMu.Unlock()
+	if _, exists := db.committedTx[txID]; exists {
+		return
+	}
+	db.transactionLog.Write(LogEntryCommit{txID: txID})
+	if durable {
+		db.transactionLog.Sync()
+	}
+	db.committedTx[txID] = struct{}{}
+}
+
+func (db *database) closeTransactionLog() {
+	db.transactionMu.Lock()
+	defer db.transactionMu.Unlock()
+	if db.transactionLog != nil {
+		db.transactionLog.Close()
+		db.transactionLog = nil
+	}
 }
 
 type rebuildDatabaseResult struct {
@@ -289,6 +353,9 @@ func rebuildDatabases(all bool, repartition bool, includeEphemeral bool) string 
 
 func UnloadDatabases() {
 	fmt.Println("table compression done in ", rebuildDatabases(false, false, true))
+	for _, db := range databases.GetAll() {
+		db.closeTransactionLog()
+	}
 	data, _ := json.Marshal(Settings)
 	if settings, err := os.OpenFile(Basepath+"/settings.json", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0640); err == nil {
 		defer settings.Close()
@@ -489,6 +556,7 @@ func (db *database) saveLockedAndUnlock(mode schemaSaveMode) {
 // ensureLoaded loads schema.json into the database struct exactly once.
 func (db *database) ensureLoaded() {
 	db.loadOnce.Do(func() {
+		db.initializeTransactionLog()
 		if db.srState != COLD {
 			return
 		}
@@ -1223,6 +1291,7 @@ func DropDatabase(schema string, ifexists bool) bool {
 	}
 
 	// remove remains of the folder structure
+	db.closeTransactionLog()
 	db.persistence.Remove()
 	// also remove backend config file if it exists
 	os.Remove(Basepath + "/" + schema + ".json")
