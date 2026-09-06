@@ -459,7 +459,11 @@ func (emitter *jitParserEmitter) emitRuleRef(node *jitParserNode, success, failu
 	// memo/left-recursion-head check can only ever report a miss here, so its
 	// full call, 3-word return, and cache-hit branch are dead work; jump
 	// straight to jitParserPushRuleFrame and the rule body instead.
-	if emitter.program.rules[node.rule].lexicalParent >= 0 || emitter.noMemoDepth > 0 {
+	// memoRuleIndex < 0 also covers a non-lexical rule that analyzeMemoNeed
+	// proved is entered at most once per position: it never has a stored entry
+	// to hit and never writes one, so the check is pure overhead.
+	if emitter.program.rules[node.rule].lexicalParent >= 0 || emitter.noMemoDepth > 0 ||
+		emitter.program.memoRuleIndex[node.rule] < 0 {
 		emitter.emitLexicalRuleRef(node, success, failure)
 		return
 	}
