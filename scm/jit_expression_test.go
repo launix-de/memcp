@@ -1151,12 +1151,15 @@ func TestJITExpressionMergeInsideReducePreservesLoopHomes(t *testing.T) {
 	// easier case where merge owns the complete register bank.
 	compiled := compileJITExpressionTestProc(t, `(lambda (groups)
 		(reduce groups (lambda (acc group) (merge (list acc group))) '()))`)
-	groups := NewSlice([]Scmer{
-		NewSlice([]Scmer{NewInt(1), NewInt(2)}),
-		NewSlice([]Scmer{NewInt(3)}),
-		NewSlice([]Scmer{NewInt(4), NewInt(5)}),
-	})
-	want := NewSlice([]Scmer{NewInt(1), NewInt(2), NewInt(3), NewInt(4), NewInt(5)})
+	groupItems := make([]Scmer, 128)
+	wantItems := make([]Scmer, 0, 256)
+	for i := range groupItems {
+		left, right := NewInt(int64(2*i)), NewInt(int64(2*i+1))
+		groupItems[i] = NewSlice([]Scmer{left, right})
+		wantItems = append(wantItems, left, right)
+	}
+	groups := NewSlice(groupItems)
+	want := NewSlice(wantItems)
 	if got := Apply(compiled, groups); !Equal(got, want) {
 		t.Fatalf("nested merge returned %s, want %s", String(got), String(want))
 	}
