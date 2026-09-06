@@ -37,6 +37,36 @@ func TestKleeneParserWithoutMemoization(t *testing.T) {
 	}
 }
 
+// The interpreter path must honour the accumulation form of * / + (go-packrat
+// Init/Step/Finish), matching the JIT's emitRepeatAccumulate.
+func TestInterpreterAccumulateRepeat(t *testing.T) {
+	acc := Eval(Read("acc parser", `(parser '(
+		(define v (+ (regex "[a-z]+" false false) "," nil
+			(lambda () (list (quote head)))
+			(lambda (a x) (append_mut a x))
+			(lambda (a) a)))
+		$
+	) v "")`), &Globalenv).Parser()
+	if got := acc.Execute("a,b,c", &Globalenv); String(got) != "(head a b c)" {
+		t.Fatalf("accumulate = %s, want (head a b c)", String(got))
+	}
+
+	// AND-cascade shape: finish unwraps a lone operand, two or more become (op …).
+	cascade := Eval(Read("cascade parser", `(parser '(
+		(define b (+ (regex "[a-z]+" false false) (atom "+" false) nil
+			(lambda () (list))
+			(lambda (a x) (append_mut a x))
+			(lambda (a) (if (equal? (count a) 1) (nth a 0) (cons (quote andop) a)))))
+		$
+	) b "")`), &Globalenv).Parser()
+	if got := cascade.Execute("p+q+r", &Globalenv); String(got) != "(andop p q r)" {
+		t.Fatalf("cascade multi = %s, want (andop p q r)", String(got))
+	}
+	if got := cascade.Execute("p", &Globalenv); String(got) != "p" {
+		t.Fatalf("cascade single = %s, want p", String(got))
+	}
+}
+
 func TestSharedParserConcurrentCaptures(t *testing.T) {
 	parserValue := Eval(Read("concurrent parser", `(parser '(
 		(define value (or
