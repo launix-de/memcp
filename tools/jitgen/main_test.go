@@ -104,6 +104,212 @@ func add(a ...Scmer) Scmer { return NewInt(a[0].Int() + a[1].Int()) }
 	}
 }
 
+func TestLoopPhiRegisterPlanColorsInterferenceGraph(t *testing.T) {
+	fn := buildTestSSAFunction(t, `package sample
+func rolling(limit uint64) uint64 {
+	var sum uint64
+	for index := uint64(0); index < limit; index++ {
+		sum += index
+	}
+	return sum
+}
+`, "rolling")
+	plan := planLoopPhiRegisters(fn)
+	if len(plan.colorByValue) != 2 {
+		t.Fatalf("loop register candidates = %v, want index and sum phis", plan.colorByValue)
+	}
+	if plan.colorCount != 2 {
+		t.Fatalf("loop register colors = %d, want 2", plan.colorCount)
+	}
+	seen := map[int]bool{}
+	for _, color := range plan.colorByValue {
+		seen[color] = true
+	}
+	if !seen[0] || !seen[1] {
+		t.Fatalf("interfering loop phis share a color: %v", plan.colorByValue)
+	}
+}
+
+func TestGeneratedBuiltinLoopUsesArchitectureRegisterHomes(t *testing.T) {
+	fn := buildTestSSAFunction(t, `package sample
+type Scmer struct{}
+func NewInt(int64) Scmer
+func (Scmer) Int() int64
+func rolling(a ...Scmer) Scmer {
+	limit := a[0].Int()
+	var sum int64
+	for index := int64(0); index < limit; index++ {
+		sum += index
+	}
+	return NewInt(sum)
+}
+`, "rolling")
+	code, errMsg := generateClosure("rolling", fn, nil)
+	if errMsg != "" {
+		t.Fatal(errMsg)
+	}
+	if !strings.Contains(code, "ctx.AllocRegisterHomes(") {
+		t.Fatalf("ordinary generated builtin does not request planned register homes:\n%s", code)
+	}
+}
+
+func TestLoopPhiRegisterPlanLeavesScmerWordsForSplitPlanner(t *testing.T) {
+	fn := buildTestSSAFunction(t, `package sample
+type Scmer struct { ptr, aux uint64 }
+func last(values []Scmer) Scmer {
+	var result Scmer
+	for _, value := range values {
+		result = value
+	}
+	return result
+}
+`, "last")
+	plan := planLoopPhiRegisters(fn)
+	for name, width := range plan.widthByValue {
+		if width == 2 {
+			t.Fatalf("Scmer %s was incorrectly planned as an indivisible pair: %#v", name, plan)
+		}
+	}
+	if len(plan.colorByValue) == 0 {
+		t.Fatalf("scalar loop cursor was not planned: %#v", plan)
+	}
+}
+
+func TestLoopPhiRegisterPlanLeavesStringWordsForSplitPlanner(t *testing.T) {
+	fn := buildTestSSAFunction(t, `package sample
+func lastTwice(left, right []string) int {
+	var leftResult string
+	for _, value := range left { leftResult = value }
+	leftLength := len(leftResult)
+	var rightResult string
+	for _, value := range right { rightResult = value }
+	return leftLength + len(rightResult)
+}
+`, "lastTwice")
+	plan := planLoopPhiRegisters(fn)
+	for name, width := range plan.widthByValue {
+		if width == 2 {
+			t.Fatalf("string %s was incorrectly planned as an indivisible pair: %#v", name, plan)
+		}
+	}
+	if len(plan.colorByValue) == 0 {
+		t.Fatalf("scalar loop cursors were not planned: %#v", plan)
+	}
+}
+
+func TestLoopPhiRegisterPlanWeightsNestedLoopTraffic(t *testing.T) {
+	fn := buildTestSSAFunction(t, `package sample
+func nested(rows, columns int) int {
+	outer := 0
+	inner := 0
+	for row := 0; row < rows; row++ {
+		outer += row
+		for column := 0; column < columns; column++ { inner += column }
+	}
+	return outer + inner
+}
+`, "nested")
+	plan := planLoopPhiRegisters(fn)
+	if len(plan.slots) < 2 {
+		t.Fatalf("nested loop plan = %#v, want multiple weighted slots", plan)
+	}
+	if plan.slots[0].weight <= plan.slots[len(plan.slots)-1].weight {
+		t.Fatalf("nested traffic did not affect slot priority: %#v", plan.slots)
+	}
+}
+
+func TestLoopPhiRegisterPlanKeepsBranchUpdatedCursor(t *testing.T) {
+	fn := buildTestSSAFunction(t, `package sample
+func rolling(limit int) int {
+	cursor := 0
+	for index := 0; index < limit; index++ {
+		if index&1 == 0 { cursor++ } else { cursor += 2 }
+	}
+	return cursor
+}
+`, "rolling")
+	foundCrossBlockPhi := false
+	for _, block := range fn.Blocks {
+		for _, instruction := range block.Instrs {
+			phi, ok := instruction.(*ssa.Phi)
+			if !ok {
+				break
+			}
+			for _, edge := range phi.Edges {
+				source, isPhi := edge.(*ssa.Phi)
+				if !isPhi || source.Block() == phi.Block() {
+					continue
+				}
+				foundCrossBlockPhi = true
+				plan := planLoopPhiRegisters(fn)
+				if _, planned := plan.colorByValue[phi.Name()]; !planned {
+					t.Fatalf("branch-updated cursor phi %s was left on the stack: %#v", phi.Name(), plan)
+				}
+			}
+		}
+	}
+	if !foundCrossBlockPhi {
+		t.Fatal("test SSA did not contain the expected cross-block phi chain")
+	}
+}
+
+func TestStoragePrefixIncludesRegisterPlanTypes(t *testing.T) {
+	input := "plan := JITRegisterPlan{Slots: [16]JITRegisterSlot{}}\nvalue := JITValueDesc{Reg: r}\n"
+	want := "plan := scm.JITRegisterPlan{Slots: [16]scm.JITRegisterSlot{}}\nvalue := scm.JITValueDesc{Reg: r}\n"
+	if got := addScmPrefix(input); got != want {
+		t.Fatalf("storage register plan qualification:\n got: %q\nwant: %q", got, want)
+	}
+	if got := (&codeGen{storageMode: true}).regTypeName(); got != "scm.Reg" {
+		t.Fatalf("storage register type = %q, want scm.Reg", got)
+	}
+}
+
+func TestRegisterColoringIsExactForSmallComponent(t *testing.T) {
+	nodes := make([]registerPlanNode, 4)
+	for index := range nodes {
+		nodes[index].neighbors = map[int]struct{}{}
+	}
+	for _, edge := range [][2]int{{0, 1}, {1, 2}, {2, 3}, {3, 0}} {
+		nodes[edge[0]].neighbors[edge[1]] = struct{}{}
+		nodes[edge[1]].neighbors[edge[0]] = struct{}{}
+	}
+	colors, count := colorRegisterPlan(nodes)
+	if count != 2 {
+		t.Fatalf("four-cycle used %d colors: %v", count, colors)
+	}
+	for node := range nodes {
+		for neighbor := range nodes[node].neighbors {
+			if colors[node] == colors[neighbor] {
+				t.Fatalf("adjacent nodes %d and %d share color %d", node, neighbor, colors[node])
+			}
+		}
+	}
+}
+
+func TestRegisterColoringSplitsLargeIndependentGraph(t *testing.T) {
+	// The allocator must not abandon a function merely because the complete SSA
+	// graph is large. Independent regions reuse colors and are solved separately.
+	nodes := make([]registerPlanNode, 96)
+	for index := range nodes {
+		nodes[index].neighbors = map[int]struct{}{}
+	}
+	for start := 0; start < len(nodes); start += 3 {
+		for left := start; left < start+3; left++ {
+			for right := left + 1; right < start+3; right++ {
+				nodes[left].neighbors[right] = struct{}{}
+				nodes[right].neighbors[left] = struct{}{}
+			}
+		}
+	}
+	colors, count := colorRegisterPlan(nodes)
+	if count != 3 {
+		t.Fatalf("independent triangles used %d colors, want 3", count)
+	}
+	if len(colors) != len(nodes) {
+		t.Fatalf("colored %d nodes, want %d", len(colors), len(nodes))
+	}
+}
+
 func TestCollectOperatorsUsesRootFunctionTypeDescriptor(t *testing.T) {
 	const source = `package sample
 func init() {

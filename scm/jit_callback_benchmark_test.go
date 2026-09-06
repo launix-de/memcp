@@ -149,3 +149,46 @@ func BenchmarkJITRuntimeReduceCallback(b *testing.B) {
 		})
 	}
 }
+
+// BenchmarkJITLoopBuiltins keeps each generated loop operator visible instead
+// of allowing the optimizer to replace it with a composed operator. The mutable
+// cases use idempotent callbacks so the same owned backing slice can be reused
+// across benchmark iterations without changing the workload.
+func BenchmarkJITLoopBuiltins(b *testing.B) {
+	if !jitEnabled {
+		b.Skip("requires GOEXPERIMENT=jit")
+	}
+	valuesSlice := make([]Scmer, 128)
+	for index := range valuesSlice {
+		valuesSlice[index] = NewInt(int64(index))
+	}
+	values := NewSlice(valuesSlice)
+	forCondition := jitCompile(Eval(Read(b.Name(), `(lambda (value) (< value 128))`), &Globalenv))
+	forStep := jitCompile(Eval(Read(b.Name(), `(lambda (value) (list (+ value 1)))`), &Globalenv))
+	cases := []struct {
+		name   string
+		source string
+		args   []Scmer
+	}{
+		{"for", `(lambda (init condition step) (for init condition step))`, []Scmer{NewSlice([]Scmer{NewInt(0)}), forCondition, forStep}},
+		{"map", `(lambda (values) (map values (lambda (value) (+ value 1))))`, []Scmer{values}},
+		{"map_mut", `(lambda (values) (map_mut values (lambda (value) value)))`, []Scmer{values}},
+		{"reduce", `(lambda (values) (reduce values (lambda (acc value) (+ acc value)) 0))`, []Scmer{values}},
+		{"filter", `(lambda (values) (filter values (lambda (value) (> value -1))))`, []Scmer{values}},
+		{"filter_mut", `(lambda (values) (filter_mut values (lambda (value) true)))`, []Scmer{values}},
+	}
+	for _, benchmark := range cases {
+		b.Run(benchmark.name, func(b *testing.B) {
+			proc := Eval(Read(b.Name(), benchmark.source), &Globalenv)
+			compiled := jitCompile(proc)
+			if compiled.GetTag() != tagProc || compiled.Proc().Compiled == nil {
+				b.Fatal("loop benchmark did not compile")
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for index := 0; index < b.N; index++ {
+				jitListBenchmarkSink = Apply(compiled, benchmark.args...)
+			}
+		})
+	}
+}

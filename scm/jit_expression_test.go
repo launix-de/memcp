@@ -601,6 +601,26 @@ func requireNoDynamicJITCalls(t *testing.T, compiled Scmer) {
 	}
 }
 
+func TestJITGlobalCallableLookupPreservesBranchResult(t *testing.T) {
+	compiled := compileJITExpressionTestProc(t, `(lambda (add)
+		(if add + -))`)
+
+	tests := []struct {
+		add  bool
+		want int
+	}{
+		{add: true, want: 10},
+		{add: false, want: 4},
+	}
+	for _, test := range tests {
+		callable := Apply(compiled, NewBool(test.add))
+		got := Apply(callable, NewInt(7), NewInt(3))
+		if ToInt(got) != test.want {
+			t.Fatalf("global callable for add=%v returned %s, want %d", test.add, String(got), test.want)
+		}
+	}
+}
+
 func TestJITDynamicNativeFuncPreservesClosureContextAcrossGC(t *testing.T) {
 	compiled := compileJITExpressionTestProc(t, `(lambda (callback value) (callback value))`)
 	captured := NewString("captured native closure context")
@@ -1141,6 +1161,27 @@ func TestJITExpressionTransferredMergeStackList(t *testing.T) {
 	want := NewSlice([]Scmer{NewString("generated"), NewString("source"), NewString("tail")})
 	if !Equal(got, want) {
 		t.Fatalf("unexpected transferred merge result: got %s, want %s", String(got), String(want))
+	}
+}
+
+func TestJITExpressionMergeInsideReducePreservesLoopHomes(t *testing.T) {
+	// reduce keeps its accumulator and cursor live while its known callback is
+	// emitted. merge has two independently planned loop cursors of its own. This
+	// composition exercises nested register-home allocation rather than the much
+	// easier case where merge owns the complete register bank.
+	compiled := compileJITExpressionTestProc(t, `(lambda (groups)
+		(reduce groups (lambda (acc group) (merge (list acc group))) '()))`)
+	groupItems := make([]Scmer, 128)
+	wantItems := make([]Scmer, 0, 256)
+	for i := range groupItems {
+		left, right := NewInt(int64(2*i)), NewInt(int64(2*i+1))
+		groupItems[i] = NewSlice([]Scmer{left, right})
+		wantItems = append(wantItems, left, right)
+	}
+	groups := NewSlice(groupItems)
+	want := NewSlice(wantItems)
+	if got := Apply(compiled, groups); !Equal(got, want) {
+		t.Fatalf("nested merge returned %s, want %s", String(got), String(want))
 	}
 }
 

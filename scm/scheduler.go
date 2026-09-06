@@ -302,6 +302,9 @@ func init_scheduler() {
 				_ = d18
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				var bbs [3]BBDescriptor
+				for i := range args {
+					ctx.StabilizeDescForControlFlow(&args[i])
+				}
 				if result.Loc == LocAny {
 					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 					ctx.BindReg(result.Reg, &result)
@@ -567,9 +570,6 @@ func init_scheduler() {
 					result.Type = tagBool
 					ctx.EmitJmp(lbl0)
 					return result
-				}
-				for i := range args {
-					ctx.StabilizeDescForControlFlow(&args[i])
 				}
 				ps19 := PhiState{General: false}
 				_ = bbs[0].RenderPS(ps19)
