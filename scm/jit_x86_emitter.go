@@ -29,6 +29,18 @@ import (
 
 var jitCodeOverflowPanic = &struct{}{}
 
+// jitX86RegisterBank maps architecture-independent register colors to amd64.
+// Registers with fixed roles in shifts, division and the Go ABI are deliberately
+// last so persistent loop values do not force avoidable shuffles.
+var jitX86RegisterBank = JITRegisterBank{
+	Registers: [16]Reg{
+		RegR13, RegR15, RegR10, RegR9, RegR8, RegRDI, RegRSI,
+		RegRCX, RegRDX, RegRAX, RegRBX,
+	},
+	Count:            11,
+	TemporaryReserve: 9,
+}
+
 func jitCapturedEnv(en *Env) *JITEnv {
 	if en == nil || en == &Globalenv {
 		return nil
@@ -131,6 +143,7 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 		End:              unsafe.Add(buf.ptr, buf.n),
 		FreeRegs:         freeRegs,
 		AllRegs:          freeRegs,
+		RegisterBank:     jitX86RegisterBank,
 		SliceBase:        RegR12,
 		StackReg:         RegRSP,
 		FrameReg:         RegRBP,

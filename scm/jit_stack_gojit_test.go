@@ -279,3 +279,27 @@ func TestJITArenaParentWaitsForInterleavedDeferredStackMaps(t *testing.T) {
 		t.Fatal("interleaved stack maps were not published as one reachable prefix")
 	}
 }
+
+func TestJITRegisterHomesFollowArchitectureBank(t *testing.T) {
+	all := uint64(1<<uint(RegR13) | 1<<uint(RegR15) | 1<<uint(RegRCX))
+	ctx := &JITContext{
+		AllRegs:  all,
+		FreeRegs: all,
+		RegisterBank: JITRegisterBank{
+			Registers:        [16]Reg{RegR13, RegR15, RegRCX},
+			Count:            3,
+			TemporaryReserve: 1,
+		},
+	}
+	homes := ctx.AllocRegisterHomes(3)
+	if homes.Count != 2 || homes.Registers[0] != RegR13 || homes.Registers[1] != RegR15 {
+		t.Fatalf("homes = %#v, want the first two backend registers", homes)
+	}
+	if ctx.FreeRegs&(1<<uint(RegRCX)) == 0 {
+		t.Fatal("allocator consumed the backend's temporary reserve")
+	}
+	ctx.ReleaseRegisterHomes(homes)
+	if ctx.FreeRegs != all || ctx.ProtectedRegs != 0 {
+		t.Fatalf("released state free=%#x protected=%#x, want free=%#x protected=0", ctx.FreeRegs, ctx.ProtectedRegs, all)
+	}
+}

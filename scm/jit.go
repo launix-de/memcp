@@ -631,6 +631,9 @@ type JITContext struct {
 	FreeRegs  uint64
 	AllRegs   uint64 // original set of all allocatable registers (for spilling)
 	SliceBase Reg    // register holding the args slice pointer (for variable-index access)
+	// RegisterBank is supplied by the architecture backend. Generated register
+	// plans contain abstract colors and never name a physical register.
+	RegisterBank JITRegisterBank
 	// Architecture register roles let common lowering describe placement without
 	// depending on one instruction set's register names.
 	StackReg     Reg
@@ -717,6 +720,69 @@ type JITContext struct {
 	EntryRoots []*JITEntryPoint
 	entrySet   map[*JITEntryPoint]struct{}
 	Arena      *jitArena // owning arena for source map entries
+}
+
+// JITRegisterBank describes the long-lived general-purpose registers offered
+// by an architecture backend. Registers are ordered by suitability for values
+// crossing control-flow edges; constrained ABI registers therefore come last.
+type JITRegisterBank struct {
+	Registers        [16]Reg
+	Count            uint8
+	TemporaryReserve uint8
+}
+
+// JITRegisterHomes maps architecture-independent colors to physical registers.
+// Its fixed-size representation keeps JIT emission allocation-free.
+type JITRegisterHomes struct {
+	Registers [16]Reg
+	Count     uint8
+}
+
+// AllocRegisterHomes retains the most valuable planned colors while preserving
+// the backend's temporary-register budget. Excess colors keep their stack home.
+func (ctx *JITContext) AllocRegisterHomes(requested int) JITRegisterHomes {
+	var homes JITRegisterHomes
+	if requested <= 0 {
+		return homes
+	}
+	available := 0
+	for index := uint8(0); index < ctx.RegisterBank.Count; index++ {
+		reg := ctx.RegisterBank.Registers[index]
+		bit := uint64(1) << uint(reg)
+		if ctx.AllRegs&bit != 0 && ctx.FreeRegs&bit != 0 && ctx.ProtectedRegs&bit == 0 {
+			available++
+		}
+	}
+	available -= int(ctx.RegisterBank.TemporaryReserve)
+	if available <= 0 {
+		return homes
+	}
+	if requested > available {
+		requested = available
+	}
+	if requested > len(homes.Registers) {
+		requested = len(homes.Registers)
+	}
+	for index := uint8(0); index < ctx.RegisterBank.Count && int(homes.Count) < requested; index++ {
+		reg := ctx.RegisterBank.Registers[index]
+		bit := uint64(1) << uint(reg)
+		if ctx.AllRegs&bit == 0 || ctx.FreeRegs&bit == 0 || ctx.ProtectedRegs&bit != 0 {
+			continue
+		}
+		ctx.FreeRegs &^= bit
+		ctx.ProtectReg(reg)
+		homes.Registers[homes.Count] = reg
+		homes.Count++
+	}
+	return homes
+}
+
+func (ctx *JITContext) ReleaseRegisterHomes(homes JITRegisterHomes) {
+	for index := int(homes.Count) - 1; index >= 0; index-- {
+		reg := homes.Registers[index]
+		ctx.UnprotectReg(reg)
+		ctx.FreeReg(reg)
+	}
 }
 
 func (ctx *JITContext) RequestPreallocatedSlice(lengthInput int) JITValueDesc {

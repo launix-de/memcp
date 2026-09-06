@@ -104,6 +104,78 @@ func add(a ...Scmer) Scmer { return NewInt(a[0].Int() + a[1].Int()) }
 	}
 }
 
+func TestLoopPhiRegisterPlanColorsInterferenceGraph(t *testing.T) {
+	fn := buildTestSSAFunction(t, `package sample
+func rolling(limit uint64) uint64 {
+	var sum uint64
+	for index := uint64(0); index < limit; index++ {
+		sum += index
+	}
+	return sum
+}
+`, "rolling")
+	plan := planLoopPhiRegisters(fn)
+	if len(plan.colorByValue) != 2 {
+		t.Fatalf("loop register candidates = %v, want index and sum phis", plan.colorByValue)
+	}
+	if plan.colorCount != 2 {
+		t.Fatalf("loop register colors = %d, want 2", plan.colorCount)
+	}
+	seen := map[int]bool{}
+	for _, color := range plan.colorByValue {
+		seen[color] = true
+	}
+	if !seen[0] || !seen[1] {
+		t.Fatalf("interfering loop phis share a color: %v", plan.colorByValue)
+	}
+}
+
+func TestRegisterColoringIsExactForSmallComponent(t *testing.T) {
+	nodes := make([]registerPlanNode, 4)
+	for index := range nodes {
+		nodes[index].neighbors = map[int]struct{}{}
+	}
+	for _, edge := range [][2]int{{0, 1}, {1, 2}, {2, 3}, {3, 0}} {
+		nodes[edge[0]].neighbors[edge[1]] = struct{}{}
+		nodes[edge[1]].neighbors[edge[0]] = struct{}{}
+	}
+	colors, count := colorRegisterPlan(nodes)
+	if count != 2 {
+		t.Fatalf("four-cycle used %d colors: %v", count, colors)
+	}
+	for node := range nodes {
+		for neighbor := range nodes[node].neighbors {
+			if colors[node] == colors[neighbor] {
+				t.Fatalf("adjacent nodes %d and %d share color %d", node, neighbor, colors[node])
+			}
+		}
+	}
+}
+
+func TestRegisterColoringSplitsLargeIndependentGraph(t *testing.T) {
+	// The allocator must not abandon a function merely because the complete SSA
+	// graph is large. Independent regions reuse colors and are solved separately.
+	nodes := make([]registerPlanNode, 96)
+	for index := range nodes {
+		nodes[index].neighbors = map[int]struct{}{}
+	}
+	for start := 0; start < len(nodes); start += 3 {
+		for left := start; left < start+3; left++ {
+			for right := left + 1; right < start+3; right++ {
+				nodes[left].neighbors[right] = struct{}{}
+				nodes[right].neighbors[left] = struct{}{}
+			}
+		}
+	}
+	colors, count := colorRegisterPlan(nodes)
+	if count != 3 {
+		t.Fatalf("independent triangles used %d colors, want 3", count)
+	}
+	if len(colors) != len(nodes) {
+		t.Fatalf("colored %d nodes, want %d", len(colors), len(nodes))
+	}
+}
+
 func TestCollectOperatorsUsesRootFunctionTypeDescriptor(t *testing.T) {
 	const source = `package sample
 func init() {
