@@ -601,6 +601,26 @@ func requireNoDynamicJITCalls(t *testing.T, compiled Scmer) {
 	}
 }
 
+func TestJITGlobalCallableLookupWritesBranchResultDirectly(t *testing.T) {
+	compiled := compileJITExpressionTestProc(t, `(lambda (add)
+		(if add + -))`)
+
+	tests := []struct {
+		add  bool
+		want int
+	}{
+		{add: true, want: 10},
+		{add: false, want: 4},
+	}
+	for _, test := range tests {
+		callable := Apply(compiled, NewBool(test.add))
+		got := Apply(callable, NewInt(7), NewInt(3))
+		if ToInt(got) != test.want {
+			t.Fatalf("global callable for add=%v returned %s, want %d", test.add, String(got), test.want)
+		}
+	}
+}
+
 func TestJITDynamicNativeFuncPreservesClosureContextAcrossGC(t *testing.T) {
 	compiled := compileJITExpressionTestProc(t, `(lambda (callback value) (callback value))`)
 	captured := NewString("captured native closure context")

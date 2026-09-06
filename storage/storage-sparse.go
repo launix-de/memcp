@@ -364,10 +364,12 @@ func (s *StorageSparse) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, i
 		if !ps.General {
 			if len(ps.PhiValues) > 0 && ps.PhiValues[0].Loc != scm.LocNone {
 				d10 := ps.PhiValues[0]
+				ctx.EnsureDesc(&d10)
 				ctx.EmitStoreToStack(d10, int32(bbs[1].PhiBase)+int32(0))
 			}
 			if len(ps.PhiValues) > 1 && ps.PhiValues[1].Loc != scm.LocNone {
 				d11 := ps.PhiValues[1]
+				ctx.EnsureDesc(&d11)
 				ctx.EmitStoreToStack(d11, int32(bbs[1].PhiBase)+int32(16))
 			}
 			if bbs[1].VisitCount >= 0 {
@@ -505,10 +507,12 @@ func (s *StorageSparse) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, i
 		if !ps.General {
 			if len(ps.PhiValues) > 0 && ps.PhiValues[0].Loc != scm.LocNone {
 				d16 := ps.PhiValues[0]
+				ctx.EnsureDesc(&d16)
 				ctx.EmitStoreToStack(d16, int32(bbs[1].PhiBase)+int32(0))
 			}
 			if len(ps.PhiValues) > 1 && ps.PhiValues[1].Loc != scm.LocNone {
 				d17 := ps.PhiValues[1]
+				ctx.EnsureDesc(&d17)
 				ctx.EmitStoreToStack(d17, int32(bbs[1].PhiBase)+int32(16))
 			}
 			ps.General = true

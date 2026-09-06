@@ -566,14 +566,14 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 		r0 = registerHomes1.Registers[0]
 	}
 	var r1 scm.Reg
-	phiHomeOK3 := registerHomes1.Available&(uint16(1)<<2) == uint16(1)<<2
+	phiHomeOK3 := registerHomes1.Available&(uint16(1)<<1) == uint16(1)<<1
 	if phiHomeOK3 {
-		r1 = registerHomes1.Registers[2]
+		r1 = registerHomes1.Registers[1]
 	}
 	var r2 scm.Reg
-	phiHomeOK4 := registerHomes1.Available&(uint16(1)<<1) == uint16(1)<<1
+	phiHomeOK4 := registerHomes1.Available&(uint16(1)<<2) == uint16(1)<<2
 	if phiHomeOK4 {
-		r2 = registerHomes1.Registers[1]
+		r2 = registerHomes1.Registers[2]
 	}
 	var d5 scm.JITValueDesc
 	if phiHomeOK2 {
@@ -915,6 +915,7 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 		if !ps.General {
 			if len(ps.PhiValues) > 0 && ps.PhiValues[0].Loc != scm.LocNone {
 				d26 := ps.PhiValues[0]
+				ctx.EnsureDesc(&d26)
 				if phiHomeOK2 {
 					ctx.EmitMovToReg(r0, d26)
 				} else {
@@ -923,6 +924,7 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 			}
 			if len(ps.PhiValues) > 1 && ps.PhiValues[1].Loc != scm.LocNone {
 				d27 := ps.PhiValues[1]
+				ctx.EnsureDesc(&d27)
 				if phiHomeOK3 {
 					ctx.EmitMovToReg(r1, d27)
 				} else {
@@ -931,6 +933,7 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 			}
 			if len(ps.PhiValues) > 2 && ps.PhiValues[2].Loc != scm.LocNone {
 				d28 := ps.PhiValues[2]
+				ctx.EnsureDesc(&d28)
 				if phiHomeOK4 {
 					ctx.EmitMovToReg(r2, d28)
 				} else {
@@ -1752,6 +1755,7 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 		if !ps.General {
 			if len(ps.PhiValues) > 0 && ps.PhiValues[0].Loc != scm.LocNone {
 				d59 := ps.PhiValues[0]
+				ctx.EnsureDesc(&d59)
 				if phiHomeOK2 {
 					ctx.EmitMovToReg(r0, d59)
 				} else {
@@ -1760,6 +1764,7 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 			}
 			if len(ps.PhiValues) > 1 && ps.PhiValues[1].Loc != scm.LocNone {
 				d60 := ps.PhiValues[1]
+				ctx.EnsureDesc(&d60)
 				if phiHomeOK3 {
 					ctx.EmitMovToReg(r1, d60)
 				} else {
@@ -1768,6 +1773,7 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 			}
 			if len(ps.PhiValues) > 2 && ps.PhiValues[2].Loc != scm.LocNone {
 				d61 := ps.PhiValues[2]
+				ctx.EnsureDesc(&d61)
 				if phiHomeOK4 {
 					ctx.EmitMovToReg(r2, d61)
 				} else {
@@ -2022,6 +2028,7 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 		if !ps.General {
 			if len(ps.PhiValues) > 0 && ps.PhiValues[0].Loc != scm.LocNone {
 				d119 := ps.PhiValues[0]
+				ctx.EnsureDesc(&d119)
 				ctx.EmitStoreToStack(d119, int32(bbs[2].PhiBase)+int32(0))
 			}
 			if bbs[2].VisitCount >= 0 {
@@ -2992,6 +2999,7 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 		if !ps.General {
 			if len(ps.PhiValues) > 0 && ps.PhiValues[0].Loc != scm.LocNone {
 				d150 := ps.PhiValues[0]
+				ctx.EnsureDesc(&d150)
 				ctx.EmitStoreToStack(d150, int32(bbs[2].PhiBase)+int32(0))
 			}
 			ps.General = true
@@ -3832,14 +3840,17 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 		if !ps.General {
 			if len(ps.PhiValues) > 0 && ps.PhiValues[0].Loc != scm.LocNone {
 				d244 := ps.PhiValues[0]
+				ctx.EnsureDesc(&d244)
 				ctx.EmitStoreToStack(d244, int32(bbs[4].PhiBase)+int32(0))
 			}
 			if len(ps.PhiValues) > 1 && ps.PhiValues[1].Loc != scm.LocNone {
 				d245 := ps.PhiValues[1]
+				ctx.EnsureDesc(&d245)
 				ctx.EmitStoreToStack(d245, int32(bbs[4].PhiBase)+int32(16))
 			}
 			if len(ps.PhiValues) > 2 && ps.PhiValues[2].Loc != scm.LocNone {
 				d246 := ps.PhiValues[2]
+				ctx.EnsureDesc(&d246)
 				ctx.EmitStoreToStack(d246, int32(bbs[4].PhiBase)+int32(32))
 			}
 			if bbs[4].VisitCount >= 0 {
@@ -4444,14 +4455,17 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 		if !ps.General {
 			if len(ps.PhiValues) > 0 && ps.PhiValues[0].Loc != scm.LocNone {
 				d254 := ps.PhiValues[0]
+				ctx.EnsureDesc(&d254)
 				ctx.EmitStoreToStack(d254, int32(bbs[4].PhiBase)+int32(0))
 			}
 			if len(ps.PhiValues) > 1 && ps.PhiValues[1].Loc != scm.LocNone {
 				d255 := ps.PhiValues[1]
+				ctx.EnsureDesc(&d255)
 				ctx.EmitStoreToStack(d255, int32(bbs[4].PhiBase)+int32(16))
 			}
 			if len(ps.PhiValues) > 2 && ps.PhiValues[2].Loc != scm.LocNone {
 				d256 := ps.PhiValues[2]
+				ctx.EnsureDesc(&d256)
 				ctx.EmitStoreToStack(d256, int32(bbs[4].PhiBase)+int32(32))
 			}
 			ps.General = true
@@ -7926,10 +7940,12 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 		if !ps.General {
 			if len(ps.PhiValues) > 0 && ps.PhiValues[0].Loc != scm.LocNone {
 				d548 := ps.PhiValues[0]
+				ctx.EnsureDesc(&d548)
 				ctx.EmitStoreToStack(d548, int32(bbs[8].PhiBase)+int32(0))
 			}
 			if len(ps.PhiValues) > 1 && ps.PhiValues[1].Loc != scm.LocNone {
 				d549 := ps.PhiValues[1]
+				ctx.EnsureDesc(&d549)
 				ctx.EmitStoreToStack(d549, int32(bbs[8].PhiBase)+int32(16))
 			}
 			if bbs[8].VisitCount >= 0 {
@@ -8785,10 +8801,12 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 		if !ps.General {
 			if len(ps.PhiValues) > 0 && ps.PhiValues[0].Loc != scm.LocNone {
 				d557 := ps.PhiValues[0]
+				ctx.EnsureDesc(&d557)
 				ctx.EmitStoreToStack(d557, int32(bbs[8].PhiBase)+int32(0))
 			}
 			if len(ps.PhiValues) > 1 && ps.PhiValues[1].Loc != scm.LocNone {
 				d558 := ps.PhiValues[1]
+				ctx.EnsureDesc(&d558)
 				ctx.EmitStoreToStack(d558, int32(bbs[8].PhiBase)+int32(16))
 			}
 			ps.General = true

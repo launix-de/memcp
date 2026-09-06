@@ -24,8 +24,8 @@ import (
 )
 
 const (
-	jitConstantRegexpTestName        = "jit-constant-regexp-test"
-	jitConstantRegexpPredicateName    = "jit-constant-regexp-predicate"
+	jitConstantRegexpTestName          = "jit-constant-regexp-test"
+	jitConstantRegexpPredicateName     = "jit-constant-regexp-predicate"
 	jitConstantRegexpReplaceFuncName   = "jit-constant-regexp-replace-func"
 	jitConstantRegexpReplaceInlineName = "jit-constant-regexp-replace-inline"
 )
