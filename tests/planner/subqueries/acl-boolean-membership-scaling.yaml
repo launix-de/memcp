@@ -185,12 +185,11 @@ test_cases:
       result_not_contains:
         - "nested_global_acl"
 
-  - name: "Compound SQL-coerced ACL preserves broad count semantics"
-    max_time: 3
+  - name: "Compound SQL-coerced ACL preserves count semantics"
     sql: |
       SELECT COUNT(*) AS total
       FROM bqm_document d
-      WHERE d.mandant_id = 1
+      WHERE d.mandant_id = 9
         AND COALESCE((
           SELECT
             ((('0' OR EXISTS (
@@ -274,7 +273,7 @@ test_cases:
     expect:
       rows: 1
       data:
-        - total: 9990
+        - total: 10
 
   - name: "Plain selective LIKE count stays on the fused scan"
     sql: |

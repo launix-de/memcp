@@ -5534,11 +5534,14 @@ deliberately retained: dropping one would change COUNT and other aggregates. */
 			(begin
 				(define stage (get_assoc stage_index (stage_output_relation_id relation)))
 				(and (not (nil? stage))
-					(and (not (stage_has_residual_outer_refs? stage))
+					(and (or
+						(equal? (qassoc_get (gs_facts stage) (quote null_semantics) nil) (quote scalar))
+						(equal? (qassoc_get (gs_facts stage) (quote null_semantics) nil) (quote exists)))
+						(and (not (stage_has_residual_outer_refs? stage))
 						(and (equal? (count (gs_keys stage))
 							(count (qassoc_get (gs_facts stage) (quote lookup-keys) '())))
 							(and (equal? (stage_result_max_rows_per_partition stage) 1)
-								(not (has_assoc? referenced_aliases (source_alias src))))))))))))
+								(not (has_assoc? referenced_aliases (source_alias src)))))))))))))
 
 (define prune_unused_stage_outputs_reversed (lambda (reversed_sources default_alias stage_index referenced_aliases)
 	(match (coalesceNil reversed_sources '())
@@ -5619,28 +5622,34 @@ no scan, RecSet, keytable, or other physical artifact. */
 						(qb_group root) (qb_having root) (qb_order root) (qb_limit root)
 						(qb_offset root) (qb_hidden root) pruned_stages (qb_facts root))
 					pruned_index '()))
-				/* Removing a dead source can change the canonical role number of the
-				remaining aliases. Propagate the resulting aggregate-column rename through
-				the stage DAG before physical probe markers are introduced. */
-				(define propagated (propagate_stage_output_aggregate_columns
-					pruned_root original_stages pruned_stages))
-				(define propagated_root (nth propagated 0))
-				(define propagated_stages (nth propagated 1))
-				(define graph (stage_dependency_graph propagated_stages))
-				(define roots (merge (list
-					(stage_dependencies_from_output_sources
-						(stage_dependency_id_index propagated_stages) (qb_sources propagated_root))
-					(filter propagated_stages (lambda (stage) (not (group_stage? stage)))))))
-				(define reachable (reachable_stage_keys_visit graph roots '()))
-				(define kept_stages (filter propagated_stages (lambda (stage)
-					(has_assoc? reachable (logical_stage_key stage)))))
-				(define kept_root (make_query_block
-					(qb_schema propagated_root) (qb_sources propagated_root) (qb_fields propagated_root)
-					(qb_where propagated_root) (qb_group propagated_root) (qb_having propagated_root)
-					(qb_order propagated_root) (qb_limit propagated_root) (qb_offset propagated_root)
-					(qb_hidden propagated_root) kept_stages (qb_facts propagated_root)))
-				(make_ir (ir_kind ir) kept_root kept_stages
-					(ir_context_of ir) (ir_return ir)))))))
+				/* Do not re-canonicalize or traverse ownership for plans where demand
+				pruning made no change. Besides keeping the common path cheap, this leaves
+				UNION/window ownership to their dedicated normalizers. */
+				(if (equal? pruned_root root)
+					ir
+					(begin
+						/* Removing a dead source can change the canonical role number of the
+						remaining aliases. Propagate the resulting aggregate-column rename through
+						the stage DAG before physical probe markers are introduced. */
+						(define propagated (propagate_stage_output_aggregate_columns
+							pruned_root original_stages pruned_stages))
+						(define propagated_root (nth propagated 0))
+						(define propagated_stages (nth propagated 1))
+						(define graph (stage_dependency_graph propagated_stages))
+						(define roots (merge (list
+							(stage_dependencies_from_output_sources
+								(stage_dependency_id_index propagated_stages) (qb_sources propagated_root))
+							(filter propagated_stages (lambda (stage) (not (group_stage? stage)))))))
+						(define reachable (reachable_stage_keys_visit graph roots '()))
+						(define kept_stages (filter propagated_stages (lambda (stage)
+							(has_assoc? reachable (logical_stage_key stage)))))
+						(define kept_root (make_query_block
+							(qb_schema propagated_root) (qb_sources propagated_root) (qb_fields propagated_root)
+							(qb_where propagated_root) (qb_group propagated_root) (qb_having propagated_root)
+							(qb_order propagated_root) (qb_limit propagated_root) (qb_offset propagated_root)
+							(qb_hidden propagated_root) kept_stages (qb_facts propagated_root)))
+						(make_ir (ir_kind ir) kept_root kept_stages
+							(ir_context_of ir) (ir_return ir))))))))))
 
 (define normalize_stage_dependencies (lambda (ir)
 	(begin
