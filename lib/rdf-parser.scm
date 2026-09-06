@@ -1295,7 +1295,9 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 			))
 			(parser '(
 				"("
-				(define items (* ttl_object))
+				/* Keep the list-item grammar non-recursive. Recursive parser objects are
+				mis-specialized by the experimental JIT and silently lose their items. */
+				(define items (* ttl_simple_constant))
 				")"
 			) (list "__ttl_collection__" items))
 			ttl_simple_constant
@@ -1361,7 +1363,7 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 			))
 			(parser '(
 				"("
-				(define items (* ttl_object))
+				(define items (* ttl_simple_constant))
 				")"
 			) (list "__ttl_collection__" items))
 			ttl_simple_constant
