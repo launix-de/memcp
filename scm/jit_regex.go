@@ -26,7 +26,8 @@ import (
 const (
 	jitConstantRegexpTestName        = "jit-constant-regexp-test"
 	jitConstantRegexpPredicateName    = "jit-constant-regexp-predicate"
-	jitConstantRegexpReplaceFuncName  = "jit-constant-regexp-replace-func"
+	jitConstantRegexpReplaceFuncName   = "jit-constant-regexp-replace-func"
+	jitConstantRegexpReplaceInlineName = "jit-constant-regexp-replace-inline"
 )
 
 // jitConstantRegexpReplaceFunc is the interpreter implementation of the hidden
@@ -240,6 +241,108 @@ func (emitter *jitRegexEmitter) emitGoStringState(text JITValueDesc) {
 	emitter.ctx.EmitMovRegReg(emitter.end, text.Reg2)
 	emitter.ctx.EmitAddInt64(emitter.end, emitter.cursor)
 	emitter.ctx.EmitMovRegReg(emitter.scan, emitter.cursor)
+}
+
+// jitEmitRegexScanReplace drives a ReplaceAllStringFunc-shaped left-to-right
+// scan of program over input, reusing emitMatchAt. For every non-overlapping
+// match it calls onMatch with two int descs - the byte offsets [start, end) of
+// the match within input. When the scan finishes onEnd is called once, on a nil
+// input nilPath instead; both receive a LocStackPair result slot to write the
+// operation's Scmer result into. onMatch/onEnd/nilPath may emit Go calls: the
+// scan registers are spilled (PreserveOuterRegs) around every callback and
+// restored afterwards, so a callback gets the whole register bank and the
+// result slot survives on the stack. Returns the result slot desc. input must
+// be a string or nil Scmer.
+func jitEmitRegexScanReplace(ctx *JITContext, program *jitRegexProgram, input JITValueDesc,
+	onMatch func(startOff, endOff JITValueDesc), onEnd func(resultSlot JITValueDesc), nilPath func(resultSlot JITValueDesc)) JITValueDesc {
+
+	e := &jitRegexEmitter{ctx: ctx, program: program}
+	nilLabel := ctx.ReserveLabel()
+	invalid := ctx.ReserveLabel()
+	e.reserveMachineState(input, invalid, &nilLabel, true)
+
+	resultOff := ctx.AllocStack(16)
+	ctx.EmitMovRegImm64(ctx.ScratchReg, 0)
+	ctx.EmitStoreRegMem(ctx.ScratchReg, ctx.StackReg, resultOff)
+	ctx.EmitStoreRegMem(ctx.ScratchReg, ctx.StackReg, resultOff+8)
+	ctx.setStackPointer(jitStackRootFrameSP, resultOff-ctx.DynamicSP, true)
+	ctx.setStackPointer(jitStackRootFrameSP, resultOff+8-ctx.DynamicSP, true)
+	resultSlot := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: resultOff, Rooted: true}
+
+	endOff := ctx.AllocStack(8)
+	ctx.EmitStoreRegMem(e.end, ctx.StackReg, endOff)
+	resumeOff := ctx.AllocStack(8)
+	startSlot := ctx.AllocStack(8)
+	endSlot := ctx.AllocStack(8)
+
+	attempt := ctx.ReserveLabel()
+	attemptFail := ctx.ReserveLabel()
+	found := ctx.ReserveLabel()
+	exhausted := ctx.ReserveLabel()
+	done := ctx.ReserveLabel()
+
+	ctx.MarkLabel(attempt)
+	e.emitMatchAt(found, attemptFail)
+
+	ctx.MarkLabel(attemptFail)
+	if program.beginText {
+		ctx.EmitJmp(exhausted)
+	} else {
+		ctx.EmitAddRegImm32(e.scan, 1)
+		ctx.EmitCmpInt64(e.scan, e.end)
+		ctx.EmitJump(CondUnsignedBelowOrEqual, attempt)
+		ctx.EmitJmp(exhausted)
+	}
+
+	ctx.MarkLabel(found)
+	inStart := ctx.AllocRegExcept(e.scan, e.cursor)
+	ctx.EmitMovRegMem(inStart, ctx.StackReg, e.inputStartOff)
+	startReg := ctx.AllocRegExcept(e.scan, e.cursor, inStart)
+	ctx.EmitMovRegReg(startReg, e.scan)
+	ctx.EmitSubInt64(startReg, inStart)
+	endReg := ctx.AllocRegExcept(e.scan, e.cursor, inStart, startReg)
+	ctx.EmitMovRegReg(endReg, e.cursor)
+	ctx.EmitSubInt64(endReg, inStart)
+	ctx.FreeReg(inStart)
+	ctx.EmitStoreRegMem(e.cursor, ctx.StackReg, resumeOff)
+	ctx.EmitStoreRegMem(startReg, ctx.StackReg, startSlot)
+	ctx.EmitStoreRegMem(endReg, ctx.StackReg, endSlot)
+	ctx.FreeReg(startReg)
+	ctx.FreeReg(endReg)
+
+	// onMatch runs Go calls and needs the whole register bank; cursor/end/scan
+	// are spilled and their protection lifted for its duration, then restored
+	// to the exact same registers (PreserveOuterRegs, as emitRuleReturn does
+	// around an inlined generator).
+	matchOuter := ctx.PreserveOuterRegs()
+	onMatch(
+		JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: startSlot, NoHeapPointer: true},
+		JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: endSlot, NoHeapPointer: true},
+	)
+	ctx.RestoreOuterRegs(matchOuter)
+
+	ctx.EmitMovRegMem(e.scan, ctx.StackReg, resumeOff)
+	ctx.EmitMovRegMem(e.end, ctx.StackReg, endOff)
+	ctx.EmitJmp(attempt)
+
+	ctx.MarkLabel(exhausted)
+	endOuter := ctx.PreserveOuterRegs()
+	onEnd(resultSlot)
+	ctx.RestoreOuterRegs(endOuter)
+	ctx.EmitJmp(done)
+
+	ctx.MarkLabel(nilLabel)
+	nilOuter := ctx.PreserveOuterRegs()
+	nilPath(resultSlot)
+	ctx.RestoreOuterRegs(nilOuter)
+	ctx.EmitJmp(done)
+
+	ctx.MarkLabel(invalid)
+	ctx.EmitGoPanic("jit: regexp_replace expects a string")
+
+	ctx.MarkLabel(done)
+	e.releaseMachineState()
+	return resultSlot
 }
 
 func (emitter *jitRegexEmitter) releaseMachineState() {
@@ -1088,6 +1191,37 @@ func registerJITRegexBuiltins() {
 				pattern := sourceArgs[0].WithoutSourceInfo()
 				if !pattern.IsRegex() {
 					panic("jit: constant regexp replace requires a precompiled regex")
+				}
+				return jitEmitConstantRegexpReplaceViaHelper(ctx, pattern.Regex(), sourceArgs[1].WithoutSourceInfo(), args, result)
+			},
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		Name: jitConstantRegexpReplaceInlineName,
+		Fn: func(arguments ...Scmer) Scmer {
+			if len(arguments) != 3 || !arguments[0].IsRegex() {
+				panic("jit constant regexp replace (inline) expects a precompiled regex, a function and a value")
+			}
+			return jitConstantRegexpReplaceFunc(arguments[0], arguments[1], arguments[2])
+		},
+		Type: &TypeDescriptor{
+			Kind:      "func",
+			Forbidden: true,
+			Params: []*TypeDescriptor{
+				{Kind: "any", Label: "pattern"},
+				{Kind: "any", Label: "replacement"},
+				{Kind: "string", Label: "value"},
+			},
+			Return:         &TypeDescriptor{Kind: "string"},
+			Const:          true,
+			JITVirtualArgs: true,
+			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				if len(sourceArgs) != 3 || len(args) != 3 {
+					panic("jit: malformed constant regexp replace (inline)")
+				}
+				pattern := sourceArgs[0].WithoutSourceInfo()
+				if !pattern.IsRegex() {
+					panic("jit: constant regexp replace (inline) requires a precompiled regex")
 				}
 				return jitEmitConstantRegexpReplaceFunc(ctx, pattern.Regex(), sourceArgs[1].WithoutSourceInfo(), args, result)
 			},
