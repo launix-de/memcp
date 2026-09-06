@@ -83,6 +83,10 @@ type jitParserRule struct {
 	lexicalParent  int
 	compiledAction *JITEntryPoint
 	actionCaptures []Symbol
+	// directReturn: set by analyzeLiteralLeaves when this rule is a single
+	// (define x <regex>) whose generator is a pure function of x. Its references
+	// skip the frame / value-stack / bindings / memo machinery entirely.
+	directReturn *directReturnPlan
 }
 
 type jitParserProgram struct {
@@ -157,6 +161,7 @@ func jitBuildParserPrograms(parsers []*ScmParser) *jitParserProgram {
 	}
 	program.prepareMemoLayout()
 	program.computeFirstBytes()
+	program.analyzeLiteralLeaves()
 	program.pool.New = func() any { return new(jitParserState) }
 	return program
 }
@@ -170,6 +175,7 @@ func jitBuildParserTemplateProgram(template *JITParserTemplate) (*jitParserProgr
 	rule := builder.addTemplate(template, -1)
 	program.prepareMemoLayout()
 	program.computeFirstBytes()
+	program.analyzeLiteralLeaves()
 	program.pool.New = func() any { return new(jitParserState) }
 	return program, rule
 }
@@ -445,6 +451,17 @@ func jitParserCallCompiledAction(entryValue Scmer, args []Scmer) Scmer {
 		panic("jit: invalid compiled parser action")
 	}
 	return entry.Call(args...)
+}
+
+// jitParserApplyAction1Native runs a literal-leaf rule's compiled generator on
+// its single argument - the matched text - with no jitMaterializeVirtualGoSlice
+// and no emulated JITEnv.
+func jitParserApplyAction1Native(entryValue, arg Scmer) Scmer {
+	entry, ok := entryValue.Any().(*JITEntryPoint)
+	if !ok || entry == nil {
+		panic("jit: invalid literal-leaf action")
+	}
+	return entry.Call(arg)
 }
 
 func (builder *jitParserBuilder) binding(ruleID int, symbol Symbol) int {
