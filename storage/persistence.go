@@ -57,8 +57,11 @@ type PersistenceEngine interface {
 	// WalkBlobs calls fn for every blob hash stored on disk, one at a time.
 	// fn may return an error to stop iteration early.
 	WalkBlobs(fn func(hash string) error) error
-	OpenLog(shard string) PersistenceLogfile                       // open for writing
-	ReplayLog(shard string) (chan interface{}, PersistenceLogfile) // replay existing log
+	OpenLog(shard string) PersistenceLogfile // open for writing
+	// ReplayLog returns the transaction IDs committed in this WAL before it
+	// streams entries. This keeps recovery memory proportional to commit count,
+	// rather than retaining every row mutation until the final marker is known.
+	ReplayLog(shard string) (map[string]struct{}, chan interface{}, PersistenceLogfile)
 	RemoveLog(shard string)
 	// WalkShardFiles calls fn for every shard-related file (column files, log files)
 	// stored on disk, one at a time. The name passed to fn is exactly the value
@@ -95,18 +98,25 @@ func finishColumnWrite(w io.WriteCloser, durable bool) {
 }
 
 type LogEntryDelete struct {
-	idx uint32
+	idx  uint32
+	txID string
 }
 type LogEntryUndelete struct {
-	idx uint32
+	idx  uint32
+	txID string
 }
 type LogEntryInsert struct {
 	cols   []string
 	values [][]scm.Scmer
+	txID   string
 }
 type LogEntryInsertHidden struct {
 	cols   []string
 	values [][]scm.Scmer
+	txID   string
+}
+type LogEntryCommit struct {
+	txID string
 }
 
 // for CREATE TABLE
