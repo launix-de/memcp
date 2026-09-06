@@ -50,7 +50,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(atom "INTERVAL" true)
 	(atom "DIV" true)
 )))
-(define psql_identifier_quoted (parser '("\"" (define id (regex "(?:[^\"])+" false false)) "\"") (sql_unescape id))) /* with double quote */
+(define psql_identifier_quoted (parser '("\"" (define id (regex "(?:[^\"])+" false false)) "\"") (regexp_replace id "\\\\[\\\\'\"nr0]" sql_string_unescape))) /* with double quote */
 (define psql_identifier (parser (define x (or psql_identifier_unquoted psql_identifier_quoted)) x))
 
 (define psql_column (parser (or
@@ -84,7 +84,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 (define psql_interval_unit (parser '((define unit psql_identifier_unquoted) (? "(" (regex "[0-9]+") ")")) unit))
 
 (define psql_string (parser (or
-	(parser '((atom "'" false) (define x (regex "(\\\\.|[^\\'])*" false false)) (atom "'" false false)) (sql_unescape x))
+	(parser '((atom "'" false) (define x (regex "(\\\\.|[^\\'])*" false false)) (atom "'" false false)) (regexp_replace x "\\\\[\\\\'\"nr0]" sql_string_unescape))
 )))
 
 /* SQL modulo expression: uses native mod builtin (NULL-safe, div-by-zero returns NULL) */

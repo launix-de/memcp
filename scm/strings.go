@@ -15162,46 +15162,6 @@ func init_strings() {
 			JITInlineCost:  21,
 		},
 	})
-	sql_escapings := regexp.MustCompile("\\\\[\\\\'\"nr0]")
-	Declare(&Globalenv, &Declaration{
-		Name: "sql_unescape",
-
-		Fn: func(a ...Scmer) Scmer {
-			input := String(a[0])
-			out := sql_escapings.ReplaceAllStringFunc(input, func(m string) string {
-				switch m {
-				case "\\\\":
-					return "\\"
-				case "\\'":
-					return "'"
-				case "\\\"":
-					return "\""
-				case "\\n":
-					return "\n"
-				case "\\r":
-					return "\r"
-				case "\\0":
-					return string([]byte{0})
-				}
-				return m
-			})
-			return NewString(out)
-		},
-		Type: &TypeDescriptor{Kind: "func", Description: "unescapes the inner part of a sql string",
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", Label: "value", Description: "string to decode"}},
-			Return: &TypeDescriptor{Kind: "string"},
-			Const:  true,
-
-			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				// JITGen native call boundary: static Go callback value.
-				ctx.Coverage.NativeCalls++
-				declaration := declarations["sql_unescape"]
-				return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
-			},
-			JITVirtualArgs: true,
-			JITInlineCost:  65535,
-		},
-	})
 	Declare(&Globalenv, &Declaration{
 		Name: "bin2hex",
 
@@ -18685,10 +18645,16 @@ func init_strings() {
 			if err != nil {
 				panic("regexp_replace: invalid pattern: " + err.Error())
 			}
+			if scmerCallable(a[2]) {
+				replacer := a[2]
+				return NewString(re.ReplaceAllStringFunc(String(a[0]), func(match string) string {
+					return String(Apply(replacer, NewString(match)))
+				}))
+			}
 			return NewString(re.ReplaceAllString(String(a[0]), String(a[2])))
 		},
-		Type: &TypeDescriptor{Kind: "func", Description: "replaces matches of a regex pattern in a string",
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", Label: "str", Description: "input string"}, &TypeDescriptor{Kind: "string", Label: "pattern", Description: "regex pattern"}, &TypeDescriptor{Kind: "string", Label: "replacement", Description: "replacement string"}},
+		Type: &TypeDescriptor{Kind: "func", Description: "replaces matches of a regex pattern in a string; the replacement may be a string ($1 expansion) or a function called with each match",
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", Label: "str", Description: "input string"}, &TypeDescriptor{Kind: "string", Label: "pattern", Description: "regex pattern"}, &TypeDescriptor{Kind: "any", Label: "replacement", Description: "replacement string ($1 expansion) or function (match) -> string"}},
 			Return: &TypeDescriptor{Kind: "string"},
 			Const:  true,
 
@@ -21989,10 +21955,18 @@ func optimizeRegexpReplace(v []Scmer, oc *OptimizerContext, useResult bool) (Scm
 	if err != nil {
 		return result, td // let runtime handle the error
 	}
-	// Replace call with a precompiled closure
+	// Replace call with a precompiled closure. The replacement stays a runtime
+	// argument (arg 1 after the rewrite) so a string ($1 expansion) and a
+	// function (match) -> string are both still accepted.
 	compiled := NewFunc(func(a ...Scmer) Scmer {
 		if a[0].IsNil() {
 			return NewNil()
+		}
+		if scmerCallable(a[1]) {
+			replacer := a[1]
+			return NewString(re.ReplaceAllStringFunc(String(a[0]), func(match string) string {
+				return String(Apply(replacer, NewString(match)))
+			}))
 		}
 		return NewString(re.ReplaceAllString(String(a[0]), String(a[1])))
 	})

@@ -1317,10 +1317,18 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	/* general_ci heuristic places ASCII before non-ASCII class like leading 'aa' */
 	(assert ((collate "general_ci") "z" "aa") true "general_ci: ASCII first")
 
-	/* SQL unescape */
-	(assert (equal? (bin2hex (sql_unescape "a\\nb")) "610a62") true "sql_unescape newline")
-	(assert (equal? (sql_unescape "a\\'b") "a'b") true "sql_unescape quote")
-	(assert (equal? (bin2hex (sql_unescape "a\\0b")) "610062") true "sql_unescape NUL byte present")
+	/* SQL string escape decoding (regexp_replace with a callback, as the grammar does it) */
+	(define sql_unescape_test (lambda (s) (regexp_replace s "''|\\\\[\\\\'\"nr0]" (lambda (m)
+		(match m
+			"''" "'"
+			"\"\"" "\""
+			"\\n" "\n"
+			"\\r" "\r"
+			"\\0" "\0"
+			(substr m 1))))))
+	(assert (equal? (bin2hex (sql_unescape_test "a\\nb")) "610a62") true "sql string unescape: newline")
+	(assert (equal? (sql_unescape_test "a\\'b") "a'b") true "sql string unescape: quote")
+	(assert (equal? (bin2hex (sql_unescape_test "a\\0b")) "610062") true "sql string unescape: NUL byte present")
 
 	/* json_encode vs json_encode_assoc semantics (master-compatible) */
 	(assert (equal? (json_encode '(1 2 3)) "[1,2,3]") true "json_encode lists as arrays")

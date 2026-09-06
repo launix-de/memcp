@@ -122,9 +122,20 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 (define sql_number (parser (define x (regex "-?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:e-?[0-9]+)?" true)) (simplify x)))
 (define sql_interval_unit (parser '((define unit sql_identifier_unquoted) (? "(" (regex "[0-9]+") ")")) unit))
 
+/* strip one SQL string escape: doubled delimiter -> single, the six backslash
+   escapes MySQL decodes, everything else (\x) keeps its literal second byte */
+(define sql_string_unescape (lambda (m)
+	(match m
+		"''" "'"
+		"\"\"" "\""
+		"\\n" "\n"
+		"\\r" "\r"
+		"\\0" "\0"
+		(substr m 1))))
+
 (define sql_string (parser (or
-	(parser '((atom "'" false) (define x (regex "(\\\\.|''|[^\\'])*" false false)) (atom "'" false false)) (sql_unescape (replace x "''" "'")))
-	(parser '((atom "\"" false) (define x (regex "(\\\\.|\"\"|[^\\\"])*" false false)) (atom "\"" false false)) (sql_unescape (replace x "\"\"" "\"")))
+	(parser '((atom "'" false) (define x (regex "(\\\\.|''|[^\\'])*" false false)) (atom "'" false false)) (regexp_replace x "''|\\\\[\\\\'\"nr0]" sql_string_unescape))
+	(parser '((atom "\"" false) (define x (regex "(\\\\.|\"\"|[^\\\"])*" false false)) (atom "\"" false false)) (regexp_replace x "\"\"|\\\\[\\\\'\"nr0]" sql_string_unescape))
 )))
 (define sql_hex_literal (parser
 	(define x (regex "0[xX](?:[0-9A-Fa-f]{2})*"))
