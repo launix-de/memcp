@@ -291,8 +291,8 @@ func TestJITRegisterHomesFollowArchitectureBank(t *testing.T) {
 			TemporaryReserve: 1,
 		},
 	}
-	homes := ctx.AllocRegisterHomes(3)
-	if homes.Count != 2 || homes.Registers[0] != RegR13 || homes.Registers[1] != RegR15 {
+	homes := ctx.AllocRegisterHomes(JITRegisterPlan{Slots: [16]JITRegisterSlot{{Color: 0, Width: 1, Cost: 3}, {Color: 1, Width: 1, Cost: 2}, {Color: 2, Width: 1, Cost: 1}}, Count: 3})
+	if homes.Available != 3 || homes.Registers[0] != RegR13 || homes.Registers[1] != RegR15 {
 		t.Fatalf("homes = %#v, want the first two backend registers", homes)
 	}
 	if ctx.FreeRegs&(1<<uint(RegRCX)) == 0 {
@@ -302,4 +302,75 @@ func TestJITRegisterHomesFollowArchitectureBank(t *testing.T) {
 	if ctx.FreeRegs != all || ctx.ProtectedRegs != 0 {
 		t.Fatalf("released state free=%#x protected=%#x, want free=%#x protected=0", ctx.FreeRegs, ctx.ProtectedRegs, all)
 	}
+}
+
+func TestJITRegisterHomesTradeOuterForMoreValuableInnerPlan(t *testing.T) {
+	code := make([]byte, 256)
+	start := unsafe.Pointer(&code[0])
+	all := uint64(1<<uint(RegR13) | 1<<uint(RegR15) | 1<<uint(RegRCX))
+	ctx := &JITContext{
+		Start: start, Ptr: start, End: unsafe.Add(start, len(code)-1),
+		AllRegs: all, FreeRegs: all, FrameReg: RegRBP, StackReg: RegRSP,
+		RegisterBank: JITRegisterBank{Registers: [16]Reg{RegR13, RegR15, RegRCX}, Count: 3, TemporaryReserve: 1},
+	}
+	outer := ctx.AllocRegisterHomes(JITRegisterPlan{Slots: [16]JITRegisterSlot{{Color: 0, Width: 2, Cost: 2}}, Count: 1})
+	value := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: outer.Registers[0], Reg2: outer.Registers[1]}
+	ctx.BindReg(value.Reg, &value)
+	ctx.BindReg(value.Reg2, &value)
+
+	inner := ctx.AllocRegisterHomes(JITRegisterPlan{Slots: [16]JITRegisterSlot{{Color: 0, Width: 2, Cost: 10}}, Count: 1})
+	if inner.Available != 3 || inner.Evictions != 1 {
+		t.Fatalf("inner homes = %#v, want pair replacing one outer bundle", inner)
+	}
+	ctx.SyncDesc(&value)
+	if value.Loc != LocStackPair {
+		t.Fatalf("evicted outer value location = %d, want stack pair", value.Loc)
+	}
+	ctx.ReleaseRegisterHomes(inner)
+	ctx.SyncDesc(&value)
+	if value.Loc != LocRegPair || value.Reg != outer.Registers[0] || value.Reg2 != outer.Registers[1] {
+		t.Fatalf("restored outer value = %#v, want original register pair", value)
+	}
+	ctx.ReleaseRegisterHomes(outer)
+}
+
+func TestJITRegisterHomesRetainMoreValuableOuterPlan(t *testing.T) {
+	code := make([]byte, 256)
+	start := unsafe.Pointer(&code[0])
+	all := uint64(1<<uint(RegR13) | 1<<uint(RegR15) | 1<<uint(RegRCX))
+	ctx := &JITContext{
+		Start: start, Ptr: start, End: unsafe.Add(start, len(code)-1),
+		AllRegs: all, FreeRegs: all, FrameReg: RegRBP, StackReg: RegRSP,
+		RegisterBank: JITRegisterBank{Registers: [16]Reg{RegR13, RegR15, RegRCX}, Count: 3, TemporaryReserve: 1},
+	}
+	outer := ctx.AllocRegisterHomes(JITRegisterPlan{Slots: [16]JITRegisterSlot{{Color: 0, Width: 2, Cost: 10}}, Count: 1})
+	value := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: outer.Registers[0], Reg2: outer.Registers[1]}
+	ctx.BindReg(value.Reg, &value)
+	ctx.BindReg(value.Reg2, &value)
+
+	inner := ctx.AllocRegisterHomes(JITRegisterPlan{Slots: [16]JITRegisterSlot{{Color: 0, Width: 2, Cost: 2}}, Count: 1})
+	if inner.Available != 0 || inner.Evictions != 0 {
+		t.Fatalf("inner homes = %#v, want valuable outer bundle retained", inner)
+	}
+	if value.Loc != LocRegPair {
+		t.Fatalf("outer value location = %d, want register pair", value.Loc)
+	}
+	ctx.ReleaseRegisterHomes(inner)
+	ctx.ReleaseRegisterHomes(outer)
+}
+
+func TestJITRegisterHomesSkipFoldedTagLane(t *testing.T) {
+	all := uint64(1<<uint(RegR13) | 1<<uint(RegR15))
+	ctx := &JITContext{
+		AllRegs: all, FreeRegs: all,
+		RegisterBank: JITRegisterBank{Registers: [16]Reg{RegR13, RegR15}, Count: 2, TemporaryReserve: 1},
+	}
+	homes := ctx.AllocRegisterHomes(JITRegisterPlan{Slots: [16]JITRegisterSlot{{Color: 0, Width: 2, Lanes: 2, Cost: 10}}, Count: 1})
+	if homes.Available != 2 || homes.Registers[1] != RegR13 {
+		t.Fatalf("payload-only homes = %#v, want logical lane 1 in first physical register", homes)
+	}
+	if ctx.FreeRegs&(1<<uint(RegR15)) == 0 {
+		t.Fatal("folded tag lane consumed the temporary register reserve")
+	}
+	ctx.ReleaseRegisterHomes(homes)
 }

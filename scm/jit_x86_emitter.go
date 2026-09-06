@@ -38,7 +38,7 @@ var jitX86RegisterBank = JITRegisterBank{
 		RegRCX, RegRDX, RegRAX, RegRBX,
 	},
 	Count:            11,
-	TemporaryReserve: 9,
+	TemporaryReserve: 7,
 }
 
 func jitCapturedEnv(en *Env) *JITEnv {
