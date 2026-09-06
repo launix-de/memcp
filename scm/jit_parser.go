@@ -66,7 +66,8 @@ type jitParserNode struct {
 	regex        *jitRegexProgram
 	skipWS       bool
 	ignoreResult bool
-	noMemo       bool
+	noMemo       bool // repeat body references skip the memo entry check
+	fenceMemo    bool // markFenceableRepeats: also fence+compact the memo table
 	description  string
 }
 
@@ -721,6 +722,7 @@ type jitParserState struct {
 	memoOffsets []uint32
 	memoRules   []uint32
 	memoEntries []jitParserMemoEntry
+	memoFences  []jitParserMemoFence
 	heads       []*jitParserLeftRecursionHead
 	farthest    int
 	expected    []string
@@ -745,6 +747,7 @@ func (program *jitParserProgram) acquireState(inputLength int) *jitParserState {
 	state.mutations = state.mutations[:0]
 	state.checkpoints = state.checkpoints[:0]
 	state.marks = state.marks[:0]
+	state.memoFences = state.memoFences[:0]
 	state.positions = state.positions[:0]
 	memoCapacity := jitParserMemoEntryCapacity(inputLength)
 	if cap(state.memoEntries) < memoCapacity {
@@ -850,6 +853,11 @@ func (state *jitParserState) memoSet(key jitParserMemoKey, entry jitParserMemoEn
 	if entryIndex := state.memoRules[index]; entryIndex != 0 {
 		state.memoEntries[entryIndex-1] = entry
 		return
+	}
+	if n := len(state.memoFences); n > 0 {
+		if fence := &state.memoFences[n-1]; index < fence.rules {
+			fence.dirtySlots = append(fence.dirtySlots, index)
+		}
 	}
 	state.memoEntries = append(state.memoEntries, entry)
 	state.memoRules[index] = uint32(len(state.memoEntries))
@@ -1217,6 +1225,83 @@ func jitParserCommitProgress(stateValue, positionValue Scmer) Scmer {
 	}
 	jitParserCommitCheckpoint(stateValue)
 	return NewBool(true)
+}
+
+// jitParserMemoFence bounds the memo table around one iteration of a `*` node
+// that markFenceableRepeats proved is never rolled back. Once an iteration
+// commits its progress no (rule, position) it memoized strictly ahead of the
+// fence can be consulted again, so jitParserMemoCompactNative rewinds
+// memoEntries/memoRules to the fence and clears memoOffsets/heads for the
+// consumed span. dirtySlots holds memoRules indices in blocks that predate the
+// fence which this iteration nonetheless wrote (the parse backtracked across
+// the loop start, e.g. inside a nested rule); the rewind strips the entry index
+// they point at, so they are zeroed first.
+type jitParserMemoFence struct {
+	entries    int
+	rules      int
+	pos        int
+	dirtySlots []int
+}
+
+func jitParserMemoFencePushNative(state *jitParserState, position int64) {
+	state.memoFences = append(state.memoFences, jitParserMemoFence{
+		entries: len(state.memoEntries), rules: len(state.memoRules), pos: int(position),
+	})
+}
+
+func jitParserMemoFencePopNative(state *jitParserState) {
+	n := len(state.memoFences)
+	if n == 0 {
+		panic("jit: parser memo fence underflow")
+	}
+	popped := state.memoFences[n-1]
+	state.memoFences = state.memoFences[:n-1]
+	if n >= 2 && len(popped.dirtySlots) > 0 {
+		parent := &state.memoFences[n-2]
+		for _, s := range popped.dirtySlots {
+			if s < parent.rules {
+				parent.dirtySlots = append(parent.dirtySlots, s)
+			}
+		}
+	}
+}
+
+// jitParserMemoCompactNative discards the memo a committed fenceable iteration
+// produced.
+func jitParserMemoCompactNative(state *jitParserState, position int64) {
+	n := len(state.memoFences)
+	if n == 0 {
+		return
+	}
+	fence := &state.memoFences[n-1]
+	for _, s := range fence.dirtySlots {
+		if s < len(state.memoRules) {
+			state.memoRules[s] = 0
+		}
+	}
+	fence.dirtySlots = fence.dirtySlots[:0]
+	end := int(position)
+	if end > len(state.memoOffsets) {
+		end = len(state.memoOffsets)
+	}
+	if fence.pos < end {
+		clear(state.memoOffsets[fence.pos:end])
+		hi := end
+		if hi > len(state.heads) {
+			hi = len(state.heads)
+		}
+		if fence.pos < hi {
+			clear(state.heads[fence.pos:hi])
+		}
+	}
+	if fence.entries < len(state.memoEntries) {
+		clear(state.memoEntries[fence.entries:])
+		state.memoEntries = state.memoEntries[:fence.entries]
+	}
+	if fence.rules < len(state.memoRules) {
+		state.memoRules = state.memoRules[:fence.rules]
+	}
+	fence.pos = end
 }
 
 func jitParserPushPosition(stateValue, positionValue Scmer) Scmer {
