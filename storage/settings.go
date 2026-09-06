@@ -20,6 +20,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -43,6 +44,8 @@ type SettingsT struct {
 	MaxRamBytes            int64 // 0 = use MaxRamPercent; >0 = override total budget in bytes
 	MaxPersistPercent      int   // 0 = default (30%), otherwise 1-100; budget for persisted shards+indexes
 	MaxPersistBytes        int64 // 0 = use MaxPersistPercent; >0 = override persisted budget in bytes
+	MaintenanceRamPercent  int   // 0 = default (50% of MaxRam); maintenance scratch-memory budget
+	MaintenanceRamBytes    int64 // 0 = use MaintenanceRamPercent; >0 = override maintenance budget in bytes
 	MetricsTracing         bool  // when true, periodically insert metrics into system.perf_metrics
 	MetricsTracingInterval int   // interval in seconds (0 = default 60s)
 	ShutdownDrainSeconds   int   // seconds to wait for in-flight requests during shutdown (0 = default 10s)
@@ -126,7 +129,15 @@ func (r CreateTableTriggerRegistration) triggerDescription() TriggerDescription 
 	}
 }
 
-var Settings SettingsT = SettingsT{false, false, false, 0, 10, "safe", 60000, 50, 5, 0, 0, 0, 0, false, 0, 0, false, false, 20, 256, false, 0, false, 0, nil}
+var Settings = SettingsT{
+	PartitionMaxDimensions: 10,
+	DefaultEngine:          "safe",
+	ShardSize:              60000,
+	AnalyzeMinItems:        50,
+	IndexThreshold:         5,
+	ExplainWidth:           20,
+	JoinReorderDPBudget:    256,
+}
 var createTableTriggerMu sync.Mutex
 
 func registerCreateTableTrigger(reg CreateTableTriggerRegistration) {
@@ -193,6 +204,8 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 			scm.NewString("MaxRamBytes"), scm.NewInt(Settings.MaxRamBytes),
 			scm.NewString("MaxPersistPercent"), scm.NewInt(int64(Settings.MaxPersistPercent)),
 			scm.NewString("MaxPersistBytes"), scm.NewInt(Settings.MaxPersistBytes),
+			scm.NewString("MaintenanceRamPercent"), scm.NewInt(int64(Settings.MaintenanceRamPercent)),
+			scm.NewString("MaintenanceRamBytes"), scm.NewInt(Settings.MaintenanceRamBytes),
 			scm.NewString("MetricsTracing"), scm.NewBool(Settings.MetricsTracing),
 			scm.NewString("MetricsTracingInterval"), scm.NewInt(int64(Settings.MetricsTracingInterval)),
 			scm.NewString("ShutdownDrainSeconds"), scm.NewInt(int64(Settings.ShutdownDrainSeconds)),
@@ -233,6 +246,10 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 			return scm.NewInt(int64(Settings.MaxPersistPercent))
 		case "MaxPersistBytes":
 			return scm.NewInt(Settings.MaxPersistBytes)
+		case "MaintenanceRamPercent":
+			return scm.NewInt(int64(Settings.MaintenanceRamPercent))
+		case "MaintenanceRamBytes":
+			return scm.NewInt(Settings.MaintenanceRamBytes)
 		case "MetricsTracing":
 			return scm.NewBool(Settings.MetricsTracing)
 		case "MetricsTracingInterval":
@@ -289,10 +306,12 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 			Settings.MaxRamPercent = scm.ToInt(a[1])
 			total, persisted := computeMemoryBudgets()
 			GlobalCache.UpdateBudget(total, persisted)
+			GlobalMaintenanceRAMBudget.SetCapacity(computeMaintenanceMemoryBudget(total))
 		case "MaxRamBytes":
 			Settings.MaxRamBytes = int64(scm.ToInt(a[1]))
 			total, persisted := computeMemoryBudgets()
 			GlobalCache.UpdateBudget(total, persisted)
+			GlobalMaintenanceRAMBudget.SetCapacity(computeMaintenanceMemoryBudget(total))
 		case "MaxPersistPercent":
 			Settings.MaxPersistPercent = scm.ToInt(a[1])
 			total, persisted := computeMemoryBudgets()
@@ -301,6 +320,14 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 			Settings.MaxPersistBytes = int64(scm.ToInt(a[1]))
 			total, persisted := computeMemoryBudgets()
 			GlobalCache.UpdateBudget(total, persisted)
+		case "MaintenanceRamPercent":
+			Settings.MaintenanceRamPercent = scm.ToInt(a[1])
+			total, _ := computeMemoryBudgets()
+			GlobalMaintenanceRAMBudget.SetCapacity(computeMaintenanceMemoryBudget(total))
+		case "MaintenanceRamBytes":
+			Settings.MaintenanceRamBytes = int64(scm.ToInt(a[1]))
+			total, _ := computeMemoryBudgets()
+			GlobalMaintenanceRAMBudget.SetCapacity(computeMaintenanceMemoryBudget(total))
 		case "MetricsTracing":
 			Settings.MetricsTracing = scm.ToBool(a[1])
 		case "MetricsTracingInterval":
@@ -361,8 +388,19 @@ func MakePrintLogFunc() func(string) {
 // Always exists as a struct; methods are no-ops until Init() is called.
 var GlobalCache CacheManager
 
-// totalMemoryBytes reads total physical RAM from /proc/meminfo (Linux).
+// totalMemoryBytes returns the memory available to this process. A cgroup-v2
+// hard limit takes precedence over host RAM so percentage budgets remain safe
+// in containers and services with MemoryMax configured.
 func totalMemoryBytes() int64 {
+	physical := physicalMemoryBytes()
+	limit := cgroupMemoryLimitBytes()
+	if limit > 0 && (physical <= 0 || limit < physical) {
+		return limit
+	}
+	return physical
+}
+
+func physicalMemoryBytes() int64 {
 	f, err := os.Open("/proc/meminfo")
 	if err != nil {
 		return 0
@@ -385,12 +423,56 @@ func totalMemoryBytes() int64 {
 	return 0
 }
 
+func cgroupMemoryLimitBytes() int64 {
+	data, err := os.ReadFile("/proc/self/cgroup")
+	if err != nil {
+		return 0
+	}
+	var relative string
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(line, "0::") {
+			relative = strings.TrimPrefix(line, "0::")
+			break
+		}
+	}
+	if relative == "" {
+		return 0
+	}
+	root := filepath.Clean("/sys/fs/cgroup")
+	dir := filepath.Join(root, filepath.Clean("/"+relative))
+	var limit int64
+	for {
+		value, readErr := os.ReadFile(filepath.Join(dir, "memory.max"))
+		if readErr == nil {
+			trimmed := strings.TrimSpace(string(value))
+			if trimmed != "max" {
+				candidate, parseErr := strconv.ParseInt(trimmed, 10, 64)
+				if parseErr == nil && candidate > 0 && (limit == 0 || candidate < limit) {
+					limit = candidate
+				}
+			}
+		}
+		if dir == root {
+			break
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir || !strings.HasPrefix(parent, root) {
+			break
+		}
+		dir = parent
+	}
+	return limit
+}
+
 func computeMemoryBudgets() (total, persisted int64) {
 	totalRAM := totalMemoryBytes()
 
 	// total budget
 	if Settings.MaxRamBytes > 0 {
 		total = Settings.MaxRamBytes
+		if totalRAM > 0 && total > totalRAM {
+			total = totalRAM
+		}
 	} else if totalRAM > 0 {
 		pct := Settings.MaxRamPercent
 		if pct == 0 {
@@ -413,9 +495,26 @@ func computeMemoryBudgets() (total, persisted int64) {
 	return
 }
 
+func computeMaintenanceMemoryBudget(total int64) int64 {
+	if Settings.MaintenanceRamBytes > 0 {
+		if total > 0 && Settings.MaintenanceRamBytes > total {
+			return total
+		}
+		return Settings.MaintenanceRamBytes
+	}
+	percent := Settings.MaintenanceRamPercent
+	if percent <= 0 {
+		percent = 50
+	} else if percent > 100 {
+		percent = 100
+	}
+	return total * int64(percent) / 100
+}
+
 // InitCacheManager initializes the global CacheManager. Call from InitSettings().
 func InitCacheManager() {
 	total, persisted := computeMemoryBudgets()
+	GlobalMaintenanceRAMBudget.SetCapacity(computeMaintenanceMemoryBudget(total))
 	if total > 0 || persisted > 0 {
 		GlobalCache.Init(total, persisted)
 	}

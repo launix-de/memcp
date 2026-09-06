@@ -651,6 +651,22 @@ func (db *database) rebuildWithLifecycle(all bool, repartition bool, includeEphe
 		}
 		dbs = onlineTables
 	}
+	// Keep the shared blob catalog last. It waits for every blob-producing table;
+	// putting it before an admission-blocked producer could otherwise reserve the
+	// maintenance budget while waiting for work that has not been started yet.
+	orderedTables := make([]*table, 0, len(dbs))
+	var blobTable *table
+	for _, t := range dbs {
+		if t.Name == ".blobs" {
+			blobTable = t
+		} else {
+			orderedTables = append(orderedTables, t)
+		}
+	}
+	if blobTable != nil {
+		orderedTables = append(orderedTables, blobTable)
+	}
+	dbs = orderedTables
 	var blobWriters sync.WaitGroup
 	for _, t := range dbs {
 		if t.Name != ".blobs" {
@@ -659,7 +675,10 @@ func (db *database) rebuildWithLifecycle(all bool, repartition bool, includeEphe
 	}
 	done.Add(len(dbs))
 	for _, t := range dbs {
-		go func(t *table) {
+		tableBytes := estimateTableMaintenanceBytes(t)
+		tableLease := GlobalMaintenanceRAMBudget.Acquire(tableBytes)
+		go func(t *table, tableBytes int64, tableLease *RAMLease) {
+			defer tableLease.Release()
 			if t.Name == ".blobs" {
 				// Rebuilding other tables may update blob refcounts. Rebuild the
 				// shared catalog only after those writes have completed.
@@ -722,61 +741,34 @@ func (db *database) rebuildWithLifecycle(all bool, repartition bool, includeEphe
 			var shardErrMu sync.Mutex
 			var shardErrors []string
 			sdone.Add(len(origShardList))
-			// throttle concurrent shard rebuilds by CPU count
+			// Acquire both CPU and RAM before creating the goroutine. This avoids a
+			// pool of blocked worker goroutines when memory is the tighter limit.
 			workers := runtime.NumCPU()
 			if workers < 1 {
 				workers = 1
 			}
-			type job struct {
-				i int
-				s *storageShard
-			}
-			if len(origShardList) <= workers {
-				for i, s := range origShardList {
-					go func(i int, s *storageShard) {
-						defer func() {
-							if r := recover(); r != nil {
-								errmsg := fmt.Sprintf("shard rebuild failed for %s.%s shard %d: %v", db.Name, t.Name, i, r)
-								fmt.Println("error:", errmsg)
-								shardErrMu.Lock()
-								shardErrors = append(shardErrors, errmsg)
-								shardErrMu.Unlock()
-							}
-							sdone.Done()
-						}()
-						if s != nil {
-							newShardList[i] = s.rebuild(all)
+			workerRights := make(chan struct{}, workers)
+			tableRows := int64(t.CountEstimate())
+			for i, s := range origShardList {
+				workerRights <- struct{}{}
+				shardLease := tableLease.Acquire(estimateShardMaintenanceBytes(tableBytes, estimatedShardRows(s), tableRows))
+				go func(i int, s *storageShard, shardLease *RAMLease) {
+					defer func() { <-workerRights }()
+					defer shardLease.Release()
+					defer func() {
+						if r := recover(); r != nil {
+							errmsg := fmt.Sprintf("shard rebuild failed for %s.%s shard %d: %v", db.Name, t.Name, i, r)
+							fmt.Println("error:", errmsg)
+							shardErrMu.Lock()
+							shardErrors = append(shardErrors, errmsg)
+							shardErrMu.Unlock()
 						}
-					}(i, s)
-				}
-			} else {
-				jobs := make(chan job, workers)
-				// launch workers
-				for w := 0; w < workers; w++ {
-					go func() {
-						for j := range jobs {
-							func(j job) {
-								defer func() {
-									if r := recover(); r != nil {
-										errmsg := fmt.Sprintf("shard rebuild failed for %s.%s shard %d: %v", db.Name, t.Name, j.i, r)
-										fmt.Println("error:", errmsg)
-										shardErrMu.Lock()
-										shardErrors = append(shardErrors, errmsg)
-										shardErrMu.Unlock()
-									}
-									sdone.Done()
-								}()
-								if j.s != nil {
-									newShardList[j.i] = j.s.rebuild(all)
-								}
-							}(j)
-						}
+						sdone.Done()
 					}()
-				}
-				for i, s := range origShardList {
-					jobs <- job{i: i, s: s}
-				}
-				close(jobs)
+					if s != nil {
+						newShardList[i] = s.rebuild(all)
+					}
+				}(i, s, shardLease)
 			}
 			sdone.Wait()
 			if len(shardErrors) > 0 {
@@ -1002,13 +994,13 @@ func (db *database) rebuildWithLifecycle(all bool, repartition bool, includeEphe
 				// maintenanceMu stays locked; repartition generation retirement
 				// releases it after the last old-topology user.
 				rebuildClaimed = false
-				t.repartitionDDLReadLocked(shardCandidates)
+				t.repartitionDDLReadLocked(shardCandidates, tableLease)
 			} else {
 				// No repartition — release maintenanceMu now
 				t.maintenanceMu.Unlock()
 				rebuildClaimed = false
 			}
-		}(t)
+		}(t, tableBytes, tableLease)
 	}
 	done.Wait()
 
