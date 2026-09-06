@@ -130,6 +130,57 @@ func rolling(limit uint64) uint64 {
 	}
 }
 
+func TestGeneratedBuiltinLoopUsesArchitectureRegisterHomes(t *testing.T) {
+	fn := buildTestSSAFunction(t, `package sample
+type Scmer struct{}
+func NewInt(int64) Scmer
+func (Scmer) Int() int64
+func rolling(a ...Scmer) Scmer {
+	limit := a[0].Int()
+	var sum int64
+	for index := int64(0); index < limit; index++ {
+		sum += index
+	}
+	return NewInt(sum)
+}
+`, "rolling")
+	code, errMsg := generateClosure("rolling", fn, nil)
+	if errMsg != "" {
+		t.Fatal(errMsg)
+	}
+	if !strings.Contains(code, "ctx.AllocRegisterHomes(") {
+		t.Fatalf("ordinary generated builtin does not request planned register homes:\n%s", code)
+	}
+}
+
+func TestLoopPhiRegisterPlanKeepsScmerInRegisterPair(t *testing.T) {
+	fn := buildTestSSAFunction(t, `package sample
+type Scmer struct { ptr, aux uint64 }
+func last(values []Scmer) Scmer {
+	var result Scmer
+	for _, value := range values {
+		result = value
+	}
+	return result
+}
+`, "last")
+	plan := planLoopPhiRegisters(fn)
+	foundPair := false
+	for name, width := range plan.widthByValue {
+		if width != 2 {
+			continue
+		}
+		foundPair = true
+		color := plan.colorByValue[name]
+		if color+1 >= plan.colorCount {
+			t.Fatalf("pair %s at color %d exceeds %d planned registers", name, color, plan.colorCount)
+		}
+	}
+	if !foundPair {
+		t.Fatalf("Scmer accumulator was not planned as a register pair: %#v", plan)
+	}
+}
+
 func TestRegisterColoringIsExactForSmallComponent(t *testing.T) {
 	nodes := make([]registerPlanNode, 4)
 	for index := range nodes {

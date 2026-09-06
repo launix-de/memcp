@@ -563,6 +563,9 @@ func (env *JITEnv) Lookup(sym Symbol) (JITValueDesc, bool) {
 type descSpillMeta struct {
 	loc      JITLoc
 	stackOff int32
+	reg      Reg
+	reg2     Reg
+	reg3     Reg
 }
 
 type jitStackRootBase uint8
@@ -706,11 +709,15 @@ type JITContext struct {
 	SpillOffset    int32 // current spill-zone allocation point below RBP
 	MaxSpillOffset int32 // spill-zone high-water mark
 
-	ProtectedRegs      uint64  // bitmask of registers that must not be spilled
-	ProtectedRegCounts [16]int // per-register protection refcount (supports nested protection)
-	nextDescID         uint32
-	descOwners         map[uint32]*JITValueDesc
-	descSpills         map[uint32]descSpillMeta
+	ProtectedRegs       uint64  // bitmask of registers that must not be spilled
+	ProtectedRegCounts  [16]int // per-register protection refcount (supports nested protection)
+	RegisterHomeCost    [16]uint16
+	RegisterHomeID      [16]uint16
+	PinnedRegisterHomes uint64
+	nextRegisterHomeID  uint16
+	nextDescID          uint32
+	descOwners          map[uint32]*JITValueDesc
+	descSpills          map[uint32]descSpillMeta
 	// ConstRoots holds pointer payloads from LocImm Scmer values that were
 	// materialized into machine code immediates. Keeping these pointers in a
 	// Go heap object reachable from JITEntryPoint prevents GC from reclaiming
@@ -731,57 +738,270 @@ type JITRegisterBank struct {
 	TemporaryReserve uint8
 }
 
+// JITRegisterSlot is an architecture-independent, statically colored value
+// bundle. Cost estimates the loop traffic avoided by retaining the bundle.
+type JITRegisterSlot struct {
+	Color uint8
+	Width uint8
+	// Lanes selects the words which still need physical storage after dynamic
+	// type folding. Zero means all Width lanes for compact generated literals.
+	Lanes uint8
+	Cost  uint16
+}
+
+// JITRegisterPlan is emitted by jitgen. It is deliberately a fixed-size value:
+// runtime emission only maps the preplanned slots and never rebuilds SSA or an
+// interference graph.
+type JITRegisterPlan struct {
+	Slots [16]JITRegisterSlot
+	Count uint8
+}
+
 // JITRegisterHomes maps architecture-independent colors to physical registers.
 // Its fixed-size representation keeps JIT emission allocation-free.
 type JITRegisterHomes struct {
 	Registers [16]Reg
-	Count     uint8
+	Available uint16
+	OwnedRegs uint64
+	Evicted   [16]jitRegisterHomeEviction
+	Evictions uint8
+}
+
+type jitRegisterHomeEviction struct {
+	owner    *JITValueDesc
+	original JITValueDesc
+	regs     [3]Reg
+	width    uint8
+	offset   int32
+	cost     uint16
+	homeID   uint16
 }
 
 // AllocRegisterHomes retains the most valuable planned colors while preserving
 // the backend's temporary-register budget. Excess colors keep their stack home.
-func (ctx *JITContext) AllocRegisterHomes(requested int) JITRegisterHomes {
+func (ctx *JITContext) AllocRegisterHomes(plan JITRegisterPlan) JITRegisterHomes {
 	var homes JITRegisterHomes
-	if requested <= 0 {
+	if plan.Count == 0 {
 		return homes
 	}
-	available := 0
+	freeCount := 0
 	for index := uint8(0); index < ctx.RegisterBank.Count; index++ {
 		reg := ctx.RegisterBank.Registers[index]
 		bit := uint64(1) << uint(reg)
 		if ctx.AllRegs&bit != 0 && ctx.FreeRegs&bit != 0 && ctx.ProtectedRegs&bit == 0 {
-			available++
+			freeCount++
 		}
 	}
-	available -= int(ctx.RegisterBank.TemporaryReserve)
-	if available <= 0 {
-		return homes
-	}
-	if requested > available {
-		requested = available
-	}
-	if requested > len(homes.Registers) {
-		requested = len(homes.Registers)
-	}
-	for index := uint8(0); index < ctx.RegisterBank.Count && int(homes.Count) < requested; index++ {
-		reg := ctx.RegisterBank.Registers[index]
-		bit := uint64(1) << uint(reg)
-		if ctx.AllRegs&bit == 0 || ctx.FreeRegs&bit == 0 || ctx.ProtectedRegs&bit != 0 {
+	budget := freeCount - int(ctx.RegisterBank.TemporaryReserve)
+	for slotIndex := uint8(0); slotIndex < plan.Count; slotIndex++ {
+		slot := plan.Slots[slotIndex]
+		if slot.Width == 0 || slot.Width > 3 || int(slot.Color)+int(slot.Width) > len(homes.Registers) {
 			continue
 		}
-		ctx.FreeRegs &^= bit
-		ctx.ProtectReg(reg)
-		homes.Registers[homes.Count] = reg
-		homes.Count++
+		lanes := slot.Lanes
+		if lanes == 0 {
+			lanes = uint8(1<<slot.Width) - 1
+		}
+		lanes &= uint8(1<<slot.Width) - 1
+		laneCount := 0
+		for lane := uint8(0); lane < slot.Width; lane++ {
+			if lanes&(1<<lane) != 0 {
+				laneCount++
+			}
+		}
+		for laneCount > budget {
+			homeID := ctx.cheapestEvictableRegisterHome(slot.Cost)
+			if homeID == 0 {
+				break
+			}
+			evicted, ok := ctx.evictRegisterHome(homeID)
+			if !ok {
+				break
+			}
+			homes.Evicted[homes.Evictions] = evicted
+			homes.Evictions++
+			budget += int(evicted.width)
+		}
+		if laneCount > budget {
+			continue
+		}
+		var selected [3]Reg
+		selectedCount := uint8(0)
+		for index := uint8(0); index < ctx.RegisterBank.Count && int(selectedCount) < laneCount; index++ {
+			reg := ctx.RegisterBank.Registers[index]
+			bit := uint64(1) << uint(reg)
+			if ctx.AllRegs&bit == 0 || ctx.FreeRegs&bit == 0 || ctx.ProtectedRegs&bit != 0 {
+				continue
+			}
+			selected[selectedCount] = reg
+			selectedCount++
+		}
+		if int(selectedCount) != laneCount {
+			continue
+		}
+		ctx.nextRegisterHomeID++
+		if ctx.nextRegisterHomeID == 0 {
+			ctx.nextRegisterHomeID++
+		}
+		selectedLane := uint8(0)
+		for lane := uint8(0); lane < slot.Width; lane++ {
+			if lanes&(1<<lane) == 0 {
+				continue
+			}
+			reg := selected[selectedLane]
+			selectedLane++
+			bit := uint64(1) << uint(reg)
+			ctx.FreeRegs &^= bit
+			ctx.ProtectReg(reg)
+			ctx.RegisterHomeCost[reg] = slot.Cost
+			ctx.RegisterHomeID[reg] = ctx.nextRegisterHomeID
+			homes.Registers[int(slot.Color)+int(lane)] = reg
+			homes.Available |= 1 << (slot.Color + lane)
+			homes.OwnedRegs |= bit
+		}
+		budget -= laneCount
 	}
 	return homes
 }
 
 func (ctx *JITContext) ReleaseRegisterHomes(homes JITRegisterHomes) {
-	for index := int(homes.Count) - 1; index >= 0; index-- {
-		reg := homes.Registers[index]
+	for index := uint8(0); index < ctx.RegisterBank.Count; index++ {
+		reg := ctx.RegisterBank.Registers[index]
+		bit := uint64(1) << uint(reg)
+		if homes.OwnedRegs&bit == 0 {
+			continue
+		}
+		ctx.RegisterHomeCost[reg] = 0
+		ctx.RegisterHomeID[reg] = 0
 		ctx.UnprotectReg(reg)
 		ctx.FreeReg(reg)
+	}
+	for index := int(homes.Evictions) - 1; index >= 0; index-- {
+		ctx.restoreRegisterHome(homes.Evicted[index])
+	}
+}
+
+func (ctx *JITContext) cheapestEvictableRegisterHome(maxCost uint16) uint16 {
+	bestCost := maxCost
+	bestID := uint16(0)
+	for index := uint8(0); index < ctx.RegisterBank.Count; index++ {
+		reg := ctx.RegisterBank.Registers[index]
+		bit := uint64(1) << uint(reg)
+		id := ctx.RegisterHomeID[reg]
+		cost := ctx.RegisterHomeCost[reg]
+		if id == 0 || cost >= bestCost || ctx.PinnedRegisterHomes&bit != 0 || ctx.ProtectedRegCounts[reg] != 1 || ctx.RegOwners[reg] == nil {
+			continue
+		}
+		valid := true
+		for other := uint8(0); other < ctx.RegisterBank.Count; other++ {
+			otherReg := ctx.RegisterBank.Registers[other]
+			if ctx.RegisterHomeID[otherReg] != id {
+				continue
+			}
+			otherBit := uint64(1) << uint(otherReg)
+			if ctx.PinnedRegisterHomes&otherBit != 0 || ctx.ProtectedRegCounts[otherReg] != 1 || ctx.RegOwners[otherReg] == nil {
+				valid = false
+				break
+			}
+		}
+		if valid {
+			bestCost, bestID = cost, id
+		}
+	}
+	return bestID
+}
+
+func (ctx *JITContext) evictRegisterHome(homeID uint16) (jitRegisterHomeEviction, bool) {
+	var eviction jitRegisterHomeEviction
+	for index := uint8(0); index < ctx.RegisterBank.Count; index++ {
+		reg := ctx.RegisterBank.Registers[index]
+		if ctx.RegisterHomeID[reg] != homeID {
+			continue
+		}
+		if eviction.width == 0 {
+			eviction.owner = ctx.RegOwners[reg]
+			eviction.original = *eviction.owner
+			eviction.cost = ctx.RegisterHomeCost[reg]
+			eviction.homeID = homeID
+		}
+		if eviction.width >= uint8(len(eviction.regs)) || ctx.RegOwners[reg] == nil || ctx.RegOwners[reg].ID != eviction.owner.ID {
+			return jitRegisterHomeEviction{}, false
+		}
+		eviction.regs[eviction.width] = reg
+		eviction.width++
+	}
+	if eviction.width == 0 {
+		return jitRegisterHomeEviction{}, false
+	}
+	words := jitDescWordCount(eviction.original)
+	if words != int(eviction.width) {
+		return jitRegisterHomeEviction{}, false
+	}
+	eviction.offset = ctx.AllocSpill(int32(words * 8))
+	regs := jitDescRegs(eviction.original)
+	for word, reg := range regs {
+		ctx.EmitStoreRegMem(reg, ctx.FrameReg, eviction.offset+int32(word*8))
+		ctx.setStackPointer(jitStackRootFrameBP, eviction.offset+int32(word*8), jitValueWordIsPointer(eviction.original, int32(word)))
+		bit := uint64(1) << uint(reg)
+		ctx.RegOwners[reg] = nil
+		ctx.FreeRegs |= bit
+		ctx.UnprotectReg(reg)
+		ctx.RegisterHomeCost[reg] = 0
+		ctx.RegisterHomeID[reg] = 0
+	}
+	eviction.owner.Reg, eviction.owner.Reg2, eviction.owner.Reg3 = 0, 0, 0
+	eviction.owner.StackOff = eviction.offset
+	switch words {
+	case 1:
+		eviction.owner.Loc = LocStack
+	case 2:
+		eviction.owner.Loc = LocStackPair
+	case 3:
+		eviction.owner.Loc = LocStackTriple
+	}
+	if eviction.owner.ID != 0 {
+		if ctx.descSpills == nil {
+			ctx.descSpills = make(map[uint32]descSpillMeta)
+		}
+		ctx.descSpills[eviction.owner.ID] = descSpillMeta{loc: eviction.owner.Loc, stackOff: eviction.offset}
+	}
+	return eviction, true
+}
+
+func (ctx *JITContext) restoreRegisterHome(eviction jitRegisterHomeEviction) {
+	for word, reg := range jitDescRegs(eviction.original) {
+		ctx.EmitMovRegMem(reg, ctx.FrameReg, eviction.offset+int32(word*8))
+		bit := uint64(1) << uint(reg)
+		ctx.FreeRegs &^= bit
+		ctx.ProtectReg(reg)
+		ctx.RegisterHomeCost[reg] = eviction.cost
+		ctx.RegisterHomeID[reg] = eviction.homeID
+	}
+	*eviction.owner = eviction.original
+	for _, reg := range jitDescRegs(eviction.original) {
+		ctx.RegOwners[reg] = eviction.owner
+	}
+	if eviction.owner.ID != 0 {
+		if ctx.descSpills == nil {
+			ctx.descSpills = make(map[uint32]descSpillMeta)
+		}
+		ctx.descSpills[eviction.owner.ID] = descSpillMeta{
+			loc: eviction.original.Loc, reg: eviction.original.Reg,
+			reg2: eviction.original.Reg2, reg3: eviction.original.Reg3,
+		}
+	}
+}
+
+func jitDescWordCount(desc JITValueDesc) int {
+	switch desc.Loc {
+	case LocReg:
+		return 1
+	case LocRegPair:
+		return 2
+	case LocRegTriple:
+		return 3
+	default:
+		return 0
 	}
 }
 
@@ -800,16 +1020,19 @@ func (ctx *JITContext) RequestOptimizedCallback(sourceInput int) JITValueDesc {
 // jitAllocStateSnapshot captures allocator/spill bookkeeping so emitter
 // generation can render sibling BBs from identical allocator state.
 type jitAllocStateSnapshot struct {
-	freeRegs           uint64
-	protectedRegs      uint64
-	protectedRegCounts [16]int
-	regOwnerIDs        [16]uint32
-	ownerValues        []jitOwnerSnapshot
-	firstNewDescID     uint32
-	spillOffset        int32
-	descSpills         []jitDescSpillSnapshot
-	stackRoots         []jitStackRoot
-	dynamicSP          int32
+	freeRegs            uint64
+	protectedRegs       uint64
+	protectedRegCounts  [16]int
+	registerHomeCost    [16]uint16
+	registerHomeID      [16]uint16
+	pinnedRegisterHomes uint64
+	regOwnerIDs         [16]uint32
+	ownerValues         []jitOwnerSnapshot
+	firstNewDescID      uint32
+	spillOffset         int32
+	descSpills          []jitDescSpillSnapshot
+	stackRoots          []jitStackRoot
+	dynamicSP           int32
 }
 
 type jitOwnerSnapshot struct {
@@ -824,12 +1047,15 @@ type jitDescSpillSnapshot struct {
 
 func (ctx *JITContext) SnapshotAllocState() jitAllocStateSnapshot {
 	s := jitAllocStateSnapshot{
-		freeRegs:           ctx.FreeRegs,
-		protectedRegs:      ctx.ProtectedRegs,
-		protectedRegCounts: ctx.ProtectedRegCounts,
-		firstNewDescID:     ctx.nextDescID + 1,
-		spillOffset:        ctx.SpillOffset,
-		dynamicSP:          ctx.DynamicSP,
+		freeRegs:            ctx.FreeRegs,
+		protectedRegs:       ctx.ProtectedRegs,
+		protectedRegCounts:  ctx.ProtectedRegCounts,
+		registerHomeCost:    ctx.RegisterHomeCost,
+		registerHomeID:      ctx.RegisterHomeID,
+		pinnedRegisterHomes: ctx.PinnedRegisterHomes,
+		firstNewDescID:      ctx.nextDescID + 1,
+		spillOffset:         ctx.SpillOffset,
+		dynamicSP:           ctx.DynamicSP,
 	}
 	if len(ctx.descOwners) != 0 {
 		for id, owner := range ctx.descOwners {
@@ -862,6 +1088,9 @@ func (ctx *JITContext) RestoreAllocState(s jitAllocStateSnapshot) {
 	ctx.FreeRegs = s.freeRegs
 	ctx.ProtectedRegs = s.protectedRegs
 	ctx.ProtectedRegCounts = s.protectedRegCounts
+	ctx.RegisterHomeCost = s.registerHomeCost
+	ctx.RegisterHomeID = s.registerHomeID
+	ctx.PinnedRegisterHomes = s.pinnedRegisterHomes
 	ctx.SpillOffset = s.spillOffset
 	// Descriptor identities are global to one emitted function. Restoring an
 	// older basic-block snapshot must not make later descriptors reuse IDs whose
@@ -1114,9 +1343,29 @@ type jitNestedPreservation struct {
 // available to the nested emitter, and RestoreOuterRegs reloads the exact same
 // registers before outer code resumes.
 func (ctx *JITContext) PreserveOuterRegs() jitNestedPreservation {
+	return ctx.PreserveOuterRegsExcept()
+}
+
+// PreserveOuterRegsExcept preserves the outer allocator state while leaving
+// result registers in place for a nested emitter to overwrite directly.
+func (ctx *JITContext) PreserveOuterRegsExcept(resultRegs ...Reg) jitNestedPreservation {
 	p := jitNestedPreservation{alloc: ctx.SnapshotAllocState()}
+	var resultMask uint64
+	for _, r := range resultRegs {
+		resultMask |= 1 << uint(r)
+	}
 	for r := Reg(0); r <= RegR15; r++ {
 		if (ctx.AllRegs&(1<<uint(r))) == 0 || (ctx.FreeRegs&(1<<uint(r))) != 0 {
+			continue
+		}
+		if resultMask&(1<<uint(r)) != 0 {
+			continue
+		}
+		// Weighted homes are the interface between the offline plan and nested
+		// one-pass emission. Keep them resident here; an inner register plan may
+		// selectively evict cheaper homes and restores their exact registers when
+		// it returns. Ordinary temporaries still take the conservative save path.
+		if ctx.RegisterHomeID[r] != 0 {
 			continue
 		}
 		off := ctx.AllocSpill(8)
@@ -1129,8 +1378,19 @@ func (ctx *JITContext) PreserveOuterRegs() jitNestedPreservation {
 		ctx.RegOwners[r] = nil
 		ctx.FreeRegs |= 1 << uint(r)
 	}
-	ctx.ProtectedRegs = 0
-	ctx.ProtectedRegCounts = [16]int{}
+	homeMask := uint64(0)
+	for r := Reg(0); r <= RegR15; r++ {
+		if ctx.RegisterHomeID[r] != 0 {
+			homeMask |= 1 << uint(r)
+		}
+	}
+	ctx.PinnedRegisterHomes |= resultMask
+	ctx.ProtectedRegs &= resultMask | homeMask
+	for r := Reg(0); r <= RegR15; r++ {
+		if (resultMask|homeMask)&(1<<uint(r)) == 0 {
+			ctx.ProtectedRegCounts[r] = 0
+		}
+	}
 	return p
 }
 
@@ -1319,32 +1579,16 @@ func (ctx *JITContext) AllocReg() Reg {
 
 // EnsureDesc restores a descriptor from stack/spill locations to registers.
 func (ctx *JITContext) syncDescSpill(desc *JITValueDesc) {
-	if desc.Loc == LocReg && desc.ID != 0 && ctx.descSpills != nil {
-		if meta, ok := ctx.descSpills[desc.ID]; ok && meta.loc == LocStack {
-			desc.Loc = LocStack
-			desc.MemPtr = 0
-			desc.StackOff = meta.stackOff
-			desc.Reg = 0
-		}
+	if desc.ID == 0 || ctx.descSpills == nil {
+		return
 	}
-	if desc.Loc == LocRegPair && desc.ID != 0 && ctx.descSpills != nil {
-		if meta, ok := ctx.descSpills[desc.ID]; ok && meta.loc == LocStackPair {
-			desc.Loc = LocStackPair
-			desc.MemPtr = 0
-			desc.StackOff = meta.stackOff
-			desc.Reg = 0
-			desc.Reg2 = 0
-		}
-	}
-	if desc.Loc == LocRegTriple && desc.ID != 0 && ctx.descSpills != nil {
-		if meta, ok := ctx.descSpills[desc.ID]; ok && meta.loc == LocStackTriple {
-			desc.Loc = LocStackTriple
-			desc.MemPtr = 0
-			desc.StackOff = meta.stackOff
-			desc.Reg = 0
-			desc.Reg2 = 0
-			desc.Reg3 = 0
-		}
+	if meta, ok := ctx.descSpills[desc.ID]; ok {
+		desc.Loc = meta.loc
+		desc.MemPtr = 0
+		desc.StackOff = meta.stackOff
+		desc.Reg = meta.reg
+		desc.Reg2 = meta.reg2
+		desc.Reg3 = meta.reg3
 	}
 }
 
@@ -2754,6 +2998,26 @@ func (ctx *JITContext) emitGoCall(funcAddr uint64, argWords []goCallArgWord, num
 	// Owner-aware liveness with conservative fallback.
 	var liveRegsArr [16]Reg
 	liveRegs := ctx.collectLiveRegsForCall(&liveRegsArr)
+	// A requested result register is dead immediately before the call: argument
+	// setup has already consumed its old value and the call deliberately
+	// overwrites it. Saving and restoring such a register only to overwrite it
+	// again adds two instructions per loop iteration.
+	if len(resultTargets) != 0 && len(liveRegs) != 0 {
+		kept := liveRegs[:0]
+		for _, live := range liveRegs {
+			isResult := false
+			for _, target := range resultTargets {
+				if live == target {
+					isResult = true
+					break
+				}
+			}
+			if !isResult {
+				kept = append(kept, live)
+			}
+		}
+		liveRegs = kept
+	}
 	// Preserve the argument slice base register across helper calls as well.
 	// It is not part of the allocator pool but can still be needed by
 	// subsequent argument loads in the same emitted function.
@@ -3104,6 +3368,36 @@ func (ctx *JITContext) EmitGoCallScalarInto(funcAddr uint64, args []JITValueDesc
 // not consume an intermediate register pair.
 func (ctx *JITContext) EmitMovPairToResult(src *JITValueDesc, dst *JITValueDesc) {
 	ctx.SyncDesc(src)
+	if src.Loc == LocImm {
+		switch src.Imm.GetTag() {
+		case tagBool:
+			ctx.EmitMakeBool(*dst, *src)
+		case tagInt:
+			ctx.EmitMakeInt(*dst, *src)
+		case tagFloat:
+			ctx.EmitMakeFloat(*dst, *src)
+		case tagNil:
+			ctx.EmitMakeNil(*dst)
+		default:
+			ptr, aux := src.Imm.RawWords()
+			ctx.EmitMovRegImm64(dst.Reg, uint64(ptr))
+			ctx.EmitMovRegImm64(dst.Reg2, aux)
+		}
+		return
+	}
+	if src.Loc == LocReg {
+		switch src.Type {
+		case tagBool:
+			ctx.EmitMakeBool(*dst, *src)
+		case tagInt:
+			ctx.EmitMakeInt(*dst, *src)
+		case tagFloat:
+			ctx.EmitMakeFloat(*dst, *src)
+		default:
+			panic("jit: scalar pair move requires a known primitive type")
+		}
+		return
+	}
 	if src.Loc == LocStackPair {
 		base := ctx.StackReg
 		if src.StackOff < 0 {
@@ -3121,6 +3415,11 @@ func (ctx *JITContext) EmitMovPairToResult(src *JITValueDesc, dst *JITValueDesc)
 		}
 		ctx.EmitMovRegMem(dst.Reg, base, src.StackOff*16)
 		ctx.EmitMovRegMem(dst.Reg2, base, src.StackOff*16+8)
+		return
+	}
+	if src.Loc == LocClosurePair || src.Loc == LocStack {
+		ctx.EnsureDesc(src)
+		ctx.EmitMovPairToResult(src, dst)
 		return
 	}
 	if src.Loc != LocRegPair {
@@ -3608,15 +3907,18 @@ func init_jit() {
 				_ = d67
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(32))
-				d1 := JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(0)}
-				_ = d1
-				d2 := JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(16)}
-				_ = d2
 				var bbs [6]BBDescriptor
 				bbs[2].PhiBase = int32(phiBase0) + int32(0)
 				bbs[2].PhiCount = uint16(1)
 				bbs[4].PhiBase = int32(phiBase0) + int32(16)
 				bbs[4].PhiCount = uint16(1)
+				for i := range args {
+					ctx.StabilizeDescForControlFlow(&args[i])
+				}
+				d1 := JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(0)}
+				_ = d1
+				d2 := JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(16)}
+				_ = d2
 				if result.Loc == LocAny {
 					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 					ctx.BindReg(result.Reg, &result)
@@ -3996,7 +4298,6 @@ func init_jit() {
 					if !ps.General {
 						if len(ps.PhiValues) > 0 && ps.PhiValues[0].Loc != LocNone {
 							d47 := ps.PhiValues[0]
-							ctx.EnsureDesc(&d47)
 							ctx.EmitStoreToStack(d47, int32(bbs[2].PhiBase)+int32(0))
 						}
 						if bbs[2].VisitCount >= 0 {
@@ -4230,7 +4531,6 @@ func init_jit() {
 					if !ps.General {
 						if len(ps.PhiValues) > 0 && ps.PhiValues[0].Loc != LocNone {
 							d54 := ps.PhiValues[0]
-							ctx.EnsureDesc(&d54)
 							ctx.EmitStoreToStack(d54, int32(bbs[4].PhiBase)+int32(0))
 						}
 						if bbs[4].VisitCount >= 0 {
@@ -4716,9 +5016,6 @@ func init_jit() {
 					ctx.FreeDesc(&d60)
 					return result
 				}
-				for i := range args {
-					ctx.StabilizeDescForControlFlow(&args[i])
-				}
 				ps98 := PhiState{General: false}
 				_ = bbs[0].RenderPS(ps98)
 				ctx.MarkLabel(lbl0)
@@ -4854,13 +5151,6 @@ func init_jit() {
 				_ = d200
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(48))
-				d1 := JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(0)}
-				_ = d1
-				d2 := JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(16)}
-				_ = d2
-				d3 := JITValueDesc{Loc: LocStackPair, Type: tagString, StackOff: int32(phiBase0) + int32(32)}
-				ctx.PrepareScmerStackTarget(int32(phiBase0) + int32(32))
-				_ = d3
 				var bbs [11]BBDescriptor
 				bbs[2].PhiBase = int32(phiBase0) + int32(0)
 				bbs[2].PhiCount = uint16(1)
@@ -4868,6 +5158,16 @@ func init_jit() {
 				bbs[4].PhiCount = uint16(1)
 				bbs[10].PhiBase = int32(phiBase0) + int32(32)
 				bbs[10].PhiCount = uint16(1)
+				for i := range args {
+					ctx.StabilizeDescForControlFlow(&args[i])
+				}
+				d1 := JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(0)}
+				_ = d1
+				d2 := JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(16)}
+				_ = d2
+				d3 := JITValueDesc{Loc: LocStackPair, Type: tagString, StackOff: int32(phiBase0) + int32(32)}
+				ctx.PrepareScmerStackTarget(int32(phiBase0) + int32(32))
+				_ = d3
 				if result.Loc == LocAny {
 					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 					ctx.BindReg(result.Reg, &result)
@@ -5278,7 +5578,6 @@ func init_jit() {
 					if !ps.General {
 						if len(ps.PhiValues) > 0 && ps.PhiValues[0].Loc != LocNone {
 							d48 := ps.PhiValues[0]
-							ctx.EnsureDesc(&d48)
 							ctx.EmitStoreToStack(d48, int32(bbs[2].PhiBase)+int32(0))
 						}
 						if bbs[2].VisitCount >= 0 {
@@ -5512,7 +5811,6 @@ func init_jit() {
 					if !ps.General {
 						if len(ps.PhiValues) > 0 && ps.PhiValues[0].Loc != LocNone {
 							d54 := ps.PhiValues[0]
-							ctx.EnsureDesc(&d54)
 							ctx.EmitStoreToStack(d54, int32(bbs[4].PhiBase)+int32(0))
 						}
 						if bbs[4].VisitCount >= 0 {
@@ -6149,19 +6447,7 @@ func init_jit() {
 							if d100.Loc == LocNone {
 								panic("jit: phi source has no location")
 							}
-							ctx.SyncDesc(&d100)
-							if d100.Loc == LocStackPair {
-								ctx.EmitCopyStackWords(d100, int32(bbs[10].PhiBase)+int32(0), 2)
-							} else if d100.Loc == LocInputPair {
-								ctx.EnsureDesc(&d100)
-								ctx.EmitStoreScmerToStack(d100, int32(bbs[10].PhiBase)+int32(0))
-							} else if d100.Loc == LocRegPair || d100.Loc == LocImm {
-								ctx.EmitStoreScmerToStack(d100, int32(bbs[10].PhiBase)+int32(0))
-							} else {
-								ctx.EnsureDesc(&d100)
-								ctx.EmitStoreToStack(d100, int32(bbs[10].PhiBase)+int32(0))
-								ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(bbs[10].PhiBase)+int32(0))+8)
-							}
+							ctx.EmitStoreScmerToStack(d100, int32(bbs[10].PhiBase)+int32(0))
 							if d95.Loc == LocReg {
 								ctx.UnprotectReg(d95.Reg)
 							} else if d95.Loc == LocRegPair {
@@ -6231,19 +6517,7 @@ func init_jit() {
 					if d103.Loc == LocNone {
 						panic("jit: phi source has no location")
 					}
-					ctx.SyncDesc(&d103)
-					if d103.Loc == LocStackPair {
-						ctx.EmitCopyStackWords(d103, int32(bbs[10].PhiBase)+int32(0), 2)
-					} else if d103.Loc == LocInputPair {
-						ctx.EnsureDesc(&d103)
-						ctx.EmitStoreScmerToStack(d103, int32(bbs[10].PhiBase)+int32(0))
-					} else if d103.Loc == LocRegPair || d103.Loc == LocImm {
-						ctx.EmitStoreScmerToStack(d103, int32(bbs[10].PhiBase)+int32(0))
-					} else {
-						ctx.EnsureDesc(&d103)
-						ctx.EmitStoreToStack(d103, int32(bbs[10].PhiBase)+int32(0))
-						ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(bbs[10].PhiBase)+int32(0))+8)
-					}
+					ctx.EmitStoreScmerToStack(d103, int32(bbs[10].PhiBase)+int32(0))
 					if d95.Loc == LocReg {
 						ctx.UnprotectReg(d95.Reg)
 					} else if d95.Loc == LocRegPair {
@@ -7117,19 +7391,7 @@ func init_jit() {
 						if d188.Loc == LocNone {
 							panic("jit: phi source has no location")
 						}
-						ctx.SyncDesc(&d188)
-						if d188.Loc == LocStackPair {
-							ctx.EmitCopyStackWords(d188, int32(bbs[10].PhiBase)+int32(0), 2)
-						} else if d188.Loc == LocInputPair {
-							ctx.EnsureDesc(&d188)
-							ctx.EmitStoreScmerToStack(d188, int32(bbs[10].PhiBase)+int32(0))
-						} else if d188.Loc == LocRegPair || d188.Loc == LocImm {
-							ctx.EmitStoreScmerToStack(d188, int32(bbs[10].PhiBase)+int32(0))
-						} else {
-							ctx.EnsureDesc(&d188)
-							ctx.EmitStoreToStack(d188, int32(bbs[10].PhiBase)+int32(0))
-							ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(bbs[10].PhiBase)+int32(0))+8)
-						}
+						ctx.EmitStoreScmerToStack(d188, int32(bbs[10].PhiBase)+int32(0))
 						if d186.Loc == LocReg {
 							ctx.UnprotectReg(d186.Reg)
 						} else if d186.Loc == LocRegPair {
@@ -7193,7 +7455,6 @@ func init_jit() {
 					if !ps.General {
 						if len(ps.PhiValues) > 0 && ps.PhiValues[0].Loc != LocNone {
 							d191 := ps.PhiValues[0]
-							ctx.EnsureDesc(&d191)
 							ctx.EmitStoreScmerToStack(d191, int32(bbs[10].PhiBase)+int32(0))
 						}
 						if bbs[10].VisitCount >= 0 {
@@ -7455,9 +7716,6 @@ func init_jit() {
 					}
 					return bbs[7].RenderPS(ps201)
 					return result
-				}
-				for i := range args {
-					ctx.StabilizeDescForControlFlow(&args[i])
 				}
 				ps202 := PhiState{General: false}
 				_ = bbs[0].RenderPS(ps202)

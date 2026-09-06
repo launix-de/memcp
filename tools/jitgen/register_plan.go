@@ -28,7 +28,17 @@ import (
 // keep the most valuable subset when it has fewer persistent registers.
 type staticRegisterPlan struct {
 	colorByValue map[string]int
+	widthByValue map[string]int
+	slots        []staticRegisterSlot
 	colorCount   int
+}
+
+type staticRegisterSlot struct {
+	color     int
+	width     int
+	weight    int
+	oldColor  int
+	valueName string
 }
 
 type registerPlanNode struct {
@@ -40,12 +50,13 @@ type registerPlanNode struct {
 const exactRegisterColoringLimit = 20
 
 func planLoopPhiRegisters(fn *ssa.Function) staticRegisterPlan {
-	plan := staticRegisterPlan{colorByValue: map[string]int{}}
+	plan := staticRegisterPlan{colorByValue: map[string]int{}, widthByValue: map[string]int{}}
 	if fn == nil {
 		return plan
 	}
 
 	var nodes []registerPlanNode
+	var pairNodes []registerPlanNode
 	for _, block := range fn.Blocks {
 		if !registerPlanLoopHeader(block) {
 			continue
@@ -55,7 +66,7 @@ func planLoopPhiRegisters(fn *ssa.Function) staticRegisterPlan {
 			if !ok {
 				break
 			}
-			if isPhiPairType(phi.Type()) || isPhiTripleType(phi.Type()) {
+			if isPhiTripleType(phi.Type()) {
 				continue
 			}
 			// Phi-to-phi assignments need a parallel-copy schedule. Retain their
@@ -63,20 +74,22 @@ func planLoopPhiRegisters(fn *ssa.Function) staticRegisterPlan {
 			if registerPlanHasPhiInput(phi) {
 				continue
 			}
-			weight := 1
-			if refs := phi.Referrers(); refs != nil {
-				// A use inside the loop is paid on every iteration. This simple
-				// static weight is deterministic and sufficient for ordering homes.
-				weight += len(*refs)
+			if isPhiPairType(phi.Type()) {
+				pairNodes = append(pairNodes, registerPlanNode{
+					value:     phi,
+					weight:    registerPlanValueWeight(phi) * 2,
+					neighbors: map[int]struct{}{},
+				})
+				continue
 			}
 			nodes = append(nodes, registerPlanNode{
 				value:     phi,
-				weight:    weight,
+				weight:    registerPlanValueWeight(phi),
 				neighbors: map[int]struct{}{},
 			})
 		}
 	}
-	if len(nodes) == 0 {
+	if len(nodes) == 0 && len(pairNodes) == 0 {
 		return plan
 	}
 
@@ -118,9 +131,6 @@ func planLoopPhiRegisters(fn *ssa.Function) staticRegisterPlan {
 	}
 
 	colors, colorCount := colorRegisterPlan(nodes)
-	if colorCount == 0 {
-		return plan
-	}
 	weights := make([]int, colorCount)
 	for node, color := range colors {
 		weights[color] += nodes[node].weight
@@ -132,15 +142,58 @@ func planLoopPhiRegisters(fn *ssa.Function) staticRegisterPlan {
 	sort.SliceStable(order, func(i, j int) bool {
 		return weights[order[i]] > weights[order[j]]
 	})
-	remap := make([]int, colorCount)
-	for priority, color := range order {
-		remap[color] = priority
+	var slots []staticRegisterSlot
+	for _, color := range order {
+		slots = append(slots, staticRegisterSlot{width: 1, weight: weights[color], oldColor: color})
+	}
+	for _, node := range pairNodes {
+		slots = append(slots, staticRegisterSlot{width: 2, weight: node.weight, oldColor: -1, valueName: node.value.Name()})
+	}
+	sort.SliceStable(slots, func(i, j int) bool {
+		return slots[i].weight > slots[j].weight
+	})
+	kept := slots[:0]
+	for _, slot := range slots {
+		if plan.colorCount+slot.width > 16 {
+			continue
+		}
+		slot.color = plan.colorCount
+		plan.colorCount += slot.width
+		kept = append(kept, slot)
+	}
+	slots = kept
+	plan.slots = kept
+
+	for _, slot := range slots {
+		if slot.width != 2 {
+			continue
+		}
+		plan.colorByValue[slot.valueName] = slot.color
+		plan.widthByValue[slot.valueName] = 2
 	}
 	for node, color := range colors {
-		plan.colorByValue[nodes[node].value.Name()] = remap[color]
+		newColor := -1
+		for _, slot := range slots {
+			if slot.width == 1 && slot.oldColor == color {
+				newColor = slot.color
+				break
+			}
+		}
+		if newColor < 0 {
+			continue
+		}
+		plan.colorByValue[nodes[node].value.Name()] = newColor
+		plan.widthByValue[nodes[node].value.Name()] = 1
 	}
-	plan.colorCount = colorCount
 	return plan
+}
+
+func registerPlanValueWeight(value ssa.Value) int {
+	weight := 2 // one definition and the loop-carried write
+	if refs := value.Referrers(); refs != nil {
+		weight += len(*refs)
+	}
+	return weight
 }
 
 func registerPlanLoopHeader(block *ssa.BasicBlock) bool {

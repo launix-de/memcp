@@ -73,7 +73,7 @@ type tokenPrefix struct {
 	toks map[string]struct{}
 }
 
-func (p *tokenPrefix) markAny()          { p.any = true; p.toks = nil }
+func (p *tokenPrefix) markAny() { p.any = true; p.toks = nil }
 func (p *tokenPrefix) addToken(t string) {
 	if p.any {
 		return
@@ -104,9 +104,9 @@ func (p *tokenPrefix) merge(other tokenPrefix) bool {
 }
 
 type memoNeedAnalysis struct {
-	program  *jitParserProgram
-	n        int
-	nullable []bool
+	program   *jitParserProgram
+	n         int
+	nullable  []bool
 	entersAt0 []parserRuleSet // rules enterable before consuming any input
 	reaches   []parserRuleSet // rules reachable at any offset (transitive)
 	first     []tokenPrefix
