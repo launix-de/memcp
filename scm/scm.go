@@ -13097,7 +13097,18 @@ Patterns can be any of:
 							panic("jit: phi source has no location")
 						}
 						ctx.SyncDesc(&d21)
-						ctx.EmitStoreScmerToStack(d21, int32(bbs[2].PhiBase)+int32(0))
+						if d21.Loc == LocStackPair {
+							ctx.EmitCopyStackWords(d21, int32(bbs[2].PhiBase)+int32(0), 2)
+						} else if d21.Loc == LocInputPair {
+							ctx.EnsureDesc(&d21)
+							ctx.EmitStoreScmerToStack(d21, int32(bbs[2].PhiBase)+int32(0))
+						} else if d21.Loc == LocRegPair || d21.Loc == LocImm {
+							ctx.EmitStoreScmerToStack(d21, int32(bbs[2].PhiBase)+int32(0))
+						} else {
+							ctx.EnsureDesc(&d21)
+							ctx.EmitStoreToStack(d21, int32(bbs[2].PhiBase)+int32(0))
+							ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(bbs[2].PhiBase)+int32(0))+8)
+						}
 						if d19.Loc == LocReg {
 							ctx.UnprotectReg(d19.Reg)
 						} else if d19.Loc == LocRegPair {
@@ -13650,7 +13661,18 @@ Patterns can be any of:
 								panic("jit: phi source has no location")
 							}
 							ctx.SyncDesc(&d56)
-							ctx.EmitStoreScmerToStack(d56, int32(phiBase33)+int32(0))
+							if d56.Loc == LocStackPair {
+								ctx.EmitCopyStackWords(d56, int32(phiBase33)+int32(0), 2)
+							} else if d56.Loc == LocInputPair {
+								ctx.EnsureDesc(&d56)
+								ctx.EmitStoreScmerToStack(d56, int32(phiBase33)+int32(0))
+							} else if d56.Loc == LocRegPair || d56.Loc == LocImm {
+								ctx.EmitStoreScmerToStack(d56, int32(phiBase33)+int32(0))
+							} else {
+								ctx.EnsureDesc(&d56)
+								ctx.EmitStoreToStack(d56, int32(phiBase33)+int32(0))
+								ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase33)+int32(0))+8)
+							}
 							if d45.Loc == LocReg {
 								ctx.UnprotectReg(d45.Reg)
 							} else if d45.Loc == LocRegPair {
@@ -13678,7 +13700,18 @@ Patterns can be any of:
 							panic("jit: phi source has no location")
 						}
 						ctx.SyncDesc(&d57)
-						ctx.EmitStoreScmerToStack(d57, int32(phiBase33)+int32(0))
+						if d57.Loc == LocStackPair {
+							ctx.EmitCopyStackWords(d57, int32(phiBase33)+int32(0), 2)
+						} else if d57.Loc == LocInputPair {
+							ctx.EnsureDesc(&d57)
+							ctx.EmitStoreScmerToStack(d57, int32(phiBase33)+int32(0))
+						} else if d57.Loc == LocRegPair || d57.Loc == LocImm {
+							ctx.EmitStoreScmerToStack(d57, int32(phiBase33)+int32(0))
+						} else {
+							ctx.EnsureDesc(&d57)
+							ctx.EmitStoreToStack(d57, int32(phiBase33)+int32(0))
+							ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase33)+int32(0))+8)
+						}
 						if d45.Loc == LocReg {
 							ctx.UnprotectReg(d45.Reg)
 						} else if d45.Loc == LocRegPair {
@@ -13828,7 +13861,18 @@ Patterns can be any of:
 						panic("jit: phi source has no location")
 					}
 					ctx.SyncDesc(&d66)
-					ctx.EmitStoreScmerToStack(d66, int32(phiBase33)+int32(0))
+					if d66.Loc == LocStackPair {
+						ctx.EmitCopyStackWords(d66, int32(phiBase33)+int32(0), 2)
+					} else if d66.Loc == LocInputPair {
+						ctx.EnsureDesc(&d66)
+						ctx.EmitStoreScmerToStack(d66, int32(phiBase33)+int32(0))
+					} else if d66.Loc == LocRegPair || d66.Loc == LocImm {
+						ctx.EmitStoreScmerToStack(d66, int32(phiBase33)+int32(0))
+					} else {
+						ctx.EnsureDesc(&d66)
+						ctx.EmitStoreToStack(d66, int32(phiBase33)+int32(0))
+						ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase33)+int32(0))+8)
+					}
 					if d65.Loc == LocReg {
 						ctx.UnprotectReg(d65.Reg)
 					} else if d65.Loc == LocRegPair {
@@ -14507,7 +14551,18 @@ Patterns can be any of:
 								panic("jit: phi source has no location")
 							}
 							ctx.SyncDesc(&d115)
-							ctx.EmitStoreScmerToStack(d115, int32(phiBase92)+int32(0))
+							if d115.Loc == LocStackPair {
+								ctx.EmitCopyStackWords(d115, int32(phiBase92)+int32(0), 2)
+							} else if d115.Loc == LocInputPair {
+								ctx.EnsureDesc(&d115)
+								ctx.EmitStoreScmerToStack(d115, int32(phiBase92)+int32(0))
+							} else if d115.Loc == LocRegPair || d115.Loc == LocImm {
+								ctx.EmitStoreScmerToStack(d115, int32(phiBase92)+int32(0))
+							} else {
+								ctx.EnsureDesc(&d115)
+								ctx.EmitStoreToStack(d115, int32(phiBase92)+int32(0))
+								ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase92)+int32(0))+8)
+							}
 							if d104.Loc == LocReg {
 								ctx.UnprotectReg(d104.Reg)
 							} else if d104.Loc == LocRegPair {
@@ -14535,7 +14590,18 @@ Patterns can be any of:
 							panic("jit: phi source has no location")
 						}
 						ctx.SyncDesc(&d116)
-						ctx.EmitStoreScmerToStack(d116, int32(phiBase92)+int32(0))
+						if d116.Loc == LocStackPair {
+							ctx.EmitCopyStackWords(d116, int32(phiBase92)+int32(0), 2)
+						} else if d116.Loc == LocInputPair {
+							ctx.EnsureDesc(&d116)
+							ctx.EmitStoreScmerToStack(d116, int32(phiBase92)+int32(0))
+						} else if d116.Loc == LocRegPair || d116.Loc == LocImm {
+							ctx.EmitStoreScmerToStack(d116, int32(phiBase92)+int32(0))
+						} else {
+							ctx.EnsureDesc(&d116)
+							ctx.EmitStoreToStack(d116, int32(phiBase92)+int32(0))
+							ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase92)+int32(0))+8)
+						}
 						if d104.Loc == LocReg {
 							ctx.UnprotectReg(d104.Reg)
 						} else if d104.Loc == LocRegPair {
@@ -14685,7 +14751,18 @@ Patterns can be any of:
 						panic("jit: phi source has no location")
 					}
 					ctx.SyncDesc(&d125)
-					ctx.EmitStoreScmerToStack(d125, int32(phiBase92)+int32(0))
+					if d125.Loc == LocStackPair {
+						ctx.EmitCopyStackWords(d125, int32(phiBase92)+int32(0), 2)
+					} else if d125.Loc == LocInputPair {
+						ctx.EnsureDesc(&d125)
+						ctx.EmitStoreScmerToStack(d125, int32(phiBase92)+int32(0))
+					} else if d125.Loc == LocRegPair || d125.Loc == LocImm {
+						ctx.EmitStoreScmerToStack(d125, int32(phiBase92)+int32(0))
+					} else {
+						ctx.EnsureDesc(&d125)
+						ctx.EmitStoreToStack(d125, int32(phiBase92)+int32(0))
+						ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase92)+int32(0))+8)
+					}
 					if d124.Loc == LocReg {
 						ctx.UnprotectReg(d124.Reg)
 					} else if d124.Loc == LocRegPair {
@@ -15364,7 +15441,18 @@ Patterns can be any of:
 								panic("jit: phi source has no location")
 							}
 							ctx.SyncDesc(&d174)
-							ctx.EmitStoreScmerToStack(d174, int32(phiBase151)+int32(0))
+							if d174.Loc == LocStackPair {
+								ctx.EmitCopyStackWords(d174, int32(phiBase151)+int32(0), 2)
+							} else if d174.Loc == LocInputPair {
+								ctx.EnsureDesc(&d174)
+								ctx.EmitStoreScmerToStack(d174, int32(phiBase151)+int32(0))
+							} else if d174.Loc == LocRegPair || d174.Loc == LocImm {
+								ctx.EmitStoreScmerToStack(d174, int32(phiBase151)+int32(0))
+							} else {
+								ctx.EnsureDesc(&d174)
+								ctx.EmitStoreToStack(d174, int32(phiBase151)+int32(0))
+								ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase151)+int32(0))+8)
+							}
 							if d163.Loc == LocReg {
 								ctx.UnprotectReg(d163.Reg)
 							} else if d163.Loc == LocRegPair {
@@ -15392,7 +15480,18 @@ Patterns can be any of:
 							panic("jit: phi source has no location")
 						}
 						ctx.SyncDesc(&d175)
-						ctx.EmitStoreScmerToStack(d175, int32(phiBase151)+int32(0))
+						if d175.Loc == LocStackPair {
+							ctx.EmitCopyStackWords(d175, int32(phiBase151)+int32(0), 2)
+						} else if d175.Loc == LocInputPair {
+							ctx.EnsureDesc(&d175)
+							ctx.EmitStoreScmerToStack(d175, int32(phiBase151)+int32(0))
+						} else if d175.Loc == LocRegPair || d175.Loc == LocImm {
+							ctx.EmitStoreScmerToStack(d175, int32(phiBase151)+int32(0))
+						} else {
+							ctx.EnsureDesc(&d175)
+							ctx.EmitStoreToStack(d175, int32(phiBase151)+int32(0))
+							ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase151)+int32(0))+8)
+						}
 						if d163.Loc == LocReg {
 							ctx.UnprotectReg(d163.Reg)
 						} else if d163.Loc == LocRegPair {
@@ -15542,7 +15641,18 @@ Patterns can be any of:
 						panic("jit: phi source has no location")
 					}
 					ctx.SyncDesc(&d184)
-					ctx.EmitStoreScmerToStack(d184, int32(phiBase151)+int32(0))
+					if d184.Loc == LocStackPair {
+						ctx.EmitCopyStackWords(d184, int32(phiBase151)+int32(0), 2)
+					} else if d184.Loc == LocInputPair {
+						ctx.EnsureDesc(&d184)
+						ctx.EmitStoreScmerToStack(d184, int32(phiBase151)+int32(0))
+					} else if d184.Loc == LocRegPair || d184.Loc == LocImm {
+						ctx.EmitStoreScmerToStack(d184, int32(phiBase151)+int32(0))
+					} else {
+						ctx.EnsureDesc(&d184)
+						ctx.EmitStoreToStack(d184, int32(phiBase151)+int32(0))
+						ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase151)+int32(0))+8)
+					}
 					if d183.Loc == LocReg {
 						ctx.UnprotectReg(d183.Reg)
 					} else if d183.Loc == LocRegPair {
@@ -16221,7 +16331,18 @@ Patterns can be any of:
 								panic("jit: phi source has no location")
 							}
 							ctx.SyncDesc(&d233)
-							ctx.EmitStoreScmerToStack(d233, int32(phiBase210)+int32(0))
+							if d233.Loc == LocStackPair {
+								ctx.EmitCopyStackWords(d233, int32(phiBase210)+int32(0), 2)
+							} else if d233.Loc == LocInputPair {
+								ctx.EnsureDesc(&d233)
+								ctx.EmitStoreScmerToStack(d233, int32(phiBase210)+int32(0))
+							} else if d233.Loc == LocRegPair || d233.Loc == LocImm {
+								ctx.EmitStoreScmerToStack(d233, int32(phiBase210)+int32(0))
+							} else {
+								ctx.EnsureDesc(&d233)
+								ctx.EmitStoreToStack(d233, int32(phiBase210)+int32(0))
+								ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase210)+int32(0))+8)
+							}
 							if d222.Loc == LocReg {
 								ctx.UnprotectReg(d222.Reg)
 							} else if d222.Loc == LocRegPair {
@@ -16249,7 +16370,18 @@ Patterns can be any of:
 							panic("jit: phi source has no location")
 						}
 						ctx.SyncDesc(&d234)
-						ctx.EmitStoreScmerToStack(d234, int32(phiBase210)+int32(0))
+						if d234.Loc == LocStackPair {
+							ctx.EmitCopyStackWords(d234, int32(phiBase210)+int32(0), 2)
+						} else if d234.Loc == LocInputPair {
+							ctx.EnsureDesc(&d234)
+							ctx.EmitStoreScmerToStack(d234, int32(phiBase210)+int32(0))
+						} else if d234.Loc == LocRegPair || d234.Loc == LocImm {
+							ctx.EmitStoreScmerToStack(d234, int32(phiBase210)+int32(0))
+						} else {
+							ctx.EnsureDesc(&d234)
+							ctx.EmitStoreToStack(d234, int32(phiBase210)+int32(0))
+							ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase210)+int32(0))+8)
+						}
 						if d222.Loc == LocReg {
 							ctx.UnprotectReg(d222.Reg)
 						} else if d222.Loc == LocRegPair {
@@ -16399,7 +16531,18 @@ Patterns can be any of:
 						panic("jit: phi source has no location")
 					}
 					ctx.SyncDesc(&d243)
-					ctx.EmitStoreScmerToStack(d243, int32(phiBase210)+int32(0))
+					if d243.Loc == LocStackPair {
+						ctx.EmitCopyStackWords(d243, int32(phiBase210)+int32(0), 2)
+					} else if d243.Loc == LocInputPair {
+						ctx.EnsureDesc(&d243)
+						ctx.EmitStoreScmerToStack(d243, int32(phiBase210)+int32(0))
+					} else if d243.Loc == LocRegPair || d243.Loc == LocImm {
+						ctx.EmitStoreScmerToStack(d243, int32(phiBase210)+int32(0))
+					} else {
+						ctx.EnsureDesc(&d243)
+						ctx.EmitStoreToStack(d243, int32(phiBase210)+int32(0))
+						ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase210)+int32(0))+8)
+					}
 					if d242.Loc == LocReg {
 						ctx.UnprotectReg(d242.Reg)
 					} else if d242.Loc == LocRegPair {
@@ -17078,7 +17221,18 @@ Patterns can be any of:
 								panic("jit: phi source has no location")
 							}
 							ctx.SyncDesc(&d292)
-							ctx.EmitStoreScmerToStack(d292, int32(phiBase269)+int32(0))
+							if d292.Loc == LocStackPair {
+								ctx.EmitCopyStackWords(d292, int32(phiBase269)+int32(0), 2)
+							} else if d292.Loc == LocInputPair {
+								ctx.EnsureDesc(&d292)
+								ctx.EmitStoreScmerToStack(d292, int32(phiBase269)+int32(0))
+							} else if d292.Loc == LocRegPair || d292.Loc == LocImm {
+								ctx.EmitStoreScmerToStack(d292, int32(phiBase269)+int32(0))
+							} else {
+								ctx.EnsureDesc(&d292)
+								ctx.EmitStoreToStack(d292, int32(phiBase269)+int32(0))
+								ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase269)+int32(0))+8)
+							}
 							if d281.Loc == LocReg {
 								ctx.UnprotectReg(d281.Reg)
 							} else if d281.Loc == LocRegPair {
@@ -17106,7 +17260,18 @@ Patterns can be any of:
 							panic("jit: phi source has no location")
 						}
 						ctx.SyncDesc(&d293)
-						ctx.EmitStoreScmerToStack(d293, int32(phiBase269)+int32(0))
+						if d293.Loc == LocStackPair {
+							ctx.EmitCopyStackWords(d293, int32(phiBase269)+int32(0), 2)
+						} else if d293.Loc == LocInputPair {
+							ctx.EnsureDesc(&d293)
+							ctx.EmitStoreScmerToStack(d293, int32(phiBase269)+int32(0))
+						} else if d293.Loc == LocRegPair || d293.Loc == LocImm {
+							ctx.EmitStoreScmerToStack(d293, int32(phiBase269)+int32(0))
+						} else {
+							ctx.EnsureDesc(&d293)
+							ctx.EmitStoreToStack(d293, int32(phiBase269)+int32(0))
+							ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase269)+int32(0))+8)
+						}
 						if d281.Loc == LocReg {
 							ctx.UnprotectReg(d281.Reg)
 						} else if d281.Loc == LocRegPair {
@@ -17256,7 +17421,18 @@ Patterns can be any of:
 						panic("jit: phi source has no location")
 					}
 					ctx.SyncDesc(&d302)
-					ctx.EmitStoreScmerToStack(d302, int32(phiBase269)+int32(0))
+					if d302.Loc == LocStackPair {
+						ctx.EmitCopyStackWords(d302, int32(phiBase269)+int32(0), 2)
+					} else if d302.Loc == LocInputPair {
+						ctx.EnsureDesc(&d302)
+						ctx.EmitStoreScmerToStack(d302, int32(phiBase269)+int32(0))
+					} else if d302.Loc == LocRegPair || d302.Loc == LocImm {
+						ctx.EmitStoreScmerToStack(d302, int32(phiBase269)+int32(0))
+					} else {
+						ctx.EnsureDesc(&d302)
+						ctx.EmitStoreToStack(d302, int32(phiBase269)+int32(0))
+						ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase269)+int32(0))+8)
+					}
 					if d301.Loc == LocReg {
 						ctx.UnprotectReg(d301.Reg)
 					} else if d301.Loc == LocRegPair {
@@ -17935,7 +18111,18 @@ Patterns can be any of:
 								panic("jit: phi source has no location")
 							}
 							ctx.SyncDesc(&d351)
-							ctx.EmitStoreScmerToStack(d351, int32(phiBase328)+int32(0))
+							if d351.Loc == LocStackPair {
+								ctx.EmitCopyStackWords(d351, int32(phiBase328)+int32(0), 2)
+							} else if d351.Loc == LocInputPair {
+								ctx.EnsureDesc(&d351)
+								ctx.EmitStoreScmerToStack(d351, int32(phiBase328)+int32(0))
+							} else if d351.Loc == LocRegPair || d351.Loc == LocImm {
+								ctx.EmitStoreScmerToStack(d351, int32(phiBase328)+int32(0))
+							} else {
+								ctx.EnsureDesc(&d351)
+								ctx.EmitStoreToStack(d351, int32(phiBase328)+int32(0))
+								ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase328)+int32(0))+8)
+							}
 							if d340.Loc == LocReg {
 								ctx.UnprotectReg(d340.Reg)
 							} else if d340.Loc == LocRegPair {
@@ -17963,7 +18150,18 @@ Patterns can be any of:
 							panic("jit: phi source has no location")
 						}
 						ctx.SyncDesc(&d352)
-						ctx.EmitStoreScmerToStack(d352, int32(phiBase328)+int32(0))
+						if d352.Loc == LocStackPair {
+							ctx.EmitCopyStackWords(d352, int32(phiBase328)+int32(0), 2)
+						} else if d352.Loc == LocInputPair {
+							ctx.EnsureDesc(&d352)
+							ctx.EmitStoreScmerToStack(d352, int32(phiBase328)+int32(0))
+						} else if d352.Loc == LocRegPair || d352.Loc == LocImm {
+							ctx.EmitStoreScmerToStack(d352, int32(phiBase328)+int32(0))
+						} else {
+							ctx.EnsureDesc(&d352)
+							ctx.EmitStoreToStack(d352, int32(phiBase328)+int32(0))
+							ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase328)+int32(0))+8)
+						}
 						if d340.Loc == LocReg {
 							ctx.UnprotectReg(d340.Reg)
 						} else if d340.Loc == LocRegPair {
@@ -18113,7 +18311,18 @@ Patterns can be any of:
 						panic("jit: phi source has no location")
 					}
 					ctx.SyncDesc(&d361)
-					ctx.EmitStoreScmerToStack(d361, int32(phiBase328)+int32(0))
+					if d361.Loc == LocStackPair {
+						ctx.EmitCopyStackWords(d361, int32(phiBase328)+int32(0), 2)
+					} else if d361.Loc == LocInputPair {
+						ctx.EnsureDesc(&d361)
+						ctx.EmitStoreScmerToStack(d361, int32(phiBase328)+int32(0))
+					} else if d361.Loc == LocRegPair || d361.Loc == LocImm {
+						ctx.EmitStoreScmerToStack(d361, int32(phiBase328)+int32(0))
+					} else {
+						ctx.EnsureDesc(&d361)
+						ctx.EmitStoreToStack(d361, int32(phiBase328)+int32(0))
+						ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase328)+int32(0))+8)
+					}
 					if d360.Loc == LocReg {
 						ctx.UnprotectReg(d360.Reg)
 					} else if d360.Loc == LocRegPair {
@@ -18792,7 +19001,18 @@ Patterns can be any of:
 								panic("jit: phi source has no location")
 							}
 							ctx.SyncDesc(&d410)
-							ctx.EmitStoreScmerToStack(d410, int32(phiBase387)+int32(0))
+							if d410.Loc == LocStackPair {
+								ctx.EmitCopyStackWords(d410, int32(phiBase387)+int32(0), 2)
+							} else if d410.Loc == LocInputPair {
+								ctx.EnsureDesc(&d410)
+								ctx.EmitStoreScmerToStack(d410, int32(phiBase387)+int32(0))
+							} else if d410.Loc == LocRegPair || d410.Loc == LocImm {
+								ctx.EmitStoreScmerToStack(d410, int32(phiBase387)+int32(0))
+							} else {
+								ctx.EnsureDesc(&d410)
+								ctx.EmitStoreToStack(d410, int32(phiBase387)+int32(0))
+								ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase387)+int32(0))+8)
+							}
 							if d399.Loc == LocReg {
 								ctx.UnprotectReg(d399.Reg)
 							} else if d399.Loc == LocRegPair {
@@ -18820,7 +19040,18 @@ Patterns can be any of:
 							panic("jit: phi source has no location")
 						}
 						ctx.SyncDesc(&d411)
-						ctx.EmitStoreScmerToStack(d411, int32(phiBase387)+int32(0))
+						if d411.Loc == LocStackPair {
+							ctx.EmitCopyStackWords(d411, int32(phiBase387)+int32(0), 2)
+						} else if d411.Loc == LocInputPair {
+							ctx.EnsureDesc(&d411)
+							ctx.EmitStoreScmerToStack(d411, int32(phiBase387)+int32(0))
+						} else if d411.Loc == LocRegPair || d411.Loc == LocImm {
+							ctx.EmitStoreScmerToStack(d411, int32(phiBase387)+int32(0))
+						} else {
+							ctx.EnsureDesc(&d411)
+							ctx.EmitStoreToStack(d411, int32(phiBase387)+int32(0))
+							ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase387)+int32(0))+8)
+						}
 						if d399.Loc == LocReg {
 							ctx.UnprotectReg(d399.Reg)
 						} else if d399.Loc == LocRegPair {
@@ -18970,7 +19201,18 @@ Patterns can be any of:
 						panic("jit: phi source has no location")
 					}
 					ctx.SyncDesc(&d420)
-					ctx.EmitStoreScmerToStack(d420, int32(phiBase387)+int32(0))
+					if d420.Loc == LocStackPair {
+						ctx.EmitCopyStackWords(d420, int32(phiBase387)+int32(0), 2)
+					} else if d420.Loc == LocInputPair {
+						ctx.EnsureDesc(&d420)
+						ctx.EmitStoreScmerToStack(d420, int32(phiBase387)+int32(0))
+					} else if d420.Loc == LocRegPair || d420.Loc == LocImm {
+						ctx.EmitStoreScmerToStack(d420, int32(phiBase387)+int32(0))
+					} else {
+						ctx.EnsureDesc(&d420)
+						ctx.EmitStoreToStack(d420, int32(phiBase387)+int32(0))
+						ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase387)+int32(0))+8)
+					}
 					if d419.Loc == LocReg {
 						ctx.UnprotectReg(d419.Reg)
 					} else if d419.Loc == LocRegPair {
@@ -19649,7 +19891,18 @@ Patterns can be any of:
 								panic("jit: phi source has no location")
 							}
 							ctx.SyncDesc(&d469)
-							ctx.EmitStoreScmerToStack(d469, int32(phiBase446)+int32(0))
+							if d469.Loc == LocStackPair {
+								ctx.EmitCopyStackWords(d469, int32(phiBase446)+int32(0), 2)
+							} else if d469.Loc == LocInputPair {
+								ctx.EnsureDesc(&d469)
+								ctx.EmitStoreScmerToStack(d469, int32(phiBase446)+int32(0))
+							} else if d469.Loc == LocRegPair || d469.Loc == LocImm {
+								ctx.EmitStoreScmerToStack(d469, int32(phiBase446)+int32(0))
+							} else {
+								ctx.EnsureDesc(&d469)
+								ctx.EmitStoreToStack(d469, int32(phiBase446)+int32(0))
+								ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase446)+int32(0))+8)
+							}
 							if d458.Loc == LocReg {
 								ctx.UnprotectReg(d458.Reg)
 							} else if d458.Loc == LocRegPair {
@@ -19677,7 +19930,18 @@ Patterns can be any of:
 							panic("jit: phi source has no location")
 						}
 						ctx.SyncDesc(&d470)
-						ctx.EmitStoreScmerToStack(d470, int32(phiBase446)+int32(0))
+						if d470.Loc == LocStackPair {
+							ctx.EmitCopyStackWords(d470, int32(phiBase446)+int32(0), 2)
+						} else if d470.Loc == LocInputPair {
+							ctx.EnsureDesc(&d470)
+							ctx.EmitStoreScmerToStack(d470, int32(phiBase446)+int32(0))
+						} else if d470.Loc == LocRegPair || d470.Loc == LocImm {
+							ctx.EmitStoreScmerToStack(d470, int32(phiBase446)+int32(0))
+						} else {
+							ctx.EnsureDesc(&d470)
+							ctx.EmitStoreToStack(d470, int32(phiBase446)+int32(0))
+							ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase446)+int32(0))+8)
+						}
 						if d458.Loc == LocReg {
 							ctx.UnprotectReg(d458.Reg)
 						} else if d458.Loc == LocRegPair {
@@ -19827,7 +20091,18 @@ Patterns can be any of:
 						panic("jit: phi source has no location")
 					}
 					ctx.SyncDesc(&d479)
-					ctx.EmitStoreScmerToStack(d479, int32(phiBase446)+int32(0))
+					if d479.Loc == LocStackPair {
+						ctx.EmitCopyStackWords(d479, int32(phiBase446)+int32(0), 2)
+					} else if d479.Loc == LocInputPair {
+						ctx.EnsureDesc(&d479)
+						ctx.EmitStoreScmerToStack(d479, int32(phiBase446)+int32(0))
+					} else if d479.Loc == LocRegPair || d479.Loc == LocImm {
+						ctx.EmitStoreScmerToStack(d479, int32(phiBase446)+int32(0))
+					} else {
+						ctx.EnsureDesc(&d479)
+						ctx.EmitStoreToStack(d479, int32(phiBase446)+int32(0))
+						ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase446)+int32(0))+8)
+					}
 					if d478.Loc == LocReg {
 						ctx.UnprotectReg(d478.Reg)
 					} else if d478.Loc == LocRegPair {
@@ -20506,7 +20781,18 @@ Patterns can be any of:
 								panic("jit: phi source has no location")
 							}
 							ctx.SyncDesc(&d528)
-							ctx.EmitStoreScmerToStack(d528, int32(phiBase505)+int32(0))
+							if d528.Loc == LocStackPair {
+								ctx.EmitCopyStackWords(d528, int32(phiBase505)+int32(0), 2)
+							} else if d528.Loc == LocInputPair {
+								ctx.EnsureDesc(&d528)
+								ctx.EmitStoreScmerToStack(d528, int32(phiBase505)+int32(0))
+							} else if d528.Loc == LocRegPair || d528.Loc == LocImm {
+								ctx.EmitStoreScmerToStack(d528, int32(phiBase505)+int32(0))
+							} else {
+								ctx.EnsureDesc(&d528)
+								ctx.EmitStoreToStack(d528, int32(phiBase505)+int32(0))
+								ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase505)+int32(0))+8)
+							}
 							if d517.Loc == LocReg {
 								ctx.UnprotectReg(d517.Reg)
 							} else if d517.Loc == LocRegPair {
@@ -20534,7 +20820,18 @@ Patterns can be any of:
 							panic("jit: phi source has no location")
 						}
 						ctx.SyncDesc(&d529)
-						ctx.EmitStoreScmerToStack(d529, int32(phiBase505)+int32(0))
+						if d529.Loc == LocStackPair {
+							ctx.EmitCopyStackWords(d529, int32(phiBase505)+int32(0), 2)
+						} else if d529.Loc == LocInputPair {
+							ctx.EnsureDesc(&d529)
+							ctx.EmitStoreScmerToStack(d529, int32(phiBase505)+int32(0))
+						} else if d529.Loc == LocRegPair || d529.Loc == LocImm {
+							ctx.EmitStoreScmerToStack(d529, int32(phiBase505)+int32(0))
+						} else {
+							ctx.EnsureDesc(&d529)
+							ctx.EmitStoreToStack(d529, int32(phiBase505)+int32(0))
+							ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase505)+int32(0))+8)
+						}
 						if d517.Loc == LocReg {
 							ctx.UnprotectReg(d517.Reg)
 						} else if d517.Loc == LocRegPair {
@@ -20684,7 +20981,18 @@ Patterns can be any of:
 						panic("jit: phi source has no location")
 					}
 					ctx.SyncDesc(&d538)
-					ctx.EmitStoreScmerToStack(d538, int32(phiBase505)+int32(0))
+					if d538.Loc == LocStackPair {
+						ctx.EmitCopyStackWords(d538, int32(phiBase505)+int32(0), 2)
+					} else if d538.Loc == LocInputPair {
+						ctx.EnsureDesc(&d538)
+						ctx.EmitStoreScmerToStack(d538, int32(phiBase505)+int32(0))
+					} else if d538.Loc == LocRegPair || d538.Loc == LocImm {
+						ctx.EmitStoreScmerToStack(d538, int32(phiBase505)+int32(0))
+					} else {
+						ctx.EnsureDesc(&d538)
+						ctx.EmitStoreToStack(d538, int32(phiBase505)+int32(0))
+						ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase505)+int32(0))+8)
+					}
 					if d537.Loc == LocReg {
 						ctx.UnprotectReg(d537.Reg)
 					} else if d537.Loc == LocRegPair {
@@ -21363,7 +21671,18 @@ Patterns can be any of:
 								panic("jit: phi source has no location")
 							}
 							ctx.SyncDesc(&d587)
-							ctx.EmitStoreScmerToStack(d587, int32(phiBase564)+int32(0))
+							if d587.Loc == LocStackPair {
+								ctx.EmitCopyStackWords(d587, int32(phiBase564)+int32(0), 2)
+							} else if d587.Loc == LocInputPair {
+								ctx.EnsureDesc(&d587)
+								ctx.EmitStoreScmerToStack(d587, int32(phiBase564)+int32(0))
+							} else if d587.Loc == LocRegPair || d587.Loc == LocImm {
+								ctx.EmitStoreScmerToStack(d587, int32(phiBase564)+int32(0))
+							} else {
+								ctx.EnsureDesc(&d587)
+								ctx.EmitStoreToStack(d587, int32(phiBase564)+int32(0))
+								ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase564)+int32(0))+8)
+							}
 							if d576.Loc == LocReg {
 								ctx.UnprotectReg(d576.Reg)
 							} else if d576.Loc == LocRegPair {
@@ -21391,7 +21710,18 @@ Patterns can be any of:
 							panic("jit: phi source has no location")
 						}
 						ctx.SyncDesc(&d588)
-						ctx.EmitStoreScmerToStack(d588, int32(phiBase564)+int32(0))
+						if d588.Loc == LocStackPair {
+							ctx.EmitCopyStackWords(d588, int32(phiBase564)+int32(0), 2)
+						} else if d588.Loc == LocInputPair {
+							ctx.EnsureDesc(&d588)
+							ctx.EmitStoreScmerToStack(d588, int32(phiBase564)+int32(0))
+						} else if d588.Loc == LocRegPair || d588.Loc == LocImm {
+							ctx.EmitStoreScmerToStack(d588, int32(phiBase564)+int32(0))
+						} else {
+							ctx.EnsureDesc(&d588)
+							ctx.EmitStoreToStack(d588, int32(phiBase564)+int32(0))
+							ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase564)+int32(0))+8)
+						}
 						if d576.Loc == LocReg {
 							ctx.UnprotectReg(d576.Reg)
 						} else if d576.Loc == LocRegPair {
@@ -21541,7 +21871,18 @@ Patterns can be any of:
 						panic("jit: phi source has no location")
 					}
 					ctx.SyncDesc(&d597)
-					ctx.EmitStoreScmerToStack(d597, int32(phiBase564)+int32(0))
+					if d597.Loc == LocStackPair {
+						ctx.EmitCopyStackWords(d597, int32(phiBase564)+int32(0), 2)
+					} else if d597.Loc == LocInputPair {
+						ctx.EnsureDesc(&d597)
+						ctx.EmitStoreScmerToStack(d597, int32(phiBase564)+int32(0))
+					} else if d597.Loc == LocRegPair || d597.Loc == LocImm {
+						ctx.EmitStoreScmerToStack(d597, int32(phiBase564)+int32(0))
+					} else {
+						ctx.EnsureDesc(&d597)
+						ctx.EmitStoreToStack(d597, int32(phiBase564)+int32(0))
+						ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase564)+int32(0))+8)
+					}
 					if d596.Loc == LocReg {
 						ctx.UnprotectReg(d596.Reg)
 					} else if d596.Loc == LocRegPair {
@@ -22220,7 +22561,18 @@ Patterns can be any of:
 								panic("jit: phi source has no location")
 							}
 							ctx.SyncDesc(&d646)
-							ctx.EmitStoreScmerToStack(d646, int32(phiBase623)+int32(0))
+							if d646.Loc == LocStackPair {
+								ctx.EmitCopyStackWords(d646, int32(phiBase623)+int32(0), 2)
+							} else if d646.Loc == LocInputPair {
+								ctx.EnsureDesc(&d646)
+								ctx.EmitStoreScmerToStack(d646, int32(phiBase623)+int32(0))
+							} else if d646.Loc == LocRegPair || d646.Loc == LocImm {
+								ctx.EmitStoreScmerToStack(d646, int32(phiBase623)+int32(0))
+							} else {
+								ctx.EnsureDesc(&d646)
+								ctx.EmitStoreToStack(d646, int32(phiBase623)+int32(0))
+								ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase623)+int32(0))+8)
+							}
 							if d635.Loc == LocReg {
 								ctx.UnprotectReg(d635.Reg)
 							} else if d635.Loc == LocRegPair {
@@ -22248,7 +22600,18 @@ Patterns can be any of:
 							panic("jit: phi source has no location")
 						}
 						ctx.SyncDesc(&d647)
-						ctx.EmitStoreScmerToStack(d647, int32(phiBase623)+int32(0))
+						if d647.Loc == LocStackPair {
+							ctx.EmitCopyStackWords(d647, int32(phiBase623)+int32(0), 2)
+						} else if d647.Loc == LocInputPair {
+							ctx.EnsureDesc(&d647)
+							ctx.EmitStoreScmerToStack(d647, int32(phiBase623)+int32(0))
+						} else if d647.Loc == LocRegPair || d647.Loc == LocImm {
+							ctx.EmitStoreScmerToStack(d647, int32(phiBase623)+int32(0))
+						} else {
+							ctx.EnsureDesc(&d647)
+							ctx.EmitStoreToStack(d647, int32(phiBase623)+int32(0))
+							ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase623)+int32(0))+8)
+						}
 						if d635.Loc == LocReg {
 							ctx.UnprotectReg(d635.Reg)
 						} else if d635.Loc == LocRegPair {
@@ -22398,7 +22761,18 @@ Patterns can be any of:
 						panic("jit: phi source has no location")
 					}
 					ctx.SyncDesc(&d656)
-					ctx.EmitStoreScmerToStack(d656, int32(phiBase623)+int32(0))
+					if d656.Loc == LocStackPair {
+						ctx.EmitCopyStackWords(d656, int32(phiBase623)+int32(0), 2)
+					} else if d656.Loc == LocInputPair {
+						ctx.EnsureDesc(&d656)
+						ctx.EmitStoreScmerToStack(d656, int32(phiBase623)+int32(0))
+					} else if d656.Loc == LocRegPair || d656.Loc == LocImm {
+						ctx.EmitStoreScmerToStack(d656, int32(phiBase623)+int32(0))
+					} else {
+						ctx.EnsureDesc(&d656)
+						ctx.EmitStoreToStack(d656, int32(phiBase623)+int32(0))
+						ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase623)+int32(0))+8)
+					}
 					if d655.Loc == LocReg {
 						ctx.UnprotectReg(d655.Reg)
 					} else if d655.Loc == LocRegPair {
@@ -23077,7 +23451,18 @@ Patterns can be any of:
 								panic("jit: phi source has no location")
 							}
 							ctx.SyncDesc(&d705)
-							ctx.EmitStoreScmerToStack(d705, int32(phiBase682)+int32(0))
+							if d705.Loc == LocStackPair {
+								ctx.EmitCopyStackWords(d705, int32(phiBase682)+int32(0), 2)
+							} else if d705.Loc == LocInputPair {
+								ctx.EnsureDesc(&d705)
+								ctx.EmitStoreScmerToStack(d705, int32(phiBase682)+int32(0))
+							} else if d705.Loc == LocRegPair || d705.Loc == LocImm {
+								ctx.EmitStoreScmerToStack(d705, int32(phiBase682)+int32(0))
+							} else {
+								ctx.EnsureDesc(&d705)
+								ctx.EmitStoreToStack(d705, int32(phiBase682)+int32(0))
+								ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase682)+int32(0))+8)
+							}
 							if d694.Loc == LocReg {
 								ctx.UnprotectReg(d694.Reg)
 							} else if d694.Loc == LocRegPair {
@@ -23105,7 +23490,18 @@ Patterns can be any of:
 							panic("jit: phi source has no location")
 						}
 						ctx.SyncDesc(&d706)
-						ctx.EmitStoreScmerToStack(d706, int32(phiBase682)+int32(0))
+						if d706.Loc == LocStackPair {
+							ctx.EmitCopyStackWords(d706, int32(phiBase682)+int32(0), 2)
+						} else if d706.Loc == LocInputPair {
+							ctx.EnsureDesc(&d706)
+							ctx.EmitStoreScmerToStack(d706, int32(phiBase682)+int32(0))
+						} else if d706.Loc == LocRegPair || d706.Loc == LocImm {
+							ctx.EmitStoreScmerToStack(d706, int32(phiBase682)+int32(0))
+						} else {
+							ctx.EnsureDesc(&d706)
+							ctx.EmitStoreToStack(d706, int32(phiBase682)+int32(0))
+							ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase682)+int32(0))+8)
+						}
 						if d694.Loc == LocReg {
 							ctx.UnprotectReg(d694.Reg)
 						} else if d694.Loc == LocRegPair {
@@ -23255,7 +23651,18 @@ Patterns can be any of:
 						panic("jit: phi source has no location")
 					}
 					ctx.SyncDesc(&d715)
-					ctx.EmitStoreScmerToStack(d715, int32(phiBase682)+int32(0))
+					if d715.Loc == LocStackPair {
+						ctx.EmitCopyStackWords(d715, int32(phiBase682)+int32(0), 2)
+					} else if d715.Loc == LocInputPair {
+						ctx.EnsureDesc(&d715)
+						ctx.EmitStoreScmerToStack(d715, int32(phiBase682)+int32(0))
+					} else if d715.Loc == LocRegPair || d715.Loc == LocImm {
+						ctx.EmitStoreScmerToStack(d715, int32(phiBase682)+int32(0))
+					} else {
+						ctx.EnsureDesc(&d715)
+						ctx.EmitStoreToStack(d715, int32(phiBase682)+int32(0))
+						ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase682)+int32(0))+8)
+					}
 					if d714.Loc == LocReg {
 						ctx.UnprotectReg(d714.Reg)
 					} else if d714.Loc == LocRegPair {
@@ -23934,7 +24341,18 @@ Patterns can be any of:
 								panic("jit: phi source has no location")
 							}
 							ctx.SyncDesc(&d764)
-							ctx.EmitStoreScmerToStack(d764, int32(phiBase741)+int32(0))
+							if d764.Loc == LocStackPair {
+								ctx.EmitCopyStackWords(d764, int32(phiBase741)+int32(0), 2)
+							} else if d764.Loc == LocInputPair {
+								ctx.EnsureDesc(&d764)
+								ctx.EmitStoreScmerToStack(d764, int32(phiBase741)+int32(0))
+							} else if d764.Loc == LocRegPair || d764.Loc == LocImm {
+								ctx.EmitStoreScmerToStack(d764, int32(phiBase741)+int32(0))
+							} else {
+								ctx.EnsureDesc(&d764)
+								ctx.EmitStoreToStack(d764, int32(phiBase741)+int32(0))
+								ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase741)+int32(0))+8)
+							}
 							if d753.Loc == LocReg {
 								ctx.UnprotectReg(d753.Reg)
 							} else if d753.Loc == LocRegPair {
@@ -23962,7 +24380,18 @@ Patterns can be any of:
 							panic("jit: phi source has no location")
 						}
 						ctx.SyncDesc(&d765)
-						ctx.EmitStoreScmerToStack(d765, int32(phiBase741)+int32(0))
+						if d765.Loc == LocStackPair {
+							ctx.EmitCopyStackWords(d765, int32(phiBase741)+int32(0), 2)
+						} else if d765.Loc == LocInputPair {
+							ctx.EnsureDesc(&d765)
+							ctx.EmitStoreScmerToStack(d765, int32(phiBase741)+int32(0))
+						} else if d765.Loc == LocRegPair || d765.Loc == LocImm {
+							ctx.EmitStoreScmerToStack(d765, int32(phiBase741)+int32(0))
+						} else {
+							ctx.EnsureDesc(&d765)
+							ctx.EmitStoreToStack(d765, int32(phiBase741)+int32(0))
+							ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase741)+int32(0))+8)
+						}
 						if d753.Loc == LocReg {
 							ctx.UnprotectReg(d753.Reg)
 						} else if d753.Loc == LocRegPair {
@@ -24112,7 +24541,18 @@ Patterns can be any of:
 						panic("jit: phi source has no location")
 					}
 					ctx.SyncDesc(&d774)
-					ctx.EmitStoreScmerToStack(d774, int32(phiBase741)+int32(0))
+					if d774.Loc == LocStackPair {
+						ctx.EmitCopyStackWords(d774, int32(phiBase741)+int32(0), 2)
+					} else if d774.Loc == LocInputPair {
+						ctx.EnsureDesc(&d774)
+						ctx.EmitStoreScmerToStack(d774, int32(phiBase741)+int32(0))
+					} else if d774.Loc == LocRegPair || d774.Loc == LocImm {
+						ctx.EmitStoreScmerToStack(d774, int32(phiBase741)+int32(0))
+					} else {
+						ctx.EnsureDesc(&d774)
+						ctx.EmitStoreToStack(d774, int32(phiBase741)+int32(0))
+						ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase741)+int32(0))+8)
+					}
 					if d773.Loc == LocReg {
 						ctx.UnprotectReg(d773.Reg)
 					} else if d773.Loc == LocRegPair {
@@ -24687,7 +25127,18 @@ Patterns can be any of:
 								panic("jit: phi source has no location")
 							}
 							ctx.SyncDesc(&d822)
-							ctx.EmitStoreScmerToStack(d822, int32(phiBase741)+int32(40))
+							if d822.Loc == LocStackPair {
+								ctx.EmitCopyStackWords(d822, int32(phiBase741)+int32(40), 2)
+							} else if d822.Loc == LocInputPair {
+								ctx.EnsureDesc(&d822)
+								ctx.EmitStoreScmerToStack(d822, int32(phiBase741)+int32(40))
+							} else if d822.Loc == LocRegPair || d822.Loc == LocImm {
+								ctx.EmitStoreScmerToStack(d822, int32(phiBase741)+int32(40))
+							} else {
+								ctx.EnsureDesc(&d822)
+								ctx.EmitStoreToStack(d822, int32(phiBase741)+int32(40))
+								ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase741)+int32(40))+8)
+							}
 							if d818.Loc == LocReg {
 								ctx.UnprotectReg(d818.Reg)
 							} else if d818.Loc == LocRegPair {
@@ -24715,7 +25166,18 @@ Patterns can be any of:
 							panic("jit: phi source has no location")
 						}
 						ctx.SyncDesc(&d823)
-						ctx.EmitStoreScmerToStack(d823, int32(phiBase741)+int32(40))
+						if d823.Loc == LocStackPair {
+							ctx.EmitCopyStackWords(d823, int32(phiBase741)+int32(40), 2)
+						} else if d823.Loc == LocInputPair {
+							ctx.EnsureDesc(&d823)
+							ctx.EmitStoreScmerToStack(d823, int32(phiBase741)+int32(40))
+						} else if d823.Loc == LocRegPair || d823.Loc == LocImm {
+							ctx.EmitStoreScmerToStack(d823, int32(phiBase741)+int32(40))
+						} else {
+							ctx.EnsureDesc(&d823)
+							ctx.EmitStoreToStack(d823, int32(phiBase741)+int32(40))
+							ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase741)+int32(40))+8)
+						}
 						if d818.Loc == LocReg {
 							ctx.UnprotectReg(d818.Reg)
 						} else if d818.Loc == LocRegPair {
@@ -25127,7 +25589,18 @@ Patterns can be any of:
 						panic("jit: phi source has no location")
 					}
 					ctx.SyncDesc(&d854)
-					ctx.EmitStoreScmerToStack(d854, int32(phiBase741)+int32(40))
+					if d854.Loc == LocStackPair {
+						ctx.EmitCopyStackWords(d854, int32(phiBase741)+int32(40), 2)
+					} else if d854.Loc == LocInputPair {
+						ctx.EnsureDesc(&d854)
+						ctx.EmitStoreScmerToStack(d854, int32(phiBase741)+int32(40))
+					} else if d854.Loc == LocRegPair || d854.Loc == LocImm {
+						ctx.EmitStoreScmerToStack(d854, int32(phiBase741)+int32(40))
+					} else {
+						ctx.EnsureDesc(&d854)
+						ctx.EmitStoreToStack(d854, int32(phiBase741)+int32(40))
+						ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase741)+int32(40))+8)
+					}
 					if d853.Loc == LocReg {
 						ctx.UnprotectReg(d853.Reg)
 					} else if d853.Loc == LocRegPair {
@@ -26112,7 +26585,18 @@ Patterns can be any of:
 								panic("jit: phi source has no location")
 							}
 							ctx.SyncDesc(&d938)
-							ctx.EmitStoreScmerToStack(d938, int32(phiBase682)+int32(40))
+							if d938.Loc == LocStackPair {
+								ctx.EmitCopyStackWords(d938, int32(phiBase682)+int32(40), 2)
+							} else if d938.Loc == LocInputPair {
+								ctx.EnsureDesc(&d938)
+								ctx.EmitStoreScmerToStack(d938, int32(phiBase682)+int32(40))
+							} else if d938.Loc == LocRegPair || d938.Loc == LocImm {
+								ctx.EmitStoreScmerToStack(d938, int32(phiBase682)+int32(40))
+							} else {
+								ctx.EnsureDesc(&d938)
+								ctx.EmitStoreToStack(d938, int32(phiBase682)+int32(40))
+								ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase682)+int32(40))+8)
+							}
 							if d934.Loc == LocReg {
 								ctx.UnprotectReg(d934.Reg)
 							} else if d934.Loc == LocRegPair {
@@ -26140,7 +26624,18 @@ Patterns can be any of:
 							panic("jit: phi source has no location")
 						}
 						ctx.SyncDesc(&d939)
-						ctx.EmitStoreScmerToStack(d939, int32(phiBase682)+int32(40))
+						if d939.Loc == LocStackPair {
+							ctx.EmitCopyStackWords(d939, int32(phiBase682)+int32(40), 2)
+						} else if d939.Loc == LocInputPair {
+							ctx.EnsureDesc(&d939)
+							ctx.EmitStoreScmerToStack(d939, int32(phiBase682)+int32(40))
+						} else if d939.Loc == LocRegPair || d939.Loc == LocImm {
+							ctx.EmitStoreScmerToStack(d939, int32(phiBase682)+int32(40))
+						} else {
+							ctx.EnsureDesc(&d939)
+							ctx.EmitStoreToStack(d939, int32(phiBase682)+int32(40))
+							ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase682)+int32(40))+8)
+						}
 						if d934.Loc == LocReg {
 							ctx.UnprotectReg(d934.Reg)
 						} else if d934.Loc == LocRegPair {
@@ -26552,7 +27047,18 @@ Patterns can be any of:
 						panic("jit: phi source has no location")
 					}
 					ctx.SyncDesc(&d970)
-					ctx.EmitStoreScmerToStack(d970, int32(phiBase682)+int32(40))
+					if d970.Loc == LocStackPair {
+						ctx.EmitCopyStackWords(d970, int32(phiBase682)+int32(40), 2)
+					} else if d970.Loc == LocInputPair {
+						ctx.EnsureDesc(&d970)
+						ctx.EmitStoreScmerToStack(d970, int32(phiBase682)+int32(40))
+					} else if d970.Loc == LocRegPair || d970.Loc == LocImm {
+						ctx.EmitStoreScmerToStack(d970, int32(phiBase682)+int32(40))
+					} else {
+						ctx.EnsureDesc(&d970)
+						ctx.EmitStoreToStack(d970, int32(phiBase682)+int32(40))
+						ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase682)+int32(40))+8)
+					}
 					if d969.Loc == LocReg {
 						ctx.UnprotectReg(d969.Reg)
 					} else if d969.Loc == LocRegPair {
@@ -27537,7 +28043,18 @@ Patterns can be any of:
 								panic("jit: phi source has no location")
 							}
 							ctx.SyncDesc(&d1054)
-							ctx.EmitStoreScmerToStack(d1054, int32(phiBase623)+int32(40))
+							if d1054.Loc == LocStackPair {
+								ctx.EmitCopyStackWords(d1054, int32(phiBase623)+int32(40), 2)
+							} else if d1054.Loc == LocInputPair {
+								ctx.EnsureDesc(&d1054)
+								ctx.EmitStoreScmerToStack(d1054, int32(phiBase623)+int32(40))
+							} else if d1054.Loc == LocRegPair || d1054.Loc == LocImm {
+								ctx.EmitStoreScmerToStack(d1054, int32(phiBase623)+int32(40))
+							} else {
+								ctx.EnsureDesc(&d1054)
+								ctx.EmitStoreToStack(d1054, int32(phiBase623)+int32(40))
+								ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase623)+int32(40))+8)
+							}
 							if d1050.Loc == LocReg {
 								ctx.UnprotectReg(d1050.Reg)
 							} else if d1050.Loc == LocRegPair {
@@ -27565,7 +28082,18 @@ Patterns can be any of:
 							panic("jit: phi source has no location")
 						}
 						ctx.SyncDesc(&d1055)
-						ctx.EmitStoreScmerToStack(d1055, int32(phiBase623)+int32(40))
+						if d1055.Loc == LocStackPair {
+							ctx.EmitCopyStackWords(d1055, int32(phiBase623)+int32(40), 2)
+						} else if d1055.Loc == LocInputPair {
+							ctx.EnsureDesc(&d1055)
+							ctx.EmitStoreScmerToStack(d1055, int32(phiBase623)+int32(40))
+						} else if d1055.Loc == LocRegPair || d1055.Loc == LocImm {
+							ctx.EmitStoreScmerToStack(d1055, int32(phiBase623)+int32(40))
+						} else {
+							ctx.EnsureDesc(&d1055)
+							ctx.EmitStoreToStack(d1055, int32(phiBase623)+int32(40))
+							ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase623)+int32(40))+8)
+						}
 						if d1050.Loc == LocReg {
 							ctx.UnprotectReg(d1050.Reg)
 						} else if d1050.Loc == LocRegPair {
@@ -27977,7 +28505,18 @@ Patterns can be any of:
 						panic("jit: phi source has no location")
 					}
 					ctx.SyncDesc(&d1086)
-					ctx.EmitStoreScmerToStack(d1086, int32(phiBase623)+int32(40))
+					if d1086.Loc == LocStackPair {
+						ctx.EmitCopyStackWords(d1086, int32(phiBase623)+int32(40), 2)
+					} else if d1086.Loc == LocInputPair {
+						ctx.EnsureDesc(&d1086)
+						ctx.EmitStoreScmerToStack(d1086, int32(phiBase623)+int32(40))
+					} else if d1086.Loc == LocRegPair || d1086.Loc == LocImm {
+						ctx.EmitStoreScmerToStack(d1086, int32(phiBase623)+int32(40))
+					} else {
+						ctx.EnsureDesc(&d1086)
+						ctx.EmitStoreToStack(d1086, int32(phiBase623)+int32(40))
+						ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase623)+int32(40))+8)
+					}
 					if d1085.Loc == LocReg {
 						ctx.UnprotectReg(d1085.Reg)
 					} else if d1085.Loc == LocRegPair {
@@ -28962,7 +29501,18 @@ Patterns can be any of:
 								panic("jit: phi source has no location")
 							}
 							ctx.SyncDesc(&d1170)
-							ctx.EmitStoreScmerToStack(d1170, int32(phiBase564)+int32(40))
+							if d1170.Loc == LocStackPair {
+								ctx.EmitCopyStackWords(d1170, int32(phiBase564)+int32(40), 2)
+							} else if d1170.Loc == LocInputPair {
+								ctx.EnsureDesc(&d1170)
+								ctx.EmitStoreScmerToStack(d1170, int32(phiBase564)+int32(40))
+							} else if d1170.Loc == LocRegPair || d1170.Loc == LocImm {
+								ctx.EmitStoreScmerToStack(d1170, int32(phiBase564)+int32(40))
+							} else {
+								ctx.EnsureDesc(&d1170)
+								ctx.EmitStoreToStack(d1170, int32(phiBase564)+int32(40))
+								ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase564)+int32(40))+8)
+							}
 							if d1166.Loc == LocReg {
 								ctx.UnprotectReg(d1166.Reg)
 							} else if d1166.Loc == LocRegPair {
@@ -28990,7 +29540,18 @@ Patterns can be any of:
 							panic("jit: phi source has no location")
 						}
 						ctx.SyncDesc(&d1171)
-						ctx.EmitStoreScmerToStack(d1171, int32(phiBase564)+int32(40))
+						if d1171.Loc == LocStackPair {
+							ctx.EmitCopyStackWords(d1171, int32(phiBase564)+int32(40), 2)
+						} else if d1171.Loc == LocInputPair {
+							ctx.EnsureDesc(&d1171)
+							ctx.EmitStoreScmerToStack(d1171, int32(phiBase564)+int32(40))
+						} else if d1171.Loc == LocRegPair || d1171.Loc == LocImm {
+							ctx.EmitStoreScmerToStack(d1171, int32(phiBase564)+int32(40))
+						} else {
+							ctx.EnsureDesc(&d1171)
+							ctx.EmitStoreToStack(d1171, int32(phiBase564)+int32(40))
+							ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase564)+int32(40))+8)
+						}
 						if d1166.Loc == LocReg {
 							ctx.UnprotectReg(d1166.Reg)
 						} else if d1166.Loc == LocRegPair {
@@ -29402,7 +29963,18 @@ Patterns can be any of:
 						panic("jit: phi source has no location")
 					}
 					ctx.SyncDesc(&d1202)
-					ctx.EmitStoreScmerToStack(d1202, int32(phiBase564)+int32(40))
+					if d1202.Loc == LocStackPair {
+						ctx.EmitCopyStackWords(d1202, int32(phiBase564)+int32(40), 2)
+					} else if d1202.Loc == LocInputPair {
+						ctx.EnsureDesc(&d1202)
+						ctx.EmitStoreScmerToStack(d1202, int32(phiBase564)+int32(40))
+					} else if d1202.Loc == LocRegPair || d1202.Loc == LocImm {
+						ctx.EmitStoreScmerToStack(d1202, int32(phiBase564)+int32(40))
+					} else {
+						ctx.EnsureDesc(&d1202)
+						ctx.EmitStoreToStack(d1202, int32(phiBase564)+int32(40))
+						ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase564)+int32(40))+8)
+					}
 					if d1201.Loc == LocReg {
 						ctx.UnprotectReg(d1201.Reg)
 					} else if d1201.Loc == LocRegPair {
@@ -30387,7 +30959,18 @@ Patterns can be any of:
 								panic("jit: phi source has no location")
 							}
 							ctx.SyncDesc(&d1286)
-							ctx.EmitStoreScmerToStack(d1286, int32(phiBase505)+int32(40))
+							if d1286.Loc == LocStackPair {
+								ctx.EmitCopyStackWords(d1286, int32(phiBase505)+int32(40), 2)
+							} else if d1286.Loc == LocInputPair {
+								ctx.EnsureDesc(&d1286)
+								ctx.EmitStoreScmerToStack(d1286, int32(phiBase505)+int32(40))
+							} else if d1286.Loc == LocRegPair || d1286.Loc == LocImm {
+								ctx.EmitStoreScmerToStack(d1286, int32(phiBase505)+int32(40))
+							} else {
+								ctx.EnsureDesc(&d1286)
+								ctx.EmitStoreToStack(d1286, int32(phiBase505)+int32(40))
+								ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase505)+int32(40))+8)
+							}
 							if d1282.Loc == LocReg {
 								ctx.UnprotectReg(d1282.Reg)
 							} else if d1282.Loc == LocRegPair {
@@ -30415,7 +30998,18 @@ Patterns can be any of:
 							panic("jit: phi source has no location")
 						}
 						ctx.SyncDesc(&d1287)
-						ctx.EmitStoreScmerToStack(d1287, int32(phiBase505)+int32(40))
+						if d1287.Loc == LocStackPair {
+							ctx.EmitCopyStackWords(d1287, int32(phiBase505)+int32(40), 2)
+						} else if d1287.Loc == LocInputPair {
+							ctx.EnsureDesc(&d1287)
+							ctx.EmitStoreScmerToStack(d1287, int32(phiBase505)+int32(40))
+						} else if d1287.Loc == LocRegPair || d1287.Loc == LocImm {
+							ctx.EmitStoreScmerToStack(d1287, int32(phiBase505)+int32(40))
+						} else {
+							ctx.EnsureDesc(&d1287)
+							ctx.EmitStoreToStack(d1287, int32(phiBase505)+int32(40))
+							ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase505)+int32(40))+8)
+						}
 						if d1282.Loc == LocReg {
 							ctx.UnprotectReg(d1282.Reg)
 						} else if d1282.Loc == LocRegPair {
@@ -30827,7 +31421,18 @@ Patterns can be any of:
 						panic("jit: phi source has no location")
 					}
 					ctx.SyncDesc(&d1318)
-					ctx.EmitStoreScmerToStack(d1318, int32(phiBase505)+int32(40))
+					if d1318.Loc == LocStackPair {
+						ctx.EmitCopyStackWords(d1318, int32(phiBase505)+int32(40), 2)
+					} else if d1318.Loc == LocInputPair {
+						ctx.EnsureDesc(&d1318)
+						ctx.EmitStoreScmerToStack(d1318, int32(phiBase505)+int32(40))
+					} else if d1318.Loc == LocRegPair || d1318.Loc == LocImm {
+						ctx.EmitStoreScmerToStack(d1318, int32(phiBase505)+int32(40))
+					} else {
+						ctx.EnsureDesc(&d1318)
+						ctx.EmitStoreToStack(d1318, int32(phiBase505)+int32(40))
+						ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase505)+int32(40))+8)
+					}
 					if d1317.Loc == LocReg {
 						ctx.UnprotectReg(d1317.Reg)
 					} else if d1317.Loc == LocRegPair {
@@ -31812,7 +32417,18 @@ Patterns can be any of:
 								panic("jit: phi source has no location")
 							}
 							ctx.SyncDesc(&d1402)
-							ctx.EmitStoreScmerToStack(d1402, int32(phiBase446)+int32(40))
+							if d1402.Loc == LocStackPair {
+								ctx.EmitCopyStackWords(d1402, int32(phiBase446)+int32(40), 2)
+							} else if d1402.Loc == LocInputPair {
+								ctx.EnsureDesc(&d1402)
+								ctx.EmitStoreScmerToStack(d1402, int32(phiBase446)+int32(40))
+							} else if d1402.Loc == LocRegPair || d1402.Loc == LocImm {
+								ctx.EmitStoreScmerToStack(d1402, int32(phiBase446)+int32(40))
+							} else {
+								ctx.EnsureDesc(&d1402)
+								ctx.EmitStoreToStack(d1402, int32(phiBase446)+int32(40))
+								ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase446)+int32(40))+8)
+							}
 							if d1398.Loc == LocReg {
 								ctx.UnprotectReg(d1398.Reg)
 							} else if d1398.Loc == LocRegPair {
@@ -31840,7 +32456,18 @@ Patterns can be any of:
 							panic("jit: phi source has no location")
 						}
 						ctx.SyncDesc(&d1403)
-						ctx.EmitStoreScmerToStack(d1403, int32(phiBase446)+int32(40))
+						if d1403.Loc == LocStackPair {
+							ctx.EmitCopyStackWords(d1403, int32(phiBase446)+int32(40), 2)
+						} else if d1403.Loc == LocInputPair {
+							ctx.EnsureDesc(&d1403)
+							ctx.EmitStoreScmerToStack(d1403, int32(phiBase446)+int32(40))
+						} else if d1403.Loc == LocRegPair || d1403.Loc == LocImm {
+							ctx.EmitStoreScmerToStack(d1403, int32(phiBase446)+int32(40))
+						} else {
+							ctx.EnsureDesc(&d1403)
+							ctx.EmitStoreToStack(d1403, int32(phiBase446)+int32(40))
+							ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase446)+int32(40))+8)
+						}
 						if d1398.Loc == LocReg {
 							ctx.UnprotectReg(d1398.Reg)
 						} else if d1398.Loc == LocRegPair {
@@ -32252,7 +32879,18 @@ Patterns can be any of:
 						panic("jit: phi source has no location")
 					}
 					ctx.SyncDesc(&d1434)
-					ctx.EmitStoreScmerToStack(d1434, int32(phiBase446)+int32(40))
+					if d1434.Loc == LocStackPair {
+						ctx.EmitCopyStackWords(d1434, int32(phiBase446)+int32(40), 2)
+					} else if d1434.Loc == LocInputPair {
+						ctx.EnsureDesc(&d1434)
+						ctx.EmitStoreScmerToStack(d1434, int32(phiBase446)+int32(40))
+					} else if d1434.Loc == LocRegPair || d1434.Loc == LocImm {
+						ctx.EmitStoreScmerToStack(d1434, int32(phiBase446)+int32(40))
+					} else {
+						ctx.EnsureDesc(&d1434)
+						ctx.EmitStoreToStack(d1434, int32(phiBase446)+int32(40))
+						ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase446)+int32(40))+8)
+					}
 					if d1433.Loc == LocReg {
 						ctx.UnprotectReg(d1433.Reg)
 					} else if d1433.Loc == LocRegPair {
@@ -33237,7 +33875,18 @@ Patterns can be any of:
 								panic("jit: phi source has no location")
 							}
 							ctx.SyncDesc(&d1518)
-							ctx.EmitStoreScmerToStack(d1518, int32(phiBase387)+int32(40))
+							if d1518.Loc == LocStackPair {
+								ctx.EmitCopyStackWords(d1518, int32(phiBase387)+int32(40), 2)
+							} else if d1518.Loc == LocInputPair {
+								ctx.EnsureDesc(&d1518)
+								ctx.EmitStoreScmerToStack(d1518, int32(phiBase387)+int32(40))
+							} else if d1518.Loc == LocRegPair || d1518.Loc == LocImm {
+								ctx.EmitStoreScmerToStack(d1518, int32(phiBase387)+int32(40))
+							} else {
+								ctx.EnsureDesc(&d1518)
+								ctx.EmitStoreToStack(d1518, int32(phiBase387)+int32(40))
+								ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase387)+int32(40))+8)
+							}
 							if d1514.Loc == LocReg {
 								ctx.UnprotectReg(d1514.Reg)
 							} else if d1514.Loc == LocRegPair {
@@ -33265,7 +33914,18 @@ Patterns can be any of:
 							panic("jit: phi source has no location")
 						}
 						ctx.SyncDesc(&d1519)
-						ctx.EmitStoreScmerToStack(d1519, int32(phiBase387)+int32(40))
+						if d1519.Loc == LocStackPair {
+							ctx.EmitCopyStackWords(d1519, int32(phiBase387)+int32(40), 2)
+						} else if d1519.Loc == LocInputPair {
+							ctx.EnsureDesc(&d1519)
+							ctx.EmitStoreScmerToStack(d1519, int32(phiBase387)+int32(40))
+						} else if d1519.Loc == LocRegPair || d1519.Loc == LocImm {
+							ctx.EmitStoreScmerToStack(d1519, int32(phiBase387)+int32(40))
+						} else {
+							ctx.EnsureDesc(&d1519)
+							ctx.EmitStoreToStack(d1519, int32(phiBase387)+int32(40))
+							ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase387)+int32(40))+8)
+						}
 						if d1514.Loc == LocReg {
 							ctx.UnprotectReg(d1514.Reg)
 						} else if d1514.Loc == LocRegPair {
@@ -33677,7 +34337,18 @@ Patterns can be any of:
 						panic("jit: phi source has no location")
 					}
 					ctx.SyncDesc(&d1550)
-					ctx.EmitStoreScmerToStack(d1550, int32(phiBase387)+int32(40))
+					if d1550.Loc == LocStackPair {
+						ctx.EmitCopyStackWords(d1550, int32(phiBase387)+int32(40), 2)
+					} else if d1550.Loc == LocInputPair {
+						ctx.EnsureDesc(&d1550)
+						ctx.EmitStoreScmerToStack(d1550, int32(phiBase387)+int32(40))
+					} else if d1550.Loc == LocRegPair || d1550.Loc == LocImm {
+						ctx.EmitStoreScmerToStack(d1550, int32(phiBase387)+int32(40))
+					} else {
+						ctx.EnsureDesc(&d1550)
+						ctx.EmitStoreToStack(d1550, int32(phiBase387)+int32(40))
+						ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase387)+int32(40))+8)
+					}
 					if d1549.Loc == LocReg {
 						ctx.UnprotectReg(d1549.Reg)
 					} else if d1549.Loc == LocRegPair {
@@ -34662,7 +35333,18 @@ Patterns can be any of:
 								panic("jit: phi source has no location")
 							}
 							ctx.SyncDesc(&d1634)
-							ctx.EmitStoreScmerToStack(d1634, int32(phiBase328)+int32(40))
+							if d1634.Loc == LocStackPair {
+								ctx.EmitCopyStackWords(d1634, int32(phiBase328)+int32(40), 2)
+							} else if d1634.Loc == LocInputPair {
+								ctx.EnsureDesc(&d1634)
+								ctx.EmitStoreScmerToStack(d1634, int32(phiBase328)+int32(40))
+							} else if d1634.Loc == LocRegPair || d1634.Loc == LocImm {
+								ctx.EmitStoreScmerToStack(d1634, int32(phiBase328)+int32(40))
+							} else {
+								ctx.EnsureDesc(&d1634)
+								ctx.EmitStoreToStack(d1634, int32(phiBase328)+int32(40))
+								ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase328)+int32(40))+8)
+							}
 							if d1630.Loc == LocReg {
 								ctx.UnprotectReg(d1630.Reg)
 							} else if d1630.Loc == LocRegPair {
@@ -34690,7 +35372,18 @@ Patterns can be any of:
 							panic("jit: phi source has no location")
 						}
 						ctx.SyncDesc(&d1635)
-						ctx.EmitStoreScmerToStack(d1635, int32(phiBase328)+int32(40))
+						if d1635.Loc == LocStackPair {
+							ctx.EmitCopyStackWords(d1635, int32(phiBase328)+int32(40), 2)
+						} else if d1635.Loc == LocInputPair {
+							ctx.EnsureDesc(&d1635)
+							ctx.EmitStoreScmerToStack(d1635, int32(phiBase328)+int32(40))
+						} else if d1635.Loc == LocRegPair || d1635.Loc == LocImm {
+							ctx.EmitStoreScmerToStack(d1635, int32(phiBase328)+int32(40))
+						} else {
+							ctx.EnsureDesc(&d1635)
+							ctx.EmitStoreToStack(d1635, int32(phiBase328)+int32(40))
+							ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase328)+int32(40))+8)
+						}
 						if d1630.Loc == LocReg {
 							ctx.UnprotectReg(d1630.Reg)
 						} else if d1630.Loc == LocRegPair {
@@ -35102,7 +35795,18 @@ Patterns can be any of:
 						panic("jit: phi source has no location")
 					}
 					ctx.SyncDesc(&d1666)
-					ctx.EmitStoreScmerToStack(d1666, int32(phiBase328)+int32(40))
+					if d1666.Loc == LocStackPair {
+						ctx.EmitCopyStackWords(d1666, int32(phiBase328)+int32(40), 2)
+					} else if d1666.Loc == LocInputPair {
+						ctx.EnsureDesc(&d1666)
+						ctx.EmitStoreScmerToStack(d1666, int32(phiBase328)+int32(40))
+					} else if d1666.Loc == LocRegPair || d1666.Loc == LocImm {
+						ctx.EmitStoreScmerToStack(d1666, int32(phiBase328)+int32(40))
+					} else {
+						ctx.EnsureDesc(&d1666)
+						ctx.EmitStoreToStack(d1666, int32(phiBase328)+int32(40))
+						ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase328)+int32(40))+8)
+					}
 					if d1665.Loc == LocReg {
 						ctx.UnprotectReg(d1665.Reg)
 					} else if d1665.Loc == LocRegPair {
@@ -36087,7 +36791,18 @@ Patterns can be any of:
 								panic("jit: phi source has no location")
 							}
 							ctx.SyncDesc(&d1750)
-							ctx.EmitStoreScmerToStack(d1750, int32(phiBase269)+int32(40))
+							if d1750.Loc == LocStackPair {
+								ctx.EmitCopyStackWords(d1750, int32(phiBase269)+int32(40), 2)
+							} else if d1750.Loc == LocInputPair {
+								ctx.EnsureDesc(&d1750)
+								ctx.EmitStoreScmerToStack(d1750, int32(phiBase269)+int32(40))
+							} else if d1750.Loc == LocRegPair || d1750.Loc == LocImm {
+								ctx.EmitStoreScmerToStack(d1750, int32(phiBase269)+int32(40))
+							} else {
+								ctx.EnsureDesc(&d1750)
+								ctx.EmitStoreToStack(d1750, int32(phiBase269)+int32(40))
+								ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase269)+int32(40))+8)
+							}
 							if d1746.Loc == LocReg {
 								ctx.UnprotectReg(d1746.Reg)
 							} else if d1746.Loc == LocRegPair {
@@ -36115,7 +36830,18 @@ Patterns can be any of:
 							panic("jit: phi source has no location")
 						}
 						ctx.SyncDesc(&d1751)
-						ctx.EmitStoreScmerToStack(d1751, int32(phiBase269)+int32(40))
+						if d1751.Loc == LocStackPair {
+							ctx.EmitCopyStackWords(d1751, int32(phiBase269)+int32(40), 2)
+						} else if d1751.Loc == LocInputPair {
+							ctx.EnsureDesc(&d1751)
+							ctx.EmitStoreScmerToStack(d1751, int32(phiBase269)+int32(40))
+						} else if d1751.Loc == LocRegPair || d1751.Loc == LocImm {
+							ctx.EmitStoreScmerToStack(d1751, int32(phiBase269)+int32(40))
+						} else {
+							ctx.EnsureDesc(&d1751)
+							ctx.EmitStoreToStack(d1751, int32(phiBase269)+int32(40))
+							ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase269)+int32(40))+8)
+						}
 						if d1746.Loc == LocReg {
 							ctx.UnprotectReg(d1746.Reg)
 						} else if d1746.Loc == LocRegPair {
@@ -36527,7 +37253,18 @@ Patterns can be any of:
 						panic("jit: phi source has no location")
 					}
 					ctx.SyncDesc(&d1782)
-					ctx.EmitStoreScmerToStack(d1782, int32(phiBase269)+int32(40))
+					if d1782.Loc == LocStackPair {
+						ctx.EmitCopyStackWords(d1782, int32(phiBase269)+int32(40), 2)
+					} else if d1782.Loc == LocInputPair {
+						ctx.EnsureDesc(&d1782)
+						ctx.EmitStoreScmerToStack(d1782, int32(phiBase269)+int32(40))
+					} else if d1782.Loc == LocRegPair || d1782.Loc == LocImm {
+						ctx.EmitStoreScmerToStack(d1782, int32(phiBase269)+int32(40))
+					} else {
+						ctx.EnsureDesc(&d1782)
+						ctx.EmitStoreToStack(d1782, int32(phiBase269)+int32(40))
+						ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase269)+int32(40))+8)
+					}
 					if d1781.Loc == LocReg {
 						ctx.UnprotectReg(d1781.Reg)
 					} else if d1781.Loc == LocRegPair {
@@ -37512,7 +38249,18 @@ Patterns can be any of:
 								panic("jit: phi source has no location")
 							}
 							ctx.SyncDesc(&d1866)
-							ctx.EmitStoreScmerToStack(d1866, int32(phiBase210)+int32(40))
+							if d1866.Loc == LocStackPair {
+								ctx.EmitCopyStackWords(d1866, int32(phiBase210)+int32(40), 2)
+							} else if d1866.Loc == LocInputPair {
+								ctx.EnsureDesc(&d1866)
+								ctx.EmitStoreScmerToStack(d1866, int32(phiBase210)+int32(40))
+							} else if d1866.Loc == LocRegPair || d1866.Loc == LocImm {
+								ctx.EmitStoreScmerToStack(d1866, int32(phiBase210)+int32(40))
+							} else {
+								ctx.EnsureDesc(&d1866)
+								ctx.EmitStoreToStack(d1866, int32(phiBase210)+int32(40))
+								ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase210)+int32(40))+8)
+							}
 							if d1862.Loc == LocReg {
 								ctx.UnprotectReg(d1862.Reg)
 							} else if d1862.Loc == LocRegPair {
@@ -37540,7 +38288,18 @@ Patterns can be any of:
 							panic("jit: phi source has no location")
 						}
 						ctx.SyncDesc(&d1867)
-						ctx.EmitStoreScmerToStack(d1867, int32(phiBase210)+int32(40))
+						if d1867.Loc == LocStackPair {
+							ctx.EmitCopyStackWords(d1867, int32(phiBase210)+int32(40), 2)
+						} else if d1867.Loc == LocInputPair {
+							ctx.EnsureDesc(&d1867)
+							ctx.EmitStoreScmerToStack(d1867, int32(phiBase210)+int32(40))
+						} else if d1867.Loc == LocRegPair || d1867.Loc == LocImm {
+							ctx.EmitStoreScmerToStack(d1867, int32(phiBase210)+int32(40))
+						} else {
+							ctx.EnsureDesc(&d1867)
+							ctx.EmitStoreToStack(d1867, int32(phiBase210)+int32(40))
+							ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase210)+int32(40))+8)
+						}
 						if d1862.Loc == LocReg {
 							ctx.UnprotectReg(d1862.Reg)
 						} else if d1862.Loc == LocRegPair {
@@ -37952,7 +38711,18 @@ Patterns can be any of:
 						panic("jit: phi source has no location")
 					}
 					ctx.SyncDesc(&d1898)
-					ctx.EmitStoreScmerToStack(d1898, int32(phiBase210)+int32(40))
+					if d1898.Loc == LocStackPair {
+						ctx.EmitCopyStackWords(d1898, int32(phiBase210)+int32(40), 2)
+					} else if d1898.Loc == LocInputPair {
+						ctx.EnsureDesc(&d1898)
+						ctx.EmitStoreScmerToStack(d1898, int32(phiBase210)+int32(40))
+					} else if d1898.Loc == LocRegPair || d1898.Loc == LocImm {
+						ctx.EmitStoreScmerToStack(d1898, int32(phiBase210)+int32(40))
+					} else {
+						ctx.EnsureDesc(&d1898)
+						ctx.EmitStoreToStack(d1898, int32(phiBase210)+int32(40))
+						ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase210)+int32(40))+8)
+					}
 					if d1897.Loc == LocReg {
 						ctx.UnprotectReg(d1897.Reg)
 					} else if d1897.Loc == LocRegPair {
@@ -38937,7 +39707,18 @@ Patterns can be any of:
 								panic("jit: phi source has no location")
 							}
 							ctx.SyncDesc(&d1982)
-							ctx.EmitStoreScmerToStack(d1982, int32(phiBase151)+int32(40))
+							if d1982.Loc == LocStackPair {
+								ctx.EmitCopyStackWords(d1982, int32(phiBase151)+int32(40), 2)
+							} else if d1982.Loc == LocInputPair {
+								ctx.EnsureDesc(&d1982)
+								ctx.EmitStoreScmerToStack(d1982, int32(phiBase151)+int32(40))
+							} else if d1982.Loc == LocRegPair || d1982.Loc == LocImm {
+								ctx.EmitStoreScmerToStack(d1982, int32(phiBase151)+int32(40))
+							} else {
+								ctx.EnsureDesc(&d1982)
+								ctx.EmitStoreToStack(d1982, int32(phiBase151)+int32(40))
+								ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase151)+int32(40))+8)
+							}
 							if d1978.Loc == LocReg {
 								ctx.UnprotectReg(d1978.Reg)
 							} else if d1978.Loc == LocRegPair {
@@ -38965,7 +39746,18 @@ Patterns can be any of:
 							panic("jit: phi source has no location")
 						}
 						ctx.SyncDesc(&d1983)
-						ctx.EmitStoreScmerToStack(d1983, int32(phiBase151)+int32(40))
+						if d1983.Loc == LocStackPair {
+							ctx.EmitCopyStackWords(d1983, int32(phiBase151)+int32(40), 2)
+						} else if d1983.Loc == LocInputPair {
+							ctx.EnsureDesc(&d1983)
+							ctx.EmitStoreScmerToStack(d1983, int32(phiBase151)+int32(40))
+						} else if d1983.Loc == LocRegPair || d1983.Loc == LocImm {
+							ctx.EmitStoreScmerToStack(d1983, int32(phiBase151)+int32(40))
+						} else {
+							ctx.EnsureDesc(&d1983)
+							ctx.EmitStoreToStack(d1983, int32(phiBase151)+int32(40))
+							ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase151)+int32(40))+8)
+						}
 						if d1978.Loc == LocReg {
 							ctx.UnprotectReg(d1978.Reg)
 						} else if d1978.Loc == LocRegPair {
@@ -39377,7 +40169,18 @@ Patterns can be any of:
 						panic("jit: phi source has no location")
 					}
 					ctx.SyncDesc(&d2014)
-					ctx.EmitStoreScmerToStack(d2014, int32(phiBase151)+int32(40))
+					if d2014.Loc == LocStackPair {
+						ctx.EmitCopyStackWords(d2014, int32(phiBase151)+int32(40), 2)
+					} else if d2014.Loc == LocInputPair {
+						ctx.EnsureDesc(&d2014)
+						ctx.EmitStoreScmerToStack(d2014, int32(phiBase151)+int32(40))
+					} else if d2014.Loc == LocRegPair || d2014.Loc == LocImm {
+						ctx.EmitStoreScmerToStack(d2014, int32(phiBase151)+int32(40))
+					} else {
+						ctx.EnsureDesc(&d2014)
+						ctx.EmitStoreToStack(d2014, int32(phiBase151)+int32(40))
+						ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase151)+int32(40))+8)
+					}
 					if d2013.Loc == LocReg {
 						ctx.UnprotectReg(d2013.Reg)
 					} else if d2013.Loc == LocRegPair {
@@ -40362,7 +41165,18 @@ Patterns can be any of:
 								panic("jit: phi source has no location")
 							}
 							ctx.SyncDesc(&d2098)
-							ctx.EmitStoreScmerToStack(d2098, int32(phiBase92)+int32(40))
+							if d2098.Loc == LocStackPair {
+								ctx.EmitCopyStackWords(d2098, int32(phiBase92)+int32(40), 2)
+							} else if d2098.Loc == LocInputPair {
+								ctx.EnsureDesc(&d2098)
+								ctx.EmitStoreScmerToStack(d2098, int32(phiBase92)+int32(40))
+							} else if d2098.Loc == LocRegPair || d2098.Loc == LocImm {
+								ctx.EmitStoreScmerToStack(d2098, int32(phiBase92)+int32(40))
+							} else {
+								ctx.EnsureDesc(&d2098)
+								ctx.EmitStoreToStack(d2098, int32(phiBase92)+int32(40))
+								ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase92)+int32(40))+8)
+							}
 							if d2094.Loc == LocReg {
 								ctx.UnprotectReg(d2094.Reg)
 							} else if d2094.Loc == LocRegPair {
@@ -40390,7 +41204,18 @@ Patterns can be any of:
 							panic("jit: phi source has no location")
 						}
 						ctx.SyncDesc(&d2099)
-						ctx.EmitStoreScmerToStack(d2099, int32(phiBase92)+int32(40))
+						if d2099.Loc == LocStackPair {
+							ctx.EmitCopyStackWords(d2099, int32(phiBase92)+int32(40), 2)
+						} else if d2099.Loc == LocInputPair {
+							ctx.EnsureDesc(&d2099)
+							ctx.EmitStoreScmerToStack(d2099, int32(phiBase92)+int32(40))
+						} else if d2099.Loc == LocRegPair || d2099.Loc == LocImm {
+							ctx.EmitStoreScmerToStack(d2099, int32(phiBase92)+int32(40))
+						} else {
+							ctx.EnsureDesc(&d2099)
+							ctx.EmitStoreToStack(d2099, int32(phiBase92)+int32(40))
+							ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase92)+int32(40))+8)
+						}
 						if d2094.Loc == LocReg {
 							ctx.UnprotectReg(d2094.Reg)
 						} else if d2094.Loc == LocRegPair {
@@ -40802,7 +41627,18 @@ Patterns can be any of:
 						panic("jit: phi source has no location")
 					}
 					ctx.SyncDesc(&d2130)
-					ctx.EmitStoreScmerToStack(d2130, int32(phiBase92)+int32(40))
+					if d2130.Loc == LocStackPair {
+						ctx.EmitCopyStackWords(d2130, int32(phiBase92)+int32(40), 2)
+					} else if d2130.Loc == LocInputPair {
+						ctx.EnsureDesc(&d2130)
+						ctx.EmitStoreScmerToStack(d2130, int32(phiBase92)+int32(40))
+					} else if d2130.Loc == LocRegPair || d2130.Loc == LocImm {
+						ctx.EmitStoreScmerToStack(d2130, int32(phiBase92)+int32(40))
+					} else {
+						ctx.EnsureDesc(&d2130)
+						ctx.EmitStoreToStack(d2130, int32(phiBase92)+int32(40))
+						ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase92)+int32(40))+8)
+					}
 					if d2129.Loc == LocReg {
 						ctx.UnprotectReg(d2129.Reg)
 					} else if d2129.Loc == LocRegPair {
@@ -41787,7 +42623,18 @@ Patterns can be any of:
 								panic("jit: phi source has no location")
 							}
 							ctx.SyncDesc(&d2214)
-							ctx.EmitStoreScmerToStack(d2214, int32(phiBase33)+int32(40))
+							if d2214.Loc == LocStackPair {
+								ctx.EmitCopyStackWords(d2214, int32(phiBase33)+int32(40), 2)
+							} else if d2214.Loc == LocInputPair {
+								ctx.EnsureDesc(&d2214)
+								ctx.EmitStoreScmerToStack(d2214, int32(phiBase33)+int32(40))
+							} else if d2214.Loc == LocRegPair || d2214.Loc == LocImm {
+								ctx.EmitStoreScmerToStack(d2214, int32(phiBase33)+int32(40))
+							} else {
+								ctx.EnsureDesc(&d2214)
+								ctx.EmitStoreToStack(d2214, int32(phiBase33)+int32(40))
+								ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase33)+int32(40))+8)
+							}
 							if d2210.Loc == LocReg {
 								ctx.UnprotectReg(d2210.Reg)
 							} else if d2210.Loc == LocRegPair {
@@ -41815,7 +42662,18 @@ Patterns can be any of:
 							panic("jit: phi source has no location")
 						}
 						ctx.SyncDesc(&d2215)
-						ctx.EmitStoreScmerToStack(d2215, int32(phiBase33)+int32(40))
+						if d2215.Loc == LocStackPair {
+							ctx.EmitCopyStackWords(d2215, int32(phiBase33)+int32(40), 2)
+						} else if d2215.Loc == LocInputPair {
+							ctx.EnsureDesc(&d2215)
+							ctx.EmitStoreScmerToStack(d2215, int32(phiBase33)+int32(40))
+						} else if d2215.Loc == LocRegPair || d2215.Loc == LocImm {
+							ctx.EmitStoreScmerToStack(d2215, int32(phiBase33)+int32(40))
+						} else {
+							ctx.EnsureDesc(&d2215)
+							ctx.EmitStoreToStack(d2215, int32(phiBase33)+int32(40))
+							ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase33)+int32(40))+8)
+						}
 						if d2210.Loc == LocReg {
 							ctx.UnprotectReg(d2210.Reg)
 						} else if d2210.Loc == LocRegPair {
@@ -42227,7 +43085,18 @@ Patterns can be any of:
 						panic("jit: phi source has no location")
 					}
 					ctx.SyncDesc(&d2246)
-					ctx.EmitStoreScmerToStack(d2246, int32(phiBase33)+int32(40))
+					if d2246.Loc == LocStackPair {
+						ctx.EmitCopyStackWords(d2246, int32(phiBase33)+int32(40), 2)
+					} else if d2246.Loc == LocInputPair {
+						ctx.EnsureDesc(&d2246)
+						ctx.EmitStoreScmerToStack(d2246, int32(phiBase33)+int32(40))
+					} else if d2246.Loc == LocRegPair || d2246.Loc == LocImm {
+						ctx.EmitStoreScmerToStack(d2246, int32(phiBase33)+int32(40))
+					} else {
+						ctx.EnsureDesc(&d2246)
+						ctx.EmitStoreToStack(d2246, int32(phiBase33)+int32(40))
+						ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(phiBase33)+int32(40))+8)
+					}
 					if d2245.Loc == LocReg {
 						ctx.UnprotectReg(d2245.Reg)
 					} else if d2245.Loc == LocRegPair {
