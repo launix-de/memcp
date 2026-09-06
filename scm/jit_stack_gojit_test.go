@@ -304,6 +304,14 @@ func TestJITRegisterHomesFollowArchitectureBank(t *testing.T) {
 	}
 }
 
+func TestJITPersistentRegisterBankExcludesGoScratchR15(t *testing.T) {
+	for index := uint8(0); index < jitX86RegisterBank.Count; index++ {
+		if jitX86RegisterBank.Registers[index] == RegR15 {
+			t.Fatal("R15 may be used as a block-local temporary, not as a persistent control-flow home")
+		}
+	}
+}
+
 func TestJITRegisterHomesTradeOuterForMoreValuableInnerPlan(t *testing.T) {
 	code := make([]byte, 256)
 	start := unsafe.Pointer(&code[0])
