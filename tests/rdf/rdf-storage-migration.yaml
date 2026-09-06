@@ -1,0 +1,36 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
+# Migration coverage for RDF tables created before triple set semantics.
+
+metadata:
+  version: "1.0"
+  description: "Existing RDF storage is migrated to unique triple semantics"
+  isolated: true
+
+setup:
+  - sql: "DROP TABLE IF EXISTS rdf"
+  - sql: "CREATE TABLE rdf (s TEXT, p TEXT, o TEXT)"
+  - sql: "INSERT INTO rdf VALUES ('subject', 'predicate', 'object'), ('subject', 'predicate', 'object')"
+
+test_cases:
+  - name: "rdf_ensure_table deduplicates and installs the triple key"
+    scm: |
+      (begin (rdf_ensure_table "memcp-tests") true)
+    expect:
+      rows: 1
+      data:
+        - true
+
+  - name: "Legacy duplicate triples were collapsed"
+    sql: "SELECT COUNT(*) AS cnt FROM rdf"
+    expect:
+      rows: 1
+      data:
+        - cnt: 1
+
+  - name: "Migrated table enforces triple uniqueness"
+    sql: "INSERT INTO rdf VALUES ('subject', 'predicate', 'object')"
+    expect:
+      error: true
+
+cleanup: []

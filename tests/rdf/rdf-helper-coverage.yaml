@@ -1,3 +1,5 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
 # Direct SCM coverage for RDF parser/planner helper paths.
 
 metadata:
@@ -25,7 +27,7 @@ test_cases:
         (define fail (lambda (msg) (error (concat "rdf condition coverage: " msg))))
         (define get_s (list (quote get_var) "?s"))
         (define get_o (list (quote get_var) "?o"))
-        (define subquery (list "select" (list "?s" get_s) "where" (list) "group" (list) "order" nil "limit" nil "offset" nil "distinct" nil))
+        (define subquery (list "select" (list "?s" get_s) "where" (list) "group" (list) "having" nil "order" nil "limit" nil "offset" nil "distinct" nil))
         (define conditions (list
           (list "__union__" (list (list get_s "p" get_o)))
           (list "__subquery__" subquery)
@@ -36,31 +38,24 @@ test_cases:
         (define defs (newsession))
         (defs "ex" "http://example/")
         (if (not (equal? (rdf_resolve_prefixes (list (quote concat) (list (quote definitions) "ex") "item") defs) "http://example/item")) (fail "resolve prefix"))
+        (define star (rdf_expand_select_star (rdf_query "SELECT * WHERE { ?subject value ?value }")))
+        (if (not (equal? (get_assoc (nth star 1) "?subject") (list (quote get_var) "?subject"))) (fail (concat "SELECT * subject " (nth star 1))))
+        (if (not (equal? (get_assoc (nth star 1) "?value") (list (quote get_var) "?value"))) (fail (concat "SELECT * value " (nth star 1))))
         true)
 
-  - name: "RDF row and aggregate helper edge cases"
+  - name: "RDF aggregates lower only to common aggregate IR"
     scm: |
       (begin
         (define fail (lambda (msg) (error (concat "rdf aggregate coverage: " msg))))
-        (define row (list (list "v" 4) (list "txt" "a")))
-        (if (not (equal? (rdf_row_lookup row "v") 4)) (fail "row lookup pair"))
-        (if (not (equal? (rdf_row_lookup '("v" 5 "txt" "b") "txt") "b")) (fail "row lookup flat assoc"))
-        (define get_v (list (quote get_var) "v"))
-        (define get_txt (list (quote get_var) "txt"))
-        (if (not (nil? (rdf_replace_row (list (quote get_var) "missing") row))) (fail "replace missing"))
-        (if (not (equal? (rdf_row_eval get_v row) 4)) (fail "row eval"))
+        (define get_v (list (quote get_var) "?v"))
+        (define bindings (list "?v" 4 "?rank" 1))
         (define count_expr (list "__rdf_agg__" "COUNT" get_v nil))
         (define sum_expr (list "__rdf_agg__" "SUM" get_v nil))
-        (define avg_expr (list "__rdf_agg__" "AVG" get_v nil))
-        (define min_expr (list "__rdf_agg__" "MIN" get_v nil))
-        (define max_expr (list "__rdf_agg__" "MAX" get_v nil))
-        (define gc_expr (list "__rdf_agg__" "GROUP_CONCAT" get_txt "|"))
-        (if (not (equal? (rdf_agg_step count_expr (rdf_agg_init count_expr) row) 1)) (fail "count step"))
-        (if (not (equal? (rdf_agg_step sum_expr (rdf_agg_init sum_expr) row) 4)) (fail "sum step"))
-        (if (not (equal? (rdf_agg_finalize avg_expr (rdf_agg_step avg_expr (rdf_agg_init avg_expr) row)) 4)) (fail "avg finalize"))
-        (if (not (equal? (rdf_agg_step min_expr nil row) 4)) (fail "min nil step"))
-        (if (not (equal? (rdf_agg_step max_expr 2 row) 4)) (fail "max step"))
-        (if (not (equal? (rdf_agg_step gc_expr "z" row) "z|a")) (fail "group concat step"))
+        (define ordered_expr (list "__rdf_agg__" "JSON_ARRAYAGG_ORDERED" get_v
+          (list (list (quote get_var) "?rank") "ASC")))
+        (if (not (equal? (car (rdf_shared_expr count_expr bindings '())) (quote aggregate))) (fail "COUNT common IR"))
+        (if (not (equal? (car (rdf_shared_expr sum_expr bindings '())) (quote aggregate))) (fail "SUM common IR"))
+        (if (not (equal? (car (rdf_shared_expr ordered_expr bindings '())) (quote aggregate))) (fail "ordered JSON common IR"))
         true)
 
 cleanup: []

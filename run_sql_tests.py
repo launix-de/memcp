@@ -1047,6 +1047,15 @@ class SQLTestRunner:
         text = response.text.strip()
         if not text:
             return []
+        if "application/sparql-results+json" in response.headers.get("Content-Type", ""):
+            try:
+                document = response.json()
+                bindings = document.get("results", {}).get("bindings")
+                if isinstance(bindings, list):
+                    return bindings
+                return [document]
+            except (TypeError, ValueError):
+                return None
         results = []
         for line in text.splitlines():
             try:
@@ -1508,6 +1517,8 @@ class SQLTestRunner:
         tc_pass = test_case.get("password") or self.suite_metadata.get("password") or self.password
         creds = f"{tc_user}:{tc_pass}".encode()
         auth_header = {"Authorization": f"Basic {b64encode(creds).decode()}"}
+        if isinstance(test_case.get("headers"), dict):
+            auth_header.update({str(k): str(v) for k, v in test_case["headers"].items()})
         test_syntax = test_case.get("syntax")
         active_syntax = self._normalize_syntax(test_syntax) if test_syntax is not None else self.suite_syntax
         sql_timeout = int(test_case.get("timeout", 10))
@@ -1833,6 +1844,10 @@ class SQLTestRunner:
 
         if "Error" in response.text or response.status_code != 200:
             return False
+
+        if "content_type" in expect:
+            if expect["content_type"] not in response.headers.get("Content-Type", ""):
+                return False
 
         if "result_contains" in expect or "result_not_contains" in expect or "result_occurrences" in expect:
             result_text = response.text

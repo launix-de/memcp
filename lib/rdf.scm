@@ -26,6 +26,50 @@ this is how rdf works:
 - import formats are: xml, ttl
 */
 
+(define rdf_sparql_json_term (lambda (value)
+	(match value
+		true (json_object "type" "literal" "value" "true"
+			"datatype" "http://www.w3.org/2001/XMLSchema#boolean")
+		false (json_object "type" "literal" "value" "false"
+			"datatype" "http://www.w3.org/2001/XMLSchema#boolean")
+		_ (if (rdf_is_blank value)
+			(json_object "type" "bnode" "value"
+				(replace (replace value "urn:uuid:" "") "_:" ""))
+			(if (rdf_is_iri value)
+				(json_object "type" "uri" "value" value)
+				(if (number? value)
+					(json_object "type" "literal" "value" (concat value)
+						"datatype" "http://www.w3.org/2001/XMLSchema#decimal")
+					(json_object "type" "literal" "value" value)))))
+))
+(define rdf_sparql_json_binding (lambda (row)
+	(apply json_object (reduce_assoc row (lambda (acc key value)
+		(if (nil? value) acc
+			(append acc (substr (concat key) 1) (rdf_sparql_json_term value)))) '()))
+))
+(define rdf_sparql_query_vars (lambda (query)
+	(match (ttl_header query)
+		'("prefixes" definitions "rest" rest)
+		(match (rdf_expand_select_star
+			(rdf_resolve_prefixes (rdf_query (rdf_strip_leading_ws_comments rest)) definitions))
+			'("select" cols "where" _conditions "group" _group "having" _having
+				"order" _order "limit" _limit "offset" _offset "distinct" _distinct)
+			(map (extract_assoc cols (lambda (title _expr) title)) (lambda (title)
+				(substr (concat title) 1)))
+			_ '())
+		_ '())
+))
+(define rdf_sparql_results_json (lambda (rows ask_query vars)
+	(if ask_query
+		(json_object "head" (json_object) "boolean"
+			(if (equal? rows '()) false (coalesceNil (get_assoc (car rows) "?ask") false)))
+		(begin
+			(json_object
+				"head" (json_object "vars" (json_arrayagg_finalize vars))
+				"results" (json_object "bindings"
+					(json_arrayagg_finalize (map rows rdf_sparql_json_binding))))))
+))
+
 (define handler_404 (lambda (req res) (begin
 	/*(print "request " req)*/
 	((res "header") "Content-Type" "text/plain")
@@ -40,16 +84,40 @@ this is how rdf works:
 		/* check for password */
 		(set pw (scan_lookup nil (table "system" "user") (list 372734710317056 (scan_boundary "equal" "username" 0 0 true true "" false) "password") (list (req "username"))))
 		(if (and pw (equal? pw (password (req "password")))) (time (begin
-			((res "header") "Content-Type" "text/plain")
+			(define accept (coalesceNil (get_assoc (req "header") "Accept") ""))
+			(define standard_json (rdf_contains (toLower accept) "application/sparql-results+json"))
+			((res "header") "Content-Type" (if standard_json
+				"application/sparql-results+json; charset=utf-8"
+				"application/x-ndjson; charset=utf-8"))
 			((res "status") 200)
-			/*(print "RDF query: " query)*/
-			/* parse_sparql currently embeds LIMIT/OFFSET/DISTINCT row-state in the generated
-			plan, so caching the compiled formula can leak counters across repeated requests.
-			Until the wrapper state is moved fully to eval time, keep SPARQL parsing uncached. */
-			(define formula (parse_sparql schema query))
-			(define resultrow (res "jsonl"))
-
-			(eval formula)
+			(define row_store (if standard_json (newsession) nil))
+			(define resultrow (if standard_json
+				(lambda (row) (begin
+					(row_store (concat "row:" (coalesceNil (row_store "count") 0)) row)
+					(row_store "count" (+ (coalesceNil (row_store "count") 0) 1))))
+				(res "jsonl")))
+			(define session (req "__session"))
+			(define session_state (req "__session_state"))
+			(define query_seq (req "__query_seq"))
+			(session "username" (req "username"))
+			(session "schema" schema)
+			/* Match SQL prepared-query semantics for URL parameters and execute the RDF
+			plan through the same closed, session-bound query-plan infrastructure. */
+			(extract_assoc (req "query") (lambda (k v) (session k v)))
+			(with_autocommit session session_state query_seq query (lambda (tx) (begin
+				(define formula (cached_parse sparql_queryplan_cache (list parse_sparql)
+					schema query (lambda (_schema _table _write) true)
+					(req "username") session false tx))
+				(sql_execute_formula session tx formula resultrow (lambda (_fields) true))
+			)))
+			(if standard_json
+				(begin
+					(define rows (map (produceN (coalesceNil (row_store "count") 0))
+						(lambda (idx) (row_store (concat "row:" idx)))))
+					((res "print") (json_encode (rdf_sparql_results_json rows
+						(regexp_test (toUpper query) "(?:^|[\\s}])ASK(?:[\\s{]|$)")
+						(rdf_sparql_query_vars query)))))
+				nil)
 		) query) (begin
 				((res "header") "Content-Type" "text/plain")
 				((res "header") "WWW-Authenticate" "Basic realm=\"authorization required\"")
