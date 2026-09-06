@@ -1,0 +1,152 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+
+metadata:
+  version: "1.0"
+  description: "SQL-compatible JSON construction and aggregation from SPARQL"
+  isolated: true
+
+setup: []
+
+test_cases:
+  - name: "JSON_OBJECT constructs one object per RDF solution"
+    ttl_data: |
+      @prefix js01: <http://json-rdf01.example/> .
+      js01:alice js01:name "Alice" .
+    sparql: |
+      @prefix js01: <http://json-rdf01.example/> .
+      SELECT (JSON_OBJECT("id", ?person, "name", ?name) AS ?document)
+      WHERE { ?person js01:name ?name }
+    expect:
+      rows: 1
+      data:
+        - "?document": {id: "http://json-rdf01.example/alice", name: "Alice"}
+
+  - name: "JSON scalar functions use the SQL builtin semantics"
+    ttl_data: |
+      @prefix js02: <http://json-rdf02.example/> .
+      js02:item js02:value "kept" .
+    sparql: |
+      @prefix js02: <http://json-rdf02.example/> .
+      SELECT (JSON_EXTRACT(JSON_OBJECT("value", ?value), "$.value") AS ?extracted)
+      WHERE { js02:item js02:value ?value }
+    expect:
+      rows: 1
+      data:
+        - "?extracted": "kept"
+
+  - name: "JSON_ARRAY builds nested scalar arrays"
+    ttl_data: |
+      @prefix js03: <http://json-rdf03.example/> .
+      js03:item js03:value "leaf" .
+    sparql: |
+      @prefix js03: <http://json-rdf03.example/> .
+      SELECT (JSON_ARRAY(?value, JSON_OBJECT("kind", "rdf")) AS ?nested)
+      WHERE { js03:item js03:value ?value }
+    expect:
+      rows: 1
+      data:
+        - "?nested": ["leaf", {kind: "rdf"}]
+
+  - name: "JSON_ARRAYAGG packs child solutions into one JSON array"
+    ttl_data: |
+      @prefix js04: <http://json-rdf04.example/> .
+      js04:case js04:item js04:item1, js04:item2 .
+      js04:item1 js04:label "first" .
+      js04:item2 js04:label "second" .
+    sparql: |
+      @prefix js04: <http://json-rdf04.example/> .
+      SELECT ?case (JSON_ARRAYAGG(JSON_OBJECT("id", ?item, "label", ?label)) AS ?items)
+      WHERE {
+        ?case js04:item ?item .
+        ?item js04:label ?label
+      }
+      GROUP BY ?case
+    expect:
+      rows: 1
+      data:
+        - "?case": "http://json-rdf04.example/case"
+          "?items":
+            - {id: "http://json-rdf04.example/item1", label: "first"}
+            - {id: "http://json-rdf04.example/item2", label: "second"}
+
+  - name: "JSON_ARRAYAGG keeps independent arrays for each RDF group"
+    ttl_data: |
+      @prefix js05: <http://json-rdf05.example/> .
+      js05:a js05:tag "red", "blue" .
+      js05:b js05:tag "green" .
+    sparql: |
+      @prefix js05: <http://json-rdf05.example/> .
+      SELECT ?subject (JSON_ARRAYAGG(?tag) AS ?tags)
+      WHERE { ?subject js05:tag ?tag }
+      GROUP BY ?subject
+      ORDER BY ?subject
+    expect:
+      rows: 2
+      data:
+        - "?subject": "http://json-rdf05.example/a"
+          "?tags": ["red", "blue"]
+        - "?subject": "http://json-rdf05.example/b"
+          "?tags": ["green"]
+
+  - name: "JSON object embeds an aggregated RDF child list"
+    ttl_data: |
+      @prefix js08: <http://json-rdf08.example/> .
+      js08:case js08:item "first", "second" .
+    sparql: |
+      @prefix js08: <http://json-rdf08.example/> .
+      SELECT (JSON_OBJECT(
+        "id", ?case,
+        "items", JSON_ARRAYAGG(JSON_OBJECT("value", ?item))
+      ) AS ?document)
+      WHERE { ?case js08:item ?item }
+      GROUP BY ?case
+    expect:
+      rows: 1
+      data:
+        - "?document":
+            id: "http://json-rdf08.example/case"
+            items:
+              - {value: "first"}
+              - {value: "second"}
+
+  - name: "JSON_OBJECTAGG builds an object from RDF key-value solutions"
+    ttl_data: |
+      @prefix js06: <http://json-rdf06.example/> .
+      js06:settings js06:entry js06:lang, js06:theme .
+      js06:lang js06:key "language" ; js06:value "de" .
+      js06:theme js06:key "theme" ; js06:value "dark" .
+    sparql: |
+      @prefix js06: <http://json-rdf06.example/> .
+      SELECT (JSON_OBJECTAGG(?key, ?value) AS ?settings)
+      WHERE {
+        js06:settings js06:entry ?entry .
+        ?entry js06:key ?key .
+        ?entry js06:value ?value
+      }
+    expect:
+      rows: 1
+      data:
+        - "?settings": {language: "de", theme: "dark"}
+
+  - name: "JSON aggregate BGP lowers through the shared query-block planner"
+    ttl_data: |
+      @prefix js07: <http://json-rdf07.example/> .
+      js07:case js07:item "one", "two" .
+    scm: |
+      (begin
+        (define header (ttl_header "@prefix js07: <http://json-rdf07.example/> . SELECT (JSON_ARRAYAGG(?item) AS ?items) WHERE { js07:case js07:item ?item }"))
+        (define definitions (header "prefixes"))
+        (define parsed (rdf_resolve_prefixes (rdf_query (header "rest")) definitions))
+        (define ast (rdf_shared_query_ast "{database}" parsed '()))
+        (list (rdf_shared_bgp_supported? parsed) (car ast) (car (cadr (qb_fields ast)))))
+    expect:
+      rows: 1
+      data:
+        - true
+        - "query-block"
+        - "aggregate"

@@ -64,8 +64,8 @@ this is how rdf works:
 			((res "header") "Content-Type" "text/plain")
 			((res "status") 200)
 			/*(print "Loading TTL data into: " schema)*/
-			/* ensure rdf table exists */
-			(eval (parse_sql schema "CREATE TABLE IF NOT EXISTS rdf (s TEXT, p TEXT, o TEXT)" (lambda (schema tblname write) true)))
+			/* ensure the shared RDF graph storage and its set-semantics key exist */
+			(rdf_ensure_table schema)
 			/* load the TTL data */
 			(load_ttl schema ttl_data)
 			((res "println") "TTL data loaded successfully")

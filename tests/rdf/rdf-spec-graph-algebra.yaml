@@ -1,0 +1,121 @@
+# Cross-feature coverage derived from SPARQL 1.1 Query sections 5 through 12.
+
+metadata:
+  version: "1.0"
+  description: "SPARQL graph pattern and expression algebra semantics"
+  isolated: true
+
+setup: []
+
+test_cases:
+  - name: "FILTER scope covers the complete enclosing group"
+    ttl_data: |
+      @prefix ca01: <http://conformance-algebra01.example/> .
+      ca01:a ca01:value "keep" .
+      ca01:b ca01:value "drop" .
+    sparql: |
+      @prefix ca01: <http://conformance-algebra01.example/> .
+      SELECT ?subject WHERE {
+        FILTER(?value = "keep")
+        ?subject ca01:value ?value
+      }
+    expect:
+      rows: 1
+      data:
+        - "?subject": "http://conformance-algebra01.example/a"
+
+  - name: "OPTIONAL emits one solution for every compatible right-side match"
+    ttl_data: |
+      @prefix ca02: <http://conformance-algebra02.example/> .
+      ca02:alice ca02:name "Alice" ; ca02:contact "mail" ; ca02:contact "phone" .
+    sparql: |
+      @prefix ca02: <http://conformance-algebra02.example/> .
+      SELECT ?name, ?contact WHERE {
+        ?subject ca02:name ?name .
+        OPTIONAL { ?subject ca02:contact ?contact }
+      }
+    expect:
+      rows: 2
+
+  - name: "UNION retains duplicate compatible solutions"
+    ttl_data: |
+      @prefix ca03: <http://conformance-algebra03.example/> .
+      ca03:item ca03:left "yes" ; ca03:right "yes" .
+    sparql: |
+      @prefix ca03: <http://conformance-algebra03.example/> .
+      SELECT ?subject WHERE {
+        { ?subject ca03:left "yes" }
+        UNION
+        { ?subject ca03:right "yes" }
+      }
+    expect:
+      rows: 2
+
+  - name: "VALUES joins its solution sequence with a graph pattern"
+    ttl_data: |
+      @prefix ca04: <http://conformance-algebra04.example/> .
+      ca04:a ca04:name "Alice" .
+      ca04:b ca04:name "Bob" .
+      ca04:c ca04:name "Carol" .
+    sparql: |
+      @prefix ca04: <http://conformance-algebra04.example/> .
+      SELECT ?name WHERE {
+        VALUES ?subject { ca04:c ca04:a }
+        ?subject ca04:name ?name
+      }
+    expect:
+      rows: 2
+      contains: "Alice"
+
+  - name: "FILTER EXISTS is correlated with the outer solution"
+    ttl_data: |
+      @prefix ca05: <http://conformance-algebra05.example/> .
+      ca05:a ca05:name "Alice" ; ca05:active "yes" .
+      ca05:b ca05:name "Bob" .
+    sparql: |
+      @prefix ca05: <http://conformance-algebra05.example/> .
+      SELECT ?name WHERE {
+        ?subject ca05:name ?name .
+        FILTER EXISTS { ?subject ca05:active "yes" }
+      }
+    expect:
+      rows: 1
+      data:
+        - "?name": "Alice"
+
+  - name: "BIND extends each incoming solution without changing cardinality"
+    ttl_data: |
+      @prefix ca06: <http://conformance-algebra06.example/> .
+      ca06:a ca06:name "Alice" .
+      ca06:b ca06:name "Bob" .
+    sparql: |
+      @prefix ca06: <http://conformance-algebra06.example/> .
+      SELECT ?label WHERE {
+        ?subject ca06:name ?name .
+        BIND(CONCAT(?name, "!") AS ?label)
+      }
+    expect:
+      rows: 2
+      contains: "Alice!"
+
+  - name: "Ungrouped COUNT over an empty input produces one zero row"
+    sparql: |
+      @prefix ca07: <http://conformance-algebra07.example/> .
+      SELECT (COUNT(?value) AS ?count) WHERE { ?subject ca07:value ?value }
+    expect:
+      rows: 1
+      data:
+        - "?count": 0
+
+  - name: "Zero-or-more path includes the zero-length subject solution"
+    ttl_data: |
+      @prefix ca08: <http://conformance-algebra08.example/> .
+      ca08:a ca08:next ca08:b .
+      ca08:b ca08:next ca08:c .
+    sparql: |
+      @prefix ca08: <http://conformance-algebra08.example/> .
+      SELECT ?end WHERE { ca08:a ca08:next* ?end }
+    expect:
+      rows: 3
+
+cleanup: []

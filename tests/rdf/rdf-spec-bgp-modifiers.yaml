@@ -1,0 +1,196 @@
+# Conformance-oriented coverage derived from SPARQL 1.1 Query sections 5 and 15.
+
+metadata:
+  version: "1.0"
+  description: "SPARQL basic graph pattern and solution modifier semantics"
+  isolated: true
+
+setup: []
+
+test_cases:
+  - name: "BGP: repeated variable in one triple must denote the same RDF term"
+    ttl_data: |
+      @prefix cb01: <http://conformance-bgp01.example/> .
+      cb01:same cb01:edge cb01:same .
+      cb01:left cb01:edge cb01:right .
+    sparql: |
+      @prefix cb01: <http://conformance-bgp01.example/> .
+      SELECT ?node WHERE { ?node cb01:edge ?node }
+    expect:
+      rows: 1
+      data:
+        - "?node": "http://conformance-bgp01.example/same"
+
+  - name: "BGP: variable predicate binds the matching predicate IRI"
+    ttl_data: |
+      @prefix cb02: <http://conformance-bgp02.example/> .
+      cb02:item cb02:first "one" ; cb02:second "two" .
+    sparql: |
+      @prefix cb02: <http://conformance-bgp02.example/> .
+      SELECT ?predicate WHERE { cb02:item ?predicate "two" }
+    expect:
+      rows: 1
+      data:
+        - "?predicate": "http://conformance-bgp02.example/second"
+
+  - name: "BGP: shared variable joins subject, predicate, and object positions"
+    ttl_data: |
+      @prefix cb03: <http://conformance-bgp03.example/> .
+      cb03:alice cb03:follows cb03:bob .
+      cb03:follows cb03:label "follows" .
+      cb03:bob cb03:name "Bob" .
+      cb03:noise cb03:name "Noise" .
+    sparql: |
+      @prefix cb03: <http://conformance-bgp03.example/> .
+      SELECT ?person, ?label WHERE {
+        cb03:alice ?relation ?person .
+        ?relation cb03:label ?label .
+        ?person cb03:name "Bob"
+      }
+    expect:
+      rows: 1
+      data:
+        - "?person": "http://conformance-bgp03.example/bob"
+          "?label": "follows"
+
+  - name: "BGP: disconnected patterns form a Cartesian product"
+    ttl_data: |
+      @prefix cb04: <http://conformance-bgp04.example/> .
+      cb04:a cb04:left "A" .
+      cb04:b cb04:left "B" .
+      cb04:x cb04:right "X" .
+      cb04:y cb04:right "Y" .
+      cb04:z cb04:right "Z" .
+    sparql: |
+      @prefix cb04: <http://conformance-bgp04.example/> .
+      SELECT ?left, ?right WHERE {
+        ?ls cb04:left ?left .
+        ?rs cb04:right ?right
+      }
+    expect:
+      rows: 6
+
+  - name: "BGP: projection retains solution multiplicity"
+    ttl_data: |
+      @prefix cb05: <http://conformance-bgp05.example/> .
+      cb05:a cb05:kind cb05:Thing .
+      cb05:b cb05:kind cb05:Thing .
+      cb05:c cb05:kind cb05:Other .
+    sparql: |
+      @prefix cb05: <http://conformance-bgp05.example/> .
+      SELECT ?kind WHERE { ?subject cb05:kind ?kind } ORDER BY ?kind
+    expect:
+      rows: 3
+      data:
+        - "?kind": "http://conformance-bgp05.example/Other"
+        - "?kind": "http://conformance-bgp05.example/Thing"
+        - "?kind": "http://conformance-bgp05.example/Thing"
+
+  - name: "DISTINCT applies after projection"
+    ttl_data: |
+      @prefix cb06: <http://conformance-bgp06.example/> .
+      cb06:a cb06:kind cb06:Thing .
+      cb06:b cb06:kind cb06:Thing .
+      cb06:c cb06:kind cb06:Other .
+    sparql: |
+      @prefix cb06: <http://conformance-bgp06.example/> .
+      SELECT DISTINCT ?kind WHERE { ?subject cb06:kind ?kind } ORDER BY ?kind
+    expect:
+      rows: 2
+      data:
+        - "?kind": "http://conformance-bgp06.example/Other"
+        - "?kind": "http://conformance-bgp06.example/Thing"
+
+  - name: "ORDER BY may use a variable omitted from projection"
+    ttl_data: |
+      @prefix cb07: <http://conformance-bgp07.example/> .
+      cb07:a cb07:name "Zulu" ; cb07:rank "2" .
+      cb07:b cb07:name "Alpha" ; cb07:rank "1" .
+    sparql: |
+      @prefix cb07: <http://conformance-bgp07.example/> .
+      SELECT ?name WHERE {
+        ?subject cb07:name ?name .
+        ?subject cb07:rank ?rank
+      } ORDER BY ?rank
+    expect:
+      rows: 2
+      data:
+        - "?name": "Alpha"
+        - "?name": "Zulu"
+
+  - name: "ORDER BY uses successive comparators to break ties"
+    ttl_data: |
+      @prefix cb08: <http://conformance-bgp08.example/> .
+      cb08:a cb08:value "x" .
+      cb08:b cb08:value "x" .
+      cb08:c cb08:value "a" .
+    sparql: |
+      @prefix cb08: <http://conformance-bgp08.example/> .
+      SELECT ?value, ?subject WHERE { ?subject cb08:value ?value }
+      ORDER BY ?value DESC(?subject)
+    expect:
+      rows: 3
+      data:
+        - "?value": "a"
+          "?subject": "http://conformance-bgp08.example/c"
+        - "?value": "x"
+          "?subject": "http://conformance-bgp08.example/b"
+        - "?value": "x"
+          "?subject": "http://conformance-bgp08.example/a"
+
+  - name: "LIMIT zero yields an empty solution sequence"
+    ttl_data: |
+      @prefix cb09: <http://conformance-bgp09.example/> .
+      cb09:a cb09:value "A" .
+    sparql: |
+      @prefix cb09: <http://conformance-bgp09.example/> .
+      SELECT ?value WHERE { ?s cb09:value ?value } LIMIT 0
+    expect:
+      rows: 0
+
+  - name: "OFFSET beyond the solution sequence yields no rows"
+    ttl_data: |
+      @prefix cb10: <http://conformance-bgp10.example/> .
+      cb10:a cb10:value "A" .
+      cb10:b cb10:value "B" .
+    sparql: |
+      @prefix cb10: <http://conformance-bgp10.example/> .
+      SELECT ?value WHERE { ?s cb10:value ?value } ORDER BY ?value OFFSET 5
+    expect:
+      rows: 0
+
+  - name: "OFFSET may precede LIMIT in SPARQL syntax"
+    ttl_data: |
+      @prefix cb11: <http://conformance-bgp11.example/> .
+      cb11:a cb11:value "A" .
+      cb11:b cb11:value "B" .
+      cb11:c cb11:value "C" .
+      cb11:d cb11:value "D" .
+    sparql: |
+      @prefix cb11: <http://conformance-bgp11.example/> .
+      SELECT ?value WHERE { ?s cb11:value ?value }
+      ORDER BY ?value OFFSET 1 LIMIT 2
+    expect:
+      rows: 2
+      data:
+        - "?value": "B"
+        - "?value": "C"
+
+  - name: "ORDER BY precedes OFFSET and LIMIT evaluation"
+    ttl_data: |
+      @prefix cb12: <http://conformance-bgp12.example/> .
+      cb12:d cb12:value "D" .
+      cb12:a cb12:value "A" .
+      cb12:c cb12:value "C" .
+      cb12:b cb12:value "B" .
+    sparql: |
+      @prefix cb12: <http://conformance-bgp12.example/> .
+      SELECT ?value WHERE { ?s cb12:value ?value }
+      ORDER BY ?value LIMIT 2 OFFSET 1
+    expect:
+      rows: 2
+      data:
+        - "?value": "B"
+        - "?value": "C"
+
+cleanup: []
