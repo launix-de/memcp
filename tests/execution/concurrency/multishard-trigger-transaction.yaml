@@ -1,0 +1,87 @@
+# Copyright (C) 2026 Carl-Philip Haensch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+metadata:
+  version: "1.0"
+  description: "Repeated mutation in one transaction remains live with trigger-maintained caches and multiple shards"
+  isolated: true
+
+setup:
+  - scm: '(settings "ShardSize" 10)'
+  - sql: "DROP TABLE IF EXISTS mtt_file"
+  - sql: "DROP TABLE IF EXISTS mtt_entry"
+  - sql: |
+      CREATE TABLE mtt_file (
+        id INT PRIMARY KEY,
+        uploaded_at INT NOT NULL
+      ) ENGINE=safe
+  - sql: |
+      CREATE TABLE mtt_entry (
+        id INT PRIMARY KEY,
+        file_id INT NOT NULL,
+        amount INT NOT NULL,
+        state VARCHAR(16) NOT NULL
+      ) ENGINE=safe
+  - scm: |
+      (begin
+        (insert (table "memcp-tests" "mtt_file") '("id" "uploaded_at")
+          (map (produceN 35) (lambda (i)
+            (list (+ i 1) (* (+ i 1) 100)))))
+        (insert (table "memcp-tests" "mtt_entry") '("id" "file_id" "amount" "state")
+          (map (produceN 35) (lambda (i)
+            (list (+ i 1) (+ i 1) (* (+ i 1) 10) "original"))))
+        (rebuild)
+        true)
+
+test_cases:
+  - name: "Materialize scalar order lookup and aggregate caches before transactional mutations"
+    sql: |
+      SELECT entry.id
+      FROM mtt_entry entry
+      ORDER BY (
+        SELECT file.uploaded_at
+        FROM mtt_file file
+        WHERE file.id = entry.file_id
+        LIMIT 1
+      ) DESC
+      LIMIT 1
+    expect:
+      rows: 1
+      data:
+        - id: 35
+
+  - name: "Materialize aggregate cache before transactional mutations"
+    sql: "SELECT COUNT(*) AS cnt, SUM(amount) AS total FROM mtt_entry"
+    expect:
+      rows: 1
+      data:
+        - cnt: 35
+          total: 6300
+
+  - name: "Update then delete replacement rows in the same transaction"
+    timeout: 5
+    steps:
+      - session_id: "mtt_overlap"
+        sql: "START TRANSACTION"
+      - session_id: "mtt_overlap"
+        sql: "UPDATE mtt_entry SET amount = amount + 1, state = 'pending' WHERE id <= 22"
+        expect:
+          affected_rows: 22
+      - session_id: "mtt_overlap"
+        sql: "DELETE FROM mtt_entry WHERE id IN (2, 12, 22, 32)"
+        expect:
+          affected_rows: 4
+      - session_id: "mtt_overlap"
+        sql: "ROLLBACK"

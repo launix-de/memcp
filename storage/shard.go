@@ -407,6 +407,11 @@ func (u *storageShard) load(t *table) {
 	}
 
 	if t.PersistencyMode == Safe || t.PersistencyMode == Logged {
+		// WAL recids follow the persisted main rows. Resolve that boundary before
+		// replaying inserts: with lazy columns main_count is otherwise still zero,
+		// so an insert-hidden entry would tombstone committed main rows and expose
+		// the uncommitted delta rows after a crash.
+		u.ensureMainCount(true)
 		// Replaying the log mutates inserts/deletions; caller holds u.mu.Lock
 		var log chan interface{}
 		log, u.logfile = u.t.schema.persistence.ReplayLog(u.uuid.String())

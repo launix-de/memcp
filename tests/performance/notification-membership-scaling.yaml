@@ -26,6 +26,9 @@ metadata:
   isolated: true
 
 setup:
+  # Force the 4,000-row workload through many shards. Production relations are
+  # multi-shard, and notification planning/lookup bugs can hide in one shard.
+  - scm: '(settings "ShardSize" 100)'
   - sql: "DROP TABLE IF EXISTS nms_seen"
   - sql: "DROP TABLE IF EXISTS nms_assignment"
   - sql: "DROP TABLE IF EXISTS nms_location"

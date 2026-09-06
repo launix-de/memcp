@@ -1,0 +1,132 @@
+# Copyright (C) 2026 Carl-Philip Haensch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+metadata:
+  version: "1.0"
+  description: "Committed mixed DML and aggregates survive crash replay and rebuild across SAFE shards"
+  isolated: true
+
+setup:
+  - scm: '(settings "ShardSize" 10)'
+  - sql: "DROP TABLE IF EXISTS mcr_entry"
+  - sql: |
+      CREATE TABLE mcr_entry (
+        id INT PRIMARY KEY,
+        bucket INT NOT NULL,
+        amount INT NOT NULL,
+        state VARCHAR(16) NOT NULL
+      ) ENGINE=safe
+  - scm: |
+      (begin
+        (insert (table "memcp-tests" "mcr_entry") '("id" "bucket" "amount" "state")
+          (map (produceN 35) (lambda (i)
+            (list (+ i 1) (mod i 4) (* (+ i 1) 10) "original"))))
+        (rebuild)
+        true)
+
+test_cases:
+  - name: "Commit mixed DML across main and delta shards"
+    steps:
+      - session_id: "mcr_committed"
+        sql: "START TRANSACTION"
+      - session_id: "mcr_committed"
+        sql: "UPDATE mcr_entry SET amount = amount + 5, state = 'committed' WHERE id IN (1, 10, 11, 20, 21, 30, 35)"
+        expect:
+          affected_rows: 7
+      - session_id: "mcr_committed"
+        sql: "DELETE FROM mcr_entry WHERE id IN (3, 13, 23, 33)"
+        expect:
+          affected_rows: 4
+      - session_id: "mcr_committed"
+        sql: "INSERT INTO mcr_entry VALUES (36, 0, 360, 'committed'), (37, 1, 370, 'committed')"
+        expect:
+          affected_rows: 2
+      - session_id: "mcr_committed"
+        sql: "COMMIT"
+
+  - name: "Committed mixed DML is exact before crash"
+    sql: |
+      SELECT COUNT(*) AS cnt,
+             SUM(id) AS id_sum,
+             SUM(amount) AS amount_sum,
+             SUM(CASE WHEN state = 'committed' THEN 1 ELSE 0 END) AS committed_rows
+      FROM mcr_entry
+    expect:
+      rows: 1
+      data:
+        - cnt: 33
+          id_sum: 631
+          amount_sum: 6345
+          committed_rows: 9
+
+  - name: "Materialize grouped facts before crash"
+    sql: "SELECT bucket, COUNT(*) AS cnt, SUM(amount) AS total FROM mcr_entry GROUP BY bucket ORDER BY bucket"
+    expect:
+      rows: 4
+
+  - name: "Hard crash after committed multi-shard DML"
+    scm: '(crash)'
+    expect:
+      interrupted_ok: true
+
+  - name: "Restart after committed transaction"
+    action: restart
+
+  - name: "Committed rows, updates, and delete masks survive WAL replay"
+    sql: |
+      SELECT COUNT(*) AS cnt,
+             SUM(id) AS id_sum,
+             SUM(amount) AS amount_sum,
+             SUM(CASE WHEN state = 'committed' THEN 1 ELSE 0 END) AS committed_rows
+      FROM mcr_entry
+    expect:
+      rows: 1
+      data:
+        - cnt: 33
+          id_sum: 631
+          amount_sum: 6345
+          committed_rows: 9
+
+  - name: "Recovered GROUP BY agrees with recovered base rows"
+    sql: |
+      SELECT SUM(bucket_count) AS total_rows, SUM(bucket_amount) AS total_amount
+      FROM (
+        SELECT bucket, COUNT(*) AS bucket_count, SUM(amount) AS bucket_amount
+        FROM mcr_entry
+        GROUP BY bucket
+      ) grouped
+    expect:
+      rows: 1
+      data:
+        - total_rows: 33
+          total_amount: 6345
+
+  - name: "Rebuild recovered main and delta shards"
+    scm: '(rebuild (table "memcp-tests" "mcr_entry") true true)'
+
+  - name: "Publish rebuilt recovery generation"
+    sql: "SHUTDOWN"
+
+  - name: "Rebuilt generation retains exact committed state"
+    sql: "SELECT COUNT(*) AS cnt, SUM(id) AS id_sum, SUM(amount) AS amount_sum FROM mcr_entry"
+    expect:
+      rows: 1
+      data:
+        - cnt: 33
+          id_sum: 631
+          amount_sum: 6345
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS mcr_entry"

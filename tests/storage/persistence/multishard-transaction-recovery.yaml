@@ -1,0 +1,97 @@
+# Copyright (C) 2026 Carl-Philip Haensch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+metadata:
+  version: "1.0"
+  description: "Uncommitted ACID DML is discarded after a crash across SAFE shard boundaries"
+  isolated: true
+
+setup:
+  - scm: '(settings "ShardSize" 10)'
+  - sql: "DROP TABLE IF EXISTS mtr_entry"
+  - sql: |
+      CREATE TABLE mtr_entry (
+        id INT PRIMARY KEY,
+        bucket INT NOT NULL,
+        amount INT NOT NULL,
+        state VARCHAR(16) NOT NULL
+      ) ENGINE=safe
+  - scm: |
+      (insert (table "memcp-tests" "mtr_entry") '("id" "bucket" "amount" "state")
+        (map (produceN 35) (lambda (i)
+          (list (+ i 1) (mod i 4) (* (+ i 1) 10) "original"))))
+  - scm: '(rebuild)'
+
+test_cases:
+  - name: "Seed spans four SAFE shards before restart"
+    sql: "SELECT COUNT(*) AS cnt, SUM(id) AS id_sum, SUM(amount) AS amount_sum FROM mtr_entry"
+    expect:
+      rows: 1
+      data:
+        - cnt: 35
+          id_sum: 630
+          amount_sum: 6300
+
+  - name: "Clean restart preserves every seed shard"
+    sql: "SHUTDOWN"
+
+  - name: "Seed checksums survive clean restart"
+    sql: "SELECT COUNT(*) AS cnt, SUM(id) AS id_sum, SUM(amount) AS amount_sum FROM mtr_entry"
+    expect:
+      rows: 1
+      data:
+        - cnt: 35
+          id_sum: 630
+          amount_sum: 6300
+
+  - name: "Prepare an uncommitted ACID transaction across shards"
+    steps:
+      - session_id: "mtr_uncommitted"
+        sql: "START ACID TRANSACTION"
+      - session_id: "mtr_uncommitted"
+        sql: "UPDATE mtr_entry SET amount = amount + 1000, state = 'pending' WHERE id <= 25"
+        expect:
+          affected_rows: 25
+      - session_id: "mtr_uncommitted"
+        sql: "DELETE FROM mtr_entry WHERE id IN (2, 12, 22, 32)"
+        expect:
+          affected_rows: 4
+      - session_id: "mtr_uncommitted"
+        sql: "INSERT INTO mtr_entry VALUES (36, 0, 360, 'pending'), (37, 1, 370, 'pending')"
+        expect:
+          affected_rows: 2
+
+  - name: "Crash before the transaction commits"
+    scm: '(crash)'
+    expect:
+      interrupted_ok: true
+
+  - name: "Restart after uncommitted transaction"
+    action: restart
+
+  - name: "Crash recovery discards the complete uncommitted transaction"
+    sql: |
+      SELECT COUNT(*) AS cnt,
+             SUM(id) AS id_sum,
+             SUM(amount) AS amount_sum,
+             SUM(CASE WHEN state = 'pending' THEN 1 ELSE 0 END) AS pending_rows
+      FROM mtr_entry
+    expect:
+      rows: 1
+      data:
+        - cnt: 35
+          id_sum: 630
+          amount_sum: 6300
+          pending_rows: 0
