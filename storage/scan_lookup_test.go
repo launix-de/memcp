@@ -128,6 +128,86 @@ func TestScanLookupPlanBindingDoesNotAllocate(t *testing.T) {
 	}
 }
 
+func TestScanLookupPlanUsesExactAdjacentValuesOnlyWhenValid(t *testing.T) {
+	schema := testScanLookupSchema("exists", []string{"tenant", "key"}, nil)
+	values := scm.NewSlice([]scm.Scmer{scm.NewInt(1), scm.NewInt(7)})
+	plan := parseScanLookupPlan(schema, values)
+	if !plan.access.exactAdjacent {
+		t.Fatal("canonical scan_lookup schema did not use adjacent values")
+	}
+	reversedUnique := &table{Unique: []uniqueKey{{Id: "uq", Cols: []string{"key", "tenant"}}}}
+	if !reversedUnique.hasBoundUniquePoint(plan.access) {
+		t.Fatal("adjacent lookup values hid a unique key with different column order")
+	}
+
+	nonAdjacentSchema := scm.NewSlice([]scm.Scmer{
+		newScanAccessHeader(2, "exists", 0, -1),
+		newScanBoundarySpec("tenant", EqualMatcher, 1, 1, true, true, "", false, -1, nil, nil, "", false),
+		newScanBoundarySpec("key", EqualMatcher, 0, 0, true, true, "", false, -1, nil, nil, "", false),
+	})
+	nonAdjacent := parseScanLookupPlan(nonAdjacentSchema, values)
+	if nonAdjacent.access.exactAdjacent {
+		t.Fatal("non-adjacent scan_lookup slots used the adjacent fast path")
+	}
+	if got := nonAdjacent.access.boundValue(0, false); !scm.Equal(got, scm.NewInt(7)) {
+		t.Fatalf("non-adjacent first value = %s, want 7", scm.String(got))
+	}
+}
+
+func TestCompiledScanLookupCompositeAllocationLimits(t *testing.T) {
+	database := "test_compiled_scan_lookup_allocations"
+	databases.Remove(database)
+	t.Cleanup(func() { databases.Remove(database) })
+	CreateDatabase(database, true)
+	tbl, _ := CreateTable(database, "items", Memory, true)
+	tbl.CreateColumn("tenant", "INT", nil, nil)
+	tbl.CreateColumn("key", "INT", nil, nil)
+	tbl.CreateColumn("value", "INT", nil, nil)
+	tbl.Unique = append(tbl.Unique, uniqueKey{Id: "lookup_key", Cols: []string{"key", "tenant"}})
+	tbl.Insert([]string{"tenant", "key", "value"}, [][]scm.Scmer{
+		{scm.NewInt(1), scm.NewInt(7), scm.NewInt(17)},
+		{scm.NewInt(2), scm.NewInt(7), scm.NewInt(27)},
+	}, nil, scm.NewNil(), false, nil)
+	tx := NewTxContext(TxCursorStability)
+	mapper := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[0] })
+	cases := []struct {
+		name      string
+		schema    scm.Scmer
+		values    scm.Scmer
+		maxAllocs float64
+	}{
+		{
+			name:      "value",
+			schema:    testScanLookupSchema("value", []string{"tenant", "key"}, []string{"value"}),
+			values:    scm.NewSlice([]scm.Scmer{scm.NewInt(2), scm.NewInt(7)}),
+			maxAllocs: 3,
+		},
+		{
+			name:      "exists",
+			schema:    testScanLookupSchema("exists", []string{"tenant", "key"}, nil),
+			values:    scm.NewSlice([]scm.Scmer{scm.NewInt(2), scm.NewInt(7)}),
+			maxAllocs: 3,
+		},
+		{
+			name:      "map",
+			schema:    testScanLookupSchema("map", []string{"tenant", "key"}, []string{"value"}),
+			values:    scm.NewSlice([]scm.Scmer{scm.NewInt(2), scm.NewInt(7), mapper}),
+			maxAllocs: 5,
+		},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			executeCompiledScanLookup(tbl, tx, test.schema, test.values)
+			allocs := testing.AllocsPerRun(1000, func() {
+				executeCompiledScanLookup(tbl, tx, test.schema, test.values)
+			})
+			if allocs > test.maxAllocs {
+				t.Fatalf("composite scan_lookup allocated %.2f times, want at most %.0f", allocs, test.maxAllocs)
+			}
+		})
+	}
+}
+
 func TestScanLookupCompositeValueAndExists(t *testing.T) {
 	database := "test_scan_lookup_composite"
 	databases.Remove(database)
@@ -295,6 +375,50 @@ func BenchmarkCompiledScanLookupWithTx(b *testing.B) {
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		executeCompiledScanLookup(tbl, tx, schema, values)
+	}
+}
+
+func BenchmarkCompiledScanLookupDimensions(b *testing.B) {
+	database := "bench_compiled_scan_lookup_dimensions"
+	databases.Remove(database)
+	b.Cleanup(func() { databases.Remove(database) })
+	CreateDatabase(database, true)
+	tbl, _ := CreateTable(database, "items", Memory, true)
+	tbl.CreateColumn("tenant", "INT", nil, nil)
+	tbl.CreateColumn("key", "INT", nil, nil)
+	tbl.CreateColumn("value", "VARCHAR", nil, nil)
+	// Deliberately reverse the planner boundary order to cover unordered
+	// composite unique-key detection in the measured hot path.
+	tbl.Unique = append(tbl.Unique, uniqueKey{Id: "lookup_key", Cols: []string{"key", "tenant"}})
+	rows := make([][]scm.Scmer, 1024)
+	for i := range rows {
+		rows[i] = []scm.Scmer{scm.NewInt(int64(i % 16)), scm.NewInt(int64(i)), scm.NewString("value")}
+	}
+	tbl.Insert([]string{"tenant", "key", "value"}, rows, nil, scm.NewNil(), false, nil)
+	tx := NewTxContext(TxCursorStability)
+	mapper := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[0] })
+
+	cases := []struct {
+		name   string
+		schema scm.Scmer
+		values scm.Scmer
+	}{
+		{name: "value_one", schema: testScanLookupSchema("value", []string{"key"}, []string{"value"}), values: scm.NewSlice([]scm.Scmer{scm.NewInt(511)})},
+		{name: "value_two", schema: testScanLookupSchema("value", []string{"tenant", "key"}, []string{"value"}), values: scm.NewSlice([]scm.Scmer{scm.NewInt(15), scm.NewInt(511)})},
+		{name: "exists_one", schema: testScanLookupSchema("exists", []string{"key"}, nil), values: scm.NewSlice([]scm.Scmer{scm.NewInt(511)})},
+		{name: "exists_two", schema: testScanLookupSchema("exists", []string{"tenant", "key"}, nil), values: scm.NewSlice([]scm.Scmer{scm.NewInt(15), scm.NewInt(511)})},
+		{name: "map_one", schema: testScanLookupSchema("map", []string{"key"}, []string{"value"}), values: scm.NewSlice([]scm.Scmer{scm.NewInt(511), mapper})},
+		{name: "map_two", schema: testScanLookupSchema("map", []string{"tenant", "key"}, []string{"value"}), values: scm.NewSlice([]scm.Scmer{scm.NewInt(15), scm.NewInt(511), mapper})},
+	}
+	for _, bench := range cases {
+		b.Run(bench.name, func(b *testing.B) {
+			executeCompiledScanLookup(tbl, tx, bench.schema, bench.values)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				executeCompiledScanLookup(tbl, tx, bench.schema, bench.values)
+			}
+		})
 	}
 }
 
