@@ -1277,6 +1277,49 @@ func TestEphemeralQueryShardLoadIgnoresPersistedHelperContents(t *testing.T) {
 	}
 }
 
+func TestEmptyWALReplayKeepsPersistedColumnsLazy(t *testing.T) {
+	dir, err := os.MkdirTemp("", "memcp-empty-wal-lazy-load-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	oldBasepath := Basepath
+	Basepath = dir
+	defer func() { Basepath = oldBasepath }()
+
+	Init(scm.Globalenv)
+	LoadDatabases()
+	defer databases.Remove("temptywallazy")
+
+	CreateDatabase("temptywallazy", false)
+	tbl, _ := CreateTable("temptywallazy", "items", Safe, false)
+	tbl.CreateColumn("id", "INT", nil, nil)
+
+	orig := tbl.Shards[0]
+	column := &StorageConst{count: 2, value: scm.NewInt(1)}
+	f := tbl.schema.persistence.WriteColumn(orig.uuid.String(), "id")
+	column.Serialize(f)
+	f.Close()
+	if orig.logfile != nil {
+		orig.logfile.Close()
+	}
+
+	reloaded := &storageShard{
+		uuid:         orig.uuid,
+		columns:      make(map[string]ColumnStorage),
+		deltaColumns: make(map[string]int),
+	}
+	reloaded.load(tbl)
+	defer reloaded.logfile.Close()
+
+	if reloaded.main_count != 0 {
+		t.Fatalf("empty WAL replay eagerly restored main_count=%d, want lazy zero", reloaded.main_count)
+	}
+	if reloaded.columns["id"] != nil {
+		t.Fatalf("empty WAL replay eagerly loaded id as %T", reloaded.columns["id"])
+	}
+}
+
 func TestCreateColumnBuiltinUpgradesExistingColumnToORC(t *testing.T) {
 	dir, err := os.MkdirTemp("", "memcp-createcolumn-orc-upgrade-*")
 	if err != nil {
