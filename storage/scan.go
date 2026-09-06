@@ -1361,7 +1361,6 @@ func (t *table) hasBoundUniquePoint(access scanAccess) bool {
 			if matched {
 				return true
 			}
-			continue
 		}
 		covered := true
 		for _, col := range unique.Cols {

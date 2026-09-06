@@ -1,0 +1,33 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+
+metadata:
+  version: "1.0"
+  description: "Authenticated point-query hot path with a composite database ACL lookup"
+  isolated: true
+  ci: true
+
+setup:
+  - sql: "DELETE FROM system.access WHERE username='point_lookup_perf'"
+  - sql: "DELETE FROM system.user WHERE username='point_lookup_perf'"
+  - sql: "DROP TABLE IF EXISTS authenticated_point_item"
+  - sql: "CREATE TABLE authenticated_point_item (id INT PRIMARY KEY, payload VARCHAR(32)) ENGINE=memory"
+  - sql: "INSERT INTO authenticated_point_item (id, payload) VALUES (7, 'seven')"
+  - sql: "CREATE USER point_lookup_perf IDENTIFIED BY 'secret123'"
+  - sql: "GRANT SELECT ON `memcp-tests`.* TO point_lookup_perf"
+
+test_cases:
+  - name: "Authenticated non-admin point lookup"
+    username: "point_lookup_perf"
+    password: "secret123"
+    warmup: 10
+    timing_samples: 100
+    threshold_ms: 2
+    sql: "SELECT payload FROM authenticated_point_item WHERE id = 7"
+    expect:
+      rows: 1
+      data:
+        - payload: "seven"
+
+cleanup:
+  - sql: "DROP USER IF EXISTS point_lookup_perf"
+  - sql: "DROP TABLE IF EXISTS authenticated_point_item"
