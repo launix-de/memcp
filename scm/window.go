@@ -2957,6 +2957,7 @@ func init_window() {
 					if !ps.General {
 						if len(ps.PhiValues) > 0 && ps.PhiValues[0].Loc != LocNone {
 							d225 := ps.PhiValues[0]
+							ctx.EnsureDesc(&d225)
 							if phiHomeOK2 {
 								ctx.EmitMovToReg(r0, d225)
 							} else {
@@ -3345,6 +3346,7 @@ func init_window() {
 					if !ps.General {
 						if len(ps.PhiValues) > 0 && ps.PhiValues[0].Loc != LocNone {
 							d231 := ps.PhiValues[0]
+							ctx.EnsureDesc(&d231)
 							if phiHomeOK2 {
 								ctx.EmitMovToReg(r0, d231)
 							} else {
@@ -8391,6 +8393,7 @@ func init_window() {
 					if !ps.General {
 						if len(ps.PhiValues) > 0 && ps.PhiValues[0].Loc != LocNone {
 							d153 := ps.PhiValues[0]
+							ctx.EnsureDesc(&d153)
 							if phiHomeOK2 {
 								ctx.EmitMovToReg(r0, d153)
 							} else {
@@ -8654,6 +8657,7 @@ func init_window() {
 					if !ps.General {
 						if len(ps.PhiValues) > 0 && ps.PhiValues[0].Loc != LocNone {
 							d158 := ps.PhiValues[0]
+							ctx.EnsureDesc(&d158)
 							if phiHomeOK2 {
 								ctx.EmitMovToReg(r0, d158)
 							} else {
@@ -9403,6 +9407,7 @@ func init_window() {
 					if !ps.General {
 						if len(ps.PhiValues) > 0 && ps.PhiValues[0].Loc != LocNone {
 							d211 := ps.PhiValues[0]
+							ctx.EnsureDesc(&d211)
 							if phiHomeOK3 {
 								ctx.EmitMovToReg(r1, d211)
 							} else {
@@ -9760,6 +9765,7 @@ func init_window() {
 					if !ps.General {
 						if len(ps.PhiValues) > 0 && ps.PhiValues[0].Loc != LocNone {
 							d217 := ps.PhiValues[0]
+							ctx.EnsureDesc(&d217)
 							if phiHomeOK3 {
 								ctx.EmitMovToReg(r1, d217)
 							} else {

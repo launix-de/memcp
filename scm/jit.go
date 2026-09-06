@@ -4365,6 +4365,7 @@ func init_jit() {
 					if !ps.General {
 						if len(ps.PhiValues) > 0 && ps.PhiValues[0].Loc != LocNone {
 							d47 := ps.PhiValues[0]
+							ctx.EnsureDesc(&d47)
 							ctx.EmitStoreToStack(d47, int32(bbs[2].PhiBase)+int32(0))
 						}
 						if bbs[2].VisitCount >= 0 {
@@ -4598,6 +4599,7 @@ func init_jit() {
 					if !ps.General {
 						if len(ps.PhiValues) > 0 && ps.PhiValues[0].Loc != LocNone {
 							d54 := ps.PhiValues[0]
+							ctx.EnsureDesc(&d54)
 							ctx.EmitStoreToStack(d54, int32(bbs[4].PhiBase)+int32(0))
 						}
 						if bbs[4].VisitCount >= 0 {
@@ -5645,6 +5647,7 @@ func init_jit() {
 					if !ps.General {
 						if len(ps.PhiValues) > 0 && ps.PhiValues[0].Loc != LocNone {
 							d48 := ps.PhiValues[0]
+							ctx.EnsureDesc(&d48)
 							ctx.EmitStoreToStack(d48, int32(bbs[2].PhiBase)+int32(0))
 						}
 						if bbs[2].VisitCount >= 0 {
@@ -5878,6 +5881,7 @@ func init_jit() {
 					if !ps.General {
 						if len(ps.PhiValues) > 0 && ps.PhiValues[0].Loc != LocNone {
 							d54 := ps.PhiValues[0]
+							ctx.EnsureDesc(&d54)
 							ctx.EmitStoreToStack(d54, int32(bbs[4].PhiBase)+int32(0))
 						}
 						if bbs[4].VisitCount >= 0 {
@@ -6514,7 +6518,19 @@ func init_jit() {
 							if d100.Loc == LocNone {
 								panic("jit: phi source has no location")
 							}
-							ctx.EmitStoreScmerToStack(d100, int32(bbs[10].PhiBase)+int32(0))
+							ctx.SyncDesc(&d100)
+							if d100.Loc == LocStackPair {
+								ctx.EmitCopyStackWords(d100, int32(bbs[10].PhiBase)+int32(0), 2)
+							} else if d100.Loc == LocInputPair {
+								ctx.EnsureDesc(&d100)
+								ctx.EmitStoreScmerToStack(d100, int32(bbs[10].PhiBase)+int32(0))
+							} else if d100.Loc == LocRegPair || d100.Loc == LocImm {
+								ctx.EmitStoreScmerToStack(d100, int32(bbs[10].PhiBase)+int32(0))
+							} else {
+								ctx.EnsureDesc(&d100)
+								ctx.EmitStoreToStack(d100, int32(bbs[10].PhiBase)+int32(0))
+								ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(bbs[10].PhiBase)+int32(0))+8)
+							}
 							if d95.Loc == LocReg {
 								ctx.UnprotectReg(d95.Reg)
 							} else if d95.Loc == LocRegPair {
@@ -6584,7 +6600,19 @@ func init_jit() {
 					if d103.Loc == LocNone {
 						panic("jit: phi source has no location")
 					}
-					ctx.EmitStoreScmerToStack(d103, int32(bbs[10].PhiBase)+int32(0))
+					ctx.SyncDesc(&d103)
+					if d103.Loc == LocStackPair {
+						ctx.EmitCopyStackWords(d103, int32(bbs[10].PhiBase)+int32(0), 2)
+					} else if d103.Loc == LocInputPair {
+						ctx.EnsureDesc(&d103)
+						ctx.EmitStoreScmerToStack(d103, int32(bbs[10].PhiBase)+int32(0))
+					} else if d103.Loc == LocRegPair || d103.Loc == LocImm {
+						ctx.EmitStoreScmerToStack(d103, int32(bbs[10].PhiBase)+int32(0))
+					} else {
+						ctx.EnsureDesc(&d103)
+						ctx.EmitStoreToStack(d103, int32(bbs[10].PhiBase)+int32(0))
+						ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(bbs[10].PhiBase)+int32(0))+8)
+					}
 					if d95.Loc == LocReg {
 						ctx.UnprotectReg(d95.Reg)
 					} else if d95.Loc == LocRegPair {
@@ -7458,7 +7486,19 @@ func init_jit() {
 						if d188.Loc == LocNone {
 							panic("jit: phi source has no location")
 						}
-						ctx.EmitStoreScmerToStack(d188, int32(bbs[10].PhiBase)+int32(0))
+						ctx.SyncDesc(&d188)
+						if d188.Loc == LocStackPair {
+							ctx.EmitCopyStackWords(d188, int32(bbs[10].PhiBase)+int32(0), 2)
+						} else if d188.Loc == LocInputPair {
+							ctx.EnsureDesc(&d188)
+							ctx.EmitStoreScmerToStack(d188, int32(bbs[10].PhiBase)+int32(0))
+						} else if d188.Loc == LocRegPair || d188.Loc == LocImm {
+							ctx.EmitStoreScmerToStack(d188, int32(bbs[10].PhiBase)+int32(0))
+						} else {
+							ctx.EnsureDesc(&d188)
+							ctx.EmitStoreToStack(d188, int32(bbs[10].PhiBase)+int32(0))
+							ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(bbs[10].PhiBase)+int32(0))+8)
+						}
 						if d186.Loc == LocReg {
 							ctx.UnprotectReg(d186.Reg)
 						} else if d186.Loc == LocRegPair {
@@ -7522,6 +7562,7 @@ func init_jit() {
 					if !ps.General {
 						if len(ps.PhiValues) > 0 && ps.PhiValues[0].Loc != LocNone {
 							d191 := ps.PhiValues[0]
+							ctx.EnsureDesc(&d191)
 							ctx.EmitStoreScmerToStack(d191, int32(bbs[10].PhiBase)+int32(0))
 						}
 						if bbs[10].VisitCount >= 0 {

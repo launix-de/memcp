@@ -64,7 +64,6 @@ func planLoopPhiRegisters(fn *ssa.Function) staticRegisterPlan {
 	}
 
 	var nodes []registerPlanNode
-	var pairNodes []registerPlanNode
 	for _, block := range fn.Blocks {
 		if !registerPlanLoopHeader(block) {
 			continue
@@ -74,21 +73,18 @@ func planLoopPhiRegisters(fn *ssa.Function) staticRegisterPlan {
 			if !ok {
 				break
 			}
-			if isPhiTripleType(phi.Type()) {
+			// A Scmer consists of independently-live tag and payload words. Treating
+			// it as one indivisible two-register color both invents interference and
+			// changes the established unboxed stack-phi representation. Split-word
+			// planning belongs in a later allocator stage; this stage plans only
+			// genuine scalar SSA values.
+			if isPhiTripleType(phi.Type()) || isPhiPairType(phi.Type()) {
 				continue
 			}
 			// Same-block phi cycles describe true parallel swaps. Cross-block phi
 			// chains are safe once their simultaneous-copy interference is added
 			// below and are important for branch-updated rolling loop cursors.
 			if registerPlanHasSameBlockPhiInput(phi) {
-				continue
-			}
-			if isPhiPairType(phi.Type()) {
-				pairNodes = append(pairNodes, registerPlanNode{
-					value:     phi,
-					weight:    registerPlanValueWeight(phi, 2),
-					neighbors: map[int]struct{}{},
-				})
 				continue
 			}
 			nodes = append(nodes, registerPlanNode{
@@ -98,15 +94,13 @@ func planLoopPhiRegisters(fn *ssa.Function) staticRegisterPlan {
 			})
 		}
 	}
-	if len(nodes) == 0 && len(pairNodes) == 0 {
+	if len(nodes) == 0 {
 		return plan
 	}
 
 	colors, colorCount := planRegisterClass(fn, nodes)
-	pairColors, pairColorCount := planRegisterClass(fn, pairNodes)
 	var slots []staticRegisterSlot
 	slots = append(slots, registerClassSlots(nodes, colors, colorCount, 1)...)
-	slots = append(slots, registerClassSlots(pairNodes, pairColors, pairColorCount, 2)...)
 	sort.SliceStable(slots, func(i, j int) bool {
 		return slots[i].weight > slots[j].weight
 	})
@@ -122,7 +116,6 @@ func planLoopPhiRegisters(fn *ssa.Function) staticRegisterPlan {
 	slots = kept
 	plan.slots = kept
 	mapRegisterClassColors(&plan, nodes, colors, slots, 1)
-	mapRegisterClassColors(&plan, pairNodes, pairColors, slots, 2)
 	return plan
 }
 

@@ -153,7 +153,7 @@ func rolling(a ...Scmer) Scmer {
 	}
 }
 
-func TestLoopPhiRegisterPlanKeepsScmerInRegisterPair(t *testing.T) {
+func TestLoopPhiRegisterPlanLeavesScmerWordsForSplitPlanner(t *testing.T) {
 	fn := buildTestSSAFunction(t, `package sample
 type Scmer struct { ptr, aux uint64 }
 func last(values []Scmer) Scmer {
@@ -165,23 +165,17 @@ func last(values []Scmer) Scmer {
 }
 `, "last")
 	plan := planLoopPhiRegisters(fn)
-	foundPair := false
 	for name, width := range plan.widthByValue {
-		if width != 2 {
-			continue
-		}
-		foundPair = true
-		color := plan.colorByValue[name]
-		if color+1 >= plan.colorCount {
-			t.Fatalf("pair %s at color %d exceeds %d planned registers", name, color, plan.colorCount)
+		if width == 2 {
+			t.Fatalf("Scmer %s was incorrectly planned as an indivisible pair: %#v", name, plan)
 		}
 	}
-	if !foundPair {
-		t.Fatalf("Scmer accumulator was not planned as a register pair: %#v", plan)
+	if len(plan.colorByValue) == 0 {
+		t.Fatalf("scalar loop cursor was not planned: %#v", plan)
 	}
 }
 
-func TestLoopPhiRegisterPlanReusesPairColorsAcrossIndependentLoops(t *testing.T) {
+func TestLoopPhiRegisterPlanLeavesStringWordsForSplitPlanner(t *testing.T) {
 	fn := buildTestSSAFunction(t, `package sample
 func lastTwice(left, right []string) int {
 	var leftResult string
@@ -193,19 +187,13 @@ func lastTwice(left, right []string) int {
 }
 `, "lastTwice")
 	plan := planLoopPhiRegisters(fn)
-	var pairColors []int
 	for name, width := range plan.widthByValue {
 		if width == 2 {
-			pairColors = append(pairColors, plan.colorByValue[name])
+			t.Fatalf("string %s was incorrectly planned as an indivisible pair: %#v", name, plan)
 		}
 	}
-	if len(pairColors) < 2 {
-		t.Fatalf("pair candidates = %v, want both independent loop accumulators", plan.colorByValue)
-	}
-	for _, color := range pairColors[1:] {
-		if color != pairColors[0] {
-			t.Fatalf("independent pair live ranges use different colors: %v", pairColors)
-		}
+	if len(plan.colorByValue) == 0 {
+		t.Fatalf("scalar loop cursors were not planned: %#v", plan)
 	}
 }
 
