@@ -214,17 +214,30 @@ func compileScanOrderAccess(schemaExpr, valuesExpr, sortColsExpr, sortDirsExpr s
 			}
 			directionValue = resolved
 		}
-		// Runtime-capturing relation procedures cannot be embedded in a shared
-		// cached schema. Planner-generated collations and global order relations
-		// resolve to immutable native functions here.
-		if !directionValue.IsNativeFunc() {
-			return schemaExpr, valuesExpr, false
+		if items, ok := scmerSlice(directionValue); ok && len(items) == 3 && callHeadIs(items[0], "collate") {
+			collation := items[1].WithoutSourceInfo()
+			reverse := items[2].WithoutSourceInfo()
+			staticReverse := reverse.IsBool() || reverse.IsNil() || reverse.SymbolEquals("false") || reverse.SymbolEquals("true")
+			if !collation.IsString() || !staticReverse {
+				return schemaExpr, valuesExpr, false
+			}
+			directionValue = scm.Apply(scm.Globalenv.Vars[scm.Symbol("collate")], collation, scm.NewBool(scm.ToBool(reverse)))
 		}
+		// Only canonical collation relations are accepted below. Runtime-capturing
+		// procedures and arbitrary native callbacks retain the runtime fallback.
 		order := scm.OptimizeProcToSerialFunction(directionValue)
 		if order == nil {
 			return schemaExpr, valuesExpr, false
 		}
-		boundary := compiledOrderBoundary{order: order, orderMeta: orderRelationMeta(order)}
+		collation, reverse, persistable := scm.LookupCollate(order)
+		if !persistable {
+			return schemaExpr, valuesExpr, false
+		}
+		orderMeta := collation + ":asc"
+		if reverse {
+			orderMeta = collation + ":desc"
+		}
+		boundary := compiledOrderBoundary{order: order, orderMeta: orderMeta}
 		if sortcol.IsString() {
 			boundary.column = sortcol.String()
 		} else {

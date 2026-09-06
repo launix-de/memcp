@@ -131,7 +131,7 @@ func BenchmarkScanOrderPlannerCompiledFixedCosts(b *testing.B) {
 	tbl := benchScanTable(b, "order_planner_compiled")
 	expr := scm.Read(b.Name(), `(lambda (table_value)
 		(scan_order nil table_value '() '() '() (lambda () true)
-			'("id") (list <) 0 0 72
+			'("id") (list (collate "utf8mb4" false)) 0 0 72
 			'("id") (lambda (acc id) acc) nil false nil '() nil))`)
 	proc := scm.Eval(scm.Optimize(expr, &scm.Globalenv, nil), &scm.Globalenv)
 	tableValue := NewTableScmer(tbl)

@@ -18,6 +18,7 @@ package storage
 
 import "encoding/json"
 import "fmt"
+import "strings"
 import "unsafe"
 
 import "github.com/launix-de/memcp/scm"
@@ -158,18 +159,51 @@ func scanBoundaryString(pointer unsafe.Pointer) string {
 
 func scanBoundaryJSONEncode(pointer unsafe.Pointer) any {
 	box := (*scanBoundaryBox)(pointer)
-	if box.order != nil || box.orderMetadata != "" {
-		panic("ordered runtime scan boundaries cannot be persisted")
+	orderMetadata := box.orderMetadata
+	if box.order != nil {
+		collation, reverse, ok := scm.LookupCollate(box.order)
+		if !ok {
+			panic("non-collation ordered scan boundaries cannot be persisted")
+		}
+		direction := ":asc"
+		if reverse {
+			direction = ":desc"
+		}
+		persisted := collation + direction
+		if orderMetadata != "" && orderMetadata != persisted {
+			panic("ordered scan boundary metadata does not match its relation")
+		}
+		orderMetadata = persisted
+	} else if orderMetadata != "" {
+		panic("ordered scan boundary metadata has no relation")
 	}
 	mapColumns := box.mapColumns
 	if mapColumns == nil {
 		mapColumns = []string{}
 	}
-	return []any{
+	items := []any{
 		box.analyzer.Kind(), box.column, box.lowerSlot, box.upperSlot,
 		box.lowerInclusive, box.upperInclusive, box.collation, box.nullSafe,
 		box.mapperSlot, mapColumns, box.mandatory,
 	}
+	if orderMetadata == "" {
+		return items
+	}
+	return append(items, orderMetadata)
+}
+
+func scanBoundaryOrderFromMetadata(metadata string) func(...scm.Scmer) scm.Scmer {
+	separator := strings.LastIndexByte(metadata, ':')
+	if separator <= 0 {
+		return nil
+	}
+	direction := metadata[separator:]
+	if direction != ":asc" && direction != ":desc" {
+		return nil
+	}
+	value := scm.Apply(scm.Globalenv.Vars[scm.Symbol("collate")],
+		scm.NewString(metadata[:separator]), scm.NewBool(direction == ":desc"))
+	return scm.OptimizeProcToSerialFunction(value)
 }
 
 func scanBoundaryJSONInt(value any) int {
@@ -189,7 +223,7 @@ func scanBoundaryJSONInt(value any) int {
 
 func scanBoundaryJSONDecode(value any) unsafe.Pointer {
 	items, ok := value.([]any)
-	if !ok || len(items) != 11 {
+	if !ok || (len(items) != 11 && len(items) != 12) {
 		panic("invalid persisted scan boundary")
 	}
 	kind, kindOK := items[0].(string)
@@ -211,12 +245,28 @@ func scanBoundaryJSONDecode(value any) unsafe.Pointer {
 		}
 		mapColumns[i] = column
 	}
+	orderMetadata := ""
+	var order func(...scm.Scmer) scm.Scmer
+	if len(items) == 12 {
+		var metadataOK bool
+		orderMetadata, metadataOK = items[11].(string)
+		if !metadataOK {
+			panic("invalid persisted scan boundary order metadata")
+		}
+		if orderMetadata != "" {
+			order = scanBoundaryOrderFromMetadata(orderMetadata)
+			if order == nil {
+				panic("invalid persisted scan boundary order relation")
+			}
+		}
+	}
 	return unsafe.Pointer(&scanBoundaryBox{
 		column: column, analyzer: scanBoundaryAnalyzer(kind),
 		lowerSlot: scanBoundaryJSONInt(items[2]), upperSlot: scanBoundaryJSONInt(items[3]),
 		lowerInclusive: lowerInclusive, upperInclusive: upperInclusive,
 		collation: collation, nullSafe: nullSafe,
 		mapperSlot: scanBoundaryJSONInt(items[8]), mapColumns: mapColumns,
+		order: order, orderMetadata: orderMetadata,
 		mandatory: mandatory,
 	})
 }

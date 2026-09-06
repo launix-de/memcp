@@ -23,11 +23,16 @@ import (
 	"github.com/launix-de/memcp/scm"
 )
 
+func persistableTestOrder(reverse bool) (scm.Scmer, func(...scm.Scmer) scm.Scmer) {
+	value := scm.Apply(scm.Globalenv.Vars[scm.Symbol("collate")], scm.NewString("utf8mb4"), scm.NewBool(reverse))
+	return value, scm.OptimizeProcToSerialFunction(value)
+}
+
 func TestScanOrderOptimizerCompilesOrderIntoAccessSchema(t *testing.T) {
 	Init(scm.Globalenv)
 	expr := scm.Read(t.Name(), `(lambda (table_value)
 		(scan_order nil table_value '() '() '() (lambda () true)
-			'("rank") (list <) 0 0 10
+			'("rank") (list (collate "utf8mb4" false)) 0 0 10
 			'("rank") (lambda (acc rank) rank) nil false nil '() nil))`)
 	optimized := scm.Optimize(expr, &scm.Globalenv, nil)
 	plan := scm.SerializeToString(optimized, &scm.Globalenv)
@@ -40,7 +45,7 @@ func TestScanOrderBatchAcceptOptimizerCompilesOrderIntoAccessSchema(t *testing.T
 	Init(scm.Globalenv)
 	expr := scm.Read(t.Name(), `(lambda (table_value)
 		(scan_order_batch_accept nil table_value '() '()
-			(lambda (input) input) '("rank") (list <) 0 0 10
+			(lambda (input) input) '("rank") (list (collate "utf8mb4" false)) 0 0 10
 			'("rank") (lambda (acc rank) rank) nil false nil))`)
 	optimized := scm.Optimize(expr, &scm.Globalenv, nil)
 	plan := scm.SerializeToString(optimized, &scm.Globalenv)
@@ -73,7 +78,7 @@ func TestExtendBoundariesRejectsPartiallyCoveredOrder(t *testing.T) {
 }
 
 func TestCompileScanOrderAccessStoresOrderInStaticSchema(t *testing.T) {
-	directionValue, direction := integerOrder(false)
+	directionValue, direction := persistableTestOrder(false)
 	schemaExpr, valuesExpr, compiled := compileScanOrderAccess(
 		scm.NewSlice(nil), scm.NewSlice(nil),
 		scm.NewSlice([]scm.Scmer{scm.NewString("rank")}),
@@ -113,8 +118,23 @@ func TestCompileScanOrderAccessStoresOrderInStaticSchema(t *testing.T) {
 	}
 }
 
+func TestCompileScanOrderAccessKeepsUnpersistableOrderAtRuntime(t *testing.T) {
+	directionValue, _ := integerOrder(false)
+	schema := scm.NewSlice(nil)
+	values := scm.NewSlice(nil)
+	schemaExpr, valuesExpr, compiled := compileScanOrderAccess(
+		schema, values,
+		scm.NewSlice([]scm.Scmer{scm.NewString("rank")}),
+		scm.NewSlice([]scm.Scmer{directionValue}),
+	)
+	if compiled || schemaExpr != schema || valuesExpr != values {
+		t.Fatalf("unpersistable callback order was compiled: schema=%s values=%s",
+			scm.String(schemaExpr), scm.String(valuesExpr))
+	}
+}
+
 func TestCompileScanOrderAccessPreservesPointPrefixAndRuntimeValues(t *testing.T) {
-	directionValue, _ := integerOrder(true)
+	directionValue, _ := persistableTestOrder(true)
 	point := newScanBoundarySpec("tenant", EqualMatcher, 0, 0, true, true,
 		"", false, -1, nil, nil, "", false)
 	schema := scm.NewSlice([]scm.Scmer{
@@ -149,7 +169,7 @@ func TestCompileScanOrderAccessPreservesPointPrefixAndRuntimeValues(t *testing.T
 }
 
 func TestCompileScanOrderAccessPreservesOptimizedLocalValuesExpression(t *testing.T) {
-	directionValue, _ := integerOrder(true)
+	directionValue, _ := persistableTestOrder(true)
 	point := newScanBoundarySpec("tenant", EqualMatcher, 0, 0, true, true,
 		"", false, -1, nil, nil, "", false)
 	schema := scm.NewSlice([]scm.Scmer{
@@ -173,7 +193,7 @@ func TestCompileScanOrderAccessPreservesOptimizedLocalValuesExpression(t *testin
 
 func TestCompileScanOrderAccessStoresComputedOrderMapper(t *testing.T) {
 	Init(scm.Globalenv)
-	directionValue, _ := integerOrder(false)
+	directionValue, _ := persistableTestOrder(false)
 	computed := scm.Eval(scm.Optimize(scm.Read(t.Name(), `(lambda (rank) (+ rank 1))`), &scm.Globalenv, nil), &scm.Globalenv)
 	proc := computed.Proc()
 	if !isRawDataset(proc.Params.Slice(), proc.Body) {
@@ -204,7 +224,7 @@ func TestCompileScanOrderAccessStoresComputedOrderMapper(t *testing.T) {
 }
 
 func TestCompileScanOrderAccessListCompilesEveryOrderedInput(t *testing.T) {
-	directionValue, _ := integerOrder(false)
+	directionValue, _ := persistableTestOrder(false)
 	emptySchema := scm.NewSlice(nil)
 	schemasExpr, valuesExpr, compiled := compileScanOrderAccessList(
 		scm.NewSlice([]scm.Scmer{emptySchema, emptySchema}), scm.NewSlice(nil),
@@ -237,7 +257,7 @@ func TestCompileScanOrderAccessListCompilesEveryOrderedInput(t *testing.T) {
 }
 
 func TestCompileScanJoinDriverOrderAccessOnlyCompilesDriver(t *testing.T) {
-	directionValue, _ := integerOrder(true)
+	directionValue, _ := persistableTestOrder(true)
 	emptySchema := scm.NewSlice(nil)
 	schemasExpr, _, compiled := compileScanJoinDriverOrderAccess(
 		scm.NewSlice([]scm.Scmer{emptySchema, emptySchema}), scm.NewSlice(nil),
