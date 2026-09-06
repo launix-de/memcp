@@ -95,6 +95,187 @@ setup:
         40000)
 
 test_cases:
+  - name: "Compound SQL-coerced ACL prunes folded stage dependencies"
+    sql: |
+      EXPLAIN IR
+      SELECT COUNT(*) AS total
+      FROM bqm_document d
+      WHERE d.mandant_id = 1
+        AND COALESCE((
+          SELECT
+            ((('0' OR EXISTS (
+                SELECT TRUE FROM bqm_mandant_assignment global_acl
+                WHERE global_acl.actor_id = 7
+                LIMIT 1
+              )) OR (
+                (NOT '0') AND (NOT '0') AND NOT EXISTS (
+                  SELECT TRUE FROM bqm_mandant_assignment global_acl
+                  WHERE global_acl.actor_id = 7
+                  LIMIT 1
+                )
+              )) OR '0')
+            AND CASE WHEN (('0' OR EXISTS (
+                SELECT TRUE FROM bqm_mandant_assignment global_acl
+                WHERE global_acl.actor_id = 7
+                LIMIT 1
+              )) OR '0')
+              THEN TRUE
+              ELSE EXISTS (
+                SELECT TRUE FROM bqm_mandant_assignment scoped
+                WHERE scoped.standort_id = s.id
+                  AND scoped.actor_id = 7
+                  AND scoped.allowed = TRUE
+                LIMIT 1
+              )
+            END
+            AND (('0' OR EXISTS (
+                SELECT TRUE FROM bqm_mandant_assignment global_acl
+                WHERE global_acl.actor_id = 7
+                LIMIT 1
+              )) OR (
+                (NOT '0') AND (NOT '0') AND NOT EXISTS (
+                  SELECT TRUE FROM bqm_mandant_assignment global_acl
+                  WHERE global_acl.actor_id = 7
+                  LIMIT 1
+                )
+              ))
+            AND COALESCE((
+              SELECT override_acl.allowed
+              FROM bqm_standort_assignment override_acl
+              WHERE override_acl.standort_id = s.id
+                AND override_acl.actor_id = 7
+              LIMIT 1
+            ), FALSE)
+            AND (TRUE OR COALESCE((
+              SELECT
+                (('0' OR EXISTS (
+                    SELECT TRUE FROM bqm_mandant_assignment nested_global_acl
+                    WHERE nested_global_acl.actor_id = 7
+                    LIMIT 1
+                  )) OR (
+                    (NOT '0') AND (NOT '0') AND NOT EXISTS (
+                      SELECT TRUE FROM bqm_mandant_assignment nested_global_acl
+                      WHERE nested_global_acl.actor_id = 7
+                      LIMIT 1
+                    )
+                  ))
+                AND CASE WHEN ((('0' OR EXISTS (
+                    SELECT TRUE FROM bqm_mandant_assignment nested_global_acl
+                    WHERE nested_global_acl.actor_id = 7
+                    LIMIT 1
+                  )) OR (
+                    (NOT '0') AND (NOT '0') AND NOT EXISTS (
+                      SELECT TRUE FROM bqm_mandant_assignment nested_global_acl
+                      WHERE nested_global_acl.actor_id = 7
+                      LIMIT 1
+                    )
+                  )) OR '0')
+                  THEN nested_scope.id > 0
+                  ELSE FALSE
+                END
+              FROM bqm_unused_lookup nested_scope
+              WHERE nested_scope.id = s.id
+              LIMIT 1
+            ), FALSE))
+          FROM bqm_standort s
+          WHERE s.id = d.standort_id
+          LIMIT 1
+        ), FALSE)
+    expect:
+      result_not_contains:
+        - "nested_global_acl"
+
+  - name: "Compound SQL-coerced ACL preserves broad count semantics"
+    max_time: 3
+    sql: |
+      SELECT COUNT(*) AS total
+      FROM bqm_document d
+      WHERE d.mandant_id = 1
+        AND COALESCE((
+          SELECT
+            ((('0' OR EXISTS (
+                SELECT TRUE FROM bqm_mandant_assignment global_acl
+                WHERE global_acl.actor_id = 7
+                LIMIT 1
+              )) OR (
+                (NOT '0') AND (NOT '0') AND NOT EXISTS (
+                  SELECT TRUE FROM bqm_mandant_assignment global_acl
+                  WHERE global_acl.actor_id = 7
+                  LIMIT 1
+                )
+              )) OR '0')
+            AND CASE WHEN (('0' OR EXISTS (
+                SELECT TRUE FROM bqm_mandant_assignment global_acl
+                WHERE global_acl.actor_id = 7
+                LIMIT 1
+              )) OR '0')
+              THEN TRUE
+              ELSE EXISTS (
+                SELECT TRUE FROM bqm_mandant_assignment scoped
+                WHERE scoped.standort_id = s.id
+                  AND scoped.actor_id = 7
+                  AND scoped.allowed = TRUE
+                LIMIT 1
+              )
+            END
+            AND (('0' OR EXISTS (
+                SELECT TRUE FROM bqm_mandant_assignment global_acl
+                WHERE global_acl.actor_id = 7
+                LIMIT 1
+              )) OR (
+                (NOT '0') AND (NOT '0') AND NOT EXISTS (
+                  SELECT TRUE FROM bqm_mandant_assignment global_acl
+                  WHERE global_acl.actor_id = 7
+                  LIMIT 1
+                )
+              ))
+            AND COALESCE((
+              SELECT override_acl.allowed
+              FROM bqm_standort_assignment override_acl
+              WHERE override_acl.standort_id = s.id
+                AND override_acl.actor_id = 7
+              LIMIT 1
+            ), FALSE)
+            AND (TRUE OR COALESCE((
+              SELECT
+                (('0' OR EXISTS (
+                    SELECT TRUE FROM bqm_mandant_assignment nested_global_acl
+                    WHERE nested_global_acl.actor_id = 7
+                    LIMIT 1
+                  )) OR (
+                    (NOT '0') AND (NOT '0') AND NOT EXISTS (
+                      SELECT TRUE FROM bqm_mandant_assignment nested_global_acl
+                      WHERE nested_global_acl.actor_id = 7
+                      LIMIT 1
+                    )
+                  ))
+                AND CASE WHEN ((('0' OR EXISTS (
+                    SELECT TRUE FROM bqm_mandant_assignment nested_global_acl
+                    WHERE nested_global_acl.actor_id = 7
+                    LIMIT 1
+                  )) OR (
+                    (NOT '0') AND (NOT '0') AND NOT EXISTS (
+                      SELECT TRUE FROM bqm_mandant_assignment nested_global_acl
+                      WHERE nested_global_acl.actor_id = 7
+                      LIMIT 1
+                    )
+                  )) OR '0')
+                  THEN nested_scope.id > 0
+                  ELSE FALSE
+                END
+              FROM bqm_unused_lookup nested_scope
+              WHERE nested_scope.id = s.id
+              LIMIT 1
+            ), FALSE))
+          FROM bqm_standort s
+          WHERE s.id = d.standort_id
+          LIMIT 1
+        ), FALSE)
+    expect:
+      rows: 1
+      data:
+        - total: 9990
+
   - name: "Plain selective LIKE count stays on the fused scan"
     sql: |
       EXPLAIN PHYSICAL
