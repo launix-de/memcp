@@ -31,4 +31,18 @@ test_cases:
           (error "rdf shared planner: BIND marker classified as a triple")
           true))
 
+  - name: "FILTER joins the BGP predicate in shared query-block WHERE"
+    scm: |
+      (begin
+        (define parsed (rdf_query
+          "SELECT ?s WHERE { FILTER(?v = \"keep\") ?s value ?v }"))
+        (if (not (rdf_shared_bgp_supported? parsed))
+          (error "rdf shared planner: supported FILTER rejected"))
+        (define ast (rdf_shared_query_ast "memcp-tests" parsed '()))
+        (if (not (equal? (car ast) (quote query-block)))
+          (error "rdf shared planner: FILTER did not lower to query-block"))
+        (if (not (rdf_contains (concat (qb_where ast)) "equal??"))
+          (error "rdf shared planner: FILTER missing from WHERE"))
+        true)
+
 cleanup: []
