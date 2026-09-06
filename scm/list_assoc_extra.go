@@ -124,7 +124,7 @@ func init_list_assoc_extra() {
 				for i := range args {
 					ctx.StabilizeDescForControlFlow(&args[i])
 				}
-				registerHomes1 := ctx.AllocRegisterHomes(JITRegisterPlan{Slots: [16]JITRegisterSlot{{Color: 0, Width: 1, Cost: 3}}, Count: 1})
+				registerHomes1 := ctx.AllocRegisterHomes(JITRegisterPlan{Slots: [16]JITRegisterSlot{{Color: 0, Width: 1, Cost: 12}}, Count: 1})
 				defer ctx.ReleaseRegisterHomes(registerHomes1)
 				var r0 Reg
 				phiHomeOK2 := registerHomes1.Available&(uint16(1)<<0) == uint16(1)<<0
@@ -1240,7 +1240,7 @@ func init_list_assoc_extra() {
 				for i := range args {
 					ctx.StabilizeDescForControlFlow(&args[i])
 				}
-				registerHomes1 := ctx.AllocRegisterHomes(JITRegisterPlan{Slots: [16]JITRegisterSlot{{Color: 0, Width: 1, Cost: 3}}, Count: 1})
+				registerHomes1 := ctx.AllocRegisterHomes(JITRegisterPlan{Slots: [16]JITRegisterSlot{{Color: 0, Width: 1, Cost: 12}}, Count: 1})
 				defer ctx.ReleaseRegisterHomes(registerHomes1)
 				var r0 Reg
 				phiHomeOK2 := registerHomes1.Available&(uint16(1)<<0) == uint16(1)<<0
@@ -2402,7 +2402,7 @@ func init_list_assoc_extra() {
 				for i := range args {
 					ctx.StabilizeDescForControlFlow(&args[i])
 				}
-				registerHomes1 := ctx.AllocRegisterHomes(JITRegisterPlan{Slots: [16]JITRegisterSlot{{Color: 0, Width: 1, Cost: 3}}, Count: 1})
+				registerHomes1 := ctx.AllocRegisterHomes(JITRegisterPlan{Slots: [16]JITRegisterSlot{{Color: 0, Width: 1, Cost: 12}}, Count: 1})
 				defer ctx.ReleaseRegisterHomes(registerHomes1)
 				var r0 Reg
 				phiHomeOK2 := registerHomes1.Available&(uint16(1)<<0) == uint16(1)<<0
@@ -3623,7 +3623,7 @@ func init_list_assoc_extra() {
 				for i := range args {
 					ctx.StabilizeDescForControlFlow(&args[i])
 				}
-				registerHomes1 := ctx.AllocRegisterHomes(JITRegisterPlan{Slots: [16]JITRegisterSlot{{Color: 0, Width: 1, Cost: 3}}, Count: 1})
+				registerHomes1 := ctx.AllocRegisterHomes(JITRegisterPlan{Slots: [16]JITRegisterSlot{{Color: 0, Width: 1, Cost: 12}}, Count: 1})
 				defer ctx.ReleaseRegisterHomes(registerHomes1)
 				var r0 Reg
 				phiHomeOK2 := registerHomes1.Available&(uint16(1)<<0) == uint16(1)<<0
@@ -4647,7 +4647,7 @@ func init_list_assoc_extra() {
 				for i := range args {
 					ctx.StabilizeDescForControlFlow(&args[i])
 				}
-				registerHomes1 := ctx.AllocRegisterHomes(JITRegisterPlan{Slots: [16]JITRegisterSlot{{Color: 0, Width: 1, Cost: 3}}, Count: 1})
+				registerHomes1 := ctx.AllocRegisterHomes(JITRegisterPlan{Slots: [16]JITRegisterSlot{{Color: 0, Width: 1, Cost: 12}}, Count: 1})
 				defer ctx.ReleaseRegisterHomes(registerHomes1)
 				var r0 Reg
 				phiHomeOK2 := registerHomes1.Available&(uint16(1)<<0) == uint16(1)<<0

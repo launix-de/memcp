@@ -306,7 +306,7 @@ func init_vector() {
 				for i := range args {
 					ctx.StabilizeDescForControlFlow(&args[i])
 				}
-				registerHomes1 := ctx.AllocRegisterHomes(JITRegisterPlan{Slots: [16]JITRegisterSlot{{Color: 0, Width: 1, Cost: 14}, {Color: 1, Width: 1, Cost: 9}, {Color: 2, Width: 1, Cost: 4}, {Color: 3, Width: 1, Cost: 4}}, Count: 4})
+				registerHomes1 := ctx.AllocRegisterHomes(JITRegisterPlan{Slots: [16]JITRegisterSlot{{Color: 0, Width: 1, Cost: 64}, {Color: 1, Width: 1, Cost: 35}, {Color: 2, Width: 1, Cost: 17}, {Color: 3, Width: 1, Cost: 17}}, Count: 4})
 				defer ctx.ReleaseRegisterHomes(registerHomes1)
 				var r0 Reg
 				phiHomeOK2 := registerHomes1.Available&(uint16(1)<<1) == uint16(1)<<1

@@ -181,6 +181,55 @@ func last(values []Scmer) Scmer {
 	}
 }
 
+func TestLoopPhiRegisterPlanReusesPairColorsAcrossIndependentLoops(t *testing.T) {
+	fn := buildTestSSAFunction(t, `package sample
+func lastTwice(left, right []string) int {
+	var leftResult string
+	for _, value := range left { leftResult = value }
+	leftLength := len(leftResult)
+	var rightResult string
+	for _, value := range right { rightResult = value }
+	return leftLength + len(rightResult)
+}
+`, "lastTwice")
+	plan := planLoopPhiRegisters(fn)
+	var pairColors []int
+	for name, width := range plan.widthByValue {
+		if width == 2 {
+			pairColors = append(pairColors, plan.colorByValue[name])
+		}
+	}
+	if len(pairColors) < 2 {
+		t.Fatalf("pair candidates = %v, want both independent loop accumulators", plan.colorByValue)
+	}
+	for _, color := range pairColors[1:] {
+		if color != pairColors[0] {
+			t.Fatalf("independent pair live ranges use different colors: %v", pairColors)
+		}
+	}
+}
+
+func TestLoopPhiRegisterPlanWeightsNestedLoopTraffic(t *testing.T) {
+	fn := buildTestSSAFunction(t, `package sample
+func nested(rows, columns int) int {
+	outer := 0
+	inner := 0
+	for row := 0; row < rows; row++ {
+		outer += row
+		for column := 0; column < columns; column++ { inner += column }
+	}
+	return outer + inner
+}
+`, "nested")
+	plan := planLoopPhiRegisters(fn)
+	if len(plan.slots) < 2 {
+		t.Fatalf("nested loop plan = %#v, want multiple weighted slots", plan)
+	}
+	if plan.slots[0].weight <= plan.slots[len(plan.slots)-1].weight {
+		t.Fatalf("nested traffic did not affect slot priority: %#v", plan.slots)
+	}
+}
+
 func TestRegisterColoringIsExactForSmallComponent(t *testing.T) {
 	nodes := make([]registerPlanNode, 4)
 	for index := range nodes {
