@@ -380,16 +380,113 @@ func (emitter *jitParserEmitter) emitSequence(node *jitParserNode, rule int, suc
 }
 
 func (emitter *jitParserEmitter) emitChoice(node *jitParserNode, rule int, success, failure JITLabel) {
-	for _, child := range node.children {
+	if d := emitter.program.choiceDispatchPlan(node); d.useful {
+		emitter.emitChoiceDispatch(node, rule, d, success, failure)
+		return
+	}
+	all := make([]int, len(node.children))
+	for i := range all {
+		all[i] = i
+	}
+	emitter.emitAltCascade(node, rule, all, success, failure)
+}
+
+// emitAltCascade tries the listed alternatives of node in order, each guarded by
+// its own checkpoint; on the last failure it jumps to failure. This is the
+// classic choice lowering, and the tail of every dispatch bucket.
+func (emitter *jitParserEmitter) emitAltCascade(node *jitParserNode, rule int, indices []int, success, failure JITLabel) {
+	for _, i := range indices {
 		emitter.pushCheckpoint()
 		accepted, rejected := emitter.ctx.ReserveLabel(), emitter.ctx.ReserveLabel()
-		emitter.emitNode(child, rule, accepted, rejected)
+		emitter.emitNode(node.children[i], rule, accepted, rejected)
 		emitter.ctx.MarkLabel(accepted)
 		emitter.commitCheckpoint()
 		emitter.ctx.EmitJmp(success)
 		emitter.ctx.MarkLabel(rejected)
 		emitter.restoreCheckpoint()
 	}
+	emitter.ctx.EmitJmp(failure)
+}
+
+func altListKey(list []int) string {
+	b := make([]byte, 0, len(list)*2)
+	for _, x := range list {
+		b = append(b, byte(x), byte(x>>8))
+	}
+	return string(b)
+}
+
+// jitParserPeekByteNative returns the byte at position, or -1 at end of input.
+func jitParserPeekByteNative(input Scmer, position int64) int64 {
+	text := input.String()
+	if position < 0 || position >= int64(len(text)) {
+		return -1
+	}
+	return int64(text[position])
+}
+
+// emitPeekByte returns a register with the byte at the current parse position
+// (0..255), or -1 at end of input. No position advance. A Go call keeps this
+// off the register-discipline critical path - it runs once per dispatched
+// choice, replacing dozens of per-alternative helper calls.
+func (emitter *jitParserEmitter) emitPeekByte() JITValueDesc {
+	position := emitter.loadPosition()
+	peek := emitter.ctx.EmitGoCallScalar(GoFuncAddr(jitParserPeekByteNative), []JITValueDesc{emitter.input, position}, 1)
+	peek.Type = tagInt
+	emitter.ctx.FreeDesc(&position)
+	return peek
+}
+
+// emitChoiceDispatch reads the leading byte once and jumps to the small cascade
+// of alternatives that could match it, instead of trying all ~N in turn.
+func (emitter *jitParserEmitter) emitChoiceDispatch(node *jitParserNode, rule int, d choiceDispatch, success, failure JITLabel) {
+	skipped := emitter.ctx.ReserveLabel()
+	emitter.emitSkip(rule, skipped)
+	emitter.ctx.MarkLabel(skipped)
+	peek := emitter.emitPeekByte()
+
+	fail := emitter.ctx.ReserveLabel()
+	wild := fail
+	if len(d.wild) > 0 {
+		wild = emitter.ctx.ReserveLabel()
+	}
+
+	labels := make([]JITLabel, 256)
+	type bucket struct {
+		label JITLabel
+		list  []int
+	}
+	var order []bucket
+	made := map[string]JITLabel{}
+	for b := 0; b < 256; b++ {
+		list := d.buckets[b]
+		if len(list) == 0 {
+			labels[b] = wild
+			continue
+		}
+		key := altListKey(list)
+		if l, ok := made[key]; ok {
+			labels[b] = l
+			continue
+		}
+		l := emitter.ctx.ReserveLabel()
+		made[key] = l
+		labels[b] = l
+		order = append(order, bucket{l, list})
+	}
+
+	emitter.ctx.EmitJumpTable(peek.Reg, labels, wild)
+	emitter.ctx.FreeDesc(&peek)
+
+	for _, bk := range order {
+		emitter.ctx.MarkLabel(bk.label)
+		emitter.emitAltCascade(node, rule, bk.list, success, fail)
+	}
+	if len(d.wild) > 0 {
+		emitter.ctx.MarkLabel(wild)
+		emitter.emitAltCascade(node, rule, d.wild, success, fail)
+	}
+	emitter.ctx.MarkLabel(fail)
 	emitter.ctx.EmitJmp(failure)
 }
 
@@ -767,6 +864,41 @@ func (emitter *jitParserEmitter) emitLexicalRuleRef(node *jitParserNode, success
 	emitter.ctx.EmitJmp(failure)
 }
 
+// emitMemoFencePush / emitMemoCompact / emitMemoFencePop drive the per-iteration
+// memo compaction for a repeat that markFenceableRepeats proved can never roll
+// back a committed iteration (node.fenceMemo). The fence records the memo table
+// high-water mark at loop entry; every committed iteration's packrat entries are
+// dead the moment the iteration commits, so they are truncated back to that mark
+// instead of accumulating for the whole input.
+func (emitter *jitParserEmitter) emitMemoFencePush() {
+	position := emitter.loadPosition()
+	statePtr := emitter.statePointer()
+	emitter.emitVoid(jitParserMemoFencePushNative, statePtr, position)
+	emitter.ctx.FreeDesc(&statePtr)
+	emitter.ctx.FreeDesc(&position)
+}
+
+func (emitter *jitParserEmitter) emitMemoCompact() {
+	position := emitter.loadPosition()
+	statePtr := emitter.statePointer()
+	emitter.emitVoid(jitParserMemoCompactNative, statePtr, position)
+	emitter.ctx.FreeDesc(&statePtr)
+	emitter.ctx.FreeDesc(&position)
+}
+
+func (emitter *jitParserEmitter) emitMemoFencePop() {
+	statePtr := emitter.statePointer()
+	emitter.emitVoid(jitParserMemoFencePopNative, statePtr)
+	emitter.ctx.FreeDesc(&statePtr)
+}
+
+// emitMemoFenceExit compacts the last iteration's growth away and pops the fence
+// on every path that leaves the repeat.
+func (emitter *jitParserEmitter) emitMemoFenceExit() {
+	emitter.emitMemoCompact()
+	emitter.emitMemoFencePop()
+}
+
 func (emitter *jitParserEmitter) emitRepeat(node *jitParserNode, rule int, success, failure JITLabel) {
 	if node.noMemo {
 		emitter.noMemoDepth++
@@ -775,6 +907,9 @@ func (emitter *jitParserEmitter) emitRepeat(node *jitParserNode, rule int, succe
 	emitter.pushCheckpoint()
 	if !node.ignoreResult {
 		emitter.emitVoid(jitParserPushMarkNative, emitter.state)
+	}
+	if node.fenceMemo {
+		emitter.emitMemoFencePush()
 	}
 	firstAccepted, firstRejected := emitter.ctx.ReserveLabel(), emitter.ctx.ReserveLabel()
 	emitter.pushCheckpoint()
@@ -793,11 +928,17 @@ func (emitter *jitParserEmitter) emitRepeat(node *jitParserNode, rule int, succe
 	emitter.restoreCheckpoint()
 	if node.kind == jitParserOneOrMore {
 		emitter.restoreCheckpoint()
+		if node.fenceMemo {
+			emitter.emitMemoFenceExit()
+		}
 		emitter.ctx.EmitJmp(failure)
 	} else {
 		emitter.ctx.EmitJmp(done)
 	}
 	emitter.ctx.MarkLabel(loop)
+	if node.fenceMemo {
+		emitter.emitMemoCompact()
+	}
 	emitter.pushCheckpoint()
 	separatorAccepted, iterationAccepted, iterationRejected := emitter.ctx.ReserveLabel(), emitter.ctx.ReserveLabel(), emitter.ctx.ReserveLabel()
 	emitter.emitNode(node.children[1], rule, separatorAccepted, iterationRejected)
@@ -815,6 +956,9 @@ func (emitter *jitParserEmitter) emitRepeat(node *jitParserNode, rule int, succe
 	emitter.restoreCheckpoint()
 	emitter.ctx.EmitJmp(done)
 	emitter.ctx.MarkLabel(done)
+	if node.fenceMemo {
+		emitter.emitMemoFenceExit()
+	}
 	if !node.ignoreResult {
 		emitter.emitVoid(jitParserMergeMarkNative, emitter.state, jitParserBoolScalar(false))
 	}
