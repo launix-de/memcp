@@ -137,7 +137,7 @@ func (s *storageShard) nextForMaintenanceLocked(deletedRecid *uint32) *storageSh
 
 // syncNextVisibilityLocked mirrors the final visibility of one source recid
 // when transaction commit/rollback changes it after the rebuild snapshot. A
-// A successor already tracked by the same transaction applies its own masks
+// successor already tracked by the same transaction applies its own masks
 // and must not be locked recursively here. Caller must hold s.mu.Lock().
 func (s *storageShard) syncNextVisibilityLocked(oldRecid uint32, trackedByTx map[*storageShard]struct{}) {
 	current := s
@@ -209,10 +209,15 @@ func (s *storageShard) catchUpRebuildLocked(next *storageShard, snapshotInsertCo
 			return
 		}
 		deleted := s.deletions.Get(uint(oldRecid))
+		wasDeleted := next.deletions.Get(uint(newRecid))
 		next.deletions.Set(uint(newRecid), deleted)
 		next.rollbackProtected.Set(uint(newRecid), s.rollbackProtected.Get(uint(oldRecid)))
-		if deleted && (next.t.PersistencyMode == Safe || next.t.PersistencyMode == Logged) && next.logfile != nil {
-			next.logfile.Write(LogEntryDelete{newRecid})
+		// A rebuild may snapshot a row while an ACID transaction still keeps its
+		// replacement hidden. The bounded catch-up then publishes the committed
+		// visibility. Persist both directions: omitting the undelete transition
+		// makes a correct in-memory commit reappear as deleted after WAL replay.
+		if wasDeleted != deleted {
+			next.logVisibilityChangeLocked(newRecid, deleted)
 		}
 	}
 

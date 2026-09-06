@@ -1,0 +1,150 @@
+# Copyright (C) 2026 Carl-Philip Haensch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+metadata:
+  version: "1.0"
+  description: "Failed autocommit statements roll back base and trigger writes across shard boundaries"
+  isolated: true
+
+setup:
+  - scm: '(settings "ShardSize" 10)'
+  - sql: "DROP TABLE IF EXISTS fsa_trigger_audit"
+  - sql: "DROP TABLE IF EXISTS fsa_trigger_source"
+  - sql: "DROP TABLE IF EXISTS fsa_audit"
+  - sql: "DROP TABLE IF EXISTS fsa_item"
+  - sql: |
+      CREATE TABLE fsa_item (
+        id INT PRIMARY KEY,
+        code VARCHAR(32) NOT NULL,
+        amount INT NOT NULL,
+        UNIQUE KEY fsa_item_code (code)
+      ) ENGINE=safe
+  - sql: |
+      CREATE TABLE fsa_audit (
+        event_name VARCHAR(16) NOT NULL,
+        item_id INT NOT NULL
+      ) ENGINE=safe
+  - scm: |
+      (begin
+        (insert (table "memcp-tests" "fsa_item") '("id" "code" "amount")
+          (map (produceN 25) (lambda (i)
+            (list (+ i 1) (concat "code-" (+ i 1)) (* (+ i 1) 10)))))
+        (rebuild)
+        true)
+  - sql: |
+      CREATE TRIGGER fsa_item_ai AFTER INSERT ON fsa_item FOR EACH ROW
+      INSERT INTO fsa_audit(event_name, item_id) VALUES ('insert', NEW.id)
+  - sql: |
+      CREATE TRIGGER fsa_item_au AFTER UPDATE ON fsa_item FOR EACH ROW
+      INSERT INTO fsa_audit(event_name, item_id) VALUES ('update', NEW.id)
+  - sql: "CREATE TABLE fsa_trigger_source (id INT PRIMARY KEY) ENGINE=safe"
+  - sql: "CREATE TABLE fsa_trigger_audit (marker INT UNIQUE) ENGINE=safe"
+  - sql: |
+      CREATE TRIGGER fsa_trigger_source_ai AFTER INSERT ON fsa_trigger_source FOR EACH ROW
+      INSERT INTO fsa_trigger_audit(marker) SELECT 1
+
+test_cases:
+  - name: "Multi-row insert fails after encountering a duplicate key"
+    sql: |
+      INSERT INTO fsa_item(id, code, amount) VALUES
+        (26, 'code-26', 260),
+        (27, 'code-5', 270),
+        (28, 'code-28', 280)
+    expect:
+      error: true
+
+  - name: "Failed insert retained neither base rows nor trigger effects"
+    sql: |
+      SELECT
+        (SELECT COUNT(*) FROM fsa_item) AS item_count,
+        (SELECT COUNT(*) FROM fsa_item WHERE id IN (26, 27, 28)) AS leaked_items,
+        (SELECT COUNT(*) FROM fsa_audit) AS leaked_audits
+    expect:
+      rows: 1
+      data:
+        - item_count: 25
+          leaked_items: 0
+          leaked_audits: 0
+
+  - name: "Sparse cross-shard update fails on its final unique collision"
+    sql: |
+      UPDATE fsa_item
+      SET code = CASE WHEN id = 22 THEN 'code-1' ELSE CONCAT('changed-', id) END,
+          amount = amount + 1000
+      WHERE id IN (2, 12, 22)
+    expect:
+      error: true
+
+  - name: "Failed update restored every original base and trigger row"
+    sql: |
+      SELECT
+        SUM(CASE WHEN code = CONCAT('code-', id) THEN 1 ELSE 0 END) AS original_codes,
+        SUM(amount) AS amount_sum,
+        (SELECT COUNT(*) FROM fsa_audit) AS leaked_audits
+      FROM fsa_item
+    expect:
+      rows: 1
+      data:
+        - original_codes: 25
+          amount_sum: 3250
+          leaked_audits: 0
+
+  - name: "Failure inside the second trigger invocation aborts the statement"
+    sql: "INSERT INTO fsa_trigger_source VALUES (1), (2)"
+    expect:
+      error: true
+
+  - name: "Trigger failure retained neither source nor target rows"
+    sql: |
+      SELECT
+        (SELECT COUNT(*) FROM fsa_trigger_source) AS source_count,
+        (SELECT COUNT(*) FROM fsa_trigger_audit) AS audit_count
+    expect:
+      rows: 1
+      data:
+        - source_count: 0
+          audit_count: 0
+
+  - name: "Hard crash after rolled-back failures"
+    scm: '(crash)'
+    expect:
+      interrupted_ok: true
+
+  - name: "Restart after rolled-back failures"
+    action: restart
+
+  - name: "Rolled-back rows remain absent after WAL replay"
+    sql: |
+      SELECT
+        (SELECT COUNT(*) FROM fsa_item) AS item_count,
+        (SELECT COUNT(*) FROM fsa_audit) AS item_audits,
+        (SELECT COUNT(*) FROM fsa_trigger_source) AS source_count,
+        (SELECT COUNT(*) FROM fsa_trigger_audit) AS trigger_audits
+    expect:
+      rows: 1
+      data:
+        - item_count: 25
+          item_audits: 0
+          source_count: 0
+          trigger_audits: 0
+
+  - name: "Restore default shard size"
+    scm: '(settings "ShardSize" 60000)'
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS fsa_trigger_audit"
+  - sql: "DROP TABLE IF EXISTS fsa_trigger_source"
+  - sql: "DROP TABLE IF EXISTS fsa_audit"
+  - sql: "DROP TABLE IF EXISTS fsa_item"
