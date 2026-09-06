@@ -67,6 +67,24 @@ test_cases:
     expect:
       rows: 2
 
+  - name: "LIMIT 1 applies after a multi-pattern ORDER BY"
+    ttl_data: |
+      @prefix ol3m: <http://ordlim03m.org/> .
+      ol3m:z a ol3m:Person ; ol3m:name "Zed" .
+      ol3m:a a ol3m:Person ; ol3m:name "Alice" .
+      ol3m:m a ol3m:Person ; ol3m:name "Mara" .
+    sparql: |
+      @prefix ol3m: <http://ordlim03m.org/> .
+      SELECT ?s, ?name WHERE {
+        ?s a ol3m:Person .
+        ?s ol3m:name ?name
+      } ORDER BY ?name LIMIT 1
+    expect:
+      rows: 1
+      data:
+        - "?s": "http://ordlim03m.org/a"
+          "?name": "Alice"
+
   - name: "LIMIT repeated query first run"
     ttl_data: |
       @prefix ol3r: <http://ordlim03r.org/> .
