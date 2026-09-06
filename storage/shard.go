@@ -1333,8 +1333,8 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 			if result && dualWriteRow != nil {
 				t.t.dualWriteInsertFromOld(t, newRecid, dualWriteCols, dualWriteRow, currentTx)
 			}
-			// transaction bookkeeping + deferred sync
-			// (shard is already registered via OpenMapReducer — no per-row RegisterTouchedShard)
+			// Transaction bookkeeping. The owning MapReducer registers this shard
+			// once on Close, and only when at least one callback mutated it.
 			if result {
 				if tx := currentTx; tx != nil {
 					switch tx.Mode {
@@ -1974,12 +1974,6 @@ func (t *storageShard) initMapReducer(mr *ShardMapReducer, cols []string, mapRed
 			}
 		}
 	}
-	// Register shard for deferred fsync once, not per row.
-	if mr.hasUpdateCol {
-		if tx := mr.currentTx; tx != nil {
-			tx.RegisterTouchedShard(t)
-		}
-	}
 }
 
 // OpenMapReducer creates a retained MapReducer for operators whose mapper
@@ -2371,6 +2365,9 @@ func (m *ShardMapReducer) processDeltaBlockBatch(acc scm.Scmer, recids []uint32,
 // batches — that must happen after all shard locks are released.
 // Call FlushTriggerBatch() separately after the scan completes.
 func (m *ShardMapReducer) Close() {
+	if m.hasUpdateCol && m.currentTx != nil && m.currentTx.getShardTx(m.shard) != nil {
+		m.currentTx.RegisterTouchedShard(m.shard)
+	}
 	if m.mainBulkBuffer != nil {
 		clear(m.mainBulkBuffer.values)
 		width := cap(m.mainBulkBuffer.values) / defaultScanBufferSize
