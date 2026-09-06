@@ -5422,7 +5422,7 @@ func init_jit() {
 					ps49.OverlayValues[29] = d29
 					ps49.OverlayValues[32] = d32
 					ps49.OverlayValues[48] = d48
-					return bbs[8].RenderPS(ps49)
+					return bbs[7].RenderPS(ps49)
 					return result
 				}
 				bbs[3].RenderPS = func(ps PhiState) JITValueDesc {
@@ -7005,6 +7005,7 @@ func init_jit() {
 						return bbs[7].RenderPS(ps146)
 					}
 					return result
+					ctx.FreeDesc(&d1)
 					return result
 				}
 				bbs[9].RenderPS = func(ps PhiState) JITValueDesc {
@@ -7546,7 +7547,7 @@ func init_jit() {
 				for i := range args {
 					ctx.StabilizeDescForControlFlow(&args[i])
 				}
-				d0 := JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(true)}
+				d0 := JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(false)}
 				if result.Loc == LocAny {
 					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 					ctx.BindReg(result.Reg, &result)

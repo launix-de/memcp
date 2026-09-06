@@ -2931,12 +2931,25 @@ func (g *codeGen) emitIfClosure(v *ssa.If) {
 	g.emit("ctx.EmitCmpRegImm32(%s.Reg, 0)", condVar)
 	g.emit("ctx.EmitJump(CondNotEqual, %s)", thenEdgeLbl)
 	g.emit("ctx.EmitJmp(%s)", elseEdgeLbl)
+	// Edge helpers are mutually exclusive machine-code paths. Emitting the
+	// first helper may spill a live descriptor while preparing its phi moves;
+	// that edge-local spill does not dominate the other helper. Restore the
+	// compiler allocation and descriptor state before emitting either sibling,
+	// otherwise the second helper can load from a stack slot initialized only
+	// by the first one.
+	edgeSnaps := g.emitSaveClosureDescState(g.allClosureDescVars())
+	edgeAllocSnap := g.allocTemp("alloc")
+	g.emit("%s := ctx.SnapshotAllocState()", edgeAllocSnap)
 	g.emit("ctx.MarkLabel(%s)", thenEdgeLbl)
 	g.emitEdgePhiMoves(thenBB, 0)
 	g.emit("ctx.EmitJmp(%s)", thenLbl)
+	g.emit("ctx.RestoreAllocState(%s)", edgeAllocSnap)
+	g.emitRestoreClosureDescState(edgeSnaps)
 	g.emit("ctx.MarkLabel(%s)", elseEdgeLbl)
 	g.emitEdgePhiMoves(elseBB, 1)
 	g.emit("ctx.EmitJmp(%s)", elseLbl)
+	g.emit("ctx.RestoreAllocState(%s)", edgeAllocSnap)
+	g.emitRestoreClosureDescState(edgeSnaps)
 
 	thenPSGeneral := g.allocTemp("ps")
 	elsePSGeneral := g.allocTemp("ps")
@@ -9030,7 +9043,7 @@ func (g *codeGen) emitReturnSingleBlock(v *ssa.Return) {
 			g.emit("\tctx.BindReg(result.Reg, &result)")
 			g.emit("\tctx.BindReg(result.Reg2, &result)")
 			g.emit("}")
-			if isScmerType(v.Results[0].Type()) {
+			if g.storageMode && isScmerType(v.Results[0].Type()) {
 				prepared := g.allocDesc()
 				g.emit("%s := JITPrepareScmerGoArg(ctx, %s)", prepared, res.goVar)
 				g.emit("ctx.EmitMovPairToResult(&%s, &result)", prepared)

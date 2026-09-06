@@ -140,6 +140,7 @@ func compileJITStorageFunction(abi jitStorageABI, emit jitStorageEmitBody) (*JIT
 		})
 		arena.complete(reservation, buf.stackMaps)
 		maybeDumpJITCode(ptr, (*[1 << 30]byte)(ptr)[:codeLen:codeLen])
+		maybeLogJITCodeName(entry)
 		return entry, holder
 	}
 	return nil, nil

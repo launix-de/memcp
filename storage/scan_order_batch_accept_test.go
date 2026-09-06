@@ -49,7 +49,7 @@ func TestJITScanOrderPreservesAdjacentMapColumnNames(t *testing.T) {
 		(!begin
 			(resultfields (quote ("ID" "post_status" "post_type")))
 			(scan_order tx (table "tjit_scan_order_column_names" "posts")
-				(quote ()) (lambda () true) (quote ("post_title")) (list <) 0 0 (session "v1")
+				(quote ()) (quote ()) (quote ()) (lambda () true) (quote ("post_title")) (list <) 0 0 (session "v1")
 				(list "ID" "post_status" "post_type")
 				(lambda (__scan_acc ID post_status post_type)
 					(resultrow (list "ID" ID "post_status" post_status "post_type" post_type)))

@@ -114,9 +114,28 @@ func init_streams() {
 					ctx.BindReg(result.Reg, &result)
 					ctx.BindReg(result.Reg2, &result)
 				}
-				d4 := JITPrepareScmerGoArg(ctx, d3)
-				ctx.EmitMovPairToResult(&d4, &result)
-				result.Type = d4.Type
+				ctx.SyncDesc(&d3)
+				if d3.Loc == LocRegPair || d3.Loc == LocStackPair || d3.Loc == LocInputPair {
+					ctx.EmitMovPairToResult(&d3, &result)
+					result.Type = d3.Type
+				} else {
+					switch d3.Type {
+					case tagBool:
+						ctx.EmitMakeBool(result, d3)
+						result.Type = tagBool
+					case tagInt:
+						ctx.EmitMakeInt(result, d3)
+						result.Type = tagInt
+					case tagFloat:
+						ctx.EmitMakeFloat(result, d3)
+						result.Type = tagFloat
+					case tagNil:
+						ctx.EmitMakeNil(result)
+						result.Type = tagNil
+					default:
+						panic("jit: single-block scalar return with unknown type")
+					}
+				}
 				return result
 				return result
 			},
