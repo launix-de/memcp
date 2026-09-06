@@ -80,12 +80,11 @@ func buildRankOrderIndex(t *testing.T, tbl *table) func(...scm.Scmer) scm.Scmer 
 	if !ok {
 		t.Fatal("rank ORDER boundary was not constructed")
 	}
-	lower, upper := indexFromBoundaries(bounds)
 	shard := tbl.ActiveShards()[0]
 	shard.mu.RLock()
 	defer shard.mu.RUnlock()
 	var buf [8]uint32
-	shard.iterateIndexForce(nil, runtimeScanAccess(bounds), lower, upper, len(shard.inserts), buf[:], false,
+	shard.iterateIndexForce(nil, runtimeScanAccess(bounds), len(shard.inserts), buf[:], false,
 		func([]uint32) bool { return false })
 	return order
 }

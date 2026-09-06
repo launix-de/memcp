@@ -28,6 +28,47 @@ import (
 	"github.com/launix-de/memcp/scm"
 )
 
+type scanLogEvent struct {
+	schema, table, filter, order, indexCols                    string
+	ordered                                                    bool
+	inputCount, candidateCount, outputCount, analyzeNs, execNs int64
+	condition                                                  scm.Scmer
+	conditionCols                                              []string
+	encodeCondition                                            bool
+}
+
+var scanLogQueue = make(chan scanLogEvent, 1024)
+
+func init() {
+	go func() {
+		for event := range scanLogQueue {
+			if event.encodeCondition {
+				if proc, ok := event.condition.Any().(scm.Proc); ok {
+					var params []scm.Scmer
+					if proc.Params.IsSlice() {
+						params = proc.Params.Slice()
+					} else if arr, ok := proc.Params.Any().([]scm.Scmer); ok {
+						params = arr
+					}
+					event.filter = encodeScmerToString(proc.Body, event.conditionCols, params)
+				}
+			}
+			safeLogScan(event.schema, event.table, event.ordered, event.filter, event.order, event.indexCols,
+				event.inputCount, event.candidateCount, event.outputCount, event.analyzeNs, event.execNs)
+		}
+	}()
+}
+
+// enqueueScanLog keeps statistics off the execution path without creating one
+// goroutine and callback frame per scan. Telemetry is best-effort; a saturated
+// sink must never apply backpressure to query execution.
+func enqueueScanLog(event scanLogEvent) {
+	select {
+	case scanLogQueue <- event:
+	default:
+	}
+}
+
 // encodeScmer prints a compact textual encoding of a Scheme AST to w.
 // Unknowns print as "?".
 // - Unknown symbols (not a global function and not one of the provided column names) => "?".

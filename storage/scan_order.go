@@ -671,13 +671,14 @@ func recSetBoundaryCallCount(conditionCols []string, condition scm.Scmer) int {
 	return walk(p.Body)
 }
 
-func recSetHooksCoverCondition(bounds scanAccess, lower []scm.Scmer, backingTable *table, conditionCols []string, condition scm.Scmer) bool {
+func recSetHooksCoverCondition(bounds scanAccess, backingTable *table, conditionCols []string, condition scm.Scmer) bool {
 	want := recSetBoundaryCallCount(conditionCols, condition)
 	if want == 0 {
 		return false
 	}
 	covered := 0
-	for i := 0; i < len(lower) && i < bounds.len(); i++ {
+	indexBounds := newScanIndexBounds(bounds)
+	for i := 0; i < indexBounds.len() && i < bounds.len(); i++ {
 		bound := bounds.boundary(i)
 		if !matcherKindEqual(bound.matcher, RecSetMatcher) {
 			continue
@@ -767,15 +768,14 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 		bounds, _ = extendScanAccessWithSortCols(bounds, spec.sortcols, sortdirs)
 		runtime := bounds.ensureRuntime()
 		runtime.suffix = appendRecSetBoundary(runtime.suffix, spec.recset)
-		lower, upperLast := indexFromScanAccessInto(scratch.lower[:0], bounds)
-
 		if Settings.ScanDebugging {
 			dbg := fmt.Sprintf("[SCAN_ORDER_MULTI] %s.%s", t.schema.Name, t.Name)
 			for i := 0; i < bounds.len(); i++ {
 				b := bounds.boundary(i)
 				dbg += fmt.Sprintf(" %s:[%v..%v]", b.col, b.lower, b.upper)
 			}
-			dbg += fmt.Sprintf(" lower=%v upper=%v", lower, upperLast)
+			indexBounds := newScanIndexBounds(bounds)
+			dbg += fmt.Sprintf(" lower-count=%d upper=%v", indexBounds.len(), indexBounds.upperLast())
 			fmt.Println(dbg)
 		}
 
@@ -827,7 +827,7 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 										q_ <- scanOrderResult{err: scanError{r, string(debug.Stack())}}
 									}
 								}()
-								res := part.shard.scan_order(tableBounds, lower, upperLast, conditionCols, condition, acceptCols, accept, sortcols, sortdirs, limitPartitionCols, offset, shardLimit, callbackCols, currentTx, ss)
+								res := part.shard.scan_order(tableBounds, conditionCols, condition, acceptCols, accept, sortcols, sortdirs, limitPartitionCols, offset, shardLimit, callbackCols, currentTx, ss)
 								res.callbackCols = callbackCols
 								res.callback = callback
 								res.tableIdx = tableIdx
@@ -857,7 +857,7 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 						if ss != nil && ss.IsKilledSeq(querySeq) {
 							panic("query killed")
 						}
-						res := part.shard.scan_order(tableBounds, lower, upperLast, conditionCols, condition, acceptCols, accept, sortcols, sortdirs, limitPartitionCols, offset, shardLimit, callbackCols, currentTx, ss)
+						res := part.shard.scan_order(tableBounds, conditionCols, condition, acceptCols, accept, sortcols, sortdirs, limitPartitionCols, offset, shardLimit, callbackCols, currentTx, ss)
 						res.callbackCols = callbackCols
 						res.callback = callback
 						res.tableIdx = tableIdx
@@ -881,7 +881,7 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 				if ss != nil && ss.IsKilledSeq(querySeq) {
 					panic("query killed")
 				}
-				res := s.scan_order(tableBounds, lower, upperLast, conditionCols, condition, acceptCols, accept, sortcols, sortdirs, limitPartitionCols, offset, shardLimit, callbackCols, currentTx, ss)
+				res := s.scan_order(tableBounds, conditionCols, condition, acceptCols, accept, sortcols, sortdirs, limitPartitionCols, offset, shardLimit, callbackCols, currentTx, ss)
 				res.callbackCols = callbackCols
 				res.callback = callback
 				res.tableIdx = tableIdx
@@ -1148,7 +1148,12 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 		}
 		orderEnc := sb.String()
 		indexColsEnc := scanAccessIndexCols(tableStats.access)
-		go safeLogScan(tbl.schema.Name, tbl.Name, true, filterEnc, orderEnc, indexColsEnc, tableStats.inputCount, tableStats.candidateCount, tableStats.outputCount, tableStats.analyzeNs, execNs)
+		enqueueScanLog(scanLogEvent{
+			schema: tbl.schema.Name, table: tbl.Name, ordered: true,
+			filter: filterEnc, order: orderEnc, indexCols: indexColsEnc,
+			inputCount: tableStats.inputCount, candidateCount: tableStats.candidateCount,
+			outputCount: tableStats.outputCount, analyzeNs: tableStats.analyzeNs, execNs: execNs,
+		})
 	}
 	return akkumulator
 }
@@ -1193,7 +1198,6 @@ func (t *table) scanOrderFirst(currentTx *TxContext, accessSchema scm.Scmer, acc
 		return notFoundValue
 	}
 	bounds = bounds.useScratch(scratch)
-	lower, upperLast := indexFromScanAccessInto(scratch.lower[:0], bounds)
 
 	var mu sync.Mutex
 	var foundShard *storageShard
@@ -1218,7 +1222,7 @@ func (t *table) scanOrderFirst(currentTx *TxContext, accessSchema scm.Scmer, acc
 		if ss != nil && ss.IsKilledSeq(querySeq) {
 			panic("query killed")
 		}
-		recid, present := shard.scanFirstRecord(bounds, lower, upperLast, conditionCols, condition, currentTx, ss, nil)
+		recid, present := shard.scanFirstRecord(bounds, conditionCols, condition, currentTx, ss, nil)
 		if !present {
 			return
 		}
@@ -1240,10 +1244,11 @@ func (t *table) scanOrderFirst(currentTx *TxContext, accessSchema scm.Scmer, acc
 	}
 	mapperAlreadyLocked := false
 	var mapperStorage ShardMapReducer
-	var mapperWorkspace shardMapReducerWorkspace
 	mapper := &mapperStorage
 	if mapReducerCanUseReadWorkspace(callbackCols) {
-		prepareReadMapReducerStorage(&mapperStorage, &mapperWorkspace, len(callbackCols))
+		mapperWorkspace := acquireShardMapReducerWorkspace()
+		defer releaseShardMapReducerWorkspace(mapperWorkspace)
+		prepareReadMapReducerStorage(&mapperStorage, mapperWorkspace, len(callbackCols))
 		foundShard.initReadMapReducer(&mapperStorage, callbackCols, mapReduce, mapperAlreadyLocked, currentTx)
 	} else {
 		mapper = foundShard.OpenMapReducer(callbackCols, mapReduce, mapperAlreadyLocked, 0, nil, currentTx)
@@ -1288,7 +1293,7 @@ func streamOrBreak(mapper *ShardMapReducer, acc scm.Scmer, recids []uint32) (res
 	return
 }
 
-func (t *storageShard) scan_order(boundaries scanAccess, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, acceptCols []string, accept scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, currentTx *TxContext, ss *scm.SessionState) (result *shardqueue) {
+func (t *storageShard) scan_order(boundaries scanAccess, conditionCols []string, condition scm.Scmer, acceptCols []string, accept scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, currentTx *TxContext, ss *scm.SessionState) (result *shardqueue) {
 	result = new(shardqueue)
 	result.shard = t
 	t.ensureLoaded()
@@ -1297,7 +1302,7 @@ func (t *storageShard) scan_order(boundaries scanAccess, lower []scm.Scmer, uppe
 	if ss == nil {
 		ss = SessionStateFromTx(currentTx)
 	}
-	recsetBoundaryCoversCondition := recSetHooksCoverCondition(boundaries, lower, t.t, conditionCols, condition)
+	recsetBoundaryCoversCondition := recSetHooksCoverCondition(boundaries, t.t, conditionCols, condition)
 	conditionProgram := scm.PrepareSerialProc(condition)
 	conditionAlwaysTrue := scanConditionAlwaysTrue(&conditionProgram, len(conditionCols)) ||
 		scanAccessProvesCondition(conditionCols, condition, boundaries)
@@ -1464,9 +1469,10 @@ func (t *storageShard) scan_order(boundaries scanAccess, lower []scm.Scmer, uppe
 		acceptColBufs := make([][]scm.Scmer, len(acceptCols))
 		boundaryCoveredLimit := acceptProgram == nil && conditionAlwaysTrue
 		access := boundaries
-		t.iterateIndexOrdered(currentTx, access, lower, upperLast, maxInsertIndex, buf, usageWeight, limit, boundaryCoveredLimit, func(index *StorageIndex, active bool) {
+		indexBounds := newScanIndexBounds(access)
+		t.iterateIndexOrdered(currentTx, access, maxInsertIndex, buf, usageWeight, limit, boundaryCoveredLimit, func(index *StorageIndex, active bool) {
 			if len(sortcols) > 0 {
-				resultAlreadySorted = indexCoversBoundaryOrder(index, active, access, len(lower))
+				resultAlreadySorted = indexCoversBoundaryOrder(index, active, access, indexBounds.len())
 			}
 		}, func(batch []uint32) bool {
 			result.candidateCount += int64(len(batch))

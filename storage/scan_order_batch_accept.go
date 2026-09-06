@@ -131,7 +131,6 @@ func collectPartitionOrderedCandidateBatch(currentTx *TxContext, source scanOrde
 			partOrder = make([]*orderedBatchPart, 0)
 			remainingOffset := offset
 			bounds, _ := extendBoundariesWithSortCols(nil, sortcols, sortdirs)
-			lower, upperLast := indexFromBoundaries(bounds)
 			condition := scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewBool(true) })
 			sessionState := SessionStateFromTx(currentTx)
 			querySeq := querySeqFromTx(currentTx)
@@ -147,7 +146,7 @@ func collectPartitionOrderedCandidateBatch(currentTx *TxContext, source scanOrde
 				queue := func() *shardqueue {
 					defer release()
 					defer shard.activeScanners.Add(-1)
-					return shard.scan_order(runtimeScanAccess(bounds), lower, upperLast, nil, condition,
+					return shard.scan_order(runtimeScanAccess(bounds), nil, condition,
 						nil, scm.NewNil(), sortcols, sortdirs, 0, remainingOffset,
 						limit-len(records), nil, currentTx, sessionState)
 				}()

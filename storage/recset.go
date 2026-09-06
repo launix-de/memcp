@@ -467,7 +467,6 @@ func (t *table) scanRecSet(currentTx *TxContext, accessSchema scm.Scmer, accessV
 	if boundaries.impossible() {
 		return result
 	}
-	lower, upperLast := indexFromScanAccessInto(scratch.lower[:0], boundaries)
 
 	values := make(chan recSetBuildResult, t.shardResultBufferSize())
 	done := t.iterateShardsParallel(currentTx, boundaries, func(shard *storageShard, solo bool) {
@@ -483,7 +482,7 @@ func (t *table) scanRecSet(currentTx *TxContext, accessSchema scm.Scmer, accessV
 				panic("query killed")
 			}
 			values <- recSetBuildResult{
-				part: shard.collectRecSet(boundaries, lower, upperLast, conditionCols, condition, currentTx, ss),
+				part: shard.collectRecSet(boundaries, conditionCols, condition, currentTx, ss),
 			}
 			return scm.NewNil()
 		})
@@ -513,7 +512,7 @@ func (t *table) scanRecSet(currentTx *TxContext, accessSchema scm.Scmer, accessV
 	return result
 }
 
-func (t *storageShard) collectRecSet(boundaries scanAccess, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, currentTx *TxContext, ss *scm.SessionState) recSetShard {
+func (t *storageShard) collectRecSet(boundaries scanAccess, conditionCols []string, condition scm.Scmer, currentTx *TxContext, ss *scm.SessionState) recSetShard {
 	conditionProgram := scm.PrepareSerialProc(condition)
 	conditionAlwaysTrue := scanAccessCoversResidual(boundaries) ||
 		conditionProgram.Kind == scm.SerialProcConstant && scm.ToBool(conditionProgram.Value)
@@ -521,7 +520,7 @@ func (t *storageShard) collectRecSet(boundaries scanAccess, lower []scm.Scmer, u
 	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
 	t.ensureMainCount(skipShardReadLock)
 	t.ensureScanAccessColumns(boundaries, skipShardReadLock, currentTx)
-	recsetBoundaryCoversCondition := recSetHooksCoverCondition(boundaries, lower, t.t, conditionCols, condition)
+	recsetBoundaryCoversCondition := recSetHooksCoverCondition(boundaries, t.t, conditionCols, condition)
 
 	var ccols []ColumnStorage
 	var cReaders []ColumnReader
@@ -620,7 +619,7 @@ func (t *storageShard) collectRecSet(boundaries scanAccess, lower []scm.Scmer, u
 	}
 	buf, pooledFullBuf, pooledPointBuf := acquireScanIDBuffer(defaultScanBufferSize)
 	defer releaseScanIDBuffer(pooledFullBuf, pooledPointBuf)
-	t.iterateIndexMatchAware(currentTx, boundaries, lower, upperLast, maxInsertIndex, buf, true, &exactLikeMain, func(batch []uint32) bool {
+	t.iterateIndexMatchAware(currentTx, boundaries, maxInsertIndex, buf, true, &exactLikeMain, func(batch []uint32) bool {
 		for _, idx := range batch {
 			if idx >= visibleUpper {
 				continue
@@ -1129,8 +1128,7 @@ func (t *storageShard) projectJoinKeysPart(currentTx *TxContext, targetKeyCols [
 			}
 		}
 		reorderByFrequency(bounds, t.t)
-		lower, upperLast := indexFromBoundaries(bounds)
-		t.iterateIndexForce(currentTx, runtimeScanAccess(bounds), lower, upperLast, maxInsertIndex, buf[:], true, func(batch []uint32) bool {
+		t.iterateIndexForce(currentTx, runtimeScanAccess(bounds), maxInsertIndex, buf[:], true, func(batch []uint32) bool {
 			for _, idx := range batch {
 				if idx >= visibleUpper {
 					continue
@@ -1306,10 +1304,11 @@ func (t *storageShard) scanRecSetPart(part *recSetShard, conditionCols []string,
 	}
 	cdataset := make([]scm.Scmer, len(conditionCols))
 	var mapperStorage ShardMapReducer
-	var mapperWorkspace shardMapReducerWorkspace
 	mapper := &mapperStorage
 	if mapReducerCanUseReadWorkspace(callbackCols) {
-		prepareReadMapReducerStorage(&mapperStorage, &mapperWorkspace, len(callbackCols))
+		mapperWorkspace := acquireShardMapReducerWorkspace()
+		defer releaseShardMapReducerWorkspace(mapperWorkspace)
+		prepareReadMapReducerStorage(&mapperStorage, mapperWorkspace, len(callbackCols))
 		t.initReadMapReducer(&mapperStorage, callbackCols, mapReduce, skipShardReadLock, currentTx)
 	} else {
 		mapper = t.OpenMapReducer(callbackCols, mapReduce, skipShardReadLock, 0, nil, currentTx)
@@ -1460,7 +1459,6 @@ func (t *storageShard) filterRecSetPart(part *recSetShard, conditionCols []strin
 	scratch := acquireScanAnalyzeScratch()
 	defer releaseScanAnalyzeScratch(scratch)
 	access = access.useScratch(scratch)
-	lower, upperLast := indexFromScanAccessInto(scratch.lower[:0], access)
 
 	var ccols []ColumnStorage
 	var cReaders []ColumnReader
@@ -1561,7 +1559,7 @@ func (t *storageShard) filterRecSetPart(part *recSetShard, conditionCols []strin
 	} else {
 		buf, pooledFullBuf, pooledPointBuf := acquireScanIDBuffer(defaultScanBufferSize)
 		defer releaseScanIDBuffer(pooledFullBuf, pooledPointBuf)
-		t.iterateIndexMatchAware(currentTx, access, lower, upperLast, len(t.inserts), buf, true, nil, evaluateBatch)
+		t.iterateIndexMatchAware(currentTx, access, len(t.inserts), buf, true, nil, evaluateBatch)
 	}
 	return builder.finish()
 }

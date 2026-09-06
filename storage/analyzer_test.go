@@ -64,7 +64,7 @@ func TestCompileScanAccessReadsRuntimeValuesWithoutAllocation(t *testing.T) {
 	if !valid || access.len() != 2 {
 		t.Fatalf("scanAccessFromScheme returned valid=%v boundaries=%d", valid, access.len())
 	}
-	bound := materializeScanAccess(access)
+	bound := boundaries{access.boundary(0), access.boundary(1)}
 	if bound[0].col != "tenant" || bound[0].matcher != EqualMatcher || bound[0].lower.Int() != 7 {
 		t.Fatalf("unexpected compiled equality: %#v", bound[0])
 	}
@@ -171,6 +171,21 @@ func TestCompileScanAccessEncodesBatchSlots(t *testing.T) {
 		bound.lowerBatchSubidx != 0 || bound.upperBatchSubidx != 0 {
 		t.Fatalf("unexpected compiled batch boundary: valid=%v boundary=%#v", valid, bound)
 	}
+	scratch := acquireScanAnalyzeScratch()
+	defer releaseScanAnalyzeScratch(scratch)
+	access = access.useScratch(scratch)
+	batchData := []scm.Scmer{scm.NewInt(7), scm.NewInt(11)}
+	boundAccess := access.withBatch(1, batchData, 1)
+	indexBounds := newScanIndexBounds(boundAccess)
+	if indexBounds.lower(0).Int() != 11 || indexBounds.upperLast().Int() != 11 {
+		t.Fatalf("batch index view = [%v,%v], want [11,11]", indexBounds.lower(0), indexBounds.upperLast())
+	}
+	if allocs := testing.AllocsPerRun(1000, func() {
+		boundAccess = access.withBatch(1, batchData, 1)
+		indexBounds = newScanIndexBounds(boundAccess)
+	}); allocs != 0 {
+		t.Fatalf("batch index binding allocated %.2f objects, want zero", allocs)
+	}
 }
 
 func TestCompileScanAccessKeepsCandidateHooksAfterSortedPrefix(t *testing.T) {
@@ -196,7 +211,7 @@ func TestCompileScanAccessKeepsCandidateHooksAfterSortedPrefix(t *testing.T) {
 	if !valid || access.len() != 3 {
 		t.Fatalf("compiled hooks returned valid=%v boundaries=%d", valid, access.len())
 	}
-	bound := materializeScanAccess(access)
+	bound := boundaries{access.boundary(0), access.boundary(1), access.boundary(2)}
 	if bound[0].matcher != EqualMatcher || bound[0].col != "tenant" {
 		t.Fatalf("equality is not the leading physical boundary: %#v", bound)
 	}
@@ -908,8 +923,8 @@ func TestEffectiveBoundaryInclusivenessUsesIndexedRange(t *testing.T) {
 		{col: "discount", matcher: RangeMatcher, lowerInclusive: true, upperInclusive: true},
 		{col: "quantity", matcher: RangeMatcher, lowerInclusive: false, upperInclusive: false},
 	}
-	lower, _ := indexFromBoundaries(bounds)
-	lowerInclusive, upperInclusive := effectiveBoundaryInclusiveness(runtimeScanAccess(bounds), lower)
+	access := runtimeScanAccess(bounds)
+	lowerInclusive, upperInclusive := effectiveBoundaryInclusiveness(access, newScanIndexBounds(access))
 	if !lowerInclusive || !upperInclusive {
 		t.Fatalf("effective boundary inclusiveness = (%t, %t), want (true, true)", lowerInclusive, upperInclusive)
 	}
@@ -1004,13 +1019,14 @@ func TestMatcherIsSorted(t *testing.T) {
 // TestRowWithinBoundsEqual verifies sorted (equal) column matching via lower/upper.
 func TestRowWithinBoundsEqual(t *testing.T) {
 	idx := &StorageIndex{Cols: []string{"id"}, ColMatchers: []IndexAnalyzer{EqualMatcher}}
-	lower := []scm.Scmer{scm.NewInt(5)}
+	access := runtimeScanAccess(boundaries{{col: "id", matcher: EqualMatcher, lower: scm.NewInt(5), upper: scm.NewInt(5)}})
+	indexBounds := newScanIndexBounds(access)
 
-	inRange, _ := idx.rowWithinBounds(scanAccess{}, 1, 0, 1, 0, lower, scm.NewInt(5), true, true, func(i int) scm.Scmer { return scm.NewInt(5) })
+	inRange, _ := idx.rowWithinBounds(access, indexBounds, 1, 0, 1, 0, true, true, func(i int) scm.Scmer { return scm.NewInt(5) })
 	if !inRange {
 		t.Error("expected match for equal value")
 	}
-	inRange, beyond := idx.rowWithinBounds(scanAccess{}, 1, 0, 1, 0, lower, scm.NewInt(5), true, true, func(i int) scm.Scmer { return scm.NewInt(10) })
+	inRange, beyond := idx.rowWithinBounds(access, indexBounds, 1, 0, 1, 0, true, true, func(i int) scm.Scmer { return scm.NewInt(10) })
 	if inRange {
 		t.Error("expected no match for different value")
 	}
@@ -1022,10 +1038,10 @@ func TestRowWithinBoundsEqual(t *testing.T) {
 // TestRowWithinBoundsLike verifies that LIKE columns are skipped in rowWithinBounds.
 func TestRowWithinBoundsLike(t *testing.T) {
 	idx := &StorageIndex{Cols: []string{"name"}, ColMatchers: []IndexAnalyzer{LikeMatcher}}
-	lower := []scm.Scmer{scm.NewString("%Klaus%")}
+	access := runtimeScanAccess(boundaries{{col: "name", matcher: LikeMatcher, lower: scm.NewString("%Klaus%"), upper: scm.NewString("%Klaus%")}})
 
 	// rowWithinBounds skips non-sorted columns entirely
-	inRange, _ := idx.rowWithinBounds(scanAccess{}, 1, -1, 0, 0, lower, scm.NewString("%Klaus%"), true, true, func(i int) scm.Scmer { return scm.NewString("anything") })
+	inRange, _ := idx.rowWithinBounds(access, newScanIndexBounds(access), 1, -1, 0, 0, true, true, func(i int) scm.Scmer { return scm.NewString("anything") })
 	if !inRange {
 		t.Error("expected inRange=true (LIKE skipped in rowWithinBounds)")
 	}

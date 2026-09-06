@@ -632,7 +632,6 @@ func (t *table) invalidateORCFromSortKey(colName string, sortKeys []scm.Scmer) {
 			})
 		}
 	}
-	lower, upperLast := indexFromBoundaries(bounds)
 
 	// Build condition function for post-index filtering (index may return superset).
 	condFn := func(rowVals []scm.Scmer) bool {
@@ -683,7 +682,7 @@ func (t *table) invalidateORCFromSortKey(colName string, sortKeys []scm.Scmer) {
 			s.ensureMainCount(false)
 			var buf [1024]uint32
 			rowVals := make([]scm.Scmer, nCols)
-			s.iterateIndex(nil, runtimeScanAccess(bounds), lower, upperLast, len(s.inserts), buf[:], 1, nil, func(batch []uint32) bool {
+			s.iterateIndex(nil, runtimeScanAccess(bounds), len(s.inserts), buf[:], 1, nil, func(batch []uint32) bool {
 				for _, idx := range batch {
 					if s.deletions.Get(uint(idx)) {
 						continue

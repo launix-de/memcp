@@ -328,7 +328,7 @@ func (t *storageShard) scanLookupMapOne(boundary columnboundaries, lookupValue s
 	mainCount := t.main_count
 	acidMode := currentTx != nil && currentTx.Mode == TxACID
 	var ids [8]uint32
-	t.iterateIndexForce(currentTx, runtimeScanAccess(boundaries{boundary}), []scm.Scmer{lookupValue}, lookupValue, len(t.inserts), ids[:], true, func(batch []uint32) bool {
+	t.iterateIndexForce(currentTx, runtimeScanAccess(boundaries{boundary}), len(t.inserts), ids[:], true, func(batch []uint32) bool {
 		for _, recid := range batch {
 			var actual scm.Scmer
 			if recid < mainCount {
@@ -471,7 +471,6 @@ func (t *storageShard) scanLookupOne(lookupCol string, lookupValue scm.Scmer, re
 	}
 
 	bounds := []columnboundaries{boundary}
-	lower := []scm.Scmer{lookupValue}
 	result := scm.NewBool(false)
 	matches := 0
 
@@ -480,7 +479,7 @@ func (t *storageShard) scanLookupOne(lookupCol string, lookupValue scm.Scmer, re
 	mainCount := t.main_count
 	acidMode := currentTx != nil && currentTx.Mode == TxACID
 	var ids [8]uint32
-	t.iterateIndexForce(currentTx, runtimeScanAccess(bounds), lower, lookupValue, len(t.inserts), ids[:], true, func(batch []uint32) bool {
+	t.iterateIndexForce(currentTx, runtimeScanAccess(bounds), len(t.inserts), ids[:], true, func(batch []uint32) bool {
 		for _, recid := range batch {
 			var actual scm.Scmer
 			if recid < mainCount {
@@ -620,7 +619,7 @@ func (t *storageShard) scanLookupMany(bounds boundaries, lookupValues []scm.Scme
 	mainCount := t.main_count
 	acidMode := currentTx != nil && currentTx.Mode == TxACID
 	var ids [8]uint32
-	t.iterateIndexForce(currentTx, runtimeScanAccess(bounds), lookupValues, lookupValues[len(lookupValues)-1], len(t.inserts), ids[:], true, func(batch []uint32) bool {
+	t.iterateIndexForce(currentTx, runtimeScanAccess(bounds), len(t.inserts), ids[:], true, func(batch []uint32) bool {
 		if stop.Load() {
 			return false
 		}
@@ -744,7 +743,7 @@ func (t *storageShard) scanLookupMapMany(bounds boundaries, lookupValues []scm.S
 	mainCount := t.main_count
 	acidMode := currentTx != nil && currentTx.Mode == TxACID
 	var ids [8]uint32
-	t.iterateIndexForce(currentTx, runtimeScanAccess(bounds), lookupValues, lookupValues[len(lookupValues)-1], len(t.inserts), ids[:], true, func(batch []uint32) bool {
+	t.iterateIndexForce(currentTx, runtimeScanAccess(bounds), len(t.inserts), ids[:], true, func(batch []uint32) bool {
 		if stop.Load() {
 			return false
 		}

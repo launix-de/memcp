@@ -81,11 +81,10 @@ func TestEstimateFilteredRowsRecognizesCompleteCappedIndexRange(t *testing.T) {
 	})
 	shard := tbl.ActiveShards()[0]
 	bounds := extractBoundaries(cols[:1], condition)
-	lower, upperLast := indexFromBoundaries(bounds)
 	var buf [16]uint32
 	for range 2 {
 		shard.mu.RLock()
-		shard.iterateIndex(nil, runtimeScanAccess(bounds), lower, upperLast, len(shard.inserts), buf[:], 1, nil,
+		shard.iterateIndex(nil, runtimeScanAccess(bounds), len(shard.inserts), buf[:], 1, nil,
 			func([]uint32) bool { return true })
 		shard.mu.RUnlock()
 	}
@@ -124,10 +123,9 @@ func TestScanSelectivityEstimateScalesIndexCandidatesByShardPopulation(t *testin
 	shard := tbl.ActiveShards()[0]
 	for range 2 {
 		bounds := extractBoundaries([]string{"tenant"}, condition)
-		lower, upperLast := indexFromBoundaries(bounds)
 		var buf [128]uint32
 		shard.mu.RLock()
-		shard.iterateIndex(nil, runtimeScanAccess(bounds), lower, upperLast, len(shard.inserts), buf[:], 100, nil,
+		shard.iterateIndex(nil, runtimeScanAccess(bounds), len(shard.inserts), buf[:], 100, nil,
 			func([]uint32) bool { return true })
 		shard.mu.RUnlock()
 	}

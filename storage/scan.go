@@ -30,8 +30,6 @@ type scanError struct {
 	stack string
 }
 
-const scanAnalyzeScratchCapacity = 8
-
 const scanAccessSchemaHeaderSize = 1
 const scanAccessBoundaryStride = 4
 
@@ -111,16 +109,11 @@ func decodeScanAccessHeader(value scm.Scmer) (scanAccessSchemaMeta, bool) {
 
 var emptyScanAccessSchema = newScanAccessSchema(scanAccessConsumerScan, nil, -1)
 
-// scanAnalyzeScratch owns the short-lived physical analyzer output until all
-// parallel shard consumers have completed. A pool is preferable to a caller
-// stack array here: the shard callback escapes into goroutines, which would
-// force the complete stack array onto the heap on every scan. Most SQL scans
-// fit in these inline buffers; unusual wide predicates retain the ordinary
-// append fallback without changing analyzer semantics.
+// scanAnalyzeScratch owns invocation-local bindings which must remain valid
+// until all shard consumers have completed. Compiled schema and values remain
+// borrowed; only optional runtime overlays and batch coordinates live here.
 type scanAnalyzeScratch struct {
-	runtime         scanAccessRuntime
-	batchBoundaries [scanAnalyzeScratchCapacity]columnboundaries
-	lower           [scanAnalyzeScratchCapacity]scm.Scmer
+	runtime scanAccessRuntime
 }
 
 var scanAnalyzeScratchPool = sync.Pool{
@@ -133,8 +126,6 @@ func acquireScanAnalyzeScratch() *scanAnalyzeScratch {
 
 func releaseScanAnalyzeScratch(scratch *scanAnalyzeScratch) {
 	scratch.runtime = scanAccessRuntime{}
-	clear(scratch.batchBoundaries[:])
-	clear(scratch.lower[:])
 	scanAnalyzeScratchPool.Put(scratch)
 }
 
@@ -1413,14 +1404,16 @@ func (t *table) scanExistsFrom(currentTx *TxContext, source *recSet, accessSchem
 		defer releaseScanAnalyzeScratch(scratch)
 		access = access.useScratch(scratch)
 	}
-	var lowerStorage []scm.Scmer
-	if scratch != nil {
-		lowerStorage = scratch.lower[:0]
-	}
-	lower, upperLast := indexFromScanAccessInto(lowerStorage, access)
 	for i := 0; i < access.len(); i++ {
 		b := access.boundary(i)
 		t.AddPartitioningScore([]string{b.col})
+	}
+	if topology, shard, single := t.pinSingleShardForScan(access); single {
+		found, scanErr := runDirectSingleShardExists(currentTx, topology, shard, access, conditionCols, condition, ss, querySeq)
+		if scanErr.r != nil {
+			panic(scanErr)
+		}
+		return found
 	}
 
 	values := scanResultCollector{channelSize: t.shardResultBufferSize()}
@@ -1440,7 +1433,7 @@ func (t *table) scanExistsFrom(currentTx *TxContext, source *recSet, accessSchem
 		if ss != nil && ss.IsKilledSeq(querySeq) {
 			panic("query killed")
 		}
-		if s.scanExists(access, lower, upperLast, conditionCols, condition, currentTx, ss, &found) {
+		if s.scanExists(access, conditionCols, condition, currentTx, ss, &found) {
 			found.Store(true)
 			values.send(solo, scanResult{outCount: 1})
 			return
@@ -1467,6 +1460,28 @@ func (t *table) scanExistsFrom(currentTx *TxContext, source *recSet, accessSchem
 	return found.Load()
 }
 
+func runDirectSingleShardExists(currentTx *TxContext, topology *tableShardTopology, shard *storageShard, access scanAccess, conditionCols []string, condition scm.Scmer, ss *scm.SessionState, querySeq uint64) (found bool, scanErr scanError) {
+	defer topology.releaseOperation()
+	defer shard.activeScanners.Add(-1)
+	release := shard.acquireReadForScan(currentTx)
+	defer release()
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			scanErr = scanError{recovered, string(debug.Stack())}
+		}
+	}()
+	if ss != nil && ss.IsKilledSeq(querySeq) {
+		panic("query killed")
+	}
+	if scm.Trace == nil {
+		return shard.scanExists(access, conditionCols, condition, currentTx, ss, nil), scanError{}
+	}
+	scm.Trace.Duration(fmt.Sprintf("%p", shard), "shard", func() {
+		found = shard.scanExists(access, conditionCols, condition, currentTx, ss, nil)
+	})
+	return found, scanError{}
+}
+
 // Fused map-reduce implementation based on Scheme callbacks.
 func (t *table) scan(currentTx *TxContext, accessSchema scm.Scmer, accessValues []scm.Scmer, conditionCols []string, condition scm.Scmer, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, combine scm.Scmer, isOuter bool) scm.Scmer {
 	return t.scanWithBatchFrom(currentTx, nil, accessSchema, accessValues, scanAccess{}, conditionCols, condition, callbackCols, mapReduce, neutral, combine, isOuter, 0, nil)
@@ -1474,6 +1489,30 @@ func (t *table) scan(currentTx *TxContext, accessSchema scm.Scmer, accessValues 
 
 func (t *table) scanWithBatch(currentTx *TxContext, accessSchema scm.Scmer, accessValues []scm.Scmer, conditionCols []string, condition scm.Scmer, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, combine scm.Scmer, isOuter bool, stride int, batchdata []scm.Scmer) scm.Scmer {
 	return t.scanWithBatchFrom(currentTx, nil, accessSchema, accessValues, scanAccess{}, conditionCols, condition, callbackCols, mapReduce, neutral, combine, isOuter, stride, batchdata)
+}
+
+func runDirectSingleShardScan(currentTx *TxContext, topology *tableShardTopology, shard *storageShard, access scanAccess, conditionCols []string, condition scm.Scmer, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, stride int, batchdata []scm.Scmer, ss *scm.SessionState, querySeq uint64) (result scanResult) {
+	defer topology.releaseOperation()
+	defer shard.activeScanners.Add(-1)
+	release := shard.acquireReadForScan(currentTx)
+	defer release()
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			result = scanResult{err: scanError{recovered, string(debug.Stack())}}
+		}
+	}()
+	if ss != nil && ss.IsKilledSeq(querySeq) {
+		panic("query killed")
+	}
+	if scm.Trace == nil {
+		result.res, result.outCount, result.candidateCount = shard.scan(access, conditionCols, condition, callbackCols, mapReduce, neutral, stride, batchdata, currentTx, ss)
+	} else {
+		scm.Trace.Duration(fmt.Sprintf("%p", shard), "shard", func() {
+			result.res, result.outCount, result.candidateCount = shard.scan(access, conditionCols, condition, callbackCols, mapReduce, neutral, stride, batchdata, currentTx, ss)
+		})
+	}
+	result.inputCount = int64(shard.Count())
+	return result
 }
 
 func (t *table) scanWithBatchFrom(currentTx *TxContext, source *recSet, accessSchema scm.Scmer, accessValues []scm.Scmer, requiredAccess scanAccess, conditionCols []string, condition scm.Scmer, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, combine scm.Scmer, isOuter bool, stride int, batchdata []scm.Scmer) scm.Scmer {
@@ -1529,18 +1568,14 @@ func (t *table) scanWithBatchFrom(currentTx *TxContext, source *recSet, accessSc
 		defer releaseScanAnalyzeScratch(scratch)
 		access = access.useScratch(scratch)
 	}
-	var lowerStorage []scm.Scmer
-	if scratch != nil {
-		lowerStorage = scratch.lower[:0]
-	}
-	lower, upperLast := indexFromScanAccessInto(lowerStorage, access)
 	if Settings.ScanDebugging {
 		dbg := fmt.Sprintf("[SCAN] %s.%s", t.schema.Name, t.Name)
 		for i := 0; i < access.len(); i++ {
 			b := access.boundary(i)
 			dbg += fmt.Sprintf(" %s:[%v..%v]", b.col, b.lower, b.upper)
 		}
-		dbg += fmt.Sprintf(" lower=%v upper=%v", lower, upperLast)
+		indexBounds := newScanIndexBounds(access)
+		dbg += fmt.Sprintf(" lower-count=%d upper=%v", indexBounds.len(), indexBounds.upperLast())
 		fmt.Println(dbg)
 	}
 	// give sharding hints
@@ -1555,72 +1590,84 @@ func (t *table) scanWithBatchFrom(currentTx *TxContext, source *recSet, accessSc
 	var outCount int64
 	var inputCount int64
 	var candidateCount int64
-	values := scanResultCollector{channelSize: t.shardResultBufferSize()}
-	done := t.iterateShardsParallel(currentTx, access, func(s *storageShard, solo bool) {
-		defer func() {
-			if r := recover(); r != nil {
-				values.send(solo, scanResult{err: scanError{r, string(debug.Stack())}})
-			}
-		}()
-		// Cancellation contract: check only at the scheduling boundary, before entering
-		// the shard. Once entered, a shard runs atomically without cancellation checks.
-		if ss != nil && ss.IsKilledSeq(querySeq) {
-			panic("query killed")
-		}
-		res, shardOutCount, shardCandidateCount := s.scan(access, lower, upperLast, conditionCols, condition, callbackCols, mapReduce, neutral, stride, batchdata, currentTx, ss)
-		values.send(solo, scanResult{res: res, outCount: shardOutCount, inputCount: int64(s.Count()), candidateCount: shardCandidateCount})
-	})
-	values.finish(done)
-
 	akkumulator := neutral
 	hadValue := false
 	var scanErr scanError
-	if !combine.IsNil() {
-		fn := scm.OptimizeProcToSerialFunction(combine)
-		for msg, ok := values.next(); ok; msg, ok = values.next() {
-			if msg.err.r != nil {
-				if scanErr.r == nil {
-					scanErr = msg.err
-				}
-				continue
-			}
-			if scanErr.r != nil {
-				continue
-			}
-			inputCount += msg.inputCount
-			candidateCount += msg.candidateCount
-			outCount += msg.outCount
+	if topology, shard, single := t.pinSingleShardForScan(access); single {
+		msg := runDirectSingleShardScan(currentTx, topology, shard, access, conditionCols, condition, callbackCols, mapReduce, neutral, stride, batchdata, ss, querySeq)
+		if msg.err.r != nil {
+			scanErr = msg.err
+		} else {
+			inputCount = msg.inputCount
+			candidateCount = msg.candidateCount
+			outCount = msg.outCount
 			if msg.outCount > 0 {
-				akkumulator = fn(akkumulator, msg.res)
 				hadValue = true
+				if !combine.IsNil() {
+					akkumulator = scm.OptimizeProcToSerialFunction(combine)(akkumulator, msg.res)
+				}
 			}
-		}
-		if scanErr.r == nil && !hadValue && isOuter {
-			nullArgs := make([]scm.Scmer, len(callbackCols)+1)
-			nullArgs[0] = akkumulator
-			akkumulator = scm.Apply(mapReduce, nullArgs...)
 		}
 	} else {
-		for msg, ok := values.next(); ok; msg, ok = values.next() {
-			if msg.err.r != nil {
-				if scanErr.r == nil {
-					scanErr = msg.err
+		values := scanResultCollector{channelSize: t.shardResultBufferSize()}
+		done := t.iterateShardsParallel(currentTx, access, func(s *storageShard, solo bool) {
+			defer func() {
+				if r := recover(); r != nil {
+					values.send(solo, scanResult{err: scanError{r, string(debug.Stack())}})
 				}
-				continue
+			}()
+			// Cancellation contract: check only at the scheduling boundary, before entering
+			// the shard. Once entered, a shard runs atomically without cancellation checks.
+			if ss != nil && ss.IsKilledSeq(querySeq) {
+				panic("query killed")
 			}
-			if scanErr.r != nil {
-				continue
+			res, shardOutCount, shardCandidateCount := s.scan(access, conditionCols, condition, callbackCols, mapReduce, neutral, stride, batchdata, currentTx, ss)
+			values.send(solo, scanResult{res: res, outCount: shardOutCount, inputCount: int64(s.Count()), candidateCount: shardCandidateCount})
+		})
+		values.finish(done)
+
+		if !combine.IsNil() {
+			fn := scm.OptimizeProcToSerialFunction(combine)
+			for msg, ok := values.next(); ok; msg, ok = values.next() {
+				if msg.err.r != nil {
+					if scanErr.r == nil {
+						scanErr = msg.err
+					}
+					continue
+				}
+				if scanErr.r != nil {
+					continue
+				}
+				inputCount += msg.inputCount
+				candidateCount += msg.candidateCount
+				outCount += msg.outCount
+				if msg.outCount > 0 {
+					akkumulator = fn(akkumulator, msg.res)
+					hadValue = true
+				}
 			}
-			inputCount += msg.inputCount
-			candidateCount += msg.candidateCount
-			outCount += msg.outCount
-			hadValue = hadValue || msg.outCount > 0
+		} else {
+			for msg, ok := values.next(); ok; msg, ok = values.next() {
+				if msg.err.r != nil {
+					if scanErr.r == nil {
+						scanErr = msg.err
+					}
+					continue
+				}
+				if scanErr.r != nil {
+					continue
+				}
+				inputCount += msg.inputCount
+				candidateCount += msg.candidateCount
+				outCount += msg.outCount
+				hadValue = hadValue || msg.outCount > 0
+			}
 		}
-		if scanErr.r == nil && !hadValue && isOuter {
-			nullArgs := make([]scm.Scmer, len(callbackCols)+1)
-			nullArgs[0] = akkumulator
-			akkumulator = scm.Apply(mapReduce, nullArgs...)
-		}
+	}
+	if scanErr.r == nil && !hadValue && isOuter {
+		nullArgs := make([]scm.Scmer, len(callbackCols)+1)
+		nullArgs[0] = akkumulator
+		akkumulator = scm.Apply(mapReduce, nullArgs...)
 	}
 	if scanErr.r != nil {
 		panic(scanErr)
@@ -1631,26 +1678,18 @@ func (t *table) scanWithBatchFrom(currentTx *TxContext, source *recSet, accessSc
 		// Boundaries may live in pooled scan scratch. Encode them before the
 		// asynchronous logger starts so no reference outlives this scan.
 		indexColsEnc := scanAccessIndexCols(access)
-		go func(anNs, exNs int64, indexColsEnc string) {
-			defer func() { _ = recover() }()
-			filterEnc := ""
-			if proc, ok := condition.Any().(scm.Proc); ok {
-				var params []scm.Scmer
-				if proc.Params.IsSlice() {
-					params = proc.Params.Slice()
-				} else if arr, ok := proc.Params.Any().([]scm.Scmer); ok {
-					params = arr
-				}
-				filterEnc = encodeScmerToString(proc.Body, conditionCols, params)
-			}
-			safeLogScan(t.schema.Name, t.Name, false, filterEnc, "", indexColsEnc, inputCount, candidateCount, outCount, anNs, exNs)
-		}(analyzeNs, execNs, indexColsEnc)
+		enqueueScanLog(scanLogEvent{
+			schema: t.schema.Name, table: t.Name, indexCols: indexColsEnc,
+			inputCount: inputCount, candidateCount: candidateCount, outputCount: outCount,
+			analyzeNs: analyzeNs, execNs: execNs, condition: condition,
+			conditionCols: conditionCols, encodeCondition: true,
+		})
 	}
 	return akkumulator
 }
 
-func (t *storageShard) scanExists(boundaries scanAccess, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, currentTx *TxContext, ss *scm.SessionState, stop *atomic.Bool) bool {
-	_, found := t.scanFirstRecord(boundaries, lower, upperLast, conditionCols, condition, currentTx, ss, stop)
+func (t *storageShard) scanExists(boundaries scanAccess, conditionCols []string, condition scm.Scmer, currentTx *TxContext, ss *scm.SessionState, stop *atomic.Bool) bool {
+	_, found := t.scanFirstRecord(boundaries, conditionCols, condition, currentTx, ss, stop)
 	return found
 }
 
@@ -1788,7 +1827,7 @@ func (t *storageShard) filterVisibleBatchedScanBatch(batch []uint32, batchIDs []
 	return outN
 }
 
-func (t *storageShard) scanFirstRecord(boundaries scanAccess, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, currentTx *TxContext, ss *scm.SessionState, stop *atomic.Bool) (uint32, bool) {
+func (t *storageShard) scanFirstRecord(boundaries scanAccess, conditionCols []string, condition scm.Scmer, currentTx *TxContext, ss *scm.SessionState, stop *atomic.Bool) (uint32, bool) {
 	if ss == nil {
 		ss = SessionStateFromTx(currentTx)
 	}
@@ -1800,7 +1839,7 @@ func (t *storageShard) scanFirstRecord(boundaries scanAccess, lower []scm.Scmer,
 	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
 	t.ensureMainCount(skipShardReadLock)
 	t.ensureScanAccessColumns(boundaries, skipShardReadLock, currentTx)
-	recsetBoundaryCoversCondition := recSetHooksCoverCondition(boundaries, lower, t.t, conditionCols, condition)
+	recsetBoundaryCoversCondition := recSetHooksCoverCondition(boundaries, t.t, conditionCols, condition)
 
 	var ccols []ColumnStorage
 	var cReaders []ColumnReader
@@ -1859,7 +1898,7 @@ func (t *storageShard) scanFirstRecord(boundaries scanAccess, lower []scm.Scmer,
 
 	buf, pooledFullBuf, pooledPointBuf := acquireScanIDBuffer(uniquePointScanBufferSize)
 	defer releaseScanIDBuffer(pooledFullBuf, pooledPointBuf)
-	t.iterateIndex(currentTx, boundaries, lower, upperLast, maxInsertIndex, buf, 1, nil, func(batch []uint32) bool {
+	t.iterateIndex(currentTx, boundaries, maxInsertIndex, buf, 1, nil, func(batch []uint32) bool {
 		if stop != nil && stop.Load() {
 			return false
 		}
@@ -1950,9 +1989,9 @@ func (t *storageShard) scanFirstRecord(boundaries scanAccess, lower []scm.Scmer,
 	return foundID, found
 }
 
-func (t *storageShard) scan(boundaries scanAccess, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, stride int, batchdata []scm.Scmer, currentTx *TxContext, ss *scm.SessionState) (scm.Scmer, int64, int64) {
+func (t *storageShard) scan(boundaries scanAccess, conditionCols []string, condition scm.Scmer, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, stride int, batchdata []scm.Scmer, currentTx *TxContext, ss *scm.SessionState) (scm.Scmer, int64, int64) {
 	if stride > 0 {
-		return t.scanBatch(boundaries, lower, upperLast, conditionCols, condition, callbackCols, mapReduce, neutral, stride, batchdata, currentTx, ss)
+		return t.scanBatch(boundaries, conditionCols, condition, callbackCols, mapReduce, neutral, stride, batchdata, currentTx, ss)
 	}
 	akkumulator := neutral
 	var outCount int64
@@ -2064,7 +2103,7 @@ func (t *storageShard) scan(boundaries scanAccess, lower []scm.Scmer, upperLast 
 		}
 	}
 	skipShardReadLock := ownsWrite || lockMutationExclusively
-	recsetBoundaryCoversCondition := recSetHooksCoverCondition(boundaries, lower, t.t, conditionCols, condition)
+	recsetBoundaryCoversCondition := recSetHooksCoverCondition(boundaries, t.t, conditionCols, condition)
 
 	// condition column readers
 	var ccols []ColumnStorage
@@ -2095,10 +2134,11 @@ func (t *storageShard) scan(boundaries scanAccess, lower []scm.Scmer, upperLast 
 
 	// MapReducer for the fused callback phase (builds column readers internally)
 	var mapperStorage ShardMapReducer
-	var mapperWorkspace shardMapReducerWorkspace
 	mapper := &mapperStorage
 	if mapReducerCanUseReadWorkspace(callbackCols) {
-		prepareReadMapReducerStorage(&mapperStorage, &mapperWorkspace, len(callbackCols))
+		mapperWorkspace := acquireShardMapReducerWorkspace()
+		defer releaseShardMapReducerWorkspace(mapperWorkspace)
+		prepareReadMapReducerStorage(&mapperStorage, mapperWorkspace, len(callbackCols))
 		t.initReadMapReducer(&mapperStorage, callbackCols, mapReduce, skipShardReadLock, currentTx)
 	} else {
 		mapper = t.OpenMapReducer(callbackCols, mapReduce, skipShardReadLock, 0, nil, currentTx)
@@ -2149,7 +2189,7 @@ func (t *storageShard) scan(boundaries scanAccess, lower []scm.Scmer, upperLast 
 	defer releaseScanIDBuffer(pooledFullBuf, pooledPointBuf)
 	hadValue := false
 
-	t.iterateIndex(currentTx, boundaries, lower, upperLast, maxInsertIndex, buf, 1, nil, func(batch []uint32) bool {
+	t.iterateIndex(currentTx, boundaries, maxInsertIndex, buf, 1, nil, func(batch []uint32) bool {
 		candidateCount += int64(len(batch))
 		outN := t.filterVisibleScanBatch(batch, visibleUpper, hasMutationCallback, currentTx, mutationSeen)
 		if !conditionAlwaysTrue && outN > 0 {
@@ -2288,7 +2328,7 @@ func (t *storageShard) hasOrderedScanProxy(cols []string, currentTx *TxContext) 
 	return false
 }
 
-func (t *storageShard) scanBatch(boundaries scanAccess, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, stride int, batchdata []scm.Scmer, currentTx *TxContext, ss *scm.SessionState) (scm.Scmer, int64, int64) {
+func (t *storageShard) scanBatch(boundaries scanAccess, conditionCols []string, condition scm.Scmer, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, stride int, batchdata []scm.Scmer, currentTx *TxContext, ss *scm.SessionState) (scm.Scmer, int64, int64) {
 	akkumulator := neutral
 	var outCount int64
 	var candidateCount int64
@@ -2328,7 +2368,7 @@ func (t *storageShard) scanBatch(boundaries scanAccess, lower []scm.Scmer, upper
 	skipShardReadLock := ownsWrite || lockMutationExclusively
 	t.ensureMainCount(skipShardReadLock)
 	t.ensureScanAccessColumns(boundaries, skipShardReadLock, currentTx)
-	recsetBoundaryCoversCondition := recSetHooksCoverCondition(boundaries, lower, t.t, conditionCols, condition)
+	recsetBoundaryCoversCondition := recSetHooksCoverCondition(boundaries, t.t, conditionCols, condition)
 
 	var ccols []ColumnStorage
 	var cReaders []ColumnReader
@@ -2367,10 +2407,11 @@ func (t *storageShard) scanBatch(boundaries scanAccess, lower []scm.Scmer, upper
 	}
 
 	var mapperStorage ShardMapReducer
-	var mapperWorkspace shardMapReducerWorkspace
 	mapper := &mapperStorage
-	if stride == 0 && mapReducerCanUseReadWorkspace(callbackCols) {
-		prepareReadMapReducerStorage(&mapperStorage, &mapperWorkspace, len(callbackCols))
+	if mapReducerCanUseReadWorkspace(callbackCols) {
+		mapperWorkspace := acquireShardMapReducerWorkspace()
+		defer releaseShardMapReducerWorkspace(mapperWorkspace)
+		prepareReadMapReducerStorage(&mapperStorage, mapperWorkspace, len(callbackCols))
 		t.initReadMapReducer(&mapperStorage, callbackCols, mapReduce, skipShardReadLock, currentTx)
 	} else {
 		mapper = t.OpenMapReducer(callbackCols, mapReduce, skipShardReadLock, stride, batchdata, currentTx)
@@ -2408,28 +2449,16 @@ func (t *storageShard) scanBatch(boundaries scanAccess, lower []scm.Scmer, upper
 	var batchBuf [1024]uint32
 	hadValue := false
 	batchCount := len(batchdata) / stride
-	batchBoundaries := hasBatchScanAccess(boundaries)
-	var batchAccessScratch *scanAnalyzeScratch
-	if batchBoundaries {
-		batchAccessScratch = acquireScanAnalyzeScratch()
-		defer releaseScanAnalyzeScratch(batchAccessScratch)
-	}
-	activeBoundaries := scanAccess{plannerFilterCovered: scanAccessCoversResidual(boundaries)}
-
+	batchAccessScratch := acquireScanAnalyzeScratch()
+	defer releaseScanAnalyzeScratch(batchAccessScratch)
+	boundaries = boundaries.useScratch(batchAccessScratch)
 	for batchid := 0; batchid < batchCount; batchid++ {
 		if boundaries.impossibleBatch(stride, batchdata, batchid) {
 			continue
 		}
-		currentBoundaries := boundaries
-		activeLower := lower
-		activeUpperLast := upperLast
-		if batchBoundaries {
-			activeBoundaries.native = materializeBatchScanAccessInto(batchAccessScratch.batchBoundaries[:0], boundaries, stride, batchdata, uint32(batchid))
-			currentBoundaries = activeBoundaries
-			activeLower, activeUpperLast = indexFromScanAccessInto(batchAccessScratch.lower[:0], currentBoundaries)
-		}
+		currentBoundaries := boundaries.withBatch(stride, batchdata, batchid)
 
-		t.iterateIndex(currentTx, currentBoundaries, activeLower, activeUpperLast, maxInsertIndex, buf, 1, nil, func(batch []uint32) bool {
+		t.iterateIndex(currentTx, currentBoundaries, maxInsertIndex, buf, 1, nil, func(batch []uint32) bool {
 			candidateCount += int64(len(batch))
 			outN := t.filterVisibleBatchedScanBatch(batch, batchBuf[:], uint32(batchid), visibleUpper, hasMutationCallback, currentTx, mutationSeen)
 			if !conditionAlwaysTrue {

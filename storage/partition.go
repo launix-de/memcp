@@ -146,6 +146,85 @@ func runSingleShardScan(currentTx *TxContext, topology *tableShardTopology, shar
 	}
 }
 
+// pinSingleShardForScan returns a registered authoritative shard only when the
+// access resolves to exactly one shard. It deliberately avoids building the
+// relevant-shard slice used by the fanout path, allowing concrete scan kernels
+// to execute without an escaping callback frame.
+func (t *table) pinSingleShardForScan(access scanAccess) (*tableShardTopology, *storageShard, bool) {
+	for {
+		topology := t.activeTopology()
+		shard, single := singleRelevantShard(topology.dimensions, access, topology.shards)
+		if !single {
+			return nil, nil, false
+		}
+		if !topology.acquireOperation() {
+			continue
+		}
+		shard.activeScanners.Add(1)
+		if t.topology.Load() == topology {
+			return topology, shard, true
+		}
+		shard.activeScanners.Add(-1)
+		topology.releaseOperation()
+	}
+}
+
+func singleRelevantShard(schema []shardDimension, access scanAccess, shards []*storageShard) (*storageShard, bool) {
+	var first *storageShard
+	count := 0
+	countRelevantShards(schema, access, shards, &first, &count)
+	return first, count == 1
+}
+
+func countRelevantShards(schema []shardDimension, access scanAccess, shards []*storageShard, first **storageShard, count *int) {
+	if *count > 1 {
+		return
+	}
+	if len(schema) == 0 {
+		for _, shard := range shards {
+			if shard == nil {
+				continue
+			}
+			if *count == 0 {
+				*first = shard
+			}
+			*count = *count + 1
+			if *count > 1 {
+				return
+			}
+		}
+		return
+	}
+	blockdim := 1
+	for i := 1; i < len(schema); i++ {
+		blockdim *= schema[i].NumPartitions
+	}
+	for boundaryIndex := 0; boundaryIndex < access.len(); boundaryIndex++ {
+		boundary := access.boundary(boundaryIndex)
+		if boundary.col != schema[0].Column {
+			continue
+		}
+		minimum := 0
+		if !boundary.lower.IsNil() {
+			minimum = partitionForValue(schema[0], boundary.lower)
+			if !boundary.lowerInclusive && valueEqualsPivot(schema[0], minimum, boundary.lower) {
+				minimum++
+			}
+		}
+		maximum := schema[0].NumPartitions - 1
+		if !boundary.upper.IsNil() {
+			maximum = partitionForValue(schema[0], boundary.upper)
+		}
+		for partition := minimum; partition <= maximum; partition++ {
+			countRelevantShards(schema[1:], access, shards[partition*blockdim:(partition+1)*blockdim], first, count)
+		}
+		return
+	}
+	for offset := 0; offset < len(shards); offset += blockdim {
+		countRelevantShards(schema[1:], access, shards[offset:offset+blockdim], first, count)
+	}
+}
+
 func runParallelShardScans(currentTx *TxContext, shards []*storageShard, topology *tableShardTopology, callback func(*storageShard, bool)) <-chan struct{} {
 	return runFanoutTasks(currentTx, len(shards), func(i int, _ bool) {
 		shard := shards[i]

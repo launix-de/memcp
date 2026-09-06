@@ -121,3 +121,25 @@ func BenchmarkScanFamilyFixedCosts(b *testing.B) {
 		})
 	}
 }
+
+// BenchmarkScanBatchCoveredFixedCosts isolates the steady-state setup of a
+// planner-covered batch scan. Its access schema, batch values and column lists
+// are retained exactly as they are in a cached physical plan.
+func BenchmarkScanBatchCoveredFixedCosts(b *testing.B) {
+	tbl := benchScanTable(b, "batch_covered")
+	accessSchema := newScanAccessSchema(scanAccessConsumerCoveredScan, nil, -1)
+	trueFn := scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewBool(true) })
+	mapReduceFn := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[0] })
+	callbackCols := []string{"id"}
+	batchdata := []scm.Scmer{scm.NewInt(1)}
+	neutral := scm.NewNil()
+	tbl.scanWithBatch(nil, accessSchema, nil, nil, trueFn, callbackCols, mapReduceFn,
+		neutral, neutral, false, 1, batchdata)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		tbl.scanWithBatch(nil, accessSchema, nil, nil, trueFn, callbackCols, mapReduceFn,
+			neutral, neutral, false, 1, batchdata)
+	}
+}

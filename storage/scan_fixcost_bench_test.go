@@ -205,6 +205,45 @@ func BenchmarkScanUniquePointCompiledAccessWithTx(b *testing.B) {
 	}
 }
 
+// BenchmarkScanUniquePointCoveredCompiledAccessWithTx models the physical
+// shape emitted after compile_scan_plan proves an exact point predicate. All
+// immutable argument slices are prepared outside the timed loop, so this
+// reports storage execution allocations rather than caller construction.
+func BenchmarkScanUniquePointCoveredCompiledAccessWithTx(b *testing.B) {
+	dbName := "bench_scan_point_covered_compiled"
+	databases.Remove(dbName)
+	b.Cleanup(func() { databases.Remove(dbName) })
+	CreateDatabase(dbName, true)
+	tbl, _ := CreateTable(dbName, "items", Memory, true)
+	tbl.CreateColumn("id", "INT", nil, nil)
+	tbl.CreateColumn("label", "VARCHAR", nil, nil)
+	rows := make([][]scm.Scmer, 1024)
+	for i := range rows {
+		rows[i] = []scm.Scmer{scm.NewInt(int64(i)), scm.NewString("value")}
+	}
+	tbl.Insert([]string{"id", "label"}, rows, nil, scm.NewNil(), false, nil)
+	tbl.Unique = append(tbl.Unique, uniqueKey{Id: "PRIMARY", Cols: []string{"id"}})
+	tx := NewTxContext(TxCursorStability)
+	condition := scanCondition("id", scm.NewInt(511))
+	mapReduceFn := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return a[1] })
+	schema := scm.NewSlice([]scm.Scmer{
+		newScanAccessHeader(1, scanAccessConsumerCoveredScan, 0, -1), scm.NewString("equal"),
+		scm.NewString("id"), newScanAccessBoundaryMeta(0, 0, 3), scm.NewString(""),
+	})
+	values := []scm.Scmer{scm.NewInt(511)}
+	conditionCols := []string{"id"}
+	callbackCols := []string{"label"}
+	tbl.scanWithBatchFrom(tx, nil, schema, values, scanAccess{}, conditionCols, condition, callbackCols, mapReduceFn,
+		scm.NewNil(), scm.NewNil(), false, 0, nil)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		tbl.scanWithBatchFrom(tx, nil, schema, values, scanAccess{}, conditionCols, condition, callbackCols, mapReduceFn,
+			scm.NewNil(), scm.NewNil(), false, 0, nil)
+	}
+}
+
 func benchmarkUniqueMainPointScan(b *testing.B, name string, currentTx *TxContext) {
 	dbName := "bench_scan_main_point_" + name
 	databases.Remove(dbName)
