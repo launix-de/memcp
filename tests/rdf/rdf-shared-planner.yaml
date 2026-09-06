@@ -1,0 +1,34 @@
+# Architectural contract tests for lowering SPARQL into the common query IR.
+
+metadata:
+  version: "1.0"
+  description: "SPARQL basic graph patterns use the shared query planner IR"
+  isolated: true
+
+setup: []
+
+test_cases:
+  - name: "Basic graph pattern lowers to query-block with relational modifiers"
+    scm: |
+      (begin
+        (define fail (lambda (msg) (error (concat "rdf shared planner: " msg))))
+        (define parsed (rdf_query
+          "SELECT ?s, ?name WHERE { ?s a Person . ?s name ?name } ORDER BY ?name LIMIT 1"))
+        (if (not (rdf_shared_bgp_supported? parsed)) (fail "eligible BGP rejected"))
+        (define ast (rdf_shared_query_ast "memcp-tests" parsed '()))
+        (if (not (equal? (car ast) (quote query-block))) (fail "not a query-block"))
+        (if (not (equal? (count (qb_sources ast)) 2)) (fail "triple patterns not mapped to two sources"))
+        (if (not (equal? (qb_limit ast) 1)) (fail "LIMIT missing from query-block"))
+        (if (not (equal? (count (qb_order ast)) 1)) (fail "ORDER BY missing from query-block"))
+        (if (not (rdf_contains (concat (qb_where ast)) "equal??")) (fail "join predicate missing"))
+        true)
+
+  - name: "Algebra markers are not mistaken for triple patterns"
+    scm: |
+      (begin
+        (define parsed (rdf_query "SELECT ?x WHERE { BIND(\"hello\" AS ?x) }"))
+        (if (rdf_shared_bgp_supported? parsed)
+          (error "rdf shared planner: BIND marker classified as a triple")
+          true))
+
+cleanup: []
