@@ -206,6 +206,75 @@ func createDurabilityTestTable(t *testing.T, databaseName string, rows int) (*ta
 	return tbl, tbl.schema.persistence
 }
 
+func TestForcedDatabaseRebuildCompactsTransactionLog(t *testing.T) {
+	tbl, engine := createDurabilityTestTable(t, "ttxlogrebuild", 4)
+	db := tbl.schema
+	db.commitTransaction("completed-before-rebuild/1", true)
+	logPath := engine.(*FileStorage).path + transactionLogName + ".log"
+	before, err := os.Stat(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if errs := rebuildDatabaseAndCompact(db, true, false, false); len(errs) != 0 {
+		t.Fatalf("forced rebuild failed: %v", errs)
+	}
+	after, err := os.Stat(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Size() >= before.Size() {
+		t.Fatalf("transaction log did not shrink: before=%d after=%d", before.Size(), after.Size())
+	}
+	t.Logf("transaction log size: before=%d bytes after=%d bytes", before.Size(), after.Size())
+	if db.transactionCommitted("completed-before-rebuild/1") {
+		t.Fatal("rebuilt transaction remains in the commit authority")
+	}
+	db.closeTransactionLog()
+}
+
+func TestNonForcedDatabaseRebuildKeepsTransactionLogForColdShards(t *testing.T) {
+	tbl, engine := createDurabilityTestTable(t, "ttxlogcold", 4)
+	source := tbl.schema
+	if errs := rebuildDatabaseAndCompact(source, true, false, false); len(errs) != 0 {
+		t.Fatalf("fixture rebuild failed: %v", errs)
+	}
+	source.commitTransaction("needed-by-cold-generation/1", true)
+	source.closeTransactionLog()
+
+	db := newDatabase()
+	db.Name = "ttxlogcold"
+	db.persistence = engine
+	db.srState = COLD
+	db.ensureLoaded()
+	loaded := db.GetTable("items")
+	if loaded == nil {
+		t.Fatal("reloaded database has no items table")
+	}
+	for _, shard := range loaded.ActiveShards() {
+		shard.mu.RLock()
+		cold := shard.srState == COLD
+		shard.mu.RUnlock()
+		if !cold {
+			t.Fatal("fixture unexpectedly materialized a cold shard")
+		}
+	}
+
+	if errs := rebuildDatabaseAndCompact(db, false, false, false); len(errs) != 0 {
+		t.Fatalf("non-forced rebuild failed: %v", errs)
+	}
+	if !db.transactionCommitted("needed-by-cold-generation/1") {
+		t.Fatal("non-forced rebuild discarded the authority for an unreplayed cold WAL")
+	}
+	db.closeTransactionLog()
+
+	reloaded := newDatabase()
+	reloaded.persistence = engine
+	if !reloaded.transactionCommitted("needed-by-cold-generation/1") {
+		t.Fatal("cold-shard transaction authority was removed from disk")
+	}
+	reloaded.closeTransactionLog()
+}
+
 func callBuiltin(t *testing.T, name string, args ...scm.Scmer) scm.Scmer {
 	t.Helper()
 	fn, ok := scm.Globalenv.Vars[scm.Symbol(name)]

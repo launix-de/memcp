@@ -257,6 +257,64 @@ func (s *FileStorage) OpenLog(shard string) PersistenceLogfile {
 	return FileLogfile{f}
 }
 
+func (s *FileStorage) SwapLog(shard string, entries []interface{}, durable bool) PersistenceLogfile {
+	if err := os.MkdirAll(s.path, 0750); err != nil {
+		panic(err)
+	}
+	tmp, err := os.CreateTemp(s.path, "."+shard+".log.tmp-")
+	if err != nil {
+		panic(err)
+	}
+	tmpName := tmp.Name()
+	removeTmp := true
+	defer func() {
+		if removeTmp {
+			_ = os.Remove(tmpName)
+		}
+	}()
+
+	for _, entry := range entries {
+		if _, err := tmp.Write(encodeFileLogEntry(entry)); err != nil {
+			_ = tmp.Close()
+			panic(err)
+		}
+	}
+	if durable {
+		if err := tmp.Sync(); err != nil {
+			_ = tmp.Close()
+			panic(err)
+		}
+	}
+	if _, err := tmp.Seek(0, io.SeekEnd); err != nil {
+		_ = tmp.Close()
+		panic(err)
+	}
+	var dir *os.File
+	if durable {
+		dir, err = os.Open(s.path)
+		if err != nil {
+			_ = tmp.Close()
+			panic(err)
+		}
+	}
+	if err := os.Rename(tmpName, s.path+shard+".log"); err != nil {
+		if dir != nil {
+			_ = dir.Close()
+		}
+		_ = tmp.Close()
+		panic(err)
+	}
+	removeTmp = false
+	if dir != nil {
+		// PersistenceLogfile cannot report an ambiguous outcome after rename.
+		// Match the existing best-effort Sync contract while still issuing the
+		// directory barrier needed to persist the chosen complete generation.
+		_ = dir.Sync()
+		_ = dir.Close()
+	}
+	return FileLogfile{w: tmp}
+}
+
 func (s *FileStorage) ReplayLog(shard string) (map[string]struct{}, chan interface{}, PersistenceLogfile) {
 	os.MkdirAll(s.path, 0750)
 	f, err := os.OpenFile(s.path+shard+".log", os.O_RDWR|os.O_CREATE, 0750)
@@ -447,40 +505,41 @@ type FileLogfile struct {
 }
 
 func (w FileLogfile) Write(logentry interface{}) {
+	_, _ = w.w.Write(encodeFileLogEntry(logentry))
+}
+
+func encodeFileLogEntry(logentry interface{}) []byte {
+	var b bytes.Buffer
 	switch l := logentry.(type) {
 	case LogEntryDelete:
 		if l.txID != "" {
-			fmt.Fprintf(w.w, "delete-tx %s %d\n", l.txID, l.idx)
-			return
+			fmt.Fprintf(&b, "delete-tx %s %d\n", l.txID, l.idx)
+			break
 		}
-		var b bytes.Buffer
 		b.WriteString("delete ")
 		tmp, _ := json.Marshal(l.idx)
 		b.Write(tmp)
 		b.WriteString("\n")
-		w.w.Write(b.Bytes())
 	case LogEntryUndelete:
 		if l.txID != "" {
-			fmt.Fprintf(w.w, "undelete-tx %s %d\n", l.txID, l.idx)
-			return
+			fmt.Fprintf(&b, "undelete-tx %s %d\n", l.txID, l.idx)
+			break
 		}
-		var b bytes.Buffer
 		b.WriteString("undelete ")
 		tmp, _ := json.Marshal(l.idx)
 		b.Write(tmp)
 		b.WriteString("\n")
-		w.w.Write(b.Bytes())
 	case LogEntryInsert:
-		w.writeInsert("insert ", l.txID, l.cols, l.values)
+		encodeFileInsert(&b, "insert ", l.txID, l.cols, l.values)
 	case LogEntryInsertHidden:
-		w.writeInsert("insert-hidden ", l.txID, l.cols, l.values)
+		encodeFileInsert(&b, "insert-hidden ", l.txID, l.cols, l.values)
 	case LogEntryCommit:
-		fmt.Fprintf(w.w, "commit-tx %s %s\n", l.txID, fileCommitChecksum(l.txID))
+		fmt.Fprintf(&b, "commit-tx %s %s\n", l.txID, fileCommitChecksum(l.txID))
 	}
+	return b.Bytes()
 }
 
-func (w FileLogfile) writeInsert(prefix string, txID string, cols []string, values [][]scm.Scmer) {
-	var b bytes.Buffer
+func encodeFileInsert(b *bytes.Buffer, prefix string, txID string, cols []string, values [][]scm.Scmer) {
 	if txID == "" {
 		b.WriteString(prefix)
 	} else {
@@ -494,7 +553,6 @@ func (w FileLogfile) writeInsert(prefix string, txID string, cols []string, valu
 	tmp, _ = json.Marshal(values)
 	b.Write(tmp)
 	b.WriteString("\n")
-	w.w.Write(b.Bytes())
 }
 func (w FileLogfile) Sync() {
 	w.w.Sync()

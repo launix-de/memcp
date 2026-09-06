@@ -399,6 +399,51 @@ func (s *S3Storage) OpenLog(shard string) PersistenceLogfile {
 	return lf
 }
 
+func (s *S3Storage) SwapLog(shard string, entries []interface{}, durable bool) PersistenceLogfile {
+	s.ensureOpen()
+	oldSegments, err := listS3LogSegments(s, shard)
+	if err != nil {
+		panic(err)
+	}
+	var next uint32
+	for _, segment := range oldSegments {
+		if segment.seg >= next {
+			next = segment.seg + 1
+		}
+	}
+	var body bytes.Buffer
+	for _, entry := range entries {
+		body.Write(encodeS3LogEntry(entry))
+	}
+	key := s.key(fmt.Sprintf("%s.log.%08d", shard, next))
+	if _, err := s.client.PutObject(context.Background(), &s3.PutObjectInput{
+		Bucket: aws.String(s.factory.Bucket),
+		Key:    aws.String(key),
+		Body:   bytes.NewReader(body.Bytes()),
+	}); err != nil {
+		panic(err)
+	}
+	if err := writeS3LogManifest(s, shard, []uint32{next}); err != nil {
+		panic(err)
+	}
+	for _, segment := range oldSegments {
+		if segment.seg != next {
+			_, _ = s.client.DeleteObject(context.Background(), &s3.DeleteObjectInput{
+				Bucket: aws.String(s.factory.Bucket),
+				Key:    aws.String(segment.key),
+			})
+		}
+	}
+	return &S3Logfile{
+		s:               s,
+		shard:           shard,
+		seg:             next,
+		key:             key,
+		offset:          uint64(body.Len()),
+		flushEveryBytes: 256 * 1024,
+	}
+}
+
 func (s *S3Storage) ReplayLog(shard string) (map[string]struct{}, chan interface{}, PersistenceLogfile) {
 	s.ensureOpen()
 
