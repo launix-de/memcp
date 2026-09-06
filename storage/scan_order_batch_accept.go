@@ -220,6 +220,12 @@ func optimizeScanOrderBatchAccept(v []scm.Scmer, oc *scm.OptimizerContext, useRe
 			v[i], _ = oc.OptimizeSub(v[i], true)
 		}
 	}
+	if len(v) > 7 {
+		if schema, values, compiled := compileScanOrderAccess(v[3], v[4], v[6], v[7]); compiled {
+			v[3] = schema
+			v[4] = values
+		}
+	}
 	neutralType := unknownScanType()
 	if len(v) > neutralIdx {
 		v[neutralIdx], neutralType = oc.OptimizeSub(v[neutralIdx], true)
