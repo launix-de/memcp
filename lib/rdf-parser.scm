@@ -1246,16 +1246,23 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 		(rdf_expand_ttl_object subject pred obj)))))
 ))
 (define rdf_expand_ttl_collection (lambda (subject pred items)
-	(match items
-		'() (list (list subject pred "http://www.w3.org/1999/02/22-rdf-syntax-ns#nil"))
-		(cons item tail)
+	(if (equal? items '())
+		(list (list subject pred "http://www.w3.org/1999/02/22-rdf-syntax-ns#nil"))
 		(begin
-			(define head (concat "_:list_" (uuid)))
-			(merge (list
-				(list (list subject pred head))
-				(rdf_expand_ttl_object head "http://www.w3.org/1999/02/22-rdf-syntax-ns#first" item)
-				(rdf_expand_ttl_collection head "http://www.w3.org/1999/02/22-rdf-syntax-ns#rest" tail))))
-	)
+			/* Build the list from the tail. Besides avoiding deep recursion, this
+			keeps the intermediate list head in the reduction state so the JIT and
+			interpreter execute exactly the same ownership pattern. */
+			(define state (reduce (reverse items) (lambda (current item)
+				(match current '(next triples)
+					(begin
+						(define head (concat "_:list_" (uuid)))
+						(list head (merge (list
+							(rdf_expand_ttl_object head "http://www.w3.org/1999/02/22-rdf-syntax-ns#first" item)
+							(list (list head "http://www.w3.org/1999/02/22-rdf-syntax-ns#rest" next))
+							triples))))))
+				(list "http://www.w3.org/1999/02/22-rdf-syntax-ns#nil" '())))
+			(match state '(head triples)
+				(cons (list subject pred head) triples))))
 ))
 (define rdf_expand_ttl_object (lambda (subject pred obj) (match obj
 	'("__ttl_inline_node__" bn facts)
