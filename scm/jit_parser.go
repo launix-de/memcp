@@ -69,6 +69,16 @@ type jitParserNode struct {
 	noMemo       bool // repeat body references skip the memo entry check
 	fenceMemo    bool // markFenceableRepeats: also fence+compact the memo table
 	description  string
+	// Accumulation form of * / + : instead of collecting item values into a
+	// slice (pushMark/mergeMark -> make+copy per repeat), run accInit() once,
+	// acc = accStep(acc, itemvalue) per accepted item, accFinish(acc) once as
+	// the repeat's single result. Set by buildNode when the * / + syntax
+	// carries init/step/finish lambdas past the noMemo slot, or injected by the
+	// optimizer. Fresh acc per repeat entry, so an outer backtrack re-inits.
+	accumulate  bool
+	accInit     *Proc
+	accStep     *Proc
+	accFinish   *Proc
 }
 
 type jitParserRule struct {
@@ -464,6 +474,25 @@ func jitParserApplyAction1Native(entryValue, arg Scmer) Scmer {
 	return entry.Call(arg)
 }
 
+// buildAccProc optimizes and evaluates an accumulation lambda
+// (init/step/finish) to a compiled Proc for inline emission in emitRepeat.
+func (builder *jitParserBuilder) buildAccProc(lambda Scmer, outer *Env) *Proc {
+	if outer == nil {
+		outer = &Globalenv
+	}
+	for lambda.IsSourceInfo() {
+		lambda = lambda.SourceInfo().value
+	}
+	value := lambda
+	if !value.IsProc() {
+		value = Eval(value, outer)
+	}
+	if !value.IsProc() || value.Proc() == nil {
+		panic("jit: parser repeat accumulation argument is not a lambda: " + String(lambda))
+	}
+	return value.Proc()
+}
+
 func (builder *jitParserBuilder) binding(ruleID int, symbol Symbol) int {
 	rule := &builder.program.rules[ruleID]
 	if index, ok := rule.bindingLookup[symbol]; ok {
@@ -614,7 +643,7 @@ func (builder *jitParserBuilder) buildNode(value Scmer, outer *Env, jitOuter *JI
 			return builder.buildChildren(jitParserExclude, items[1:], outer, jitOuter, ruleID, ignoreResult)
 		case "*", "+":
 			children := []*jitParserNode{builder.buildNode(items[1], outer, jitOuter, ruleID, ignoreResult)}
-			if len(items) > 2 {
+			if len(items) > 2 && !jitUnwrapParserSyntax(items[2]).IsNil() {
 				children = append(children, builder.buildNode(items[2], outer, jitOuter, ruleID, true))
 			} else {
 				children = append(children, &jitParserNode{kind: jitParserEmpty, ignoreResult: true})
@@ -623,8 +652,17 @@ func (builder *jitParserBuilder) buildNode(value Scmer, outer *Env, jitOuter *JI
 			if head == "+" {
 				kind = jitParserOneOrMore
 			}
-			return &jitParserNode{kind: kind, children: children, ignoreResult: ignoreResult,
-				noMemo: head == "*" && len(items) > 3 && items[3].Bool()}
+			node := &jitParserNode{kind: kind, children: children, ignoreResult: ignoreResult,
+				noMemo: head == "*" && len(items) > 3 && !items[3].IsNil() && items[3].Bool()}
+			// Accumulation form: (* | + item sep noMemo init step finish)
+			if len(items) >= 7 {
+				node.accumulate = true
+				node.noMemo = true // an accumulating repeat is never memo-replayed
+				node.accInit = builder.buildAccProc(items[4], outer)
+				node.accStep = builder.buildAccProc(items[5], outer)
+				node.accFinish = builder.buildAccProc(items[6], outer)
+			}
+			return node
 		case "?":
 			child := builder.buildChildren(jitParserSequence, items[1:], outer, jitOuter, ruleID, ignoreResult)
 			if len(items) == 2 {
@@ -901,6 +939,19 @@ func jitParserDiscardValueNative(state *jitParserState) {
 	}
 	state.values[len(state.values)-1] = NewNil()
 	state.values = state.values[:len(state.values)-1]
+}
+
+// jitParserPopValueNative returns and removes the top of the value stack - the
+// accumulation form of a repeat consumes each item value this way instead of
+// leaving it for mergeMark to collect.
+func jitParserPopValueNative(state *jitParserState) Scmer {
+	if len(state.values) == 0 {
+		panic("jit: parser value stack underflow")
+	}
+	value := state.values[len(state.values)-1]
+	state.values[len(state.values)-1] = NewNil()
+	state.values = state.values[:len(state.values)-1]
+	return value
 }
 
 func jitParserCaptureValueNative(state *jitParserState, inputValue Scmer, start, end int64) {
