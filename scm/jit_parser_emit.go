@@ -576,7 +576,51 @@ func (emitter *jitParserEmitter) continuation(label JITLabel) int64 {
 	return index
 }
 
+// emitDirectReturnLeaf is the fast path for a literal-leaf rule
+// (analyzeLiteralLeaves): match the regex, run the compiled generator on the
+// matched text, push the result. No jitParserPushRuleFrame, no push/bind of the
+// capture through state.values/state.bindings, no memo, no
+// jitMaterializeVirtualGoSlice, no jitParserCompleteRule. The value left on
+// state.values top is identical to what the full path would have produced.
+func (emitter *jitParserEmitter) emitDirectReturnLeaf(p *directReturnPlan, success, failure JITLabel) {
+	ctx := emitter.ctx
+	skipped := ctx.ReserveLabel()
+	emitter.emitSkip(0, skipped)
+	ctx.MarkLabel(skipped)
+
+	matched, failed := ctx.ReserveLabel(), ctx.ReserveLabel()
+	captures := jitRegexCaptureTargets(ctx, p.regex.captures)
+	input := emitter.substringAtPosition()
+	jitEmitNativeRegex(ctx, p.regex, input, captures, matched, failed, failed, nil, false)
+
+	ctx.MarkLabel(matched)
+	emitter.advanceBy(captures[0])
+	entryValue := NewAny(p.action)
+	ctx.TrackImm(entryValue)
+	entry := emitter.immPair(entryValue)
+	value := ctx.EmitGoCallScalar(GoFuncAddr(jitParserApplyAction1Native), []JITValueDesc{entry, captures[0]}, 2)
+	ctx.FreeDesc(&entry)
+	value.Type = JITTypeUnknown
+	value.Rooted = true
+	emitter.pushValue(value)
+	ctx.EmitJmp(success)
+
+	ctx.MarkLabel(failed)
+	expected := emitter.immPair(NewString(p.desc))
+	position := emitter.loadPosition()
+	emitter.emitStateVoid(jitParserRecordFailureNative, position, expected)
+	ctx.FreeDesc(&position)
+	ctx.FreeDesc(&expected)
+	ctx.EmitJmp(failure)
+
+	ctx.FreeStack(int32(len(captures) * 16))
+}
+
 func (emitter *jitParserEmitter) emitRuleRef(node *jitParserNode, success, failure JITLabel) {
+	if p := emitter.program.rules[node.rule].directReturn; p != nil && !node.ignoreResult {
+		emitter.emitDirectReturnLeaf(p, success, failure)
+		return
+	}
 	// A lexical sub-rule (lexicalParent >= 0) is never memoized or left
 	// recursive, and a rule referenced from inside a noMemo-marked unbranched
 	// repeat body provably cannot have been visited at this position before
