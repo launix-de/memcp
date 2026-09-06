@@ -19,7 +19,90 @@ package scm
 
 import (
 	"regexp"
+	"sync"
+	"unsafe"
 )
+
+// regexpReplaceHelperKey identifies a compiled (pattern, replacement) scan
+// helper. The inline scan is compiled once as its own function and called from
+// parse_sql, so parse_sql's frame - and its GC stack map and unwind info -
+// stays a small call stub. Inlining the scan (with its loop-local spills and
+// PreserveOuterRegs) directly into parse_sql corrupted the frame metadata and
+// crashed the runtime's stack copy on deep INSERT recursion
+// ("traceback did not unwind completely").
+type regexpReplaceHelperKey struct {
+	pattern     *regexp.Regexp
+	replacement uintptr
+}
+
+var regexpReplaceHelpers sync.Map // regexpReplaceHelperKey -> *JITEntryPoint
+
+// jitRegexpReplaceHelperFor returns the compiled scan helper for this
+// pattern+replacement, building it on first use. nil if compilation failed
+// (caller falls back to jitConstRegexpReplaceCall).
+func jitRegexpReplaceHelperFor(pattern *regexp.Regexp, replacement Scmer) *JITEntryPoint {
+	key := regexpReplaceHelperKey{pattern: pattern}
+	if replacement.GetTag() == tagProc && replacement.Proc() != nil {
+		key.replacement = uintptr(unsafe.Pointer(replacement.Proc()))
+	}
+	if cached, ok := regexpReplaceHelpers.Load(key); ok {
+		return cached.(*JITEntryPoint)
+	}
+	body := NewSlice([]Scmer{
+		NewSymbol(jitConstantRegexpReplaceInlineName),
+		NewRegex(pattern),
+		replacement,
+		NewNthLocalVar(0),
+	})
+	compiled := jitCompileModeDeferred(true, NewProcStruct(Proc{
+		Params:       NewSlice([]Scmer{NewSymbol("s")}),
+		Body:         body,
+		En:           &Globalenv,
+		NumVars:      1,
+		NumberedOnly: true,
+	}))
+	var entry *JITEntryPoint
+	if compiled.GetTag() == tagProc && compiled.Proc() != nil {
+		entry = compiled.Proc().Compiled
+		if entry != nil {
+			entry.DebugName = "regexp_replace scan " + pattern.String()
+		}
+	}
+	regexpReplaceHelpers.Store(key, entry)
+	return entry
+}
+
+// jitRegexpReplaceHelperCall invokes a compiled scan helper on one string.
+func jitRegexpReplaceHelperCall(entryValue, s Scmer) Scmer {
+	entry, ok := entryValue.Any().(*JITEntryPoint)
+	if !ok || entry == nil {
+		panic("jit: invalid regexp_replace scan helper")
+	}
+	return entry.Call(s)
+}
+
+// jitEmitConstantRegexpReplaceViaHelper is the JITEmit for
+// jit-constant-regexp-replace-func: compile the scan once, emit a call.
+func jitEmitConstantRegexpReplaceViaHelper(ctx *JITContext, pattern *regexp.Regexp, replacement Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+	replacement = replacement.WithoutSourceInfo()
+	if !scmerCallable(replacement) {
+		return jitConstRegexpReplaceCall(ctx, pattern, replacement, args[2], result)
+	}
+	entry := jitRegexpReplaceHelperFor(pattern, replacement)
+	if entry == nil {
+		return jitConstRegexpReplaceCall(ctx, pattern, replacement, args[2], result)
+	}
+	entryValue := NewAny(entry)
+	ctx.TrackImm(entryValue)
+	entryArg := jitCopyScmerToPair(ctx, JITValueDesc{Loc: LocImm, Type: tagAny, Imm: entryValue})
+	value := args[2]
+	ctx.EnsureDesc(&value)
+	out := ctx.EmitGoCallScalar(GoFuncAddr(jitRegexpReplaceHelperCall), []JITValueDesc{entryArg, value}, 2)
+	out.Type = JITTypeUnknown
+	out.Rooted = true
+	ctx.FreeDesc(&entryArg)
+	return jitPlaceScmerIntoTarget(ctx, out, result)
+}
 
 // jitReplaceBuilder accumulates the output of a regexp_replace-with-function
 // scan. It only exists when the pattern actually matched at least once - the

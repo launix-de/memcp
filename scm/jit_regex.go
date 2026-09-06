@@ -26,7 +26,8 @@ import (
 const (
 	jitConstantRegexpTestName        = "jit-constant-regexp-test"
 	jitConstantRegexpPredicateName    = "jit-constant-regexp-predicate"
-	jitConstantRegexpReplaceFuncName  = "jit-constant-regexp-replace-func"
+	jitConstantRegexpReplaceFuncName   = "jit-constant-regexp-replace-func"
+	jitConstantRegexpReplaceInlineName = "jit-constant-regexp-replace-inline"
 )
 
 // jitConstantRegexpReplaceFunc is the interpreter implementation of the hidden
@@ -1190,6 +1191,37 @@ func registerJITRegexBuiltins() {
 				pattern := sourceArgs[0].WithoutSourceInfo()
 				if !pattern.IsRegex() {
 					panic("jit: constant regexp replace requires a precompiled regex")
+				}
+				return jitEmitConstantRegexpReplaceViaHelper(ctx, pattern.Regex(), sourceArgs[1].WithoutSourceInfo(), args, result)
+			},
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		Name: jitConstantRegexpReplaceInlineName,
+		Fn: func(arguments ...Scmer) Scmer {
+			if len(arguments) != 3 || !arguments[0].IsRegex() {
+				panic("jit constant regexp replace (inline) expects a precompiled regex, a function and a value")
+			}
+			return jitConstantRegexpReplaceFunc(arguments[0], arguments[1], arguments[2])
+		},
+		Type: &TypeDescriptor{
+			Kind:      "func",
+			Forbidden: true,
+			Params: []*TypeDescriptor{
+				{Kind: "any", Label: "pattern"},
+				{Kind: "any", Label: "replacement"},
+				{Kind: "string", Label: "value"},
+			},
+			Return:         &TypeDescriptor{Kind: "string"},
+			Const:          true,
+			JITVirtualArgs: true,
+			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				if len(sourceArgs) != 3 || len(args) != 3 {
+					panic("jit: malformed constant regexp replace (inline)")
+				}
+				pattern := sourceArgs[0].WithoutSourceInfo()
+				if !pattern.IsRegex() {
+					panic("jit: constant regexp replace (inline) requires a precompiled regex")
 				}
 				return jitEmitConstantRegexpReplaceFunc(ctx, pattern.Regex(), sourceArgs[1].WithoutSourceInfo(), args, result)
 			},
