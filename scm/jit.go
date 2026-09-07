@@ -2290,6 +2290,10 @@ func (ctx *JITContext) FreeDesc(desc *JITValueDesc) {
 	if desc.ID == 0 {
 		return
 	}
+	// Allocation can move the canonical owner to a stack or cross-class
+	// overflow home while generated code still holds descriptor aliases. Free
+	// the current placement, never the stale register named by such an alias.
+	ctx.SyncDesc(desc)
 	switch desc.Loc {
 	case LocReg:
 		if desc.Reg <= RegR15 {
