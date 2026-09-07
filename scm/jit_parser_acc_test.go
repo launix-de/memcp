@@ -49,3 +49,55 @@ func TestJITParserAccumulateRepeat(t *testing.T) {
 		t.Fatalf("re-run = %s, want (a b)", String(g))
 	}
 }
+
+// TestJITParserAccumulateSeeded exercises a non-trivial init (seeds a head
+// symbol) + a finish that inspects the accumulator - the shape an optimizer
+// injection for (cons 'op repeat) / the AND-OR cascade would produce.
+func TestJITParserAccumulateSeeded(t *testing.T) {
+	if !jitEnabled {
+		t.Skip("requires GOEXPERIMENT=jit")
+	}
+	env := &Env{Vars: make(Vars), Outer: &Globalenv}
+
+	seeded := Eval(Read("seeded", `(parser '(
+		(atom "X" true)
+		(define v (+ (regex "[a-z]+" false true) "," nil
+			(lambda () (list (quote head)))
+			(lambda (a x) (append_mut a x))
+			(lambda (a) a)))
+		$
+	) v)`), env)
+	env.Vars[Symbol("seeded_parser")] = seeded
+	sp := seeded.Parser()
+
+	cascade := Eval(Read("cascade", `(parser '(
+		(define b (+ (regex "[a-z]+" false true) (atom "+" false) nil
+			(lambda () (list))
+			(lambda (a x) (append_mut a x))
+			(lambda (a) (if (equal? (count a) 1) (nth a 0) (cons (quote op) a)))))
+		$
+	) b)`), env)
+	env.Vars[Symbol("cascade_parser")] = cascade
+	cp := cascade.Parser()
+
+	jitCompileEnvironmentParsers(env)
+	if sp.Compiled == nil || sp.JITProgram == nil {
+		t.Fatal("seeded grammar not JIT-compiled")
+	}
+	if cp.Compiled == nil || cp.JITProgram == nil {
+		t.Fatal("cascade grammar not JIT-compiled")
+	}
+
+	if g := sp.Execute(" X a,b,c ", env); String(g) != "(head a b c)" {
+		t.Fatalf("seeded JIT = %s, want (head a b c)", String(g))
+	}
+	if g := sp.Execute(" X solo ", env); String(g) != "(head solo)" {
+		t.Fatalf("seeded single = %s, want (head solo)", String(g))
+	}
+	if g := cp.Execute(" p+q+r ", env); String(g) != "(op p q r)" {
+		t.Fatalf("cascade JIT = %s, want (op p q r)", String(g))
+	}
+	if g := cp.Execute(" lone ", env); String(g) != "lone" {
+		t.Fatalf("cascade single = %s, want lone", String(g))
+	}
+}
