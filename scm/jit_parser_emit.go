@@ -175,6 +175,13 @@ type jitParserEmitter struct {
 	// exactly the original per-level machinery, with no added speculation.
 	currentRule              int
 	currentRuleIsLadderLevel bool
+	// repeatItemDepth > 0 while emitting the item (children[0]) of a * / +
+	// repeat. The ladder speculative descent is only worth its emitted bulk in
+	// a value-list position - `(* sql_expression ",")` in INSERT ... VALUES, IN
+	// lists, function argument lists - where bare literals dominate; elsewhere
+	// (a WHERE predicate, a lone DEFAULT expr) it is neutral at best and only
+	// grows parse_sql, shifting the JIT arena layout.
+	repeatItemDepth int
 }
 
 func (emitter *jitParserEmitter) statePointer() JITValueDesc {
@@ -854,7 +861,8 @@ func (emitter *jitParserEmitter) emitDirectReturnLeaf(p *directReturnPlan, succe
 }
 
 func (emitter *jitParserEmitter) emitRuleRef(node *jitParserNode, success, failure JITLabel) {
-	if emitter.program.ladderFastPath != nil && !node.ignoreResult && !emitter.currentRuleIsLadderLevel {
+	if emitter.program.ladderFastPath != nil && !node.ignoreResult &&
+		!emitter.currentRuleIsLadderLevel && emitter.repeatItemDepth > 0 {
 		if target, ok := emitter.program.ladderFastPath[node.rule]; ok && target != node.rule {
 			emitter.emitLadderFastPath(node, target, success, failure)
 			return
@@ -1220,6 +1228,15 @@ func (emitter *jitParserEmitter) emitMemoFenceExit() {
 	emitter.emitMemoFencePop()
 }
 
+// emitRepeatItem emits a repeat's item production (children[0]) with
+// repeatItemDepth raised, so a ladder reference inside it takes the speculative
+// descent (value-list position). The separator (children[1]) is emitted plainly.
+func (emitter *jitParserEmitter) emitRepeatItem(item *jitParserNode, rule int, success, failure JITLabel) {
+	emitter.repeatItemDepth++
+	emitter.emitNode(item, rule, success, failure)
+	emitter.repeatItemDepth--
+}
+
 func (emitter *jitParserEmitter) emitRepeat(node *jitParserNode, rule int, success, failure JITLabel) {
 	if node.accumulate {
 		emitter.emitRepeatAccumulate(node, rule, success, failure)
@@ -1238,7 +1255,7 @@ func (emitter *jitParserEmitter) emitRepeat(node *jitParserNode, rule int, succe
 	}
 	firstAccepted, firstRejected := emitter.ctx.ReserveLabel(), emitter.ctx.ReserveLabel()
 	emitter.pushCheckpoint()
-	emitter.emitNode(node.children[0], rule, firstAccepted, firstRejected)
+	emitter.emitRepeatItem(node.children[0], rule, firstAccepted, firstRejected)
 	emitter.ctx.MarkLabel(firstAccepted)
 	position := emitter.loadPosition()
 	progress := emitter.emitStateScalar(jitParserCommitProgressNative, 1, position)
@@ -1268,7 +1285,7 @@ func (emitter *jitParserEmitter) emitRepeat(node *jitParserNode, rule int, succe
 	separatorAccepted, iterationAccepted, iterationRejected := emitter.ctx.ReserveLabel(), emitter.ctx.ReserveLabel(), emitter.ctx.ReserveLabel()
 	emitter.emitNode(node.children[1], rule, separatorAccepted, iterationRejected)
 	emitter.ctx.MarkLabel(separatorAccepted)
-	emitter.emitNode(node.children[0], rule, iterationAccepted, iterationRejected)
+	emitter.emitRepeatItem(node.children[0], rule, iterationAccepted, iterationRejected)
 	emitter.ctx.MarkLabel(iterationAccepted)
 	position = emitter.loadPosition()
 	progress = emitter.emitStateScalar(jitParserCommitProgressNative, 1, position)
@@ -1331,7 +1348,7 @@ func (emitter *jitParserEmitter) emitRepeatAccumulate(node *jitParserNode, rule 
 	emitter.pushCheckpoint()
 	firstAccepted, firstRejected := ctx.ReserveLabel(), ctx.ReserveLabel()
 	emitter.pushCheckpoint()
-	emitter.emitNode(node.children[0], rule, firstAccepted, firstRejected)
+	emitter.emitRepeatItem(node.children[0], rule, firstAccepted, firstRejected)
 	ctx.MarkLabel(firstAccepted)
 	step()
 	position := emitter.loadPosition()
@@ -1358,7 +1375,7 @@ func (emitter *jitParserEmitter) emitRepeatAccumulate(node *jitParserNode, rule 
 	separatorAccepted, iterationAccepted, iterationRejected := ctx.ReserveLabel(), ctx.ReserveLabel(), ctx.ReserveLabel()
 	emitter.emitNode(node.children[1], rule, separatorAccepted, iterationRejected)
 	ctx.MarkLabel(separatorAccepted)
-	emitter.emitNode(node.children[0], rule, iterationAccepted, iterationRejected)
+	emitter.emitRepeatItem(node.children[0], rule, iterationAccepted, iterationRejected)
 	ctx.MarkLabel(iterationAccepted)
 	step()
 	position = emitter.loadPosition()
