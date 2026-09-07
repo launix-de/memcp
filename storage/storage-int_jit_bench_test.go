@@ -427,6 +427,66 @@ func BenchmarkStorageIntFinishedReaders(b *testing.B) {
 	})
 }
 
+// BenchmarkStorageIntTypedConsumer isolates the benefit of transporting the
+// finished main storage's exact tag into an immediately inlined Scheme
+// consumer. Both variants emit the same GetValue body and call ABI; only the
+// descriptor presented to the arithmetic emitter differs.
+func BenchmarkStorageIntTypedConsumer(b *testing.B) {
+	if !scm.JITEnabled() {
+		b.Skip("requires the JIT experiment")
+	}
+	s := buildBenchStorageInt(benchN)
+	Init(scm.Globalenv)
+	less := scm.Globalenv.Vars[scm.Symbol("<")]
+	if less.IsNil() {
+		b.Fatal("< builtin is not registered")
+	}
+	consumer := &scm.Proc{
+		Params: scm.NewSlice([]scm.Scmer{scm.NewSymbol("value")}),
+		Body: scm.NewSlice([]scm.Scmer{
+			less,
+			scm.NewSymbol("value"),
+			scm.NewInt(511),
+		}),
+		En: &scm.Globalenv,
+	}
+
+	build := func(typed bool) scm.JITStorageGetValueFunc {
+		return scm.CompileJITStorageGetValue(func(ctx *scm.JITContext, idx, result scm.JITValueDesc) scm.JITValueDesc {
+			var value scm.JITValueDesc
+			if typed {
+				value = emitMainStorageValue(ctx, s, idx, scm.JITValueDesc{Loc: scm.LocAny})
+			} else {
+				value = s.JITEmit(ctx, idx, scm.JITValueDesc{Loc: scm.LocAny})
+				value.Type = scm.JITTypeUnknown
+			}
+			return scm.JITEmitProcInline(ctx, consumer, []scm.JITValueDesc{value}, scm.RegR12, result)
+		})
+	}
+
+	unknown := build(false)
+	typed := build(true)
+	if unknown == nil || typed == nil {
+		b.Fatal("failed to compile typed-consumer benchmark")
+	}
+
+	run := func(b *testing.B, fn scm.JITStorageGetValueFunc) {
+		var sum int64
+		b.ReportAllocs()
+		b.ResetTimer()
+		for sample := 0; sample < b.N; sample++ {
+			for i := uint32(0); i < benchN; i++ {
+				if fn(i).Bool() {
+					sum++
+				}
+			}
+		}
+		runtime.KeepAlive(sum)
+	}
+	b.Run("Unknown", func(b *testing.B) { run(b, unknown) })
+	b.Run("Typed", func(b *testing.B) { run(b, typed) })
+}
+
 // BenchmarkStorageIntCachedReader measures the same indirection shape used by
 // scans after resolving a ColumnReader from the query plan. The direct typed
 // function benchmarks below isolate generated code quality; this benchmark

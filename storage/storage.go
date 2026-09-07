@@ -237,6 +237,12 @@ type ColumnStorage interface {
 	DistinctCount() uint // estimated number of distinct values in this shard column
 
 	// JIT compilation
+	// JITValueType describes the exact physical Scmer tag returned for every
+	// valid row of this finalized main storage. It must return JITTypeUnknown
+	// when NULLs or representation variants make the tag non-uniform. This is
+	// deliberately a property of the immutable main storage, not of the logical
+	// column: delta rows always retain their runtime tags.
+	JITValueType() uint8
 	JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc
 	JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, stride, result scm.JITValueDesc) scm.JITValueDesc
 	JITEmitGetValueRange(ctx *scm.JITContext, recid, count, target, stride, result scm.JITValueDesc) scm.JITValueDesc
