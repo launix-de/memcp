@@ -27,6 +27,10 @@ import "github.com/launix-de/memcp/scm"
 type StorageFloat struct {
 	storageJITFunctions
 	values []float64 `jit:"immutable-after-finish"`
+	// hasNull is collected while the storage is built (or reconstructed while
+	// it is loaded) and is immutable after finish. Keeping the proof beside the
+	// payload lets query code specialize the main column in O(1).
+	hasNull bool
 }
 
 func (s *StorageFloat) ComputeSize() uint {
@@ -408,6 +412,13 @@ func (s *StorageFloat) deserializeFloatV0(f io.Reader) uint {
 	rawdata := make([]byte, 8*l)
 	f.Read(rawdata)
 	s.values = unsafe.Slice((*float64)(unsafe.Pointer(&rawdata[0])), l)
+	s.hasNull = false
+	for _, value := range s.values {
+		if math.IsNaN(value) {
+			s.hasNull = true
+			break
+		}
+	}
 	return uint(l)
 }
 
@@ -457,8 +468,12 @@ func (s *StorageFloat) GetValueMulti(recids []uint32, target []scm.Scmer, stride
 }
 
 func (s *StorageFloat) scan(i uint32, value scm.Scmer) {
+	if value.IsNil() {
+		s.hasNull = true
+	}
 }
 func (s *StorageFloat) prepare() {
+	s.hasNull = false
 }
 func (s *StorageFloat) init(i uint32) {
 	// allocate
@@ -467,6 +482,7 @@ func (s *StorageFloat) init(i uint32) {
 func (s *StorageFloat) build(i uint32, value scm.Scmer) {
 	// store
 	if value.IsNil() {
+		s.hasNull = true
 		s.values[i] = math.NaN()
 	} else {
 		s.values[i] = value.Float()

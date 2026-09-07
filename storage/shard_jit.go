@@ -225,7 +225,7 @@ func emitFusedLoop(ctx *scm.JITContext, mainCols []ColumnStorage, mapProc, reduc
 		idxCopy := ctx.AllocReg()
 		ctx.EmitMovRegReg(idxCopy, recidReg)
 		idxDesc := scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: idxCopy}
-		colDescs[i] = col.JITEmit(ctx, idxDesc, scm.JITValueDesc{Loc: scm.LocAny})
+		colDescs[i] = emitMainStorageValue(ctx, col, idxDesc, scm.JITValueDesc{Loc: scm.LocAny})
 	}
 	ctx.UnprotectReg(recidReg)
 	ctx.FreeReg(recidReg)
@@ -274,6 +274,18 @@ func emitFusedLoop(ctx *scm.JITContext, mainCols []ColumnStorage, mapProc, reduc
 	ctx.PatchInt32(spFixup, stackSize)
 	ctx.EmitAddRSP32(stackSize)
 	ctx.EmitByte(0xC3) // RET
+}
+
+// emitMainStorageValue is the only point where a finished storage's physical
+// type proof enters an inlined query callback. The caller is intentionally the
+// main-only loop above. Delta rows live outside ColumnStorage and must continue
+// through getDelta plus the ordinary dynamically typed lambda call.
+func emitMainStorageValue(ctx *scm.JITContext, col ColumnStorage, idx, result scm.JITValueDesc) scm.JITValueDesc {
+	value := col.JITEmit(ctx, idx, result)
+	if valueType := col.JITValueType(); valueType != scm.JITTypeUnknown {
+		value.Type = valueType
+	}
+	return value
 }
 
 // emitProcInlineWithStackArgs materializes proc arguments as a contiguous
