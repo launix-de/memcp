@@ -29,6 +29,31 @@ import (
 
 var jitCodeOverflowPanic = &struct{}{}
 
+// jitX86RegisterBank maps architecture-independent register colors to amd64.
+// Registers with fixed roles in shifts, division and the Go ABI are deliberately
+// last so persistent loop values do not force avoidable shuffles.
+//
+// R15 remains available to the ordinary allocator for block-local temporaries,
+// but is intentionally absent from this persistent-home bank. Go treats R15 as
+// scratch and dynamically linked Go code may use it for GOT loads. A home spans
+// separately rendered control-flow paths, whereas RegOwners describes only the
+// emitter's current path snapshot; that is insufficient proof that every future
+// runtime call will preserve R15. Short-lived uses remain safe because their
+// descriptor ownership is exact at the call boundary.
+//
+// Every JIT-to-Go boundary must nevertheless obtain its live set through
+// collectLiveRegsForCall. A call emitter must not duplicate a weaker owner-only
+// scan, because protected homes can be live without a direct owner in the
+// emitter's current bookkeeping snapshot.
+var jitX86RegisterBank = JITRegisterBank{
+	Registers: [16]Reg{
+		RegR13, RegR10, RegR9, RegR8, RegRDI, RegRSI,
+		RegRCX, RegRDX, RegRAX, RegRBX,
+	},
+	Count:            10,
+	TemporaryReserve: 7,
+}
+
 func jitCapturedEnv(en *Env) *JITEnv {
 	if en == nil || en == &Globalenv {
 		return nil
@@ -131,6 +156,7 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 		End:              unsafe.Add(buf.ptr, buf.n),
 		FreeRegs:         freeRegs,
 		AllRegs:          freeRegs,
+		RegisterBank:     jitX86RegisterBank,
 		SliceBase:        RegR12,
 		StackReg:         RegRSP,
 		FrameReg:         RegRBP,
@@ -664,6 +690,18 @@ func (ctx *JITContext) EmitSubInt64(dst, src Reg) {
 	ctx.emitAluRegReg(0x29, dst, src) // SUB r/m64, r64
 }
 
+// EmitAddInt32 emits a 32-bit ADD. Writing the low word zero-extends the result
+// on amd64, so uint32 SSA values become canonical without a following mask or
+// shift pair.
+func (ctx *JITContext) EmitAddInt32(dst, src Reg) {
+	ctx.emitAluRegRegWidth(0x01, dst, src, false)
+}
+
+// EmitSubInt32 is the subtraction counterpart of EmitAddInt32.
+func (ctx *JITContext) EmitSubInt32(dst, src Reg) {
+	ctx.emitAluRegRegWidth(0x29, dst, src, false)
+}
+
 // EmitImulInt64 emits: IMUL dst, src (GPR *= GPR, signed)
 func (ctx *JITContext) EmitImulInt64(dst, src Reg) {
 	// IMUL dst, src: REX.W + 0F AF /r (dst = dst * src)
@@ -729,7 +767,21 @@ func (ctx *JITContext) EmitCmpFloat64Setcc(dst, left, right Reg, cc JITCondition
 	ctx.emitMovqGprToXmm(RegX1, right)
 	// UCOMISD XMM0, XMM1
 	ctx.emitBytes(0x66, 0x0F, 0x2E, 0xC1)
-	ctx.EmitSetcc(dst, cc)
+	switch cc {
+	case CcE, CcB, CcBE:
+		// EQ/LT/LE must reject unordered operands. UCOMISD sets PF for NaN.
+		ctx.EmitSetcc(dst, cc)
+		ctx.EmitSetcc(RegR11, CondNotParity)
+		ctx.EmitAndInt64(dst, RegR11)
+	case CcNE:
+		// Go's != is true for unordered operands.
+		ctx.EmitSetcc(dst, cc)
+		ctx.EmitSetcc(RegR11, CondParity)
+		ctx.EmitOrInt64(dst, RegR11)
+	default:
+		// GT/GE already reject unordered operands through CF/ZF.
+		ctx.EmitSetcc(dst, cc)
+	}
 }
 
 // --- Conversion emitters ---
@@ -903,6 +955,10 @@ func x86ConditionCode(cc JITCondition) byte {
 		return 0x02
 	case CcAE:
 		return 0x03
+	case CondParity:
+		return 0x0A
+	case CondNotParity:
+		return 0x0B
 	default:
 		panic("jit: unsupported x86 condition")
 	}
@@ -1035,6 +1091,82 @@ func (ctx *JITContext) EmitMovRegMemL(dst, base Reg, disp int32) {
 // For IndexAddr: LEA dst, [sliceBase + idx*16] computes &a[idx]
 func (ctx *JITContext) EmitLeaRegMem(dst, base Reg, disp int32) {
 	ctx.emitRegMemOp(0x8D, dst, base, disp)
+}
+
+// EmitLeaRegBaseIndex emits LEA dst, [base + index*scale]. Keeping this
+// addressing primitive in the architecture backend lets common lowering fuse
+// IndexAddr+Store without manufacturing an allocator-owned address value.
+func (ctx *JITContext) EmitLeaRegBaseIndex(dst, base, index Reg, scale uint8) {
+	var scaleBits byte
+	switch scale {
+	case 1:
+		scaleBits = 0
+	case 2:
+		scaleBits = 1
+	case 4:
+		scaleBits = 2
+	case 8:
+		scaleBits = 3
+	default:
+		panic("jit: x86 indexed address scale must be 1, 2, 4, or 8")
+	}
+	rex := byte(0x48)
+	if dst >= 8 {
+		rex |= 0x04 // REX.R
+	}
+	if index >= 8 {
+		rex |= 0x02 // REX.X
+	}
+	if base >= 8 {
+		rex |= 0x01 // REX.B
+	}
+	modrm := byte(dst&7)<<3 | 0x04
+	sib := scaleBits<<6 | byte(index&7)<<3 | byte(base&7)
+	ctx.emitBytes(rex, 0x8D, modrm, sib)
+}
+
+// EmitMovRegBaseIndex loads an unsigned scalar from [base+index*scale]. The
+// semantic slice-element lowering lives in common code; only this SIB encoding
+// is architecture-specific.
+func (ctx *JITContext) EmitMovRegBaseIndex(dst, base, index Reg, scale uint8, width int32) {
+	var scaleBits byte
+	switch scale {
+	case 1:
+		scaleBits = 0
+	case 2:
+		scaleBits = 1
+	case 4:
+		scaleBits = 2
+	case 8:
+		scaleBits = 3
+	default:
+		panic("jit: x86 indexed load scale must be 1, 2, 4, or 8")
+	}
+	rex := byte(0x40)
+	if width != 4 {
+		rex |= 0x08 // 64-bit destination for MOV/MOVZX
+	}
+	if dst >= 8 {
+		rex |= 0x04
+	}
+	if index >= 8 {
+		rex |= 0x02
+	}
+	if base >= 8 {
+		rex |= 0x01
+	}
+	modrm := byte(dst&7)<<3 | 0x04
+	sib := scaleBits<<6 | byte(index&7)<<3 | byte(base&7)
+	switch width {
+	case 1:
+		ctx.emitBytes(rex, 0x0F, 0xB6, modrm, sib)
+	case 2:
+		ctx.emitBytes(rex, 0x0F, 0xB7, modrm, sib)
+	case 4, 8:
+		ctx.emitBytes(rex, 0x8B, modrm, sib)
+	default:
+		panic("jit: x86 indexed load width must be 1, 2, 4, or 8")
+	}
 }
 
 // EmitMovRegMem64 loads a 64-bit value from an absolute memory address into dst.
@@ -1296,6 +1428,17 @@ func (ctx *JITContext) EmitAddRegImm32(dst Reg, imm int32) {
 	ctx.emitU32(uint32(imm))
 }
 
+// EmitAddRegImm32Low emits ADD r32, imm32 and therefore canonicalizes a uint32
+// result as part of the arithmetic instruction itself.
+func (ctx *JITContext) EmitAddRegImm32Low(dst Reg, imm int32) {
+	rex := byte(0x40)
+	if dst >= 8 {
+		rex |= 0x01
+	}
+	ctx.emitBytes(rex, 0x81, 0xC0|byte(dst&7))
+	ctx.emitU32(uint32(imm))
+}
+
 // EmitSubRegImm32 emits SUB r64, sign-extended imm32.
 func (ctx *JITContext) EmitSubRegImm32(dst Reg, imm int32) {
 	rex := byte(0x48)
@@ -1304,6 +1447,16 @@ func (ctx *JITContext) EmitSubRegImm32(dst Reg, imm int32) {
 	}
 	modrm := byte(0xE8) | byte(dst&7) // /5 = SUB
 	ctx.emitBytes(rex, 0x81, modrm)
+	ctx.emitU32(uint32(imm))
+}
+
+// EmitSubRegImm32Low emits SUB r32, imm32 and canonicalizes a uint32 result.
+func (ctx *JITContext) EmitSubRegImm32Low(dst Reg, imm int32) {
+	rex := byte(0x40)
+	if dst >= 8 {
+		rex |= 0x01
+	}
+	ctx.emitBytes(rex, 0x81, 0xE8|byte(dst&7))
 	ctx.emitU32(uint32(imm))
 }
 
@@ -1975,10 +2128,12 @@ func (ctx *JITContext) finalizeStackMaps(frameSize int32, arenaOffset int) []jit
 			}
 		}
 		maps[i] = jitStackMap{
-			pcOffset:   uintptr(arenaOffset) + uintptr(safepoint.pcOffset),
-			frameWords: frameWords,
-			pointerMap: pointerMap,
-			entry:      safepoint.entry,
+			pcOffset:        uintptr(arenaOffset) + uintptr(safepoint.pcOffset),
+			frameWords:      frameWords,
+			pointerMap:      pointerMap,
+			entry:           safepoint.entry,
+			entryFrameWords: safepoint.entryFrameWords,
+			entryPointerMap: safepoint.entryPointerMap,
 		}
 	}
 	return maps
@@ -2034,35 +2189,9 @@ func (ctx *JITContext) EmitGoCallVariadic(f func(...Scmer) Scmer, argslice JITVa
 
 	ctx.ReclaimUntrackedRegs()
 	var liveRegsArr [16]Reg
-	liveCount := 0
-	for r := Reg(0); r <= RegR15; r++ {
-		if r == RegRSP || r == RegRBP || r == RegR11 || r == RegR14 {
-			continue
-		}
-		bit := uint64(1 << uint(r))
-		if (ctx.AllRegs&bit) == 0 || (ctx.FreeRegs&bit) != 0 {
-			continue
-		}
-		owner := ctx.RegOwners[r]
-		if owner == nil {
-			continue
-		}
-		valid := false
-		switch owner.Loc {
-		case LocReg:
-			valid = owner.Reg == r
-		case LocRegPair:
-			valid = owner.Reg == r || owner.Reg2 == r
-		}
-		if !valid {
-			continue
-		}
-		liveRegsArr[liveCount] = r
-		liveCount++
-	}
-	liveRegs := liveRegsArr[:0]
-	for i := 0; i < liveCount; i++ {
-		r := liveRegsArr[i]
+	allLiveRegs := ctx.collectLiveRegsForCall(&liveRegsArr)
+	liveRegs := allLiveRegs[:0]
+	for _, r := range allLiveRegs {
 		if r == arg.Reg || r == arg.Reg2 {
 			continue
 		}
@@ -2313,7 +2442,14 @@ func (ctx *JITContext) emitStoreRegMem(src, base Reg, disp int32) {
 // emitAluRegReg emits a REX.W ALU op: <opcode> r/m64, r64
 // opcode: 0x01=ADD, 0x29=SUB, 0x39=CMP, 0x09=OR, 0x21=AND, 0x31=XOR
 func (ctx *JITContext) emitAluRegReg(opcode byte, dst, src Reg) {
+	ctx.emitAluRegRegWidth(opcode, dst, src, true)
+}
+
+func (ctx *JITContext) emitAluRegRegWidth(opcode byte, dst, src Reg, wide bool) {
 	rex := byte(0x48)
+	if !wide {
+		rex = 0x40
+	}
 	if src >= 8 {
 		rex |= 0x04
 	}
@@ -2328,6 +2464,83 @@ func (ctx *JITContext) emitAluRegReg(opcode byte, dst, src Reg) {
 // MOV [base+disp], src (64-bit store).
 func (ctx *JITContext) EmitStoreRegMem(src, base Reg, disp int32) {
 	ctx.emitStoreRegMem(src, base, disp)
+}
+
+// EmitStoreImm32Mem stores a sign-extended 32-bit immediate into a 64-bit
+// memory word. x86-64 has no general imm64-to-memory encoding; constants that
+// fit this form avoid occupying a temporary register in tight generated loops.
+func (ctx *JITContext) EmitStoreImm32Mem(base Reg, disp int32, value int32) {
+	rex := byte(0x48)
+	if base >= 8 {
+		rex |= 0x01
+	}
+	baseEnc := byte(base & 7)
+	mod := byte(0)
+	if disp == 0 && baseEnc != 5 {
+		mod = 0x00
+	} else if disp >= -128 && disp <= 127 {
+		mod = 0x40
+	} else {
+		mod = 0x80
+	}
+	ctx.emitBytes(rex, 0xC7, mod|baseEnc)
+	if baseEnc == 4 {
+		ctx.emitByte(0x24)
+	}
+	if mod == 0x40 {
+		ctx.emitByte(byte(int8(disp)))
+	} else if mod == 0x80 {
+		ctx.emitU32(uint32(disp))
+	}
+	ctx.emitU32(uint32(value))
+}
+
+func (ctx *JITContext) emitStoreRegMemWidth(src, base Reg, disp int32, opcode byte, rexW bool) {
+	rex := byte(0x40)
+	if rexW {
+		rex |= 0x08
+	}
+	if src >= 8 {
+		rex |= 0x04
+	}
+	if base >= 8 {
+		rex |= 0x01
+	}
+	baseEnc := byte(base & 7)
+	srcEnc := byte(src & 7)
+	mod := byte(0)
+	if disp == 0 && baseEnc != 5 {
+		mod = 0x00
+	} else if disp >= -128 && disp <= 127 {
+		mod = 0x40
+	} else {
+		mod = 0x80
+	}
+	ctx.emitBytes(rex, opcode, mod|(srcEnc<<3)|baseEnc)
+	if baseEnc == 4 {
+		ctx.emitBytes(0x24)
+	}
+	if mod == 0x40 {
+		ctx.emitBytes(byte(int8(disp)))
+	} else if mod == 0x80 {
+		ctx.emitU32(uint32(disp))
+	}
+}
+
+// EmitStoreRegMemB stores the low byte of src at [base+disp].
+func (ctx *JITContext) EmitStoreRegMemB(src, base Reg, disp int32) {
+	ctx.emitStoreRegMemWidth(src, base, disp, 0x88, false)
+}
+
+// EmitStoreRegMemW stores the low word of src at [base+disp].
+func (ctx *JITContext) EmitStoreRegMemW(src, base Reg, disp int32) {
+	ctx.emitBytes(0x66)
+	ctx.emitStoreRegMemWidth(src, base, disp, 0x89, false)
+}
+
+// EmitStoreRegMemL stores the low doubleword of src at [base+disp].
+func (ctx *JITContext) EmitStoreRegMemL(src, base Reg, disp int32) {
+	ctx.emitStoreRegMemWidth(src, base, disp, 0x89, false)
 }
 
 // EmitSubRSP emits SUB RSP, imm8 to reserve stack space.
@@ -2543,6 +2756,11 @@ func (ctx *JITContext) EmitStoreScmerToStack(desc JITValueDesc, disp int32) {
 		ctx.EmitStoreRegMem(value.Reg, RegRSP, disp)
 		ctx.EmitStoreRegMem(value.Reg2, RegRSP, disp+8)
 		ctx.FreeDesc(&value)
+	case LocStack:
+		if desc.Type == JITTypeUnknown {
+			panic("jit: an untyped scalar stack value cannot be boxed as Scmer")
+		}
+		ctx.EmitStoreTypedScmerToStack(desc, desc.Type, disp)
 	case LocImm:
 		// Store ptr word
 		ctx.EmitMovRegImm64(RegR11, uint64(uintptr(unsafe.Pointer(desc.Imm.ptr))))
@@ -2558,36 +2776,60 @@ func (ctx *JITContext) EmitStoreScmerToStack(desc JITValueDesc, disp int32) {
 // EmitStoreTypedScmerToStack boxes a scalar directly into its final stack
 // destination. Phi producers use this instead of allocating a transient
 // register pair only to copy both words into the phi slot immediately after.
+// A LocStack source is intentionally supported: when the runtime register bank
+// cannot map every offline color, the scalar's canonical phi home is a single
+// word, but a Scmer consumer still needs a boxed two-word value.
 func (ctx *JITContext) EmitStoreTypedScmerToStack(desc JITValueDesc, typ uint8, disp int32) {
 	ctx.setStackPointer(jitStackRootFrameSP, disp-ctx.DynamicSP, true)
-	if desc.Loc != LocReg && desc.Loc != LocImm {
+	if desc.Loc != LocReg && desc.Loc != LocImm && desc.Loc != LocStack {
 		panic("jit: typed Scmer stack store requires a scalar descriptor")
+	}
+	storePayload := func(destination int32) {
+		switch desc.Loc {
+		case LocReg:
+			ctx.EmitStoreRegMem(desc.Reg, RegRSP, destination)
+		case LocStack:
+			base := RegRSP
+			if desc.StackOff < 0 {
+				base = RegRBP
+			}
+			ctx.EmitMovRegMem(RegR11, base, desc.StackOff)
+			ctx.EmitStoreRegMem(RegR11, RegRSP, destination)
+		default:
+			panic("jit: immediate payload must be encoded by its type case")
+		}
 	}
 
 	switch typ {
 	case tagInt:
-		ctx.EmitMovRegImm64(RegR11, uint64(uintptr(unsafe.Pointer(&scmerIntSentinel))))
-		ctx.EmitStoreRegMem(RegR11, RegRSP, disp)
-		if desc.Loc == LocReg {
-			ctx.EmitStoreRegMem(desc.Reg, RegRSP, disp+8)
+		if desc.Loc != LocImm {
+			storePayload(disp + 8)
 		} else {
 			ctx.EmitMovRegImm64(RegR11, uint64(desc.Imm.Int()))
 			ctx.EmitStoreRegMem(RegR11, RegRSP, disp+8)
 		}
-	case tagFloat:
-		ctx.EmitMovRegImm64(RegR11, uint64(uintptr(unsafe.Pointer(&scmerFloatSentinel))))
+		ctx.EmitMovRegImm64(RegR11, uint64(uintptr(unsafe.Pointer(&scmerIntSentinel))))
 		ctx.EmitStoreRegMem(RegR11, RegRSP, disp)
-		if desc.Loc == LocReg {
-			ctx.EmitStoreRegMem(desc.Reg, RegRSP, disp+8)
+	case tagFloat:
+		if desc.Loc != LocImm {
+			storePayload(disp + 8)
 		} else {
 			ctx.EmitMovRegImm64(RegR11, math.Float64bits(desc.Imm.Float()))
 			ctx.EmitStoreRegMem(RegR11, RegRSP, disp+8)
 		}
-	case tagBool:
-		ctx.EmitMovRegImm64(RegR11, 0)
+		ctx.EmitMovRegImm64(RegR11, uint64(uintptr(unsafe.Pointer(&scmerFloatSentinel))))
 		ctx.EmitStoreRegMem(RegR11, RegRSP, disp)
-		if desc.Loc == LocReg {
-			ctx.emitMovRegReg(RegR11, desc.Reg)
+	case tagBool:
+		if desc.Loc != LocImm {
+			if desc.Loc == LocReg {
+				ctx.emitMovRegReg(RegR11, desc.Reg)
+			} else {
+				base := RegRSP
+				if desc.StackOff < 0 {
+					base = RegRBP
+				}
+				ctx.EmitMovRegMem(RegR11, base, desc.StackOff)
+			}
 			ctx.emitAndRegImm32(RegR11, 1)
 			ctx.EmitShlRegImm8(RegR11, 8)
 			ctx.EmitOrRegImm32(RegR11, int32(tagBool))
@@ -2596,6 +2838,8 @@ func (ctx *JITContext) EmitStoreTypedScmerToStack(desc JITValueDesc, typ uint8, 
 			ctx.EmitMovRegImm64(RegR11, desc.Imm.aux)
 			ctx.EmitStoreRegMem(RegR11, RegRSP, disp+8)
 		}
+		ctx.EmitMovRegImm64(RegR11, 0)
+		ctx.EmitStoreRegMem(RegR11, RegRSP, disp)
 	case tagNil:
 		ctx.EmitMovRegImm64(RegR11, 0)
 		ctx.EmitStoreRegMem(RegR11, RegRSP, disp)

@@ -405,14 +405,15 @@ func init() {
 }
 
 type StorageString struct {
+	storageJITFunctions
 	// StorageInt for dictionary entries
-	values StorageInt
+	values StorageInt `jit:"immutable-after-finish"`
 	// the dictionary: compressed bytes for all values concatenated
 	dictionary string
-	starts     StorageInt // byte offsets into dictionary
-	lens       StorageInt // compressed byte lengths
-	nodict     bool       // disable values array
-	format     StringFormat
+	starts     StorageInt   `jit:"immutable-after-finish"` // byte offsets into dictionary
+	lens       StorageInt   `jit:"immutable-after-finish"` // compressed byte lengths
+	nodict     bool         `jit:"immutable-after-finish"` // disable values array
+	format     StringFormat `jit:"immutable-after-finish"`
 
 	// LZ4 compression: when compressed==true, compressedDict holds the
 	// lz4-compressed dictionary and dictionary is materialized on demand.
@@ -704,7 +705,7 @@ func (s *StorageString) deserializeStringV1(f io.Reader) uint {
 	return uint(l)
 }
 
-func (s *StorageString) GetCachedReader() ColumnReader { return s }
+func (s *StorageString) GetCachedReader() ColumnReader { return s.storageJITFunctions.reader(s) }
 
 func (s *StorageString) GetValue(i uint32) scm.Scmer {
 	atomic.AddUint64(&s.readCount, 1)
@@ -1157,6 +1158,7 @@ func (s *StorageString) finish() {
 	}
 	s.starts.finish()
 	s.lens.finish()
+	s.storageJITFunctions.finish(s)
 }
 
 func (s *StorageString) proposeCompression(i uint32) ColumnStorage {
@@ -1175,9 +1177,123 @@ func (s *StorageString) DistinctCount() uint {
 }
 
 // JITEmit currently preserves the complete string decoding path through GetValue.
-func (s *StorageString) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc {
-
-	/* TODO: unsupported call: sync/atomic.AddUint64(t0, 1:uint64) */
+func (s *StorageString) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc {
+	/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 	ctx.TrackPointer(unsafe.Pointer(s))
-	return ctx.EmitGoCallScalar(scm.GoFuncAddr((*StorageString).GetValue), []scm.JITValueDesc{thisptr, idx}, 2)
+	thisptr := scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(int64(uintptr(unsafe.Pointer(s)))), NoHeapPointer: true}
+	var idxInt scm.JITValueDesc
+	if idx.Loc == scm.LocImm {
+		idxInt = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(idx.Imm.Int())}
+	} else if idx.Loc == scm.LocRegPair {
+		ctx.FreeReg(idx.Reg)
+		idxInt = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: idx.Reg2}
+		ctx.BindReg(idx.Reg2, &idxInt)
+	} else {
+		idxInt = idx
+	}
+	d0 := scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(1)}
+	r0 := ctx.AllocReg()
+	if thisptr.Loc == scm.LocImm {
+		ctx.EmitMovRegImm64(r0, uint64(uintptr(thisptr.Imm.Int())+unsafe.Offsetof((*StorageString)(nil).readCount)))
+	} else {
+		ctx.EmitLeaRegMem(r0, thisptr.Reg, int32(unsafe.Offsetof((*StorageString)(nil).readCount)))
+	}
+	d1 := scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: r0}
+	ctx.BindReg(r0, &d1)
+	ctx.BindReg(r0, &d1)
+	d2 := ctx.EmitGoCallScalar(scm.GoFuncAddr(scm.JITAtomicAddUint64), []scm.JITValueDesc{d1, d0}, 1)
+	_ = d2
+	ctx.EnsureDesc(&thisptr)
+	ctx.EnsureDesc(&thisptr)
+	if thisptr.Loc == scm.LocRegPair || thisptr.Loc == scm.LocStackPair || thisptr.Loc == scm.LocRegTriple || thisptr.Loc == scm.LocStackTriple {
+		panic("jit: generic call arg expects 1-word value")
+	}
+	ctx.SyncDesc(&thisptr)
+	d3 := ctx.EmitGoCallScalar(scm.GoFuncAddr((*StorageString).ensureDict), []scm.JITValueDesc{thisptr}, 2)
+	d3.NoHeapPointer = false
+	ctx.BindReg(d3.Reg, &d3)
+	ctx.BindReg(d3.Reg2, &d3)
+	ctx.EnsureDesc(&d3)
+	var d4 scm.JITValueDesc
+	if d3.Loc == scm.LocImm {
+		ptr, _ := d3.Imm.RawWords()
+		d4 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(int64(uintptr(unsafe.Pointer(ptr))))}
+	} else if d3.Loc == scm.LocStackPair {
+		d4 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: d3.StackOff}
+	} else {
+		ctx.EnsureDesc(&d3)
+		if d3.Loc != scm.LocRegPair {
+			panic("StringData requires a Go string pair")
+		}
+		d4 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: d3.Reg, ID: 0}
+	}
+	ctx.EnsureDesc(&d4)
+	ctx.EnsureDesc(&d4)
+	ctx.EnsureDesc(&thisptr)
+	ctx.EnsureDesc(&thisptr)
+	if thisptr.Loc == scm.LocRegPair || thisptr.Loc == scm.LocStackPair || thisptr.Loc == scm.LocRegTriple || thisptr.Loc == scm.LocStackTriple {
+		panic("jit: generic call arg expects 1-word value")
+	}
+	ctx.EnsureDesc(&idxInt)
+	ctx.EnsureDesc(&idxInt)
+	if idxInt.Loc == scm.LocRegPair || idxInt.Loc == scm.LocStackPair || idxInt.Loc == scm.LocRegTriple || idxInt.Loc == scm.LocStackTriple {
+		panic("jit: generic call arg expects 1-word value")
+	}
+	ctx.EnsureDesc(&d3)
+	ctx.EnsureDesc(&d3)
+	ctx.EnsureDesc(&d3)
+	if d3.Loc == scm.LocImm {
+		tmpPair := scm.JITValueDesc{Loc: scm.LocRegPair, Type: d3.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+		ctx.TrackImm(d3.Imm)
+		ptrWord, _ := d3.Imm.RawWords()
+		ctx.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
+		ctx.EmitMovRegImm64(tmpPair.Reg2, uint64(len(d3.Imm.String())))
+		d3 = tmpPair
+	} else if d3.Loc == scm.LocReg {
+		tmpPair := scm.JITValueDesc{Loc: scm.LocRegPair, Type: d3.Type, Reg: ctx.AllocRegExcept(d3.Reg), Reg2: ctx.AllocRegExcept(d3.Reg)}
+		switch d3.Type {
+		case scm.TagBool:
+			ctx.EmitMakeBool(tmpPair, d3)
+		case scm.TagInt:
+			ctx.EmitMakeInt(tmpPair, d3)
+		case scm.TagFloat:
+			ctx.EmitMakeFloat(tmpPair, d3)
+		default:
+			panic("jit: generic call arg scalar type unknown for 2-word value")
+		}
+		ctx.FreeDesc(&d3)
+		d3 = tmpPair
+	}
+	if d3.Loc != scm.LocRegPair && d3.Loc != scm.LocStackPair && d3.Loc != scm.LocInputPair {
+		panic("jit: generic call arg expects 2-word value ((*StorageString).decodeAt arg2)")
+	}
+	ctx.EnsureDesc(&d4)
+	ctx.EnsureDesc(&d4)
+	if d4.Loc == scm.LocRegPair || d4.Loc == scm.LocStackPair || d4.Loc == scm.LocRegTriple || d4.Loc == scm.LocStackTriple {
+		panic("jit: generic call arg expects 1-word value")
+	}
+	ctx.SyncDesc(&thisptr)
+	ctx.SyncDesc(&idxInt)
+	ctx.SyncDesc(&d3)
+	ctx.SyncDesc(&d4)
+	d6 := ctx.EmitGoCallScalar(scm.GoFuncAddr((*StorageString).decodeAt), []scm.JITValueDesc{thisptr, idxInt, d3, d4}, 2)
+	d6.NoHeapPointer = false
+	ctx.BindReg(d6.Reg, &d6)
+	ctx.BindReg(d6.Reg2, &d6)
+	ctx.FreeDesc(&idxInt)
+	ctx.FreeDesc(&d4)
+	if d6.Loc == scm.LocImm {
+		if result.Loc == scm.LocAny {
+			return d6
+		}
+	}
+	if result.Loc == scm.LocAny {
+		result = scm.JITValueDesc{Loc: scm.LocRegPair, Type: scm.JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+		ctx.BindReg(result.Reg, &result)
+		ctx.BindReg(result.Reg2, &result)
+	}
+	ctx.EmitMovPairToResult(&d6, &result)
+	result.Type = d6.Type
+	return result
+	return result
 }

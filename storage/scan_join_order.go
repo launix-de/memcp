@@ -1696,8 +1696,8 @@ func declareScanJoinOrder(en *scm.Env) {
 			Params: []*scm.TypeDescriptor{
 				{Kind: "any", Label: "tx", Description: "transaction context"},
 				{Kind: "list", Label: "tables", Description: "driver table followed by inner equi-join tables"},
-				{Kind: "list", Label: "accessSchemas", Description: "optimizer-compiled static local-filter access schemas, one per table", NoEscape: true},
-				{Kind: "list", Label: "accessValues", Description: "flat runtime values shared by accessSchemas", NoEscape: true},
+				{Kind: "list", Label: "accessSchemas", Description: "optimizer-compiled static local-filter access schemas, one per table", NoEscape: true, CrossGoroutine: true},
+				{Kind: "list", Label: "accessValues", Description: "flat runtime values shared by accessSchemas", NoEscape: true, CrossGoroutine: true},
 				{Kind: "list", Label: "filterColumns", Description: "one physical filter-column list per table"},
 				{Kind: "list", Label: "filterFns", Description: "one table-local filter callback per table"},
 				{Kind: "list", Label: "joins", Description: "one join description per inner table; every clause is (outer_table_index outer_column inner_column)"},

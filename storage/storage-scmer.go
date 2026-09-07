@@ -28,8 +28,9 @@ import "unsafe"
 
 // main type for storage: can store any value, is inefficient but does type analysis how to optimize
 type StorageSCMER struct {
-	values      []scm.Scmer
-	minIntScale int8 // power-of-ten exponent of finest granularity
+	storageJITFunctions
+	values      []scm.Scmer `jit:"immutable-after-finish"`
+	minIntScale int8        // power-of-ten exponent of finest granularity
 	//   0 = pure ints, -2 = 2 decimal places, 2 = multiples of 100
 	//   math.MinInt8 = not representable as scaled int
 	hasString    bool
@@ -73,15 +74,10 @@ func (s *StorageSCMER) String() string {
 //	BSON values use a reserved JSON object envelope inside their existing JSONL
 //	line. This adds a representation for the new Scmer tag without changing the
 //	legacy framing or the decoding of any previously supported Scmer value.
-func (s *StorageSCMER) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc {
+func (s *StorageSCMER) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc {
 	/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 	ctx.TrackPointer(unsafe.Pointer(s))
-	thisptrPinned := thisptr.Loc == scm.LocReg
-	thisptrPinnedReg := thisptr.Reg
-	if thisptrPinned {
-		ctx.ProtectReg(thisptrPinnedReg)
-		defer ctx.UnprotectReg(thisptrPinnedReg)
-	}
+	thisptr := scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(int64(uintptr(unsafe.Pointer(s)))), NoHeapPointer: true}
 	var idxInt scm.JITValueDesc
 	if idx.Loc == scm.LocImm {
 		idxInt = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(idx.Imm.Int())}
@@ -92,52 +88,38 @@ func (s *StorageSCMER) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, id
 	} else {
 		idxInt = idx
 	}
-	if idxInt.Loc == scm.LocImm {
-		idxInt = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(int64(uint64(idxInt.Imm.Int()) & 0xffffffff))}
-	} else {
-		ctx.EnsureDesc(&idxInt)
-		if idxInt.Loc != scm.LocReg {
-			panic("jit: idxInt not in register")
-		}
-		ctx.EmitShlRegImm8(idxInt.Reg, 32)
-		ctx.EmitShrRegImm8(idxInt.Reg, 32)
-		ctx.BindReg(idxInt.Reg, &idxInt)
-	}
 	var d0 scm.JITValueDesc
 	if thisptr.Loc == scm.LocImm {
 		fieldAddr := uintptr(thisptr.Imm.Int()) + unsafe.Offsetof((*StorageSCMER)(nil).values)
+		dataPtr := *(*uintptr)(unsafe.Pointer(fieldAddr))
+		sliceLen := *(*int)(unsafe.Pointer(fieldAddr + 8))
+		sliceCap := *(*int)(unsafe.Pointer(fieldAddr + 16))
+		d0 = scm.JITValueDesc{Loc: scm.LocMem, Type: scm.TagSlice, MemPtr: dataPtr, KnownSliceLen: int32(sliceLen), KnownSliceCap: int32(sliceCap), SliceSizeKnown: true, GoArray: true, RelocatablePointer: true, Rooted: true}
+	} else {
 		r0 := ctx.AllocReg()
 		r1 := ctx.AllocRegExcept(r0)
 		r2 := ctx.AllocRegExcept(r0, r1)
-		ctx.EmitMovRegMem64(r0, fieldAddr)
-		ctx.EmitMovRegMem64(r1, fieldAddr+8)
-		ctx.EmitMovRegMem64(r2, fieldAddr+16)
-		d0 = scm.JITValueDesc{Loc: scm.LocRegTriple, Reg: r0, Reg2: r1, Reg3: r2}
+		off := int32(unsafe.Offsetof((*StorageSCMER)(nil).values))
+		ctx.EmitMovRegMem(r0, thisptr.Reg, off)
+		ctx.EmitMovRegMem(r1, thisptr.Reg, off+8)
+		ctx.EmitMovRegMem(r2, thisptr.Reg, off+16)
+		d0 = scm.JITValueDesc{Loc: scm.LocRegTriple, Type: scm.TagSlice, Reg: r0, Reg2: r1, Reg3: r2}
 		ctx.BindReg(r0, &d0)
 		ctx.BindReg(r1, &d0)
 		ctx.BindReg(r2, &d0)
-	} else {
-		off := int32(unsafe.Offsetof((*StorageSCMER)(nil).values))
-		r3 := ctx.AllocReg()
-		r4 := ctx.AllocRegExcept(r3)
-		r5 := ctx.AllocRegExcept(r3, r4)
-		ctx.EmitMovRegMem(r3, thisptr.Reg, off)
-		ctx.EmitMovRegMem(r4, thisptr.Reg, off+8)
-		ctx.EmitMovRegMem(r5, thisptr.Reg, off+16)
-		d0 = scm.JITValueDesc{Loc: scm.LocRegTriple, Reg: r3, Reg2: r4, Reg3: r5}
-		ctx.BindReg(r3, &d0)
-		ctx.BindReg(r4, &d0)
-		ctx.BindReg(r5, &d0)
+		ctx.BindReg(r0, &d0)
+		ctx.BindReg(r1, &d0)
+		ctx.BindReg(r2, &d0)
 	}
 	ctx.EnsureDesc(&idxInt)
 	d2 := ctx.EmitSliceElementAddress(&d0, &idxInt, 16)
 	ctx.EnsureDesc(&d2)
-	r6 := ctx.AllocRegExcept(d2.Reg)
-	ctx.EmitMovRegMem(r6, d2.Reg, 8)
+	r3 := ctx.AllocRegExcept(d2.Reg)
+	ctx.EmitMovRegMem(r3, d2.Reg, 8)
 	ctx.EmitMovRegMem(d2.Reg, d2.Reg, 0)
-	d1 := scm.JITValueDesc{Loc: scm.LocRegPair, Type: scm.JITTypeUnknown, Reg: d2.Reg, Reg2: r6}
+	d1 := scm.JITValueDesc{Loc: scm.LocRegPair, Type: scm.JITTypeUnknown, Reg: d2.Reg, Reg2: r3}
 	ctx.BindReg(d2.Reg, &d1)
-	ctx.BindReg(r6, &d1)
+	ctx.BindReg(r3, &d1)
 	ctx.FreeDesc(&idxInt)
 	if d1.Loc == scm.LocImm {
 		if result.Loc == scm.LocAny {
@@ -149,28 +131,8 @@ func (s *StorageSCMER) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, id
 		ctx.BindReg(result.Reg, &result)
 		ctx.BindReg(result.Reg2, &result)
 	}
-	ctx.SyncDesc(&d1)
-	if d1.Loc == scm.LocRegPair || d1.Loc == scm.LocStackPair || d1.Loc == scm.LocInputPair {
-		ctx.EmitMovPairToResult(&d1, &result)
-		result.Type = d1.Type
-	} else {
-		switch d1.Type {
-		case scm.TagBool:
-			ctx.EmitMakeBool(result, d1)
-			result.Type = scm.TagBool
-		case scm.TagInt:
-			ctx.EmitMakeInt(result, d1)
-			result.Type = scm.TagInt
-		case scm.TagFloat:
-			ctx.EmitMakeFloat(result, d1)
-			result.Type = scm.TagFloat
-		case scm.TagNil:
-			ctx.EmitMakeNil(result)
-			result.Type = scm.TagNil
-		default:
-			panic("jit: single-block scalar return with unknown type")
-		}
-	}
+	ctx.EmitMovPairToResult(&d1, &result)
+	result.Type = d1.Type
 	return result
 	return result
 }
@@ -232,7 +194,7 @@ func (s *StorageSCMER) Deserialize(f io.Reader) uint {
 	return uint(l)
 }
 
-func (s *StorageSCMER) GetCachedReader() ColumnReader { return s }
+func (s *StorageSCMER) GetCachedReader() ColumnReader { return s.storageJITFunctions.reader(s) }
 
 func (s *StorageSCMER) GetValue(i uint32) scm.Scmer {
 	return s.values[i]
@@ -373,6 +335,7 @@ func (s *StorageSCMER) build(i uint32, value scm.Scmer) {
 	s.values[i] = value
 }
 func (s *StorageSCMER) finish() {
+	s.storageJITFunctions.finish(s)
 }
 
 // soley to StorageSCMER

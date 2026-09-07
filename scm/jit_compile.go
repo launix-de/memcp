@@ -19,6 +19,7 @@ package scm
 import (
 	"fmt"
 	"io"
+	"math"
 	"math/bits"
 	"sort"
 	"sync/atomic"
@@ -355,6 +356,53 @@ func jitMakeByteSlice(length, capacity int) []byte {
 	return make([]byte, length, capacity)
 }
 
+// JITMakeScmerSlice exposes the allocation boundary to generated emitters in
+// packages outside scm. It is called by emitted code, not while generating it.
+func JITMakeScmerSlice(length, capacity int) []Scmer {
+	return jitMakeScmerSlice(length, capacity)
+}
+
+// JITMakeByteSlice exposes the byte-slice allocation boundary to generated
+// emitters in packages outside scm.
+func JITMakeByteSlice(length, capacity int) []byte {
+	return jitMakeByteSlice(length, capacity)
+}
+
+// JITMakeUint32Slice allocates scratch record identifiers for generated bulk
+// readers while preserving Go's precise slice-element pointer metadata.
+func JITMakeUint32Slice(length, capacity int) []uint32 {
+	return make([]uint32, length, capacity)
+}
+
+// JITMakeUint64Slice allocates decoded integer scratch space for generated
+// bulk readers.
+func JITMakeUint64Slice(length, capacity int) []uint64 {
+	return make([]uint64, length, capacity)
+}
+
+// JITMakeInt64Slice allocates scratch decoded integers for generated bulk
+// readers while preserving Go's precise slice-element pointer metadata.
+func JITMakeInt64Slice(length, capacity int) []int64 {
+	return make([]int64, length, capacity)
+}
+
+// JITMakeIntSlice allocates machine-word scratch positions for generated bulk
+// readers.
+func JITMakeIntSlice(length, capacity int) []int {
+	return make([]int, length, capacity)
+}
+
+// JITMakeBoolSlice allocates null masks for generated bulk readers.
+func JITMakeBoolSlice(length, capacity int) []bool {
+	return make([]bool, length, capacity)
+}
+
+// JITAtomicAddUint64 preserves instrumentation-counter semantics at a native
+// boundary generated outside the scm package.
+func JITAtomicAddUint64(address *uint64, delta uint64) uint64 {
+	return atomic.AddUint64(address, delta)
+}
+
 func jitStringToBytes(value string) []byte {
 	return []byte(value)
 }
@@ -365,6 +413,12 @@ func jitBytesToString(value []byte) string {
 
 func jitCopyScmerSlice(dst, src []Scmer) int {
 	return copy(dst, src)
+}
+
+// JITCopyScmerSlice exposes the typed slice-copy boundary to generated
+// emitters outside the scm package.
+func JITCopyScmerSlice(dst, src []Scmer) int {
+	return jitCopyScmerSlice(dst, src)
 }
 
 func jitCopyByteSlice(dst, src []byte) int {
@@ -490,9 +544,18 @@ func jitInvokeGoFunctionSlice(callback func(...Scmer) Scmer, args []Scmer) Scmer
 // EmitSliceElementAddress lowers the address part shared by SSA slice loads and
 // stores.
 func (ctx *JITContext) EmitSliceElementAddress(slice, index *JITValueDesc, elementSize int32) JITValueDesc {
+	ctx.ReclaimUntrackedRegs()
 	slicePtr := Reg(0)
 	loadedPtr := false
-	if slice.Loc == LocStackTriple || slice.Loc == LocStackPair {
+	if slice.GoArray && slice.Loc == LocStack {
+		slicePtr = ctx.AllocReg()
+		base := ctx.StackReg
+		if slice.StackOff < 0 {
+			base = ctx.FrameReg
+		}
+		ctx.EmitMovRegMem(slicePtr, base, slice.StackOff)
+		loadedPtr = true
+	} else if slice.Loc == LocStackTriple || slice.Loc == LocStackPair {
 		slicePtr = ctx.AllocReg()
 		base := ctx.StackReg
 		if slice.StackOff < 0 {
@@ -502,11 +565,15 @@ func (ctx *JITContext) EmitSliceElementAddress(slice, index *JITValueDesc, eleme
 		loadedPtr = true
 	} else {
 		ctx.EnsureDesc(slice)
-		if slice.Loc != LocRegTriple && slice.Loc != LocRegPair {
-			panic("jit: slice element address requires a Go slice or string header")
+		if slice.GoArray && slice.Loc == LocReg {
+			slicePtr = slice.Reg
+			ctx.ProtectReg(slicePtr)
+		} else if slice.Loc != LocRegTriple && slice.Loc != LocRegPair {
+			panic(fmt.Sprintf("jit: slice element address requires a Go slice, string header, or array (loc=%d array=%t id=%d)", slice.Loc, slice.GoArray, slice.ID))
+		} else {
+			slicePtr = slice.Reg
+			ctx.ProtectReg(slicePtr)
 		}
-		slicePtr = slice.Reg
-		ctx.ProtectReg(slicePtr)
 	}
 	ctx.EnsureDesc(index)
 	excluded := []Reg{slicePtr}
@@ -569,6 +636,80 @@ func (ctx *JITContext) EmitSliceElementAddress(slice, index *JITValueDesc, eleme
 	return result
 }
 
+// EmitLoadScalarSliceElement fuses IndexAddr+Deref for scalar slices. The
+// transient data pointer uses the architecture scratch register, so an indexed
+// load does not introduce an address lifetime into the general allocator.
+func (ctx *JITContext) EmitLoadScalarSliceElement(slice, index *JITValueDesc, elementSize int32, valueType uint8) JITValueDesc {
+	ctx.SyncDesc(index)
+	ctx.EnsureDesc(index)
+	excluded := []Reg{ctx.ScratchReg}
+	if index.Loc == LocReg {
+		excluded = append(excluded, index.Reg)
+	} else if index.Loc != LocImm {
+		panic("jit: indexed scalar load requires an integer index")
+	}
+	result := ctx.AllocRegExcept(excluded...)
+	ctx.SyncDesc(slice)
+	switch slice.Loc {
+	case LocMem:
+		if !slice.GoArray {
+			ctx.FreeReg(result)
+			panic("jit: fixed-memory indexed load requires an array descriptor")
+		}
+		ctx.EmitMovRegImm64(ctx.ScratchReg, uint64(slice.MemPtr))
+	case LocStackPair, LocStackTriple:
+		base := ctx.StackReg
+		if slice.StackOff < 0 {
+			base = ctx.FrameReg
+		}
+		ctx.EmitMovRegMem(ctx.ScratchReg, base, slice.StackOff)
+	case LocRegPair, LocRegTriple:
+		ctx.EmitMovRegReg(ctx.ScratchReg, slice.Reg)
+	case LocReg:
+		if !slice.GoArray {
+			panic("jit: scalar indexed load requires a slice or array")
+		}
+		ctx.EmitMovRegReg(ctx.ScratchReg, slice.Reg)
+	case LocStack:
+		if !slice.GoArray {
+			panic("jit: scalar indexed load requires a slice or array")
+		}
+		base := ctx.StackReg
+		if slice.StackOff < 0 {
+			base = ctx.FrameReg
+		}
+		ctx.EmitMovRegMem(ctx.ScratchReg, base, slice.StackOff)
+	default:
+		ctx.FreeReg(result)
+		panic("jit: scalar indexed load requires a materialized slice")
+	}
+	if index.Loc == LocImm {
+		offset := index.Imm.Int() * int64(elementSize)
+		if offset < math.MinInt32 || offset > math.MaxInt32 {
+			ctx.FreeReg(result)
+			panic("jit: constant slice offset exceeds x86 displacement")
+		}
+		switch elementSize {
+		case 1:
+			ctx.EmitMovRegMemB(result, ctx.ScratchReg, int32(offset))
+		case 2:
+			ctx.EmitMovRegMemW(result, ctx.ScratchReg, int32(offset))
+		case 4:
+			ctx.EmitMovRegMemL(result, ctx.ScratchReg, int32(offset))
+		case 8:
+			ctx.EmitMovRegMem(result, ctx.ScratchReg, int32(offset))
+		default:
+			ctx.FreeReg(result)
+			panic("jit: unsupported scalar slice element width")
+		}
+	} else {
+		ctx.EmitMovRegBaseIndex(result, ctx.ScratchReg, index.Reg, uint8(elementSize), elementSize)
+	}
+	desc := JITValueDesc{Loc: LocReg, Type: valueType, Reg: result, NoHeapPointer: true}
+	ctx.BindReg(result, &desc)
+	return desc
+}
+
 // EnsureGoStringHeader materializes a Go string's data pointer and length as
 // the same two-word descriptor used by ABI calls and indexed loads.
 func (ctx *JITContext) EnsureGoStringHeader(value *JITValueDesc) {
@@ -594,6 +735,7 @@ func (ctx *JITContext) EnsureGoStringHeader(value *JITValueDesc) {
 // slice header into three registers. Callers pass registers that already hold
 // the new pointer/length so allocation cannot destroy them.
 func (ctx *JITContext) EmitSliceCapAfterLow(slice, low *JITValueDesc, excluded ...Reg) Reg {
+	ctx.ReclaimUntrackedRegs()
 	ctx.SyncDesc(slice)
 	ctx.SyncDesc(low)
 	ctx.EnsureDesc(low)
@@ -633,6 +775,7 @@ func (ctx *JITContext) EmitSliceCapAfterLow(slice, low *JITValueDesc, excluded .
 // EmitSliceDataAfterLow computes slice.data + low*elementSize without assuming
 // that a control-flow-stabilized slice header still occupies registers.
 func (ctx *JITContext) EmitSliceDataAfterLow(slice, low *JITValueDesc, elementSize int32, excluded ...Reg) Reg {
+	ctx.ReclaimUntrackedRegs()
 	ctx.SyncDesc(slice)
 	ctx.SyncDesc(low)
 	ctx.EnsureDesc(low)
@@ -657,7 +800,7 @@ func (ctx *JITContext) EmitSliceDataAfterLow(slice, low *JITValueDesc, elementSi
 	default:
 		ctx.EnsureDesc(slice)
 		if slice.Loc != LocRegPair && slice.Loc != LocRegTriple {
-			panic("jit: slice data requires a Go slice or string header")
+			panic(fmt.Sprintf("jit: slice data requires a Go slice or string header (loc=%d type=%d id=%d)", slice.Loc, slice.Type, slice.ID))
 		}
 		ctx.EmitMovRegReg(result, slice.Reg)
 	}
@@ -767,6 +910,255 @@ func (ctx *JITContext) EmitStoreScmerAt(address, value *JITValueDesc) {
 	}
 }
 
+// EmitStoreScmerSliceElement fuses the SSA IndexAddr+Store pair. Numeric and
+// nil Scmers have a statically non-heap pointer word, so they can be written
+// without a write barrier. In that case the dedicated architecture scratch
+// register carries the transient address and never consumes an allocator slot.
+// This distinction matters inside generated bulk-reader loops: making the
+// address an ordinary descriptor can otherwise evict every live loop value.
+// Pointer-bearing values deliberately retain EmitStoreScmerAt's authoritative
+// Go write-barrier path.
+func (ctx *JITContext) EmitStoreScmerSliceElement(slice, index, value *JITValueDesc, elementSize int32) {
+	if ctx.TryEmitStoreScmerSliceElement(slice, index, value, elementSize) {
+		return
+	}
+	address := ctx.EmitSliceElementAddress(slice, index, elementSize)
+	ctx.EmitStoreScmerAt(&address, value)
+	ctx.FreeDesc(&address)
+}
+
+// TryEmitStoreScmerSliceElement reports whether it emitted a safepoint-free
+// direct store. Callers which need a source value after the store can defer
+// rooting/spilling that value until this returns false, rather than charging
+// numeric bulk loops for a Go-call boundary which is not present in their
+// specialized machine code.
+func (ctx *JITContext) TryEmitStoreScmerSliceElement(slice, index, value *JITValueDesc, elementSize int32) bool {
+	switch value.Type {
+	case tagNil, tagFloat, tagInt, tagBool, tagDate, tagNthLocalVar:
+		value.NoHeapPointer = true
+	}
+	if !value.NoHeapPointer {
+		return false
+	}
+	return ctx.emitDirectScmerSliceElement(slice, index, value, elementSize)
+}
+
+// AdoptDescPrefix transfers the live prefix of an incoming ABI descriptor to
+// a long-lived generated home. Storage source annotations use this only when
+// SSA proves that the remaining words are never read: for example, a write-only
+// slice needs its data pointer but neither len nor cap. Releasing those dead ABI
+// lanes is important because a one-pass loop otherwise carries three registers
+// for a value whose machine-code use is a single addressing operand.
+//
+// This operation is valid only before the generated CFG starts. A conservative
+// storage retry does not call it and retains the complete Go value for GC-safe
+// call boundaries.
+func (ctx *JITContext) AdoptDescPrefix(source, home *JITValueDesc, words uint8) {
+	ctx.SyncDesc(source)
+	*home = *source
+	available := uint8(0)
+	switch source.Loc {
+	case LocReg:
+		available = 1
+	case LocRegPair:
+		available = 2
+	case LocRegTriple:
+		available = 3
+	default:
+		panic("jit: ABI descriptor prefix requires registers")
+	}
+	if words == 0 || words > available {
+		panic("jit: invalid ABI descriptor prefix width")
+	}
+	regs := [...]Reg{source.Reg, source.Reg2, source.Reg3}
+	for lane := words; lane < available; lane++ {
+		reg := regs[lane]
+		ctx.RegOwners[reg] = nil
+		ctx.FreeRegs |= uint64(1) << uint(reg)
+	}
+	switch words {
+	case 1:
+		home.Loc = LocReg
+		home.Reg2 = 0
+		home.Reg3 = 0
+		// A narrowed slice is an addressable Go array from this point on. This
+		// lets the common indexed load/store emitters consume its data pointer.
+		home.GoArray = available > 1
+		ctx.BindReg(home.Reg, home)
+	case 2:
+		home.Loc = LocRegPair
+		home.Reg3 = 0
+		ctx.BindReg(home.Reg, home)
+		ctx.BindReg(home.Reg2, home)
+	case 3:
+		ctx.BindReg(home.Reg, home)
+		ctx.BindReg(home.Reg2, home)
+		ctx.BindReg(home.Reg3, home)
+	}
+}
+
+// ProtectDescRegisters pins an ABI descriptor while a call-free storage CFG is
+// emitted. The operation affects allocator metadata only; it emits no machine
+// instruction and is consequently architecture-independent.
+func (ctx *JITContext) ProtectDescRegisters(value *JITValueDesc) {
+	ctx.SyncDesc(value)
+	switch value.Loc {
+	case LocReg:
+		ctx.ProtectReg(value.Reg)
+	case LocRegPair:
+		ctx.ProtectReg(value.Reg)
+		ctx.ProtectReg(value.Reg2)
+	case LocRegTriple:
+		ctx.ProtectReg(value.Reg)
+		ctx.ProtectReg(value.Reg2)
+		ctx.ProtectReg(value.Reg3)
+	}
+}
+
+// UnprotectDescRegisters balances ProtectDescRegisters after the generated
+// emitter has finished selecting placements.
+func (ctx *JITContext) UnprotectDescRegisters(value *JITValueDesc) {
+	ctx.SyncDesc(value)
+	switch value.Loc {
+	case LocReg:
+		ctx.UnprotectReg(value.Reg)
+	case LocRegPair:
+		ctx.UnprotectReg(value.Reg2)
+		ctx.UnprotectReg(value.Reg)
+	case LocRegTriple:
+		ctx.UnprotectReg(value.Reg3)
+		ctx.UnprotectReg(value.Reg2)
+		ctx.UnprotectReg(value.Reg)
+	}
+}
+
+func (ctx *JITContext) emitDirectScmerSliceElement(slice, index, value *JITValueDesc, elementSize int32) bool {
+	ctx.SyncDesc(slice)
+	ctx.SyncDesc(index)
+	ctx.SyncDesc(value)
+	ctx.EnsureDesc(index)
+	ctx.EnsureDesc(value)
+	ctx.SyncDesc(slice)
+	ctx.SyncDesc(index)
+	ctx.SyncDesc(value)
+	if index.Loc != LocImm && index.Loc != LocReg {
+		return false
+	}
+	if value.Loc != LocImm && value.Loc != LocReg && value.Loc != LocRegPair {
+		return false
+	}
+
+	word0, word1 := uintptr(0), uint64(0)
+	immediateStore := false
+	if value.Loc == LocImm {
+		word0, word1 = value.Imm.RawWords()
+		immediateStore = uint64(int64(int32(word0))) == uint64(word0) &&
+			uint64(int64(int32(word1))) == word1
+	}
+	// One temporary word is sufficient for constants outside x86's signed
+	// imm32 store range and for the type pointer of an unboxed scalar. The value
+	// itself remains in its producer register.
+	temporary := Reg(0)
+	if value.Loc != LocRegPair && !immediateStore {
+		excluded := []Reg{ctx.ScratchReg}
+		if index.Loc == LocReg {
+			excluded = append(excluded, index.Reg)
+		}
+		if value.Loc == LocReg {
+			excluded = append(excluded, value.Reg)
+		}
+		temporary = ctx.AllocRegExcept(excluded...)
+	}
+
+	emitAddress := func() bool {
+		ctx.SyncDesc(slice)
+		switch slice.Loc {
+		case LocStackPair, LocStackTriple:
+			base := ctx.StackReg
+			if slice.StackOff < 0 {
+				base = ctx.FrameReg
+			}
+			ctx.EmitMovRegMem(ctx.ScratchReg, base, slice.StackOff)
+		case LocRegPair, LocRegTriple:
+			ctx.EmitMovRegReg(ctx.ScratchReg, slice.Reg)
+		default:
+			if slice.GoArray && slice.Loc == LocReg {
+				ctx.EmitMovRegReg(ctx.ScratchReg, slice.Reg)
+			} else if slice.GoArray && slice.Loc == LocStack {
+				base := ctx.StackReg
+				if slice.StackOff < 0 {
+					base = ctx.FrameReg
+				}
+				ctx.EmitMovRegMem(ctx.ScratchReg, base, slice.StackOff)
+			} else {
+				return false
+			}
+		}
+		if index.Loc == LocImm {
+			offset := index.Imm.Int() * int64(elementSize)
+			if offset < math.MinInt32 || offset > math.MaxInt32 {
+				return false
+			}
+			ctx.EmitAddRegImm32(ctx.ScratchReg, int32(offset))
+			return true
+		}
+		switch elementSize {
+		case 1, 2, 4, 8:
+			ctx.EmitLeaRegBaseIndex(ctx.ScratchReg, ctx.ScratchReg, index.Reg, uint8(elementSize))
+		case 16:
+			// x86 SIB scales stop at eight. Two dependent LEAs are still much
+			// cheaper than spilling the surrounding loop to obtain an address.
+			ctx.EmitLeaRegBaseIndex(ctx.ScratchReg, ctx.ScratchReg, index.Reg, 8)
+			ctx.EmitLeaRegBaseIndex(ctx.ScratchReg, ctx.ScratchReg, index.Reg, 8)
+		default:
+			return false
+		}
+		return true
+	}
+
+	if !emitAddress() {
+		if value.Loc != LocRegPair && !immediateStore {
+			ctx.FreeReg(temporary)
+		}
+		return false
+	}
+	switch value.Loc {
+	case LocImm:
+		if immediateStore {
+			ctx.EmitStoreImm32Mem(ctx.ScratchReg, 0, int32(word0))
+			ctx.EmitStoreImm32Mem(ctx.ScratchReg, 8, int32(word1))
+		} else {
+			ctx.EmitMovRegImm64(temporary, uint64(word0))
+			ctx.EmitStoreRegMem(temporary, ctx.ScratchReg, 0)
+			ctx.EmitMovRegImm64(temporary, word1)
+			ctx.EmitStoreRegMem(temporary, ctx.ScratchReg, 8)
+		}
+	case LocRegPair:
+		ctx.EmitStoreRegMem(value.Reg, ctx.ScratchReg, 0)
+		ctx.EmitStoreRegMem(value.Reg2, ctx.ScratchReg, 8)
+	case LocReg:
+		var tagWord uintptr
+		switch value.Type {
+		case tagInt:
+			tagWord, _ = NewInt(0).RawWords()
+		case tagFloat:
+			tagWord, _ = NewFloat(0).RawWords()
+		case tagNil, tagBool:
+			tagWord = 0
+		default:
+			ctx.FreeReg(temporary)
+			return false
+		}
+		ctx.EmitMovRegImm64(temporary, uint64(tagWord))
+		ctx.EmitStoreRegMem(temporary, ctx.ScratchReg, 0)
+		ctx.EmitStoreRegMem(value.Reg, ctx.ScratchReg, 8)
+	}
+	if value.Loc != LocRegPair && !immediateStore {
+		ctx.FreeReg(temporary)
+	}
+	return true
+}
+
 // EmitLoadScmerToStack lets a slice-element producer write directly into a
 // stack-backed consumer (most importantly a phi slot) without first occupying
 // two allocator registers for the Scmer pair.
@@ -872,6 +1264,25 @@ func (ctx *JITContext) EmitCopyDescWords(dst, src *JITValueDesc, words int) {
 	if dst.StackOff < 0 {
 		dstBase = ctx.FrameReg
 	}
+	if src.Loc == LocImm {
+		if words != 1 {
+			panic("jit: multiword immediate descriptor copy")
+		}
+		var word uint64
+		switch src.Type {
+		case tagFloat:
+			word = math.Float64bits(src.Imm.Float())
+		case tagBool:
+			if src.Imm.Bool() {
+				word = 1
+			}
+		default:
+			word = uint64(src.Imm.Int())
+		}
+		ctx.EmitMovRegImm64(ctx.ScratchReg, word)
+		ctx.EmitStoreRegMem(ctx.ScratchReg, dstBase, dst.StackOff)
+		return
+	}
 	if src.Loc == LocStack || src.Loc == LocStackPair || src.Loc == LocStackTriple {
 		srcBase := ctx.StackReg
 		if src.StackOff < 0 {
@@ -909,6 +1320,54 @@ func (ctx *JITContext) EmitCopyScmerToDesc(dst, src *JITValueDesc) {
 	}
 }
 
+// EmitStoreScalarAt stores a raw Go scalar through an address descriptor.
+// Unlike EmitStoreScmerAt, it respects the pointee width and does not write a
+// two-word Scheme value into compact Go arrays such as []uint32 or []bool.
+func (ctx *JITContext) EmitStoreScalarAt(address, value *JITValueDesc, width int) {
+	ctx.SyncDesc(address)
+	ctx.EnsureDesc(address)
+	if address.Loc != LocReg {
+		panic("jit: scalar store address is not a register")
+	}
+	ctx.ProtectReg(address.Reg)
+	ctx.SyncDesc(value)
+	valueReg := value.Reg
+	if value.Loc == LocImm {
+		var word uint64
+		switch value.Type {
+		case tagFloat:
+			word = math.Float64bits(value.Imm.Float())
+		case tagBool:
+			if value.Imm.Bool() {
+				word = 1
+			}
+		default:
+			word = uint64(value.Imm.Int())
+		}
+		ctx.EmitMovRegImm64(ctx.ScratchReg, word)
+		valueReg = ctx.ScratchReg
+	} else {
+		ctx.EnsureDesc(value)
+		if value.Loc != LocReg {
+			panic("jit: scalar store value is not a register")
+		}
+		valueReg = value.Reg
+	}
+	switch width {
+	case 1:
+		ctx.EmitStoreRegMemB(valueReg, address.Reg, 0)
+	case 2:
+		ctx.EmitStoreRegMemW(valueReg, address.Reg, 0)
+	case 4:
+		ctx.EmitStoreRegMemL(valueReg, address.Reg, 0)
+	case 8:
+		ctx.EmitStoreRegMem(valueReg, address.Reg, 0)
+	default:
+		panic("jit: unsupported scalar store width")
+	}
+	ctx.UnprotectReg(address.Reg)
+}
+
 // EmitZeroDescWords writes a typed Go zero value into an existing stack home.
 // It is primarily used for nil pointers, slices, interfaces, and functions in
 // multi-result inlined helpers, whose width is known from the Go signature.
@@ -942,6 +1401,11 @@ func (ctx *JITContext) PreparePointerStackTarget(off int32, words int) {
 // home at its producer. Machine code in successor blocks can then be entered
 // repeatedly without depending on the allocator state used while those blocks
 // were emitted once.
+//
+// This operation changes the canonical runtime location. Consumers must not
+// accidentally turn the canonical descriptor back into a register-resident
+// cross-block contract merely by loading it: a register reload is a block-local
+// materialization, while predecessor edges continue to write this stack slot.
 func (ctx *JITContext) StabilizeDescForControlFlow(desc *JITValueDesc) {
 	ctx.SyncDesc(desc)
 	words := int32(0)
@@ -982,6 +1446,58 @@ func (ctx *JITContext) StabilizeDescForControlFlow(desc *JITValueDesc) {
 	case LocRegTriple:
 		desc.Loc = LocStackTriple
 	}
+}
+
+// EmitIsStringBorrowed implements Scmer.IsString without consuming src.
+// Strings have three representations, so an exact tagString comparison is
+// insufficient for compressed and binary string values produced by storages.
+func (ctx *JITContext) EmitIsStringBorrowed(src *JITValueDesc, result JITValueDesc) JITValueDesc {
+	isStringTag := func(tag uint8) bool {
+		return tag == tagString || tag == tagCString || tag == tagBString
+	}
+	if src.Loc == LocImm {
+		value := JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(isStringTag(src.Imm.GetTag()))}
+		if result.Loc == LocAny {
+			return value
+		}
+		ctx.EmitMakeBool(result, value)
+		return result
+	}
+	if src.Type != JITTypeUnknown {
+		value := JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(isStringTag(src.Type))}
+		if result.Loc == LocAny {
+			return value
+		}
+		ctx.EmitMakeBool(result, value)
+		return result
+	}
+
+	tmp := *src
+	tmp.ID = 0
+	ctx.EnsureDesc(&tmp)
+	ctx.ProtectReg(tmp.Reg)
+	ctx.ProtectReg(tmp.Reg2)
+	tagReg := ctx.AllocRegExcept(tmp.Reg, tmp.Reg2)
+	rangeReg := ctx.AllocRegExcept(tmp.Reg, tmp.Reg2, tagReg)
+	ctx.UnprotectReg(tmp.Reg2)
+	ctx.UnprotectReg(tmp.Reg)
+	ctx.EmitGetTagRegs(tagReg, tmp.Reg, tmp.Reg2)
+	ctx.EmitMovRegReg(rangeReg, tagReg)
+	ctx.EmitSubRegImm32(rangeReg, int32(tagCString))
+	ctx.EmitCmpRegImm32(rangeReg, int32(tagBString-tagCString))
+	ctx.EmitSetcc(rangeReg, CondUnsignedBelowOrEqual)
+	ctx.EmitCmpRegImm32(tagReg, int32(tagString))
+	ctx.EmitSetcc(tagReg, CondEqual)
+	ctx.EmitOrInt64(tagReg, rangeReg)
+	ctx.FreeReg(rangeReg)
+	value := JITValueDesc{Loc: LocReg, Type: tagBool, Reg: tagReg}
+	ctx.BindReg(tagReg, &value)
+	if result.Loc == LocAny {
+		return value
+	}
+	ctx.EmitMakeBool(result, value)
+	ctx.FreeDesc(&value)
+	return result
 }
 
 // StabilizeDescAcrossNestedCall moves a value into the non-reusable spill zone.

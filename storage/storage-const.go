@@ -28,8 +28,9 @@ import "unsafe"
 // StorageConst stores a column where every row has the same value.
 // Zero per-element overhead: only the single constant value is stored.
 type StorageConst struct {
+	storageJITFunctions
 	value scm.Scmer `jit:"immutable-after-finish"`
-	count uint64
+	count uint64    `jit:"immutable-after-finish"`
 }
 
 func (s *StorageConst) String() string {
@@ -68,17 +69,12 @@ func (s *StorageConst) GetValueMulti(recids []uint32, target []scm.Scmer, stride
 	}
 }
 
-func (s *StorageConst) GetCachedReader() ColumnReader { return s }
+func (s *StorageConst) GetCachedReader() ColumnReader { return s.storageJITFunctions.reader(s) }
 
-func (s *StorageConst) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc {
+func (s *StorageConst) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc {
 	/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 	ctx.TrackPointer(unsafe.Pointer(s))
-	thisptrPinned := thisptr.Loc == scm.LocReg
-	thisptrPinnedReg := thisptr.Reg
-	if thisptrPinned {
-		ctx.ProtectReg(thisptrPinnedReg)
-		defer ctx.UnprotectReg(thisptrPinnedReg)
-	}
+	thisptr := scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(int64(uintptr(unsafe.Pointer(s)))), NoHeapPointer: true}
 	ctx.FreeDesc(&idx)
 	var d0 scm.JITValueDesc
 	if thisptr.Loc == scm.LocImm {
@@ -108,28 +104,8 @@ func (s *StorageConst) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, id
 		ctx.BindReg(result.Reg, &result)
 		ctx.BindReg(result.Reg2, &result)
 	}
-	ctx.SyncDesc(&d0)
-	if d0.Loc == scm.LocRegPair || d0.Loc == scm.LocStackPair || d0.Loc == scm.LocInputPair {
-		ctx.EmitMovPairToResult(&d0, &result)
-		result.Type = d0.Type
-	} else {
-		switch d0.Type {
-		case scm.TagBool:
-			ctx.EmitMakeBool(result, d0)
-			result.Type = scm.TagBool
-		case scm.TagInt:
-			ctx.EmitMakeInt(result, d0)
-			result.Type = scm.TagInt
-		case scm.TagFloat:
-			ctx.EmitMakeFloat(result, d0)
-			result.Type = scm.TagFloat
-		case scm.TagNil:
-			ctx.EmitMakeNil(result)
-			result.Type = scm.TagNil
-		default:
-			panic("jit: single-block scalar return with unknown type")
-		}
-	}
+	ctx.EmitMovPairToResult(&d0, &result)
+	result.Type = d0.Type
 	return result
 	return result
 }
@@ -139,7 +115,7 @@ func (s *StorageConst) scan(i uint32, value scm.Scmer)            {}
 func (s *StorageConst) proposeCompression(i uint32) ColumnStorage { return nil }
 func (s *StorageConst) init(i uint32)                             { s.count = uint64(i) }
 func (s *StorageConst) build(i uint32, value scm.Scmer)           { s.value = value } // all rows identical; last assignment wins
-func (s *StorageConst) finish()                                   {}
+func (s *StorageConst) finish()                                   { s.storageJITFunctions.finish(s) }
 
 // Serialize: magic 41 + uint64 count + JSON-encoded value
 func (s *StorageConst) Serialize(f io.Writer) {

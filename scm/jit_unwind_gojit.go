@@ -91,13 +91,21 @@ func publishJITStackMaps(a *jitArena, maps []jitStackMap) {
 			panic("jit: invalid empty unwind frame")
 		}
 		if maps[i].entry {
+			frameWords := maps[i].entryFrameWords
+			pointerMap := maps[i].entryPointerMap
+			if frameWords == 0 {
+				// Variadic Scheme entry: return PC followed by slice data,
+				// length and capacity.
+				frameWords = 4
+				pointerMap = []byte{0b00000010}
+			}
 			runtimeMaps[i] = jit.StackMap{
 				PCOffset: maps[i].pcOffset,
 				// The Go-compatible morestack path spills the incoming variadic
 				// slice at SP+8, SP+16 and SP+24. Its data word points into the
 				// caller's JIT frame and must be relocated when copystack moves it.
-				FrameWords:     4,
-				PointerMask:    []byte{0b00000010},
+				FrameWords:     frameWords,
+				PointerMask:    pointerMap,
 				HasUnwind:      true,
 				CallerPCOffset: 0,
 				CallerSPOffset: unsafe.Sizeof(uintptr(0)),

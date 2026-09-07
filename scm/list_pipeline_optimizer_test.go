@@ -78,6 +78,22 @@ func TestJITFusedListPipelinesInlineKnownCallbacks(t *testing.T) {
 	}
 }
 
+func TestJITFusedMappedSumExecutesWithStackPhiHome(t *testing.T) {
+	if !jitEnabled {
+		t.Skip("requires GOEXPERIMENT=jit")
+	}
+	optimized, env := optimizeListPipeline(t, `(lambda (values)
+		(reduce values (lambda (total value) (+ total (* value 2))) 0))`)
+	compiled := jitCompile(Eval(optimized, env))
+	if compiled.Proc() == nil || compiled.Proc().Compiled == nil {
+		t.Fatal("fused mapped sum did not compile")
+	}
+	values := NewSlice([]Scmer{NewInt(1), NewInt(2), NewInt(3)})
+	if got := Apply(compiled, values); !Equal(got, NewInt(12)) {
+		t.Fatalf("fused mapped sum = %s, want 12", String(got))
+	}
+}
+
 func BenchmarkJITFusedReduceFilterMap(b *testing.B) {
 	if !jitEnabled {
 		b.Skip("requires GOEXPERIMENT=jit")

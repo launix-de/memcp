@@ -199,7 +199,7 @@ func main() {
 
 	// Collect operators from AST (for patching byte offsets)
 	var ops []operatorInfo
-	var stInfos []storageInfo
+	var storageFiles []storageASTFile
 	for _, astFile := range pkg.Syntax {
 		fname := fset.Position(astFile.Pos()).Filename
 		abs, _ := filepath.Abs(fname)
@@ -207,8 +207,9 @@ func main() {
 			continue
 		}
 		ops = append(ops, collectOperators(fset, astFile, fname)...)
-		stInfos = append(stInfos, collectStorageMethods(fset, astFile, fname)...)
+		storageFiles = append(storageFiles, storageASTFile{file: astFile, path: fname})
 	}
+	stInfos := collectStorageMethods(storageFiles)
 	for i := range ops {
 		if ops[i].jitExpr == nil {
 			continue
@@ -362,47 +363,45 @@ func main() {
 		}
 	}
 
-	// Process each storage type (pattern 2: ColumnStorage.GetValue → JITEmit)
+	// Process each scalar or bulk storage method. Bulk methods retain their
+	// original SSA loops and encoding-specific batching optimizations.
 	for _, si := range stInfos {
 		if policyOnly {
 			continue
 		}
-		if onlyOp != "" && si.typeName != onlyOp && si.typeName+".GetValue" != onlyOp {
+		if onlyOp != "" && si.typeName != onlyOp && si.typeName+"."+si.sourceName != onlyOp {
 			continue
 		}
-		ssaFn := ssaFuncs[si.getValuePos]
+		ssaFn := ssaFuncs[si.sourcePos]
 		if ssaFn == nil {
-			fmt.Fprintf(os.Stderr, "  %s: %s.GetValue — SSA function not found\n", si.path, si.typeName)
+			fmt.Fprintf(os.Stderr, "  %s: %s.%s — SSA function not found\n", si.path, si.typeName, si.sourceName)
 			continue
 		}
 
-		if dumpOp == si.typeName || dumpOp == si.typeName+".GetValue" {
+		if dumpOp == si.typeName || dumpOp == si.typeName+"."+si.sourceName {
 			dumpSSA(ssaFn)
 		}
 
-		newText, genErr := generateStorageBody(si.typeName, ssaFn, nil)
+		newText, genErr := generateStorageBody(si.typeName, ssaFn, nil, si.stableInputs)
 		if genErr == "" {
-			fmt.Printf("  %s: %s.GetValue OK\n", si.path, si.typeName)
+			fmt.Printf("  %s: %s.%s OK\n", si.path, si.typeName, si.sourceName)
 		} else {
-			fmt.Printf("  %s: %s.GetValue FALLBACK: %s\n", si.path, si.typeName, genErr)
+			fmt.Printf("  %s: %s.%s FALLBACK: %s\n", si.path, si.typeName, si.sourceName, genErr)
 			if verbose {
 				dumpSSA(ssaFn)
 			}
-			// Fallback: emit a Go call to GetValue (unbound method, receiver as first arg)
-			newText = "\n\t/* TODO: " + genErr + " */\n" +
-				"\tctx.TrackPointer(unsafe.Pointer(s))\n" +
-				"\treturn ctx.EmitGoCallScalar(scm.GoFuncAddr((*" + si.typeName + ").GetValue), []scm.JITValueDesc{thisptr, idx}, 2)\n"
+			newText = storageFallbackEmitter(si, genErr)
 		}
 
 		if doPatch {
 			// Patch body of JITEmit method (between { and })
-			bodyStart := fset.Position(si.jitEmitBody.Lbrace).Offset + 1
-			bodyEnd := fset.Position(si.jitEmitBody.Rbrace).Offset
+			bodyStart := fset.Position(si.emitterBody.Lbrace).Offset + 1
+			bodyEnd := fset.Position(si.emitterBody.Rbrace).Offset
 			patches[si.path] = append(patches[si.path], patchEntry{
 				startOff: bodyStart,
 				endOff:   bodyEnd,
 				newText:  "\n" + newText,
-				opName:   si.typeName + ".JITEmit",
+				opName:   si.typeName + "." + si.emitterName,
 			})
 		}
 	}
@@ -836,66 +835,115 @@ func stringLiteral(expr ast.Expr) (string, bool) {
 // --- Storage method collection (pattern 2: ColumnStorage.GetValue → JITEmit) ---
 
 type storageInfo struct {
-	typeName    string         // e.g. "StorageInt"
-	path        string         // source file path
-	recvName    string         // receiver variable name (e.g. "s", "p")
-	getValuePos token.Pos      // position of GetValue func keyword (for SSA lookup)
-	jitEmitBody *ast.BlockStmt // body of JITEmit method (for patching)
+	typeName     string
+	path         string
+	recvName     string
+	sourceName   string
+	emitterName  string
+	sourcePos    token.Pos
+	emitterBody  *ast.BlockStmt
+	stableInputs []string
 }
 
-// collectStorageMethods finds types in f that have both GetValue and JITEmit methods.
-func collectStorageMethods(fset *token.FileSet, f *ast.File, path string) []storageInfo {
+type storageASTFile struct {
+	file *ast.File
+	path string
+}
+
+func storageFallbackEmitter(info storageInfo, reason string) string {
+	header := "\n\t/* TODO: " + reason + " */\n\tctx.TrackPointer(unsafe.Pointer(s))\n\tthisptr := scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(int64(uintptr(unsafe.Pointer(s)))), NoHeapPointer: true}\n"
+	switch info.sourceName {
+	case "GetValue":
+		return header + "\treturn ctx.EmitGoCallScalar(scm.GoFuncAddr((*" + info.typeName + ").GetValue), []scm.JITValueDesc{thisptr, idx}, 2)\n"
+	case "GetValueRange":
+		return header + "\tctx.EmitGoCallVoid(scm.GoFuncAddr((*" + info.typeName + ").GetValueRange), []scm.JITValueDesc{thisptr, recid, count, target, stride})\n\treturn result\n"
+	case "GetValueMulti":
+		return header + "\tctx.EmitGoCallVoid(scm.GoFuncAddr((*" + info.typeName + ").GetValueMulti), []scm.JITValueDesc{thisptr, recids, target, stride})\n\treturn result\n"
+	default:
+		panic("unknown storage getter " + info.sourceName)
+	}
+}
+
+// collectStorageMethods pairs each GetValue variant with its generated emitter.
+// Sources and generated entry points deliberately may live in separate files.
+func collectStorageMethods(files []storageASTFile) []storageInfo {
+	stableInputs := map[string][]string{}
+	const stablePrefix = "jitgen:control-flow-stable "
+	for _, sourceFile := range files {
+		for _, comments := range sourceFile.file.Comments {
+			for _, comment := range comments.List {
+				text := strings.TrimSpace(strings.TrimPrefix(comment.Text, "//"))
+				if !strings.HasPrefix(text, stablePrefix) {
+					continue
+				}
+				fields := strings.Fields(strings.TrimPrefix(text, stablePrefix))
+				if len(fields) < 2 {
+					panic("jitgen: control-flow-stable requires a method and at least one parameter")
+				}
+				stableInputs[fields[0]] = append([]string(nil), fields[1:]...)
+			}
+		}
+	}
 	// First pass: collect all methods by receiver type name
 	type methodInfo struct {
 		funcPos  token.Pos // position of func name (for SSA lookup)
 		body     *ast.BlockStmt
 		recvName string // receiver variable name
+		path     string
 	}
-	getValues := map[string]methodInfo{}
-	jitEmits := map[string]methodInfo{}
+	methods := map[string]map[string]methodInfo{}
 
-	for _, decl := range f.Decls {
-		fn, ok := decl.(*ast.FuncDecl)
-		if !ok || fn.Recv == nil || len(fn.Recv.List) == 0 {
-			continue
-		}
-		// Extract receiver type name (handle *T)
-		recvType := fn.Recv.List[0].Type
-		if star, ok := recvType.(*ast.StarExpr); ok {
-			recvType = star.X
-		}
-		ident, ok := recvType.(*ast.Ident)
-		if !ok {
-			continue
-		}
-		typeName := ident.Name
-		recvName := ""
-		if len(fn.Recv.List[0].Names) > 0 {
-			recvName = fn.Recv.List[0].Names[0].Name
-		}
+	for _, sourceFile := range files {
+		for _, decl := range sourceFile.file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Recv == nil || len(fn.Recv.List) == 0 {
+				continue
+			}
+			// Extract receiver type name (handle *T)
+			recvType := fn.Recv.List[0].Type
+			if star, ok := recvType.(*ast.StarExpr); ok {
+				recvType = star.X
+			}
+			ident, ok := recvType.(*ast.Ident)
+			if !ok {
+				continue
+			}
+			typeName := ident.Name
+			recvName := ""
+			if len(fn.Recv.List[0].Names) > 0 {
+				recvName = fn.Recv.List[0].Names[0].Name
+			}
 
-		switch fn.Name.Name {
-		case "GetValue":
-			getValues[typeName] = methodInfo{funcPos: fn.Name.Pos(), body: fn.Body, recvName: recvName}
-		case "JITEmit":
-			jitEmits[typeName] = methodInfo{funcPos: fn.Name.Pos(), body: fn.Body, recvName: recvName}
+			if methods[typeName] == nil {
+				methods[typeName] = map[string]methodInfo{}
+			}
+			switch fn.Name.Name {
+			case "GetValue", "GetValueRange", "GetValueMulti", "JITEmit", "JITEmitGetValueRange", "JITEmitGetValueMulti":
+				methods[typeName][fn.Name.Name] = methodInfo{funcPos: fn.Name.Pos(), body: fn.Body, recvName: recvName, path: sourceFile.path}
+			}
 		}
 	}
 
-	// Second pass: pair them up
 	var result []storageInfo
-	for typeName, gv := range getValues {
-		je, ok := jitEmits[typeName]
-		if !ok {
-			continue
+	pairs := [...]struct{ source, emitter string }{
+		{"GetValue", "JITEmit"},
+		{"GetValueRange", "JITEmitGetValueRange"},
+		{"GetValueMulti", "JITEmitGetValueMulti"},
+	}
+	for typeName, typeMethods := range methods {
+		for _, pair := range pairs {
+			source, sourceOK := typeMethods[pair.source]
+			emitter, emitterOK := typeMethods[pair.emitter]
+			if !sourceOK || !emitterOK {
+				continue
+			}
+			result = append(result, storageInfo{
+				typeName: typeName, path: emitter.path, recvName: emitter.recvName,
+				sourceName: pair.source, emitterName: pair.emitter,
+				sourcePos: source.funcPos, emitterBody: emitter.body,
+				stableInputs: append([]string(nil), stableInputs[pair.source]...),
+			})
 		}
-		result = append(result, storageInfo{
-			typeName:    typeName,
-			path:        path,
-			recvName:    je.recvName,
-			getValuePos: gv.funcPos,
-			jitEmitBody: je.body,
-		})
 	}
 	return result
 }
@@ -931,8 +979,19 @@ func dumpSSA(fn *ssa.Function) {
 
 // --- codegen ---
 
-// genVal tracks how an SSA value is represented in the generated Go code.
-// goVar is a Go variable name: either a JITValueDesc (isDesc=true) or a Reg.
+// genVal tracks how an SSA value is represented in the generated Go emitter.
+// goVar does not name a value in the final machine program. It names a Go
+// variable which describes where that value will live when the emitted machine
+// program runs: either a JITValueDesc (isDesc=true) or a raw Reg.
+//
+// There are consequently two independent notions of lifetime here:
+//   - SSA lifetime decides whether two runtime values may share a planned home.
+//   - descriptor lifetime is the time during which jitgen-generated Go code may
+//     mutate allocator bookkeeping while it emits the machine program.
+//
+// Conflating the two is a correctness bug. In particular, graph coloring may
+// assign the same physical home to disjoint phis even though all of their Go
+// descriptor variables are declared together at the start of the emitter.
 //
 // Scmer runtime layout contract (important for emitter generation):
 //   - Scmer is split into two machine words: ptr + aux.
@@ -964,16 +1023,25 @@ type genVal struct {
 	hasSliceInput    bool
 	lengthInput      int
 	hasLengthInput   bool
-	pinAcrossBlock   bool // mutable aggregate whose register identity is embedded in another block
-	tuple            []genVal
-	closureFn        *ssa.Function
-	closureBindings  []closureBinding
-	cellName         string
-	cellScope        uint32
-	fieldBaseType    types.Type
-	fieldType        types.Type
-	fieldName        string
-	aggregateType    types.Type
+	// pinAcrossBlock marks a descriptor whose placement is part of the machine
+	// code contract between separately rendered basic blocks. Such a value must
+	// be stabilized before another renderer is allowed to reuse its registers;
+	// copying the descriptor alone does not copy the runtime value.
+	pinAcrossBlock  bool
+	tuple           []genVal
+	closureFn       *ssa.Function
+	closureBindings []closureBinding
+	cellName        string
+	cellScope       uint32
+	fieldBaseType   types.Type
+	fieldType       types.Type
+	fieldName       string
+	aggregateType   types.Type
+	// canonicalIntBits describes the machine representation already guaranteed
+	// by the producer. It prevents widening conversions from re-emitting masks
+	// that the typed ABI or a width-specific load has already established.
+	canonicalIntBits   int
+	canonicalIntSigned bool
 }
 
 type closureBinding struct {
@@ -1011,11 +1079,20 @@ type codeGen struct {
 	bbPhiCount    map[int]int       // BB index → number of phi slots
 	phiStackSize  int               // total bytes reserved on stack for phi nodes (local to current function/inline)
 	phiFrameFixup string            // Go var name for the current function's local phi-frame base
+	registerPlan  staticRegisterPlan
+	phiHomeRegs   map[string]string // SSA phi name → physical register selected by the backend
+	phiHomeOK     map[string]string // SSA phi name → generated availability boolean
 	curBlock      int               // current BB index being generated
+	currentInstr  ssa.Instruction   // caller instruction retained while a nested helper is emitted
 	multiBlock    bool              // true if function has >1 block
 	endLabel      string            // label for shared epilogue (multi-block)
 	storageMode   bool              // true for ColumnStorage.GetValue pattern (vs Declare pattern)
 	typeName      string            // struct type name for FieldAddr (e.g. "StorageInt")
+	// storageInputHomes describes generated ABI descriptors that must survive
+	// every backedge of a bulk reader. words optionally narrows a register-only
+	// emission to a live prefix of a multiword Go value; zero preserves all
+	// words. SSA parameter identifiers are not stable after body substitution.
+	storageInputHomes []storageInputHome
 
 	// Inline call state (non-empty when processing an inlined function)
 	inlineReturnRegVar  string   // Go variable naming the result register (multi-block inline)
@@ -1033,6 +1110,10 @@ type codeGen struct {
 
 	// Reference counting for SSA values (remaining uses)
 	refCounts map[string]int
+	// Values consumed in another basic block have a stable stack home. Their
+	// descriptor must remain nameable while sibling renderers are generated;
+	// global emission-order reference counting cannot free them path-locally.
+	crossBlockValues map[string]bool
 
 	// Scalar values consumed by the constructor returned from the same block.
 	// Arithmetic may produce these directly in result.Reg2.
@@ -1068,6 +1149,11 @@ type codeGen struct {
 	inlineInstructions int
 }
 
+type storageInputHome struct {
+	name  string
+	words uint8
+}
+
 func cloneMap[K comparable, V any](src map[K]V) map[K]V {
 	if src == nil {
 		return nil
@@ -1100,6 +1186,9 @@ func (g *codeGen) clone() *codeGen {
 	clone.phiPair = cloneMap(g.phiPair)
 	clone.phiTriple = cloneMap(g.phiTriple)
 	clone.phiTypeTag = cloneMap(g.phiTypeTag)
+	clone.phiHomeRegs = cloneMap(g.phiHomeRegs)
+	clone.phiHomeOK = cloneMap(g.phiHomeOK)
+	clone.storageInputHomes = append([]storageInputHome(nil), g.storageInputHomes...)
 	clone.bbPhiBase = cloneMap(g.bbPhiBase)
 	clone.bbPhiCount = cloneMap(g.bbPhiCount)
 	clone.fieldCache = cloneMap(g.fieldCache)
@@ -1358,7 +1447,29 @@ func (g *codeGen) emitRestoreClosureDescState(snaps []descSnapshot) {
 
 func (g *codeGen) emitProtectIncomingArgRegs() string {
 	if g.storageMode {
-		return ""
+		// Bulk storage readers contain loops. The optimistic, call-free emission
+		// keeps their ABI descriptors resident; the conservative retry gives each
+		// descriptor a rooted stack home. In either case the home descriptor owns
+		// the location: generated blocks reset their working copies from it, so it
+		// must remain the register owner's stable address throughout codegen.
+		homes := g.storageInputHomeNames()
+		if len(homes) == 0 {
+			return ""
+		}
+		g.emit("storageInputsProtected := ctx.StorageInputsInRegisters")
+		for _, home := range homes {
+			name := home.name
+			g.emit("storage%sHome = %s", strings.Title(name), name)
+			g.emit("if storageInputsProtected {")
+			if home.words != 0 {
+				g.emit("\tctx.AdoptDescPrefix(&%s, &storage%sHome, %d)", name, strings.Title(name), home.words)
+			}
+			g.emit("\tctx.ProtectDescRegisters(&storage%sHome)", strings.Title(name))
+			g.emit("} else {")
+			g.emit("\tctx.StabilizeDescForControlFlow(&storage%sHome)", strings.Title(name))
+			g.emit("}")
+		}
+		return "storageInputsProtected"
 	}
 	// A generated callee may use every register in the shared allocator. Give
 	// incoming register values stable stack homes instead of reserving their
@@ -1370,11 +1481,38 @@ func (g *codeGen) emitProtectIncomingArgRegs() string {
 	return ""
 }
 
+// storageInputHomeNames derives the bulk-reader ABI shape from descriptors
+// already installed by generateStorageBody. This deliberately does not key on
+// the SSA function name: storage source substitution retains the wrapper name
+// in some generator paths while replacing its body with GetValueRange/Multi.
+func (g *codeGen) storageInputHomeNames() []storageInputHome {
+	return g.storageInputHomes
+}
+
 func (g *codeGen) emitUnprotectIncomingArgRegs(pinned string) {
+	if g.storageMode && pinned != "" {
+		for _, home := range g.storageInputHomeNames() {
+			g.emit("if %s { ctx.UnprotectDescRegisters(&storage%sHome) }", pinned, strings.Title(home.name))
+		}
+		return
+	}
 	// Incoming registers are released by the deferred emitter epilogue. Returns
 	// are emitted directly from SSA blocks, so an appended cleanup statement
 	// would be unreachable for single-block functions.
 	_ = pinned
+}
+
+func (g *codeGen) emitStorageInputHomeDeclarations() {
+	for _, input := range g.storageInputHomeNames() {
+		name := strings.Title(input.name)
+		g.emit("var storage%sHome JITValueDesc", name)
+	}
+}
+
+func (g *codeGen) resetStorageInputsToHomes() {
+	for _, home := range g.storageInputHomeNames() {
+		g.emit("%s = storage%sHome", home.name, strings.Title(home.name))
+	}
 }
 
 func (g *codeGen) scopedBBID(bbIdx int) uint64 {
@@ -1702,9 +1840,6 @@ func (g *codeGen) emitGenericStaticCall(name string, callee *ssa.Function, args 
 	results := sig.Results()
 	retWords := 0
 	indirectResult := false
-	if g.storageMode && results.Len() > 1 {
-		return false
-	}
 	if results.Len() == 1 && name == "" {
 		return false
 	}
@@ -1927,7 +2062,15 @@ func (g *codeGen) emitGenericStaticCall(name string, callee *ssa.Function, args 
 	}
 	retType := results.At(0).Type()
 	dv := g.allocDesc()
-	g.emit("%s := ctx.EmitGoCallScalar(GoFuncAddr(%s), []JITValueDesc{%s}, %d)", dv, funcExpr, argList, retWords)
+	if g.crossBlockValues[name] && retWords == 2 && isScmerType(retType) {
+		helper := "JITEmitGoCallScmerToFrame"
+		if g.storageMode {
+			helper = "scm." + helper
+		}
+		g.emit("%s := %s(ctx, GoFuncAddr(%s), []JITValueDesc{%s})", dv, helper, funcExpr, argList)
+	} else {
+		g.emit("%s := ctx.EmitGoCallScalar(GoFuncAddr(%s), []JITValueDesc{%s}, %d)", dv, funcExpr, argList, retWords)
+	}
 	g.emit("%s.NoHeapPointer = %t", dv, resultPointerMasks[0] == 0)
 	if basic, ok := retType.Underlying().(*types.Basic); ok && basic.Kind() == types.Bool {
 		// Go's internal ABI only defines the low byte of a bool result. Clear
@@ -1939,7 +2082,9 @@ func (g *codeGen) emitGenericStaticCall(name string, callee *ssa.Function, args 
 	// Bind and protect GoCall result registers. The nil-ownership from
 	// EmitGoCallScalar prevents spilling, but BindReg makes it trackable.
 	// We protect until freeDeadOperands releases this value.
-	if retWords == 1 {
+	if g.crossBlockValues[name] && retWords == 2 && isScmerType(retType) {
+		// The result already owns a rooted RBP-relative home.
+	} else if retWords == 1 {
 		g.emit("ctx.BindReg(%s.Reg, &%s)", dv, dv)
 	} else if retWords == 2 {
 		g.emit("ctx.BindReg(%s.Reg, &%s)", dv, dv)
@@ -1972,6 +2117,47 @@ func (g *codeGen) emitGenericStaticCall(name string, callee *ssa.Function, args 
 		g.vals[name] = genVal{goVar: dv, isDesc: true, marker: "_aggregate_ptr", pinAcrossBlock: true}
 	}
 	return true
+}
+
+// emitNestedStorageGetter emits a direct native Go call for a nested storage
+// method. The outer GetValue variant still comes from its complete SSA body,
+// while the boundary keeps independently specialized child storages isolated
+// from the parent's register allocator and code-size budget.
+func (g *codeGen) emitNestedStorageGetter(name string, call *ssa.Call, callee *ssa.Function) bool {
+	if !g.storageMode || callee == nil || len(call.Call.Args) == 0 {
+		return false
+	}
+	switch callee.Name() {
+	case "GetValue", "GetValueRange", "GetValueMulti":
+	default:
+		return false
+	}
+
+	receiver := g.resolveValue(call.Call.Args[0])
+	receiverExpr := ""
+	switch {
+	case receiver.marker == "_storage_recv":
+		receiverExpr = "s"
+	case strings.HasPrefix(receiver.marker, "_fieldaddr:") || strings.HasPrefix(receiver.marker, "_fieldconst:"):
+		receiverType := g.sourceTypeExpr(call.Call.Args[0].Type())
+		receiverExpr = fmt.Sprintf("(%s)(unsafe.Pointer(uintptr(unsafe.Pointer(s)) + uintptr(%s)))", receiverType, receiver.offsetExpr)
+	default:
+		return false
+	}
+
+	receiverDesc := g.allocDesc()
+	g.emit("ctx.TrackPointer(unsafe.Pointer(%s))", receiverExpr)
+	g.emit("%s := scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(int64(uintptr(unsafe.Pointer(%s)))), RelocatablePointer: true}", receiverDesc, receiverExpr)
+	receiverName := call.Call.Args[0].Name()
+	previous, existed := g.vals[receiverName]
+	g.vals[receiverName] = genVal{goVar: receiverDesc, isDesc: true}
+	ok := g.emitGenericStaticCall(name, callee, call.Call.Args)
+	if existed {
+		g.vals[receiverName] = previous
+	} else {
+		delete(g.vals, receiverName)
+	}
+	return ok
 }
 
 func (g *codeGen) recordSliceResult(name string, producer ssa.Value, desc string) {
@@ -2324,13 +2510,13 @@ func (g *codeGen) phiSlotOffExpr(bbIdx int, phiIdx int) string {
 	return fmt.Sprintf("int32(bbs[%d].PhiBase)+int32(%d)", bbIdx, phiIdx*phiSlotBytes)
 }
 
-// directPhiTarget returns the stack slot and shape for a producer feeding one
-// phi node on its block's sole outgoing edge. A producer before a branch must
-// not write early: another edge may retain the phi's previous value.
-func (g *codeGen) directPhiTarget(value ssa.Value) (string, JITTargetShape, bool) {
+// directPhiNode returns the sole phi fed by a producer on its block's sole
+// outgoing edge. A producer before a branch must not write early: another edge
+// may retain the phi's previous value.
+func (g *codeGen) directPhiNode(value ssa.Value) (*ssa.Phi, bool) {
 	refs := value.Referrers()
 	if refs == nil {
-		return "", phiTargetScalar, false
+		return nil, false
 	}
 	var phi *ssa.Phi
 	for _, ref := range *refs {
@@ -2339,20 +2525,20 @@ func (g *codeGen) directPhiTarget(value ssa.Value) (string, JITTargetShape, bool
 			continue
 		}
 		if phi != nil && phi != candidate {
-			return "", phiTargetScalar, false
+			return nil, false
 		}
 		phi = candidate
 	}
 	if phi == nil {
-		return "", phiTargetScalar, false
+		return nil, false
 	}
 	producer, ok := value.(ssa.Instruction)
 	if !ok {
-		return "", phiTargetScalar, false
+		return nil, false
 	}
 	producerBlock := producer.Block()
 	if producerBlock == nil || len(producerBlock.Succs) != 1 || producerBlock.Succs[0] != phi.Block() {
-		return "", phiTargetScalar, false
+		return nil, false
 	}
 	directEdge := false
 	for edgeIndex, edge := range phi.Edges {
@@ -2360,11 +2546,20 @@ func (g *codeGen) directPhiTarget(value ssa.Value) (string, JITTargetShape, bool
 			continue
 		}
 		if edgeIndex >= len(phi.Block().Preds) || phi.Block().Preds[edgeIndex] != producerBlock {
-			return "", phiTargetScalar, false
+			return nil, false
 		}
 		directEdge = true
 	}
 	if !directEdge {
+		return nil, false
+	}
+	return phi, true
+}
+
+// directPhiTarget returns the stack slot and shape for a direct phi producer.
+func (g *codeGen) directPhiTarget(value ssa.Value) (string, JITTargetShape, bool) {
+	phi, ok := g.directPhiNode(value)
+	if !ok {
 		return "", phiTargetScalar, false
 	}
 	shape := phiTargetScalar
@@ -2375,6 +2570,9 @@ func (g *codeGen) directPhiTarget(value ssa.Value) (string, JITTargetShape, bool
 	}
 	for phiIdx, candidate := range g.blockPhis(phi.Block().Index) {
 		if candidate == phi {
+			if _, _, planned := g.phiRegisterHome(phi.Name()); planned {
+				return "", phiTargetScalar, false
+			}
 			return g.phiSlotOffExpr(phi.Block().Index, phiIdx), shape, true
 		}
 	}
@@ -2388,6 +2586,129 @@ const (
 	phiTargetPair
 	phiTargetTriple
 )
+
+type plannedRegisterTarget struct {
+	reg       string
+	available string
+	aliases   map[string]bool
+}
+
+// plannedPhiTarget selects the destination home for a scalar producer on an
+// unconditional phi edge. Reusing the old phi's register is legal only after
+// its final use in the producer block; otherwise the allocator chooses another
+// temporary and the edge emits a move.
+func (g *codeGen) plannedPhiTarget(value *ssa.BinOp) plannedRegisterTarget {
+	if value == nil || value.Block() == nil || len(value.Block().Succs) != 1 {
+		return plannedRegisterTarget{}
+	}
+	refs := value.Referrers()
+	if refs == nil {
+		return plannedRegisterTarget{}
+	}
+	var target *ssa.Phi
+	for _, ref := range *refs {
+		phi, ok := ref.(*ssa.Phi)
+		if !ok {
+			continue
+		}
+		if target != nil && target != phi {
+			return plannedRegisterTarget{}
+		}
+		target = phi
+	}
+	if target == nil || target.Block() != value.Block().Succs[0] || isPhiPairType(target.Type()) || isPhiTripleType(target.Type()) {
+		return plannedRegisterTarget{}
+	}
+	reg, available, ok := g.phiRegisterHome(target.Name())
+	if !ok {
+		return plannedRegisterTarget{}
+	}
+	result := plannedRegisterTarget{reg: reg, available: available, aliases: map[string]bool{}}
+	for _, operand := range []ssa.Value{value.X, value.Y} {
+		if operand != target || registerPlanValueUsedAfter(value, operand) {
+			continue
+		}
+		generated, exists := g.vals[operand.Name()]
+		if exists && generated.isDesc {
+			result.aliases[generated.goVar+".Reg"] = true
+		}
+	}
+	return result
+}
+
+func registerPlanValueUsedAfter(producer ssa.Instruction, value ssa.Value) bool {
+	seenProducer := false
+	for _, instruction := range producer.Block().Instrs {
+		if instruction == producer {
+			seenProducer = true
+			continue
+		}
+		if !seenProducer {
+			continue
+		}
+		for _, operand := range instruction.Operands(nil) {
+			if operand != nil && *operand == value {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// ssaValueNeededAfterInstruction answers the path-sensitive part of argument
+// preservation for an inlined helper. References in sibling branches are not
+// live after the current call, while references in successors and loop
+// backedges are. This operates on the existing SSA graph and creates no IR.
+func ssaValueNeededAfterInstruction(instruction ssa.Instruction, value ssa.Value) bool {
+	if instruction == nil || instruction.Block() == nil || value == nil || value.Referrers() == nil {
+		return true
+	}
+	block := instruction.Block()
+	position := -1
+	for index, candidate := range block.Instrs {
+		if candidate == instruction {
+			position = index
+			break
+		}
+	}
+	if position < 0 {
+		return true
+	}
+
+	reachable := map[*ssa.BasicBlock]bool{}
+	queue := append([]*ssa.BasicBlock(nil), block.Succs...)
+	for len(queue) > 0 {
+		candidate := queue[0]
+		queue = queue[1:]
+		if candidate == nil || reachable[candidate] {
+			continue
+		}
+		reachable[candidate] = true
+		queue = append(queue, candidate.Succs...)
+	}
+	for _, reference := range *value.Referrers() {
+		if reference == instruction || reference.Block() == nil {
+			continue
+		}
+		if reference.Block() != block {
+			if reachable[reference.Block()] {
+				return true
+			}
+			continue
+		}
+		for index := position + 1; index < len(block.Instrs); index++ {
+			if block.Instrs[index] == reference {
+				return true
+			}
+		}
+		// A reference earlier in the same block is live only when a successor
+		// reaches the block again, i.e. on a loop backedge.
+		if reachable[block] {
+			return true
+		}
+	}
+	return false
+}
 
 func (g *codeGen) phiValueAlreadyStored(value ssa.Value, targetBBIdx, phiIdx int) bool {
 	phis := g.blockPhis(targetBBIdx)
@@ -2726,6 +3047,20 @@ func (g *codeGen) externalDescVars(block *ssa.BasicBlock) []string {
 
 func (g *codeGen) emitPinDescVars(descVars []string) string {
 	for _, variable := range descVars {
+		storageInput := false
+		if g.storageMode {
+			for _, input := range g.storageInputHomeNames() {
+				storageInput = storageInput || input.name == variable
+			}
+		}
+		if storageInput {
+			// Storage CFG entries reconstruct this working descriptor from its
+			// dedicated home. The optimistic home already reserves the incoming
+			// ABI registers, while the conservative home is already rooted on the
+			// stack. Stabilizing the short-lived working copy here would defeat the
+			// register-resident path on every loop iteration.
+			continue
+		}
 		g.emit("ctx.StabilizeDescForControlFlow(&%s)", variable)
 	}
 	return ""
@@ -2756,8 +3091,13 @@ func (g *codeGen) emitIfClosure(v *ssa.If) {
 	condVar := g.allocDesc()
 	g.emit("%s := %s", condVar, cond.goVar)
 	g.emit("ctx.EnsureDesc(&%s)", condVar)
-	g.emit("if %s.Loc != LocImm && %s.Loc != LocReg {", condVar, condVar)
-	g.emit("\tpanic(\"jit: If condition is neither LocImm nor LocReg\")")
+	if cond.marker == "_flags" {
+		g.emit("if %s.Loc != LocImm && %s.Loc != LocFlags {", condVar, condVar)
+		g.emit("\tpanic(\"jit: fused If condition is neither LocImm nor LocFlags\")")
+	} else {
+		g.emit("if %s.Loc != LocImm && %s.Loc != LocReg {", condVar, condVar)
+		g.emit("\tpanic(\"jit: If condition is neither LocImm nor LocReg\")")
+	}
 	g.emit("}")
 
 	// Constant-pruned branch: recurse into exactly one successor.
@@ -2792,19 +3132,64 @@ func (g *codeGen) emitIfClosure(v *ssa.If) {
 	// successors in general mode.
 	thenLbl := g.ensureBBLabel(thenBB)
 	elseLbl := g.ensureBBLabel(elseBB)
-	thenEdgeLbl := g.allocLabel()
-	elseEdgeLbl := g.allocLabel()
-	g.emit("%s := ctx.ReserveLabel()", thenEdgeLbl)
-	g.emit("%s := ctx.ReserveLabel()", elseEdgeLbl)
-	g.emit("ctx.EmitCmpRegImm32(%s.Reg, 0)", condVar)
-	g.emit("ctx.EmitJump(CondNotEqual, %s)", thenEdgeLbl)
-	g.emit("ctx.EmitJmp(%s)", elseEdgeLbl)
-	g.emit("ctx.MarkLabel(%s)", thenEdgeLbl)
-	g.emitEdgePhiMoves(thenBB, 0)
-	g.emit("ctx.EmitJmp(%s)", thenLbl)
-	g.emit("ctx.MarkLabel(%s)", elseEdgeLbl)
-	g.emitEdgePhiMoves(elseBB, 1)
-	g.emit("ctx.EmitJmp(%s)", elseLbl)
+	thenMoves := g.collectEdgePhiMoves(thenBB, 0)
+	elseMoves := g.collectEdgePhiMoves(elseBB, 1)
+	thenEdgeLbl := thenLbl
+	elseEdgeLbl := elseLbl
+	if len(thenMoves) != 0 {
+		thenEdgeLbl = g.allocLabel()
+		g.emit("%s := ctx.ReserveLabel()", thenEdgeLbl)
+	}
+	if len(elseMoves) != 0 {
+		elseEdgeLbl = g.allocLabel()
+		g.emit("%s := ctx.ReserveLabel()", elseEdgeLbl)
+	}
+	directFallthrough := len(thenMoves) == 0 && len(elseMoves) == 0
+	preferred := g.preferredIfFallthrough(thenBB, elseBB)
+	if directFallthrough && preferred == thenBB {
+		if cond.marker == "_flags" {
+			g.emit("ctx.EmitJump(InvertJITCondition(%s.Condition), %s)", condVar, elseLbl)
+		} else {
+			g.emit("ctx.EmitCmpRegImm32(%s.Reg, 0)", condVar)
+			g.emit("ctx.EmitJump(CondEqual, %s)", elseLbl)
+		}
+	} else {
+		if cond.marker == "_flags" {
+			g.emit("ctx.EmitJump(%s.Condition, %s)", condVar, thenEdgeLbl)
+		} else {
+			g.emit("ctx.EmitCmpRegImm32(%s.Reg, 0)", condVar)
+			g.emit("ctx.EmitJump(CondNotEqual, %s)", thenEdgeLbl)
+		}
+		if !directFallthrough {
+			g.emit("ctx.EmitJmp(%s)", elseEdgeLbl)
+		}
+	}
+	if cond.marker == "_flags" {
+		g.emit("ctx.FreeDesc(&%s)", cond.goVar)
+	}
+	// Edge helpers are mutually exclusive machine-code paths. Emitting the
+	// first helper may spill a live descriptor while preparing its phi moves;
+	// that edge-local spill does not dominate the other helper. Restore the
+	// compiler allocation and descriptor state before emitting either sibling,
+	// otherwise the second helper can load from a stack slot initialized only
+	// by the first one.
+	edgeSnaps := g.emitSaveClosureDescState(g.allClosureDescVars())
+	edgeAllocSnap := g.allocTemp("alloc")
+	g.emit("%s := ctx.SnapshotAllocState()", edgeAllocSnap)
+	if len(thenMoves) != 0 {
+		g.emit("ctx.MarkLabel(%s)", thenEdgeLbl)
+		g.emitEdgePhiMoves(thenBB, 0)
+		g.emit("ctx.EmitJmp(%s)", thenLbl)
+	}
+	g.emit("ctx.RestoreAllocState(%s)", edgeAllocSnap)
+	g.emitRestoreClosureDescState(edgeSnaps)
+	if len(elseMoves) != 0 {
+		g.emit("ctx.MarkLabel(%s)", elseEdgeLbl)
+		g.emitEdgePhiMoves(elseBB, 1)
+		g.emit("ctx.EmitJmp(%s)", elseLbl)
+	}
+	g.emit("ctx.RestoreAllocState(%s)", edgeAllocSnap)
+	g.emitRestoreClosureDescState(edgeSnaps)
 
 	thenPSGeneral := g.allocTemp("ps")
 	elsePSGeneral := g.allocTemp("ps")
@@ -2841,6 +3226,26 @@ func (g *codeGen) emitIfClosure(v *ssa.If) {
 	g.emit("return result")
 }
 
+// comparisonFeedsImmediateIf reports whether a comparison's machine flags can
+// be consumed directly by the block terminator. Keeping this proof in jitgen
+// makes LocFlags deliberately short-lived: the runtime emitter never performs
+// flags liveness analysis and remains a single pass.
+func comparisonFeedsImmediateIf(v *ssa.BinOp) bool {
+	if opToCC(v.Op) == "" {
+		return false
+	}
+	refs := v.Referrers()
+	if refs == nil || len(*refs) != 1 {
+		return false
+	}
+	branch, ok := (*refs)[0].(*ssa.If)
+	if !ok || branch.Cond != v || branch.Block() != v.Block() {
+		return false
+	}
+	instructions := v.Block().Instrs
+	return len(instructions) >= 2 && instructions[len(instructions)-2] == v && instructions[len(instructions)-1] == branch
+}
+
 func (g *codeGen) emitJumpClosure(v *ssa.Jump) {
 	targetBB := v.Block().Succs[0].Index
 	g.emit("if ps.General {")
@@ -2871,7 +3276,7 @@ func (g *codeGen) emitEdgePhiMoves(targetBBIdx int, succPos int) {
 		g.emitProtectDescVars(deps)
 		for i := 0; i < len(moves); i++ {
 			m := moves[i]
-			g.emitPhiMov(m.phiOff, m.edge, m.phiType)
+			g.emitPhiMov(m.phiName, m.phiOff, m.edge, m.phiType)
 		}
 		g.emitUnprotectDescVars(deps)
 		return
@@ -2885,13 +3290,14 @@ func (g *codeGen) emitEdgePhiMoves(targetBBIdx int, succPos int) {
 		g.emitProtectDescVars(deps)
 		for i := start; i < end; i++ {
 			m := moves[i]
-			g.emitPhiMov(m.phiOff, m.edge, m.phiType)
+			g.emitPhiMov(m.phiName, m.phiOff, m.edge, m.phiType)
 		}
 		g.emitUnprotectDescVars(deps)
 	}
 }
 
 type phiEdgeMove struct {
+	phiName string
 	phiOff  string
 	edge    ssa.Value
 	phiType types.Type
@@ -2919,6 +3325,7 @@ func (g *codeGen) collectEdgePhiMoves(targetBBIdx int, succPos int) []phiEdgeMov
 			continue
 		}
 		out = append(out, phiEdgeMove{
+			phiName: phi.Name(),
 			phiOff:  g.phiSlotOffExpr(targetBBIdx, phiIdx),
 			edge:    edge,
 			phiType: phi.Type(),
@@ -2986,49 +3393,69 @@ func (g *codeGen) phiMovesRequireSingleChunk(moves []phiEdgeMove) bool {
 	return false
 }
 
-// emitPhiMov emits a machine-code store from an SSA value to a phi stack slot.
-// phiOff is the stack offset string (e.g. "0", "8", "16").
-func (g *codeGen) emitPhiMov(phiOff string, v ssa.Value, phiType types.Type) {
+func (g *codeGen) emitScalarPhiMove(phiName, phiOff, source string) {
+	if home, available, planned := g.phiRegisterHome(phiName); planned {
+		g.emit("if %s {", available)
+		g.emit("\tctx.EmitMovToReg(%s, %s)", home, source)
+		g.emit("} else {")
+		g.emit("\tctx.EmitStoreToStack(%s, %s)", source, phiOff)
+		g.emit("}")
+		return
+	}
+	g.emit("ctx.EmitStoreToStack(%s, %s)", source, phiOff)
+}
+
+// emitPhiMov emits a machine-code move from an SSA edge value to its planned
+// register home or canonical stack slot.
+func (g *codeGen) emitPhiMov(phiName, phiOff string, v ssa.Value, phiType types.Type) {
 	phiTriple := isPhiTripleType(phiType)
 	phiPair := isPhiPairType(phiType)
 	phiOffHi := "(" + phiOff + ")+8"
 	if c, ok := v.(*ssa.Const); ok {
 		if c.Value == nil {
-			g.emit("ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewInt(0)}, %s)", phiOff)
 			if phiPair {
+				g.emit("ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewInt(0)}, %s)", phiOff)
 				g.emit("ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, %s)", phiOffHi)
+			} else {
+				g.emitScalarPhiMove(phiName, phiOff, "JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewInt(0)}")
 			}
 		} else if c.Value.Kind() == constant.String {
 			sval := constant.StringVal(c.Value)
 			if phiPair {
 				g.emit("ctx.EmitStoreScmerToStack(JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString(%q)}, %s)", sval, phiOff)
 			} else {
-				g.emit("ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString(%q)}, %s)", sval, phiOff)
+				g.emitScalarPhiMove(phiName, phiOff, fmt.Sprintf("JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString(%q)}", sval))
 			}
 		} else if c.Value.Kind() == constant.Bool {
 			bval := constant.BoolVal(c.Value)
+			value := 0
 			if bval {
-				g.emit("ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewInt(1)}, %s)", phiOff)
-			} else {
-				g.emit("ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewInt(0)}, %s)", phiOff)
+				value = 1
 			}
 			if phiPair {
+				g.emit("ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewInt(%d)}, %s)", value, phiOff)
 				g.emit("ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, %s)", phiOffHi)
+			} else {
+				g.emitScalarPhiMove(phiName, phiOff, fmt.Sprintf("JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewInt(%d)}", value))
 			}
 		} else if c.Value.Kind() == constant.Int {
 			ival, _ := constant.Int64Val(c.Value)
 			if signed, bits, ok := intTypeInfo(phiType); ok {
 				ival = normalizeIntConstForType(ival, signed, bits)
 			}
-			g.emit("ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(%d)}, %s)", ival, phiOff)
 			if phiPair {
+				g.emit("ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(%d)}, %s)", ival, phiOff)
 				g.emit("ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, %s)", phiOffHi)
+			} else {
+				g.emitScalarPhiMove(phiName, phiOff, fmt.Sprintf("JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(%d)}", ival))
 			}
 		} else if c.Value.Kind() == constant.Float {
 			fval, _ := constant.Float64Val(c.Value)
-			g.emit("ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagFloat, Imm: NewFloat(%v)}, %s)", fval, phiOff)
 			if phiPair {
+				g.emit("ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagFloat, Imm: NewFloat(%v)}, %s)", fval, phiOff)
 				g.emit("ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, %s)", phiOffHi)
+			} else {
+				g.emitScalarPhiMove(phiName, phiOff, fmt.Sprintf("JITValueDesc{Loc: LocImm, Type: tagFloat, Imm: NewFloat(%v)}", fval))
 			}
 		} else {
 			panic(fmt.Sprintf("unsupported phi constant: %s", c))
@@ -3084,7 +3511,11 @@ func (g *codeGen) emitPhiMov(phiOff string, v ssa.Value, phiType types.Type) {
 				return
 			}
 			g.emit("ctx.EnsureDesc(&%s)", edgeSrc)
-			if signed, bits, ok := intTypeInfo(phiType); ok && bits > 0 && bits < 64 {
+			if signed, bits, ok := intTypeInfo(phiType); ok && bits > 0 && bits < 64 &&
+				(src.canonicalIntBits != bits || src.canonicalIntSigned != signed) {
+				// The producer may already have applied the exact Go-width wrap.
+				// Repeating it on the back edge adds two shifts to every loop
+				// iteration and carries no additional semantic information.
 				tmp := g.allocDesc()
 				g.emit("%s := %s", tmp, edgeSrc)
 				if signed {
@@ -3092,9 +3523,9 @@ func (g *codeGen) emitPhiMov(phiOff string, v ssa.Value, phiType types.Type) {
 				} else {
 					g.emitNormalizeUnsignedNarrow(tmp, bits)
 				}
-				g.emit("ctx.EmitStoreToStack(%s, %s)", tmp, phiOff)
+				g.emitScalarPhiMove(phiName, phiOff, tmp)
 			} else {
-				g.emit("ctx.EmitStoreToStack(%s, %s)", edgeSrc, phiOff)
+				g.emitScalarPhiMove(phiName, phiOff, edgeSrc)
 			}
 			// Note: we do NOT call useOperand here. Phi edge references keep the
 			// value alive (inflated refcount) but are not consumed. This prevents
@@ -3124,7 +3555,7 @@ func (g *codeGen) emitEdgePhiMovesIndent(targetBBIdx int, succPos int, indent st
 			panic(fmt.Sprintf("phi edge index out of range for %s: edge=%d len=%d", phi.Name(), edgeIdx, len(phi.Edges)))
 		}
 		edge := phi.Edges[edgeIdx]
-		g.emitPhiMov(g.phiSlotOffExpr(targetBBIdx, phiIdx), edge, phi.Type())
+		g.emitPhiMov(phi.Name(), g.phiSlotOffExpr(targetBBIdx, phiIdx), edge, phi.Type())
 		phiIdx++
 	}
 }
@@ -3221,6 +3652,66 @@ func (g *codeGen) allocPhiRegs() {
 	}
 }
 
+func (g *codeGen) emitRegisterHomes() {
+	if g.registerPlan.colorCount == 0 {
+		return
+	}
+	homes := g.allocTemp("registerHomes")
+	planItems := make([]string, 0, len(g.registerPlan.slots))
+	for _, slot := range g.registerPlan.slots {
+		weight := slot.weight
+		if weight > 65535 {
+			weight = 65535
+		}
+		planItems = append(planItems, fmt.Sprintf("{Color: %d, Width: %d, Cost: %d}", slot.color, slot.width, weight))
+	}
+	g.emit("%s := ctx.AllocRegisterHomes(JITRegisterPlan{Slots: [16]JITRegisterSlot{%s}, Count: %d})", homes, strings.Join(planItems, ", "), len(planItems))
+	g.emit("defer ctx.ReleaseRegisterHomes(%s)", homes)
+
+	names := make([]string, 0, len(g.registerPlan.colorByValue))
+	for name := range g.registerPlan.colorByValue {
+		names = append(names, name)
+	}
+	sort.Slice(names, func(i, j int) bool {
+		left, _ := strconv.Atoi(g.phiRegs[names[i]])
+		right, _ := strconv.Atoi(g.phiRegs[names[j]])
+		return left < right
+	})
+	for _, name := range names {
+		color := g.registerPlan.colorByValue[name]
+		width := g.registerPlan.widthByValue[name]
+		if width == 0 {
+			width = 1
+		}
+		reg := g.allocReg()
+		available := g.allocTemp("phiHomeOK")
+		g.emit("var %s %s", reg, g.regTypeName())
+		mask := (1 << width) - 1
+		g.emit("%s := %s.Available&(uint16(%d)<<%d) == uint16(%d)<<%d", available, homes, mask, color, mask, color)
+		g.emit("if %s { %s = %s.Registers[%d] }", available, reg, homes, color)
+		g.phiHomeRegs[name] = reg
+		g.phiHomeOK[name] = available
+	}
+}
+
+func (g *codeGen) regTypeName() string {
+	if g.storageMode {
+		return "scm.Reg"
+	}
+	return "Reg"
+}
+
+func (g *codeGen) phiRegisterHome(name string) (reg, available string, ok bool) {
+	if g.registerPlan.widthByValue[name] != 1 {
+		return "", "", false
+	}
+	reg, ok = g.phiHomeRegs[name]
+	if !ok {
+		return "", "", false
+	}
+	return reg, g.phiHomeOK[name], true
+}
+
 // initAllPhiDescs materializes descriptors for all phi values so resolveValue
 // works independently from BB declaration order while emitting recursive
 // renderers.
@@ -3252,7 +3743,16 @@ func (g *codeGen) initAllPhiDescs() {
 				g.emit("%s := JITValueDesc{Loc: LocStackPair, Type: %s, StackOff: %sint32(%s)}", dv, phiTag, phiBaseExpr, phiOff)
 				g.emit("ctx.PrepareScmerStackTarget(%sint32(%s))", phiBaseExpr, phiOff)
 			} else {
-				g.emit("%s := JITValueDesc{Loc: LocStack, Type: %s, StackOff: %sint32(%s)}", dv, phiTag, phiBaseExpr, phiOff)
+				if home, available, planned := g.phiRegisterHome(name); planned {
+					g.emit("var %s JITValueDesc", dv)
+					g.emit("if %s {", available)
+					g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: %s, Reg: %s, ID: 0}", dv, phiTag, home)
+					g.emit("} else {")
+					g.emit("\t%s = JITValueDesc{Loc: LocStack, Type: %s, StackOff: %sint32(%s)}", dv, phiTag, phiBaseExpr, phiOff)
+					g.emit("}")
+				} else {
+					g.emit("%s := JITValueDesc{Loc: LocStack, Type: %s, StackOff: %sint32(%s)}", dv, phiTag, phiBaseExpr, phiOff)
+				}
 			}
 			g.emit("_ = %s", dv)
 			generated := genVal{goVar: dv, isDesc: true}
@@ -3276,6 +3776,7 @@ func (g *codeGen) inlineCall(callee *ssa.Function, callArgs []ssa.Value) genVal 
 }
 
 func (g *codeGen) inlineCallCaptured(callee *ssa.Function, callArgs []ssa.Value, captures []closureBinding) genVal {
+	callerInstruction := g.currentInstr
 	// Resolve caller's arguments BEFORE switching state
 	resolvedArgs := make([]genVal, len(callArgs))
 	for i, arg := range callArgs {
@@ -3299,6 +3800,9 @@ func (g *codeGen) inlineCallCaptured(callee *ssa.Function, callArgs []ssa.Value,
 	savedBBPhiCount := g.bbPhiCount
 	savedPhiStackSize := g.phiStackSize
 	savedPhiFrameFixup := g.phiFrameFixup
+	savedRegisterPlan := g.registerPlan
+	savedPhiHomeRegs := g.phiHomeRegs
+	savedPhiHomeOK := g.phiHomeOK
 	savedVals := g.vals
 	savedMultiBlock := g.multiBlock
 	savedEndLabel := g.endLabel
@@ -3310,6 +3814,7 @@ func (g *codeGen) inlineCallCaptured(callee *ssa.Function, callArgs []ssa.Value,
 	savedReturnPhiReg := g.returnPhiReg
 	savedReturnPhiReg2 := g.returnPhiReg2
 	savedRefCounts := g.refCounts
+	savedCrossBlockValues := g.crossBlockValues
 	savedAliases := g.ssaAliases
 	savedFieldCache := g.fieldCache
 	savedPhiProtected := g.phiProtectedRegVars
@@ -3345,14 +3850,22 @@ func (g *codeGen) inlineCallCaptured(callee *ssa.Function, callArgs []ssa.Value,
 	g.bbPhiBase = map[int]int{}
 	g.bbPhiCount = map[int]int{}
 	g.phiFrameFixup = ""
+	// The top-level planner deliberately excludes inlined helper CFGs. They are
+	// emitted into the caller's register universe and retain stack phis until a
+	// joint interprocedural plan can model their interference.
+	g.registerPlan = staticRegisterPlan{colorByValue: map[string]int{}, widthByValue: map[string]int{}}
+	g.phiHomeRegs = map[string]string{}
+	g.phiHomeOK = map[string]string{}
 	g.vals = map[string]genVal{}
 	g.refCounts = computeRefCounts(callee)
+	g.crossBlockValues = computeCrossBlockValues(callee)
 	g.ssaAliases = map[string]string{}
 	// Do not share cached field loads across inline boundaries:
 	// the callee receiver may be a different sub-struct (e.g. multiple inlined
 	// StorageInt receivers inside StorageString/StorageSeq).
 	g.fieldCache = map[string]genVal{}
 	g.forceLegacyCFG = true
+	calleeMultiBlock := len(callee.Blocks) > 1
 
 	// Map callee params -> resolved caller args.
 	// Always use per-inline descriptor copies so callee-side FreeDesc/Loc
@@ -3364,7 +3877,13 @@ func (g *codeGen) inlineCallCaptured(callee *ssa.Function, callArgs []ssa.Value,
 			pv := g.allocDesc()
 			g.emit("%s := %s", pv, arg.goVar)
 			g.emit("_ = %s", pv)
-			g.emit("ctx.StabilizeDescForControlFlow(&%s)", pv)
+			// A single-block helper may consume its private descriptor copy in
+			// place. Caller values which remain live are protected below; forcing
+			// every argument through a stack home here penalizes leaf helpers such
+			// as StorageInt.GetValueUInt without adding a correctness property.
+			if calleeMultiBlock {
+				g.emit("ctx.StabilizeDescForControlFlow(&%s)", pv)
+			}
 			copied := arg
 			copied.goVar = pv
 			g.vals[param.Name()] = copied
@@ -3397,14 +3916,13 @@ func (g *codeGen) inlineCallCaptured(callee *ssa.Function, callArgs []ssa.Value,
 		if alias, ok := savedAliases[argName]; ok {
 			argName = alias
 		}
-		// Conservative correctness-first policy:
-		// Every non-constant argument may still be needed by the caller after
-		// this inline site (especially across phi edges / nested inlines).
-		// Prevent destructive parameter reuse in the callee and prevent spills
-		// of caller-live argument registers while the inline body emits.
-		_ = argName
+		// Preserve only values reachable after this call site. A global SSA
+		// reference count also sees mutually exclusive sibling branches and used
+		// to spill an argument merely because the other specialized arm called
+		// the same helper. Reachability keeps loop/backedge uses conservative
+		// while allowing compile-time branch folding to remain allocation-free.
 		g.refCounts[callee.Params[i].Name()]++
-		if savedRefCounts[argName] <= 1 {
+		if savedRefCounts[argName] <= 1 || !ssaValueNeededAfterInstruction(callerInstruction, arg) {
 			continue
 		}
 		resolved := resolvedArgs[i]
@@ -3417,7 +3935,7 @@ func (g *codeGen) inlineCallCaptured(callee *ssa.Function, callArgs []ssa.Value,
 	g.allocPhiRegs()
 	g.initAllPhiDescs()
 
-	isMultiBlock := len(callee.Blocks) > 1
+	isMultiBlock := calleeMultiBlock
 	g.multiBlock = isMultiBlock
 
 	// Detect if callee returns Scmer (2-word pair) or scalar (1 word).
@@ -3498,6 +4016,9 @@ func (g *codeGen) inlineCallCaptured(callee *ssa.Function, callArgs []ssa.Value,
 		}
 		g.bbDone[bbID] = true
 		g.curBlock = bbIdx
+		// Cached descriptors name instructions emitted on one control-flow
+		// path. A sibling block must emit its own field loads.
+		g.fieldCache = map[string]genVal{}
 
 		if posVar, ok := g.bbPosVars[bbID]; ok {
 			g.emit("%s = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))", posVar)
@@ -3507,6 +4028,7 @@ func (g *codeGen) inlineCallCaptured(callee *ssa.Function, callArgs []ssa.Value,
 			g.emit("ctx.ResolveFixups()")
 		}
 		g.resetAllPhiDescsToStack()
+		g.bindActivePhiRegisterHomes(bbIdx)
 		g.emit("ctx.ReclaimUntrackedRegs()")
 
 		block := callee.Blocks[bbIdx]
@@ -3522,8 +4044,14 @@ func (g *codeGen) inlineCallCaptured(callee *ssa.Function, callArgs []ssa.Value,
 			g.emit("ctx.ReclaimUntrackedRegs()")
 			if ret, ok := instr.(*ssa.Return); ok && !isMultiBlock {
 				// Single-block: capture return value directly, no code emitted
-				if len(ret.Results) > 0 {
+				if len(ret.Results) == 1 {
 					singleBlockResult = g.resolveValue(ret.Results[0])
+				} else if len(ret.Results) > 1 {
+					values := make([]genVal, len(ret.Results))
+					for i, returned := range ret.Results {
+						values[i] = g.resolveValue(returned)
+					}
+					singleBlockResult = genVal{tuple: values}
 				}
 				break
 			} else {
@@ -3610,6 +4138,9 @@ func (g *codeGen) inlineCallCaptured(callee *ssa.Function, callArgs []ssa.Value,
 	g.bbPhiCount = savedBBPhiCount
 	g.phiStackSize = savedPhiStackSize
 	g.phiFrameFixup = savedPhiFrameFixup
+	g.registerPlan = savedRegisterPlan
+	g.phiHomeRegs = savedPhiHomeRegs
+	g.phiHomeOK = savedPhiHomeOK
 	g.vals = savedVals
 	g.multiBlock = savedMultiBlock
 	g.endLabel = savedEndLabel
@@ -3621,6 +4152,7 @@ func (g *codeGen) inlineCallCaptured(callee *ssa.Function, callArgs []ssa.Value,
 	g.returnPhiReg = savedReturnPhiReg
 	g.returnPhiReg2 = savedReturnPhiReg2
 	g.refCounts = savedRefCounts
+	g.crossBlockValues = savedCrossBlockValues
 	g.ssaAliases = savedAliases
 	g.fieldCache = savedFieldCache
 	g.phiProtectedRegVars = savedPhiProtected
@@ -3807,6 +4339,44 @@ func (g *codeGen) tryInlineClosure(closure genVal, callArgs []ssa.Value) (result
 	return result, true
 }
 
+// tryInlineStorageMethod keeps encoding helpers in the specialized reader
+// without imposing the builtin inlining budget. If a helper contains a real
+// native boundary (locks, defers, maps, I/O), generation rolls back cleanly and
+// the caller emits one Go call for that helper instead.
+func (g *codeGen) tryInlineStorageMethod(callee *ssa.Function, callArgs []ssa.Value) (result genVal, ok bool) {
+	if callee == nil || callee.Blocks == nil || callee.Pkg != g.fn.Pkg || callee.Signature == nil || callee.Signature.Recv() == nil {
+		return genVal{}, false
+	}
+	if len(callee.Blocks) != 1 || functionWritesMemory(callee) {
+		return genVal{}, false
+	}
+	// Wide tuples use Go's native multi-result ABI. Keeping them behind one
+	// call also avoids expanding their nested storage reads into every bulk
+	// reader; scalar helpers remain visible for immutable-field folding.
+	if callee.Signature.Results().Len() > 2 {
+		return genVal{}, false
+	}
+	trial := g.clone()
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			if verbose {
+				fmt.Fprintf(os.Stderr, "jitgen: storage helper %s remains a native boundary: %v\n", callee, recovered)
+			}
+			result = genVal{}
+			ok = false
+		}
+	}()
+	result = trial.inlineCall(callee, callArgs)
+	generated := trial.w.String()
+	declarations := trial.wDecl.String()
+	trial.w = strings.Builder{}
+	trial.wDecl = strings.Builder{}
+	*g = *trial
+	g.w.WriteString(generated)
+	g.wDecl.WriteString(declarations)
+	return result, true
+}
+
 func (g *codeGen) emitSpecializedPhiStackWrites(bbIdx int, psVar string, indent string) {
 	phis := g.blockPhis(bbIdx)
 	for phiIdx, phi := range phis {
@@ -3822,7 +4392,15 @@ func (g *codeGen) emitSpecializedPhiStackWrites(bbIdx int, psVar string, indent 
 		} else if isPhiPairType(phi.Type()) {
 			g.emit("%s\tctx.EmitStoreScmerToStack(%s, %s)", indent, tmp, phiOff)
 		} else {
-			g.emit("%s\tctx.EmitStoreToStack(%s, %s)", indent, tmp, phiOff)
+			if home, available, planned := g.phiRegisterHome(phi.Name()); planned {
+				g.emit("%s\tif %s {", indent, available)
+				g.emit("%s\t\tctx.EmitMovToReg(%s, %s)", indent, home, tmp)
+				g.emit("%s\t} else {", indent)
+				g.emit("%s\t\tctx.EmitStoreToStack(%s, %s)", indent, tmp, phiOff)
+				g.emit("%s\t}", indent)
+			} else {
+				g.emit("%s\tctx.EmitStoreToStack(%s, %s)", indent, tmp, phiOff)
+			}
 		}
 		g.emit("%s}", indent)
 	}
@@ -3868,10 +4446,28 @@ func (g *codeGen) emitRecursiveBBRenderers() {
 		g.emit("}")
 
 		g.curBlock = bbIdx
+		// Keep field-load deduplication local to the block whose machine code
+		// defines the descriptor.
+		g.fieldCache = map[string]genVal{}
 		g.resetAllPhiDescsToStack()
 		g.applyPhiStateOverlay(bbIdx)
+		g.resetStorageInputsToHomes()
+		g.bindActivePhiRegisterHomes(bbIdx)
 		g.emit("ctx.ReclaimUntrackedRegs()")
-		g.emitPinDescVars(g.externalDescVars(block))
+		// An unconditional single-predecessor edge has no sibling renderer and
+		// cannot be re-entered as a loop header. Its predecessor's live register
+		// descriptors therefore remain valid; forcing them through stack homes
+		// would only materialize an artificial SSA block boundary.
+		linearEntry := false
+		if len(block.Preds) == 1 {
+			predecessor := block.Preds[0]
+			if len(predecessor.Instrs) != 0 {
+				_, linearEntry = predecessor.Instrs[len(predecessor.Instrs)-1].(*ssa.Jump)
+			}
+		}
+		if !linearEntry {
+			g.emitPinDescVars(g.externalDescVars(block))
+		}
 		if blockEndsInPanic(block) && !g.storageMode && g.opName != "" {
 			g.emit("_ = jitEmitGoVariadicCallFromDescs(ctx, declarations[%q].Fn, args, result)", g.opName)
 			g.emit("ctx.EmitGoPanic(%q)", "jit: builtin panic boundary unexpectedly returned")
@@ -3895,6 +4491,18 @@ func (g *codeGen) emitRecursiveBBRenderers() {
 
 // generateClosure tries to generate a JIT emitter closure for the given SSA function.
 // Returns (closureCode, "") on success, or ("", errorDescription) on failure.
+func computeCrossBlockValues(fn *ssa.Function) map[string]bool {
+	result := make(map[string]bool)
+	for _, block := range fn.Blocks {
+		for _, instruction := range block.Instrs {
+			if value, ok := instruction.(ssa.Value); ok && ssaValueCrossesControlFlow(value) {
+				result[value.Name()] = true
+			}
+		}
+	}
+	return result
+}
+
 func newCodeGen(fn *ssa.Function, rewrite ssaValueRewriter, sourceAliases ...map[string]string) *codeGen {
 	imports := make(map[string]string)
 	if len(sourceAliases) > 0 {
@@ -3918,10 +4526,14 @@ func newCodeGen(fn *ssa.Function, rewrite ssaValueRewriter, sourceAliases ...map
 		phiPair:              map[string]bool{},
 		phiTriple:            map[string]bool{},
 		phiTypeTag:           map[string]string{},
+		registerPlan:         planLoopPhiRegisters(fn),
+		phiHomeRegs:          map[string]string{},
+		phiHomeOK:            map[string]string{},
 		bbPhiBase:            map[int]int{},
 		bbPhiCount:           map[int]int{},
 		fieldCache:           map[string]genVal{},
 		refCounts:            computeRefCounts(fn),
+		crossBlockValues:     computeCrossBlockValues(fn),
 		directResultPayloads: computeDirectResultPayloads(fn),
 		ssaAliases:           map[string]string{},
 		topLevelPkgPath:      fn.Pkg.Pkg.Path(),
@@ -3941,10 +4553,11 @@ type emitBodyConfig struct {
 // For single-block functions, it skips the BB closure infrastructure entirely.
 func (g *codeGen) emitBody(cfg emitBodyConfig) {
 	g.allocPhiRegs()
-	g.initAllPhiDescs()
+	storageVoid := g.storageMode && g.fn.Signature.Results().Len() == 0
 
 	// Single-block fast path: no BB closures, no phi state, just emit instructions inline.
 	if len(g.fn.Blocks) == 1 {
+		g.initAllPhiDescs()
 		pinnedArgRegs := g.emitProtectIncomingArgRegs()
 		g.curBlock = 0
 		for _, instr := range g.fn.Blocks[0].Instrs {
@@ -3962,8 +4575,12 @@ func (g *codeGen) emitBody(cfg emitBodyConfig) {
 	// Multi-block path: full BB closure infrastructure.
 	g.emit("var bbs [%d]%sBBDescriptor", len(g.fn.Blocks), cfg.bbsDeclPrefix)
 	g.emitBBPhiLayout()
+	g.emitStorageInputHomeDeclarations()
+	pinnedArgRegs := g.emitProtectIncomingArgRegs()
+	g.emitRegisterHomes()
+	g.initAllPhiDescs()
 
-	if g.multiBlock {
+	if g.multiBlock && !storageVoid {
 		g.emit("if result.Loc == LocAny {")
 		g.emit("\tresult = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}")
 		g.emit("\tctx.BindReg(result.Reg, &result)")
@@ -3984,12 +4601,11 @@ func (g *codeGen) emitBody(cfg emitBodyConfig) {
 			g.emit("%s := ctx.AllocReg()", g.returnPhiReg)
 			g.emit("%s := ctx.AllocRegExcept(%s)", g.returnPhiReg2, g.returnPhiReg)
 		}
-		g.endLabel = g.allocLabel()
-		g.emit("%s := ctx.ReserveLabel()", g.endLabel)
 	}
+	g.endLabel = g.allocLabel()
+	g.emit("%s := ctx.ReserveLabel()", g.endLabel)
 
 	g.emitRecursiveBBRenderers()
-	pinnedArgRegs := g.emitProtectIncomingArgRegs()
 	entryPS := g.allocTemp("ps")
 	g.emit("%s := %sPhiState{General: %v}", entryPS, cfg.bbsDeclPrefix, cfg.entryGeneral)
 	g.emit("_ = bbs[0].RenderPS(%s)", entryPS)
@@ -3997,7 +4613,7 @@ func (g *codeGen) emitBody(cfg emitBodyConfig) {
 	// Epilogue
 	if g.multiBlock {
 		g.emit("ctx.MarkLabel(%s)", g.endLabel)
-		if cfg.useReturnPhiRegs && g.returnPhiReg != "" && g.returnPhiReg2 != "" {
+		if !storageVoid && cfg.useReturnPhiRegs && g.returnPhiReg != "" && g.returnPhiReg2 != "" {
 			dv := g.allocDesc()
 			g.emit("%s := JITValueDesc{Loc: LocRegPair, Reg: %s, Reg2: %s}", dv, g.returnPhiReg, g.returnPhiReg2)
 			g.emit("ctx.EmitMovPairToResult(&%s, &result)", dv)
@@ -4006,7 +4622,7 @@ func (g *codeGen) emitBody(cfg emitBodyConfig) {
 		}
 		g.emit("ctx.ResolveFixups()")
 	}
-	if g.multiBlock {
+	if g.multiBlock && !storageVoid {
 		g.emit("if resultRegsProtected {")
 		g.emit("\tctx.UnprotectReg(result.Reg2)")
 		g.emit("\tctx.UnprotectReg(result.Reg)")
@@ -4086,11 +4702,8 @@ func generateClosureCost(opName string, fn *ssa.Function, rewrite ssaValueRewrit
 	return result, "", uint16(cost)
 }
 
-// generateStorageBody generates the body of a JITEmit method from GetValue SSA.
-// The generated code lives inside:
-//
-//	func (s *StorageXxx) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc { ... }
-func generateStorageBody(typeName string, fn *ssa.Function, rewrite ssaValueRewriter) (code string, errMsg string) {
+// generateStorageBody generates a JIT emitter from one GetValue variant's SSA.
+func generateStorageBody(typeName string, fn *ssa.Function, rewrite ssaValueRewriter, stableInputs []string) (code string, errMsg string) {
 	defer func() {
 		if r := recover(); r != nil {
 			code = ""
@@ -4105,28 +4718,84 @@ func generateStorageBody(typeName string, fn *ssa.Function, rewrite ssaValueRewr
 	g.returnPhiReg = ""
 	g.returnPhiReg2 = ""
 
-	// GetValue has 2 params: receiver (s *StorageXxx) and index (i uint32)
-	// Map receiver to thisptr (LocImm at JIT compile time)
+	// Map receiver to thisptr. finish passes it as LocImm, allowing immutable
+	// post-finish fields to fold while the emitter is constructing machine code.
 	if len(fn.Params) >= 1 {
 		g.emit("ctx.TrackPointer(unsafe.Pointer(s))")
+		g.emit("thisptr := scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(int64(uintptr(unsafe.Pointer(s)))), NoHeapPointer: true}")
 		g.vals[fn.Params[0].Name()] = genVal{goVar: "thisptr", isDesc: true, marker: "_storage_recv"}
-		g.emit("thisptrPinned := thisptr.Loc == LocReg")
-		g.emit("thisptrPinnedReg := thisptr.Reg")
-		g.emit("if thisptrPinned {")
-		g.emit("\tctx.ProtectReg(thisptrPinnedReg)")
-		g.emit("\tdefer ctx.UnprotectReg(thisptrPinnedReg)")
-		g.emit("}")
 	}
 	if g.multiBlock {
 		g.emit("standaloneFrame := ctx.BeginStandaloneFrame()")
 	}
-	// Map index: idx is a Scmer (JITValueDesc), but GetValue's i is uint32.
-	// Extract the integer value from the Scmer.
-	// Dead code elimination: if the index parameter is never used in the body,
-	// just free it and skip the conversion boilerplate.
+	switch fn.Name() {
+	case "GetValue":
+		g.mapStorageScalarIndex(fn)
+	case "GetValueRange":
+		if len(fn.Params) != 5 {
+			panic(fmt.Sprintf("GetValueRange has %d parameters", len(fn.Params)))
+		}
+		g.vals[fn.Params[1].Name()] = genVal{goVar: "recid", isDesc: true, canonicalIntBits: 32}
+		g.vals[fn.Params[2].Name()] = genVal{goVar: "count", isDesc: true, canonicalIntBits: 32}
+		g.vals[fn.Params[3].Name()] = genVal{goVar: "target", isDesc: true, marker: "_slice", pinAcrossBlock: true}
+		g.vals[fn.Params[4].Name()] = genVal{goVar: "stride", isDesc: true}
+	case "GetValueMulti":
+		if len(fn.Params) != 4 {
+			panic(fmt.Sprintf("GetValueMulti has %d parameters", len(fn.Params)))
+		}
+		g.vals[fn.Params[1].Name()] = genVal{goVar: "recids", isDesc: true, marker: "_slice", pinAcrossBlock: true}
+		g.vals[fn.Params[2].Name()] = genVal{goVar: "target", isDesc: true, marker: "_slice", pinAcrossBlock: true}
+		g.vals[fn.Params[3].Name()] = genVal{goVar: "stride", isDesc: true}
+	default:
+		panic("unsupported storage getter " + fn.Name())
+	}
+	for _, annotatedParameter := range stableInputs {
+		parameter := annotatedParameter
+		words := uint8(0)
+		if slash := strings.LastIndexByte(parameter, '/'); slash >= 0 {
+			parsed, err := strconv.ParseUint(parameter[slash+1:], 10, 8)
+			if err != nil || parsed == 0 || parsed > 3 {
+				panic("jitgen: invalid control-flow-stable word prefix " + annotatedParameter)
+			}
+			parameter = parameter[:slash]
+			words = uint8(parsed)
+		}
+		value, ok := g.vals[parameter]
+		if !ok || !value.isDesc || value.goVar == "" {
+			panic("jitgen: control-flow-stable names unknown parameter " + parameter)
+		}
+		if g.refCounts[parameter] == 0 {
+			// An annotation describes every source-level value that may cross a
+			// back-edge. Specialization can erase a value entirely (StorageConst
+			// does not inspect its record id), in which case reserving its ABI
+			// register would only manufacture pressure in the emitted function.
+			continue
+		}
+		g.storageInputHomes = append(g.storageInputHomes, storageInputHome{name: value.goVar, words: words})
+	}
+
+	g.emitBody(emitBodyConfig{
+		entryGeneral:     false,
+		useReturnPhiRegs: true,
+		bbsDeclPrefix:    "scm.",
+	})
+
+	code = g.wDecl.String() + g.w.String()
+	if g.storageMode {
+		code = addScmPrefix(code)
+	}
+	code = injectBindRegCalls(code)
+	return code, ""
+}
+
+func (g *codeGen) mapStorageScalarIndex(fn *ssa.Function) {
 	if len(fn.Params) >= 2 && g.refCounts[fn.Params[1].Name()] == 0 {
 		g.emit("ctx.FreeDesc(&idx)")
 	} else if len(fn.Params) >= 2 {
+		// CompileJITStorageGetValue enters through func(uint32) Scmer. Go's ABI
+		// has therefore already canonicalized the record id in the low 32 bits;
+		// treating it like an arbitrary int64 here would add two shifts (and,
+		// under pressure, a spill) to every scalar read.
 		g.emit("var idxInt JITValueDesc")
 		g.emit("if idx.Loc == LocImm {")
 		g.emit("\tidxInt = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(idx.Imm.Int())}")
@@ -4135,16 +4804,6 @@ func generateStorageBody(typeName string, fn *ssa.Function, rewrite ssaValueRewr
 		g.emit("\tidxInt = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: idx.Reg2}")
 		g.emit("} else {")
 		g.emit("\tidxInt = idx")
-		g.emit("}")
-		// GetValue's index parameter is uint32: normalize once at entry.
-		g.emit("if idxInt.Loc == LocImm {")
-		g.emit("\tidxInt = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(uint64(idxInt.Imm.Int()) & 0xffffffff))}")
-		g.emit("} else {")
-		g.emit("\tctx.EnsureDesc(&idxInt)")
-		g.emit("\tif idxInt.Loc != LocReg { panic(\"jit: idxInt not in register\") }")
-		g.emit("\tctx.EmitShlRegImm8(idxInt.Reg, 32)")
-		g.emit("\tctx.EmitShrRegImm8(idxInt.Reg, 32)")
-		g.emit("\tctx.BindReg(idxInt.Reg, &idxInt)")
 		g.emit("}")
 		if g.multiBlock {
 			g.emit("idxPinned := idxInt.Loc == LocReg")
@@ -4155,22 +4814,25 @@ func generateStorageBody(typeName string, fn *ssa.Function, rewrite ssaValueRewr
 			g.emit("}")
 			g.hasStorageIdx = true
 		}
-		g.vals[fn.Params[1].Name()] = genVal{goVar: "idxInt", isDesc: true}
+		g.vals[fn.Params[1].Name()] = genVal{goVar: "idxInt", isDesc: true, canonicalIntBits: 32}
 	}
+}
 
-	g.emitBody(emitBodyConfig{
-		entryGeneral:     false,
-		useReturnPhiRegs: true,
-		bbsDeclPrefix:    "scm.",
-	})
-
-	code = g.wDecl.String() + g.w.String()
-	// In storage mode, generated code goes in the storage package and needs scm. prefix
-	if g.storageMode {
-		code = addScmPrefix(code)
+func canonicalIntegerConversionIsNoop(srcSigned bool, srcBits int, dstSigned bool, dstBits int) bool {
+	if srcBits <= 0 || dstBits <= 0 {
+		return false
 	}
-	code = injectBindRegCalls(code)
-	return code, ""
+	// Integer conversions preserve the low 64 bits. A 64-bit destination needs
+	// no further canonicalization regardless of signedness.
+	if dstBits == 64 || dstBits == srcBits {
+		return true
+	}
+	if dstBits < srcBits {
+		return false
+	}
+	// Widening preserves an equally-signed value. Unsigned inputs also fit in a
+	// wider signed destination, so their existing zero extension is canonical.
+	return srcSigned == dstSigned || !srcSigned
 }
 
 // addScmPrefix adds "scm." prefix to scm package identifiers in generated code.
@@ -4179,14 +4841,18 @@ func addScmPrefix(code string) string {
 	// Words that need the scm. prefix — these are exported identifiers from the scm package
 	scmIdents := map[string]bool{
 		"JITValueDesc": true, "JITTypeUnknown": true, "JITContext": true,
+		"Reg": true, "JITRegisterPlan": true, "JITRegisterSlot": true,
 		"BBDescriptor": true, "PhiState": true,
 		"LocNone": true, "LocReg": true, "LocRegPair": true, "LocRegTriple": true,
-		"LocStack": true, "LocStackPair": true, "LocStackTriple": true, "LocInputPair": true, "LocMem": true, "LocImm": true, "LocAny": true,
+		"LocStack": true, "LocStackPair": true, "LocStackTriple": true, "LocInputPair": true, "LocMem": true, "LocImm": true, "LocAny": true, "LocFlags": true,
 		"NewInt": true, "NewFloat": true, "NewBool": true, "NewNil": true, "NewString": true,
 		"NewFastDict": true, "NewFastDictValue": true,
 		"Scmer": true, "GoFuncAddr": true, "JITBuildMergeClosure": true,
 		"JITIntDiv": true, "JITEmitGoCallResults": true, "JITCloneScmerSlice": true, "JITAppendScmerSlice": true, "JITAppendScmerSliceCopy": true, "JITNewSliceCopy": true,
 		"JITPanic":                     true,
+		"InvertJITCondition":           true,
+		"JITPrepareScmerGoArg":         true,
+		"JITAtomicAddUint64":           true,
 		"EnsureDesc":                   true,
 		"ConcatStrings":                true,
 		"OptimizeProcToSerialFunction": true,
@@ -4203,6 +4869,7 @@ func addScmPrefix(code string) string {
 		"tagNil": "scm.TagNil", "tagBool": "scm.TagBool", "tagInt": "scm.TagInt",
 		"tagFloat": "scm.TagFloat", "tagString": "scm.TagString", "tagSymbol": "scm.TagSymbol",
 		"tagSlice": "scm.TagSlice", "tagFastDict": "scm.TagFastDict", "tagDate": "scm.TagDate",
+		"jitCopyScmerSlice": "scm.JITCopyScmerSlice",
 	}
 
 	var result strings.Builder
@@ -4217,13 +4884,14 @@ func addScmPrefix(code string) string {
 			word := code[i:j]
 			// Only prefix if not already preceded by a dot (e.g., not part of x.NewInt)
 			preceded := i > 0 && code[i-1] == '.'
+			fieldKey := j < len(code) && code[j] == ':'
 			if !preceded {
 				if mapped, ok := scmTagMap[word]; ok {
 					result.WriteString(mapped)
 					i = j
 					continue
 				}
-				if scmIdents[word] {
+				if scmIdents[word] && !fieldKey {
 					result.WriteString("scm.")
 				}
 			}
@@ -4309,20 +4977,38 @@ func computeDirectResultPayloads(fn *ssa.Function) map[string]string {
 // register when it cannot alias a still-live operand. The final EmitMake*
 // remains unconditional; its architecture-specific register move is a no-op
 // for this placement and materializes other destination forms normally.
-func (g *codeGen) emitAllocResultAwareReg(dstVar, targetVar, indent string, direct bool, excludes ...string) {
-	if !direct {
+func (g *codeGen) emitAllocResultAwareReg(dstVar, targetVar, indent string, direct bool, planned plannedRegisterTarget, excludes ...string) {
+	if !direct && planned.reg == "" {
 		g.emit("%s%s := ctx.AllocRegExcept(%s)", indent, dstVar, strings.Join(excludes, ", "))
 		return
 	}
-	condition := "result.Loc == LocRegPair"
-	for _, exclude := range excludes {
-		condition += " && result.Reg2 != " + exclude
+	g.emit("%svar %s %s", indent, dstVar, g.regTypeName())
+	if planned.reg != "" {
+		condition := planned.available
+		for _, exclude := range excludes {
+			if !planned.aliases[exclude] {
+				condition += " && " + planned.reg + " != " + exclude
+			}
+		}
+		g.emit("%sif %s {", indent, condition)
+		g.emit("%s\t%s = %s", indent, dstVar, planned.reg)
 	}
-	g.emit("%svar %s Reg", indent, dstVar)
-	g.emit("%sif %s {", indent, condition)
-	g.emit("%s\t%s = result.Reg2", indent, dstVar)
-	g.emit("%s\t%s = true", indent, targetVar)
-	g.emit("%s} else {", indent)
+	if direct {
+		condition := "result.Loc == LocRegPair"
+		for _, exclude := range excludes {
+			condition += " && result.Reg2 != " + exclude
+		}
+		if planned.reg != "" {
+			g.emit("%s} else if %s {", indent, condition)
+		} else {
+			g.emit("%sif %s {", indent, condition)
+		}
+		g.emit("%s\t%s = result.Reg2", indent, dstVar)
+		g.emit("%s\t%s = true", indent, targetVar)
+		g.emit("%s} else {", indent)
+	} else {
+		g.emit("%s} else {", indent)
+	}
 	g.emit("%s\t%s = ctx.AllocRegExcept(%s)", indent, dstVar, strings.Join(excludes, ", "))
 	g.emit("%s}", indent)
 }
@@ -4332,6 +5018,9 @@ func (g *codeGen) useOperand(name string) {
 	// Resolve aliases (from Convert no-ops): redirect to canonical SSA name
 	if alias, ok := g.ssaAliases[name]; ok {
 		name = alias
+	}
+	if g.crossBlockValues[name] {
+		return
 	}
 	count, ok := g.refCounts[name]
 	if !ok {
@@ -4346,7 +5035,8 @@ func (g *codeGen) useOperand(name string) {
 	if !ok || !gv.isDesc || gv.goVar == "" {
 		return
 	}
-	// Don't free markers or special values
+	// Don't free markers or special values. The If emitters release their
+	// short-lived LocFlags carrier immediately after emitting the Jcc.
 	if gv.marker != "" {
 		return
 	}
@@ -4410,9 +5100,16 @@ func (g *codeGen) freeDeadOperands(instr ssa.Instruction) {
 	}
 }
 
-// resetAllPhiDescsToStack restores phi descriptors to their canonical
-// stack-backed locations at BB entry. This prevents stale descriptor state
-// from one emitted BB affecting compile-time lowering decisions in another BB.
+// resetAllPhiDescsToStack restores every phi descriptor to its canonical home
+// at BB-renderer entry. "Canonical" means the location written by predecessor
+// edge code in the final machine program; it does not mean that the descriptor
+// owns a register in the one-pass allocator yet.
+//
+// Renderer closures are invoked in code-generation order, not runtime control-
+// flow order. A descriptor may therefore still contain the register/spill state
+// left by whichever sibling renderer happened to be generated first. Resetting
+// removes that order dependency. Register homes deliberately use ID 0 here:
+// ownership becomes valid only for a phi in the BB where that phi is live.
 func (g *codeGen) resetAllPhiDescsToStack() {
 	phiNames := make([]string, 0, len(g.phiRegs))
 	for phiName := range g.phiRegs {
@@ -4441,7 +5138,7 @@ func (g *codeGen) resetAllPhiDescsToStack() {
 			phiTag = "JITTypeUnknown"
 		}
 		stackOff := "int32(" + phiOff + ")"
-		if g.phiFrameFixup != "" && !g.storageMode {
+		if g.phiFrameFixup != "" {
 			stackOff = "int32(" + g.phiFrameFixup + ")+" + stackOff
 		}
 		if g.phiTriple[phiName] {
@@ -4449,7 +5146,39 @@ func (g *codeGen) resetAllPhiDescsToStack() {
 		} else if g.phiPair[phiName] {
 			g.emit("%s = JITValueDesc{Loc: LocStackPair, Type: %s, StackOff: %s}", gv.goVar, phiTag, stackOff)
 		} else {
-			g.emit("%s = JITValueDesc{Loc: LocStack, Type: %s, StackOff: %s}", gv.goVar, phiTag, stackOff)
+			if home, available, planned := g.phiRegisterHome(phiName); planned {
+				g.emit("if %s {", available)
+				g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: %s, Reg: %s, ID: 0}", gv.goVar, phiTag, home)
+				g.emit("} else {")
+				g.emit("\t%s = JITValueDesc{Loc: LocStack, Type: %s, StackOff: %s}", gv.goVar, phiTag, stackOff)
+				g.emit("}")
+			} else {
+				g.emit("%s = JITValueDesc{Loc: LocStack, Type: %s, StackOff: %s}", gv.goVar, phiTag, stackOff)
+			}
+		}
+	}
+}
+
+// bindActivePhiRegisterHomes establishes spill ownership for the phi values
+// which are live at the current basic-block entry. A physical home is a stable
+// location, not a permanent descriptor owner: graph coloring intentionally
+// lets non-overlapping phis reuse a color. Binding every function phi at every
+// BB entry would therefore attach the register to an arbitrary inactive value,
+// and a later spill/free would update the wrong descriptor.
+//
+// resetAllPhiDescsToStack marks register-home descriptors as borrowed (ID 0) so
+// injectBindRegCalls leaves them alone. This function is the sole transition
+// from that declarative placement to active allocator ownership.
+func (g *codeGen) bindActivePhiRegisterHomes(bbIdx int) {
+	for _, phi := range g.blockPhis(bbIdx) {
+		generated, ok := g.vals[phi.Name()]
+		if !ok || !generated.isDesc || generated.goVar == "" {
+			continue
+		}
+		if home, available, planned := g.phiRegisterHome(phi.Name()); planned {
+			g.emit("if %s && %s.Loc == LocReg {", available, generated.goVar)
+			g.emit("\tctx.BindReg(%s, &%s)", home, generated.goVar)
+			g.emit("}")
 		}
 	}
 }
@@ -4484,7 +5213,7 @@ func (g *codeGen) applyPhiStateOverlay(bbIdx int) {
 	for phiIdx, phi := range phis {
 		phiOff := g.phiSlotOffExpr(bbIdx, phiIdx)
 		stackOff := "int32(" + phiOff + ")"
-		if g.phiFrameFixup != "" && !g.storageMode {
+		if g.phiFrameFixup != "" {
 			stackOff = "int32(" + g.phiFrameFixup + ")+" + stackOff
 		}
 		gv, ok := g.vals[phi.Name()]
@@ -4502,6 +5231,12 @@ func (g *codeGen) applyPhiStateOverlay(bbIdx int) {
 				g.emit("%s := JITValueDesc{Loc: LocStack, Type: %s, StackOff: %s}", dv, phiTag, stackOff)
 			}
 			gv = genVal{goVar: dv, isDesc: true}
+			if signed, bits, integer := intTypeInfo(phi.Type()); integer {
+				// Every incoming edge is normalized by emitPhiMov. The phi home
+				// therefore preserves the same canonical machine representation.
+				gv.canonicalIntBits = bits
+				gv.canonicalIntSigned = signed
+			}
 			if g.phiTriple[phi.Name()] {
 				gv.marker = "_slice"
 				gv.pinAcrossBlock = true
@@ -4528,6 +5263,14 @@ func (g *codeGen) ssaValueUsesRemaining(name string) int {
 func (g *codeGen) stabilizeCrossBlockValue(instr ssa.Instruction) {
 	value, ok := instr.(ssa.Value)
 	if !ok || value.Referrers() == nil || instr.Block() == nil {
+		return
+	}
+	if phi, ok := value.(*ssa.Phi); ok {
+		if _, _, planned := g.phiRegisterHome(phi.Name()); planned {
+			return
+		}
+	}
+	if producer, ok := value.(*ssa.BinOp); ok && g.plannedPhiTarget(producer).reg != "" {
 		return
 	}
 	crossesBlock := false
@@ -4846,7 +5589,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				g.emit("\tctx.EmitMovRegReg(%s, thisptr.Reg)", baseReg)
 				g.emit("\tctx.EmitAddRegImm32(%s, int32(%s))", baseReg, src.offsetExpr)
 				g.emit("}")
-				g.emit("%s = JITValueDesc{Loc: LocReg, Reg: %s}", baseDesc, baseReg)
+				g.emit("%s = JITValueDesc{Loc: LocReg, Reg: %s, GoArray: true, RelocatablePointer: true}", baseDesc, baseReg)
 				idxSSAName := ""
 				if _, isConst := v.Index.(*ssa.Const); !isConst {
 					idxSSAName = v.Index.Name()
@@ -4976,6 +5719,9 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			case *types.Array:
 				// Keep array as addressable aggregate; indexed loads are lowered via IndexAddr.
 				sizeStr = "array"
+			case *types.Interface:
+				// Go interfaces are the itab/type word followed by the data word.
+				sizeStr = "interface"
 			default:
 				sizeStr = "8"
 			}
@@ -5202,11 +5948,20 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 					g.emit("\tctx.EmitMovRegMem64(%s, fieldAddr+8)", lenReg)
 					g.emit("\tctx.EmitMovRegMem64(%s, fieldAddr+16)", capReg)
 					g.emit("\t%s = JITValueDesc{Loc: LocRegTriple, Reg: %s, Reg2: %s, Reg3: %s}", dv, ptrReg, lenReg, capReg)
+				case "interface":
+					itabReg := g.allocReg()
+					dataReg := g.allocReg()
+					g.emit("\tfieldAddr := uintptr(thisptr.Imm.Int()) + %s", src.offsetExpr)
+					g.emit("\t%s := ctx.AllocReg()", itabReg)
+					g.emit("\t%s := ctx.AllocRegExcept(%s)", dataReg, itabReg)
+					g.emit("\tctx.EmitMovRegMem64(%s, fieldAddr)", itabReg)
+					g.emit("\tctx.EmitMovRegMem64(%s, fieldAddr+8)", dataReg)
+					g.emit("\t%s = JITValueDesc{Loc: LocRegPair, Reg: %s, Reg2: %s}", dv, itabReg, dataReg)
 				case "array":
 					ptrReg := g.allocReg()
 					g.emit("\t%s := ctx.AllocReg()", ptrReg)
 					g.emit("\tctx.EmitMovRegImm64(%s, uint64(fieldAddr))", ptrReg)
-					g.emit("\t%s = JITValueDesc{Loc: LocReg, Reg: %s}", dv, ptrReg)
+					g.emit("\t%s = JITValueDesc{Loc: LocReg, Reg: %s, GoArray: true, RelocatablePointer: true}", dv, ptrReg)
 				}
 				g.emit("} else {")
 				g.emit("\toff := int32(%s)", src.offsetExpr)
@@ -5256,7 +6011,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 					g.emit("\t%s := ctx.AllocRegExcept(baseReg)", ptrReg)
 					g.emit("\tctx.EmitMovRegReg(%s, baseReg)", ptrReg)
 					g.emit("\tctx.EmitAddRegImm32(%s, off)", ptrReg)
-					g.emit("\t%s = JITValueDesc{Loc: LocReg, Reg: %s}", dv, ptrReg)
+					g.emit("\t%s = JITValueDesc{Loc: LocReg, Reg: %s, GoArray: true, RelocatablePointer: true}", dv, ptrReg)
 				}
 				g.emit("}")
 				if sizeStr == "slice" || sizeStr == "array" {
@@ -5274,32 +6029,41 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				fieldName := parts[2]
 
 				if goType == "slice" {
-					// Immutable slice/string header: keep data pointer in a register.
-					// Do NOT encode raw pointers as NewInt immediates; they are plain
-					// addresses, not tagged integers.
+					// A finalized receiver makes the complete slice header immutable.
+					// Preserve it as compile-time metadata instead of spending three
+					// registers and eventually spilling them around every loop. Indexed
+					// lowering materializes only dataPtr; len/cap stay known constants.
+					// Do NOT encode raw pointers as NewInt: they are unboxed addresses.
 					cacheKey := fieldName
 					if cached, ok := g.fieldCache[cacheKey]; ok {
 						g.vals[name] = cached
 						break
 					}
 					dv := g.allocDesc()
-					ptrReg2 := g.allocReg()
 					g.emit("var %s JITValueDesc", dv)
-					g.emit("%s := ctx.AllocReg()", ptrReg2)
 					g.emit("if thisptr.Loc == LocImm {")
-					// Constant receiver: fold load address, but still materialize pointer in a GPR.
 					g.emit("\tfieldAddr := uintptr(thisptr.Imm.Int()) + %s", src.offsetExpr)
 					g.emit("\tdataPtr := *(*uintptr)(unsafe.Pointer(fieldAddr))")
 					g.emit("\tsliceLen := *(*int)(unsafe.Pointer(fieldAddr + 8))")
-					g.emit("\tctx.EmitMovRegImm64(%s, uint64(dataPtr))", ptrReg2)
-					g.emit("\t%s = JITValueDesc{Loc: LocReg, Reg: %s, StackOff: int32(sliceLen)}", dv, ptrReg2)
+					g.emit("\tsliceCap := *(*int)(unsafe.Pointer(fieldAddr + 16))")
+					g.emit("\t%s = JITValueDesc{Loc: LocMem, Type: tagSlice, MemPtr: dataPtr, KnownSliceLen: int32(sliceLen), KnownSliceCap: int32(sliceCap), SliceSizeKnown: true, GoArray: true, RelocatablePointer: true, Rooted: true}", dv)
 					g.emit("} else {")
-					// Register receiver: load data pointer from field.
+					// Register receiver: load the complete header from the field.
+					ptrReg2 := g.allocReg()
+					lenReg := g.allocReg()
+					capReg := g.allocReg()
+					g.emit("\t%s := ctx.AllocReg()", ptrReg2)
+					g.emit("\t%s := ctx.AllocRegExcept(%s)", lenReg, ptrReg2)
+					g.emit("\t%s := ctx.AllocRegExcept(%s, %s)", capReg, ptrReg2, lenReg)
 					g.emit("\toff := int32(%s)", src.offsetExpr)
 					g.emit("\tctx.EmitMovRegMem(%s, thisptr.Reg, off)", ptrReg2)
-					g.emit("\t%s = JITValueDesc{Loc: LocReg, Reg: %s}", dv, ptrReg2)
+					g.emit("\tctx.EmitMovRegMem(%s, thisptr.Reg, off+8)", lenReg)
+					g.emit("\tctx.EmitMovRegMem(%s, thisptr.Reg, off+16)", capReg)
+					g.emit("\t%s = JITValueDesc{Loc: LocRegTriple, Type: tagSlice, Reg: %s, Reg2: %s, Reg3: %s}", dv, ptrReg2, lenReg, capReg)
+					g.emit("\tctx.BindReg(%s, &%s)", ptrReg2, dv)
+					g.emit("\tctx.BindReg(%s, &%s)", lenReg, dv)
+					g.emit("\tctx.BindReg(%s, &%s)", capReg, dv)
 					g.emit("}")
-					g.emit("ctx.BindReg(%s, &%s)", ptrReg2, dv)
 					gv := genVal{goVar: dv, isDesc: true, marker: "_slice"}
 					g.vals[name] = gv
 					g.fieldCache[cacheKey] = gv
@@ -5385,10 +6149,10 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				case "int32":
 					g.emit("\tval := *(*int32)(unsafe.Pointer(fieldAddr))")
 					g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(val))}", dv)
-				case "int64":
+				case "int", "int64":
 					g.emit("\tval := *(*int64)(unsafe.Pointer(fieldAddr))")
 					g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(val)}", dv)
-				case "uint64":
+				case "uint", "uintptr", "uint64":
 					g.emit("\tval := *(*uint64)(unsafe.Pointer(fieldAddr))")
 					g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(val))}", dv)
 				default:
@@ -5453,16 +6217,25 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 					g.emit("\t%s := ctx.AllocReg()", ptrReg)
 					g.emit("\t%s := ctx.AllocRegExcept(%s)", lenReg, ptrReg)
 					g.emit("\t%s := ctx.AllocRegExcept(%s, %s)", capReg, ptrReg, lenReg)
-					g.emit("\tctx.EmitMovRegMem64(%s, fieldAddr)", ptrReg)    // data ptr
-					g.emit("\tctx.EmitMovRegMem64(%s, fieldAddr+8)", lenReg)  // length
-					g.emit("\tctx.EmitMovRegMem64(%s, fieldAddr+16)", capReg) // capacity
+					g.emit("\tctx.EmitMovRegMem64(%s, fieldAddr)", ptrReg)
+					g.emit("\tctx.EmitMovRegMem64(%s, fieldAddr+8)", lenReg)
+					g.emit("\tctx.EmitMovRegMem64(%s, fieldAddr+16)", capReg)
 					g.emit("\t%s = JITValueDesc{Loc: LocRegTriple, Reg: %s, Reg2: %s, Reg3: %s}", dv, ptrReg, lenReg, capReg)
+				case "interface":
+					itabReg := g.allocReg()
+					dataReg := g.allocReg()
+					g.emit("\tfieldAddr := uintptr(thisptr.Imm.Int()) + %s", src.offsetExpr)
+					g.emit("\t%s := ctx.AllocReg()", itabReg)
+					g.emit("\t%s := ctx.AllocRegExcept(%s)", dataReg, itabReg)
+					g.emit("\tctx.EmitMovRegMem64(%s, fieldAddr)", itabReg)
+					g.emit("\tctx.EmitMovRegMem64(%s, fieldAddr+8)", dataReg)
+					g.emit("\t%s = JITValueDesc{Loc: LocRegPair, Reg: %s, Reg2: %s}", dv, itabReg, dataReg)
 				case "array":
 					ptrReg := g.allocReg()
 					g.emit("\tfieldAddr := uintptr(thisptr.Imm.Int()) + %s", src.offsetExpr)
 					g.emit("\t%s := ctx.AllocReg()", ptrReg)
 					g.emit("\tctx.EmitMovRegImm64(%s, uint64(fieldAddr))", ptrReg)
-					g.emit("\t%s = JITValueDesc{Loc: LocReg, Reg: %s}", dv, ptrReg)
+					g.emit("\t%s = JITValueDesc{Loc: LocReg, Reg: %s, GoArray: true, RelocatablePointer: true}", dv, ptrReg)
 				}
 				g.emit("} else {")
 				// thisptr is in a register → emit register-relative loads
@@ -5499,16 +6272,28 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 					g.emit("\tctx.EmitMovRegMem(%s, thisptr.Reg, off+8)", lenReg2)  // length
 					g.emit("\tctx.EmitMovRegMem(%s, thisptr.Reg, off+16)", capReg2) // capacity
 					g.emit("\t%s = JITValueDesc{Loc: LocRegTriple, Reg: %s, Reg2: %s, Reg3: %s}", dv, ptrReg2, lenReg2, capReg2)
+				case "interface":
+					itabReg2 := g.allocReg()
+					dataReg2 := g.allocReg()
+					g.emit("\t%s := ctx.AllocReg()", itabReg2)
+					g.emit("\t%s := ctx.AllocRegExcept(%s)", dataReg2, itabReg2)
+					g.emit("\tctx.EmitMovRegMem(%s, thisptr.Reg, off)", itabReg2)
+					g.emit("\tctx.EmitMovRegMem(%s, thisptr.Reg, off+8)", dataReg2)
+					g.emit("\t%s = JITValueDesc{Loc: LocRegPair, Reg: %s, Reg2: %s}", dv, itabReg2, dataReg2)
 				case "array":
 					ptrReg2 := g.allocReg()
 					g.emit("\t%s := ctx.AllocReg()", ptrReg2)
 					g.emit("\tctx.EmitMovRegReg(%s, thisptr.Reg)", ptrReg2)
 					g.emit("\tctx.EmitAddRegImm32(%s, off)", ptrReg2)
-					g.emit("\t%s = JITValueDesc{Loc: LocReg, Reg: %s}", dv, ptrReg2)
+					g.emit("\t%s = JITValueDesc{Loc: LocReg, Reg: %s, GoArray: true, RelocatablePointer: true}", dv, ptrReg2)
 				}
 				g.emit("}")
 				if sizeStr == "slice" || sizeStr == "array" {
 					gv := genVal{goVar: dv, isDesc: true, marker: "_slice"}
+					g.vals[name] = gv
+					g.fieldCache[cacheKey] = gv
+				} else if sizeStr == "interface" {
+					gv := genVal{goVar: dv, isDesc: true, marker: "_goiface", pinAcrossBlock: true}
 					g.vals[name] = gv
 					g.fieldCache[cacheKey] = gv
 				} else {
@@ -5525,17 +6310,14 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				sliceDescVar = g.overlayDescVar(sliceDescVar, src.deferredBaseSSA)
 				idxDescVar := g.overlayDescVar(src.argIdxVar, src.deferredIndexSSA)
 				dv := g.allocDesc()
-				addressDesc := g.allocDesc()
-				g.emit("%s := ctx.EmitSliceElementAddress(&%s, &%s, %s)", addressDesc, sliceDescVar, idxDescVar, elemSize)
 				switch elemSize {
-				case "8":
-					g.emit("ctx.EnsureDesc(&%s)", addressDesc)
-					// Load through the address in place. Architecture emitters handle
-					// destination==base, avoiding a second live register.
-					g.emit("ctx.EmitMovRegMem(%s.Reg, %s.Reg, 0)", addressDesc, addressDesc)
-					g.emit("%s := %s", dv, addressDesc)
-					g.vals[name] = genVal{goVar: dv, isDesc: true}
+				case "1", "2", "4", "8":
+					g.emit("%s := ctx.EmitLoadScalarSliceElement(&%s, &%s, %s, %s)", dv, sliceDescVar, idxDescVar, elemSize, jitTagForSSAType(v.Type()))
+					bits, _ := strconv.Atoi(elemSize)
+					g.vals[name] = genVal{goVar: dv, isDesc: true, canonicalIntBits: bits * 8}
 				default:
+					addressDesc := g.allocDesc()
+					g.emit("%s := ctx.EmitSliceElementAddress(&%s, &%s, %s)", addressDesc, sliceDescVar, idxDescVar, elemSize)
 					// Load aux first, then reuse the address register for ptr. A Scmer
 					// element therefore needs only two live registers even when its slice
 					// header is pinned across recursive CFG blocks.
@@ -5931,6 +6713,24 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s.Reg3, ID: 0}", dv, src.goVar)
 				g.emit("}")
 				g.vals[name] = genVal{goVar: dv, isDesc: true}
+			case "StringData":
+				// unsafe.StringData returns the first word of a Go string header.
+				// Keep it borrowed: the string descriptor remains the owner and is
+				// still live when the resulting pointer is consumed.
+				src := g.resolveValue(v.Call.Args[0])
+				dv := g.allocDesc()
+				g.emit("var %s JITValueDesc", dv)
+				g.emit("if %s.Loc == LocImm {", src.goVar)
+				g.emit("\tptr, _ := %s.Imm.RawWords()", src.goVar)
+				g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(uintptr(unsafe.Pointer(ptr))))}", dv)
+				g.emit("} else if %s.Loc == LocStackPair {", src.goVar)
+				g.emit("\t%s = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: %s.StackOff}", dv, src.goVar)
+				g.emit("} else {")
+				g.emit("\tctx.EnsureDesc(&%s)", src.goVar)
+				g.emit("\tif %s.Loc != LocRegPair { panic(\"StringData requires a Go string pair\") }", src.goVar)
+				g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s.Reg, ID: 0}", dv, src.goVar)
+				g.emit("}")
+				g.vals[name] = genVal{goVar: dv, isDesc: true}
 			case "copy":
 				if len(v.Call.Args) != 2 {
 					panic(fmt.Sprintf("copy with unsupported arity: %s", v))
@@ -6051,6 +6851,32 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		atomicPkg := callee.Pkg != nil && callee.Pkg.Pkg != nil && callee.Pkg.Pkg.Path() == "sync/atomic"
 		atomicLoad := callee.Name() == "LoadInt64" || (atomicPkg && callee.Name() == "Load")
 		atomicStore := callee.Name() == "StoreInt64" || (atomicPkg && callee.Name() == "Store")
+		if atomicPkg && callee.Name() == "AddUint64" {
+			dst := g.vals[v.Call.Args[0].Name()]
+			val := g.resolveValue(v.Call.Args[1])
+			if !strings.HasPrefix(dst.marker, "_fieldaddr:") && !strings.HasPrefix(dst.marker, "_fieldconst:") {
+				panic(fmt.Sprintf("AddUint64 dst is not a field address: marker=%q", dst.marker))
+			}
+			addr := g.allocDesc()
+			reg := g.allocReg()
+			g.emit("%s := ctx.AllocReg()", reg)
+			g.emit("if thisptr.Loc == LocImm {")
+			g.emit("\tctx.EmitMovRegImm64(%s, uint64(uintptr(thisptr.Imm.Int()) + %s))", reg, dst.offsetExpr)
+			g.emit("} else {")
+			g.emit("\tctx.EmitLeaRegMem(%s, thisptr.Reg, int32(%s))", reg, dst.offsetExpr)
+			g.emit("}")
+			g.emit("%s := JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s}", addr, reg)
+			g.emit("ctx.BindReg(%s, &%s)", reg, addr)
+			resultDesc := g.allocDesc()
+			g.emit("%s := ctx.EmitGoCallScalar(GoFuncAddr(JITAtomicAddUint64), []JITValueDesc{%s, %s}, 1)", resultDesc, addr, val.goVar)
+			g.emit("_ = %s", resultDesc)
+			if name != "" {
+				g.vals[name] = genVal{goVar: resultDesc, isDesc: true}
+			} else {
+				g.emit("ctx.FreeDesc(&%s)", resultDesc)
+			}
+			break
+		}
 		if atomicLoad {
 			// sync/atomic.LoadInt64(ptr) / (*sync/atomic.Int64).Load() → int64
 			// SSA method form passes receiver pointer as first argument.
@@ -6180,7 +7006,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			tmp := g.allocDesc()
 			g.emit("%s := %s", tmp, arg.goVar)
 			g.emit("%s.ID = 0", tmp)
-			g.emit("%s := ctx.EmitTagEqualsBorrowed(&%s, tagString, JITValueDesc{Loc: LocAny})", dv, tmp)
+			g.emit("%s := ctx.EmitIsStringBorrowed(&%s, JITValueDesc{Loc: LocAny})", dv, tmp)
 			g.vals[name] = genVal{goVar: dv, isDesc: true}
 		case "IsSlice":
 			arg := g.vals[v.Call.Args[0].Name()]
@@ -6538,7 +7364,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagFloat, Imm: NewFloat(math.Trunc(%s.Imm.Float()))}", dv, arg.goVar)
 			g.emit("} else {")
 			g.emit("\tctx.EnsureDesc(&%s)", arg.goVar)
-			g.emit("\tvar truncSrc Reg")
+			g.emit("\tvar truncSrc %s", g.regTypeName())
 			g.emit("\tif %s.Loc == LocRegPair {", arg.goVar)
 			g.emit("\t\tctx.FreeReg(%s.Reg)", arg.goVar)
 			g.emit("\t\ttruncSrc = %s.Reg2", arg.goVar)
@@ -6643,7 +7469,20 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			}
 		default:
 			if g.storageMode {
+				if g.emitNestedStorageGetter(name, v, callee) {
+					break
+				}
 				if result, ok := g.tryInlineCall(callee, v.Call.Args); ok {
+					if name != "" {
+						g.vals[name] = result
+					}
+					break
+				}
+				// Methods that implement an encoding helper are part of the storage
+				// reader, rather than a native boundary. Keep their SSA in the same
+				// generated function so the finished receiver remains a compile-time
+				// specialization input.
+				if result, ok := g.tryInlineStorageMethod(callee, v.Call.Args); ok {
 					if name != "" {
 						g.vals[name] = result
 					}
@@ -6724,6 +7563,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			}
 		}
 		xVal := g.resolveValue(v.X)
+		plannedTarget := g.plannedPhiTarget(v)
 		directResultMarker := g.directResultPayloads[name]
 		directResult := directResultMarker == "_newint" || directResultMarker == "_newfloat"
 		resultTargetVar := ""
@@ -6746,8 +7586,9 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			xMultiUse = true
 		}
 		if g.storageMode {
-			// Conservative in storage emitters: SSA value reuse across phi edges
-			// and inlined blocks is subtle; prefer non-destructive BinOps.
+			// Nested storage CFGs still share descriptors outside the static
+			// alias set. Preserve those operands until the planner models the
+			// complete inlined receiver graph.
 			xMultiUse = true
 		}
 		if g.isFieldCachedDesc(xVal.goVar) {
@@ -6772,7 +7613,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagFloat, Imm: NewFloat(%s.Imm.Float() %s %g)}", dv, xVal.goVar, goOp, cmpVal)
 				g.emit("} else {")
 				if xMultiUse {
-					g.emitAllocResultAwareReg("scratch", resultTargetVar, "\t", directResult, xVal.goVar+".Reg")
+					g.emitAllocResultAwareReg("scratch", resultTargetVar, "\t", directResult, plannedTarget, xVal.goVar+".Reg")
 					g.emit("\tctx.EmitMovRegReg(scratch, %s.Reg)", xVal.goVar)
 					g.emit("\tctx.EmitMovRegImm64(RegR11, uint64(%d))", bits)
 					g.emit("\tctx.%s(scratch, RegR11)", floatAluOp)
@@ -6790,14 +7631,14 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				g.emit("if %s {", bothImmCond(xVal.goVar, yVal.goVar))
 				g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagFloat, Imm: NewFloat(%s.Imm.Float() %s %s.Imm.Float())}", dv, xVal.goVar, goOp, yVal.goVar)
 				g.emit("} else if %s.Loc == LocImm {", xVal.goVar)
-				g.emitAllocResultAwareReg("scratch", resultTargetVar, "\t", directResult, yVal.goVar+".Reg")
+				g.emitAllocResultAwareReg("scratch", resultTargetVar, "\t", directResult, plannedTarget, yVal.goVar+".Reg")
 				g.emit("\t_, xBits := %s.Imm.RawWords()", xVal.goVar)
 				g.emit("\tctx.EmitMovRegImm64(scratch, xBits)")
 				g.emit("\tctx.%s(scratch, %s.Reg)", floatAluOp, yVal.goVar)
 				g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: scratch}", dv)
 				g.emit("} else if %s.Loc == LocImm {", yVal.goVar)
 				if xMultiUse {
-					g.emitAllocResultAwareReg("scratch", resultTargetVar, "\t", directResult, xVal.goVar+".Reg")
+					g.emitAllocResultAwareReg("scratch", resultTargetVar, "\t", directResult, plannedTarget, xVal.goVar+".Reg")
 					g.emit("\tctx.EmitMovRegReg(scratch, %s.Reg)", xVal.goVar)
 					g.emit("\t_, yBits := %s.Imm.RawWords()", yVal.goVar)
 					g.emit("\tctx.EmitMovRegImm64(RegR11, yBits)")
@@ -6812,7 +7653,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				g.emit("} else {")
 				if xMultiUse {
 					copyReg := g.allocReg()
-					g.emitAllocResultAwareReg(copyReg, resultTargetVar, "\t", directResult, xVal.goVar+".Reg", yVal.goVar+".Reg")
+					g.emitAllocResultAwareReg(copyReg, resultTargetVar, "\t", directResult, plannedTarget, xVal.goVar+".Reg", yVal.goVar+".Reg")
 					g.emit("\tctx.EmitMovRegReg(%s, %s.Reg)", copyReg, xVal.goVar)
 					g.emit("\tctx.%s(%s, %s.Reg)", floatAluOp, copyReg, yVal.goVar)
 					g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: %s}", dv, copyReg)
@@ -6843,6 +7684,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		}
 		goOp := goOpStr(v.Op)
 		if cc != "" {
+			flagsOnly := comparisonFeedsImmediateIf(v)
 			dv := g.allocDesc()
 			if c, ok := v.Y.(*ssa.Const); ok && c.Value == nil && (v.Op == token.EQL || v.Op == token.NEQ) {
 				nilComparable := false
@@ -6952,18 +7794,27 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 					g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(%s.Imm.Int() %s %d)}", dv, xVal.goVar, goOp, cmpVal)
 				}
 				g.emit("} else {")
-				// Fresh register for result — CMP is non-destructive, SetCC writes only the target.
-				// Protect xVal.Reg when multi-use: AllocReg must not return xVal.Reg (SetCC would clobber it).
-				rv := g.allocReg()
-				g.emitAllocRegExcept(rv, "\t", xMultiUse, xVal)
+				flagsReg := ""
+				if flagsOnly {
+					flagsReg = g.allocReg()
+					g.emitAllocRegExcept(flagsReg, "\t", xMultiUse, xVal)
+				}
 				if fitsInt32(cmpVal) {
 					g.emit("\tctx.EmitCmpRegImm32(%s.Reg, %d)", xVal.goVar, cmpVal)
 				} else {
 					g.emit("\tctx.EmitMovRegImm64(RegR11, 0x%x)", uint64(cmpVal))
 					g.emit("\tctx.EmitCmpInt64(%s.Reg, RegR11)", xVal.goVar)
 				}
-				g.emit("\tctx.EmitSetcc(%s, %s)", rv, cc)
-				g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: %s}", dv, rv)
+				if flagsOnly {
+					g.emit("\t%s = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: %s, Condition: %s}", dv, flagsReg, cc)
+					g.emit("\tctx.BindReg(%s, &%s)", flagsReg, dv)
+				} else {
+					// CMP is non-destructive, but SETcc requires a fresh result register.
+					rv := g.allocReg()
+					g.emitAllocRegExcept(rv, "\t", xMultiUse, xVal)
+					g.emit("\tctx.EmitSetcc(%s, %s)", rv, cc)
+					g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: %s}", dv, rv)
+				}
 				g.emit("}")
 			} else {
 				yVal := g.resolveValue(v.Y)
@@ -6976,39 +7827,84 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 					g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(%s.Imm.Int() %s %s.Imm.Int())}", dv, xVal.goVar, goOp, yVal.goVar)
 				}
 				g.emit("} else if %s.Loc == LocImm {", yVal.goVar)
-				// y is imm, x is reg → CmpRegImm32. Protect xVal.Reg when multi-use.
-				rv := g.allocReg()
-				g.emitAllocRegExcept(rv, "\t", xMultiUse, xVal)
+				flagsRegY := ""
+				if flagsOnly {
+					flagsRegY = g.allocReg()
+					g.emitAllocRegExcept(flagsRegY, "\t", xMultiUse, xVal)
+				}
 				g.emit("\tif %s.Imm.Int() >= -2147483648 && %s.Imm.Int() <= 2147483647 {", yVal.goVar, yVal.goVar)
 				g.emit("\t\tctx.EmitCmpRegImm32(%s.Reg, int32(%s.Imm.Int()))", xVal.goVar, yVal.goVar)
 				g.emit("\t} else {")
 				g.emit("\t\tctx.EmitMovRegImm64(RegR11, uint64(%s.Imm.Int()))", yVal.goVar)
 				g.emit("\t\tctx.EmitCmpInt64(%s.Reg, RegR11)", xVal.goVar)
 				g.emit("\t}")
-				g.emit("\tctx.EmitSetcc(%s, %s)", rv, cc)
-				g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: %s}", dv, rv)
+				if flagsOnly {
+					g.emit("\t%s = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: %s, Condition: %s}", dv, flagsRegY, cc)
+					g.emit("\tctx.BindReg(%s, &%s)", flagsRegY, dv)
+				} else {
+					rv := g.allocReg()
+					g.emitAllocRegExcept(rv, "\t", xMultiUse, xVal)
+					g.emit("\tctx.EmitSetcc(%s, %s)", rv, cc)
+					g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: %s}", dv, rv)
+				}
 				g.emit("} else if %s.Loc == LocImm {", xVal.goVar)
 				// x is imm, y is reg → materialize x, CMP
-				rv2 := g.allocReg()
-				g.emit("\t%s := ctx.AllocReg()", rv2)
+				flagsRegX := ""
+				if flagsOnly {
+					flagsRegX = g.allocReg()
+					g.emit("\t%s := ctx.AllocReg()", flagsRegX)
+				}
 				g.emit("\tctx.EmitMovRegImm64(RegR11, uint64(%s.Imm.Int()))", xVal.goVar)
 				g.emit("\tctx.EmitCmpInt64(RegR11, %s.Reg)", yVal.goVar)
-				g.emit("\tctx.EmitSetcc(%s, %s)", rv2, cc)
-				g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: %s}", dv, rv2)
+				if flagsOnly {
+					g.emit("\t%s = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: %s, Condition: %s}", dv, flagsRegX, cc)
+					g.emit("\tctx.BindReg(%s, &%s)", flagsRegX, dv)
+				} else {
+					rv2 := g.allocReg()
+					g.emit("\t%s := ctx.AllocReg()", rv2)
+					g.emit("\tctx.EmitSetcc(%s, %s)", rv2, cc)
+					g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: %s}", dv, rv2)
+				}
 				g.emit("} else {")
-				// Both regs: protect xVal.Reg when multi-use (SetCC would clobber if rv3==xVal.Reg).
-				rv3 := g.allocReg()
-				g.emitAllocRegExcept(rv3, "\t", xMultiUse, xVal)
+				flagsRegBoth := ""
+				if flagsOnly {
+					flagsRegBoth = g.allocReg()
+					g.emitAllocRegExcept(flagsRegBoth, "\t", xMultiUse, xVal)
+				}
 				g.emit("\tctx.EmitCmpInt64(%s.Reg, %s.Reg)", xVal.goVar, yVal.goVar)
-				g.emit("\tctx.EmitSetcc(%s, %s)", rv3, cc)
-				g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: %s}", dv, rv3)
+				if flagsOnly {
+					g.emit("\t%s = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: %s, Condition: %s}", dv, flagsRegBoth, cc)
+					g.emit("\tctx.BindReg(%s, &%s)", flagsRegBoth, dv)
+				} else {
+					// Protect xVal.Reg when multi-use: SETcc must not clobber it.
+					rv3 := g.allocReg()
+					g.emitAllocRegExcept(rv3, "\t", xMultiUse, xVal)
+					g.emit("\tctx.EmitSetcc(%s, %s)", rv3, cc)
+					g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: %s}", dv, rv3)
+				}
 				g.emit("}")
 			}
-			g.vals[name] = genVal{goVar: dv, isDesc: true}
+			marker := ""
+			if flagsOnly {
+				marker = "_flags"
+			}
+			g.vals[name] = genVal{goVar: dv, isDesc: true, marker: marker}
 		} else if aluOp := aluEmitFunc(v.Op); aluOp != "" {
 			// Arithmetic BinOp: ADD, SUB, MUL
 			dv := g.allocDesc()
 			directIntResult := directResultMarker == "_newint"
+			addImmediate := "EmitAddRegImm32"
+			subImmediate := "EmitSubRegImm32"
+			canonicalALU32 := narrowUnsigned && resBits == 32 && (v.Op == token.ADD || v.Op == token.SUB)
+			if canonicalALU32 {
+				addImmediate = "EmitAddRegImm32Low"
+				subImmediate = "EmitSubRegImm32Low"
+				if v.Op == token.ADD {
+					aluOp = "EmitAddInt32"
+				} else {
+					aluOp = "EmitSubInt32"
+				}
+			}
 			if c, ok := v.Y.(*ssa.Const); ok {
 				cmpVal, ok := constInt64Value(c.Value)
 				if !ok {
@@ -7025,10 +7921,10 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 					// x is needed again → result must go into a fresh register
 					if v.Op == token.SUB {
 						// SUB is non-commutative: copy x, then subtract const
-						g.emitAllocResultAwareReg("scratch", resultTargetVar, "\t", directIntResult, xVal.goVar+".Reg")
+						g.emitAllocResultAwareReg("scratch", resultTargetVar, "\t", directIntResult, plannedTarget, xVal.goVar+".Reg")
 						g.emit("\tctx.EmitMovRegReg(scratch, %s.Reg)", xVal.goVar)
 						if fitsInt32(cmpVal) {
-							g.emit("\tctx.EmitSubRegImm32(scratch, int32(%d))", cmpVal)
+							g.emit("\tctx.%s(scratch, int32(%d))", subImmediate, cmpVal)
 						} else {
 							g.emit("\tctx.EmitMovRegImm64(RegR11, 0x%x)", uint64(cmpVal))
 							g.emit("\tctx.EmitSubInt64(scratch, RegR11)")
@@ -7036,12 +7932,12 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 						g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: scratch}", dv)
 					} else {
 						// ADD/MUL: commutative, order doesn't matter
-						g.emitAllocResultAwareReg("scratch", resultTargetVar, "\t", directIntResult, xVal.goVar+".Reg")
+						g.emitAllocResultAwareReg("scratch", resultTargetVar, "\t", directIntResult, plannedTarget, xVal.goVar+".Reg")
 						g.emit("\tctx.EmitMovRegReg(scratch, %s.Reg)", xVal.goVar)
 						if v.Op == token.MUL {
 							g.emitMulConstOnReg("scratch", cmpVal, "\t")
 						} else if fitsInt32(cmpVal) {
-							g.emit("\tctx.EmitAddRegImm32(scratch, int32(%d))", cmpVal)
+							g.emit("\tctx.%s(scratch, int32(%d))", addImmediate, cmpVal)
 						} else {
 							g.emit("\tctx.EmitMovRegImm64(RegR11, 0x%x)", uint64(cmpVal))
 							g.emit("\tctx.%s(scratch, RegR11)", aluOp)
@@ -7055,9 +7951,9 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 					} else if fitsInt32(cmpVal) {
 						switch v.Op {
 						case token.ADD:
-							g.emit("\tctx.EmitAddRegImm32(%s.Reg, int32(%d))", xVal.goVar, cmpVal)
+							g.emit("\tctx.%s(%s.Reg, int32(%d))", addImmediate, xVal.goVar, cmpVal)
 						case token.SUB:
-							g.emit("\tctx.EmitSubRegImm32(%s.Reg, int32(%d))", xVal.goVar, cmpVal)
+							g.emit("\tctx.%s(%s.Reg, int32(%d))", subImmediate, xVal.goVar, cmpVal)
 						default:
 							g.emit("\tctx.EmitMovRegImm64(RegR11, 0x%x)", uint64(cmpVal))
 							g.emit("\tctx.%s(%s.Reg, RegR11)", aluOp, xVal.goVar)
@@ -7081,7 +7977,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 					g.emit("} else if %s.Loc == LocImm && %s.Imm.Int() == 0 {", yVal.goVar, yVal.goVar)
 					if xMultiUse {
 						copyReg := g.allocReg()
-						g.emitAllocResultAwareReg(copyReg, resultTargetVar, "\t", directIntResult, xVal.goVar+".Reg")
+						g.emitAllocResultAwareReg(copyReg, resultTargetVar, "\t", directIntResult, plannedTarget, xVal.goVar+".Reg")
 						g.emit("\tctx.EmitMovRegReg(%s, %s.Reg)", copyReg, xVal.goVar)
 						g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s}", dv, copyReg)
 					} else {
@@ -7095,7 +7991,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				}
 				g.emit("} else if %s.Loc == LocImm {", xVal.goVar)
 				// x is const, y is reg → materialize x into scratch, ALU (result in scratch)
-				g.emitAllocResultAwareReg("scratch", resultTargetVar, "\t", directIntResult, yVal.goVar+".Reg")
+				g.emitAllocResultAwareReg("scratch", resultTargetVar, "\t", directIntResult, plannedTarget, yVal.goVar+".Reg")
 				g.emit("\tctx.EmitMovRegImm64(scratch, uint64(%s.Imm.Int()))", xVal.goVar)
 				g.emit("\tctx.%s(scratch, %s.Reg)", aluOp, yVal.goVar)
 				g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: scratch}", dv)
@@ -7104,10 +8000,10 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				if xMultiUse {
 					if v.Op == token.SUB {
 						// SUB is non-commutative: copy x, then subtract y
-						g.emitAllocResultAwareReg("scratch", resultTargetVar, "\t", directIntResult, xVal.goVar+".Reg")
+						g.emitAllocResultAwareReg("scratch", resultTargetVar, "\t", directIntResult, plannedTarget, xVal.goVar+".Reg")
 						g.emit("\tctx.EmitMovRegReg(scratch, %s.Reg)", xVal.goVar)
 						g.emit("\tif %s.Imm.Int() >= -2147483648 && %s.Imm.Int() <= 2147483647 {", yVal.goVar, yVal.goVar)
-						g.emit("\t\tctx.EmitSubRegImm32(scratch, int32(%s.Imm.Int()))", yVal.goVar)
+						g.emit("\t\tctx.%s(scratch, int32(%s.Imm.Int()))", subImmediate, yVal.goVar)
 						g.emit("\t} else {")
 						g.emit("\t\tctx.EmitMovRegImm64(RegR11, uint64(%s.Imm.Int()))", yVal.goVar)
 						g.emit("\t\tctx.EmitSubInt64(scratch, RegR11)")
@@ -7115,11 +8011,11 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 						g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: scratch}", dv)
 					} else {
 						// ADD/MUL: commutative, order doesn't matter
-						g.emitAllocResultAwareReg("scratch", resultTargetVar, "\t", directIntResult, xVal.goVar+".Reg")
+						g.emitAllocResultAwareReg("scratch", resultTargetVar, "\t", directIntResult, plannedTarget, xVal.goVar+".Reg")
 						g.emit("\tctx.EmitMovRegReg(scratch, %s.Reg)", xVal.goVar)
 						g.emit("\tif %s.Imm.Int() >= -2147483648 && %s.Imm.Int() <= 2147483647 {", yVal.goVar, yVal.goVar)
 						if v.Op == token.ADD {
-							g.emit("\t\tctx.EmitAddRegImm32(scratch, int32(%s.Imm.Int()))", yVal.goVar)
+							g.emit("\t\tctx.%s(scratch, int32(%s.Imm.Int()))", addImmediate, yVal.goVar)
 						} else if v.Op == token.MUL {
 							g.emit("\t\tctx.EmitImulRegImm32(scratch, int32(%s.Imm.Int()))", yVal.goVar)
 						} else {
@@ -7136,9 +8032,9 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 					// x consumed, y constant: immediate-form ALU when possible.
 					g.emit("\tif %s.Imm.Int() >= -2147483648 && %s.Imm.Int() <= 2147483647 {", yVal.goVar, yVal.goVar)
 					if v.Op == token.ADD {
-						g.emit("\t\tctx.EmitAddRegImm32(%s.Reg, int32(%s.Imm.Int()))", xVal.goVar, yVal.goVar)
+						g.emit("\t\tctx.%s(%s.Reg, int32(%s.Imm.Int()))", addImmediate, xVal.goVar, yVal.goVar)
 					} else if v.Op == token.SUB {
-						g.emit("\t\tctx.EmitSubRegImm32(%s.Reg, int32(%s.Imm.Int()))", xVal.goVar, yVal.goVar)
+						g.emit("\t\tctx.%s(%s.Reg, int32(%s.Imm.Int()))", subImmediate, xVal.goVar, yVal.goVar)
 					} else if v.Op == token.MUL {
 						g.emit("\t\tctx.EmitImulRegImm32(%s.Reg, int32(%s.Imm.Int()))", xVal.goVar, yVal.goVar)
 					} else {
@@ -7154,7 +8050,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				g.emit("} else {")
 				if xMultiUse {
 					copyReg := g.allocReg()
-					g.emitAllocResultAwareReg(copyReg, resultTargetVar, "\t", directIntResult, xVal.goVar+".Reg", yVal.goVar+".Reg")
+					g.emitAllocResultAwareReg(copyReg, resultTargetVar, "\t", directIntResult, plannedTarget, xVal.goVar+".Reg", yVal.goVar+".Reg")
 					g.emit("\tctx.EmitMovRegReg(%s, %s.Reg)", copyReg, xVal.goVar)
 					g.emit("\tctx.%s(%s, %s.Reg)", aluOp, copyReg, yVal.goVar)
 					g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s}", dv, copyReg)
@@ -7165,7 +8061,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				g.emit("}")
 			}
 			// Neutralize xVal if its register was transferred to the result (destructive ALU)
-			if narrowUnsigned {
+			if narrowUnsigned && !canonicalALU32 {
 				g.emitNormalizeUnsignedNarrow(dv, resBits)
 			}
 			g.emit("if %s.Loc == LocReg && %s.Loc == LocReg && %s.Reg == %s.Reg {", dv, xVal.goVar, dv, xVal.goVar)
@@ -7175,7 +8071,16 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			if directIntResult {
 				g.emit("if %s && %s.Loc == LocReg { ctx.BindReg(result.Reg2, &result) }", resultTargetVar, dv)
 			}
-			g.vals[name] = genVal{goVar: dv, isDesc: true, resultTargetVar: resultTargetVar}
+			canonicalBits := 0
+			if resBits == 64 || narrowUnsigned {
+				// Unsigned narrow results were explicitly masked above; full-width
+				// integer operations are canonical by construction. Preserve that
+				// fact so a following SSA widening conversion aliases the value
+				// instead of emitting a second normalization sequence.
+				canonicalBits = resBits
+			}
+			g.vals[name] = genVal{goVar: dv, isDesc: true, resultTargetVar: resultTargetVar,
+				canonicalIntBits: canonicalBits, canonicalIntSigned: resSigned}
 		} else if v.Op == token.QUO {
 			// Integer division: uses SHR for power-of-2, IDIV otherwise
 			dv := g.allocDesc()
@@ -7215,6 +8120,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				g.emit("}")
 			} else {
 				yVal := g.resolveValue(v.Y)
+				g.emit("ctx.EnsureDescsTogether(&%s, &%s)", xVal.goVar, yVal.goVar)
 				g.emit("var %s JITValueDesc", dv)
 				g.emit("if %s {", bothImmCond(xVal.goVar, yVal.goVar))
 				g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(%s.Imm.Int() / %s.Imm.Int())}", dv, xVal.goVar, yVal.goVar)
@@ -7261,6 +8167,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				g.emit("}")
 			} else {
 				yVal := g.resolveValue(v.Y)
+				g.emit("ctx.EnsureDescsTogether(&%s, &%s)", xVal.goVar, yVal.goVar)
 				g.emit("var %s JITValueDesc", dv)
 				g.emit("if %s {", bothImmCond(xVal.goVar, yVal.goVar))
 				g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(%s.Imm.Int() %% %s.Imm.Int())}", dv, xVal.goVar, yVal.goVar)
@@ -7281,10 +8188,21 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			// Shift operations
 			dv := g.allocDesc()
 			emitFn := "EmitShlRegClGo64"
+			// SSA expressions such as x&(wordBits-1) and x%wordBits prove
+			// that the count is already in the machine shift domain. Preserve
+			// that fact offline so the one-pass emitter can omit the Go >=64
+			// correction branch without carrying range-analysis state at run time.
+			if ssaUnsignedValueBelow(v.Y, 64) {
+				emitFn = "EmitShlRegCl"
+			}
 			immFn := "EmitShlRegImm8"
 			goShOp := "<<"
 			if v.Op == token.SHR {
-				emitFn = "EmitShrRegClGo64"
+				if ssaUnsignedValueBelow(v.Y, 64) {
+					emitFn = "EmitShrRegCl"
+				} else {
+					emitFn = "EmitShrRegClGo64"
+				}
 				immFn = "EmitShrRegImm8"
 				goShOp = ">>"
 			}
@@ -7307,6 +8225,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				g.emit("}")
 			} else {
 				yVal := g.resolveValue(v.Y)
+				g.emit("ctx.EnsureDescsTogether(&%s, &%s)", xVal.goVar, yVal.goVar)
 				g.emit("var %s JITValueDesc", dv)
 				g.emit("if %s {", bothImmCond(xVal.goVar, yVal.goVar))
 				g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(uint64(%s.Imm.Int()) %s uint64(%s.Imm.Int())))}", dv, xVal.goVar, goShOp, yVal.goVar)
@@ -7330,7 +8249,10 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				g.emit("\t\tshiftSrc := %s.Reg", xVal.goVar)
 				if xMultiUse {
 					copyReg := g.allocReg()
-					g.emitAllocRegExcept(copyReg, "\t\t", true, xVal)
+					// Both operands remain live until CL has been loaded. Excluding only
+					// the shifted value lets register pressure evict and alias the shift
+					// count with the newly allocated result register.
+					g.emit("\t\t%s := ctx.AllocRegExcept(%s.Reg, %s.Reg)", copyReg, xVal.goVar, yVal.goVar)
 					g.emit("\t\tctx.EmitMovRegReg(%s, %s.Reg)", copyReg, xVal.goVar)
 					g.emit("\t\tshiftSrc = %s", copyReg)
 				} else {
@@ -7342,14 +8264,14 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				}
 				g.emit("\t\trcxUsed := ctx.FreeRegs & (1 << uint(RegRCX)) == 0 && %s.Reg != RegRCX", yVal.goVar)
 				g.emit("\t\tif rcxUsed {")
-				g.emit("\t\t\tctx.EmitMovRegReg(RegR11, RegRCX)") // save RCX in scratch R11
+				g.emit("\t\t\tctx.EmitMovRegReg(RegR11, RegRCX)")
 				g.emit("\t\t}")
 				g.emit("\t\tif %s.Reg != RegRCX {", yVal.goVar)
 				g.emit("\t\t\tctx.EmitMovRegReg(RegRCX, %s.Reg)", yVal.goVar)
 				g.emit("\t\t}")
 				g.emit("\t\tctx.%s(shiftSrc)", emitFn)
 				g.emit("\t\tif rcxUsed {")
-				g.emit("\t\t\tctx.EmitMovRegReg(RegRCX, RegR11)") // restore RCX from R11
+				g.emit("\t\t\tctx.EmitMovRegReg(RegRCX, RegR11)")
 				g.emit("\t\t}")
 				g.emit("\t\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: shiftSrc}", dv)
 				g.emit("\t}")
@@ -7575,7 +8497,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		}
 		if phiOff, ok := g.phiRegs[name]; ok {
 			stackOff := "int32(" + phiOff + ")"
-			if g.phiFrameFixup != "" && !g.storageMode {
+			if g.phiFrameFixup != "" {
 				stackOff = "int32(" + g.phiFrameFixup + ")+" + stackOff
 			}
 			if g.phiTriple[name] {
@@ -7593,7 +8515,12 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				if _, ok := v.Type().Underlying().(*types.Signature); ok {
 					marker = "_gofunc"
 				}
-				g.vals[name] = genVal{goVar: dv, isDesc: true, marker: marker, pinAcrossBlock: marker != ""}
+				gv := genVal{goVar: dv, isDesc: true, marker: marker, pinAcrossBlock: marker != ""}
+				if signed, bits, integer := intTypeInfo(v.Type()); integer {
+					gv.canonicalIntBits = bits
+					gv.canonicalIntSigned = signed
+				}
+				g.vals[name] = gv
 			}
 		} else {
 			panic(fmt.Sprintf("phi %s has no allocated stack slot", name))
@@ -7642,8 +8569,13 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		condVar := g.allocDesc()
 		g.emit("%s := %s", condVar, cond.goVar)
 		g.emit("ctx.EnsureDesc(&%s)", condVar)
-		g.emit("if %s.Loc != LocImm && %s.Loc != LocReg {", condVar, condVar)
-		g.emit("\tpanic(\"jit: If condition is neither LocImm nor LocReg\")")
+		if cond.marker == "_flags" {
+			g.emit("if %s.Loc != LocImm && %s.Loc != LocFlags {", condVar, condVar)
+			g.emit("\tpanic(\"jit: fused If condition is neither LocImm nor LocFlags\")")
+		} else {
+			g.emit("if %s.Loc != LocImm && %s.Loc != LocReg {", condVar, condVar)
+			g.emit("\tpanic(\"jit: If condition is neither LocImm nor LocReg\")")
+		}
 		g.emit("}")
 		// Ensure labels for both targets
 		thenLbl := g.ensureBBLabel(thenBB)
@@ -7669,9 +8601,16 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		g.emit("\t}")
 		g.emit("} else {")
 		// Runtime: CMP + JNE to then-edge helper, otherwise else-edge helper.
-		g.emit("\tctx.EmitCmpRegImm32(%s.Reg, 0)", condVar)
-		g.emit("\tctx.EmitJump(CondNotEqual, %s)", thenEdgeLbl)
+		if cond.marker == "_flags" {
+			g.emit("\tctx.EmitJump(%s.Condition, %s)", condVar, thenEdgeLbl)
+		} else {
+			g.emit("\tctx.EmitCmpRegImm32(%s.Reg, 0)", condVar)
+			g.emit("\tctx.EmitJump(CondNotEqual, %s)", thenEdgeLbl)
+		}
 		g.emit("\tctx.EmitJmp(%s)", elseEdgeLbl)
+		if cond.marker == "_flags" {
+			g.emit("\tctx.FreeDesc(&%s)", cond.goVar)
+		}
 		// Dynamic condition: both helper edges are reachable.
 		g.emit("\tctx.MarkLabel(%s)", thenEdgeLbl)
 		g.emitEdgePhiMoves(thenBB, 0)
@@ -7749,6 +8688,19 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			if !srcInfoOK || !dstInfoOK {
 				panic(fmt.Sprintf("unsupported integer Convert %s → %s", v.X.Type(), v.Type()))
 			}
+			if src.canonicalIntBits == srcBits && src.canonicalIntSigned == srcSigned &&
+				canonicalIntegerConversionIsNoop(srcSigned, srcBits, dstSigned, dstBits) {
+				srcName := v.X.Name()
+				if _, isConst := v.X.(*ssa.Const); !isConst {
+					g.ssaAliases[name] = srcName
+					g.refCounts[srcName] += g.refCounts[name]
+					delete(g.refCounts, name)
+				}
+				src.canonicalIntBits = dstBits
+				src.canonicalIntSigned = dstSigned
+				g.vals[name] = src
+				break
+			}
 
 			// Exact same integer representation: alias source.
 			if srcSigned == dstSigned && srcBits == dstBits {
@@ -7804,15 +8756,21 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			}
 			g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s}", dv, tmpReg)
 			g.emit("}")
-			g.vals[name] = genVal{goVar: dv, isDesc: true}
+			g.vals[name] = genVal{goVar: dv, isDesc: true,
+				canonicalIntBits: dstBits, canonicalIntSigned: dstSigned}
 		} else if srcOk && dstOk && isIntegerKind(srcBasic.Kind()) && dstBasic.Kind() == types.Float64 {
-			// int → float64: emit CVTSI2SD
+			// int → float64: CVTSI2SD overwrites its GPR operand with the
+			// resulting IEEE-754 bits. Keep the SSA producer intact because it
+			// may still feed a loop phi or another consumer after this conversion.
 			g.emit("var %s JITValueDesc", dv)
 			g.emit("if %s.Loc == LocImm {", src.goVar)
 			g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagFloat, Imm: NewFloat(float64(%s.Imm.Int()))}", dv, src.goVar)
 			g.emit("} else {")
-			g.emit("\tctx.EmitCvtInt64ToFloat64(RegX0, %s.Reg)", src.goVar)
-			g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: %s.Reg}", dv, src.goVar)
+			tmpReg := g.allocReg()
+			g.emit("\t%s := ctx.AllocRegExcept(%s.Reg)", tmpReg, src.goVar)
+			g.emit("\tctx.EmitMovRegReg(%s, %s.Reg)", tmpReg, src.goVar)
+			g.emit("\tctx.EmitCvtInt64ToFloat64(RegX0, %s)", tmpReg)
+			g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: %s}", dv, tmpReg)
 			g.emit("}")
 			g.vals[name] = genVal{goVar: dv, isDesc: true}
 		} else if srcOk && dstOk && srcBasic.Kind() == types.Float64 && isIntegerKind(dstBasic.Kind()) {
@@ -8055,23 +9013,36 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				// stack home here so address generation cannot spill a stale copy.
 				g.emit("ctx.SyncDesc(&%s)", src.goVar)
 			}
-			// Address formation may materialize stack-backed operands. Give that
-			// consumer non-owning descriptor copies so a subsequent write-barrier
-			// call cannot disconnect a loop-carried source from its stable home.
-			if dst.deferredIndexSSA != "" {
-				g.emit("ctx.StabilizeDescAcrossNestedCall(&%s)", idxDescVar)
-			}
+			// Address formation receives non-owning descriptor copies. If the
+			// specialized value can be stored without a write barrier, the loop
+			// carrier remains in its register home. Only the uncommon Go-call
+			// path needs the durable spill required across a safepoint.
 			sliceUse := g.allocDesc()
 			indexUse := g.allocDesc()
 			g.emit("%s := %s", sliceUse, sliceDescVar)
 			g.emit("%s.ID = 0", sliceUse)
 			g.emit("%s := %s", indexUse, idxDescVar)
 			g.emit("%s.ID = 0", indexUse)
-			address := g.allocDesc()
-			g.emit("%s := ctx.EmitSliceElementAddress(&%s, &%s, int32(%s))", address, sliceUse, indexUse, elemSize)
+			if isScmerType(v.Val.Type()) {
+				g.emit("if !ctx.TryEmitStoreScmerSliceElement(&%s, &%s, &%s, int32(%s)) {", sliceUse, indexUse, src.goVar, elemSize)
+				if dst.deferredIndexSSA != "" {
+					g.emit("\tctx.StabilizeDescAcrossNestedCall(&%s)", idxDescVar)
+					g.emit("\t%s = %s", indexUse, idxDescVar)
+					g.emit("\t%s.ID = 0", indexUse)
+				}
+				g.emit("\tctx.EmitStoreScmerSliceElement(&%s, &%s, &%s, int32(%s))", sliceUse, indexUse, src.goVar, elemSize)
+				g.emit("}")
+			} else {
+				address := g.allocDesc()
+				g.emit("%s := ctx.EmitSliceElementAddress(&%s, &%s, int32(%s))", address, sliceUse, indexUse, elemSize)
+				width := types.SizesFor("gc", "amd64").Sizeof(v.Val.Type())
+				if width != 1 && width != 2 && width != 4 && width != 8 {
+					panic(fmt.Sprintf("unsupported slice element store width %d for %s", width, v.Val.Type()))
+				}
+				g.emit("ctx.EmitStoreScalarAt(&%s, &%s, %d)", address, src.goVar, width)
+				g.emit("ctx.FreeDesc(&%s)", address)
+			}
 			g.emit("ctx.FreeDesc(&%s)", indexUse)
-			g.emit("ctx.EmitStoreScmerAt(&%s, &%s)", address, src.goVar)
-			g.emit("ctx.FreeDesc(&%s)", address)
 			if dst.deferredIndexSSA != "" {
 				g.useOperand(dst.deferredIndexSSA)
 			}
@@ -8326,73 +9297,6 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			g.vals[name] = genVal{goVar: dv, isDesc: true, marker: "_slice", pinAcrossBlock: true}
 			break
 		}
-		if g.storageMode {
-			// Storage fast path: materialize a proper Go string/slice header
-			// as LocRegPair{ptr,len}. Never collapse to LocImm because Go calls
-			// expect 2 ABI words for string/slice values.
-			x := g.vals[v.X.Name()]
-			if !x.isDesc {
-				panic(fmt.Sprintf("Slice on non-desc: %s", v))
-			}
-			low := g.resolveValue(v.Low)
-			high := g.resolveValue(v.High)
-			g.emit("ctx.EnsureDesc(&%s)", x.goVar)
-			if low.isDesc {
-				g.emit("ctx.EnsureDesc(&%s)", low.goVar)
-			}
-			if high.isDesc {
-				g.emit("ctx.EnsureDesc(&%s)", high.goVar)
-			}
-			ptrReg := g.allocReg()
-			lenReg := g.allocReg()
-			dv := g.allocDesc()
-			g.emit("%s := ctx.AllocReg()", ptrReg)
-			g.emit("%s := ctx.AllocRegExcept(%s)", lenReg, ptrReg)
-			g.emit("ctx.EnsureDesc(&%s)", x.goVar)
-			if low.isDesc {
-				g.emit("ctx.EnsureDesc(&%s)", low.goVar)
-			}
-			if high.isDesc {
-				g.emit("ctx.EnsureDesc(&%s)", high.goVar)
-			}
-			g.emit("if %s.Loc == LocImm {", x.goVar)
-			g.emit("\tctx.EmitMovRegImm64(%s, uint64(%s.Imm.Int()))", ptrReg, x.goVar)
-			g.emit("} else if %s.Loc == LocRegPair {", x.goVar)
-			g.emit("\tctx.EmitMovRegReg(%s, %s.Reg)", ptrReg, x.goVar)
-			g.emit("} else {")
-			g.emit("\tctx.EmitMovRegReg(%s, %s.Reg)", ptrReg, x.goVar)
-			g.emit("}")
-			g.emit("if %s.Loc == LocImm {", low.goVar)
-			g.emit("\tif %s.Imm.Int() != 0 {", low.goVar)
-			g.emit("\t\tif %s.Imm.Int() >= -2147483648 && %s.Imm.Int() <= 2147483647 {", low.goVar, low.goVar)
-			g.emit("\t\t\tctx.EmitAddRegImm32(%s, int32(%s.Imm.Int()))", ptrReg, low.goVar)
-			g.emit("\t\t} else {")
-			g.emit("\t\t\tctx.EmitMovRegImm64(RegR11, uint64(%s.Imm.Int()))", low.goVar)
-			g.emit("\t\t\tctx.EmitAddInt64(%s, RegR11)", ptrReg)
-			g.emit("\t\t}")
-			g.emit("\t}")
-			g.emit("} else {")
-			g.emit("\tctx.EmitAddInt64(%s, %s.Reg)", ptrReg, low.goVar)
-			g.emit("}")
-			g.emit("if %s.Loc == LocImm {", high.goVar)
-			g.emit("\tctx.EmitMovRegImm64(%s, uint64(%s.Imm.Int()))", lenReg, high.goVar)
-			g.emit("} else {")
-			g.emit("\tctx.EmitMovRegReg(%s, %s.Reg)", lenReg, high.goVar)
-			g.emit("}")
-			g.emit("if %s.Loc == LocImm {", low.goVar)
-			g.emit("\tif %s.Imm.Int() >= -2147483648 && %s.Imm.Int() <= 2147483647 {", low.goVar, low.goVar)
-			g.emit("\t\tctx.EmitSubRegImm32(%s, int32(%s.Imm.Int()))", lenReg, low.goVar)
-			g.emit("\t} else {")
-			g.emit("\t\tctx.EmitMovRegImm64(RegR11, uint64(%s.Imm.Int()))", low.goVar)
-			g.emit("\t\tctx.EmitSubInt64(%s, RegR11)", lenReg)
-			g.emit("\t}")
-			g.emit("} else {")
-			g.emit("\tctx.EmitSubInt64(%s, %s.Reg)", lenReg, low.goVar)
-			g.emit("}")
-			g.emit("%s := JITValueDesc{Loc: LocRegPair, Reg: %s, Reg2: %s}", dv, ptrReg, lenReg)
-			g.vals[name] = genVal{goVar: dv, isDesc: true, marker: "_gostring"}
-			break
-		}
 		// Sub-slice: strings use ptr+len, Go slices use the complete ptr+len+cap ABI header.
 		x := g.vals[v.X.Name()]
 		if strings.HasPrefix(x.marker, "_stackarray:") {
@@ -8534,8 +9438,8 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		// LocImm Scmer cannot represent Go string header (ptr+len) correctly.
 		finalPtr := g.allocReg()
 		finalLen := g.allocReg()
-		g.emit("var %s Reg", finalPtr)
-		g.emit("var %s Reg", finalLen)
+		g.emit("var %s %s", finalPtr, g.regTypeName())
+		g.emit("var %s %s", finalLen, g.regTypeName())
 		g.emit("ctx.SyncDesc(&%s)", ptrDesc)
 		g.emit("ctx.EnsureDesc(&%s)", ptrDesc)
 		g.emit("if %s.Loc == LocImm {", ptrDesc)
@@ -8579,7 +9483,8 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 
 	case *ssa.MakeSlice:
 		elem := v.Type().Underlying().(*types.Slice).Elem()
-		if !isScmerType(elem) && !isByteType(elem) {
+		basic, scalarElem := elem.Underlying().(*types.Basic)
+		if !isScmerType(elem) && !isByteType(elem) && (!scalarElem || (basic.Kind() != types.Uint32 && basic.Kind() != types.Uint64 && basic.Kind() != types.Int64 && basic.Kind() != types.Int && basic.Kind() != types.Bool)) {
 			panic(fmt.Sprintf("MakeSlice of unsupported element type: %s", v))
 		}
 		length := g.resolveValue(v.Len)
@@ -8595,6 +9500,34 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		helper := "jitMakeScmerSlice"
 		if isByteType(elem) {
 			helper = "jitMakeByteSlice"
+		} else if scalarElem && basic.Kind() == types.Uint32 {
+			helper = "JITMakeUint32Slice"
+		} else if scalarElem && basic.Kind() == types.Uint64 {
+			helper = "JITMakeUint64Slice"
+		} else if scalarElem && basic.Kind() == types.Int64 {
+			helper = "JITMakeInt64Slice"
+		} else if scalarElem && basic.Kind() == types.Int {
+			helper = "JITMakeIntSlice"
+		} else if scalarElem && basic.Kind() == types.Bool {
+			helper = "JITMakeBoolSlice"
+		}
+		if g.storageMode {
+			switch {
+			case isByteType(elem):
+				helper = "scm.JITMakeByteSlice"
+			case scalarElem && basic.Kind() == types.Uint32:
+				helper = "scm.JITMakeUint32Slice"
+			case scalarElem && basic.Kind() == types.Uint64:
+				helper = "scm.JITMakeUint64Slice"
+			case scalarElem && basic.Kind() == types.Int64:
+				helper = "scm.JITMakeInt64Slice"
+			case scalarElem && basic.Kind() == types.Int:
+				helper = "scm.JITMakeIntSlice"
+			case scalarElem && basic.Kind() == types.Bool:
+				helper = "scm.JITMakeBoolSlice"
+			default:
+				helper = "scm.JITMakeScmerSlice"
+			}
 		}
 		g.emit("%s := JITEmitGoCallResults(ctx, GoFuncAddr(%s), []JITValueDesc{%s, %s}, []uint8{3}, []uint8{1})", callResults, helper, length.goVar, capacity.goVar)
 		g.emit("%s := %s[0]", dv, callResults)
@@ -8704,6 +9637,16 @@ func (g *codeGen) emitReturnSingleBlock(v *ssa.Return) {
 			g.emit("\tctx.BindReg(result.Reg, &result)")
 			g.emit("\tctx.BindReg(result.Reg2, &result)")
 			g.emit("}")
+			if g.storageMode && isScmerType(v.Results[0].Type()) {
+				// Storage entry points already provide their Go ABI result pair as the
+				// requested target. Materialize directly there: preparing a separate
+				// Go argument pair first adds two registers and two moves precisely on
+				// the per-row GetValue path.
+				g.emit("ctx.EmitMovPairToResult(&%s, &result)", res.goVar)
+				g.emit("result.Type = %s.Type", res.goVar)
+				g.emit("return result")
+				break
+			}
 			g.emit("ctx.SyncDesc(&%s)", res.goVar)
 			g.emit("if %s.Loc == LocRegPair || %s.Loc == LocStackPair || %s.Loc == LocInputPair {", res.goVar, res.goVar, res.goVar)
 			g.emit("\tctx.EmitMovPairToResult(&%s, &result)", res.goVar)
@@ -8737,16 +9680,15 @@ func (g *codeGen) emitReturnSingleBlock(v *ssa.Return) {
 // Emits machine code to construct the result + JMP to the shared epilogue.
 func (g *codeGen) emitReturnMultiBlock(v *ssa.Return) {
 	if g.storageMode {
+		if len(v.Results) == 0 {
+			g.emit("ctx.EmitJmp(%s)", g.endLabel)
+			return
+		}
 		if g.returnPhiReg == "" || g.returnPhiReg2 == "" {
 			panic("jit: storage return-phi registers not initialized")
 		}
 		retDesc := g.allocDesc()
 		g.emit("%s := JITValueDesc{Loc: LocRegPair, Reg: %s, Reg2: %s}", retDesc, g.returnPhiReg, g.returnPhiReg2)
-		if len(v.Results) == 0 {
-			g.emit("ctx.EmitMakeNil(%s)", retDesc)
-			g.emit("ctx.EmitJmp(%s)", g.endLabel)
-			return
-		}
 		res := g.vals[v.Results[0].Name()]
 		switch res.marker {
 		case "_newbool":
@@ -9106,6 +10048,50 @@ func constInt64Value(v constant.Value) (val int64, ok bool) {
 	return constant.Int64Val(v)
 }
 
+// ssaUnsignedValueBelow recognizes cheap range proofs which survive directly
+// in SSA. It intentionally stays narrow: modulo and masking are sufficient for
+// Go's common variable-shift lowering, and every accepted expression proves the
+// strict bound without relying on profiles or storage-specific knowledge.
+func ssaUnsignedValueBelow(value ssa.Value, limit uint64) bool {
+	if limit == 0 {
+		return false
+	}
+	if basic, ok := value.Type().Underlying().(*types.Basic); !ok || basic.Info()&types.IsUnsigned == 0 {
+		return false
+	}
+	switch value := value.(type) {
+	case *ssa.Const:
+		constantValue, exact := constant.Uint64Val(value.Value)
+		return exact && constantValue < limit
+	case *ssa.Convert:
+		return ssaUnsignedValueBelow(value.X, limit)
+	case *ssa.ChangeType:
+		return ssaUnsignedValueBelow(value.X, limit)
+	case *ssa.BinOp:
+		switch value.Op {
+		case token.REM:
+			divisor, ok := value.Y.(*ssa.Const)
+			if !ok {
+				return false
+			}
+			constantValue, exact := constant.Uint64Val(divisor.Value)
+			return exact && constantValue > 0 && constantValue <= limit
+		case token.AND:
+			for _, operand := range []ssa.Value{value.X, value.Y} {
+				mask, ok := operand.(*ssa.Const)
+				if !ok {
+					continue
+				}
+				constantValue, exact := constant.Uint64Val(mask.Value)
+				if exact && constantValue < limit {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
 func constFloat64Value(v constant.Value) (val float64, ok bool) {
 	defer func() {
 		if recover() != nil {
@@ -9403,8 +10389,11 @@ func applyPatches(path string, patches []patchEntry) {
 		return
 	}
 
-	for i := len(patches) - 1; i >= 0; i-- {
-		p := patches[i]
+	// Method discovery includes three emitters per storage and iterates maps.
+	// Apply replacements by descending source offset so an earlier replacement
+	// can never invalidate a later method's AST offsets.
+	sort.Slice(patches, func(i, j int) bool { return patches[i].startOff > patches[j].startOff })
+	for _, p := range patches {
 		// Extend endOff past any trailing /* ... */ comment
 		endOff := p.endOff
 		rest := src[endOff:]
