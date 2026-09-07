@@ -365,6 +365,10 @@ func TestAlterDatabaseStorageKeepsReadersOnPublishedGeneration(t *testing.T) {
 	// The old generation remains the write entry point until publication, while
 	// its completed rebuild successor receives the same mutation.
 	table.Insert([]string{"id", "value"}, [][]scm.Scmer{{scm.NewInt(2), scm.NewString("mirrored")}}, nil, scm.NewNil(), false, nil)
+	if table.maintenanceMu.TryLock() {
+		table.maintenanceMu.Unlock()
+		t.Fatal("storage migration did not exclude a concurrent rebuild")
+	}
 	ddlDone := make(chan struct{})
 	go func() {
 		CreateTable(databaseName, "created_after_move", Memory, false)
@@ -389,6 +393,10 @@ func TestAlterDatabaseStorageKeepsReadersOnPublishedGeneration(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("catalog mutation did not resume after storage migration")
 	}
+	if !table.maintenanceMu.TryLock() {
+		t.Fatal("storage migration did not release the rebuild claim")
+	}
+	table.maintenanceMu.Unlock()
 
 	db := GetDatabase(databaseName)
 	db.closeTransactionLog()

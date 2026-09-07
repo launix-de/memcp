@@ -66,6 +66,47 @@ func TestNonRegenerableInternalTriggerPersistenceKeepsProc(t *testing.T) {
 	}
 }
 
+func TestDropTableLifecycleTriggerMayDropAnotherTable(t *testing.T) {
+	dir := t.TempDir()
+	oldBasepath := Basepath
+	Basepath = dir
+	defer func() { Basepath = oldBasepath }()
+
+	Init(scm.Globalenv)
+	LoadDatabases()
+	const databaseName = "tdroplifecycle"
+	defer databases.Remove(databaseName)
+
+	CreateDatabase(databaseName, false)
+	source, _ := CreateTable(databaseName, "source", Memory, false)
+	CreateTable(databaseName, "derived", Memory, false)
+	source.AddTrigger(TriggerDescription{
+		Name:     ".drop-derived",
+		Timing:   AfterDropTable,
+		IsSystem: true,
+		Func: buildFKProc(scm.NewSlice([]scm.Scmer{
+			scm.NewSymbol("droptable"),
+			scm.NewString(databaseName),
+			scm.NewString("derived"),
+			scm.NewBool(true),
+		})),
+	})
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		DropTable(databaseName, "source", false)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("DropTable deadlocked while an AfterDropTable trigger dropped a related table")
+	}
+	if GetDatabase(databaseName).GetTable("derived") != nil {
+		t.Fatal("AfterDropTable trigger did not drop the related table")
+	}
+}
+
 func TestLanguageTriggerPersistenceKeepsOnlySourceDefinition(t *testing.T) {
 	trigger := TriggerDescription{
 		Name:     "source_defined",

@@ -59,14 +59,11 @@ type database struct {
 	savePanic       any           `json:"-"`
 	schemaDirty     atomic.Bool   `json:"-"`
 	blobRefs        *blobRefState `json:"-"`
-	// persistenceLifecycle prevents cleanup from inspecting generation-private
-	// files between their write and schema publication. Rebuild/repartition take
-	// a read capability; cleanup takes the exclusive capability. Query and DML
-	// paths do not participate.
+	// persistenceLifecycle protects storage generations from rebuild through
+	// publication. Rebuild/repartition and short catalog mutations take a read
+	// capability; cleanup and backend migration take the exclusive capability.
+	// Query and DML paths do not participate.
 	persistenceLifecycle sync.RWMutex `json:"-"`
-	// storageMoveMu serializes backend migration with rare catalog membership
-	// changes. Query/DML paths and idempotent planner setup never enter it.
-	storageMoveMu sync.Mutex `json:"-"`
 	// transactionLog is the database-wide commit authority for transactional
 	// shard WAL entries. Shard logs may contain prepared records after a crash;
 	// recovery exposes them only when this log contains their durable commit.
@@ -1609,24 +1606,23 @@ func AlterDatabaseStorage(schema string, targetConfig json.RawMessage, currentTx
 	}
 
 	db.ensureLoaded()
-	db.storageMoveMu.Lock()
-	defer db.storageMoveMu.Unlock()
+	// The blob catalog must exist before the table set is frozen. Rebuild may
+	// update it, and no table may appear while the destination generation is
+	// being prepared.
+	db.ensureBlobTable()
+	db.persistenceLifecycle.Lock()
+	defer db.persistenceLifecycle.Unlock()
 	if GetDatabase(schema) != db {
 		panic("Database " + schema + " was dropped while waiting for storage migration")
 	}
 	if equalDatabaseBackendConfig(databaseBackendConfig(schema), targetConfig) {
 		return true
 	}
-	// Create internal schema before taking the exclusive schema-generation lock.
-	db.ensureBlobTable()
 	src := db.persistence
 	sameStorage := src.StorageIdentity() == dst.StorageIdentity()
 	if !sameStorage && len(dst.ReadSchema()) != 0 {
 		panic("destination storage already contains a database schema")
 	}
-	db.persistenceLifecycle.Lock()
-	defer db.persistenceLifecycle.Unlock()
-
 	// A same-namespace change only replaces connection/configuration metadata.
 	if sameStorage {
 		db.schemalock.Lock()
@@ -1705,8 +1701,8 @@ func DropDatabase(schema string, ifexists bool) bool {
 		}
 		panic("Database " + schema + " does not exist")
 	}
-	db.storageMoveMu.Lock()
-	defer db.storageMoveMu.Unlock()
+	db.persistenceLifecycle.Lock()
+	defer db.persistenceLifecycle.Unlock()
 	requireDatabaseMaintenance(schema, maintenanceDrop)
 	db = databases.Remove(schema)
 	if db == nil {
@@ -1754,8 +1750,8 @@ func CreateTable(schema, name string, pm PersistencyMode, ifnotexists bool) (*ta
 			return existing, false
 		}
 	}
-	db.storageMoveMu.Lock()
-	defer db.storageMoveMu.Unlock()
+	db.persistenceLifecycle.RLock()
+	defer db.persistenceLifecycle.RUnlock()
 	db.ensureLoaded()
 	db.schemalock.Lock()
 	t, created := db.createTableLocked(name, pm, ifnotexists)
@@ -1830,8 +1826,13 @@ func DropTable(schema, name string, ifexists bool) {
 	if db == nil {
 		panic("Database " + schema + " does not exist")
 	}
-	db.storageMoveMu.Lock()
-	defer db.storageMoveMu.Unlock()
+	db.persistenceLifecycle.RLock()
+	persistenceLifecycleLocked := true
+	defer func() {
+		if persistenceLifecycleLocked {
+			db.persistenceLifecycle.RUnlock()
+		}
+	}()
 	db.ensureLoaded()
 	db.schemalock.Lock()
 	t := db.tables.Get(name)
@@ -1851,8 +1852,6 @@ func DropTable(schema, name string, ifexists bool) {
 		db.blobRefState().table.Store(nil)
 	}
 	db.saveLockedAndUnlock(t.schemaSaveMode())
-	// fire AfterDropTable triggers after releasing schemalock (avoids deadlock on cascading drops)
-	t.ExecuteTableLifecycleTriggers(AfterDropTable, nil)
 
 	// deregister temp keytable from CacheManager (no-op if not registered or already evicted)
 	// Must be AFTER schemalock.Unlock to avoid deadlock: Remove → run() → evict → keytableCleanup → TryLock
@@ -1874,6 +1873,11 @@ func DropTable(schema, name string, ifexists bool) {
 			s.RemoveFromDisk()
 		}
 	}
+	db.persistenceLifecycle.RUnlock()
+	persistenceLifecycleLocked = false
+	// Fire AfterDropTable triggers after releasing catalog and persistence
+	// lifecycle locks. Cascading drops may perform DDL in this database again.
+	t.ExecuteTableLifecycleTriggers(AfterDropTable, nil)
 }
 
 func RenameTable(schema, oldname, newname string) {
@@ -1881,8 +1885,8 @@ func RenameTable(schema, oldname, newname string) {
 	if db == nil {
 		panic("Database " + schema + " does not exist")
 	}
-	db.storageMoveMu.Lock()
-	defer db.storageMoveMu.Unlock()
+	db.persistenceLifecycle.RLock()
+	defer db.persistenceLifecycle.RUnlock()
 	db.ensureLoaded()
 	db.schemalock.Lock()
 	t := db.tables.Get(oldname)
@@ -1913,7 +1917,11 @@ func RenameTable(schema, oldname, newname string) {
 // MUST NOT use Lock on schemalock (deadlock: CreateTable holds schemalock → AddItem → evict → here).
 // Returns false if the schemalock is busy (item pushed back for later retry).
 func keytableCleanup(tbl *table, schemaName string, freedByType *[numEvictableTypes]int64) bool {
+	persistenceLifecycleLocked := false
 	defer func() {
+		if persistenceLifecycleLocked {
+			tbl.schema.persistenceLifecycle.RUnlock()
+		}
 		if r := recover(); r != nil {
 			fmt.Println("error: keytableCleanup panic for", schemaName+"."+tbl.Name, ":", r)
 		}
@@ -1921,10 +1929,10 @@ func keytableCleanup(tbl *table, schemaName string, freedByType *[numEvictableTy
 	// drop the table directly (bypass DropTable to avoid deadlock on opChan)
 	db := GetDatabase(schemaName)
 	if db != nil {
-		if !db.storageMoveMu.TryLock() {
+		if !db.persistenceLifecycle.TryRLock() {
 			return false // a storage generation is retaining this catalog member
 		}
-		defer db.storageMoveMu.Unlock()
+		persistenceLifecycleLocked = true
 		if !db.schemalock.TryLock() {
 			return false // schemalock is held (e.g. by CreateTable); retry later
 		}
@@ -1941,10 +1949,6 @@ func keytableCleanup(tbl *table, schemaName string, freedByType *[numEvictableTy
 	} else if !tbl.beginCacheEviction() {
 		return false
 	}
-	// The table's self-cleanup hooks remove exactly the source-table triggers
-	// installed for its computed columns. Trigger target pins above make this
-	// safe even when a writer snapshotted a trigger concurrently.
-	tbl.ExecuteTableLifecycleTriggers(AfterDropTable, nil)
 	// remove all shard+index+temp column registrations for this table (recursive)
 	for _, c := range tbl.Columns {
 		if c.IsTemp {
@@ -1971,6 +1975,15 @@ func keytableCleanup(tbl *table, schemaName string, freedByType *[numEvictableTy
 	for _, s := range tbl.PShards {
 		s.RemoveFromDisk()
 	}
+	if persistenceLifecycleLocked {
+		tbl.schema.persistenceLifecycle.RUnlock()
+		persistenceLifecycleLocked = false
+	}
+	// The table's self-cleanup hooks remove exactly the source-table triggers
+	// installed for its computed columns. Trigger target pins above make this
+	// safe even when a writer snapshotted a trigger concurrently. Run callbacks
+	// outside catalog locks because they may recursively perform DDL.
+	tbl.ExecuteTableLifecycleTriggers(AfterDropTable, nil)
 	return true
 }
 

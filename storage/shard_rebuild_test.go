@@ -333,7 +333,7 @@ func TestCreateTableIfNotExistsReturnsFalseWithoutSaving(t *testing.T) {
 	}
 
 	db := GetDatabase("tcreatetablefast")
-	db.storageMoveMu.Lock()
+	db.persistenceLifecycle.Lock()
 	fastDone := make(chan scm.Scmer, 1)
 	go func() {
 		fastDone <- callBuiltin(t, "createtable",
@@ -347,13 +347,13 @@ func TestCreateTableIfNotExistsReturnsFalseWithoutSaving(t *testing.T) {
 	select {
 	case result := <-fastDone:
 		if scm.ToBool(result) {
-			t.Fatal("locked storage-move fast path should report created=false")
+			t.Fatal("locked persistence-lifecycle fast path should report created=false")
 		}
 	case <-time.After(time.Second):
-		db.storageMoveMu.Unlock()
-		t.Fatal("idempotent createtable entered the storage-move writer lock")
+		db.persistenceLifecycle.Unlock()
+		t.Fatal("idempotent createtable entered the persistence lifecycle writer lock")
 	}
-	db.storageMoveMu.Unlock()
+	db.persistenceLifecycle.Unlock()
 }
 
 func TestSchemaReloadInvalidatesPlannerCacheOnInit(t *testing.T) {
