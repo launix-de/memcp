@@ -72,6 +72,75 @@ this is how rdf works:
 				"results" (json_object "bindings"
 					(json_arrayagg_finalize (map rows rdf_sparql_json_binding))))))
 ))
+(define rdf_sparql_xml_escape (lambda (value)
+	(htmlentities (concat value))
+))
+(define rdf_sparql_results_xml_term (lambda (value)
+	(if (rdf_is_blank value)
+		(concat "<bnode>" (rdf_sparql_xml_escape
+			(replace (replace value "urn:uuid:" "") "_:" "")) "</bnode>")
+		(if (rdf_is_iri value)
+			(concat "<uri>" (rdf_sparql_xml_escape value) "</uri>")
+			(concat "<literal"
+				(if (or (int? value) (number? value))
+					(concat " datatype=\"http://www.w3.org/2001/XMLSchema#"
+						(if (int? value) "integer" "decimal") "\"")
+					(if (or (equal? value true) (equal? value false))
+						" datatype=\"http://www.w3.org/2001/XMLSchema#boolean\"" ""))
+				">" (rdf_sparql_xml_escape value) "</literal>")))
+))
+(define rdf_sparql_results_xml (lambda (rows ask_query vars)
+	(concat "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+		"<sparql xmlns=\"http://www.w3.org/2005/sparql-results#\"><head>"
+		(reduce vars (lambda (acc var) (concat acc "<variable name=\""
+			(rdf_sparql_xml_escape var) "\"/>")) "") "</head>"
+		(if ask_query
+			(concat "<boolean>" (if (equal? rows '()) "false"
+				(if (coalesceNil (get_assoc (car rows) "?ask") false) "true" "false"))
+				"</boolean>")
+			(concat "<results>" (reduce rows (lambda (row_acc row)
+				(concat row_acc "<result>" (reduce vars (lambda (binding_acc var)
+					(begin
+						(define value (get_assoc row (concat "?" var)))
+						(if (nil? value) binding_acc
+							(concat binding_acc "<binding name=\""
+								(rdf_sparql_xml_escape var) "\">"
+								(rdf_sparql_results_xml_term value) "</binding>")))) "")
+					"</result>")) "") "</results>"))
+		"</sparql>")
+))
+(define rdf_sparql_csv_field (lambda (value)
+	(concat "\"" (replace (concat value) "\"" "\"\"") "\"")
+))
+(define rdf_sparql_delimited_results (lambda (rows vars separator variable_prefix)
+	(concat
+		(reduce vars (lambda (acc var) (concat acc
+			(if (equal? acc "") "" separator) variable_prefix var)) "") "\n"
+		(reduce rows (lambda (row_acc row) (concat row_acc
+			(reduce vars (lambda (field_acc var) (begin
+				(define value (get_assoc row (concat "?" var)))
+				(concat field_acc (if (equal? field_acc "") "" separator)
+					(if (nil? value) "" (rdf_sparql_csv_field value))))) "") "\n")) ""))
+))
+(define rdf_turtle_result_term (lambda (value)
+	(if (rdf_is_blank value)
+		(concat "_:" (replace (replace value "urn:uuid:" "") "_:" ""))
+		(if (rdf_is_iri value) (concat "<" value ">")
+			(if (equal? value true) "true"
+				(if (equal? value false) "false"
+					(if (number? value) (concat value) (rdf_quote value))))))
+))
+(define rdf_turtle_results (lambda (rows)
+	(reduce rows (lambda (acc row)
+		(begin
+			(define subject (get_assoc row "?s"))
+			(define predicate (get_assoc row "?p"))
+			(define object (get_assoc row "?o"))
+			(if (or (nil? subject) (or (nil? predicate) (nil? object))) acc
+				(concat acc (rdf_turtle_result_term subject) " "
+					(rdf_turtle_result_term predicate) " "
+					(rdf_turtle_result_term object) " .\n")))) "")
+))
 
 (define handler_404 (lambda (req res) (begin
 	/*(print "request " req)*/
@@ -88,13 +157,24 @@ this is how rdf works:
 		(set pw (scan_lookup nil (table "system" "user") (list 372734710317056 (scan_boundary "equal" "username" 0 0 true true "" false) "password") (list (req "username"))))
 		(if (and pw (equal? pw (password (req "password")))) (time (begin
 			(define accept (coalesceNil (get_assoc (req "header") "Accept") ""))
-			(define standard_json (rdf_contains (toLower accept) "application/sparql-results+json"))
-			((res "header") "Content-Type" (if standard_json
-				"application/sparql-results+json; charset=utf-8"
-				"application/x-ndjson; charset=utf-8"))
+			(define accept_lower (toLower accept))
+			(define standard_json (rdf_contains accept_lower "application/sparql-results+json"))
+			(define standard_xml (rdf_contains accept_lower "application/sparql-results+xml"))
+			(define standard_csv (rdf_contains accept_lower "text/csv"))
+			(define standard_tsv (rdf_contains accept_lower "text/tab-separated-values"))
+			(define graph_turtle (rdf_contains accept_lower "text/turtle"))
+			(define buffered (or standard_json (or standard_xml
+				(or standard_csv (or standard_tsv graph_turtle)))))
+			((res "header") "Content-Type"
+				(if standard_json "application/sparql-results+json; charset=utf-8"
+				(if standard_xml "application/sparql-results+xml; charset=utf-8"
+				(if standard_csv "text/csv; charset=utf-8"
+				(if standard_tsv "text/tab-separated-values; charset=utf-8"
+				(if graph_turtle "text/turtle; charset=utf-8"
+					"application/x-ndjson; charset=utf-8"))))))
 			((res "status") 200)
-			(define row_store (if standard_json (newsession) nil))
-			(define resultrow (if standard_json
+			(define row_store (if buffered (newsession) nil))
+			(define resultrow (if buffered
 				(lambda (row) (begin
 					(row_store (concat "row:" (coalesceNil (row_store "count") 0)) row)
 					(row_store "count" (+ (coalesceNil (row_store "count") 0) 1))))
@@ -113,13 +193,18 @@ this is how rdf works:
 					(req "username") session false tx))
 				(sql_execute_formula session tx formula resultrow (lambda (_fields) true))
 			)))
-			(if standard_json
+			(if buffered
 				(begin
 					(define rows (map (produceN (coalesceNil (row_store "count") 0))
 						(lambda (idx) (row_store (concat "row:" idx)))))
-					((res "print") (json_encode (rdf_sparql_results_json rows
-						(regexp_test (toUpper query) "(?:^|[\\s}])ASK(?:[\\s{]|$)")
-						(rdf_sparql_query_vars query)))))
+					(define ask_query (regexp_test (toUpper query) "(?:^|[\\s}])ASK(?:[\\s{]|$)"))
+					(define vars (rdf_sparql_query_vars query))
+					((res "print")
+						(if standard_json (json_encode (rdf_sparql_results_json rows ask_query vars))
+						(if standard_xml (rdf_sparql_results_xml rows ask_query vars)
+						(if standard_csv (rdf_sparql_delimited_results rows vars "," "")
+						(if standard_tsv (rdf_sparql_delimited_results rows vars "\t" "?")
+							(rdf_turtle_results rows)))))))
 				nil)
 		) query) (begin
 				((res "header") "Content-Type" "text/plain")

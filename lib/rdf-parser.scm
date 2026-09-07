@@ -38,6 +38,15 @@ consumer stage. */
 (define rdf_unescape (lambda (s)
 	(replace (replace (replace (replace (replace s "\\n" "\n") "\\t" "\t") "\\\\" "\\") "\\\"" "\"") "\\r" "\r")
 ))
+(define rdf_unescape_single (lambda (s)
+	(replace (rdf_unescape s) "\\'" "'")
+))
+(define rdf_unescape_iri (lambda (s)
+	(json_decode_scmer (concat "\"" s "\""))
+))
+(define rdf_unescape_pname (lambda (s)
+	(regexp_replace s "\\\\([~._-])" "$1")
+))
 (define rdf_typed_literal (lambda (value datatype)
 	(if (regexp_test datatype "(?:#|:)integer$")
 		(json_decode_scmer value)
@@ -86,6 +95,53 @@ consumer stage. */
 		nil
 		(equal? (sql_substr s (+ (- (strlen s) (strlen suffix)) 1) (strlen suffix)) suffix)
 	)
+))
+(define rdf_string_find_using (lambda (s needle position)
+	(if (equal? needle "") position
+		(if (> (+ position (strlen needle) -1) (strlen s)) 0
+			(if (equal? (sql_substr s position (strlen needle)) needle) position
+				(rdf_string_find_using s needle (+ position 1)))))
+))
+(define rdf_strbefore (lambda (s needle)
+	(if (or (nil? s) (nil? needle)) nil
+		(begin
+			(define position (rdf_string_find_using s needle 1))
+			(if (equal? position 0) "" (sql_substr s 1 (- position 1)))))
+))
+(define rdf_strafter (lambda (s needle)
+	(if (or (nil? s) (nil? needle)) nil
+		(begin
+			(define position (rdf_string_find_using s needle 1))
+			(if (equal? position 0) ""
+				(sql_substr s (+ position (strlen needle))))))
+))
+(define rdf_regex_pattern (lambda (pattern flags)
+	(if (or (nil? flags) (equal? flags "")) pattern
+		(begin
+			(define supported (concat
+				(if (rdf_contains flags "i") "i" "")
+				(if (rdf_contains flags "m") "m" "")
+				(if (rdf_contains flags "s") "s" "")))
+			(if (equal? supported "") pattern (concat "(?" supported ")" pattern))))
+))
+(define rdf_regex (lambda (value pattern flags)
+	(regexp_test value (rdf_regex_pattern pattern flags))
+))
+(define rdf_replace_regex (lambda (value pattern replacement flags)
+	(regexp_replace value (rdf_regex_pattern pattern flags) replacement)
+))
+(define rdf_encode_for_uri (lambda (value)
+	(if (nil? value) nil (replace (urlencode value) "+" "%20"))
+))
+(define rdf_timezone (lambda (value)
+	(if (nil? value) nil
+		(regexp_replace (concat value) ".*(Z|[+-][0-9]{2}:[0-9]{2})$" "$1"))
+))
+(define rdf_date_component (lambda (value start length part)
+	(if (nil? value) nil
+		(if (string? value)
+			(simplify (sql_substr value start length))
+			(extract_date value part)))
 ))
 (define rdf_json_objectagg_reduce (lambda (a b)
 	(if (nil? a) b (if (nil? b) a (json_merge_patch a b)))
@@ -139,6 +195,25 @@ consumer stage. */
 	rdf_constant
 	/* TODO: CONCAT() */
 )))
+(define rdf_iri_expression (parser (or
+	(parser '((atom "a" true)) "http://www.w3.org/1999/02/22-rdf-syntax-ns#type")
+	(parser '((define pfx (regex "[a-zA-Z0-9_]*" true)) (atom ":" false false)
+		(define post (regex "[a-zA-Z0-9_]*" false)))
+		'('concat '('definitions pfx) post))
+	(parser '((atom "<" true) (define iri (regex "[^>]*" false false))
+		(atom ">" false false)) iri)
+	(regex "[a-zA-Z0-9_]+" true)
+)))
+(define rdf_subject_expression (parser (or
+	rdf_variable
+	(parser '((atom "_:" true) (define name (regex "[a-zA-Z0-9_]+" false false)))
+		(concat "_:" name))
+	rdf_iri_expression
+)))
+(define rdf_predicate_expression (parser (or
+	rdf_variable
+	rdf_iri_expression
+)))
 (define rdf_aggregate_expression (parser (or
 	(parser '((atom "JSON_ARRAYAGG" true) "(" (define e rdf_filter_or)
 		(atom "ORDER" true) (atom "BY" true) (define key rdf_filter_or)
@@ -178,6 +253,23 @@ consumer stage. */
 	(parser '((atom "SUBSTR" true) "(" (define a rdf_filter_or) "," (define start rdf_filter_or) "," (define len rdf_filter_or) ")") '('sql_substr a start len))
 	(parser '((atom "SUBSTR" true) "(" (define a rdf_filter_or) "," (define start rdf_filter_or) ")") '('sql_substr a start))
 	(parser '((atom "REPLACE" true) "(" (define a rdf_filter_or) "," (define from rdf_filter_or) "," (define to rdf_filter_or) ")") '('replace a from to))
+	(parser '((atom "REPLACE" true) "(" (define a rdf_filter_or) "," (define pattern rdf_filter_or) "," (define replacement rdf_filter_or) "," (define flags rdf_filter_or) ")") '('rdf_replace_regex a pattern replacement flags))
+	(parser '((atom "STRBEFORE" true) "(" (define a rdf_filter_or) "," (define b rdf_filter_or) ")") '('rdf_strbefore a b))
+	(parser '((atom "STRAFTER" true) "(" (define a rdf_filter_or) "," (define b rdf_filter_or) ")") '('rdf_strafter a b))
+	(parser '((atom "ENCODE_FOR_URI" true) "(" (define a rdf_filter_or) ")") '('rdf_encode_for_uri a))
+	(parser '((atom "REGEX" true) "(" (define a rdf_filter_or) "," (define b rdf_filter_or) "," (define flags rdf_filter_or) ")") '('rdf_regex a b flags))
+	(parser '((atom "RAND" true) "(" ")") '('sql_rand))
+	(parser '((atom "NOW" true) "(" ")") '('now))
+	(parser '((atom "YEAR" true) "(" (define a rdf_filter_or) ")") '('rdf_date_component a 1 4 "YEAR"))
+	(parser '((atom "MONTH" true) "(" (define a rdf_filter_or) ")") '('rdf_date_component a 6 2 "MONTH"))
+	(parser '((atom "DAY" true) "(" (define a rdf_filter_or) ")") '('rdf_date_component a 9 2 "DAY"))
+	(parser '((atom "HOURS" true) "(" (define a rdf_filter_or) ")") '('rdf_date_component a 12 2 "HOUR"))
+	(parser '((atom "MINUTES" true) "(" (define a rdf_filter_or) ")") '('rdf_date_component a 15 2 "MINUTE"))
+	(parser '((atom "SECONDS" true) "(" (define a rdf_filter_or) ")") '('rdf_date_component a 18 2 "SECOND"))
+	(parser '((atom "TZ" true) "(" (define a rdf_filter_or) ")") '('rdf_timezone a))
+	(parser '((atom "MD5" true) "(" (define a rdf_filter_or) ")") '('md5 a))
+	(parser '((atom "SHA1" true) "(" (define a rdf_filter_or) ")") '('sha1 a))
+	(parser '((atom "SHA256" true) "(" (define a rdf_filter_or) ")") '('sha256 a))
 	(parser '((atom "ABS" true) "(" (define a rdf_filter_or) ")") '('sql_abs a))
 	(parser '((atom "ROUND" true) "(" (define a rdf_filter_or) ")") '('round a))
 	(parser '((atom "CEIL" true) "(" (define a rdf_filter_or) ")") '('ceil a))
@@ -221,6 +313,10 @@ consumer stage. */
 	rdf_filter_mul
 )))
 (define rdf_filter_cmp (parser (or
+	(parser '((define a rdf_filter_add) (atom "NOT" true) (atom "IN" true) "(" (define b (+ rdf_filter_or ",")) ")")
+		(list (quote not) (cons (quote sql_in) (cons (cons (quote list) b) (list a)))))
+	(parser '((define a rdf_filter_add) (atom "IN" true) "(" (define b (+ rdf_filter_or ",")) ")")
+		(cons (quote sql_in) (cons (cons (quote list) b) (list a))))
 	(parser '((define a rdf_filter_add) "!=" (define b rdf_filter_add)) '('not '('equal? a b)))
 	(parser '((define a rdf_filter_add) "=" (define b rdf_filter_add)) '('equal? a b))
 	(parser '((define a rdf_filter_add) "<=" (define b rdf_filter_add)) '('<= a b))
@@ -238,13 +334,26 @@ consumer stage. */
 	rdf_filter_and
 )))
 
+(define rdf_path_negated_member (parser (or
+	(parser '((atom "^" true) (define p rdf_predicate_expression)) (list "inverse" p))
+	(parser (define p rdf_predicate_expression) (list "forward" p))
+)))
 (define rdf_path_atom (parser (or
+	(parser '((atom "!" true) "(" (define members (+ rdf_path_negated_member "|")) ")")
+		(list "__path_negated__" members))
+	(parser '((atom "!" true) (define member rdf_path_negated_member))
+		(list "__path_negated__" (list member)))
+	(parser '((atom "^" true) "(" (define p rdf_path_alt) ")") (list "__path_inverse__" p))
+	(parser '((atom "^" true) (define p rdf_predicate_expression)) (list "__path_inverse__" p))
 	(parser '("(" (define p rdf_path_alt) ")") p)
-	rdf_expression
+	rdf_predicate_expression
 )))
 (define rdf_path_postfix (parser (or
 	(parser '((define p rdf_path_atom) "*") '("__path_star__" p))
 	(parser '((define p rdf_path_atom) "+") '("__path_plus__" p))
+	/* A path postfix is adjacent to its path. Disallow leading whitespace so
+	`p ?object` cannot consume the object's variable marker as `p?`. */
+	(parser '((define p rdf_path_atom) (atom "?" false false)) '("__path_optional__" p))
 	rdf_path_atom
 )))
 (define rdf_path_seq (parser (or
@@ -257,7 +366,7 @@ consumer stage. */
 )))
 
 (define rdf_where_basic_item (parser (or
-	(parser '((define s rdf_expression) (define ps (+ (parser '((define p rdf_path_alt) (define os (+ rdf_expression ","))) (map os (lambda (o) '(p o)))) ";"))) (merge (map ps (lambda (p) (map p (lambda (p1) (cons s p1)))))))
+	(parser '((define s rdf_subject_expression) (define ps (+ (parser '((define p rdf_path_alt) (define os (+ rdf_expression ","))) (map os (lambda (o) '(p o)))) ";"))) (merge (map ps (lambda (p) (map p (lambda (p1) (cons s p1)))))))
 	(parser '((atom "FILTER" true) "(" (define expr rdf_filter_or) ")") (list (list "__filter__" expr)))
 )))
 (define rdf_where_inner_basic_items (parser
@@ -591,7 +700,11 @@ consumer stage. */
 	(atom "{" true)
 	(define triples rdf_template_items)
 	(atom "}" true)
-) '("insert_data" (merge (coalesce triples '('()))))))
+) (begin
+	(define merged (merge (coalesce triples '())))
+	(if (equal? (rdf_condition_vars merged) '())
+		(list "insert_data" merged)
+		(error "SPARQL INSERT DATA does not allow variables")))))
 (define rdf_insert_graph_data (parser '(
 	(atom "INSERT" true)
 	(atom "DATA" true)
@@ -602,14 +715,23 @@ consumer stage. */
 	(define triples rdf_template_items)
 	(atom "}" true)
 	(atom "}" true)
-) '("insert_graph_data" graph (merge (coalesce triples '('()))))))
+) (begin
+	(define merged (merge (coalesce triples '())))
+	(if (and (equal? (rdf_condition_vars merged) '())
+		(not (match graph '('get_var _name) true _ false)))
+		(list "insert_graph_data" graph merged)
+		(error "SPARQL INSERT DATA does not allow variables")))))
 (define rdf_delete_data (parser '(
 	(atom "DELETE" true)
 	(atom "DATA" true)
 	(atom "{" true)
 	(define triples rdf_template_items)
 	(atom "}" true)
-) '("delete_data" (merge (coalesce triples '('()))))))
+) (begin
+	(define merged (merge (coalesce triples '())))
+	(if (equal? (rdf_condition_vars merged) '())
+		(list "delete_data" merged)
+		(error "SPARQL DELETE DATA does not allow variables")))))
 (define rdf_delete_graph_data (parser '(
 	(atom "DELETE" true)
 	(atom "DATA" true)
@@ -620,7 +742,12 @@ consumer stage. */
 	(define triples rdf_template_items)
 	(atom "}" true)
 	(atom "}" true)
-) '("delete_graph_data" graph (merge (coalesce triples '('()))))))
+) (begin
+	(define merged (merge (coalesce triples '())))
+	(if (and (equal? (rdf_condition_vars merged) '())
+		(not (match graph '('get_var _name) true _ false)))
+		(list "delete_graph_data" graph merged)
+		(error "SPARQL DELETE DATA does not allow variables")))))
 (define rdf_update_dataset_clause (parser '(
 	(atom "USING" true)
 	(? (define named (atom "NAMED" true)))
@@ -964,7 +1091,10 @@ consumer stage. */
 	(if include_self
 		(visit start)
 		(map (rdf_relation_targets schema start pred) visit))
-	(seen)
+	/* Session key iteration is intentionally unordered. Canonicalize the path
+	result before exposing it as an array-backed planner relation so ORDER BY is
+	deterministic even when the table-function source is lowered directly. */
+	(sort (seen) (lambda (left right) (< left right)))
 )))
 (define rdf_ensure_table (lambda (schema)
 	(begin
@@ -1368,6 +1498,56 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 				(state "used" (cons candidate (state "used")))
 				(list (quote get_var) candidate))))
 ))
+(define rdf_path_invert (lambda (path)
+	(match path
+		'("__path_inverse__" inner) inner
+		'("__path_seq__" left right)
+		(list "__path_seq__" (rdf_path_invert right) (rdf_path_invert left))
+		'("__path_alt__" left right)
+		(list "__path_alt__" (rdf_path_invert left) (rdf_path_invert right))
+		'("__path_star__" inner) (list "__path_star__" (rdf_path_invert inner))
+		'("__path_plus__" inner) (list "__path_plus__" (rdf_path_invert inner))
+		'("__path_optional__" inner) (list "__path_optional__" (rdf_path_invert inner))
+		path)
+))
+(define rdf_path_zero_branch (lambda (subject object)
+	(match object
+		'('get_var _object_var) (list (list "__bind__" subject object))
+		_ (match subject
+			'('get_var _subject_var) (list (list "__bind__" object subject))
+			_ (list (list "__filter__" (list (quote equal?) subject object)))))
+))
+(define rdf_path_negated_branch (lambda (subject object direction exclusions state)
+	(begin
+		(define predicate (rdf_shared_fresh_path_var state))
+		(list
+			(if (equal? direction "inverse")
+				(list object predicate subject) (list subject predicate object))
+			(list "__filter__" (list (quote not)
+				(cons (quote sql_in) (cons (cons (quote list) exclusions)
+					(list predicate)))))))
+))
+(define rdf_path_negated_exclusions (lambda (members direction)
+	(match members
+		(cons member tail)
+		(if (equal? (car member) direction)
+			(cons (cadr member) (rdf_path_negated_exclusions tail direction))
+			(rdf_path_negated_exclusions tail direction))
+		'() '())
+))
+(define rdf_path_negated_branches (lambda (subject object members state)
+	(begin
+		(define forward (rdf_path_negated_exclusions members "forward"))
+		(define inverse (rdf_path_negated_exclusions members "inverse"))
+		(if (equal? forward '())
+			(if (equal? inverse '()) '()
+				(list (rdf_path_negated_branch subject object "inverse" inverse state)))
+			(if (equal? inverse '())
+				(list (rdf_path_negated_branch subject object "forward" forward state))
+				(list (rdf_path_negated_branch subject object "forward" forward state)
+					(rdf_path_negated_branch subject object "inverse" inverse state))))
+))
+))
 (define rdf_shared_expand_paths_using (lambda (conditions state) (match conditions
 	(cons condition tail)
 	(match condition
@@ -1376,6 +1556,18 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 			(cons (list "__filter__" false) tail)) state)
 		'(s p o)
 		(match p
+			'("__path_negated__" members)
+			(begin
+				(define branches (rdf_path_negated_branches s o members state))
+				(if (equal? (count branches) 1)
+					(rdf_shared_expand_paths_using
+						(cons (car (car branches))
+							(cons (cadr (car branches)) tail)) state)
+					(cons (list "__union__" branches)
+						(rdf_shared_expand_paths_using tail state))))
+			'("__path_inverse__" inner)
+			(rdf_shared_expand_paths_using
+				(cons (list o (rdf_path_invert inner) s) tail) state)
 			'("__path_seq__" p1 p2)
 			(begin
 				(define intermediate (rdf_shared_fresh_path_var state))
@@ -1383,6 +1575,10 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 					(cons (list s p1 intermediate) (cons (list intermediate p2 o) tail)) state))
 			'("__path_alt__" p1 p2)
 			(cons (list "__union__" (list (list (list s p1 o)) (list (list s p2 o))))
+				(rdf_shared_expand_paths_using tail state))
+			'("__path_optional__" inner)
+			(cons (list "__union__" (list (list (list s inner o))
+				(rdf_path_zero_branch s o)))
 				(rdf_shared_expand_paths_using tail state))
 			_ (cons condition (rdf_shared_expand_paths_using tail state)))
 		_ (cons condition (rdf_shared_expand_paths_using tail state)))
@@ -1920,11 +2116,12 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 				(rdf_ctx_bound (rdf_shared_state_bindings state) var))))
 			(if (equal? shared '()) state
 				/* MINUS evaluates its right group independently, then removes
-				compatible mappings. Correlation belongs in the anti-join predicate. */
+				compatible mappings. Keep its distinct-key relation as an explicit
+				semantic boundary: unlike NOT EXISTS, MINUS compatibility is defined
+				over the shared mapping domain and must not be flattened into a
+				one-pattern physical anti-join. */
 				(match (rdf_shared_conditions_relation schema inner '()) '(query vars)
-					(if (rdf_shared_exists_direct_safe query vars shared)
-						(rdf_shared_exists_direct_relation schema state query vars shared true)
-						(rdf_shared_minus_relation schema state query vars shared)))))
+					(rdf_shared_minus_relation schema state query vars shared))))
 		'("__service__" silent endpoint _inner)
 		(if silent state (error "SPARQL SERVICE endpoint unavailable: " endpoint))
 		'("__union__" branches)
@@ -2063,7 +2260,7 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 							(if (nil? having) nil (rdf_shared_expr having bindings outer_ctx))
 								result_order
 							limit offset '() '()
-							(if (> (count (coalesceNil result_order '())) 1)
+							(if (> (count (coalesceNil result_order '())) 0)
 								(list (list (quote global_order_required) true)) '())))
 					(begin
 						(define selected_fields (map_assoc cols (lambda (_title expr)
@@ -2079,7 +2276,7 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 								result_order limit offset '() '()
 							(merge (list
 								(if distinct (list (list (quote select_distinct) true)) '())
-								(if (> (count (coalesceNil result_order '())) 1)
+								(if (> (count (coalesceNil result_order '())) 0)
 									(list (list (quote global_order_required) true)) '()))))))))
 		(error "SPARQL shared planner: expected SELECT query")
 	)
@@ -2302,8 +2499,11 @@ bindings of neighbouring update alternatives. */
 	(begin
 		(define ttl_simple_constant (parser (or
 			(parser '((atom "_:" true) (define x (regex "[a-zA-Z0-9_]+" false false))) (concat "_:" x))
-			(parser '((define pfx (regex "[a-zA-Z0-9_]*" true)) (atom ":" false false) (define post (regex "[a-zA-Z0-9_]*" false))) (if (nil? (definitions pfx)) (error "undefined prefix: " pfx) (concat (definitions pfx) post)))
-			(parser '((atom "<" true) (define iri (regex "[^>]*" false false)) (atom ">" false false)) (rdf_apply_base_iri definitions iri))
+			(parser '((atom "a" true)) "http://www.w3.org/1999/02/22-rdf-syntax-ns#type")
+			(parser '((define pfx (regex "[a-zA-Z0-9_]*" true)) (atom ":" false false) (define post (regex "(?:[a-zA-Z0-9_]|\\\\[~._-])*" false))) (if (nil? (definitions pfx)) (error "undefined prefix: " pfx) (concat (definitions pfx) (rdf_unescape_pname post))))
+			(parser '((atom "<" true) (define iri (regex "[^>]*" false false)) (atom ">" false false)) (rdf_apply_base_iri definitions (rdf_unescape_iri iri)))
+			(parser '((atom "'''" true) (define x (regex "[^']*(?:(?:'[^']|''[^'])[^']*)*" false false)) (atom "'''" false false)) (rdf_unescape_single x))
+			(parser '((atom "'" true) (define x (regex "(?:[^'\\\\]|\\\\.)*" false false)) (atom "'" false false)) (rdf_unescape_single x))
 			(parser '((atom "\"\"\"" true) (define x (regex "[^\"]*(?:(?:\"[^\"]|\"\"[^\"])[^\"]*)*" false false)) (atom "\"\"\"" false false) (? (atom "^^" false false) (define datatype rdf_datatype_suffix))) (if (nil? datatype) x (rdf_typed_literal x datatype)))
 			(parser '((atom "\"" true) (define x (regex "(?:[^\"\\\\]|\\\\.)*" false false)) (atom "\"@" false false) (regex "[a-zA-Z_0-9]+" false)) (rdf_unescape x))
 			(parser '((atom "\"" true) (define x (regex "(?:[^\"\\\\]|\\\\.)*" false false)) (atom "\"" false false) (? (atom "^^" false false) (define datatype rdf_datatype_suffix))) (if (nil? datatype) (rdf_unescape x) (rdf_typed_literal (rdf_unescape x) datatype)))
@@ -2373,8 +2573,11 @@ bindings of neighbouring update alternatives. */
 		))
 		(define ttl_simple_constant (parser (or
 			(parser '((atom "_:" true) (define x (regex "[a-zA-Z0-9_]+" false false))) (concat "_:" x)) /* blank node before prefix match */
-			(parser '((define pfx (regex "[a-zA-Z0-9_]*" true)) (atom ":" false false) (define post (regex "[a-zA-Z0-9_]*" false))) (if (nil? (definitions pfx)) (error "undefined prefix: " pfx) (concat (definitions pfx) post))) /* add prefix with validation */
-			(parser '((atom "<" true) (define iri (regex "[^>]*" false false)) (atom ">" false false)) (rdf_apply_base_iri definitions iri))
+			(parser '((atom "a" true)) "http://www.w3.org/1999/02/22-rdf-syntax-ns#type")
+			(parser '((define pfx (regex "[a-zA-Z0-9_]*" true)) (atom ":" false false) (define post (regex "(?:[a-zA-Z0-9_]|\\\\[~._-])*" false))) (if (nil? (definitions pfx)) (error "undefined prefix: " pfx) (concat (definitions pfx) (rdf_unescape_pname post)))) /* add prefix with validation */
+			(parser '((atom "<" true) (define iri (regex "[^>]*" false false)) (atom ">" false false)) (rdf_apply_base_iri definitions (rdf_unescape_iri iri)))
+			(parser '((atom "'''" true) (define x (regex "[^']*(?:(?:'[^']|''[^'])[^']*)*" false false)) (atom "'''" false false)) (rdf_unescape_single x))
+			(parser '((atom "'" true) (define x (regex "(?:[^'\\\\]|\\\\.)*" false false)) (atom "'" false false)) (rdf_unescape_single x))
 				(parser '((atom "\"\"\"" true) (define x (regex "[^\"]*(?:(?:\"[^\"]|\"\"[^\"])[^\"]*)*" false false)) (atom "\"\"\"" false false) (? (atom "^^" false false) (define datatype rdf_datatype_suffix))) (if (nil? datatype) x (rdf_typed_literal x datatype)))
 			(parser '((atom "\"" true) (define x (regex "(?:[^\"\\\\]|\\\\.)*" false false)) (atom "\"@" false false) (regex "[a-zA-Z_0-9]+" false)) (rdf_unescape x))
 				(parser '((atom "\"" true) (define x (regex "(?:[^\"\\\\]|\\\\.)*" false false)) (atom "\"" false false) (? (atom "^^" false false) (define datatype rdf_datatype_suffix))) (if (nil? datatype) (rdf_unescape x) (rdf_typed_literal (rdf_unescape x) datatype)))
