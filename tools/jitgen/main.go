@@ -448,7 +448,7 @@ func generateOperators(ops []operatorInfo, ssaFuncs map[token.Pos]*ssa.Function,
 				}
 				result := operatorGeneration{ssaFn: fn}
 				if fn != nil {
-					result.newText, result.genErr, result.inlineCost = generateClosureCost(op.name, fn, nil, op.path)
+					result.newText, result.genErr, result.inlineCost = generateClosureCost(op.name, fn, nil, op.jitNativeFP, op.path)
 					if result.genErr == "" {
 						if _, err := parser.ParseExpr(result.newText); err != nil {
 							result.genErr = "generated invalid Go expression: " + err.Error()
@@ -724,6 +724,7 @@ type operatorInfo struct {
 	jitVirtualExpr         ast.Expr
 	jitInlineCallbacksExpr ast.Expr
 	jitInlineCostExpr      ast.Expr
+	jitNativeFP            bool
 	jitInsertPos           token.Pos
 	typeInsertPos          token.Pos
 	preservedEnd           int
@@ -764,6 +765,7 @@ func collectOperators(fset *token.FileSet, f *ast.File, path string) []operatorI
 		}
 
 		var nameExpr, fnExpr, jitExpr, jitVirtualExpr, jitInlineCallbacksExpr, jitInlineCostExpr ast.Expr
+		var jitNativeFP bool
 		var jitInsertPos token.Pos
 		var typeInsertPos token.Pos
 		if len(comp.Elts) > 0 {
@@ -781,6 +783,9 @@ func collectOperators(fset *token.FileSet, f *ast.File, path string) []operatorI
 						jitVirtualExpr = keyedValue(typeComp, "JITVirtualArgs")
 						jitInlineCallbacksExpr = keyedValue(typeComp, "JITInlineCallbacks")
 						jitInlineCostExpr = keyedValue(typeComp, "JITInlineCost")
+						if ident, ok := keyedValue(typeComp, "JITNativeFP").(*ast.Ident); ok {
+							jitNativeFP = ident.Name == "true"
+						}
 						typeInsertPos = typeComp.Rbrace
 						if jitExpr == nil {
 							jitInsertPos = typeComp.Rbrace
@@ -815,6 +820,7 @@ func collectOperators(fset *token.FileSet, f *ast.File, path string) []operatorI
 			jitVirtualExpr:         jitVirtualExpr,
 			jitInlineCallbacksExpr: jitInlineCallbacksExpr,
 			jitInlineCostExpr:      jitInlineCostExpr,
+			jitNativeFP:            jitNativeFP,
 			jitInsertPos:           jitInsertPos,
 			typeInsertPos:          typeInsertPos,
 		})
@@ -1149,6 +1155,7 @@ type codeGen struct {
 	// Optional callback-based SSA node rewrite hook.
 	valueRewriter      ssaValueRewriter
 	inlineInstructions int
+	nativeFP           bool // declaration explicitly permits typed FP register lowering
 }
 
 type storageInputHome struct {
@@ -3004,7 +3011,7 @@ func (g *codeGen) preferredIfFallthrough(thenBB, elseBB int) int {
 func (g *codeGen) emitProtectDescVars(descVars []string) {
 	for _, dv := range descVars {
 		g.emit("ctx.SyncDesc(&%s)", dv)
-		g.emit("if %s.Loc == LocReg {", dv)
+		g.emit("if %s.Loc == LocReg || %s.Loc == LocFPReg {", dv, dv)
 		g.emit("\tctx.ProtectReg(%s.Reg)", dv)
 		g.emit("} else if %s.Loc == LocRegPair {", dv)
 		g.emit("\tctx.ProtectReg(%s.Reg)", dv)
@@ -3015,7 +3022,7 @@ func (g *codeGen) emitProtectDescVars(descVars []string) {
 
 func (g *codeGen) emitUnprotectDescVars(descVars []string) {
 	for _, dv := range descVars {
-		g.emit("if %s.Loc == LocReg {", dv)
+		g.emit("if %s.Loc == LocReg || %s.Loc == LocFPReg {", dv, dv)
 		g.emit("\tctx.UnprotectReg(%s.Reg)", dv)
 		g.emit("} else if %s.Loc == LocRegPair {", dv)
 		g.emit("\tctx.UnprotectReg(%s.Reg)", dv)
@@ -3687,7 +3694,11 @@ func (g *codeGen) emitRegisterHomes() {
 		if weight > 65535 {
 			weight = 65535
 		}
-		planItems = append(planItems, fmt.Sprintf("{Color: %d, Width: %d, Cost: %d}", slot.color, slot.width, weight))
+		if slot.class == "JITRegisterClassFP" {
+			planItems = append(planItems, fmt.Sprintf("{Color: %d, Width: %d, Class: JITRegisterClassFP, Cost: %d}", slot.color, slot.width, weight))
+		} else {
+			planItems = append(planItems, fmt.Sprintf("{Color: %d, Width: %d, Cost: %d}", slot.color, slot.width, weight))
+		}
 	}
 	g.emit("%s := ctx.AllocRegisterHomes(JITRegisterPlan{Slots: [16]JITRegisterSlot{%s}, Count: %d})", homes, strings.Join(planItems, ", "), len(planItems))
 	g.emit("defer ctx.ReleaseRegisterHomes(%s)", homes)
@@ -3767,15 +3778,28 @@ func (g *codeGen) initAllPhiDescs() {
 				g.emit("%s := JITValueDesc{Loc: LocStackPair, Type: %s, StackOff: %sint32(%s)}", dv, phiTag, phiBaseExpr, phiOff)
 				g.emit("ctx.PrepareScmerStackTarget(%sint32(%s))", phiBaseExpr, phiOff)
 			} else {
+				registerClass := g.registerPlan.classByValue[name]
 				if home, available, planned := g.phiRegisterHome(name); planned {
 					g.emit("var %s JITValueDesc", dv)
 					g.emit("if %s {", available)
-					g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: %s, Reg: %s, ID: 0}", dv, phiTag, home)
+					if registerClass == "JITRegisterClassFP" {
+						g.emit("\t%s = JITValueDesc{Loc: LocFPReg, Type: %s, RegClass: JITRegisterClassFP, Reg: %s, ID: 0}", dv, phiTag, home)
+					} else {
+						g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: %s, Reg: %s, ID: 0}", dv, phiTag, home)
+					}
 					g.emit("} else {")
-					g.emit("\t%s = JITValueDesc{Loc: LocStack, Type: %s, StackOff: %sint32(%s)}", dv, phiTag, phiBaseExpr, phiOff)
+					if registerClass == "JITRegisterClassFP" {
+						g.emit("\t%s = JITValueDesc{Loc: LocStack, Type: %s, RegClass: JITRegisterClassFP, StackOff: %sint32(%s)}", dv, phiTag, phiBaseExpr, phiOff)
+					} else {
+						g.emit("\t%s = JITValueDesc{Loc: LocStack, Type: %s, StackOff: %sint32(%s)}", dv, phiTag, phiBaseExpr, phiOff)
+					}
 					g.emit("}")
 				} else {
-					g.emit("%s := JITValueDesc{Loc: LocStack, Type: %s, StackOff: %sint32(%s)}", dv, phiTag, phiBaseExpr, phiOff)
+					if registerClass == "JITRegisterClassFP" {
+						g.emit("%s := JITValueDesc{Loc: LocStack, Type: %s, RegClass: JITRegisterClassFP, StackOff: %sint32(%s)}", dv, phiTag, phiBaseExpr, phiOff)
+					} else {
+						g.emit("%s := JITValueDesc{Loc: LocStack, Type: %s, StackOff: %sint32(%s)}", dv, phiTag, phiBaseExpr, phiOff)
+					}
 				}
 			}
 			g.emit("_ = %s", dv)
@@ -3877,7 +3901,7 @@ func (g *codeGen) inlineCallCaptured(callee *ssa.Function, callArgs []ssa.Value,
 	// The top-level planner deliberately excludes inlined helper CFGs. They are
 	// emitted into the caller's register universe and retain stack phis until a
 	// joint interprocedural plan can model their interference.
-	g.registerPlan = staticRegisterPlan{colorByValue: map[string]int{}, widthByValue: map[string]int{}}
+	g.registerPlan = staticRegisterPlan{colorByValue: map[string]int{}, widthByValue: map[string]int{}, classByValue: map[string]string{}}
 	g.phiHomeRegs = map[string]string{}
 	g.phiHomeOK = map[string]string{}
 	g.vals = map[string]genVal{}
@@ -4550,7 +4574,7 @@ func newCodeGen(fn *ssa.Function, rewrite ssaValueRewriter, sourceAliases ...map
 		phiPair:              map[string]bool{},
 		phiTriple:            map[string]bool{},
 		phiTypeTag:           map[string]string{},
-		registerPlan:         planLoopPhiRegisters(fn),
+		registerPlan:         planLoopPhiRegisters(fn, false),
 		phiHomeRegs:          map[string]string{},
 		phiHomeOK:            map[string]string{},
 		bbPhiBase:            map[int]int{},
@@ -4660,7 +4684,7 @@ func (g *codeGen) emitBody(cfg emitBodyConfig) {
 }
 
 func generateClosure(opName string, fn *ssa.Function, rewrite ssaValueRewriter, sourcePath ...string) (string, string) {
-	code, errMsg, _ := generateClosureCost(opName, fn, rewrite, sourcePath...)
+	code, errMsg, _ := generateClosureCost(opName, fn, rewrite, false, sourcePath...)
 	return code, errMsg
 }
 
@@ -4682,7 +4706,7 @@ func inlineRegisterPlanSafe(fn *ssa.Function) bool {
 	return true
 }
 
-func generateClosureCost(opName string, fn *ssa.Function, rewrite ssaValueRewriter, sourcePath ...string) (code string, errMsg string, inlineCost uint16) {
+func generateClosureCost(opName string, fn *ssa.Function, rewrite ssaValueRewriter, nativeFP bool, sourcePath ...string) (code string, errMsg string, inlineCost uint16) {
 	defer func() {
 		if r := recover(); r != nil {
 			if os.Getenv("JITGEN_DEBUG_PANIC") == "1" && (dumpOp == "" || dumpOp == opName) {
@@ -4713,8 +4737,15 @@ func generateClosureCost(opName string, fn *ssa.Function, rewrite ssaValueRewrit
 		}
 	}
 	g := newCodeGen(fn, rewrite, aliases)
-	if !inlineRegisterPlanSafe(fn) {
-		g.registerPlan = staticRegisterPlan{colorByValue: map[string]int{}, widthByValue: map[string]int{}}
+	g.nativeFP = nativeFP
+	g.registerPlan = planLoopPhiRegisters(fn, nativeFP)
+	// Native-FP declarations keep their own typed loop homes across callbacks.
+	// The FP allocator protects those homes while recursively emitted callbacks
+	// use the same allocator, and Go-call boundaries spill every live FP owner.
+	// Generic GPR plans retain the stricter historical rule because callback
+	// aliases may still contain pointer-bearing multiword values.
+	if !inlineRegisterPlanSafe(fn) && !nativeFP {
+		g.registerPlan = staticRegisterPlan{colorByValue: map[string]int{}, widthByValue: map[string]int{}, classByValue: map[string]string{}}
 	}
 	g.opName = opName
 	fmt.Fprintf(&g.w, "\t\t\t%s\n", generatedBanner)
@@ -5193,14 +5224,27 @@ func (g *codeGen) resetAllPhiDescsToStack() {
 		} else if g.phiPair[phiName] {
 			g.emit("%s = JITValueDesc{Loc: LocStackPair, Type: %s, StackOff: %s}", gv.goVar, phiTag, stackOff)
 		} else {
+			registerClass := g.registerPlan.classByValue[phiName]
 			if home, available, planned := g.phiRegisterHome(phiName); planned {
 				g.emit("if %s {", available)
-				g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: %s, Reg: %s, ID: 0}", gv.goVar, phiTag, home)
+				if registerClass == "JITRegisterClassFP" {
+					g.emit("\t%s = JITValueDesc{Loc: LocFPReg, Type: %s, RegClass: JITRegisterClassFP, Reg: %s, ID: 0}", gv.goVar, phiTag, home)
+				} else {
+					g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: %s, Reg: %s, ID: 0}", gv.goVar, phiTag, home)
+				}
 				g.emit("} else {")
-				g.emit("\t%s = JITValueDesc{Loc: LocStack, Type: %s, StackOff: %s}", gv.goVar, phiTag, stackOff)
+				if registerClass == "JITRegisterClassFP" {
+					g.emit("\t%s = JITValueDesc{Loc: LocStack, Type: %s, RegClass: JITRegisterClassFP, StackOff: %s}", gv.goVar, phiTag, stackOff)
+				} else {
+					g.emit("\t%s = JITValueDesc{Loc: LocStack, Type: %s, StackOff: %s}", gv.goVar, phiTag, stackOff)
+				}
 				g.emit("}")
 			} else {
-				g.emit("%s = JITValueDesc{Loc: LocStack, Type: %s, StackOff: %s}", gv.goVar, phiTag, stackOff)
+				if registerClass == "JITRegisterClassFP" {
+					g.emit("%s = JITValueDesc{Loc: LocStack, Type: %s, RegClass: JITRegisterClassFP, StackOff: %s}", gv.goVar, phiTag, stackOff)
+				} else {
+					g.emit("%s = JITValueDesc{Loc: LocStack, Type: %s, StackOff: %s}", gv.goVar, phiTag, stackOff)
+				}
 			}
 		}
 	}
@@ -7718,6 +7762,13 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			xMultiUse = true
 		}
 		if floatAluOp := floatAluEmitFunc(v.Op); floatAluOp != "" && isFloat64Type(v.Type()) && isFloat64Type(v.X.Type()) && isFloat64Type(v.Y.Type()) {
+			if g.nativeFP {
+				yVal := g.resolveValue(v.Y)
+				dv := g.allocDesc()
+				g.emit("%s := ctx.EmitFloatBinary(&%s, &%s, %s)", dv, xVal.goVar, yVal.goVar, floatAluEnum(v.Op))
+				g.vals[name] = genVal{goVar: dv, isDesc: true}
+				break
+			}
 			dv := g.allocDesc()
 			goOp := goOpStr(v.Op)
 			if c, ok := v.Y.(*ssa.Const); ok {
@@ -7852,6 +7903,12 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				}
 			}
 			if isFloat64Type(v.X.Type()) && isFloat64Type(v.Y.Type()) {
+				if g.nativeFP {
+					yVal := g.resolveValue(v.Y)
+					g.emit("%s := ctx.EmitFloatCompare(&%s, &%s, %s)", dv, xVal.goVar, yVal.goVar, cc)
+					g.vals[name] = genVal{goVar: dv, isDesc: true}
+					break
+				}
 				if c, ok := v.Y.(*ssa.Const); ok {
 					cmpVal, ok := constFloat64Value(c.Value)
 					if !ok {
@@ -10339,6 +10396,21 @@ func floatAluEmitFunc(op token.Token) string {
 		return "EmitMulFloat64"
 	case token.QUO:
 		return "EmitDivFloat64"
+	default:
+		return ""
+	}
+}
+
+func floatAluEnum(op token.Token) string {
+	switch op {
+	case token.ADD:
+		return "JITFloatAdd"
+	case token.SUB:
+		return "JITFloatSub"
+	case token.MUL:
+		return "JITFloatMul"
+	case token.QUO:
+		return "JITFloatDiv"
 	default:
 		return ""
 	}

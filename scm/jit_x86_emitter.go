@@ -54,6 +54,15 @@ var jitX86RegisterBank = JITRegisterBank{
 	TemporaryReserve: 7,
 }
 
+var jitX86FPRegisterBank = JITRegisterBank{
+	Registers: [16]Reg{
+		RegX2, RegX3, RegX4, RegX5, RegX6, RegX7, RegX8,
+		RegX9, RegX10, RegX11, RegX12, RegX13, RegX14, RegX15,
+	},
+	Count:            14,
+	TemporaryReserve: 2,
+}
+
 func jitCapturedEnv(en *Env) *JITEnv {
 	if en == nil || en == &Globalenv {
 		return nil
@@ -145,6 +154,10 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 		(1 << uint(RegRSI)) | (1 << uint(RegRDI)) |
 		(1 << uint(RegR8)) | (1 << uint(RegR9)) | (1 << uint(RegR10)) |
 		(1 << uint(RegR13)) | (1 << uint(RegR15)))
+	freeFPRegs := uint64(0)
+	for index := uint8(0); index < jitX86FPRegisterBank.Count; index++ {
+		freeFPRegs |= uint64(1) << uint(jitX86FPRegisterBank.Registers[index])
+	}
 	inputArgCount := -1
 	if proc != nil && proc.Params.GetTag() == tagSlice {
 		inputArgCount = len(proc.Params.Slice())
@@ -156,7 +169,10 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 		End:              unsafe.Add(buf.ptr, buf.n),
 		FreeRegs:         freeRegs,
 		AllRegs:          freeRegs,
+		FreeFPRegs:       freeFPRegs,
+		AllFPRegs:        freeFPRegs,
 		RegisterBank:     jitX86RegisterBank,
+		FPRegisterBank:   jitX86FPRegisterBank,
 		SliceBase:        RegR12,
 		StackReg:         RegRSP,
 		FrameReg:         RegRBP,
@@ -470,12 +486,22 @@ const (
 	RegR14 Reg = 14
 	RegR15 Reg = 15
 	// XMM registers start at 16
-	RegX0 Reg = 16
-	RegX1 Reg = 17
-	RegX2 Reg = 18
-	RegX3 Reg = 19
-	RegX4 Reg = 20
-	RegX5 Reg = 21
+	RegX0  Reg = 16
+	RegX1  Reg = 17
+	RegX2  Reg = 18
+	RegX3  Reg = 19
+	RegX4  Reg = 20
+	RegX5  Reg = 21
+	RegX6  Reg = 22
+	RegX7  Reg = 23
+	RegX8  Reg = 24
+	RegX9  Reg = 25
+	RegX10 Reg = 26
+	RegX11 Reg = 27
+	RegX12 Reg = 28
+	RegX13 Reg = 29
+	RegX14 Reg = 30
+	RegX15 Reg = 31
 )
 
 // emitByte appends a single byte to the writer.
@@ -543,9 +569,11 @@ func (ctx *JITContext) EmitReturnFloat(src JITValueDesc) {
 	ctx.emitBytes(0x48, 0xB8)
 	ctx.emitU64(uint64(uintptr(unsafe.Pointer(&scmerFloatSentinel))))
 	switch src.Loc {
-	case LocReg:
+	case LocFPReg:
 		// MOVQ XMM -> RBX: 66 48 0F 7E C3 (for X0→RBX)
 		ctx.emitMovqXmmToGpr(RegRBX, src.Reg)
+	case LocReg:
+		ctx.emitMovRegReg(RegRBX, src.Reg)
 	case LocImm:
 		// MOV RBX, imm64 (raw float bits)
 		ctx.emitBytes(0x48, 0xBB)
@@ -625,6 +653,8 @@ func (ctx *JITContext) EmitMakeBool(dst JITValueDesc, src JITValueDesc) {
 // src.Reg holds the int64 value.
 func (ctx *JITContext) EmitMakeInt(dst JITValueDesc, src JITValueDesc) {
 	switch src.Loc {
+	case LocFPReg:
+		ctx.emitMovqXmmToGpr(dst.Reg2, src.Reg)
 	case LocReg:
 		if dst.Reg2 != src.Reg {
 			ctx.emitMovRegReg(dst.Reg2, src.Reg)
@@ -724,7 +754,7 @@ func (ctx *JITContext) EmitImulInt64(dst, src Reg) {
 func (ctx *JITContext) EmitAddFloat64(dst, src Reg) {
 	ctx.emitMovqGprToXmm(RegX0, dst)
 	ctx.emitMovqGprToXmm(RegX1, src)
-	ctx.emitSseOp(0x58, RegX0, RegX1) // ADDSD
+	ctx.emitSseOp(0x58, RegX0, RegX1)
 	ctx.emitMovqXmmToGpr(dst, RegX0)
 }
 
@@ -732,7 +762,7 @@ func (ctx *JITContext) EmitAddFloat64(dst, src Reg) {
 func (ctx *JITContext) EmitSubFloat64(dst, src Reg) {
 	ctx.emitMovqGprToXmm(RegX0, dst)
 	ctx.emitMovqGprToXmm(RegX1, src)
-	ctx.emitSseOp(0x5C, RegX0, RegX1) // SUBSD
+	ctx.emitSseOp(0x5C, RegX0, RegX1)
 	ctx.emitMovqXmmToGpr(dst, RegX0)
 }
 
@@ -740,7 +770,7 @@ func (ctx *JITContext) EmitSubFloat64(dst, src Reg) {
 func (ctx *JITContext) EmitMulFloat64(dst, src Reg) {
 	ctx.emitMovqGprToXmm(RegX0, dst)
 	ctx.emitMovqGprToXmm(RegX1, src)
-	ctx.emitSseOp(0x59, RegX0, RegX1) // MULSD
+	ctx.emitSseOp(0x59, RegX0, RegX1)
 	ctx.emitMovqXmmToGpr(dst, RegX0)
 }
 
@@ -748,7 +778,7 @@ func (ctx *JITContext) EmitMulFloat64(dst, src Reg) {
 func (ctx *JITContext) EmitDivFloat64(dst, src Reg) {
 	ctx.emitMovqGprToXmm(RegX0, dst)
 	ctx.emitMovqGprToXmm(RegX1, src)
-	ctx.emitSseOp(0x5E, RegX0, RegX1) // DIVSD
+	ctx.emitSseOp(0x5E, RegX0, RegX1)
 	ctx.emitMovqXmmToGpr(dst, RegX0)
 }
 
@@ -794,6 +824,101 @@ func (ctx *JITContext) EmitCmpFloat64Setcc(dst, left, right Reg, cc JITCondition
 	default:
 		// GT/GE already reject unordered operands through CF/ZF.
 		ctx.EmitSetcc(dst, cc)
+	}
+}
+
+func (ctx *JITContext) EmitAddFP64(dst, src Reg) { ctx.emitSseOp(0x58, dst, src) }
+func (ctx *JITContext) EmitSubFP64(dst, src Reg) { ctx.emitSseOp(0x5C, dst, src) }
+func (ctx *JITContext) EmitMulFP64(dst, src Reg) { ctx.emitSseOp(0x59, dst, src) }
+func (ctx *JITContext) EmitDivFP64(dst, src Reg) { ctx.emitSseOp(0x5E, dst, src) }
+
+func (ctx *JITContext) EmitCmpFP64Setcc(dst, left, right Reg, cc JITCondition) {
+	switch cc {
+	case CcL:
+		cc = CcB
+	case CcLE:
+		cc = CcBE
+	case CcG:
+		cc = CcA
+	case CcGE:
+		cc = CcAE
+	}
+	ctx.emitUcomisd(left, right)
+	switch cc {
+	case CcE:
+		ctx.EmitSetcc(dst, CcE)
+		ctx.EmitSetcc(ctx.ScratchReg, CcNP)
+		ctx.EmitAndInt64(dst, ctx.ScratchReg)
+	case CcNE:
+		ctx.EmitSetcc(dst, CcNE)
+		ctx.EmitSetcc(ctx.ScratchReg, CcP)
+		ctx.emitOrRegReg(dst, ctx.ScratchReg)
+	case CcB, CcBE:
+		ctx.EmitSetcc(dst, cc)
+		ctx.EmitSetcc(ctx.ScratchReg, CcNP)
+		ctx.EmitAndInt64(dst, ctx.ScratchReg)
+	default:
+		ctx.EmitSetcc(dst, cc)
+	}
+}
+
+func (ctx *JITContext) emitUcomisd(left, right Reg) {
+	l := left - 16
+	r := right - 16
+	rex := byte(0)
+	if l >= 8 || r >= 8 {
+		rex = 0x40
+		if l >= 8 {
+			rex |= 0x04
+		}
+		if r >= 8 {
+			rex |= 0x01
+		}
+	}
+	modrm := byte(0xC0) | byte(l&7)<<3 | byte(r&7)
+	if rex != 0 {
+		ctx.emitBytes(0x66, rex, 0x0F, 0x2E, modrm)
+	} else {
+		ctx.emitBytes(0x66, 0x0F, 0x2E, modrm)
+	}
+}
+
+func (ctx *JITContext) EmitMovGPRToFP(dst, src Reg) { ctx.emitMovqGprToXmm(dst, src) }
+func (ctx *JITContext) EmitMovFPToGPR(dst, src Reg) { ctx.emitMovqXmmToGpr(dst, src) }
+func (ctx *JITContext) EmitMovFPReg(dst, src Reg)   { ctx.emitSseOp(0x10, dst, src) }
+func (ctx *JITContext) EmitLoadFPRegMem(dst, base Reg, disp int32) {
+	ctx.emitMovqMemToXmm(dst, base, disp)
+}
+
+func (ctx *JITContext) EmitStoreFPRegMem(src, base Reg, disp int32) {
+	x := src - 16
+	rex := byte(0)
+	if x >= 8 || base >= 8 {
+		rex = 0x40
+		if x >= 8 {
+			rex |= 0x04
+		}
+		if base >= 8 {
+			rex |= 0x01
+		}
+	}
+	baseEnc := byte(base & 7)
+	modrm := byte(0x80) | byte(x&7)<<3 | baseEnc
+	if disp >= -128 && disp <= 127 {
+		modrm = byte(0x40) | byte(x&7)<<3 | baseEnc
+	}
+	if rex != 0 {
+		ctx.emitBytes(0x66, rex, 0x0F, 0xD6, modrm)
+	} else {
+		ctx.emitBytes(0x66, 0x0F, 0xD6, modrm)
+	}
+	if baseEnc == 4 {
+		ctx.emitByte(0x24)
+	}
+	if disp >= -128 && disp <= 127 {
+		ctx.emitByte(byte(int8(disp)))
+	} else {
+		ctx.emitU32(uint32(disp))
 	}
 }
 
@@ -1885,6 +2010,8 @@ func (ctx *JITContext) EmitBoolDesc(src *JITValueDesc, result JITValueDesc) JITV
 		switch src.Loc {
 		case LocReg:
 			valReg = src.Reg
+		case LocFPReg:
+			valReg = src.Reg
 		case LocRegPair:
 			valReg = src.Reg2 // aux payload contains bool/int/float bits
 		default:
@@ -1893,7 +2020,9 @@ func (ctx *JITContext) EmitBoolDesc(src *JITValueDesc, result JITValueDesc) JITV
 		}
 
 		dst := ctx.AllocReg()
-		if valReg != dst {
+		if srcLoc == LocFPReg {
+			ctx.EmitMovFPToGPR(dst, valReg)
+		} else if valReg != dst {
 			ctx.emitMovRegReg(dst, valReg)
 		}
 
@@ -1927,6 +2056,8 @@ func (ctx *JITContext) EmitBoolDesc(src *JITValueDesc, result JITValueDesc) JITV
 				ctx.FreeReg(srcReg)
 				ctx.FreeReg(srcReg2)
 			}
+		case LocFPReg:
+			ctx.FreeReg(srcReg)
 		default:
 			ctx.FreeDesc(src)
 		}
@@ -1949,16 +2080,34 @@ func (ctx *JITContext) EmitBoolDesc(src *JITValueDesc, result JITValueDesc) JITV
 	return emitResult(out)
 }
 
-// EmitMovToReg moves a scalar JITValueDesc into a specific GPR register.
-// Register self-copies intentionally emit no instruction.
+// EmitMovToReg moves a scalar into a same-class register home.
 func (ctx *JITContext) EmitMovToReg(dst Reg, src JITValueDesc) {
 	switch src.Loc {
 	case LocImm:
-		ctx.EmitMovRegImm64(dst, uint64(src.Imm.Int()))
+		if dst >= RegX0 {
+			ctx.EmitMovRegImm64(ctx.ScratchReg, math.Float64bits(src.Imm.Float()))
+			ctx.EmitMovGPRToFP(dst, ctx.ScratchReg)
+		} else {
+			ctx.EmitMovRegImm64(dst, uint64(src.Imm.Int()))
+		}
 	case LocReg:
-		ctx.EmitMovRegReg(dst, src.Reg)
+		if dst >= RegX0 {
+			ctx.EmitMovGPRToFP(dst, src.Reg)
+		} else {
+			ctx.EmitMovRegReg(dst, src.Reg)
+		}
+	case LocFPReg:
+		if dst < RegX0 {
+			ctx.EmitMovFPToGPR(dst, src.Reg)
+		} else if dst != src.Reg {
+			ctx.EmitMovFPReg(dst, src.Reg)
+		}
 	case LocStack:
-		ctx.EmitMovRegMem(dst, RegRSP, src.StackOff)
+		if dst >= RegX0 || src.RegClass == JITRegisterClassFP {
+			ctx.EmitLoadFPRegMem(dst, RegRSP, src.StackOff)
+		} else {
+			ctx.EmitMovRegMem(dst, RegRSP, src.StackOff)
+		}
 	default:
 		panic("jit: scalar move requires immediate, register, or stack source")
 	}
@@ -2710,6 +2859,8 @@ func (ctx *JITContext) EmitStoreToStack(src JITValueDesc, disp int32) {
 		ctx.EmitStoreRegMem(RegR11, RegRSP, disp)
 	case LocReg:
 		ctx.EmitStoreRegMem(src.Reg, RegRSP, disp)
+	case LocFPReg:
+		ctx.EmitStoreFPRegMem(src.Reg, RegRSP, disp)
 	}
 }
 
@@ -2794,13 +2945,15 @@ func (ctx *JITContext) EmitStoreScmerToStack(desc JITValueDesc, disp int32) {
 // word, but a Scmer consumer still needs a boxed two-word value.
 func (ctx *JITContext) EmitStoreTypedScmerToStack(desc JITValueDesc, typ uint8, disp int32) {
 	ctx.setStackPointer(jitStackRootFrameSP, disp-ctx.DynamicSP, true)
-	if desc.Loc != LocReg && desc.Loc != LocImm && desc.Loc != LocStack {
+	if desc.Loc != LocReg && desc.Loc != LocFPReg && desc.Loc != LocImm && desc.Loc != LocStack {
 		panic("jit: typed Scmer stack store requires a scalar descriptor")
 	}
 	storePayload := func(destination int32) {
 		switch desc.Loc {
 		case LocReg:
 			ctx.EmitStoreRegMem(desc.Reg, RegRSP, destination)
+		case LocFPReg:
+			ctx.EmitStoreFPRegMem(desc.Reg, RegRSP, destination)
 		case LocStack:
 			base := RegRSP
 			if desc.StackOff < 0 {
