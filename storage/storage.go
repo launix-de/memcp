@@ -1979,12 +1979,28 @@ func Init(en scm.Env) {
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			ignoreexists := len(a) > 1 && scm.ToBool(a[1])
+			if len(a) > 3 && !a[3].IsNil() {
+				return scm.NewBool(CreateDatabaseFrom(scm.String(a[0]), ignoreexists, scm.String(a[3])))
+			}
+			if len(a) > 2 && !a[2].IsNil() {
+				items := a[2].Slice()
+				if len(items)%2 != 0 {
+					panic("database backend options must contain key/value pairs")
+				}
+				options := make(map[string]string, len(items)/2)
+				for index := 0; index < len(items); index += 2 {
+					options[scm.String(items[index])] = scm.String(items[index+1])
+				}
+				return scm.NewBool(CreateDatabaseWithBackend(scm.String(a[0]), ignoreexists, options))
+			}
 			return scm.NewBool(CreateDatabase(scm.String(a[0]), ignoreexists))
 		},
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "creates a new database", HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
 				{Kind: "string", Label: "schema", Description: "name of the new database"},
 				{Kind: "bool", Label: "ignoreexists", Description: "if true, return false instead of throwing an error", Optional: true},
+				{Kind: "list|nil", Label: "backendOptions", Description: "optional flat key/value list selecting a persistence backend", Optional: true},
+				{Kind: "string|nil", Label: "sourceDatabase", Description: "optional remote database whose backend configuration is copied", Optional: true},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},

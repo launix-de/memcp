@@ -27,6 +27,21 @@ transactions fail, retry the writes, and crash-recover the exact result:
 python3 tools/reliability_drill.py --mode io-failures
 ```
 
+To run the same transaction/crash oracle against a remote backend, pass the
+options accepted by `CREATE DATABASE ... SET` as JSON. For example, against a
+local MinIO instance:
+
+```sh
+python3 tools/reliability_drill.py --mode atomicity \
+  --atomicity-rows 201 --commit-crashes 5 \
+  --database-config-json '{"backend":"s3","access_key_id":"minioadmin","secret_access_key":"minioadmin","region":"us-east-1","endpoint":"http://127.0.0.1:9000","bucket":"memcp","prefix":"reliability","force_path_style":true}'
+```
+
+The regular GitHub Actions test workflow runs this bounded S3 drill against a
+pinned MinIO image after the main test job, in parallel with packaging. It also
+exercises the complete persistence interface directly, including paginated
+blob listings and WAL replacement/replay.
+
 The server-side injector is enabled only when
 `MEMCP_IO_FAULT_PROBABILITY` is set. Tests can scope it with
 `MEMCP_IO_FAULT_DATABASE`, select comma-separated operations with

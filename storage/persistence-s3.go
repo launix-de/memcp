@@ -229,7 +229,7 @@ func (s *S3Storage) ReadColumn(shard string, column string) io.ReadCloser {
 		}
 		return ErrorReader{e: err, notFound: s3ObjectMissing(err)}
 	}
-	return resp.Body
+	return standardPersistenceReader(resp.Body, s.BackendName(), s.prefix, "column.read")
 }
 
 type s3WriteCloser struct {
@@ -294,7 +294,7 @@ func (s *S3Storage) ReadBlob(hash string) io.ReadCloser {
 		}
 		return ErrorReader{e: err, notFound: s3ObjectMissing(err)}
 	}
-	return resp.Body
+	return standardPersistenceReader(resp.Body, s.BackendName(), s.prefix, "blob.read")
 }
 
 func (s *S3Storage) WriteBlob(hash string) io.WriteCloser {
@@ -328,6 +328,9 @@ func (s *S3Storage) WalkBlobs(fn func(hash string)) {
 			raisePersistenceFailure(s.BackendName(), s.prefix, "blob.walk", err)
 		}
 		for _, obj := range page.Contents {
+			if obj.Key == nil {
+				continue
+			}
 			hash := strings.TrimPrefix(*obj.Key, blobPrefix)
 			fn(hash)
 		}
@@ -347,6 +350,9 @@ func (s *S3Storage) WalkShardFiles(fn func(name string)) {
 			raisePersistenceFailure(s.BackendName(), s.prefix, "shard.walk", err)
 		}
 		for _, obj := range page.Contents {
+			if obj.Key == nil {
+				continue
+			}
 			name := strings.TrimPrefix(*obj.Key, pfx)
 			if name == "schema.json" || name == "schema.json.old" || strings.HasPrefix(name, "blob/") {
 				continue
@@ -372,7 +378,6 @@ func (s *S3Storage) BackendName() string {
 }
 
 func (s *S3Storage) Remove() {
-	// List and delete all objects with prefix
 	s.ensureOpen()
 
 	paginator := s3.NewListObjectsV2Paginator(s.client, &s3.ListObjectsV2Input{
@@ -380,18 +385,24 @@ func (s *S3Storage) Remove() {
 		Prefix: aws.String(s.prefix + "/"),
 	})
 
+	var keys []*string
 	for paginator.HasMorePages() {
 		page, err := paginator.NextPage(context.Background())
 		if err != nil {
 			raisePersistenceFailure(s.BackendName(), s.prefix, "database.remove.list", err)
 		}
 		for _, obj := range page.Contents {
-			if _, err := s.client.DeleteObject(context.Background(), &s3.DeleteObjectInput{
-				Bucket: aws.String(s.factory.Bucket),
-				Key:    obj.Key,
-			}); err != nil {
-				raisePersistenceFailure(s.BackendName(), s.prefix, "database.remove", err)
+			if obj.Key != nil {
+				keys = append(keys, obj.Key)
 			}
+		}
+	}
+	for _, key := range keys {
+		if _, err := s.client.DeleteObject(context.Background(), &s3.DeleteObjectInput{
+			Bucket: aws.String(s.factory.Bucket),
+			Key:    key,
+		}); err != nil {
+			raisePersistenceFailure(s.BackendName(), s.prefix, "database.remove", err)
 		}
 	}
 }
@@ -422,7 +433,7 @@ func (s *S3Storage) OpenLog(shard string) PersistenceLogfile {
 
 func (s *S3Storage) SwapLog(shard string, entries []interface{}, durable bool) PersistenceLogfile {
 	s.ensureOpen()
-	oldSegments, err := listS3LogSegments(s, shard)
+	oldSegments, _, err := listS3LogSegments(s, shard)
 	if err != nil {
 		raisePersistenceFailure(s.BackendName(), s.prefix, "log.swap", err)
 	}
@@ -472,7 +483,7 @@ func (s *S3Storage) ReplayLog(shard string) (map[string]struct{}, chan interface
 
 	out := make(chan interface{}, 64)
 	committed := make(map[string]struct{})
-	segments, err := listS3LogSegments(s, shard)
+	segments, _, err := listS3LogSegments(s, shard)
 	if err != nil {
 		raisePersistenceFailure(s.BackendName(), s.prefix, "log.replay", err)
 	}
@@ -503,19 +514,25 @@ func (s *S3Storage) readLogSegment(seg s3LogSegInfo) []byte {
 	if err != nil {
 		raisePersistenceFailure(s.BackendName(), s.prefix, "log.read", err)
 	}
-	defer resp.Body.Close()
 	data, err := io.ReadAll(resp.Body)
+	closeErr := resp.Body.Close()
 	if err != nil {
 		raisePersistenceFailure(s.BackendName(), s.prefix, "log.read", err)
+	}
+	if closeErr != nil {
+		raisePersistenceFailure(s.BackendName(), s.prefix, "log.read.close", closeErr)
 	}
 	return data
 }
 
 func (s *S3Storage) RemoveLog(shard string) {
 	s.ensureOpen()
-	segments, err := listS3LogSegments(s, shard)
+	segments, manifestExists, err := listS3LogSegments(s, shard)
 	if err != nil {
 		raisePersistenceFailure(s.BackendName(), s.prefix, "log.remove", err)
+	}
+	if !manifestExists {
+		return
 	}
 	for _, seg := range segments {
 		if _, err := s.client.DeleteObject(context.Background(), &s3.DeleteObjectInput{
@@ -540,7 +557,7 @@ type s3LogSegInfo struct {
 	key string
 }
 
-func listS3LogSegments(s *S3Storage, shard string) ([]s3LogSegInfo, error) {
+func listS3LogSegments(s *S3Storage, shard string) ([]s3LogSegInfo, bool, error) {
 	manifestKey := s.key(fmt.Sprintf("%s.log.manifest", shard))
 
 	resp, err := s.client.GetObject(context.Background(), &s3.GetObjectInput{
@@ -548,18 +565,30 @@ func listS3LogSegments(s *S3Storage, shard string) ([]s3LogSegInfo, error) {
 		Key:    aws.String(manifestKey),
 	})
 	if err != nil {
-		return nil, fmt.Errorf("no manifest")
+		if s3ObjectMissing(err) {
+			return nil, false, nil
+		}
+		return nil, false, err
 	}
-	defer resp.Body.Close()
 
 	raw, err := io.ReadAll(resp.Body)
-	if err != nil || len(raw) == 0 {
-		return nil, fmt.Errorf("empty manifest")
+	closeErr := resp.Body.Close()
+	if err != nil {
+		return nil, true, err
+	}
+	if closeErr != nil {
+		return nil, true, closeErr
+	}
+	if len(raw) == 0 {
+		return nil, true, fmt.Errorf("empty log manifest")
 	}
 
 	var segs []uint32
 	if err := json.Unmarshal(raw, &segs); err != nil {
-		return nil, err
+		return nil, true, err
+	}
+	if len(segs) == 0 {
+		return nil, true, fmt.Errorf("log manifest has no segments")
 	}
 
 	out := make([]s3LogSegInfo, 0, len(segs))
@@ -569,7 +598,7 @@ func listS3LogSegments(s *S3Storage, shard string) ([]s3LogSegInfo, error) {
 			key: s.key(fmt.Sprintf("%s.log.%08d", shard, seg)),
 		})
 	}
-	return out, nil
+	return out, true, nil
 }
 
 func writeS3LogManifest(s *S3Storage, shard string, segs []uint32) error {
@@ -584,12 +613,23 @@ func writeS3LogManifest(s *S3Storage, shard string, segs []uint32) error {
 }
 
 func openOrCreateS3Logfile(s *S3Storage, shard string) (*S3Logfile, error) {
-	segs, _ := listS3LogSegments(s, shard)
+	segs, manifestExists, err := listS3LogSegments(s, shard)
+	if err != nil {
+		return nil, err
+	}
 	var seg uint32
 	var all []uint32
-	if len(segs) == 0 {
+	if !manifestExists {
 		seg = 0
 		all = []uint32{0}
+		key := s.key(fmt.Sprintf("%s.log.%08d", shard, seg))
+		if _, err := s.client.PutObject(context.Background(), &s3.PutObjectInput{
+			Bucket: aws.String(s.factory.Bucket),
+			Key:    aws.String(key),
+			Body:   bytes.NewReader(nil),
+		}); err != nil {
+			return nil, err
+		}
 		if err := writeS3LogManifest(s, shard, all); err != nil {
 			return nil, err
 		}
@@ -610,6 +650,9 @@ func openOrCreateS3Logfile(s *S3Storage, shard string) (*S3Logfile, error) {
 		Bucket: aws.String(s.factory.Bucket),
 		Key:    aws.String(key),
 	})
+	if err != nil && !s3ObjectMissing(err) {
+		return nil, err
+	}
 	if err == nil && head.ContentLength != nil {
 		offset = uint64(*head.ContentLength)
 	}
@@ -788,22 +831,37 @@ func (w *S3Logfile) flushLocked(force bool) error {
 		next := w.seg + 1
 		nextKey := w.s.key(fmt.Sprintf("%s.log.%08d", w.shard, next))
 
-		segs, err := listS3LogSegments(w.s, w.shard)
+		segs, manifestExists, err := listS3LogSegments(w.s, w.shard)
 		if err != nil {
 			return err
+		}
+		if !manifestExists {
+			return fmt.Errorf("log manifest disappeared before segment rollover")
 		}
 		var all []uint32
 		for _, si := range segs {
 			all = append(all, si.seg)
 		}
 		all = append(all, next)
+		// Publish the immutable new segment before the manifest can make it
+		// visible. A crash before the manifest PUT only leaves an orphan; a
+		// crash afterwards always leaves a readable manifest generation.
+		if _, err := w.s.client.PutObject(context.Background(), &s3.PutObjectInput{
+			Bucket: aws.String(w.s.factory.Bucket),
+			Key:    aws.String(nextKey),
+			Body:   bytes.NewReader(w.buf.Bytes()),
+		}); err != nil {
+			return err
+		}
 		if err := writeS3LogManifest(w.s, w.shard, all); err != nil {
 			return err
 		}
 
 		w.seg = next
 		w.key = nextKey
-		w.offset = 0
+		w.offset = uint64(w.buf.Len())
+		w.buf.Reset()
+		return nil
 	}
 
 	// S3 doesn't support append, so we need to read-modify-write for logs
@@ -827,7 +885,15 @@ func (w *S3Logfile) flushLocked(force bool) error {
 		}
 	}
 
-	newData := append(existing, w.buf.Bytes()...)
+	if uint64(len(existing)) < w.offset {
+		return fmt.Errorf("log segment is shorter than its known offset: got %d, want at least %d", len(existing), w.offset)
+	}
+	// PUT has an ambiguous outcome when the server stores the object but its
+	// response is lost. Replacing from the last acknowledged logical offset
+	// makes a retry idempotent instead of duplicating the buffered frames.
+	newData := make([]byte, 0, int(w.offset)+w.buf.Len())
+	newData = append(newData, existing[:w.offset]...)
+	newData = append(newData, w.buf.Bytes()...)
 	_, err := w.s.client.PutObject(context.Background(), &s3.PutObjectInput{
 		Bucket: aws.String(w.s.factory.Bucket),
 		Key:    aws.String(w.key),

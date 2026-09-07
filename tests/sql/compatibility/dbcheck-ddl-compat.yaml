@@ -65,6 +65,11 @@ test_cases:
     sql: "SHOW CREATE DATABASE IF NOT EXISTS `memcp-tests`"
     expect:
       rows: 1
+
+  - name: "CREATE DATABASE rejects an unknown persistence backend"
+    sql: "CREATE DATABASE dbc_unknown_backend SET backend='not-a-backend',prefix='must-parse-all-options'"
+    expect:
+      error: true
   - name: "SHOW INDEXES FROM table"
     sql: "SHOW INDEXES FROM dbc_t"
 

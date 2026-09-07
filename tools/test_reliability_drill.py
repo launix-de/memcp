@@ -24,6 +24,27 @@ SPEC.loader.exec_module(drill)
 
 
 class ReliabilityDrillTests(unittest.TestCase):
+	def test_remote_database_options_are_emitted_as_sql_literals(self) -> None:
+		class RecordingClient:
+			def __init__(self) -> None:
+				self.calls = []
+
+			def sql(self, statement: str, database: str) -> None:
+				self.calls.append((statement, database))
+
+		client = RecordingClient()
+		drill.create_database(client, {
+			"backend": "s3", "force_path_style": True,
+			"prefix": "ci's-prefix",
+		})
+		self.assertEqual(client.calls, [(
+			"CREATE DATABASE IF NOT EXISTS reliability_drill SET "
+			"backend='s3',force_path_style='true',prefix='ci''s-prefix'",
+			"system",
+		)])
+		with self.assertRaises(drill.DrillFailure):
+			drill.create_database(client, {"backend; DROP DATABASE system": "s3"})
+
 	def test_artifact_directory_must_not_exist(self) -> None:
 		with tempfile.TemporaryDirectory() as temp:
 			with self.assertRaises(drill.DrillFailure):

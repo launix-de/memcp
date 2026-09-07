@@ -145,7 +145,7 @@ func (s *FileStorage) ReadColumn(shard string, column string) io.ReadCloser {
 		// file does not exist -> no data available
 		return ErrorReader{e: err, notFound: os.IsNotExist(err)}
 	}
-	return f
+	return standardPersistenceReader(f, s.BackendName(), s.path, "column.read")
 }
 
 func (s *FileStorage) WriteColumn(shard string, column string) io.WriteCloser {
@@ -180,7 +180,7 @@ func (s *FileStorage) ReadBlob(hash string) io.ReadCloser {
 		}
 		return ErrorReader{e: err, notFound: os.IsNotExist(err)}
 	}
-	return f
+	return standardPersistenceReader(f, s.BackendName(), s.path, "blob.read")
 }
 
 func (s *FileStorage) WriteBlob(hash string) io.WriteCloser {

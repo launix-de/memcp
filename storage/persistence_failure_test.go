@@ -18,10 +18,39 @@ package storage
 
 import (
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 )
+
+type failingPersistenceReader struct {
+	readErr  error
+	closeErr error
+}
+
+func (r failingPersistenceReader) Read([]byte) (int, error) { return 0, r.readErr }
+func (r failingPersistenceReader) Close() error             { return r.closeErr }
+
+func TestPersistenceObjectReaderStandardizesStreamErrors(t *testing.T) {
+	for _, reader := range []io.ReadCloser{
+		standardPersistenceReader(failingPersistenceReader{readErr: syscall.EIO}, "test", "db", "column.read"),
+		standardPersistenceReader(failingPersistenceReader{readErr: io.EOF, closeErr: syscall.EIO}, "test", "db", "column.read"),
+	} {
+		func() {
+			defer func() {
+				if _, ok := recover().(*PersistenceFailure); !ok {
+					t.Fatal("stream error did not panic with *PersistenceFailure")
+				}
+			}()
+			_, err := reader.Read(make([]byte, 1))
+			if err == io.EOF {
+				_ = reader.Close()
+			}
+		}()
+	}
+}
 
 func TestRemoteRetryIsBounded(t *testing.T) {
 	want := errors.New("remote unavailable")

@@ -20,6 +20,7 @@ import json
 import os
 from pathlib import Path
 import random
+import re
 import shutil
 import signal
 import socket
@@ -246,8 +247,28 @@ def expect(actual: object, wanted: object, context: str) -> None:
 		raise DrillFailure(f"{context}: got {actual!r}, want {wanted!r}")
 
 
-def initialize(client: HttpClient) -> None:
-	client.sql(f"CREATE DATABASE IF NOT EXISTS {DATABASE}", database="system")
+def sql_literal(value: object) -> str:
+	if isinstance(value, bool):
+		value = "true" if value else "false"
+	return "'" + str(value).replace("'", "''") + "'"
+
+
+def create_database(client: HttpClient, backend_config: dict[str, object] | None) -> None:
+	statement = f"CREATE DATABASE IF NOT EXISTS {DATABASE}"
+	if backend_config:
+		for key in backend_config:
+			if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+				raise DrillFailure(f"invalid database backend option name: {key!r}")
+		options = ",".join(
+			f"{key}={sql_literal(value)}" for key, value in sorted(backend_config.items())
+		)
+		statement += " SET " + options
+	client.sql(statement, database="system")
+
+
+def initialize(client: HttpClient, backend_config: dict[str, object] | None = None,
+		rebuild_rows: int = 100000) -> None:
+	create_database(client, backend_config)
 	client.scm('(settings "ShardSize" 10)')
 	client.sql("CREATE TABLE drill_entry (id INT PRIMARY KEY, bucket INT NOT NULL, amount INT NOT NULL, state VARCHAR(16) NOT NULL) ENGINE=safe")
 	client.sql("CREATE TABLE drill_audit (entry_id INT NOT NULL, amount INT NOT NULL) ENGINE=safe")
@@ -264,14 +285,15 @@ def initialize(client: HttpClient) -> None:
 	client.sql("CREATE TABLE drill_rebuild (id INT PRIMARY KEY, payload BIGINT NOT NULL) ENGINE=safe")
 	client.scm(
 		f'(insert (table "{DATABASE}" "drill_rebuild") \'("id" "payload") '
-		'(map (produceN 100000) (lambda (i) (list (+ i 1) (+ i 1)))))',
+		f'(map (produceN {rebuild_rows}) (lambda (i) (list (+ i 1) (+ i 1)))))',
 		timeout=120,
 	)
 	client.scm(f'(rebuild (table "{DATABASE}" "drill_rebuild") true true)', timeout=120)
 
 
-def initialize_atomicity(client: HttpClient, rows: int) -> None:
-	client.sql(f"CREATE DATABASE IF NOT EXISTS {DATABASE}", database="system")
+def initialize_atomicity(client: HttpClient, rows: int,
+		backend_config: dict[str, object] | None = None) -> None:
+	create_database(client, backend_config)
 	client.scm('(settings "ShardSize" 100)')
 	client.sql("CREATE TABLE drill_atomic (id INT PRIMARY KEY, x INT NOT NULL) ENGINE=safe")
 	client.scm(
@@ -614,6 +636,10 @@ def parse_args() -> argparse.Namespace:
 		help="rows updated across ShardSize=100 shards in atomicity mode")
 	parser.add_argument("--io-failure-rows", type=int, default=300,
 		help="rows updated across ShardSize=100 shards in I/O failure mode")
+	parser.add_argument("--rebuild-rows", type=int, default=100000,
+		help="rows used to keep rebuild publication active during crash tests")
+	parser.add_argument("--database-config-json",
+		help="JSON object passed as CREATE DATABASE SET backend options")
 	parser.add_argument("--timeout", type=float, default=30)
 	return parser.parse_args()
 
@@ -622,8 +648,16 @@ def main() -> int:
 	args = parse_args()
 	if (args.workers < 1 or args.operations < 1 or args.rebuild_crashes < 1 or
 			args.commit_crashes < 1 or args.atomicity_rows < 1 or
-			args.io_failure_rows < 1 or args.timeout <= 0):
+			args.io_failure_rows < 1 or args.rebuild_rows < 1 or args.timeout <= 0):
 		raise DrillFailure("workers, operations, crash rounds, row counts, and timeout must be positive")
+	backend_config = None
+	if args.database_config_json:
+		try:
+			backend_config = json.loads(args.database_config_json)
+		except json.JSONDecodeError as error:
+			raise DrillFailure(f"invalid --database-config-json: {error}") from error
+		if not isinstance(backend_config, dict) or not backend_config.get("backend"):
+			raise DrillFailure("--database-config-json must be an object with a backend key")
 	binary = args.binary.expanduser().resolve()
 	app = args.app.expanduser().resolve()
 	if not binary.is_file() or not os.access(binary, os.X_OK):
@@ -643,18 +677,18 @@ def main() -> int:
 	try:
 		client = server.start()
 		if args.mode == "atomicity":
-			initialize_atomicity(client, args.atomicity_rows)
+			initialize_atomicity(client, args.atomicity_rows, backend_config)
 			run_commit_crash(server, args.atomicity_rows, args.commit_crashes, rng, journal)
 			write_manifest(manifest, args.seed, "passed", journal)
 			print(f"PASS: {len(journal)} reliability scenarios; manifest: {manifest}")
 			return 0
 		if args.mode == "io-failures":
-			initialize_atomicity(client, args.io_failure_rows)
+			initialize_atomicity(client, args.io_failure_rows, backend_config)
 			run_io_failures(server, args.io_failure_rows, args.seed, journal)
 			write_manifest(manifest, args.seed, "passed", journal)
 			print(f"PASS: {len(journal)} reliability scenarios; manifest: {manifest}")
 			return 0
-		initialize(client)
+		initialize(client, backend_config, args.rebuild_rows)
 		wanted = run_committed_crash(server, journal)
 		run_uncommitted_crash(server, wanted, journal)
 		assert server.client is not None

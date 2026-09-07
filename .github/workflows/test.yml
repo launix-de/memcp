@@ -98,3 +98,70 @@ jobs:
 
       - name: Validate container definition without building it
         run: docker build --check .
+
+  alternative-storage:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      MINIO_ROOT_USER: memcp-ci
+      MINIO_ROOT_PASSWORD: memcp-ci-password
+      MEMCP_TEST_S3_ENDPOINT: http://127.0.0.1:9000
+      MEMCP_TEST_S3_BUCKET: memcp-test
+      MEMCP_TEST_S3_ACCESS_KEY: memcp-ci
+      MEMCP_TEST_S3_SECRET_KEY: memcp-ci-password
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+
+      - name: Start S3-compatible storage
+        run: |
+          docker run --detach --name memcp-minio \
+            --publish 9000:9000 \
+            --env MINIO_ROOT_USER \
+            --env MINIO_ROOT_PASSWORD \
+            minio/minio:RELEASE.2025-09-07T16-13-09Z server /data
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:9000/minio/health/ready >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs memcp-minio
+          exit 1
+
+      - name: Stress the S3 persistence contract
+        run: go test ./storage -run TestS3PersistenceStress -count=1 -v
+
+      - name: Build MemCP
+        run: go build -o memcp .
+
+      - name: Exercise S3 multi-shard crash recovery
+        env:
+          MEMCP_S3_CONFIG: >-
+            {"backend":"s3","access_key_id":"memcp-ci","secret_access_key":"memcp-ci-password","region":"us-east-1","endpoint":"http://127.0.0.1:9000","bucket":"memcp-test","prefix":"reliability-${{ github.run_id }}-${{ github.run_attempt }}","force_path_style":true}
+        run: >-
+          python3 tools/reliability_drill.py
+          --mode atomicity
+          --atomicity-rows 201
+          --commit-crashes 5
+          --database-config-json "$MEMCP_S3_CONFIG"
+
+      - name: Print S3 server log after failure
+        if: failure()
+        run: docker logs memcp-minio
+
+      - name: Upload reliability evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: alternative-storage-reliability
+          path: /tmp/memcp-reliability-*/
+          if-no-files-found: warn
+          retention-days: 7
