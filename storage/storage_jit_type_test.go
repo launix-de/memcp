@@ -17,6 +17,7 @@ Copyright (C) 2026  Carl-Philip Hänsch
 package storage
 
 import (
+	"bytes"
 	"testing"
 
 	"github.com/launix-de/memcp/scm"
@@ -74,6 +75,40 @@ func TestFinishedMainStorageJITValueTypes(t *testing.T) {
 	mutable.finish()
 	if got := mutable.JITValueType(); got != scm.JITTypeUnknown {
 		t.Fatalf("mutable SCMER storage type = %d, want unknown", got)
+	}
+}
+
+func TestStorageFloatJITValueTypeSurvivesSerialization(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		values []scm.Scmer
+		want   uint8
+	}{
+		{"not-null", []scm.Scmer{scm.NewFloat(1.25), scm.NewFloat(2.5)}, scm.TagFloat},
+		{"nullable", []scm.Scmer{scm.NewFloat(1.25), scm.NewNil()}, scm.JITTypeUnknown},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			source := &StorageFloat{}
+			source.prepare()
+			source.init(uint32(len(test.values)))
+			for i, value := range test.values {
+				source.scan(uint32(i), value)
+				source.build(uint32(i), value)
+			}
+
+			var encoded bytes.Buffer
+			source.Serialize(&encoded)
+			if magic, err := encoded.ReadByte(); err != nil || magic != 12 {
+				t.Fatalf("float magic = %d, %v; want 12", magic, err)
+			}
+			loaded := &StorageFloat{}
+			if count := loaded.Deserialize(&encoded); count != uint(len(test.values)) {
+				t.Fatalf("deserialized count = %d, want %d", count, len(test.values))
+			}
+			if got := loaded.JITValueType(); got != test.want {
+				t.Fatalf("deserialized type = %d, want %d", got, test.want)
+			}
+		})
 	}
 }
 
