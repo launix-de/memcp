@@ -18,7 +18,7 @@ require (
 	github.com/google/btree v1.1.3
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
-	github.com/launix-de/NonLockingReadMap v1.1.0
+	github.com/launix-de/NonLockingReadMap v1.1.1
 	github.com/launix-de/go-mysqlstack v0.2.0
 	github.com/launix-de/go-packrat/v2 v2.1.24
 	github.com/lib/pq v1.11.2
