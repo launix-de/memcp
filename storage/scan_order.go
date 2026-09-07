@@ -65,19 +65,33 @@ func optimizeScanOrderMulti(v []scm.Scmer, oc *scm.OptimizerContext, useResult b
 	}
 	oc.Ome.IncrLoopDepth()
 	if callbacks, static := scanStaticListElements(rawMapReduceFns); static {
-		valueTypes := make([][]*scm.TypeDescriptor, len(callbacks))
-		for index, callback := range callbacks {
-			if params, _, ok := scanLambdaParts(callback); ok && len(params) > 1 {
-				valueTypes[index] = make([]*scm.TypeDescriptor, len(params)-1)
-				for valueIndex := range valueTypes[index] {
-					valueTypes[index][valueIndex] = unknownScanType()
-				}
+		// scanStaticListElements also accepts already-materialized list values.
+		// Reject arbitrary call expressions here: their head is not a callback,
+		// and the runtime-produced list must retain the generic optimization path.
+		for _, callback := range callbacks {
+			_, _, lambda := scanLambdaParts(callback)
+			if !callback.IsProc() && !lambda {
+				static = false
+				break
 			}
 		}
-		optimized, _ := oc.OptimizeReducerCallbacks(callbacks, neutralType, valueTypes)
-		v[15] = scm.NewSlice(append([]scm.Scmer{scm.NewSymbol("list")}, optimized...))
+		if !static {
+			v[15], _ = oc.OptimizeSub(rawMapReduceFns, true)
+		} else {
+			valueTypes := make([][]*scm.TypeDescriptor, len(callbacks))
+			for index, callback := range callbacks {
+				if params, _, ok := scanLambdaParts(callback); ok && len(params) > 1 {
+					valueTypes[index] = make([]*scm.TypeDescriptor, len(params)-1)
+					for valueIndex := range valueTypes[index] {
+						valueTypes[index][valueIndex] = unknownScanType()
+					}
+				}
+			}
+			optimized, _ := oc.OptimizeReducerCallbacks(callbacks, neutralType, valueTypes)
+			v[15] = scm.NewSlice(append([]scm.Scmer{scm.NewSymbol("list")}, optimized...))
+		}
 	} else if len(v) > 15 {
-		v[15], _ = oc.OptimizeSub(v[15], true)
+		v[15], _ = oc.OptimizeSub(rawMapReduceFns, true)
 	}
 	if len(v) > 17 {
 		v[17], _ = oc.OptimizeSub(v[17], true)

@@ -49,3 +49,10 @@ func TestScanOrderMultiRejectsOwnershipUnlessEveryReducerPreservesIt(t *testing.
 		t.Fatalf("owned update escaped across a borrowing sibling reducer: %s", serialized)
 	}
 }
+
+func TestScanOrderMultiKeepsDynamicReducerList(t *testing.T) {
+	serialized := optimizeScanOrderMultiTestSource(t, `runtime_reducers`)
+	if !strings.Contains(serialized, "runtime_reducers") {
+		t.Fatalf("dynamic reducer list was mistaken for a static callback list: %s", serialized)
+	}
+}
