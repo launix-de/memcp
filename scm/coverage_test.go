@@ -16,7 +16,10 @@ Copyright (C) 2026  Carl-Philip Haensch
 */
 package scm
 
-import "testing"
+import (
+	"sync"
+	"testing"
+)
 
 func sourceCoverageCounts(source string) (covered, total int) {
 	type point struct {
@@ -24,7 +27,7 @@ func sourceCoverageCounts(source string) (covered, total int) {
 		col  int
 	}
 	points := make(map[point]bool)
-	for _, info := range sourceCoverageInfos {
+	for _, info := range sourceCoverageSnapshot() {
 		if info != nil && info.source == source {
 			key := point{line: info.line, col: info.col}
 			points[key] = points[key] || info.wasInterpreted()
@@ -37,6 +40,33 @@ func sourceCoverageCounts(source string) (covered, total int) {
 		}
 	}
 	return covered, total
+}
+
+func TestSourceCoverageRegistrySupportsConcurrentCompilation(t *testing.T) {
+	const source = "coverage-concurrent-registration.scm"
+	const workers = 8
+	const registrations = 100
+	var done sync.WaitGroup
+	done.Add(workers)
+	for range workers {
+		go func() {
+			defer done.Done()
+			for index := range registrations {
+				NewSourceInfo(SourceInfo{source: source, line: index + 1, col: 1, value: NewNil()})
+				_ = sourceCoverageSnapshot()
+			}
+		}()
+	}
+	done.Wait()
+	count := 0
+	for _, info := range sourceCoverageSnapshot() {
+		if info != nil && info.source == source {
+			count++
+		}
+	}
+	if count != workers*registrations {
+		t.Fatalf("registered coverage points = %d, want %d", count, workers*registrations)
+	}
 }
 
 func TestSourceCoverageTracksInterpreterExecutionOnly(t *testing.T) {

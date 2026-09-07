@@ -275,6 +275,16 @@ type tableShardTopology struct {
 	drainOnce          sync.Once
 }
 
+// tableSchemaTopology is the immutable storage generation written to
+// schema.json. It is separate from tableShardTopology because a durable
+// rebuild must publish the successor UUIDs to disk before making that
+// generation authoritative for live readers and writers.
+type tableSchemaTopology struct {
+	mode       ShardMode
+	shards     []*storageShard
+	dimensions []shardDimension
+}
+
 func (topology *tableShardTopology) acquireOperation() bool {
 	topology.operations.Add(1)
 	if topology.retired.Load() {
@@ -567,6 +577,10 @@ type table struct {
 	PShards     []*storageShard // partitioned shards according to PDimensions (used when ShardMode == ShardModePartition)
 	PDimensions []shardDimension
 	topology    atomic.Pointer[tableShardTopology]
+	// schemaTopology is the sole topology source for JSON persistence. Writers
+	// replace the complete immutable value; schema serialization never reads the
+	// mutable compatibility fields above.
+	schemaTopology atomic.Pointer[tableSchemaTopology]
 
 	// maintenanceMu prevents concurrent rebuild and repartition on this table.
 	// Holders: db.rebuild() claims it for rebuild (maintenanceKind=1) and may
@@ -723,11 +737,81 @@ func (t *table) publishTopologyLocked() *tableShardTopology {
 			shard.generation.Store(topology)
 		}
 	}
+	t.publishSchemaTopology(topology.mode, topology.shards, topology.dimensions)
 	previous := t.topology.Swap(topology)
 	if previous != nil {
 		previous.retire()
 	}
 	return topology
+}
+
+func (t *table) publishSchemaTopology(mode ShardMode, shards []*storageShard, dimensions []shardDimension) *tableSchemaTopology {
+	next := &tableSchemaTopology{
+		mode:       mode,
+		shards:     append([]*storageShard(nil), shards...),
+		dimensions: append([]shardDimension(nil), dimensions...),
+	}
+	return t.schemaTopology.Swap(next)
+}
+
+// MarshalJSON reads topology only from an immutable, atomically published
+// generation. Database schema locking keeps the remaining DDL fields stable.
+func (t *table) MarshalJSON() ([]byte, error) {
+	topology := t.schemaTopology.Load()
+	if topology == nil {
+		active := t.activeTopology()
+		topology = t.schemaTopology.Load()
+		if topology == nil {
+			topology = &tableSchemaTopology{
+				mode:       active.mode,
+				shards:     active.shards,
+				dimensions: active.dimensions,
+			}
+		}
+	}
+	var shards []*storageShard
+	var partitionedShards []*storageShard
+	if topology.mode == ShardModePartition {
+		partitionedShards = topology.shards
+	} else {
+		shards = topology.shards
+	}
+	type persistedTable struct {
+		Name               string
+		Columns            []*column
+		Unique             []uniqueKey
+		Foreign            []foreignKey
+		Triggers           []TriggerDescription
+		PersistencyMode    PersistencyMode
+		OnInit             *scm.Scmer `json:"oninit,omitempty"`
+		AutoIncrement      uint64     `json:"Auto_increment"`
+		Collation          string
+		Charset            string
+		Comment            string
+		PlannerRowEstimate uint64 `json:"planner_row_estimate"`
+		ShardMode          ShardMode
+		Shards             []*storageShard
+		PShards            []*storageShard
+		PDimensions        []shardDimension
+	}
+	return json.Marshal(&persistedTable{
+		Name:               t.Name,
+		Columns:            t.Columns,
+		Unique:             t.Unique,
+		Foreign:            t.Foreign,
+		Triggers:           t.Triggers,
+		PersistencyMode:    t.PersistencyMode,
+		OnInit:             t.OnInit,
+		AutoIncrement:      t.Auto_increment,
+		Collation:          t.Collation,
+		Charset:            t.Charset,
+		Comment:            t.Comment,
+		PlannerRowEstimate: t.PlannerRowEstimate.value.Load(),
+		ShardMode:          topology.mode,
+		Shards:             shards,
+		PShards:            partitionedShards,
+		PDimensions:        topology.dimensions,
+	})
 }
 
 func (t *table) pinActiveTopology() *tableShardTopology {
@@ -2216,6 +2300,7 @@ func (t *table) appendFreeShardDurably(topology *tableShardTopology, source *sto
 	newShard := NewShard(t)
 	t.maintenanceKind = 1
 	t.Shards = append(t.Shards, newShard)
+	previousSchemaTopology := t.publishSchemaTopology(ShardModeFree, t.Shards, t.PDimensions)
 	newIndex := len(t.Shards) - 1
 	sourceIndex := newIndex - 1
 	t.mu.Unlock()
@@ -2230,6 +2315,7 @@ func (t *table) appendFreeShardDurably(topology *tableShardTopology, source *sto
 		if newIndex < len(t.Shards) && t.Shards[newIndex] == newShard {
 			t.Shards = t.Shards[:newIndex]
 		}
+		t.schemaTopology.Store(previousSchemaTopology)
 		t.maintenanceKind = 0
 		t.mu.Unlock()
 		t.maintenanceMu.Unlock()
@@ -2275,6 +2361,7 @@ func (t *table) finishOverflowRebuild(index int, source *storageShard) {
 		return
 	}
 	t.Shards[index] = rebuilt
+	previousSchemaTopology := t.publishSchemaTopology(ShardModeFree, t.Shards, t.PDimensions)
 	t.mu.Unlock()
 
 	var savePanic any
@@ -2287,6 +2374,7 @@ func (t *table) finishOverflowRebuild(index int, source *storageShard) {
 		if index < len(t.Shards) && t.Shards[index] == rebuilt {
 			t.Shards[index] = source
 		}
+		t.schemaTopology.Store(previousSchemaTopology)
 		t.mu.Unlock()
 		source.mu.Unlock()
 		panic(savePanic)

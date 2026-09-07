@@ -49,6 +49,41 @@ type failSchemaWritePersistence struct {
 	failAt int32
 }
 
+func TestTableSchemaMarshalUsesPublishedTopologyGeneration(t *testing.T) {
+	tbl := &table{Name: "items", PersistencyMode: Memory, ShardMode: ShardModeFree}
+	oldShard := NewShard(tbl)
+	newShard := NewShard(tbl)
+	tbl.Shards = []*storageShard{oldShard}
+	tbl.publishTopologyLocked()
+
+	// Rebuild prepares compatibility fields before the durable schema commit,
+	// while live readers remain pinned to the preceding topology generation.
+	tbl.Shards = []*storageShard{newShard}
+	assertSchemaShard := func(want *storageShard) {
+		t.Helper()
+		data, err := json.Marshal(tbl)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var persisted struct {
+			Shards []string
+		}
+		if err := json.Unmarshal(data, &persisted); err != nil {
+			t.Fatal(err)
+		}
+		if len(persisted.Shards) != 1 || persisted.Shards[0] != want.uuid.String() {
+			t.Fatalf("persisted shards = %v, want [%s]", persisted.Shards, want.uuid.String())
+		}
+	}
+
+	assertSchemaShard(oldShard)
+	tbl.publishSchemaTopology(ShardModeFree, []*storageShard{newShard}, nil)
+	assertSchemaShard(newShard)
+	if active := tbl.activeTopology(); len(active.shards) != 1 || active.shards[0] != oldShard {
+		t.Fatal("schema publication changed the live topology before durable commit")
+	}
+}
+
 func (p *failSchemaWritePersistence) WriteSchema(schema []byte) {
 	if p.calls.Add(1) == p.failAt {
 		panic("injected schema publication failure")

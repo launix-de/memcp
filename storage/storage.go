@@ -3832,7 +3832,7 @@ func Init(en scm.Env) {
 								scm.NewString("orders"), scm.NewSlice(orders),
 								scm.NewString("active"), scm.NewBool(ix.baseState.active),
 								scm.NewString("native"), scm.NewBool(ix.Native),
-								scm.NewString("savings"), scm.NewFloat(ix.Savings),
+								scm.NewString("savings"), scm.NewFloat(ix.loadSavings()),
 								scm.NewString("size_bytes"), scm.NewInt(int64(ix.ComputeSize())),
 							}))
 						}
