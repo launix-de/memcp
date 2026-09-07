@@ -1869,7 +1869,7 @@ func init_strings() {
 						}
 						if ps.General {
 							ctx.SyncDesc(&d34)
-							if d34.Loc == LocReg {
+							if d34.Loc == LocReg || d34.Loc == LocFPReg {
 								ctx.ProtectReg(d34.Reg)
 							} else if d34.Loc == LocRegPair {
 								ctx.ProtectReg(d34.Reg)
@@ -1881,7 +1881,7 @@ func init_strings() {
 							}
 							ctx.EnsureDesc(&d38)
 							ctx.EmitStoreToStack(d38, int32(bbs[4].PhiBase)+int32(0))
-							if d34.Loc == LocReg {
+							if d34.Loc == LocReg || d34.Loc == LocFPReg {
 								ctx.UnprotectReg(d34.Reg)
 							} else if d34.Loc == LocRegPair {
 								ctx.UnprotectReg(d34.Reg)
@@ -1966,7 +1966,7 @@ func init_strings() {
 					d40 = snap60
 					ctx.MarkLabel(lbl15)
 					ctx.SyncDesc(&d34)
-					if d34.Loc == LocReg {
+					if d34.Loc == LocReg || d34.Loc == LocFPReg {
 						ctx.ProtectReg(d34.Reg)
 					} else if d34.Loc == LocRegPair {
 						ctx.ProtectReg(d34.Reg)
@@ -1978,7 +1978,7 @@ func init_strings() {
 					}
 					ctx.EnsureDesc(&d62)
 					ctx.EmitStoreToStack(d62, int32(bbs[4].PhiBase)+int32(0))
-					if d34.Loc == LocReg {
+					if d34.Loc == LocReg || d34.Loc == LocFPReg {
 						ctx.UnprotectReg(d34.Reg)
 					} else if d34.Loc == LocRegPair {
 						ctx.UnprotectReg(d34.Reg)
@@ -3504,7 +3504,7 @@ func init_strings() {
 						}
 						if ps.General {
 							ctx.SyncDesc(&d232)
-							if d232.Loc == LocReg {
+							if d232.Loc == LocReg || d232.Loc == LocFPReg {
 								ctx.ProtectReg(d232.Reg)
 							} else if d232.Loc == LocRegPair {
 								ctx.ProtectReg(d232.Reg)
@@ -3516,7 +3516,7 @@ func init_strings() {
 							}
 							ctx.EnsureDesc(&d238)
 							ctx.EmitStoreToStack(d238, int32(bbs[10].PhiBase)+int32(0))
-							if d232.Loc == LocReg {
+							if d232.Loc == LocReg || d232.Loc == LocFPReg {
 								ctx.UnprotectReg(d232.Reg)
 							} else if d232.Loc == LocRegPair {
 								ctx.UnprotectReg(d232.Reg)
@@ -3664,7 +3664,7 @@ func init_strings() {
 					d240 = snap281
 					ctx.MarkLabel(lbl17)
 					ctx.SyncDesc(&d232)
-					if d232.Loc == LocReg {
+					if d232.Loc == LocReg || d232.Loc == LocFPReg {
 						ctx.ProtectReg(d232.Reg)
 					} else if d232.Loc == LocRegPair {
 						ctx.ProtectReg(d232.Reg)
@@ -3676,7 +3676,7 @@ func init_strings() {
 					}
 					ctx.EnsureDesc(&d283)
 					ctx.EmitStoreToStack(d283, int32(bbs[10].PhiBase)+int32(0))
-					if d232.Loc == LocReg {
+					if d232.Loc == LocReg || d232.Loc == LocFPReg {
 						ctx.UnprotectReg(d232.Reg)
 					} else if d232.Loc == LocRegPair {
 						ctx.UnprotectReg(d232.Reg)
@@ -6884,7 +6884,7 @@ func init_strings() {
 					ctx.StabilizeDescForControlFlow(&d128)
 					if ps.General {
 						ctx.SyncDesc(&d128)
-						if d128.Loc == LocReg {
+						if d128.Loc == LocReg || d128.Loc == LocFPReg {
 							ctx.ProtectReg(d128.Reg)
 						} else if d128.Loc == LocRegPair {
 							ctx.ProtectReg(d128.Reg)
@@ -6907,7 +6907,7 @@ func init_strings() {
 							ctx.EmitStoreToStack(d129, int32(bbs[5].PhiBase)+int32(0))
 							ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(bbs[5].PhiBase)+int32(0))+8)
 						}
-						if d128.Loc == LocReg {
+						if d128.Loc == LocReg || d128.Loc == LocFPReg {
 							ctx.UnprotectReg(d128.Reg)
 						} else if d128.Loc == LocRegPair {
 							ctx.UnprotectReg(d128.Reg)
@@ -9977,7 +9977,7 @@ func init_strings() {
 					ctx.FreeDesc(&d27)
 					if ps.General {
 						ctx.SyncDesc(&d28)
-						if d28.Loc == LocReg {
+						if d28.Loc == LocReg || d28.Loc == LocFPReg {
 							ctx.ProtectReg(d28.Reg)
 						} else if d28.Loc == LocRegPair {
 							ctx.ProtectReg(d28.Reg)
@@ -10000,7 +10000,7 @@ func init_strings() {
 							ctx.EmitStoreToStack(d30, int32(bbs[2].PhiBase)+int32(0))
 							ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(bbs[2].PhiBase)+int32(0))+8)
 						}
-						if d28.Loc == LocReg {
+						if d28.Loc == LocReg || d28.Loc == LocFPReg {
 							ctx.UnprotectReg(d28.Reg)
 						} else if d28.Loc == LocRegPair {
 							ctx.UnprotectReg(d28.Reg)
@@ -10810,7 +10810,7 @@ func init_strings() {
 					ctx.FreeDesc(&d110)
 					if ps.General {
 						ctx.SyncDesc(&d45)
-						if d45.Loc == LocReg {
+						if d45.Loc == LocReg || d45.Loc == LocFPReg {
 							ctx.ProtectReg(d45.Reg)
 						} else if d45.Loc == LocRegPair {
 							ctx.ProtectReg(d45.Reg)
@@ -10822,7 +10822,7 @@ func init_strings() {
 						}
 						ctx.EnsureDesc(&d111)
 						ctx.EmitStoreToStack(d111, int32(bbs[3].PhiBase)+int32(0))
-						if d45.Loc == LocReg {
+						if d45.Loc == LocReg || d45.Loc == LocFPReg {
 							ctx.UnprotectReg(d45.Reg)
 						} else if d45.Loc == LocRegPair {
 							ctx.UnprotectReg(d45.Reg)
@@ -21255,6 +21255,159 @@ func init_strings() {
 			Params: []*TypeDescriptor{{Kind: "string", Label: "str", Description: "input string to hash"}},
 			Return: &TypeDescriptor{Kind: "string"},
 			Const:  true,
+			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				declaration := declarations["md5"]
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
+					ctx.Coverage.NativeCalls++
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
+				}
+				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+				for i := range args {
+					ctx.StabilizeDescForControlFlow(&args[i])
+				}
+				d0 := ctx.EmitGoCallScalar(GoFuncAddr(func() *[16]byte { return new([16]byte) }), nil, 1)
+				d1 := args[0]
+				d1.ID = 0
+				d3 := d1
+				ctx.SyncDesc(&d3)
+				if d3.Loc == LocMem {
+					tmpScalar := JITValueDesc{Loc: LocReg, Type: d3.Type, Reg: ctx.AllocReg()}
+					scratch := ctx.AllocRegExcept(tmpScalar.Reg)
+					ctx.EmitMovRegImm64(scratch, uint64(d3.MemPtr))
+					ctx.EmitMovRegMem(tmpScalar.Reg, scratch, 0)
+					ctx.FreeReg(scratch)
+					ctx.BindReg(tmpScalar.Reg, &tmpScalar)
+					d3 = tmpScalar
+				}
+				d3 = JITPrepareScmerGoArg(ctx, d3)
+				if d3.Loc != LocRegPair && d3.Loc != LocStackPair && d3.Loc != LocInputPair {
+					panic("jit: Scmer.String receiver not materialized as pair")
+				}
+				d2 := ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d3}, 2)
+				ctx.FreeDesc(&d1)
+				ctx.EnsureDesc(&d2)
+				ctx.EnsureDesc(&d2)
+				ctx.EnsureDesc(&d2)
+				callResults5 := JITEmitGoCallResults(ctx, GoFuncAddr(jitStringToBytes), []JITValueDesc{d2}, []uint8{3}, []uint8{1})
+				d4 := callResults5[0]
+				d4.Type = tagSlice
+				d4 = JITPrepareGoSliceArg(ctx, d4)
+				if d4.Loc != LocRegTriple && d4.Loc != LocStackTriple {
+					panic("jit: generic call arg expects 3-word Go slice (md5.Sum arg0)")
+				}
+				ctx.SyncDesc(&d4)
+				d6 := ctx.EmitGoCallScalar(GoFuncAddr(md5.Sum), []JITValueDesc{d4}, 2)
+				d6.NoHeapPointer = true
+				ctx.BindReg(d6.Reg, &d6)
+				ctx.BindReg(d6.Reg2, &d6)
+				ctx.EnsureDesc(&d6)
+				ctx.EmitGoCallVoid(GoFuncAddr(func(dst *[16]byte, src [16]byte) { *dst = src }), []JITValueDesc{d0, d6})
+				sliceResults7 := JITEmitGoCallResults(ctx, GoFuncAddr(func(value *[16]byte) []byte { return value[0:16:16] }), []JITValueDesc{d0}, []uint8{3}, []uint8{1})
+				d8 := sliceResults7[0]
+				ctx.EnsureDesc(&d8)
+				d9 := d8
+				_ = d9
+				bbpos_1_0 := int32(-1)
+				_ = bbpos_1_0
+				lbl0 := ctx.ReserveLabel()
+				_ = lbl0
+				bbpos_1_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
+				ctx.MarkLabel(lbl0)
+				ctx.ResolveFixups()
+				ctx.ReclaimUntrackedRegs()
+				ctx.ReclaimUntrackedRegs()
+				var d10 JITValueDesc
+				if d9.SliceSizeKnown {
+					d10 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d9.KnownSliceLen))}
+				} else if d9.Loc == LocImm {
+					d10 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d9.StackOff))}
+				} else if d9.Loc == LocStackTriple {
+					d10 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: d9.StackOff + 8, NoHeapPointer: true}
+				} else {
+					ctx.EnsureDesc(&d9)
+					if d9.Loc == LocRegPair || d9.Loc == LocRegTriple {
+						d10 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d9.Reg2, ID: 0}
+					} else if d9.Loc == LocReg {
+						d10 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d9.Reg, ID: 0}
+					} else {
+						panic("len on unsupported descriptor location")
+					}
+				}
+				ctx.ReclaimUntrackedRegs()
+				ctx.EnsureDesc(&d10)
+				d11 := d10
+				_ = d11
+				bbpos_2_0 := int32(-1)
+				_ = bbpos_2_0
+				lbl1 := ctx.ReserveLabel()
+				_ = lbl1
+				bbpos_2_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
+				ctx.MarkLabel(lbl1)
+				ctx.ResolveFixups()
+				ctx.ReclaimUntrackedRegs()
+				ctx.ReclaimUntrackedRegs()
+				ctx.EnsureDesc(&d11)
+				ctx.EnsureDesc(&d11)
+				var d12 JITValueDesc
+				if d11.Loc == LocImm {
+					d12 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d11.Imm.Int() * 2)}
+				} else {
+					scratch := ctx.AllocRegExcept(d11.Reg)
+					ctx.EmitMovRegReg(scratch, d11.Reg)
+					ctx.EmitAddInt64(scratch, scratch)
+					d12 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: scratch}
+					ctx.BindReg(scratch, &d12)
+				}
+				if d12.Loc == LocReg && d11.Loc == LocReg && d12.Reg == d11.Reg {
+					ctx.TransferReg(d11.Reg)
+					d11.Loc = LocNone
+				}
+				ctx.ReclaimUntrackedRegs()
+				ctx.EnsureDesc(&d12)
+				ctx.FreeDesc(&d10)
+				ctx.ReclaimUntrackedRegs()
+				ctx.EnsureDesc(&d12)
+				ctx.EnsureDesc(&d12)
+				ctx.ReclaimUntrackedRegs()
+				ctx.EnsureDesc(&d12)
+				ctx.EnsureDesc(&d12)
+				callResults13 := JITEmitGoCallResults(ctx, GoFuncAddr(jitMakeByteSlice), []JITValueDesc{d12, d12}, []uint8{3}, []uint8{1})
+				d14 := callResults13[0]
+				d14.Type = tagSlice
+				ctx.FreeDesc(&d12)
+				ctx.ReclaimUntrackedRegs()
+				d14 = JITPrepareGoSliceArg(ctx, d14)
+				if d14.Loc != LocRegTriple && d14.Loc != LocStackTriple {
+					panic("jit: generic call arg expects 3-word Go slice (hex.Encode arg0)")
+				}
+				d9 = JITPrepareGoSliceArg(ctx, d9)
+				if d9.Loc != LocRegTriple && d9.Loc != LocStackTriple {
+					panic("jit: generic call arg expects 3-word Go slice (hex.Encode arg1)")
+				}
+				ctx.SyncDesc(&d14)
+				ctx.SyncDesc(&d9)
+				d15 := ctx.EmitGoCallScalar(GoFuncAddr(hex.Encode), []JITValueDesc{d14, d9}, 1)
+				d15.NoHeapPointer = true
+				ctx.BindReg(d15.Reg, &d15)
+				ctx.ReclaimUntrackedRegs()
+				ctx.EnsureDesc(&d14)
+				ctx.EnsureDesc(&d14)
+				ctx.EnsureDesc(&d14)
+				callResults17 := JITEmitGoCallResults(ctx, GoFuncAddr(jitBytesToString), []JITValueDesc{d14}, []uint8{2}, []uint8{1})
+				d16 := callResults17[0]
+				ctx.ReclaimUntrackedRegs()
+				ctx.EnsureDesc(&d16)
+				ctx.EnsureDesc(&d16)
+				d18 := ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d16}, 2)
+				if result.Loc == LocAny {
+					return d18
+				}
+				ctx.EmitMovPairToResult(&d18, &result)
+				result.Type = tagString
+				return result
+				return result
+			},
+			JITInlineCost: 19,
 		},
 	})
 	Declare(&Globalenv, &Declaration{

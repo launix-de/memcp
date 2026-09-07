@@ -891,7 +891,7 @@ func init_list_assoc_extra() {
 					ctx.FreeDesc(&d85)
 					if ps.General {
 						ctx.SyncDesc(&d21)
-						if d21.Loc == LocReg {
+						if d21.Loc == LocReg || d21.Loc == LocFPReg {
 							ctx.ProtectReg(d21.Reg)
 						} else if d21.Loc == LocRegPair {
 							ctx.ProtectReg(d21.Reg)
@@ -903,7 +903,7 @@ func init_list_assoc_extra() {
 						}
 						ctx.EnsureDesc(&d86)
 						ctx.EmitStoreToStack(d86, int32(bbs[1].PhiBase)+int32(0))
-						if d21.Loc == LocReg {
+						if d21.Loc == LocReg || d21.Loc == LocFPReg {
 							ctx.UnprotectReg(d21.Reg)
 						} else if d21.Loc == LocRegPair {
 							ctx.UnprotectReg(d21.Reg)
@@ -2021,7 +2021,7 @@ func init_list_assoc_extra() {
 					ctx.FreeDesc(&d88)
 					if ps.General {
 						ctx.SyncDesc(&d21)
-						if d21.Loc == LocReg {
+						if d21.Loc == LocReg || d21.Loc == LocFPReg {
 							ctx.ProtectReg(d21.Reg)
 						} else if d21.Loc == LocRegPair {
 							ctx.ProtectReg(d21.Reg)
@@ -2033,7 +2033,7 @@ func init_list_assoc_extra() {
 						}
 						ctx.EnsureDesc(&d96)
 						ctx.EmitStoreToStack(d96, int32(bbs[1].PhiBase)+int32(0))
-						if d21.Loc == LocReg {
+						if d21.Loc == LocReg || d21.Loc == LocFPReg {
 							ctx.UnprotectReg(d21.Reg)
 						} else if d21.Loc == LocRegPair {
 							ctx.UnprotectReg(d21.Reg)
@@ -3173,7 +3173,7 @@ func init_list_assoc_extra() {
 					ctx.FreeDesc(&d89)
 					if ps.General {
 						ctx.SyncDesc(&d21)
-						if d21.Loc == LocReg {
+						if d21.Loc == LocReg || d21.Loc == LocFPReg {
 							ctx.ProtectReg(d21.Reg)
 						} else if d21.Loc == LocRegPair {
 							ctx.ProtectReg(d21.Reg)
@@ -3185,7 +3185,7 @@ func init_list_assoc_extra() {
 						}
 						ctx.EnsureDesc(&d97)
 						ctx.EmitStoreToStack(d97, int32(bbs[1].PhiBase)+int32(0))
-						if d21.Loc == LocReg {
+						if d21.Loc == LocReg || d21.Loc == LocFPReg {
 							ctx.UnprotectReg(d21.Reg)
 						} else if d21.Loc == LocRegPair {
 							ctx.UnprotectReg(d21.Reg)
@@ -4288,7 +4288,7 @@ func init_list_assoc_extra() {
 					ctx.FreeDesc(&d70)
 					if ps.General {
 						ctx.SyncDesc(&d18)
-						if d18.Loc == LocReg {
+						if d18.Loc == LocReg || d18.Loc == LocFPReg {
 							ctx.ProtectReg(d18.Reg)
 						} else if d18.Loc == LocRegPair {
 							ctx.ProtectReg(d18.Reg)
@@ -4300,7 +4300,7 @@ func init_list_assoc_extra() {
 						}
 						ctx.EnsureDesc(&d78)
 						ctx.EmitStoreToStack(d78, int32(bbs[1].PhiBase)+int32(0))
-						if d18.Loc == LocReg {
+						if d18.Loc == LocReg || d18.Loc == LocFPReg {
 							ctx.UnprotectReg(d18.Reg)
 						} else if d18.Loc == LocRegPair {
 							ctx.UnprotectReg(d18.Reg)
@@ -5306,7 +5306,7 @@ func init_list_assoc_extra() {
 					ctx.FreeDesc(&d71)
 					if ps.General {
 						ctx.SyncDesc(&d18)
-						if d18.Loc == LocReg {
+						if d18.Loc == LocReg || d18.Loc == LocFPReg {
 							ctx.ProtectReg(d18.Reg)
 						} else if d18.Loc == LocRegPair {
 							ctx.ProtectReg(d18.Reg)
@@ -5318,7 +5318,7 @@ func init_list_assoc_extra() {
 						}
 						ctx.EnsureDesc(&d79)
 						ctx.EmitStoreToStack(d79, int32(bbs[1].PhiBase)+int32(0))
-						if d18.Loc == LocReg {
+						if d18.Loc == LocReg || d18.Loc == LocFPReg {
 							ctx.UnprotectReg(d18.Reg)
 						} else if d18.Loc == LocRegPair {
 							ctx.UnprotectReg(d18.Reg)

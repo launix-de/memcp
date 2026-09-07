@@ -45,6 +45,88 @@ func TestEmitCmpFloat64AvoidsDuplicateSameOperandMove(t *testing.T) {
 	}
 }
 
+func emitParallelMoveTestCode(t *testing.T, batch *jitParallelRegMoveBatch) []byte {
+	t.Helper()
+	code := make([]byte, 128)
+	ctx := &JITContext{
+		Start:        unsafe.Pointer(&code[0]),
+		Ptr:          unsafe.Pointer(&code[0]),
+		End:          unsafe.Pointer(&code[len(code)-1]),
+		SliceBase:    RegR12,
+		ScratchReg:   RegR11,
+		StackReg:     RegRSP,
+		FrameReg:     RegRBP,
+		RegisterBank: jitX86RegisterBank,
+	}
+	ctx.emitParallelRegMoveBatch(batch)
+	if ctx.DynamicSP != 0 {
+		t.Fatalf("parallel move left dynamic stack offset %d", ctx.DynamicSP)
+	}
+	return code[:uintptr(ctx.Ptr)-uintptr(ctx.Start)]
+}
+
+func TestParallelMoveBatchElidesIdentityAndOrdersDependencies(t *testing.T) {
+	var batch jitParallelRegMoveBatch
+	batch.add(RegRDX, RegRDX)
+	batch.add(RegRAX, RegRBX)
+	batch.add(RegRCX, RegRAX)
+
+	// RCX must consume the old RAX before RAX is overwritten by RBX. Both x86
+	// register moves are three bytes; the identity must emit nothing.
+	code := emitParallelMoveTestCode(t, &batch)
+	want := []byte{0x48, 0x89, 0xc1, 0x48, 0x89, 0xd8}
+	if !bytes.Equal(code, want) {
+		t.Fatalf("parallel dependency moves = %x, want %x", code, want)
+	}
+}
+
+func TestParallelMoveBatchBreaksCycleWithOneSavedScratch(t *testing.T) {
+	var batch jitParallelRegMoveBatch
+	batch.add(RegRAX, RegRBX)
+	batch.add(RegRBX, RegRAX)
+
+	code := emitParallelMoveTestCode(t, &batch)
+	// PUSH/POP R12 surround exactly three MOVs: save old RAX in scratch,
+	// rotate RBX into RAX, then scratch into RBX.
+	if len(code) != 13 || !bytes.Equal(code[:2], []byte{0x41, 0x54}) || !bytes.Equal(code[len(code)-2:], []byte{0x41, 0x5c}) {
+		t.Fatalf("parallel cycle is not one saved-scratch rotation: %x", code)
+	}
+}
+
+func TestParallelMoveBatchChoosesScratchOutsideCycle(t *testing.T) {
+	var batch jitParallelRegMoveBatch
+	batch.add(RegR12, RegR11)
+	batch.add(RegR11, RegR12)
+
+	// Both preferred role registers participate in the cycle. The solver must
+	// select another register from the architecture-provided bank; reusing either
+	// cycle member would fail to break the dependency (the old R12-specific
+	// implementation could loop forever for this shape).
+	code := emitParallelMoveTestCode(t, &batch)
+	if len(code) != 13 {
+		t.Fatalf("role-register cycle emitted %d bytes, want one saved-scratch rotation (13): %x", len(code), code)
+	}
+}
+
+func TestParallelMoveBatchNeverUsesStackOrFrameRegisterAsScratch(t *testing.T) {
+	var batch jitParallelRegMoveBatch
+	batch.add(RegRAX, RegRBX)
+	batch.add(RegRBX, RegRAX)
+
+	ctx := JITContext{
+		// Stack-backed argument lists deliberately use RSP as SliceBase. This
+		// makes it a valid address base, not a writable temporary register.
+		SliceBase:    RegRSP,
+		ScratchReg:   RegR11,
+		StackReg:     RegRSP,
+		FrameReg:     RegRBP,
+		RegisterBank: jitX86RegisterBank,
+	}
+	if scratch := ctx.parallelMoveScratch(&batch); scratch != RegR11 {
+		t.Fatalf("parallel cycle scratch = %d, want non-frame scratch %d", scratch, RegR11)
+	}
+}
+
 func jitFourScalarResults(seed uint32) (int64, bool, int64, int64) {
 	return int64(seed) + 1, seed&1 != 0, int64(seed) + 3, int64(seed) + 5
 }
@@ -106,6 +188,29 @@ func TestJITStorageScalarInputSurvivesScratchReclamation(t *testing.T) {
 	}
 	if got, want := fn(17), NewInt(17); !Equal(got, want) {
 		t.Fatalf("scalar input after scratch reclamation = %v, want %v", got, want)
+	}
+}
+
+func TestJITLessHelperEmitsKnownIntegerComparison(t *testing.T) {
+	fn := CompileJITStorageGetValue(func(ctx *JITContext, source, target JITValueDesc) JITValueDesc {
+		source.Type = tagInt
+		comparison := jitEmitLess(ctx, []JITValueDesc{
+			source,
+			{Loc: LocImm, Type: tagInt, Imm: NewInt(511)},
+		}, JITValueDesc{Loc: LocReg, Type: tagBool, Reg: target.Reg2, ID: 0})
+		ctx.EmitMakeBool(target, comparison)
+		return target
+	})
+	if fn == nil {
+		t.Fatal("known integer Less helper did not compile")
+	}
+	for _, test := range []struct {
+		value uint32
+		want  bool
+	}{{510, true}, {511, false}, {512, false}} {
+		if got := fn(test.value).Bool(); got != test.want {
+			t.Fatalf("(< %d 511) = %v, want %v", test.value, got, test.want)
+		}
 	}
 }
 

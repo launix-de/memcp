@@ -869,7 +869,7 @@ func init_processlist() {
 					ctx.FreeDesc(&d30)
 					if ps.General {
 						ctx.SyncDesc(&d31)
-						if d31.Loc == LocReg {
+						if d31.Loc == LocReg || d31.Loc == LocFPReg {
 							ctx.ProtectReg(d31.Reg)
 						} else if d31.Loc == LocRegPair {
 							ctx.ProtectReg(d31.Reg)
@@ -881,7 +881,7 @@ func init_processlist() {
 						}
 						ctx.EnsureDesc(&d33)
 						ctx.EmitStoreToStack(d33, int32(bbs[2].PhiBase)+int32(0))
-						if d31.Loc == LocReg {
+						if d31.Loc == LocReg || d31.Loc == LocFPReg {
 							ctx.UnprotectReg(d31.Reg)
 						} else if d31.Loc == LocRegPair {
 							ctx.UnprotectReg(d31.Reg)
@@ -1587,7 +1587,7 @@ func init_processlist() {
 						if d105.Imm.Bool() {
 							if ps.General {
 								ctx.SyncDesc(&d104)
-								if d104.Loc == LocReg {
+								if d104.Loc == LocReg || d104.Loc == LocFPReg {
 									ctx.ProtectReg(d104.Reg)
 								} else if d104.Loc == LocRegPair {
 									ctx.ProtectReg(d104.Reg)
@@ -1610,7 +1610,7 @@ func init_processlist() {
 									ctx.EmitStoreToStack(d106, int32(bbs[7].PhiBase)+int32(0))
 									ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(bbs[7].PhiBase)+int32(0))+8)
 								}
-								if d104.Loc == LocReg {
+								if d104.Loc == LocReg || d104.Loc == LocFPReg {
 									ctx.UnprotectReg(d104.Reg)
 								} else if d104.Loc == LocRegPair {
 									ctx.UnprotectReg(d104.Reg)
@@ -1727,7 +1727,7 @@ func init_processlist() {
 					alloc139 := ctx.SnapshotAllocState()
 					ctx.MarkLabel(lbl11)
 					ctx.SyncDesc(&d104)
-					if d104.Loc == LocReg {
+					if d104.Loc == LocReg || d104.Loc == LocFPReg {
 						ctx.ProtectReg(d104.Reg)
 					} else if d104.Loc == LocRegPair {
 						ctx.ProtectReg(d104.Reg)
@@ -1750,7 +1750,7 @@ func init_processlist() {
 						ctx.EmitStoreToStack(d140, int32(bbs[7].PhiBase)+int32(0))
 						ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(bbs[7].PhiBase)+int32(0))+8)
 					}
-					if d104.Loc == LocReg {
+					if d104.Loc == LocReg || d104.Loc == LocFPReg {
 						ctx.UnprotectReg(d104.Reg)
 					} else if d104.Loc == LocRegPair {
 						ctx.UnprotectReg(d104.Reg)
@@ -2281,7 +2281,7 @@ func init_processlist() {
 					ctx.StabilizeDescForControlFlow(&d182)
 					if ps.General {
 						ctx.SyncDesc(&d182)
-						if d182.Loc == LocReg {
+						if d182.Loc == LocReg || d182.Loc == LocFPReg {
 							ctx.ProtectReg(d182.Reg)
 						} else if d182.Loc == LocRegPair {
 							ctx.ProtectReg(d182.Reg)
@@ -2304,7 +2304,7 @@ func init_processlist() {
 							ctx.EmitStoreToStack(d183, int32(bbs[7].PhiBase)+int32(0))
 							ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(bbs[7].PhiBase)+int32(0))+8)
 						}
-						if d182.Loc == LocReg {
+						if d182.Loc == LocReg || d182.Loc == LocFPReg {
 							ctx.UnprotectReg(d182.Reg)
 						} else if d182.Loc == LocRegPair {
 							ctx.UnprotectReg(d182.Reg)
@@ -2715,7 +2715,7 @@ func init_processlist() {
 					ctx.FreeDesc(&d207)
 					if ps.General {
 						ctx.SyncDesc(&d45)
-						if d45.Loc == LocReg {
+						if d45.Loc == LocReg || d45.Loc == LocFPReg {
 							ctx.ProtectReg(d45.Reg)
 						} else if d45.Loc == LocRegPair {
 							ctx.ProtectReg(d45.Reg)
@@ -2727,7 +2727,7 @@ func init_processlist() {
 						}
 						ctx.EnsureDesc(&d210)
 						ctx.EmitStoreToStack(d210, int32(bbs[3].PhiBase)+int32(0))
-						if d45.Loc == LocReg {
+						if d45.Loc == LocReg || d45.Loc == LocFPReg {
 							ctx.UnprotectReg(d45.Reg)
 						} else if d45.Loc == LocRegPair {
 							ctx.UnprotectReg(d45.Reg)
@@ -3136,7 +3136,7 @@ func init_processlist() {
 						}
 						if ps.General {
 							ctx.SyncDesc(&d104)
-							if d104.Loc == LocReg {
+							if d104.Loc == LocReg || d104.Loc == LocFPReg {
 								ctx.ProtectReg(d104.Reg)
 							} else if d104.Loc == LocRegPair {
 								ctx.ProtectReg(d104.Reg)
@@ -3159,7 +3159,7 @@ func init_processlist() {
 								ctx.EmitStoreToStack(d217, int32(bbs[7].PhiBase)+int32(0))
 								ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(bbs[7].PhiBase)+int32(0))+8)
 							}
-							if d104.Loc == LocReg {
+							if d104.Loc == LocReg || d104.Loc == LocFPReg {
 								ctx.UnprotectReg(d104.Reg)
 							} else if d104.Loc == LocRegPair {
 								ctx.UnprotectReg(d104.Reg)
@@ -3391,7 +3391,7 @@ func init_processlist() {
 					d219 = snap288
 					ctx.MarkLabel(lbl12)
 					ctx.SyncDesc(&d104)
-					if d104.Loc == LocReg {
+					if d104.Loc == LocReg || d104.Loc == LocFPReg {
 						ctx.ProtectReg(d104.Reg)
 					} else if d104.Loc == LocRegPair {
 						ctx.ProtectReg(d104.Reg)
@@ -3414,7 +3414,7 @@ func init_processlist() {
 						ctx.EmitStoreToStack(d290, int32(bbs[7].PhiBase)+int32(0))
 						ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(bbs[7].PhiBase)+int32(0))+8)
 					}
-					if d104.Loc == LocReg {
+					if d104.Loc == LocReg || d104.Loc == LocFPReg {
 						ctx.UnprotectReg(d104.Reg)
 					} else if d104.Loc == LocRegPair {
 						ctx.UnprotectReg(d104.Reg)
