@@ -525,10 +525,10 @@ test_cases:
   # Covered by unit-level testing of load_ttl.
 
   # ==========================================================
-  # SPARQL Error Cases — Query Plan Builder
+  # SPARQL unbound projection semantics
   # ==========================================================
 
-  - name: "SPARQL error: SELECT unbound variable"
+  - name: "SPARQL SELECT permits an unbound projected variable"
     ttl_data: |
       @prefix te1: <http://teste1.org/> .
       te1:a te1:b te1:c .
@@ -536,9 +536,10 @@ test_cases:
       @prefix te1: <http://teste1.org/> .
       SELECT ?x WHERE { te1:a te1:b te1:c }
     expect:
-      error: true
+      rows: 1
+      data: [{"?x": null}]
 
-  - name: "SPARQL error: SELECT unbound variable among bound"
+  - name: "SPARQL SELECT preserves bound and unbound projected variables"
     ttl_data: |
       @prefix te2: <http://teste2.org/> .
       te2:a te2:b te2:c .
@@ -546,12 +547,14 @@ test_cases:
       @prefix te2: <http://teste2.org/> .
       SELECT ?s, ?unbound WHERE { ?s te2:b te2:c }
     expect:
-      error: true
+      rows: 1
+      data: [{"?s": "http://teste2.org/a", "?unbound": null}]
 
-  - name: "SPARQL error: all SELECT vars unbound (no WHERE patterns)"
+  - name: "SPARQL SELECT permits all projected variables to be unbound"
     sparql: "SELECT ?x, ?y WHERE { }"
     expect:
-      error: true
+      rows: 1
+      data: [{"?x": null, "?y": null}]
 
   # ==========================================================
   # SPARQL Error Cases — Parser
@@ -572,12 +575,12 @@ test_cases:
     expect:
       error: true
 
-  - name: "SPARQL error: missing WHERE clause"
+  - name: "SPARQL permits the WHERE keyword to be omitted"
     sparql: |
       SELECT ?name {
         ?person <http://example.org/name> ?name .
       }
     expect:
-      error: true
+      rows: 0
 
 cleanup: []

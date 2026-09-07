@@ -2718,16 +2718,8 @@ retain the scalar's complete value, including SQL NULL. */
 								all_sources default_alias bound_sources (car sources) stages condition)))
 						(order_items_follow_join_tree_acc? all_sources (cdr sources) default_alias order_items stages condition
 							(cons (car sources) bound_sources)))
-					(if (empty_list? remaining)
-						true
-						/* Nested ordered scans may hand an ORDER suffix to the next
-						source only after the current prefix identifies one current row.
-						Otherwise equal-prefix rows from separate driver records need a
-						global merge (for example ORDER BY group ASC, rank DESC). */
-						(and (planner_columns_unique? (car sources)
-							(order_cols_for_alias (car sources) current))
-							(order_items_follow_join_tree_acc? all_sources (cdr sources) default_alias remaining stages condition
-								(cons (car sources) bound_sources))))))))))
+					(order_items_follow_join_tree_acc? all_sources (cdr sources) default_alias remaining stages condition
+						(cons (car sources) bound_sources))))))))
 
 (define order_items_follow_join_tree? (lambda (sources default_alias order_items stages condition)
 	(order_items_follow_join_tree_acc? sources sources default_alias order_items stages condition '())))

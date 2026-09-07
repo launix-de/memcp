@@ -8175,15 +8175,21 @@ physical decision and preserve its runtime recompile gate. */
 				(define ordered_sources (join_optimizer_sources_for_order scan_sources
 					(join_optimizer_tree_aliases scan_plan)))
 				(define order_items (coalesceNil (qb_order block) '()))
+				/* Some frontends know that equal prefixes from independently
+				generated relations must be globally merged. Keep this as a generic
+				logical fact so they can request the common materialized ORDER path
+				without changing SQL's established streaming-plan selection. */
+				(define global_order_required
+					(qassoc_get (qb_facts block) (quote global_order_required) false))
 				(define direct_order
 					(order_items_supported_by_join_driver?
 						scan_sources first_alias driver_source order_items stage_catalog final_condition))
-				(define direct_order_safe (and direct_order
+				(define direct_order_safe (and (not global_order_required) direct_order
 					(not (ordered_join_limit_requires_complete_rows? ordered_sources first_alias final_condition
 						(qb_offset block) (qb_limit block) stage_catalog
 						(planner_context_session (qb_facts block))))))
-				(define hierarchical_order
-					(order_items_follow_join_tree? ordered_sources first_alias order_items stage_catalog final_condition))
+				(define hierarchical_order (and (not global_order_required)
+					(order_items_follow_join_tree? ordered_sources first_alias order_items stage_catalog final_condition)))
 				(define needed_exprs (merge (list
 					(extract_assoc fields (lambda (_title expr) expr))
 					(list final_condition)
@@ -8221,12 +8227,17 @@ physical decision and preserve its runtime recompile gate. */
 								nil)
 							(neumann_fail "build_queryplan"
 								"ordered variable-cardinality join requires a streaming consumer"))
+						(if global_order_required
+							(lower_materialized_join_order
+								(qb_schema block) scan_sources scan_plan first_alias needed_exprs
+								final_condition fields order_items (qb_offset block) (qb_limit block)
+								stage_catalog (qb_facts block))
 						(if (physical_prejoin_supported? block)
 							(lower_query_block_through_prejoin block)
 							(lower_materialized_join_order
 								(qb_schema block) scan_sources scan_plan first_alias needed_exprs
 								final_condition fields order_items (qb_offset block) (qb_limit block)
-								stage_catalog (qb_facts block))))
+								stage_catalog (qb_facts block)))))
 ))))))
 
 (define zero_source_field_expr_key (lambda (expr)
