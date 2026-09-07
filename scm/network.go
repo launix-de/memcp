@@ -219,8 +219,6 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 		}),
 	}
 	var res_lock sync.Mutex
-	var countedRows uint64
-	var countedResult bool
 	res_scm := []Scmer{
 		NewString("res"), NewAny(res),
 		NewString("header"), NewFunc(func(a ...Scmer) Scmer {
@@ -254,26 +252,9 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 			return NewString("ok")
 		}),
 		NewString("jsonl"), NewFunc(func(a ...Scmer) Scmer {
+			// print json line (only assoc)
 			res_lock.Lock()
 			defer res_lock.Unlock()
-			if len(a) == 0 {
-				if countedResult {
-					return NewInt(int64(countedRows))
-				}
-				return NewNil()
-			}
-			if len(a) > 1 && ToBool(a[1]) {
-				// Count-only rows use the same serialized response critical section.
-				// The HTTP frontend reads this value once after query completion. A
-				// nil row starts the count so an empty result replaces stale state.
-				countedResult = true
-				if !a[0].IsNil() {
-					countedRows++
-				}
-				return NewBool(true)
-			}
-
-			// print json line (only assoc)
 			io.WriteString(res, "{")
 			dict := mustSliceNet("jsonl", a[0])
 			for i, v := range dict {

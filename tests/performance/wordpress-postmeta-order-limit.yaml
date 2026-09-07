@@ -53,6 +53,18 @@ test_cases:
     sql: "SELECT ID, post_status, post_type FROM wordpress_perf_posts ORDER BY post_title LIMIT 5"
     expect: {rows: 5}
 
+  - name: "WordPress post pagination with total row count"
+    warmup: 10
+    timing_samples: 50
+    threshold_ms: 5
+    sql: |
+      SELECT SQL_CALC_FOUND_ROWS ID, post_title
+      FROM wordpress_perf_posts
+      WHERE post_type = 'post' AND post_status = 'publish'
+      ORDER BY ID DESC
+      LIMIT 20
+    expect: {rows: 20}
+
   - name: "WordPress filtered postmeta join ordered by newest post"
     warmup: 10
     timing_samples: 30

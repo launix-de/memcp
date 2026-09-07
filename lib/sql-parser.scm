@@ -1082,19 +1082,35 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(qassoc_get facts (quote sql_calc_found_rows) false)
 		_ false
 	)))
+	/* FOUND_ROWS counts the rows in the semantic SELECT result before its
+	ORDER/LIMIT stage. Wrapping that relation keeps DISTINCT, GROUP BY, HAVING,
+	and projection semantics intact while exposing a genuine scalar aggregate to
+	the optimizer instead of counting materialized rows in resultrow. */
+	(define sql_select_found_rows_count_query (lambda (query) (begin
+		(define schema2 (qb_schema query))
+		(if (and (empty_list? (qb_sources query))
+			(and (empty_list? (qb_group query))
+				(and (nil? (qb_having query)) (not (query_block_has_aggregates? query)))))
+			(make_query_block schema2 '()
+				(list "found_rows" (list (quote if) (coalesceNil (qb_where query) true) 1 0))
+				true nil nil nil nil nil '() '() '())
+			(make_query_block schema2
+				(list (list "__found_rows_source" schema2 (sql_select_clear_stage query) false nil))
+				(list "found_rows" (list (quote aggregate) 1 (quote +) 0))
+				true nil nil nil nil nil '() '() '())))))
 	(define sql_build_select_plan (lambda (query) (begin
 		(define expanded_query (sql_expand_views query policy))
 		(define actual_plan (build_queryplan_term expanded_query planning_session tx))
 		(define execution_plan (if (sql_select_calc_found_rows? query)
 			(begin
-				(define count_plan (build_queryplan_term
-					(sql_expand_views (sql_select_clear_stage query) policy) planning_session tx))
+				(define count_plan (build_queryplan_term (sql_select_found_rows_count_query expanded_query) planning_session tx))
 				(list (quote !begin)
-					(list (quote resultrow) nil true)
+					(list (quote session) "found_rows" 0)
 					(list
 						(list (quote lambda) (list (quote resultrow)) count_plan)
 						(list (quote lambda) (list (quote item))
-							(list (quote resultrow) (quote item) true)))
+							(list (quote session) "found_rows"
+								(list (quote get_assoc) (quote item) "found_rows"))))
 					actual_plan))
 			actual_plan))
 		(list (quote !begin)

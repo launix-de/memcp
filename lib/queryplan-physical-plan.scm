@@ -8277,12 +8277,26 @@ every title. */
 			(cons (quote !begin) (append definitions row))))))
 
 (define lower_zero_source_query_block (lambda (block)
-	(if (equal? (coalesceNil (qb_where block) true) true)
-		(lower_zero_source_result_expr (qb_fields block))
-		(list (quote if)
-			(lower_scalar_marker_expr (qb_where block))
-			(lower_zero_source_result_expr (qb_fields block))
-			(list (quote list))))))
+	(begin
+		(define where_expr (coalesceNil (qb_where block) true))
+		(define having_expr (coalesceNil (qb_having block) true))
+		(define offset_expr (coalesceNil (qb_offset block) 0))
+		(define limit_expr (coalesceNil (qb_limit block) -1))
+		(define row_expr (lower_zero_source_result_expr (qb_fields block)))
+		(if (and (equal? where_expr true)
+			(and (equal? having_expr true)
+				(and (equal? offset_expr 0) (equal? limit_expr -1))))
+			row_expr
+			(list (quote if)
+				(list (quote and)
+					(lower_scalar_marker_expr where_expr)
+					(list (quote and)
+						(lower_scalar_marker_expr having_expr)
+						(list (quote and)
+							(list (quote equal?) offset_expr 0)
+							(list (quote not) (list (quote equal?) limit_expr 0)))))
+				row_expr
+				(list (quote list)))))))
 
 (define dml_assignment_exprs (lambda (cols)
 	(extract_assoc (coalesceNil cols '()) (lambda (_title expr) expr))))

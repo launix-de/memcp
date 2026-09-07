@@ -793,20 +793,14 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 					(extract_assoc (req "query") (lambda (k v) (session k v)))
 					(set resultrow_called false)
 					(set original_resultrow resultrow)
-					(define resultrow (lambda (row count_only) (if count_only
-						(original_resultrow row true)
-						(begin
-							(set resultrow_called true)
-							(original_resultrow row)))))
+					(define resultrow (lambda (row) (begin
+						(set resultrow_called true)
+						(original_resultrow row))))
 					(set query_result (with_autocommit session session_state query_seq query
 						(lambda (tx) (begin
 							(define formula (cached_parse sql_queryplan_cache (list parse_sql) schema query
 								(list (quote sql-policy-for) (req "username")) (req "username") session true tx))
 							(sql_execute_formula session tx formula resultrow (lambda (_fields) true))))))
-					(define counted_rows (original_resultrow))
-					(if (not (nil? counted_rows))
-						(session "found_rows" counted_rows)
-						nil)
 					/* If no resultrow was called and we got a number, return it as affected_rows */
 					(if (and (not resultrow_called) (number? query_result)) (begin
 						(original_resultrow '("affected_rows" query_result))
