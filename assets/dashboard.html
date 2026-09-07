@@ -98,6 +98,14 @@ header a:hover{opacity:1;text-decoration:underline}
 .settings-status{text-align:center;padding:8px;font-size:.8rem;color:#76b512;min-height:24px}
 .settings-group-header{grid-column:1/-1;font-size:.8rem;color:#888;text-transform:uppercase;letter-spacing:.5px;padding:12px 0 4px;border-bottom:1px solid #2a2a4a;margin-top:8px}
 .settings-group-header:first-child{margin-top:0}
+.hook-list{display:grid;gap:14px}
+.hook-card{background:#16213e;border:1px solid #2a2a4a;border-radius:6px;padding:16px 20px}
+.hook-fields{display:grid;grid-template-columns:minmax(150px,1fr) minmax(180px,1fr) 130px auto;gap:12px;align-items:end;margin-bottom:12px}
+.hook-field label{display:block;color:#888;font-size:.7rem;margin-bottom:4px;text-transform:uppercase;letter-spacing:.4px}
+.hook-field input[type="text"],.hook-field input[type="number"]{width:100%;background:#1a1a2e;border:1px solid #2a2a4a;color:#fff;padding:7px 9px;border-radius:4px}
+.hook-source{font-family:monospace;background:#1a1a2e;border:1px solid #2a2a4a;color:#e0e0e0;width:100%;min-height:100px;padding:10px;border-radius:4px;resize:vertical}
+.hook-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:10px}
+@media(max-width:800px){.hook-fields{grid-template-columns:1fr}}
 .btn-danger{background:#c0392b;color:#fff;border:none;padding:4px 10px;border-radius:3px;font-size:.75rem;cursor:pointer}
 .btn-danger:hover{background:#e74c3c}
 .btn-warn{background:#e67e22;color:#fff;border:none;padding:4px 10px;border-radius:3px;font-size:.75rem;cursor:pointer}
@@ -526,6 +534,13 @@ body{display:flex;flex-direction:column}
 </div>
 <div class="settings-status" id="settings-status"></div>
 <div class="settings-grid" id="settings-grid"></div>
+<div class="detail-section" style="margin-top:28px">
+<h3>Storage Failure Hooks</h3>
+<p style="color:#888;font-size:.78rem;margin-bottom:12px">Enabled hooks execute trusted Scheme code with server permissions. Classes are <code>io</code>, <code>cleanup</code>, <code>ambiguous_commit</code>, or <code>*</code>. Changes are persisted in <code>system.storage_failure_hooks</code>.</p>
+<button class="btn-warn" id="btn-add-storage-hook" style="margin-bottom:12px">Add Hook</button>
+<div class="settings-status" id="storage-hooks-status"></div>
+<div class="hook-list" id="storage-hooks-list"></div>
+</div>
 </div>
 </div>
 
@@ -611,6 +626,7 @@ if(bytes>=1024)return(bytes/1024).toFixed(0)+" KB";
 return bytes+" B";
 }
 function esc(s){var d=document.createElement("span");d.textContent=String(s);return d.innerHTML}
+function attr(s){return esc(s).replace(/'/g,"&#39;").replace(/\"/g,"&quot;")}
 function truncName(s,n){n=n||30;return s.length>n?s.substring(0,n)+"\u2026":s}
 
 /* ---- Error log ---- */
@@ -1272,6 +1288,71 @@ fetch(base+"/scm",{method:"POST",credentials:"same-origin",body:"(settings "+JSO
 .catch(function(e){window.alert("Error: "+e.message);});
 }
 
+var storageFailureHooks=[];
+function storageHooksStatus(message,isError){
+var el=document.getElementById("storage-hooks-status");
+if(!el)return;
+el.style.color=isError?"#e74c3c":"#76b512";
+el.textContent=message||"";
+}
+function loadStorageFailureHooks(){
+fetch(base+"/dashboard/api/storage-failure-hooks",{credentials:"same-origin"})
+.then(function(r){if(!r.ok)return r.text().then(function(t){throw new Error(t)});return r.json();})
+.then(function(rows){storageFailureHooks=Array.isArray(rows)?rows:[];renderStorageFailureHooks();})
+.catch(function(e){storageHooksStatus("Could not load hooks: "+e.message,true);});
+}
+function renderStorageFailureHooks(){
+var list=document.getElementById("storage-hooks-list");
+if(!list)return;
+var h="";
+for(var i=0;i<storageFailureHooks.length;i++){
+var hook=storageFailureHooks[i]||{};
+var classes=Array.isArray(hook.classes)?hook.classes.join(", "):String(hook.classes||"*").split(",").join(", ");
+h+="<div class='hook-card' data-hook-index='"+i+"'>";
+h+="<div class='hook-fields'>";
+h+="<div class='hook-field'><label>Name</label><input class='hook-name' type='text' value='"+attr(hook.name||"")+"'"+(hook.is_new?"":" readonly")+"></div>";
+h+="<div class='hook-field'><label>Failure classes</label><input class='hook-classes' type='text' value='"+attr(classes)+"'></div>";
+h+="<div class='hook-field'><label>Cooldown (seconds)</label><input class='hook-cooldown' type='number' min='0' value='"+Number(hook.cooldown_seconds||0)+"'></div>";
+h+="<div class='hook-field'><label>Enabled</label><label class='toggle'><input class='hook-enabled' type='checkbox'"+(hook.enabled?" checked":"")+"><span class='slider'></span></label></div>";
+h+="</div>";
+h+="<div class='hook-field'><label>Scheme source (must evaluate to a lambda accepting failure)</label><textarea class='hook-source'>"+esc(hook.source||"")+"</textarea></div>";
+h+="<div class='hook-actions'><button class='btn-danger hook-delete'>Delete</button><button class='btn-warn hook-save'>Save &amp; activate</button></div>";
+h+="</div>";
+}
+list.innerHTML=h||"<div style='color:#888;font-size:.85rem'>No storage failure hooks configured.</div>";
+list.querySelectorAll(".hook-save").forEach(function(button){button.addEventListener("click",function(){saveStorageFailureHook(button.closest(".hook-card"));});});
+list.querySelectorAll(".hook-delete").forEach(function(button){button.addEventListener("click",function(){deleteStorageFailureHook(button.closest(".hook-card"));});});
+}
+function saveStorageFailureHook(card){
+var classes=card.querySelector(".hook-classes").value.split(",").map(function(v){return v.trim();}).filter(Boolean);
+var payload={
+name:card.querySelector(".hook-name").value.trim(),
+enabled:card.querySelector(".hook-enabled").checked,
+classes:classes,
+cooldown_seconds:Number(card.querySelector(".hook-cooldown").value)||0,
+source:card.querySelector(".hook-source").value
+};
+storageHooksStatus("Saving "+(payload.name||"hook")+"...",false);
+fetch(base+"/dashboard/api/storage-failure-hooks/save",{method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)})
+.then(function(r){if(!r.ok)return r.text().then(function(t){throw new Error(t)});return r.json();})
+.then(function(){storageHooksStatus(payload.name+" saved and runtime hooks updated",false);loadStorageFailureHooks();})
+.catch(function(e){storageHooksStatus("Hook was not saved: "+e.message,true);});
+}
+function deleteStorageFailureHook(card){
+var name=card.querySelector(".hook-name").value.trim();
+var index=Number(card.getAttribute("data-hook-index"));
+if(storageFailureHooks[index]&&storageFailureHooks[index].is_new){storageFailureHooks.splice(index,1);renderStorageFailureHooks();return;}
+if(!confirm("Delete storage failure hook "+name+"?"))return;
+fetch(base+"/dashboard/api/storage-failure-hooks/delete",{method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:name})})
+.then(function(r){if(!r.ok)return r.text().then(function(t){throw new Error(t)});return r.json();})
+.then(function(){storageHooksStatus(name+" deleted",false);loadStorageFailureHooks();})
+.catch(function(e){storageHooksStatus("Hook was not deleted: "+e.message,true);});
+}
+document.getElementById("btn-add-storage-hook").addEventListener("click",function(){
+storageFailureHooks.push({name:"",enabled:false,classes:["io"],cooldown_seconds:300,is_new:true,source:'(lambda (failure) (http_request "POST" "https://monitor.example/memcp" (list "Content-Type" "text/plain") (serialize failure)))'});
+renderStorageFailureHooks();
+});
+
 /* settings grouped by topic */
 var settingsGroups=[
 {group:"Memory",items:[
@@ -1414,6 +1495,7 @@ if(!isAdmin){location.hash="databases";return}
 showView("view-settings");
 document.getElementById("root-pw-warning").style.display=defaultPassword?"":"none";
 fetchSettings(renderSettings);
+loadStorageFailureHooks();
 scmFetch(SCM_SERVICES,renderServices);
 return;
 }

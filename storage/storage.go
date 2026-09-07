@@ -4051,16 +4051,23 @@ func Init(en scm.Env) {
 	scm.Declare(&en, &scm.Declaration{
 		Name: "register_storage_failure_hook",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
-			cooldownSeconds := int64(scm.ToInt(a[0]))
+			classValues := a[1].Slice()
+			classes := make([]string, len(classValues))
+			for index, class := range classValues {
+				classes[index] = scm.String(class)
+			}
+			cooldownSeconds := int64(scm.ToInt(a[2]))
 			if cooldownSeconds < 0 || cooldownSeconds > int64((1<<63-1)/time.Second) {
 				panic("storage failure hook cooldown is out of range")
 			}
-			registerPersistenceFailureHook(time.Duration(cooldownSeconds)*time.Second, a[1])
+			registerPersistenceFailureHook(scm.String(a[0]), classes, time.Duration(cooldownSeconds)*time.Second, a[3])
 			return scm.NewBool(true)
 		},
-		Type: &scm.TypeDescriptor{Kind: "func", Description: "registers a process-local asynchronous callback for persistence failures; repeated failures with the same class, backend, database, and operation are coalesced during the cooldown",
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "registers or replaces a named process-local asynchronous callback for selected persistence failure classes; repeated failures with the same hook, class, backend, database, and operation are coalesced during the cooldown",
 			HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
+				{Kind: "string", Label: "name", Description: "stable name used to replace this hook"},
+				{Kind: "list", Label: "classes", Description: "exact failure classes to receive; use * for every class", Element: &scm.TypeDescriptor{Kind: "string"}},
 				{Kind: "number", Label: "cooldown_seconds", Description: "minimum seconds between callbacks for one failure fingerprint"},
 				{Kind: "func", Label: "callback", Description: "called with an assoc containing class, backend, database, operation, error, outcome_unknown, suppressed_count, and timestamp", Params: []*scm.TypeDescriptor{{Kind: "assoc", Label: "failure"}}, Return: &scm.TypeDescriptor{Kind: "any", Label: "ignored"}},
 			},
@@ -4068,12 +4075,23 @@ func Init(en scm.Env) {
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
-		Name: "clear_storage_failure_hook",
+		Name: "unregister_storage_failure_hook",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
-			clearPersistenceFailureHook()
+			unregisterPersistenceFailureHook(scm.String(a[0]))
 			return scm.NewBool(true)
 		},
-		Type: &scm.TypeDescriptor{Kind: "func", Description: "removes the process-local persistence failure callback", HasSideEffects: true,
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "removes one named process-local persistence failure callback", HasSideEffects: true,
+			Params: []*scm.TypeDescriptor{{Kind: "string", Label: "name"}},
+			Return: &scm.TypeDescriptor{Kind: "bool"},
+		},
+	})
+	scm.Declare(&en, &scm.Declaration{
+		Name: "clear_storage_failure_hooks",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			clearPersistenceFailureHooks()
+			return scm.NewBool(true)
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "removes all process-local persistence failure callbacks", HasSideEffects: true,
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
 	})

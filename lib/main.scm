@@ -47,6 +47,7 @@ own compiler under any language name. */
 		(scheme source (concat "trigger:" (context "schema") "." (context "table") ":" (context "name"))))))
 
 (import "sql.scm")
+(import "storage-failure-hooks.scm")
 (import "dashboard.scm")
 (import "rdf.scm")
 

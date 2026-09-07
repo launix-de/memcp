@@ -161,6 +161,29 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(lambda (req res) (begin
 		(define session (req "__session"))
 		(match (req "path")
+			/* API: persistent storage failure hooks (admin only) */
+			"/dashboard/api/storage-failure-hooks/save" (begin
+				(if (dashboard_check_admin req) (begin
+					(define payload (json_decode ((req "body"))))
+					(storage_failure_hook_save
+						(payload "name") (payload "enabled") (payload "classes")
+						(payload "cooldown_seconds") (payload "source"))
+					(dashboard_send_json res "{\"ok\":true}")
+				) (dashboard_send_401 res))
+			)
+			"/dashboard/api/storage-failure-hooks/delete" (begin
+				(if (dashboard_check_admin req) (begin
+					(define payload (json_decode ((req "body"))))
+					(storage_failure_hook_delete (payload "name"))
+					(dashboard_send_json res "{\"ok\":true}")
+				) (dashboard_send_401 res))
+			)
+			"/dashboard/api/storage-failure-hooks" (begin
+				(if (dashboard_check_admin req)
+					(dashboard_send_json res (dashboard_json_array
+						(map (storage_failure_hook_rows) (lambda (row) (json_encode_assoc row)))))
+					(dashboard_send_401 res))
+			)
 			/* API: list databases (admin: all, non-admin: filtered by system.access) */
 			"/dashboard/api/databases" (begin
 				(define is_admin (dashboard_check_user req))

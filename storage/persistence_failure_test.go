@@ -57,10 +57,10 @@ func waitForPersistenceFailureHook(t *testing.T) {
 }
 
 func TestPersistenceFailureHookDeliversStructuredEvent(t *testing.T) {
-	clearPersistenceFailureHook()
-	t.Cleanup(clearPersistenceFailureHook)
+	clearPersistenceFailureHooks()
+	t.Cleanup(clearPersistenceFailureHooks)
 	received := make(chan scm.Scmer, 1)
-	registerPersistenceFailureHook(30*time.Second, scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+	registerPersistenceFailureHook("structured", []string{"*"}, 30*time.Second, scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
 		received <- args[0]
 		return scm.NewNil()
 	}))
@@ -100,10 +100,10 @@ func TestPersistenceFailureHookDeliversStructuredEvent(t *testing.T) {
 }
 
 func TestPersistenceFailureHookCooldownCoalescesFingerprint(t *testing.T) {
-	clearPersistenceFailureHook()
-	t.Cleanup(clearPersistenceFailureHook)
+	clearPersistenceFailureHooks()
+	t.Cleanup(clearPersistenceFailureHooks)
 	received := make(chan scm.Scmer, 2)
-	registerPersistenceFailureHook(10*time.Second, scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+	registerPersistenceFailureHook("cooldown", []string{"io"}, 10*time.Second, scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
 		received <- args[0]
 		return scm.NewNil()
 	}))
@@ -132,10 +132,10 @@ func TestPersistenceFailureHookCooldownCoalescesFingerprint(t *testing.T) {
 }
 
 func TestPersistenceFailureHookDoesNotReenter(t *testing.T) {
-	clearPersistenceFailureHook()
-	t.Cleanup(clearPersistenceFailureHook)
+	clearPersistenceFailureHooks()
+	t.Cleanup(clearPersistenceFailureHooks)
 	calls := make(chan struct{}, 2)
-	registerPersistenceFailureHook(0, scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+	registerPersistenceFailureHook("reentrant", []string{"io"}, 0, scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
 		calls <- struct{}{}
 		notifyPersistenceFailureAt(persistenceFailureEvent{
 			class: "io", backend: "filesystem", database: "hook",
@@ -170,6 +170,98 @@ func TestPersistenceFailureHookDoesNotReenter(t *testing.T) {
 		t.Fatal("hook panic disabled later notifications")
 	}
 	waitForPersistenceFailureHook(t)
+}
+
+func TestPersistenceFailureHooksFilterClassesAndDispatchMultipleRules(t *testing.T) {
+	clearPersistenceFailureHooks()
+	t.Cleanup(clearPersistenceFailureHooks)
+	ioCalls := make(chan scm.Scmer, 1)
+	cleanupCalls := make(chan scm.Scmer, 1)
+	registerPersistenceFailureHook("io-only", []string{"io"}, 0, scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+		ioCalls <- args[0]
+		return scm.NewNil()
+	}))
+	registerPersistenceFailureHook("cleanup-only", []string{"cleanup"}, 0, scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+		cleanupCalls <- args[0]
+		return scm.NewNil()
+	}))
+
+	notifyPersistenceFailure(persistenceFailureEvent{
+		class: "ambiguous_commit", backend: "filesystem", database: "db",
+		operation: "log.sync", err: syscall.EIO, outcomeUnknown: true,
+	})
+	select {
+	case <-ioCalls:
+		t.Fatal("io-only hook received an ambiguous commit event")
+	case <-cleanupCalls:
+		t.Fatal("cleanup-only hook received an ambiguous commit event")
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	notifyPersistenceFailure(persistenceFailureEvent{
+		class: "io", backend: "filesystem", database: "db",
+		operation: "log.write", err: syscall.ENOSPC,
+	})
+	select {
+	case event := <-ioCalls:
+		if got := failureHookValue(t, event, "class").String(); got != "io" {
+			t.Fatalf("io hook class = %q, want io", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("io-only hook did not receive matching event")
+	}
+	waitForPersistenceFailureHook(t)
+
+	notifyPersistenceFailure(persistenceFailureEvent{
+		class: "cleanup", backend: "s3", database: "db",
+		operation: "log.swap.cleanup", err: syscall.EIO,
+	})
+	select {
+	case event := <-cleanupCalls:
+		if got := failureHookValue(t, event, "class").String(); got != "cleanup" {
+			t.Fatalf("cleanup hook class = %q, want cleanup", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cleanup-only hook did not receive matching event")
+	}
+	waitForPersistenceFailureHook(t)
+}
+
+func TestPersistenceFailureHookNameReplacesAndUnregistersRule(t *testing.T) {
+	clearPersistenceFailureHooks()
+	t.Cleanup(clearPersistenceFailureHooks)
+	oldCalls := make(chan struct{}, 1)
+	newCalls := make(chan struct{}, 1)
+	registerPersistenceFailureHook("replaceable", []string{"io"}, 0, scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+		oldCalls <- struct{}{}
+		return scm.NewNil()
+	}))
+	registerPersistenceFailureHook("replaceable", []string{"cleanup"}, 0, scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+		newCalls <- struct{}{}
+		return scm.NewNil()
+	}))
+	notifyPersistenceFailure(persistenceFailureEvent{class: "io", backend: "filesystem", database: "db", operation: "log.write"})
+	select {
+	case <-oldCalls:
+		t.Fatal("replaced hook callback was called")
+	case <-newCalls:
+		t.Fatal("replacement hook ignored its class mask")
+	case <-time.After(20 * time.Millisecond):
+	}
+	notifyPersistenceFailure(persistenceFailureEvent{class: "cleanup", backend: "filesystem", database: "db", operation: "log.swap.cleanup"})
+	select {
+	case <-newCalls:
+	case <-time.After(time.Second):
+		t.Fatal("replacement hook was not called")
+	}
+	waitForPersistenceFailureHook(t)
+	unregisterPersistenceFailureHook("replaceable")
+	notifyPersistenceFailure(persistenceFailureEvent{class: "cleanup", backend: "filesystem", database: "db", operation: "log.swap.cleanup"})
+	select {
+	case <-newCalls:
+		t.Fatal("unregistered hook was called")
+	case <-time.After(20 * time.Millisecond):
+	}
 }
 
 func (r failingPersistenceReader) Read([]byte) (int, error) { return 0, r.readErr }

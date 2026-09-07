@@ -149,9 +149,13 @@ class FailureWebhook:
 
 
 def register_failure_webhook(client: HttpClient, webhook: FailureWebhook) -> None:
+	source = (
+		'(lambda (failure) '
+		f'(http_request "POST" "{webhook.url}" (list) (serialize failure)))'
+	)
 	client.scm(
-		'(register_storage_failure_hook 60 (lambda (failure) '
-		f'(http_request "POST" "{webhook.url}" (list) (serialize failure))))'
+		'(storage_failure_hook_save "reliability-webhook" true (list "io") 60 '
+		+ json.dumps(source) + ')'
 	)
 
 
@@ -536,9 +540,27 @@ def run_io_failures(server: OwnedServer, rows: int, seed: int,
 	want_one = {"row_count": rows, "min_x": 1, "max_x": 1, "x_sum": rows}
 	want_two = {"row_count": rows, "min_x": 2, "max_x": 2, "x_sum": rows * 2}
 
+	client = server.client
+	assert client is not None
+	configured = json.loads(client.request("/dashboard/api/storage-failure-hooks", ""))
+	templates = {hook["name"]: hook for hook in configured}
+	for name in ("syslog-process", "open-outage-page"):
+		if name not in templates or templates[name]["enabled"]:
+			raise DrillFailure(f"missing disabled storage failure hook template: {name}")
+	try:
+		client.scm(
+			'(storage_failure_hook_save "invalid-hook" true (list "io") 60 "42")'
+		)
+	except DrillFailure:
+		pass
+	else:
+		raise DrillFailure("non-callable storage failure hook source was accepted")
+	configured = json.loads(client.request("/dashboard/api/storage-failure-hooks", ""))
+	if any(hook["name"] == "invalid-hook" for hook in configured):
+		raise DrillFailure("invalid storage failure hook was persisted")
+	register_failure_webhook(client, webhook)
 	server.stop()
 	client = server.start(io_fault_environment("log.write", "partial", seed))
-	register_failure_webhook(client, webhook)
 	session = "drill-explicit-write-failure"
 	client.sql("START ACID TRANSACTION", session=session)
 	expect_write_failure(
