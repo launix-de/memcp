@@ -891,7 +891,7 @@ consumer stage. */
 (define rdf_numeric_value (lambda (value)
 	(if (number? value) value (simplify (concat value)))
 ))
-(define rdf_template_triple_expr (lambda (triple ctx)
+(define rdf_template_triple_expr (lambda (triple ctx blank_prefix blank_index)
 	(match triple '(s p o)
 		(match o
 			'("__template_bnode__" nested_p nested_o)
@@ -902,15 +902,15 @@ consumer stage. */
 							(quote __rdf_template_bn))
 						(list (quote list) (quote __rdf_template_bn)
 							(rdf_replace_ctx nested_p ctx) (rdf_replace_ctx nested_o ctx))))
-				(list (quote concat) "urn:uuid:" (list (quote uuid))))
+				(list (quote concat) blank_prefix (quote __rdf_update_row) ":" blank_index))
 			_ (list (quote list)
 				(list (quote list) (rdf_replace_ctx s ctx) (rdf_replace_ctx p ctx)
 					(rdf_replace_ctx o ctx)))))
 ))
-(define rdf_template_expr (lambda (triples ctx)
+(define rdf_template_expr (lambda (triples ctx blank_prefix)
 	(if (equal? triples '()) (list (quote quote) '())
-		(list (quote merge) (cons (quote list) (map triples (lambda (triple)
-			(rdf_template_triple_expr triple ctx))))))
+		(list (quote merge) (cons (quote list) (mapIndex triples (lambda (blank_index triple)
+			(rdf_template_triple_expr triple ctx blank_prefix blank_index))))))
 ))
 (define rdf_describe_subject_vars (lambda (conditions)
 	(reduce conditions (lambda (vars condition) (match condition
@@ -1570,21 +1570,10 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 ))
 (define rdf_shared_minus_relation (lambda (schema state query vars shared)
 	(begin
-		/* Model MINUS as an anti-join with an explicit presence column. Unlike a
-		correlated scalar EXISTS marker, the relation keeps both alias scopes
-		separate when a compiled query is reused from the planner cache. */
+		/* Model MINUS as an anti-join. A shared RDF term is necessarily bound on
+		a compatible right mapping, so it is also an unambiguous match marker. */
 		(define index (rdf_shared_state_index state))
-		(define input_alias (concat "__rdf_minus_input" index))
 		(define alias (concat "__rdf_minus" index))
-		(define presence "__rdf_minus_present")
-		(define input_bindings (rdf_shared_relation_refs input_alias vars))
-		/* A projected constant survives some LEFT JOIN rewrites on the null side.
-		Use a shared, necessarily bound RDF term as the match marker instead. */
-		(define fields (append (rdf_shared_relation_fields input_bindings)
-			presence (get_assoc input_bindings (car shared))))
-		(define relation (make_query_block schema
-			(list (list input_alias schema query false nil)) fields true
-			nil nil nil nil nil '() '() '()))
 		(define right (rdf_shared_relation_refs alias vars))
 		(define joins (reduce shared (lambda (conditions var)
 			(match (rdf_ctx_lookup (rdf_shared_state_bindings state) var) '(left_found left_expr)
@@ -1599,9 +1588,9 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 				'() conditions)) '()))
 		(list
 			(append (rdf_shared_state_sources state)
-				(list alias schema relation true (rdf_shared_where joins)))
+				(list alias schema query true (rdf_shared_where joins)))
 			(rdf_shared_state_bindings state)
-			(cons (list (quote nil?) (rdf_shared_column alias presence))
+			(cons (list (quote nil?) (get_assoc right (car shared)))
 				(rdf_shared_state_filters state))
 			(+ index 1)))
 ))
@@ -2018,6 +2007,11 @@ bindings of neighbouring update alternatives. */
 				(define delete_rows (newsession))
 				(define insert_rows (newsession))
 				(define update_row_count (newsession))
+				/* Allocate the namespace at template evaluation time. nanotime has a
+				straight JIT path; row and template indexes disambiguate every label
+				within an update and the persistent row counter covers plan reuse. */
+				(define update_blank_prefix
+					(list (quote concat) "urn:rdf-template:" (list (quote nanotime)) ":"))
 				(update_row_count "value" 0)
 				(list (quote begin)
 					(list (quote rdf_ensure_table) schema)
@@ -2025,8 +2019,10 @@ bindings of neighbouring update alternatives. */
 						(lambda (_cols ctx) (list (quote begin)
 							(list (quote set) (quote __rdf_update_row) (list update_row_count "value"))
 							(list update_row_count "value" (list (quote +) (quote __rdf_update_row) 1))
-							(list delete_rows (quote __rdf_update_row) (rdf_template_expr delete_triples ctx))
-							(list insert_rows (quote __rdf_update_row) (rdf_template_expr insert_triples ctx)))))
+							(list delete_rows (quote __rdf_update_row)
+								(rdf_template_expr delete_triples ctx update_blank_prefix))
+							(list insert_rows (quote __rdf_update_row)
+								(rdf_template_expr insert_triples ctx update_blank_prefix)))))
 					(list (quote rdf_delete_graph_target) schema update_graph
 						(list (quote rdf_session_merged_values) delete_rows))
 					(list (quote rdf_insert_graph_target) schema update_graph
