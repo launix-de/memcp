@@ -1,0 +1,280 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
+# Feature-complete executable inventory for SPARQL 1.1 sections 4 and 17.
+# Every case is intentionally noncritical until its semantics are implemented.
+
+metadata:
+  version: "1.0"
+  description: "SPARQL 1.1 RDF term, operator, and built-in function conformance matrix"
+  isolated: true
+
+setup: []
+
+test_cases:
+  - name: "SPARQL 1.1 4.1.2 language-tagged literals preserve their language"
+    noncritical: true
+    ttl_data: |
+      @prefix ex: <http://spec11-terms.example/> .
+      ex:subject ex:label "Berlin"@de .
+    headers: {Accept: "application/sparql-results+json"}
+    sparql: |
+      PREFIX ex: <http://spec11-terms.example/>
+      SELECT ?label WHERE { ex:subject ex:label ?label }
+    expect:
+      rows: 1
+      contains: '"xml:lang":"de"'
+
+  - name: "SPARQL 1.1 4.1.2 language tags participate in term identity"
+    noncritical: true
+    ttl_data: |
+      @prefix ex: <http://spec11-terms-lang.example/> .
+      ex:subject ex:label "Berlin"@de, "Berlin"@en .
+    sparql: |
+      PREFIX ex: <http://spec11-terms-lang.example/>
+      SELECT ?label WHERE { ex:subject ex:label ?label }
+    expect: {rows: 2}
+
+  - name: "SPARQL 1.1 4.1.2 datatype IRIs participate in term identity"
+    noncritical: true
+    ttl_data: |
+      @prefix ex: <http://spec11-terms-datatype.example/> .
+      @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+      ex:subject ex:value "1"^^xsd:string, "1"^^xsd:integer .
+    sparql: |
+      PREFIX ex: <http://spec11-terms-datatype.example/>
+      SELECT ?value WHERE { ex:subject ex:value ?value }
+    expect: {rows: 2}
+
+  - name: "SPARQL 1.1 17.4.1.8 sameTerm retains lexical form"
+    noncritical: true
+    sparql: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT (sameTerm("01"^^xsd:integer, "1"^^xsd:integer) AS ?result) WHERE {}
+    expect:
+      rows: 1
+      data: [{"?result": false}]
+
+  - name: "SPARQL 1.1 17.3 value equality compares typed numeric values"
+    noncritical: true
+    sparql: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT (("01"^^xsd:integer = "1"^^xsd:integer) AS ?result) WHERE {}
+    expect:
+      rows: 1
+      data: [{"?result": true}]
+
+  - name: "SPARQL 1.1 17.4.2.6 LANG returns a normalized language tag"
+    noncritical: true
+    sparql: 'SELECT (LANG("Hallo"@DE) AS ?result) WHERE {}'
+    expect:
+      rows: 1
+      data: [{"?result": "de"}]
+
+  - name: "SPARQL 1.1 17.4.3.12 LANGMATCHES supports language ranges"
+    noncritical: true
+    sparql: 'SELECT (LANGMATCHES("de-DE", "de") AS ?result) WHERE {}'
+    expect:
+      rows: 1
+      data: [{"?result": true}]
+
+  - name: "SPARQL 1.1 17.4.2.7 DATATYPE returns the literal datatype"
+    noncritical: true
+    sparql: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT (DATATYPE("42"^^xsd:integer) AS ?result) WHERE {}
+    expect:
+      rows: 1
+      contains: "http://www.w3.org/2001/XMLSchema#integer"
+
+  - name: "SPARQL 1.1 17.4.2.12 STRLANG constructs a language literal"
+    noncritical: true
+    headers: {Accept: "application/sparql-results+json"}
+    sparql: 'SELECT (STRLANG("Hallo", "de") AS ?result) WHERE {}'
+    expect:
+      rows: 1
+      contains: '"xml:lang":"de"'
+
+  - name: "SPARQL 1.1 17.4.2.11 STRDT constructs a typed literal"
+    noncritical: true
+    headers: {Accept: "application/sparql-results+json"}
+    sparql: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT (STRDT("42", xsd:integer) AS ?result) WHERE {}
+    expect:
+      rows: 1
+      contains: "http://www.w3.org/2001/XMLSchema#integer"
+
+  - name: "SPARQL 1.1 17.4.2.9 BNODE creates blank nodes"
+    noncritical: true
+    headers: {Accept: "application/sparql-results+json"}
+    sparql: 'SELECT (BNODE() AS ?result) WHERE {}'
+    expect:
+      rows: 1
+      contains: '"type":"bnode"'
+
+  - name: "SPARQL 1.1 17.4.2.9 BNODE labels are stable within one solution"
+    noncritical: true
+    sparql: 'SELECT (sameTerm(BNODE("key"), BNODE("key")) AS ?result) WHERE {}'
+    expect:
+      rows: 1
+      data: [{"?result": true}]
+
+  - name: "SPARQL 1.1 17.4.2.1 isIRI distinguishes IRIs from strings"
+    noncritical: true
+    sparql: 'SELECT (isIRI(<http://spec11.example/iri>) AS ?iri) (isIRI("http://spec11.example/iri") AS ?string) WHERE {}'
+    expect:
+      rows: 1
+      data: [{"?iri": true, "?string": false}]
+
+  - name: "SPARQL 1.1 17.4.2.4 isLiteral recognizes typed literals"
+    noncritical: true
+    sparql: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT (isLiteral("7"^^xsd:integer) AS ?result) WHERE {}
+    expect:
+      rows: 1
+      data: [{"?result": true}]
+
+  - name: "SPARQL 1.1 17.4.2.5 isNumeric recognizes numeric datatypes"
+    noncritical: true
+    sparql: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT (isNumeric("7"^^xsd:integer) AS ?result) WHERE {}
+    expect:
+      rows: 1
+      data: [{"?result": true}]
+
+  - name: "SPARQL 1.1 17.4.1 arithmetic supports addition and multiplication"
+    noncritical: true
+    sparql: 'SELECT ((2 + 3 * 4) AS ?result) WHERE {}'
+    expect:
+      rows: 1
+      data: [{"?result": 14}]
+
+  - name: "SPARQL 1.1 17.4.1 arithmetic supports unary minus and division"
+    noncritical: true
+    sparql: 'SELECT ((-12 / 3) AS ?result) WHERE {}'
+    expect:
+      rows: 1
+      data: [{"?result": -4}]
+
+  - name: "SPARQL 1.1 17.4.1.9 IN tests membership"
+    noncritical: true
+    sparql: 'SELECT ((2 IN (1, 2, 3)) AS ?result) WHERE {}'
+    expect:
+      rows: 1
+      data: [{"?result": true}]
+
+  - name: "SPARQL 1.1 17.4.1.10 NOT IN tests non-membership"
+    noncritical: true
+    sparql: 'SELECT ((4 NOT IN (1, 2, 3)) AS ?result) WHERE {}'
+    expect:
+      rows: 1
+      data: [{"?result": true}]
+
+  - name: "SPARQL 1.1 17.4.3.3 RAND returns a numeric value"
+    noncritical: true
+    sparql: 'SELECT ((RAND() >= 0 && RAND() < 1) AS ?result) WHERE {}'
+    expect:
+      rows: 1
+      data: [{"?result": true}]
+
+  - name: "SPARQL 1.1 17.4.3.5 STRBEFORE returns the prefix"
+    noncritical: true
+    sparql: 'SELECT (STRBEFORE("alpha:beta", ":") AS ?result) WHERE {}'
+    expect:
+      rows: 1
+      data: [{"?result": "alpha"}]
+
+  - name: "SPARQL 1.1 17.4.3.6 STRAFTER returns the suffix"
+    noncritical: true
+    sparql: 'SELECT (STRAFTER("alpha:beta", ":") AS ?result) WHERE {}'
+    expect:
+      rows: 1
+      data: [{"?result": "beta"}]
+
+  - name: "SPARQL 1.1 17.4.3.9 ENCODE_FOR_URI escapes reserved characters"
+    noncritical: true
+    sparql: 'SELECT (ENCODE_FOR_URI("A B") AS ?result) WHERE {}'
+    expect:
+      rows: 1
+      data: [{"?result": "A%20B"}]
+
+  - name: "SPARQL 1.1 17.4.3.14 REGEX supports flags"
+    noncritical: true
+    sparql: 'SELECT (REGEX("Berlin", "berlin", "i") AS ?result) WHERE {}'
+    expect:
+      rows: 1
+      data: [{"?result": true}]
+
+  - name: "SPARQL 1.1 17.4.3.15 REPLACE supports flags"
+    noncritical: true
+    sparql: 'SELECT (REPLACE("Berlin berlin", "berlin", "X", "i") AS ?result) WHERE {}'
+    expect:
+      rows: 1
+      data: [{"?result": "X X"}]
+
+  - name: "SPARQL 1.1 17.4.5.1 NOW is stable within a query"
+    noncritical: true
+    sparql: 'SELECT ((NOW() = NOW()) AS ?result) WHERE {}'
+    expect:
+      rows: 1
+      data: [{"?result": true}]
+
+  - name: "SPARQL 1.1 17.4.5 date component functions"
+    noncritical: true
+    sparql: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT (YEAR("2026-09-07T12:34:56Z"^^xsd:dateTime) AS ?year)
+             (MONTH("2026-09-07T12:34:56Z"^^xsd:dateTime) AS ?month)
+             (DAY("2026-09-07T12:34:56Z"^^xsd:dateTime) AS ?day)
+      WHERE {}
+    expect:
+      rows: 1
+      data: [{"?year": 2026, "?month": 9, "?day": 7}]
+
+  - name: "SPARQL 1.1 17.4.5 time component functions"
+    noncritical: true
+    sparql: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT (HOURS("2026-09-07T12:34:56Z"^^xsd:dateTime) AS ?hours)
+             (MINUTES("2026-09-07T12:34:56Z"^^xsd:dateTime) AS ?minutes)
+             (SECONDS("2026-09-07T12:34:56Z"^^xsd:dateTime) AS ?seconds)
+      WHERE {}
+    expect:
+      rows: 1
+      data: [{"?hours": 12, "?minutes": 34, "?seconds": 56}]
+
+  - name: "SPARQL 1.1 17.4.5 timezone functions"
+    noncritical: true
+    sparql: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT (TZ("2026-09-07T12:34:56+02:00"^^xsd:dateTime) AS ?tz) WHERE {}
+    expect:
+      rows: 1
+      data: [{"?tz": "+02:00"}]
+
+  - name: "SPARQL 1.1 17.4.6 MD5 hash"
+    noncritical: true
+    sparql: 'SELECT (MD5("abc") AS ?result) WHERE {}'
+    expect:
+      rows: 1
+      data: [{"?result": "900150983cd24fb0d6963f7d28e17f72"}]
+
+  - name: "SPARQL 1.1 17.4.6 SHA family hashes"
+    noncritical: true
+    sparql: 'SELECT (SHA1("abc") AS ?sha1) (SHA256("abc") AS ?sha256) WHERE {}'
+    expect:
+      rows: 1
+      contains: "a9993e364706816aba3e25717850c26c9cd0d89d"
+
+  - name: "SPARQL 1.1 17.4.1 expression errors leave projection variables unbound"
+    noncritical: true
+    headers: {Accept: "application/sparql-results+json"}
+    sparql: 'SELECT ((1 / 0) AS ?error) ("kept" AS ?value) WHERE {}'
+    expect:
+      rows: 1
+      contains: '"value":"kept"'
+      not_contains: '"error"'
+
+cleanup: []

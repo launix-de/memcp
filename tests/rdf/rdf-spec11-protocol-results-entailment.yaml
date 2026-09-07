@@ -1,0 +1,141 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
+# Executable portions of the SPARQL 1.1 Protocol, result formats, graph result
+# serialization, and advertised entailment behavior.
+
+metadata:
+  version: "1.0"
+  description: "SPARQL 1.1 protocol media types, result formats, and entailment matrix"
+  isolated: true
+
+setup: []
+
+test_cases:
+  - name: "SPARQL 1.1 Protocol direct POST accepts application sparql-query"
+    noncritical: true
+    headers:
+      Content-Type: "application/sparql-query"
+      Accept: "application/sparql-results+json"
+    sparql: 'SELECT ("yes" AS ?value) WHERE {}'
+    expect: {rows: 1, content_type: "application/sparql-results+json"}
+
+  - name: "SPARQL 1.1 Query Results JSON SELECT media type"
+    noncritical: true
+    headers: {Accept: "application/sparql-results+json"}
+    sparql: 'SELECT ("yes" AS ?value) WHERE {}'
+    expect:
+      rows: 1
+      content_type: "application/sparql-results+json"
+      contains: '"bindings"'
+
+  - name: "SPARQL 1.1 Query Results JSON ASK media type"
+    noncritical: true
+    headers: {Accept: "application/sparql-results+json"}
+    sparql: 'ASK WHERE {}'
+    expect:
+      rows: 1
+      content_type: "application/sparql-results+json"
+      contains: '"boolean":true'
+
+  - name: "SPARQL 1.1 Query Results XML SELECT serialization"
+    noncritical: true
+    headers: {Accept: "application/sparql-results+xml"}
+    sparql: 'SELECT ("yes" AS ?value) WHERE {}'
+    expect:
+      content_type: "application/sparql-results+xml"
+      contains: "<sparql"
+
+  - name: "SPARQL 1.1 Query Results XML ASK serialization"
+    noncritical: true
+    headers: {Accept: "application/sparql-results+xml"}
+    sparql: 'ASK WHERE {}'
+    expect:
+      content_type: "application/sparql-results+xml"
+      contains: "<boolean>true</boolean>"
+
+  - name: "SPARQL 1.1 Query Results CSV serialization"
+    noncritical: true
+    headers: {Accept: "text/csv"}
+    sparql: 'SELECT ("yes" AS ?value) WHERE {}'
+    expect:
+      content_type: "text/csv"
+      contains: "value"
+
+  - name: "SPARQL 1.1 Query Results TSV serialization"
+    noncritical: true
+    headers: {Accept: "text/tab-separated-values"}
+    sparql: 'SELECT ("yes" AS ?value) WHERE {}'
+    expect:
+      content_type: "text/tab-separated-values"
+      contains: "?value"
+
+  - name: "SPARQL 1.1 CONSTRUCT negotiates Turtle graph output"
+    noncritical: true
+    ttl_data: '@prefix ex: <http://spec11-result-turtle.example/> . ex:s ex:p ex:o .'
+    headers: {Accept: "text/turtle"}
+    sparql: 'PREFIX ex: <http://spec11-result-turtle.example/> CONSTRUCT { ?s ex:p ?o } WHERE { ?s ex:p ?o }'
+    expect:
+      content_type: "text/turtle"
+      contains: "spec11-result-turtle.example"
+
+  - name: "SPARQL 1.1 CONSTRUCT negotiates RDF XML graph output"
+    noncritical: true
+    ttl_data: '@prefix ex: <http://spec11-result-rdfxml.example/> . ex:s ex:p ex:o .'
+    headers: {Accept: "application/rdf+xml"}
+    sparql: 'PREFIX ex: <http://spec11-result-rdfxml.example/> CONSTRUCT { ?s ex:p ?o } WHERE { ?s ex:p ?o }'
+    expect:
+      content_type: "application/rdf+xml"
+      contains: "rdf:RDF"
+
+  - name: "SPARQL 1.1 malformed query returns a protocol error"
+    noncritical: true
+    headers: {Content-Type: "application/sparql-query"}
+    sparql: 'SELECT WHERE {'
+    expect: {error: true}
+
+  - name: "SPARQL 1.1 RDF entailment recognizes asserted triples"
+    noncritical: true
+    ttl_data: '@prefix ex: <http://spec11-entailment-simple.example/> . ex:s ex:p ex:o .'
+    sparql: 'PREFIX ex: <http://spec11-entailment-simple.example/> ASK WHERE { ex:s ex:p ex:o }'
+    expect: {rows: 1, data: [{"?ask": true}]}
+
+  - name: "SPARQL 1.1 RDFS entailment follows subClassOf"
+    noncritical: true
+    ttl_data: |
+      @prefix ex: <http://spec11-entailment-class.example/> .
+      @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+      @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+      ex:Case rdfs:subClassOf ex:Record . ex:item rdf:type ex:Case .
+    sparql: |
+      PREFIX ex: <http://spec11-entailment-class.example/>
+      ASK WHERE { ex:item a ex:Record }
+    expect: {rows: 1, data: [{"?ask": true}]}
+
+  - name: "SPARQL 1.1 RDFS entailment follows subPropertyOf"
+    noncritical: true
+    ttl_data: |
+      @prefix ex: <http://spec11-entailment-property.example/> .
+      @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+      ex:specific rdfs:subPropertyOf ex:general . ex:s ex:specific ex:o .
+    sparql: 'PREFIX ex: <http://spec11-entailment-property.example/> ASK WHERE { ex:s ex:general ex:o }'
+    expect: {rows: 1, data: [{"?ask": true}]}
+
+  - name: "SPARQL 1.1 RDFS entailment applies domain typing"
+    noncritical: true
+    ttl_data: |
+      @prefix ex: <http://spec11-entailment-domain.example/> .
+      @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+      ex:p rdfs:domain ex:Subject . ex:s ex:p ex:o .
+    sparql: 'PREFIX ex: <http://spec11-entailment-domain.example/> ASK WHERE { ex:s a ex:Subject }'
+    expect: {rows: 1, data: [{"?ask": true}]}
+
+  - name: "SPARQL 1.1 RDFS entailment applies range typing"
+    noncritical: true
+    ttl_data: |
+      @prefix ex: <http://spec11-entailment-range.example/> .
+      @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+      ex:p rdfs:range ex:Object . ex:s ex:p ex:o .
+    sparql: 'PREFIX ex: <http://spec11-entailment-range.example/> ASK WHERE { ex:o a ex:Object }'
+    expect: {rows: 1, data: [{"?ask": true}]}
+
+cleanup: []

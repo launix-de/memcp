@@ -1,0 +1,126 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
+# Executable inventory for every SPARQL 1.1 property-path production.
+
+metadata:
+  version: "1.0"
+  description: "Complete SPARQL 1.1 property-path syntax and endpoint semantics"
+  isolated: true
+
+setup: []
+
+test_cases:
+  - name: "SPARQL 1.1 9 PredicatePath matches one edge"
+    noncritical: true
+    ttl_data: |
+      @prefix ex: <http://spec11-path-link.example/> . ex:a ex:p ex:b .
+    sparql: 'PREFIX ex: <http://spec11-path-link.example/> SELECT ?o WHERE { ex:a ex:p ?o }'
+    expect: {rows: 1, data: [{"?o": "http://spec11-path-link.example/b"}]}
+
+  - name: "SPARQL 1.1 9 InversePath reverses an edge"
+    noncritical: true
+    ttl_data: |
+      @prefix ex: <http://spec11-path-inverse.example/> . ex:a ex:parent ex:b .
+    sparql: 'PREFIX ex: <http://spec11-path-inverse.example/> SELECT ?child WHERE { ex:b ^ex:parent ?child }'
+    expect: {rows: 1, data: [{"?child": "http://spec11-path-inverse.example/a"}]}
+
+  - name: "SPARQL 1.1 9 SequencePath hides intermediate variables"
+    noncritical: true
+    ttl_data: |
+      @prefix ex: <http://spec11-path-sequence.example/> . ex:a ex:p ex:b . ex:b ex:q ex:c .
+    sparql: 'PREFIX ex: <http://spec11-path-sequence.example/> SELECT ?o WHERE { ex:a ex:p/ex:q ?o }'
+    expect: {rows: 1, data: [{"?o": "http://spec11-path-sequence.example/c"}]}
+
+  - name: "SPARQL 1.1 9 AlternativePath retains both alternatives"
+    noncritical: true
+    ttl_data: |
+      @prefix ex: <http://spec11-path-alternative.example/> . ex:a ex:p ex:b ; ex:q ex:c .
+    sparql: 'PREFIX ex: <http://spec11-path-alternative.example/> SELECT ?o WHERE { ex:a (ex:p|ex:q) ?o }'
+    expect: {rows: 2}
+
+  - name: "SPARQL 1.1 9 ZeroOrOnePath includes zero and one edge"
+    noncritical: true
+    ttl_data: |
+      @prefix ex: <http://spec11-path-optional.example/> . ex:a ex:p ex:b .
+    sparql: 'PREFIX ex: <http://spec11-path-optional.example/> SELECT ?o WHERE { ex:a ex:p? ?o }'
+    expect: {rows: 2}
+
+  - name: "SPARQL 1.1 9 ZeroOrMorePath handles cycles without duplicates"
+    noncritical: true
+    ttl_data: |
+      @prefix ex: <http://spec11-path-star-cycle.example/> . ex:a ex:p ex:b . ex:b ex:p ex:a .
+    sparql: 'PREFIX ex: <http://spec11-path-star-cycle.example/> SELECT ?o WHERE { ex:a ex:p* ?o } ORDER BY ?o'
+    expect:
+      rows: 2
+      data:
+        - {"?o": "http://spec11-path-star-cycle.example/a"}
+        - {"?o": "http://spec11-path-star-cycle.example/b"}
+
+  - name: "SPARQL 1.1 9 OneOrMorePath excludes a zero-length acyclic endpoint"
+    noncritical: true
+    ttl_data: |
+      @prefix ex: <http://spec11-path-plus.example/> . ex:a ex:p ex:b . ex:b ex:p ex:c .
+    sparql: 'PREFIX ex: <http://spec11-path-plus.example/> SELECT ?o WHERE { ex:a ex:p+ ?o }'
+    expect: {rows: 2}
+
+  - name: "SPARQL 1.1 9 NegatedPropertySet excludes a forward predicate"
+    noncritical: true
+    ttl_data: |
+      @prefix ex: <http://spec11-path-negated.example/> . ex:a ex:blocked ex:b ; ex:allowed ex:c .
+    sparql: 'PREFIX ex: <http://spec11-path-negated.example/> SELECT ?o WHERE { ex:a !ex:blocked ?o }'
+    expect: {rows: 1, data: [{"?o": "http://spec11-path-negated.example/c"}]}
+
+  - name: "SPARQL 1.1 9 NegatedPropertySet mixes forward and inverse exclusions"
+    noncritical: true
+    ttl_data: |
+      @prefix ex: <http://spec11-path-negated-mixed.example/> .
+      ex:a ex:blocked ex:center . ex:center ex:allowed ex:c . ex:x ex:reverseBlocked ex:center .
+    sparql: |
+      PREFIX ex: <http://spec11-path-negated-mixed.example/>
+      SELECT ?o WHERE { ex:center !(ex:blocked|^ex:reverseBlocked) ?o }
+    expect: {rows: 1, data: [{"?o": "http://spec11-path-negated-mixed.example/c"}]}
+
+  - name: "SPARQL 1.1 9 repetition applies to a composite path"
+    noncritical: true
+    ttl_data: |
+      @prefix ex: <http://spec11-path-composite.example/> .
+      ex:a ex:p ex:b . ex:b ex:q ex:c . ex:c ex:p ex:d . ex:d ex:q ex:e .
+    sparql: 'PREFIX ex: <http://spec11-path-composite.example/> SELECT ?o WHERE { ex:a (ex:p/ex:q)+ ?o }'
+    expect: {rows: 2}
+
+  - name: "SPARQL 1.1 9 path supports a variable subject"
+    noncritical: true
+    ttl_data: |
+      @prefix ex: <http://spec11-path-variable-subject.example/> . ex:a ex:p ex:b . ex:b ex:p ex:c .
+    sparql: 'PREFIX ex: <http://spec11-path-variable-subject.example/> SELECT ?s WHERE { ?s ex:p+ ex:c } ORDER BY ?s'
+    expect: {rows: 2}
+
+  - name: "SPARQL 1.1 9 path supports two variable endpoints"
+    noncritical: true
+    ttl_data: |
+      @prefix ex: <http://spec11-path-two-vars.example/> . ex:a ex:p ex:b . ex:b ex:p ex:c .
+    sparql: 'PREFIX ex: <http://spec11-path-two-vars.example/> SELECT ?s ?o WHERE { ?s ex:p+ ?o }'
+    expect: {rows: 3}
+
+  - name: "SPARQL 1.1 9 path supports two fixed endpoints"
+    noncritical: true
+    ttl_data: |
+      @prefix ex: <http://spec11-path-fixed.example/> . ex:a ex:p ex:b . ex:b ex:p ex:c .
+    sparql: 'PREFIX ex: <http://spec11-path-fixed.example/> ASK WHERE { ex:a ex:p+ ex:c }'
+    expect: {rows: 1, data: [{"?ask": true}]}
+
+  - name: "SPARQL 1.1 9 path evaluation stays in the active named graph"
+    noncritical: true
+    sparql: |
+      PREFIX ex: <http://spec11-path-graph.example/>
+      INSERT DATA { GRAPH ex:g { ex:a ex:p ex:b . ex:b ex:p ex:c } }
+    expect: {rows: 0}
+
+  - name: "SPARQL 1.1 9 named graph path query"
+    noncritical: true
+    sparql: |
+      PREFIX ex: <http://spec11-path-graph.example/>
+      SELECT ?o WHERE { GRAPH ex:g { ex:a ex:p+ ?o } }
+    expect: {rows: 2}
+
+cleanup: []

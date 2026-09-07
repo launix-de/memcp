@@ -1,0 +1,252 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
+# Executable inventory for SPARQL 1.1 graph-pattern algebra, sections 5-12.
+
+metadata:
+  version: "1.0"
+  description: "Complete SPARQL 1.1 graph-pattern, grouping, and subquery feature matrix"
+  isolated: true
+
+setup: []
+
+test_cases:
+  - name: "SPARQL 1.1 5.2 empty group graph pattern has one solution"
+    noncritical: true
+    sparql: 'SELECT ("yes" AS ?value) WHERE {}'
+    expect:
+      rows: 1
+      data: [{"?value": "yes"}]
+
+  - name: "SPARQL 1.1 5.2 nested group graph patterns compose"
+    noncritical: true
+    ttl_data: |
+      @prefix ex: <http://spec11-groups.example/> .
+      ex:item ex:value "yes" .
+    sparql: |
+      PREFIX ex: <http://spec11-groups.example/>
+      SELECT ?value WHERE { { { ex:item ex:value ?value } } }
+    expect:
+      rows: 1
+      data: [{"?value": "yes"}]
+
+  - name: "SPARQL 1.1 6 OPTIONAL may contain UNION and FILTER"
+    noncritical: true
+    ttl_data: |
+      @prefix ex: <http://spec11-optional-nested.example/> .
+      ex:a ex:name "A" ; ex:left "L" .
+      ex:b ex:name "B" ; ex:right "R" .
+    sparql: |
+      PREFIX ex: <http://spec11-optional-nested.example/>
+      SELECT ?name ?value WHERE {
+        ?s ex:name ?name
+        OPTIONAL {
+          { ?s ex:left ?value } UNION { ?s ex:right ?value }
+          FILTER(?value != "hidden")
+        }
+      }
+      ORDER BY ?name
+    expect:
+      rows: 2
+      data:
+        - {"?name": "A", "?value": "L"}
+        - {"?name": "B", "?value": "R"}
+
+  - name: "SPARQL 1.1 6 OPTIONAL filter uses left and right bindings"
+    noncritical: true
+    ttl_data: |
+      @prefix ex: <http://spec11-optional-filter.example/> .
+      ex:a ex:wanted "x" ; ex:candidate "x" .
+      ex:b ex:wanted "x" ; ex:candidate "y" .
+    sparql: |
+      PREFIX ex: <http://spec11-optional-filter.example/>
+      SELECT ?s ?candidate WHERE {
+        ?s ex:wanted ?wanted
+        OPTIONAL { ?s ex:candidate ?candidate FILTER(?wanted = ?candidate) }
+      }
+    expect: {rows: 2}
+
+  - name: "SPARQL 1.1 7 UNION accepts arbitrary group patterns"
+    noncritical: true
+    ttl_data: |
+      @prefix ex: <http://spec11-union-group.example/> .
+      ex:a ex:type "left" ; ex:enabled true .
+      ex:b ex:type "right" ; ex:enabled true .
+    sparql: |
+      PREFIX ex: <http://spec11-union-group.example/>
+      SELECT ?s WHERE {
+        { ?s ex:type "left" OPTIONAL { ?s ex:enabled ?flag } }
+        UNION
+        { ?s ex:type "right" FILTER EXISTS { ?s ex:enabled true } }
+      }
+    expect: {rows: 2}
+
+  - name: "SPARQL 1.1 8.2 MINUS removes compatible solutions"
+    noncritical: true
+    ttl_data: |
+      @prefix ex: <http://spec11-minus.example/> .
+      ex:a ex:name "A" . ex:b ex:name "B" ; ex:deleted true .
+    sparql: |
+      PREFIX ex: <http://spec11-minus.example/>
+      SELECT ?name WHERE {
+        ?s ex:name ?name
+        MINUS { ?s ex:deleted true }
+      }
+    expect:
+      rows: 1
+      data: [{"?name": "A"}]
+
+  - name: "SPARQL 1.1 8.2 MINUS with disjoint variables preserves solutions"
+    noncritical: true
+    ttl_data: |
+      @prefix ex: <http://spec11-minus-domain.example/> .
+      ex:a ex:name "A" . ex:x ex:flag true .
+    sparql: |
+      PREFIX ex: <http://spec11-minus-domain.example/>
+      SELECT ?name WHERE { ?s ex:name ?name MINUS { ?x ex:flag true } }
+    expect:
+      rows: 1
+      data: [{"?name": "A"}]
+
+  - name: "SPARQL 1.1 8.1 EXISTS supports nested arbitrary patterns"
+    noncritical: true
+    ttl_data: |
+      @prefix ex: <http://spec11-exists-nested.example/> .
+      ex:a ex:name "A" ; ex:left true .
+    sparql: |
+      PREFIX ex: <http://spec11-exists-nested.example/>
+      SELECT ?name WHERE {
+        ?s ex:name ?name
+        FILTER EXISTS { { ?s ex:left true } UNION { ?s ex:right true } }
+      }
+    expect:
+      rows: 1
+      data: [{"?name": "A"}]
+
+  - name: "SPARQL 1.1 10.1 BIND expression errors leave the variable unbound"
+    noncritical: true
+    headers: {Accept: "application/sparql-results+json"}
+    sparql: 'SELECT ?result ?kept WHERE { BIND((1 / 0) AS ?result) BIND("yes" AS ?kept) }'
+    expect:
+      rows: 1
+      contains: '"kept"'
+      not_contains: '"result"'
+
+  - name: "SPARQL 1.1 10.1 BIND cannot rebind an in-scope variable"
+    noncritical: true
+    sparql: 'SELECT ?value WHERE { BIND("first" AS ?value) BIND("second" AS ?value) }'
+    expect: {error: true}
+
+  - name: "SPARQL 1.1 10.2 tuple VALUES binds multiple variables"
+    noncritical: true
+    sparql: |
+      SELECT ?name ?rank WHERE {
+        VALUES (?name ?rank) { ("Alpha" 1) ("Beta" 2) }
+      }
+      ORDER BY ?rank
+    expect:
+      rows: 2
+      data:
+        - {"?name": "Alpha", "?rank": 1}
+        - {"?name": "Beta", "?rank": 2}
+
+  - name: "SPARQL 1.1 10.2 VALUES supports UNDEF"
+    noncritical: true
+    headers: {Accept: "application/sparql-results+json"}
+    sparql: 'SELECT ?left ?right WHERE { VALUES (?left ?right) { ("A" UNDEF) (UNDEF "B") } }'
+    expect:
+      rows: 2
+      contains: '"left"'
+
+  - name: "SPARQL 1.1 10.2 trailing VALUES applies after solution modifiers"
+    noncritical: true
+    sparql: 'SELECT ?value WHERE {} VALUES ?value { "A" "B" }'
+    expect: {rows: 2}
+
+  - name: "SPARQL 1.1 11 aggregate DISTINCT eliminates duplicate inputs"
+    noncritical: true
+    ttl_data: |
+      @prefix ex: <http://spec11-aggregate-distinct.example/> .
+      ex:a ex:value "same" . ex:b ex:value "same" .
+    sparql: |
+      PREFIX ex: <http://spec11-aggregate-distinct.example/>
+      SELECT (COUNT(DISTINCT ?value) AS ?count) WHERE { ?s ex:value ?value }
+    expect:
+      rows: 1
+      data: [{"?count": 1}]
+
+  - name: "SPARQL 1.1 11 SAMPLE returns one group member"
+    noncritical: true
+    ttl_data: |
+      @prefix ex: <http://spec11-sample.example/> .
+      ex:a ex:value "A" . ex:b ex:value "B" .
+    sparql: |
+      PREFIX ex: <http://spec11-sample.example/>
+      SELECT (SAMPLE(?value) AS ?sample) WHERE { ?s ex:value ?value }
+    expect: {rows: 1}
+
+  - name: "SPARQL 1.1 11 GROUP_CONCAT default separator is a space"
+    noncritical: true
+    ttl_data: |
+      @prefix ex: <http://spec11-group-concat.example/> .
+      ex:a ex:value "A" . ex:b ex:value "B" .
+    sparql: |
+      PREFIX ex: <http://spec11-group-concat.example/>
+      SELECT (GROUP_CONCAT(?value) AS ?joined) WHERE { ?s ex:value ?value }
+    expect:
+      rows: 1
+      contains: "A B"
+
+  - name: "SPARQL 1.1 11 GROUP BY accepts expressions and aliases"
+    noncritical: true
+    ttl_data: |
+      @prefix ex: <http://spec11-group-expression.example/> .
+      ex:a ex:label "alpha" . ex:b ex:label "apple" . ex:c ex:label "beta" .
+    sparql: |
+      PREFIX ex: <http://spec11-group-expression.example/>
+      SELECT ?initial (COUNT(*) AS ?count) WHERE { ?s ex:label ?label }
+      GROUP BY (SUBSTR(?label, 1, 1) AS ?initial)
+      ORDER BY ?initial
+    expect:
+      rows: 2
+      data:
+        - {"?initial": "a", "?count": 2}
+        - {"?initial": "b", "?count": 1}
+
+  - name: "SPARQL 1.1 11 HAVING accepts multiple constraints"
+    noncritical: true
+    ttl_data: |
+      @prefix ex: <http://spec11-having.example/> .
+      ex:a ex:group "A" ; ex:value 1, 2 . ex:b ex:group "B" ; ex:value 1 .
+    sparql: |
+      PREFIX ex: <http://spec11-having.example/>
+      SELECT ?group (COUNT(?value) AS ?count) WHERE { ?s ex:group ?group ; ex:value ?value }
+      GROUP BY ?group HAVING(COUNT(?value) > 1) HAVING(?group = "A")
+    expect:
+      rows: 1
+      data: [{"?group": "A", "?count": 2}]
+
+  - name: "SPARQL 1.1 12 subquery SELECT star exposes its projected scope"
+    noncritical: true
+    ttl_data: |
+      @prefix ex: <http://spec11-subquery-star.example/> .
+      ex:item ex:value "yes" .
+    sparql: |
+      PREFIX ex: <http://spec11-subquery-star.example/>
+      SELECT ?s ?value WHERE { { SELECT * WHERE { ?s ex:value ?value } } }
+    expect:
+      rows: 1
+      data: [{"?s": "http://spec11-subquery-star.example/item", "?value": "yes"}]
+
+  - name: "SPARQL 1.1 12 subquery solution modifiers apply before the outer join"
+    noncritical: true
+    ttl_data: |
+      @prefix ex: <http://spec11-subquery-modifiers.example/> .
+      ex:a ex:rank 1 . ex:b ex:rank 2 .
+    sparql: |
+      PREFIX ex: <http://spec11-subquery-modifiers.example/>
+      SELECT ?s WHERE { { SELECT ?s WHERE { ?s ex:rank ?rank } ORDER BY DESC(?rank) LIMIT 1 } }
+    expect:
+      rows: 1
+      data: [{"?s": "http://spec11-subquery-modifiers.example/b"}]
+
+cleanup: []
