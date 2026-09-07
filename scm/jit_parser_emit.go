@@ -258,25 +258,165 @@ func (emitter *jitParserEmitter) discardValue() {
 	emitter.ctx.FreeDesc(&sp)
 }
 
+// pushCheckpoint records a backtrack point. jitParserPushCheckpointNative just
+// appends a jitParserCheckpoint (five ints, no pointers) built from the current
+// slice lengths, so inline the len<cap fast path - write the struct in place,
+// bump the length - and only call the Go helper when the checkpoints slice must
+// grow. Same hot-path rationale as commit/restoreCheckpoint.
 func (emitter *jitParserEmitter) pushCheckpoint() {
+	ctx := emitter.ctx
 	position := emitter.loadPosition()
 	sp := emitter.statePointer()
+	cpOff := int32(unsafe.Offsetof(jitParserState{}.checkpoints))
+	mutOff := int32(unsafe.Offsetof(jitParserState{}.mutations))
+	valOff := int32(unsafe.Offsetof(jitParserState{}.values))
+	markOff := int32(unsafe.Offsetof(jitParserState{}.marks))
+	posSliceOff := int32(unsafe.Offsetof(jitParserState{}.positions))
+	const cpSize = int32(unsafe.Sizeof(jitParserCheckpoint{}))
+	const cpValueLen, cpMutationLen, cpMarkLen, cpPositionLen = 8, 16, 24, 32
+
+	lenReg := ctx.AllocReg()
+	elem := ctx.AllocRegExcept(lenReg)
+	tmp := ctx.AllocRegExcept(lenReg, elem)
+
+	ctx.EnsureDesc(&sp)
+	ctx.EnsureDesc(&position)
+	slow, done := ctx.ReserveLabel(), ctx.ReserveLabel()
+	ctx.EmitMovRegMem(lenReg, sp.Reg, cpOff+8)  // checkpoints.Len
+	ctx.EmitMovRegMem(tmp, sp.Reg, cpOff+16)    // checkpoints.Cap
+	ctx.EmitCmpInt64(lenReg, tmp)
+	ctx.EmitJump(CondUnsignedAboveOrEqual, slow)
+
+	// fast: elem = checkpoints.Data + Len*cpSize ; write the struct ; Len++
+	ctx.EmitMovRegReg(elem, lenReg)
+	ctx.EmitImulRegImm32(elem, cpSize)
+	ctx.EmitMovRegMem(tmp, sp.Reg, cpOff)
+	ctx.EmitAddInt64(elem, tmp)
+	ctx.EmitStoreRegMem(position.Reg, elem, 0)
+	ctx.EmitMovRegMem(tmp, sp.Reg, valOff+8)
+	ctx.EmitStoreRegMem(tmp, elem, cpValueLen)
+	ctx.EmitMovRegMem(tmp, sp.Reg, mutOff+8)
+	ctx.EmitStoreRegMem(tmp, elem, cpMutationLen)
+	ctx.EmitMovRegMem(tmp, sp.Reg, markOff+8)
+	ctx.EmitStoreRegMem(tmp, elem, cpMarkLen)
+	ctx.EmitMovRegMem(tmp, sp.Reg, posSliceOff+8)
+	ctx.EmitStoreRegMem(tmp, elem, cpPositionLen)
+	ctx.EmitAddRegImm32(lenReg, 1)
+	ctx.EmitStoreRegMem(lenReg, sp.Reg, cpOff+8)
+	ctx.EmitJmp(done)
+
+	ctx.MarkLabel(slow)
 	emitter.emitVoid(jitParserPushCheckpointNative, sp, position)
-	emitter.ctx.FreeDesc(&sp)
-	emitter.ctx.FreeDesc(&position)
+
+	ctx.MarkLabel(done)
+	ctx.FreeReg(tmp)
+	ctx.FreeReg(elem)
+	ctx.FreeReg(lenReg)
+	ctx.FreeDesc(&sp)
+	ctx.FreeDesc(&position)
+}
+
+// restoreCheckpoint backtracks to the innermost checkpoint. The common case -
+// a failed alternative that bound nothing - is pure slice-length bookkeeping:
+// truncate values / marks / positions, restore position, pop the checkpoint. It
+// is one of the hottest sites in the whole grammar (every rejected keyword atom
+// in a choice cascade), so inline that and only fall back to
+// jitParserRestoreCheckpointNative when there are binding mutations to undo.
+// emitRecordFailure records a terminal-match failure for the "expected ..."
+// diagnostic. jitParserRecordFailureNative only does anything when the failing
+// position is at or past the farthest reached so far - the overwhelmingly
+// common case in a choice cascade is a keyword failing well before that, where
+// the helper is two integer comparisons and a no-op. Inline that guard (one
+// load + cmp + branch) and build the `expected` string + call the helper only
+// on the rare at-or-past-farthest path. Leaves position loaded for the caller.
+func (emitter *jitParserEmitter) emitRecordFailure(desc string) {
+	ctx := emitter.ctx
+	position := emitter.loadPosition()
+	sp := emitter.statePointer()
+	farReg := ctx.AllocReg()
+	ctx.EmitMovRegMem(farReg, sp.Reg, int32(unsafe.Offsetof(jitParserState{}.farthest)))
+	skip := ctx.ReserveLabel()
+	ctx.EmitCmpInt64(position.Reg, farReg)
+	ctx.EmitJump(CondSignedLess, skip)
+	ctx.FreeReg(farReg)
+	expected := emitter.immPair(NewString(desc))
+	emitter.emitVoid(jitParserRecordFailureNative, sp, position, expected)
+	ctx.FreeDesc(&expected)
+	ctx.MarkLabel(skip)
+	ctx.FreeDesc(&sp)
+	ctx.FreeDesc(&position)
 }
 
 func (emitter *jitParserEmitter) restoreCheckpoint() {
+	ctx := emitter.ctx
 	sp := emitter.statePointer()
-	position := emitter.ctx.EmitGoCallScalar(GoFuncAddr(jitParserRestoreCheckpointNative), []JITValueDesc{sp}, 1)
-	emitter.ctx.FreeDesc(&sp)
-	position.Type = tagInt
-	emitter.storePosition(position)
+	cpOff := int32(unsafe.Offsetof(jitParserState{}.checkpoints))
+	mutOff := int32(unsafe.Offsetof(jitParserState{}.mutations))
+	valOff := int32(unsafe.Offsetof(jitParserState{}.values))
+	markOff := int32(unsafe.Offsetof(jitParserState{}.marks))
+	posSliceOff := int32(unsafe.Offsetof(jitParserState{}.positions))
+	const cpSize = int32(unsafe.Sizeof(jitParserCheckpoint{}))
+	const cpValueLen, cpMutationLen, cpMarkLen, cpPositionLen = 8, 16, 24, 32
+
+	lenReg := ctx.AllocReg()
+	elem := ctx.AllocRegExcept(lenReg)
+	a := ctx.AllocRegExcept(lenReg, elem)
+	b := ctx.AllocRegExcept(lenReg, elem, a)
+
+	// elem = &checkpoints.Data[checkpoints.Len-1] (without popping yet)
+	ctx.EmitMovRegMem(lenReg, sp.Reg, cpOff+8)
+	ctx.EmitMovRegReg(elem, lenReg)
+	ctx.EmitSubRegImm32(elem, 1)
+	ctx.EmitImulRegImm32(elem, cpSize)
+	ctx.EmitMovRegMem(a, sp.Reg, cpOff)
+	ctx.EmitAddInt64(elem, a)
+
+	slow, done := ctx.ReserveLabel(), ctx.ReserveLabel()
+	ctx.EmitMovRegMem(a, sp.Reg, mutOff+8)      // mutations.Len
+	ctx.EmitMovRegMem(b, elem, cpMutationLen)   // checkpoint.mutationLen
+	ctx.EmitCmpInt64(a, b)
+	ctx.EmitJump(CondNotEqual, slow)
+
+	// fast: pop the checkpoint, truncate the three unmutated slices, restore pos
+	ctx.EmitSubRegImm32(lenReg, 1)
+	ctx.EmitStoreRegMem(lenReg, sp.Reg, cpOff+8)
+	ctx.EmitMovRegMem(a, elem, cpValueLen)
+	ctx.EmitStoreRegMem(a, sp.Reg, valOff+8)
+	ctx.EmitMovRegMem(a, elem, cpMarkLen)
+	ctx.EmitStoreRegMem(a, sp.Reg, markOff+8)
+	ctx.EmitMovRegMem(a, elem, cpPositionLen)
+	ctx.EmitStoreRegMem(a, sp.Reg, posSliceOff+8)
+	ctx.EmitMovRegMem(a, elem, 0) // checkpoint.position
+	ctx.EmitStoreRegMem(a, ctx.StackReg, emitter.positionOff)
+	ctx.EmitJmp(done)
+
+	ctx.MarkLabel(slow)
+	pos := ctx.EmitGoCallScalar(GoFuncAddr(jitParserRestoreCheckpointNative), []JITValueDesc{sp}, 1)
+	ctx.EmitMovRegReg(a, pos.Reg)
+	ctx.FreeDesc(&pos)
+	ctx.EmitStoreRegMem(a, ctx.StackReg, emitter.positionOff)
+
+	ctx.MarkLabel(done)
+	ctx.FreeReg(b)
+	ctx.FreeReg(a)
+	ctx.FreeReg(elem)
+	ctx.FreeReg(lenReg)
+	ctx.FreeDesc(&sp)
 }
 
+// commitCheckpoint drops the innermost checkpoint. jitParserCommitCheckpointNative
+// does nothing but `state.checkpoints = state.checkpoints[:len-1]`, so inline
+// that single length decrement instead of paying the ~30-instruction Go-call
+// boundary at ~1600 sites. Push/commit are structurally balanced by the emitter,
+// so the underflow guard is a compile-time invariant.
 func (emitter *jitParserEmitter) commitCheckpoint() {
 	sp := emitter.statePointer()
-	emitter.emitVoid(jitParserCommitCheckpointNative, sp)
+	lenOff := int32(unsafe.Offsetof(jitParserState{}.checkpoints)) + 8
+	tmp := emitter.ctx.AllocReg()
+	emitter.ctx.EmitMovRegMem(tmp, sp.Reg, lenOff)
+	emitter.ctx.EmitSubRegImm32(tmp, 1)
+	emitter.ctx.EmitStoreRegMem(tmp, sp.Reg, lenOff)
+	emitter.ctx.FreeReg(tmp)
 	emitter.ctx.FreeDesc(&sp)
 }
 
@@ -377,11 +517,7 @@ func (emitter *jitParserEmitter) emitTerminal(node *jitParserNode, rule int, suc
 	}
 	emitter.ctx.EmitJmp(success)
 	emitter.ctx.MarkLabel(failed)
-	expected := emitter.immPair(NewString(node.description))
-	position := emitter.loadPosition()
-	emitter.emitStateVoid(jitParserRecordFailureNative, position, expected)
-	emitter.ctx.FreeDesc(&position)
-	emitter.ctx.FreeDesc(&expected)
+	emitter.emitRecordFailure(node.description)
 	emitter.ctx.EmitJmp(failure)
 	emitter.ctx.FreeStack(int32(len(captures) * 16))
 }
@@ -606,11 +742,7 @@ func (emitter *jitParserEmitter) emitDirectReturnLeaf(p *directReturnPlan, succe
 	ctx.EmitJmp(success)
 
 	ctx.MarkLabel(failed)
-	expected := emitter.immPair(NewString(p.desc))
-	position := emitter.loadPosition()
-	emitter.emitStateVoid(jitParserRecordFailureNative, position, expected)
-	ctx.FreeDesc(&position)
-	ctx.FreeDesc(&expected)
+	emitter.emitRecordFailure(p.desc)
 	ctx.EmitJmp(failure)
 
 	ctx.FreeStack(int32(len(captures) * 16))
