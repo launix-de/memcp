@@ -206,6 +206,58 @@ func mergeParserResultsNil(s string, r ...*parserResult) *parserResult {
 	return result
 }
 
+// parseRepeatSeparator lowers the separator slot of a (* | +) node. Absent or
+// nil means "no separator".
+func parseRepeatSeparator(list []Scmer, en *Env, ome *optimizerMetainfo, ignoreResult bool) packrat.Parser[*parserResult] {
+	if len(list) > 2 && !list[2].IsNil() {
+		return parseSyntax(list[2], en, ome, ignoreResult)
+	}
+	return packrat.NewEmptyParser(&parserResult{value: NewNil(), env: nil})
+}
+
+// scmParserAccumulable is satisfied by both *KleeneParser and *ManyParser.
+type scmParserAccumulable interface {
+	SetAccumulator(init func() *parserResult, step func(acc, item *parserResult) *parserResult, finish func(acc *parserResult) *parserResult)
+}
+
+// bindScmParserAccumulator lowers the accumulation form of (* | + item sep
+// noMemo init step finish): the repeat folds each item into an accumulator
+// (init seeds, step folds, finish maps) instead of collecting them, matching
+// the JIT's emitRepeatAccumulate. The lambdas run against the parse-time env.
+func bindScmParserAccumulator(p scmParserAccumulable, initExpr, stepExpr, finishExpr Scmer, en *Env) {
+	initProc := Eval(initExpr, en)
+	stepProc := Eval(stepExpr, en)
+	finishProc := Eval(finishExpr, en)
+	unwrap := func(r *parserResult) Scmer {
+		if r == nil {
+			return NewNil()
+		}
+		v := r.value
+		if v.GetTag() == tagAny {
+			if inner, ok := v.Any().(*parserResult); ok {
+				v = inner.value
+			}
+		}
+		return v
+	}
+	p.SetAccumulator(
+		func() *parserResult {
+			return &parserResult{value: Apply(initProc)}
+		},
+		func(acc, item *parserResult) *parserResult {
+			res := &parserResult{value: Apply(stepProc, acc.value, unwrap(item))}
+			acc.eachVariable(res.addVariable)
+			item.eachVariable(res.addVariable)
+			return res
+		},
+		func(acc *parserResult) *parserResult {
+			res := &parserResult{value: Apply(finishProc, acc.value)}
+			acc.eachVariable(res.addVariable)
+			return res
+		},
+	)
+}
+
 func (b *ScmParser) Execute(str string, en *Env) Scmer {
 	if jitEnabled && b.Compiled != nil && b.JITProgram != nil {
 		state := b.JITProgram.acquireState(len(str))
@@ -371,18 +423,17 @@ func parseSyntax(syntax Scmer, en *Env, ome *optimizerMetainfo, ignoreResult boo
 				if sub == nil {
 					return nil
 				}
-				var sep packrat.Parser[*parserResult]
-				if len(list) > 2 {
-					sep = parseSyntax(list[2], en, ome, ignoreResult)
-					if sep == nil {
-						return nil
-					}
-				} else {
-					sep = packrat.NewEmptyParser(&parserResult{value: NewNil(), env: nil})
+				sep := parseRepeatSeparator(list, en, ome, ignoreResult)
+				if sep == nil {
+					return nil
 				}
 				result := packrat.NewKleeneParser(merger, sub, sep)
-				if len(list) > 3 {
+				if len(list) > 3 && !list[3].IsNil() {
 					result.NoMemo = list[3].Bool()
+				}
+				if len(list) >= 7 {
+					result.NoMemo = true
+					bindScmParserAccumulator(result, list[4], list[5], list[6], en)
 				}
 				return result
 			case "+":
@@ -390,16 +441,16 @@ func parseSyntax(syntax Scmer, en *Env, ome *optimizerMetainfo, ignoreResult boo
 				if sub == nil {
 					return nil
 				}
-				var sep packrat.Parser[*parserResult]
-				if len(list) > 2 {
-					sep = parseSyntax(list[2], en, ome, ignoreResult)
-					if sep == nil {
-						return nil
-					}
-				} else {
-					sep = packrat.NewEmptyParser(&parserResult{value: NewNil(), env: nil})
+				sep := parseRepeatSeparator(list, en, ome, ignoreResult)
+				if sep == nil {
+					return nil
 				}
-				return packrat.NewManyParser(merger, sub, sep)
+				result := packrat.NewManyParser(merger, sub, sep)
+				if len(list) >= 7 {
+					result.NoMemo = true
+					bindScmParserAccumulator(result, list[4], list[5], list[6], en)
+				}
+				return result
 			case "?":
 				if len(list) == 2 {
 					sub := parseSyntax(list[1], en, ome, ignoreResult)

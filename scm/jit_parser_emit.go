@@ -972,6 +972,10 @@ func (emitter *jitParserEmitter) emitMemoFenceExit() {
 }
 
 func (emitter *jitParserEmitter) emitRepeat(node *jitParserNode, rule int, success, failure JITLabel) {
+	if node.accumulate {
+		emitter.emitRepeatAccumulate(node, rule, success, failure)
+		return
+	}
 	if node.noMemo {
 		emitter.noMemoDepth++
 		defer func() { emitter.noMemoDepth-- }()
@@ -1036,6 +1040,99 @@ func (emitter *jitParserEmitter) emitRepeat(node *jitParserNode, rule int, succe
 	}
 	emitter.commitCheckpoint()
 	emitter.ctx.EmitJmp(success)
+}
+
+// emitRepeatAccumulate lowers the accumulation form of * / + : accInit() once
+// into a frame slot, acc = accStep(acc, itemvalue) per accepted item (the
+// item's generator value is popped off state.values, never collected), and
+// accFinish(acc) once as the repeat's single pushed result. No pushMark /
+// mergeMark (i.e. no make+copy per repeat). The accumulator is fresh on every
+// entry, so an outer backtrack that re-enters this node simply re-inits.
+func (emitter *jitParserEmitter) emitRepeatAccumulate(node *jitParserNode, rule int, success, failure JITLabel) {
+	ctx := emitter.ctx
+	emitter.noMemoDepth++
+	defer func() { emitter.noMemoDepth-- }()
+
+	accOff := ctx.AllocStack(16)
+	ctx.EmitMovRegImm64(ctx.ScratchReg, 0)
+	ctx.EmitStoreRegMem(ctx.ScratchReg, ctx.StackReg, accOff)
+	ctx.EmitStoreRegMem(ctx.ScratchReg, ctx.StackReg, accOff+8)
+	ctx.setStackPointer(jitStackRootFrameSP, accOff-ctx.DynamicSP, true)
+	accTarget := func() JITValueDesc {
+		return JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: accOff, Rooted: true}
+	}
+	callAcc := func(proc *Proc, args []JITValueDesc) {
+		ctx.ReclaimUntrackedRegs()
+		v := JITEmitProcInline(ctx, proc, args, ctx.SliceBase, JITValueDesc{Loc: LocAny})
+		ctx.EnsureDesc(&v)
+		dst := accTarget()
+		ctx.EmitCopyScmerToDesc(&dst, &v)
+		ctx.FreeDesc(&v)
+	}
+	step := func() {
+		val := emitter.emitStateScalar(jitParserPopValueNative, 2)
+		val.Type = JITTypeUnknown
+		acc := accTarget()
+		callAcc(node.accStep, []JITValueDesc{acc, val})
+		ctx.FreeDesc(&val)
+	}
+
+	callAcc(node.accInit, nil)
+
+	emitter.pushCheckpoint()
+	firstAccepted, firstRejected := ctx.ReserveLabel(), ctx.ReserveLabel()
+	emitter.pushCheckpoint()
+	emitter.emitNode(node.children[0], rule, firstAccepted, firstRejected)
+	ctx.MarkLabel(firstAccepted)
+	step()
+	position := emitter.loadPosition()
+	progress := emitter.emitStateScalar(jitParserCommitProgressNative, 1, position)
+	ctx.FreeDesc(&position)
+	ctx.EmitCmpRegImm32(progress.Reg, 0)
+	ctx.FreeDesc(&progress)
+	done := ctx.ReserveLabel()
+	ctx.EmitJump(CondEqual, done)
+	loop := ctx.ReserveLabel()
+	ctx.EmitJmp(loop)
+
+	ctx.MarkLabel(firstRejected)
+	emitter.restoreCheckpoint()
+	if node.kind == jitParserOneOrMore {
+		emitter.restoreCheckpoint()
+		ctx.EmitJmp(failure)
+	} else {
+		ctx.EmitJmp(done)
+	}
+
+	ctx.MarkLabel(loop)
+	emitter.pushCheckpoint()
+	separatorAccepted, iterationAccepted, iterationRejected := ctx.ReserveLabel(), ctx.ReserveLabel(), ctx.ReserveLabel()
+	emitter.emitNode(node.children[1], rule, separatorAccepted, iterationRejected)
+	ctx.MarkLabel(separatorAccepted)
+	emitter.emitNode(node.children[0], rule, iterationAccepted, iterationRejected)
+	ctx.MarkLabel(iterationAccepted)
+	step()
+	position = emitter.loadPosition()
+	progress = emitter.emitStateScalar(jitParserCommitProgressNative, 1, position)
+	ctx.FreeDesc(&position)
+	ctx.EmitCmpRegImm32(progress.Reg, 0)
+	ctx.FreeDesc(&progress)
+	ctx.EmitJump(CondEqual, done)
+	ctx.EmitJmp(loop)
+	ctx.MarkLabel(iterationRejected)
+	emitter.restoreCheckpoint()
+	ctx.EmitJmp(done)
+
+	ctx.MarkLabel(done)
+	ctx.ReclaimUntrackedRegs()
+	acc := accTarget()
+	res := JITEmitProcInline(ctx, node.accFinish, []JITValueDesc{acc}, ctx.SliceBase, JITValueDesc{Loc: LocAny})
+	ctx.EnsureDesc(&res)
+	res = jitRootScmer(ctx, res)
+	emitter.pushValue(res)
+	ctx.FreeDesc(&res)
+	emitter.commitCheckpoint()
+	ctx.EmitJmp(success)
 }
 
 func (emitter *jitParserEmitter) emitExclude(node *jitParserNode, rule int, success, failure JITLabel) {

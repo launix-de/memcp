@@ -3911,6 +3911,20 @@ func OptimizeParser(val Scmer, env *Env, ome *optimizerMetainfo, ignoreResult bo
 		// capture wrapper - optimize sub-parser but keep capture structure
 		slice[1] = OptimizeParser(slice[1], env, ome, false)
 		val = NewSlice(slice)
+	} else if headOk && (headSym == Symbol("*") || headSym == Symbol("+")) {
+		// (* | + item sep [noMemo [init step finish]]). item and sep are
+		// sub-syntax; noMemo is a literal; init/step/finish (accumulation form)
+		// are ordinary lambdas, not sub-parsers.
+		if len(slice) > 1 {
+			slice[1] = OptimizeParser(slice[1], env, ome, ignoreResult)
+		}
+		if len(slice) > 2 && !slice[2].IsNil() {
+			slice[2] = OptimizeParser(slice[2], env, ome, true)
+		}
+		for i := 4; i < len(slice) && i < 7; i++ {
+			slice[i], _ = OptimizeEx(slice[i], env, ome, true)
+		}
+		val = NewSlice(slice)
 	} else {
 		for i := 1; i < len(slice); i++ {
 			slice[i] = OptimizeParser(slice[i], env, ome, ignoreResult)
