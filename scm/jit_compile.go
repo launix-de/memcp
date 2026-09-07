@@ -1477,7 +1477,7 @@ func (ctx *JITContext) StabilizeDescForControlFlow(desc *JITValueDesc) {
 	words := int32(0)
 	loc := desc.Loc
 	switch loc {
-	case LocReg:
+	case LocReg, LocFPReg:
 		words = 1
 	case LocRegPair:
 		words = 2
@@ -1489,13 +1489,21 @@ func (ctx *JITContext) StabilizeDescForControlFlow(desc *JITValueDesc) {
 	off := ctx.AllocStack(words * 8)
 	regs := [...]Reg{desc.Reg, desc.Reg2, desc.Reg3}
 	for i := int32(0); i < words; i++ {
-		ctx.EmitStoreRegMem(regs[i], ctx.StackReg, off+i*8)
+		if loc == LocFPReg {
+			ctx.EmitStoreFPRegMem(regs[i], ctx.StackReg, off+i*8)
+		} else {
+			ctx.EmitStoreRegMem(regs[i], ctx.StackReg, off+i*8)
+		}
 		ctx.setStackPointer(jitStackRootFrameSP, off+i*8-ctx.DynamicSP, jitValueWordIsPointer(*desc, i))
 		owner := ctx.RegOwners[regs[i]]
 		ownsReg := owner == desc || (owner != nil && desc.ID != 0 && owner.ID == desc.ID)
 		if ownsReg {
 			ctx.RegOwners[regs[i]] = nil
-			ctx.FreeRegs |= 1 << uint(regs[i])
+			if regs[i] >= RegX0 {
+				ctx.FreeFPRegs |= 1 << uint(regs[i])
+			} else {
+				ctx.FreeRegs |= 1 << uint(regs[i])
+			}
 		}
 	}
 	desc.Reg, desc.Reg2, desc.Reg3 = 0, 0, 0
@@ -1507,6 +1515,9 @@ func (ctx *JITContext) StabilizeDescForControlFlow(desc *JITValueDesc) {
 	switch loc {
 	case LocReg:
 		desc.Loc = LocStack
+	case LocFPReg:
+		desc.Loc = LocStack
+		desc.RegClass = JITRegisterClassFP
 	case LocRegPair:
 		desc.Loc = LocStackPair
 	case LocRegTriple:

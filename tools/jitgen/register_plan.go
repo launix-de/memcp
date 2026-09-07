@@ -38,6 +38,7 @@ import (
 type staticRegisterPlan struct {
 	colorByValue map[string]int
 	widthByValue map[string]int
+	classByValue map[string]string
 	slots        []staticRegisterSlot
 	colorCount   int
 }
@@ -47,6 +48,7 @@ type staticRegisterSlot struct {
 	width    int
 	weight   int
 	oldColor int
+	class    string
 }
 
 type registerPlanNode struct {
@@ -57,8 +59,12 @@ type registerPlanNode struct {
 
 const exactRegisterColoringLimit = 20
 
-func planLoopPhiRegisters(fn *ssa.Function) staticRegisterPlan {
-	plan := staticRegisterPlan{colorByValue: map[string]int{}, widthByValue: map[string]int{}}
+func planLoopPhiRegisters(fn *ssa.Function, nativeFP bool) staticRegisterPlan {
+	plan := staticRegisterPlan{
+		colorByValue: map[string]int{},
+		widthByValue: map[string]int{},
+		classByValue: map[string]string{},
+	}
 	if fn == nil {
 		return plan
 	}
@@ -84,7 +90,7 @@ func planLoopPhiRegisters(fn *ssa.Function) staticRegisterPlan {
 			// Same-block phi cycles describe true parallel swaps. Cross-block phi
 			// chains are safe once their simultaneous-copy interference is added
 			// below and are important for branch-updated rolling loop cursors.
-			if registerPlanHasSameBlockPhiInput(phi) {
+			if registerPlanHasSameBlockPhiInput(phi, nativeFP) {
 				continue
 			}
 			nodes = append(nodes, registerPlanNode{
@@ -98,24 +104,36 @@ func planLoopPhiRegisters(fn *ssa.Function) staticRegisterPlan {
 		return plan
 	}
 
-	colors, colorCount := planRegisterClass(fn, nodes)
-	var slots []staticRegisterSlot
-	slots = append(slots, registerClassSlots(nodes, colors, colorCount, 1)...)
-	sort.SliceStable(slots, func(i, j int) bool {
-		return slots[i].weight > slots[j].weight
-	})
-	kept := slots[:0]
-	for _, slot := range slots {
-		if plan.colorCount+slot.width > 16 {
-			continue
+	var gprNodes, fpNodes []registerPlanNode
+	for _, node := range nodes {
+		if nativeFP && isFloat64Type(node.value.Type()) {
+			fpNodes = append(fpNodes, node)
+		} else {
+			gprNodes = append(gprNodes, node)
 		}
-		slot.color = plan.colorCount
-		plan.colorCount += slot.width
-		kept = append(kept, slot)
 	}
-	slots = kept
-	plan.slots = kept
-	mapRegisterClassColors(&plan, nodes, colors, slots, 1)
+	appendClass := func(classNodes []registerPlanNode, class string) {
+		if len(classNodes) == 0 || len(plan.slots) >= 16 {
+			return
+		}
+		colors, colorCount := planRegisterClass(fn, classNodes)
+		slots := registerClassSlots(classNodes, colors, colorCount, 1)
+		sort.SliceStable(slots, func(i, j int) bool { return slots[i].weight > slots[j].weight })
+		kept := slots[:0]
+		for _, slot := range slots {
+			if len(plan.slots)+len(kept) >= 16 {
+				break
+			}
+			slot.color = plan.colorCount
+			slot.class = class
+			plan.colorCount += slot.width
+			kept = append(kept, slot)
+		}
+		plan.slots = append(plan.slots, kept...)
+		mapRegisterClassColors(&plan, classNodes, colors, kept, 1, class)
+	}
+	appendClass(gprNodes, "JITRegisterClassGPR")
+	appendClass(fpNodes, "JITRegisterClassFP")
 	return plan
 }
 
@@ -186,7 +204,7 @@ func registerClassSlots(nodes []registerPlanNode, colors []int, colorCount, widt
 	return slots
 }
 
-func mapRegisterClassColors(plan *staticRegisterPlan, nodes []registerPlanNode, colors []int, slots []staticRegisterSlot, width int) {
+func mapRegisterClassColors(plan *staticRegisterPlan, nodes []registerPlanNode, colors []int, slots []staticRegisterSlot, width int, class string) {
 	for node, color := range colors {
 		newColor := -1
 		for _, slot := range slots {
@@ -200,6 +218,7 @@ func mapRegisterClassColors(plan *staticRegisterPlan, nodes []registerPlanNode, 
 		}
 		plan.colorByValue[nodes[node].value.Name()] = newColor
 		plan.widthByValue[nodes[node].value.Name()] = width
+		plan.classByValue[nodes[node].value.Name()] = class
 	}
 }
 
@@ -248,9 +267,10 @@ func registerPlanLoopHeader(block *ssa.BasicBlock) bool {
 	return false
 }
 
-func registerPlanHasSameBlockPhiInput(phi *ssa.Phi) bool {
+func registerPlanHasSameBlockPhiInput(phi *ssa.Phi, allowSelfEdge bool) bool {
 	for _, edge := range phi.Edges {
-		if source, ok := edge.(*ssa.Phi); ok && source.Block() == phi.Block() {
+		if source, ok := edge.(*ssa.Phi); ok && source.Block() == phi.Block() &&
+			(!allowSelfEdge || source != phi) {
 			return true
 		}
 	}

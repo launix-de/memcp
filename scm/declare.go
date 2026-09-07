@@ -119,6 +119,11 @@ type TypeDescriptor struct {
 	// calls as recursive lambda emitters. It is capability metadata, not a
 	// runtime permission gate.
 	JITInlineCallbacks bool
+	// JITNativeFP opts this generated emitter into the typed floating-point
+	// register contract. The default deliberately preserves the generic Scmer
+	// lowering; declarations may enable this only when their source function
+	// proves that float values cannot change representation inside the loop.
+	JITNativeFP bool
 	// JITInlineCost is jitgen's architecture-neutral estimate of the emitted
 	// builtin body: the builtin's SSA instructions plus recursively inlined Go
 	// helpers. Zero denotes a handwritten emitter without generated cost data;

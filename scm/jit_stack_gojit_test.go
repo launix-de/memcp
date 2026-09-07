@@ -304,6 +304,29 @@ func TestJITRegisterHomesFollowArchitectureBank(t *testing.T) {
 	}
 }
 
+func TestJITRegisterHomesUseSeparateIntegerAndFloatBanks(t *testing.T) {
+	gpr := uint64(1 << uint(RegR13))
+	fp := uint64(1 << uint(RegX2))
+	ctx := &JITContext{
+		AllRegs: gpr, FreeRegs: gpr,
+		AllFPRegs: fp, FreeFPRegs: fp,
+		RegisterBank:   JITRegisterBank{Registers: [16]Reg{RegR13}, Count: 1},
+		FPRegisterBank: JITRegisterBank{Registers: [16]Reg{RegX2}, Count: 1},
+	}
+	plan := JITRegisterPlan{Slots: [16]JITRegisterSlot{
+		{Color: 0, Width: 1, Cost: 2},
+		{Color: 1, Width: 1, Class: JITRegisterClassFP, Cost: 2},
+	}, Count: 2}
+	homes := ctx.AllocRegisterHomes(plan)
+	if homes.Available != 3 || homes.Registers[0] != RegR13 || homes.Registers[1] != RegX2 {
+		t.Fatalf("mixed register homes = %#v, want R13 and XMM2", homes)
+	}
+	ctx.ReleaseRegisterHomes(homes)
+	if ctx.FreeRegs != gpr || ctx.FreeFPRegs != fp || ctx.ProtectedRegs != 0 {
+		t.Fatalf("released mixed homes: gpr=%#x fp=%#x protected=%#x", ctx.FreeRegs, ctx.FreeFPRegs, ctx.ProtectedRegs)
+	}
+}
+
 func TestJITPersistentRegisterBankExcludesGoScratchR15(t *testing.T) {
 	for index := uint8(0); index < jitX86RegisterBank.Count; index++ {
 		if jitX86RegisterBank.Registers[index] == RegR15 {

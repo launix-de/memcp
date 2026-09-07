@@ -20,6 +20,7 @@ package scm
 import (
 	"fmt"
 	"math"
+	"math/bits"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -79,6 +80,7 @@ Input arguments (args):
                 Imm.GetTag() carries the type. No register is allocated.
                 The emitter SHOULD constant-fold when all inputs are LocImm.
   - LocReg:     unboxed primitive in args[i].Reg.
+  - LocFPReg:   unboxed float in the backend's floating-point register file.
   - LocRegPair: boxed Scmer in args[i].Reg (ptr) + args[i].Reg2 (aux).
   - LocStack:   value on the stack at args[i].StackOff.
   - LocStackPair:
@@ -97,6 +99,7 @@ Result placement (result):
                 emitted), LocReg, or anything else. Use this when the caller
                 will immediately pass the result into another emitter.
   - LocReg:     result MUST be placed into result.Reg.
+  - LocFPReg:   result MUST be placed into result.Reg as a native float.
   - LocRegPair: result MUST be placed into result.Reg + result.Reg2.
   - LocStack:   result MUST be written to result.StackOff.
   - LocStackPair:
@@ -121,7 +124,8 @@ Constant propagation:
 
 Register discipline:
 
-  - Allocate registers with ctx.AllocReg(), free with ctx.FreeReg(r).
+  - Allocate integer registers with ctx.AllocReg() and floating-point registers
+    with ctx.AllocFPReg(); free either class with ctx.FreeReg(r).
   - Free consumed input registers via ctx.FreeDesc(&args[i]).
   - Never hold more registers than necessary between operations.
   - Scratch registers (R11) are reserved for internal use by emit helpers.
@@ -396,6 +400,7 @@ type JITValueDesc struct {
 	ID       uint32
 	Type     uint8 // tag constant (tagInt, tagFloat, ...) or JITTypeUnknown
 	Loc      JITLoc
+	RegClass JITRegisterClass
 	Reg      Reg
 	Reg2     Reg     // second register (for Scmer: ptr+aux)
 	StackOff int32   // stack offset (if Loc == LocStack)
@@ -543,6 +548,8 @@ const (
 	CcAE = CondUnsignedAboveOrEqual
 	CcBE = CondUnsignedBelowOrEqual
 	CcA  = CondUnsignedAbove
+	CcP  = CondParity
+	CcNP = CondNotParity
 )
 
 // JITTypeUnknown means the Scmer type is not known at compile time.
@@ -572,6 +579,26 @@ const (
 	LocParserTemplate
 	LocClosurePair // One Scmer in the current Go funcval's typed closure environment
 	LocFlags       // Ephemeral comparison result consumed immediately by a branch
+	LocFPReg       // Unboxed scalar in a native floating-point register
+)
+
+// JITRegisterClass separates values which share liveness but cannot share a
+// physical register. The common compiler uses these architecture-neutral
+// classes; each backend maps them to its native register files.
+type JITRegisterClass uint8
+
+const (
+	JITRegisterClassGPR JITRegisterClass = iota
+	JITRegisterClassFP
+)
+
+type JITFloatOp uint8
+
+const (
+	JITFloatAdd JITFloatOp = iota
+	JITFloatSub
+	JITFloatMul
+	JITFloatDiv
 )
 
 // JITFixup records a forward reference that must be patched after all
@@ -709,13 +736,16 @@ type JITContext struct {
 	Labels []int32
 	Fixups []JITFixup
 
-	Env       *JITEnv
-	FreeRegs  uint64
-	AllRegs   uint64 // original set of all allocatable registers (for spilling)
-	SliceBase Reg    // register holding the args slice pointer (for variable-index access)
+	Env        *JITEnv
+	FreeRegs   uint64
+	AllRegs    uint64 // original set of all allocatable registers (for spilling)
+	FreeFPRegs uint64
+	AllFPRegs  uint64
+	SliceBase  Reg // register holding the args slice pointer (for variable-index access)
 	// RegisterBank is supplied by the architecture backend. Generated register
 	// plans contain abstract colors and never name a physical register.
-	RegisterBank JITRegisterBank
+	RegisterBank   JITRegisterBank
+	FPRegisterBank JITRegisterBank
 	// Architecture register roles let common lowering describe placement without
 	// depending on one instruction set's register names.
 	StackReg     Reg
@@ -769,7 +799,7 @@ type JITContext struct {
 	SelfLoopLabel            JITLabel
 	HasSelfLoop              bool
 	SelfParamCount           int
-	RegOwners                [16]*JITValueDesc // register → owner descriptor (nil = untracked)
+	RegOwners                [32]*JITValueDesc // register → owner descriptor (nil = untracked)
 	// DynamicSP is the temporary distance below the static frame bottom. It
 	// covers pushed live registers, variadic arrays, and the Go call area.
 	DynamicSP    int32
@@ -794,9 +824,9 @@ type JITContext struct {
 	MaxSpillOffset int32 // spill-zone high-water mark
 
 	ProtectedRegs       uint64  // bitmask of registers that must not be spilled
-	ProtectedRegCounts  [16]int // per-register protection refcount (supports nested protection)
-	RegisterHomeCost    [16]uint16
-	RegisterHomeID      [16]uint16
+	ProtectedRegCounts  [32]int // per-register protection refcount (supports nested protection)
+	RegisterHomeCost    [32]uint16
+	RegisterHomeID      [32]uint16
 	PinnedRegisterHomes uint64
 	nextRegisterHomeID  uint16
 	nextDescID          uint32
@@ -833,6 +863,7 @@ type JITRegisterBank struct {
 type JITRegisterSlot struct {
 	Color uint8
 	Width uint8
+	Class JITRegisterClass
 	// Lanes selects the words which still need physical storage after dynamic
 	// type folding. Zero means all Width lanes for compact generated literals.
 	Lanes uint8
@@ -880,17 +911,29 @@ func (ctx *JITContext) AllocRegisterHomes(plan JITRegisterPlan) JITRegisterHomes
 	if plan.Count == 0 {
 		return homes
 	}
-	freeCount := 0
-	for index := uint8(0); index < ctx.RegisterBank.Count; index++ {
-		reg := ctx.RegisterBank.Registers[index]
-		bit := uint64(1) << uint(reg)
-		if ctx.AllRegs&bit != 0 && ctx.FreeRegs&bit != 0 && ctx.ProtectedRegs&bit == 0 {
-			freeCount++
+	var budgets [2]int
+	for class, bank := range [...]JITRegisterBank{ctx.RegisterBank, ctx.FPRegisterBank} {
+		all, free := ctx.AllRegs, ctx.FreeRegs
+		if JITRegisterClass(class) == JITRegisterClassFP {
+			all, free = ctx.AllFPRegs, ctx.FreeFPRegs
 		}
+		for index := uint8(0); index < bank.Count; index++ {
+			reg := bank.Registers[index]
+			bit := uint64(1) << uint(reg)
+			if all&bit != 0 && free&bit != 0 && ctx.ProtectedRegs&bit == 0 {
+				budgets[class]++
+			}
+		}
+		budgets[class] -= int(bank.TemporaryReserve)
 	}
-	budget := freeCount - int(ctx.RegisterBank.TemporaryReserve)
 	for slotIndex := uint8(0); slotIndex < plan.Count; slotIndex++ {
 		slot := plan.Slots[slotIndex]
+		class := slot.Class
+		bank := ctx.RegisterBank
+		all, free := ctx.AllRegs, ctx.FreeRegs
+		if class == JITRegisterClassFP {
+			bank, all, free = ctx.FPRegisterBank, ctx.AllFPRegs, ctx.FreeFPRegs
+		}
 		if slot.Width == 0 || slot.Width > 3 || int(slot.Color)+int(slot.Width) > len(homes.Registers) {
 			continue
 		}
@@ -905,7 +948,7 @@ func (ctx *JITContext) AllocRegisterHomes(plan JITRegisterPlan) JITRegisterHomes
 				laneCount++
 			}
 		}
-		for laneCount > budget {
+		for class == JITRegisterClassGPR && laneCount > budgets[class] {
 			homeID := ctx.cheapestEvictableRegisterHome(slot.Cost)
 			if homeID == 0 {
 				break
@@ -916,17 +959,22 @@ func (ctx *JITContext) AllocRegisterHomes(plan JITRegisterPlan) JITRegisterHomes
 			}
 			homes.Evicted[homes.Evictions] = evicted
 			homes.Evictions++
-			budget += int(evicted.width)
+			budgets[class] += int(evicted.width)
 		}
-		if laneCount > budget {
+		if laneCount > budgets[class] {
 			continue
+		}
+		if class == JITRegisterClassFP {
+			free = ctx.FreeFPRegs
+		} else {
+			free = ctx.FreeRegs
 		}
 		var selected [3]Reg
 		selectedCount := uint8(0)
-		for index := uint8(0); index < ctx.RegisterBank.Count && int(selectedCount) < laneCount; index++ {
-			reg := ctx.RegisterBank.Registers[index]
+		for index := uint8(0); index < bank.Count && int(selectedCount) < laneCount; index++ {
+			reg := bank.Registers[index]
 			bit := uint64(1) << uint(reg)
-			if ctx.AllRegs&bit == 0 || ctx.FreeRegs&bit == 0 || ctx.ProtectedRegs&bit != 0 {
+			if all&bit == 0 || free&bit == 0 || ctx.ProtectedRegs&bit != 0 {
 				continue
 			}
 			selected[selectedCount] = reg
@@ -947,7 +995,11 @@ func (ctx *JITContext) AllocRegisterHomes(plan JITRegisterPlan) JITRegisterHomes
 			reg := selected[selectedLane]
 			selectedLane++
 			bit := uint64(1) << uint(reg)
-			ctx.FreeRegs &^= bit
+			if class == JITRegisterClassFP {
+				ctx.FreeFPRegs &^= bit
+			} else {
+				ctx.FreeRegs &^= bit
+			}
 			ctx.ProtectReg(reg)
 			ctx.RegisterHomeCost[reg] = slot.Cost
 			ctx.RegisterHomeID[reg] = ctx.nextRegisterHomeID
@@ -955,14 +1007,13 @@ func (ctx *JITContext) AllocRegisterHomes(plan JITRegisterPlan) JITRegisterHomes
 			homes.Available |= 1 << (slot.Color + lane)
 			homes.OwnedRegs |= bit
 		}
-		budget -= laneCount
+		budgets[class] -= laneCount
 	}
 	return homes
 }
 
 func (ctx *JITContext) ReleaseRegisterHomes(homes JITRegisterHomes) {
-	for index := uint8(0); index < ctx.RegisterBank.Count; index++ {
-		reg := ctx.RegisterBank.Registers[index]
+	for reg := Reg(0); reg <= RegX15; reg++ {
 		bit := uint64(1) << uint(reg)
 		if homes.OwnedRegs&bit == 0 {
 			continue
@@ -1120,12 +1171,13 @@ func (ctx *JITContext) RequestOptimizedCallback(sourceInput int) JITValueDesc {
 // rewound; restoring only these Go fields cannot resurrect a runtime register.
 type jitAllocStateSnapshot struct {
 	freeRegs            uint64
+	freeFPRegs          uint64
 	protectedRegs       uint64
-	protectedRegCounts  [16]int
-	registerHomeCost    [16]uint16
-	registerHomeID      [16]uint16
+	protectedRegCounts  [32]int
+	registerHomeCost    [32]uint16
+	registerHomeID      [32]uint16
 	pinnedRegisterHomes uint64
-	regOwnerIDs         [16]uint32
+	regOwnerIDs         [32]uint32
 	ownerValues         []jitOwnerSnapshot
 	firstNewDescID      uint32
 	spillOffset         int32
@@ -1147,6 +1199,7 @@ type jitDescSpillSnapshot struct {
 func (ctx *JITContext) SnapshotAllocState() jitAllocStateSnapshot {
 	s := jitAllocStateSnapshot{
 		freeRegs:            ctx.FreeRegs,
+		freeFPRegs:          ctx.FreeFPRegs,
 		protectedRegs:       ctx.ProtectedRegs,
 		protectedRegCounts:  ctx.ProtectedRegCounts,
 		registerHomeCost:    ctx.RegisterHomeCost,
@@ -1165,7 +1218,7 @@ func (ctx *JITContext) SnapshotAllocState() jitAllocStateSnapshot {
 			s.ownerValues = append(s.ownerValues, jitOwnerSnapshot{id: id, value: *owner})
 		}
 	}
-	for r := Reg(0); r <= RegR15; r++ {
+	for r := Reg(0); r <= RegX15; r++ {
 		if owner := ctx.RegOwners[r]; owner != nil {
 			s.regOwnerIDs[r] = owner.ID
 		}
@@ -1185,6 +1238,7 @@ func (ctx *JITContext) SnapshotAllocState() jitAllocStateSnapshot {
 
 func (ctx *JITContext) RestoreAllocState(s jitAllocStateSnapshot) {
 	ctx.FreeRegs = s.freeRegs
+	ctx.FreeFPRegs = s.freeFPRegs
 	ctx.ProtectedRegs = s.protectedRegs
 	ctx.ProtectedRegCounts = s.protectedRegCounts
 	ctx.RegisterHomeCost = s.registerHomeCost
@@ -1209,7 +1263,7 @@ func (ctx *JITContext) RestoreAllocState(s jitAllocStateSnapshot) {
 		}
 		*owner = saved.value
 	}
-	for r := Reg(0); r <= RegR15; r++ {
+	for r := Reg(0); r <= RegX15; r++ {
 		id := s.regOwnerIDs[r]
 		if id == 0 {
 			ctx.RegOwners[r] = nil
@@ -1401,9 +1455,13 @@ func (ctx *JITContext) UnprotectReg(r Reg) {
 // tracked owner descriptor. This is used at BB boundaries in closure emitters
 // to prevent stale temporary allocations from exhausting the allocator.
 func (ctx *JITContext) ReclaimUntrackedRegs() {
-	for rr := Reg(0); rr <= RegR15; rr++ {
+	for rr := Reg(0); rr <= RegX15; rr++ {
 		bit := uint64(1 << uint(rr))
-		if (ctx.AllRegs & bit) == 0 {
+		all := ctx.AllRegs
+		if rr >= RegX0 {
+			all = ctx.AllFPRegs
+		}
+		if (all & bit) == 0 {
 			continue
 		}
 		if (ctx.ProtectedRegs & bit) != 0 {
@@ -1411,12 +1469,16 @@ func (ctx *JITContext) ReclaimUntrackedRegs() {
 		}
 		owner := ctx.RegOwners[rr]
 		if owner == nil {
-			ctx.FreeRegs |= bit
+			if rr >= RegX0 {
+				ctx.FreeFPRegs |= bit
+			} else {
+				ctx.FreeRegs |= bit
+			}
 			continue
 		}
 		valid := false
 		switch owner.Loc {
-		case LocReg:
+		case LocReg, LocFPReg:
 			valid = owner.Reg == rr
 		case LocRegPair:
 			valid = owner.Reg == rr || owner.Reg2 == rr
@@ -1425,7 +1487,11 @@ func (ctx *JITContext) ReclaimUntrackedRegs() {
 		}
 		if !valid {
 			ctx.RegOwners[rr] = nil
-			ctx.FreeRegs |= bit
+			if rr >= RegX0 {
+				ctx.FreeFPRegs |= bit
+			} else {
+				ctx.FreeRegs |= bit
+			}
 		}
 	}
 }
@@ -1440,8 +1506,8 @@ func (ctx *JITContext) ReclaimUntrackedRegs() {
 // freedom on the register bank.
 type JITRegisterBoundary struct {
 	alloc jitAllocStateSnapshot
-	regs  [16]Reg
-	offs  [16]int32
+	regs  [32]Reg
+	offs  [32]int32
 	count uint8
 }
 
@@ -1481,8 +1547,12 @@ func (ctx *JITContext) PreserveRegisters(options JITRegisterBoundaryOptions) JIT
 	for _, r := range options.ResultRegs {
 		resultMask |= 1 << uint(r)
 	}
-	for r := Reg(0); r <= RegR15; r++ {
-		if (ctx.AllRegs&(1<<uint(r))) == 0 || (ctx.FreeRegs&(1<<uint(r))) != 0 {
+	for r := Reg(0); r <= RegX15; r++ {
+		all, free := ctx.AllRegs, ctx.FreeRegs
+		if r >= RegX0 {
+			all, free = ctx.AllFPRegs, ctx.FreeFPRegs
+		}
+		if (all&(1<<uint(r))) == 0 || (free&(1<<uint(r))) != 0 {
 			continue
 		}
 		if resultMask&(1<<uint(r)) != 0 {
@@ -1496,15 +1566,23 @@ func (ctx *JITContext) PreserveRegisters(options JITRegisterBoundaryOptions) JIT
 			continue
 		}
 		off := ctx.AllocSpill(8)
-		ctx.EmitStoreRegMem(r, RegRBP, off)
-		if ctx.regHoldsPointer(r) {
+		if r >= RegX0 {
+			ctx.EmitStoreFPRegMem(r, ctx.FrameReg, off)
+		} else {
+			ctx.EmitStoreRegMem(r, ctx.FrameReg, off)
+		}
+		if r < RegX0 && ctx.regHoldsPointer(r) {
 			ctx.setStackPointer(jitStackRootFrameBP, off, true)
 		}
 		p.regs[p.count] = r
 		p.offs[p.count] = off
 		p.count++
 		ctx.RegOwners[r] = nil
-		ctx.FreeRegs |= 1 << uint(r)
+		if r >= RegX0 {
+			ctx.FreeFPRegs |= 1 << uint(r)
+		} else {
+			ctx.FreeRegs |= 1 << uint(r)
+		}
 		if options.ReleaseHomes {
 			// The snapshot retains the home metadata for Restore. Leaving it on a
 			// now-free register would make a nested plan mistake its own register
@@ -1514,7 +1592,7 @@ func (ctx *JITContext) PreserveRegisters(options JITRegisterBoundaryOptions) JIT
 		}
 	}
 	homeMask := uint64(0)
-	for r := Reg(0); r <= RegR15; r++ {
+	for r := Reg(0); r <= RegX15; r++ {
 		if !options.ReleaseHomes && ctx.RegisterHomeID[r] != 0 {
 			homeMask |= 1 << uint(r)
 		}
@@ -1523,7 +1601,7 @@ func (ctx *JITContext) PreserveRegisters(options JITRegisterBoundaryOptions) JIT
 	// legitimately use those physical registers until this boundary is restored.
 	ctx.PinnedRegisterHomes &= homeMask | resultMask
 	ctx.ProtectedRegs &= resultMask | homeMask
-	for r := Reg(0); r <= RegR15; r++ {
+	for r := Reg(0); r <= RegX15; r++ {
 		if (resultMask|homeMask)&(1<<uint(r)) == 0 {
 			ctx.ProtectedRegCounts[r] = 0
 		}
@@ -1540,7 +1618,11 @@ func (ctx *JITContext) RestoreOuterRegs(p JITRegisterBoundary) {
 // discards all allocator ownership created inside the boundary.
 func (p JITRegisterBoundary) Restore(ctx *JITContext) {
 	for i := uint8(0); i < p.count; i++ {
-		ctx.EmitMovRegMem(p.regs[i], RegRBP, p.offs[i])
+		if p.regs[i] >= RegX0 {
+			ctx.EmitLoadFPRegMem(p.regs[i], ctx.FrameReg, p.offs[i])
+		} else {
+			ctx.EmitMovRegMem(p.regs[i], ctx.FrameReg, p.offs[i])
+		}
 	}
 	ctx.RestoreAllocState(p.alloc)
 }
@@ -1721,6 +1803,44 @@ func (ctx *JITContext) AllocReg() Reg {
 	return r
 }
 
+// AllocFPReg allocates a scalar floating-point register independently from the
+// GPR allocator. FP values cannot consume pointer-bearing GPR homes, and vice
+// versa; keeping the files separate also maps directly to non-amd64 backends.
+func (ctx *JITContext) AllocFPReg() Reg {
+	available := ctx.FreeFPRegs &^ ctx.ProtectedRegs
+	if available != 0 {
+		bit := available & -available
+		ctx.FreeFPRegs &^= bit
+		return Reg(bits.TrailingZeros64(bit))
+	}
+	spillable := ctx.AllFPRegs &^ ctx.FreeFPRegs &^ ctx.ProtectedRegs
+	for bitIndex := int(RegX15); bitIndex >= int(RegX0); bitIndex-- {
+		bit := uint64(1) << uint(bitIndex)
+		if spillable&bit == 0 {
+			continue
+		}
+		owner := ctx.RegOwners[bitIndex]
+		if owner == nil || owner.Loc != LocFPReg || owner.Reg != Reg(bitIndex) {
+			continue
+		}
+		off := ctx.AllocSpill(8)
+		ctx.EmitStoreFPRegMem(Reg(bitIndex), ctx.FrameReg, off)
+		owner.Loc = LocStack
+		owner.StackOff = off
+		owner.Reg = 0
+		owner.RegClass = JITRegisterClassFP
+		if owner.ID != 0 {
+			if ctx.descSpills == nil {
+				ctx.descSpills = make(map[uint32]descSpillMeta)
+			}
+			ctx.descSpills[owner.ID] = descSpillMeta{loc: LocStack, stackOff: off}
+		}
+		ctx.RegOwners[bitIndex] = nil
+		return Reg(bitIndex)
+	}
+	panic("jit: floating-point register spill required without an owned value")
+}
+
 // EnsureDesc restores a descriptor from stack/spill locations to registers.
 func (ctx *JITContext) syncDescSpill(desc *JITValueDesc) {
 	if desc.ID == 0 || ctx.descSpills == nil {
@@ -1776,7 +1896,11 @@ func (ctx *JITContext) EnsureDesc(desc *JITValueDesc) {
 		ctx.BindReg(r1, desc)
 		ctx.BindReg(r2, desc)
 	case LocStack:
-		ctx.EnsureReg(desc)
+		if desc.RegClass == JITRegisterClassFP {
+			ctx.EnsureFPReg(desc)
+		} else {
+			ctx.EnsureReg(desc)
+		}
 	case LocStackPair:
 		r1 := ctx.AllocReg()
 		r2 := ctx.AllocRegExcept(r1)
@@ -1826,7 +1950,7 @@ func (ctx *JITContext) EnsureDescsTogether(descs ...*JITValueDesc) {
 	for _, desc := range descs {
 		ctx.EnsureDesc(desc)
 		switch desc.Loc {
-		case LocReg:
+		case LocReg, LocFPReg:
 			ctx.ProtectReg(desc.Reg)
 			protected[protectedCount] = desc.Reg
 			protectedCount++
@@ -1855,7 +1979,7 @@ func (ctx *JITContext) FreeReg(r Reg) {
 	owner := ctx.RegOwners[r]
 	if owner != nil {
 		switch owner.Loc {
-		case LocReg:
+		case LocReg, LocFPReg:
 			if owner.Reg == r {
 				owner.Loc = LocNone
 				owner.Reg = 0
@@ -1890,7 +2014,11 @@ func (ctx *JITContext) FreeReg(r Reg) {
 			}
 		}
 	}
-	ctx.FreeRegs |= 1 << uint(r)
+	if r >= RegX0 {
+		ctx.FreeFPRegs |= 1 << uint(r)
+	} else {
+		ctx.FreeRegs |= 1 << uint(r)
+	}
 	ctx.RegOwners[r] = nil
 }
 
@@ -1911,7 +2039,11 @@ func (ctx *JITContext) BindReg(r Reg, desc *JITValueDesc) {
 	}
 	*owner = *desc
 	// A bound register is live and must not be treated as free.
-	ctx.FreeRegs &^= 1 << uint(r)
+	if r >= RegX0 {
+		ctx.FreeFPRegs &^= 1 << uint(r)
+	} else {
+		ctx.FreeRegs &^= 1 << uint(r)
+	}
 	ctx.RegOwners[r] = owner
 	if desc.ID != 0 && ctx.descSpills != nil {
 		delete(ctx.descSpills, desc.ID)
@@ -1975,6 +2107,117 @@ func (ctx *JITContext) EnsureReg(desc *JITValueDesc) {
 	}
 }
 
+func (ctx *JITContext) EnsureFPReg(desc *JITValueDesc) {
+	if desc.Loc == LocFPReg {
+		return
+	}
+	r := ctx.AllocFPReg()
+	switch desc.Loc {
+	case LocStack:
+		base := ctx.StackReg
+		if desc.StackOff < 0 {
+			base = ctx.FrameReg
+		}
+		ctx.EmitLoadFPRegMem(r, base, desc.StackOff)
+	case LocReg:
+		ctx.EmitMovGPRToFP(r, desc.Reg)
+		ctx.FreeReg(desc.Reg)
+	case LocRegPair:
+		ctx.EmitMovGPRToFP(r, desc.Reg2)
+	default:
+		panic("jit: cannot materialize float in FP register")
+	}
+	desc.Loc = LocFPReg
+	desc.RegClass = JITRegisterClassFP
+	desc.Reg = r
+	desc.Reg2 = 0
+	desc.StackOff = 0
+	ctx.BindReg(r, desc)
+}
+
+// EmitFloatBinary keeps typed operands and results in the FP register file.
+// Constants use the backend scratch register, while SSA operands remain owned
+// by their descriptors so chains and loop phis do not bounce through GPRs.
+func (ctx *JITContext) EmitFloatBinary(left, right *JITValueDesc, op JITFloatOp) JITValueDesc {
+	if left.Loc != LocImm {
+		ctx.EnsureFPReg(left)
+	}
+	if right.Loc != LocImm {
+		ctx.EnsureFPReg(right)
+	}
+	if left.Loc == LocFPReg {
+		ctx.ProtectReg(left.Reg)
+		defer ctx.UnprotectReg(left.Reg)
+	}
+	if right.Loc == LocFPReg {
+		ctx.ProtectReg(right.Reg)
+		defer ctx.UnprotectReg(right.Reg)
+	}
+	result := JITValueDesc{Loc: LocFPReg, Type: tagFloat, RegClass: JITRegisterClassFP, Reg: ctx.AllocFPReg()}
+	ctx.EmitMovToReg(result.Reg, *left)
+	rightReg := right.Reg
+	if right.Loc == LocImm {
+		ctx.EmitMovToReg(RegX1, *right)
+		rightReg = RegX1
+	}
+	switch op {
+	case JITFloatAdd:
+		ctx.EmitAddFP64(result.Reg, rightReg)
+	case JITFloatSub:
+		ctx.EmitSubFP64(result.Reg, rightReg)
+	case JITFloatMul:
+		ctx.EmitMulFP64(result.Reg, rightReg)
+	case JITFloatDiv:
+		ctx.EmitDivFP64(result.Reg, rightReg)
+	default:
+		panic("jit: unknown floating-point operation")
+	}
+	ctx.BindReg(result.Reg, &result)
+	return result
+}
+
+func (ctx *JITContext) EmitFloatCompare(left, right *JITValueDesc, condition JITCondition) JITValueDesc {
+	if left.Loc == LocImm && right.Loc == LocImm {
+		x, y := left.Imm.Float(), right.Imm.Float()
+		var value bool
+		switch condition {
+		case CcE:
+			value = x == y
+		case CcNE:
+			value = x != y
+		case CcL:
+			value = x < y
+		case CcLE:
+			value = x <= y
+		case CcG:
+			value = x > y
+		case CcGE:
+			value = x >= y
+		}
+		return JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(value)}
+	}
+	if left.Loc != LocImm {
+		ctx.EnsureFPReg(left)
+	}
+	if right.Loc != LocImm {
+		ctx.EnsureFPReg(right)
+	}
+	leftReg := left.Reg
+	if left.Loc == LocImm {
+		ctx.EmitMovToReg(RegX0, *left)
+		leftReg = RegX0
+	}
+	rightReg := right.Reg
+	if right.Loc == LocImm {
+		ctx.EmitMovToReg(RegX1, *right)
+		rightReg = RegX1
+	}
+	result := JITValueDesc{Loc: LocReg, Type: tagBool, Reg: ctx.AllocReg()}
+	ctx.EmitCmpFP64Setcc(result.Reg, leftReg, rightReg, condition)
+	ctx.BindReg(result.Reg, &result)
+	return result
+}
+
 // FreeDesc releases any registers held by a value descriptor.
 func (ctx *JITContext) FreeDesc(desc *JITValueDesc) {
 	// Non-owning descriptors (ID==0), e.g. copied call arguments, must not
@@ -1989,6 +2232,11 @@ func (ctx *JITContext) FreeDesc(desc *JITValueDesc) {
 			if owner == nil || owner == desc || (desc.ID != 0 && owner.ID == desc.ID) {
 				ctx.FreeReg(desc.Reg)
 			}
+		}
+	case LocFPReg:
+		owner := ctx.RegOwners[desc.Reg]
+		if owner == nil || owner == desc || (desc.ID != 0 && owner.ID == desc.ID) {
+			ctx.FreeReg(desc.Reg)
 		}
 	case LocRegPair:
 		if desc.Reg <= RegR15 {
@@ -3106,6 +3354,19 @@ func (ctx *JITContext) collectLiveRegsForCall(buf *[16]Reg) []Reg {
 	return buf[:liveCount]
 }
 
+func (ctx *JITContext) collectLiveFPRegsForCall(buf *[16]Reg) []Reg {
+	liveMask := (ctx.AllFPRegs &^ ctx.FreeFPRegs) | (ctx.ProtectedRegs & ctx.AllFPRegs)
+	count := 0
+	for reg := RegX0; reg <= RegX15; reg++ {
+		if liveMask&(uint64(1)<<uint(reg)) == 0 {
+			continue
+		}
+		buf[count] = reg
+		count++
+	}
+	return buf[:count]
+}
+
 // EmitGoCall emits a call to a Go function from JIT code.
 // argWords: registers holding argument words in Go ABI order.
 // numResultWords: how many result words to capture.
@@ -3218,6 +3479,18 @@ func (ctx *JITContext) emitGoCall(funcAddr uint64, argWords []goCallArgWord, num
 	// Owner-aware liveness with conservative fallback.
 	var liveRegsArr [16]Reg
 	liveRegs := ctx.collectLiveRegsForCall(&liveRegsArr)
+	var liveFPRegsArr [16]Reg
+	liveFPRegs := ctx.collectLiveFPRegsForCall(&liveFPRegsArr)
+	var liveFPOffs [16]int32
+	for index, reg := range liveFPRegs {
+		liveFPOffs[index] = ctx.AllocSpill(8)
+		ctx.EmitStoreFPRegMem(reg, ctx.FrameReg, liveFPOffs[index])
+	}
+	restoreLiveFP := func() {
+		for index, reg := range liveFPRegs {
+			ctx.EmitLoadFPRegMem(reg, ctx.FrameReg, liveFPOffs[index])
+		}
+	}
 	// A requested result register is dead immediately before the call: argument
 	// setup has already consumed its old value and the call deliberately
 	// overwrites it. Saving and restoring such a register only to overwrite it
@@ -3330,6 +3603,7 @@ func (ctx *JITContext) emitGoCall(funcAddr uint64, argWords []goCallArgWord, num
 		ctx.emitCallIndirectWithSetup(funcAddr, func(callFrameBytes int32) {
 			emitArgSetup(callFrameBytes)
 		}, nil)
+		restoreLiveFP()
 		if ctx.SliceBaseTracksRSP && ctx.SliceBase != RegRSP {
 			ctx.emitMovRegReg(ctx.SliceBase, RegRSP)
 		}
@@ -3408,6 +3682,7 @@ func (ctx *JITContext) emitGoCall(funcAddr uint64, argWords []goCallArgWord, num
 	ctx.emitCallIndirectWithSetup(funcAddr, func(callFrameBytes int32) {
 		emitArgSetup(stackArgBaseDisp + callFrameBytes)
 	}, transientRoots)
+	restoreLiveFP()
 
 	// Store results to reserved stack slots (above saved regs + padding)
 	paddingSize := 0
