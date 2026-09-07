@@ -127,6 +127,66 @@ func TestParallelMoveBatchNeverUsesStackOrFrameRegisterAsScratch(t *testing.T) {
 	}
 }
 
+func TestDeferredRegisterMovesCollapseAcrossEmitterBoundaries(t *testing.T) {
+	code := make([]byte, 128)
+	ctx := &JITContext{
+		Start:        unsafe.Pointer(&code[0]),
+		Ptr:          unsafe.Pointer(&code[0]),
+		End:          unsafe.Pointer(&code[len(code)-1]),
+		SliceBase:    RegR12,
+		ScratchReg:   RegR11,
+		StackReg:     RegRSP,
+		RegisterBank: jitX86RegisterBank,
+	}
+
+	// Model two independent inline emitters handing the same value through an
+	// otherwise dead intermediate register. Ending the producer lifetime must
+	// reserve its physical register for the alias rather than forcing an early
+	// copy. The physical stream needs only the final RDI -> RDX move.
+	ctx.AllRegs = uint64(jitRegisterMask(RegRDI, RegRSI, RegRDX))
+	ctx.EmitMovRegReg(RegRSI, RegRDI)
+	ctx.FreeReg(RegRDI)
+	ctx.EmitMovRegReg(RegRDX, RegRSI)
+	ctx.FreeReg(RegRSI)
+	if ctx.Ptr != ctx.Start {
+		t.Fatal("deferred moves emitted before a materialization barrier")
+	}
+	if ctx.FreeRegs&uint64(jitRegisterMask(RegRDI)) != 0 {
+		t.Fatal("aliased physical source returned to allocator before materialization")
+	}
+	ctx.FlushRegisterMoves()
+	emitted := code[:uintptr(ctx.Ptr)-uintptr(ctx.Start)]
+	if want := []byte{0x48, 0x89, 0xfa}; !bytes.Equal(emitted, want) {
+		t.Fatalf("collapsed deferred chain = %x, want %x", emitted, want)
+	}
+	if ctx.FreeRegs&uint64(jitRegisterMask(RegRDI)) == 0 {
+		t.Fatal("physical source remained held after its final alias materialized")
+	}
+}
+
+func TestDeferredRegisterMovesPreserveOldSourceBeforeOverwrite(t *testing.T) {
+	code := make([]byte, 128)
+	ctx := &JITContext{
+		Start:        unsafe.Pointer(&code[0]),
+		Ptr:          unsafe.Pointer(&code[0]),
+		End:          unsafe.Pointer(&code[len(code)-1]),
+		SliceBase:    RegR12,
+		ScratchReg:   RegR11,
+		StackReg:     RegRSP,
+		RegisterBank: jitX86RegisterBank,
+	}
+
+	ctx.EmitMovRegReg(RegRSI, RegRDI)
+	ctx.EmitMovRegReg(RegRDI, RegRAX)
+	ctx.FlushRegisterMoves()
+	// RSI must receive the old RDI before the later RAX -> RDI assignment.
+	emitted := code[:uintptr(ctx.Ptr)-uintptr(ctx.Start)]
+	want := []byte{0x48, 0x89, 0xfe, 0x48, 0x89, 0xc7}
+	if !bytes.Equal(emitted, want) {
+		t.Fatalf("overwrite-preserving deferred moves = %x, want %x", emitted, want)
+	}
+}
+
 func jitFourScalarResults(seed uint32) (int64, bool, int64, int64) {
 	return int64(seed) + 1, seed&1 != 0, int64(seed) + 3, int64(seed) + 5
 }
