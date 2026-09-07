@@ -1688,13 +1688,29 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 		(define flattened_joins (rdf_shared_join_filters
 			(rdf_shared_state_bindings state) flattened_right))
 		(if negate
-			(list
-				(append (rdf_shared_state_sources state)
-					(list alias schema query true (rdf_shared_where joins)))
-				(rdf_shared_state_bindings state)
-				(cons (list (quote nil?) (get_assoc right (car shared)))
-					(rdf_shared_state_filters state))
-				(+ index 1))
+			(if (equal? (count (qb_sources query)) 1)
+				(begin
+					/* Keep a one-pattern anti-join in the same flat join graph. This
+					avoids an unnecessary derived carrier while retaining the query
+					planner's normal costing and source reordering. */
+					(define source (car (qb_sources query)))
+					(list
+						(append (rdf_shared_state_sources state)
+							(list (source_alias source) (source_schema source)
+								(source_relation source) true
+								(rdf_shared_where (merge (list
+									(list (qb_where query)) flattened_joins)))))
+						(rdf_shared_state_bindings state)
+						(cons (list (quote nil?) (get_assoc flattened_right (car shared)))
+							(rdf_shared_state_filters state))
+						(+ index 1)))
+				(list
+					(append (rdf_shared_state_sources state)
+						(list alias schema query true (rdf_shared_where joins)))
+					(rdf_shared_state_bindings state)
+					(cons (list (quote nil?) (get_assoc right (car shared)))
+						(rdf_shared_state_filters state))
+					(+ index 1)))
 			/* A set-unique positive operand needs no cardinality barrier. Flatten
 				its base sources into the current BGP so the common planner can cost
 				and reorder the complete semi-join as one join graph. */
@@ -1906,7 +1922,9 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 				/* MINUS evaluates its right group independently, then removes
 				compatible mappings. Correlation belongs in the anti-join predicate. */
 				(match (rdf_shared_conditions_relation schema inner '()) '(query vars)
-					(rdf_shared_minus_relation schema state query vars shared))))
+					(if (rdf_shared_exists_direct_safe query vars shared)
+						(rdf_shared_exists_direct_relation schema state query vars shared true)
+						(rdf_shared_minus_relation schema state query vars shared)))))
 		'("__service__" silent endpoint _inner)
 		(if silent state (error "SPARQL SERVICE endpoint unavailable: " endpoint))
 		'("__union__" branches)
