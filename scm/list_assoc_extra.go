@@ -17,8 +17,16 @@ Copyright (C) 2026  Carl-Philip Hänsch
 package scm
 
 func treeCollectTaggedNthUnique(root, tag Scmer, position int) Scmer {
+	return collectTaggedNthUnique(root, tag, position, true)
+}
+
+func exprCollectTaggedNthUnique(root, tag Scmer, position int) Scmer {
+	return collectTaggedNthUnique(root, tag, position, false)
+}
+
+func collectTaggedNthUnique(root, tag Scmer, position int, traverseHeads bool) Scmer {
 	if position < 0 {
-		panic("tree_collect_tagged_nth_unique expects a non-negative position")
+		panic("tagged nth collector expects a non-negative position")
 	}
 
 	// Compiler trees are normally shallow and aliases are few. Keep traversal
@@ -56,7 +64,11 @@ func treeCollectTaggedNthUnique(root, tag Scmer, position int) Scmer {
 			// data, not another expression to inspect for the same tag.
 			continue
 		}
-		for index := len(items) - 1; index >= 0; index-- {
+		firstChild := 0
+		if !traverseHeads {
+			firstChild = 1
+		}
+		for index := len(items) - 1; index >= firstChild; index-- {
 			pending = append(pending, items[index])
 		}
 	}
@@ -83,6 +95,21 @@ func init_list_assoc_extra() {
 		Type: &TypeDescriptor{Kind: "func", Description: "collects the unique zero-based nth values of tagged nodes in a nested list tree",
 			Params: []*TypeDescriptor{
 				{Kind: "any", Label: "tree", NoEscape: true},
+				{Kind: "any", Label: "tag", NoEscape: true},
+				{Kind: "number", Label: "position"},
+			},
+			Return: FreshAlloc,
+			Const:  true,
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		Name: "expr_collect_tagged_nth_unique",
+		Fn: func(a ...Scmer) Scmer {
+			return exprCollectTaggedNthUnique(a[0], a[1], int(ToInt(a[2])))
+		},
+		Type: &TypeDescriptor{Kind: "func", Description: "collects unique zero-based nth values of tagged operand expressions without traversing operator heads",
+			Params: []*TypeDescriptor{
+				{Kind: "any", Label: "expression", NoEscape: true},
 				{Kind: "any", Label: "tag", NoEscape: true},
 				{Kind: "number", Label: "position"},
 			},
