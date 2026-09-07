@@ -509,7 +509,9 @@ func (emitter *jitParserEmitter) emitTerminal(node *jitParserNode, rule int, suc
 		skipped := emitter.ctx.ReserveLabel()
 		emitter.emitSkip(rule, skipped)
 		emitter.ctx.MarkLabel(skipped)
-		emitter.atBreak(failure)
+		if !node.skipBreakBefore {
+			emitter.atBreak(failure)
+		}
 	}
 	emitter.ctx.MarkLabel(matchStart)
 	matched := emitter.ctx.ReserveLabel()
@@ -519,7 +521,7 @@ func (emitter *jitParserEmitter) emitTerminal(node *jitParserNode, rule int, suc
 	jitEmitNativeRegex(emitter.ctx, node.regex, input, captures, matched, failed, failed, nil, false)
 	emitter.ctx.MarkLabel(matched)
 	emitter.advanceBy(captures[0])
-	if node.skipWS {
+	if node.skipWS && !node.skipBreakAfter {
 		emitter.atBreak(failure)
 	}
 	if !node.ignoreResult {
