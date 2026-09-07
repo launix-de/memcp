@@ -75,10 +75,10 @@ type jitParserNode struct {
 	// the repeat's single result. Set by buildNode when the * / + syntax
 	// carries init/step/finish lambdas past the noMemo slot, or injected by the
 	// optimizer. Fresh acc per repeat entry, so an outer backtrack re-inits.
-	accumulate  bool
-	accInit     *Proc
-	accStep     *Proc
-	accFinish   *Proc
+	accumulate bool
+	accInit    *Proc
+	accStep    *Proc
+	accFinish  *Proc
 }
 
 type jitParserRule struct {

@@ -104,6 +104,145 @@ func add(a ...Scmer) Scmer { return NewInt(a[0].Int() + a[1].Int()) }
 	}
 }
 
+func TestComparisonConsumedByBranchKeepsMachineFlags(t *testing.T) {
+	fn := buildTestSSAFunction(t, `package sample
+type Scmer struct{}
+func NewInt(int64) Scmer
+func (Scmer) Int() int64
+func minimum(a ...Scmer) Scmer {
+	if a[0].Int() < a[1].Int() {
+		return a[0]
+	}
+	return a[1]
+}
+`, "minimum")
+	code, errMsg := generateClosure("minimum", fn, nil)
+	if errMsg != "" {
+		t.Fatal(errMsg)
+	}
+	for _, want := range []string{
+		"Loc: LocFlags",
+		"Condition: CondSignedLess",
+		"ctx.EmitJump(",
+		".Condition,",
+	} {
+		if !strings.Contains(code, want) {
+			t.Fatalf("generated comparison branch does not contain %q:\n%s", want, code)
+		}
+	}
+	if strings.Contains(code, "ctx.EmitSetcc(") {
+		t.Fatalf("generated comparison branch materializes a boolean:\n%s", code)
+	}
+	jump := strings.Index(code, "ctx.EmitJump(")
+	if jump < 0 {
+		t.Fatalf("generated comparison branch does not emit a conditional jump:\n%s", code)
+	}
+	free := strings.Index(code[jump:], "ctx.FreeDesc(")
+	snapshot := strings.Index(code[jump:], "ctx.SnapshotAllocState(")
+	if free < 0 || (snapshot >= 0 && free > snapshot) {
+		t.Fatalf("generated comparison branch does not release its flags carrier after the jump:\n%s", code)
+	}
+}
+
+func TestRenderedSuccessorClosesPlannedFallthrough(t *testing.T) {
+	fn := buildTestSSAFunction(t, `package sample
+type Scmer struct{}
+func (Scmer) Int() int64
+func choose(a ...Scmer) Scmer {
+	if a[0].Int() < a[1].Int() && a[1].Int() < a[2].Int() {
+		return a[1]
+	}
+	return a[0]
+}
+`, "choose")
+	code, errMsg := generateClosure("choose", fn, nil)
+	if errMsg != "" {
+		t.Fatal(errMsg)
+	}
+	if !strings.Contains(code, ".Rendered { ctx.EmitJmp(") {
+		t.Fatalf("generated branch can fall through into an already rendered sibling:\n%s", code)
+	}
+}
+
+func TestIsNaNConsumedByBranchKeepsParityFlag(t *testing.T) {
+	fn := buildTestSSAFunction(t, `package sample
+import "math"
+type Scmer struct{}
+func NewNil() Scmer
+func NewFloat(float64) Scmer
+func classify(a ...Scmer) Scmer {
+	v := float64(len(a))
+	if math.IsNaN(v) {
+		return NewNil()
+	}
+	return NewFloat(v)
+}
+`, "classify")
+	code, errMsg := generateClosure("classify", fn, nil)
+	if errMsg != "" {
+		t.Fatal(errMsg)
+	}
+	for _, want := range []string{
+		"ctx.EmitCmpFloat64(",
+		"Loc: LocFlags",
+		"Condition: CondParity",
+		"ctx.EmitJump(",
+	} {
+		if !strings.Contains(code, want) {
+			t.Fatalf("generated IsNaN branch does not contain %q:\n%s", want, code)
+		}
+	}
+	if strings.Contains(code, "ctx.EmitSetcc(") {
+		t.Fatalf("generated IsNaN branch materializes a boolean:\n%s", code)
+	}
+}
+
+func TestSinglePredecessorBranchValueMayRemainInRegister(t *testing.T) {
+	fn := buildTestSSAFunction(t, `package sample
+import "math"
+func classify(values []float64, index int) float64 {
+	value := values[index]
+	if math.IsNaN(value) { return 0 }
+	return value
+}
+`, "classify")
+	found := false
+	for _, block := range fn.Blocks {
+		for _, instruction := range block.Instrs {
+			value, ok := instruction.(ssa.Value)
+			if ok && crossBlockValueHasSinglePredecessorConsumer(value) {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatal("branch-local value was not recognized as a register-safe edge value")
+	}
+}
+
+func TestJoinedBranchValueStillRequiresStableHome(t *testing.T) {
+	fn := buildTestSSAFunction(t, `package sample
+func choose(value int, left bool) int {
+	loaded := value + 1
+	if left { loaded += 2 } else { loaded += 3 }
+	return loaded
+}
+`, "choose")
+	for _, block := range fn.Blocks {
+		for _, instruction := range block.Instrs {
+			value, ok := instruction.(ssa.Value)
+			if !ok || !ssaValueCrossesControlFlow(value) {
+				continue
+			}
+			if crossBlockValueHasSinglePredecessorConsumer(value) {
+				continue
+			}
+			return
+		}
+	}
+	t.Fatal("test SSA did not retain a joined value requiring a stable home")
+}
+
 func TestLoopPhiRegisterPlanColorsInterferenceGraph(t *testing.T) {
 	fn := buildTestSSAFunction(t, `package sample
 func rolling(limit uint64) uint64 {
@@ -148,7 +287,7 @@ func rolling(a ...Scmer) Scmer {
 	if errMsg != "" {
 		t.Fatal(errMsg)
 	}
-	if !strings.Contains(code, "AllocRegisterHomes(") {
+	if !strings.Contains(code, "ctx.AllocRegisterHomes(") {
 		t.Fatalf("generated builtin did not emit its register plan:\n%s", code)
 	}
 }
@@ -163,6 +302,55 @@ func mappedSum(values []int, callback func(int) int) int {
 `, "mappedSum")
 	if inlineRegisterPlanSafe(fn) {
 		t.Fatal("dynamic callback was treated as part of the standalone interference graph")
+	}
+}
+
+func TestVariableShiftUsesMachineInstructionForBoundedUnsignedCount(t *testing.T) {
+	fn := buildTestSSAFunction(t, `package sample
+func shift(value, count uint64) uint64 {
+	return value << (count % 64)
+}
+`, "shift")
+	var shift *ssa.BinOp
+	for _, block := range fn.Blocks {
+		for _, instruction := range block.Instrs {
+			candidate, ok := instruction.(*ssa.BinOp)
+			if ok && candidate.Op == token.SHL {
+				shift = candidate
+			}
+		}
+	}
+	if shift == nil {
+		t.Fatal("shift expression not found in SSA")
+	}
+	if !ssaUnsignedValueBelow(shift.Y, 64) {
+		t.Fatalf("modulo-bounded shift count was not recognized: %s", shift.Y)
+	}
+}
+
+func TestInlineArgumentLivenessIgnoresMutuallyExclusiveSibling(t *testing.T) {
+	fn := buildTestSSAFunction(t, `package sample
+func identity(value uint32) uint32 { return value }
+func choose(value uint32, left bool) uint32 {
+	if left { return identity(value) }
+	return identity(value)
+}
+`, "choose")
+	var calls []*ssa.Call
+	for _, block := range fn.Blocks {
+		for _, instruction := range block.Instrs {
+			if call, ok := instruction.(*ssa.Call); ok {
+				calls = append(calls, call)
+			}
+		}
+	}
+	if len(calls) != 2 {
+		t.Fatalf("calls = %d, want two branch-local calls", len(calls))
+	}
+	for _, call := range calls {
+		if ssaValueNeededAfterInstruction(call, fn.Params[0]) {
+			t.Fatalf("value incorrectly live from %s into sibling branch", call.Block())
+		}
 	}
 }
 
@@ -349,6 +537,35 @@ func init() {
 	ops := collectOperators(fset, file, "sample.go")
 	if len(ops) != 1 || ops[0].name != "nested" || !ops[0].jitInsertPos.IsValid() {
 		t.Fatalf("collectOperators() = %#v, want one root declaration insertion", ops)
+	}
+}
+
+func TestStorageStableInputsBelongToSourceDeclaration(t *testing.T) {
+	const source = `package sample
+//jitgen:control-flow-stable detached comments must be ignored
+type StorageWrapper struct{}
+//jitgen:control-flow-stable recid count target/3 stride
+func (s *StorageWrapper) GetValueRange(recid, count int, target []int, stride int) {}
+func (s *StorageWrapper) JITEmitGetValueRange() {}
+type StorageLeaf struct{}
+func (s *StorageLeaf) GetValueRange(recid, count int, target []int, stride int) {}
+func (s *StorageLeaf) JITEmitGetValueRange() {}
+`
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "sample.go", source, parser.ParseComments)
+	if err != nil {
+		t.Fatal(err)
+	}
+	infos := collectStorageMethods([]storageASTFile{{file: file, path: "sample.go"}})
+	got := make(map[string][]string, len(infos))
+	for _, info := range infos {
+		got[info.typeName+"."+info.sourceName] = info.stableInputs
+	}
+	if values := strings.Join(got["StorageWrapper.GetValueRange"], " "); values != "recid count target/3 stride" {
+		t.Fatalf("attached stable inputs = %q, want recid count target/3 stride", values)
+	}
+	if values := strings.Join(got["StorageLeaf.GetValueRange"], " "); values != "" {
+		t.Fatalf("unannotated stable inputs = %q, want none", values)
 	}
 }
 

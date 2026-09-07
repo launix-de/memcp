@@ -1,0 +1,198 @@
+//go:build goexperiment.jit && amd64
+
+/*
+Copyright (C) 2026  Carl-Philip Hänsch
+
+	This program is free software: you can redistribute it and/or modify
+	it under the terms of the GNU General Public License as published by
+	the Free Software Foundation, either version 3 of the License, or
+	(at your option) any later version.
+
+	This program is distributed in the hope that it will be useful,
+	but WITHOUT ANY WARRANTY; without even the implied warranty of
+	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+	GNU General Public License for more details.
+
+	You should have received a copy of the GNU General Public License
+	along with this program. If not, see <https://www.gnu.org/licenses/>.
+*/
+
+package scm
+
+import (
+	"bytes"
+	"math"
+	"runtime"
+	"testing"
+	"unsafe"
+)
+
+func TestEmitCmpFloat64AvoidsDuplicateSameOperandMove(t *testing.T) {
+	code := make([]byte, 16)
+	ctx := &JITContext{
+		Start: unsafe.Pointer(&code[0]),
+		Ptr:   unsafe.Pointer(&code[0]),
+		End:   unsafe.Pointer(&code[len(code)-1]),
+	}
+	ctx.EmitCmpFloat64(RegRAX, RegRAX)
+	emitted := code[:uintptr(ctx.Ptr)-uintptr(ctx.Start)]
+	want := []byte{
+		0x66, 0x48, 0x0f, 0x6e, 0xc0, // MOVQ XMM0, RAX
+		0x66, 0x0f, 0x2e, 0xc0, // UCOMISD XMM0, XMM0
+	}
+	if !bytes.Equal(emitted, want) {
+		t.Fatalf("same-operand float comparison = %x, want %x", emitted, want)
+	}
+}
+
+func jitFourScalarResults(seed uint32) (int64, bool, int64, int64) {
+	return int64(seed) + 1, seed&1 != 0, int64(seed) + 3, int64(seed) + 5
+}
+
+func TestJITScmerConstructorsAllowAliasedPayloadRegister(t *testing.T) {
+	tests := []struct {
+		name string
+		want Scmer
+		emit func(*JITContext, JITValueDesc, JITValueDesc)
+	}{
+		{"int", NewInt(42), func(ctx *JITContext, dst, src JITValueDesc) {
+			ctx.EmitMovRegImm64(src.Reg, 42)
+			ctx.EmitMakeInt(dst, src)
+		}},
+		{"float", NewFloat(-157.84), func(ctx *JITContext, dst, src JITValueDesc) {
+			ctx.EmitMovRegImm64(src.Reg, math.Float64bits(-157.84))
+			ctx.EmitMakeFloat(dst, src)
+		}},
+		{"bool", NewBool(true), func(ctx *JITContext, dst, src JITValueDesc) {
+			ctx.EmitMovRegImm64(src.Reg, 1)
+			ctx.EmitMakeBool(dst, src)
+		}},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			fn := CompileJITStorageGetValue(func(ctx *JITContext, source, target JITValueDesc) JITValueDesc {
+				if source.Reg != target.Reg {
+					t.Fatalf("test requires an aliased source and pointer destination, got %v and %v", source.Reg, target.Reg)
+				}
+				test.emit(ctx, target, source)
+				return target
+			})
+			if fn == nil {
+				t.Fatal("aliased constructor did not compile")
+			}
+			if got := fn(0); !Equal(got, test.want) {
+				t.Fatalf("aliased constructor = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestJITStorageScalarInputSurvivesScratchReclamation(t *testing.T) {
+	fn := CompileJITStorageGetValue(func(ctx *JITContext, source, target JITValueDesc) JITValueDesc {
+		// Generated CFG emitters reclaim registers whose descriptors no longer own
+		// them. The incoming RAX is still live here and therefore must not become
+		// scratch merely because it is also the eventual result register.
+		ctx.ReclaimUntrackedRegs()
+		scratch := ctx.AllocReg()
+		ctx.EmitMovRegImm64(scratch, 99)
+		ctx.FreeReg(scratch)
+		value := JITValueDesc{Loc: LocRegPair, Type: tagInt, Reg: target.Reg, Reg2: target.Reg2}
+		ctx.EmitMakeInt(value, source)
+		return value
+	})
+	if fn == nil {
+		t.Fatal("scalar storage JIT function did not compile")
+	}
+	if got, want := fn(17), NewInt(17); !Equal(got, want) {
+		t.Fatalf("scalar input after scratch reclamation = %v, want %v", got, want)
+	}
+}
+
+func TestJITStorageReadersSharePackedCodeLifetime(t *testing.T) {
+	scalar, ranged, multi := CompileJITStorageReaders(
+		func(ctx *JITContext, source, target JITValueDesc) JITValueDesc {
+			ctx.EmitMakeInt(target, source)
+			return target
+		},
+		func(_ *JITContext, _, _, _, _, result JITValueDesc) JITValueDesc { return result },
+		func(_ *JITContext, _, _, _, result JITValueDesc) JITValueDesc { return result },
+	)
+	if scalar == nil || ranged == nil || multi == nil {
+		t.Fatal("storage reader batch did not compile every ABI")
+	}
+
+	scalarValue := *(*unsafe.Pointer)(unsafe.Pointer(&scalar))
+	rangeValue := *(*unsafe.Pointer)(unsafe.Pointer(&ranged))
+	multiValue := *(*unsafe.Pointer)(unsafe.Pointer(&multi))
+	scalarHolder := (*jitStorageFuncValue)(scalarValue)
+	rangeHolder := (*jitStorageFuncValue)(rangeValue)
+	multiHolder := (*jitStorageFuncValue)(multiValue)
+	if scalarHolder.owner == nil || scalarHolder.owner != rangeHolder.owner || scalarHolder.owner != multiHolder.owner {
+		t.Fatal("storage reader funcvals do not share one code owner")
+	}
+	if len(scalarHolder.owner.entries) != 3 {
+		t.Fatalf("shared code owner has %d entries, want 3", len(scalarHolder.owner.entries))
+	}
+	if gap := rangeHolder.code - scalarHolder.code; gap == 0 || gap >= 16*1024 {
+		t.Fatalf("scalar-to-range code gap = %d, want densely packed functions", gap)
+	}
+	if gap := multiHolder.code - rangeHolder.code; gap == 0 || gap >= 16*1024 {
+		t.Fatalf("range-to-multi code gap = %d, want densely packed functions", gap)
+	}
+	runtime.GC()
+	if got := scalar(23); !Equal(got, NewInt(23)) {
+		t.Fatalf("packed scalar result = %v, want 23", got)
+	}
+}
+
+func TestJITGoCallFourScalarResults(t *testing.T) {
+	fn := CompileJITStorageGetValue(func(ctx *JITContext, seed, target JITValueDesc) JITValueDesc {
+		results := JITEmitGoCallResults(ctx, GoFuncAddr(jitFourScalarResults), []JITValueDesc{seed}, []uint8{1, 1, 1, 1}, []uint8{0, 0, 0, 0})
+		for index := range results {
+			ctx.EnsureDesc(&results[index])
+		}
+		ctx.EmitImulRegImm32(results[1].Reg, 10)
+		ctx.EmitImulRegImm32(results[2].Reg, 100)
+		ctx.EmitImulRegImm32(results[3].Reg, 1000)
+		ctx.EmitAddInt64(results[0].Reg, results[1].Reg)
+		ctx.EmitAddInt64(results[0].Reg, results[2].Reg)
+		ctx.EmitAddInt64(results[0].Reg, results[3].Reg)
+		ctx.EnsureDesc(&seed)
+		ctx.EmitAddInt64(results[0].Reg, seed.Reg)
+		value := JITValueDesc{Loc: LocRegPair, Type: tagInt, Reg: target.Reg, Reg2: target.Reg2}
+		ctx.EmitMakeInt(value, results[0])
+		return value
+	})
+	if fn == nil {
+		t.Fatal("four-result JIT function did not compile")
+	}
+	if got, want := fn(7), NewInt(8+10+1000+12000+7); !Equal(got, want) {
+		t.Fatalf("four-result Go ABI call = %v, want %v", got, want)
+	}
+}
+
+func TestJITStoreCustomScmerKeepsSpilledAddress(t *testing.T) {
+	payload := new(byte)
+	value := NewCustom(200, unsafe.Pointer(payload))
+	fn := CompileJITStorageGetValueRange(func(ctx *JITContext, index, count, target, stride, result JITValueDesc) JITValueDesc {
+		address := ctx.EmitSliceElementAddress(&target, &index, 16)
+		addressOff := ctx.AllocStack(8)
+		ctx.EmitStoreRegMem(address.Reg, ctx.StackReg, addressOff)
+		ctx.FreeDesc(&address)
+		address = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: addressOff, NoHeapPointer: true}
+		stored := JITValueDesc{Loc: LocImm, Type: value.GetTag(), Imm: value, Rooted: true}
+		ctx.EmitStoreScmerAt(&address, &stored)
+		return result
+	})
+	if fn == nil {
+		t.Fatal("spilled-address JIT function did not compile")
+	}
+	target := make([]Scmer, 1)
+	fn(0, 1, target, 1)
+	runtime.GC()
+	if got := target[0]; got.GetTag() != value.GetTag() || got.ptr != value.ptr {
+		t.Fatalf("stored custom Scmer = %v, want tag %d at %p", got, value.GetTag(), value.ptr)
+	}
+	runtime.KeepAlive(payload)
+}

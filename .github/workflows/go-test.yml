@@ -1,0 +1,100 @@
+# Copyright (C) 2026  Carl-Philip Haensch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+name: Go Tests
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: go-test-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  JIT_GO_REF: jit-foreign-frames-go1.27.0
+
+jobs:
+  go-test:
+    name: go-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out MemCP
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run Go tests
+        run: go test ./...
+
+  jit-go-test:
+    name: jit-go-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out MemCP
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Check out patched Go compiler
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: launix-de/go
+          ref: ${{ env.JIT_GO_REF }}
+          path: go-jit
+
+      - name: Read patched Go version
+        id: jit-go-version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^go\([0-9].*\)$/\1/p' go-jit/VERSION | head -n 1)
+          test -n "$version"
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+
+      - name: Set up matching bootstrap Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: ${{ steps.jit-go-version.outputs.version }}
+          cache: false
+
+      - name: Build patched Go compiler
+        shell: bash
+        run: |
+          set -euo pipefail
+          bootstrap_goroot=$(go env GOROOT)
+          (cd go-jit/src && GOROOT_BOOTSTRAP="$bootstrap_goroot" ./make.bash)
+          mv go-jit "$RUNNER_TEMP/go-jit"
+
+      - name: Select patched Go compiler
+        shell: bash
+        run: |
+          printf '%s\n' "$RUNNER_TEMP/go-jit/bin" >> "$GITHUB_PATH"
+          printf 'GOROOT=%s\n' "$RUNNER_TEMP/go-jit" >> "$GITHUB_ENV"
+          printf 'GOEXPERIMENT=jit\n' >> "$GITHUB_ENV"
+
+      - name: Run Go tests with JIT enabled
+        run: go test ./...

@@ -282,8 +282,8 @@ func (emitter *jitParserEmitter) pushCheckpoint() {
 	ctx.EnsureDesc(&sp)
 	ctx.EnsureDesc(&position)
 	slow, done := ctx.ReserveLabel(), ctx.ReserveLabel()
-	ctx.EmitMovRegMem(lenReg, sp.Reg, cpOff+8)  // checkpoints.Len
-	ctx.EmitMovRegMem(tmp, sp.Reg, cpOff+16)    // checkpoints.Cap
+	ctx.EmitMovRegMem(lenReg, sp.Reg, cpOff+8) // checkpoints.Len
+	ctx.EmitMovRegMem(tmp, sp.Reg, cpOff+16)   // checkpoints.Cap
 	ctx.EmitCmpInt64(lenReg, tmp)
 	ctx.EmitJump(CondUnsignedAboveOrEqual, slow)
 
@@ -372,8 +372,8 @@ func (emitter *jitParserEmitter) restoreCheckpoint() {
 	ctx.EmitAddInt64(elem, a)
 
 	slow, done := ctx.ReserveLabel(), ctx.ReserveLabel()
-	ctx.EmitMovRegMem(a, sp.Reg, mutOff+8)      // mutations.Len
-	ctx.EmitMovRegMem(b, elem, cpMutationLen)   // checkpoint.mutationLen
+	ctx.EmitMovRegMem(a, sp.Reg, mutOff+8)    // mutations.Len
+	ctx.EmitMovRegMem(b, elem, cpMutationLen) // checkpoint.mutationLen
 	ctx.EmitCmpInt64(a, b)
 	ctx.EmitJump(CondNotEqual, slow)
 

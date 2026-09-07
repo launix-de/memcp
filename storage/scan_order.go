@@ -1833,11 +1833,13 @@ func (t *storageShard) scan_order(access scanAccess, conditionCols []string, con
 	var ccols []ColumnStorage
 	var cReaders []ColumnReader
 	var cNeedsCachedReader []bool
+	var cMultiFuncs []scm.JITStorageGetValueMultiFunc
 	var conditionGetters []mapArgGetter
 	if !conditionAlwaysTrue {
 		ccols = make([]ColumnStorage, len(conditionCols))
 		cReaders = make([]ColumnReader, len(conditionCols))
 		cNeedsCachedReader = make([]bool, len(conditionCols))
+		cMultiFuncs = make([]scm.JITStorageGetValueMultiFunc, len(conditionCols))
 		conditionGetters = make([]mapArgGetter, len(conditionCols))
 		for i, k := range conditionCols { // iterate over columns
 			if k == "$recset_contains" {
@@ -1856,17 +1858,28 @@ func (t *storageShard) scan_order(access scanAccess, conditionCols []string, con
 			if _, ok := ccols[i].(*StorageComputeProxy); ok {
 				cNeedsCachedReader[i] = true
 			}
+			reader := ColumnReader(ccols[i])
+			if cNeedsCachedReader[i] {
+				reader = cReaders[i]
+			}
+			cMultiFuncs[i] = compiledColumnGetValueMulti(reader)
 		}
 	}
 	acols := make([]ColumnStorage, len(acceptCols))
 	aReaders := make([]ColumnReader, len(acceptCols))
 	aNeedsCachedReader := make([]bool, len(acceptCols))
+	aMultiFuncs := make([]scm.JITStorageGetValueMultiFunc, len(acceptCols))
 	for i, column := range acceptCols {
 		acols[i] = t.getColumnStorageOrPanic(column, skipShardReadLock, currentTx)
 		aReaders[i] = newCachedColumnReaderTx(acols[i], currentTx)
 		if _, ok := acols[i].(*StorageComputeProxy); ok {
 			aNeedsCachedReader[i] = true
 		}
+		reader := ColumnReader(acols[i])
+		if aNeedsCachedReader[i] {
+			reader = aReaders[i]
+		}
+		aMultiFuncs[i] = compiledColumnGetValueMulti(reader)
 	}
 	// initialize main_count lazily if needed
 	t.ensureMainCount(skipShardReadLock)
@@ -1976,7 +1989,9 @@ func (t *storageShard) scan_order(access scanAccess, conditionCols []string, con
 					if len(mainIds) == 0 {
 						continue
 					}
-					if cNeedsCachedReader[i] {
+					if getValueMulti := cMultiFuncs[i]; getValueMulti != nil {
+						getValueMulti(mainIds, colBufs[i], 1)
+					} else if cNeedsCachedReader[i] {
 						cReaders[i].GetValueMulti(mainIds, colBufs[i], 1)
 					} else {
 						ccols[i].GetValueMulti(mainIds, colBufs[i], 1)
@@ -2043,7 +2058,9 @@ func (t *storageShard) scan_order(access scanAccess, conditionCols []string, con
 					if len(acceptMainIds) == 0 {
 						continue
 					}
-					if aNeedsCachedReader[i] {
+					if getValueMulti := aMultiFuncs[i]; getValueMulti != nil {
+						getValueMulti(acceptMainIds, acceptColBufs[i], 1)
+					} else if aNeedsCachedReader[i] {
 						aReaders[i].GetValueMulti(acceptMainIds, acceptColBufs[i], 1)
 					} else {
 						acols[i].GetValueMulti(acceptMainIds, acceptColBufs[i], 1)

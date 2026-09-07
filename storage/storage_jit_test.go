@@ -28,13 +28,13 @@ import (
 
 // jitEmitter is the interface shared by all storage types with JIT emitters.
 type jitEmitter interface {
-	JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc
+	JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc
 }
 
 // jitBuildGetValueFunc compiles a JIT function for any storage type.
 // Returns func(int64) scm.Scmer with Go ABI calling convention.
 // Returns nil fn if the emitter panics (e.g. register exhaustion).
-func jitBuildGetValueFunc(tb testing.TB, s jitEmitter, constThisptr bool) (fn func(int64) scm.Scmer, cleanup func()) {
+func jitBuildGetValueFunc(tb testing.TB, s jitEmitter, _ bool) (fn func(int64) scm.Scmer, cleanup func()) {
 	tb.Helper()
 	if runtime.GOARCH != "amd64" {
 		tb.Skip("JIT tests only on amd64")
@@ -63,21 +63,12 @@ func jitBuildGetValueFunc(tb testing.TB, s jitEmitter, constThisptr bool) (fn fu
 	ctx.EmitMovRegReg(idxReg, scm.RegRAX)
 	idx := scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: idxReg}
 
-	var thisptr scm.JITValueDesc
-	if constThisptr {
-		thisptr = scm.JITValueDesc{Loc: scm.LocImm, Imm: scm.NewInt(extractDataPtr(s))}
-	} else {
-		ptrReg := ctx.AllocReg()
-		ctx.EmitMovRegImm64(ptrReg, uint64(extractDataPtr(s)))
-		thisptr = scm.JITValueDesc{Loc: scm.LocReg, Reg: ptrReg}
-	}
-
 	// Use recover to handle register exhaustion gracefully
 	var emitErr interface{}
 	func() {
 		defer func() { emitErr = recover() }()
 		result := scm.JITValueDesc{Loc: scm.LocRegPair, Reg: scm.RegRAX, Reg2: scm.RegRBX}
-		desc := s.JITEmit(ctx, thisptr, idx, result)
+		desc := s.JITEmit(ctx, idx, result)
 		ctx.EmitMovPairToResult(&desc, &result)
 		ctx.EmitByte(0xC3) // RET
 		ctx.ResolveFixupsFinal()
@@ -109,12 +100,41 @@ func jitBuildGetValueFunc(tb testing.TB, s jitEmitter, constThisptr bool) (fn fu
 	hdrPtr := unsafe.Pointer(hdr)
 	jitFn := *(*func(int64) scm.Scmer)(unsafe.Pointer(&hdrPtr))
 
-	tb.Logf("JIT code size: %d bytes (constThisptr=%v)", codeLen, constThisptr)
+	tb.Logf("JIT code size: %d bytes", codeLen)
 
 	return jitFn, func() {
 		runtime.KeepAlive(hdr)
 		runtime.KeepAlive(ctx) // keep compile-time roots alive through the native call
 		syscall.Munmap(b)
+	}
+}
+
+func TestStorageDecimalFinishedJITReadersComposeInnerStorage(t *testing.T) {
+	if !scm.JITEnabled() {
+		t.Skip("requires the JIT experiment")
+	}
+	col := buildViaCompression(80, func(i int) scm.Scmer {
+		return scm.NewFloat(float64(i) / 100)
+	})
+	decimal, ok := col.(*StorageDecimal)
+	if !ok {
+		t.Fatalf("compressed to %T, want *StorageDecimal", col)
+	}
+
+	inner := make([]scm.Scmer, 16)
+	decimal.inner.GetJITGetValueRange()(0, uint32(len(inner)), inner, 1)
+	for i := range inner {
+		if got := inner[i].Int(); got != int64(i) {
+			t.Fatalf("inner range[%d] = %d, want %d", i, got, i)
+		}
+	}
+
+	got := make([]scm.Scmer, len(inner))
+	decimal.GetJITGetValueRange()(0, uint32(len(got)), got, 1)
+	for i := range got {
+		if !scm.Equal(got[i], scm.NewFloat(float64(i)/100)) {
+			t.Fatalf("decimal range[%d] = %v, want %v", i, got[i], float64(i)/100)
+		}
 	}
 }
 
@@ -150,7 +170,7 @@ func scmerEqual(a, b scm.Scmer) bool {
 
 // jitBuildSumFuncGeneric builds a JIT sum loop for any storage type that returns numeric values.
 // Returns nil fn if the emitter panics (e.g. register exhaustion).
-func jitBuildSumFuncGeneric(tb testing.TB, s jitEmitter, count int64, constThisptr bool) (fn func() int64, cleanup func()) {
+func jitBuildSumFuncGeneric(tb testing.TB, s jitEmitter, count int64, _ bool) (fn func() int64, cleanup func()) {
 	tb.Helper()
 	if runtime.GOARCH != "amd64" {
 		tb.Skip("JIT benchmarks only on amd64")
@@ -168,16 +188,6 @@ func jitBuildSumFuncGeneric(tb testing.TB, s jitEmitter, count int64, constThisp
 		End:      unsafe.Add(unsafe.Pointer(&codeBuf[0]), len(codeBuf)-256),
 		FreeRegs: freeRegs,
 		AllRegs:  freeRegs,
-	}
-
-	var thisptr scm.JITValueDesc
-	if constThisptr {
-		thisptr = scm.JITValueDesc{Loc: scm.LocImm, Imm: scm.NewInt(extractDataPtr(s))}
-	} else {
-		ctx.FreeRegs &^= 1 << uint(scm.RegR13)
-		ctx.AllRegs &^= 1 << uint(scm.RegR13)
-		ctx.EmitMovRegImm64(scm.RegR13, uint64(extractDataPtr(s)))
-		thisptr = scm.JITValueDesc{Loc: scm.LocReg, Reg: scm.RegR13}
 	}
 
 	// Loop phis on stack:
@@ -210,7 +220,7 @@ func jitBuildSumFuncGeneric(tb testing.TB, s jitEmitter, count int64, constThisp
 		defer func() { emitErr = recover() }()
 		// Allow typed emitters to keep unboxed results in a single register.
 		result := scm.JITValueDesc{Loc: scm.LocAny}
-		desc = s.JITEmit(ctx, thisptr, idx, result)
+		desc = s.JITEmit(ctx, idx, result)
 	}()
 	if emitErr != nil {
 		tb.Skipf("JIT emit failed: %v", emitErr)
@@ -347,7 +357,7 @@ func jitBuildSumFuncGeneric(tb testing.TB, s jitEmitter, count int64, constThisp
 	hdrPtr := unsafe.Pointer(hdr)
 	rawFn := *(*func() int64)(unsafe.Pointer(&hdrPtr))
 
-	tb.Logf("JIT SUM code size: %d bytes (constThisptr=%v, count=%d)", codeLen, constThisptr, count)
+	tb.Logf("JIT SUM code size: %d bytes (count=%d)", codeLen, count)
 
 	// When fallback emitters perform Go-calls from JIT code, a concurrent GC stack walk
 	// can fail to unwind through unknown JIT PCs. Run this hot loop with GC disabled.

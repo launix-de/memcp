@@ -1556,6 +1556,8 @@ var mapReducerBulkBufferPools [inlineMapReducerColumns]sync.Pool
 type shardMapReducerWorkspace struct {
 	mainCols        [inlineMapReducerColumns]ColumnStorage
 	mainBulkReaders [inlineMapReducerColumns]ColumnReader
+	mainValueFuncs  [inlineMapReducerColumns]scm.JITStorageGetValueFunc
+	mainMultiFuncs  [inlineMapReducerColumns]scm.JITStorageGetValueMultiFunc
 	args            [inlineMapReducerColumns + 1]scm.Scmer
 }
 
@@ -1570,6 +1572,8 @@ func acquireShardMapReducerWorkspace() *shardMapReducerWorkspace {
 func releaseShardMapReducerWorkspace(workspace *shardMapReducerWorkspace) {
 	clear(workspace.mainCols[:])
 	clear(workspace.mainBulkReaders[:])
+	clear(workspace.mainValueFuncs[:])
+	clear(workspace.mainMultiFuncs[:])
 	clear(workspace.args[:])
 	shardMapReducerWorkspacePool.Put(workspace)
 }
@@ -1580,26 +1584,29 @@ func releaseShardMapReducerWorkspace(workspace *shardMapReducerWorkspace) {
 // processMainBlock/processDeltaBlock – tight loops suitable for JIT compilation.
 // For remote shards, Stream() will be backed by an RPC returning the accumulator per batch.
 type ShardMapReducer struct {
-	shard           *storageShard
-	currentTx       *TxContext
-	acidMode        bool
-	mainGetters     []mapArgGetter
-	deltaGetters    []mapArgGetter
-	mainCols        []ColumnStorage        // direct main storage access (nil for $update/$invalidate/$increment cols)
-	mainBulkReaders []ColumnReader         // physical map columns gathered once per Stream main-record run
-	mainBulkValues  []scm.Scmer            // reusable row-major buffer for every physical map column
-	mainBulkBuffer  *mapReducerBulkBuffer  // non-nil when mainBulkValues belongs to a width bucket
-	colNames        []string               // column names for delta getDelta access
-	isUpdate        []bool                 // true for $update columns
-	isInvalidate    []bool                 // true for $invalidate: columns
-	invalidateProxy []*StorageComputeProxy // proxy per $invalidate col (nil if not found)
-	isIncrement     []bool                 // true for $increment: columns
-	incrementProxy  []*StorageComputeProxy // proxy per $increment col (nil if not found)
-	isSet           []bool                 // true for $set: columns
-	setProxy        []*StorageComputeProxy // proxy per $set col (nil if not found)
-	hasSetCol       bool
-	isBreak         []bool // true for $break column
-	hasBreakCol     bool
+	shard              *storageShard
+	currentTx          *TxContext
+	acidMode           bool
+	mainGetters        []mapArgGetter
+	deltaGetters       []mapArgGetter
+	mainCols           []ColumnStorage                   // direct main storage access (nil for $update/$invalidate/$increment cols)
+	mainBulkReaders    []ColumnReader                    // physical map columns gathered once per Stream main-record run
+	mainValueFuncs     []scm.JITStorageGetValueFunc      // scalar targets resolved once; avoids interface-to-func double dispatch
+	mainMultiFuncs     []scm.JITStorageGetValueMultiFunc // batch targets resolved once for main-storage prefetch
+	mainValuesCompiled bool                              // every mainValueFuncs entry is available
+	mainBulkValues     []scm.Scmer                       // reusable row-major buffer for every physical map column
+	mainBulkBuffer     *mapReducerBulkBuffer             // non-nil when mainBulkValues belongs to a width bucket
+	colNames           []string                          // column names for delta getDelta access
+	isUpdate           []bool                            // true for $update columns
+	isInvalidate       []bool                            // true for $invalidate: columns
+	invalidateProxy    []*StorageComputeProxy            // proxy per $invalidate col (nil if not found)
+	isIncrement        []bool                            // true for $increment: columns
+	incrementProxy     []*StorageComputeProxy            // proxy per $increment col (nil if not found)
+	isSet              []bool                            // true for $set: columns
+	setProxy           []*StorageComputeProxy            // proxy per $set col (nil if not found)
+	hasSetCol          bool
+	isBreak            []bool // true for $break column
+	hasBreakCol        bool
 	// tagClosure hoisted fn ptrs — allocated once per mapper, reused per row
 	setClosureFn     []*func(uint32, ...scm.Scmer) scm.Scmer // per $set col
 	incrClosureFn    []*func(uint32, ...scm.Scmer) scm.Scmer // per $increment col
@@ -1649,10 +1656,14 @@ func prepareReadMapReducerStorage(mr *ShardMapReducer, workspace *shardMapReduce
 	if width <= inlineMapReducerColumns {
 		mr.mainCols = workspace.mainCols[:width]
 		mr.mainBulkReaders = workspace.mainBulkReaders[:width]
+		mr.mainValueFuncs = workspace.mainValueFuncs[:width]
+		mr.mainMultiFuncs = workspace.mainMultiFuncs[:width]
 		mr.args = workspace.args[:width+1]
 	} else {
 		mr.mainCols = make([]ColumnStorage, width)
 		mr.mainBulkReaders = make([]ColumnReader, width)
+		mr.mainValueFuncs = make([]scm.JITStorageGetValueFunc, width)
+		mr.mainMultiFuncs = make([]scm.JITStorageGetValueMultiFunc, width)
 		mr.args = make([]scm.Scmer, width+1)
 	}
 }
@@ -1674,12 +1685,18 @@ func (t *storageShard) initReadMapReducer(mr *ShardMapReducer, cols []string, ma
 	mr.mainCount = t.main_count
 	mr.shardWriteLocked = alreadyLocked
 	mr.directRead = true
+	mr.mainValuesCompiled = true
 
 	for i, colName := range cols {
 		mainCol := t.getColumnStorageOrPanic(colName, alreadyLocked, currentTx)
 		mainReader := newCachedColumnReaderTx(mainCol, currentTx)
 		mr.mainCols[i] = mainCol
 		mr.mainBulkReaders[i] = mainReader
+		mr.mainValueFuncs[i] = compiledColumnGetValue(mainReader)
+		mr.mainMultiFuncs[i] = compiledColumnGetValueMulti(mainReader)
+		if mr.mainValueFuncs[i] == nil {
+			mr.mainValuesCompiled = false
+		}
 	}
 }
 
@@ -1711,6 +1728,7 @@ func (t *storageShard) initMapReducer(mr *ShardMapReducer, cols []string, mapRed
 		deltaGetters:     make([]mapArgGetter, len(cols)),
 		mainCols:         make([]ColumnStorage, len(cols)),
 		mainBulkReaders:  make([]ColumnReader, len(cols)),
+		mainMultiFuncs:   make([]scm.JITStorageGetValueMultiFunc, len(cols)),
 		colNames:         cols,
 		args:             make([]scm.Scmer, len(cols)+1),
 		mapReduceProgram: scm.PrepareSerialProc(mapReduceFn),
@@ -1959,6 +1977,7 @@ func (t *storageShard) initMapReducer(mr *ShardMapReducer, cols []string, mapRed
 		mainCol := mr.mainCols[i]
 		mainReader := newCachedColumnReaderTx(mainCol, mr.currentTx)
 		mr.mainBulkReaders[i] = mainReader
+		mr.mainMultiFuncs[i] = compiledColumnGetValueMulti(mainReader)
 		colName := mr.colNames[i]
 		mr.mainGetters[i] = func(id uint32, batchid uint32) scm.Scmer {
 			return mainReader.GetValue(id)
@@ -2028,7 +2047,18 @@ func (m *ShardMapReducer) prefetchMainColumns(recids []uint32) {
 		if reader == nil {
 			continue
 		}
-		reader.GetValueMulti(recids, m.mainBulkValues[i:], width)
+		var getValueMulti scm.JITStorageGetValueMultiFunc
+		// General operators and focused tests may construct a mapper without the
+		// optional compiled-target side table. The ColumnReader remains the source
+		// of truth; the side table only removes dispatch when setup populated it.
+		if i < len(m.mainMultiFuncs) {
+			getValueMulti = m.mainMultiFuncs[i]
+		}
+		if getValueMulti != nil {
+			getValueMulti(recids, m.mainBulkValues[i:], width)
+		} else {
+			reader.GetValueMulti(recids, m.mainBulkValues[i:], width)
+		}
 	}
 }
 
@@ -2039,14 +2069,28 @@ func (m *ShardMapReducer) loadDirectReadArgs(id uint32, rowOffset int, useBulkVa
 			copy(m.args[1:], m.mainBulkValues[rowOffset*width:(rowOffset+1)*width])
 			return
 		}
+		if m.mainValuesCompiled {
+			for i, getValue := range m.mainValueFuncs {
+				m.args[i+1] = getValue(id)
+			}
+			return
+		}
 		for i, reader := range m.mainBulkReaders {
-			m.args[i+1] = reader.GetValue(id)
+			if getValue := m.mainValueFuncs[i]; getValue != nil {
+				m.args[i+1] = getValue(id)
+			} else {
+				m.args[i+1] = reader.GetValue(id)
+			}
 		}
 		return
 	}
 	for i, mainCol := range m.mainCols {
 		if _, isProxy := mainCol.(*StorageComputeProxy); isProxy {
-			m.args[i+1] = m.mainBulkReaders[i].GetValue(id)
+			if getValue := m.mainValueFuncs[i]; getValue != nil {
+				m.args[i+1] = getValue(id)
+			} else {
+				m.args[i+1] = m.mainBulkReaders[i].GetValue(id)
+			}
 		} else {
 			m.args[i+1] = m.shard.getDelta(int(id-m.mainCount), m.colNames[i])
 		}
