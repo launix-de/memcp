@@ -150,6 +150,7 @@ test_cases:
       SELECT ("42"^^xsd:integer AS ?value) WHERE {}
     expect:
       rows: 1
+      contains: '"datatype":"http://www.w3.org/2001/XMLSchema#integer"'
       result_contains: '"datatype":"http://www.w3.org/2001/XMLSchema#integer"'
 
   - name: "SPARQL Results JSON omits unbound variables"
@@ -157,6 +158,8 @@ test_cases:
     sparql: 'SELECT ?missing ("yes" AS ?value) WHERE {}'
     expect:
       rows: 1
+      contains: '"value"'
+      not_contains: '"missing":{"type"'
       result_contains: '"value"'
       result_occurrences:
         - text: '"missing"'

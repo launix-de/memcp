@@ -119,6 +119,8 @@ test_cases:
     sparql: 'SELECT ?result ?kept WHERE { BIND((1 / 0) AS ?result) BIND("yes" AS ?kept) }'
     expect:
       rows: 1
+      contains: '"kept"'
+      not_contains: '"result":{"type"'
       result_contains: '"kept"'
       result_occurrences:
         - text: '"result"'
@@ -145,6 +147,7 @@ test_cases:
     sparql: 'SELECT ?left ?right WHERE { VALUES (?left ?right) { ("A" UNDEF) (UNDEF "B") } }'
     expect:
       rows: 2
+      contains: '"left"'
       result_contains: '"left"'
 
   - name: "SPARQL 1.1 10.2 trailing VALUES applies after solution modifiers"
@@ -180,6 +183,7 @@ test_cases:
       SELECT (GROUP_CONCAT(?value) AS ?joined) WHERE { ?s ex:value ?value }
     expect:
       rows: 1
+      contains: "A B"
       result_contains: "A B"
 
   - name: "SPARQL 1.1 11 GROUP BY accepts expressions and aliases"
