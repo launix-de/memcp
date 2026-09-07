@@ -1,0 +1,130 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
+# SPARQL 1.1 named graph coverage through the common query-block planner.
+
+metadata:
+  version: "1.0"
+  description: "SPARQL named graph query and graph data updates"
+  isolated: true
+
+setup: []
+
+test_cases:
+  - name: "CREATE GRAPH initializes named graph storage"
+    sparql: |
+      PREFIX ng: <http://named-graph.example/>
+      CREATE GRAPH ng:cases
+    expect:
+      rows: 0
+
+  - name: "INSERT DATA creates triples in a named graph"
+    sparql: |
+      PREFIX ng: <http://named-graph.example/>
+      INSERT DATA { GRAPH ng:cases { ng:alice ng:status "open" . ng:bob ng:status "closed" } }
+    expect:
+      rows: 0
+
+  - name: "GRAPH with a fixed IRI reads only that named graph"
+    sparql: |
+      PREFIX ng: <http://named-graph.example/>
+      SELECT ?person, ?status WHERE {
+        GRAPH ng:cases { ?person ng:status ?status }
+      } ORDER BY ?person
+    expect:
+      rows: 2
+      data:
+        - "?person": "http://named-graph.example/alice"
+          "?status": "open"
+        - "?person": "http://named-graph.example/bob"
+          "?status": "closed"
+
+  - name: "GRAPH variable binds the named graph IRI"
+    sparql: |
+      PREFIX ng: <http://named-graph.example/>
+      SELECT ?graph, ?person WHERE {
+        GRAPH ?graph { ?person ng:status "open" }
+      }
+    expect:
+      rows: 1
+      data:
+        - "?graph": "http://named-graph.example/cases"
+          "?person": "http://named-graph.example/alice"
+
+  - name: "FROM selects a named graph as the default dataset"
+    sparql: |
+      PREFIX ng: <http://named-graph.example/>
+      SELECT ?person FROM ng:cases WHERE { ?person ng:status "open" }
+    expect:
+      rows: 1
+      data:
+        - "?person": "http://named-graph.example/alice"
+
+  - name: "FROM NAMED restricts a GRAPH variable"
+    sparql: |
+      PREFIX ng: <http://named-graph.example/>
+      SELECT ?graph, ?person FROM NAMED ng:cases WHERE {
+        GRAPH ?graph { ?person ng:status "open" }
+      }
+    expect:
+      rows: 1
+      data:
+        - "?graph": "http://named-graph.example/cases"
+          "?person": "http://named-graph.example/alice"
+
+  - name: "FROM NAMED leaves the default graph empty"
+    ttl_data: |
+      @prefix ng: <http://named-graph.example/> .
+      ng:default ng:status "default-only" .
+    sparql: |
+      PREFIX ng: <http://named-graph.example/>
+      SELECT ?person FROM NAMED ng:cases WHERE { ?person ng:status ?status }
+    expect:
+      rows: 0
+
+  - name: "Multiple FROM graphs form one duplicate-free default graph"
+    sparql: |
+      PREFIX ng: <http://named-graph.example/>
+      INSERT DATA { GRAPH ng:archive { ng:alice ng:status "open" } }
+    expect:
+      rows: 0
+
+  - name: "Merged default graph removes duplicate triples"
+    sparql: |
+      PREFIX ng: <http://named-graph.example/>
+      SELECT ?person FROM ng:cases FROM ng:archive WHERE { ?person ng:status "open" }
+    expect:
+      rows: 1
+      data:
+        - "?person": "http://named-graph.example/alice"
+
+  - name: "DELETE DATA removes only the named graph triple"
+    sparql: |
+      PREFIX ng: <http://named-graph.example/>
+      DELETE DATA { GRAPH ng:cases { ng:bob ng:status "closed" } }
+    expect:
+      rows: 0
+
+  - name: "Named graph update is visible through GRAPH"
+    sparql: |
+      PREFIX ng: <http://named-graph.example/>
+      SELECT ?person WHERE { GRAPH ng:cases { ?person ng:status ?status } }
+    expect:
+      rows: 1
+      data:
+        - "?person": "http://named-graph.example/alice"
+
+  - name: "CLEAR GRAPH removes all triples from the graph"
+    sparql: |
+      PREFIX ng: <http://named-graph.example/>
+      CLEAR GRAPH ng:cases
+    expect:
+      rows: 0
+
+  - name: "DROP GRAPH accepts an already empty graph"
+    sparql: |
+      PREFIX ng: <http://named-graph.example/>
+      DROP SILENT GRAPH ng:cases
+    expect:
+      rows: 0
+
+cleanup: []

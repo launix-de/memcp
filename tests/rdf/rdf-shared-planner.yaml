@@ -1,3 +1,5 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
 # Architectural contract tests for lowering SPARQL into the common query IR.
 
 metadata:
@@ -14,35 +16,64 @@ test_cases:
         (define fail (lambda (msg) (error (concat "rdf shared planner: " msg))))
         (define parsed (rdf_query
           "SELECT ?s, ?name WHERE { ?s a Person . ?s name ?name } ORDER BY ?name LIMIT 1"))
-        (if (not (rdf_shared_bgp_supported? parsed)) (fail "eligible BGP rejected"))
         (define ast (rdf_shared_query_ast "memcp-tests" parsed '()))
         (if (not (equal? (car ast) (quote query-block))) (fail "not a query-block"))
-        (if (not (equal? (count (qb_sources ast)) 2)) (fail "triple patterns not mapped to two sources"))
+        (define input (source_relation (car (qb_sources ast))))
+        (if (not (query_block? input)) (fail "BGP input is not a shared query-block"))
+        (if (not (equal? (count (qb_sources input)) 2)) (fail "triple patterns not mapped to two sources"))
         (if (not (equal? (qb_limit ast) 1)) (fail "LIMIT missing from query-block"))
         (if (not (equal? (count (qb_order ast)) 1)) (fail "ORDER BY missing from query-block"))
-        (if (not (rdf_contains (concat (qb_where ast)) "equal??")) (fail "join predicate missing"))
+        (if (not (rdf_contains (concat (qb_where input)) "equal??")) (fail "join predicate missing"))
         true)
 
   - name: "Algebra markers are not mistaken for triple patterns"
     scm: |
       (begin
         (define parsed (rdf_query "SELECT ?x WHERE { BIND(\"hello\" AS ?x) }"))
-        (if (rdf_shared_bgp_supported? parsed)
-          (error "rdf shared planner: BIND marker classified as a triple")
-          true))
+        (define ast (rdf_shared_query_ast "memcp-tests" parsed '()))
+        (if (not (equal? (car ast) (quote query-block)))
+          (error "rdf shared planner: BIND did not lower to query-block"))
+        true)
 
   - name: "FILTER joins the BGP predicate in shared query-block WHERE"
     scm: |
       (begin
         (define parsed (rdf_query
           "SELECT ?s WHERE { FILTER(?v = \"keep\") ?s value ?v }"))
-        (if (not (rdf_shared_bgp_supported? parsed))
-          (error "rdf shared planner: supported FILTER rejected"))
         (define ast (rdf_shared_query_ast "memcp-tests" parsed '()))
         (if (not (equal? (car ast) (quote query-block)))
           (error "rdf shared planner: FILTER did not lower to query-block"))
-        (if (not (rdf_contains (concat (qb_where ast)) "equal??"))
+        (define input (source_relation (car (qb_sources ast))))
+        (if (not (rdf_contains (concat (qb_where input)) "equal??"))
           (error "rdf shared planner: FILTER missing from WHERE"))
+        true)
+
+  - name: "LIMIT is owned by the common physical scan"
+    scm: |
+      (begin
+        (rdf_ensure_table "memcp-tests")
+        (define formula (parse_sparql "memcp-tests"
+          "SELECT ?subject WHERE { ?subject value ?value } LIMIT 1"
+          nil (newsession) (session "__memcp_tx")))
+        (define rendered (concat formula))
+        (if (not (rdf_contains rendered "scan_order"))
+          (error "rdf shared planner: LIMIT did not lower to scan_order"))
+        (if (rdf_contains rendered "rdf_legacy")
+          (error "rdf shared planner: legacy fallback survived compilation"))
+        true)
+
+  - name: "EXISTS is decorrelated before physical lowering"
+    scm: |
+      (begin
+        (rdf_ensure_table "memcp-tests")
+        (define formula (parse_sparql "memcp-tests"
+          "SELECT ?subject WHERE { ?subject value ?value FILTER EXISTS { ?subject flag yes } }"
+          nil (newsession) (session "__memcp_tx")))
+        (define rendered (concat formula))
+        (if (rdf_contains rendered "inner_select")
+          (error "rdf shared planner: correlated EXISTS survived untangle_query"))
+        (if (rdf_contains rendered "dependent-subquery")
+          (error "rdf shared planner: dependent subquery fallback survived"))
         true)
 
 cleanup: []

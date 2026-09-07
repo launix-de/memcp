@@ -1,3 +1,5 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
 # Conformance-oriented coverage derived from SPARQL 1.1 Query sections 5 and 15.
 
 metadata:
@@ -192,5 +194,48 @@ test_cases:
       data:
         - "?value": "B"
         - "?value": "C"
+
+  - name: "SPARQL PREFIX declaration and SELECT star"
+    ttl_data: |
+      @prefix cb13: <http://conformance-bgp13.example/> .
+      cb13:item cb13:value "visible" .
+    sparql: |
+      PREFIX cb13: <http://conformance-bgp13.example/>
+      SELECT * WHERE { ?subject cb13:value ?value }
+    expect:
+      rows: 1
+      data:
+        - "?subject": "http://conformance-bgp13.example/item"
+          "?value": "visible"
+
+  - name: "Expression projection uses the common expression IR"
+    ttl_data: |
+      @prefix cb14: <http://conformance-bgp14.example/> .
+      cb14:item cb14:first "Ada" ; cb14:last "Lovelace" .
+    sparql: |
+      PREFIX cb14: <http://conformance-bgp14.example/>
+      SELECT (CONCAT(?first, " ", ?last) AS ?name) WHERE {
+        cb14:item cb14:first ?first ; cb14:last ?last
+      }
+    expect:
+      rows: 1
+      data:
+        - "?name": "Ada Lovelace"
+
+  - name: "HAVING filters grouped solutions"
+    ttl_data: |
+      @prefix cb15: <http://conformance-bgp15.example/> .
+      cb15:a cb15:kind "keep" .
+      cb15:b cb15:kind "keep" .
+      cb15:c cb15:kind "drop" .
+    sparql: |
+      PREFIX cb15: <http://conformance-bgp15.example/>
+      SELECT ?kind, (COUNT(?subject) AS ?count) WHERE { ?subject cb15:kind ?kind }
+      GROUP BY ?kind HAVING (COUNT(?subject) > 1)
+    expect:
+      rows: 1
+      data:
+        - "?kind": "keep"
+          "?count": 2
 
 cleanup: []

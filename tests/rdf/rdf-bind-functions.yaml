@@ -1,3 +1,5 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+
 metadata:
   version: "1.0"
   description: "SPARQL BIND, built-in functions, IF/BOUND/COALESCE"
@@ -121,5 +123,33 @@ test_cases:
       SELECT ?s WHERE { ?s b10:name ?n . FILTER(STRSTARTS(?n, "A")) }
     expect:
       rows: 2
+
+  - name: "SPARQL string transformation functions"
+    sparql: |
+      SELECT ?upper, ?part, ?replaced WHERE {
+        BIND(UCASE("detective") AS ?upper)
+        BIND(SUBSTR("detective", 2, 3) AS ?part)
+        BIND(REPLACE("case-file", "-", " ") AS ?replaced)
+      }
+    expect:
+      rows: 1
+      data:
+        - "?upper": "DETECTIVE"
+          "?part": "ete"
+          "?replaced": "case file"
+
+  - name: "SPARQL term tests and numeric functions"
+    sparql: |
+      SELECT ?iri, ?literal, ?absolute WHERE {
+        BIND(isIRI(IRI("http://example.org/item")) AS ?iri)
+        BIND(isLiteral("text") AS ?literal)
+        BIND(ABS(7) AS ?absolute)
+      }
+    expect:
+      rows: 1
+      data:
+        - "?iri": true
+          "?literal": true
+          "?absolute": 7
 
 cleanup: []

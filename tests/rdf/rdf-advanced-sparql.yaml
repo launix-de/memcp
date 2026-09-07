@@ -1,3 +1,5 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+
 metadata:
   version: "1.0"
   description: "Advanced SPARQL — subqueries, property paths, ASK, CONSTRUCT, VALUES"
@@ -26,6 +28,42 @@ test_cases:
       }
     expect:
       rows: 1
+
+  - name: "SPARQL: multilevel correlated subqueries build nested JSON"
+    ttl_data: |
+      @prefix a10: <http://adv10.org/> .
+      a10:case a10:item a10:first, a10:second .
+      a10:first a10:label "A" .
+      a10:second a10:label "B" .
+      a10:n1 a10:noteFor a10:first .
+      a10:n2 a10:noteFor a10:second .
+      a10:n3 a10:noteFor a10:second .
+    sparql: |
+      PREFIX a10: <http://adv10.org/>
+      SELECT ?case, ?items WHERE {
+        ?case a10:item ?seed .
+        {
+          SELECT ?case, (JSON_ARRAYAGG(JSON_OBJECT("id", ?item, "notes", ?noteCount) ORDER BY ?label) AS ?items)
+          WHERE {
+            ?case a10:item ?item .
+            ?item a10:label ?label .
+            {
+              SELECT (COUNT(?note) AS ?noteCount) WHERE {
+                ?note a10:noteFor ?item
+              }
+            }
+          }
+          GROUP BY ?case
+        }
+      }
+      LIMIT 1
+    expect:
+      rows: 1
+      data:
+        - "?case": "http://adv10.org/case"
+          "?items":
+            - {id: "http://adv10.org/first", notes: 1}
+            - {id: "http://adv10.org/second", notes: 2}
 
   # ==========================================================
   # Property Paths

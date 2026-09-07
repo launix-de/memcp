@@ -143,10 +143,30 @@ test_cases:
         (define definitions (header "prefixes"))
         (define parsed (rdf_resolve_prefixes (rdf_query (header "rest")) definitions))
         (define ast (rdf_shared_query_ast "{database}" parsed '()))
-        (list (rdf_shared_bgp_supported? parsed) (car ast) (car (cadr (qb_fields ast)))))
+        (list (car ast) (car (cadr (qb_fields ast)))))
     expect:
       rows: 1
       data:
-        - true
         - "query-block"
         - "aggregate"
+
+  - name: "JSON_ARRAYAGG has deterministic in-aggregate ordering"
+    ttl_data: |
+      @prefix js09: <http://json-rdf09.example/> .
+      js09:case js09:item js09:middle, js09:last, js09:first .
+      js09:first js09:rank "1" .
+      js09:middle js09:rank "2" .
+      js09:last js09:rank "3" .
+    sparql: |
+      PREFIX js09: <http://json-rdf09.example/>
+      SELECT (JSON_ARRAYAGG(?item ORDER BY ?rank DESC) AS ?items) WHERE {
+        js09:case js09:item ?item .
+        ?item js09:rank ?rank
+      }
+    expect:
+      rows: 1
+      data:
+        - "?items":
+            - "http://json-rdf09.example/last"
+            - "http://json-rdf09.example/middle"
+            - "http://json-rdf09.example/first"
