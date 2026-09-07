@@ -311,6 +311,9 @@ func TestS3PersistenceStress(t *testing.T) {
 	}
 
 	reopened.RemoveLog("shard")
+	emptyLog := reopened.OpenLog("shard")
+	emptyLog.Close()
+	reopened = factory.CreateDatabase("stress")
 	committed, entries, appendLog = reopened.ReplayLog("shard")
 	for range entries {
 		t.Fatal("removed S3 WAL replayed an entry")

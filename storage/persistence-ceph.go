@@ -570,6 +570,10 @@ func openOrCreateCephLogfile(s *CephStorage, shard string) (*CephLogfile, error)
 	if !manifestExists {
 		seg = 0
 		all = []uint32{0}
+		obj := s.obj(fmt.Sprintf("%s.log.%08d", shard, seg))
+		if err := remoteRetry(func() error { return s.ioctx.Truncate(obj, 0) }); err != nil {
+			return nil, err
+		}
 		if err := writeLogManifest(s, shard, all); err != nil {
 			return nil, err
 		}

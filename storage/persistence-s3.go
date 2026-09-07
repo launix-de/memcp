@@ -622,6 +622,14 @@ func openOrCreateS3Logfile(s *S3Storage, shard string) (*S3Logfile, error) {
 	if !manifestExists {
 		seg = 0
 		all = []uint32{0}
+		key := s.key(fmt.Sprintf("%s.log.%08d", shard, seg))
+		if _, err := s.client.PutObject(context.Background(), &s3.PutObjectInput{
+			Bucket: aws.String(s.factory.Bucket),
+			Key:    aws.String(key),
+			Body:   bytes.NewReader(nil),
+		}); err != nil {
+			return nil, err
+		}
 		if err := writeS3LogManifest(s, shard, all); err != nil {
 			return nil, err
 		}
