@@ -3732,6 +3732,7 @@ type jitArena struct {
 
 type jitCodeReservation struct {
 	offset    int
+	size      int
 	done      bool
 	published bool
 	maps      []jitStackMap
@@ -3839,7 +3840,7 @@ func (p *jitPool) Alloc(size int) (ptr unsafe.Pointer, arena *jitArena, reservat
 		a := p.arenas[len(p.arenas)-1]
 		if a.offset+size <= a.size {
 			ptr = unsafe.Add(a.base, a.offset)
-			reservation = &jitCodeReservation{offset: a.offset}
+			reservation = &jitCodeReservation{offset: a.offset, size: size}
 			a.metaMu.Lock()
 			a.reservations = append(a.reservations, reservation)
 			a.metaMu.Unlock()
@@ -3878,12 +3879,35 @@ func (p *jitPool) Alloc(size int) (ptr unsafe.Pointer, arena *jitArena, reservat
 	a.metaCond = sync.NewCond(&a.metaMu)
 	a.handle = registerJITArena(a)
 	ptr = a.base
-	reservation = &jitCodeReservation{}
+	reservation = &jitCodeReservation{size: size}
 	a.reservations = append(a.reservations, reservation)
 	a.offset = size
 	p.arenas = append(p.arenas, a)
 	p.mu.Unlock()
 	return ptr, a, reservation
+}
+
+// Trim returns the unused tail of the newest reservation to the arena bump
+// pointer. Emitters reserve for their worst case because code is written in one
+// pass; once the exact size is known, sequential compilers should not retain
+// that pessimistic capacity. A concurrently allocated successor makes the tail
+// an unavoidable hole, but changing the recorded size remains safe and no
+// published code address moves.
+func (p *jitPool) Trim(a *jitArena, reservation *jitCodeReservation, used int) {
+	if a == nil || reservation == nil {
+		return
+	}
+	used = (used + 15) &^ 15
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if used < 0 || used > reservation.size {
+		panic("jit: invalid reservation trim")
+	}
+	oldEnd := reservation.offset + reservation.size
+	reservation.size = used
+	if !a.sealed && a.offset == oldEnd {
+		a.offset = reservation.offset + used
+	}
 }
 
 // Free releases one code reservation. Bump-allocated holes are not reused;

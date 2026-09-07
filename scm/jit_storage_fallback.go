@@ -33,3 +33,8 @@ func CompileJITStorageGetValueRange(JITStorageGetValueRangeEmitter) JITStorageGe
 func CompileJITStorageGetValueMulti(JITStorageGetValueMultiEmitter) JITStorageGetValueMultiFunc {
 	return nil
 }
+
+// CompileJITStorageReaders is unavailable without the patched Go JIT backend.
+func CompileJITStorageReaders(JITStorageGetValueEmitter, JITStorageGetValueRangeEmitter, JITStorageGetValueMultiEmitter) (JITStorageGetValueFunc, JITStorageGetValueRangeFunc, JITStorageGetValueMultiFunc) {
+	return nil, nil, nil
+}

@@ -339,9 +339,11 @@ func (j *storageJITFunctions) finish(owner storageJITEmitter) {
 	if !scm.JITEnabled() {
 		return
 	}
-	j.getValue = scm.CompileJITStorageGetValue(owner.JITEmit)
-	j.getValueRange = scm.CompileJITStorageGetValueRange(owner.JITEmitGetValueRange)
-	j.getValueMulti = scm.CompileJITStorageGetValueMulti(owner.JITEmitGetValueMulti)
+	j.getValue, j.getValueRange, j.getValueMulti = scm.CompileJITStorageReaders(
+		owner.JITEmit,
+		owner.JITEmitGetValueRange,
+		owner.JITEmitGetValueMulti,
+	)
 }
 
 // storages maps the on-disk magic byte to the Go type used for deserialization.

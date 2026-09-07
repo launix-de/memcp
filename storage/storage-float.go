@@ -70,10 +70,6 @@ func (s *StorageFloat) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result
 	_ = d20
 	var d21 scm.JITValueDesc
 	_ = d21
-	var d22 scm.JITValueDesc
-	_ = d22
-	var d23 scm.JITValueDesc
-	_ = d23
 	/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 	ctx.TrackPointer(unsafe.Pointer(s))
 	thisptr := scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(int64(uintptr(unsafe.Pointer(s)))), NoHeapPointer: true}
@@ -105,8 +101,6 @@ func (s *StorageFloat) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result
 		ctx.ProtectReg(result.Reg)
 		ctx.ProtectReg(result.Reg2)
 	}
-	r0 := ctx.AllocReg()
-	r1 := ctx.AllocRegExcept(r0)
 	lbl0 := ctx.ReserveLabel()
 	bbpos_0_0 := int32(-1)
 	_ = bbpos_0_0
@@ -148,23 +142,24 @@ func (s *StorageFloat) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result
 			sliceCap := *(*int)(unsafe.Pointer(fieldAddr + 16))
 			d0 = scm.JITValueDesc{Loc: scm.LocMem, Type: scm.TagSlice, MemPtr: dataPtr, KnownSliceLen: int32(sliceLen), KnownSliceCap: int32(sliceCap), SliceSizeKnown: true, GoArray: true, RelocatablePointer: true, Rooted: true}
 		} else {
-			r2 := ctx.AllocReg()
-			r3 := ctx.AllocRegExcept(r2)
-			r4 := ctx.AllocRegExcept(r2, r3)
+			r0 := ctx.AllocReg()
+			r1 := ctx.AllocRegExcept(r0)
+			r2 := ctx.AllocRegExcept(r0, r1)
 			off := int32(unsafe.Offsetof((*StorageFloat)(nil).values))
-			ctx.EmitMovRegMem(r2, thisptr.Reg, off)
-			ctx.EmitMovRegMem(r3, thisptr.Reg, off+8)
-			ctx.EmitMovRegMem(r4, thisptr.Reg, off+16)
-			d0 = scm.JITValueDesc{Loc: scm.LocRegTriple, Type: scm.TagSlice, Reg: r2, Reg2: r3, Reg3: r4}
+			ctx.EmitMovRegMem(r0, thisptr.Reg, off)
+			ctx.EmitMovRegMem(r1, thisptr.Reg, off+8)
+			ctx.EmitMovRegMem(r2, thisptr.Reg, off+16)
+			d0 = scm.JITValueDesc{Loc: scm.LocRegTriple, Type: scm.TagSlice, Reg: r0, Reg2: r1, Reg3: r2}
+			ctx.BindReg(r0, &d0)
+			ctx.BindReg(r1, &d0)
 			ctx.BindReg(r2, &d0)
-			ctx.BindReg(r3, &d0)
-			ctx.BindReg(r4, &d0)
+			ctx.BindReg(r0, &d0)
+			ctx.BindReg(r1, &d0)
 			ctx.BindReg(r2, &d0)
-			ctx.BindReg(r3, &d0)
-			ctx.BindReg(r4, &d0)
 		}
 		ctx.EnsureDesc(&idxInt)
 		d1 = ctx.EmitLoadScalarSliceElement(&d0, &idxInt, 8, scm.TagFloat)
+		ctx.FreeDesc(&idxInt)
 		ctx.EnsureDesc(&d1)
 		var d2 scm.JITValueDesc
 		if d1.Loc == scm.LocImm {
@@ -175,12 +170,11 @@ func (s *StorageFloat) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result
 			if d1.Loc == scm.LocRegPair {
 				nanSource3 = d1.Reg2
 			}
-			r5 := ctx.AllocRegExcept(nanSource3)
+			r3 := ctx.AllocRegExcept(nanSource3)
 			ctx.EmitCmpFloat64(nanSource3, nanSource3)
-			d2 = scm.JITValueDesc{Loc: scm.LocFlags, Type: scm.TagBool, Reg: r5, Condition: scm.CondParity}
-			ctx.BindReg(r5, &d2)
+			d2 = scm.JITValueDesc{Loc: scm.LocFlags, Type: scm.TagBool, Reg: r3, Condition: scm.CondParity}
+			ctx.BindReg(r3, &d2)
 		}
-		ctx.FreeDesc(&d1)
 		d4 = d2
 		ctx.EnsureDesc(&d4)
 		if d4.Loc != scm.LocImm && d4.Loc != scm.LocFlags {
@@ -296,9 +290,7 @@ func (s *StorageFloat) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result
 		}
 		ctx.ReclaimUntrackedRegs()
 		d19 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagNil, Imm: scm.NewNil()}
-		d20 = scm.JITValueDesc{Loc: scm.LocRegPair, Reg: r0, Reg2: r1}
-		ctx.BindReg(r0, &d20)
-		ctx.BindReg(r1, &d20)
+		d20 = result
 		ctx.EnsureDesc(&d19)
 		if d19.Loc == scm.LocRegPair {
 			ctx.EmitMovPairToResult(&d19, &d20)
@@ -357,53 +349,19 @@ func (s *StorageFloat) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result
 			d20 = ps.OverlayValues[20]
 		}
 		ctx.ReclaimUntrackedRegs()
-		var d21 scm.JITValueDesc
-		if thisptr.Loc == scm.LocImm {
-			fieldAddr := uintptr(thisptr.Imm.Int()) + unsafe.Offsetof((*StorageFloat)(nil).values)
-			dataPtr := *(*uintptr)(unsafe.Pointer(fieldAddr))
-			sliceLen := *(*int)(unsafe.Pointer(fieldAddr + 8))
-			sliceCap := *(*int)(unsafe.Pointer(fieldAddr + 16))
-			d21 = scm.JITValueDesc{Loc: scm.LocMem, Type: scm.TagSlice, MemPtr: dataPtr, KnownSliceLen: int32(sliceLen), KnownSliceCap: int32(sliceCap), SliceSizeKnown: true, GoArray: true, RelocatablePointer: true, Rooted: true}
-		} else {
-			r6 := ctx.AllocReg()
-			r7 := ctx.AllocRegExcept(r6)
-			r8 := ctx.AllocRegExcept(r6, r7)
-			off := int32(unsafe.Offsetof((*StorageFloat)(nil).values))
-			ctx.EmitMovRegMem(r6, thisptr.Reg, off)
-			ctx.EmitMovRegMem(r7, thisptr.Reg, off+8)
-			ctx.EmitMovRegMem(r8, thisptr.Reg, off+16)
-			d21 = scm.JITValueDesc{Loc: scm.LocRegTriple, Type: scm.TagSlice, Reg: r6, Reg2: r7, Reg3: r8}
-			ctx.BindReg(r6, &d21)
-			ctx.BindReg(r7, &d21)
-			ctx.BindReg(r8, &d21)
-			ctx.BindReg(r6, &d21)
-			ctx.BindReg(r7, &d21)
-			ctx.BindReg(r8, &d21)
-		}
-		ctx.EnsureDesc(&idxInt)
-		d22 = ctx.EmitLoadScalarSliceElement(&d21, &idxInt, 8, scm.TagFloat)
-		ctx.FreeDesc(&idxInt)
-		ctx.EnsureDesc(&d22)
-		d23 = scm.JITValueDesc{Loc: scm.LocRegPair, Reg: r0, Reg2: r1}
-		ctx.BindReg(r0, &d23)
-		ctx.BindReg(r1, &d23)
-		ctx.EnsureDesc(&d22)
-		ctx.EmitMakeFloat(d23, d22)
-		if d22.Loc == scm.LocReg {
-			ctx.FreeReg(d22.Reg)
+		ctx.EnsureDesc(&d1)
+		d21 = result
+		ctx.EnsureDesc(&d1)
+		ctx.EmitMakeFloat(d21, d1)
+		if d1.Loc == scm.LocReg {
+			ctx.FreeReg(d1.Reg)
 		}
 		ctx.EmitJmp(lbl0)
 		return result
 	}
-	ps24 := scm.PhiState{General: false}
-	_ = bbs[0].RenderPS(ps24)
+	ps22 := scm.PhiState{General: false}
+	_ = bbs[0].RenderPS(ps22)
 	ctx.MarkLabel(lbl0)
-	d25 := scm.JITValueDesc{Loc: scm.LocRegPair, Reg: r0, Reg2: r1}
-	ctx.BindReg(r0, &d25)
-	ctx.BindReg(r1, &d25)
-	ctx.EmitMovPairToResult(&d25, &result)
-	ctx.FreeReg(r0)
-	ctx.FreeReg(r1)
 	ctx.ResolveFixups()
 	if resultRegsProtected {
 		ctx.UnprotectReg(result.Reg2)
@@ -457,10 +415,11 @@ func (s *StorageFloat) GetCachedReader() ColumnReader { return s.storageJITFunct
 
 func (s *StorageFloat) GetValue(i uint32) scm.Scmer {
 	// NULL is encoded as NaN in SQL
-	if math.IsNaN(s.values[i]) {
+	v := s.values[i]
+	if math.IsNaN(v) {
 		return scm.NewNil()
 	}
-	return scm.NewFloat(s.values[i])
+	return scm.NewFloat(v)
 }
 
 //jitgen:control-flow-stable recid count target/1 stride

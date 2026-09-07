@@ -35,10 +35,23 @@ const (
 
 type jitStorageFuncValue struct {
 	code  uintptr
-	owner *JITEntryPoint
+	owner *jitStorageCodeBatch
+}
+
+// jitStorageCodeBatch owns the scalar and bulk readers compiled for one
+// finished storage. Keeping their entry metadata behind one funcval context
+// gives all three functions one lifetime and, more importantly, lets the
+// compiler place their machine code consecutively in a single reservation.
+type jitStorageCodeBatch struct {
+	entries []*JITEntryPoint
 }
 
 type jitStorageEmitBody func(*JITContext)
+
+type jitStorageCompileRequest struct {
+	abi  jitStorageABI
+	emit jitStorageEmitBody
+}
 
 // JITEnabled reports whether this binary contains the native JIT backend.
 func JITEnabled() bool { return true }
@@ -46,57 +59,82 @@ func JITEnabled() bool { return true }
 // CompileJITStorageGetValue compiles a generated scalar storage emitter into
 // the exact func(uint32) Scmer Go ABI used by column consumers.
 func CompileJITStorageGetValue(emit JITStorageGetValueEmitter) JITStorageGetValueFunc {
-	entry, holder := compileJITStorageFunction(jitStorageGetValueABI, func(ctx *JITContext) {
-		idx := JITValueDesc{Loc: LocReg, Type: tagInt, Reg: RegRAX, NoHeapPointer: true}
-		result := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: RegRAX, Reg2: RegRBX}
-		// RAX initially belongs to the input while RBX already belongs to the
-		// eventual result. Explicit ownership keeps either ABI word from becoming
-		// anonymous scratch, but still lets the input release RAX at its last use.
-		ctx.BindReg(RegRAX, &idx)
-		ctx.BindReg(RegRBX, &result)
-		out := emit(ctx, idx, result)
-		ctx.EmitMovPairToResult(&out, &result)
-	})
-	if entry == nil {
-		return nil
+	getValue, _, _ := CompileJITStorageReaders(emit, nil, nil)
+	return getValue
+}
+
+// CompileJITStorageReaders compiles the three readers of one immutable storage
+// into one densely packed code reservation. A storage owns these functions as
+// a unit, so separate 16-KiB reservations and cleanup leases only waste arena
+// and instruction-TLB capacity without providing useful lifetime granularity.
+func CompileJITStorageReaders(getValue JITStorageGetValueEmitter, getValueRange JITStorageGetValueRangeEmitter, getValueMulti JITStorageGetValueMultiEmitter) (JITStorageGetValueFunc, JITStorageGetValueRangeFunc, JITStorageGetValueMultiFunc) {
+	requests := make([]jitStorageCompileRequest, 0, 3)
+	if getValue != nil {
+		requests = append(requests, jitStorageCompileRequest{jitStorageGetValueABI, func(ctx *JITContext) {
+			idx := JITValueDesc{Loc: LocReg, Type: tagInt, Reg: RegRAX, NoHeapPointer: true}
+			result := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: RegRAX, Reg2: RegRBX}
+			// RAX initially belongs to the input while RBX already belongs to the
+			// eventual result. Explicit ownership keeps either ABI word from becoming
+			// anonymous scratch, but still lets the input release RAX at its last use.
+			ctx.BindReg(RegRAX, &idx)
+			ctx.BindReg(RegRBX, &result)
+			out := getValue(ctx, idx, result)
+			ctx.EmitMovPairToResult(&out, &result)
+		}})
 	}
-	valuePointer := unsafe.Pointer(holder)
-	return *(*JITStorageGetValueFunc)(unsafe.Pointer(&valuePointer))
+	if getValueRange != nil {
+		requests = append(requests, jitStorageCompileRequest{jitStorageGetValueRangeABI, func(ctx *JITContext) {
+			recid := jitStorageScalarArg(ctx, RegRAX)
+			count := jitStorageScalarArg(ctx, RegRBX)
+			target := jitStorageSliceArg(ctx, RegRCX, RegRDI, RegRSI)
+			stride := jitStorageScalarArg(ctx, RegR8)
+			result := JITValueDesc{Loc: LocStackPair, Type: tagNil, StackOff: ctx.AllocStack(16), Rooted: true}
+			_ = getValueRange(ctx, recid, count, target, stride, result)
+		}})
+	}
+	if getValueMulti != nil {
+		requests = append(requests, jitStorageCompileRequest{jitStorageGetValueMultiABI, func(ctx *JITContext) {
+			recids := jitStorageSliceArg(ctx, RegRAX, RegRBX, RegRCX)
+			target := jitStorageSliceArg(ctx, RegRDI, RegRSI, RegR8)
+			stride := jitStorageScalarArg(ctx, RegR9)
+			result := JITValueDesc{Loc: LocStackPair, Type: tagNil, StackOff: ctx.AllocStack(16), Rooted: true}
+			_ = getValueMulti(ctx, recids, target, stride, result)
+		}})
+	}
+
+	entries, holders := compileJITStorageBatch(requests)
+	if len(entries) != len(requests) {
+		return nil, nil, nil
+	}
+	var scalar JITStorageGetValueFunc
+	var ranged JITStorageGetValueRangeFunc
+	var multi JITStorageGetValueMultiFunc
+	for index, request := range requests {
+		valuePointer := unsafe.Pointer(holders[index])
+		switch request.abi {
+		case jitStorageGetValueABI:
+			scalar = *(*JITStorageGetValueFunc)(unsafe.Pointer(&valuePointer))
+		case jitStorageGetValueRangeABI:
+			ranged = *(*JITStorageGetValueRangeFunc)(unsafe.Pointer(&valuePointer))
+		case jitStorageGetValueMultiABI:
+			multi = *(*JITStorageGetValueMultiFunc)(unsafe.Pointer(&valuePointer))
+		}
+	}
+	return scalar, ranged, multi
 }
 
 // CompileJITStorageGetValueRange compiles a generated consecutive-range
 // emitter. Stride remains a runtime argument in R8.
 func CompileJITStorageGetValueRange(emit JITStorageGetValueRangeEmitter) JITStorageGetValueRangeFunc {
-	entry, holder := compileJITStorageFunction(jitStorageGetValueRangeABI, func(ctx *JITContext) {
-		recid := jitStorageScalarArg(ctx, RegRAX)
-		count := jitStorageScalarArg(ctx, RegRBX)
-		target := jitStorageSliceArg(ctx, RegRCX, RegRDI, RegRSI)
-		stride := jitStorageScalarArg(ctx, RegR8)
-		result := JITValueDesc{Loc: LocStackPair, Type: tagNil, StackOff: ctx.AllocStack(16), Rooted: true}
-		_ = emit(ctx, recid, count, target, stride, result)
-	})
-	if entry == nil {
-		return nil
-	}
-	valuePointer := unsafe.Pointer(holder)
-	return *(*JITStorageGetValueRangeFunc)(unsafe.Pointer(&valuePointer))
+	_, getValueRange, _ := CompileJITStorageReaders(nil, emit, nil)
+	return getValueRange
 }
 
 // CompileJITStorageGetValueMulti compiles a generated arbitrary-record
 // emitter. Stride remains a runtime argument in R9.
 func CompileJITStorageGetValueMulti(emit JITStorageGetValueMultiEmitter) JITStorageGetValueMultiFunc {
-	entry, holder := compileJITStorageFunction(jitStorageGetValueMultiABI, func(ctx *JITContext) {
-		recids := jitStorageSliceArg(ctx, RegRAX, RegRBX, RegRCX)
-		target := jitStorageSliceArg(ctx, RegRDI, RegRSI, RegR8)
-		stride := jitStorageScalarArg(ctx, RegR9)
-		result := JITValueDesc{Loc: LocStackPair, Type: tagNil, StackOff: ctx.AllocStack(16), Rooted: true}
-		_ = emit(ctx, recids, target, stride, result)
-	})
-	if entry == nil {
-		return nil
-	}
-	valuePointer := unsafe.Pointer(holder)
-	return *(*JITStorageGetValueMultiFunc)(unsafe.Pointer(&valuePointer))
+	_, _, getValueMulti := CompileJITStorageReaders(nil, nil, emit)
+	return getValueMulti
 }
 
 func jitStorageScalarArg(ctx *JITContext, reg Reg) JITValueDesc {
@@ -113,44 +151,105 @@ func jitStorageSliceArg(ctx *JITContext, data, length, capacity Reg) JITValueDes
 	return desc
 }
 
-func compileJITStorageFunction(abi jitStorageABI, emit jitStorageEmitBody) (*JITEntryPoint, *jitStorageFuncValue) {
+func compileJITStorageBatch(requests []jitStorageCompileRequest) ([]*JITEntryPoint, []*jitStorageFuncValue) {
+	entries := make([]*JITEntryPoint, len(requests))
+	holders := make([]*jitStorageFuncValue, len(requests))
+	if len(requests) == 0 {
+		return entries, holders
+	}
 	for _, registerInputs := range [...]bool{true, false} {
 		for _, codeCap := range [...]int{16 * 1024, 64 * 1024, 256 * 1024, 1024 * 1024} {
-			ptr, arena, reservation := globalJITPool.Alloc(codeCap)
-			buf := &execBuf{ptr: ptr, n: codeCap, arena: arena, reservation: reservation}
-			codeLen, roots, overflow, needsStableInputs := emitJITStorageFunction(buf, abi, emit, registerInputs)
-			if codeLen == 0 {
-				arena.complete(reservation, buf.stackMaps)
-				globalJITPool.Free(arena)
+			ptr, arena, reservation := globalJITPool.Alloc(codeCap * len(requests))
+			type compiled struct {
+				index     int
+				ptr       unsafe.Pointer
+				codeLen   int
+				frameSize int32
+				roots     []unsafe.Pointer
+				maps      []jitStackMap
+			}
+			compiledReaders := make([]compiled, 0, len(requests))
+			cursor := 0
+			retryLarger := false
+			retryStable := false
+			for index, request := range requests {
+				functionPtr := unsafe.Add(ptr, cursor)
+				// emitJITStorageFunction expresses stack-map PCs relative to the
+				// reservation offset. Each packed function therefore gets a tiny
+				// metadata view with its real arena offset; only the outer reservation
+				// participates in publication and lifetime accounting.
+				functionReservation := &jitCodeReservation{offset: reservation.offset + cursor}
+				buf := &execBuf{ptr: functionPtr, n: codeCap, arena: arena, reservation: functionReservation}
+				codeLen, roots, overflow, needsStableInputs := emitJITStorageFunction(buf, request.abi, request.emit, registerInputs)
 				if needsStableInputs && registerInputs {
+					retryStable = true
 					break
 				}
 				if overflow {
+					retryLarger = true
+					break
+				}
+				if codeLen == 0 {
 					continue
 				}
-				return nil, nil
+				compiledReaders = append(compiledReaders, compiled{
+					index: index, ptr: functionPtr, codeLen: codeLen,
+					frameSize: buf.stackFrameSize, roots: roots, maps: buf.stackMaps,
+				})
+				cursor = (cursor + codeLen + 15) &^ 15
 			}
-			entry := &JITEntryPoint{
-				DebugName:      jitStorageABIName(abi),
-				StackFrameSize: buf.stackFrameSize,
-				CodePtr:        ptr,
-				CodeLen:        codeLen,
-				Arena:          arena,
-				ConstRoots:     roots,
+			if retryLarger || retryStable {
+				arena.complete(reservation, nil)
+				globalJITPool.Free(arena)
+				if retryStable {
+					break
+				}
+				continue
 			}
-			holder := &jitStorageFuncValue{code: uintptr(ptr), owner: entry}
-			runtime.AddCleanup(entry, releaseJITEntryPoint, jitCodeLease{
+			if len(compiledReaders) == 0 {
+				arena.complete(reservation, nil)
+				globalJITPool.Free(arena)
+				return entries, holders
+			}
+
+			allMaps := make([]jitStackMap, 0)
+			batch := &jitStorageCodeBatch{}
+			for _, function := range compiledReaders {
+				entry := &JITEntryPoint{
+					DebugName:      jitStorageABIName(requests[function.index].abi),
+					StackFrameSize: function.frameSize,
+					CodePtr:        function.ptr,
+					CodeLen:        function.codeLen,
+					Arena:          arena,
+					ConstRoots:     function.roots,
+				}
+				entries[function.index] = entry
+				batch.entries = append(batch.entries, entry)
+				allMaps = append(allMaps, function.maps...)
+			}
+			for index, entry := range entries {
+				if entry != nil {
+					holders[index] = &jitStorageFuncValue{code: uintptr(entry.CodePtr), owner: batch}
+				}
+			}
+			globalJITPool.Trim(arena, reservation, cursor)
+			runtime.AddCleanup(batch, releaseJITEntryPoint, jitCodeLease{
 				pool:  &globalJITPool,
 				arena: arena,
 				code:  uintptr(ptr),
 			})
-			arena.complete(reservation, buf.stackMaps)
-			maybeDumpJITCode(ptr, (*[1 << 30]byte)(ptr)[:codeLen:codeLen])
-			maybeLogJITCodeName(entry)
-			return entry, holder
+			arena.complete(reservation, allMaps)
+			for _, entry := range entries {
+				if entry == nil {
+					continue
+				}
+				maybeDumpJITCode(entry.CodePtr, (*[1 << 30]byte)(entry.CodePtr)[:entry.CodeLen:entry.CodeLen])
+				maybeLogJITCodeName(entry)
+			}
+			return entries, holders
 		}
 	}
-	return nil, nil
+	return entries, holders
 }
 
 func jitStorageABIName(abi jitStorageABI) string {

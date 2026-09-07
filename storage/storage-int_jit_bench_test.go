@@ -576,8 +576,11 @@ func BenchmarkStorageConstFinishedReaders(b *testing.B) {
 		b.Fatal("finish did not install every JIT reader")
 	}
 	goScalar := scm.JITStorageGetValueFunc(s.GetValue)
+	staticScalar := scm.JITStorageGetValueFunc(benchmarkStorageConst42)
 	goRange := scm.JITStorageGetValueRangeFunc(s.GetValueRange)
 	goMulti := scm.JITStorageGetValueMultiFunc(s.GetValueMulti)
+	var goReader ColumnReader = s
+	jitValue := compiledColumnGetValue(s.GetCachedReader())
 
 	b.Run("Scalar/Go", func(b *testing.B) {
 		var sum int64
@@ -592,6 +595,23 @@ func BenchmarkStorageConstFinishedReaders(b *testing.B) {
 			sum += benchmarkStorageScalar(scalar, benchN)
 		}
 		runtime.KeepAlive(sum)
+	})
+	b.Run("Scalar/StaticFunc", func(b *testing.B) {
+		var sum int64
+		for sample := 0; sample < b.N; sample++ {
+			sum += benchmarkStorageScalar(staticScalar, benchN)
+		}
+		runtime.KeepAlive(sum)
+	})
+	b.Run("ScalarConsumer/GoInterface", func(b *testing.B) {
+		for sample := 0; sample < b.N; sample++ {
+			benchmarkColumnReaderScalar(goReader, benchN)
+		}
+	})
+	b.Run("ScalarConsumer/JITResolved", func(b *testing.B) {
+		for sample := 0; sample < b.N; sample++ {
+			benchmarkStorageScalar(jitValue, benchN)
+		}
 	})
 
 	target := make([]scm.Scmer, benchN)
@@ -652,6 +672,8 @@ func BenchmarkStorageFloatFinishedReaders(b *testing.B) {
 	goScalar := scm.JITStorageGetValueFunc(s.GetValue)
 	goRange := scm.JITStorageGetValueRangeFunc(s.GetValueRange)
 	goMulti := scm.JITStorageGetValueMultiFunc(s.GetValueMulti)
+	var goReader ColumnReader = s
+	jitValue := compiledColumnGetValue(s.GetCachedReader())
 
 	b.Run("Scalar/Go", func(b *testing.B) {
 		var sum int64
@@ -666,6 +688,16 @@ func BenchmarkStorageFloatFinishedReaders(b *testing.B) {
 			sum += benchmarkStorageScalar(scalar, benchN)
 		}
 		runtime.KeepAlive(sum)
+	})
+	b.Run("ScalarConsumer/GoInterface", func(b *testing.B) {
+		for sample := 0; sample < b.N; sample++ {
+			benchmarkColumnReaderScalar(goReader, benchN)
+		}
+	})
+	b.Run("ScalarConsumer/JITResolved", func(b *testing.B) {
+		for sample := 0; sample < b.N; sample++ {
+			benchmarkStorageScalar(jitValue, benchN)
+		}
 	})
 
 	target := make([]scm.Scmer, benchN)
@@ -708,6 +740,11 @@ func benchmarkStorageScalar(reader scm.JITStorageGetValueFunc, count uint32) int
 		sum += reader(recid).Int()
 	}
 	return sum
+}
+
+//go:noinline
+func benchmarkStorageConst42(uint32) scm.Scmer {
+	return scm.NewInt(42)
 }
 
 //go:noinline

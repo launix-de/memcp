@@ -1089,6 +1089,7 @@ type codeGen struct {
 	endLabel      string            // label for shared epilogue (multi-block)
 	storageMode   bool              // true for ColumnStorage.GetValue pattern (vs Declare pattern)
 	typeName      string            // struct type name for FieldAddr (e.g. "StorageInt")
+	storageRoot   *ssa.Function     // outer getter; nested inlined CFGs must retain their own edge homes
 	// storageInputHomes describes generated ABI descriptors that must survive
 	// every backedge of a bulk reader. words optionally narrows a register-only
 	// emission to a live prefix of a multiword Go value; zero preserves all
@@ -4757,6 +4758,7 @@ func generateStorageBody(typeName string, fn *ssa.Function, rewrite ssaValueRewr
 	g := newCodeGen(fn, rewrite)
 	g.storageMode = true
 	g.typeName = typeName
+	g.storageRoot = fn
 	fmt.Fprintf(&g.w, "\t%s\n", generatedBanner)
 	g.multiBlock = len(fn.Blocks) > 1
 	g.returnPhiReg = ""
@@ -4820,7 +4822,7 @@ func generateStorageBody(typeName string, fn *ssa.Function, rewrite ssaValueRewr
 
 	g.emitBody(emitBodyConfig{
 		entryGeneral:     false,
-		useReturnPhiRegs: true,
+		useReturnPhiRegs: false,
 		bbsDeclPrefix:    "scm.",
 	})
 
@@ -5328,6 +5330,14 @@ func (g *codeGen) stabilizeCrossBlockValue(instr ssa.Instruction) {
 	if !crossesBlock {
 		return
 	}
+	if g.storageRoot == value.Parent() && g.storageRoot.Name() == "GetValue" && crossBlockValueHasSinglePredecessorConsumer(value) {
+		// A value used only in one direct successor cannot be observed without
+		// executing this producer. The sibling edge skips both the consumer and
+		// the value, so retaining its register is a complete machine-level
+		// contract; no join or backedge needs a canonical stack location. This is
+		// the common load -> classify -> return-value shape of typed getters.
+		return
+	}
 	generated, ok := g.vals[value.Name()]
 	if !ok || !generated.isDesc || generated.goVar == "" {
 		return
@@ -5336,6 +5346,31 @@ func (g *codeGen) stabilizeCrossBlockValue(instr ssa.Instruction) {
 		panic(fmt.Sprintf("dynamic variadic element crosses a control-flow edge: %s", value))
 	}
 	g.emit("ctx.StabilizeDescForControlFlow(&%s)", generated.goVar)
+}
+
+func crossBlockValueHasSinglePredecessorConsumer(value ssa.Value) bool {
+	producer, ok := value.(ssa.Instruction)
+	if !ok || producer.Block() == nil || value.Referrers() == nil || len(*value.Referrers()) == 0 {
+		return false
+	}
+	var consumer *ssa.BasicBlock
+	for _, ref := range *value.Referrers() {
+		if ref.Block() == nil || ref.Block() == producer.Block() {
+			continue
+		}
+		if consumer == nil {
+			consumer = ref.Block()
+		} else if consumer != ref.Block() {
+			return false
+		}
+	}
+	if consumer == nil || len(consumer.Preds) != 1 || consumer.Preds[0] != producer.Block() {
+		return false
+	}
+	// A direct loop backedge has one predecessor as well, but the register then
+	// describes a different dynamic iteration. Only forward-dominated consumers
+	// may inherit the producer's one-shot register location.
+	return producer.Block().Dominates(consumer) && !consumer.Dominates(producer.Block())
 }
 
 func ssaValueCrossesControlFlow(value ssa.Value) bool {
@@ -9767,11 +9802,16 @@ func (g *codeGen) emitReturnMultiBlock(v *ssa.Return) {
 			g.emit("ctx.EmitJmp(%s)", g.endLabel)
 			return
 		}
-		if g.returnPhiReg == "" || g.returnPhiReg2 == "" {
-			panic("jit: storage return-phi registers not initialized")
-		}
 		retDesc := g.allocDesc()
-		g.emit("%s := JITValueDesc{Loc: LocRegPair, Reg: %s, Reg2: %s}", retDesc, g.returnPhiReg, g.returnPhiReg2)
+		if g.returnPhiReg != "" && g.returnPhiReg2 != "" {
+			g.emit("%s := JITValueDesc{Loc: LocRegPair, Reg: %s, Reg2: %s}", retDesc, g.returnPhiReg, g.returnPhiReg2)
+		} else {
+			// Every return arm is mutually exclusive at runtime. The caller-selected
+			// result pair is protected for the complete CFG render, so each arm can
+			// construct its value there directly; a second virtual return pair and
+			// epilogue copy add pressure without representing a real phi lifetime.
+			g.emit("%s := result", retDesc)
+		}
 		res := g.vals[v.Results[0].Name()]
 		switch res.marker {
 		case "_newbool":

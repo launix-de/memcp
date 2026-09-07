@@ -197,6 +197,52 @@ func classify(a ...Scmer) Scmer {
 	}
 }
 
+func TestSinglePredecessorBranchValueMayRemainInRegister(t *testing.T) {
+	fn := buildTestSSAFunction(t, `package sample
+import "math"
+func classify(values []float64, index int) float64 {
+	value := values[index]
+	if math.IsNaN(value) { return 0 }
+	return value
+}
+`, "classify")
+	found := false
+	for _, block := range fn.Blocks {
+		for _, instruction := range block.Instrs {
+			value, ok := instruction.(ssa.Value)
+			if ok && crossBlockValueHasSinglePredecessorConsumer(value) {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatal("branch-local value was not recognized as a register-safe edge value")
+	}
+}
+
+func TestJoinedBranchValueStillRequiresStableHome(t *testing.T) {
+	fn := buildTestSSAFunction(t, `package sample
+func choose(value int, left bool) int {
+	loaded := value + 1
+	if left { loaded += 2 } else { loaded += 3 }
+	return loaded
+}
+`, "choose")
+	for _, block := range fn.Blocks {
+		for _, instruction := range block.Instrs {
+			value, ok := instruction.(ssa.Value)
+			if !ok || !ssaValueCrossesControlFlow(value) {
+				continue
+			}
+			if crossBlockValueHasSinglePredecessorConsumer(value) {
+				continue
+			}
+			return
+		}
+	}
+	t.Fatal("test SSA did not retain a joined value requiring a stable home")
+}
+
 func TestLoopPhiRegisterPlanColorsInterferenceGraph(t *testing.T) {
 	fn := buildTestSSAFunction(t, `package sample
 func rolling(limit uint64) uint64 {

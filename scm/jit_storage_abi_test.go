@@ -109,6 +109,43 @@ func TestJITStorageScalarInputSurvivesScratchReclamation(t *testing.T) {
 	}
 }
 
+func TestJITStorageReadersSharePackedCodeLifetime(t *testing.T) {
+	scalar, ranged, multi := CompileJITStorageReaders(
+		func(ctx *JITContext, source, target JITValueDesc) JITValueDesc {
+			ctx.EmitMakeInt(target, source)
+			return target
+		},
+		func(_ *JITContext, _, _, _, _, result JITValueDesc) JITValueDesc { return result },
+		func(_ *JITContext, _, _, _, result JITValueDesc) JITValueDesc { return result },
+	)
+	if scalar == nil || ranged == nil || multi == nil {
+		t.Fatal("storage reader batch did not compile every ABI")
+	}
+
+	scalarValue := *(*unsafe.Pointer)(unsafe.Pointer(&scalar))
+	rangeValue := *(*unsafe.Pointer)(unsafe.Pointer(&ranged))
+	multiValue := *(*unsafe.Pointer)(unsafe.Pointer(&multi))
+	scalarHolder := (*jitStorageFuncValue)(scalarValue)
+	rangeHolder := (*jitStorageFuncValue)(rangeValue)
+	multiHolder := (*jitStorageFuncValue)(multiValue)
+	if scalarHolder.owner == nil || scalarHolder.owner != rangeHolder.owner || scalarHolder.owner != multiHolder.owner {
+		t.Fatal("storage reader funcvals do not share one code owner")
+	}
+	if len(scalarHolder.owner.entries) != 3 {
+		t.Fatalf("shared code owner has %d entries, want 3", len(scalarHolder.owner.entries))
+	}
+	if gap := rangeHolder.code - scalarHolder.code; gap == 0 || gap >= 16*1024 {
+		t.Fatalf("scalar-to-range code gap = %d, want densely packed functions", gap)
+	}
+	if gap := multiHolder.code - rangeHolder.code; gap == 0 || gap >= 16*1024 {
+		t.Fatalf("range-to-multi code gap = %d, want densely packed functions", gap)
+	}
+	runtime.GC()
+	if got := scalar(23); !Equal(got, NewInt(23)) {
+		t.Fatalf("packed scalar result = %v, want 23", got)
+	}
+}
+
 func TestJITGoCallFourScalarResults(t *testing.T) {
 	fn := CompileJITStorageGetValue(func(ctx *JITContext, seed, target JITValueDesc) JITValueDesc {
 		results := JITEmitGoCallResults(ctx, GoFuncAddr(jitFourScalarResults), []JITValueDesc{seed}, []uint8{1, 1, 1, 1}, []uint8{0, 0, 0, 0})
