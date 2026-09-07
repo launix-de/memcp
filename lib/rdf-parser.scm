@@ -1312,6 +1312,17 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 (define rdf_shared_column (lambda (alias column)
 	(list (quote get_column) alias false column false)
 ))
+(define rdf_shared_next_index (lambda (index)
+	/* Alias scopes start with a hexadecimal hash. Keep them as strings: numeric
+	addition coerces large all-digit hashes to imprecise floats, where index + 1
+	can equal index and publish duplicate relation aliases. */
+	(concat index "_")
+))
+(define rdf_shared_advance_index (lambda (index remaining)
+	(if (> remaining 0)
+		(rdf_shared_advance_index (rdf_shared_next_index index) (- remaining 1))
+		index)
+))
 (define rdf_shared_lookup (lambda (bindings var)
 	(match (rdf_ctx_lookup bindings var) '(found value)
 		(if found value nil)
@@ -1347,7 +1358,7 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 		(begin
 			(define alias (concat "__rdf_t" index))
 			(match (rdf_shared_add_pattern pattern alias bindings filters outer_ctx) '(next_bindings next_filters)
-				(rdf_shared_build_sources schema tail outer_ctx (+ index 1)
+				(rdf_shared_build_sources schema tail outer_ctx (rdf_shared_next_index index)
 					(append sources (list alias schema "rdf" false nil))
 					next_bindings next_filters)))
 		'() (list sources bindings filters)
@@ -1366,7 +1377,7 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 		(begin
 			(define alias (concat "__rdf_g" index))
 			(match (rdf_shared_add_named_pattern pattern graph alias bindings filters outer_ctx) '(next_bindings next_filters)
-				(rdf_shared_build_named_sources schema graph tail outer_ctx (+ index 1)
+				(rdf_shared_build_named_sources schema graph tail outer_ctx (rdf_shared_next_index index)
 					(append sources (list alias schema "rdf_named" false nil))
 					next_bindings next_filters)))
 		'() (list sources bindings filters))
@@ -1521,7 +1532,8 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 		(match (rdf_shared_build_named_sources schema graph patterns outer_ctx source_index '() '() '()) '(sources bindings filters)
 			(begin
 				(define filter_exprs (rdf_shared_filter_conditions conditions bindings outer_ctx))
-				(define state (list sources bindings (merge (list filters filter_exprs)) (+ source_index (count patterns))))
+				(define state (list sources bindings (merge (list filters filter_exprs))
+					(rdf_shared_advance_index source_index (count patterns))))
 				(list (rdf_shared_relation_query schema state) (rdf_shared_relation_vars bindings)))))
 ))
 (define rdf_shared_fresh_path_var (lambda (state)
@@ -1675,7 +1687,7 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 					(if (equal? joins '()) nil (rdf_shared_where joins))))
 			(rdf_shared_merge_bindings (rdf_shared_state_bindings state) right)
 			(rdf_shared_state_filters state)
-			(+ index 1)))
+			(rdf_shared_next_index index)))
 ))
 (define rdf_shared_add_last_source_join (lambda (sources extra)
 	(match sources
@@ -1843,7 +1855,7 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 			(rdf_shared_state_bindings state)
 			(cons (list (quote nil?) (rdf_shared_column alias presence))
 				(rdf_shared_state_filters state))
-			(+ index 1)))
+			(rdf_shared_next_index index)))
 ))
 (define rdf_shared_exists_relation (lambda (schema state query vars shared negate)
 	(begin
@@ -1884,7 +1896,7 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 					(list (quote equal?) presence_expr 0)
 					(list (quote >) presence_expr 0))
 					(rdf_shared_state_filters state))
-				(+ index 1))
+				(rdf_shared_next_index index))
 			(if negate
 				(list
 					(append (rdf_shared_state_sources state)
@@ -1892,14 +1904,14 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 					(rdf_shared_state_bindings state)
 					(cons (list (quote nil?) presence_expr)
 						(rdf_shared_state_filters state))
-					(+ index 1))
+					(rdf_shared_next_index index))
 				(list
 					(append (rdf_shared_state_sources state)
 						(list alias schema relation true (rdf_shared_where joins)))
 					(rdf_shared_state_bindings state)
 					(cons (list (quote not) (list (quote nil?) presence_expr))
 						(rdf_shared_state_filters state))
-					(+ index 1))))
+					(rdf_shared_next_index index))))
 )))
 (define rdf_shared_exists_direct_safe (lambda (query vars shared)
 	(and (not (equal? shared '()))
@@ -1936,14 +1948,14 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 						(rdf_shared_state_bindings state)
 						(cons (list (quote nil?) (get_assoc flattened_right (car shared)))
 							(rdf_shared_state_filters state))
-						(+ index 1)))
+						(rdf_shared_next_index index)))
 				(list
 					(append (rdf_shared_state_sources state)
 						(list alias schema query true (rdf_shared_where joins)))
 					(rdf_shared_state_bindings state)
 					(cons (list (quote nil?) (get_assoc right (car shared)))
 						(rdf_shared_state_filters state))
-					(+ index 1)))
+					(rdf_shared_next_index index)))
 			/* A set-unique positive operand needs no cardinality barrier. Flatten
 				its base sources into the current BGP so the common planner can cost
 				and reorder the complete semi-join as one join graph. */
@@ -1952,7 +1964,7 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 				(rdf_shared_state_bindings state)
 				(merge (list (rdf_shared_state_filters state)
 					(list (qb_where query)) flattened_joins))
-				(+ index 1))))
+				(rdf_shared_next_index index))))
 ))
 (define rdf_shared_exists_apply_relation (lambda (schema state query vars shared negate)
 	(if (rdf_shared_exists_direct_safe query vars shared)
@@ -2015,12 +2027,12 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 						(rdf_shared_state_bindings state)
 						(cons (list (quote nil?) (get_assoc right (car (nth first_candidate 2))))
 							(rdf_shared_state_filters state))
-						(+ (rdf_shared_state_index state) 1))
+						(rdf_shared_next_index (rdf_shared_state_index state)))
 					(list (append (rdf_shared_state_sources state)
 						(list probe_alias (source_schema first_src) (source_relation first_src) false nil))
 						(rdf_shared_state_bindings state)
 						(merge (list (rdf_shared_state_filters state) (list match_expr) joins))
-						(+ (rdf_shared_state_index state) 1))))
+						(rdf_shared_next_index (rdf_shared_state_index state)))))
 			(if negate
 			/* NOT EXISTS(A UNION B) = NOT EXISTS(A) AND NOT EXISTS(B). */
 			(reduce branches (lambda (current branch)
@@ -2054,7 +2066,7 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 				(list (list (list alias schema relation false nil))
 					(list var (rdf_shared_column alias "value"))
 					(rdf_shared_state_filters state)
-					(+ (rdf_shared_state_index state) 1)))
+					(rdf_shared_next_index (rdf_shared_state_index state))))
 			(begin
 				(define query (make_query_block schema
 					(list (list "__rdf_path_values" schema relation false nil))
@@ -2216,7 +2228,7 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 							(if (equal? joins '()) nil (rdf_shared_where joins))))
 					(rdf_shared_merge_bindings (rdf_shared_state_bindings state) right)
 					(rdf_shared_state_filters state)
-					(+ index 1))))
+					(rdf_shared_next_index index))))
 		_ state
 	)
 ))
@@ -2242,7 +2254,8 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 		(match (rdf_shared_build_sources schema patterns outer_ctx source_index '() '() '()) '(sources bindings filters)
 			(begin
 				(define state (rdf_shared_apply_operators schema conditions outer_ctx
-					(list sources bindings filters (+ source_index (count patterns)))))
+					(list sources bindings filters
+						(rdf_shared_advance_index source_index (count patterns)))))
 				(define filter_exprs (rdf_shared_filter_conditions conditions
 					(rdf_shared_state_bindings state) outer_ctx))
 				(define final_state (list (rdf_shared_state_sources state)

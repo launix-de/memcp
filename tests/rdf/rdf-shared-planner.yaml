@@ -32,6 +32,23 @@ test_cases:
         (if (not (rdf_contains (concat (qb_where input)) "equal??")) (fail "join predicate missing"))
         true)
 
+  - name: "Hash-like RDF alias scopes remain unique across three joins"
+    scm: |
+      (begin
+        (define patterns (list
+          (list (list (quote get_var) (quote ?a)) "urn:test:p1" (list (quote get_var) (quote ?b)))
+          (list (list (quote get_var) (quote ?b)) "urn:test:p2" (list (quote get_var) (quote ?c)))
+          (list (list (quote get_var) (quote ?c)) "urn:test:p3" (list (quote get_var) (quote ?d)))))
+        (match (rdf_shared_build_sources "memcp-tests" patterns '()
+          "329e25deadbeef00" '() '() '()) '(sources _bindings _filters)
+          (begin
+            (define aliases (map sources source_alias))
+            (if (or (equal? (nth aliases 0) (nth aliases 1))
+              (or (equal? (nth aliases 0) (nth aliases 2))
+                (equal? (nth aliases 1) (nth aliases 2))))
+              (error (concat "rdf shared planner: duplicate aliases " aliases)))
+            true)))
+
   - name: "Embedded RDF query plans resolve caller prefix definitions"
     scm: |
       (begin
