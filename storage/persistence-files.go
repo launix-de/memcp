@@ -24,6 +24,7 @@ import "bytes"
 import "strings"
 import "errors"
 import "strconv"
+import "syscall"
 import "path/filepath"
 import "crypto/sha256"
 import "encoding/json"
@@ -53,10 +54,16 @@ func (f *FileFactory) CreateDatabase(schema string) PersistenceEngine {
 }
 
 func (f *FileStorage) ReadSchema() []byte {
-	jsonbytes, _ := os.ReadFile(f.path + "schema.json")
+	jsonbytes, err := os.ReadFile(f.path + "schema.json")
+	if err != nil && !os.IsNotExist(err) {
+		raisePersistenceFailure(f.BackendName(), f.path, "schema.read", err)
+	}
 	if len(jsonbytes) == 0 {
 		// try to load backup (in case of failure while save)
-		jsonbytes, _ = os.ReadFile(f.path + "schema.json.old")
+		jsonbytes, err = os.ReadFile(f.path + "schema.json.old")
+		if err != nil && !os.IsNotExist(err) {
+			raisePersistenceFailure(f.BackendName(), f.path, "schema.read", err)
+		}
 	}
 	return jsonbytes
 }
@@ -72,26 +79,26 @@ func (s *FileStorage) WriteSchema(jsonbytes []byte) {
 // to the previously committed generation and cannot create a live-path gap.
 func (s *FileStorage) WriteSchemaWithMode(jsonbytes []byte, durable bool) {
 	if err := os.MkdirAll(s.path, 0750); err != nil {
-		panic(err)
+		raisePersistenceFailure(s.BackendName(), s.path, "schema.write", err)
 	}
 	tmp, err := os.CreateTemp(s.path, ".schema.json.tmp-")
 	if err != nil {
-		panic(err)
+		raisePersistenceFailure(s.BackendName(), s.path, "schema.write", err)
 	}
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName)
 	if _, err := tmp.Write(jsonbytes); err != nil {
 		tmp.Close()
-		panic(err)
+		raisePersistenceFailure(s.BackendName(), s.path, "schema.write", err)
 	}
 	if durable {
 		if err := tmp.Sync(); err != nil {
 			tmp.Close()
-			panic(err)
+			raisePersistenceFailure(s.BackendName(), s.path, "schema.write", err)
 		}
 	}
 	if err := tmp.Close(); err != nil {
-		panic(err)
+		raisePersistenceFailure(s.BackendName(), s.path, "schema.write", err)
 	}
 
 	current := s.path + "schema.json"
@@ -104,24 +111,26 @@ func (s *FileStorage) WriteSchemaWithMode(jsonbytes []byte, durable bool) {
 		if err := os.Link(current, backupTmp); err == nil {
 			if err := os.Rename(backupTmp, backup); err != nil {
 				_ = os.Remove(backupTmp)
-				panic(err)
+				raisePersistenceFailure(s.BackendName(), s.path, "schema.write", err)
 			}
+		} else {
+			reportPersistenceCleanupFailure(s.BackendName(), s.path, "schema.backup", err)
 		}
 	}
 	if err := os.Rename(tmpName, current); err != nil {
-		panic(err)
+		raisePersistenceFailure(s.BackendName(), s.path, "schema.write", err)
 	}
 	if durable {
 		dir, err := os.Open(s.path)
 		if err != nil {
-			panic(err)
+			raisePersistenceFailure(s.BackendName(), s.path, "schema.write", err)
 		}
 		if err := dir.Sync(); err != nil {
 			dir.Close()
-			panic(err)
+			raisePersistenceFailure(s.BackendName(), s.path, "schema.write", err)
 		}
 		if err := dir.Close(); err != nil {
-			panic(err)
+			raisePersistenceFailure(s.BackendName(), s.path, "schema.write", err)
 		}
 	}
 }
@@ -130,6 +139,9 @@ func (s *FileStorage) ReadColumn(shard string, column string) io.ReadCloser {
 	//f, err := os.C
 	f, err := os.Open(s.path + shard + "-" + ProcessColumnName(column))
 	if err != nil {
+		if !os.IsNotExist(err) {
+			raisePersistenceFailure(s.BackendName(), s.path, "column.read.open", err)
+		}
 		// file does not exist -> no data available
 		return ErrorReader{e: err, notFound: os.IsNotExist(err)}
 	}
@@ -137,16 +149,20 @@ func (s *FileStorage) ReadColumn(shard string, column string) io.ReadCloser {
 }
 
 func (s *FileStorage) WriteColumn(shard string, column string) io.WriteCloser {
-	os.MkdirAll(s.path, 0750)
+	if err := os.MkdirAll(s.path, 0750); err != nil {
+		raisePersistenceFailure(s.BackendName(), s.path, "column.write.open", err)
+	}
 	f, err := os.Create(s.path + shard + "-" + ProcessColumnName(column))
 	if err != nil {
-		panic(err)
+		raisePersistenceFailure(s.BackendName(), s.path, "column.write.open", err)
 	}
-	return f
+	return &fileObjectWriter{File: f, database: s.path, operation: "column.write"}
 }
 
 func (s *FileStorage) RemoveColumn(shard string, column string) {
-	os.Remove(s.path + shard + "-" + ProcessColumnName(column))
+	if err := os.Remove(s.path + shard + "-" + ProcessColumnName(column)); err != nil && !os.IsNotExist(err) {
+		raisePersistenceFailure(s.BackendName(), s.path, "column.remove", err)
+	}
 }
 
 func (s *FileStorage) blobPath(hash string) string {
@@ -159,6 +175,9 @@ func (s *FileStorage) blobPath(hash string) string {
 func (s *FileStorage) ReadBlob(hash string) io.ReadCloser {
 	f, err := os.Open(s.blobPath(hash))
 	if err != nil {
+		if !os.IsNotExist(err) {
+			raisePersistenceFailure(s.BackendName(), s.path, "blob.read.open", err)
+		}
 		return ErrorReader{e: err, notFound: os.IsNotExist(err)}
 	}
 	return f
@@ -167,12 +186,45 @@ func (s *FileStorage) ReadBlob(hash string) io.ReadCloser {
 func (s *FileStorage) WriteBlob(hash string) io.WriteCloser {
 	p := s.blobPath(hash)
 	dir := p[:strings.LastIndex(p, "/")]
-	os.MkdirAll(dir, 0750)
+	if err := os.MkdirAll(dir, 0750); err != nil {
+		raisePersistenceFailure(s.BackendName(), s.path, "blob.write.open", err)
+	}
 	f, err := os.CreateTemp(dir, ".blob-write-")
 	if err != nil {
-		panic(err)
+		raisePersistenceFailure(s.BackendName(), s.path, "blob.write.open", err)
 	}
-	return &fileBlobWriter{File: f, finalPath: p, directory: dir}
+	return &fileBlobWriter{File: f, finalPath: p, directory: dir, database: s.path}
+}
+
+type fileObjectWriter struct {
+	*os.File
+	database  string
+	operation string
+}
+
+func (w *fileObjectWriter) Write(buffer []byte) (int, error) {
+	n, err := w.File.Write(buffer)
+	if err != nil || n != len(buffer) {
+		if err == nil {
+			err = io.ErrShortWrite
+		}
+		raisePersistenceFailure("filesystem", w.database, w.operation, err)
+	}
+	return n, nil
+}
+
+func (w *fileObjectWriter) Sync() error {
+	if err := w.File.Sync(); err != nil {
+		raisePersistenceFailure("filesystem", w.database, w.operation+".sync", err)
+	}
+	return nil
+}
+
+func (w *fileObjectWriter) Close() error {
+	if err := w.File.Close(); err != nil {
+		raisePersistenceFailure("filesystem", w.database, w.operation+".close", err)
+	}
+	return nil
 }
 
 // fileBlobWriter publishes a content-addressed blob only after the complete
@@ -182,52 +234,82 @@ type fileBlobWriter struct {
 	*os.File
 	finalPath string
 	directory string
+	database  string
+}
+
+func (w *fileBlobWriter) Write(buffer []byte) (int, error) {
+	n, err := w.File.Write(buffer)
+	if err != nil || n != len(buffer) {
+		if err == nil {
+			err = io.ErrShortWrite
+		}
+		raisePersistenceFailure("filesystem", w.database, "blob.write", err)
+	}
+	return n, nil
 }
 
 func (w *fileBlobWriter) Close() error {
 	if err := w.File.Sync(); err != nil {
 		w.File.Close()
 		os.Remove(w.File.Name())
-		return err
+		raisePersistenceFailure("filesystem", w.database, "blob.write.sync", err)
 	}
 	if err := w.File.Close(); err != nil {
 		os.Remove(w.File.Name())
-		return err
+		raisePersistenceFailure("filesystem", w.database, "blob.write.close", err)
 	}
 	err := os.Link(w.File.Name(), w.finalPath)
 	if err != nil && !os.IsExist(err) {
 		os.Remove(w.File.Name())
-		return err
+		raisePersistenceFailure("filesystem", w.database, "blob.write.publish", err)
 	}
 	os.Remove(w.File.Name())
 	dir, err := os.Open(w.directory)
 	if err != nil {
-		return err
+		raisePersistenceFailure("filesystem", w.database, "blob.write.sync", err)
 	}
-	defer dir.Close()
-	return dir.Sync()
+	if err := dir.Sync(); err != nil {
+		_ = dir.Close()
+		raisePersistenceFailure("filesystem", w.database, "blob.write.sync", err)
+	}
+	if err := dir.Close(); err != nil {
+		raisePersistenceFailure("filesystem", w.database, "blob.write.close", err)
+	}
+	return nil
 }
 
 func (s *FileStorage) DeleteBlob(hash string) {
-	os.Remove(s.blobPath(hash))
+	if err := os.Remove(s.blobPath(hash)); err != nil && !os.IsNotExist(err) {
+		raisePersistenceFailure(s.BackendName(), s.path, "blob.delete", err)
+	}
 }
 
-func (s *FileStorage) WalkBlobs(fn func(hash string) error) error {
-	return filepath.Walk(s.path+"blob/", func(p string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
+func (s *FileStorage) WalkBlobs(fn func(hash string)) {
+	err := filepath.Walk(s.path+"blob/", func(p string, info os.FileInfo, err error) error {
+		if err != nil {
 			return err
+		}
+		if info.IsDir() {
+			return nil
 		}
 		if strings.HasPrefix(info.Name(), ".blob-write-") {
 			return nil
 		}
-		return fn(info.Name())
+		fn(info.Name())
+		return nil
 	})
+	if os.IsNotExist(err) {
+		return
+	}
+	if err != nil {
+		raisePersistenceFailure(s.BackendName(), s.path, "blob.walk", err)
+	}
 }
 
-func (s *FileStorage) WalkShardFiles(fn func(name string) error) error {
+func (s *FileStorage) WalkShardFiles(fn func(name string)) {
 	entries, err := os.ReadDir(s.path)
 	if err != nil {
-		return err
+		raisePersistenceFailure(s.BackendName(), s.path, "shard.walk", err)
 	}
 	for _, e := range entries {
 		if e.IsDir() {
@@ -237,33 +319,38 @@ func (s *FileStorage) WalkShardFiles(fn func(name string) error) error {
 		if n == "schema.json" || n == "schema.json.old" {
 			continue
 		}
-		if err := fn(n); err != nil {
-			return err
-		}
+		fn(n)
 	}
-	return nil
 }
 
 func (s *FileStorage) DeleteShardFile(name string) {
-	os.Remove(s.path + name)
+	if err := os.Remove(s.path + name); err != nil && !os.IsNotExist(err) {
+		raisePersistenceFailure(s.BackendName(), s.path, "shard.delete", err)
+	}
 }
 
 func (s *FileStorage) OpenLog(shard string) PersistenceLogfile {
-	os.MkdirAll(s.path, 0750)
+	if err := os.MkdirAll(s.path, 0750); err != nil {
+		raisePersistenceFailure(s.BackendName(), s.path, "log.open", err)
+	}
 	f, err := os.OpenFile(s.path+shard+".log", os.O_RDWR|os.O_CREATE, 0750)
 	if err != nil {
-		panic(err)
+		raisePersistenceFailure(s.BackendName(), s.path, "log.open", err)
 	}
-	return FileLogfile{f}
+	if _, err := f.Seek(0, io.SeekEnd); err != nil {
+		_ = f.Close()
+		raisePersistenceFailure(s.BackendName(), s.path, "log.open", err)
+	}
+	return FileLogfile{w: f}
 }
 
 func (s *FileStorage) SwapLog(shard string, entries []interface{}, durable bool) PersistenceLogfile {
 	if err := os.MkdirAll(s.path, 0750); err != nil {
-		panic(err)
+		raisePersistenceFailure(s.BackendName(), s.path, "log.swap", err)
 	}
 	tmp, err := os.CreateTemp(s.path, "."+shard+".log.tmp-")
 	if err != nil {
-		panic(err)
+		raisePersistenceFailure(s.BackendName(), s.path, "log.swap", err)
 	}
 	tmpName := tmp.Name()
 	removeTmp := true
@@ -276,25 +363,25 @@ func (s *FileStorage) SwapLog(shard string, entries []interface{}, durable bool)
 	for _, entry := range entries {
 		if _, err := tmp.Write(encodeFileLogEntry(entry)); err != nil {
 			_ = tmp.Close()
-			panic(err)
+			raisePersistenceFailure(s.BackendName(), s.path, "log.swap", err)
 		}
 	}
 	if durable {
 		if err := tmp.Sync(); err != nil {
 			_ = tmp.Close()
-			panic(err)
+			raisePersistenceFailure(s.BackendName(), s.path, "log.swap", err)
 		}
 	}
 	if _, err := tmp.Seek(0, io.SeekEnd); err != nil {
 		_ = tmp.Close()
-		panic(err)
+		raisePersistenceFailure(s.BackendName(), s.path, "log.swap", err)
 	}
 	var dir *os.File
 	if durable {
 		dir, err = os.Open(s.path)
 		if err != nil {
 			_ = tmp.Close()
-			panic(err)
+			raisePersistenceFailure(s.BackendName(), s.path, "log.swap", err)
 		}
 	}
 	if err := os.Rename(tmpName, s.path+shard+".log"); err != nil {
@@ -302,32 +389,42 @@ func (s *FileStorage) SwapLog(shard string, entries []interface{}, durable bool)
 			_ = dir.Close()
 		}
 		_ = tmp.Close()
-		panic(err)
+		raisePersistenceFailure(s.BackendName(), s.path, "log.swap", err)
 	}
 	removeTmp = false
 	if dir != nil {
 		// PersistenceLogfile cannot report an ambiguous outcome after rename.
 		// Match the existing best-effort Sync contract while still issuing the
 		// directory barrier needed to persist the chosen complete generation.
-		_ = dir.Sync()
-		_ = dir.Close()
+		if err := dir.Sync(); err != nil {
+			reportPersistenceAmbiguousFailure(s.BackendName(), s.path, "log.swap.sync", err)
+		}
+		if err := dir.Close(); err != nil {
+			reportPersistenceCleanupFailure(s.BackendName(), s.path, "log.swap.close", err)
+		}
 	}
 	return FileLogfile{w: tmp}
 }
 
 func (s *FileStorage) ReplayLog(shard string) (map[string]struct{}, chan interface{}, PersistenceLogfile) {
-	os.MkdirAll(s.path, 0750)
+	if err := os.MkdirAll(s.path, 0750); err != nil {
+		raisePersistenceFailure(s.BackendName(), s.path, "log.replay", err)
+	}
 	f, err := os.OpenFile(s.path+shard+".log", os.O_RDWR|os.O_CREATE, 0750)
 	if err != nil {
-		panic(err)
+		raisePersistenceFailure(s.BackendName(), s.path, "log.replay", err)
 	}
 	committed := fileCommittedTransactions(f)
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		_ = f.Close()
-		panic(err)
+		raisePersistenceFailure(s.BackendName(), s.path, "log.replay", err)
 	}
 	replay := make(chan interface{}, 64)
-	fi, _ := f.Stat()
+	fi, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		raisePersistenceFailure(s.BackendName(), s.path, "log.replay", err)
+	}
 	if fi.Size() > 0 {
 		go func() {
 			defer close(replay)
@@ -396,14 +493,14 @@ func (s *FileStorage) ReplayLog(shard string) (map[string]struct{}, chan interfa
 					break
 				}
 				if err != nil {
-					panic(err)
+					raisePersistenceFailure(s.BackendName(), s.path, "log.replay", err)
 				}
 			}
 		}()
 	} else {
 		close(replay)
 	}
-	return committed, replay, FileLogfile{f}
+	return committed, replay, FileLogfile{w: f}
 }
 
 func fileCommittedTransactions(f *os.File) map[string]struct{} {
@@ -427,7 +524,7 @@ func fileCommittedTransactions(f *os.File) map[string]struct{} {
 			committed[fields[0]] = struct{}{}
 		}
 		if err != nil {
-			panic(err)
+			raisePersistenceFailure("filesystem", f.Name(), "log.replay", err)
 		}
 	}
 	return committed
@@ -497,7 +594,9 @@ func decodeFileInsertLog(b []byte) ([]string, [][]scm.Scmer) {
 }
 
 func (s *FileStorage) RemoveLog(shard string) {
-	os.Remove(s.path + shard + ".log")
+	if err := os.Remove(s.path + shard + ".log"); err != nil && !os.IsNotExist(err) {
+		raisePersistenceFailure(s.BackendName(), s.path, "log.remove", err)
+	}
 }
 
 type FileLogfile struct {
@@ -505,7 +604,53 @@ type FileLogfile struct {
 }
 
 func (w FileLogfile) Write(logentry interface{}) {
-	_, _ = w.w.Write(encodeFileLogEntry(logentry))
+	frame := encodeFileLogEntry(logentry)
+	if len(frame) == 0 {
+		return
+	}
+	start, err := w.w.Seek(0, io.SeekCurrent)
+	if err != nil {
+		raisePersistenceFailure("filesystem", w.w.Name(), "log.write", err)
+	}
+	n, err := w.w.Write(frame)
+	if err == nil && n == len(frame) {
+		return
+	}
+	if err == nil {
+		err = io.ErrShortWrite
+	}
+	if truncateErr := w.w.Truncate(start); truncateErr != nil {
+		err = fmt.Errorf("%w; WAL rollback failed: %v", err, truncateErr)
+	}
+	if _, seekErr := w.w.Seek(start, io.SeekStart); seekErr != nil {
+		err = fmt.Errorf("%w; WAL seek rollback failed: %v", err, seekErr)
+	}
+	raisePersistenceFailure("filesystem", w.w.Name(), "log.write", err)
+}
+
+func (w FileLogfile) writePartial(logentry interface{}) error {
+	frame := encodeFileLogEntry(logentry)
+	if len(frame) == 0 {
+		return syscall.ENOSPC
+	}
+	start, err := w.w.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return err
+	}
+	prefix := len(frame) / 2
+	if prefix == 0 {
+		prefix = 1
+	}
+	if _, err := w.w.Write(frame[:prefix]); err != nil {
+		return err
+	}
+	if err := w.w.Truncate(start); err != nil {
+		return err
+	}
+	if _, err := w.w.Seek(start, io.SeekStart); err != nil {
+		return err
+	}
+	return syscall.ENOSPC
 }
 
 func encodeFileLogEntry(logentry interface{}) []byte {
@@ -554,15 +699,23 @@ func encodeFileInsert(b *bytes.Buffer, prefix string, txID string, cols []string
 	b.Write(tmp)
 	b.WriteString("\n")
 }
-func (w FileLogfile) Sync() {
-	w.w.Sync()
+func (w FileLogfile) Flush(durable bool) {
+	if durable {
+		if err := w.w.Sync(); err != nil {
+			raisePersistenceFailure("filesystem", w.w.Name(), "log.sync", err)
+		}
+	}
 }
 func (w FileLogfile) Close() {
-	w.w.Close()
+	if err := w.w.Close(); err != nil {
+		raisePersistenceFailure("filesystem", w.w.Name(), "log.close", err)
+	}
 }
 
 func (s *FileStorage) Remove() {
-	os.RemoveAll(s.path)
+	if err := os.RemoveAll(s.path); err != nil {
+		raisePersistenceFailure(s.BackendName(), s.path, "database.remove", err)
+	}
 }
 
 func (s *FileStorage) BackendName() string {
