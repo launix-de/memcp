@@ -58,6 +58,11 @@ type PersistenceEngine interface {
 	// fn may return an error to stop iteration early.
 	WalkBlobs(fn func(hash string) error) error
 	OpenLog(shard string) PersistenceLogfile // open for writing
+	// SwapLog atomically replaces the visible log with entries and returns an
+	// appendable handle for the replacement. A crash may leave private/orphaned
+	// temporary storage, but ReplayLog must observe either the complete old log
+	// or the complete replacement.
+	SwapLog(shard string, entries []interface{}, durable bool) PersistenceLogfile
 	// ReplayLog returns the transaction IDs committed in this WAL before it
 	// streams entries. This keeps recovery memory proportional to commit count,
 	// rather than retaining every row mutation until the final marker is known.

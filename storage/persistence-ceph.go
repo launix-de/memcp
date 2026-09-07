@@ -342,6 +342,44 @@ func (s *CephStorage) OpenLog(shard string) PersistenceLogfile {
 	return lf
 }
 
+func (s *CephStorage) SwapLog(shard string, entries []interface{}, durable bool) PersistenceLogfile {
+	s.ensureOpen()
+	oldSegments, err := listLogSegments(s, shard)
+	if err != nil {
+		panic(err)
+	}
+	var next uint32
+	for _, segment := range oldSegments {
+		if segment.seg >= next {
+			next = segment.seg + 1
+		}
+	}
+	var body bytes.Buffer
+	for _, entry := range entries {
+		body.Write(encodeLogEntry(entry))
+	}
+	obj := s.obj(fmt.Sprintf("%s.log.%08d", shard, next))
+	if err := s.ioctx.WriteFull(obj, body.Bytes()); err != nil {
+		panic(err)
+	}
+	if err := writeLogManifest(s, shard, []uint32{next}); err != nil {
+		panic(err)
+	}
+	for _, segment := range oldSegments {
+		if segment.seg != next {
+			_ = s.ioctx.Delete(segment.obj)
+		}
+	}
+	return &CephLogfile{
+		s:               s,
+		shard:           shard,
+		seg:             next,
+		obj:             obj,
+		offset:          uint64(body.Len()),
+		flushEveryBytes: 256 * 1024,
+	}
+}
+
 func (s *CephStorage) ReplayLog(shard string) (map[string]struct{}, chan interface{}, PersistenceLogfile) {
 	s.ensureOpen()
 

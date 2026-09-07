@@ -18,12 +18,13 @@ package storage
 
 import "os"
 import "fmt"
+import "sort"
 import "sync"
-import "sync/atomic"
 import "time"
 import "runtime"
 import "strings"
 import "encoding/json"
+import "sync/atomic"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/NonLockingReadMap"
 
@@ -65,10 +66,11 @@ type database struct {
 	// transactionLog is the database-wide commit authority for transactional
 	// shard WAL entries. Shard logs may contain prepared records after a crash;
 	// recovery exposes them only when this log contains their durable commit.
-	transactionOnce sync.Once           `json:"-"`
-	transactionMu   sync.RWMutex        `json:"-"`
-	transactionLog  PersistenceLogfile  `json:"-"`
-	committedTx     map[string]struct{} `json:"-"`
+	transactionOnce sync.Once          `json:"-"`
+	transactionMu   sync.RWMutex       `json:"-"`
+	transactionLog  PersistenceLogfile `json:"-"`
+	committedTx     map[string]uint64  `json:"-"`
+	transactionGen  uint64             `json:"-"`
 
 	// lazy-loading/shared-resource state (not serialized)
 	srState SharedState `json:"-"`
@@ -93,21 +95,21 @@ func (db *database) blobRefState() *blobRefState {
 }
 
 func newDatabase() *database {
-	return &database{blobRefs: new(blobRefState), committedTx: make(map[string]struct{})}
+	return &database{blobRefs: new(blobRefState), committedTx: make(map[string]uint64)}
 }
 
 const transactionLogName = ".transactions"
 
 func (db *database) initializeTransactionLog() {
 	db.transactionOnce.Do(func() {
-		committed := make(map[string]struct{})
+		committed := make(map[string]uint64)
 		_, entries, logfile := db.persistence.ReplayLog(transactionLogName)
 		for entry := range entries {
 			commit, ok := entry.(LogEntryCommit)
 			if !ok || commit.txID == "" {
 				panic("invalid entry in transaction commit log")
 			}
-			committed[commit.txID] = struct{}{}
+			committed[commit.txID] = 0
 		}
 		db.transactionMu.Lock()
 		db.committedTx = committed
@@ -141,7 +143,48 @@ func (db *database) commitTransaction(txID string, durable bool) {
 	if durable {
 		db.transactionLog.Sync()
 	}
-	db.committedTx[txID] = struct{}{}
+	db.committedTx[txID] = db.transactionGen
+}
+
+func (db *database) transactionCompactionSnapshot() (uint64, bool) {
+	db.initializeTransactionLog()
+	db.transactionMu.Lock()
+	cutoff := db.transactionGen
+	hasTransactions := len(db.committedTx) != 0
+	db.transactionGen++
+	db.transactionMu.Unlock()
+	return cutoff, hasTransactions
+}
+
+func (db *database) compactTransactionLog(cutoff uint64) {
+	db.initializeTransactionLog()
+	db.transactionMu.Lock()
+	defer db.transactionMu.Unlock()
+
+	// Usually only the small set committed while the rebuild was running is
+	// retained. Do not reserve capacity for the much larger obsolete set.
+	var retainedIDs []string
+	for txID, generation := range db.committedTx {
+		if generation > cutoff {
+			retainedIDs = append(retainedIDs, txID)
+		}
+	}
+	sort.Strings(retainedIDs)
+	entries := make([]interface{}, len(retainedIDs))
+	retained := make(map[string]uint64, len(retainedIDs))
+	for i, txID := range retainedIDs {
+		entries[i] = LogEntryCommit{txID: txID}
+		retained[txID] = db.committedTx[txID]
+	}
+
+	// Committers share transactionMu, so nobody can append between this
+	// barrier and publishing the replacement log.
+	db.transactionLog.Sync()
+	replacement := db.persistence.SwapLog(transactionLogName, entries, true)
+	old := db.transactionLog
+	db.transactionLog = replacement
+	db.committedTx = retained
+	old.Close()
 }
 
 func (db *database) closeTransactionLog() {
@@ -159,6 +202,7 @@ type rebuildDatabaseResult struct {
 	// the last committed schema may still reference them.
 	replaced []replacedShardGeneration
 	errors   []string
+	complete bool
 }
 
 type replacedShardGeneration struct {
@@ -323,32 +367,52 @@ func rebuildDatabases(all bool, repartition bool, includeEphemeral bool) string 
 	dbs := databases.GetAll()
 	var errs []string
 	for _, db := range dbs {
-		func(db *database) {
-			db.persistenceLifecycle.RLock()
-			defer db.persistenceLifecycle.RUnlock()
-			result := db.rebuildWithLifecycle(all, repartition, includeEphemeral)
-			if len(result.errors) > 0 {
-				errs = append(errs, result.errors...)
-				return
-			}
-			if err := func() (err error) {
-				defer func() { err = recoverAsError("save failed for database " + db.Name) }()
-				db.save()
-				return nil
-			}(); err != nil {
-				errs = append(errs, err.Error())
-				return
-			}
-			// db.save() committed all replacement UUIDs. A save failure returns
-			// above and deliberately retains every old generation.
-			errs = append(errs, cleanupReplacedShardGenerations(result.replaced, "database "+db.Name)...)
-		}(db)
+		errs = append(errs, rebuildDatabaseAndCompact(db, all, repartition, includeEphemeral)...)
 	}
 	duration := fmt.Sprint(time.Since(start))
 	if len(errs) == 0 {
 		return duration
 	}
 	return duration + " errors: " + strings.Join(errs, " | ")
+}
+
+func rebuildDatabaseAndCompact(db *database, all bool, repartition bool, includeEphemeral bool) []string {
+	db.persistenceLifecycle.RLock()
+	defer db.persistenceLifecycle.RUnlock()
+	var transactionCutoff uint64
+	var hasTransactions bool
+	if err := func() (err error) {
+		defer func() { err = recoverAsError("transaction log snapshot failed for database " + db.Name) }()
+		transactionCutoff, hasTransactions = db.transactionCompactionSnapshot()
+		return nil
+	}(); err != nil {
+		return []string{err.Error()}
+	}
+	result := db.rebuildWithLifecycle(all, repartition, includeEphemeral)
+	if len(result.errors) > 0 {
+		return result.errors
+	}
+	if err := func() (err error) {
+		defer func() { err = recoverAsError("save failed for database " + db.Name) }()
+		db.save()
+		return nil
+	}(); err != nil {
+		return []string{err.Error()}
+	}
+	// db.save() committed all replacement UUIDs. A save failure returns above
+	// and deliberately retains every old generation.
+	errs := cleanupReplacedShardGenerations(result.replaced, "database "+db.Name)
+	if len(errs) != 0 || !result.complete || !hasTransactions {
+		return errs
+	}
+	if err := func() (err error) {
+		defer func() { err = recoverAsError("transaction log compaction failed for database " + db.Name) }()
+		db.compactTransactionLog(transactionCutoff)
+		return nil
+	}(); err != nil {
+		errs = append(errs, err.Error())
+	}
+	return errs
 }
 
 func UnloadDatabases() {
@@ -706,6 +770,7 @@ func (db *database) rebuildWithLifecycle(all bool, repartition bool, includeEphe
 	var allReplaced []replacedShardGeneration
 	var errMu sync.Mutex
 	var rebuildErrors []string
+	var incomplete atomic.Bool
 	dbs := db.tables.GetAll()
 	if len(only) > 0 {
 		dbs = []*table{only[0]}
@@ -785,6 +850,7 @@ func (db *database) rebuildWithLifecycle(all bool, repartition bool, includeEphe
 				return
 			}
 			if !t.maintenanceMu.TryLock() {
+				incomplete.Store(true)
 				return // another rebuild/repartition is in progress
 			}
 			t.mu.Lock() // table lock
@@ -869,6 +935,12 @@ func (db *database) rebuildWithLifecycle(all bool, repartition bool, includeEphe
 				if cold {
 					hasColdShard = true
 				}
+			}
+			// A non-forced rebuild deliberately retains cold generations without
+			// replaying their WAL. Their coordinator references are therefore
+			// unknown and the database transaction log must remain intact.
+			if hasColdShard {
+				incomplete.Store(true)
 			}
 
 			// Collect pre-rebuild shards that were replaced so we can clean them up.
@@ -1078,7 +1150,11 @@ func (db *database) rebuildWithLifecycle(all bool, repartition bool, includeEphe
 	// where a crash/kill leaves schema.json pointing at already-deleted UUIDs.
 	// Failed schema publication intentionally retains the old generation: it is
 	// still referenced by the last committed schema and must remain recoverable.
-	return rebuildDatabaseResult{replaced: allReplaced, errors: rebuildErrors}
+	return rebuildDatabaseResult{
+		replaced: allReplaced,
+		errors:   rebuildErrors,
+		complete: !incomplete.Load() && len(rebuildErrors) == 0,
+	}
 }
 
 func GetDatabase(schema string) *database {
