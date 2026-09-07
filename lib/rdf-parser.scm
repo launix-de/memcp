@@ -315,7 +315,15 @@ consumer stage. */
 	rdf_filter_and
 )))
 
+(define rdf_path_negated_member (parser (or
+	(parser '((atom "^" true) (define p rdf_expression)) (list "inverse" p))
+	(parser (define p rdf_expression) (list "forward" p))
+)))
 (define rdf_path_atom (parser (or
+	(parser '((atom "!" true) "(" (define members (+ rdf_path_negated_member "|")) ")")
+		(list "__path_negated__" members))
+	(parser '((atom "!" true) (define member rdf_path_negated_member))
+		(list "__path_negated__" (list member)))
 	(parser '((atom "^" true) "(" (define p rdf_path_alt) ")") (list "__path_inverse__" p))
 	(parser '((atom "^" true) (define p rdf_expression)) (list "__path_inverse__" p))
 	(parser '("(" (define p rdf_path_alt) ")") p)
@@ -1487,6 +1495,37 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 			'('get_var _subject_var) (list (list "__bind__" object subject))
 			_ (list (list "__filter__" (list (quote equal?) subject object)))))
 ))
+(define rdf_path_negated_branch (lambda (subject object direction exclusions state)
+	(begin
+		(define predicate (rdf_shared_fresh_path_var state))
+		(list
+			(if (equal? direction "inverse")
+				(list object predicate subject) (list subject predicate object))
+			(list "__filter__" (list (quote not)
+				(cons (quote sql_in) (cons (cons (quote list) exclusions)
+					(list predicate)))))))
+))
+(define rdf_path_negated_exclusions (lambda (members direction)
+	(match members
+		(cons member tail)
+		(if (equal? (car member) direction)
+			(cons (cadr member) (rdf_path_negated_exclusions tail direction))
+			(rdf_path_negated_exclusions tail direction))
+		'() '())
+))
+(define rdf_path_negated_branches (lambda (subject object members state)
+	(begin
+		(define forward (rdf_path_negated_exclusions members "forward"))
+		(define inverse (rdf_path_negated_exclusions members "inverse"))
+		(if (equal? forward '())
+			(if (equal? inverse '()) '()
+				(list (rdf_path_negated_branch subject object "inverse" inverse state)))
+			(if (equal? inverse '())
+				(list (rdf_path_negated_branch subject object "forward" forward state))
+				(list (rdf_path_negated_branch subject object "forward" forward state)
+					(rdf_path_negated_branch subject object "inverse" inverse state))))
+))
+))
 (define rdf_shared_expand_paths_using (lambda (conditions state) (match conditions
 	(cons condition tail)
 	(match condition
@@ -1495,6 +1534,15 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 			(cons (list "__filter__" false) tail)) state)
 		'(s p o)
 		(match p
+			'("__path_negated__" members)
+			(begin
+				(define branches (rdf_path_negated_branches s o members state))
+				(if (equal? (count branches) 1)
+					(rdf_shared_expand_paths_using
+						(cons (car (car branches))
+							(cons (cadr (car branches)) tail)) state)
+					(cons (list "__union__" branches)
+						(rdf_shared_expand_paths_using tail state))))
 			'("__path_inverse__" inner)
 			(rdf_shared_expand_paths_using
 				(cons (list o (rdf_path_invert inner) s) tail) state)

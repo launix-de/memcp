@@ -57,21 +57,23 @@ test_cases:
     expect: {rows: 2}
 
   - name: "SPARQL 1.1 9 NegatedPropertySet excludes a forward predicate"
-    noncritical: true
     ttl_data: |
       @prefix ex: <http://spec11-path-negated.example/> . ex:a ex:blocked ex:b ; ex:allowed ex:c .
     sparql: 'PREFIX ex: <http://spec11-path-negated.example/> SELECT ?o WHERE { ex:a !ex:blocked ?o }'
     expect: {rows: 1, data: [{"?o": "http://spec11-path-negated.example/c"}]}
 
   - name: "SPARQL 1.1 9 NegatedPropertySet mixes forward and inverse exclusions"
-    noncritical: true
     ttl_data: |
       @prefix ex: <http://spec11-path-negated-mixed.example/> .
       ex:a ex:blocked ex:center . ex:center ex:allowed ex:c . ex:x ex:reverseBlocked ex:center .
     sparql: |
       PREFIX ex: <http://spec11-path-negated-mixed.example/>
-      SELECT ?o WHERE { ex:center !(ex:blocked|^ex:reverseBlocked) ?o }
-    expect: {rows: 1, data: [{"?o": "http://spec11-path-negated-mixed.example/c"}]}
+      SELECT ?o WHERE { ex:center !(ex:blocked|^ex:reverseBlocked) ?o } ORDER BY ?o
+    expect:
+      rows: 2
+      data:
+        - {"?o": "http://spec11-path-negated-mixed.example/a"}
+        - {"?o": "http://spec11-path-negated-mixed.example/c"}
 
   - name: "SPARQL 1.1 9 repetition applies to a composite path"
     noncritical: true
