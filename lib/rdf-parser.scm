@@ -361,6 +361,11 @@ consumer stage. */
 		(parser (define expr rdf_expression) '(expr "ASC")))
 	(atom "LIMIT" true)
 	(atom "OFFSET" true)
+	/* RDFHP embeds SELECT directly before its block delimiters. They must not
+	be consumed as legacy bare-name ORDER BY expressions. */
+	(atom "BEGIN" true)
+	(atom "ELSE" true)
+	(atom "END" true)
 )))
 (define rdf_limit_offset (parser (or
 	(parser '((atom "LIMIT" true) (define limit rdf_number) (? (atom "OFFSET" true) (define offset rdf_number))) '(limit offset))
@@ -745,7 +750,11 @@ consumer stage. */
 )))
 (define rdf_ensure_table (lambda (schema)
 	(begin
-		(eval (parse_sql schema "CREATE TABLE IF NOT EXISTS rdf (s TEXT, p TEXT, o TEXT, UNIQUE KEY rdf_spo (s, p, o))" (lambda (schema tblname write) true)))
+		/* Avoid replaying idempotent DDL on every RDF read. Besides being wasted
+		work, CREATE IF NOT EXISTS can publish a fresh table generation while a
+		query plan using the previous generation is still being compiled. */
+		(if (table schema "rdf") true
+			(eval (parse_sql schema "CREATE TABLE IF NOT EXISTS rdf (s TEXT, p TEXT, o TEXT, UNIQUE KEY rdf_spo (s, p, o))" (lambda (schema tblname write) true))))
 		(define info (show schema "rdf" true))
 		(define unique_keys ((info "meta") "Unique"))
 		(define has_spo (find unique_keys (lambda (key)
@@ -768,7 +777,8 @@ consumer stage. */
 		true)
 ))
 (define rdf_ensure_named_table (lambda (schema)
-	(eval (parse_sql schema "CREATE TABLE IF NOT EXISTS rdf_named (g TEXT, s TEXT, p TEXT, o TEXT, UNIQUE KEY rdf_gspo (g, s, p, o))" (lambda (schema tblname write) true)))
+	(if (table schema "rdf_named") true
+		(eval (parse_sql schema "CREATE TABLE IF NOT EXISTS rdf_named (g TEXT, s TEXT, p TEXT, o TEXT, UNIQUE KEY rdf_gspo (g, s, p, o))" (lambda (schema tblname write) true))))
 ))
 (define rdf_insert_triples (lambda (schema triples)
 	(if (equal? triples '())
@@ -1351,11 +1361,11 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 		(error "SPARQL shared planner: expected SELECT query")
 	)
 ))
-(define rdf_shared_result_context (lambda (cols outer_ctx)
+(define rdf_shared_result_context (lambda (cols outer_ctx row_symbol)
 	(match cols
 		(cons title (cons _expr tail))
-		(merge (rdf_shared_result_context tail outer_ctx)
-			(list title (list (quote rdf_row_lookup) (quote __rdf_values) title)))
+		(merge (rdf_shared_result_context tail outer_ctx row_symbol)
+			(list title (list (quote rdf_row_lookup) row_symbol title)))
 		'() outer_ctx
 	)
 ))
@@ -1366,22 +1376,29 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 		transaction carriers as SQL. Passing nil here was sufficient for a BGP,
 		but loses the runtime session preparation required by decorrelation. */
 		(define plan (build_queryplan_term ast planning_session tx))
-		(define result_ctx (rdf_shared_result_context (qb_fields ast) outer_ctx))
+		/* RDFHP can nest query plans. Fixed callback parameter names let an inner
+		plan shadow expressions captured from the outer row, producing
+		__rdf_row_missing__ for otherwise bound variables. Derive hygienic names
+		from the logical query and its outer context. */
+		(define scope_id (fnv_hash (concat query "|" outer_ctx)))
+		(define values_symbol (symbol (concat "__rdf_values_" scope_id)))
+		(define outer_resultrow_symbol (symbol (concat "__rdf_outer_resultrow_" scope_id)))
+		(define result_ctx (rdf_shared_result_context (qb_fields ast) outer_ctx values_symbol))
 		(define result_body (resultfunc (nth query 1) result_ctx))
 		(list
-			(list (quote lambda) (list (quote __rdf_outer_resultrow))
+			(list (quote lambda) (list outer_resultrow_symbol)
 				(list (quote begin)
 					(list (quote set) (quote resultrow)
-						(list (quote lambda) (list (quote __rdf_values))
+						(list (quote lambda) (list values_symbol)
 							(list
 								(list (quote lambda) (list (quote resultrow)) result_body)
-								(quote __rdf_outer_resultrow))))
+								outer_resultrow_symbol)))
 					plan))
 			(quote resultrow)))
 ))
 
 (define rdf_queryplan (lambda (schema query definitions ctx resultfunc /* function that gets cols + ctx */)
-	(rdf_shared_queryplan schema query ctx resultfunc)
+	(rdf_shared_queryplan schema (rdf_resolve_prefixes query definitions) ctx resultfunc)
 ))
 
 (define parse_sparql (lambda (schema s _policy planning_session tx) (match (ttl_header s)
