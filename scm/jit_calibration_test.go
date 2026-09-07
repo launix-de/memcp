@@ -77,6 +77,21 @@ func TestJITExpressionCostUsesDeclarationMetadata(t *testing.T) {
 	}
 }
 
+func TestJITExpressionCostDoesNotInterpretQuotedData(t *testing.T) {
+	quoted := Read("jit calibration quoted data", `(quote ((+ 1 2) (> 3 2)))`)
+	for quoted.GetTag() == tagSourceInfo {
+		quoted = quoted.SourceInfo().value
+	}
+	declaration := DeclarationForValue(quoted.Slice()[0])
+	want := 1
+	if declaration != nil && declaration.Type != nil && declaration.Type.JITInlineCost != 0 {
+		want = int(declaration.Type.JITInlineCost)
+	}
+	if got := JITExpressionCost(quoted); got != want {
+		t.Fatalf("quoted expression cost = %d, want only quote emitter cost %d", got, want)
+	}
+}
+
 func TestJITStartupCalibrationPublishesImmutableCostModel(t *testing.T) {
 	first := CalibrateJITCosts()
 	second := CurrentJITCosts()

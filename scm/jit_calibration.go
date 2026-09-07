@@ -228,6 +228,9 @@ func JITExpressionCost(expression Scmer) int {
 	for expression.GetTag() == tagSourceInfo {
 		expression = expression.SourceInfo().value
 	}
+	if expression.GetTag() == tagProc && expression.Proc() != nil {
+		return JITExpressionCost(expression.Proc().Body)
+	}
 	if expression.GetTag() != tagSlice {
 		return 0
 	}
@@ -236,13 +239,27 @@ func JITExpressionCost(expression Scmer) int {
 		return 0
 	}
 	cost := 1
-	if declaration := DeclarationForValue(list[0]); declaration != nil && declaration.Type != nil {
+	declaration := DeclarationForValue(list[0])
+	if declaration != nil && declaration.Type != nil {
 		cost = int(declaration.Type.JITInlineCost)
 		if cost == 0 {
 			cost = 1
 		}
 	}
-	for _, argument := range list[1:] {
+	arguments := list[1:]
+	if declaration != nil {
+		switch declaration.SyntaxKind {
+		case SyntaxQuote:
+			return cost
+		case SyntaxLambda:
+			// Lambda parameter lists are syntax data. Its body is emitted when the
+			// callback itself is inlined, so it belongs to the estimate.
+			if len(arguments) != 0 {
+				arguments = arguments[1:]
+			}
+		}
+	}
+	for _, argument := range arguments {
 		cost += JITExpressionCost(argument)
 	}
 	return cost
