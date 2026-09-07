@@ -214,6 +214,8 @@ func validateAcceptedBatch(batch *recSet, acceptedValue scm.Scmer) *recSet {
 func optimizeScanOrderBatchAccept(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) (scm.Scmer, *scm.TypeDescriptor) {
 	const mapReduceIdx = 12
 	const neutralIdx = 13
+	const notFoundIdx = 15
+	reuseNeutralForNotFound := len(v) <= notFoundIdx || scm.Equal(v[neutralIdx], v[notFoundIdx])
 	rawMapReduce := v[mapReduceIdx]
 	for i := 1; i <= mapReduceIdx && i < len(v); i++ {
 		if i != mapReduceIdx {
@@ -239,11 +241,15 @@ func optimizeScanOrderBatchAccept(v []scm.Scmer, oc *scm.OptimizerContext, useRe
 			columnTypes[i] = unknownScanType()
 		}
 	}
-	v[mapReduceIdx], _ = oc.OptimizeReducerCallback(rawMapReduce, neutralType, columnTypes...)
+	var resultType *scm.TypeDescriptor
+	v[mapReduceIdx], resultType = oc.OptimizeReducerCallback(rawMapReduce, neutralType, columnTypes...)
 	for i := 14; i < len(v); i++ {
 		v[i], _ = oc.OptimizeSub(v[i], true)
 	}
 	oc.Ome.DecrLoopDepth()
+	if reuseNeutralForNotFound {
+		return scm.NewSlice(v), resultType
+	}
 	return scm.NewSlice(v), nil
 }
 

@@ -2851,6 +2851,56 @@ func (oc *OptimizerContext) OptimizeReducerCallback(callback Scmer, accumulator 
 	return optimized, normalizeOptimizerType(finalResult)
 }
 
+// OptimizeReducerCallbacks optimizes alternative reducers that share one
+// accumulator. A multi-source operator can invoke any reducer next, so an
+// ownership fact is valid only when every callback preserves it. Computing one
+// common fixed point before emitting the callbacks prevents an early callback
+// from being made mutable when a later callback can return a borrowed value.
+func (oc *OptimizerContext) OptimizeReducerCallbacks(callbacks []Scmer, accumulator *TypeDescriptor, values [][]*TypeDescriptor) ([]Scmer, *TypeDescriptor) {
+	if len(callbacks) == 0 {
+		return nil, normalizeOptimizerType(accumulator)
+	}
+	if len(callbacks) == 1 {
+		var callbackValues []*TypeDescriptor
+		if len(values) != 0 {
+			callbackValues = values[0]
+		}
+		optimized, result := oc.OptimizeReducerCallback(callbacks[0], accumulator, callbackValues...)
+		return []Scmer{optimized}, result
+	}
+
+	loopType := normalizeOptimizerType(accumulator)
+	for iteration := 0; iteration < 16; iteration++ {
+		next := loopType
+		changed := false
+		for index, callback := range callbacks {
+			params := []*TypeDescriptor{loopType}
+			if index < len(values) {
+				params = append(params, values[index]...)
+			}
+			result := normalizeOptimizerType(oc.AnalyzeCallback(callback, params))
+			var callbackChanged bool
+			next, callbackChanged = mergeOptimizerTypes(next, result)
+			changed = changed || callbackChanged
+		}
+		loopType = next
+		if !changed {
+			break
+		}
+	}
+
+	optimized := make([]Scmer, len(callbacks))
+	for index, callback := range callbacks {
+		params := []*TypeDescriptor{loopType}
+		if index < len(values) {
+			params = append(params, values[index]...)
+		}
+		oc.SetCallbackParamTypes(params)
+		optimized[index], _ = oc.OptimizeSub(callback, true)
+	}
+	return optimized, loopType
+}
+
 func normalizeOptimizerType(td *TypeDescriptor) *TypeDescriptor {
 	if td == nil {
 		return &TypeDescriptor{Kind: "any", Length: UnknownLength}

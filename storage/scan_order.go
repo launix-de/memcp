@@ -45,7 +45,12 @@ func optimizeScanOrderMulti(v []scm.Scmer, oc *scm.OptimizerContext, useResult b
 			}
 		}
 	}
-	for i := 1; i <= 15 && i < len(v); i++ {
+	reuseNeutralForNotFound := len(v) > 18 && scm.Equal(v[16], v[18])
+	rawMapReduceFns := scm.NewNil()
+	if len(v) > 15 {
+		rawMapReduceFns = v[15]
+	}
+	for i := 1; i <= 14 && i < len(v); i++ {
 		v[i], _ = oc.OptimizeSub(v[i], true)
 	}
 	if len(v) > 8 {
@@ -60,6 +65,37 @@ func optimizeScanOrderMulti(v []scm.Scmer, oc *scm.OptimizerContext, useResult b
 		neutralType = normalizeScanType(neutralType)
 	}
 	oc.Ome.IncrLoopDepth()
+	var resultType *scm.TypeDescriptor
+	if callbacks, static := scanStaticListElements(rawMapReduceFns); static {
+		// scanStaticListElements also accepts already-materialized list values.
+		// Reject arbitrary call expressions here: their head is not a callback,
+		// and the runtime-produced list must retain the generic optimization path.
+		for _, callback := range callbacks {
+			_, _, lambda := scanLambdaParts(callback)
+			if !callback.IsProc() && !lambda {
+				static = false
+				break
+			}
+		}
+		if !static {
+			v[15], _ = oc.OptimizeSub(rawMapReduceFns, true)
+		} else {
+			valueTypes := make([][]*scm.TypeDescriptor, len(callbacks))
+			for index, callback := range callbacks {
+				if params, _, ok := scanLambdaParts(callback); ok && len(params) > 1 {
+					valueTypes[index] = make([]*scm.TypeDescriptor, len(params)-1)
+					for valueIndex := range valueTypes[index] {
+						valueTypes[index][valueIndex] = unknownScanType()
+					}
+				}
+			}
+			var optimized []scm.Scmer
+			optimized, resultType = oc.OptimizeReducerCallbacks(callbacks, neutralType, valueTypes)
+			v[15] = scm.NewSlice(append([]scm.Scmer{scm.NewSymbol("list")}, optimized...))
+		}
+	} else if len(v) > 15 {
+		v[15], _ = oc.OptimizeSub(rawMapReduceFns, true)
+	}
 	if len(v) > 17 {
 		v[17], _ = oc.OptimizeSub(v[17], true)
 	}
@@ -67,6 +103,9 @@ func optimizeScanOrderMulti(v []scm.Scmer, oc *scm.OptimizerContext, useResult b
 		v[18], _ = oc.OptimizeSub(v[18], true)
 	}
 	oc.Ome.DecrLoopDepth()
+	if reuseNeutralForNotFound {
+		return scm.NewSlice(v), resultType
+	}
 	return scm.NewSlice(v), nil
 }
 
@@ -126,7 +165,8 @@ func optimizeScanOrder(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) 
 			columnTypes[i] = unknownScanType()
 		}
 	}
-	v[mapReduceIdx], _ = oc.OptimizeReducerCallback(rawMapReduce, neutralType, columnTypes...)
+	var resultType *scm.TypeDescriptor
+	v[mapReduceIdx], resultType = oc.OptimizeReducerCallback(rawMapReduce, neutralType, columnTypes...)
 	if len(v) > outerIdx {
 		v[outerIdx], _ = oc.OptimizeSub(v[outerIdx], true)
 	}
@@ -144,6 +184,9 @@ func optimizeScanOrder(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) 
 		v[postOrderFilterIdx], _ = oc.OptimizeSub(v[postOrderFilterIdx], true)
 	}
 	oc.Ome.DecrLoopDepth()
+	if reuseNeutralForNotFound {
+		return scm.NewSlice(v), resultType
+	}
 	return scm.NewSlice(v), nil
 }
 
