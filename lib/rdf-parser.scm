@@ -195,6 +195,25 @@ consumer stage. */
 	rdf_constant
 	/* TODO: CONCAT() */
 )))
+(define rdf_iri_expression (parser (or
+	(parser '((atom "a" true)) "http://www.w3.org/1999/02/22-rdf-syntax-ns#type")
+	(parser '((define pfx (regex "[a-zA-Z0-9_]*" true)) (atom ":" false false)
+		(define post (regex "[a-zA-Z0-9_]*" false)))
+		'('concat '('definitions pfx) post))
+	(parser '((atom "<" true) (define iri (regex "[^>]*" false false))
+		(atom ">" false false)) iri)
+	(regex "[a-zA-Z0-9_]+" true)
+)))
+(define rdf_subject_expression (parser (or
+	rdf_variable
+	(parser '((atom "_:" true) (define name (regex "[a-zA-Z0-9_]+" false false)))
+		(concat "_:" name))
+	rdf_iri_expression
+)))
+(define rdf_predicate_expression (parser (or
+	rdf_variable
+	rdf_iri_expression
+)))
 (define rdf_aggregate_expression (parser (or
 	(parser '((atom "JSON_ARRAYAGG" true) "(" (define e rdf_filter_or)
 		(atom "ORDER" true) (atom "BY" true) (define key rdf_filter_or)
@@ -316,8 +335,8 @@ consumer stage. */
 )))
 
 (define rdf_path_negated_member (parser (or
-	(parser '((atom "^" true) (define p rdf_expression)) (list "inverse" p))
-	(parser (define p rdf_expression) (list "forward" p))
+	(parser '((atom "^" true) (define p rdf_predicate_expression)) (list "inverse" p))
+	(parser (define p rdf_predicate_expression) (list "forward" p))
 )))
 (define rdf_path_atom (parser (or
 	(parser '((atom "!" true) "(" (define members (+ rdf_path_negated_member "|")) ")")
@@ -325,9 +344,9 @@ consumer stage. */
 	(parser '((atom "!" true) (define member rdf_path_negated_member))
 		(list "__path_negated__" (list member)))
 	(parser '((atom "^" true) "(" (define p rdf_path_alt) ")") (list "__path_inverse__" p))
-	(parser '((atom "^" true) (define p rdf_expression)) (list "__path_inverse__" p))
+	(parser '((atom "^" true) (define p rdf_predicate_expression)) (list "__path_inverse__" p))
 	(parser '("(" (define p rdf_path_alt) ")") p)
-	rdf_expression
+	rdf_predicate_expression
 )))
 (define rdf_path_postfix (parser (or
 	(parser '((define p rdf_path_atom) "*") '("__path_star__" p))
@@ -347,7 +366,7 @@ consumer stage. */
 )))
 
 (define rdf_where_basic_item (parser (or
-	(parser '((define s rdf_expression) (define ps (+ (parser '((define p rdf_path_alt) (define os (+ rdf_expression ","))) (map os (lambda (o) '(p o)))) ";"))) (merge (map ps (lambda (p) (map p (lambda (p1) (cons s p1)))))))
+	(parser '((define s rdf_subject_expression) (define ps (+ (parser '((define p rdf_path_alt) (define os (+ rdf_expression ","))) (map os (lambda (o) '(p o)))) ";"))) (merge (map ps (lambda (p) (map p (lambda (p1) (cons s p1)))))))
 	(parser '((atom "FILTER" true) "(" (define expr rdf_filter_or) ")") (list (list "__filter__" expr)))
 )))
 (define rdf_where_inner_basic_items (parser

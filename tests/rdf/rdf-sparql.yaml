@@ -307,7 +307,7 @@ test_cases:
       data:
         - "?t": "http://www.w3.org/2000/01/rdf-schema#Class"
 
-  - name: "TTL: a is stored as literal a (rdf:type shorthand)"
+  - name: "TTL: a is stored as the rdf:type IRI"
     ttl_data: |
       @prefix t23: <http://test23.org/> .
       t23:item a t23:Thing .
@@ -317,7 +317,7 @@ test_cases:
     expect:
       rows: 1
       data:
-        - "?p": "a"
+        - "?p": "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
 
   # ==========================================================
   # TTL — Prefix Edge Cases
