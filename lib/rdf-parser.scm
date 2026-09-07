@@ -1568,6 +1568,43 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 			nil nil nil nil nil '() '() '()))
 		(list (make_union_block (quote all) (append matched unmatched) nil nil nil '()) all_vars))
 ))
+(define rdf_shared_minus_relation (lambda (schema state query vars shared)
+	(begin
+		/* Model MINUS as an anti-join with an explicit presence column. Unlike a
+		correlated scalar EXISTS marker, the relation keeps both alias scopes
+		separate when a compiled query is reused from the planner cache. */
+		(define index (rdf_shared_state_index state))
+		(define input_alias (concat "__rdf_minus_input" index))
+		(define alias (concat "__rdf_minus" index))
+		(define presence "__rdf_minus_present")
+		(define input_bindings (rdf_shared_relation_refs input_alias vars))
+		/* A projected constant survives some LEFT JOIN rewrites on the null side.
+		Use a shared, necessarily bound RDF term as the match marker instead. */
+		(define fields (append (rdf_shared_relation_fields input_bindings)
+			presence (get_assoc input_bindings (car shared))))
+		(define relation (make_query_block schema
+			(list (list input_alias schema query false nil)) fields true
+			nil nil nil nil nil '() '() '()))
+		(define right (rdf_shared_relation_refs alias vars))
+		(define joins (reduce shared (lambda (conditions var)
+			(match (rdf_ctx_lookup (rdf_shared_state_bindings state) var) '(left_found left_expr)
+				(match (rdf_ctx_lookup right var) '(right_found right_expr)
+					(if (and left_found right_found)
+						(merge (list conditions
+							(list (list (quote equal??) left_expr right_expr)
+								(list (quote not) (list (quote nil?) left_expr))
+								(list (quote not) (list (quote nil?) right_expr)))))
+						conditions)
+					'() conditions)
+				'() conditions)) '()))
+		(list
+			(append (rdf_shared_state_sources state)
+				(list alias schema relation true (rdf_shared_where joins)))
+			(rdf_shared_state_bindings state)
+			(cons (list (quote nil?) (rdf_shared_column alias presence))
+				(rdf_shared_state_filters state))
+			(+ index 1)))
+))
 (define rdf_shared_path_relation (lambda (schema state subject pred object include_self)
 	(begin
 		(define bindings (rdf_shared_state_bindings state))
@@ -1685,12 +1722,10 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 			(define shared (filter (rdf_condition_vars inner) (lambda (var)
 				(rdf_ctx_bound (rdf_shared_state_bindings state) var))))
 			(if (equal? shared '()) state
-				(match (rdf_shared_conditions_relation schema inner
-					(rdf_shared_merge_bindings outer_ctx (rdf_shared_state_bindings state))) '(query _vars)
-					(list (rdf_shared_state_sources state) (rdf_shared_state_bindings state)
-						(cons (list (quote not) (list (quote inner_select_exists) query))
-							(rdf_shared_state_filters state))
-						(rdf_shared_state_index state)))))
+				/* MINUS evaluates its right group independently, then removes
+				compatible mappings. Correlation belongs in the anti-join predicate. */
+				(match (rdf_shared_conditions_relation schema inner '()) '(query vars)
+					(rdf_shared_minus_relation schema state query vars shared))))
 		'("__service__" silent endpoint _inner)
 		(if silent state (error "SPARQL SERVICE endpoint unavailable: " endpoint))
 		'("__union__" branches)

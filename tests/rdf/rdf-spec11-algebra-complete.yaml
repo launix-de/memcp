@@ -89,6 +89,17 @@ test_cases:
       rows: 1
       data: [{"?name": "A"}]
 
+  - name: "SPARQL 1.1 8.2 MINUS remains correlated with a warm planner cache"
+    sparql: |
+      PREFIX ex: <http://spec11-minus.example/>
+      SELECT ?name WHERE {
+        ?s ex:name ?name
+        MINUS { ?s ex:deleted true }
+      }
+    expect:
+      rows: 1
+      data: [{"?name": "A"}]
+
   - name: "SPARQL 1.1 8.2 MINUS with disjoint variables preserves solutions"
     ttl_data: |
       @prefix ex: <http://spec11-minus-domain.example/> .
