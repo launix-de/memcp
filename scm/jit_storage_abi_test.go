@@ -55,6 +55,7 @@ func emitParallelMoveTestCode(t *testing.T, batch *jitParallelRegMoveBatch) []by
 		SliceBase:    RegR12,
 		ScratchReg:   RegR11,
 		StackReg:     RegRSP,
+		FrameReg:     RegRBP,
 		RegisterBank: jitX86RegisterBank,
 	}
 	ctx.emitParallelRegMoveBatch(batch)
@@ -104,6 +105,25 @@ func TestParallelMoveBatchChoosesScratchOutsideCycle(t *testing.T) {
 	code := emitParallelMoveTestCode(t, &batch)
 	if len(code) != 13 {
 		t.Fatalf("role-register cycle emitted %d bytes, want one saved-scratch rotation (13): %x", len(code), code)
+	}
+}
+
+func TestParallelMoveBatchNeverUsesStackOrFrameRegisterAsScratch(t *testing.T) {
+	var batch jitParallelRegMoveBatch
+	batch.add(RegRAX, RegRBX)
+	batch.add(RegRBX, RegRAX)
+
+	ctx := JITContext{
+		// Stack-backed argument lists deliberately use RSP as SliceBase. This
+		// makes it a valid address base, not a writable temporary register.
+		SliceBase:    RegRSP,
+		ScratchReg:   RegR11,
+		StackReg:     RegRSP,
+		FrameReg:     RegRBP,
+		RegisterBank: jitX86RegisterBank,
+	}
+	if scratch := ctx.parallelMoveScratch(&batch); scratch != RegR11 {
+		t.Fatalf("parallel cycle scratch = %d, want non-frame scratch %d", scratch, RegR11)
 	}
 }
 

@@ -3494,15 +3494,21 @@ func (batch *jitParallelRegMoveBatch) uses(reg Reg) bool {
 // never by a hard-coded x86 register number. The scratch value is saved only
 // when a cycle actually needs it, so an allocated outer value remains intact.
 func (ctx *JITContext) parallelMoveScratch(batch *jitParallelRegMoveBatch) Reg {
-	if !batch.uses(ctx.SliceBase) {
+	eligible := func(reg Reg) bool {
+		// The stack and frame registers define the generated frame. A backend may
+		// also expose one as a value base (notably SliceBase=RSP), but a parallel
+		// assignment must never rewrite either register while breaking a cycle.
+		return reg != ctx.StackReg && reg != ctx.FrameReg && !batch.uses(reg)
+	}
+	if eligible(ctx.SliceBase) {
 		return ctx.SliceBase
 	}
-	if !batch.uses(ctx.ScratchReg) {
+	if eligible(ctx.ScratchReg) {
 		return ctx.ScratchReg
 	}
 	for index := uint8(0); index < ctx.RegisterBank.Count; index++ {
 		candidate := ctx.RegisterBank.Registers[index]
-		if !batch.uses(candidate) {
+		if eligible(candidate) {
 			return candidate
 		}
 	}
