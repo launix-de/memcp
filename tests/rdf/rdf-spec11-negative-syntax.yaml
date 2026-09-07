@@ -1,0 +1,89 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
+# Representative normative rejection cases from the SPARQL 1.1 grammar and
+# update constraints. These stay noncritical with the rest of the inventory.
+
+metadata:
+  version: "1.0"
+  description: "SPARQL 1.1 negative query and update syntax conformance matrix"
+  isolated: true
+
+setup: []
+
+test_cases:
+  - name: "SPARQL 1.1 rejects an undefined prefix"
+    noncritical: true
+    sparql: 'SELECT ?s WHERE { ?s missing:p ?o }'
+    expect: {error: true}
+
+  - name: "SPARQL 1.1 rejects a literal in subject position"
+    noncritical: true
+    sparql: 'SELECT ?o WHERE { "literal" <http://spec11-negative.example/p> ?o }'
+    expect: {error: true}
+
+  - name: "SPARQL 1.1 rejects a literal in predicate position"
+    noncritical: true
+    sparql: 'SELECT ?o WHERE { <http://spec11-negative.example/s> "predicate" ?o }'
+    expect: {error: true}
+
+  - name: "SPARQL 1.1 rejects a blank node in predicate position"
+    noncritical: true
+    sparql: 'SELECT ?o WHERE { <http://spec11-negative.example/s> _:predicate ?o }'
+    expect: {error: true}
+
+  - name: "SPARQL 1.1 rejects SELECT expressions without aliases"
+    noncritical: true
+    sparql: 'SELECT STR(?s) WHERE { ?s ?p ?o }'
+    expect: {error: true}
+
+  - name: "SPARQL 1.1 rejects projection of an ungrouped variable"
+    noncritical: true
+    sparql: 'SELECT ?s (COUNT(*) AS ?count) WHERE { ?s ?p ?o }'
+    expect: {error: true}
+
+  - name: "SPARQL 1.1 rejects VALUES rows with too few entries"
+    noncritical: true
+    sparql: 'SELECT * WHERE { VALUES (?a ?b) { (1) } }'
+    expect: {error: true}
+
+  - name: "SPARQL 1.1 rejects VALUES rows with too many entries"
+    noncritical: true
+    sparql: 'SELECT * WHERE { VALUES (?a ?b) { (1 2 3) } }'
+    expect: {error: true}
+
+  - name: "SPARQL 1.1 rejects BIND rebinding an existing variable"
+    noncritical: true
+    sparql: 'SELECT ?s WHERE { ?s ?p ?o BIND("replacement" AS ?s) }'
+    expect: {error: true}
+
+  - name: "SPARQL 1.1 rejects aggregate calls in FILTER before grouping"
+    noncritical: true
+    sparql: 'SELECT ?s WHERE { ?s ?p ?o FILTER(COUNT(*) > 1) }'
+    expect: {error: true}
+
+  - name: "SPARQL 1.1 Update rejects variables in INSERT DATA"
+    noncritical: true
+    sparql: 'INSERT DATA { ?s <http://spec11-negative.example/p> "value" }'
+    expect: {error: true}
+
+  - name: "SPARQL 1.1 Update rejects variables in DELETE DATA"
+    noncritical: true
+    sparql: 'DELETE DATA { <http://spec11-negative.example/s> <http://spec11-negative.example/p> ?o }'
+    expect: {error: true}
+
+  - name: "SPARQL 1.1 Update rejects blank nodes in DELETE DATA"
+    noncritical: true
+    sparql: 'DELETE DATA { _:node <http://spec11-negative.example/p> "value" }'
+    expect: {error: true}
+
+  - name: "SPARQL 1.1 Update rejects blank nodes in DELETE templates"
+    noncritical: true
+    sparql: 'DELETE { _:node <http://spec11-negative.example/p> ?o } WHERE { ?s <http://spec11-negative.example/p> ?o }'
+    expect: {error: true}
+
+  - name: "SPARQL 1.1 Update rejects GRAPH variables in DATA blocks"
+    noncritical: true
+    sparql: 'INSERT DATA { GRAPH ?g { <http://spec11-negative.example/s> <http://spec11-negative.example/p> "value" } }'
+    expect: {error: true}
+
+cleanup: []
