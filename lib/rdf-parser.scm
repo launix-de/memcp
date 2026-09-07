@@ -1091,7 +1091,10 @@ consumer stage. */
 	(if include_self
 		(visit start)
 		(map (rdf_relation_targets schema start pred) visit))
-	(seen)
+	/* Session key iteration is intentionally unordered. Canonicalize the path
+	result before exposing it as an array-backed planner relation so ORDER BY is
+	deterministic even when the table-function source is lowered directly. */
+	(sort (seen) (lambda (left right) (< left right)))
 )))
 (define rdf_ensure_table (lambda (schema)
 	(begin
@@ -2113,11 +2116,12 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 				(rdf_ctx_bound (rdf_shared_state_bindings state) var))))
 			(if (equal? shared '()) state
 				/* MINUS evaluates its right group independently, then removes
-				compatible mappings. Correlation belongs in the anti-join predicate. */
+				compatible mappings. Keep its distinct-key relation as an explicit
+				semantic boundary: unlike NOT EXISTS, MINUS compatibility is defined
+				over the shared mapping domain and must not be flattened into a
+				one-pattern physical anti-join. */
 				(match (rdf_shared_conditions_relation schema inner '()) '(query vars)
-					(if (rdf_shared_exists_direct_safe query vars shared)
-						(rdf_shared_exists_direct_relation schema state query vars shared true)
-						(rdf_shared_minus_relation schema state query vars shared)))))
+					(rdf_shared_minus_relation schema state query vars shared))))
 		'("__service__" silent endpoint _inner)
 		(if silent state (error "SPARQL SERVICE endpoint unavailable: " endpoint))
 		'("__union__" branches)
