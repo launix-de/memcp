@@ -7891,6 +7891,68 @@ physical decision and preserve its runtime recompile gate. */
 			schema sources plan default_alias effective_needed_exprs effective_condition row_expr
 			order_items offset_value limit_value true bounded_probe_work_rows nil stages scalar_plan facts))))
 
+(define projection_expr_position (lambda (fields target index)
+	(match fields
+		(cons _title (cons expr rest))
+		(if (equal?? expr target) index (projection_expr_position rest target (+ index 1)))
+		_ nil)
+))
+
+(define materialized_visible_row (lambda (row width)
+	(slice row 0 width)
+))
+
+(define materialized_order_projection (lambda (fields order_items index positions)
+	(match order_items
+		(cons item rest)
+		(match item '(expr _dir)
+			(begin
+				(define existing (projection_expr_position fields expr 0))
+				(if (nil? existing)
+					(materialized_order_projection
+						(append fields (concat "__materialized_order_" index) expr)
+						rest (+ index 1) (append positions (/ (count fields) 2)))
+					(materialized_order_projection fields rest (+ index 1)
+						(append positions existing))))
+			(error "malformed ORDER BY item"))
+		_ (list fields positions))
+))
+
+(define lower_materialized_join_order (lambda (schema sources plan default_alias needed_exprs
+	final_condition fields order_items offset_value limit_value stages facts)
+	(begin
+		(define projection (materialized_order_projection fields order_items 0 '()))
+		(define materialized_fields (nth projection 0))
+		(define order_positions (nth projection 1))
+		(define visible_width (count fields))
+		(define id (concat "__join_materialized_" (fnv_hash (serialize (list fields order_items)))))
+		(define rows (symbol (concat id "_rows")))
+		(define emit (symbol (concat id "_emit")))
+		(define row (symbol (concat id "_row")))
+		(define unordered (build_join_scan_rows schema sources plan default_alias needed_exprs
+			final_condition materialized_fields '() 0 -1 false stages facts))
+		(list (quote begin)
+			(list (quote define) rows (list (quote newsession)))
+			(list rows "count" 0)
+			(list (quote define) emit (quote resultrow))
+			(list (quote set) (quote resultrow)
+				(list (quote lambda) (list row) (list (quote begin)
+					(list rows (list rows "count") row)
+					(list rows "count" (list (quote +) (list rows "count") 1)))))
+			unordered
+			(list (quote set) (quote resultrow) emit)
+			(list (quote map)
+				(list (quote union_materialized_order_window)
+					(list (quote map) (list (quote produceN) (list rows "count"))
+						(list (quote lambda) (list (quote __join_materialized_index))
+							(list rows (quote __join_materialized_index))))
+					(list (quote quote) order_positions)
+					(cons (quote list) (order_relations_default order_items))
+					(coalesceNil offset_value 0) (coalesceNil limit_value -1))
+				(list (quote lambda) (list row)
+					(list emit (list (quote materialized_visible_row) row visible_width))))))
+))
+
 (define lower_zero_source_query_block_as_dataset_reduce (lambda (block fields row_mapper reduce_expr neutral_expr)
 	(begin
 		(define field_exprs (extract_assoc fields (lambda (_title expr)
@@ -8161,8 +8223,10 @@ physical decision and preserve its runtime recompile gate. */
 								"ordered variable-cardinality join requires a streaming consumer"))
 						(if (physical_prejoin_supported? block)
 							(lower_query_block_through_prejoin block)
-							(neumann_fail "build_queryplan"
-								"ORDER BY has no streamable driver in the logical join tree")))
+							(lower_materialized_join_order
+								(qb_schema block) scan_sources scan_plan first_alias needed_exprs
+								final_condition fields order_items (qb_offset block) (qb_limit block)
+								stage_catalog (qb_facts block))))
 ))))))
 
 (define zero_source_field_expr_key (lambda (expr)
@@ -8828,6 +8892,65 @@ stars through the same catalog-aware path used by physical lowering. */
 			map_expr
 			membership_bindings))))
 
+(define union_materialized_row_less (lambda (left right positions relations)
+	(match positions
+		(cons position rest_positions)
+		(match relations
+			(cons relation rest_relations)
+			(begin
+				(define left_value (nth left (+ (* position 2) 1)))
+				(define right_value (nth right (+ (* position 2) 1)))
+				(if (relation left_value right_value) true
+					(if (relation right_value left_value) false
+						(union_materialized_row_less left right rest_positions rest_relations))))
+			_ false)
+		_ false)
+))
+
+(define union_materialized_order_window (lambda (rows positions relations offset limit)
+	(begin
+		(define ordered (sort rows (lambda (left right)
+			(union_materialized_row_less left right positions relations))))
+		(define start (coalesceNil offset 0))
+		(define requested (coalesceNil limit -1))
+		(define end (if (< requested 0) (count ordered)
+			(min (count ordered) (+ start requested))))
+		(slice ordered (min start (count ordered)) end))
+))
+
+(define lower_union_all_ordered_materialized (lambda (block titles width order_positions)
+	(begin
+		(define id (concat "__union_materialized_" (fnv_hash (serialize block))))
+		(define rows (symbol (concat id "_rows")))
+		(define emit (symbol (concat id "_emit")))
+		(define row (symbol (concat id "_row")))
+		(define unordered (make_union_block (quote all)
+			(map (union_branches block) (lambda (branch)
+				(union_align_branch_fields branch titles width)))
+			'() nil nil (union_facts block)))
+		(list (quote begin)
+			(list (quote define) rows (list (quote newsession)))
+			(list rows "count" 0)
+			(list (quote define) emit (quote resultrow))
+			(list (quote set) (quote resultrow)
+				(list (quote lambda) (list row)
+					(list (quote begin)
+						(list rows (list rows "count") row)
+						(list rows "count" (list (quote +) (list rows "count") 1)))))
+			(lower_union_all_successive unordered)
+			(list (quote set) (quote resultrow) emit)
+			(list (quote map)
+				(list (quote union_materialized_order_window)
+					(list (quote map) (list (quote produceN) (list rows "count"))
+						(list (quote lambda) (list (quote __union_materialized_index))
+							(list rows (quote __union_materialized_index))))
+					(list (quote quote) order_positions)
+					(cons (quote list) (union_order_relations (union_order block)))
+					(coalesceNil (union_offset block) 0)
+					(coalesceNil (union_limit block) -1))
+				emit)))
+))
+
 (define lower_union_all_ordered (lambda (block titles width)
 	(begin
 		(define branches (union_branches block))
@@ -8860,7 +8983,7 @@ stars through the same catalog-aware path used by physical lowering. */
 				(if (empty_list? prepares)
 					bound_scan_plan
 					(cons (quote begin) (merge (list prepares (list bound_scan_plan))))))
-			(neumann_fail "build_queryplan" "UNION ALL ORDER BY requires streamable branches")))))
+			(lower_union_all_ordered_materialized block titles width order_positions)))))
 
 (define union_direct_order_supported? (lambda (block)
 	(begin
