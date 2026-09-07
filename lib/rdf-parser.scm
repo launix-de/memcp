@@ -87,6 +87,53 @@ consumer stage. */
 		(equal? (sql_substr s (+ (- (strlen s) (strlen suffix)) 1) (strlen suffix)) suffix)
 	)
 ))
+(define rdf_string_find_using (lambda (s needle position)
+	(if (equal? needle "") position
+		(if (> (+ position (strlen needle) -1) (strlen s)) 0
+			(if (equal? (sql_substr s position (strlen needle)) needle) position
+				(rdf_string_find_using s needle (+ position 1)))))
+))
+(define rdf_strbefore (lambda (s needle)
+	(if (or (nil? s) (nil? needle)) nil
+		(begin
+			(define position (rdf_string_find_using s needle 1))
+			(if (equal? position 0) "" (sql_substr s 1 (- position 1)))))
+))
+(define rdf_strafter (lambda (s needle)
+	(if (or (nil? s) (nil? needle)) nil
+		(begin
+			(define position (rdf_string_find_using s needle 1))
+			(if (equal? position 0) ""
+				(sql_substr s (+ position (strlen needle))))))
+))
+(define rdf_regex_pattern (lambda (pattern flags)
+	(if (or (nil? flags) (equal? flags "")) pattern
+		(begin
+			(define supported (concat
+				(if (rdf_contains flags "i") "i" "")
+				(if (rdf_contains flags "m") "m" "")
+				(if (rdf_contains flags "s") "s" "")))
+			(if (equal? supported "") pattern (concat "(?" supported ")" pattern))))
+))
+(define rdf_regex (lambda (value pattern flags)
+	(regexp_test value (rdf_regex_pattern pattern flags))
+))
+(define rdf_replace_regex (lambda (value pattern replacement flags)
+	(regexp_replace value (rdf_regex_pattern pattern flags) replacement)
+))
+(define rdf_encode_for_uri (lambda (value)
+	(if (nil? value) nil (replace (urlencode value) "+" "%20"))
+))
+(define rdf_timezone (lambda (value)
+	(if (nil? value) nil
+		(regexp_replace (concat value) ".*(Z|[+-][0-9]{2}:[0-9]{2})$" "$1"))
+))
+(define rdf_date_component (lambda (value start length part)
+	(if (nil? value) nil
+		(if (string? value)
+			(simplify (sql_substr value start length))
+			(extract_date value part)))
+))
 (define rdf_json_objectagg_reduce (lambda (a b)
 	(if (nil? a) b (if (nil? b) a (json_merge_patch a b)))
 ))
@@ -178,6 +225,22 @@ consumer stage. */
 	(parser '((atom "SUBSTR" true) "(" (define a rdf_filter_or) "," (define start rdf_filter_or) "," (define len rdf_filter_or) ")") '('sql_substr a start len))
 	(parser '((atom "SUBSTR" true) "(" (define a rdf_filter_or) "," (define start rdf_filter_or) ")") '('sql_substr a start))
 	(parser '((atom "REPLACE" true) "(" (define a rdf_filter_or) "," (define from rdf_filter_or) "," (define to rdf_filter_or) ")") '('replace a from to))
+	(parser '((atom "REPLACE" true) "(" (define a rdf_filter_or) "," (define pattern rdf_filter_or) "," (define replacement rdf_filter_or) "," (define flags rdf_filter_or) ")") '('rdf_replace_regex a pattern replacement flags))
+	(parser '((atom "STRBEFORE" true) "(" (define a rdf_filter_or) "," (define b rdf_filter_or) ")") '('rdf_strbefore a b))
+	(parser '((atom "STRAFTER" true) "(" (define a rdf_filter_or) "," (define b rdf_filter_or) ")") '('rdf_strafter a b))
+	(parser '((atom "ENCODE_FOR_URI" true) "(" (define a rdf_filter_or) ")") '('rdf_encode_for_uri a))
+	(parser '((atom "REGEX" true) "(" (define a rdf_filter_or) "," (define b rdf_filter_or) "," (define flags rdf_filter_or) ")") '('rdf_regex a b flags))
+	(parser '((atom "RAND" true) "(" ")") '('sql_rand))
+	(parser '((atom "NOW" true) "(" ")") '('now))
+	(parser '((atom "YEAR" true) "(" (define a rdf_filter_or) ")") '('rdf_date_component a 1 4 "YEAR"))
+	(parser '((atom "MONTH" true) "(" (define a rdf_filter_or) ")") '('rdf_date_component a 6 2 "MONTH"))
+	(parser '((atom "DAY" true) "(" (define a rdf_filter_or) ")") '('rdf_date_component a 9 2 "DAY"))
+	(parser '((atom "HOURS" true) "(" (define a rdf_filter_or) ")") '('rdf_date_component a 12 2 "HOUR"))
+	(parser '((atom "MINUTES" true) "(" (define a rdf_filter_or) ")") '('rdf_date_component a 15 2 "MINUTE"))
+	(parser '((atom "SECONDS" true) "(" (define a rdf_filter_or) ")") '('rdf_date_component a 18 2 "SECOND"))
+	(parser '((atom "TZ" true) "(" (define a rdf_filter_or) ")") '('rdf_timezone a))
+	(parser '((atom "SHA1" true) "(" (define a rdf_filter_or) ")") '('sha1 a))
+	(parser '((atom "SHA256" true) "(" (define a rdf_filter_or) ")") '('sha256 a))
 	(parser '((atom "ABS" true) "(" (define a rdf_filter_or) ")") '('sql_abs a))
 	(parser '((atom "ROUND" true) "(" (define a rdf_filter_or) ")") '('round a))
 	(parser '((atom "CEIL" true) "(" (define a rdf_filter_or) ")") '('ceil a))
@@ -221,6 +284,10 @@ consumer stage. */
 	rdf_filter_mul
 )))
 (define rdf_filter_cmp (parser (or
+	(parser '((define a rdf_filter_add) (atom "NOT" true) (atom "IN" true) "(" (define b (+ rdf_filter_or ",")) ")")
+		(list (quote not) (cons (quote sql_in) (cons (cons (quote list) b) (list a)))))
+	(parser '((define a rdf_filter_add) (atom "IN" true) "(" (define b (+ rdf_filter_or ",")) ")")
+		(cons (quote sql_in) (cons (cons (quote list) b) (list a))))
 	(parser '((define a rdf_filter_add) "!=" (define b rdf_filter_add)) '('not '('equal? a b)))
 	(parser '((define a rdf_filter_add) "=" (define b rdf_filter_add)) '('equal? a b))
 	(parser '((define a rdf_filter_add) "<=" (define b rdf_filter_add)) '('<= a b))
