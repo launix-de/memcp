@@ -223,10 +223,12 @@ func jitPlaceIntoPair(ctx *JITContext, src *JITValueDesc, target JITValueDesc) J
 		ctx.EnsureDesc(src)
 		return jitPlaceIntoPair(ctx, src, target)
 	case LocRegPair:
-		ctx.emitParallelRegMoves([]jitRegMove{
-			{dst: target.Reg, src: src.Reg},
-			{dst: target.Reg2, src: src.Reg2},
-		})
+		if src.Reg != target.Reg {
+			ctx.EmitMovRegReg(target.Reg, src.Reg)
+		}
+		if src.Reg2 != target.Reg2 {
+			ctx.EmitMovRegReg(target.Reg2, src.Reg2)
+		}
 		if src.Reg != target.Reg && src.Reg2 != target.Reg2 {
 			ctx.FreeDesc(src)
 		}
@@ -247,25 +249,6 @@ func jitPlaceIntoPair(ctx *JITContext, src *JITValueDesc, target JITValueDesc) J
 	default:
 		panic("jit: unsupported source location for pair materialization")
 	}
-}
-
-// jitEmitGoCallPairViaTemporary keeps a requested pair target stable while a
-// Go call allocates its ABI result registers. In particular, an inline caller
-// may lend the callee a register-planned target: it must neither be overwritten
-// before every call argument has been consumed nor be evicted while the
-// temporary result is allocated. The final pair move is the only ownership
-// transition at this boundary.
-func jitEmitGoCallPairViaTemporary(ctx *JITContext, funcAddr uint64, args []JITValueDesc, target JITValueDesc) JITValueDesc {
-	if target.Loc != LocRegPair {
-		panic("jit: temporary Go-call pair placement requires LocRegPair target")
-	}
-	ctx.ProtectReg(target.Reg)
-	ctx.ProtectReg(target.Reg2)
-	out := ctx.EmitGoCallScalar(funcAddr, args, 2)
-	out = jitPlaceIntoPair(ctx, &out, target)
-	ctx.UnprotectReg(target.Reg2)
-	ctx.UnprotectReg(target.Reg)
-	return out
 }
 
 // jitCopyScmerToPair gives a nested Go call its own two-register Scmer value.
@@ -2350,7 +2333,7 @@ func jitCompileRuntimeSymbol(ctx *JITContext, symbol Scmer, result JITValueDesc)
 	symbolPair := jitAllocTrackedPair(ctx, tagSymbol)
 	symbolPair = jitPlaceIntoPair(ctx, &symbolImm, symbolPair)
 	target := jitEnsureResultPair(ctx, result)
-	out := jitEmitGoCallPairViaTemporary(ctx, GoFuncAddr(jitResolveRuntimeSymbol), []JITValueDesc{env, symbolPair}, target)
+	out := ctx.EmitGoCallScalarInto(GoFuncAddr(jitResolveRuntimeSymbol), []JITValueDesc{env, symbolPair}, target)
 	out.Type = JITTypeUnknown
 	out = jitRootScmer(ctx, out)
 	ctx.FreeDesc(&env)
@@ -2365,7 +2348,7 @@ func jitCompileRuntimeGlobalSymbol(ctx *JITContext, symbol Scmer, result JITValu
 	symbolPair := jitAllocTrackedPair(ctx, tagSymbol)
 	symbolPair = jitPlaceIntoPair(ctx, &symbolImm, symbolPair)
 	target := jitEnsureResultPair(ctx, result)
-	out := jitEmitGoCallPairViaTemporary(ctx, GoFuncAddr(jitResolveGlobalSymbol), []JITValueDesc{symbolPair}, target)
+	out := ctx.EmitGoCallScalarInto(GoFuncAddr(jitResolveGlobalSymbol), []JITValueDesc{symbolPair}, target)
 	out.Type = JITTypeUnknown
 	out = jitRootScmer(ctx, out)
 	ctx.FreeDesc(&symbolPair)

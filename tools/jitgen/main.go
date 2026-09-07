@@ -3356,11 +3356,7 @@ func (g *codeGen) emitRegisterHomes() {
 		}
 		planItems = append(planItems, fmt.Sprintf("{Color: %d, Width: %d, Cost: %d}", slot.color, slot.width, weight))
 	}
-	allocator := "AllocInlineRegisterHomes"
-	if g.storageMode {
-		allocator = "AllocRegisterHomes"
-	}
-	g.emit("%s := ctx.%s(JITRegisterPlan{Slots: [16]JITRegisterSlot{%s}, Count: %d})", homes, allocator, strings.Join(planItems, ", "), len(planItems))
+	g.emit("%s := ctx.AllocRegisterHomes(JITRegisterPlan{Slots: [16]JITRegisterSlot{%s}, Count: %d})", homes, strings.Join(planItems, ", "), len(planItems))
 	g.emit("defer ctx.ReleaseRegisterHomes(%s)", homes)
 
 	names := make([]string, 0, len(g.registerPlan.colorByValue))
@@ -4277,6 +4273,12 @@ func generateClosureCost(opName string, fn *ssa.Function, rewrite ssaValueRewrit
 		}
 	}
 	g := newCodeGen(fn, rewrite, aliases)
+	// Ordinary builtins are inlined into a larger Scheme Proc allocator
+	// universe. Their standalone SSA graph cannot assign either register or
+	// stack homes without modelling caller-live values, so leave placement to
+	// the existing Proc-wide allocator. Storage readers establish an explicit
+	// standalone frame and retain their independently planned homes.
+	g.registerPlan = staticRegisterPlan{colorByValue: map[string]int{}, widthByValue: map[string]int{}}
 	g.opName = opName
 	fmt.Fprintf(&g.w, "\t\t\t%s\n", generatedBanner)
 	if len(fn.Params) > 0 {
