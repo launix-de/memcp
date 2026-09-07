@@ -3290,6 +3290,12 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		'tag 1)
 		(list 'a 'b 'c)
 		"tree collector preserves first-seen order, uniqueness, and tagged-leaf boundaries")
+	(assert (expr_collect_tagged_nth_unique
+		(list (list 'lambda (list 'row) (list 'tag 'operator-scope))
+			(list 'tag 'operand-scope))
+		'tag 1)
+		(list 'operand-scope)
+		"expression collector excludes references embedded in operator heads")
 	(assert (query_expr_alias_set 'default (list 'get_column 'a 'x nil nil) '()) (list 'a true)
 		"jit coverage: symbol get_column match")
 	(assert (query_expr_alias_set 'default
