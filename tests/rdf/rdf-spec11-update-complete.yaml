@@ -1,0 +1,213 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
+# Executable inventory for every SPARQL 1.1 Update operation family.
+
+metadata:
+  version: "1.0"
+  description: "Complete SPARQL 1.1 Update and graph-management feature matrix"
+  isolated: true
+
+setup: []
+
+test_cases:
+  - name: "SPARQL 1.1 Update 3.1.1 INSERT DATA accepts the default graph"
+    noncritical: true
+    sparql: 'PREFIX ex: <http://spec11-update-insert.example/> INSERT DATA { ex:s ex:p "value" }'
+    expect: {rows: 0}
+
+  - name: "SPARQL 1.1 Update 3.1.1 INSERT DATA default graph is visible"
+    noncritical: true
+    sparql: 'PREFIX ex: <http://spec11-update-insert.example/> SELECT ?o WHERE { ex:s ex:p ?o }'
+    expect: {rows: 1, data: [{"?o": "value"}]}
+
+  - name: "SPARQL 1.1 Update 3.1.2 DELETE DATA is an absent-triple no-op"
+    noncritical: true
+    sparql: 'PREFIX ex: <http://spec11-update-delete.example/> DELETE DATA { ex:absent ex:p "value" }'
+    expect: {rows: 0}
+
+  - name: "SPARQL 1.1 Update 3.1.3 DELETE WHERE shorthand"
+    noncritical: true
+    sparql: 'PREFIX ex: <http://spec11-update-delete-where.example/> INSERT DATA { ex:a ex:p 1 . ex:b ex:p 2 }'
+    expect: {rows: 0}
+
+  - name: "SPARQL 1.1 Update 3.1.3 DELETE WHERE removes every matching solution"
+    noncritical: true
+    sparql: 'PREFIX ex: <http://spec11-update-delete-where.example/> DELETE WHERE { ?s ex:p ?o }'
+    expect: {rows: 0}
+
+  - name: "SPARQL 1.1 Update 3.1.3 DELETE WHERE result is empty"
+    noncritical: true
+    sparql: 'PREFIX ex: <http://spec11-update-delete-where.example/> SELECT ?s WHERE { ?s ex:p ?o }'
+    expect: {rows: 0}
+
+  - name: "SPARQL 1.1 Update 3.1.3 INSERT-only modify"
+    noncritical: true
+    sparql: 'PREFIX ex: <http://spec11-update-insert-where.example/> INSERT DATA { ex:a ex:source "x" }'
+    expect: {rows: 0}
+
+  - name: "SPARQL 1.1 Update 3.1.3 INSERT WHERE instantiates its template"
+    noncritical: true
+    sparql: |
+      PREFIX ex: <http://spec11-update-insert-where.example/>
+      INSERT { ?s ex:target ?value } WHERE { ?s ex:source ?value }
+    expect: {rows: 0}
+
+  - name: "SPARQL 1.1 Update 3.1.3 INSERT WHERE result is visible"
+    noncritical: true
+    sparql: 'PREFIX ex: <http://spec11-update-insert-where.example/> SELECT ?value WHERE { ex:a ex:target ?value }'
+    expect: {rows: 1, data: [{"?value": "x"}]}
+
+  - name: "SPARQL 1.1 Update 3.1.3 DELETE-only modify"
+    noncritical: true
+    sparql: 'PREFIX ex: <http://spec11-update-delete-only.example/> INSERT DATA { ex:a ex:state "old" }'
+    expect: {rows: 0}
+
+  - name: "SPARQL 1.1 Update 3.1.3 DELETE template without INSERT"
+    noncritical: true
+    sparql: 'PREFIX ex: <http://spec11-update-delete-only.example/> DELETE { ?s ex:state ?state } WHERE { ?s ex:state ?state }'
+    expect: {rows: 0}
+
+  - name: "SPARQL 1.1 Update 3.1.3 WITH selects the modify graph"
+    noncritical: true
+    sparql: 'PREFIX ex: <http://spec11-update-with.example/> INSERT DATA { GRAPH ex:g { ex:a ex:state "old" } }'
+    expect: {rows: 0}
+
+  - name: "SPARQL 1.1 Update 3.1.3 WITH applies DELETE INSERT to one graph"
+    noncritical: true
+    sparql: |
+      PREFIX ex: <http://spec11-update-with.example/>
+      WITH ex:g
+      DELETE { ?s ex:state ?old }
+      INSERT { ?s ex:state "new" }
+      WHERE { ?s ex:state ?old }
+    expect: {rows: 0}
+
+  - name: "SPARQL 1.1 Update 3.1.3 USING supplies the default query dataset"
+    noncritical: true
+    sparql: |
+      PREFIX ex: <http://spec11-update-using.example/>
+      INSERT DATA { GRAPH ex:source { ex:a ex:value "x" } }
+    expect: {rows: 0}
+
+  - name: "SPARQL 1.1 Update 3.1.3 USING reads one graph into a default target"
+    noncritical: true
+    sparql: |
+      PREFIX ex: <http://spec11-update-using.example/>
+      INSERT { ?s ex:copied ?value }
+      USING ex:source
+      WHERE { ?s ex:value ?value }
+    expect: {rows: 0}
+
+  - name: "SPARQL 1.1 Update 3.1.3 USING NAMED supplies named query graphs"
+    noncritical: true
+    sparql: |
+      PREFIX ex: <http://spec11-update-using.example/>
+      INSERT { ?s ex:namedCopy ?value }
+      USING NAMED ex:source
+      WHERE { GRAPH ex:source { ?s ex:value ?value } }
+    expect: {rows: 0}
+
+  - name: "SPARQL 1.1 Update 3.2.1 LOAD SILENT suppresses retrieval failure"
+    noncritical: true
+    sparql: 'LOAD SILENT <http://127.0.0.1:1/spec11-unreachable.ttl>'
+    expect: {rows: 0}
+
+  - name: "SPARQL 1.1 Update 3.2.2 CLEAR DEFAULT"
+    noncritical: true
+    sparql: 'CLEAR DEFAULT'
+    expect: {rows: 0}
+
+  - name: "SPARQL 1.1 Update 3.2.2 CLEAR NAMED"
+    noncritical: true
+    sparql: 'CLEAR NAMED'
+    expect: {rows: 0}
+
+  - name: "SPARQL 1.1 Update 3.2.2 CLEAR ALL"
+    noncritical: true
+    sparql: 'CLEAR ALL'
+    expect: {rows: 0}
+
+  - name: "SPARQL 1.1 Update 3.2.3 CREATE records an empty graph"
+    noncritical: true
+    sparql: 'CREATE GRAPH <http://spec11-update-create.example/empty>'
+    expect: {rows: 0}
+
+  - name: "SPARQL 1.1 Update 3.2.3 duplicate CREATE reports an error"
+    noncritical: true
+    sparql: 'CREATE GRAPH <http://spec11-update-create.example/empty>'
+    expect: {error: true}
+
+  - name: "SPARQL 1.1 Update 3.2.3 CREATE SILENT suppresses duplicate error"
+    noncritical: true
+    sparql: 'CREATE SILENT GRAPH <http://spec11-update-create.example/empty>'
+    expect: {rows: 0}
+
+  - name: "SPARQL 1.1 Update 3.2.4 DROP DEFAULT"
+    noncritical: true
+    sparql: 'DROP DEFAULT'
+    expect: {rows: 0}
+
+  - name: "SPARQL 1.1 Update 3.2.4 DROP NAMED"
+    noncritical: true
+    sparql: 'DROP NAMED'
+    expect: {rows: 0}
+
+  - name: "SPARQL 1.1 Update 3.2.4 DROP ALL"
+    noncritical: true
+    sparql: 'DROP ALL'
+    expect: {rows: 0}
+
+  - name: "SPARQL 1.1 Update 3.2.5 COPY graph setup"
+    noncritical: true
+    sparql: 'PREFIX ex: <http://spec11-update-copy.example/> INSERT DATA { GRAPH ex:source { ex:s ex:p ex:o } }'
+    expect: {rows: 0}
+
+  - name: "SPARQL 1.1 Update 3.2.5 COPY replaces destination graph"
+    noncritical: true
+    sparql: 'PREFIX ex: <http://spec11-update-copy.example/> COPY GRAPH ex:source TO GRAPH ex:copy'
+    expect: {rows: 0}
+
+  - name: "SPARQL 1.1 Update 3.2.5 MOVE transfers and clears source graph"
+    noncritical: true
+    sparql: 'PREFIX ex: <http://spec11-update-copy.example/> MOVE GRAPH ex:copy TO GRAPH ex:moved'
+    expect: {rows: 0}
+
+  - name: "SPARQL 1.1 Update 3.2.5 ADD merges source into destination"
+    noncritical: true
+    sparql: 'PREFIX ex: <http://spec11-update-copy.example/> ADD GRAPH ex:moved TO DEFAULT'
+    expect: {rows: 0}
+
+  - name: "SPARQL 1.1 Update 3.2.5 graph transfer result is visible"
+    noncritical: true
+    sparql: 'PREFIX ex: <http://spec11-update-copy.example/> ASK WHERE { ex:s ex:p ex:o }'
+    expect: {rows: 1, data: [{"?ask": true}]}
+
+  - name: "SPARQL 1.1 Update 3.2 update request executes operations in order"
+    noncritical: true
+    sparql: |
+      PREFIX ex: <http://spec11-update-sequence.example/>
+      INSERT DATA { ex:s ex:p "old" } ;
+      DELETE DATA { ex:s ex:p "old" } ;
+      INSERT DATA { ex:s ex:p "new" }
+    expect: {rows: 0}
+
+  - name: "SPARQL 1.1 Update blank nodes in INSERT templates are fresh per solution"
+    noncritical: true
+    sparql: 'PREFIX ex: <http://spec11-update-bnode.example/> INSERT DATA { ex:a ex:value "A" . ex:b ex:value "B" }'
+    expect: {rows: 0}
+
+  - name: "SPARQL 1.1 Update allocates one template blank node per solution"
+    noncritical: true
+    sparql: |
+      PREFIX ex: <http://spec11-update-bnode.example/>
+      INSERT { ?s ex:generated [ ex:copy ?value ] } WHERE { ?s ex:value ?value }
+    expect: {rows: 0}
+
+  - name: "SPARQL 1.1 Update template blank nodes remain distinct"
+    noncritical: true
+    sparql: |
+      PREFIX ex: <http://spec11-update-bnode.example/>
+      SELECT (COUNT(DISTINCT ?node) AS ?count) WHERE { ?s ex:generated ?node }
+    expect: {rows: 1, data: [{"?count": 2}]}
+
+cleanup: []
