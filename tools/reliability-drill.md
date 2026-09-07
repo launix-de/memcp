@@ -37,10 +37,12 @@ python3 tools/reliability_drill.py --mode atomicity \
   --database-config-json '{"backend":"s3","access_key_id":"minioadmin","secret_access_key":"minioadmin","region":"us-east-1","endpoint":"http://127.0.0.1:9000","bucket":"memcp","prefix":"reliability","force_path_style":true}'
 ```
 
-The regular GitHub Actions test workflow runs this bounded S3 drill against a
-pinned MinIO image after the main test job, in parallel with packaging. It also
-exercises the complete persistence interface directly, including paginated
-blob listings and WAL replacement/replay.
+The regular GitHub Actions test workflow runs this bounded S3 drill against the
+latest published MinIO image after the main test job, in parallel with
+packaging. The resolved image digest is printed in the job log so failures can
+be reproduced while normal CI runs continue to detect upstream compatibility
+changes. The job also exercises the complete persistence interface directly,
+including paginated blob listings and WAL replacement/replay.
 
 The server-side injector is enabled only when
 `MEMCP_IO_FAULT_PROBABILITY` is set. Tests can scope it with
