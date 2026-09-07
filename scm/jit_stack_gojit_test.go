@@ -106,6 +106,35 @@ func TestJITScalarPointerSpillRemainsInStackMap(t *testing.T) {
 	}
 }
 
+func TestJITUnprovenScalarDoesNotUseFPOverflowHome(t *testing.T) {
+	code := make([]byte, 128)
+	start := unsafe.Pointer(&code[0])
+	ctx := &JITContext{
+		Start:      start,
+		Ptr:        start,
+		End:        unsafe.Add(start, len(code)-1),
+		AllRegs:    1 << uint(RegRAX),
+		AllFPRegs:  1 << uint(RegX2),
+		FreeFPRegs: 1 << uint(RegX2),
+		FrameReg:   RegRBP,
+		StackReg:   RegRSP,
+		ScratchReg: RegR11,
+	}
+	value := JITValueDesc{Loc: LocReg, Type: tagInt, Reg: RegRAX}
+	ctx.BindReg(RegRAX, &value)
+
+	if got := ctx.AllocReg(); got != RegRAX {
+		t.Fatalf("reclaimed register %d, want %d", got, RegRAX)
+	}
+	ctx.SyncDesc(&value)
+	if value.Loc != LocStack {
+		t.Fatalf("unproven scalar spilled to loc %d, want stack", value.Loc)
+	}
+	if ctx.FreeFPRegs&(1<<uint(RegX2)) == 0 {
+		t.Fatal("unproven scalar consumed an FP overflow home")
+	}
+}
+
 func TestJITPointerFreeScalarUsesFPOverflowHome(t *testing.T) {
 	code := make([]byte, 128)
 	start := unsafe.Pointer(&code[0])

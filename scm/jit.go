@@ -1836,10 +1836,12 @@ func (ctx *JITContext) AllocReg() Reg {
 // jitScalarCanUseFPOverflow recognizes values whose sole machine word is data,
 // never a Go pointer. Type knowledge is intentionally not used as a blanket
 // permission: string/slice/procedure scalar views may carry addresses. Numeric,
-// boolean and internal ordinal payloads are safe, while RelocatablePointer is
-// an explicit veto even when such an address is represented as a Scheme int.
+// boolean and internal ordinal payloads are safe only when the producer also
+// proves NoHeapPointer. RelocatablePointer is an explicit veto: internal
+// runtime addresses may be represented as Scheme ints, but their register
+// homes remain part of the Go pointer/lifetime contract.
 func jitScalarCanUseFPOverflow(value *JITValueDesc) bool {
-	if value == nil || value.Loc != LocReg || value.RelocatablePointer {
+	if value == nil || value.Loc != LocReg || !value.NoHeapPointer || value.RelocatablePointer {
 		return false
 	}
 	switch value.Type {
