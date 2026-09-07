@@ -1022,7 +1022,7 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension, maint
 				}
 			}
 			if t.PersistencyMode == Safe {
-				s.logfile.Sync()
+				s.logfile.Flush(true)
 			}
 		}
 		s.mu.Unlock()
@@ -1055,7 +1055,7 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension, maint
 			}
 			ps.mu.Unlock()
 			if !wasDeleted && t.PersistencyMode == Safe && ps.logfile != nil {
-				ps.logfile.Sync()
+				ps.logfile.Flush(true)
 			}
 		}
 		return len(pending)

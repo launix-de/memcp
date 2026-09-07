@@ -129,21 +129,28 @@ func (db *database) transactionCommitted(txID string) bool {
 	return committed
 }
 
-func (db *database) commitTransaction(txID string, durable bool) {
+func (db *database) commitTransaction(txID string, durable bool) error {
 	if txID == "" {
-		return
+		return nil
 	}
 	db.initializeTransactionLog()
 	db.transactionMu.Lock()
 	defer db.transactionMu.Unlock()
 	if _, exists := db.committedTx[txID]; exists {
-		return
+		return nil
 	}
-	db.transactionLog.Write(LogEntryCommit{txID: txID})
-	if durable {
-		db.transactionLog.Sync()
+	if err := persistenceCall(func() { db.transactionLog.Write(LogEntryCommit{txID: txID}) }); err != nil {
+		return err
+	}
+	if err := persistenceCall(func() { db.transactionLog.Flush(durable) }); err != nil {
+		// The authority frame was accepted into the logfile. A failed local
+		// durability barrier or remote publication cannot tell us whether it
+		// will survive a crash, so memory must keep treating it as committed.
+		db.committedTx[txID] = db.transactionGen
+		return markCommitOutcomeUnknown(err)
 	}
 	db.committedTx[txID] = db.transactionGen
+	return nil
 }
 
 func (db *database) transactionCompactionSnapshot() (uint64, bool) {
@@ -179,7 +186,7 @@ func (db *database) compactTransactionLog(cutoff uint64) {
 
 	// Committers share transactionMu, so nobody can append between this
 	// barrier and publishing the replacement log.
-	db.transactionLog.Sync()
+	db.transactionLog.Flush(true)
 	replacement := db.persistence.SwapLog(transactionLogName, entries, true)
 	old := db.transactionLog
 	db.transactionLog = replacement
@@ -441,7 +448,7 @@ func createPersistenceFromConfig(dbName string, raw json.RawMessage) Persistence
 	if !ok {
 		return nil
 	}
-	return factory(dbName, raw)
+	return instrumentPersistence(dbName, factory(dbName, raw))
 }
 
 func LoadDatabases() {
@@ -462,7 +469,7 @@ func LoadDatabases() {
 		if entry.IsDir() {
 			db := newDatabase()
 			db.Name = entry.Name()
-			db.persistence = &FileStorage{path: Basepath + "/" + entry.Name() + "/"}
+			db.persistence = instrumentPersistence(entry.Name(), &FileStorage{path: Basepath + "/" + entry.Name() + "/"})
 			db.srState = COLD
 			databases.Set(db)
 		} else if strings.HasSuffix(entry.Name(), ".json") && entry.Name() != "settings.json" {
@@ -1173,7 +1180,7 @@ func CreateDatabase(schema string, ignoreexists bool /*, persistence Persistence
 	db = newDatabase()
 	db.Name = schema
 	persistence := FileFactory{Basepath} // TODO: remove this, use parameter instead
-	db.persistence = persistence.CreateDatabase(schema)
+	db.persistence = instrumentPersistence(schema, persistence.CreateDatabase(schema))
 	db.tables = NonLockingReadMap.New[table, string]()
 	// Newly created database is live for writes
 	db.srState = WRITE

@@ -143,10 +143,11 @@ func (s *S3Storage) ensureOpen() {
 			),
 		))
 	}
+	opts = append(opts, config.WithRetryMaxAttempts(remoteStorageAttempts))
 
 	cfg, err := config.LoadDefaultConfig(ctx, opts...)
 	if err != nil {
-		panic(fmt.Sprintf("S3Storage: failed to load AWS config: %v", err))
+		raisePersistenceFailure(s.BackendName(), s.prefix, "backend.open", err)
 	}
 
 	// Build S3 client options
@@ -181,13 +182,19 @@ func (s *S3Storage) ReadSchema() []byte {
 		Key:    aws.String(key),
 	})
 	if err != nil {
-		return nil
+		if s3ObjectMissing(err) {
+			return nil
+		}
+		raisePersistenceFailure(s.BackendName(), s.prefix, "schema.read", err)
 	}
-	defer resp.Body.Close()
 
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil
+		_ = resp.Body.Close()
+		raisePersistenceFailure(s.BackendName(), s.prefix, "schema.read", err)
+	}
+	if err := resp.Body.Close(); err != nil {
+		raisePersistenceFailure(s.BackendName(), s.prefix, "schema.read.close", err)
 	}
 	return data
 }
@@ -204,7 +211,7 @@ func (s *S3Storage) WriteSchema(schema []byte) {
 		Body:   bytes.NewReader(schema),
 	})
 	if err != nil {
-		panic(fmt.Sprintf("S3Storage: failed to write schema: %v", err))
+		raisePersistenceFailure(s.BackendName(), s.prefix, "schema.write", err)
 	}
 }
 
@@ -217,6 +224,9 @@ func (s *S3Storage) ReadColumn(shard string, column string) io.ReadCloser {
 		Key:    aws.String(key),
 	})
 	if err != nil {
+		if !s3ObjectMissing(err) {
+			raisePersistenceFailure(s.BackendName(), s.prefix, "column.read.open", err)
+		}
 		return ErrorReader{e: err, notFound: s3ObjectMissing(err)}
 	}
 	return resp.Body
@@ -247,7 +257,10 @@ func (w *s3WriteCloser) Close() error {
 		Key:    aws.String(w.key),
 		Body:   bytes.NewReader(w.buf.Bytes()),
 	})
-	return err
+	if err != nil {
+		raisePersistenceFailure(w.s.BackendName(), w.s.prefix, "object.write", err)
+	}
+	return nil
 }
 
 func (s *S3Storage) WriteColumn(shard string, column string) io.WriteCloser {
@@ -259,10 +272,13 @@ func (s *S3Storage) WriteColumn(shard string, column string) io.WriteCloser {
 func (s *S3Storage) RemoveColumn(shard string, column string) {
 	s.ensureOpen()
 	key := s.key(shard + "-" + ProcessColumnName(column))
-	_, _ = s.client.DeleteObject(context.Background(), &s3.DeleteObjectInput{
+	_, err := s.client.DeleteObject(context.Background(), &s3.DeleteObjectInput{
 		Bucket: aws.String(s.factory.Bucket),
 		Key:    aws.String(key),
 	})
+	if err != nil {
+		raisePersistenceFailure(s.BackendName(), s.prefix, "column.remove", err)
+	}
 }
 
 func (s *S3Storage) ReadBlob(hash string) io.ReadCloser {
@@ -273,6 +289,9 @@ func (s *S3Storage) ReadBlob(hash string) io.ReadCloser {
 		Key:    aws.String(key),
 	})
 	if err != nil {
+		if !s3ObjectMissing(err) {
+			raisePersistenceFailure(s.BackendName(), s.prefix, "blob.read.open", err)
+		}
 		return ErrorReader{e: err, notFound: s3ObjectMissing(err)}
 	}
 	return resp.Body
@@ -287,13 +306,16 @@ func (s *S3Storage) WriteBlob(hash string) io.WriteCloser {
 func (s *S3Storage) DeleteBlob(hash string) {
 	s.ensureOpen()
 	key := s.key("blob/" + hash)
-	_, _ = s.client.DeleteObject(context.Background(), &s3.DeleteObjectInput{
+	_, err := s.client.DeleteObject(context.Background(), &s3.DeleteObjectInput{
 		Bucket: aws.String(s.factory.Bucket),
 		Key:    aws.String(key),
 	})
+	if err != nil {
+		raisePersistenceFailure(s.BackendName(), s.prefix, "blob.delete", err)
+	}
 }
 
-func (s *S3Storage) WalkBlobs(fn func(hash string) error) error {
+func (s *S3Storage) WalkBlobs(fn func(hash string)) {
 	s.ensureOpen()
 	paginator := s3.NewListObjectsV2Paginator(s.client, &s3.ListObjectsV2Input{
 		Bucket: aws.String(s.factory.Bucket),
@@ -303,19 +325,16 @@ func (s *S3Storage) WalkBlobs(fn func(hash string) error) error {
 	for paginator.HasMorePages() {
 		page, err := paginator.NextPage(context.Background())
 		if err != nil {
-			return err
+			raisePersistenceFailure(s.BackendName(), s.prefix, "blob.walk", err)
 		}
 		for _, obj := range page.Contents {
 			hash := strings.TrimPrefix(*obj.Key, blobPrefix)
-			if err := fn(hash); err != nil {
-				return err
-			}
+			fn(hash)
 		}
 	}
-	return nil
 }
 
-func (s *S3Storage) WalkShardFiles(fn func(name string) error) error {
+func (s *S3Storage) WalkShardFiles(fn func(name string)) {
 	s.ensureOpen()
 	paginator := s3.NewListObjectsV2Paginator(s.client, &s3.ListObjectsV2Input{
 		Bucket: aws.String(s.factory.Bucket),
@@ -325,27 +344,27 @@ func (s *S3Storage) WalkShardFiles(fn func(name string) error) error {
 	for paginator.HasMorePages() {
 		page, err := paginator.NextPage(context.Background())
 		if err != nil {
-			return err
+			raisePersistenceFailure(s.BackendName(), s.prefix, "shard.walk", err)
 		}
 		for _, obj := range page.Contents {
 			name := strings.TrimPrefix(*obj.Key, pfx)
 			if name == "schema.json" || name == "schema.json.old" || strings.HasPrefix(name, "blob/") {
 				continue
 			}
-			if err := fn(name); err != nil {
-				return err
-			}
+			fn(name)
 		}
 	}
-	return nil
 }
 
 func (s *S3Storage) DeleteShardFile(name string) {
 	s.ensureOpen()
-	_, _ = s.client.DeleteObject(context.Background(), &s3.DeleteObjectInput{
+	_, err := s.client.DeleteObject(context.Background(), &s3.DeleteObjectInput{
 		Bucket: aws.String(s.factory.Bucket),
 		Key:    aws.String(s.key(name)),
 	})
+	if err != nil {
+		raisePersistenceFailure(s.BackendName(), s.prefix, "shard.delete", err)
+	}
 }
 
 func (s *S3Storage) BackendName() string {
@@ -364,13 +383,15 @@ func (s *S3Storage) Remove() {
 	for paginator.HasMorePages() {
 		page, err := paginator.NextPage(context.Background())
 		if err != nil {
-			break
+			raisePersistenceFailure(s.BackendName(), s.prefix, "database.remove.list", err)
 		}
 		for _, obj := range page.Contents {
-			_, _ = s.client.DeleteObject(context.Background(), &s3.DeleteObjectInput{
+			if _, err := s.client.DeleteObject(context.Background(), &s3.DeleteObjectInput{
 				Bucket: aws.String(s.factory.Bucket),
 				Key:    obj.Key,
-			})
+			}); err != nil {
+				raisePersistenceFailure(s.BackendName(), s.prefix, "database.remove", err)
+			}
 		}
 	}
 }
@@ -394,7 +415,7 @@ func (s *S3Storage) OpenLog(shard string) PersistenceLogfile {
 	s.ensureOpen()
 	lf, err := openOrCreateS3Logfile(s, shard)
 	if err != nil {
-		panic(err)
+		raisePersistenceFailure(s.BackendName(), s.prefix, "log.open", err)
 	}
 	return lf
 }
@@ -403,7 +424,7 @@ func (s *S3Storage) SwapLog(shard string, entries []interface{}, durable bool) P
 	s.ensureOpen()
 	oldSegments, err := listS3LogSegments(s, shard)
 	if err != nil {
-		panic(err)
+		raisePersistenceFailure(s.BackendName(), s.prefix, "log.swap", err)
 	}
 	var next uint32
 	for _, segment := range oldSegments {
@@ -421,17 +442,19 @@ func (s *S3Storage) SwapLog(shard string, entries []interface{}, durable bool) P
 		Key:    aws.String(key),
 		Body:   bytes.NewReader(body.Bytes()),
 	}); err != nil {
-		panic(err)
+		raisePersistenceFailure(s.BackendName(), s.prefix, "log.swap", err)
 	}
 	if err := writeS3LogManifest(s, shard, []uint32{next}); err != nil {
-		panic(err)
+		raisePersistenceFailure(s.BackendName(), s.prefix, "log.swap", err)
 	}
 	for _, segment := range oldSegments {
 		if segment.seg != next {
-			_, _ = s.client.DeleteObject(context.Background(), &s3.DeleteObjectInput{
+			if _, err := s.client.DeleteObject(context.Background(), &s3.DeleteObjectInput{
 				Bucket: aws.String(s.factory.Bucket),
 				Key:    aws.String(segment.key),
-			})
+			}); err != nil {
+				reportPersistenceCleanupFailure(s.BackendName(), s.prefix, "log.swap.cleanup", err)
+			}
 		}
 	}
 	return &S3Logfile{
@@ -450,13 +473,12 @@ func (s *S3Storage) ReplayLog(shard string) (map[string]struct{}, chan interface
 	out := make(chan interface{}, 64)
 	committed := make(map[string]struct{})
 	segments, err := listS3LogSegments(s, shard)
-	if err == nil {
-		hybridsort.Slice(segments, func(i, j int) bool { return segments[i].seg < segments[j].seg })
-		for _, seg := range segments {
-			collectS3LogStreamCommits(s.readLogSegment(seg), committed)
-		}
-	} else {
-		segments = nil
+	if err != nil {
+		raisePersistenceFailure(s.BackendName(), s.prefix, "log.replay", err)
+	}
+	hybridsort.Slice(segments, func(i, j int) bool { return segments[i].seg < segments[j].seg })
+	for _, seg := range segments {
+		collectS3LogStreamCommits(s.readLogSegment(seg), committed)
 	}
 
 	go func() {
@@ -468,7 +490,7 @@ func (s *S3Storage) ReplayLog(shard string) (map[string]struct{}, chan interface
 
 	lf, err := openOrCreateS3Logfile(s, shard)
 	if err != nil {
-		panic(err)
+		raisePersistenceFailure(s.BackendName(), s.prefix, "log.replay", err)
 	}
 	return committed, out, lf
 }
@@ -479,31 +501,38 @@ func (s *S3Storage) readLogSegment(seg s3LogSegInfo) []byte {
 		Key:    aws.String(seg.key),
 	})
 	if err != nil {
-		return nil
+		raisePersistenceFailure(s.BackendName(), s.prefix, "log.read", err)
 	}
 	defer resp.Body.Close()
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil
+		raisePersistenceFailure(s.BackendName(), s.prefix, "log.read", err)
 	}
 	return data
 }
 
 func (s *S3Storage) RemoveLog(shard string) {
 	s.ensureOpen()
-	segments, _ := listS3LogSegments(s, shard)
+	segments, err := listS3LogSegments(s, shard)
+	if err != nil {
+		raisePersistenceFailure(s.BackendName(), s.prefix, "log.remove", err)
+	}
 	for _, seg := range segments {
-		_, _ = s.client.DeleteObject(context.Background(), &s3.DeleteObjectInput{
+		if _, err := s.client.DeleteObject(context.Background(), &s3.DeleteObjectInput{
 			Bucket: aws.String(s.factory.Bucket),
 			Key:    aws.String(seg.key),
-		})
+		}); err != nil {
+			raisePersistenceFailure(s.BackendName(), s.prefix, "log.remove", err)
+		}
 	}
 	// Also remove manifest
 	manifestKey := s.key(fmt.Sprintf("%s.log.manifest", shard))
-	_, _ = s.client.DeleteObject(context.Background(), &s3.DeleteObjectInput{
+	if _, err := s.client.DeleteObject(context.Background(), &s3.DeleteObjectInput{
 		Bucket: aws.String(s.factory.Bucket),
 		Key:    aws.String(manifestKey),
-	})
+	}); err != nil {
+		raisePersistenceFailure(s.BackendName(), s.prefix, "log.remove", err)
+	}
 }
 
 type s3LogSegInfo struct {
@@ -722,20 +751,30 @@ func (w *S3Logfile) Write(logentry interface{}) {
 	w.buf.Write(frame)
 
 	if w.buf.Len() >= w.flushEveryBytes {
-		_ = w.flushLocked(false)
+		if err := w.flushLocked(false); err != nil {
+			raisePersistenceFailure(w.s.BackendName(), w.s.prefix, "log.write", err)
+		}
 	}
 }
 
-func (w *S3Logfile) Sync() {
+func (w *S3Logfile) Flush(durable bool) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	_ = w.flushLocked(true)
+	if err := w.flushLocked(durable); err != nil {
+		operation := "log.flush"
+		if durable {
+			operation = "log.sync"
+		}
+		raisePersistenceFailure(w.s.BackendName(), w.s.prefix, operation, err)
+	}
 }
 
 func (w *S3Logfile) Close() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	_ = w.flushLocked(true)
+	if err := w.flushLocked(true); err != nil {
+		raisePersistenceFailure(w.s.BackendName(), w.s.prefix, "log.close", err)
+	}
 }
 
 func (w *S3Logfile) flushLocked(force bool) error {
@@ -749,13 +788,18 @@ func (w *S3Logfile) flushLocked(force bool) error {
 		next := w.seg + 1
 		nextKey := w.s.key(fmt.Sprintf("%s.log.%08d", w.shard, next))
 
-		segs, _ := listS3LogSegments(w.s, w.shard)
+		segs, err := listS3LogSegments(w.s, w.shard)
+		if err != nil {
+			return err
+		}
 		var all []uint32
 		for _, si := range segs {
 			all = append(all, si.seg)
 		}
 		all = append(all, next)
-		_ = writeS3LogManifest(w.s, w.shard, all)
+		if err := writeS3LogManifest(w.s, w.shard, all); err != nil {
+			return err
+		}
 
 		w.seg = next
 		w.key = nextKey
@@ -770,9 +814,16 @@ func (w *S3Logfile) flushLocked(force bool) error {
 			Bucket: aws.String(w.s.factory.Bucket),
 			Key:    aws.String(w.key),
 		})
-		if err == nil {
-			existing, _ = io.ReadAll(resp.Body)
-			resp.Body.Close()
+		if err != nil {
+			return err
+		}
+		existing, err = io.ReadAll(resp.Body)
+		closeErr := resp.Body.Close()
+		if err != nil {
+			return err
+		}
+		if closeErr != nil {
+			return closeErr
 		}
 	}
 

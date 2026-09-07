@@ -20,6 +20,23 @@ For a longer concurrent write/rebuild workload:
 python3 tools/reliability_drill.py --mode all --workers 12 --operations 1000
 ```
 
+To inject a partial WAL write and a failed WAL sync, verify that both
+transactions fail, retry the writes, and crash-recover the exact result:
+
+```sh
+python3 tools/reliability_drill.py --mode io-failures
+```
+
+The server-side injector is enabled only when
+`MEMCP_IO_FAULT_PROBABILITY` is set. Tests can scope it with
+`MEMCP_IO_FAULT_DATABASE`, select comma-separated operations with
+`MEMCP_IO_FAULT_OPERATIONS`, reproduce the random sequence with
+`MEMCP_IO_FAULT_SEED`, skip matching calls with `MEMCP_IO_FAULT_AFTER`, and
+bound injections with `MEMCP_IO_FAULT_LIMIT`. `MEMCP_IO_FAULT_PHASE` accepts
+`before` or `partial`. Partial stream and WAL failures execute a real prefix
+write before raising the standard persistence panic; an unsafe synthetic
+post-publication failure is deliberately not offered.
+
 Use `--rebuild-crashes N` to change the default five randomized
 rebuild/kill/recovery rounds. Record `--seed` from the manifest to replay their
 delays exactly.
@@ -53,6 +70,9 @@ The current drill covers:
 - statement rollback when a trigger fails partway through a multi-row insert;
 - a hard kill racing a rebuild and publication of its replacement shards;
 - concurrent disjoint writers and rebuilds followed by another hard kill;
+- deterministic partial-write failures in autocommit and explicit transactions,
+  aborted-transaction enforcement, sync failures, successful retries, and exact
+  crash recovery;
 - graceful offline snapshot, restore into a separate data directory, and
   checksum comparison.
 

@@ -139,7 +139,7 @@ func (s *storageShard) nextForMaintenanceLocked(deletedRecid *uint32) *storageSh
 // when transaction commit/rollback changes it after the rebuild snapshot. A
 // successor already tracked by the same transaction applies its own masks
 // and must not be locked recursively here. Caller must hold s.mu.Lock().
-func (s *storageShard) syncNextVisibilityLocked(oldRecid uint32, trackedByTx map[*storageShard]struct{}, currentTx *TxContext) {
+func (s *storageShard) syncNextVisibilityLocked(oldRecid uint32, trackedByTx map[*storageShard]struct{}, currentTx *TxContext, persist bool) {
 	current := s
 	currentRecid := oldRecid
 	currentIsSource := true
@@ -165,7 +165,13 @@ func (s *storageShard) syncNextVisibilityLocked(oldRecid uint32, trackedByTx map
 		wasDeleted := next.deletions.Get(uint(newRecid))
 		next.deletions.Set(uint(newRecid), deleted)
 		next.rollbackProtected.Set(uint(newRecid), protected)
-		if wasDeleted != deleted {
+		generation := next.generation.Load()
+		// A transaction may span several completed rebuilds. Intermediate
+		// generations still need their in-memory visibility forwarded so the
+		// RecID translation chain remains valid, but retirement has closed their
+		// WALs. Only the current (or not-yet-published) generation is durable state.
+		persistNext := persist && (generation == nil || !generation.retired.Load())
+		if persistNext && wasDeleted != deleted {
 			txID := ""
 			if currentTx != nil {
 				txID = currentTx.durableID()
@@ -1317,6 +1323,10 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 					// Cursor-stability / no-tx: existing behavior
 					if currentTx != nil {
 						t.rollbackProtected.Set(uint(targetIdx), true)
+						// Register undo state before WAL I/O. A storage panic must
+						// be able to reverse every mutation already made in memory.
+						currentTx.LogDelete(t, targetIdx)
+						currentTx.LogInsert(t, newRecid)
 					}
 					if (t.t.PersistencyMode == Safe || t.t.PersistencyMode == Logged) && t.logfile != nil {
 						txID := ""
@@ -1333,18 +1343,8 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 			if result && dualWriteRow != nil {
 				t.t.dualWriteInsertFromOld(t, newRecid, dualWriteCols, dualWriteRow, currentTx)
 			}
-			// Transaction bookkeeping. The owning MapReducer registers this shard
-			// once on Close, and only when at least one callback mutated it.
-			if result {
-				if tx := currentTx; tx != nil {
-					switch tx.Mode {
-					case TxCursorStability:
-						tx.LogDelete(t, targetIdx)
-						tx.LogInsert(t, newRecid)
-					}
-				} else if t.t.PersistencyMode == Safe && t.logfile != nil {
-					defer t.logfile.Sync()
-				}
+			if result && currentTx == nil && t.t.PersistencyMode == Safe && t.logfile != nil {
+				defer t.logfile.Flush(true)
 			}
 			if withTrigger && triggerOldRow != nil {
 				if alreadyLocked {
@@ -1426,6 +1426,7 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 					t.deletions.Set(uint(idx), true) // mark as deleted
 					if currentTx != nil {
 						t.rollbackProtected.Set(uint(idx), true)
+						currentTx.LogDelete(t, idx)
 					}
 					if (t.t.PersistencyMode == Safe || t.t.PersistencyMode == Logged) && t.logfile != nil {
 						txID := ""
@@ -1438,10 +1439,8 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 					result = true
 				}()
 				// deferred sync (shard already registered via OpenMapReducer)
-				if tx != nil {
-					tx.LogDelete(t, idx)
-				} else if t.t.PersistencyMode == Safe && t.logfile != nil {
-					defer t.logfile.Sync()
+				if tx == nil && t.t.PersistencyMode == Safe && t.logfile != nil {
+					defer t.logfile.Flush(true)
 				}
 			}
 			if withTrigger && triggerDeletedRow != nil {
@@ -2601,6 +2600,25 @@ func (t *storageShard) insertPreparedLocked(columns []string, values [][]scm.Scm
 	if needMaterializedRows {
 		payloadCols, payloadVals = t.materializedInsertedRowsLocked(firstNewInsertIdx)
 	}
+	// Register visibility and undo state before WAL I/O. Persistence failures
+	// panic, and the transaction rollback must already know every inserted row.
+	if tx := currentTx; tx != nil {
+		switch tx.Mode {
+		case TxACID:
+			for i := range values {
+				recid := firstNewRecid + uint32(i)
+				t.deletions.Set(uint(recid), true)
+				t.rollbackProtected.Set(uint(recid), true)
+				tx.AddToUndeleteMask(t, recid)
+			}
+			tx.RegisterTouchedShard(t)
+		case TxCursorStability:
+			for i := range values {
+				tx.LogInsert(t, firstNewRecid+uint32(i))
+			}
+			tx.RegisterTouchedShard(t)
+		}
+	}
 	if (t.t.PersistencyMode == Safe || t.t.PersistencyMode == Logged) && t.logfile != nil {
 		// Log the actual inserted rows (not the original columns/values) so that
 		// auto-incremented IDs and column defaults are preserved across restarts.
@@ -2624,27 +2642,8 @@ func (t *storageShard) insertPreparedLocked(columns []string, values [][]scm.Scm
 			t.t.dualWriteInsertFromOld(t, firstNewRecid, payloadCols, payloadVals, currentTx)
 		}
 	}
-	// transaction bookkeeping
-	if tx := currentTx; tx != nil {
-		switch tx.Mode {
-		case TxACID:
-			// ACID: hide rows globally, add to undelete mask so this tx can see them
-			for i := range values {
-				recid := firstNewRecid + uint32(i)
-				t.deletions.Set(uint(recid), true)
-				t.rollbackProtected.Set(uint(recid), true)
-				tx.AddToUndeleteMask(t, recid)
-			}
-			tx.RegisterTouchedShard(t)
-		case TxCursorStability:
-			// Cursor-stability: log inserts for undo on rollback
-			for i := range values {
-				tx.LogInsert(t, firstNewRecid+uint32(i))
-			}
-			tx.RegisterTouchedShard(t)
-		}
-	} else if t.t.PersistencyMode == Safe && t.logfile != nil {
-		t.logfile.Sync() // write barrier; no tx means immediate sync
+	if currentTx == nil && t.t.PersistencyMode == Safe && t.logfile != nil {
+		t.logfile.Flush(true) // write barrier; no tx means immediate sync
 	}
 	// execute AFTER INSERT triggers outside the shard write lock, matching the
 	// AFTER UPDATE/DELETE paths and avoiding lock inversion with computed-column

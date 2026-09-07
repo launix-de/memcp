@@ -110,7 +110,7 @@ class OwnedServer:
 		self.log_handle = None
 		self.client: HttpClient | None = None
 
-	def start(self) -> HttpClient:
+	def start(self, extra_env: dict[str, str] | None = None) -> HttpClient:
 		if self.process is not None:
 			raise DrillFailure("refusing to start a second process under one server owner")
 		self.generation += 1
@@ -123,10 +123,13 @@ class OwnedServer:
 			f"--api-port={api_port}", f"--mysql-port={mysql_port}",
 			"--disable-mysql", "--no-repl", str(self.app),
 		]
+		environment = os.environ.copy()
+		if extra_env:
+			environment.update(extra_env)
 		self.process = subprocess.Popen(
 			command, cwd=ROOT, stdin=subprocess.DEVNULL,
 			stdout=self.log_handle, stderr=subprocess.STDOUT,
-			start_new_session=True,
+			start_new_session=True, env=environment,
 		)
 		self.client = HttpClient(api_port, self.timeout)
 		deadline = time.monotonic() + self.timeout
@@ -326,6 +329,96 @@ def run_commit_crash(server: OwnedServer, rows: int, rounds: int,
 		committed_x = classify_atomic_signature(observed, rows, committed_x)
 
 
+def io_fault_environment(operation: str, phase: str, seed: int) -> dict[str, str]:
+	return {
+		"MEMCP_IO_FAULT_PROBABILITY": "1",
+		"MEMCP_IO_FAULT_SEED": str(seed),
+		"MEMCP_IO_FAULT_OPERATIONS": operation,
+		"MEMCP_IO_FAULT_PHASE": phase,
+		"MEMCP_IO_FAULT_LIMIT": "1",
+		"MEMCP_IO_FAULT_DATABASE": DATABASE,
+	}
+
+
+def expect_write_failure(client: HttpClient, statement: str,
+		session: str | None, context: str) -> None:
+	try:
+		client.sql(statement, session=session, timeout=300)
+	except DrillFailure:
+		return
+	raise DrillFailure(f"{context} unexpectedly succeeded")
+
+
+def run_io_failures(server: OwnedServer, rows: int, seed: int,
+		journal: list[dict]) -> None:
+	want_zero = {"row_count": rows, "min_x": 0, "max_x": 0, "x_sum": 0}
+	want_one = {"row_count": rows, "min_x": 1, "max_x": 1, "x_sum": rows}
+	want_two = {"row_count": rows, "min_x": 2, "max_x": 2, "x_sum": rows * 2}
+
+	server.stop()
+	client = server.start(io_fault_environment("log.write", "partial", seed))
+	session = "drill-explicit-write-failure"
+	client.sql("START ACID TRANSACTION", session=session)
+	expect_write_failure(
+		client, "UPDATE drill_atomic SET x = x + 1", session,
+		"partially written explicit transaction",
+	)
+	expect(atomic_signature(client), want_zero, "failed explicit transaction changed visible rows")
+	expect_write_failure(
+		client, "UPDATE drill_atomic SET x = x + 1", session,
+		"write in aborted explicit transaction",
+	)
+	client.sql("ROLLBACK", session=session)
+	# The database itself has no sticky failure mode. Once the failed
+	# transaction is acknowledged, a fresh write retries storage immediately.
+	client.sql("UPDATE drill_atomic SET x = x + 1", session=session, timeout=300)
+	expect(atomic_signature(client), want_one, "write did not recover after explicit rollback")
+	client.sql("UPDATE drill_atomic SET x = x - 1", session=session, timeout=300)
+	expect(atomic_signature(client), want_zero, "explicit failure retry cleanup failed")
+	journal.append({
+		"scenario": "explicit-partial-log-write-failure", "seed": seed,
+		"expected_after_failure": want_zero, "expected_after_retry": want_one,
+	})
+
+	server.stop()
+	client = server.start(io_fault_environment("log.write", "partial", seed))
+	expect_write_failure(
+		client, "UPDATE drill_atomic SET x = x + 1", None,
+		"partially written autocommit transaction",
+	)
+	expect(atomic_signature(client), want_zero, "partial WAL failure changed visible rows")
+	client.sql("UPDATE drill_atomic SET x = x + 1", timeout=300)
+	expect(atomic_signature(client), want_one, "write did not recover after one injected failure")
+	journal.append({
+		"scenario": "partial-log-write-failure", "seed": seed,
+		"expected_after_failure": want_zero, "expected_after_retry": want_one,
+	})
+	server.kill()
+	client = server.start()
+	expect(atomic_signature(client), want_one, "partial WAL failure corrupted crash recovery")
+
+	server.stop()
+	client = server.start(io_fault_environment("log.sync", "before", seed + 1))
+	session = "drill-sync-failure"
+	client.sql("START ACID TRANSACTION", session=session)
+	client.sql("UPDATE drill_atomic SET x = x + 1", session=session, timeout=300)
+	expect_write_failure(client, "COMMIT", session, "failed multi-shard sync")
+	expect(atomic_signature(client), want_one, "failed commit changed visible rows")
+
+	retry_session = "drill-sync-retry"
+	client.sql("START ACID TRANSACTION", session=retry_session)
+	client.sql("UPDATE drill_atomic SET x = x + 1", session=retry_session, timeout=300)
+	client.sql("COMMIT", session=retry_session, timeout=300)
+	expect(atomic_signature(client), want_two, "commit did not recover after sync failure")
+	journal.append({
+		"scenario": "log-sync-failure", "seed": seed + 1,
+		"expected_after_failure": want_one, "expected_after_retry": want_two,
+	})
+	server.kill()
+	client = server.start()
+	expect(atomic_signature(client), want_two, "failed sync corrupted crash recovery")
+
+
 def run_committed_crash(server: OwnedServer, journal: list[dict]) -> dict[str, int]:
 	client = server.client
 	assert client is not None
@@ -510,7 +603,7 @@ def parse_args() -> argparse.Namespace:
 	parser.add_argument("--app", type=Path, default=ROOT / "lib/main.scm")
 	parser.add_argument("--artifacts", type=Path, help="new directory for data, logs, journal, and restore snapshot")
 	parser.add_argument("--seed", type=int, default=random.SystemRandom().randrange(2**63))
-	parser.add_argument("--mode", choices=("atomicity", "crash", "soak", "restore", "all"), default="all")
+	parser.add_argument("--mode", choices=("atomicity", "io-failures", "crash", "soak", "restore", "all"), default="all")
 	parser.add_argument("--workers", type=int, default=4)
 	parser.add_argument("--operations", type=int, default=25, help="rows written by each soak worker")
 	parser.add_argument("--rebuild-crashes", type=int, default=5,
@@ -519,6 +612,8 @@ def parse_args() -> argparse.Namespace:
 		help="number of ACID COMMIT/kill/recovery races in atomicity mode")
 	parser.add_argument("--atomicity-rows", type=int, default=100000,
 		help="rows updated across ShardSize=100 shards in atomicity mode")
+	parser.add_argument("--io-failure-rows", type=int, default=300,
+		help="rows updated across ShardSize=100 shards in I/O failure mode")
 	parser.add_argument("--timeout", type=float, default=30)
 	return parser.parse_args()
 
@@ -526,7 +621,8 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
 	args = parse_args()
 	if (args.workers < 1 or args.operations < 1 or args.rebuild_crashes < 1 or
-			args.commit_crashes < 1 or args.atomicity_rows < 1 or args.timeout <= 0):
+			args.commit_crashes < 1 or args.atomicity_rows < 1 or
+			args.io_failure_rows < 1 or args.timeout <= 0):
 		raise DrillFailure("workers, operations, crash rounds, row counts, and timeout must be positive")
 	binary = args.binary.expanduser().resolve()
 	app = args.app.expanduser().resolve()
@@ -549,6 +645,12 @@ def main() -> int:
 		if args.mode == "atomicity":
 			initialize_atomicity(client, args.atomicity_rows)
 			run_commit_crash(server, args.atomicity_rows, args.commit_crashes, rng, journal)
+			write_manifest(manifest, args.seed, "passed", journal)
+			print(f"PASS: {len(journal)} reliability scenarios; manifest: {manifest}")
+			return 0
+		if args.mode == "io-failures":
+			initialize_atomicity(client, args.io_failure_rows)
+			run_io_failures(server, args.io_failure_rows, args.seed, journal)
 			write_manifest(manifest, args.seed, "passed", journal)
 			print(f"PASS: {len(journal)} reliability scenarios; manifest: {manifest}")
 			return 0

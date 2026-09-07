@@ -43,7 +43,9 @@ type PersistenceEngine interface {
 	ReadSchema() []byte
 	// WriteSchema must publish one complete schema generation atomically. A
 	// reader may observe either the previous or the new generation, never a
-	// missing, empty, or partial schema. Failures must panic.
+	// missing, empty, or partial schema. Every backend I/O failure must panic
+	// with *PersistenceFailure; absence is represented explicitly by a reader
+	// whose Missing method returns true.
 	WriteSchema(schema []byte)
 	ReadColumn(shard string, column string) io.ReadCloser
 	// WriteColumn returns a generation-private writer. Close must either publish
@@ -55,8 +57,9 @@ type PersistenceEngine interface {
 	WriteBlob(hash string) io.WriteCloser
 	DeleteBlob(hash string)
 	// WalkBlobs calls fn for every blob hash stored on disk, one at a time.
-	// fn may return an error to stop iteration early.
-	WalkBlobs(fn func(hash string) error) error
+	// Backend failures follow the common persistence contract and panic with
+	// *PersistenceFailure.
+	WalkBlobs(fn func(hash string))
 	OpenLog(shard string) PersistenceLogfile // open for writing
 	// SwapLog atomically replaces the visible log with entries and returns an
 	// appendable handle for the replacement. A crash may leave private/orphaned
@@ -70,8 +73,8 @@ type PersistenceEngine interface {
 	RemoveLog(shard string)
 	// WalkShardFiles calls fn for every shard-related file (column files, log files)
 	// stored on disk, one at a time. The name passed to fn is exactly the value
-	// expected by DeleteShardFile. fn may return an error to stop iteration early.
-	WalkShardFiles(fn func(name string) error) error
+	// expected by DeleteShardFile. Backend failures panic with *PersistenceFailure.
+	WalkShardFiles(fn func(name string))
 	// DeleteShardFile deletes a file previously yielded by WalkShardFiles.
 	DeleteShardFile(name string)
 	Remove()             // delete from storage
@@ -80,7 +83,10 @@ type PersistenceEngine interface {
 
 type PersistenceLogfile interface {
 	Write(logentry interface{})
-	Sync()
+	// Flush publishes every accepted frame. durable additionally requests the
+	// backend's strongest durability barrier (fsync for local files). Remote
+	// backends must transmit buffered writes even when durable is false.
+	Flush(durable bool)
 	Close()
 }
 
@@ -93,12 +99,12 @@ func finishColumnWrite(w io.WriteCloser, durable bool) {
 		if syncer, ok := w.(interface{ Sync() error }); ok {
 			if err := syncer.Sync(); err != nil {
 				_ = w.Close()
-				panic(err)
+				raisePersistenceFailure("unknown", "unknown", "column.write.sync", err)
 			}
 		}
 	}
 	if err := w.Close(); err != nil {
-		panic(err)
+		raisePersistenceFailure("unknown", "unknown", "column.write.close", err)
 	}
 }
 
