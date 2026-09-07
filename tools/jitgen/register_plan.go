@@ -437,6 +437,7 @@ func registerPlanComponents(nodes []registerPlanNode) [][]int {
 				}
 			}
 		}
+		sort.Ints(component)
 		result = append(result, component)
 	}
 	return result
