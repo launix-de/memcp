@@ -237,7 +237,6 @@ test_cases:
       data: [{"?tz": "+02:00"}]
 
   - name: "SPARQL 1.1 17.4.6 MD5 hash"
-    noncritical: true
     sparql: 'SELECT (MD5("abc") AS ?result) WHERE {}'
     expect:
       rows: 1

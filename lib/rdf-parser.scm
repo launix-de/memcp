@@ -248,6 +248,7 @@ consumer stage. */
 	(parser '((atom "MINUTES" true) "(" (define a rdf_filter_or) ")") '('rdf_date_component a 15 2 "MINUTE"))
 	(parser '((atom "SECONDS" true) "(" (define a rdf_filter_or) ")") '('rdf_date_component a 18 2 "SECOND"))
 	(parser '((atom "TZ" true) "(" (define a rdf_filter_or) ")") '('rdf_timezone a))
+	(parser '((atom "MD5" true) "(" (define a rdf_filter_or) ")") '('md5 a))
 	(parser '((atom "SHA1" true) "(" (define a rdf_filter_or) ")") '('sha1 a))
 	(parser '((atom "SHA256" true) "(" (define a rdf_filter_or) ")") '('sha256 a))
 	(parser '((atom "ABS" true) "(" (define a rdf_filter_or) ")") '('sql_abs a))
