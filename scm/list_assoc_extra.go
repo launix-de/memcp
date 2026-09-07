@@ -16,9 +16,9 @@ Copyright (C) 2026  Carl-Philip Hänsch
 */
 package scm
 
-func exprCollectTaggedNthUnique(root, tag Scmer, position int) Scmer {
+func treeCollectTaggedNthUnique(root, tag Scmer, position int) Scmer {
 	if position < 0 {
-		panic("expr_collect_tagged_nth_unique expects a non-negative position")
+		panic("tree_collect_tagged_nth_unique expects a non-negative position")
 	}
 
 	// Compiler trees are normally shallow and aliases are few. Keep traversal
@@ -56,10 +56,7 @@ func exprCollectTaggedNthUnique(root, tag Scmer, position int) Scmer {
 			// data, not another expression to inspect for the same tag.
 			continue
 		}
-		// Expression heads are operators. They may themselves be compound values
-		// (for example an embedded lambda), but are not operands of this expression
-		// and must not contribute references to its caller's scope.
-		for index := len(items) - 1; index >= 1; index-- {
+		for index := len(items) - 1; index >= 0; index-- {
 			pending = append(pending, items[index])
 		}
 	}
@@ -79,11 +76,11 @@ func groupAssocCapacity(inputLength int) int {
 
 func init_list_assoc_extra() {
 	Declare(&Globalenv, &Declaration{
-		Name: "expr_collect_tagged_nth_unique",
+		Name: "tree_collect_tagged_nth_unique",
 		Fn: func(a ...Scmer) Scmer {
-			return exprCollectTaggedNthUnique(a[0], a[1], int(ToInt(a[2])))
+			return treeCollectTaggedNthUnique(a[0], a[1], int(ToInt(a[2])))
 		},
-		Type: &TypeDescriptor{Kind: "func", Description: "collects unique zero-based nth values of tagged operand expressions without traversing operator heads",
+		Type: &TypeDescriptor{Kind: "func", Description: "collects the unique zero-based nth values of tagged nodes in a nested list tree",
 			Params: []*TypeDescriptor{
 				{Kind: "any", Label: "tree", NoEscape: true},
 				{Kind: "any", Label: "tag", NoEscape: true},

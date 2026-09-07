@@ -919,7 +919,7 @@ the shallow guard instead of walking the wide expression it is about to drop. */
 projection for every source; that turns read-model queries into O(N^2) planner
 work before decorrelation has even started. */
 (define query_expr_alias_set (lambda (default_alias expr aliases)
-	(reduce (expr_collect_tagged_nth_unique expr (quote get_column) 1)
+	(reduce (tree_collect_tagged_nth_unique expr (quote get_column) 1)
 		(lambda (found tblvar)
 			(set_assoc found (resolve_column_alias tblvar default_alias) true))
 		aliases)))
