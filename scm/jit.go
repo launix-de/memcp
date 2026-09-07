@@ -81,6 +81,9 @@ Input arguments (args):
                 The emitter SHOULD constant-fold when all inputs are LocImm.
   - LocReg:     unboxed primitive in args[i].Reg.
   - LocFPReg:   unboxed float in the backend's floating-point register file.
+                The allocator may use the same physical bank as a temporary
+                overflow home for another proven pointer-free scalar, but
+                EnsureDesc restores that value before an emitter sees it.
   - LocRegPair: boxed Scmer in args[i].Reg (ptr) + args[i].Reg2 (aux).
   - LocStack:   value on the stack at args[i].StackOff.
   - LocStackPair:
@@ -579,7 +582,7 @@ const (
 	LocParserTemplate
 	LocClosurePair // One Scmer in the current Go funcval's typed closure environment
 	LocFlags       // Ephemeral comparison result consumed immediately by a branch
-	LocFPReg       // Unboxed scalar in a native floating-point register
+	LocFPReg       // Native FP value, or a pointer-free scalar payload in an FP overflow home
 )
 
 // JITRegisterClass separates values which share liveness but cannot share a
@@ -1740,6 +1743,33 @@ func (ctx *JITContext) AllocReg() Reg {
 	}
 
 	owner := ctx.RegOwners[r]
+	// A scalar register is only a payload while it remains inside generated
+	// code.  When its type is known and it is not a relocatable Go pointer, an
+	// unused FP register is a cheaper spill home than memory.  The original
+	// register class remains attached to the descriptor so a later FP spill is
+	// restored to the register file required by its consumer.  Full Scmer pairs
+	// are deliberately excluded: their pointer word must remain visible to the
+	// Go stack map unless NoHeapPointer proves otherwise, and splitting pairs
+	// here would make their ownership non-atomic.
+	if !pairSpill && !tripleSpill && jitScalarCanUseFPOverflow(owner) {
+		availableFP := ctx.FreeFPRegs &^ ctx.ProtectedRegs
+		if availableFP != 0 {
+			fp := Reg(bits.TrailingZeros64(availableFP))
+			ctx.FreeFPRegs &^= 1 << uint(fp)
+			ctx.EmitMovGPRToFP(fp, r)
+			owner.Loc = LocFPReg
+			owner.Reg = fp
+			ctx.RegOwners[r] = nil
+			ctx.RegOwners[fp] = owner
+			if owner.ID != 0 {
+				if ctx.descSpills == nil {
+					ctx.descSpills = make(map[uint32]descSpillMeta)
+				}
+				ctx.descSpills[owner.ID] = descSpillMeta{loc: LocFPReg, reg: fp}
+			}
+			return r
+		}
+	}
 	if pairSpill {
 		stackOff := ctx.AllocSpill(16)
 		ctx.EmitStoreRegMem(spillR1, RegRBP, stackOff)
@@ -1803,6 +1833,25 @@ func (ctx *JITContext) AllocReg() Reg {
 	return r
 }
 
+// jitScalarCanUseFPOverflow recognizes values whose sole machine word is data,
+// never a Go pointer. Type knowledge is intentionally not used as a blanket
+// permission: string/slice/procedure scalar views may carry addresses. Numeric,
+// boolean and internal ordinal payloads are safe only when the producer also
+// proves NoHeapPointer. RelocatablePointer is an explicit veto: internal
+// runtime addresses may be represented as Scheme ints, but their register
+// homes remain part of the Go pointer/lifetime contract.
+func jitScalarCanUseFPOverflow(value *JITValueDesc) bool {
+	if value == nil || value.Loc != LocReg || !value.NoHeapPointer || value.RelocatablePointer {
+		return false
+	}
+	switch value.Type {
+	case tagInt, tagFloat, tagBool, tagDate, tagNthLocalVar:
+		return true
+	default:
+		return false
+	}
+}
+
 // AllocFPReg allocates a scalar floating-point register independently from the
 // GPR allocator. FP values cannot consume pointer-bearing GPR homes, and vice
 // versa; keeping the files separate also maps directly to non-amd64 backends.
@@ -1828,7 +1877,6 @@ func (ctx *JITContext) AllocFPReg() Reg {
 		owner.Loc = LocStack
 		owner.StackOff = off
 		owner.Reg = 0
-		owner.RegClass = JITRegisterClassFP
 		if owner.ID != 0 {
 			if ctx.descSpills == nil {
 				ctx.descSpills = make(map[uint32]descSpillMeta)
@@ -1899,6 +1947,13 @@ func (ctx *JITContext) EnsureDesc(desc *JITValueDesc) {
 		if desc.RegClass == JITRegisterClassFP {
 			ctx.EnsureFPReg(desc)
 		} else {
+			ctx.EnsureReg(desc)
+		}
+	case LocFPReg:
+		// LocFPReg is also an overflow home for pointer-free scalar payloads.
+		// Only native float values are consumed there directly; integer and
+		// boolean consumers get their original GPR representation back.
+		if desc.RegClass != JITRegisterClassFP {
 			ctx.EnsureReg(desc)
 		}
 	case LocStackPair:
@@ -2088,6 +2143,18 @@ func (ctx *JITContext) AllocRegExcept(excluded ...Reg) Reg {
 // If the value is still in a register, this is a no-op.
 // If spilled, allocates a new register, emits a load, and updates the desc.
 func (ctx *JITContext) EnsureReg(desc *JITValueDesc) {
+	if desc.Loc == LocFPReg {
+		fp := desc.Reg
+		r := ctx.AllocReg()
+		ctx.EmitMovFPToGPR(r, fp)
+		ctx.FreeReg(fp)
+		desc.Loc = LocReg
+		desc.Reg = r
+		desc.MemPtr = 0
+		desc.StackOff = 0
+		ctx.BindReg(r, desc)
+		return
+	}
 	if desc.Loc != LocStack {
 		return
 	}
@@ -2225,6 +2292,10 @@ func (ctx *JITContext) FreeDesc(desc *JITValueDesc) {
 	if desc.ID == 0 {
 		return
 	}
+	// Allocation can move the canonical owner to a stack or cross-class
+	// overflow home while generated code still holds descriptor aliases. Free
+	// the current placement, never the stale register named by such an alias.
+	ctx.SyncDesc(desc)
 	switch desc.Loc {
 	case LocReg:
 		if desc.Reg <= RegR15 {
