@@ -315,12 +315,17 @@ consumer stage. */
 )))
 
 (define rdf_path_atom (parser (or
+	(parser '((atom "^" true) "(" (define p rdf_path_alt) ")") (list "__path_inverse__" p))
+	(parser '((atom "^" true) (define p rdf_expression)) (list "__path_inverse__" p))
 	(parser '("(" (define p rdf_path_alt) ")") p)
 	rdf_expression
 )))
 (define rdf_path_postfix (parser (or
 	(parser '((define p rdf_path_atom) "*") '("__path_star__" p))
 	(parser '((define p rdf_path_atom) "+") '("__path_plus__" p))
+	/* A path postfix is adjacent to its path. Disallow leading whitespace so
+	`p ?object` cannot consume the object's variable marker as `p?`. */
+	(parser '((define p rdf_path_atom) (atom "?" false false)) '("__path_optional__" p))
 	rdf_path_atom
 )))
 (define rdf_path_seq (parser (or
@@ -1462,6 +1467,25 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 				(state "used" (cons candidate (state "used")))
 				(list (quote get_var) candidate))))
 ))
+(define rdf_path_invert (lambda (path)
+	(match path
+		'("__path_inverse__" inner) inner
+		'("__path_seq__" left right)
+		(list "__path_seq__" (rdf_path_invert right) (rdf_path_invert left))
+		'("__path_alt__" left right)
+		(list "__path_alt__" (rdf_path_invert left) (rdf_path_invert right))
+		'("__path_star__" inner) (list "__path_star__" (rdf_path_invert inner))
+		'("__path_plus__" inner) (list "__path_plus__" (rdf_path_invert inner))
+		'("__path_optional__" inner) (list "__path_optional__" (rdf_path_invert inner))
+		path)
+))
+(define rdf_path_zero_branch (lambda (subject object)
+	(match object
+		'('get_var _object_var) (list (list "__bind__" subject object))
+		_ (match subject
+			'('get_var _subject_var) (list (list "__bind__" object subject))
+			_ (list (list "__filter__" (list (quote equal?) subject object)))))
+))
 (define rdf_shared_expand_paths_using (lambda (conditions state) (match conditions
 	(cons condition tail)
 	(match condition
@@ -1470,6 +1494,9 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 			(cons (list "__filter__" false) tail)) state)
 		'(s p o)
 		(match p
+			'("__path_inverse__" inner)
+			(rdf_shared_expand_paths_using
+				(cons (list o (rdf_path_invert inner) s) tail) state)
 			'("__path_seq__" p1 p2)
 			(begin
 				(define intermediate (rdf_shared_fresh_path_var state))
@@ -1477,6 +1504,10 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 					(cons (list s p1 intermediate) (cons (list intermediate p2 o) tail)) state))
 			'("__path_alt__" p1 p2)
 			(cons (list "__union__" (list (list (list s p1 o)) (list (list s p2 o))))
+				(rdf_shared_expand_paths_using tail state))
+			'("__path_optional__" inner)
+			(cons (list "__union__" (list (list (list s inner o))
+				(rdf_path_zero_branch s o)))
 				(rdf_shared_expand_paths_using tail state))
 			_ (cons condition (rdf_shared_expand_paths_using tail state)))
 		_ (cons condition (rdf_shared_expand_paths_using tail state)))

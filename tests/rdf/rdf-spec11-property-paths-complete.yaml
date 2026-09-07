@@ -17,7 +17,6 @@ test_cases:
     expect: {rows: 1, data: [{"?o": "http://spec11-path-link.example/b"}]}
 
   - name: "SPARQL 1.1 9 InversePath reverses an edge"
-    noncritical: true
     ttl_data: |
       @prefix ex: <http://spec11-path-inverse.example/> . ex:a ex:parent ex:b .
     sparql: 'PREFIX ex: <http://spec11-path-inverse.example/> SELECT ?child WHERE { ex:b ^ex:parent ?child }'
@@ -36,7 +35,6 @@ test_cases:
     expect: {rows: 2}
 
   - name: "SPARQL 1.1 9 ZeroOrOnePath includes zero and one edge"
-    noncritical: true
     ttl_data: |
       @prefix ex: <http://spec11-path-optional.example/> . ex:a ex:p ex:b .
     sparql: 'PREFIX ex: <http://spec11-path-optional.example/> SELECT ?o WHERE { ex:a ex:p? ?o }'
