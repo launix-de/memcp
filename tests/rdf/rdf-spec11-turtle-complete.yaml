@@ -11,7 +11,6 @@ setup: []
 
 test_cases:
   - name: "Turtle 1.1 2.4 BASE resolves relative IRIs"
-    noncritical: true
     ttl_data: |
       @base <http://spec11-turtle-base.example/root/> .
       <subject> <predicate> <object> .
@@ -19,7 +18,6 @@ test_cases:
     expect: {rows: 1, data: [{"?ask": true}]}
 
   - name: "Turtle 1.1 SPARQL BASE directive needs no trailing dot"
-    noncritical: true
     ttl_data: |
       BASE <http://spec11-turtle-sparql-base.example/>
       <s> <p> <o> .
@@ -27,7 +25,6 @@ test_cases:
     expect: {rows: 1, data: [{"?ask": true}]}
 
   - name: "Turtle 1.1 SPARQL PREFIX directive needs no trailing dot"
-    noncritical: true
     ttl_data: |
       PREFIX ex: <http://spec11-turtle-sparql-prefix.example/>
       ex:s ex:p ex:o .
@@ -61,7 +58,6 @@ test_cases:
     expect: {rows: 1, contains: "line one"}
 
   - name: "Turtle 1.1 long double-quoted string literal"
-    noncritical: true
     ttl_data: |
       <http://spec11-turtle-string.example/long-double> <http://spec11-turtle-string.example/p> """line one
       line two""" .
@@ -69,7 +65,6 @@ test_cases:
     expect: {rows: 1, contains: "line two"}
 
   - name: "Turtle 1.1 string escape sequences"
-    noncritical: true
     ttl_data: |
       <http://spec11-turtle-string.example/escapes> <http://spec11-turtle-string.example/p> "tab:\t newline:\n quote:\" slash:\\" .
     sparql: 'SELECT ?o WHERE { <http://spec11-turtle-string.example/escapes> <http://spec11-turtle-string.example/p> ?o }'
@@ -83,7 +78,6 @@ test_cases:
     expect: {rows: 1, contains: '"xml:lang":"en-gb"'}
 
   - name: "Turtle 1.1 explicitly typed literal"
-    noncritical: true
     ttl_data: |
       @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
       <http://spec11-turtle-typed.example/s> <http://spec11-turtle-typed.example/p> "42"^^xsd:integer .
@@ -92,19 +86,16 @@ test_cases:
     expect: {rows: 1, contains: "http://www.w3.org/2001/XMLSchema#integer"}
 
   - name: "Turtle 1.1 integer literal has xsd integer datatype"
-    noncritical: true
     ttl_data: '<http://spec11-turtle-numeric.example/integer> <http://spec11-turtle-numeric.example/p> -42 .'
     sparql: 'SELECT ?o WHERE { <http://spec11-turtle-numeric.example/integer> <http://spec11-turtle-numeric.example/p> ?o FILTER(?o = -42) }'
     expect: {rows: 1}
 
   - name: "Turtle 1.1 decimal literal has xsd decimal datatype"
-    noncritical: true
     ttl_data: '<http://spec11-turtle-numeric.example/decimal> <http://spec11-turtle-numeric.example/p> 12.50 .'
     sparql: 'SELECT ?o WHERE { <http://spec11-turtle-numeric.example/decimal> <http://spec11-turtle-numeric.example/p> ?o FILTER(?o = 12.50) }'
     expect: {rows: 1}
 
   - name: "Turtle 1.1 double literal supports exponent notation"
-    noncritical: true
     ttl_data: '<http://spec11-turtle-numeric.example/double> <http://spec11-turtle-numeric.example/p> 1.25e2 .'
     sparql: 'SELECT ?o WHERE { <http://spec11-turtle-numeric.example/double> <http://spec11-turtle-numeric.example/p> ?o FILTER(?o = 125) }'
     expect: {rows: 1}
@@ -116,21 +107,18 @@ test_cases:
     expect: {rows: 1, data: [{"?o": true}]}
 
   - name: "Turtle 1.1 object lists expand to multiple triples"
-    noncritical: true
     ttl_data: |
       @prefix ex: <http://spec11-turtle-object-list.example/> . ex:s ex:p "A", "B", "C" .
     sparql: 'PREFIX ex: <http://spec11-turtle-object-list.example/> SELECT ?o WHERE { ex:s ex:p ?o }'
     expect: {rows: 3}
 
   - name: "Turtle 1.1 predicate lists share one subject"
-    noncritical: true
     ttl_data: |
       @prefix ex: <http://spec11-turtle-predicate-list.example/> . ex:s ex:p "A" ; ex:q "B" .
     sparql: 'PREFIX ex: <http://spec11-turtle-predicate-list.example/> SELECT ?p ?o WHERE { ex:s ?p ?o }'
     expect: {rows: 2}
 
   - name: "Turtle 1.1 blank-node property lists nest"
-    noncritical: true
     ttl_data: |
       @prefix ex: <http://spec11-turtle-bnode-list.example/> . ex:s ex:address [ ex:city "Berlin" ; ex:country [ ex:code "DE" ] ] .
     sparql: |
@@ -156,7 +144,6 @@ test_cases:
     expect: {rows: 3}
 
   - name: "Turtle 1.1 empty collection denotes rdf nil"
-    noncritical: true
     ttl_data: |
       @prefix ex: <http://spec11-turtle-empty-list.example/> . ex:s ex:items () .
     sparql: |

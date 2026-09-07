@@ -12,7 +12,6 @@ setup: []
 
 test_cases:
   - name: "SPARQL 1.1 Protocol direct POST accepts application sparql-query"
-    noncritical: true
     headers:
       Content-Type: "application/sparql-query"
       Accept: "application/sparql-results+json"
@@ -20,7 +19,6 @@ test_cases:
     expect: {rows: 1, content_type: "application/sparql-results+json"}
 
   - name: "SPARQL 1.1 Query Results JSON SELECT media type"
-    noncritical: true
     headers: {Accept: "application/sparql-results+json"}
     sparql: 'SELECT ("yes" AS ?value) WHERE {}'
     expect:
@@ -29,7 +27,6 @@ test_cases:
       contains: '"bindings"'
 
   - name: "SPARQL 1.1 Query Results JSON ASK media type"
-    noncritical: true
     headers: {Accept: "application/sparql-results+json"}
     sparql: 'ASK WHERE {}'
     expect:
@@ -88,13 +85,11 @@ test_cases:
       contains: "rdf:RDF"
 
   - name: "SPARQL 1.1 malformed query returns a protocol error"
-    noncritical: true
     headers: {Content-Type: "application/sparql-query"}
     sparql: 'SELECT WHERE {'
     expect: {error: true}
 
   - name: "SPARQL 1.1 RDF entailment recognizes asserted triples"
-    noncritical: true
     ttl_data: '@prefix ex: <http://spec11-entailment-simple.example/> . ex:s ex:p ex:o .'
     sparql: 'PREFIX ex: <http://spec11-entailment-simple.example/> ASK WHERE { ex:s ex:p ex:o }'
     expect: {rows: 1, data: [{"?ask": true}]}

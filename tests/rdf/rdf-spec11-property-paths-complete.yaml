@@ -11,7 +11,6 @@ setup: []
 
 test_cases:
   - name: "SPARQL 1.1 9 PredicatePath matches one edge"
-    noncritical: true
     ttl_data: |
       @prefix ex: <http://spec11-path-link.example/> . ex:a ex:p ex:b .
     sparql: 'PREFIX ex: <http://spec11-path-link.example/> SELECT ?o WHERE { ex:a ex:p ?o }'
@@ -25,14 +24,12 @@ test_cases:
     expect: {rows: 1, data: [{"?child": "http://spec11-path-inverse.example/a"}]}
 
   - name: "SPARQL 1.1 9 SequencePath hides intermediate variables"
-    noncritical: true
     ttl_data: |
       @prefix ex: <http://spec11-path-sequence.example/> . ex:a ex:p ex:b . ex:b ex:q ex:c .
     sparql: 'PREFIX ex: <http://spec11-path-sequence.example/> SELECT ?o WHERE { ex:a ex:p/ex:q ?o }'
     expect: {rows: 1, data: [{"?o": "http://spec11-path-sequence.example/c"}]}
 
   - name: "SPARQL 1.1 9 AlternativePath retains both alternatives"
-    noncritical: true
     ttl_data: |
       @prefix ex: <http://spec11-path-alternative.example/> . ex:a ex:p ex:b ; ex:q ex:c .
     sparql: 'PREFIX ex: <http://spec11-path-alternative.example/> SELECT ?o WHERE { ex:a (ex:p|ex:q) ?o }'
@@ -46,7 +43,6 @@ test_cases:
     expect: {rows: 2}
 
   - name: "SPARQL 1.1 9 ZeroOrMorePath handles cycles without duplicates"
-    noncritical: true
     ttl_data: |
       @prefix ex: <http://spec11-path-star-cycle.example/> . ex:a ex:p ex:b . ex:b ex:p ex:a .
     sparql: 'PREFIX ex: <http://spec11-path-star-cycle.example/> SELECT ?o WHERE { ex:a ex:p* ?o } ORDER BY ?o'
@@ -57,7 +53,6 @@ test_cases:
         - {"?o": "http://spec11-path-star-cycle.example/b"}
 
   - name: "SPARQL 1.1 9 OneOrMorePath excludes a zero-length acyclic endpoint"
-    noncritical: true
     ttl_data: |
       @prefix ex: <http://spec11-path-plus.example/> . ex:a ex:p ex:b . ex:b ex:p ex:c .
     sparql: 'PREFIX ex: <http://spec11-path-plus.example/> SELECT ?o WHERE { ex:a ex:p+ ?o }'
@@ -110,7 +105,6 @@ test_cases:
     expect: {rows: 1, data: [{"?ask": true}]}
 
   - name: "SPARQL 1.1 9 path evaluation stays in the active named graph"
-    noncritical: true
     sparql: |
       PREFIX ex: <http://spec11-path-graph.example/>
       INSERT DATA { GRAPH ex:g { ex:a ex:p ex:b . ex:b ex:p ex:c } }

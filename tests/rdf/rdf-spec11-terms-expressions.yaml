@@ -12,7 +12,6 @@ setup: []
 
 test_cases:
   - name: "SPARQL 1.1 4.1.2 language-tagged literals preserve their language"
-    noncritical: true
     ttl_data: |
       @prefix ex: <http://spec11-terms.example/> .
       ex:subject ex:label "Berlin"@de .
@@ -25,7 +24,6 @@ test_cases:
       contains: '"xml:lang":"de"'
 
   - name: "SPARQL 1.1 4.1.2 language tags participate in term identity"
-    noncritical: true
     ttl_data: |
       @prefix ex: <http://spec11-terms-lang.example/> .
       ex:subject ex:label "Berlin"@de, "Berlin"@en .
@@ -35,7 +33,6 @@ test_cases:
     expect: {rows: 2}
 
   - name: "SPARQL 1.1 4.1.2 datatype IRIs participate in term identity"
-    noncritical: true
     ttl_data: |
       @prefix ex: <http://spec11-terms-datatype.example/> .
       @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
@@ -127,7 +124,6 @@ test_cases:
       data: [{"?iri": true, "?string": false}]
 
   - name: "SPARQL 1.1 17.4.2.4 isLiteral recognizes typed literals"
-    noncritical: true
     sparql: |
       PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
       SELECT (isLiteral("7"^^xsd:integer) AS ?result) WHERE {}
@@ -145,14 +141,12 @@ test_cases:
       data: [{"?result": true}]
 
   - name: "SPARQL 1.1 17.4.1 arithmetic supports addition and multiplication"
-    noncritical: true
     sparql: 'SELECT ((2 + 3 * 4) AS ?result) WHERE {}'
     expect:
       rows: 1
       data: [{"?result": 14}]
 
   - name: "SPARQL 1.1 17.4.1 arithmetic supports unary minus and division"
-    noncritical: true
     sparql: 'SELECT ((-12 / 3) AS ?result) WHERE {}'
     expect:
       rows: 1
@@ -269,7 +263,6 @@ test_cases:
       contains: "a9993e364706816aba3e25717850c26c9cd0d89d"
 
   - name: "SPARQL 1.1 17.4.1 expression errors leave projection variables unbound"
-    noncritical: true
     headers: {Accept: "application/sparql-results+json"}
     sparql: 'SELECT ((1 / 0) AS ?error) ("kept" AS ?value) WHERE {}'
     expect:
