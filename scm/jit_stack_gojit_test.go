@@ -88,6 +88,8 @@ func TestJITScalarPointerSpillRemainsInStackMap(t *testing.T) {
 		Ptr:        start,
 		End:        unsafe.Add(start, len(code)-1),
 		AllRegs:    1 << uint(RegRAX),
+		AllFPRegs:  1 << uint(RegX2),
+		FreeFPRegs: 1 << uint(RegX2),
 		FrameReg:   RegRBP,
 		StackReg:   RegRSP,
 		ScratchReg: RegR11,
@@ -101,6 +103,97 @@ func TestJITScalarPointerSpillRemainsInStackMap(t *testing.T) {
 	root := jitStackRoot{base: jitStackRootFrameBP, offset: -8}
 	if _, ok := ctx.StackRoots[root]; !ok {
 		t.Fatal("relocatable scalar spill is missing from the stack map")
+	}
+}
+
+func TestJITUnprovenScalarDoesNotUseFPOverflowHome(t *testing.T) {
+	code := make([]byte, 128)
+	start := unsafe.Pointer(&code[0])
+	ctx := &JITContext{
+		Start:      start,
+		Ptr:        start,
+		End:        unsafe.Add(start, len(code)-1),
+		AllRegs:    1 << uint(RegRAX),
+		AllFPRegs:  1 << uint(RegX2),
+		FreeFPRegs: 1 << uint(RegX2),
+		FrameReg:   RegRBP,
+		StackReg:   RegRSP,
+		ScratchReg: RegR11,
+	}
+	value := JITValueDesc{Loc: LocReg, Type: tagInt, Reg: RegRAX}
+	ctx.BindReg(RegRAX, &value)
+
+	if got := ctx.AllocReg(); got != RegRAX {
+		t.Fatalf("reclaimed register %d, want %d", got, RegRAX)
+	}
+	ctx.SyncDesc(&value)
+	if value.Loc != LocStack {
+		t.Fatalf("unproven scalar spilled to loc %d, want stack", value.Loc)
+	}
+	if ctx.FreeFPRegs&(1<<uint(RegX2)) == 0 {
+		t.Fatal("unproven scalar consumed an FP overflow home")
+	}
+}
+
+func TestJITPointerFreeScalarUsesFPOverflowHome(t *testing.T) {
+	code := make([]byte, 128)
+	start := unsafe.Pointer(&code[0])
+	ctx := &JITContext{
+		Start:      start,
+		Ptr:        start,
+		End:        unsafe.Add(start, len(code)-1),
+		AllRegs:    1 << uint(RegRAX),
+		AllFPRegs:  1 << uint(RegX2),
+		FreeFPRegs: 1 << uint(RegX2),
+		FrameReg:   RegRBP,
+		StackReg:   RegRSP,
+		ScratchReg: RegR11,
+	}
+	value := JITValueDesc{Loc: LocReg, Type: tagInt, Reg: RegRAX, NoHeapPointer: true}
+	ctx.BindReg(RegRAX, &value)
+
+	if got := ctx.AllocReg(); got != RegRAX {
+		t.Fatalf("reclaimed register %d, want %d", got, RegRAX)
+	}
+	ctx.SyncDesc(&value)
+	if value.Loc != LocFPReg || value.Reg != RegX2 {
+		t.Fatalf("scalar overflow home = loc %d reg %d, want XMM register %d", value.Loc, value.Reg, RegX2)
+	}
+	if ctx.MaxSpillOffset != 0 || len(ctx.StackRoots) != 0 {
+		t.Fatalf("register overflow used stack: spill=%d roots=%v", ctx.MaxSpillOffset, ctx.StackRoots)
+	}
+
+	// The allocator returned RAX to its caller. Once that temporary dies, an
+	// integer consumer must recover the original payload without boxing it.
+	ctx.FreeReg(RegRAX)
+	ctx.EnsureDesc(&value)
+	if value.Loc != LocReg || value.Reg != RegRAX {
+		t.Fatalf("restored scalar = loc %d reg %d, want GPR %d", value.Loc, value.Reg, RegRAX)
+	}
+}
+
+func TestJITFreeDescReleasesScalarFPOverflowHome(t *testing.T) {
+	code := make([]byte, 128)
+	start := unsafe.Pointer(&code[0])
+	ctx := &JITContext{
+		Start:      start,
+		Ptr:        start,
+		End:        unsafe.Add(start, len(code)-1),
+		AllRegs:    1 << uint(RegRAX),
+		AllFPRegs:  1 << uint(RegX2),
+		FreeFPRegs: 1 << uint(RegX2),
+		FrameReg:   RegRBP,
+		StackReg:   RegRSP,
+		ScratchReg: RegR11,
+	}
+	value := JITValueDesc{Loc: LocReg, Type: tagInt, Reg: RegRAX, NoHeapPointer: true}
+	ctx.BindReg(RegRAX, &value)
+	staleAlias := value
+	_ = ctx.AllocReg()
+
+	ctx.FreeDesc(&staleAlias)
+	if ctx.FreeFPRegs&(1<<uint(RegX2)) == 0 || ctx.RegOwners[RegX2] != nil {
+		t.Fatal("freeing a stale descriptor alias leaked its FP overflow home")
 	}
 }
 
@@ -301,6 +394,29 @@ func TestJITRegisterHomesFollowArchitectureBank(t *testing.T) {
 	ctx.ReleaseRegisterHomes(homes)
 	if ctx.FreeRegs != all || ctx.ProtectedRegs != 0 {
 		t.Fatalf("released state free=%#x protected=%#x, want free=%#x protected=0", ctx.FreeRegs, ctx.ProtectedRegs, all)
+	}
+}
+
+func TestJITRegisterHomesUseSeparateIntegerAndFloatBanks(t *testing.T) {
+	gpr := uint64(1 << uint(RegR13))
+	fp := uint64(1 << uint(RegX2))
+	ctx := &JITContext{
+		AllRegs: gpr, FreeRegs: gpr,
+		AllFPRegs: fp, FreeFPRegs: fp,
+		RegisterBank:   JITRegisterBank{Registers: [16]Reg{RegR13}, Count: 1},
+		FPRegisterBank: JITRegisterBank{Registers: [16]Reg{RegX2}, Count: 1},
+	}
+	plan := JITRegisterPlan{Slots: [16]JITRegisterSlot{
+		{Color: 0, Width: 1, Cost: 2},
+		{Color: 1, Width: 1, Class: JITRegisterClassFP, Cost: 2},
+	}, Count: 2}
+	homes := ctx.AllocRegisterHomes(plan)
+	if homes.Available != 3 || homes.Registers[0] != RegR13 || homes.Registers[1] != RegX2 {
+		t.Fatalf("mixed register homes = %#v, want R13 and XMM2", homes)
+	}
+	ctx.ReleaseRegisterHomes(homes)
+	if ctx.FreeRegs != gpr || ctx.FreeFPRegs != fp || ctx.ProtectedRegs != 0 {
+		t.Fatalf("released mixed homes: gpr=%#x fp=%#x protected=%#x", ctx.FreeRegs, ctx.FreeFPRegs, ctx.ProtectedRegs)
 	}
 }
 

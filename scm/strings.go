@@ -28,6 +28,7 @@ import "net/url"
 import "strings"
 import "unicode/utf8"
 import crand "crypto/rand"
+import "crypto/md5"
 import "crypto/sha1"
 import "encoding/hex"
 import "crypto/sha256"
@@ -21241,6 +21242,19 @@ func init_strings() {
 			},
 			JITVirtualArgs: true,
 			JITInlineCost:  33,
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		Name: "md5",
+
+		Fn: func(a ...Scmer) Scmer {
+			sum := md5.Sum([]byte(String(a[0])))
+			return NewString(hex.EncodeToString(sum[:]))
+		},
+		Type: &TypeDescriptor{Kind: "func", Description: "computes the MD5 digest of a string, returns a 32-character lowercase hex string",
+			Params: []*TypeDescriptor{{Kind: "string", Label: "str", Description: "input string to hash"}},
+			Return: &TypeDescriptor{Kind: "string"},
+			Const:  true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{

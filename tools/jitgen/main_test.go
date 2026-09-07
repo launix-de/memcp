@@ -250,10 +250,10 @@ func rolling(limit uint64) uint64 {
 	for index := uint64(0); index < limit; index++ {
 		sum += index
 	}
-	return sum
+return sum
 }
 `, "rolling")
-	plan := planLoopPhiRegisters(fn)
+	plan := planLoopPhiRegisters(fn, false)
 	if len(plan.colorByValue) != 2 {
 		t.Fatalf("loop register candidates = %v, want index and sum phis", plan.colorByValue)
 	}
@@ -266,6 +266,30 @@ func rolling(limit uint64) uint64 {
 	}
 	if !seen[0] || !seen[1] {
 		t.Fatalf("interfering loop phis share a color: %v", plan.colorByValue)
+	}
+}
+
+func TestLoopPhiRegisterPlanSeparatesNativeFloatRegisterClass(t *testing.T) {
+	fn := buildTestSSAFunction(t, `package sample
+func rolling(values []float64) float64 {
+	result := 0.0
+	for _, value := range values { result += value }
+	return result
+}
+`, "rolling")
+	generic := planLoopPhiRegisters(fn, false)
+	for name, class := range generic.classByValue {
+		if class != "JITRegisterClassGPR" {
+			t.Fatalf("generic phi %s unexpectedly uses %s", name, class)
+		}
+	}
+	native := planLoopPhiRegisters(fn, true)
+	foundFloat := false
+	for _, class := range native.classByValue {
+		foundFloat = foundFloat || class == "JITRegisterClassFP"
+	}
+	if !foundFloat {
+		t.Fatalf("native plan contains no FP-class phi: %#v", native)
 	}
 }
 
@@ -365,7 +389,7 @@ func last(values []Scmer) Scmer {
 	return result
 }
 `, "last")
-	plan := planLoopPhiRegisters(fn)
+	plan := planLoopPhiRegisters(fn, false)
 	for name, width := range plan.widthByValue {
 		if width == 2 {
 			t.Fatalf("Scmer %s was incorrectly planned as an indivisible pair: %#v", name, plan)
@@ -387,7 +411,7 @@ func lastTwice(left, right []string) int {
 	return leftLength + len(rightResult)
 }
 `, "lastTwice")
-	plan := planLoopPhiRegisters(fn)
+	plan := planLoopPhiRegisters(fn, false)
 	for name, width := range plan.widthByValue {
 		if width == 2 {
 			t.Fatalf("string %s was incorrectly planned as an indivisible pair: %#v", name, plan)
@@ -410,7 +434,7 @@ func nested(rows, columns int) int {
 	return outer + inner
 }
 `, "nested")
-	plan := planLoopPhiRegisters(fn)
+	plan := planLoopPhiRegisters(fn, false)
 	if len(plan.slots) < 2 {
 		t.Fatalf("nested loop plan = %#v, want multiple weighted slots", plan)
 	}
@@ -442,7 +466,7 @@ func rolling(limit int) int {
 					continue
 				}
 				foundCrossBlockPhi = true
-				plan := planLoopPhiRegisters(fn)
+				plan := planLoopPhiRegisters(fn, false)
 				if _, planned := plan.colorByValue[phi.Name()]; !planned {
 					t.Fatalf("branch-updated cursor phi %s was left on the stack: %#v", phi.Name(), plan)
 				}

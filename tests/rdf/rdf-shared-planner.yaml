@@ -10,6 +10,12 @@ metadata:
 setup: []
 
 test_cases:
+  - name: "Standalone RDF does not consume an RDFHP block as ORDER BY"
+    scm: |
+      (rdf_select "SELECT ?child WHERE { ?parent child ?child } ORDER BY ?child BEGIN")
+    expect:
+      error: true
+
   - name: "Basic graph pattern lowers to query-block with relational modifiers"
     scm: |
       (begin
@@ -25,6 +31,47 @@ test_cases:
         (if (not (equal? (count (qb_order ast)) 1)) (fail "ORDER BY missing from query-block"))
         (if (not (rdf_contains (concat (qb_where input)) "equal??")) (fail "join predicate missing"))
         true)
+
+  - name: "Embedded RDF query plans resolve caller prefix definitions"
+    scm: |
+      (begin
+        (rdf_ensure_table "memcp-tests")
+        (define definitions (newsession))
+        (definitions "rdfop" "https://launix.de/rdfop/schema#")
+        (define query (rdf_query
+          "SELECT ?type WHERE { ?type rdfop:paletteVisible true }"))
+        (define planning_session (newsession))
+        (define tx (session "__memcp_tx"))
+        (define formula (rdf_queryplan "memcp-tests" query definitions '()
+          (lambda (_cols _ctx) true)))
+        (define rendered (concat formula))
+        (if (rdf_contains rendered "(definitions rdfop)")
+          (error "rdf shared planner: unresolved caller prefix reached physical plan"))
+        (if (not (rdf_contains rendered "https://launix.de/rdfop/schema#paletteVisible"))
+          (error "rdf shared planner: resolved caller prefix missing from physical plan"))
+        true)
+
+  - name: "Nested RDF query plans retain outer row bindings"
+    scm: |
+      (begin
+        (rdf_ensure_table "memcp-tests")
+        (rdf_insert_triples "memcp-tests" (list
+          (list "urn:test:nested-outer" "urn:test:label" "Outer label")
+          (list "urn:test:nested-inner" "urn:test:value" "Inner value")))
+        (define captured (newsession))
+        (define definitions (newsession))
+        (define outer_query (rdf_query
+          "SELECT ?label WHERE { <urn:test:nested-outer> <urn:test:label> ?label }"))
+        (define inner_query (rdf_query
+          "SELECT ?inner WHERE { <urn:test:nested-inner> <urn:test:value> ?inner }"))
+        (define resultrow (lambda (_row) true))
+        (eval (rdf_queryplan "memcp-tests" outer_query definitions '()
+          (lambda (_outer_cols outer_ctx)
+            (rdf_queryplan "memcp-tests" inner_query definitions outer_ctx
+              (lambda (_inner_cols _inner_ctx)
+                (list (quote captured) "label" (get_assoc outer_ctx "?label")))))))
+        (if (equal? (captured "label") "Outer label") true
+          (error "nested RDF query plan shadowed its outer row binding")))
 
   - name: "Algebra markers are not mistaken for triple patterns"
     scm: |

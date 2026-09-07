@@ -136,7 +136,7 @@ test_cases:
       rows: 1
 
   # ==========================================================
-  # Error queries (must return error, not crash)
+  # Boundary queries (must follow SPARQL solution-mapping semantics, not crash)
   # ==========================================================
 
   - name: "Selecting unbound variable returns error, not crash"
@@ -147,12 +147,14 @@ test_cases:
       @prefix r08: <http://robust08.org/> .
       SELECT ?x, ?unbound WHERE { r08:a r08:b ?x }
     expect:
-      error: true
+      rows: 1
+      data: [{"?x": "http://robust08.org/c", "?unbound": null}]
 
   - name: "Empty WHERE clause returns error, not crash"
     sparql: "SELECT ?x WHERE { }"
     expect:
-      error: true
+      rows: 1
+      data: [{"?x": null}]
 
   - name: "Malformed TTL does not crash load endpoint"
     ttl_data: "this is not valid TTL @@@ {{{ }}} ."

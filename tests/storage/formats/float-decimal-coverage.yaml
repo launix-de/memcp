@@ -162,6 +162,13 @@ test_cases:
       data:
         - total: 3.5801
 
+  - name: "Float: fractional aggregate expression preserves precision"
+    sql: "SELECT SUM(sample * 1.0001) AS total FROM fdc_decimal_expr"
+    expect:
+      rows: 1
+      data:
+        - total: 3.58045801
+
   - name: "Decimal: MIN"
     sql: "SELECT MIN(price) AS m FROM fdc_decimal"
     expect:

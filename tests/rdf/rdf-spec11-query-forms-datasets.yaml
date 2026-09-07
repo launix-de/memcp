@@ -12,7 +12,6 @@ setup: []
 
 test_cases:
   - name: "SPARQL 1.1 15.3 ORDER BY accepts expression conditions"
-    noncritical: true
     ttl_data: |
       @prefix ex: <http://spec11-order-expression.example/> . ex:a ex:name "b" . ex:b ex:name "A" .
     sparql: |
@@ -23,7 +22,6 @@ test_cases:
       data: [{"?name": "A"}, {"?name": "b"}]
 
   - name: "SPARQL 1.1 15.3 ORDER BY supports multiple ASC and DESC conditions"
-    noncritical: true
     ttl_data: |
       @prefix ex: <http://spec11-order-multiple.example/> .
       ex:a ex:group "A" ; ex:rank 1 . ex:b ex:group "A" ; ex:rank 2 . ex:c ex:group "B" ; ex:rank 1 .
@@ -39,38 +37,32 @@ test_cases:
         - {"?group": "B", "?rank": 1}
 
   - name: "SPARQL 1.1 15.4 projection expressions expose aliases"
-    noncritical: true
     sparql: 'SELECT (CONCAT("A", "B") AS ?value) WHERE {}'
     expect: {rows: 1, data: [{"?value": "AB"}]}
 
   - name: "SPARQL 1.1 15.5 DISTINCT removes duplicate solution mappings"
-    noncritical: true
     ttl_data: |
       @prefix ex: <http://spec11-distinct.example/> . ex:a ex:value "same" . ex:b ex:value "same" .
     sparql: 'PREFIX ex: <http://spec11-distinct.example/> SELECT DISTINCT ?value WHERE { ?s ex:value ?value }'
     expect: {rows: 1}
 
   - name: "SPARQL 1.1 15.6 REDUCED permits duplicate elimination"
-    noncritical: true
     ttl_data: |
       @prefix ex: <http://spec11-reduced.example/> . ex:a ex:value "same" . ex:b ex:value "same" .
     sparql: 'PREFIX ex: <http://spec11-reduced.example/> SELECT REDUCED ?value WHERE { ?s ex:value ?value }'
     expect: {rows: 1}
 
   - name: "SPARQL 1.1 15.7 OFFSET and LIMIT slice after ordering"
-    noncritical: true
     ttl_data: |
       @prefix ex: <http://spec11-slice.example/> . ex:a ex:rank 1 . ex:b ex:rank 2 . ex:c ex:rank 3 .
     sparql: 'PREFIX ex: <http://spec11-slice.example/> SELECT ?rank WHERE { ?s ex:rank ?rank } ORDER BY ?rank OFFSET 1 LIMIT 1'
     expect: {rows: 1, data: [{"?rank": 2}]}
 
   - name: "SPARQL 1.1 16.1 SELECT permits an omitted WHERE keyword"
-    noncritical: true
     sparql: 'SELECT ("yes" AS ?value) { }'
     expect: {rows: 1, data: [{"?value": "yes"}]}
 
   - name: "SPARQL 1.1 16.2 CONSTRUCT template applies solution modifiers"
-    noncritical: true
     ttl_data: |
       @prefix ex: <http://spec11-construct-modifier.example/> . ex:a ex:rank 1 . ex:b ex:rank 2 .
     sparql: |
@@ -80,75 +72,64 @@ test_cases:
     expect: {rows: 1}
 
   - name: "SPARQL 1.1 16.2 CONSTRUCT WHERE shorthand"
-    noncritical: true
     ttl_data: |
       @prefix ex: <http://spec11-construct-short.example/> . ex:item ex:value "yes" .
     sparql: 'PREFIX ex: <http://spec11-construct-short.example/> CONSTRUCT WHERE { ?s ex:value ?o }'
     expect: {rows: 1}
 
   - name: "SPARQL 1.1 16.3 ASK accepts an RDF dataset clause"
-    noncritical: true
     sparql: |
       PREFIX ex: <http://spec11-ask-dataset.example/>
       INSERT DATA { GRAPH ex:g { ex:s ex:p ex:o } }
     expect: {rows: 0}
 
   - name: "SPARQL 1.1 16.3 ASK evaluates FROM datasets"
-    noncritical: true
     sparql: 'PREFIX ex: <http://spec11-ask-dataset.example/> ASK FROM ex:g WHERE { ex:s ex:p ex:o }'
     expect: {rows: 1, data: [{"?ask": true}]}
 
   - name: "SPARQL 1.1 16.4 DESCRIBE accepts an IRI"
-    noncritical: true
     ttl_data: |
       @prefix ex: <http://spec11-describe-iri.example/> . ex:item ex:name "Item" .
     sparql: 'PREFIX ex: <http://spec11-describe-iri.example/> DESCRIBE ex:item'
     expect: {rows: 1}
 
   - name: "SPARQL 1.1 16.4 DESCRIBE accepts variables and WHERE"
-    noncritical: true
     ttl_data: |
       @prefix ex: <http://spec11-describe-var.example/> . ex:item ex:name "Item" .
     sparql: 'PREFIX ex: <http://spec11-describe-var.example/> DESCRIBE ?s WHERE { ?s ex:name "Item" }'
     expect: {rows: 1}
 
   - name: "SPARQL 1.1 16.4 DESCRIBE star describes every result resource"
-    noncritical: true
     ttl_data: |
       @prefix ex: <http://spec11-describe-star.example/> . ex:a ex:name "A" . ex:b ex:name "B" .
     sparql: 'PREFIX ex: <http://spec11-describe-star.example/> DESCRIBE * WHERE { ?s ex:name ?name }'
     expect: {rows: 2}
 
   - name: "SPARQL 1.1 13 multiple FROM graphs form one RDF merge"
-    noncritical: true
     sparql: |
       PREFIX ex: <http://spec11-dataset-merge.example/>
       INSERT DATA { GRAPH ex:g1 { ex:s ex:p ex:o } }
     expect: {rows: 0}
 
   - name: "SPARQL 1.1 13 prepare second graph for RDF merge"
-    noncritical: true
     sparql: |
       PREFIX ex: <http://spec11-dataset-merge.example/>
       INSERT DATA { GRAPH ex:g2 { ex:s ex:p ex:o . ex:x ex:p ex:y } }
     expect: {rows: 0}
 
   - name: "SPARQL 1.1 13 RDF merge deduplicates equal triples"
-    noncritical: true
     sparql: |
       PREFIX ex: <http://spec11-dataset-merge.example/>
       SELECT ?s FROM ex:g1 FROM ex:g2 WHERE { ?s ex:p ?o }
     expect: {rows: 2}
 
   - name: "SPARQL 1.1 13 FROM NAMED exposes only declared named graphs"
-    noncritical: true
     sparql: |
       PREFIX ex: <http://spec11-dataset-merge.example/>
       SELECT ?g ?s FROM NAMED ex:g2 WHERE { GRAPH ?g { ?s ex:p ?o } }
     expect: {rows: 2}
 
   - name: "SPARQL 1.1 14 SERVICE invokes a remote endpoint"
-    noncritical: true
     sparql: |
       SELECT ?s WHERE {
         SERVICE <http://127.0.0.1:1/sparql> { ?s ?p ?o }
@@ -156,7 +137,6 @@ test_cases:
     expect: {error: true}
 
   - name: "SPARQL 1.1 14 SERVICE SILENT suppresses endpoint failure"
-    noncritical: true
     sparql: |
       SELECT ("survived" AS ?value) WHERE {
         SERVICE SILENT <http://127.0.0.1:1/sparql> { ?s ?p ?o }
@@ -164,7 +144,6 @@ test_cases:
     expect: {rows: 1, data: [{"?value": "survived"}]}
 
   - name: "SPARQL Results JSON preserves datatype metadata"
-    noncritical: true
     headers: {Accept: "application/sparql-results+json"}
     sparql: |
       PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
@@ -172,14 +151,18 @@ test_cases:
     expect:
       rows: 1
       contains: '"datatype":"http://www.w3.org/2001/XMLSchema#integer"'
+      result_contains: '"datatype":"http://www.w3.org/2001/XMLSchema#integer"'
 
   - name: "SPARQL Results JSON omits unbound variables"
-    noncritical: true
     headers: {Accept: "application/sparql-results+json"}
     sparql: 'SELECT ?missing ("yes" AS ?value) WHERE {}'
     expect:
       rows: 1
       contains: '"value"'
-      not_contains: '"missing"'
+      not_contains: '"missing":{"type"'
+      result_contains: '"value"'
+      result_occurrences:
+        - text: '"missing"'
+          count: 1
 
 cleanup: []

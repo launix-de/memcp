@@ -67,9 +67,16 @@ type jitParserNode struct {
 	regex        *jitRegexProgram
 	skipWS       bool
 	ignoreResult bool
-	noMemo       bool // repeat body references skip the memo entry check
-	fenceMemo    bool // markFenceableRepeats: also fence+compact the memo table
-	description  string
+	// skipBreakBefore/After: this terminal's literal begins / ends with a
+	// non-word byte, so the word-boundary check on that side (atBreak: is there
+	// a boundary between the neighbouring char and this token's edge?) is
+	// always satisfied - a punctuation / operator atom like "," "(" "->" "::".
+	// Only set for atoms; a regex terminal keeps both checks.
+	skipBreakBefore bool
+	skipBreakAfter  bool
+	noMemo          bool // repeat body references skip the memo entry check
+	fenceMemo       bool // markFenceableRepeats: also fence+compact the memo table
+	description     string
 	// Accumulation form of * / + : instead of collecting item values into a
 	// slice (pushMark/mergeMark -> make+copy per repeat), run accInit() once,
 	// acc = accStep(acc, itemvalue) per accepted item, accFinish(acc) once as
@@ -158,6 +165,13 @@ func jitUnwrapParserSyntax(value Scmer) Scmer {
 		}
 	}
 	return value
+}
+
+// jitParserWordByte matches atBreak's ASCII word class ([0-9A-Za-z_], = the
+// ASCII members of unicode.N | unicode.L | unicode.Pc). A non-ASCII byte is
+// conservatively "word" so a multi-byte atom edge keeps its boundary check.
+func jitParserWordByte(b byte) bool {
+	return b == '_' || (b >= '0' && b <= '9') || (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z') || b >= 0x80
 }
 
 func jitBuildParserProgram(parser *ScmParser) *jitParserProgram {
@@ -560,12 +574,14 @@ func (builder *jitParserBuilder) buildNode(value Scmer, outer *Env, jitOuter *JI
 	case tagString:
 		literal := value.String()
 		return &jitParserNode{
-			kind:         jitParserAtom,
-			value:        value,
-			regex:        jitCompileRegexProgram(regexp.MustCompile("^(?:" + regexp.QuoteMeta(literal) + ")")),
-			skipWS:       true,
-			ignoreResult: ignoreResult,
-			description:  literal,
+			kind:            jitParserAtom,
+			value:           value,
+			regex:           jitCompileRegexProgram(regexp.MustCompile("^(?:" + regexp.QuoteMeta(literal) + ")")),
+			skipWS:          true,
+			skipBreakBefore: len(literal) > 0 && !jitParserWordByte(literal[0]),
+			skipBreakAfter:  len(literal) > 0 && !jitParserWordByte(literal[len(literal)-1]),
+			ignoreResult:    ignoreResult,
+			description:     literal,
 		}
 	case tagSymbol:
 		switch value.Symbol() {
@@ -656,8 +672,11 @@ func (builder *jitParserBuilder) buildNode(value Scmer, outer *Env, jitOuter *JI
 				result = items[4]
 			}
 			return &jitParserNode{kind: jitParserAtom, value: result,
-				regex:  jitCompileRegexProgram(regexp.MustCompile("^(?:" + pattern + ")")),
-				skipWS: jitParserBool(items, 3, true), ignoreResult: ignoreResult, description: literal}
+				regex:           jitCompileRegexProgram(regexp.MustCompile("^(?:" + pattern + ")")),
+				skipWS:          jitParserBool(items, 3, true),
+				skipBreakBefore: len(literal) > 0 && !jitParserWordByte(literal[0]),
+				skipBreakAfter:  len(literal) > 0 && !jitParserWordByte(literal[len(literal)-1]),
+				ignoreResult:    ignoreResult, description: literal}
 		case "regex":
 			pattern := items[1].String()
 			if jitParserBool(items, 2, false) {

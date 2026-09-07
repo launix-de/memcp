@@ -94,6 +94,95 @@ func TestJITFusedMappedSumExecutesWithStackPhiHome(t *testing.T) {
 	}
 }
 
+func TestOptimizeUsesNativeFloatSumOnlyWhenRepresentationIsProven(t *testing.T) {
+	tests := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{
+			name:   "fractional arithmetic",
+			source: `(lambda (values) (reduce values (lambda (total value) (+ total (* value 1.0001))) 0.0))`,
+			want:   "sum_float_map",
+		},
+		{
+			name:   "integer compatible arithmetic stays generic",
+			source: `(lambda (values) (reduce values (lambda (total value) (+ total (* value 2))) 0.0))`,
+			want:   "sum_map",
+		},
+		{
+			name:   "callback observing accumulator stays generic",
+			source: `(lambda (values) (reduce values (lambda (total value) (+ total (* (+ value total) 1.5))) 0.0))`,
+			want:   "sum_map",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			optimized, env := optimizeListPipeline(t, tc.source)
+			serialized := serializedTestExpr(t, env, optimized)
+			if !strings.Contains(serialized, tc.want) {
+				t.Fatalf("reducer did not select %s: %s", tc.want, serialized)
+			}
+		})
+	}
+}
+
+func TestJITNativeFloatSumPreservesNumericAndNilSemantics(t *testing.T) {
+	if !jitEnabled {
+		t.Skip("requires GOEXPERIMENT=jit")
+	}
+	optimized, env := optimizeListPipeline(t, `(lambda (values)
+		(reduce values (lambda (total value) (+ total (* value 1.5))) 0.0))`)
+	compiled := jitCompile(Eval(optimized, env))
+	if compiled.Proc() == nil || compiled.Proc().Compiled == nil {
+		t.Fatal("native float sum did not compile")
+	}
+	if got := Apply(compiled, NewSlice([]Scmer{NewFloat(1.25), NewInt(2)})); !Equal(got, NewFloat(4.875)) {
+		t.Fatalf("native float sum = %s, want 4.875", String(got))
+	}
+	if got := Apply(compiled, NewSlice([]Scmer{NewFloat(1.25), NewNil(), NewFloat(2)})); !got.IsNil() {
+		t.Fatalf("native float sum with nil = %s, want nil", String(got))
+	}
+}
+
+func benchmarkJITFloatSum(b *testing.B, source string) {
+	if !jitEnabled {
+		b.Skip("requires GOEXPERIMENT=jit")
+	}
+	const count = 4096
+	values := make([]Scmer, count)
+	want := 0.0
+	for index := range values {
+		value := float64(index) + 0.25
+		values[index] = NewFloat(value)
+		want += value * 1.0001
+	}
+	input := NewSlice(values)
+	optimized, env := optimizeListPipeline(b, source)
+	compiled := jitCompile(Eval(optimized, env))
+	if compiled.GetTag() != tagProc || compiled.Proc().Compiled == nil {
+		b.Fatal("float pipeline did not compile")
+	}
+	if got := Apply(compiled, input).Float(); got != want {
+		b.Fatalf("float pipeline = %g, want %g", got, want)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for index := 0; index < b.N; index++ {
+		jitListBenchmarkSink = Apply(compiled, input)
+	}
+}
+
+func BenchmarkJITGenericFloatSum(b *testing.B) {
+	benchmarkJITFloatSum(b, `(lambda (values)
+		(sum_map values (lambda (total value) (* value 1.0001)) 0.0))`)
+}
+
+func BenchmarkJITNativeFloatSum(b *testing.B) {
+	benchmarkJITFloatSum(b, `(lambda (values)
+		(reduce values (lambda (total value) (+ total (* value 1.0001))) 0.0))`)
+}
+
 func BenchmarkJITFusedReduceFilterMap(b *testing.B) {
 	if !jitEnabled {
 		b.Skip("requires GOEXPERIMENT=jit")
