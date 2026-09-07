@@ -528,7 +528,7 @@ test_cases:
   # SPARQL unbound projection semantics
   # ==========================================================
 
-  - name: "SPARQL SELECT permits an unbound projected variable"
+  - name: "SPARQL error: SELECT unbound variable"
     ttl_data: |
       @prefix te1: <http://teste1.org/> .
       te1:a te1:b te1:c .
@@ -539,7 +539,7 @@ test_cases:
       rows: 1
       data: [{"?x": null}]
 
-  - name: "SPARQL SELECT preserves bound and unbound projected variables"
+  - name: "SPARQL error: SELECT unbound variable among bound"
     ttl_data: |
       @prefix te2: <http://teste2.org/> .
       te2:a te2:b te2:c .
@@ -550,7 +550,7 @@ test_cases:
       rows: 1
       data: [{"?s": "http://teste2.org/a", "?unbound": null}]
 
-  - name: "SPARQL SELECT permits all projected variables to be unbound"
+  - name: "SPARQL error: all SELECT vars unbound (no WHERE patterns)"
     sparql: "SELECT ?x, ?y WHERE { }"
     expect:
       rows: 1
@@ -575,7 +575,7 @@ test_cases:
     expect:
       error: true
 
-  - name: "SPARQL permits the WHERE keyword to be omitted"
+  - name: "SPARQL error: missing WHERE clause"
     sparql: |
       SELECT ?name {
         ?person <http://example.org/name> ?name .

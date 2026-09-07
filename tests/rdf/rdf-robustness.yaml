@@ -139,7 +139,7 @@ test_cases:
   # Boundary queries (must follow SPARQL solution-mapping semantics, not crash)
   # ==========================================================
 
-  - name: "Selecting an unbound variable returns an unbound binding, not an error"
+  - name: "Selecting unbound variable returns error, not crash"
     ttl_data: |
       @prefix r08: <http://robust08.org/> .
       r08:a r08:b r08:c .
@@ -150,7 +150,7 @@ test_cases:
       rows: 1
       data: [{"?x": "http://robust08.org/c", "?unbound": null}]
 
-  - name: "Empty WHERE clause has the identity solution mapping"
+  - name: "Empty WHERE clause returns error, not crash"
     sparql: "SELECT ?x WHERE { }"
     expect:
       rows: 1
