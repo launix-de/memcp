@@ -211,6 +211,35 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 			res_lock.Unlock()
 			return NewString("ok")
 		}),
+		NewString("proxy"), NewFunc(func(a ...Scmer) Scmer {
+			if len(a) != 1 {
+				panic("response proxy expects exactly one target URL")
+			}
+			upstreamReq, err := http.NewRequestWithContext(req.Context(), req.Method, a[0].String(), req.Body)
+			if err != nil {
+				panic(err)
+			}
+			upstreamReq.Header = req.Header.Clone()
+			upstreamResp, err := http.DefaultClient.Do(upstreamReq)
+			if err != nil {
+				panic(err)
+			}
+			defer upstreamResp.Body.Close()
+
+			res_lock.Lock()
+			defer res_lock.Unlock()
+			for key, values := range upstreamResp.Header {
+				res.Header().Del(key)
+				for _, value := range values {
+					res.Header().Add(key, value)
+				}
+			}
+			res.WriteHeader(upstreamResp.StatusCode)
+			if _, err := io.Copy(res, upstreamResp.Body); err != nil {
+				panic(err)
+			}
+			return NewString("ok")
+		}),
 		NewString("jsonl"), NewFunc(func(a ...Scmer) Scmer {
 			// print json line (only assoc)
 			res_lock.Lock()

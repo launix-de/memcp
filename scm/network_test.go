@@ -18,10 +18,51 @@ Copyright (C) 2026  Carl-Philip Hänsch
 package scm
 
 import (
+	"io"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 )
+
+func TestHTTPResponseProxyForwardsStreamingRequestAndResponse(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.Method != http.MethodPost || string(body) != `{"question":"test"}` {
+			t.Fatalf("unexpected proxied request: %s %q", r.Method, body)
+		}
+		if got := r.Header.Get("Content-Type"); got != "application/json" {
+			t.Fatalf("expected content type to be forwarded, got %q", got)
+		}
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(w, "{\"answer\":\"ok\"}\n")
+	}))
+	defer upstream.Close()
+
+	server := &HttpServer{callback: NewFunc(func(a ...Scmer) Scmer {
+		proxy := Apply(a[1], NewString("proxy"))
+		return Apply(proxy, NewString(upstream.URL+"/api/chat"))
+	})}
+	req := httptest.NewRequest(http.MethodPost, "/ollama-chat", strings.NewReader(`{"question":"test"}`))
+	req.Header.Set("Content-Type", "application/json")
+	res := httptest.NewRecorder()
+
+	server.ServeHTTP(res, req)
+
+	if res.Code != http.StatusCreated {
+		t.Fatalf("expected upstream status %d, got %d", http.StatusCreated, res.Code)
+	}
+	if got := res.Header().Get("Content-Type"); got != "application/x-ndjson" {
+		t.Fatalf("expected upstream content type, got %q", got)
+	}
+	if got := res.Body.String(); got != "{\"answer\":\"ok\"}\n" {
+		t.Fatalf("unexpected upstream body %q", got)
+	}
+}
 
 func TestHTTPSQLBodyUpdatesProcesslistInfo(t *testing.T) {
 	const query = "SELECT SLEEP(1)"
