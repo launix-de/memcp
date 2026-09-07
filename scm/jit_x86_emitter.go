@@ -2536,11 +2536,11 @@ func (ctx *JITContext) emitFuncValueCall(fn, argslice, result JITValueDesc, kind
 	// Stage the slice and function value as one parallel move. The allocator may
 	// place the function value in RAX/RBX or either slice word in RDX; sequential
 	// moves would then destroy a source before its final consumer reads it.
-	ctx.emitParallelRegMoves([]jitRegMove{
-		{dst: RegRAX, src: argslice.Reg},
-		{dst: RegRBX, src: argslice.Reg2},
-		{dst: RegRDX, src: fn.Reg},
-	})
+	var moves jitParallelRegMoveBatch
+	moves.add(RegRAX, argslice.Reg)
+	moves.add(RegRBX, argslice.Reg2)
+	moves.add(RegRDX, fn.Reg)
+	ctx.emitParallelRegMoveBatch(&moves)
 	ctx.EmitMovRegReg(RegRCX, RegRBX)
 	ctx.EmitMovRegMem(RegR11, RegRDX, 0)
 

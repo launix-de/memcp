@@ -2975,7 +2975,7 @@ func (s *StorageInt) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 		ctx.FreeDesc(&d155)
 		if ps.General {
 			ctx.SyncDesc(&d153)
-			if d153.Loc == scm.LocReg {
+			if d153.Loc == scm.LocReg || d153.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d153.Reg)
 			} else if d153.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d153.Reg)
@@ -2996,7 +2996,7 @@ func (s *StorageInt) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 			} else {
 				ctx.EmitStoreToStack(scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(0)}, int32(bbs[19].PhiBase)+int32(16))
 			}
-			if d153.Loc == scm.LocReg {
+			if d153.Loc == scm.LocReg || d153.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d153.Reg)
 			} else if d153.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d153.Reg)
@@ -7211,14 +7211,14 @@ func (s *StorageInt) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 		}
 		if ps.General {
 			ctx.SyncDesc(&d652)
-			if d652.Loc == scm.LocReg {
+			if d652.Loc == scm.LocReg || d652.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d652.Reg)
 			} else if d652.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d652.Reg)
 				ctx.ProtectReg(d652.Reg2)
 			}
 			ctx.SyncDesc(&d653)
-			if d653.Loc == scm.LocReg {
+			if d653.Loc == scm.LocReg || d653.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d653.Reg)
 			} else if d653.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d653.Reg)
@@ -7244,13 +7244,13 @@ func (s *StorageInt) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 			} else {
 				ctx.EmitStoreToStack(d655, int32(bbs[10].PhiBase)+int32(16))
 			}
-			if d652.Loc == scm.LocReg {
+			if d652.Loc == scm.LocReg || d652.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d652.Reg)
 			} else if d652.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d652.Reg)
 				ctx.UnprotectReg(d652.Reg2)
 			}
-			if d653.Loc == scm.LocReg {
+			if d653.Loc == scm.LocReg || d653.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d653.Reg)
 			} else if d653.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d653.Reg)
@@ -12535,14 +12535,14 @@ func (s *StorageInt) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 		}
 		if ps.General {
 			ctx.SyncDesc(&d1208)
-			if d1208.Loc == scm.LocReg {
+			if d1208.Loc == scm.LocReg || d1208.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d1208.Reg)
 			} else if d1208.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d1208.Reg)
 				ctx.ProtectReg(d1208.Reg2)
 			}
 			ctx.SyncDesc(&d1209)
-			if d1209.Loc == scm.LocReg {
+			if d1209.Loc == scm.LocReg || d1209.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d1209.Reg)
 			} else if d1209.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d1209.Reg)
@@ -12568,13 +12568,13 @@ func (s *StorageInt) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 			} else {
 				ctx.EmitStoreToStack(d1211, int32(bbs[19].PhiBase)+int32(16))
 			}
-			if d1208.Loc == scm.LocReg {
+			if d1208.Loc == scm.LocReg || d1208.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d1208.Reg)
 			} else if d1208.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d1208.Reg)
 				ctx.UnprotectReg(d1208.Reg2)
 			}
-			if d1209.Loc == scm.LocReg {
+			if d1209.Loc == scm.LocReg || d1209.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d1209.Reg)
 			} else if d1209.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d1209.Reg)
@@ -20470,14 +20470,14 @@ func (s *StorageInt) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 		}
 		if ps.General {
 			ctx.SyncDesc(&d391)
-			if d391.Loc == scm.LocReg {
+			if d391.Loc == scm.LocReg || d391.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d391.Reg)
 			} else if d391.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d391.Reg)
 				ctx.ProtectReg(d391.Reg2)
 			}
 			ctx.SyncDesc(&d617)
-			if d617.Loc == scm.LocReg {
+			if d617.Loc == scm.LocReg || d617.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d617.Reg)
 			} else if d617.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d617.Reg)
@@ -20503,13 +20503,13 @@ func (s *StorageInt) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 			} else {
 				ctx.EmitStoreToStack(d619, int32(bbs[10].PhiBase)+int32(16))
 			}
-			if d391.Loc == scm.LocReg {
+			if d391.Loc == scm.LocReg || d391.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d391.Reg)
 			} else if d391.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d391.Reg)
 				ctx.UnprotectReg(d391.Reg2)
 			}
-			if d617.Loc == scm.LocReg {
+			if d617.Loc == scm.LocReg || d617.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d617.Reg)
 			} else if d617.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d617.Reg)
@@ -25610,14 +25610,14 @@ func (s *StorageInt) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 		}
 		if ps.General {
 			ctx.SyncDesc(&d1146)
-			if d1146.Loc == scm.LocReg {
+			if d1146.Loc == scm.LocReg || d1146.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d1146.Reg)
 			} else if d1146.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d1146.Reg)
 				ctx.ProtectReg(d1146.Reg2)
 			}
 			ctx.SyncDesc(&d1147)
-			if d1147.Loc == scm.LocReg {
+			if d1147.Loc == scm.LocReg || d1147.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d1147.Reg)
 			} else if d1147.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d1147.Reg)
@@ -25643,13 +25643,13 @@ func (s *StorageInt) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 			} else {
 				ctx.EmitStoreToStack(d1149, int32(bbs[17].PhiBase)+int32(16))
 			}
-			if d1146.Loc == scm.LocReg {
+			if d1146.Loc == scm.LocReg || d1146.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d1146.Reg)
 			} else if d1146.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d1146.Reg)
 				ctx.UnprotectReg(d1146.Reg2)
 			}
-			if d1147.Loc == scm.LocReg {
+			if d1147.Loc == scm.LocReg || d1147.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d1147.Reg)
 			} else if d1147.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d1147.Reg)
@@ -29547,14 +29547,14 @@ func (s *StorageFloat) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, t
 		}
 		if ps.General {
 			ctx.SyncDesc(&d155)
-			if d155.Loc == scm.LocReg {
+			if d155.Loc == scm.LocReg || d155.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d155.Reg)
 			} else if d155.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d155.Reg)
 				ctx.ProtectReg(d155.Reg2)
 			}
 			ctx.SyncDesc(&d156)
-			if d156.Loc == scm.LocReg {
+			if d156.Loc == scm.LocReg || d156.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d156.Reg)
 			} else if d156.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d156.Reg)
@@ -29580,13 +29580,13 @@ func (s *StorageFloat) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, t
 			} else {
 				ctx.EmitStoreToStack(d158, int32(bbs[3].PhiBase)+int32(16))
 			}
-			if d155.Loc == scm.LocReg {
+			if d155.Loc == scm.LocReg || d155.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d155.Reg)
 			} else if d155.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d155.Reg)
 				ctx.UnprotectReg(d155.Reg2)
 			}
-			if d156.Loc == scm.LocReg {
+			if d156.Loc == scm.LocReg || d156.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d156.Reg)
 			} else if d156.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d156.Reg)
@@ -31681,14 +31681,14 @@ func (s *StorageFloat) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target,
 		}
 		if ps.General {
 			ctx.SyncDesc(&d160)
-			if d160.Loc == scm.LocReg {
+			if d160.Loc == scm.LocReg || d160.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d160.Reg)
 			} else if d160.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d160.Reg)
 				ctx.ProtectReg(d160.Reg2)
 			}
 			ctx.SyncDesc(&d161)
-			if d161.Loc == scm.LocReg {
+			if d161.Loc == scm.LocReg || d161.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d161.Reg)
 			} else if d161.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d161.Reg)
@@ -31714,13 +31714,13 @@ func (s *StorageFloat) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target,
 			} else {
 				ctx.EmitStoreToStack(d163, int32(bbs[3].PhiBase)+int32(16))
 			}
-			if d160.Loc == scm.LocReg {
+			if d160.Loc == scm.LocReg || d160.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d160.Reg)
 			} else if d160.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d160.Reg)
 				ctx.UnprotectReg(d160.Reg2)
 			}
-			if d161.Loc == scm.LocReg {
+			if d161.Loc == scm.LocReg || d161.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d161.Reg)
 			} else if d161.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d161.Reg)
@@ -33389,7 +33389,7 @@ func (s *StorageString) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 		ctx.FreeDesc(&d128)
 		if ps.General {
 			ctx.SyncDesc(&d75)
-			if d75.Loc == scm.LocReg {
+			if d75.Loc == scm.LocReg || d75.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d75.Reg)
 			} else if d75.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d75.Reg)
@@ -33405,7 +33405,7 @@ func (s *StorageString) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 			} else {
 				ctx.EmitStoreToStack(d132, int32(bbs[5].PhiBase)+int32(0))
 			}
-			if d75.Loc == scm.LocReg {
+			if d75.Loc == scm.LocReg || d75.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d75.Reg)
 			} else if d75.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d75.Reg)
@@ -35711,14 +35711,14 @@ func (s *StorageEnum) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, ta
 		}
 		if ps.General {
 			ctx.SyncDesc(&d98)
-			if d98.Loc == scm.LocReg {
+			if d98.Loc == scm.LocReg || d98.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d98.Reg)
 			} else if d98.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d98.Reg)
 				ctx.ProtectReg(d98.Reg2)
 			}
 			ctx.SyncDesc(&d99)
-			if d99.Loc == scm.LocReg {
+			if d99.Loc == scm.LocReg || d99.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d99.Reg)
 			} else if d99.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d99.Reg)
@@ -35744,13 +35744,13 @@ func (s *StorageEnum) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, ta
 			} else {
 				ctx.EmitStoreToStack(d101, int32(bbs[3].PhiBase)+int32(16))
 			}
-			if d98.Loc == scm.LocReg {
+			if d98.Loc == scm.LocReg || d98.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d98.Reg)
 			} else if d98.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d98.Reg)
 				ctx.UnprotectReg(d98.Reg2)
 			}
-			if d99.Loc == scm.LocReg {
+			if d99.Loc == scm.LocReg || d99.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d99.Reg)
 			} else if d99.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d99.Reg)
@@ -37112,14 +37112,14 @@ func (s *StorageEnum) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, 
 		}
 		if ps.General {
 			ctx.SyncDesc(&d45)
-			if d45.Loc == scm.LocReg {
+			if d45.Loc == scm.LocReg || d45.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d45.Reg)
 			} else if d45.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d45.Reg)
 				ctx.ProtectReg(d45.Reg2)
 			}
 			ctx.SyncDesc(&d104)
-			if d104.Loc == scm.LocReg {
+			if d104.Loc == scm.LocReg || d104.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d104.Reg)
 			} else if d104.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d104.Reg)
@@ -37145,13 +37145,13 @@ func (s *StorageEnum) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, 
 			} else {
 				ctx.EmitStoreToStack(d106, int32(bbs[3].PhiBase)+int32(16))
 			}
-			if d45.Loc == scm.LocReg {
+			if d45.Loc == scm.LocReg || d45.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d45.Reg)
 			} else if d45.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d45.Reg)
 				ctx.UnprotectReg(d45.Reg2)
 			}
-			if d104.Loc == scm.LocReg {
+			if d104.Loc == scm.LocReg || d104.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d104.Reg)
 			} else if d104.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d104.Reg)
@@ -39110,7 +39110,7 @@ func (s *StorageSparse) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 		ctx.StabilizeDescForControlFlow(&d133)
 		if ps.General {
 			ctx.SyncDesc(&d133)
-			if d133.Loc == scm.LocReg {
+			if d133.Loc == scm.LocReg || d133.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d133.Reg)
 			} else if d133.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d133.Reg)
@@ -39143,7 +39143,7 @@ func (s *StorageSparse) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 			} else {
 				ctx.EmitStoreToStack(scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagBool, Imm: scm.NewInt(0)}, int32(bbs[5].PhiBase)+int32(32))
 			}
-			if d133.Loc == scm.LocReg {
+			if d133.Loc == scm.LocReg || d133.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d133.Reg)
 			} else if d133.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d133.Reg)
@@ -40247,21 +40247,21 @@ func (s *StorageSparse) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 		ctx.FreeDesc(&recid)
 		if ps.General {
 			ctx.SyncDesc(&d11)
-			if d11.Loc == scm.LocReg {
+			if d11.Loc == scm.LocReg || d11.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d11.Reg)
 			} else if d11.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d11.Reg)
 				ctx.ProtectReg(d11.Reg2)
 			}
 			ctx.SyncDesc(&d12)
-			if d12.Loc == scm.LocReg {
+			if d12.Loc == scm.LocReg || d12.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d12.Reg)
 			} else if d12.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d12.Reg)
 				ctx.ProtectReg(d12.Reg2)
 			}
 			ctx.SyncDesc(&d13)
-			if d13.Loc == scm.LocReg {
+			if d13.Loc == scm.LocReg || d13.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d13.Reg)
 			} else if d13.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d13.Reg)
@@ -40311,19 +40311,19 @@ func (s *StorageSparse) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 			} else {
 				ctx.EmitStoreToStack(d257, int32(bbs[8].PhiBase)+int32(32))
 			}
-			if d11.Loc == scm.LocReg {
+			if d11.Loc == scm.LocReg || d11.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d11.Reg)
 			} else if d11.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d11.Reg)
 				ctx.UnprotectReg(d11.Reg2)
 			}
-			if d12.Loc == scm.LocReg {
+			if d12.Loc == scm.LocReg || d12.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d12.Reg)
 			} else if d12.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d12.Reg)
 				ctx.UnprotectReg(d12.Reg2)
 			}
-			if d13.Loc == scm.LocReg {
+			if d13.Loc == scm.LocReg || d13.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d13.Reg)
 			} else if d13.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d13.Reg)
@@ -40932,14 +40932,14 @@ func (s *StorageSparse) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 			if d265.Imm.Bool() {
 				if ps.General {
 					ctx.SyncDesc(&d17)
-					if d17.Loc == scm.LocReg {
+					if d17.Loc == scm.LocReg || d17.Loc == scm.LocFPReg {
 						ctx.ProtectReg(d17.Reg)
 					} else if d17.Loc == scm.LocRegPair {
 						ctx.ProtectReg(d17.Reg)
 						ctx.ProtectReg(d17.Reg2)
 					}
 					ctx.SyncDesc(&d18)
-					if d18.Loc == scm.LocReg {
+					if d18.Loc == scm.LocReg || d18.Loc == scm.LocFPReg {
 						ctx.ProtectReg(d18.Reg)
 					} else if d18.Loc == scm.LocRegPair {
 						ctx.ProtectReg(d18.Reg)
@@ -40964,13 +40964,13 @@ func (s *StorageSparse) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 					}
 					ctx.EnsureDesc(&d268)
 					ctx.EmitStoreToStack(d268, int32(bbs[11].PhiBase)+int32(16))
-					if d17.Loc == scm.LocReg {
+					if d17.Loc == scm.LocReg || d17.Loc == scm.LocFPReg {
 						ctx.UnprotectReg(d17.Reg)
 					} else if d17.Loc == scm.LocRegPair {
 						ctx.UnprotectReg(d17.Reg)
 						ctx.UnprotectReg(d17.Reg2)
 					}
-					if d18.Loc == scm.LocReg {
+					if d18.Loc == scm.LocReg || d18.Loc == scm.LocFPReg {
 						ctx.UnprotectReg(d18.Reg)
 					} else if d18.Loc == scm.LocRegPair {
 						ctx.UnprotectReg(d18.Reg)
@@ -41223,14 +41223,14 @@ func (s *StorageSparse) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 		alloc343 := ctx.SnapshotAllocState()
 		ctx.MarkLabel(lbl20)
 		ctx.SyncDesc(&d17)
-		if d17.Loc == scm.LocReg {
+		if d17.Loc == scm.LocReg || d17.Loc == scm.LocFPReg {
 			ctx.ProtectReg(d17.Reg)
 		} else if d17.Loc == scm.LocRegPair {
 			ctx.ProtectReg(d17.Reg)
 			ctx.ProtectReg(d17.Reg2)
 		}
 		ctx.SyncDesc(&d18)
-		if d18.Loc == scm.LocReg {
+		if d18.Loc == scm.LocReg || d18.Loc == scm.LocFPReg {
 			ctx.ProtectReg(d18.Reg)
 		} else if d18.Loc == scm.LocRegPair {
 			ctx.ProtectReg(d18.Reg)
@@ -41255,13 +41255,13 @@ func (s *StorageSparse) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 		}
 		ctx.EnsureDesc(&d346)
 		ctx.EmitStoreToStack(d346, int32(bbs[11].PhiBase)+int32(16))
-		if d17.Loc == scm.LocReg {
+		if d17.Loc == scm.LocReg || d17.Loc == scm.LocFPReg {
 			ctx.UnprotectReg(d17.Reg)
 		} else if d17.Loc == scm.LocRegPair {
 			ctx.UnprotectReg(d17.Reg)
 			ctx.UnprotectReg(d17.Reg2)
 		}
-		if d18.Loc == scm.LocReg {
+		if d18.Loc == scm.LocReg || d18.Loc == scm.LocFPReg {
 			ctx.UnprotectReg(d18.Reg)
 		} else if d18.Loc == scm.LocRegPair {
 			ctx.UnprotectReg(d18.Reg)
@@ -43101,14 +43101,14 @@ func (s *StorageSparse) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 			if d590.Imm.Bool() {
 				if ps.General {
 					ctx.SyncDesc(&d17)
-					if d17.Loc == scm.LocReg {
+					if d17.Loc == scm.LocReg || d17.Loc == scm.LocFPReg {
 						ctx.ProtectReg(d17.Reg)
 					} else if d17.Loc == scm.LocRegPair {
 						ctx.ProtectReg(d17.Reg)
 						ctx.ProtectReg(d17.Reg2)
 					}
 					ctx.SyncDesc(&d18)
-					if d18.Loc == scm.LocReg {
+					if d18.Loc == scm.LocReg || d18.Loc == scm.LocFPReg {
 						ctx.ProtectReg(d18.Reg)
 					} else if d18.Loc == scm.LocRegPair {
 						ctx.ProtectReg(d18.Reg)
@@ -43133,13 +43133,13 @@ func (s *StorageSparse) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 					}
 					ctx.EnsureDesc(&d593)
 					ctx.EmitStoreToStack(d593, int32(bbs[9].PhiBase)+int32(16))
-					if d17.Loc == scm.LocReg {
+					if d17.Loc == scm.LocReg || d17.Loc == scm.LocFPReg {
 						ctx.UnprotectReg(d17.Reg)
 					} else if d17.Loc == scm.LocRegPair {
 						ctx.UnprotectReg(d17.Reg)
 						ctx.UnprotectReg(d17.Reg2)
 					}
-					if d18.Loc == scm.LocReg {
+					if d18.Loc == scm.LocReg || d18.Loc == scm.LocFPReg {
 						ctx.UnprotectReg(d18.Reg)
 					} else if d18.Loc == scm.LocRegPair {
 						ctx.UnprotectReg(d18.Reg)
@@ -43422,14 +43422,14 @@ func (s *StorageSparse) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 		alloc682 := ctx.SnapshotAllocState()
 		ctx.MarkLabel(lbl21)
 		ctx.SyncDesc(&d17)
-		if d17.Loc == scm.LocReg {
+		if d17.Loc == scm.LocReg || d17.Loc == scm.LocFPReg {
 			ctx.ProtectReg(d17.Reg)
 		} else if d17.Loc == scm.LocRegPair {
 			ctx.ProtectReg(d17.Reg)
 			ctx.ProtectReg(d17.Reg2)
 		}
 		ctx.SyncDesc(&d18)
-		if d18.Loc == scm.LocReg {
+		if d18.Loc == scm.LocReg || d18.Loc == scm.LocFPReg {
 			ctx.ProtectReg(d18.Reg)
 		} else if d18.Loc == scm.LocRegPair {
 			ctx.ProtectReg(d18.Reg)
@@ -43454,13 +43454,13 @@ func (s *StorageSparse) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 		}
 		ctx.EnsureDesc(&d685)
 		ctx.EmitStoreToStack(d685, int32(bbs[9].PhiBase)+int32(16))
-		if d17.Loc == scm.LocReg {
+		if d17.Loc == scm.LocReg || d17.Loc == scm.LocFPReg {
 			ctx.UnprotectReg(d17.Reg)
 		} else if d17.Loc == scm.LocRegPair {
 			ctx.UnprotectReg(d17.Reg)
 			ctx.UnprotectReg(d17.Reg2)
 		}
-		if d18.Loc == scm.LocReg {
+		if d18.Loc == scm.LocReg || d18.Loc == scm.LocFPReg {
 			ctx.UnprotectReg(d18.Reg)
 		} else if d18.Loc == scm.LocRegPair {
 			ctx.UnprotectReg(d18.Reg)
@@ -44507,14 +44507,14 @@ func (s *StorageSparse) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 			}
 			if ps.General {
 				ctx.SyncDesc(&d21)
-				if d21.Loc == scm.LocReg {
+				if d21.Loc == scm.LocReg || d21.Loc == scm.LocFPReg {
 					ctx.ProtectReg(d21.Reg)
 				} else if d21.Loc == scm.LocRegPair {
 					ctx.ProtectReg(d21.Reg)
 					ctx.ProtectReg(d21.Reg2)
 				}
 				ctx.SyncDesc(&d22)
-				if d22.Loc == scm.LocReg {
+				if d22.Loc == scm.LocReg || d22.Loc == scm.LocFPReg {
 					ctx.ProtectReg(d22.Reg)
 				} else if d22.Loc == scm.LocRegPair {
 					ctx.ProtectReg(d22.Reg)
@@ -44539,13 +44539,13 @@ func (s *StorageSparse) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 				}
 				ctx.EnsureDesc(&d787)
 				ctx.EmitStoreToStack(d787, int32(bbs[9].PhiBase)+int32(16))
-				if d21.Loc == scm.LocReg {
+				if d21.Loc == scm.LocReg || d21.Loc == scm.LocFPReg {
 					ctx.UnprotectReg(d21.Reg)
 				} else if d21.Loc == scm.LocRegPair {
 					ctx.UnprotectReg(d21.Reg)
 					ctx.UnprotectReg(d21.Reg2)
 				}
-				if d22.Loc == scm.LocReg {
+				if d22.Loc == scm.LocReg || d22.Loc == scm.LocFPReg {
 					ctx.UnprotectReg(d22.Reg)
 				} else if d22.Loc == scm.LocRegPair {
 					ctx.UnprotectReg(d22.Reg)
@@ -44879,14 +44879,14 @@ func (s *StorageSparse) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 		d792 = snap892
 		ctx.MarkLabel(lbl22)
 		ctx.SyncDesc(&d21)
-		if d21.Loc == scm.LocReg {
+		if d21.Loc == scm.LocReg || d21.Loc == scm.LocFPReg {
 			ctx.ProtectReg(d21.Reg)
 		} else if d21.Loc == scm.LocRegPair {
 			ctx.ProtectReg(d21.Reg)
 			ctx.ProtectReg(d21.Reg2)
 		}
 		ctx.SyncDesc(&d22)
-		if d22.Loc == scm.LocReg {
+		if d22.Loc == scm.LocReg || d22.Loc == scm.LocFPReg {
 			ctx.ProtectReg(d22.Reg)
 		} else if d22.Loc == scm.LocRegPair {
 			ctx.ProtectReg(d22.Reg)
@@ -44911,13 +44911,13 @@ func (s *StorageSparse) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 		}
 		ctx.EnsureDesc(&d896)
 		ctx.EmitStoreToStack(d896, int32(bbs[9].PhiBase)+int32(16))
-		if d21.Loc == scm.LocReg {
+		if d21.Loc == scm.LocReg || d21.Loc == scm.LocFPReg {
 			ctx.UnprotectReg(d21.Reg)
 		} else if d21.Loc == scm.LocRegPair {
 			ctx.UnprotectReg(d21.Reg)
 			ctx.UnprotectReg(d21.Reg2)
 		}
-		if d22.Loc == scm.LocReg {
+		if d22.Loc == scm.LocReg || d22.Loc == scm.LocFPReg {
 			ctx.UnprotectReg(d22.Reg)
 		} else if d22.Loc == scm.LocRegPair {
 			ctx.UnprotectReg(d22.Reg)
@@ -46979,14 +46979,14 @@ func (s *StorageSparse) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 		}
 		if ps.General {
 			ctx.SyncDesc(&d21)
-			if d21.Loc == scm.LocReg {
+			if d21.Loc == scm.LocReg || d21.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d21.Reg)
 			} else if d21.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d21.Reg)
 				ctx.ProtectReg(d21.Reg2)
 			}
 			ctx.SyncDesc(&d1032)
-			if d1032.Loc == scm.LocReg {
+			if d1032.Loc == scm.LocReg || d1032.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d1032.Reg)
 			} else if d1032.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d1032.Reg)
@@ -47024,13 +47024,13 @@ func (s *StorageSparse) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 			} else {
 				ctx.EmitStoreToStack(scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagBool, Imm: scm.NewInt(0)}, int32(bbs[8].PhiBase)+int32(32))
 			}
-			if d21.Loc == scm.LocReg {
+			if d21.Loc == scm.LocReg || d21.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d21.Reg)
 			} else if d21.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d21.Reg)
 				ctx.UnprotectReg(d21.Reg2)
 			}
-			if d1032.Loc == scm.LocReg {
+			if d1032.Loc == scm.LocReg || d1032.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d1032.Reg)
 			} else if d1032.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d1032.Reg)
@@ -48438,21 +48438,21 @@ func (s *StorageSparse) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 		}
 		if ps.General {
 			ctx.SyncDesc(&d16)
-			if d16.Loc == scm.LocReg {
+			if d16.Loc == scm.LocReg || d16.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d16.Reg)
 			} else if d16.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d16.Reg)
 				ctx.ProtectReg(d16.Reg2)
 			}
 			ctx.SyncDesc(&d19)
-			if d19.Loc == scm.LocReg {
+			if d19.Loc == scm.LocReg || d19.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d19.Reg)
 			} else if d19.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d19.Reg)
 				ctx.ProtectReg(d19.Reg2)
 			}
 			ctx.SyncDesc(&d20)
-			if d20.Loc == scm.LocReg {
+			if d20.Loc == scm.LocReg || d20.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d20.Reg)
 			} else if d20.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d20.Reg)
@@ -48502,33 +48502,33 @@ func (s *StorageSparse) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 			} else {
 				ctx.EmitStoreToStack(d1052, int32(bbs[5].PhiBase)+int32(32))
 			}
-			if d16.Loc == scm.LocReg {
+			if d16.Loc == scm.LocReg || d16.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d16.Reg)
 			} else if d16.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d16.Reg)
 				ctx.UnprotectReg(d16.Reg2)
 			}
-			if d19.Loc == scm.LocReg {
+			if d19.Loc == scm.LocReg || d19.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d19.Reg)
 			} else if d19.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d19.Reg)
 				ctx.UnprotectReg(d19.Reg2)
 			}
-			if d20.Loc == scm.LocReg {
+			if d20.Loc == scm.LocReg || d20.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d20.Reg)
 			} else if d20.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d20.Reg)
 				ctx.UnprotectReg(d20.Reg2)
 			}
 			ctx.SyncDesc(&d1046)
-			if d1046.Loc == scm.LocReg {
+			if d1046.Loc == scm.LocReg || d1046.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d1046.Reg)
 			} else if d1046.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d1046.Reg)
 				ctx.ProtectReg(d1046.Reg2)
 			}
 			ctx.SyncDesc(&d1047)
-			if d1047.Loc == scm.LocReg {
+			if d1047.Loc == scm.LocReg || d1047.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d1047.Reg)
 			} else if d1047.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d1047.Reg)
@@ -48554,13 +48554,13 @@ func (s *StorageSparse) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 			} else {
 				ctx.EmitStoreToStack(d1054, int32(bbs[5].PhiBase)+int32(64))
 			}
-			if d1046.Loc == scm.LocReg {
+			if d1046.Loc == scm.LocReg || d1046.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d1046.Reg)
 			} else if d1046.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d1046.Reg)
 				ctx.UnprotectReg(d1046.Reg2)
 			}
-			if d1047.Loc == scm.LocReg {
+			if d1047.Loc == scm.LocReg || d1047.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d1047.Reg)
 			} else if d1047.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d1047.Reg)
@@ -56145,7 +56145,7 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 		}
 		if ps.General {
 			ctx.SyncDesc(&d434)
-			if d434.Loc == scm.LocReg {
+			if d434.Loc == scm.LocReg || d434.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d434.Reg)
 			} else if d434.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d434.Reg)
@@ -56161,7 +56161,7 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 			} else {
 				ctx.EmitStoreToStack(d435, int32(bbs[5].PhiBase)+int32(0))
 			}
-			if d434.Loc == scm.LocReg {
+			if d434.Loc == scm.LocReg || d434.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d434.Reg)
 			} else if d434.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d434.Reg)
@@ -56847,7 +56847,7 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 		ctx.StabilizeDescForControlFlow(&d447)
 		if ps.General {
 			ctx.SyncDesc(&d446)
-			if d446.Loc == scm.LocReg {
+			if d446.Loc == scm.LocReg || d446.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d446.Reg)
 			} else if d446.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d446.Reg)
@@ -56880,7 +56880,7 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 			} else {
 				ctx.EmitStoreToStack(scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagBool, Imm: scm.NewInt(0)}, int32(bbs[15].PhiBase)+int32(32))
 			}
-			if d446.Loc == scm.LocReg {
+			if d446.Loc == scm.LocReg || d446.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d446.Reg)
 			} else if d446.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d446.Reg)
@@ -58426,14 +58426,14 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 		}
 		if ps.General {
 			ctx.SyncDesc(&d458)
-			if d458.Loc == scm.LocReg {
+			if d458.Loc == scm.LocReg || d458.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d458.Reg)
 			} else if d458.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d458.Reg)
 				ctx.ProtectReg(d458.Reg2)
 			}
 			ctx.SyncDesc(&d616)
-			if d616.Loc == scm.LocReg {
+			if d616.Loc == scm.LocReg || d616.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d616.Reg)
 			} else if d616.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d616.Reg)
@@ -58459,13 +58459,13 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 			} else {
 				ctx.EmitStoreToStack(d618, int32(bbs[12].PhiBase)+int32(16))
 			}
-			if d458.Loc == scm.LocReg {
+			if d458.Loc == scm.LocReg || d458.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d458.Reg)
 			} else if d458.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d458.Reg)
 				ctx.UnprotectReg(d458.Reg2)
 			}
-			if d616.Loc == scm.LocReg {
+			if d616.Loc == scm.LocReg || d616.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d616.Reg)
 			} else if d616.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d616.Reg)
@@ -60656,21 +60656,21 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 		ctx.StabilizeDescForControlFlow(&d829)
 		if ps.General {
 			ctx.SyncDesc(&d18)
-			if d18.Loc == scm.LocReg {
+			if d18.Loc == scm.LocReg || d18.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d18.Reg)
 			} else if d18.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d18.Reg)
 				ctx.ProtectReg(d18.Reg2)
 			}
 			ctx.SyncDesc(&d19)
-			if d19.Loc == scm.LocReg {
+			if d19.Loc == scm.LocReg || d19.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d19.Reg)
 			} else if d19.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d19.Reg)
 				ctx.ProtectReg(d19.Reg2)
 			}
 			ctx.SyncDesc(&d20)
-			if d20.Loc == scm.LocReg {
+			if d20.Loc == scm.LocReg || d20.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d20.Reg)
 			} else if d20.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d20.Reg)
@@ -60720,19 +60720,19 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 			} else {
 				ctx.EmitStoreToStack(d834, int32(bbs[18].PhiBase)+int32(32))
 			}
-			if d18.Loc == scm.LocReg {
+			if d18.Loc == scm.LocReg || d18.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d18.Reg)
 			} else if d18.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d18.Reg)
 				ctx.UnprotectReg(d18.Reg2)
 			}
-			if d19.Loc == scm.LocReg {
+			if d19.Loc == scm.LocReg || d19.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d19.Reg)
 			} else if d19.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d19.Reg)
 				ctx.UnprotectReg(d19.Reg2)
 			}
-			if d20.Loc == scm.LocReg {
+			if d20.Loc == scm.LocReg || d20.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d20.Reg)
 			} else if d20.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d20.Reg)
@@ -61707,14 +61707,14 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 			if d842.Imm.Bool() {
 				if ps.General {
 					ctx.SyncDesc(&d24)
-					if d24.Loc == scm.LocReg {
+					if d24.Loc == scm.LocReg || d24.Loc == scm.LocFPReg {
 						ctx.ProtectReg(d24.Reg)
 					} else if d24.Loc == scm.LocRegPair {
 						ctx.ProtectReg(d24.Reg)
 						ctx.ProtectReg(d24.Reg2)
 					}
 					ctx.SyncDesc(&d25)
-					if d25.Loc == scm.LocReg {
+					if d25.Loc == scm.LocReg || d25.Loc == scm.LocFPReg {
 						ctx.ProtectReg(d25.Reg)
 					} else if d25.Loc == scm.LocRegPair {
 						ctx.ProtectReg(d25.Reg)
@@ -61739,13 +61739,13 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 					}
 					ctx.EnsureDesc(&d845)
 					ctx.EmitStoreToStack(d845, int32(bbs[21].PhiBase)+int32(16))
-					if d24.Loc == scm.LocReg {
+					if d24.Loc == scm.LocReg || d24.Loc == scm.LocFPReg {
 						ctx.UnprotectReg(d24.Reg)
 					} else if d24.Loc == scm.LocRegPair {
 						ctx.UnprotectReg(d24.Reg)
 						ctx.UnprotectReg(d24.Reg2)
 					}
-					if d25.Loc == scm.LocReg {
+					if d25.Loc == scm.LocReg || d25.Loc == scm.LocFPReg {
 						ctx.UnprotectReg(d25.Reg)
 					} else if d25.Loc == scm.LocRegPair {
 						ctx.UnprotectReg(d25.Reg)
@@ -62142,14 +62142,14 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 		alloc968 := ctx.SnapshotAllocState()
 		ctx.MarkLabel(lbl31)
 		ctx.SyncDesc(&d24)
-		if d24.Loc == scm.LocReg {
+		if d24.Loc == scm.LocReg || d24.Loc == scm.LocFPReg {
 			ctx.ProtectReg(d24.Reg)
 		} else if d24.Loc == scm.LocRegPair {
 			ctx.ProtectReg(d24.Reg)
 			ctx.ProtectReg(d24.Reg2)
 		}
 		ctx.SyncDesc(&d25)
-		if d25.Loc == scm.LocReg {
+		if d25.Loc == scm.LocReg || d25.Loc == scm.LocFPReg {
 			ctx.ProtectReg(d25.Reg)
 		} else if d25.Loc == scm.LocRegPair {
 			ctx.ProtectReg(d25.Reg)
@@ -62174,13 +62174,13 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 		}
 		ctx.EnsureDesc(&d971)
 		ctx.EmitStoreToStack(d971, int32(bbs[21].PhiBase)+int32(16))
-		if d24.Loc == scm.LocReg {
+		if d24.Loc == scm.LocReg || d24.Loc == scm.LocFPReg {
 			ctx.UnprotectReg(d24.Reg)
 		} else if d24.Loc == scm.LocRegPair {
 			ctx.UnprotectReg(d24.Reg)
 			ctx.UnprotectReg(d24.Reg2)
 		}
-		if d25.Loc == scm.LocReg {
+		if d25.Loc == scm.LocReg || d25.Loc == scm.LocFPReg {
 			ctx.UnprotectReg(d25.Reg)
 		} else if d25.Loc == scm.LocRegPair {
 			ctx.UnprotectReg(d25.Reg)
@@ -65058,14 +65058,14 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 			if d1359.Imm.Bool() {
 				if ps.General {
 					ctx.SyncDesc(&d24)
-					if d24.Loc == scm.LocReg {
+					if d24.Loc == scm.LocReg || d24.Loc == scm.LocFPReg {
 						ctx.ProtectReg(d24.Reg)
 					} else if d24.Loc == scm.LocRegPair {
 						ctx.ProtectReg(d24.Reg)
 						ctx.ProtectReg(d24.Reg2)
 					}
 					ctx.SyncDesc(&d25)
-					if d25.Loc == scm.LocReg {
+					if d25.Loc == scm.LocReg || d25.Loc == scm.LocFPReg {
 						ctx.ProtectReg(d25.Reg)
 					} else if d25.Loc == scm.LocRegPair {
 						ctx.ProtectReg(d25.Reg)
@@ -65090,13 +65090,13 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 					}
 					ctx.EnsureDesc(&d1362)
 					ctx.EmitStoreToStack(d1362, int32(bbs[19].PhiBase)+int32(16))
-					if d24.Loc == scm.LocReg {
+					if d24.Loc == scm.LocReg || d24.Loc == scm.LocFPReg {
 						ctx.UnprotectReg(d24.Reg)
 					} else if d24.Loc == scm.LocRegPair {
 						ctx.UnprotectReg(d24.Reg)
 						ctx.UnprotectReg(d24.Reg2)
 					}
-					if d25.Loc == scm.LocReg {
+					if d25.Loc == scm.LocReg || d25.Loc == scm.LocFPReg {
 						ctx.UnprotectReg(d25.Reg)
 					} else if d25.Loc == scm.LocRegPair {
 						ctx.UnprotectReg(d25.Reg)
@@ -65523,14 +65523,14 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 		alloc1499 := ctx.SnapshotAllocState()
 		ctx.MarkLabel(lbl32)
 		ctx.SyncDesc(&d24)
-		if d24.Loc == scm.LocReg {
+		if d24.Loc == scm.LocReg || d24.Loc == scm.LocFPReg {
 			ctx.ProtectReg(d24.Reg)
 		} else if d24.Loc == scm.LocRegPair {
 			ctx.ProtectReg(d24.Reg)
 			ctx.ProtectReg(d24.Reg2)
 		}
 		ctx.SyncDesc(&d25)
-		if d25.Loc == scm.LocReg {
+		if d25.Loc == scm.LocReg || d25.Loc == scm.LocFPReg {
 			ctx.ProtectReg(d25.Reg)
 		} else if d25.Loc == scm.LocRegPair {
 			ctx.ProtectReg(d25.Reg)
@@ -65555,13 +65555,13 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 		}
 		ctx.EnsureDesc(&d1502)
 		ctx.EmitStoreToStack(d1502, int32(bbs[19].PhiBase)+int32(16))
-		if d24.Loc == scm.LocReg {
+		if d24.Loc == scm.LocReg || d24.Loc == scm.LocFPReg {
 			ctx.UnprotectReg(d24.Reg)
 		} else if d24.Loc == scm.LocRegPair {
 			ctx.UnprotectReg(d24.Reg)
 			ctx.UnprotectReg(d24.Reg2)
 		}
-		if d25.Loc == scm.LocReg {
+		if d25.Loc == scm.LocReg || d25.Loc == scm.LocFPReg {
 			ctx.UnprotectReg(d25.Reg)
 		} else if d25.Loc == scm.LocRegPair {
 			ctx.UnprotectReg(d25.Reg)
@@ -67103,14 +67103,14 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 			}
 			if ps.General {
 				ctx.SyncDesc(&d28)
-				if d28.Loc == scm.LocReg {
+				if d28.Loc == scm.LocReg || d28.Loc == scm.LocFPReg {
 					ctx.ProtectReg(d28.Reg)
 				} else if d28.Loc == scm.LocRegPair {
 					ctx.ProtectReg(d28.Reg)
 					ctx.ProtectReg(d28.Reg2)
 				}
 				ctx.SyncDesc(&d29)
-				if d29.Loc == scm.LocReg {
+				if d29.Loc == scm.LocReg || d29.Loc == scm.LocFPReg {
 					ctx.ProtectReg(d29.Reg)
 				} else if d29.Loc == scm.LocRegPair {
 					ctx.ProtectReg(d29.Reg)
@@ -67135,13 +67135,13 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 				}
 				ctx.EnsureDesc(&d1652)
 				ctx.EmitStoreToStack(d1652, int32(bbs[19].PhiBase)+int32(16))
-				if d28.Loc == scm.LocReg {
+				if d28.Loc == scm.LocReg || d28.Loc == scm.LocFPReg {
 					ctx.UnprotectReg(d28.Reg)
 				} else if d28.Loc == scm.LocRegPair {
 					ctx.UnprotectReg(d28.Reg)
 					ctx.UnprotectReg(d28.Reg2)
 				}
-				if d29.Loc == scm.LocReg {
+				if d29.Loc == scm.LocReg || d29.Loc == scm.LocFPReg {
 					ctx.UnprotectReg(d29.Reg)
 				} else if d29.Loc == scm.LocRegPair {
 					ctx.UnprotectReg(d29.Reg)
@@ -67619,14 +67619,14 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 		d1657 = snap1805
 		ctx.MarkLabel(lbl33)
 		ctx.SyncDesc(&d28)
-		if d28.Loc == scm.LocReg {
+		if d28.Loc == scm.LocReg || d28.Loc == scm.LocFPReg {
 			ctx.ProtectReg(d28.Reg)
 		} else if d28.Loc == scm.LocRegPair {
 			ctx.ProtectReg(d28.Reg)
 			ctx.ProtectReg(d28.Reg2)
 		}
 		ctx.SyncDesc(&d29)
-		if d29.Loc == scm.LocReg {
+		if d29.Loc == scm.LocReg || d29.Loc == scm.LocFPReg {
 			ctx.ProtectReg(d29.Reg)
 		} else if d29.Loc == scm.LocRegPair {
 			ctx.ProtectReg(d29.Reg)
@@ -67651,13 +67651,13 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 		}
 		ctx.EnsureDesc(&d1809)
 		ctx.EmitStoreToStack(d1809, int32(bbs[19].PhiBase)+int32(16))
-		if d28.Loc == scm.LocReg {
+		if d28.Loc == scm.LocReg || d28.Loc == scm.LocFPReg {
 			ctx.UnprotectReg(d28.Reg)
 		} else if d28.Loc == scm.LocRegPair {
 			ctx.UnprotectReg(d28.Reg)
 			ctx.UnprotectReg(d28.Reg2)
 		}
-		if d29.Loc == scm.LocReg {
+		if d29.Loc == scm.LocReg || d29.Loc == scm.LocFPReg {
 			ctx.UnprotectReg(d29.Reg)
 		} else if d29.Loc == scm.LocRegPair {
 			ctx.UnprotectReg(d29.Reg)
@@ -70325,14 +70325,14 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 		}
 		if ps.General {
 			ctx.SyncDesc(&d28)
-			if d28.Loc == scm.LocReg {
+			if d28.Loc == scm.LocReg || d28.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d28.Reg)
 			} else if d28.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d28.Reg)
 				ctx.ProtectReg(d28.Reg2)
 			}
 			ctx.SyncDesc(&d1993)
-			if d1993.Loc == scm.LocReg {
+			if d1993.Loc == scm.LocReg || d1993.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d1993.Reg)
 			} else if d1993.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d1993.Reg)
@@ -70370,13 +70370,13 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 			} else {
 				ctx.EmitStoreToStack(scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagBool, Imm: scm.NewInt(0)}, int32(bbs[18].PhiBase)+int32(32))
 			}
-			if d28.Loc == scm.LocReg {
+			if d28.Loc == scm.LocReg || d28.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d28.Reg)
 			} else if d28.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d28.Reg)
 				ctx.UnprotectReg(d28.Reg2)
 			}
-			if d1993.Loc == scm.LocReg {
+			if d1993.Loc == scm.LocReg || d1993.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d1993.Reg)
 			} else if d1993.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d1993.Reg)
@@ -72177,21 +72177,21 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 		}
 		if ps.General {
 			ctx.SyncDesc(&d23)
-			if d23.Loc == scm.LocReg {
+			if d23.Loc == scm.LocReg || d23.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d23.Reg)
 			} else if d23.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d23.Reg)
 				ctx.ProtectReg(d23.Reg2)
 			}
 			ctx.SyncDesc(&d26)
-			if d26.Loc == scm.LocReg {
+			if d26.Loc == scm.LocReg || d26.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d26.Reg)
 			} else if d26.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d26.Reg)
 				ctx.ProtectReg(d26.Reg2)
 			}
 			ctx.SyncDesc(&d27)
-			if d27.Loc == scm.LocReg {
+			if d27.Loc == scm.LocReg || d27.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d27.Reg)
 			} else if d27.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d27.Reg)
@@ -72241,33 +72241,33 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 			} else {
 				ctx.EmitStoreToStack(d2012, int32(bbs[15].PhiBase)+int32(32))
 			}
-			if d23.Loc == scm.LocReg {
+			if d23.Loc == scm.LocReg || d23.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d23.Reg)
 			} else if d23.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d23.Reg)
 				ctx.UnprotectReg(d23.Reg2)
 			}
-			if d26.Loc == scm.LocReg {
+			if d26.Loc == scm.LocReg || d26.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d26.Reg)
 			} else if d26.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d26.Reg)
 				ctx.UnprotectReg(d26.Reg2)
 			}
-			if d27.Loc == scm.LocReg {
+			if d27.Loc == scm.LocReg || d27.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d27.Reg)
 			} else if d27.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d27.Reg)
 				ctx.UnprotectReg(d27.Reg2)
 			}
 			ctx.SyncDesc(&d627)
-			if d627.Loc == scm.LocReg {
+			if d627.Loc == scm.LocReg || d627.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d627.Reg)
 			} else if d627.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d627.Reg)
 				ctx.ProtectReg(d627.Reg2)
 			}
 			ctx.SyncDesc(&d2007)
-			if d2007.Loc == scm.LocReg {
+			if d2007.Loc == scm.LocReg || d2007.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d2007.Reg)
 			} else if d2007.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d2007.Reg)
@@ -72293,13 +72293,13 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 			} else {
 				ctx.EmitStoreToStack(d2014, int32(bbs[15].PhiBase)+int32(64))
 			}
-			if d627.Loc == scm.LocReg {
+			if d627.Loc == scm.LocReg || d627.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d627.Reg)
 			} else if d627.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d627.Reg)
 				ctx.UnprotectReg(d627.Reg2)
 			}
-			if d2007.Loc == scm.LocReg {
+			if d2007.Loc == scm.LocReg || d2007.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d2007.Reg)
 			} else if d2007.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d2007.Reg)
@@ -77191,14 +77191,14 @@ func (s *StorageConst) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, t
 		}
 		if ps.General {
 			ctx.SyncDesc(&d94)
-			if d94.Loc == scm.LocReg {
+			if d94.Loc == scm.LocReg || d94.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d94.Reg)
 			} else if d94.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d94.Reg)
 				ctx.ProtectReg(d94.Reg2)
 			}
 			ctx.SyncDesc(&d95)
-			if d95.Loc == scm.LocReg {
+			if d95.Loc == scm.LocReg || d95.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d95.Reg)
 			} else if d95.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d95.Reg)
@@ -77224,13 +77224,13 @@ func (s *StorageConst) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, t
 			} else {
 				ctx.EmitStoreToStack(d97, int32(bbs[3].PhiBase)+int32(16))
 			}
-			if d94.Loc == scm.LocReg {
+			if d94.Loc == scm.LocReg || d94.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d94.Reg)
 			} else if d94.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d94.Reg)
 				ctx.UnprotectReg(d94.Reg2)
 			}
-			if d95.Loc == scm.LocReg {
+			if d95.Loc == scm.LocReg || d95.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d95.Reg)
 			} else if d95.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d95.Reg)
@@ -78553,14 +78553,14 @@ func (s *StorageConst) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target,
 		}
 		if ps.General {
 			ctx.SyncDesc(&d44)
-			if d44.Loc == scm.LocReg {
+			if d44.Loc == scm.LocReg || d44.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d44.Reg)
 			} else if d44.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d44.Reg)
 				ctx.ProtectReg(d44.Reg2)
 			}
 			ctx.SyncDesc(&d100)
-			if d100.Loc == scm.LocReg {
+			if d100.Loc == scm.LocReg || d100.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d100.Reg)
 			} else if d100.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d100.Reg)
@@ -78586,13 +78586,13 @@ func (s *StorageConst) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target,
 			} else {
 				ctx.EmitStoreToStack(d102, int32(bbs[3].PhiBase)+int32(16))
 			}
-			if d44.Loc == scm.LocReg {
+			if d44.Loc == scm.LocReg || d44.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d44.Reg)
 			} else if d44.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d44.Reg)
 				ctx.UnprotectReg(d44.Reg2)
 			}
-			if d100.Loc == scm.LocReg {
+			if d100.Loc == scm.LocReg || d100.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d100.Reg)
 			} else if d100.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d100.Reg)
@@ -81009,14 +81009,14 @@ func (s *StorageSCMER) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, t
 		}
 		if ps.General {
 			ctx.SyncDesc(&d100)
-			if d100.Loc == scm.LocReg {
+			if d100.Loc == scm.LocReg || d100.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d100.Reg)
 			} else if d100.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d100.Reg)
 				ctx.ProtectReg(d100.Reg2)
 			}
 			ctx.SyncDesc(&d199)
-			if d199.Loc == scm.LocReg {
+			if d199.Loc == scm.LocReg || d199.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d199.Reg)
 			} else if d199.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d199.Reg)
@@ -81042,13 +81042,13 @@ func (s *StorageSCMER) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, t
 			} else {
 				ctx.EmitStoreToStack(d201, int32(bbs[5].PhiBase)+int32(16))
 			}
-			if d100.Loc == scm.LocReg {
+			if d100.Loc == scm.LocReg || d100.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d100.Reg)
 			} else if d100.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d100.Reg)
 				ctx.UnprotectReg(d100.Reg2)
 			}
-			if d199.Loc == scm.LocReg {
+			if d199.Loc == scm.LocReg || d199.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d199.Reg)
 			} else if d199.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d199.Reg)
@@ -82509,14 +82509,14 @@ func (s *StorageSCMER) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target,
 		}
 		if ps.General {
 			ctx.SyncDesc(&d45)
-			if d45.Loc == scm.LocReg {
+			if d45.Loc == scm.LocReg || d45.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d45.Reg)
 			} else if d45.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d45.Reg)
 				ctx.ProtectReg(d45.Reg2)
 			}
 			ctx.SyncDesc(&d105)
-			if d105.Loc == scm.LocReg {
+			if d105.Loc == scm.LocReg || d105.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d105.Reg)
 			} else if d105.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d105.Reg)
@@ -82542,13 +82542,13 @@ func (s *StorageSCMER) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target,
 			} else {
 				ctx.EmitStoreToStack(d107, int32(bbs[3].PhiBase)+int32(16))
 			}
-			if d45.Loc == scm.LocReg {
+			if d45.Loc == scm.LocReg || d45.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d45.Reg)
 			} else if d45.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d45.Reg)
 				ctx.UnprotectReg(d45.Reg2)
 			}
-			if d105.Loc == scm.LocReg {
+			if d105.Loc == scm.LocReg || d105.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d105.Reg)
 			} else if d105.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d105.Reg)
@@ -85466,21 +85466,21 @@ func (s *StorageSeq) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 		ctx.FreeDesc(&d144)
 		if ps.General {
 			ctx.SyncDesc(&d135)
-			if d135.Loc == scm.LocReg {
+			if d135.Loc == scm.LocReg || d135.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d135.Reg)
 			} else if d135.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d135.Reg)
 				ctx.ProtectReg(d135.Reg2)
 			}
 			ctx.SyncDesc(&d138)
-			if d138.Loc == scm.LocReg {
+			if d138.Loc == scm.LocReg || d138.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d138.Reg)
 			} else if d138.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d138.Reg)
 				ctx.ProtectReg(d138.Reg2)
 			}
 			ctx.SyncDesc(&d140)
-			if d140.Loc == scm.LocReg {
+			if d140.Loc == scm.LocReg || d140.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d140.Reg)
 			} else if d140.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d140.Reg)
@@ -85523,33 +85523,33 @@ func (s *StorageSeq) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 			} else {
 				ctx.EmitStoreToStack(d149, int32(bbs[5].PhiBase)+int32(32))
 			}
-			if d135.Loc == scm.LocReg {
+			if d135.Loc == scm.LocReg || d135.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d135.Reg)
 			} else if d135.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d135.Reg)
 				ctx.UnprotectReg(d135.Reg2)
 			}
-			if d138.Loc == scm.LocReg {
+			if d138.Loc == scm.LocReg || d138.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d138.Reg)
 			} else if d138.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d138.Reg)
 				ctx.UnprotectReg(d138.Reg2)
 			}
-			if d140.Loc == scm.LocReg {
+			if d140.Loc == scm.LocReg || d140.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d140.Reg)
 			} else if d140.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d140.Reg)
 				ctx.UnprotectReg(d140.Reg2)
 			}
 			ctx.SyncDesc(&d141)
-			if d141.Loc == scm.LocReg {
+			if d141.Loc == scm.LocReg || d141.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d141.Reg)
 			} else if d141.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d141.Reg)
 				ctx.ProtectReg(d141.Reg2)
 			}
 			ctx.SyncDesc(&d145)
-			if d145.Loc == scm.LocReg {
+			if d145.Loc == scm.LocReg || d145.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d145.Reg)
 			} else if d145.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d145.Reg)
@@ -85580,13 +85580,13 @@ func (s *StorageSeq) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 			} else {
 				ctx.EmitStoreToStack(scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(0)}, int32(bbs[5].PhiBase)+int32(80))
 			}
-			if d141.Loc == scm.LocReg {
+			if d141.Loc == scm.LocReg || d141.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d141.Reg)
 			} else if d141.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d141.Reg)
 				ctx.UnprotectReg(d141.Reg2)
 			}
-			if d145.Loc == scm.LocReg {
+			if d145.Loc == scm.LocReg || d145.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d145.Reg)
 			} else if d145.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d145.Reg)
@@ -87129,21 +87129,21 @@ func (s *StorageSeq) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 			}
 			if ps.General {
 				ctx.SyncDesc(&d10)
-				if d10.Loc == scm.LocReg {
+				if d10.Loc == scm.LocReg || d10.Loc == scm.LocFPReg {
 					ctx.ProtectReg(d10.Reg)
 				} else if d10.Loc == scm.LocRegPair {
 					ctx.ProtectReg(d10.Reg)
 					ctx.ProtectReg(d10.Reg2)
 				}
 				ctx.SyncDesc(&d11)
-				if d11.Loc == scm.LocReg {
+				if d11.Loc == scm.LocReg || d11.Loc == scm.LocFPReg {
 					ctx.ProtectReg(d11.Reg)
 				} else if d11.Loc == scm.LocRegPair {
 					ctx.ProtectReg(d11.Reg)
 					ctx.ProtectReg(d11.Reg2)
 				}
 				ctx.SyncDesc(&d12)
-				if d12.Loc == scm.LocReg {
+				if d12.Loc == scm.LocReg || d12.Loc == scm.LocFPReg {
 					ctx.ProtectReg(d12.Reg)
 				} else if d12.Loc == scm.LocRegPair {
 					ctx.ProtectReg(d12.Reg)
@@ -87174,33 +87174,33 @@ func (s *StorageSeq) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 				}
 				ctx.EnsureDesc(&d319)
 				ctx.EmitStoreToStack(d319, int32(bbs[9].PhiBase)+int32(32))
-				if d10.Loc == scm.LocReg {
+				if d10.Loc == scm.LocReg || d10.Loc == scm.LocFPReg {
 					ctx.UnprotectReg(d10.Reg)
 				} else if d10.Loc == scm.LocRegPair {
 					ctx.UnprotectReg(d10.Reg)
 					ctx.UnprotectReg(d10.Reg2)
 				}
-				if d11.Loc == scm.LocReg {
+				if d11.Loc == scm.LocReg || d11.Loc == scm.LocFPReg {
 					ctx.UnprotectReg(d11.Reg)
 				} else if d11.Loc == scm.LocRegPair {
 					ctx.UnprotectReg(d11.Reg)
 					ctx.UnprotectReg(d11.Reg2)
 				}
-				if d12.Loc == scm.LocReg {
+				if d12.Loc == scm.LocReg || d12.Loc == scm.LocFPReg {
 					ctx.UnprotectReg(d12.Reg)
 				} else if d12.Loc == scm.LocRegPair {
 					ctx.UnprotectReg(d12.Reg)
 					ctx.UnprotectReg(d12.Reg2)
 				}
 				ctx.SyncDesc(&d13)
-				if d13.Loc == scm.LocReg {
+				if d13.Loc == scm.LocReg || d13.Loc == scm.LocFPReg {
 					ctx.ProtectReg(d13.Reg)
 				} else if d13.Loc == scm.LocRegPair {
 					ctx.ProtectReg(d13.Reg)
 					ctx.ProtectReg(d13.Reg2)
 				}
 				ctx.SyncDesc(&d14)
-				if d14.Loc == scm.LocReg {
+				if d14.Loc == scm.LocReg || d14.Loc == scm.LocFPReg {
 					ctx.ProtectReg(d14.Reg)
 				} else if d14.Loc == scm.LocRegPair {
 					ctx.ProtectReg(d14.Reg)
@@ -87218,13 +87218,13 @@ func (s *StorageSeq) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 				}
 				ctx.EnsureDesc(&d321)
 				ctx.EmitStoreToStack(d321, int32(bbs[9].PhiBase)+int32(64))
-				if d13.Loc == scm.LocReg {
+				if d13.Loc == scm.LocReg || d13.Loc == scm.LocFPReg {
 					ctx.UnprotectReg(d13.Reg)
 				} else if d13.Loc == scm.LocRegPair {
 					ctx.UnprotectReg(d13.Reg)
 					ctx.UnprotectReg(d13.Reg2)
 				}
-				if d14.Loc == scm.LocReg {
+				if d14.Loc == scm.LocReg || d14.Loc == scm.LocFPReg {
 					ctx.UnprotectReg(d14.Reg)
 				} else if d14.Loc == scm.LocRegPair {
 					ctx.UnprotectReg(d14.Reg)
@@ -87493,21 +87493,21 @@ func (s *StorageSeq) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 		d327 = snap407
 		ctx.MarkLabel(lbl15)
 		ctx.SyncDesc(&d10)
-		if d10.Loc == scm.LocReg {
+		if d10.Loc == scm.LocReg || d10.Loc == scm.LocFPReg {
 			ctx.ProtectReg(d10.Reg)
 		} else if d10.Loc == scm.LocRegPair {
 			ctx.ProtectReg(d10.Reg)
 			ctx.ProtectReg(d10.Reg2)
 		}
 		ctx.SyncDesc(&d11)
-		if d11.Loc == scm.LocReg {
+		if d11.Loc == scm.LocReg || d11.Loc == scm.LocFPReg {
 			ctx.ProtectReg(d11.Reg)
 		} else if d11.Loc == scm.LocRegPair {
 			ctx.ProtectReg(d11.Reg)
 			ctx.ProtectReg(d11.Reg2)
 		}
 		ctx.SyncDesc(&d12)
-		if d12.Loc == scm.LocReg {
+		if d12.Loc == scm.LocReg || d12.Loc == scm.LocFPReg {
 			ctx.ProtectReg(d12.Reg)
 		} else if d12.Loc == scm.LocRegPair {
 			ctx.ProtectReg(d12.Reg)
@@ -87538,33 +87538,33 @@ func (s *StorageSeq) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 		}
 		ctx.EnsureDesc(&d412)
 		ctx.EmitStoreToStack(d412, int32(bbs[9].PhiBase)+int32(32))
-		if d10.Loc == scm.LocReg {
+		if d10.Loc == scm.LocReg || d10.Loc == scm.LocFPReg {
 			ctx.UnprotectReg(d10.Reg)
 		} else if d10.Loc == scm.LocRegPair {
 			ctx.UnprotectReg(d10.Reg)
 			ctx.UnprotectReg(d10.Reg2)
 		}
-		if d11.Loc == scm.LocReg {
+		if d11.Loc == scm.LocReg || d11.Loc == scm.LocFPReg {
 			ctx.UnprotectReg(d11.Reg)
 		} else if d11.Loc == scm.LocRegPair {
 			ctx.UnprotectReg(d11.Reg)
 			ctx.UnprotectReg(d11.Reg2)
 		}
-		if d12.Loc == scm.LocReg {
+		if d12.Loc == scm.LocReg || d12.Loc == scm.LocFPReg {
 			ctx.UnprotectReg(d12.Reg)
 		} else if d12.Loc == scm.LocRegPair {
 			ctx.UnprotectReg(d12.Reg)
 			ctx.UnprotectReg(d12.Reg2)
 		}
 		ctx.SyncDesc(&d13)
-		if d13.Loc == scm.LocReg {
+		if d13.Loc == scm.LocReg || d13.Loc == scm.LocFPReg {
 			ctx.ProtectReg(d13.Reg)
 		} else if d13.Loc == scm.LocRegPair {
 			ctx.ProtectReg(d13.Reg)
 			ctx.ProtectReg(d13.Reg2)
 		}
 		ctx.SyncDesc(&d14)
-		if d14.Loc == scm.LocReg {
+		if d14.Loc == scm.LocReg || d14.Loc == scm.LocFPReg {
 			ctx.ProtectReg(d14.Reg)
 		} else if d14.Loc == scm.LocRegPair {
 			ctx.ProtectReg(d14.Reg)
@@ -87582,13 +87582,13 @@ func (s *StorageSeq) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 		}
 		ctx.EnsureDesc(&d414)
 		ctx.EmitStoreToStack(d414, int32(bbs[9].PhiBase)+int32(64))
-		if d13.Loc == scm.LocReg {
+		if d13.Loc == scm.LocReg || d13.Loc == scm.LocFPReg {
 			ctx.UnprotectReg(d13.Reg)
 		} else if d13.Loc == scm.LocRegPair {
 			ctx.UnprotectReg(d13.Reg)
 			ctx.UnprotectReg(d13.Reg2)
 		}
-		if d14.Loc == scm.LocReg {
+		if d14.Loc == scm.LocReg || d14.Loc == scm.LocFPReg {
 			ctx.UnprotectReg(d14.Reg)
 		} else if d14.Loc == scm.LocRegPair {
 			ctx.UnprotectReg(d14.Reg)
@@ -88911,21 +88911,21 @@ func (s *StorageSeq) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 		ctx.FreeDesc(&d522)
 		if ps.General {
 			ctx.SyncDesc(&d517)
-			if d517.Loc == scm.LocReg {
+			if d517.Loc == scm.LocReg || d517.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d517.Reg)
 			} else if d517.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d517.Reg)
 				ctx.ProtectReg(d517.Reg2)
 			}
 			ctx.SyncDesc(&d519)
-			if d519.Loc == scm.LocReg {
+			if d519.Loc == scm.LocReg || d519.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d519.Reg)
 			} else if d519.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d519.Reg)
 				ctx.ProtectReg(d519.Reg2)
 			}
 			ctx.SyncDesc(&d520)
-			if d520.Loc == scm.LocReg {
+			if d520.Loc == scm.LocReg || d520.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d520.Reg)
 			} else if d520.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d520.Reg)
@@ -88949,19 +88949,19 @@ func (s *StorageSeq) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 			}
 			ctx.EnsureDesc(&d526)
 			ctx.EmitStoreToStack(d526, int32(bbs[9].PhiBase)+int32(48))
-			if d517.Loc == scm.LocReg {
+			if d517.Loc == scm.LocReg || d517.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d517.Reg)
 			} else if d517.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d517.Reg)
 				ctx.UnprotectReg(d517.Reg2)
 			}
-			if d519.Loc == scm.LocReg {
+			if d519.Loc == scm.LocReg || d519.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d519.Reg)
 			} else if d519.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d519.Reg)
 				ctx.UnprotectReg(d519.Reg2)
 			}
-			if d520.Loc == scm.LocReg {
+			if d520.Loc == scm.LocReg || d520.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d520.Reg)
 			} else if d520.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d520.Reg)
@@ -91079,7 +91079,7 @@ func (s *StorageSeq) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 		ctx.FreeDesc(&d782)
 		if ps.General {
 			ctx.SyncDesc(&d21)
-			if d21.Loc == scm.LocReg {
+			if d21.Loc == scm.LocReg || d21.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d21.Reg)
 			} else if d21.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d21.Reg)
@@ -91091,7 +91091,7 @@ func (s *StorageSeq) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 			}
 			ctx.EnsureDesc(&d785)
 			ctx.EmitStoreToStack(d785, int32(bbs[11].PhiBase)+int32(0))
-			if d21.Loc == scm.LocReg {
+			if d21.Loc == scm.LocReg || d21.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d21.Reg)
 			} else if d21.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d21.Reg)
@@ -91760,21 +91760,21 @@ func (s *StorageSeq) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 		}
 		if ps.General {
 			ctx.SyncDesc(&d17)
-			if d17.Loc == scm.LocReg {
+			if d17.Loc == scm.LocReg || d17.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d17.Reg)
 			} else if d17.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d17.Reg)
 				ctx.ProtectReg(d17.Reg2)
 			}
 			ctx.SyncDesc(&d18)
-			if d18.Loc == scm.LocReg {
+			if d18.Loc == scm.LocReg || d18.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d18.Reg)
 			} else if d18.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d18.Reg)
 				ctx.ProtectReg(d18.Reg2)
 			}
 			ctx.SyncDesc(&d19)
-			if d19.Loc == scm.LocReg {
+			if d19.Loc == scm.LocReg || d19.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d19.Reg)
 			} else if d19.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d19.Reg)
@@ -91817,40 +91817,40 @@ func (s *StorageSeq) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 			} else {
 				ctx.EmitStoreToStack(d794, int32(bbs[5].PhiBase)+int32(32))
 			}
-			if d17.Loc == scm.LocReg {
+			if d17.Loc == scm.LocReg || d17.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d17.Reg)
 			} else if d17.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d17.Reg)
 				ctx.UnprotectReg(d17.Reg2)
 			}
-			if d18.Loc == scm.LocReg {
+			if d18.Loc == scm.LocReg || d18.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d18.Reg)
 			} else if d18.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d18.Reg)
 				ctx.UnprotectReg(d18.Reg2)
 			}
-			if d19.Loc == scm.LocReg {
+			if d19.Loc == scm.LocReg || d19.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d19.Reg)
 			} else if d19.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d19.Reg)
 				ctx.UnprotectReg(d19.Reg2)
 			}
 			ctx.SyncDesc(&d20)
-			if d20.Loc == scm.LocReg {
+			if d20.Loc == scm.LocReg || d20.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d20.Reg)
 			} else if d20.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d20.Reg)
 				ctx.ProtectReg(d20.Reg2)
 			}
 			ctx.SyncDesc(&d22)
-			if d22.Loc == scm.LocReg {
+			if d22.Loc == scm.LocReg || d22.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d22.Reg)
 			} else if d22.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d22.Reg)
 				ctx.ProtectReg(d22.Reg2)
 			}
 			ctx.SyncDesc(&d789)
-			if d789.Loc == scm.LocReg {
+			if d789.Loc == scm.LocReg || d789.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d789.Reg)
 			} else if d789.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d789.Reg)
@@ -91886,26 +91886,26 @@ func (s *StorageSeq) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 			} else {
 				ctx.EmitStoreToStack(d797, int32(bbs[5].PhiBase)+int32(80))
 			}
-			if d20.Loc == scm.LocReg {
+			if d20.Loc == scm.LocReg || d20.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d20.Reg)
 			} else if d20.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d20.Reg)
 				ctx.UnprotectReg(d20.Reg2)
 			}
-			if d22.Loc == scm.LocReg {
+			if d22.Loc == scm.LocReg || d22.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d22.Reg)
 			} else if d22.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d22.Reg)
 				ctx.UnprotectReg(d22.Reg2)
 			}
-			if d789.Loc == scm.LocReg {
+			if d789.Loc == scm.LocReg || d789.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d789.Reg)
 			} else if d789.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d789.Reg)
 				ctx.UnprotectReg(d789.Reg2)
 			}
 			ctx.SyncDesc(&d790)
-			if d790.Loc == scm.LocReg {
+			if d790.Loc == scm.LocReg || d790.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d790.Reg)
 			} else if d790.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d790.Reg)
@@ -91921,7 +91921,7 @@ func (s *StorageSeq) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 			} else {
 				ctx.EmitStoreToStack(d798, int32(bbs[5].PhiBase)+int32(96))
 			}
-			if d790.Loc == scm.LocReg {
+			if d790.Loc == scm.LocReg || d790.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d790.Reg)
 			} else if d790.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d790.Reg)
@@ -92577,7 +92577,8 @@ func (s *StorageSeq) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 		if d21.Loc == scm.LocImm {
 			d807 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagFloat, Imm: scm.NewFloat(float64(d21.Imm.Int()))}
 		} else {
-			r30 := ctx.AllocRegExcept(d21.Reg)
+			var r30 scm.Reg
+			r30 = ctx.AllocRegExcept(d21.Reg)
 			ctx.EmitMovRegReg(r30, d21.Reg)
 			ctx.EmitCvtInt64ToFloat64(scm.RegX0, r30)
 			d807 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagFloat, Reg: r30}
@@ -97881,7 +97882,7 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 		}
 		if ps.General {
 			ctx.SyncDesc(&d462)
-			if d462.Loc == scm.LocReg {
+			if d462.Loc == scm.LocReg || d462.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d462.Reg)
 			} else if d462.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d462.Reg)
@@ -97897,7 +97898,7 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 			} else {
 				ctx.EmitStoreToStack(d463, int32(bbs[5].PhiBase)+int32(0))
 			}
-			if d462.Loc == scm.LocReg {
+			if d462.Loc == scm.LocReg || d462.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d462.Reg)
 			} else if d462.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d462.Reg)
@@ -98275,14 +98276,14 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 		ctx.StabilizeDescForControlFlow(&d474)
 		if ps.General {
 			ctx.SyncDesc(&d468)
-			if d468.Loc == scm.LocReg {
+			if d468.Loc == scm.LocReg || d468.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d468.Reg)
 			} else if d468.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d468.Reg)
 				ctx.ProtectReg(d468.Reg2)
 			}
 			ctx.SyncDesc(&d470)
-			if d470.Loc == scm.LocReg {
+			if d470.Loc == scm.LocReg || d470.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d470.Reg)
 			} else if d470.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d470.Reg)
@@ -98320,34 +98321,34 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 			} else {
 				ctx.EmitStoreToStack(d477, int32(bbs[12].PhiBase)+int32(32))
 			}
-			if d468.Loc == scm.LocReg {
+			if d468.Loc == scm.LocReg || d468.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d468.Reg)
 			} else if d468.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d468.Reg)
 				ctx.UnprotectReg(d468.Reg2)
 			}
-			if d470.Loc == scm.LocReg {
+			if d470.Loc == scm.LocReg || d470.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d470.Reg)
 			} else if d470.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d470.Reg)
 				ctx.UnprotectReg(d470.Reg2)
 			}
 			ctx.SyncDesc(&d471)
-			if d471.Loc == scm.LocReg {
+			if d471.Loc == scm.LocReg || d471.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d471.Reg)
 			} else if d471.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d471.Reg)
 				ctx.ProtectReg(d471.Reg2)
 			}
 			ctx.SyncDesc(&d472)
-			if d472.Loc == scm.LocReg {
+			if d472.Loc == scm.LocReg || d472.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d472.Reg)
 			} else if d472.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d472.Reg)
 				ctx.ProtectReg(d472.Reg2)
 			}
 			ctx.SyncDesc(&d473)
-			if d473.Loc == scm.LocReg {
+			if d473.Loc == scm.LocReg || d473.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d473.Reg)
 			} else if d473.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d473.Reg)
@@ -98383,26 +98384,26 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 			} else {
 				ctx.EmitStoreToStack(d480, int32(bbs[12].PhiBase)+int32(80))
 			}
-			if d471.Loc == scm.LocReg {
+			if d471.Loc == scm.LocReg || d471.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d471.Reg)
 			} else if d471.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d471.Reg)
 				ctx.UnprotectReg(d471.Reg2)
 			}
-			if d472.Loc == scm.LocReg {
+			if d472.Loc == scm.LocReg || d472.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d472.Reg)
 			} else if d472.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d472.Reg)
 				ctx.UnprotectReg(d472.Reg2)
 			}
-			if d473.Loc == scm.LocReg {
+			if d473.Loc == scm.LocReg || d473.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d473.Reg)
 			} else if d473.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d473.Reg)
 				ctx.UnprotectReg(d473.Reg2)
 			}
 			ctx.SyncDesc(&d474)
-			if d474.Loc == scm.LocReg {
+			if d474.Loc == scm.LocReg || d474.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d474.Reg)
 			} else if d474.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d474.Reg)
@@ -98423,7 +98424,7 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 			} else {
 				ctx.EmitStoreToStack(scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(0)}, int32(bbs[12].PhiBase)+int32(112))
 			}
-			if d474.Loc == scm.LocReg {
+			if d474.Loc == scm.LocReg || d474.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d474.Reg)
 			} else if d474.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d474.Reg)
@@ -100791,21 +100792,21 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 		ctx.StabilizeDescForControlFlow(&d704)
 		if ps.General {
 			ctx.SyncDesc(&d23)
-			if d23.Loc == scm.LocReg {
+			if d23.Loc == scm.LocReg || d23.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d23.Reg)
 			} else if d23.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d23.Reg)
 				ctx.ProtectReg(d23.Reg2)
 			}
 			ctx.SyncDesc(&d24)
-			if d24.Loc == scm.LocReg {
+			if d24.Loc == scm.LocReg || d24.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d24.Reg)
 			} else if d24.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d24.Reg)
 				ctx.ProtectReg(d24.Reg2)
 			}
 			ctx.SyncDesc(&d25)
-			if d25.Loc == scm.LocReg {
+			if d25.Loc == scm.LocReg || d25.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d25.Reg)
 			} else if d25.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d25.Reg)
@@ -100848,40 +100849,40 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 			} else {
 				ctx.EmitStoreToStack(d709, int32(bbs[17].PhiBase)+int32(32))
 			}
-			if d23.Loc == scm.LocReg {
+			if d23.Loc == scm.LocReg || d23.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d23.Reg)
 			} else if d23.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d23.Reg)
 				ctx.UnprotectReg(d23.Reg2)
 			}
-			if d24.Loc == scm.LocReg {
+			if d24.Loc == scm.LocReg || d24.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d24.Reg)
 			} else if d24.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d24.Reg)
 				ctx.UnprotectReg(d24.Reg2)
 			}
-			if d25.Loc == scm.LocReg {
+			if d25.Loc == scm.LocReg || d25.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d25.Reg)
 			} else if d25.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d25.Reg)
 				ctx.UnprotectReg(d25.Reg2)
 			}
 			ctx.SyncDesc(&d26)
-			if d26.Loc == scm.LocReg {
+			if d26.Loc == scm.LocReg || d26.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d26.Reg)
 			} else if d26.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d26.Reg)
 				ctx.ProtectReg(d26.Reg2)
 			}
 			ctx.SyncDesc(&d27)
-			if d27.Loc == scm.LocReg {
+			if d27.Loc == scm.LocReg || d27.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d27.Reg)
 			} else if d27.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d27.Reg)
 				ctx.ProtectReg(d27.Reg2)
 			}
 			ctx.SyncDesc(&d28)
-			if d28.Loc == scm.LocReg {
+			if d28.Loc == scm.LocReg || d28.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d28.Reg)
 			} else if d28.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d28.Reg)
@@ -100917,19 +100918,19 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 			} else {
 				ctx.EmitStoreToStack(d712, int32(bbs[17].PhiBase)+int32(80))
 			}
-			if d26.Loc == scm.LocReg {
+			if d26.Loc == scm.LocReg || d26.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d26.Reg)
 			} else if d26.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d26.Reg)
 				ctx.UnprotectReg(d26.Reg2)
 			}
-			if d27.Loc == scm.LocReg {
+			if d27.Loc == scm.LocReg || d27.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d27.Reg)
 			} else if d27.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d27.Reg)
 				ctx.UnprotectReg(d27.Reg2)
 			}
-			if d28.Loc == scm.LocReg {
+			if d28.Loc == scm.LocReg || d28.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d28.Reg)
 			} else if d28.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d28.Reg)
@@ -101987,21 +101988,21 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 		ctx.StabilizeDescForControlFlow(&d726)
 		if ps.General {
 			ctx.SyncDesc(&d720)
-			if d720.Loc == scm.LocReg {
+			if d720.Loc == scm.LocReg || d720.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d720.Reg)
 			} else if d720.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d720.Reg)
 				ctx.ProtectReg(d720.Reg2)
 			}
 			ctx.SyncDesc(&d722)
-			if d722.Loc == scm.LocReg {
+			if d722.Loc == scm.LocReg || d722.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d722.Reg)
 			} else if d722.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d722.Reg)
 				ctx.ProtectReg(d722.Reg2)
 			}
 			ctx.SyncDesc(&d723)
-			if d723.Loc == scm.LocReg {
+			if d723.Loc == scm.LocReg || d723.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d723.Reg)
 			} else if d723.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d723.Reg)
@@ -102037,40 +102038,40 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 			} else {
 				ctx.EmitStoreToStack(d729, int32(bbs[17].PhiBase)+int32(32))
 			}
-			if d720.Loc == scm.LocReg {
+			if d720.Loc == scm.LocReg || d720.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d720.Reg)
 			} else if d720.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d720.Reg)
 				ctx.UnprotectReg(d720.Reg2)
 			}
-			if d722.Loc == scm.LocReg {
+			if d722.Loc == scm.LocReg || d722.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d722.Reg)
 			} else if d722.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d722.Reg)
 				ctx.UnprotectReg(d722.Reg2)
 			}
-			if d723.Loc == scm.LocReg {
+			if d723.Loc == scm.LocReg || d723.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d723.Reg)
 			} else if d723.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d723.Reg)
 				ctx.UnprotectReg(d723.Reg2)
 			}
 			ctx.SyncDesc(&d724)
-			if d724.Loc == scm.LocReg {
+			if d724.Loc == scm.LocReg || d724.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d724.Reg)
 			} else if d724.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d724.Reg)
 				ctx.ProtectReg(d724.Reg2)
 			}
 			ctx.SyncDesc(&d725)
-			if d725.Loc == scm.LocReg {
+			if d725.Loc == scm.LocReg || d725.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d725.Reg)
 			} else if d725.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d725.Reg)
 				ctx.ProtectReg(d725.Reg2)
 			}
 			ctx.SyncDesc(&d726)
-			if d726.Loc == scm.LocReg {
+			if d726.Loc == scm.LocReg || d726.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d726.Reg)
 			} else if d726.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d726.Reg)
@@ -102106,19 +102107,19 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 			} else {
 				ctx.EmitStoreToStack(d732, int32(bbs[17].PhiBase)+int32(80))
 			}
-			if d724.Loc == scm.LocReg {
+			if d724.Loc == scm.LocReg || d724.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d724.Reg)
 			} else if d724.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d724.Reg)
 				ctx.UnprotectReg(d724.Reg2)
 			}
-			if d725.Loc == scm.LocReg {
+			if d725.Loc == scm.LocReg || d725.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d725.Reg)
 			} else if d725.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d725.Reg)
 				ctx.UnprotectReg(d725.Reg2)
 			}
-			if d726.Loc == scm.LocReg {
+			if d726.Loc == scm.LocReg || d726.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d726.Reg)
 			} else if d726.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d726.Reg)
@@ -107258,21 +107259,21 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 		}
 		if ps.General {
 			ctx.SyncDesc(&d30)
-			if d30.Loc == scm.LocReg {
+			if d30.Loc == scm.LocReg || d30.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d30.Reg)
 			} else if d30.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d30.Reg)
 				ctx.ProtectReg(d30.Reg2)
 			}
 			ctx.SyncDesc(&d31)
-			if d31.Loc == scm.LocReg {
+			if d31.Loc == scm.LocReg || d31.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d31.Reg)
 			} else if d31.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d31.Reg)
 				ctx.ProtectReg(d31.Reg2)
 			}
 			ctx.SyncDesc(&d1307)
-			if d1307.Loc == scm.LocReg {
+			if d1307.Loc == scm.LocReg || d1307.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d1307.Reg)
 			} else if d1307.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d1307.Reg)
@@ -107315,40 +107316,40 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 			} else {
 				ctx.EmitStoreToStack(d1312, int32(bbs[12].PhiBase)+int32(32))
 			}
-			if d30.Loc == scm.LocReg {
+			if d30.Loc == scm.LocReg || d30.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d30.Reg)
 			} else if d30.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d30.Reg)
 				ctx.UnprotectReg(d30.Reg2)
 			}
-			if d31.Loc == scm.LocReg {
+			if d31.Loc == scm.LocReg || d31.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d31.Reg)
 			} else if d31.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d31.Reg)
 				ctx.UnprotectReg(d31.Reg2)
 			}
-			if d1307.Loc == scm.LocReg {
+			if d1307.Loc == scm.LocReg || d1307.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d1307.Reg)
 			} else if d1307.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d1307.Reg)
 				ctx.UnprotectReg(d1307.Reg2)
 			}
 			ctx.SyncDesc(&d32)
-			if d32.Loc == scm.LocReg {
+			if d32.Loc == scm.LocReg || d32.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d32.Reg)
 			} else if d32.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d32.Reg)
 				ctx.ProtectReg(d32.Reg2)
 			}
 			ctx.SyncDesc(&d33)
-			if d33.Loc == scm.LocReg {
+			if d33.Loc == scm.LocReg || d33.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d33.Reg)
 			} else if d33.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d33.Reg)
 				ctx.ProtectReg(d33.Reg2)
 			}
 			ctx.SyncDesc(&d34)
-			if d34.Loc == scm.LocReg {
+			if d34.Loc == scm.LocReg || d34.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d34.Reg)
 			} else if d34.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d34.Reg)
@@ -107384,33 +107385,33 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 			} else {
 				ctx.EmitStoreToStack(d1315, int32(bbs[12].PhiBase)+int32(80))
 			}
-			if d32.Loc == scm.LocReg {
+			if d32.Loc == scm.LocReg || d32.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d32.Reg)
 			} else if d32.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d32.Reg)
 				ctx.UnprotectReg(d32.Reg2)
 			}
-			if d33.Loc == scm.LocReg {
+			if d33.Loc == scm.LocReg || d33.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d33.Reg)
 			} else if d33.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d33.Reg)
 				ctx.UnprotectReg(d33.Reg2)
 			}
-			if d34.Loc == scm.LocReg {
+			if d34.Loc == scm.LocReg || d34.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d34.Reg)
 			} else if d34.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d34.Reg)
 				ctx.UnprotectReg(d34.Reg2)
 			}
 			ctx.SyncDesc(&d35)
-			if d35.Loc == scm.LocReg {
+			if d35.Loc == scm.LocReg || d35.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d35.Reg)
 			} else if d35.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d35.Reg)
 				ctx.ProtectReg(d35.Reg2)
 			}
 			ctx.SyncDesc(&d1308)
-			if d1308.Loc == scm.LocReg {
+			if d1308.Loc == scm.LocReg || d1308.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d1308.Reg)
 			} else if d1308.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d1308.Reg)
@@ -107436,13 +107437,13 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 			} else {
 				ctx.EmitStoreToStack(d1317, int32(bbs[12].PhiBase)+int32(112))
 			}
-			if d35.Loc == scm.LocReg {
+			if d35.Loc == scm.LocReg || d35.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d35.Reg)
 			} else if d35.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d35.Reg)
 				ctx.UnprotectReg(d35.Reg2)
 			}
-			if d1308.Loc == scm.LocReg {
+			if d1308.Loc == scm.LocReg || d1308.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d1308.Reg)
 			} else if d1308.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d1308.Reg)
@@ -108353,8 +108354,9 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 		if d1329.Loc == scm.LocImm {
 			d1330 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagFloat, Imm: scm.NewFloat(float64(d1329.Imm.Int()))}
 		} else {
-			r38 := ctx.AllocRegExcept(d1329.Reg)
-			ctx.EmitMovRegReg(r38, d1329.Reg)
+			var r38 scm.Reg
+			r38 = d1329.Reg
+			d1329.Loc = scm.LocNone
 			ctx.EmitCvtInt64ToFloat64(scm.RegX0, r38)
 			d1330 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagFloat, Reg: r38}
 			ctx.BindReg(r38, &d1330)
@@ -115501,14 +115503,14 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 		}
 		if ps.General {
 			ctx.SyncDesc(&d2078)
-			if d2078.Loc == scm.LocReg {
+			if d2078.Loc == scm.LocReg || d2078.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d2078.Reg)
 			} else if d2078.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d2078.Reg)
 				ctx.ProtectReg(d2078.Reg2)
 			}
 			ctx.SyncDesc(&d2079)
-			if d2079.Loc == scm.LocReg {
+			if d2079.Loc == scm.LocReg || d2079.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d2079.Reg)
 			} else if d2079.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d2079.Reg)
@@ -115534,13 +115536,13 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 			} else {
 				ctx.EmitStoreToStack(d2081, int32(bbs[21].PhiBase)+int32(16))
 			}
-			if d2078.Loc == scm.LocReg {
+			if d2078.Loc == scm.LocReg || d2078.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d2078.Reg)
 			} else if d2078.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d2078.Reg)
 				ctx.UnprotectReg(d2078.Reg2)
 			}
-			if d2079.Loc == scm.LocReg {
+			if d2079.Loc == scm.LocReg || d2079.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d2079.Reg)
 			} else if d2079.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d2079.Reg)
@@ -116558,8 +116560,9 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 		if d2088.Loc == scm.LocImm {
 			d2089 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagFloat, Imm: scm.NewFloat(float64(d2088.Imm.Int()))}
 		} else {
-			r49 := ctx.AllocRegExcept(d2088.Reg)
-			ctx.EmitMovRegReg(r49, d2088.Reg)
+			var r49 scm.Reg
+			r49 = d2088.Reg
+			d2088.Loc = scm.LocNone
 			ctx.EmitCvtInt64ToFloat64(scm.RegX0, r49)
 			d2089 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagFloat, Reg: r49}
 			ctx.BindReg(r49, &d2089)
@@ -117981,14 +117984,14 @@ func (s *OverlayBlob) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, ta
 		}
 		if ps.General {
 			ctx.SyncDesc(&d99)
-			if d99.Loc == scm.LocReg {
+			if d99.Loc == scm.LocReg || d99.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d99.Reg)
 			} else if d99.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d99.Reg)
 				ctx.ProtectReg(d99.Reg2)
 			}
 			ctx.SyncDesc(&d100)
-			if d100.Loc == scm.LocReg {
+			if d100.Loc == scm.LocReg || d100.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d100.Reg)
 			} else if d100.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d100.Reg)
@@ -118014,13 +118017,13 @@ func (s *OverlayBlob) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, ta
 			} else {
 				ctx.EmitStoreToStack(d102, int32(bbs[3].PhiBase)+int32(16))
 			}
-			if d99.Loc == scm.LocReg {
+			if d99.Loc == scm.LocReg || d99.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d99.Reg)
 			} else if d99.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d99.Reg)
 				ctx.UnprotectReg(d99.Reg2)
 			}
-			if d100.Loc == scm.LocReg {
+			if d100.Loc == scm.LocReg || d100.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d100.Reg)
 			} else if d100.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d100.Reg)
@@ -119411,14 +119414,14 @@ func (s *OverlayBlob) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, 
 		}
 		if ps.General {
 			ctx.SyncDesc(&d45)
-			if d45.Loc == scm.LocReg {
+			if d45.Loc == scm.LocReg || d45.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d45.Reg)
 			} else if d45.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d45.Reg)
 				ctx.ProtectReg(d45.Reg2)
 			}
 			ctx.SyncDesc(&d105)
-			if d105.Loc == scm.LocReg {
+			if d105.Loc == scm.LocReg || d105.Loc == scm.LocFPReg {
 				ctx.ProtectReg(d105.Reg)
 			} else if d105.Loc == scm.LocRegPair {
 				ctx.ProtectReg(d105.Reg)
@@ -119444,13 +119447,13 @@ func (s *OverlayBlob) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, 
 			} else {
 				ctx.EmitStoreToStack(d107, int32(bbs[3].PhiBase)+int32(16))
 			}
-			if d45.Loc == scm.LocReg {
+			if d45.Loc == scm.LocReg || d45.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d45.Reg)
 			} else if d45.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d45.Reg)
 				ctx.UnprotectReg(d45.Reg2)
 			}
-			if d105.Loc == scm.LocReg {
+			if d105.Loc == scm.LocReg || d105.Loc == scm.LocFPReg {
 				ctx.UnprotectReg(d105.Reg)
 			} else if d105.Loc == scm.LocRegPair {
 				ctx.UnprotectReg(d105.Reg)

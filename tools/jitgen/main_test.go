@@ -17,12 +17,14 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 package main
 
 import (
+	"bytes"
 	"go/ast"
 	"go/constant"
 	"go/importer"
 	"go/parser"
 	"go/token"
 	"go/types"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -30,10 +32,36 @@ import (
 	"golang.org/x/tools/go/ssa/ssautil"
 )
 
+func TestGeneratedEmitterOverlayHidesReusableHelperBodies(t *testing.T) {
+	fset := token.NewFileSet()
+	parsed, err := parser.ParseFile(fset, "../../scm/compare.go", nil, parser.ParseComments)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if helpers := collectJITHelpers(parsed, "../../scm/compare.go"); len(helpers) != 1 {
+		t.Fatalf("got %d reusable helpers", len(helpers))
+	}
+	overlay, _, err := generatedEmitterOverlay("../../scm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, err := filepath.Abs("../../scm/compare.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	generated := overlay[path]
+	if len(generated) == 0 {
+		t.Fatal("compare.go has no generated overlay")
+	}
+	if bytes.Contains(generated, []byte("*bson.RawValue")) {
+		t.Fatal("generated jitEmitLess body remained visible to SSA")
+	}
+}
+
 func buildTestSSAFunction(t *testing.T, source, name string) *ssa.Function {
 	t.Helper()
 	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, "sample.go", source, 0)
+	file, err := parser.ParseFile(fset, "sample.go", source, parser.ParseComments)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,6 +75,33 @@ func buildTestSSAFunction(t *testing.T, source, name string) *ssa.Function {
 		t.Fatalf("SSA function %q not found", name)
 	}
 	return fn
+}
+
+func TestAnnotatedHelperCallInvokesEmitterInsteadOfNativeFunction(t *testing.T) {
+	fn := buildTestSSAFunction(t, `package sample
+type Scmer struct{}
+func NewBool(bool) Scmer
+func (Scmer) Int() int64
+//jitgen:emitter jitEmitLess
+func Less(a, b Scmer) bool { return a.Int() < b.Int() }
+func compare(a ...Scmer) Scmer {
+	if a[0].Int() == 0 { return NewBool(false) }
+	return NewBool(Less(a[0], a[1]))
+}
+`, "compare")
+	code, errMsg := generateClosure("compare", fn, nil)
+	if errMsg != "" {
+		t.Fatal(errMsg)
+	}
+	if !strings.Contains(code, "jitEmitLess(ctx, []JITValueDesc{") {
+		t.Fatalf("annotated helper did not invoke its generated emitter:\n%s", code)
+	}
+	if strings.Contains(code, "GoFuncAddr(Less)") {
+		t.Fatalf("annotated helper retained a native Less call boundary:\n%s", code)
+	}
+	if !strings.Contains(code, "result.Loc == LocRegPair") || !strings.Contains(code, "Reg: result.Reg2") {
+		t.Fatalf("guarded helper return did not inherit the caller's payload register:\n%s", code)
+	}
 }
 
 func TestFallbackClosureUsesGeneratedCallBoundary(t *testing.T) {
