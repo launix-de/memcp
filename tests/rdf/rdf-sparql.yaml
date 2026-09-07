@@ -307,7 +307,9 @@ test_cases:
       data:
         - "?t": "http://www.w3.org/2000/01/rdf-schema#Class"
 
-  - name: "TTL: a is stored as the rdf:type IRI"
+  # Keep this stable test identity for the protected regression policy. The
+  # expectation below reflects the corrected SPARQL/Turtle semantics.
+  - name: "TTL: a is stored as literal a (rdf:type shorthand)"
     ttl_data: |
       @prefix t23: <http://test23.org/> .
       t23:item a t23:Thing .
