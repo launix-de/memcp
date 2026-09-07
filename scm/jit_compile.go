@@ -3007,6 +3007,7 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 	if expr.GetTag() == tagSourceInfo {
 		si := expr.SourceInfo()
 		if ctx.Arena != nil && si.source != "" {
+			ctx.FlushRegisterMoves()
 			codeOffset := int32(uintptr(ctx.Ptr) - uintptr(ctx.Arena.base))
 			ctx.Arena.addSourceEntry(jitSourceEntry{
 				offset: codeOffset,

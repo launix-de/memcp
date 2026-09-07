@@ -679,6 +679,7 @@ func init_strings() {
 							return result
 						}
 						bbs[0].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[0].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_0 = bbs[0].Address
 						ctx.MarkLabel(lbl1)
@@ -905,6 +906,7 @@ func init_strings() {
 							return result
 						}
 						bbs[1].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[1].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_1 = bbs[1].Address
 						ctx.MarkLabel(lbl2)
@@ -1100,6 +1102,7 @@ func init_strings() {
 							return result
 						}
 						bbs[2].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[2].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_2 = bbs[2].Address
 						ctx.MarkLabel(lbl3)
@@ -1500,6 +1503,7 @@ func init_strings() {
 							return result
 						}
 						bbs[0].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[0].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_0 = bbs[0].Address
 						ctx.MarkLabel(lbl1)
@@ -1635,6 +1639,7 @@ func init_strings() {
 							return result
 						}
 						bbs[1].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[1].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_1 = bbs[1].Address
 						ctx.MarkLabel(lbl2)
@@ -1702,6 +1707,7 @@ func init_strings() {
 							return result
 						}
 						bbs[2].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[2].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_2 = bbs[2].Address
 						ctx.MarkLabel(lbl3)
@@ -2124,6 +2130,7 @@ func init_strings() {
 							return result
 						}
 						bbs[3].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[3].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_3 = bbs[3].Address
 						ctx.MarkLabel(lbl4)
@@ -2254,6 +2261,7 @@ func init_strings() {
 							return result
 						}
 						bbs[4].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[4].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_4 = bbs[4].Address
 						ctx.MarkLabel(lbl5)
@@ -2672,6 +2680,7 @@ func init_strings() {
 							return result
 						}
 						bbs[5].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[5].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_5 = bbs[5].Address
 						ctx.MarkLabel(lbl6)
@@ -2782,6 +2791,7 @@ func init_strings() {
 							return result
 						}
 						bbs[6].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[6].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_6 = bbs[6].Address
 						ctx.MarkLabel(lbl7)
@@ -3237,6 +3247,7 @@ func init_strings() {
 							return result
 						}
 						bbs[7].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[7].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_7 = bbs[7].Address
 						ctx.MarkLabel(lbl8)
@@ -3927,6 +3938,7 @@ func init_strings() {
 							return result
 						}
 						bbs[8].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[8].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_8 = bbs[8].Address
 						ctx.MarkLabel(lbl9)
@@ -4149,6 +4161,7 @@ func init_strings() {
 							return result
 						}
 						bbs[9].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[9].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_9 = bbs[9].Address
 						ctx.MarkLabel(lbl10)
@@ -4427,6 +4440,7 @@ func init_strings() {
 							return result
 						}
 						bbs[10].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[10].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_10 = bbs[10].Address
 						ctx.MarkLabel(lbl11)
@@ -5151,6 +5165,7 @@ func init_strings() {
 							return result
 						}
 						bbs[11].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[11].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_11 = bbs[11].Address
 						ctx.MarkLabel(lbl12)
@@ -5342,6 +5357,7 @@ func init_strings() {
 							return result
 						}
 						bbs[12].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[12].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_12 = bbs[12].Address
 						ctx.MarkLabel(lbl13)
@@ -5972,6 +5988,7 @@ func init_strings() {
 							return result
 						}
 						bbs[0].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[0].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_0 = bbs[0].Address
 						ctx.MarkLabel(lbl1)
@@ -6094,6 +6111,7 @@ func init_strings() {
 							return result
 						}
 						bbs[1].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[1].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_1 = bbs[1].Address
 						ctx.MarkLabel(lbl2)
@@ -6157,6 +6175,7 @@ func init_strings() {
 							return result
 						}
 						bbs[2].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[2].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_2 = bbs[2].Address
 						ctx.MarkLabel(lbl3)
@@ -6447,6 +6466,7 @@ func init_strings() {
 							return result
 						}
 						bbs[3].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[3].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_3 = bbs[3].Address
 						ctx.MarkLabel(lbl4)
@@ -6761,6 +6781,7 @@ func init_strings() {
 							return result
 						}
 						bbs[4].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[4].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_4 = bbs[4].Address
 						ctx.MarkLabel(lbl5)
@@ -6971,6 +6992,7 @@ func init_strings() {
 							return result
 						}
 						bbs[5].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[5].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_5 = bbs[5].Address
 						ctx.MarkLabel(lbl6)
@@ -7280,6 +7302,7 @@ func init_strings() {
 							return result
 						}
 						bbs[0].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[0].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_0 = bbs[0].Address
 						ctx.MarkLabel(lbl1)
@@ -7389,6 +7412,7 @@ func init_strings() {
 							return result
 						}
 						bbs[1].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[1].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_1 = bbs[1].Address
 						ctx.MarkLabel(lbl2)
@@ -7448,6 +7472,7 @@ func init_strings() {
 							return result
 						}
 						bbs[2].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[2].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_2 = bbs[2].Address
 						ctx.MarkLabel(lbl3)
@@ -7595,6 +7620,7 @@ func init_strings() {
 							return result
 						}
 						bbs[3].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[3].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_3 = bbs[3].Address
 						ctx.MarkLabel(lbl4)
@@ -8622,6 +8648,7 @@ func init_strings() {
 							return result
 						}
 						bbs[0].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[0].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_0 = bbs[0].Address
 						ctx.MarkLabel(lbl1)
@@ -8731,6 +8758,7 @@ func init_strings() {
 							return result
 						}
 						bbs[1].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[1].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_1 = bbs[1].Address
 						ctx.MarkLabel(lbl2)
@@ -8790,6 +8818,7 @@ func init_strings() {
 							return result
 						}
 						bbs[2].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[2].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_2 = bbs[2].Address
 						ctx.MarkLabel(lbl3)
@@ -8965,6 +8994,7 @@ func init_strings() {
 							return result
 						}
 						bbs[0].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[0].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_0 = bbs[0].Address
 						ctx.MarkLabel(lbl1)
@@ -9074,6 +9104,7 @@ func init_strings() {
 							return result
 						}
 						bbs[1].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[1].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_1 = bbs[1].Address
 						ctx.MarkLabel(lbl2)
@@ -9133,6 +9164,7 @@ func init_strings() {
 							return result
 						}
 						bbs[2].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[2].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_2 = bbs[2].Address
 						ctx.MarkLabel(lbl3)
@@ -9337,6 +9369,7 @@ func init_strings() {
 							return result
 						}
 						bbs[0].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[0].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_0 = bbs[0].Address
 						ctx.MarkLabel(lbl1)
@@ -9446,6 +9479,7 @@ func init_strings() {
 							return result
 						}
 						bbs[1].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[1].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_1 = bbs[1].Address
 						ctx.MarkLabel(lbl2)
@@ -9505,6 +9539,7 @@ func init_strings() {
 							return result
 						}
 						bbs[2].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[2].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_2 = bbs[2].Address
 						ctx.MarkLabel(lbl3)
@@ -9777,6 +9812,7 @@ func init_strings() {
 							return result
 						}
 						bbs[0].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[0].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_0 = bbs[0].Address
 						ctx.MarkLabel(lbl1)
@@ -9926,6 +9962,7 @@ func init_strings() {
 							return result
 						}
 						bbs[1].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[1].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_1 = bbs[1].Address
 						ctx.MarkLabel(lbl2)
@@ -10049,6 +10086,7 @@ func init_strings() {
 							return result
 						}
 						bbs[2].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[2].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_2 = bbs[2].Address
 						ctx.MarkLabel(lbl3)
@@ -10278,6 +10316,7 @@ func init_strings() {
 							return result
 						}
 						bbs[3].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[3].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_3 = bbs[3].Address
 						ctx.MarkLabel(lbl4)
@@ -10698,6 +10737,7 @@ func init_strings() {
 							return result
 						}
 						bbs[4].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[4].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_4 = bbs[4].Address
 						ctx.MarkLabel(lbl5)
@@ -10886,6 +10926,7 @@ func init_strings() {
 							return result
 						}
 						bbs[5].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[5].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_5 = bbs[5].Address
 						ctx.MarkLabel(lbl6)
@@ -11143,6 +11184,7 @@ func init_strings() {
 							return result
 						}
 						bbs[0].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[0].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_0 = bbs[0].Address
 						ctx.MarkLabel(lbl1)
@@ -11252,6 +11294,7 @@ func init_strings() {
 							return result
 						}
 						bbs[1].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[1].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_1 = bbs[1].Address
 						ctx.MarkLabel(lbl2)
@@ -11311,6 +11354,7 @@ func init_strings() {
 							return result
 						}
 						bbs[2].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[2].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_2 = bbs[2].Address
 						ctx.MarkLabel(lbl3)
@@ -11539,6 +11583,7 @@ func init_strings() {
 							return result
 						}
 						bbs[3].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[3].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_3 = bbs[3].Address
 						ctx.MarkLabel(lbl4)
@@ -11599,6 +11644,7 @@ func init_strings() {
 							return result
 						}
 						bbs[4].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[4].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_4 = bbs[4].Address
 						ctx.MarkLabel(lbl5)
@@ -12231,6 +12277,7 @@ func init_strings() {
 							return result
 						}
 						bbs[0].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[0].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_0 = bbs[0].Address
 						ctx.MarkLabel(lbl1)
@@ -12429,6 +12476,7 @@ func init_strings() {
 							return result
 						}
 						bbs[1].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[1].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_1 = bbs[1].Address
 						ctx.MarkLabel(lbl2)
@@ -12474,6 +12522,7 @@ func init_strings() {
 							return result
 						}
 						bbs[2].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[2].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_2 = bbs[2].Address
 						ctx.MarkLabel(lbl3)
@@ -12601,6 +12650,7 @@ func init_strings() {
 							return result
 						}
 						bbs[0].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[0].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_0 = bbs[0].Address
 						ctx.MarkLabel(lbl1)
@@ -12785,6 +12835,7 @@ func init_strings() {
 							return result
 						}
 						bbs[1].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[1].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_1 = bbs[1].Address
 						ctx.MarkLabel(lbl2)
@@ -12827,6 +12878,7 @@ func init_strings() {
 							return result
 						}
 						bbs[2].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[2].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_2 = bbs[2].Address
 						ctx.MarkLabel(lbl3)
@@ -13070,6 +13122,7 @@ func init_strings() {
 							return result
 						}
 						bbs[0].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[0].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_0 = bbs[0].Address
 						ctx.MarkLabel(lbl1)
@@ -13179,6 +13232,7 @@ func init_strings() {
 							return result
 						}
 						bbs[1].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[1].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_1 = bbs[1].Address
 						ctx.MarkLabel(lbl2)
@@ -13238,6 +13292,7 @@ func init_strings() {
 							return result
 						}
 						bbs[2].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[2].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_2 = bbs[2].Address
 						ctx.MarkLabel(lbl3)
@@ -13601,6 +13656,7 @@ func init_strings() {
 							return result
 						}
 						bbs[3].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[3].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_3 = bbs[3].Address
 						ctx.MarkLabel(lbl4)
@@ -13902,6 +13958,7 @@ func init_strings() {
 							return result
 						}
 						bbs[4].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[4].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_4 = bbs[4].Address
 						ctx.MarkLabel(lbl5)
@@ -13986,6 +14043,7 @@ func init_strings() {
 							return result
 						}
 						bbs[5].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[5].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_5 = bbs[5].Address
 						ctx.MarkLabel(lbl6)
@@ -14770,6 +14828,7 @@ func init_strings() {
 							return result
 						}
 						bbs[0].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[0].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_0 = bbs[0].Address
 						ctx.MarkLabel(lbl1)
@@ -15009,6 +15068,7 @@ func init_strings() {
 							return result
 						}
 						bbs[1].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[1].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_1 = bbs[1].Address
 						ctx.MarkLabel(lbl2)
@@ -15060,6 +15120,7 @@ func init_strings() {
 							return result
 						}
 						bbs[2].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[2].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_2 = bbs[2].Address
 						ctx.MarkLabel(lbl3)
@@ -15260,6 +15321,7 @@ func init_strings() {
 							return result
 						}
 						bbs[0].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[0].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_0 = bbs[0].Address
 						ctx.MarkLabel(lbl1)
@@ -15504,6 +15566,7 @@ func init_strings() {
 							return result
 						}
 						bbs[1].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[1].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_1 = bbs[1].Address
 						ctx.MarkLabel(lbl2)
@@ -15555,6 +15618,7 @@ func init_strings() {
 							return result
 						}
 						bbs[2].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[2].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_2 = bbs[2].Address
 						ctx.MarkLabel(lbl3)
@@ -15854,6 +15918,7 @@ func init_strings() {
 							return result
 						}
 						bbs[0].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[0].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_0 = bbs[0].Address
 						ctx.MarkLabel(lbl1)
@@ -16067,6 +16132,7 @@ func init_strings() {
 							return result
 						}
 						bbs[1].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[1].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_1 = bbs[1].Address
 						ctx.MarkLabel(lbl2)
@@ -16115,6 +16181,7 @@ func init_strings() {
 							return result
 						}
 						bbs[2].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[2].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_2 = bbs[2].Address
 						ctx.MarkLabel(lbl3)
@@ -16324,6 +16391,7 @@ func init_strings() {
 							return result
 						}
 						bbs[0].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[0].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_0 = bbs[0].Address
 						ctx.MarkLabel(lbl1)
@@ -16456,6 +16524,7 @@ func init_strings() {
 							return result
 						}
 						bbs[1].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[1].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_1 = bbs[1].Address
 						ctx.MarkLabel(lbl2)
@@ -16734,6 +16803,7 @@ func init_strings() {
 							return result
 						}
 						bbs[2].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[2].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_2 = bbs[2].Address
 						ctx.MarkLabel(lbl3)
@@ -17054,6 +17124,7 @@ func init_strings() {
 							return result
 						}
 						bbs[3].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[3].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_3 = bbs[3].Address
 						ctx.MarkLabel(lbl4)
@@ -17355,6 +17426,7 @@ func init_strings() {
 							return result
 						}
 						bbs[0].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[0].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_0 = bbs[0].Address
 						ctx.MarkLabel(lbl1)
@@ -17487,6 +17559,7 @@ func init_strings() {
 							return result
 						}
 						bbs[1].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[1].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_1 = bbs[1].Address
 						ctx.MarkLabel(lbl2)
@@ -17765,6 +17838,7 @@ func init_strings() {
 							return result
 						}
 						bbs[2].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[2].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_2 = bbs[2].Address
 						ctx.MarkLabel(lbl3)
@@ -18085,6 +18159,7 @@ func init_strings() {
 							return result
 						}
 						bbs[3].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[3].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_3 = bbs[3].Address
 						ctx.MarkLabel(lbl4)
@@ -18314,6 +18389,7 @@ func init_strings() {
 							return result
 						}
 						bbs[0].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[0].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_0 = bbs[0].Address
 						ctx.MarkLabel(lbl1)
@@ -18512,6 +18588,7 @@ func init_strings() {
 							return result
 						}
 						bbs[1].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[1].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_1 = bbs[1].Address
 						ctx.MarkLabel(lbl2)
@@ -18557,6 +18634,7 @@ func init_strings() {
 							return result
 						}
 						bbs[2].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[2].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_2 = bbs[2].Address
 						ctx.MarkLabel(lbl3)
@@ -18685,6 +18763,7 @@ func init_strings() {
 							return result
 						}
 						bbs[0].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[0].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_0 = bbs[0].Address
 						ctx.MarkLabel(lbl1)
@@ -18810,6 +18889,7 @@ func init_strings() {
 							return result
 						}
 						bbs[1].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[1].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_1 = bbs[1].Address
 						ctx.MarkLabel(lbl2)
@@ -18846,6 +18926,7 @@ func init_strings() {
 							return result
 						}
 						bbs[2].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[2].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_2 = bbs[2].Address
 						ctx.MarkLabel(lbl3)
@@ -19037,6 +19118,7 @@ func init_strings() {
 							return result
 						}
 						bbs[0].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[0].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_0 = bbs[0].Address
 						ctx.MarkLabel(lbl1)
@@ -19205,6 +19287,7 @@ func init_strings() {
 							return result
 						}
 						bbs[1].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[1].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_1 = bbs[1].Address
 						ctx.MarkLabel(lbl2)
@@ -19247,6 +19330,7 @@ func init_strings() {
 							return result
 						}
 						bbs[2].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[2].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_2 = bbs[2].Address
 						ctx.MarkLabel(lbl3)
@@ -19431,6 +19515,7 @@ func init_strings() {
 							return result
 						}
 						bbs[3].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[3].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_3 = bbs[3].Address
 						ctx.MarkLabel(lbl4)
@@ -19669,6 +19754,7 @@ func init_strings() {
 							return result
 						}
 						bbs[4].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[4].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_4 = bbs[4].Address
 						ctx.MarkLabel(lbl5)
@@ -19741,6 +19827,7 @@ func init_strings() {
 							return result
 						}
 						bbs[5].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[5].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_5 = bbs[5].Address
 						ctx.MarkLabel(lbl6)
@@ -20070,6 +20157,7 @@ func init_strings() {
 							return result
 						}
 						bbs[0].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[0].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_0 = bbs[0].Address
 						ctx.MarkLabel(lbl1)
@@ -20175,6 +20263,7 @@ func init_strings() {
 							return result
 						}
 						bbs[1].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[1].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_1 = bbs[1].Address
 						ctx.MarkLabel(lbl2)
@@ -20208,6 +20297,7 @@ func init_strings() {
 							return result
 						}
 						bbs[2].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[2].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_2 = bbs[2].Address
 						ctx.MarkLabel(lbl3)
@@ -20387,6 +20477,7 @@ func init_strings() {
 							return result
 						}
 						bbs[3].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[3].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_3 = bbs[3].Address
 						ctx.MarkLabel(lbl4)
@@ -20588,6 +20679,7 @@ func init_strings() {
 							return result
 						}
 						bbs[4].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[4].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_4 = bbs[4].Address
 						ctx.MarkLabel(lbl5)
@@ -20694,6 +20786,7 @@ func init_strings() {
 							return result
 						}
 						bbs[5].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[5].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_5 = bbs[5].Address
 						ctx.MarkLabel(lbl6)
@@ -20792,6 +20885,7 @@ func init_strings() {
 							return result
 						}
 						bbs[6].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[6].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_6 = bbs[6].Address
 						ctx.MarkLabel(lbl7)
@@ -20907,6 +21001,7 @@ func init_strings() {
 							return result
 						}
 						bbs[7].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[7].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_7 = bbs[7].Address
 						ctx.MarkLabel(lbl8)
@@ -21867,6 +21962,7 @@ func init_strings() {
 							return result
 						}
 						bbs[0].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[0].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_0 = bbs[0].Address
 						ctx.MarkLabel(lbl1)
@@ -21976,6 +22072,7 @@ func init_strings() {
 							return result
 						}
 						bbs[1].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[1].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_1 = bbs[1].Address
 						ctx.MarkLabel(lbl2)
@@ -22035,6 +22132,7 @@ func init_strings() {
 							return result
 						}
 						bbs[2].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[2].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_2 = bbs[2].Address
 						ctx.MarkLabel(lbl3)
@@ -22293,6 +22391,7 @@ func init_strings() {
 							return result
 						}
 						bbs[3].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[3].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_3 = bbs[3].Address
 						ctx.MarkLabel(lbl4)
@@ -22546,6 +22645,7 @@ func init_strings() {
 							return result
 						}
 						bbs[4].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[4].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_4 = bbs[4].Address
 						ctx.MarkLabel(lbl5)
@@ -22618,6 +22718,7 @@ func init_strings() {
 							return result
 						}
 						bbs[5].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[5].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_5 = bbs[5].Address
 						ctx.MarkLabel(lbl6)
