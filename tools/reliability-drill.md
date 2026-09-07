@@ -21,7 +21,8 @@ python3 tools/reliability_drill.py --mode all --workers 12 --operations 1000
 ```
 
 To inject a partial WAL write and a failed WAL sync, verify that both
-transactions fail, retry the writes, and crash-recover the exact result:
+transactions fail, deliver the first failure through a registered Scheme HTTP
+webhook, retry the writes, and crash-recover the exact result:
 
 ```sh
 python3 tools/reliability_drill.py --mode io-failures
@@ -88,8 +89,8 @@ The current drill covers:
 - a hard kill racing a rebuild and publication of its replacement shards;
 - concurrent disjoint writers and rebuilds followed by another hard kill;
 - deterministic partial-write failures in autocommit and explicit transactions,
-  aborted-transaction enforcement, sync failures, successful retries, and exact
-  crash recovery;
+  asynchronous Scheme failure-hook delivery, aborted-transaction enforcement,
+  sync failures, successful retries, and exact crash recovery;
 - graceful offline snapshot, restore into a separate data directory, and
   checksum comparison.
 

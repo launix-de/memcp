@@ -83,15 +83,27 @@ func raisePersistenceFailure(backend string, database string, operation string, 
 	// This must never use MemCP tables: the statistics database may be the
 	// failing backend and recursive failure reporting would never terminate.
 	_, _ = fmt.Fprintf(os.Stderr, "CRITICAL: %s\n", failure.Error())
+	notifyPersistenceFailure(persistenceFailureEvent{
+		class: "io", backend: backend, database: database,
+		operation: operation, err: err,
+	})
 	panic(failure)
 }
 
 func reportPersistenceCleanupFailure(backend string, database string, operation string, err error) {
 	_, _ = fmt.Fprintf(os.Stderr, "CRITICAL: persistence %s failed for %s database %s: %v; committed data is intact but orphan cleanup is incomplete\n", operation, backend, database, err)
+	notifyPersistenceFailure(persistenceFailureEvent{
+		class: "cleanup", backend: backend, database: database,
+		operation: operation, err: err,
+	})
 }
 
 func reportPersistenceAmbiguousFailure(backend string, database string, operation string, err error) {
 	_, _ = fmt.Fprintf(os.Stderr, "CRITICAL: persistence %s failed for %s database %s: %v; publication completed but crash durability is unknown\n", operation, backend, database, err)
+	notifyPersistenceFailure(persistenceFailureEvent{
+		class: "ambiguous_commit", backend: backend, database: database,
+		operation: operation, err: err, outcomeUnknown: true,
+	})
 }
 
 func recoverPersistenceFailure(errp *error) {
@@ -117,6 +129,10 @@ func markCommitOutcomeUnknown(err error) error {
 	}
 	copy := *failure
 	copy.OutcomeUnknown = true
+	notifyPersistenceFailure(persistenceFailureEvent{
+		class: "ambiguous_commit", backend: copy.Backend, database: copy.Database,
+		operation: copy.Operation, err: copy.Err, outcomeUnknown: true,
+	})
 	return &copy
 }
 

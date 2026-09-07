@@ -204,6 +204,26 @@ MemCP supports several storage engines, selectable per table via `CREATE TABLE .
 For production data, use `safe` unless you have explicitly accepted another
 engine's weaker durability contract.
 
+### Storage failure notifications
+
+Administrators can register one process-local Scheme callback for persistence
+failures. The callback runs asynchronously, so notification delivery cannot
+delay or rescue the failing storage operation:
+
+```scheme
+(register_storage_failure_hook 300 (lambda (failure)
+	(http_request "POST" "https://monitor.example/memcp"
+		(list "Content-Type" "text/plain") (serialize failure))))
+```
+
+The numeric argument is a per-fingerprint cooldown in seconds. A fingerprint
+consists of `class`, `backend`, `database`, and `operation`; the next delivered
+event reports intervening occurrences in `suppressed_count`. Events also contain
+`error`, `outcome_unknown`, and `timestamp`. Callback panics and storage errors
+caused by the callback are isolated and written directly to stderr instead of
+being logged through a MemCP table. `clear_storage_failure_hook` removes the
+registration. Registrations are not persisted across process restarts.
+
 ### Test coverage
 
 The repository currently contains more than 6,000 SQL/YAML cases across more

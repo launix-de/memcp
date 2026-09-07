@@ -23,11 +23,153 @@ import (
 	"path/filepath"
 	"syscall"
 	"testing"
+	"time"
+
+	"github.com/launix-de/memcp/scm"
 )
 
 type failingPersistenceReader struct {
 	readErr  error
 	closeErr error
+}
+
+func failureHookValue(t *testing.T, event scm.Scmer, key string) scm.Scmer {
+	t.Helper()
+	values := event.Slice()
+	for index := 0; index+1 < len(values); index += 2 {
+		if values[index].String() == key {
+			return values[index+1]
+		}
+	}
+	t.Fatalf("failure hook event has no %q: %s", key, event.String())
+	return scm.NewNil()
+}
+
+func waitForPersistenceFailureHook(t *testing.T) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for persistenceFailureHooks.running.Load() {
+		if time.Now().After(deadline) {
+			t.Fatal("storage failure hook did not return")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestPersistenceFailureHookDeliversStructuredEvent(t *testing.T) {
+	clearPersistenceFailureHook()
+	t.Cleanup(clearPersistenceFailureHook)
+	received := make(chan scm.Scmer, 1)
+	registerPersistenceFailureHook(30*time.Second, scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+		received <- args[0]
+		return scm.NewNil()
+	}))
+
+	notifyPersistenceFailureAt(persistenceFailureEvent{
+		class: "io", backend: "s3", database: "bucket/prefix",
+		operation: "log.write", err: syscall.ENOSPC,
+	}, time.Unix(100, 0))
+
+	select {
+	case event := <-received:
+		if got := failureHookValue(t, event, "class").String(); got != "io" {
+			t.Fatalf("class = %q, want io", got)
+		}
+		if got := failureHookValue(t, event, "backend").String(); got != "s3" {
+			t.Fatalf("backend = %q, want s3", got)
+		}
+		if got := failureHookValue(t, event, "database").String(); got != "bucket/prefix" {
+			t.Fatalf("database = %q, want bucket/prefix", got)
+		}
+		if got := failureHookValue(t, event, "operation").String(); got != "log.write" {
+			t.Fatalf("operation = %q, want log.write", got)
+		}
+		if got := failureHookValue(t, event, "error").String(); got != syscall.ENOSPC.Error() {
+			t.Fatalf("error = %q, want %q", got, syscall.ENOSPC.Error())
+		}
+		if failureHookValue(t, event, "outcome_unknown").Bool() {
+			t.Fatal("ordinary I/O failure reported an unknown commit outcome")
+		}
+		if got := failureHookValue(t, event, "suppressed_count").Int(); got != 0 {
+			t.Fatalf("suppressed_count = %d, want 0", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("storage failure hook was not called")
+	}
+	waitForPersistenceFailureHook(t)
+}
+
+func TestPersistenceFailureHookCooldownCoalescesFingerprint(t *testing.T) {
+	clearPersistenceFailureHook()
+	t.Cleanup(clearPersistenceFailureHook)
+	received := make(chan scm.Scmer, 2)
+	registerPersistenceFailureHook(10*time.Second, scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+		received <- args[0]
+		return scm.NewNil()
+	}))
+	event := persistenceFailureEvent{class: "io", backend: "filesystem", database: "db", operation: "log.sync", err: syscall.EIO}
+	start := time.Unix(200, 0)
+	notifyPersistenceFailureAt(event, start)
+	first := <-received
+	waitForPersistenceFailureHook(t)
+	notifyPersistenceFailureAt(event, start.Add(time.Second))
+	notifyPersistenceFailureAt(event, start.Add(2*time.Second))
+	notifyPersistenceFailureAt(event, start.Add(11*time.Second))
+
+	second := <-received
+	if got := failureHookValue(t, first, "suppressed_count").Int(); got != 0 {
+		t.Fatalf("first suppressed_count = %d, want 0", got)
+	}
+	if got := failureHookValue(t, second, "suppressed_count").Int(); got != 2 {
+		t.Fatalf("second suppressed_count = %d, want 2", got)
+	}
+	waitForPersistenceFailureHook(t)
+	select {
+	case extra := <-received:
+		t.Fatalf("cooldown emitted an extra event: %s", extra.String())
+	case <-time.After(20 * time.Millisecond):
+	}
+}
+
+func TestPersistenceFailureHookDoesNotReenter(t *testing.T) {
+	clearPersistenceFailureHook()
+	t.Cleanup(clearPersistenceFailureHook)
+	calls := make(chan struct{}, 2)
+	registerPersistenceFailureHook(0, scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+		calls <- struct{}{}
+		notifyPersistenceFailureAt(persistenceFailureEvent{
+			class: "io", backend: "filesystem", database: "hook",
+			operation: "log.write", err: syscall.ENOSPC,
+		}, time.Now())
+		panic("hook failed")
+	}))
+	notifyPersistenceFailureAt(persistenceFailureEvent{
+		class: "io", backend: "filesystem", database: "db",
+		operation: "schema.write", err: syscall.EIO,
+	}, time.Now())
+
+	select {
+	case <-calls:
+	case <-time.After(time.Second):
+		t.Fatal("storage failure hook was not called")
+	}
+	waitForPersistenceFailureHook(t)
+	select {
+	case <-calls:
+		t.Fatal("storage failure hook recursively invoked itself")
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	notifyPersistenceFailureAt(persistenceFailureEvent{
+		class: "io", backend: "filesystem", database: "db",
+		operation: "schema.sync", err: syscall.EIO,
+	}, time.Now())
+	select {
+	case <-calls:
+	case <-time.After(time.Second):
+		t.Fatal("hook panic disabled later notifications")
+	}
+	waitForPersistenceFailureHook(t)
 }
 
 func (r failingPersistenceReader) Read([]byte) (int, error) { return 0, r.readErr }
