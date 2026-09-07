@@ -20,6 +20,7 @@ todos/
 .perf_runner_gate.lock
 .gocache/
 .gomodcache/
+.third_party/
 __pycache__/
 .build/
 dist/
