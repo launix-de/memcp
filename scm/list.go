@@ -1858,6 +1858,9 @@ func init_list() {
 				_ = d71
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				var bbs [7]BBDescriptor
+				for i := range args {
+					ctx.StabilizeDescForControlFlow(&args[i])
+				}
 				if result.Loc == LocAny {
 					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 					ctx.BindReg(result.Reg, &result)
@@ -2807,9 +2810,6 @@ func init_list() {
 					ctx.EmitJmp(lbl0)
 					return result
 				}
-				for i := range args {
-					ctx.StabilizeDescForControlFlow(&args[i])
-				}
 				ps72 := PhiState{General: false}
 				_ = bbs[0].RenderPS(ps72)
 				ctx.MarkLabel(lbl0)
@@ -2876,6 +2876,9 @@ func init_list() {
 				_ = d23
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				var bbs [4]BBDescriptor
+				for i := range args {
+					ctx.StabilizeDescForControlFlow(&args[i])
+				}
 				if result.Loc == LocAny {
 					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 					ctx.BindReg(result.Reg, &result)
@@ -3398,9 +3401,6 @@ func init_list() {
 					ctx.FreeDesc(&d22)
 					return result
 				}
-				for i := range args {
-					ctx.StabilizeDescForControlFlow(&args[i])
-				}
 				ps41 := PhiState{General: false}
 				_ = bbs[0].RenderPS(ps41)
 				ctx.MarkLabel(lbl0)
@@ -3474,6 +3474,9 @@ func init_list() {
 				_ = d26
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				var bbs [4]BBDescriptor
+				for i := range args {
+					ctx.StabilizeDescForControlFlow(&args[i])
+				}
 				if result.Loc == LocAny {
 					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 					ctx.BindReg(result.Reg, &result)
@@ -4029,9 +4032,6 @@ func init_list() {
 					ctx.FreeDesc(&d25)
 					return result
 				}
-				for i := range args {
-					ctx.StabilizeDescForControlFlow(&args[i])
-				}
 				ps47 := PhiState{General: false}
 				_ = bbs[0].RenderPS(ps47)
 				ctx.MarkLabel(lbl0)
@@ -4167,15 +4167,18 @@ func init_list() {
 				_ = d140
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(32))
-				d1 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(0)}
-				_ = d1
-				d2 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(16)}
-				_ = d2
 				var bbs [7]BBDescriptor
 				bbs[2].PhiBase = int32(phiBase0) + int32(0)
 				bbs[2].PhiCount = uint16(1)
 				bbs[4].PhiBase = int32(phiBase0) + int32(16)
 				bbs[4].PhiCount = uint16(1)
+				for i := range args {
+					ctx.StabilizeDescForControlFlow(&args[i])
+				}
+				d1 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(0)}
+				_ = d1
+				d2 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(16)}
+				_ = d2
 				if result.Loc == LocAny {
 					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 					ctx.BindReg(result.Reg, &result)
@@ -5989,9 +5992,6 @@ func init_list() {
 					ctx.EmitJmp(lbl0)
 					return result
 				}
-				for i := range args {
-					ctx.StabilizeDescForControlFlow(&args[i])
-				}
 				ps141 := PhiState{General: false}
 				_ = bbs[0].RenderPS(ps141)
 				ctx.MarkLabel(lbl0)
@@ -6069,11 +6069,14 @@ func init_list() {
 				_ = d37
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(16))
-				d1 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(0)}
-				_ = d1
 				var bbs [4]BBDescriptor
 				bbs[1].PhiBase = int32(phiBase0) + int32(0)
 				bbs[1].PhiCount = uint16(1)
+				for i := range args {
+					ctx.StabilizeDescForControlFlow(&args[i])
+				}
+				d1 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(0)}
+				_ = d1
 				if result.Loc == LocAny {
 					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 					ctx.BindReg(result.Reg, &result)
@@ -6662,9 +6665,6 @@ func init_list() {
 					ctx.EmitJmp(lbl0)
 					return result
 				}
-				for i := range args {
-					ctx.StabilizeDescForControlFlow(&args[i])
-				}
 				ps38 := PhiState{General: false}
 				_ = bbs[0].RenderPS(ps38)
 				ctx.MarkLabel(lbl0)
@@ -6888,6 +6888,14 @@ func init_list() {
 				_ = d149
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(56))
+				var bbs [7]BBDescriptor
+				bbs[1].PhiBase = int32(phiBase0) + int32(0)
+				bbs[1].PhiCount = uint16(2)
+				bbs[4].PhiBase = int32(phiBase0) + int32(40)
+				bbs[4].PhiCount = uint16(1)
+				for i := range args {
+					ctx.StabilizeDescForControlFlow(&args[i])
+				}
 				d1 := JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(0)}
 				ctx.PreparePointerStackTarget(int32(phiBase0)+int32(0), 3)
 				_ = d1
@@ -6895,11 +6903,6 @@ func init_list() {
 				_ = d2
 				d3 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(40)}
 				_ = d3
-				var bbs [7]BBDescriptor
-				bbs[1].PhiBase = int32(phiBase0) + int32(0)
-				bbs[1].PhiCount = uint16(2)
-				bbs[4].PhiBase = int32(phiBase0) + int32(40)
-				bbs[4].PhiCount = uint16(1)
 				if result.Loc == LocAny {
 					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 					ctx.BindReg(result.Reg, &result)
@@ -8654,9 +8657,6 @@ func init_list() {
 					return bbs[1].RenderPS(ps148)
 					return result
 				}
-				for i := range args {
-					ctx.StabilizeDescForControlFlow(&args[i])
-				}
 				ps150 := PhiState{General: false}
 				_ = bbs[0].RenderPS(ps150)
 				ctx.MarkLabel(lbl0)
@@ -8731,6 +8731,9 @@ func init_list() {
 				_ = d28
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				var bbs [3]BBDescriptor
+				for i := range args {
+					ctx.StabilizeDescForControlFlow(&args[i])
+				}
 				if result.Loc == LocAny {
 					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 					ctx.BindReg(result.Reg, &result)
@@ -9061,9 +9064,6 @@ func init_list() {
 					ctx.EmitJmp(lbl0)
 					return result
 				}
-				for i := range args {
-					ctx.StabilizeDescForControlFlow(&args[i])
-				}
 				ps29 := PhiState{General: false}
 				_ = bbs[0].RenderPS(ps29)
 				ctx.MarkLabel(lbl0)
@@ -9120,6 +9120,9 @@ func init_list() {
 				_ = d17
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				var bbs [3]BBDescriptor
+				for i := range args {
+					ctx.StabilizeDescForControlFlow(&args[i])
+				}
 				if result.Loc == LocAny {
 					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 					ctx.BindReg(result.Reg, &result)
@@ -9392,9 +9395,6 @@ func init_list() {
 					ctx.EmitJmp(lbl0)
 					return result
 				}
-				for i := range args {
-					ctx.StabilizeDescForControlFlow(&args[i])
-				}
 				ps18 := PhiState{General: false}
 				_ = bbs[0].RenderPS(ps18)
 				ctx.MarkLabel(lbl0)
@@ -9465,6 +9465,9 @@ func init_list() {
 				_ = d26
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				var bbs [3]BBDescriptor
+				for i := range args {
+					ctx.StabilizeDescForControlFlow(&args[i])
+				}
 				if result.Loc == LocAny {
 					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 					ctx.BindReg(result.Reg, &result)
@@ -9846,9 +9849,6 @@ func init_list() {
 					ctx.EmitJmp(lbl0)
 					return result
 				}
-				for i := range args {
-					ctx.StabilizeDescForControlFlow(&args[i])
-				}
 				ps27 := PhiState{General: false}
 				_ = bbs[0].RenderPS(ps27)
 				ctx.MarkLabel(lbl0)
@@ -9905,6 +9905,9 @@ func init_list() {
 				_ = d17
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				var bbs [3]BBDescriptor
+				for i := range args {
+					ctx.StabilizeDescForControlFlow(&args[i])
+				}
 				if result.Loc == LocAny {
 					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 					ctx.BindReg(result.Reg, &result)
@@ -10177,9 +10180,6 @@ func init_list() {
 					ctx.EmitJmp(lbl0)
 					return result
 				}
-				for i := range args {
-					ctx.StabilizeDescForControlFlow(&args[i])
-				}
 				ps18 := PhiState{General: false}
 				_ = bbs[0].RenderPS(ps18)
 				ctx.MarkLabel(lbl0)
@@ -10348,13 +10348,6 @@ func init_list() {
 				_ = d237
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(56))
-				d1 := JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(0)}
-				ctx.PreparePointerStackTarget(int32(phiBase0)+int32(0), 3)
-				_ = d1
-				d2 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(24)}
-				_ = d2
-				d3 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(40)}
-				_ = d3
 				var bbs [13]BBDescriptor
 				bbs[2].PhiBase = int32(phiBase0) + int32(0)
 				bbs[2].PhiCount = uint16(1)
@@ -10362,6 +10355,16 @@ func init_list() {
 				bbs[5].PhiCount = uint16(1)
 				bbs[8].PhiBase = int32(phiBase0) + int32(40)
 				bbs[8].PhiCount = uint16(1)
+				for i := range args {
+					ctx.StabilizeDescForControlFlow(&args[i])
+				}
+				d1 := JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(0)}
+				ctx.PreparePointerStackTarget(int32(phiBase0)+int32(0), 3)
+				_ = d1
+				d2 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(24)}
+				_ = d2
+				d3 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(40)}
+				_ = d3
 				if result.Loc == LocAny {
 					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 					ctx.BindReg(result.Reg, &result)
@@ -13762,9 +13765,6 @@ func init_list() {
 					return bbs[8].RenderPS(ps236)
 					return result
 				}
-				for i := range args {
-					ctx.StabilizeDescForControlFlow(&args[i])
-				}
 				ps238 := PhiState{General: false}
 				_ = bbs[0].RenderPS(ps238)
 				ctx.MarkLabel(lbl0)
@@ -13907,6 +13907,16 @@ func init_list() {
 				_ = d153
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(96))
+				var bbs [9]BBDescriptor
+				bbs[2].PhiBase = int32(phiBase0) + int32(0)
+				bbs[2].PhiCount = uint16(1)
+				bbs[3].PhiBase = int32(phiBase0) + int32(24)
+				bbs[3].PhiCount = uint16(2)
+				bbs[6].PhiBase = int32(phiBase0) + int32(56)
+				bbs[6].PhiCount = uint16(2)
+				for i := range args {
+					ctx.StabilizeDescForControlFlow(&args[i])
+				}
 				d1 := JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(0)}
 				ctx.PreparePointerStackTarget(int32(phiBase0)+int32(0), 3)
 				_ = d1
@@ -13919,13 +13929,6 @@ func init_list() {
 				_ = d4
 				d5 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(80)}
 				_ = d5
-				var bbs [9]BBDescriptor
-				bbs[2].PhiBase = int32(phiBase0) + int32(0)
-				bbs[2].PhiCount = uint16(1)
-				bbs[3].PhiBase = int32(phiBase0) + int32(24)
-				bbs[3].PhiCount = uint16(2)
-				bbs[6].PhiBase = int32(phiBase0) + int32(56)
-				bbs[6].PhiCount = uint16(2)
 				if result.Loc == LocAny {
 					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 					ctx.BindReg(result.Reg, &result)
@@ -16215,9 +16218,6 @@ func init_list() {
 					ctx.EmitJmp(lbl0)
 					return result
 				}
-				for i := range args {
-					ctx.StabilizeDescForControlFlow(&args[i])
-				}
 				ps154 := PhiState{General: false}
 				_ = bbs[0].RenderPS(ps154)
 				ctx.MarkLabel(lbl0)
@@ -16468,6 +16468,22 @@ func init_list() {
 				_ = d581
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(168))
+				var bbs [16]BBDescriptor
+				bbs[2].PhiBase = int32(phiBase0) + int32(0)
+				bbs[2].PhiCount = uint16(1)
+				bbs[3].PhiBase = int32(phiBase0) + int32(24)
+				bbs[3].PhiCount = uint16(2)
+				bbs[6].PhiBase = int32(phiBase0) + int32(56)
+				bbs[6].PhiCount = uint16(2)
+				bbs[9].PhiBase = int32(phiBase0) + int32(96)
+				bbs[9].PhiCount = uint16(2)
+				bbs[11].PhiBase = int32(phiBase0) + int32(136)
+				bbs[11].PhiCount = uint16(1)
+				bbs[13].PhiBase = int32(phiBase0) + int32(152)
+				bbs[13].PhiCount = uint16(1)
+				for i := range args {
+					ctx.StabilizeDescForControlFlow(&args[i])
+				}
 				d1 := JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(0)}
 				ctx.PreparePointerStackTarget(int32(phiBase0)+int32(0), 3)
 				_ = d1
@@ -16489,19 +16505,6 @@ func init_list() {
 				_ = d8
 				d9 := JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(152)}
 				_ = d9
-				var bbs [16]BBDescriptor
-				bbs[2].PhiBase = int32(phiBase0) + int32(0)
-				bbs[2].PhiCount = uint16(1)
-				bbs[3].PhiBase = int32(phiBase0) + int32(24)
-				bbs[3].PhiCount = uint16(2)
-				bbs[6].PhiBase = int32(phiBase0) + int32(56)
-				bbs[6].PhiCount = uint16(2)
-				bbs[9].PhiBase = int32(phiBase0) + int32(96)
-				bbs[9].PhiCount = uint16(2)
-				bbs[11].PhiBase = int32(phiBase0) + int32(136)
-				bbs[11].PhiCount = uint16(1)
-				bbs[13].PhiBase = int32(phiBase0) + int32(152)
-				bbs[13].PhiCount = uint16(1)
 				if result.Loc == LocAny {
 					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 					ctx.BindReg(result.Reg, &result)
@@ -23961,9 +23964,6 @@ func init_list() {
 					return bbs[9].RenderPS(ps580)
 					return result
 				}
-				for i := range args {
-					ctx.StabilizeDescForControlFlow(&args[i])
-				}
 				ps582 := PhiState{General: false}
 				_ = bbs[0].RenderPS(ps582)
 				ctx.MarkLabel(lbl0)
@@ -24052,11 +24052,14 @@ func init_list() {
 				_ = d63
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(16))
-				d1 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(0)}
-				_ = d1
 				var bbs [5]BBDescriptor
 				bbs[1].PhiBase = int32(phiBase0) + int32(0)
 				bbs[1].PhiCount = uint16(1)
+				for i := range args {
+					ctx.StabilizeDescForControlFlow(&args[i])
+				}
+				d1 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(0)}
+				_ = d1
 				if result.Loc == LocAny {
 					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 					ctx.BindReg(result.Reg, &result)
@@ -24836,9 +24839,6 @@ func init_list() {
 					ctx.EmitJmp(lbl0)
 					return result
 				}
-				for i := range args {
-					ctx.StabilizeDescForControlFlow(&args[i])
-				}
 				ps64 := PhiState{General: false}
 				_ = bbs[0].RenderPS(ps64)
 				ctx.MarkLabel(lbl0)
@@ -24960,14 +24960,17 @@ func init_list() {
 				_ = d112
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(40))
+				var bbs [5]BBDescriptor
+				bbs[1].PhiBase = int32(phiBase0) + int32(0)
+				bbs[1].PhiCount = uint16(2)
+				for i := range args {
+					ctx.StabilizeDescForControlFlow(&args[i])
+				}
 				d1 := JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(0)}
 				ctx.PreparePointerStackTarget(int32(phiBase0)+int32(0), 3)
 				_ = d1
 				d2 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(24)}
 				_ = d2
-				var bbs [5]BBDescriptor
-				bbs[1].PhiBase = int32(phiBase0) + int32(0)
-				bbs[1].PhiCount = uint16(2)
 				if result.Loc == LocAny {
 					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 					ctx.BindReg(result.Reg, &result)
@@ -26201,9 +26204,6 @@ func init_list() {
 					return bbs[1].RenderPS(ps111)
 					return result
 				}
-				for i := range args {
-					ctx.StabilizeDescForControlFlow(&args[i])
-				}
 				ps113 := PhiState{General: false}
 				_ = bbs[0].RenderPS(ps113)
 				ctx.MarkLabel(lbl0)
@@ -26313,11 +26313,14 @@ func init_list() {
 				_ = d118
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(16))
-				d1 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(0)}
-				_ = d1
 				var bbs [7]BBDescriptor
 				bbs[1].PhiBase = int32(phiBase0) + int32(0)
 				bbs[1].PhiCount = uint16(1)
+				for i := range args {
+					ctx.StabilizeDescForControlFlow(&args[i])
+				}
+				d1 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(0)}
+				_ = d1
 				if result.Loc == LocAny {
 					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 					ctx.BindReg(result.Reg, &result)
@@ -27735,9 +27738,6 @@ func init_list() {
 					ctx.EmitJmp(lbl0)
 					return result
 				}
-				for i := range args {
-					ctx.StabilizeDescForControlFlow(&args[i])
-				}
 				ps119 := PhiState{General: false}
 				_ = bbs[0].RenderPS(ps119)
 				ctx.MarkLabel(lbl0)
@@ -27832,11 +27832,14 @@ func init_list() {
 				_ = d55
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(16))
-				d1 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(0)}
-				_ = d1
 				var bbs [4]BBDescriptor
 				bbs[1].PhiBase = int32(phiBase0) + int32(0)
 				bbs[1].PhiCount = uint16(1)
+				for i := range args {
+					ctx.StabilizeDescForControlFlow(&args[i])
+				}
+				d1 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(0)}
+				_ = d1
 				if result.Loc == LocAny {
 					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 					ctx.BindReg(result.Reg, &result)
@@ -28528,9 +28531,6 @@ func init_list() {
 					ctx.EmitJmp(lbl0)
 					return result
 				}
-				for i := range args {
-					ctx.StabilizeDescForControlFlow(&args[i])
-				}
 				ps56 := PhiState{General: false}
 				_ = bbs[0].RenderPS(ps56)
 				ctx.MarkLabel(lbl0)
@@ -28770,11 +28770,14 @@ func init_list() {
 				_ = d56
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(16))
-				d1 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(0)}
-				_ = d1
 				var bbs [4]BBDescriptor
 				bbs[1].PhiBase = int32(phiBase0) + int32(0)
 				bbs[1].PhiCount = uint16(1)
+				for i := range args {
+					ctx.StabilizeDescForControlFlow(&args[i])
+				}
+				d1 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(0)}
+				_ = d1
 				if result.Loc == LocAny {
 					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 					ctx.BindReg(result.Reg, &result)
@@ -29477,9 +29480,6 @@ func init_list() {
 					ctx.EmitJmp(lbl0)
 					return result
 				}
-				for i := range args {
-					ctx.StabilizeDescForControlFlow(&args[i])
-				}
 				ps57 := PhiState{General: false}
 				_ = bbs[0].RenderPS(ps57)
 				ctx.MarkLabel(lbl0)
@@ -29616,14 +29616,17 @@ func init_list() {
 				_ = d97
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(32))
+				var bbs [7]BBDescriptor
+				bbs[6].PhiBase = int32(phiBase0) + int32(0)
+				bbs[6].PhiCount = uint16(2)
+				for i := range args {
+					ctx.StabilizeDescForControlFlow(&args[i])
+				}
 				d1 := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(0)}
 				ctx.PrepareScmerStackTarget(int32(phiBase0) + int32(0))
 				_ = d1
 				d2 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(16)}
 				_ = d2
-				var bbs [7]BBDescriptor
-				bbs[6].PhiBase = int32(phiBase0) + int32(0)
-				bbs[6].PhiCount = uint16(2)
 				if result.Loc == LocAny {
 					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 					ctx.BindReg(result.Reg, &result)
@@ -31356,9 +31359,6 @@ func init_list() {
 					ctx.FreeDesc(&d92)
 					return result
 				}
-				for i := range args {
-					ctx.StabilizeDescForControlFlow(&args[i])
-				}
 				ps144 := PhiState{General: false}
 				_ = bbs[0].RenderPS(ps144)
 				ctx.MarkLabel(lbl0)
@@ -31471,15 +31471,18 @@ func init_list() {
 				_ = d52
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(40))
+				var bbs [4]BBDescriptor
+				bbs[3].PhiBase = int32(phiBase0) + int32(0)
+				bbs[3].PhiCount = uint16(2)
+				for i := range args {
+					ctx.StabilizeDescForControlFlow(&args[i])
+				}
 				d1 := JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(0)}
 				ctx.PreparePointerStackTarget(int32(phiBase0)+int32(0), 3)
 				_ = d1
 				d2 := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(24)}
 				ctx.PrepareScmerStackTarget(int32(phiBase0) + int32(24))
 				_ = d2
-				var bbs [4]BBDescriptor
-				bbs[3].PhiBase = int32(phiBase0) + int32(0)
-				bbs[3].PhiCount = uint16(2)
 				if result.Loc == LocAny {
 					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 					ctx.BindReg(result.Reg, &result)
@@ -32312,9 +32315,6 @@ func init_list() {
 					ctx.FreeDesc(&d46)
 					return result
 				}
-				for i := range args {
-					ctx.StabilizeDescForControlFlow(&args[i])
-				}
 				ps88 := PhiState{General: false}
 				_ = bbs[0].RenderPS(ps88)
 				ctx.MarkLabel(lbl0)
@@ -32464,12 +32464,6 @@ func init_list() {
 				_ = d223
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(48))
-				d1 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(0)}
-				_ = d1
-				d2 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(16)}
-				_ = d2
-				d3 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(32)}
-				_ = d3
 				var bbs [11]BBDescriptor
 				bbs[2].PhiBase = int32(phiBase0) + int32(0)
 				bbs[2].PhiCount = uint16(1)
@@ -32477,6 +32471,15 @@ func init_list() {
 				bbs[7].PhiCount = uint16(1)
 				bbs[9].PhiBase = int32(phiBase0) + int32(32)
 				bbs[9].PhiCount = uint16(1)
+				for i := range args {
+					ctx.StabilizeDescForControlFlow(&args[i])
+				}
+				d1 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(0)}
+				_ = d1
+				d2 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(16)}
+				_ = d2
+				d3 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(32)}
+				_ = d3
 				if result.Loc == LocAny {
 					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 					ctx.BindReg(result.Reg, &result)
@@ -35195,9 +35198,6 @@ func init_list() {
 					return bbs[9].RenderPS(ps224)
 					return result
 				}
-				for i := range args {
-					ctx.StabilizeDescForControlFlow(&args[i])
-				}
 				ps225 := PhiState{General: false}
 				_ = bbs[0].RenderPS(ps225)
 				ctx.MarkLabel(lbl0)
@@ -35453,12 +35453,6 @@ func init_list() {
 				_ = d282
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(48))
-				d1 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(0)}
-				_ = d1
-				d2 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(16)}
-				_ = d2
-				d3 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(32)}
-				_ = d3
 				var bbs [14]BBDescriptor
 				bbs[2].PhiBase = int32(phiBase0) + int32(0)
 				bbs[2].PhiCount = uint16(1)
@@ -35466,6 +35460,15 @@ func init_list() {
 				bbs[6].PhiCount = uint16(1)
 				bbs[11].PhiBase = int32(phiBase0) + int32(32)
 				bbs[11].PhiCount = uint16(1)
+				for i := range args {
+					ctx.StabilizeDescForControlFlow(&args[i])
+				}
+				d1 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(0)}
+				_ = d1
+				d2 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(16)}
+				_ = d2
+				d3 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(32)}
+				_ = d3
 				if result.Loc == LocAny {
 					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 					ctx.BindReg(result.Reg, &result)
@@ -39258,9 +39261,6 @@ func init_list() {
 					ctx.EmitJmp(lbl0)
 					return result
 				}
-				for i := range args {
-					ctx.StabilizeDescForControlFlow(&args[i])
-				}
 				ps283 := PhiState{General: false}
 				_ = bbs[0].RenderPS(ps283)
 				ctx.MarkLabel(lbl0)
@@ -39430,6 +39430,9 @@ func init_list() {
 				_ = d16
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				var bbs [3]BBDescriptor
+				for i := range args {
+					ctx.StabilizeDescForControlFlow(&args[i])
+				}
 				if result.Loc == LocAny {
 					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 					ctx.BindReg(result.Reg, &result)
@@ -39651,9 +39654,6 @@ func init_list() {
 					ctx.EmitJmp(lbl0)
 					return result
 				}
-				for i := range args {
-					ctx.StabilizeDescForControlFlow(&args[i])
-				}
 				ps17 := PhiState{General: false}
 				_ = bbs[0].RenderPS(ps17)
 				ctx.MarkLabel(lbl0)
@@ -39739,11 +39739,14 @@ func init_list() {
 				_ = d63
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(16))
-				d1 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(0)}
-				_ = d1
 				var bbs [5]BBDescriptor
 				bbs[1].PhiBase = int32(phiBase0) + int32(0)
 				bbs[1].PhiCount = uint16(1)
+				for i := range args {
+					ctx.StabilizeDescForControlFlow(&args[i])
+				}
+				d1 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(0)}
+				_ = d1
 				if result.Loc == LocAny {
 					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 					ctx.BindReg(result.Reg, &result)
@@ -40523,9 +40526,6 @@ func init_list() {
 					ctx.EmitJmp(lbl0)
 					return result
 				}
-				for i := range args {
-					ctx.StabilizeDescForControlFlow(&args[i])
-				}
 				ps64 := PhiState{General: false}
 				_ = bbs[0].RenderPS(ps64)
 				ctx.MarkLabel(lbl0)
@@ -40655,13 +40655,16 @@ func init_list() {
 				_ = d186
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(32))
+				var bbs [11]BBDescriptor
+				bbs[3].PhiBase = int32(phiBase0) + int32(0)
+				bbs[3].PhiCount = uint16(2)
+				for i := range args {
+					ctx.StabilizeDescForControlFlow(&args[i])
+				}
 				d1 := JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(0)}
 				_ = d1
 				d2 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(16)}
 				_ = d2
-				var bbs [11]BBDescriptor
-				bbs[3].PhiBase = int32(phiBase0) + int32(0)
-				bbs[3].PhiCount = uint16(2)
 				if result.Loc == LocAny {
 					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 					ctx.BindReg(result.Reg, &result)
@@ -43007,9 +43010,6 @@ func init_list() {
 					ctx.EmitJmp(lbl0)
 					return result
 				}
-				for i := range args {
-					ctx.StabilizeDescForControlFlow(&args[i])
-				}
 				ps187 := PhiState{General: false}
 				_ = bbs[0].RenderPS(ps187)
 				ctx.MarkLabel(lbl0)
@@ -43353,11 +43353,14 @@ func init_list() {
 				_ = d117
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(16))
-				d1 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(0)}
-				_ = d1
 				var bbs [9]BBDescriptor
 				bbs[4].PhiBase = int32(phiBase0) + int32(0)
 				bbs[4].PhiCount = uint16(1)
+				for i := range args {
+					ctx.StabilizeDescForControlFlow(&args[i])
+				}
+				d1 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(0)}
+				_ = d1
 				if result.Loc == LocAny {
 					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 					ctx.BindReg(result.Reg, &result)
@@ -44871,9 +44874,6 @@ func init_list() {
 					ctx.EmitJmp(lbl0)
 					return result
 				}
-				for i := range args {
-					ctx.StabilizeDescForControlFlow(&args[i])
-				}
 				ps118 := PhiState{General: false}
 				_ = bbs[0].RenderPS(ps118)
 				ctx.MarkLabel(lbl0)
@@ -44986,11 +44986,14 @@ func init_list() {
 				_ = d138
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(16))
-				d1 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(0)}
-				_ = d1
 				var bbs [11]BBDescriptor
 				bbs[4].PhiBase = int32(phiBase0) + int32(0)
 				bbs[4].PhiCount = uint16(1)
+				for i := range args {
+					ctx.StabilizeDescForControlFlow(&args[i])
+				}
+				d1 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(0)}
+				_ = d1
 				if result.Loc == LocAny {
 					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 					ctx.BindReg(result.Reg, &result)
@@ -46991,9 +46994,6 @@ func init_list() {
 					ctx.EmitJmp(lbl0)
 					return result
 				}
-				for i := range args {
-					ctx.StabilizeDescForControlFlow(&args[i])
-				}
 				ps139 := PhiState{General: false}
 				_ = bbs[0].RenderPS(ps139)
 				ctx.MarkLabel(lbl0)
@@ -47144,11 +47144,14 @@ func init_list() {
 				_ = d206
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(16))
-				d1 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(0)}
-				_ = d1
 				var bbs [9]BBDescriptor
 				bbs[1].PhiBase = int32(phiBase0) + int32(0)
 				bbs[1].PhiCount = uint16(1)
+				for i := range args {
+					ctx.StabilizeDescForControlFlow(&args[i])
+				}
+				d1 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(0)}
+				_ = d1
 				if result.Loc == LocAny {
 					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 					ctx.BindReg(result.Reg, &result)
@@ -49475,9 +49478,6 @@ func init_list() {
 					ctx.EmitJmp(lbl0)
 					return result
 				}
-				for i := range args {
-					ctx.StabilizeDescForControlFlow(&args[i])
-				}
 				ps207 := PhiState{General: false}
 				_ = bbs[0].RenderPS(ps207)
 				ctx.MarkLabel(lbl0)
@@ -49865,6 +49865,18 @@ func init_list() {
 				_ = d398
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(128))
+				var bbs [13]BBDescriptor
+				bbs[1].PhiBase = int32(phiBase0) + int32(0)
+				bbs[1].PhiCount = uint16(1)
+				bbs[5].PhiBase = int32(phiBase0) + int32(16)
+				bbs[5].PhiCount = uint16(1)
+				bbs[6].PhiBase = int32(phiBase0) + int32(32)
+				bbs[6].PhiCount = uint16(3)
+				bbs[9].PhiBase = int32(phiBase0) + int32(80)
+				bbs[9].PhiCount = uint16(3)
+				for i := range args {
+					ctx.StabilizeDescForControlFlow(&args[i])
+				}
 				d1 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(0)}
 				_ = d1
 				d2 := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(16)}
@@ -49884,15 +49896,6 @@ func init_list() {
 				_ = d7
 				d8 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(112)}
 				_ = d8
-				var bbs [13]BBDescriptor
-				bbs[1].PhiBase = int32(phiBase0) + int32(0)
-				bbs[1].PhiCount = uint16(1)
-				bbs[5].PhiBase = int32(phiBase0) + int32(16)
-				bbs[5].PhiCount = uint16(1)
-				bbs[6].PhiBase = int32(phiBase0) + int32(32)
-				bbs[6].PhiCount = uint16(3)
-				bbs[9].PhiBase = int32(phiBase0) + int32(80)
-				bbs[9].PhiCount = uint16(3)
 				if result.Loc == LocAny {
 					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 					ctx.BindReg(result.Reg, &result)
@@ -55255,9 +55258,6 @@ func init_list() {
 					return bbs[9].RenderPS(ps397)
 					return result
 				}
-				for i := range args {
-					ctx.StabilizeDescForControlFlow(&args[i])
-				}
 				ps399 := PhiState{General: false}
 				_ = bbs[0].RenderPS(ps399)
 				ctx.MarkLabel(lbl0)
@@ -55397,14 +55397,17 @@ func init_list() {
 				_ = d133
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(40))
+				var bbs [5]BBDescriptor
+				bbs[1].PhiBase = int32(phiBase0) + int32(0)
+				bbs[1].PhiCount = uint16(2)
+				for i := range args {
+					ctx.StabilizeDescForControlFlow(&args[i])
+				}
 				d1 := JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(0)}
 				ctx.PreparePointerStackTarget(int32(phiBase0)+int32(0), 3)
 				_ = d1
 				d2 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(24)}
 				_ = d2
-				var bbs [5]BBDescriptor
-				bbs[1].PhiBase = int32(phiBase0) + int32(0)
-				bbs[1].PhiCount = uint16(2)
 				if result.Loc == LocAny {
 					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 					ctx.BindReg(result.Reg, &result)
@@ -56791,9 +56794,6 @@ func init_list() {
 					return bbs[1].RenderPS(ps132)
 					return result
 				}
-				for i := range args {
-					ctx.StabilizeDescForControlFlow(&args[i])
-				}
 				ps134 := PhiState{General: false}
 				_ = bbs[0].RenderPS(ps134)
 				ctx.MarkLabel(lbl0)
@@ -56917,14 +56917,17 @@ func init_list() {
 				_ = d112
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(40))
+				var bbs [5]BBDescriptor
+				bbs[1].PhiBase = int32(phiBase0) + int32(0)
+				bbs[1].PhiCount = uint16(2)
+				for i := range args {
+					ctx.StabilizeDescForControlFlow(&args[i])
+				}
 				d1 := JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(0)}
 				ctx.PreparePointerStackTarget(int32(phiBase0)+int32(0), 3)
 				_ = d1
 				d2 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(24)}
 				_ = d2
-				var bbs [5]BBDescriptor
-				bbs[1].PhiBase = int32(phiBase0) + int32(0)
-				bbs[1].PhiCount = uint16(2)
 				if result.Loc == LocAny {
 					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 					ctx.BindReg(result.Reg, &result)
@@ -58161,9 +58164,6 @@ func init_list() {
 					return bbs[1].RenderPS(ps111)
 					return result
 				}
-				for i := range args {
-					ctx.StabilizeDescForControlFlow(&args[i])
-				}
 				ps113 := PhiState{General: false}
 				_ = bbs[0].RenderPS(ps113)
 				ctx.MarkLabel(lbl0)
@@ -58315,14 +58315,17 @@ func init_list() {
 				_ = d196
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(32))
+				var bbs [10]BBDescriptor
+				bbs[1].PhiBase = int32(phiBase0) + int32(0)
+				bbs[1].PhiCount = uint16(2)
+				for i := range args {
+					ctx.StabilizeDescForControlFlow(&args[i])
+				}
 				d1 := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(0)}
 				ctx.PrepareScmerStackTarget(int32(phiBase0) + int32(0))
 				_ = d1
 				d2 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(16)}
 				_ = d2
-				var bbs [10]BBDescriptor
-				bbs[1].PhiBase = int32(phiBase0) + int32(0)
-				bbs[1].PhiCount = uint16(2)
 				if result.Loc == LocAny {
 					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 					ctx.BindReg(result.Reg, &result)
@@ -61290,9 +61293,6 @@ func init_list() {
 					ctx.FreeDesc(&d194)
 					return result
 				}
-				for i := range args {
-					ctx.StabilizeDescForControlFlow(&args[i])
-				}
 				ps253 := PhiState{General: false}
 				_ = bbs[0].RenderPS(ps253)
 				ctx.MarkLabel(lbl0)
@@ -61416,14 +61416,17 @@ func init_list() {
 				_ = d141
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(32))
+				var bbs [7]BBDescriptor
+				bbs[1].PhiBase = int32(phiBase0) + int32(0)
+				bbs[1].PhiCount = uint16(2)
+				for i := range args {
+					ctx.StabilizeDescForControlFlow(&args[i])
+				}
 				d1 := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(0)}
 				ctx.PrepareScmerStackTarget(int32(phiBase0) + int32(0))
 				_ = d1
 				d2 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(16)}
 				_ = d2
-				var bbs [7]BBDescriptor
-				bbs[1].PhiBase = int32(phiBase0) + int32(0)
-				bbs[1].PhiCount = uint16(2)
 				if result.Loc == LocAny {
 					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 					ctx.BindReg(result.Reg, &result)
@@ -63020,9 +63023,6 @@ func init_list() {
 					result.Type = tagBool
 					ctx.EmitJmp(lbl0)
 					return result
-				}
-				for i := range args {
-					ctx.StabilizeDescForControlFlow(&args[i])
 				}
 				ps142 := PhiState{General: false}
 				_ = bbs[0].RenderPS(ps142)
@@ -66191,14 +66191,17 @@ func init_list() {
 				_ = d141
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(32))
+				var bbs [7]BBDescriptor
+				bbs[1].PhiBase = int32(phiBase0) + int32(0)
+				bbs[1].PhiCount = uint16(2)
+				for i := range args {
+					ctx.StabilizeDescForControlFlow(&args[i])
+				}
 				d1 := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(0)}
 				ctx.PrepareScmerStackTarget(int32(phiBase0) + int32(0))
 				_ = d1
 				d2 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(16)}
 				_ = d2
-				var bbs [7]BBDescriptor
-				bbs[1].PhiBase = int32(phiBase0) + int32(0)
-				bbs[1].PhiCount = uint16(2)
 				if result.Loc == LocAny {
 					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 					ctx.BindReg(result.Reg, &result)
@@ -67799,9 +67802,6 @@ func init_list() {
 					ctx.EmitJmp(lbl0)
 					return result
 				}
-				for i := range args {
-					ctx.StabilizeDescForControlFlow(&args[i])
-				}
 				ps142 := PhiState{General: false}
 				_ = bbs[0].RenderPS(ps142)
 				ctx.MarkLabel(lbl0)
@@ -68004,11 +68004,14 @@ func init_list() {
 				_ = d83
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(16))
-				d1 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(0)}
-				_ = d1
 				var bbs [5]BBDescriptor
 				bbs[1].PhiBase = int32(phiBase0) + int32(0)
 				bbs[1].PhiCount = uint16(1)
+				for i := range args {
+					ctx.StabilizeDescForControlFlow(&args[i])
+				}
+				d1 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(0)}
+				_ = d1
 				if result.Loc == LocAny {
 					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 					ctx.BindReg(result.Reg, &result)
@@ -68962,9 +68965,6 @@ func init_list() {
 					ctx.EmitJmp(lbl0)
 					return result
 				}
-				for i := range args {
-					ctx.StabilizeDescForControlFlow(&args[i])
-				}
 				ps84 := PhiState{General: false}
 				_ = bbs[0].RenderPS(ps84)
 				ctx.MarkLabel(lbl0)
@@ -69104,14 +69104,17 @@ func init_list() {
 				_ = d129
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(40))
+				var bbs [5]BBDescriptor
+				bbs[1].PhiBase = int32(phiBase0) + int32(0)
+				bbs[1].PhiCount = uint16(2)
+				for i := range args {
+					ctx.StabilizeDescForControlFlow(&args[i])
+				}
 				d1 := JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(0)}
 				ctx.PreparePointerStackTarget(int32(phiBase0)+int32(0), 3)
 				_ = d1
 				d2 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(24)}
 				_ = d2
-				var bbs [5]BBDescriptor
-				bbs[1].PhiBase = int32(phiBase0) + int32(0)
-				bbs[1].PhiCount = uint16(2)
 				if result.Loc == LocAny {
 					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 					ctx.BindReg(result.Reg, &result)
@@ -70450,9 +70453,6 @@ func init_list() {
 					return bbs[1].RenderPS(ps128)
 					return result
 				}
-				for i := range args {
-					ctx.StabilizeDescForControlFlow(&args[i])
-				}
 				ps130 := PhiState{General: false}
 				_ = bbs[0].RenderPS(ps130)
 				ctx.MarkLabel(lbl0)
@@ -70564,11 +70564,14 @@ func init_list() {
 				_ = d70
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(16))
-				d1 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(0)}
-				_ = d1
 				var bbs [4]BBDescriptor
 				bbs[1].PhiBase = int32(phiBase0) + int32(0)
 				bbs[1].PhiCount = uint16(1)
+				for i := range args {
+					ctx.StabilizeDescForControlFlow(&args[i])
+				}
+				d1 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(0)}
+				_ = d1
 				if result.Loc == LocAny {
 					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 					ctx.BindReg(result.Reg, &result)
@@ -71359,9 +71362,6 @@ func init_list() {
 					ctx.EmitJmp(lbl0)
 					return result
 				}
-				for i := range args {
-					ctx.StabilizeDescForControlFlow(&args[i])
-				}
 				ps71 := PhiState{General: false}
 				_ = bbs[0].RenderPS(ps71)
 				ctx.MarkLabel(lbl0)
@@ -71472,11 +71472,14 @@ func init_list() {
 				_ = d68
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(16))
-				d1 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(0)}
-				_ = d1
 				var bbs [4]BBDescriptor
 				bbs[1].PhiBase = int32(phiBase0) + int32(0)
 				bbs[1].PhiCount = uint16(1)
+				for i := range args {
+					ctx.StabilizeDescForControlFlow(&args[i])
+				}
+				d1 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(0)}
+				_ = d1
 				if result.Loc == LocAny {
 					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 					ctx.BindReg(result.Reg, &result)
@@ -72274,9 +72277,6 @@ func init_list() {
 					ctx.EmitJmp(lbl0)
 					return result
 				}
-				for i := range args {
-					ctx.StabilizeDescForControlFlow(&args[i])
-				}
 				ps69 := PhiState{General: false}
 				_ = bbs[0].RenderPS(ps69)
 				ctx.MarkLabel(lbl0)
@@ -72448,6 +72448,14 @@ func init_list() {
 				_ = d204
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(80))
+				var bbs [8]BBDescriptor
+				bbs[2].PhiBase = int32(phiBase0) + int32(0)
+				bbs[2].PhiCount = uint16(2)
+				bbs[3].PhiBase = int32(phiBase0) + int32(32)
+				bbs[3].PhiCount = uint16(3)
+				for i := range args {
+					ctx.StabilizeDescForControlFlow(&args[i])
+				}
 				d1 := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(0)}
 				ctx.PrepareScmerStackTarget(int32(phiBase0) + int32(0))
 				_ = d1
@@ -72460,11 +72468,6 @@ func init_list() {
 				_ = d4
 				d5 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(64)}
 				_ = d5
-				var bbs [8]BBDescriptor
-				bbs[2].PhiBase = int32(phiBase0) + int32(0)
-				bbs[2].PhiCount = uint16(2)
-				bbs[3].PhiBase = int32(phiBase0) + int32(32)
-				bbs[3].PhiCount = uint16(3)
 				if result.Loc == LocAny {
 					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 					ctx.BindReg(result.Reg, &result)
@@ -75095,9 +75098,6 @@ func init_list() {
 					return bbs[3].RenderPS(ps203)
 					return result
 				}
-				for i := range args {
-					ctx.StabilizeDescForControlFlow(&args[i])
-				}
 				ps205 := PhiState{General: false}
 				_ = bbs[0].RenderPS(ps205)
 				ctx.MarkLabel(lbl0)
@@ -75284,6 +75284,14 @@ func init_list() {
 				_ = d278
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(80))
+				var bbs [9]BBDescriptor
+				bbs[2].PhiBase = int32(phiBase0) + int32(0)
+				bbs[2].PhiCount = uint16(2)
+				bbs[3].PhiBase = int32(phiBase0) + int32(32)
+				bbs[3].PhiCount = uint16(3)
+				for i := range args {
+					ctx.StabilizeDescForControlFlow(&args[i])
+				}
 				d1 := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(0)}
 				ctx.PrepareScmerStackTarget(int32(phiBase0) + int32(0))
 				_ = d1
@@ -75296,11 +75304,6 @@ func init_list() {
 				_ = d4
 				d5 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(64)}
 				_ = d5
-				var bbs [9]BBDescriptor
-				bbs[2].PhiBase = int32(phiBase0) + int32(0)
-				bbs[2].PhiCount = uint16(2)
-				bbs[3].PhiBase = int32(phiBase0) + int32(32)
-				bbs[3].PhiCount = uint16(3)
 				if result.Loc == LocAny {
 					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 					ctx.BindReg(result.Reg, &result)
@@ -78657,9 +78660,6 @@ func init_list() {
 					return bbs[3].RenderPS(ps277)
 					return result
 				}
-				for i := range args {
-					ctx.StabilizeDescForControlFlow(&args[i])
-				}
 				ps279 := PhiState{General: false}
 				_ = bbs[0].RenderPS(ps279)
 				ctx.MarkLabel(lbl0)
@@ -78895,6 +78895,16 @@ func init_list() {
 				_ = d433
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(128))
+				var bbs [15]BBDescriptor
+				bbs[4].PhiBase = int32(phiBase0) + int32(0)
+				bbs[4].PhiCount = uint16(2)
+				bbs[5].PhiBase = int32(phiBase0) + int32(32)
+				bbs[5].PhiCount = uint16(3)
+				bbs[10].PhiBase = int32(phiBase0) + int32(80)
+				bbs[10].PhiCount = uint16(3)
+				for i := range args {
+					ctx.StabilizeDescForControlFlow(&args[i])
+				}
 				d1 := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(0)}
 				ctx.PrepareScmerStackTarget(int32(phiBase0) + int32(0))
 				_ = d1
@@ -78914,13 +78924,6 @@ func init_list() {
 				_ = d7
 				d8 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(112)}
 				_ = d8
-				var bbs [15]BBDescriptor
-				bbs[4].PhiBase = int32(phiBase0) + int32(0)
-				bbs[4].PhiCount = uint16(2)
-				bbs[5].PhiBase = int32(phiBase0) + int32(32)
-				bbs[5].PhiCount = uint16(3)
-				bbs[10].PhiBase = int32(phiBase0) + int32(80)
-				bbs[10].PhiCount = uint16(3)
 				if result.Loc == LocAny {
 					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 					ctx.BindReg(result.Reg, &result)
@@ -84964,9 +84967,6 @@ func init_list() {
 					return bbs[10].RenderPS(ps432)
 					return result
 				}
-				for i := range args {
-					ctx.StabilizeDescForControlFlow(&args[i])
-				}
 				ps434 := PhiState{General: false}
 				_ = bbs[0].RenderPS(ps434)
 				ctx.MarkLabel(lbl0)
@@ -85170,6 +85170,14 @@ func init_list() {
 				_ = d307
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(80))
+				var bbs [9]BBDescriptor
+				bbs[2].PhiBase = int32(phiBase0) + int32(0)
+				bbs[2].PhiCount = uint16(2)
+				bbs[3].PhiBase = int32(phiBase0) + int32(32)
+				bbs[3].PhiCount = uint16(3)
+				for i := range args {
+					ctx.StabilizeDescForControlFlow(&args[i])
+				}
 				d1 := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(0)}
 				ctx.PrepareScmerStackTarget(int32(phiBase0) + int32(0))
 				_ = d1
@@ -85182,11 +85190,6 @@ func init_list() {
 				_ = d4
 				d5 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(64)}
 				_ = d5
-				var bbs [9]BBDescriptor
-				bbs[2].PhiBase = int32(phiBase0) + int32(0)
-				bbs[2].PhiCount = uint16(2)
-				bbs[3].PhiBase = int32(phiBase0) + int32(32)
-				bbs[3].PhiCount = uint16(3)
 				if result.Loc == LocAny {
 					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 					ctx.BindReg(result.Reg, &result)
@@ -88800,9 +88803,6 @@ func init_list() {
 					return bbs[3].RenderPS(ps306)
 					return result
 				}
-				for i := range args {
-					ctx.StabilizeDescForControlFlow(&args[i])
-				}
 				ps308 := PhiState{General: false}
 				_ = bbs[0].RenderPS(ps308)
 				ctx.MarkLabel(lbl0)
@@ -89006,6 +89006,14 @@ func init_list() {
 				_ = d303
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(80))
+				var bbs [9]BBDescriptor
+				bbs[2].PhiBase = int32(phiBase0) + int32(0)
+				bbs[2].PhiCount = uint16(2)
+				bbs[3].PhiBase = int32(phiBase0) + int32(32)
+				bbs[3].PhiCount = uint16(3)
+				for i := range args {
+					ctx.StabilizeDescForControlFlow(&args[i])
+				}
 				d1 := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(0)}
 				ctx.PrepareScmerStackTarget(int32(phiBase0) + int32(0))
 				_ = d1
@@ -89018,11 +89026,6 @@ func init_list() {
 				_ = d4
 				d5 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(64)}
 				_ = d5
-				var bbs [9]BBDescriptor
-				bbs[2].PhiBase = int32(phiBase0) + int32(0)
-				bbs[2].PhiCount = uint16(2)
-				bbs[3].PhiBase = int32(phiBase0) + int32(32)
-				bbs[3].PhiCount = uint16(3)
 				if result.Loc == LocAny {
 					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 					ctx.BindReg(result.Reg, &result)
@@ -92589,9 +92592,6 @@ func init_list() {
 					return bbs[3].RenderPS(ps302)
 					return result
 				}
-				for i := range args {
-					ctx.StabilizeDescForControlFlow(&args[i])
-				}
 				ps304 := PhiState{General: false}
 				_ = bbs[0].RenderPS(ps304)
 				ctx.MarkLabel(lbl0)
@@ -92743,14 +92743,17 @@ func init_list() {
 				_ = d140
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(40))
+				var bbs [6]BBDescriptor
+				bbs[1].PhiBase = int32(phiBase0) + int32(0)
+				bbs[1].PhiCount = uint16(2)
+				for i := range args {
+					ctx.StabilizeDescForControlFlow(&args[i])
+				}
 				d1 := JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(0)}
 				ctx.PreparePointerStackTarget(int32(phiBase0)+int32(0), 3)
 				_ = d1
 				d2 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(24)}
 				_ = d2
-				var bbs [6]BBDescriptor
-				bbs[1].PhiBase = int32(phiBase0) + int32(0)
-				bbs[1].PhiCount = uint16(2)
 				if result.Loc == LocAny {
 					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 					ctx.BindReg(result.Reg, &result)
@@ -94632,9 +94635,6 @@ func init_list() {
 					ctx.FreeDesc(&d130)
 					return result
 				}
-				for i := range args {
-					ctx.StabilizeDescForControlFlow(&args[i])
-				}
 				ps194 := PhiState{General: false}
 				_ = bbs[0].RenderPS(ps194)
 				ctx.MarkLabel(lbl0)
@@ -94746,11 +94746,14 @@ func init_list() {
 				_ = d68
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(16))
-				d1 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(0)}
-				_ = d1
 				var bbs [4]BBDescriptor
 				bbs[1].PhiBase = int32(phiBase0) + int32(0)
 				bbs[1].PhiCount = uint16(1)
+				for i := range args {
+					ctx.StabilizeDescForControlFlow(&args[i])
+				}
+				d1 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(0)}
+				_ = d1
 				if result.Loc == LocAny {
 					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 					ctx.BindReg(result.Reg, &result)
@@ -95596,9 +95599,6 @@ func init_list() {
 					ctx.EmitJmp(lbl0)
 					return result
 				}
-				for i := range args {
-					ctx.StabilizeDescForControlFlow(&args[i])
-				}
 				ps69 := PhiState{General: false}
 				_ = bbs[0].RenderPS(ps69)
 				ctx.MarkLabel(lbl0)
@@ -95714,14 +95714,17 @@ func init_list() {
 				_ = d76
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(40))
+				var bbs [4]BBDescriptor
+				bbs[1].PhiBase = int32(phiBase0) + int32(0)
+				bbs[1].PhiCount = uint16(2)
+				for i := range args {
+					ctx.StabilizeDescForControlFlow(&args[i])
+				}
 				d1 := JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(0)}
 				ctx.PreparePointerStackTarget(int32(phiBase0)+int32(0), 3)
 				_ = d1
 				d2 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(24)}
 				_ = d2
-				var bbs [4]BBDescriptor
-				bbs[1].PhiBase = int32(phiBase0) + int32(0)
-				bbs[1].PhiCount = uint16(2)
 				if result.Loc == LocAny {
 					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 					ctx.BindReg(result.Reg, &result)
@@ -96681,9 +96684,6 @@ func init_list() {
 					ctx.EmitJmp(lbl0)
 					return result
 				}
-				for i := range args {
-					ctx.StabilizeDescForControlFlow(&args[i])
-				}
 				ps77 := PhiState{General: false}
 				_ = bbs[0].RenderPS(ps77)
 				ctx.MarkLabel(lbl0)
@@ -96939,11 +96939,14 @@ func init_list() {
 				_ = d50
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(16))
-				d1 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(0)}
-				_ = d1
 				var bbs [4]BBDescriptor
 				bbs[1].PhiBase = int32(phiBase0) + int32(0)
 				bbs[1].PhiCount = uint16(1)
+				for i := range args {
+					ctx.StabilizeDescForControlFlow(&args[i])
+				}
+				d1 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(0)}
+				_ = d1
 				if result.Loc == LocAny {
 					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 					ctx.BindReg(result.Reg, &result)
@@ -97564,9 +97567,6 @@ func init_list() {
 					ctx.EmitJmp(lbl0)
 					return result
 				}
-				for i := range args {
-					ctx.StabilizeDescForControlFlow(&args[i])
-				}
 				ps51 := PhiState{General: false}
 				_ = bbs[0].RenderPS(ps51)
 				ctx.MarkLabel(lbl0)
@@ -97660,11 +97660,14 @@ func init_list() {
 				_ = d51
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(16))
-				d1 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(0)}
-				_ = d1
 				var bbs [4]BBDescriptor
 				bbs[1].PhiBase = int32(phiBase0) + int32(0)
 				bbs[1].PhiCount = uint16(1)
+				for i := range args {
+					ctx.StabilizeDescForControlFlow(&args[i])
+				}
+				d1 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(0)}
+				_ = d1
 				if result.Loc == LocAny {
 					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 					ctx.BindReg(result.Reg, &result)
@@ -98296,9 +98299,6 @@ func init_list() {
 					ctx.EmitJmp(lbl0)
 					return result
 				}
-				for i := range args {
-					ctx.StabilizeDescForControlFlow(&args[i])
-				}
 				ps52 := PhiState{General: false}
 				_ = bbs[0].RenderPS(ps52)
 				ctx.MarkLabel(lbl0)
@@ -98474,13 +98474,16 @@ func init_list() {
 				_ = d105
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(32))
+				var bbs [5]BBDescriptor
+				bbs[1].PhiBase = int32(phiBase0) + int32(0)
+				bbs[1].PhiCount = uint16(2)
+				for i := range args {
+					ctx.StabilizeDescForControlFlow(&args[i])
+				}
 				d1 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(0)}
 				_ = d1
 				d2 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(16)}
 				_ = d2
-				var bbs [5]BBDescriptor
-				bbs[1].PhiBase = int32(phiBase0) + int32(0)
-				bbs[1].PhiCount = uint16(2)
 				if result.Loc == LocAny {
 					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 					ctx.BindReg(result.Reg, &result)
@@ -99677,9 +99680,6 @@ func init_list() {
 					return bbs[1].RenderPS(ps104)
 					return result
 				}
-				for i := range args {
-					ctx.StabilizeDescForControlFlow(&args[i])
-				}
 				ps106 := PhiState{General: false}
 				_ = bbs[0].RenderPS(ps106)
 				ctx.MarkLabel(lbl0)
@@ -99769,13 +99769,16 @@ func init_list() {
 				_ = d46
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(32))
+				var bbs [4]BBDescriptor
+				bbs[1].PhiBase = int32(phiBase0) + int32(0)
+				bbs[1].PhiCount = uint16(2)
+				for i := range args {
+					ctx.StabilizeDescForControlFlow(&args[i])
+				}
 				d1 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(0)}
 				_ = d1
 				d2 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(16)}
 				_ = d2
-				var bbs [4]BBDescriptor
-				bbs[1].PhiBase = int32(phiBase0) + int32(0)
-				bbs[1].PhiCount = uint16(2)
 				if result.Loc == LocAny {
 					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 					ctx.BindReg(result.Reg, &result)
@@ -100428,9 +100431,6 @@ func init_list() {
 					ctx.EmitJmp(lbl0)
 					return result
 				}
-				for i := range args {
-					ctx.StabilizeDescForControlFlow(&args[i])
-				}
 				ps47 := PhiState{General: false}
 				_ = bbs[0].RenderPS(ps47)
 				ctx.MarkLabel(lbl0)
@@ -100798,6 +100798,14 @@ func init_list() {
 				_ = d143
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(56))
+				var bbs [7]BBDescriptor
+				bbs[1].PhiBase = int32(phiBase0) + int32(0)
+				bbs[1].PhiCount = uint16(2)
+				bbs[4].PhiBase = int32(phiBase0) + int32(40)
+				bbs[4].PhiCount = uint16(1)
+				for i := range args {
+					ctx.StabilizeDescForControlFlow(&args[i])
+				}
 				d1 := JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(0)}
 				ctx.PreparePointerStackTarget(int32(phiBase0)+int32(0), 3)
 				_ = d1
@@ -100805,11 +100813,6 @@ func init_list() {
 				_ = d2
 				d3 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(40)}
 				_ = d3
-				var bbs [7]BBDescriptor
-				bbs[1].PhiBase = int32(phiBase0) + int32(0)
-				bbs[1].PhiCount = uint16(2)
-				bbs[4].PhiBase = int32(phiBase0) + int32(40)
-				bbs[4].PhiCount = uint16(1)
 				if result.Loc == LocAny {
 					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 					ctx.BindReg(result.Reg, &result)
@@ -102543,9 +102546,6 @@ func init_list() {
 					return bbs[1].RenderPS(ps142)
 					return result
 				}
-				for i := range args {
-					ctx.StabilizeDescForControlFlow(&args[i])
-				}
 				ps144 := PhiState{General: false}
 				_ = bbs[0].RenderPS(ps144)
 				ctx.MarkLabel(lbl0)
@@ -103038,6 +103038,32 @@ func init_list() {
 				_ = d2238
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(296))
+				var bbs [31]BBDescriptor
+				bbs[3].PhiBase = int32(phiBase0) + int32(0)
+				bbs[3].PhiCount = uint16(2)
+				bbs[6].PhiBase = int32(phiBase0) + int32(40)
+				bbs[6].PhiCount = uint16(2)
+				bbs[8].PhiBase = int32(phiBase0) + int32(80)
+				bbs[8].PhiCount = uint16(1)
+				bbs[10].PhiBase = int32(phiBase0) + int32(96)
+				bbs[10].PhiCount = uint16(1)
+				bbs[13].PhiBase = int32(phiBase0) + int32(112)
+				bbs[13].PhiCount = uint16(2)
+				bbs[16].PhiBase = int32(phiBase0) + int32(152)
+				bbs[16].PhiCount = uint16(1)
+				bbs[18].PhiBase = int32(phiBase0) + int32(168)
+				bbs[18].PhiCount = uint16(1)
+				bbs[21].PhiBase = int32(phiBase0) + int32(184)
+				bbs[21].PhiCount = uint16(2)
+				bbs[24].PhiBase = int32(phiBase0) + int32(224)
+				bbs[24].PhiCount = uint16(2)
+				bbs[26].PhiBase = int32(phiBase0) + int32(264)
+				bbs[26].PhiCount = uint16(1)
+				bbs[28].PhiBase = int32(phiBase0) + int32(280)
+				bbs[28].PhiCount = uint16(1)
+				for i := range args {
+					ctx.StabilizeDescForControlFlow(&args[i])
+				}
 				d1 := JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(0)}
 				ctx.PreparePointerStackTarget(int32(phiBase0)+int32(0), 3)
 				_ = d1
@@ -103075,29 +103101,6 @@ func init_list() {
 				_ = d15
 				d16 := JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(280)}
 				_ = d16
-				var bbs [31]BBDescriptor
-				bbs[3].PhiBase = int32(phiBase0) + int32(0)
-				bbs[3].PhiCount = uint16(2)
-				bbs[6].PhiBase = int32(phiBase0) + int32(40)
-				bbs[6].PhiCount = uint16(2)
-				bbs[8].PhiBase = int32(phiBase0) + int32(80)
-				bbs[8].PhiCount = uint16(1)
-				bbs[10].PhiBase = int32(phiBase0) + int32(96)
-				bbs[10].PhiCount = uint16(1)
-				bbs[13].PhiBase = int32(phiBase0) + int32(112)
-				bbs[13].PhiCount = uint16(2)
-				bbs[16].PhiBase = int32(phiBase0) + int32(152)
-				bbs[16].PhiCount = uint16(1)
-				bbs[18].PhiBase = int32(phiBase0) + int32(168)
-				bbs[18].PhiCount = uint16(1)
-				bbs[21].PhiBase = int32(phiBase0) + int32(184)
-				bbs[21].PhiCount = uint16(2)
-				bbs[24].PhiBase = int32(phiBase0) + int32(224)
-				bbs[24].PhiCount = uint16(2)
-				bbs[26].PhiBase = int32(phiBase0) + int32(264)
-				bbs[26].PhiCount = uint16(1)
-				bbs[28].PhiBase = int32(phiBase0) + int32(280)
-				bbs[28].PhiCount = uint16(1)
 				if result.Loc == LocAny {
 					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 					ctx.BindReg(result.Reg, &result)
@@ -131570,9 +131573,6 @@ func init_list() {
 					return bbs[24].RenderPS(ps2237)
 					return result
 				}
-				for i := range args {
-					ctx.StabilizeDescForControlFlow(&args[i])
-				}
 				ps2239 := PhiState{General: false}
 				_ = bbs[0].RenderPS(ps2239)
 				ctx.MarkLabel(lbl0)
@@ -131645,6 +131645,9 @@ func init_list() {
 				_ = d25
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				var bbs [3]BBDescriptor
+				for i := range args {
+					ctx.StabilizeDescForControlFlow(&args[i])
+				}
 				if result.Loc == LocAny {
 					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 					ctx.BindReg(result.Reg, &result)
@@ -132005,9 +132008,6 @@ func init_list() {
 					}
 					ctx.EmitJmp(lbl0)
 					return result
-				}
-				for i := range args {
-					ctx.StabilizeDescForControlFlow(&args[i])
 				}
 				ps26 := PhiState{General: false}
 				_ = bbs[0].RenderPS(ps26)

@@ -266,6 +266,18 @@ func init_vector() {
 				_ = d591
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(128))
+				var bbs [15]BBDescriptor
+				bbs[2].PhiBase = int32(phiBase0) + int32(0)
+				bbs[2].PhiCount = uint16(1)
+				bbs[4].PhiBase = int32(phiBase0) + int32(16)
+				bbs[4].PhiCount = uint16(1)
+				bbs[6].PhiBase = int32(phiBase0) + int32(32)
+				bbs[6].PhiCount = uint16(4)
+				bbs[10].PhiBase = int32(phiBase0) + int32(96)
+				bbs[10].PhiCount = uint16(2)
+				for i := range args {
+					ctx.StabilizeDescForControlFlow(&args[i])
+				}
 				d1 := JITValueDesc{Loc: LocStackPair, Type: tagString, StackOff: int32(phiBase0) + int32(0)}
 				ctx.PrepareScmerStackTarget(int32(phiBase0) + int32(0))
 				_ = d1
@@ -283,15 +295,6 @@ func init_vector() {
 				_ = d7
 				d8 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(112)}
 				_ = d8
-				var bbs [15]BBDescriptor
-				bbs[2].PhiBase = int32(phiBase0) + int32(0)
-				bbs[2].PhiCount = uint16(1)
-				bbs[4].PhiBase = int32(phiBase0) + int32(16)
-				bbs[4].PhiCount = uint16(1)
-				bbs[6].PhiBase = int32(phiBase0) + int32(32)
-				bbs[6].PhiCount = uint16(4)
-				bbs[10].PhiBase = int32(phiBase0) + int32(96)
-				bbs[10].PhiCount = uint16(2)
 				if result.Loc == LocAny {
 					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 					ctx.BindReg(result.Reg, &result)
@@ -7862,9 +7865,6 @@ func init_vector() {
 					}
 					return bbs[4].RenderPS(ps590)
 					return result
-				}
-				for i := range args {
-					ctx.StabilizeDescForControlFlow(&args[i])
 				}
 				ps592 := PhiState{General: false}
 				_ = bbs[0].RenderPS(ps592)

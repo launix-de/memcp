@@ -29,6 +29,31 @@ import (
 
 var jitCodeOverflowPanic = &struct{}{}
 
+// jitX86RegisterBank maps architecture-independent register colors to amd64.
+// Registers with fixed roles in shifts, division and the Go ABI are deliberately
+// last so persistent loop values do not force avoidable shuffles.
+//
+// R15 remains available to the ordinary allocator for block-local temporaries,
+// but is intentionally absent from this persistent-home bank. Go treats R15 as
+// scratch and dynamically linked Go code may use it for GOT loads. A home spans
+// separately rendered control-flow paths, whereas RegOwners describes only the
+// emitter's current path snapshot; that is insufficient proof that every future
+// runtime call will preserve R15. Short-lived uses remain safe because their
+// descriptor ownership is exact at the call boundary.
+//
+// Every JIT-to-Go boundary must nevertheless obtain its live set through
+// collectLiveRegsForCall. A call emitter must not duplicate a weaker owner-only
+// scan, because protected homes can be live without a direct owner in the
+// emitter's current bookkeeping snapshot.
+var jitX86RegisterBank = JITRegisterBank{
+	Registers: [16]Reg{
+		RegR13, RegR10, RegR9, RegR8, RegRDI, RegRSI,
+		RegRCX, RegRDX, RegRAX, RegRBX,
+	},
+	Count:            10,
+	TemporaryReserve: 7,
+}
+
 func jitCapturedEnv(en *Env) *JITEnv {
 	if en == nil || en == &Globalenv {
 		return nil
@@ -131,6 +156,7 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 		End:              unsafe.Add(buf.ptr, buf.n),
 		FreeRegs:         freeRegs,
 		AllRegs:          freeRegs,
+		RegisterBank:     jitX86RegisterBank,
 		SliceBase:        RegR12,
 		StackReg:         RegRSP,
 		FrameReg:         RegRBP,
@@ -2034,35 +2060,9 @@ func (ctx *JITContext) EmitGoCallVariadic(f func(...Scmer) Scmer, argslice JITVa
 
 	ctx.ReclaimUntrackedRegs()
 	var liveRegsArr [16]Reg
-	liveCount := 0
-	for r := Reg(0); r <= RegR15; r++ {
-		if r == RegRSP || r == RegRBP || r == RegR11 || r == RegR14 {
-			continue
-		}
-		bit := uint64(1 << uint(r))
-		if (ctx.AllRegs&bit) == 0 || (ctx.FreeRegs&bit) != 0 {
-			continue
-		}
-		owner := ctx.RegOwners[r]
-		if owner == nil {
-			continue
-		}
-		valid := false
-		switch owner.Loc {
-		case LocReg:
-			valid = owner.Reg == r
-		case LocRegPair:
-			valid = owner.Reg == r || owner.Reg2 == r
-		}
-		if !valid {
-			continue
-		}
-		liveRegsArr[liveCount] = r
-		liveCount++
-	}
-	liveRegs := liveRegsArr[:0]
-	for i := 0; i < liveCount; i++ {
-		r := liveRegsArr[i]
+	allLiveRegs := ctx.collectLiveRegsForCall(&liveRegsArr)
+	liveRegs := allLiveRegs[:0]
+	for _, r := range allLiveRegs {
 		if r == arg.Reg || r == arg.Reg2 {
 			continue
 		}
@@ -2543,6 +2543,11 @@ func (ctx *JITContext) EmitStoreScmerToStack(desc JITValueDesc, disp int32) {
 		ctx.EmitStoreRegMem(value.Reg, RegRSP, disp)
 		ctx.EmitStoreRegMem(value.Reg2, RegRSP, disp+8)
 		ctx.FreeDesc(&value)
+	case LocStack:
+		if desc.Type == JITTypeUnknown {
+			panic("jit: an untyped scalar stack value cannot be boxed as Scmer")
+		}
+		ctx.EmitStoreTypedScmerToStack(desc, desc.Type, disp)
 	case LocImm:
 		// Store ptr word
 		ctx.EmitMovRegImm64(RegR11, uint64(uintptr(unsafe.Pointer(desc.Imm.ptr))))
@@ -2558,36 +2563,60 @@ func (ctx *JITContext) EmitStoreScmerToStack(desc JITValueDesc, disp int32) {
 // EmitStoreTypedScmerToStack boxes a scalar directly into its final stack
 // destination. Phi producers use this instead of allocating a transient
 // register pair only to copy both words into the phi slot immediately after.
+// A LocStack source is intentionally supported: when the runtime register bank
+// cannot map every offline color, the scalar's canonical phi home is a single
+// word, but a Scmer consumer still needs a boxed two-word value.
 func (ctx *JITContext) EmitStoreTypedScmerToStack(desc JITValueDesc, typ uint8, disp int32) {
 	ctx.setStackPointer(jitStackRootFrameSP, disp-ctx.DynamicSP, true)
-	if desc.Loc != LocReg && desc.Loc != LocImm {
+	if desc.Loc != LocReg && desc.Loc != LocImm && desc.Loc != LocStack {
 		panic("jit: typed Scmer stack store requires a scalar descriptor")
+	}
+	storePayload := func(destination int32) {
+		switch desc.Loc {
+		case LocReg:
+			ctx.EmitStoreRegMem(desc.Reg, RegRSP, destination)
+		case LocStack:
+			base := RegRSP
+			if desc.StackOff < 0 {
+				base = RegRBP
+			}
+			ctx.EmitMovRegMem(RegR11, base, desc.StackOff)
+			ctx.EmitStoreRegMem(RegR11, RegRSP, destination)
+		default:
+			panic("jit: immediate payload must be encoded by its type case")
+		}
 	}
 
 	switch typ {
 	case tagInt:
-		ctx.EmitMovRegImm64(RegR11, uint64(uintptr(unsafe.Pointer(&scmerIntSentinel))))
-		ctx.EmitStoreRegMem(RegR11, RegRSP, disp)
-		if desc.Loc == LocReg {
-			ctx.EmitStoreRegMem(desc.Reg, RegRSP, disp+8)
+		if desc.Loc != LocImm {
+			storePayload(disp + 8)
 		} else {
 			ctx.EmitMovRegImm64(RegR11, uint64(desc.Imm.Int()))
 			ctx.EmitStoreRegMem(RegR11, RegRSP, disp+8)
 		}
-	case tagFloat:
-		ctx.EmitMovRegImm64(RegR11, uint64(uintptr(unsafe.Pointer(&scmerFloatSentinel))))
+		ctx.EmitMovRegImm64(RegR11, uint64(uintptr(unsafe.Pointer(&scmerIntSentinel))))
 		ctx.EmitStoreRegMem(RegR11, RegRSP, disp)
-		if desc.Loc == LocReg {
-			ctx.EmitStoreRegMem(desc.Reg, RegRSP, disp+8)
+	case tagFloat:
+		if desc.Loc != LocImm {
+			storePayload(disp + 8)
 		} else {
 			ctx.EmitMovRegImm64(RegR11, math.Float64bits(desc.Imm.Float()))
 			ctx.EmitStoreRegMem(RegR11, RegRSP, disp+8)
 		}
-	case tagBool:
-		ctx.EmitMovRegImm64(RegR11, 0)
+		ctx.EmitMovRegImm64(RegR11, uint64(uintptr(unsafe.Pointer(&scmerFloatSentinel))))
 		ctx.EmitStoreRegMem(RegR11, RegRSP, disp)
-		if desc.Loc == LocReg {
-			ctx.emitMovRegReg(RegR11, desc.Reg)
+	case tagBool:
+		if desc.Loc != LocImm {
+			if desc.Loc == LocReg {
+				ctx.emitMovRegReg(RegR11, desc.Reg)
+			} else {
+				base := RegRSP
+				if desc.StackOff < 0 {
+					base = RegRBP
+				}
+				ctx.EmitMovRegMem(RegR11, base, desc.StackOff)
+			}
 			ctx.emitAndRegImm32(RegR11, 1)
 			ctx.EmitShlRegImm8(RegR11, 8)
 			ctx.EmitOrRegImm32(RegR11, int32(tagBool))
@@ -2596,6 +2625,8 @@ func (ctx *JITContext) EmitStoreTypedScmerToStack(desc JITValueDesc, typ uint8, 
 			ctx.EmitMovRegImm64(RegR11, desc.Imm.aux)
 			ctx.EmitStoreRegMem(RegR11, RegRSP, disp+8)
 		}
+		ctx.EmitMovRegImm64(RegR11, 0)
+		ctx.EmitStoreRegMem(RegR11, RegRSP, disp)
 	case tagNil:
 		ctx.EmitMovRegImm64(RegR11, 0)
 		ctx.EmitStoreRegMem(RegR11, RegRSP, disp)
