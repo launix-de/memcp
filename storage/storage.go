@@ -2373,7 +2373,7 @@ func Init(en scm.Env) {
 			// Lock before publication. Every if-not-exists observer therefore waits
 			// until oninit and registered create-table triggers have both completed.
 			newTable.creationMu.Lock()
-			if prev := db.tables.Set(newTable); prev != nil {
+			if prev := db.tables.Set(tblName, newTable); prev != nil {
 				newTable.creationMu.Unlock()
 				db.schemalock.Unlock()
 				panic("Table " + tblName + " already exists")

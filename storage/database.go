@@ -30,9 +30,9 @@ import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/NonLockingReadMap"
 
 type database struct {
-	Name        string                                             `json:"name"`
-	persistence PersistenceEngine                                  `json:"-"`
-	tables      NonLockingReadMap.NonLockingReadMap[table, string] `json:"-"`
+	Name        string                                     `json:"name"`
+	persistence PersistenceEngine                          `json:"-"`
+	tables      *NonLockingReadMap.ReadMap[string, *table] `json:"-"`
 	// loadOnce is the database-wide lazy-load barrier. The MySQL and HTTP
 	// listeners may issue the first queries concurrently; none may observe a
 	// partially decoded table catalog.
@@ -99,7 +99,11 @@ func (db *database) blobRefState() *blobRefState {
 }
 
 func newDatabase() *database {
-	return &database{blobRefs: new(blobRefState), committedTx: make(map[string]uint64)}
+	return &database{
+		tables:      NonLockingReadMap.NewReadMap[string, *table](),
+		blobRefs:    new(blobRefState),
+		committedTx: make(map[string]uint64),
+	}
 }
 
 const transactionLogName = ".transactions"
@@ -289,16 +293,16 @@ func normalizeTempLookupName(dbName string, name string) string {
 // Custom JSON to persist private tables field
 func (d *database) MarshalJSON() ([]byte, error) {
 	type persist struct {
-		Name   string                                             `json:"name"`
-		Tables NonLockingReadMap.NonLockingReadMap[table, string] `json:"tables"`
+		Name   string                                     `json:"name"`
+		Tables *NonLockingReadMap.ReadMap[string, *table] `json:"tables"`
 	}
 	return json.Marshal(persist{Name: d.Name, Tables: d.tables})
 }
 
 func (d *database) UnmarshalJSON(data []byte) error {
 	type persist struct {
-		Name   string                                             `json:"name"`
-		Tables NonLockingReadMap.NonLockingReadMap[table, string] `json:"tables"`
+		Name   string                                     `json:"name"`
+		Tables *NonLockingReadMap.ReadMap[string, *table] `json:"tables"`
 	}
 	var p persist
 	if err := json.Unmarshal(data, &p); err != nil {
@@ -306,105 +310,14 @@ func (d *database) UnmarshalJSON(data []byte) error {
 	}
 	d.Name = p.Name
 	d.tables = p.Tables
-	return nil
-}
-
-// databaseCatalogEntry is immutable after publication. Keeping the mutable
-// database behind a pointer prevents lookups from copying live mutex/cachelines.
-type databaseCatalogEntry struct {
-	name string
-	db   *database
-}
-
-type databaseCatalogSnapshot struct {
-	entries   []databaseCatalogEntry
-	databases []*database
-}
-
-type databaseCatalog struct {
-	writes   sync.Mutex
-	snapshot atomic.Pointer[databaseCatalogSnapshot]
-}
-
-func newDatabaseCatalog() databaseCatalog {
-	catalog := databaseCatalog{}
-	catalog.snapshot.Store(&databaseCatalogSnapshot{})
-	return catalog
-}
-
-func (catalog *databaseCatalog) Get(name string) *database {
-	entries := catalog.snapshot.Load().entries
-	lower, upper := 0, len(entries)
-	for lower < upper {
-		pivot := (lower + upper) / 2
-		if entries[pivot].name == name {
-			return entries[pivot].db
-		}
-		if entries[pivot].name < name {
-			lower = pivot + 1
-		} else {
-			upper = pivot
-		}
+	if d.tables == nil {
+		d.tables = NonLockingReadMap.NewReadMap[string, *table]()
 	}
 	return nil
 }
 
-func (catalog *databaseCatalog) Set(db *database) *database {
-	catalog.writes.Lock()
-	defer catalog.writes.Unlock()
-	old := catalog.snapshot.Load().entries
-	index := sort.Search(len(old), func(index int) bool { return old[index].name >= db.Name })
-	previous := (*database)(nil)
-	var entries []databaseCatalogEntry
-	if index < len(old) && old[index].name == db.Name {
-		previous = old[index].db
-		entries = make([]databaseCatalogEntry, len(old))
-		copy(entries, old)
-	} else {
-		entries = make([]databaseCatalogEntry, len(old)+1)
-		copy(entries, old[:index])
-		copy(entries[index+1:], old[index:])
-	}
-	entries[index] = databaseCatalogEntry{name: db.Name, db: db}
-	catalog.publish(entries)
-	return previous
-}
-
-func (catalog *databaseCatalog) Remove(name string) *database {
-	catalog.writes.Lock()
-	defer catalog.writes.Unlock()
-	old := catalog.snapshot.Load().entries
-	index := sort.Search(len(old), func(index int) bool { return old[index].name >= name })
-	if index == len(old) || old[index].name != name {
-		return nil
-	}
-	entries := make([]databaseCatalogEntry, len(old)-1)
-	copy(entries, old[:index])
-	copy(entries[index:], old[index+1:])
-	removed := old[index].db
-	catalog.publish(entries)
-	return removed
-}
-
-func (catalog *databaseCatalog) GetAll() []*database {
-	return catalog.snapshot.Load().databases
-}
-
-func (catalog *databaseCatalog) publish(entries []databaseCatalogEntry) {
-	result := make([]*database, len(entries))
-	for index, entry := range entries {
-		result[index] = entry.db
-	}
-	catalog.snapshot.Store(&databaseCatalogSnapshot{entries: entries, databases: result})
-}
-
-var databases = newDatabaseCatalog()
+var databases = NonLockingReadMap.NewReadMap[string, *database]()
 var Basepath string = "data"
-
-/* implement NonLockingReadMap */
-func (d *database) GetKey() string {
-	return d.Name
-}
 
 func (d *database) ComputeSize() uint {
 	var sz uint = 16 * 8 // heuristic
@@ -568,7 +481,7 @@ func LoadDatabases() {
 			db.Name = entry.Name()
 			db.persistence = instrumentPersistence(entry.Name(), &FileStorage{path: Basepath + "/" + entry.Name() + "/"})
 			db.srState = COLD
-			databases.Set(db)
+			databases.Set(db.Name, db)
 		} else if strings.HasSuffix(entry.Name(), ".json") && entry.Name() != "settings.json" {
 			// Backend configuration file (e.g., Ceph, S3)
 			dbName := strings.TrimSuffix(entry.Name(), ".json")
@@ -588,7 +501,7 @@ func LoadDatabases() {
 			db.Name = dbName
 			db.persistence = persistence
 			db.srState = COLD
-			databases.Set(db)
+			databases.Set(db.Name, db)
 		}
 	}
 
@@ -731,7 +644,7 @@ func (db *database) ensureLoaded() {
 		jsonbytes := db.persistence.ReadSchema()
 		if len(jsonbytes) == 0 {
 			// fresh/empty database
-			db.tables = NonLockingReadMap.New[table, string]()
+			db.tables = NonLockingReadMap.NewReadMap[string, *table]()
 			db.srState = SHARED
 			return
 		}
@@ -1278,14 +1191,14 @@ func CreateDatabase(schema string, ignoreexists bool /*, persistence Persistence
 	db.Name = schema
 	persistence := FileFactory{Basepath} // TODO: remove this, use parameter instead
 	db.persistence = instrumentPersistence(schema, persistence.CreateDatabase(schema))
-	db.tables = NonLockingReadMap.New[table, string]()
+	db.tables = NonLockingReadMap.NewReadMap[string, *table]()
 	// Newly created database is live for writes
 	db.srState = WRITE
 
-	last := databases.Set(db)
+	last := databases.Set(schema, db)
 	if last != nil {
 		// two concurrent CREATE
-		databases.Set(last)
+		databases.Set(schema, last)
 		panic("Database " + schema + " already exists")
 	}
 
@@ -1333,12 +1246,12 @@ func CreateDatabaseWithBackend(schema string, ignoreexists bool, options map[str
 	db = newDatabase()
 	db.Name = schema
 	db.persistence = persistence
-	db.tables = NonLockingReadMap.New[table, string]()
+	db.tables = NonLockingReadMap.NewReadMap[string, *table]()
 	db.srState = WRITE
 
-	last := databases.Set(db)
+	last := databases.Set(schema, db)
 	if last != nil {
-		databases.Set(last)
+		databases.Set(schema, last)
 		os.Remove(configPath)
 		panic("Database " + schema + " already exists")
 	}
@@ -1467,12 +1380,12 @@ func CreateDatabaseFrom(schema string, ignoreexists bool, sourceDB string) bool 
 	db = newDatabase()
 	db.Name = schema
 	db.persistence = persistence
-	db.tables = NonLockingReadMap.New[table, string]()
+	db.tables = NonLockingReadMap.NewReadMap[string, *table]()
 	db.srState = WRITE
 
-	last := databases.Set(db)
+	last := databases.Set(schema, db)
 	if last != nil {
-		databases.Set(last)
+		databases.Set(schema, last)
 		os.Remove(Basepath + "/" + schema + ".json")
 		panic("Database " + schema + " already exists")
 	}
@@ -1871,7 +1784,7 @@ func (db *database) createTableLocked(name string, pm PersistencyMode, ifnotexis
 		panic("Table " + name + " already exists")
 	}
 	t = db.newTable(name, pm)
-	if existing := db.tables.Set(t); existing != nil {
+	if existing := db.tables.Set(name, t); existing != nil {
 		panic("Table " + name + " already exists")
 	}
 	return t, true
@@ -1991,7 +1904,7 @@ func RenameTable(schema, oldname, newname string) {
 	}
 	db.tables.Remove(oldname)
 	t.Name = newname
-	db.tables.Set(t)
+	db.tables.Set(newname, t)
 	db.saveLockedAndUnlock(t.schemaSaveMode())
 }
 

@@ -80,13 +80,13 @@ func TestDropRefusesInternalObjectsBeforeMutation(t *testing.T) {
 	oldSystem := databases.Get("system")
 	db := newDatabase()
 	db.Name = "system"
-	db.tables = NonLockingReadMap.New[table, string]()
-	db.tables.Set(&table{schema: db, Name: "user", PersistencyMode: Safe})
-	databases.Set(db)
+	db.tables = NonLockingReadMap.NewReadMap[string, *table]()
+	db.tables.Set("user", &table{schema: db, Name: "user", PersistencyMode: Safe})
+	databases.Set(db.Name, db)
 	t.Cleanup(func() {
 		databases.Remove("system")
 		if oldSystem != nil {
-			databases.Set(oldSystem)
+			databases.Set(oldSystem.Name, oldSystem)
 		}
 	})
 

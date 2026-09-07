@@ -376,7 +376,7 @@ func testAlterDatabaseStorageToS3(t *testing.T, factory *S3Factory) {
 	reloaded.Name = databaseName
 	reloaded.persistence = createPersistenceFromConfig(databaseName, targetConfig)
 	reloaded.srState = COLD
-	databases.Set(reloaded)
+	databases.Set(reloaded.Name, reloaded)
 	reloadedTable := reloaded.GetTable("items")
 	if reloadedTable == nil {
 		t.Fatal("S3 migration lost table schema")

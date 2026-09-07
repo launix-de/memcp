@@ -167,10 +167,10 @@ func TestLegacyPersistedCacheTriggerWaitsForRuntimeTarget(t *testing.T) {
 
 func TestDropTriggerDoesNotHoldSchemaLockWhileWaitingForTableDDL(t *testing.T) {
 	db := &database{Name: "trigger-lock-order", srState: COLD}
-	db.tables = NonLockingReadMap.New[table, string]()
+	db.tables = NonLockingReadMap.NewReadMap[string, *table]()
 	table := &table{Name: "items", schema: db}
 	table.Triggers = []TriggerDescription{{Name: "items_after_drop"}}
-	db.tables.Set(table)
+	db.tables.Set(table.Name, table)
 
 	table.ddlMu.Lock()
 	dropped := make(chan bool, 1)

@@ -223,7 +223,7 @@ func TestAlterDatabaseStorageMovesDataAndPublishesDescriptor(t *testing.T) {
 	reloaded.Name = databaseName
 	reloaded.persistence = createPersistenceFromConfig(databaseName, target)
 	reloaded.srState = COLD
-	databases.Set(reloaded)
+	databases.Set(reloaded.Name, reloaded)
 	reloadedTable := reloaded.GetTable("items")
 	if reloadedTable == nil {
 		t.Fatal("moved table did not survive backend reload")
@@ -397,7 +397,7 @@ func TestAlterDatabaseStorageKeepsReadersOnPublishedGeneration(t *testing.T) {
 	reloaded.Name = databaseName
 	reloaded.persistence = createPersistenceFromConfig(databaseName, json.RawMessage(`{"backend":"blocking-test-filesystem"}`))
 	reloaded.srState = COLD
-	databases.Set(reloaded)
+	databases.Set(reloaded.Name, reloaded)
 	reloadedTable := reloaded.GetTable("items")
 	got := reloadedTable.scanLookup(NewTxContext(TxCursorStability), testLookupAccess([]string{"id"}, []scm.Scmer{scm.NewInt(2)}), "value", true)
 	if !scm.Equal(got, scm.NewString("mirrored")) {
@@ -409,13 +409,27 @@ func BenchmarkDatabaseCatalogLookup(b *testing.B) {
 	databaseName := "benchmark_database_catalog_lookup"
 	db := newDatabase()
 	db.Name = databaseName
-	databases.Set(db)
+	databases.Set(db.Name, db)
 	b.Cleanup(func() { databases.Remove(databaseName) })
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
 		if GetDatabase(databaseName) != db {
 			b.Fatal("database catalog lookup returned a different database")
+		}
+	}
+}
+
+func BenchmarkTableCatalogLookup(b *testing.B) {
+	db := newDatabase()
+	tableName := "benchmark_table_catalog_lookup"
+	tbl := &table{Name: tableName, schema: db}
+	db.tables.Set(tableName, tbl)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		if db.tables.Get(tableName) != tbl {
+			b.Fatal("table catalog lookup returned a different table")
 		}
 	}
 }

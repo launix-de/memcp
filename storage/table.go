@@ -1290,11 +1290,6 @@ func (t *table) CountExact() (result uint) {
 	return result
 }
 
-/* Implement NonLockingReadMap */
-func (t table) GetKey() string {
-	return t.Name
-}
-
 func (t table) ComputeSize() uint {
 	var size uint = 10*8 + 32*uint(len(t.Columns))
 	for _, s := range t.Shards {
