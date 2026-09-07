@@ -16,10 +16,31 @@ Copyright (C) 2026  Carl-Philip Hänsch
 */
 package storage
 
+import "sync"
 import "testing"
 
 import "github.com/google/btree"
 import "github.com/launix-de/memcp/scm"
+
+func TestStorageIndexSavingsAccumulateConcurrently(t *testing.T) {
+	idx := new(StorageIndex)
+	const workers = 8
+	const additions = 1000
+	var done sync.WaitGroup
+	done.Add(workers)
+	for range workers {
+		go func() {
+			defer done.Done()
+			for range additions {
+				idx.addSavings(nil, 1)
+			}
+		}()
+	}
+	done.Wait()
+	if got, want := idx.loadSavings(), float64(workers*additions); got != want {
+		t.Fatalf("concurrent savings = %v, want %v", got, want)
+	}
+}
 
 func TestPlannerIndexProbeDoesNotIncreaseIndexSavings(t *testing.T) {
 	Init(scm.Globalenv)
@@ -46,8 +67,8 @@ func TestPlannerIndexProbeDoesNotIncreaseIndexSavings(t *testing.T) {
 	if len(shard.Indexes) != 1 {
 		t.Fatalf("metadata indexes = %d, want 1", len(shard.Indexes))
 	}
-	if shard.Indexes[0].Savings != 0 {
-		t.Fatalf("estimate must not count as index usage, savings = %v", shard.Indexes[0].Savings)
+	if savings := shard.Indexes[0].loadSavings(); savings != 0 {
+		t.Fatalf("estimate must not count as index usage, savings = %v", savings)
 	}
 	if len(shard.Indexes[0].ColMatchers) != 0 {
 		t.Fatalf("sorted index persisted redundant matcher metadata: %#v", shard.Indexes[0].ColMatchers)

@@ -14,6 +14,7 @@ import importlib.util
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 
 MODULE_PATH = Path(__file__).with_name("reliability_drill.py")
@@ -80,6 +81,17 @@ class ReliabilityDrillTests(unittest.TestCase):
 			drill.classify_atomic_signature({
 				"row_count": 73, "min_x": 5, "max_x": 5, "x_sum": 365,
 			}, 100, 4)
+
+	def test_schema_race_mode_enables_fail_fast_race_reporting(self) -> None:
+		self.assertEqual(
+			drill.race_detector_environment(),
+			{"GORACE": "halt_on_error=1 exitcode=66"},
+		)
+		with mock.patch("sys.argv", ["reliability_drill.py", "--mode", "schema-race"]):
+			args = drill.parse_args()
+		self.assertEqual(args.mode, "schema-race")
+		self.assertGreater(args.schema_race_rows, 0)
+		self.assertGreater(args.schema_race_rounds, 0)
 
 
 if __name__ == "__main__":

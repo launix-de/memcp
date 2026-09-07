@@ -994,6 +994,7 @@ func (db *database) rebuildWithLifecycle(all bool, repartition bool, includeEphe
 			} else {
 				t.Shards = newShardList
 			}
+			previousSchemaTopology := t.publishSchemaTopology(origTopology.mode, newShardList, origTopology.dimensions)
 			t.mu.Unlock()
 			tableLocked = false
 
@@ -1011,6 +1012,7 @@ func (db *database) rebuildWithLifecycle(all bool, repartition bool, includeEphe
 				} else {
 					t.Shards = origShardList
 				}
+				t.schemaTopology.Store(previousSchemaTopology)
 				t.maintenanceKind = 0
 				t.mu.Unlock()
 				if durablePublication {
@@ -1392,11 +1394,12 @@ func CreateDatabaseFrom(schema string, ignoreexists bool, sourceDB string) bool 
 }
 
 type storageMoveGeneration struct {
-	table       *table
-	oldTopology *tableShardTopology
-	oldShards   []*storageShard
-	newShards   []*storageShard
-	partitioned bool
+	table             *table
+	oldTopology       *tableShardTopology
+	oldSchemaTopology *tableSchemaTopology
+	oldShards         []*storageShard
+	newShards         []*storageShard
+	partitioned       bool
 }
 
 func prepareStorageMoveGeneration(t *table) (generation storageMoveGeneration) {
@@ -1414,11 +1417,12 @@ func prepareStorageMoveGeneration(t *table) (generation storageMoveGeneration) {
 	t.mu.Unlock()
 
 	generation = storageMoveGeneration{
-		table:       t,
-		oldTopology: topology,
-		oldShards:   oldShards,
-		newShards:   make([]*storageShard, len(oldShards)),
-		partitioned: partitioned,
+		table:             t,
+		oldTopology:       topology,
+		oldSchemaTopology: t.schemaTopology.Load(),
+		oldShards:         oldShards,
+		newShards:         make([]*storageShard, len(oldShards)),
+		partitioned:       partitioned,
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
@@ -1445,6 +1449,7 @@ func abortStorageMoveGenerations(generations []storageMoveGeneration) {
 			discardUnpublishedShard(generation.newShards[index])
 		}
 		generation.table.mu.Lock()
+		generation.table.schemaTopology.Store(generation.oldSchemaTopology)
 		if generation.partitioned {
 			generation.table.PShards = generation.oldShards
 		} else {
@@ -1515,6 +1520,11 @@ func publishStorageMoveGenerations(db *database, dst PersistenceEngine, generati
 		} else {
 			generation.table.Shards = generation.newShards
 		}
+		generation.table.publishSchemaTopology(
+			generation.oldTopology.mode,
+			generation.newShards,
+			generation.oldTopology.dimensions,
+		)
 		generation.table.mu.Unlock()
 	}
 
@@ -1522,6 +1532,7 @@ func publishStorageMoveGenerations(db *database, dst PersistenceEngine, generati
 	for index := len(generations) - 1; index >= 0; index-- {
 		generation := generations[index]
 		generation.table.mu.Lock()
+		generation.table.schemaTopology.Store(generation.oldSchemaTopology)
 		if generation.partitioned {
 			generation.table.PShards = generation.oldShards
 		} else {

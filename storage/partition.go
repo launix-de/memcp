@@ -665,6 +665,7 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension, maint
 	oldFreeShards := append([]*storageShard(nil), t.Shards...)
 	oldPartitionShards := append([]*storageShard(nil), t.PShards...)
 	oldPartitionDimensions := append([]shardDimension(nil), t.PDimensions...)
+	oldSchemaTopology := t.schemaTopology.Load()
 	t.mu.Unlock()
 
 	// Eagerly load all shard data before taking any locks for partitioning.
@@ -705,6 +706,7 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension, maint
 		t.Shards = oldFreeShards
 		t.PShards = oldPartitionShards
 		t.PDimensions = oldPartitionDimensions
+		t.schemaTopology.Store(oldSchemaTopology)
 		t.maintenanceKind = 0
 		t.repartitionDualWriteActive.Store(false)
 		t.repartitionSources.Store(nil)
@@ -1173,6 +1175,7 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension, maint
 	t.PDimensions = shardCandidates
 	t.ShardMode = ShardModePartition
 	t.Shards = nil
+	t.publishSchemaTopology(ShardModePartition, newshards, shardCandidates)
 	t.mu.Unlock()
 	var savePanic any
 	func() {
