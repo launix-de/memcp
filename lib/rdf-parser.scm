@@ -551,6 +551,11 @@ consumer stage. */
 		(parser (define expr rdf_filter_or) '(expr "ASC")))
 	(atom "LIMIT" true)
 	(atom "OFFSET" true)
+	/* RDFHP embeds SELECT directly before its block delimiters. They must not
+	be consumed as legacy bare-name ORDER BY expressions. */
+	(atom "BEGIN" true)
+	(atom "ELSE" true)
+	(atom "END" true)
 )))
 (define rdf_limit_offset (parser (or
 	(parser '((atom "LIMIT" true) (define limit rdf_number) (? (atom "OFFSET" true) (define offset rdf_number))) '(limit offset))
@@ -2281,11 +2286,11 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 		(error "SPARQL shared planner: expected SELECT query")
 	)
 ))
-(define rdf_shared_result_context (lambda (cols outer_ctx)
+(define rdf_shared_result_context (lambda (cols outer_ctx row_symbol)
 	(match cols
 		(cons title (cons _expr tail))
-		(merge (rdf_shared_result_context tail outer_ctx)
-			(list title (list (quote rdf_row_lookup) (quote __rdf_values) title)))
+		(merge (rdf_shared_result_context tail outer_ctx row_symbol)
+			(list title (list (quote rdf_row_lookup) row_symbol title)))
 		'() outer_ctx
 	)
 ))
@@ -2296,22 +2301,29 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 		transaction carriers as SQL. Passing nil here was sufficient for a BGP,
 		but loses the runtime session preparation required by decorrelation. */
 		(define plan (build_queryplan_term ast planning_session tx))
-		(define result_ctx (rdf_shared_result_context (qb_fields ast) outer_ctx))
+		/* RDFHP can nest query plans. Fixed callback parameter names let an inner
+		plan shadow expressions captured from the outer row, producing
+		__rdf_row_missing__ for otherwise bound variables. Derive hygienic names
+		from the logical query and its outer context. */
+		(define scope_id (fnv_hash (concat query "|" outer_ctx)))
+		(define values_symbol (symbol (concat "__rdf_values_" scope_id)))
+		(define outer_resultrow_symbol (symbol (concat "__rdf_outer_resultrow_" scope_id)))
+		(define result_ctx (rdf_shared_result_context (qb_fields ast) outer_ctx values_symbol))
 		(define result_body (resultfunc (nth query 1) result_ctx))
 		(list
-			(list (quote lambda) (list (quote __rdf_outer_resultrow))
+			(list (quote lambda) (list outer_resultrow_symbol)
 				(list (quote begin)
 					(list (quote set) (quote resultrow)
-						(list (quote lambda) (list (quote __rdf_values))
+						(list (quote lambda) (list values_symbol)
 							(list
 								(list (quote lambda) (list (quote resultrow)) result_body)
-								(quote __rdf_outer_resultrow))))
+								outer_resultrow_symbol)))
 					plan))
 			(quote resultrow)))
 ))
 
 (define rdf_queryplan (lambda (schema query definitions ctx resultfunc /* function that gets cols + ctx */)
-	(rdf_shared_queryplan schema query ctx resultfunc)
+	(rdf_shared_queryplan schema (rdf_resolve_prefixes query definitions) ctx resultfunc)
 ))
 
 (define rdf_update_select_query (lambda (conditions)
