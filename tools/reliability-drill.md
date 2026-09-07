@@ -21,7 +21,9 @@ python3 tools/reliability_drill.py --mode all --workers 12 --operations 1000
 ```
 
 To inject a partial WAL write and a failed WAL sync, verify that both
-transactions fail, retry the writes, and crash-recover the exact result:
+transactions fail, persist and reload a Scheme HTTP failure hook, reject an
+invalid hook, deliver the first failure through the reloaded callback, retry
+the writes, and crash-recover the exact result:
 
 ```sh
 python3 tools/reliability_drill.py --mode io-failures
@@ -105,8 +107,9 @@ The current drill covers:
 - rebuild publication raced against full schema serialization under Go's race
   detector, with concurrent reads and crash-recovery validation;
 - deterministic partial-write failures in autocommit and explicit transactions,
-  aborted-transaction enforcement, sync failures, successful retries, and exact
-  crash recovery;
+  persistent hook startup evaluation, class masking, asynchronous Scheme HTTP
+  delivery, aborted-transaction enforcement, sync failures, successful retries,
+  and exact crash recovery;
 - graceful offline snapshot, restore into a separate data directory, and
   checksum comparison.
 

@@ -154,6 +154,10 @@ func TestDeferredRegisterMovesCollapseAcrossEmitterBoundaries(t *testing.T) {
 	if ctx.FreeRegs&uint64(jitRegisterMask(RegRDI)) != 0 {
 		t.Fatal("aliased physical source returned to allocator before materialization")
 	}
+	ctx.ReclaimUntrackedRegs()
+	if ctx.FreeRegs&uint64(jitRegisterMask(RegRDI)) != 0 {
+		t.Fatal("reclamation returned an aliased physical source before materialization")
+	}
 	ctx.FlushRegisterMoves()
 	emitted := code[:uintptr(ctx.Ptr)-uintptr(ctx.Start)]
 	if want := []byte{0x48, 0x89, 0xfa}; !bytes.Equal(emitted, want) {

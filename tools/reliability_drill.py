@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import http.server
 import json
 import os
 from pathlib import Path
@@ -96,6 +97,66 @@ class HttpClient:
 
 	def scm(self, expression: str, timeout: float | None = None) -> str:
 		return self.request("/scm", expression, timeout=timeout)
+
+
+class FailureWebhook:
+	def __init__(self, timeout: float) -> None:
+		self.timeout = timeout
+		self.payloads: list[str] = []
+		self.condition = threading.Condition()
+		owner = self
+
+		class Handler(http.server.BaseHTTPRequestHandler):
+			def do_POST(self) -> None:
+				length = int(self.headers.get("Content-Length", "0"))
+				payload = self.rfile.read(length).decode("utf-8", errors="replace")
+				with owner.condition:
+					owner.payloads.append(payload)
+					owner.condition.notify_all()
+				self.send_response(204)
+				self.end_headers()
+
+			def log_message(self, format: str, *args: object) -> None:
+				pass
+
+		self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+		self.thread = threading.Thread(
+			target=self.server.serve_forever,
+			name="reliability-failure-webhook", daemon=True,
+		)
+
+	@property
+	def url(self) -> str:
+		return f"http://127.0.0.1:{self.server.server_port}/storage-failure"
+
+	def start(self) -> None:
+		self.thread.start()
+
+	def close(self) -> None:
+		self.server.shutdown()
+		self.server.server_close()
+		self.thread.join(timeout=self.timeout)
+
+	def wait(self) -> str:
+		deadline = time.monotonic() + self.timeout
+		with self.condition:
+			while not self.payloads:
+				remaining = deadline - time.monotonic()
+				if remaining <= 0:
+					raise DrillFailure("storage failure hook did not call its HTTP webhook")
+				self.condition.wait(remaining)
+			return self.payloads[0]
+
+
+def register_failure_webhook(client: HttpClient, webhook: FailureWebhook) -> None:
+	source = (
+		'(lambda (failure) '
+		f'(http_request "POST" "{webhook.url}" (list) (serialize failure)))'
+	)
+	client.scm(
+		'(storage_failure_hook_save "reliability-webhook" true (list "io") 60 '
+		+ json.dumps(source) + ')'
+	)
 
 
 class OwnedServer:
@@ -474,11 +535,30 @@ def expect_write_failure(client: HttpClient, statement: str,
 
 
 def run_io_failures(server: OwnedServer, rows: int, seed: int,
-		journal: list[dict]) -> None:
+		journal: list[dict], webhook: FailureWebhook) -> None:
 	want_zero = {"row_count": rows, "min_x": 0, "max_x": 0, "x_sum": 0}
 	want_one = {"row_count": rows, "min_x": 1, "max_x": 1, "x_sum": rows}
 	want_two = {"row_count": rows, "min_x": 2, "max_x": 2, "x_sum": rows * 2}
 
+	client = server.client
+	assert client is not None
+	configured = json.loads(client.request("/dashboard/api/storage-failure-hooks", ""))
+	templates = {hook["name"]: hook for hook in configured}
+	for name in ("syslog-process", "open-outage-page"):
+		if name not in templates or templates[name]["enabled"]:
+			raise DrillFailure(f"missing disabled storage failure hook template: {name}")
+	try:
+		client.scm(
+			'(storage_failure_hook_save "invalid-hook" true (list "io") 60 "42")'
+		)
+	except DrillFailure:
+		pass
+	else:
+		raise DrillFailure("non-callable storage failure hook source was accepted")
+	configured = json.loads(client.request("/dashboard/api/storage-failure-hooks", ""))
+	if any(hook["name"] == "invalid-hook" for hook in configured):
+		raise DrillFailure("invalid storage failure hook was persisted")
+	register_failure_webhook(client, webhook)
 	server.stop()
 	client = server.start(io_fault_environment("log.write", "partial", seed))
 	session = "drill-explicit-write-failure"
@@ -487,6 +567,13 @@ def run_io_failures(server: OwnedServer, rows: int, seed: int,
 		client, "UPDATE drill_atomic SET x = x + 1", session,
 		"partially written explicit transaction",
 	)
+	hook_payload = webhook.wait()
+	for fragment in ('"class" "io"', '"operation" "log.write"',
+			f'"database" "{DATABASE}"', '"outcome_unknown" false'):
+		if fragment not in hook_payload:
+			raise DrillFailure(
+				f"storage failure webhook payload lacks {fragment}: {hook_payload}"
+			)
 	expect(atomic_signature(client), want_zero, "failed explicit transaction changed visible rows")
 	expect_write_failure(
 		client, "UPDATE drill_atomic SET x = x + 1", session,
@@ -502,6 +589,7 @@ def run_io_failures(server: OwnedServer, rows: int, seed: int,
 	journal.append({
 		"scenario": "explicit-partial-log-write-failure", "seed": seed,
 		"expected_after_failure": want_zero, "expected_after_retry": want_one,
+		"failure_hook_payload": hook_payload,
 	})
 
 	server.stop()
@@ -778,6 +866,7 @@ def main() -> int:
 	journal: list[dict] = []
 	server = OwnedServer(binary, app, data_dir, artifact_dir, args.timeout)
 	active_server = server
+	failure_webhook: FailureWebhook | None = None
 	manifest = artifact_dir / "manifest.json"
 	print(f"Reliability drill artifacts: {artifact_dir}")
 	print(f"Seed: {args.seed}")
@@ -791,7 +880,9 @@ def main() -> int:
 			return 0
 		if args.mode == "io-failures":
 			initialize_atomicity(client, args.io_failure_rows, backend_config)
-			run_io_failures(server, args.io_failure_rows, args.seed, journal)
+			failure_webhook = FailureWebhook(args.timeout)
+			failure_webhook.start()
+			run_io_failures(server, args.io_failure_rows, args.seed, journal, failure_webhook)
 			write_manifest(manifest, args.seed, "passed", journal)
 			print(f"PASS: {len(journal)} reliability scenarios; manifest: {manifest}")
 			return 0
@@ -825,6 +916,8 @@ def main() -> int:
 		return 1
 	finally:
 		active_server.cleanup()
+		if failure_webhook is not None:
+			failure_webhook.close()
 
 
 if __name__ == "__main__":

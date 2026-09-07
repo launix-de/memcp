@@ -1484,6 +1484,13 @@ func (ctx *JITContext) ReclaimUntrackedRegs() {
 		if (ctx.ProtectedRegs & bit) != 0 {
 			continue
 		}
+		// FreeReg deliberately keeps a dead register unavailable while a deferred
+		// destination still aliases its physical contents. Reclamation must honor
+		// that reservation; releaseUnusedDeferredSources returns it after the last
+		// alias has been materialized.
+		if ctx.DeferredRegMoves.held&uint32(bit) != 0 {
+			continue
+		}
 		owner := ctx.RegOwners[rr]
 		if owner == nil {
 			if rr >= RegX0 {
