@@ -266,17 +266,82 @@ func (emitter *jitParserEmitter) pushCheckpoint() {
 	emitter.ctx.FreeDesc(&position)
 }
 
+// restoreCheckpoint backtracks to the innermost checkpoint. The common case -
+// a failed alternative that bound nothing - is pure slice-length bookkeeping:
+// truncate values / marks / positions, restore position, pop the checkpoint. It
+// is one of the hottest sites in the whole grammar (every rejected keyword atom
+// in a choice cascade), so inline that and only fall back to
+// jitParserRestoreCheckpointNative when there are binding mutations to undo.
 func (emitter *jitParserEmitter) restoreCheckpoint() {
+	ctx := emitter.ctx
 	sp := emitter.statePointer()
-	position := emitter.ctx.EmitGoCallScalar(GoFuncAddr(jitParserRestoreCheckpointNative), []JITValueDesc{sp}, 1)
-	emitter.ctx.FreeDesc(&sp)
-	position.Type = tagInt
-	emitter.storePosition(position)
+	cpOff := int32(unsafe.Offsetof(jitParserState{}.checkpoints))
+	mutOff := int32(unsafe.Offsetof(jitParserState{}.mutations))
+	valOff := int32(unsafe.Offsetof(jitParserState{}.values))
+	markOff := int32(unsafe.Offsetof(jitParserState{}.marks))
+	posSliceOff := int32(unsafe.Offsetof(jitParserState{}.positions))
+	const cpSize = int32(unsafe.Sizeof(jitParserCheckpoint{}))
+	const cpValueLen, cpMutationLen, cpMarkLen, cpPositionLen = 8, 16, 24, 32
+
+	lenReg := ctx.AllocReg()
+	elem := ctx.AllocRegExcept(lenReg)
+	a := ctx.AllocRegExcept(lenReg, elem)
+	b := ctx.AllocRegExcept(lenReg, elem, a)
+
+	// elem = &checkpoints.Data[checkpoints.Len-1] (without popping yet)
+	ctx.EmitMovRegMem(lenReg, sp.Reg, cpOff+8)
+	ctx.EmitMovRegReg(elem, lenReg)
+	ctx.EmitSubRegImm32(elem, 1)
+	ctx.EmitImulRegImm32(elem, cpSize)
+	ctx.EmitMovRegMem(a, sp.Reg, cpOff)
+	ctx.EmitAddInt64(elem, a)
+
+	slow, done := ctx.ReserveLabel(), ctx.ReserveLabel()
+	ctx.EmitMovRegMem(a, sp.Reg, mutOff+8)      // mutations.Len
+	ctx.EmitMovRegMem(b, elem, cpMutationLen)   // checkpoint.mutationLen
+	ctx.EmitCmpInt64(a, b)
+	ctx.EmitJump(CondNotEqual, slow)
+
+	// fast: pop the checkpoint, truncate the three unmutated slices, restore pos
+	ctx.EmitSubRegImm32(lenReg, 1)
+	ctx.EmitStoreRegMem(lenReg, sp.Reg, cpOff+8)
+	ctx.EmitMovRegMem(a, elem, cpValueLen)
+	ctx.EmitStoreRegMem(a, sp.Reg, valOff+8)
+	ctx.EmitMovRegMem(a, elem, cpMarkLen)
+	ctx.EmitStoreRegMem(a, sp.Reg, markOff+8)
+	ctx.EmitMovRegMem(a, elem, cpPositionLen)
+	ctx.EmitStoreRegMem(a, sp.Reg, posSliceOff+8)
+	ctx.EmitMovRegMem(a, elem, 0) // checkpoint.position
+	ctx.EmitStoreRegMem(a, ctx.StackReg, emitter.positionOff)
+	ctx.EmitJmp(done)
+
+	ctx.MarkLabel(slow)
+	pos := ctx.EmitGoCallScalar(GoFuncAddr(jitParserRestoreCheckpointNative), []JITValueDesc{sp}, 1)
+	ctx.EmitMovRegReg(a, pos.Reg)
+	ctx.FreeDesc(&pos)
+	ctx.EmitStoreRegMem(a, ctx.StackReg, emitter.positionOff)
+
+	ctx.MarkLabel(done)
+	ctx.FreeReg(b)
+	ctx.FreeReg(a)
+	ctx.FreeReg(elem)
+	ctx.FreeReg(lenReg)
+	ctx.FreeDesc(&sp)
 }
 
+// commitCheckpoint drops the innermost checkpoint. jitParserCommitCheckpointNative
+// does nothing but `state.checkpoints = state.checkpoints[:len-1]`, so inline
+// that single length decrement instead of paying the ~30-instruction Go-call
+// boundary at ~1600 sites. Push/commit are structurally balanced by the emitter,
+// so the underflow guard is a compile-time invariant.
 func (emitter *jitParserEmitter) commitCheckpoint() {
 	sp := emitter.statePointer()
-	emitter.emitVoid(jitParserCommitCheckpointNative, sp)
+	lenOff := int32(unsafe.Offsetof(jitParserState{}.checkpoints)) + 8
+	tmp := emitter.ctx.AllocReg()
+	emitter.ctx.EmitMovRegMem(tmp, sp.Reg, lenOff)
+	emitter.ctx.EmitSubRegImm32(tmp, 1)
+	emitter.ctx.EmitStoreRegMem(tmp, sp.Reg, lenOff)
+	emitter.ctx.FreeReg(tmp)
 	emitter.ctx.FreeDesc(&sp)
 }
 
