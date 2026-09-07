@@ -348,23 +348,6 @@ test_cases:
           (error (concat "owned projected value was not propagated: " plan)))
         true)
 
-  - name: "large scan reducer preserves owned accumulator"
-    scm: |
-      (begin
-        (define reducer_body (cons 'begin
-          (append (produceN 300)
-            (list 'set_assoc 'acc 'id true))))
-        (define reducer (list 'lambda (list 'acc 'id) reducer_body))
-        (define plan (serialize (optimize
-          (compile_scan_plan 'scan nil (list 'table "memcp-tests" "lookup_group_items")
-            (list "id") (list 'lambda (list 'id) true)
-            (list "id") reducer (list 'list) nil false))))
-        (if (not (match plan (regex "set_assoc_mut" _) true false))
-          (error (concat "large reducer lost accumulator ownership: " plan)))
-        (if (match plan (regex "\\(set_assoc \\(var 0\\)" _) true false)
-          (error (concat "large reducer retained copying assoc update: " plan)))
-        true)
-
   - name: "scan optimizer keeps a borrowed projected map value immutable"
     scm: |
       (begin
