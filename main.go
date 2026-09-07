@@ -1213,6 +1213,7 @@ func main() {
 		scm.WriteDocumentation(writeDocu)
 		os.Exit(0)
 	}
+	scm.CalibrateJITCosts()
 
 	storage.Basepath = basepath
 	// Run initialization in one goroutine so startup keeps its existing
