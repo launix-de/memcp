@@ -130,7 +130,7 @@ func rolling(limit uint64) uint64 {
 	}
 }
 
-func TestGeneratedBuiltinLoopUsesArchitectureRegisterHomes(t *testing.T) {
+func TestGeneratedBuiltinLoopKeepsPlanDormantUntilJointInlineAllocation(t *testing.T) {
 	fn := buildTestSSAFunction(t, `package sample
 type Scmer struct{}
 func NewInt(int64) Scmer
@@ -148,8 +148,11 @@ func rolling(a ...Scmer) Scmer {
 	if errMsg != "" {
 		t.Fatal(errMsg)
 	}
-	if !strings.Contains(code, "ctx.AllocRegisterHomes(") {
-		t.Fatalf("ordinary generated builtin does not request planned register homes:\n%s", code)
+	if !strings.Contains(code, "ctx.AllocInlineRegisterHomes(") {
+		t.Fatalf("inlinable generated builtin did not preserve its dormant register plan:\n%s", code)
+	}
+	if strings.Contains(code, "ctx.AllocRegisterHomes(") {
+		t.Fatalf("inlinable generated builtin activated a standalone register plan:\n%s", code)
 	}
 }
 

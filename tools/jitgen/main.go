@@ -3356,7 +3356,11 @@ func (g *codeGen) emitRegisterHomes() {
 		}
 		planItems = append(planItems, fmt.Sprintf("{Color: %d, Width: %d, Cost: %d}", slot.color, slot.width, weight))
 	}
-	g.emit("%s := ctx.AllocRegisterHomes(JITRegisterPlan{Slots: [16]JITRegisterSlot{%s}, Count: %d})", homes, strings.Join(planItems, ", "), len(planItems))
+	allocator := "AllocInlineRegisterHomes"
+	if g.storageMode {
+		allocator = "AllocRegisterHomes"
+	}
+	g.emit("%s := ctx.%s(JITRegisterPlan{Slots: [16]JITRegisterSlot{%s}, Count: %d})", homes, allocator, strings.Join(planItems, ", "), len(planItems))
 	g.emit("defer ctx.ReleaseRegisterHomes(%s)", homes)
 
 	names := make([]string, 0, len(g.registerPlan.colorByValue))

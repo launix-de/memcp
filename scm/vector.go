@@ -302,7 +302,7 @@ func init_vector() {
 				for i := range args {
 					ctx.StabilizeDescForControlFlow(&args[i])
 				}
-				registerHomes1 := ctx.AllocRegisterHomes(JITRegisterPlan{Slots: [16]JITRegisterSlot{{Color: 0, Width: 1, Cost: 64}, {Color: 1, Width: 1, Cost: 35}, {Color: 2, Width: 1, Cost: 17}, {Color: 3, Width: 1, Cost: 17}}, Count: 4})
+				registerHomes1 := ctx.AllocInlineRegisterHomes(JITRegisterPlan{Slots: [16]JITRegisterSlot{{Color: 0, Width: 1, Cost: 64}, {Color: 1, Width: 1, Cost: 35}, {Color: 2, Width: 1, Cost: 17}, {Color: 3, Width: 1, Cost: 17}}, Count: 4})
 				defer ctx.ReleaseRegisterHomes(registerHomes1)
 				var r0 Reg
 				phiHomeOK2 := registerHomes1.Available&(uint16(1)<<1) == uint16(1)<<1
@@ -310,14 +310,14 @@ func init_vector() {
 					r0 = registerHomes1.Registers[1]
 				}
 				var r1 Reg
-				phiHomeOK3 := registerHomes1.Available&(uint16(1)<<3) == uint16(1)<<3
+				phiHomeOK3 := registerHomes1.Available&(uint16(1)<<2) == uint16(1)<<2
 				if phiHomeOK3 {
-					r1 = registerHomes1.Registers[3]
+					r1 = registerHomes1.Registers[2]
 				}
 				var r2 Reg
-				phiHomeOK4 := registerHomes1.Available&(uint16(1)<<2) == uint16(1)<<2
+				phiHomeOK4 := registerHomes1.Available&(uint16(1)<<3) == uint16(1)<<3
 				if phiHomeOK4 {
-					r2 = registerHomes1.Registers[2]
+					r2 = registerHomes1.Registers[3]
 				}
 				var r3 Reg
 				phiHomeOK5 := registerHomes1.Available&(uint16(1)<<0) == uint16(1)<<0
