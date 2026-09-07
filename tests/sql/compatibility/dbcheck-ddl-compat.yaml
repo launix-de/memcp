@@ -67,7 +67,7 @@ test_cases:
       rows: 1
 
   - name: "CREATE DATABASE rejects an unknown persistence backend"
-    sql: "CREATE DATABASE dbc_unknown_backend SET backend='not-a-backend'"
+    sql: "CREATE DATABASE dbc_unknown_backend SET backend='not-a-backend',prefix='must-parse-all-options'"
     expect:
       error: true
   - name: "SHOW INDEXES FROM table"
