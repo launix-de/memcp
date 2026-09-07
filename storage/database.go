@@ -24,14 +24,15 @@ import "time"
 import "runtime"
 import "strings"
 import "encoding/json"
+import "reflect"
 import "sync/atomic"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/NonLockingReadMap"
 
 type database struct {
-	Name        string                                             `json:"name"`
-	persistence PersistenceEngine                                  `json:"-"`
-	tables      NonLockingReadMap.NonLockingReadMap[table, string] `json:"-"`
+	Name        string                                     `json:"name"`
+	persistence PersistenceEngine                          `json:"-"`
+	tables      *NonLockingReadMap.ReadMap[string, *table] `json:"-"`
 	// loadOnce is the database-wide lazy-load barrier. The MySQL and HTTP
 	// listeners may issue the first queries concurrently; none may observe a
 	// partially decoded table catalog.
@@ -58,10 +59,10 @@ type database struct {
 	savePanic       any           `json:"-"`
 	schemaDirty     atomic.Bool   `json:"-"`
 	blobRefs        *blobRefState `json:"-"`
-	// persistenceLifecycle prevents cleanup from inspecting generation-private
-	// files between their write and schema publication. Rebuild/repartition take
-	// a read capability; cleanup takes the exclusive capability. Query and DML
-	// paths do not participate.
+	// persistenceLifecycle protects storage generations from rebuild through
+	// publication. Rebuild/repartition and short catalog mutations take a read
+	// capability; cleanup and backend migration take the exclusive capability.
+	// Query and DML paths do not participate.
 	persistenceLifecycle sync.RWMutex `json:"-"`
 	// transactionLog is the database-wide commit authority for transactional
 	// shard WAL entries. Shard logs may contain prepared records after a crash;
@@ -95,7 +96,11 @@ func (db *database) blobRefState() *blobRefState {
 }
 
 func newDatabase() *database {
-	return &database{blobRefs: new(blobRefState), committedTx: make(map[string]uint64)}
+	return &database{
+		tables:      NonLockingReadMap.NewReadMap[string, *table](),
+		blobRefs:    new(blobRefState),
+		committedTx: make(map[string]uint64),
+	}
 }
 
 const transactionLogName = ".transactions"
@@ -285,16 +290,16 @@ func normalizeTempLookupName(dbName string, name string) string {
 // Custom JSON to persist private tables field
 func (d *database) MarshalJSON() ([]byte, error) {
 	type persist struct {
-		Name   string                                             `json:"name"`
-		Tables NonLockingReadMap.NonLockingReadMap[table, string] `json:"tables"`
+		Name   string                                     `json:"name"`
+		Tables *NonLockingReadMap.ReadMap[string, *table] `json:"tables"`
 	}
 	return json.Marshal(persist{Name: d.Name, Tables: d.tables})
 }
 
 func (d *database) UnmarshalJSON(data []byte) error {
 	type persist struct {
-		Name   string                                             `json:"name"`
-		Tables NonLockingReadMap.NonLockingReadMap[table, string] `json:"tables"`
+		Name   string                                     `json:"name"`
+		Tables *NonLockingReadMap.ReadMap[string, *table] `json:"tables"`
 	}
 	var p persist
 	if err := json.Unmarshal(data, &p); err != nil {
@@ -302,20 +307,16 @@ func (d *database) UnmarshalJSON(data []byte) error {
 	}
 	d.Name = p.Name
 	d.tables = p.Tables
+	if d.tables == nil {
+		d.tables = NonLockingReadMap.NewReadMap[string, *table]()
+	}
 	return nil
 }
 
-// TODO: replace databases map everytime something changes, so we don't run into read-while-write
-// e.g. a table of databases
-var databases NonLockingReadMap.NonLockingReadMap[database, string] = NonLockingReadMap.New[database, string]()
+var databases = NonLockingReadMap.NewReadMap[string, *database]()
 var Basepath string = "data"
 
-/* implement NonLockingReadMap */
-func (d database) GetKey() string {
-	return d.Name
-}
-
-func (d database) ComputeSize() uint {
+func (d *database) ComputeSize() uint {
 	var sz uint = 16 * 8 // heuristic
 	for _, t := range d.tables.GetAll() {
 		sz += t.ComputeSize()
@@ -465,13 +466,19 @@ func LoadDatabases() {
 	InitSettings()
 	// enumerate dbs; do not load schemas/shards yet (lazy-load on demand)
 	entries, _ := os.ReadDir(Basepath)
+	configured := make(map[string]bool)
 	for _, entry := range entries {
-		if entry.IsDir() {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".json") && entry.Name() != "settings.json" {
+			configured[strings.TrimSuffix(entry.Name(), ".json")] = true
+		}
+	}
+	for _, entry := range entries {
+		if entry.IsDir() && !configured[entry.Name()] {
 			db := newDatabase()
 			db.Name = entry.Name()
 			db.persistence = instrumentPersistence(entry.Name(), &FileStorage{path: Basepath + "/" + entry.Name() + "/"})
 			db.srState = COLD
-			databases.Set(db)
+			databases.Set(db.Name, db)
 		} else if strings.HasSuffix(entry.Name(), ".json") && entry.Name() != "settings.json" {
 			// Backend configuration file (e.g., Ceph, S3)
 			dbName := strings.TrimSuffix(entry.Name(), ".json")
@@ -491,7 +498,7 @@ func LoadDatabases() {
 			db.Name = dbName
 			db.persistence = persistence
 			db.srState = COLD
-			databases.Set(db)
+			databases.Set(db.Name, db)
 		}
 	}
 
@@ -634,7 +641,7 @@ func (db *database) ensureLoaded() {
 		jsonbytes := db.persistence.ReadSchema()
 		if len(jsonbytes) == 0 {
 			// fresh/empty database
-			db.tables = NonLockingReadMap.New[table, string]()
+			db.tables = NonLockingReadMap.NewReadMap[string, *table]()
 			db.srState = SHARED
 			return
 		}
@@ -1181,14 +1188,14 @@ func CreateDatabase(schema string, ignoreexists bool /*, persistence Persistence
 	db.Name = schema
 	persistence := FileFactory{Basepath} // TODO: remove this, use parameter instead
 	db.persistence = instrumentPersistence(schema, persistence.CreateDatabase(schema))
-	db.tables = NonLockingReadMap.New[table, string]()
+	db.tables = NonLockingReadMap.NewReadMap[string, *table]()
 	// Newly created database is live for writes
 	db.srState = WRITE
 
-	last := databases.Set(db)
+	last := databases.Set(schema, db)
 	if last != nil {
 		// two concurrent CREATE
-		databases.Set(last)
+		databases.Set(schema, last)
 		panic("Database " + schema + " already exists")
 	}
 
@@ -1214,32 +1221,11 @@ func CreateDatabaseWithBackend(schema string, ignoreexists bool, options map[str
 	if _, ok := BackendRegistry[backend]; !ok {
 		panic("Unknown storage backend: " + backend)
 	}
-
-	// Default prefix to schema name
 	if _, ok := options["prefix"]; !ok {
 		options["prefix"] = schema
 	}
 
-	// Convert force_path_style string to bool for JSON
-	forcePathStyle := false
-	if fps, ok := options["force_path_style"]; ok {
-		forcePathStyle = fps == "true" || fps == "1" || fps == "TRUE"
-		delete(options, "force_path_style")
-	}
-
-	// Build JSON config
-	configMap := make(map[string]interface{})
-	for k, v := range options {
-		configMap[k] = v
-	}
-	if forcePathStyle {
-		configMap["force_path_style"] = true
-	}
-
-	raw, err := json.MarshalIndent(configMap, "", "  ")
-	if err != nil {
-		panic("failed to marshal backend config: " + err.Error())
-	}
+	raw := marshalDatabaseBackendOptions(options)
 
 	// Write config file
 	configPath := Basepath + "/" + schema + ".json"
@@ -1257,18 +1243,113 @@ func CreateDatabaseWithBackend(schema string, ignoreexists bool, options map[str
 	db = newDatabase()
 	db.Name = schema
 	db.persistence = persistence
-	db.tables = NonLockingReadMap.New[table, string]()
+	db.tables = NonLockingReadMap.NewReadMap[string, *table]()
 	db.srState = WRITE
 
-	last := databases.Set(db)
+	last := databases.Set(schema, db)
 	if last != nil {
-		databases.Set(last)
+		databases.Set(schema, last)
 		os.Remove(configPath)
 		panic("Database " + schema + " already exists")
 	}
 
 	db.save()
 	return true
+}
+
+func marshalDatabaseBackendOptions(options map[string]string) json.RawMessage {
+	configMap := make(map[string]interface{}, len(options))
+	for key, value := range options {
+		if key == "force_path_style" {
+			configMap[key] = value == "true" || value == "1" || value == "TRUE"
+			continue
+		}
+		configMap[key] = value
+	}
+	raw, err := json.MarshalIndent(configMap, "", "  ")
+	if err != nil {
+		panic("failed to marshal backend config: " + err.Error())
+	}
+	return raw
+}
+
+func databaseBackendConfig(schema string) json.RawMessage {
+	configPath := Basepath + "/" + schema + ".json"
+	raw, err := os.ReadFile(configPath)
+	if err == nil {
+		return raw
+	}
+	if !os.IsNotExist(err) {
+		panic("failed to read database backend config: " + err.Error())
+	}
+	return json.RawMessage(`{"backend":"filesystem"}`)
+}
+
+func databaseBackendConfigForTarget(source string, target string) json.RawMessage {
+	var config map[string]interface{}
+	if err := json.Unmarshal(databaseBackendConfig(source), &config); err != nil {
+		panic("failed to parse source database backend config: " + err.Error())
+	}
+	if backend, _ := config["backend"].(string); backend != "filesystem" {
+		config["prefix"] = target
+	}
+	raw, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		panic("failed to copy source database backend config: " + err.Error())
+	}
+	return raw
+}
+
+func equalDatabaseBackendConfig(left, right json.RawMessage) bool {
+	var leftConfig interface{}
+	var rightConfig interface{}
+	if json.Unmarshal(left, &leftConfig) != nil || json.Unmarshal(right, &rightConfig) != nil {
+		return false
+	}
+	return reflect.DeepEqual(leftConfig, rightConfig)
+}
+
+func writeDatabaseBackendConfig(schema string, raw json.RawMessage) {
+	if err := os.MkdirAll(Basepath, 0750); err != nil {
+		raisePersistenceFailure("filesystem", Basepath, "backend.config.write", err)
+	}
+	tmp, err := os.CreateTemp(Basepath, "."+schema+".json.tmp-")
+	if err != nil {
+		raisePersistenceFailure("filesystem", Basepath, "backend.config.write", err)
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if err := tmp.Chmod(0640); err != nil {
+		_ = tmp.Close()
+		raisePersistenceFailure("filesystem", Basepath, "backend.config.write", err)
+	}
+	if _, err := tmp.Write(raw); err != nil {
+		_ = tmp.Close()
+		raisePersistenceFailure("filesystem", Basepath, "backend.config.write", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		raisePersistenceFailure("filesystem", Basepath, "backend.config.write", err)
+	}
+	if err := tmp.Close(); err != nil {
+		raisePersistenceFailure("filesystem", Basepath, "backend.config.write", err)
+	}
+	if err := os.Rename(tmpName, Basepath+"/"+schema+".json"); err != nil {
+		raisePersistenceFailure("filesystem", Basepath, "backend.config.write", err)
+	}
+	dir, err := os.Open(Basepath)
+	if err != nil {
+		reportPersistenceAmbiguousFailure("filesystem", Basepath, "backend.config.sync", err)
+		return
+	}
+	if err := dir.Sync(); err != nil {
+		_ = dir.Close()
+		reportPersistenceAmbiguousFailure("filesystem", Basepath, "backend.config.sync", err)
+		return
+	}
+	if err := dir.Close(); err != nil {
+		reportPersistenceAmbiguousFailure("filesystem", Basepath, "backend.config.close", err)
+	}
 }
 
 func CreateDatabaseFrom(schema string, ignoreexists bool, sourceDB string) bool {
@@ -1280,52 +1361,327 @@ func CreateDatabaseFrom(schema string, ignoreexists bool, sourceDB string) bool 
 		panic("Database " + schema + " already exists")
 	}
 
-	// Read source config
-	configPath := Basepath + "/" + sourceDB + ".json"
-	configData, err := os.ReadFile(configPath)
-	if err != nil {
-		panic("Source database " + sourceDB + " has no backend config (filesystem databases cannot be copied)")
+	if databases.Get(sourceDB) == nil {
+		panic("Source database " + sourceDB + " does not exist")
 	}
-
-	// Parse and update prefix
-	var configMap map[string]interface{}
-	if err := json.Unmarshal(configData, &configMap); err != nil {
-		panic("failed to parse source config: " + err.Error())
-	}
-	configMap["prefix"] = schema
-
-	raw, err := json.MarshalIndent(configMap, "", "  ")
-	if err != nil {
-		panic("failed to marshal backend config: " + err.Error())
-	}
-
-	// Write new config file
-	newConfigPath := Basepath + "/" + schema + ".json"
-	if err := os.WriteFile(newConfigPath, raw, 0640); err != nil {
-		panic("failed to write backend config: " + err.Error())
-	}
+	raw := databaseBackendConfigForTarget(sourceDB, schema)
+	writeDatabaseBackendConfig(schema, raw)
 
 	// Create persistence engine
 	persistence := createPersistenceFromConfig(schema, json.RawMessage(raw))
 	if persistence == nil {
-		os.Remove(newConfigPath)
+		os.Remove(Basepath + "/" + schema + ".json")
 		panic("failed to create persistence engine from source config")
 	}
 
 	db = newDatabase()
 	db.Name = schema
 	db.persistence = persistence
-	db.tables = NonLockingReadMap.New[table, string]()
+	db.tables = NonLockingReadMap.NewReadMap[string, *table]()
 	db.srState = WRITE
 
-	last := databases.Set(db)
+	last := databases.Set(schema, db)
 	if last != nil {
-		databases.Set(last)
-		os.Remove(newConfigPath)
+		databases.Set(schema, last)
+		os.Remove(Basepath + "/" + schema + ".json")
 		panic("Database " + schema + " already exists")
 	}
 
 	db.save()
+	return true
+}
+
+type storageMoveGeneration struct {
+	table       *table
+	oldTopology *tableShardTopology
+	oldShards   []*storageShard
+	newShards   []*storageShard
+	partitioned bool
+}
+
+func prepareStorageMoveGeneration(t *table) (generation storageMoveGeneration) {
+	t.maintenanceMu.Lock()
+	t.mu.Lock()
+	if t.maintenanceKind != 0 {
+		t.mu.Unlock()
+		t.maintenanceMu.Unlock()
+		panic("storage migration raced table maintenance for " + t.schema.Name + "." + t.Name)
+	}
+	t.maintenanceKind = 1
+	topology := t.activeTopology()
+	oldShards := append([]*storageShard(nil), topology.shards...)
+	partitioned := topology.mode == ShardModePartition
+	t.mu.Unlock()
+
+	generation = storageMoveGeneration{
+		table:       t,
+		oldTopology: topology,
+		oldShards:   oldShards,
+		newShards:   make([]*storageShard, len(oldShards)),
+		partitioned: partitioned,
+	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			abortStorageMoveGenerations([]storageMoveGeneration{generation})
+			panic(recovered)
+		}
+	}()
+	for index, shard := range oldShards {
+		if shard != nil {
+			generation.newShards[index] = shard.rebuild(true)
+		}
+	}
+	return generation
+}
+
+func abortStorageMoveGenerations(generations []storageMoveGeneration) {
+	for _, generation := range generations {
+		for index, shard := range generation.oldShards {
+			if shard == nil || generation.newShards[index] == nil {
+				continue
+			}
+			shard.clearNext(generation.newShards[index])
+			GlobalCache.Remove(generation.newShards[index])
+			discardUnpublishedShard(generation.newShards[index])
+		}
+		generation.table.mu.Lock()
+		if generation.partitioned {
+			generation.table.PShards = generation.oldShards
+		} else {
+			generation.table.Shards = generation.oldShards
+		}
+		generation.table.maintenanceKind = 0
+		generation.table.mu.Unlock()
+		generation.table.maintenanceMu.Unlock()
+	}
+}
+
+func replayPersistenceLog(engine PersistenceEngine, name string) []interface{} {
+	_, input, logfile := engine.ReplayLog(name)
+	entries := make([]interface{}, 0)
+	for entry := range input {
+		entries = append(entries, entry)
+	}
+	logfile.Close()
+	return entries
+}
+
+func movePreparedShardLogs(src, dst PersistenceEngine, generations []storageMoveGeneration) {
+	for _, generation := range generations {
+		for _, shard := range generation.newShards {
+			if shard == nil {
+				continue
+			}
+			shard.mu.Lock()
+			if shard.logfile != nil {
+				shard.logfile.Flush(shard.t.PersistencyMode == Safe)
+				shard.logfile.Close()
+				shard.logfile = dst.SwapLog(shard.uuid.String(), replayPersistenceLog(src, shard.uuid.String()), shard.t.PersistencyMode == Safe)
+			}
+			shard.mu.Unlock()
+		}
+	}
+}
+
+func moveTransactionLog(db *database, dst PersistenceEngine) PersistenceLogfile {
+	db.transactionMu.Lock()
+	defer db.transactionMu.Unlock()
+	if db.transactionLog == nil {
+		return nil
+	}
+	ids := make([]string, 0, len(db.committedTx))
+	for id := range db.committedTx {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	entries := make([]interface{}, len(ids))
+	for index, id := range ids {
+		entries[index] = LogEntryCommit{txID: id}
+	}
+	replacement := dst.SwapLog(transactionLogName, entries, true)
+	old := db.transactionLog
+	db.transactionLog = replacement
+	return old
+}
+
+func publishStorageMoveGenerations(db *database, dst PersistenceEngine, generations []storageMoveGeneration, targetConfig json.RawMessage) {
+	// Build the destination catalog from the private successors without making
+	// them visible through the tables' atomic topology pointers. The direct
+	// shard fields are only serialization inputs; mutations use activeTopology.
+	for _, generation := range generations {
+		generation.table.mu.Lock()
+		if generation.partitioned {
+			generation.table.PShards = generation.newShards
+		} else {
+			generation.table.Shards = generation.newShards
+		}
+		generation.table.mu.Unlock()
+	}
+
+	snapshot, err := json.MarshalIndent(db, "", "  ")
+	for index := len(generations) - 1; index >= 0; index-- {
+		generation := generations[index]
+		generation.table.mu.Lock()
+		if generation.partitioned {
+			generation.table.PShards = generation.oldShards
+		} else {
+			generation.table.Shards = generation.oldShards
+		}
+		generation.table.mu.Unlock()
+	}
+	if err != nil {
+		panic(err)
+	}
+	if writer, ok := dst.(schemaWriteOptions); ok {
+		writer.WriteSchemaWithMode(snapshot, true)
+	} else {
+		dst.WriteSchema(snapshot)
+	}
+	writeDatabaseBackendConfig(db.Name, targetConfig)
+	db.persistence = dst
+
+	for _, generation := range generations {
+		generation.table.mu.Lock()
+		if generation.partitioned {
+			generation.table.PShards = generation.newShards
+		} else {
+			generation.table.Shards = generation.newShards
+		}
+		generation.table.publishTopologyLocked()
+		generation.table.maintenanceKind = 0
+		generation.table.mu.Unlock()
+		generation.table.maintenanceMu.Unlock()
+	}
+}
+
+func retireSourceStorage(src PersistenceEngine, generations []storageMoveGeneration, oldTransactionLog PersistenceLogfile) {
+	cleanup := func() {
+		for _, generation := range generations {
+			<-generation.oldTopology.drained
+			for _, shard := range generation.oldShards {
+				if shard != nil && shard.logfile != nil {
+					func() { defer func() { _ = recover() }(); shard.logfile.Close() }()
+				}
+			}
+		}
+		if oldTransactionLog != nil {
+			func() { defer func() { _ = recover() }(); oldTransactionLog.Close() }()
+		}
+		func() {
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					fmt.Println("error: old database storage cleanup failed after cutover:", recovered)
+				}
+			}()
+			src.Remove()
+		}()
+	}
+	for _, generation := range generations {
+		select {
+		case <-generation.oldTopology.drained:
+		default:
+			go cleanup()
+			return
+		}
+	}
+	cleanup()
+}
+
+// AlterDatabaseStorage builds private shard successors while readers remain on
+// the published generation. Source mutations are mirrored by the existing
+// rebuild chain. Only schema writers are excluded; publication swaps every
+// table topology after the complete destination schema is durable.
+func AlterDatabaseStorage(schema string, targetConfig json.RawMessage, currentTx *TxContext) bool {
+	db := GetDatabase(schema)
+	if db == nil {
+		panic("Database " + schema + " does not exist")
+	}
+	requireDatabaseMaintenance(schema, maintenanceAlter)
+	dst := createPersistenceFromConfig(schema, targetConfig)
+	if dst == nil {
+		panic("unknown or invalid storage backend")
+	}
+	if SessionStateFromTx(currentTx) == nil {
+		panic("ALTER DATABASE storage requires a query session")
+	}
+
+	db.ensureLoaded()
+	// The blob catalog must exist before the table set is frozen. Rebuild may
+	// update it, and no table may appear while the destination generation is
+	// being prepared.
+	db.ensureBlobTable()
+	db.persistenceLifecycle.Lock()
+	defer db.persistenceLifecycle.Unlock()
+	if GetDatabase(schema) != db {
+		panic("Database " + schema + " was dropped while waiting for storage migration")
+	}
+	if equalDatabaseBackendConfig(databaseBackendConfig(schema), targetConfig) {
+		return true
+	}
+	src := db.persistence
+	sameStorage := src.StorageIdentity() == dst.StorageIdentity()
+	if !sameStorage && len(dst.ReadSchema()) != 0 {
+		panic("destination storage already contains a database schema")
+	}
+	// A same-namespace change only replaces connection/configuration metadata.
+	if sameStorage {
+		db.schemalock.Lock()
+		defer db.schemalock.Unlock()
+		writeDatabaseBackendConfig(schema, targetConfig)
+		db.persistence = dst
+		return true
+	}
+
+	generations := make([]storageMoveGeneration, 0)
+	var oldTransactionLog PersistenceLogfile
+	published := false
+	tables := db.tables.GetAll()
+	sort.Slice(tables, func(i, j int) bool {
+		if tables[i].Name == ".blobs" {
+			return false
+		}
+		if tables[j].Name == ".blobs" {
+			return true
+		}
+		return tables[i].Name < tables[j].Name
+	})
+	for _, table := range tables {
+		table.ddlMu.RLock()
+	}
+	defer func() {
+		if !published {
+			if oldTransactionLog != nil {
+				db.transactionMu.Lock()
+				failedTargetLog := db.transactionLog
+				db.transactionLog = oldTransactionLog
+				db.transactionMu.Unlock()
+				if failedTargetLog != nil {
+					func() { defer func() { _ = recover() }(); failedTargetLog.Close() }()
+				}
+			}
+			abortStorageMoveGenerations(generations)
+			func() { defer func() { _ = recover() }(); dst.Remove() }()
+		}
+		for index := len(tables) - 1; index >= 0; index-- {
+			tables[index].ddlMu.RUnlock()
+		}
+	}()
+	for _, table := range tables {
+		generations = append(generations, prepareStorageMoveGeneration(table))
+	}
+
+	// Columns and blobs are immutable for the prepared successors. Writes keep
+	// entering their WAL/delta through the source generation's rebuild link.
+	copyDatabaseObjects(src, dst)
+	movePreparedShardLogs(src, dst, generations)
+	oldTransactionLog = moveTransactionLog(db, dst)
+	func() {
+		db.schemalock.Lock()
+		defer db.schemalock.Unlock()
+		publishStorageMoveGenerations(db, dst, generations, targetConfig)
+	}()
+	published = true
+	retireSourceStorage(src, generations, oldTransactionLog)
 	return true
 }
 
@@ -1345,6 +1701,8 @@ func DropDatabase(schema string, ifexists bool) bool {
 		}
 		panic("Database " + schema + " does not exist")
 	}
+	db.persistenceLifecycle.Lock()
+	defer db.persistenceLifecycle.Unlock()
 	requireDatabaseMaintenance(schema, maintenanceDrop)
 	db = databases.Remove(schema)
 	if db == nil {
@@ -1386,6 +1744,14 @@ func CreateTable(schema, name string, pm PersistencyMode, ifnotexists bool) (*ta
 	if db == nil {
 		panic("Database " + schema + " does not exist")
 	}
+	if ifnotexists {
+		if existing := db.tables.Get(name); existing != nil {
+			atomic.StoreUint64(&existing.lastAccessed, uint64(time.Now().UnixNano()))
+			return existing, false
+		}
+	}
+	db.persistenceLifecycle.RLock()
+	defer db.persistenceLifecycle.RUnlock()
 	db.ensureLoaded()
 	db.schemalock.Lock()
 	t, created := db.createTableLocked(name, pm, ifnotexists)
@@ -1414,7 +1780,7 @@ func (db *database) createTableLocked(name string, pm PersistencyMode, ifnotexis
 		panic("Table " + name + " already exists")
 	}
 	t = db.newTable(name, pm)
-	if existing := db.tables.Set(t); existing != nil {
+	if existing := db.tables.Set(name, t); existing != nil {
 		panic("Table " + name + " already exists")
 	}
 	return t, true
@@ -1460,6 +1826,13 @@ func DropTable(schema, name string, ifexists bool) {
 	if db == nil {
 		panic("Database " + schema + " does not exist")
 	}
+	db.persistenceLifecycle.RLock()
+	persistenceLifecycleLocked := true
+	defer func() {
+		if persistenceLifecycleLocked {
+			db.persistenceLifecycle.RUnlock()
+		}
+	}()
 	db.ensureLoaded()
 	db.schemalock.Lock()
 	t := db.tables.Get(name)
@@ -1479,8 +1852,6 @@ func DropTable(schema, name string, ifexists bool) {
 		db.blobRefState().table.Store(nil)
 	}
 	db.saveLockedAndUnlock(t.schemaSaveMode())
-	// fire AfterDropTable triggers after releasing schemalock (avoids deadlock on cascading drops)
-	t.ExecuteTableLifecycleTriggers(AfterDropTable, nil)
 
 	// deregister temp keytable from CacheManager (no-op if not registered or already evicted)
 	// Must be AFTER schemalock.Unlock to avoid deadlock: Remove → run() → evict → keytableCleanup → TryLock
@@ -1502,6 +1873,11 @@ func DropTable(schema, name string, ifexists bool) {
 			s.RemoveFromDisk()
 		}
 	}
+	db.persistenceLifecycle.RUnlock()
+	persistenceLifecycleLocked = false
+	// Fire AfterDropTable triggers after releasing catalog and persistence
+	// lifecycle locks. Cascading drops may perform DDL in this database again.
+	t.ExecuteTableLifecycleTriggers(AfterDropTable, nil)
 }
 
 func RenameTable(schema, oldname, newname string) {
@@ -1509,6 +1885,8 @@ func RenameTable(schema, oldname, newname string) {
 	if db == nil {
 		panic("Database " + schema + " does not exist")
 	}
+	db.persistenceLifecycle.RLock()
+	defer db.persistenceLifecycle.RUnlock()
 	db.ensureLoaded()
 	db.schemalock.Lock()
 	t := db.tables.Get(oldname)
@@ -1530,7 +1908,7 @@ func RenameTable(schema, oldname, newname string) {
 	}
 	db.tables.Remove(oldname)
 	t.Name = newname
-	db.tables.Set(t)
+	db.tables.Set(newname, t)
 	db.saveLockedAndUnlock(t.schemaSaveMode())
 }
 
@@ -1539,7 +1917,11 @@ func RenameTable(schema, oldname, newname string) {
 // MUST NOT use Lock on schemalock (deadlock: CreateTable holds schemalock → AddItem → evict → here).
 // Returns false if the schemalock is busy (item pushed back for later retry).
 func keytableCleanup(tbl *table, schemaName string, freedByType *[numEvictableTypes]int64) bool {
+	persistenceLifecycleLocked := false
 	defer func() {
+		if persistenceLifecycleLocked {
+			tbl.schema.persistenceLifecycle.RUnlock()
+		}
 		if r := recover(); r != nil {
 			fmt.Println("error: keytableCleanup panic for", schemaName+"."+tbl.Name, ":", r)
 		}
@@ -1547,6 +1929,10 @@ func keytableCleanup(tbl *table, schemaName string, freedByType *[numEvictableTy
 	// drop the table directly (bypass DropTable to avoid deadlock on opChan)
 	db := GetDatabase(schemaName)
 	if db != nil {
+		if !db.persistenceLifecycle.TryRLock() {
+			return false // a storage generation is retaining this catalog member
+		}
+		persistenceLifecycleLocked = true
 		if !db.schemalock.TryLock() {
 			return false // schemalock is held (e.g. by CreateTable); retry later
 		}
@@ -1563,10 +1949,6 @@ func keytableCleanup(tbl *table, schemaName string, freedByType *[numEvictableTy
 	} else if !tbl.beginCacheEviction() {
 		return false
 	}
-	// The table's self-cleanup hooks remove exactly the source-table triggers
-	// installed for its computed columns. Trigger target pins above make this
-	// safe even when a writer snapshotted a trigger concurrently.
-	tbl.ExecuteTableLifecycleTriggers(AfterDropTable, nil)
 	// remove all shard+index+temp column registrations for this table (recursive)
 	for _, c := range tbl.Columns {
 		if c.IsTemp {
@@ -1593,6 +1975,15 @@ func keytableCleanup(tbl *table, schemaName string, freedByType *[numEvictableTy
 	for _, s := range tbl.PShards {
 		s.RemoveFromDisk()
 	}
+	if persistenceLifecycleLocked {
+		tbl.schema.persistenceLifecycle.RUnlock()
+		persistenceLifecycleLocked = false
+	}
+	// The table's self-cleanup hooks remove exactly the source-table triggers
+	// installed for its computed columns. Trigger target pins above make this
+	// safe even when a writer snapshotted a trigger concurrently. Run callbacks
+	// outside catalog locks because they may recursively perform DDL.
+	tbl.ExecuteTableLifecycleTriggers(AfterDropTable, nil)
 	return true
 }
 

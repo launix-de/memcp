@@ -314,6 +314,32 @@ func (s *CephStorage) WalkShardFiles(fn func(name string)) {
 	}
 }
 
+func (s *CephStorage) ReadShardFile(name string) io.ReadCloser {
+	s.ensureOpen()
+	obj := s.obj(name)
+	stat, err := remoteRetryValue(func() (rados.ObjectStat, error) { return s.ioctx.Stat(obj) })
+	if err != nil {
+		if !errors.Is(err, rados.ErrNotFound) {
+			raisePersistenceFailure(s.BackendName(), s.prefix, "shard.read.open", err)
+		}
+		return ErrorReader{e: err, notFound: errors.Is(err, rados.ErrNotFound)}
+	}
+	data := make([]byte, stat.Size)
+	n, err := remoteRetryValue(func() (int, error) { return s.ioctx.Read(obj, data, 0) })
+	if err != nil {
+		raisePersistenceFailure(s.BackendName(), s.prefix, "shard.read", err)
+	}
+	if uint64(n) != stat.Size {
+		raisePersistenceFailure(s.BackendName(), s.prefix, "shard.read", io.ErrUnexpectedEOF)
+	}
+	return standardPersistenceReader(io.NopCloser(bytes.NewReader(data[:n])), s.BackendName(), s.prefix, "shard.read")
+}
+
+func (s *CephStorage) WriteShardFile(name string) io.WriteCloser {
+	s.ensureOpen()
+	return &cephWriteCloser{s: s, obj: s.obj(name)}
+}
+
 func (s *CephStorage) DeleteShardFile(name string) {
 	s.ensureOpen()
 	if err := remoteRetry(func() error { return s.ioctx.Delete(s.obj(name)) }); err != nil && !errors.Is(err, rados.ErrNotFound) {
@@ -323,6 +349,10 @@ func (s *CephStorage) DeleteShardFile(name string) {
 
 func (s *CephStorage) BackendName() string {
 	return "ceph"
+}
+
+func (s *CephStorage) StorageIdentity() string {
+	return "ceph:" + s.factory.ClusterName + ":" + s.factory.Pool + ":" + s.prefix
 }
 
 func (s *CephStorage) Remove() {
