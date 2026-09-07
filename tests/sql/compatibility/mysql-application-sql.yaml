@@ -119,6 +119,18 @@ test_cases:
             data:
               - total: 3
 
+  - name: "Empty SQL_CALC_FOUND_ROWS replaces a previous count with zero"
+    mysql:
+      statements:
+        - sql: "SELECT SQL_CALC_FOUND_ROWS ID FROM wpcompat_posts WHERE ID < 0 LIMIT 1"
+          expect:
+            rows: 0
+        - sql: "SELECT FOUND_ROWS() AS total"
+          expect:
+            rows: 1
+            data:
+              - total: 0
+
   - name: "Non-null NOT IN selects the anti-presence rewrite"
     sql: |
       EXPLAIN IR

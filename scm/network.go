@@ -264,9 +264,12 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 			}
 			if len(a) > 1 && ToBool(a[1]) {
 				// Count-only rows use the same serialized response critical section.
-				// The HTTP frontend reads this value once after query completion.
+				// The HTTP frontend reads this value once after query completion. A
+				// nil row starts the count so an empty result replaces stale state.
 				countedResult = true
-				countedRows++
+				if !a[0].IsNil() {
+					countedRows++
+				}
 				return NewBool(true)
 			}
 

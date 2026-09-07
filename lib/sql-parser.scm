@@ -1090,6 +1090,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 				(define count_plan (build_queryplan_term
 					(sql_expand_views (sql_select_clear_stage query) policy) planning_session tx))
 				(list (quote !begin)
+					(list (quote resultrow) nil true)
 					(list
 						(list (quote lambda) (list (quote resultrow)) count_plan)
 						(list (quote lambda) (list (quote item))

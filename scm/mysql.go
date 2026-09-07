@@ -513,9 +513,12 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 			if len(a) > 1 && ToBool(a[1]) {
 				// SQL_CALC_FOUND_ROWS sends the unbounded result through the
 				// existing output callback. Counting therefore shares the output
-				// critical section and does not need its own synchronization.
+				// critical section and does not need its own synchronization. A
+				// nil row starts the count so an empty result still publishes zero.
 				countedResult = true
-				countedRows++
+				if !a[0].IsNil() {
+					countedRows++
+				}
 				return NewBool(true)
 			}
 
