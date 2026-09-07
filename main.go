@@ -832,6 +832,19 @@ func setupIO(wd string) {
 		},
 	})
 	scm.Declare(&IOEnv, &scm.Declaration{
+		Name: "http_request",
+		Fn:   scm.HTTPRequest,
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "Performs an outbound HTTP request assembled by trusted Scheme code", HasSideEffects: true,
+			Params: []*scm.TypeDescriptor{
+				{Kind: "string", Label: "method"},
+				{Kind: "string", Label: "url"},
+				{Kind: "list", Label: "headers"},
+				{Kind: "string", Label: "body"},
+			},
+			Return: &scm.TypeDescriptor{Kind: "list", Label: "response"},
+		},
+	})
+	scm.Declare(&IOEnv, &scm.Declaration{
 		Name: "serveStatic",
 
 		Fn: (func(...scm.Scmer) scm.Scmer)(scm.HTTPStaticGetter(wd)),

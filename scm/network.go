@@ -35,6 +35,46 @@ import "github.com/gorilla/websocket"
 var httpServersMu sync.Mutex
 var httpServers []*http.Server
 
+// HTTPRequest performs an outbound request assembled by trusted Scheme code.
+// Browser-controlled requests are deliberately not forwarded implicitly.
+func HTTPRequest(a ...Scmer) Scmer {
+	if len(a) != 4 {
+		panic("http_request expects method, URL, headers, and body")
+	}
+	req, err := http.NewRequest(a[0].String(), a[1].String(), strings.NewReader(a[3].String()))
+	if err != nil {
+		panic(err)
+	}
+	headers := mustSliceNet("http_request headers", a[2])
+	if len(headers)%2 != 0 {
+		panic("http_request headers must contain key/value pairs")
+	}
+	for i := 0; i < len(headers); i += 2 {
+		req.Header.Add(headers[i].String(), headers[i+1].String())
+	}
+	client := &http.Client{Timeout: 300 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		panic(err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		panic(err)
+	}
+	responseHeaders := make([]Scmer, 0, len(resp.Header)*2)
+	for key, values := range resp.Header {
+		for _, value := range values {
+			responseHeaders = append(responseHeaders, NewString(key), NewString(value))
+		}
+	}
+	return NewSlice([]Scmer{
+		NewString("status"), NewInt(int64(resp.StatusCode)),
+		NewString("headers"), NewSlice(responseHeaders),
+		NewString("body"), NewString(string(body)),
+	})
+}
+
 // build this function into your SCM environment to offer http server capabilities
 func HTTPServe(a ...Scmer) Scmer {
 	// HTTP endpoint; params: (port, handler)
