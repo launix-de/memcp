@@ -2488,10 +2488,9 @@ func (s *StorageInt) GetValuesUInt32Multi(recids []uint32, target []uint32, stri
 }
 
 // GetValueRange decodes count consecutive bit-packed values starting at
-// recid. Unlike calling GetValueUInt in a loop, it keeps a running
-// chunk/bit-offset cursor and advances it by bitsize each step instead of
-// recomputing bitpos/64 and bitpos%64 (a division+modulo) from scratch for
-// every element, since consecutive rows are exactly bitsize bits apart.
+// recid. It keeps one monotonically increasing bit position, which minimizes
+// loop-carried state while constant division and modulo by 64 lower to shifts
+// and masks in both Go and the generated reader.
 func (s *StorageInt) GetValueRange(recid uint32, count uint32, target []scm.Scmer, stride int) {
 	if stride <= 0 {
 		stride = 1
@@ -2524,14 +2523,15 @@ func (s *StorageInt) GetValueRange(recid uint32, count uint32, target []scm.Scme
 	}
 
 	bitpos := uint(recid) * bitsize
-	chunkIdx := bitpos / 64
-	bitOff := bitpos % 64
+	endBit := bitpos + uint(count)*bitsize
 	idx := 0
-	for k := uint32(0); k < count; k++ {
-		v := chunk[chunkIdx] << bitOff
-		if bitOff+bitsize > 64 {
-			v |= chunk[chunkIdx+1] >> (64 - bitOff)
-		}
+	for bitpos < endBit {
+		chunkIdx := bitpos / 64
+		bitOff := bitpos % 64
+		// The trailing sentinel chunk makes the second load valid even when the
+		// value stays within one word. Removing the data-dependent straddle
+		// branch is cheaper than conditionally avoiding that sequential load.
+		v := chunk[chunkIdx]<<bitOff | chunk[chunkIdx+1]>>(64-bitOff)
 		raw := v >> (64 - bitsize)
 		if hasNull && raw == null {
 			target[idx] = scm.NewNil()
@@ -2539,19 +2539,14 @@ func (s *StorageInt) GetValueRange(recid uint32, count uint32, target []scm.Scme
 			target[idx] = scm.NewInt(int64(raw) + offset)
 		}
 		idx += stride
-		bitOff += bitsize
-		if bitOff >= 64 {
-			bitOff -= 64
-			chunkIdx++
-		}
+		bitpos += bitsize
 	}
 }
 
-// GetValueMulti gathers values at arbitrary recids. Consecutive recids that
-// happen to be adjacent (recids[k] == recids[k-1]+1, the common case for a
-// batch drawn from a contiguous index range) reuse the rolling cursor from
-// GetValueRange; any jump falls back to a direct bitpos computation for that
-// element only.
+// GetValueMulti gathers values at arbitrary recids. An explicit index loop is
+// intentional: unlike a Go range loop, its SSA induction variable starts at
+// zero and needs no synthetic -1/+1 state. That smaller live set materially
+// improves the generated one-pass JIT loop without changing the Go result.
 func (s *StorageInt) GetValueMulti(recids []uint32, target []scm.Scmer, stride int) {
 	if stride <= 0 {
 		stride = 1
@@ -2579,20 +2574,13 @@ func (s *StorageInt) GetValueMulti(recids []uint32, target []scm.Scmer, stride i
 		return
 	}
 
-	var chunkIdx, bitOff uint
-	havePos := false
-	var prevRecid uint32
 	idx := 0
-	for _, recid := range recids {
-		if !havePos || recid != prevRecid+1 {
-			bitpos := uint(recid) * bitsize
-			chunkIdx = bitpos / 64
-			bitOff = bitpos % 64
-		}
-		v := chunk[chunkIdx] << bitOff
-		if bitOff+bitsize > 64 {
-			v |= chunk[chunkIdx+1] >> (64 - bitOff)
-		}
+	for recidIndex := 0; recidIndex < len(recids); recidIndex++ {
+		recid := recids[recidIndex]
+		bitpos := uint(recid) * bitsize
+		chunkIdx := bitpos / 64
+		bitOff := bitpos % 64
+		v := chunk[chunkIdx]<<bitOff | chunk[chunkIdx+1]>>(64-bitOff)
 		raw := v >> (64 - bitsize)
 		if hasNull && raw == null {
 			target[idx] = scm.NewNil()
@@ -2600,13 +2588,6 @@ func (s *StorageInt) GetValueMulti(recids []uint32, target []scm.Scmer, stride i
 			target[idx] = scm.NewInt(int64(raw) + offset)
 		}
 		idx += stride
-		prevRecid = recid
-		havePos = true
-		bitOff += bitsize
-		if bitOff >= 64 {
-			bitOff -= 64
-			chunkIdx++
-		}
 	}
 }
 
