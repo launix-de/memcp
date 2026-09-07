@@ -591,7 +591,11 @@ consumer stage. */
 	(atom "{" true)
 	(define triples rdf_template_items)
 	(atom "}" true)
-) '("insert_data" (merge (coalesce triples '('()))))))
+) (begin
+	(define merged (merge (coalesce triples '())))
+	(if (equal? (rdf_condition_vars merged) '())
+		(list "insert_data" merged)
+		(error "SPARQL INSERT DATA does not allow variables")))))
 (define rdf_insert_graph_data (parser '(
 	(atom "INSERT" true)
 	(atom "DATA" true)
@@ -602,14 +606,23 @@ consumer stage. */
 	(define triples rdf_template_items)
 	(atom "}" true)
 	(atom "}" true)
-) '("insert_graph_data" graph (merge (coalesce triples '('()))))))
+) (begin
+	(define merged (merge (coalesce triples '())))
+	(if (and (equal? (rdf_condition_vars merged) '())
+		(not (match graph '('get_var _name) true _ false)))
+		(list "insert_graph_data" graph merged)
+		(error "SPARQL INSERT DATA does not allow variables")))))
 (define rdf_delete_data (parser '(
 	(atom "DELETE" true)
 	(atom "DATA" true)
 	(atom "{" true)
 	(define triples rdf_template_items)
 	(atom "}" true)
-) '("delete_data" (merge (coalesce triples '('()))))))
+) (begin
+	(define merged (merge (coalesce triples '())))
+	(if (equal? (rdf_condition_vars merged) '())
+		(list "delete_data" merged)
+		(error "SPARQL DELETE DATA does not allow variables")))))
 (define rdf_delete_graph_data (parser '(
 	(atom "DELETE" true)
 	(atom "DATA" true)
@@ -620,7 +633,12 @@ consumer stage. */
 	(define triples rdf_template_items)
 	(atom "}" true)
 	(atom "}" true)
-) '("delete_graph_data" graph (merge (coalesce triples '('()))))))
+) (begin
+	(define merged (merge (coalesce triples '())))
+	(if (and (equal? (rdf_condition_vars merged) '())
+		(not (match graph '('get_var _name) true _ false)))
+		(list "delete_graph_data" graph merged)
+		(error "SPARQL DELETE DATA does not allow variables")))))
 (define rdf_update_dataset_clause (parser '(
 	(atom "USING" true)
 	(? (define named (atom "NAMED" true)))
