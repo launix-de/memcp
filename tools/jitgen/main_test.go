@@ -223,7 +223,7 @@ func rolling(limit uint64) uint64 {
 	}
 }
 
-func TestGeneratedBuiltinLoopKeepsPlanDormantUntilJointInlineAllocation(t *testing.T) {
+func TestGeneratedBuiltinLoopEmitsRegisterPlan(t *testing.T) {
 	fn := buildTestSSAFunction(t, `package sample
 type Scmer struct{}
 func NewInt(int64) Scmer
@@ -241,11 +241,21 @@ func rolling(a ...Scmer) Scmer {
 	if errMsg != "" {
 		t.Fatal(errMsg)
 	}
-	if !strings.Contains(code, "ctx.AllocInlineRegisterHomes(") {
-		t.Fatalf("inlinable generated builtin did not preserve its dormant register plan:\n%s", code)
+	if !strings.Contains(code, "ctx.AllocRegisterHomes(") {
+		t.Fatalf("generated builtin did not emit its register plan:\n%s", code)
 	}
-	if strings.Contains(code, "ctx.AllocRegisterHomes(") {
-		t.Fatalf("inlinable generated builtin activated a standalone register plan:\n%s", code)
+}
+
+func TestInlineRegisterPlanRejectsUnmodelledDynamicCallback(t *testing.T) {
+	fn := buildTestSSAFunction(t, `package sample
+func mappedSum(values []int, callback func(int) int) int {
+	total := 0
+	for _, value := range values { total += callback(value) }
+	return total
+}
+`, "mappedSum")
+	if inlineRegisterPlanSafe(fn) {
+		t.Fatal("dynamic callback was treated as part of the standalone interference graph")
 	}
 }
 

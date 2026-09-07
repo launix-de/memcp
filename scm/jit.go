@@ -960,17 +960,6 @@ func (ctx *JITContext) AllocRegisterHomes(plan JITRegisterPlan) JITRegisterHomes
 	return homes
 }
 
-// AllocInlineRegisterHomes reserves the architecture boundary for register
-// plans emitted by ordinary builtins. Those emitters are expanded inside a
-// Scheme Proc and therefore do not yet have a joint caller/callee interference
-// graph. Activating an independent plan here could overlap caller-live values;
-// keep the generated plan dormant until jitgen can describe both environments
-// in one allocation. Standalone storage readers use AllocRegisterHomes.
-func (ctx *JITContext) AllocInlineRegisterHomes(plan JITRegisterPlan) JITRegisterHomes {
-	_ = plan
-	return JITRegisterHomes{}
-}
-
 func (ctx *JITContext) ReleaseRegisterHomes(homes JITRegisterHomes) {
 	for index := uint8(0); index < ctx.RegisterBank.Count; index++ {
 		reg := ctx.RegisterBank.Registers[index]

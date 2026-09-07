@@ -3688,11 +3688,7 @@ func (g *codeGen) emitRegisterHomes() {
 		}
 		planItems = append(planItems, fmt.Sprintf("{Color: %d, Width: %d, Cost: %d}", slot.color, slot.width, weight))
 	}
-	allocator := "AllocInlineRegisterHomes"
-	if g.storageMode {
-		allocator = "AllocRegisterHomes"
-	}
-	g.emit("%s := ctx.%s(JITRegisterPlan{Slots: [16]JITRegisterSlot{%s}, Count: %d})", homes, allocator, strings.Join(planItems, ", "), len(planItems))
+	g.emit("%s := ctx.AllocRegisterHomes(JITRegisterPlan{Slots: [16]JITRegisterSlot{%s}, Count: %d})", homes, strings.Join(planItems, ", "), len(planItems))
 	g.emit("defer ctx.ReleaseRegisterHomes(%s)", homes)
 
 	names := make([]string, 0, len(g.registerPlan.colorByValue))
@@ -4667,6 +4663,24 @@ func generateClosure(opName string, fn *ssa.Function, rewrite ssaValueRewriter, 
 	return code, errMsg
 }
 
+// inlineRegisterPlanSafe reports whether fn's SSA contains every environment
+// whose values can be live while the generated loop runs. A dynamic call can
+// enter a Scheme callback compiled in the surrounding Proc; that callback is
+// absent from fn's standalone graph, so independently assigning phi homes
+// would violate caller/callee interference. Static callees are expanded by
+// inlineCallCaptured into this emitter and share its allocator state.
+func inlineRegisterPlanSafe(fn *ssa.Function) bool {
+	for _, block := range fn.Blocks {
+		for _, instruction := range block.Instrs {
+			call, ok := instruction.(*ssa.Call)
+			if ok && call.Common().StaticCallee() == nil {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func generateClosureCost(opName string, fn *ssa.Function, rewrite ssaValueRewriter, sourcePath ...string) (code string, errMsg string, inlineCost uint16) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -4698,6 +4712,9 @@ func generateClosureCost(opName string, fn *ssa.Function, rewrite ssaValueRewrit
 		}
 	}
 	g := newCodeGen(fn, rewrite, aliases)
+	if !inlineRegisterPlanSafe(fn) {
+		g.registerPlan = staticRegisterPlan{colorByValue: map[string]int{}, widthByValue: map[string]int{}}
+	}
 	g.opName = opName
 	fmt.Fprintf(&g.w, "\t\t\t%s\n", generatedBanner)
 	if len(fn.Params) > 0 {
