@@ -19,6 +19,7 @@ package scm
 
 import (
 	"fmt"
+	"os"
 	"regexp"
 	"slices"
 	"sync"
@@ -172,6 +173,9 @@ func jitBuildParserPrograms(parsers []*ScmParser) *jitParserProgram {
 	program.prepareMemoLayout()
 	program.computeFirstBytes()
 	program.analyzeLiteralLeaves()
+	if os.Getenv("MEMCP_DUMP_LADDER") != "" {
+		program.dumpPrecedenceLadders()
+	}
 	program.pool.New = func() any { return new(jitParserState) }
 	return program
 }
@@ -186,6 +190,9 @@ func jitBuildParserTemplateProgram(template *JITParserTemplate) (*jitParserProgr
 	program.prepareMemoLayout()
 	program.computeFirstBytes()
 	program.analyzeLiteralLeaves()
+	if os.Getenv("MEMCP_DUMP_LADDER") != "" {
+		program.dumpPrecedenceLadders()
+	}
 	program.pool.New = func() any { return new(jitParserState) }
 	return program, rule
 }
