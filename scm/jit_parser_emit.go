@@ -322,6 +322,31 @@ func (emitter *jitParserEmitter) pushCheckpoint() {
 // is one of the hottest sites in the whole grammar (every rejected keyword atom
 // in a choice cascade), so inline that and only fall back to
 // jitParserRestoreCheckpointNative when there are binding mutations to undo.
+// emitRecordFailure records a terminal-match failure for the "expected ..."
+// diagnostic. jitParserRecordFailureNative only does anything when the failing
+// position is at or past the farthest reached so far - the overwhelmingly
+// common case in a choice cascade is a keyword failing well before that, where
+// the helper is two integer comparisons and a no-op. Inline that guard (one
+// load + cmp + branch) and build the `expected` string + call the helper only
+// on the rare at-or-past-farthest path. Leaves position loaded for the caller.
+func (emitter *jitParserEmitter) emitRecordFailure(desc string) {
+	ctx := emitter.ctx
+	position := emitter.loadPosition()
+	sp := emitter.statePointer()
+	farReg := ctx.AllocReg()
+	ctx.EmitMovRegMem(farReg, sp.Reg, int32(unsafe.Offsetof(jitParserState{}.farthest)))
+	skip := ctx.ReserveLabel()
+	ctx.EmitCmpInt64(position.Reg, farReg)
+	ctx.EmitJump(CondSignedLess, skip)
+	ctx.FreeReg(farReg)
+	expected := emitter.immPair(NewString(desc))
+	emitter.emitVoid(jitParserRecordFailureNative, sp, position, expected)
+	ctx.FreeDesc(&expected)
+	ctx.MarkLabel(skip)
+	ctx.FreeDesc(&sp)
+	ctx.FreeDesc(&position)
+}
+
 func (emitter *jitParserEmitter) restoreCheckpoint() {
 	ctx := emitter.ctx
 	sp := emitter.statePointer()
@@ -492,11 +517,7 @@ func (emitter *jitParserEmitter) emitTerminal(node *jitParserNode, rule int, suc
 	}
 	emitter.ctx.EmitJmp(success)
 	emitter.ctx.MarkLabel(failed)
-	expected := emitter.immPair(NewString(node.description))
-	position := emitter.loadPosition()
-	emitter.emitStateVoid(jitParserRecordFailureNative, position, expected)
-	emitter.ctx.FreeDesc(&position)
-	emitter.ctx.FreeDesc(&expected)
+	emitter.emitRecordFailure(node.description)
 	emitter.ctx.EmitJmp(failure)
 	emitter.ctx.FreeStack(int32(len(captures) * 16))
 }
@@ -721,11 +742,7 @@ func (emitter *jitParserEmitter) emitDirectReturnLeaf(p *directReturnPlan, succe
 	ctx.EmitJmp(success)
 
 	ctx.MarkLabel(failed)
-	expected := emitter.immPair(NewString(p.desc))
-	position := emitter.loadPosition()
-	emitter.emitStateVoid(jitParserRecordFailureNative, position, expected)
-	ctx.FreeDesc(&position)
-	ctx.FreeDesc(&expected)
+	emitter.emitRecordFailure(p.desc)
 	ctx.EmitJmp(failure)
 
 	ctx.FreeStack(int32(len(captures) * 16))
