@@ -331,6 +331,29 @@ func TestCreateTableIfNotExistsReturnsFalseWithoutSaving(t *testing.T) {
 	if scm.ToBool(second) {
 		t.Fatal("second createtable should report created=false")
 	}
+
+	db := GetDatabase("tcreatetablefast")
+	db.persistenceLifecycle.Lock()
+	fastDone := make(chan scm.Scmer, 1)
+	go func() {
+		fastDone <- callBuiltin(t, "createtable",
+			scm.NewString("tcreatetablefast"),
+			scm.NewString(".hot"),
+			cols,
+			options,
+			scm.NewBool(true),
+		)
+	}()
+	select {
+	case result := <-fastDone:
+		if scm.ToBool(result) {
+			t.Fatal("locked persistence-lifecycle fast path should report created=false")
+		}
+	case <-time.After(time.Second):
+		db.persistenceLifecycle.Unlock()
+		t.Fatal("idempotent createtable entered the persistence lifecycle writer lock")
+	}
+	db.persistenceLifecycle.Unlock()
 }
 
 func TestSchemaReloadInvalidatesPlannerCacheOnInit(t *testing.T) {

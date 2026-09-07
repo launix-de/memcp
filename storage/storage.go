@@ -29,6 +29,7 @@ import "time"
 import "strconv"
 import "reflect"
 import "strings"
+import "encoding/json"
 import "unicode/utf8"
 import units "github.com/docker/go-units"
 import "github.com/launix-de/memcp/scm"
@@ -2112,6 +2113,51 @@ func Init(en scm.Env) {
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
+		Name: "alterdatabase_storage",
+
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			var raw json.RawMessage
+			if len(a) > 2 && !a[2].IsNil() {
+				source := scm.String(a[2])
+				sourceDB := GetDatabase(source)
+				if sourceDB == nil {
+					panic("Source database " + source + " does not exist")
+				}
+				if len(a) > 3 && !a[3].IsNil() && sourceDB.GetTable(scm.String(a[3])) == nil {
+					panic("Source table " + source + "." + scm.String(a[3]) + " does not exist")
+				}
+				raw = databaseBackendConfigForTarget(source, scm.String(a[0]))
+			} else {
+				items := mustScmerSlice(a[1], "database backend options")
+				if len(items) == 0 || len(items)%2 != 0 {
+					panic("database backend options must contain key/value pairs")
+				}
+				options := make(map[string]string, len(items)/2)
+				for index := 0; index < len(items); index += 2 {
+					options[scm.String(items[index])] = scm.String(items[index+1])
+				}
+				if options["backend"] == "" {
+					panic("database backend options require backend")
+				}
+				if options["backend"] != "filesystem" && options["prefix"] == "" {
+					options["prefix"] = scm.String(a[0])
+				}
+				raw = marshalDatabaseBackendOptions(options)
+			}
+			return scm.NewBool(AlterDatabaseStorage(scm.String(a[0]), raw, scmerToTxContext(a[4])))
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "atomically moves a database to explicitly configured storage or to a copy of another database's storage configuration", HasSideEffects: true,
+			Params: []*scm.TypeDescriptor{
+				{Kind: "string", Label: "schema", Description: "database to move"},
+				{Kind: "list|nil", Label: "backendOptions", Description: "flat target backend key/value list"},
+				{Kind: "string|nil", Label: "sourceDatabase", Description: "database whose backend configuration is copied"},
+				{Kind: "string|nil", Label: "sourceTable", Description: "optional table proving the copied configuration's owner"},
+				{Kind: "any", Label: "transaction", Description: "explicit request context used to drain table access"},
+			},
+			Return: &scm.TypeDescriptor{Kind: "bool"},
+		},
+	})
+	scm.Declare(&en, &scm.Declaration{
 		Name: "dropdatabase",
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
@@ -2199,7 +2245,15 @@ func Init(en scm.Env) {
 					// invocation so its current closed callback can repair the table.
 				}
 			}
-
+			db.persistenceLifecycle.RLock()
+			persistenceLifecycleLocked := true
+			unlockPersistenceLifecycle := func() {
+				if persistenceLifecycleLocked {
+					persistenceLifecycleLocked = false
+					db.persistenceLifecycle.RUnlock()
+				}
+			}
+			defer unlockPersistenceLifecycle()
 			// parse options only after the fast existing-table probe
 			options := mustScmerSlice(a[3], "options")
 			var autoIncrement uint64
@@ -2314,6 +2368,7 @@ func Init(en scm.Env) {
 				} else {
 					db.schemalock.Unlock()
 				}
+				unlockPersistenceLifecycle()
 				// The competing creator may have published the table after our
 				// optimistic probe. Its table-local barrier includes oninit.
 				existing.awaitCreationInitialization(currentTx)
@@ -2326,7 +2381,7 @@ func Init(en scm.Env) {
 			// Lock before publication. Every if-not-exists observer therefore waits
 			// until oninit and registered create-table triggers have both completed.
 			newTable.creationMu.Lock()
-			if prev := db.tables.Set(newTable); prev != nil {
+			if prev := db.tables.Set(tblName, newTable); prev != nil {
 				newTable.creationMu.Unlock()
 				db.schemalock.Unlock()
 				panic("Table " + tblName + " already exists")
@@ -2354,6 +2409,7 @@ func Init(en scm.Env) {
 				mode = schemaSaveBuffered
 			}
 			db.saveLockedAndUnlock(mode)
+			unlockPersistenceLifecycle()
 			registerCreatedTable(newTable)
 			func() {
 				defer func() {
@@ -2389,7 +2445,6 @@ func Init(en scm.Env) {
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			t := TableFromScmer(a[0])
-
 			// normal column
 			colname := scm.String(a[1])
 			typename := scm.String(a[2])

@@ -3127,6 +3127,13 @@ func discardUnpublishedShard(s *storageShard) {
 		return
 	}
 	for _, col := range s.t.Columns {
+		if storage, ok := s.columns[col.Name]; ok && storage != nil {
+			if blob, ok := storage.(*OverlayBlob); ok {
+				blob.ReleaseBlobs(uint(s.main_count))
+			}
+		}
+	}
+	for _, col := range s.t.Columns {
 		s.t.schema.persistence.RemoveColumn(s.uuid.String(), col.Name)
 	}
 	s.t.schema.persistence.RemoveColumn(s.uuid.String(), blobManifestColumn)

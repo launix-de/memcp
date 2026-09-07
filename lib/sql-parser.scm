@@ -123,7 +123,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 (define sql_interval_unit (parser '((define unit sql_identifier_unquoted) (? "(" (regex "[0-9]+") ")")) unit))
 
 /* strip one SQL string escape: doubled delimiter -> single, the six backslash
-   escapes MySQL decodes, everything else (\x) keeps its literal second byte */
+escapes MySQL decodes, everything else (\x) keeps its literal second byte */
 (define sql_string_unescape (lambda (m)
 	(match m
 		"''" "'"
@@ -1793,6 +1793,28 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		sql_multi_delete
 		sql_delete
 		sql_truncate
+
+		/* ALTER DATABASE name SET STORAGE key=val, ... */
+		(parser '((atom "ALTER" true) (or (atom "DATABASE" true) (atom "SCHEMA" true)) (define id sql_identifier)
+			(atom "SET" true) (atom "STORAGE" true)
+			(define opts (+ (parser '((define k sql_identifier) "=" (define v sql_literal)) '(k v)) ",")))
+			(begin (if policy (policy "system" true true) true)
+				'((quote alterdatabase_storage) id (cons (quote list) (merge opts)) nil nil (list (quote session) "__memcp_tx"))))
+		/* ALTER DATABASE name SET STORAGE FROM DATABASE source */
+		(parser '((atom "ALTER" true) (or (atom "DATABASE" true) (atom "SCHEMA" true)) (define id sql_identifier)
+			(atom "SET" true) (atom "STORAGE" true) (atom "FROM" true) (or (atom "DATABASE" true) (atom "SCHEMA" true)) (define source sql_identifier))
+			(begin (if policy (policy "system" true true) true)
+				'((quote alterdatabase_storage) id nil source nil (list (quote session) "__memcp_tx"))))
+		/* ALTER DATABASE name SET STORAGE FROM TABLE [schema.]table */
+		(parser '((atom "ALTER" true) (or (atom "DATABASE" true) (atom "SCHEMA" true)) (define id sql_identifier)
+			(atom "SET" true) (atom "STORAGE" true) (atom "FROM" true) (atom "TABLE" true)
+			(define source (or
+				(parser '((define source_schema sql_identifier) "." (define source_table sql_identifier)) '(source_schema source_table))
+				(parser (define source_table sql_identifier) '(nil source_table)))))
+			(match source '(source_schema source_table) (begin
+				(if policy (policy (coalesce source_schema schema) source_table false) true)
+				(if policy (policy "system" true true) true)
+				'((quote alterdatabase_storage) id nil (coalesce source_schema schema) source_table (list (quote session) "__memcp_tx")))))
 
 		/* CREATE {DATABASE | SCHEMA} name FROM source_db */
 		(parser '((atom "CREATE" true) (or (atom "DATABASE" true) (atom "SCHEMA" true)) (define ifnot (? (atom "IF" true) (atom "NOT" true) (atom "EXISTS" true))) (define id sql_identifier) (atom "FROM" true) (define from_db sql_identifier)) (begin (if policy (policy "system" true true) true) '((quote createdatabase) id (if ifnot true false) nil from_db)))

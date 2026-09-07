@@ -1021,6 +1021,25 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		psql_delete
 		psql_truncate
 
+		(parser '((atom "ALTER" true) (or (atom "DATABASE" true) (atom "SCHEMA" true)) (define id psql_identifier)
+			(atom "SET" true) (atom "STORAGE" true)
+			(define opts (+ (parser '((define k psql_identifier) "=" (define v psql_expression)) '(k v)) ",")))
+			(begin (if policy (policy "system" true true) true)
+				'((quote alterdatabase_storage) id (cons (quote list) (merge opts)) nil nil (list (quote session) "__memcp_tx"))))
+		(parser '((atom "ALTER" true) (or (atom "DATABASE" true) (atom "SCHEMA" true)) (define id psql_identifier)
+			(atom "SET" true) (atom "STORAGE" true) (atom "FROM" true) (or (atom "DATABASE" true) (atom "SCHEMA" true)) (define source psql_identifier))
+			(begin (if policy (policy "system" true true) true)
+				'((quote alterdatabase_storage) id nil source nil (list (quote session) "__memcp_tx"))))
+		(parser '((atom "ALTER" true) (or (atom "DATABASE" true) (atom "SCHEMA" true)) (define id psql_identifier)
+			(atom "SET" true) (atom "STORAGE" true) (atom "FROM" true) (atom "TABLE" true)
+			(define source (or
+				(parser '((define source_schema psql_identifier) "." (define source_table psql_identifier)) '(source_schema source_table))
+				(parser (define source_table psql_identifier) '(nil source_table)))))
+			(match source '(source_schema source_table) (begin
+				(if policy (policy (coalesce source_schema schema) source_table false) true)
+				(if policy (policy "system" true true) true)
+				'((quote alterdatabase_storage) id nil (coalesce source_schema schema) source_table (list (quote session) "__memcp_tx")))))
+
 		(parser '((atom "CREATE" true) (atom "DATABASE" true) (define ifnot (? (atom "IF" true) (atom "NOT" true) (atom "EXISTS" true))) (define id psql_identifier)
 			(? (atom "WITH" true) (* (or psql_identifier "=" psql_expression))))
 			(begin (if policy (policy "system" true true) true) '((quote createdatabase) id (if ifnot true false))) )

@@ -6,6 +6,8 @@ metadata:
   isolated: true
 
 setup:
+  - sql: "DROP DATABASE IF EXISTS dbc_storage_source"
+  - sql: "DROP TABLE IF EXISTS dbc_storage_items"
   - sql: "DROP TABLE IF EXISTS dbc_unique_lifecycle"
   - sql: "DROP TABLE IF EXISTS dbc_child"
   - sql: "DROP TABLE IF EXISTS dbc_t"
@@ -68,6 +70,35 @@ test_cases:
 
   - name: "CREATE DATABASE rejects an unknown persistence backend"
     sql: "CREATE DATABASE dbc_unknown_backend SET backend='not-a-backend',prefix='must-parse-all-options'"
+    expect:
+      error: true
+
+  - name: "Create storage configuration source database"
+    sql: "CREATE DATABASE dbc_storage_source"
+  - name: "Create durable data in storage migration target"
+    sql: "CREATE TABLE dbc_storage_items (id INT PRIMARY KEY, value VARCHAR(40))"
+  - name: "Insert durable data before storage configuration change"
+    sql: "INSERT INTO dbc_storage_items VALUES (1, 'preserved')"
+    expect:
+      affected_rows: 1
+  - name: "Copy storage configuration from database"
+    sql: "ALTER DATABASE `memcp-tests` SET STORAGE FROM DATABASE dbc_storage_source"
+  - name: "Data survives database storage configuration copy"
+    sql: "SELECT value FROM dbc_storage_items WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - value: "preserved"
+  - name: "Copy storage configuration from owning database of table"
+    sql: "ALTER DATABASE `memcp-tests` SET STORAGE FROM TABLE `memcp-tests`.dbc_storage_items"
+  - name: "Set explicit filesystem storage configuration"
+    sql: "ALTER DATABASE `memcp-tests` SET STORAGE backend='filesystem'"
+  - name: "Storage configuration copy rejects missing source table"
+    sql: "ALTER DATABASE `memcp-tests` SET STORAGE FROM TABLE `memcp-tests`.missing"
+    expect:
+      error: true
+  - name: "Storage migration rejects unknown backend"
+    sql: "ALTER DATABASE `memcp-tests` SET STORAGE backend='not-a-backend'"
     expect:
       error: true
   - name: "SHOW INDEXES FROM table"
@@ -308,6 +339,8 @@ test_cases:
     sql: "CREATE TABLE dbc_double (id INT PRIMARY KEY, val DOUBLE)"
 
 cleanup:
+  - sql: "DROP DATABASE IF EXISTS dbc_storage_source"
+  - sql: "DROP TABLE IF EXISTS dbc_storage_items"
   - sql: "DROP TABLE IF EXISTS dbc_unique_lifecycle"
   - sql: "DROP TABLE IF EXISTS dbc_double_precision"
   - sql: "DROP TABLE IF EXISTS dbc_double"

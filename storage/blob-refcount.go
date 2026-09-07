@@ -87,7 +87,7 @@ func (db *database) ensureBlobTable() *table {
 	t = db.newTable(".blobs", Safe)
 	t.createColumnLocked("hash", "TEXT", nil, nil)
 	t.createColumnLocked("refcount", "INT", nil, nil)
-	db.tables.Set(t)
+	db.tables.Set(t.Name, t)
 	db.saveLockedAndUnlock(schemaSaveFsync)
 	state.table.Store(t)
 	registerCreatedTable(t)
