@@ -968,7 +968,11 @@ consumer stage. */
 )))
 (define rdf_ensure_table (lambda (schema)
 	(begin
-		(eval (parse_sql schema "CREATE TABLE IF NOT EXISTS rdf (s TEXT, p TEXT, o TEXT, UNIQUE KEY rdf_spo (s, p, o))" (lambda (schema tblname write) true)))
+		/* Avoid replaying idempotent DDL on every RDF read. Besides being wasted
+		work, concurrent CREATE IF NOT EXISTS requests can publish a fresh table
+		generation while a point/index plan is being compiled. */
+		(if (table schema "rdf") true
+			(eval (parse_sql schema "CREATE TABLE IF NOT EXISTS rdf (s TEXT, p TEXT, o TEXT, UNIQUE KEY rdf_spo (s, p, o))" (lambda (schema tblname write) true))))
 		(define info (show schema "rdf" true))
 		(define unique_keys ((info "meta") "Unique"))
 		(define has_spo (find unique_keys (lambda (key)
@@ -992,8 +996,10 @@ consumer stage. */
 ))
 (define rdf_ensure_named_table (lambda (schema)
 	(begin
-		(eval (parse_sql schema "CREATE TABLE IF NOT EXISTS rdf_named (g TEXT, s TEXT, p TEXT, o TEXT, UNIQUE KEY rdf_gspo (g, s, p, o))" (lambda (schema tblname write) true)))
-		(eval (parse_sql schema "CREATE TABLE IF NOT EXISTS rdf_graphs (g TEXT, UNIQUE KEY rdf_graph_name (g))" (lambda (schema tblname write) true))))
+		(if (table schema "rdf_named") true
+			(eval (parse_sql schema "CREATE TABLE IF NOT EXISTS rdf_named (g TEXT, s TEXT, p TEXT, o TEXT, UNIQUE KEY rdf_gspo (g, s, p, o))" (lambda (schema tblname write) true))))
+		(if (table schema "rdf_graphs") true
+			(eval (parse_sql schema "CREATE TABLE IF NOT EXISTS rdf_graphs (g TEXT, UNIQUE KEY rdf_graph_name (g))" (lambda (schema tblname write) true)))))
 ))
 (define rdf_graph_exists (lambda (schema graph)
 	(begin
@@ -1570,11 +1576,23 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 ))
 (define rdf_shared_minus_relation (lambda (schema state query vars shared)
 	(begin
-		/* Model MINUS as an anti-join. A shared RDF term is necessarily bound on
-		a compatible right mapping, so it is also an unambiguous match marker. */
+		/* Model MINUS as an anti-join against distinct compatible keys. The
+		grouped relation is a semantic boundary: right-side multiplicity cannot
+		duplicate left mappings, and its COUNT column is an explicit presence
+		marker after a LEFT JOIN. */
 		(define index (rdf_shared_state_index state))
+		(define input_alias (concat "__rdf_minus_input" index))
 		(define alias (concat "__rdf_minus" index))
-		(define right (rdf_shared_relation_refs alias vars))
+		(define presence "__rdf_minus_present")
+		(define input_bindings (rdf_shared_relation_refs input_alias vars))
+		(define grouped_bindings (reduce shared (lambda (bindings var)
+			(append bindings var (get_assoc input_bindings var))) '()))
+		(define grouped_fields (append (rdf_shared_relation_fields grouped_bindings)
+			presence (list (quote aggregate) 1 (quote +) 0)))
+		(define relation (make_query_block schema
+			(list (list input_alias schema query false nil)) grouped_fields true
+			(extract_assoc grouped_bindings (lambda (_var expr) expr)) nil nil nil nil '() '() '()))
+		(define right (rdf_shared_relation_refs alias shared))
 		(define joins (reduce shared (lambda (conditions var)
 			(match (rdf_ctx_lookup (rdf_shared_state_bindings state) var) '(left_found left_expr)
 				(match (rdf_ctx_lookup right var) '(right_found right_expr)
@@ -1588,9 +1606,9 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 				'() conditions)) '()))
 		(list
 			(append (rdf_shared_state_sources state)
-				(list alias schema query true (rdf_shared_where joins)))
+				(list alias schema relation true (rdf_shared_where joins)))
 			(rdf_shared_state_bindings state)
-			(cons (list (quote nil?) (get_assoc right (car shared)))
+			(cons (list (quote nil?) (rdf_shared_column alias presence))
 				(rdf_shared_state_filters state))
 			(+ index 1)))
 ))
