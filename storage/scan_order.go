@@ -45,6 +45,7 @@ func optimizeScanOrderMulti(v []scm.Scmer, oc *scm.OptimizerContext, useResult b
 			}
 		}
 	}
+	reuseNeutralForNotFound := len(v) > 18 && scm.Equal(v[16], v[18])
 	rawMapReduceFns := scm.NewNil()
 	if len(v) > 15 {
 		rawMapReduceFns = v[15]
@@ -64,6 +65,7 @@ func optimizeScanOrderMulti(v []scm.Scmer, oc *scm.OptimizerContext, useResult b
 		neutralType = normalizeScanType(neutralType)
 	}
 	oc.Ome.IncrLoopDepth()
+	var resultType *scm.TypeDescriptor
 	if callbacks, static := scanStaticListElements(rawMapReduceFns); static {
 		// scanStaticListElements also accepts already-materialized list values.
 		// Reject arbitrary call expressions here: their head is not a callback,
@@ -87,7 +89,8 @@ func optimizeScanOrderMulti(v []scm.Scmer, oc *scm.OptimizerContext, useResult b
 					}
 				}
 			}
-			optimized, _ := oc.OptimizeReducerCallbacks(callbacks, neutralType, valueTypes)
+			var optimized []scm.Scmer
+			optimized, resultType = oc.OptimizeReducerCallbacks(callbacks, neutralType, valueTypes)
 			v[15] = scm.NewSlice(append([]scm.Scmer{scm.NewSymbol("list")}, optimized...))
 		}
 	} else if len(v) > 15 {
@@ -100,6 +103,9 @@ func optimizeScanOrderMulti(v []scm.Scmer, oc *scm.OptimizerContext, useResult b
 		v[18], _ = oc.OptimizeSub(v[18], true)
 	}
 	oc.Ome.DecrLoopDepth()
+	if reuseNeutralForNotFound {
+		return scm.NewSlice(v), resultType
+	}
 	return scm.NewSlice(v), nil
 }
 
@@ -159,7 +165,8 @@ func optimizeScanOrder(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) 
 			columnTypes[i] = unknownScanType()
 		}
 	}
-	v[mapReduceIdx], _ = oc.OptimizeReducerCallback(rawMapReduce, neutralType, columnTypes...)
+	var resultType *scm.TypeDescriptor
+	v[mapReduceIdx], resultType = oc.OptimizeReducerCallback(rawMapReduce, neutralType, columnTypes...)
 	if len(v) > outerIdx {
 		v[outerIdx], _ = oc.OptimizeSub(v[outerIdx], true)
 	}
@@ -177,6 +184,9 @@ func optimizeScanOrder(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) 
 		v[postOrderFilterIdx], _ = oc.OptimizeSub(v[postOrderFilterIdx], true)
 	}
 	oc.Ome.DecrLoopDepth()
+	if reuseNeutralForNotFound {
+		return scm.NewSlice(v), resultType
+	}
 	return scm.NewSlice(v), nil
 }
 

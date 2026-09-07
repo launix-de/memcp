@@ -41,6 +41,7 @@ func optimizeScanJoinOrder(v []scm.Scmer, oc *scm.OptimizerContext, _ bool) (scm
 			v = append(v, scm.NewBool(false))
 		}
 	}
+	reuseNeutralForNotFound := len(v) > notFoundIdx && scm.Equal(v[neutralIdx], v[notFoundIdx])
 	rawMapReduce := v[mapReduceIdx]
 	rawCombine := scm.NewNil()
 	if len(v) > combineIdx {
@@ -80,7 +81,10 @@ func optimizeScanJoinOrder(v []scm.Scmer, oc *scm.OptimizerContext, _ bool) (scm
 		v[notFoundIdx], _ = oc.OptimizeSub(v[notFoundIdx], true)
 	}
 	oc.Ome.DecrLoopDepth()
-	return scm.NewSlice(v), resultType
+	if reuseNeutralForNotFound {
+		return scm.NewSlice(v), resultType
+	}
+	return scm.NewSlice(v), nil
 }
 
 func compileScanJoinDriverOrderAccess(schemasExpr, valuesExpr, orderColsExpr, sortDirsExpr scm.Scmer) (scm.Scmer, scm.Scmer, bool) {
