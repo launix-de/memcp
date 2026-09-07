@@ -18,9 +18,38 @@ package storage
 
 import "os"
 import "fmt"
+import "io"
 import "time"
 
 const remoteStorageAttempts = 3
+
+type persistenceObjectReader struct {
+	io.ReadCloser
+	backend   string
+	database  string
+	operation string
+}
+
+func (r *persistenceObjectReader) Read(buffer []byte) (int, error) {
+	n, err := r.ReadCloser.Read(buffer)
+	if err != nil && err != io.EOF {
+		raisePersistenceFailure(r.backend, r.database, r.operation, err)
+	}
+	return n, err
+}
+
+func (r *persistenceObjectReader) Close() error {
+	if err := r.ReadCloser.Close(); err != nil {
+		raisePersistenceFailure(r.backend, r.database, r.operation+".close", err)
+	}
+	return nil
+}
+
+func standardPersistenceReader(reader io.ReadCloser, backend string, database string, operation string) io.ReadCloser {
+	return &persistenceObjectReader{
+		ReadCloser: reader, backend: backend, database: database, operation: operation,
+	}
+}
 
 // PersistenceFailure is the only panic value emitted for an I/O failure at a
 // persistence boundary. Transaction code may recover this type to abort a

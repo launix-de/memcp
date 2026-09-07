@@ -156,6 +156,9 @@ func (s *CephStorage) ReadSchema() []byte {
 	if err != nil {
 		raisePersistenceFailure(s.BackendName(), s.prefix, "schema.read", err)
 	}
+	if uint64(n) != stat.Size {
+		raisePersistenceFailure(s.BackendName(), s.prefix, "schema.read", io.ErrUnexpectedEOF)
+	}
 	return data[:n]
 }
 
@@ -187,7 +190,10 @@ func (s *CephStorage) ReadColumn(shard string, column string) io.ReadCloser {
 	if err != nil {
 		raisePersistenceFailure(s.BackendName(), s.prefix, "column.read", err)
 	}
-	return io.NopCloser(bytes.NewReader(data[:n]))
+	if uint64(n) != stat.Size {
+		raisePersistenceFailure(s.BackendName(), s.prefix, "column.read", io.ErrUnexpectedEOF)
+	}
+	return standardPersistenceReader(io.NopCloser(bytes.NewReader(data[:n])), s.BackendName(), s.prefix, "column.read")
 }
 
 type cephWriteCloser struct {
@@ -244,7 +250,10 @@ func (s *CephStorage) ReadBlob(hash string) io.ReadCloser {
 	if err != nil {
 		raisePersistenceFailure(s.BackendName(), s.prefix, "blob.read", err)
 	}
-	return io.NopCloser(bytes.NewReader(data[:n]))
+	if uint64(n) != stat.Size {
+		raisePersistenceFailure(s.BackendName(), s.prefix, "blob.read", io.ErrUnexpectedEOF)
+	}
+	return standardPersistenceReader(io.NopCloser(bytes.NewReader(data[:n])), s.BackendName(), s.prefix, "blob.read")
 }
 
 func (s *CephStorage) WriteBlob(hash string) io.WriteCloser {
@@ -317,11 +326,28 @@ func (s *CephStorage) BackendName() string {
 }
 
 func (s *CephStorage) Remove() {
-	// With plain librados we can't efficiently list "all objects under prefix"
-	// unless we also maintain an index object / omap with object names.
-	// For MVP: not implemented.
-	// Recommendation: keep a "manifest" object listing all objects in the db prefix.
-	panic("CephStorage.Remove not implemented: needs a manifest/index to enumerate objects")
+	s.ensureOpen()
+	prefix := s.prefix + "/"
+	iter, err := s.ioctx.Iter()
+	if err != nil {
+		raisePersistenceFailure(s.BackendName(), s.prefix, "database.remove.list", err)
+	}
+	var objects []string
+	for iter.Next() {
+		if object := iter.Value(); strings.HasPrefix(object, prefix) {
+			objects = append(objects, object)
+		}
+	}
+	iterErr := iter.Err()
+	iter.Close()
+	if iterErr != nil {
+		raisePersistenceFailure(s.BackendName(), s.prefix, "database.remove.list", iterErr)
+	}
+	for _, object := range objects {
+		if err := remoteRetry(func() error { return s.ioctx.Delete(object) }); err != nil && !errors.Is(err, rados.ErrNotFound) {
+			raisePersistenceFailure(s.BackendName(), s.prefix, "database.remove", err)
+		}
+	}
 }
 
 // -------------------- Logs --------------------
@@ -361,7 +387,7 @@ func (s *CephStorage) OpenLog(shard string) PersistenceLogfile {
 
 func (s *CephStorage) SwapLog(shard string, entries []interface{}, durable bool) PersistenceLogfile {
 	s.ensureOpen()
-	oldSegments, err := listLogSegments(s, shard)
+	oldSegments, _, err := listLogSegments(s, shard)
 	if err != nil {
 		raisePersistenceFailure(s.BackendName(), s.prefix, "log.swap", err)
 	}
@@ -404,7 +430,7 @@ func (s *CephStorage) ReplayLog(shard string) (map[string]struct{}, chan interfa
 
 	out := make(chan interface{}, 64)
 	committed := make(map[string]struct{})
-	segments, err := listLogSegments(s, shard)
+	segments, _, err := listLogSegments(s, shard)
 	if err != nil {
 		raisePersistenceFailure(s.BackendName(), s.prefix, "log.replay", err)
 	}
@@ -445,19 +471,29 @@ func (s *CephStorage) readLogSegment(seg logSegInfo) []byte {
 	if n == 0 {
 		return nil
 	}
+	if uint64(n) != stat.Size {
+		raisePersistenceFailure(s.BackendName(), s.prefix, "log.read", io.ErrUnexpectedEOF)
+	}
 	return data[:n]
 }
 
 func (s *CephStorage) RemoveLog(shard string) {
 	s.ensureOpen()
-	segments, err := listLogSegments(s, shard)
+	segments, manifestExists, err := listLogSegments(s, shard)
 	if err != nil {
 		raisePersistenceFailure(s.BackendName(), s.prefix, "log.remove", err)
+	}
+	if !manifestExists {
+		return
 	}
 	for _, seg := range segments {
 		if err := remoteRetry(func() error { return s.ioctx.Delete(seg.obj) }); err != nil && !errors.Is(err, rados.ErrNotFound) {
 			raisePersistenceFailure(s.BackendName(), s.prefix, "log.remove", err)
 		}
+	}
+	manifestObj := s.obj(fmt.Sprintf("%s.log.manifest", shard))
+	if err := remoteRetry(func() error { return s.ioctx.Delete(manifestObj) }); err != nil && !errors.Is(err, rados.ErrNotFound) {
+		raisePersistenceFailure(s.BackendName(), s.prefix, "log.remove", err)
 	}
 }
 
@@ -468,7 +504,7 @@ type logSegInfo struct {
 	obj string
 }
 
-func listLogSegments(s *CephStorage, shard string) ([]logSegInfo, error) {
+func listLogSegments(s *CephStorage, shard string) ([]logSegInfo, bool, error) {
 	// librados enumeration is possible, but expensive and pool-wide.
 	// For MVP we use a small manifest object per shard.
 	//
@@ -479,17 +515,32 @@ func listLogSegments(s *CephStorage, shard string) ([]logSegInfo, error) {
 
 	manifestObj := s.obj(fmt.Sprintf("%s.log.manifest", shard))
 	stat, err := remoteRetryValue(func() (rados.ObjectStat, error) { return s.ioctx.Stat(manifestObj) })
-	if err != nil || stat.Size == 0 {
-		return nil, fmt.Errorf("no manifest")
+	if err != nil {
+		if errors.Is(err, rados.ErrNotFound) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	if stat.Size == 0 {
+		return nil, true, fmt.Errorf("empty log manifest")
 	}
 	raw := make([]byte, stat.Size)
 	n, err := remoteRetryValue(func() (int, error) { return s.ioctx.Read(manifestObj, raw, 0) })
-	if err != nil || n == 0 {
-		return nil, fmt.Errorf("no manifest")
+	if err != nil {
+		return nil, true, err
+	}
+	if n == 0 {
+		return nil, true, fmt.Errorf("empty log manifest")
+	}
+	if uint64(n) != stat.Size {
+		return nil, true, io.ErrUnexpectedEOF
 	}
 	var segs []uint32
 	if err := json.Unmarshal(raw[:n], &segs); err != nil {
-		return nil, err
+		return nil, true, err
+	}
+	if len(segs) == 0 {
+		return nil, true, fmt.Errorf("log manifest has no segments")
 	}
 
 	out := make([]logSegInfo, 0, len(segs))
@@ -499,7 +550,7 @@ func listLogSegments(s *CephStorage, shard string) ([]logSegInfo, error) {
 			obj: s.obj(fmt.Sprintf("%s.log.%08d", shard, seg)),
 		})
 	}
-	return out, nil
+	return out, true, nil
 }
 
 func writeLogManifest(s *CephStorage, shard string, segs []uint32) error {
@@ -510,10 +561,13 @@ func writeLogManifest(s *CephStorage, shard string, segs []uint32) error {
 
 func openOrCreateCephLogfile(s *CephStorage, shard string) (*CephLogfile, error) {
 	// Load manifest (or create with seg0)
-	segs, _ := listLogSegments(s, shard)
+	segs, manifestExists, err := listLogSegments(s, shard)
+	if err != nil {
+		return nil, err
+	}
 	var seg uint32
 	var all []uint32
-	if len(segs) == 0 {
+	if !manifestExists {
 		seg = 0
 		all = []uint32{0}
 		if err := writeLogManifest(s, shard, all); err != nil {
@@ -534,7 +588,11 @@ func openOrCreateCephLogfile(s *CephStorage, shard string) (*CephLogfile, error)
 	// Determine current size as append offset
 	st, err := remoteRetryValue(func() (rados.ObjectStat, error) { return s.ioctx.Stat(obj) })
 	if err != nil {
-		// object may not exist yet -> create empty using Truncate
+		if !errors.Is(err, rados.ErrNotFound) {
+			return nil, err
+		}
+		// A newly created manifest may name an empty segment whose object does
+		// not exist until its first append.
 		if err := remoteRetry(func() error { return s.ioctx.Truncate(obj, 0) }); err != nil {
 			return nil, err
 		}
@@ -740,9 +798,12 @@ func (w *CephLogfile) flushLocked(force bool) error {
 			return err
 		}
 		// update manifest
-		segs, err := listLogSegments(w.s, w.shard)
+		segs, manifestExists, err := listLogSegments(w.s, w.shard)
 		if err != nil {
 			return err
+		}
+		if !manifestExists {
+			return fmt.Errorf("log manifest disappeared before segment rollover")
 		}
 		var all []uint32
 		for _, si := range segs {
