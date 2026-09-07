@@ -1612,6 +1612,180 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 				(rdf_shared_state_filters state))
 			(+ index 1)))
 ))
+(define rdf_shared_exists_relation (lambda (schema state query vars shared negate)
+	(begin
+		/* EXISTS is a semi-join and NOT EXISTS is its anti-join counterpart.
+		Group the right mappings by their shared domain so neither form changes
+		left multiplicity, then leave physical join choice to the common planner. */
+		(define index (rdf_shared_state_index state))
+		(define input_alias (concat "__rdf_exists_input" index))
+		(define alias (concat "__rdf_exists" index))
+		(define presence "__rdf_exists_present")
+		(define flat_input (and (query_block? query)
+			(equal? (count (filter (qb_sources query) source_is_base_table?))
+				(count (qb_sources query)))))
+		(define input_bindings (if flat_input
+			(reduce vars (lambda (bindings var)
+				(append bindings var (get_assoc (qb_fields query)
+					(rdf_shared_input_field_name var)))) '())
+			(rdf_shared_relation_refs input_alias vars)))
+		(define grouped_bindings (reduce shared (lambda (bindings var)
+			(append bindings var (get_assoc input_bindings var))) '()))
+		(define relation (make_query_block schema
+			(if flat_input (qb_sources query)
+				(list (list input_alias schema query false nil)))
+			(append (rdf_shared_relation_fields grouped_bindings)
+				presence (list (quote aggregate) 1 (quote +) 0))
+			(if flat_input (qb_where query) true) (if (equal? shared '()) nil
+				(extract_assoc grouped_bindings (lambda (_var expr) expr)))
+			nil nil nil nil '() '() '()))
+		(define right (rdf_shared_relation_refs alias shared))
+		(define joins (rdf_shared_join_filters (rdf_shared_state_bindings state) right))
+		(define presence_expr (rdf_shared_column alias presence))
+		(if (equal? shared '())
+			(list
+				(append (rdf_shared_state_sources state)
+					(list alias schema relation false nil))
+				(rdf_shared_state_bindings state)
+				(cons (if negate
+					(list (quote equal?) presence_expr 0)
+					(list (quote >) presence_expr 0))
+					(rdf_shared_state_filters state))
+				(+ index 1))
+			(if negate
+				(list
+					(append (rdf_shared_state_sources state)
+						(list alias schema relation true (rdf_shared_where joins)))
+					(rdf_shared_state_bindings state)
+					(cons (list (quote nil?) presence_expr)
+						(rdf_shared_state_filters state))
+					(+ index 1))
+				(list
+					(append (rdf_shared_state_sources state)
+						(list alias schema relation true (rdf_shared_where joins)))
+					(rdf_shared_state_bindings state)
+					(cons (list (quote not) (list (quote nil?) presence_expr))
+						(rdf_shared_state_filters state))
+					(+ index 1))))
+)))
+(define rdf_shared_exists_direct_safe (lambda (query vars shared)
+	(and (not (equal? shared '()))
+		(and (equal? (count vars) (count shared))
+			(and (equal? (count (filter vars (lambda (var) (rdf_key_in_list shared var))))
+				(count vars))
+				(and (query_block? query)
+					(equal? (count (filter (qb_sources query) source_is_base_table?))
+						(count (qb_sources query)))))))
+))
+(define rdf_shared_exists_direct_relation (lambda (schema state query vars shared negate)
+	(begin
+		(define index (rdf_shared_state_index state))
+		(define alias (concat "__rdf_exists_direct" index))
+		(define right (rdf_shared_relation_refs alias vars))
+		(define joins (rdf_shared_join_filters (rdf_shared_state_bindings state) right))
+		(define flattened_right (reduce vars (lambda (bindings var)
+			(append bindings var (get_assoc (qb_fields query) (rdf_shared_input_field_name var)))) '()))
+		(define flattened_joins (rdf_shared_join_filters
+			(rdf_shared_state_bindings state) flattened_right))
+		(if negate
+			(list
+				(append (rdf_shared_state_sources state)
+					(list alias schema query true (rdf_shared_where joins)))
+				(rdf_shared_state_bindings state)
+				(cons (list (quote nil?) (get_assoc right (car shared)))
+					(rdf_shared_state_filters state))
+				(+ index 1))
+			/* A set-unique positive operand needs no cardinality barrier. Flatten
+				its base sources into the current BGP so the common planner can cost
+				and reorder the complete semi-join as one join graph. */
+			(list
+				(merge (list (rdf_shared_state_sources state) (qb_sources query)))
+				(rdf_shared_state_bindings state)
+				(merge (list (rdf_shared_state_filters state)
+					(list (qb_where query)) flattened_joins))
+				(+ index 1))))
+))
+(define rdf_shared_exists_apply_relation (lambda (schema state query vars shared negate)
+	(if (rdf_shared_exists_direct_safe query vars shared)
+		(rdf_shared_exists_direct_relation schema state query vars shared negate)
+		(rdf_shared_exists_relation schema state query vars shared negate))
+))
+(define rdf_shared_rewrite_source_alias (lambda (expr old_alias new_alias)
+	(match expr
+		((symbol get_column) alias table_icase column column_icase)
+		(if (equal? alias old_alias)
+			(list (quote get_column) new_alias table_icase column column_icase) expr)
+		((quote get_column) alias table_icase column column_icase)
+		(if (equal? alias old_alias)
+			(list (quote get_column) new_alias table_icase column column_icase) expr)
+		(cons head tail) (cons (rdf_shared_rewrite_source_alias head old_alias new_alias)
+			(map tail (lambda (item) (rdf_shared_rewrite_source_alias item old_alias new_alias))))
+		expr)
+))
+(define rdf_shared_exists_union_relation (lambda (schema state branches negate)
+	(begin
+		(define apply_branch (lambda (input branch branch_negate)
+			(match (rdf_shared_conditions_relation schema branch '()) '(query vars)
+				(begin
+					(define shared (filter vars (lambda (var)
+						(rdf_ctx_bound (rdf_shared_state_bindings input) var))))
+					(rdf_shared_exists_apply_relation schema input query vars shared branch_negate)))))
+		(define candidates (map branches (lambda (branch)
+			(match (rdf_shared_conditions_relation schema branch '()) '(query vars)
+				(begin
+					(define shared (filter vars (lambda (var)
+						(rdf_ctx_bound (rdf_shared_state_bindings state) var))))
+					(list query vars shared))))))
+		(define direct_candidates (filter candidates (lambda (candidate)
+			(match candidate '(query vars shared)
+				(and (rdf_shared_exists_direct_safe query vars shared)
+					(equal? (count (qb_sources query)) 1))))))
+		(if (equal? (count direct_candidates) (count candidates))
+			(begin
+				(define first_candidate (car candidates))
+				(define first_query (nth first_candidate 0))
+				(define first_vars (nth first_candidate 1))
+				(define first_src (car (qb_sources first_query)))
+				(define probe_alias (source_alias first_src))
+				(define alternatives (map candidates (lambda (candidate)
+					(begin
+						(define candidate_query (nth candidate 0))
+						(define candidate_src (car (qb_sources candidate_query)))
+						(rdf_shared_rewrite_source_alias (qb_where candidate_query)
+							(source_alias candidate_src) probe_alias)))))
+				(define right (reduce first_vars (lambda (bindings var)
+					(append bindings var (get_assoc (qb_fields first_query)
+						(rdf_shared_input_field_name var)))) '()))
+				(define joins (rdf_shared_join_filters (rdf_shared_state_bindings state) right))
+				(define match_expr (if (equal? (count alternatives) 1) (car alternatives)
+					(cons (quote or) alternatives)))
+				(if negate
+					(list (append (rdf_shared_state_sources state)
+						(list probe_alias (source_schema first_src) (source_relation first_src) true
+							(rdf_shared_where (merge (list (list match_expr) joins)))))
+						(rdf_shared_state_bindings state)
+						(cons (list (quote nil?) (get_assoc right (car (nth first_candidate 2))))
+							(rdf_shared_state_filters state))
+						(+ (rdf_shared_state_index state) 1))
+					(list (append (rdf_shared_state_sources state)
+						(list probe_alias (source_schema first_src) (source_relation first_src) false nil))
+						(rdf_shared_state_bindings state)
+						(merge (list (rdf_shared_state_filters state) (list match_expr) joins))
+						(+ (rdf_shared_state_index state) 1))))
+			(if negate
+			/* NOT EXISTS(A UNION B) = NOT EXISTS(A) AND NOT EXISTS(B). */
+			(reduce branches (lambda (current branch)
+				(apply_branch current branch true)) state)
+			(begin
+				/* EXISTS projects a UNION back onto the current mapping domain. */
+				(define queries (map branches (lambda (branch)
+					(rdf_shared_relation_query schema (apply_branch state branch false)))))
+				(define vars (rdf_shared_relation_vars (rdf_shared_state_bindings state)))
+				(define union_query (make_union_block (quote union_distinct) queries nil nil nil '()))
+				(rdf_shared_attach_relation schema
+					(list '() '() '() (rdf_shared_state_index state))
+					union_query vars false)))))
+))
 (define rdf_shared_path_relation (lambda (schema state subject pred object include_self)
 	(begin
 		(define bindings (rdf_shared_state_bindings state))
@@ -1756,13 +1930,18 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 					(list "__values__" graph graphs) outer_ctx
 					(rdf_shared_attach_relation schema state query vars false))))
 		'("__filter_exists__" negate inner)
-		(match (rdf_shared_conditions_relation schema inner (rdf_shared_state_bindings state)) '(query _vars)
-			(list (rdf_shared_state_sources state) (rdf_shared_state_bindings state)
-				(cons
-					(if negate (list (quote not) (list (quote inner_select_exists) query))
-						(list (quote inner_select_exists) query))
-					(rdf_shared_state_filters state))
-				(rdf_shared_state_index state)))
+		(match inner
+			(list (list "__union__" branches))
+			(rdf_shared_exists_union_relation schema state branches negate)
+			/* Build the EXISTS operand as an independent relation. Correlation is
+				represented explicitly by the semi/anti-join below; carrying outer
+				source references into a derived table would bypass normal name binding
+				and prevents the common planner from reordering the join. */
+			(match (rdf_shared_conditions_relation schema inner '()) '(query vars)
+				(begin
+					(define shared (filter vars (lambda (var)
+						(rdf_ctx_bound (rdf_shared_state_bindings state) var))))
+					(rdf_shared_exists_apply_relation schema state query vars shared negate))))
 		'(subject path object)
 		(match path
 			'("__path_star__" pred)
