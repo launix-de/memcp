@@ -215,6 +215,9 @@ type ColumnStorage interface {
 	// encoding has state worth amortizing across a batch.
 	GetValueMulti(recids []uint32, target []scm.Scmer, stride int)
 	GetValueRange(recid uint32, count uint32, target []scm.Scmer, stride int)
+	GetJITGetValue() scm.JITStorageGetValueFunc
+	GetJITGetValueMulti() scm.JITStorageGetValueMultiFunc
+	GetJITGetValueRange() scm.JITStorageGetValueRangeFunc
 	GetCachedReader() ColumnReader // returns a per-goroutine cached reader for O(1) sequential access
 	String() string                // self-description
 	scm.Sizable
@@ -233,11 +236,114 @@ type ColumnStorage interface {
 	DistinctCount() uint // estimated number of distinct values in this shard column
 
 	// JIT compilation
-	JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc
+	JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc
+	JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, stride, result scm.JITValueDesc) scm.JITValueDesc
+	JITEmitGetValueRange(ctx *scm.JITContext, recid, count, target, stride, result scm.JITValueDesc) scm.JITValueDesc
 
 	// persistency (the callee takes ownership of the file handle, so he can close it immediately or set a finalizer)
 	Serialize(io.Writer)        // write content to Writer
 	Deserialize(io.Reader) uint // read from Reader (note that first byte is already read, so the reader starts at the second byte)
+}
+
+// storageJITFunctions stores typed native readers on the immutable finished
+// storage object. Consumers resolve these getters once before entering their
+// row or batch loop.
+type storageJITFunctions struct {
+	getValue      scm.JITStorageGetValueFunc
+	getValueRange scm.JITStorageGetValueRangeFunc
+	getValueMulti scm.JITStorageGetValueMultiFunc
+}
+
+type storageJITValueProvider interface {
+	GetJITGetValue() scm.JITStorageGetValueFunc
+}
+
+type storageJITRangeProvider interface {
+	GetJITGetValueRange() scm.JITStorageGetValueRangeFunc
+}
+
+type storageJITMultiProvider interface {
+	GetJITGetValueMulti() scm.JITStorageGetValueMultiFunc
+}
+
+// compiledColumnGetValue resolves the native scalar target once, before a row
+// loop. Callers retain the ColumnReader separately for the fallback. This
+// avoids both an escaping Go method-value closure during scan setup and the
+// ColumnReader -> storageJITFunctions -> native-func double dispatch.
+func compiledColumnGetValue(reader ColumnReader) scm.JITStorageGetValueFunc {
+	if provider, ok := reader.(storageJITValueProvider); ok {
+		if compiled := provider.GetJITGetValue(); compiled != nil {
+			return compiled
+		}
+	}
+	return nil
+}
+
+// compiledColumnGetValueRange and compiledColumnGetValueMulti perform the same
+// one-time dispatch for batch consumers. Keeping this decision outside the
+// batch loop matters even though one native call handles many rows: an
+// interface method on storageJITFunctions would otherwise dispatch once to Go
+// merely to dispatch a second time through the stored function value.
+func compiledColumnGetValueRange(reader ColumnReader) scm.JITStorageGetValueRangeFunc {
+	if provider, ok := reader.(storageJITRangeProvider); ok {
+		return provider.GetJITGetValueRange()
+	}
+	return nil
+}
+
+func compiledColumnGetValueMulti(reader ColumnReader) scm.JITStorageGetValueMultiFunc {
+	if provider, ok := reader.(storageJITMultiProvider); ok {
+		return provider.GetJITGetValueMulti()
+	}
+	return nil
+}
+
+func (j *storageJITFunctions) GetJITGetValue() scm.JITStorageGetValueFunc {
+	return j.getValue
+}
+
+func (j *storageJITFunctions) GetJITGetValueRange() scm.JITStorageGetValueRangeFunc {
+	return j.getValueRange
+}
+
+func (j *storageJITFunctions) GetJITGetValueMulti() scm.JITStorageGetValueMultiFunc {
+	return j.getValueMulti
+}
+
+func (j *storageJITFunctions) GetValue(recid uint32) scm.Scmer {
+	return j.getValue(recid)
+}
+
+func (j *storageJITFunctions) GetValueRange(recid uint32, count uint32, target []scm.Scmer, stride int) {
+	j.getValueRange(recid, count, target, stride)
+}
+
+func (j *storageJITFunctions) GetValueMulti(recids []uint32, target []scm.Scmer, stride int) {
+	j.getValueMulti(recids, target, stride)
+}
+
+func (j *storageJITFunctions) reader(fallback ColumnReader) ColumnReader {
+	if j.getValue != nil && j.getValueRange != nil && j.getValueMulti != nil {
+		return j
+	}
+	return fallback
+}
+
+type storageJITEmitter interface {
+	JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc
+	JITEmitGetValueRange(ctx *scm.JITContext, recid, count, target, stride, result scm.JITValueDesc) scm.JITValueDesc
+	JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, stride, result scm.JITValueDesc) scm.JITValueDesc
+}
+
+func (j *storageJITFunctions) finish(owner storageJITEmitter) {
+	if !scm.JITEnabled() {
+		return
+	}
+	j.getValue, j.getValueRange, j.getValueMulti = scm.CompileJITStorageReaders(
+		owner.JITEmit,
+		owner.JITEmitGetValueRange,
+		owner.JITEmitGetValueMulti,
+	)
 }
 
 // storages maps the on-disk magic byte to the Go type used for deserialization.
@@ -1138,8 +1244,8 @@ func Init(en scm.Env) {
 			Params: []*scm.TypeDescriptor{
 				{Kind: "any", Label: "tx", Description: "transaction context to use for visibility; usually ((context \"session\") \"__memcp_tx\")"},
 				{Kind: "table", Label: "table"},
-				{Kind: "list", Label: "accessSchema", Description: "optimizer-compiled static scan access schema", NoEscape: true},
-				{Kind: "list", Label: "accessValues", Description: "flat runtime values referenced by accessSchema", NoEscape: true},
+				{Kind: "list", Label: "accessSchema", Description: "optimizer-compiled static scan access schema", NoEscape: true, CrossGoroutine: true},
+				{Kind: "list", Label: "accessValues", Description: "flat runtime values referenced by accessSchema", NoEscape: true, CrossGoroutine: true},
 				columnList("condition_cols", "columns passed to the selectivity predicate"),
 				scanCallback("condition", "predicate sampled to estimate matching rows", "bool", "true when the sampled row matches"),
 				{Kind: "int", Label: "max_rows"},
@@ -1181,8 +1287,8 @@ func Init(en scm.Env) {
 			Params: []*scm.TypeDescriptor{
 				{Kind: "any", Label: "tx", Description: "transaction context to use for visibility; usually ((context \"session\") \"__memcp_tx\")"},
 				{Kind: "any", Label: "table", Description: "a table, or an existing recset to narrow further"},
-				{Kind: "list", Label: "accessSchema", Description: "optimizer-compiled static scan access schema", NoEscape: true},
-				{Kind: "list", Label: "accessValues", Description: "flat runtime values referenced by accessSchema", NoEscape: true},
+				{Kind: "list", Label: "accessSchema", Description: "optimizer-compiled static scan access schema", NoEscape: true, CrossGoroutine: true},
+				{Kind: "list", Label: "accessValues", Description: "flat runtime values referenced by accessSchema", NoEscape: true, CrossGoroutine: true},
 				columnList("filterColumns", scanFilterColumnsDesc),
 				scanCallback("filter", "lambda function that decides whether a row enters the recset", "bool", "true when the row belongs in the recset"),
 			},
@@ -1368,8 +1474,8 @@ func Init(en scm.Env) {
 			Params: []*scm.TypeDescriptor{
 				{Kind: "any", Label: "tx", Description: "transaction context to use for visibility; usually ((context \"session\") \"__memcp_tx\")"},
 				{Kind: "table|list|recset", Label: "table"},
-				{Kind: "list", Label: "accessSchema", Description: "optimizer-compiled static scan access schema", NoEscape: true},
-				{Kind: "list", Label: "accessValues", Description: "flat runtime values referenced by accessSchema", NoEscape: true},
+				{Kind: "list", Label: "accessSchema", Description: "optimizer-compiled static scan access schema", NoEscape: true, CrossGoroutine: true},
+				{Kind: "list", Label: "accessValues", Description: "flat runtime values referenced by accessSchema", NoEscape: true, CrossGoroutine: true},
 				columnList("filterColumns", scanFilterColumnsDesc),
 				scanCallback("filter", "lambda function that decides whether a row exists", "bool", "true when the row satisfies the existence test"),
 			},
@@ -1402,8 +1508,8 @@ func Init(en scm.Env) {
 			Params: []*scm.TypeDescriptor{
 				{Kind: "any", Label: "tx", Description: "transaction context used for visibility"},
 				{Kind: "table", Label: "table"},
-				{Kind: "list", NoEscape: true, Label: "schema", Description: "static scan_access schema containing access, projection, and consumer layout"},
-				{Kind: "list", NoEscape: true, Label: "values", Description: "flat runtime match values followed by an optional mapper"},
+				{Kind: "list", NoEscape: true, CrossGoroutine: true, Label: "schema", Description: "static scan_access schema containing access, projection, and consumer layout"},
+				{Kind: "list", NoEscape: true, CrossGoroutine: true, Label: "values", Description: "flat runtime match values followed by an optional mapper"},
 			},
 			Return: &scm.TypeDescriptor{Kind: "any", Description: "projected scalar, mapped scalar, or boolean existence result"},
 		},
@@ -1497,8 +1603,8 @@ func Init(en scm.Env) {
 			Params: []*scm.TypeDescriptor{
 				{Kind: "any", Label: "tx", Description: "transaction context to use for visibility and mutations; usually ((context \"session\") \"__memcp_tx\")"},
 				{Kind: "table|list|recset", Label: "table", Description: "table handle, query-local recset, or a list for temporary data"},
-				{Kind: "list", Label: "accessSchema", Description: "optimizer-compiled static scan access schema", NoEscape: true},
-				{Kind: "list", Label: "accessValues", Description: "flat runtime values referenced by accessSchema", NoEscape: true},
+				{Kind: "list", Label: "accessSchema", Description: "optimizer-compiled static scan access schema", NoEscape: true, CrossGoroutine: true},
+				{Kind: "list", Label: "accessValues", Description: "flat runtime values referenced by accessSchema", NoEscape: true, CrossGoroutine: true},
 				columnList("filterColumns", scanFilterColumnsDesc),
 				scanCallback("filter", "lambda function that decides whether a dataset is passed to the map phase. Equality and range comparisons may be translated into indexed scans", "bool", "true when the row proceeds to map"),
 				columnList("mapReduceColumns", scanMapColumnsDesc),
@@ -1609,8 +1715,8 @@ func Init(en scm.Env) {
 			Params: []*scm.TypeDescriptor{
 				{Kind: "any", Label: "tx", Description: "transaction context to use for visibility and mutations; usually ((context \"session\") \"__memcp_tx\")"},
 				{Kind: "table|list|recset", Label: "table", Description: "table handle, query-local recset, or a list for temporary data"},
-				{Kind: "list", Label: "accessSchema", Description: "optimizer-compiled static scan access schema with optional batch slots", NoEscape: true},
-				{Kind: "list", Label: "accessValues", Description: "flat runtime values referenced by accessSchema", NoEscape: true},
+				{Kind: "list", Label: "accessSchema", Description: "optimizer-compiled static scan access schema with optional batch slots", NoEscape: true, CrossGoroutine: true},
+				{Kind: "list", Label: "accessValues", Description: "flat runtime values referenced by accessSchema", NoEscape: true, CrossGoroutine: true},
 				columnList("filterColumns", "columns passed to filter; #0, #1, ... address batchdata slots"),
 				scanCallback("filter", "lambda function that decides whether a dataset is passed to the map phase", "bool", "true when this table row and batch row proceed to map"),
 				columnList("mapReduceColumns", "columns passed after the accumulator; #0, #1, ... address batchdata slots"),
@@ -1669,8 +1775,8 @@ func Init(en scm.Env) {
 			Params: []*scm.TypeDescriptor{
 				{Kind: "any", Label: "tx", Description: "transaction context used consistently by the candidate scan and every batch filter operation; usually ((context \"session\") \"__memcp_tx\")"},
 				{Kind: "table|recset", Label: "table_or_recset", Description: "base table or complete existing query-local RecSet from which ordered candidate batches are drawn"},
-				{Kind: "list", Label: "accessSchema", Description: "optimizer-compiled static scan access schema", NoEscape: true},
-				{Kind: "list", Label: "accessValues", Description: "flat runtime values referenced by accessSchema", NoEscape: true},
+				{Kind: "list", Label: "accessSchema", Description: "optimizer-compiled static scan access schema", NoEscape: true, CrossGoroutine: true},
+				{Kind: "list", Label: "accessValues", Description: "flat runtime values referenced by accessSchema", NoEscape: true, CrossGoroutine: true},
 				{Kind: "func", NoEscape: true, Label: "batchFilter", Description: "function (lambda (input_recset) accepted_recset). It may naively narrow input_recset with scan_recset, or run arbitrary RecSet projections/search/ACL operations and project back. It must return a same-table, same-transaction subset of input_recset", Params: []*scm.TypeDescriptor{{Kind: "recset", Label: "input_recset"}}, Return: &scm.TypeDescriptor{Kind: "recset"}},
 				sortColumnList("sortcols", "same as scan_order: columns or computed sort functions. Include a unique tie-breaker for a total repeatable order; use an empty list for greedy unsorted collection"),
 				sortDirectionList("sortdirs", "same as scan_order: one relation per sort column; must also be empty when sortcols is empty"),
@@ -1842,8 +1948,8 @@ func Init(en scm.Env) {
 			Params: []*scm.TypeDescriptor{
 				{Kind: "any", Label: "tx", Description: "transaction context to use for visibility and mutations; usually ((context \"session\") \"__memcp_tx\")"},
 				{Kind: "table|list|recset", Label: "table", Description: "table handle, query-local RecSet, or a list for temporary data"},
-				{Kind: "list", Label: "accessSchema", Description: "optimizer-compiled static scan access schema", NoEscape: true},
-				{Kind: "list", Label: "accessValues", Description: "flat runtime values referenced by accessSchema", NoEscape: true},
+				{Kind: "list", Label: "accessSchema", Description: "optimizer-compiled static scan access schema", NoEscape: true, CrossGoroutine: true},
+				{Kind: "list", Label: "accessValues", Description: "flat runtime values referenced by accessSchema", NoEscape: true, CrossGoroutine: true},
 				columnList("filterColumns", scanFilterColumnsDesc),
 				scanCallback("filter", "lambda function that decides whether a dataset is passed to the map phase. Equality and range comparisons may be translated into indexed scans", "bool", "true when the row proceeds to ordering and map"),
 				sortColumnList("sortcols", "columns used for ordering; each entry corresponds to one relation in sortdirs"),
@@ -1952,8 +2058,8 @@ func Init(en scm.Env) {
 			Params: []*scm.TypeDescriptor{
 				{Kind: "any", Label: "tx", Description: "transaction context"},
 				{Kind: "list", Label: "tables", Description: "scan sources; all per-table lists must have this length", Element: &scm.TypeDescriptor{Kind: "table|recset", Label: "source", Description: "base table or query-local record set for one input stream"}},
-				{Kind: "list", Label: "accessSchemas", Description: "optimizer-compiled static scan access schemas, one per table", NoEscape: true},
-				{Kind: "list", Label: "accessValues", Description: "flat runtime values shared by accessSchemas", NoEscape: true},
+				{Kind: "list", Label: "accessSchemas", Description: "optimizer-compiled static scan access schemas, one per table", NoEscape: true, CrossGoroutine: true},
+				{Kind: "list", Label: "accessValues", Description: "flat runtime values shared by accessSchemas", NoEscape: true, CrossGoroutine: true},
 				{Kind: "list", Label: "filterColumns", Description: "filter column lists, one per table", Element: &scm.TypeDescriptor{Kind: "list", Label: "table filter columns", Description: "columns supplied to the matching filterFns entry", Element: &scm.TypeDescriptor{Kind: "string", Label: "column", Description: "column name in the corresponding table"}}},
 				{Kind: "list", Label: "filterFns", Description: "filter lambdas, one per table", Element: scanCallback("table filter", "predicate for the corresponding table and filterColumns entry", "bool", "true when the row enters that table's ordered stream")},
 				{Kind: "list", Label: "sortcols", Description: "sort column lists, one per table; every inner list must match sortdirs in length and result domains", Element: sortColumnList("table sort columns", "sort expressions for the corresponding table")},

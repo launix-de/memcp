@@ -3096,8 +3096,10 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 	}
 
 	// !list rewrite: when an argument is (list expr...) passed to a function
-	// whose parameter is annotated NoEscape:true, replace with (!list start count expr...)
-	// so the list is stack-allocated into VarsNumbered instead of heap-allocated.
+	// whose parameter is annotated NoEscape:true and remains on this goroutine,
+	// replace it with (!list start count expr...) so the list is stack-allocated
+	// into VarsNumbered instead of heap-allocated. A pointer into a movable Go
+	// stack must never be lent to another goroutine, even for a synchronous call.
 	if !allConstArgs && ome.nextSlot != nil {
 		if decl := callDecl; decl != nil && decl.Type != nil && len(decl.Type.Params) > 0 {
 			for i := 1; i < len(v); i++ {
@@ -3115,8 +3117,8 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 					continue
 				}
 				ti := decl.Type.Params[paramIdx]
-				if ti == nil || !ti.NoEscape {
-					continue // unknown or escaping parameter
+				if ti == nil || !ti.NoEscape || ti.CrossGoroutine {
+					continue // unknown, escaping, or cross-goroutine parameter
 				}
 				// Check if this argument is a (list ...) call
 				if inner, ok := scmerSlice(v[i]); ok && len(inner) >= 1 {

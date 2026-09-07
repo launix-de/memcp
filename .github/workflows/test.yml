@@ -122,11 +122,13 @@ jobs:
 
       - name: Start S3-compatible storage
         run: |
+          docker pull minio/minio:latest
+          docker image inspect --format='Testing {{index .RepoDigests 0}}' minio/minio:latest
           docker run --detach --name memcp-minio \
             --publish 9000:9000 \
             --env MINIO_ROOT_USER \
             --env MINIO_ROOT_PASSWORD \
-            minio/minio:RELEASE.2025-09-07T16-13-09Z server /data
+            minio/minio:latest server /data
           for attempt in $(seq 1 60); do
             if curl --fail --silent http://127.0.0.1:9000/minio/health/ready >/dev/null; then
               exit 0

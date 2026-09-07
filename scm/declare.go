@@ -90,8 +90,9 @@ func (d *Declaration) MaxParams() int {
 // Uses pointers throughout — nil means "unknown / don't care" (conservative).
 type TypeDescriptor struct {
 	Kind           string                     // "any"|"string"|"number"|"int"|"bool"|"nil"|"symbol"|"func"|"list"|"assoc"
-	NoEscape       bool                       // true = value will NOT outlive its scope (safe for stack alloc); default false = may escape (conservative)
+	NoEscape       bool                       // true = value will NOT outlive the call; stack allocation also requires goroutine locality
 	SameGoroutine  bool                       // for NoEscape func parameters: callback runs synchronously on the caller goroutine
+	CrossGoroutine bool                       // for NoEscape values: callee may borrow the value from another goroutine before returning
 	Transfer       bool                       // callee receives ownership, can mutate
 	CallsOnce      bool                       // for func params: callback is invoked at most once per call; default false = unknown or repeated
 	Const          bool                       // value is a compile-time constant; for func: safe to constant-fold
@@ -118,6 +119,11 @@ type TypeDescriptor struct {
 	// calls as recursive lambda emitters. It is capability metadata, not a
 	// runtime permission gate.
 	JITInlineCallbacks bool
+	// JITNativeFP opts this generated emitter into the typed floating-point
+	// register contract. The default deliberately preserves the generic Scmer
+	// lowering; declarations may enable this only when their source function
+	// proves that float values cannot change representation inside the loop.
+	JITNativeFP bool
 	// JITInlineCost is jitgen's architecture-neutral estimate of the emitted
 	// builtin body: the builtin's SSA instructions plus recursively inlined Go
 	// helpers. Zero denotes a handwritten emitter without generated cost data;

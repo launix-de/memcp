@@ -207,7 +207,17 @@ func (t *table) executeScanLookup(currentTx *TxContext, plan scanLookupPlan) scm
 
 type scanLookupMapReader struct {
 	reader   ColumnReader
+	compiled scm.JITStorageGetValueFunc
 	computed bool
+}
+
+type scanLookupValueReader struct {
+	reader   ColumnReader
+	compiled scm.JITStorageGetValueFunc
+}
+
+func newScanLookupValueReader(reader ColumnReader) scanLookupValueReader {
+	return scanLookupValueReader{reader: reader, compiled: compiledColumnGetValue(reader)}
 }
 
 // scanLookup probes an exact index prefix. Omitting resultCol turns it into a
@@ -323,6 +333,7 @@ func (t *storageShard) scanLookupMapOne(access scanAccess, mapCols []string, cur
 	lookupCol := access.boundaryColumn(0)
 	lookupValue := access.boundValue(0, false)
 	lookupReader := newCachedColumnReaderTx(t.getColumnStorageOrPanic(lookupCol, false, currentTx), currentTx)
+	lookupGetValue := compiledColumnGetValue(lookupReader)
 	var fixedMapReaders [8]scanLookupMapReader
 	mapReaders := fixedMapReaders[:]
 	if len(mapCols) <= len(fixedMapReaders) {
@@ -343,7 +354,11 @@ func (t *storageShard) scanLookupMapOne(access scanAccess, mapCols []string, cur
 		for _, recid := range batch {
 			var actual scm.Scmer
 			if recid < mainCount {
-				actual = lookupReader.GetValue(recid)
+				if lookupGetValue != nil {
+					actual = lookupGetValue(recid)
+				} else {
+					actual = lookupReader.GetValue(recid)
+				}
 			} else {
 				actual = t.getDelta(int(recid-mainCount), lookupCol)
 			}
@@ -374,6 +389,7 @@ func (t *storageShard) prepareScanLookupMapReaders(mapCols []string, readers []s
 	for i, col := range mapCols {
 		storage := t.getColumnStorageOrPanic(col, false, currentTx)
 		readers[i].reader = newCachedColumnReaderTx(storage, currentTx)
+		readers[i].compiled = compiledColumnGetValue(readers[i].reader)
 		_, readers[i].computed = storage.(*StorageComputeProxy)
 	}
 }
@@ -382,7 +398,11 @@ func (t *storageShard) scanLookupMapValues(recid, mainCount uint32, mapCols []st
 	values := make([]scm.Scmer, len(mapCols))
 	for i, col := range mapCols {
 		if recid < mainCount || readers[i].computed {
-			values[i] = readers[i].reader.GetValue(recid)
+			if readers[i].compiled != nil {
+				values[i] = readers[i].compiled(recid)
+			} else {
+				values[i] = readers[i].reader.GetValue(recid)
+			}
 		} else {
 			values[i] = t.getDelta(int(recid-mainCount), col)
 		}
@@ -458,11 +478,14 @@ func (t *storageShard) scanLookupOne(access scanAccess, resultCol string, return
 	lookupValue := access.boundValue(0, false)
 	lookupStorage := t.getColumnStorageOrPanic(lookupCol, false, currentTx)
 	lookupReader := newCachedColumnReaderTx(lookupStorage, currentTx)
+	lookupGetValue := compiledColumnGetValue(lookupReader)
 	var resultReader ColumnReader
+	var resultGetValue scm.JITStorageGetValueFunc
 	resultComputed := false
 	if returnValue {
 		resultStorage := t.getColumnStorageOrPanic(resultCol, false, currentTx)
 		resultReader = newCachedColumnReaderTx(resultStorage, currentTx)
+		resultGetValue = compiledColumnGetValue(resultReader)
 		_, resultComputed = resultStorage.(*StorageComputeProxy)
 	}
 
@@ -478,7 +501,11 @@ func (t *storageShard) scanLookupOne(access scanAccess, resultCol string, return
 		for _, recid := range batch {
 			var actual scm.Scmer
 			if recid < mainCount {
-				actual = lookupReader.GetValue(recid)
+				if lookupGetValue != nil {
+					actual = lookupGetValue(recid)
+				} else {
+					actual = lookupReader.GetValue(recid)
+				}
 			} else {
 				actual = t.getDelta(int(recid-mainCount), lookupCol)
 			}
@@ -496,7 +523,11 @@ func (t *storageShard) scanLookupOne(access scanAccess, resultCol string, return
 			matches++
 			if matches == 1 && returnValue {
 				if recid < mainCount || resultComputed {
-					result = resultReader.GetValue(recid)
+					if resultGetValue != nil {
+						result = resultGetValue(recid)
+					} else {
+						result = resultReader.GetValue(recid)
+					}
 				} else {
 					result = t.getDelta(int(recid-mainCount), resultCol)
 				}
@@ -593,21 +624,21 @@ func (t *table) scanLookupMany(currentTx *TxContext, access scanAccess, resultCo
 func (t *storageShard) scanLookupMany(access scanAccess, resultCol string, returnValue bool, currentTx *TxContext, stop *atomic.Bool) (scm.Scmer, int) {
 	t.ensureLoaded()
 	t.ensureMainCount(false)
-	var fixedLookupReaders [8]ColumnReader
+	var fixedLookupReaders [8]scanLookupValueReader
 	lookupReaders := fixedLookupReaders[:]
 	if access.len() <= len(fixedLookupReaders) {
 		lookupReaders = lookupReaders[:access.len()]
 	} else {
-		lookupReaders = make([]ColumnReader, access.len())
+		lookupReaders = make([]scanLookupValueReader, access.len())
 	}
 	for i := range lookupReaders {
-		lookupReaders[i] = newCachedColumnReaderTx(t.getColumnStorageOrPanic(access.boundaryColumn(i), false, currentTx), currentTx)
+		lookupReaders[i] = newScanLookupValueReader(newCachedColumnReaderTx(t.getColumnStorageOrPanic(access.boundaryColumn(i), false, currentTx), currentTx))
 	}
-	var resultReader ColumnReader
+	var resultReader scanLookupValueReader
 	resultComputed := false
 	if returnValue {
 		resultStorage := t.getColumnStorageOrPanic(resultCol, false, currentTx)
-		resultReader = newCachedColumnReaderTx(resultStorage, currentTx)
+		resultReader = newScanLookupValueReader(newCachedColumnReaderTx(resultStorage, currentTx))
 		_, resultComputed = resultStorage.(*StorageComputeProxy)
 	}
 
@@ -627,7 +658,11 @@ func (t *storageShard) scanLookupMany(access scanAccess, resultCol string, retur
 			for i := range lookupReaders {
 				var actual scm.Scmer
 				if recid < mainCount {
-					actual = lookupReaders[i].GetValue(recid)
+					if lookupReaders[i].compiled != nil {
+						actual = lookupReaders[i].compiled(recid)
+					} else {
+						actual = lookupReaders[i].reader.GetValue(recid)
+					}
 				} else {
 					actual = t.getDelta(int(recid-mainCount), access.boundaryColumn(i))
 				}
@@ -649,7 +684,11 @@ func (t *storageShard) scanLookupMany(access scanAccess, resultCol string, retur
 			matches++
 			if matches == 1 && returnValue {
 				if recid < mainCount || resultComputed {
-					result = resultReader.GetValue(recid)
+					if resultReader.compiled != nil {
+						result = resultReader.compiled(recid)
+					} else {
+						result = resultReader.reader.GetValue(recid)
+					}
 				} else {
 					result = t.getDelta(int(recid-mainCount), resultCol)
 				}
@@ -719,15 +758,15 @@ func (t *table) scanLookupMapMany(currentTx *TxContext, access scanAccess, mapCo
 func (t *storageShard) scanLookupMapMany(access scanAccess, mapCols []string, currentTx *TxContext, stop *atomic.Bool) ([]scm.Scmer, int) {
 	t.ensureLoaded()
 	t.ensureMainCount(false)
-	var fixedLookupReaders [8]ColumnReader
+	var fixedLookupReaders [8]scanLookupValueReader
 	lookupReaders := fixedLookupReaders[:]
 	if access.len() <= len(fixedLookupReaders) {
 		lookupReaders = lookupReaders[:access.len()]
 	} else {
-		lookupReaders = make([]ColumnReader, access.len())
+		lookupReaders = make([]scanLookupValueReader, access.len())
 	}
 	for i := range lookupReaders {
-		lookupReaders[i] = newCachedColumnReaderTx(t.getColumnStorageOrPanic(access.boundaryColumn(i), false, currentTx), currentTx)
+		lookupReaders[i] = newScanLookupValueReader(newCachedColumnReaderTx(t.getColumnStorageOrPanic(access.boundaryColumn(i), false, currentTx), currentTx))
 	}
 	var fixedMapReaders [8]scanLookupMapReader
 	mapReaders := fixedMapReaders[:]
@@ -754,7 +793,11 @@ func (t *storageShard) scanLookupMapMany(access scanAccess, mapCols []string, cu
 			for i := range lookupReaders {
 				var actual scm.Scmer
 				if recid < mainCount {
-					actual = lookupReaders[i].GetValue(recid)
+					if lookupReaders[i].compiled != nil {
+						actual = lookupReaders[i].compiled(recid)
+					} else {
+						actual = lookupReaders[i].reader.GetValue(recid)
+					}
 				} else {
 					actual = t.getDelta(int(recid-mainCount), access.boundaryColumn(i))
 				}

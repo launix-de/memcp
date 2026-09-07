@@ -222,11 +222,10 @@ func emitFusedLoop(ctx *scm.JITContext, mainCols []ColumnStorage, mapProc, reduc
 	colDescs := make([]scm.JITValueDesc, len(mainCols))
 	ctx.ProtectReg(recidReg)
 	for i, col := range mainCols {
-		thisptr := scm.JITValueDesc{Loc: scm.LocImm, Imm: scm.NewInt(extractColDataPtr(col))}
 		idxCopy := ctx.AllocReg()
 		ctx.EmitMovRegReg(idxCopy, recidReg)
 		idxDesc := scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: idxCopy}
-		colDescs[i] = col.JITEmit(ctx, thisptr, idxDesc, scm.JITValueDesc{Loc: scm.LocAny})
+		colDescs[i] = col.JITEmit(ctx, idxDesc, scm.JITValueDesc{Loc: scm.LocAny})
 	}
 	ctx.UnprotectReg(recidReg)
 	ctx.FreeReg(recidReg)

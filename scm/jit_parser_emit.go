@@ -168,6 +168,20 @@ type jitParserEmitter struct {
 	// correct, up to date results - only the redundant pre-check here is
 	// skipped, matching go-packrat's KleeneParser.NoMemo contract.
 	noMemoDepth int
+	// currentRule is the rule whose body is currently being emitted (set by the
+	// per-rule loop in jitEmitParserProgramCore). currentRuleIsLadderLevel is
+	// true when that rule is an interior precedence-ladder level: its own refs
+	// to the next level stay on the plain path so the slow (operator) path is
+	// exactly the original per-level machinery, with no added speculation.
+	currentRule              int
+	currentRuleIsLadderLevel bool
+	// repeatItemDepth > 0 while emitting the item (children[0]) of a * / +
+	// repeat. The ladder speculative descent is only worth its emitted bulk in
+	// a value-list position - `(* sql_expression ",")` in INSERT ... VALUES, IN
+	// lists, function argument lists - where bare literals dominate; elsewhere
+	// (a WHERE predicate, a lone DEFAULT expr) it is neutral at best and only
+	// grows parse_sql, shifting the JIT arena layout.
+	repeatItemDepth int
 }
 
 func (emitter *jitParserEmitter) statePointer() JITValueDesc {
@@ -282,8 +296,8 @@ func (emitter *jitParserEmitter) pushCheckpoint() {
 	ctx.EnsureDesc(&sp)
 	ctx.EnsureDesc(&position)
 	slow, done := ctx.ReserveLabel(), ctx.ReserveLabel()
-	ctx.EmitMovRegMem(lenReg, sp.Reg, cpOff+8)  // checkpoints.Len
-	ctx.EmitMovRegMem(tmp, sp.Reg, cpOff+16)    // checkpoints.Cap
+	ctx.EmitMovRegMem(lenReg, sp.Reg, cpOff+8) // checkpoints.Len
+	ctx.EmitMovRegMem(tmp, sp.Reg, cpOff+16)   // checkpoints.Cap
 	ctx.EmitCmpInt64(lenReg, tmp)
 	ctx.EmitJump(CondUnsignedAboveOrEqual, slow)
 
@@ -372,8 +386,8 @@ func (emitter *jitParserEmitter) restoreCheckpoint() {
 	ctx.EmitAddInt64(elem, a)
 
 	slow, done := ctx.ReserveLabel(), ctx.ReserveLabel()
-	ctx.EmitMovRegMem(a, sp.Reg, mutOff+8)      // mutations.Len
-	ctx.EmitMovRegMem(b, elem, cpMutationLen)   // checkpoint.mutationLen
+	ctx.EmitMovRegMem(a, sp.Reg, mutOff+8)    // mutations.Len
+	ctx.EmitMovRegMem(b, elem, cpMutationLen) // checkpoint.mutationLen
 	ctx.EmitCmpInt64(a, b)
 	ctx.EmitJump(CondNotEqual, slow)
 
@@ -495,7 +509,9 @@ func (emitter *jitParserEmitter) emitTerminal(node *jitParserNode, rule int, suc
 		skipped := emitter.ctx.ReserveLabel()
 		emitter.emitSkip(rule, skipped)
 		emitter.ctx.MarkLabel(skipped)
-		emitter.atBreak(failure)
+		if !node.skipBreakBefore {
+			emitter.atBreak(failure)
+		}
 	}
 	emitter.ctx.MarkLabel(matchStart)
 	matched := emitter.ctx.ReserveLabel()
@@ -505,7 +521,7 @@ func (emitter *jitParserEmitter) emitTerminal(node *jitParserNode, rule int, suc
 	jitEmitNativeRegex(emitter.ctx, node.regex, input, captures, matched, failed, failed, nil, false)
 	emitter.ctx.MarkLabel(matched)
 	emitter.advanceBy(captures[0])
-	if node.skipWS {
+	if node.skipWS && !node.skipBreakAfter {
 		emitter.atBreak(failure)
 	}
 	if !node.ignoreResult {
@@ -599,6 +615,126 @@ func (emitter *jitParserEmitter) emitPeekByte() JITValueDesc {
 	peek.Type = tagInt
 	emitter.ctx.FreeDesc(&position)
 	return peek
+}
+
+// jitParserLadderTerminatorNative returns 1 when the next non-whitespace byte at
+// position is a value/expression terminator ( "," ")" ";" or end of input ) that
+// no sql_expression precedence level can consume as a continuation. The
+// precedence-ladder speculative descent commits its bare-primary result only in
+// that case; any other following byte (an operator, or an identifier that might
+// be a keyword operator such as OR / AND / IN / IS / LIKE / BETWEEN) returns 0
+// and the caller re-runs the full per-level ladder.
+func jitParserLadderTerminatorNative(input Scmer, position int64) int64 {
+	text := input.String()
+	n := int64(len(text))
+	for position >= 0 && position < n {
+		c := text[position]
+		if c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f' {
+			position++
+			continue
+		}
+		if c == ',' || c == ')' || c == ';' {
+			return 1
+		}
+		return 0
+	}
+	return 1 // end of input
+}
+
+// jitParserLadderLiteralAheadNative reports what kind of bare literal starts at
+// the next non-whitespace byte: 1 = digit (number), 2 = single-quote (string),
+// 0 = anything else. Only 1/2 make the precedence-ladder speculative descent
+// worthwhile - for a "(" group, an identifier/keyword or a unary "-" the descent
+// would do real work only to be discarded when an operator follows, so the
+// caller goes straight to the full per-level machinery.
+func jitParserLadderLiteralAheadNative(input Scmer, position int64) int64 {
+	text := input.String()
+	n := int64(len(text))
+	for position >= 0 && position < n {
+		c := text[position]
+		if c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f' {
+			position++
+			continue
+		}
+		if c >= '0' && c <= '9' {
+			return 1
+		}
+		if c == '\'' {
+			return 2
+		}
+		return 0
+	}
+	return 0
+}
+
+// emitLadderFastPath lowers a reference to an interior precedence-ladder level
+// (node.rule) as: if a bare literal is ahead, push a checkpoint and match one
+// of the primary's direct-return literal leaves (sql_number / sql_string /
+// sql_hex_literal - regex + one action call, NO rule frame, NO memo); if it
+// matched and nothing an operator level could consume follows, commit and
+// return it as this level's result (every rule between the level and the
+// primary is identity when no operator follows its first operand). Otherwise
+// restore and fall through to the full per-level machinery unchanged.
+func (emitter *jitParserEmitter) emitLadderFastPath(node *jitParserNode, target int, success, failure JITLabel) {
+	ctx := emitter.ctx
+	slow := ctx.ReserveLabel()
+	descentOK := ctx.ReserveLabel()
+	descentFail := ctx.ReserveLabel()
+	bail := ctx.ReserveLabel()
+
+	// Only speculate when a bare literal is actually ahead (1 = digit, 2 =
+	// quote) - otherwise the descent parses a "(" group / column reference just
+	// to discard it.
+	gatePos := emitter.loadPosition()
+	lit := ctx.EmitGoCallScalar(GoFuncAddr(jitParserLadderLiteralAheadNative), []JITValueDesc{emitter.input, gatePos}, 1)
+	lit.Type = tagInt
+	ctx.FreeDesc(&gatePos)
+	ctx.EmitCmpRegImm32(lit.Reg, 0)
+	ctx.EmitJump(CondEqual, slow)
+
+	emitter.pushCheckpoint()
+	numLeaf, strLeaf := emitter.program.ladderPrimaryLeaves[target][0], emitter.program.ladderPrimaryLeaves[target][1]
+	viaPrimary := ctx.ReserveLabel()
+	// gate class 1 = digit -> number leaf; 2 = quote -> string leaf. A class
+	// with no direct-return leaf falls to the memoized primary rule, which
+	// carries the non-leaf productions for that literal kind.
+	if numLeaf >= 0 {
+		afterNum := ctx.ReserveLabel()
+		ctx.EmitCmpRegImm32(lit.Reg, 1)
+		ctx.EmitJump(CondNotEqual, afterNum)
+		emitter.emitDirectReturnLeaf(emitter.program.rules[numLeaf].directReturn, descentOK, descentFail)
+		ctx.MarkLabel(afterNum)
+	}
+	if strLeaf >= 0 {
+		ctx.EmitCmpRegImm32(lit.Reg, 2)
+		ctx.EmitJump(CondNotEqual, viaPrimary)
+		emitter.emitDirectReturnLeaf(emitter.program.rules[strLeaf].directReturn, descentOK, descentFail)
+	}
+	ctx.MarkLabel(viaPrimary)
+	ctx.FreeDesc(&lit)
+	emitter.emitRuleRefDirect(&jitParserNode{kind: jitParserRuleRef, rule: target}, descentOK, descentFail)
+
+	ctx.MarkLabel(descentFail)
+	emitter.restoreCheckpoint()
+	ctx.EmitJmp(slow)
+
+	ctx.MarkLabel(descentOK)
+	position := emitter.loadPosition()
+	term := ctx.EmitGoCallScalar(GoFuncAddr(jitParserLadderTerminatorNative), []JITValueDesc{emitter.input, position}, 1)
+	term.Type = tagInt
+	ctx.FreeDesc(&position)
+	ctx.EmitCmpRegImm32(term.Reg, 0)
+	ctx.FreeDesc(&term)
+	ctx.EmitJump(CondEqual, bail)
+	emitter.commitCheckpoint()
+	ctx.EmitJmp(success)
+
+	ctx.MarkLabel(bail)
+	emitter.discardValue()
+	emitter.restoreCheckpoint()
+
+	ctx.MarkLabel(slow)
+	emitter.emitRuleRefDirect(node, success, failure)
 }
 
 // emitChoiceDispatch reads the leading byte once and jumps to the small cascade
@@ -749,6 +885,19 @@ func (emitter *jitParserEmitter) emitDirectReturnLeaf(p *directReturnPlan, succe
 }
 
 func (emitter *jitParserEmitter) emitRuleRef(node *jitParserNode, success, failure JITLabel) {
+	if emitter.program.ladderFastPath != nil && !node.ignoreResult &&
+		!emitter.currentRuleIsLadderLevel && emitter.repeatItemDepth > 0 {
+		if target, ok := emitter.program.ladderFastPath[node.rule]; ok && target != node.rule {
+			emitter.emitLadderFastPath(node, target, success, failure)
+			return
+		}
+	}
+	emitter.emitRuleRefDirect(node, success, failure)
+}
+
+// emitRuleRefDirect is emitRuleRef without the precedence-ladder speculative
+// descent - the plain memo-checked / lexical / direct-return dispatch.
+func (emitter *jitParserEmitter) emitRuleRefDirect(node *jitParserNode, success, failure JITLabel) {
 	if p := emitter.program.rules[node.rule].directReturn; p != nil && !node.ignoreResult {
 		emitter.emitDirectReturnLeaf(p, success, failure)
 		return
@@ -1103,6 +1252,15 @@ func (emitter *jitParserEmitter) emitMemoFenceExit() {
 	emitter.emitMemoFencePop()
 }
 
+// emitRepeatItem emits a repeat's item production (children[0]) with
+// repeatItemDepth raised, so a ladder reference inside it takes the speculative
+// descent (value-list position). The separator (children[1]) is emitted plainly.
+func (emitter *jitParserEmitter) emitRepeatItem(item *jitParserNode, rule int, success, failure JITLabel) {
+	emitter.repeatItemDepth++
+	emitter.emitNode(item, rule, success, failure)
+	emitter.repeatItemDepth--
+}
+
 func (emitter *jitParserEmitter) emitRepeat(node *jitParserNode, rule int, success, failure JITLabel) {
 	if node.accumulate {
 		emitter.emitRepeatAccumulate(node, rule, success, failure)
@@ -1121,7 +1279,7 @@ func (emitter *jitParserEmitter) emitRepeat(node *jitParserNode, rule int, succe
 	}
 	firstAccepted, firstRejected := emitter.ctx.ReserveLabel(), emitter.ctx.ReserveLabel()
 	emitter.pushCheckpoint()
-	emitter.emitNode(node.children[0], rule, firstAccepted, firstRejected)
+	emitter.emitRepeatItem(node.children[0], rule, firstAccepted, firstRejected)
 	emitter.ctx.MarkLabel(firstAccepted)
 	position := emitter.loadPosition()
 	progress := emitter.emitStateScalar(jitParserCommitProgressNative, 1, position)
@@ -1151,7 +1309,7 @@ func (emitter *jitParserEmitter) emitRepeat(node *jitParserNode, rule int, succe
 	separatorAccepted, iterationAccepted, iterationRejected := emitter.ctx.ReserveLabel(), emitter.ctx.ReserveLabel(), emitter.ctx.ReserveLabel()
 	emitter.emitNode(node.children[1], rule, separatorAccepted, iterationRejected)
 	emitter.ctx.MarkLabel(separatorAccepted)
-	emitter.emitNode(node.children[0], rule, iterationAccepted, iterationRejected)
+	emitter.emitRepeatItem(node.children[0], rule, iterationAccepted, iterationRejected)
 	emitter.ctx.MarkLabel(iterationAccepted)
 	position = emitter.loadPosition()
 	progress = emitter.emitStateScalar(jitParserCommitProgressNative, 1, position)
@@ -1214,7 +1372,7 @@ func (emitter *jitParserEmitter) emitRepeatAccumulate(node *jitParserNode, rule 
 	emitter.pushCheckpoint()
 	firstAccepted, firstRejected := ctx.ReserveLabel(), ctx.ReserveLabel()
 	emitter.pushCheckpoint()
-	emitter.emitNode(node.children[0], rule, firstAccepted, firstRejected)
+	emitter.emitRepeatItem(node.children[0], rule, firstAccepted, firstRejected)
 	ctx.MarkLabel(firstAccepted)
 	step()
 	position := emitter.loadPosition()
@@ -1241,7 +1399,7 @@ func (emitter *jitParserEmitter) emitRepeatAccumulate(node *jitParserNode, rule 
 	separatorAccepted, iterationAccepted, iterationRejected := ctx.ReserveLabel(), ctx.ReserveLabel(), ctx.ReserveLabel()
 	emitter.emitNode(node.children[1], rule, separatorAccepted, iterationRejected)
 	ctx.MarkLabel(separatorAccepted)
-	emitter.emitNode(node.children[0], rule, iterationAccepted, iterationRejected)
+	emitter.emitRepeatItem(node.children[0], rule, iterationAccepted, iterationRejected)
 	ctx.MarkLabel(iterationAccepted)
 	step()
 	position = emitter.loadPosition()
@@ -1433,6 +1591,8 @@ func jitEmitParserProgramCore(ctx *JITContext, program *jitParserProgram, input,
 	for ruleID := range program.rules {
 		ctx.MarkLabel(emitter.ruleLabels[ruleID])
 		accepted, rejected := ctx.ReserveLabel(), ctx.ReserveLabel()
+		emitter.currentRule = ruleID
+		_, emitter.currentRuleIsLadderLevel = program.ladderFastPath[ruleID]
 		emitter.emitNode(program.rules[ruleID].root, ruleID, accepted, rejected)
 		ctx.MarkLabel(accepted)
 		emitter.emitRuleReturn(ruleID, true)

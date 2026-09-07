@@ -19,6 +19,7 @@ package scm
 
 import (
 	"fmt"
+	"os"
 	"regexp"
 	"slices"
 	"sync"
@@ -66,19 +67,26 @@ type jitParserNode struct {
 	regex        *jitRegexProgram
 	skipWS       bool
 	ignoreResult bool
-	noMemo       bool // repeat body references skip the memo entry check
-	fenceMemo    bool // markFenceableRepeats: also fence+compact the memo table
-	description  string
+	// skipBreakBefore/After: this terminal's literal begins / ends with a
+	// non-word byte, so the word-boundary check on that side (atBreak: is there
+	// a boundary between the neighbouring char and this token's edge?) is
+	// always satisfied - a punctuation / operator atom like "," "(" "->" "::".
+	// Only set for atoms; a regex terminal keeps both checks.
+	skipBreakBefore bool
+	skipBreakAfter  bool
+	noMemo          bool // repeat body references skip the memo entry check
+	fenceMemo       bool // markFenceableRepeats: also fence+compact the memo table
+	description     string
 	// Accumulation form of * / + : instead of collecting item values into a
 	// slice (pushMark/mergeMark -> make+copy per repeat), run accInit() once,
 	// acc = accStep(acc, itemvalue) per accepted item, accFinish(acc) once as
 	// the repeat's single result. Set by buildNode when the * / + syntax
 	// carries init/step/finish lambdas past the noMemo slot, or injected by the
 	// optimizer. Fresh acc per repeat entry, so an outer backtrack re-inits.
-	accumulate  bool
-	accInit     *Proc
-	accStep     *Proc
-	accFinish   *Proc
+	accumulate bool
+	accInit    *Proc
+	accStep    *Proc
+	accFinish  *Proc
 }
 
 type jitParserRule struct {
@@ -107,7 +115,13 @@ type jitParserProgram struct {
 	ruleFirstBytes []firstByteSet
 	ruleNullable   []bool
 	inlineActions  bool
-	pool           sync.Pool
+	// ladderFastPath: interior precedence-ladder level rule -> primary rule to
+	// speculatively descend to (see computeLadderFastPaths / emitLadderFastPath).
+	ladderFastPath map[int]int
+	// ladderPrimaryLeaves: primary rule -> {numberLeafRule, stringLeafRule}
+	// (-1 if absent), matched directly by the fast path for a digit / quote.
+	ladderPrimaryLeaves map[int][2]int
+	pool                sync.Pool
 }
 
 type jitParserBuilder struct {
@@ -153,6 +167,13 @@ func jitUnwrapParserSyntax(value Scmer) Scmer {
 	return value
 }
 
+// jitParserWordByte matches atBreak's ASCII word class ([0-9A-Za-z_], = the
+// ASCII members of unicode.N | unicode.L | unicode.Pc). A non-ASCII byte is
+// conservatively "word" so a multi-byte atom edge keeps its boundary check.
+func jitParserWordByte(b byte) bool {
+	return b == '_' || (b >= '0' && b <= '9') || (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z') || b >= 0x80
+}
+
 func jitBuildParserProgram(parser *ScmParser) *jitParserProgram {
 	return jitBuildParserPrograms([]*ScmParser{parser})
 }
@@ -172,6 +193,18 @@ func jitBuildParserPrograms(parsers []*ScmParser) *jitParserProgram {
 	program.prepareMemoLayout()
 	program.computeFirstBytes()
 	program.analyzeLiteralLeaves()
+	if jitLadderFastPathEnabled() {
+		program.ladderFastPath = program.computeLadderFastPaths()
+		program.ladderPrimaryLeaves = map[int][2]int{}
+		for _, target := range program.ladderFastPath {
+			if _, done := program.ladderPrimaryLeaves[target]; !done {
+				program.ladderPrimaryLeaves[target] = program.primaryDirectReturnLeaves(target)
+			}
+		}
+	}
+	if os.Getenv("MEMCP_DUMP_LADDER") != "" {
+		program.dumpPrecedenceLadders()
+	}
 	program.pool.New = func() any { return new(jitParserState) }
 	return program
 }
@@ -186,6 +219,18 @@ func jitBuildParserTemplateProgram(template *JITParserTemplate) (*jitParserProgr
 	program.prepareMemoLayout()
 	program.computeFirstBytes()
 	program.analyzeLiteralLeaves()
+	if jitLadderFastPathEnabled() {
+		program.ladderFastPath = program.computeLadderFastPaths()
+		program.ladderPrimaryLeaves = map[int][2]int{}
+		for _, target := range program.ladderFastPath {
+			if _, done := program.ladderPrimaryLeaves[target]; !done {
+				program.ladderPrimaryLeaves[target] = program.primaryDirectReturnLeaves(target)
+			}
+		}
+	}
+	if os.Getenv("MEMCP_DUMP_LADDER") != "" {
+		program.dumpPrecedenceLadders()
+	}
 	program.pool.New = func() any { return new(jitParserState) }
 	return program, rule
 }
@@ -529,12 +574,14 @@ func (builder *jitParserBuilder) buildNode(value Scmer, outer *Env, jitOuter *JI
 	case tagString:
 		literal := value.String()
 		return &jitParserNode{
-			kind:         jitParserAtom,
-			value:        value,
-			regex:        jitCompileRegexProgram(regexp.MustCompile("^(?:" + regexp.QuoteMeta(literal) + ")")),
-			skipWS:       true,
-			ignoreResult: ignoreResult,
-			description:  literal,
+			kind:            jitParserAtom,
+			value:           value,
+			regex:           jitCompileRegexProgram(regexp.MustCompile("^(?:" + regexp.QuoteMeta(literal) + ")")),
+			skipWS:          true,
+			skipBreakBefore: len(literal) > 0 && !jitParserWordByte(literal[0]),
+			skipBreakAfter:  len(literal) > 0 && !jitParserWordByte(literal[len(literal)-1]),
+			ignoreResult:    ignoreResult,
+			description:     literal,
 		}
 	case tagSymbol:
 		switch value.Symbol() {
@@ -625,8 +672,11 @@ func (builder *jitParserBuilder) buildNode(value Scmer, outer *Env, jitOuter *JI
 				result = items[4]
 			}
 			return &jitParserNode{kind: jitParserAtom, value: result,
-				regex:  jitCompileRegexProgram(regexp.MustCompile("^(?:" + pattern + ")")),
-				skipWS: jitParserBool(items, 3, true), ignoreResult: ignoreResult, description: literal}
+				regex:           jitCompileRegexProgram(regexp.MustCompile("^(?:" + pattern + ")")),
+				skipWS:          jitParserBool(items, 3, true),
+				skipBreakBefore: len(literal) > 0 && !jitParserWordByte(literal[0]),
+				skipBreakAfter:  len(literal) > 0 && !jitParserWordByte(literal[len(literal)-1]),
+				ignoreResult:    ignoreResult, description: literal}
 		case "regex":
 			pattern := items[1].String()
 			if jitParserBool(items, 2, false) {

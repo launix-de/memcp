@@ -8,6 +8,8 @@ metadata:
 
 setup:
   - sql: "DROP TABLE IF EXISTS obc_data"
+  - sql: "DROP TABLE IF EXISTS obc_group_member"
+  - sql: "DROP TABLE IF EXISTS obc_group_rank"
   - sql: |
       CREATE TABLE obc_data (
         id INT, name VARCHAR(30), score INT, grade VARCHAR(5), weight DOUBLE
@@ -24,6 +26,10 @@ setup:
         (8, 'henry', 70, 'C', 0.5),
         (9, NULL, 85, 'B', 1.0),
         (10, 'ivy', 85, 'B', 2.5)
+  - sql: "CREATE TABLE obc_group_member (group_name VARCHAR(10), member_id INT)"
+  - sql: "CREATE TABLE obc_group_rank (group_name VARCHAR(10), rank_value INT)"
+  - sql: "INSERT INTO obc_group_member VALUES ('a', 1), ('a', 2), ('b', 3)"
+  - sql: "INSERT INTO obc_group_rank VALUES ('a', 1), ('a', 2), ('b', 3)"
 
 test_cases:
 
@@ -54,6 +60,26 @@ test_cases:
           score: 90
         - name: "bob"
           score: 90
+
+  - name: "Joined ORDER BY globally merges a non-unique driver prefix"
+    sql: |
+      SELECT m.group_name, r.rank_value
+      FROM obc_group_member AS m
+      JOIN obc_group_rank AS r ON r.group_name = m.group_name
+      ORDER BY m.group_name ASC, r.rank_value DESC
+    expect:
+      rows: 5
+      data:
+        - group_name: "a"
+          rank_value: 2
+        - group_name: "a"
+          rank_value: 2
+        - group_name: "a"
+          rank_value: 1
+        - group_name: "a"
+          rank_value: 1
+        - group_name: "b"
+          rank_value: 3
 
   # === NULL ordering ===
 
@@ -204,3 +230,5 @@ test_cases:
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS obc_data"
+  - sql: "DROP TABLE IF EXISTS obc_group_member"
+  - sql: "DROP TABLE IF EXISTS obc_group_rank"
