@@ -6155,7 +6155,7 @@ func init_window() {
 					ctx.FreeDesc(&d786)
 					if ps.General {
 						ctx.SyncDesc(&d374)
-						if d374.Loc == LocReg {
+						if d374.Loc == LocReg || d374.Loc == LocFPReg {
 							ctx.ProtectReg(d374.Reg)
 						} else if d374.Loc == LocRegPair {
 							ctx.ProtectReg(d374.Reg)
@@ -6167,7 +6167,7 @@ func init_window() {
 						}
 						ctx.EnsureDesc(&d790)
 						ctx.EmitStoreToStack(d790, int32(bbs[7].PhiBase)+int32(0))
-						if d374.Loc == LocReg {
+						if d374.Loc == LocReg || d374.Loc == LocFPReg {
 							ctx.UnprotectReg(d374.Reg)
 						} else if d374.Loc == LocRegPair {
 							ctx.UnprotectReg(d374.Reg)
@@ -6523,7 +6523,7 @@ func init_window() {
 					ctx.FreeDesc(&d793)
 					if ps.General {
 						ctx.SyncDesc(&d374)
-						if d374.Loc == LocReg {
+						if d374.Loc == LocReg || d374.Loc == LocFPReg {
 							ctx.ProtectReg(d374.Reg)
 						} else if d374.Loc == LocRegPair {
 							ctx.ProtectReg(d374.Reg)
@@ -6535,7 +6535,7 @@ func init_window() {
 						}
 						ctx.EnsureDesc(&d796)
 						ctx.EmitStoreToStack(d796, int32(bbs[7].PhiBase)+int32(0))
-						if d374.Loc == LocReg {
+						if d374.Loc == LocReg || d374.Loc == LocFPReg {
 							ctx.UnprotectReg(d374.Reg)
 						} else if d374.Loc == LocRegPair {
 							ctx.UnprotectReg(d374.Reg)
