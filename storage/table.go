@@ -102,18 +102,21 @@ type column struct {
 	// definition; the filter expression itself is runtime-only like Computor.
 	ComputorFilterCols []string  `json:",omitempty"`
 	ComputorFilter     scm.Scmer `json:"-"`
-	PartitioningScore  int       // count this up to increase the chance of partitioning for this column
-	AutoIncrement      bool
-	Default            scm.Scmer
-	DefaultExpression  string
-	OnUpdate           scm.Scmer
-	AllowNull          bool
-	IsTemp             bool // columns with IsTemp may be removed without consequences
-	Collation          string
-	Comment            string
-	sanitizer          func(scm.Scmer) scm.Scmer
-	lastAccessed       int64 // atomic; UnixNano timestamp for CacheManager LRU (lock-free via sync/atomic)
-	cacheUsers         int64 // atomic; -1 while/after CacheManager eviction, otherwise active trigger users
+	// PartitioningScore is a deliberately racy, approximate planner hint. Lost
+	// increments and arbitrary intermediate values in schema.json are allowed;
+	// storage correctness and durable state must never depend on its exact value.
+	PartitioningScore int
+	AutoIncrement     bool
+	Default           scm.Scmer
+	DefaultExpression string
+	OnUpdate          scm.Scmer
+	AllowNull         bool
+	IsTemp            bool // columns with IsTemp may be removed without consequences
+	Collation         string
+	Comment           string
+	sanitizer         func(scm.Scmer) scm.Scmer
+	lastAccessed      int64 // atomic; UnixNano timestamp for CacheManager LRU (lock-free via sync/atomic)
+	cacheUsers        int64 // atomic; -1 while/after CacheManager eviction, otherwise active trigger users
 
 	// Statistics — updated at rebuild time, O(1) access for query planning.
 	// DistinctEstimate is the sum of per-shard DistinctCount() (upper bound).
@@ -1387,7 +1390,9 @@ func (t table) ComputeSize() uint {
 
 // increases PartitioningScore for a set of columns
 func (t *table) AddPartitioningScore(cols []string) {
-	// we don't sync because we want to be fast; we ignore write-after-write hazards
+	// Deliberately avoid synchronization in this hot path. Concurrent increments
+	// may overwrite each other and schema serialization may observe any
+	// intermediate value. The score only nudges future partition selection.
 	for _, c := range t.Columns {
 		for _, col := range cols {
 			if col == c.Name {
