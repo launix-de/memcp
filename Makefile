@@ -16,10 +16,45 @@ PACKAGE_LDFLAGS ?= -s -w
 DIST_DIR     ?= dist
 PACKAGE_DIR  ?= .build/packages
 SOURCE_DATE_EPOCH ?= $(shell git log -1 --format=%ct)
+JIT_GOROOT   ?= $(CURDIR)/.third_party/go-jit
+JIT_GO_REPOSITORY ?= https://github.com/launix-de/go.git
+JIT_GO_REF   ?= jit-foreign-frames-go1.27.0
 export SOURCE_DATE_EPOCH
 
 all:
 	CGO_ENABLED=$(CGO_ENABLED) GOOS=$(GOOS) GOARCH=$(GOARCH) go build $(BUILD_FLAGS) -ldflags="$(LDFLAGS)" -o memcp .
+
+# Keep the experimental compiler outside the tracked source tree. Clean
+# checkouts fast-forward on every invocation, while a checkout with local
+# tracked changes is left untouched so compiler work is never discarded.
+jit-toolchain:
+	@set -eu; \
+	if [ ! -e "$(JIT_GOROOT)" ]; then \
+		mkdir -p "$(dir $(JIT_GOROOT))"; \
+		git clone --depth 1 --branch "$(JIT_GO_REF)" "$(JIT_GO_REPOSITORY)" "$(JIT_GOROOT)"; \
+	else \
+		test -d "$(JIT_GOROOT)/.git" || { echo "$(JIT_GOROOT) is not a Go git checkout" >&2; exit 1; }; \
+		if git -C "$(JIT_GOROOT)" diff --quiet && git -C "$(JIT_GOROOT)" diff --cached --quiet; then \
+			git -C "$(JIT_GOROOT)" pull --ff-only origin "$(JIT_GO_REF)"; \
+		else \
+			echo "warning: $(JIT_GOROOT) has local changes; skipping compiler update" >&2; \
+		fi; \
+	fi; \
+	test -d "$(JIT_GOROOT)/.git" || { echo "$(JIT_GOROOT) is not a Go git checkout" >&2; exit 1; }; \
+	revision=$$(git -C "$(JIT_GOROOT)" rev-parse HEAD); \
+	built_revision=$$(cat "$(JIT_GOROOT)/.memcp-built-revision" 2>/dev/null || true); \
+	if [ ! -x "$(JIT_GOROOT)/bin/go" ] || [ "$$built_revision" != "$$revision" ]; then \
+		version=$$(sed -n 's/^go\([0-9].*\)$$/\1/p' "$(JIT_GOROOT)/VERSION" | head -n 1); \
+		test -n "$$version"; \
+		bootstrap_goroot=$$(GOTOOLCHAIN="go$$version" go env GOROOT); \
+		(cd "$(JIT_GOROOT)/src" && GOROOT_BOOTSTRAP="$$bootstrap_goroot" ./make.bash); \
+		printf '%s\n' "$$revision" > "$(JIT_GOROOT)/.memcp-built-revision"; \
+	fi
+
+jit: jit-toolchain
+	CGO_ENABLED=$(CGO_ENABLED) GOOS=$(GOOS) GOARCH=$(GOARCH) \
+		GOROOT="$(JIT_GOROOT)" GOEXPERIMENT=jit "$(JIT_GOROOT)/bin/go" \
+		build $(BUILD_FLAGS) -ldflags="$(LDFLAGS)" -o memcp .
 
 jitgen:
 	@set -eu; \
@@ -175,5 +210,5 @@ docker-release:
 		--provenance=mode=max --sbom=true --push \
 		-t carli2/memcp:$(VERSION) -t carli2/memcp:latest .
 
-.PHONY: all install install-files memcp.sif memcp.deb memcp.rpm package-check \
-	version artifact-names docs docker-release jitgen costgen
+.PHONY: all jit jit-toolchain install install-files memcp.sif memcp.deb memcp.rpm \
+	package-check version artifact-names docs docker-release jitgen costgen

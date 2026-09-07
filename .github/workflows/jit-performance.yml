@@ -42,14 +42,14 @@ jobs:
         with:
           repository: launix-de/go
           ref: ${{ env.JIT_GO_REF }}
-          path: go-jit
+          path: candidate/.third_party/go-jit
 
       - name: Read patched Go version
         id: jit-go-version
         shell: bash
         run: |
           set -euo pipefail
-          version=$(sed -n 's/^go\([0-9].*\)$/\1/p' go-jit/VERSION | head -n 1)
+          version=$(sed -n 's/^go\([0-9].*\)$/\1/p' candidate/.third_party/go-jit/VERSION | head -n 1)
           test -n "$version"
           printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
 
@@ -59,26 +59,22 @@ jobs:
           go-version: ${{ steps.jit-go-version.outputs.version }}
           cache: false
 
-      - name: Build patched Go compiler
-        shell: bash
-        run: |
-          set -euo pipefail
-          bootstrap_goroot=$(go env GOROOT)
-          (cd go-jit/src && GOROOT_BOOTSTRAP="$bootstrap_goroot" ./make.bash)
+      - name: Build JIT candidate and patched Go compiler
+        run: make -C candidate jit
 
       - name: Select patched Go compiler
         shell: bash
         run: |
-          printf '%s\n' "$GITHUB_WORKSPACE/go-jit/bin" >> "$GITHUB_PATH"
-          printf 'GOROOT=%s\n' "$GITHUB_WORKSPACE/go-jit" >> "$GITHUB_ENV"
+          printf '%s\n' "$GITHUB_WORKSPACE/candidate/.third_party/go-jit/bin" >> "$GITHUB_PATH"
+          printf 'GOROOT=%s\n' "$GITHUB_WORKSPACE/candidate/.third_party/go-jit" >> "$GITHUB_ENV"
           printf 'GOEXPERIMENT=jit\n' >> "$GITHUB_ENV"
 
       - name: Verify compiler identity
         shell: bash
         run: |
           set -euo pipefail
-          test "$(go env GOROOT)" = "$GITHUB_WORKSPACE/go-jit"
-          jit_go_revision=$(git -C "$GITHUB_WORKSPACE/go-jit" rev-parse HEAD)
+          test "$(go env GOROOT)" = "$GITHUB_WORKSPACE/candidate/.third_party/go-jit"
+          jit_go_revision=$(git -C "$GITHUB_WORKSPACE/candidate/.third_party/go-jit" rev-parse HEAD)
           printf 'Patched Go revision: `%s`\n' "$jit_go_revision" >> "$GITHUB_STEP_SUMMARY"
           go version
           go env GOEXPERIMENT
@@ -86,11 +82,8 @@ jobs:
       - name: Install test dependencies
         run: pip install requests PyYAML
 
-      - name: Build JIT base and candidate
-        shell: bash
-        run: |
-          (cd base && go build -o memcp)
-          (cd candidate && go build -o memcp)
+      - name: Build JIT base with the same compiler
+        run: make -C base jit JIT_GOROOT="$GITHUB_WORKSPACE/candidate/.third_party/go-jit"
 
       - name: Measure JIT base and candidate with the SQL test runner
         shell: bash
