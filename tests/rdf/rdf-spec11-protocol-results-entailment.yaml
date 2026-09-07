@@ -63,7 +63,6 @@ test_cases:
       contains: "?value"
 
   - name: "SPARQL 1.1 CONSTRUCT negotiates Turtle graph output"
-    noncritical: true
     ttl_data: '@prefix ex: <http://spec11-result-turtle.example/> . ex:s ex:p ex:o .'
     headers: {Accept: "text/turtle"}
     sparql: 'PREFIX ex: <http://spec11-result-turtle.example/> CONSTRUCT { ?s ex:p ?o } WHERE { ?s ex:p ?o }'

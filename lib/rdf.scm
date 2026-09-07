@@ -122,6 +122,25 @@ this is how rdf works:
 				(concat field_acc (if (equal? field_acc "") "" separator)
 					(if (nil? value) "" (rdf_sparql_csv_field value))))) "") "\n")) ""))
 ))
+(define rdf_turtle_result_term (lambda (value)
+	(if (rdf_is_blank value)
+		(concat "_:" (replace (replace value "urn:uuid:" "") "_:" ""))
+		(if (rdf_is_iri value) (concat "<" value ">")
+			(if (equal? value true) "true"
+				(if (equal? value false) "false"
+					(if (number? value) (concat value) (rdf_quote value))))))
+))
+(define rdf_turtle_results (lambda (rows)
+	(reduce rows (lambda (acc row)
+		(begin
+			(define subject (get_assoc row "?s"))
+			(define predicate (get_assoc row "?p"))
+			(define object (get_assoc row "?o"))
+			(if (or (nil? subject) (or (nil? predicate) (nil? object))) acc
+				(concat acc (rdf_turtle_result_term subject) " "
+					(rdf_turtle_result_term predicate) " "
+					(rdf_turtle_result_term object) " .\n")))) "")
+))
 
 (define handler_404 (lambda (req res) (begin
 	/*(print "request " req)*/
@@ -143,13 +162,16 @@ this is how rdf works:
 			(define standard_xml (rdf_contains accept_lower "application/sparql-results+xml"))
 			(define standard_csv (rdf_contains accept_lower "text/csv"))
 			(define standard_tsv (rdf_contains accept_lower "text/tab-separated-values"))
-			(define buffered (or standard_json (or standard_xml (or standard_csv standard_tsv))))
+			(define graph_turtle (rdf_contains accept_lower "text/turtle"))
+			(define buffered (or standard_json (or standard_xml
+				(or standard_csv (or standard_tsv graph_turtle)))))
 			((res "header") "Content-Type"
 				(if standard_json "application/sparql-results+json; charset=utf-8"
 				(if standard_xml "application/sparql-results+xml; charset=utf-8"
 				(if standard_csv "text/csv; charset=utf-8"
 				(if standard_tsv "text/tab-separated-values; charset=utf-8"
-					"application/x-ndjson; charset=utf-8")))))
+				(if graph_turtle "text/turtle; charset=utf-8"
+					"application/x-ndjson; charset=utf-8"))))))
 			((res "status") 200)
 			(define row_store (if buffered (newsession) nil))
 			(define resultrow (if buffered
@@ -181,7 +203,8 @@ this is how rdf works:
 						(if standard_json (json_encode (rdf_sparql_results_json rows ask_query vars))
 						(if standard_xml (rdf_sparql_results_xml rows ask_query vars)
 						(if standard_csv (rdf_sparql_delimited_results rows vars "," "")
-							(rdf_sparql_delimited_results rows vars "\t" "?"))))))
+						(if standard_tsv (rdf_sparql_delimited_results rows vars "\t" "?")
+							(rdf_turtle_results rows)))))))
 				nil)
 		) query) (begin
 				((res "header") "Content-Type" "text/plain")
