@@ -18,10 +18,44 @@ Copyright (C) 2026  Carl-Philip Hänsch
 package scm
 
 import (
+	"io"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 )
+
+func TestHTTPRequestUsesOnlyExplicitServerBuiltPayload(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.Method != http.MethodPost || string(body) != `{"model":"server-choice","input":"checked"}` {
+			t.Fatalf("unexpected request: %s %q", r.Method, body)
+		}
+		if got := r.Header.Get("Content-Type"); got != "application/json" {
+			t.Fatalf("unexpected content type %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(w, `{"output":"filtered"}`)
+	}))
+	defer upstream.Close()
+
+	result := HTTPRequest(
+		NewString(http.MethodPost),
+		NewString(upstream.URL+"/model"),
+		NewSlice([]Scmer{NewString("Content-Type"), NewString("application/json")}),
+		NewString(`{"model":"server-choice","input":"checked"}`),
+	)
+	if got := Apply(result, NewString("status")).Int(); got != http.StatusCreated {
+		t.Fatalf("unexpected status %d", got)
+	}
+	if got := Apply(result, NewString("body")).String(); got != `{"output":"filtered"}` {
+		t.Fatalf("unexpected body %q", got)
+	}
+}
 
 func TestHTTPSQLBodyUpdatesProcesslistInfo(t *testing.T) {
 	const query = "SELECT SLEEP(1)"
