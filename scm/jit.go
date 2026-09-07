@@ -8070,10 +8070,21 @@ func maybeDumpJITCode(base unsafe.Pointer, code []byte) {
 }
 
 func maybeLogJITCodeName(entry *JITEntryPoint) {
-	if os.Getenv("MEMCP_JIT_DUMP_DIR") == "" || entry == nil || entry.DebugName == "" {
+	if entry == nil || entry.DebugName == "" {
 		return
 	}
-	fmt.Printf("jitdump: name=%s code=%p bytes=%d\n", entry.DebugName, entry.CodePtr, entry.CodeLen)
+	if os.Getenv("MEMCP_JIT_DUMP_DIR") != "" {
+		fmt.Printf("jitdump: name=%s code=%p bytes=%d\n", entry.DebugName, entry.CodePtr, entry.CodeLen)
+	}
+	// Linux perf symbol map: lets `perf report` name JIT machine code instead of
+	// showing raw addresses outside any Go function. Format: "<hexAddr> <hexSize> <name>".
+	if os.Getenv("MEMCP_PERF_MAP") != "" && entry.CodePtr != nil && entry.CodeLen > 0 {
+		path := fmt.Sprintf("/tmp/perf-%d.map", os.Getpid())
+		if f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644); err == nil {
+			fmt.Fprintf(f, "%x %x %s\n", uintptr(entry.CodePtr), entry.CodeLen, entry.DebugName)
+			f.Close()
+		}
+	}
 }
 
 func maybeLogJITImportCandidate(name Symbol, entry *JITEntryPoint, selected bool) {
