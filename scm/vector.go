@@ -888,8 +888,6 @@ func init_vector() {
 					d65 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d66}, 2)
 					ctx.FreeDesc(&d64)
 					ctx.EnsureDesc(&d65)
-					ctx.EnsureDesc(&d65)
-					ctx.EnsureDesc(&d65)
 					if d65.Loc == LocImm {
 						tmpPair := JITValueDesc{Loc: LocRegPair, Type: d65.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 						ctx.TrackImm(d65.Imm)
@@ -1238,6 +1236,9 @@ func init_vector() {
 					}
 					ctx.EmitCmpRegImm32(d76.Reg, 0)
 					ctx.EmitJump(CondNotEqual, lbl4)
+					if bbs[5].Rendered {
+						ctx.EmitJmp(lbl6)
+					}
 					snap80 := d8
 					snap81 := d9
 					snap82 := d10
@@ -2515,6 +2516,9 @@ func init_vector() {
 						return bbs[6].RenderPS(ps)
 					}
 					ctx.EmitJump(d160.Condition, lbl10)
+					if bbs[8].Rendered {
+						ctx.EmitJmp(lbl9)
+					}
 					ctx.FreeDesc(&d159)
 					snap167 := d8
 					snap168 := d9
@@ -4551,6 +4555,9 @@ func init_vector() {
 						return bbs[9].RenderPS(ps)
 					}
 					ctx.EmitJump(d300.Condition, lbl8)
+					if bbs[8].Rendered {
+						ctx.EmitJmp(lbl9)
+					}
 					ctx.FreeDesc(&d299)
 					snap303 := d8
 					snap304 := d9
@@ -5704,6 +5711,9 @@ func init_vector() {
 						return bbs[10].RenderPS(ps)
 					}
 					ctx.EmitJump(d469.Condition, lbl14)
+					if bbs[12].Rendered {
+						ctx.EmitJmp(lbl13)
+					}
 					ctx.FreeDesc(&d468)
 					snap474 := d8
 					snap475 := d9
@@ -9107,6 +9117,9 @@ func init_vector() {
 						return bbs[13].RenderPS(ps)
 					}
 					ctx.EmitJump(d901.Condition, lbl12)
+					if bbs[12].Rendered {
+						ctx.EmitJmp(lbl13)
+					}
 					ctx.FreeDesc(&d900)
 					snap904 := d8
 					snap905 := d9

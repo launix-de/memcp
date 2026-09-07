@@ -105,8 +105,6 @@ func declareSQLLiteralParameterizer() {
 				d1 := ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d2}, 2)
 				ctx.FreeDesc(&d0)
 				ctx.EnsureDesc(&d1)
-				ctx.EnsureDesc(&d1)
-				ctx.EnsureDesc(&d1)
 				if d1.Loc == LocImm {
 					tmpPair := JITValueDesc{Loc: LocRegPair, Type: d1.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 					ctx.TrackImm(d1.Imm)

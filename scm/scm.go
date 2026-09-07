@@ -1084,8 +1084,6 @@ func init() {
 				}
 				d0 := args[0]
 				d0.ID = 0
-				ctx.EnsureDesc(&d0)
-				ctx.EnsureDesc(&d0)
 				d0 = JITPrepareScmerGoArg(ctx, d0)
 				ctx.SyncDesc(&d0)
 				d1 := ctx.EmitGoCallScalar(GoFuncAddr(ComputeSize), []JITValueDesc{d0}, 1)
@@ -1311,8 +1309,6 @@ func init() {
 				ctx.BindReg(d8.Reg, &d8)
 				ctx.StabilizeDescForControlFlow(&d8)
 				ctx.ReclaimUntrackedRegs()
-				ctx.EnsureDesc(&d1)
-				ctx.EnsureDesc(&d1)
 				d1 = JITPrepareScmerGoArg(ctx, d1)
 				ctx.SyncDesc(&d1)
 				d9 := ctx.EmitGoCallScalar(GoFuncAddr((Scmer).Proc), []JITValueDesc{d1}, 1)
@@ -1687,8 +1683,6 @@ func init() {
 					ctx.BindReg(r21, &d30)
 				}
 				ctx.ReclaimUntrackedRegs()
-				ctx.EnsureDesc(&d30)
-				ctx.EnsureDesc(&d30)
 				d30 = JITPrepareScmerGoArg(ctx, d30)
 				ctx.SyncDesc(&d30)
 				d31 := ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d30}, 1)
@@ -1754,11 +1748,7 @@ func init() {
 					ctx.BindReg(r25, &d33)
 				}
 				ctx.ReclaimUntrackedRegs()
-				ctx.EnsureDesc(&d33)
-				ctx.EnsureDesc(&d33)
 				d33 = JITPrepareScmerGoArg(ctx, d33)
-				ctx.EnsureDesc(&d25)
-				ctx.EnsureDesc(&d25)
 				if d25.Loc == LocRegPair || d25.Loc == LocStackPair || d25.Loc == LocRegTriple || d25.Loc == LocStackTriple {
 					panic("jit: generic call arg expects 1-word value")
 				}
@@ -1791,16 +1781,10 @@ func init() {
 					ctx.BindReg(r29, &d34)
 				}
 				ctx.ReclaimUntrackedRegs()
-				ctx.EnsureDesc(&d34)
-				ctx.EnsureDesc(&d34)
 				d34 = JITPrepareScmerGoArg(ctx, d34)
-				ctx.EnsureDesc(&d23)
-				ctx.EnsureDesc(&d23)
 				if d23.Loc == LocRegPair || d23.Loc == LocStackPair || d23.Loc == LocRegTriple || d23.Loc == LocStackTriple {
 					panic("jit: generic call arg expects 1-word value")
 				}
-				ctx.EnsureDesc(&d25)
-				ctx.EnsureDesc(&d25)
 				if d25.Loc == LocRegPair || d25.Loc == LocStackPair || d25.Loc == LocRegTriple || d25.Loc == LocStackTriple {
 					panic("jit: generic call arg expects 1-word value")
 				}
@@ -1924,8 +1908,6 @@ func init() {
 				ctx.EnsureDesc(&d42)
 				ctx.EmitGoCallVoid(GoFuncAddr(func(dst, src *Proc) { *dst = *src }), []JITValueDesc{d43, d42})
 				ctx.ReclaimUntrackedRegs()
-				ctx.EnsureDesc(&d43)
-				ctx.EnsureDesc(&d43)
 				if d43.Loc == LocRegPair || d43.Loc == LocStackPair || d43.Loc == LocRegTriple || d43.Loc == LocStackTriple {
 					panic("jit: generic call arg expects 1-word value")
 				}
@@ -2032,16 +2014,12 @@ func init() {
 				d4 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase2) + int32(16)}
 				ctx.ReclaimUntrackedRegs()
 				ctx.ReclaimUntrackedRegs()
-				ctx.EnsureDesc(&d1)
-				ctx.EnsureDesc(&d1)
 				d1 = JITPrepareScmerGoArg(ctx, d1)
 				ctx.SyncDesc(&d1)
 				d50 := ctx.EmitGoCallScalar(GoFuncAddr((Scmer).Proc), []JITValueDesc{d1}, 1)
 				d50.NoHeapPointer = false
 				ctx.BindReg(d50.Reg, &d50)
 				ctx.ReclaimUntrackedRegs()
-				ctx.EnsureDesc(&d50)
-				ctx.EnsureDesc(&d50)
 				if d50.Loc == LocRegPair || d50.Loc == LocStackPair || d50.Loc == LocRegTriple || d50.Loc == LocStackTriple {
 					panic("jit: generic call arg expects 1-word value")
 				}
@@ -2117,16 +2095,10 @@ func init() {
 				}
 				ctx.FreeDesc(&d55)
 				ctx.ReclaimUntrackedRegs()
-				ctx.EnsureDesc(&d54)
-				ctx.EnsureDesc(&d54)
 				d54 = JITPrepareScmerGoArg(ctx, d54)
-				ctx.EnsureDesc(&d56)
-				ctx.EnsureDesc(&d56)
 				if d56.Loc == LocRegPair || d56.Loc == LocStackPair || d56.Loc == LocRegTriple || d56.Loc == LocStackTriple {
 					panic("jit: generic call arg expects 1-word value")
 				}
-				ctx.EnsureDesc(&d53)
-				ctx.EnsureDesc(&d53)
 				d53 = JITPrepareGoSliceArg(ctx, d53)
 				if d53.Loc != LocRegTriple && d53.Loc != LocStackTriple {
 					panic("jit: generic call arg expects 3-word Go slice (closeJITProcedureCaptures arg2)")
@@ -2714,8 +2686,6 @@ func init() {
 				ctx.EnsureDesc(&d89)
 				ctx.EmitGoCallVoid(GoFuncAddr(func(dst, src *Proc) { *dst = *src }), []JITValueDesc{d90, d89})
 				ctx.ReclaimUntrackedRegs()
-				ctx.EnsureDesc(&d90)
-				ctx.EnsureDesc(&d90)
 				if d90.Loc == LocRegPair || d90.Loc == LocStackPair || d90.Loc == LocRegTriple || d90.Loc == LocStackTriple {
 					panic("jit: generic call arg expects 1-word value")
 				}
@@ -2751,8 +2721,6 @@ func init() {
 				ctx.BindReg(r75, &d93)
 				ctx.StabilizeDescForControlFlow(&d93)
 				ctx.ReclaimUntrackedRegs()
-				ctx.EnsureDesc(&d93)
-				ctx.EnsureDesc(&d93)
 				d93 = JITPrepareScmerGoArg(ctx, d93)
 				ctx.SyncDesc(&d93)
 				d95 := ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d93}, 1)
@@ -3019,8 +2987,6 @@ func init() {
 				}
 				d0 := args[0]
 				d0.ID = 0
-				ctx.EnsureDesc(&d0)
-				ctx.EnsureDesc(&d0)
 				d0 = JITPrepareScmerGoArg(ctx, d0)
 				ctx.SyncDesc(&d0)
 				d1 := ctx.EmitGoCallScalar(GoFuncAddr(CloneOptimizerExpression), []JITValueDesc{d0}, 2)
@@ -3457,15 +3423,11 @@ func init() {
 					ctx.StabilizeDescForControlFlow(&d26)
 					d31 = args[0]
 					d31.ID = 0
-					ctx.EnsureDesc(&d31)
-					ctx.EnsureDesc(&d31)
 					d31 = JITPrepareScmerGoArg(ctx, d31)
 					d32 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(uintptr(unsafe.Pointer(&Globalenv)))), NoHeapPointer: true, Rooted: true}
 					if d32.Loc == LocRegPair || d32.Loc == LocStackPair || d32.Loc == LocRegTriple || d32.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
 					}
-					ctx.EnsureDesc(&d1)
-					ctx.EnsureDesc(&d1)
 					if d1.Loc == LocRegPair || d1.Loc == LocStackPair || d1.Loc == LocRegTriple || d1.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
 					}
@@ -3833,6 +3795,9 @@ func init() {
 						return bbs[0].RenderPS(ps)
 					}
 					ctx.EmitJump(d6.Condition, lbl2)
+					if bbs[2].Rendered {
+						ctx.EmitJmp(lbl3)
+					}
 					ctx.FreeDesc(&d5)
 					snap9 := d3
 					snap10 := d4
@@ -4153,6 +4118,9 @@ func init() {
 						return bbs[3].RenderPS(ps)
 					}
 					ctx.EmitJump(d28.Condition, lbl5)
+					if bbs[5].Rendered {
+						ctx.EmitJmp(lbl6)
+					}
 					ctx.FreeDesc(&d27)
 					snap32 := d3
 					snap33 := d4
@@ -4367,13 +4335,9 @@ func init() {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
 					d62 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d63}, 2)
-					ctx.EnsureDesc(&d21)
-					ctx.EnsureDesc(&d21)
 					if d21.Loc == LocRegPair || d21.Loc == LocStackPair || d21.Loc == LocRegTriple || d21.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
 					}
-					ctx.EnsureDesc(&d62)
-					ctx.EnsureDesc(&d62)
 					ctx.EnsureDesc(&d62)
 					if d62.Loc == LocImm {
 						tmpPair := JITValueDesc{Loc: LocRegPair, Type: d62.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
@@ -4647,11 +4611,7 @@ func init() {
 				ctx.ResolveFixups()
 				ctx.ReclaimUntrackedRegs()
 				ctx.ReclaimUntrackedRegs()
-				ctx.EnsureDesc(&d3)
-				ctx.EnsureDesc(&d3)
 				d3 = JITPrepareScmerGoArg(ctx, d3)
-				ctx.EnsureDesc(&d4)
-				ctx.EnsureDesc(&d4)
 				d4 = JITPrepareGoSliceArg(ctx, d4)
 				if d4.Loc != LocRegTriple && d4.Loc != LocStackTriple {
 					panic("jit: generic call arg expects 3-word Go slice (ApplyEx arg1)")
@@ -4823,8 +4783,6 @@ func init() {
 				d7 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase5) + int32(16)}
 				ctx.ReclaimUntrackedRegs()
 				ctx.ReclaimUntrackedRegs()
-				ctx.EnsureDesc(&d3)
-				ctx.EnsureDesc(&d3)
 				d3 = JITPrepareScmerGoArg(ctx, d3)
 				ctx.SyncDesc(&d3)
 				d8 := ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsProc), []JITValueDesc{d3}, 1)
@@ -4872,8 +4830,6 @@ func init() {
 				d7 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase5) + int32(16)}
 				ctx.ReclaimUntrackedRegs()
 				ctx.ReclaimUntrackedRegs()
-				ctx.EnsureDesc(&d3)
-				ctx.EnsureDesc(&d3)
 				d3 = JITPrepareScmerGoArg(ctx, d3)
 				ctx.SyncDesc(&d3)
 				d10 := ctx.EmitGoCallScalar(GoFuncAddr((Scmer).Proc), []JITValueDesc{d3}, 1)
@@ -5193,11 +5149,7 @@ func init() {
 				ctx.ResolveFixups()
 				ctx.ReclaimUntrackedRegs()
 				ctx.ReclaimUntrackedRegs()
-				ctx.EnsureDesc(&d27)
-				ctx.EnsureDesc(&d27)
 				d27 = JITPrepareScmerGoArg(ctx, d27)
-				ctx.EnsureDesc(&d28)
-				ctx.EnsureDesc(&d28)
 				d28 = JITPrepareGoSliceArg(ctx, d28)
 				if d28.Loc != LocRegTriple && d28.Loc != LocStackTriple {
 					panic("jit: generic call arg expects 3-word Go slice (ApplyEx arg1)")
@@ -5241,8 +5193,6 @@ func init() {
 				ctx.BindReg(d33.Reg, &d32)
 				ctx.BindReg(r15, &d32)
 				ctx.ReclaimUntrackedRegs()
-				ctx.EnsureDesc(&d32)
-				ctx.EnsureDesc(&d32)
 				d32 = JITPrepareScmerGoArg(ctx, d32)
 				ctx.SyncDesc(&d32)
 				d34 := ctx.EmitGoCallScalar(GoFuncAddr(mustSymbol), []JITValueDesc{d32}, 2)
@@ -5610,8 +5560,6 @@ func init() {
 				}
 				d1 := ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d2}, 2)
 				ctx.FreeDesc(&d0)
-				ctx.EnsureDesc(&d1)
-				ctx.EnsureDesc(&d1)
 				ctx.EnsureDesc(&d1)
 				if d1.Loc == LocImm {
 					tmpPair := JITValueDesc{Loc: LocRegPair, Type: d1.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
@@ -6052,6 +6000,9 @@ func init() {
 					}
 					ctx.EmitCmpRegImm32(d20.Reg, 0)
 					ctx.EmitJump(CondNotEqual, lbl5)
+					if bbs[5].Rendered {
+						ctx.EmitJmp(lbl6)
+					}
 					snap23 := d1
 					snap24 := d3
 					snap25 := d4
@@ -6452,6 +6403,9 @@ func init() {
 					}
 					ctx.EmitCmpRegImm32(d64.Reg, 0)
 					ctx.EmitJump(CondNotEqual, lbl2)
+					if bbs[2].Rendered {
+						ctx.EmitJmp(lbl3)
+					}
 					snap68 := d1
 					snap69 := d3
 					snap70 := d4
@@ -7354,6 +7308,9 @@ func init() {
 					}
 					ctx.EmitCmpRegImm32(d17.Reg, 0)
 					ctx.EmitJump(CondNotEqual, lbl5)
+					if bbs[5].Rendered {
+						ctx.EmitJmp(lbl6)
+					}
 					snap20 := d1
 					snap21 := d2
 					snap22 := d3
@@ -7738,6 +7695,9 @@ func init() {
 					}
 					ctx.EmitCmpRegImm32(d59.Reg, 0)
 					ctx.EmitJump(CondNotEqual, lbl2)
+					if bbs[2].Rendered {
+						ctx.EmitJmp(lbl3)
+					}
 					snap63 := d1
 					snap64 := d2
 					snap65 := d3
@@ -8548,8 +8508,6 @@ Patterns can be any of:
 				ctx.EnsureDesc(&d12)
 				ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d0, d12})
 				ctx.FreeDesc(&d12)
-				ctx.EnsureDesc(&d0)
-				ctx.EnsureDesc(&d0)
 				ctx.SyncDesc(&d0)
 				d13 := ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d0}, 2)
 				d13.NoHeapPointer = false
@@ -13468,8 +13426,6 @@ Patterns can be any of:
 					ctx.BindReg(d36.Reg, &d36)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d34)
-					ctx.EnsureDesc(&d34)
-					ctx.EnsureDesc(&d34)
 					if d34.Loc == LocImm {
 						tmpPair := JITValueDesc{Loc: LocRegPair, Type: d34.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 						ctx.TrackImm(d34.Imm)
@@ -13495,8 +13451,6 @@ Patterns can be any of:
 					if d34.Loc != LocRegPair && d34.Loc != LocStackPair && d34.Loc != LocInputPair {
 						panic("jit: generic call arg expects 2-word value (tokenize arg0)")
 					}
-					ctx.EnsureDesc(&d35)
-					ctx.EnsureDesc(&d35)
 					ctx.EnsureDesc(&d35)
 					if d35.Loc == LocImm {
 						tmpPair := JITValueDesc{Loc: LocRegPair, Type: d35.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
@@ -13849,8 +13803,6 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d59)
 					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *[]Scmer, value []Scmer) { *dst = value }), []JITValueDesc{d38, d59})
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d51)
-					ctx.EnsureDesc(&d51)
 					d51 = JITPrepareScmerGoArg(ctx, d51)
 					ctx.SyncDesc(&d51)
 					d60 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSourceInfo), []JITValueDesc{d51}, 1)
@@ -13955,8 +13907,6 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.StabilizeDescForControlFlow(&d40)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d40)
-					ctx.EnsureDesc(&d40)
 					d40 = JITPrepareScmerGoArg(ctx, d40)
 					ctx.SyncDesc(&d40)
 					d64 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d40}, 1)
@@ -14031,8 +13981,6 @@ Patterns can be any of:
 					d43 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase39) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d51)
-					ctx.EnsureDesc(&d51)
 					d51 = JITPrepareScmerGoArg(ctx, d51)
 					ctx.SyncDesc(&d51)
 					d69 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).SourceInfo), []JITValueDesc{d51}, 1)
@@ -14375,8 +14323,6 @@ Patterns can be any of:
 					ctx.BindReg(r15, &d93)
 					ctx.StabilizeDescForControlFlow(&d93)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d93)
-					ctx.EnsureDesc(&d93)
 					d93 = JITPrepareScmerGoArg(ctx, d93)
 					ctx.SyncDesc(&d93)
 					d95 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d93}, 1)
@@ -14735,8 +14681,6 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d118)
 					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *[]Scmer, value []Scmer) { *dst = value }), []JITValueDesc{d97, d118})
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d110)
-					ctx.EnsureDesc(&d110)
 					d110 = JITPrepareScmerGoArg(ctx, d110)
 					ctx.SyncDesc(&d110)
 					d119 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSourceInfo), []JITValueDesc{d110}, 1)
@@ -14841,8 +14785,6 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.StabilizeDescForControlFlow(&d99)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d99)
-					ctx.EnsureDesc(&d99)
 					d99 = JITPrepareScmerGoArg(ctx, d99)
 					ctx.SyncDesc(&d99)
 					d123 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d99}, 1)
@@ -14917,8 +14859,6 @@ Patterns can be any of:
 					d102 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase98) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d110)
-					ctx.EnsureDesc(&d110)
 					d110 = JITPrepareScmerGoArg(ctx, d110)
 					ctx.SyncDesc(&d110)
 					d128 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).SourceInfo), []JITValueDesc{d110}, 1)
@@ -15261,8 +15201,6 @@ Patterns can be any of:
 					ctx.BindReg(r30, &d152)
 					ctx.StabilizeDescForControlFlow(&d152)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d152)
-					ctx.EnsureDesc(&d152)
 					d152 = JITPrepareScmerGoArg(ctx, d152)
 					ctx.SyncDesc(&d152)
 					d154 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d152}, 1)
@@ -15621,8 +15559,6 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d177)
 					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *[]Scmer, value []Scmer) { *dst = value }), []JITValueDesc{d156, d177})
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d169)
-					ctx.EnsureDesc(&d169)
 					d169 = JITPrepareScmerGoArg(ctx, d169)
 					ctx.SyncDesc(&d169)
 					d178 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSourceInfo), []JITValueDesc{d169}, 1)
@@ -15727,8 +15663,6 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.StabilizeDescForControlFlow(&d158)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d158)
-					ctx.EnsureDesc(&d158)
 					d158 = JITPrepareScmerGoArg(ctx, d158)
 					ctx.SyncDesc(&d158)
 					d182 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d158}, 1)
@@ -15803,8 +15737,6 @@ Patterns can be any of:
 					d161 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase157) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d169)
-					ctx.EnsureDesc(&d169)
 					d169 = JITPrepareScmerGoArg(ctx, d169)
 					ctx.SyncDesc(&d169)
 					d187 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).SourceInfo), []JITValueDesc{d169}, 1)
@@ -16147,8 +16079,6 @@ Patterns can be any of:
 					ctx.BindReg(r45, &d211)
 					ctx.StabilizeDescForControlFlow(&d211)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d211)
-					ctx.EnsureDesc(&d211)
 					d211 = JITPrepareScmerGoArg(ctx, d211)
 					ctx.SyncDesc(&d211)
 					d213 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d211}, 1)
@@ -16507,8 +16437,6 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d236)
 					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *[]Scmer, value []Scmer) { *dst = value }), []JITValueDesc{d215, d236})
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d228)
-					ctx.EnsureDesc(&d228)
 					d228 = JITPrepareScmerGoArg(ctx, d228)
 					ctx.SyncDesc(&d228)
 					d237 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSourceInfo), []JITValueDesc{d228}, 1)
@@ -16613,8 +16541,6 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.StabilizeDescForControlFlow(&d217)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d217)
-					ctx.EnsureDesc(&d217)
 					d217 = JITPrepareScmerGoArg(ctx, d217)
 					ctx.SyncDesc(&d217)
 					d241 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d217}, 1)
@@ -16689,8 +16615,6 @@ Patterns can be any of:
 					d220 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase216) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d228)
-					ctx.EnsureDesc(&d228)
 					d228 = JITPrepareScmerGoArg(ctx, d228)
 					ctx.SyncDesc(&d228)
 					d246 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).SourceInfo), []JITValueDesc{d228}, 1)
@@ -17033,8 +16957,6 @@ Patterns can be any of:
 					ctx.BindReg(r60, &d270)
 					ctx.StabilizeDescForControlFlow(&d270)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d270)
-					ctx.EnsureDesc(&d270)
 					d270 = JITPrepareScmerGoArg(ctx, d270)
 					ctx.SyncDesc(&d270)
 					d272 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d270}, 1)
@@ -17393,8 +17315,6 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d295)
 					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *[]Scmer, value []Scmer) { *dst = value }), []JITValueDesc{d274, d295})
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d287)
-					ctx.EnsureDesc(&d287)
 					d287 = JITPrepareScmerGoArg(ctx, d287)
 					ctx.SyncDesc(&d287)
 					d296 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSourceInfo), []JITValueDesc{d287}, 1)
@@ -17499,8 +17419,6 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.StabilizeDescForControlFlow(&d276)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d276)
-					ctx.EnsureDesc(&d276)
 					d276 = JITPrepareScmerGoArg(ctx, d276)
 					ctx.SyncDesc(&d276)
 					d300 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d276}, 1)
@@ -17575,8 +17493,6 @@ Patterns can be any of:
 					d279 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase275) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d287)
-					ctx.EnsureDesc(&d287)
 					d287 = JITPrepareScmerGoArg(ctx, d287)
 					ctx.SyncDesc(&d287)
 					d305 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).SourceInfo), []JITValueDesc{d287}, 1)
@@ -17919,8 +17835,6 @@ Patterns can be any of:
 					ctx.BindReg(r75, &d329)
 					ctx.StabilizeDescForControlFlow(&d329)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d329)
-					ctx.EnsureDesc(&d329)
 					d329 = JITPrepareScmerGoArg(ctx, d329)
 					ctx.SyncDesc(&d329)
 					d331 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d329}, 1)
@@ -18279,8 +18193,6 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d354)
 					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *[]Scmer, value []Scmer) { *dst = value }), []JITValueDesc{d333, d354})
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d346)
-					ctx.EnsureDesc(&d346)
 					d346 = JITPrepareScmerGoArg(ctx, d346)
 					ctx.SyncDesc(&d346)
 					d355 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSourceInfo), []JITValueDesc{d346}, 1)
@@ -18385,8 +18297,6 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.StabilizeDescForControlFlow(&d335)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d335)
-					ctx.EnsureDesc(&d335)
 					d335 = JITPrepareScmerGoArg(ctx, d335)
 					ctx.SyncDesc(&d335)
 					d359 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d335}, 1)
@@ -18461,8 +18371,6 @@ Patterns can be any of:
 					d338 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase334) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d346)
-					ctx.EnsureDesc(&d346)
 					d346 = JITPrepareScmerGoArg(ctx, d346)
 					ctx.SyncDesc(&d346)
 					d364 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).SourceInfo), []JITValueDesc{d346}, 1)
@@ -18805,8 +18713,6 @@ Patterns can be any of:
 					ctx.BindReg(r90, &d388)
 					ctx.StabilizeDescForControlFlow(&d388)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d388)
-					ctx.EnsureDesc(&d388)
 					d388 = JITPrepareScmerGoArg(ctx, d388)
 					ctx.SyncDesc(&d388)
 					d390 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d388}, 1)
@@ -19165,8 +19071,6 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d413)
 					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *[]Scmer, value []Scmer) { *dst = value }), []JITValueDesc{d392, d413})
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d405)
-					ctx.EnsureDesc(&d405)
 					d405 = JITPrepareScmerGoArg(ctx, d405)
 					ctx.SyncDesc(&d405)
 					d414 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSourceInfo), []JITValueDesc{d405}, 1)
@@ -19271,8 +19175,6 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.StabilizeDescForControlFlow(&d394)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d394)
-					ctx.EnsureDesc(&d394)
 					d394 = JITPrepareScmerGoArg(ctx, d394)
 					ctx.SyncDesc(&d394)
 					d418 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d394}, 1)
@@ -19347,8 +19249,6 @@ Patterns can be any of:
 					d397 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase393) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d405)
-					ctx.EnsureDesc(&d405)
 					d405 = JITPrepareScmerGoArg(ctx, d405)
 					ctx.SyncDesc(&d405)
 					d423 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).SourceInfo), []JITValueDesc{d405}, 1)
@@ -19691,8 +19591,6 @@ Patterns can be any of:
 					ctx.BindReg(r105, &d447)
 					ctx.StabilizeDescForControlFlow(&d447)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d447)
-					ctx.EnsureDesc(&d447)
 					d447 = JITPrepareScmerGoArg(ctx, d447)
 					ctx.SyncDesc(&d447)
 					d449 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d447}, 1)
@@ -20051,8 +19949,6 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d472)
 					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *[]Scmer, value []Scmer) { *dst = value }), []JITValueDesc{d451, d472})
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d464)
-					ctx.EnsureDesc(&d464)
 					d464 = JITPrepareScmerGoArg(ctx, d464)
 					ctx.SyncDesc(&d464)
 					d473 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSourceInfo), []JITValueDesc{d464}, 1)
@@ -20157,8 +20053,6 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.StabilizeDescForControlFlow(&d453)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d453)
-					ctx.EnsureDesc(&d453)
 					d453 = JITPrepareScmerGoArg(ctx, d453)
 					ctx.SyncDesc(&d453)
 					d477 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d453}, 1)
@@ -20233,8 +20127,6 @@ Patterns can be any of:
 					d456 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase452) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d464)
-					ctx.EnsureDesc(&d464)
 					d464 = JITPrepareScmerGoArg(ctx, d464)
 					ctx.SyncDesc(&d464)
 					d482 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).SourceInfo), []JITValueDesc{d464}, 1)
@@ -20577,8 +20469,6 @@ Patterns can be any of:
 					ctx.BindReg(r120, &d506)
 					ctx.StabilizeDescForControlFlow(&d506)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d506)
-					ctx.EnsureDesc(&d506)
 					d506 = JITPrepareScmerGoArg(ctx, d506)
 					ctx.SyncDesc(&d506)
 					d508 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d506}, 1)
@@ -20937,8 +20827,6 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d531)
 					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *[]Scmer, value []Scmer) { *dst = value }), []JITValueDesc{d510, d531})
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d523)
-					ctx.EnsureDesc(&d523)
 					d523 = JITPrepareScmerGoArg(ctx, d523)
 					ctx.SyncDesc(&d523)
 					d532 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSourceInfo), []JITValueDesc{d523}, 1)
@@ -21043,8 +20931,6 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.StabilizeDescForControlFlow(&d512)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d512)
-					ctx.EnsureDesc(&d512)
 					d512 = JITPrepareScmerGoArg(ctx, d512)
 					ctx.SyncDesc(&d512)
 					d536 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d512}, 1)
@@ -21119,8 +21005,6 @@ Patterns can be any of:
 					d515 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase511) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d523)
-					ctx.EnsureDesc(&d523)
 					d523 = JITPrepareScmerGoArg(ctx, d523)
 					ctx.SyncDesc(&d523)
 					d541 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).SourceInfo), []JITValueDesc{d523}, 1)
@@ -21463,8 +21347,6 @@ Patterns can be any of:
 					ctx.BindReg(r135, &d565)
 					ctx.StabilizeDescForControlFlow(&d565)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d565)
-					ctx.EnsureDesc(&d565)
 					d565 = JITPrepareScmerGoArg(ctx, d565)
 					ctx.SyncDesc(&d565)
 					d567 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d565}, 1)
@@ -21823,8 +21705,6 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d590)
 					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *[]Scmer, value []Scmer) { *dst = value }), []JITValueDesc{d569, d590})
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d582)
-					ctx.EnsureDesc(&d582)
 					d582 = JITPrepareScmerGoArg(ctx, d582)
 					ctx.SyncDesc(&d582)
 					d591 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSourceInfo), []JITValueDesc{d582}, 1)
@@ -21929,8 +21809,6 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.StabilizeDescForControlFlow(&d571)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d571)
-					ctx.EnsureDesc(&d571)
 					d571 = JITPrepareScmerGoArg(ctx, d571)
 					ctx.SyncDesc(&d571)
 					d595 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d571}, 1)
@@ -22005,8 +21883,6 @@ Patterns can be any of:
 					d574 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase570) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d582)
-					ctx.EnsureDesc(&d582)
 					d582 = JITPrepareScmerGoArg(ctx, d582)
 					ctx.SyncDesc(&d582)
 					d600 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).SourceInfo), []JITValueDesc{d582}, 1)
@@ -22349,8 +22225,6 @@ Patterns can be any of:
 					ctx.BindReg(r150, &d624)
 					ctx.StabilizeDescForControlFlow(&d624)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d624)
-					ctx.EnsureDesc(&d624)
 					d624 = JITPrepareScmerGoArg(ctx, d624)
 					ctx.SyncDesc(&d624)
 					d626 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d624}, 1)
@@ -22709,8 +22583,6 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d649)
 					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *[]Scmer, value []Scmer) { *dst = value }), []JITValueDesc{d628, d649})
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d641)
-					ctx.EnsureDesc(&d641)
 					d641 = JITPrepareScmerGoArg(ctx, d641)
 					ctx.SyncDesc(&d641)
 					d650 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSourceInfo), []JITValueDesc{d641}, 1)
@@ -22815,8 +22687,6 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.StabilizeDescForControlFlow(&d630)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d630)
-					ctx.EnsureDesc(&d630)
 					d630 = JITPrepareScmerGoArg(ctx, d630)
 					ctx.SyncDesc(&d630)
 					d654 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d630}, 1)
@@ -22891,8 +22761,6 @@ Patterns can be any of:
 					d633 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase629) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d641)
-					ctx.EnsureDesc(&d641)
 					d641 = JITPrepareScmerGoArg(ctx, d641)
 					ctx.SyncDesc(&d641)
 					d659 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).SourceInfo), []JITValueDesc{d641}, 1)
@@ -23235,8 +23103,6 @@ Patterns can be any of:
 					ctx.BindReg(r165, &d683)
 					ctx.StabilizeDescForControlFlow(&d683)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d683)
-					ctx.EnsureDesc(&d683)
 					d683 = JITPrepareScmerGoArg(ctx, d683)
 					ctx.SyncDesc(&d683)
 					d685 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d683}, 1)
@@ -23595,8 +23461,6 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d708)
 					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *[]Scmer, value []Scmer) { *dst = value }), []JITValueDesc{d687, d708})
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d700)
-					ctx.EnsureDesc(&d700)
 					d700 = JITPrepareScmerGoArg(ctx, d700)
 					ctx.SyncDesc(&d700)
 					d709 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSourceInfo), []JITValueDesc{d700}, 1)
@@ -23701,8 +23565,6 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.StabilizeDescForControlFlow(&d689)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d689)
-					ctx.EnsureDesc(&d689)
 					d689 = JITPrepareScmerGoArg(ctx, d689)
 					ctx.SyncDesc(&d689)
 					d713 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d689}, 1)
@@ -23777,8 +23639,6 @@ Patterns can be any of:
 					d692 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d700)
-					ctx.EnsureDesc(&d700)
 					d700 = JITPrepareScmerGoArg(ctx, d700)
 					ctx.SyncDesc(&d700)
 					d718 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).SourceInfo), []JITValueDesc{d700}, 1)
@@ -24121,8 +23981,6 @@ Patterns can be any of:
 					ctx.BindReg(r180, &d742)
 					ctx.StabilizeDescForControlFlow(&d742)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d742)
-					ctx.EnsureDesc(&d742)
 					d742 = JITPrepareScmerGoArg(ctx, d742)
 					ctx.SyncDesc(&d742)
 					d744 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d742}, 1)
@@ -24481,8 +24339,6 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d767)
 					ctx.EmitGoCallVoid(GoFuncAddr(func(dst *[]Scmer, value []Scmer) { *dst = value }), []JITValueDesc{d746, d767})
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d759)
-					ctx.EnsureDesc(&d759)
 					d759 = JITPrepareScmerGoArg(ctx, d759)
 					ctx.SyncDesc(&d759)
 					d768 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSourceInfo), []JITValueDesc{d759}, 1)
@@ -24587,8 +24443,6 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.StabilizeDescForControlFlow(&d748)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d748)
-					ctx.EnsureDesc(&d748)
 					d748 = JITPrepareScmerGoArg(ctx, d748)
 					ctx.SyncDesc(&d748)
 					d772 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d748}, 1)
@@ -24663,8 +24517,6 @@ Patterns can be any of:
 					d751 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d759)
-					ctx.EnsureDesc(&d759)
 					d759 = JITPrepareScmerGoArg(ctx, d759)
 					ctx.SyncDesc(&d759)
 					d777 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).SourceInfo), []JITValueDesc{d759}, 1)
@@ -25007,8 +24859,6 @@ Patterns can be any of:
 					ctx.BindReg(r195, &d801)
 					ctx.StabilizeDescForControlFlow(&d801)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d801)
-					ctx.EnsureDesc(&d801)
 					d801 = JITPrepareScmerGoArg(ctx, d801)
 					ctx.SyncDesc(&d801)
 					d803 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d801}, 1)
@@ -25051,8 +24901,6 @@ Patterns can be any of:
 					d751 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d746)
-					ctx.EnsureDesc(&d746)
 					if d746.Loc == LocRegPair || d746.Loc == LocStackPair || d746.Loc == LocRegTriple || d746.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
 					}
@@ -25262,8 +25110,6 @@ Patterns can be any of:
 					ctx.BindReg(r200, &d824)
 					ctx.StabilizeDescForControlFlow(&d824)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d824)
-					ctx.EnsureDesc(&d824)
 					d824 = JITPrepareScmerGoArg(ctx, d824)
 					ctx.SyncDesc(&d824)
 					d826 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSourceInfo), []JITValueDesc{d824}, 1)
@@ -25368,8 +25214,6 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.StabilizeDescForControlFlow(&d750)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d750)
-					ctx.EnsureDesc(&d750)
 					d750 = JITPrepareScmerGoArg(ctx, d750)
 					ctx.SyncDesc(&d750)
 					d830 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d750}, 1)
@@ -25412,8 +25256,6 @@ Patterns can be any of:
 					d751 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d746)
-					ctx.EnsureDesc(&d746)
 					if d746.Loc == LocRegPair || d746.Loc == LocStackPair || d746.Loc == LocRegTriple || d746.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
 					}
@@ -25684,8 +25526,6 @@ Patterns can be any of:
 					ctx.FreeDesc(&d854)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d756)
-					ctx.EnsureDesc(&d756)
 					ctx.SyncDesc(&d756)
 					d855 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d756}, 2)
 					d855.NoHeapPointer = false
@@ -25706,8 +25546,6 @@ Patterns can be any of:
 					d751 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d824)
-					ctx.EnsureDesc(&d824)
 					d824 = JITPrepareScmerGoArg(ctx, d824)
 					ctx.SyncDesc(&d824)
 					d857 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).SourceInfo), []JITValueDesc{d824}, 1)
@@ -25864,8 +25702,6 @@ Patterns can be any of:
 					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d756, d839})
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d756)
-					ctx.EnsureDesc(&d756)
 					ctx.SyncDesc(&d756)
 					d867 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d756}, 2)
 					d867.NoHeapPointer = false
@@ -26123,8 +25959,6 @@ Patterns can be any of:
 					ctx.BindReg(r225, &d887)
 					ctx.StabilizeDescForControlFlow(&d887)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d887)
-					ctx.EnsureDesc(&d887)
 					d887 = JITPrepareScmerGoArg(ctx, d887)
 					ctx.SyncDesc(&d887)
 					d889 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d887}, 1)
@@ -26167,8 +26001,6 @@ Patterns can be any of:
 					d751 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d746)
-					ctx.EnsureDesc(&d746)
 					if d746.Loc == LocRegPair || d746.Loc == LocStackPair || d746.Loc == LocRegTriple || d746.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
 					}
@@ -26493,8 +26325,6 @@ Patterns can be any of:
 					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d756, d911})
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d756)
-					ctx.EnsureDesc(&d756)
 					ctx.SyncDesc(&d756)
 					d919 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d756}, 2)
 					d919.NoHeapPointer = false
@@ -26713,8 +26543,6 @@ Patterns can be any of:
 					ctx.BindReg(r244, &d940)
 					ctx.StabilizeDescForControlFlow(&d940)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d940)
-					ctx.EnsureDesc(&d940)
 					d940 = JITPrepareScmerGoArg(ctx, d940)
 					ctx.SyncDesc(&d940)
 					d942 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSourceInfo), []JITValueDesc{d940}, 1)
@@ -26819,8 +26647,6 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.StabilizeDescForControlFlow(&d691)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d691)
-					ctx.EnsureDesc(&d691)
 					d691 = JITPrepareScmerGoArg(ctx, d691)
 					ctx.SyncDesc(&d691)
 					d946 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d691}, 1)
@@ -26863,8 +26689,6 @@ Patterns can be any of:
 					d692 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d687)
-					ctx.EnsureDesc(&d687)
 					if d687.Loc == LocRegPair || d687.Loc == LocStackPair || d687.Loc == LocRegTriple || d687.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
 					}
@@ -27135,8 +26959,6 @@ Patterns can be any of:
 					ctx.FreeDesc(&d970)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d697)
-					ctx.EnsureDesc(&d697)
 					ctx.SyncDesc(&d697)
 					d971 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d697}, 2)
 					d971.NoHeapPointer = false
@@ -27157,8 +26979,6 @@ Patterns can be any of:
 					d692 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d940)
-					ctx.EnsureDesc(&d940)
 					d940 = JITPrepareScmerGoArg(ctx, d940)
 					ctx.SyncDesc(&d940)
 					d973 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).SourceInfo), []JITValueDesc{d940}, 1)
@@ -27315,8 +27135,6 @@ Patterns can be any of:
 					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d697, d955})
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d697)
-					ctx.EnsureDesc(&d697)
 					ctx.SyncDesc(&d697)
 					d983 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d697}, 2)
 					d983.NoHeapPointer = false
@@ -27574,8 +27392,6 @@ Patterns can be any of:
 					ctx.BindReg(r269, &d1003)
 					ctx.StabilizeDescForControlFlow(&d1003)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d1003)
-					ctx.EnsureDesc(&d1003)
 					d1003 = JITPrepareScmerGoArg(ctx, d1003)
 					ctx.SyncDesc(&d1003)
 					d1005 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d1003}, 1)
@@ -27618,8 +27434,6 @@ Patterns can be any of:
 					d692 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d687)
-					ctx.EnsureDesc(&d687)
 					if d687.Loc == LocRegPair || d687.Loc == LocStackPair || d687.Loc == LocRegTriple || d687.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
 					}
@@ -27944,8 +27758,6 @@ Patterns can be any of:
 					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d697, d1027})
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d697)
-					ctx.EnsureDesc(&d697)
 					ctx.SyncDesc(&d697)
 					d1035 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d697}, 2)
 					d1035.NoHeapPointer = false
@@ -28164,8 +27976,6 @@ Patterns can be any of:
 					ctx.BindReg(r288, &d1056)
 					ctx.StabilizeDescForControlFlow(&d1056)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d1056)
-					ctx.EnsureDesc(&d1056)
 					d1056 = JITPrepareScmerGoArg(ctx, d1056)
 					ctx.SyncDesc(&d1056)
 					d1058 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSourceInfo), []JITValueDesc{d1056}, 1)
@@ -28270,8 +28080,6 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.StabilizeDescForControlFlow(&d632)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d632)
-					ctx.EnsureDesc(&d632)
 					d632 = JITPrepareScmerGoArg(ctx, d632)
 					ctx.SyncDesc(&d632)
 					d1062 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d632}, 1)
@@ -28314,8 +28122,6 @@ Patterns can be any of:
 					d633 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase629) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d628)
-					ctx.EnsureDesc(&d628)
 					if d628.Loc == LocRegPair || d628.Loc == LocStackPair || d628.Loc == LocRegTriple || d628.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
 					}
@@ -28586,8 +28392,6 @@ Patterns can be any of:
 					ctx.FreeDesc(&d1086)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d638)
-					ctx.EnsureDesc(&d638)
 					ctx.SyncDesc(&d638)
 					d1087 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d638}, 2)
 					d1087.NoHeapPointer = false
@@ -28608,8 +28412,6 @@ Patterns can be any of:
 					d633 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase629) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d1056)
-					ctx.EnsureDesc(&d1056)
 					d1056 = JITPrepareScmerGoArg(ctx, d1056)
 					ctx.SyncDesc(&d1056)
 					d1089 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).SourceInfo), []JITValueDesc{d1056}, 1)
@@ -28766,8 +28568,6 @@ Patterns can be any of:
 					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d638, d1071})
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d638)
-					ctx.EnsureDesc(&d638)
 					ctx.SyncDesc(&d638)
 					d1099 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d638}, 2)
 					d1099.NoHeapPointer = false
@@ -29025,8 +28825,6 @@ Patterns can be any of:
 					ctx.BindReg(r313, &d1119)
 					ctx.StabilizeDescForControlFlow(&d1119)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d1119)
-					ctx.EnsureDesc(&d1119)
 					d1119 = JITPrepareScmerGoArg(ctx, d1119)
 					ctx.SyncDesc(&d1119)
 					d1121 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d1119}, 1)
@@ -29069,8 +28867,6 @@ Patterns can be any of:
 					d633 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase629) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d628)
-					ctx.EnsureDesc(&d628)
 					if d628.Loc == LocRegPair || d628.Loc == LocStackPair || d628.Loc == LocRegTriple || d628.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
 					}
@@ -29395,8 +29191,6 @@ Patterns can be any of:
 					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d638, d1143})
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d638)
-					ctx.EnsureDesc(&d638)
 					ctx.SyncDesc(&d638)
 					d1151 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d638}, 2)
 					d1151.NoHeapPointer = false
@@ -29615,8 +29409,6 @@ Patterns can be any of:
 					ctx.BindReg(r332, &d1172)
 					ctx.StabilizeDescForControlFlow(&d1172)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d1172)
-					ctx.EnsureDesc(&d1172)
 					d1172 = JITPrepareScmerGoArg(ctx, d1172)
 					ctx.SyncDesc(&d1172)
 					d1174 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSourceInfo), []JITValueDesc{d1172}, 1)
@@ -29721,8 +29513,6 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.StabilizeDescForControlFlow(&d573)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d573)
-					ctx.EnsureDesc(&d573)
 					d573 = JITPrepareScmerGoArg(ctx, d573)
 					ctx.SyncDesc(&d573)
 					d1178 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d573}, 1)
@@ -29765,8 +29555,6 @@ Patterns can be any of:
 					d574 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase570) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d569)
-					ctx.EnsureDesc(&d569)
 					if d569.Loc == LocRegPair || d569.Loc == LocStackPair || d569.Loc == LocRegTriple || d569.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
 					}
@@ -30037,8 +29825,6 @@ Patterns can be any of:
 					ctx.FreeDesc(&d1202)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d579)
-					ctx.EnsureDesc(&d579)
 					ctx.SyncDesc(&d579)
 					d1203 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d579}, 2)
 					d1203.NoHeapPointer = false
@@ -30059,8 +29845,6 @@ Patterns can be any of:
 					d574 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase570) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d1172)
-					ctx.EnsureDesc(&d1172)
 					d1172 = JITPrepareScmerGoArg(ctx, d1172)
 					ctx.SyncDesc(&d1172)
 					d1205 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).SourceInfo), []JITValueDesc{d1172}, 1)
@@ -30217,8 +30001,6 @@ Patterns can be any of:
 					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d579, d1187})
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d579)
-					ctx.EnsureDesc(&d579)
 					ctx.SyncDesc(&d579)
 					d1215 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d579}, 2)
 					d1215.NoHeapPointer = false
@@ -30476,8 +30258,6 @@ Patterns can be any of:
 					ctx.BindReg(r357, &d1235)
 					ctx.StabilizeDescForControlFlow(&d1235)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d1235)
-					ctx.EnsureDesc(&d1235)
 					d1235 = JITPrepareScmerGoArg(ctx, d1235)
 					ctx.SyncDesc(&d1235)
 					d1237 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d1235}, 1)
@@ -30520,8 +30300,6 @@ Patterns can be any of:
 					d574 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase570) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d569)
-					ctx.EnsureDesc(&d569)
 					if d569.Loc == LocRegPair || d569.Loc == LocStackPair || d569.Loc == LocRegTriple || d569.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
 					}
@@ -30846,8 +30624,6 @@ Patterns can be any of:
 					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d579, d1259})
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d579)
-					ctx.EnsureDesc(&d579)
 					ctx.SyncDesc(&d579)
 					d1267 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d579}, 2)
 					d1267.NoHeapPointer = false
@@ -31066,8 +30842,6 @@ Patterns can be any of:
 					ctx.BindReg(r376, &d1288)
 					ctx.StabilizeDescForControlFlow(&d1288)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d1288)
-					ctx.EnsureDesc(&d1288)
 					d1288 = JITPrepareScmerGoArg(ctx, d1288)
 					ctx.SyncDesc(&d1288)
 					d1290 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSourceInfo), []JITValueDesc{d1288}, 1)
@@ -31172,8 +30946,6 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.StabilizeDescForControlFlow(&d514)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d514)
-					ctx.EnsureDesc(&d514)
 					d514 = JITPrepareScmerGoArg(ctx, d514)
 					ctx.SyncDesc(&d514)
 					d1294 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d514}, 1)
@@ -31216,8 +30988,6 @@ Patterns can be any of:
 					d515 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase511) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d510)
-					ctx.EnsureDesc(&d510)
 					if d510.Loc == LocRegPair || d510.Loc == LocStackPair || d510.Loc == LocRegTriple || d510.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
 					}
@@ -31488,8 +31258,6 @@ Patterns can be any of:
 					ctx.FreeDesc(&d1318)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d520)
-					ctx.EnsureDesc(&d520)
 					ctx.SyncDesc(&d520)
 					d1319 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d520}, 2)
 					d1319.NoHeapPointer = false
@@ -31510,8 +31278,6 @@ Patterns can be any of:
 					d515 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase511) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d1288)
-					ctx.EnsureDesc(&d1288)
 					d1288 = JITPrepareScmerGoArg(ctx, d1288)
 					ctx.SyncDesc(&d1288)
 					d1321 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).SourceInfo), []JITValueDesc{d1288}, 1)
@@ -31668,8 +31434,6 @@ Patterns can be any of:
 					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d520, d1303})
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d520)
-					ctx.EnsureDesc(&d520)
 					ctx.SyncDesc(&d520)
 					d1331 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d520}, 2)
 					d1331.NoHeapPointer = false
@@ -31927,8 +31691,6 @@ Patterns can be any of:
 					ctx.BindReg(r401, &d1351)
 					ctx.StabilizeDescForControlFlow(&d1351)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d1351)
-					ctx.EnsureDesc(&d1351)
 					d1351 = JITPrepareScmerGoArg(ctx, d1351)
 					ctx.SyncDesc(&d1351)
 					d1353 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d1351}, 1)
@@ -31971,8 +31733,6 @@ Patterns can be any of:
 					d515 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase511) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d510)
-					ctx.EnsureDesc(&d510)
 					if d510.Loc == LocRegPair || d510.Loc == LocStackPair || d510.Loc == LocRegTriple || d510.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
 					}
@@ -32297,8 +32057,6 @@ Patterns can be any of:
 					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d520, d1375})
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d520)
-					ctx.EnsureDesc(&d520)
 					ctx.SyncDesc(&d520)
 					d1383 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d520}, 2)
 					d1383.NoHeapPointer = false
@@ -32517,8 +32275,6 @@ Patterns can be any of:
 					ctx.BindReg(r420, &d1404)
 					ctx.StabilizeDescForControlFlow(&d1404)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d1404)
-					ctx.EnsureDesc(&d1404)
 					d1404 = JITPrepareScmerGoArg(ctx, d1404)
 					ctx.SyncDesc(&d1404)
 					d1406 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSourceInfo), []JITValueDesc{d1404}, 1)
@@ -32623,8 +32379,6 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.StabilizeDescForControlFlow(&d455)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d455)
-					ctx.EnsureDesc(&d455)
 					d455 = JITPrepareScmerGoArg(ctx, d455)
 					ctx.SyncDesc(&d455)
 					d1410 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d455}, 1)
@@ -32667,8 +32421,6 @@ Patterns can be any of:
 					d456 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase452) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d451)
-					ctx.EnsureDesc(&d451)
 					if d451.Loc == LocRegPair || d451.Loc == LocStackPair || d451.Loc == LocRegTriple || d451.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
 					}
@@ -32939,8 +32691,6 @@ Patterns can be any of:
 					ctx.FreeDesc(&d1434)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d461)
-					ctx.EnsureDesc(&d461)
 					ctx.SyncDesc(&d461)
 					d1435 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d461}, 2)
 					d1435.NoHeapPointer = false
@@ -32961,8 +32711,6 @@ Patterns can be any of:
 					d456 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase452) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d1404)
-					ctx.EnsureDesc(&d1404)
 					d1404 = JITPrepareScmerGoArg(ctx, d1404)
 					ctx.SyncDesc(&d1404)
 					d1437 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).SourceInfo), []JITValueDesc{d1404}, 1)
@@ -33119,8 +32867,6 @@ Patterns can be any of:
 					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d461, d1419})
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d461)
-					ctx.EnsureDesc(&d461)
 					ctx.SyncDesc(&d461)
 					d1447 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d461}, 2)
 					d1447.NoHeapPointer = false
@@ -33378,8 +33124,6 @@ Patterns can be any of:
 					ctx.BindReg(r445, &d1467)
 					ctx.StabilizeDescForControlFlow(&d1467)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d1467)
-					ctx.EnsureDesc(&d1467)
 					d1467 = JITPrepareScmerGoArg(ctx, d1467)
 					ctx.SyncDesc(&d1467)
 					d1469 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d1467}, 1)
@@ -33422,8 +33166,6 @@ Patterns can be any of:
 					d456 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase452) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d451)
-					ctx.EnsureDesc(&d451)
 					if d451.Loc == LocRegPair || d451.Loc == LocStackPair || d451.Loc == LocRegTriple || d451.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
 					}
@@ -33748,8 +33490,6 @@ Patterns can be any of:
 					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d461, d1491})
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d461)
-					ctx.EnsureDesc(&d461)
 					ctx.SyncDesc(&d461)
 					d1499 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d461}, 2)
 					d1499.NoHeapPointer = false
@@ -33968,8 +33708,6 @@ Patterns can be any of:
 					ctx.BindReg(r464, &d1520)
 					ctx.StabilizeDescForControlFlow(&d1520)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d1520)
-					ctx.EnsureDesc(&d1520)
 					d1520 = JITPrepareScmerGoArg(ctx, d1520)
 					ctx.SyncDesc(&d1520)
 					d1522 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSourceInfo), []JITValueDesc{d1520}, 1)
@@ -34074,8 +33812,6 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.StabilizeDescForControlFlow(&d396)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d396)
-					ctx.EnsureDesc(&d396)
 					d396 = JITPrepareScmerGoArg(ctx, d396)
 					ctx.SyncDesc(&d396)
 					d1526 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d396}, 1)
@@ -34118,8 +33854,6 @@ Patterns can be any of:
 					d397 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase393) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d392)
-					ctx.EnsureDesc(&d392)
 					if d392.Loc == LocRegPair || d392.Loc == LocStackPair || d392.Loc == LocRegTriple || d392.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
 					}
@@ -34390,8 +34124,6 @@ Patterns can be any of:
 					ctx.FreeDesc(&d1550)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d402)
-					ctx.EnsureDesc(&d402)
 					ctx.SyncDesc(&d402)
 					d1551 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d402}, 2)
 					d1551.NoHeapPointer = false
@@ -34412,8 +34144,6 @@ Patterns can be any of:
 					d397 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase393) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d1520)
-					ctx.EnsureDesc(&d1520)
 					d1520 = JITPrepareScmerGoArg(ctx, d1520)
 					ctx.SyncDesc(&d1520)
 					d1553 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).SourceInfo), []JITValueDesc{d1520}, 1)
@@ -34570,8 +34300,6 @@ Patterns can be any of:
 					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d402, d1535})
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d402)
-					ctx.EnsureDesc(&d402)
 					ctx.SyncDesc(&d402)
 					d1563 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d402}, 2)
 					d1563.NoHeapPointer = false
@@ -34829,8 +34557,6 @@ Patterns can be any of:
 					ctx.BindReg(r489, &d1583)
 					ctx.StabilizeDescForControlFlow(&d1583)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d1583)
-					ctx.EnsureDesc(&d1583)
 					d1583 = JITPrepareScmerGoArg(ctx, d1583)
 					ctx.SyncDesc(&d1583)
 					d1585 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d1583}, 1)
@@ -34873,8 +34599,6 @@ Patterns can be any of:
 					d397 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase393) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d392)
-					ctx.EnsureDesc(&d392)
 					if d392.Loc == LocRegPair || d392.Loc == LocStackPair || d392.Loc == LocRegTriple || d392.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
 					}
@@ -35199,8 +34923,6 @@ Patterns can be any of:
 					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d402, d1607})
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d402)
-					ctx.EnsureDesc(&d402)
 					ctx.SyncDesc(&d402)
 					d1615 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d402}, 2)
 					d1615.NoHeapPointer = false
@@ -35419,8 +35141,6 @@ Patterns can be any of:
 					ctx.BindReg(r508, &d1636)
 					ctx.StabilizeDescForControlFlow(&d1636)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d1636)
-					ctx.EnsureDesc(&d1636)
 					d1636 = JITPrepareScmerGoArg(ctx, d1636)
 					ctx.SyncDesc(&d1636)
 					d1638 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSourceInfo), []JITValueDesc{d1636}, 1)
@@ -35525,8 +35245,6 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.StabilizeDescForControlFlow(&d337)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d337)
-					ctx.EnsureDesc(&d337)
 					d337 = JITPrepareScmerGoArg(ctx, d337)
 					ctx.SyncDesc(&d337)
 					d1642 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d337}, 1)
@@ -35569,8 +35287,6 @@ Patterns can be any of:
 					d338 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase334) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d333)
-					ctx.EnsureDesc(&d333)
 					if d333.Loc == LocRegPair || d333.Loc == LocStackPair || d333.Loc == LocRegTriple || d333.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
 					}
@@ -35841,8 +35557,6 @@ Patterns can be any of:
 					ctx.FreeDesc(&d1666)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d343)
-					ctx.EnsureDesc(&d343)
 					ctx.SyncDesc(&d343)
 					d1667 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d343}, 2)
 					d1667.NoHeapPointer = false
@@ -35863,8 +35577,6 @@ Patterns can be any of:
 					d338 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase334) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d1636)
-					ctx.EnsureDesc(&d1636)
 					d1636 = JITPrepareScmerGoArg(ctx, d1636)
 					ctx.SyncDesc(&d1636)
 					d1669 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).SourceInfo), []JITValueDesc{d1636}, 1)
@@ -36021,8 +35733,6 @@ Patterns can be any of:
 					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d343, d1651})
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d343)
-					ctx.EnsureDesc(&d343)
 					ctx.SyncDesc(&d343)
 					d1679 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d343}, 2)
 					d1679.NoHeapPointer = false
@@ -36280,8 +35990,6 @@ Patterns can be any of:
 					ctx.BindReg(r533, &d1699)
 					ctx.StabilizeDescForControlFlow(&d1699)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d1699)
-					ctx.EnsureDesc(&d1699)
 					d1699 = JITPrepareScmerGoArg(ctx, d1699)
 					ctx.SyncDesc(&d1699)
 					d1701 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d1699}, 1)
@@ -36324,8 +36032,6 @@ Patterns can be any of:
 					d338 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase334) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d333)
-					ctx.EnsureDesc(&d333)
 					if d333.Loc == LocRegPair || d333.Loc == LocStackPair || d333.Loc == LocRegTriple || d333.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
 					}
@@ -36650,8 +36356,6 @@ Patterns can be any of:
 					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d343, d1723})
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d343)
-					ctx.EnsureDesc(&d343)
 					ctx.SyncDesc(&d343)
 					d1731 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d343}, 2)
 					d1731.NoHeapPointer = false
@@ -36870,8 +36574,6 @@ Patterns can be any of:
 					ctx.BindReg(r552, &d1752)
 					ctx.StabilizeDescForControlFlow(&d1752)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d1752)
-					ctx.EnsureDesc(&d1752)
 					d1752 = JITPrepareScmerGoArg(ctx, d1752)
 					ctx.SyncDesc(&d1752)
 					d1754 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSourceInfo), []JITValueDesc{d1752}, 1)
@@ -36976,8 +36678,6 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.StabilizeDescForControlFlow(&d278)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d278)
-					ctx.EnsureDesc(&d278)
 					d278 = JITPrepareScmerGoArg(ctx, d278)
 					ctx.SyncDesc(&d278)
 					d1758 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d278}, 1)
@@ -37020,8 +36720,6 @@ Patterns can be any of:
 					d279 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase275) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d274)
-					ctx.EnsureDesc(&d274)
 					if d274.Loc == LocRegPair || d274.Loc == LocStackPair || d274.Loc == LocRegTriple || d274.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
 					}
@@ -37292,8 +36990,6 @@ Patterns can be any of:
 					ctx.FreeDesc(&d1782)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d284)
-					ctx.EnsureDesc(&d284)
 					ctx.SyncDesc(&d284)
 					d1783 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d284}, 2)
 					d1783.NoHeapPointer = false
@@ -37314,8 +37010,6 @@ Patterns can be any of:
 					d279 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase275) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d1752)
-					ctx.EnsureDesc(&d1752)
 					d1752 = JITPrepareScmerGoArg(ctx, d1752)
 					ctx.SyncDesc(&d1752)
 					d1785 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).SourceInfo), []JITValueDesc{d1752}, 1)
@@ -37472,8 +37166,6 @@ Patterns can be any of:
 					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d284, d1767})
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d284)
-					ctx.EnsureDesc(&d284)
 					ctx.SyncDesc(&d284)
 					d1795 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d284}, 2)
 					d1795.NoHeapPointer = false
@@ -37731,8 +37423,6 @@ Patterns can be any of:
 					ctx.BindReg(r577, &d1815)
 					ctx.StabilizeDescForControlFlow(&d1815)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d1815)
-					ctx.EnsureDesc(&d1815)
 					d1815 = JITPrepareScmerGoArg(ctx, d1815)
 					ctx.SyncDesc(&d1815)
 					d1817 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d1815}, 1)
@@ -37775,8 +37465,6 @@ Patterns can be any of:
 					d279 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase275) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d274)
-					ctx.EnsureDesc(&d274)
 					if d274.Loc == LocRegPair || d274.Loc == LocStackPair || d274.Loc == LocRegTriple || d274.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
 					}
@@ -38101,8 +37789,6 @@ Patterns can be any of:
 					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d284, d1839})
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d284)
-					ctx.EnsureDesc(&d284)
 					ctx.SyncDesc(&d284)
 					d1847 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d284}, 2)
 					d1847.NoHeapPointer = false
@@ -38321,8 +38007,6 @@ Patterns can be any of:
 					ctx.BindReg(r596, &d1868)
 					ctx.StabilizeDescForControlFlow(&d1868)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d1868)
-					ctx.EnsureDesc(&d1868)
 					d1868 = JITPrepareScmerGoArg(ctx, d1868)
 					ctx.SyncDesc(&d1868)
 					d1870 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSourceInfo), []JITValueDesc{d1868}, 1)
@@ -38427,8 +38111,6 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.StabilizeDescForControlFlow(&d219)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d219)
-					ctx.EnsureDesc(&d219)
 					d219 = JITPrepareScmerGoArg(ctx, d219)
 					ctx.SyncDesc(&d219)
 					d1874 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d219}, 1)
@@ -38471,8 +38153,6 @@ Patterns can be any of:
 					d220 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase216) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d215)
-					ctx.EnsureDesc(&d215)
 					if d215.Loc == LocRegPair || d215.Loc == LocStackPair || d215.Loc == LocRegTriple || d215.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
 					}
@@ -38743,8 +38423,6 @@ Patterns can be any of:
 					ctx.FreeDesc(&d1898)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d225)
-					ctx.EnsureDesc(&d225)
 					ctx.SyncDesc(&d225)
 					d1899 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d225}, 2)
 					d1899.NoHeapPointer = false
@@ -38765,8 +38443,6 @@ Patterns can be any of:
 					d220 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase216) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d1868)
-					ctx.EnsureDesc(&d1868)
 					d1868 = JITPrepareScmerGoArg(ctx, d1868)
 					ctx.SyncDesc(&d1868)
 					d1901 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).SourceInfo), []JITValueDesc{d1868}, 1)
@@ -38923,8 +38599,6 @@ Patterns can be any of:
 					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d225, d1883})
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d225)
-					ctx.EnsureDesc(&d225)
 					ctx.SyncDesc(&d225)
 					d1911 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d225}, 2)
 					d1911.NoHeapPointer = false
@@ -39182,8 +38856,6 @@ Patterns can be any of:
 					ctx.BindReg(r621, &d1931)
 					ctx.StabilizeDescForControlFlow(&d1931)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d1931)
-					ctx.EnsureDesc(&d1931)
 					d1931 = JITPrepareScmerGoArg(ctx, d1931)
 					ctx.SyncDesc(&d1931)
 					d1933 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d1931}, 1)
@@ -39226,8 +38898,6 @@ Patterns can be any of:
 					d220 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase216) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d215)
-					ctx.EnsureDesc(&d215)
 					if d215.Loc == LocRegPair || d215.Loc == LocStackPair || d215.Loc == LocRegTriple || d215.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
 					}
@@ -39552,8 +39222,6 @@ Patterns can be any of:
 					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d225, d1955})
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d225)
-					ctx.EnsureDesc(&d225)
 					ctx.SyncDesc(&d225)
 					d1963 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d225}, 2)
 					d1963.NoHeapPointer = false
@@ -39772,8 +39440,6 @@ Patterns can be any of:
 					ctx.BindReg(r640, &d1984)
 					ctx.StabilizeDescForControlFlow(&d1984)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d1984)
-					ctx.EnsureDesc(&d1984)
 					d1984 = JITPrepareScmerGoArg(ctx, d1984)
 					ctx.SyncDesc(&d1984)
 					d1986 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSourceInfo), []JITValueDesc{d1984}, 1)
@@ -39878,8 +39544,6 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.StabilizeDescForControlFlow(&d160)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d160)
-					ctx.EnsureDesc(&d160)
 					d160 = JITPrepareScmerGoArg(ctx, d160)
 					ctx.SyncDesc(&d160)
 					d1990 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d160}, 1)
@@ -39922,8 +39586,6 @@ Patterns can be any of:
 					d161 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase157) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d156)
-					ctx.EnsureDesc(&d156)
 					if d156.Loc == LocRegPair || d156.Loc == LocStackPair || d156.Loc == LocRegTriple || d156.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
 					}
@@ -40194,8 +39856,6 @@ Patterns can be any of:
 					ctx.FreeDesc(&d2014)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d166)
-					ctx.EnsureDesc(&d166)
 					ctx.SyncDesc(&d166)
 					d2015 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d166}, 2)
 					d2015.NoHeapPointer = false
@@ -40216,8 +39876,6 @@ Patterns can be any of:
 					d161 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase157) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d1984)
-					ctx.EnsureDesc(&d1984)
 					d1984 = JITPrepareScmerGoArg(ctx, d1984)
 					ctx.SyncDesc(&d1984)
 					d2017 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).SourceInfo), []JITValueDesc{d1984}, 1)
@@ -40374,8 +40032,6 @@ Patterns can be any of:
 					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d166, d1999})
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d166)
-					ctx.EnsureDesc(&d166)
 					ctx.SyncDesc(&d166)
 					d2027 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d166}, 2)
 					d2027.NoHeapPointer = false
@@ -40633,8 +40289,6 @@ Patterns can be any of:
 					ctx.BindReg(r665, &d2047)
 					ctx.StabilizeDescForControlFlow(&d2047)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d2047)
-					ctx.EnsureDesc(&d2047)
 					d2047 = JITPrepareScmerGoArg(ctx, d2047)
 					ctx.SyncDesc(&d2047)
 					d2049 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d2047}, 1)
@@ -40677,8 +40331,6 @@ Patterns can be any of:
 					d161 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase157) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d156)
-					ctx.EnsureDesc(&d156)
 					if d156.Loc == LocRegPair || d156.Loc == LocStackPair || d156.Loc == LocRegTriple || d156.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
 					}
@@ -41003,8 +40655,6 @@ Patterns can be any of:
 					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d166, d2071})
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d166)
-					ctx.EnsureDesc(&d166)
 					ctx.SyncDesc(&d166)
 					d2079 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d166}, 2)
 					d2079.NoHeapPointer = false
@@ -41223,8 +40873,6 @@ Patterns can be any of:
 					ctx.BindReg(r684, &d2100)
 					ctx.StabilizeDescForControlFlow(&d2100)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d2100)
-					ctx.EnsureDesc(&d2100)
 					d2100 = JITPrepareScmerGoArg(ctx, d2100)
 					ctx.SyncDesc(&d2100)
 					d2102 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSourceInfo), []JITValueDesc{d2100}, 1)
@@ -41329,8 +40977,6 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.StabilizeDescForControlFlow(&d101)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d101)
-					ctx.EnsureDesc(&d101)
 					d101 = JITPrepareScmerGoArg(ctx, d101)
 					ctx.SyncDesc(&d101)
 					d2106 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d101}, 1)
@@ -41373,8 +41019,6 @@ Patterns can be any of:
 					d102 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase98) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d97)
-					ctx.EnsureDesc(&d97)
 					if d97.Loc == LocRegPair || d97.Loc == LocStackPair || d97.Loc == LocRegTriple || d97.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
 					}
@@ -41645,8 +41289,6 @@ Patterns can be any of:
 					ctx.FreeDesc(&d2130)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d107)
-					ctx.EnsureDesc(&d107)
 					ctx.SyncDesc(&d107)
 					d2131 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d107}, 2)
 					d2131.NoHeapPointer = false
@@ -41667,8 +41309,6 @@ Patterns can be any of:
 					d102 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase98) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d2100)
-					ctx.EnsureDesc(&d2100)
 					d2100 = JITPrepareScmerGoArg(ctx, d2100)
 					ctx.SyncDesc(&d2100)
 					d2133 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).SourceInfo), []JITValueDesc{d2100}, 1)
@@ -41825,8 +41465,6 @@ Patterns can be any of:
 					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d107, d2115})
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d107)
-					ctx.EnsureDesc(&d107)
 					ctx.SyncDesc(&d107)
 					d2143 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d107}, 2)
 					d2143.NoHeapPointer = false
@@ -42084,8 +41722,6 @@ Patterns can be any of:
 					ctx.BindReg(r709, &d2163)
 					ctx.StabilizeDescForControlFlow(&d2163)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d2163)
-					ctx.EnsureDesc(&d2163)
 					d2163 = JITPrepareScmerGoArg(ctx, d2163)
 					ctx.SyncDesc(&d2163)
 					d2165 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d2163}, 1)
@@ -42128,8 +41764,6 @@ Patterns can be any of:
 					d102 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase98) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d97)
-					ctx.EnsureDesc(&d97)
 					if d97.Loc == LocRegPair || d97.Loc == LocStackPair || d97.Loc == LocRegTriple || d97.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
 					}
@@ -42454,8 +42088,6 @@ Patterns can be any of:
 					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d107, d2187})
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d107)
-					ctx.EnsureDesc(&d107)
 					ctx.SyncDesc(&d107)
 					d2195 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d107}, 2)
 					d2195.NoHeapPointer = false
@@ -42674,8 +42306,6 @@ Patterns can be any of:
 					ctx.BindReg(r728, &d2216)
 					ctx.StabilizeDescForControlFlow(&d2216)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d2216)
-					ctx.EnsureDesc(&d2216)
 					d2216 = JITPrepareScmerGoArg(ctx, d2216)
 					ctx.SyncDesc(&d2216)
 					d2218 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSourceInfo), []JITValueDesc{d2216}, 1)
@@ -42780,8 +42410,6 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.StabilizeDescForControlFlow(&d42)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d42)
-					ctx.EnsureDesc(&d42)
 					d42 = JITPrepareScmerGoArg(ctx, d42)
 					ctx.SyncDesc(&d42)
 					d2222 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d42}, 1)
@@ -42824,8 +42452,6 @@ Patterns can be any of:
 					d43 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase39) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d38)
-					ctx.EnsureDesc(&d38)
 					if d38.Loc == LocRegPair || d38.Loc == LocStackPair || d38.Loc == LocRegTriple || d38.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
 					}
@@ -43096,8 +42722,6 @@ Patterns can be any of:
 					ctx.FreeDesc(&d2246)
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d48)
-					ctx.EnsureDesc(&d48)
 					ctx.SyncDesc(&d48)
 					d2247 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d48}, 2)
 					d2247.NoHeapPointer = false
@@ -43118,8 +42742,6 @@ Patterns can be any of:
 					d43 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase39) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d2216)
-					ctx.EnsureDesc(&d2216)
 					d2216 = JITPrepareScmerGoArg(ctx, d2216)
 					ctx.SyncDesc(&d2216)
 					d2249 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).SourceInfo), []JITValueDesc{d2216}, 1)
@@ -43276,8 +42898,6 @@ Patterns can be any of:
 					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d48, d2231})
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d48)
-					ctx.EnsureDesc(&d48)
 					ctx.SyncDesc(&d48)
 					d2259 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d48}, 2)
 					d2259.NoHeapPointer = false
@@ -43535,8 +43155,6 @@ Patterns can be any of:
 					ctx.BindReg(r753, &d2279)
 					ctx.StabilizeDescForControlFlow(&d2279)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d2279)
-					ctx.EnsureDesc(&d2279)
 					d2279 = JITPrepareScmerGoArg(ctx, d2279)
 					ctx.SyncDesc(&d2279)
 					d2281 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).IsSymbol), []JITValueDesc{d2279}, 1)
@@ -43579,8 +43197,6 @@ Patterns can be any of:
 					d43 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase39) + int32(56)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d38)
-					ctx.EnsureDesc(&d38)
 					if d38.Loc == LocRegPair || d38.Loc == LocStackPair || d38.Loc == LocRegTriple || d38.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
 					}
@@ -43905,8 +43521,6 @@ Patterns can be any of:
 					ctx.EmitGoCallVoid(GoFuncAddr(func(base *SourceInfo, value Scmer) { base.value = value }), []JITValueDesc{d48, d2303})
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d48)
-					ctx.EnsureDesc(&d48)
 					ctx.SyncDesc(&d48)
 					d2311 = ctx.EmitGoCallScalar(GoFuncAddr((func(arg0 *SourceInfo) Scmer { return NewSourceInfo(*arg0) })), []JITValueDesc{d48}, 2)
 					d2311.NoHeapPointer = false
@@ -43990,8 +43604,6 @@ Patterns can be any of:
 				}
 				d0 := args[0]
 				d0.ID = 0
-				ctx.EnsureDesc(&d0)
-				ctx.EnsureDesc(&d0)
 				d0 = JITPrepareScmerGoArg(ctx, d0)
 				d1 := JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(uintptr(unsafe.Pointer(&Globalenv)))), NoHeapPointer: true, Rooted: true}
 				if d1.Loc == LocRegPair || d1.Loc == LocStackPair || d1.Loc == LocRegTriple || d1.Loc == LocStackTriple {
@@ -44433,15 +44045,11 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					d32 = args[0]
 					d32.ID = 0
-					ctx.EnsureDesc(&d32)
-					ctx.EnsureDesc(&d32)
 					d32 = JITPrepareScmerGoArg(ctx, d32)
 					d33 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(uintptr(unsafe.Pointer(&Globalenv)))), NoHeapPointer: true, Rooted: true}
 					if d33.Loc == LocRegPair || d33.Loc == LocStackPair || d33.Loc == LocRegTriple || d33.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
 					}
-					ctx.EnsureDesc(&d1)
-					ctx.EnsureDesc(&d1)
 					if d1.Loc == LocRegPair || d1.Loc == LocStackPair || d1.Loc == LocRegTriple || d1.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
 					}

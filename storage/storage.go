@@ -254,8 +254,16 @@ type storageJITFunctions struct {
 	getValueMulti scm.JITStorageGetValueMultiFunc
 }
 
-type storageJITReaderProvider interface {
+type storageJITValueProvider interface {
 	GetJITGetValue() scm.JITStorageGetValueFunc
+}
+
+type storageJITRangeProvider interface {
+	GetJITGetValueRange() scm.JITStorageGetValueRangeFunc
+}
+
+type storageJITMultiProvider interface {
+	GetJITGetValueMulti() scm.JITStorageGetValueMultiFunc
 }
 
 // compiledColumnGetValue resolves the native scalar target once, before a row
@@ -263,10 +271,29 @@ type storageJITReaderProvider interface {
 // avoids both an escaping Go method-value closure during scan setup and the
 // ColumnReader -> storageJITFunctions -> native-func double dispatch.
 func compiledColumnGetValue(reader ColumnReader) scm.JITStorageGetValueFunc {
-	if provider, ok := reader.(storageJITReaderProvider); ok {
+	if provider, ok := reader.(storageJITValueProvider); ok {
 		if compiled := provider.GetJITGetValue(); compiled != nil {
 			return compiled
 		}
+	}
+	return nil
+}
+
+// compiledColumnGetValueRange and compiledColumnGetValueMulti perform the same
+// one-time dispatch for batch consumers. Keeping this decision outside the
+// batch loop matters even though one native call handles many rows: an
+// interface method on storageJITFunctions would otherwise dispatch once to Go
+// merely to dispatch a second time through the stored function value.
+func compiledColumnGetValueRange(reader ColumnReader) scm.JITStorageGetValueRangeFunc {
+	if provider, ok := reader.(storageJITRangeProvider); ok {
+		return provider.GetJITGetValueRange()
+	}
+	return nil
+}
+
+func compiledColumnGetValueMulti(reader ColumnReader) scm.JITStorageGetValueMultiFunc {
+	if provider, ok := reader.(storageJITMultiProvider); ok {
+		return provider.GetJITGetValueMulti()
 	}
 	return nil
 }

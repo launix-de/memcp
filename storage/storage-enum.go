@@ -498,6 +498,8 @@ func (s *StorageEnum) GetValueCached(i uint32, c *EnumDecodeCache) scm.Scmer {
 // chunk decode state — the expensive part of an enum read — is amortized
 // across the batch via GetValueCached's O(1) sequential/jump fast paths
 // instead of every element paying its own binary search from GetValue.
+//
+//jitgen:control-flow-stable recid count target/1 stride
 func (s *StorageEnum) GetValueRange(recid uint32, count uint32, target []scm.Scmer, stride int) {
 	if stride <= 0 {
 		stride = 1
@@ -510,6 +512,7 @@ func (s *StorageEnum) GetValueRange(recid uint32, count uint32, target []scm.Scm
 	}
 }
 
+//jitgen:control-flow-stable recids/2 target/1 stride
 func (s *StorageEnum) GetValueMulti(recids []uint32, target []scm.Scmer, stride int) {
 	if stride <= 0 {
 		stride = 1
@@ -930,6 +933,9 @@ func (s *StorageEnum) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result 
 			return bbs[0].RenderPS(ps)
 		}
 		ctx.EmitJump(d11.Condition, lbl2)
+		if bbs[2].Rendered {
+			ctx.EmitJmp(lbl3)
+		}
 		ctx.FreeDesc(&d10)
 		snap14 := d4
 		snap15 := d5
@@ -1150,13 +1156,9 @@ func (s *StorageEnum) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result 
 		ctx.EnsureDesc(&idxInt)
 		ctx.EnsureDesc(&idxInt)
 		ctx.StabilizeDescForControlFlow(&idxInt)
-		ctx.EnsureDesc(&thisptr)
-		ctx.EnsureDesc(&thisptr)
 		if thisptr.Loc == scm.LocRegPair || thisptr.Loc == scm.LocStackPair || thisptr.Loc == scm.LocRegTriple || thisptr.Loc == scm.LocStackTriple {
 			panic("jit: generic call arg expects 1-word value")
 		}
-		ctx.EnsureDesc(&idxInt)
-		ctx.EnsureDesc(&idxInt)
 		if idxInt.Loc == scm.LocRegPair || idxInt.Loc == scm.LocStackPair || idxInt.Loc == scm.LocRegTriple || idxInt.Loc == scm.LocStackTriple {
 			panic("jit: generic call arg expects 1-word value")
 		}
@@ -1291,6 +1293,9 @@ func (s *StorageEnum) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result 
 			return bbs[2].RenderPS(ps)
 		}
 		ctx.EmitJump(d41.Condition, lbl4)
+		if bbs[4].Rendered {
+			ctx.EmitJmp(lbl5)
+		}
 		ctx.FreeDesc(&d40)
 		snap44 := d4
 		snap45 := d5
@@ -1980,13 +1985,9 @@ func (s *StorageEnum) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result 
 			ctx.TransferReg(d37.Reg)
 			d37.Loc = scm.LocNone
 		}
-		ctx.EnsureDesc(&thisptr)
-		ctx.EnsureDesc(&thisptr)
 		if thisptr.Loc == scm.LocRegPair || thisptr.Loc == scm.LocStackPair || thisptr.Loc == scm.LocRegTriple || thisptr.Loc == scm.LocStackTriple {
 			panic("jit: generic call arg expects 1-word value")
 		}
-		ctx.EnsureDesc(&d135)
-		ctx.EnsureDesc(&d135)
 		if d135.Loc == scm.LocRegPair || d135.Loc == scm.LocStackPair || d135.Loc == scm.LocRegTriple || d135.Loc == scm.LocStackTriple {
 			panic("jit: generic call arg expects 1-word value")
 		}
@@ -2751,6 +2752,9 @@ func (s *StorageEnum) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result 
 			return bbs[7].RenderPS(ps)
 		}
 		ctx.EmitJump(d156.Condition, lbl9)
+		if bbs[9].Rendered {
+			ctx.EmitJmp(lbl10)
+		}
 		ctx.FreeDesc(&d155)
 		snap162 := d4
 		snap163 := d5
@@ -3281,13 +3285,9 @@ func (s *StorageEnum) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result 
 			d256.Loc = scm.LocNone
 		}
 		ctx.ReclaimUntrackedRegs()
-		ctx.EnsureDesc(&thisptr)
-		ctx.EnsureDesc(&thisptr)
 		if thisptr.Loc == scm.LocRegPair || thisptr.Loc == scm.LocStackPair || thisptr.Loc == scm.LocRegTriple || thisptr.Loc == scm.LocStackTriple {
 			panic("jit: generic call arg expects 1-word value")
 		}
-		ctx.EnsureDesc(&d257)
-		ctx.EnsureDesc(&d257)
 		if d257.Loc == scm.LocRegPair || d257.Loc == scm.LocStackPair || d257.Loc == scm.LocRegTriple || d257.Loc == scm.LocStackTriple {
 			panic("jit: generic call arg expects 1-word value")
 		}
@@ -3432,13 +3432,9 @@ func (s *StorageEnum) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result 
 		ctx.FreeDesc(&d265)
 		ctx.FreeDesc(&d257)
 		ctx.ReclaimUntrackedRegs()
-		ctx.EnsureDesc(&thisptr)
-		ctx.EnsureDesc(&thisptr)
 		if thisptr.Loc == scm.LocRegPair || thisptr.Loc == scm.LocStackPair || thisptr.Loc == scm.LocRegTriple || thisptr.Loc == scm.LocStackTriple {
 			panic("jit: generic call arg expects 1-word value")
 		}
-		ctx.EnsureDesc(&d258)
-		ctx.EnsureDesc(&d258)
 		if d258.Loc == scm.LocRegPair || d258.Loc == scm.LocStackPair || d258.Loc == scm.LocRegTriple || d258.Loc == scm.LocStackTriple {
 			panic("jit: generic call arg expects 1-word value")
 		}

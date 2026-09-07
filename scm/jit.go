@@ -4765,8 +4765,6 @@ func init_jit() {
 					ctx.ReclaimUntrackedRegs()
 					d71 = args[0]
 					d71.ID = 0
-					ctx.EnsureDesc(&d71)
-					ctx.EnsureDesc(&d71)
 					d71 = JITPrepareScmerGoArg(ctx, d71)
 					ctx.SyncDesc(&d71)
 					d72 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).Proc), []JITValueDesc{d71}, 1)
@@ -5079,8 +5077,6 @@ func init_jit() {
 					ctx.ReclaimUntrackedRegs()
 					d80 = args[0]
 					d80.ID = 0
-					ctx.EnsureDesc(&d80)
-					ctx.EnsureDesc(&d80)
 					d80 = JITPrepareScmerGoArg(ctx, d80)
 					ctx.SyncDesc(&d80)
 					d81 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).Proc), []JITValueDesc{d80}, 1)
@@ -6193,8 +6189,6 @@ func init_jit() {
 						d71 = ps.OverlayValues[71]
 					}
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d4)
-					ctx.EnsureDesc(&d4)
 					d4 = JITPrepareScmerGoArg(ctx, d4)
 					ctx.SyncDesc(&d4)
 					d73 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).Proc), []JITValueDesc{d4}, 1)
@@ -6490,8 +6484,6 @@ func init_jit() {
 						d80 = ps.OverlayValues[80]
 					}
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d4)
-					ctx.EnsureDesc(&d4)
 					d4 = JITPrepareScmerGoArg(ctx, d4)
 					ctx.SyncDesc(&d4)
 					d81 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).Proc), []JITValueDesc{d4}, 1)
@@ -6895,8 +6887,6 @@ func init_jit() {
 						d115 = ps.OverlayValues[115]
 					}
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d4)
-					ctx.EnsureDesc(&d4)
 					d4 = JITPrepareScmerGoArg(ctx, d4)
 					d143 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(uintptr(unsafe.Pointer(&Globalenv)))), NoHeapPointer: true, Rooted: true}
 					if d143.Loc == LocRegPair || d143.Loc == LocStackPair || d143.Loc == LocRegTriple || d143.Loc == LocStackTriple {
@@ -7713,6 +7703,9 @@ func init_jit() {
 					}
 					ctx.EmitCmpRegImm32(d226.Reg, 0)
 					ctx.EmitJump(CondNotEqual, lbl8)
+					if bbs[6].Rendered {
+						ctx.EmitJmp(lbl7)
+					}
 					snap229 := d1
 					snap230 := d2
 					snap231 := d3
@@ -8411,8 +8404,6 @@ func init_jit() {
 					if d317.Loc != LocRegPair && d317.Loc != LocStackPair && d317.Loc != LocInputPair {
 						panic("jit: generic call arg expects 2-word value (fmt.Printf arg0)")
 					}
-					ctx.EnsureDesc(&d316)
-					ctx.EnsureDesc(&d316)
 					d316 = JITPrepareGoSliceArg(ctx, d316)
 					if d316.Loc != LocRegTriple && d316.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice (fmt.Printf arg1)")

@@ -60,7 +60,7 @@ func (s *StoragePrefix) GetValue(i uint32) scm.Scmer {
 // (one call each instead of 2*n GetValue calls) and then stitch prefix+suffix
 // together in a single post-process pass.
 //
-//jitgen:control-flow-stable StoragePrefix.GetValueRange recid count target/3 stride
+//jitgen:control-flow-stable recid count target/3 stride
 func (s *StoragePrefix) GetValueRange(recid uint32, count uint32, target []scm.Scmer, stride int) {
 	if stride <= 0 {
 		stride = 1
@@ -71,7 +71,7 @@ func (s *StoragePrefix) GetValueRange(recid uint32, count uint32, target []scm.S
 	s.applyPrefixInPlace(target, idxbuf, count, stride)
 }
 
-//jitgen:control-flow-stable StoragePrefix.GetValueMulti recids/3 target/3 stride
+//jitgen:control-flow-stable recids/3 target/3 stride
 func (s *StoragePrefix) GetValueMulti(recids []uint32, target []scm.Scmer, stride int) {
 	if stride <= 0 {
 		stride = 1
@@ -313,13 +313,9 @@ func (s *StoragePrefix) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resul
 		ctx.ReclaimUntrackedRegs()
 		ctx.TrackPointer(unsafe.Pointer((*StorageString)(unsafe.Pointer(uintptr(unsafe.Pointer(s)) + uintptr(unsafe.Offsetof((*StoragePrefix)(nil).values))))))
 		d0 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(int64(uintptr(unsafe.Pointer((*StorageString)(unsafe.Pointer(uintptr(unsafe.Pointer(s)) + uintptr(unsafe.Offsetof((*StoragePrefix)(nil).values)))))))), RelocatablePointer: true}
-		ctx.EnsureDesc(&d0)
-		ctx.EnsureDesc(&d0)
 		if d0.Loc == scm.LocRegPair || d0.Loc == scm.LocStackPair || d0.Loc == scm.LocRegTriple || d0.Loc == scm.LocStackTriple {
 			panic("jit: generic call arg expects 1-word value")
 		}
-		ctx.EnsureDesc(&idxInt)
-		ctx.EnsureDesc(&idxInt)
 		if idxInt.Loc == scm.LocRegPair || idxInt.Loc == scm.LocStackPair || idxInt.Loc == scm.LocRegTriple || idxInt.Loc == scm.LocStackTriple {
 			panic("jit: generic call arg expects 1-word value")
 		}
@@ -366,6 +362,9 @@ func (s *StoragePrefix) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resul
 		}
 		ctx.EmitCmpRegImm32(d4.Reg, 0)
 		ctx.EmitJump(scm.CondNotEqual, lbl2)
+		if bbs[2].Rendered {
+			ctx.EmitJmp(lbl3)
+		}
 		snap7 := d0
 		snap8 := d1
 		snap9 := d2
@@ -568,6 +567,9 @@ func (s *StoragePrefix) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resul
 		}
 		ctx.EmitCmpRegImm32(d25.Reg, 0)
 		ctx.EmitJump(scm.CondNotEqual, lbl5)
+		if bbs[3].Rendered {
+			ctx.EmitJmp(lbl4)
+		}
 		snap28 := d0
 		snap29 := d1
 		snap30 := d2
@@ -1457,6 +1459,9 @@ func (s *StoragePrefix) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resul
 			return bbs[4].RenderPS(ps)
 		}
 		ctx.EmitJump(d79.Condition, lbl6)
+		if bbs[7].Rendered {
+			ctx.EmitJmp(lbl8)
+		}
 		ctx.FreeDesc(&d78)
 		snap82 := d0
 		snap83 := d1
@@ -2411,6 +2416,9 @@ func (s *StoragePrefix) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resul
 			return bbs[7].RenderPS(ps)
 		}
 		ctx.EmitJump(d172.Condition, lbl6)
+		if bbs[6].Rendered {
+			ctx.EmitJmp(lbl7)
+		}
 		ctx.FreeDesc(&d171)
 		snap175 := d0
 		snap176 := d1

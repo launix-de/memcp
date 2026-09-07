@@ -50,8 +50,6 @@ func init_streams() {
 				}
 				d0 := args[0]
 				d0.ID = 0
-				ctx.EnsureDesc(&d0)
-				ctx.EnsureDesc(&d0)
 				d0 = JITPrepareScmerGoArg(ctx, d0)
 				ctx.SyncDesc(&d0)
 				d1 := ctx.EmitGoCallScalar(GoFuncAddr((Scmer).Stream), []JITValueDesc{d0}, 2)
@@ -62,8 +60,6 @@ func init_streams() {
 				ctx.EnsureDesc(&d1)
 				d2 := ctx.EmitGoCallScalar(GoFuncAddr(jitReaderToAny), []JITValueDesc{d1}, 2)
 				ctx.FreeDesc(&d1)
-				ctx.EnsureDesc(&d2)
-				ctx.EnsureDesc(&d2)
 				ctx.EnsureDesc(&d2)
 				if d2.Loc == LocImm {
 					tmpPair := JITValueDesc{Loc: LocRegPair, Type: d2.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}

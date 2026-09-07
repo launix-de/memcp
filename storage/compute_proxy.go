@@ -1160,8 +1160,6 @@ func (s *StorageComputeProxy) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc,
 	} else {
 		idxInt = idx
 	}
-	ctx.EnsureDesc(&thisptr)
-	ctx.EnsureDesc(&thisptr)
 	if thisptr.Loc == scm.LocRegPair || thisptr.Loc == scm.LocStackPair || thisptr.Loc == scm.LocRegTriple || thisptr.Loc == scm.LocStackTriple {
 		panic("jit: generic call arg expects 1-word value")
 	}
@@ -1169,8 +1167,6 @@ func (s *StorageComputeProxy) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc,
 	if d0.Loc == scm.LocRegPair || d0.Loc == scm.LocStackPair || d0.Loc == scm.LocRegTriple || d0.Loc == scm.LocStackTriple {
 		panic("jit: generic call arg expects 1-word value")
 	}
-	ctx.EnsureDesc(&idxInt)
-	ctx.EnsureDesc(&idxInt)
 	if idxInt.Loc == scm.LocRegPair || idxInt.Loc == scm.LocStackPair || idxInt.Loc == scm.LocRegTriple || idxInt.Loc == scm.LocStackTriple {
 		panic("jit: generic call arg expects 1-word value")
 	}

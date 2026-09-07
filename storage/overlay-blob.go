@@ -107,13 +107,9 @@ func (s *OverlayBlob) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result 
 	ctx.EnsureDesc(&idxInt)
 	d1 := ctx.EmitGoCallScalar(scm.GoFuncAddr(func(receiver ColumnStorage, arg0 uint32) scm.Scmer { return receiver.GetValue(arg0) }), []scm.JITValueDesc{d0, idxInt}, 2)
 	ctx.FreeDesc(&idxInt)
-	ctx.EnsureDesc(&thisptr)
-	ctx.EnsureDesc(&thisptr)
 	if thisptr.Loc == scm.LocRegPair || thisptr.Loc == scm.LocStackPair || thisptr.Loc == scm.LocRegTriple || thisptr.Loc == scm.LocStackTriple {
 		panic("jit: generic call arg expects 1-word value")
 	}
-	ctx.EnsureDesc(&d1)
-	ctx.EnsureDesc(&d1)
 	d1 = scm.JITPrepareScmerGoArg(ctx, d1)
 	ctx.SyncDesc(&thisptr)
 	ctx.SyncDesc(&d1)
@@ -247,6 +243,8 @@ func (s *OverlayBlob) GetValue(i uint32) scm.Scmer {
 // GetValueRange and GetValueMulti bulk-fetch the base storage (one call
 // instead of n GetValue calls) and then resolve the blob-escape encoding for
 // each result in place.
+//
+//jitgen:control-flow-stable recid count target/1 stride
 func (s *OverlayBlob) GetValueRange(recid uint32, count uint32, target []scm.Scmer, stride int) {
 	if stride <= 0 {
 		stride = 1
@@ -259,6 +257,7 @@ func (s *OverlayBlob) GetValueRange(recid uint32, count uint32, target []scm.Scm
 	}
 }
 
+//jitgen:control-flow-stable recids/2 target/1 stride
 func (s *OverlayBlob) GetValueMulti(recids []uint32, target []scm.Scmer, stride int) {
 	if stride <= 0 {
 		stride = 1

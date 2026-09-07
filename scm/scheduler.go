@@ -390,6 +390,9 @@ func init_scheduler() {
 						return bbs[0].RenderPS(ps)
 					}
 					ctx.EmitJump(d2.Condition, lbl2)
+					if bbs[2].Rendered {
+						ctx.EmitJmp(lbl3)
+					}
 					ctx.FreeDesc(&d1)
 					snap5 := d0
 					snap6 := d1
@@ -545,8 +548,6 @@ func init_scheduler() {
 					if d20.Loc == LocRegPair || d20.Loc == LocStackPair || d20.Loc == LocRegTriple || d20.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
 					}
-					ctx.EnsureDesc(&d19)
-					ctx.EnsureDesc(&d19)
 					if d19.Loc == LocRegPair || d19.Loc == LocStackPair || d19.Loc == LocRegTriple || d19.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
 					}

@@ -622,6 +622,80 @@ func BenchmarkStorageConstFinishedReaders(b *testing.B) {
 	})
 }
 
+func BenchmarkStorageFloatFinishedReaders(b *testing.B) {
+	if !scm.JITEnabled() {
+		b.Skip("requires the JIT experiment")
+	}
+	values := make([]scm.Scmer, benchN)
+	s := &StorageFloat{}
+	s.prepare()
+	for index := range values {
+		if index%13 == 0 {
+			values[index] = scm.NewNil()
+		} else {
+			values[index] = scm.NewFloat(float64(index*index-3000) / 19)
+		}
+		s.scan(uint32(index), values[index])
+	}
+	s.init(benchN)
+	for index, value := range values {
+		s.build(uint32(index), value)
+	}
+	s.finish()
+
+	scalar := s.GetJITGetValue()
+	rangeReader := s.GetJITGetValueRange()
+	multiReader := s.GetJITGetValueMulti()
+	if scalar == nil || rangeReader == nil || multiReader == nil {
+		b.Fatal("finish did not install every JIT reader")
+	}
+	goScalar := scm.JITStorageGetValueFunc(s.GetValue)
+	goRange := scm.JITStorageGetValueRangeFunc(s.GetValueRange)
+	goMulti := scm.JITStorageGetValueMultiFunc(s.GetValueMulti)
+
+	b.Run("Scalar/Go", func(b *testing.B) {
+		var sum int64
+		for sample := 0; sample < b.N; sample++ {
+			sum += benchmarkStorageScalar(goScalar, benchN)
+		}
+		runtime.KeepAlive(sum)
+	})
+	b.Run("Scalar/JIT", func(b *testing.B) {
+		var sum int64
+		for sample := 0; sample < b.N; sample++ {
+			sum += benchmarkStorageScalar(scalar, benchN)
+		}
+		runtime.KeepAlive(sum)
+	})
+
+	target := make([]scm.Scmer, benchN)
+	b.Run("Range/Go", func(b *testing.B) {
+		for sample := 0; sample < b.N; sample++ {
+			benchmarkStorageRange(goRange, benchN, target)
+		}
+	})
+	b.Run("Range/JIT", func(b *testing.B) {
+		for sample := 0; sample < b.N; sample++ {
+			benchmarkStorageRange(rangeReader, benchN, target)
+		}
+	})
+
+	recids := make([]uint32, benchN)
+	for index := range recids {
+		recids[index] = uint32((index * 7919) % benchN)
+	}
+	b.Run("Multi/Go", func(b *testing.B) {
+		for sample := 0; sample < b.N; sample++ {
+			benchmarkStorageMulti(goMulti, recids, target)
+		}
+	})
+	b.Run("Multi/JIT", func(b *testing.B) {
+		for sample := 0; sample < b.N; sample++ {
+			benchmarkStorageMulti(multiReader, recids, target)
+		}
+	})
+}
+
 // These helpers preserve the indirect typed-function boundary used after a
 // scan resolves its storage readers. Benchmarking a concrete storage method
 // directly would let Go inline the getter into the harness while the JIT

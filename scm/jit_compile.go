@@ -871,6 +871,13 @@ func (ctx *JITContext) EmitSliceDataAfterLow(slice, low *JITValueDesc, elementSi
 // the payload address and bounds compile-time constant while code is inlined;
 // only an actual Go call pays this materialization cost.
 func JITPrepareGoSliceArg(ctx *JITContext, value JITValueDesc) JITValueDesc {
+	// flattenArgs and emitGoCall can move a stack-resident slice header directly
+	// into the Go ABI locations. Rematerializing all three words here defeats
+	// control-flow stabilization and can exhaust the register bank when a call
+	// consumes two or more slices (for example copy(dst, src)).
+	if value.Loc == LocRegTriple || value.Loc == LocStackTriple {
+		return value
+	}
 	if value.Loc != LocMem {
 		ctx.EnsureDesc(&value)
 		return value

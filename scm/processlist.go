@@ -1325,6 +1325,9 @@ func init_processlist() {
 						return bbs[3].RenderPS(ps)
 					}
 					ctx.EmitJump(d49.Condition, lbl5)
+					if bbs[5].Rendered {
+						ctx.EmitJmp(lbl6)
+					}
 					ctx.FreeDesc(&d48)
 					snap53 := d3
 					snap54 := d4
@@ -2573,8 +2576,6 @@ func init_processlist() {
 					}
 					ctx.ReclaimUntrackedRegs()
 					ctx.StabilizeDescForControlFlow(&d42)
-					ctx.EnsureDesc(&d105)
-					ctx.EnsureDesc(&d105)
 					if d105.Loc == LocRegPair || d105.Loc == LocStackPair || d105.Loc == LocRegTriple || d105.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
 					}
@@ -2717,8 +2718,6 @@ func init_processlist() {
 					d202 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString("Time")}
 					ctx.SyncDesc(&d202)
 					ctx.EmitStoreScmerToStack(d202, int32(stackArray190)+int32(160))
-					ctx.EnsureDesc(&d105)
-					ctx.EnsureDesc(&d105)
 					if d105.Loc == LocRegPair || d105.Loc == LocStackPair || d105.Loc == LocRegTriple || d105.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
 					}
@@ -4023,6 +4022,9 @@ func init_processlist() {
 						return bbs[0].RenderPS(ps)
 					}
 					ctx.EmitJump(d2.Condition, lbl2)
+					if bbs[2].Rendered {
+						ctx.EmitJmp(lbl3)
+					}
 					ctx.FreeDesc(&d1)
 					snap5 := d0
 					snap6 := d1
@@ -4094,8 +4096,6 @@ func init_processlist() {
 					ctx.ReclaimUntrackedRegs()
 					d15 = args[0]
 					d15.ID = 0
-					ctx.EnsureDesc(&d15)
-					ctx.EnsureDesc(&d15)
 					d15 = JITPrepareScmerGoArg(ctx, d15)
 					ctx.SyncDesc(&d15)
 					callResults16 := JITEmitGoCallResults(ctx, GoFuncAddr(querySessionState), []JITValueDesc{d15}, []uint8{1, 1}, []uint8{1, 0})
@@ -4161,6 +4161,9 @@ func init_processlist() {
 					}
 					ctx.EmitCmpRegImm32(d20.Reg, 0)
 					ctx.EmitJump(CondNotEqual, lbl4)
+					if bbs[4].Rendered {
+						ctx.EmitJmp(lbl5)
+					}
 					snap23 := d0
 					snap24 := d1
 					snap25 := d2
@@ -4523,8 +4526,6 @@ func init_processlist() {
 					ctx.BindReg(r0, &d2)
 				}
 				ctx.FreeDesc(&d1)
-				ctx.EnsureDesc(&d2)
-				ctx.EnsureDesc(&d2)
 				if d2.Loc == LocRegPair || d2.Loc == LocStackPair || d2.Loc == LocRegTriple || d2.Loc == LocStackTriple {
 					panic("jit: generic call arg expects 1-word value")
 				}

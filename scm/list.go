@@ -1966,6 +1966,9 @@ func init_list() {
 						return bbs[0].RenderPS(ps)
 					}
 					ctx.EmitJump(d3.Condition, lbl2)
+					if bbs[2].Rendered {
+						ctx.EmitJmp(lbl3)
+					}
 					ctx.FreeDesc(&d2)
 					snap6 := d0
 					snap7 := d1
@@ -2195,6 +2198,9 @@ func init_list() {
 						return bbs[2].RenderPS(ps)
 					}
 					ctx.EmitJump(d26.Condition, lbl4)
+					if bbs[4].Rendered {
+						ctx.EmitJmp(lbl5)
+					}
 					ctx.FreeDesc(&d25)
 					snap29 := d0
 					snap30 := d1
@@ -2456,6 +2462,9 @@ func init_list() {
 					}
 					ctx.EmitCmpRegImm32(d62.Reg, 0)
 					ctx.EmitJump(CondNotEqual, lbl6)
+					if bbs[6].Rendered {
+						ctx.EmitJmp(lbl7)
+					}
 					snap65 := d0
 					snap66 := d1
 					snap67 := d2
@@ -3094,6 +3103,9 @@ func init_list() {
 						return bbs[0].RenderPS(ps)
 					}
 					ctx.EmitJump(d6.Condition, lbl2)
+					if bbs[3].Rendered {
+						ctx.EmitJmp(lbl4)
+					}
 					ctx.FreeDesc(&d5)
 					snap9 := d0
 					snap10 := d1
@@ -3425,6 +3437,9 @@ func init_list() {
 						return bbs[3].RenderPS(ps)
 					}
 					ctx.EmitJump(d31.Condition, lbl2)
+					if bbs[2].Rendered {
+						ctx.EmitJmp(lbl3)
+					}
 					ctx.FreeDesc(&d30)
 					snap34 := d0
 					snap35 := d1
@@ -3733,6 +3748,9 @@ func init_list() {
 						return bbs[0].RenderPS(ps)
 					}
 					ctx.EmitJump(d6.Condition, lbl2)
+					if bbs[3].Rendered {
+						ctx.EmitJmp(lbl4)
+					}
 					ctx.FreeDesc(&d5)
 					snap9 := d0
 					snap10 := d1
@@ -4082,6 +4100,9 @@ func init_list() {
 						return bbs[3].RenderPS(ps)
 					}
 					ctx.EmitJump(d33.Condition, lbl2)
+					if bbs[2].Rendered {
+						ctx.EmitJmp(lbl3)
+					}
 					ctx.FreeDesc(&d32)
 					snap36 := d0
 					snap37 := d1
@@ -5668,6 +5689,9 @@ func init_list() {
 						return bbs[4].RenderPS(ps)
 					}
 					ctx.EmitJump(d126.Condition, lbl6)
+					if bbs[6].Rendered {
+						ctx.EmitJmp(lbl7)
+					}
 					ctx.FreeDesc(&d125)
 					snap130 := d1
 					snap131 := d2
@@ -6324,8 +6348,6 @@ func init_list() {
 					ctx.BindReg(r16, &d211)
 					ctx.EnsureDesc(&d207)
 					ctx.EnsureDesc(&d211)
-					ctx.EnsureDesc(&d207)
-					ctx.EnsureDesc(&d211)
 					callResults212 := JITEmitGoCallResults(ctx, GoFuncAddr(jitCopyScmerSlice), []JITValueDesc{d207, d211}, []uint8{1}, []uint8{0})
 					d213 = callResults212[0]
 					d213.Type = tagInt
@@ -6714,6 +6736,9 @@ func init_list() {
 						return bbs[1].RenderPS(ps)
 					}
 					ctx.EmitJump(d13.Condition, lbl3)
+					if bbs[3].Rendered {
+						ctx.EmitJmp(lbl4)
+					}
 					ctx.FreeDesc(&d12)
 					snap17 := d3
 					snap18 := d4
@@ -7727,6 +7752,9 @@ func init_list() {
 						return bbs[1].RenderPS(ps)
 					}
 					ctx.EmitJump(d21.Condition, lbl3)
+					if bbs[3].Rendered {
+						ctx.EmitJmp(lbl4)
+					}
 					ctx.FreeDesc(&d20)
 					snap26 := d4
 					snap27 := d5
@@ -8402,6 +8430,9 @@ func init_list() {
 						return bbs[4].RenderPS(ps)
 					}
 					ctx.EmitJump(d74.Condition, lbl6)
+					if bbs[6].Rendered {
+						ctx.EmitJmp(lbl7)
+					}
 					ctx.FreeDesc(&d73)
 					snap78 := d4
 					snap79 := d5
@@ -8723,11 +8754,7 @@ func init_list() {
 					d134 = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: d135.Reg, Reg2: r8}
 					ctx.BindReg(d135.Reg, &d134)
 					ctx.BindReg(r8, &d134)
-					ctx.EnsureDesc(&d64)
-					ctx.EnsureDesc(&d64)
 					d64 = JITPrepareScmerGoArg(ctx, d64)
-					ctx.EnsureDesc(&d134)
-					ctx.EnsureDesc(&d134)
 					d134 = JITPrepareScmerGoArg(ctx, d134)
 					ctx.SyncDesc(&d64)
 					ctx.SyncDesc(&d134)
@@ -9632,6 +9659,9 @@ func init_list() {
 						return bbs[0].RenderPS(ps)
 					}
 					ctx.EmitJump(d4.Condition, lbl2)
+					if bbs[2].Rendered {
+						ctx.EmitJmp(lbl3)
+					}
 					ctx.FreeDesc(&d3)
 					snap7 := d0
 					snap8 := d1
@@ -10052,6 +10082,9 @@ func init_list() {
 						return bbs[0].RenderPS(ps)
 					}
 					ctx.EmitJump(d4.Condition, lbl2)
+					if bbs[2].Rendered {
+						ctx.EmitJmp(lbl3)
+					}
 					ctx.FreeDesc(&d3)
 					snap7 := d0
 					snap8 := d1
@@ -10406,6 +10439,9 @@ func init_list() {
 						return bbs[0].RenderPS(ps)
 					}
 					ctx.EmitJump(d4.Condition, lbl2)
+					if bbs[2].Rendered {
+						ctx.EmitJmp(lbl3)
+					}
 					ctx.FreeDesc(&d3)
 					snap7 := d0
 					snap8 := d1
@@ -10855,6 +10891,9 @@ func init_list() {
 						return bbs[0].RenderPS(ps)
 					}
 					ctx.EmitJump(d4.Condition, lbl2)
+					if bbs[2].Rendered {
+						ctx.EmitJmp(lbl3)
+					}
 					ctx.FreeDesc(&d3)
 					snap7 := d0
 					snap8 := d1
@@ -11760,6 +11799,9 @@ func init_list() {
 						return bbs[2].RenderPS(ps)
 					}
 					ctx.EmitJump(d41.Condition, lbl4)
+					if bbs[4].Rendered {
+						ctx.EmitJmp(lbl5)
+					}
 					ctx.FreeDesc(&d40)
 					snap45 := d4
 					snap46 := d5
@@ -12459,6 +12501,9 @@ func init_list() {
 						return bbs[5].RenderPS(ps)
 					}
 					ctx.EmitJump(d99.Condition, lbl7)
+					if bbs[7].Rendered {
+						ctx.EmitJmp(lbl8)
+					}
 					ctx.FreeDesc(&d98)
 					snap103 := d4
 					snap104 := d5
@@ -13398,6 +13443,9 @@ func init_list() {
 						return bbs[8].RenderPS(ps)
 					}
 					ctx.EmitJump(d179.Condition, lbl10)
+					if bbs[10].Rendered {
+						ctx.EmitJmp(lbl11)
+					}
 					ctx.FreeDesc(&d178)
 					snap183 := d4
 					snap184 := d5
@@ -14043,6 +14091,9 @@ func init_list() {
 						return bbs[9].RenderPS(ps)
 					}
 					ctx.EmitJump(d274.Condition, lbl12)
+					if bbs[12].Rendered {
+						ctx.EmitJmp(lbl13)
+					}
 					ctx.FreeDesc(&d273)
 					snap277 := d4
 					snap278 := d5
@@ -16198,6 +16249,9 @@ func init_list() {
 						return bbs[3].RenderPS(ps)
 					}
 					ctx.EmitJump(d54.Condition, lbl5)
+					if bbs[5].Rendered {
+						ctx.EmitJmp(lbl6)
+					}
 					ctx.FreeDesc(&d53)
 					snap59 := d5
 					snap60 := d6
@@ -17287,6 +17341,9 @@ func init_list() {
 						return bbs[6].RenderPS(ps)
 					}
 					ctx.EmitJump(d134.Condition, lbl8)
+					if bbs[8].Rendered {
+						ctx.EmitJmp(lbl9)
+					}
 					ctx.FreeDesc(&d133)
 					snap139 := d5
 					snap140 := d6
@@ -19468,6 +19525,9 @@ func init_list() {
 						return bbs[3].RenderPS(ps)
 					}
 					ctx.EmitJump(d68.Condition, lbl5)
+					if bbs[5].Rendered {
+						ctx.EmitJmp(lbl6)
+					}
 					ctx.FreeDesc(&d67)
 					snap73 := d7
 					snap74 := d8
@@ -20674,6 +20734,9 @@ func init_list() {
 						return bbs[6].RenderPS(ps)
 					}
 					ctx.EmitJump(d156.Condition, lbl8)
+					if bbs[8].Rendered {
+						ctx.EmitJmp(lbl9)
+					}
 					ctx.FreeDesc(&d155)
 					snap161 := d7
 					snap162 := d8
@@ -24589,11 +24652,7 @@ func init_list() {
 					d622 = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: d623.Reg, Reg2: r23}
 					ctx.BindReg(d623.Reg, &d622)
 					ctx.BindReg(r23, &d622)
-					ctx.EnsureDesc(&d437)
-					ctx.EnsureDesc(&d437)
 					d437 = JITPrepareScmerGoArg(ctx, d437)
-					ctx.EnsureDesc(&d622)
-					ctx.EnsureDesc(&d622)
 					d622 = JITPrepareScmerGoArg(ctx, d622)
 					ctx.SyncDesc(&d437)
 					ctx.SyncDesc(&d622)
@@ -28188,6 +28247,9 @@ func init_list() {
 						return bbs[1].RenderPS(ps)
 					}
 					ctx.EmitJump(d12.Condition, lbl3)
+					if bbs[3].Rendered {
+						ctx.EmitJmp(lbl4)
+					}
 					ctx.FreeDesc(&d11)
 					snap16 := d3
 					snap17 := d4
@@ -28343,11 +28405,7 @@ func init_list() {
 					ctx.BindReg(r4, &d40)
 					d42 = args[1]
 					d42.ID = 0
-					ctx.EnsureDesc(&d42)
-					ctx.EnsureDesc(&d42)
 					d42 = JITPrepareScmerGoArg(ctx, d42)
-					ctx.EnsureDesc(&d40)
-					ctx.EnsureDesc(&d40)
 					d40 = JITPrepareScmerGoArg(ctx, d40)
 					ctx.SyncDesc(&d42)
 					ctx.SyncDesc(&d40)
@@ -29346,6 +29404,9 @@ func init_list() {
 						return bbs[1].RenderPS(ps)
 					}
 					ctx.EmitJump(d22.Condition, lbl3)
+					if bbs[3].Rendered {
+						ctx.EmitJmp(lbl4)
+					}
 					ctx.FreeDesc(&d21)
 					snap27 := d3
 					snap28 := d4
@@ -30810,6 +30871,9 @@ func init_list() {
 						return bbs[1].RenderPS(ps)
 					}
 					ctx.EmitJump(d15.Condition, lbl3)
+					if bbs[3].Rendered {
+						ctx.EmitJmp(lbl4)
+					}
 					ctx.FreeDesc(&d14)
 					snap19 := d3
 					snap20 := d4
@@ -31520,6 +31584,9 @@ func init_list() {
 						return bbs[3].RenderPS(ps)
 					}
 					ctx.EmitJump(d122.Condition, lbl6)
+					if bbs[6].Rendered {
+						ctx.EmitJmp(lbl7)
+					}
 					ctx.FreeDesc(&d121)
 					snap125 := d3
 					snap126 := d4
@@ -32591,6 +32658,9 @@ func init_list() {
 						return bbs[1].RenderPS(ps)
 					}
 					ctx.EmitJump(d18.Condition, lbl3)
+					if bbs[3].Rendered {
+						ctx.EmitJmp(lbl4)
+					}
 					ctx.FreeDesc(&d17)
 					snap22 := d3
 					snap23 := d4
@@ -33605,6 +33675,9 @@ func init_list() {
 						return bbs[1].RenderPS(ps)
 					}
 					ctx.EmitJump(d18.Condition, lbl3)
+					if bbs[3].Rendered {
+						ctx.EmitJmp(lbl4)
+					}
 					ctx.FreeDesc(&d17)
 					snap22 := d3
 					snap23 := d4
@@ -34363,6 +34436,9 @@ func init_list() {
 						return bbs[0].RenderPS(ps)
 					}
 					ctx.EmitJump(d13.Condition, lbl2)
+					if bbs[2].Rendered {
+						ctx.EmitJmp(lbl3)
+					}
 					ctx.FreeDesc(&d12)
 					snap16 := d3
 					snap17 := d4
@@ -35915,6 +35991,9 @@ func init_list() {
 						return bbs[6].RenderPS(ps)
 					}
 					ctx.EmitJump(d129.Condition, lbl5)
+					if bbs[5].Rendered {
+						ctx.EmitJmp(lbl6)
+					}
 					ctx.FreeDesc(&d128)
 					snap134 := d3
 					snap135 := d4
@@ -37053,6 +37132,9 @@ func init_list() {
 					}
 					ctx.EmitCmpRegImm32(d48.Reg, 0)
 					ctx.EmitJump(CondNotEqual, lbl2)
+					if bbs[2].Rendered {
+						ctx.EmitJmp(lbl3)
+					}
 					snap53 := d1
 					snap54 := d2
 					snap55 := d4
@@ -38061,6 +38143,9 @@ func init_list() {
 						return bbs[2].RenderPS(ps)
 					}
 					ctx.EmitJump(d51.Condition, lbl7)
+					if bbs[5].Rendered {
+						ctx.EmitJmp(lbl6)
+					}
 					ctx.FreeDesc(&d50)
 					snap55 := d4
 					snap56 := d5
@@ -38816,6 +38901,9 @@ func init_list() {
 					}
 					ctx.EmitCmpRegImm32(d108.Reg, 0)
 					ctx.EmitJump(CondNotEqual, lbl6)
+					if bbs[3].Rendered {
+						ctx.EmitJmp(lbl4)
+					}
 					snap111 := d4
 					snap112 := d5
 					snap113 := d6
@@ -39287,6 +39375,9 @@ func init_list() {
 						return bbs[7].RenderPS(ps)
 					}
 					ctx.EmitJump(d173.Condition, lbl9)
+					if bbs[4].Rendered {
+						ctx.EmitJmp(lbl5)
+					}
 					ctx.FreeDesc(&d172)
 					snap177 := d4
 					snap178 := d5
@@ -40132,6 +40223,9 @@ func init_list() {
 						return bbs[9].RenderPS(ps)
 					}
 					ctx.EmitJump(d264.Condition, lbl11)
+					if bbs[4].Rendered {
+						ctx.EmitJmp(lbl5)
+					}
 					ctx.FreeDesc(&d263)
 					snap268 := d4
 					snap269 := d5
@@ -41664,6 +41758,9 @@ func init_list() {
 						return bbs[2].RenderPS(ps)
 					}
 					ctx.EmitJump(d52.Condition, lbl4)
+					if bbs[5].Rendered {
+						ctx.EmitJmp(lbl6)
+					}
 					ctx.FreeDesc(&d51)
 					snap56 := d4
 					snap57 := d5
@@ -42182,6 +42279,9 @@ func init_list() {
 						return bbs[4].RenderPS(ps)
 					}
 					ctx.EmitJump(d106.Condition, lbl10)
+					if bbs[10].Rendered {
+						ctx.EmitJmp(lbl11)
+					}
 					ctx.FreeDesc(&d105)
 					snap109 := d4
 					snap110 := d5
@@ -42583,6 +42683,9 @@ func init_list() {
 					}
 					ctx.EmitCmpRegImm32(d168.Reg, 0)
 					ctx.EmitJump(CondNotEqual, lbl4)
+					if bbs[4].Rendered {
+						ctx.EmitJmp(lbl5)
+					}
 					snap171 := d4
 					snap172 := d5
 					snap173 := d6
@@ -43078,6 +43181,9 @@ func init_list() {
 						return bbs[6].RenderPS(ps)
 					}
 					ctx.EmitJump(d237.Condition, lbl8)
+					if bbs[8].Rendered {
+						ctx.EmitJmp(lbl9)
+					}
 					ctx.FreeDesc(&d236)
 					snap241 := d4
 					snap242 := d5
@@ -44598,6 +44704,9 @@ func init_list() {
 						return bbs[11].RenderPS(ps)
 					}
 					ctx.EmitJump(d338.Condition, lbl13)
+					if bbs[13].Rendered {
+						ctx.EmitJmp(lbl14)
+					}
 					ctx.FreeDesc(&d337)
 					snap342 := d4
 					snap343 := d5
@@ -45847,6 +45956,9 @@ func init_list() {
 					}
 					ctx.EmitCmpRegImm32(d3.Reg, 0)
 					ctx.EmitJump(CondNotEqual, lbl2)
+					if bbs[2].Rendered {
+						ctx.EmitJmp(lbl3)
+					}
 					snap6 := d0
 					snap7 := d1
 					snap8 := d2
@@ -46367,6 +46479,9 @@ func init_list() {
 						return bbs[1].RenderPS(ps)
 					}
 					ctx.EmitJump(d12.Condition, lbl3)
+					if bbs[3].Rendered {
+						ctx.EmitJmp(lbl4)
+					}
 					ctx.FreeDesc(&d11)
 					snap16 := d3
 					snap17 := d4
@@ -46522,11 +46637,7 @@ func init_list() {
 					ctx.BindReg(r4, &d40)
 					d42 = args[1]
 					d42.ID = 0
-					ctx.EnsureDesc(&d40)
-					ctx.EnsureDesc(&d40)
 					d40 = JITPrepareScmerGoArg(ctx, d40)
-					ctx.EnsureDesc(&d42)
-					ctx.EnsureDesc(&d42)
 					d42 = JITPrepareScmerGoArg(ctx, d42)
 					ctx.SyncDesc(&d40)
 					ctx.SyncDesc(&d42)
@@ -47291,6 +47402,9 @@ func init_list() {
 					}
 					ctx.EmitCmpRegImm32(d10.Reg, 0)
 					ctx.EmitJump(CondNotEqual, lbl2)
+					if bbs[2].Rendered {
+						ctx.EmitJmp(lbl3)
+					}
 					snap13 := d3
 					snap14 := d4
 					snap15 := d5
@@ -47756,6 +47870,9 @@ func init_list() {
 						return bbs[3].RenderPS(ps)
 					}
 					ctx.EmitJump(d42.Condition, lbl5)
+					if bbs[5].Rendered {
+						ctx.EmitJmp(lbl6)
+					}
 					ctx.FreeDesc(&d41)
 					snap47 := d3
 					snap48 := d4
@@ -48002,11 +48119,7 @@ func init_list() {
 					ctx.BindReg(r4, &d89)
 					d91 = args[1]
 					d91.ID = 0
-					ctx.EnsureDesc(&d89)
-					ctx.EnsureDesc(&d89)
 					d89 = JITPrepareScmerGoArg(ctx, d89)
-					ctx.EnsureDesc(&d91)
-					ctx.EnsureDesc(&d91)
 					d91 = JITPrepareScmerGoArg(ctx, d91)
 					ctx.SyncDesc(&d89)
 					ctx.SyncDesc(&d91)
@@ -48095,6 +48208,9 @@ func init_list() {
 					}
 					ctx.EmitCmpRegImm32(d95.Reg, 0)
 					ctx.EmitJump(CondNotEqual, lbl7)
+					if bbs[7].Rendered {
+						ctx.EmitJmp(lbl8)
+					}
 					snap98 := d3
 					snap99 := d4
 					snap100 := d5
@@ -48479,6 +48595,9 @@ func init_list() {
 					}
 					ctx.EmitCmpRegImm32(d154.Reg, 0)
 					ctx.EmitJump(CondNotEqual, lbl10)
+					if bbs[10].Rendered {
+						ctx.EmitJmp(lbl11)
+					}
 					snap157 := d3
 					snap158 := d4
 					snap159 := d5
@@ -50325,8 +50444,6 @@ func init_list() {
 					ctx.ReclaimUntrackedRegs()
 					d4 = args[0]
 					d4.ID = 0
-					ctx.EnsureDesc(&d4)
-					ctx.EnsureDesc(&d4)
 					d4 = JITPrepareScmerGoArg(ctx, d4)
 					d5 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString("has_assoc?")}
 					ctx.EnsureDesc(&d5)
@@ -50420,6 +50537,9 @@ func init_list() {
 					}
 					ctx.EmitCmpRegImm32(d10.Reg, 0)
 					ctx.EmitJump(CondNotEqual, lbl2)
+					if bbs[3].Rendered {
+						ctx.EmitJmp(lbl4)
+					}
 					snap13 := d3
 					snap14 := d4
 					snap15 := d5
@@ -50681,13 +50801,9 @@ func init_list() {
 					ctx.ReclaimUntrackedRegs()
 					d35 = args[1]
 					d35.ID = 0
-					ctx.EnsureDesc(&d8)
-					ctx.EnsureDesc(&d8)
 					if d8.Loc == LocRegPair || d8.Loc == LocStackPair || d8.Loc == LocRegTriple || d8.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
 					}
-					ctx.EnsureDesc(&d35)
-					ctx.EnsureDesc(&d35)
 					d35 = JITPrepareScmerGoArg(ctx, d35)
 					ctx.SyncDesc(&d8)
 					ctx.SyncDesc(&d35)
@@ -50750,6 +50866,9 @@ func init_list() {
 					}
 					ctx.EmitCmpRegImm32(d39.Reg, 0)
 					ctx.EmitJump(CondNotEqual, lbl9)
+					if bbs[2].Rendered {
+						ctx.EmitJmp(lbl3)
+					}
 					snap42 := d3
 					snap43 := d4
 					snap44 := d5
@@ -51067,6 +51186,9 @@ func init_list() {
 						return bbs[4].RenderPS(ps)
 					}
 					ctx.EmitJump(d77.Condition, lbl6)
+					if bbs[2].Rendered {
+						ctx.EmitJmp(lbl3)
+					}
 					ctx.FreeDesc(&d76)
 					snap81 := d3
 					snap82 := d4
@@ -51312,11 +51434,7 @@ func init_list() {
 					ctx.BindReg(r5, &d123)
 					d125 = args[1]
 					d125.ID = 0
-					ctx.EnsureDesc(&d123)
-					ctx.EnsureDesc(&d123)
 					d123 = JITPrepareScmerGoArg(ctx, d123)
-					ctx.EnsureDesc(&d125)
-					ctx.EnsureDesc(&d125)
 					d125 = JITPrepareScmerGoArg(ctx, d125)
 					ctx.SyncDesc(&d123)
 					ctx.SyncDesc(&d125)
@@ -51400,6 +51518,9 @@ func init_list() {
 					}
 					ctx.EmitCmpRegImm32(d127.Reg, 0)
 					ctx.EmitJump(CondNotEqual, lbl7)
+					if bbs[7].Rendered {
+						ctx.EmitJmp(lbl8)
+					}
 					snap130 := d3
 					snap131 := d4
 					snap132 := d5
@@ -52236,8 +52357,6 @@ func init_list() {
 					ctx.ReclaimUntrackedRegs()
 					d4 = args[0]
 					d4.ID = 0
-					ctx.EnsureDesc(&d4)
-					ctx.EnsureDesc(&d4)
 					d4 = JITPrepareScmerGoArg(ctx, d4)
 					d5 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString("get_assoc")}
 					ctx.EnsureDesc(&d5)
@@ -52331,6 +52450,9 @@ func init_list() {
 					}
 					ctx.EmitCmpRegImm32(d10.Reg, 0)
 					ctx.EmitJump(CondNotEqual, lbl2)
+					if bbs[3].Rendered {
+						ctx.EmitJmp(lbl4)
+					}
 					snap13 := d3
 					snap14 := d4
 					snap15 := d5
@@ -52578,6 +52700,9 @@ func init_list() {
 						return bbs[2].RenderPS(ps)
 					}
 					ctx.EmitJump(d35.Condition, lbl10)
+					if bbs[10].Rendered {
+						ctx.EmitJmp(lbl11)
+					}
 					ctx.FreeDesc(&d34)
 					snap38 := d3
 					snap39 := d4
@@ -52734,13 +52859,9 @@ func init_list() {
 					ctx.ReclaimUntrackedRegs()
 					d64 = args[1]
 					d64.ID = 0
-					ctx.EnsureDesc(&d8)
-					ctx.EnsureDesc(&d8)
 					if d8.Loc == LocRegPair || d8.Loc == LocStackPair || d8.Loc == LocRegTriple || d8.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
 					}
-					ctx.EnsureDesc(&d64)
-					ctx.EnsureDesc(&d64)
 					d64 = JITPrepareScmerGoArg(ctx, d64)
 					ctx.SyncDesc(&d8)
 					ctx.SyncDesc(&d64)
@@ -52806,6 +52927,9 @@ func init_list() {
 					}
 					ctx.EmitCmpRegImm32(d68.Reg, 0)
 					ctx.EmitJump(CondNotEqual, lbl9)
+					if bbs[2].Rendered {
+						ctx.EmitJmp(lbl3)
+					}
 					snap71 := d3
 					snap72 := d4
 					snap73 := d5
@@ -53135,6 +53259,9 @@ func init_list() {
 						return bbs[4].RenderPS(ps)
 					}
 					ctx.EmitJump(d108.Condition, lbl6)
+					if bbs[2].Rendered {
+						ctx.EmitJmp(lbl3)
+					}
 					ctx.FreeDesc(&d107)
 					snap112 := d3
 					snap113 := d4
@@ -53390,11 +53517,7 @@ func init_list() {
 					ctx.BindReg(r6, &d156)
 					d158 = args[1]
 					d158.ID = 0
-					ctx.EnsureDesc(&d156)
-					ctx.EnsureDesc(&d156)
 					d156 = JITPrepareScmerGoArg(ctx, d156)
-					ctx.EnsureDesc(&d158)
-					ctx.EnsureDesc(&d158)
 					d158 = JITPrepareScmerGoArg(ctx, d158)
 					ctx.SyncDesc(&d156)
 					ctx.SyncDesc(&d158)
@@ -53480,6 +53603,9 @@ func init_list() {
 					}
 					ctx.EmitCmpRegImm32(d160.Reg, 0)
 					ctx.EmitJump(CondNotEqual, lbl7)
+					if bbs[7].Rendered {
+						ctx.EmitJmp(lbl8)
+					}
 					snap163 := d3
 					snap164 := d4
 					snap165 := d5
@@ -54915,6 +55041,9 @@ func init_list() {
 						return bbs[1].RenderPS(ps)
 					}
 					ctx.EmitJump(d12.Condition, lbl3)
+					if bbs[3].Rendered {
+						ctx.EmitJmp(lbl4)
+					}
 					ctx.FreeDesc(&d11)
 					snap16 := d3
 					snap17 := d4
@@ -56115,6 +56244,9 @@ func init_list() {
 						return bbs[5].RenderPS(ps)
 					}
 					ctx.EmitJump(d162.Condition, lbl8)
+					if bbs[8].Rendered {
+						ctx.EmitJmp(lbl9)
+					}
 					ctx.FreeDesc(&d161)
 					snap165 := d3
 					snap166 := d4
@@ -56480,11 +56612,7 @@ func init_list() {
 					ctx.BindReg(r7, &d232)
 					d234 = args[1]
 					d234.ID = 0
-					ctx.EnsureDesc(&d232)
-					ctx.EnsureDesc(&d232)
 					d232 = JITPrepareScmerGoArg(ctx, d232)
-					ctx.EnsureDesc(&d234)
-					ctx.EnsureDesc(&d234)
 					d234 = JITPrepareScmerGoArg(ctx, d234)
 					ctx.SyncDesc(&d232)
 					ctx.SyncDesc(&d234)
@@ -58244,6 +58372,9 @@ func init_list() {
 						return bbs[1].RenderPS(ps)
 					}
 					ctx.EmitJump(d22.Condition, lbl3)
+					if bbs[3].Rendered {
+						ctx.EmitJmp(lbl4)
+					}
 					ctx.FreeDesc(&d21)
 					snap26 := d6
 					snap27 := d7
@@ -60006,6 +60137,9 @@ func init_list() {
 						return bbs[6].RenderPS(ps)
 					}
 					ctx.EmitJump(d166.Condition, lbl8)
+					if bbs[8].Rendered {
+						ctx.EmitJmp(lbl9)
+					}
 					ctx.FreeDesc(&d165)
 					snap172 := d6
 					snap173 := d7
@@ -62708,6 +62842,9 @@ func init_list() {
 					}
 					ctx.EmitCmpRegImm32(d473.Reg, 0)
 					ctx.EmitJump(CondNotEqual, lbl13)
+					if bbs[11].Rendered {
+						ctx.EmitJmp(lbl12)
+					}
 					snap476 := d6
 					snap477 := d7
 					snap478 := d8
@@ -64824,6 +64961,9 @@ func init_list() {
 						return bbs[1].RenderPS(ps)
 					}
 					ctx.EmitJump(d25.Condition, lbl3)
+					if bbs[3].Rendered {
+						ctx.EmitJmp(lbl4)
+					}
 					ctx.FreeDesc(&d24)
 					snap30 := d3
 					snap31 := d4
@@ -66534,6 +66674,9 @@ func init_list() {
 						return bbs[1].RenderPS(ps)
 					}
 					ctx.EmitJump(d22.Condition, lbl3)
+					if bbs[3].Rendered {
+						ctx.EmitJmp(lbl4)
+					}
 					ctx.FreeDesc(&d21)
 					snap27 := d3
 					snap28 := d4
@@ -68140,6 +68283,9 @@ func init_list() {
 						return bbs[1].RenderPS(ps)
 					}
 					ctx.EmitJump(d20.Condition, lbl3)
+					if bbs[3].Rendered {
+						ctx.EmitJmp(lbl4)
+					}
 					ctx.FreeDesc(&d19)
 					snap25 := d3
 					snap26 := d4
@@ -68491,6 +68637,9 @@ func init_list() {
 					}
 					ctx.EmitCmpRegImm32(d79.Reg, 0)
 					ctx.EmitJump(CondNotEqual, lbl5)
+					if bbs[6].Rendered {
+						ctx.EmitJmp(lbl7)
+					}
 					snap82 := d3
 					snap83 := d4
 					snap84 := d5
@@ -69219,6 +69368,9 @@ func init_list() {
 					}
 					ctx.EmitCmpRegImm32(d146.Reg, 0)
 					ctx.EmitJump(CondNotEqual, lbl10)
+					if bbs[8].Rendered {
+						ctx.EmitJmp(lbl9)
+					}
 					snap149 := d3
 					snap150 := d4
 					snap151 := d5
@@ -69694,6 +69846,9 @@ func init_list() {
 					}
 					ctx.EmitCmpRegImm32(d221.Reg, 0)
 					ctx.EmitJump(CondNotEqual, lbl5)
+					if bbs[5].Rendered {
+						ctx.EmitJmp(lbl6)
+					}
 					snap224 := d3
 					snap225 := d4
 					snap226 := d5
@@ -70867,6 +71022,9 @@ func init_list() {
 					}
 					ctx.EmitCmpRegImm32(d316.Reg, 0)
 					ctx.EmitJump(CondNotEqual, lbl8)
+					if bbs[8].Rendered {
+						ctx.EmitJmp(lbl9)
+					}
 					snap319 := d3
 					snap320 := d4
 					snap321 := d5
@@ -71741,6 +71899,9 @@ func init_list() {
 						return bbs[1].RenderPS(ps)
 					}
 					ctx.EmitJump(d19.Condition, lbl3)
+					if bbs[3].Rendered {
+						ctx.EmitJmp(lbl4)
+					}
 					ctx.FreeDesc(&d18)
 					snap24 := d3
 					snap25 := d4
@@ -72080,6 +72241,9 @@ func init_list() {
 					}
 					ctx.EmitCmpRegImm32(d76.Reg, 0)
 					ctx.EmitJump(CondNotEqual, lbl5)
+					if bbs[5].Rendered {
+						ctx.EmitJmp(lbl6)
+					}
 					snap79 := d3
 					snap80 := d4
 					snap81 := d5
@@ -74125,13 +74289,9 @@ func init_list() {
 				ctx.BindReg(d47.Reg, &d46)
 				ctx.BindReg(r14, &d46)
 				ctx.ReclaimUntrackedRegs()
-				ctx.EnsureDesc(&d23)
-				ctx.EnsureDesc(&d23)
 				if d23.Loc == LocRegPair || d23.Loc == LocStackPair || d23.Loc == LocRegTriple || d23.Loc == LocStackTriple {
 					panic("jit: generic call arg expects 1-word value")
 				}
-				ctx.EnsureDesc(&d46)
-				ctx.EnsureDesc(&d46)
 				d46 = JITPrepareScmerGoArg(ctx, d46)
 				ctx.SyncDesc(&d23)
 				ctx.SyncDesc(&d46)
@@ -74179,13 +74339,9 @@ func init_list() {
 				ctx.BindReg(d50.Reg, &d49)
 				ctx.BindReg(r15, &d49)
 				ctx.ReclaimUntrackedRegs()
-				ctx.EnsureDesc(&d23)
-				ctx.EnsureDesc(&d23)
 				if d23.Loc == LocRegPair || d23.Loc == LocStackPair || d23.Loc == LocRegTriple || d23.Loc == LocStackTriple {
 					panic("jit: generic call arg expects 1-word value")
 				}
-				ctx.EnsureDesc(&d49)
-				ctx.EnsureDesc(&d49)
 				d49 = JITPrepareScmerGoArg(ctx, d49)
 				ctx.SyncDesc(&d23)
 				ctx.SyncDesc(&d49)
@@ -74583,11 +74739,7 @@ func init_list() {
 				ctx.BindReg(d71.Reg, &d70)
 				ctx.BindReg(r26, &d70)
 				ctx.ReclaimUntrackedRegs()
-				ctx.EnsureDesc(&d56)
-				ctx.EnsureDesc(&d56)
 				d56 = JITPrepareScmerGoArg(ctx, d56)
-				ctx.EnsureDesc(&d70)
-				ctx.EnsureDesc(&d70)
 				d70 = JITPrepareScmerGoArg(ctx, d70)
 				ctx.SyncDesc(&d56)
 				ctx.SyncDesc(&d70)
@@ -75612,13 +75764,9 @@ func init_list() {
 				ctx.BindReg(d47.Reg, &d46)
 				ctx.BindReg(r14, &d46)
 				ctx.ReclaimUntrackedRegs()
-				ctx.EnsureDesc(&d23)
-				ctx.EnsureDesc(&d23)
 				if d23.Loc == LocRegPair || d23.Loc == LocStackPair || d23.Loc == LocRegTriple || d23.Loc == LocStackTriple {
 					panic("jit: generic call arg expects 1-word value")
 				}
-				ctx.EnsureDesc(&d46)
-				ctx.EnsureDesc(&d46)
 				d46 = JITPrepareScmerGoArg(ctx, d46)
 				ctx.SyncDesc(&d23)
 				ctx.SyncDesc(&d46)
@@ -75666,13 +75814,9 @@ func init_list() {
 				ctx.BindReg(d50.Reg, &d49)
 				ctx.BindReg(r15, &d49)
 				ctx.ReclaimUntrackedRegs()
-				ctx.EnsureDesc(&d23)
-				ctx.EnsureDesc(&d23)
 				if d23.Loc == LocRegPair || d23.Loc == LocStackPair || d23.Loc == LocRegTriple || d23.Loc == LocStackTriple {
 					panic("jit: generic call arg expects 1-word value")
 				}
-				ctx.EnsureDesc(&d49)
-				ctx.EnsureDesc(&d49)
 				d49 = JITPrepareScmerGoArg(ctx, d49)
 				ctx.SyncDesc(&d23)
 				ctx.SyncDesc(&d49)
@@ -76070,11 +76214,7 @@ func init_list() {
 				ctx.BindReg(d71.Reg, &d70)
 				ctx.BindReg(r26, &d70)
 				ctx.ReclaimUntrackedRegs()
-				ctx.EnsureDesc(&d56)
-				ctx.EnsureDesc(&d56)
 				d56 = JITPrepareScmerGoArg(ctx, d56)
-				ctx.EnsureDesc(&d70)
-				ctx.EnsureDesc(&d70)
 				d70 = JITPrepareScmerGoArg(ctx, d70)
 				ctx.SyncDesc(&d56)
 				ctx.SyncDesc(&d70)
@@ -76730,6 +76870,9 @@ func init_list() {
 						return bbs[1].RenderPS(ps)
 					}
 					ctx.EmitJump(d19.Condition, lbl3)
+					if bbs[3].Rendered {
+						ctx.EmitJmp(lbl4)
+					}
 					ctx.FreeDesc(&d18)
 					snap24 := d3
 					snap25 := d4
@@ -77069,6 +77212,9 @@ func init_list() {
 					}
 					ctx.EmitCmpRegImm32(d76.Reg, 0)
 					ctx.EmitJump(CondNotEqual, lbl5)
+					if bbs[5].Rendered {
+						ctx.EmitJmp(lbl6)
+					}
 					snap79 := d3
 					snap80 := d4
 					snap81 := d5
@@ -78770,6 +78916,9 @@ func init_list() {
 						return bbs[1].RenderPS(ps)
 					}
 					ctx.EmitJump(d15.Condition, lbl3)
+					if bbs[3].Rendered {
+						ctx.EmitJmp(lbl4)
+					}
 					ctx.FreeDesc(&d14)
 					snap19 := d3
 					snap20 := d4
@@ -80147,6 +80296,9 @@ func init_list() {
 						return bbs[1].RenderPS(ps)
 					}
 					ctx.EmitJump(d25.Condition, lbl3)
+					if bbs[3].Rendered {
+						ctx.EmitJmp(lbl4)
+					}
 					ctx.FreeDesc(&d24)
 					snap30 := d3
 					snap31 := d4
@@ -81755,6 +81907,9 @@ func init_list() {
 						return bbs[1].RenderPS(ps)
 					}
 					ctx.EmitJump(d21.Condition, lbl3)
+					if bbs[3].Rendered {
+						ctx.EmitJmp(lbl4)
+					}
 					ctx.FreeDesc(&d20)
 					snap25 := d3
 					snap26 := d4
@@ -82741,6 +82896,9 @@ func init_list() {
 						return bbs[1].RenderPS(ps)
 					}
 					ctx.EmitJump(d20.Condition, lbl3)
+					if bbs[3].Rendered {
+						ctx.EmitJmp(lbl4)
+					}
 					ctx.FreeDesc(&d19)
 					snap24 := d3
 					snap25 := d4
@@ -84641,6 +84799,9 @@ func init_list() {
 						return bbs[3].RenderPS(ps)
 					}
 					ctx.EmitJump(d90.Condition, lbl5)
+					if bbs[5].Rendered {
+						ctx.EmitJmp(lbl6)
+					}
 					ctx.FreeDesc(&d89)
 					snap96 := d3
 					snap97 := d4
@@ -85273,6 +85434,9 @@ func init_list() {
 					}
 					ctx.EmitCmpRegImm32(d196.Reg, 0)
 					ctx.EmitJump(CondNotEqual, lbl8)
+					if bbs[6].Rendered {
+						ctx.EmitJmp(lbl7)
+					}
 					snap199 := d3
 					snap200 := d4
 					snap201 := d5
@@ -87860,6 +88024,9 @@ func init_list() {
 						return bbs[3].RenderPS(ps)
 					}
 					ctx.EmitJump(d90.Condition, lbl5)
+					if bbs[5].Rendered {
+						ctx.EmitJmp(lbl6)
+					}
 					ctx.FreeDesc(&d89)
 					snap96 := d3
 					snap97 := d4
@@ -89503,6 +89670,9 @@ func init_list() {
 					}
 					ctx.EmitCmpRegImm32(d317.Reg, 0)
 					ctx.EmitJump(CondNotEqual, lbl9)
+					if bbs[7].Rendered {
+						ctx.EmitJmp(lbl8)
+					}
 					snap320 := d3
 					snap321 := d4
 					snap322 := d5
@@ -91062,6 +91232,9 @@ func init_list() {
 						return bbs[0].RenderPS(ps)
 					}
 					ctx.EmitJump(d14.Condition, lbl2)
+					if bbs[2].Rendered {
+						ctx.EmitJmp(lbl3)
+					}
 					ctx.FreeDesc(&d13)
 					snap17 := d4
 					snap18 := d5
@@ -92545,6 +92718,9 @@ func init_list() {
 						return bbs[5].RenderPS(ps)
 					}
 					ctx.EmitJump(d136.Condition, lbl7)
+					if bbs[7].Rendered {
+						ctx.EmitJmp(lbl8)
+					}
 					ctx.FreeDesc(&d135)
 					snap142 := d4
 					snap143 := d5
@@ -93217,6 +93393,9 @@ func init_list() {
 					}
 					ctx.EmitCmpRegImm32(d244.Reg, 0)
 					ctx.EmitJump(CondNotEqual, lbl10)
+					if bbs[8].Rendered {
+						ctx.EmitJmp(lbl9)
+					}
 					snap247 := d4
 					snap248 := d5
 					snap249 := d6
@@ -95140,6 +95319,9 @@ func init_list() {
 						return bbs[10].RenderPS(ps)
 					}
 					ctx.EmitJump(d383.Condition, lbl12)
+					if bbs[12].Rendered {
+						ctx.EmitJmp(lbl13)
+					}
 					ctx.FreeDesc(&d382)
 					snap389 := d4
 					snap390 := d5
@@ -96160,6 +96342,9 @@ func init_list() {
 					}
 					ctx.EmitCmpRegImm32(d549.Reg, 0)
 					ctx.EmitJump(CondNotEqual, lbl15)
+					if bbs[13].Rendered {
+						ctx.EmitJmp(lbl14)
+					}
 					snap552 := d4
 					snap553 := d5
 					snap554 := d6
@@ -99406,6 +99591,9 @@ func init_list() {
 						return bbs[3].RenderPS(ps)
 					}
 					ctx.EmitJump(d97.Condition, lbl5)
+					if bbs[5].Rendered {
+						ctx.EmitJmp(lbl6)
+					}
 					ctx.FreeDesc(&d96)
 					snap103 := d3
 					snap104 := d4
@@ -101202,6 +101390,9 @@ func init_list() {
 					}
 					ctx.EmitCmpRegImm32(d350.Reg, 0)
 					ctx.EmitJump(CondNotEqual, lbl9)
+					if bbs[7].Rendered {
+						ctx.EmitJmp(lbl8)
+					}
 					snap353 := d3
 					snap354 := d4
 					snap355 := d5
@@ -103861,6 +104052,9 @@ func init_list() {
 						return bbs[3].RenderPS(ps)
 					}
 					ctx.EmitJump(d97.Condition, lbl5)
+					if bbs[5].Rendered {
+						ctx.EmitJmp(lbl6)
+					}
 					ctx.FreeDesc(&d96)
 					snap103 := d3
 					snap104 := d4
@@ -105597,6 +105791,9 @@ func init_list() {
 					}
 					ctx.EmitCmpRegImm32(d342.Reg, 0)
 					ctx.EmitJump(CondNotEqual, lbl9)
+					if bbs[7].Rendered {
+						ctx.EmitJmp(lbl8)
+					}
 					snap345 := d3
 					snap346 := d4
 					snap347 := d5
@@ -107367,6 +107564,9 @@ func init_list() {
 						return bbs[1].RenderPS(ps)
 					}
 					ctx.EmitJump(d25.Condition, lbl3)
+					if bbs[3].Rendered {
+						ctx.EmitJmp(lbl4)
+					}
 					ctx.FreeDesc(&d24)
 					snap30 := d3
 					snap31 := d4
@@ -109704,6 +109904,9 @@ func init_list() {
 						return bbs[1].RenderPS(ps)
 					}
 					ctx.EmitJump(d23.Condition, lbl3)
+					if bbs[3].Rendered {
+						ctx.EmitJmp(lbl4)
+					}
 					ctx.FreeDesc(&d22)
 					snap27 := d3
 					snap28 := d4
@@ -110841,6 +111044,9 @@ func init_list() {
 						return bbs[1].RenderPS(ps)
 					}
 					ctx.EmitJump(d27.Condition, lbl3)
+					if bbs[3].Rendered {
+						ctx.EmitJmp(lbl4)
+					}
 					ctx.FreeDesc(&d26)
 					snap32 := d3
 					snap33 := d4
@@ -111973,6 +112179,9 @@ func init_list() {
 						return bbs[1].RenderPS(ps)
 					}
 					ctx.EmitJump(d15.Condition, lbl3)
+					if bbs[3].Rendered {
+						ctx.EmitJmp(lbl4)
+					}
 					ctx.FreeDesc(&d14)
 					snap19 := d3
 					snap20 := d4
@@ -112764,6 +112973,9 @@ func init_list() {
 						return bbs[1].RenderPS(ps)
 					}
 					ctx.EmitJump(d15.Condition, lbl3)
+					if bbs[3].Rendered {
+						ctx.EmitJmp(lbl4)
+					}
 					ctx.FreeDesc(&d14)
 					snap19 := d3
 					snap20 := d4
@@ -113692,6 +113904,9 @@ func init_list() {
 						return bbs[1].RenderPS(ps)
 					}
 					ctx.EmitJump(d18.Condition, lbl3)
+					if bbs[3].Rendered {
+						ctx.EmitJmp(lbl4)
+					}
 					ctx.FreeDesc(&d17)
 					snap23 := d3
 					snap24 := d4
@@ -115203,6 +115418,9 @@ func init_list() {
 						return bbs[1].RenderPS(ps)
 					}
 					ctx.EmitJump(d17.Condition, lbl3)
+					if bbs[3].Rendered {
+						ctx.EmitJmp(lbl4)
+					}
 					ctx.FreeDesc(&d16)
 					snap22 := d4
 					snap23 := d5
@@ -116481,6 +116699,9 @@ func init_list() {
 						return bbs[1].RenderPS(ps)
 					}
 					ctx.EmitJump(d18.Condition, lbl3)
+					if bbs[3].Rendered {
+						ctx.EmitJmp(lbl4)
+					}
 					ctx.FreeDesc(&d17)
 					snap23 := d4
 					snap24 := d5
@@ -117137,6 +117358,9 @@ func init_list() {
 						return bbs[4].RenderPS(ps)
 					}
 					ctx.EmitJump(d69.Condition, lbl6)
+					if bbs[6].Rendered {
+						ctx.EmitJmp(lbl7)
+					}
 					ctx.FreeDesc(&d68)
 					snap73 := d4
 					snap74 := d5
@@ -117448,11 +117672,7 @@ func init_list() {
 					d127 = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: d128.Reg, Reg2: r8}
 					ctx.BindReg(d128.Reg, &d127)
 					ctx.BindReg(r8, &d127)
-					ctx.EnsureDesc(&d59)
-					ctx.EnsureDesc(&d59)
 					d59 = JITPrepareScmerGoArg(ctx, d59)
-					ctx.EnsureDesc(&d127)
-					ctx.EnsureDesc(&d127)
 					d127 = JITPrepareScmerGoArg(ctx, d127)
 					ctx.SyncDesc(&d59)
 					ctx.SyncDesc(&d127)
@@ -119134,6 +119354,9 @@ func init_list() {
 						return bbs[0].RenderPS(ps)
 					}
 					ctx.EmitJump(d28.Condition, lbl2)
+					if bbs[2].Rendered {
+						ctx.EmitJmp(lbl3)
+					}
 					ctx.FreeDesc(&d27)
 					snap31 := d10
 					snap32 := d11
@@ -120380,6 +120603,9 @@ func init_list() {
 						return bbs[3].RenderPS(ps)
 					}
 					ctx.EmitJump(d111.Condition, lbl5)
+					if bbs[5].Rendered {
+						ctx.EmitJmp(lbl6)
+					}
 					ctx.FreeDesc(&d110)
 					snap116 := d10
 					snap117 := d11
@@ -124589,11 +124815,7 @@ func init_list() {
 					d601 = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: d602.Reg, Reg2: r30}
 					ctx.BindReg(d602.Reg, &d601)
 					ctx.BindReg(r30, &d601)
-					ctx.EnsureDesc(&d408)
-					ctx.EnsureDesc(&d408)
 					d408 = JITPrepareScmerGoArg(ctx, d408)
-					ctx.EnsureDesc(&d601)
-					ctx.EnsureDesc(&d601)
 					d601 = JITPrepareScmerGoArg(ctx, d601)
 					ctx.SyncDesc(&d408)
 					ctx.SyncDesc(&d601)
@@ -128731,6 +128953,9 @@ func init_list() {
 						return bbs[13].RenderPS(ps)
 					}
 					ctx.EmitJump(d1037.Condition, lbl15)
+					if bbs[15].Rendered {
+						ctx.EmitJmp(lbl16)
+					}
 					ctx.FreeDesc(&d1036)
 					snap1042 := d10
 					snap1043 := d11
@@ -132984,11 +133209,7 @@ func init_list() {
 					d1566 = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: d1567.Reg, Reg2: r41}
 					ctx.BindReg(d1567.Reg, &d1566)
 					ctx.BindReg(r41, &d1566)
-					ctx.EnsureDesc(&d1280)
-					ctx.EnsureDesc(&d1280)
 					d1280 = JITPrepareScmerGoArg(ctx, d1280)
-					ctx.EnsureDesc(&d1566)
-					ctx.EnsureDesc(&d1566)
 					d1566 = JITPrepareScmerGoArg(ctx, d1566)
 					ctx.SyncDesc(&d1280)
 					ctx.SyncDesc(&d1566)
@@ -138624,6 +138845,9 @@ func init_list() {
 						return bbs[21].RenderPS(ps)
 					}
 					ctx.EmitJump(d2178.Condition, lbl23)
+					if bbs[23].Rendered {
+						ctx.EmitJmp(lbl24)
+					}
 					ctx.FreeDesc(&d2177)
 					snap2183 := d10
 					snap2184 := d11
@@ -147635,11 +147859,7 @@ func init_list() {
 					d3306 = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: d3307.Reg, Reg2: r55}
 					ctx.BindReg(d3307.Reg, &d3306)
 					ctx.BindReg(r55, &d3306)
-					ctx.EnsureDesc(&d2901)
-					ctx.EnsureDesc(&d2901)
 					d2901 = JITPrepareScmerGoArg(ctx, d2901)
-					ctx.EnsureDesc(&d3306)
-					ctx.EnsureDesc(&d3306)
 					d3306 = JITPrepareScmerGoArg(ctx, d3306)
 					ctx.SyncDesc(&d2901)
 					ctx.SyncDesc(&d3306)
@@ -154284,6 +154504,9 @@ func init_list() {
 					}
 					ctx.EmitCmpRegImm32(d3.Reg, 0)
 					ctx.EmitJump(CondNotEqual, lbl2)
+					if bbs[2].Rendered {
+						ctx.EmitJmp(lbl3)
+					}
 					snap6 := d0
 					snap7 := d1
 					snap8 := d2

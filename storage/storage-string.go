@@ -791,6 +791,8 @@ func (s *StorageString) decodeAt(i uint32, dict string, dictBase unsafe.Pointer)
 // decoding once into a shared, cache-local buffer beats paying for N small
 // allocations (one per lazy Scmer's eventual .String() call, or more if
 // called repeatedly) later.
+//
+//jitgen:control-flow-stable recid count target/1 stride
 func (s *StorageString) GetValueRange(recid uint32, count uint32, target []scm.Scmer, stride int) {
 	if stride <= 0 {
 		stride = 1
@@ -805,6 +807,7 @@ func (s *StorageString) GetValueRange(recid uint32, count uint32, target []scm.S
 	s.getValueBulk(recids, target, stride)
 }
 
+//jitgen:control-flow-stable recids/2 target/1 stride
 func (s *StorageString) GetValueMulti(recids []uint32, target []scm.Scmer, stride int) {
 	if stride <= 0 {
 		stride = 1
@@ -1203,8 +1206,6 @@ func (s *StorageString) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resul
 	ctx.BindReg(r0, &d1)
 	d2 := ctx.EmitGoCallScalar(scm.GoFuncAddr(scm.JITAtomicAddUint64), []scm.JITValueDesc{d1, d0}, 1)
 	_ = d2
-	ctx.EnsureDesc(&thisptr)
-	ctx.EnsureDesc(&thisptr)
 	if thisptr.Loc == scm.LocRegPair || thisptr.Loc == scm.LocStackPair || thisptr.Loc == scm.LocRegTriple || thisptr.Loc == scm.LocStackTriple {
 		panic("jit: generic call arg expects 1-word value")
 	}
@@ -1229,18 +1230,12 @@ func (s *StorageString) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resul
 	}
 	ctx.EnsureDesc(&d4)
 	ctx.EnsureDesc(&d4)
-	ctx.EnsureDesc(&thisptr)
-	ctx.EnsureDesc(&thisptr)
 	if thisptr.Loc == scm.LocRegPair || thisptr.Loc == scm.LocStackPair || thisptr.Loc == scm.LocRegTriple || thisptr.Loc == scm.LocStackTriple {
 		panic("jit: generic call arg expects 1-word value")
 	}
-	ctx.EnsureDesc(&idxInt)
-	ctx.EnsureDesc(&idxInt)
 	if idxInt.Loc == scm.LocRegPair || idxInt.Loc == scm.LocStackPair || idxInt.Loc == scm.LocRegTriple || idxInt.Loc == scm.LocStackTriple {
 		panic("jit: generic call arg expects 1-word value")
 	}
-	ctx.EnsureDesc(&d3)
-	ctx.EnsureDesc(&d3)
 	ctx.EnsureDesc(&d3)
 	if d3.Loc == scm.LocImm {
 		tmpPair := scm.JITValueDesc{Loc: scm.LocRegPair, Type: d3.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
@@ -1267,8 +1262,6 @@ func (s *StorageString) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resul
 	if d3.Loc != scm.LocRegPair && d3.Loc != scm.LocStackPair && d3.Loc != scm.LocInputPair {
 		panic("jit: generic call arg expects 2-word value ((*StorageString).decodeAt arg2)")
 	}
-	ctx.EnsureDesc(&d4)
-	ctx.EnsureDesc(&d4)
 	if d4.Loc == scm.LocRegPair || d4.Loc == scm.LocStackPair || d4.Loc == scm.LocRegTriple || d4.Loc == scm.LocStackTriple {
 		panic("jit: generic call arg expects 1-word value")
 	}

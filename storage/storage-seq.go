@@ -521,14 +521,14 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result s
 		r0 = registerHomes1.Registers[0]
 	}
 	var r1 scm.Reg
-	phiHomeOK3 := registerHomes1.Available&(uint16(1)<<2) == uint16(1)<<2
+	phiHomeOK3 := registerHomes1.Available&(uint16(1)<<1) == uint16(1)<<1
 	if phiHomeOK3 {
-		r1 = registerHomes1.Registers[2]
+		r1 = registerHomes1.Registers[1]
 	}
 	var r2 scm.Reg
-	phiHomeOK4 := registerHomes1.Available&(uint16(1)<<1) == uint16(1)<<1
+	phiHomeOK4 := registerHomes1.Available&(uint16(1)<<2) == uint16(1)<<2
 	if phiHomeOK4 {
-		r2 = registerHomes1.Registers[1]
+		r2 = registerHomes1.Registers[2]
 	}
 	var d5 scm.JITValueDesc
 	if phiHomeOK2 {
@@ -1671,6 +1671,9 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result s
 			return bbs[1].RenderPS(ps)
 		}
 		ctx.EmitJump(d51.Condition, lbl4)
+		if bbs[5].Rendered {
+			ctx.EmitJmp(lbl6)
+		}
 		ctx.FreeDesc(&d50)
 		snap57 := d5
 		snap58 := d6
@@ -2957,6 +2960,9 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result s
 		}
 		ctx.EmitCmpRegImm32(d184.Reg, 0)
 		ctx.EmitJump(scm.CondNotEqual, lbl14)
+		if bbs[12].Rendered {
+			ctx.EmitJmp(lbl13)
+		}
 		snap188 := d5
 		snap189 := d6
 		snap190 := d7
@@ -6909,6 +6915,9 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result s
 			return bbs[6].RenderPS(ps)
 		}
 		ctx.EmitJump(d589.Condition, lbl8)
+		if bbs[9].Rendered {
+			ctx.EmitJmp(lbl10)
+		}
 		ctx.FreeDesc(&d588)
 		snap592 := d5
 		snap593 := d6
@@ -15187,6 +15196,9 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result s
 			return bbs[13].RenderPS(ps)
 		}
 		ctx.EmitJump(d1230.Condition, lbl12)
+		if bbs[12].Rendered {
+			ctx.EmitJmp(lbl13)
+		}
 		ctx.FreeDesc(&d1229)
 		snap1233 := d5
 		snap1234 := d6
@@ -16867,6 +16879,8 @@ func (s *StorageSeq) segmentEnd(seg uint32) int64 {
 // arithmetic-sequence segment is read as start+delta*stride incrementally
 // (a running add, no per-row multiply or search), and a nil segment fills
 // its whole span directly.
+//
+//jitgen:control-flow-stable recid count target/1 stride
 func (s *StorageSeq) GetValueRange(recid uint32, count uint32, target []scm.Scmer, stride int) {
 	if stride <= 0 {
 		stride = 1
@@ -16906,6 +16920,8 @@ func (s *StorageSeq) GetValueRange(recid uint32, count uint32, target []scm.Scme
 // A genuinely unordered batch falls back to a fresh local findSegment per
 // row — still O(log seqCount) per row like GetValue, but without the shared
 // atomic pivot-cache contention.
+//
+//jitgen:control-flow-stable recids/2 target/1 stride
 func (s *StorageSeq) GetValueMulti(recids []uint32, target []scm.Scmer, stride int) {
 	if stride <= 0 {
 		stride = 1
@@ -16927,7 +16943,10 @@ func (s *StorageSeq) GetValueMulti(recids []uint32, target []scm.Scmer, stride i
 		seg := s.findSegment(recids[0])
 		segRecordId, isNil, segStart, segStride := s.segmentAt(seg)
 		nextRecordId := s.segmentEnd(seg)
-		for _, recid := range recids {
+		// Keep one explicit induction variable across the nested segment walk;
+		// the range form introduces a second copied-element phi with no benefit.
+		for k := 0; k < n; k++ {
+			recid := recids[k]
 			i := int64(recid)
 			for i >= nextRecordId {
 				seg++
@@ -16944,7 +16963,8 @@ func (s *StorageSeq) GetValueMulti(recids []uint32, target []scm.Scmer, stride i
 		return
 	}
 
-	for _, recid := range recids {
+	for k := 0; k < n; k++ {
+		recid := recids[k]
 		seg := s.findSegment(recid)
 		segRecordId, isNil, segStart, segStride := s.segmentAt(seg)
 		if isNil {

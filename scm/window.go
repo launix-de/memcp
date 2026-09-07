@@ -151,11 +151,7 @@ func init_window() {
 				ctx.ResolveFixups()
 				ctx.ReclaimUntrackedRegs()
 				ctx.ReclaimUntrackedRegs()
-				ctx.EnsureDesc(&d4)
-				ctx.EnsureDesc(&d4)
 				d4 = JITPrepareScmerGoArg(ctx, d4)
-				ctx.EnsureDesc(&d5)
-				ctx.EnsureDesc(&d5)
 				d5 = JITPrepareGoSliceArg(ctx, d5)
 				if d5.Loc != LocRegTriple && d5.Loc != LocStackTriple {
 					panic("jit: generic call arg expects 3-word Go slice (ApplyEx arg1)")
@@ -694,6 +690,9 @@ func init_window() {
 						return bbs[0].RenderPS(ps)
 					}
 					ctx.EmitJump(d11.Condition, lbl2)
+					if bbs[2].Rendered {
+						ctx.EmitJmp(lbl3)
+					}
 					ctx.FreeDesc(&d10)
 					snap14 := d3
 					snap15 := d4
@@ -1140,6 +1139,9 @@ func init_window() {
 						return bbs[2].RenderPS(ps)
 					}
 					ctx.EmitJump(d58.Condition, lbl4)
+					if bbs[6].Rendered {
+						ctx.EmitJmp(lbl7)
+					}
 					ctx.FreeDesc(&d57)
 					snap61 := d3
 					snap62 := d4
@@ -1698,8 +1700,6 @@ func init_window() {
 					ctx.BindReg(r15, &d133)
 					ctx.EnsureDesc(&d56)
 					ctx.EnsureDesc(&d133)
-					ctx.EnsureDesc(&d56)
-					ctx.EnsureDesc(&d133)
 					callResults134 := JITEmitGoCallResults(ctx, GoFuncAddr(jitCopyScmerSlice), []JITValueDesc{d56, d133}, []uint8{1}, []uint8{0})
 					d135 = callResults134[0]
 					d135.Type = tagInt
@@ -2247,6 +2247,9 @@ func init_window() {
 						return bbs[5].RenderPS(ps)
 					}
 					ctx.EmitJump(d149.Condition, lbl4)
+					if bbs[4].Rendered {
+						ctx.EmitJmp(lbl5)
+					}
 					ctx.FreeDesc(&d148)
 					snap152 := d3
 					snap153 := d4
@@ -2961,6 +2964,9 @@ func init_window() {
 						return bbs[6].RenderPS(ps)
 					}
 					ctx.EmitJump(d260.Condition, lbl4)
+					if bbs[5].Rendered {
+						ctx.EmitJmp(lbl6)
+					}
 					ctx.FreeDesc(&d259)
 					snap263 := d3
 					snap264 := d4
@@ -3758,6 +3764,9 @@ func init_window() {
 						return bbs[7].RenderPS(ps)
 					}
 					ctx.EmitJump(d378.Condition, lbl9)
+					if bbs[9].Rendered {
+						ctx.EmitJmp(lbl10)
+					}
 					ctx.FreeDesc(&d377)
 					snap382 := d3
 					snap383 := d4
@@ -4586,6 +4595,9 @@ func init_window() {
 						return bbs[8].RenderPS(ps)
 					}
 					ctx.EmitJump(d506.Condition, lbl11)
+					if bbs[11].Rendered {
+						ctx.EmitJmp(lbl12)
+					}
 					ctx.FreeDesc(&d505)
 					snap509 := d3
 					snap510 := d4
@@ -5452,6 +5464,9 @@ func init_window() {
 						return bbs[9].RenderPS(ps)
 					}
 					ctx.EmitJump(d643.Condition, lbl13)
+					if bbs[13].Rendered {
+						ctx.EmitJmp(lbl14)
+					}
 					ctx.FreeDesc(&d642)
 					snap646 := d3
 					snap647 := d4
@@ -7322,11 +7337,7 @@ func init_window() {
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d807)
-					ctx.EnsureDesc(&d807)
 					d807 = JITPrepareScmerGoArg(ctx, d807)
-					ctx.EnsureDesc(&d808)
-					ctx.EnsureDesc(&d808)
 					d808 = JITPrepareGoSliceArg(ctx, d808)
 					if d808.Loc != LocRegTriple && d808.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice (ApplyEx arg1)")
@@ -7791,6 +7802,9 @@ func init_window() {
 						return bbs[0].RenderPS(ps)
 					}
 					ctx.EmitJump(d14.Condition, lbl2)
+					if bbs[2].Rendered {
+						ctx.EmitJmp(lbl3)
+					}
 					ctx.FreeDesc(&d13)
 					snap17 := d4
 					snap18 := d5
@@ -8197,6 +8211,9 @@ func init_window() {
 						return bbs[2].RenderPS(ps)
 					}
 					ctx.EmitJump(d55.Condition, lbl4)
+					if bbs[6].Rendered {
+						ctx.EmitJmp(lbl7)
+					}
 					ctx.FreeDesc(&d54)
 					snap58 := d4
 					snap59 := d5
@@ -8864,6 +8881,9 @@ func init_window() {
 						return bbs[5].RenderPS(ps)
 					}
 					ctx.EmitJump(d115.Condition, lbl4)
+					if bbs[4].Rendered {
+						ctx.EmitJmp(lbl5)
+					}
 					ctx.FreeDesc(&d114)
 					snap118 := d4
 					snap119 := d5
@@ -9319,6 +9339,9 @@ func init_window() {
 						return bbs[6].RenderPS(ps)
 					}
 					ctx.EmitJump(d182.Condition, lbl4)
+					if bbs[5].Rendered {
+						ctx.EmitJmp(lbl6)
+					}
 					ctx.FreeDesc(&d181)
 					snap185 := d4
 					snap186 := d5
@@ -9838,6 +9861,9 @@ func init_window() {
 						return bbs[7].RenderPS(ps)
 					}
 					ctx.EmitJump(d255.Condition, lbl9)
+					if bbs[9].Rendered {
+						ctx.EmitJmp(lbl10)
+					}
 					ctx.FreeDesc(&d254)
 					snap259 := d4
 					snap260 := d5
@@ -10314,8 +10340,6 @@ func init_window() {
 					ctx.BindReg(r17, &d339)
 					ctx.BindReg(r18, &d339)
 					ctx.BindReg(r19, &d339)
-					ctx.EnsureDesc(&d53)
-					ctx.EnsureDesc(&d339)
 					ctx.EnsureDesc(&d53)
 					ctx.EnsureDesc(&d339)
 					callResults340 := JITEmitGoCallResults(ctx, GoFuncAddr(jitCopyScmerSlice), []JITValueDesc{d53, d339}, []uint8{1}, []uint8{0})
@@ -11046,6 +11070,9 @@ func init_window() {
 						return bbs[10].RenderPS(ps)
 					}
 					ctx.EmitJump(d351.Condition, lbl12)
+					if bbs[12].Rendered {
+						ctx.EmitJmp(lbl13)
+					}
 					ctx.FreeDesc(&d350)
 					snap355 := d4
 					snap356 := d5
@@ -12020,11 +12047,7 @@ func init_window() {
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d478)
-					ctx.EnsureDesc(&d478)
 					d478 = JITPrepareScmerGoArg(ctx, d478)
-					ctx.EnsureDesc(&d479)
-					ctx.EnsureDesc(&d479)
 					d479 = JITPrepareGoSliceArg(ctx, d479)
 					if d479.Loc != LocRegTriple && d479.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice (ApplyEx arg1)")

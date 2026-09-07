@@ -278,6 +278,9 @@ func (s *StorageInt) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result s
 		}
 		ctx.EmitCmpRegImm32(d1.Reg, 0)
 		ctx.EmitJump(scm.CondNotEqual, lbl3)
+		if bbs[1].Rendered {
+			ctx.EmitJmp(lbl2)
+		}
 		snap4 := d0
 		snap5 := d1
 		alloc6 := ctx.SnapshotAllocState()
@@ -1499,6 +1502,9 @@ func (s *StorageInt) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result s
 			return bbs[2].RenderPS(ps)
 		}
 		ctx.EmitJump(d56.Condition, lbl4)
+		if bbs[4].Rendered {
+			ctx.EmitJmp(lbl5)
+		}
 		ctx.FreeDesc(&d55)
 		snap59 := d0
 		snap60 := d1
@@ -2491,6 +2497,8 @@ func (s *StorageInt) GetValuesUInt32Multi(recids []uint32, target []uint32, stri
 // recid. It keeps one monotonically increasing bit position, which minimizes
 // loop-carried state while constant division and modulo by 64 lower to shifts
 // and masks in both Go and the generated reader.
+//
+//jitgen:control-flow-stable recid count target/1 stride
 func (s *StorageInt) GetValueRange(recid uint32, count uint32, target []scm.Scmer, stride int) {
 	if stride <= 0 {
 		stride = 1
@@ -2547,6 +2555,8 @@ func (s *StorageInt) GetValueRange(recid uint32, count uint32, target []scm.Scme
 // intentional: unlike a Go range loop, its SSA induction variable starts at
 // zero and needs no synthetic -1/+1 state. That smaller live set materially
 // improves the generated one-pass JIT loop without changing the Go result.
+//
+//jitgen:control-flow-stable recids/2 target/1 stride
 func (s *StorageInt) GetValueMulti(recids []uint32, target []scm.Scmer, stride int) {
 	if stride <= 0 {
 		stride = 1

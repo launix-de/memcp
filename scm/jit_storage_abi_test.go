@@ -20,11 +20,30 @@ Copyright (C) 2026  Carl-Philip Hänsch
 package scm
 
 import (
+	"bytes"
 	"math"
 	"runtime"
 	"testing"
 	"unsafe"
 )
+
+func TestEmitCmpFloat64AvoidsDuplicateSameOperandMove(t *testing.T) {
+	code := make([]byte, 16)
+	ctx := &JITContext{
+		Start: unsafe.Pointer(&code[0]),
+		Ptr:   unsafe.Pointer(&code[0]),
+		End:   unsafe.Pointer(&code[len(code)-1]),
+	}
+	ctx.EmitCmpFloat64(RegRAX, RegRAX)
+	emitted := code[:uintptr(ctx.Ptr)-uintptr(ctx.Start)]
+	want := []byte{
+		0x66, 0x48, 0x0f, 0x6e, 0xc0, // MOVQ XMM0, RAX
+		0x66, 0x0f, 0x2e, 0xc0, // UCOMISD XMM0, XMM0
+	}
+	if !bytes.Equal(emitted, want) {
+		t.Fatalf("same-operand float comparison = %x, want %x", emitted, want)
+	}
+}
 
 func jitFourScalarResults(seed uint32) (int64, bool, int64, int64) {
 	return int64(seed) + 1, seed&1 != 0, int64(seed) + 3, int64(seed) + 5
@@ -66,6 +85,27 @@ func TestJITScmerConstructorsAllowAliasedPayloadRegister(t *testing.T) {
 				t.Fatalf("aliased constructor = %v, want %v", got, test.want)
 			}
 		})
+	}
+}
+
+func TestJITStorageScalarInputSurvivesScratchReclamation(t *testing.T) {
+	fn := CompileJITStorageGetValue(func(ctx *JITContext, source, target JITValueDesc) JITValueDesc {
+		// Generated CFG emitters reclaim registers whose descriptors no longer own
+		// them. The incoming RAX is still live here and therefore must not become
+		// scratch merely because it is also the eventual result register.
+		ctx.ReclaimUntrackedRegs()
+		scratch := ctx.AllocReg()
+		ctx.EmitMovRegImm64(scratch, 99)
+		ctx.FreeReg(scratch)
+		value := JITValueDesc{Loc: LocRegPair, Type: tagInt, Reg: target.Reg, Reg2: target.Reg2}
+		ctx.EmitMakeInt(value, source)
+		return value
+	})
+	if fn == nil {
+		t.Fatal("scalar storage JIT function did not compile")
+	}
+	if got, want := fn(17), NewInt(17); !Equal(got, want) {
+		t.Fatalf("scalar input after scratch reclamation = %v, want %v", got, want)
 	}
 }
 

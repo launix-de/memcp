@@ -47,12 +47,13 @@ func JITEnabled() bool { return true }
 // the exact func(uint32) Scmer Go ABI used by column consumers.
 func CompileJITStorageGetValue(emit JITStorageGetValueEmitter) JITStorageGetValueFunc {
 	entry, holder := compileJITStorageFunction(jitStorageGetValueABI, func(ctx *JITContext) {
-		// RAX remains reserved for the result throughout emission, so expose the
-		// incoming record id as a non-owning descriptor. Generated code may read
-		// it in place, and freeing the SSA input cannot accidentally make the ABI
-		// result register available to an unrelated temporary.
 		idx := JITValueDesc{Loc: LocReg, Type: tagInt, Reg: RegRAX, NoHeapPointer: true}
 		result := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: RegRAX, Reg2: RegRBX}
+		// RAX initially belongs to the input while RBX already belongs to the
+		// eventual result. Explicit ownership keeps either ABI word from becoming
+		// anonymous scratch, but still lets the input release RAX at its last use.
+		ctx.BindReg(RegRAX, &idx)
+		ctx.BindReg(RegRBX, &result)
 		out := emit(ctx, idx, result)
 		ctx.EmitMovPairToResult(&out, &result)
 	})

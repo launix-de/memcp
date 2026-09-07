@@ -144,6 +144,59 @@ func minimum(a ...Scmer) Scmer {
 	}
 }
 
+func TestRenderedSuccessorClosesPlannedFallthrough(t *testing.T) {
+	fn := buildTestSSAFunction(t, `package sample
+type Scmer struct{}
+func (Scmer) Int() int64
+func choose(a ...Scmer) Scmer {
+	if a[0].Int() < a[1].Int() && a[1].Int() < a[2].Int() {
+		return a[1]
+	}
+	return a[0]
+}
+`, "choose")
+	code, errMsg := generateClosure("choose", fn, nil)
+	if errMsg != "" {
+		t.Fatal(errMsg)
+	}
+	if !strings.Contains(code, ".Rendered { ctx.EmitJmp(") {
+		t.Fatalf("generated branch can fall through into an already rendered sibling:\n%s", code)
+	}
+}
+
+func TestIsNaNConsumedByBranchKeepsParityFlag(t *testing.T) {
+	fn := buildTestSSAFunction(t, `package sample
+import "math"
+type Scmer struct{}
+func NewNil() Scmer
+func NewFloat(float64) Scmer
+func classify(a ...Scmer) Scmer {
+	v := float64(len(a))
+	if math.IsNaN(v) {
+		return NewNil()
+	}
+	return NewFloat(v)
+}
+`, "classify")
+	code, errMsg := generateClosure("classify", fn, nil)
+	if errMsg != "" {
+		t.Fatal(errMsg)
+	}
+	for _, want := range []string{
+		"ctx.EmitCmpFloat64(",
+		"Loc: LocFlags",
+		"Condition: CondParity",
+		"ctx.EmitJump(",
+	} {
+		if !strings.Contains(code, want) {
+			t.Fatalf("generated IsNaN branch does not contain %q:\n%s", want, code)
+		}
+	}
+	if strings.Contains(code, "ctx.EmitSetcc(") {
+		t.Fatalf("generated IsNaN branch materializes a boolean:\n%s", code)
+	}
+}
+
 func TestLoopPhiRegisterPlanColorsInterferenceGraph(t *testing.T) {
 	fn := buildTestSSAFunction(t, `package sample
 func rolling(limit uint64) uint64 {
@@ -431,11 +484,11 @@ func init() {
 	}
 }
 
-func TestStorageStableInputsAllowReceiverScopedOverride(t *testing.T) {
+func TestStorageStableInputsBelongToSourceDeclaration(t *testing.T) {
 	const source = `package sample
-//jitgen:control-flow-stable GetValueRange recid count target/1 stride
-//jitgen:control-flow-stable StorageWrapper.GetValueRange recid count target/3 stride
+//jitgen:control-flow-stable detached comments must be ignored
 type StorageWrapper struct{}
+//jitgen:control-flow-stable recid count target/3 stride
 func (s *StorageWrapper) GetValueRange(recid, count int, target []int, stride int) {}
 func (s *StorageWrapper) JITEmitGetValueRange() {}
 type StorageLeaf struct{}
@@ -453,10 +506,10 @@ func (s *StorageLeaf) JITEmitGetValueRange() {}
 		got[info.typeName+"."+info.sourceName] = info.stableInputs
 	}
 	if values := strings.Join(got["StorageWrapper.GetValueRange"], " "); values != "recid count target/3 stride" {
-		t.Fatalf("scoped stable inputs = %q, want recid count target/3 stride", values)
+		t.Fatalf("attached stable inputs = %q, want recid count target/3 stride", values)
 	}
-	if values := strings.Join(got["StorageLeaf.GetValueRange"], " "); values != "recid count target/1 stride" {
-		t.Fatalf("default stable inputs = %q, want recid count target/1 stride", values)
+	if values := strings.Join(got["StorageLeaf.GetValueRange"], " "); values != "" {
+		t.Fatalf("unannotated stable inputs = %q, want none", values)
 	}
 }
 

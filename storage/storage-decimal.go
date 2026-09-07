@@ -127,7 +127,7 @@ func (s *StorageDecimal) GetValue(i uint32) scm.Scmer {
 // rescale each non-nil result in place, avoiding a second per-element
 // GetValue dispatch.
 //
-//jitgen:control-flow-stable StorageDecimal.GetValueRange recid count target/3 stride
+//jitgen:control-flow-stable recid count target/3 stride
 func (s *StorageDecimal) GetValueRange(recid uint32, count uint32, target []scm.Scmer, stride int) {
 	if stride <= 0 {
 		stride = 1
@@ -136,7 +136,7 @@ func (s *StorageDecimal) GetValueRange(recid uint32, count uint32, target []scm.
 	s.rescaleInPlace(target, count, stride)
 }
 
-//jitgen:control-flow-stable StorageDecimal.GetValueMulti recids/3 target/3 stride
+//jitgen:control-flow-stable recids/3 target/3 stride
 func (s *StorageDecimal) GetValueMulti(recids []uint32, target []scm.Scmer, stride int) {
 	if stride <= 0 {
 		stride = 1
@@ -871,6 +871,9 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resu
 		}
 		ctx.EmitCmpRegImm32(d20.Reg, 0)
 		ctx.EmitJump(scm.CondNotEqual, lbl4)
+		if bbs[2].Rendered {
+			ctx.EmitJmp(lbl3)
+		}
 		snap23 := d0
 		snap24 := d1
 		snap25 := d2
@@ -1406,6 +1409,9 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resu
 			return bbs[2].RenderPS(ps)
 		}
 		ctx.EmitJump(d76.Condition, lbl5)
+		if bbs[5].Rendered {
+			ctx.EmitJmp(lbl6)
+		}
 		ctx.FreeDesc(&d75)
 		snap79 := d0
 		snap80 := d1
@@ -1864,6 +1870,9 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resu
 			return bbs[3].RenderPS(ps)
 		}
 		ctx.EmitJump(d143.Condition, lbl2)
+		if bbs[2].Rendered {
+			ctx.EmitJmp(lbl3)
+		}
 		ctx.FreeDesc(&d142)
 		snap146 := d0
 		snap147 := d1

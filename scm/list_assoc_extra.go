@@ -612,6 +612,9 @@ func init_list_assoc_extra() {
 						return bbs[1].RenderPS(ps)
 					}
 					ctx.EmitJump(d25.Condition, lbl3)
+					if bbs[3].Rendered {
+						ctx.EmitJmp(lbl4)
+					}
 					ctx.FreeDesc(&d24)
 					snap29 := d3
 					snap30 := d4
@@ -907,22 +910,12 @@ func init_list_assoc_extra() {
 					}
 					d87 = args[3]
 					d87.ID = 0
-					ctx.EnsureDesc(&d18)
-					ctx.EnsureDesc(&d18)
 					if d18.Loc == LocRegPair || d18.Loc == LocStackPair || d18.Loc == LocRegTriple || d18.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
 					}
-					ctx.EnsureDesc(&d79)
-					ctx.EnsureDesc(&d79)
 					d79 = JITPrepareScmerGoArg(ctx, d79)
-					ctx.EnsureDesc(&d75)
-					ctx.EnsureDesc(&d75)
 					d75 = JITPrepareScmerGoArg(ctx, d75)
-					ctx.EnsureDesc(&d87)
-					ctx.EnsureDesc(&d87)
 					d87 = JITPrepareScmerGoArg(ctx, d87)
-					ctx.EnsureDesc(&d10)
-					ctx.EnsureDesc(&d10)
 					if d10.Loc == LocRegPair || d10.Loc == LocStackPair || d10.Loc == LocRegTriple || d10.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
 					}
@@ -1769,6 +1762,9 @@ func init_list_assoc_extra() {
 						return bbs[1].RenderPS(ps)
 					}
 					ctx.EmitJump(d25.Condition, lbl3)
+					if bbs[3].Rendered {
+						ctx.EmitJmp(lbl4)
+					}
 					ctx.FreeDesc(&d24)
 					snap29 := d3
 					snap30 := d4
@@ -2098,16 +2094,10 @@ func init_list_assoc_extra() {
 							d90 = jitEmitDynamicCallableAt(ctx, d97, callbackArgs91, int32(stackArray88), JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(callbackResultOff92), ID: 0})
 						}
 					}
-					ctx.EnsureDesc(&d18)
-					ctx.EnsureDesc(&d18)
 					if d18.Loc == LocRegPair || d18.Loc == LocStackPair || d18.Loc == LocRegTriple || d18.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
 					}
-					ctx.EnsureDesc(&d79)
-					ctx.EnsureDesc(&d79)
 					d79 = JITPrepareScmerGoArg(ctx, d79)
-					ctx.EnsureDesc(&d90)
-					ctx.EnsureDesc(&d90)
 					d90 = JITPrepareScmerGoArg(ctx, d90)
 					ctx.SyncDesc(&d18)
 					ctx.SyncDesc(&d79)
@@ -2966,6 +2956,9 @@ func init_list_assoc_extra() {
 						return bbs[1].RenderPS(ps)
 					}
 					ctx.EmitJump(d25.Condition, lbl3)
+					if bbs[3].Rendered {
+						ctx.EmitJmp(lbl4)
+					}
 					ctx.FreeDesc(&d24)
 					snap29 := d3
 					snap30 := d4
@@ -3300,16 +3293,10 @@ func init_list_assoc_extra() {
 							d91 = jitEmitDynamicCallableAt(ctx, d98, callbackArgs92, int32(stackArray89), JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(callbackResultOff93), ID: 0})
 						}
 					}
-					ctx.EnsureDesc(&d18)
-					ctx.EnsureDesc(&d18)
 					if d18.Loc == LocRegPair || d18.Loc == LocStackPair || d18.Loc == LocRegTriple || d18.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
 					}
-					ctx.EnsureDesc(&d80)
-					ctx.EnsureDesc(&d80)
 					d80 = JITPrepareScmerGoArg(ctx, d80)
-					ctx.EnsureDesc(&d91)
-					ctx.EnsureDesc(&d91)
 					d91 = JITPrepareScmerGoArg(ctx, d91)
 					ctx.SyncDesc(&d18)
 					ctx.SyncDesc(&d80)
@@ -4194,6 +4181,9 @@ func init_list_assoc_extra() {
 						return bbs[1].RenderPS(ps)
 					}
 					ctx.EmitJump(d22.Condition, lbl3)
+					if bbs[3].Rendered {
+						ctx.EmitJmp(lbl4)
+					}
 					ctx.FreeDesc(&d21)
 					snap26 := d3
 					snap27 := d4
@@ -4468,13 +4458,9 @@ func init_list_assoc_extra() {
 							d72 = jitEmitDynamicCallableAt(ctx, d79, callbackArgs73, int32(stackArray70), JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(callbackResultOff74), ID: 0})
 						}
 					}
-					ctx.EnsureDesc(&d15)
-					ctx.EnsureDesc(&d15)
 					if d15.Loc == LocRegPair || d15.Loc == LocStackPair || d15.Loc == LocRegTriple || d15.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
 					}
-					ctx.EnsureDesc(&d72)
-					ctx.EnsureDesc(&d72)
 					d72 = JITPrepareScmerGoArg(ctx, d72)
 					ctx.SyncDesc(&d15)
 					ctx.SyncDesc(&d72)
@@ -5255,6 +5241,9 @@ func init_list_assoc_extra() {
 						return bbs[1].RenderPS(ps)
 					}
 					ctx.EmitJump(d22.Condition, lbl3)
+					if bbs[3].Rendered {
+						ctx.EmitJmp(lbl4)
+					}
 					ctx.FreeDesc(&d21)
 					snap26 := d3
 					snap27 := d4
@@ -5534,13 +5523,9 @@ func init_list_assoc_extra() {
 							d73 = jitEmitDynamicCallableAt(ctx, d80, callbackArgs74, int32(stackArray71), JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(callbackResultOff75), ID: 0})
 						}
 					}
-					ctx.EnsureDesc(&d15)
-					ctx.EnsureDesc(&d15)
 					if d15.Loc == LocRegPair || d15.Loc == LocStackPair || d15.Loc == LocRegTriple || d15.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
 					}
-					ctx.EnsureDesc(&d73)
-					ctx.EnsureDesc(&d73)
 					d73 = JITPrepareScmerGoArg(ctx, d73)
 					ctx.SyncDesc(&d15)
 					ctx.SyncDesc(&d73)

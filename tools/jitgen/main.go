@@ -867,29 +867,14 @@ func storageFallbackEmitter(info storageInfo, reason string) string {
 // collectStorageMethods pairs each GetValue variant with its generated emitter.
 // Sources and generated entry points deliberately may live in separate files.
 func collectStorageMethods(files []storageASTFile) []storageInfo {
-	stableInputs := map[string][]string{}
 	const stablePrefix = "jitgen:control-flow-stable "
-	for _, sourceFile := range files {
-		for _, comments := range sourceFile.file.Comments {
-			for _, comment := range comments.List {
-				text := strings.TrimSpace(strings.TrimPrefix(comment.Text, "//"))
-				if !strings.HasPrefix(text, stablePrefix) {
-					continue
-				}
-				fields := strings.Fields(strings.TrimPrefix(text, stablePrefix))
-				if len(fields) < 2 {
-					panic("jitgen: control-flow-stable requires a method and at least one parameter")
-				}
-				stableInputs[fields[0]] = append([]string(nil), fields[1:]...)
-			}
-		}
-	}
 	// First pass: collect all methods by receiver type name
 	type methodInfo struct {
-		funcPos  token.Pos // position of func name (for SSA lookup)
-		body     *ast.BlockStmt
-		recvName string // receiver variable name
-		path     string
+		funcPos      token.Pos // position of func name (for SSA lookup)
+		body         *ast.BlockStmt
+		recvName     string // receiver variable name
+		path         string
+		stableInputs []string
 	}
 	methods := map[string]map[string]methodInfo{}
 
@@ -917,9 +902,25 @@ func collectStorageMethods(files []storageASTFile) []storageInfo {
 			if methods[typeName] == nil {
 				methods[typeName] = map[string]methodInfo{}
 			}
+			var stableInputs []string
+			if fn.Doc != nil {
+				for _, comment := range fn.Doc.List {
+					text := strings.TrimSpace(strings.TrimPrefix(comment.Text, "//"))
+					if !strings.HasPrefix(text, stablePrefix) {
+						continue
+					}
+					stableInputs = strings.Fields(strings.TrimPrefix(text, stablePrefix))
+					if len(stableInputs) == 0 {
+						panic("jitgen: control-flow-stable requires at least one parameter")
+					}
+				}
+			}
 			switch fn.Name.Name {
 			case "GetValue", "GetValueRange", "GetValueMulti", "JITEmit", "JITEmitGetValueRange", "JITEmitGetValueMulti":
-				methods[typeName][fn.Name.Name] = methodInfo{funcPos: fn.Name.Pos(), body: fn.Body, recvName: recvName, path: sourceFile.path}
+				methods[typeName][fn.Name.Name] = methodInfo{
+					funcPos: fn.Name.Pos(), body: fn.Body, recvName: recvName,
+					path: sourceFile.path, stableInputs: stableInputs,
+				}
 			}
 		}
 	}
@@ -937,15 +938,11 @@ func collectStorageMethods(files []storageASTFile) []storageInfo {
 			if !sourceOK || !emitterOK {
 				continue
 			}
-			inputs := stableInputs[pair.source]
-			if scoped, ok := stableInputs[typeName+"."+pair.source]; ok {
-				inputs = scoped
-			}
 			result = append(result, storageInfo{
 				typeName: typeName, path: emitter.path, recvName: emitter.recvName,
 				sourceName: pair.source, emitterName: pair.emitter,
 				sourcePos: source.funcPos, emitterBody: emitter.body,
-				stableInputs: append([]string(nil), inputs...),
+				stableInputs: append([]string(nil), source.stableInputs...),
 			})
 		}
 	}
@@ -1877,12 +1874,12 @@ func (g *codeGen) emitGenericStaticCall(name string, callee *ssa.Function, args 
 		_, constantArgs[i] = a.(*ssa.Const)
 		_, globalArg := a.(*ssa.Global)
 		if !constantArgs[i] && !globalArg {
-			candidate := g.lookup(g.rewriteSSAValue(a))
-			if candidate.goVar == "" {
+			candidate, exists := g.vals[g.rewriteSSAValue(a).Name()]
+			if !exists || candidate.goVar == "" {
 				return false
 			}
 		}
-		resolved[i] = g.resolveValue(a)
+		resolved[i] = g.resolveCallValue(a)
 		paramType := func() types.Type {
 			if i == 0 && argOffset == 1 {
 				return sig.Recv().Type()
@@ -3161,6 +3158,11 @@ func (g *codeGen) emitIfClosure(v *ssa.If) {
 			g.emit("ctx.EmitCmpRegImm32(%s.Reg, 0)", condVar)
 			g.emit("ctx.EmitJump(CondEqual, %s)", elseLbl)
 		}
+		// A fallthrough is valid only while its block is still going to be
+		// emitted immediately after this branch. Recursive CFG rendering may
+		// already have placed it elsewhere; in that case close the edge with an
+		// explicit jump instead of falling into whichever sibling is emitted next.
+		g.emit("if bbs[%d].Rendered { ctx.EmitJmp(%s) }", thenBB, thenLbl)
 	} else {
 		if cond.marker == "_flags" {
 			g.emit("ctx.EmitJump(%s.Condition, %s)", condVar, thenEdgeLbl)
@@ -3170,6 +3172,8 @@ func (g *codeGen) emitIfClosure(v *ssa.If) {
 		}
 		if !directFallthrough {
 			g.emit("ctx.EmitJmp(%s)", elseEdgeLbl)
+		} else {
+			g.emit("if bbs[%d].Rendered { ctx.EmitJmp(%s) }", elseBB, elseLbl)
 		}
 	}
 	if cond.marker == "_flags" {
@@ -3242,16 +3246,27 @@ func comparisonFeedsImmediateIf(v *ssa.BinOp) bool {
 	if opToCC(v.Op) == "" {
 		return false
 	}
+	return valueFeedsImmediateIf(v)
+}
+
+// valueFeedsImmediateIf proves that a value is consumed only by the block's
+// terminating branch. Intrinsics such as math.IsNaN can then return LocFlags
+// just like a directly written comparison, without materializing a Go bool.
+func valueFeedsImmediateIf(v ssa.Value) bool {
+	instr, ok := v.(ssa.Instruction)
+	if !ok {
+		return false
+	}
 	refs := v.Referrers()
 	if refs == nil || len(*refs) != 1 {
 		return false
 	}
 	branch, ok := (*refs)[0].(*ssa.If)
-	if !ok || branch.Cond != v || branch.Block() != v.Block() {
+	if !ok || branch.Cond != v || branch.Block() != instr.Block() {
 		return false
 	}
-	instructions := v.Block().Instrs
-	return len(instructions) >= 2 && instructions[len(instructions)-2] == v && instructions[len(instructions)-1] == branch
+	instructions := instr.Block().Instrs
+	return len(instructions) >= 2 && instructions[len(instructions)-2] == instr && instructions[len(instructions)-1] == branch
 }
 
 func (g *codeGen) emitJumpClosure(v *ssa.Jump) {
@@ -4869,6 +4884,7 @@ func addScmPrefix(code string) string {
 		"ConcatStrings":                true,
 		"OptimizeProcToSerialFunction": true,
 		"CondEqual":                    true, "CondNotEqual": true, "CondSignedLess": true, "CondSignedGreater": true, "CondSignedLessOrEqual": true, "CondSignedGreaterOrEqual": true,
+		"CondParity":        true,
 		"CondUnsignedBelow": true, "CondUnsignedAboveOrEqual": true, "CondUnsignedBelowOrEqual": true, "CondUnsignedAbove": true,
 		"RegRAX": true, "RegRBX": true, "RegRCX": true, "RegRDX": true,
 		"RegRSI": true, "RegRDI": true, "RegRSP": true, "RegRBP": true,
@@ -6763,8 +6779,9 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				}
 				dst := g.resolveValue(v.Call.Args[0])
 				src := g.resolveValue(v.Call.Args[1])
-				g.emit("ctx.EnsureDesc(&%s)", dst.goVar)
-				g.emit("ctx.EnsureDesc(&%s)", src.goVar)
+				// The Go-call lowerer accepts register- and stack-resident slice
+				// headers. Keeping stabilized triples on the stack avoids needing
+				// six simultaneous registers for copy(dst, src).
 				callResults := g.allocTemp("callResults")
 				dv := g.allocDesc()
 				g.emit("%s := JITEmitGoCallResults(ctx, GoFuncAddr(%s), []JITValueDesc{%s, %s}, []uint8{1}, []uint8{0})", callResults, helper, dst.goVar, src.goVar)
@@ -7289,6 +7306,43 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			g.emit("%s = JITPrepareScmerGoArg(ctx, %s)", key.goVar, key.goVar)
 			g.emit("%s = JITPrepareScmerGoArg(ctx, %s)", val.goVar, val.goVar)
 			g.emit("ctx.EmitGoCallVoid(GoFuncAddr((*FastDict).Set), []JITValueDesc{%s, %s, %s, %s})", recv.goVar, key.goVar, val.goVar, mergeFn.goVar)
+		case "IsNaN":
+			if callee.Pkg == nil || callee.Pkg.Pkg == nil || callee.Pkg.Pkg.Path() != "math" {
+				panic(fmt.Sprintf("unsupported IsNaN function: %s", callee.String()))
+			}
+			// math.IsNaN is x != x. When its result feeds the terminating If,
+			// preserve UCOMISD's parity flag directly instead of emitting two
+			// SETcc instructions, an OR, and a second integer comparison.
+			arg := g.resolveValue(v.Call.Args[0])
+			dv := g.allocDesc()
+			g.emit("var %s JITValueDesc", dv)
+			g.emit("if %s.Loc == LocImm {", arg.goVar)
+			g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(%s.Imm.Float() != %s.Imm.Float())}", dv, arg.goVar, arg.goVar)
+			g.emit("} else {")
+			g.emit("\tctx.EnsureDesc(&%s)", arg.goVar)
+			sourceReg := g.allocTemp("nanSource")
+			g.emit("\t%s := %s.Reg", sourceReg, arg.goVar)
+			g.emit("\tif %s.Loc == LocRegPair { %s = %s.Reg2 }", arg.goVar, sourceReg, arg.goVar)
+			if valueFeedsImmediateIf(v) {
+				flagsReg := g.allocReg()
+				g.emit("\t%s := ctx.AllocRegExcept(%s)", flagsReg, sourceReg)
+				g.emit("\tctx.EmitCmpFloat64(%s, %s)", sourceReg, sourceReg)
+				g.emit("\t%s = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: %s, Condition: CondParity}", dv, flagsReg)
+				g.emit("\tctx.BindReg(%s, &%s)", flagsReg, dv)
+			} else {
+				resultReg := g.allocReg()
+				g.emit("\t%s := ctx.AllocRegExcept(%s)", resultReg, sourceReg)
+				g.emit("\tctx.EmitCmpFloat64(%s, %s)", sourceReg, sourceReg)
+				g.emit("\tctx.EmitSetcc(%s, CondParity)", resultReg)
+				g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: %s}", dv, resultReg)
+				g.emit("\tctx.BindReg(%s, &%s)", resultReg, dv)
+			}
+			g.emit("}")
+			marker := ""
+			if valueFeedsImmediateIf(v) {
+				marker = "_flags"
+			}
+			g.vals[name] = genVal{goVar: dv, isDesc: true, marker: marker}
 		case "Sqrt":
 			// math.Sqrt(float64) float64 via bit-helper (Go ABI float args are not marshaled directly).
 			arg := g.resolveValue(v.Call.Args[0])
@@ -10035,6 +10089,29 @@ func (g *codeGen) resolveValue(v ssa.Value) genVal {
 		return genVal{goVar: dv, isDesc: true, marker: "_goptr"}
 	}
 	return g.lookup(v)
+}
+
+// resolveCallValue preserves an already materialized descriptor's current
+// placement. Go-call lowering accepts stack words directly and performs the
+// required ABI moves as one parallel move set; eagerly loading a stack pair or
+// triple here both adds work and can exhaust the register bank before the call.
+// Values which still require construction (constants, globals, and deferred
+// addresses) retain resolveValue's normal behavior.
+func (g *codeGen) resolveCallValue(v ssa.Value) genVal {
+	rewritten := g.rewriteSSAValue(v)
+	if _, ok := rewritten.(*ssa.Const); ok {
+		return g.resolveValue(rewritten)
+	}
+	if _, ok := rewritten.(*ssa.Global); ok {
+		return g.resolveValue(rewritten)
+	}
+	if existing, ok := g.vals[rewritten.Name()]; ok {
+		if strings.HasPrefix(existing.marker, "_sliceaddr:") || strings.HasPrefix(existing.marker, "_stackaddr:") {
+			return g.resolveValue(rewritten)
+		}
+		return existing
+	}
+	return g.resolveValue(rewritten)
 }
 
 // constInt extracts the int64 from a constant SSA value.

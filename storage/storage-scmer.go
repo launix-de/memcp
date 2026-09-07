@@ -200,7 +200,7 @@ func (s *StorageSCMER) GetValue(i uint32) scm.Scmer {
 	return s.values[i]
 }
 
-//jitgen:control-flow-stable StorageSCMER.GetValueRange recid count target/3 stride
+//jitgen:control-flow-stable recid count target/3 stride
 func (s *StorageSCMER) GetValueRange(recid uint32, count uint32, target []scm.Scmer, stride int) {
 	if stride <= 0 {
 		stride = 1
@@ -217,6 +217,7 @@ func (s *StorageSCMER) GetValueRange(recid uint32, count uint32, target []scm.Sc
 	}
 }
 
+//jitgen:control-flow-stable recids/2 target/1 stride
 func (s *StorageSCMER) GetValueMulti(recids []uint32, target []scm.Scmer, stride int) {
 	if stride <= 0 {
 		stride = 1

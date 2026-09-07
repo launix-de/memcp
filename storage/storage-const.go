@@ -47,6 +47,8 @@ func (s *StorageConst) GetValue(i uint32) scm.Scmer {
 
 // GetValueRange and GetValueMulti fill target with the single constant
 // value directly; there is no per-row work to batch.
+//
+//jitgen:control-flow-stable recid count target/1 stride
 func (s *StorageConst) GetValueRange(recid uint32, count uint32, target []scm.Scmer, stride int) {
 	if stride <= 0 {
 		stride = 1
@@ -58,6 +60,7 @@ func (s *StorageConst) GetValueRange(recid uint32, count uint32, target []scm.Sc
 	}
 }
 
+//jitgen:control-flow-stable recids/2 target/1 stride
 func (s *StorageConst) GetValueMulti(recids []uint32, target []scm.Scmer, stride int) {
 	if stride <= 0 {
 		stride = 1

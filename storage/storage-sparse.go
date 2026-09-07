@@ -479,6 +479,9 @@ func (s *StorageSparse) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resul
 			return bbs[1].RenderPS(ps)
 		}
 		ctx.EmitJump(d12.Condition, lbl3)
+		if bbs[3].Rendered {
+			ctx.EmitJmp(lbl4)
+		}
 		ctx.FreeDesc(&d11)
 		snap17 := d1
 		snap18 := d2
@@ -1438,6 +1441,9 @@ func (s *StorageSparse) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resul
 			return bbs[3].RenderPS(ps)
 		}
 		ctx.EmitJump(d75.Condition, lbl5)
+		if bbs[5].Rendered {
+			ctx.EmitJmp(lbl6)
+		}
 		ctx.FreeDesc(&d74)
 		snap78 := d1
 		snap79 := d2
@@ -2267,6 +2273,9 @@ func (s *StorageSparse) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resul
 			return bbs[5].RenderPS(ps)
 		}
 		ctx.EmitJump(d172.Condition, lbl7)
+		if bbs[7].Rendered {
+			ctx.EmitJmp(lbl8)
+		}
 		ctx.FreeDesc(&d171)
 		snap175 := d1
 		snap176 := d2
@@ -3261,6 +3270,8 @@ func (s *StorageSparse) sparseSeek(want uint32) uint32 {
 // to seed a pointer into the sparse recids array, then merge-scan it forward
 // against the requested rows in one pass — O(touched sparse entries + n)
 // instead of a binary search per requested row.
+//
+//jitgen:control-flow-stable recid count target/1 stride
 func (s *StorageSparse) GetValueRange(recid uint32, count uint32, target []scm.Scmer, stride int) {
 	if stride <= 0 {
 		stride = 1
@@ -3299,6 +3310,7 @@ func (s *StorageSparse) GetValueRange(recid uint32, count uint32, target []scm.S
 	}
 }
 
+//jitgen:control-flow-stable recids/2 target/1 stride
 func (s *StorageSparse) GetValueMulti(recids []uint32, target []scm.Scmer, stride int) {
 	if stride <= 0 {
 		stride = 1

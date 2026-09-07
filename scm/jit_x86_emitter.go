@@ -752,6 +752,18 @@ func (ctx *JITContext) EmitDivFloat64(dst, src Reg) {
 	ctx.emitMovqXmmToGpr(dst, RegX0)
 }
 
+// EmitCmpFloat64 compares two float64 bit-patterns from GPRs and leaves the
+// UCOMISD result in machine flags for an immediately following consumer.
+func (ctx *JITContext) EmitCmpFloat64(left, right Reg) {
+	ctx.emitMovqGprToXmm(RegX0, left)
+	if left == right {
+		ctx.emitBytes(0x66, 0x0F, 0x2E, 0xC0) // UCOMISD XMM0, XMM0
+		return
+	}
+	ctx.emitMovqGprToXmm(RegX1, right)
+	ctx.emitBytes(0x66, 0x0F, 0x2E, 0xC1) // UCOMISD XMM0, XMM1
+}
+
 // EmitCmpFloat64Setcc compares two float64 bit-patterns from GPRs and writes
 // 0/1 into dst using SETcc on the floating-point flags.
 func (ctx *JITContext) EmitCmpFloat64Setcc(dst, left, right Reg, cc JITCondition) {
@@ -767,10 +779,7 @@ func (ctx *JITContext) EmitCmpFloat64Setcc(dst, left, right Reg, cc JITCondition
 	case CcGE:
 		cc = CcAE
 	}
-	ctx.emitMovqGprToXmm(RegX0, left)
-	ctx.emitMovqGprToXmm(RegX1, right)
-	// UCOMISD XMM0, XMM1
-	ctx.emitBytes(0x66, 0x0F, 0x2E, 0xC1)
+	ctx.EmitCmpFloat64(left, right)
 	switch cc {
 	case CcE, CcB, CcBE:
 		// EQ/LT/LE must reject unordered operands. UCOMISD sets PF for NaN.

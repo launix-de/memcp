@@ -423,8 +423,6 @@ func init_strings() {
 				}
 				d0 := args[0]
 				d0.ID = 0
-				ctx.EnsureDesc(&d0)
-				ctx.EnsureDesc(&d0)
 				d0 = JITPrepareScmerGoArg(ctx, d0)
 				ctx.SyncDesc(&d0)
 				d1 := ctx.EmitGoCallScalar(GoFuncAddr((Scmer).Any), []JITValueDesc{d0}, 2)
@@ -517,8 +515,6 @@ func init_strings() {
 				globalLookup0 := Globalenv.Vars[Symbol("concat")]
 				ctx.TrackImm(globalLookup0)
 				d1 := JITValueDesc{Loc: LocImm, Type: globalLookup0.GetTag(), Imm: globalLookup0, Rooted: true}
-				ctx.EnsureDesc(&d1)
-				ctx.EnsureDesc(&d1)
 				d1 = JITPrepareScmerGoArg(ctx, d1)
 				ctx.SyncDesc(&d1)
 				d2 := ctx.EmitGoCallScalar(GoFuncAddr((Scmer).Func), []JITValueDesc{d1}, 1)
@@ -802,6 +798,9 @@ func init_strings() {
 						return bbs[0].RenderPS(ps)
 					}
 					ctx.EmitJump(d9.Condition, lbl2)
+					if bbs[2].Rendered {
+						ctx.EmitJmp(lbl3)
+					}
 					ctx.FreeDesc(&d8)
 					snap12 := d0
 					snap13 := d1
@@ -1557,6 +1556,9 @@ func init_strings() {
 					}
 					ctx.EmitCmpRegImm32(d6.Reg, 0)
 					ctx.EmitJump(CondNotEqual, lbl2)
+					if bbs[2].Rendered {
+						ctx.EmitJmp(lbl3)
+					}
 					snap9 := d1
 					snap10 := d2
 					snap11 := d3
@@ -2444,6 +2446,9 @@ func init_strings() {
 						return bbs[4].RenderPS(ps)
 					}
 					ctx.EmitJump(d93.Condition, lbl6)
+					if bbs[6].Rendered {
+						ctx.EmitJmp(lbl7)
+					}
 					ctx.FreeDesc(&d92)
 					snap97 := d1
 					snap98 := d2
@@ -2971,6 +2976,9 @@ func init_strings() {
 						return bbs[6].RenderPS(ps)
 					}
 					ctx.EmitJump(d159.Condition, lbl8)
+					if bbs[8].Rendered {
+						ctx.EmitJmp(lbl9)
+					}
 					ctx.FreeDesc(&d158)
 					snap162 := d1
 					snap163 := d2
@@ -4728,6 +4736,9 @@ func init_strings() {
 						return bbs[10].RenderPS(ps)
 					}
 					ctx.EmitJump(d341.Condition, lbl12)
+					if bbs[12].Rendered {
+						ctx.EmitJmp(lbl13)
+					}
 					ctx.FreeDesc(&d340)
 					snap345 := d1
 					snap346 := d2
@@ -5668,8 +5679,6 @@ func init_strings() {
 				d1 := ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d2}, 2)
 				ctx.FreeDesc(&d0)
 				ctx.EnsureDesc(&d1)
-				ctx.EnsureDesc(&d1)
-				ctx.EnsureDesc(&d1)
 				if d1.Loc == LocImm {
 					tmpPair := JITValueDesc{Loc: LocRegPair, Type: d1.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 					ctx.TrackImm(d1.Imm)
@@ -6013,6 +6022,9 @@ func init_strings() {
 					}
 					ctx.EmitCmpRegImm32(d5.Reg, 0)
 					ctx.EmitJump(CondNotEqual, lbl2)
+					if bbs[3].Rendered {
+						ctx.EmitJmp(lbl4)
+					}
 					snap8 := d1
 					snap9 := d2
 					snap10 := d3
@@ -6565,6 +6577,9 @@ func init_strings() {
 					}
 					ctx.EmitCmpRegImm32(d76.Reg, 0)
 					ctx.EmitJump(CondNotEqual, lbl2)
+					if bbs[2].Rendered {
+						ctx.EmitJmp(lbl3)
+					}
 					snap79 := d1
 					snap80 := d2
 					snap81 := d3
@@ -6835,8 +6850,6 @@ func init_strings() {
 					d126 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d127}, 2)
 					ctx.FreeDesc(&d125)
 					ctx.EnsureDesc(&d126)
-					ctx.EnsureDesc(&d126)
-					ctx.EnsureDesc(&d126)
 					if d126.Loc == LocImm {
 						tmpPair := JITValueDesc{Loc: LocRegPair, Type: d126.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 						ctx.TrackImm(d126.Imm)
@@ -7052,8 +7065,6 @@ func init_strings() {
 					}
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d24)
-					ctx.EnsureDesc(&d24)
-					ctx.EnsureDesc(&d24)
 					if d24.Loc == LocImm {
 						tmpPair := JITValueDesc{Loc: LocRegPair, Type: d24.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 						ctx.TrackImm(d24.Imm)
@@ -7080,8 +7091,6 @@ func init_strings() {
 						panic("jit: generic call arg expects 2-word value (StrLikeCollation arg0)")
 					}
 					ctx.EnsureDesc(&d27)
-					ctx.EnsureDesc(&d27)
-					ctx.EnsureDesc(&d27)
 					if d27.Loc == LocImm {
 						tmpPair := JITValueDesc{Loc: LocRegPair, Type: d27.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 						ctx.TrackImm(d27.Imm)
@@ -7107,8 +7116,6 @@ func init_strings() {
 					if d27.Loc != LocRegPair && d27.Loc != LocStackPair && d27.Loc != LocInputPair {
 						panic("jit: generic call arg expects 2-word value (StrLikeCollation arg1)")
 					}
-					ctx.EnsureDesc(&d1)
-					ctx.EnsureDesc(&d1)
 					ctx.EnsureDesc(&d1)
 					if d1.Loc == LocImm {
 						tmpPair := JITValueDesc{Loc: LocRegPair, Type: d1.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
@@ -7317,6 +7324,9 @@ func init_strings() {
 					}
 					ctx.EmitCmpRegImm32(d3.Reg, 0)
 					ctx.EmitJump(CondNotEqual, lbl2)
+					if bbs[3].Rendered {
+						ctx.EmitJmp(lbl4)
+					}
 					snap6 := d0
 					snap7 := d1
 					snap8 := d2
@@ -7497,8 +7507,6 @@ func init_strings() {
 					d23 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d24}, 2)
 					ctx.FreeDesc(&d22)
 					ctx.EnsureDesc(&d20)
-					ctx.EnsureDesc(&d20)
-					ctx.EnsureDesc(&d20)
 					if d20.Loc == LocImm {
 						tmpPair := JITValueDesc{Loc: LocRegPair, Type: d20.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 						ctx.TrackImm(d20.Imm)
@@ -7524,8 +7532,6 @@ func init_strings() {
 					if d20.Loc != LocRegPair && d20.Loc != LocStackPair && d20.Loc != LocInputPair {
 						panic("jit: generic call arg expects 2-word value (StrLike arg0)")
 					}
-					ctx.EnsureDesc(&d23)
-					ctx.EnsureDesc(&d23)
 					ctx.EnsureDesc(&d23)
 					if d23.Loc == LocImm {
 						tmpPair := JITValueDesc{Loc: LocRegPair, Type: d23.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
@@ -7698,6 +7704,9 @@ func init_strings() {
 					}
 					ctx.EmitCmpRegImm32(d30.Reg, 0)
 					ctx.EmitJump(CondNotEqual, lbl2)
+					if bbs[2].Rendered {
+						ctx.EmitJmp(lbl3)
+					}
 					snap33 := d0
 					snap34 := d1
 					snap35 := d2
@@ -7890,8 +7899,6 @@ func init_strings() {
 				d1 := ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d2}, 2)
 				ctx.FreeDesc(&d0)
 				ctx.EnsureDesc(&d1)
-				ctx.EnsureDesc(&d1)
-				ctx.EnsureDesc(&d1)
 				if d1.Loc == LocImm {
 					tmpPair := JITValueDesc{Loc: LocRegPair, Type: d1.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 					ctx.TrackImm(d1.Imm)
@@ -7975,8 +7982,6 @@ func init_strings() {
 				}
 				d1 := ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d2}, 2)
 				ctx.FreeDesc(&d0)
-				ctx.EnsureDesc(&d1)
-				ctx.EnsureDesc(&d1)
 				ctx.EnsureDesc(&d1)
 				if d1.Loc == LocImm {
 					tmpPair := JITValueDesc{Loc: LocRegPair, Type: d1.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
@@ -8118,8 +8123,6 @@ func init_strings() {
 				ctx.ReclaimUntrackedRegs()
 				ctx.ReclaimUntrackedRegs()
 				ctx.EnsureDesc(&d9)
-				ctx.EnsureDesc(&d9)
-				ctx.EnsureDesc(&d9)
 				if d9.Loc == LocImm {
 					tmpPair := JITValueDesc{Loc: LocRegPair, Type: d9.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 					ctx.TrackImm(d9.Imm)
@@ -8146,8 +8149,6 @@ func init_strings() {
 					panic("jit: generic call arg expects 2-word value (strings.Replace arg0)")
 				}
 				ctx.EnsureDesc(&d10)
-				ctx.EnsureDesc(&d10)
-				ctx.EnsureDesc(&d10)
 				if d10.Loc == LocImm {
 					tmpPair := JITValueDesc{Loc: LocRegPair, Type: d10.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 					ctx.TrackImm(d10.Imm)
@@ -8173,8 +8174,6 @@ func init_strings() {
 				if d10.Loc != LocRegPair && d10.Loc != LocStackPair && d10.Loc != LocInputPair {
 					panic("jit: generic call arg expects 2-word value (strings.Replace arg1)")
 				}
-				ctx.EnsureDesc(&d11)
-				ctx.EnsureDesc(&d11)
 				ctx.EnsureDesc(&d11)
 				if d11.Loc == LocImm {
 					tmpPair := JITValueDesc{Loc: LocRegPair, Type: d11.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
@@ -8270,8 +8269,6 @@ func init_strings() {
 				d1 := ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d2}, 2)
 				ctx.FreeDesc(&d0)
 				ctx.EnsureDesc(&d1)
-				ctx.EnsureDesc(&d1)
-				ctx.EnsureDesc(&d1)
 				if d1.Loc == LocImm {
 					tmpPair := JITValueDesc{Loc: LocRegPair, Type: d1.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 					ctx.TrackImm(d1.Imm)
@@ -8355,8 +8352,6 @@ func init_strings() {
 				}
 				d1 := ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d2}, 2)
 				ctx.FreeDesc(&d0)
-				ctx.EnsureDesc(&d1)
-				ctx.EnsureDesc(&d1)
 				ctx.EnsureDesc(&d1)
 				if d1.Loc == LocImm {
 					tmpPair := JITValueDesc{Loc: LocRegPair, Type: d1.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
@@ -8470,8 +8465,6 @@ func init_strings() {
 				}
 				d1 := ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d2}, 2)
 				ctx.FreeDesc(&d0)
-				ctx.EnsureDesc(&d1)
-				ctx.EnsureDesc(&d1)
 				ctx.EnsureDesc(&d1)
 				if d1.Loc == LocImm {
 					tmpPair := JITValueDesc{Loc: LocRegPair, Type: d1.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
@@ -8673,6 +8666,9 @@ func init_strings() {
 					}
 					ctx.EmitCmpRegImm32(d3.Reg, 0)
 					ctx.EmitJump(CondNotEqual, lbl2)
+					if bbs[2].Rendered {
+						ctx.EmitJmp(lbl3)
+					}
 					snap6 := d0
 					snap7 := d1
 					snap8 := d2
@@ -8833,8 +8829,6 @@ func init_strings() {
 					}
 					d20 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d21}, 2)
 					ctx.FreeDesc(&d19)
-					ctx.EnsureDesc(&d20)
-					ctx.EnsureDesc(&d20)
 					ctx.EnsureDesc(&d20)
 					if d20.Loc == LocImm {
 						tmpPair := JITValueDesc{Loc: LocRegPair, Type: d20.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
@@ -9015,6 +9009,9 @@ func init_strings() {
 					}
 					ctx.EmitCmpRegImm32(d3.Reg, 0)
 					ctx.EmitJump(CondNotEqual, lbl2)
+					if bbs[2].Rendered {
+						ctx.EmitJmp(lbl3)
+					}
 					snap6 := d0
 					snap7 := d1
 					snap8 := d2
@@ -9175,8 +9172,6 @@ func init_strings() {
 					}
 					d20 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d21}, 2)
 					ctx.FreeDesc(&d19)
-					ctx.EnsureDesc(&d20)
-					ctx.EnsureDesc(&d20)
 					ctx.EnsureDesc(&d20)
 					if d20.Loc == LocImm {
 						tmpPair := JITValueDesc{Loc: LocRegPair, Type: d20.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
@@ -9386,6 +9381,9 @@ func init_strings() {
 					}
 					ctx.EmitCmpRegImm32(d3.Reg, 0)
 					ctx.EmitJump(CondNotEqual, lbl2)
+					if bbs[2].Rendered {
+						ctx.EmitJmp(lbl3)
+					}
 					snap6 := d0
 					snap7 := d1
 					snap8 := d2
@@ -9546,8 +9544,6 @@ func init_strings() {
 					}
 					d20 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d21}, 2)
 					ctx.FreeDesc(&d19)
-					ctx.EnsureDesc(&d20)
-					ctx.EnsureDesc(&d20)
 					ctx.EnsureDesc(&d20)
 					if d20.Loc == LocImm {
 						tmpPair := JITValueDesc{Loc: LocRegPair, Type: d20.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
@@ -10146,8 +10142,6 @@ func init_strings() {
 					d37 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d38}, 2)
 					ctx.FreeDesc(&d36)
 					ctx.EnsureDesc(&d37)
-					ctx.EnsureDesc(&d37)
-					ctx.EnsureDesc(&d37)
 					if d37.Loc == LocImm {
 						tmpPair := JITValueDesc{Loc: LocRegPair, Type: d37.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 						ctx.TrackImm(d37.Imm)
@@ -10173,8 +10167,6 @@ func init_strings() {
 					if d37.Loc != LocRegPair && d37.Loc != LocStackPair && d37.Loc != LocInputPair {
 						panic("jit: generic call arg expects 2-word value (strings.Split arg0)")
 					}
-					ctx.EnsureDesc(&d3)
-					ctx.EnsureDesc(&d3)
 					ctx.EnsureDesc(&d3)
 					if d3.Loc == LocImm {
 						tmpPair := JITValueDesc{Loc: LocRegPair, Type: d3.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
@@ -10530,6 +10522,9 @@ func init_strings() {
 						return bbs[3].RenderPS(ps)
 					}
 					ctx.EmitJump(d49.Condition, lbl5)
+					if bbs[5].Rendered {
+						ctx.EmitJmp(lbl6)
+					}
 					ctx.FreeDesc(&d48)
 					snap53 := d3
 					snap54 := d4
@@ -11247,6 +11242,9 @@ func init_strings() {
 					}
 					ctx.EmitCmpRegImm32(d3.Reg, 0)
 					ctx.EmitJump(CondNotEqual, lbl2)
+					if bbs[2].Rendered {
+						ctx.EmitJmp(lbl3)
+					}
 					snap6 := d0
 					snap7 := d1
 					snap8 := d2
@@ -11482,6 +11480,9 @@ func init_strings() {
 						return bbs[2].RenderPS(ps)
 					}
 					ctx.EmitJump(d24.Condition, lbl4)
+					if bbs[4].Rendered {
+						ctx.EmitJmp(lbl5)
+					}
 					ctx.FreeDesc(&d23)
 					snap27 := d0
 					snap28 := d1
@@ -11717,8 +11718,6 @@ func init_strings() {
 					d56 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d57}, 2)
 					ctx.FreeDesc(&d55)
 					ctx.EnsureDesc(&d56)
-					ctx.EnsureDesc(&d56)
-					ctx.EnsureDesc(&d56)
 					if d56.Loc == LocImm {
 						tmpPair := JITValueDesc{Loc: LocRegPair, Type: d56.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 						ctx.TrackImm(d56.Imm)
@@ -11744,8 +11743,6 @@ func init_strings() {
 					if d56.Loc != LocRegPair && d56.Loc != LocStackPair && d56.Loc != LocInputPair {
 						panic("jit: generic call arg expects 2-word value (strings.Repeat arg0)")
 					}
-					ctx.EnsureDesc(&d21)
-					ctx.EnsureDesc(&d21)
 					if d21.Loc == LocRegPair || d21.Loc == LocStackPair || d21.Loc == LocRegTriple || d21.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
 					}
@@ -12082,8 +12079,6 @@ func init_strings() {
 				d1 := ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d2}, 2)
 				ctx.FreeDesc(&d0)
 				ctx.EnsureDesc(&d1)
-				ctx.EnsureDesc(&d1)
-				ctx.EnsureDesc(&d1)
 				if d1.Loc == LocImm {
 					tmpPair := JITValueDesc{Loc: LocRegPair, Type: d1.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 					ctx.TrackImm(d1.Imm)
@@ -12167,8 +12162,6 @@ func init_strings() {
 				}
 				d1 := ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d2}, 2)
 				ctx.FreeDesc(&d0)
-				ctx.EnsureDesc(&d1)
-				ctx.EnsureDesc(&d1)
 				ctx.EnsureDesc(&d1)
 				if d1.Loc == LocImm {
 					tmpPair := JITValueDesc{Loc: LocRegPair, Type: d1.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
@@ -12318,8 +12311,6 @@ func init_strings() {
 					d1 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d2}, 2)
 					ctx.FreeDesc(&d0)
 					ctx.EnsureDesc(&d1)
-					ctx.EnsureDesc(&d1)
-					ctx.EnsureDesc(&d1)
 					if d1.Loc == LocImm {
 						tmpPair := JITValueDesc{Loc: LocRegPair, Type: d1.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 						ctx.TrackImm(d1.Imm)
@@ -12407,6 +12398,9 @@ func init_strings() {
 					}
 					ctx.EmitCmpRegImm32(d7.Reg, 0)
 					ctx.EmitJump(CondNotEqual, lbl2)
+					if bbs[2].Rendered {
+						ctx.EmitJmp(lbl3)
+					}
 					snap10 := d0
 					snap11 := d1
 					snap12 := d2
@@ -12673,8 +12667,6 @@ func init_strings() {
 					d1 = ctx.EmitGoCallScalar(GoFuncAddr(func(value Scmer) any { return value }), []JITValueDesc{d0}, 2)
 					ctx.FreeDesc(&d0)
 					ctx.EnsureDesc(&d1)
-					ctx.EnsureDesc(&d1)
-					ctx.EnsureDesc(&d1)
 					if d1.Loc == LocImm {
 						tmpPair := JITValueDesc{Loc: LocRegPair, Type: d1.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 						if d1.Imm.GetTag() == tagBool {
@@ -12769,6 +12761,9 @@ func init_strings() {
 					}
 					ctx.EmitCmpRegImm32(d6.Reg, 0)
 					ctx.EmitJump(CondNotEqual, lbl2)
+					if bbs[2].Rendered {
+						ctx.EmitJmp(lbl3)
+					}
 					snap9 := d0
 					snap10 := d1
 					snap11 := d3
@@ -13174,6 +13169,9 @@ func init_strings() {
 					}
 					ctx.EmitCmpRegImm32(d3.Reg, 0)
 					ctx.EmitJump(CondNotEqual, lbl2)
+					if bbs[3].Rendered {
+						ctx.EmitJmp(lbl4)
+					}
 					snap6 := d0
 					snap7 := d1
 					snap8 := d2
@@ -13321,8 +13319,6 @@ func init_strings() {
 					ctx.EnsureDesc(&d19)
 					d20 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *bytes.Buffer) io.Writer { return value }), []JITValueDesc{d19}, 2)
 					ctx.EnsureDesc(&d20)
-					ctx.EnsureDesc(&d20)
-					ctx.EnsureDesc(&d20)
 					if d20.Loc == LocImm {
 						tmpPair := JITValueDesc{Loc: LocRegPair, Type: d20.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 						if d20.Imm.GetTag() == tagBool {
@@ -13361,8 +13357,6 @@ func init_strings() {
 					d21 = ctx.EmitGoCallScalar(GoFuncAddr(json.NewEncoder), []JITValueDesc{d20}, 1)
 					d21.NoHeapPointer = false
 					ctx.BindReg(d21.Reg, &d21)
-					ctx.EnsureDesc(&d21)
-					ctx.EnsureDesc(&d21)
 					if d21.Loc == LocRegPair || d21.Loc == LocStackPair || d21.Loc == LocRegTriple || d21.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
 					}
@@ -13395,13 +13389,9 @@ func init_strings() {
 					ctx.FreeDesc(&d23)
 					ctx.EnsureDesc(&d24)
 					d26 = ctx.EmitGoCallScalar(GoFuncAddr(func(value string) any { return value }), []JITValueDesc{d24}, 2)
-					ctx.EnsureDesc(&d21)
-					ctx.EnsureDesc(&d21)
 					if d21.Loc == LocRegPair || d21.Loc == LocStackPair || d21.Loc == LocRegTriple || d21.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
 					}
-					ctx.EnsureDesc(&d26)
-					ctx.EnsureDesc(&d26)
 					ctx.EnsureDesc(&d26)
 					if d26.Loc == LocImm {
 						tmpPair := JITValueDesc{Loc: LocRegPair, Type: d26.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
@@ -13517,6 +13507,9 @@ func init_strings() {
 					}
 					ctx.EmitCmpRegImm32(d29.Reg, 0)
 					ctx.EmitJump(CondNotEqual, lbl5)
+					if bbs[5].Rendered {
+						ctx.EmitJmp(lbl6)
+					}
 					snap32 := d0
 					snap33 := d1
 					snap34 := d2
@@ -13787,6 +13780,9 @@ func init_strings() {
 					}
 					ctx.EmitCmpRegImm32(d71.Reg, 0)
 					ctx.EmitJump(CondNotEqual, lbl3)
+					if bbs[1].Rendered {
+						ctx.EmitJmp(lbl2)
+					}
 					snap74 := d0
 					snap75 := d1
 					snap76 := d2
@@ -14111,8 +14107,6 @@ func init_strings() {
 					}
 					ctx.ReclaimUntrackedRegs()
 					ctx.StabilizeDescForControlFlow(&d19)
-					ctx.EnsureDesc(&d19)
-					ctx.EnsureDesc(&d19)
 					if d19.Loc == LocRegPair || d19.Loc == LocStackPair || d19.Loc == LocRegTriple || d19.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
 					}
@@ -14866,14 +14860,10 @@ func init_strings() {
 					d4.Type = tagSlice
 					ctx.EnsureDesc(&d0)
 					d6 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *any) any { return value }), []JITValueDesc{d0}, 2)
-					ctx.EnsureDesc(&d4)
-					ctx.EnsureDesc(&d4)
 					d4 = JITPrepareGoSliceArg(ctx, d4)
 					if d4.Loc != LocRegTriple && d4.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice (json.Unmarshal arg0)")
 					}
-					ctx.EnsureDesc(&d6)
-					ctx.EnsureDesc(&d6)
 					ctx.EnsureDesc(&d6)
 					if d6.Loc == LocImm {
 						tmpPair := JITValueDesc{Loc: LocRegPair, Type: d6.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
@@ -14974,6 +14964,9 @@ func init_strings() {
 					}
 					ctx.EmitCmpRegImm32(d9.Reg, 0)
 					ctx.EmitJump(CondNotEqual, lbl2)
+					if bbs[2].Rendered {
+						ctx.EmitJmp(lbl3)
+					}
 					snap12 := d0
 					snap13 := d1
 					snap14 := d2
@@ -15156,8 +15149,6 @@ func init_strings() {
 					ctx.ReclaimUntrackedRegs()
 					ctx.StabilizeDescForControlFlow(&d0)
 					d34 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *any) any { return *value }), []JITValueDesc{d0}, 2)
-					ctx.EnsureDesc(&d34)
-					ctx.EnsureDesc(&d34)
 					ctx.EnsureDesc(&d34)
 					if d34.Loc == LocImm {
 						tmpPair := JITValueDesc{Loc: LocRegPair, Type: d34.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
@@ -15364,14 +15355,10 @@ func init_strings() {
 					d4.Type = tagSlice
 					ctx.EnsureDesc(&d0)
 					d6 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *Scmer) any { return value }), []JITValueDesc{d0}, 2)
-					ctx.EnsureDesc(&d4)
-					ctx.EnsureDesc(&d4)
 					d4 = JITPrepareGoSliceArg(ctx, d4)
 					if d4.Loc != LocRegTriple && d4.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice (json.Unmarshal arg0)")
 					}
-					ctx.EnsureDesc(&d6)
-					ctx.EnsureDesc(&d6)
 					ctx.EnsureDesc(&d6)
 					if d6.Loc == LocImm {
 						tmpPair := JITValueDesc{Loc: LocRegPair, Type: d6.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
@@ -15472,6 +15459,9 @@ func init_strings() {
 					}
 					ctx.EmitCmpRegImm32(d9.Reg, 0)
 					ctx.EmitJump(CondNotEqual, lbl2)
+					if bbs[2].Rendered {
+						ctx.EmitJmp(lbl3)
+					}
 					snap12 := d0
 					snap13 := d1
 					snap14 := d2
@@ -15773,13 +15763,9 @@ func init_strings() {
 					}
 				}
 				ctx.ReclaimUntrackedRegs()
-				ctx.EnsureDesc(&d0)
-				ctx.EnsureDesc(&d0)
 				if d0.Loc == LocRegPair || d0.Loc == LocStackPair || d0.Loc == LocRegTriple || d0.Loc == LocStackTriple {
 					panic("jit: generic call arg expects 1-word value")
 				}
-				ctx.EnsureDesc(&d7)
-				ctx.EnsureDesc(&d7)
 				if d7.Loc == LocRegPair || d7.Loc == LocStackPair || d7.Loc == LocRegTriple || d7.Loc == LocStackTriple {
 					panic("jit: generic call arg expects 1-word value")
 				}
@@ -15800,19 +15786,13 @@ func init_strings() {
 				d10.Type = tagSlice
 				ctx.FreeDesc(&d8)
 				ctx.ReclaimUntrackedRegs()
-				ctx.EnsureDesc(&d0)
-				ctx.EnsureDesc(&d0)
 				if d0.Loc == LocRegPair || d0.Loc == LocStackPair || d0.Loc == LocRegTriple || d0.Loc == LocStackTriple {
 					panic("jit: generic call arg expects 1-word value")
 				}
-				ctx.EnsureDesc(&d10)
-				ctx.EnsureDesc(&d10)
 				d10 = JITPrepareGoSliceArg(ctx, d10)
 				if d10.Loc != LocRegTriple && d10.Loc != LocStackTriple {
 					panic("jit: generic call arg expects 3-word Go slice ((*base64.Encoding).Encode arg1)")
 				}
-				ctx.EnsureDesc(&d6)
-				ctx.EnsureDesc(&d6)
 				d6 = JITPrepareGoSliceArg(ctx, d6)
 				if d6.Loc != LocRegTriple && d6.Loc != LocStackTriple {
 					panic("jit: generic call arg expects 3-word Go slice ((*base64.Encoding).Encode arg2)")
@@ -15954,13 +15934,9 @@ func init_strings() {
 					}
 					d2 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d3}, 2)
 					ctx.FreeDesc(&d1)
-					ctx.EnsureDesc(&d0)
-					ctx.EnsureDesc(&d0)
 					if d0.Loc == LocRegPair || d0.Loc == LocStackPair || d0.Loc == LocRegTriple || d0.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
 					}
-					ctx.EnsureDesc(&d2)
-					ctx.EnsureDesc(&d2)
 					ctx.EnsureDesc(&d2)
 					if d2.Loc == LocImm {
 						tmpPair := JITValueDesc{Loc: LocRegPair, Type: d2.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
@@ -16053,6 +16029,9 @@ func init_strings() {
 					}
 					ctx.EmitCmpRegImm32(d8.Reg, 0)
 					ctx.EmitJump(CondNotEqual, lbl2)
+					if bbs[2].Rendered {
+						ctx.EmitJmp(lbl3)
+					}
 					snap11 := d0
 					snap12 := d1
 					snap13 := d2
@@ -16713,6 +16692,9 @@ func init_strings() {
 						return bbs[1].RenderPS(ps)
 					}
 					ctx.EmitJump(d17.Condition, lbl3)
+					if bbs[3].Rendered {
+						ctx.EmitJmp(lbl4)
+					}
 					ctx.FreeDesc(&d16)
 					snap21 := d3
 					snap22 := d4
@@ -17821,6 +17803,9 @@ func init_strings() {
 						return bbs[1].RenderPS(ps)
 					}
 					ctx.EmitJump(d17.Condition, lbl3)
+					if bbs[3].Rendered {
+						ctx.EmitJmp(lbl4)
+					}
 					ctx.FreeDesc(&d16)
 					snap21 := d3
 					snap22 := d4
@@ -18569,8 +18554,6 @@ func init_strings() {
 					d1 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d2}, 2)
 					ctx.FreeDesc(&d0)
 					ctx.EnsureDesc(&d1)
-					ctx.EnsureDesc(&d1)
-					ctx.EnsureDesc(&d1)
 					if d1.Loc == LocImm {
 						tmpPair := JITValueDesc{Loc: LocRegPair, Type: d1.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 						ctx.TrackImm(d1.Imm)
@@ -18658,6 +18641,9 @@ func init_strings() {
 					}
 					ctx.EmitCmpRegImm32(d7.Reg, 0)
 					ctx.EmitJump(CondNotEqual, lbl2)
+					if bbs[2].Rendered {
+						ctx.EmitJmp(lbl3)
+					}
 					snap10 := d0
 					snap11 := d1
 					snap12 := d2
@@ -18974,6 +18960,9 @@ func init_strings() {
 					}
 					ctx.EmitCmpRegImm32(d4.Reg, 0)
 					ctx.EmitJump(CondNotEqual, lbl2)
+					if bbs[2].Rendered {
+						ctx.EmitJmp(lbl3)
+					}
 					snap7 := d1
 					snap8 := d2
 					snap9 := d3
@@ -19089,8 +19078,6 @@ func init_strings() {
 						d4 = ps.OverlayValues[4]
 					}
 					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d1)
-					ctx.EnsureDesc(&d1)
 					ctx.EnsureDesc(&d1)
 					if d1.Loc == LocImm {
 						tmpPair := JITValueDesc{Loc: LocRegPair, Type: d1.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
@@ -19354,6 +19341,9 @@ func init_strings() {
 						return bbs[0].RenderPS(ps)
 					}
 					ctx.EmitJump(d5.Condition, lbl2)
+					if bbs[2].Rendered {
+						ctx.EmitJmp(lbl3)
+					}
 					ctx.FreeDesc(&d4)
 					snap8 := d0
 					snap9 := d1
@@ -19556,6 +19546,9 @@ func init_strings() {
 						return bbs[2].RenderPS(ps)
 					}
 					ctx.EmitJump(d27.Condition, lbl4)
+					if bbs[4].Rendered {
+						ctx.EmitJmp(lbl5)
+					}
 					ctx.FreeDesc(&d26)
 					snap30 := d0
 					snap31 := d1
@@ -19686,8 +19679,6 @@ func init_strings() {
 					}
 					ctx.ReclaimUntrackedRegs()
 					ctx.StabilizeDescForControlFlow(&d25)
-					ctx.EnsureDesc(&d25)
-					ctx.EnsureDesc(&d25)
 					d25 = JITPrepareGoSliceArg(ctx, d25)
 					if d25.Loc != LocRegTriple && d25.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice (crand.Read arg0)")
@@ -19765,6 +19756,9 @@ func init_strings() {
 					}
 					ctx.EmitCmpRegImm32(d56.Reg, 0)
 					ctx.EmitJump(CondNotEqual, lbl6)
+					if bbs[4].Rendered {
+						ctx.EmitJmp(lbl5)
+					}
 					snap59 := d0
 					snap60 := d1
 					snap61 := d2
@@ -20109,8 +20103,6 @@ func init_strings() {
 				d1 := ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d2}, 2)
 				ctx.FreeDesc(&d0)
 				ctx.EnsureDesc(&d1)
-				ctx.EnsureDesc(&d1)
-				ctx.EnsureDesc(&d1)
 				if d1.Loc == LocImm {
 					tmpPair := JITValueDesc{Loc: LocRegPair, Type: d1.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 					ctx.TrackImm(d1.Imm)
@@ -20340,6 +20332,9 @@ func init_strings() {
 						return bbs[0].RenderPS(ps)
 					}
 					ctx.EmitJump(d2.Condition, lbl2)
+					if bbs[3].Rendered {
+						ctx.EmitJmp(lbl4)
+					}
 					ctx.FreeDesc(&d1)
 					snap5 := d0
 					snap6 := d1
@@ -20514,6 +20509,9 @@ func init_strings() {
 						return bbs[2].RenderPS(ps)
 					}
 					ctx.EmitJump(d19.Condition, lbl8)
+					if bbs[6].Rendered {
+						ctx.EmitJmp(lbl7)
+					}
 					ctx.FreeDesc(&d18)
 					snap22 := d0
 					snap23 := d1
@@ -20691,6 +20689,9 @@ func init_strings() {
 						return bbs[3].RenderPS(ps)
 					}
 					ctx.EmitJump(d44.Condition, lbl2)
+					if bbs[2].Rendered {
+						ctx.EmitJmp(lbl3)
+					}
 					ctx.FreeDesc(&d43)
 					snap47 := d0
 					snap48 := d1
@@ -20843,13 +20844,9 @@ func init_strings() {
 					ctx.StabilizeDescForControlFlow(&d15)
 					d73 = args[0]
 					d73.ID = 0
-					ctx.EnsureDesc(&d15)
-					ctx.EnsureDesc(&d15)
 					if d15.Loc == LocRegPair || d15.Loc == LocStackPair || d15.Loc == LocRegTriple || d15.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
 					}
-					ctx.EnsureDesc(&d73)
-					ctx.EnsureDesc(&d73)
 					d73 = JITPrepareScmerGoArg(ctx, d73)
 					d74 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(uintptr(unsafe.Pointer(&Globalenv)))), NoHeapPointer: true, Rooted: true}
 					if d74.Loc == LocRegPair || d74.Loc == LocStackPair || d74.Loc == LocRegTriple || d74.Loc == LocStackTriple {
@@ -20979,8 +20976,6 @@ func init_strings() {
 						d78 = JITValueDesc{Loc: LocReg, Reg: r4}
 						ctx.BindReg(r4, &d78)
 					}
-					ctx.EnsureDesc(&d78)
-					ctx.EnsureDesc(&d78)
 					if d78.Loc == LocRegPair || d78.Loc == LocStackPair || d78.Loc == LocRegTriple || d78.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
 					}
@@ -21074,13 +21069,9 @@ func init_strings() {
 					ctx.StabilizeDescForControlFlow(&d15)
 					d81 = args[0]
 					d81.ID = 0
-					ctx.EnsureDesc(&d15)
-					ctx.EnsureDesc(&d15)
 					if d15.Loc == LocRegPair || d15.Loc == LocStackPair || d15.Loc == LocRegTriple || d15.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
 					}
-					ctx.EnsureDesc(&d81)
-					ctx.EnsureDesc(&d81)
 					d81 = JITPrepareScmerGoArg(ctx, d81)
 					ctx.SyncDesc(&d15)
 					ctx.SyncDesc(&d81)
@@ -21270,6 +21261,9 @@ func init_strings() {
 					}
 					ctx.EmitCmpRegImm32(d86.Reg, 0)
 					ctx.EmitJump(CondNotEqual, lbl5)
+					if bbs[6].Rendered {
+						ctx.EmitJmp(lbl7)
+					}
 					snap89 := d0
 					snap90 := d1
 					snap91 := d2
@@ -21512,8 +21506,6 @@ func init_strings() {
 				callResults5 := JITEmitGoCallResults(ctx, GoFuncAddr(jitStringToBytes), []JITValueDesc{d2}, []uint8{3}, []uint8{1})
 				d4 := callResults5[0]
 				d4.Type = tagSlice
-				ctx.EnsureDesc(&d4)
-				ctx.EnsureDesc(&d4)
 				d4 = JITPrepareGoSliceArg(ctx, d4)
 				if d4.Loc != LocRegTriple && d4.Loc != LocStackTriple {
 					panic("jit: generic call arg expects 3-word Go slice (sha1.Sum arg0)")
@@ -21600,14 +21592,10 @@ func init_strings() {
 				d14.Type = tagSlice
 				ctx.FreeDesc(&d12)
 				ctx.ReclaimUntrackedRegs()
-				ctx.EnsureDesc(&d14)
-				ctx.EnsureDesc(&d14)
 				d14 = JITPrepareGoSliceArg(ctx, d14)
 				if d14.Loc != LocRegTriple && d14.Loc != LocStackTriple {
 					panic("jit: generic call arg expects 3-word Go slice (hex.Encode arg0)")
 				}
-				ctx.EnsureDesc(&d9)
-				ctx.EnsureDesc(&d9)
 				d9 = JITPrepareGoSliceArg(ctx, d9)
 				if d9.Loc != LocRegTriple && d9.Loc != LocStackTriple {
 					panic("jit: generic call arg expects 3-word Go slice (hex.Encode arg1)")
@@ -21687,8 +21675,6 @@ func init_strings() {
 				callResults5 := JITEmitGoCallResults(ctx, GoFuncAddr(jitStringToBytes), []JITValueDesc{d2}, []uint8{3}, []uint8{1})
 				d4 := callResults5[0]
 				d4.Type = tagSlice
-				ctx.EnsureDesc(&d4)
-				ctx.EnsureDesc(&d4)
 				d4 = JITPrepareGoSliceArg(ctx, d4)
 				if d4.Loc != LocRegTriple && d4.Loc != LocStackTriple {
 					panic("jit: generic call arg expects 3-word Go slice (sha256.Sum256 arg0)")
@@ -21773,14 +21759,10 @@ func init_strings() {
 				d14.Type = tagSlice
 				ctx.FreeDesc(&d12)
 				ctx.ReclaimUntrackedRegs()
-				ctx.EnsureDesc(&d14)
-				ctx.EnsureDesc(&d14)
 				d14 = JITPrepareGoSliceArg(ctx, d14)
 				if d14.Loc != LocRegTriple && d14.Loc != LocStackTriple {
 					panic("jit: generic call arg expects 3-word Go slice (hex.Encode arg0)")
 				}
-				ctx.EnsureDesc(&d9)
-				ctx.EnsureDesc(&d9)
 				d9 = JITPrepareGoSliceArg(ctx, d9)
 				if d9.Loc != LocRegTriple && d9.Loc != LocStackTriple {
 					panic("jit: generic call arg expects 3-word Go slice (hex.Encode arg1)")
@@ -21978,6 +21960,9 @@ func init_strings() {
 					}
 					ctx.EmitCmpRegImm32(d3.Reg, 0)
 					ctx.EmitJump(CondNotEqual, lbl2)
+					if bbs[3].Rendered {
+						ctx.EmitJmp(lbl4)
+					}
 					snap6 := d0
 					snap7 := d1
 					snap8 := d2
@@ -22139,8 +22124,6 @@ func init_strings() {
 					d20 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d21}, 2)
 					ctx.FreeDesc(&d19)
 					ctx.EnsureDesc(&d20)
-					ctx.EnsureDesc(&d20)
-					ctx.EnsureDesc(&d20)
 					if d20.Loc == LocImm {
 						tmpPair := JITValueDesc{Loc: LocRegPair, Type: d20.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 						ctx.TrackImm(d20.Imm)
@@ -22238,6 +22221,9 @@ func init_strings() {
 					}
 					ctx.EmitCmpRegImm32(d26.Reg, 0)
 					ctx.EmitJump(CondNotEqual, lbl5)
+					if bbs[5].Rendered {
+						ctx.EmitJmp(lbl6)
+					}
 					snap29 := d0
 					snap30 := d1
 					snap31 := d2
@@ -22460,6 +22446,9 @@ func init_strings() {
 					}
 					ctx.EmitCmpRegImm32(d60.Reg, 0)
 					ctx.EmitJump(CondNotEqual, lbl2)
+					if bbs[2].Rendered {
+						ctx.EmitJmp(lbl3)
+					}
 					snap63 := d0
 					snap64 := d1
 					snap65 := d2
@@ -22750,13 +22739,9 @@ func init_strings() {
 					}
 					d100 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d101}, 2)
 					ctx.FreeDesc(&d99)
-					ctx.EnsureDesc(&d23)
-					ctx.EnsureDesc(&d23)
 					if d23.Loc == LocRegPair || d23.Loc == LocStackPair || d23.Loc == LocRegTriple || d23.Loc == LocStackTriple {
 						panic("jit: generic call arg expects 1-word value")
 					}
-					ctx.EnsureDesc(&d100)
-					ctx.EnsureDesc(&d100)
 					ctx.EnsureDesc(&d100)
 					if d100.Loc == LocImm {
 						tmpPair := JITValueDesc{Loc: LocRegPair, Type: d100.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
