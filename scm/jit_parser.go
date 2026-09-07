@@ -111,7 +111,10 @@ type jitParserProgram struct {
 	// ladderFastPath: interior precedence-ladder level rule -> primary rule to
 	// speculatively descend to (see computeLadderFastPaths / emitLadderFastPath).
 	ladderFastPath map[int]int
-	pool           sync.Pool
+	// ladderPrimaryLeaves: primary rule -> {numberLeafRule, stringLeafRule}
+	// (-1 if absent), matched directly by the fast path for a digit / quote.
+	ladderPrimaryLeaves map[int][2]int
+	pool                sync.Pool
 }
 
 type jitParserBuilder struct {
@@ -178,6 +181,12 @@ func jitBuildParserPrograms(parsers []*ScmParser) *jitParserProgram {
 	program.analyzeLiteralLeaves()
 	if jitLadderFastPathEnabled() {
 		program.ladderFastPath = program.computeLadderFastPaths()
+		program.ladderPrimaryLeaves = map[int][2]int{}
+		for _, target := range program.ladderFastPath {
+			if _, done := program.ladderPrimaryLeaves[target]; !done {
+				program.ladderPrimaryLeaves[target] = program.primaryDirectReturnLeaves(target)
+			}
+		}
 	}
 	if os.Getenv("MEMCP_DUMP_LADDER") != "" {
 		program.dumpPrecedenceLadders()
@@ -198,6 +207,12 @@ func jitBuildParserTemplateProgram(template *JITParserTemplate) (*jitParserProgr
 	program.analyzeLiteralLeaves()
 	if jitLadderFastPathEnabled() {
 		program.ladderFastPath = program.computeLadderFastPaths()
+		program.ladderPrimaryLeaves = map[int][2]int{}
+		for _, target := range program.ladderFastPath {
+			if _, done := program.ladderPrimaryLeaves[target]; !done {
+				program.ladderPrimaryLeaves[target] = program.primaryDirectReturnLeaves(target)
+			}
+		}
 	}
 	if os.Getenv("MEMCP_DUMP_LADDER") != "" {
 		program.dumpPrecedenceLadders()

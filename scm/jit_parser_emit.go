@@ -639,12 +639,12 @@ func jitParserLadderTerminatorNative(input Scmer, position int64) int64 {
 	return 1 // end of input
 }
 
-// jitParserLadderLiteralAheadNative returns 1 when the next non-whitespace byte
-// is the start of a bare literal - a digit or a single-quote string. Only then
-// is the precedence-ladder speculative descent worth attempting: for anything
-// else (a "(" group, an identifier / keyword, a unary "-") the descent would do
-// real work only to be thrown away when an operator follows, so the caller goes
-// straight to the full per-level machinery instead.
+// jitParserLadderLiteralAheadNative reports what kind of bare literal starts at
+// the next non-whitespace byte: 1 = digit (number), 2 = single-quote (string),
+// 0 = anything else. Only 1/2 make the precedence-ladder speculative descent
+// worthwhile - for a "(" group, an identifier/keyword or a unary "-" the descent
+// would do real work only to be discarded when an operator follows, so the
+// caller goes straight to the full per-level machinery.
 func jitParserLadderLiteralAheadNative(input Scmer, position int64) int64 {
 	text := input.String()
 	n := int64(len(text))
@@ -654,8 +654,11 @@ func jitParserLadderLiteralAheadNative(input Scmer, position int64) int64 {
 			position++
 			continue
 		}
-		if (c >= '0' && c <= '9') || c == '\'' {
+		if c >= '0' && c <= '9' {
 			return 1
+		}
+		if c == '\'' {
+			return 2
 		}
 		return 0
 	}
@@ -663,12 +666,13 @@ func jitParserLadderLiteralAheadNative(input Scmer, position int64) int64 {
 }
 
 // emitLadderFastPath lowers a reference to an interior precedence-ladder level
-// (node.rule) as: push a checkpoint, speculatively descend straight to the
-// ladder's primary rule (target), and - if a bare primary matched and nothing
-// an operator level could consume follows - commit and return it as this
-// level's result (every rule between the two is identity when no operator
-// follows its first operand). Otherwise restore and fall through to the full
-// per-level machinery unchanged.
+// (node.rule) as: if a bare literal is ahead, push a checkpoint and match one
+// of the primary's direct-return literal leaves (sql_number / sql_string /
+// sql_hex_literal - regex + one action call, NO rule frame, NO memo); if it
+// matched and nothing an operator level could consume follows, commit and
+// return it as this level's result (every rule between the level and the
+// primary is identity when no operator follows its first operand). Otherwise
+// restore and fall through to the full per-level machinery unchanged.
 func (emitter *jitParserEmitter) emitLadderFastPath(node *jitParserNode, target int, success, failure JITLabel) {
 	ctx := emitter.ctx
 	slow := ctx.ReserveLabel()
@@ -676,19 +680,37 @@ func (emitter *jitParserEmitter) emitLadderFastPath(node *jitParserNode, target 
 	descentFail := ctx.ReserveLabel()
 	bail := ctx.ReserveLabel()
 
-	// Only speculate when a bare literal is actually ahead - otherwise the
-	// descent parses a "(" group / column reference just to discard it.
+	// Only speculate when a bare literal is actually ahead (1 = digit, 2 =
+	// quote) - otherwise the descent parses a "(" group / column reference just
+	// to discard it.
 	gatePos := emitter.loadPosition()
 	lit := ctx.EmitGoCallScalar(GoFuncAddr(jitParserLadderLiteralAheadNative), []JITValueDesc{emitter.input, gatePos}, 1)
 	lit.Type = tagInt
 	ctx.FreeDesc(&gatePos)
 	ctx.EmitCmpRegImm32(lit.Reg, 0)
-	ctx.FreeDesc(&lit)
 	ctx.EmitJump(CondEqual, slow)
 
 	emitter.pushCheckpoint()
-	targetNode := &jitParserNode{kind: jitParserRuleRef, rule: target}
-	emitter.emitRuleRefDirect(targetNode, descentOK, descentFail)
+	numLeaf, strLeaf := emitter.program.ladderPrimaryLeaves[target][0], emitter.program.ladderPrimaryLeaves[target][1]
+	viaPrimary := ctx.ReserveLabel()
+	// gate class 1 = digit -> number leaf; 2 = quote -> string leaf. A class
+	// with no direct-return leaf falls to the memoized primary rule, which
+	// carries the non-leaf productions for that literal kind.
+	if numLeaf >= 0 {
+		afterNum := ctx.ReserveLabel()
+		ctx.EmitCmpRegImm32(lit.Reg, 1)
+		ctx.EmitJump(CondNotEqual, afterNum)
+		emitter.emitDirectReturnLeaf(emitter.program.rules[numLeaf].directReturn, descentOK, descentFail)
+		ctx.MarkLabel(afterNum)
+	}
+	if strLeaf >= 0 {
+		ctx.EmitCmpRegImm32(lit.Reg, 2)
+		ctx.EmitJump(CondNotEqual, viaPrimary)
+		emitter.emitDirectReturnLeaf(emitter.program.rules[strLeaf].directReturn, descentOK, descentFail)
+	}
+	ctx.MarkLabel(viaPrimary)
+	ctx.FreeDesc(&lit)
+	emitter.emitRuleRefDirect(&jitParserNode{kind: jitParserRuleRef, rule: target}, descentOK, descentFail)
 
 	ctx.MarkLabel(descentFail)
 	emitter.restoreCheckpoint()

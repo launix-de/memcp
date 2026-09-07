@@ -344,6 +344,35 @@ func (program *jitParserProgram) computeLadderFastPaths() map[int]int {
 	return out
 }
 
+// primaryDirectReturnLeaves finds the direct-return literal-leaf rules that are
+// immediate alternatives of a ladder primary: [0] the number leaf (gate class
+// 1, first byte a digit), [1] the single-quote string leaf (gate class 2).
+// Each is -1 when absent. These #776 leaves are regex + one action call, no
+// frame, no memo - the fast path matches one directly for a digit/quote-led
+// value, skipping the primary rule's own frame + memo entirely.
+func (program *jitParserProgram) primaryDirectReturnLeaves(target int) [2]int {
+	out := [2]int{-1, -1}
+	root := program.rules[target].root
+	if root == nil || root.kind != jitParserChoice || program.ruleFirstBytes == nil {
+		return out
+	}
+	for _, c := range root.children {
+		if c.kind != jitParserRuleRef || c.rule < 0 || c.rule >= len(program.rules) ||
+			program.rules[c.rule].directReturn == nil {
+			continue
+		}
+		fb := program.ruleFirstBytes[c.rule]
+		if out[1] < 0 && fb.has('\'') {
+			out[1] = c.rule
+		}
+		// a plain decimal number leaf accepts every digit but not "0x..." only
+		if out[0] < 0 && fb.has('1') && fb.has('9') && !fb.has('\'') {
+			out[0] = c.rule
+		}
+	}
+	return out
+}
+
 // ruleNames does a best-effort reverse lookup of ruleID -> grammar name via the
 // parser objects registered during the build and the global environment.
 func (program *jitParserProgram) ruleNames() map[int]string {
