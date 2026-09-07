@@ -28,6 +28,21 @@ webhook, retry the writes, and crash-recover the exact result:
 python3 tools/reliability_drill.py --mode io-failures
 ```
 
+To race rebuild topology publication against complete `schema.json`
+serialization, build with Go's race detector and run the dedicated mode:
+
+```sh
+go build -race -o /tmp/memcp-race .
+python3 tools/reliability_drill.py --mode schema-race --binary /tmp/memcp-race
+```
+
+This mode repeatedly rebuilds a wide multi-shard SAFE table while another
+worker creates and drops persistent tables, forcing concurrent schema
+snapshots. A third worker verifies that reads remain available. The runner sets
+up the fixture first, restarts it under `GORACE=halt_on_error=1`, retains the
+detector log, and crash-recovers the expected row signature after a successful
+run. Increase `--schema-race-rows` or `--schema-race-rounds` for longer runs.
+
 To run the same transaction/crash oracle against a remote backend, pass the
 options accepted by `CREATE DATABASE ... SET` as JSON. For example, against a
 local MinIO instance:
@@ -88,6 +103,8 @@ The current drill covers:
 - statement rollback when a trigger fails partway through a multi-row insert;
 - a hard kill racing a rebuild and publication of its replacement shards;
 - concurrent disjoint writers and rebuilds followed by another hard kill;
+- rebuild publication raced against full schema serialization under Go's race
+  detector, with concurrent reads and crash-recovery validation;
 - deterministic partial-write failures in autocommit and explicit transactions,
   asynchronous Scheme failure-hook delivery, aborted-transaction enforcement,
   sync failures, successful retries, and exact crash recovery;

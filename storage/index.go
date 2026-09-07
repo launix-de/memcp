@@ -18,6 +18,7 @@ Copyright (C) 2023-2026  Carl-Philip Hänsch
 package storage
 
 import "fmt"
+import "math"
 import "math/bits"
 import "sort"
 import "sync"
@@ -113,8 +114,8 @@ type StorageIndex struct {
 	ColOrder []func(scm.Scmer, scm.Scmer) bool
 	// ColOrderMeta identifies the source relation for equality and reuse checks.
 	ColOrderMeta []string
-	Savings      float64 // store the amount of time savings here -> add selectivity (outputted / size) on each
-	Native       bool    // true when data is physically sorted by this index (zero-cost)
+	savings      atomic.Uint64 // float64 bits; accumulated lock-free by concurrent scans
+	Native       bool          // true when data is physically sorted by this index (zero-cost)
 	t            *storageShard
 	lastHit      atomic.Uint32 // last search position for sorted access pattern optimization
 	mu           sync.Mutex
@@ -387,10 +388,24 @@ func (idx *StorageIndex) columnIsSorted(i int) bool {
 }
 
 func (idx *StorageIndex) addSavings(state *storageIndexState, usageWeight float64) float64 {
-	if usageWeight > 0 {
-		idx.Savings += usageWeight
+	if usageWeight <= 0 {
+		return idx.loadSavings()
 	}
-	return idx.Savings
+	for {
+		oldBits := idx.savings.Load()
+		next := math.Float64frombits(oldBits) + usageWeight
+		if idx.savings.CompareAndSwap(oldBits, math.Float64bits(next)) {
+			return next
+		}
+	}
+}
+
+func (idx *StorageIndex) loadSavings() float64 {
+	return math.Float64frombits(idx.savings.Load())
+}
+
+func (idx *StorageIndex) storeSavings(value float64) {
+	idx.savings.Store(math.Float64bits(value))
 }
 
 func (idx *StorageIndex) ComputeSize() uint {
@@ -811,7 +826,7 @@ func (t *storageShard) iterateIndexEx(tx *TxContext, cols scanAccess, maxInsertI
 				index.ColMatchers[i] = cols.boundaryAnalyzer(i)
 			}
 		}
-		index.Savings = 0.0            // count how many cost we wasted so we decide when to build the index
+		index.storeSavings(0.0)        // count how many cost we wasted so we decide when to build the index
 		index.baseState.active = false // tell the engine that index has to be built first
 		index.t = t
 		index.Native = true
@@ -899,7 +914,7 @@ func snapshotIndexesForRebuild(indexes []*StorageIndex) []*StorageIndex {
 		}
 		clone.ColOrder = append([]func(scm.Scmer, scm.Scmer) bool(nil), idx.ColOrder...)
 		clone.ColOrderMeta = append([]string(nil), idx.ColOrderMeta...)
-		clone.Savings = idx.Savings * 0.9
+		clone.storeSavings(idx.loadSavings() * 0.9)
 		clone.baseState.active = false
 		candidates = append(candidates, clone)
 	}
@@ -957,7 +972,7 @@ func rebuildIndexes(candidates []*StorageIndex, t2 *storageShard) {
 				}
 			}
 			if isPrefix {
-				longer.Savings += shorter.Savings
+				longer.addSavings(nil, shorter.loadSavings())
 				removed[j] = true
 			}
 		}
@@ -976,8 +991,8 @@ func rebuildIndexes(candidates []*StorageIndex, t2 *storageShard) {
 	bestSavings := 4.0 // minimum threshold for physical sort
 	bestIdx := -1
 	for i, idx := range result {
-		if idx.Savings > bestSavings && !indexHasComputedCol(t2, idx) {
-			bestSavings = idx.Savings
+		if savings := idx.loadSavings(); savings > bestSavings && !indexHasComputedCol(t2, idx) {
+			bestSavings = savings
 			bestIdx = i
 		}
 	}
@@ -2057,5 +2072,5 @@ func indexLastUsed(ptr any) time.Time {
 }
 
 func indexGetScore(ptr any) float64 {
-	return ptr.(*StorageIndex).Savings
+	return ptr.(*StorageIndex).loadSavings()
 }

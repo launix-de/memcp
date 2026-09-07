@@ -16,9 +16,28 @@ Copyright (C) 2026  Carl-Philip Hänsch
 */
 package scm
 
-import "strings"
+import (
+	"strings"
+	"sync"
+)
 
-var sourceCoverageInfos []*SourceInfo
+var (
+	sourceCoverageMu    sync.RWMutex
+	sourceCoverageInfos []*SourceInfo
+)
+
+func registerSourceCoverageInfo(info *SourceInfo) {
+	sourceCoverageMu.Lock()
+	sourceCoverageInfos = append(sourceCoverageInfos, info)
+	sourceCoverageMu.Unlock()
+}
+
+func sourceCoverageSnapshot() []*SourceInfo {
+	sourceCoverageMu.RLock()
+	infos := append([]*SourceInfo(nil), sourceCoverageInfos...)
+	sourceCoverageMu.RUnlock()
+	return infos
+}
 
 func sourceCoverageMatchesPrefix(source string, prefix string) bool {
 	if prefix == "" || strings.HasPrefix(source, prefix) {
@@ -50,7 +69,7 @@ func sourceCoverageReport(a ...Scmer) Scmer {
 	}
 
 	points := map[sourceCoveragePoint]bool{}
-	for _, si := range sourceCoverageInfos {
+	for _, si := range sourceCoverageSnapshot() {
 		if si == nil || si.source == "" || !sourceCoverageMatchesPrefix(si.source, prefix) {
 			continue
 		}

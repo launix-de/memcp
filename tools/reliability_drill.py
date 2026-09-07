@@ -366,6 +366,108 @@ def initialize_atomicity(client: HttpClient, rows: int,
 	)
 
 
+def schema_race_signature(client: HttpClient) -> dict[str, int]:
+	return {
+		"row_count": scalar(client, "SELECT COUNT(*) AS value FROM drill_schema_race"),
+		"id_sum": scalar(client, "SELECT COALESCE(SUM(id), 0) AS value FROM drill_schema_race"),
+	}
+
+
+def initialize_schema_race(client: HttpClient, rows: int,
+		backend_config: dict[str, object] | None = None) -> dict[str, int]:
+	create_database(client, backend_config)
+	# Build the fixture in one shard so asynchronous overflow publication cannot
+	# consume the detector failure before the deliberate race phase starts.
+	client.scm(f'(settings "ShardSize" {max(1000, rows * 2)})')
+	extra_columns = ",".join(f"schema_probe_{index:02d} BIGINT" for index in range(32))
+	client.sql(
+		"CREATE TABLE drill_schema_race (id INT PRIMARY KEY, payload BIGINT," +
+		extra_columns + ") ENGINE=safe"
+	)
+	client.scm(
+		f'(insert (table "{DATABASE}" "drill_schema_race") \'("id" "payload") '
+		f'(map (produceN {rows}) (lambda (i) (list (+ i 1) (+ i 1)))))',
+		timeout=300,
+	)
+	client.scm('(settings "ShardSize" 100)')
+	client.scm(f'(rebuild (table "{DATABASE}" "drill_schema_race") true true)', timeout=300)
+	wanted = {"row_count": rows, "id_sum": rows * (rows + 1) // 2}
+	expect(schema_race_signature(client), wanted, "schema-race fixture")
+	return wanted
+
+
+def race_detector_environment() -> dict[str, str]:
+	return {"GORACE": "halt_on_error=1 exitcode=66"}
+
+
+def run_schema_race(server: OwnedServer, rounds: int, wanted: dict[str, int],
+		journal: list[dict]) -> None:
+	client = server.client
+	assert client is not None
+	start = threading.Barrier(4)
+	stop = threading.Event()
+	failures: list[str] = []
+
+	def rebuilder() -> None:
+		try:
+			start.wait()
+			for _ in range(rounds):
+				client.scm(
+					f'(rebuild (table "{DATABASE}" "drill_schema_race") true false)',
+					timeout=300,
+				)
+		except Exception as error:
+			failures.append(f"rebuilder: {error}")
+		finally:
+			stop.set()
+
+	def schema_publisher() -> None:
+		iteration = 0
+		try:
+			start.wait()
+			while not stop.is_set():
+				name = f"drill_schema_publish_{iteration % 4}"
+				client.sql(
+					f"CREATE TABLE {name} (id INT PRIMARY KEY, value BIGINT) ENGINE=safe",
+					timeout=300,
+				)
+				client.sql(f"DROP TABLE {name}", timeout=300)
+				iteration += 1
+		except Exception as error:
+			failures.append(f"schema publisher: {error}")
+			stop.set()
+
+	def reader() -> None:
+		try:
+			start.wait()
+			while not stop.is_set():
+				expect(schema_race_signature(client), wanted, "read during schema race")
+		except Exception as error:
+			failures.append(f"reader: {error}")
+			stop.set()
+
+	threads = [
+		threading.Thread(target=rebuilder, name="schema-race-rebuilder", daemon=True),
+		threading.Thread(target=schema_publisher, name="schema-race-publisher", daemon=True),
+		threading.Thread(target=reader, name="schema-race-reader", daemon=True),
+	]
+	for thread in threads:
+		thread.start()
+	start.wait()
+	for thread in threads:
+		thread.join(timeout=max(300, rounds * 30))
+	stop.set()
+	if any(thread.is_alive() for thread in threads):
+		raise DrillFailure("schema-race worker did not terminate")
+	if failures:
+		raise DrillFailure("; ".join(failures))
+	expect(schema_race_signature(client), wanted, "schema race result")
+	journal.append({"scenario": "schema-race", "rounds": rounds, "expected": wanted})
+	server.kill()
+	client = server.start(race_detector_environment())
+	expect(schema_race_signature(client), wanted, "schema race crash recovery")
+
+
 def run_commit_crash(server: OwnedServer, rows: int, rounds: int,
 		rng: random.Random, journal: list[dict]) -> None:
 	committed_x = 0
@@ -691,7 +793,7 @@ def parse_args() -> argparse.Namespace:
 	parser.add_argument("--app", type=Path, default=ROOT / "lib/main.scm")
 	parser.add_argument("--artifacts", type=Path, help="new directory for data, logs, journal, and restore snapshot")
 	parser.add_argument("--seed", type=int, default=random.SystemRandom().randrange(2**63))
-	parser.add_argument("--mode", choices=("atomicity", "io-failures", "crash", "soak", "restore", "all"), default="all")
+	parser.add_argument("--mode", choices=("atomicity", "io-failures", "schema-race", "crash", "soak", "restore", "all"), default="all")
 	parser.add_argument("--workers", type=int, default=4)
 	parser.add_argument("--operations", type=int, default=25, help="rows written by each soak worker")
 	parser.add_argument("--rebuild-crashes", type=int, default=5,
@@ -704,6 +806,10 @@ def parse_args() -> argparse.Namespace:
 		help="rows updated across ShardSize=100 shards in I/O failure mode")
 	parser.add_argument("--rebuild-rows", type=int, default=100000,
 		help="rows used to keep rebuild publication active during crash tests")
+	parser.add_argument("--schema-race-rows", type=int, default=20000,
+		help="rows in the sharded table used by schema-race mode")
+	parser.add_argument("--schema-race-rounds", type=int, default=20,
+		help="rebuild rounds raced against schema publication")
 	parser.add_argument("--database-config-json",
 		help="JSON object passed as CREATE DATABASE SET backend options")
 	parser.add_argument("--timeout", type=float, default=30)
@@ -714,7 +820,8 @@ def main() -> int:
 	args = parse_args()
 	if (args.workers < 1 or args.operations < 1 or args.rebuild_crashes < 1 or
 			args.commit_crashes < 1 or args.atomicity_rows < 1 or
-			args.io_failure_rows < 1 or args.rebuild_rows < 1 or args.timeout <= 0):
+			args.io_failure_rows < 1 or args.rebuild_rows < 1 or
+			args.schema_race_rows < 1 or args.schema_race_rounds < 1 or args.timeout <= 0):
 		raise DrillFailure("workers, operations, crash rounds, row counts, and timeout must be positive")
 	backend_config = None
 	if args.database_config_json:
@@ -754,6 +861,14 @@ def main() -> int:
 			failure_webhook = FailureWebhook(args.timeout)
 			failure_webhook.start()
 			run_io_failures(server, args.io_failure_rows, args.seed, journal, failure_webhook)
+			write_manifest(manifest, args.seed, "passed", journal)
+			print(f"PASS: {len(journal)} reliability scenarios; manifest: {manifest}")
+			return 0
+		if args.mode == "schema-race":
+			wanted_schema = initialize_schema_race(client, args.schema_race_rows, backend_config)
+			server.stop()
+			client = server.start(race_detector_environment())
+			run_schema_race(server, args.schema_race_rounds, wanted_schema, journal)
 			write_manifest(manifest, args.seed, "passed", journal)
 			print(f"PASS: {len(journal)} reliability scenarios; manifest: {manifest}")
 			return 0
