@@ -1087,14 +1087,14 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(define actual_plan (build_queryplan_term expanded_query planning_session tx))
 		(define execution_plan (if (sql_select_calc_found_rows? query)
 			(begin
-				(define count_plan (build_queryplan_term (sql_expand_views (sql_select_clear_stage query) policy) planning_session tx))
+				(define count_plan (build_queryplan_term
+					(sql_expand_views (sql_select_clear_stage query) policy) planning_session tx))
 				(list (quote !begin)
-					(list (quote session) "found_rows" 0)
+					(list (quote resultrow) nil true)
 					(list
 						(list (quote lambda) (list (quote resultrow)) count_plan)
 						(list (quote lambda) (list (quote item))
-							(list (quote session) "found_rows"
-								(list (quote +) (list (quote session) "found_rows") 1))))
+							(list (quote resultrow) (quote item) true)))
 					actual_plan))
 			actual_plan))
 		(list (quote !begin)

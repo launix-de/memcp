@@ -104,6 +104,47 @@ test_cases:
             data:
               - total: 3
 
+  - name: "Grouped SQL_CALC_FOUND_ROWS counts a non-null anti join in the output driver"
+    mysql:
+      statements:
+        - sql: "SELECT SQL_CALC_FOUND_ROWS p.ID FROM wpcompat_posts p WHERE p.post_type = 'post' AND p.ID NOT IN (SELECT t.term_id FROM wpcompat_terms t WHERE t.term_id = 999) GROUP BY p.ID ORDER BY p.post_date DESC LIMIT 0, 2"
+          expect:
+            rows: 2
+            data:
+              - ID: 3
+              - ID: 2
+        - sql: "SELECT FOUND_ROWS() AS total"
+          expect:
+            rows: 1
+            data:
+              - total: 3
+
+  - name: "Empty SQL_CALC_FOUND_ROWS replaces a previous count with zero"
+    mysql:
+      statements:
+        - sql: "SELECT SQL_CALC_FOUND_ROWS ID FROM wpcompat_posts WHERE ID < 0 LIMIT 1"
+          expect:
+            rows: 0
+        - sql: "SELECT FOUND_ROWS() AS total"
+          expect:
+            rows: 1
+            data:
+              - total: 0
+
+  - name: "Non-null NOT IN selects the anti-presence rewrite"
+    sql: |
+      EXPLAIN IR
+      SELECT p.ID
+      FROM wpcompat_posts p
+      WHERE p.ID NOT IN (
+        SELECT t.term_id
+        FROM wpcompat_terms t
+        WHERE t.term_id = 999
+      )
+    expect:
+      result_contains:
+        - "__exists_"
+
   - name: "Filtered COUNT binds unqualified columns"
     sql: |
       SELECT COUNT(*) AS total

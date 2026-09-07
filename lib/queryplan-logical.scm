@@ -955,6 +955,33 @@ work before decorrelation has even started. */
 				(if (empty_list? primary_key) '() (list primary_key))
 				unique_keys))))))
 
+/* NOT IN can use the much cheaper anti-presence plan in positive WHERE truth
+context only when SQL UNKNOWN is impossible. Use the schema contract here,
+not sampled null statistics: observed zero NULLs would stop being a proof as
+soon as a nullable column receives a new NULL row. Keep the proof deliberately
+small. Derived expressions and non-table sources remain on the general 3VL
+membership path until their nullability is represented in logical metadata. */
+(define source_column_guaranteed_nonnull? (lambda (src col)
+	(if (or (nil? src) (not (source_is_base_table? src)))
+		false
+		(begin
+			(define meta (find (get_schema (source_schema src) (source_relation src))
+				(lambda (candidate) (equal?? (candidate "Field") col)) nil))
+			(and (not (nil? meta)) (not (meta "Null")))))))
+
+(define expr_guaranteed_nonnull_from_sources? (lambda (expr sources default_alias)
+	(match expr
+		((symbol get_column) tblvar tbl_ignorecase col col_ignorecase) (begin
+			(define src (source_for_alias sources default_alias tblvar tbl_ignorecase))
+			(define resolved_col (if (nil? src) nil (source_column_name src col col_ignorecase)))
+			(and (not (nil? resolved_col))
+				(source_column_guaranteed_nonnull? src resolved_col)))
+		((quote get_column) tblvar tbl_ignorecase col col_ignorecase)
+		(expr_guaranteed_nonnull_from_sources?
+			(list (symbol "get_column") tblvar tbl_ignorecase col col_ignorecase)
+			sources default_alias)
+		_ false)))
+
 (define unique_lookup_column_name (lambda (src expr)
 	(match expr
 		((symbol if) ((symbol nil?) probe) fallback value)
@@ -4118,6 +4145,62 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 				(list (untangle_zero_domain_not_in_subquery rewritten_probe subquery ctx) '() '())
 				(make_in_stage_rewrite rewritten_probe inner (list outer_sources subquery true false pending_info)))))))
 
+/* In a positive WHERE predicate, NOT IN and NOT EXISTS are equivalent when
+both compared values are guaranteed non-NULL. Expose that equivalence before
+physical lowering so the existing presence-probe machinery can select
+scan_exists instead of building both match and RHS-NULL group tables. ORDER,
+LIMIT, OFFSET, grouping, and UNION are semantic barriers: pushing the equality
+below any of them could change which membership rows the subquery returns. */
+(define resolve_nonnull_not_in_where_with_stages (lambda (probe subquery outer_sources ctx)
+	(begin
+		(define normalized (normalize_query_ast subquery))
+		(define sub_ctx (make_uctx ctx (list (list (quote outer-sources) outer_sources))))
+		(define pending_info (uctx_get ctx (quote btw2025-current-info) nil))
+		(define inner (untangle_query normalized sub_ctx))
+		(define rewritten_probe (nth (untangle_expr_with_stages probe outer_sources ctx) 0))
+		(if (and (query_block? inner)
+			(and (empty_list? (qb_group inner))
+				(and (nil? (qb_having inner))
+					(and (empty_list? (qb_order inner))
+						(and (nil? (qb_limit inner))
+							(and (nil? (qb_offset inner))
+								(equal? (count (qb_fields inner)) 2)))))))
+			(begin
+				(define inner_default (if (empty_list? (qb_sources inner)) nil
+					(source_alias (car (qb_sources inner)))))
+				(define rhs (query_block_first_expr inner))
+				(if (and
+					(expr_guaranteed_nonnull_from_sources? rewritten_probe outer_sources nil)
+					(expr_guaranteed_nonnull_from_sources? rhs (qb_sources inner) inner_default))
+					(begin
+						(define exists_inner (make_query_block
+							(qb_schema inner)
+							(qb_sources inner)
+							(qb_fields inner)
+							(combine_where (qb_where inner) (list (quote equal??) rhs rewritten_probe))
+							'() nil '() nil nil
+							(qb_hidden inner)
+							(qb_stages inner)
+							(qb_facts inner)))
+						(define rewritten (make_exists_stage_rewrite exists_inner
+							(list outer_sources (list (quote nonnull-not-in) subquery) pending_info)))
+						(list (list (quote not) (nth rewritten 0))
+							(nth rewritten 1) (nth rewritten 2)))
+					nil))
+			nil))))
+
+(define direct_nonnull_not_in_where_rewrite (lambda (expr outer_sources ctx)
+	(match expr
+		((symbol not) ((symbol inner_select_in) probe subquery))
+		(resolve_nonnull_not_in_where_with_stages probe subquery outer_sources ctx)
+		((quote not) ((quote inner_select_in) probe subquery))
+		(resolve_nonnull_not_in_where_with_stages probe subquery outer_sources ctx)
+		((symbol not) ((quote inner_select_in) probe subquery))
+		(resolve_nonnull_not_in_where_with_stages probe subquery outer_sources ctx)
+		((quote not) ((symbol inner_select_in) probe subquery))
+		(resolve_nonnull_not_in_where_with_stages probe subquery outer_sources ctx)
+		_ nil)))
+
 (define untangle_not_in_subquery_with_stages (lambda (probe subquery outer_sources ctx)
 	(if (btw2025_defer_subquery_rewrite? subquery outer_sources ctx)
 		(list (make_dependent_subquery_marker (quote not-in) probe subquery outer_sources) '() '())
@@ -4148,7 +4231,10 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 
 (define where_conjunct_with_stages (lambda (expr outer_sources ctx)
 	(begin
-		(define direct_in (direct_positive_in_term_rewrite expr outer_sources ctx))
+		(define direct_not_in (direct_nonnull_not_in_where_rewrite expr outer_sources ctx))
+		(define direct_in (if (nil? direct_not_in)
+			(direct_positive_in_term_rewrite expr outer_sources ctx)
+			direct_not_in))
 		(if (nil? direct_in)
 			(if (and (list? expr)
 				(or (equal? (car expr) (quote or)) (equal? (car expr) (symbol "or"))))

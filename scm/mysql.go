@@ -444,6 +444,8 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 	bufferedRowCount := 0
 	var rowStatus driver.RowStatus
 	var resultlock sync.Mutex
+	var countedRows uint64
+	var countedResult bool
 	emitPreparedRow := func(values []Scmer) {
 		row, err := output.BeginRow()
 		if err != nil {
@@ -506,10 +508,22 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 			}
 		}()
 		callbackFn := NewFunc(func(a ...Scmer) Scmer {
-			// function resultrow(item)
-			item := a[0].Slice()
 			resultlock.Lock()
 			defer resultlock.Unlock()
+			if len(a) > 1 && ToBool(a[1]) {
+				// SQL_CALC_FOUND_ROWS sends the unbounded result through the
+				// existing output callback. Counting therefore shares the output
+				// critical section and does not need its own synchronization. A
+				// nil row starts the count so an empty result still publishes zero.
+				countedResult = true
+				if !a[0].IsNil() {
+					countedRows++
+				}
+				return NewBool(true)
+			}
+
+			// function resultrow(item)
+			item := a[0].Slice()
 
 			var unknownColumn bool
 			rowValues, unknownColumn = prepareMySQLResultRow(&fields, colmap, item, rowValues, schemaInitialized, !fieldsPublished)
@@ -561,6 +575,11 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 	}
 	if rowStatus != driver.RowComplete {
 		m.log.Warning("mysql result rows required recovery flags=%d", rowStatus)
+	}
+	if countedResult {
+		// FOUND_ROWS() belongs to the connection and is read by a later
+		// statement. Publish once after every producer has completed.
+		sessionFunc(NewString("found_rows"), NewInt(int64(countedRows)))
 	}
 	// Retrieve last_insert_id from the session (set by INSERT with AUTO_INCREMENT).
 	// TODO: replace with a dedicated callback parameter to m.querycallback so the
