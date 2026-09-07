@@ -258,12 +258,62 @@ func (emitter *jitParserEmitter) discardValue() {
 	emitter.ctx.FreeDesc(&sp)
 }
 
+// pushCheckpoint records a backtrack point. jitParserPushCheckpointNative just
+// appends a jitParserCheckpoint (five ints, no pointers) built from the current
+// slice lengths, so inline the len<cap fast path - write the struct in place,
+// bump the length - and only call the Go helper when the checkpoints slice must
+// grow. Same hot-path rationale as commit/restoreCheckpoint.
 func (emitter *jitParserEmitter) pushCheckpoint() {
+	ctx := emitter.ctx
 	position := emitter.loadPosition()
 	sp := emitter.statePointer()
+	cpOff := int32(unsafe.Offsetof(jitParserState{}.checkpoints))
+	mutOff := int32(unsafe.Offsetof(jitParserState{}.mutations))
+	valOff := int32(unsafe.Offsetof(jitParserState{}.values))
+	markOff := int32(unsafe.Offsetof(jitParserState{}.marks))
+	posSliceOff := int32(unsafe.Offsetof(jitParserState{}.positions))
+	const cpSize = int32(unsafe.Sizeof(jitParserCheckpoint{}))
+	const cpValueLen, cpMutationLen, cpMarkLen, cpPositionLen = 8, 16, 24, 32
+
+	lenReg := ctx.AllocReg()
+	elem := ctx.AllocRegExcept(lenReg)
+	tmp := ctx.AllocRegExcept(lenReg, elem)
+
+	ctx.EnsureDesc(&sp)
+	ctx.EnsureDesc(&position)
+	slow, done := ctx.ReserveLabel(), ctx.ReserveLabel()
+	ctx.EmitMovRegMem(lenReg, sp.Reg, cpOff+8)  // checkpoints.Len
+	ctx.EmitMovRegMem(tmp, sp.Reg, cpOff+16)    // checkpoints.Cap
+	ctx.EmitCmpInt64(lenReg, tmp)
+	ctx.EmitJump(CondUnsignedAboveOrEqual, slow)
+
+	// fast: elem = checkpoints.Data + Len*cpSize ; write the struct ; Len++
+	ctx.EmitMovRegReg(elem, lenReg)
+	ctx.EmitImulRegImm32(elem, cpSize)
+	ctx.EmitMovRegMem(tmp, sp.Reg, cpOff)
+	ctx.EmitAddInt64(elem, tmp)
+	ctx.EmitStoreRegMem(position.Reg, elem, 0)
+	ctx.EmitMovRegMem(tmp, sp.Reg, valOff+8)
+	ctx.EmitStoreRegMem(tmp, elem, cpValueLen)
+	ctx.EmitMovRegMem(tmp, sp.Reg, mutOff+8)
+	ctx.EmitStoreRegMem(tmp, elem, cpMutationLen)
+	ctx.EmitMovRegMem(tmp, sp.Reg, markOff+8)
+	ctx.EmitStoreRegMem(tmp, elem, cpMarkLen)
+	ctx.EmitMovRegMem(tmp, sp.Reg, posSliceOff+8)
+	ctx.EmitStoreRegMem(tmp, elem, cpPositionLen)
+	ctx.EmitAddRegImm32(lenReg, 1)
+	ctx.EmitStoreRegMem(lenReg, sp.Reg, cpOff+8)
+	ctx.EmitJmp(done)
+
+	ctx.MarkLabel(slow)
 	emitter.emitVoid(jitParserPushCheckpointNative, sp, position)
-	emitter.ctx.FreeDesc(&sp)
-	emitter.ctx.FreeDesc(&position)
+
+	ctx.MarkLabel(done)
+	ctx.FreeReg(tmp)
+	ctx.FreeReg(elem)
+	ctx.FreeReg(lenReg)
+	ctx.FreeDesc(&sp)
+	ctx.FreeDesc(&position)
 }
 
 // restoreCheckpoint backtracks to the innermost checkpoint. The common case -
