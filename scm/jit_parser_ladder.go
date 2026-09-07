@@ -191,6 +191,159 @@ func (program *jitParserProgram) detectPrecedenceLadders() []precedenceLadder {
 	return out
 }
 
+// jitLadderFastPathEnabled gates the precedence-ladder speculative-descent
+// emission. On by default; set MEMCP_LADDER_FASTPATH=0 for an A/B baseline.
+func jitLadderFastPathEnabled() bool {
+	return os.Getenv("MEMCP_LADDER_FASTPATH") != "0"
+}
+
+// foldSeqBridgeTarget recognises the left-assoc fold precedence level shape
+//
+//	'((define a LOWER) (define terms (* (op LOWER) ...))) (reduce terms FOLD a)
+//
+// i.e. a two-child sequence whose first child binds a ruleref and whose second
+// binds a repeat, wrapped by a `reduce`/`reduce2` generator seeded with the
+// first bind. Such a rule returns the first operand unchanged when the repeat
+// matches nothing, so the ladder descent may pass straight through it. Returns
+// the lower level's rule id.
+func (program *jitParserProgram) foldSeqBridgeTarget(r int) (int, bool) {
+	gen := program.rules[r].generator
+	if gen.IsNil() || !gen.IsSlice() {
+		return 0, false
+	}
+	head := gen.Slice()
+	if len(head) == 0 || !(scmerIsSymbol(head[0], "reduce") || scmerIsSymbol(head[0], "reduce2")) {
+		return 0, false
+	}
+	root := program.rules[r].root
+	if root == nil || root.kind != jitParserSequence || len(root.children) != 2 {
+		return 0, false
+	}
+	first := root.children[0]
+	for first != nil && (first.kind == jitParserBind || first.kind == jitParserCapture) && len(first.children) == 1 {
+		first = first.children[0]
+	}
+	if first == nil || first.kind != jitParserRuleRef {
+		return 0, false
+	}
+	second := root.children[1]
+	for second != nil && (second.kind == jitParserBind || second.kind == jitParserCapture) && len(second.children) == 1 {
+		second = second.children[0]
+	}
+	if second == nil || (second.kind != jitParserZeroOrMore && second.kind != jitParserOneOrMore) {
+		return 0, false
+	}
+	return first.rule, true
+}
+
+// altIsAtomLed reports whether an alternative starts by matching a literal token
+// or a leaf (regex / direct-return) rule rather than by recursing into another
+// composite rule. Primary/"value" choices are overwhelmingly atom-led; operator
+// levels start by parsing their lower operand.
+func (program *jitParserProgram) altIsAtomLed(n *jitParserNode) bool {
+	seen := map[int]bool{}
+	for depth := 0; n != nil && depth < 12; depth++ {
+		switch n.kind {
+		case jitParserAtom, jitParserRegex:
+			return true
+		case jitParserRuleRef:
+			if n.rule < 0 || n.rule >= len(program.rules) {
+				return false
+			}
+			rr := program.rules[n.rule]
+			if rr.directReturn != nil {
+				return true
+			}
+			if rr.root != nil && rr.root.kind == jitParserRegex {
+				return true
+			}
+			if seen[n.rule] {
+				return false
+			}
+			seen[n.rule] = true
+			n = rr.root
+		case jitParserSequence, jitParserBind, jitParserCapture, jitParserExclude,
+			jitParserOptional, jitParserChoice:
+			if len(n.children) == 0 {
+				return false
+			}
+			n = n.children[0]
+		default:
+			return false
+		}
+	}
+	return false
+}
+
+// isPrimaryLevel reports whether rule r is the "primary" of a precedence ladder
+// (a literal / paren / function-call choice) as opposed to an operator level.
+func (program *jitParserProgram) isPrimaryLevel(r int) bool {
+	root := program.rules[r].root
+	if root == nil || root.kind != jitParserChoice {
+		return false
+	}
+	alts := root.children
+	if len(alts) > 1 && alts[len(alts)-1].kind == jitParserRuleRef {
+		alts = alts[:len(alts)-1] // drop the tail ruleref
+	}
+	if len(alts) < 8 {
+		return false
+	}
+	atomLed := 0
+	for _, a := range alts {
+		if program.altIsAtomLed(a) {
+			atomLed++
+		}
+	}
+	return atomLed*2 >= len(alts)
+}
+
+// computeLadderFastPaths maps every interior level of a precedence ladder to the
+// primary rule the emitter may speculatively descend to: for a bare primary
+// (no operator follows) every rule between the level and the primary is
+// identity, so the primary's result IS the level's result. detectPrecedenceLadders
+// stops at Choice/Sequence boundaries; this walk bridges the fold-sequence
+// levels (sql_expression3/4) too and runs the chain down to the primary.
+func (program *jitParserProgram) computeLadderFastPaths() map[int]int {
+	out := map[int]int{}
+	for _, lad := range program.detectPrecedenceLadders() {
+		chain := make([]int, 0, 8)
+		visited := map[int]bool{}
+		cur := lad.levels[0].rule
+		target := -1
+		for {
+			if cur < 0 || cur >= len(program.rules) || visited[cur] {
+				break
+			}
+			visited[cur] = true
+			if program.isPrimaryLevel(cur) {
+				target = cur
+				break
+			}
+			next := -1
+			if _, _, tr, ok := program.ladderLinkTarget(cur); ok {
+				next = tr.rule
+			} else if b, ok := program.foldSeqBridgeTarget(cur); ok {
+				next = b
+			} else {
+				target = cur // identity is preserved down to here; stop
+				break
+			}
+			chain = append(chain, cur)
+			cur = next
+		}
+		if target < 0 || len(chain) < 2 {
+			continue
+		}
+		for _, r := range chain {
+			if _, exists := out[r]; !exists {
+				out[r] = target
+			}
+		}
+	}
+	return out
+}
+
 // ruleNames does a best-effort reverse lookup of ruleID -> grammar name via the
 // parser objects registered during the build and the global environment.
 func (program *jitParserProgram) ruleNames() map[int]string {

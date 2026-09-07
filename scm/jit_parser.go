@@ -76,10 +76,10 @@ type jitParserNode struct {
 	// the repeat's single result. Set by buildNode when the * / + syntax
 	// carries init/step/finish lambdas past the noMemo slot, or injected by the
 	// optimizer. Fresh acc per repeat entry, so an outer backtrack re-inits.
-	accumulate  bool
-	accInit     *Proc
-	accStep     *Proc
-	accFinish   *Proc
+	accumulate bool
+	accInit    *Proc
+	accStep    *Proc
+	accFinish  *Proc
 }
 
 type jitParserRule struct {
@@ -108,6 +108,9 @@ type jitParserProgram struct {
 	ruleFirstBytes []firstByteSet
 	ruleNullable   []bool
 	inlineActions  bool
+	// ladderFastPath: interior precedence-ladder level rule -> primary rule to
+	// speculatively descend to (see computeLadderFastPaths / emitLadderFastPath).
+	ladderFastPath map[int]int
 	pool           sync.Pool
 }
 
@@ -173,6 +176,9 @@ func jitBuildParserPrograms(parsers []*ScmParser) *jitParserProgram {
 	program.prepareMemoLayout()
 	program.computeFirstBytes()
 	program.analyzeLiteralLeaves()
+	if jitLadderFastPathEnabled() {
+		program.ladderFastPath = program.computeLadderFastPaths()
+	}
 	if os.Getenv("MEMCP_DUMP_LADDER") != "" {
 		program.dumpPrecedenceLadders()
 	}
@@ -190,6 +196,9 @@ func jitBuildParserTemplateProgram(template *JITParserTemplate) (*jitParserProgr
 	program.prepareMemoLayout()
 	program.computeFirstBytes()
 	program.analyzeLiteralLeaves()
+	if jitLadderFastPathEnabled() {
+		program.ladderFastPath = program.computeLadderFastPaths()
+	}
 	if os.Getenv("MEMCP_DUMP_LADDER") != "" {
 		program.dumpPrecedenceLadders()
 	}

@@ -168,6 +168,13 @@ type jitParserEmitter struct {
 	// correct, up to date results - only the redundant pre-check here is
 	// skipped, matching go-packrat's KleeneParser.NoMemo contract.
 	noMemoDepth int
+	// currentRule is the rule whose body is currently being emitted (set by the
+	// per-rule loop in jitEmitParserProgramCore). currentRuleIsLadderLevel is
+	// true when that rule is an interior precedence-ladder level: its own refs
+	// to the next level stay on the plain path so the slow (operator) path is
+	// exactly the original per-level machinery, with no added speculation.
+	currentRule              int
+	currentRuleIsLadderLevel bool
 }
 
 func (emitter *jitParserEmitter) statePointer() JITValueDesc {
@@ -282,8 +289,8 @@ func (emitter *jitParserEmitter) pushCheckpoint() {
 	ctx.EnsureDesc(&sp)
 	ctx.EnsureDesc(&position)
 	slow, done := ctx.ReserveLabel(), ctx.ReserveLabel()
-	ctx.EmitMovRegMem(lenReg, sp.Reg, cpOff+8)  // checkpoints.Len
-	ctx.EmitMovRegMem(tmp, sp.Reg, cpOff+16)    // checkpoints.Cap
+	ctx.EmitMovRegMem(lenReg, sp.Reg, cpOff+8) // checkpoints.Len
+	ctx.EmitMovRegMem(tmp, sp.Reg, cpOff+16)   // checkpoints.Cap
 	ctx.EmitCmpInt64(lenReg, tmp)
 	ctx.EmitJump(CondUnsignedAboveOrEqual, slow)
 
@@ -372,8 +379,8 @@ func (emitter *jitParserEmitter) restoreCheckpoint() {
 	ctx.EmitAddInt64(elem, a)
 
 	slow, done := ctx.ReserveLabel(), ctx.ReserveLabel()
-	ctx.EmitMovRegMem(a, sp.Reg, mutOff+8)      // mutations.Len
-	ctx.EmitMovRegMem(b, elem, cpMutationLen)   // checkpoint.mutationLen
+	ctx.EmitMovRegMem(a, sp.Reg, mutOff+8)    // mutations.Len
+	ctx.EmitMovRegMem(b, elem, cpMutationLen) // checkpoint.mutationLen
 	ctx.EmitCmpInt64(a, b)
 	ctx.EmitJump(CondNotEqual, slow)
 
@@ -601,6 +608,104 @@ func (emitter *jitParserEmitter) emitPeekByte() JITValueDesc {
 	return peek
 }
 
+// jitParserLadderTerminatorNative returns 1 when the next non-whitespace byte at
+// position is a value/expression terminator ( "," ")" ";" or end of input ) that
+// no sql_expression precedence level can consume as a continuation. The
+// precedence-ladder speculative descent commits its bare-primary result only in
+// that case; any other following byte (an operator, or an identifier that might
+// be a keyword operator such as OR / AND / IN / IS / LIKE / BETWEEN) returns 0
+// and the caller re-runs the full per-level ladder.
+func jitParserLadderTerminatorNative(input Scmer, position int64) int64 {
+	text := input.String()
+	n := int64(len(text))
+	for position >= 0 && position < n {
+		c := text[position]
+		if c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f' {
+			position++
+			continue
+		}
+		if c == ',' || c == ')' || c == ';' {
+			return 1
+		}
+		return 0
+	}
+	return 1 // end of input
+}
+
+// jitParserLadderLiteralAheadNative returns 1 when the next non-whitespace byte
+// is the start of a bare literal - a digit or a single-quote string. Only then
+// is the precedence-ladder speculative descent worth attempting: for anything
+// else (a "(" group, an identifier / keyword, a unary "-") the descent would do
+// real work only to be thrown away when an operator follows, so the caller goes
+// straight to the full per-level machinery instead.
+func jitParserLadderLiteralAheadNative(input Scmer, position int64) int64 {
+	text := input.String()
+	n := int64(len(text))
+	for position >= 0 && position < n {
+		c := text[position]
+		if c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f' {
+			position++
+			continue
+		}
+		if (c >= '0' && c <= '9') || c == '\'' {
+			return 1
+		}
+		return 0
+	}
+	return 0
+}
+
+// emitLadderFastPath lowers a reference to an interior precedence-ladder level
+// (node.rule) as: push a checkpoint, speculatively descend straight to the
+// ladder's primary rule (target), and - if a bare primary matched and nothing
+// an operator level could consume follows - commit and return it as this
+// level's result (every rule between the two is identity when no operator
+// follows its first operand). Otherwise restore and fall through to the full
+// per-level machinery unchanged.
+func (emitter *jitParserEmitter) emitLadderFastPath(node *jitParserNode, target int, success, failure JITLabel) {
+	ctx := emitter.ctx
+	slow := ctx.ReserveLabel()
+	descentOK := ctx.ReserveLabel()
+	descentFail := ctx.ReserveLabel()
+	bail := ctx.ReserveLabel()
+
+	// Only speculate when a bare literal is actually ahead - otherwise the
+	// descent parses a "(" group / column reference just to discard it.
+	gatePos := emitter.loadPosition()
+	lit := ctx.EmitGoCallScalar(GoFuncAddr(jitParserLadderLiteralAheadNative), []JITValueDesc{emitter.input, gatePos}, 1)
+	lit.Type = tagInt
+	ctx.FreeDesc(&gatePos)
+	ctx.EmitCmpRegImm32(lit.Reg, 0)
+	ctx.FreeDesc(&lit)
+	ctx.EmitJump(CondEqual, slow)
+
+	emitter.pushCheckpoint()
+	targetNode := &jitParserNode{kind: jitParserRuleRef, rule: target}
+	emitter.emitRuleRefDirect(targetNode, descentOK, descentFail)
+
+	ctx.MarkLabel(descentFail)
+	emitter.restoreCheckpoint()
+	ctx.EmitJmp(slow)
+
+	ctx.MarkLabel(descentOK)
+	position := emitter.loadPosition()
+	term := ctx.EmitGoCallScalar(GoFuncAddr(jitParserLadderTerminatorNative), []JITValueDesc{emitter.input, position}, 1)
+	term.Type = tagInt
+	ctx.FreeDesc(&position)
+	ctx.EmitCmpRegImm32(term.Reg, 0)
+	ctx.FreeDesc(&term)
+	ctx.EmitJump(CondEqual, bail)
+	emitter.commitCheckpoint()
+	ctx.EmitJmp(success)
+
+	ctx.MarkLabel(bail)
+	emitter.discardValue()
+	emitter.restoreCheckpoint()
+
+	ctx.MarkLabel(slow)
+	emitter.emitRuleRefDirect(node, success, failure)
+}
+
 // emitChoiceDispatch reads the leading byte once and jumps to the small cascade
 // of alternatives that could match it, instead of trying all ~N in turn.
 func (emitter *jitParserEmitter) emitChoiceDispatch(node *jitParserNode, rule int, d choiceDispatch, success, failure JITLabel) {
@@ -749,6 +854,18 @@ func (emitter *jitParserEmitter) emitDirectReturnLeaf(p *directReturnPlan, succe
 }
 
 func (emitter *jitParserEmitter) emitRuleRef(node *jitParserNode, success, failure JITLabel) {
+	if emitter.program.ladderFastPath != nil && !node.ignoreResult && !emitter.currentRuleIsLadderLevel {
+		if target, ok := emitter.program.ladderFastPath[node.rule]; ok && target != node.rule {
+			emitter.emitLadderFastPath(node, target, success, failure)
+			return
+		}
+	}
+	emitter.emitRuleRefDirect(node, success, failure)
+}
+
+// emitRuleRefDirect is emitRuleRef without the precedence-ladder speculative
+// descent - the plain memo-checked / lexical / direct-return dispatch.
+func (emitter *jitParserEmitter) emitRuleRefDirect(node *jitParserNode, success, failure JITLabel) {
 	if p := emitter.program.rules[node.rule].directReturn; p != nil && !node.ignoreResult {
 		emitter.emitDirectReturnLeaf(p, success, failure)
 		return
@@ -1433,6 +1550,8 @@ func jitEmitParserProgramCore(ctx *JITContext, program *jitParserProgram, input,
 	for ruleID := range program.rules {
 		ctx.MarkLabel(emitter.ruleLabels[ruleID])
 		accepted, rejected := ctx.ReserveLabel(), ctx.ReserveLabel()
+		emitter.currentRule = ruleID
+		_, emitter.currentRuleIsLadderLevel = program.ladderFastPath[ruleID]
 		emitter.emitNode(program.rules[ruleID].root, ruleID, accepted, rejected)
 		ctx.MarkLabel(accepted)
 		emitter.emitRuleReturn(ruleID, true)
