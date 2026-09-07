@@ -2315,10 +2315,10 @@ source catalog. join_plan remains the single owner of physical join order. */
 			predicates
 			required_drivers
 			planning_session))
-		(qassoc_set planned (quote tree)
-			(join_order_tree_with_predicates
-				(qassoc_get planned (quote tree) nil)
-				predicates)))))
+		/* join_order_result has already attached every predicate to its unique
+		logical owner. Repeating that recursive reconstruction here used to copy
+		the complete winning tree a second time without changing its value. */
+		planned)))
 
 (define join_optimizer_reorder_result (lambda (tree strategy dp_entries cost cardinality cost_components properties)
 	(list tree strategy dp_entries cost cardinality cost_components properties)))
