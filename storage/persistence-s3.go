@@ -362,6 +362,26 @@ func (s *S3Storage) WalkShardFiles(fn func(name string)) {
 	}
 }
 
+func (s *S3Storage) ReadShardFile(name string) io.ReadCloser {
+	s.ensureOpen()
+	resp, err := s.client.GetObject(context.Background(), &s3.GetObjectInput{
+		Bucket: aws.String(s.factory.Bucket),
+		Key:    aws.String(s.key(name)),
+	})
+	if err != nil {
+		if !s3ObjectMissing(err) {
+			raisePersistenceFailure(s.BackendName(), s.prefix, "shard.read.open", err)
+		}
+		return ErrorReader{e: err, notFound: s3ObjectMissing(err)}
+	}
+	return standardPersistenceReader(resp.Body, s.BackendName(), s.prefix, "shard.read")
+}
+
+func (s *S3Storage) WriteShardFile(name string) io.WriteCloser {
+	s.ensureOpen()
+	return &s3WriteCloser{s: s, key: s.key(name)}
+}
+
 func (s *S3Storage) DeleteShardFile(name string) {
 	s.ensureOpen()
 	_, err := s.client.DeleteObject(context.Background(), &s3.DeleteObjectInput{
@@ -375,6 +395,10 @@ func (s *S3Storage) DeleteShardFile(name string) {
 
 func (s *S3Storage) BackendName() string {
 	return "s3"
+}
+
+func (s *S3Storage) StorageIdentity() string {
+	return "s3:" + s.factory.Endpoint + ":" + s.factory.Bucket + ":" + s.prefix
 }
 
 func (s *S3Storage) Remove() {

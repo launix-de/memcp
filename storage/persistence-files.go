@@ -39,6 +39,12 @@ type FileFactory struct {
 	Basepath string
 }
 
+func init() {
+	BackendRegistry["filesystem"] = func(dbName string, raw json.RawMessage) PersistenceEngine {
+		return (&FileFactory{Basepath: Basepath}).CreateDatabase(dbName)
+	}
+}
+
 // helper for long column names
 func ProcessColumnName(col string) string {
 	if len(col) < 64 {
@@ -321,6 +327,38 @@ func (s *FileStorage) WalkShardFiles(fn func(name string)) {
 		}
 		fn(n)
 	}
+}
+
+func validShardFileName(name string) bool {
+	return name != "" && filepath.Base(name) == name && name != "." && name != ".."
+}
+
+func (s *FileStorage) ReadShardFile(name string) io.ReadCloser {
+	if !validShardFileName(name) {
+		panic("invalid shard file name")
+	}
+	f, err := os.Open(s.path + name)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			raisePersistenceFailure(s.BackendName(), s.path, "shard.read.open", err)
+		}
+		return ErrorReader{e: err, notFound: os.IsNotExist(err)}
+	}
+	return standardPersistenceReader(f, s.BackendName(), s.path, "shard.read")
+}
+
+func (s *FileStorage) WriteShardFile(name string) io.WriteCloser {
+	if !validShardFileName(name) {
+		panic("invalid shard file name")
+	}
+	if err := os.MkdirAll(s.path, 0750); err != nil {
+		raisePersistenceFailure(s.BackendName(), s.path, "shard.write.open", err)
+	}
+	f, err := os.Create(s.path + name)
+	if err != nil {
+		raisePersistenceFailure(s.BackendName(), s.path, "shard.write.open", err)
+	}
+	return &fileObjectWriter{File: f, database: s.path, operation: "shard.write"}
 }
 
 func (s *FileStorage) DeleteShardFile(name string) {
@@ -720,4 +758,8 @@ func (s *FileStorage) Remove() {
 
 func (s *FileStorage) BackendName() string {
 	return "filesystem"
+}
+
+func (s *FileStorage) StorageIdentity() string {
+	return "filesystem:" + filepath.Clean(s.path)
 }

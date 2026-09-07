@@ -24,6 +24,7 @@ import "time"
 import "runtime"
 import "strings"
 import "encoding/json"
+import "reflect"
 import "sync/atomic"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/NonLockingReadMap"
@@ -63,6 +64,9 @@ type database struct {
 	// a read capability; cleanup takes the exclusive capability. Query and DML
 	// paths do not participate.
 	persistenceLifecycle sync.RWMutex `json:"-"`
+	// storageMoveMu serializes backend migrations. A migration additionally
+	// takes persistenceLifecycle exclusively and publishes table WRITE locks.
+	storageMoveMu sync.RWMutex `json:"-"`
 	// transactionLog is the database-wide commit authority for transactional
 	// shard WAL entries. Shard logs may contain prepared records after a crash;
 	// recovery exposes them only when this log contains their durable commit.
@@ -465,8 +469,14 @@ func LoadDatabases() {
 	InitSettings()
 	// enumerate dbs; do not load schemas/shards yet (lazy-load on demand)
 	entries, _ := os.ReadDir(Basepath)
+	configured := make(map[string]bool)
 	for _, entry := range entries {
-		if entry.IsDir() {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".json") && entry.Name() != "settings.json" {
+			configured[strings.TrimSuffix(entry.Name(), ".json")] = true
+		}
+	}
+	for _, entry := range entries {
+		if entry.IsDir() && !configured[entry.Name()] {
 			db := newDatabase()
 			db.Name = entry.Name()
 			db.persistence = instrumentPersistence(entry.Name(), &FileStorage{path: Basepath + "/" + entry.Name() + "/"})
@@ -1214,32 +1224,11 @@ func CreateDatabaseWithBackend(schema string, ignoreexists bool, options map[str
 	if _, ok := BackendRegistry[backend]; !ok {
 		panic("Unknown storage backend: " + backend)
 	}
-
-	// Default prefix to schema name
 	if _, ok := options["prefix"]; !ok {
 		options["prefix"] = schema
 	}
 
-	// Convert force_path_style string to bool for JSON
-	forcePathStyle := false
-	if fps, ok := options["force_path_style"]; ok {
-		forcePathStyle = fps == "true" || fps == "1" || fps == "TRUE"
-		delete(options, "force_path_style")
-	}
-
-	// Build JSON config
-	configMap := make(map[string]interface{})
-	for k, v := range options {
-		configMap[k] = v
-	}
-	if forcePathStyle {
-		configMap["force_path_style"] = true
-	}
-
-	raw, err := json.MarshalIndent(configMap, "", "  ")
-	if err != nil {
-		panic("failed to marshal backend config: " + err.Error())
-	}
+	raw := marshalDatabaseBackendOptions(options)
 
 	// Write config file
 	configPath := Basepath + "/" + schema + ".json"
@@ -1271,6 +1260,101 @@ func CreateDatabaseWithBackend(schema string, ignoreexists bool, options map[str
 	return true
 }
 
+func marshalDatabaseBackendOptions(options map[string]string) json.RawMessage {
+	configMap := make(map[string]interface{}, len(options))
+	for key, value := range options {
+		if key == "force_path_style" {
+			configMap[key] = value == "true" || value == "1" || value == "TRUE"
+			continue
+		}
+		configMap[key] = value
+	}
+	raw, err := json.MarshalIndent(configMap, "", "  ")
+	if err != nil {
+		panic("failed to marshal backend config: " + err.Error())
+	}
+	return raw
+}
+
+func databaseBackendConfig(schema string) json.RawMessage {
+	configPath := Basepath + "/" + schema + ".json"
+	raw, err := os.ReadFile(configPath)
+	if err == nil {
+		return raw
+	}
+	if !os.IsNotExist(err) {
+		panic("failed to read database backend config: " + err.Error())
+	}
+	return json.RawMessage(`{"backend":"filesystem"}`)
+}
+
+func databaseBackendConfigForTarget(source string, target string) json.RawMessage {
+	var config map[string]interface{}
+	if err := json.Unmarshal(databaseBackendConfig(source), &config); err != nil {
+		panic("failed to parse source database backend config: " + err.Error())
+	}
+	if backend, _ := config["backend"].(string); backend != "filesystem" {
+		config["prefix"] = target
+	}
+	raw, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		panic("failed to copy source database backend config: " + err.Error())
+	}
+	return raw
+}
+
+func equalDatabaseBackendConfig(left, right json.RawMessage) bool {
+	var leftConfig interface{}
+	var rightConfig interface{}
+	if json.Unmarshal(left, &leftConfig) != nil || json.Unmarshal(right, &rightConfig) != nil {
+		return false
+	}
+	return reflect.DeepEqual(leftConfig, rightConfig)
+}
+
+func writeDatabaseBackendConfig(schema string, raw json.RawMessage) {
+	if err := os.MkdirAll(Basepath, 0750); err != nil {
+		raisePersistenceFailure("filesystem", Basepath, "backend.config.write", err)
+	}
+	tmp, err := os.CreateTemp(Basepath, "."+schema+".json.tmp-")
+	if err != nil {
+		raisePersistenceFailure("filesystem", Basepath, "backend.config.write", err)
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if err := tmp.Chmod(0640); err != nil {
+		_ = tmp.Close()
+		raisePersistenceFailure("filesystem", Basepath, "backend.config.write", err)
+	}
+	if _, err := tmp.Write(raw); err != nil {
+		_ = tmp.Close()
+		raisePersistenceFailure("filesystem", Basepath, "backend.config.write", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		raisePersistenceFailure("filesystem", Basepath, "backend.config.write", err)
+	}
+	if err := tmp.Close(); err != nil {
+		raisePersistenceFailure("filesystem", Basepath, "backend.config.write", err)
+	}
+	if err := os.Rename(tmpName, Basepath+"/"+schema+".json"); err != nil {
+		raisePersistenceFailure("filesystem", Basepath, "backend.config.write", err)
+	}
+	dir, err := os.Open(Basepath)
+	if err != nil {
+		reportPersistenceAmbiguousFailure("filesystem", Basepath, "backend.config.sync", err)
+		return
+	}
+	if err := dir.Sync(); err != nil {
+		_ = dir.Close()
+		reportPersistenceAmbiguousFailure("filesystem", Basepath, "backend.config.sync", err)
+		return
+	}
+	if err := dir.Close(); err != nil {
+		reportPersistenceAmbiguousFailure("filesystem", Basepath, "backend.config.close", err)
+	}
+}
+
 func CreateDatabaseFrom(schema string, ignoreexists bool, sourceDB string) bool {
 	db := databases.Get(schema)
 	if db != nil {
@@ -1280,35 +1364,16 @@ func CreateDatabaseFrom(schema string, ignoreexists bool, sourceDB string) bool 
 		panic("Database " + schema + " already exists")
 	}
 
-	// Read source config
-	configPath := Basepath + "/" + sourceDB + ".json"
-	configData, err := os.ReadFile(configPath)
-	if err != nil {
-		panic("Source database " + sourceDB + " has no backend config (filesystem databases cannot be copied)")
+	if databases.Get(sourceDB) == nil {
+		panic("Source database " + sourceDB + " does not exist")
 	}
-
-	// Parse and update prefix
-	var configMap map[string]interface{}
-	if err := json.Unmarshal(configData, &configMap); err != nil {
-		panic("failed to parse source config: " + err.Error())
-	}
-	configMap["prefix"] = schema
-
-	raw, err := json.MarshalIndent(configMap, "", "  ")
-	if err != nil {
-		panic("failed to marshal backend config: " + err.Error())
-	}
-
-	// Write new config file
-	newConfigPath := Basepath + "/" + schema + ".json"
-	if err := os.WriteFile(newConfigPath, raw, 0640); err != nil {
-		panic("failed to write backend config: " + err.Error())
-	}
+	raw := databaseBackendConfigForTarget(sourceDB, schema)
+	writeDatabaseBackendConfig(schema, raw)
 
 	// Create persistence engine
 	persistence := createPersistenceFromConfig(schema, json.RawMessage(raw))
 	if persistence == nil {
-		os.Remove(newConfigPath)
+		os.Remove(Basepath + "/" + schema + ".json")
 		panic("failed to create persistence engine from source config")
 	}
 
@@ -1321,11 +1386,177 @@ func CreateDatabaseFrom(schema string, ignoreexists bool, sourceDB string) bool 
 	last := databases.Set(db)
 	if last != nil {
 		databases.Set(last)
-		os.Remove(newConfigPath)
+		os.Remove(Basepath + "/" + schema + ".json")
 		panic("Database " + schema + " already exists")
 	}
 
 	db.save()
+	return true
+}
+
+type movedShardLog struct {
+	shard *storageShard
+	log   PersistenceLogfile
+}
+
+func drainPersistenceLog(entries chan interface{}) {
+	for range entries {
+	}
+}
+
+// AlterDatabaseStorage moves every durable object to a new backend and changes
+// the local backend descriptor only after the destination schema is complete.
+// A database-wide set of table WRITE locks deliberately blocks reads as well as
+// writes during this first implementation: no query may retain a source-backed
+// lazy reader when the old backend is removed.
+func AlterDatabaseStorage(schema string, targetConfig json.RawMessage, currentTx *TxContext) bool {
+	db := GetDatabase(schema)
+	if db == nil {
+		panic("Database " + schema + " does not exist")
+	}
+	requireDatabaseMaintenance(schema, maintenanceAlter)
+	if equalDatabaseBackendConfig(databaseBackendConfig(schema), targetConfig) {
+		return true
+	}
+	dst := createPersistenceFromConfig(schema, targetConfig)
+	if dst == nil {
+		panic("unknown or invalid storage backend")
+	}
+	src := db.persistence
+	sameStorage := src.StorageIdentity() == dst.StorageIdentity()
+	if !sameStorage {
+		if len(dst.ReadSchema()) != 0 {
+			panic("destination storage already contains a database schema")
+		}
+	}
+	ss := SessionStateFromTx(currentTx)
+	if ss == nil {
+		panic("ALTER DATABASE storage requires a query session")
+	}
+
+	db.ensureLoaded()
+	// The blob catalog must exist before the table set is frozen. Rebuild may
+	// update it, and no table may appear after we publish the WRITE locks.
+	db.ensureBlobTable()
+	db.storageMoveMu.Lock()
+	defer db.storageMoveMu.Unlock()
+	db.persistenceLifecycle.Lock()
+	defer db.persistenceLifecycle.Unlock()
+
+	tables := db.tables.GetAll()
+	sort.Slice(tables, func(i, j int) bool { return tables[i].Name < tables[j].Name })
+	unlocks := make([]func(), 0, len(tables))
+	defer func() {
+		for i := len(unlocks) - 1; i >= 0; i-- {
+			unlocks[i]()
+		}
+	}()
+	for _, table := range tables {
+		// Rebuilding blob-producing tables updates this internal refcount table
+		// with transactionless engine calls. User DDL cannot address .blobs, and
+		// every producer is locked, so leaving it unlocked is both safe and
+		// necessary to avoid self-deadlock during rebuild/old-generation cleanup.
+		if table.Name == ".blobs" {
+			continue
+		}
+		unlocks = append(unlocks, acquireTableLock(schema, table.Name, true, false, ss, querySeqFromTx(currentTx)))
+	}
+
+	// Consolidate every delta into backend-neutral column generations. WAL file
+	// formats deliberately remain private to each backend and are not copied.
+	transactionCutoff, hasTransactions := db.transactionCompactionSnapshot()
+	rebuild := db.rebuildWithLifecycle(true, false, true)
+	if len(rebuild.errors) != 0 || !rebuild.complete {
+		panic("database storage move rebuild failed: " + strings.Join(rebuild.errors, " | "))
+	}
+	db.save()
+	for _, cleanupError := range cleanupReplacedShardGenerations(rebuild.replaced, "storage move "+schema) {
+		fmt.Println("error:", cleanupError)
+	}
+	if hasTransactions {
+		db.compactTransactionLog(transactionCutoff)
+	}
+
+	// Flush the newly opened empty native logs before copying the schema and
+	// backend-neutral objects.
+	var shards []*storageShard
+	for _, table := range tables {
+		shards = append(shards, table.ActiveShards()...)
+	}
+	for _, shard := range shards {
+		shard.mu.Lock()
+		if shard.logfile != nil {
+			shard.logfile.Flush(shard.t.PersistencyMode == Safe)
+		}
+		shard.mu.Unlock()
+	}
+	db.transactionMu.Lock()
+	if db.transactionLog != nil {
+		db.transactionLog.Flush(true)
+	}
+	db.transactionMu.Unlock()
+
+	if !sameStorage {
+		MoveDatabase(src, dst)
+	}
+
+	// Validate all copied WALs and prepare their destination append handles
+	// before the descriptor cutover. Any failure still leaves src authoritative.
+	movedLogs := make([]movedShardLog, 0, len(shards))
+	for _, shard := range shards {
+		shard.mu.RLock()
+		hasLog := shard.logfile != nil
+		shard.mu.RUnlock()
+		if !hasLog {
+			continue
+		}
+		_, entries, logfile := dst.ReplayLog(shard.uuid.String())
+		drainPersistenceLog(entries)
+		movedLogs = append(movedLogs, movedShardLog{shard: shard, log: logfile})
+	}
+	var movedTransactionLog PersistenceLogfile
+	db.transactionMu.RLock()
+	hasTransactionLog := db.transactionLog != nil
+	db.transactionMu.RUnlock()
+	if hasTransactionLog {
+		_, entries, logfile := dst.ReplayLog(transactionLogName)
+		drainPersistenceLog(entries)
+		movedTransactionLog = logfile
+	}
+
+	writeDatabaseBackendConfig(schema, targetConfig)
+	db.persistence = dst
+	for _, moved := range movedLogs {
+		moved.shard.mu.Lock()
+		old := moved.shard.logfile
+		moved.shard.logfile = moved.log
+		moved.shard.mu.Unlock()
+		if old != nil {
+			func() { defer func() { _ = recover() }(); old.Close() }()
+		}
+	}
+	if movedTransactionLog != nil {
+		db.transactionMu.Lock()
+		old := db.transactionLog
+		db.transactionLog = movedTransactionLog
+		db.transactionMu.Unlock()
+		if old != nil {
+			func() { defer func() { _ = recover() }(); old.Close() }()
+		}
+	}
+
+	// Cutover is complete. Cleanup failure is non-fatal and leaves only a stale
+	// source copy; rolling back now would be less safe than retaining the target.
+	if !sameStorage {
+		func() {
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					fmt.Println("error: old database storage cleanup failed after cutover:", recovered)
+				}
+			}()
+			src.Remove()
+		}()
+	}
 	return true
 }
 
@@ -1345,6 +1576,8 @@ func DropDatabase(schema string, ifexists bool) bool {
 		}
 		panic("Database " + schema + " does not exist")
 	}
+	db.storageMoveMu.RLock()
+	defer db.storageMoveMu.RUnlock()
 	requireDatabaseMaintenance(schema, maintenanceDrop)
 	db = databases.Remove(schema)
 	if db == nil {
@@ -1386,6 +1619,8 @@ func CreateTable(schema, name string, pm PersistencyMode, ifnotexists bool) (*ta
 	if db == nil {
 		panic("Database " + schema + " does not exist")
 	}
+	db.storageMoveMu.RLock()
+	defer db.storageMoveMu.RUnlock()
 	db.ensureLoaded()
 	db.schemalock.Lock()
 	t, created := db.createTableLocked(name, pm, ifnotexists)
@@ -1460,6 +1695,8 @@ func DropTable(schema, name string, ifexists bool) {
 	if db == nil {
 		panic("Database " + schema + " does not exist")
 	}
+	db.storageMoveMu.RLock()
+	defer db.storageMoveMu.RUnlock()
 	db.ensureLoaded()
 	db.schemalock.Lock()
 	t := db.tables.Get(name)
@@ -1509,6 +1746,8 @@ func RenameTable(schema, oldname, newname string) {
 	if db == nil {
 		panic("Database " + schema + " does not exist")
 	}
+	db.storageMoveMu.RLock()
+	defer db.storageMoveMu.RUnlock()
 	db.ensureLoaded()
 	db.schemalock.Lock()
 	t := db.tables.Get(oldname)

@@ -19,6 +19,7 @@ package storage
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -33,6 +34,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/smithy-go"
+	"github.com/launix-de/memcp/scm"
 )
 
 func s3IntegrationFactory(t *testing.T) *S3Factory {
@@ -321,5 +323,66 @@ func TestS3PersistenceStress(t *testing.T) {
 	appendLog.Close()
 	if len(committed) != 0 {
 		t.Fatalf("removed S3 WAL retained commits: %v", committed)
+	}
+
+	t.Run("ALTER DATABASE moves filesystem data to native S3 layout", func(t *testing.T) {
+		testAlterDatabaseStorageToS3(t, factory)
+	})
+}
+
+func testAlterDatabaseStorageToS3(t *testing.T, factory *S3Factory) {
+	databaseName := "s3_alter_storage"
+	root := t.TempDir()
+	oldBasepath := Basepath
+	Basepath = root
+	t.Cleanup(func() {
+		db := databases.Remove(databaseName)
+		if db != nil {
+			db.closeTransactionLog()
+			func() { defer func() { _ = recover() }(); db.persistence.Remove() }()
+		}
+		Basepath = oldBasepath
+	})
+
+	configMap := map[string]interface{}{
+		"backend":           "s3",
+		"access_key_id":     factory.AccessKeyID,
+		"secret_access_key": factory.SecretAccessKey,
+		"region":            factory.Region,
+		"endpoint":          factory.Endpoint,
+		"bucket":            factory.Bucket,
+		"prefix":            factory.Prefix + "/alter-storage",
+		"force_path_style":  factory.ForcePathStyle,
+	}
+	targetConfig, err := json.Marshal(configMap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := createPersistenceFromConfig(databaseName, targetConfig)
+	target.Remove()
+
+	CreateDatabase(databaseName, false)
+	table, _ := CreateTable(databaseName, "items", Safe, false)
+	table.CreateColumn("id", "INT", nil, nil)
+	table.CreateColumn("value", "TEXT", nil, nil)
+	table.Insert([]string{"id", "value"}, [][]scm.Scmer{{scm.NewInt(1), scm.NewString("from-filesystem")}}, nil, scm.NewNil(), false, nil)
+	tx := NewTxContext(TxCursorStability)
+	tx.SessionState = &scm.SessionState{ID: 9100}
+	AlterDatabaseStorage(databaseName, targetConfig, tx)
+
+	db := databases.Remove(databaseName)
+	db.closeTransactionLog()
+	reloaded := newDatabase()
+	reloaded.Name = databaseName
+	reloaded.persistence = createPersistenceFromConfig(databaseName, targetConfig)
+	reloaded.srState = COLD
+	databases.Set(reloaded)
+	reloadedTable := reloaded.GetTable("items")
+	if reloadedTable == nil {
+		t.Fatal("S3 migration lost table schema")
+	}
+	got := reloadedTable.scanLookup(NewTxContext(TxCursorStability), testLookupAccess([]string{"id"}, []scm.Scmer{scm.NewInt(1)}), "value", true)
+	if !scm.Equal(got, scm.NewString("from-filesystem")) {
+		t.Fatalf("S3 migration row = %s, want from-filesystem", scm.String(got))
 	}
 }

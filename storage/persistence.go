@@ -19,6 +19,8 @@ package storage
 import "io"
 import "encoding/json"
 import "github.com/launix-de/memcp/scm"
+import "strings"
+import "github.com/google/uuid"
 
 /*
 
@@ -73,12 +75,17 @@ type PersistenceEngine interface {
 	RemoveLog(shard string)
 	// WalkShardFiles calls fn for every shard-related file (column files, log files)
 	// stored on disk, one at a time. The name passed to fn is exactly the value
-	// expected by DeleteShardFile. Backend failures panic with *PersistenceFailure.
+	// expected by ReadShardFile, WriteShardFile, and DeleteShardFile. Backend
+	// failures panic with *PersistenceFailure.
 	WalkShardFiles(fn func(name string))
+	ReadShardFile(name string) io.ReadCloser
+	WriteShardFile(name string) io.WriteCloser
 	// DeleteShardFile deletes a file previously yielded by WalkShardFiles.
 	DeleteShardFile(name string)
 	Remove()             // delete from storage
 	BackendName() string // returns the backend type name (e.g. "filesystem", "s3", "ceph")
+	// StorageIdentity names the physical namespace without exposing credentials.
+	StorageIdentity() string
 }
 
 type PersistenceLogfile interface {
@@ -143,8 +150,69 @@ var BackendRegistry = map[string]func(dbName string, raw json.RawMessage) Persis
 
 // Helper function to move databases between storages
 func MoveDatabase(src PersistenceEngine, dst PersistenceEngine) {
-	// TODO: read schema.json
-	// TODO: for each shard: read columns, read log, transfer to dst
+	schema := src.ReadSchema()
+	if len(schema) == 0 {
+		panic("cannot move a database without a published schema")
+	}
+
+	src.WalkShardFiles(func(name string) {
+		// WAL encodings are backend-specific (filesystem uses one appendable
+		// file, remote stores use immutable segments plus a manifest). ALTER
+		// DATABASE compacts them before MoveDatabase and opens native empty WALs.
+		if isPersistenceLogObject(name) {
+			return
+		}
+		copyPersistenceObject(src.ReadShardFile(name), dst.WriteShardFile(name), dst, "database.move.file")
+	})
+	src.WalkBlobs(func(hash string) {
+		copyPersistenceObject(src.ReadBlob(hash), dst.WriteBlob(hash), dst, "database.move.blob")
+	})
+
+	// The schema is the commit record naming the copied shard generations. It
+	// must be the final destination object so an interrupted move is never
+	// mistaken for a complete database.
+	dst.WriteSchema(schema)
+}
+
+func isPersistenceLogObject(name string) bool {
+	logAt := strings.LastIndex(name, ".log")
+	if logAt < 0 {
+		return false
+	}
+	owner := name[:logAt]
+	if owner != transactionLogName {
+		if _, err := uuid.Parse(owner); err != nil {
+			return false
+		}
+	}
+	suffix := name[logAt+len(".log"):]
+	if suffix == "" || suffix == ".manifest" {
+		return true
+	}
+	if len(suffix) != 9 || suffix[0] != '.' {
+		return false
+	}
+	for _, digit := range suffix[1:] {
+		if digit < '0' || digit > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func copyPersistenceObject(reader io.ReadCloser, writer io.WriteCloser, dst PersistenceEngine, operation string) {
+	if _, err := io.Copy(writer, reader); err != nil {
+		_ = reader.Close()
+		_ = writer.Close()
+		raisePersistenceFailure(dst.BackendName(), "database move", operation, err)
+	}
+	if err := reader.Close(); err != nil {
+		_ = writer.Close()
+		raisePersistenceFailure(dst.BackendName(), "database move", operation+".read.close", err)
+	}
+	if err := writer.Close(); err != nil {
+		raisePersistenceFailure(dst.BackendName(), "database move", operation+".write.close", err)
+	}
 }
 
 // ErrorReader implements io.ReadCloser

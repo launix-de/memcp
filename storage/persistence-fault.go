@@ -229,12 +229,28 @@ func (p *faultPersistence) WalkShardFiles(fn func(name string)) {
 	p.around("shard.walk", func() { p.PersistenceEngine.WalkShardFiles(fn) })
 }
 
+func (p *faultPersistence) ReadShardFile(name string) io.ReadCloser {
+	var result io.ReadCloser
+	p.around("shard.read.open", func() { result = p.PersistenceEngine.ReadShardFile(name) })
+	return &faultReadCloser{ReadCloser: result, owner: p, operation: "shard.read"}
+}
+
+func (p *faultPersistence) WriteShardFile(name string) io.WriteCloser {
+	var result io.WriteCloser
+	p.around("shard.write.open", func() { result = p.PersistenceEngine.WriteShardFile(name) })
+	return &faultWriteCloser{WriteCloser: result, owner: p, operation: "shard.write"}
+}
+
 func (p *faultPersistence) DeleteShardFile(name string) {
 	p.around("shard.delete", func() { p.PersistenceEngine.DeleteShardFile(name) })
 }
 
 func (p *faultPersistence) Remove() {
 	p.around("database.remove", p.PersistenceEngine.Remove)
+}
+
+func (p *faultPersistence) StorageIdentity() string {
+	return p.PersistenceEngine.StorageIdentity()
 }
 
 type faultReadCloser struct {
