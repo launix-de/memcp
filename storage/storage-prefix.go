@@ -59,6 +59,8 @@ func (s *StoragePrefix) GetValue(i uint32) scm.Scmer {
 // prefix-dictionary indices via the two wrapped storages' own bulk methods
 // (one call each instead of 2*n GetValue calls) and then stitch prefix+suffix
 // together in a single post-process pass.
+//
+//jitgen:control-flow-stable StoragePrefix.GetValueRange recid count target/3 stride
 func (s *StoragePrefix) GetValueRange(recid uint32, count uint32, target []scm.Scmer, stride int) {
 	if stride <= 0 {
 		stride = 1
@@ -69,6 +71,7 @@ func (s *StoragePrefix) GetValueRange(recid uint32, count uint32, target []scm.S
 	s.applyPrefixInPlace(target, idxbuf, count, stride)
 }
 
+//jitgen:control-flow-stable StoragePrefix.GetValueMulti recids/3 target/3 stride
 func (s *StoragePrefix) GetValueMulti(recids []uint32, target []scm.Scmer, stride int) {
 	if stride <= 0 {
 		stride = 1

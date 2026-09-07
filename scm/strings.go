@@ -14868,7 +14868,7 @@ func init_strings() {
 					d6 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *any) any { return value }), []JITValueDesc{d0}, 2)
 					ctx.EnsureDesc(&d4)
 					ctx.EnsureDesc(&d4)
-					ctx.EnsureDesc(&d4)
+					d4 = JITPrepareGoSliceArg(ctx, d4)
 					if d4.Loc != LocRegTriple && d4.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice (json.Unmarshal arg0)")
 					}
@@ -15366,7 +15366,7 @@ func init_strings() {
 					d6 = ctx.EmitGoCallScalar(GoFuncAddr(func(value *Scmer) any { return value }), []JITValueDesc{d0}, 2)
 					ctx.EnsureDesc(&d4)
 					ctx.EnsureDesc(&d4)
-					ctx.EnsureDesc(&d4)
+					d4 = JITPrepareGoSliceArg(ctx, d4)
 					if d4.Loc != LocRegTriple && d4.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice (json.Unmarshal arg0)")
 					}
@@ -15807,13 +15807,13 @@ func init_strings() {
 				}
 				ctx.EnsureDesc(&d10)
 				ctx.EnsureDesc(&d10)
-				ctx.EnsureDesc(&d10)
+				d10 = JITPrepareGoSliceArg(ctx, d10)
 				if d10.Loc != LocRegTriple && d10.Loc != LocStackTriple {
 					panic("jit: generic call arg expects 3-word Go slice ((*base64.Encoding).Encode arg1)")
 				}
 				ctx.EnsureDesc(&d6)
 				ctx.EnsureDesc(&d6)
-				ctx.EnsureDesc(&d6)
+				d6 = JITPrepareGoSliceArg(ctx, d6)
 				if d6.Loc != LocRegTriple && d6.Loc != LocStackTriple {
 					panic("jit: generic call arg expects 3-word Go slice ((*base64.Encoding).Encode arg2)")
 				}
@@ -19688,7 +19688,7 @@ func init_strings() {
 					ctx.StabilizeDescForControlFlow(&d25)
 					ctx.EnsureDesc(&d25)
 					ctx.EnsureDesc(&d25)
-					ctx.EnsureDesc(&d25)
+					d25 = JITPrepareGoSliceArg(ctx, d25)
 					if d25.Loc != LocRegTriple && d25.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice (crand.Read arg0)")
 					}
@@ -21514,7 +21514,7 @@ func init_strings() {
 				d4.Type = tagSlice
 				ctx.EnsureDesc(&d4)
 				ctx.EnsureDesc(&d4)
-				ctx.EnsureDesc(&d4)
+				d4 = JITPrepareGoSliceArg(ctx, d4)
 				if d4.Loc != LocRegTriple && d4.Loc != LocStackTriple {
 					panic("jit: generic call arg expects 3-word Go slice (sha1.Sum arg0)")
 				}
@@ -21602,13 +21602,13 @@ func init_strings() {
 				ctx.ReclaimUntrackedRegs()
 				ctx.EnsureDesc(&d14)
 				ctx.EnsureDesc(&d14)
-				ctx.EnsureDesc(&d14)
+				d14 = JITPrepareGoSliceArg(ctx, d14)
 				if d14.Loc != LocRegTriple && d14.Loc != LocStackTriple {
 					panic("jit: generic call arg expects 3-word Go slice (hex.Encode arg0)")
 				}
 				ctx.EnsureDesc(&d9)
 				ctx.EnsureDesc(&d9)
-				ctx.EnsureDesc(&d9)
+				d9 = JITPrepareGoSliceArg(ctx, d9)
 				if d9.Loc != LocRegTriple && d9.Loc != LocStackTriple {
 					panic("jit: generic call arg expects 3-word Go slice (hex.Encode arg1)")
 				}
@@ -21689,7 +21689,7 @@ func init_strings() {
 				d4.Type = tagSlice
 				ctx.EnsureDesc(&d4)
 				ctx.EnsureDesc(&d4)
-				ctx.EnsureDesc(&d4)
+				d4 = JITPrepareGoSliceArg(ctx, d4)
 				if d4.Loc != LocRegTriple && d4.Loc != LocStackTriple {
 					panic("jit: generic call arg expects 3-word Go slice (sha256.Sum256 arg0)")
 				}
@@ -21775,13 +21775,13 @@ func init_strings() {
 				ctx.ReclaimUntrackedRegs()
 				ctx.EnsureDesc(&d14)
 				ctx.EnsureDesc(&d14)
-				ctx.EnsureDesc(&d14)
+				d14 = JITPrepareGoSliceArg(ctx, d14)
 				if d14.Loc != LocRegTriple && d14.Loc != LocStackTriple {
 					panic("jit: generic call arg expects 3-word Go slice (hex.Encode arg0)")
 				}
 				ctx.EnsureDesc(&d9)
 				ctx.EnsureDesc(&d9)
-				ctx.EnsureDesc(&d9)
+				d9 = JITPrepareGoSliceArg(ctx, d9)
 				if d9.Loc != LocRegTriple && d9.Loc != LocStackTriple {
 					panic("jit: generic call arg expects 3-word Go slice (hex.Encode arg1)")
 				}

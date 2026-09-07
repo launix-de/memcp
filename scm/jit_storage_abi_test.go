@@ -20,6 +20,7 @@ Copyright (C) 2026  Carl-Philip Hänsch
 package scm
 
 import (
+	"math"
 	"runtime"
 	"testing"
 	"unsafe"
@@ -27,6 +28,45 @@ import (
 
 func jitFourScalarResults(seed uint32) (int64, bool, int64, int64) {
 	return int64(seed) + 1, seed&1 != 0, int64(seed) + 3, int64(seed) + 5
+}
+
+func TestJITScmerConstructorsAllowAliasedPayloadRegister(t *testing.T) {
+	tests := []struct {
+		name string
+		want Scmer
+		emit func(*JITContext, JITValueDesc, JITValueDesc)
+	}{
+		{"int", NewInt(42), func(ctx *JITContext, dst, src JITValueDesc) {
+			ctx.EmitMovRegImm64(src.Reg, 42)
+			ctx.EmitMakeInt(dst, src)
+		}},
+		{"float", NewFloat(-157.84), func(ctx *JITContext, dst, src JITValueDesc) {
+			ctx.EmitMovRegImm64(src.Reg, math.Float64bits(-157.84))
+			ctx.EmitMakeFloat(dst, src)
+		}},
+		{"bool", NewBool(true), func(ctx *JITContext, dst, src JITValueDesc) {
+			ctx.EmitMovRegImm64(src.Reg, 1)
+			ctx.EmitMakeBool(dst, src)
+		}},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			fn := CompileJITStorageGetValue(func(ctx *JITContext, source, target JITValueDesc) JITValueDesc {
+				if source.Reg != target.Reg {
+					t.Fatalf("test requires an aliased source and pointer destination, got %v and %v", source.Reg, target.Reg)
+				}
+				test.emit(ctx, target, source)
+				return target
+			})
+			if fn == nil {
+				t.Fatal("aliased constructor did not compile")
+			}
+			if got := fn(0); !Equal(got, test.want) {
+				t.Fatalf("aliased constructor = %v, want %v", got, test.want)
+			}
+		})
+	}
 }
 
 func TestJITGoCallFourScalarResults(t *testing.T) {

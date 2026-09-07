@@ -254,6 +254,23 @@ type storageJITFunctions struct {
 	getValueMulti scm.JITStorageGetValueMultiFunc
 }
 
+type storageJITReaderProvider interface {
+	GetJITGetValue() scm.JITStorageGetValueFunc
+}
+
+// compiledColumnGetValue resolves the native scalar target once, before a row
+// loop. Callers retain the ColumnReader separately for the fallback. This
+// avoids both an escaping Go method-value closure during scan setup and the
+// ColumnReader -> storageJITFunctions -> native-func double dispatch.
+func compiledColumnGetValue(reader ColumnReader) scm.JITStorageGetValueFunc {
+	if provider, ok := reader.(storageJITReaderProvider); ok {
+		if compiled := provider.GetJITGetValue(); compiled != nil {
+			return compiled
+		}
+	}
+	return nil
+}
+
 func (j *storageJITFunctions) GetJITGetValue() scm.JITStorageGetValueFunc {
 	return j.getValue
 }

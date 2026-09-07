@@ -428,6 +428,35 @@ func init() {
 	}
 }
 
+func TestStorageStableInputsAllowReceiverScopedOverride(t *testing.T) {
+	const source = `package sample
+//jitgen:control-flow-stable GetValueRange recid count target/1 stride
+//jitgen:control-flow-stable StorageWrapper.GetValueRange recid count target/3 stride
+type StorageWrapper struct{}
+func (s *StorageWrapper) GetValueRange(recid, count int, target []int, stride int) {}
+func (s *StorageWrapper) JITEmitGetValueRange() {}
+type StorageLeaf struct{}
+func (s *StorageLeaf) GetValueRange(recid, count int, target []int, stride int) {}
+func (s *StorageLeaf) JITEmitGetValueRange() {}
+`
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "sample.go", source, parser.ParseComments)
+	if err != nil {
+		t.Fatal(err)
+	}
+	infos := collectStorageMethods([]storageASTFile{{file: file, path: "sample.go"}})
+	got := make(map[string][]string, len(infos))
+	for _, info := range infos {
+		got[info.typeName+"."+info.sourceName] = info.stableInputs
+	}
+	if values := strings.Join(got["StorageWrapper.GetValueRange"], " "); values != "recid count target/3 stride" {
+		t.Fatalf("scoped stable inputs = %q, want recid count target/3 stride", values)
+	}
+	if values := strings.Join(got["StorageLeaf.GetValueRange"], " "); values != "recid count target/1 stride" {
+		t.Fatalf("default stable inputs = %q, want recid count target/1 stride", values)
+	}
+}
+
 func TestSlicePhiUsesThreeWordLayout(t *testing.T) {
 	sliceType := types.NewSlice(types.Typ[types.Int64])
 	if !isPhiTripleType(sliceType) {

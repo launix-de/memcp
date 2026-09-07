@@ -279,7 +279,7 @@ func init_date() {
 				ctx.BindReg(d0.Reg3, &d0)
 				ctx.EnsureDesc(&d0)
 				ctx.EnsureDesc(&d0)
-				ctx.EnsureDesc(&d0)
+				d0 = JITPrepareGoSliceArg(ctx, d0)
 				if d0.Loc != LocRegTriple && d0.Loc != LocStackTriple {
 					panic("jit: generic call arg expects 3-word Go slice ((time.Time).Unix arg0)")
 				}
@@ -364,7 +364,7 @@ func init_date() {
 				ctx.BindReg(d0.Reg3, &d0)
 				ctx.EnsureDesc(&d0)
 				ctx.EnsureDesc(&d0)
-				ctx.EnsureDesc(&d0)
+				d0 = JITPrepareGoSliceArg(ctx, d0)
 				if d0.Loc != LocRegTriple && d0.Loc != LocStackTriple {
 					panic("jit: generic call arg expects 3-word Go slice ((time.Time).UnixNano arg0)")
 				}
@@ -1467,7 +1467,7 @@ func init_date() {
 					ctx.BindReg(d97.Reg3, &d97)
 					ctx.EnsureDesc(&d97)
 					ctx.EnsureDesc(&d97)
-					ctx.EnsureDesc(&d97)
+					d97 = JITPrepareGoSliceArg(ctx, d97)
 					if d97.Loc != LocRegTriple && d97.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).In arg0)")
 					}
@@ -1487,7 +1487,7 @@ func init_date() {
 					ctx.FreeDesc(&d2)
 					ctx.EnsureDesc(&d98)
 					ctx.EnsureDesc(&d98)
-					ctx.EnsureDesc(&d98)
+					d98 = JITPrepareGoSliceArg(ctx, d98)
 					if d98.Loc != LocRegTriple && d98.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Year arg0)")
 					}
@@ -1497,7 +1497,7 @@ func init_date() {
 					ctx.BindReg(d99.Reg, &d99)
 					ctx.EnsureDesc(&d98)
 					ctx.EnsureDesc(&d98)
-					ctx.EnsureDesc(&d98)
+					d98 = JITPrepareGoSliceArg(ctx, d98)
 					if d98.Loc != LocRegTriple && d98.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Month arg0)")
 					}
@@ -1507,7 +1507,7 @@ func init_date() {
 					ctx.BindReg(d100.Reg, &d100)
 					ctx.EnsureDesc(&d98)
 					ctx.EnsureDesc(&d98)
-					ctx.EnsureDesc(&d98)
+					d98 = JITPrepareGoSliceArg(ctx, d98)
 					if d98.Loc != LocRegTriple && d98.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Day arg0)")
 					}
@@ -1576,7 +1576,7 @@ func init_date() {
 					ctx.FreeDesc(&d102)
 					ctx.EnsureDesc(&d107)
 					ctx.EnsureDesc(&d107)
-					ctx.EnsureDesc(&d107)
+					d107 = JITPrepareGoSliceArg(ctx, d107)
 					if d107.Loc != LocRegTriple && d107.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Unix arg0)")
 					}
@@ -5506,7 +5506,7 @@ func init_date() {
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d28)
 					ctx.EnsureDesc(&d28)
-					ctx.EnsureDesc(&d28)
+					d28 = JITPrepareGoSliceArg(ctx, d28)
 					if d28.Loc != LocRegTriple && d28.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).In arg0)")
 					}
@@ -5544,7 +5544,7 @@ func init_date() {
 					ctx.FreeDesc(&d195)
 					ctx.EnsureDesc(&d194)
 					ctx.EnsureDesc(&d194)
-					ctx.EnsureDesc(&d194)
+					d194 = JITPrepareGoSliceArg(ctx, d194)
 					if d194.Loc != LocRegTriple && d194.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice (formatDateMySQL arg0)")
 					}
@@ -7795,7 +7795,7 @@ func init_date() {
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d28)
 					ctx.EnsureDesc(&d28)
-					ctx.EnsureDesc(&d28)
+					d28 = JITPrepareGoSliceArg(ctx, d28)
 					if d28.Loc != LocRegTriple && d28.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).In arg0)")
 					}
@@ -8507,7 +8507,7 @@ func init_date() {
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d194)
 					ctx.EnsureDesc(&d194)
-					ctx.EnsureDesc(&d194)
+					d194 = JITPrepareGoSliceArg(ctx, d194)
 					if d194.Loc != LocRegTriple && d194.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Year arg0)")
 					}
@@ -8703,7 +8703,7 @@ func init_date() {
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d194)
 					ctx.EnsureDesc(&d194)
-					ctx.EnsureDesc(&d194)
+					d194 = JITPrepareGoSliceArg(ctx, d194)
 					if d194.Loc != LocRegTriple && d194.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Month arg0)")
 					}
@@ -9664,7 +9664,7 @@ func init_date() {
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d194)
 					ctx.EnsureDesc(&d194)
-					ctx.EnsureDesc(&d194)
+					d194 = JITPrepareGoSliceArg(ctx, d194)
 					if d194.Loc != LocRegTriple && d194.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Day arg0)")
 					}
@@ -10730,7 +10730,7 @@ func init_date() {
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d194)
 					ctx.EnsureDesc(&d194)
-					ctx.EnsureDesc(&d194)
+					d194 = JITPrepareGoSliceArg(ctx, d194)
 					if d194.Loc != LocRegTriple && d194.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Hour arg0)")
 					}
@@ -11901,7 +11901,7 @@ func init_date() {
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d194)
 					ctx.EnsureDesc(&d194)
-					ctx.EnsureDesc(&d194)
+					d194 = JITPrepareGoSliceArg(ctx, d194)
 					if d194.Loc != LocRegTriple && d194.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Minute arg0)")
 					}
@@ -13177,7 +13177,7 @@ func init_date() {
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d194)
 					ctx.EnsureDesc(&d194)
-					ctx.EnsureDesc(&d194)
+					d194 = JITPrepareGoSliceArg(ctx, d194)
 					if d194.Loc != LocRegTriple && d194.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Second arg0)")
 					}
@@ -14558,7 +14558,7 @@ func init_date() {
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d194)
 					ctx.EnsureDesc(&d194)
-					ctx.EnsureDesc(&d194)
+					d194 = JITPrepareGoSliceArg(ctx, d194)
 					if d194.Loc != LocRegTriple && d194.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Month arg0)")
 					}
@@ -16139,7 +16139,7 @@ func init_date() {
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d194)
 					ctx.EnsureDesc(&d194)
-					ctx.EnsureDesc(&d194)
+					d194 = JITPrepareGoSliceArg(ctx, d194)
 					if d194.Loc != LocRegTriple && d194.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).ISOWeek arg0)")
 					}
@@ -17792,7 +17792,7 @@ func init_date() {
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d194)
 					ctx.EnsureDesc(&d194)
-					ctx.EnsureDesc(&d194)
+					d194 = JITPrepareGoSliceArg(ctx, d194)
 					if d194.Loc != LocRegTriple && d194.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Weekday arg0)")
 					}
@@ -19580,7 +19580,7 @@ func init_date() {
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d194)
 					ctx.EnsureDesc(&d194)
-					ctx.EnsureDesc(&d194)
+					d194 = JITPrepareGoSliceArg(ctx, d194)
 					if d194.Loc != LocRegTriple && d194.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Weekday arg0)")
 					}
@@ -22785,7 +22785,7 @@ func init_date() {
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d1)
 					ctx.EnsureDesc(&d1)
-					ctx.EnsureDesc(&d1)
+					d1 = JITPrepareGoSliceArg(ctx, d1)
 					if d1.Loc != LocRegTriple && d1.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Unix arg0)")
 					}
@@ -22945,7 +22945,7 @@ func init_date() {
 					}
 					ctx.EnsureDesc(&d25)
 					ctx.EnsureDesc(&d25)
-					ctx.EnsureDesc(&d25)
+					d25 = JITPrepareGoSliceArg(ctx, d25)
 					if d25.Loc != LocRegTriple && d25.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Add arg0)")
 					}
@@ -23168,7 +23168,7 @@ func init_date() {
 					}
 					ctx.EnsureDesc(&d25)
 					ctx.EnsureDesc(&d25)
-					ctx.EnsureDesc(&d25)
+					d25 = JITPrepareGoSliceArg(ctx, d25)
 					if d25.Loc != LocRegTriple && d25.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Add arg0)")
 					}
@@ -23962,7 +23962,7 @@ func init_date() {
 					}
 					ctx.EnsureDesc(&d25)
 					ctx.EnsureDesc(&d25)
-					ctx.EnsureDesc(&d25)
+					d25 = JITPrepareGoSliceArg(ctx, d25)
 					if d25.Loc != LocRegTriple && d25.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Add arg0)")
 					}
@@ -24881,7 +24881,7 @@ func init_date() {
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d25)
 					ctx.EnsureDesc(&d25)
-					ctx.EnsureDesc(&d25)
+					d25 = JITPrepareGoSliceArg(ctx, d25)
 					if d25.Loc != LocRegTriple && d25.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).AddDate arg0)")
 					}
@@ -25971,7 +25971,7 @@ func init_date() {
 					}
 					ctx.EnsureDesc(&d25)
 					ctx.EnsureDesc(&d25)
-					ctx.EnsureDesc(&d25)
+					d25 = JITPrepareGoSliceArg(ctx, d25)
 					if d25.Loc != LocRegTriple && d25.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).AddDate arg0)")
 					}
@@ -27206,7 +27206,7 @@ func init_date() {
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d25)
 					ctx.EnsureDesc(&d25)
-					ctx.EnsureDesc(&d25)
+					d25 = JITPrepareGoSliceArg(ctx, d25)
 					if d25.Loc != LocRegTriple && d25.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).AddDate arg0)")
 					}
@@ -28584,7 +28584,7 @@ func init_date() {
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d25)
 					ctx.EnsureDesc(&d25)
-					ctx.EnsureDesc(&d25)
+					d25 = JITPrepareGoSliceArg(ctx, d25)
 					if d25.Loc != LocRegTriple && d25.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).AddDate arg0)")
 					}
@@ -31389,7 +31389,7 @@ func init_date() {
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d1)
 					ctx.EnsureDesc(&d1)
-					ctx.EnsureDesc(&d1)
+					d1 = JITPrepareGoSliceArg(ctx, d1)
 					if d1.Loc != LocRegTriple && d1.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Unix arg0)")
 					}
@@ -31573,7 +31573,7 @@ func init_date() {
 					ctx.FreeDesc(&d120)
 					ctx.EnsureDesc(&d25)
 					ctx.EnsureDesc(&d25)
-					ctx.EnsureDesc(&d25)
+					d25 = JITPrepareGoSliceArg(ctx, d25)
 					if d25.Loc != LocRegTriple && d25.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Add arg0)")
 					}
@@ -31822,7 +31822,7 @@ func init_date() {
 					ctx.FreeDesc(&d127)
 					ctx.EnsureDesc(&d25)
 					ctx.EnsureDesc(&d25)
-					ctx.EnsureDesc(&d25)
+					d25 = JITPrepareGoSliceArg(ctx, d25)
 					if d25.Loc != LocRegTriple && d25.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Add arg0)")
 					}
@@ -32670,7 +32670,7 @@ func init_date() {
 					ctx.FreeDesc(&d226)
 					ctx.EnsureDesc(&d25)
 					ctx.EnsureDesc(&d25)
-					ctx.EnsureDesc(&d25)
+					d25 = JITPrepareGoSliceArg(ctx, d25)
 					if d25.Loc != LocRegTriple && d25.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Add arg0)")
 					}
@@ -33660,7 +33660,7 @@ func init_date() {
 					}
 					ctx.EnsureDesc(&d25)
 					ctx.EnsureDesc(&d25)
-					ctx.EnsureDesc(&d25)
+					d25 = JITPrepareGoSliceArg(ctx, d25)
 					if d25.Loc != LocRegTriple && d25.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).AddDate arg0)")
 					}
@@ -34837,7 +34837,7 @@ func init_date() {
 					ctx.FreeDesc(&d483)
 					ctx.EnsureDesc(&d25)
 					ctx.EnsureDesc(&d25)
-					ctx.EnsureDesc(&d25)
+					d25 = JITPrepareGoSliceArg(ctx, d25)
 					if d25.Loc != LocRegTriple && d25.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).AddDate arg0)")
 					}
@@ -36175,7 +36175,7 @@ func init_date() {
 					}
 					ctx.EnsureDesc(&d25)
 					ctx.EnsureDesc(&d25)
-					ctx.EnsureDesc(&d25)
+					d25 = JITPrepareGoSliceArg(ctx, d25)
 					if d25.Loc != LocRegTriple && d25.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).AddDate arg0)")
 					}
@@ -37674,7 +37674,7 @@ func init_date() {
 					ctx.FreeDesc(&d56)
 					ctx.EnsureDesc(&d25)
 					ctx.EnsureDesc(&d25)
-					ctx.EnsureDesc(&d25)
+					d25 = JITPrepareGoSliceArg(ctx, d25)
 					if d25.Loc != LocRegTriple && d25.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).AddDate arg0)")
 					}
@@ -39894,7 +39894,7 @@ func init_date() {
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d21)
 					ctx.EnsureDesc(&d21)
-					ctx.EnsureDesc(&d21)
+					d21 = JITPrepareGoSliceArg(ctx, d21)
 					if d21.Loc != LocRegTriple && d21.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Year arg0)")
 					}
@@ -39904,7 +39904,7 @@ func init_date() {
 					ctx.BindReg(d49.Reg, &d49)
 					ctx.EnsureDesc(&d21)
 					ctx.EnsureDesc(&d21)
-					ctx.EnsureDesc(&d21)
+					d21 = JITPrepareGoSliceArg(ctx, d21)
 					if d21.Loc != LocRegTriple && d21.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Month arg0)")
 					}
@@ -39914,7 +39914,7 @@ func init_date() {
 					ctx.BindReg(d50.Reg, &d50)
 					ctx.EnsureDesc(&d21)
 					ctx.EnsureDesc(&d21)
-					ctx.EnsureDesc(&d21)
+					d21 = JITPrepareGoSliceArg(ctx, d21)
 					if d21.Loc != LocRegTriple && d21.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Day arg0)")
 					}
@@ -39982,7 +39982,7 @@ func init_date() {
 					ctx.FreeDesc(&d52)
 					ctx.EnsureDesc(&d57)
 					ctx.EnsureDesc(&d57)
-					ctx.EnsureDesc(&d57)
+					d57 = JITPrepareGoSliceArg(ctx, d57)
 					if d57.Loc != LocRegTriple && d57.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Unix arg0)")
 					}
@@ -42546,13 +42546,13 @@ func init_date() {
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d35)
 					ctx.EnsureDesc(&d35)
-					ctx.EnsureDesc(&d35)
+					d35 = JITPrepareGoSliceArg(ctx, d35)
 					if d35.Loc != LocRegTriple && d35.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Sub arg0)")
 					}
 					ctx.EnsureDesc(&d31)
 					ctx.EnsureDesc(&d31)
-					ctx.EnsureDesc(&d31)
+					d31 = JITPrepareGoSliceArg(ctx, d31)
 					if d31.Loc != LocRegTriple && d31.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Sub arg1)")
 					}
@@ -42727,13 +42727,13 @@ func init_date() {
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d35)
 					ctx.EnsureDesc(&d35)
-					ctx.EnsureDesc(&d35)
+					d35 = JITPrepareGoSliceArg(ctx, d35)
 					if d35.Loc != LocRegTriple && d35.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Sub arg0)")
 					}
 					ctx.EnsureDesc(&d31)
 					ctx.EnsureDesc(&d31)
-					ctx.EnsureDesc(&d31)
+					d31 = JITPrepareGoSliceArg(ctx, d31)
 					if d31.Loc != LocRegTriple && d31.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Sub arg1)")
 					}
@@ -43664,13 +43664,13 @@ func init_date() {
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d35)
 					ctx.EnsureDesc(&d35)
-					ctx.EnsureDesc(&d35)
+					d35 = JITPrepareGoSliceArg(ctx, d35)
 					if d35.Loc != LocRegTriple && d35.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Sub arg0)")
 					}
 					ctx.EnsureDesc(&d31)
 					ctx.EnsureDesc(&d31)
-					ctx.EnsureDesc(&d31)
+					d31 = JITPrepareGoSliceArg(ctx, d31)
 					if d31.Loc != LocRegTriple && d31.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Sub arg1)")
 					}
@@ -44796,13 +44796,13 @@ func init_date() {
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d35)
 					ctx.EnsureDesc(&d35)
-					ctx.EnsureDesc(&d35)
+					d35 = JITPrepareGoSliceArg(ctx, d35)
 					if d35.Loc != LocRegTriple && d35.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Sub arg0)")
 					}
 					ctx.EnsureDesc(&d31)
 					ctx.EnsureDesc(&d31)
-					ctx.EnsureDesc(&d31)
+					d31 = JITPrepareGoSliceArg(ctx, d31)
 					if d31.Loc != LocRegTriple && d31.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Sub arg1)")
 					}
@@ -46123,7 +46123,7 @@ func init_date() {
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d31)
 					ctx.EnsureDesc(&d31)
-					ctx.EnsureDesc(&d31)
+					d31 = JITPrepareGoSliceArg(ctx, d31)
 					if d31.Loc != LocRegTriple && d31.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Year arg0)")
 					}
@@ -46133,7 +46133,7 @@ func init_date() {
 					ctx.BindReg(d666.Reg, &d666)
 					ctx.EnsureDesc(&d31)
 					ctx.EnsureDesc(&d31)
-					ctx.EnsureDesc(&d31)
+					d31 = JITPrepareGoSliceArg(ctx, d31)
 					if d31.Loc != LocRegTriple && d31.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Month arg0)")
 					}
@@ -46143,7 +46143,7 @@ func init_date() {
 					ctx.BindReg(d667.Reg, &d667)
 					ctx.EnsureDesc(&d31)
 					ctx.EnsureDesc(&d31)
-					ctx.EnsureDesc(&d31)
+					d31 = JITPrepareGoSliceArg(ctx, d31)
 					if d31.Loc != LocRegTriple && d31.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Day arg0)")
 					}
@@ -46211,7 +46211,7 @@ func init_date() {
 					ctx.FreeDesc(&d669)
 					ctx.EnsureDesc(&d35)
 					ctx.EnsureDesc(&d35)
-					ctx.EnsureDesc(&d35)
+					d35 = JITPrepareGoSliceArg(ctx, d35)
 					if d35.Loc != LocRegTriple && d35.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Year arg0)")
 					}
@@ -46221,7 +46221,7 @@ func init_date() {
 					ctx.BindReg(d675.Reg, &d675)
 					ctx.EnsureDesc(&d35)
 					ctx.EnsureDesc(&d35)
-					ctx.EnsureDesc(&d35)
+					d35 = JITPrepareGoSliceArg(ctx, d35)
 					if d35.Loc != LocRegTriple && d35.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Month arg0)")
 					}
@@ -46231,7 +46231,7 @@ func init_date() {
 					ctx.BindReg(d676.Reg, &d676)
 					ctx.EnsureDesc(&d35)
 					ctx.EnsureDesc(&d35)
-					ctx.EnsureDesc(&d35)
+					d35 = JITPrepareGoSliceArg(ctx, d35)
 					if d35.Loc != LocRegTriple && d35.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Day arg0)")
 					}
@@ -46299,13 +46299,13 @@ func init_date() {
 					ctx.FreeDesc(&d678)
 					ctx.EnsureDesc(&d683)
 					ctx.EnsureDesc(&d683)
-					ctx.EnsureDesc(&d683)
+					d683 = JITPrepareGoSliceArg(ctx, d683)
 					if d683.Loc != LocRegTriple && d683.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Sub arg0)")
 					}
 					ctx.EnsureDesc(&d674)
 					ctx.EnsureDesc(&d674)
-					ctx.EnsureDesc(&d674)
+					d674 = JITPrepareGoSliceArg(ctx, d674)
 					if d674.Loc != LocRegTriple && d674.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Sub arg1)")
 					}
@@ -48123,7 +48123,7 @@ func init_date() {
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d31)
 					ctx.EnsureDesc(&d31)
-					ctx.EnsureDesc(&d31)
+					d31 = JITPrepareGoSliceArg(ctx, d31)
 					if d31.Loc != LocRegTriple && d31.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Year arg0)")
 					}
@@ -48133,7 +48133,7 @@ func init_date() {
 					ctx.BindReg(d910.Reg, &d910)
 					ctx.EnsureDesc(&d31)
 					ctx.EnsureDesc(&d31)
-					ctx.EnsureDesc(&d31)
+					d31 = JITPrepareGoSliceArg(ctx, d31)
 					if d31.Loc != LocRegTriple && d31.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Month arg0)")
 					}
@@ -48143,7 +48143,7 @@ func init_date() {
 					ctx.BindReg(d911.Reg, &d911)
 					ctx.EnsureDesc(&d31)
 					ctx.EnsureDesc(&d31)
-					ctx.EnsureDesc(&d31)
+					d31 = JITPrepareGoSliceArg(ctx, d31)
 					if d31.Loc != LocRegTriple && d31.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Day arg0)")
 					}
@@ -48211,7 +48211,7 @@ func init_date() {
 					ctx.FreeDesc(&d913)
 					ctx.EnsureDesc(&d35)
 					ctx.EnsureDesc(&d35)
-					ctx.EnsureDesc(&d35)
+					d35 = JITPrepareGoSliceArg(ctx, d35)
 					if d35.Loc != LocRegTriple && d35.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Year arg0)")
 					}
@@ -48221,7 +48221,7 @@ func init_date() {
 					ctx.BindReg(d919.Reg, &d919)
 					ctx.EnsureDesc(&d35)
 					ctx.EnsureDesc(&d35)
-					ctx.EnsureDesc(&d35)
+					d35 = JITPrepareGoSliceArg(ctx, d35)
 					if d35.Loc != LocRegTriple && d35.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Month arg0)")
 					}
@@ -48231,7 +48231,7 @@ func init_date() {
 					ctx.BindReg(d920.Reg, &d920)
 					ctx.EnsureDesc(&d35)
 					ctx.EnsureDesc(&d35)
-					ctx.EnsureDesc(&d35)
+					d35 = JITPrepareGoSliceArg(ctx, d35)
 					if d35.Loc != LocRegTriple && d35.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Day arg0)")
 					}
@@ -48299,13 +48299,13 @@ func init_date() {
 					ctx.FreeDesc(&d922)
 					ctx.EnsureDesc(&d927)
 					ctx.EnsureDesc(&d927)
-					ctx.EnsureDesc(&d927)
+					d927 = JITPrepareGoSliceArg(ctx, d927)
 					if d927.Loc != LocRegTriple && d927.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Sub arg0)")
 					}
 					ctx.EnsureDesc(&d918)
 					ctx.EnsureDesc(&d918)
-					ctx.EnsureDesc(&d918)
+					d918 = JITPrepareGoSliceArg(ctx, d918)
 					if d918.Loc != LocRegTriple && d918.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Sub arg1)")
 					}
@@ -50633,7 +50633,7 @@ func init_date() {
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d35)
 					ctx.EnsureDesc(&d35)
-					ctx.EnsureDesc(&d35)
+					d35 = JITPrepareGoSliceArg(ctx, d35)
 					if d35.Loc != LocRegTriple && d35.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Year arg0)")
 					}
@@ -50643,7 +50643,7 @@ func init_date() {
 					ctx.BindReg(d1221.Reg, &d1221)
 					ctx.EnsureDesc(&d31)
 					ctx.EnsureDesc(&d31)
-					ctx.EnsureDesc(&d31)
+					d31 = JITPrepareGoSliceArg(ctx, d31)
 					if d31.Loc != LocRegTriple && d31.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Year arg0)")
 					}
@@ -50696,7 +50696,7 @@ func init_date() {
 					ctx.EnsureDesc(&d1223)
 					ctx.EnsureDesc(&d35)
 					ctx.EnsureDesc(&d35)
-					ctx.EnsureDesc(&d35)
+					d35 = JITPrepareGoSliceArg(ctx, d35)
 					if d35.Loc != LocRegTriple && d35.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Month arg0)")
 					}
@@ -50706,7 +50706,7 @@ func init_date() {
 					ctx.BindReg(d1225.Reg, &d1225)
 					ctx.EnsureDesc(&d31)
 					ctx.EnsureDesc(&d31)
-					ctx.EnsureDesc(&d31)
+					d31 = JITPrepareGoSliceArg(ctx, d31)
 					if d31.Loc != LocRegTriple && d31.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Month arg0)")
 					}
@@ -50819,7 +50819,7 @@ func init_date() {
 					ctx.FreeDesc(&d1227)
 					ctx.EnsureDesc(&d35)
 					ctx.EnsureDesc(&d35)
-					ctx.EnsureDesc(&d35)
+					d35 = JITPrepareGoSliceArg(ctx, d35)
 					if d35.Loc != LocRegTriple && d35.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Day arg0)")
 					}
@@ -50829,7 +50829,7 @@ func init_date() {
 					ctx.BindReg(d1231.Reg, &d1231)
 					ctx.EnsureDesc(&d31)
 					ctx.EnsureDesc(&d31)
-					ctx.EnsureDesc(&d31)
+					d31 = JITPrepareGoSliceArg(ctx, d31)
 					if d31.Loc != LocRegTriple && d31.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Day arg0)")
 					}
@@ -54797,7 +54797,7 @@ func init_date() {
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d35)
 					ctx.EnsureDesc(&d35)
-					ctx.EnsureDesc(&d35)
+					d35 = JITPrepareGoSliceArg(ctx, d35)
 					if d35.Loc != LocRegTriple && d35.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Year arg0)")
 					}
@@ -54807,7 +54807,7 @@ func init_date() {
 					ctx.BindReg(d1877.Reg, &d1877)
 					ctx.EnsureDesc(&d31)
 					ctx.EnsureDesc(&d31)
-					ctx.EnsureDesc(&d31)
+					d31 = JITPrepareGoSliceArg(ctx, d31)
 					if d31.Loc != LocRegTriple && d31.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Year arg0)")
 					}
@@ -54860,7 +54860,7 @@ func init_date() {
 					ctx.EnsureDesc(&d1879)
 					ctx.EnsureDesc(&d35)
 					ctx.EnsureDesc(&d35)
-					ctx.EnsureDesc(&d35)
+					d35 = JITPrepareGoSliceArg(ctx, d35)
 					if d35.Loc != LocRegTriple && d35.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Month arg0)")
 					}
@@ -54870,7 +54870,7 @@ func init_date() {
 					ctx.BindReg(d1881.Reg, &d1881)
 					ctx.EnsureDesc(&d31)
 					ctx.EnsureDesc(&d31)
-					ctx.EnsureDesc(&d31)
+					d31 = JITPrepareGoSliceArg(ctx, d31)
 					if d31.Loc != LocRegTriple && d31.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Month arg0)")
 					}
@@ -54983,7 +54983,7 @@ func init_date() {
 					ctx.FreeDesc(&d1883)
 					ctx.EnsureDesc(&d35)
 					ctx.EnsureDesc(&d35)
-					ctx.EnsureDesc(&d35)
+					d35 = JITPrepareGoSliceArg(ctx, d35)
 					if d35.Loc != LocRegTriple && d35.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Day arg0)")
 					}
@@ -54993,7 +54993,7 @@ func init_date() {
 					ctx.BindReg(d1887.Reg, &d1887)
 					ctx.EnsureDesc(&d31)
 					ctx.EnsureDesc(&d31)
-					ctx.EnsureDesc(&d31)
+					d31 = JITPrepareGoSliceArg(ctx, d31)
 					if d31.Loc != LocRegTriple && d31.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Day arg0)")
 					}
@@ -60865,7 +60865,7 @@ func init_date() {
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d35)
 					ctx.EnsureDesc(&d35)
-					ctx.EnsureDesc(&d35)
+					d35 = JITPrepareGoSliceArg(ctx, d35)
 					if d35.Loc != LocRegTriple && d35.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Year arg0)")
 					}
@@ -60875,7 +60875,7 @@ func init_date() {
 					ctx.BindReg(d2625.Reg, &d2625)
 					ctx.EnsureDesc(&d31)
 					ctx.EnsureDesc(&d31)
-					ctx.EnsureDesc(&d31)
+					d31 = JITPrepareGoSliceArg(ctx, d31)
 					if d31.Loc != LocRegTriple && d31.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Year arg0)")
 					}
@@ -60929,7 +60929,7 @@ func init_date() {
 					ctx.StabilizeDescForControlFlow(&d2627)
 					ctx.EnsureDesc(&d35)
 					ctx.EnsureDesc(&d35)
-					ctx.EnsureDesc(&d35)
+					d35 = JITPrepareGoSliceArg(ctx, d35)
 					if d35.Loc != LocRegTriple && d35.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Month arg0)")
 					}
@@ -60939,7 +60939,7 @@ func init_date() {
 					ctx.BindReg(d2629.Reg, &d2629)
 					ctx.EnsureDesc(&d31)
 					ctx.EnsureDesc(&d31)
-					ctx.EnsureDesc(&d31)
+					d31 = JITPrepareGoSliceArg(ctx, d31)
 					if d31.Loc != LocRegTriple && d31.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Month arg0)")
 					}
@@ -69393,7 +69393,7 @@ func init_date() {
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d35)
 					ctx.EnsureDesc(&d35)
-					ctx.EnsureDesc(&d35)
+					d35 = JITPrepareGoSliceArg(ctx, d35)
 					if d35.Loc != LocRegTriple && d35.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Month arg0)")
 					}
@@ -69403,7 +69403,7 @@ func init_date() {
 					ctx.BindReg(d3430.Reg, &d3430)
 					ctx.EnsureDesc(&d31)
 					ctx.EnsureDesc(&d31)
-					ctx.EnsureDesc(&d31)
+					d31 = JITPrepareGoSliceArg(ctx, d31)
 					if d31.Loc != LocRegTriple && d31.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Month arg0)")
 					}
@@ -72062,7 +72062,7 @@ func init_date() {
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d35)
 					ctx.EnsureDesc(&d35)
-					ctx.EnsureDesc(&d35)
+					d35 = JITPrepareGoSliceArg(ctx, d35)
 					if d35.Loc != LocRegTriple && d35.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Day arg0)")
 					}
@@ -72072,7 +72072,7 @@ func init_date() {
 					ctx.BindReg(d3862.Reg, &d3862)
 					ctx.EnsureDesc(&d31)
 					ctx.EnsureDesc(&d31)
-					ctx.EnsureDesc(&d31)
+					d31 = JITPrepareGoSliceArg(ctx, d31)
 					if d31.Loc != LocRegTriple && d31.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Day arg0)")
 					}
@@ -75125,7 +75125,7 @@ func init_date() {
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d21)
 					ctx.EnsureDesc(&d21)
-					ctx.EnsureDesc(&d21)
+					d21 = JITPrepareGoSliceArg(ctx, d21)
 					if d21.Loc != LocRegTriple && d21.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Year arg0)")
 					}
@@ -75135,7 +75135,7 @@ func init_date() {
 					ctx.BindReg(d101.Reg, &d101)
 					ctx.EnsureDesc(&d21)
 					ctx.EnsureDesc(&d21)
-					ctx.EnsureDesc(&d21)
+					d21 = JITPrepareGoSliceArg(ctx, d21)
 					if d21.Loc != LocRegTriple && d21.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Month arg0)")
 					}
@@ -75145,7 +75145,7 @@ func init_date() {
 					ctx.BindReg(d102.Reg, &d102)
 					ctx.EnsureDesc(&d21)
 					ctx.EnsureDesc(&d21)
-					ctx.EnsureDesc(&d21)
+					d21 = JITPrepareGoSliceArg(ctx, d21)
 					if d21.Loc != LocRegTriple && d21.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Day arg0)")
 					}
@@ -75213,7 +75213,7 @@ func init_date() {
 					ctx.FreeDesc(&d104)
 					ctx.EnsureDesc(&d25)
 					ctx.EnsureDesc(&d25)
-					ctx.EnsureDesc(&d25)
+					d25 = JITPrepareGoSliceArg(ctx, d25)
 					if d25.Loc != LocRegTriple && d25.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Year arg0)")
 					}
@@ -75223,7 +75223,7 @@ func init_date() {
 					ctx.BindReg(d110.Reg, &d110)
 					ctx.EnsureDesc(&d25)
 					ctx.EnsureDesc(&d25)
-					ctx.EnsureDesc(&d25)
+					d25 = JITPrepareGoSliceArg(ctx, d25)
 					if d25.Loc != LocRegTriple && d25.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Month arg0)")
 					}
@@ -75233,7 +75233,7 @@ func init_date() {
 					ctx.BindReg(d111.Reg, &d111)
 					ctx.EnsureDesc(&d25)
 					ctx.EnsureDesc(&d25)
-					ctx.EnsureDesc(&d25)
+					d25 = JITPrepareGoSliceArg(ctx, d25)
 					if d25.Loc != LocRegTriple && d25.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Day arg0)")
 					}
@@ -75301,13 +75301,13 @@ func init_date() {
 					ctx.FreeDesc(&d113)
 					ctx.EnsureDesc(&d109)
 					ctx.EnsureDesc(&d109)
-					ctx.EnsureDesc(&d109)
+					d109 = JITPrepareGoSliceArg(ctx, d109)
 					if d109.Loc != LocRegTriple && d109.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Sub arg0)")
 					}
 					ctx.EnsureDesc(&d118)
 					ctx.EnsureDesc(&d118)
-					ctx.EnsureDesc(&d118)
+					d118 = JITPrepareGoSliceArg(ctx, d118)
 					if d118.Loc != LocRegTriple && d118.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Sub arg1)")
 					}
@@ -76819,7 +76819,7 @@ func init_date() {
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d27)
 					ctx.EnsureDesc(&d27)
-					ctx.EnsureDesc(&d27)
+					d27 = JITPrepareGoSliceArg(ctx, d27)
 					if d27.Loc != LocRegTriple && d27.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice ((time.Time).Unix arg0)")
 					}

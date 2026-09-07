@@ -126,6 +126,8 @@ func (s *StorageDecimal) GetValue(i uint32) scm.Scmer {
 // — which is where the bit-unpacking cursor optimization lives — and then
 // rescale each non-nil result in place, avoiding a second per-element
 // GetValue dispatch.
+//
+//jitgen:control-flow-stable StorageDecimal.GetValueRange recid count target/3 stride
 func (s *StorageDecimal) GetValueRange(recid uint32, count uint32, target []scm.Scmer, stride int) {
 	if stride <= 0 {
 		stride = 1
@@ -134,6 +136,7 @@ func (s *StorageDecimal) GetValueRange(recid uint32, count uint32, target []scm.
 	s.rescaleInPlace(target, count, stride)
 }
 
+//jitgen:control-flow-stable StorageDecimal.GetValueMulti recids/3 target/3 stride
 func (s *StorageDecimal) GetValueMulti(recids []uint32, target []scm.Scmer, stride int) {
 	if stride <= 0 {
 		stride = 1

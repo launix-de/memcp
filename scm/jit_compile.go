@@ -547,7 +547,11 @@ func (ctx *JITContext) EmitSliceElementAddress(slice, index *JITValueDesc, eleme
 	ctx.ReclaimUntrackedRegs()
 	slicePtr := Reg(0)
 	loadedPtr := false
-	if slice.GoArray && slice.Loc == LocStack {
+	if slice.GoArray && slice.Loc == LocMem {
+		slicePtr = ctx.AllocReg()
+		ctx.EmitMovRegImm64(slicePtr, uint64(slice.MemPtr))
+		loadedPtr = true
+	} else if slice.GoArray && slice.Loc == LocStack {
 		slicePtr = ctx.AllocReg()
 		base := ctx.StackReg
 		if slice.StackOff < 0 {
@@ -744,6 +748,12 @@ func (ctx *JITContext) EmitSliceCapAfterLow(slice, low *JITValueDesc, excluded .
 	}
 	result := ctx.AllocRegExcept(excluded...)
 	switch slice.Loc {
+	case LocMem:
+		if !slice.GoArray || !slice.SliceSizeKnown {
+			ctx.FreeReg(result)
+			panic("jit: fixed-memory slice capacity is unknown")
+		}
+		ctx.EmitMovRegImm64(result, uint64(uint32(slice.KnownSliceCap)))
 	case LocStackTriple:
 		base := ctx.StackReg
 		if slice.StackOff < 0 {
@@ -789,6 +799,12 @@ func (ctx *JITContext) EmitSliceDataAfterLow(slice, low *JITValueDesc, elementSi
 	switch slice.Loc {
 	case LocImm:
 		ctx.EmitMovRegImm64(result, uint64(slice.Imm.Int()))
+	case LocMem:
+		if !slice.GoArray {
+			ctx.FreeReg(result)
+			panic("jit: fixed-memory slice data requires an array descriptor")
+		}
+		ctx.EmitMovRegImm64(result, uint64(slice.MemPtr))
 	case LocStackPair, LocStackTriple:
 		base := ctx.StackReg
 		if slice.StackOff < 0 {
@@ -831,6 +847,32 @@ func (ctx *JITContext) EmitSliceDataAfterLow(slice, low *JITValueDesc, elementSi
 		}
 	}
 	return result
+}
+
+// JITPrepareGoSliceArg materializes a fixed immutable payload as the complete
+// three-word Go slice header required at a native call boundary. LocMem keeps
+// the payload address and bounds compile-time constant while code is inlined;
+// only an actual Go call pays this materialization cost.
+func JITPrepareGoSliceArg(ctx *JITContext, value JITValueDesc) JITValueDesc {
+	if value.Loc != LocMem {
+		ctx.EnsureDesc(&value)
+		return value
+	}
+	if !value.GoArray || !value.SliceSizeKnown {
+		panic("jit: fixed-memory Go slice requires known length and capacity")
+	}
+	off := ctx.AllocStack(24)
+	ctx.EmitMovRegImm64(ctx.ScratchReg, uint64(value.MemPtr))
+	ctx.EmitStoreRegMem(ctx.ScratchReg, ctx.StackReg, off)
+	ctx.EmitMovRegImm64(ctx.ScratchReg, uint64(uint32(value.KnownSliceLen)))
+	ctx.EmitStoreRegMem(ctx.ScratchReg, ctx.StackReg, off+8)
+	ctx.EmitMovRegImm64(ctx.ScratchReg, uint64(uint32(value.KnownSliceCap)))
+	ctx.EmitStoreRegMem(ctx.ScratchReg, ctx.StackReg, off+16)
+	ctx.setStackPointer(jitStackRootFrameSP, off-ctx.DynamicSP, true)
+	return JITValueDesc{
+		Loc: LocStackTriple, Type: tagSlice, StackOff: off, Rooted: true,
+		KnownSliceLen: value.KnownSliceLen, KnownSliceCap: value.KnownSliceCap, SliceSizeKnown: true,
+	}
 }
 
 // EmitStoreScmerAt stores a Scmer through an address produced by

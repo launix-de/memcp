@@ -8402,7 +8402,7 @@ func init_jit() {
 					}
 					ctx.EnsureDesc(&d316)
 					ctx.EnsureDesc(&d316)
-					ctx.EnsureDesc(&d316)
+					d316 = JITPrepareGoSliceArg(ctx, d316)
 					if d316.Loc != LocRegTriple && d316.Loc != LocStackTriple {
 						panic("jit: generic call arg expects 3-word Go slice (fmt.Printf arg1)")
 					}

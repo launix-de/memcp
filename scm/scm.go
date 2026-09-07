@@ -2127,7 +2127,7 @@ func init() {
 				}
 				ctx.EnsureDesc(&d53)
 				ctx.EnsureDesc(&d53)
-				ctx.EnsureDesc(&d53)
+				d53 = JITPrepareGoSliceArg(ctx, d53)
 				if d53.Loc != LocRegTriple && d53.Loc != LocStackTriple {
 					panic("jit: generic call arg expects 3-word Go slice (closeJITProcedureCaptures arg2)")
 				}
@@ -4652,7 +4652,7 @@ func init() {
 				d3 = JITPrepareScmerGoArg(ctx, d3)
 				ctx.EnsureDesc(&d4)
 				ctx.EnsureDesc(&d4)
-				ctx.EnsureDesc(&d4)
+				d4 = JITPrepareGoSliceArg(ctx, d4)
 				if d4.Loc != LocRegTriple && d4.Loc != LocStackTriple {
 					panic("jit: generic call arg expects 3-word Go slice (ApplyEx arg1)")
 				}
@@ -5198,7 +5198,7 @@ func init() {
 				d27 = JITPrepareScmerGoArg(ctx, d27)
 				ctx.EnsureDesc(&d28)
 				ctx.EnsureDesc(&d28)
-				ctx.EnsureDesc(&d28)
+				d28 = JITPrepareGoSliceArg(ctx, d28)
 				if d28.Loc != LocRegTriple && d28.Loc != LocStackTriple {
 					panic("jit: generic call arg expects 3-word Go slice (ApplyEx arg1)")
 				}

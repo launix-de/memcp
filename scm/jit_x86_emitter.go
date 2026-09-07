@@ -597,10 +597,9 @@ func (ctx *JITContext) EmitReturnBool(src JITValueDesc) {
 // EmitMakeBool constructs a Scmer bool into dst.Reg (ptr) and dst.Reg2 (aux).
 // src.Reg holds the 0/1 boolean value.
 func (ctx *JITContext) EmitMakeBool(dst JITValueDesc, src JITValueDesc) {
-	// dst.Reg = nil (XOR reg, reg)
-	ctx.emitXorReg(dst.Reg)
 	switch src.Loc {
 	case LocImm:
+		ctx.emitXorReg(dst.Reg)
 		var bval uint64
 		if src.Imm.Bool() {
 			bval = 1
@@ -612,6 +611,9 @@ func (ctx *JITContext) EmitMakeBool(dst JITValueDesc, src JITValueDesc) {
 		if dst.Reg2 != src.Reg {
 			ctx.emitMovRegReg(dst.Reg2, src.Reg)
 		}
+		// The requested pointer destination may be the source register. Build
+		// aux first so zeroing the pointer word cannot destroy the payload.
+		ctx.emitXorReg(dst.Reg)
 		ctx.emitAndRegImm32(dst.Reg2, 1)
 		ctx.EmitShlRegImm8(dst.Reg2, 8)
 		ctx.EmitMovRegImm64(RegR11, uint64(tagBool))
@@ -622,13 +624,14 @@ func (ctx *JITContext) EmitMakeBool(dst JITValueDesc, src JITValueDesc) {
 // EmitMakeInt constructs a Scmer int into dst.Reg (ptr) and dst.Reg2 (aux).
 // src.Reg holds the int64 value.
 func (ctx *JITContext) EmitMakeInt(dst JITValueDesc, src JITValueDesc) {
-	ctx.EmitMovRegImm64(dst.Reg, uint64(uintptr(unsafe.Pointer(&scmerIntSentinel))))
 	switch src.Loc {
 	case LocReg:
 		if dst.Reg2 != src.Reg {
 			ctx.emitMovRegReg(dst.Reg2, src.Reg)
 		}
+		ctx.EmitMovRegImm64(dst.Reg, uint64(uintptr(unsafe.Pointer(&scmerIntSentinel))))
 	case LocImm:
+		ctx.EmitMovRegImm64(dst.Reg, uint64(uintptr(unsafe.Pointer(&scmerIntSentinel))))
 		ctx.EmitMovRegImm64(dst.Reg2, uint64(src.Imm.Int()))
 	}
 }
@@ -636,13 +639,14 @@ func (ctx *JITContext) EmitMakeInt(dst JITValueDesc, src JITValueDesc) {
 // EmitMakeFloat constructs a Scmer float into dst.Reg (ptr) and dst.Reg2 (aux).
 // src.Reg holds the float64 bits as uint64.
 func (ctx *JITContext) EmitMakeFloat(dst JITValueDesc, src JITValueDesc) {
-	ctx.EmitMovRegImm64(dst.Reg, uint64(uintptr(unsafe.Pointer(&scmerFloatSentinel))))
 	switch src.Loc {
 	case LocReg:
 		if dst.Reg2 != src.Reg {
 			ctx.emitMovRegReg(dst.Reg2, src.Reg)
 		}
+		ctx.EmitMovRegImm64(dst.Reg, uint64(uintptr(unsafe.Pointer(&scmerFloatSentinel))))
 	case LocImm:
+		ctx.EmitMovRegImm64(dst.Reg, uint64(uintptr(unsafe.Pointer(&scmerFloatSentinel))))
 		ctx.EmitMovRegImm64(dst.Reg2, math.Float64bits(src.Imm.Float())) // float bits stored in aux
 	}
 }

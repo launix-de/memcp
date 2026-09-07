@@ -427,6 +427,71 @@ func BenchmarkStorageIntFinishedReaders(b *testing.B) {
 	})
 }
 
+// BenchmarkStorageIntCachedReader measures the same indirection shape used by
+// scans after resolving a ColumnReader from the query plan. The direct typed
+// function benchmarks below isolate generated code quality; this benchmark
+// also catches dispatch overhead introduced by the reader cache itself.
+func BenchmarkStorageIntCachedReader(b *testing.B) {
+	if !scm.JITEnabled() {
+		b.Skip("requires the JIT experiment")
+	}
+	s := buildBenchStorageInt(benchN)
+	var goReader ColumnReader = s
+	jitReader := s.GetCachedReader()
+	// Keep the baseline on the ordinary Go method even though the concrete
+	// storage also exposes a compiled reader in JIT builds.
+	goValue := scm.JITStorageGetValueFunc(s.GetValue)
+	jitValue := compiledColumnGetValue(jitReader)
+
+	b.Run("Scalar/Go", func(b *testing.B) {
+		for sample := 0; sample < b.N; sample++ {
+			benchmarkColumnReaderScalar(goReader, benchN)
+		}
+	})
+	b.Run("Scalar/JIT", func(b *testing.B) {
+		for sample := 0; sample < b.N; sample++ {
+			benchmarkColumnReaderScalar(jitReader, benchN)
+		}
+	})
+	b.Run("ScalarResolved/Go", func(b *testing.B) {
+		for sample := 0; sample < b.N; sample++ {
+			benchmarkStorageScalar(goValue, benchN)
+		}
+	})
+	b.Run("ScalarResolved/JIT", func(b *testing.B) {
+		for sample := 0; sample < b.N; sample++ {
+			benchmarkStorageScalar(jitValue, benchN)
+		}
+	})
+
+	target := make([]scm.Scmer, benchN)
+	b.Run("Range/Go", func(b *testing.B) {
+		for sample := 0; sample < b.N; sample++ {
+			benchmarkColumnReaderRange(goReader, benchN, target)
+		}
+	})
+	b.Run("Range/JIT", func(b *testing.B) {
+		for sample := 0; sample < b.N; sample++ {
+			benchmarkColumnReaderRange(jitReader, benchN, target)
+		}
+	})
+
+	recids := make([]uint32, benchN)
+	for index := range recids {
+		recids[index] = uint32((index * 7919) % benchN)
+	}
+	b.Run("Multi/Go", func(b *testing.B) {
+		for sample := 0; sample < b.N; sample++ {
+			benchmarkColumnReaderMulti(goReader, recids, target)
+		}
+	})
+	b.Run("Multi/JIT", func(b *testing.B) {
+		for sample := 0; sample < b.N; sample++ {
+			benchmarkColumnReaderMulti(jitReader, recids, target)
+		}
+	})
+}
+
 func BenchmarkStorageIntByteFinishedReaders(b *testing.B) {
 	benchmarkStorageIntAlignedFinishedReaders(b, 8)
 }
@@ -579,4 +644,23 @@ func benchmarkStorageRange(reader scm.JITStorageGetValueRangeFunc, count uint32,
 //go:noinline
 func benchmarkStorageMulti(reader scm.JITStorageGetValueMultiFunc, recids []uint32, target []scm.Scmer) {
 	reader(recids, target, 1)
+}
+
+//go:noinline
+func benchmarkColumnReaderScalar(reader ColumnReader, count uint32) int64 {
+	var sum int64
+	for recid := uint32(0); recid < count; recid++ {
+		sum += reader.GetValue(recid).Int()
+	}
+	return sum
+}
+
+//go:noinline
+func benchmarkColumnReaderRange(reader ColumnReader, count uint32, target []scm.Scmer) {
+	reader.GetValueRange(0, count, target, 1)
+}
+
+//go:noinline
+func benchmarkColumnReaderMulti(reader ColumnReader, recids []uint32, target []scm.Scmer) {
+	reader.GetValueMulti(recids, target, 1)
 }

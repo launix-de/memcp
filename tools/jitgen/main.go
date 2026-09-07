@@ -937,11 +937,15 @@ func collectStorageMethods(files []storageASTFile) []storageInfo {
 			if !sourceOK || !emitterOK {
 				continue
 			}
+			inputs := stableInputs[pair.source]
+			if scoped, ok := stableInputs[typeName+"."+pair.source]; ok {
+				inputs = scoped
+			}
 			result = append(result, storageInfo{
 				typeName: typeName, path: emitter.path, recvName: emitter.recvName,
 				sourceName: pair.source, emitterName: pair.emitter,
 				sourcePos: source.funcPos, emitterBody: emitter.body,
-				stableInputs: append([]string(nil), stableInputs[pair.source]...),
+				stableInputs: append([]string(nil), inputs...),
 			})
 		}
 	}
@@ -1958,7 +1962,11 @@ func (g *codeGen) emitGenericStaticCall(name string, callee *ssa.Function, args 
 			g.emit("\tpanic(\"jit: generic call arg expects 2-word value (%s arg%d)\")", funcExpr, i)
 			g.emit("}")
 		case 3:
-			g.emit("ctx.EnsureDesc(&%s)", resolved[i].goVar)
+			prepare := "JITPrepareGoSliceArg"
+			if g.storageMode {
+				prepare = "scm." + prepare
+			}
+			g.emit("%s = %s(ctx, %s)", resolved[i].goVar, prepare, resolved[i].goVar)
 			g.emit("if %s.Loc != LocRegTriple && %s.Loc != LocStackTriple {", resolved[i].goVar, resolved[i].goVar)
 			g.emit("\tpanic(\"jit: generic call arg expects 3-word Go slice (%s arg%d)\")", funcExpr, i)
 			g.emit("}")

@@ -25,7 +25,6 @@ import "unsafe"
 //
 //jitgen:control-flow-stable GetValueRange recid count target/1 stride
 //jitgen:control-flow-stable GetValueMulti recids/2 target/1 stride
-
 func (s *StoragePrefix) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, target, stride, result scm.JITValueDesc) scm.JITValueDesc {
 	var d2 scm.JITValueDesc
 	_ = d2
@@ -78,7 +77,7 @@ func (s *StoragePrefix) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 	}
 	storageTargetHome = target
 	if storageInputsProtected {
-		ctx.AdoptDescPrefix(&target, &storageTargetHome, 1)
+		ctx.AdoptDescPrefix(&target, &storageTargetHome, 3)
 		ctx.ProtectDescRegisters(&storageTargetHome)
 	} else {
 		ctx.StabilizeDescForControlFlow(&storageTargetHome)
@@ -402,7 +401,7 @@ func (s *StoragePrefix) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 		}
 		ctx.EnsureDesc(&target)
 		ctx.EnsureDesc(&target)
-		ctx.EnsureDesc(&target)
+		target = scm.JITPrepareGoSliceArg(ctx, target)
 		if target.Loc != scm.LocRegTriple && target.Loc != scm.LocStackTriple {
 			panic("jit: generic call arg expects 3-word Go slice ((*StorageString).GetValueRange arg3)")
 		}
@@ -444,7 +443,7 @@ func (s *StoragePrefix) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 		}
 		ctx.EnsureDesc(&d31)
 		ctx.EnsureDesc(&d31)
-		ctx.EnsureDesc(&d31)
+		d31 = scm.JITPrepareGoSliceArg(ctx, d31)
 		if d31.Loc != scm.LocRegTriple && d31.Loc != scm.LocStackTriple {
 			panic("jit: generic call arg expects 3-word Go slice ((*StorageInt).GetValueRange arg3)")
 		}
@@ -467,13 +466,13 @@ func (s *StoragePrefix) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 		}
 		ctx.EnsureDesc(&target)
 		ctx.EnsureDesc(&target)
-		ctx.EnsureDesc(&target)
+		target = scm.JITPrepareGoSliceArg(ctx, target)
 		if target.Loc != scm.LocRegTriple && target.Loc != scm.LocStackTriple {
 			panic("jit: generic call arg expects 3-word Go slice ((*StoragePrefix).applyPrefixInPlace arg1)")
 		}
 		ctx.EnsureDesc(&d31)
 		ctx.EnsureDesc(&d31)
-		ctx.EnsureDesc(&d31)
+		d31 = scm.JITPrepareGoSliceArg(ctx, d31)
 		if d31.Loc != scm.LocRegTriple && d31.Loc != scm.LocStackTriple {
 			panic("jit: generic call arg expects 3-word Go slice ((*StoragePrefix).applyPrefixInPlace arg2)")
 		}
@@ -563,14 +562,14 @@ func (s *StoragePrefix) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 	storageInputsProtected := ctx.StorageInputsInRegisters
 	storageRecidsHome = recids
 	if storageInputsProtected {
-		ctx.AdoptDescPrefix(&recids, &storageRecidsHome, 2)
+		ctx.AdoptDescPrefix(&recids, &storageRecidsHome, 3)
 		ctx.ProtectDescRegisters(&storageRecidsHome)
 	} else {
 		ctx.StabilizeDescForControlFlow(&storageRecidsHome)
 	}
 	storageTargetHome = target
 	if storageInputsProtected {
-		ctx.AdoptDescPrefix(&target, &storageTargetHome, 1)
+		ctx.AdoptDescPrefix(&target, &storageTargetHome, 3)
 		ctx.ProtectDescRegisters(&storageTargetHome)
 	} else {
 		ctx.StabilizeDescForControlFlow(&storageTargetHome)
@@ -881,13 +880,13 @@ func (s *StoragePrefix) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 		}
 		ctx.EnsureDesc(&recids)
 		ctx.EnsureDesc(&recids)
-		ctx.EnsureDesc(&recids)
+		recids = scm.JITPrepareGoSliceArg(ctx, recids)
 		if recids.Loc != scm.LocRegTriple && recids.Loc != scm.LocStackTriple {
 			panic("jit: generic call arg expects 3-word Go slice ((*StorageString).GetValueMulti arg1)")
 		}
 		ctx.EnsureDesc(&target)
 		ctx.EnsureDesc(&target)
-		ctx.EnsureDesc(&target)
+		target = scm.JITPrepareGoSliceArg(ctx, target)
 		if target.Loc != scm.LocRegTriple && target.Loc != scm.LocStackTriple {
 			panic("jit: generic call arg expects 3-word Go slice ((*StorageString).GetValueMulti arg2)")
 		}
@@ -936,13 +935,13 @@ func (s *StoragePrefix) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 		}
 		ctx.EnsureDesc(&recids)
 		ctx.EnsureDesc(&recids)
-		ctx.EnsureDesc(&recids)
+		recids = scm.JITPrepareGoSliceArg(ctx, recids)
 		if recids.Loc != scm.LocRegTriple && recids.Loc != scm.LocStackTriple {
 			panic("jit: generic call arg expects 3-word Go slice ((*StorageInt).GetValueMulti arg1)")
 		}
 		ctx.EnsureDesc(&d32)
 		ctx.EnsureDesc(&d32)
-		ctx.EnsureDesc(&d32)
+		d32 = scm.JITPrepareGoSliceArg(ctx, d32)
 		if d32.Loc != scm.LocRegTriple && d32.Loc != scm.LocStackTriple {
 			panic("jit: generic call arg expects 3-word Go slice ((*StorageInt).GetValueMulti arg2)")
 		}
@@ -994,13 +993,13 @@ func (s *StoragePrefix) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 		}
 		ctx.EnsureDesc(&target)
 		ctx.EnsureDesc(&target)
-		ctx.EnsureDesc(&target)
+		target = scm.JITPrepareGoSliceArg(ctx, target)
 		if target.Loc != scm.LocRegTriple && target.Loc != scm.LocStackTriple {
 			panic("jit: generic call arg expects 3-word Go slice ((*StoragePrefix).applyPrefixInPlace arg1)")
 		}
 		ctx.EnsureDesc(&d32)
 		ctx.EnsureDesc(&d32)
-		ctx.EnsureDesc(&d32)
+		d32 = scm.JITPrepareGoSliceArg(ctx, d32)
 		if d32.Loc != scm.LocRegTriple && d32.Loc != scm.LocStackTriple {
 			panic("jit: generic call arg expects 3-word Go slice ((*StoragePrefix).applyPrefixInPlace arg2)")
 		}
@@ -34114,7 +34113,7 @@ func (s *StorageString) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 		}
 		ctx.EnsureDesc(&d135)
 		ctx.EnsureDesc(&d135)
-		ctx.EnsureDesc(&d135)
+		d135 = scm.JITPrepareGoSliceArg(ctx, d135)
 		if d135.Loc != scm.LocRegTriple && d135.Loc != scm.LocStackTriple {
 			panic("jit: generic call arg expects 3-word Go slice ((*StorageString).resolvePositions arg1)")
 		}
@@ -34138,25 +34137,25 @@ func (s *StorageString) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 		}
 		ctx.EnsureDesc(&d143)
 		ctx.EnsureDesc(&d143)
-		ctx.EnsureDesc(&d143)
+		d143 = scm.JITPrepareGoSliceArg(ctx, d143)
 		if d143.Loc != scm.LocRegTriple && d143.Loc != scm.LocStackTriple {
 			panic("jit: generic call arg expects 3-word Go slice ((*StorageString).decodeBulk arg1)")
 		}
 		ctx.EnsureDesc(&d144)
 		ctx.EnsureDesc(&d144)
-		ctx.EnsureDesc(&d144)
+		d144 = scm.JITPrepareGoSliceArg(ctx, d144)
 		if d144.Loc != scm.LocRegTriple && d144.Loc != scm.LocStackTriple {
 			panic("jit: generic call arg expects 3-word Go slice ((*StorageString).decodeBulk arg2)")
 		}
 		ctx.EnsureDesc(&d145)
 		ctx.EnsureDesc(&d145)
-		ctx.EnsureDesc(&d145)
+		d145 = scm.JITPrepareGoSliceArg(ctx, d145)
 		if d145.Loc != scm.LocRegTriple && d145.Loc != scm.LocStackTriple {
 			panic("jit: generic call arg expects 3-word Go slice ((*StorageString).decodeBulk arg3)")
 		}
 		ctx.EnsureDesc(&d136)
 		ctx.EnsureDesc(&d136)
-		ctx.EnsureDesc(&d136)
+		d136 = scm.JITPrepareGoSliceArg(ctx, d136)
 		if d136.Loc != scm.LocRegTriple && d136.Loc != scm.LocStackTriple {
 			panic("jit: generic call arg expects 3-word Go slice ((*StorageString).decodeBulk arg4)")
 		}
@@ -34964,7 +34963,7 @@ func (s *StorageString) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 		}
 		ctx.EnsureDesc(&d65)
 		ctx.EnsureDesc(&d65)
-		ctx.EnsureDesc(&d65)
+		d65 = scm.JITPrepareGoSliceArg(ctx, d65)
 		if d65.Loc != scm.LocRegTriple && d65.Loc != scm.LocStackTriple {
 			panic("jit: generic call arg expects 3-word Go slice ((*StorageString).resolvePositions arg1)")
 		}
@@ -34988,25 +34987,25 @@ func (s *StorageString) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 		}
 		ctx.EnsureDesc(&d73)
 		ctx.EnsureDesc(&d73)
-		ctx.EnsureDesc(&d73)
+		d73 = scm.JITPrepareGoSliceArg(ctx, d73)
 		if d73.Loc != scm.LocRegTriple && d73.Loc != scm.LocStackTriple {
 			panic("jit: generic call arg expects 3-word Go slice ((*StorageString).decodeBulk arg1)")
 		}
 		ctx.EnsureDesc(&d74)
 		ctx.EnsureDesc(&d74)
-		ctx.EnsureDesc(&d74)
+		d74 = scm.JITPrepareGoSliceArg(ctx, d74)
 		if d74.Loc != scm.LocRegTriple && d74.Loc != scm.LocStackTriple {
 			panic("jit: generic call arg expects 3-word Go slice ((*StorageString).decodeBulk arg2)")
 		}
 		ctx.EnsureDesc(&d75)
 		ctx.EnsureDesc(&d75)
-		ctx.EnsureDesc(&d75)
+		d75 = scm.JITPrepareGoSliceArg(ctx, d75)
 		if d75.Loc != scm.LocRegTriple && d75.Loc != scm.LocStackTriple {
 			panic("jit: generic call arg expects 3-word Go slice ((*StorageString).decodeBulk arg3)")
 		}
 		ctx.EnsureDesc(&d66)
 		ctx.EnsureDesc(&d66)
-		ctx.EnsureDesc(&d66)
+		d66 = scm.JITPrepareGoSliceArg(ctx, d66)
 		if d66.Loc != scm.LocRegTriple && d66.Loc != scm.LocStackTriple {
 			panic("jit: generic call arg expects 3-word Go slice ((*StorageString).decodeBulk arg4)")
 		}
@@ -38217,9 +38216,9 @@ func (s *StorageSparse) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 		r2 = registerHomes1.Registers[5]
 	}
 	var r3 scm.Reg
-	phiHomeOK5 := registerHomes1.Available&(uint16(1)<<2) == uint16(1)<<2
+	phiHomeOK5 := registerHomes1.Available&(uint16(1)<<1) == uint16(1)<<1
 	if phiHomeOK5 {
-		r3 = registerHomes1.Registers[2]
+		r3 = registerHomes1.Registers[1]
 	}
 	var r4 scm.Reg
 	phiHomeOK6 := registerHomes1.Available&(uint16(1)<<3) == uint16(1)<<3
@@ -38237,9 +38236,9 @@ func (s *StorageSparse) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 		r6 = registerHomes1.Registers[4]
 	}
 	var r7 scm.Reg
-	phiHomeOK9 := registerHomes1.Available&(uint16(1)<<1) == uint16(1)<<1
+	phiHomeOK9 := registerHomes1.Available&(uint16(1)<<2) == uint16(1)<<2
 	if phiHomeOK9 {
-		r7 = registerHomes1.Registers[1]
+		r7 = registerHomes1.Registers[2]
 	}
 	d10 := scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(phiBase0) + int32(0)}
 	_ = d10
@@ -52484,14 +52483,14 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 		r3 = registerHomes1.Registers[0]
 	}
 	var r4 scm.Reg
-	phiHomeOK6 := registerHomes1.Available&(uint16(1)<<5) == uint16(1)<<5
+	phiHomeOK6 := registerHomes1.Available&(uint16(1)<<4) == uint16(1)<<4
 	if phiHomeOK6 {
-		r4 = registerHomes1.Registers[5]
+		r4 = registerHomes1.Registers[4]
 	}
 	var r5 scm.Reg
-	phiHomeOK7 := registerHomes1.Available&(uint16(1)<<4) == uint16(1)<<4
+	phiHomeOK7 := registerHomes1.Available&(uint16(1)<<5) == uint16(1)<<5
 	if phiHomeOK7 {
-		r5 = registerHomes1.Registers[4]
+		r5 = registerHomes1.Registers[5]
 	}
 	var r6 scm.Reg
 	phiHomeOK8 := registerHomes1.Available&(uint16(1)<<2) == uint16(1)<<2
@@ -79390,7 +79389,7 @@ func (s *StorageSCMER) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, t
 	}
 	storageTargetHome = target
 	if storageInputsProtected {
-		ctx.AdoptDescPrefix(&target, &storageTargetHome, 1)
+		ctx.AdoptDescPrefix(&target, &storageTargetHome, 3)
 		ctx.ProtectDescRegisters(&storageTargetHome)
 	} else {
 		ctx.StabilizeDescForControlFlow(&storageTargetHome)
@@ -83271,7 +83270,7 @@ func (s *StorageDecimal) JITEmitGetValueRange(ctx *scm.JITContext, recid, count,
 	}
 	storageTargetHome = target
 	if storageInputsProtected {
-		ctx.AdoptDescPrefix(&target, &storageTargetHome, 1)
+		ctx.AdoptDescPrefix(&target, &storageTargetHome, 3)
 		ctx.ProtectDescRegisters(&storageTargetHome)
 	} else {
 		ctx.StabilizeDescForControlFlow(&storageTargetHome)
@@ -83595,7 +83594,7 @@ func (s *StorageDecimal) JITEmitGetValueRange(ctx *scm.JITContext, recid, count,
 		}
 		ctx.EnsureDesc(&target)
 		ctx.EnsureDesc(&target)
-		ctx.EnsureDesc(&target)
+		target = scm.JITPrepareGoSliceArg(ctx, target)
 		if target.Loc != scm.LocRegTriple && target.Loc != scm.LocStackTriple {
 			panic("jit: generic call arg expects 3-word Go slice ((*StorageInt).GetValueRange arg3)")
 		}
@@ -83618,7 +83617,7 @@ func (s *StorageDecimal) JITEmitGetValueRange(ctx *scm.JITContext, recid, count,
 		}
 		ctx.EnsureDesc(&target)
 		ctx.EnsureDesc(&target)
-		ctx.EnsureDesc(&target)
+		target = scm.JITPrepareGoSliceArg(ctx, target)
 		if target.Loc != scm.LocRegTriple && target.Loc != scm.LocStackTriple {
 			panic("jit: generic call arg expects 3-word Go slice ((*StorageDecimal).rescaleInPlace arg1)")
 		}
@@ -83698,14 +83697,14 @@ func (s *StorageDecimal) JITEmitGetValueMulti(ctx *scm.JITContext, recids, targe
 	storageInputsProtected := ctx.StorageInputsInRegisters
 	storageRecidsHome = recids
 	if storageInputsProtected {
-		ctx.AdoptDescPrefix(&recids, &storageRecidsHome, 2)
+		ctx.AdoptDescPrefix(&recids, &storageRecidsHome, 3)
 		ctx.ProtectDescRegisters(&storageRecidsHome)
 	} else {
 		ctx.StabilizeDescForControlFlow(&storageRecidsHome)
 	}
 	storageTargetHome = target
 	if storageInputsProtected {
-		ctx.AdoptDescPrefix(&target, &storageTargetHome, 1)
+		ctx.AdoptDescPrefix(&target, &storageTargetHome, 3)
 		ctx.ProtectDescRegisters(&storageTargetHome)
 	} else {
 		ctx.StabilizeDescForControlFlow(&storageTargetHome)
@@ -84016,13 +84015,13 @@ func (s *StorageDecimal) JITEmitGetValueMulti(ctx *scm.JITContext, recids, targe
 		}
 		ctx.EnsureDesc(&recids)
 		ctx.EnsureDesc(&recids)
-		ctx.EnsureDesc(&recids)
+		recids = scm.JITPrepareGoSliceArg(ctx, recids)
 		if recids.Loc != scm.LocRegTriple && recids.Loc != scm.LocStackTriple {
 			panic("jit: generic call arg expects 3-word Go slice ((*StorageInt).GetValueMulti arg1)")
 		}
 		ctx.EnsureDesc(&target)
 		ctx.EnsureDesc(&target)
-		ctx.EnsureDesc(&target)
+		target = scm.JITPrepareGoSliceArg(ctx, target)
 		if target.Loc != scm.LocRegTriple && target.Loc != scm.LocStackTriple {
 			panic("jit: generic call arg expects 3-word Go slice ((*StorageInt).GetValueMulti arg2)")
 		}
@@ -84074,7 +84073,7 @@ func (s *StorageDecimal) JITEmitGetValueMulti(ctx *scm.JITContext, recids, targe
 		}
 		ctx.EnsureDesc(&target)
 		ctx.EnsureDesc(&target)
-		ctx.EnsureDesc(&target)
+		target = scm.JITPrepareGoSliceArg(ctx, target)
 		if target.Loc != scm.LocRegTriple && target.Loc != scm.LocStackTriple {
 			panic("jit: generic call arg expects 3-word Go slice ((*StorageDecimal).rescaleInPlace arg1)")
 		}
@@ -84447,14 +84446,14 @@ func (s *StorageSeq) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 		r4 = registerHomes1.Registers[4]
 	}
 	var r5 scm.Reg
-	phiHomeOK7 := registerHomes1.Available&(uint16(1)<<1) == uint16(1)<<1
+	phiHomeOK7 := registerHomes1.Available&(uint16(1)<<0) == uint16(1)<<0
 	if phiHomeOK7 {
-		r5 = registerHomes1.Registers[1]
+		r5 = registerHomes1.Registers[0]
 	}
 	var r6 scm.Reg
-	phiHomeOK8 := registerHomes1.Available&(uint16(1)<<0) == uint16(1)<<0
+	phiHomeOK8 := registerHomes1.Available&(uint16(1)<<1) == uint16(1)<<1
 	if phiHomeOK8 {
-		r6 = registerHomes1.Registers[0]
+		r6 = registerHomes1.Registers[1]
 	}
 	d9 := scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(phiBase0) + int32(0)}
 	_ = d9
@@ -93757,34 +93756,34 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 		r1 = registerHomes1.Registers[0]
 	}
 	var r2 scm.Reg
-	phiHomeOK4 := registerHomes1.Available&(uint16(1)<<4) == uint16(1)<<4
+	phiHomeOK4 := registerHomes1.Available&(uint16(1)<<6) == uint16(1)<<6
 	if phiHomeOK4 {
-		r2 = registerHomes1.Registers[4]
+		r2 = registerHomes1.Registers[6]
 	}
 	var r3 scm.Reg
-	phiHomeOK5 := registerHomes1.Available&(uint16(1)<<1) == uint16(1)<<1
+	phiHomeOK5 := registerHomes1.Available&(uint16(1)<<3) == uint16(1)<<3
 	if phiHomeOK5 {
-		r3 = registerHomes1.Registers[1]
+		r3 = registerHomes1.Registers[3]
 	}
 	var r4 scm.Reg
-	phiHomeOK6 := registerHomes1.Available&(uint16(1)<<3) == uint16(1)<<3
+	phiHomeOK6 := registerHomes1.Available&(uint16(1)<<2) == uint16(1)<<2
 	if phiHomeOK6 {
-		r4 = registerHomes1.Registers[3]
+		r4 = registerHomes1.Registers[2]
 	}
 	var r5 scm.Reg
-	phiHomeOK7 := registerHomes1.Available&(uint16(1)<<6) == uint16(1)<<6
+	phiHomeOK7 := registerHomes1.Available&(uint16(1)<<5) == uint16(1)<<5
 	if phiHomeOK7 {
-		r5 = registerHomes1.Registers[6]
+		r5 = registerHomes1.Registers[5]
 	}
 	var r6 scm.Reg
-	phiHomeOK8 := registerHomes1.Available&(uint16(1)<<2) == uint16(1)<<2
+	phiHomeOK8 := registerHomes1.Available&(uint16(1)<<4) == uint16(1)<<4
 	if phiHomeOK8 {
-		r6 = registerHomes1.Registers[2]
+		r6 = registerHomes1.Registers[4]
 	}
 	var r7 scm.Reg
-	phiHomeOK9 := registerHomes1.Available&(uint16(1)<<5) == uint16(1)<<5
+	phiHomeOK9 := registerHomes1.Available&(uint16(1)<<1) == uint16(1)<<1
 	if phiHomeOK9 {
-		r7 = registerHomes1.Registers[5]
+		r7 = registerHomes1.Registers[1]
 	}
 	var r8 scm.Reg
 	phiHomeOK10 := registerHomes1.Available&(uint16(1)<<7) == uint16(1)<<7
@@ -93792,34 +93791,34 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 		r8 = registerHomes1.Registers[7]
 	}
 	var r9 scm.Reg
-	phiHomeOK11 := registerHomes1.Available&(uint16(1)<<4) == uint16(1)<<4
+	phiHomeOK11 := registerHomes1.Available&(uint16(1)<<6) == uint16(1)<<6
 	if phiHomeOK11 {
-		r9 = registerHomes1.Registers[4]
+		r9 = registerHomes1.Registers[6]
 	}
 	var r10 scm.Reg
-	phiHomeOK12 := registerHomes1.Available&(uint16(1)<<1) == uint16(1)<<1
+	phiHomeOK12 := registerHomes1.Available&(uint16(1)<<3) == uint16(1)<<3
 	if phiHomeOK12 {
-		r10 = registerHomes1.Registers[1]
+		r10 = registerHomes1.Registers[3]
 	}
 	var r11 scm.Reg
-	phiHomeOK13 := registerHomes1.Available&(uint16(1)<<3) == uint16(1)<<3
+	phiHomeOK13 := registerHomes1.Available&(uint16(1)<<2) == uint16(1)<<2
 	if phiHomeOK13 {
-		r11 = registerHomes1.Registers[3]
+		r11 = registerHomes1.Registers[2]
 	}
 	var r12 scm.Reg
-	phiHomeOK14 := registerHomes1.Available&(uint16(1)<<6) == uint16(1)<<6
+	phiHomeOK14 := registerHomes1.Available&(uint16(1)<<5) == uint16(1)<<5
 	if phiHomeOK14 {
-		r12 = registerHomes1.Registers[6]
+		r12 = registerHomes1.Registers[5]
 	}
 	var r13 scm.Reg
-	phiHomeOK15 := registerHomes1.Available&(uint16(1)<<2) == uint16(1)<<2
+	phiHomeOK15 := registerHomes1.Available&(uint16(1)<<4) == uint16(1)<<4
 	if phiHomeOK15 {
-		r13 = registerHomes1.Registers[2]
+		r13 = registerHomes1.Registers[4]
 	}
 	var r14 scm.Reg
-	phiHomeOK16 := registerHomes1.Available&(uint16(1)<<5) == uint16(1)<<5
+	phiHomeOK16 := registerHomes1.Available&(uint16(1)<<1) == uint16(1)<<1
 	if phiHomeOK16 {
-		r14 = registerHomes1.Registers[5]
+		r14 = registerHomes1.Registers[1]
 	}
 	var r15 scm.Reg
 	phiHomeOK17 := registerHomes1.Available&(uint16(1)<<0) == uint16(1)<<0
