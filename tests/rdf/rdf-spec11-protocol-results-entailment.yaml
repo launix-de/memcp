@@ -35,7 +35,6 @@ test_cases:
       contains: '"boolean":true'
 
   - name: "SPARQL 1.1 Query Results XML SELECT serialization"
-    noncritical: true
     headers: {Accept: "application/sparql-results+xml"}
     sparql: 'SELECT ("yes" AS ?value) WHERE {}'
     expect:
@@ -43,7 +42,6 @@ test_cases:
       contains: "<sparql"
 
   - name: "SPARQL 1.1 Query Results XML ASK serialization"
-    noncritical: true
     headers: {Accept: "application/sparql-results+xml"}
     sparql: 'ASK WHERE {}'
     expect:
@@ -51,7 +49,6 @@ test_cases:
       contains: "<boolean>true</boolean>"
 
   - name: "SPARQL 1.1 Query Results CSV serialization"
-    noncritical: true
     headers: {Accept: "text/csv"}
     sparql: 'SELECT ("yes" AS ?value) WHERE {}'
     expect:
@@ -59,7 +56,6 @@ test_cases:
       contains: "value"
 
   - name: "SPARQL 1.1 Query Results TSV serialization"
-    noncritical: true
     headers: {Accept: "text/tab-separated-values"}
     sparql: 'SELECT ("yes" AS ?value) WHERE {}'
     expect:
