@@ -19,6 +19,7 @@ package scm
 
 import (
 	"fmt"
+	"os"
 	"regexp"
 	"slices"
 	"sync"
@@ -107,7 +108,13 @@ type jitParserProgram struct {
 	ruleFirstBytes []firstByteSet
 	ruleNullable   []bool
 	inlineActions  bool
-	pool           sync.Pool
+	// ladderFastPath: interior precedence-ladder level rule -> primary rule to
+	// speculatively descend to (see computeLadderFastPaths / emitLadderFastPath).
+	ladderFastPath map[int]int
+	// ladderPrimaryLeaves: primary rule -> {numberLeafRule, stringLeafRule}
+	// (-1 if absent), matched directly by the fast path for a digit / quote.
+	ladderPrimaryLeaves map[int][2]int
+	pool                sync.Pool
 }
 
 type jitParserBuilder struct {
@@ -172,6 +179,18 @@ func jitBuildParserPrograms(parsers []*ScmParser) *jitParserProgram {
 	program.prepareMemoLayout()
 	program.computeFirstBytes()
 	program.analyzeLiteralLeaves()
+	if jitLadderFastPathEnabled() {
+		program.ladderFastPath = program.computeLadderFastPaths()
+		program.ladderPrimaryLeaves = map[int][2]int{}
+		for _, target := range program.ladderFastPath {
+			if _, done := program.ladderPrimaryLeaves[target]; !done {
+				program.ladderPrimaryLeaves[target] = program.primaryDirectReturnLeaves(target)
+			}
+		}
+	}
+	if os.Getenv("MEMCP_DUMP_LADDER") != "" {
+		program.dumpPrecedenceLadders()
+	}
 	program.pool.New = func() any { return new(jitParserState) }
 	return program
 }
@@ -186,6 +205,18 @@ func jitBuildParserTemplateProgram(template *JITParserTemplate) (*jitParserProgr
 	program.prepareMemoLayout()
 	program.computeFirstBytes()
 	program.analyzeLiteralLeaves()
+	if jitLadderFastPathEnabled() {
+		program.ladderFastPath = program.computeLadderFastPaths()
+		program.ladderPrimaryLeaves = map[int][2]int{}
+		for _, target := range program.ladderFastPath {
+			if _, done := program.ladderPrimaryLeaves[target]; !done {
+				program.ladderPrimaryLeaves[target] = program.primaryDirectReturnLeaves(target)
+			}
+		}
+	}
+	if os.Getenv("MEMCP_DUMP_LADDER") != "" {
+		program.dumpPrecedenceLadders()
+	}
 	program.pool.New = func() any { return new(jitParserState) }
 	return program, rule
 }
