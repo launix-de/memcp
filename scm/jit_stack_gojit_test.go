@@ -88,6 +88,8 @@ func TestJITScalarPointerSpillRemainsInStackMap(t *testing.T) {
 		Ptr:        start,
 		End:        unsafe.Add(start, len(code)-1),
 		AllRegs:    1 << uint(RegRAX),
+		AllFPRegs:  1 << uint(RegX2),
+		FreeFPRegs: 1 << uint(RegX2),
 		FrameReg:   RegRBP,
 		StackReg:   RegRSP,
 		ScratchReg: RegR11,
@@ -101,6 +103,43 @@ func TestJITScalarPointerSpillRemainsInStackMap(t *testing.T) {
 	root := jitStackRoot{base: jitStackRootFrameBP, offset: -8}
 	if _, ok := ctx.StackRoots[root]; !ok {
 		t.Fatal("relocatable scalar spill is missing from the stack map")
+	}
+}
+
+func TestJITPointerFreeScalarUsesFPOverflowHome(t *testing.T) {
+	code := make([]byte, 128)
+	start := unsafe.Pointer(&code[0])
+	ctx := &JITContext{
+		Start:      start,
+		Ptr:        start,
+		End:        unsafe.Add(start, len(code)-1),
+		AllRegs:    1 << uint(RegRAX),
+		AllFPRegs:  1 << uint(RegX2),
+		FreeFPRegs: 1 << uint(RegX2),
+		FrameReg:   RegRBP,
+		StackReg:   RegRSP,
+		ScratchReg: RegR11,
+	}
+	value := JITValueDesc{Loc: LocReg, Type: tagInt, Reg: RegRAX, NoHeapPointer: true}
+	ctx.BindReg(RegRAX, &value)
+
+	if got := ctx.AllocReg(); got != RegRAX {
+		t.Fatalf("reclaimed register %d, want %d", got, RegRAX)
+	}
+	ctx.SyncDesc(&value)
+	if value.Loc != LocFPReg || value.Reg != RegX2 {
+		t.Fatalf("scalar overflow home = loc %d reg %d, want XMM register %d", value.Loc, value.Reg, RegX2)
+	}
+	if ctx.MaxSpillOffset != 0 || len(ctx.StackRoots) != 0 {
+		t.Fatalf("register overflow used stack: spill=%d roots=%v", ctx.MaxSpillOffset, ctx.StackRoots)
+	}
+
+	// The allocator returned RAX to its caller. Once that temporary dies, an
+	// integer consumer must recover the original payload without boxing it.
+	ctx.FreeReg(RegRAX)
+	ctx.EnsureDesc(&value)
+	if value.Loc != LocReg || value.Reg != RegRAX {
+		t.Fatalf("restored scalar = loc %d reg %d, want GPR %d", value.Loc, value.Reg, RegRAX)
 	}
 }
 

@@ -232,7 +232,7 @@ func jitPlaceIntoPair(ctx *JITContext, src *JITValueDesc, target JITValueDesc) J
 			ctx.FreeDesc(src)
 		}
 		return target
-	case LocReg:
+	case LocReg, LocFPReg:
 		switch src.Type {
 		case tagBool:
 			ctx.EmitMakeBool(target, *src)
@@ -305,7 +305,7 @@ func JITPrepareScmerGoArg(ctx *JITContext, src JITValueDesc) JITValueDesc {
 	switch src.Loc {
 	case LocRegPair, LocStackPair, LocInputPair:
 		return src
-	case LocImm, LocReg, LocStack:
+	case LocImm, LocReg, LocFPReg, LocStack:
 		return jitCopyScmerToPair(ctx, src)
 	default:
 		panic("jit: Go call expects a Scmer argument")
@@ -937,7 +937,7 @@ func (ctx *JITContext) EmitStoreScmerAt(address, value *JITValueDesc) {
 			ctx.EmitStoreRegMem(value.Reg2, address.Reg, 8)
 			return
 		}
-		if value.Loc == LocReg {
+		if value.Loc == LocReg || value.Loc == LocFPReg {
 			ctx.ProtectReg(address.Reg)
 			ctx.ProtectReg(value.Reg)
 			pair := jitAllocTrackedPair(ctx, value.Type)
@@ -1110,7 +1110,7 @@ func (ctx *JITContext) emitDirectScmerSliceElement(slice, index, value *JITValue
 	if index.Loc != LocImm && index.Loc != LocReg {
 		return false
 	}
-	if value.Loc != LocImm && value.Loc != LocReg && value.Loc != LocRegPair {
+	if value.Loc != LocImm && value.Loc != LocReg && value.Loc != LocFPReg && value.Loc != LocRegPair {
 		return false
 	}
 
@@ -1218,6 +1218,22 @@ func (ctx *JITContext) emitDirectScmerSliceElement(slice, index, value *JITValue
 		ctx.EmitMovRegImm64(temporary, uint64(tagWord))
 		ctx.EmitStoreRegMem(temporary, ctx.ScratchReg, 0)
 		ctx.EmitStoreRegMem(value.Reg, ctx.ScratchReg, 8)
+	case LocFPReg:
+		var tagWord uintptr
+		switch value.Type {
+		case tagInt:
+			tagWord, _ = NewInt(0).RawWords()
+		case tagFloat:
+			tagWord, _ = NewFloat(0).RawWords()
+		case tagNil, tagBool:
+			tagWord = 0
+		default:
+			ctx.FreeReg(temporary)
+			return false
+		}
+		ctx.EmitMovRegImm64(temporary, uint64(tagWord))
+		ctx.EmitStoreRegMem(temporary, ctx.ScratchReg, 0)
+		ctx.EmitStoreFPRegMem(value.Reg, ctx.ScratchReg, 8)
 	}
 	if value.Loc != LocRegPair && !immediateStore {
 		ctx.FreeReg(temporary)

@@ -388,7 +388,7 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 		switch desc.Loc {
 		case LocRegPair:
 			ctx.EmitMovPairToResult(&desc, &result)
-		case LocReg:
+		case LocReg, LocFPReg:
 			ret := JITValueDesc{Loc: LocRegPair, Reg: RegRAX, Reg2: RegRBX}
 			switch desc.Type {
 			case tagBool:
@@ -549,6 +549,8 @@ func (ctx *JITContext) EmitReturnInt(src JITValueDesc) {
 	ctx.emitBytes(0x48, 0xB8)
 	ctx.emitU64(uint64(uintptr(unsafe.Pointer(&scmerIntSentinel))))
 	switch src.Loc {
+	case LocFPReg:
+		ctx.emitMovqXmmToGpr(RegRBX, src.Reg)
 	case LocReg:
 		if src.Reg != RegRBX {
 			// MOV RBX, src.Reg
@@ -616,6 +618,14 @@ func (ctx *JITContext) EmitReturnBool(src JITValueDesc) {
 		ctx.emitU64(uint64(tagBool))
 		// OR RBX, RCX
 		ctx.emitBytes(0x48, 0x09, 0xCB)
+	case LocFPReg:
+		ctx.emitMovqXmmToGpr(RegRBX, src.Reg)
+		ctx.emitBytes(0x48, 0x81, 0xE3)
+		ctx.emitU32(1)
+		ctx.EmitShlRegImm8(RegRBX, 8)
+		ctx.emitBytes(0x48, 0xB9)
+		ctx.emitU64(uint64(tagBool))
+		ctx.emitBytes(0x48, 0x09, 0xCB)
 	}
 	ctx.emitByte(0xC3) // RET
 }
@@ -655,6 +665,7 @@ func (ctx *JITContext) EmitMakeInt(dst JITValueDesc, src JITValueDesc) {
 	switch src.Loc {
 	case LocFPReg:
 		ctx.emitMovqXmmToGpr(dst.Reg2, src.Reg)
+		ctx.EmitMovRegImm64(dst.Reg, uint64(uintptr(unsafe.Pointer(&scmerIntSentinel))))
 	case LocReg:
 		if dst.Reg2 != src.Reg {
 			ctx.emitMovRegReg(dst.Reg2, src.Reg)
@@ -670,6 +681,9 @@ func (ctx *JITContext) EmitMakeInt(dst JITValueDesc, src JITValueDesc) {
 // src.Reg holds the float64 bits as uint64.
 func (ctx *JITContext) EmitMakeFloat(dst JITValueDesc, src JITValueDesc) {
 	switch src.Loc {
+	case LocFPReg:
+		ctx.emitMovqXmmToGpr(dst.Reg2, src.Reg)
+		ctx.EmitMovRegImm64(dst.Reg, uint64(uintptr(unsafe.Pointer(&scmerFloatSentinel))))
 	case LocReg:
 		if dst.Reg2 != src.Reg {
 			ctx.emitMovRegReg(dst.Reg2, src.Reg)
