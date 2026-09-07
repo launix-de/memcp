@@ -45,7 +45,11 @@ func optimizeScanOrderMulti(v []scm.Scmer, oc *scm.OptimizerContext, useResult b
 			}
 		}
 	}
-	for i := 1; i <= 15 && i < len(v); i++ {
+	rawMapReduceFns := scm.NewNil()
+	if len(v) > 15 {
+		rawMapReduceFns = v[15]
+	}
+	for i := 1; i <= 14 && i < len(v); i++ {
 		v[i], _ = oc.OptimizeSub(v[i], true)
 	}
 	if len(v) > 8 {
@@ -60,6 +64,21 @@ func optimizeScanOrderMulti(v []scm.Scmer, oc *scm.OptimizerContext, useResult b
 		neutralType = normalizeScanType(neutralType)
 	}
 	oc.Ome.IncrLoopDepth()
+	if callbacks, static := scanStaticListElements(rawMapReduceFns); static {
+		valueTypes := make([][]*scm.TypeDescriptor, len(callbacks))
+		for index, callback := range callbacks {
+			if params, _, ok := scanLambdaParts(callback); ok && len(params) > 1 {
+				valueTypes[index] = make([]*scm.TypeDescriptor, len(params)-1)
+				for valueIndex := range valueTypes[index] {
+					valueTypes[index][valueIndex] = unknownScanType()
+				}
+			}
+		}
+		optimized, _ := oc.OptimizeReducerCallbacks(callbacks, neutralType, valueTypes)
+		v[15] = scm.NewSlice(append([]scm.Scmer{scm.NewSymbol("list")}, optimized...))
+	} else if len(v) > 15 {
+		v[15], _ = oc.OptimizeSub(v[15], true)
+	}
 	if len(v) > 17 {
 		v[17], _ = oc.OptimizeSub(v[17], true)
 	}
