@@ -107,25 +107,27 @@ func (s *CephStorage) ensureOpen() {
 
 	conn, err := rados.NewConnWithClusterAndUser(s.factory.ClusterName, s.factory.UserName)
 	if err != nil {
-		panic(err)
+		raisePersistenceFailure(s.BackendName(), s.prefix, "backend.open", err)
 	}
 	if s.factory.ConfFile != "" {
 		if err := conn.ReadConfigFile(s.factory.ConfFile); err != nil {
-			panic(err)
+			raisePersistenceFailure(s.BackendName(), s.prefix, "backend.open", err)
 		}
 	} else {
 		// If no conf provided, caller must have CEPH_ARGS/CEPH_CONF env or defaults.
-		_ = conn.ReadDefaultConfigFile()
+		if err := conn.ReadDefaultConfigFile(); err != nil {
+			raisePersistenceFailure(s.BackendName(), s.prefix, "backend.open", err)
+		}
 	}
 
 	if err := conn.Connect(); err != nil {
-		panic(err)
+		raisePersistenceFailure(s.BackendName(), s.prefix, "backend.open", err)
 	}
 
 	ioctx, err := conn.OpenIOContext(s.factory.Pool)
 	if err != nil {
 		conn.Shutdown()
-		panic(err)
+		raisePersistenceFailure(s.BackendName(), s.prefix, "backend.open", err)
 	}
 
 	s.conn = conn
@@ -141,15 +143,18 @@ func (s *CephStorage) ReadSchema() []byte {
 	s.ensureOpen()
 	obj := s.obj("schema.json")
 	// First stat to get size
-	stat, err := s.ioctx.Stat(obj)
+	stat, err := remoteRetryValue(func() (rados.ObjectStat, error) { return s.ioctx.Stat(obj) })
 	if err != nil {
 		// Keep behavior similar to FileStorage: empty means "not found"
-		return nil
+		if errors.Is(err, rados.ErrNotFound) {
+			return nil
+		}
+		raisePersistenceFailure(s.BackendName(), s.prefix, "schema.read", err)
 	}
 	data := make([]byte, stat.Size)
-	n, err := s.ioctx.Read(obj, data, 0)
+	n, err := remoteRetryValue(func() (int, error) { return s.ioctx.Read(obj, data, 0) })
 	if err != nil {
-		return nil
+		raisePersistenceFailure(s.BackendName(), s.prefix, "schema.read", err)
 	}
 	return data[:n]
 }
@@ -159,8 +164,8 @@ func (s *CephStorage) WriteSchema(schema []byte) {
 	obj := s.obj("schema.json")
 	// RADOS full-object overwrite satisfies PersistenceEngine's atomic schema
 	// generation contract: readers see the old or complete new object.
-	if err := s.ioctx.WriteFull(obj, schema); err != nil {
-		panic(err)
+	if err := remoteRetry(func() error { return s.ioctx.WriteFull(obj, schema) }); err != nil {
+		raisePersistenceFailure(s.BackendName(), s.prefix, "schema.write", err)
 	}
 }
 
@@ -170,14 +175,17 @@ func (s *CephStorage) ReadColumn(shard string, column string) io.ReadCloser {
 
 	// We implement ReadCloser backed by in-memory buffer.
 	// If you want streaming, you'd need chunked reads; for now columns are usually loaded fully anyway.
-	stat, err := s.ioctx.Stat(obj)
+	stat, err := remoteRetryValue(func() (rados.ObjectStat, error) { return s.ioctx.Stat(obj) })
 	if err != nil {
+		if !errors.Is(err, rados.ErrNotFound) {
+			raisePersistenceFailure(s.BackendName(), s.prefix, "column.read.open", err)
+		}
 		return ErrorReader{e: err, notFound: errors.Is(err, rados.ErrNotFound)}
 	}
 	data := make([]byte, stat.Size)
-	n, err := s.ioctx.Read(obj, data, 0)
+	n, err := remoteRetryValue(func() (int, error) { return s.ioctx.Read(obj, data, 0) })
 	if err != nil {
-		return ErrorReader{e: err, notFound: errors.Is(err, rados.ErrNotFound)}
+		raisePersistenceFailure(s.BackendName(), s.prefix, "column.read", err)
 	}
 	return io.NopCloser(bytes.NewReader(data[:n]))
 }
@@ -202,8 +210,8 @@ func (w *cephWriteCloser) Close() error {
 	}
 	w.closed = true
 	// atomic overwrite
-	if err := w.s.ioctx.WriteFull(w.obj, w.buf.Bytes()); err != nil {
-		return err
+	if err := remoteRetry(func() error { return w.s.ioctx.WriteFull(w.obj, w.buf.Bytes()) }); err != nil {
+		raisePersistenceFailure(w.s.BackendName(), w.s.prefix, "object.write", err)
 	}
 	return nil
 }
@@ -216,20 +224,25 @@ func (s *CephStorage) WriteColumn(shard string, column string) io.WriteCloser {
 
 func (s *CephStorage) RemoveColumn(shard string, column string) {
 	s.ensureOpen()
-	_ = s.ioctx.Delete(s.obj(shard + "-" + ProcessColumnName(column)))
+	if err := remoteRetry(func() error { return s.ioctx.Delete(s.obj(shard + "-" + ProcessColumnName(column))) }); err != nil && !errors.Is(err, rados.ErrNotFound) {
+		raisePersistenceFailure(s.BackendName(), s.prefix, "column.remove", err)
+	}
 }
 
 func (s *CephStorage) ReadBlob(hash string) io.ReadCloser {
 	s.ensureOpen()
 	obj := s.obj("blob/" + hash)
-	stat, err := s.ioctx.Stat(obj)
+	stat, err := remoteRetryValue(func() (rados.ObjectStat, error) { return s.ioctx.Stat(obj) })
 	if err != nil {
+		if !errors.Is(err, rados.ErrNotFound) {
+			raisePersistenceFailure(s.BackendName(), s.prefix, "blob.read.open", err)
+		}
 		return ErrorReader{e: err, notFound: errors.Is(err, rados.ErrNotFound)}
 	}
 	data := make([]byte, stat.Size)
-	n, err := s.ioctx.Read(obj, data, 0)
+	n, err := remoteRetryValue(func() (int, error) { return s.ioctx.Read(obj, data, 0) })
 	if err != nil {
-		return ErrorReader{e: err, notFound: errors.Is(err, rados.ErrNotFound)}
+		raisePersistenceFailure(s.BackendName(), s.prefix, "blob.read", err)
 	}
 	return io.NopCloser(bytes.NewReader(data[:n]))
 }
@@ -242,15 +255,17 @@ func (s *CephStorage) WriteBlob(hash string) io.WriteCloser {
 
 func (s *CephStorage) DeleteBlob(hash string) {
 	s.ensureOpen()
-	_ = s.ioctx.Delete(s.obj("blob/" + hash))
+	if err := remoteRetry(func() error { return s.ioctx.Delete(s.obj("blob/" + hash)) }); err != nil && !errors.Is(err, rados.ErrNotFound) {
+		raisePersistenceFailure(s.BackendName(), s.prefix, "blob.delete", err)
+	}
 }
 
-func (s *CephStorage) WalkBlobs(fn func(hash string) error) error {
+func (s *CephStorage) WalkBlobs(fn func(hash string)) {
 	s.ensureOpen()
 	blobPrefix := s.prefix + "/blob/"
 	iter, err := s.ioctx.Iter()
 	if err != nil {
-		return err
+		raisePersistenceFailure(s.BackendName(), s.prefix, "blob.walk", err)
 	}
 	defer iter.Close()
 	for iter.Next() {
@@ -258,20 +273,20 @@ func (s *CephStorage) WalkBlobs(fn func(hash string) error) error {
 		if !strings.HasPrefix(name, blobPrefix) {
 			continue
 		}
-		if err := fn(strings.TrimPrefix(name, blobPrefix)); err != nil {
-			return err
-		}
+		fn(strings.TrimPrefix(name, blobPrefix))
 	}
-	return iter.Err()
+	if err := iter.Err(); err != nil {
+		raisePersistenceFailure(s.BackendName(), s.prefix, "blob.walk", err)
+	}
 }
 
-func (s *CephStorage) WalkShardFiles(fn func(name string) error) error {
+func (s *CephStorage) WalkShardFiles(fn func(name string)) {
 	s.ensureOpen()
 	pfx := s.prefix + "/"
 	blobPfx := pfx + "blob/"
 	iter, err := s.ioctx.Iter()
 	if err != nil {
-		return err
+		raisePersistenceFailure(s.BackendName(), s.prefix, "shard.walk", err)
 	}
 	defer iter.Close()
 	for iter.Next() {
@@ -283,16 +298,18 @@ func (s *CephStorage) WalkShardFiles(fn func(name string) error) error {
 		if name == "schema.json" || name == "schema.json.old" || strings.HasPrefix(obj, blobPfx) {
 			continue
 		}
-		if err := fn(name); err != nil {
-			return err
-		}
+		fn(name)
 	}
-	return iter.Err()
+	if err := iter.Err(); err != nil {
+		raisePersistenceFailure(s.BackendName(), s.prefix, "shard.walk", err)
+	}
 }
 
 func (s *CephStorage) DeleteShardFile(name string) {
 	s.ensureOpen()
-	_ = s.ioctx.Delete(s.obj(name))
+	if err := remoteRetry(func() error { return s.ioctx.Delete(s.obj(name)) }); err != nil && !errors.Is(err, rados.ErrNotFound) {
+		raisePersistenceFailure(s.BackendName(), s.prefix, "shard.delete", err)
+	}
 }
 
 func (s *CephStorage) BackendName() string {
@@ -337,7 +354,7 @@ func (s *CephStorage) OpenLog(shard string) PersistenceLogfile {
 	s.ensureOpen()
 	lf, err := openOrCreateCephLogfile(s, shard)
 	if err != nil {
-		panic(err)
+		raisePersistenceFailure(s.BackendName(), s.prefix, "log.open", err)
 	}
 	return lf
 }
@@ -346,7 +363,7 @@ func (s *CephStorage) SwapLog(shard string, entries []interface{}, durable bool)
 	s.ensureOpen()
 	oldSegments, err := listLogSegments(s, shard)
 	if err != nil {
-		panic(err)
+		raisePersistenceFailure(s.BackendName(), s.prefix, "log.swap", err)
 	}
 	var next uint32
 	for _, segment := range oldSegments {
@@ -359,15 +376,17 @@ func (s *CephStorage) SwapLog(shard string, entries []interface{}, durable bool)
 		body.Write(encodeLogEntry(entry))
 	}
 	obj := s.obj(fmt.Sprintf("%s.log.%08d", shard, next))
-	if err := s.ioctx.WriteFull(obj, body.Bytes()); err != nil {
-		panic(err)
+	if err := remoteRetry(func() error { return s.ioctx.WriteFull(obj, body.Bytes()) }); err != nil {
+		raisePersistenceFailure(s.BackendName(), s.prefix, "log.swap", err)
 	}
 	if err := writeLogManifest(s, shard, []uint32{next}); err != nil {
-		panic(err)
+		raisePersistenceFailure(s.BackendName(), s.prefix, "log.swap", err)
 	}
 	for _, segment := range oldSegments {
 		if segment.seg != next {
-			_ = s.ioctx.Delete(segment.obj)
+			if err := s.ioctx.Delete(segment.obj); err != nil && !errors.Is(err, rados.ErrNotFound) {
+				reportPersistenceCleanupFailure(s.BackendName(), s.prefix, "log.swap.cleanup", err)
+			}
 		}
 	}
 	return &CephLogfile{
@@ -386,14 +405,13 @@ func (s *CephStorage) ReplayLog(shard string) (map[string]struct{}, chan interfa
 	out := make(chan interface{}, 64)
 	committed := make(map[string]struct{})
 	segments, err := listLogSegments(s, shard)
-	if err == nil {
-		hybridsort.Slice(segments, func(i, j int) bool { return segments[i].seg < segments[j].seg })
-		for _, seg := range segments {
-			data := s.readLogSegment(seg)
-			collectLogStreamCommits(data, committed)
-		}
-	} else {
-		segments = nil
+	if err != nil {
+		raisePersistenceFailure(s.BackendName(), s.prefix, "log.replay", err)
+	}
+	hybridsort.Slice(segments, func(i, j int) bool { return segments[i].seg < segments[j].seg })
+	for _, seg := range segments {
+		data := s.readLogSegment(seg)
+		collectLogStreamCommits(data, committed)
 	}
 
 	go func() {
@@ -406,19 +424,25 @@ func (s *CephStorage) ReplayLog(shard string) (map[string]struct{}, chan interfa
 	// Return an appendable logfile as second return, like FileStorage does.
 	lf, err := openOrCreateCephLogfile(s, shard)
 	if err != nil {
-		panic(err)
+		raisePersistenceFailure(s.BackendName(), s.prefix, "log.replay", err)
 	}
 	return committed, out, lf
 }
 
 func (s *CephStorage) readLogSegment(seg logSegInfo) []byte {
-	stat, err := s.ioctx.Stat(seg.obj)
-	if err != nil || stat.Size == 0 {
+	stat, err := remoteRetryValue(func() (rados.ObjectStat, error) { return s.ioctx.Stat(seg.obj) })
+	if err != nil {
+		raisePersistenceFailure(s.BackendName(), s.prefix, "log.read", err)
+	}
+	if stat.Size == 0 {
 		return nil
 	}
 	data := make([]byte, stat.Size)
-	n, err := s.ioctx.Read(seg.obj, data, 0)
-	if err != nil || n == 0 {
+	n, err := remoteRetryValue(func() (int, error) { return s.ioctx.Read(seg.obj, data, 0) })
+	if err != nil {
+		raisePersistenceFailure(s.BackendName(), s.prefix, "log.read", err)
+	}
+	if n == 0 {
 		return nil
 	}
 	return data[:n]
@@ -426,9 +450,14 @@ func (s *CephStorage) readLogSegment(seg logSegInfo) []byte {
 
 func (s *CephStorage) RemoveLog(shard string) {
 	s.ensureOpen()
-	segments, _ := listLogSegments(s, shard)
+	segments, err := listLogSegments(s, shard)
+	if err != nil {
+		raisePersistenceFailure(s.BackendName(), s.prefix, "log.remove", err)
+	}
 	for _, seg := range segments {
-		_ = s.ioctx.Delete(seg.obj)
+		if err := remoteRetry(func() error { return s.ioctx.Delete(seg.obj) }); err != nil && !errors.Is(err, rados.ErrNotFound) {
+			raisePersistenceFailure(s.BackendName(), s.prefix, "log.remove", err)
+		}
 	}
 }
 
@@ -449,12 +478,12 @@ func listLogSegments(s *CephStorage, shard string) ([]logSegInfo, error) {
 	// This keeps list operation O(segments), avoids pool-wide scans.
 
 	manifestObj := s.obj(fmt.Sprintf("%s.log.manifest", shard))
-	stat, err := s.ioctx.Stat(manifestObj)
+	stat, err := remoteRetryValue(func() (rados.ObjectStat, error) { return s.ioctx.Stat(manifestObj) })
 	if err != nil || stat.Size == 0 {
 		return nil, fmt.Errorf("no manifest")
 	}
 	raw := make([]byte, stat.Size)
-	n, err := s.ioctx.Read(manifestObj, raw, 0)
+	n, err := remoteRetryValue(func() (int, error) { return s.ioctx.Read(manifestObj, raw, 0) })
 	if err != nil || n == 0 {
 		return nil, fmt.Errorf("no manifest")
 	}
@@ -476,7 +505,7 @@ func listLogSegments(s *CephStorage, shard string) ([]logSegInfo, error) {
 func writeLogManifest(s *CephStorage, shard string, segs []uint32) error {
 	manifestObj := s.obj(fmt.Sprintf("%s.log.manifest", shard))
 	raw, _ := json.Marshal(segs)
-	return s.ioctx.WriteFull(manifestObj, raw)
+	return remoteRetry(func() error { return s.ioctx.WriteFull(manifestObj, raw) })
 }
 
 func openOrCreateCephLogfile(s *CephStorage, shard string) (*CephLogfile, error) {
@@ -503,13 +532,16 @@ func openOrCreateCephLogfile(s *CephStorage, shard string) (*CephLogfile, error)
 	obj := s.obj(fmt.Sprintf("%s.log.%08d", shard, seg))
 
 	// Determine current size as append offset
-	st, err := s.ioctx.Stat(obj)
+	st, err := remoteRetryValue(func() (rados.ObjectStat, error) { return s.ioctx.Stat(obj) })
 	if err != nil {
 		// object may not exist yet -> create empty using Truncate
-		if err := s.ioctx.Truncate(obj, 0); err != nil {
+		if err := remoteRetry(func() error { return s.ioctx.Truncate(obj, 0) }); err != nil {
 			return nil, err
 		}
-		st, _ = s.ioctx.Stat(obj)
+		st, err = remoteRetryValue(func() (rados.ObjectStat, error) { return s.ioctx.Stat(obj) })
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	return &CephLogfile{
@@ -665,21 +697,30 @@ func (w *CephLogfile) Write(logentry interface{}) {
 
 	// optional auto-flush: prevents unbounded buffer in write-heavy workloads
 	if w.buf.Len() >= w.flushEveryBytes {
-		// best-effort flush without forcing caller to call Sync()
-		_ = w.flushLocked(false)
+		if err := w.flushLocked(false); err != nil {
+			raisePersistenceFailure(w.s.BackendName(), w.s.prefix, "log.write", err)
+		}
 	}
 }
 
-func (w *CephLogfile) Sync() {
+func (w *CephLogfile) Flush(durable bool) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	_ = w.flushLocked(true)
+	if err := w.flushLocked(durable); err != nil {
+		operation := "log.flush"
+		if durable {
+			operation = "log.sync"
+		}
+		raisePersistenceFailure(w.s.BackendName(), w.s.prefix, operation, err)
+	}
 }
 
 func (w *CephLogfile) Close() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	_ = w.flushLocked(true)
+	if err := w.flushLocked(true); err != nil {
+		raisePersistenceFailure(w.s.BackendName(), w.s.prefix, "log.close", err)
+	}
 	// no explicit handle to close for rados object
 }
 
@@ -695,17 +736,22 @@ func (w *CephLogfile) flushLocked(force bool) error {
 		// create next segment and update manifest
 		next := w.seg + 1
 		nextObj := w.s.obj(fmt.Sprintf("%s.log.%08d", w.shard, next))
-		if err := w.s.ioctx.Truncate(nextObj, 0); err != nil {
+		if err := remoteRetry(func() error { return w.s.ioctx.Truncate(nextObj, 0) }); err != nil {
 			return err
 		}
 		// update manifest
-		segs, _ := listLogSegments(w.s, w.shard)
+		segs, err := listLogSegments(w.s, w.shard)
+		if err != nil {
+			return err
+		}
 		var all []uint32
 		for _, si := range segs {
 			all = append(all, si.seg)
 		}
 		all = append(all, next)
-		_ = writeLogManifest(w.s, w.shard, all)
+		if err := writeLogManifest(w.s, w.shard, all); err != nil {
+			return err
+		}
 
 		w.seg = next
 		w.obj = nextObj
@@ -716,12 +762,15 @@ func (w *CephLogfile) flushLocked(force bool) error {
 	payload := w.buf.Bytes()
 
 	// Use a WriteOp so we can later extend with flags / op batching.
-	op := rados.CreateWriteOp()
-	defer op.Release()
-	op.Write(payload, uint64(w.offset))
 	// RADOS has no fsync; durability depends on replication and client ack.
-	// For "Sync semantics" you mainly want to flush buffers and maybe block until op completes.
-	if err := op.Operate(w.s.ioctx, w.obj, rados.OperationNoFlag); err != nil {
+	// Each retry uses a fresh operation object and repeats the same idempotent
+	// offset write.
+	if err := remoteRetry(func() error {
+		op := rados.CreateWriteOp()
+		defer op.Release()
+		op.Write(payload, uint64(w.offset))
+		return op.Operate(w.s.ioctx, w.obj, rados.OperationNoFlag)
+	}); err != nil {
 		// If op fails, keep buffer (caller can retry). We won't clear.
 		return err
 	}

@@ -44,7 +44,7 @@ func TestFileTransactionalWALRoundTrip(t *testing.T) {
 	logfile.Write(LogEntryDelete{idx: 3, txID: txID})
 	logfile.Write(LogEntryUndelete{idx: 4, txID: txID})
 	logfile.Write(LogEntryCommit{txID: txID})
-	logfile.Sync()
+	logfile.Flush(true)
 	logfile.Close()
 
 	committed, entries, replayLog := engine.ReplayLog("roundtrip")
@@ -126,7 +126,7 @@ func TestFileSwapLogPublishesCompleteReplacement(t *testing.T) {
 	old := engine.OpenLog(transactionLogName)
 	old.Write(LogEntryCommit{txID: "old/1"})
 	old.Write(LogEntryCommit{txID: "old/2"})
-	old.Sync()
+	old.Flush(true)
 
 	replacement := engine.SwapLog(transactionLogName, []interface{}{
 		LogEntryCommit{txID: "retained/1"},
@@ -134,10 +134,10 @@ func TestFileSwapLogPublishesCompleteReplacement(t *testing.T) {
 	// The old descriptor still names the unlinked generation. A late write to
 	// it must not modify the newly published log path.
 	old.Write(LogEntryCommit{txID: "old/late"})
-	old.Sync()
+	old.Flush(true)
 	old.Close()
 	replacement.Write(LogEntryCommit{txID: "new/1"})
-	replacement.Sync()
+	replacement.Flush(true)
 	replacement.Close()
 
 	committed, entries, logfile := engine.ReplayLog(transactionLogName)

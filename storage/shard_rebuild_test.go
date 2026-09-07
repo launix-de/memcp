@@ -1889,8 +1889,15 @@ func TestRepartitionPostFlipUpdateDoesNotDuplicateRow(t *testing.T) {
 	}()
 	<-blocking.entered
 
+	topology := tbl.pinActiveTopology()
+	topologyReleased := false
+	defer func() {
+		if !topologyReleased {
+			topology.releaseOperation()
+		}
+	}()
 	var target *storageShard
-	for _, shard := range tbl.ActiveShards() {
+	for _, shard := range topology.shards {
 		if shard.Count() > 0 {
 			target = shard
 			break
@@ -1914,6 +1921,12 @@ func TestRepartitionPostFlipUpdateDoesNotDuplicateRow(t *testing.T) {
 	if !<-updateDone {
 		t.Fatal("post-publication update did not change the row")
 	}
+	topology.releaseOperation()
+	topologyReleased = true
+	// Releasing the final operation pin starts asynchronous retirement. Wait
+	// until its pending mutations have been applied before counting rows.
+	tbl.maintenanceMu.Lock()
+	tbl.maintenanceMu.Unlock()
 
 	if got := tbl.Count(); got != rows {
 		t.Fatalf("repartition count after post-flip update = %d, want %d", got, rows)

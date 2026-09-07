@@ -39,6 +39,15 @@ class ReliabilityDrillTests(unittest.TestCase):
 		with self.assertRaises(drill.DrillFailure):
 			drill.expect({"count": 2}, {"count": 3}, "recovery")
 
+	def test_io_fault_environment_is_reproducible_and_scoped(self) -> None:
+		environment = drill.io_fault_environment("log.write", "partial", 42)
+		self.assertEqual(environment["MEMCP_IO_FAULT_PROBABILITY"], "1")
+		self.assertEqual(environment["MEMCP_IO_FAULT_SEED"], "42")
+		self.assertEqual(environment["MEMCP_IO_FAULT_OPERATIONS"], "log.write")
+		self.assertEqual(environment["MEMCP_IO_FAULT_PHASE"], "partial")
+		self.assertEqual(environment["MEMCP_IO_FAULT_LIMIT"], "1")
+		self.assertEqual(environment["MEMCP_IO_FAULT_DATABASE"], drill.DATABASE)
+
 	def test_atomicity_oracle_accepts_only_complete_generations(self) -> None:
 		self.assertEqual(drill.classify_atomic_signature({
 			"row_count": 100, "min_x": 4, "max_x": 4, "x_sum": 400,

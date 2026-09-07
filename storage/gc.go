@@ -62,13 +62,12 @@ func cleanBlobs(db *database) int {
 	}
 
 	deleted := 0
-	db.persistence.WalkBlobs(func(hash string) error {
+	db.persistence.WalkBlobs(func(hash string) {
 		defer db.lockBlobRef(hash)()
 		if _, live := references[hash]; !live {
 			db.persistence.DeleteBlob(hash)
 			deleted++
 		}
-		return nil
 	})
 	return deleted
 }
@@ -280,13 +279,12 @@ func cleanShards(db *database) int {
 
 	// Walk disk shard files one by one; delete those with an unknown UUID.
 	deleted := 0
-	db.persistence.WalkShardFiles(func(name string) error {
+	db.persistence.WalkShardFiles(func(name string) {
 		uuid := extractShardUUID(name)
 		if uuid != "" && !activeUUIDs[uuid] {
 			db.persistence.DeleteShardFile(name)
 			deleted++
 		}
-		return nil
 	})
 	return deleted
 }
