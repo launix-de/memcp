@@ -38,6 +38,15 @@ consumer stage. */
 (define rdf_unescape (lambda (s)
 	(replace (replace (replace (replace (replace s "\\n" "\n") "\\t" "\t") "\\\\" "\\") "\\\"" "\"") "\\r" "\r")
 ))
+(define rdf_unescape_single (lambda (s)
+	(replace (rdf_unescape s) "\\'" "'")
+))
+(define rdf_unescape_iri (lambda (s)
+	(json_decode_scmer (concat "\"" s "\""))
+))
+(define rdf_unescape_pname (lambda (s)
+	(regexp_replace s "\\\\([~._-])" "$1")
+))
 (define rdf_typed_literal (lambda (value datatype)
 	(if (regexp_test datatype "(?:#|:)integer$")
 		(json_decode_scmer value)
@@ -2387,8 +2396,11 @@ bindings of neighbouring update alternatives. */
 	(begin
 		(define ttl_simple_constant (parser (or
 			(parser '((atom "_:" true) (define x (regex "[a-zA-Z0-9_]+" false false))) (concat "_:" x))
-			(parser '((define pfx (regex "[a-zA-Z0-9_]*" true)) (atom ":" false false) (define post (regex "[a-zA-Z0-9_]*" false))) (if (nil? (definitions pfx)) (error "undefined prefix: " pfx) (concat (definitions pfx) post)))
-			(parser '((atom "<" true) (define iri (regex "[^>]*" false false)) (atom ">" false false)) (rdf_apply_base_iri definitions iri))
+			(parser '((atom "a" true)) "http://www.w3.org/1999/02/22-rdf-syntax-ns#type")
+			(parser '((define pfx (regex "[a-zA-Z0-9_]*" true)) (atom ":" false false) (define post (regex "(?:[a-zA-Z0-9_]|\\\\[~._-])*" false))) (if (nil? (definitions pfx)) (error "undefined prefix: " pfx) (concat (definitions pfx) (rdf_unescape_pname post))))
+			(parser '((atom "<" true) (define iri (regex "[^>]*" false false)) (atom ">" false false)) (rdf_apply_base_iri definitions (rdf_unescape_iri iri)))
+			(parser '((atom "'''" true) (define x (regex "[^']*(?:(?:'[^']|''[^'])[^']*)*" false false)) (atom "'''" false false)) (rdf_unescape_single x))
+			(parser '((atom "'" true) (define x (regex "(?:[^'\\\\]|\\\\.)*" false false)) (atom "'" false false)) (rdf_unescape_single x))
 			(parser '((atom "\"\"\"" true) (define x (regex "[^\"]*(?:(?:\"[^\"]|\"\"[^\"])[^\"]*)*" false false)) (atom "\"\"\"" false false) (? (atom "^^" false false) (define datatype rdf_datatype_suffix))) (if (nil? datatype) x (rdf_typed_literal x datatype)))
 			(parser '((atom "\"" true) (define x (regex "(?:[^\"\\\\]|\\\\.)*" false false)) (atom "\"@" false false) (regex "[a-zA-Z_0-9]+" false)) (rdf_unescape x))
 			(parser '((atom "\"" true) (define x (regex "(?:[^\"\\\\]|\\\\.)*" false false)) (atom "\"" false false) (? (atom "^^" false false) (define datatype rdf_datatype_suffix))) (if (nil? datatype) (rdf_unescape x) (rdf_typed_literal (rdf_unescape x) datatype)))
@@ -2458,8 +2470,11 @@ bindings of neighbouring update alternatives. */
 		))
 		(define ttl_simple_constant (parser (or
 			(parser '((atom "_:" true) (define x (regex "[a-zA-Z0-9_]+" false false))) (concat "_:" x)) /* blank node before prefix match */
-			(parser '((define pfx (regex "[a-zA-Z0-9_]*" true)) (atom ":" false false) (define post (regex "[a-zA-Z0-9_]*" false))) (if (nil? (definitions pfx)) (error "undefined prefix: " pfx) (concat (definitions pfx) post))) /* add prefix with validation */
-			(parser '((atom "<" true) (define iri (regex "[^>]*" false false)) (atom ">" false false)) (rdf_apply_base_iri definitions iri))
+			(parser '((atom "a" true)) "http://www.w3.org/1999/02/22-rdf-syntax-ns#type")
+			(parser '((define pfx (regex "[a-zA-Z0-9_]*" true)) (atom ":" false false) (define post (regex "(?:[a-zA-Z0-9_]|\\\\[~._-])*" false))) (if (nil? (definitions pfx)) (error "undefined prefix: " pfx) (concat (definitions pfx) (rdf_unescape_pname post)))) /* add prefix with validation */
+			(parser '((atom "<" true) (define iri (regex "[^>]*" false false)) (atom ">" false false)) (rdf_apply_base_iri definitions (rdf_unescape_iri iri)))
+			(parser '((atom "'''" true) (define x (regex "[^']*(?:(?:'[^']|''[^'])[^']*)*" false false)) (atom "'''" false false)) (rdf_unescape_single x))
+			(parser '((atom "'" true) (define x (regex "(?:[^'\\\\]|\\\\.)*" false false)) (atom "'" false false)) (rdf_unescape_single x))
 				(parser '((atom "\"\"\"" true) (define x (regex "[^\"]*(?:(?:\"[^\"]|\"\"[^\"])[^\"]*)*" false false)) (atom "\"\"\"" false false) (? (atom "^^" false false) (define datatype rdf_datatype_suffix))) (if (nil? datatype) x (rdf_typed_literal x datatype)))
 			(parser '((atom "\"" true) (define x (regex "(?:[^\"\\\\]|\\\\.)*" false false)) (atom "\"@" false false) (regex "[a-zA-Z_0-9]+" false)) (rdf_unescape x))
 				(parser '((atom "\"" true) (define x (regex "(?:[^\"\\\\]|\\\\.)*" false false)) (atom "\"" false false) (? (atom "^^" false false) (define datatype rdf_datatype_suffix))) (if (nil? datatype) (rdf_unescape x) (rdf_typed_literal (rdf_unescape x) datatype)))

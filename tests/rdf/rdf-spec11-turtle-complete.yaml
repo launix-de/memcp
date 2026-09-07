@@ -32,7 +32,6 @@ test_cases:
     expect: {rows: 1, data: [{"?ask": true}]}
 
   - name: "Turtle 1.1 prefixed names support escaped local characters"
-    noncritical: true
     ttl_data: |
       @prefix ex: <http://spec11-turtle-pname.example/> .
       ex:subject ex:has\~value "yes" .
@@ -40,19 +39,16 @@ test_cases:
     expect: {rows: 1, data: [{"?ask": true}]}
 
   - name: "Turtle 1.1 IRIREF supports Unicode escapes"
-    noncritical: true
     ttl_data: '<http://spec11-turtle-iri.example/\u0061> <http://spec11-turtle-iri.example/p> "yes" .'
     sparql: 'ASK WHERE { <http://spec11-turtle-iri.example/a> <http://spec11-turtle-iri.example/p> "yes" }'
     expect: {rows: 1, data: [{"?ask": true}]}
 
   - name: "Turtle 1.1 single-quoted string literal"
-    noncritical: true
     ttl_data: '<http://spec11-turtle-string.example/single> <http://spec11-turtle-string.example/p> ''single'' .'
     sparql: 'SELECT ?o WHERE { <http://spec11-turtle-string.example/single> <http://spec11-turtle-string.example/p> ?o }'
     expect: {rows: 1, data: [{"?o": "single"}]}
 
   - name: "Turtle 1.1 long single-quoted string literal"
-    noncritical: true
     ttl_data: "<http://spec11-turtle-string.example/long-single> <http://spec11-turtle-string.example/p> '''line one\nline two''' ."
     sparql: 'SELECT ?o WHERE { <http://spec11-turtle-string.example/long-single> <http://spec11-turtle-string.example/p> ?o }'
     expect: {rows: 1, contains: "line one"}
@@ -101,7 +97,6 @@ test_cases:
     expect: {rows: 1}
 
   - name: "Turtle 1.1 boolean literals are typed values"
-    noncritical: true
     ttl_data: '<http://spec11-turtle-boolean.example/s> <http://spec11-turtle-boolean.example/p> true .'
     sparql: 'SELECT ?o WHERE { <http://spec11-turtle-boolean.example/s> <http://spec11-turtle-boolean.example/p> ?o FILTER(?o = true) }'
     expect: {rows: 1, data: [{"?o": true}]}
@@ -153,7 +148,6 @@ test_cases:
     expect: {rows: 1, data: [{"?ask": true}]}
 
   - name: "Turtle 1.1 a abbreviation denotes rdf type"
-    noncritical: true
     ttl_data: |
       @prefix ex: <http://spec11-turtle-type.example/> . ex:s a ex:Type .
     sparql: |
