@@ -6,12 +6,11 @@ This directory treats the stable SPARQL 1.1 W3C Recommendations and the RDF
 1.1/Turtle term model required by them as the conformance target. SPARQL 1.2 is
 still a draft and is deliberately not mixed into this baseline.
 
-The inventory starts new cases as `noncritical: true`. A passing noncritical
-case describes capability already present; a failing noncritical case is an
-implementation candidate. Once a feature is selected and implemented, its
-cases become critical in that feature PR. The algebra, update, and query-form /
-dataset suites are critical; the remaining inventory still follows the
-noncritical selection workflow.
+Every test introduced by the full-spec inventory is explicitly marked
+`noncritical: true`. A passing noncritical case describes capability already
+present; a failing noncritical case is an implementation candidate. Once a
+feature is selected and implemented, its cases should become critical in that
+feature PR.
 
 ## Executable coverage
 
