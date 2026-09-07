@@ -175,7 +175,11 @@ func Equal(a, b Scmer) bool {
 		case tagFloat:
 			return a.Float() == b.Float()
 		case tagString, tagSymbol:
-			return a.String() == b.String()
+			// Both tags already prove that ptr/aux encode a plain Go string.
+			// Keep this dominant comparison path out of AppendString: that
+			// general converter carries a large type switch and stack frame for
+			// compressed strings, BSON, lists, and numeric formatting.
+			return unsafe.String(a.ptr, int(auxVal(a.aux))) == unsafe.String(b.ptr, int(auxVal(b.aux)))
 		case tagCString:
 			return cstringEqual(a, b)
 		case tagBString:
@@ -587,7 +591,14 @@ func Less(a, b Scmer) bool {
 			return a.Float() < b.Float()
 		case tagFloat:
 			return a.Float() < b.Float()
-		case tagString, tagSymbol, tagCString, tagBString, tagBSON:
+		case tagString, tagSymbol:
+			if ta == tagString || ta == tagSymbol {
+				// As in Equal, known plain-string tags can be compared directly.
+				// Compressed representations retain the materializing fallback.
+				return unsafe.String(a.ptr, int(auxVal(a.aux))) < unsafe.String(b.ptr, int(auxVal(b.aux)))
+			}
+			return a.String() < b.String()
+		case tagCString, tagBString, tagBSON:
 			return a.String() < b.String()
 		default:
 			// Fallback: compare by string representation to avoid panics on mixed types
