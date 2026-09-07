@@ -1101,6 +1101,33 @@ consumer stage. */
 	deterministic even when the table-function source is lowered directly. */
 	(sort (seen) (lambda (left right) (< left right)))
 )))
+(define rdf_table_migrations (coalesce rdf_table_migrations (newsession)))
+(define rdf_migrate_legacy_type_predicates (lambda (rdf_table) (begin
+	(define replacements (newsession))
+	(define replacement_count (newsession))
+	(replacement_count "value" 0)
+	(scan nil rdf_table '() '() '() (lambda () true) '("s" "p" "o")
+		(lambda (acc s p o) (begin
+			(if (equal? p "a")
+				(begin
+					(replacements (replacement_count "value")
+						(list s "http://www.w3.org/1999/02/22-rdf-syntax-ns#type" o))
+					(replacement_count "value" (+ (replacement_count "value") 1))) nil)
+			acc)))
+	(if (> (replacement_count "value") 0)
+		(begin
+			/* Insert first so an interruption can never discard the only form of a
+			legacy type statement. The triple key makes this idempotent when both
+			spellings already exist. */
+			(insert rdf_table '("s" "p" "o")
+				(map (produceN (replacement_count "value")) (lambda (idx) (replacements idx)))
+				'() (lambda () true))
+			(scan nil rdf_table '() '() '() (lambda () true) '("p" "$update")
+				(lambda (acc p $update) (begin
+					(if (equal? p "a") ($update) nil)
+					acc)))) nil)
+	true)
+)))
 (define rdf_ensure_table (lambda (schema)
 	(begin
 		/* Avoid replaying idempotent DDL on every RDF read. Besides being wasted
@@ -1127,6 +1154,11 @@ consumer stage. */
 						(if (seen identity) ($update) (seen identity true))
 						acc)))
 				(createkey (table schema "rdf") "rdf_spo" true '("s" "p" "o"))))
+		(define rdf_table (table schema "rdf"))
+		/* Key the one-time migration by the table handle rather than the schema
+		name, so DROP/CREATE receives a fresh migration pass in the same process. */
+		(rdf_table_migrations "get_or_compute_scoped" rdf_table "legacy-type-predicate"
+			(lambda () (rdf_migrate_legacy_type_predicates rdf_table)))
 		true)
 ))
 (define rdf_ensure_named_table (lambda (schema)

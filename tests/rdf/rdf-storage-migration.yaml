@@ -10,7 +10,13 @@ metadata:
 setup:
   - sql: "DROP TABLE IF EXISTS rdf"
   - sql: "CREATE TABLE rdf (s TEXT, p TEXT, o TEXT)"
-  - sql: "INSERT INTO rdf VALUES ('subject', 'predicate', 'object'), ('subject', 'predicate', 'object')"
+  - sql: >-
+      INSERT INTO rdf VALUES
+      ('subject', 'predicate', 'object'),
+      ('subject', 'predicate', 'object'),
+      ('legacy-subject', 'a', 'legacy-class'),
+      ('mixed-subject', 'a', 'mixed-class'),
+      ('mixed-subject', 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', 'mixed-class')
 
 test_cases:
   - name: "rdf_ensure_table deduplicates and installs the triple key"
@@ -26,7 +32,29 @@ test_cases:
     expect:
       rows: 1
       data:
-        - cnt: 1
+        - cnt: 3
+
+  - name: "Legacy Turtle a predicates were removed"
+    sql: "SELECT COUNT(*) AS cnt FROM rdf WHERE p = 'a'"
+    expect:
+      rows: 1
+      data:
+        - cnt: 0
+
+  - name: "Legacy Turtle a predicates became standard rdf type triples"
+    sparql: |
+      SELECT ?subject ?class WHERE {
+        ?subject a ?class .
+        FILTER(?subject = <legacy-subject> || ?subject = <mixed-subject>)
+      }
+      ORDER BY ?subject
+    expect:
+      rows: 2
+      data:
+        - "?subject": "legacy-subject"
+          "?class": "legacy-class"
+        - "?subject": "mixed-subject"
+          "?class": "mixed-class"
 
   - name: "Migrated table enforces triple uniqueness"
     sql: "INSERT INTO rdf VALUES ('subject', 'predicate', 'object')"
