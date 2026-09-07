@@ -1093,7 +1093,8 @@ outer_direct_consumers already includes all outer ON conditions. */
 (define prune_derived_src (lambda (src outer_direct_consumers)
 	(begin
 		(define relation (source_relation src))
-		(if (or (string? relation) (union_block? relation))
+		(if (or (string? relation)
+			(or (table_function_relation? relation) (union_block? relation)))
 			src
 			(begin
 				(define alias (source_alias src))

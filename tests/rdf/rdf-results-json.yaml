@@ -1,0 +1,89 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
+# Protocol-level SPARQL 1.1 Query Results JSON coverage for SPA clients.
+
+metadata:
+  version: "1.0"
+  description: "SPARQL Results JSON content negotiation"
+  isolated: true
+
+setup: []
+
+test_cases:
+  - name: "SELECT returns standard SPARQL Results JSON when requested"
+    ttl_data: |
+      @prefix rj: <http://results-json.example/> .
+      rj:case rj:label "Case file" .
+    headers:
+      Accept: "application/sparql-results+json"
+    sparql: |
+      PREFIX rj: <http://results-json.example/>
+      SELECT ?case, ?label WHERE { ?case rj:label ?label }
+    expect:
+      rows: 1
+      content_type: "application/sparql-results+json"
+      result_contains:
+        - '"head"'
+        - '"vars":["case","label"]'
+        - '"bindings"'
+        - '"type":"uri"'
+        - '"value":"Case file"'
+
+  - name: "ASK returns the standard boolean result member"
+    headers:
+      Accept: "application/sparql-results+json"
+    sparql: |
+      PREFIX rj: <http://results-json.example/>
+      ASK WHERE { rj:case rj:label "Case file" }
+    expect:
+      rows: 1
+      content_type: "application/sparql-results+json"
+      result_contains: '"boolean":true'
+
+  - name: "Empty SELECT retains projected variables in the result head"
+    headers:
+      Accept: "application/sparql-results+json"
+    sparql: |
+      PREFIX rj: <http://results-json.example/>
+      SELECT ?case, ?missing WHERE { ?case rj:missing ?missing }
+    expect:
+      rows: 0
+      content_type: "application/sparql-results+json"
+      result_contains:
+        - '"vars":["case","missing"]'
+        - '"bindings":[]'
+
+  - name: "Unbound OPTIONAL variables are absent from JSON bindings"
+    headers:
+      Accept: "application/sparql-results+json"
+    sparql: |
+      PREFIX rj: <http://results-json.example/>
+      SELECT ?case, ?missing WHERE {
+        ?case rj:label ?label
+        OPTIONAL { ?case rj:missing ?missing }
+      }
+    expect:
+      rows: 1
+      content_type: "application/sparql-results+json"
+      result_occurrences:
+        - text: '"missing"'
+          count: 1
+
+  - name: "Native scalar values carry SPARQL JSON datatypes"
+    headers:
+      Accept: "application/sparql-results+json"
+    sparql: |
+      SELECT ?number, ?truth WHERE {
+        BIND(7 AS ?number)
+        BIND(isLiteral("text") AS ?truth)
+      }
+    expect:
+      rows: 1
+      content_type: "application/sparql-results+json"
+      result_contains:
+        - '"datatype":"http://www.w3.org/2001/XMLSchema#decimal"'
+        - '"value":"7"'
+        - '"datatype":"http://www.w3.org/2001/XMLSchema#boolean"'
+        - '"value":"true"'
+
+cleanup: []

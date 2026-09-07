@@ -39,6 +39,18 @@ class ReliabilityDrillTests(unittest.TestCase):
 		with self.assertRaises(drill.DrillFailure):
 			drill.expect({"count": 2}, {"count": 3}, "recovery")
 
+	def test_atomicity_oracle_accepts_only_complete_generations(self) -> None:
+		self.assertEqual(drill.classify_atomic_signature({
+			"row_count": 100, "min_x": 4, "max_x": 4, "x_sum": 400,
+		}, 100, 4), 4)
+		self.assertEqual(drill.classify_atomic_signature({
+			"row_count": 100, "min_x": 5, "max_x": 5, "x_sum": 500,
+		}, 100, 4), 5)
+		with self.assertRaises(drill.DrillFailure):
+			drill.classify_atomic_signature({
+				"row_count": 73, "min_x": 5, "max_x": 5, "x_sum": 365,
+			}, 100, 4)
+
 
 if __name__ == "__main__":
 	unittest.main()

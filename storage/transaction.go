@@ -18,10 +18,14 @@ package storage
 
 import "context"
 import "fmt"
+
 import "github.com/carli2/hybridsort"
 import "runtime"
+import "strconv"
 import "sync"
 import "sync/atomic"
+
+import "github.com/google/uuid"
 import "github.com/launix-de/memcp/scm"
 import NonLockingReadMap "github.com/launix-de/NonLockingReadMap"
 
@@ -122,6 +126,7 @@ type TxContext struct {
 	queryInfo     atomic.Pointer[string]
 	queryActive   atomic.Bool
 	queryMu       sync.Mutex // serializes statements which reuse this transaction object
+	walTxID       atomic.Pointer[string]
 	// fanoutLimit/fanoutInUse bound only additional multi-shard workers. A
 	// single relevant shard never reads or writes this cache line.
 	fanoutLimit atomic.Int32
@@ -162,6 +167,7 @@ func (tx *TxContext) reset(mode TxMode) {
 	tx.Depth = 0
 	tx.fanoutLimit.Store(int32(runtime.GOMAXPROCS(0)))
 	tx.fanoutInUse.Store(0)
+	tx.walTxID.Store(nil)
 	tx.shards = nil
 	tx.touchedShards = sync.Map{}
 	tx.autoCommit = false
@@ -169,6 +175,27 @@ func (tx *TxContext) reset(mode TxMode) {
 	tx.repartitionDeletes = nil
 	tx.invalidationDepth = 0
 	tx.invalidationVisited = nil
+}
+
+var walBootID = uuid.NewString()
+var walTxSequence atomic.Uint64
+
+func nextDurableTxID() string {
+	return walBootID + "/" + strconv.FormatUint(walTxSequence.Add(1), 10)
+}
+
+func (tx *TxContext) durableID() string {
+	if tx == nil {
+		return ""
+	}
+	if txID := tx.walTxID.Load(); txID != nil {
+		return *txID
+	}
+	candidate := nextDurableTxID()
+	if tx.walTxID.CompareAndSwap(nil, &candidate) {
+		return candidate
+	}
+	return *tx.walTxID.Load()
 }
 
 // claimFanoutWorkers reserves at most half of the transaction's remaining
@@ -421,21 +448,49 @@ func (tx *TxContext) UnstageRow(shard *storageShard, recid uint32) bool {
 // RegisterTouchedShard marks a shard as having pending writes for deferred sync.
 // Only Safe-engine shards need an fsync; Memory/Cache/Sloppy shards are skipped.
 func (tx *TxContext) RegisterTouchedShard(shard *storageShard) {
-	if shard.t.PersistencyMode != Safe {
+	if shard.t.PersistencyMode != Safe && shard.t.PersistencyMode != Logged {
 		return
 	}
+	tx.durableID()
 	tx.touchedShards.Store(shard, true)
 }
 
 // SyncTouchedShards flushes all pending log writes to durable storage.
 func (tx *TxContext) SyncTouchedShards() {
+	type databaseCommit struct {
+		db      *database
+		durable bool
+	}
+	shards := make([]*storageShard, 0, 1)
+	databases := make(map[*database]databaseCommit)
 	tx.touchedShards.Range(func(key, _ any) bool {
 		shard := key.(*storageShard)
+		shards = append(shards, shard)
+		commit := databases[shard.t.schema]
+		commit.db = shard.t.schema
+		commit.durable = commit.durable || shard.t.PersistencyMode == Safe
+		databases[shard.t.schema] = commit
+		return true
+	})
+	if len(shards) == 1 {
+		// The common OLTP case needs no coordinator fsync: the commit marker and
+		// its mutations share one WAL and become durable through one barrier.
+		shard := shards[0]
+		shard.logfile.Write(LogEntryCommit{txID: tx.durableID()})
+		if shard.t.PersistencyMode == Safe {
+			shard.logfile.Sync()
+		}
+		tx.touchedShards = sync.Map{}
+		return
+	}
+	for _, shard := range shards {
 		if shard.t.PersistencyMode == Safe && shard.logfile != nil {
 			shard.logfile.Sync()
 		}
-		return true
-	})
+	}
+	for _, commit := range databases {
+		commit.db.commitTransaction(tx.durableID(), commit.durable)
+	}
 	tx.touchedShards = sync.Map{}
 }
 
@@ -516,9 +571,9 @@ func (tx *TxContext) RollbackToSavepoint(sp Savepoint) {
 				shard.mu.Lock()
 				shard.deletions.Set(uint(recid), true)
 				if shard.logfile != nil {
-					shard.logfile.Write(LogEntryDelete{recid})
+					shard.logfile.Write(LogEntryDelete{idx: recid, txID: tx.durableID()})
 				}
-				shard.syncNextVisibilityLocked(recid, trackedShards)
+				shard.syncNextVisibilityLocked(recid, trackedShards, tx)
 				shard.mu.Unlock()
 			}
 			st.InsertRecids = st.InsertRecids[:lens.InsertLen]
@@ -528,9 +583,9 @@ func (tx *TxContext) RollbackToSavepoint(sp Savepoint) {
 				st.DeletedMask.Set(uint(recid), false)
 				shard.mu.Lock()
 				shard.deletions.Set(uint(recid), false)
-				shard.logVisibilityChangeLocked(recid, false)
+				shard.logVisibilityChangeLocked(recid, false, tx.durableID())
 				shard.rollbackProtected.Set(uint(recid), false)
-				shard.syncNextVisibilityLocked(recid, trackedShards)
+				shard.syncNextVisibilityLocked(recid, trackedShards, tx)
 				shard.mu.Unlock()
 			}
 			st.DeletedRecids = st.DeletedRecids[:lens.DeletedLen]
@@ -551,7 +606,7 @@ func (tx *TxContext) RollbackToSavepoint(sp Savepoint) {
 				}
 				shard.deletions.Set(uint(recid), true)
 				shard.rollbackProtected.Set(uint(recid), false)
-				shard.syncNextVisibilityLocked(recid, trackedShards)
+				shard.syncNextVisibilityLocked(recid, trackedShards, tx)
 				if !ownsShardWrite {
 					shard.mu.Unlock()
 				}
@@ -580,7 +635,7 @@ func (tx *TxContext) Commit() error {
 			shard.mu.Lock()
 			for _, recid := range st.DeletedRecids {
 				shard.rollbackProtected.Set(uint(recid), false)
-				shard.syncNextVisibilityLocked(recid, trackedShards)
+				shard.syncNextVisibilityLocked(recid, trackedShards, tx)
 			}
 			shard.mu.Unlock()
 			st.mu.Unlock()
@@ -653,9 +708,9 @@ func (tx *TxContext) commitACID() error {
 			}
 			shard.deletions.Set(uint(recid), true)
 			if shard.logfile != nil {
-				shard.logfile.Write(LogEntryDelete{recid})
+				shard.logfile.Write(LogEntryDelete{idx: recid, txID: tx.durableID()})
 			}
-			shard.syncNextVisibilityLocked(recid, trackedShards)
+			shard.syncNextVisibilityLocked(recid, trackedShards, tx)
 		}
 	}
 	// Apply UndeleteMask → clear global deletions (make staged rows visible)
@@ -667,11 +722,15 @@ func (tx *TxContext) commitACID() error {
 			}
 			shard.deletions.Set(uint(recid), false)
 			shard.rollbackProtected.Set(uint(recid), false)
-			shard.logVisibilityChangeLocked(recid, false)
-			shard.syncNextVisibilityLocked(recid, trackedShards)
+			shard.logVisibilityChangeLocked(recid, false, tx.durableID())
+			shard.syncNextVisibilityLocked(recid, trackedShards, tx)
 		}
 	}
 
+	// Keep every touched shard locked until the commit authority is durable.
+	// Readers can therefore observe neither a pre-sync transaction nor a state
+	// that crash recovery would still discard.
+	tx.SyncTouchedShards()
 	atomic.AddUint64(&GlobalCommitEpoch, 1)
 
 	for _, s := range shards {
@@ -685,7 +744,6 @@ func (tx *TxContext) commitACID() error {
 	tx.shards = nil
 	tx.mu.Unlock()
 
-	tx.SyncTouchedShards()
 	return nil
 }
 
@@ -715,9 +773,9 @@ func (tx *TxContext) rollbackCursorStability() {
 			shard.mu.Lock()
 			shard.deletions.Set(uint(recid), true)
 			if shard.logfile != nil {
-				shard.logfile.Write(LogEntryDelete{recid})
+				shard.logfile.Write(LogEntryDelete{idx: recid, txID: tx.durableID()})
 			}
-			shard.syncNextVisibilityLocked(recid, trackedShards)
+			shard.syncNextVisibilityLocked(recid, trackedShards, tx)
 			shard.mu.Unlock()
 		}
 		// Undo deletes (reverse order): restore global visibility
@@ -725,9 +783,9 @@ func (tx *TxContext) rollbackCursorStability() {
 			recid := st.DeletedRecids[i]
 			shard.mu.Lock()
 			shard.deletions.Set(uint(recid), false)
-			shard.logVisibilityChangeLocked(recid, false)
+			shard.logVisibilityChangeLocked(recid, false, tx.durableID())
 			shard.rollbackProtected.Set(uint(recid), false)
-			shard.syncNextVisibilityLocked(recid, trackedShards)
+			shard.syncNextVisibilityLocked(recid, trackedShards, tx)
 			shard.mu.Unlock()
 		}
 		st.mu.Unlock()
@@ -753,7 +811,7 @@ func (tx *TxContext) rollbackACID() {
 		shard.mu.Lock()
 		for _, recid := range st.UndeleteRecids {
 			shard.rollbackProtected.Set(uint(recid), false)
-			shard.syncNextVisibilityLocked(recid, trackedShards)
+			shard.syncNextVisibilityLocked(recid, trackedShards, tx)
 		}
 		shard.mu.Unlock()
 		st.mu.Unlock()

@@ -1013,11 +1013,11 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension, maint
 			s.logfile = t.schema.persistence.OpenLog(s.uuid.String())
 			if len(s.inserts) > 0 {
 				columns, values := s.materializedInsertedRowsLocked(0)
-				s.logfile.Write(LogEntryInsert{columns, values})
+				s.logfile.Write(LogEntryInsert{cols: columns, values: values})
 				for i := range s.inserts {
 					recid := s.main_count + uint32(i)
 					if s.deletions.Get(uint(recid)) {
-						s.logfile.Write(LogEntryDelete{recid})
+						s.logfile.Write(LogEntryDelete{idx: recid})
 					}
 				}
 			}
@@ -1051,7 +1051,7 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension, maint
 			wasDeleted := ps.deletions.Get(uint(recid))
 			ps.deletions.Set(uint(recid), true)
 			if !wasDeleted {
-				ps.logVisibilityChangeLocked(recid, true)
+				ps.logVisibilityChangeLocked(recid, true, "")
 			}
 			ps.mu.Unlock()
 			if !wasDeleted && t.PersistencyMode == Safe && ps.logfile != nil {

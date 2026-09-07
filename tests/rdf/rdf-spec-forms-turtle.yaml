@@ -1,0 +1,186 @@
+# Conformance-oriented coverage derived from SPARQL 1.1 query forms/update
+# and RDF 1.1 Turtle sections 2.6 through 2.8.
+
+metadata:
+  version: "1.0"
+  description: "SPARQL query forms, updates, blank nodes, and collections"
+  isolated: true
+
+setup: []
+
+test_cases:
+  - name: "ASK evaluates a multi-pattern BGP to true"
+    ttl_data: |
+      @prefix cf01: <http://conformance-form01.example/> .
+      cf01:alice a cf01:Person ; cf01:name "Alice" .
+    sparql: |
+      @prefix cf01: <http://conformance-form01.example/> .
+      ASK WHERE { ?s a cf01:Person . ?s cf01:name "Alice" }
+    expect:
+      contains: "true"
+
+  - name: "ASK evaluates a partially matching BGP to false"
+    ttl_data: |
+      @prefix cf02: <http://conformance-form02.example/> .
+      cf02:alice a cf02:Person .
+    sparql: |
+      @prefix cf02: <http://conformance-form02.example/> .
+      ASK WHERE { ?s a cf02:Person . ?s cf02:name ?name }
+    expect:
+      contains: "false"
+
+  - name: "CONSTRUCT instantiates its template once per solution"
+    ttl_data: |
+      @prefix cf03: <http://conformance-form03.example/> .
+      cf03:alice cf03:name "Alice" .
+      cf03:bob cf03:name "Bob" .
+    sparql: |
+      @prefix cf03: <http://conformance-form03.example/> .
+      CONSTRUCT { ?s cf03:label ?name } WHERE { ?s cf03:name ?name }
+    expect:
+      contains: "Alice"
+
+  - name: "INSERT DATA followed by duplicate insertion preserves RDF set semantics"
+    sparql: |
+      @prefix cf04: <http://conformance-form04.example/> .
+      INSERT DATA { cf04:item cf04:value "once" }
+    expect:
+      rows: 0
+
+  - name: "Duplicate INSERT DATA is accepted"
+    sparql: |
+      @prefix cf04: <http://conformance-form04.example/> .
+      INSERT DATA { cf04:item cf04:value "once" }
+    expect:
+      rows: 0
+
+  - name: "RDF graph exposes one solution for a duplicate inserted triple"
+    sparql: |
+      @prefix cf04: <http://conformance-form04.example/> .
+      SELECT ?value WHERE { cf04:item cf04:value ?value }
+    expect:
+      rows: 1
+      data:
+        - "?value": "once"
+
+  - name: "DELETE DATA for an absent triple is a successful no-op"
+    sparql: |
+      @prefix cf05: <http://conformance-form05.example/> .
+      DELETE DATA { cf05:missing cf05:value "absent" }
+    expect:
+      rows: 0
+
+  - name: "DELETE INSERT WHERE applies the template for every solution"
+    ttl_data: |
+      @prefix cf06: <http://conformance-form06.example/> .
+      cf06:a cf06:state "old" .
+      cf06:b cf06:state "old" .
+    sparql: |
+      @prefix cf06: <http://conformance-form06.example/> .
+      DELETE { ?subject cf06:state ?old }
+      INSERT { ?subject cf06:state "new" }
+      WHERE { ?subject cf06:state ?old }
+    expect:
+      rows: 0
+
+  - name: "DELETE INSERT WHERE leaves both replacement triples"
+    sparql: |
+      @prefix cf06: <http://conformance-form06.example/> .
+      SELECT ?subject, ?state WHERE { ?subject cf06:state ?state }
+      ORDER BY ?subject
+    expect:
+      rows: 2
+      data:
+        - "?subject": "http://conformance-form06.example/a"
+          "?state": "new"
+        - "?subject": "http://conformance-form06.example/b"
+          "?state": "new"
+
+  - name: "Turtle blank-node label denotes one node throughout a document"
+    ttl_data: |
+      @prefix cf07: <http://conformance-form07.example/> .
+      cf07:alice cf07:address _:address .
+      _:address cf07:city "Berlin" .
+      _:address cf07:country "DE" .
+    sparql: |
+      @prefix cf07: <http://conformance-form07.example/> .
+      SELECT ?city, ?country WHERE {
+        cf07:alice cf07:address ?address .
+        ?address cf07:city ?city .
+        ?address cf07:country ?country
+      }
+    expect:
+      rows: 1
+      data:
+        - "?city": "Berlin"
+          "?country": "DE"
+
+  - name: "Separate anonymous blank-node property lists allocate distinct nodes"
+    ttl_data: |
+      @prefix cf08: <http://conformance-form08.example/> .
+      cf08:alice cf08:address [ cf08:city "Berlin" ] .
+      cf08:bob cf08:address [ cf08:city "Berlin" ] .
+    sparql: |
+      @prefix cf08: <http://conformance-form08.example/> .
+      SELECT DISTINCT ?address WHERE {
+        ?person cf08:address ?address .
+        ?address cf08:city "Berlin"
+      }
+    expect:
+      rows: 2
+
+  - name: "Nested blank-node property lists preserve inner and outer subjects"
+    ttl_data: |
+      @prefix cf09: <http://conformance-form09.example/> .
+      cf09:alice cf09:address [
+        cf09:city "Berlin" ;
+        cf09:country [ cf09:code "DE" ]
+      ] .
+    sparql: |
+      @prefix cf09: <http://conformance-form09.example/> .
+      SELECT ?city, ?code WHERE {
+        cf09:alice cf09:address ?address .
+        ?address cf09:city ?city .
+        ?address cf09:country ?country .
+        ?country cf09:code ?code
+      }
+    expect:
+      rows: 1
+      data:
+        - "?city": "Berlin"
+          "?code": "DE"
+
+  - name: "Turtle collection expands to an ordered rdf:first/rdf:rest chain"
+    ttl_data: |
+      @prefix cf10: <http://conformance-form10.example/> .
+      cf10:subject cf10:items ( "first" "second" ) .
+    sparql: |
+      @prefix cf10: <http://conformance-form10.example/> .
+      @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+      SELECT ?first, ?second WHERE {
+        cf10:subject cf10:items ?head .
+        ?head rdf:first ?first .
+        ?head rdf:rest ?tail .
+        ?tail rdf:first ?second .
+        ?tail rdf:rest rdf:nil
+      }
+    expect:
+      rows: 1
+      data:
+        - "?first": "first"
+          "?second": "second"
+
+  - name: "Empty Turtle collection denotes rdf:nil"
+    ttl_data: |
+      @prefix cf11: <http://conformance-form11.example/> .
+      cf11:subject cf11:items () .
+    sparql: |
+      @prefix cf11: <http://conformance-form11.example/> .
+      @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+      SELECT ?items WHERE { cf11:subject cf11:items ?items }
+    expect:
+      rows: 1
+      data:
+        - "?items": "http://www.w3.org/1999/02/22-rdf-syntax-ns#nil"
+
+cleanup: []
