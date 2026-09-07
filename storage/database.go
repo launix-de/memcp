@@ -1415,19 +1415,9 @@ func AlterDatabaseStorage(schema string, targetConfig json.RawMessage, currentTx
 		panic("Database " + schema + " does not exist")
 	}
 	requireDatabaseMaintenance(schema, maintenanceAlter)
-	if equalDatabaseBackendConfig(databaseBackendConfig(schema), targetConfig) {
-		return true
-	}
 	dst := createPersistenceFromConfig(schema, targetConfig)
 	if dst == nil {
 		panic("unknown or invalid storage backend")
-	}
-	src := db.persistence
-	sameStorage := src.StorageIdentity() == dst.StorageIdentity()
-	if !sameStorage {
-		if len(dst.ReadSchema()) != 0 {
-			panic("destination storage already contains a database schema")
-		}
 	}
 	ss := SessionStateFromTx(currentTx)
 	if ss == nil {
@@ -1435,11 +1425,22 @@ func AlterDatabaseStorage(schema string, targetConfig json.RawMessage, currentTx
 	}
 
 	db.ensureLoaded()
+	db.storageMoveMu.Lock()
+	defer db.storageMoveMu.Unlock()
+	if GetDatabase(schema) != db {
+		panic("Database " + schema + " was dropped while waiting for storage migration")
+	}
+	if equalDatabaseBackendConfig(databaseBackendConfig(schema), targetConfig) {
+		return true
+	}
 	// The blob catalog must exist before the table set is frozen. Rebuild may
 	// update it, and no table may appear after we publish the WRITE locks.
 	db.ensureBlobTable()
-	db.storageMoveMu.Lock()
-	defer db.storageMoveMu.Unlock()
+	src := db.persistence
+	sameStorage := src.StorageIdentity() == dst.StorageIdentity()
+	if !sameStorage && len(dst.ReadSchema()) != 0 {
+		panic("destination storage already contains a database schema")
+	}
 	db.persistenceLifecycle.Lock()
 	defer db.persistenceLifecycle.Unlock()
 
