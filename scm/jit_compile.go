@@ -223,12 +223,10 @@ func jitPlaceIntoPair(ctx *JITContext, src *JITValueDesc, target JITValueDesc) J
 		ctx.EnsureDesc(src)
 		return jitPlaceIntoPair(ctx, src, target)
 	case LocRegPair:
-		if src.Reg != target.Reg {
-			ctx.EmitMovRegReg(target.Reg, src.Reg)
-		}
-		if src.Reg2 != target.Reg2 {
-			ctx.EmitMovRegReg(target.Reg2, src.Reg2)
-		}
+		ctx.emitParallelRegMoves([]jitRegMove{
+			{dst: target.Reg, src: src.Reg},
+			{dst: target.Reg2, src: src.Reg2},
+		})
 		if src.Reg != target.Reg && src.Reg2 != target.Reg2 {
 			ctx.FreeDesc(src)
 		}
