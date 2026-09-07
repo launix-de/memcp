@@ -803,6 +803,16 @@ type JITContext struct {
 	HasSelfLoop              bool
 	SelfParamCount           int
 	RegOwners                [32]*JITValueDesc // register → owner descriptor (nil = untracked)
+	// DeferredRegMoves is the physical half of descriptor-level lazy placement.
+	// A public register move changes the logical location immediately, but its
+	// bytes are held until a non-move instruction, control-flow boundary, or
+	// safepoint needs the value. Keeping this state in JITContext lets nested
+	// inline emitters collapse each other's hand-off moves.
+	DeferredRegMoves jitDeferredRegMoves
+	// registerInstructionDepth suppresses the conservative full barrier in the
+	// raw byte writer while an architecture emitter with an explicit use/def
+	// contract is encoding one instruction.
+	registerInstructionDepth uint8
 	// DynamicSP is the temporary distance below the static frame bottom. It
 	// covers pushed live registers, variadic arrays, and the Go call area.
 	DynamicSP    int32
@@ -1200,6 +1210,9 @@ type jitDescSpillSnapshot struct {
 }
 
 func (ctx *JITContext) SnapshotAllocState() jitAllocStateSnapshot {
+	// Sibling renderers rewind allocator metadata, not physical alias state.
+	// Materialize the fallthrough state before taking the branch snapshot.
+	ctx.FlushRegisterMoves()
 	s := jitAllocStateSnapshot{
 		freeRegs:            ctx.FreeRegs,
 		freeFPRegs:          ctx.FreeFPRegs,
@@ -1240,6 +1253,7 @@ func (ctx *JITContext) SnapshotAllocState() jitAllocStateSnapshot {
 }
 
 func (ctx *JITContext) RestoreAllocState(s jitAllocStateSnapshot) {
+	ctx.FlushRegisterMoves()
 	ctx.FreeRegs = s.freeRegs
 	ctx.FreeFPRegs = s.freeFPRegs
 	ctx.ProtectedRegs = s.protectedRegs
@@ -2031,6 +2045,7 @@ func (ctx *JITContext) EnsureDescsTogether(descs ...*JITValueDesc) {
 
 // FreeReg returns a register to the free pool.
 func (ctx *JITContext) FreeReg(r Reg) {
+	heldAsDeferredSource := ctx.releaseDeferredReg(r)
 	owner := ctx.RegOwners[r]
 	if owner != nil {
 		switch owner.Loc {
@@ -2069,10 +2084,12 @@ func (ctx *JITContext) FreeReg(r Reg) {
 			}
 		}
 	}
-	if r >= RegX0 {
-		ctx.FreeFPRegs |= 1 << uint(r)
-	} else {
-		ctx.FreeRegs |= 1 << uint(r)
+	if !heldAsDeferredSource {
+		if r >= RegX0 {
+			ctx.FreeFPRegs |= 1 << uint(r)
+		} else {
+			ctx.FreeRegs |= 1 << uint(r)
+		}
 	}
 	ctx.RegOwners[r] = nil
 }
@@ -3465,6 +3482,203 @@ type jitParallelRegMoveBatch struct {
 	count uint8
 }
 
+// jitDeferredRegMoves represents sequential register copies as aliases to the
+// physical register which still contains the requested value. Unlike a
+// parallel move batch, assigning a register is an ordering boundary for older
+// aliases which still depend on its previous contents.
+//
+// The fixed arrays make queuing and flushing allocation-free. Registers are
+// architecture identifiers supplied by the backend; the scheduler itself does
+// not know whether they spell RAX, X0, or a future RISC-V register.
+type jitDeferredRegMoves struct {
+	sources [32]Reg
+	active  uint32
+	// held marks physical source registers whose descriptor lifetime ended while
+	// a deferred destination still aliases their contents. Such registers remain
+	// unavailable to AllocReg until the final alias is emitted or discarded.
+	held     uint32
+	flushing bool
+}
+
+func (moves *jitDeferredRegMoves) source(reg Reg) Reg {
+	for depth := 0; depth < len(moves.sources); depth++ {
+		if moves.active&(uint32(1)<<uint(reg)) == 0 {
+			return reg
+		}
+		reg = moves.sources[reg]
+	}
+	panic("jit: cyclic deferred register moves")
+}
+
+// deferRegMove records the value currently visible through src as dst's new
+// logical value. If dst's old physical contents still feed another alias, that
+// dependent value must be materialized before dst can be redefined.
+func (ctx *JITContext) deferRegMove(dst, src Reg) {
+	if dst >= 32 || src >= 32 {
+		panic("jit: deferred move register outside scheduler range")
+	}
+	if dst == src {
+		return
+	}
+	var dependents uint32
+	for pending := ctx.DeferredRegMoves.active; pending != 0; pending &= pending - 1 {
+		candidate := Reg(bits.TrailingZeros32(pending))
+		bit := uint32(1) << uint(candidate)
+		if candidate != dst && ctx.DeferredRegMoves.source(candidate) == dst {
+			dependents |= bit
+		}
+	}
+	ctx.flushDeferredRegMoves(dependents)
+	source := ctx.DeferredRegMoves.source(src)
+	if source == dst {
+		ctx.DeferredRegMoves.active &^= uint32(1) << uint(dst)
+		return
+	}
+	ctx.DeferredRegMoves.sources[dst] = source
+	ctx.DeferredRegMoves.active |= uint32(1) << uint(dst)
+}
+
+// releaseDeferredReg drops a dead logical destination. Any other pending value
+// which still names the register's old physical contents is emitted first,
+// because the allocator may hand the register to a destructive producer next.
+func (ctx *JITContext) releaseDeferredReg(reg Reg) bool {
+	if reg >= 32 {
+		return false
+	}
+	regBit := uint32(1) << uint(reg)
+	if ctx.DeferredRegMoves.active&regBit != 0 {
+		source := ctx.DeferredRegMoves.source(reg)
+		representedElsewhere := false
+		for pending := ctx.DeferredRegMoves.active; pending != 0; pending &= pending - 1 {
+			candidate := Reg(bits.TrailingZeros32(pending))
+			if candidate != reg && ctx.DeferredRegMoves.source(candidate) == source {
+				representedElsewhere = true
+				break
+			}
+		}
+		if representedElsewhere {
+			ctx.DeferredRegMoves.active &^= regBit
+		} else {
+			// The final logical alias may still be read through a non-owning
+			// descriptor copy. Materialize it before returning its named register.
+			ctx.flushDeferredRegMoves(regBit)
+		}
+	}
+	hasDependents := false
+	for pending := ctx.DeferredRegMoves.active; pending != 0; pending &= pending - 1 {
+		candidate := Reg(bits.TrailingZeros32(pending))
+		if candidate != reg && ctx.DeferredRegMoves.source(candidate) == reg {
+			hasDependents = true
+			break
+		}
+	}
+	ctx.DeferredRegMoves.active &^= regBit
+	if hasDependents {
+		ctx.DeferredRegMoves.held |= uint32(1) << uint(reg)
+		return true
+	}
+	ctx.releaseUnusedDeferredSources()
+	return false
+}
+
+func (ctx *JITContext) releaseUnusedDeferredSources() {
+	moves := &ctx.DeferredRegMoves
+	for held := moves.held; held != 0; held &= held - 1 {
+		source := Reg(bits.TrailingZeros32(held))
+		bit := uint32(1) << uint(source)
+		used := false
+		for pending := moves.active; pending != 0; pending &= pending - 1 {
+			candidate := Reg(bits.TrailingZeros32(pending))
+			if moves.source(candidate) == source {
+				used = true
+				break
+			}
+		}
+		if used {
+			continue
+		}
+		moves.held &^= bit
+		if source >= RegX0 {
+			if ctx.AllFPRegs&uint64(bit) != 0 {
+				ctx.FreeFPRegs |= uint64(bit)
+			}
+		} else if ctx.AllRegs&uint64(bit) != 0 {
+			ctx.FreeRegs |= uint64(bit)
+		}
+	}
+}
+
+// flushDeferredRegMoves emits only the requested logical destinations. Their
+// canonical sources are physical registers because deferRegMove flattens every
+// alias chain. The parallel solver retains correct old-source semantics when
+// several destinations are materialized together.
+func (ctx *JITContext) flushDeferredRegMoves(mask uint32) {
+	moves := &ctx.DeferredRegMoves
+	mask &= moves.active
+	if mask == 0 || moves.flushing {
+		return
+	}
+	moves.flushing = true
+	defer func() { moves.flushing = false }()
+	var batch jitParallelRegMoveBatch
+	for pending := mask; pending != 0; pending &= pending - 1 {
+		dst := Reg(bits.TrailingZeros32(pending))
+		batch.add(dst, moves.source(dst))
+	}
+	ctx.emitParallelRegMoveBatch(&batch)
+	moves.active &^= mask
+	ctx.releaseUnusedDeferredSources()
+}
+
+// FlushRegisterMoves is a full materialization barrier for control-flow,
+// safepoint, stack-map, and raw-code-position boundaries.
+func (ctx *JITContext) FlushRegisterMoves() {
+	ctx.flushDeferredRegMoves(ctx.DeferredRegMoves.active)
+}
+
+func jitRegisterMask(regs ...Reg) uint32 {
+	var mask uint32
+	for _, reg := range regs {
+		if reg >= 32 {
+			panic("jit: register outside use/def mask")
+		}
+		mask |= uint32(1) << uint(reg)
+	}
+	return mask
+}
+
+// beginRegisterInstruction applies an architecture emitter's use/def contract.
+// Reads materialize only their requested logical values. Before a write, old
+// physical values still referenced by another alias are preserved; the written
+// destinations themselves become concrete outputs of this instruction.
+func (ctx *JITContext) beginRegisterInstruction(reads, writes uint32) {
+	if ctx.DeferredRegMoves.active == 0 {
+		ctx.registerInstructionDepth++
+		return
+	}
+	ctx.prepareDeferredRegisterInstruction(reads, writes)
+	ctx.registerInstructionDepth++
+}
+
+func (ctx *JITContext) prepareDeferredRegisterInstruction(reads, writes uint32) {
+	ctx.flushDeferredRegMoves(reads)
+	var oldValueDependents uint32
+	for pending := ctx.DeferredRegMoves.active &^ writes; pending != 0; pending &= pending - 1 {
+		candidate := Reg(bits.TrailingZeros32(pending))
+		bit := uint32(1) << uint(candidate)
+		source := ctx.DeferredRegMoves.source(candidate)
+		if writes&(uint32(1)<<uint(source)) != 0 {
+			oldValueDependents |= bit
+		}
+	}
+	ctx.flushDeferredRegMoves(oldValueDependents)
+	ctx.DeferredRegMoves.active &^= writes
+}
+
+func (ctx *JITContext) endRegisterInstruction() {
+	ctx.registerInstructionDepth--
+}
+
 func (batch *jitParallelRegMoveBatch) add(dst, src Reg) {
 	if dst == src {
 		return
@@ -4407,6 +4621,9 @@ func (ctx *JITContext) MarkLabel(id JITLabel) {
 	if int(id) >= len(ctx.Labels) {
 		panic("jit: invalid label")
 	}
+	// Fallthrough moves belong to the predecessor. A branch targeting this
+	// label must start after those bytes, never in front of them.
+	ctx.FlushRegisterMoves()
 	ctx.Labels[id] = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 }
 
@@ -4446,6 +4663,7 @@ func (ctx *JITContext) ResolveFixups() {
 
 // ResolveFixupsFinal patches all remaining fixups, panicking on undefined labels.
 func (ctx *JITContext) ResolveFixupsFinal() {
+	ctx.FlushRegisterMoves()
 	for i := range ctx.Fixups {
 		f := &ctx.Fixups[i]
 		targetPos := ctx.Labels[f.LabelID]
@@ -4647,6 +4865,7 @@ func init_jit() {
 							return result
 						}
 						bbs[0].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[0].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_0 = bbs[0].Address
 						ctx.MarkLabel(lbl1)
@@ -4821,6 +5040,7 @@ func init_jit() {
 							return result
 						}
 						bbs[1].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[1].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_1 = bbs[1].Address
 						ctx.MarkLabel(lbl2)
@@ -5082,6 +5302,7 @@ func init_jit() {
 							return result
 						}
 						bbs[2].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[2].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_2 = bbs[2].Address
 						ctx.MarkLabel(lbl3)
@@ -5173,6 +5394,7 @@ func init_jit() {
 							return result
 						}
 						bbs[3].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[3].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_3 = bbs[3].Address
 						ctx.MarkLabel(lbl4)
@@ -5328,6 +5550,7 @@ func init_jit() {
 							return result
 						}
 						bbs[4].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[4].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_4 = bbs[4].Address
 						ctx.MarkLabel(lbl5)
@@ -5480,6 +5703,7 @@ func init_jit() {
 							return result
 						}
 						bbs[5].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[5].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_5 = bbs[5].Address
 						ctx.MarkLabel(lbl6)
@@ -6138,6 +6362,7 @@ func init_jit() {
 							return result
 						}
 						bbs[0].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[0].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_0 = bbs[0].Address
 						ctx.MarkLabel(lbl1)
@@ -6325,6 +6550,7 @@ func init_jit() {
 							return result
 						}
 						bbs[1].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[1].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_1 = bbs[1].Address
 						ctx.MarkLabel(lbl2)
@@ -6587,6 +6813,7 @@ func init_jit() {
 							return result
 						}
 						bbs[2].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[2].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_2 = bbs[2].Address
 						ctx.MarkLabel(lbl3)
@@ -6687,6 +6914,7 @@ func init_jit() {
 							return result
 						}
 						bbs[3].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[3].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_3 = bbs[3].Address
 						ctx.MarkLabel(lbl4)
@@ -6835,6 +7063,7 @@ func init_jit() {
 							return result
 						}
 						bbs[4].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[4].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_4 = bbs[4].Address
 						ctx.MarkLabel(lbl5)
@@ -6980,6 +7209,7 @@ func init_jit() {
 							return result
 						}
 						bbs[5].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[5].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_5 = bbs[5].Address
 						ctx.MarkLabel(lbl6)
@@ -7392,6 +7622,7 @@ func init_jit() {
 							return result
 						}
 						bbs[6].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[6].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_6 = bbs[6].Address
 						ctx.MarkLabel(lbl7)
@@ -7954,6 +8185,7 @@ func init_jit() {
 							return result
 						}
 						bbs[7].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[7].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_7 = bbs[7].Address
 						ctx.MarkLabel(lbl8)
@@ -8114,6 +8346,7 @@ func init_jit() {
 							return result
 						}
 						bbs[8].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[8].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_8 = bbs[8].Address
 						ctx.MarkLabel(lbl9)
@@ -8636,6 +8869,7 @@ func init_jit() {
 							return result
 						}
 						bbs[9].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[9].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_9 = bbs[9].Address
 						ctx.MarkLabel(lbl10)
@@ -8884,6 +9118,7 @@ func init_jit() {
 							return result
 						}
 						bbs[10].Rendered = true
+						ctx.FlushRegisterMoves()
 						bbs[10].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 						bbpos_0_10 = bbs[10].Address
 						ctx.MarkLabel(lbl11)

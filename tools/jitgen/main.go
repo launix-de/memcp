@@ -4682,6 +4682,7 @@ func (g *codeGen) emitRecursiveBBRenderers() {
 		g.emit("\t\treturn result")
 		g.emit("\t}")
 		g.emit("\tbbs[%d].Rendered = true", bbIdx)
+		g.emit("\tctx.FlushRegisterMoves()")
 		g.emit("\tbbs[%d].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))", bbIdx)
 		g.emit("\t%s = bbs[%d].Address", posVar, bbIdx)
 		g.emit("\tctx.MarkLabel(%s)", lbl)

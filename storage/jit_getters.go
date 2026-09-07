@@ -114,6 +114,7 @@ func (s *StoragePrefix) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 				return result
 			}
 			bbs[0].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[0].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_0 = bbs[0].Address
 			ctx.MarkLabel(lbl1)
@@ -265,6 +266,7 @@ func (s *StoragePrefix) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 				return result
 			}
 			bbs[1].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[1].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_1 = bbs[1].Address
 			ctx.MarkLabel(lbl2)
@@ -338,6 +340,7 @@ func (s *StoragePrefix) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 				return result
 			}
 			bbs[2].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[2].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_2 = bbs[2].Address
 			ctx.MarkLabel(lbl3)
@@ -578,6 +581,7 @@ func (s *StoragePrefix) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 				return result
 			}
 			bbs[0].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[0].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_0 = bbs[0].Address
 			ctx.MarkLabel(lbl1)
@@ -728,6 +732,7 @@ func (s *StoragePrefix) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 				return result
 			}
 			bbs[1].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[1].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_1 = bbs[1].Address
 			ctx.MarkLabel(lbl2)
@@ -800,6 +805,7 @@ func (s *StoragePrefix) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 				return result
 			}
 			bbs[2].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[2].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_2 = bbs[2].Address
 			ctx.MarkLabel(lbl3)
@@ -1396,6 +1402,7 @@ func (s *StorageInt) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 				return result
 			}
 			bbs[0].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[0].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_0 = bbs[0].Address
 			ctx.MarkLabel(lbl1)
@@ -1615,6 +1622,7 @@ func (s *StorageInt) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 				return result
 			}
 			bbs[1].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[1].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_1 = bbs[1].Address
 			ctx.MarkLabel(lbl2)
@@ -1724,6 +1732,7 @@ func (s *StorageInt) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 				return result
 			}
 			bbs[2].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[2].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_2 = bbs[2].Address
 			ctx.MarkLabel(lbl3)
@@ -2015,6 +2024,7 @@ func (s *StorageInt) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 				return result
 			}
 			bbs[3].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[3].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_3 = bbs[3].Address
 			ctx.MarkLabel(lbl4)
@@ -2111,6 +2121,7 @@ func (s *StorageInt) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 				return result
 			}
 			bbs[4].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[4].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_4 = bbs[4].Address
 			ctx.MarkLabel(lbl5)
@@ -2566,6 +2577,7 @@ func (s *StorageInt) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 				return result
 			}
 			bbs[5].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[5].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_5 = bbs[5].Address
 			ctx.MarkLabel(lbl6)
@@ -2733,6 +2745,7 @@ func (s *StorageInt) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 				return result
 			}
 			bbs[6].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[6].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_6 = bbs[6].Address
 			ctx.MarkLabel(lbl7)
@@ -3063,6 +3076,7 @@ func (s *StorageInt) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 				return result
 			}
 			bbs[7].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[7].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_7 = bbs[7].Address
 			ctx.MarkLabel(lbl8)
@@ -3590,6 +3604,7 @@ func (s *StorageInt) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 				return result
 			}
 			bbs[8].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[8].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_8 = bbs[8].Address
 			ctx.MarkLabel(lbl9)
@@ -4141,6 +4156,7 @@ func (s *StorageInt) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 				return result
 			}
 			bbs[9].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[9].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_9 = bbs[9].Address
 			ctx.MarkLabel(lbl10)
@@ -4734,6 +4750,7 @@ func (s *StorageInt) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 				return result
 			}
 			bbs[10].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[10].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_10 = bbs[10].Address
 			ctx.MarkLabel(lbl11)
@@ -5420,6 +5437,7 @@ func (s *StorageInt) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 				return result
 			}
 			bbs[11].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[11].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_11 = bbs[11].Address
 			ctx.MarkLabel(lbl12)
@@ -6394,6 +6412,7 @@ func (s *StorageInt) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 				return result
 			}
 			bbs[12].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[12].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_12 = bbs[12].Address
 			ctx.MarkLabel(lbl13)
@@ -6613,6 +6632,7 @@ func (s *StorageInt) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 				return result
 			}
 			bbs[13].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[13].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_13 = bbs[13].Address
 			ctx.MarkLabel(lbl14)
@@ -6915,6 +6935,7 @@ func (s *StorageInt) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 				return result
 			}
 			bbs[14].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[14].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_14 = bbs[14].Address
 			ctx.MarkLabel(lbl15)
@@ -7349,6 +7370,7 @@ func (s *StorageInt) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 				return result
 			}
 			bbs[15].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[15].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_15 = bbs[15].Address
 			ctx.MarkLabel(lbl16)
@@ -7741,6 +7763,7 @@ func (s *StorageInt) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 				return result
 			}
 			bbs[16].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[16].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_16 = bbs[16].Address
 			ctx.MarkLabel(lbl17)
@@ -8718,6 +8741,7 @@ func (s *StorageInt) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 				return result
 			}
 			bbs[17].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[17].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_17 = bbs[17].Address
 			ctx.MarkLabel(lbl18)
@@ -10090,6 +10114,7 @@ func (s *StorageInt) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 				return result
 			}
 			bbs[18].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[18].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_18 = bbs[18].Address
 			ctx.MarkLabel(lbl19)
@@ -10414,6 +10439,7 @@ func (s *StorageInt) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 				return result
 			}
 			bbs[19].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[19].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_19 = bbs[19].Address
 			ctx.MarkLabel(lbl20)
@@ -11651,6 +11677,7 @@ func (s *StorageInt) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 				return result
 			}
 			bbs[20].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[20].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_20 = bbs[20].Address
 			ctx.MarkLabel(lbl21)
@@ -12093,6 +12120,7 @@ func (s *StorageInt) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 				return result
 			}
 			bbs[21].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[21].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_21 = bbs[21].Address
 			ctx.MarkLabel(lbl22)
@@ -12708,6 +12736,7 @@ func (s *StorageInt) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 				return result
 			}
 			bbs[22].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[22].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_22 = bbs[22].Address
 			ctx.MarkLabel(lbl23)
@@ -13240,6 +13269,7 @@ func (s *StorageInt) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 				return result
 			}
 			bbs[23].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[23].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_23 = bbs[23].Address
 			ctx.MarkLabel(lbl24)
@@ -15046,6 +15076,7 @@ func (s *StorageInt) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 				return result
 			}
 			bbs[0].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[0].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_0 = bbs[0].Address
 			ctx.MarkLabel(lbl1)
@@ -15264,6 +15295,7 @@ func (s *StorageInt) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 				return result
 			}
 			bbs[1].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[1].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_1 = bbs[1].Address
 			ctx.MarkLabel(lbl2)
@@ -15372,6 +15404,7 @@ func (s *StorageInt) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 				return result
 			}
 			bbs[2].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[2].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_2 = bbs[2].Address
 			ctx.MarkLabel(lbl3)
@@ -15689,6 +15722,7 @@ func (s *StorageInt) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 				return result
 			}
 			bbs[3].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[3].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_3 = bbs[3].Address
 			ctx.MarkLabel(lbl4)
@@ -15787,6 +15821,7 @@ func (s *StorageInt) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 				return result
 			}
 			bbs[4].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[4].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_4 = bbs[4].Address
 			ctx.MarkLabel(lbl5)
@@ -16253,6 +16288,7 @@ func (s *StorageInt) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 				return result
 			}
 			bbs[5].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[5].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_5 = bbs[5].Address
 			ctx.MarkLabel(lbl6)
@@ -16442,6 +16478,7 @@ func (s *StorageInt) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 				return result
 			}
 			bbs[6].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[6].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_6 = bbs[6].Address
 			ctx.MarkLabel(lbl7)
@@ -16624,6 +16661,7 @@ func (s *StorageInt) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 				return result
 			}
 			bbs[7].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[7].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_7 = bbs[7].Address
 			ctx.MarkLabel(lbl8)
@@ -17102,6 +17140,7 @@ func (s *StorageInt) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 				return result
 			}
 			bbs[8].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[8].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_8 = bbs[8].Address
 			ctx.MarkLabel(lbl9)
@@ -17604,6 +17643,7 @@ func (s *StorageInt) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 				return result
 			}
 			bbs[9].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[9].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_9 = bbs[9].Address
 			ctx.MarkLabel(lbl10)
@@ -18148,6 +18188,7 @@ func (s *StorageInt) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 				return result
 			}
 			bbs[10].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[10].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_10 = bbs[10].Address
 			ctx.MarkLabel(lbl11)
@@ -18811,6 +18852,7 @@ func (s *StorageInt) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 				return result
 			}
 			bbs[11].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[11].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_11 = bbs[11].Address
 			ctx.MarkLabel(lbl12)
@@ -19707,6 +19749,7 @@ func (s *StorageInt) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 				return result
 			}
 			bbs[12].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[12].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_12 = bbs[12].Address
 			ctx.MarkLabel(lbl13)
@@ -19916,6 +19959,7 @@ func (s *StorageInt) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 				return result
 			}
 			bbs[13].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[13].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_13 = bbs[13].Address
 			ctx.MarkLabel(lbl14)
@@ -20205,6 +20249,7 @@ func (s *StorageInt) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 				return result
 			}
 			bbs[14].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[14].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_14 = bbs[14].Address
 			ctx.MarkLabel(lbl15)
@@ -20604,6 +20649,7 @@ func (s *StorageInt) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 				return result
 			}
 			bbs[15].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[15].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_15 = bbs[15].Address
 			ctx.MarkLabel(lbl16)
@@ -20979,6 +21025,7 @@ func (s *StorageInt) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 				return result
 			}
 			bbs[16].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[16].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_16 = bbs[16].Address
 			ctx.MarkLabel(lbl17)
@@ -21925,6 +21972,7 @@ func (s *StorageInt) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 				return result
 			}
 			bbs[17].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[17].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_17 = bbs[17].Address
 			ctx.MarkLabel(lbl18)
@@ -22972,6 +23020,7 @@ func (s *StorageInt) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 				return result
 			}
 			bbs[18].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[18].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_18 = bbs[18].Address
 			ctx.MarkLabel(lbl19)
@@ -24446,6 +24495,7 @@ func (s *StorageInt) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 				return result
 			}
 			bbs[19].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[19].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_19 = bbs[19].Address
 			ctx.MarkLabel(lbl20)
@@ -24769,6 +24819,7 @@ func (s *StorageInt) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 				return result
 			}
 			bbs[20].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[20].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_20 = bbs[20].Address
 			ctx.MarkLabel(lbl21)
@@ -25210,6 +25261,7 @@ func (s *StorageInt) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 				return result
 			}
 			bbs[21].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[21].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_21 = bbs[21].Address
 			ctx.MarkLabel(lbl22)
@@ -25783,6 +25835,7 @@ func (s *StorageInt) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 				return result
 			}
 			bbs[22].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[22].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_22 = bbs[22].Address
 			ctx.MarkLabel(lbl23)
@@ -26314,6 +26367,7 @@ func (s *StorageInt) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 				return result
 			}
 			bbs[23].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[23].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_23 = bbs[23].Address
 			ctx.MarkLabel(lbl24)
@@ -27896,6 +27950,7 @@ func (s *StorageFloat) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, t
 				return result
 			}
 			bbs[0].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[0].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_0 = bbs[0].Address
 			ctx.MarkLabel(lbl1)
@@ -28081,6 +28136,7 @@ func (s *StorageFloat) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, t
 				return result
 			}
 			bbs[1].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[1].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_1 = bbs[1].Address
 			ctx.MarkLabel(lbl2)
@@ -28172,6 +28228,7 @@ func (s *StorageFloat) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, t
 				return result
 			}
 			bbs[2].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[2].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_2 = bbs[2].Address
 			ctx.MarkLabel(lbl3)
@@ -28299,6 +28356,7 @@ func (s *StorageFloat) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, t
 				return result
 			}
 			bbs[3].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[3].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_3 = bbs[3].Address
 			ctx.MarkLabel(lbl4)
@@ -28651,6 +28709,7 @@ func (s *StorageFloat) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, t
 				return result
 			}
 			bbs[4].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[4].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_4 = bbs[4].Address
 			ctx.MarkLabel(lbl5)
@@ -29090,6 +29149,7 @@ func (s *StorageFloat) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, t
 				return result
 			}
 			bbs[5].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[5].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_5 = bbs[5].Address
 			ctx.MarkLabel(lbl6)
@@ -29200,6 +29260,7 @@ func (s *StorageFloat) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, t
 				return result
 			}
 			bbs[6].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[6].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_6 = bbs[6].Address
 			ctx.MarkLabel(lbl7)
@@ -29360,6 +29421,7 @@ func (s *StorageFloat) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, t
 				return result
 			}
 			bbs[7].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[7].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_7 = bbs[7].Address
 			ctx.MarkLabel(lbl8)
@@ -29652,6 +29714,7 @@ func (s *StorageFloat) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, t
 				return result
 			}
 			bbs[8].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[8].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_8 = bbs[8].Address
 			ctx.MarkLabel(lbl9)
@@ -30031,6 +30094,7 @@ func (s *StorageFloat) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target,
 				return result
 			}
 			bbs[0].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[0].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_0 = bbs[0].Address
 			ctx.MarkLabel(lbl1)
@@ -30215,6 +30279,7 @@ func (s *StorageFloat) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target,
 				return result
 			}
 			bbs[1].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[1].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_1 = bbs[1].Address
 			ctx.MarkLabel(lbl2)
@@ -30305,6 +30370,7 @@ func (s *StorageFloat) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target,
 				return result
 			}
 			bbs[2].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[2].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_2 = bbs[2].Address
 			ctx.MarkLabel(lbl3)
@@ -30431,6 +30497,7 @@ func (s *StorageFloat) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target,
 				return result
 			}
 			bbs[3].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[3].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_3 = bbs[3].Address
 			ctx.MarkLabel(lbl4)
@@ -30808,6 +30875,7 @@ func (s *StorageFloat) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target,
 				return result
 			}
 			bbs[4].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[4].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_4 = bbs[4].Address
 			ctx.MarkLabel(lbl5)
@@ -31217,6 +31285,7 @@ func (s *StorageFloat) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target,
 				return result
 			}
 			bbs[5].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[5].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_5 = bbs[5].Address
 			ctx.MarkLabel(lbl6)
@@ -31329,6 +31398,7 @@ func (s *StorageFloat) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target,
 				return result
 			}
 			bbs[6].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[6].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_6 = bbs[6].Address
 			ctx.MarkLabel(lbl7)
@@ -31492,6 +31562,7 @@ func (s *StorageFloat) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target,
 				return result
 			}
 			bbs[7].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[7].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_7 = bbs[7].Address
 			ctx.MarkLabel(lbl8)
@@ -31787,6 +31858,7 @@ func (s *StorageFloat) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target,
 				return result
 			}
 			bbs[8].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[8].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_8 = bbs[8].Address
 			ctx.MarkLabel(lbl9)
@@ -32162,6 +32234,7 @@ func (s *StorageString) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 				return result
 			}
 			bbs[0].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[0].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_0 = bbs[0].Address
 			ctx.MarkLabel(lbl1)
@@ -32330,6 +32403,7 @@ func (s *StorageString) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 				return result
 			}
 			bbs[1].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[1].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_1 = bbs[1].Address
 			ctx.MarkLabel(lbl2)
@@ -32412,6 +32486,7 @@ func (s *StorageString) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 				return result
 			}
 			bbs[2].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[2].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_2 = bbs[2].Address
 			ctx.MarkLabel(lbl3)
@@ -32652,6 +32727,7 @@ func (s *StorageString) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 				return result
 			}
 			bbs[3].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[3].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_3 = bbs[3].Address
 			ctx.MarkLabel(lbl4)
@@ -32724,6 +32800,7 @@ func (s *StorageString) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 				return result
 			}
 			bbs[4].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[4].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_4 = bbs[4].Address
 			ctx.MarkLabel(lbl5)
@@ -32864,6 +32941,7 @@ func (s *StorageString) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 				return result
 			}
 			bbs[5].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[5].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_5 = bbs[5].Address
 			ctx.MarkLabel(lbl6)
@@ -33239,6 +33317,7 @@ func (s *StorageString) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 				return result
 			}
 			bbs[6].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[6].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_6 = bbs[6].Address
 			ctx.MarkLabel(lbl7)
@@ -33465,6 +33544,7 @@ func (s *StorageString) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 				return result
 			}
 			bbs[7].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[7].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_7 = bbs[7].Address
 			ctx.MarkLabel(lbl8)
@@ -33817,6 +33897,7 @@ func (s *StorageString) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 				return result
 			}
 			bbs[0].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[0].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_0 = bbs[0].Address
 			ctx.MarkLabel(lbl1)
@@ -33967,6 +34048,7 @@ func (s *StorageString) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 				return result
 			}
 			bbs[1].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[1].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_1 = bbs[1].Address
 			ctx.MarkLabel(lbl2)
@@ -34039,6 +34121,7 @@ func (s *StorageString) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 				return result
 			}
 			bbs[2].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[2].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_2 = bbs[2].Address
 			ctx.MarkLabel(lbl3)
@@ -34288,6 +34371,7 @@ func (s *StorageString) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 				return result
 			}
 			bbs[3].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[3].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_3 = bbs[3].Address
 			ctx.MarkLabel(lbl4)
@@ -34354,6 +34438,7 @@ func (s *StorageString) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 				return result
 			}
 			bbs[4].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[4].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_4 = bbs[4].Address
 			ctx.MarkLabel(lbl5)
@@ -34699,6 +34784,7 @@ func (s *StorageEnum) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, ta
 				return result
 			}
 			bbs[0].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[0].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_0 = bbs[0].Address
 			ctx.MarkLabel(lbl1)
@@ -34884,6 +34970,7 @@ func (s *StorageEnum) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, ta
 				return result
 			}
 			bbs[1].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[1].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_1 = bbs[1].Address
 			ctx.MarkLabel(lbl2)
@@ -34975,6 +35062,7 @@ func (s *StorageEnum) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, ta
 				return result
 			}
 			bbs[2].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[2].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_2 = bbs[2].Address
 			ctx.MarkLabel(lbl3)
@@ -35106,6 +35194,7 @@ func (s *StorageEnum) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, ta
 				return result
 			}
 			bbs[3].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[3].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_3 = bbs[3].Address
 			ctx.MarkLabel(lbl4)
@@ -35470,6 +35559,7 @@ func (s *StorageEnum) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, ta
 				return result
 			}
 			bbs[4].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[4].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_4 = bbs[4].Address
 			ctx.MarkLabel(lbl5)
@@ -35813,6 +35903,7 @@ func (s *StorageEnum) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, ta
 				return result
 			}
 			bbs[5].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[5].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_5 = bbs[5].Address
 			ctx.MarkLabel(lbl6)
@@ -36104,6 +36195,7 @@ func (s *StorageEnum) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, 
 				return result
 			}
 			bbs[0].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[0].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_0 = bbs[0].Address
 			ctx.MarkLabel(lbl1)
@@ -36288,6 +36380,7 @@ func (s *StorageEnum) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, 
 				return result
 			}
 			bbs[1].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[1].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_1 = bbs[1].Address
 			ctx.MarkLabel(lbl2)
@@ -36378,6 +36471,7 @@ func (s *StorageEnum) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, 
 				return result
 			}
 			bbs[2].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[2].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_2 = bbs[2].Address
 			ctx.MarkLabel(lbl3)
@@ -36527,6 +36621,7 @@ func (s *StorageEnum) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, 
 				return result
 			}
 			bbs[3].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[3].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_3 = bbs[3].Address
 			ctx.MarkLabel(lbl4)
@@ -36928,6 +37023,7 @@ func (s *StorageEnum) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, 
 				return result
 			}
 			bbs[4].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[4].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_4 = bbs[4].Address
 			ctx.MarkLabel(lbl5)
@@ -37215,6 +37311,7 @@ func (s *StorageEnum) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, 
 				return result
 			}
 			bbs[5].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[5].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_5 = bbs[5].Address
 			ctx.MarkLabel(lbl6)
@@ -37883,6 +37980,7 @@ func (s *StorageSparse) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 				return result
 			}
 			bbs[0].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[0].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_0 = bbs[0].Address
 			ctx.MarkLabel(lbl1)
@@ -38222,6 +38320,7 @@ func (s *StorageSparse) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 				return result
 			}
 			bbs[1].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[1].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_1 = bbs[1].Address
 			ctx.MarkLabel(lbl2)
@@ -38387,6 +38486,7 @@ func (s *StorageSparse) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 				return result
 			}
 			bbs[2].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[2].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_2 = bbs[2].Address
 			ctx.MarkLabel(lbl3)
@@ -38798,6 +38898,7 @@ func (s *StorageSparse) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 				return result
 			}
 			bbs[3].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[3].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_3 = bbs[3].Address
 			ctx.MarkLabel(lbl4)
@@ -38942,6 +39043,7 @@ func (s *StorageSparse) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 				return result
 			}
 			bbs[4].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[4].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_4 = bbs[4].Address
 			ctx.MarkLabel(lbl5)
@@ -39268,6 +39370,7 @@ func (s *StorageSparse) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 				return result
 			}
 			bbs[5].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[5].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_5 = bbs[5].Address
 			ctx.MarkLabel(lbl6)
@@ -40008,6 +40111,7 @@ func (s *StorageSparse) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 				return result
 			}
 			bbs[6].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[6].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_6 = bbs[6].Address
 			ctx.MarkLabel(lbl7)
@@ -40412,6 +40516,7 @@ func (s *StorageSparse) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 				return result
 			}
 			bbs[7].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[7].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_7 = bbs[7].Address
 			ctx.MarkLabel(lbl8)
@@ -40676,6 +40781,7 @@ func (s *StorageSparse) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 				return result
 			}
 			bbs[8].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[8].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_8 = bbs[8].Address
 			ctx.MarkLabel(lbl9)
@@ -41734,6 +41840,7 @@ func (s *StorageSparse) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 				return result
 			}
 			bbs[9].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[9].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_9 = bbs[9].Address
 			ctx.MarkLabel(lbl10)
@@ -42778,6 +42885,7 @@ func (s *StorageSparse) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 				return result
 			}
 			bbs[10].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[10].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_10 = bbs[10].Address
 			ctx.MarkLabel(lbl11)
@@ -44035,6 +44143,7 @@ func (s *StorageSparse) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 				return result
 			}
 			bbs[11].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[11].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_11 = bbs[11].Address
 			ctx.MarkLabel(lbl12)
@@ -45475,6 +45584,7 @@ func (s *StorageSparse) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 				return result
 			}
 			bbs[12].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[12].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_12 = bbs[12].Address
 			ctx.MarkLabel(lbl13)
@@ -46514,6 +46624,7 @@ func (s *StorageSparse) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 				return result
 			}
 			bbs[13].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[13].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_13 = bbs[13].Address
 			ctx.MarkLabel(lbl14)
@@ -47200,6 +47311,7 @@ func (s *StorageSparse) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 				return result
 			}
 			bbs[14].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[14].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_14 = bbs[14].Address
 			ctx.MarkLabel(lbl15)
@@ -47875,6 +47987,7 @@ func (s *StorageSparse) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 				return result
 			}
 			bbs[15].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[15].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_15 = bbs[15].Address
 			ctx.MarkLabel(lbl16)
@@ -48751,6 +48864,7 @@ func (s *StorageSparse) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 				return result
 			}
 			bbs[16].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[16].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_16 = bbs[16].Address
 			ctx.MarkLabel(lbl17)
@@ -49469,6 +49583,7 @@ func (s *StorageSparse) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, 
 				return result
 			}
 			bbs[17].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[17].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_17 = bbs[17].Address
 			ctx.MarkLabel(lbl18)
@@ -52231,6 +52346,7 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 				return result
 			}
 			bbs[0].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[0].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_0 = bbs[0].Address
 			ctx.MarkLabel(lbl1)
@@ -52633,6 +52749,7 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 				return result
 			}
 			bbs[1].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[1].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_1 = bbs[1].Address
 			ctx.MarkLabel(lbl2)
@@ -52829,6 +52946,7 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 				return result
 			}
 			bbs[2].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[2].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_2 = bbs[2].Address
 			ctx.MarkLabel(lbl3)
@@ -53330,6 +53448,7 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 				return result
 			}
 			bbs[3].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[3].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_3 = bbs[3].Address
 			ctx.MarkLabel(lbl4)
@@ -53504,6 +53623,7 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 				return result
 			}
 			bbs[4].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[4].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_4 = bbs[4].Address
 			ctx.MarkLabel(lbl5)
@@ -53732,6 +53852,7 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 				return result
 			}
 			bbs[5].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[5].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_5 = bbs[5].Address
 			ctx.MarkLabel(lbl6)
@@ -54320,6 +54441,7 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 				return result
 			}
 			bbs[6].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[6].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_6 = bbs[6].Address
 			ctx.MarkLabel(lbl7)
@@ -54983,6 +55105,7 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 				return result
 			}
 			bbs[7].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[7].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_7 = bbs[7].Address
 			ctx.MarkLabel(lbl8)
@@ -55642,6 +55765,7 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 				return result
 			}
 			bbs[8].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[8].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_8 = bbs[8].Address
 			ctx.MarkLabel(lbl9)
@@ -55917,6 +56041,7 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 				return result
 			}
 			bbs[9].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[9].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_9 = bbs[9].Address
 			ctx.MarkLabel(lbl10)
@@ -56241,6 +56366,7 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 				return result
 			}
 			bbs[10].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[10].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_10 = bbs[10].Address
 			ctx.MarkLabel(lbl11)
@@ -56562,6 +56688,7 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 				return result
 			}
 			bbs[11].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[11].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_11 = bbs[11].Address
 			ctx.MarkLabel(lbl12)
@@ -57008,6 +57135,7 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 				return result
 			}
 			bbs[12].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[12].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_12 = bbs[12].Address
 			ctx.MarkLabel(lbl13)
@@ -58047,6 +58175,7 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 				return result
 			}
 			bbs[13].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[13].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_13 = bbs[13].Address
 			ctx.MarkLabel(lbl14)
@@ -58579,6 +58708,7 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 				return result
 			}
 			bbs[14].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[14].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_14 = bbs[14].Address
 			ctx.MarkLabel(lbl15)
@@ -58954,6 +59084,7 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 				return result
 			}
 			bbs[15].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[15].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_15 = bbs[15].Address
 			ctx.MarkLabel(lbl16)
@@ -60299,6 +60430,7 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 				return result
 			}
 			bbs[16].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[16].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_16 = bbs[16].Address
 			ctx.MarkLabel(lbl17)
@@ -60869,6 +61001,7 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 				return result
 			}
 			bbs[17].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[17].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_17 = bbs[17].Address
 			ctx.MarkLabel(lbl18)
@@ -61292,6 +61425,7 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 				return result
 			}
 			bbs[18].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[18].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_18 = bbs[18].Address
 			ctx.MarkLabel(lbl19)
@@ -62941,6 +63075,7 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 				return result
 			}
 			bbs[19].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[19].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_19 = bbs[19].Address
 			ctx.MarkLabel(lbl20)
@@ -64576,6 +64711,7 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 				return result
 			}
 			bbs[20].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[20].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_20 = bbs[20].Address
 			ctx.MarkLabel(lbl21)
@@ -66424,6 +66560,7 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 				return result
 			}
 			bbs[21].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[21].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_21 = bbs[21].Address
 			ctx.MarkLabel(lbl22)
@@ -68455,6 +68592,7 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 				return result
 			}
 			bbs[22].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[22].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_22 = bbs[22].Address
 			ctx.MarkLabel(lbl23)
@@ -69701,6 +69839,7 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 				return result
 			}
 			bbs[23].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[23].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_23 = bbs[23].Address
 			ctx.MarkLabel(lbl24)
@@ -70594,6 +70733,7 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 				return result
 			}
 			bbs[24].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[24].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_24 = bbs[24].Address
 			ctx.MarkLabel(lbl25)
@@ -71476,6 +71616,7 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 				return result
 			}
 			bbs[25].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[25].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_25 = bbs[25].Address
 			ctx.MarkLabel(lbl26)
@@ -72537,6 +72678,7 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 				return result
 			}
 			bbs[26].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[26].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_26 = bbs[26].Address
 			ctx.MarkLabel(lbl27)
@@ -73458,6 +73600,7 @@ func (s *StorageSparse) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target
 				return result
 			}
 			bbs[27].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[27].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_27 = bbs[27].Address
 			ctx.MarkLabel(lbl28)
@@ -76247,6 +76390,7 @@ func (s *StorageConst) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, t
 				return result
 			}
 			bbs[0].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[0].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_0 = bbs[0].Address
 			ctx.MarkLabel(lbl1)
@@ -76431,6 +76575,7 @@ func (s *StorageConst) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, t
 				return result
 			}
 			bbs[1].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[1].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_1 = bbs[1].Address
 			ctx.MarkLabel(lbl2)
@@ -76521,6 +76666,7 @@ func (s *StorageConst) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, t
 				return result
 			}
 			bbs[2].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[2].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_2 = bbs[2].Address
 			ctx.MarkLabel(lbl3)
@@ -76647,6 +76793,7 @@ func (s *StorageConst) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, t
 				return result
 			}
 			bbs[3].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[3].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_3 = bbs[3].Address
 			ctx.MarkLabel(lbl4)
@@ -76998,6 +77145,7 @@ func (s *StorageConst) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, t
 				return result
 			}
 			bbs[4].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[4].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_4 = bbs[4].Address
 			ctx.MarkLabel(lbl5)
@@ -77291,6 +77439,7 @@ func (s *StorageConst) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, t
 				return result
 			}
 			bbs[5].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[5].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_5 = bbs[5].Address
 			ctx.MarkLabel(lbl6)
@@ -77568,6 +77717,7 @@ func (s *StorageConst) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target,
 				return result
 			}
 			bbs[0].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[0].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_0 = bbs[0].Address
 			ctx.MarkLabel(lbl1)
@@ -77752,6 +77902,7 @@ func (s *StorageConst) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target,
 				return result
 			}
 			bbs[1].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[1].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_1 = bbs[1].Address
 			ctx.MarkLabel(lbl2)
@@ -77842,6 +77993,7 @@ func (s *StorageConst) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target,
 				return result
 			}
 			bbs[2].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[2].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_2 = bbs[2].Address
 			ctx.MarkLabel(lbl3)
@@ -77987,6 +78139,7 @@ func (s *StorageConst) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target,
 				return result
 			}
 			bbs[3].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[3].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_3 = bbs[3].Address
 			ctx.MarkLabel(lbl4)
@@ -78375,6 +78528,7 @@ func (s *StorageConst) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target,
 				return result
 			}
 			bbs[4].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[4].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_4 = bbs[4].Address
 			ctx.MarkLabel(lbl5)
@@ -78654,6 +78808,7 @@ func (s *StorageConst) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target,
 				return result
 			}
 			bbs[5].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[5].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_5 = bbs[5].Address
 			ctx.MarkLabel(lbl6)
@@ -78992,6 +79147,7 @@ func (s *StorageSCMER) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, t
 				return result
 			}
 			bbs[0].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[0].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_0 = bbs[0].Address
 			ctx.MarkLabel(lbl1)
@@ -79177,6 +79333,7 @@ func (s *StorageSCMER) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, t
 				return result
 			}
 			bbs[1].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[1].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_1 = bbs[1].Address
 			ctx.MarkLabel(lbl2)
@@ -79268,6 +79425,7 @@ func (s *StorageSCMER) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, t
 				return result
 			}
 			bbs[2].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[2].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_2 = bbs[2].Address
 			ctx.MarkLabel(lbl3)
@@ -79525,6 +79683,7 @@ func (s *StorageSCMER) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, t
 				return result
 			}
 			bbs[3].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[3].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_3 = bbs[3].Address
 			ctx.MarkLabel(lbl4)
@@ -79796,6 +79955,7 @@ func (s *StorageSCMER) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, t
 				return result
 			}
 			bbs[4].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[4].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_4 = bbs[4].Address
 			ctx.MarkLabel(lbl5)
@@ -80133,6 +80293,7 @@ func (s *StorageSCMER) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, t
 				return result
 			}
 			bbs[5].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[5].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_5 = bbs[5].Address
 			ctx.MarkLabel(lbl6)
@@ -80775,6 +80936,7 @@ func (s *StorageSCMER) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, t
 				return result
 			}
 			bbs[6].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[6].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_6 = bbs[6].Address
 			ctx.MarkLabel(lbl7)
@@ -81132,6 +81294,7 @@ func (s *StorageSCMER) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, t
 				return result
 			}
 			bbs[7].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[7].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_7 = bbs[7].Address
 			ctx.MarkLabel(lbl8)
@@ -81488,6 +81651,7 @@ func (s *StorageSCMER) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target,
 				return result
 			}
 			bbs[0].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[0].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_0 = bbs[0].Address
 			ctx.MarkLabel(lbl1)
@@ -81672,6 +81836,7 @@ func (s *StorageSCMER) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target,
 				return result
 			}
 			bbs[1].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[1].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_1 = bbs[1].Address
 			ctx.MarkLabel(lbl2)
@@ -81762,6 +81927,7 @@ func (s *StorageSCMER) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target,
 				return result
 			}
 			bbs[2].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[2].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_2 = bbs[2].Address
 			ctx.MarkLabel(lbl3)
@@ -81932,6 +82098,7 @@ func (s *StorageSCMER) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target,
 				return result
 			}
 			bbs[3].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[3].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_3 = bbs[3].Address
 			ctx.MarkLabel(lbl4)
@@ -82333,6 +82500,7 @@ func (s *StorageSCMER) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target,
 				return result
 			}
 			bbs[4].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[4].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_4 = bbs[4].Address
 			ctx.MarkLabel(lbl5)
@@ -82613,6 +82781,7 @@ func (s *StorageSCMER) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target,
 				return result
 			}
 			bbs[5].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[5].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_5 = bbs[5].Address
 			ctx.MarkLabel(lbl6)
@@ -82834,6 +83003,7 @@ func (s *StorageDecimal) JITEmitGetValueRange(ctx *scm.JITContext, recid, count,
 				return result
 			}
 			bbs[0].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[0].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_0 = bbs[0].Address
 			ctx.MarkLabel(lbl1)
@@ -82985,6 +83155,7 @@ func (s *StorageDecimal) JITEmitGetValueRange(ctx *scm.JITContext, recid, count,
 				return result
 			}
 			bbs[1].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[1].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_1 = bbs[1].Address
 			ctx.MarkLabel(lbl2)
@@ -83058,6 +83229,7 @@ func (s *StorageDecimal) JITEmitGetValueRange(ctx *scm.JITContext, recid, count,
 				return result
 			}
 			bbs[2].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[2].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_2 = bbs[2].Address
 			ctx.MarkLabel(lbl3)
@@ -83250,6 +83422,7 @@ func (s *StorageDecimal) JITEmitGetValueMulti(ctx *scm.JITContext, recids, targe
 				return result
 			}
 			bbs[0].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[0].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_0 = bbs[0].Address
 			ctx.MarkLabel(lbl1)
@@ -83400,6 +83573,7 @@ func (s *StorageDecimal) JITEmitGetValueMulti(ctx *scm.JITContext, recids, targe
 				return result
 			}
 			bbs[1].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[1].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_1 = bbs[1].Address
 			ctx.MarkLabel(lbl2)
@@ -83472,6 +83646,7 @@ func (s *StorageDecimal) JITEmitGetValueMulti(ctx *scm.JITContext, recids, targe
 				return result
 			}
 			bbs[2].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[2].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_2 = bbs[2].Address
 			ctx.MarkLabel(lbl3)
@@ -84075,6 +84250,7 @@ func (s *StorageSeq) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 				return result
 			}
 			bbs[0].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[0].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_0 = bbs[0].Address
 			ctx.MarkLabel(lbl1)
@@ -84423,6 +84599,7 @@ func (s *StorageSeq) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 				return result
 			}
 			bbs[1].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[1].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_1 = bbs[1].Address
 			ctx.MarkLabel(lbl2)
@@ -84589,6 +84766,7 @@ func (s *StorageSeq) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 				return result
 			}
 			bbs[2].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[2].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_2 = bbs[2].Address
 			ctx.MarkLabel(lbl3)
@@ -85009,6 +85187,7 @@ func (s *StorageSeq) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 				return result
 			}
 			bbs[3].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[3].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_3 = bbs[3].Address
 			ctx.MarkLabel(lbl4)
@@ -85153,6 +85332,7 @@ func (s *StorageSeq) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 				return result
 			}
 			bbs[4].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[4].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_4 = bbs[4].Address
 			ctx.MarkLabel(lbl5)
@@ -85740,6 +85920,7 @@ func (s *StorageSeq) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 				return result
 			}
 			bbs[5].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[5].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_5 = bbs[5].Address
 			ctx.MarkLabel(lbl6)
@@ -86713,6 +86894,7 @@ func (s *StorageSeq) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 				return result
 			}
 			bbs[6].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[6].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_6 = bbs[6].Address
 			ctx.MarkLabel(lbl7)
@@ -88070,6 +88252,7 @@ func (s *StorageSeq) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 				return result
 			}
 			bbs[7].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[7].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_7 = bbs[7].Address
 			ctx.MarkLabel(lbl8)
@@ -88412,6 +88595,7 @@ func (s *StorageSeq) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 				return result
 			}
 			bbs[8].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[8].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_8 = bbs[8].Address
 			ctx.MarkLabel(lbl9)
@@ -89126,6 +89310,7 @@ func (s *StorageSeq) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 				return result
 			}
 			bbs[9].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[9].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_9 = bbs[9].Address
 			ctx.MarkLabel(lbl10)
@@ -90659,6 +90844,7 @@ func (s *StorageSeq) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 				return result
 			}
 			bbs[10].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[10].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_10 = bbs[10].Address
 			ctx.MarkLabel(lbl11)
@@ -91250,6 +91436,7 @@ func (s *StorageSeq) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 				return result
 			}
 			bbs[11].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[11].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_11 = bbs[11].Address
 			ctx.MarkLabel(lbl12)
@@ -92099,6 +92286,7 @@ func (s *StorageSeq) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, tar
 				return result
 			}
 			bbs[12].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[12].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_12 = bbs[12].Address
 			ctx.MarkLabel(lbl13)
@@ -93552,6 +93740,7 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 				return result
 			}
 			bbs[0].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[0].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_0 = bbs[0].Address
 			ctx.MarkLabel(lbl1)
@@ -94004,6 +94193,7 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 				return result
 			}
 			bbs[1].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[1].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_1 = bbs[1].Address
 			ctx.MarkLabel(lbl2)
@@ -94234,6 +94424,7 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 				return result
 			}
 			bbs[2].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[2].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_2 = bbs[2].Address
 			ctx.MarkLabel(lbl3)
@@ -94785,6 +94976,7 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 				return result
 			}
 			bbs[3].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[3].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_3 = bbs[3].Address
 			ctx.MarkLabel(lbl4)
@@ -94991,6 +95183,7 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 				return result
 			}
 			bbs[4].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[4].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_4 = bbs[4].Address
 			ctx.MarkLabel(lbl5)
@@ -95253,6 +95446,7 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 				return result
 			}
 			bbs[5].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[5].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_5 = bbs[5].Address
 			ctx.MarkLabel(lbl6)
@@ -95891,6 +96085,7 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 				return result
 			}
 			bbs[6].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[6].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_6 = bbs[6].Address
 			ctx.MarkLabel(lbl7)
@@ -96604,6 +96799,7 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 				return result
 			}
 			bbs[7].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[7].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_7 = bbs[7].Address
 			ctx.MarkLabel(lbl8)
@@ -97313,6 +97509,7 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 				return result
 			}
 			bbs[8].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[8].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_8 = bbs[8].Address
 			ctx.MarkLabel(lbl9)
@@ -97622,6 +97819,7 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 				return result
 			}
 			bbs[9].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[9].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_9 = bbs[9].Address
 			ctx.MarkLabel(lbl10)
@@ -97980,6 +98178,7 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 				return result
 			}
 			bbs[10].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[10].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_10 = bbs[10].Address
 			ctx.MarkLabel(lbl11)
@@ -98536,6 +98735,7 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 				return result
 			}
 			bbs[11].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[11].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_11 = bbs[11].Address
 			ctx.MarkLabel(lbl12)
@@ -99036,6 +99236,7 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 				return result
 			}
 			bbs[12].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[12].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_12 = bbs[12].Address
 			ctx.MarkLabel(lbl13)
@@ -100410,6 +100611,7 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 				return result
 			}
 			bbs[13].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[13].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_13 = bbs[13].Address
 			ctx.MarkLabel(lbl14)
@@ -101075,6 +101277,7 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 				return result
 			}
 			bbs[14].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[14].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_14 = bbs[14].Address
 			ctx.MarkLabel(lbl15)
@@ -101512,6 +101715,7 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 				return result
 			}
 			bbs[15].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[15].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_15 = bbs[15].Address
 			ctx.MarkLabel(lbl16)
@@ -102282,6 +102486,7 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 				return result
 			}
 			bbs[16].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[16].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_16 = bbs[16].Address
 			ctx.MarkLabel(lbl17)
@@ -104013,6 +104218,7 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 				return result
 			}
 			bbs[17].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[17].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_17 = bbs[17].Address
 			ctx.MarkLabel(lbl18)
@@ -105943,6 +106149,7 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 				return result
 			}
 			bbs[18].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[18].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_18 = bbs[18].Address
 			ctx.MarkLabel(lbl19)
@@ -106646,6 +106853,7 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 				return result
 			}
 			bbs[19].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[19].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_19 = bbs[19].Address
 			ctx.MarkLabel(lbl20)
@@ -107645,6 +107853,7 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 				return result
 			}
 			bbs[20].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[20].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_20 = bbs[20].Address
 			ctx.MarkLabel(lbl21)
@@ -108588,6 +108797,7 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 				return result
 			}
 			bbs[21].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[21].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_21 = bbs[21].Address
 			ctx.MarkLabel(lbl22)
@@ -110886,6 +111096,7 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 				return result
 			}
 			bbs[22].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[22].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_22 = bbs[22].Address
 			ctx.MarkLabel(lbl23)
@@ -113241,6 +113452,7 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 				return result
 			}
 			bbs[23].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[23].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_23 = bbs[23].Address
 			ctx.MarkLabel(lbl24)
@@ -113900,6 +114112,7 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 				return result
 			}
 			bbs[24].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[24].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_24 = bbs[24].Address
 			ctx.MarkLabel(lbl25)
@@ -114767,6 +114980,7 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 				return result
 			}
 			bbs[25].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[25].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_25 = bbs[25].Address
 			ctx.MarkLabel(lbl26)
@@ -115766,6 +115980,7 @@ func (s *StorageSeq) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, s
 				return result
 			}
 			bbs[26].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[26].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_26 = bbs[26].Address
 			ctx.MarkLabel(lbl27)
@@ -116987,6 +117202,7 @@ func (s *OverlayBlob) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, ta
 				return result
 			}
 			bbs[0].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[0].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_0 = bbs[0].Address
 			ctx.MarkLabel(lbl1)
@@ -117172,6 +117388,7 @@ func (s *OverlayBlob) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, ta
 				return result
 			}
 			bbs[1].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[1].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_1 = bbs[1].Address
 			ctx.MarkLabel(lbl2)
@@ -117263,6 +117480,7 @@ func (s *OverlayBlob) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, ta
 				return result
 			}
 			bbs[2].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[2].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_2 = bbs[2].Address
 			ctx.MarkLabel(lbl3)
@@ -117420,6 +117638,7 @@ func (s *OverlayBlob) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, ta
 				return result
 			}
 			bbs[3].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[3].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_3 = bbs[3].Address
 			ctx.MarkLabel(lbl4)
@@ -117784,6 +118003,7 @@ func (s *OverlayBlob) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, ta
 				return result
 			}
 			bbs[4].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[4].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_4 = bbs[4].Address
 			ctx.MarkLabel(lbl5)
@@ -118087,6 +118307,7 @@ func (s *OverlayBlob) JITEmitGetValueRange(ctx *scm.JITContext, recid, count, ta
 				return result
 			}
 			bbs[5].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[5].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_5 = bbs[5].Address
 			ctx.MarkLabel(lbl6)
@@ -118383,6 +118604,7 @@ func (s *OverlayBlob) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, 
 				return result
 			}
 			bbs[0].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[0].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_0 = bbs[0].Address
 			ctx.MarkLabel(lbl1)
@@ -118567,6 +118789,7 @@ func (s *OverlayBlob) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, 
 				return result
 			}
 			bbs[1].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[1].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_1 = bbs[1].Address
 			ctx.MarkLabel(lbl2)
@@ -118657,6 +118880,7 @@ func (s *OverlayBlob) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, 
 				return result
 			}
 			bbs[2].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[2].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_2 = bbs[2].Address
 			ctx.MarkLabel(lbl3)
@@ -118830,6 +119054,7 @@ func (s *OverlayBlob) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, 
 				return result
 			}
 			bbs[3].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[3].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_3 = bbs[3].Address
 			ctx.MarkLabel(lbl4)
@@ -119230,6 +119455,7 @@ func (s *OverlayBlob) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, 
 				return result
 			}
 			bbs[4].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[4].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_4 = bbs[4].Address
 			ctx.MarkLabel(lbl5)
@@ -119518,6 +119744,7 @@ func (s *OverlayBlob) JITEmitGetValueMulti(ctx *scm.JITContext, recids, target, 
 				return result
 			}
 			bbs[5].Rendered = true
+			ctx.FlushRegisterMoves()
 			bbs[5].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 			bbpos_0_5 = bbs[5].Address
 			ctx.MarkLabel(lbl6)

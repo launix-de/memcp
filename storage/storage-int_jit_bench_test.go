@@ -469,6 +469,9 @@ func BenchmarkStorageIntTypedConsumer(b *testing.B) {
 	if unknown == nil || typed == nil {
 		b.Fatal("failed to compile typed-consumer benchmark")
 	}
+	if !typed(0).Bool() || typed(1).Bool() {
+		b.Fatal("typed-consumer benchmark generated incorrect comparison code")
+	}
 
 	run := func(b *testing.B, fn scm.JITStorageGetValueFunc) {
 		var sum int64
