@@ -24,14 +24,21 @@ export SOURCE_DATE_EPOCH
 all:
 	CGO_ENABLED=$(CGO_ENABLED) GOOS=$(GOOS) GOARCH=$(GOARCH) go build $(BUILD_FLAGS) -ldflags="$(LDFLAGS)" -o memcp .
 
-# Keep the experimental compiler outside the tracked source tree. Existing
-# checkouts are left untouched so local compiler patches are never discarded;
-# remove the disposable checkout explicitly to recreate it at JIT_GO_REF.
+# Keep the experimental compiler outside the tracked source tree. Clean
+# checkouts fast-forward on every invocation, while a checkout with local
+# tracked changes is left untouched so compiler work is never discarded.
 jit-toolchain:
 	@set -eu; \
 	if [ ! -e "$(JIT_GOROOT)" ]; then \
 		mkdir -p "$(dir $(JIT_GOROOT))"; \
 		git clone --depth 1 --branch "$(JIT_GO_REF)" "$(JIT_GO_REPOSITORY)" "$(JIT_GOROOT)"; \
+	else \
+		test -d "$(JIT_GOROOT)/.git" || { echo "$(JIT_GOROOT) is not a Go git checkout" >&2; exit 1; }; \
+		if git -C "$(JIT_GOROOT)" diff --quiet && git -C "$(JIT_GOROOT)" diff --cached --quiet; then \
+			git -C "$(JIT_GOROOT)" pull --ff-only origin "$(JIT_GO_REF)"; \
+		else \
+			echo "warning: $(JIT_GOROOT) has local changes; skipping compiler update" >&2; \
+		fi; \
 	fi; \
 	test -d "$(JIT_GOROOT)/.git" || { echo "$(JIT_GOROOT) is not a Go git checkout" >&2; exit 1; }; \
 	revision=$$(git -C "$(JIT_GOROOT)" rev-parse HEAD); \
