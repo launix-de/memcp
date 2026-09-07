@@ -27,6 +27,7 @@ import "archive/zip"
 import "bytes"
 import "compress/gzip"
 import "os"
+import "os/exec"
 import "io"
 import "fmt"
 import "flag"
@@ -60,6 +61,23 @@ type virtualFile interface {
 
 type virtualDir interface {
 	Lookup([]string) (virtualFile, error)
+}
+
+func runProcess(program string, argv []string, stdin string) (int, string, string) {
+	cmd := exec.Command(program, argv...)
+	cmd.Stdin = strings.NewReader(stdin)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if err == nil {
+		return 0, stdout.String(), stderr.String()
+	}
+	if exitError, ok := err.(*exec.ExitError); ok {
+		return exitError.ExitCode(), stdout.String(), stderr.String()
+	}
+	return -1, stdout.String(), err.Error()
 }
 
 type hostVirtualFile string
@@ -714,6 +732,35 @@ func setupIO(wd string) {
 		Nodefine:     true, // other defines go into Globalenv
 	}
 	scm.DeclareTitle("IO")
+	scm.Declare(&IOEnv, &scm.Declaration{
+		Name: "process_run",
+
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			argvValues := a[1].Slice()
+			argv := make([]string, len(argvValues))
+			for i, value := range argvValues {
+				argv[i] = scm.String(value)
+			}
+			stdin := ""
+			if len(a) > 2 {
+				stdin = scm.String(a[2])
+			}
+			exitCode, stdout, stderr := runProcess(scm.String(a[0]), argv, stdin)
+			return scm.NewSlice([]scm.Scmer{
+				scm.NewString("exit_code"), scm.NewInt(int64(exitCode)),
+				scm.NewString("stdout"), scm.NewString(stdout),
+				scm.NewString("stderr"), scm.NewString(stderr),
+			})
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "runs a process without a shell, writes an optional string to stdin, and captures its result (only in IO environment)", HasSideEffects: true,
+			Params: []*scm.TypeDescriptor{
+				{Kind: "string", Label: "program", Description: "executable path or name"},
+				{Kind: "list", Label: "arguments", Description: "exact argument vector", Element: &scm.TypeDescriptor{Kind: "string"}},
+				{Kind: "string", Label: "stdin", Description: "bytes written to standard input", Optional: true},
+			},
+			Return: &scm.TypeDescriptor{Kind: "list", Label: "result", Description: "association list with exit_code, stdout, and stderr"},
+		},
+	})
 	scm.Declare(&IOEnv, &scm.Declaration{
 		Name: "print",
 
