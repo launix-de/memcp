@@ -410,7 +410,7 @@ func (s *CephStorage) SwapLog(shard string, entries []interface{}, durable bool)
 	}
 	for _, segment := range oldSegments {
 		if segment.seg != next {
-			if err := s.ioctx.Delete(segment.obj); err != nil && !errors.Is(err, rados.ErrNotFound) {
+			if err := remoteRetry(func() error { return s.ioctx.Delete(segment.obj) }); err != nil && !errors.Is(err, rados.ErrNotFound) {
 				reportPersistenceCleanupFailure(s.BackendName(), s.prefix, "log.swap.cleanup", err)
 			}
 		}
