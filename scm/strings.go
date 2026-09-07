@@ -802,6 +802,7 @@ func init_strings() {
 						return bbs[0].RenderPS(ps)
 					}
 					ctx.EmitJump(d9.Condition, lbl2)
+					ctx.FreeDesc(&d8)
 					snap12 := d0
 					snap13 := d1
 					snap14 := d2
@@ -1917,6 +1918,7 @@ func init_strings() {
 					lbl15 := ctx.ReserveLabel()
 					ctx.EmitJump(d36.Condition, lbl4)
 					ctx.EmitJmp(lbl15)
+					ctx.FreeDesc(&d35)
 					snap41 := d1
 					snap42 := d2
 					snap43 := d3
@@ -2442,6 +2444,7 @@ func init_strings() {
 						return bbs[4].RenderPS(ps)
 					}
 					ctx.EmitJump(d93.Condition, lbl6)
+					ctx.FreeDesc(&d92)
 					snap97 := d1
 					snap98 := d2
 					snap99 := d3
@@ -2968,6 +2971,7 @@ func init_strings() {
 						return bbs[6].RenderPS(ps)
 					}
 					ctx.EmitJump(d159.Condition, lbl8)
+					ctx.FreeDesc(&d158)
 					snap162 := d1
 					snap163 := d2
 					snap164 := d3
@@ -3564,6 +3568,7 @@ func init_strings() {
 					lbl17 := ctx.ReserveLabel()
 					ctx.EmitJump(d236.Condition, lbl10)
 					ctx.EmitJmp(lbl17)
+					ctx.FreeDesc(&d235)
 					snap241 := d1
 					snap242 := d2
 					snap243 := d3
@@ -4723,6 +4728,7 @@ func init_strings() {
 						return bbs[10].RenderPS(ps)
 					}
 					ctx.EmitJump(d341.Condition, lbl12)
+					ctx.FreeDesc(&d340)
 					snap345 := d1
 					snap346 := d2
 					snap347 := d3
@@ -6275,6 +6281,7 @@ func init_strings() {
 					lbl7 := ctx.ReserveLabel()
 					ctx.EmitJump(d31.Condition, lbl5)
 					ctx.EmitJmp(lbl7)
+					ctx.FreeDesc(&d30)
 					snap35 := d1
 					snap36 := d2
 					snap37 := d3
@@ -9855,6 +9862,7 @@ func init_strings() {
 					lbl7 := ctx.ReserveLabel()
 					ctx.EmitJump(d7.Condition, lbl2)
 					ctx.EmitJmp(lbl7)
+					ctx.FreeDesc(&d6)
 					snap11 := d3
 					snap12 := d4
 					snap13 := d5
@@ -10522,6 +10530,7 @@ func init_strings() {
 						return bbs[3].RenderPS(ps)
 					}
 					ctx.EmitJump(d49.Condition, lbl5)
+					ctx.FreeDesc(&d48)
 					snap53 := d3
 					snap54 := d4
 					snap55 := d5
@@ -11473,6 +11482,7 @@ func init_strings() {
 						return bbs[2].RenderPS(ps)
 					}
 					ctx.EmitJump(d24.Condition, lbl4)
+					ctx.FreeDesc(&d23)
 					snap27 := d0
 					snap28 := d1
 					snap29 := d2
@@ -14274,6 +14284,7 @@ func init_strings() {
 					} else {
 						ctx.EmitJump(d133.Condition, lbl16)
 						ctx.EmitJmp(lbl17)
+						ctx.FreeDesc(&d132)
 						ctx.MarkLabel(lbl16)
 						ctx.EmitJmp(lbl14)
 						ctx.MarkLabel(lbl17)
@@ -16702,6 +16713,7 @@ func init_strings() {
 						return bbs[1].RenderPS(ps)
 					}
 					ctx.EmitJump(d17.Condition, lbl3)
+					ctx.FreeDesc(&d16)
 					snap21 := d3
 					snap22 := d4
 					snap23 := d5
@@ -17809,6 +17821,7 @@ func init_strings() {
 						return bbs[1].RenderPS(ps)
 					}
 					ctx.EmitJump(d17.Condition, lbl3)
+					ctx.FreeDesc(&d16)
 					snap21 := d3
 					snap22 := d4
 					snap23 := d5
@@ -19341,6 +19354,7 @@ func init_strings() {
 						return bbs[0].RenderPS(ps)
 					}
 					ctx.EmitJump(d5.Condition, lbl2)
+					ctx.FreeDesc(&d4)
 					snap8 := d0
 					snap9 := d1
 					snap10 := d2
@@ -19542,6 +19556,7 @@ func init_strings() {
 						return bbs[2].RenderPS(ps)
 					}
 					ctx.EmitJump(d27.Condition, lbl4)
+					ctx.FreeDesc(&d26)
 					snap30 := d0
 					snap31 := d1
 					snap32 := d2
@@ -20325,6 +20340,7 @@ func init_strings() {
 						return bbs[0].RenderPS(ps)
 					}
 					ctx.EmitJump(d2.Condition, lbl2)
+					ctx.FreeDesc(&d1)
 					snap5 := d0
 					snap6 := d1
 					snap7 := d2
@@ -20498,6 +20514,7 @@ func init_strings() {
 						return bbs[2].RenderPS(ps)
 					}
 					ctx.EmitJump(d19.Condition, lbl8)
+					ctx.FreeDesc(&d18)
 					snap22 := d0
 					snap23 := d1
 					snap24 := d2
@@ -20674,6 +20691,7 @@ func init_strings() {
 						return bbs[3].RenderPS(ps)
 					}
 					ctx.EmitJump(d44.Condition, lbl2)
+					ctx.FreeDesc(&d43)
 					snap47 := d0
 					snap48 := d1
 					snap49 := d2

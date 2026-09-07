@@ -839,6 +839,14 @@ func (ctx *JITContext) EmitSliceDataAfterLow(slice, low *JITValueDesc, elementSi
 // as two plain stores. All other values retain Go's authoritative write barrier
 // through the generic trampoline.
 func (ctx *JITContext) EmitStoreScmerAt(address, value *JITValueDesc) {
+	if address.Loc == LocStack {
+		stored := JITPrepareScmerGoArg(ctx, *value)
+		ctx.EmitGoCallVoid(GoFuncAddr(jitStoreScmerAt), []JITValueDesc{*address, stored})
+		if stored.ID != value.ID || stored.Loc != value.Loc {
+			ctx.FreeDesc(&stored)
+		}
+		return
+	}
 	ctx.EnsureDesc(address)
 	if address.Loc != LocReg {
 		panic("jit: Scmer store requires an address register")

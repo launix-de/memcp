@@ -619,6 +619,7 @@ func init_date() {
 					lbl6 := ctx.ReserveLabel()
 					ctx.EmitJump(d5.Condition, lbl2)
 					ctx.EmitJmp(lbl6)
+					ctx.FreeDesc(&d4)
 					snap9 := d1
 					snap10 := d2
 					snap11 := d3
@@ -2035,6 +2036,7 @@ func init_date() {
 						return bbs[2].RenderPS(ps)
 					}
 					ctx.EmitJump(d22.Condition, lbl4)
+					ctx.FreeDesc(&d21)
 					snap25 := d0
 					snap26 := d1
 					snap27 := d2
@@ -4361,6 +4363,7 @@ func init_date() {
 					lbl10 := ctx.ReserveLabel()
 					ctx.EmitJump(d62.Condition, lbl6)
 					ctx.EmitJmp(lbl10)
+					ctx.FreeDesc(&d61)
 					snap66 := d1
 					snap67 := d2
 					snap68 := d3
@@ -6649,6 +6652,7 @@ func init_date() {
 					lbl30 := ctx.ReserveLabel()
 					ctx.EmitJump(d62.Condition, lbl6)
 					ctx.EmitJmp(lbl30)
+					ctx.FreeDesc(&d61)
 					snap66 := d1
 					snap67 := d2
 					snap68 := d3
@@ -51212,6 +51216,7 @@ func init_date() {
 					lbl40 := ctx.ReserveLabel()
 					ctx.EmitJump(d1234.Condition, lbl23)
 					ctx.EmitJmp(lbl40)
+					ctx.FreeDesc(&d1233)
 					snap1239 := d1
 					snap1240 := d2
 					snap1241 := d3
@@ -55419,6 +55424,7 @@ func init_date() {
 					lbl41 := ctx.ReserveLabel()
 					ctx.EmitJump(d1890.Condition, lbl27)
 					ctx.EmitJmp(lbl41)
+					ctx.FreeDesc(&d1889)
 					snap1895 := d1
 					snap1896 := d2
 					snap1897 := d3
@@ -61377,6 +61383,7 @@ func init_date() {
 						return bbs[24].RenderPS(ps)
 					}
 					ctx.EmitJump(d2632.Condition, lbl30)
+					ctx.FreeDesc(&d2631)
 					snap2635 := d1
 					snap2636 := d2
 					snap2637 := d3
@@ -69895,6 +69902,7 @@ func init_date() {
 					lbl42 := ctx.ReserveLabel()
 					ctx.EmitJump(d3433.Condition, lbl33)
 					ctx.EmitJmp(lbl42)
+					ctx.FreeDesc(&d3432)
 					snap3438 := d1
 					snap3439 := d2
 					snap3440 := d3
@@ -72579,6 +72587,7 @@ func init_date() {
 					lbl43 := ctx.ReserveLabel()
 					ctx.EmitJump(d3865.Condition, lbl30)
 					ctx.EmitJmp(lbl43)
+					ctx.FreeDesc(&d3864)
 					snap3870 := d1
 					snap3871 := d2
 					snap3872 := d3

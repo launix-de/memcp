@@ -479,6 +479,7 @@ func (s *StorageSparse) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resul
 			return bbs[1].RenderPS(ps)
 		}
 		ctx.EmitJump(d12.Condition, lbl3)
+		ctx.FreeDesc(&d11)
 		snap17 := d1
 		snap18 := d2
 		snap19 := d3
@@ -1437,6 +1438,7 @@ func (s *StorageSparse) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resul
 			return bbs[3].RenderPS(ps)
 		}
 		ctx.EmitJump(d75.Condition, lbl5)
+		ctx.FreeDesc(&d74)
 		snap78 := d1
 		snap79 := d2
 		snap80 := d3
@@ -2265,6 +2267,7 @@ func (s *StorageSparse) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resul
 			return bbs[5].RenderPS(ps)
 		}
 		ctx.EmitJump(d172.Condition, lbl7)
+		ctx.FreeDesc(&d171)
 		snap175 := d1
 		snap176 := d2
 		snap177 := d3

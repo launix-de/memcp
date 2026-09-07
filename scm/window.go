@@ -694,6 +694,7 @@ func init_window() {
 						return bbs[0].RenderPS(ps)
 					}
 					ctx.EmitJump(d11.Condition, lbl2)
+					ctx.FreeDesc(&d10)
 					snap14 := d3
 					snap15 := d4
 					snap16 := d5
@@ -1139,6 +1140,7 @@ func init_window() {
 						return bbs[2].RenderPS(ps)
 					}
 					ctx.EmitJump(d58.Condition, lbl4)
+					ctx.FreeDesc(&d57)
 					snap61 := d3
 					snap62 := d4
 					snap63 := d5
@@ -2245,6 +2247,7 @@ func init_window() {
 						return bbs[5].RenderPS(ps)
 					}
 					ctx.EmitJump(d149.Condition, lbl4)
+					ctx.FreeDesc(&d148)
 					snap152 := d3
 					snap153 := d4
 					snap154 := d5
@@ -2958,6 +2961,7 @@ func init_window() {
 						return bbs[6].RenderPS(ps)
 					}
 					ctx.EmitJump(d260.Condition, lbl4)
+					ctx.FreeDesc(&d259)
 					snap263 := d3
 					snap264 := d4
 					snap265 := d5
@@ -3754,6 +3758,7 @@ func init_window() {
 						return bbs[7].RenderPS(ps)
 					}
 					ctx.EmitJump(d378.Condition, lbl9)
+					ctx.FreeDesc(&d377)
 					snap382 := d3
 					snap383 := d4
 					snap384 := d5
@@ -4581,6 +4586,7 @@ func init_window() {
 						return bbs[8].RenderPS(ps)
 					}
 					ctx.EmitJump(d506.Condition, lbl11)
+					ctx.FreeDesc(&d505)
 					snap509 := d3
 					snap510 := d4
 					snap511 := d5
@@ -5446,6 +5452,7 @@ func init_window() {
 						return bbs[9].RenderPS(ps)
 					}
 					ctx.EmitJump(d643.Condition, lbl13)
+					ctx.FreeDesc(&d642)
 					snap646 := d3
 					snap647 := d4
 					snap648 := d5
@@ -7784,6 +7791,7 @@ func init_window() {
 						return bbs[0].RenderPS(ps)
 					}
 					ctx.EmitJump(d14.Condition, lbl2)
+					ctx.FreeDesc(&d13)
 					snap17 := d4
 					snap18 := d5
 					snap19 := d6
@@ -8189,6 +8197,7 @@ func init_window() {
 						return bbs[2].RenderPS(ps)
 					}
 					ctx.EmitJump(d55.Condition, lbl4)
+					ctx.FreeDesc(&d54)
 					snap58 := d4
 					snap59 := d5
 					snap60 := d6
@@ -8855,6 +8864,7 @@ func init_window() {
 						return bbs[5].RenderPS(ps)
 					}
 					ctx.EmitJump(d115.Condition, lbl4)
+					ctx.FreeDesc(&d114)
 					snap118 := d4
 					snap119 := d5
 					snap120 := d6
@@ -9309,6 +9319,7 @@ func init_window() {
 						return bbs[6].RenderPS(ps)
 					}
 					ctx.EmitJump(d182.Condition, lbl4)
+					ctx.FreeDesc(&d181)
 					snap185 := d4
 					snap186 := d5
 					snap187 := d6
@@ -9827,6 +9838,7 @@ func init_window() {
 						return bbs[7].RenderPS(ps)
 					}
 					ctx.EmitJump(d255.Condition, lbl9)
+					ctx.FreeDesc(&d254)
 					snap259 := d4
 					snap260 := d5
 					snap261 := d6
@@ -11034,6 +11046,7 @@ func init_window() {
 						return bbs[10].RenderPS(ps)
 					}
 					ctx.EmitJump(d351.Condition, lbl12)
+					ctx.FreeDesc(&d350)
 					snap355 := d4
 					snap356 := d5
 					snap357 := d6

@@ -308,6 +308,7 @@ func init_list_assoc_extra() {
 					} else {
 						ctx.EmitJump(d15.Condition, lbl9)
 						ctx.EmitJmp(lbl10)
+						ctx.FreeDesc(&d14)
 						ctx.MarkLabel(lbl9)
 						ctx.EmitJmp(lbl7)
 						ctx.MarkLabel(lbl10)
@@ -611,6 +612,7 @@ func init_list_assoc_extra() {
 						return bbs[1].RenderPS(ps)
 					}
 					ctx.EmitJump(d25.Condition, lbl3)
+					ctx.FreeDesc(&d24)
 					snap29 := d3
 					snap30 := d4
 					snap31 := d5
@@ -1463,6 +1465,7 @@ func init_list_assoc_extra() {
 					} else {
 						ctx.EmitJump(d15.Condition, lbl9)
 						ctx.EmitJmp(lbl10)
+						ctx.FreeDesc(&d14)
 						ctx.MarkLabel(lbl9)
 						ctx.EmitJmp(lbl7)
 						ctx.MarkLabel(lbl10)
@@ -1766,6 +1769,7 @@ func init_list_assoc_extra() {
 						return bbs[1].RenderPS(ps)
 					}
 					ctx.EmitJump(d25.Condition, lbl3)
+					ctx.FreeDesc(&d24)
 					snap29 := d3
 					snap30 := d4
 					snap31 := d5
@@ -2658,6 +2662,7 @@ func init_list_assoc_extra() {
 					} else {
 						ctx.EmitJump(d15.Condition, lbl9)
 						ctx.EmitJmp(lbl10)
+						ctx.FreeDesc(&d14)
 						ctx.MarkLabel(lbl9)
 						ctx.EmitJmp(lbl7)
 						ctx.MarkLabel(lbl10)
@@ -2961,6 +2966,7 @@ func init_list_assoc_extra() {
 						return bbs[1].RenderPS(ps)
 					}
 					ctx.EmitJump(d25.Condition, lbl3)
+					ctx.FreeDesc(&d24)
 					snap29 := d3
 					snap30 := d4
 					snap31 := d5
@@ -3896,6 +3902,7 @@ func init_list_assoc_extra() {
 					} else {
 						ctx.EmitJump(d12.Condition, lbl9)
 						ctx.EmitJmp(lbl10)
+						ctx.FreeDesc(&d11)
 						ctx.MarkLabel(lbl9)
 						ctx.EmitJmp(lbl7)
 						ctx.MarkLabel(lbl10)
@@ -4187,6 +4194,7 @@ func init_list_assoc_extra() {
 						return bbs[1].RenderPS(ps)
 					}
 					ctx.EmitJump(d22.Condition, lbl3)
+					ctx.FreeDesc(&d21)
 					snap26 := d3
 					snap27 := d4
 					snap28 := d5
@@ -4955,6 +4963,7 @@ func init_list_assoc_extra() {
 					} else {
 						ctx.EmitJump(d12.Condition, lbl9)
 						ctx.EmitJmp(lbl10)
+						ctx.FreeDesc(&d11)
 						ctx.MarkLabel(lbl9)
 						ctx.EmitJmp(lbl7)
 						ctx.MarkLabel(lbl10)
@@ -5246,6 +5255,7 @@ func init_list_assoc_extra() {
 						return bbs[1].RenderPS(ps)
 					}
 					ctx.EmitJump(d22.Condition, lbl3)
+					ctx.FreeDesc(&d21)
 					snap26 := d3
 					snap27 := d4
 					snap28 := d5

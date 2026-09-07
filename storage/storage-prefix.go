@@ -1454,6 +1454,7 @@ func (s *StoragePrefix) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resul
 			return bbs[4].RenderPS(ps)
 		}
 		ctx.EmitJump(d79.Condition, lbl6)
+		ctx.FreeDesc(&d78)
 		snap82 := d0
 		snap83 := d1
 		snap84 := d2
@@ -2407,6 +2408,7 @@ func (s *StoragePrefix) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resul
 			return bbs[7].RenderPS(ps)
 		}
 		ctx.EmitJump(d172.Condition, lbl6)
+		ctx.FreeDesc(&d171)
 		snap175 := d0
 		snap176 := d1
 		snap177 := d2

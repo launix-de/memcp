@@ -296,6 +296,7 @@ func init_alu() {
 					lbl5 := ctx.ReserveLabel()
 					ctx.EmitJump(d5.Condition, lbl5)
 					ctx.EmitJmp(lbl4)
+					ctx.FreeDesc(&d4)
 					snap9 := d1
 					snap10 := d2
 					snap11 := d3
@@ -628,6 +629,7 @@ func init_alu() {
 					lbl6 := ctx.ReserveLabel()
 					ctx.EmitJump(d32.Condition, lbl6)
 					ctx.EmitJmp(lbl2)
+					ctx.FreeDesc(&d31)
 					snap36 := d1
 					snap37 := d2
 					snap38 := d3
@@ -1546,6 +1548,7 @@ func init_alu() {
 						return bbs[2].RenderPS(ps)
 					}
 					ctx.EmitJump(d47.Condition, lbl6)
+					ctx.FreeDesc(&d46)
 					snap50 := d6
 					snap51 := d7
 					snap52 := d8
@@ -1878,6 +1881,7 @@ func init_alu() {
 						return bbs[3].RenderPS(ps)
 					}
 					ctx.EmitJump(d84.Condition, lbl2)
+					ctx.FreeDesc(&d83)
 					snap89 := d6
 					snap90 := d7
 					snap91 := d8
@@ -3762,6 +3766,7 @@ func init_alu() {
 						return bbs[9].RenderPS(ps)
 					}
 					ctx.EmitJump(d239.Condition, lbl8)
+					ctx.FreeDesc(&d238)
 					snap244 := d6
 					snap245 := d7
 					snap246 := d8
@@ -6949,6 +6954,7 @@ func init_alu() {
 						return bbs[1].RenderPS(ps)
 					}
 					ctx.EmitJump(d22.Condition, lbl3)
+					ctx.FreeDesc(&d21)
 					snap26 := d9
 					snap27 := d10
 					snap28 := d11
@@ -9270,6 +9276,7 @@ func init_alu() {
 						return bbs[8].RenderPS(ps)
 					}
 					ctx.EmitJump(d202.Condition, lbl12)
+					ctx.FreeDesc(&d201)
 					snap205 := d9
 					snap206 := d10
 					snap207 := d11
@@ -10037,6 +10044,7 @@ func init_alu() {
 						return bbs[9].RenderPS(ps)
 					}
 					ctx.EmitJump(d309.Condition, lbl11)
+					ctx.FreeDesc(&d308)
 					snap314 := d9
 					snap315 := d10
 					snap316 := d11
@@ -13225,6 +13233,7 @@ func init_alu() {
 						return bbs[15].RenderPS(ps)
 					}
 					ctx.EmitJump(d579.Condition, lbl14)
+					ctx.FreeDesc(&d578)
 					snap584 := d9
 					snap585 := d10
 					snap586 := d11
@@ -14388,6 +14397,7 @@ func init_alu() {
 						return bbs[16].RenderPS(ps)
 					}
 					ctx.EmitJump(d754.Condition, lbl18)
+					ctx.FreeDesc(&d753)
 					snap759 := d9
 					snap760 := d10
 					snap761 := d11
@@ -16800,6 +16810,7 @@ func init_alu() {
 						return bbs[1].RenderPS(ps)
 					}
 					ctx.EmitJump(d19.Condition, lbl3)
+					ctx.FreeDesc(&d18)
 					snap23 := d7
 					snap24 := d8
 					snap25 := d9
@@ -18303,6 +18314,7 @@ func init_alu() {
 						return bbs[6].RenderPS(ps)
 					}
 					ctx.EmitJump(d182.Condition, lbl14)
+					ctx.FreeDesc(&d181)
 					snap185 := d7
 					snap186 := d8
 					snap187 := d9
@@ -18857,6 +18869,7 @@ func init_alu() {
 						return bbs[7].RenderPS(ps)
 					}
 					ctx.EmitJump(d255.Condition, lbl6)
+					ctx.FreeDesc(&d254)
 					snap260 := d7
 					snap261 := d8
 					snap262 := d9
@@ -23337,6 +23350,7 @@ func init_alu() {
 						return bbs[17].RenderPS(ps)
 					}
 					ctx.EmitJump(d598.Condition, lbl16)
+					ctx.FreeDesc(&d597)
 					snap603 := d7
 					snap604 := d8
 					snap605 := d9
@@ -24338,6 +24352,7 @@ func init_alu() {
 						return bbs[1].RenderPS(ps)
 					}
 					ctx.EmitJump(d14.Condition, lbl3)
+					ctx.FreeDesc(&d13)
 					snap18 := d5
 					snap19 := d6
 					snap20 := d7
@@ -25380,6 +25395,7 @@ func init_alu() {
 						return bbs[5].RenderPS(ps)
 					}
 					ctx.EmitJump(d103.Condition, lbl7)
+					ctx.FreeDesc(&d102)
 					snap108 := d5
 					snap109 := d6
 					snap110 := d7
@@ -27047,6 +27063,7 @@ func init_alu() {
 						return bbs[4].RenderPS(ps)
 					}
 					ctx.EmitJump(d86.Condition, lbl8)
+					ctx.FreeDesc(&d85)
 					snap89 := d0
 					snap90 := d1
 					snap91 := d2
@@ -28381,6 +28398,7 @@ func init_alu() {
 						return bbs[9].RenderPS(ps)
 					}
 					ctx.EmitJump(d247.Condition, lbl11)
+					ctx.FreeDesc(&d246)
 					snap250 := d0
 					snap251 := d1
 					snap252 := d2
@@ -28865,6 +28883,7 @@ func init_alu() {
 						return bbs[10].RenderPS(ps)
 					}
 					ctx.EmitJump(d323.Condition, lbl8)
+					ctx.FreeDesc(&d322)
 					snap326 := d0
 					snap327 := d1
 					snap328 := d2
@@ -32547,6 +32566,7 @@ func init_alu() {
 						return bbs[4].RenderPS(ps)
 					}
 					ctx.EmitJump(d86.Condition, lbl8)
+					ctx.FreeDesc(&d85)
 					snap89 := d0
 					snap90 := d1
 					snap91 := d2
@@ -37223,6 +37243,7 @@ func init_alu() {
 						return bbs[2].RenderPS(ps)
 					}
 					ctx.EmitJump(d28.Condition, lbl7)
+					ctx.FreeDesc(&d27)
 					snap31 := d0
 					snap32 := d1
 					snap33 := d2
@@ -38549,6 +38570,7 @@ func init_alu() {
 						return bbs[6].RenderPS(ps)
 					}
 					ctx.EmitJump(d197.Condition, lbl5)
+					ctx.FreeDesc(&d196)
 					snap200 := d0
 					snap201 := d1
 					snap202 := d2
@@ -39057,6 +39079,7 @@ func init_alu() {
 						return bbs[7].RenderPS(ps)
 					}
 					ctx.EmitJump(d277.Condition, lbl7)
+					ctx.FreeDesc(&d276)
 					snap280 := d0
 					snap281 := d1
 					snap282 := d2
@@ -39589,6 +39612,7 @@ func init_alu() {
 						return bbs[8].RenderPS(ps)
 					}
 					ctx.EmitJump(d361.Condition, lbl5)
+					ctx.FreeDesc(&d360)
 					snap364 := d0
 					snap365 := d1
 					snap366 := d2
@@ -41363,6 +41387,7 @@ func init_alu() {
 						return bbs[1].RenderPS(ps)
 					}
 					ctx.EmitJump(d13.Condition, lbl3)
+					ctx.FreeDesc(&d12)
 					snap18 := d3
 					snap19 := d4
 					snap20 := d5
@@ -43609,6 +43634,7 @@ func init_alu() {
 						return bbs[1].RenderPS(ps)
 					}
 					ctx.EmitJump(d13.Condition, lbl3)
+					ctx.FreeDesc(&d12)
 					snap18 := d3
 					snap19 := d4
 					snap20 := d5
@@ -46532,6 +46558,7 @@ func init_alu() {
 						return bbs[2].RenderPS(ps)
 					}
 					ctx.EmitJump(d24.Condition, lbl4)
+					ctx.FreeDesc(&d23)
 					snap27 := d0
 					snap28 := d1
 					snap29 := d2
@@ -47166,6 +47193,7 @@ func init_alu() {
 						return bbs[5].RenderPS(ps)
 					}
 					ctx.EmitJump(d100.Condition, lbl4)
+					ctx.FreeDesc(&d99)
 					snap103 := d0
 					snap104 := d1
 					snap105 := d2
@@ -47737,6 +47765,7 @@ func init_alu() {
 					} else {
 						ctx.EmitJump(d162.Condition, lbl29)
 						ctx.EmitJmp(lbl30)
+						ctx.FreeDesc(&d161)
 						ctx.MarkLabel(lbl29)
 						ctx.EmitJmp(lbl26)
 						ctx.MarkLabel(lbl30)
@@ -47780,6 +47809,7 @@ func init_alu() {
 					} else {
 						ctx.EmitJump(d164.Condition, lbl31)
 						ctx.EmitJmp(lbl32)
+						ctx.FreeDesc(&d163)
 						ctx.MarkLabel(lbl31)
 						ctx.EmitJmp(lbl27)
 						ctx.MarkLabel(lbl32)
@@ -48041,6 +48071,7 @@ func init_alu() {
 					} else {
 						ctx.EmitJump(d179.Condition, lbl42)
 						ctx.EmitJmp(lbl43)
+						ctx.FreeDesc(&d178)
 						ctx.MarkLabel(lbl42)
 						ctx.EmitJmp(lbl39)
 						ctx.MarkLabel(lbl43)
@@ -48481,6 +48512,7 @@ func init_alu() {
 					} else {
 						ctx.EmitJump(d202.Condition, lbl67)
 						ctx.EmitJmp(lbl68)
+						ctx.FreeDesc(&d201)
 						ctx.MarkLabel(lbl67)
 						ctx.EmitJmp(lbl55)
 						ctx.MarkLabel(lbl68)
@@ -49072,6 +49104,7 @@ func init_alu() {
 					} else {
 						ctx.EmitJump(d255.Condition, lbl82)
 						ctx.EmitJmp(lbl83)
+						ctx.FreeDesc(&d254)
 						ctx.MarkLabel(lbl82)
 						ctx.EmitJmp(lbl79)
 						ctx.MarkLabel(lbl83)
@@ -49512,6 +49545,7 @@ func init_alu() {
 					} else {
 						ctx.EmitJump(d278.Condition, lbl107)
 						ctx.EmitJmp(lbl108)
+						ctx.FreeDesc(&d277)
 						ctx.MarkLabel(lbl107)
 						ctx.EmitJmp(lbl95)
 						ctx.MarkLabel(lbl108)
@@ -51077,6 +51111,7 @@ func init_alu() {
 					} else {
 						ctx.EmitJump(d348.Condition, lbl126)
 						ctx.EmitJmp(lbl127)
+						ctx.FreeDesc(&d347)
 						ctx.MarkLabel(lbl126)
 						ctx.EmitJmp(lbl123)
 						ctx.MarkLabel(lbl127)
@@ -51120,6 +51155,7 @@ func init_alu() {
 					} else {
 						ctx.EmitJump(d350.Condition, lbl128)
 						ctx.EmitJmp(lbl129)
+						ctx.FreeDesc(&d349)
 						ctx.MarkLabel(lbl128)
 						ctx.EmitJmp(lbl124)
 						ctx.MarkLabel(lbl129)
@@ -54297,6 +54333,7 @@ func init_alu() {
 						return bbs[4].RenderPS(ps)
 					}
 					ctx.EmitJump(d74.Condition, lbl8)
+					ctx.FreeDesc(&d73)
 					snap78 := d1
 					snap79 := d2
 					snap80 := d3

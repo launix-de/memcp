@@ -390,6 +390,7 @@ func init_scheduler() {
 						return bbs[0].RenderPS(ps)
 					}
 					ctx.EmitJump(d2.Condition, lbl2)
+					ctx.FreeDesc(&d1)
 					snap5 := d0
 					snap6 := d1
 					snap7 := d2

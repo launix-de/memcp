@@ -1403,6 +1403,7 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resu
 			return bbs[2].RenderPS(ps)
 		}
 		ctx.EmitJump(d76.Condition, lbl5)
+		ctx.FreeDesc(&d75)
 		snap79 := d0
 		snap80 := d1
 		snap81 := d2
@@ -1860,6 +1861,7 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resu
 			return bbs[3].RenderPS(ps)
 		}
 		ctx.EmitJump(d143.Condition, lbl2)
+		ctx.FreeDesc(&d142)
 		snap146 := d0
 		snap147 := d1
 		snap148 := d2

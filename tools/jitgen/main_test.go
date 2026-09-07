@@ -133,6 +133,15 @@ func minimum(a ...Scmer) Scmer {
 	if strings.Contains(code, "ctx.EmitSetcc(") {
 		t.Fatalf("generated comparison branch materializes a boolean:\n%s", code)
 	}
+	jump := strings.Index(code, "ctx.EmitJump(")
+	if jump < 0 {
+		t.Fatalf("generated comparison branch does not emit a conditional jump:\n%s", code)
+	}
+	free := strings.Index(code[jump:], "ctx.FreeDesc(")
+	snapshot := strings.Index(code[jump:], "ctx.SnapshotAllocState(")
+	if free < 0 || (snapshot >= 0 && free > snapshot) {
+		t.Fatalf("generated comparison branch does not release its flags carrier after the jump:\n%s", code)
+	}
 }
 
 func TestLoopPhiRegisterPlanColorsInterferenceGraph(t *testing.T) {

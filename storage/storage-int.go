@@ -1499,6 +1499,7 @@ func (s *StorageInt) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result s
 			return bbs[2].RenderPS(ps)
 		}
 		ctx.EmitJump(d56.Condition, lbl4)
+		ctx.FreeDesc(&d55)
 		snap59 := d0
 		snap60 := d1
 		snap61 := d12

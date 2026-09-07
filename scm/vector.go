@@ -626,6 +626,7 @@ func init_vector() {
 					lbl16 := ctx.ReserveLabel()
 					ctx.EmitJump(d22.Condition, lbl2)
 					ctx.EmitJmp(lbl16)
+					ctx.FreeDesc(&d21)
 					snap26 := d8
 					snap27 := d9
 					snap28 := d10
@@ -2514,6 +2515,7 @@ func init_vector() {
 						return bbs[6].RenderPS(ps)
 					}
 					ctx.EmitJump(d160.Condition, lbl10)
+					ctx.FreeDesc(&d159)
 					snap167 := d8
 					snap168 := d9
 					snap169 := d10
@@ -4549,6 +4551,7 @@ func init_vector() {
 						return bbs[9].RenderPS(ps)
 					}
 					ctx.EmitJump(d300.Condition, lbl8)
+					ctx.FreeDesc(&d299)
 					snap303 := d8
 					snap304 := d9
 					snap305 := d10
@@ -5701,6 +5704,7 @@ func init_vector() {
 						return bbs[10].RenderPS(ps)
 					}
 					ctx.EmitJump(d469.Condition, lbl14)
+					ctx.FreeDesc(&d468)
 					snap474 := d8
 					snap475 := d9
 					snap476 := d10
@@ -9103,6 +9107,7 @@ func init_vector() {
 						return bbs[13].RenderPS(ps)
 					}
 					ctx.EmitJump(d901.Condition, lbl12)
+					ctx.FreeDesc(&d900)
 					snap904 := d8
 					snap905 := d9
 					snap906 := d10

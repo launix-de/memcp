@@ -641,6 +641,7 @@ func init_sync() {
 						return bbs[0].RenderPS(ps)
 					}
 					ctx.EmitJump(d2.Condition, lbl2)
+					ctx.FreeDesc(&d1)
 					snap5 := d0
 					snap6 := d1
 					snap7 := d2
@@ -1062,6 +1063,7 @@ func init_sync() {
 						return bbs[2].RenderPS(ps)
 					}
 					ctx.EmitJump(d37.Condition, lbl4)
+					ctx.FreeDesc(&d36)
 					snap40 := d0
 					snap41 := d1
 					snap42 := d2

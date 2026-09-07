@@ -4282,6 +4282,7 @@ func init_jit() {
 					lbl7 := ctx.ReserveLabel()
 					ctx.EmitJump(d6.Condition, lbl7)
 					ctx.EmitJmp(lbl2)
+					ctx.FreeDesc(&d5)
 					snap10 := d1
 					snap11 := d2
 					snap12 := d3
@@ -4473,6 +4474,7 @@ func init_jit() {
 					lbl8 := ctx.ReserveLabel()
 					ctx.EmitJump(d33.Condition, lbl6)
 					ctx.EmitJmp(lbl8)
+					ctx.FreeDesc(&d32)
 					snap37 := d1
 					snap38 := d2
 					snap39 := d3
@@ -5697,6 +5699,7 @@ func init_jit() {
 					lbl12 := ctx.ReserveLabel()
 					ctx.EmitJump(d7.Condition, lbl12)
 					ctx.EmitJmp(lbl2)
+					ctx.FreeDesc(&d6)
 					snap11 := d1
 					snap12 := d2
 					snap13 := d3
@@ -5896,6 +5899,7 @@ func init_jit() {
 					lbl13 := ctx.ReserveLabel()
 					ctx.EmitJump(d35.Condition, lbl6)
 					ctx.EmitJmp(lbl13)
+					ctx.FreeDesc(&d34)
 					snap39 := d1
 					snap40 := d2
 					snap41 := d3
@@ -7028,6 +7032,7 @@ func init_jit() {
 					lbl15 := ctx.ReserveLabel()
 					ctx.EmitJump(d147.Condition, lbl10)
 					ctx.EmitJmp(lbl15)
+					ctx.FreeDesc(&d146)
 					snap152 := d1
 					snap153 := d2
 					snap154 := d3

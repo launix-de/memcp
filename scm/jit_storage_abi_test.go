@@ -19,7 +19,11 @@ Copyright (C) 2026  Carl-Philip Hänsch
 
 package scm
 
-import "testing"
+import (
+	"runtime"
+	"testing"
+	"unsafe"
+)
 
 func jitFourScalarResults(seed uint32) (int64, bool, int64, int64) {
 	return int64(seed) + 1, seed&1 != 0, int64(seed) + 3, int64(seed) + 5
@@ -49,4 +53,29 @@ func TestJITGoCallFourScalarResults(t *testing.T) {
 	if got, want := fn(7), NewInt(8+10+1000+12000+7); !Equal(got, want) {
 		t.Fatalf("four-result Go ABI call = %v, want %v", got, want)
 	}
+}
+
+func TestJITStoreCustomScmerKeepsSpilledAddress(t *testing.T) {
+	payload := new(byte)
+	value := NewCustom(200, unsafe.Pointer(payload))
+	fn := CompileJITStorageGetValueRange(func(ctx *JITContext, index, count, target, stride, result JITValueDesc) JITValueDesc {
+		address := ctx.EmitSliceElementAddress(&target, &index, 16)
+		addressOff := ctx.AllocStack(8)
+		ctx.EmitStoreRegMem(address.Reg, ctx.StackReg, addressOff)
+		ctx.FreeDesc(&address)
+		address = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: addressOff, NoHeapPointer: true}
+		stored := JITValueDesc{Loc: LocImm, Type: value.GetTag(), Imm: value, Rooted: true}
+		ctx.EmitStoreScmerAt(&address, &stored)
+		return result
+	})
+	if fn == nil {
+		t.Fatal("spilled-address JIT function did not compile")
+	}
+	target := make([]Scmer, 1)
+	fn(0, 1, target, 1)
+	runtime.GC()
+	if got := target[0]; got.GetTag() != value.GetTag() || got.ptr != value.ptr {
+		t.Fatalf("stored custom Scmer = %v, want tag %d at %p", got, value.GetTag(), value.ptr)
+	}
+	runtime.KeepAlive(payload)
 }

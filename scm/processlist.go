@@ -753,6 +753,7 @@ func init_processlist() {
 					lbl10 := ctx.ReserveLabel()
 					ctx.EmitJump(d8.Condition, lbl2)
 					ctx.EmitJmp(lbl10)
+					ctx.FreeDesc(&d7)
 					snap12 := d3
 					snap13 := d4
 					snap14 := d5
@@ -1324,6 +1325,7 @@ func init_processlist() {
 						return bbs[3].RenderPS(ps)
 					}
 					ctx.EmitJump(d49.Condition, lbl5)
+					ctx.FreeDesc(&d48)
 					snap53 := d3
 					snap54 := d4
 					snap55 := d5
@@ -3314,6 +3316,7 @@ func init_processlist() {
 					lbl12 := ctx.ReserveLabel()
 					ctx.EmitJump(d217.Condition, lbl7)
 					ctx.EmitJmp(lbl12)
+					ctx.FreeDesc(&d216)
 					snap222 := d3
 					snap223 := d4
 					snap224 := d5
@@ -4020,6 +4023,7 @@ func init_processlist() {
 						return bbs[0].RenderPS(ps)
 					}
 					ctx.EmitJump(d2.Condition, lbl2)
+					ctx.FreeDesc(&d1)
 					snap5 := d0
 					snap6 := d1
 					snap7 := d2

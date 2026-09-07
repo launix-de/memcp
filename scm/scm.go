@@ -1294,6 +1294,7 @@ func init() {
 				} else {
 					ctx.EmitJump(d7.Condition, lbl23)
 					ctx.EmitJmp(lbl24)
+					ctx.FreeDesc(&d6)
 					ctx.MarkLabel(lbl23)
 					ctx.EmitJmp(lbl2)
 					ctx.MarkLabel(lbl24)
@@ -1375,6 +1376,7 @@ func init() {
 				} else {
 					ctx.EmitJump(d13.Condition, lbl25)
 					ctx.EmitJmp(lbl26)
+					ctx.FreeDesc(&d12)
 					ctx.MarkLabel(lbl25)
 					ctx.EmitJmp(lbl6)
 					ctx.MarkLabel(lbl26)
@@ -1555,6 +1557,7 @@ func init() {
 				} else {
 					ctx.EmitJump(d22.Condition, lbl31)
 					ctx.EmitJmp(lbl32)
+					ctx.FreeDesc(&d20)
 					ctx.MarkLabel(lbl31)
 					ctx.EmitJmp(lbl9)
 					ctx.MarkLabel(lbl32)
@@ -2325,6 +2328,7 @@ func init() {
 				} else {
 					ctx.EmitJump(d67.Condition, lbl44)
 					ctx.EmitJmp(lbl45)
+					ctx.FreeDesc(&d66)
 					ctx.MarkLabel(lbl44)
 					ctx.EmitJmp(lbl18)
 					ctx.MarkLabel(lbl45)
@@ -2414,6 +2418,7 @@ func init() {
 				} else {
 					ctx.EmitJump(d73.Condition, lbl50)
 					ctx.EmitJmp(lbl51)
+					ctx.FreeDesc(&d72)
 					ctx.MarkLabel(lbl50)
 					ctx.EmitJmp(lbl48)
 					ctx.MarkLabel(lbl51)
@@ -2879,6 +2884,7 @@ func init() {
 				} else {
 					ctx.EmitJump(d103.Condition, lbl59)
 					ctx.EmitJmp(lbl60)
+					ctx.FreeDesc(&d102)
 					ctx.MarkLabel(lbl59)
 					ctx.EmitJmp(lbl57)
 					ctx.MarkLabel(lbl60)
@@ -3225,6 +3231,7 @@ func init() {
 					lbl4 := ctx.ReserveLabel()
 					ctx.EmitJump(d4.Condition, lbl2)
 					ctx.EmitJmp(lbl4)
+					ctx.FreeDesc(&d3)
 					snap8 := d1
 					snap9 := d2
 					snap10 := d3
@@ -3826,6 +3833,7 @@ func init() {
 						return bbs[0].RenderPS(ps)
 					}
 					ctx.EmitJump(d6.Condition, lbl2)
+					ctx.FreeDesc(&d5)
 					snap9 := d3
 					snap10 := d4
 					snap11 := d5
@@ -4145,6 +4153,7 @@ func init() {
 						return bbs[3].RenderPS(ps)
 					}
 					ctx.EmitJump(d28.Condition, lbl5)
+					ctx.FreeDesc(&d27)
 					snap32 := d3
 					snap33 := d4
 					snap34 := d5
@@ -4977,6 +4986,7 @@ func init() {
 				} else {
 					ctx.EmitJump(d16.Condition, lbl19)
 					ctx.EmitJmp(lbl20)
+					ctx.FreeDesc(&d15)
 					ctx.MarkLabel(lbl19)
 					ctx.EmitJmp(lbl6)
 					ctx.MarkLabel(lbl20)
@@ -5155,6 +5165,7 @@ func init() {
 				} else {
 					ctx.EmitJump(d26.Condition, lbl21)
 					ctx.EmitJmp(lbl22)
+					ctx.FreeDesc(&d25)
 					ctx.MarkLabel(lbl21)
 					ctx.EmitJmp(lbl9)
 					ctx.MarkLabel(lbl22)
@@ -5337,6 +5348,7 @@ func init() {
 				} else {
 					ctx.EmitJump(d38.Condition, lbl24)
 					ctx.EmitJmp(lbl25)
+					ctx.FreeDesc(&d37)
 					ctx.MarkLabel(lbl24)
 					ctx.EmitJmp(lbl12)
 					ctx.MarkLabel(lbl25)
@@ -13178,6 +13190,7 @@ Patterns can be any of:
 					lbl4 := ctx.ReserveLabel()
 					ctx.EmitJump(d4.Condition, lbl2)
 					ctx.EmitJmp(lbl4)
+					ctx.FreeDesc(&d3)
 					snap8 := d1
 					snap9 := d2
 					snap10 := d3
@@ -13730,6 +13743,7 @@ Patterns can be any of:
 					} else {
 						ctx.EmitJump(d47.Condition, lbl40)
 						ctx.EmitJmp(lbl41)
+						ctx.FreeDesc(&d46)
 						ctx.MarkLabel(lbl40)
 						ctx.EmitJmp(lbl8)
 						ctx.MarkLabel(lbl41)
@@ -14332,6 +14346,7 @@ Patterns can be any of:
 					} else {
 						ctx.EmitJump(d90.Condition, lbl50)
 						ctx.EmitJmp(lbl51)
+						ctx.FreeDesc(&d89)
 						ctx.MarkLabel(lbl50)
 						ctx.EmitJmp(lbl17)
 						ctx.MarkLabel(lbl51)
@@ -14614,6 +14629,7 @@ Patterns can be any of:
 					} else {
 						ctx.EmitJump(d106.Condition, lbl88)
 						ctx.EmitJmp(lbl89)
+						ctx.FreeDesc(&d105)
 						ctx.MarkLabel(lbl88)
 						ctx.EmitJmp(lbl56)
 						ctx.MarkLabel(lbl89)
@@ -15216,6 +15232,7 @@ Patterns can be any of:
 					} else {
 						ctx.EmitJump(d149.Condition, lbl98)
 						ctx.EmitJmp(lbl99)
+						ctx.FreeDesc(&d148)
 						ctx.MarkLabel(lbl98)
 						ctx.EmitJmp(lbl65)
 						ctx.MarkLabel(lbl99)
@@ -15498,6 +15515,7 @@ Patterns can be any of:
 					} else {
 						ctx.EmitJump(d165.Condition, lbl136)
 						ctx.EmitJmp(lbl137)
+						ctx.FreeDesc(&d164)
 						ctx.MarkLabel(lbl136)
 						ctx.EmitJmp(lbl104)
 						ctx.MarkLabel(lbl137)
@@ -16100,6 +16118,7 @@ Patterns can be any of:
 					} else {
 						ctx.EmitJump(d208.Condition, lbl146)
 						ctx.EmitJmp(lbl147)
+						ctx.FreeDesc(&d207)
 						ctx.MarkLabel(lbl146)
 						ctx.EmitJmp(lbl113)
 						ctx.MarkLabel(lbl147)
@@ -16382,6 +16401,7 @@ Patterns can be any of:
 					} else {
 						ctx.EmitJump(d224.Condition, lbl184)
 						ctx.EmitJmp(lbl185)
+						ctx.FreeDesc(&d223)
 						ctx.MarkLabel(lbl184)
 						ctx.EmitJmp(lbl152)
 						ctx.MarkLabel(lbl185)
@@ -16984,6 +17004,7 @@ Patterns can be any of:
 					} else {
 						ctx.EmitJump(d267.Condition, lbl194)
 						ctx.EmitJmp(lbl195)
+						ctx.FreeDesc(&d266)
 						ctx.MarkLabel(lbl194)
 						ctx.EmitJmp(lbl161)
 						ctx.MarkLabel(lbl195)
@@ -17266,6 +17287,7 @@ Patterns can be any of:
 					} else {
 						ctx.EmitJump(d283.Condition, lbl232)
 						ctx.EmitJmp(lbl233)
+						ctx.FreeDesc(&d282)
 						ctx.MarkLabel(lbl232)
 						ctx.EmitJmp(lbl200)
 						ctx.MarkLabel(lbl233)
@@ -17868,6 +17890,7 @@ Patterns can be any of:
 					} else {
 						ctx.EmitJump(d326.Condition, lbl242)
 						ctx.EmitJmp(lbl243)
+						ctx.FreeDesc(&d325)
 						ctx.MarkLabel(lbl242)
 						ctx.EmitJmp(lbl209)
 						ctx.MarkLabel(lbl243)
@@ -18150,6 +18173,7 @@ Patterns can be any of:
 					} else {
 						ctx.EmitJump(d342.Condition, lbl280)
 						ctx.EmitJmp(lbl281)
+						ctx.FreeDesc(&d341)
 						ctx.MarkLabel(lbl280)
 						ctx.EmitJmp(lbl248)
 						ctx.MarkLabel(lbl281)
@@ -18752,6 +18776,7 @@ Patterns can be any of:
 					} else {
 						ctx.EmitJump(d385.Condition, lbl290)
 						ctx.EmitJmp(lbl291)
+						ctx.FreeDesc(&d384)
 						ctx.MarkLabel(lbl290)
 						ctx.EmitJmp(lbl257)
 						ctx.MarkLabel(lbl291)
@@ -19034,6 +19059,7 @@ Patterns can be any of:
 					} else {
 						ctx.EmitJump(d401.Condition, lbl328)
 						ctx.EmitJmp(lbl329)
+						ctx.FreeDesc(&d400)
 						ctx.MarkLabel(lbl328)
 						ctx.EmitJmp(lbl296)
 						ctx.MarkLabel(lbl329)
@@ -19636,6 +19662,7 @@ Patterns can be any of:
 					} else {
 						ctx.EmitJump(d444.Condition, lbl338)
 						ctx.EmitJmp(lbl339)
+						ctx.FreeDesc(&d443)
 						ctx.MarkLabel(lbl338)
 						ctx.EmitJmp(lbl305)
 						ctx.MarkLabel(lbl339)
@@ -19918,6 +19945,7 @@ Patterns can be any of:
 					} else {
 						ctx.EmitJump(d460.Condition, lbl376)
 						ctx.EmitJmp(lbl377)
+						ctx.FreeDesc(&d459)
 						ctx.MarkLabel(lbl376)
 						ctx.EmitJmp(lbl344)
 						ctx.MarkLabel(lbl377)
@@ -20520,6 +20548,7 @@ Patterns can be any of:
 					} else {
 						ctx.EmitJump(d503.Condition, lbl386)
 						ctx.EmitJmp(lbl387)
+						ctx.FreeDesc(&d502)
 						ctx.MarkLabel(lbl386)
 						ctx.EmitJmp(lbl353)
 						ctx.MarkLabel(lbl387)
@@ -20802,6 +20831,7 @@ Patterns can be any of:
 					} else {
 						ctx.EmitJump(d519.Condition, lbl424)
 						ctx.EmitJmp(lbl425)
+						ctx.FreeDesc(&d518)
 						ctx.MarkLabel(lbl424)
 						ctx.EmitJmp(lbl392)
 						ctx.MarkLabel(lbl425)
@@ -21404,6 +21434,7 @@ Patterns can be any of:
 					} else {
 						ctx.EmitJump(d562.Condition, lbl434)
 						ctx.EmitJmp(lbl435)
+						ctx.FreeDesc(&d561)
 						ctx.MarkLabel(lbl434)
 						ctx.EmitJmp(lbl401)
 						ctx.MarkLabel(lbl435)
@@ -21686,6 +21717,7 @@ Patterns can be any of:
 					} else {
 						ctx.EmitJump(d578.Condition, lbl472)
 						ctx.EmitJmp(lbl473)
+						ctx.FreeDesc(&d577)
 						ctx.MarkLabel(lbl472)
 						ctx.EmitJmp(lbl440)
 						ctx.MarkLabel(lbl473)
@@ -22288,6 +22320,7 @@ Patterns can be any of:
 					} else {
 						ctx.EmitJump(d621.Condition, lbl482)
 						ctx.EmitJmp(lbl483)
+						ctx.FreeDesc(&d620)
 						ctx.MarkLabel(lbl482)
 						ctx.EmitJmp(lbl449)
 						ctx.MarkLabel(lbl483)
@@ -22570,6 +22603,7 @@ Patterns can be any of:
 					} else {
 						ctx.EmitJump(d637.Condition, lbl520)
 						ctx.EmitJmp(lbl521)
+						ctx.FreeDesc(&d636)
 						ctx.MarkLabel(lbl520)
 						ctx.EmitJmp(lbl488)
 						ctx.MarkLabel(lbl521)
@@ -23172,6 +23206,7 @@ Patterns can be any of:
 					} else {
 						ctx.EmitJump(d680.Condition, lbl530)
 						ctx.EmitJmp(lbl531)
+						ctx.FreeDesc(&d679)
 						ctx.MarkLabel(lbl530)
 						ctx.EmitJmp(lbl497)
 						ctx.MarkLabel(lbl531)
@@ -23454,6 +23489,7 @@ Patterns can be any of:
 					} else {
 						ctx.EmitJump(d696.Condition, lbl568)
 						ctx.EmitJmp(lbl569)
+						ctx.FreeDesc(&d695)
 						ctx.MarkLabel(lbl568)
 						ctx.EmitJmp(lbl536)
 						ctx.MarkLabel(lbl569)
@@ -24056,6 +24092,7 @@ Patterns can be any of:
 					} else {
 						ctx.EmitJump(d739.Condition, lbl578)
 						ctx.EmitJmp(lbl579)
+						ctx.FreeDesc(&d738)
 						ctx.MarkLabel(lbl578)
 						ctx.EmitJmp(lbl545)
 						ctx.MarkLabel(lbl579)
@@ -24338,6 +24375,7 @@ Patterns can be any of:
 					} else {
 						ctx.EmitJump(d755.Condition, lbl616)
 						ctx.EmitJmp(lbl617)
+						ctx.FreeDesc(&d754)
 						ctx.MarkLabel(lbl616)
 						ctx.EmitJmp(lbl584)
 						ctx.MarkLabel(lbl617)
@@ -24940,6 +24978,7 @@ Patterns can be any of:
 					} else {
 						ctx.EmitJump(d798.Condition, lbl626)
 						ctx.EmitJmp(lbl627)
+						ctx.FreeDesc(&d797)
 						ctx.MarkLabel(lbl626)
 						ctx.EmitJmp(lbl593)
 						ctx.MarkLabel(lbl627)
@@ -25115,6 +25154,7 @@ Patterns can be any of:
 					} else {
 						ctx.EmitJump(d815.Condition, lbl630)
 						ctx.EmitJmp(lbl631)
+						ctx.FreeDesc(&d814)
 						ctx.MarkLabel(lbl630)
 						ctx.EmitJmp(lbl598)
 						ctx.MarkLabel(lbl631)
@@ -26054,6 +26094,7 @@ Patterns can be any of:
 					} else {
 						ctx.EmitJump(d884.Condition, lbl642)
 						ctx.EmitJmp(lbl643)
+						ctx.FreeDesc(&d883)
 						ctx.MarkLabel(lbl642)
 						ctx.EmitJmp(lbl607)
 						ctx.MarkLabel(lbl643)
@@ -26564,6 +26605,7 @@ Patterns can be any of:
 					} else {
 						ctx.EmitJump(d931.Condition, lbl650)
 						ctx.EmitJmp(lbl651)
+						ctx.FreeDesc(&d930)
 						ctx.MarkLabel(lbl650)
 						ctx.EmitJmp(lbl550)
 						ctx.MarkLabel(lbl651)
@@ -27503,6 +27545,7 @@ Patterns can be any of:
 					} else {
 						ctx.EmitJump(d1000.Condition, lbl662)
 						ctx.EmitJmp(lbl663)
+						ctx.FreeDesc(&d999)
 						ctx.MarkLabel(lbl662)
 						ctx.EmitJmp(lbl559)
 						ctx.MarkLabel(lbl663)
@@ -28013,6 +28056,7 @@ Patterns can be any of:
 					} else {
 						ctx.EmitJump(d1047.Condition, lbl670)
 						ctx.EmitJmp(lbl671)
+						ctx.FreeDesc(&d1046)
 						ctx.MarkLabel(lbl670)
 						ctx.EmitJmp(lbl502)
 						ctx.MarkLabel(lbl671)
@@ -28952,6 +28996,7 @@ Patterns can be any of:
 					} else {
 						ctx.EmitJump(d1116.Condition, lbl682)
 						ctx.EmitJmp(lbl683)
+						ctx.FreeDesc(&d1115)
 						ctx.MarkLabel(lbl682)
 						ctx.EmitJmp(lbl511)
 						ctx.MarkLabel(lbl683)
@@ -29462,6 +29507,7 @@ Patterns can be any of:
 					} else {
 						ctx.EmitJump(d1163.Condition, lbl690)
 						ctx.EmitJmp(lbl691)
+						ctx.FreeDesc(&d1162)
 						ctx.MarkLabel(lbl690)
 						ctx.EmitJmp(lbl454)
 						ctx.MarkLabel(lbl691)
@@ -30401,6 +30447,7 @@ Patterns can be any of:
 					} else {
 						ctx.EmitJump(d1232.Condition, lbl702)
 						ctx.EmitJmp(lbl703)
+						ctx.FreeDesc(&d1231)
 						ctx.MarkLabel(lbl702)
 						ctx.EmitJmp(lbl463)
 						ctx.MarkLabel(lbl703)
@@ -30911,6 +30958,7 @@ Patterns can be any of:
 					} else {
 						ctx.EmitJump(d1279.Condition, lbl710)
 						ctx.EmitJmp(lbl711)
+						ctx.FreeDesc(&d1278)
 						ctx.MarkLabel(lbl710)
 						ctx.EmitJmp(lbl406)
 						ctx.MarkLabel(lbl711)
@@ -31850,6 +31898,7 @@ Patterns can be any of:
 					} else {
 						ctx.EmitJump(d1348.Condition, lbl722)
 						ctx.EmitJmp(lbl723)
+						ctx.FreeDesc(&d1347)
 						ctx.MarkLabel(lbl722)
 						ctx.EmitJmp(lbl415)
 						ctx.MarkLabel(lbl723)
@@ -32360,6 +32409,7 @@ Patterns can be any of:
 					} else {
 						ctx.EmitJump(d1395.Condition, lbl730)
 						ctx.EmitJmp(lbl731)
+						ctx.FreeDesc(&d1394)
 						ctx.MarkLabel(lbl730)
 						ctx.EmitJmp(lbl358)
 						ctx.MarkLabel(lbl731)
@@ -33299,6 +33349,7 @@ Patterns can be any of:
 					} else {
 						ctx.EmitJump(d1464.Condition, lbl742)
 						ctx.EmitJmp(lbl743)
+						ctx.FreeDesc(&d1463)
 						ctx.MarkLabel(lbl742)
 						ctx.EmitJmp(lbl367)
 						ctx.MarkLabel(lbl743)
@@ -33809,6 +33860,7 @@ Patterns can be any of:
 					} else {
 						ctx.EmitJump(d1511.Condition, lbl750)
 						ctx.EmitJmp(lbl751)
+						ctx.FreeDesc(&d1510)
 						ctx.MarkLabel(lbl750)
 						ctx.EmitJmp(lbl310)
 						ctx.MarkLabel(lbl751)
@@ -34748,6 +34800,7 @@ Patterns can be any of:
 					} else {
 						ctx.EmitJump(d1580.Condition, lbl762)
 						ctx.EmitJmp(lbl763)
+						ctx.FreeDesc(&d1579)
 						ctx.MarkLabel(lbl762)
 						ctx.EmitJmp(lbl319)
 						ctx.MarkLabel(lbl763)
@@ -35258,6 +35311,7 @@ Patterns can be any of:
 					} else {
 						ctx.EmitJump(d1627.Condition, lbl770)
 						ctx.EmitJmp(lbl771)
+						ctx.FreeDesc(&d1626)
 						ctx.MarkLabel(lbl770)
 						ctx.EmitJmp(lbl262)
 						ctx.MarkLabel(lbl771)
@@ -36197,6 +36251,7 @@ Patterns can be any of:
 					} else {
 						ctx.EmitJump(d1696.Condition, lbl782)
 						ctx.EmitJmp(lbl783)
+						ctx.FreeDesc(&d1695)
 						ctx.MarkLabel(lbl782)
 						ctx.EmitJmp(lbl271)
 						ctx.MarkLabel(lbl783)
@@ -36707,6 +36762,7 @@ Patterns can be any of:
 					} else {
 						ctx.EmitJump(d1743.Condition, lbl790)
 						ctx.EmitJmp(lbl791)
+						ctx.FreeDesc(&d1742)
 						ctx.MarkLabel(lbl790)
 						ctx.EmitJmp(lbl214)
 						ctx.MarkLabel(lbl791)
@@ -37646,6 +37702,7 @@ Patterns can be any of:
 					} else {
 						ctx.EmitJump(d1812.Condition, lbl802)
 						ctx.EmitJmp(lbl803)
+						ctx.FreeDesc(&d1811)
 						ctx.MarkLabel(lbl802)
 						ctx.EmitJmp(lbl223)
 						ctx.MarkLabel(lbl803)
@@ -38156,6 +38213,7 @@ Patterns can be any of:
 					} else {
 						ctx.EmitJump(d1859.Condition, lbl810)
 						ctx.EmitJmp(lbl811)
+						ctx.FreeDesc(&d1858)
 						ctx.MarkLabel(lbl810)
 						ctx.EmitJmp(lbl166)
 						ctx.MarkLabel(lbl811)
@@ -39095,6 +39153,7 @@ Patterns can be any of:
 					} else {
 						ctx.EmitJump(d1928.Condition, lbl822)
 						ctx.EmitJmp(lbl823)
+						ctx.FreeDesc(&d1927)
 						ctx.MarkLabel(lbl822)
 						ctx.EmitJmp(lbl175)
 						ctx.MarkLabel(lbl823)
@@ -39605,6 +39664,7 @@ Patterns can be any of:
 					} else {
 						ctx.EmitJump(d1975.Condition, lbl830)
 						ctx.EmitJmp(lbl831)
+						ctx.FreeDesc(&d1974)
 						ctx.MarkLabel(lbl830)
 						ctx.EmitJmp(lbl118)
 						ctx.MarkLabel(lbl831)
@@ -40544,6 +40604,7 @@ Patterns can be any of:
 					} else {
 						ctx.EmitJump(d2044.Condition, lbl842)
 						ctx.EmitJmp(lbl843)
+						ctx.FreeDesc(&d2043)
 						ctx.MarkLabel(lbl842)
 						ctx.EmitJmp(lbl127)
 						ctx.MarkLabel(lbl843)
@@ -41054,6 +41115,7 @@ Patterns can be any of:
 					} else {
 						ctx.EmitJump(d2091.Condition, lbl850)
 						ctx.EmitJmp(lbl851)
+						ctx.FreeDesc(&d2090)
 						ctx.MarkLabel(lbl850)
 						ctx.EmitJmp(lbl70)
 						ctx.MarkLabel(lbl851)
@@ -41993,6 +42055,7 @@ Patterns can be any of:
 					} else {
 						ctx.EmitJump(d2160.Condition, lbl862)
 						ctx.EmitJmp(lbl863)
+						ctx.FreeDesc(&d2159)
 						ctx.MarkLabel(lbl862)
 						ctx.EmitJmp(lbl79)
 						ctx.MarkLabel(lbl863)
@@ -42503,6 +42566,7 @@ Patterns can be any of:
 					} else {
 						ctx.EmitJump(d2207.Condition, lbl870)
 						ctx.EmitJmp(lbl871)
+						ctx.FreeDesc(&d2206)
 						ctx.MarkLabel(lbl870)
 						ctx.EmitJmp(lbl22)
 						ctx.MarkLabel(lbl871)
@@ -43442,6 +43506,7 @@ Patterns can be any of:
 					} else {
 						ctx.EmitJump(d2276.Condition, lbl882)
 						ctx.EmitJmp(lbl883)
+						ctx.FreeDesc(&d2275)
 						ctx.MarkLabel(lbl882)
 						ctx.EmitJmp(lbl31)
 						ctx.MarkLabel(lbl883)
@@ -44115,6 +44180,7 @@ Patterns can be any of:
 					lbl4 := ctx.ReserveLabel()
 					ctx.EmitJump(d4.Condition, lbl2)
 					ctx.EmitJmp(lbl4)
+					ctx.FreeDesc(&d3)
 					snap8 := d1
 					snap9 := d2
 					snap10 := d3

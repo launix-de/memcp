@@ -329,6 +329,7 @@ func init_timezone() {
 						return bbs[0].RenderPS(ps)
 					}
 					ctx.EmitJump(d2.Condition, lbl2)
+					ctx.FreeDesc(&d1)
 					snap5 := d0
 					snap6 := d1
 					snap7 := d2
@@ -3392,6 +3393,7 @@ func init_timezone() {
 						return bbs[8].RenderPS(ps)
 					}
 					ctx.EmitJump(d236.Condition, lbl11)
+					ctx.FreeDesc(&d235)
 					snap239 := d1
 					snap240 := d2
 					snap241 := d3
@@ -6487,6 +6489,7 @@ func init_timezone() {
 					lbl11 := ctx.ReserveLabel()
 					ctx.EmitJump(d30.Condition, lbl4)
 					ctx.EmitJmp(lbl11)
+					ctx.FreeDesc(&d29)
 					snap34 := d1
 					snap35 := d2
 					snap36 := d3
@@ -7651,6 +7654,7 @@ func init_timezone() {
 						return bbs[6].RenderPS(ps)
 					}
 					ctx.EmitJump(d152.Condition, lbl10)
+					ctx.FreeDesc(&d151)
 					snap156 := d1
 					snap157 := d2
 					snap158 := d3
@@ -10948,6 +10952,7 @@ func init_timezone() {
 						return bbs[5].RenderPS(ps)
 					}
 					ctx.EmitJump(d118.Condition, lbl7)
+					ctx.FreeDesc(&d117)
 					snap121 := d1
 					snap122 := d2
 					snap123 := d3
@@ -11858,6 +11863,7 @@ func init_timezone() {
 						return bbs[7].RenderPS(ps)
 					}
 					ctx.EmitJump(d196.Condition, lbl10)
+					ctx.FreeDesc(&d195)
 					snap201 := d1
 					snap202 := d2
 					snap203 := d3
