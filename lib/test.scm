@@ -3282,7 +3282,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(set query_expr_alias_set (jit query_expr_alias_set))
 	(assert (jit? resolve_column_alias) (jit-enabled?) "jit coverage: resolve_column_alias is 100% native")
 	(assert (jit? query_expr_alias_set) (jit-enabled?) "jit coverage: query_expr_alias_set is 100% native")
-	(assert (tree_collect_tagged_nth_unique
+	(assert (expr_collect_tagged_nth_unique
 		(list 'root
 			(list 'tag 'a)
 			(list 'nested (list 'tag 'b) (list 'tag 'a))
@@ -3290,6 +3290,12 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		'tag 1)
 		(list 'a 'b 'c)
 		"tree collector preserves first-seen order, uniqueness, and tagged-leaf boundaries")
+	(assert (expr_collect_tagged_nth_unique
+		(list (list 'lambda (list 'row) (list 'tag 'operator-scope))
+			(list 'tag 'operand-scope))
+		'tag 1)
+		(list 'operand-scope)
+		"expression collector does not leak references from a compound operator head")
 	(assert (query_expr_alias_set 'default (list 'get_column 'a 'x nil nil) '()) (list 'a true)
 		"jit coverage: symbol get_column match")
 	(assert (query_expr_alias_set 'default
