@@ -194,6 +194,28 @@ test_cases:
         - "__union_rows"
         - "(sort rows"
 
+  - name: "Ordered UNION globally merges non-unique joined prefixes"
+    sql: |
+      SELECT f.name AS group_name, r.ID AS rank_value
+      FROM ua_fop_files AS f
+      JOIN renderjob AS r ON r.result = f.ID
+      UNION ALL
+      SELECT name AS group_name, ID AS rank_value
+      FROM ua_fop_files
+      WHERE ID = 2
+      ORDER BY group_name ASC, rank_value DESC
+    expect:
+      rows: 4
+      data:
+        - group_name: "image1.png"
+          rank_value: 101
+        - group_name: "image2.png"
+          rank_value: 2
+        - group_name: "image3.png"
+          rank_value: 103
+        - group_name: "image3.png"
+          rank_value: 102
+
   # === scan_order_multi: cross-table merge, 3+ branches, computed sort ===
 
   - name: "UNION ALL ORDER BY across different tables"
