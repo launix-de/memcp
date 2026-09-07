@@ -331,6 +331,29 @@ func TestCreateTableIfNotExistsReturnsFalseWithoutSaving(t *testing.T) {
 	if scm.ToBool(second) {
 		t.Fatal("second createtable should report created=false")
 	}
+
+	db := GetDatabase("tcreatetablefast")
+	db.storageMoveMu.Lock()
+	fastDone := make(chan scm.Scmer, 1)
+	go func() {
+		fastDone <- callBuiltin(t, "createtable",
+			scm.NewString("tcreatetablefast"),
+			scm.NewString(".hot"),
+			cols,
+			options,
+			scm.NewBool(true),
+		)
+	}()
+	select {
+	case result := <-fastDone:
+		if scm.ToBool(result) {
+			t.Fatal("locked storage-move fast path should report created=false")
+		}
+	case <-time.After(time.Second):
+		db.storageMoveMu.Unlock()
+		t.Fatal("idempotent createtable entered the storage-move writer lock")
+	}
+	db.storageMoveMu.Unlock()
 }
 
 func TestSchemaReloadInvalidatesPlannerCacheOnInit(t *testing.T) {

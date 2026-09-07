@@ -154,7 +154,15 @@ func MoveDatabase(src PersistenceEngine, dst PersistenceEngine) {
 	if len(schema) == 0 {
 		panic("cannot move a database without a published schema")
 	}
+	copyDatabaseObjects(src, dst)
+	dst.WriteSchema(schema)
+}
 
+// copyDatabaseObjects copies generation-private data without publishing a
+// schema. Online storage migration uses this while the old schema generation
+// remains authoritative, then publishes the prepared replacement schema as its
+// atomic commit record.
+func copyDatabaseObjects(src PersistenceEngine, dst PersistenceEngine) {
 	src.WalkShardFiles(func(name string) {
 		// WAL encodings are backend-specific (filesystem uses one appendable
 		// file, remote stores use immutable segments plus a manifest). ALTER
@@ -167,11 +175,6 @@ func MoveDatabase(src PersistenceEngine, dst PersistenceEngine) {
 	src.WalkBlobs(func(hash string) {
 		copyPersistenceObject(src.ReadBlob(hash), dst.WriteBlob(hash), dst, "database.move.blob")
 	})
-
-	// The schema is the commit record naming the copied shard generations. It
-	// must be the final destination object so an interrupted move is never
-	// mistaken for a complete database.
-	dst.WriteSchema(schema)
 }
 
 func isPersistenceLogObject(name string) bool {

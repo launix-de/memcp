@@ -2245,9 +2245,8 @@ func Init(en scm.Env) {
 					// invocation so its current closed callback can repair the table.
 				}
 			}
-			db.storageMoveMu.RLock()
-			defer db.storageMoveMu.RUnlock()
-
+			db.storageMoveMu.Lock()
+			defer db.storageMoveMu.Unlock()
 			// parse options only after the fast existing-table probe
 			options := mustScmerSlice(a[3], "options")
 			var autoIncrement uint64
@@ -2437,9 +2436,6 @@ func Init(en scm.Env) {
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			t := TableFromScmer(a[0])
-			t.schema.storageMoveMu.RLock()
-			defer t.schema.storageMoveMu.RUnlock()
-
 			// normal column
 			colname := scm.String(a[1])
 			typename := scm.String(a[2])
@@ -2555,8 +2551,6 @@ func Init(en scm.Env) {
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			t := TableFromScmer(a[0])
-			t.schema.storageMoveMu.RLock()
-			defer t.schema.storageMoveMu.RUnlock()
 			var currentTx *TxContext
 			if len(a) > 4 {
 				currentTx = scmerToTxContext(a[4])
@@ -2826,8 +2820,6 @@ func Init(en scm.Env) {
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			t := TableFromScmer(a[0])
-			t.schema.storageMoveMu.RLock()
-			defer t.schema.storageMoveMu.RUnlock()
 			db := t.schema
 			operation := scm.String(a[1])
 
@@ -2910,8 +2902,6 @@ func Init(en scm.Env) {
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			t := TableFromScmer(a[0])
-			t.schema.storageMoveMu.RLock()
-			defer t.schema.storageMoveMu.RUnlock()
 			db := t.schema
 			requireTableMaintenance(db.Name, t.Name, maintenanceAlter)
 			for i, c := range t.Columns {

@@ -64,9 +64,9 @@ type database struct {
 	// a read capability; cleanup takes the exclusive capability. Query and DML
 	// paths do not participate.
 	persistenceLifecycle sync.RWMutex `json:"-"`
-	// storageMoveMu serializes backend migrations. A migration additionally
-	// takes persistenceLifecycle exclusively and publishes table WRITE locks.
-	storageMoveMu sync.RWMutex `json:"-"`
+	// storageMoveMu serializes backend migration with rare catalog membership
+	// changes. Query/DML paths and idempotent planner setup never enter it.
+	storageMoveMu sync.Mutex `json:"-"`
 	// transactionLog is the database-wide commit authority for transactional
 	// shard WAL entries. Shard logs may contain prepared records after a crash;
 	// recovery exposes them only when this log contains their durable commit.
@@ -309,17 +309,104 @@ func (d *database) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// TODO: replace databases map everytime something changes, so we don't run into read-while-write
-// e.g. a table of databases
-var databases NonLockingReadMap.NonLockingReadMap[database, string] = NonLockingReadMap.New[database, string]()
+// databaseCatalogEntry is immutable after publication. Keeping the mutable
+// database behind a pointer prevents lookups from copying live mutex/cachelines.
+type databaseCatalogEntry struct {
+	name string
+	db   *database
+}
+
+type databaseCatalogSnapshot struct {
+	entries   []databaseCatalogEntry
+	databases []*database
+}
+
+type databaseCatalog struct {
+	writes   sync.Mutex
+	snapshot atomic.Pointer[databaseCatalogSnapshot]
+}
+
+func newDatabaseCatalog() databaseCatalog {
+	catalog := databaseCatalog{}
+	catalog.snapshot.Store(&databaseCatalogSnapshot{})
+	return catalog
+}
+
+func (catalog *databaseCatalog) Get(name string) *database {
+	entries := catalog.snapshot.Load().entries
+	lower, upper := 0, len(entries)
+	for lower < upper {
+		pivot := (lower + upper) / 2
+		if entries[pivot].name == name {
+			return entries[pivot].db
+		}
+		if entries[pivot].name < name {
+			lower = pivot + 1
+		} else {
+			upper = pivot
+		}
+	}
+	return nil
+}
+
+func (catalog *databaseCatalog) Set(db *database) *database {
+	catalog.writes.Lock()
+	defer catalog.writes.Unlock()
+	old := catalog.snapshot.Load().entries
+	index := sort.Search(len(old), func(index int) bool { return old[index].name >= db.Name })
+	previous := (*database)(nil)
+	var entries []databaseCatalogEntry
+	if index < len(old) && old[index].name == db.Name {
+		previous = old[index].db
+		entries = make([]databaseCatalogEntry, len(old))
+		copy(entries, old)
+	} else {
+		entries = make([]databaseCatalogEntry, len(old)+1)
+		copy(entries, old[:index])
+		copy(entries[index+1:], old[index:])
+	}
+	entries[index] = databaseCatalogEntry{name: db.Name, db: db}
+	catalog.publish(entries)
+	return previous
+}
+
+func (catalog *databaseCatalog) Remove(name string) *database {
+	catalog.writes.Lock()
+	defer catalog.writes.Unlock()
+	old := catalog.snapshot.Load().entries
+	index := sort.Search(len(old), func(index int) bool { return old[index].name >= name })
+	if index == len(old) || old[index].name != name {
+		return nil
+	}
+	entries := make([]databaseCatalogEntry, len(old)-1)
+	copy(entries, old[:index])
+	copy(entries[index:], old[index+1:])
+	removed := old[index].db
+	catalog.publish(entries)
+	return removed
+}
+
+func (catalog *databaseCatalog) GetAll() []*database {
+	return catalog.snapshot.Load().databases
+}
+
+func (catalog *databaseCatalog) publish(entries []databaseCatalogEntry) {
+	result := make([]*database, len(entries))
+	for index, entry := range entries {
+		result[index] = entry.db
+	}
+	catalog.snapshot.Store(&databaseCatalogSnapshot{entries: entries, databases: result})
+}
+
+var databases = newDatabaseCatalog()
 var Basepath string = "data"
 
 /* implement NonLockingReadMap */
-func (d database) GetKey() string {
+func (d *database) GetKey() string {
 	return d.Name
 }
 
-func (d database) ComputeSize() uint {
+func (d *database) ComputeSize() uint {
 	var sz uint = 16 * 8 // heuristic
 	for _, t := range d.tables.GetAll() {
 		sz += t.ComputeSize()
@@ -1394,21 +1481,206 @@ func CreateDatabaseFrom(schema string, ignoreexists bool, sourceDB string) bool 
 	return true
 }
 
-type movedShardLog struct {
-	shard *storageShard
-	log   PersistenceLogfile
+type storageMoveGeneration struct {
+	table       *table
+	oldTopology *tableShardTopology
+	oldShards   []*storageShard
+	newShards   []*storageShard
+	partitioned bool
 }
 
-func drainPersistenceLog(entries chan interface{}) {
-	for range entries {
+func prepareStorageMoveGeneration(t *table) (generation storageMoveGeneration) {
+	t.maintenanceMu.Lock()
+	t.mu.Lock()
+	if t.maintenanceKind != 0 {
+		t.mu.Unlock()
+		t.maintenanceMu.Unlock()
+		panic("storage migration raced table maintenance for " + t.schema.Name + "." + t.Name)
+	}
+	t.maintenanceKind = 1
+	topology := t.activeTopology()
+	oldShards := append([]*storageShard(nil), topology.shards...)
+	partitioned := topology.mode == ShardModePartition
+	t.mu.Unlock()
+
+	generation = storageMoveGeneration{
+		table:       t,
+		oldTopology: topology,
+		oldShards:   oldShards,
+		newShards:   make([]*storageShard, len(oldShards)),
+		partitioned: partitioned,
+	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			abortStorageMoveGenerations([]storageMoveGeneration{generation})
+			panic(recovered)
+		}
+	}()
+	for index, shard := range oldShards {
+		if shard != nil {
+			generation.newShards[index] = shard.rebuild(true)
+		}
+	}
+	return generation
+}
+
+func abortStorageMoveGenerations(generations []storageMoveGeneration) {
+	for _, generation := range generations {
+		for index, shard := range generation.oldShards {
+			if shard == nil || generation.newShards[index] == nil {
+				continue
+			}
+			shard.clearNext(generation.newShards[index])
+			GlobalCache.Remove(generation.newShards[index])
+			discardUnpublishedShard(generation.newShards[index])
+		}
+		generation.table.mu.Lock()
+		if generation.partitioned {
+			generation.table.PShards = generation.oldShards
+		} else {
+			generation.table.Shards = generation.oldShards
+		}
+		generation.table.maintenanceKind = 0
+		generation.table.mu.Unlock()
+		generation.table.maintenanceMu.Unlock()
 	}
 }
 
-// AlterDatabaseStorage moves every durable object to a new backend and changes
-// the local backend descriptor only after the destination schema is complete.
-// A database-wide set of table WRITE locks deliberately blocks reads as well as
-// writes during this first implementation: no query may retain a source-backed
-// lazy reader when the old backend is removed.
+func replayPersistenceLog(engine PersistenceEngine, name string) []interface{} {
+	_, input, logfile := engine.ReplayLog(name)
+	entries := make([]interface{}, 0)
+	for entry := range input {
+		entries = append(entries, entry)
+	}
+	logfile.Close()
+	return entries
+}
+
+func movePreparedShardLogs(src, dst PersistenceEngine, generations []storageMoveGeneration) {
+	for _, generation := range generations {
+		for _, shard := range generation.newShards {
+			if shard == nil {
+				continue
+			}
+			shard.mu.Lock()
+			if shard.logfile != nil {
+				shard.logfile.Flush(shard.t.PersistencyMode == Safe)
+				shard.logfile.Close()
+				shard.logfile = dst.SwapLog(shard.uuid.String(), replayPersistenceLog(src, shard.uuid.String()), shard.t.PersistencyMode == Safe)
+			}
+			shard.mu.Unlock()
+		}
+	}
+}
+
+func moveTransactionLog(db *database, dst PersistenceEngine) PersistenceLogfile {
+	db.transactionMu.Lock()
+	defer db.transactionMu.Unlock()
+	if db.transactionLog == nil {
+		return nil
+	}
+	ids := make([]string, 0, len(db.committedTx))
+	for id := range db.committedTx {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	entries := make([]interface{}, len(ids))
+	for index, id := range ids {
+		entries[index] = LogEntryCommit{txID: id}
+	}
+	replacement := dst.SwapLog(transactionLogName, entries, true)
+	old := db.transactionLog
+	db.transactionLog = replacement
+	return old
+}
+
+func publishStorageMoveGenerations(db *database, dst PersistenceEngine, generations []storageMoveGeneration, targetConfig json.RawMessage) {
+	// Build the destination catalog from the private successors without making
+	// them visible through the tables' atomic topology pointers. The direct
+	// shard fields are only serialization inputs; mutations use activeTopology.
+	for _, generation := range generations {
+		generation.table.mu.Lock()
+		if generation.partitioned {
+			generation.table.PShards = generation.newShards
+		} else {
+			generation.table.Shards = generation.newShards
+		}
+		generation.table.mu.Unlock()
+	}
+
+	snapshot, err := json.MarshalIndent(db, "", "  ")
+	for index := len(generations) - 1; index >= 0; index-- {
+		generation := generations[index]
+		generation.table.mu.Lock()
+		if generation.partitioned {
+			generation.table.PShards = generation.oldShards
+		} else {
+			generation.table.Shards = generation.oldShards
+		}
+		generation.table.mu.Unlock()
+	}
+	if err != nil {
+		panic(err)
+	}
+	if writer, ok := dst.(schemaWriteOptions); ok {
+		writer.WriteSchemaWithMode(snapshot, true)
+	} else {
+		dst.WriteSchema(snapshot)
+	}
+	writeDatabaseBackendConfig(db.Name, targetConfig)
+	db.persistence = dst
+
+	for _, generation := range generations {
+		generation.table.mu.Lock()
+		if generation.partitioned {
+			generation.table.PShards = generation.newShards
+		} else {
+			generation.table.Shards = generation.newShards
+		}
+		generation.table.publishTopologyLocked()
+		generation.table.maintenanceKind = 0
+		generation.table.mu.Unlock()
+		generation.table.maintenanceMu.Unlock()
+	}
+}
+
+func retireSourceStorage(src PersistenceEngine, generations []storageMoveGeneration, oldTransactionLog PersistenceLogfile) {
+	cleanup := func() {
+		for _, generation := range generations {
+			<-generation.oldTopology.drained
+			for _, shard := range generation.oldShards {
+				if shard != nil && shard.logfile != nil {
+					func() { defer func() { _ = recover() }(); shard.logfile.Close() }()
+				}
+			}
+		}
+		if oldTransactionLog != nil {
+			func() { defer func() { _ = recover() }(); oldTransactionLog.Close() }()
+		}
+		func() {
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					fmt.Println("error: old database storage cleanup failed after cutover:", recovered)
+				}
+			}()
+			src.Remove()
+		}()
+	}
+	for _, generation := range generations {
+		select {
+		case <-generation.oldTopology.drained:
+		default:
+			go cleanup()
+			return
+		}
+	}
+	cleanup()
+}
+
+// AlterDatabaseStorage builds private shard successors while readers remain on
+// the published generation. Source mutations are mirrored by the existing
+// rebuild chain. Only schema writers are excluded; publication swaps every
+// table topology after the complete destination schema is durable.
 func AlterDatabaseStorage(schema string, targetConfig json.RawMessage, currentTx *TxContext) bool {
 	db := GetDatabase(schema)
 	if db == nil {
@@ -1419,8 +1691,7 @@ func AlterDatabaseStorage(schema string, targetConfig json.RawMessage, currentTx
 	if dst == nil {
 		panic("unknown or invalid storage backend")
 	}
-	ss := SessionStateFromTx(currentTx)
-	if ss == nil {
+	if SessionStateFromTx(currentTx) == nil {
 		panic("ALTER DATABASE storage requires a query session")
 	}
 
@@ -1433,8 +1704,7 @@ func AlterDatabaseStorage(schema string, targetConfig json.RawMessage, currentTx
 	if equalDatabaseBackendConfig(databaseBackendConfig(schema), targetConfig) {
 		return true
 	}
-	// The blob catalog must exist before the table set is frozen. Rebuild may
-	// update it, and no table may appear after we publish the WRITE locks.
+	// Create internal schema before taking the exclusive schema-generation lock.
 	db.ensureBlobTable()
 	src := db.persistence
 	sameStorage := src.StorageIdentity() == dst.StorageIdentity()
@@ -1444,120 +1714,65 @@ func AlterDatabaseStorage(schema string, targetConfig json.RawMessage, currentTx
 	db.persistenceLifecycle.Lock()
 	defer db.persistenceLifecycle.Unlock()
 
+	// A same-namespace change only replaces connection/configuration metadata.
+	if sameStorage {
+		db.schemalock.Lock()
+		defer db.schemalock.Unlock()
+		writeDatabaseBackendConfig(schema, targetConfig)
+		db.persistence = dst
+		return true
+	}
+
+	generations := make([]storageMoveGeneration, 0)
+	var oldTransactionLog PersistenceLogfile
+	published := false
 	tables := db.tables.GetAll()
-	sort.Slice(tables, func(i, j int) bool { return tables[i].Name < tables[j].Name })
-	unlocks := make([]func(), 0, len(tables))
+	sort.Slice(tables, func(i, j int) bool {
+		if tables[i].Name == ".blobs" {
+			return false
+		}
+		if tables[j].Name == ".blobs" {
+			return true
+		}
+		return tables[i].Name < tables[j].Name
+	})
+	for _, table := range tables {
+		table.ddlMu.RLock()
+	}
 	defer func() {
-		for i := len(unlocks) - 1; i >= 0; i-- {
-			unlocks[i]()
+		if !published {
+			if oldTransactionLog != nil {
+				db.transactionMu.Lock()
+				failedTargetLog := db.transactionLog
+				db.transactionLog = oldTransactionLog
+				db.transactionMu.Unlock()
+				if failedTargetLog != nil {
+					func() { defer func() { _ = recover() }(); failedTargetLog.Close() }()
+				}
+			}
+			abortStorageMoveGenerations(generations)
+			func() { defer func() { _ = recover() }(); dst.Remove() }()
+		}
+		for index := len(tables) - 1; index >= 0; index-- {
+			tables[index].ddlMu.RUnlock()
 		}
 	}()
 	for _, table := range tables {
-		// Rebuilding blob-producing tables updates this internal refcount table
-		// with transactionless engine calls. User DDL cannot address .blobs, and
-		// every producer is locked, so leaving it unlocked is both safe and
-		// necessary to avoid self-deadlock during rebuild/old-generation cleanup.
-		if table.Name == ".blobs" {
-			continue
-		}
-		unlocks = append(unlocks, acquireTableLock(schema, table.Name, true, false, ss, querySeqFromTx(currentTx)))
+		generations = append(generations, prepareStorageMoveGeneration(table))
 	}
 
-	// Consolidate every delta into backend-neutral column generations. WAL file
-	// formats deliberately remain private to each backend and are not copied.
-	transactionCutoff, hasTransactions := db.transactionCompactionSnapshot()
-	rebuild := db.rebuildWithLifecycle(true, false, true)
-	if len(rebuild.errors) != 0 || !rebuild.complete {
-		panic("database storage move rebuild failed: " + strings.Join(rebuild.errors, " | "))
-	}
-	db.save()
-	for _, cleanupError := range cleanupReplacedShardGenerations(rebuild.replaced, "storage move "+schema) {
-		fmt.Println("error:", cleanupError)
-	}
-	if hasTransactions {
-		db.compactTransactionLog(transactionCutoff)
-	}
-
-	// Flush the newly opened empty native logs before copying the schema and
-	// backend-neutral objects.
-	var shards []*storageShard
-	for _, table := range tables {
-		shards = append(shards, table.ActiveShards()...)
-	}
-	for _, shard := range shards {
-		shard.mu.Lock()
-		if shard.logfile != nil {
-			shard.logfile.Flush(shard.t.PersistencyMode == Safe)
-		}
-		shard.mu.Unlock()
-	}
-	db.transactionMu.Lock()
-	if db.transactionLog != nil {
-		db.transactionLog.Flush(true)
-	}
-	db.transactionMu.Unlock()
-
-	if !sameStorage {
-		MoveDatabase(src, dst)
-	}
-
-	// Validate all copied WALs and prepare their destination append handles
-	// before the descriptor cutover. Any failure still leaves src authoritative.
-	movedLogs := make([]movedShardLog, 0, len(shards))
-	for _, shard := range shards {
-		shard.mu.RLock()
-		hasLog := shard.logfile != nil
-		shard.mu.RUnlock()
-		if !hasLog {
-			continue
-		}
-		_, entries, logfile := dst.ReplayLog(shard.uuid.String())
-		drainPersistenceLog(entries)
-		movedLogs = append(movedLogs, movedShardLog{shard: shard, log: logfile})
-	}
-	var movedTransactionLog PersistenceLogfile
-	db.transactionMu.RLock()
-	hasTransactionLog := db.transactionLog != nil
-	db.transactionMu.RUnlock()
-	if hasTransactionLog {
-		_, entries, logfile := dst.ReplayLog(transactionLogName)
-		drainPersistenceLog(entries)
-		movedTransactionLog = logfile
-	}
-
-	writeDatabaseBackendConfig(schema, targetConfig)
-	db.persistence = dst
-	for _, moved := range movedLogs {
-		moved.shard.mu.Lock()
-		old := moved.shard.logfile
-		moved.shard.logfile = moved.log
-		moved.shard.mu.Unlock()
-		if old != nil {
-			func() { defer func() { _ = recover() }(); old.Close() }()
-		}
-	}
-	if movedTransactionLog != nil {
-		db.transactionMu.Lock()
-		old := db.transactionLog
-		db.transactionLog = movedTransactionLog
-		db.transactionMu.Unlock()
-		if old != nil {
-			func() { defer func() { _ = recover() }(); old.Close() }()
-		}
-	}
-
-	// Cutover is complete. Cleanup failure is non-fatal and leaves only a stale
-	// source copy; rolling back now would be less safe than retaining the target.
-	if !sameStorage {
-		func() {
-			defer func() {
-				if recovered := recover(); recovered != nil {
-					fmt.Println("error: old database storage cleanup failed after cutover:", recovered)
-				}
-			}()
-			src.Remove()
-		}()
-	}
+	// Columns and blobs are immutable for the prepared successors. Writes keep
+	// entering their WAL/delta through the source generation's rebuild link.
+	copyDatabaseObjects(src, dst)
+	movePreparedShardLogs(src, dst, generations)
+	oldTransactionLog = moveTransactionLog(db, dst)
+	func() {
+		db.schemalock.Lock()
+		defer db.schemalock.Unlock()
+		publishStorageMoveGenerations(db, dst, generations, targetConfig)
+	}()
+	published = true
+	retireSourceStorage(src, generations, oldTransactionLog)
 	return true
 }
 
@@ -1577,8 +1792,8 @@ func DropDatabase(schema string, ifexists bool) bool {
 		}
 		panic("Database " + schema + " does not exist")
 	}
-	db.storageMoveMu.RLock()
-	defer db.storageMoveMu.RUnlock()
+	db.storageMoveMu.Lock()
+	defer db.storageMoveMu.Unlock()
 	requireDatabaseMaintenance(schema, maintenanceDrop)
 	db = databases.Remove(schema)
 	if db == nil {
@@ -1620,8 +1835,14 @@ func CreateTable(schema, name string, pm PersistencyMode, ifnotexists bool) (*ta
 	if db == nil {
 		panic("Database " + schema + " does not exist")
 	}
-	db.storageMoveMu.RLock()
-	defer db.storageMoveMu.RUnlock()
+	if ifnotexists {
+		if existing := db.tables.Get(name); existing != nil {
+			atomic.StoreUint64(&existing.lastAccessed, uint64(time.Now().UnixNano()))
+			return existing, false
+		}
+	}
+	db.storageMoveMu.Lock()
+	defer db.storageMoveMu.Unlock()
 	db.ensureLoaded()
 	db.schemalock.Lock()
 	t, created := db.createTableLocked(name, pm, ifnotexists)
@@ -1696,8 +1917,8 @@ func DropTable(schema, name string, ifexists bool) {
 	if db == nil {
 		panic("Database " + schema + " does not exist")
 	}
-	db.storageMoveMu.RLock()
-	defer db.storageMoveMu.RUnlock()
+	db.storageMoveMu.Lock()
+	defer db.storageMoveMu.Unlock()
 	db.ensureLoaded()
 	db.schemalock.Lock()
 	t := db.tables.Get(name)
@@ -1747,8 +1968,8 @@ func RenameTable(schema, oldname, newname string) {
 	if db == nil {
 		panic("Database " + schema + " does not exist")
 	}
-	db.storageMoveMu.RLock()
-	defer db.storageMoveMu.RUnlock()
+	db.storageMoveMu.Lock()
+	defer db.storageMoveMu.Unlock()
 	db.ensureLoaded()
 	db.schemalock.Lock()
 	t := db.tables.Get(oldname)
@@ -1787,6 +2008,10 @@ func keytableCleanup(tbl *table, schemaName string, freedByType *[numEvictableTy
 	// drop the table directly (bypass DropTable to avoid deadlock on opChan)
 	db := GetDatabase(schemaName)
 	if db != nil {
+		if !db.storageMoveMu.TryLock() {
+			return false // a storage generation is retaining this catalog member
+		}
+		defer db.storageMoveMu.Unlock()
 		if !db.schemalock.TryLock() {
 			return false // schemalock is held (e.g. by CreateTable); retry later
 		}

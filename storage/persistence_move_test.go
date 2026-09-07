@@ -21,7 +21,9 @@ import "os"
 import "bytes"
 import "encoding/json"
 import "strings"
+import "sync"
 import "testing"
+import "time"
 
 import "github.com/launix-de/memcp/scm"
 
@@ -51,6 +53,21 @@ type failingMovePersistence struct {
 
 func (p *failingMovePersistence) WriteShardFile(string) io.WriteCloser {
 	panic("injected move failure")
+}
+
+type blockingMovePersistence struct {
+	PersistenceEngine
+	once    sync.Once
+	started chan struct{}
+	release chan struct{}
+}
+
+func (p *blockingMovePersistence) WriteShardFile(name string) io.WriteCloser {
+	p.once.Do(func() {
+		close(p.started)
+		<-p.release
+	})
+	return p.PersistenceEngine.WriteShardFile(name)
 }
 
 func writeMoveObject(t *testing.T, writer io.WriteCloser, data []byte) {
@@ -273,5 +290,132 @@ func TestAlterDatabaseStorageFailureKeepsSourceActive(t *testing.T) {
 	got := table.scanLookup(NewTxContext(TxCursorStability), testLookupAccess([]string{"id"}, []scm.Scmer{scm.NewInt(1)}), "value", true)
 	if !scm.Equal(got, scm.NewString("source")) {
 		t.Fatalf("source row after failed move = %s, want source", scm.String(got))
+	}
+}
+
+func TestAlterDatabaseStorageKeepsReadersOnPublishedGeneration(t *testing.T) {
+	root := t.TempDir()
+	destinationRoot := t.TempDir()
+	databaseName := "alter_storage_online"
+	oldBasepath := Basepath
+	oldFactory, hadFactory := BackendRegistry["blocking-test-filesystem"]
+	started := make(chan struct{})
+	release := make(chan struct{})
+	Basepath = root
+	BackendRegistry["blocking-test-filesystem"] = func(dbName string, _ json.RawMessage) PersistenceEngine {
+		return &blockingMovePersistence{
+			PersistenceEngine: &FileStorage{path: destinationRoot + "/" + dbName + "/"},
+			started:           started,
+			release:           release,
+		}
+	}
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+		db := databases.Remove(databaseName)
+		if db != nil {
+			db.closeTransactionLog()
+		}
+		if hadFactory {
+			BackendRegistry["blocking-test-filesystem"] = oldFactory
+		} else {
+			delete(BackendRegistry, "blocking-test-filesystem")
+		}
+		Basepath = oldBasepath
+	})
+
+	CreateDatabase(databaseName, false)
+	table, _ := CreateTable(databaseName, "items", Safe, false)
+	table.CreateColumn("id", "INT", nil, nil)
+	table.CreateColumn("value", "TEXT", nil, nil)
+	table.Insert([]string{"id", "value"}, [][]scm.Scmer{{scm.NewInt(1), scm.NewString("old-generation")}}, nil, scm.NewNil(), false, nil)
+	oldTopology := table.activeTopology()
+	tx := NewTxContext(TxCursorStability)
+	tx.SessionState = &scm.SessionState{ID: 9003}
+	done := make(chan any, 1)
+	go func() {
+		defer func() { done <- recover() }()
+		AlterDatabaseStorage(databaseName, json.RawMessage(`{"backend":"blocking-test-filesystem"}`), tx)
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("storage migration did not reach the blocked destination copy")
+	}
+	if got := table.activeTopology(); got != oldTopology {
+		t.Fatal("storage migration published the replacement before destination completion")
+	}
+	readDone := make(chan scm.Scmer, 1)
+	go func() {
+		readDone <- table.scanLookup(NewTxContext(TxCursorStability), testLookupAccess([]string{"id"}, []scm.Scmer{scm.NewInt(1)}), "value", true)
+	}()
+	select {
+	case got := <-readDone:
+		if !scm.Equal(got, scm.NewString("old-generation")) {
+			t.Fatalf("read during migration = %s, want old-generation", scm.String(got))
+		}
+	case <-time.After(time.Second):
+		t.Fatal("reader blocked behind storage migration")
+	}
+
+	// The old generation remains the write entry point until publication, while
+	// its completed rebuild successor receives the same mutation.
+	table.Insert([]string{"id", "value"}, [][]scm.Scmer{{scm.NewInt(2), scm.NewString("mirrored")}}, nil, scm.NewNil(), false, nil)
+	ddlDone := make(chan struct{})
+	go func() {
+		CreateTable(databaseName, "created_after_move", Memory, false)
+		close(ddlDone)
+	}()
+	select {
+	case <-ddlDone:
+		t.Fatal("catalog mutation passed an unpublished storage generation")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case recovered := <-done:
+		if recovered != nil {
+			t.Fatalf("storage migration panicked: %v", recovered)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("storage migration did not finish")
+	}
+	select {
+	case <-ddlDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("catalog mutation did not resume after storage migration")
+	}
+
+	db := GetDatabase(databaseName)
+	db.closeTransactionLog()
+	databases.Remove(databaseName)
+	reloaded := newDatabase()
+	reloaded.Name = databaseName
+	reloaded.persistence = createPersistenceFromConfig(databaseName, json.RawMessage(`{"backend":"blocking-test-filesystem"}`))
+	reloaded.srState = COLD
+	databases.Set(reloaded)
+	reloadedTable := reloaded.GetTable("items")
+	got := reloadedTable.scanLookup(NewTxContext(TxCursorStability), testLookupAccess([]string{"id"}, []scm.Scmer{scm.NewInt(2)}), "value", true)
+	if !scm.Equal(got, scm.NewString("mirrored")) {
+		t.Fatalf("concurrent write after reload = %s, want mirrored", scm.String(got))
+	}
+}
+
+func BenchmarkDatabaseCatalogLookup(b *testing.B) {
+	databaseName := "benchmark_database_catalog_lookup"
+	db := newDatabase()
+	db.Name = databaseName
+	databases.Set(db)
+	b.Cleanup(func() { databases.Remove(databaseName) })
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		if GetDatabase(databaseName) != db {
+			b.Fatal("database catalog lookup returned a different database")
+		}
 	}
 }
