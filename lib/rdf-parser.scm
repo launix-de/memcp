@@ -2157,7 +2157,7 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 							(if (nil? having) nil (rdf_shared_expr having bindings outer_ctx))
 								result_order
 							limit offset '() '()
-							(if (> (count (coalesceNil result_order '())) 1)
+							(if (> (count (coalesceNil result_order '())) 0)
 								(list (list (quote global_order_required) true)) '())))
 					(begin
 						(define selected_fields (map_assoc cols (lambda (_title expr)
@@ -2173,7 +2173,7 @@ join reordering, RecSet selection, and physical scan costing have one owner. */
 								result_order limit offset '() '()
 							(merge (list
 								(if distinct (list (list (quote select_distinct) true)) '())
-								(if (> (count (coalesceNil result_order '())) 1)
+								(if (> (count (coalesceNil result_order '())) 0)
 									(list (list (quote global_order_required) true)) '()))))))))
 		(error "SPARQL shared planner: expected SELECT query")
 	)
