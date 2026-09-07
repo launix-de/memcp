@@ -47,10 +47,11 @@ func JITEnabled() bool { return true }
 // the exact func(uint32) Scmer Go ABI used by column consumers.
 func CompileJITStorageGetValue(emit JITStorageGetValueEmitter) JITStorageGetValueFunc {
 	entry, holder := compileJITStorageFunction(jitStorageGetValueABI, func(ctx *JITContext) {
-		idxReg := ctx.AllocReg()
-		ctx.EmitMovRegReg(idxReg, RegRAX)
-		idx := JITValueDesc{Loc: LocReg, Type: tagInt, Reg: idxReg, NoHeapPointer: true}
-		ctx.BindReg(idxReg, &idx)
+		// RAX remains reserved for the result throughout emission, so expose the
+		// incoming record id as a non-owning descriptor. Generated code may read
+		// it in place, and freeing the SSA input cannot accidentally make the ABI
+		// result register available to an unrelated temporary.
+		idx := JITValueDesc{Loc: LocReg, Type: tagInt, Reg: RegRAX, NoHeapPointer: true}
 		result := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: RegRAX, Reg2: RegRBX}
 		out := emit(ctx, idx, result)
 		ctx.EmitMovPairToResult(&out, &result)
@@ -112,36 +113,41 @@ func jitStorageSliceArg(ctx *JITContext, data, length, capacity Reg) JITValueDes
 }
 
 func compileJITStorageFunction(abi jitStorageABI, emit jitStorageEmitBody) (*JITEntryPoint, *jitStorageFuncValue) {
-	for _, codeCap := range [...]int{16 * 1024, 64 * 1024, 256 * 1024, 1024 * 1024} {
-		ptr, arena, reservation := globalJITPool.Alloc(codeCap)
-		buf := &execBuf{ptr: ptr, n: codeCap, arena: arena, reservation: reservation}
-		codeLen, roots, overflow := emitJITStorageFunction(buf, abi, emit)
-		if codeLen == 0 {
-			arena.complete(reservation, buf.stackMaps)
-			globalJITPool.Free(arena)
-			if overflow {
-				continue
+	for _, registerInputs := range [...]bool{true, false} {
+		for _, codeCap := range [...]int{16 * 1024, 64 * 1024, 256 * 1024, 1024 * 1024} {
+			ptr, arena, reservation := globalJITPool.Alloc(codeCap)
+			buf := &execBuf{ptr: ptr, n: codeCap, arena: arena, reservation: reservation}
+			codeLen, roots, overflow, needsStableInputs := emitJITStorageFunction(buf, abi, emit, registerInputs)
+			if codeLen == 0 {
+				arena.complete(reservation, buf.stackMaps)
+				globalJITPool.Free(arena)
+				if needsStableInputs && registerInputs {
+					break
+				}
+				if overflow {
+					continue
+				}
+				return nil, nil
 			}
-			return nil, nil
+			entry := &JITEntryPoint{
+				DebugName:      jitStorageABIName(abi),
+				StackFrameSize: buf.stackFrameSize,
+				CodePtr:        ptr,
+				CodeLen:        codeLen,
+				Arena:          arena,
+				ConstRoots:     roots,
+			}
+			holder := &jitStorageFuncValue{code: uintptr(ptr), owner: entry}
+			runtime.AddCleanup(entry, releaseJITEntryPoint, jitCodeLease{
+				pool:  &globalJITPool,
+				arena: arena,
+				code:  uintptr(ptr),
+			})
+			arena.complete(reservation, buf.stackMaps)
+			maybeDumpJITCode(ptr, (*[1 << 30]byte)(ptr)[:codeLen:codeLen])
+			maybeLogJITCodeName(entry)
+			return entry, holder
 		}
-		entry := &JITEntryPoint{
-			DebugName:      jitStorageABIName(abi),
-			StackFrameSize: buf.stackFrameSize,
-			CodePtr:        ptr,
-			CodeLen:        codeLen,
-			Arena:          arena,
-			ConstRoots:     roots,
-		}
-		holder := &jitStorageFuncValue{code: uintptr(ptr), owner: entry}
-		runtime.AddCleanup(entry, releaseJITEntryPoint, jitCodeLease{
-			pool:  &globalJITPool,
-			arena: arena,
-			code:  uintptr(ptr),
-		})
-		arena.complete(reservation, buf.stackMaps)
-		maybeDumpJITCode(ptr, (*[1 << 30]byte)(ptr)[:codeLen:codeLen])
-		maybeLogJITCodeName(entry)
-		return entry, holder
 	}
 	return nil, nil
 }
@@ -159,10 +165,11 @@ func jitStorageABIName(abi jitStorageABI) string {
 	}
 }
 
-func emitJITStorageFunction(buf *execBuf, abi jitStorageABI, emit jitStorageEmitBody) (codeLen int, roots []unsafe.Pointer, overflow bool) {
+func emitJITStorageFunction(buf *execBuf, abi jitStorageABI, emit jitStorageEmitBody, registerInputs bool) (codeLen int, roots []unsafe.Pointer, overflow bool, needsStableInputs bool) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			overflow = recovered == jitCodeOverflowPanic
+			needsStableInputs = recovered == jitStorageNeedsStableInputs
 			if JITLog {
 				fmt.Println("storage JIT panic", recovered)
 			}
@@ -179,22 +186,30 @@ func emitJITStorageFunction(buf *execBuf, abi jitStorageABI, emit jitStorageEmit
 	if abi == jitStorageGetValueABI {
 		occupied |= 1<<uint(RegRAX) | 1<<uint(RegRBX)
 	}
+	registerBank := jitX86RegisterBank
+	if registerInputs {
+		// Four temporaries cover the deepest current getter expression while
+		// leaving the remaining registers available to preplanned loop homes.
+		registerBank.TemporaryReserve = 4
+	}
 	ctx := &JITContext{
-		Ptr:          buf.ptr,
-		Start:        buf.ptr,
-		End:          unsafe.Add(buf.ptr, buf.n),
-		FreeRegs:     allRegs &^ occupied,
-		AllRegs:      allRegs,
-		SliceBase:    RegR12,
-		StackReg:     RegRSP,
-		FrameReg:     RegRBP,
-		ScratchReg:   RegR11,
-		ResultPtrReg: RegRAX,
-		ResultAuxReg: RegRBX,
-		LastIntReg:   RegR15,
-		HasFrame:     true,
-		FrameRoots:   make(map[jitStackRoot]struct{}),
-		Arena:        buf.arena,
+		Ptr:                      buf.ptr,
+		Start:                    buf.ptr,
+		End:                      unsafe.Add(buf.ptr, buf.n),
+		FreeRegs:                 allRegs &^ occupied,
+		AllRegs:                  allRegs,
+		RegisterBank:             registerBank,
+		StorageInputsInRegisters: registerInputs,
+		SliceBase:                RegR12,
+		StackReg:                 RegRSP,
+		FrameReg:                 RegRBP,
+		ScratchReg:               RegR11,
+		ResultPtrReg:             RegRAX,
+		ResultAuxReg:             RegRBX,
+		LastIntReg:               RegR15,
+		HasFrame:                 true,
+		FrameRoots:               make(map[jitStackRoot]struct{}),
+		Arena:                    buf.arena,
 	}
 	ctx.W = ctx
 	guardOffset, stackSmall, moreStackPC := jitRuntimeStackCheck()
@@ -221,7 +236,38 @@ func emitJITStorageFunction(buf *execBuf, abi jitStorageABI, emit jitStorageEmit
 	closureOff := ctx.AllocStack(8)
 	ctx.EmitStoreRegMem(RegRDX, RegRSP, closureOff)
 	ctx.setStackPointer(jitStackRootFrameSP, closureOff, true)
+	leafBody := ctx.Ptr
+	leafFrameLimit := ctx.MaxBPOffset
 	emit(ctx)
+	// A storage emitter without calls or storage beyond the precautionary
+	// closure root is a true leaf. No GC safepoint can observe its frame, and
+	// the calling Go funcval remains the owner of the code lease. Compact the
+	// already-emitted body to the entry instead of charging every scalar read
+	// for an unused stack probe, frame and root initialization.
+	leaf := ctx.MaxBPOffset == leafFrameLimit && ctx.MaxSpillOffset == 0 &&
+		ctx.MaxDynamicSP == 0 && len(ctx.Safepoints) == 0
+	if leaf {
+		ctx.emitByte(0xC3)
+		// Discard the two unresolved prologue-to-morestack fixups. A proven leaf
+		// enters after the prologue and cannot reach either edge; all body-local
+		// labels still resolve normally before relocation.
+		bodyOffset := int32(uintptr(leafBody) - uintptr(ctx.Start))
+		kept := ctx.Fixups[:0]
+		for _, fixup := range ctx.Fixups {
+			if fixup.CodePos >= bodyOffset {
+				kept = append(kept, fixup)
+			}
+		}
+		ctx.Fixups = kept
+		ctx.ResolveFixupsFinal()
+		bodyLength := int(uintptr(ctx.Ptr) - uintptr(leafBody))
+		destination := unsafe.Slice((*byte)(buf.ptr), bodyLength)
+		source := unsafe.Slice((*byte)(leafBody), bodyLength)
+		copy(destination, source)
+		buf.stackFrameSize = 0
+		buf.stackMaps = nil
+		return bodyLength, ctx.ConstRoots, false, false
+	}
 
 	frameSize := (ctx.MaxBPOffset + ctx.MaxSpillOffset + 15) &^ 15
 	buf.stackFrameSize = frameSize
@@ -266,7 +312,7 @@ func emitJITStorageFunction(buf *execBuf, abi jitStorageABI, emit jitStorageEmit
 	}
 	buf.stackMaps = ctx.finalizeStackMaps(frameSize, arenaOffset)
 	ctx.ResolveFixupsFinal()
-	return int(uintptr(ctx.Ptr) - uintptr(ctx.Start)), ctx.ConstRoots, false
+	return int(uintptr(ctx.Ptr) - uintptr(ctx.Start)), ctx.ConstRoots, false, false
 }
 
 func jitStorageABIInputRegisters(abi jitStorageABI) uint64 {

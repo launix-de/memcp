@@ -1906,7 +1906,6 @@ func init() {
 				ctx.EnsureDesc(&d8)
 				d42 := d8
 				_ = d42
-				ctx.StabilizeDescForControlFlow(&d42)
 				bbpos_2_0 := int32(-1)
 				_ = bbpos_2_0
 				lbl39 := ctx.ReserveLabel()
@@ -2695,7 +2694,6 @@ func init() {
 				ctx.EnsureDesc(&d8)
 				d89 := d8
 				_ = d89
-				ctx.StabilizeDescForControlFlow(&d89)
 				bbpos_4_0 := int32(-1)
 				_ = bbpos_4_0
 				lbl52 := ctx.ReserveLabel()
@@ -3225,24 +3223,21 @@ func init() {
 						return bbs[0].RenderPS(ps)
 					}
 					lbl4 := ctx.ReserveLabel()
-					lbl5 := ctx.ReserveLabel()
-					ctx.EmitJump(d4.Condition, lbl4)
-					ctx.EmitJmp(lbl5)
+					ctx.EmitJump(d4.Condition, lbl2)
+					ctx.EmitJmp(lbl4)
 					snap8 := d1
 					snap9 := d2
 					snap10 := d3
 					snap11 := d4
 					snap12 := d7
 					alloc13 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl4)
-					ctx.EmitJmp(lbl2)
 					ctx.RestoreAllocState(alloc13)
 					d1 = snap8
 					d2 = snap9
 					d3 = snap10
 					d4 = snap11
 					d7 = snap12
-					ctx.MarkLabel(lbl5)
+					ctx.MarkLabel(lbl4)
 					ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewInt(0)}, int32(bbs[2].PhiBase)+int32(0))
 					ctx.EmitJmp(lbl3)
 					ctx.RestoreAllocState(alloc13)
@@ -3830,24 +3825,17 @@ func init() {
 						ps.General = true
 						return bbs[0].RenderPS(ps)
 					}
-					lbl7 := ctx.ReserveLabel()
-					lbl8 := ctx.ReserveLabel()
-					ctx.EmitJump(d6.Condition, lbl7)
-					ctx.EmitJmp(lbl8)
+					ctx.EmitJump(d6.Condition, lbl2)
 					snap9 := d3
 					snap10 := d4
 					snap11 := d5
 					snap12 := d6
 					alloc13 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl7)
-					ctx.EmitJmp(lbl2)
 					ctx.RestoreAllocState(alloc13)
 					d3 = snap9
 					d4 = snap10
 					d5 = snap11
 					d6 = snap12
-					ctx.MarkLabel(lbl8)
-					ctx.EmitJmp(lbl3)
 					ctx.RestoreAllocState(alloc13)
 					d3 = snap9
 					d4 = snap10
@@ -4156,10 +4144,7 @@ func init() {
 						ps.General = true
 						return bbs[3].RenderPS(ps)
 					}
-					lbl9 := ctx.ReserveLabel()
-					lbl10 := ctx.ReserveLabel()
-					ctx.EmitJump(d28.Condition, lbl9)
-					ctx.EmitJmp(lbl10)
+					ctx.EmitJump(d28.Condition, lbl5)
 					snap32 := d3
 					snap33 := d4
 					snap34 := d5
@@ -4173,8 +4158,6 @@ func init() {
 					snap42 := d28
 					snap43 := d31
 					alloc44 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl9)
-					ctx.EmitJmp(lbl5)
 					ctx.RestoreAllocState(alloc44)
 					d3 = snap32
 					d4 = snap33
@@ -4188,8 +4171,6 @@ func init() {
 					d27 = snap41
 					d28 = snap42
 					d31 = snap43
-					ctx.MarkLabel(lbl10)
-					ctx.EmitJmp(lbl6)
 					ctx.RestoreAllocState(alloc44)
 					d3 = snap32
 					d4 = snap33
@@ -4341,10 +4322,10 @@ func init() {
 						ctx.EnsureDesc(&d26)
 						dynamicArgOff61 = ctx.AllocStack(16)
 						ctx.ProtectReg(d26.Reg)
-						lbl11 := ctx.ReserveLabel()
-						lbl12 := ctx.ReserveLabel()
+						lbl7 := ctx.ReserveLabel()
+						lbl8 := ctx.ReserveLabel()
 						ctx.EmitCmpRegImm32(d26.Reg, int32(len(args)-0))
-						ctx.EmitJump(CondUnsignedAboveOrEqual, lbl12)
+						ctx.EmitJump(CondUnsignedAboveOrEqual, lbl8)
 						for i := 0; i < len(args); i++ {
 							nextLbl := ctx.ReserveLabel()
 							ctx.EmitCmpRegImm32(d26.Reg, int32(i-0))
@@ -4352,12 +4333,12 @@ func init() {
 							ai := args[i]
 							ai.ID = 0
 							ctx.EmitStoreScmerToStack(ai, int32(dynamicArgOff61))
-							ctx.EmitJmp(lbl11)
+							ctx.EmitJmp(lbl7)
 							ctx.MarkLabel(nextLbl)
 						}
-						ctx.MarkLabel(lbl12)
+						ctx.MarkLabel(lbl8)
 						ctx.EmitStoreScmerToStack(JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}, int32(dynamicArgOff61))
-						ctx.MarkLabel(lbl11)
+						ctx.MarkLabel(lbl7)
 						ctx.UnprotectReg(d26.Reg)
 						d60 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(dynamicArgOff61), Rooted: true}
 					}
@@ -4646,10 +4627,8 @@ func init() {
 				ctx.EnsureDesc(&d2)
 				d3 := d0
 				_ = d3
-				ctx.StabilizeDescForControlFlow(&d3)
 				d4 := d2
 				_ = d4
-				ctx.StabilizeDescForControlFlow(&d4)
 				bbpos_1_0 := int32(-1)
 				_ = bbpos_1_0
 				lbl0 := ctx.ReserveLabel()
@@ -5192,12 +5171,8 @@ func init() {
 				ctx.EnsureDesc(&d21)
 				d27 := d3
 				_ = d27
-				ctx.StabilizeDescForControlFlow(&d27)
 				d28 := d21
 				_ = d28
-				ctx.StabilizeDescForControlFlow(&d28)
-				ctx.StabilizeDescForControlFlow(&d3)
-				ctx.StabilizeDescForControlFlow(&d21)
 				bbpos_2_0 := int32(-1)
 				_ = bbpos_2_0
 				lbl23 := ctx.ReserveLabel()
@@ -5523,28 +5498,30 @@ func init() {
 				ctx.EnsureDesc(&d24)
 				ctx.ReclaimUntrackedRegs()
 				ctx.SyncDesc(&d49)
-				ctx.StabilizeDescAcrossNestedCall(&d24)
 				d51 := d21
 				d51.ID = 0
 				d52 := d24
 				d52.ID = 0
-				d53 := ctx.EmitSliceElementAddress(&d51, &d52, int32(16))
+				if !ctx.TryEmitStoreScmerSliceElement(&d51, &d52, &d49, int32(16)) {
+					ctx.StabilizeDescAcrossNestedCall(&d24)
+					d52 = d24
+					d52.ID = 0
+					ctx.EmitStoreScmerSliceElement(&d51, &d52, &d49, int32(16))
+				}
 				ctx.FreeDesc(&d52)
-				ctx.EmitStoreScmerAt(&d53, &d49)
-				ctx.FreeDesc(&d53)
 				ctx.FreeDesc(&d49)
 				ctx.ReclaimUntrackedRegs()
 				ctx.EmitJmp(lbl14)
 				ctx.MarkLabel(lbl0)
-				d54 := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: r13, Reg2: r14}
-				ctx.BindReg(r13, &d54)
-				ctx.BindReg(r14, &d54)
-				ctx.BindReg(r13, &d54)
-				ctx.BindReg(r14, &d54)
+				d53 := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: r13, Reg2: r14}
+				ctx.BindReg(r13, &d53)
+				ctx.BindReg(r14, &d53)
+				ctx.BindReg(r13, &d53)
+				ctx.BindReg(r14, &d53)
 				ctx.FreeDesc(&d0)
-				if d54.Loc == LocImm {
+				if d53.Loc == LocImm {
 					if result.Loc == LocAny {
-						return d54
+						return d53
 					}
 				}
 				if result.Loc == LocAny {
@@ -5552,20 +5529,20 @@ func init() {
 					ctx.BindReg(result.Reg, &result)
 					ctx.BindReg(result.Reg2, &result)
 				}
-				ctx.SyncDesc(&d54)
-				if d54.Loc == LocRegPair || d54.Loc == LocStackPair || d54.Loc == LocInputPair {
-					ctx.EmitMovPairToResult(&d54, &result)
-					result.Type = d54.Type
+				ctx.SyncDesc(&d53)
+				if d53.Loc == LocRegPair || d53.Loc == LocStackPair || d53.Loc == LocInputPair {
+					ctx.EmitMovPairToResult(&d53, &result)
+					result.Type = d53.Type
 				} else {
-					switch d54.Type {
+					switch d53.Type {
 					case tagBool:
-						ctx.EmitMakeBool(result, d54)
+						ctx.EmitMakeBool(result, d53)
 						result.Type = tagBool
 					case tagInt:
-						ctx.EmitMakeInt(result, d54)
+						ctx.EmitMakeInt(result, d53)
 						result.Type = tagInt
 					case tagFloat:
-						ctx.EmitMakeFloat(result, d54)
+						ctx.EmitMakeFloat(result, d53)
 						result.Type = tagFloat
 					case tagNil:
 						ctx.EmitMakeNil(result)
@@ -6061,11 +6038,8 @@ func init() {
 						ps.General = true
 						return bbs[1].RenderPS(ps)
 					}
-					lbl7 := ctx.ReserveLabel()
-					lbl8 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d20.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl7)
-					ctx.EmitJmp(lbl8)
+					ctx.EmitJump(CondNotEqual, lbl5)
 					snap23 := d1
 					snap24 := d3
 					snap25 := d4
@@ -6082,8 +6056,6 @@ func init() {
 					snap36 := d19
 					snap37 := d20
 					alloc38 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl7)
-					ctx.EmitJmp(lbl5)
 					ctx.RestoreAllocState(alloc38)
 					d1 = snap23
 					d3 = snap24
@@ -6100,8 +6072,6 @@ func init() {
 					d18 = snap35
 					d19 = snap36
 					d20 = snap37
-					ctx.MarkLabel(lbl8)
-					ctx.EmitJmp(lbl6)
 					ctx.RestoreAllocState(alloc38)
 					d1 = snap23
 					d3 = snap24
@@ -6377,13 +6347,12 @@ func init() {
 					ctx.EnsureDesc(&d60)
 					d61 = d60
 					_ = d61
-					ctx.StabilizeDescForControlFlow(&d61)
 					bbpos_1_0 := int32(-1)
 					_ = bbpos_1_0
-					lbl9 := ctx.ReserveLabel()
-					_ = lbl9
+					lbl7 := ctx.ReserveLabel()
+					_ = lbl7
 					bbpos_1_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl9)
+					ctx.MarkLabel(lbl7)
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
@@ -6469,11 +6438,8 @@ func init() {
 						ps.General = true
 						return bbs[3].RenderPS(ps)
 					}
-					lbl10 := ctx.ReserveLabel()
-					lbl11 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d64.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl10)
-					ctx.EmitJmp(lbl11)
+					ctx.EmitJump(CondNotEqual, lbl2)
 					snap68 := d1
 					snap69 := d3
 					snap70 := d4
@@ -6499,8 +6465,6 @@ func init() {
 					snap90 := d64
 					snap91 := d67
 					alloc92 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl10)
-					ctx.EmitJmp(lbl2)
 					ctx.RestoreAllocState(alloc92)
 					d1 = snap68
 					d3 = snap69
@@ -6526,8 +6490,6 @@ func init() {
 					d63 = snap89
 					d64 = snap90
 					d67 = snap91
-					ctx.MarkLabel(lbl11)
-					ctx.EmitJmp(lbl3)
 					ctx.RestoreAllocState(alloc92)
 					d1 = snap68
 					d3 = snap69
@@ -7378,11 +7340,8 @@ func init() {
 						ps.General = true
 						return bbs[1].RenderPS(ps)
 					}
-					lbl7 := ctx.ReserveLabel()
-					lbl8 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d17.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl7)
-					ctx.EmitJmp(lbl8)
+					ctx.EmitJump(CondNotEqual, lbl5)
 					snap20 := d1
 					snap21 := d2
 					snap22 := d3
@@ -7398,8 +7357,6 @@ func init() {
 					snap32 := d16
 					snap33 := d17
 					alloc34 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl7)
-					ctx.EmitJmp(lbl5)
 					ctx.RestoreAllocState(alloc34)
 					d1 = snap20
 					d2 = snap21
@@ -7415,8 +7372,6 @@ func init() {
 					d15 = snap31
 					d16 = snap32
 					d17 = snap33
-					ctx.MarkLabel(lbl8)
-					ctx.EmitJmp(lbl6)
 					ctx.RestoreAllocState(alloc34)
 					d1 = snap20
 					d2 = snap21
@@ -7680,13 +7635,12 @@ func init() {
 					ctx.EnsureDesc(&d55)
 					d56 = d55
 					_ = d56
-					ctx.StabilizeDescForControlFlow(&d56)
 					bbpos_1_0 := int32(-1)
 					_ = bbpos_1_0
-					lbl9 := ctx.ReserveLabel()
-					_ = lbl9
+					lbl7 := ctx.ReserveLabel()
+					_ = lbl7
 					bbpos_1_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl9)
+					ctx.MarkLabel(lbl7)
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
@@ -7770,11 +7724,8 @@ func init() {
 						ps.General = true
 						return bbs[3].RenderPS(ps)
 					}
-					lbl10 := ctx.ReserveLabel()
-					lbl11 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d59.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl10)
-					ctx.EmitJmp(lbl11)
+					ctx.EmitJump(CondNotEqual, lbl2)
 					snap63 := d1
 					snap64 := d2
 					snap65 := d3
@@ -7799,8 +7750,6 @@ func init() {
 					snap84 := d59
 					snap85 := d62
 					alloc86 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl10)
-					ctx.EmitJmp(lbl2)
 					ctx.RestoreAllocState(alloc86)
 					d1 = snap63
 					d2 = snap64
@@ -7825,8 +7774,6 @@ func init() {
 					d58 = snap83
 					d59 = snap84
 					d62 = snap85
-					ctx.MarkLabel(lbl11)
-					ctx.EmitJmp(lbl3)
 					ctx.RestoreAllocState(alloc86)
 					d1 = snap63
 					d2 = snap64
@@ -8499,7 +8446,6 @@ Patterns can be any of:
 				ctx.EnsureDesc(&d4)
 				d5 := d4
 				_ = d5
-				ctx.StabilizeDescForControlFlow(&d5)
 				bbpos_1_0 := int32(-1)
 				_ = bbpos_1_0
 				lbl0 := ctx.ReserveLabel()
@@ -8537,7 +8483,6 @@ Patterns can be any of:
 				ctx.EnsureDesc(&d8)
 				d9 := d8
 				_ = d9
-				ctx.StabilizeDescForControlFlow(&d9)
 				bbpos_2_0 := int32(-1)
 				_ = bbpos_2_0
 				lbl1 := ctx.ReserveLabel()
@@ -13231,24 +13176,21 @@ Patterns can be any of:
 						return bbs[0].RenderPS(ps)
 					}
 					lbl4 := ctx.ReserveLabel()
-					lbl5 := ctx.ReserveLabel()
-					ctx.EmitJump(d4.Condition, lbl4)
-					ctx.EmitJmp(lbl5)
+					ctx.EmitJump(d4.Condition, lbl2)
+					ctx.EmitJmp(lbl4)
 					snap8 := d1
 					snap9 := d2
 					snap10 := d3
 					snap11 := d4
 					snap12 := d7
 					alloc13 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl4)
-					ctx.EmitJmp(lbl2)
 					ctx.RestoreAllocState(alloc13)
 					d1 = snap8
 					d2 = snap9
 					d3 = snap10
 					d4 = snap11
 					d7 = snap12
-					ctx.MarkLabel(lbl5)
+					ctx.MarkLabel(lbl4)
 					ctx.EmitStoreScmerToStack(JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString("eval")}, int32(bbs[2].PhiBase)+int32(0))
 					ctx.EmitJmp(lbl3)
 					ctx.RestoreAllocState(alloc13)
@@ -13498,16 +13440,14 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d32)
 					d34 = d1
 					_ = d34
-					ctx.StabilizeDescForControlFlow(&d34)
 					d35 = d32
 					_ = d35
-					ctx.StabilizeDescForControlFlow(&d35)
 					bbpos_1_0 := int32(-1)
 					_ = bbpos_1_0
-					lbl6 := ctx.ReserveLabel()
-					_ = lbl6
+					lbl5 := ctx.ReserveLabel()
+					_ = lbl5
 					bbpos_1_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl6)
+					ctx.MarkLabel(lbl5)
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
@@ -13598,141 +13538,141 @@ Patterns can be any of:
 					d43 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase39) + int32(56)}
 					ctx.PreparePointerStackTarget(int32(phiBase39)+int32(56), 3)
 					_ = d43
-					lbl7 := ctx.ReserveLabel()
+					lbl6 := ctx.ReserveLabel()
 					bbpos_2_0 := int32(-1)
 					_ = bbpos_2_0
-					lbl8 := ctx.ReserveLabel()
-					_ = lbl8
+					lbl7 := ctx.ReserveLabel()
+					_ = lbl7
 					bbpos_2_1 := int32(-1)
 					_ = bbpos_2_1
-					lbl9 := ctx.ReserveLabel()
-					_ = lbl9
+					lbl8 := ctx.ReserveLabel()
+					_ = lbl8
 					bbpos_2_2 := int32(-1)
 					_ = bbpos_2_2
-					lbl10 := ctx.ReserveLabel()
-					_ = lbl10
+					lbl9 := ctx.ReserveLabel()
+					_ = lbl9
 					bbpos_2_3 := int32(-1)
 					_ = bbpos_2_3
-					lbl11 := ctx.ReserveLabel()
-					_ = lbl11
+					lbl10 := ctx.ReserveLabel()
+					_ = lbl10
 					bbpos_2_4 := int32(-1)
 					_ = bbpos_2_4
-					lbl12 := ctx.ReserveLabel()
-					_ = lbl12
+					lbl11 := ctx.ReserveLabel()
+					_ = lbl11
 					bbpos_2_5 := int32(-1)
 					_ = bbpos_2_5
-					lbl13 := ctx.ReserveLabel()
-					_ = lbl13
+					lbl12 := ctx.ReserveLabel()
+					_ = lbl12
 					bbpos_2_6 := int32(-1)
 					_ = bbpos_2_6
-					lbl14 := ctx.ReserveLabel()
-					_ = lbl14
+					lbl13 := ctx.ReserveLabel()
+					_ = lbl13
 					bbpos_2_7 := int32(-1)
 					_ = bbpos_2_7
-					lbl15 := ctx.ReserveLabel()
-					_ = lbl15
+					lbl14 := ctx.ReserveLabel()
+					_ = lbl14
 					bbpos_2_8 := int32(-1)
 					_ = bbpos_2_8
-					lbl16 := ctx.ReserveLabel()
-					_ = lbl16
+					lbl15 := ctx.ReserveLabel()
+					_ = lbl15
 					bbpos_2_9 := int32(-1)
 					_ = bbpos_2_9
-					lbl17 := ctx.ReserveLabel()
-					_ = lbl17
+					lbl16 := ctx.ReserveLabel()
+					_ = lbl16
 					bbpos_2_10 := int32(-1)
 					_ = bbpos_2_10
-					lbl18 := ctx.ReserveLabel()
-					_ = lbl18
+					lbl17 := ctx.ReserveLabel()
+					_ = lbl17
 					bbpos_2_11 := int32(-1)
 					_ = bbpos_2_11
-					lbl19 := ctx.ReserveLabel()
-					_ = lbl19
+					lbl18 := ctx.ReserveLabel()
+					_ = lbl18
 					bbpos_2_12 := int32(-1)
 					_ = bbpos_2_12
-					lbl20 := ctx.ReserveLabel()
-					_ = lbl20
+					lbl19 := ctx.ReserveLabel()
+					_ = lbl19
 					bbpos_2_13 := int32(-1)
 					_ = bbpos_2_13
-					lbl21 := ctx.ReserveLabel()
-					_ = lbl21
+					lbl20 := ctx.ReserveLabel()
+					_ = lbl20
 					bbpos_2_14 := int32(-1)
 					_ = bbpos_2_14
-					lbl22 := ctx.ReserveLabel()
-					_ = lbl22
+					lbl21 := ctx.ReserveLabel()
+					_ = lbl21
 					bbpos_2_15 := int32(-1)
 					_ = bbpos_2_15
-					lbl23 := ctx.ReserveLabel()
-					_ = lbl23
+					lbl22 := ctx.ReserveLabel()
+					_ = lbl22
 					bbpos_2_16 := int32(-1)
 					_ = bbpos_2_16
-					lbl24 := ctx.ReserveLabel()
-					_ = lbl24
+					lbl23 := ctx.ReserveLabel()
+					_ = lbl23
 					bbpos_2_17 := int32(-1)
 					_ = bbpos_2_17
-					lbl25 := ctx.ReserveLabel()
-					_ = lbl25
+					lbl24 := ctx.ReserveLabel()
+					_ = lbl24
 					bbpos_2_18 := int32(-1)
 					_ = bbpos_2_18
-					lbl26 := ctx.ReserveLabel()
-					_ = lbl26
+					lbl25 := ctx.ReserveLabel()
+					_ = lbl25
 					bbpos_2_19 := int32(-1)
 					_ = bbpos_2_19
-					lbl27 := ctx.ReserveLabel()
-					_ = lbl27
+					lbl26 := ctx.ReserveLabel()
+					_ = lbl26
 					bbpos_2_20 := int32(-1)
 					_ = bbpos_2_20
-					lbl28 := ctx.ReserveLabel()
-					_ = lbl28
+					lbl27 := ctx.ReserveLabel()
+					_ = lbl27
 					bbpos_2_21 := int32(-1)
 					_ = bbpos_2_21
-					lbl29 := ctx.ReserveLabel()
-					_ = lbl29
+					lbl28 := ctx.ReserveLabel()
+					_ = lbl28
 					bbpos_2_22 := int32(-1)
 					_ = bbpos_2_22
-					lbl30 := ctx.ReserveLabel()
-					_ = lbl30
+					lbl29 := ctx.ReserveLabel()
+					_ = lbl29
 					bbpos_2_23 := int32(-1)
 					_ = bbpos_2_23
-					lbl31 := ctx.ReserveLabel()
-					_ = lbl31
+					lbl30 := ctx.ReserveLabel()
+					_ = lbl30
 					bbpos_2_24 := int32(-1)
 					_ = bbpos_2_24
-					lbl32 := ctx.ReserveLabel()
-					_ = lbl32
+					lbl31 := ctx.ReserveLabel()
+					_ = lbl31
 					bbpos_2_25 := int32(-1)
 					_ = bbpos_2_25
-					lbl33 := ctx.ReserveLabel()
-					_ = lbl33
+					lbl32 := ctx.ReserveLabel()
+					_ = lbl32
 					bbpos_2_26 := int32(-1)
 					_ = bbpos_2_26
-					lbl34 := ctx.ReserveLabel()
-					_ = lbl34
+					lbl33 := ctx.ReserveLabel()
+					_ = lbl33
 					bbpos_2_27 := int32(-1)
 					_ = bbpos_2_27
-					lbl35 := ctx.ReserveLabel()
-					_ = lbl35
+					lbl34 := ctx.ReserveLabel()
+					_ = lbl34
 					bbpos_2_28 := int32(-1)
 					_ = bbpos_2_28
-					lbl36 := ctx.ReserveLabel()
-					_ = lbl36
+					lbl35 := ctx.ReserveLabel()
+					_ = lbl35
 					bbpos_2_29 := int32(-1)
 					_ = bbpos_2_29
-					lbl37 := ctx.ReserveLabel()
-					_ = lbl37
+					lbl36 := ctx.ReserveLabel()
+					_ = lbl36
 					bbpos_2_30 := int32(-1)
 					_ = bbpos_2_30
-					lbl38 := ctx.ReserveLabel()
-					_ = lbl38
+					lbl37 := ctx.ReserveLabel()
+					_ = lbl37
 					bbpos_2_31 := int32(-1)
 					_ = bbpos_2_31
-					lbl39 := ctx.ReserveLabel()
-					_ = lbl39
+					lbl38 := ctx.ReserveLabel()
+					_ = lbl38
 					bbpos_2_32 := int32(-1)
 					_ = bbpos_2_32
-					lbl40 := ctx.ReserveLabel()
-					_ = lbl40
+					lbl39 := ctx.ReserveLabel()
+					_ = lbl39
 					bbpos_2_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl8)
+					ctx.MarkLabel(lbl7)
 					ctx.ResolveFixups()
 					d40 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase39) + int32(0)}
 					d41 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase39) + int32(16)}
@@ -13777,26 +13717,26 @@ Patterns can be any of:
 					if d47.Loc != LocImm && d47.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
+					lbl40 := ctx.ReserveLabel()
 					lbl41 := ctx.ReserveLabel()
-					lbl42 := ctx.ReserveLabel()
 					if d47.Loc == LocImm {
 						if d47.Imm.Bool() {
+							ctx.MarkLabel(lbl40)
+							ctx.EmitJmp(lbl8)
+						} else {
 							ctx.MarkLabel(lbl41)
 							ctx.EmitJmp(lbl9)
-						} else {
-							ctx.MarkLabel(lbl42)
-							ctx.EmitJmp(lbl10)
 						}
 					} else {
-						ctx.EmitJump(d47.Condition, lbl41)
-						ctx.EmitJmp(lbl42)
+						ctx.EmitJump(d47.Condition, lbl40)
+						ctx.EmitJmp(lbl41)
+						ctx.MarkLabel(lbl40)
+						ctx.EmitJmp(lbl8)
 						ctx.MarkLabel(lbl41)
 						ctx.EmitJmp(lbl9)
-						ctx.MarkLabel(lbl42)
-						ctx.EmitJmp(lbl10)
 					}
 					bbpos_2_2 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl10)
+					ctx.MarkLabel(lbl9)
 					ctx.ResolveFixups()
 					d40 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase39) + int32(0)}
 					d41 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase39) + int32(16)}
@@ -13910,14 +13850,14 @@ Patterns can be any of:
 					if d61.Loc != LocImm && d61.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl42 := ctx.ReserveLabel()
 					lbl43 := ctx.ReserveLabel()
-					lbl44 := ctx.ReserveLabel()
 					if d61.Loc == LocImm {
 						if d61.Imm.Bool() {
-							ctx.MarkLabel(lbl43)
-							ctx.EmitJmp(lbl11)
+							ctx.MarkLabel(lbl42)
+							ctx.EmitJmp(lbl10)
 						} else {
-							ctx.MarkLabel(lbl44)
+							ctx.MarkLabel(lbl43)
 							ctx.SyncDesc(&d51)
 							if d51.Loc == LocReg {
 								ctx.ProtectReg(d51.Reg)
@@ -13948,15 +13888,15 @@ Patterns can be any of:
 								ctx.UnprotectReg(d51.Reg)
 								ctx.UnprotectReg(d51.Reg2)
 							}
-							ctx.EmitJmp(lbl12)
+							ctx.EmitJmp(lbl11)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d61.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl43)
-						ctx.EmitJmp(lbl44)
+						ctx.EmitJump(CondNotEqual, lbl42)
+						ctx.EmitJmp(lbl43)
+						ctx.MarkLabel(lbl42)
+						ctx.EmitJmp(lbl10)
 						ctx.MarkLabel(lbl43)
-						ctx.EmitJmp(lbl11)
-						ctx.MarkLabel(lbl44)
 						ctx.SyncDesc(&d51)
 						if d51.Loc == LocReg {
 							ctx.ProtectReg(d51.Reg)
@@ -13987,11 +13927,11 @@ Patterns can be any of:
 							ctx.UnprotectReg(d51.Reg)
 							ctx.UnprotectReg(d51.Reg2)
 						}
-						ctx.EmitJmp(lbl12)
+						ctx.EmitJmp(lbl11)
 					}
 					ctx.FreeDesc(&d60)
 					bbpos_2_4 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl12)
+					ctx.MarkLabel(lbl11)
 					ctx.ResolveFixups()
 					d40 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase39) + int32(0)}
 					d41 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase39) + int32(16)}
@@ -14016,28 +13956,28 @@ Patterns can be any of:
 					if d65.Loc != LocImm && d65.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl44 := ctx.ReserveLabel()
 					lbl45 := ctx.ReserveLabel()
-					lbl46 := ctx.ReserveLabel()
 					if d65.Loc == LocImm {
 						if d65.Imm.Bool() {
+							ctx.MarkLabel(lbl44)
+							ctx.EmitJmp(lbl12)
+						} else {
 							ctx.MarkLabel(lbl45)
 							ctx.EmitJmp(lbl13)
-						} else {
-							ctx.MarkLabel(lbl46)
-							ctx.EmitJmp(lbl14)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d65.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl45)
-						ctx.EmitJmp(lbl46)
+						ctx.EmitJump(CondNotEqual, lbl44)
+						ctx.EmitJmp(lbl45)
+						ctx.MarkLabel(lbl44)
+						ctx.EmitJmp(lbl12)
 						ctx.MarkLabel(lbl45)
 						ctx.EmitJmp(lbl13)
-						ctx.MarkLabel(lbl46)
-						ctx.EmitJmp(lbl14)
 					}
 					ctx.FreeDesc(&d64)
 					bbpos_2_6 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl14)
+					ctx.MarkLabel(lbl13)
 					ctx.ResolveFixups()
 					d40 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase39) + int32(0)}
 					d41 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase39) + int32(16)}
@@ -14051,9 +13991,9 @@ Patterns can be any of:
 					ctx.BindReg(r8, &d66)
 					ctx.BindReg(r9, &d66)
 					ctx.EmitMovPairToResult(&d40, &d66)
-					ctx.EmitJmp(lbl7)
+					ctx.EmitJmp(lbl6)
 					bbpos_2_1 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl9)
+					ctx.MarkLabel(lbl8)
 					ctx.ResolveFixups()
 					d40 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase39) + int32(0)}
 					d41 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase39) + int32(16)}
@@ -14067,9 +14007,9 @@ Patterns can be any of:
 					ctx.BindReg(r8, &d68)
 					ctx.BindReg(r9, &d68)
 					ctx.EmitMovPairToResult(&d67, &d68)
-					ctx.EmitJmp(lbl7)
+					ctx.EmitJmp(lbl6)
 					bbpos_2_3 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl11)
+					ctx.MarkLabel(lbl10)
 					ctx.ResolveFixups()
 					d40 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase39) + int32(0)}
 					d41 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase39) + int32(16)}
@@ -14148,9 +14088,9 @@ Patterns can be any of:
 						ctx.UnprotectReg(d71.Reg)
 						ctx.UnprotectReg(d71.Reg2)
 					}
-					ctx.EmitJmp(lbl12)
+					ctx.EmitJmp(lbl11)
 					bbpos_2_5 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl13)
+					ctx.MarkLabel(lbl12)
 					ctx.ResolveFixups()
 					d40 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase39) + int32(0)}
 					d41 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase39) + int32(16)}
@@ -14200,28 +14140,28 @@ Patterns can be any of:
 					if d78.Loc != LocImm && d78.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl46 := ctx.ReserveLabel()
 					lbl47 := ctx.ReserveLabel()
-					lbl48 := ctx.ReserveLabel()
 					if d78.Loc == LocImm {
 						if d78.Imm.Bool() {
+							ctx.MarkLabel(lbl46)
+							ctx.EmitJmp(lbl14)
+						} else {
 							ctx.MarkLabel(lbl47)
 							ctx.EmitJmp(lbl15)
-						} else {
-							ctx.MarkLabel(lbl48)
-							ctx.EmitJmp(lbl16)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d78.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl47)
-						ctx.EmitJmp(lbl48)
+						ctx.EmitJump(CondNotEqual, lbl46)
+						ctx.EmitJmp(lbl47)
+						ctx.MarkLabel(lbl46)
+						ctx.EmitJmp(lbl14)
 						ctx.MarkLabel(lbl47)
 						ctx.EmitJmp(lbl15)
-						ctx.MarkLabel(lbl48)
-						ctx.EmitJmp(lbl16)
 					}
 					ctx.FreeDesc(&d77)
 					bbpos_2_8 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl16)
+					ctx.MarkLabel(lbl15)
 					ctx.ResolveFixups()
 					d40 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase39) + int32(0)}
 					d41 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase39) + int32(16)}
@@ -14253,28 +14193,28 @@ Patterns can be any of:
 					if d82.Loc != LocImm && d82.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl48 := ctx.ReserveLabel()
 					lbl49 := ctx.ReserveLabel()
-					lbl50 := ctx.ReserveLabel()
 					if d82.Loc == LocImm {
 						if d82.Imm.Bool() {
-							ctx.MarkLabel(lbl49)
-							ctx.EmitJmp(lbl25)
-						} else {
-							ctx.MarkLabel(lbl50)
+							ctx.MarkLabel(lbl48)
 							ctx.EmitJmp(lbl24)
+						} else {
+							ctx.MarkLabel(lbl49)
+							ctx.EmitJmp(lbl23)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d82.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl49)
-						ctx.EmitJmp(lbl50)
-						ctx.MarkLabel(lbl49)
-						ctx.EmitJmp(lbl25)
-						ctx.MarkLabel(lbl50)
+						ctx.EmitJump(CondNotEqual, lbl48)
+						ctx.EmitJmp(lbl49)
+						ctx.MarkLabel(lbl48)
 						ctx.EmitJmp(lbl24)
+						ctx.MarkLabel(lbl49)
+						ctx.EmitJmp(lbl23)
 					}
 					ctx.FreeDesc(&d81)
 					bbpos_2_16 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl24)
+					ctx.MarkLabel(lbl23)
 					ctx.ResolveFixups()
 					d40 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase39) + int32(0)}
 					d41 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase39) + int32(16)}
@@ -14286,9 +14226,9 @@ Patterns can be any of:
 					ctx.BindReg(r8, &d83)
 					ctx.BindReg(r9, &d83)
 					ctx.EmitMovPairToResult(&d40, &d83)
-					ctx.EmitJmp(lbl7)
+					ctx.EmitJmp(lbl6)
 					bbpos_2_7 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl15)
+					ctx.MarkLabel(lbl14)
 					ctx.ResolveFixups()
 					d40 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase39) + int32(0)}
 					d41 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase39) + int32(16)}
@@ -14332,7 +14272,7 @@ Patterns can be any of:
 						ctx.UnprotectReg(d85.Reg2)
 					}
 					bbpos_2_9 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl17)
+					ctx.MarkLabel(lbl16)
 					ctx.ResolveFixups()
 					d40 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase39) + int32(0)}
 					d41 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase39) + int32(16)}
@@ -14379,26 +14319,26 @@ Patterns can be any of:
 					if d90.Loc != LocImm && d90.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
+					lbl50 := ctx.ReserveLabel()
 					lbl51 := ctx.ReserveLabel()
-					lbl52 := ctx.ReserveLabel()
 					if d90.Loc == LocImm {
 						if d90.Imm.Bool() {
+							ctx.MarkLabel(lbl50)
+							ctx.EmitJmp(lbl17)
+						} else {
 							ctx.MarkLabel(lbl51)
 							ctx.EmitJmp(lbl18)
-						} else {
-							ctx.MarkLabel(lbl52)
-							ctx.EmitJmp(lbl19)
 						}
 					} else {
-						ctx.EmitJump(d90.Condition, lbl51)
-						ctx.EmitJmp(lbl52)
+						ctx.EmitJump(d90.Condition, lbl50)
+						ctx.EmitJmp(lbl51)
+						ctx.MarkLabel(lbl50)
+						ctx.EmitJmp(lbl17)
 						ctx.MarkLabel(lbl51)
 						ctx.EmitJmp(lbl18)
-						ctx.MarkLabel(lbl52)
-						ctx.EmitJmp(lbl19)
 					}
 					bbpos_2_11 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl19)
+					ctx.MarkLabel(lbl18)
 					ctx.ResolveFixups()
 					d40 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase39) + int32(0)}
 					d41 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase39) + int32(16)}
@@ -14435,28 +14375,28 @@ Patterns can be any of:
 					if d96.Loc != LocImm && d96.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl52 := ctx.ReserveLabel()
 					lbl53 := ctx.ReserveLabel()
-					lbl54 := ctx.ReserveLabel()
 					if d96.Loc == LocImm {
 						if d96.Imm.Bool() {
-							ctx.MarkLabel(lbl53)
-							ctx.EmitJmp(lbl22)
-						} else {
-							ctx.MarkLabel(lbl54)
+							ctx.MarkLabel(lbl52)
 							ctx.EmitJmp(lbl21)
+						} else {
+							ctx.MarkLabel(lbl53)
+							ctx.EmitJmp(lbl20)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d96.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl53)
-						ctx.EmitJmp(lbl54)
-						ctx.MarkLabel(lbl53)
-						ctx.EmitJmp(lbl22)
-						ctx.MarkLabel(lbl54)
+						ctx.EmitJump(CondNotEqual, lbl52)
+						ctx.EmitJmp(lbl53)
+						ctx.MarkLabel(lbl52)
 						ctx.EmitJmp(lbl21)
+						ctx.MarkLabel(lbl53)
+						ctx.EmitJmp(lbl20)
 					}
 					ctx.FreeDesc(&d95)
 					bbpos_2_13 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl21)
+					ctx.MarkLabel(lbl20)
 					ctx.ResolveFixups()
 					d40 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase39) + int32(0)}
 					d41 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase39) + int32(16)}
@@ -14482,141 +14422,141 @@ Patterns can be any of:
 					d102 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase98) + int32(56)}
 					ctx.PreparePointerStackTarget(int32(phiBase98)+int32(56), 3)
 					_ = d102
-					lbl55 := ctx.ReserveLabel()
+					lbl54 := ctx.ReserveLabel()
 					bbpos_3_0 := int32(-1)
 					_ = bbpos_3_0
-					lbl56 := ctx.ReserveLabel()
-					_ = lbl56
+					lbl55 := ctx.ReserveLabel()
+					_ = lbl55
 					bbpos_3_1 := int32(-1)
 					_ = bbpos_3_1
-					lbl57 := ctx.ReserveLabel()
-					_ = lbl57
+					lbl56 := ctx.ReserveLabel()
+					_ = lbl56
 					bbpos_3_2 := int32(-1)
 					_ = bbpos_3_2
-					lbl58 := ctx.ReserveLabel()
-					_ = lbl58
+					lbl57 := ctx.ReserveLabel()
+					_ = lbl57
 					bbpos_3_3 := int32(-1)
 					_ = bbpos_3_3
-					lbl59 := ctx.ReserveLabel()
-					_ = lbl59
+					lbl58 := ctx.ReserveLabel()
+					_ = lbl58
 					bbpos_3_4 := int32(-1)
 					_ = bbpos_3_4
-					lbl60 := ctx.ReserveLabel()
-					_ = lbl60
+					lbl59 := ctx.ReserveLabel()
+					_ = lbl59
 					bbpos_3_5 := int32(-1)
 					_ = bbpos_3_5
-					lbl61 := ctx.ReserveLabel()
-					_ = lbl61
+					lbl60 := ctx.ReserveLabel()
+					_ = lbl60
 					bbpos_3_6 := int32(-1)
 					_ = bbpos_3_6
-					lbl62 := ctx.ReserveLabel()
-					_ = lbl62
+					lbl61 := ctx.ReserveLabel()
+					_ = lbl61
 					bbpos_3_7 := int32(-1)
 					_ = bbpos_3_7
-					lbl63 := ctx.ReserveLabel()
-					_ = lbl63
+					lbl62 := ctx.ReserveLabel()
+					_ = lbl62
 					bbpos_3_8 := int32(-1)
 					_ = bbpos_3_8
-					lbl64 := ctx.ReserveLabel()
-					_ = lbl64
+					lbl63 := ctx.ReserveLabel()
+					_ = lbl63
 					bbpos_3_9 := int32(-1)
 					_ = bbpos_3_9
-					lbl65 := ctx.ReserveLabel()
-					_ = lbl65
+					lbl64 := ctx.ReserveLabel()
+					_ = lbl64
 					bbpos_3_10 := int32(-1)
 					_ = bbpos_3_10
-					lbl66 := ctx.ReserveLabel()
-					_ = lbl66
+					lbl65 := ctx.ReserveLabel()
+					_ = lbl65
 					bbpos_3_11 := int32(-1)
 					_ = bbpos_3_11
-					lbl67 := ctx.ReserveLabel()
-					_ = lbl67
+					lbl66 := ctx.ReserveLabel()
+					_ = lbl66
 					bbpos_3_12 := int32(-1)
 					_ = bbpos_3_12
-					lbl68 := ctx.ReserveLabel()
-					_ = lbl68
+					lbl67 := ctx.ReserveLabel()
+					_ = lbl67
 					bbpos_3_13 := int32(-1)
 					_ = bbpos_3_13
-					lbl69 := ctx.ReserveLabel()
-					_ = lbl69
+					lbl68 := ctx.ReserveLabel()
+					_ = lbl68
 					bbpos_3_14 := int32(-1)
 					_ = bbpos_3_14
-					lbl70 := ctx.ReserveLabel()
-					_ = lbl70
+					lbl69 := ctx.ReserveLabel()
+					_ = lbl69
 					bbpos_3_15 := int32(-1)
 					_ = bbpos_3_15
-					lbl71 := ctx.ReserveLabel()
-					_ = lbl71
+					lbl70 := ctx.ReserveLabel()
+					_ = lbl70
 					bbpos_3_16 := int32(-1)
 					_ = bbpos_3_16
-					lbl72 := ctx.ReserveLabel()
-					_ = lbl72
+					lbl71 := ctx.ReserveLabel()
+					_ = lbl71
 					bbpos_3_17 := int32(-1)
 					_ = bbpos_3_17
-					lbl73 := ctx.ReserveLabel()
-					_ = lbl73
+					lbl72 := ctx.ReserveLabel()
+					_ = lbl72
 					bbpos_3_18 := int32(-1)
 					_ = bbpos_3_18
-					lbl74 := ctx.ReserveLabel()
-					_ = lbl74
+					lbl73 := ctx.ReserveLabel()
+					_ = lbl73
 					bbpos_3_19 := int32(-1)
 					_ = bbpos_3_19
-					lbl75 := ctx.ReserveLabel()
-					_ = lbl75
+					lbl74 := ctx.ReserveLabel()
+					_ = lbl74
 					bbpos_3_20 := int32(-1)
 					_ = bbpos_3_20
-					lbl76 := ctx.ReserveLabel()
-					_ = lbl76
+					lbl75 := ctx.ReserveLabel()
+					_ = lbl75
 					bbpos_3_21 := int32(-1)
 					_ = bbpos_3_21
-					lbl77 := ctx.ReserveLabel()
-					_ = lbl77
+					lbl76 := ctx.ReserveLabel()
+					_ = lbl76
 					bbpos_3_22 := int32(-1)
 					_ = bbpos_3_22
-					lbl78 := ctx.ReserveLabel()
-					_ = lbl78
+					lbl77 := ctx.ReserveLabel()
+					_ = lbl77
 					bbpos_3_23 := int32(-1)
 					_ = bbpos_3_23
-					lbl79 := ctx.ReserveLabel()
-					_ = lbl79
+					lbl78 := ctx.ReserveLabel()
+					_ = lbl78
 					bbpos_3_24 := int32(-1)
 					_ = bbpos_3_24
-					lbl80 := ctx.ReserveLabel()
-					_ = lbl80
+					lbl79 := ctx.ReserveLabel()
+					_ = lbl79
 					bbpos_3_25 := int32(-1)
 					_ = bbpos_3_25
-					lbl81 := ctx.ReserveLabel()
-					_ = lbl81
+					lbl80 := ctx.ReserveLabel()
+					_ = lbl80
 					bbpos_3_26 := int32(-1)
 					_ = bbpos_3_26
-					lbl82 := ctx.ReserveLabel()
-					_ = lbl82
+					lbl81 := ctx.ReserveLabel()
+					_ = lbl81
 					bbpos_3_27 := int32(-1)
 					_ = bbpos_3_27
-					lbl83 := ctx.ReserveLabel()
-					_ = lbl83
+					lbl82 := ctx.ReserveLabel()
+					_ = lbl82
 					bbpos_3_28 := int32(-1)
 					_ = bbpos_3_28
-					lbl84 := ctx.ReserveLabel()
-					_ = lbl84
+					lbl83 := ctx.ReserveLabel()
+					_ = lbl83
 					bbpos_3_29 := int32(-1)
 					_ = bbpos_3_29
-					lbl85 := ctx.ReserveLabel()
-					_ = lbl85
+					lbl84 := ctx.ReserveLabel()
+					_ = lbl84
 					bbpos_3_30 := int32(-1)
 					_ = bbpos_3_30
-					lbl86 := ctx.ReserveLabel()
-					_ = lbl86
+					lbl85 := ctx.ReserveLabel()
+					_ = lbl85
 					bbpos_3_31 := int32(-1)
 					_ = bbpos_3_31
-					lbl87 := ctx.ReserveLabel()
-					_ = lbl87
+					lbl86 := ctx.ReserveLabel()
+					_ = lbl86
 					bbpos_3_32 := int32(-1)
 					_ = bbpos_3_32
-					lbl88 := ctx.ReserveLabel()
-					_ = lbl88
+					lbl87 := ctx.ReserveLabel()
+					_ = lbl87
 					bbpos_3_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl56)
+					ctx.MarkLabel(lbl55)
 					ctx.ResolveFixups()
 					d99 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase98) + int32(0)}
 					d100 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase98) + int32(16)}
@@ -14661,26 +14601,26 @@ Patterns can be any of:
 					if d106.Loc != LocImm && d106.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
+					lbl88 := ctx.ReserveLabel()
 					lbl89 := ctx.ReserveLabel()
-					lbl90 := ctx.ReserveLabel()
 					if d106.Loc == LocImm {
 						if d106.Imm.Bool() {
+							ctx.MarkLabel(lbl88)
+							ctx.EmitJmp(lbl56)
+						} else {
 							ctx.MarkLabel(lbl89)
 							ctx.EmitJmp(lbl57)
-						} else {
-							ctx.MarkLabel(lbl90)
-							ctx.EmitJmp(lbl58)
 						}
 					} else {
-						ctx.EmitJump(d106.Condition, lbl89)
-						ctx.EmitJmp(lbl90)
+						ctx.EmitJump(d106.Condition, lbl88)
+						ctx.EmitJmp(lbl89)
+						ctx.MarkLabel(lbl88)
+						ctx.EmitJmp(lbl56)
 						ctx.MarkLabel(lbl89)
 						ctx.EmitJmp(lbl57)
-						ctx.MarkLabel(lbl90)
-						ctx.EmitJmp(lbl58)
 					}
 					bbpos_3_2 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl58)
+					ctx.MarkLabel(lbl57)
 					ctx.ResolveFixups()
 					d99 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase98) + int32(0)}
 					d100 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase98) + int32(16)}
@@ -14794,14 +14734,14 @@ Patterns can be any of:
 					if d120.Loc != LocImm && d120.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl90 := ctx.ReserveLabel()
 					lbl91 := ctx.ReserveLabel()
-					lbl92 := ctx.ReserveLabel()
 					if d120.Loc == LocImm {
 						if d120.Imm.Bool() {
-							ctx.MarkLabel(lbl91)
-							ctx.EmitJmp(lbl59)
+							ctx.MarkLabel(lbl90)
+							ctx.EmitJmp(lbl58)
 						} else {
-							ctx.MarkLabel(lbl92)
+							ctx.MarkLabel(lbl91)
 							ctx.SyncDesc(&d110)
 							if d110.Loc == LocReg {
 								ctx.ProtectReg(d110.Reg)
@@ -14832,15 +14772,15 @@ Patterns can be any of:
 								ctx.UnprotectReg(d110.Reg)
 								ctx.UnprotectReg(d110.Reg2)
 							}
-							ctx.EmitJmp(lbl60)
+							ctx.EmitJmp(lbl59)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d120.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl91)
-						ctx.EmitJmp(lbl92)
+						ctx.EmitJump(CondNotEqual, lbl90)
+						ctx.EmitJmp(lbl91)
+						ctx.MarkLabel(lbl90)
+						ctx.EmitJmp(lbl58)
 						ctx.MarkLabel(lbl91)
-						ctx.EmitJmp(lbl59)
-						ctx.MarkLabel(lbl92)
 						ctx.SyncDesc(&d110)
 						if d110.Loc == LocReg {
 							ctx.ProtectReg(d110.Reg)
@@ -14871,11 +14811,11 @@ Patterns can be any of:
 							ctx.UnprotectReg(d110.Reg)
 							ctx.UnprotectReg(d110.Reg2)
 						}
-						ctx.EmitJmp(lbl60)
+						ctx.EmitJmp(lbl59)
 					}
 					ctx.FreeDesc(&d119)
 					bbpos_3_4 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl60)
+					ctx.MarkLabel(lbl59)
 					ctx.ResolveFixups()
 					d99 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase98) + int32(0)}
 					d100 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase98) + int32(16)}
@@ -14900,28 +14840,28 @@ Patterns can be any of:
 					if d124.Loc != LocImm && d124.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl92 := ctx.ReserveLabel()
 					lbl93 := ctx.ReserveLabel()
-					lbl94 := ctx.ReserveLabel()
 					if d124.Loc == LocImm {
 						if d124.Imm.Bool() {
+							ctx.MarkLabel(lbl92)
+							ctx.EmitJmp(lbl60)
+						} else {
 							ctx.MarkLabel(lbl93)
 							ctx.EmitJmp(lbl61)
-						} else {
-							ctx.MarkLabel(lbl94)
-							ctx.EmitJmp(lbl62)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d124.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl93)
-						ctx.EmitJmp(lbl94)
+						ctx.EmitJump(CondNotEqual, lbl92)
+						ctx.EmitJmp(lbl93)
+						ctx.MarkLabel(lbl92)
+						ctx.EmitJmp(lbl60)
 						ctx.MarkLabel(lbl93)
 						ctx.EmitJmp(lbl61)
-						ctx.MarkLabel(lbl94)
-						ctx.EmitJmp(lbl62)
 					}
 					ctx.FreeDesc(&d123)
 					bbpos_3_6 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl62)
+					ctx.MarkLabel(lbl61)
 					ctx.ResolveFixups()
 					d99 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase98) + int32(0)}
 					d100 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase98) + int32(16)}
@@ -14935,9 +14875,9 @@ Patterns can be any of:
 					ctx.BindReg(r23, &d125)
 					ctx.BindReg(r24, &d125)
 					ctx.EmitMovPairToResult(&d99, &d125)
-					ctx.EmitJmp(lbl55)
+					ctx.EmitJmp(lbl54)
 					bbpos_3_1 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl57)
+					ctx.MarkLabel(lbl56)
 					ctx.ResolveFixups()
 					d99 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase98) + int32(0)}
 					d100 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase98) + int32(16)}
@@ -14951,9 +14891,9 @@ Patterns can be any of:
 					ctx.BindReg(r23, &d127)
 					ctx.BindReg(r24, &d127)
 					ctx.EmitMovPairToResult(&d126, &d127)
-					ctx.EmitJmp(lbl55)
+					ctx.EmitJmp(lbl54)
 					bbpos_3_3 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl59)
+					ctx.MarkLabel(lbl58)
 					ctx.ResolveFixups()
 					d99 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase98) + int32(0)}
 					d100 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase98) + int32(16)}
@@ -15032,9 +14972,9 @@ Patterns can be any of:
 						ctx.UnprotectReg(d130.Reg)
 						ctx.UnprotectReg(d130.Reg2)
 					}
-					ctx.EmitJmp(lbl60)
+					ctx.EmitJmp(lbl59)
 					bbpos_3_5 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl61)
+					ctx.MarkLabel(lbl60)
 					ctx.ResolveFixups()
 					d99 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase98) + int32(0)}
 					d100 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase98) + int32(16)}
@@ -15084,28 +15024,28 @@ Patterns can be any of:
 					if d137.Loc != LocImm && d137.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl94 := ctx.ReserveLabel()
 					lbl95 := ctx.ReserveLabel()
-					lbl96 := ctx.ReserveLabel()
 					if d137.Loc == LocImm {
 						if d137.Imm.Bool() {
+							ctx.MarkLabel(lbl94)
+							ctx.EmitJmp(lbl62)
+						} else {
 							ctx.MarkLabel(lbl95)
 							ctx.EmitJmp(lbl63)
-						} else {
-							ctx.MarkLabel(lbl96)
-							ctx.EmitJmp(lbl64)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d137.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl95)
-						ctx.EmitJmp(lbl96)
+						ctx.EmitJump(CondNotEqual, lbl94)
+						ctx.EmitJmp(lbl95)
+						ctx.MarkLabel(lbl94)
+						ctx.EmitJmp(lbl62)
 						ctx.MarkLabel(lbl95)
 						ctx.EmitJmp(lbl63)
-						ctx.MarkLabel(lbl96)
-						ctx.EmitJmp(lbl64)
 					}
 					ctx.FreeDesc(&d136)
 					bbpos_3_8 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl64)
+					ctx.MarkLabel(lbl63)
 					ctx.ResolveFixups()
 					d99 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase98) + int32(0)}
 					d100 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase98) + int32(16)}
@@ -15137,28 +15077,28 @@ Patterns can be any of:
 					if d141.Loc != LocImm && d141.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl96 := ctx.ReserveLabel()
 					lbl97 := ctx.ReserveLabel()
-					lbl98 := ctx.ReserveLabel()
 					if d141.Loc == LocImm {
 						if d141.Imm.Bool() {
-							ctx.MarkLabel(lbl97)
-							ctx.EmitJmp(lbl73)
-						} else {
-							ctx.MarkLabel(lbl98)
+							ctx.MarkLabel(lbl96)
 							ctx.EmitJmp(lbl72)
+						} else {
+							ctx.MarkLabel(lbl97)
+							ctx.EmitJmp(lbl71)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d141.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl97)
-						ctx.EmitJmp(lbl98)
-						ctx.MarkLabel(lbl97)
-						ctx.EmitJmp(lbl73)
-						ctx.MarkLabel(lbl98)
+						ctx.EmitJump(CondNotEqual, lbl96)
+						ctx.EmitJmp(lbl97)
+						ctx.MarkLabel(lbl96)
 						ctx.EmitJmp(lbl72)
+						ctx.MarkLabel(lbl97)
+						ctx.EmitJmp(lbl71)
 					}
 					ctx.FreeDesc(&d140)
 					bbpos_3_16 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl72)
+					ctx.MarkLabel(lbl71)
 					ctx.ResolveFixups()
 					d99 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase98) + int32(0)}
 					d100 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase98) + int32(16)}
@@ -15170,9 +15110,9 @@ Patterns can be any of:
 					ctx.BindReg(r23, &d142)
 					ctx.BindReg(r24, &d142)
 					ctx.EmitMovPairToResult(&d99, &d142)
-					ctx.EmitJmp(lbl55)
+					ctx.EmitJmp(lbl54)
 					bbpos_3_7 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl63)
+					ctx.MarkLabel(lbl62)
 					ctx.ResolveFixups()
 					d99 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase98) + int32(0)}
 					d100 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase98) + int32(16)}
@@ -15216,7 +15156,7 @@ Patterns can be any of:
 						ctx.UnprotectReg(d144.Reg2)
 					}
 					bbpos_3_9 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl65)
+					ctx.MarkLabel(lbl64)
 					ctx.ResolveFixups()
 					d99 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase98) + int32(0)}
 					d100 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase98) + int32(16)}
@@ -15263,26 +15203,26 @@ Patterns can be any of:
 					if d149.Loc != LocImm && d149.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
+					lbl98 := ctx.ReserveLabel()
 					lbl99 := ctx.ReserveLabel()
-					lbl100 := ctx.ReserveLabel()
 					if d149.Loc == LocImm {
 						if d149.Imm.Bool() {
+							ctx.MarkLabel(lbl98)
+							ctx.EmitJmp(lbl65)
+						} else {
 							ctx.MarkLabel(lbl99)
 							ctx.EmitJmp(lbl66)
-						} else {
-							ctx.MarkLabel(lbl100)
-							ctx.EmitJmp(lbl67)
 						}
 					} else {
-						ctx.EmitJump(d149.Condition, lbl99)
-						ctx.EmitJmp(lbl100)
+						ctx.EmitJump(d149.Condition, lbl98)
+						ctx.EmitJmp(lbl99)
+						ctx.MarkLabel(lbl98)
+						ctx.EmitJmp(lbl65)
 						ctx.MarkLabel(lbl99)
 						ctx.EmitJmp(lbl66)
-						ctx.MarkLabel(lbl100)
-						ctx.EmitJmp(lbl67)
 					}
 					bbpos_3_11 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl67)
+					ctx.MarkLabel(lbl66)
 					ctx.ResolveFixups()
 					d99 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase98) + int32(0)}
 					d100 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase98) + int32(16)}
@@ -15319,28 +15259,28 @@ Patterns can be any of:
 					if d155.Loc != LocImm && d155.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl100 := ctx.ReserveLabel()
 					lbl101 := ctx.ReserveLabel()
-					lbl102 := ctx.ReserveLabel()
 					if d155.Loc == LocImm {
 						if d155.Imm.Bool() {
-							ctx.MarkLabel(lbl101)
-							ctx.EmitJmp(lbl70)
-						} else {
-							ctx.MarkLabel(lbl102)
+							ctx.MarkLabel(lbl100)
 							ctx.EmitJmp(lbl69)
+						} else {
+							ctx.MarkLabel(lbl101)
+							ctx.EmitJmp(lbl68)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d155.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl101)
-						ctx.EmitJmp(lbl102)
-						ctx.MarkLabel(lbl101)
-						ctx.EmitJmp(lbl70)
-						ctx.MarkLabel(lbl102)
+						ctx.EmitJump(CondNotEqual, lbl100)
+						ctx.EmitJmp(lbl101)
+						ctx.MarkLabel(lbl100)
 						ctx.EmitJmp(lbl69)
+						ctx.MarkLabel(lbl101)
+						ctx.EmitJmp(lbl68)
 					}
 					ctx.FreeDesc(&d154)
 					bbpos_3_13 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl69)
+					ctx.MarkLabel(lbl68)
 					ctx.ResolveFixups()
 					d99 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase98) + int32(0)}
 					d100 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase98) + int32(16)}
@@ -15366,141 +15306,141 @@ Patterns can be any of:
 					d161 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase157) + int32(56)}
 					ctx.PreparePointerStackTarget(int32(phiBase157)+int32(56), 3)
 					_ = d161
-					lbl103 := ctx.ReserveLabel()
+					lbl102 := ctx.ReserveLabel()
 					bbpos_4_0 := int32(-1)
 					_ = bbpos_4_0
-					lbl104 := ctx.ReserveLabel()
-					_ = lbl104
+					lbl103 := ctx.ReserveLabel()
+					_ = lbl103
 					bbpos_4_1 := int32(-1)
 					_ = bbpos_4_1
-					lbl105 := ctx.ReserveLabel()
-					_ = lbl105
+					lbl104 := ctx.ReserveLabel()
+					_ = lbl104
 					bbpos_4_2 := int32(-1)
 					_ = bbpos_4_2
-					lbl106 := ctx.ReserveLabel()
-					_ = lbl106
+					lbl105 := ctx.ReserveLabel()
+					_ = lbl105
 					bbpos_4_3 := int32(-1)
 					_ = bbpos_4_3
-					lbl107 := ctx.ReserveLabel()
-					_ = lbl107
+					lbl106 := ctx.ReserveLabel()
+					_ = lbl106
 					bbpos_4_4 := int32(-1)
 					_ = bbpos_4_4
-					lbl108 := ctx.ReserveLabel()
-					_ = lbl108
+					lbl107 := ctx.ReserveLabel()
+					_ = lbl107
 					bbpos_4_5 := int32(-1)
 					_ = bbpos_4_5
-					lbl109 := ctx.ReserveLabel()
-					_ = lbl109
+					lbl108 := ctx.ReserveLabel()
+					_ = lbl108
 					bbpos_4_6 := int32(-1)
 					_ = bbpos_4_6
-					lbl110 := ctx.ReserveLabel()
-					_ = lbl110
+					lbl109 := ctx.ReserveLabel()
+					_ = lbl109
 					bbpos_4_7 := int32(-1)
 					_ = bbpos_4_7
-					lbl111 := ctx.ReserveLabel()
-					_ = lbl111
+					lbl110 := ctx.ReserveLabel()
+					_ = lbl110
 					bbpos_4_8 := int32(-1)
 					_ = bbpos_4_8
-					lbl112 := ctx.ReserveLabel()
-					_ = lbl112
+					lbl111 := ctx.ReserveLabel()
+					_ = lbl111
 					bbpos_4_9 := int32(-1)
 					_ = bbpos_4_9
-					lbl113 := ctx.ReserveLabel()
-					_ = lbl113
+					lbl112 := ctx.ReserveLabel()
+					_ = lbl112
 					bbpos_4_10 := int32(-1)
 					_ = bbpos_4_10
-					lbl114 := ctx.ReserveLabel()
-					_ = lbl114
+					lbl113 := ctx.ReserveLabel()
+					_ = lbl113
 					bbpos_4_11 := int32(-1)
 					_ = bbpos_4_11
-					lbl115 := ctx.ReserveLabel()
-					_ = lbl115
+					lbl114 := ctx.ReserveLabel()
+					_ = lbl114
 					bbpos_4_12 := int32(-1)
 					_ = bbpos_4_12
-					lbl116 := ctx.ReserveLabel()
-					_ = lbl116
+					lbl115 := ctx.ReserveLabel()
+					_ = lbl115
 					bbpos_4_13 := int32(-1)
 					_ = bbpos_4_13
-					lbl117 := ctx.ReserveLabel()
-					_ = lbl117
+					lbl116 := ctx.ReserveLabel()
+					_ = lbl116
 					bbpos_4_14 := int32(-1)
 					_ = bbpos_4_14
-					lbl118 := ctx.ReserveLabel()
-					_ = lbl118
+					lbl117 := ctx.ReserveLabel()
+					_ = lbl117
 					bbpos_4_15 := int32(-1)
 					_ = bbpos_4_15
-					lbl119 := ctx.ReserveLabel()
-					_ = lbl119
+					lbl118 := ctx.ReserveLabel()
+					_ = lbl118
 					bbpos_4_16 := int32(-1)
 					_ = bbpos_4_16
-					lbl120 := ctx.ReserveLabel()
-					_ = lbl120
+					lbl119 := ctx.ReserveLabel()
+					_ = lbl119
 					bbpos_4_17 := int32(-1)
 					_ = bbpos_4_17
-					lbl121 := ctx.ReserveLabel()
-					_ = lbl121
+					lbl120 := ctx.ReserveLabel()
+					_ = lbl120
 					bbpos_4_18 := int32(-1)
 					_ = bbpos_4_18
-					lbl122 := ctx.ReserveLabel()
-					_ = lbl122
+					lbl121 := ctx.ReserveLabel()
+					_ = lbl121
 					bbpos_4_19 := int32(-1)
 					_ = bbpos_4_19
-					lbl123 := ctx.ReserveLabel()
-					_ = lbl123
+					lbl122 := ctx.ReserveLabel()
+					_ = lbl122
 					bbpos_4_20 := int32(-1)
 					_ = bbpos_4_20
-					lbl124 := ctx.ReserveLabel()
-					_ = lbl124
+					lbl123 := ctx.ReserveLabel()
+					_ = lbl123
 					bbpos_4_21 := int32(-1)
 					_ = bbpos_4_21
-					lbl125 := ctx.ReserveLabel()
-					_ = lbl125
+					lbl124 := ctx.ReserveLabel()
+					_ = lbl124
 					bbpos_4_22 := int32(-1)
 					_ = bbpos_4_22
-					lbl126 := ctx.ReserveLabel()
-					_ = lbl126
+					lbl125 := ctx.ReserveLabel()
+					_ = lbl125
 					bbpos_4_23 := int32(-1)
 					_ = bbpos_4_23
-					lbl127 := ctx.ReserveLabel()
-					_ = lbl127
+					lbl126 := ctx.ReserveLabel()
+					_ = lbl126
 					bbpos_4_24 := int32(-1)
 					_ = bbpos_4_24
-					lbl128 := ctx.ReserveLabel()
-					_ = lbl128
+					lbl127 := ctx.ReserveLabel()
+					_ = lbl127
 					bbpos_4_25 := int32(-1)
 					_ = bbpos_4_25
-					lbl129 := ctx.ReserveLabel()
-					_ = lbl129
+					lbl128 := ctx.ReserveLabel()
+					_ = lbl128
 					bbpos_4_26 := int32(-1)
 					_ = bbpos_4_26
-					lbl130 := ctx.ReserveLabel()
-					_ = lbl130
+					lbl129 := ctx.ReserveLabel()
+					_ = lbl129
 					bbpos_4_27 := int32(-1)
 					_ = bbpos_4_27
-					lbl131 := ctx.ReserveLabel()
-					_ = lbl131
+					lbl130 := ctx.ReserveLabel()
+					_ = lbl130
 					bbpos_4_28 := int32(-1)
 					_ = bbpos_4_28
-					lbl132 := ctx.ReserveLabel()
-					_ = lbl132
+					lbl131 := ctx.ReserveLabel()
+					_ = lbl131
 					bbpos_4_29 := int32(-1)
 					_ = bbpos_4_29
-					lbl133 := ctx.ReserveLabel()
-					_ = lbl133
+					lbl132 := ctx.ReserveLabel()
+					_ = lbl132
 					bbpos_4_30 := int32(-1)
 					_ = bbpos_4_30
-					lbl134 := ctx.ReserveLabel()
-					_ = lbl134
+					lbl133 := ctx.ReserveLabel()
+					_ = lbl133
 					bbpos_4_31 := int32(-1)
 					_ = bbpos_4_31
-					lbl135 := ctx.ReserveLabel()
-					_ = lbl135
+					lbl134 := ctx.ReserveLabel()
+					_ = lbl134
 					bbpos_4_32 := int32(-1)
 					_ = bbpos_4_32
-					lbl136 := ctx.ReserveLabel()
-					_ = lbl136
+					lbl135 := ctx.ReserveLabel()
+					_ = lbl135
 					bbpos_4_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl104)
+					ctx.MarkLabel(lbl103)
 					ctx.ResolveFixups()
 					d158 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase157) + int32(0)}
 					d159 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase157) + int32(16)}
@@ -15545,26 +15485,26 @@ Patterns can be any of:
 					if d165.Loc != LocImm && d165.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
+					lbl136 := ctx.ReserveLabel()
 					lbl137 := ctx.ReserveLabel()
-					lbl138 := ctx.ReserveLabel()
 					if d165.Loc == LocImm {
 						if d165.Imm.Bool() {
+							ctx.MarkLabel(lbl136)
+							ctx.EmitJmp(lbl104)
+						} else {
 							ctx.MarkLabel(lbl137)
 							ctx.EmitJmp(lbl105)
-						} else {
-							ctx.MarkLabel(lbl138)
-							ctx.EmitJmp(lbl106)
 						}
 					} else {
-						ctx.EmitJump(d165.Condition, lbl137)
-						ctx.EmitJmp(lbl138)
+						ctx.EmitJump(d165.Condition, lbl136)
+						ctx.EmitJmp(lbl137)
+						ctx.MarkLabel(lbl136)
+						ctx.EmitJmp(lbl104)
 						ctx.MarkLabel(lbl137)
 						ctx.EmitJmp(lbl105)
-						ctx.MarkLabel(lbl138)
-						ctx.EmitJmp(lbl106)
 					}
 					bbpos_4_2 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl106)
+					ctx.MarkLabel(lbl105)
 					ctx.ResolveFixups()
 					d158 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase157) + int32(0)}
 					d159 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase157) + int32(16)}
@@ -15678,14 +15618,14 @@ Patterns can be any of:
 					if d179.Loc != LocImm && d179.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl138 := ctx.ReserveLabel()
 					lbl139 := ctx.ReserveLabel()
-					lbl140 := ctx.ReserveLabel()
 					if d179.Loc == LocImm {
 						if d179.Imm.Bool() {
-							ctx.MarkLabel(lbl139)
-							ctx.EmitJmp(lbl107)
+							ctx.MarkLabel(lbl138)
+							ctx.EmitJmp(lbl106)
 						} else {
-							ctx.MarkLabel(lbl140)
+							ctx.MarkLabel(lbl139)
 							ctx.SyncDesc(&d169)
 							if d169.Loc == LocReg {
 								ctx.ProtectReg(d169.Reg)
@@ -15716,15 +15656,15 @@ Patterns can be any of:
 								ctx.UnprotectReg(d169.Reg)
 								ctx.UnprotectReg(d169.Reg2)
 							}
-							ctx.EmitJmp(lbl108)
+							ctx.EmitJmp(lbl107)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d179.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl139)
-						ctx.EmitJmp(lbl140)
+						ctx.EmitJump(CondNotEqual, lbl138)
+						ctx.EmitJmp(lbl139)
+						ctx.MarkLabel(lbl138)
+						ctx.EmitJmp(lbl106)
 						ctx.MarkLabel(lbl139)
-						ctx.EmitJmp(lbl107)
-						ctx.MarkLabel(lbl140)
 						ctx.SyncDesc(&d169)
 						if d169.Loc == LocReg {
 							ctx.ProtectReg(d169.Reg)
@@ -15755,11 +15695,11 @@ Patterns can be any of:
 							ctx.UnprotectReg(d169.Reg)
 							ctx.UnprotectReg(d169.Reg2)
 						}
-						ctx.EmitJmp(lbl108)
+						ctx.EmitJmp(lbl107)
 					}
 					ctx.FreeDesc(&d178)
 					bbpos_4_4 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl108)
+					ctx.MarkLabel(lbl107)
 					ctx.ResolveFixups()
 					d158 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase157) + int32(0)}
 					d159 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase157) + int32(16)}
@@ -15784,28 +15724,28 @@ Patterns can be any of:
 					if d183.Loc != LocImm && d183.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl140 := ctx.ReserveLabel()
 					lbl141 := ctx.ReserveLabel()
-					lbl142 := ctx.ReserveLabel()
 					if d183.Loc == LocImm {
 						if d183.Imm.Bool() {
+							ctx.MarkLabel(lbl140)
+							ctx.EmitJmp(lbl108)
+						} else {
 							ctx.MarkLabel(lbl141)
 							ctx.EmitJmp(lbl109)
-						} else {
-							ctx.MarkLabel(lbl142)
-							ctx.EmitJmp(lbl110)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d183.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl141)
-						ctx.EmitJmp(lbl142)
+						ctx.EmitJump(CondNotEqual, lbl140)
+						ctx.EmitJmp(lbl141)
+						ctx.MarkLabel(lbl140)
+						ctx.EmitJmp(lbl108)
 						ctx.MarkLabel(lbl141)
 						ctx.EmitJmp(lbl109)
-						ctx.MarkLabel(lbl142)
-						ctx.EmitJmp(lbl110)
 					}
 					ctx.FreeDesc(&d182)
 					bbpos_4_6 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl110)
+					ctx.MarkLabel(lbl109)
 					ctx.ResolveFixups()
 					d158 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase157) + int32(0)}
 					d159 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase157) + int32(16)}
@@ -15819,9 +15759,9 @@ Patterns can be any of:
 					ctx.BindReg(r38, &d184)
 					ctx.BindReg(r39, &d184)
 					ctx.EmitMovPairToResult(&d158, &d184)
-					ctx.EmitJmp(lbl103)
+					ctx.EmitJmp(lbl102)
 					bbpos_4_1 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl105)
+					ctx.MarkLabel(lbl104)
 					ctx.ResolveFixups()
 					d158 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase157) + int32(0)}
 					d159 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase157) + int32(16)}
@@ -15835,9 +15775,9 @@ Patterns can be any of:
 					ctx.BindReg(r38, &d186)
 					ctx.BindReg(r39, &d186)
 					ctx.EmitMovPairToResult(&d185, &d186)
-					ctx.EmitJmp(lbl103)
+					ctx.EmitJmp(lbl102)
 					bbpos_4_3 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl107)
+					ctx.MarkLabel(lbl106)
 					ctx.ResolveFixups()
 					d158 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase157) + int32(0)}
 					d159 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase157) + int32(16)}
@@ -15916,9 +15856,9 @@ Patterns can be any of:
 						ctx.UnprotectReg(d189.Reg)
 						ctx.UnprotectReg(d189.Reg2)
 					}
-					ctx.EmitJmp(lbl108)
+					ctx.EmitJmp(lbl107)
 					bbpos_4_5 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl109)
+					ctx.MarkLabel(lbl108)
 					ctx.ResolveFixups()
 					d158 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase157) + int32(0)}
 					d159 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase157) + int32(16)}
@@ -15968,28 +15908,28 @@ Patterns can be any of:
 					if d196.Loc != LocImm && d196.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl142 := ctx.ReserveLabel()
 					lbl143 := ctx.ReserveLabel()
-					lbl144 := ctx.ReserveLabel()
 					if d196.Loc == LocImm {
 						if d196.Imm.Bool() {
+							ctx.MarkLabel(lbl142)
+							ctx.EmitJmp(lbl110)
+						} else {
 							ctx.MarkLabel(lbl143)
 							ctx.EmitJmp(lbl111)
-						} else {
-							ctx.MarkLabel(lbl144)
-							ctx.EmitJmp(lbl112)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d196.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl143)
-						ctx.EmitJmp(lbl144)
+						ctx.EmitJump(CondNotEqual, lbl142)
+						ctx.EmitJmp(lbl143)
+						ctx.MarkLabel(lbl142)
+						ctx.EmitJmp(lbl110)
 						ctx.MarkLabel(lbl143)
 						ctx.EmitJmp(lbl111)
-						ctx.MarkLabel(lbl144)
-						ctx.EmitJmp(lbl112)
 					}
 					ctx.FreeDesc(&d195)
 					bbpos_4_8 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl112)
+					ctx.MarkLabel(lbl111)
 					ctx.ResolveFixups()
 					d158 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase157) + int32(0)}
 					d159 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase157) + int32(16)}
@@ -16021,28 +15961,28 @@ Patterns can be any of:
 					if d200.Loc != LocImm && d200.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl144 := ctx.ReserveLabel()
 					lbl145 := ctx.ReserveLabel()
-					lbl146 := ctx.ReserveLabel()
 					if d200.Loc == LocImm {
 						if d200.Imm.Bool() {
-							ctx.MarkLabel(lbl145)
-							ctx.EmitJmp(lbl121)
-						} else {
-							ctx.MarkLabel(lbl146)
+							ctx.MarkLabel(lbl144)
 							ctx.EmitJmp(lbl120)
+						} else {
+							ctx.MarkLabel(lbl145)
+							ctx.EmitJmp(lbl119)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d200.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl145)
-						ctx.EmitJmp(lbl146)
-						ctx.MarkLabel(lbl145)
-						ctx.EmitJmp(lbl121)
-						ctx.MarkLabel(lbl146)
+						ctx.EmitJump(CondNotEqual, lbl144)
+						ctx.EmitJmp(lbl145)
+						ctx.MarkLabel(lbl144)
 						ctx.EmitJmp(lbl120)
+						ctx.MarkLabel(lbl145)
+						ctx.EmitJmp(lbl119)
 					}
 					ctx.FreeDesc(&d199)
 					bbpos_4_16 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl120)
+					ctx.MarkLabel(lbl119)
 					ctx.ResolveFixups()
 					d158 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase157) + int32(0)}
 					d159 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase157) + int32(16)}
@@ -16054,9 +15994,9 @@ Patterns can be any of:
 					ctx.BindReg(r38, &d201)
 					ctx.BindReg(r39, &d201)
 					ctx.EmitMovPairToResult(&d158, &d201)
-					ctx.EmitJmp(lbl103)
+					ctx.EmitJmp(lbl102)
 					bbpos_4_7 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl111)
+					ctx.MarkLabel(lbl110)
 					ctx.ResolveFixups()
 					d158 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase157) + int32(0)}
 					d159 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase157) + int32(16)}
@@ -16100,7 +16040,7 @@ Patterns can be any of:
 						ctx.UnprotectReg(d203.Reg2)
 					}
 					bbpos_4_9 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl113)
+					ctx.MarkLabel(lbl112)
 					ctx.ResolveFixups()
 					d158 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase157) + int32(0)}
 					d159 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase157) + int32(16)}
@@ -16147,26 +16087,26 @@ Patterns can be any of:
 					if d208.Loc != LocImm && d208.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
+					lbl146 := ctx.ReserveLabel()
 					lbl147 := ctx.ReserveLabel()
-					lbl148 := ctx.ReserveLabel()
 					if d208.Loc == LocImm {
 						if d208.Imm.Bool() {
+							ctx.MarkLabel(lbl146)
+							ctx.EmitJmp(lbl113)
+						} else {
 							ctx.MarkLabel(lbl147)
 							ctx.EmitJmp(lbl114)
-						} else {
-							ctx.MarkLabel(lbl148)
-							ctx.EmitJmp(lbl115)
 						}
 					} else {
-						ctx.EmitJump(d208.Condition, lbl147)
-						ctx.EmitJmp(lbl148)
+						ctx.EmitJump(d208.Condition, lbl146)
+						ctx.EmitJmp(lbl147)
+						ctx.MarkLabel(lbl146)
+						ctx.EmitJmp(lbl113)
 						ctx.MarkLabel(lbl147)
 						ctx.EmitJmp(lbl114)
-						ctx.MarkLabel(lbl148)
-						ctx.EmitJmp(lbl115)
 					}
 					bbpos_4_11 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl115)
+					ctx.MarkLabel(lbl114)
 					ctx.ResolveFixups()
 					d158 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase157) + int32(0)}
 					d159 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase157) + int32(16)}
@@ -16203,28 +16143,28 @@ Patterns can be any of:
 					if d214.Loc != LocImm && d214.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl148 := ctx.ReserveLabel()
 					lbl149 := ctx.ReserveLabel()
-					lbl150 := ctx.ReserveLabel()
 					if d214.Loc == LocImm {
 						if d214.Imm.Bool() {
-							ctx.MarkLabel(lbl149)
-							ctx.EmitJmp(lbl118)
-						} else {
-							ctx.MarkLabel(lbl150)
+							ctx.MarkLabel(lbl148)
 							ctx.EmitJmp(lbl117)
+						} else {
+							ctx.MarkLabel(lbl149)
+							ctx.EmitJmp(lbl116)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d214.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl149)
-						ctx.EmitJmp(lbl150)
-						ctx.MarkLabel(lbl149)
-						ctx.EmitJmp(lbl118)
-						ctx.MarkLabel(lbl150)
+						ctx.EmitJump(CondNotEqual, lbl148)
+						ctx.EmitJmp(lbl149)
+						ctx.MarkLabel(lbl148)
 						ctx.EmitJmp(lbl117)
+						ctx.MarkLabel(lbl149)
+						ctx.EmitJmp(lbl116)
 					}
 					ctx.FreeDesc(&d213)
 					bbpos_4_13 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl117)
+					ctx.MarkLabel(lbl116)
 					ctx.ResolveFixups()
 					d158 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase157) + int32(0)}
 					d159 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase157) + int32(16)}
@@ -16250,141 +16190,141 @@ Patterns can be any of:
 					d220 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase216) + int32(56)}
 					ctx.PreparePointerStackTarget(int32(phiBase216)+int32(56), 3)
 					_ = d220
-					lbl151 := ctx.ReserveLabel()
+					lbl150 := ctx.ReserveLabel()
 					bbpos_5_0 := int32(-1)
 					_ = bbpos_5_0
-					lbl152 := ctx.ReserveLabel()
-					_ = lbl152
+					lbl151 := ctx.ReserveLabel()
+					_ = lbl151
 					bbpos_5_1 := int32(-1)
 					_ = bbpos_5_1
-					lbl153 := ctx.ReserveLabel()
-					_ = lbl153
+					lbl152 := ctx.ReserveLabel()
+					_ = lbl152
 					bbpos_5_2 := int32(-1)
 					_ = bbpos_5_2
-					lbl154 := ctx.ReserveLabel()
-					_ = lbl154
+					lbl153 := ctx.ReserveLabel()
+					_ = lbl153
 					bbpos_5_3 := int32(-1)
 					_ = bbpos_5_3
-					lbl155 := ctx.ReserveLabel()
-					_ = lbl155
+					lbl154 := ctx.ReserveLabel()
+					_ = lbl154
 					bbpos_5_4 := int32(-1)
 					_ = bbpos_5_4
-					lbl156 := ctx.ReserveLabel()
-					_ = lbl156
+					lbl155 := ctx.ReserveLabel()
+					_ = lbl155
 					bbpos_5_5 := int32(-1)
 					_ = bbpos_5_5
-					lbl157 := ctx.ReserveLabel()
-					_ = lbl157
+					lbl156 := ctx.ReserveLabel()
+					_ = lbl156
 					bbpos_5_6 := int32(-1)
 					_ = bbpos_5_6
-					lbl158 := ctx.ReserveLabel()
-					_ = lbl158
+					lbl157 := ctx.ReserveLabel()
+					_ = lbl157
 					bbpos_5_7 := int32(-1)
 					_ = bbpos_5_7
-					lbl159 := ctx.ReserveLabel()
-					_ = lbl159
+					lbl158 := ctx.ReserveLabel()
+					_ = lbl158
 					bbpos_5_8 := int32(-1)
 					_ = bbpos_5_8
-					lbl160 := ctx.ReserveLabel()
-					_ = lbl160
+					lbl159 := ctx.ReserveLabel()
+					_ = lbl159
 					bbpos_5_9 := int32(-1)
 					_ = bbpos_5_9
-					lbl161 := ctx.ReserveLabel()
-					_ = lbl161
+					lbl160 := ctx.ReserveLabel()
+					_ = lbl160
 					bbpos_5_10 := int32(-1)
 					_ = bbpos_5_10
-					lbl162 := ctx.ReserveLabel()
-					_ = lbl162
+					lbl161 := ctx.ReserveLabel()
+					_ = lbl161
 					bbpos_5_11 := int32(-1)
 					_ = bbpos_5_11
-					lbl163 := ctx.ReserveLabel()
-					_ = lbl163
+					lbl162 := ctx.ReserveLabel()
+					_ = lbl162
 					bbpos_5_12 := int32(-1)
 					_ = bbpos_5_12
-					lbl164 := ctx.ReserveLabel()
-					_ = lbl164
+					lbl163 := ctx.ReserveLabel()
+					_ = lbl163
 					bbpos_5_13 := int32(-1)
 					_ = bbpos_5_13
-					lbl165 := ctx.ReserveLabel()
-					_ = lbl165
+					lbl164 := ctx.ReserveLabel()
+					_ = lbl164
 					bbpos_5_14 := int32(-1)
 					_ = bbpos_5_14
-					lbl166 := ctx.ReserveLabel()
-					_ = lbl166
+					lbl165 := ctx.ReserveLabel()
+					_ = lbl165
 					bbpos_5_15 := int32(-1)
 					_ = bbpos_5_15
-					lbl167 := ctx.ReserveLabel()
-					_ = lbl167
+					lbl166 := ctx.ReserveLabel()
+					_ = lbl166
 					bbpos_5_16 := int32(-1)
 					_ = bbpos_5_16
-					lbl168 := ctx.ReserveLabel()
-					_ = lbl168
+					lbl167 := ctx.ReserveLabel()
+					_ = lbl167
 					bbpos_5_17 := int32(-1)
 					_ = bbpos_5_17
-					lbl169 := ctx.ReserveLabel()
-					_ = lbl169
+					lbl168 := ctx.ReserveLabel()
+					_ = lbl168
 					bbpos_5_18 := int32(-1)
 					_ = bbpos_5_18
-					lbl170 := ctx.ReserveLabel()
-					_ = lbl170
+					lbl169 := ctx.ReserveLabel()
+					_ = lbl169
 					bbpos_5_19 := int32(-1)
 					_ = bbpos_5_19
-					lbl171 := ctx.ReserveLabel()
-					_ = lbl171
+					lbl170 := ctx.ReserveLabel()
+					_ = lbl170
 					bbpos_5_20 := int32(-1)
 					_ = bbpos_5_20
-					lbl172 := ctx.ReserveLabel()
-					_ = lbl172
+					lbl171 := ctx.ReserveLabel()
+					_ = lbl171
 					bbpos_5_21 := int32(-1)
 					_ = bbpos_5_21
-					lbl173 := ctx.ReserveLabel()
-					_ = lbl173
+					lbl172 := ctx.ReserveLabel()
+					_ = lbl172
 					bbpos_5_22 := int32(-1)
 					_ = bbpos_5_22
-					lbl174 := ctx.ReserveLabel()
-					_ = lbl174
+					lbl173 := ctx.ReserveLabel()
+					_ = lbl173
 					bbpos_5_23 := int32(-1)
 					_ = bbpos_5_23
-					lbl175 := ctx.ReserveLabel()
-					_ = lbl175
+					lbl174 := ctx.ReserveLabel()
+					_ = lbl174
 					bbpos_5_24 := int32(-1)
 					_ = bbpos_5_24
-					lbl176 := ctx.ReserveLabel()
-					_ = lbl176
+					lbl175 := ctx.ReserveLabel()
+					_ = lbl175
 					bbpos_5_25 := int32(-1)
 					_ = bbpos_5_25
-					lbl177 := ctx.ReserveLabel()
-					_ = lbl177
+					lbl176 := ctx.ReserveLabel()
+					_ = lbl176
 					bbpos_5_26 := int32(-1)
 					_ = bbpos_5_26
-					lbl178 := ctx.ReserveLabel()
-					_ = lbl178
+					lbl177 := ctx.ReserveLabel()
+					_ = lbl177
 					bbpos_5_27 := int32(-1)
 					_ = bbpos_5_27
-					lbl179 := ctx.ReserveLabel()
-					_ = lbl179
+					lbl178 := ctx.ReserveLabel()
+					_ = lbl178
 					bbpos_5_28 := int32(-1)
 					_ = bbpos_5_28
-					lbl180 := ctx.ReserveLabel()
-					_ = lbl180
+					lbl179 := ctx.ReserveLabel()
+					_ = lbl179
 					bbpos_5_29 := int32(-1)
 					_ = bbpos_5_29
-					lbl181 := ctx.ReserveLabel()
-					_ = lbl181
+					lbl180 := ctx.ReserveLabel()
+					_ = lbl180
 					bbpos_5_30 := int32(-1)
 					_ = bbpos_5_30
-					lbl182 := ctx.ReserveLabel()
-					_ = lbl182
+					lbl181 := ctx.ReserveLabel()
+					_ = lbl181
 					bbpos_5_31 := int32(-1)
 					_ = bbpos_5_31
-					lbl183 := ctx.ReserveLabel()
-					_ = lbl183
+					lbl182 := ctx.ReserveLabel()
+					_ = lbl182
 					bbpos_5_32 := int32(-1)
 					_ = bbpos_5_32
-					lbl184 := ctx.ReserveLabel()
-					_ = lbl184
+					lbl183 := ctx.ReserveLabel()
+					_ = lbl183
 					bbpos_5_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl152)
+					ctx.MarkLabel(lbl151)
 					ctx.ResolveFixups()
 					d217 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase216) + int32(0)}
 					d218 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase216) + int32(16)}
@@ -16429,26 +16369,26 @@ Patterns can be any of:
 					if d224.Loc != LocImm && d224.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
+					lbl184 := ctx.ReserveLabel()
 					lbl185 := ctx.ReserveLabel()
-					lbl186 := ctx.ReserveLabel()
 					if d224.Loc == LocImm {
 						if d224.Imm.Bool() {
+							ctx.MarkLabel(lbl184)
+							ctx.EmitJmp(lbl152)
+						} else {
 							ctx.MarkLabel(lbl185)
 							ctx.EmitJmp(lbl153)
-						} else {
-							ctx.MarkLabel(lbl186)
-							ctx.EmitJmp(lbl154)
 						}
 					} else {
-						ctx.EmitJump(d224.Condition, lbl185)
-						ctx.EmitJmp(lbl186)
+						ctx.EmitJump(d224.Condition, lbl184)
+						ctx.EmitJmp(lbl185)
+						ctx.MarkLabel(lbl184)
+						ctx.EmitJmp(lbl152)
 						ctx.MarkLabel(lbl185)
 						ctx.EmitJmp(lbl153)
-						ctx.MarkLabel(lbl186)
-						ctx.EmitJmp(lbl154)
 					}
 					bbpos_5_2 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl154)
+					ctx.MarkLabel(lbl153)
 					ctx.ResolveFixups()
 					d217 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase216) + int32(0)}
 					d218 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase216) + int32(16)}
@@ -16562,14 +16502,14 @@ Patterns can be any of:
 					if d238.Loc != LocImm && d238.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl186 := ctx.ReserveLabel()
 					lbl187 := ctx.ReserveLabel()
-					lbl188 := ctx.ReserveLabel()
 					if d238.Loc == LocImm {
 						if d238.Imm.Bool() {
-							ctx.MarkLabel(lbl187)
-							ctx.EmitJmp(lbl155)
+							ctx.MarkLabel(lbl186)
+							ctx.EmitJmp(lbl154)
 						} else {
-							ctx.MarkLabel(lbl188)
+							ctx.MarkLabel(lbl187)
 							ctx.SyncDesc(&d228)
 							if d228.Loc == LocReg {
 								ctx.ProtectReg(d228.Reg)
@@ -16600,15 +16540,15 @@ Patterns can be any of:
 								ctx.UnprotectReg(d228.Reg)
 								ctx.UnprotectReg(d228.Reg2)
 							}
-							ctx.EmitJmp(lbl156)
+							ctx.EmitJmp(lbl155)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d238.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl187)
-						ctx.EmitJmp(lbl188)
+						ctx.EmitJump(CondNotEqual, lbl186)
+						ctx.EmitJmp(lbl187)
+						ctx.MarkLabel(lbl186)
+						ctx.EmitJmp(lbl154)
 						ctx.MarkLabel(lbl187)
-						ctx.EmitJmp(lbl155)
-						ctx.MarkLabel(lbl188)
 						ctx.SyncDesc(&d228)
 						if d228.Loc == LocReg {
 							ctx.ProtectReg(d228.Reg)
@@ -16639,11 +16579,11 @@ Patterns can be any of:
 							ctx.UnprotectReg(d228.Reg)
 							ctx.UnprotectReg(d228.Reg2)
 						}
-						ctx.EmitJmp(lbl156)
+						ctx.EmitJmp(lbl155)
 					}
 					ctx.FreeDesc(&d237)
 					bbpos_5_4 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl156)
+					ctx.MarkLabel(lbl155)
 					ctx.ResolveFixups()
 					d217 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase216) + int32(0)}
 					d218 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase216) + int32(16)}
@@ -16668,28 +16608,28 @@ Patterns can be any of:
 					if d242.Loc != LocImm && d242.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl188 := ctx.ReserveLabel()
 					lbl189 := ctx.ReserveLabel()
-					lbl190 := ctx.ReserveLabel()
 					if d242.Loc == LocImm {
 						if d242.Imm.Bool() {
+							ctx.MarkLabel(lbl188)
+							ctx.EmitJmp(lbl156)
+						} else {
 							ctx.MarkLabel(lbl189)
 							ctx.EmitJmp(lbl157)
-						} else {
-							ctx.MarkLabel(lbl190)
-							ctx.EmitJmp(lbl158)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d242.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl189)
-						ctx.EmitJmp(lbl190)
+						ctx.EmitJump(CondNotEqual, lbl188)
+						ctx.EmitJmp(lbl189)
+						ctx.MarkLabel(lbl188)
+						ctx.EmitJmp(lbl156)
 						ctx.MarkLabel(lbl189)
 						ctx.EmitJmp(lbl157)
-						ctx.MarkLabel(lbl190)
-						ctx.EmitJmp(lbl158)
 					}
 					ctx.FreeDesc(&d241)
 					bbpos_5_6 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl158)
+					ctx.MarkLabel(lbl157)
 					ctx.ResolveFixups()
 					d217 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase216) + int32(0)}
 					d218 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase216) + int32(16)}
@@ -16703,9 +16643,9 @@ Patterns can be any of:
 					ctx.BindReg(r53, &d243)
 					ctx.BindReg(r54, &d243)
 					ctx.EmitMovPairToResult(&d217, &d243)
-					ctx.EmitJmp(lbl151)
+					ctx.EmitJmp(lbl150)
 					bbpos_5_1 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl153)
+					ctx.MarkLabel(lbl152)
 					ctx.ResolveFixups()
 					d217 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase216) + int32(0)}
 					d218 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase216) + int32(16)}
@@ -16719,9 +16659,9 @@ Patterns can be any of:
 					ctx.BindReg(r53, &d245)
 					ctx.BindReg(r54, &d245)
 					ctx.EmitMovPairToResult(&d244, &d245)
-					ctx.EmitJmp(lbl151)
+					ctx.EmitJmp(lbl150)
 					bbpos_5_3 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl155)
+					ctx.MarkLabel(lbl154)
 					ctx.ResolveFixups()
 					d217 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase216) + int32(0)}
 					d218 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase216) + int32(16)}
@@ -16800,9 +16740,9 @@ Patterns can be any of:
 						ctx.UnprotectReg(d248.Reg)
 						ctx.UnprotectReg(d248.Reg2)
 					}
-					ctx.EmitJmp(lbl156)
+					ctx.EmitJmp(lbl155)
 					bbpos_5_5 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl157)
+					ctx.MarkLabel(lbl156)
 					ctx.ResolveFixups()
 					d217 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase216) + int32(0)}
 					d218 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase216) + int32(16)}
@@ -16852,28 +16792,28 @@ Patterns can be any of:
 					if d255.Loc != LocImm && d255.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl190 := ctx.ReserveLabel()
 					lbl191 := ctx.ReserveLabel()
-					lbl192 := ctx.ReserveLabel()
 					if d255.Loc == LocImm {
 						if d255.Imm.Bool() {
+							ctx.MarkLabel(lbl190)
+							ctx.EmitJmp(lbl158)
+						} else {
 							ctx.MarkLabel(lbl191)
 							ctx.EmitJmp(lbl159)
-						} else {
-							ctx.MarkLabel(lbl192)
-							ctx.EmitJmp(lbl160)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d255.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl191)
-						ctx.EmitJmp(lbl192)
+						ctx.EmitJump(CondNotEqual, lbl190)
+						ctx.EmitJmp(lbl191)
+						ctx.MarkLabel(lbl190)
+						ctx.EmitJmp(lbl158)
 						ctx.MarkLabel(lbl191)
 						ctx.EmitJmp(lbl159)
-						ctx.MarkLabel(lbl192)
-						ctx.EmitJmp(lbl160)
 					}
 					ctx.FreeDesc(&d254)
 					bbpos_5_8 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl160)
+					ctx.MarkLabel(lbl159)
 					ctx.ResolveFixups()
 					d217 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase216) + int32(0)}
 					d218 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase216) + int32(16)}
@@ -16905,28 +16845,28 @@ Patterns can be any of:
 					if d259.Loc != LocImm && d259.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl192 := ctx.ReserveLabel()
 					lbl193 := ctx.ReserveLabel()
-					lbl194 := ctx.ReserveLabel()
 					if d259.Loc == LocImm {
 						if d259.Imm.Bool() {
-							ctx.MarkLabel(lbl193)
-							ctx.EmitJmp(lbl169)
-						} else {
-							ctx.MarkLabel(lbl194)
+							ctx.MarkLabel(lbl192)
 							ctx.EmitJmp(lbl168)
+						} else {
+							ctx.MarkLabel(lbl193)
+							ctx.EmitJmp(lbl167)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d259.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl193)
-						ctx.EmitJmp(lbl194)
-						ctx.MarkLabel(lbl193)
-						ctx.EmitJmp(lbl169)
-						ctx.MarkLabel(lbl194)
+						ctx.EmitJump(CondNotEqual, lbl192)
+						ctx.EmitJmp(lbl193)
+						ctx.MarkLabel(lbl192)
 						ctx.EmitJmp(lbl168)
+						ctx.MarkLabel(lbl193)
+						ctx.EmitJmp(lbl167)
 					}
 					ctx.FreeDesc(&d258)
 					bbpos_5_16 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl168)
+					ctx.MarkLabel(lbl167)
 					ctx.ResolveFixups()
 					d217 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase216) + int32(0)}
 					d218 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase216) + int32(16)}
@@ -16938,9 +16878,9 @@ Patterns can be any of:
 					ctx.BindReg(r53, &d260)
 					ctx.BindReg(r54, &d260)
 					ctx.EmitMovPairToResult(&d217, &d260)
-					ctx.EmitJmp(lbl151)
+					ctx.EmitJmp(lbl150)
 					bbpos_5_7 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl159)
+					ctx.MarkLabel(lbl158)
 					ctx.ResolveFixups()
 					d217 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase216) + int32(0)}
 					d218 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase216) + int32(16)}
@@ -16984,7 +16924,7 @@ Patterns can be any of:
 						ctx.UnprotectReg(d262.Reg2)
 					}
 					bbpos_5_9 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl161)
+					ctx.MarkLabel(lbl160)
 					ctx.ResolveFixups()
 					d217 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase216) + int32(0)}
 					d218 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase216) + int32(16)}
@@ -17031,26 +16971,26 @@ Patterns can be any of:
 					if d267.Loc != LocImm && d267.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
+					lbl194 := ctx.ReserveLabel()
 					lbl195 := ctx.ReserveLabel()
-					lbl196 := ctx.ReserveLabel()
 					if d267.Loc == LocImm {
 						if d267.Imm.Bool() {
+							ctx.MarkLabel(lbl194)
+							ctx.EmitJmp(lbl161)
+						} else {
 							ctx.MarkLabel(lbl195)
 							ctx.EmitJmp(lbl162)
-						} else {
-							ctx.MarkLabel(lbl196)
-							ctx.EmitJmp(lbl163)
 						}
 					} else {
-						ctx.EmitJump(d267.Condition, lbl195)
-						ctx.EmitJmp(lbl196)
+						ctx.EmitJump(d267.Condition, lbl194)
+						ctx.EmitJmp(lbl195)
+						ctx.MarkLabel(lbl194)
+						ctx.EmitJmp(lbl161)
 						ctx.MarkLabel(lbl195)
 						ctx.EmitJmp(lbl162)
-						ctx.MarkLabel(lbl196)
-						ctx.EmitJmp(lbl163)
 					}
 					bbpos_5_11 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl163)
+					ctx.MarkLabel(lbl162)
 					ctx.ResolveFixups()
 					d217 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase216) + int32(0)}
 					d218 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase216) + int32(16)}
@@ -17087,28 +17027,28 @@ Patterns can be any of:
 					if d273.Loc != LocImm && d273.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl196 := ctx.ReserveLabel()
 					lbl197 := ctx.ReserveLabel()
-					lbl198 := ctx.ReserveLabel()
 					if d273.Loc == LocImm {
 						if d273.Imm.Bool() {
-							ctx.MarkLabel(lbl197)
-							ctx.EmitJmp(lbl166)
-						} else {
-							ctx.MarkLabel(lbl198)
+							ctx.MarkLabel(lbl196)
 							ctx.EmitJmp(lbl165)
+						} else {
+							ctx.MarkLabel(lbl197)
+							ctx.EmitJmp(lbl164)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d273.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl197)
-						ctx.EmitJmp(lbl198)
-						ctx.MarkLabel(lbl197)
-						ctx.EmitJmp(lbl166)
-						ctx.MarkLabel(lbl198)
+						ctx.EmitJump(CondNotEqual, lbl196)
+						ctx.EmitJmp(lbl197)
+						ctx.MarkLabel(lbl196)
 						ctx.EmitJmp(lbl165)
+						ctx.MarkLabel(lbl197)
+						ctx.EmitJmp(lbl164)
 					}
 					ctx.FreeDesc(&d272)
 					bbpos_5_13 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl165)
+					ctx.MarkLabel(lbl164)
 					ctx.ResolveFixups()
 					d217 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase216) + int32(0)}
 					d218 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase216) + int32(16)}
@@ -17134,141 +17074,141 @@ Patterns can be any of:
 					d279 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase275) + int32(56)}
 					ctx.PreparePointerStackTarget(int32(phiBase275)+int32(56), 3)
 					_ = d279
-					lbl199 := ctx.ReserveLabel()
+					lbl198 := ctx.ReserveLabel()
 					bbpos_6_0 := int32(-1)
 					_ = bbpos_6_0
-					lbl200 := ctx.ReserveLabel()
-					_ = lbl200
+					lbl199 := ctx.ReserveLabel()
+					_ = lbl199
 					bbpos_6_1 := int32(-1)
 					_ = bbpos_6_1
-					lbl201 := ctx.ReserveLabel()
-					_ = lbl201
+					lbl200 := ctx.ReserveLabel()
+					_ = lbl200
 					bbpos_6_2 := int32(-1)
 					_ = bbpos_6_2
-					lbl202 := ctx.ReserveLabel()
-					_ = lbl202
+					lbl201 := ctx.ReserveLabel()
+					_ = lbl201
 					bbpos_6_3 := int32(-1)
 					_ = bbpos_6_3
-					lbl203 := ctx.ReserveLabel()
-					_ = lbl203
+					lbl202 := ctx.ReserveLabel()
+					_ = lbl202
 					bbpos_6_4 := int32(-1)
 					_ = bbpos_6_4
-					lbl204 := ctx.ReserveLabel()
-					_ = lbl204
+					lbl203 := ctx.ReserveLabel()
+					_ = lbl203
 					bbpos_6_5 := int32(-1)
 					_ = bbpos_6_5
-					lbl205 := ctx.ReserveLabel()
-					_ = lbl205
+					lbl204 := ctx.ReserveLabel()
+					_ = lbl204
 					bbpos_6_6 := int32(-1)
 					_ = bbpos_6_6
-					lbl206 := ctx.ReserveLabel()
-					_ = lbl206
+					lbl205 := ctx.ReserveLabel()
+					_ = lbl205
 					bbpos_6_7 := int32(-1)
 					_ = bbpos_6_7
-					lbl207 := ctx.ReserveLabel()
-					_ = lbl207
+					lbl206 := ctx.ReserveLabel()
+					_ = lbl206
 					bbpos_6_8 := int32(-1)
 					_ = bbpos_6_8
-					lbl208 := ctx.ReserveLabel()
-					_ = lbl208
+					lbl207 := ctx.ReserveLabel()
+					_ = lbl207
 					bbpos_6_9 := int32(-1)
 					_ = bbpos_6_9
-					lbl209 := ctx.ReserveLabel()
-					_ = lbl209
+					lbl208 := ctx.ReserveLabel()
+					_ = lbl208
 					bbpos_6_10 := int32(-1)
 					_ = bbpos_6_10
-					lbl210 := ctx.ReserveLabel()
-					_ = lbl210
+					lbl209 := ctx.ReserveLabel()
+					_ = lbl209
 					bbpos_6_11 := int32(-1)
 					_ = bbpos_6_11
-					lbl211 := ctx.ReserveLabel()
-					_ = lbl211
+					lbl210 := ctx.ReserveLabel()
+					_ = lbl210
 					bbpos_6_12 := int32(-1)
 					_ = bbpos_6_12
-					lbl212 := ctx.ReserveLabel()
-					_ = lbl212
+					lbl211 := ctx.ReserveLabel()
+					_ = lbl211
 					bbpos_6_13 := int32(-1)
 					_ = bbpos_6_13
-					lbl213 := ctx.ReserveLabel()
-					_ = lbl213
+					lbl212 := ctx.ReserveLabel()
+					_ = lbl212
 					bbpos_6_14 := int32(-1)
 					_ = bbpos_6_14
-					lbl214 := ctx.ReserveLabel()
-					_ = lbl214
+					lbl213 := ctx.ReserveLabel()
+					_ = lbl213
 					bbpos_6_15 := int32(-1)
 					_ = bbpos_6_15
-					lbl215 := ctx.ReserveLabel()
-					_ = lbl215
+					lbl214 := ctx.ReserveLabel()
+					_ = lbl214
 					bbpos_6_16 := int32(-1)
 					_ = bbpos_6_16
-					lbl216 := ctx.ReserveLabel()
-					_ = lbl216
+					lbl215 := ctx.ReserveLabel()
+					_ = lbl215
 					bbpos_6_17 := int32(-1)
 					_ = bbpos_6_17
-					lbl217 := ctx.ReserveLabel()
-					_ = lbl217
+					lbl216 := ctx.ReserveLabel()
+					_ = lbl216
 					bbpos_6_18 := int32(-1)
 					_ = bbpos_6_18
-					lbl218 := ctx.ReserveLabel()
-					_ = lbl218
+					lbl217 := ctx.ReserveLabel()
+					_ = lbl217
 					bbpos_6_19 := int32(-1)
 					_ = bbpos_6_19
-					lbl219 := ctx.ReserveLabel()
-					_ = lbl219
+					lbl218 := ctx.ReserveLabel()
+					_ = lbl218
 					bbpos_6_20 := int32(-1)
 					_ = bbpos_6_20
-					lbl220 := ctx.ReserveLabel()
-					_ = lbl220
+					lbl219 := ctx.ReserveLabel()
+					_ = lbl219
 					bbpos_6_21 := int32(-1)
 					_ = bbpos_6_21
-					lbl221 := ctx.ReserveLabel()
-					_ = lbl221
+					lbl220 := ctx.ReserveLabel()
+					_ = lbl220
 					bbpos_6_22 := int32(-1)
 					_ = bbpos_6_22
-					lbl222 := ctx.ReserveLabel()
-					_ = lbl222
+					lbl221 := ctx.ReserveLabel()
+					_ = lbl221
 					bbpos_6_23 := int32(-1)
 					_ = bbpos_6_23
-					lbl223 := ctx.ReserveLabel()
-					_ = lbl223
+					lbl222 := ctx.ReserveLabel()
+					_ = lbl222
 					bbpos_6_24 := int32(-1)
 					_ = bbpos_6_24
-					lbl224 := ctx.ReserveLabel()
-					_ = lbl224
+					lbl223 := ctx.ReserveLabel()
+					_ = lbl223
 					bbpos_6_25 := int32(-1)
 					_ = bbpos_6_25
-					lbl225 := ctx.ReserveLabel()
-					_ = lbl225
+					lbl224 := ctx.ReserveLabel()
+					_ = lbl224
 					bbpos_6_26 := int32(-1)
 					_ = bbpos_6_26
-					lbl226 := ctx.ReserveLabel()
-					_ = lbl226
+					lbl225 := ctx.ReserveLabel()
+					_ = lbl225
 					bbpos_6_27 := int32(-1)
 					_ = bbpos_6_27
-					lbl227 := ctx.ReserveLabel()
-					_ = lbl227
+					lbl226 := ctx.ReserveLabel()
+					_ = lbl226
 					bbpos_6_28 := int32(-1)
 					_ = bbpos_6_28
-					lbl228 := ctx.ReserveLabel()
-					_ = lbl228
+					lbl227 := ctx.ReserveLabel()
+					_ = lbl227
 					bbpos_6_29 := int32(-1)
 					_ = bbpos_6_29
-					lbl229 := ctx.ReserveLabel()
-					_ = lbl229
+					lbl228 := ctx.ReserveLabel()
+					_ = lbl228
 					bbpos_6_30 := int32(-1)
 					_ = bbpos_6_30
-					lbl230 := ctx.ReserveLabel()
-					_ = lbl230
+					lbl229 := ctx.ReserveLabel()
+					_ = lbl229
 					bbpos_6_31 := int32(-1)
 					_ = bbpos_6_31
-					lbl231 := ctx.ReserveLabel()
-					_ = lbl231
+					lbl230 := ctx.ReserveLabel()
+					_ = lbl230
 					bbpos_6_32 := int32(-1)
 					_ = bbpos_6_32
-					lbl232 := ctx.ReserveLabel()
-					_ = lbl232
+					lbl231 := ctx.ReserveLabel()
+					_ = lbl231
 					bbpos_6_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl200)
+					ctx.MarkLabel(lbl199)
 					ctx.ResolveFixups()
 					d276 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase275) + int32(0)}
 					d277 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase275) + int32(16)}
@@ -17313,26 +17253,26 @@ Patterns can be any of:
 					if d283.Loc != LocImm && d283.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
+					lbl232 := ctx.ReserveLabel()
 					lbl233 := ctx.ReserveLabel()
-					lbl234 := ctx.ReserveLabel()
 					if d283.Loc == LocImm {
 						if d283.Imm.Bool() {
+							ctx.MarkLabel(lbl232)
+							ctx.EmitJmp(lbl200)
+						} else {
 							ctx.MarkLabel(lbl233)
 							ctx.EmitJmp(lbl201)
-						} else {
-							ctx.MarkLabel(lbl234)
-							ctx.EmitJmp(lbl202)
 						}
 					} else {
-						ctx.EmitJump(d283.Condition, lbl233)
-						ctx.EmitJmp(lbl234)
+						ctx.EmitJump(d283.Condition, lbl232)
+						ctx.EmitJmp(lbl233)
+						ctx.MarkLabel(lbl232)
+						ctx.EmitJmp(lbl200)
 						ctx.MarkLabel(lbl233)
 						ctx.EmitJmp(lbl201)
-						ctx.MarkLabel(lbl234)
-						ctx.EmitJmp(lbl202)
 					}
 					bbpos_6_2 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl202)
+					ctx.MarkLabel(lbl201)
 					ctx.ResolveFixups()
 					d276 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase275) + int32(0)}
 					d277 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase275) + int32(16)}
@@ -17446,14 +17386,14 @@ Patterns can be any of:
 					if d297.Loc != LocImm && d297.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl234 := ctx.ReserveLabel()
 					lbl235 := ctx.ReserveLabel()
-					lbl236 := ctx.ReserveLabel()
 					if d297.Loc == LocImm {
 						if d297.Imm.Bool() {
-							ctx.MarkLabel(lbl235)
-							ctx.EmitJmp(lbl203)
+							ctx.MarkLabel(lbl234)
+							ctx.EmitJmp(lbl202)
 						} else {
-							ctx.MarkLabel(lbl236)
+							ctx.MarkLabel(lbl235)
 							ctx.SyncDesc(&d287)
 							if d287.Loc == LocReg {
 								ctx.ProtectReg(d287.Reg)
@@ -17484,15 +17424,15 @@ Patterns can be any of:
 								ctx.UnprotectReg(d287.Reg)
 								ctx.UnprotectReg(d287.Reg2)
 							}
-							ctx.EmitJmp(lbl204)
+							ctx.EmitJmp(lbl203)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d297.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl235)
-						ctx.EmitJmp(lbl236)
+						ctx.EmitJump(CondNotEqual, lbl234)
+						ctx.EmitJmp(lbl235)
+						ctx.MarkLabel(lbl234)
+						ctx.EmitJmp(lbl202)
 						ctx.MarkLabel(lbl235)
-						ctx.EmitJmp(lbl203)
-						ctx.MarkLabel(lbl236)
 						ctx.SyncDesc(&d287)
 						if d287.Loc == LocReg {
 							ctx.ProtectReg(d287.Reg)
@@ -17523,11 +17463,11 @@ Patterns can be any of:
 							ctx.UnprotectReg(d287.Reg)
 							ctx.UnprotectReg(d287.Reg2)
 						}
-						ctx.EmitJmp(lbl204)
+						ctx.EmitJmp(lbl203)
 					}
 					ctx.FreeDesc(&d296)
 					bbpos_6_4 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl204)
+					ctx.MarkLabel(lbl203)
 					ctx.ResolveFixups()
 					d276 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase275) + int32(0)}
 					d277 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase275) + int32(16)}
@@ -17552,28 +17492,28 @@ Patterns can be any of:
 					if d301.Loc != LocImm && d301.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl236 := ctx.ReserveLabel()
 					lbl237 := ctx.ReserveLabel()
-					lbl238 := ctx.ReserveLabel()
 					if d301.Loc == LocImm {
 						if d301.Imm.Bool() {
+							ctx.MarkLabel(lbl236)
+							ctx.EmitJmp(lbl204)
+						} else {
 							ctx.MarkLabel(lbl237)
 							ctx.EmitJmp(lbl205)
-						} else {
-							ctx.MarkLabel(lbl238)
-							ctx.EmitJmp(lbl206)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d301.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl237)
-						ctx.EmitJmp(lbl238)
+						ctx.EmitJump(CondNotEqual, lbl236)
+						ctx.EmitJmp(lbl237)
+						ctx.MarkLabel(lbl236)
+						ctx.EmitJmp(lbl204)
 						ctx.MarkLabel(lbl237)
 						ctx.EmitJmp(lbl205)
-						ctx.MarkLabel(lbl238)
-						ctx.EmitJmp(lbl206)
 					}
 					ctx.FreeDesc(&d300)
 					bbpos_6_6 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl206)
+					ctx.MarkLabel(lbl205)
 					ctx.ResolveFixups()
 					d276 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase275) + int32(0)}
 					d277 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase275) + int32(16)}
@@ -17587,9 +17527,9 @@ Patterns can be any of:
 					ctx.BindReg(r68, &d302)
 					ctx.BindReg(r69, &d302)
 					ctx.EmitMovPairToResult(&d276, &d302)
-					ctx.EmitJmp(lbl199)
+					ctx.EmitJmp(lbl198)
 					bbpos_6_1 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl201)
+					ctx.MarkLabel(lbl200)
 					ctx.ResolveFixups()
 					d276 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase275) + int32(0)}
 					d277 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase275) + int32(16)}
@@ -17603,9 +17543,9 @@ Patterns can be any of:
 					ctx.BindReg(r68, &d304)
 					ctx.BindReg(r69, &d304)
 					ctx.EmitMovPairToResult(&d303, &d304)
-					ctx.EmitJmp(lbl199)
+					ctx.EmitJmp(lbl198)
 					bbpos_6_3 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl203)
+					ctx.MarkLabel(lbl202)
 					ctx.ResolveFixups()
 					d276 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase275) + int32(0)}
 					d277 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase275) + int32(16)}
@@ -17684,9 +17624,9 @@ Patterns can be any of:
 						ctx.UnprotectReg(d307.Reg)
 						ctx.UnprotectReg(d307.Reg2)
 					}
-					ctx.EmitJmp(lbl204)
+					ctx.EmitJmp(lbl203)
 					bbpos_6_5 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl205)
+					ctx.MarkLabel(lbl204)
 					ctx.ResolveFixups()
 					d276 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase275) + int32(0)}
 					d277 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase275) + int32(16)}
@@ -17736,28 +17676,28 @@ Patterns can be any of:
 					if d314.Loc != LocImm && d314.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl238 := ctx.ReserveLabel()
 					lbl239 := ctx.ReserveLabel()
-					lbl240 := ctx.ReserveLabel()
 					if d314.Loc == LocImm {
 						if d314.Imm.Bool() {
+							ctx.MarkLabel(lbl238)
+							ctx.EmitJmp(lbl206)
+						} else {
 							ctx.MarkLabel(lbl239)
 							ctx.EmitJmp(lbl207)
-						} else {
-							ctx.MarkLabel(lbl240)
-							ctx.EmitJmp(lbl208)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d314.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl239)
-						ctx.EmitJmp(lbl240)
+						ctx.EmitJump(CondNotEqual, lbl238)
+						ctx.EmitJmp(lbl239)
+						ctx.MarkLabel(lbl238)
+						ctx.EmitJmp(lbl206)
 						ctx.MarkLabel(lbl239)
 						ctx.EmitJmp(lbl207)
-						ctx.MarkLabel(lbl240)
-						ctx.EmitJmp(lbl208)
 					}
 					ctx.FreeDesc(&d313)
 					bbpos_6_8 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl208)
+					ctx.MarkLabel(lbl207)
 					ctx.ResolveFixups()
 					d276 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase275) + int32(0)}
 					d277 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase275) + int32(16)}
@@ -17789,28 +17729,28 @@ Patterns can be any of:
 					if d318.Loc != LocImm && d318.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl240 := ctx.ReserveLabel()
 					lbl241 := ctx.ReserveLabel()
-					lbl242 := ctx.ReserveLabel()
 					if d318.Loc == LocImm {
 						if d318.Imm.Bool() {
-							ctx.MarkLabel(lbl241)
-							ctx.EmitJmp(lbl217)
-						} else {
-							ctx.MarkLabel(lbl242)
+							ctx.MarkLabel(lbl240)
 							ctx.EmitJmp(lbl216)
+						} else {
+							ctx.MarkLabel(lbl241)
+							ctx.EmitJmp(lbl215)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d318.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl241)
-						ctx.EmitJmp(lbl242)
-						ctx.MarkLabel(lbl241)
-						ctx.EmitJmp(lbl217)
-						ctx.MarkLabel(lbl242)
+						ctx.EmitJump(CondNotEqual, lbl240)
+						ctx.EmitJmp(lbl241)
+						ctx.MarkLabel(lbl240)
 						ctx.EmitJmp(lbl216)
+						ctx.MarkLabel(lbl241)
+						ctx.EmitJmp(lbl215)
 					}
 					ctx.FreeDesc(&d317)
 					bbpos_6_16 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl216)
+					ctx.MarkLabel(lbl215)
 					ctx.ResolveFixups()
 					d276 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase275) + int32(0)}
 					d277 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase275) + int32(16)}
@@ -17822,9 +17762,9 @@ Patterns can be any of:
 					ctx.BindReg(r68, &d319)
 					ctx.BindReg(r69, &d319)
 					ctx.EmitMovPairToResult(&d276, &d319)
-					ctx.EmitJmp(lbl199)
+					ctx.EmitJmp(lbl198)
 					bbpos_6_7 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl207)
+					ctx.MarkLabel(lbl206)
 					ctx.ResolveFixups()
 					d276 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase275) + int32(0)}
 					d277 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase275) + int32(16)}
@@ -17868,7 +17808,7 @@ Patterns can be any of:
 						ctx.UnprotectReg(d321.Reg2)
 					}
 					bbpos_6_9 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl209)
+					ctx.MarkLabel(lbl208)
 					ctx.ResolveFixups()
 					d276 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase275) + int32(0)}
 					d277 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase275) + int32(16)}
@@ -17915,26 +17855,26 @@ Patterns can be any of:
 					if d326.Loc != LocImm && d326.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
+					lbl242 := ctx.ReserveLabel()
 					lbl243 := ctx.ReserveLabel()
-					lbl244 := ctx.ReserveLabel()
 					if d326.Loc == LocImm {
 						if d326.Imm.Bool() {
+							ctx.MarkLabel(lbl242)
+							ctx.EmitJmp(lbl209)
+						} else {
 							ctx.MarkLabel(lbl243)
 							ctx.EmitJmp(lbl210)
-						} else {
-							ctx.MarkLabel(lbl244)
-							ctx.EmitJmp(lbl211)
 						}
 					} else {
-						ctx.EmitJump(d326.Condition, lbl243)
-						ctx.EmitJmp(lbl244)
+						ctx.EmitJump(d326.Condition, lbl242)
+						ctx.EmitJmp(lbl243)
+						ctx.MarkLabel(lbl242)
+						ctx.EmitJmp(lbl209)
 						ctx.MarkLabel(lbl243)
 						ctx.EmitJmp(lbl210)
-						ctx.MarkLabel(lbl244)
-						ctx.EmitJmp(lbl211)
 					}
 					bbpos_6_11 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl211)
+					ctx.MarkLabel(lbl210)
 					ctx.ResolveFixups()
 					d276 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase275) + int32(0)}
 					d277 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase275) + int32(16)}
@@ -17971,28 +17911,28 @@ Patterns can be any of:
 					if d332.Loc != LocImm && d332.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl244 := ctx.ReserveLabel()
 					lbl245 := ctx.ReserveLabel()
-					lbl246 := ctx.ReserveLabel()
 					if d332.Loc == LocImm {
 						if d332.Imm.Bool() {
-							ctx.MarkLabel(lbl245)
-							ctx.EmitJmp(lbl214)
-						} else {
-							ctx.MarkLabel(lbl246)
+							ctx.MarkLabel(lbl244)
 							ctx.EmitJmp(lbl213)
+						} else {
+							ctx.MarkLabel(lbl245)
+							ctx.EmitJmp(lbl212)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d332.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl245)
-						ctx.EmitJmp(lbl246)
-						ctx.MarkLabel(lbl245)
-						ctx.EmitJmp(lbl214)
-						ctx.MarkLabel(lbl246)
+						ctx.EmitJump(CondNotEqual, lbl244)
+						ctx.EmitJmp(lbl245)
+						ctx.MarkLabel(lbl244)
 						ctx.EmitJmp(lbl213)
+						ctx.MarkLabel(lbl245)
+						ctx.EmitJmp(lbl212)
 					}
 					ctx.FreeDesc(&d331)
 					bbpos_6_13 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl213)
+					ctx.MarkLabel(lbl212)
 					ctx.ResolveFixups()
 					d276 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase275) + int32(0)}
 					d277 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase275) + int32(16)}
@@ -18018,141 +17958,141 @@ Patterns can be any of:
 					d338 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase334) + int32(56)}
 					ctx.PreparePointerStackTarget(int32(phiBase334)+int32(56), 3)
 					_ = d338
-					lbl247 := ctx.ReserveLabel()
+					lbl246 := ctx.ReserveLabel()
 					bbpos_7_0 := int32(-1)
 					_ = bbpos_7_0
-					lbl248 := ctx.ReserveLabel()
-					_ = lbl248
+					lbl247 := ctx.ReserveLabel()
+					_ = lbl247
 					bbpos_7_1 := int32(-1)
 					_ = bbpos_7_1
-					lbl249 := ctx.ReserveLabel()
-					_ = lbl249
+					lbl248 := ctx.ReserveLabel()
+					_ = lbl248
 					bbpos_7_2 := int32(-1)
 					_ = bbpos_7_2
-					lbl250 := ctx.ReserveLabel()
-					_ = lbl250
+					lbl249 := ctx.ReserveLabel()
+					_ = lbl249
 					bbpos_7_3 := int32(-1)
 					_ = bbpos_7_3
-					lbl251 := ctx.ReserveLabel()
-					_ = lbl251
+					lbl250 := ctx.ReserveLabel()
+					_ = lbl250
 					bbpos_7_4 := int32(-1)
 					_ = bbpos_7_4
-					lbl252 := ctx.ReserveLabel()
-					_ = lbl252
+					lbl251 := ctx.ReserveLabel()
+					_ = lbl251
 					bbpos_7_5 := int32(-1)
 					_ = bbpos_7_5
-					lbl253 := ctx.ReserveLabel()
-					_ = lbl253
+					lbl252 := ctx.ReserveLabel()
+					_ = lbl252
 					bbpos_7_6 := int32(-1)
 					_ = bbpos_7_6
-					lbl254 := ctx.ReserveLabel()
-					_ = lbl254
+					lbl253 := ctx.ReserveLabel()
+					_ = lbl253
 					bbpos_7_7 := int32(-1)
 					_ = bbpos_7_7
-					lbl255 := ctx.ReserveLabel()
-					_ = lbl255
+					lbl254 := ctx.ReserveLabel()
+					_ = lbl254
 					bbpos_7_8 := int32(-1)
 					_ = bbpos_7_8
-					lbl256 := ctx.ReserveLabel()
-					_ = lbl256
+					lbl255 := ctx.ReserveLabel()
+					_ = lbl255
 					bbpos_7_9 := int32(-1)
 					_ = bbpos_7_9
-					lbl257 := ctx.ReserveLabel()
-					_ = lbl257
+					lbl256 := ctx.ReserveLabel()
+					_ = lbl256
 					bbpos_7_10 := int32(-1)
 					_ = bbpos_7_10
-					lbl258 := ctx.ReserveLabel()
-					_ = lbl258
+					lbl257 := ctx.ReserveLabel()
+					_ = lbl257
 					bbpos_7_11 := int32(-1)
 					_ = bbpos_7_11
-					lbl259 := ctx.ReserveLabel()
-					_ = lbl259
+					lbl258 := ctx.ReserveLabel()
+					_ = lbl258
 					bbpos_7_12 := int32(-1)
 					_ = bbpos_7_12
-					lbl260 := ctx.ReserveLabel()
-					_ = lbl260
+					lbl259 := ctx.ReserveLabel()
+					_ = lbl259
 					bbpos_7_13 := int32(-1)
 					_ = bbpos_7_13
-					lbl261 := ctx.ReserveLabel()
-					_ = lbl261
+					lbl260 := ctx.ReserveLabel()
+					_ = lbl260
 					bbpos_7_14 := int32(-1)
 					_ = bbpos_7_14
-					lbl262 := ctx.ReserveLabel()
-					_ = lbl262
+					lbl261 := ctx.ReserveLabel()
+					_ = lbl261
 					bbpos_7_15 := int32(-1)
 					_ = bbpos_7_15
-					lbl263 := ctx.ReserveLabel()
-					_ = lbl263
+					lbl262 := ctx.ReserveLabel()
+					_ = lbl262
 					bbpos_7_16 := int32(-1)
 					_ = bbpos_7_16
-					lbl264 := ctx.ReserveLabel()
-					_ = lbl264
+					lbl263 := ctx.ReserveLabel()
+					_ = lbl263
 					bbpos_7_17 := int32(-1)
 					_ = bbpos_7_17
-					lbl265 := ctx.ReserveLabel()
-					_ = lbl265
+					lbl264 := ctx.ReserveLabel()
+					_ = lbl264
 					bbpos_7_18 := int32(-1)
 					_ = bbpos_7_18
-					lbl266 := ctx.ReserveLabel()
-					_ = lbl266
+					lbl265 := ctx.ReserveLabel()
+					_ = lbl265
 					bbpos_7_19 := int32(-1)
 					_ = bbpos_7_19
-					lbl267 := ctx.ReserveLabel()
-					_ = lbl267
+					lbl266 := ctx.ReserveLabel()
+					_ = lbl266
 					bbpos_7_20 := int32(-1)
 					_ = bbpos_7_20
-					lbl268 := ctx.ReserveLabel()
-					_ = lbl268
+					lbl267 := ctx.ReserveLabel()
+					_ = lbl267
 					bbpos_7_21 := int32(-1)
 					_ = bbpos_7_21
-					lbl269 := ctx.ReserveLabel()
-					_ = lbl269
+					lbl268 := ctx.ReserveLabel()
+					_ = lbl268
 					bbpos_7_22 := int32(-1)
 					_ = bbpos_7_22
-					lbl270 := ctx.ReserveLabel()
-					_ = lbl270
+					lbl269 := ctx.ReserveLabel()
+					_ = lbl269
 					bbpos_7_23 := int32(-1)
 					_ = bbpos_7_23
-					lbl271 := ctx.ReserveLabel()
-					_ = lbl271
+					lbl270 := ctx.ReserveLabel()
+					_ = lbl270
 					bbpos_7_24 := int32(-1)
 					_ = bbpos_7_24
-					lbl272 := ctx.ReserveLabel()
-					_ = lbl272
+					lbl271 := ctx.ReserveLabel()
+					_ = lbl271
 					bbpos_7_25 := int32(-1)
 					_ = bbpos_7_25
-					lbl273 := ctx.ReserveLabel()
-					_ = lbl273
+					lbl272 := ctx.ReserveLabel()
+					_ = lbl272
 					bbpos_7_26 := int32(-1)
 					_ = bbpos_7_26
-					lbl274 := ctx.ReserveLabel()
-					_ = lbl274
+					lbl273 := ctx.ReserveLabel()
+					_ = lbl273
 					bbpos_7_27 := int32(-1)
 					_ = bbpos_7_27
-					lbl275 := ctx.ReserveLabel()
-					_ = lbl275
+					lbl274 := ctx.ReserveLabel()
+					_ = lbl274
 					bbpos_7_28 := int32(-1)
 					_ = bbpos_7_28
-					lbl276 := ctx.ReserveLabel()
-					_ = lbl276
+					lbl275 := ctx.ReserveLabel()
+					_ = lbl275
 					bbpos_7_29 := int32(-1)
 					_ = bbpos_7_29
-					lbl277 := ctx.ReserveLabel()
-					_ = lbl277
+					lbl276 := ctx.ReserveLabel()
+					_ = lbl276
 					bbpos_7_30 := int32(-1)
 					_ = bbpos_7_30
-					lbl278 := ctx.ReserveLabel()
-					_ = lbl278
+					lbl277 := ctx.ReserveLabel()
+					_ = lbl277
 					bbpos_7_31 := int32(-1)
 					_ = bbpos_7_31
-					lbl279 := ctx.ReserveLabel()
-					_ = lbl279
+					lbl278 := ctx.ReserveLabel()
+					_ = lbl278
 					bbpos_7_32 := int32(-1)
 					_ = bbpos_7_32
-					lbl280 := ctx.ReserveLabel()
-					_ = lbl280
+					lbl279 := ctx.ReserveLabel()
+					_ = lbl279
 					bbpos_7_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl248)
+					ctx.MarkLabel(lbl247)
 					ctx.ResolveFixups()
 					d335 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase334) + int32(0)}
 					d336 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase334) + int32(16)}
@@ -18197,26 +18137,26 @@ Patterns can be any of:
 					if d342.Loc != LocImm && d342.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
+					lbl280 := ctx.ReserveLabel()
 					lbl281 := ctx.ReserveLabel()
-					lbl282 := ctx.ReserveLabel()
 					if d342.Loc == LocImm {
 						if d342.Imm.Bool() {
+							ctx.MarkLabel(lbl280)
+							ctx.EmitJmp(lbl248)
+						} else {
 							ctx.MarkLabel(lbl281)
 							ctx.EmitJmp(lbl249)
-						} else {
-							ctx.MarkLabel(lbl282)
-							ctx.EmitJmp(lbl250)
 						}
 					} else {
-						ctx.EmitJump(d342.Condition, lbl281)
-						ctx.EmitJmp(lbl282)
+						ctx.EmitJump(d342.Condition, lbl280)
+						ctx.EmitJmp(lbl281)
+						ctx.MarkLabel(lbl280)
+						ctx.EmitJmp(lbl248)
 						ctx.MarkLabel(lbl281)
 						ctx.EmitJmp(lbl249)
-						ctx.MarkLabel(lbl282)
-						ctx.EmitJmp(lbl250)
 					}
 					bbpos_7_2 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl250)
+					ctx.MarkLabel(lbl249)
 					ctx.ResolveFixups()
 					d335 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase334) + int32(0)}
 					d336 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase334) + int32(16)}
@@ -18330,14 +18270,14 @@ Patterns can be any of:
 					if d356.Loc != LocImm && d356.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl282 := ctx.ReserveLabel()
 					lbl283 := ctx.ReserveLabel()
-					lbl284 := ctx.ReserveLabel()
 					if d356.Loc == LocImm {
 						if d356.Imm.Bool() {
-							ctx.MarkLabel(lbl283)
-							ctx.EmitJmp(lbl251)
+							ctx.MarkLabel(lbl282)
+							ctx.EmitJmp(lbl250)
 						} else {
-							ctx.MarkLabel(lbl284)
+							ctx.MarkLabel(lbl283)
 							ctx.SyncDesc(&d346)
 							if d346.Loc == LocReg {
 								ctx.ProtectReg(d346.Reg)
@@ -18368,15 +18308,15 @@ Patterns can be any of:
 								ctx.UnprotectReg(d346.Reg)
 								ctx.UnprotectReg(d346.Reg2)
 							}
-							ctx.EmitJmp(lbl252)
+							ctx.EmitJmp(lbl251)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d356.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl283)
-						ctx.EmitJmp(lbl284)
+						ctx.EmitJump(CondNotEqual, lbl282)
+						ctx.EmitJmp(lbl283)
+						ctx.MarkLabel(lbl282)
+						ctx.EmitJmp(lbl250)
 						ctx.MarkLabel(lbl283)
-						ctx.EmitJmp(lbl251)
-						ctx.MarkLabel(lbl284)
 						ctx.SyncDesc(&d346)
 						if d346.Loc == LocReg {
 							ctx.ProtectReg(d346.Reg)
@@ -18407,11 +18347,11 @@ Patterns can be any of:
 							ctx.UnprotectReg(d346.Reg)
 							ctx.UnprotectReg(d346.Reg2)
 						}
-						ctx.EmitJmp(lbl252)
+						ctx.EmitJmp(lbl251)
 					}
 					ctx.FreeDesc(&d355)
 					bbpos_7_4 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl252)
+					ctx.MarkLabel(lbl251)
 					ctx.ResolveFixups()
 					d335 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase334) + int32(0)}
 					d336 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase334) + int32(16)}
@@ -18436,28 +18376,28 @@ Patterns can be any of:
 					if d360.Loc != LocImm && d360.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl284 := ctx.ReserveLabel()
 					lbl285 := ctx.ReserveLabel()
-					lbl286 := ctx.ReserveLabel()
 					if d360.Loc == LocImm {
 						if d360.Imm.Bool() {
+							ctx.MarkLabel(lbl284)
+							ctx.EmitJmp(lbl252)
+						} else {
 							ctx.MarkLabel(lbl285)
 							ctx.EmitJmp(lbl253)
-						} else {
-							ctx.MarkLabel(lbl286)
-							ctx.EmitJmp(lbl254)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d360.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl285)
-						ctx.EmitJmp(lbl286)
+						ctx.EmitJump(CondNotEqual, lbl284)
+						ctx.EmitJmp(lbl285)
+						ctx.MarkLabel(lbl284)
+						ctx.EmitJmp(lbl252)
 						ctx.MarkLabel(lbl285)
 						ctx.EmitJmp(lbl253)
-						ctx.MarkLabel(lbl286)
-						ctx.EmitJmp(lbl254)
 					}
 					ctx.FreeDesc(&d359)
 					bbpos_7_6 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl254)
+					ctx.MarkLabel(lbl253)
 					ctx.ResolveFixups()
 					d335 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase334) + int32(0)}
 					d336 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase334) + int32(16)}
@@ -18471,9 +18411,9 @@ Patterns can be any of:
 					ctx.BindReg(r83, &d361)
 					ctx.BindReg(r84, &d361)
 					ctx.EmitMovPairToResult(&d335, &d361)
-					ctx.EmitJmp(lbl247)
+					ctx.EmitJmp(lbl246)
 					bbpos_7_1 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl249)
+					ctx.MarkLabel(lbl248)
 					ctx.ResolveFixups()
 					d335 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase334) + int32(0)}
 					d336 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase334) + int32(16)}
@@ -18487,9 +18427,9 @@ Patterns can be any of:
 					ctx.BindReg(r83, &d363)
 					ctx.BindReg(r84, &d363)
 					ctx.EmitMovPairToResult(&d362, &d363)
-					ctx.EmitJmp(lbl247)
+					ctx.EmitJmp(lbl246)
 					bbpos_7_3 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl251)
+					ctx.MarkLabel(lbl250)
 					ctx.ResolveFixups()
 					d335 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase334) + int32(0)}
 					d336 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase334) + int32(16)}
@@ -18568,9 +18508,9 @@ Patterns can be any of:
 						ctx.UnprotectReg(d366.Reg)
 						ctx.UnprotectReg(d366.Reg2)
 					}
-					ctx.EmitJmp(lbl252)
+					ctx.EmitJmp(lbl251)
 					bbpos_7_5 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl253)
+					ctx.MarkLabel(lbl252)
 					ctx.ResolveFixups()
 					d335 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase334) + int32(0)}
 					d336 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase334) + int32(16)}
@@ -18620,28 +18560,28 @@ Patterns can be any of:
 					if d373.Loc != LocImm && d373.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl286 := ctx.ReserveLabel()
 					lbl287 := ctx.ReserveLabel()
-					lbl288 := ctx.ReserveLabel()
 					if d373.Loc == LocImm {
 						if d373.Imm.Bool() {
+							ctx.MarkLabel(lbl286)
+							ctx.EmitJmp(lbl254)
+						} else {
 							ctx.MarkLabel(lbl287)
 							ctx.EmitJmp(lbl255)
-						} else {
-							ctx.MarkLabel(lbl288)
-							ctx.EmitJmp(lbl256)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d373.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl287)
-						ctx.EmitJmp(lbl288)
+						ctx.EmitJump(CondNotEqual, lbl286)
+						ctx.EmitJmp(lbl287)
+						ctx.MarkLabel(lbl286)
+						ctx.EmitJmp(lbl254)
 						ctx.MarkLabel(lbl287)
 						ctx.EmitJmp(lbl255)
-						ctx.MarkLabel(lbl288)
-						ctx.EmitJmp(lbl256)
 					}
 					ctx.FreeDesc(&d372)
 					bbpos_7_8 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl256)
+					ctx.MarkLabel(lbl255)
 					ctx.ResolveFixups()
 					d335 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase334) + int32(0)}
 					d336 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase334) + int32(16)}
@@ -18673,28 +18613,28 @@ Patterns can be any of:
 					if d377.Loc != LocImm && d377.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl288 := ctx.ReserveLabel()
 					lbl289 := ctx.ReserveLabel()
-					lbl290 := ctx.ReserveLabel()
 					if d377.Loc == LocImm {
 						if d377.Imm.Bool() {
-							ctx.MarkLabel(lbl289)
-							ctx.EmitJmp(lbl265)
-						} else {
-							ctx.MarkLabel(lbl290)
+							ctx.MarkLabel(lbl288)
 							ctx.EmitJmp(lbl264)
+						} else {
+							ctx.MarkLabel(lbl289)
+							ctx.EmitJmp(lbl263)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d377.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl289)
-						ctx.EmitJmp(lbl290)
-						ctx.MarkLabel(lbl289)
-						ctx.EmitJmp(lbl265)
-						ctx.MarkLabel(lbl290)
+						ctx.EmitJump(CondNotEqual, lbl288)
+						ctx.EmitJmp(lbl289)
+						ctx.MarkLabel(lbl288)
 						ctx.EmitJmp(lbl264)
+						ctx.MarkLabel(lbl289)
+						ctx.EmitJmp(lbl263)
 					}
 					ctx.FreeDesc(&d376)
 					bbpos_7_16 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl264)
+					ctx.MarkLabel(lbl263)
 					ctx.ResolveFixups()
 					d335 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase334) + int32(0)}
 					d336 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase334) + int32(16)}
@@ -18706,9 +18646,9 @@ Patterns can be any of:
 					ctx.BindReg(r83, &d378)
 					ctx.BindReg(r84, &d378)
 					ctx.EmitMovPairToResult(&d335, &d378)
-					ctx.EmitJmp(lbl247)
+					ctx.EmitJmp(lbl246)
 					bbpos_7_7 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl255)
+					ctx.MarkLabel(lbl254)
 					ctx.ResolveFixups()
 					d335 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase334) + int32(0)}
 					d336 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase334) + int32(16)}
@@ -18752,7 +18692,7 @@ Patterns can be any of:
 						ctx.UnprotectReg(d380.Reg2)
 					}
 					bbpos_7_9 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl257)
+					ctx.MarkLabel(lbl256)
 					ctx.ResolveFixups()
 					d335 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase334) + int32(0)}
 					d336 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase334) + int32(16)}
@@ -18799,26 +18739,26 @@ Patterns can be any of:
 					if d385.Loc != LocImm && d385.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
+					lbl290 := ctx.ReserveLabel()
 					lbl291 := ctx.ReserveLabel()
-					lbl292 := ctx.ReserveLabel()
 					if d385.Loc == LocImm {
 						if d385.Imm.Bool() {
+							ctx.MarkLabel(lbl290)
+							ctx.EmitJmp(lbl257)
+						} else {
 							ctx.MarkLabel(lbl291)
 							ctx.EmitJmp(lbl258)
-						} else {
-							ctx.MarkLabel(lbl292)
-							ctx.EmitJmp(lbl259)
 						}
 					} else {
-						ctx.EmitJump(d385.Condition, lbl291)
-						ctx.EmitJmp(lbl292)
+						ctx.EmitJump(d385.Condition, lbl290)
+						ctx.EmitJmp(lbl291)
+						ctx.MarkLabel(lbl290)
+						ctx.EmitJmp(lbl257)
 						ctx.MarkLabel(lbl291)
 						ctx.EmitJmp(lbl258)
-						ctx.MarkLabel(lbl292)
-						ctx.EmitJmp(lbl259)
 					}
 					bbpos_7_11 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl259)
+					ctx.MarkLabel(lbl258)
 					ctx.ResolveFixups()
 					d335 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase334) + int32(0)}
 					d336 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase334) + int32(16)}
@@ -18855,28 +18795,28 @@ Patterns can be any of:
 					if d391.Loc != LocImm && d391.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl292 := ctx.ReserveLabel()
 					lbl293 := ctx.ReserveLabel()
-					lbl294 := ctx.ReserveLabel()
 					if d391.Loc == LocImm {
 						if d391.Imm.Bool() {
-							ctx.MarkLabel(lbl293)
-							ctx.EmitJmp(lbl262)
-						} else {
-							ctx.MarkLabel(lbl294)
+							ctx.MarkLabel(lbl292)
 							ctx.EmitJmp(lbl261)
+						} else {
+							ctx.MarkLabel(lbl293)
+							ctx.EmitJmp(lbl260)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d391.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl293)
-						ctx.EmitJmp(lbl294)
-						ctx.MarkLabel(lbl293)
-						ctx.EmitJmp(lbl262)
-						ctx.MarkLabel(lbl294)
+						ctx.EmitJump(CondNotEqual, lbl292)
+						ctx.EmitJmp(lbl293)
+						ctx.MarkLabel(lbl292)
 						ctx.EmitJmp(lbl261)
+						ctx.MarkLabel(lbl293)
+						ctx.EmitJmp(lbl260)
 					}
 					ctx.FreeDesc(&d390)
 					bbpos_7_13 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl261)
+					ctx.MarkLabel(lbl260)
 					ctx.ResolveFixups()
 					d335 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase334) + int32(0)}
 					d336 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase334) + int32(16)}
@@ -18902,141 +18842,141 @@ Patterns can be any of:
 					d397 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase393) + int32(56)}
 					ctx.PreparePointerStackTarget(int32(phiBase393)+int32(56), 3)
 					_ = d397
-					lbl295 := ctx.ReserveLabel()
+					lbl294 := ctx.ReserveLabel()
 					bbpos_8_0 := int32(-1)
 					_ = bbpos_8_0
-					lbl296 := ctx.ReserveLabel()
-					_ = lbl296
+					lbl295 := ctx.ReserveLabel()
+					_ = lbl295
 					bbpos_8_1 := int32(-1)
 					_ = bbpos_8_1
-					lbl297 := ctx.ReserveLabel()
-					_ = lbl297
+					lbl296 := ctx.ReserveLabel()
+					_ = lbl296
 					bbpos_8_2 := int32(-1)
 					_ = bbpos_8_2
-					lbl298 := ctx.ReserveLabel()
-					_ = lbl298
+					lbl297 := ctx.ReserveLabel()
+					_ = lbl297
 					bbpos_8_3 := int32(-1)
 					_ = bbpos_8_3
-					lbl299 := ctx.ReserveLabel()
-					_ = lbl299
+					lbl298 := ctx.ReserveLabel()
+					_ = lbl298
 					bbpos_8_4 := int32(-1)
 					_ = bbpos_8_4
-					lbl300 := ctx.ReserveLabel()
-					_ = lbl300
+					lbl299 := ctx.ReserveLabel()
+					_ = lbl299
 					bbpos_8_5 := int32(-1)
 					_ = bbpos_8_5
-					lbl301 := ctx.ReserveLabel()
-					_ = lbl301
+					lbl300 := ctx.ReserveLabel()
+					_ = lbl300
 					bbpos_8_6 := int32(-1)
 					_ = bbpos_8_6
-					lbl302 := ctx.ReserveLabel()
-					_ = lbl302
+					lbl301 := ctx.ReserveLabel()
+					_ = lbl301
 					bbpos_8_7 := int32(-1)
 					_ = bbpos_8_7
-					lbl303 := ctx.ReserveLabel()
-					_ = lbl303
+					lbl302 := ctx.ReserveLabel()
+					_ = lbl302
 					bbpos_8_8 := int32(-1)
 					_ = bbpos_8_8
-					lbl304 := ctx.ReserveLabel()
-					_ = lbl304
+					lbl303 := ctx.ReserveLabel()
+					_ = lbl303
 					bbpos_8_9 := int32(-1)
 					_ = bbpos_8_9
-					lbl305 := ctx.ReserveLabel()
-					_ = lbl305
+					lbl304 := ctx.ReserveLabel()
+					_ = lbl304
 					bbpos_8_10 := int32(-1)
 					_ = bbpos_8_10
-					lbl306 := ctx.ReserveLabel()
-					_ = lbl306
+					lbl305 := ctx.ReserveLabel()
+					_ = lbl305
 					bbpos_8_11 := int32(-1)
 					_ = bbpos_8_11
-					lbl307 := ctx.ReserveLabel()
-					_ = lbl307
+					lbl306 := ctx.ReserveLabel()
+					_ = lbl306
 					bbpos_8_12 := int32(-1)
 					_ = bbpos_8_12
-					lbl308 := ctx.ReserveLabel()
-					_ = lbl308
+					lbl307 := ctx.ReserveLabel()
+					_ = lbl307
 					bbpos_8_13 := int32(-1)
 					_ = bbpos_8_13
-					lbl309 := ctx.ReserveLabel()
-					_ = lbl309
+					lbl308 := ctx.ReserveLabel()
+					_ = lbl308
 					bbpos_8_14 := int32(-1)
 					_ = bbpos_8_14
-					lbl310 := ctx.ReserveLabel()
-					_ = lbl310
+					lbl309 := ctx.ReserveLabel()
+					_ = lbl309
 					bbpos_8_15 := int32(-1)
 					_ = bbpos_8_15
-					lbl311 := ctx.ReserveLabel()
-					_ = lbl311
+					lbl310 := ctx.ReserveLabel()
+					_ = lbl310
 					bbpos_8_16 := int32(-1)
 					_ = bbpos_8_16
-					lbl312 := ctx.ReserveLabel()
-					_ = lbl312
+					lbl311 := ctx.ReserveLabel()
+					_ = lbl311
 					bbpos_8_17 := int32(-1)
 					_ = bbpos_8_17
-					lbl313 := ctx.ReserveLabel()
-					_ = lbl313
+					lbl312 := ctx.ReserveLabel()
+					_ = lbl312
 					bbpos_8_18 := int32(-1)
 					_ = bbpos_8_18
-					lbl314 := ctx.ReserveLabel()
-					_ = lbl314
+					lbl313 := ctx.ReserveLabel()
+					_ = lbl313
 					bbpos_8_19 := int32(-1)
 					_ = bbpos_8_19
-					lbl315 := ctx.ReserveLabel()
-					_ = lbl315
+					lbl314 := ctx.ReserveLabel()
+					_ = lbl314
 					bbpos_8_20 := int32(-1)
 					_ = bbpos_8_20
-					lbl316 := ctx.ReserveLabel()
-					_ = lbl316
+					lbl315 := ctx.ReserveLabel()
+					_ = lbl315
 					bbpos_8_21 := int32(-1)
 					_ = bbpos_8_21
-					lbl317 := ctx.ReserveLabel()
-					_ = lbl317
+					lbl316 := ctx.ReserveLabel()
+					_ = lbl316
 					bbpos_8_22 := int32(-1)
 					_ = bbpos_8_22
-					lbl318 := ctx.ReserveLabel()
-					_ = lbl318
+					lbl317 := ctx.ReserveLabel()
+					_ = lbl317
 					bbpos_8_23 := int32(-1)
 					_ = bbpos_8_23
-					lbl319 := ctx.ReserveLabel()
-					_ = lbl319
+					lbl318 := ctx.ReserveLabel()
+					_ = lbl318
 					bbpos_8_24 := int32(-1)
 					_ = bbpos_8_24
-					lbl320 := ctx.ReserveLabel()
-					_ = lbl320
+					lbl319 := ctx.ReserveLabel()
+					_ = lbl319
 					bbpos_8_25 := int32(-1)
 					_ = bbpos_8_25
-					lbl321 := ctx.ReserveLabel()
-					_ = lbl321
+					lbl320 := ctx.ReserveLabel()
+					_ = lbl320
 					bbpos_8_26 := int32(-1)
 					_ = bbpos_8_26
-					lbl322 := ctx.ReserveLabel()
-					_ = lbl322
+					lbl321 := ctx.ReserveLabel()
+					_ = lbl321
 					bbpos_8_27 := int32(-1)
 					_ = bbpos_8_27
-					lbl323 := ctx.ReserveLabel()
-					_ = lbl323
+					lbl322 := ctx.ReserveLabel()
+					_ = lbl322
 					bbpos_8_28 := int32(-1)
 					_ = bbpos_8_28
-					lbl324 := ctx.ReserveLabel()
-					_ = lbl324
+					lbl323 := ctx.ReserveLabel()
+					_ = lbl323
 					bbpos_8_29 := int32(-1)
 					_ = bbpos_8_29
-					lbl325 := ctx.ReserveLabel()
-					_ = lbl325
+					lbl324 := ctx.ReserveLabel()
+					_ = lbl324
 					bbpos_8_30 := int32(-1)
 					_ = bbpos_8_30
-					lbl326 := ctx.ReserveLabel()
-					_ = lbl326
+					lbl325 := ctx.ReserveLabel()
+					_ = lbl325
 					bbpos_8_31 := int32(-1)
 					_ = bbpos_8_31
-					lbl327 := ctx.ReserveLabel()
-					_ = lbl327
+					lbl326 := ctx.ReserveLabel()
+					_ = lbl326
 					bbpos_8_32 := int32(-1)
 					_ = bbpos_8_32
-					lbl328 := ctx.ReserveLabel()
-					_ = lbl328
+					lbl327 := ctx.ReserveLabel()
+					_ = lbl327
 					bbpos_8_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl296)
+					ctx.MarkLabel(lbl295)
 					ctx.ResolveFixups()
 					d394 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase393) + int32(0)}
 					d395 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase393) + int32(16)}
@@ -19081,26 +19021,26 @@ Patterns can be any of:
 					if d401.Loc != LocImm && d401.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
+					lbl328 := ctx.ReserveLabel()
 					lbl329 := ctx.ReserveLabel()
-					lbl330 := ctx.ReserveLabel()
 					if d401.Loc == LocImm {
 						if d401.Imm.Bool() {
+							ctx.MarkLabel(lbl328)
+							ctx.EmitJmp(lbl296)
+						} else {
 							ctx.MarkLabel(lbl329)
 							ctx.EmitJmp(lbl297)
-						} else {
-							ctx.MarkLabel(lbl330)
-							ctx.EmitJmp(lbl298)
 						}
 					} else {
-						ctx.EmitJump(d401.Condition, lbl329)
-						ctx.EmitJmp(lbl330)
+						ctx.EmitJump(d401.Condition, lbl328)
+						ctx.EmitJmp(lbl329)
+						ctx.MarkLabel(lbl328)
+						ctx.EmitJmp(lbl296)
 						ctx.MarkLabel(lbl329)
 						ctx.EmitJmp(lbl297)
-						ctx.MarkLabel(lbl330)
-						ctx.EmitJmp(lbl298)
 					}
 					bbpos_8_2 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl298)
+					ctx.MarkLabel(lbl297)
 					ctx.ResolveFixups()
 					d394 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase393) + int32(0)}
 					d395 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase393) + int32(16)}
@@ -19214,14 +19154,14 @@ Patterns can be any of:
 					if d415.Loc != LocImm && d415.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl330 := ctx.ReserveLabel()
 					lbl331 := ctx.ReserveLabel()
-					lbl332 := ctx.ReserveLabel()
 					if d415.Loc == LocImm {
 						if d415.Imm.Bool() {
-							ctx.MarkLabel(lbl331)
-							ctx.EmitJmp(lbl299)
+							ctx.MarkLabel(lbl330)
+							ctx.EmitJmp(lbl298)
 						} else {
-							ctx.MarkLabel(lbl332)
+							ctx.MarkLabel(lbl331)
 							ctx.SyncDesc(&d405)
 							if d405.Loc == LocReg {
 								ctx.ProtectReg(d405.Reg)
@@ -19252,15 +19192,15 @@ Patterns can be any of:
 								ctx.UnprotectReg(d405.Reg)
 								ctx.UnprotectReg(d405.Reg2)
 							}
-							ctx.EmitJmp(lbl300)
+							ctx.EmitJmp(lbl299)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d415.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl331)
-						ctx.EmitJmp(lbl332)
+						ctx.EmitJump(CondNotEqual, lbl330)
+						ctx.EmitJmp(lbl331)
+						ctx.MarkLabel(lbl330)
+						ctx.EmitJmp(lbl298)
 						ctx.MarkLabel(lbl331)
-						ctx.EmitJmp(lbl299)
-						ctx.MarkLabel(lbl332)
 						ctx.SyncDesc(&d405)
 						if d405.Loc == LocReg {
 							ctx.ProtectReg(d405.Reg)
@@ -19291,11 +19231,11 @@ Patterns can be any of:
 							ctx.UnprotectReg(d405.Reg)
 							ctx.UnprotectReg(d405.Reg2)
 						}
-						ctx.EmitJmp(lbl300)
+						ctx.EmitJmp(lbl299)
 					}
 					ctx.FreeDesc(&d414)
 					bbpos_8_4 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl300)
+					ctx.MarkLabel(lbl299)
 					ctx.ResolveFixups()
 					d394 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase393) + int32(0)}
 					d395 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase393) + int32(16)}
@@ -19320,28 +19260,28 @@ Patterns can be any of:
 					if d419.Loc != LocImm && d419.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl332 := ctx.ReserveLabel()
 					lbl333 := ctx.ReserveLabel()
-					lbl334 := ctx.ReserveLabel()
 					if d419.Loc == LocImm {
 						if d419.Imm.Bool() {
+							ctx.MarkLabel(lbl332)
+							ctx.EmitJmp(lbl300)
+						} else {
 							ctx.MarkLabel(lbl333)
 							ctx.EmitJmp(lbl301)
-						} else {
-							ctx.MarkLabel(lbl334)
-							ctx.EmitJmp(lbl302)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d419.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl333)
-						ctx.EmitJmp(lbl334)
+						ctx.EmitJump(CondNotEqual, lbl332)
+						ctx.EmitJmp(lbl333)
+						ctx.MarkLabel(lbl332)
+						ctx.EmitJmp(lbl300)
 						ctx.MarkLabel(lbl333)
 						ctx.EmitJmp(lbl301)
-						ctx.MarkLabel(lbl334)
-						ctx.EmitJmp(lbl302)
 					}
 					ctx.FreeDesc(&d418)
 					bbpos_8_6 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl302)
+					ctx.MarkLabel(lbl301)
 					ctx.ResolveFixups()
 					d394 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase393) + int32(0)}
 					d395 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase393) + int32(16)}
@@ -19355,9 +19295,9 @@ Patterns can be any of:
 					ctx.BindReg(r98, &d420)
 					ctx.BindReg(r99, &d420)
 					ctx.EmitMovPairToResult(&d394, &d420)
-					ctx.EmitJmp(lbl295)
+					ctx.EmitJmp(lbl294)
 					bbpos_8_1 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl297)
+					ctx.MarkLabel(lbl296)
 					ctx.ResolveFixups()
 					d394 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase393) + int32(0)}
 					d395 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase393) + int32(16)}
@@ -19371,9 +19311,9 @@ Patterns can be any of:
 					ctx.BindReg(r98, &d422)
 					ctx.BindReg(r99, &d422)
 					ctx.EmitMovPairToResult(&d421, &d422)
-					ctx.EmitJmp(lbl295)
+					ctx.EmitJmp(lbl294)
 					bbpos_8_3 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl299)
+					ctx.MarkLabel(lbl298)
 					ctx.ResolveFixups()
 					d394 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase393) + int32(0)}
 					d395 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase393) + int32(16)}
@@ -19452,9 +19392,9 @@ Patterns can be any of:
 						ctx.UnprotectReg(d425.Reg)
 						ctx.UnprotectReg(d425.Reg2)
 					}
-					ctx.EmitJmp(lbl300)
+					ctx.EmitJmp(lbl299)
 					bbpos_8_5 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl301)
+					ctx.MarkLabel(lbl300)
 					ctx.ResolveFixups()
 					d394 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase393) + int32(0)}
 					d395 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase393) + int32(16)}
@@ -19504,28 +19444,28 @@ Patterns can be any of:
 					if d432.Loc != LocImm && d432.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl334 := ctx.ReserveLabel()
 					lbl335 := ctx.ReserveLabel()
-					lbl336 := ctx.ReserveLabel()
 					if d432.Loc == LocImm {
 						if d432.Imm.Bool() {
+							ctx.MarkLabel(lbl334)
+							ctx.EmitJmp(lbl302)
+						} else {
 							ctx.MarkLabel(lbl335)
 							ctx.EmitJmp(lbl303)
-						} else {
-							ctx.MarkLabel(lbl336)
-							ctx.EmitJmp(lbl304)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d432.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl335)
-						ctx.EmitJmp(lbl336)
+						ctx.EmitJump(CondNotEqual, lbl334)
+						ctx.EmitJmp(lbl335)
+						ctx.MarkLabel(lbl334)
+						ctx.EmitJmp(lbl302)
 						ctx.MarkLabel(lbl335)
 						ctx.EmitJmp(lbl303)
-						ctx.MarkLabel(lbl336)
-						ctx.EmitJmp(lbl304)
 					}
 					ctx.FreeDesc(&d431)
 					bbpos_8_8 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl304)
+					ctx.MarkLabel(lbl303)
 					ctx.ResolveFixups()
 					d394 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase393) + int32(0)}
 					d395 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase393) + int32(16)}
@@ -19557,28 +19497,28 @@ Patterns can be any of:
 					if d436.Loc != LocImm && d436.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl336 := ctx.ReserveLabel()
 					lbl337 := ctx.ReserveLabel()
-					lbl338 := ctx.ReserveLabel()
 					if d436.Loc == LocImm {
 						if d436.Imm.Bool() {
-							ctx.MarkLabel(lbl337)
-							ctx.EmitJmp(lbl313)
-						} else {
-							ctx.MarkLabel(lbl338)
+							ctx.MarkLabel(lbl336)
 							ctx.EmitJmp(lbl312)
+						} else {
+							ctx.MarkLabel(lbl337)
+							ctx.EmitJmp(lbl311)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d436.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl337)
-						ctx.EmitJmp(lbl338)
-						ctx.MarkLabel(lbl337)
-						ctx.EmitJmp(lbl313)
-						ctx.MarkLabel(lbl338)
+						ctx.EmitJump(CondNotEqual, lbl336)
+						ctx.EmitJmp(lbl337)
+						ctx.MarkLabel(lbl336)
 						ctx.EmitJmp(lbl312)
+						ctx.MarkLabel(lbl337)
+						ctx.EmitJmp(lbl311)
 					}
 					ctx.FreeDesc(&d435)
 					bbpos_8_16 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl312)
+					ctx.MarkLabel(lbl311)
 					ctx.ResolveFixups()
 					d394 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase393) + int32(0)}
 					d395 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase393) + int32(16)}
@@ -19590,9 +19530,9 @@ Patterns can be any of:
 					ctx.BindReg(r98, &d437)
 					ctx.BindReg(r99, &d437)
 					ctx.EmitMovPairToResult(&d394, &d437)
-					ctx.EmitJmp(lbl295)
+					ctx.EmitJmp(lbl294)
 					bbpos_8_7 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl303)
+					ctx.MarkLabel(lbl302)
 					ctx.ResolveFixups()
 					d394 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase393) + int32(0)}
 					d395 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase393) + int32(16)}
@@ -19636,7 +19576,7 @@ Patterns can be any of:
 						ctx.UnprotectReg(d439.Reg2)
 					}
 					bbpos_8_9 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl305)
+					ctx.MarkLabel(lbl304)
 					ctx.ResolveFixups()
 					d394 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase393) + int32(0)}
 					d395 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase393) + int32(16)}
@@ -19683,26 +19623,26 @@ Patterns can be any of:
 					if d444.Loc != LocImm && d444.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
+					lbl338 := ctx.ReserveLabel()
 					lbl339 := ctx.ReserveLabel()
-					lbl340 := ctx.ReserveLabel()
 					if d444.Loc == LocImm {
 						if d444.Imm.Bool() {
+							ctx.MarkLabel(lbl338)
+							ctx.EmitJmp(lbl305)
+						} else {
 							ctx.MarkLabel(lbl339)
 							ctx.EmitJmp(lbl306)
-						} else {
-							ctx.MarkLabel(lbl340)
-							ctx.EmitJmp(lbl307)
 						}
 					} else {
-						ctx.EmitJump(d444.Condition, lbl339)
-						ctx.EmitJmp(lbl340)
+						ctx.EmitJump(d444.Condition, lbl338)
+						ctx.EmitJmp(lbl339)
+						ctx.MarkLabel(lbl338)
+						ctx.EmitJmp(lbl305)
 						ctx.MarkLabel(lbl339)
 						ctx.EmitJmp(lbl306)
-						ctx.MarkLabel(lbl340)
-						ctx.EmitJmp(lbl307)
 					}
 					bbpos_8_11 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl307)
+					ctx.MarkLabel(lbl306)
 					ctx.ResolveFixups()
 					d394 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase393) + int32(0)}
 					d395 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase393) + int32(16)}
@@ -19739,28 +19679,28 @@ Patterns can be any of:
 					if d450.Loc != LocImm && d450.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl340 := ctx.ReserveLabel()
 					lbl341 := ctx.ReserveLabel()
-					lbl342 := ctx.ReserveLabel()
 					if d450.Loc == LocImm {
 						if d450.Imm.Bool() {
-							ctx.MarkLabel(lbl341)
-							ctx.EmitJmp(lbl310)
-						} else {
-							ctx.MarkLabel(lbl342)
+							ctx.MarkLabel(lbl340)
 							ctx.EmitJmp(lbl309)
+						} else {
+							ctx.MarkLabel(lbl341)
+							ctx.EmitJmp(lbl308)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d450.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl341)
-						ctx.EmitJmp(lbl342)
-						ctx.MarkLabel(lbl341)
-						ctx.EmitJmp(lbl310)
-						ctx.MarkLabel(lbl342)
+						ctx.EmitJump(CondNotEqual, lbl340)
+						ctx.EmitJmp(lbl341)
+						ctx.MarkLabel(lbl340)
 						ctx.EmitJmp(lbl309)
+						ctx.MarkLabel(lbl341)
+						ctx.EmitJmp(lbl308)
 					}
 					ctx.FreeDesc(&d449)
 					bbpos_8_13 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl309)
+					ctx.MarkLabel(lbl308)
 					ctx.ResolveFixups()
 					d394 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase393) + int32(0)}
 					d395 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase393) + int32(16)}
@@ -19786,141 +19726,141 @@ Patterns can be any of:
 					d456 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase452) + int32(56)}
 					ctx.PreparePointerStackTarget(int32(phiBase452)+int32(56), 3)
 					_ = d456
-					lbl343 := ctx.ReserveLabel()
+					lbl342 := ctx.ReserveLabel()
 					bbpos_9_0 := int32(-1)
 					_ = bbpos_9_0
-					lbl344 := ctx.ReserveLabel()
-					_ = lbl344
+					lbl343 := ctx.ReserveLabel()
+					_ = lbl343
 					bbpos_9_1 := int32(-1)
 					_ = bbpos_9_1
-					lbl345 := ctx.ReserveLabel()
-					_ = lbl345
+					lbl344 := ctx.ReserveLabel()
+					_ = lbl344
 					bbpos_9_2 := int32(-1)
 					_ = bbpos_9_2
-					lbl346 := ctx.ReserveLabel()
-					_ = lbl346
+					lbl345 := ctx.ReserveLabel()
+					_ = lbl345
 					bbpos_9_3 := int32(-1)
 					_ = bbpos_9_3
-					lbl347 := ctx.ReserveLabel()
-					_ = lbl347
+					lbl346 := ctx.ReserveLabel()
+					_ = lbl346
 					bbpos_9_4 := int32(-1)
 					_ = bbpos_9_4
-					lbl348 := ctx.ReserveLabel()
-					_ = lbl348
+					lbl347 := ctx.ReserveLabel()
+					_ = lbl347
 					bbpos_9_5 := int32(-1)
 					_ = bbpos_9_5
-					lbl349 := ctx.ReserveLabel()
-					_ = lbl349
+					lbl348 := ctx.ReserveLabel()
+					_ = lbl348
 					bbpos_9_6 := int32(-1)
 					_ = bbpos_9_6
-					lbl350 := ctx.ReserveLabel()
-					_ = lbl350
+					lbl349 := ctx.ReserveLabel()
+					_ = lbl349
 					bbpos_9_7 := int32(-1)
 					_ = bbpos_9_7
-					lbl351 := ctx.ReserveLabel()
-					_ = lbl351
+					lbl350 := ctx.ReserveLabel()
+					_ = lbl350
 					bbpos_9_8 := int32(-1)
 					_ = bbpos_9_8
-					lbl352 := ctx.ReserveLabel()
-					_ = lbl352
+					lbl351 := ctx.ReserveLabel()
+					_ = lbl351
 					bbpos_9_9 := int32(-1)
 					_ = bbpos_9_9
-					lbl353 := ctx.ReserveLabel()
-					_ = lbl353
+					lbl352 := ctx.ReserveLabel()
+					_ = lbl352
 					bbpos_9_10 := int32(-1)
 					_ = bbpos_9_10
-					lbl354 := ctx.ReserveLabel()
-					_ = lbl354
+					lbl353 := ctx.ReserveLabel()
+					_ = lbl353
 					bbpos_9_11 := int32(-1)
 					_ = bbpos_9_11
-					lbl355 := ctx.ReserveLabel()
-					_ = lbl355
+					lbl354 := ctx.ReserveLabel()
+					_ = lbl354
 					bbpos_9_12 := int32(-1)
 					_ = bbpos_9_12
-					lbl356 := ctx.ReserveLabel()
-					_ = lbl356
+					lbl355 := ctx.ReserveLabel()
+					_ = lbl355
 					bbpos_9_13 := int32(-1)
 					_ = bbpos_9_13
-					lbl357 := ctx.ReserveLabel()
-					_ = lbl357
+					lbl356 := ctx.ReserveLabel()
+					_ = lbl356
 					bbpos_9_14 := int32(-1)
 					_ = bbpos_9_14
-					lbl358 := ctx.ReserveLabel()
-					_ = lbl358
+					lbl357 := ctx.ReserveLabel()
+					_ = lbl357
 					bbpos_9_15 := int32(-1)
 					_ = bbpos_9_15
-					lbl359 := ctx.ReserveLabel()
-					_ = lbl359
+					lbl358 := ctx.ReserveLabel()
+					_ = lbl358
 					bbpos_9_16 := int32(-1)
 					_ = bbpos_9_16
-					lbl360 := ctx.ReserveLabel()
-					_ = lbl360
+					lbl359 := ctx.ReserveLabel()
+					_ = lbl359
 					bbpos_9_17 := int32(-1)
 					_ = bbpos_9_17
-					lbl361 := ctx.ReserveLabel()
-					_ = lbl361
+					lbl360 := ctx.ReserveLabel()
+					_ = lbl360
 					bbpos_9_18 := int32(-1)
 					_ = bbpos_9_18
-					lbl362 := ctx.ReserveLabel()
-					_ = lbl362
+					lbl361 := ctx.ReserveLabel()
+					_ = lbl361
 					bbpos_9_19 := int32(-1)
 					_ = bbpos_9_19
-					lbl363 := ctx.ReserveLabel()
-					_ = lbl363
+					lbl362 := ctx.ReserveLabel()
+					_ = lbl362
 					bbpos_9_20 := int32(-1)
 					_ = bbpos_9_20
-					lbl364 := ctx.ReserveLabel()
-					_ = lbl364
+					lbl363 := ctx.ReserveLabel()
+					_ = lbl363
 					bbpos_9_21 := int32(-1)
 					_ = bbpos_9_21
-					lbl365 := ctx.ReserveLabel()
-					_ = lbl365
+					lbl364 := ctx.ReserveLabel()
+					_ = lbl364
 					bbpos_9_22 := int32(-1)
 					_ = bbpos_9_22
-					lbl366 := ctx.ReserveLabel()
-					_ = lbl366
+					lbl365 := ctx.ReserveLabel()
+					_ = lbl365
 					bbpos_9_23 := int32(-1)
 					_ = bbpos_9_23
-					lbl367 := ctx.ReserveLabel()
-					_ = lbl367
+					lbl366 := ctx.ReserveLabel()
+					_ = lbl366
 					bbpos_9_24 := int32(-1)
 					_ = bbpos_9_24
-					lbl368 := ctx.ReserveLabel()
-					_ = lbl368
+					lbl367 := ctx.ReserveLabel()
+					_ = lbl367
 					bbpos_9_25 := int32(-1)
 					_ = bbpos_9_25
-					lbl369 := ctx.ReserveLabel()
-					_ = lbl369
+					lbl368 := ctx.ReserveLabel()
+					_ = lbl368
 					bbpos_9_26 := int32(-1)
 					_ = bbpos_9_26
-					lbl370 := ctx.ReserveLabel()
-					_ = lbl370
+					lbl369 := ctx.ReserveLabel()
+					_ = lbl369
 					bbpos_9_27 := int32(-1)
 					_ = bbpos_9_27
-					lbl371 := ctx.ReserveLabel()
-					_ = lbl371
+					lbl370 := ctx.ReserveLabel()
+					_ = lbl370
 					bbpos_9_28 := int32(-1)
 					_ = bbpos_9_28
-					lbl372 := ctx.ReserveLabel()
-					_ = lbl372
+					lbl371 := ctx.ReserveLabel()
+					_ = lbl371
 					bbpos_9_29 := int32(-1)
 					_ = bbpos_9_29
-					lbl373 := ctx.ReserveLabel()
-					_ = lbl373
+					lbl372 := ctx.ReserveLabel()
+					_ = lbl372
 					bbpos_9_30 := int32(-1)
 					_ = bbpos_9_30
-					lbl374 := ctx.ReserveLabel()
-					_ = lbl374
+					lbl373 := ctx.ReserveLabel()
+					_ = lbl373
 					bbpos_9_31 := int32(-1)
 					_ = bbpos_9_31
-					lbl375 := ctx.ReserveLabel()
-					_ = lbl375
+					lbl374 := ctx.ReserveLabel()
+					_ = lbl374
 					bbpos_9_32 := int32(-1)
 					_ = bbpos_9_32
-					lbl376 := ctx.ReserveLabel()
-					_ = lbl376
+					lbl375 := ctx.ReserveLabel()
+					_ = lbl375
 					bbpos_9_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl344)
+					ctx.MarkLabel(lbl343)
 					ctx.ResolveFixups()
 					d453 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase452) + int32(0)}
 					d454 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase452) + int32(16)}
@@ -19965,26 +19905,26 @@ Patterns can be any of:
 					if d460.Loc != LocImm && d460.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
+					lbl376 := ctx.ReserveLabel()
 					lbl377 := ctx.ReserveLabel()
-					lbl378 := ctx.ReserveLabel()
 					if d460.Loc == LocImm {
 						if d460.Imm.Bool() {
+							ctx.MarkLabel(lbl376)
+							ctx.EmitJmp(lbl344)
+						} else {
 							ctx.MarkLabel(lbl377)
 							ctx.EmitJmp(lbl345)
-						} else {
-							ctx.MarkLabel(lbl378)
-							ctx.EmitJmp(lbl346)
 						}
 					} else {
-						ctx.EmitJump(d460.Condition, lbl377)
-						ctx.EmitJmp(lbl378)
+						ctx.EmitJump(d460.Condition, lbl376)
+						ctx.EmitJmp(lbl377)
+						ctx.MarkLabel(lbl376)
+						ctx.EmitJmp(lbl344)
 						ctx.MarkLabel(lbl377)
 						ctx.EmitJmp(lbl345)
-						ctx.MarkLabel(lbl378)
-						ctx.EmitJmp(lbl346)
 					}
 					bbpos_9_2 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl346)
+					ctx.MarkLabel(lbl345)
 					ctx.ResolveFixups()
 					d453 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase452) + int32(0)}
 					d454 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase452) + int32(16)}
@@ -20098,14 +20038,14 @@ Patterns can be any of:
 					if d474.Loc != LocImm && d474.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl378 := ctx.ReserveLabel()
 					lbl379 := ctx.ReserveLabel()
-					lbl380 := ctx.ReserveLabel()
 					if d474.Loc == LocImm {
 						if d474.Imm.Bool() {
-							ctx.MarkLabel(lbl379)
-							ctx.EmitJmp(lbl347)
+							ctx.MarkLabel(lbl378)
+							ctx.EmitJmp(lbl346)
 						} else {
-							ctx.MarkLabel(lbl380)
+							ctx.MarkLabel(lbl379)
 							ctx.SyncDesc(&d464)
 							if d464.Loc == LocReg {
 								ctx.ProtectReg(d464.Reg)
@@ -20136,15 +20076,15 @@ Patterns can be any of:
 								ctx.UnprotectReg(d464.Reg)
 								ctx.UnprotectReg(d464.Reg2)
 							}
-							ctx.EmitJmp(lbl348)
+							ctx.EmitJmp(lbl347)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d474.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl379)
-						ctx.EmitJmp(lbl380)
+						ctx.EmitJump(CondNotEqual, lbl378)
+						ctx.EmitJmp(lbl379)
+						ctx.MarkLabel(lbl378)
+						ctx.EmitJmp(lbl346)
 						ctx.MarkLabel(lbl379)
-						ctx.EmitJmp(lbl347)
-						ctx.MarkLabel(lbl380)
 						ctx.SyncDesc(&d464)
 						if d464.Loc == LocReg {
 							ctx.ProtectReg(d464.Reg)
@@ -20175,11 +20115,11 @@ Patterns can be any of:
 							ctx.UnprotectReg(d464.Reg)
 							ctx.UnprotectReg(d464.Reg2)
 						}
-						ctx.EmitJmp(lbl348)
+						ctx.EmitJmp(lbl347)
 					}
 					ctx.FreeDesc(&d473)
 					bbpos_9_4 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl348)
+					ctx.MarkLabel(lbl347)
 					ctx.ResolveFixups()
 					d453 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase452) + int32(0)}
 					d454 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase452) + int32(16)}
@@ -20204,28 +20144,28 @@ Patterns can be any of:
 					if d478.Loc != LocImm && d478.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl380 := ctx.ReserveLabel()
 					lbl381 := ctx.ReserveLabel()
-					lbl382 := ctx.ReserveLabel()
 					if d478.Loc == LocImm {
 						if d478.Imm.Bool() {
+							ctx.MarkLabel(lbl380)
+							ctx.EmitJmp(lbl348)
+						} else {
 							ctx.MarkLabel(lbl381)
 							ctx.EmitJmp(lbl349)
-						} else {
-							ctx.MarkLabel(lbl382)
-							ctx.EmitJmp(lbl350)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d478.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl381)
-						ctx.EmitJmp(lbl382)
+						ctx.EmitJump(CondNotEqual, lbl380)
+						ctx.EmitJmp(lbl381)
+						ctx.MarkLabel(lbl380)
+						ctx.EmitJmp(lbl348)
 						ctx.MarkLabel(lbl381)
 						ctx.EmitJmp(lbl349)
-						ctx.MarkLabel(lbl382)
-						ctx.EmitJmp(lbl350)
 					}
 					ctx.FreeDesc(&d477)
 					bbpos_9_6 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl350)
+					ctx.MarkLabel(lbl349)
 					ctx.ResolveFixups()
 					d453 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase452) + int32(0)}
 					d454 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase452) + int32(16)}
@@ -20239,9 +20179,9 @@ Patterns can be any of:
 					ctx.BindReg(r113, &d479)
 					ctx.BindReg(r114, &d479)
 					ctx.EmitMovPairToResult(&d453, &d479)
-					ctx.EmitJmp(lbl343)
+					ctx.EmitJmp(lbl342)
 					bbpos_9_1 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl345)
+					ctx.MarkLabel(lbl344)
 					ctx.ResolveFixups()
 					d453 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase452) + int32(0)}
 					d454 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase452) + int32(16)}
@@ -20255,9 +20195,9 @@ Patterns can be any of:
 					ctx.BindReg(r113, &d481)
 					ctx.BindReg(r114, &d481)
 					ctx.EmitMovPairToResult(&d480, &d481)
-					ctx.EmitJmp(lbl343)
+					ctx.EmitJmp(lbl342)
 					bbpos_9_3 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl347)
+					ctx.MarkLabel(lbl346)
 					ctx.ResolveFixups()
 					d453 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase452) + int32(0)}
 					d454 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase452) + int32(16)}
@@ -20336,9 +20276,9 @@ Patterns can be any of:
 						ctx.UnprotectReg(d484.Reg)
 						ctx.UnprotectReg(d484.Reg2)
 					}
-					ctx.EmitJmp(lbl348)
+					ctx.EmitJmp(lbl347)
 					bbpos_9_5 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl349)
+					ctx.MarkLabel(lbl348)
 					ctx.ResolveFixups()
 					d453 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase452) + int32(0)}
 					d454 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase452) + int32(16)}
@@ -20388,28 +20328,28 @@ Patterns can be any of:
 					if d491.Loc != LocImm && d491.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl382 := ctx.ReserveLabel()
 					lbl383 := ctx.ReserveLabel()
-					lbl384 := ctx.ReserveLabel()
 					if d491.Loc == LocImm {
 						if d491.Imm.Bool() {
+							ctx.MarkLabel(lbl382)
+							ctx.EmitJmp(lbl350)
+						} else {
 							ctx.MarkLabel(lbl383)
 							ctx.EmitJmp(lbl351)
-						} else {
-							ctx.MarkLabel(lbl384)
-							ctx.EmitJmp(lbl352)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d491.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl383)
-						ctx.EmitJmp(lbl384)
+						ctx.EmitJump(CondNotEqual, lbl382)
+						ctx.EmitJmp(lbl383)
+						ctx.MarkLabel(lbl382)
+						ctx.EmitJmp(lbl350)
 						ctx.MarkLabel(lbl383)
 						ctx.EmitJmp(lbl351)
-						ctx.MarkLabel(lbl384)
-						ctx.EmitJmp(lbl352)
 					}
 					ctx.FreeDesc(&d490)
 					bbpos_9_8 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl352)
+					ctx.MarkLabel(lbl351)
 					ctx.ResolveFixups()
 					d453 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase452) + int32(0)}
 					d454 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase452) + int32(16)}
@@ -20441,28 +20381,28 @@ Patterns can be any of:
 					if d495.Loc != LocImm && d495.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl384 := ctx.ReserveLabel()
 					lbl385 := ctx.ReserveLabel()
-					lbl386 := ctx.ReserveLabel()
 					if d495.Loc == LocImm {
 						if d495.Imm.Bool() {
-							ctx.MarkLabel(lbl385)
-							ctx.EmitJmp(lbl361)
-						} else {
-							ctx.MarkLabel(lbl386)
+							ctx.MarkLabel(lbl384)
 							ctx.EmitJmp(lbl360)
+						} else {
+							ctx.MarkLabel(lbl385)
+							ctx.EmitJmp(lbl359)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d495.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl385)
-						ctx.EmitJmp(lbl386)
-						ctx.MarkLabel(lbl385)
-						ctx.EmitJmp(lbl361)
-						ctx.MarkLabel(lbl386)
+						ctx.EmitJump(CondNotEqual, lbl384)
+						ctx.EmitJmp(lbl385)
+						ctx.MarkLabel(lbl384)
 						ctx.EmitJmp(lbl360)
+						ctx.MarkLabel(lbl385)
+						ctx.EmitJmp(lbl359)
 					}
 					ctx.FreeDesc(&d494)
 					bbpos_9_16 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl360)
+					ctx.MarkLabel(lbl359)
 					ctx.ResolveFixups()
 					d453 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase452) + int32(0)}
 					d454 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase452) + int32(16)}
@@ -20474,9 +20414,9 @@ Patterns can be any of:
 					ctx.BindReg(r113, &d496)
 					ctx.BindReg(r114, &d496)
 					ctx.EmitMovPairToResult(&d453, &d496)
-					ctx.EmitJmp(lbl343)
+					ctx.EmitJmp(lbl342)
 					bbpos_9_7 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl351)
+					ctx.MarkLabel(lbl350)
 					ctx.ResolveFixups()
 					d453 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase452) + int32(0)}
 					d454 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase452) + int32(16)}
@@ -20520,7 +20460,7 @@ Patterns can be any of:
 						ctx.UnprotectReg(d498.Reg2)
 					}
 					bbpos_9_9 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl353)
+					ctx.MarkLabel(lbl352)
 					ctx.ResolveFixups()
 					d453 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase452) + int32(0)}
 					d454 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase452) + int32(16)}
@@ -20567,26 +20507,26 @@ Patterns can be any of:
 					if d503.Loc != LocImm && d503.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
+					lbl386 := ctx.ReserveLabel()
 					lbl387 := ctx.ReserveLabel()
-					lbl388 := ctx.ReserveLabel()
 					if d503.Loc == LocImm {
 						if d503.Imm.Bool() {
+							ctx.MarkLabel(lbl386)
+							ctx.EmitJmp(lbl353)
+						} else {
 							ctx.MarkLabel(lbl387)
 							ctx.EmitJmp(lbl354)
-						} else {
-							ctx.MarkLabel(lbl388)
-							ctx.EmitJmp(lbl355)
 						}
 					} else {
-						ctx.EmitJump(d503.Condition, lbl387)
-						ctx.EmitJmp(lbl388)
+						ctx.EmitJump(d503.Condition, lbl386)
+						ctx.EmitJmp(lbl387)
+						ctx.MarkLabel(lbl386)
+						ctx.EmitJmp(lbl353)
 						ctx.MarkLabel(lbl387)
 						ctx.EmitJmp(lbl354)
-						ctx.MarkLabel(lbl388)
-						ctx.EmitJmp(lbl355)
 					}
 					bbpos_9_11 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl355)
+					ctx.MarkLabel(lbl354)
 					ctx.ResolveFixups()
 					d453 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase452) + int32(0)}
 					d454 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase452) + int32(16)}
@@ -20623,28 +20563,28 @@ Patterns can be any of:
 					if d509.Loc != LocImm && d509.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl388 := ctx.ReserveLabel()
 					lbl389 := ctx.ReserveLabel()
-					lbl390 := ctx.ReserveLabel()
 					if d509.Loc == LocImm {
 						if d509.Imm.Bool() {
-							ctx.MarkLabel(lbl389)
-							ctx.EmitJmp(lbl358)
-						} else {
-							ctx.MarkLabel(lbl390)
+							ctx.MarkLabel(lbl388)
 							ctx.EmitJmp(lbl357)
+						} else {
+							ctx.MarkLabel(lbl389)
+							ctx.EmitJmp(lbl356)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d509.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl389)
-						ctx.EmitJmp(lbl390)
-						ctx.MarkLabel(lbl389)
-						ctx.EmitJmp(lbl358)
-						ctx.MarkLabel(lbl390)
+						ctx.EmitJump(CondNotEqual, lbl388)
+						ctx.EmitJmp(lbl389)
+						ctx.MarkLabel(lbl388)
 						ctx.EmitJmp(lbl357)
+						ctx.MarkLabel(lbl389)
+						ctx.EmitJmp(lbl356)
 					}
 					ctx.FreeDesc(&d508)
 					bbpos_9_13 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl357)
+					ctx.MarkLabel(lbl356)
 					ctx.ResolveFixups()
 					d453 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase452) + int32(0)}
 					d454 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase452) + int32(16)}
@@ -20670,141 +20610,141 @@ Patterns can be any of:
 					d515 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase511) + int32(56)}
 					ctx.PreparePointerStackTarget(int32(phiBase511)+int32(56), 3)
 					_ = d515
-					lbl391 := ctx.ReserveLabel()
+					lbl390 := ctx.ReserveLabel()
 					bbpos_10_0 := int32(-1)
 					_ = bbpos_10_0
-					lbl392 := ctx.ReserveLabel()
-					_ = lbl392
+					lbl391 := ctx.ReserveLabel()
+					_ = lbl391
 					bbpos_10_1 := int32(-1)
 					_ = bbpos_10_1
-					lbl393 := ctx.ReserveLabel()
-					_ = lbl393
+					lbl392 := ctx.ReserveLabel()
+					_ = lbl392
 					bbpos_10_2 := int32(-1)
 					_ = bbpos_10_2
-					lbl394 := ctx.ReserveLabel()
-					_ = lbl394
+					lbl393 := ctx.ReserveLabel()
+					_ = lbl393
 					bbpos_10_3 := int32(-1)
 					_ = bbpos_10_3
-					lbl395 := ctx.ReserveLabel()
-					_ = lbl395
+					lbl394 := ctx.ReserveLabel()
+					_ = lbl394
 					bbpos_10_4 := int32(-1)
 					_ = bbpos_10_4
-					lbl396 := ctx.ReserveLabel()
-					_ = lbl396
+					lbl395 := ctx.ReserveLabel()
+					_ = lbl395
 					bbpos_10_5 := int32(-1)
 					_ = bbpos_10_5
-					lbl397 := ctx.ReserveLabel()
-					_ = lbl397
+					lbl396 := ctx.ReserveLabel()
+					_ = lbl396
 					bbpos_10_6 := int32(-1)
 					_ = bbpos_10_6
-					lbl398 := ctx.ReserveLabel()
-					_ = lbl398
+					lbl397 := ctx.ReserveLabel()
+					_ = lbl397
 					bbpos_10_7 := int32(-1)
 					_ = bbpos_10_7
-					lbl399 := ctx.ReserveLabel()
-					_ = lbl399
+					lbl398 := ctx.ReserveLabel()
+					_ = lbl398
 					bbpos_10_8 := int32(-1)
 					_ = bbpos_10_8
-					lbl400 := ctx.ReserveLabel()
-					_ = lbl400
+					lbl399 := ctx.ReserveLabel()
+					_ = lbl399
 					bbpos_10_9 := int32(-1)
 					_ = bbpos_10_9
-					lbl401 := ctx.ReserveLabel()
-					_ = lbl401
+					lbl400 := ctx.ReserveLabel()
+					_ = lbl400
 					bbpos_10_10 := int32(-1)
 					_ = bbpos_10_10
-					lbl402 := ctx.ReserveLabel()
-					_ = lbl402
+					lbl401 := ctx.ReserveLabel()
+					_ = lbl401
 					bbpos_10_11 := int32(-1)
 					_ = bbpos_10_11
-					lbl403 := ctx.ReserveLabel()
-					_ = lbl403
+					lbl402 := ctx.ReserveLabel()
+					_ = lbl402
 					bbpos_10_12 := int32(-1)
 					_ = bbpos_10_12
-					lbl404 := ctx.ReserveLabel()
-					_ = lbl404
+					lbl403 := ctx.ReserveLabel()
+					_ = lbl403
 					bbpos_10_13 := int32(-1)
 					_ = bbpos_10_13
-					lbl405 := ctx.ReserveLabel()
-					_ = lbl405
+					lbl404 := ctx.ReserveLabel()
+					_ = lbl404
 					bbpos_10_14 := int32(-1)
 					_ = bbpos_10_14
-					lbl406 := ctx.ReserveLabel()
-					_ = lbl406
+					lbl405 := ctx.ReserveLabel()
+					_ = lbl405
 					bbpos_10_15 := int32(-1)
 					_ = bbpos_10_15
-					lbl407 := ctx.ReserveLabel()
-					_ = lbl407
+					lbl406 := ctx.ReserveLabel()
+					_ = lbl406
 					bbpos_10_16 := int32(-1)
 					_ = bbpos_10_16
-					lbl408 := ctx.ReserveLabel()
-					_ = lbl408
+					lbl407 := ctx.ReserveLabel()
+					_ = lbl407
 					bbpos_10_17 := int32(-1)
 					_ = bbpos_10_17
-					lbl409 := ctx.ReserveLabel()
-					_ = lbl409
+					lbl408 := ctx.ReserveLabel()
+					_ = lbl408
 					bbpos_10_18 := int32(-1)
 					_ = bbpos_10_18
-					lbl410 := ctx.ReserveLabel()
-					_ = lbl410
+					lbl409 := ctx.ReserveLabel()
+					_ = lbl409
 					bbpos_10_19 := int32(-1)
 					_ = bbpos_10_19
-					lbl411 := ctx.ReserveLabel()
-					_ = lbl411
+					lbl410 := ctx.ReserveLabel()
+					_ = lbl410
 					bbpos_10_20 := int32(-1)
 					_ = bbpos_10_20
-					lbl412 := ctx.ReserveLabel()
-					_ = lbl412
+					lbl411 := ctx.ReserveLabel()
+					_ = lbl411
 					bbpos_10_21 := int32(-1)
 					_ = bbpos_10_21
-					lbl413 := ctx.ReserveLabel()
-					_ = lbl413
+					lbl412 := ctx.ReserveLabel()
+					_ = lbl412
 					bbpos_10_22 := int32(-1)
 					_ = bbpos_10_22
-					lbl414 := ctx.ReserveLabel()
-					_ = lbl414
+					lbl413 := ctx.ReserveLabel()
+					_ = lbl413
 					bbpos_10_23 := int32(-1)
 					_ = bbpos_10_23
-					lbl415 := ctx.ReserveLabel()
-					_ = lbl415
+					lbl414 := ctx.ReserveLabel()
+					_ = lbl414
 					bbpos_10_24 := int32(-1)
 					_ = bbpos_10_24
-					lbl416 := ctx.ReserveLabel()
-					_ = lbl416
+					lbl415 := ctx.ReserveLabel()
+					_ = lbl415
 					bbpos_10_25 := int32(-1)
 					_ = bbpos_10_25
-					lbl417 := ctx.ReserveLabel()
-					_ = lbl417
+					lbl416 := ctx.ReserveLabel()
+					_ = lbl416
 					bbpos_10_26 := int32(-1)
 					_ = bbpos_10_26
-					lbl418 := ctx.ReserveLabel()
-					_ = lbl418
+					lbl417 := ctx.ReserveLabel()
+					_ = lbl417
 					bbpos_10_27 := int32(-1)
 					_ = bbpos_10_27
-					lbl419 := ctx.ReserveLabel()
-					_ = lbl419
+					lbl418 := ctx.ReserveLabel()
+					_ = lbl418
 					bbpos_10_28 := int32(-1)
 					_ = bbpos_10_28
-					lbl420 := ctx.ReserveLabel()
-					_ = lbl420
+					lbl419 := ctx.ReserveLabel()
+					_ = lbl419
 					bbpos_10_29 := int32(-1)
 					_ = bbpos_10_29
-					lbl421 := ctx.ReserveLabel()
-					_ = lbl421
+					lbl420 := ctx.ReserveLabel()
+					_ = lbl420
 					bbpos_10_30 := int32(-1)
 					_ = bbpos_10_30
-					lbl422 := ctx.ReserveLabel()
-					_ = lbl422
+					lbl421 := ctx.ReserveLabel()
+					_ = lbl421
 					bbpos_10_31 := int32(-1)
 					_ = bbpos_10_31
-					lbl423 := ctx.ReserveLabel()
-					_ = lbl423
+					lbl422 := ctx.ReserveLabel()
+					_ = lbl422
 					bbpos_10_32 := int32(-1)
 					_ = bbpos_10_32
-					lbl424 := ctx.ReserveLabel()
-					_ = lbl424
+					lbl423 := ctx.ReserveLabel()
+					_ = lbl423
 					bbpos_10_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl392)
+					ctx.MarkLabel(lbl391)
 					ctx.ResolveFixups()
 					d512 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase511) + int32(0)}
 					d513 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase511) + int32(16)}
@@ -20849,26 +20789,26 @@ Patterns can be any of:
 					if d519.Loc != LocImm && d519.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
+					lbl424 := ctx.ReserveLabel()
 					lbl425 := ctx.ReserveLabel()
-					lbl426 := ctx.ReserveLabel()
 					if d519.Loc == LocImm {
 						if d519.Imm.Bool() {
+							ctx.MarkLabel(lbl424)
+							ctx.EmitJmp(lbl392)
+						} else {
 							ctx.MarkLabel(lbl425)
 							ctx.EmitJmp(lbl393)
-						} else {
-							ctx.MarkLabel(lbl426)
-							ctx.EmitJmp(lbl394)
 						}
 					} else {
-						ctx.EmitJump(d519.Condition, lbl425)
-						ctx.EmitJmp(lbl426)
+						ctx.EmitJump(d519.Condition, lbl424)
+						ctx.EmitJmp(lbl425)
+						ctx.MarkLabel(lbl424)
+						ctx.EmitJmp(lbl392)
 						ctx.MarkLabel(lbl425)
 						ctx.EmitJmp(lbl393)
-						ctx.MarkLabel(lbl426)
-						ctx.EmitJmp(lbl394)
 					}
 					bbpos_10_2 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl394)
+					ctx.MarkLabel(lbl393)
 					ctx.ResolveFixups()
 					d512 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase511) + int32(0)}
 					d513 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase511) + int32(16)}
@@ -20982,14 +20922,14 @@ Patterns can be any of:
 					if d533.Loc != LocImm && d533.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl426 := ctx.ReserveLabel()
 					lbl427 := ctx.ReserveLabel()
-					lbl428 := ctx.ReserveLabel()
 					if d533.Loc == LocImm {
 						if d533.Imm.Bool() {
-							ctx.MarkLabel(lbl427)
-							ctx.EmitJmp(lbl395)
+							ctx.MarkLabel(lbl426)
+							ctx.EmitJmp(lbl394)
 						} else {
-							ctx.MarkLabel(lbl428)
+							ctx.MarkLabel(lbl427)
 							ctx.SyncDesc(&d523)
 							if d523.Loc == LocReg {
 								ctx.ProtectReg(d523.Reg)
@@ -21020,15 +20960,15 @@ Patterns can be any of:
 								ctx.UnprotectReg(d523.Reg)
 								ctx.UnprotectReg(d523.Reg2)
 							}
-							ctx.EmitJmp(lbl396)
+							ctx.EmitJmp(lbl395)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d533.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl427)
-						ctx.EmitJmp(lbl428)
+						ctx.EmitJump(CondNotEqual, lbl426)
+						ctx.EmitJmp(lbl427)
+						ctx.MarkLabel(lbl426)
+						ctx.EmitJmp(lbl394)
 						ctx.MarkLabel(lbl427)
-						ctx.EmitJmp(lbl395)
-						ctx.MarkLabel(lbl428)
 						ctx.SyncDesc(&d523)
 						if d523.Loc == LocReg {
 							ctx.ProtectReg(d523.Reg)
@@ -21059,11 +20999,11 @@ Patterns can be any of:
 							ctx.UnprotectReg(d523.Reg)
 							ctx.UnprotectReg(d523.Reg2)
 						}
-						ctx.EmitJmp(lbl396)
+						ctx.EmitJmp(lbl395)
 					}
 					ctx.FreeDesc(&d532)
 					bbpos_10_4 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl396)
+					ctx.MarkLabel(lbl395)
 					ctx.ResolveFixups()
 					d512 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase511) + int32(0)}
 					d513 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase511) + int32(16)}
@@ -21088,28 +21028,28 @@ Patterns can be any of:
 					if d537.Loc != LocImm && d537.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl428 := ctx.ReserveLabel()
 					lbl429 := ctx.ReserveLabel()
-					lbl430 := ctx.ReserveLabel()
 					if d537.Loc == LocImm {
 						if d537.Imm.Bool() {
+							ctx.MarkLabel(lbl428)
+							ctx.EmitJmp(lbl396)
+						} else {
 							ctx.MarkLabel(lbl429)
 							ctx.EmitJmp(lbl397)
-						} else {
-							ctx.MarkLabel(lbl430)
-							ctx.EmitJmp(lbl398)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d537.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl429)
-						ctx.EmitJmp(lbl430)
+						ctx.EmitJump(CondNotEqual, lbl428)
+						ctx.EmitJmp(lbl429)
+						ctx.MarkLabel(lbl428)
+						ctx.EmitJmp(lbl396)
 						ctx.MarkLabel(lbl429)
 						ctx.EmitJmp(lbl397)
-						ctx.MarkLabel(lbl430)
-						ctx.EmitJmp(lbl398)
 					}
 					ctx.FreeDesc(&d536)
 					bbpos_10_6 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl398)
+					ctx.MarkLabel(lbl397)
 					ctx.ResolveFixups()
 					d512 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase511) + int32(0)}
 					d513 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase511) + int32(16)}
@@ -21123,9 +21063,9 @@ Patterns can be any of:
 					ctx.BindReg(r128, &d538)
 					ctx.BindReg(r129, &d538)
 					ctx.EmitMovPairToResult(&d512, &d538)
-					ctx.EmitJmp(lbl391)
+					ctx.EmitJmp(lbl390)
 					bbpos_10_1 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl393)
+					ctx.MarkLabel(lbl392)
 					ctx.ResolveFixups()
 					d512 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase511) + int32(0)}
 					d513 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase511) + int32(16)}
@@ -21139,9 +21079,9 @@ Patterns can be any of:
 					ctx.BindReg(r128, &d540)
 					ctx.BindReg(r129, &d540)
 					ctx.EmitMovPairToResult(&d539, &d540)
-					ctx.EmitJmp(lbl391)
+					ctx.EmitJmp(lbl390)
 					bbpos_10_3 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl395)
+					ctx.MarkLabel(lbl394)
 					ctx.ResolveFixups()
 					d512 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase511) + int32(0)}
 					d513 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase511) + int32(16)}
@@ -21220,9 +21160,9 @@ Patterns can be any of:
 						ctx.UnprotectReg(d543.Reg)
 						ctx.UnprotectReg(d543.Reg2)
 					}
-					ctx.EmitJmp(lbl396)
+					ctx.EmitJmp(lbl395)
 					bbpos_10_5 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl397)
+					ctx.MarkLabel(lbl396)
 					ctx.ResolveFixups()
 					d512 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase511) + int32(0)}
 					d513 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase511) + int32(16)}
@@ -21272,28 +21212,28 @@ Patterns can be any of:
 					if d550.Loc != LocImm && d550.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl430 := ctx.ReserveLabel()
 					lbl431 := ctx.ReserveLabel()
-					lbl432 := ctx.ReserveLabel()
 					if d550.Loc == LocImm {
 						if d550.Imm.Bool() {
+							ctx.MarkLabel(lbl430)
+							ctx.EmitJmp(lbl398)
+						} else {
 							ctx.MarkLabel(lbl431)
 							ctx.EmitJmp(lbl399)
-						} else {
-							ctx.MarkLabel(lbl432)
-							ctx.EmitJmp(lbl400)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d550.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl431)
-						ctx.EmitJmp(lbl432)
+						ctx.EmitJump(CondNotEqual, lbl430)
+						ctx.EmitJmp(lbl431)
+						ctx.MarkLabel(lbl430)
+						ctx.EmitJmp(lbl398)
 						ctx.MarkLabel(lbl431)
 						ctx.EmitJmp(lbl399)
-						ctx.MarkLabel(lbl432)
-						ctx.EmitJmp(lbl400)
 					}
 					ctx.FreeDesc(&d549)
 					bbpos_10_8 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl400)
+					ctx.MarkLabel(lbl399)
 					ctx.ResolveFixups()
 					d512 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase511) + int32(0)}
 					d513 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase511) + int32(16)}
@@ -21325,28 +21265,28 @@ Patterns can be any of:
 					if d554.Loc != LocImm && d554.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl432 := ctx.ReserveLabel()
 					lbl433 := ctx.ReserveLabel()
-					lbl434 := ctx.ReserveLabel()
 					if d554.Loc == LocImm {
 						if d554.Imm.Bool() {
-							ctx.MarkLabel(lbl433)
-							ctx.EmitJmp(lbl409)
-						} else {
-							ctx.MarkLabel(lbl434)
+							ctx.MarkLabel(lbl432)
 							ctx.EmitJmp(lbl408)
+						} else {
+							ctx.MarkLabel(lbl433)
+							ctx.EmitJmp(lbl407)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d554.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl433)
-						ctx.EmitJmp(lbl434)
-						ctx.MarkLabel(lbl433)
-						ctx.EmitJmp(lbl409)
-						ctx.MarkLabel(lbl434)
+						ctx.EmitJump(CondNotEqual, lbl432)
+						ctx.EmitJmp(lbl433)
+						ctx.MarkLabel(lbl432)
 						ctx.EmitJmp(lbl408)
+						ctx.MarkLabel(lbl433)
+						ctx.EmitJmp(lbl407)
 					}
 					ctx.FreeDesc(&d553)
 					bbpos_10_16 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl408)
+					ctx.MarkLabel(lbl407)
 					ctx.ResolveFixups()
 					d512 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase511) + int32(0)}
 					d513 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase511) + int32(16)}
@@ -21358,9 +21298,9 @@ Patterns can be any of:
 					ctx.BindReg(r128, &d555)
 					ctx.BindReg(r129, &d555)
 					ctx.EmitMovPairToResult(&d512, &d555)
-					ctx.EmitJmp(lbl391)
+					ctx.EmitJmp(lbl390)
 					bbpos_10_7 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl399)
+					ctx.MarkLabel(lbl398)
 					ctx.ResolveFixups()
 					d512 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase511) + int32(0)}
 					d513 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase511) + int32(16)}
@@ -21404,7 +21344,7 @@ Patterns can be any of:
 						ctx.UnprotectReg(d557.Reg2)
 					}
 					bbpos_10_9 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl401)
+					ctx.MarkLabel(lbl400)
 					ctx.ResolveFixups()
 					d512 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase511) + int32(0)}
 					d513 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase511) + int32(16)}
@@ -21451,26 +21391,26 @@ Patterns can be any of:
 					if d562.Loc != LocImm && d562.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
+					lbl434 := ctx.ReserveLabel()
 					lbl435 := ctx.ReserveLabel()
-					lbl436 := ctx.ReserveLabel()
 					if d562.Loc == LocImm {
 						if d562.Imm.Bool() {
+							ctx.MarkLabel(lbl434)
+							ctx.EmitJmp(lbl401)
+						} else {
 							ctx.MarkLabel(lbl435)
 							ctx.EmitJmp(lbl402)
-						} else {
-							ctx.MarkLabel(lbl436)
-							ctx.EmitJmp(lbl403)
 						}
 					} else {
-						ctx.EmitJump(d562.Condition, lbl435)
-						ctx.EmitJmp(lbl436)
+						ctx.EmitJump(d562.Condition, lbl434)
+						ctx.EmitJmp(lbl435)
+						ctx.MarkLabel(lbl434)
+						ctx.EmitJmp(lbl401)
 						ctx.MarkLabel(lbl435)
 						ctx.EmitJmp(lbl402)
-						ctx.MarkLabel(lbl436)
-						ctx.EmitJmp(lbl403)
 					}
 					bbpos_10_11 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl403)
+					ctx.MarkLabel(lbl402)
 					ctx.ResolveFixups()
 					d512 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase511) + int32(0)}
 					d513 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase511) + int32(16)}
@@ -21507,28 +21447,28 @@ Patterns can be any of:
 					if d568.Loc != LocImm && d568.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl436 := ctx.ReserveLabel()
 					lbl437 := ctx.ReserveLabel()
-					lbl438 := ctx.ReserveLabel()
 					if d568.Loc == LocImm {
 						if d568.Imm.Bool() {
-							ctx.MarkLabel(lbl437)
-							ctx.EmitJmp(lbl406)
-						} else {
-							ctx.MarkLabel(lbl438)
+							ctx.MarkLabel(lbl436)
 							ctx.EmitJmp(lbl405)
+						} else {
+							ctx.MarkLabel(lbl437)
+							ctx.EmitJmp(lbl404)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d568.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl437)
-						ctx.EmitJmp(lbl438)
-						ctx.MarkLabel(lbl437)
-						ctx.EmitJmp(lbl406)
-						ctx.MarkLabel(lbl438)
+						ctx.EmitJump(CondNotEqual, lbl436)
+						ctx.EmitJmp(lbl437)
+						ctx.MarkLabel(lbl436)
 						ctx.EmitJmp(lbl405)
+						ctx.MarkLabel(lbl437)
+						ctx.EmitJmp(lbl404)
 					}
 					ctx.FreeDesc(&d567)
 					bbpos_10_13 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl405)
+					ctx.MarkLabel(lbl404)
 					ctx.ResolveFixups()
 					d512 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase511) + int32(0)}
 					d513 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase511) + int32(16)}
@@ -21554,141 +21494,141 @@ Patterns can be any of:
 					d574 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase570) + int32(56)}
 					ctx.PreparePointerStackTarget(int32(phiBase570)+int32(56), 3)
 					_ = d574
-					lbl439 := ctx.ReserveLabel()
+					lbl438 := ctx.ReserveLabel()
 					bbpos_11_0 := int32(-1)
 					_ = bbpos_11_0
-					lbl440 := ctx.ReserveLabel()
-					_ = lbl440
+					lbl439 := ctx.ReserveLabel()
+					_ = lbl439
 					bbpos_11_1 := int32(-1)
 					_ = bbpos_11_1
-					lbl441 := ctx.ReserveLabel()
-					_ = lbl441
+					lbl440 := ctx.ReserveLabel()
+					_ = lbl440
 					bbpos_11_2 := int32(-1)
 					_ = bbpos_11_2
-					lbl442 := ctx.ReserveLabel()
-					_ = lbl442
+					lbl441 := ctx.ReserveLabel()
+					_ = lbl441
 					bbpos_11_3 := int32(-1)
 					_ = bbpos_11_3
-					lbl443 := ctx.ReserveLabel()
-					_ = lbl443
+					lbl442 := ctx.ReserveLabel()
+					_ = lbl442
 					bbpos_11_4 := int32(-1)
 					_ = bbpos_11_4
-					lbl444 := ctx.ReserveLabel()
-					_ = lbl444
+					lbl443 := ctx.ReserveLabel()
+					_ = lbl443
 					bbpos_11_5 := int32(-1)
 					_ = bbpos_11_5
-					lbl445 := ctx.ReserveLabel()
-					_ = lbl445
+					lbl444 := ctx.ReserveLabel()
+					_ = lbl444
 					bbpos_11_6 := int32(-1)
 					_ = bbpos_11_6
-					lbl446 := ctx.ReserveLabel()
-					_ = lbl446
+					lbl445 := ctx.ReserveLabel()
+					_ = lbl445
 					bbpos_11_7 := int32(-1)
 					_ = bbpos_11_7
-					lbl447 := ctx.ReserveLabel()
-					_ = lbl447
+					lbl446 := ctx.ReserveLabel()
+					_ = lbl446
 					bbpos_11_8 := int32(-1)
 					_ = bbpos_11_8
-					lbl448 := ctx.ReserveLabel()
-					_ = lbl448
+					lbl447 := ctx.ReserveLabel()
+					_ = lbl447
 					bbpos_11_9 := int32(-1)
 					_ = bbpos_11_9
-					lbl449 := ctx.ReserveLabel()
-					_ = lbl449
+					lbl448 := ctx.ReserveLabel()
+					_ = lbl448
 					bbpos_11_10 := int32(-1)
 					_ = bbpos_11_10
-					lbl450 := ctx.ReserveLabel()
-					_ = lbl450
+					lbl449 := ctx.ReserveLabel()
+					_ = lbl449
 					bbpos_11_11 := int32(-1)
 					_ = bbpos_11_11
-					lbl451 := ctx.ReserveLabel()
-					_ = lbl451
+					lbl450 := ctx.ReserveLabel()
+					_ = lbl450
 					bbpos_11_12 := int32(-1)
 					_ = bbpos_11_12
-					lbl452 := ctx.ReserveLabel()
-					_ = lbl452
+					lbl451 := ctx.ReserveLabel()
+					_ = lbl451
 					bbpos_11_13 := int32(-1)
 					_ = bbpos_11_13
-					lbl453 := ctx.ReserveLabel()
-					_ = lbl453
+					lbl452 := ctx.ReserveLabel()
+					_ = lbl452
 					bbpos_11_14 := int32(-1)
 					_ = bbpos_11_14
-					lbl454 := ctx.ReserveLabel()
-					_ = lbl454
+					lbl453 := ctx.ReserveLabel()
+					_ = lbl453
 					bbpos_11_15 := int32(-1)
 					_ = bbpos_11_15
-					lbl455 := ctx.ReserveLabel()
-					_ = lbl455
+					lbl454 := ctx.ReserveLabel()
+					_ = lbl454
 					bbpos_11_16 := int32(-1)
 					_ = bbpos_11_16
-					lbl456 := ctx.ReserveLabel()
-					_ = lbl456
+					lbl455 := ctx.ReserveLabel()
+					_ = lbl455
 					bbpos_11_17 := int32(-1)
 					_ = bbpos_11_17
-					lbl457 := ctx.ReserveLabel()
-					_ = lbl457
+					lbl456 := ctx.ReserveLabel()
+					_ = lbl456
 					bbpos_11_18 := int32(-1)
 					_ = bbpos_11_18
-					lbl458 := ctx.ReserveLabel()
-					_ = lbl458
+					lbl457 := ctx.ReserveLabel()
+					_ = lbl457
 					bbpos_11_19 := int32(-1)
 					_ = bbpos_11_19
-					lbl459 := ctx.ReserveLabel()
-					_ = lbl459
+					lbl458 := ctx.ReserveLabel()
+					_ = lbl458
 					bbpos_11_20 := int32(-1)
 					_ = bbpos_11_20
-					lbl460 := ctx.ReserveLabel()
-					_ = lbl460
+					lbl459 := ctx.ReserveLabel()
+					_ = lbl459
 					bbpos_11_21 := int32(-1)
 					_ = bbpos_11_21
-					lbl461 := ctx.ReserveLabel()
-					_ = lbl461
+					lbl460 := ctx.ReserveLabel()
+					_ = lbl460
 					bbpos_11_22 := int32(-1)
 					_ = bbpos_11_22
-					lbl462 := ctx.ReserveLabel()
-					_ = lbl462
+					lbl461 := ctx.ReserveLabel()
+					_ = lbl461
 					bbpos_11_23 := int32(-1)
 					_ = bbpos_11_23
-					lbl463 := ctx.ReserveLabel()
-					_ = lbl463
+					lbl462 := ctx.ReserveLabel()
+					_ = lbl462
 					bbpos_11_24 := int32(-1)
 					_ = bbpos_11_24
-					lbl464 := ctx.ReserveLabel()
-					_ = lbl464
+					lbl463 := ctx.ReserveLabel()
+					_ = lbl463
 					bbpos_11_25 := int32(-1)
 					_ = bbpos_11_25
-					lbl465 := ctx.ReserveLabel()
-					_ = lbl465
+					lbl464 := ctx.ReserveLabel()
+					_ = lbl464
 					bbpos_11_26 := int32(-1)
 					_ = bbpos_11_26
-					lbl466 := ctx.ReserveLabel()
-					_ = lbl466
+					lbl465 := ctx.ReserveLabel()
+					_ = lbl465
 					bbpos_11_27 := int32(-1)
 					_ = bbpos_11_27
-					lbl467 := ctx.ReserveLabel()
-					_ = lbl467
+					lbl466 := ctx.ReserveLabel()
+					_ = lbl466
 					bbpos_11_28 := int32(-1)
 					_ = bbpos_11_28
-					lbl468 := ctx.ReserveLabel()
-					_ = lbl468
+					lbl467 := ctx.ReserveLabel()
+					_ = lbl467
 					bbpos_11_29 := int32(-1)
 					_ = bbpos_11_29
-					lbl469 := ctx.ReserveLabel()
-					_ = lbl469
+					lbl468 := ctx.ReserveLabel()
+					_ = lbl468
 					bbpos_11_30 := int32(-1)
 					_ = bbpos_11_30
-					lbl470 := ctx.ReserveLabel()
-					_ = lbl470
+					lbl469 := ctx.ReserveLabel()
+					_ = lbl469
 					bbpos_11_31 := int32(-1)
 					_ = bbpos_11_31
-					lbl471 := ctx.ReserveLabel()
-					_ = lbl471
+					lbl470 := ctx.ReserveLabel()
+					_ = lbl470
 					bbpos_11_32 := int32(-1)
 					_ = bbpos_11_32
-					lbl472 := ctx.ReserveLabel()
-					_ = lbl472
+					lbl471 := ctx.ReserveLabel()
+					_ = lbl471
 					bbpos_11_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl440)
+					ctx.MarkLabel(lbl439)
 					ctx.ResolveFixups()
 					d571 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase570) + int32(0)}
 					d572 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase570) + int32(16)}
@@ -21733,26 +21673,26 @@ Patterns can be any of:
 					if d578.Loc != LocImm && d578.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
+					lbl472 := ctx.ReserveLabel()
 					lbl473 := ctx.ReserveLabel()
-					lbl474 := ctx.ReserveLabel()
 					if d578.Loc == LocImm {
 						if d578.Imm.Bool() {
+							ctx.MarkLabel(lbl472)
+							ctx.EmitJmp(lbl440)
+						} else {
 							ctx.MarkLabel(lbl473)
 							ctx.EmitJmp(lbl441)
-						} else {
-							ctx.MarkLabel(lbl474)
-							ctx.EmitJmp(lbl442)
 						}
 					} else {
-						ctx.EmitJump(d578.Condition, lbl473)
-						ctx.EmitJmp(lbl474)
+						ctx.EmitJump(d578.Condition, lbl472)
+						ctx.EmitJmp(lbl473)
+						ctx.MarkLabel(lbl472)
+						ctx.EmitJmp(lbl440)
 						ctx.MarkLabel(lbl473)
 						ctx.EmitJmp(lbl441)
-						ctx.MarkLabel(lbl474)
-						ctx.EmitJmp(lbl442)
 					}
 					bbpos_11_2 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl442)
+					ctx.MarkLabel(lbl441)
 					ctx.ResolveFixups()
 					d571 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase570) + int32(0)}
 					d572 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase570) + int32(16)}
@@ -21866,14 +21806,14 @@ Patterns can be any of:
 					if d592.Loc != LocImm && d592.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl474 := ctx.ReserveLabel()
 					lbl475 := ctx.ReserveLabel()
-					lbl476 := ctx.ReserveLabel()
 					if d592.Loc == LocImm {
 						if d592.Imm.Bool() {
-							ctx.MarkLabel(lbl475)
-							ctx.EmitJmp(lbl443)
+							ctx.MarkLabel(lbl474)
+							ctx.EmitJmp(lbl442)
 						} else {
-							ctx.MarkLabel(lbl476)
+							ctx.MarkLabel(lbl475)
 							ctx.SyncDesc(&d582)
 							if d582.Loc == LocReg {
 								ctx.ProtectReg(d582.Reg)
@@ -21904,15 +21844,15 @@ Patterns can be any of:
 								ctx.UnprotectReg(d582.Reg)
 								ctx.UnprotectReg(d582.Reg2)
 							}
-							ctx.EmitJmp(lbl444)
+							ctx.EmitJmp(lbl443)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d592.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl475)
-						ctx.EmitJmp(lbl476)
+						ctx.EmitJump(CondNotEqual, lbl474)
+						ctx.EmitJmp(lbl475)
+						ctx.MarkLabel(lbl474)
+						ctx.EmitJmp(lbl442)
 						ctx.MarkLabel(lbl475)
-						ctx.EmitJmp(lbl443)
-						ctx.MarkLabel(lbl476)
 						ctx.SyncDesc(&d582)
 						if d582.Loc == LocReg {
 							ctx.ProtectReg(d582.Reg)
@@ -21943,11 +21883,11 @@ Patterns can be any of:
 							ctx.UnprotectReg(d582.Reg)
 							ctx.UnprotectReg(d582.Reg2)
 						}
-						ctx.EmitJmp(lbl444)
+						ctx.EmitJmp(lbl443)
 					}
 					ctx.FreeDesc(&d591)
 					bbpos_11_4 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl444)
+					ctx.MarkLabel(lbl443)
 					ctx.ResolveFixups()
 					d571 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase570) + int32(0)}
 					d572 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase570) + int32(16)}
@@ -21972,28 +21912,28 @@ Patterns can be any of:
 					if d596.Loc != LocImm && d596.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl476 := ctx.ReserveLabel()
 					lbl477 := ctx.ReserveLabel()
-					lbl478 := ctx.ReserveLabel()
 					if d596.Loc == LocImm {
 						if d596.Imm.Bool() {
+							ctx.MarkLabel(lbl476)
+							ctx.EmitJmp(lbl444)
+						} else {
 							ctx.MarkLabel(lbl477)
 							ctx.EmitJmp(lbl445)
-						} else {
-							ctx.MarkLabel(lbl478)
-							ctx.EmitJmp(lbl446)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d596.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl477)
-						ctx.EmitJmp(lbl478)
+						ctx.EmitJump(CondNotEqual, lbl476)
+						ctx.EmitJmp(lbl477)
+						ctx.MarkLabel(lbl476)
+						ctx.EmitJmp(lbl444)
 						ctx.MarkLabel(lbl477)
 						ctx.EmitJmp(lbl445)
-						ctx.MarkLabel(lbl478)
-						ctx.EmitJmp(lbl446)
 					}
 					ctx.FreeDesc(&d595)
 					bbpos_11_6 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl446)
+					ctx.MarkLabel(lbl445)
 					ctx.ResolveFixups()
 					d571 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase570) + int32(0)}
 					d572 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase570) + int32(16)}
@@ -22007,9 +21947,9 @@ Patterns can be any of:
 					ctx.BindReg(r143, &d597)
 					ctx.BindReg(r144, &d597)
 					ctx.EmitMovPairToResult(&d571, &d597)
-					ctx.EmitJmp(lbl439)
+					ctx.EmitJmp(lbl438)
 					bbpos_11_1 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl441)
+					ctx.MarkLabel(lbl440)
 					ctx.ResolveFixups()
 					d571 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase570) + int32(0)}
 					d572 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase570) + int32(16)}
@@ -22023,9 +21963,9 @@ Patterns can be any of:
 					ctx.BindReg(r143, &d599)
 					ctx.BindReg(r144, &d599)
 					ctx.EmitMovPairToResult(&d598, &d599)
-					ctx.EmitJmp(lbl439)
+					ctx.EmitJmp(lbl438)
 					bbpos_11_3 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl443)
+					ctx.MarkLabel(lbl442)
 					ctx.ResolveFixups()
 					d571 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase570) + int32(0)}
 					d572 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase570) + int32(16)}
@@ -22104,9 +22044,9 @@ Patterns can be any of:
 						ctx.UnprotectReg(d602.Reg)
 						ctx.UnprotectReg(d602.Reg2)
 					}
-					ctx.EmitJmp(lbl444)
+					ctx.EmitJmp(lbl443)
 					bbpos_11_5 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl445)
+					ctx.MarkLabel(lbl444)
 					ctx.ResolveFixups()
 					d571 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase570) + int32(0)}
 					d572 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase570) + int32(16)}
@@ -22156,28 +22096,28 @@ Patterns can be any of:
 					if d609.Loc != LocImm && d609.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl478 := ctx.ReserveLabel()
 					lbl479 := ctx.ReserveLabel()
-					lbl480 := ctx.ReserveLabel()
 					if d609.Loc == LocImm {
 						if d609.Imm.Bool() {
+							ctx.MarkLabel(lbl478)
+							ctx.EmitJmp(lbl446)
+						} else {
 							ctx.MarkLabel(lbl479)
 							ctx.EmitJmp(lbl447)
-						} else {
-							ctx.MarkLabel(lbl480)
-							ctx.EmitJmp(lbl448)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d609.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl479)
-						ctx.EmitJmp(lbl480)
+						ctx.EmitJump(CondNotEqual, lbl478)
+						ctx.EmitJmp(lbl479)
+						ctx.MarkLabel(lbl478)
+						ctx.EmitJmp(lbl446)
 						ctx.MarkLabel(lbl479)
 						ctx.EmitJmp(lbl447)
-						ctx.MarkLabel(lbl480)
-						ctx.EmitJmp(lbl448)
 					}
 					ctx.FreeDesc(&d608)
 					bbpos_11_8 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl448)
+					ctx.MarkLabel(lbl447)
 					ctx.ResolveFixups()
 					d571 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase570) + int32(0)}
 					d572 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase570) + int32(16)}
@@ -22209,28 +22149,28 @@ Patterns can be any of:
 					if d613.Loc != LocImm && d613.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl480 := ctx.ReserveLabel()
 					lbl481 := ctx.ReserveLabel()
-					lbl482 := ctx.ReserveLabel()
 					if d613.Loc == LocImm {
 						if d613.Imm.Bool() {
-							ctx.MarkLabel(lbl481)
-							ctx.EmitJmp(lbl457)
-						} else {
-							ctx.MarkLabel(lbl482)
+							ctx.MarkLabel(lbl480)
 							ctx.EmitJmp(lbl456)
+						} else {
+							ctx.MarkLabel(lbl481)
+							ctx.EmitJmp(lbl455)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d613.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl481)
-						ctx.EmitJmp(lbl482)
-						ctx.MarkLabel(lbl481)
-						ctx.EmitJmp(lbl457)
-						ctx.MarkLabel(lbl482)
+						ctx.EmitJump(CondNotEqual, lbl480)
+						ctx.EmitJmp(lbl481)
+						ctx.MarkLabel(lbl480)
 						ctx.EmitJmp(lbl456)
+						ctx.MarkLabel(lbl481)
+						ctx.EmitJmp(lbl455)
 					}
 					ctx.FreeDesc(&d612)
 					bbpos_11_16 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl456)
+					ctx.MarkLabel(lbl455)
 					ctx.ResolveFixups()
 					d571 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase570) + int32(0)}
 					d572 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase570) + int32(16)}
@@ -22242,9 +22182,9 @@ Patterns can be any of:
 					ctx.BindReg(r143, &d614)
 					ctx.BindReg(r144, &d614)
 					ctx.EmitMovPairToResult(&d571, &d614)
-					ctx.EmitJmp(lbl439)
+					ctx.EmitJmp(lbl438)
 					bbpos_11_7 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl447)
+					ctx.MarkLabel(lbl446)
 					ctx.ResolveFixups()
 					d571 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase570) + int32(0)}
 					d572 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase570) + int32(16)}
@@ -22288,7 +22228,7 @@ Patterns can be any of:
 						ctx.UnprotectReg(d616.Reg2)
 					}
 					bbpos_11_9 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl449)
+					ctx.MarkLabel(lbl448)
 					ctx.ResolveFixups()
 					d571 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase570) + int32(0)}
 					d572 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase570) + int32(16)}
@@ -22335,26 +22275,26 @@ Patterns can be any of:
 					if d621.Loc != LocImm && d621.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
+					lbl482 := ctx.ReserveLabel()
 					lbl483 := ctx.ReserveLabel()
-					lbl484 := ctx.ReserveLabel()
 					if d621.Loc == LocImm {
 						if d621.Imm.Bool() {
+							ctx.MarkLabel(lbl482)
+							ctx.EmitJmp(lbl449)
+						} else {
 							ctx.MarkLabel(lbl483)
 							ctx.EmitJmp(lbl450)
-						} else {
-							ctx.MarkLabel(lbl484)
-							ctx.EmitJmp(lbl451)
 						}
 					} else {
-						ctx.EmitJump(d621.Condition, lbl483)
-						ctx.EmitJmp(lbl484)
+						ctx.EmitJump(d621.Condition, lbl482)
+						ctx.EmitJmp(lbl483)
+						ctx.MarkLabel(lbl482)
+						ctx.EmitJmp(lbl449)
 						ctx.MarkLabel(lbl483)
 						ctx.EmitJmp(lbl450)
-						ctx.MarkLabel(lbl484)
-						ctx.EmitJmp(lbl451)
 					}
 					bbpos_11_11 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl451)
+					ctx.MarkLabel(lbl450)
 					ctx.ResolveFixups()
 					d571 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase570) + int32(0)}
 					d572 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase570) + int32(16)}
@@ -22391,28 +22331,28 @@ Patterns can be any of:
 					if d627.Loc != LocImm && d627.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl484 := ctx.ReserveLabel()
 					lbl485 := ctx.ReserveLabel()
-					lbl486 := ctx.ReserveLabel()
 					if d627.Loc == LocImm {
 						if d627.Imm.Bool() {
-							ctx.MarkLabel(lbl485)
-							ctx.EmitJmp(lbl454)
-						} else {
-							ctx.MarkLabel(lbl486)
+							ctx.MarkLabel(lbl484)
 							ctx.EmitJmp(lbl453)
+						} else {
+							ctx.MarkLabel(lbl485)
+							ctx.EmitJmp(lbl452)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d627.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl485)
-						ctx.EmitJmp(lbl486)
-						ctx.MarkLabel(lbl485)
-						ctx.EmitJmp(lbl454)
-						ctx.MarkLabel(lbl486)
+						ctx.EmitJump(CondNotEqual, lbl484)
+						ctx.EmitJmp(lbl485)
+						ctx.MarkLabel(lbl484)
 						ctx.EmitJmp(lbl453)
+						ctx.MarkLabel(lbl485)
+						ctx.EmitJmp(lbl452)
 					}
 					ctx.FreeDesc(&d626)
 					bbpos_11_13 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl453)
+					ctx.MarkLabel(lbl452)
 					ctx.ResolveFixups()
 					d571 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase570) + int32(0)}
 					d572 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase570) + int32(16)}
@@ -22438,141 +22378,141 @@ Patterns can be any of:
 					d633 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase629) + int32(56)}
 					ctx.PreparePointerStackTarget(int32(phiBase629)+int32(56), 3)
 					_ = d633
-					lbl487 := ctx.ReserveLabel()
+					lbl486 := ctx.ReserveLabel()
 					bbpos_12_0 := int32(-1)
 					_ = bbpos_12_0
-					lbl488 := ctx.ReserveLabel()
-					_ = lbl488
+					lbl487 := ctx.ReserveLabel()
+					_ = lbl487
 					bbpos_12_1 := int32(-1)
 					_ = bbpos_12_1
-					lbl489 := ctx.ReserveLabel()
-					_ = lbl489
+					lbl488 := ctx.ReserveLabel()
+					_ = lbl488
 					bbpos_12_2 := int32(-1)
 					_ = bbpos_12_2
-					lbl490 := ctx.ReserveLabel()
-					_ = lbl490
+					lbl489 := ctx.ReserveLabel()
+					_ = lbl489
 					bbpos_12_3 := int32(-1)
 					_ = bbpos_12_3
-					lbl491 := ctx.ReserveLabel()
-					_ = lbl491
+					lbl490 := ctx.ReserveLabel()
+					_ = lbl490
 					bbpos_12_4 := int32(-1)
 					_ = bbpos_12_4
-					lbl492 := ctx.ReserveLabel()
-					_ = lbl492
+					lbl491 := ctx.ReserveLabel()
+					_ = lbl491
 					bbpos_12_5 := int32(-1)
 					_ = bbpos_12_5
-					lbl493 := ctx.ReserveLabel()
-					_ = lbl493
+					lbl492 := ctx.ReserveLabel()
+					_ = lbl492
 					bbpos_12_6 := int32(-1)
 					_ = bbpos_12_6
-					lbl494 := ctx.ReserveLabel()
-					_ = lbl494
+					lbl493 := ctx.ReserveLabel()
+					_ = lbl493
 					bbpos_12_7 := int32(-1)
 					_ = bbpos_12_7
-					lbl495 := ctx.ReserveLabel()
-					_ = lbl495
+					lbl494 := ctx.ReserveLabel()
+					_ = lbl494
 					bbpos_12_8 := int32(-1)
 					_ = bbpos_12_8
-					lbl496 := ctx.ReserveLabel()
-					_ = lbl496
+					lbl495 := ctx.ReserveLabel()
+					_ = lbl495
 					bbpos_12_9 := int32(-1)
 					_ = bbpos_12_9
-					lbl497 := ctx.ReserveLabel()
-					_ = lbl497
+					lbl496 := ctx.ReserveLabel()
+					_ = lbl496
 					bbpos_12_10 := int32(-1)
 					_ = bbpos_12_10
-					lbl498 := ctx.ReserveLabel()
-					_ = lbl498
+					lbl497 := ctx.ReserveLabel()
+					_ = lbl497
 					bbpos_12_11 := int32(-1)
 					_ = bbpos_12_11
-					lbl499 := ctx.ReserveLabel()
-					_ = lbl499
+					lbl498 := ctx.ReserveLabel()
+					_ = lbl498
 					bbpos_12_12 := int32(-1)
 					_ = bbpos_12_12
-					lbl500 := ctx.ReserveLabel()
-					_ = lbl500
+					lbl499 := ctx.ReserveLabel()
+					_ = lbl499
 					bbpos_12_13 := int32(-1)
 					_ = bbpos_12_13
-					lbl501 := ctx.ReserveLabel()
-					_ = lbl501
+					lbl500 := ctx.ReserveLabel()
+					_ = lbl500
 					bbpos_12_14 := int32(-1)
 					_ = bbpos_12_14
-					lbl502 := ctx.ReserveLabel()
-					_ = lbl502
+					lbl501 := ctx.ReserveLabel()
+					_ = lbl501
 					bbpos_12_15 := int32(-1)
 					_ = bbpos_12_15
-					lbl503 := ctx.ReserveLabel()
-					_ = lbl503
+					lbl502 := ctx.ReserveLabel()
+					_ = lbl502
 					bbpos_12_16 := int32(-1)
 					_ = bbpos_12_16
-					lbl504 := ctx.ReserveLabel()
-					_ = lbl504
+					lbl503 := ctx.ReserveLabel()
+					_ = lbl503
 					bbpos_12_17 := int32(-1)
 					_ = bbpos_12_17
-					lbl505 := ctx.ReserveLabel()
-					_ = lbl505
+					lbl504 := ctx.ReserveLabel()
+					_ = lbl504
 					bbpos_12_18 := int32(-1)
 					_ = bbpos_12_18
-					lbl506 := ctx.ReserveLabel()
-					_ = lbl506
+					lbl505 := ctx.ReserveLabel()
+					_ = lbl505
 					bbpos_12_19 := int32(-1)
 					_ = bbpos_12_19
-					lbl507 := ctx.ReserveLabel()
-					_ = lbl507
+					lbl506 := ctx.ReserveLabel()
+					_ = lbl506
 					bbpos_12_20 := int32(-1)
 					_ = bbpos_12_20
-					lbl508 := ctx.ReserveLabel()
-					_ = lbl508
+					lbl507 := ctx.ReserveLabel()
+					_ = lbl507
 					bbpos_12_21 := int32(-1)
 					_ = bbpos_12_21
-					lbl509 := ctx.ReserveLabel()
-					_ = lbl509
+					lbl508 := ctx.ReserveLabel()
+					_ = lbl508
 					bbpos_12_22 := int32(-1)
 					_ = bbpos_12_22
-					lbl510 := ctx.ReserveLabel()
-					_ = lbl510
+					lbl509 := ctx.ReserveLabel()
+					_ = lbl509
 					bbpos_12_23 := int32(-1)
 					_ = bbpos_12_23
-					lbl511 := ctx.ReserveLabel()
-					_ = lbl511
+					lbl510 := ctx.ReserveLabel()
+					_ = lbl510
 					bbpos_12_24 := int32(-1)
 					_ = bbpos_12_24
-					lbl512 := ctx.ReserveLabel()
-					_ = lbl512
+					lbl511 := ctx.ReserveLabel()
+					_ = lbl511
 					bbpos_12_25 := int32(-1)
 					_ = bbpos_12_25
-					lbl513 := ctx.ReserveLabel()
-					_ = lbl513
+					lbl512 := ctx.ReserveLabel()
+					_ = lbl512
 					bbpos_12_26 := int32(-1)
 					_ = bbpos_12_26
-					lbl514 := ctx.ReserveLabel()
-					_ = lbl514
+					lbl513 := ctx.ReserveLabel()
+					_ = lbl513
 					bbpos_12_27 := int32(-1)
 					_ = bbpos_12_27
-					lbl515 := ctx.ReserveLabel()
-					_ = lbl515
+					lbl514 := ctx.ReserveLabel()
+					_ = lbl514
 					bbpos_12_28 := int32(-1)
 					_ = bbpos_12_28
-					lbl516 := ctx.ReserveLabel()
-					_ = lbl516
+					lbl515 := ctx.ReserveLabel()
+					_ = lbl515
 					bbpos_12_29 := int32(-1)
 					_ = bbpos_12_29
-					lbl517 := ctx.ReserveLabel()
-					_ = lbl517
+					lbl516 := ctx.ReserveLabel()
+					_ = lbl516
 					bbpos_12_30 := int32(-1)
 					_ = bbpos_12_30
-					lbl518 := ctx.ReserveLabel()
-					_ = lbl518
+					lbl517 := ctx.ReserveLabel()
+					_ = lbl517
 					bbpos_12_31 := int32(-1)
 					_ = bbpos_12_31
-					lbl519 := ctx.ReserveLabel()
-					_ = lbl519
+					lbl518 := ctx.ReserveLabel()
+					_ = lbl518
 					bbpos_12_32 := int32(-1)
 					_ = bbpos_12_32
-					lbl520 := ctx.ReserveLabel()
-					_ = lbl520
+					lbl519 := ctx.ReserveLabel()
+					_ = lbl519
 					bbpos_12_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl488)
+					ctx.MarkLabel(lbl487)
 					ctx.ResolveFixups()
 					d630 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase629) + int32(0)}
 					d631 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase629) + int32(16)}
@@ -22617,26 +22557,26 @@ Patterns can be any of:
 					if d637.Loc != LocImm && d637.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
+					lbl520 := ctx.ReserveLabel()
 					lbl521 := ctx.ReserveLabel()
-					lbl522 := ctx.ReserveLabel()
 					if d637.Loc == LocImm {
 						if d637.Imm.Bool() {
+							ctx.MarkLabel(lbl520)
+							ctx.EmitJmp(lbl488)
+						} else {
 							ctx.MarkLabel(lbl521)
 							ctx.EmitJmp(lbl489)
-						} else {
-							ctx.MarkLabel(lbl522)
-							ctx.EmitJmp(lbl490)
 						}
 					} else {
-						ctx.EmitJump(d637.Condition, lbl521)
-						ctx.EmitJmp(lbl522)
+						ctx.EmitJump(d637.Condition, lbl520)
+						ctx.EmitJmp(lbl521)
+						ctx.MarkLabel(lbl520)
+						ctx.EmitJmp(lbl488)
 						ctx.MarkLabel(lbl521)
 						ctx.EmitJmp(lbl489)
-						ctx.MarkLabel(lbl522)
-						ctx.EmitJmp(lbl490)
 					}
 					bbpos_12_2 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl490)
+					ctx.MarkLabel(lbl489)
 					ctx.ResolveFixups()
 					d630 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase629) + int32(0)}
 					d631 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase629) + int32(16)}
@@ -22750,14 +22690,14 @@ Patterns can be any of:
 					if d651.Loc != LocImm && d651.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl522 := ctx.ReserveLabel()
 					lbl523 := ctx.ReserveLabel()
-					lbl524 := ctx.ReserveLabel()
 					if d651.Loc == LocImm {
 						if d651.Imm.Bool() {
-							ctx.MarkLabel(lbl523)
-							ctx.EmitJmp(lbl491)
+							ctx.MarkLabel(lbl522)
+							ctx.EmitJmp(lbl490)
 						} else {
-							ctx.MarkLabel(lbl524)
+							ctx.MarkLabel(lbl523)
 							ctx.SyncDesc(&d641)
 							if d641.Loc == LocReg {
 								ctx.ProtectReg(d641.Reg)
@@ -22788,15 +22728,15 @@ Patterns can be any of:
 								ctx.UnprotectReg(d641.Reg)
 								ctx.UnprotectReg(d641.Reg2)
 							}
-							ctx.EmitJmp(lbl492)
+							ctx.EmitJmp(lbl491)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d651.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl523)
-						ctx.EmitJmp(lbl524)
+						ctx.EmitJump(CondNotEqual, lbl522)
+						ctx.EmitJmp(lbl523)
+						ctx.MarkLabel(lbl522)
+						ctx.EmitJmp(lbl490)
 						ctx.MarkLabel(lbl523)
-						ctx.EmitJmp(lbl491)
-						ctx.MarkLabel(lbl524)
 						ctx.SyncDesc(&d641)
 						if d641.Loc == LocReg {
 							ctx.ProtectReg(d641.Reg)
@@ -22827,11 +22767,11 @@ Patterns can be any of:
 							ctx.UnprotectReg(d641.Reg)
 							ctx.UnprotectReg(d641.Reg2)
 						}
-						ctx.EmitJmp(lbl492)
+						ctx.EmitJmp(lbl491)
 					}
 					ctx.FreeDesc(&d650)
 					bbpos_12_4 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl492)
+					ctx.MarkLabel(lbl491)
 					ctx.ResolveFixups()
 					d630 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase629) + int32(0)}
 					d631 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase629) + int32(16)}
@@ -22856,28 +22796,28 @@ Patterns can be any of:
 					if d655.Loc != LocImm && d655.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl524 := ctx.ReserveLabel()
 					lbl525 := ctx.ReserveLabel()
-					lbl526 := ctx.ReserveLabel()
 					if d655.Loc == LocImm {
 						if d655.Imm.Bool() {
+							ctx.MarkLabel(lbl524)
+							ctx.EmitJmp(lbl492)
+						} else {
 							ctx.MarkLabel(lbl525)
 							ctx.EmitJmp(lbl493)
-						} else {
-							ctx.MarkLabel(lbl526)
-							ctx.EmitJmp(lbl494)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d655.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl525)
-						ctx.EmitJmp(lbl526)
+						ctx.EmitJump(CondNotEqual, lbl524)
+						ctx.EmitJmp(lbl525)
+						ctx.MarkLabel(lbl524)
+						ctx.EmitJmp(lbl492)
 						ctx.MarkLabel(lbl525)
 						ctx.EmitJmp(lbl493)
-						ctx.MarkLabel(lbl526)
-						ctx.EmitJmp(lbl494)
 					}
 					ctx.FreeDesc(&d654)
 					bbpos_12_6 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl494)
+					ctx.MarkLabel(lbl493)
 					ctx.ResolveFixups()
 					d630 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase629) + int32(0)}
 					d631 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase629) + int32(16)}
@@ -22891,9 +22831,9 @@ Patterns can be any of:
 					ctx.BindReg(r158, &d656)
 					ctx.BindReg(r159, &d656)
 					ctx.EmitMovPairToResult(&d630, &d656)
-					ctx.EmitJmp(lbl487)
+					ctx.EmitJmp(lbl486)
 					bbpos_12_1 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl489)
+					ctx.MarkLabel(lbl488)
 					ctx.ResolveFixups()
 					d630 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase629) + int32(0)}
 					d631 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase629) + int32(16)}
@@ -22907,9 +22847,9 @@ Patterns can be any of:
 					ctx.BindReg(r158, &d658)
 					ctx.BindReg(r159, &d658)
 					ctx.EmitMovPairToResult(&d657, &d658)
-					ctx.EmitJmp(lbl487)
+					ctx.EmitJmp(lbl486)
 					bbpos_12_3 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl491)
+					ctx.MarkLabel(lbl490)
 					ctx.ResolveFixups()
 					d630 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase629) + int32(0)}
 					d631 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase629) + int32(16)}
@@ -22988,9 +22928,9 @@ Patterns can be any of:
 						ctx.UnprotectReg(d661.Reg)
 						ctx.UnprotectReg(d661.Reg2)
 					}
-					ctx.EmitJmp(lbl492)
+					ctx.EmitJmp(lbl491)
 					bbpos_12_5 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl493)
+					ctx.MarkLabel(lbl492)
 					ctx.ResolveFixups()
 					d630 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase629) + int32(0)}
 					d631 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase629) + int32(16)}
@@ -23040,28 +22980,28 @@ Patterns can be any of:
 					if d668.Loc != LocImm && d668.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl526 := ctx.ReserveLabel()
 					lbl527 := ctx.ReserveLabel()
-					lbl528 := ctx.ReserveLabel()
 					if d668.Loc == LocImm {
 						if d668.Imm.Bool() {
+							ctx.MarkLabel(lbl526)
+							ctx.EmitJmp(lbl494)
+						} else {
 							ctx.MarkLabel(lbl527)
 							ctx.EmitJmp(lbl495)
-						} else {
-							ctx.MarkLabel(lbl528)
-							ctx.EmitJmp(lbl496)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d668.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl527)
-						ctx.EmitJmp(lbl528)
+						ctx.EmitJump(CondNotEqual, lbl526)
+						ctx.EmitJmp(lbl527)
+						ctx.MarkLabel(lbl526)
+						ctx.EmitJmp(lbl494)
 						ctx.MarkLabel(lbl527)
 						ctx.EmitJmp(lbl495)
-						ctx.MarkLabel(lbl528)
-						ctx.EmitJmp(lbl496)
 					}
 					ctx.FreeDesc(&d667)
 					bbpos_12_8 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl496)
+					ctx.MarkLabel(lbl495)
 					ctx.ResolveFixups()
 					d630 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase629) + int32(0)}
 					d631 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase629) + int32(16)}
@@ -23093,28 +23033,28 @@ Patterns can be any of:
 					if d672.Loc != LocImm && d672.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl528 := ctx.ReserveLabel()
 					lbl529 := ctx.ReserveLabel()
-					lbl530 := ctx.ReserveLabel()
 					if d672.Loc == LocImm {
 						if d672.Imm.Bool() {
-							ctx.MarkLabel(lbl529)
-							ctx.EmitJmp(lbl505)
-						} else {
-							ctx.MarkLabel(lbl530)
+							ctx.MarkLabel(lbl528)
 							ctx.EmitJmp(lbl504)
+						} else {
+							ctx.MarkLabel(lbl529)
+							ctx.EmitJmp(lbl503)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d672.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl529)
-						ctx.EmitJmp(lbl530)
-						ctx.MarkLabel(lbl529)
-						ctx.EmitJmp(lbl505)
-						ctx.MarkLabel(lbl530)
+						ctx.EmitJump(CondNotEqual, lbl528)
+						ctx.EmitJmp(lbl529)
+						ctx.MarkLabel(lbl528)
 						ctx.EmitJmp(lbl504)
+						ctx.MarkLabel(lbl529)
+						ctx.EmitJmp(lbl503)
 					}
 					ctx.FreeDesc(&d671)
 					bbpos_12_16 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl504)
+					ctx.MarkLabel(lbl503)
 					ctx.ResolveFixups()
 					d630 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase629) + int32(0)}
 					d631 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase629) + int32(16)}
@@ -23126,9 +23066,9 @@ Patterns can be any of:
 					ctx.BindReg(r158, &d673)
 					ctx.BindReg(r159, &d673)
 					ctx.EmitMovPairToResult(&d630, &d673)
-					ctx.EmitJmp(lbl487)
+					ctx.EmitJmp(lbl486)
 					bbpos_12_7 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl495)
+					ctx.MarkLabel(lbl494)
 					ctx.ResolveFixups()
 					d630 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase629) + int32(0)}
 					d631 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase629) + int32(16)}
@@ -23172,7 +23112,7 @@ Patterns can be any of:
 						ctx.UnprotectReg(d675.Reg2)
 					}
 					bbpos_12_9 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl497)
+					ctx.MarkLabel(lbl496)
 					ctx.ResolveFixups()
 					d630 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase629) + int32(0)}
 					d631 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase629) + int32(16)}
@@ -23219,26 +23159,26 @@ Patterns can be any of:
 					if d680.Loc != LocImm && d680.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
+					lbl530 := ctx.ReserveLabel()
 					lbl531 := ctx.ReserveLabel()
-					lbl532 := ctx.ReserveLabel()
 					if d680.Loc == LocImm {
 						if d680.Imm.Bool() {
+							ctx.MarkLabel(lbl530)
+							ctx.EmitJmp(lbl497)
+						} else {
 							ctx.MarkLabel(lbl531)
 							ctx.EmitJmp(lbl498)
-						} else {
-							ctx.MarkLabel(lbl532)
-							ctx.EmitJmp(lbl499)
 						}
 					} else {
-						ctx.EmitJump(d680.Condition, lbl531)
-						ctx.EmitJmp(lbl532)
+						ctx.EmitJump(d680.Condition, lbl530)
+						ctx.EmitJmp(lbl531)
+						ctx.MarkLabel(lbl530)
+						ctx.EmitJmp(lbl497)
 						ctx.MarkLabel(lbl531)
 						ctx.EmitJmp(lbl498)
-						ctx.MarkLabel(lbl532)
-						ctx.EmitJmp(lbl499)
 					}
 					bbpos_12_11 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl499)
+					ctx.MarkLabel(lbl498)
 					ctx.ResolveFixups()
 					d630 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase629) + int32(0)}
 					d631 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase629) + int32(16)}
@@ -23275,28 +23215,28 @@ Patterns can be any of:
 					if d686.Loc != LocImm && d686.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl532 := ctx.ReserveLabel()
 					lbl533 := ctx.ReserveLabel()
-					lbl534 := ctx.ReserveLabel()
 					if d686.Loc == LocImm {
 						if d686.Imm.Bool() {
-							ctx.MarkLabel(lbl533)
-							ctx.EmitJmp(lbl502)
-						} else {
-							ctx.MarkLabel(lbl534)
+							ctx.MarkLabel(lbl532)
 							ctx.EmitJmp(lbl501)
+						} else {
+							ctx.MarkLabel(lbl533)
+							ctx.EmitJmp(lbl500)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d686.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl533)
-						ctx.EmitJmp(lbl534)
-						ctx.MarkLabel(lbl533)
-						ctx.EmitJmp(lbl502)
-						ctx.MarkLabel(lbl534)
+						ctx.EmitJump(CondNotEqual, lbl532)
+						ctx.EmitJmp(lbl533)
+						ctx.MarkLabel(lbl532)
 						ctx.EmitJmp(lbl501)
+						ctx.MarkLabel(lbl533)
+						ctx.EmitJmp(lbl500)
 					}
 					ctx.FreeDesc(&d685)
 					bbpos_12_13 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl501)
+					ctx.MarkLabel(lbl500)
 					ctx.ResolveFixups()
 					d630 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase629) + int32(0)}
 					d631 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase629) + int32(16)}
@@ -23322,141 +23262,141 @@ Patterns can be any of:
 					d692 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(56)}
 					ctx.PreparePointerStackTarget(int32(phiBase688)+int32(56), 3)
 					_ = d692
-					lbl535 := ctx.ReserveLabel()
+					lbl534 := ctx.ReserveLabel()
 					bbpos_13_0 := int32(-1)
 					_ = bbpos_13_0
-					lbl536 := ctx.ReserveLabel()
-					_ = lbl536
+					lbl535 := ctx.ReserveLabel()
+					_ = lbl535
 					bbpos_13_1 := int32(-1)
 					_ = bbpos_13_1
-					lbl537 := ctx.ReserveLabel()
-					_ = lbl537
+					lbl536 := ctx.ReserveLabel()
+					_ = lbl536
 					bbpos_13_2 := int32(-1)
 					_ = bbpos_13_2
-					lbl538 := ctx.ReserveLabel()
-					_ = lbl538
+					lbl537 := ctx.ReserveLabel()
+					_ = lbl537
 					bbpos_13_3 := int32(-1)
 					_ = bbpos_13_3
-					lbl539 := ctx.ReserveLabel()
-					_ = lbl539
+					lbl538 := ctx.ReserveLabel()
+					_ = lbl538
 					bbpos_13_4 := int32(-1)
 					_ = bbpos_13_4
-					lbl540 := ctx.ReserveLabel()
-					_ = lbl540
+					lbl539 := ctx.ReserveLabel()
+					_ = lbl539
 					bbpos_13_5 := int32(-1)
 					_ = bbpos_13_5
-					lbl541 := ctx.ReserveLabel()
-					_ = lbl541
+					lbl540 := ctx.ReserveLabel()
+					_ = lbl540
 					bbpos_13_6 := int32(-1)
 					_ = bbpos_13_6
-					lbl542 := ctx.ReserveLabel()
-					_ = lbl542
+					lbl541 := ctx.ReserveLabel()
+					_ = lbl541
 					bbpos_13_7 := int32(-1)
 					_ = bbpos_13_7
-					lbl543 := ctx.ReserveLabel()
-					_ = lbl543
+					lbl542 := ctx.ReserveLabel()
+					_ = lbl542
 					bbpos_13_8 := int32(-1)
 					_ = bbpos_13_8
-					lbl544 := ctx.ReserveLabel()
-					_ = lbl544
+					lbl543 := ctx.ReserveLabel()
+					_ = lbl543
 					bbpos_13_9 := int32(-1)
 					_ = bbpos_13_9
-					lbl545 := ctx.ReserveLabel()
-					_ = lbl545
+					lbl544 := ctx.ReserveLabel()
+					_ = lbl544
 					bbpos_13_10 := int32(-1)
 					_ = bbpos_13_10
-					lbl546 := ctx.ReserveLabel()
-					_ = lbl546
+					lbl545 := ctx.ReserveLabel()
+					_ = lbl545
 					bbpos_13_11 := int32(-1)
 					_ = bbpos_13_11
-					lbl547 := ctx.ReserveLabel()
-					_ = lbl547
+					lbl546 := ctx.ReserveLabel()
+					_ = lbl546
 					bbpos_13_12 := int32(-1)
 					_ = bbpos_13_12
-					lbl548 := ctx.ReserveLabel()
-					_ = lbl548
+					lbl547 := ctx.ReserveLabel()
+					_ = lbl547
 					bbpos_13_13 := int32(-1)
 					_ = bbpos_13_13
-					lbl549 := ctx.ReserveLabel()
-					_ = lbl549
+					lbl548 := ctx.ReserveLabel()
+					_ = lbl548
 					bbpos_13_14 := int32(-1)
 					_ = bbpos_13_14
-					lbl550 := ctx.ReserveLabel()
-					_ = lbl550
+					lbl549 := ctx.ReserveLabel()
+					_ = lbl549
 					bbpos_13_15 := int32(-1)
 					_ = bbpos_13_15
-					lbl551 := ctx.ReserveLabel()
-					_ = lbl551
+					lbl550 := ctx.ReserveLabel()
+					_ = lbl550
 					bbpos_13_16 := int32(-1)
 					_ = bbpos_13_16
-					lbl552 := ctx.ReserveLabel()
-					_ = lbl552
+					lbl551 := ctx.ReserveLabel()
+					_ = lbl551
 					bbpos_13_17 := int32(-1)
 					_ = bbpos_13_17
-					lbl553 := ctx.ReserveLabel()
-					_ = lbl553
+					lbl552 := ctx.ReserveLabel()
+					_ = lbl552
 					bbpos_13_18 := int32(-1)
 					_ = bbpos_13_18
-					lbl554 := ctx.ReserveLabel()
-					_ = lbl554
+					lbl553 := ctx.ReserveLabel()
+					_ = lbl553
 					bbpos_13_19 := int32(-1)
 					_ = bbpos_13_19
-					lbl555 := ctx.ReserveLabel()
-					_ = lbl555
+					lbl554 := ctx.ReserveLabel()
+					_ = lbl554
 					bbpos_13_20 := int32(-1)
 					_ = bbpos_13_20
-					lbl556 := ctx.ReserveLabel()
-					_ = lbl556
+					lbl555 := ctx.ReserveLabel()
+					_ = lbl555
 					bbpos_13_21 := int32(-1)
 					_ = bbpos_13_21
-					lbl557 := ctx.ReserveLabel()
-					_ = lbl557
+					lbl556 := ctx.ReserveLabel()
+					_ = lbl556
 					bbpos_13_22 := int32(-1)
 					_ = bbpos_13_22
-					lbl558 := ctx.ReserveLabel()
-					_ = lbl558
+					lbl557 := ctx.ReserveLabel()
+					_ = lbl557
 					bbpos_13_23 := int32(-1)
 					_ = bbpos_13_23
-					lbl559 := ctx.ReserveLabel()
-					_ = lbl559
+					lbl558 := ctx.ReserveLabel()
+					_ = lbl558
 					bbpos_13_24 := int32(-1)
 					_ = bbpos_13_24
-					lbl560 := ctx.ReserveLabel()
-					_ = lbl560
+					lbl559 := ctx.ReserveLabel()
+					_ = lbl559
 					bbpos_13_25 := int32(-1)
 					_ = bbpos_13_25
-					lbl561 := ctx.ReserveLabel()
-					_ = lbl561
+					lbl560 := ctx.ReserveLabel()
+					_ = lbl560
 					bbpos_13_26 := int32(-1)
 					_ = bbpos_13_26
-					lbl562 := ctx.ReserveLabel()
-					_ = lbl562
+					lbl561 := ctx.ReserveLabel()
+					_ = lbl561
 					bbpos_13_27 := int32(-1)
 					_ = bbpos_13_27
-					lbl563 := ctx.ReserveLabel()
-					_ = lbl563
+					lbl562 := ctx.ReserveLabel()
+					_ = lbl562
 					bbpos_13_28 := int32(-1)
 					_ = bbpos_13_28
-					lbl564 := ctx.ReserveLabel()
-					_ = lbl564
+					lbl563 := ctx.ReserveLabel()
+					_ = lbl563
 					bbpos_13_29 := int32(-1)
 					_ = bbpos_13_29
-					lbl565 := ctx.ReserveLabel()
-					_ = lbl565
+					lbl564 := ctx.ReserveLabel()
+					_ = lbl564
 					bbpos_13_30 := int32(-1)
 					_ = bbpos_13_30
-					lbl566 := ctx.ReserveLabel()
-					_ = lbl566
+					lbl565 := ctx.ReserveLabel()
+					_ = lbl565
 					bbpos_13_31 := int32(-1)
 					_ = bbpos_13_31
-					lbl567 := ctx.ReserveLabel()
-					_ = lbl567
+					lbl566 := ctx.ReserveLabel()
+					_ = lbl566
 					bbpos_13_32 := int32(-1)
 					_ = bbpos_13_32
-					lbl568 := ctx.ReserveLabel()
-					_ = lbl568
+					lbl567 := ctx.ReserveLabel()
+					_ = lbl567
 					bbpos_13_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl536)
+					ctx.MarkLabel(lbl535)
 					ctx.ResolveFixups()
 					d689 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(0)}
 					d690 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(16)}
@@ -23501,26 +23441,26 @@ Patterns can be any of:
 					if d696.Loc != LocImm && d696.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
+					lbl568 := ctx.ReserveLabel()
 					lbl569 := ctx.ReserveLabel()
-					lbl570 := ctx.ReserveLabel()
 					if d696.Loc == LocImm {
 						if d696.Imm.Bool() {
+							ctx.MarkLabel(lbl568)
+							ctx.EmitJmp(lbl536)
+						} else {
 							ctx.MarkLabel(lbl569)
 							ctx.EmitJmp(lbl537)
-						} else {
-							ctx.MarkLabel(lbl570)
-							ctx.EmitJmp(lbl538)
 						}
 					} else {
-						ctx.EmitJump(d696.Condition, lbl569)
-						ctx.EmitJmp(lbl570)
+						ctx.EmitJump(d696.Condition, lbl568)
+						ctx.EmitJmp(lbl569)
+						ctx.MarkLabel(lbl568)
+						ctx.EmitJmp(lbl536)
 						ctx.MarkLabel(lbl569)
 						ctx.EmitJmp(lbl537)
-						ctx.MarkLabel(lbl570)
-						ctx.EmitJmp(lbl538)
 					}
 					bbpos_13_2 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl538)
+					ctx.MarkLabel(lbl537)
 					ctx.ResolveFixups()
 					d689 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(0)}
 					d690 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(16)}
@@ -23634,14 +23574,14 @@ Patterns can be any of:
 					if d710.Loc != LocImm && d710.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl570 := ctx.ReserveLabel()
 					lbl571 := ctx.ReserveLabel()
-					lbl572 := ctx.ReserveLabel()
 					if d710.Loc == LocImm {
 						if d710.Imm.Bool() {
-							ctx.MarkLabel(lbl571)
-							ctx.EmitJmp(lbl539)
+							ctx.MarkLabel(lbl570)
+							ctx.EmitJmp(lbl538)
 						} else {
-							ctx.MarkLabel(lbl572)
+							ctx.MarkLabel(lbl571)
 							ctx.SyncDesc(&d700)
 							if d700.Loc == LocReg {
 								ctx.ProtectReg(d700.Reg)
@@ -23672,15 +23612,15 @@ Patterns can be any of:
 								ctx.UnprotectReg(d700.Reg)
 								ctx.UnprotectReg(d700.Reg2)
 							}
-							ctx.EmitJmp(lbl540)
+							ctx.EmitJmp(lbl539)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d710.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl571)
-						ctx.EmitJmp(lbl572)
+						ctx.EmitJump(CondNotEqual, lbl570)
+						ctx.EmitJmp(lbl571)
+						ctx.MarkLabel(lbl570)
+						ctx.EmitJmp(lbl538)
 						ctx.MarkLabel(lbl571)
-						ctx.EmitJmp(lbl539)
-						ctx.MarkLabel(lbl572)
 						ctx.SyncDesc(&d700)
 						if d700.Loc == LocReg {
 							ctx.ProtectReg(d700.Reg)
@@ -23711,11 +23651,11 @@ Patterns can be any of:
 							ctx.UnprotectReg(d700.Reg)
 							ctx.UnprotectReg(d700.Reg2)
 						}
-						ctx.EmitJmp(lbl540)
+						ctx.EmitJmp(lbl539)
 					}
 					ctx.FreeDesc(&d709)
 					bbpos_13_4 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl540)
+					ctx.MarkLabel(lbl539)
 					ctx.ResolveFixups()
 					d689 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(0)}
 					d690 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(16)}
@@ -23740,28 +23680,28 @@ Patterns can be any of:
 					if d714.Loc != LocImm && d714.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl572 := ctx.ReserveLabel()
 					lbl573 := ctx.ReserveLabel()
-					lbl574 := ctx.ReserveLabel()
 					if d714.Loc == LocImm {
 						if d714.Imm.Bool() {
+							ctx.MarkLabel(lbl572)
+							ctx.EmitJmp(lbl540)
+						} else {
 							ctx.MarkLabel(lbl573)
 							ctx.EmitJmp(lbl541)
-						} else {
-							ctx.MarkLabel(lbl574)
-							ctx.EmitJmp(lbl542)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d714.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl573)
-						ctx.EmitJmp(lbl574)
+						ctx.EmitJump(CondNotEqual, lbl572)
+						ctx.EmitJmp(lbl573)
+						ctx.MarkLabel(lbl572)
+						ctx.EmitJmp(lbl540)
 						ctx.MarkLabel(lbl573)
 						ctx.EmitJmp(lbl541)
-						ctx.MarkLabel(lbl574)
-						ctx.EmitJmp(lbl542)
 					}
 					ctx.FreeDesc(&d713)
 					bbpos_13_6 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl542)
+					ctx.MarkLabel(lbl541)
 					ctx.ResolveFixups()
 					d689 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(0)}
 					d690 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(16)}
@@ -23775,9 +23715,9 @@ Patterns can be any of:
 					ctx.BindReg(r173, &d715)
 					ctx.BindReg(r174, &d715)
 					ctx.EmitMovPairToResult(&d689, &d715)
-					ctx.EmitJmp(lbl535)
+					ctx.EmitJmp(lbl534)
 					bbpos_13_1 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl537)
+					ctx.MarkLabel(lbl536)
 					ctx.ResolveFixups()
 					d689 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(0)}
 					d690 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(16)}
@@ -23791,9 +23731,9 @@ Patterns can be any of:
 					ctx.BindReg(r173, &d717)
 					ctx.BindReg(r174, &d717)
 					ctx.EmitMovPairToResult(&d716, &d717)
-					ctx.EmitJmp(lbl535)
+					ctx.EmitJmp(lbl534)
 					bbpos_13_3 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl539)
+					ctx.MarkLabel(lbl538)
 					ctx.ResolveFixups()
 					d689 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(0)}
 					d690 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(16)}
@@ -23872,9 +23812,9 @@ Patterns can be any of:
 						ctx.UnprotectReg(d720.Reg)
 						ctx.UnprotectReg(d720.Reg2)
 					}
-					ctx.EmitJmp(lbl540)
+					ctx.EmitJmp(lbl539)
 					bbpos_13_5 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl541)
+					ctx.MarkLabel(lbl540)
 					ctx.ResolveFixups()
 					d689 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(0)}
 					d690 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(16)}
@@ -23924,28 +23864,28 @@ Patterns can be any of:
 					if d727.Loc != LocImm && d727.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl574 := ctx.ReserveLabel()
 					lbl575 := ctx.ReserveLabel()
-					lbl576 := ctx.ReserveLabel()
 					if d727.Loc == LocImm {
 						if d727.Imm.Bool() {
+							ctx.MarkLabel(lbl574)
+							ctx.EmitJmp(lbl542)
+						} else {
 							ctx.MarkLabel(lbl575)
 							ctx.EmitJmp(lbl543)
-						} else {
-							ctx.MarkLabel(lbl576)
-							ctx.EmitJmp(lbl544)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d727.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl575)
-						ctx.EmitJmp(lbl576)
+						ctx.EmitJump(CondNotEqual, lbl574)
+						ctx.EmitJmp(lbl575)
+						ctx.MarkLabel(lbl574)
+						ctx.EmitJmp(lbl542)
 						ctx.MarkLabel(lbl575)
 						ctx.EmitJmp(lbl543)
-						ctx.MarkLabel(lbl576)
-						ctx.EmitJmp(lbl544)
 					}
 					ctx.FreeDesc(&d726)
 					bbpos_13_8 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl544)
+					ctx.MarkLabel(lbl543)
 					ctx.ResolveFixups()
 					d689 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(0)}
 					d690 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(16)}
@@ -23977,28 +23917,28 @@ Patterns can be any of:
 					if d731.Loc != LocImm && d731.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl576 := ctx.ReserveLabel()
 					lbl577 := ctx.ReserveLabel()
-					lbl578 := ctx.ReserveLabel()
 					if d731.Loc == LocImm {
 						if d731.Imm.Bool() {
-							ctx.MarkLabel(lbl577)
-							ctx.EmitJmp(lbl553)
-						} else {
-							ctx.MarkLabel(lbl578)
+							ctx.MarkLabel(lbl576)
 							ctx.EmitJmp(lbl552)
+						} else {
+							ctx.MarkLabel(lbl577)
+							ctx.EmitJmp(lbl551)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d731.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl577)
-						ctx.EmitJmp(lbl578)
-						ctx.MarkLabel(lbl577)
-						ctx.EmitJmp(lbl553)
-						ctx.MarkLabel(lbl578)
+						ctx.EmitJump(CondNotEqual, lbl576)
+						ctx.EmitJmp(lbl577)
+						ctx.MarkLabel(lbl576)
 						ctx.EmitJmp(lbl552)
+						ctx.MarkLabel(lbl577)
+						ctx.EmitJmp(lbl551)
 					}
 					ctx.FreeDesc(&d730)
 					bbpos_13_16 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl552)
+					ctx.MarkLabel(lbl551)
 					ctx.ResolveFixups()
 					d689 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(0)}
 					d690 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(16)}
@@ -24010,9 +23950,9 @@ Patterns can be any of:
 					ctx.BindReg(r173, &d732)
 					ctx.BindReg(r174, &d732)
 					ctx.EmitMovPairToResult(&d689, &d732)
-					ctx.EmitJmp(lbl535)
+					ctx.EmitJmp(lbl534)
 					bbpos_13_7 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl543)
+					ctx.MarkLabel(lbl542)
 					ctx.ResolveFixups()
 					d689 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(0)}
 					d690 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(16)}
@@ -24056,7 +23996,7 @@ Patterns can be any of:
 						ctx.UnprotectReg(d734.Reg2)
 					}
 					bbpos_13_9 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl545)
+					ctx.MarkLabel(lbl544)
 					ctx.ResolveFixups()
 					d689 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(0)}
 					d690 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(16)}
@@ -24103,26 +24043,26 @@ Patterns can be any of:
 					if d739.Loc != LocImm && d739.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
+					lbl578 := ctx.ReserveLabel()
 					lbl579 := ctx.ReserveLabel()
-					lbl580 := ctx.ReserveLabel()
 					if d739.Loc == LocImm {
 						if d739.Imm.Bool() {
+							ctx.MarkLabel(lbl578)
+							ctx.EmitJmp(lbl545)
+						} else {
 							ctx.MarkLabel(lbl579)
 							ctx.EmitJmp(lbl546)
-						} else {
-							ctx.MarkLabel(lbl580)
-							ctx.EmitJmp(lbl547)
 						}
 					} else {
-						ctx.EmitJump(d739.Condition, lbl579)
-						ctx.EmitJmp(lbl580)
+						ctx.EmitJump(d739.Condition, lbl578)
+						ctx.EmitJmp(lbl579)
+						ctx.MarkLabel(lbl578)
+						ctx.EmitJmp(lbl545)
 						ctx.MarkLabel(lbl579)
 						ctx.EmitJmp(lbl546)
-						ctx.MarkLabel(lbl580)
-						ctx.EmitJmp(lbl547)
 					}
 					bbpos_13_11 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl547)
+					ctx.MarkLabel(lbl546)
 					ctx.ResolveFixups()
 					d689 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(0)}
 					d690 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(16)}
@@ -24159,28 +24099,28 @@ Patterns can be any of:
 					if d745.Loc != LocImm && d745.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl580 := ctx.ReserveLabel()
 					lbl581 := ctx.ReserveLabel()
-					lbl582 := ctx.ReserveLabel()
 					if d745.Loc == LocImm {
 						if d745.Imm.Bool() {
-							ctx.MarkLabel(lbl581)
-							ctx.EmitJmp(lbl550)
-						} else {
-							ctx.MarkLabel(lbl582)
+							ctx.MarkLabel(lbl580)
 							ctx.EmitJmp(lbl549)
+						} else {
+							ctx.MarkLabel(lbl581)
+							ctx.EmitJmp(lbl548)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d745.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl581)
-						ctx.EmitJmp(lbl582)
-						ctx.MarkLabel(lbl581)
-						ctx.EmitJmp(lbl550)
-						ctx.MarkLabel(lbl582)
+						ctx.EmitJump(CondNotEqual, lbl580)
+						ctx.EmitJmp(lbl581)
+						ctx.MarkLabel(lbl580)
 						ctx.EmitJmp(lbl549)
+						ctx.MarkLabel(lbl581)
+						ctx.EmitJmp(lbl548)
 					}
 					ctx.FreeDesc(&d744)
 					bbpos_13_13 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl549)
+					ctx.MarkLabel(lbl548)
 					ctx.ResolveFixups()
 					d689 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(0)}
 					d690 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(16)}
@@ -24206,141 +24146,141 @@ Patterns can be any of:
 					d751 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(56)}
 					ctx.PreparePointerStackTarget(int32(phiBase747)+int32(56), 3)
 					_ = d751
-					lbl583 := ctx.ReserveLabel()
+					lbl582 := ctx.ReserveLabel()
 					bbpos_14_0 := int32(-1)
 					_ = bbpos_14_0
-					lbl584 := ctx.ReserveLabel()
-					_ = lbl584
+					lbl583 := ctx.ReserveLabel()
+					_ = lbl583
 					bbpos_14_1 := int32(-1)
 					_ = bbpos_14_1
-					lbl585 := ctx.ReserveLabel()
-					_ = lbl585
+					lbl584 := ctx.ReserveLabel()
+					_ = lbl584
 					bbpos_14_2 := int32(-1)
 					_ = bbpos_14_2
-					lbl586 := ctx.ReserveLabel()
-					_ = lbl586
+					lbl585 := ctx.ReserveLabel()
+					_ = lbl585
 					bbpos_14_3 := int32(-1)
 					_ = bbpos_14_3
-					lbl587 := ctx.ReserveLabel()
-					_ = lbl587
+					lbl586 := ctx.ReserveLabel()
+					_ = lbl586
 					bbpos_14_4 := int32(-1)
 					_ = bbpos_14_4
-					lbl588 := ctx.ReserveLabel()
-					_ = lbl588
+					lbl587 := ctx.ReserveLabel()
+					_ = lbl587
 					bbpos_14_5 := int32(-1)
 					_ = bbpos_14_5
-					lbl589 := ctx.ReserveLabel()
-					_ = lbl589
+					lbl588 := ctx.ReserveLabel()
+					_ = lbl588
 					bbpos_14_6 := int32(-1)
 					_ = bbpos_14_6
-					lbl590 := ctx.ReserveLabel()
-					_ = lbl590
+					lbl589 := ctx.ReserveLabel()
+					_ = lbl589
 					bbpos_14_7 := int32(-1)
 					_ = bbpos_14_7
-					lbl591 := ctx.ReserveLabel()
-					_ = lbl591
+					lbl590 := ctx.ReserveLabel()
+					_ = lbl590
 					bbpos_14_8 := int32(-1)
 					_ = bbpos_14_8
-					lbl592 := ctx.ReserveLabel()
-					_ = lbl592
+					lbl591 := ctx.ReserveLabel()
+					_ = lbl591
 					bbpos_14_9 := int32(-1)
 					_ = bbpos_14_9
-					lbl593 := ctx.ReserveLabel()
-					_ = lbl593
+					lbl592 := ctx.ReserveLabel()
+					_ = lbl592
 					bbpos_14_10 := int32(-1)
 					_ = bbpos_14_10
-					lbl594 := ctx.ReserveLabel()
-					_ = lbl594
+					lbl593 := ctx.ReserveLabel()
+					_ = lbl593
 					bbpos_14_11 := int32(-1)
 					_ = bbpos_14_11
-					lbl595 := ctx.ReserveLabel()
-					_ = lbl595
+					lbl594 := ctx.ReserveLabel()
+					_ = lbl594
 					bbpos_14_12 := int32(-1)
 					_ = bbpos_14_12
-					lbl596 := ctx.ReserveLabel()
-					_ = lbl596
+					lbl595 := ctx.ReserveLabel()
+					_ = lbl595
 					bbpos_14_13 := int32(-1)
 					_ = bbpos_14_13
-					lbl597 := ctx.ReserveLabel()
-					_ = lbl597
+					lbl596 := ctx.ReserveLabel()
+					_ = lbl596
 					bbpos_14_14 := int32(-1)
 					_ = bbpos_14_14
-					lbl598 := ctx.ReserveLabel()
-					_ = lbl598
+					lbl597 := ctx.ReserveLabel()
+					_ = lbl597
 					bbpos_14_15 := int32(-1)
 					_ = bbpos_14_15
-					lbl599 := ctx.ReserveLabel()
-					_ = lbl599
+					lbl598 := ctx.ReserveLabel()
+					_ = lbl598
 					bbpos_14_16 := int32(-1)
 					_ = bbpos_14_16
-					lbl600 := ctx.ReserveLabel()
-					_ = lbl600
+					lbl599 := ctx.ReserveLabel()
+					_ = lbl599
 					bbpos_14_17 := int32(-1)
 					_ = bbpos_14_17
-					lbl601 := ctx.ReserveLabel()
-					_ = lbl601
+					lbl600 := ctx.ReserveLabel()
+					_ = lbl600
 					bbpos_14_18 := int32(-1)
 					_ = bbpos_14_18
-					lbl602 := ctx.ReserveLabel()
-					_ = lbl602
+					lbl601 := ctx.ReserveLabel()
+					_ = lbl601
 					bbpos_14_19 := int32(-1)
 					_ = bbpos_14_19
-					lbl603 := ctx.ReserveLabel()
-					_ = lbl603
+					lbl602 := ctx.ReserveLabel()
+					_ = lbl602
 					bbpos_14_20 := int32(-1)
 					_ = bbpos_14_20
-					lbl604 := ctx.ReserveLabel()
-					_ = lbl604
+					lbl603 := ctx.ReserveLabel()
+					_ = lbl603
 					bbpos_14_21 := int32(-1)
 					_ = bbpos_14_21
-					lbl605 := ctx.ReserveLabel()
-					_ = lbl605
+					lbl604 := ctx.ReserveLabel()
+					_ = lbl604
 					bbpos_14_22 := int32(-1)
 					_ = bbpos_14_22
-					lbl606 := ctx.ReserveLabel()
-					_ = lbl606
+					lbl605 := ctx.ReserveLabel()
+					_ = lbl605
 					bbpos_14_23 := int32(-1)
 					_ = bbpos_14_23
-					lbl607 := ctx.ReserveLabel()
-					_ = lbl607
+					lbl606 := ctx.ReserveLabel()
+					_ = lbl606
 					bbpos_14_24 := int32(-1)
 					_ = bbpos_14_24
-					lbl608 := ctx.ReserveLabel()
-					_ = lbl608
+					lbl607 := ctx.ReserveLabel()
+					_ = lbl607
 					bbpos_14_25 := int32(-1)
 					_ = bbpos_14_25
-					lbl609 := ctx.ReserveLabel()
-					_ = lbl609
+					lbl608 := ctx.ReserveLabel()
+					_ = lbl608
 					bbpos_14_26 := int32(-1)
 					_ = bbpos_14_26
-					lbl610 := ctx.ReserveLabel()
-					_ = lbl610
+					lbl609 := ctx.ReserveLabel()
+					_ = lbl609
 					bbpos_14_27 := int32(-1)
 					_ = bbpos_14_27
-					lbl611 := ctx.ReserveLabel()
-					_ = lbl611
+					lbl610 := ctx.ReserveLabel()
+					_ = lbl610
 					bbpos_14_28 := int32(-1)
 					_ = bbpos_14_28
-					lbl612 := ctx.ReserveLabel()
-					_ = lbl612
+					lbl611 := ctx.ReserveLabel()
+					_ = lbl611
 					bbpos_14_29 := int32(-1)
 					_ = bbpos_14_29
-					lbl613 := ctx.ReserveLabel()
-					_ = lbl613
+					lbl612 := ctx.ReserveLabel()
+					_ = lbl612
 					bbpos_14_30 := int32(-1)
 					_ = bbpos_14_30
-					lbl614 := ctx.ReserveLabel()
-					_ = lbl614
+					lbl613 := ctx.ReserveLabel()
+					_ = lbl613
 					bbpos_14_31 := int32(-1)
 					_ = bbpos_14_31
-					lbl615 := ctx.ReserveLabel()
-					_ = lbl615
+					lbl614 := ctx.ReserveLabel()
+					_ = lbl614
 					bbpos_14_32 := int32(-1)
 					_ = bbpos_14_32
-					lbl616 := ctx.ReserveLabel()
-					_ = lbl616
+					lbl615 := ctx.ReserveLabel()
+					_ = lbl615
 					bbpos_14_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl584)
+					ctx.MarkLabel(lbl583)
 					ctx.ResolveFixups()
 					d748 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(0)}
 					d749 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(16)}
@@ -24385,26 +24325,26 @@ Patterns can be any of:
 					if d755.Loc != LocImm && d755.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
+					lbl616 := ctx.ReserveLabel()
 					lbl617 := ctx.ReserveLabel()
-					lbl618 := ctx.ReserveLabel()
 					if d755.Loc == LocImm {
 						if d755.Imm.Bool() {
+							ctx.MarkLabel(lbl616)
+							ctx.EmitJmp(lbl584)
+						} else {
 							ctx.MarkLabel(lbl617)
 							ctx.EmitJmp(lbl585)
-						} else {
-							ctx.MarkLabel(lbl618)
-							ctx.EmitJmp(lbl586)
 						}
 					} else {
-						ctx.EmitJump(d755.Condition, lbl617)
-						ctx.EmitJmp(lbl618)
+						ctx.EmitJump(d755.Condition, lbl616)
+						ctx.EmitJmp(lbl617)
+						ctx.MarkLabel(lbl616)
+						ctx.EmitJmp(lbl584)
 						ctx.MarkLabel(lbl617)
 						ctx.EmitJmp(lbl585)
-						ctx.MarkLabel(lbl618)
-						ctx.EmitJmp(lbl586)
 					}
 					bbpos_14_2 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl586)
+					ctx.MarkLabel(lbl585)
 					ctx.ResolveFixups()
 					d748 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(0)}
 					d749 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(16)}
@@ -24518,14 +24458,14 @@ Patterns can be any of:
 					if d769.Loc != LocImm && d769.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl618 := ctx.ReserveLabel()
 					lbl619 := ctx.ReserveLabel()
-					lbl620 := ctx.ReserveLabel()
 					if d769.Loc == LocImm {
 						if d769.Imm.Bool() {
-							ctx.MarkLabel(lbl619)
-							ctx.EmitJmp(lbl587)
+							ctx.MarkLabel(lbl618)
+							ctx.EmitJmp(lbl586)
 						} else {
-							ctx.MarkLabel(lbl620)
+							ctx.MarkLabel(lbl619)
 							ctx.SyncDesc(&d759)
 							if d759.Loc == LocReg {
 								ctx.ProtectReg(d759.Reg)
@@ -24556,15 +24496,15 @@ Patterns can be any of:
 								ctx.UnprotectReg(d759.Reg)
 								ctx.UnprotectReg(d759.Reg2)
 							}
-							ctx.EmitJmp(lbl588)
+							ctx.EmitJmp(lbl587)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d769.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl619)
-						ctx.EmitJmp(lbl620)
+						ctx.EmitJump(CondNotEqual, lbl618)
+						ctx.EmitJmp(lbl619)
+						ctx.MarkLabel(lbl618)
+						ctx.EmitJmp(lbl586)
 						ctx.MarkLabel(lbl619)
-						ctx.EmitJmp(lbl587)
-						ctx.MarkLabel(lbl620)
 						ctx.SyncDesc(&d759)
 						if d759.Loc == LocReg {
 							ctx.ProtectReg(d759.Reg)
@@ -24595,11 +24535,11 @@ Patterns can be any of:
 							ctx.UnprotectReg(d759.Reg)
 							ctx.UnprotectReg(d759.Reg2)
 						}
-						ctx.EmitJmp(lbl588)
+						ctx.EmitJmp(lbl587)
 					}
 					ctx.FreeDesc(&d768)
 					bbpos_14_4 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl588)
+					ctx.MarkLabel(lbl587)
 					ctx.ResolveFixups()
 					d748 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(0)}
 					d749 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(16)}
@@ -24624,28 +24564,28 @@ Patterns can be any of:
 					if d773.Loc != LocImm && d773.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl620 := ctx.ReserveLabel()
 					lbl621 := ctx.ReserveLabel()
-					lbl622 := ctx.ReserveLabel()
 					if d773.Loc == LocImm {
 						if d773.Imm.Bool() {
+							ctx.MarkLabel(lbl620)
+							ctx.EmitJmp(lbl588)
+						} else {
 							ctx.MarkLabel(lbl621)
 							ctx.EmitJmp(lbl589)
-						} else {
-							ctx.MarkLabel(lbl622)
-							ctx.EmitJmp(lbl590)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d773.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl621)
-						ctx.EmitJmp(lbl622)
+						ctx.EmitJump(CondNotEqual, lbl620)
+						ctx.EmitJmp(lbl621)
+						ctx.MarkLabel(lbl620)
+						ctx.EmitJmp(lbl588)
 						ctx.MarkLabel(lbl621)
 						ctx.EmitJmp(lbl589)
-						ctx.MarkLabel(lbl622)
-						ctx.EmitJmp(lbl590)
 					}
 					ctx.FreeDesc(&d772)
 					bbpos_14_6 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl590)
+					ctx.MarkLabel(lbl589)
 					ctx.ResolveFixups()
 					d748 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(0)}
 					d749 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(16)}
@@ -24659,9 +24599,9 @@ Patterns can be any of:
 					ctx.BindReg(r188, &d774)
 					ctx.BindReg(r189, &d774)
 					ctx.EmitMovPairToResult(&d748, &d774)
-					ctx.EmitJmp(lbl583)
+					ctx.EmitJmp(lbl582)
 					bbpos_14_1 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl585)
+					ctx.MarkLabel(lbl584)
 					ctx.ResolveFixups()
 					d748 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(0)}
 					d749 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(16)}
@@ -24675,9 +24615,9 @@ Patterns can be any of:
 					ctx.BindReg(r188, &d776)
 					ctx.BindReg(r189, &d776)
 					ctx.EmitMovPairToResult(&d775, &d776)
-					ctx.EmitJmp(lbl583)
+					ctx.EmitJmp(lbl582)
 					bbpos_14_3 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl587)
+					ctx.MarkLabel(lbl586)
 					ctx.ResolveFixups()
 					d748 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(0)}
 					d749 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(16)}
@@ -24756,9 +24696,9 @@ Patterns can be any of:
 						ctx.UnprotectReg(d779.Reg)
 						ctx.UnprotectReg(d779.Reg2)
 					}
-					ctx.EmitJmp(lbl588)
+					ctx.EmitJmp(lbl587)
 					bbpos_14_5 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl589)
+					ctx.MarkLabel(lbl588)
 					ctx.ResolveFixups()
 					d748 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(0)}
 					d749 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(16)}
@@ -24808,28 +24748,28 @@ Patterns can be any of:
 					if d786.Loc != LocImm && d786.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl622 := ctx.ReserveLabel()
 					lbl623 := ctx.ReserveLabel()
-					lbl624 := ctx.ReserveLabel()
 					if d786.Loc == LocImm {
 						if d786.Imm.Bool() {
+							ctx.MarkLabel(lbl622)
+							ctx.EmitJmp(lbl590)
+						} else {
 							ctx.MarkLabel(lbl623)
 							ctx.EmitJmp(lbl591)
-						} else {
-							ctx.MarkLabel(lbl624)
-							ctx.EmitJmp(lbl592)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d786.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl623)
-						ctx.EmitJmp(lbl624)
+						ctx.EmitJump(CondNotEqual, lbl622)
+						ctx.EmitJmp(lbl623)
+						ctx.MarkLabel(lbl622)
+						ctx.EmitJmp(lbl590)
 						ctx.MarkLabel(lbl623)
 						ctx.EmitJmp(lbl591)
-						ctx.MarkLabel(lbl624)
-						ctx.EmitJmp(lbl592)
 					}
 					ctx.FreeDesc(&d785)
 					bbpos_14_8 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl592)
+					ctx.MarkLabel(lbl591)
 					ctx.ResolveFixups()
 					d748 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(0)}
 					d749 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(16)}
@@ -24861,28 +24801,28 @@ Patterns can be any of:
 					if d790.Loc != LocImm && d790.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl624 := ctx.ReserveLabel()
 					lbl625 := ctx.ReserveLabel()
-					lbl626 := ctx.ReserveLabel()
 					if d790.Loc == LocImm {
 						if d790.Imm.Bool() {
-							ctx.MarkLabel(lbl625)
-							ctx.EmitJmp(lbl601)
-						} else {
-							ctx.MarkLabel(lbl626)
+							ctx.MarkLabel(lbl624)
 							ctx.EmitJmp(lbl600)
+						} else {
+							ctx.MarkLabel(lbl625)
+							ctx.EmitJmp(lbl599)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d790.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl625)
-						ctx.EmitJmp(lbl626)
-						ctx.MarkLabel(lbl625)
-						ctx.EmitJmp(lbl601)
-						ctx.MarkLabel(lbl626)
+						ctx.EmitJump(CondNotEqual, lbl624)
+						ctx.EmitJmp(lbl625)
+						ctx.MarkLabel(lbl624)
 						ctx.EmitJmp(lbl600)
+						ctx.MarkLabel(lbl625)
+						ctx.EmitJmp(lbl599)
 					}
 					ctx.FreeDesc(&d789)
 					bbpos_14_16 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl600)
+					ctx.MarkLabel(lbl599)
 					ctx.ResolveFixups()
 					d748 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(0)}
 					d749 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(16)}
@@ -24894,9 +24834,9 @@ Patterns can be any of:
 					ctx.BindReg(r188, &d791)
 					ctx.BindReg(r189, &d791)
 					ctx.EmitMovPairToResult(&d748, &d791)
-					ctx.EmitJmp(lbl583)
+					ctx.EmitJmp(lbl582)
 					bbpos_14_7 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl591)
+					ctx.MarkLabel(lbl590)
 					ctx.ResolveFixups()
 					d748 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(0)}
 					d749 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(16)}
@@ -24940,7 +24880,7 @@ Patterns can be any of:
 						ctx.UnprotectReg(d793.Reg2)
 					}
 					bbpos_14_9 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl593)
+					ctx.MarkLabel(lbl592)
 					ctx.ResolveFixups()
 					d748 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(0)}
 					d749 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(16)}
@@ -24987,26 +24927,26 @@ Patterns can be any of:
 					if d798.Loc != LocImm && d798.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
+					lbl626 := ctx.ReserveLabel()
 					lbl627 := ctx.ReserveLabel()
-					lbl628 := ctx.ReserveLabel()
 					if d798.Loc == LocImm {
 						if d798.Imm.Bool() {
+							ctx.MarkLabel(lbl626)
+							ctx.EmitJmp(lbl593)
+						} else {
 							ctx.MarkLabel(lbl627)
 							ctx.EmitJmp(lbl594)
-						} else {
-							ctx.MarkLabel(lbl628)
-							ctx.EmitJmp(lbl595)
 						}
 					} else {
-						ctx.EmitJump(d798.Condition, lbl627)
-						ctx.EmitJmp(lbl628)
+						ctx.EmitJump(d798.Condition, lbl626)
+						ctx.EmitJmp(lbl627)
+						ctx.MarkLabel(lbl626)
+						ctx.EmitJmp(lbl593)
 						ctx.MarkLabel(lbl627)
 						ctx.EmitJmp(lbl594)
-						ctx.MarkLabel(lbl628)
-						ctx.EmitJmp(lbl595)
 					}
 					bbpos_14_11 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl595)
+					ctx.MarkLabel(lbl594)
 					ctx.ResolveFixups()
 					d748 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(0)}
 					d749 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(16)}
@@ -25043,28 +24983,28 @@ Patterns can be any of:
 					if d804.Loc != LocImm && d804.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl628 := ctx.ReserveLabel()
 					lbl629 := ctx.ReserveLabel()
-					lbl630 := ctx.ReserveLabel()
 					if d804.Loc == LocImm {
 						if d804.Imm.Bool() {
-							ctx.MarkLabel(lbl629)
-							ctx.EmitJmp(lbl598)
-						} else {
-							ctx.MarkLabel(lbl630)
+							ctx.MarkLabel(lbl628)
 							ctx.EmitJmp(lbl597)
+						} else {
+							ctx.MarkLabel(lbl629)
+							ctx.EmitJmp(lbl596)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d804.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl629)
-						ctx.EmitJmp(lbl630)
-						ctx.MarkLabel(lbl629)
-						ctx.EmitJmp(lbl598)
-						ctx.MarkLabel(lbl630)
+						ctx.EmitJump(CondNotEqual, lbl628)
+						ctx.EmitJmp(lbl629)
+						ctx.MarkLabel(lbl628)
 						ctx.EmitJmp(lbl597)
+						ctx.MarkLabel(lbl629)
+						ctx.EmitJmp(lbl596)
 					}
 					ctx.FreeDesc(&d803)
 					bbpos_14_13 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl597)
+					ctx.MarkLabel(lbl596)
 					ctx.ResolveFixups()
 					d748 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(0)}
 					d749 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(16)}
@@ -25115,9 +25055,9 @@ Patterns can be any of:
 					d810 = d811
 					ctx.StabilizeDescForControlFlow(&d810)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EmitJmp(lbl593)
+					ctx.EmitJmp(lbl592)
 					bbpos_14_17 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl601)
+					ctx.MarkLabel(lbl600)
 					ctx.ResolveFixups()
 					d748 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(0)}
 					d749 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(16)}
@@ -25162,26 +25102,26 @@ Patterns can be any of:
 					if d815.Loc != LocImm && d815.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
+					lbl630 := ctx.ReserveLabel()
 					lbl631 := ctx.ReserveLabel()
-					lbl632 := ctx.ReserveLabel()
 					if d815.Loc == LocImm {
 						if d815.Imm.Bool() {
+							ctx.MarkLabel(lbl630)
+							ctx.EmitJmp(lbl598)
+						} else {
 							ctx.MarkLabel(lbl631)
 							ctx.EmitJmp(lbl599)
-						} else {
-							ctx.MarkLabel(lbl632)
-							ctx.EmitJmp(lbl600)
 						}
 					} else {
-						ctx.EmitJump(d815.Condition, lbl631)
-						ctx.EmitJmp(lbl632)
+						ctx.EmitJump(d815.Condition, lbl630)
+						ctx.EmitJmp(lbl631)
+						ctx.MarkLabel(lbl630)
+						ctx.EmitJmp(lbl598)
 						ctx.MarkLabel(lbl631)
 						ctx.EmitJmp(lbl599)
-						ctx.MarkLabel(lbl632)
-						ctx.EmitJmp(lbl600)
 					}
 					bbpos_14_10 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl594)
+					ctx.MarkLabel(lbl593)
 					ctx.ResolveFixups()
 					d748 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(0)}
 					d749 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(16)}
@@ -25190,7 +25130,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.EmitGoPanic("jit: invalid arguments for inlined Go helper")
 					bbpos_14_14 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl598)
+					ctx.MarkLabel(lbl597)
 					ctx.ResolveFixups()
 					d748 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(0)}
 					d749 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(16)}
@@ -25239,28 +25179,28 @@ Patterns can be any of:
 					if d821.Loc != LocImm && d821.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl632 := ctx.ReserveLabel()
 					lbl633 := ctx.ReserveLabel()
-					lbl634 := ctx.ReserveLabel()
 					if d821.Loc == LocImm {
 						if d821.Imm.Bool() {
+							ctx.MarkLabel(lbl632)
+							ctx.EmitJmp(lbl595)
+						} else {
 							ctx.MarkLabel(lbl633)
 							ctx.EmitJmp(lbl596)
-						} else {
-							ctx.MarkLabel(lbl634)
-							ctx.EmitJmp(lbl597)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d821.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl633)
-						ctx.EmitJmp(lbl634)
+						ctx.EmitJump(CondNotEqual, lbl632)
+						ctx.EmitJmp(lbl633)
+						ctx.MarkLabel(lbl632)
+						ctx.EmitJmp(lbl595)
 						ctx.MarkLabel(lbl633)
 						ctx.EmitJmp(lbl596)
-						ctx.MarkLabel(lbl634)
-						ctx.EmitJmp(lbl597)
 					}
 					ctx.FreeDesc(&d820)
 					bbpos_14_15 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl599)
+					ctx.MarkLabel(lbl598)
 					ctx.ResolveFixups()
 					d748 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(0)}
 					d749 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(16)}
@@ -25297,14 +25237,14 @@ Patterns can be any of:
 					if d827.Loc != LocImm && d827.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl634 := ctx.ReserveLabel()
 					lbl635 := ctx.ReserveLabel()
-					lbl636 := ctx.ReserveLabel()
 					if d827.Loc == LocImm {
 						if d827.Imm.Bool() {
-							ctx.MarkLabel(lbl635)
-							ctx.EmitJmp(lbl602)
+							ctx.MarkLabel(lbl634)
+							ctx.EmitJmp(lbl601)
 						} else {
-							ctx.MarkLabel(lbl636)
+							ctx.MarkLabel(lbl635)
 							ctx.SyncDesc(&d824)
 							if d824.Loc == LocReg {
 								ctx.ProtectReg(d824.Reg)
@@ -25335,15 +25275,15 @@ Patterns can be any of:
 								ctx.UnprotectReg(d824.Reg)
 								ctx.UnprotectReg(d824.Reg2)
 							}
-							ctx.EmitJmp(lbl603)
+							ctx.EmitJmp(lbl602)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d827.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl635)
-						ctx.EmitJmp(lbl636)
+						ctx.EmitJump(CondNotEqual, lbl634)
+						ctx.EmitJmp(lbl635)
+						ctx.MarkLabel(lbl634)
+						ctx.EmitJmp(lbl601)
 						ctx.MarkLabel(lbl635)
-						ctx.EmitJmp(lbl602)
-						ctx.MarkLabel(lbl636)
 						ctx.SyncDesc(&d824)
 						if d824.Loc == LocReg {
 							ctx.ProtectReg(d824.Reg)
@@ -25374,11 +25314,11 @@ Patterns can be any of:
 							ctx.UnprotectReg(d824.Reg)
 							ctx.UnprotectReg(d824.Reg2)
 						}
-						ctx.EmitJmp(lbl603)
+						ctx.EmitJmp(lbl602)
 					}
 					ctx.FreeDesc(&d826)
 					bbpos_14_19 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl603)
+					ctx.MarkLabel(lbl602)
 					ctx.ResolveFixups()
 					d748 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(0)}
 					d749 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(16)}
@@ -25403,28 +25343,28 @@ Patterns can be any of:
 					if d831.Loc != LocImm && d831.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl636 := ctx.ReserveLabel()
 					lbl637 := ctx.ReserveLabel()
-					lbl638 := ctx.ReserveLabel()
 					if d831.Loc == LocImm {
 						if d831.Imm.Bool() {
-							ctx.MarkLabel(lbl637)
-							ctx.EmitJmp(lbl606)
-						} else {
-							ctx.MarkLabel(lbl638)
+							ctx.MarkLabel(lbl636)
 							ctx.EmitJmp(lbl605)
+						} else {
+							ctx.MarkLabel(lbl637)
+							ctx.EmitJmp(lbl604)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d831.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl637)
-						ctx.EmitJmp(lbl638)
-						ctx.MarkLabel(lbl637)
-						ctx.EmitJmp(lbl606)
-						ctx.MarkLabel(lbl638)
+						ctx.EmitJump(CondNotEqual, lbl636)
+						ctx.EmitJmp(lbl637)
+						ctx.MarkLabel(lbl636)
 						ctx.EmitJmp(lbl605)
+						ctx.MarkLabel(lbl637)
+						ctx.EmitJmp(lbl604)
 					}
 					ctx.FreeDesc(&d830)
 					bbpos_14_21 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl605)
+					ctx.MarkLabel(lbl604)
 					ctx.ResolveFixups()
 					d748 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(0)}
 					d749 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(16)}
@@ -25578,28 +25518,28 @@ Patterns can be any of:
 					if d845.Loc != LocImm && d845.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl638 := ctx.ReserveLabel()
 					lbl639 := ctx.ReserveLabel()
-					lbl640 := ctx.ReserveLabel()
 					if d845.Loc == LocImm {
 						if d845.Imm.Bool() {
+							ctx.MarkLabel(lbl638)
+							ctx.EmitJmp(lbl614)
+						} else {
 							ctx.MarkLabel(lbl639)
 							ctx.EmitJmp(lbl615)
-						} else {
-							ctx.MarkLabel(lbl640)
-							ctx.EmitJmp(lbl616)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d845.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl639)
-						ctx.EmitJmp(lbl640)
+						ctx.EmitJump(CondNotEqual, lbl638)
+						ctx.EmitJmp(lbl639)
+						ctx.MarkLabel(lbl638)
+						ctx.EmitJmp(lbl614)
 						ctx.MarkLabel(lbl639)
 						ctx.EmitJmp(lbl615)
-						ctx.MarkLabel(lbl640)
-						ctx.EmitJmp(lbl616)
 					}
 					ctx.FreeDesc(&d844)
 					bbpos_14_32 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl616)
+					ctx.MarkLabel(lbl615)
 					ctx.ResolveFixups()
 					d748 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(0)}
 					d749 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(16)}
@@ -25611,9 +25551,9 @@ Patterns can be any of:
 					ctx.BindReg(r188, &d846)
 					ctx.BindReg(r189, &d846)
 					ctx.EmitMovPairToResult(&d839, &d846)
-					ctx.EmitJmp(lbl583)
+					ctx.EmitJmp(lbl582)
 					bbpos_14_12 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl596)
+					ctx.MarkLabel(lbl595)
 					ctx.ResolveFixups()
 					d748 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(0)}
 					d749 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(16)}
@@ -25716,9 +25656,9 @@ Patterns can be any of:
 					ctx.BindReg(r188, &d856)
 					ctx.BindReg(r189, &d856)
 					ctx.EmitMovPairToResult(&d855, &d856)
-					ctx.EmitJmp(lbl583)
+					ctx.EmitJmp(lbl582)
 					bbpos_14_18 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl602)
+					ctx.MarkLabel(lbl601)
 					ctx.ResolveFixups()
 					d748 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(0)}
 					d749 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(16)}
@@ -25797,9 +25737,9 @@ Patterns can be any of:
 						ctx.UnprotectReg(d859.Reg)
 						ctx.UnprotectReg(d859.Reg2)
 					}
-					ctx.EmitJmp(lbl603)
+					ctx.EmitJmp(lbl602)
 					bbpos_14_22 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl606)
+					ctx.MarkLabel(lbl605)
 					ctx.ResolveFixups()
 					d748 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(0)}
 					d749 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(16)}
@@ -25848,28 +25788,28 @@ Patterns can be any of:
 					if d866.Loc != LocImm && d866.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl640 := ctx.ReserveLabel()
 					lbl641 := ctx.ReserveLabel()
-					lbl642 := ctx.ReserveLabel()
 					if d866.Loc == LocImm {
 						if d866.Imm.Bool() {
+							ctx.MarkLabel(lbl640)
+							ctx.EmitJmp(lbl603)
+						} else {
 							ctx.MarkLabel(lbl641)
 							ctx.EmitJmp(lbl604)
-						} else {
-							ctx.MarkLabel(lbl642)
-							ctx.EmitJmp(lbl605)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d866.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl641)
-						ctx.EmitJmp(lbl642)
+						ctx.EmitJump(CondNotEqual, lbl640)
+						ctx.EmitJmp(lbl641)
+						ctx.MarkLabel(lbl640)
+						ctx.EmitJmp(lbl603)
 						ctx.MarkLabel(lbl641)
 						ctx.EmitJmp(lbl604)
-						ctx.MarkLabel(lbl642)
-						ctx.EmitJmp(lbl605)
 					}
 					ctx.FreeDesc(&d865)
 					bbpos_14_31 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl615)
+					ctx.MarkLabel(lbl614)
 					ctx.ResolveFixups()
 					d748 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(0)}
 					d749 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(16)}
@@ -25896,9 +25836,9 @@ Patterns can be any of:
 					ctx.BindReg(r188, &d868)
 					ctx.BindReg(r189, &d868)
 					ctx.EmitMovPairToResult(&d867, &d868)
-					ctx.EmitJmp(lbl583)
+					ctx.EmitJmp(lbl582)
 					bbpos_14_20 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl604)
+					ctx.MarkLabel(lbl603)
 					ctx.ResolveFixups()
 					d748 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(0)}
 					d749 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(16)}
@@ -26054,7 +25994,7 @@ Patterns can be any of:
 						ctx.UnprotectReg(d877.Reg2)
 					}
 					bbpos_14_23 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl607)
+					ctx.MarkLabel(lbl606)
 					ctx.ResolveFixups()
 					d748 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(0)}
 					d749 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(16)}
@@ -26101,26 +26041,26 @@ Patterns can be any of:
 					if d884.Loc != LocImm && d884.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
+					lbl642 := ctx.ReserveLabel()
 					lbl643 := ctx.ReserveLabel()
-					lbl644 := ctx.ReserveLabel()
 					if d884.Loc == LocImm {
 						if d884.Imm.Bool() {
+							ctx.MarkLabel(lbl642)
+							ctx.EmitJmp(lbl607)
+						} else {
 							ctx.MarkLabel(lbl643)
 							ctx.EmitJmp(lbl608)
-						} else {
-							ctx.MarkLabel(lbl644)
-							ctx.EmitJmp(lbl609)
 						}
 					} else {
-						ctx.EmitJump(d884.Condition, lbl643)
-						ctx.EmitJmp(lbl644)
+						ctx.EmitJump(d884.Condition, lbl642)
+						ctx.EmitJmp(lbl643)
+						ctx.MarkLabel(lbl642)
+						ctx.EmitJmp(lbl607)
 						ctx.MarkLabel(lbl643)
 						ctx.EmitJmp(lbl608)
-						ctx.MarkLabel(lbl644)
-						ctx.EmitJmp(lbl609)
 					}
 					bbpos_14_25 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl609)
+					ctx.MarkLabel(lbl608)
 					ctx.ResolveFixups()
 					d748 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(0)}
 					d749 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(16)}
@@ -26157,28 +26097,28 @@ Patterns can be any of:
 					if d890.Loc != LocImm && d890.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl644 := ctx.ReserveLabel()
 					lbl645 := ctx.ReserveLabel()
-					lbl646 := ctx.ReserveLabel()
 					if d890.Loc == LocImm {
 						if d890.Imm.Bool() {
-							ctx.MarkLabel(lbl645)
-							ctx.EmitJmp(lbl612)
-						} else {
-							ctx.MarkLabel(lbl646)
+							ctx.MarkLabel(lbl644)
 							ctx.EmitJmp(lbl611)
+						} else {
+							ctx.MarkLabel(lbl645)
+							ctx.EmitJmp(lbl610)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d890.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl645)
-						ctx.EmitJmp(lbl646)
-						ctx.MarkLabel(lbl645)
-						ctx.EmitJmp(lbl612)
-						ctx.MarkLabel(lbl646)
+						ctx.EmitJump(CondNotEqual, lbl644)
+						ctx.EmitJmp(lbl645)
+						ctx.MarkLabel(lbl644)
 						ctx.EmitJmp(lbl611)
+						ctx.MarkLabel(lbl645)
+						ctx.EmitJmp(lbl610)
 					}
 					ctx.FreeDesc(&d889)
 					bbpos_14_27 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl611)
+					ctx.MarkLabel(lbl610)
 					ctx.ResolveFixups()
 					d748 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(0)}
 					d749 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(16)}
@@ -26229,9 +26169,9 @@ Patterns can be any of:
 					d896 = d897
 					ctx.StabilizeDescForControlFlow(&d896)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EmitJmp(lbl607)
+					ctx.EmitJmp(lbl606)
 					bbpos_14_24 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl608)
+					ctx.MarkLabel(lbl607)
 					ctx.ResolveFixups()
 					d748 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(0)}
 					d749 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(16)}
@@ -26240,7 +26180,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.EmitGoPanic("jit: invalid arguments for inlined Go helper")
 					bbpos_14_28 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl612)
+					ctx.MarkLabel(lbl611)
 					ctx.ResolveFixups()
 					d748 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(0)}
 					d749 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(16)}
@@ -26289,28 +26229,28 @@ Patterns can be any of:
 					if d903.Loc != LocImm && d903.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl646 := ctx.ReserveLabel()
 					lbl647 := ctx.ReserveLabel()
-					lbl648 := ctx.ReserveLabel()
 					if d903.Loc == LocImm {
 						if d903.Imm.Bool() {
+							ctx.MarkLabel(lbl646)
+							ctx.EmitJmp(lbl609)
+						} else {
 							ctx.MarkLabel(lbl647)
 							ctx.EmitJmp(lbl610)
-						} else {
-							ctx.MarkLabel(lbl648)
-							ctx.EmitJmp(lbl611)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d903.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl647)
-						ctx.EmitJmp(lbl648)
+						ctx.EmitJump(CondNotEqual, lbl646)
+						ctx.EmitJmp(lbl647)
+						ctx.MarkLabel(lbl646)
+						ctx.EmitJmp(lbl609)
 						ctx.MarkLabel(lbl647)
 						ctx.EmitJmp(lbl610)
-						ctx.MarkLabel(lbl648)
-						ctx.EmitJmp(lbl611)
 					}
 					ctx.FreeDesc(&d902)
 					bbpos_14_26 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl610)
+					ctx.MarkLabel(lbl609)
 					ctx.ResolveFixups()
 					d748 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(0)}
 					d749 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(16)}
@@ -26462,28 +26402,28 @@ Patterns can be any of:
 					if d917.Loc != LocImm && d917.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl648 := ctx.ReserveLabel()
 					lbl649 := ctx.ReserveLabel()
-					lbl650 := ctx.ReserveLabel()
 					if d917.Loc == LocImm {
 						if d917.Imm.Bool() {
+							ctx.MarkLabel(lbl648)
+							ctx.EmitJmp(lbl612)
+						} else {
 							ctx.MarkLabel(lbl649)
 							ctx.EmitJmp(lbl613)
-						} else {
-							ctx.MarkLabel(lbl650)
-							ctx.EmitJmp(lbl614)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d917.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl649)
-						ctx.EmitJmp(lbl650)
+						ctx.EmitJump(CondNotEqual, lbl648)
+						ctx.EmitJmp(lbl649)
+						ctx.MarkLabel(lbl648)
+						ctx.EmitJmp(lbl612)
 						ctx.MarkLabel(lbl649)
 						ctx.EmitJmp(lbl613)
-						ctx.MarkLabel(lbl650)
-						ctx.EmitJmp(lbl614)
 					}
 					ctx.FreeDesc(&d916)
 					bbpos_14_30 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl614)
+					ctx.MarkLabel(lbl613)
 					ctx.ResolveFixups()
 					d748 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(0)}
 					d749 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(16)}
@@ -26495,9 +26435,9 @@ Patterns can be any of:
 					ctx.BindReg(r188, &d918)
 					ctx.BindReg(r189, &d918)
 					ctx.EmitMovPairToResult(&d911, &d918)
-					ctx.EmitJmp(lbl583)
+					ctx.EmitJmp(lbl582)
 					bbpos_14_29 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl613)
+					ctx.MarkLabel(lbl612)
 					ctx.ResolveFixups()
 					d748 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(0)}
 					d749 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase747) + int32(16)}
@@ -26524,8 +26464,8 @@ Patterns can be any of:
 					ctx.BindReg(r188, &d920)
 					ctx.BindReg(r189, &d920)
 					ctx.EmitMovPairToResult(&d919, &d920)
-					ctx.EmitJmp(lbl583)
-					ctx.MarkLabel(lbl583)
+					ctx.EmitJmp(lbl582)
+					ctx.MarkLabel(lbl582)
 					d921 = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: r188, Reg2: r189}
 					ctx.BindReg(r188, &d921)
 					ctx.BindReg(r189, &d921)
@@ -26564,9 +26504,9 @@ Patterns can be any of:
 					d926 = d927
 					ctx.StabilizeDescForControlFlow(&d926)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EmitJmp(lbl545)
+					ctx.EmitJmp(lbl544)
 					bbpos_13_17 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl553)
+					ctx.MarkLabel(lbl552)
 					ctx.ResolveFixups()
 					d689 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(0)}
 					d690 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(16)}
@@ -26611,26 +26551,26 @@ Patterns can be any of:
 					if d931.Loc != LocImm && d931.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
+					lbl650 := ctx.ReserveLabel()
 					lbl651 := ctx.ReserveLabel()
-					lbl652 := ctx.ReserveLabel()
 					if d931.Loc == LocImm {
 						if d931.Imm.Bool() {
+							ctx.MarkLabel(lbl650)
+							ctx.EmitJmp(lbl550)
+						} else {
 							ctx.MarkLabel(lbl651)
 							ctx.EmitJmp(lbl551)
-						} else {
-							ctx.MarkLabel(lbl652)
-							ctx.EmitJmp(lbl552)
 						}
 					} else {
-						ctx.EmitJump(d931.Condition, lbl651)
-						ctx.EmitJmp(lbl652)
+						ctx.EmitJump(d931.Condition, lbl650)
+						ctx.EmitJmp(lbl651)
+						ctx.MarkLabel(lbl650)
+						ctx.EmitJmp(lbl550)
 						ctx.MarkLabel(lbl651)
 						ctx.EmitJmp(lbl551)
-						ctx.MarkLabel(lbl652)
-						ctx.EmitJmp(lbl552)
 					}
 					bbpos_13_10 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl546)
+					ctx.MarkLabel(lbl545)
 					ctx.ResolveFixups()
 					d689 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(0)}
 					d690 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(16)}
@@ -26639,7 +26579,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.EmitGoPanic("jit: invalid arguments for inlined Go helper")
 					bbpos_13_14 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl550)
+					ctx.MarkLabel(lbl549)
 					ctx.ResolveFixups()
 					d689 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(0)}
 					d690 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(16)}
@@ -26688,28 +26628,28 @@ Patterns can be any of:
 					if d937.Loc != LocImm && d937.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl652 := ctx.ReserveLabel()
 					lbl653 := ctx.ReserveLabel()
-					lbl654 := ctx.ReserveLabel()
 					if d937.Loc == LocImm {
 						if d937.Imm.Bool() {
+							ctx.MarkLabel(lbl652)
+							ctx.EmitJmp(lbl547)
+						} else {
 							ctx.MarkLabel(lbl653)
 							ctx.EmitJmp(lbl548)
-						} else {
-							ctx.MarkLabel(lbl654)
-							ctx.EmitJmp(lbl549)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d937.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl653)
-						ctx.EmitJmp(lbl654)
+						ctx.EmitJump(CondNotEqual, lbl652)
+						ctx.EmitJmp(lbl653)
+						ctx.MarkLabel(lbl652)
+						ctx.EmitJmp(lbl547)
 						ctx.MarkLabel(lbl653)
 						ctx.EmitJmp(lbl548)
-						ctx.MarkLabel(lbl654)
-						ctx.EmitJmp(lbl549)
 					}
 					ctx.FreeDesc(&d936)
 					bbpos_13_15 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl551)
+					ctx.MarkLabel(lbl550)
 					ctx.ResolveFixups()
 					d689 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(0)}
 					d690 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(16)}
@@ -26746,14 +26686,14 @@ Patterns can be any of:
 					if d943.Loc != LocImm && d943.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl654 := ctx.ReserveLabel()
 					lbl655 := ctx.ReserveLabel()
-					lbl656 := ctx.ReserveLabel()
 					if d943.Loc == LocImm {
 						if d943.Imm.Bool() {
-							ctx.MarkLabel(lbl655)
-							ctx.EmitJmp(lbl554)
+							ctx.MarkLabel(lbl654)
+							ctx.EmitJmp(lbl553)
 						} else {
-							ctx.MarkLabel(lbl656)
+							ctx.MarkLabel(lbl655)
 							ctx.SyncDesc(&d940)
 							if d940.Loc == LocReg {
 								ctx.ProtectReg(d940.Reg)
@@ -26784,15 +26724,15 @@ Patterns can be any of:
 								ctx.UnprotectReg(d940.Reg)
 								ctx.UnprotectReg(d940.Reg2)
 							}
-							ctx.EmitJmp(lbl555)
+							ctx.EmitJmp(lbl554)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d943.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl655)
-						ctx.EmitJmp(lbl656)
+						ctx.EmitJump(CondNotEqual, lbl654)
+						ctx.EmitJmp(lbl655)
+						ctx.MarkLabel(lbl654)
+						ctx.EmitJmp(lbl553)
 						ctx.MarkLabel(lbl655)
-						ctx.EmitJmp(lbl554)
-						ctx.MarkLabel(lbl656)
 						ctx.SyncDesc(&d940)
 						if d940.Loc == LocReg {
 							ctx.ProtectReg(d940.Reg)
@@ -26823,11 +26763,11 @@ Patterns can be any of:
 							ctx.UnprotectReg(d940.Reg)
 							ctx.UnprotectReg(d940.Reg2)
 						}
-						ctx.EmitJmp(lbl555)
+						ctx.EmitJmp(lbl554)
 					}
 					ctx.FreeDesc(&d942)
 					bbpos_13_19 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl555)
+					ctx.MarkLabel(lbl554)
 					ctx.ResolveFixups()
 					d689 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(0)}
 					d690 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(16)}
@@ -26852,28 +26792,28 @@ Patterns can be any of:
 					if d947.Loc != LocImm && d947.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl656 := ctx.ReserveLabel()
 					lbl657 := ctx.ReserveLabel()
-					lbl658 := ctx.ReserveLabel()
 					if d947.Loc == LocImm {
 						if d947.Imm.Bool() {
-							ctx.MarkLabel(lbl657)
-							ctx.EmitJmp(lbl558)
-						} else {
-							ctx.MarkLabel(lbl658)
+							ctx.MarkLabel(lbl656)
 							ctx.EmitJmp(lbl557)
+						} else {
+							ctx.MarkLabel(lbl657)
+							ctx.EmitJmp(lbl556)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d947.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl657)
-						ctx.EmitJmp(lbl658)
-						ctx.MarkLabel(lbl657)
-						ctx.EmitJmp(lbl558)
-						ctx.MarkLabel(lbl658)
+						ctx.EmitJump(CondNotEqual, lbl656)
+						ctx.EmitJmp(lbl657)
+						ctx.MarkLabel(lbl656)
 						ctx.EmitJmp(lbl557)
+						ctx.MarkLabel(lbl657)
+						ctx.EmitJmp(lbl556)
 					}
 					ctx.FreeDesc(&d946)
 					bbpos_13_21 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl557)
+					ctx.MarkLabel(lbl556)
 					ctx.ResolveFixups()
 					d689 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(0)}
 					d690 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(16)}
@@ -27027,28 +26967,28 @@ Patterns can be any of:
 					if d961.Loc != LocImm && d961.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl658 := ctx.ReserveLabel()
 					lbl659 := ctx.ReserveLabel()
-					lbl660 := ctx.ReserveLabel()
 					if d961.Loc == LocImm {
 						if d961.Imm.Bool() {
+							ctx.MarkLabel(lbl658)
+							ctx.EmitJmp(lbl566)
+						} else {
 							ctx.MarkLabel(lbl659)
 							ctx.EmitJmp(lbl567)
-						} else {
-							ctx.MarkLabel(lbl660)
-							ctx.EmitJmp(lbl568)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d961.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl659)
-						ctx.EmitJmp(lbl660)
+						ctx.EmitJump(CondNotEqual, lbl658)
+						ctx.EmitJmp(lbl659)
+						ctx.MarkLabel(lbl658)
+						ctx.EmitJmp(lbl566)
 						ctx.MarkLabel(lbl659)
 						ctx.EmitJmp(lbl567)
-						ctx.MarkLabel(lbl660)
-						ctx.EmitJmp(lbl568)
 					}
 					ctx.FreeDesc(&d960)
 					bbpos_13_32 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl568)
+					ctx.MarkLabel(lbl567)
 					ctx.ResolveFixups()
 					d689 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(0)}
 					d690 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(16)}
@@ -27060,9 +27000,9 @@ Patterns can be any of:
 					ctx.BindReg(r173, &d962)
 					ctx.BindReg(r174, &d962)
 					ctx.EmitMovPairToResult(&d955, &d962)
-					ctx.EmitJmp(lbl535)
+					ctx.EmitJmp(lbl534)
 					bbpos_13_12 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl548)
+					ctx.MarkLabel(lbl547)
 					ctx.ResolveFixups()
 					d689 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(0)}
 					d690 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(16)}
@@ -27165,9 +27105,9 @@ Patterns can be any of:
 					ctx.BindReg(r173, &d972)
 					ctx.BindReg(r174, &d972)
 					ctx.EmitMovPairToResult(&d971, &d972)
-					ctx.EmitJmp(lbl535)
+					ctx.EmitJmp(lbl534)
 					bbpos_13_18 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl554)
+					ctx.MarkLabel(lbl553)
 					ctx.ResolveFixups()
 					d689 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(0)}
 					d690 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(16)}
@@ -27246,9 +27186,9 @@ Patterns can be any of:
 						ctx.UnprotectReg(d975.Reg)
 						ctx.UnprotectReg(d975.Reg2)
 					}
-					ctx.EmitJmp(lbl555)
+					ctx.EmitJmp(lbl554)
 					bbpos_13_22 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl558)
+					ctx.MarkLabel(lbl557)
 					ctx.ResolveFixups()
 					d689 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(0)}
 					d690 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(16)}
@@ -27297,28 +27237,28 @@ Patterns can be any of:
 					if d982.Loc != LocImm && d982.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl660 := ctx.ReserveLabel()
 					lbl661 := ctx.ReserveLabel()
-					lbl662 := ctx.ReserveLabel()
 					if d982.Loc == LocImm {
 						if d982.Imm.Bool() {
+							ctx.MarkLabel(lbl660)
+							ctx.EmitJmp(lbl555)
+						} else {
 							ctx.MarkLabel(lbl661)
 							ctx.EmitJmp(lbl556)
-						} else {
-							ctx.MarkLabel(lbl662)
-							ctx.EmitJmp(lbl557)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d982.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl661)
-						ctx.EmitJmp(lbl662)
+						ctx.EmitJump(CondNotEqual, lbl660)
+						ctx.EmitJmp(lbl661)
+						ctx.MarkLabel(lbl660)
+						ctx.EmitJmp(lbl555)
 						ctx.MarkLabel(lbl661)
 						ctx.EmitJmp(lbl556)
-						ctx.MarkLabel(lbl662)
-						ctx.EmitJmp(lbl557)
 					}
 					ctx.FreeDesc(&d981)
 					bbpos_13_31 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl567)
+					ctx.MarkLabel(lbl566)
 					ctx.ResolveFixups()
 					d689 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(0)}
 					d690 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(16)}
@@ -27345,9 +27285,9 @@ Patterns can be any of:
 					ctx.BindReg(r173, &d984)
 					ctx.BindReg(r174, &d984)
 					ctx.EmitMovPairToResult(&d983, &d984)
-					ctx.EmitJmp(lbl535)
+					ctx.EmitJmp(lbl534)
 					bbpos_13_20 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl556)
+					ctx.MarkLabel(lbl555)
 					ctx.ResolveFixups()
 					d689 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(0)}
 					d690 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(16)}
@@ -27503,7 +27443,7 @@ Patterns can be any of:
 						ctx.UnprotectReg(d993.Reg2)
 					}
 					bbpos_13_23 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl559)
+					ctx.MarkLabel(lbl558)
 					ctx.ResolveFixups()
 					d689 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(0)}
 					d690 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(16)}
@@ -27550,26 +27490,26 @@ Patterns can be any of:
 					if d1000.Loc != LocImm && d1000.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
+					lbl662 := ctx.ReserveLabel()
 					lbl663 := ctx.ReserveLabel()
-					lbl664 := ctx.ReserveLabel()
 					if d1000.Loc == LocImm {
 						if d1000.Imm.Bool() {
+							ctx.MarkLabel(lbl662)
+							ctx.EmitJmp(lbl559)
+						} else {
 							ctx.MarkLabel(lbl663)
 							ctx.EmitJmp(lbl560)
-						} else {
-							ctx.MarkLabel(lbl664)
-							ctx.EmitJmp(lbl561)
 						}
 					} else {
-						ctx.EmitJump(d1000.Condition, lbl663)
-						ctx.EmitJmp(lbl664)
+						ctx.EmitJump(d1000.Condition, lbl662)
+						ctx.EmitJmp(lbl663)
+						ctx.MarkLabel(lbl662)
+						ctx.EmitJmp(lbl559)
 						ctx.MarkLabel(lbl663)
 						ctx.EmitJmp(lbl560)
-						ctx.MarkLabel(lbl664)
-						ctx.EmitJmp(lbl561)
 					}
 					bbpos_13_25 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl561)
+					ctx.MarkLabel(lbl560)
 					ctx.ResolveFixups()
 					d689 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(0)}
 					d690 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(16)}
@@ -27606,28 +27546,28 @@ Patterns can be any of:
 					if d1006.Loc != LocImm && d1006.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl664 := ctx.ReserveLabel()
 					lbl665 := ctx.ReserveLabel()
-					lbl666 := ctx.ReserveLabel()
 					if d1006.Loc == LocImm {
 						if d1006.Imm.Bool() {
-							ctx.MarkLabel(lbl665)
-							ctx.EmitJmp(lbl564)
-						} else {
-							ctx.MarkLabel(lbl666)
+							ctx.MarkLabel(lbl664)
 							ctx.EmitJmp(lbl563)
+						} else {
+							ctx.MarkLabel(lbl665)
+							ctx.EmitJmp(lbl562)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d1006.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl665)
-						ctx.EmitJmp(lbl666)
-						ctx.MarkLabel(lbl665)
-						ctx.EmitJmp(lbl564)
-						ctx.MarkLabel(lbl666)
+						ctx.EmitJump(CondNotEqual, lbl664)
+						ctx.EmitJmp(lbl665)
+						ctx.MarkLabel(lbl664)
 						ctx.EmitJmp(lbl563)
+						ctx.MarkLabel(lbl665)
+						ctx.EmitJmp(lbl562)
 					}
 					ctx.FreeDesc(&d1005)
 					bbpos_13_27 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl563)
+					ctx.MarkLabel(lbl562)
 					ctx.ResolveFixups()
 					d689 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(0)}
 					d690 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(16)}
@@ -27678,9 +27618,9 @@ Patterns can be any of:
 					d1012 = d1013
 					ctx.StabilizeDescForControlFlow(&d1012)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EmitJmp(lbl559)
+					ctx.EmitJmp(lbl558)
 					bbpos_13_24 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl560)
+					ctx.MarkLabel(lbl559)
 					ctx.ResolveFixups()
 					d689 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(0)}
 					d690 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(16)}
@@ -27689,7 +27629,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.EmitGoPanic("jit: invalid arguments for inlined Go helper")
 					bbpos_13_28 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl564)
+					ctx.MarkLabel(lbl563)
 					ctx.ResolveFixups()
 					d689 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(0)}
 					d690 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(16)}
@@ -27738,28 +27678,28 @@ Patterns can be any of:
 					if d1019.Loc != LocImm && d1019.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl666 := ctx.ReserveLabel()
 					lbl667 := ctx.ReserveLabel()
-					lbl668 := ctx.ReserveLabel()
 					if d1019.Loc == LocImm {
 						if d1019.Imm.Bool() {
+							ctx.MarkLabel(lbl666)
+							ctx.EmitJmp(lbl561)
+						} else {
 							ctx.MarkLabel(lbl667)
 							ctx.EmitJmp(lbl562)
-						} else {
-							ctx.MarkLabel(lbl668)
-							ctx.EmitJmp(lbl563)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d1019.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl667)
-						ctx.EmitJmp(lbl668)
+						ctx.EmitJump(CondNotEqual, lbl666)
+						ctx.EmitJmp(lbl667)
+						ctx.MarkLabel(lbl666)
+						ctx.EmitJmp(lbl561)
 						ctx.MarkLabel(lbl667)
 						ctx.EmitJmp(lbl562)
-						ctx.MarkLabel(lbl668)
-						ctx.EmitJmp(lbl563)
 					}
 					ctx.FreeDesc(&d1018)
 					bbpos_13_26 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl562)
+					ctx.MarkLabel(lbl561)
 					ctx.ResolveFixups()
 					d689 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(0)}
 					d690 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(16)}
@@ -27911,28 +27851,28 @@ Patterns can be any of:
 					if d1033.Loc != LocImm && d1033.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl668 := ctx.ReserveLabel()
 					lbl669 := ctx.ReserveLabel()
-					lbl670 := ctx.ReserveLabel()
 					if d1033.Loc == LocImm {
 						if d1033.Imm.Bool() {
+							ctx.MarkLabel(lbl668)
+							ctx.EmitJmp(lbl564)
+						} else {
 							ctx.MarkLabel(lbl669)
 							ctx.EmitJmp(lbl565)
-						} else {
-							ctx.MarkLabel(lbl670)
-							ctx.EmitJmp(lbl566)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d1033.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl669)
-						ctx.EmitJmp(lbl670)
+						ctx.EmitJump(CondNotEqual, lbl668)
+						ctx.EmitJmp(lbl669)
+						ctx.MarkLabel(lbl668)
+						ctx.EmitJmp(lbl564)
 						ctx.MarkLabel(lbl669)
 						ctx.EmitJmp(lbl565)
-						ctx.MarkLabel(lbl670)
-						ctx.EmitJmp(lbl566)
 					}
 					ctx.FreeDesc(&d1032)
 					bbpos_13_30 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl566)
+					ctx.MarkLabel(lbl565)
 					ctx.ResolveFixups()
 					d689 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(0)}
 					d690 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(16)}
@@ -27944,9 +27884,9 @@ Patterns can be any of:
 					ctx.BindReg(r173, &d1034)
 					ctx.BindReg(r174, &d1034)
 					ctx.EmitMovPairToResult(&d1027, &d1034)
-					ctx.EmitJmp(lbl535)
+					ctx.EmitJmp(lbl534)
 					bbpos_13_29 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl565)
+					ctx.MarkLabel(lbl564)
 					ctx.ResolveFixups()
 					d689 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(0)}
 					d690 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase688) + int32(16)}
@@ -27973,8 +27913,8 @@ Patterns can be any of:
 					ctx.BindReg(r173, &d1036)
 					ctx.BindReg(r174, &d1036)
 					ctx.EmitMovPairToResult(&d1035, &d1036)
-					ctx.EmitJmp(lbl535)
-					ctx.MarkLabel(lbl535)
+					ctx.EmitJmp(lbl534)
+					ctx.MarkLabel(lbl534)
 					d1037 = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: r173, Reg2: r174}
 					ctx.BindReg(r173, &d1037)
 					ctx.BindReg(r174, &d1037)
@@ -28013,9 +27953,9 @@ Patterns can be any of:
 					d1042 = d1043
 					ctx.StabilizeDescForControlFlow(&d1042)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EmitJmp(lbl497)
+					ctx.EmitJmp(lbl496)
 					bbpos_12_17 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl505)
+					ctx.MarkLabel(lbl504)
 					ctx.ResolveFixups()
 					d630 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase629) + int32(0)}
 					d631 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase629) + int32(16)}
@@ -28060,26 +28000,26 @@ Patterns can be any of:
 					if d1047.Loc != LocImm && d1047.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
+					lbl670 := ctx.ReserveLabel()
 					lbl671 := ctx.ReserveLabel()
-					lbl672 := ctx.ReserveLabel()
 					if d1047.Loc == LocImm {
 						if d1047.Imm.Bool() {
+							ctx.MarkLabel(lbl670)
+							ctx.EmitJmp(lbl502)
+						} else {
 							ctx.MarkLabel(lbl671)
 							ctx.EmitJmp(lbl503)
-						} else {
-							ctx.MarkLabel(lbl672)
-							ctx.EmitJmp(lbl504)
 						}
 					} else {
-						ctx.EmitJump(d1047.Condition, lbl671)
-						ctx.EmitJmp(lbl672)
+						ctx.EmitJump(d1047.Condition, lbl670)
+						ctx.EmitJmp(lbl671)
+						ctx.MarkLabel(lbl670)
+						ctx.EmitJmp(lbl502)
 						ctx.MarkLabel(lbl671)
 						ctx.EmitJmp(lbl503)
-						ctx.MarkLabel(lbl672)
-						ctx.EmitJmp(lbl504)
 					}
 					bbpos_12_10 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl498)
+					ctx.MarkLabel(lbl497)
 					ctx.ResolveFixups()
 					d630 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase629) + int32(0)}
 					d631 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase629) + int32(16)}
@@ -28088,7 +28028,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.EmitGoPanic("jit: invalid arguments for inlined Go helper")
 					bbpos_12_14 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl502)
+					ctx.MarkLabel(lbl501)
 					ctx.ResolveFixups()
 					d630 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase629) + int32(0)}
 					d631 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase629) + int32(16)}
@@ -28137,28 +28077,28 @@ Patterns can be any of:
 					if d1053.Loc != LocImm && d1053.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl672 := ctx.ReserveLabel()
 					lbl673 := ctx.ReserveLabel()
-					lbl674 := ctx.ReserveLabel()
 					if d1053.Loc == LocImm {
 						if d1053.Imm.Bool() {
+							ctx.MarkLabel(lbl672)
+							ctx.EmitJmp(lbl499)
+						} else {
 							ctx.MarkLabel(lbl673)
 							ctx.EmitJmp(lbl500)
-						} else {
-							ctx.MarkLabel(lbl674)
-							ctx.EmitJmp(lbl501)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d1053.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl673)
-						ctx.EmitJmp(lbl674)
+						ctx.EmitJump(CondNotEqual, lbl672)
+						ctx.EmitJmp(lbl673)
+						ctx.MarkLabel(lbl672)
+						ctx.EmitJmp(lbl499)
 						ctx.MarkLabel(lbl673)
 						ctx.EmitJmp(lbl500)
-						ctx.MarkLabel(lbl674)
-						ctx.EmitJmp(lbl501)
 					}
 					ctx.FreeDesc(&d1052)
 					bbpos_12_15 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl503)
+					ctx.MarkLabel(lbl502)
 					ctx.ResolveFixups()
 					d630 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase629) + int32(0)}
 					d631 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase629) + int32(16)}
@@ -28195,14 +28135,14 @@ Patterns can be any of:
 					if d1059.Loc != LocImm && d1059.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl674 := ctx.ReserveLabel()
 					lbl675 := ctx.ReserveLabel()
-					lbl676 := ctx.ReserveLabel()
 					if d1059.Loc == LocImm {
 						if d1059.Imm.Bool() {
-							ctx.MarkLabel(lbl675)
-							ctx.EmitJmp(lbl506)
+							ctx.MarkLabel(lbl674)
+							ctx.EmitJmp(lbl505)
 						} else {
-							ctx.MarkLabel(lbl676)
+							ctx.MarkLabel(lbl675)
 							ctx.SyncDesc(&d1056)
 							if d1056.Loc == LocReg {
 								ctx.ProtectReg(d1056.Reg)
@@ -28233,15 +28173,15 @@ Patterns can be any of:
 								ctx.UnprotectReg(d1056.Reg)
 								ctx.UnprotectReg(d1056.Reg2)
 							}
-							ctx.EmitJmp(lbl507)
+							ctx.EmitJmp(lbl506)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d1059.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl675)
-						ctx.EmitJmp(lbl676)
+						ctx.EmitJump(CondNotEqual, lbl674)
+						ctx.EmitJmp(lbl675)
+						ctx.MarkLabel(lbl674)
+						ctx.EmitJmp(lbl505)
 						ctx.MarkLabel(lbl675)
-						ctx.EmitJmp(lbl506)
-						ctx.MarkLabel(lbl676)
 						ctx.SyncDesc(&d1056)
 						if d1056.Loc == LocReg {
 							ctx.ProtectReg(d1056.Reg)
@@ -28272,11 +28212,11 @@ Patterns can be any of:
 							ctx.UnprotectReg(d1056.Reg)
 							ctx.UnprotectReg(d1056.Reg2)
 						}
-						ctx.EmitJmp(lbl507)
+						ctx.EmitJmp(lbl506)
 					}
 					ctx.FreeDesc(&d1058)
 					bbpos_12_19 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl507)
+					ctx.MarkLabel(lbl506)
 					ctx.ResolveFixups()
 					d630 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase629) + int32(0)}
 					d631 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase629) + int32(16)}
@@ -28301,28 +28241,28 @@ Patterns can be any of:
 					if d1063.Loc != LocImm && d1063.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl676 := ctx.ReserveLabel()
 					lbl677 := ctx.ReserveLabel()
-					lbl678 := ctx.ReserveLabel()
 					if d1063.Loc == LocImm {
 						if d1063.Imm.Bool() {
-							ctx.MarkLabel(lbl677)
-							ctx.EmitJmp(lbl510)
-						} else {
-							ctx.MarkLabel(lbl678)
+							ctx.MarkLabel(lbl676)
 							ctx.EmitJmp(lbl509)
+						} else {
+							ctx.MarkLabel(lbl677)
+							ctx.EmitJmp(lbl508)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d1063.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl677)
-						ctx.EmitJmp(lbl678)
-						ctx.MarkLabel(lbl677)
-						ctx.EmitJmp(lbl510)
-						ctx.MarkLabel(lbl678)
+						ctx.EmitJump(CondNotEqual, lbl676)
+						ctx.EmitJmp(lbl677)
+						ctx.MarkLabel(lbl676)
 						ctx.EmitJmp(lbl509)
+						ctx.MarkLabel(lbl677)
+						ctx.EmitJmp(lbl508)
 					}
 					ctx.FreeDesc(&d1062)
 					bbpos_12_21 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl509)
+					ctx.MarkLabel(lbl508)
 					ctx.ResolveFixups()
 					d630 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase629) + int32(0)}
 					d631 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase629) + int32(16)}
@@ -28476,28 +28416,28 @@ Patterns can be any of:
 					if d1077.Loc != LocImm && d1077.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl678 := ctx.ReserveLabel()
 					lbl679 := ctx.ReserveLabel()
-					lbl680 := ctx.ReserveLabel()
 					if d1077.Loc == LocImm {
 						if d1077.Imm.Bool() {
+							ctx.MarkLabel(lbl678)
+							ctx.EmitJmp(lbl518)
+						} else {
 							ctx.MarkLabel(lbl679)
 							ctx.EmitJmp(lbl519)
-						} else {
-							ctx.MarkLabel(lbl680)
-							ctx.EmitJmp(lbl520)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d1077.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl679)
-						ctx.EmitJmp(lbl680)
+						ctx.EmitJump(CondNotEqual, lbl678)
+						ctx.EmitJmp(lbl679)
+						ctx.MarkLabel(lbl678)
+						ctx.EmitJmp(lbl518)
 						ctx.MarkLabel(lbl679)
 						ctx.EmitJmp(lbl519)
-						ctx.MarkLabel(lbl680)
-						ctx.EmitJmp(lbl520)
 					}
 					ctx.FreeDesc(&d1076)
 					bbpos_12_32 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl520)
+					ctx.MarkLabel(lbl519)
 					ctx.ResolveFixups()
 					d630 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase629) + int32(0)}
 					d631 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase629) + int32(16)}
@@ -28509,9 +28449,9 @@ Patterns can be any of:
 					ctx.BindReg(r158, &d1078)
 					ctx.BindReg(r159, &d1078)
 					ctx.EmitMovPairToResult(&d1071, &d1078)
-					ctx.EmitJmp(lbl487)
+					ctx.EmitJmp(lbl486)
 					bbpos_12_12 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl500)
+					ctx.MarkLabel(lbl499)
 					ctx.ResolveFixups()
 					d630 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase629) + int32(0)}
 					d631 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase629) + int32(16)}
@@ -28614,9 +28554,9 @@ Patterns can be any of:
 					ctx.BindReg(r158, &d1088)
 					ctx.BindReg(r159, &d1088)
 					ctx.EmitMovPairToResult(&d1087, &d1088)
-					ctx.EmitJmp(lbl487)
+					ctx.EmitJmp(lbl486)
 					bbpos_12_18 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl506)
+					ctx.MarkLabel(lbl505)
 					ctx.ResolveFixups()
 					d630 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase629) + int32(0)}
 					d631 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase629) + int32(16)}
@@ -28695,9 +28635,9 @@ Patterns can be any of:
 						ctx.UnprotectReg(d1091.Reg)
 						ctx.UnprotectReg(d1091.Reg2)
 					}
-					ctx.EmitJmp(lbl507)
+					ctx.EmitJmp(lbl506)
 					bbpos_12_22 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl510)
+					ctx.MarkLabel(lbl509)
 					ctx.ResolveFixups()
 					d630 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase629) + int32(0)}
 					d631 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase629) + int32(16)}
@@ -28746,28 +28686,28 @@ Patterns can be any of:
 					if d1098.Loc != LocImm && d1098.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl680 := ctx.ReserveLabel()
 					lbl681 := ctx.ReserveLabel()
-					lbl682 := ctx.ReserveLabel()
 					if d1098.Loc == LocImm {
 						if d1098.Imm.Bool() {
+							ctx.MarkLabel(lbl680)
+							ctx.EmitJmp(lbl507)
+						} else {
 							ctx.MarkLabel(lbl681)
 							ctx.EmitJmp(lbl508)
-						} else {
-							ctx.MarkLabel(lbl682)
-							ctx.EmitJmp(lbl509)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d1098.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl681)
-						ctx.EmitJmp(lbl682)
+						ctx.EmitJump(CondNotEqual, lbl680)
+						ctx.EmitJmp(lbl681)
+						ctx.MarkLabel(lbl680)
+						ctx.EmitJmp(lbl507)
 						ctx.MarkLabel(lbl681)
 						ctx.EmitJmp(lbl508)
-						ctx.MarkLabel(lbl682)
-						ctx.EmitJmp(lbl509)
 					}
 					ctx.FreeDesc(&d1097)
 					bbpos_12_31 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl519)
+					ctx.MarkLabel(lbl518)
 					ctx.ResolveFixups()
 					d630 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase629) + int32(0)}
 					d631 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase629) + int32(16)}
@@ -28794,9 +28734,9 @@ Patterns can be any of:
 					ctx.BindReg(r158, &d1100)
 					ctx.BindReg(r159, &d1100)
 					ctx.EmitMovPairToResult(&d1099, &d1100)
-					ctx.EmitJmp(lbl487)
+					ctx.EmitJmp(lbl486)
 					bbpos_12_20 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl508)
+					ctx.MarkLabel(lbl507)
 					ctx.ResolveFixups()
 					d630 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase629) + int32(0)}
 					d631 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase629) + int32(16)}
@@ -28952,7 +28892,7 @@ Patterns can be any of:
 						ctx.UnprotectReg(d1109.Reg2)
 					}
 					bbpos_12_23 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl511)
+					ctx.MarkLabel(lbl510)
 					ctx.ResolveFixups()
 					d630 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase629) + int32(0)}
 					d631 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase629) + int32(16)}
@@ -28999,26 +28939,26 @@ Patterns can be any of:
 					if d1116.Loc != LocImm && d1116.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
+					lbl682 := ctx.ReserveLabel()
 					lbl683 := ctx.ReserveLabel()
-					lbl684 := ctx.ReserveLabel()
 					if d1116.Loc == LocImm {
 						if d1116.Imm.Bool() {
+							ctx.MarkLabel(lbl682)
+							ctx.EmitJmp(lbl511)
+						} else {
 							ctx.MarkLabel(lbl683)
 							ctx.EmitJmp(lbl512)
-						} else {
-							ctx.MarkLabel(lbl684)
-							ctx.EmitJmp(lbl513)
 						}
 					} else {
-						ctx.EmitJump(d1116.Condition, lbl683)
-						ctx.EmitJmp(lbl684)
+						ctx.EmitJump(d1116.Condition, lbl682)
+						ctx.EmitJmp(lbl683)
+						ctx.MarkLabel(lbl682)
+						ctx.EmitJmp(lbl511)
 						ctx.MarkLabel(lbl683)
 						ctx.EmitJmp(lbl512)
-						ctx.MarkLabel(lbl684)
-						ctx.EmitJmp(lbl513)
 					}
 					bbpos_12_25 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl513)
+					ctx.MarkLabel(lbl512)
 					ctx.ResolveFixups()
 					d630 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase629) + int32(0)}
 					d631 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase629) + int32(16)}
@@ -29055,28 +28995,28 @@ Patterns can be any of:
 					if d1122.Loc != LocImm && d1122.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl684 := ctx.ReserveLabel()
 					lbl685 := ctx.ReserveLabel()
-					lbl686 := ctx.ReserveLabel()
 					if d1122.Loc == LocImm {
 						if d1122.Imm.Bool() {
-							ctx.MarkLabel(lbl685)
-							ctx.EmitJmp(lbl516)
-						} else {
-							ctx.MarkLabel(lbl686)
+							ctx.MarkLabel(lbl684)
 							ctx.EmitJmp(lbl515)
+						} else {
+							ctx.MarkLabel(lbl685)
+							ctx.EmitJmp(lbl514)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d1122.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl685)
-						ctx.EmitJmp(lbl686)
-						ctx.MarkLabel(lbl685)
-						ctx.EmitJmp(lbl516)
-						ctx.MarkLabel(lbl686)
+						ctx.EmitJump(CondNotEqual, lbl684)
+						ctx.EmitJmp(lbl685)
+						ctx.MarkLabel(lbl684)
 						ctx.EmitJmp(lbl515)
+						ctx.MarkLabel(lbl685)
+						ctx.EmitJmp(lbl514)
 					}
 					ctx.FreeDesc(&d1121)
 					bbpos_12_27 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl515)
+					ctx.MarkLabel(lbl514)
 					ctx.ResolveFixups()
 					d630 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase629) + int32(0)}
 					d631 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase629) + int32(16)}
@@ -29127,9 +29067,9 @@ Patterns can be any of:
 					d1128 = d1129
 					ctx.StabilizeDescForControlFlow(&d1128)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EmitJmp(lbl511)
+					ctx.EmitJmp(lbl510)
 					bbpos_12_24 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl512)
+					ctx.MarkLabel(lbl511)
 					ctx.ResolveFixups()
 					d630 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase629) + int32(0)}
 					d631 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase629) + int32(16)}
@@ -29138,7 +29078,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.EmitGoPanic("jit: invalid arguments for inlined Go helper")
 					bbpos_12_28 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl516)
+					ctx.MarkLabel(lbl515)
 					ctx.ResolveFixups()
 					d630 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase629) + int32(0)}
 					d631 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase629) + int32(16)}
@@ -29187,28 +29127,28 @@ Patterns can be any of:
 					if d1135.Loc != LocImm && d1135.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl686 := ctx.ReserveLabel()
 					lbl687 := ctx.ReserveLabel()
-					lbl688 := ctx.ReserveLabel()
 					if d1135.Loc == LocImm {
 						if d1135.Imm.Bool() {
+							ctx.MarkLabel(lbl686)
+							ctx.EmitJmp(lbl513)
+						} else {
 							ctx.MarkLabel(lbl687)
 							ctx.EmitJmp(lbl514)
-						} else {
-							ctx.MarkLabel(lbl688)
-							ctx.EmitJmp(lbl515)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d1135.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl687)
-						ctx.EmitJmp(lbl688)
+						ctx.EmitJump(CondNotEqual, lbl686)
+						ctx.EmitJmp(lbl687)
+						ctx.MarkLabel(lbl686)
+						ctx.EmitJmp(lbl513)
 						ctx.MarkLabel(lbl687)
 						ctx.EmitJmp(lbl514)
-						ctx.MarkLabel(lbl688)
-						ctx.EmitJmp(lbl515)
 					}
 					ctx.FreeDesc(&d1134)
 					bbpos_12_26 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl514)
+					ctx.MarkLabel(lbl513)
 					ctx.ResolveFixups()
 					d630 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase629) + int32(0)}
 					d631 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase629) + int32(16)}
@@ -29360,28 +29300,28 @@ Patterns can be any of:
 					if d1149.Loc != LocImm && d1149.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl688 := ctx.ReserveLabel()
 					lbl689 := ctx.ReserveLabel()
-					lbl690 := ctx.ReserveLabel()
 					if d1149.Loc == LocImm {
 						if d1149.Imm.Bool() {
+							ctx.MarkLabel(lbl688)
+							ctx.EmitJmp(lbl516)
+						} else {
 							ctx.MarkLabel(lbl689)
 							ctx.EmitJmp(lbl517)
-						} else {
-							ctx.MarkLabel(lbl690)
-							ctx.EmitJmp(lbl518)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d1149.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl689)
-						ctx.EmitJmp(lbl690)
+						ctx.EmitJump(CondNotEqual, lbl688)
+						ctx.EmitJmp(lbl689)
+						ctx.MarkLabel(lbl688)
+						ctx.EmitJmp(lbl516)
 						ctx.MarkLabel(lbl689)
 						ctx.EmitJmp(lbl517)
-						ctx.MarkLabel(lbl690)
-						ctx.EmitJmp(lbl518)
 					}
 					ctx.FreeDesc(&d1148)
 					bbpos_12_30 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl518)
+					ctx.MarkLabel(lbl517)
 					ctx.ResolveFixups()
 					d630 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase629) + int32(0)}
 					d631 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase629) + int32(16)}
@@ -29393,9 +29333,9 @@ Patterns can be any of:
 					ctx.BindReg(r158, &d1150)
 					ctx.BindReg(r159, &d1150)
 					ctx.EmitMovPairToResult(&d1143, &d1150)
-					ctx.EmitJmp(lbl487)
+					ctx.EmitJmp(lbl486)
 					bbpos_12_29 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl517)
+					ctx.MarkLabel(lbl516)
 					ctx.ResolveFixups()
 					d630 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase629) + int32(0)}
 					d631 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase629) + int32(16)}
@@ -29422,8 +29362,8 @@ Patterns can be any of:
 					ctx.BindReg(r158, &d1152)
 					ctx.BindReg(r159, &d1152)
 					ctx.EmitMovPairToResult(&d1151, &d1152)
-					ctx.EmitJmp(lbl487)
-					ctx.MarkLabel(lbl487)
+					ctx.EmitJmp(lbl486)
+					ctx.MarkLabel(lbl486)
 					d1153 = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: r158, Reg2: r159}
 					ctx.BindReg(r158, &d1153)
 					ctx.BindReg(r159, &d1153)
@@ -29462,9 +29402,9 @@ Patterns can be any of:
 					d1158 = d1159
 					ctx.StabilizeDescForControlFlow(&d1158)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EmitJmp(lbl449)
+					ctx.EmitJmp(lbl448)
 					bbpos_11_17 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl457)
+					ctx.MarkLabel(lbl456)
 					ctx.ResolveFixups()
 					d571 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase570) + int32(0)}
 					d572 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase570) + int32(16)}
@@ -29509,26 +29449,26 @@ Patterns can be any of:
 					if d1163.Loc != LocImm && d1163.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
+					lbl690 := ctx.ReserveLabel()
 					lbl691 := ctx.ReserveLabel()
-					lbl692 := ctx.ReserveLabel()
 					if d1163.Loc == LocImm {
 						if d1163.Imm.Bool() {
+							ctx.MarkLabel(lbl690)
+							ctx.EmitJmp(lbl454)
+						} else {
 							ctx.MarkLabel(lbl691)
 							ctx.EmitJmp(lbl455)
-						} else {
-							ctx.MarkLabel(lbl692)
-							ctx.EmitJmp(lbl456)
 						}
 					} else {
-						ctx.EmitJump(d1163.Condition, lbl691)
-						ctx.EmitJmp(lbl692)
+						ctx.EmitJump(d1163.Condition, lbl690)
+						ctx.EmitJmp(lbl691)
+						ctx.MarkLabel(lbl690)
+						ctx.EmitJmp(lbl454)
 						ctx.MarkLabel(lbl691)
 						ctx.EmitJmp(lbl455)
-						ctx.MarkLabel(lbl692)
-						ctx.EmitJmp(lbl456)
 					}
 					bbpos_11_10 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl450)
+					ctx.MarkLabel(lbl449)
 					ctx.ResolveFixups()
 					d571 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase570) + int32(0)}
 					d572 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase570) + int32(16)}
@@ -29537,7 +29477,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.EmitGoPanic("jit: invalid arguments for inlined Go helper")
 					bbpos_11_14 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl454)
+					ctx.MarkLabel(lbl453)
 					ctx.ResolveFixups()
 					d571 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase570) + int32(0)}
 					d572 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase570) + int32(16)}
@@ -29586,28 +29526,28 @@ Patterns can be any of:
 					if d1169.Loc != LocImm && d1169.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl692 := ctx.ReserveLabel()
 					lbl693 := ctx.ReserveLabel()
-					lbl694 := ctx.ReserveLabel()
 					if d1169.Loc == LocImm {
 						if d1169.Imm.Bool() {
+							ctx.MarkLabel(lbl692)
+							ctx.EmitJmp(lbl451)
+						} else {
 							ctx.MarkLabel(lbl693)
 							ctx.EmitJmp(lbl452)
-						} else {
-							ctx.MarkLabel(lbl694)
-							ctx.EmitJmp(lbl453)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d1169.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl693)
-						ctx.EmitJmp(lbl694)
+						ctx.EmitJump(CondNotEqual, lbl692)
+						ctx.EmitJmp(lbl693)
+						ctx.MarkLabel(lbl692)
+						ctx.EmitJmp(lbl451)
 						ctx.MarkLabel(lbl693)
 						ctx.EmitJmp(lbl452)
-						ctx.MarkLabel(lbl694)
-						ctx.EmitJmp(lbl453)
 					}
 					ctx.FreeDesc(&d1168)
 					bbpos_11_15 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl455)
+					ctx.MarkLabel(lbl454)
 					ctx.ResolveFixups()
 					d571 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase570) + int32(0)}
 					d572 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase570) + int32(16)}
@@ -29644,14 +29584,14 @@ Patterns can be any of:
 					if d1175.Loc != LocImm && d1175.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl694 := ctx.ReserveLabel()
 					lbl695 := ctx.ReserveLabel()
-					lbl696 := ctx.ReserveLabel()
 					if d1175.Loc == LocImm {
 						if d1175.Imm.Bool() {
-							ctx.MarkLabel(lbl695)
-							ctx.EmitJmp(lbl458)
+							ctx.MarkLabel(lbl694)
+							ctx.EmitJmp(lbl457)
 						} else {
-							ctx.MarkLabel(lbl696)
+							ctx.MarkLabel(lbl695)
 							ctx.SyncDesc(&d1172)
 							if d1172.Loc == LocReg {
 								ctx.ProtectReg(d1172.Reg)
@@ -29682,15 +29622,15 @@ Patterns can be any of:
 								ctx.UnprotectReg(d1172.Reg)
 								ctx.UnprotectReg(d1172.Reg2)
 							}
-							ctx.EmitJmp(lbl459)
+							ctx.EmitJmp(lbl458)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d1175.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl695)
-						ctx.EmitJmp(lbl696)
+						ctx.EmitJump(CondNotEqual, lbl694)
+						ctx.EmitJmp(lbl695)
+						ctx.MarkLabel(lbl694)
+						ctx.EmitJmp(lbl457)
 						ctx.MarkLabel(lbl695)
-						ctx.EmitJmp(lbl458)
-						ctx.MarkLabel(lbl696)
 						ctx.SyncDesc(&d1172)
 						if d1172.Loc == LocReg {
 							ctx.ProtectReg(d1172.Reg)
@@ -29721,11 +29661,11 @@ Patterns can be any of:
 							ctx.UnprotectReg(d1172.Reg)
 							ctx.UnprotectReg(d1172.Reg2)
 						}
-						ctx.EmitJmp(lbl459)
+						ctx.EmitJmp(lbl458)
 					}
 					ctx.FreeDesc(&d1174)
 					bbpos_11_19 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl459)
+					ctx.MarkLabel(lbl458)
 					ctx.ResolveFixups()
 					d571 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase570) + int32(0)}
 					d572 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase570) + int32(16)}
@@ -29750,28 +29690,28 @@ Patterns can be any of:
 					if d1179.Loc != LocImm && d1179.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl696 := ctx.ReserveLabel()
 					lbl697 := ctx.ReserveLabel()
-					lbl698 := ctx.ReserveLabel()
 					if d1179.Loc == LocImm {
 						if d1179.Imm.Bool() {
-							ctx.MarkLabel(lbl697)
-							ctx.EmitJmp(lbl462)
-						} else {
-							ctx.MarkLabel(lbl698)
+							ctx.MarkLabel(lbl696)
 							ctx.EmitJmp(lbl461)
+						} else {
+							ctx.MarkLabel(lbl697)
+							ctx.EmitJmp(lbl460)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d1179.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl697)
-						ctx.EmitJmp(lbl698)
-						ctx.MarkLabel(lbl697)
-						ctx.EmitJmp(lbl462)
-						ctx.MarkLabel(lbl698)
+						ctx.EmitJump(CondNotEqual, lbl696)
+						ctx.EmitJmp(lbl697)
+						ctx.MarkLabel(lbl696)
 						ctx.EmitJmp(lbl461)
+						ctx.MarkLabel(lbl697)
+						ctx.EmitJmp(lbl460)
 					}
 					ctx.FreeDesc(&d1178)
 					bbpos_11_21 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl461)
+					ctx.MarkLabel(lbl460)
 					ctx.ResolveFixups()
 					d571 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase570) + int32(0)}
 					d572 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase570) + int32(16)}
@@ -29925,28 +29865,28 @@ Patterns can be any of:
 					if d1193.Loc != LocImm && d1193.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl698 := ctx.ReserveLabel()
 					lbl699 := ctx.ReserveLabel()
-					lbl700 := ctx.ReserveLabel()
 					if d1193.Loc == LocImm {
 						if d1193.Imm.Bool() {
+							ctx.MarkLabel(lbl698)
+							ctx.EmitJmp(lbl470)
+						} else {
 							ctx.MarkLabel(lbl699)
 							ctx.EmitJmp(lbl471)
-						} else {
-							ctx.MarkLabel(lbl700)
-							ctx.EmitJmp(lbl472)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d1193.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl699)
-						ctx.EmitJmp(lbl700)
+						ctx.EmitJump(CondNotEqual, lbl698)
+						ctx.EmitJmp(lbl699)
+						ctx.MarkLabel(lbl698)
+						ctx.EmitJmp(lbl470)
 						ctx.MarkLabel(lbl699)
 						ctx.EmitJmp(lbl471)
-						ctx.MarkLabel(lbl700)
-						ctx.EmitJmp(lbl472)
 					}
 					ctx.FreeDesc(&d1192)
 					bbpos_11_32 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl472)
+					ctx.MarkLabel(lbl471)
 					ctx.ResolveFixups()
 					d571 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase570) + int32(0)}
 					d572 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase570) + int32(16)}
@@ -29958,9 +29898,9 @@ Patterns can be any of:
 					ctx.BindReg(r143, &d1194)
 					ctx.BindReg(r144, &d1194)
 					ctx.EmitMovPairToResult(&d1187, &d1194)
-					ctx.EmitJmp(lbl439)
+					ctx.EmitJmp(lbl438)
 					bbpos_11_12 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl452)
+					ctx.MarkLabel(lbl451)
 					ctx.ResolveFixups()
 					d571 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase570) + int32(0)}
 					d572 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase570) + int32(16)}
@@ -30063,9 +30003,9 @@ Patterns can be any of:
 					ctx.BindReg(r143, &d1204)
 					ctx.BindReg(r144, &d1204)
 					ctx.EmitMovPairToResult(&d1203, &d1204)
-					ctx.EmitJmp(lbl439)
+					ctx.EmitJmp(lbl438)
 					bbpos_11_18 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl458)
+					ctx.MarkLabel(lbl457)
 					ctx.ResolveFixups()
 					d571 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase570) + int32(0)}
 					d572 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase570) + int32(16)}
@@ -30144,9 +30084,9 @@ Patterns can be any of:
 						ctx.UnprotectReg(d1207.Reg)
 						ctx.UnprotectReg(d1207.Reg2)
 					}
-					ctx.EmitJmp(lbl459)
+					ctx.EmitJmp(lbl458)
 					bbpos_11_22 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl462)
+					ctx.MarkLabel(lbl461)
 					ctx.ResolveFixups()
 					d571 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase570) + int32(0)}
 					d572 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase570) + int32(16)}
@@ -30195,28 +30135,28 @@ Patterns can be any of:
 					if d1214.Loc != LocImm && d1214.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl700 := ctx.ReserveLabel()
 					lbl701 := ctx.ReserveLabel()
-					lbl702 := ctx.ReserveLabel()
 					if d1214.Loc == LocImm {
 						if d1214.Imm.Bool() {
+							ctx.MarkLabel(lbl700)
+							ctx.EmitJmp(lbl459)
+						} else {
 							ctx.MarkLabel(lbl701)
 							ctx.EmitJmp(lbl460)
-						} else {
-							ctx.MarkLabel(lbl702)
-							ctx.EmitJmp(lbl461)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d1214.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl701)
-						ctx.EmitJmp(lbl702)
+						ctx.EmitJump(CondNotEqual, lbl700)
+						ctx.EmitJmp(lbl701)
+						ctx.MarkLabel(lbl700)
+						ctx.EmitJmp(lbl459)
 						ctx.MarkLabel(lbl701)
 						ctx.EmitJmp(lbl460)
-						ctx.MarkLabel(lbl702)
-						ctx.EmitJmp(lbl461)
 					}
 					ctx.FreeDesc(&d1213)
 					bbpos_11_31 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl471)
+					ctx.MarkLabel(lbl470)
 					ctx.ResolveFixups()
 					d571 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase570) + int32(0)}
 					d572 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase570) + int32(16)}
@@ -30243,9 +30183,9 @@ Patterns can be any of:
 					ctx.BindReg(r143, &d1216)
 					ctx.BindReg(r144, &d1216)
 					ctx.EmitMovPairToResult(&d1215, &d1216)
-					ctx.EmitJmp(lbl439)
+					ctx.EmitJmp(lbl438)
 					bbpos_11_20 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl460)
+					ctx.MarkLabel(lbl459)
 					ctx.ResolveFixups()
 					d571 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase570) + int32(0)}
 					d572 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase570) + int32(16)}
@@ -30401,7 +30341,7 @@ Patterns can be any of:
 						ctx.UnprotectReg(d1225.Reg2)
 					}
 					bbpos_11_23 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl463)
+					ctx.MarkLabel(lbl462)
 					ctx.ResolveFixups()
 					d571 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase570) + int32(0)}
 					d572 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase570) + int32(16)}
@@ -30448,26 +30388,26 @@ Patterns can be any of:
 					if d1232.Loc != LocImm && d1232.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
+					lbl702 := ctx.ReserveLabel()
 					lbl703 := ctx.ReserveLabel()
-					lbl704 := ctx.ReserveLabel()
 					if d1232.Loc == LocImm {
 						if d1232.Imm.Bool() {
+							ctx.MarkLabel(lbl702)
+							ctx.EmitJmp(lbl463)
+						} else {
 							ctx.MarkLabel(lbl703)
 							ctx.EmitJmp(lbl464)
-						} else {
-							ctx.MarkLabel(lbl704)
-							ctx.EmitJmp(lbl465)
 						}
 					} else {
-						ctx.EmitJump(d1232.Condition, lbl703)
-						ctx.EmitJmp(lbl704)
+						ctx.EmitJump(d1232.Condition, lbl702)
+						ctx.EmitJmp(lbl703)
+						ctx.MarkLabel(lbl702)
+						ctx.EmitJmp(lbl463)
 						ctx.MarkLabel(lbl703)
 						ctx.EmitJmp(lbl464)
-						ctx.MarkLabel(lbl704)
-						ctx.EmitJmp(lbl465)
 					}
 					bbpos_11_25 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl465)
+					ctx.MarkLabel(lbl464)
 					ctx.ResolveFixups()
 					d571 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase570) + int32(0)}
 					d572 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase570) + int32(16)}
@@ -30504,28 +30444,28 @@ Patterns can be any of:
 					if d1238.Loc != LocImm && d1238.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl704 := ctx.ReserveLabel()
 					lbl705 := ctx.ReserveLabel()
-					lbl706 := ctx.ReserveLabel()
 					if d1238.Loc == LocImm {
 						if d1238.Imm.Bool() {
-							ctx.MarkLabel(lbl705)
-							ctx.EmitJmp(lbl468)
-						} else {
-							ctx.MarkLabel(lbl706)
+							ctx.MarkLabel(lbl704)
 							ctx.EmitJmp(lbl467)
+						} else {
+							ctx.MarkLabel(lbl705)
+							ctx.EmitJmp(lbl466)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d1238.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl705)
-						ctx.EmitJmp(lbl706)
-						ctx.MarkLabel(lbl705)
-						ctx.EmitJmp(lbl468)
-						ctx.MarkLabel(lbl706)
+						ctx.EmitJump(CondNotEqual, lbl704)
+						ctx.EmitJmp(lbl705)
+						ctx.MarkLabel(lbl704)
 						ctx.EmitJmp(lbl467)
+						ctx.MarkLabel(lbl705)
+						ctx.EmitJmp(lbl466)
 					}
 					ctx.FreeDesc(&d1237)
 					bbpos_11_27 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl467)
+					ctx.MarkLabel(lbl466)
 					ctx.ResolveFixups()
 					d571 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase570) + int32(0)}
 					d572 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase570) + int32(16)}
@@ -30576,9 +30516,9 @@ Patterns can be any of:
 					d1244 = d1245
 					ctx.StabilizeDescForControlFlow(&d1244)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EmitJmp(lbl463)
+					ctx.EmitJmp(lbl462)
 					bbpos_11_24 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl464)
+					ctx.MarkLabel(lbl463)
 					ctx.ResolveFixups()
 					d571 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase570) + int32(0)}
 					d572 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase570) + int32(16)}
@@ -30587,7 +30527,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.EmitGoPanic("jit: invalid arguments for inlined Go helper")
 					bbpos_11_28 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl468)
+					ctx.MarkLabel(lbl467)
 					ctx.ResolveFixups()
 					d571 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase570) + int32(0)}
 					d572 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase570) + int32(16)}
@@ -30636,28 +30576,28 @@ Patterns can be any of:
 					if d1251.Loc != LocImm && d1251.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl706 := ctx.ReserveLabel()
 					lbl707 := ctx.ReserveLabel()
-					lbl708 := ctx.ReserveLabel()
 					if d1251.Loc == LocImm {
 						if d1251.Imm.Bool() {
+							ctx.MarkLabel(lbl706)
+							ctx.EmitJmp(lbl465)
+						} else {
 							ctx.MarkLabel(lbl707)
 							ctx.EmitJmp(lbl466)
-						} else {
-							ctx.MarkLabel(lbl708)
-							ctx.EmitJmp(lbl467)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d1251.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl707)
-						ctx.EmitJmp(lbl708)
+						ctx.EmitJump(CondNotEqual, lbl706)
+						ctx.EmitJmp(lbl707)
+						ctx.MarkLabel(lbl706)
+						ctx.EmitJmp(lbl465)
 						ctx.MarkLabel(lbl707)
 						ctx.EmitJmp(lbl466)
-						ctx.MarkLabel(lbl708)
-						ctx.EmitJmp(lbl467)
 					}
 					ctx.FreeDesc(&d1250)
 					bbpos_11_26 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl466)
+					ctx.MarkLabel(lbl465)
 					ctx.ResolveFixups()
 					d571 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase570) + int32(0)}
 					d572 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase570) + int32(16)}
@@ -30809,28 +30749,28 @@ Patterns can be any of:
 					if d1265.Loc != LocImm && d1265.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl708 := ctx.ReserveLabel()
 					lbl709 := ctx.ReserveLabel()
-					lbl710 := ctx.ReserveLabel()
 					if d1265.Loc == LocImm {
 						if d1265.Imm.Bool() {
+							ctx.MarkLabel(lbl708)
+							ctx.EmitJmp(lbl468)
+						} else {
 							ctx.MarkLabel(lbl709)
 							ctx.EmitJmp(lbl469)
-						} else {
-							ctx.MarkLabel(lbl710)
-							ctx.EmitJmp(lbl470)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d1265.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl709)
-						ctx.EmitJmp(lbl710)
+						ctx.EmitJump(CondNotEqual, lbl708)
+						ctx.EmitJmp(lbl709)
+						ctx.MarkLabel(lbl708)
+						ctx.EmitJmp(lbl468)
 						ctx.MarkLabel(lbl709)
 						ctx.EmitJmp(lbl469)
-						ctx.MarkLabel(lbl710)
-						ctx.EmitJmp(lbl470)
 					}
 					ctx.FreeDesc(&d1264)
 					bbpos_11_30 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl470)
+					ctx.MarkLabel(lbl469)
 					ctx.ResolveFixups()
 					d571 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase570) + int32(0)}
 					d572 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase570) + int32(16)}
@@ -30842,9 +30782,9 @@ Patterns can be any of:
 					ctx.BindReg(r143, &d1266)
 					ctx.BindReg(r144, &d1266)
 					ctx.EmitMovPairToResult(&d1259, &d1266)
-					ctx.EmitJmp(lbl439)
+					ctx.EmitJmp(lbl438)
 					bbpos_11_29 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl469)
+					ctx.MarkLabel(lbl468)
 					ctx.ResolveFixups()
 					d571 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase570) + int32(0)}
 					d572 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase570) + int32(16)}
@@ -30871,8 +30811,8 @@ Patterns can be any of:
 					ctx.BindReg(r143, &d1268)
 					ctx.BindReg(r144, &d1268)
 					ctx.EmitMovPairToResult(&d1267, &d1268)
-					ctx.EmitJmp(lbl439)
-					ctx.MarkLabel(lbl439)
+					ctx.EmitJmp(lbl438)
+					ctx.MarkLabel(lbl438)
 					d1269 = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: r143, Reg2: r144}
 					ctx.BindReg(r143, &d1269)
 					ctx.BindReg(r144, &d1269)
@@ -30911,9 +30851,9 @@ Patterns can be any of:
 					d1274 = d1275
 					ctx.StabilizeDescForControlFlow(&d1274)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EmitJmp(lbl401)
+					ctx.EmitJmp(lbl400)
 					bbpos_10_17 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl409)
+					ctx.MarkLabel(lbl408)
 					ctx.ResolveFixups()
 					d512 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase511) + int32(0)}
 					d513 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase511) + int32(16)}
@@ -30958,26 +30898,26 @@ Patterns can be any of:
 					if d1279.Loc != LocImm && d1279.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
+					lbl710 := ctx.ReserveLabel()
 					lbl711 := ctx.ReserveLabel()
-					lbl712 := ctx.ReserveLabel()
 					if d1279.Loc == LocImm {
 						if d1279.Imm.Bool() {
+							ctx.MarkLabel(lbl710)
+							ctx.EmitJmp(lbl406)
+						} else {
 							ctx.MarkLabel(lbl711)
 							ctx.EmitJmp(lbl407)
-						} else {
-							ctx.MarkLabel(lbl712)
-							ctx.EmitJmp(lbl408)
 						}
 					} else {
-						ctx.EmitJump(d1279.Condition, lbl711)
-						ctx.EmitJmp(lbl712)
+						ctx.EmitJump(d1279.Condition, lbl710)
+						ctx.EmitJmp(lbl711)
+						ctx.MarkLabel(lbl710)
+						ctx.EmitJmp(lbl406)
 						ctx.MarkLabel(lbl711)
 						ctx.EmitJmp(lbl407)
-						ctx.MarkLabel(lbl712)
-						ctx.EmitJmp(lbl408)
 					}
 					bbpos_10_10 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl402)
+					ctx.MarkLabel(lbl401)
 					ctx.ResolveFixups()
 					d512 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase511) + int32(0)}
 					d513 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase511) + int32(16)}
@@ -30986,7 +30926,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.EmitGoPanic("jit: invalid arguments for inlined Go helper")
 					bbpos_10_14 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl406)
+					ctx.MarkLabel(lbl405)
 					ctx.ResolveFixups()
 					d512 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase511) + int32(0)}
 					d513 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase511) + int32(16)}
@@ -31035,28 +30975,28 @@ Patterns can be any of:
 					if d1285.Loc != LocImm && d1285.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl712 := ctx.ReserveLabel()
 					lbl713 := ctx.ReserveLabel()
-					lbl714 := ctx.ReserveLabel()
 					if d1285.Loc == LocImm {
 						if d1285.Imm.Bool() {
+							ctx.MarkLabel(lbl712)
+							ctx.EmitJmp(lbl403)
+						} else {
 							ctx.MarkLabel(lbl713)
 							ctx.EmitJmp(lbl404)
-						} else {
-							ctx.MarkLabel(lbl714)
-							ctx.EmitJmp(lbl405)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d1285.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl713)
-						ctx.EmitJmp(lbl714)
+						ctx.EmitJump(CondNotEqual, lbl712)
+						ctx.EmitJmp(lbl713)
+						ctx.MarkLabel(lbl712)
+						ctx.EmitJmp(lbl403)
 						ctx.MarkLabel(lbl713)
 						ctx.EmitJmp(lbl404)
-						ctx.MarkLabel(lbl714)
-						ctx.EmitJmp(lbl405)
 					}
 					ctx.FreeDesc(&d1284)
 					bbpos_10_15 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl407)
+					ctx.MarkLabel(lbl406)
 					ctx.ResolveFixups()
 					d512 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase511) + int32(0)}
 					d513 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase511) + int32(16)}
@@ -31093,14 +31033,14 @@ Patterns can be any of:
 					if d1291.Loc != LocImm && d1291.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl714 := ctx.ReserveLabel()
 					lbl715 := ctx.ReserveLabel()
-					lbl716 := ctx.ReserveLabel()
 					if d1291.Loc == LocImm {
 						if d1291.Imm.Bool() {
-							ctx.MarkLabel(lbl715)
-							ctx.EmitJmp(lbl410)
+							ctx.MarkLabel(lbl714)
+							ctx.EmitJmp(lbl409)
 						} else {
-							ctx.MarkLabel(lbl716)
+							ctx.MarkLabel(lbl715)
 							ctx.SyncDesc(&d1288)
 							if d1288.Loc == LocReg {
 								ctx.ProtectReg(d1288.Reg)
@@ -31131,15 +31071,15 @@ Patterns can be any of:
 								ctx.UnprotectReg(d1288.Reg)
 								ctx.UnprotectReg(d1288.Reg2)
 							}
-							ctx.EmitJmp(lbl411)
+							ctx.EmitJmp(lbl410)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d1291.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl715)
-						ctx.EmitJmp(lbl716)
+						ctx.EmitJump(CondNotEqual, lbl714)
+						ctx.EmitJmp(lbl715)
+						ctx.MarkLabel(lbl714)
+						ctx.EmitJmp(lbl409)
 						ctx.MarkLabel(lbl715)
-						ctx.EmitJmp(lbl410)
-						ctx.MarkLabel(lbl716)
 						ctx.SyncDesc(&d1288)
 						if d1288.Loc == LocReg {
 							ctx.ProtectReg(d1288.Reg)
@@ -31170,11 +31110,11 @@ Patterns can be any of:
 							ctx.UnprotectReg(d1288.Reg)
 							ctx.UnprotectReg(d1288.Reg2)
 						}
-						ctx.EmitJmp(lbl411)
+						ctx.EmitJmp(lbl410)
 					}
 					ctx.FreeDesc(&d1290)
 					bbpos_10_19 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl411)
+					ctx.MarkLabel(lbl410)
 					ctx.ResolveFixups()
 					d512 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase511) + int32(0)}
 					d513 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase511) + int32(16)}
@@ -31199,28 +31139,28 @@ Patterns can be any of:
 					if d1295.Loc != LocImm && d1295.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl716 := ctx.ReserveLabel()
 					lbl717 := ctx.ReserveLabel()
-					lbl718 := ctx.ReserveLabel()
 					if d1295.Loc == LocImm {
 						if d1295.Imm.Bool() {
-							ctx.MarkLabel(lbl717)
-							ctx.EmitJmp(lbl414)
-						} else {
-							ctx.MarkLabel(lbl718)
+							ctx.MarkLabel(lbl716)
 							ctx.EmitJmp(lbl413)
+						} else {
+							ctx.MarkLabel(lbl717)
+							ctx.EmitJmp(lbl412)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d1295.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl717)
-						ctx.EmitJmp(lbl718)
-						ctx.MarkLabel(lbl717)
-						ctx.EmitJmp(lbl414)
-						ctx.MarkLabel(lbl718)
+						ctx.EmitJump(CondNotEqual, lbl716)
+						ctx.EmitJmp(lbl717)
+						ctx.MarkLabel(lbl716)
 						ctx.EmitJmp(lbl413)
+						ctx.MarkLabel(lbl717)
+						ctx.EmitJmp(lbl412)
 					}
 					ctx.FreeDesc(&d1294)
 					bbpos_10_21 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl413)
+					ctx.MarkLabel(lbl412)
 					ctx.ResolveFixups()
 					d512 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase511) + int32(0)}
 					d513 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase511) + int32(16)}
@@ -31374,28 +31314,28 @@ Patterns can be any of:
 					if d1309.Loc != LocImm && d1309.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl718 := ctx.ReserveLabel()
 					lbl719 := ctx.ReserveLabel()
-					lbl720 := ctx.ReserveLabel()
 					if d1309.Loc == LocImm {
 						if d1309.Imm.Bool() {
+							ctx.MarkLabel(lbl718)
+							ctx.EmitJmp(lbl422)
+						} else {
 							ctx.MarkLabel(lbl719)
 							ctx.EmitJmp(lbl423)
-						} else {
-							ctx.MarkLabel(lbl720)
-							ctx.EmitJmp(lbl424)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d1309.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl719)
-						ctx.EmitJmp(lbl720)
+						ctx.EmitJump(CondNotEqual, lbl718)
+						ctx.EmitJmp(lbl719)
+						ctx.MarkLabel(lbl718)
+						ctx.EmitJmp(lbl422)
 						ctx.MarkLabel(lbl719)
 						ctx.EmitJmp(lbl423)
-						ctx.MarkLabel(lbl720)
-						ctx.EmitJmp(lbl424)
 					}
 					ctx.FreeDesc(&d1308)
 					bbpos_10_32 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl424)
+					ctx.MarkLabel(lbl423)
 					ctx.ResolveFixups()
 					d512 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase511) + int32(0)}
 					d513 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase511) + int32(16)}
@@ -31407,9 +31347,9 @@ Patterns can be any of:
 					ctx.BindReg(r128, &d1310)
 					ctx.BindReg(r129, &d1310)
 					ctx.EmitMovPairToResult(&d1303, &d1310)
-					ctx.EmitJmp(lbl391)
+					ctx.EmitJmp(lbl390)
 					bbpos_10_12 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl404)
+					ctx.MarkLabel(lbl403)
 					ctx.ResolveFixups()
 					d512 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase511) + int32(0)}
 					d513 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase511) + int32(16)}
@@ -31512,9 +31452,9 @@ Patterns can be any of:
 					ctx.BindReg(r128, &d1320)
 					ctx.BindReg(r129, &d1320)
 					ctx.EmitMovPairToResult(&d1319, &d1320)
-					ctx.EmitJmp(lbl391)
+					ctx.EmitJmp(lbl390)
 					bbpos_10_18 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl410)
+					ctx.MarkLabel(lbl409)
 					ctx.ResolveFixups()
 					d512 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase511) + int32(0)}
 					d513 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase511) + int32(16)}
@@ -31593,9 +31533,9 @@ Patterns can be any of:
 						ctx.UnprotectReg(d1323.Reg)
 						ctx.UnprotectReg(d1323.Reg2)
 					}
-					ctx.EmitJmp(lbl411)
+					ctx.EmitJmp(lbl410)
 					bbpos_10_22 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl414)
+					ctx.MarkLabel(lbl413)
 					ctx.ResolveFixups()
 					d512 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase511) + int32(0)}
 					d513 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase511) + int32(16)}
@@ -31644,28 +31584,28 @@ Patterns can be any of:
 					if d1330.Loc != LocImm && d1330.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl720 := ctx.ReserveLabel()
 					lbl721 := ctx.ReserveLabel()
-					lbl722 := ctx.ReserveLabel()
 					if d1330.Loc == LocImm {
 						if d1330.Imm.Bool() {
+							ctx.MarkLabel(lbl720)
+							ctx.EmitJmp(lbl411)
+						} else {
 							ctx.MarkLabel(lbl721)
 							ctx.EmitJmp(lbl412)
-						} else {
-							ctx.MarkLabel(lbl722)
-							ctx.EmitJmp(lbl413)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d1330.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl721)
-						ctx.EmitJmp(lbl722)
+						ctx.EmitJump(CondNotEqual, lbl720)
+						ctx.EmitJmp(lbl721)
+						ctx.MarkLabel(lbl720)
+						ctx.EmitJmp(lbl411)
 						ctx.MarkLabel(lbl721)
 						ctx.EmitJmp(lbl412)
-						ctx.MarkLabel(lbl722)
-						ctx.EmitJmp(lbl413)
 					}
 					ctx.FreeDesc(&d1329)
 					bbpos_10_31 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl423)
+					ctx.MarkLabel(lbl422)
 					ctx.ResolveFixups()
 					d512 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase511) + int32(0)}
 					d513 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase511) + int32(16)}
@@ -31692,9 +31632,9 @@ Patterns can be any of:
 					ctx.BindReg(r128, &d1332)
 					ctx.BindReg(r129, &d1332)
 					ctx.EmitMovPairToResult(&d1331, &d1332)
-					ctx.EmitJmp(lbl391)
+					ctx.EmitJmp(lbl390)
 					bbpos_10_20 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl412)
+					ctx.MarkLabel(lbl411)
 					ctx.ResolveFixups()
 					d512 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase511) + int32(0)}
 					d513 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase511) + int32(16)}
@@ -31850,7 +31790,7 @@ Patterns can be any of:
 						ctx.UnprotectReg(d1341.Reg2)
 					}
 					bbpos_10_23 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl415)
+					ctx.MarkLabel(lbl414)
 					ctx.ResolveFixups()
 					d512 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase511) + int32(0)}
 					d513 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase511) + int32(16)}
@@ -31897,26 +31837,26 @@ Patterns can be any of:
 					if d1348.Loc != LocImm && d1348.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
+					lbl722 := ctx.ReserveLabel()
 					lbl723 := ctx.ReserveLabel()
-					lbl724 := ctx.ReserveLabel()
 					if d1348.Loc == LocImm {
 						if d1348.Imm.Bool() {
+							ctx.MarkLabel(lbl722)
+							ctx.EmitJmp(lbl415)
+						} else {
 							ctx.MarkLabel(lbl723)
 							ctx.EmitJmp(lbl416)
-						} else {
-							ctx.MarkLabel(lbl724)
-							ctx.EmitJmp(lbl417)
 						}
 					} else {
-						ctx.EmitJump(d1348.Condition, lbl723)
-						ctx.EmitJmp(lbl724)
+						ctx.EmitJump(d1348.Condition, lbl722)
+						ctx.EmitJmp(lbl723)
+						ctx.MarkLabel(lbl722)
+						ctx.EmitJmp(lbl415)
 						ctx.MarkLabel(lbl723)
 						ctx.EmitJmp(lbl416)
-						ctx.MarkLabel(lbl724)
-						ctx.EmitJmp(lbl417)
 					}
 					bbpos_10_25 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl417)
+					ctx.MarkLabel(lbl416)
 					ctx.ResolveFixups()
 					d512 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase511) + int32(0)}
 					d513 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase511) + int32(16)}
@@ -31953,28 +31893,28 @@ Patterns can be any of:
 					if d1354.Loc != LocImm && d1354.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl724 := ctx.ReserveLabel()
 					lbl725 := ctx.ReserveLabel()
-					lbl726 := ctx.ReserveLabel()
 					if d1354.Loc == LocImm {
 						if d1354.Imm.Bool() {
-							ctx.MarkLabel(lbl725)
-							ctx.EmitJmp(lbl420)
-						} else {
-							ctx.MarkLabel(lbl726)
+							ctx.MarkLabel(lbl724)
 							ctx.EmitJmp(lbl419)
+						} else {
+							ctx.MarkLabel(lbl725)
+							ctx.EmitJmp(lbl418)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d1354.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl725)
-						ctx.EmitJmp(lbl726)
-						ctx.MarkLabel(lbl725)
-						ctx.EmitJmp(lbl420)
-						ctx.MarkLabel(lbl726)
+						ctx.EmitJump(CondNotEqual, lbl724)
+						ctx.EmitJmp(lbl725)
+						ctx.MarkLabel(lbl724)
 						ctx.EmitJmp(lbl419)
+						ctx.MarkLabel(lbl725)
+						ctx.EmitJmp(lbl418)
 					}
 					ctx.FreeDesc(&d1353)
 					bbpos_10_27 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl419)
+					ctx.MarkLabel(lbl418)
 					ctx.ResolveFixups()
 					d512 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase511) + int32(0)}
 					d513 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase511) + int32(16)}
@@ -32025,9 +31965,9 @@ Patterns can be any of:
 					d1360 = d1361
 					ctx.StabilizeDescForControlFlow(&d1360)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EmitJmp(lbl415)
+					ctx.EmitJmp(lbl414)
 					bbpos_10_24 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl416)
+					ctx.MarkLabel(lbl415)
 					ctx.ResolveFixups()
 					d512 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase511) + int32(0)}
 					d513 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase511) + int32(16)}
@@ -32036,7 +31976,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.EmitGoPanic("jit: invalid arguments for inlined Go helper")
 					bbpos_10_28 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl420)
+					ctx.MarkLabel(lbl419)
 					ctx.ResolveFixups()
 					d512 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase511) + int32(0)}
 					d513 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase511) + int32(16)}
@@ -32085,28 +32025,28 @@ Patterns can be any of:
 					if d1367.Loc != LocImm && d1367.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl726 := ctx.ReserveLabel()
 					lbl727 := ctx.ReserveLabel()
-					lbl728 := ctx.ReserveLabel()
 					if d1367.Loc == LocImm {
 						if d1367.Imm.Bool() {
+							ctx.MarkLabel(lbl726)
+							ctx.EmitJmp(lbl417)
+						} else {
 							ctx.MarkLabel(lbl727)
 							ctx.EmitJmp(lbl418)
-						} else {
-							ctx.MarkLabel(lbl728)
-							ctx.EmitJmp(lbl419)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d1367.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl727)
-						ctx.EmitJmp(lbl728)
+						ctx.EmitJump(CondNotEqual, lbl726)
+						ctx.EmitJmp(lbl727)
+						ctx.MarkLabel(lbl726)
+						ctx.EmitJmp(lbl417)
 						ctx.MarkLabel(lbl727)
 						ctx.EmitJmp(lbl418)
-						ctx.MarkLabel(lbl728)
-						ctx.EmitJmp(lbl419)
 					}
 					ctx.FreeDesc(&d1366)
 					bbpos_10_26 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl418)
+					ctx.MarkLabel(lbl417)
 					ctx.ResolveFixups()
 					d512 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase511) + int32(0)}
 					d513 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase511) + int32(16)}
@@ -32258,28 +32198,28 @@ Patterns can be any of:
 					if d1381.Loc != LocImm && d1381.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl728 := ctx.ReserveLabel()
 					lbl729 := ctx.ReserveLabel()
-					lbl730 := ctx.ReserveLabel()
 					if d1381.Loc == LocImm {
 						if d1381.Imm.Bool() {
+							ctx.MarkLabel(lbl728)
+							ctx.EmitJmp(lbl420)
+						} else {
 							ctx.MarkLabel(lbl729)
 							ctx.EmitJmp(lbl421)
-						} else {
-							ctx.MarkLabel(lbl730)
-							ctx.EmitJmp(lbl422)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d1381.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl729)
-						ctx.EmitJmp(lbl730)
+						ctx.EmitJump(CondNotEqual, lbl728)
+						ctx.EmitJmp(lbl729)
+						ctx.MarkLabel(lbl728)
+						ctx.EmitJmp(lbl420)
 						ctx.MarkLabel(lbl729)
 						ctx.EmitJmp(lbl421)
-						ctx.MarkLabel(lbl730)
-						ctx.EmitJmp(lbl422)
 					}
 					ctx.FreeDesc(&d1380)
 					bbpos_10_30 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl422)
+					ctx.MarkLabel(lbl421)
 					ctx.ResolveFixups()
 					d512 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase511) + int32(0)}
 					d513 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase511) + int32(16)}
@@ -32291,9 +32231,9 @@ Patterns can be any of:
 					ctx.BindReg(r128, &d1382)
 					ctx.BindReg(r129, &d1382)
 					ctx.EmitMovPairToResult(&d1375, &d1382)
-					ctx.EmitJmp(lbl391)
+					ctx.EmitJmp(lbl390)
 					bbpos_10_29 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl421)
+					ctx.MarkLabel(lbl420)
 					ctx.ResolveFixups()
 					d512 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase511) + int32(0)}
 					d513 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase511) + int32(16)}
@@ -32320,8 +32260,8 @@ Patterns can be any of:
 					ctx.BindReg(r128, &d1384)
 					ctx.BindReg(r129, &d1384)
 					ctx.EmitMovPairToResult(&d1383, &d1384)
-					ctx.EmitJmp(lbl391)
-					ctx.MarkLabel(lbl391)
+					ctx.EmitJmp(lbl390)
+					ctx.MarkLabel(lbl390)
 					d1385 = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: r128, Reg2: r129}
 					ctx.BindReg(r128, &d1385)
 					ctx.BindReg(r129, &d1385)
@@ -32360,9 +32300,9 @@ Patterns can be any of:
 					d1390 = d1391
 					ctx.StabilizeDescForControlFlow(&d1390)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EmitJmp(lbl353)
+					ctx.EmitJmp(lbl352)
 					bbpos_9_17 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl361)
+					ctx.MarkLabel(lbl360)
 					ctx.ResolveFixups()
 					d453 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase452) + int32(0)}
 					d454 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase452) + int32(16)}
@@ -32407,26 +32347,26 @@ Patterns can be any of:
 					if d1395.Loc != LocImm && d1395.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
+					lbl730 := ctx.ReserveLabel()
 					lbl731 := ctx.ReserveLabel()
-					lbl732 := ctx.ReserveLabel()
 					if d1395.Loc == LocImm {
 						if d1395.Imm.Bool() {
+							ctx.MarkLabel(lbl730)
+							ctx.EmitJmp(lbl358)
+						} else {
 							ctx.MarkLabel(lbl731)
 							ctx.EmitJmp(lbl359)
-						} else {
-							ctx.MarkLabel(lbl732)
-							ctx.EmitJmp(lbl360)
 						}
 					} else {
-						ctx.EmitJump(d1395.Condition, lbl731)
-						ctx.EmitJmp(lbl732)
+						ctx.EmitJump(d1395.Condition, lbl730)
+						ctx.EmitJmp(lbl731)
+						ctx.MarkLabel(lbl730)
+						ctx.EmitJmp(lbl358)
 						ctx.MarkLabel(lbl731)
 						ctx.EmitJmp(lbl359)
-						ctx.MarkLabel(lbl732)
-						ctx.EmitJmp(lbl360)
 					}
 					bbpos_9_10 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl354)
+					ctx.MarkLabel(lbl353)
 					ctx.ResolveFixups()
 					d453 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase452) + int32(0)}
 					d454 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase452) + int32(16)}
@@ -32435,7 +32375,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.EmitGoPanic("jit: invalid arguments for inlined Go helper")
 					bbpos_9_14 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl358)
+					ctx.MarkLabel(lbl357)
 					ctx.ResolveFixups()
 					d453 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase452) + int32(0)}
 					d454 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase452) + int32(16)}
@@ -32484,28 +32424,28 @@ Patterns can be any of:
 					if d1401.Loc != LocImm && d1401.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl732 := ctx.ReserveLabel()
 					lbl733 := ctx.ReserveLabel()
-					lbl734 := ctx.ReserveLabel()
 					if d1401.Loc == LocImm {
 						if d1401.Imm.Bool() {
+							ctx.MarkLabel(lbl732)
+							ctx.EmitJmp(lbl355)
+						} else {
 							ctx.MarkLabel(lbl733)
 							ctx.EmitJmp(lbl356)
-						} else {
-							ctx.MarkLabel(lbl734)
-							ctx.EmitJmp(lbl357)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d1401.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl733)
-						ctx.EmitJmp(lbl734)
+						ctx.EmitJump(CondNotEqual, lbl732)
+						ctx.EmitJmp(lbl733)
+						ctx.MarkLabel(lbl732)
+						ctx.EmitJmp(lbl355)
 						ctx.MarkLabel(lbl733)
 						ctx.EmitJmp(lbl356)
-						ctx.MarkLabel(lbl734)
-						ctx.EmitJmp(lbl357)
 					}
 					ctx.FreeDesc(&d1400)
 					bbpos_9_15 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl359)
+					ctx.MarkLabel(lbl358)
 					ctx.ResolveFixups()
 					d453 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase452) + int32(0)}
 					d454 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase452) + int32(16)}
@@ -32542,14 +32482,14 @@ Patterns can be any of:
 					if d1407.Loc != LocImm && d1407.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl734 := ctx.ReserveLabel()
 					lbl735 := ctx.ReserveLabel()
-					lbl736 := ctx.ReserveLabel()
 					if d1407.Loc == LocImm {
 						if d1407.Imm.Bool() {
-							ctx.MarkLabel(lbl735)
-							ctx.EmitJmp(lbl362)
+							ctx.MarkLabel(lbl734)
+							ctx.EmitJmp(lbl361)
 						} else {
-							ctx.MarkLabel(lbl736)
+							ctx.MarkLabel(lbl735)
 							ctx.SyncDesc(&d1404)
 							if d1404.Loc == LocReg {
 								ctx.ProtectReg(d1404.Reg)
@@ -32580,15 +32520,15 @@ Patterns can be any of:
 								ctx.UnprotectReg(d1404.Reg)
 								ctx.UnprotectReg(d1404.Reg2)
 							}
-							ctx.EmitJmp(lbl363)
+							ctx.EmitJmp(lbl362)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d1407.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl735)
-						ctx.EmitJmp(lbl736)
+						ctx.EmitJump(CondNotEqual, lbl734)
+						ctx.EmitJmp(lbl735)
+						ctx.MarkLabel(lbl734)
+						ctx.EmitJmp(lbl361)
 						ctx.MarkLabel(lbl735)
-						ctx.EmitJmp(lbl362)
-						ctx.MarkLabel(lbl736)
 						ctx.SyncDesc(&d1404)
 						if d1404.Loc == LocReg {
 							ctx.ProtectReg(d1404.Reg)
@@ -32619,11 +32559,11 @@ Patterns can be any of:
 							ctx.UnprotectReg(d1404.Reg)
 							ctx.UnprotectReg(d1404.Reg2)
 						}
-						ctx.EmitJmp(lbl363)
+						ctx.EmitJmp(lbl362)
 					}
 					ctx.FreeDesc(&d1406)
 					bbpos_9_19 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl363)
+					ctx.MarkLabel(lbl362)
 					ctx.ResolveFixups()
 					d453 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase452) + int32(0)}
 					d454 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase452) + int32(16)}
@@ -32648,28 +32588,28 @@ Patterns can be any of:
 					if d1411.Loc != LocImm && d1411.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl736 := ctx.ReserveLabel()
 					lbl737 := ctx.ReserveLabel()
-					lbl738 := ctx.ReserveLabel()
 					if d1411.Loc == LocImm {
 						if d1411.Imm.Bool() {
-							ctx.MarkLabel(lbl737)
-							ctx.EmitJmp(lbl366)
-						} else {
-							ctx.MarkLabel(lbl738)
+							ctx.MarkLabel(lbl736)
 							ctx.EmitJmp(lbl365)
+						} else {
+							ctx.MarkLabel(lbl737)
+							ctx.EmitJmp(lbl364)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d1411.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl737)
-						ctx.EmitJmp(lbl738)
-						ctx.MarkLabel(lbl737)
-						ctx.EmitJmp(lbl366)
-						ctx.MarkLabel(lbl738)
+						ctx.EmitJump(CondNotEqual, lbl736)
+						ctx.EmitJmp(lbl737)
+						ctx.MarkLabel(lbl736)
 						ctx.EmitJmp(lbl365)
+						ctx.MarkLabel(lbl737)
+						ctx.EmitJmp(lbl364)
 					}
 					ctx.FreeDesc(&d1410)
 					bbpos_9_21 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl365)
+					ctx.MarkLabel(lbl364)
 					ctx.ResolveFixups()
 					d453 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase452) + int32(0)}
 					d454 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase452) + int32(16)}
@@ -32823,28 +32763,28 @@ Patterns can be any of:
 					if d1425.Loc != LocImm && d1425.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl738 := ctx.ReserveLabel()
 					lbl739 := ctx.ReserveLabel()
-					lbl740 := ctx.ReserveLabel()
 					if d1425.Loc == LocImm {
 						if d1425.Imm.Bool() {
+							ctx.MarkLabel(lbl738)
+							ctx.EmitJmp(lbl374)
+						} else {
 							ctx.MarkLabel(lbl739)
 							ctx.EmitJmp(lbl375)
-						} else {
-							ctx.MarkLabel(lbl740)
-							ctx.EmitJmp(lbl376)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d1425.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl739)
-						ctx.EmitJmp(lbl740)
+						ctx.EmitJump(CondNotEqual, lbl738)
+						ctx.EmitJmp(lbl739)
+						ctx.MarkLabel(lbl738)
+						ctx.EmitJmp(lbl374)
 						ctx.MarkLabel(lbl739)
 						ctx.EmitJmp(lbl375)
-						ctx.MarkLabel(lbl740)
-						ctx.EmitJmp(lbl376)
 					}
 					ctx.FreeDesc(&d1424)
 					bbpos_9_32 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl376)
+					ctx.MarkLabel(lbl375)
 					ctx.ResolveFixups()
 					d453 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase452) + int32(0)}
 					d454 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase452) + int32(16)}
@@ -32856,9 +32796,9 @@ Patterns can be any of:
 					ctx.BindReg(r113, &d1426)
 					ctx.BindReg(r114, &d1426)
 					ctx.EmitMovPairToResult(&d1419, &d1426)
-					ctx.EmitJmp(lbl343)
+					ctx.EmitJmp(lbl342)
 					bbpos_9_12 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl356)
+					ctx.MarkLabel(lbl355)
 					ctx.ResolveFixups()
 					d453 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase452) + int32(0)}
 					d454 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase452) + int32(16)}
@@ -32961,9 +32901,9 @@ Patterns can be any of:
 					ctx.BindReg(r113, &d1436)
 					ctx.BindReg(r114, &d1436)
 					ctx.EmitMovPairToResult(&d1435, &d1436)
-					ctx.EmitJmp(lbl343)
+					ctx.EmitJmp(lbl342)
 					bbpos_9_18 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl362)
+					ctx.MarkLabel(lbl361)
 					ctx.ResolveFixups()
 					d453 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase452) + int32(0)}
 					d454 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase452) + int32(16)}
@@ -33042,9 +32982,9 @@ Patterns can be any of:
 						ctx.UnprotectReg(d1439.Reg)
 						ctx.UnprotectReg(d1439.Reg2)
 					}
-					ctx.EmitJmp(lbl363)
+					ctx.EmitJmp(lbl362)
 					bbpos_9_22 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl366)
+					ctx.MarkLabel(lbl365)
 					ctx.ResolveFixups()
 					d453 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase452) + int32(0)}
 					d454 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase452) + int32(16)}
@@ -33093,28 +33033,28 @@ Patterns can be any of:
 					if d1446.Loc != LocImm && d1446.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl740 := ctx.ReserveLabel()
 					lbl741 := ctx.ReserveLabel()
-					lbl742 := ctx.ReserveLabel()
 					if d1446.Loc == LocImm {
 						if d1446.Imm.Bool() {
+							ctx.MarkLabel(lbl740)
+							ctx.EmitJmp(lbl363)
+						} else {
 							ctx.MarkLabel(lbl741)
 							ctx.EmitJmp(lbl364)
-						} else {
-							ctx.MarkLabel(lbl742)
-							ctx.EmitJmp(lbl365)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d1446.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl741)
-						ctx.EmitJmp(lbl742)
+						ctx.EmitJump(CondNotEqual, lbl740)
+						ctx.EmitJmp(lbl741)
+						ctx.MarkLabel(lbl740)
+						ctx.EmitJmp(lbl363)
 						ctx.MarkLabel(lbl741)
 						ctx.EmitJmp(lbl364)
-						ctx.MarkLabel(lbl742)
-						ctx.EmitJmp(lbl365)
 					}
 					ctx.FreeDesc(&d1445)
 					bbpos_9_31 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl375)
+					ctx.MarkLabel(lbl374)
 					ctx.ResolveFixups()
 					d453 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase452) + int32(0)}
 					d454 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase452) + int32(16)}
@@ -33141,9 +33081,9 @@ Patterns can be any of:
 					ctx.BindReg(r113, &d1448)
 					ctx.BindReg(r114, &d1448)
 					ctx.EmitMovPairToResult(&d1447, &d1448)
-					ctx.EmitJmp(lbl343)
+					ctx.EmitJmp(lbl342)
 					bbpos_9_20 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl364)
+					ctx.MarkLabel(lbl363)
 					ctx.ResolveFixups()
 					d453 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase452) + int32(0)}
 					d454 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase452) + int32(16)}
@@ -33299,7 +33239,7 @@ Patterns can be any of:
 						ctx.UnprotectReg(d1457.Reg2)
 					}
 					bbpos_9_23 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl367)
+					ctx.MarkLabel(lbl366)
 					ctx.ResolveFixups()
 					d453 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase452) + int32(0)}
 					d454 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase452) + int32(16)}
@@ -33346,26 +33286,26 @@ Patterns can be any of:
 					if d1464.Loc != LocImm && d1464.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
+					lbl742 := ctx.ReserveLabel()
 					lbl743 := ctx.ReserveLabel()
-					lbl744 := ctx.ReserveLabel()
 					if d1464.Loc == LocImm {
 						if d1464.Imm.Bool() {
+							ctx.MarkLabel(lbl742)
+							ctx.EmitJmp(lbl367)
+						} else {
 							ctx.MarkLabel(lbl743)
 							ctx.EmitJmp(lbl368)
-						} else {
-							ctx.MarkLabel(lbl744)
-							ctx.EmitJmp(lbl369)
 						}
 					} else {
-						ctx.EmitJump(d1464.Condition, lbl743)
-						ctx.EmitJmp(lbl744)
+						ctx.EmitJump(d1464.Condition, lbl742)
+						ctx.EmitJmp(lbl743)
+						ctx.MarkLabel(lbl742)
+						ctx.EmitJmp(lbl367)
 						ctx.MarkLabel(lbl743)
 						ctx.EmitJmp(lbl368)
-						ctx.MarkLabel(lbl744)
-						ctx.EmitJmp(lbl369)
 					}
 					bbpos_9_25 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl369)
+					ctx.MarkLabel(lbl368)
 					ctx.ResolveFixups()
 					d453 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase452) + int32(0)}
 					d454 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase452) + int32(16)}
@@ -33402,28 +33342,28 @@ Patterns can be any of:
 					if d1470.Loc != LocImm && d1470.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl744 := ctx.ReserveLabel()
 					lbl745 := ctx.ReserveLabel()
-					lbl746 := ctx.ReserveLabel()
 					if d1470.Loc == LocImm {
 						if d1470.Imm.Bool() {
-							ctx.MarkLabel(lbl745)
-							ctx.EmitJmp(lbl372)
-						} else {
-							ctx.MarkLabel(lbl746)
+							ctx.MarkLabel(lbl744)
 							ctx.EmitJmp(lbl371)
+						} else {
+							ctx.MarkLabel(lbl745)
+							ctx.EmitJmp(lbl370)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d1470.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl745)
-						ctx.EmitJmp(lbl746)
-						ctx.MarkLabel(lbl745)
-						ctx.EmitJmp(lbl372)
-						ctx.MarkLabel(lbl746)
+						ctx.EmitJump(CondNotEqual, lbl744)
+						ctx.EmitJmp(lbl745)
+						ctx.MarkLabel(lbl744)
 						ctx.EmitJmp(lbl371)
+						ctx.MarkLabel(lbl745)
+						ctx.EmitJmp(lbl370)
 					}
 					ctx.FreeDesc(&d1469)
 					bbpos_9_27 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl371)
+					ctx.MarkLabel(lbl370)
 					ctx.ResolveFixups()
 					d453 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase452) + int32(0)}
 					d454 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase452) + int32(16)}
@@ -33474,9 +33414,9 @@ Patterns can be any of:
 					d1476 = d1477
 					ctx.StabilizeDescForControlFlow(&d1476)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EmitJmp(lbl367)
+					ctx.EmitJmp(lbl366)
 					bbpos_9_24 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl368)
+					ctx.MarkLabel(lbl367)
 					ctx.ResolveFixups()
 					d453 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase452) + int32(0)}
 					d454 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase452) + int32(16)}
@@ -33485,7 +33425,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.EmitGoPanic("jit: invalid arguments for inlined Go helper")
 					bbpos_9_28 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl372)
+					ctx.MarkLabel(lbl371)
 					ctx.ResolveFixups()
 					d453 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase452) + int32(0)}
 					d454 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase452) + int32(16)}
@@ -33534,28 +33474,28 @@ Patterns can be any of:
 					if d1483.Loc != LocImm && d1483.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl746 := ctx.ReserveLabel()
 					lbl747 := ctx.ReserveLabel()
-					lbl748 := ctx.ReserveLabel()
 					if d1483.Loc == LocImm {
 						if d1483.Imm.Bool() {
+							ctx.MarkLabel(lbl746)
+							ctx.EmitJmp(lbl369)
+						} else {
 							ctx.MarkLabel(lbl747)
 							ctx.EmitJmp(lbl370)
-						} else {
-							ctx.MarkLabel(lbl748)
-							ctx.EmitJmp(lbl371)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d1483.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl747)
-						ctx.EmitJmp(lbl748)
+						ctx.EmitJump(CondNotEqual, lbl746)
+						ctx.EmitJmp(lbl747)
+						ctx.MarkLabel(lbl746)
+						ctx.EmitJmp(lbl369)
 						ctx.MarkLabel(lbl747)
 						ctx.EmitJmp(lbl370)
-						ctx.MarkLabel(lbl748)
-						ctx.EmitJmp(lbl371)
 					}
 					ctx.FreeDesc(&d1482)
 					bbpos_9_26 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl370)
+					ctx.MarkLabel(lbl369)
 					ctx.ResolveFixups()
 					d453 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase452) + int32(0)}
 					d454 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase452) + int32(16)}
@@ -33707,28 +33647,28 @@ Patterns can be any of:
 					if d1497.Loc != LocImm && d1497.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl748 := ctx.ReserveLabel()
 					lbl749 := ctx.ReserveLabel()
-					lbl750 := ctx.ReserveLabel()
 					if d1497.Loc == LocImm {
 						if d1497.Imm.Bool() {
+							ctx.MarkLabel(lbl748)
+							ctx.EmitJmp(lbl372)
+						} else {
 							ctx.MarkLabel(lbl749)
 							ctx.EmitJmp(lbl373)
-						} else {
-							ctx.MarkLabel(lbl750)
-							ctx.EmitJmp(lbl374)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d1497.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl749)
-						ctx.EmitJmp(lbl750)
+						ctx.EmitJump(CondNotEqual, lbl748)
+						ctx.EmitJmp(lbl749)
+						ctx.MarkLabel(lbl748)
+						ctx.EmitJmp(lbl372)
 						ctx.MarkLabel(lbl749)
 						ctx.EmitJmp(lbl373)
-						ctx.MarkLabel(lbl750)
-						ctx.EmitJmp(lbl374)
 					}
 					ctx.FreeDesc(&d1496)
 					bbpos_9_30 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl374)
+					ctx.MarkLabel(lbl373)
 					ctx.ResolveFixups()
 					d453 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase452) + int32(0)}
 					d454 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase452) + int32(16)}
@@ -33740,9 +33680,9 @@ Patterns can be any of:
 					ctx.BindReg(r113, &d1498)
 					ctx.BindReg(r114, &d1498)
 					ctx.EmitMovPairToResult(&d1491, &d1498)
-					ctx.EmitJmp(lbl343)
+					ctx.EmitJmp(lbl342)
 					bbpos_9_29 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl373)
+					ctx.MarkLabel(lbl372)
 					ctx.ResolveFixups()
 					d453 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase452) + int32(0)}
 					d454 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase452) + int32(16)}
@@ -33769,8 +33709,8 @@ Patterns can be any of:
 					ctx.BindReg(r113, &d1500)
 					ctx.BindReg(r114, &d1500)
 					ctx.EmitMovPairToResult(&d1499, &d1500)
-					ctx.EmitJmp(lbl343)
-					ctx.MarkLabel(lbl343)
+					ctx.EmitJmp(lbl342)
+					ctx.MarkLabel(lbl342)
 					d1501 = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: r113, Reg2: r114}
 					ctx.BindReg(r113, &d1501)
 					ctx.BindReg(r114, &d1501)
@@ -33809,9 +33749,9 @@ Patterns can be any of:
 					d1506 = d1507
 					ctx.StabilizeDescForControlFlow(&d1506)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EmitJmp(lbl305)
+					ctx.EmitJmp(lbl304)
 					bbpos_8_17 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl313)
+					ctx.MarkLabel(lbl312)
 					ctx.ResolveFixups()
 					d394 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase393) + int32(0)}
 					d395 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase393) + int32(16)}
@@ -33856,26 +33796,26 @@ Patterns can be any of:
 					if d1511.Loc != LocImm && d1511.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
+					lbl750 := ctx.ReserveLabel()
 					lbl751 := ctx.ReserveLabel()
-					lbl752 := ctx.ReserveLabel()
 					if d1511.Loc == LocImm {
 						if d1511.Imm.Bool() {
+							ctx.MarkLabel(lbl750)
+							ctx.EmitJmp(lbl310)
+						} else {
 							ctx.MarkLabel(lbl751)
 							ctx.EmitJmp(lbl311)
-						} else {
-							ctx.MarkLabel(lbl752)
-							ctx.EmitJmp(lbl312)
 						}
 					} else {
-						ctx.EmitJump(d1511.Condition, lbl751)
-						ctx.EmitJmp(lbl752)
+						ctx.EmitJump(d1511.Condition, lbl750)
+						ctx.EmitJmp(lbl751)
+						ctx.MarkLabel(lbl750)
+						ctx.EmitJmp(lbl310)
 						ctx.MarkLabel(lbl751)
 						ctx.EmitJmp(lbl311)
-						ctx.MarkLabel(lbl752)
-						ctx.EmitJmp(lbl312)
 					}
 					bbpos_8_10 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl306)
+					ctx.MarkLabel(lbl305)
 					ctx.ResolveFixups()
 					d394 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase393) + int32(0)}
 					d395 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase393) + int32(16)}
@@ -33884,7 +33824,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.EmitGoPanic("jit: invalid arguments for inlined Go helper")
 					bbpos_8_14 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl310)
+					ctx.MarkLabel(lbl309)
 					ctx.ResolveFixups()
 					d394 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase393) + int32(0)}
 					d395 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase393) + int32(16)}
@@ -33933,28 +33873,28 @@ Patterns can be any of:
 					if d1517.Loc != LocImm && d1517.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl752 := ctx.ReserveLabel()
 					lbl753 := ctx.ReserveLabel()
-					lbl754 := ctx.ReserveLabel()
 					if d1517.Loc == LocImm {
 						if d1517.Imm.Bool() {
+							ctx.MarkLabel(lbl752)
+							ctx.EmitJmp(lbl307)
+						} else {
 							ctx.MarkLabel(lbl753)
 							ctx.EmitJmp(lbl308)
-						} else {
-							ctx.MarkLabel(lbl754)
-							ctx.EmitJmp(lbl309)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d1517.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl753)
-						ctx.EmitJmp(lbl754)
+						ctx.EmitJump(CondNotEqual, lbl752)
+						ctx.EmitJmp(lbl753)
+						ctx.MarkLabel(lbl752)
+						ctx.EmitJmp(lbl307)
 						ctx.MarkLabel(lbl753)
 						ctx.EmitJmp(lbl308)
-						ctx.MarkLabel(lbl754)
-						ctx.EmitJmp(lbl309)
 					}
 					ctx.FreeDesc(&d1516)
 					bbpos_8_15 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl311)
+					ctx.MarkLabel(lbl310)
 					ctx.ResolveFixups()
 					d394 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase393) + int32(0)}
 					d395 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase393) + int32(16)}
@@ -33991,14 +33931,14 @@ Patterns can be any of:
 					if d1523.Loc != LocImm && d1523.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl754 := ctx.ReserveLabel()
 					lbl755 := ctx.ReserveLabel()
-					lbl756 := ctx.ReserveLabel()
 					if d1523.Loc == LocImm {
 						if d1523.Imm.Bool() {
-							ctx.MarkLabel(lbl755)
-							ctx.EmitJmp(lbl314)
+							ctx.MarkLabel(lbl754)
+							ctx.EmitJmp(lbl313)
 						} else {
-							ctx.MarkLabel(lbl756)
+							ctx.MarkLabel(lbl755)
 							ctx.SyncDesc(&d1520)
 							if d1520.Loc == LocReg {
 								ctx.ProtectReg(d1520.Reg)
@@ -34029,15 +33969,15 @@ Patterns can be any of:
 								ctx.UnprotectReg(d1520.Reg)
 								ctx.UnprotectReg(d1520.Reg2)
 							}
-							ctx.EmitJmp(lbl315)
+							ctx.EmitJmp(lbl314)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d1523.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl755)
-						ctx.EmitJmp(lbl756)
+						ctx.EmitJump(CondNotEqual, lbl754)
+						ctx.EmitJmp(lbl755)
+						ctx.MarkLabel(lbl754)
+						ctx.EmitJmp(lbl313)
 						ctx.MarkLabel(lbl755)
-						ctx.EmitJmp(lbl314)
-						ctx.MarkLabel(lbl756)
 						ctx.SyncDesc(&d1520)
 						if d1520.Loc == LocReg {
 							ctx.ProtectReg(d1520.Reg)
@@ -34068,11 +34008,11 @@ Patterns can be any of:
 							ctx.UnprotectReg(d1520.Reg)
 							ctx.UnprotectReg(d1520.Reg2)
 						}
-						ctx.EmitJmp(lbl315)
+						ctx.EmitJmp(lbl314)
 					}
 					ctx.FreeDesc(&d1522)
 					bbpos_8_19 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl315)
+					ctx.MarkLabel(lbl314)
 					ctx.ResolveFixups()
 					d394 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase393) + int32(0)}
 					d395 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase393) + int32(16)}
@@ -34097,28 +34037,28 @@ Patterns can be any of:
 					if d1527.Loc != LocImm && d1527.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl756 := ctx.ReserveLabel()
 					lbl757 := ctx.ReserveLabel()
-					lbl758 := ctx.ReserveLabel()
 					if d1527.Loc == LocImm {
 						if d1527.Imm.Bool() {
-							ctx.MarkLabel(lbl757)
-							ctx.EmitJmp(lbl318)
-						} else {
-							ctx.MarkLabel(lbl758)
+							ctx.MarkLabel(lbl756)
 							ctx.EmitJmp(lbl317)
+						} else {
+							ctx.MarkLabel(lbl757)
+							ctx.EmitJmp(lbl316)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d1527.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl757)
-						ctx.EmitJmp(lbl758)
-						ctx.MarkLabel(lbl757)
-						ctx.EmitJmp(lbl318)
-						ctx.MarkLabel(lbl758)
+						ctx.EmitJump(CondNotEqual, lbl756)
+						ctx.EmitJmp(lbl757)
+						ctx.MarkLabel(lbl756)
 						ctx.EmitJmp(lbl317)
+						ctx.MarkLabel(lbl757)
+						ctx.EmitJmp(lbl316)
 					}
 					ctx.FreeDesc(&d1526)
 					bbpos_8_21 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl317)
+					ctx.MarkLabel(lbl316)
 					ctx.ResolveFixups()
 					d394 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase393) + int32(0)}
 					d395 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase393) + int32(16)}
@@ -34272,28 +34212,28 @@ Patterns can be any of:
 					if d1541.Loc != LocImm && d1541.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl758 := ctx.ReserveLabel()
 					lbl759 := ctx.ReserveLabel()
-					lbl760 := ctx.ReserveLabel()
 					if d1541.Loc == LocImm {
 						if d1541.Imm.Bool() {
+							ctx.MarkLabel(lbl758)
+							ctx.EmitJmp(lbl326)
+						} else {
 							ctx.MarkLabel(lbl759)
 							ctx.EmitJmp(lbl327)
-						} else {
-							ctx.MarkLabel(lbl760)
-							ctx.EmitJmp(lbl328)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d1541.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl759)
-						ctx.EmitJmp(lbl760)
+						ctx.EmitJump(CondNotEqual, lbl758)
+						ctx.EmitJmp(lbl759)
+						ctx.MarkLabel(lbl758)
+						ctx.EmitJmp(lbl326)
 						ctx.MarkLabel(lbl759)
 						ctx.EmitJmp(lbl327)
-						ctx.MarkLabel(lbl760)
-						ctx.EmitJmp(lbl328)
 					}
 					ctx.FreeDesc(&d1540)
 					bbpos_8_32 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl328)
+					ctx.MarkLabel(lbl327)
 					ctx.ResolveFixups()
 					d394 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase393) + int32(0)}
 					d395 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase393) + int32(16)}
@@ -34305,9 +34245,9 @@ Patterns can be any of:
 					ctx.BindReg(r98, &d1542)
 					ctx.BindReg(r99, &d1542)
 					ctx.EmitMovPairToResult(&d1535, &d1542)
-					ctx.EmitJmp(lbl295)
+					ctx.EmitJmp(lbl294)
 					bbpos_8_12 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl308)
+					ctx.MarkLabel(lbl307)
 					ctx.ResolveFixups()
 					d394 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase393) + int32(0)}
 					d395 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase393) + int32(16)}
@@ -34410,9 +34350,9 @@ Patterns can be any of:
 					ctx.BindReg(r98, &d1552)
 					ctx.BindReg(r99, &d1552)
 					ctx.EmitMovPairToResult(&d1551, &d1552)
-					ctx.EmitJmp(lbl295)
+					ctx.EmitJmp(lbl294)
 					bbpos_8_18 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl314)
+					ctx.MarkLabel(lbl313)
 					ctx.ResolveFixups()
 					d394 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase393) + int32(0)}
 					d395 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase393) + int32(16)}
@@ -34491,9 +34431,9 @@ Patterns can be any of:
 						ctx.UnprotectReg(d1555.Reg)
 						ctx.UnprotectReg(d1555.Reg2)
 					}
-					ctx.EmitJmp(lbl315)
+					ctx.EmitJmp(lbl314)
 					bbpos_8_22 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl318)
+					ctx.MarkLabel(lbl317)
 					ctx.ResolveFixups()
 					d394 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase393) + int32(0)}
 					d395 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase393) + int32(16)}
@@ -34542,28 +34482,28 @@ Patterns can be any of:
 					if d1562.Loc != LocImm && d1562.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl760 := ctx.ReserveLabel()
 					lbl761 := ctx.ReserveLabel()
-					lbl762 := ctx.ReserveLabel()
 					if d1562.Loc == LocImm {
 						if d1562.Imm.Bool() {
+							ctx.MarkLabel(lbl760)
+							ctx.EmitJmp(lbl315)
+						} else {
 							ctx.MarkLabel(lbl761)
 							ctx.EmitJmp(lbl316)
-						} else {
-							ctx.MarkLabel(lbl762)
-							ctx.EmitJmp(lbl317)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d1562.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl761)
-						ctx.EmitJmp(lbl762)
+						ctx.EmitJump(CondNotEqual, lbl760)
+						ctx.EmitJmp(lbl761)
+						ctx.MarkLabel(lbl760)
+						ctx.EmitJmp(lbl315)
 						ctx.MarkLabel(lbl761)
 						ctx.EmitJmp(lbl316)
-						ctx.MarkLabel(lbl762)
-						ctx.EmitJmp(lbl317)
 					}
 					ctx.FreeDesc(&d1561)
 					bbpos_8_31 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl327)
+					ctx.MarkLabel(lbl326)
 					ctx.ResolveFixups()
 					d394 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase393) + int32(0)}
 					d395 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase393) + int32(16)}
@@ -34590,9 +34530,9 @@ Patterns can be any of:
 					ctx.BindReg(r98, &d1564)
 					ctx.BindReg(r99, &d1564)
 					ctx.EmitMovPairToResult(&d1563, &d1564)
-					ctx.EmitJmp(lbl295)
+					ctx.EmitJmp(lbl294)
 					bbpos_8_20 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl316)
+					ctx.MarkLabel(lbl315)
 					ctx.ResolveFixups()
 					d394 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase393) + int32(0)}
 					d395 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase393) + int32(16)}
@@ -34748,7 +34688,7 @@ Patterns can be any of:
 						ctx.UnprotectReg(d1573.Reg2)
 					}
 					bbpos_8_23 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl319)
+					ctx.MarkLabel(lbl318)
 					ctx.ResolveFixups()
 					d394 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase393) + int32(0)}
 					d395 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase393) + int32(16)}
@@ -34795,26 +34735,26 @@ Patterns can be any of:
 					if d1580.Loc != LocImm && d1580.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
+					lbl762 := ctx.ReserveLabel()
 					lbl763 := ctx.ReserveLabel()
-					lbl764 := ctx.ReserveLabel()
 					if d1580.Loc == LocImm {
 						if d1580.Imm.Bool() {
+							ctx.MarkLabel(lbl762)
+							ctx.EmitJmp(lbl319)
+						} else {
 							ctx.MarkLabel(lbl763)
 							ctx.EmitJmp(lbl320)
-						} else {
-							ctx.MarkLabel(lbl764)
-							ctx.EmitJmp(lbl321)
 						}
 					} else {
-						ctx.EmitJump(d1580.Condition, lbl763)
-						ctx.EmitJmp(lbl764)
+						ctx.EmitJump(d1580.Condition, lbl762)
+						ctx.EmitJmp(lbl763)
+						ctx.MarkLabel(lbl762)
+						ctx.EmitJmp(lbl319)
 						ctx.MarkLabel(lbl763)
 						ctx.EmitJmp(lbl320)
-						ctx.MarkLabel(lbl764)
-						ctx.EmitJmp(lbl321)
 					}
 					bbpos_8_25 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl321)
+					ctx.MarkLabel(lbl320)
 					ctx.ResolveFixups()
 					d394 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase393) + int32(0)}
 					d395 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase393) + int32(16)}
@@ -34851,28 +34791,28 @@ Patterns can be any of:
 					if d1586.Loc != LocImm && d1586.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl764 := ctx.ReserveLabel()
 					lbl765 := ctx.ReserveLabel()
-					lbl766 := ctx.ReserveLabel()
 					if d1586.Loc == LocImm {
 						if d1586.Imm.Bool() {
-							ctx.MarkLabel(lbl765)
-							ctx.EmitJmp(lbl324)
-						} else {
-							ctx.MarkLabel(lbl766)
+							ctx.MarkLabel(lbl764)
 							ctx.EmitJmp(lbl323)
+						} else {
+							ctx.MarkLabel(lbl765)
+							ctx.EmitJmp(lbl322)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d1586.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl765)
-						ctx.EmitJmp(lbl766)
-						ctx.MarkLabel(lbl765)
-						ctx.EmitJmp(lbl324)
-						ctx.MarkLabel(lbl766)
+						ctx.EmitJump(CondNotEqual, lbl764)
+						ctx.EmitJmp(lbl765)
+						ctx.MarkLabel(lbl764)
 						ctx.EmitJmp(lbl323)
+						ctx.MarkLabel(lbl765)
+						ctx.EmitJmp(lbl322)
 					}
 					ctx.FreeDesc(&d1585)
 					bbpos_8_27 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl323)
+					ctx.MarkLabel(lbl322)
 					ctx.ResolveFixups()
 					d394 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase393) + int32(0)}
 					d395 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase393) + int32(16)}
@@ -34923,9 +34863,9 @@ Patterns can be any of:
 					d1592 = d1593
 					ctx.StabilizeDescForControlFlow(&d1592)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EmitJmp(lbl319)
+					ctx.EmitJmp(lbl318)
 					bbpos_8_24 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl320)
+					ctx.MarkLabel(lbl319)
 					ctx.ResolveFixups()
 					d394 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase393) + int32(0)}
 					d395 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase393) + int32(16)}
@@ -34934,7 +34874,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.EmitGoPanic("jit: invalid arguments for inlined Go helper")
 					bbpos_8_28 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl324)
+					ctx.MarkLabel(lbl323)
 					ctx.ResolveFixups()
 					d394 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase393) + int32(0)}
 					d395 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase393) + int32(16)}
@@ -34983,28 +34923,28 @@ Patterns can be any of:
 					if d1599.Loc != LocImm && d1599.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl766 := ctx.ReserveLabel()
 					lbl767 := ctx.ReserveLabel()
-					lbl768 := ctx.ReserveLabel()
 					if d1599.Loc == LocImm {
 						if d1599.Imm.Bool() {
+							ctx.MarkLabel(lbl766)
+							ctx.EmitJmp(lbl321)
+						} else {
 							ctx.MarkLabel(lbl767)
 							ctx.EmitJmp(lbl322)
-						} else {
-							ctx.MarkLabel(lbl768)
-							ctx.EmitJmp(lbl323)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d1599.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl767)
-						ctx.EmitJmp(lbl768)
+						ctx.EmitJump(CondNotEqual, lbl766)
+						ctx.EmitJmp(lbl767)
+						ctx.MarkLabel(lbl766)
+						ctx.EmitJmp(lbl321)
 						ctx.MarkLabel(lbl767)
 						ctx.EmitJmp(lbl322)
-						ctx.MarkLabel(lbl768)
-						ctx.EmitJmp(lbl323)
 					}
 					ctx.FreeDesc(&d1598)
 					bbpos_8_26 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl322)
+					ctx.MarkLabel(lbl321)
 					ctx.ResolveFixups()
 					d394 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase393) + int32(0)}
 					d395 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase393) + int32(16)}
@@ -35156,28 +35096,28 @@ Patterns can be any of:
 					if d1613.Loc != LocImm && d1613.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl768 := ctx.ReserveLabel()
 					lbl769 := ctx.ReserveLabel()
-					lbl770 := ctx.ReserveLabel()
 					if d1613.Loc == LocImm {
 						if d1613.Imm.Bool() {
+							ctx.MarkLabel(lbl768)
+							ctx.EmitJmp(lbl324)
+						} else {
 							ctx.MarkLabel(lbl769)
 							ctx.EmitJmp(lbl325)
-						} else {
-							ctx.MarkLabel(lbl770)
-							ctx.EmitJmp(lbl326)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d1613.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl769)
-						ctx.EmitJmp(lbl770)
+						ctx.EmitJump(CondNotEqual, lbl768)
+						ctx.EmitJmp(lbl769)
+						ctx.MarkLabel(lbl768)
+						ctx.EmitJmp(lbl324)
 						ctx.MarkLabel(lbl769)
 						ctx.EmitJmp(lbl325)
-						ctx.MarkLabel(lbl770)
-						ctx.EmitJmp(lbl326)
 					}
 					ctx.FreeDesc(&d1612)
 					bbpos_8_30 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl326)
+					ctx.MarkLabel(lbl325)
 					ctx.ResolveFixups()
 					d394 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase393) + int32(0)}
 					d395 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase393) + int32(16)}
@@ -35189,9 +35129,9 @@ Patterns can be any of:
 					ctx.BindReg(r98, &d1614)
 					ctx.BindReg(r99, &d1614)
 					ctx.EmitMovPairToResult(&d1607, &d1614)
-					ctx.EmitJmp(lbl295)
+					ctx.EmitJmp(lbl294)
 					bbpos_8_29 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl325)
+					ctx.MarkLabel(lbl324)
 					ctx.ResolveFixups()
 					d394 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase393) + int32(0)}
 					d395 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase393) + int32(16)}
@@ -35218,8 +35158,8 @@ Patterns can be any of:
 					ctx.BindReg(r98, &d1616)
 					ctx.BindReg(r99, &d1616)
 					ctx.EmitMovPairToResult(&d1615, &d1616)
-					ctx.EmitJmp(lbl295)
-					ctx.MarkLabel(lbl295)
+					ctx.EmitJmp(lbl294)
+					ctx.MarkLabel(lbl294)
 					d1617 = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: r98, Reg2: r99}
 					ctx.BindReg(r98, &d1617)
 					ctx.BindReg(r99, &d1617)
@@ -35258,9 +35198,9 @@ Patterns can be any of:
 					d1622 = d1623
 					ctx.StabilizeDescForControlFlow(&d1622)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EmitJmp(lbl257)
+					ctx.EmitJmp(lbl256)
 					bbpos_7_17 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl265)
+					ctx.MarkLabel(lbl264)
 					ctx.ResolveFixups()
 					d335 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase334) + int32(0)}
 					d336 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase334) + int32(16)}
@@ -35305,26 +35245,26 @@ Patterns can be any of:
 					if d1627.Loc != LocImm && d1627.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
+					lbl770 := ctx.ReserveLabel()
 					lbl771 := ctx.ReserveLabel()
-					lbl772 := ctx.ReserveLabel()
 					if d1627.Loc == LocImm {
 						if d1627.Imm.Bool() {
+							ctx.MarkLabel(lbl770)
+							ctx.EmitJmp(lbl262)
+						} else {
 							ctx.MarkLabel(lbl771)
 							ctx.EmitJmp(lbl263)
-						} else {
-							ctx.MarkLabel(lbl772)
-							ctx.EmitJmp(lbl264)
 						}
 					} else {
-						ctx.EmitJump(d1627.Condition, lbl771)
-						ctx.EmitJmp(lbl772)
+						ctx.EmitJump(d1627.Condition, lbl770)
+						ctx.EmitJmp(lbl771)
+						ctx.MarkLabel(lbl770)
+						ctx.EmitJmp(lbl262)
 						ctx.MarkLabel(lbl771)
 						ctx.EmitJmp(lbl263)
-						ctx.MarkLabel(lbl772)
-						ctx.EmitJmp(lbl264)
 					}
 					bbpos_7_10 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl258)
+					ctx.MarkLabel(lbl257)
 					ctx.ResolveFixups()
 					d335 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase334) + int32(0)}
 					d336 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase334) + int32(16)}
@@ -35333,7 +35273,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.EmitGoPanic("jit: invalid arguments for inlined Go helper")
 					bbpos_7_14 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl262)
+					ctx.MarkLabel(lbl261)
 					ctx.ResolveFixups()
 					d335 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase334) + int32(0)}
 					d336 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase334) + int32(16)}
@@ -35382,28 +35322,28 @@ Patterns can be any of:
 					if d1633.Loc != LocImm && d1633.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl772 := ctx.ReserveLabel()
 					lbl773 := ctx.ReserveLabel()
-					lbl774 := ctx.ReserveLabel()
 					if d1633.Loc == LocImm {
 						if d1633.Imm.Bool() {
+							ctx.MarkLabel(lbl772)
+							ctx.EmitJmp(lbl259)
+						} else {
 							ctx.MarkLabel(lbl773)
 							ctx.EmitJmp(lbl260)
-						} else {
-							ctx.MarkLabel(lbl774)
-							ctx.EmitJmp(lbl261)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d1633.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl773)
-						ctx.EmitJmp(lbl774)
+						ctx.EmitJump(CondNotEqual, lbl772)
+						ctx.EmitJmp(lbl773)
+						ctx.MarkLabel(lbl772)
+						ctx.EmitJmp(lbl259)
 						ctx.MarkLabel(lbl773)
 						ctx.EmitJmp(lbl260)
-						ctx.MarkLabel(lbl774)
-						ctx.EmitJmp(lbl261)
 					}
 					ctx.FreeDesc(&d1632)
 					bbpos_7_15 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl263)
+					ctx.MarkLabel(lbl262)
 					ctx.ResolveFixups()
 					d335 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase334) + int32(0)}
 					d336 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase334) + int32(16)}
@@ -35440,14 +35380,14 @@ Patterns can be any of:
 					if d1639.Loc != LocImm && d1639.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl774 := ctx.ReserveLabel()
 					lbl775 := ctx.ReserveLabel()
-					lbl776 := ctx.ReserveLabel()
 					if d1639.Loc == LocImm {
 						if d1639.Imm.Bool() {
-							ctx.MarkLabel(lbl775)
-							ctx.EmitJmp(lbl266)
+							ctx.MarkLabel(lbl774)
+							ctx.EmitJmp(lbl265)
 						} else {
-							ctx.MarkLabel(lbl776)
+							ctx.MarkLabel(lbl775)
 							ctx.SyncDesc(&d1636)
 							if d1636.Loc == LocReg {
 								ctx.ProtectReg(d1636.Reg)
@@ -35478,15 +35418,15 @@ Patterns can be any of:
 								ctx.UnprotectReg(d1636.Reg)
 								ctx.UnprotectReg(d1636.Reg2)
 							}
-							ctx.EmitJmp(lbl267)
+							ctx.EmitJmp(lbl266)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d1639.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl775)
-						ctx.EmitJmp(lbl776)
+						ctx.EmitJump(CondNotEqual, lbl774)
+						ctx.EmitJmp(lbl775)
+						ctx.MarkLabel(lbl774)
+						ctx.EmitJmp(lbl265)
 						ctx.MarkLabel(lbl775)
-						ctx.EmitJmp(lbl266)
-						ctx.MarkLabel(lbl776)
 						ctx.SyncDesc(&d1636)
 						if d1636.Loc == LocReg {
 							ctx.ProtectReg(d1636.Reg)
@@ -35517,11 +35457,11 @@ Patterns can be any of:
 							ctx.UnprotectReg(d1636.Reg)
 							ctx.UnprotectReg(d1636.Reg2)
 						}
-						ctx.EmitJmp(lbl267)
+						ctx.EmitJmp(lbl266)
 					}
 					ctx.FreeDesc(&d1638)
 					bbpos_7_19 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl267)
+					ctx.MarkLabel(lbl266)
 					ctx.ResolveFixups()
 					d335 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase334) + int32(0)}
 					d336 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase334) + int32(16)}
@@ -35546,28 +35486,28 @@ Patterns can be any of:
 					if d1643.Loc != LocImm && d1643.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl776 := ctx.ReserveLabel()
 					lbl777 := ctx.ReserveLabel()
-					lbl778 := ctx.ReserveLabel()
 					if d1643.Loc == LocImm {
 						if d1643.Imm.Bool() {
-							ctx.MarkLabel(lbl777)
-							ctx.EmitJmp(lbl270)
-						} else {
-							ctx.MarkLabel(lbl778)
+							ctx.MarkLabel(lbl776)
 							ctx.EmitJmp(lbl269)
+						} else {
+							ctx.MarkLabel(lbl777)
+							ctx.EmitJmp(lbl268)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d1643.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl777)
-						ctx.EmitJmp(lbl778)
-						ctx.MarkLabel(lbl777)
-						ctx.EmitJmp(lbl270)
-						ctx.MarkLabel(lbl778)
+						ctx.EmitJump(CondNotEqual, lbl776)
+						ctx.EmitJmp(lbl777)
+						ctx.MarkLabel(lbl776)
 						ctx.EmitJmp(lbl269)
+						ctx.MarkLabel(lbl777)
+						ctx.EmitJmp(lbl268)
 					}
 					ctx.FreeDesc(&d1642)
 					bbpos_7_21 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl269)
+					ctx.MarkLabel(lbl268)
 					ctx.ResolveFixups()
 					d335 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase334) + int32(0)}
 					d336 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase334) + int32(16)}
@@ -35721,28 +35661,28 @@ Patterns can be any of:
 					if d1657.Loc != LocImm && d1657.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl778 := ctx.ReserveLabel()
 					lbl779 := ctx.ReserveLabel()
-					lbl780 := ctx.ReserveLabel()
 					if d1657.Loc == LocImm {
 						if d1657.Imm.Bool() {
+							ctx.MarkLabel(lbl778)
+							ctx.EmitJmp(lbl278)
+						} else {
 							ctx.MarkLabel(lbl779)
 							ctx.EmitJmp(lbl279)
-						} else {
-							ctx.MarkLabel(lbl780)
-							ctx.EmitJmp(lbl280)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d1657.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl779)
-						ctx.EmitJmp(lbl780)
+						ctx.EmitJump(CondNotEqual, lbl778)
+						ctx.EmitJmp(lbl779)
+						ctx.MarkLabel(lbl778)
+						ctx.EmitJmp(lbl278)
 						ctx.MarkLabel(lbl779)
 						ctx.EmitJmp(lbl279)
-						ctx.MarkLabel(lbl780)
-						ctx.EmitJmp(lbl280)
 					}
 					ctx.FreeDesc(&d1656)
 					bbpos_7_32 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl280)
+					ctx.MarkLabel(lbl279)
 					ctx.ResolveFixups()
 					d335 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase334) + int32(0)}
 					d336 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase334) + int32(16)}
@@ -35754,9 +35694,9 @@ Patterns can be any of:
 					ctx.BindReg(r83, &d1658)
 					ctx.BindReg(r84, &d1658)
 					ctx.EmitMovPairToResult(&d1651, &d1658)
-					ctx.EmitJmp(lbl247)
+					ctx.EmitJmp(lbl246)
 					bbpos_7_12 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl260)
+					ctx.MarkLabel(lbl259)
 					ctx.ResolveFixups()
 					d335 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase334) + int32(0)}
 					d336 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase334) + int32(16)}
@@ -35859,9 +35799,9 @@ Patterns can be any of:
 					ctx.BindReg(r83, &d1668)
 					ctx.BindReg(r84, &d1668)
 					ctx.EmitMovPairToResult(&d1667, &d1668)
-					ctx.EmitJmp(lbl247)
+					ctx.EmitJmp(lbl246)
 					bbpos_7_18 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl266)
+					ctx.MarkLabel(lbl265)
 					ctx.ResolveFixups()
 					d335 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase334) + int32(0)}
 					d336 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase334) + int32(16)}
@@ -35940,9 +35880,9 @@ Patterns can be any of:
 						ctx.UnprotectReg(d1671.Reg)
 						ctx.UnprotectReg(d1671.Reg2)
 					}
-					ctx.EmitJmp(lbl267)
+					ctx.EmitJmp(lbl266)
 					bbpos_7_22 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl270)
+					ctx.MarkLabel(lbl269)
 					ctx.ResolveFixups()
 					d335 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase334) + int32(0)}
 					d336 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase334) + int32(16)}
@@ -35991,28 +35931,28 @@ Patterns can be any of:
 					if d1678.Loc != LocImm && d1678.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl780 := ctx.ReserveLabel()
 					lbl781 := ctx.ReserveLabel()
-					lbl782 := ctx.ReserveLabel()
 					if d1678.Loc == LocImm {
 						if d1678.Imm.Bool() {
+							ctx.MarkLabel(lbl780)
+							ctx.EmitJmp(lbl267)
+						} else {
 							ctx.MarkLabel(lbl781)
 							ctx.EmitJmp(lbl268)
-						} else {
-							ctx.MarkLabel(lbl782)
-							ctx.EmitJmp(lbl269)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d1678.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl781)
-						ctx.EmitJmp(lbl782)
+						ctx.EmitJump(CondNotEqual, lbl780)
+						ctx.EmitJmp(lbl781)
+						ctx.MarkLabel(lbl780)
+						ctx.EmitJmp(lbl267)
 						ctx.MarkLabel(lbl781)
 						ctx.EmitJmp(lbl268)
-						ctx.MarkLabel(lbl782)
-						ctx.EmitJmp(lbl269)
 					}
 					ctx.FreeDesc(&d1677)
 					bbpos_7_31 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl279)
+					ctx.MarkLabel(lbl278)
 					ctx.ResolveFixups()
 					d335 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase334) + int32(0)}
 					d336 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase334) + int32(16)}
@@ -36039,9 +35979,9 @@ Patterns can be any of:
 					ctx.BindReg(r83, &d1680)
 					ctx.BindReg(r84, &d1680)
 					ctx.EmitMovPairToResult(&d1679, &d1680)
-					ctx.EmitJmp(lbl247)
+					ctx.EmitJmp(lbl246)
 					bbpos_7_20 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl268)
+					ctx.MarkLabel(lbl267)
 					ctx.ResolveFixups()
 					d335 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase334) + int32(0)}
 					d336 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase334) + int32(16)}
@@ -36197,7 +36137,7 @@ Patterns can be any of:
 						ctx.UnprotectReg(d1689.Reg2)
 					}
 					bbpos_7_23 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl271)
+					ctx.MarkLabel(lbl270)
 					ctx.ResolveFixups()
 					d335 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase334) + int32(0)}
 					d336 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase334) + int32(16)}
@@ -36244,26 +36184,26 @@ Patterns can be any of:
 					if d1696.Loc != LocImm && d1696.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
+					lbl782 := ctx.ReserveLabel()
 					lbl783 := ctx.ReserveLabel()
-					lbl784 := ctx.ReserveLabel()
 					if d1696.Loc == LocImm {
 						if d1696.Imm.Bool() {
+							ctx.MarkLabel(lbl782)
+							ctx.EmitJmp(lbl271)
+						} else {
 							ctx.MarkLabel(lbl783)
 							ctx.EmitJmp(lbl272)
-						} else {
-							ctx.MarkLabel(lbl784)
-							ctx.EmitJmp(lbl273)
 						}
 					} else {
-						ctx.EmitJump(d1696.Condition, lbl783)
-						ctx.EmitJmp(lbl784)
+						ctx.EmitJump(d1696.Condition, lbl782)
+						ctx.EmitJmp(lbl783)
+						ctx.MarkLabel(lbl782)
+						ctx.EmitJmp(lbl271)
 						ctx.MarkLabel(lbl783)
 						ctx.EmitJmp(lbl272)
-						ctx.MarkLabel(lbl784)
-						ctx.EmitJmp(lbl273)
 					}
 					bbpos_7_25 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl273)
+					ctx.MarkLabel(lbl272)
 					ctx.ResolveFixups()
 					d335 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase334) + int32(0)}
 					d336 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase334) + int32(16)}
@@ -36300,28 +36240,28 @@ Patterns can be any of:
 					if d1702.Loc != LocImm && d1702.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl784 := ctx.ReserveLabel()
 					lbl785 := ctx.ReserveLabel()
-					lbl786 := ctx.ReserveLabel()
 					if d1702.Loc == LocImm {
 						if d1702.Imm.Bool() {
-							ctx.MarkLabel(lbl785)
-							ctx.EmitJmp(lbl276)
-						} else {
-							ctx.MarkLabel(lbl786)
+							ctx.MarkLabel(lbl784)
 							ctx.EmitJmp(lbl275)
+						} else {
+							ctx.MarkLabel(lbl785)
+							ctx.EmitJmp(lbl274)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d1702.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl785)
-						ctx.EmitJmp(lbl786)
-						ctx.MarkLabel(lbl785)
-						ctx.EmitJmp(lbl276)
-						ctx.MarkLabel(lbl786)
+						ctx.EmitJump(CondNotEqual, lbl784)
+						ctx.EmitJmp(lbl785)
+						ctx.MarkLabel(lbl784)
 						ctx.EmitJmp(lbl275)
+						ctx.MarkLabel(lbl785)
+						ctx.EmitJmp(lbl274)
 					}
 					ctx.FreeDesc(&d1701)
 					bbpos_7_27 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl275)
+					ctx.MarkLabel(lbl274)
 					ctx.ResolveFixups()
 					d335 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase334) + int32(0)}
 					d336 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase334) + int32(16)}
@@ -36372,9 +36312,9 @@ Patterns can be any of:
 					d1708 = d1709
 					ctx.StabilizeDescForControlFlow(&d1708)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EmitJmp(lbl271)
+					ctx.EmitJmp(lbl270)
 					bbpos_7_24 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl272)
+					ctx.MarkLabel(lbl271)
 					ctx.ResolveFixups()
 					d335 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase334) + int32(0)}
 					d336 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase334) + int32(16)}
@@ -36383,7 +36323,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.EmitGoPanic("jit: invalid arguments for inlined Go helper")
 					bbpos_7_28 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl276)
+					ctx.MarkLabel(lbl275)
 					ctx.ResolveFixups()
 					d335 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase334) + int32(0)}
 					d336 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase334) + int32(16)}
@@ -36432,28 +36372,28 @@ Patterns can be any of:
 					if d1715.Loc != LocImm && d1715.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl786 := ctx.ReserveLabel()
 					lbl787 := ctx.ReserveLabel()
-					lbl788 := ctx.ReserveLabel()
 					if d1715.Loc == LocImm {
 						if d1715.Imm.Bool() {
+							ctx.MarkLabel(lbl786)
+							ctx.EmitJmp(lbl273)
+						} else {
 							ctx.MarkLabel(lbl787)
 							ctx.EmitJmp(lbl274)
-						} else {
-							ctx.MarkLabel(lbl788)
-							ctx.EmitJmp(lbl275)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d1715.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl787)
-						ctx.EmitJmp(lbl788)
+						ctx.EmitJump(CondNotEqual, lbl786)
+						ctx.EmitJmp(lbl787)
+						ctx.MarkLabel(lbl786)
+						ctx.EmitJmp(lbl273)
 						ctx.MarkLabel(lbl787)
 						ctx.EmitJmp(lbl274)
-						ctx.MarkLabel(lbl788)
-						ctx.EmitJmp(lbl275)
 					}
 					ctx.FreeDesc(&d1714)
 					bbpos_7_26 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl274)
+					ctx.MarkLabel(lbl273)
 					ctx.ResolveFixups()
 					d335 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase334) + int32(0)}
 					d336 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase334) + int32(16)}
@@ -36605,28 +36545,28 @@ Patterns can be any of:
 					if d1729.Loc != LocImm && d1729.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl788 := ctx.ReserveLabel()
 					lbl789 := ctx.ReserveLabel()
-					lbl790 := ctx.ReserveLabel()
 					if d1729.Loc == LocImm {
 						if d1729.Imm.Bool() {
+							ctx.MarkLabel(lbl788)
+							ctx.EmitJmp(lbl276)
+						} else {
 							ctx.MarkLabel(lbl789)
 							ctx.EmitJmp(lbl277)
-						} else {
-							ctx.MarkLabel(lbl790)
-							ctx.EmitJmp(lbl278)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d1729.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl789)
-						ctx.EmitJmp(lbl790)
+						ctx.EmitJump(CondNotEqual, lbl788)
+						ctx.EmitJmp(lbl789)
+						ctx.MarkLabel(lbl788)
+						ctx.EmitJmp(lbl276)
 						ctx.MarkLabel(lbl789)
 						ctx.EmitJmp(lbl277)
-						ctx.MarkLabel(lbl790)
-						ctx.EmitJmp(lbl278)
 					}
 					ctx.FreeDesc(&d1728)
 					bbpos_7_30 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl278)
+					ctx.MarkLabel(lbl277)
 					ctx.ResolveFixups()
 					d335 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase334) + int32(0)}
 					d336 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase334) + int32(16)}
@@ -36638,9 +36578,9 @@ Patterns can be any of:
 					ctx.BindReg(r83, &d1730)
 					ctx.BindReg(r84, &d1730)
 					ctx.EmitMovPairToResult(&d1723, &d1730)
-					ctx.EmitJmp(lbl247)
+					ctx.EmitJmp(lbl246)
 					bbpos_7_29 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl277)
+					ctx.MarkLabel(lbl276)
 					ctx.ResolveFixups()
 					d335 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase334) + int32(0)}
 					d336 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase334) + int32(16)}
@@ -36667,8 +36607,8 @@ Patterns can be any of:
 					ctx.BindReg(r83, &d1732)
 					ctx.BindReg(r84, &d1732)
 					ctx.EmitMovPairToResult(&d1731, &d1732)
-					ctx.EmitJmp(lbl247)
-					ctx.MarkLabel(lbl247)
+					ctx.EmitJmp(lbl246)
+					ctx.MarkLabel(lbl246)
 					d1733 = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: r83, Reg2: r84}
 					ctx.BindReg(r83, &d1733)
 					ctx.BindReg(r84, &d1733)
@@ -36707,9 +36647,9 @@ Patterns can be any of:
 					d1738 = d1739
 					ctx.StabilizeDescForControlFlow(&d1738)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EmitJmp(lbl209)
+					ctx.EmitJmp(lbl208)
 					bbpos_6_17 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl217)
+					ctx.MarkLabel(lbl216)
 					ctx.ResolveFixups()
 					d276 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase275) + int32(0)}
 					d277 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase275) + int32(16)}
@@ -36754,26 +36694,26 @@ Patterns can be any of:
 					if d1743.Loc != LocImm && d1743.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
+					lbl790 := ctx.ReserveLabel()
 					lbl791 := ctx.ReserveLabel()
-					lbl792 := ctx.ReserveLabel()
 					if d1743.Loc == LocImm {
 						if d1743.Imm.Bool() {
+							ctx.MarkLabel(lbl790)
+							ctx.EmitJmp(lbl214)
+						} else {
 							ctx.MarkLabel(lbl791)
 							ctx.EmitJmp(lbl215)
-						} else {
-							ctx.MarkLabel(lbl792)
-							ctx.EmitJmp(lbl216)
 						}
 					} else {
-						ctx.EmitJump(d1743.Condition, lbl791)
-						ctx.EmitJmp(lbl792)
+						ctx.EmitJump(d1743.Condition, lbl790)
+						ctx.EmitJmp(lbl791)
+						ctx.MarkLabel(lbl790)
+						ctx.EmitJmp(lbl214)
 						ctx.MarkLabel(lbl791)
 						ctx.EmitJmp(lbl215)
-						ctx.MarkLabel(lbl792)
-						ctx.EmitJmp(lbl216)
 					}
 					bbpos_6_10 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl210)
+					ctx.MarkLabel(lbl209)
 					ctx.ResolveFixups()
 					d276 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase275) + int32(0)}
 					d277 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase275) + int32(16)}
@@ -36782,7 +36722,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.EmitGoPanic("jit: invalid arguments for inlined Go helper")
 					bbpos_6_14 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl214)
+					ctx.MarkLabel(lbl213)
 					ctx.ResolveFixups()
 					d276 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase275) + int32(0)}
 					d277 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase275) + int32(16)}
@@ -36831,28 +36771,28 @@ Patterns can be any of:
 					if d1749.Loc != LocImm && d1749.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl792 := ctx.ReserveLabel()
 					lbl793 := ctx.ReserveLabel()
-					lbl794 := ctx.ReserveLabel()
 					if d1749.Loc == LocImm {
 						if d1749.Imm.Bool() {
+							ctx.MarkLabel(lbl792)
+							ctx.EmitJmp(lbl211)
+						} else {
 							ctx.MarkLabel(lbl793)
 							ctx.EmitJmp(lbl212)
-						} else {
-							ctx.MarkLabel(lbl794)
-							ctx.EmitJmp(lbl213)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d1749.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl793)
-						ctx.EmitJmp(lbl794)
+						ctx.EmitJump(CondNotEqual, lbl792)
+						ctx.EmitJmp(lbl793)
+						ctx.MarkLabel(lbl792)
+						ctx.EmitJmp(lbl211)
 						ctx.MarkLabel(lbl793)
 						ctx.EmitJmp(lbl212)
-						ctx.MarkLabel(lbl794)
-						ctx.EmitJmp(lbl213)
 					}
 					ctx.FreeDesc(&d1748)
 					bbpos_6_15 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl215)
+					ctx.MarkLabel(lbl214)
 					ctx.ResolveFixups()
 					d276 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase275) + int32(0)}
 					d277 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase275) + int32(16)}
@@ -36889,14 +36829,14 @@ Patterns can be any of:
 					if d1755.Loc != LocImm && d1755.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl794 := ctx.ReserveLabel()
 					lbl795 := ctx.ReserveLabel()
-					lbl796 := ctx.ReserveLabel()
 					if d1755.Loc == LocImm {
 						if d1755.Imm.Bool() {
-							ctx.MarkLabel(lbl795)
-							ctx.EmitJmp(lbl218)
+							ctx.MarkLabel(lbl794)
+							ctx.EmitJmp(lbl217)
 						} else {
-							ctx.MarkLabel(lbl796)
+							ctx.MarkLabel(lbl795)
 							ctx.SyncDesc(&d1752)
 							if d1752.Loc == LocReg {
 								ctx.ProtectReg(d1752.Reg)
@@ -36927,15 +36867,15 @@ Patterns can be any of:
 								ctx.UnprotectReg(d1752.Reg)
 								ctx.UnprotectReg(d1752.Reg2)
 							}
-							ctx.EmitJmp(lbl219)
+							ctx.EmitJmp(lbl218)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d1755.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl795)
-						ctx.EmitJmp(lbl796)
+						ctx.EmitJump(CondNotEqual, lbl794)
+						ctx.EmitJmp(lbl795)
+						ctx.MarkLabel(lbl794)
+						ctx.EmitJmp(lbl217)
 						ctx.MarkLabel(lbl795)
-						ctx.EmitJmp(lbl218)
-						ctx.MarkLabel(lbl796)
 						ctx.SyncDesc(&d1752)
 						if d1752.Loc == LocReg {
 							ctx.ProtectReg(d1752.Reg)
@@ -36966,11 +36906,11 @@ Patterns can be any of:
 							ctx.UnprotectReg(d1752.Reg)
 							ctx.UnprotectReg(d1752.Reg2)
 						}
-						ctx.EmitJmp(lbl219)
+						ctx.EmitJmp(lbl218)
 					}
 					ctx.FreeDesc(&d1754)
 					bbpos_6_19 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl219)
+					ctx.MarkLabel(lbl218)
 					ctx.ResolveFixups()
 					d276 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase275) + int32(0)}
 					d277 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase275) + int32(16)}
@@ -36995,28 +36935,28 @@ Patterns can be any of:
 					if d1759.Loc != LocImm && d1759.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl796 := ctx.ReserveLabel()
 					lbl797 := ctx.ReserveLabel()
-					lbl798 := ctx.ReserveLabel()
 					if d1759.Loc == LocImm {
 						if d1759.Imm.Bool() {
-							ctx.MarkLabel(lbl797)
-							ctx.EmitJmp(lbl222)
-						} else {
-							ctx.MarkLabel(lbl798)
+							ctx.MarkLabel(lbl796)
 							ctx.EmitJmp(lbl221)
+						} else {
+							ctx.MarkLabel(lbl797)
+							ctx.EmitJmp(lbl220)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d1759.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl797)
-						ctx.EmitJmp(lbl798)
-						ctx.MarkLabel(lbl797)
-						ctx.EmitJmp(lbl222)
-						ctx.MarkLabel(lbl798)
+						ctx.EmitJump(CondNotEqual, lbl796)
+						ctx.EmitJmp(lbl797)
+						ctx.MarkLabel(lbl796)
 						ctx.EmitJmp(lbl221)
+						ctx.MarkLabel(lbl797)
+						ctx.EmitJmp(lbl220)
 					}
 					ctx.FreeDesc(&d1758)
 					bbpos_6_21 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl221)
+					ctx.MarkLabel(lbl220)
 					ctx.ResolveFixups()
 					d276 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase275) + int32(0)}
 					d277 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase275) + int32(16)}
@@ -37170,28 +37110,28 @@ Patterns can be any of:
 					if d1773.Loc != LocImm && d1773.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl798 := ctx.ReserveLabel()
 					lbl799 := ctx.ReserveLabel()
-					lbl800 := ctx.ReserveLabel()
 					if d1773.Loc == LocImm {
 						if d1773.Imm.Bool() {
+							ctx.MarkLabel(lbl798)
+							ctx.EmitJmp(lbl230)
+						} else {
 							ctx.MarkLabel(lbl799)
 							ctx.EmitJmp(lbl231)
-						} else {
-							ctx.MarkLabel(lbl800)
-							ctx.EmitJmp(lbl232)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d1773.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl799)
-						ctx.EmitJmp(lbl800)
+						ctx.EmitJump(CondNotEqual, lbl798)
+						ctx.EmitJmp(lbl799)
+						ctx.MarkLabel(lbl798)
+						ctx.EmitJmp(lbl230)
 						ctx.MarkLabel(lbl799)
 						ctx.EmitJmp(lbl231)
-						ctx.MarkLabel(lbl800)
-						ctx.EmitJmp(lbl232)
 					}
 					ctx.FreeDesc(&d1772)
 					bbpos_6_32 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl232)
+					ctx.MarkLabel(lbl231)
 					ctx.ResolveFixups()
 					d276 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase275) + int32(0)}
 					d277 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase275) + int32(16)}
@@ -37203,9 +37143,9 @@ Patterns can be any of:
 					ctx.BindReg(r68, &d1774)
 					ctx.BindReg(r69, &d1774)
 					ctx.EmitMovPairToResult(&d1767, &d1774)
-					ctx.EmitJmp(lbl199)
+					ctx.EmitJmp(lbl198)
 					bbpos_6_12 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl212)
+					ctx.MarkLabel(lbl211)
 					ctx.ResolveFixups()
 					d276 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase275) + int32(0)}
 					d277 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase275) + int32(16)}
@@ -37308,9 +37248,9 @@ Patterns can be any of:
 					ctx.BindReg(r68, &d1784)
 					ctx.BindReg(r69, &d1784)
 					ctx.EmitMovPairToResult(&d1783, &d1784)
-					ctx.EmitJmp(lbl199)
+					ctx.EmitJmp(lbl198)
 					bbpos_6_18 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl218)
+					ctx.MarkLabel(lbl217)
 					ctx.ResolveFixups()
 					d276 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase275) + int32(0)}
 					d277 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase275) + int32(16)}
@@ -37389,9 +37329,9 @@ Patterns can be any of:
 						ctx.UnprotectReg(d1787.Reg)
 						ctx.UnprotectReg(d1787.Reg2)
 					}
-					ctx.EmitJmp(lbl219)
+					ctx.EmitJmp(lbl218)
 					bbpos_6_22 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl222)
+					ctx.MarkLabel(lbl221)
 					ctx.ResolveFixups()
 					d276 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase275) + int32(0)}
 					d277 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase275) + int32(16)}
@@ -37440,28 +37380,28 @@ Patterns can be any of:
 					if d1794.Loc != LocImm && d1794.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl800 := ctx.ReserveLabel()
 					lbl801 := ctx.ReserveLabel()
-					lbl802 := ctx.ReserveLabel()
 					if d1794.Loc == LocImm {
 						if d1794.Imm.Bool() {
+							ctx.MarkLabel(lbl800)
+							ctx.EmitJmp(lbl219)
+						} else {
 							ctx.MarkLabel(lbl801)
 							ctx.EmitJmp(lbl220)
-						} else {
-							ctx.MarkLabel(lbl802)
-							ctx.EmitJmp(lbl221)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d1794.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl801)
-						ctx.EmitJmp(lbl802)
+						ctx.EmitJump(CondNotEqual, lbl800)
+						ctx.EmitJmp(lbl801)
+						ctx.MarkLabel(lbl800)
+						ctx.EmitJmp(lbl219)
 						ctx.MarkLabel(lbl801)
 						ctx.EmitJmp(lbl220)
-						ctx.MarkLabel(lbl802)
-						ctx.EmitJmp(lbl221)
 					}
 					ctx.FreeDesc(&d1793)
 					bbpos_6_31 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl231)
+					ctx.MarkLabel(lbl230)
 					ctx.ResolveFixups()
 					d276 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase275) + int32(0)}
 					d277 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase275) + int32(16)}
@@ -37488,9 +37428,9 @@ Patterns can be any of:
 					ctx.BindReg(r68, &d1796)
 					ctx.BindReg(r69, &d1796)
 					ctx.EmitMovPairToResult(&d1795, &d1796)
-					ctx.EmitJmp(lbl199)
+					ctx.EmitJmp(lbl198)
 					bbpos_6_20 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl220)
+					ctx.MarkLabel(lbl219)
 					ctx.ResolveFixups()
 					d276 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase275) + int32(0)}
 					d277 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase275) + int32(16)}
@@ -37646,7 +37586,7 @@ Patterns can be any of:
 						ctx.UnprotectReg(d1805.Reg2)
 					}
 					bbpos_6_23 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl223)
+					ctx.MarkLabel(lbl222)
 					ctx.ResolveFixups()
 					d276 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase275) + int32(0)}
 					d277 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase275) + int32(16)}
@@ -37693,26 +37633,26 @@ Patterns can be any of:
 					if d1812.Loc != LocImm && d1812.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
+					lbl802 := ctx.ReserveLabel()
 					lbl803 := ctx.ReserveLabel()
-					lbl804 := ctx.ReserveLabel()
 					if d1812.Loc == LocImm {
 						if d1812.Imm.Bool() {
+							ctx.MarkLabel(lbl802)
+							ctx.EmitJmp(lbl223)
+						} else {
 							ctx.MarkLabel(lbl803)
 							ctx.EmitJmp(lbl224)
-						} else {
-							ctx.MarkLabel(lbl804)
-							ctx.EmitJmp(lbl225)
 						}
 					} else {
-						ctx.EmitJump(d1812.Condition, lbl803)
-						ctx.EmitJmp(lbl804)
+						ctx.EmitJump(d1812.Condition, lbl802)
+						ctx.EmitJmp(lbl803)
+						ctx.MarkLabel(lbl802)
+						ctx.EmitJmp(lbl223)
 						ctx.MarkLabel(lbl803)
 						ctx.EmitJmp(lbl224)
-						ctx.MarkLabel(lbl804)
-						ctx.EmitJmp(lbl225)
 					}
 					bbpos_6_25 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl225)
+					ctx.MarkLabel(lbl224)
 					ctx.ResolveFixups()
 					d276 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase275) + int32(0)}
 					d277 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase275) + int32(16)}
@@ -37749,28 +37689,28 @@ Patterns can be any of:
 					if d1818.Loc != LocImm && d1818.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl804 := ctx.ReserveLabel()
 					lbl805 := ctx.ReserveLabel()
-					lbl806 := ctx.ReserveLabel()
 					if d1818.Loc == LocImm {
 						if d1818.Imm.Bool() {
-							ctx.MarkLabel(lbl805)
-							ctx.EmitJmp(lbl228)
-						} else {
-							ctx.MarkLabel(lbl806)
+							ctx.MarkLabel(lbl804)
 							ctx.EmitJmp(lbl227)
+						} else {
+							ctx.MarkLabel(lbl805)
+							ctx.EmitJmp(lbl226)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d1818.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl805)
-						ctx.EmitJmp(lbl806)
-						ctx.MarkLabel(lbl805)
-						ctx.EmitJmp(lbl228)
-						ctx.MarkLabel(lbl806)
+						ctx.EmitJump(CondNotEqual, lbl804)
+						ctx.EmitJmp(lbl805)
+						ctx.MarkLabel(lbl804)
 						ctx.EmitJmp(lbl227)
+						ctx.MarkLabel(lbl805)
+						ctx.EmitJmp(lbl226)
 					}
 					ctx.FreeDesc(&d1817)
 					bbpos_6_27 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl227)
+					ctx.MarkLabel(lbl226)
 					ctx.ResolveFixups()
 					d276 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase275) + int32(0)}
 					d277 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase275) + int32(16)}
@@ -37821,9 +37761,9 @@ Patterns can be any of:
 					d1824 = d1825
 					ctx.StabilizeDescForControlFlow(&d1824)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EmitJmp(lbl223)
+					ctx.EmitJmp(lbl222)
 					bbpos_6_24 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl224)
+					ctx.MarkLabel(lbl223)
 					ctx.ResolveFixups()
 					d276 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase275) + int32(0)}
 					d277 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase275) + int32(16)}
@@ -37832,7 +37772,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.EmitGoPanic("jit: invalid arguments for inlined Go helper")
 					bbpos_6_28 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl228)
+					ctx.MarkLabel(lbl227)
 					ctx.ResolveFixups()
 					d276 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase275) + int32(0)}
 					d277 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase275) + int32(16)}
@@ -37881,28 +37821,28 @@ Patterns can be any of:
 					if d1831.Loc != LocImm && d1831.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl806 := ctx.ReserveLabel()
 					lbl807 := ctx.ReserveLabel()
-					lbl808 := ctx.ReserveLabel()
 					if d1831.Loc == LocImm {
 						if d1831.Imm.Bool() {
+							ctx.MarkLabel(lbl806)
+							ctx.EmitJmp(lbl225)
+						} else {
 							ctx.MarkLabel(lbl807)
 							ctx.EmitJmp(lbl226)
-						} else {
-							ctx.MarkLabel(lbl808)
-							ctx.EmitJmp(lbl227)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d1831.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl807)
-						ctx.EmitJmp(lbl808)
+						ctx.EmitJump(CondNotEqual, lbl806)
+						ctx.EmitJmp(lbl807)
+						ctx.MarkLabel(lbl806)
+						ctx.EmitJmp(lbl225)
 						ctx.MarkLabel(lbl807)
 						ctx.EmitJmp(lbl226)
-						ctx.MarkLabel(lbl808)
-						ctx.EmitJmp(lbl227)
 					}
 					ctx.FreeDesc(&d1830)
 					bbpos_6_26 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl226)
+					ctx.MarkLabel(lbl225)
 					ctx.ResolveFixups()
 					d276 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase275) + int32(0)}
 					d277 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase275) + int32(16)}
@@ -38054,28 +37994,28 @@ Patterns can be any of:
 					if d1845.Loc != LocImm && d1845.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl808 := ctx.ReserveLabel()
 					lbl809 := ctx.ReserveLabel()
-					lbl810 := ctx.ReserveLabel()
 					if d1845.Loc == LocImm {
 						if d1845.Imm.Bool() {
+							ctx.MarkLabel(lbl808)
+							ctx.EmitJmp(lbl228)
+						} else {
 							ctx.MarkLabel(lbl809)
 							ctx.EmitJmp(lbl229)
-						} else {
-							ctx.MarkLabel(lbl810)
-							ctx.EmitJmp(lbl230)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d1845.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl809)
-						ctx.EmitJmp(lbl810)
+						ctx.EmitJump(CondNotEqual, lbl808)
+						ctx.EmitJmp(lbl809)
+						ctx.MarkLabel(lbl808)
+						ctx.EmitJmp(lbl228)
 						ctx.MarkLabel(lbl809)
 						ctx.EmitJmp(lbl229)
-						ctx.MarkLabel(lbl810)
-						ctx.EmitJmp(lbl230)
 					}
 					ctx.FreeDesc(&d1844)
 					bbpos_6_30 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl230)
+					ctx.MarkLabel(lbl229)
 					ctx.ResolveFixups()
 					d276 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase275) + int32(0)}
 					d277 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase275) + int32(16)}
@@ -38087,9 +38027,9 @@ Patterns can be any of:
 					ctx.BindReg(r68, &d1846)
 					ctx.BindReg(r69, &d1846)
 					ctx.EmitMovPairToResult(&d1839, &d1846)
-					ctx.EmitJmp(lbl199)
+					ctx.EmitJmp(lbl198)
 					bbpos_6_29 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl229)
+					ctx.MarkLabel(lbl228)
 					ctx.ResolveFixups()
 					d276 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase275) + int32(0)}
 					d277 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase275) + int32(16)}
@@ -38116,8 +38056,8 @@ Patterns can be any of:
 					ctx.BindReg(r68, &d1848)
 					ctx.BindReg(r69, &d1848)
 					ctx.EmitMovPairToResult(&d1847, &d1848)
-					ctx.EmitJmp(lbl199)
-					ctx.MarkLabel(lbl199)
+					ctx.EmitJmp(lbl198)
+					ctx.MarkLabel(lbl198)
 					d1849 = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: r68, Reg2: r69}
 					ctx.BindReg(r68, &d1849)
 					ctx.BindReg(r69, &d1849)
@@ -38156,9 +38096,9 @@ Patterns can be any of:
 					d1854 = d1855
 					ctx.StabilizeDescForControlFlow(&d1854)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EmitJmp(lbl161)
+					ctx.EmitJmp(lbl160)
 					bbpos_5_17 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl169)
+					ctx.MarkLabel(lbl168)
 					ctx.ResolveFixups()
 					d217 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase216) + int32(0)}
 					d218 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase216) + int32(16)}
@@ -38203,26 +38143,26 @@ Patterns can be any of:
 					if d1859.Loc != LocImm && d1859.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
+					lbl810 := ctx.ReserveLabel()
 					lbl811 := ctx.ReserveLabel()
-					lbl812 := ctx.ReserveLabel()
 					if d1859.Loc == LocImm {
 						if d1859.Imm.Bool() {
+							ctx.MarkLabel(lbl810)
+							ctx.EmitJmp(lbl166)
+						} else {
 							ctx.MarkLabel(lbl811)
 							ctx.EmitJmp(lbl167)
-						} else {
-							ctx.MarkLabel(lbl812)
-							ctx.EmitJmp(lbl168)
 						}
 					} else {
-						ctx.EmitJump(d1859.Condition, lbl811)
-						ctx.EmitJmp(lbl812)
+						ctx.EmitJump(d1859.Condition, lbl810)
+						ctx.EmitJmp(lbl811)
+						ctx.MarkLabel(lbl810)
+						ctx.EmitJmp(lbl166)
 						ctx.MarkLabel(lbl811)
 						ctx.EmitJmp(lbl167)
-						ctx.MarkLabel(lbl812)
-						ctx.EmitJmp(lbl168)
 					}
 					bbpos_5_10 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl162)
+					ctx.MarkLabel(lbl161)
 					ctx.ResolveFixups()
 					d217 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase216) + int32(0)}
 					d218 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase216) + int32(16)}
@@ -38231,7 +38171,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.EmitGoPanic("jit: invalid arguments for inlined Go helper")
 					bbpos_5_14 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl166)
+					ctx.MarkLabel(lbl165)
 					ctx.ResolveFixups()
 					d217 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase216) + int32(0)}
 					d218 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase216) + int32(16)}
@@ -38280,28 +38220,28 @@ Patterns can be any of:
 					if d1865.Loc != LocImm && d1865.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl812 := ctx.ReserveLabel()
 					lbl813 := ctx.ReserveLabel()
-					lbl814 := ctx.ReserveLabel()
 					if d1865.Loc == LocImm {
 						if d1865.Imm.Bool() {
+							ctx.MarkLabel(lbl812)
+							ctx.EmitJmp(lbl163)
+						} else {
 							ctx.MarkLabel(lbl813)
 							ctx.EmitJmp(lbl164)
-						} else {
-							ctx.MarkLabel(lbl814)
-							ctx.EmitJmp(lbl165)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d1865.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl813)
-						ctx.EmitJmp(lbl814)
+						ctx.EmitJump(CondNotEqual, lbl812)
+						ctx.EmitJmp(lbl813)
+						ctx.MarkLabel(lbl812)
+						ctx.EmitJmp(lbl163)
 						ctx.MarkLabel(lbl813)
 						ctx.EmitJmp(lbl164)
-						ctx.MarkLabel(lbl814)
-						ctx.EmitJmp(lbl165)
 					}
 					ctx.FreeDesc(&d1864)
 					bbpos_5_15 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl167)
+					ctx.MarkLabel(lbl166)
 					ctx.ResolveFixups()
 					d217 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase216) + int32(0)}
 					d218 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase216) + int32(16)}
@@ -38338,14 +38278,14 @@ Patterns can be any of:
 					if d1871.Loc != LocImm && d1871.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl814 := ctx.ReserveLabel()
 					lbl815 := ctx.ReserveLabel()
-					lbl816 := ctx.ReserveLabel()
 					if d1871.Loc == LocImm {
 						if d1871.Imm.Bool() {
-							ctx.MarkLabel(lbl815)
-							ctx.EmitJmp(lbl170)
+							ctx.MarkLabel(lbl814)
+							ctx.EmitJmp(lbl169)
 						} else {
-							ctx.MarkLabel(lbl816)
+							ctx.MarkLabel(lbl815)
 							ctx.SyncDesc(&d1868)
 							if d1868.Loc == LocReg {
 								ctx.ProtectReg(d1868.Reg)
@@ -38376,15 +38316,15 @@ Patterns can be any of:
 								ctx.UnprotectReg(d1868.Reg)
 								ctx.UnprotectReg(d1868.Reg2)
 							}
-							ctx.EmitJmp(lbl171)
+							ctx.EmitJmp(lbl170)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d1871.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl815)
-						ctx.EmitJmp(lbl816)
+						ctx.EmitJump(CondNotEqual, lbl814)
+						ctx.EmitJmp(lbl815)
+						ctx.MarkLabel(lbl814)
+						ctx.EmitJmp(lbl169)
 						ctx.MarkLabel(lbl815)
-						ctx.EmitJmp(lbl170)
-						ctx.MarkLabel(lbl816)
 						ctx.SyncDesc(&d1868)
 						if d1868.Loc == LocReg {
 							ctx.ProtectReg(d1868.Reg)
@@ -38415,11 +38355,11 @@ Patterns can be any of:
 							ctx.UnprotectReg(d1868.Reg)
 							ctx.UnprotectReg(d1868.Reg2)
 						}
-						ctx.EmitJmp(lbl171)
+						ctx.EmitJmp(lbl170)
 					}
 					ctx.FreeDesc(&d1870)
 					bbpos_5_19 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl171)
+					ctx.MarkLabel(lbl170)
 					ctx.ResolveFixups()
 					d217 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase216) + int32(0)}
 					d218 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase216) + int32(16)}
@@ -38444,28 +38384,28 @@ Patterns can be any of:
 					if d1875.Loc != LocImm && d1875.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl816 := ctx.ReserveLabel()
 					lbl817 := ctx.ReserveLabel()
-					lbl818 := ctx.ReserveLabel()
 					if d1875.Loc == LocImm {
 						if d1875.Imm.Bool() {
-							ctx.MarkLabel(lbl817)
-							ctx.EmitJmp(lbl174)
-						} else {
-							ctx.MarkLabel(lbl818)
+							ctx.MarkLabel(lbl816)
 							ctx.EmitJmp(lbl173)
+						} else {
+							ctx.MarkLabel(lbl817)
+							ctx.EmitJmp(lbl172)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d1875.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl817)
-						ctx.EmitJmp(lbl818)
-						ctx.MarkLabel(lbl817)
-						ctx.EmitJmp(lbl174)
-						ctx.MarkLabel(lbl818)
+						ctx.EmitJump(CondNotEqual, lbl816)
+						ctx.EmitJmp(lbl817)
+						ctx.MarkLabel(lbl816)
 						ctx.EmitJmp(lbl173)
+						ctx.MarkLabel(lbl817)
+						ctx.EmitJmp(lbl172)
 					}
 					ctx.FreeDesc(&d1874)
 					bbpos_5_21 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl173)
+					ctx.MarkLabel(lbl172)
 					ctx.ResolveFixups()
 					d217 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase216) + int32(0)}
 					d218 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase216) + int32(16)}
@@ -38619,28 +38559,28 @@ Patterns can be any of:
 					if d1889.Loc != LocImm && d1889.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl818 := ctx.ReserveLabel()
 					lbl819 := ctx.ReserveLabel()
-					lbl820 := ctx.ReserveLabel()
 					if d1889.Loc == LocImm {
 						if d1889.Imm.Bool() {
+							ctx.MarkLabel(lbl818)
+							ctx.EmitJmp(lbl182)
+						} else {
 							ctx.MarkLabel(lbl819)
 							ctx.EmitJmp(lbl183)
-						} else {
-							ctx.MarkLabel(lbl820)
-							ctx.EmitJmp(lbl184)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d1889.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl819)
-						ctx.EmitJmp(lbl820)
+						ctx.EmitJump(CondNotEqual, lbl818)
+						ctx.EmitJmp(lbl819)
+						ctx.MarkLabel(lbl818)
+						ctx.EmitJmp(lbl182)
 						ctx.MarkLabel(lbl819)
 						ctx.EmitJmp(lbl183)
-						ctx.MarkLabel(lbl820)
-						ctx.EmitJmp(lbl184)
 					}
 					ctx.FreeDesc(&d1888)
 					bbpos_5_32 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl184)
+					ctx.MarkLabel(lbl183)
 					ctx.ResolveFixups()
 					d217 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase216) + int32(0)}
 					d218 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase216) + int32(16)}
@@ -38652,9 +38592,9 @@ Patterns can be any of:
 					ctx.BindReg(r53, &d1890)
 					ctx.BindReg(r54, &d1890)
 					ctx.EmitMovPairToResult(&d1883, &d1890)
-					ctx.EmitJmp(lbl151)
+					ctx.EmitJmp(lbl150)
 					bbpos_5_12 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl164)
+					ctx.MarkLabel(lbl163)
 					ctx.ResolveFixups()
 					d217 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase216) + int32(0)}
 					d218 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase216) + int32(16)}
@@ -38757,9 +38697,9 @@ Patterns can be any of:
 					ctx.BindReg(r53, &d1900)
 					ctx.BindReg(r54, &d1900)
 					ctx.EmitMovPairToResult(&d1899, &d1900)
-					ctx.EmitJmp(lbl151)
+					ctx.EmitJmp(lbl150)
 					bbpos_5_18 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl170)
+					ctx.MarkLabel(lbl169)
 					ctx.ResolveFixups()
 					d217 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase216) + int32(0)}
 					d218 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase216) + int32(16)}
@@ -38838,9 +38778,9 @@ Patterns can be any of:
 						ctx.UnprotectReg(d1903.Reg)
 						ctx.UnprotectReg(d1903.Reg2)
 					}
-					ctx.EmitJmp(lbl171)
+					ctx.EmitJmp(lbl170)
 					bbpos_5_22 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl174)
+					ctx.MarkLabel(lbl173)
 					ctx.ResolveFixups()
 					d217 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase216) + int32(0)}
 					d218 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase216) + int32(16)}
@@ -38889,28 +38829,28 @@ Patterns can be any of:
 					if d1910.Loc != LocImm && d1910.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl820 := ctx.ReserveLabel()
 					lbl821 := ctx.ReserveLabel()
-					lbl822 := ctx.ReserveLabel()
 					if d1910.Loc == LocImm {
 						if d1910.Imm.Bool() {
+							ctx.MarkLabel(lbl820)
+							ctx.EmitJmp(lbl171)
+						} else {
 							ctx.MarkLabel(lbl821)
 							ctx.EmitJmp(lbl172)
-						} else {
-							ctx.MarkLabel(lbl822)
-							ctx.EmitJmp(lbl173)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d1910.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl821)
-						ctx.EmitJmp(lbl822)
+						ctx.EmitJump(CondNotEqual, lbl820)
+						ctx.EmitJmp(lbl821)
+						ctx.MarkLabel(lbl820)
+						ctx.EmitJmp(lbl171)
 						ctx.MarkLabel(lbl821)
 						ctx.EmitJmp(lbl172)
-						ctx.MarkLabel(lbl822)
-						ctx.EmitJmp(lbl173)
 					}
 					ctx.FreeDesc(&d1909)
 					bbpos_5_31 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl183)
+					ctx.MarkLabel(lbl182)
 					ctx.ResolveFixups()
 					d217 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase216) + int32(0)}
 					d218 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase216) + int32(16)}
@@ -38937,9 +38877,9 @@ Patterns can be any of:
 					ctx.BindReg(r53, &d1912)
 					ctx.BindReg(r54, &d1912)
 					ctx.EmitMovPairToResult(&d1911, &d1912)
-					ctx.EmitJmp(lbl151)
+					ctx.EmitJmp(lbl150)
 					bbpos_5_20 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl172)
+					ctx.MarkLabel(lbl171)
 					ctx.ResolveFixups()
 					d217 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase216) + int32(0)}
 					d218 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase216) + int32(16)}
@@ -39095,7 +39035,7 @@ Patterns can be any of:
 						ctx.UnprotectReg(d1921.Reg2)
 					}
 					bbpos_5_23 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl175)
+					ctx.MarkLabel(lbl174)
 					ctx.ResolveFixups()
 					d217 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase216) + int32(0)}
 					d218 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase216) + int32(16)}
@@ -39142,26 +39082,26 @@ Patterns can be any of:
 					if d1928.Loc != LocImm && d1928.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
+					lbl822 := ctx.ReserveLabel()
 					lbl823 := ctx.ReserveLabel()
-					lbl824 := ctx.ReserveLabel()
 					if d1928.Loc == LocImm {
 						if d1928.Imm.Bool() {
+							ctx.MarkLabel(lbl822)
+							ctx.EmitJmp(lbl175)
+						} else {
 							ctx.MarkLabel(lbl823)
 							ctx.EmitJmp(lbl176)
-						} else {
-							ctx.MarkLabel(lbl824)
-							ctx.EmitJmp(lbl177)
 						}
 					} else {
-						ctx.EmitJump(d1928.Condition, lbl823)
-						ctx.EmitJmp(lbl824)
+						ctx.EmitJump(d1928.Condition, lbl822)
+						ctx.EmitJmp(lbl823)
+						ctx.MarkLabel(lbl822)
+						ctx.EmitJmp(lbl175)
 						ctx.MarkLabel(lbl823)
 						ctx.EmitJmp(lbl176)
-						ctx.MarkLabel(lbl824)
-						ctx.EmitJmp(lbl177)
 					}
 					bbpos_5_25 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl177)
+					ctx.MarkLabel(lbl176)
 					ctx.ResolveFixups()
 					d217 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase216) + int32(0)}
 					d218 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase216) + int32(16)}
@@ -39198,28 +39138,28 @@ Patterns can be any of:
 					if d1934.Loc != LocImm && d1934.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl824 := ctx.ReserveLabel()
 					lbl825 := ctx.ReserveLabel()
-					lbl826 := ctx.ReserveLabel()
 					if d1934.Loc == LocImm {
 						if d1934.Imm.Bool() {
-							ctx.MarkLabel(lbl825)
-							ctx.EmitJmp(lbl180)
-						} else {
-							ctx.MarkLabel(lbl826)
+							ctx.MarkLabel(lbl824)
 							ctx.EmitJmp(lbl179)
+						} else {
+							ctx.MarkLabel(lbl825)
+							ctx.EmitJmp(lbl178)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d1934.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl825)
-						ctx.EmitJmp(lbl826)
-						ctx.MarkLabel(lbl825)
-						ctx.EmitJmp(lbl180)
-						ctx.MarkLabel(lbl826)
+						ctx.EmitJump(CondNotEqual, lbl824)
+						ctx.EmitJmp(lbl825)
+						ctx.MarkLabel(lbl824)
 						ctx.EmitJmp(lbl179)
+						ctx.MarkLabel(lbl825)
+						ctx.EmitJmp(lbl178)
 					}
 					ctx.FreeDesc(&d1933)
 					bbpos_5_27 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl179)
+					ctx.MarkLabel(lbl178)
 					ctx.ResolveFixups()
 					d217 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase216) + int32(0)}
 					d218 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase216) + int32(16)}
@@ -39270,9 +39210,9 @@ Patterns can be any of:
 					d1940 = d1941
 					ctx.StabilizeDescForControlFlow(&d1940)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EmitJmp(lbl175)
+					ctx.EmitJmp(lbl174)
 					bbpos_5_24 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl176)
+					ctx.MarkLabel(lbl175)
 					ctx.ResolveFixups()
 					d217 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase216) + int32(0)}
 					d218 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase216) + int32(16)}
@@ -39281,7 +39221,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.EmitGoPanic("jit: invalid arguments for inlined Go helper")
 					bbpos_5_28 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl180)
+					ctx.MarkLabel(lbl179)
 					ctx.ResolveFixups()
 					d217 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase216) + int32(0)}
 					d218 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase216) + int32(16)}
@@ -39330,28 +39270,28 @@ Patterns can be any of:
 					if d1947.Loc != LocImm && d1947.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl826 := ctx.ReserveLabel()
 					lbl827 := ctx.ReserveLabel()
-					lbl828 := ctx.ReserveLabel()
 					if d1947.Loc == LocImm {
 						if d1947.Imm.Bool() {
+							ctx.MarkLabel(lbl826)
+							ctx.EmitJmp(lbl177)
+						} else {
 							ctx.MarkLabel(lbl827)
 							ctx.EmitJmp(lbl178)
-						} else {
-							ctx.MarkLabel(lbl828)
-							ctx.EmitJmp(lbl179)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d1947.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl827)
-						ctx.EmitJmp(lbl828)
+						ctx.EmitJump(CondNotEqual, lbl826)
+						ctx.EmitJmp(lbl827)
+						ctx.MarkLabel(lbl826)
+						ctx.EmitJmp(lbl177)
 						ctx.MarkLabel(lbl827)
 						ctx.EmitJmp(lbl178)
-						ctx.MarkLabel(lbl828)
-						ctx.EmitJmp(lbl179)
 					}
 					ctx.FreeDesc(&d1946)
 					bbpos_5_26 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl178)
+					ctx.MarkLabel(lbl177)
 					ctx.ResolveFixups()
 					d217 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase216) + int32(0)}
 					d218 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase216) + int32(16)}
@@ -39503,28 +39443,28 @@ Patterns can be any of:
 					if d1961.Loc != LocImm && d1961.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl828 := ctx.ReserveLabel()
 					lbl829 := ctx.ReserveLabel()
-					lbl830 := ctx.ReserveLabel()
 					if d1961.Loc == LocImm {
 						if d1961.Imm.Bool() {
+							ctx.MarkLabel(lbl828)
+							ctx.EmitJmp(lbl180)
+						} else {
 							ctx.MarkLabel(lbl829)
 							ctx.EmitJmp(lbl181)
-						} else {
-							ctx.MarkLabel(lbl830)
-							ctx.EmitJmp(lbl182)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d1961.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl829)
-						ctx.EmitJmp(lbl830)
+						ctx.EmitJump(CondNotEqual, lbl828)
+						ctx.EmitJmp(lbl829)
+						ctx.MarkLabel(lbl828)
+						ctx.EmitJmp(lbl180)
 						ctx.MarkLabel(lbl829)
 						ctx.EmitJmp(lbl181)
-						ctx.MarkLabel(lbl830)
-						ctx.EmitJmp(lbl182)
 					}
 					ctx.FreeDesc(&d1960)
 					bbpos_5_30 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl182)
+					ctx.MarkLabel(lbl181)
 					ctx.ResolveFixups()
 					d217 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase216) + int32(0)}
 					d218 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase216) + int32(16)}
@@ -39536,9 +39476,9 @@ Patterns can be any of:
 					ctx.BindReg(r53, &d1962)
 					ctx.BindReg(r54, &d1962)
 					ctx.EmitMovPairToResult(&d1955, &d1962)
-					ctx.EmitJmp(lbl151)
+					ctx.EmitJmp(lbl150)
 					bbpos_5_29 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl181)
+					ctx.MarkLabel(lbl180)
 					ctx.ResolveFixups()
 					d217 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase216) + int32(0)}
 					d218 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase216) + int32(16)}
@@ -39565,8 +39505,8 @@ Patterns can be any of:
 					ctx.BindReg(r53, &d1964)
 					ctx.BindReg(r54, &d1964)
 					ctx.EmitMovPairToResult(&d1963, &d1964)
-					ctx.EmitJmp(lbl151)
-					ctx.MarkLabel(lbl151)
+					ctx.EmitJmp(lbl150)
+					ctx.MarkLabel(lbl150)
 					d1965 = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: r53, Reg2: r54}
 					ctx.BindReg(r53, &d1965)
 					ctx.BindReg(r54, &d1965)
@@ -39605,9 +39545,9 @@ Patterns can be any of:
 					d1970 = d1971
 					ctx.StabilizeDescForControlFlow(&d1970)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EmitJmp(lbl113)
+					ctx.EmitJmp(lbl112)
 					bbpos_4_17 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl121)
+					ctx.MarkLabel(lbl120)
 					ctx.ResolveFixups()
 					d158 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase157) + int32(0)}
 					d159 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase157) + int32(16)}
@@ -39652,26 +39592,26 @@ Patterns can be any of:
 					if d1975.Loc != LocImm && d1975.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
+					lbl830 := ctx.ReserveLabel()
 					lbl831 := ctx.ReserveLabel()
-					lbl832 := ctx.ReserveLabel()
 					if d1975.Loc == LocImm {
 						if d1975.Imm.Bool() {
+							ctx.MarkLabel(lbl830)
+							ctx.EmitJmp(lbl118)
+						} else {
 							ctx.MarkLabel(lbl831)
 							ctx.EmitJmp(lbl119)
-						} else {
-							ctx.MarkLabel(lbl832)
-							ctx.EmitJmp(lbl120)
 						}
 					} else {
-						ctx.EmitJump(d1975.Condition, lbl831)
-						ctx.EmitJmp(lbl832)
+						ctx.EmitJump(d1975.Condition, lbl830)
+						ctx.EmitJmp(lbl831)
+						ctx.MarkLabel(lbl830)
+						ctx.EmitJmp(lbl118)
 						ctx.MarkLabel(lbl831)
 						ctx.EmitJmp(lbl119)
-						ctx.MarkLabel(lbl832)
-						ctx.EmitJmp(lbl120)
 					}
 					bbpos_4_10 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl114)
+					ctx.MarkLabel(lbl113)
 					ctx.ResolveFixups()
 					d158 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase157) + int32(0)}
 					d159 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase157) + int32(16)}
@@ -39680,7 +39620,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.EmitGoPanic("jit: invalid arguments for inlined Go helper")
 					bbpos_4_14 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl118)
+					ctx.MarkLabel(lbl117)
 					ctx.ResolveFixups()
 					d158 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase157) + int32(0)}
 					d159 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase157) + int32(16)}
@@ -39729,28 +39669,28 @@ Patterns can be any of:
 					if d1981.Loc != LocImm && d1981.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl832 := ctx.ReserveLabel()
 					lbl833 := ctx.ReserveLabel()
-					lbl834 := ctx.ReserveLabel()
 					if d1981.Loc == LocImm {
 						if d1981.Imm.Bool() {
+							ctx.MarkLabel(lbl832)
+							ctx.EmitJmp(lbl115)
+						} else {
 							ctx.MarkLabel(lbl833)
 							ctx.EmitJmp(lbl116)
-						} else {
-							ctx.MarkLabel(lbl834)
-							ctx.EmitJmp(lbl117)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d1981.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl833)
-						ctx.EmitJmp(lbl834)
+						ctx.EmitJump(CondNotEqual, lbl832)
+						ctx.EmitJmp(lbl833)
+						ctx.MarkLabel(lbl832)
+						ctx.EmitJmp(lbl115)
 						ctx.MarkLabel(lbl833)
 						ctx.EmitJmp(lbl116)
-						ctx.MarkLabel(lbl834)
-						ctx.EmitJmp(lbl117)
 					}
 					ctx.FreeDesc(&d1980)
 					bbpos_4_15 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl119)
+					ctx.MarkLabel(lbl118)
 					ctx.ResolveFixups()
 					d158 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase157) + int32(0)}
 					d159 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase157) + int32(16)}
@@ -39787,14 +39727,14 @@ Patterns can be any of:
 					if d1987.Loc != LocImm && d1987.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl834 := ctx.ReserveLabel()
 					lbl835 := ctx.ReserveLabel()
-					lbl836 := ctx.ReserveLabel()
 					if d1987.Loc == LocImm {
 						if d1987.Imm.Bool() {
-							ctx.MarkLabel(lbl835)
-							ctx.EmitJmp(lbl122)
+							ctx.MarkLabel(lbl834)
+							ctx.EmitJmp(lbl121)
 						} else {
-							ctx.MarkLabel(lbl836)
+							ctx.MarkLabel(lbl835)
 							ctx.SyncDesc(&d1984)
 							if d1984.Loc == LocReg {
 								ctx.ProtectReg(d1984.Reg)
@@ -39825,15 +39765,15 @@ Patterns can be any of:
 								ctx.UnprotectReg(d1984.Reg)
 								ctx.UnprotectReg(d1984.Reg2)
 							}
-							ctx.EmitJmp(lbl123)
+							ctx.EmitJmp(lbl122)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d1987.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl835)
-						ctx.EmitJmp(lbl836)
+						ctx.EmitJump(CondNotEqual, lbl834)
+						ctx.EmitJmp(lbl835)
+						ctx.MarkLabel(lbl834)
+						ctx.EmitJmp(lbl121)
 						ctx.MarkLabel(lbl835)
-						ctx.EmitJmp(lbl122)
-						ctx.MarkLabel(lbl836)
 						ctx.SyncDesc(&d1984)
 						if d1984.Loc == LocReg {
 							ctx.ProtectReg(d1984.Reg)
@@ -39864,11 +39804,11 @@ Patterns can be any of:
 							ctx.UnprotectReg(d1984.Reg)
 							ctx.UnprotectReg(d1984.Reg2)
 						}
-						ctx.EmitJmp(lbl123)
+						ctx.EmitJmp(lbl122)
 					}
 					ctx.FreeDesc(&d1986)
 					bbpos_4_19 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl123)
+					ctx.MarkLabel(lbl122)
 					ctx.ResolveFixups()
 					d158 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase157) + int32(0)}
 					d159 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase157) + int32(16)}
@@ -39893,28 +39833,28 @@ Patterns can be any of:
 					if d1991.Loc != LocImm && d1991.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl836 := ctx.ReserveLabel()
 					lbl837 := ctx.ReserveLabel()
-					lbl838 := ctx.ReserveLabel()
 					if d1991.Loc == LocImm {
 						if d1991.Imm.Bool() {
-							ctx.MarkLabel(lbl837)
-							ctx.EmitJmp(lbl126)
-						} else {
-							ctx.MarkLabel(lbl838)
+							ctx.MarkLabel(lbl836)
 							ctx.EmitJmp(lbl125)
+						} else {
+							ctx.MarkLabel(lbl837)
+							ctx.EmitJmp(lbl124)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d1991.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl837)
-						ctx.EmitJmp(lbl838)
-						ctx.MarkLabel(lbl837)
-						ctx.EmitJmp(lbl126)
-						ctx.MarkLabel(lbl838)
+						ctx.EmitJump(CondNotEqual, lbl836)
+						ctx.EmitJmp(lbl837)
+						ctx.MarkLabel(lbl836)
 						ctx.EmitJmp(lbl125)
+						ctx.MarkLabel(lbl837)
+						ctx.EmitJmp(lbl124)
 					}
 					ctx.FreeDesc(&d1990)
 					bbpos_4_21 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl125)
+					ctx.MarkLabel(lbl124)
 					ctx.ResolveFixups()
 					d158 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase157) + int32(0)}
 					d159 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase157) + int32(16)}
@@ -40068,28 +40008,28 @@ Patterns can be any of:
 					if d2005.Loc != LocImm && d2005.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl838 := ctx.ReserveLabel()
 					lbl839 := ctx.ReserveLabel()
-					lbl840 := ctx.ReserveLabel()
 					if d2005.Loc == LocImm {
 						if d2005.Imm.Bool() {
+							ctx.MarkLabel(lbl838)
+							ctx.EmitJmp(lbl134)
+						} else {
 							ctx.MarkLabel(lbl839)
 							ctx.EmitJmp(lbl135)
-						} else {
-							ctx.MarkLabel(lbl840)
-							ctx.EmitJmp(lbl136)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d2005.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl839)
-						ctx.EmitJmp(lbl840)
+						ctx.EmitJump(CondNotEqual, lbl838)
+						ctx.EmitJmp(lbl839)
+						ctx.MarkLabel(lbl838)
+						ctx.EmitJmp(lbl134)
 						ctx.MarkLabel(lbl839)
 						ctx.EmitJmp(lbl135)
-						ctx.MarkLabel(lbl840)
-						ctx.EmitJmp(lbl136)
 					}
 					ctx.FreeDesc(&d2004)
 					bbpos_4_32 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl136)
+					ctx.MarkLabel(lbl135)
 					ctx.ResolveFixups()
 					d158 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase157) + int32(0)}
 					d159 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase157) + int32(16)}
@@ -40101,9 +40041,9 @@ Patterns can be any of:
 					ctx.BindReg(r38, &d2006)
 					ctx.BindReg(r39, &d2006)
 					ctx.EmitMovPairToResult(&d1999, &d2006)
-					ctx.EmitJmp(lbl103)
+					ctx.EmitJmp(lbl102)
 					bbpos_4_12 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl116)
+					ctx.MarkLabel(lbl115)
 					ctx.ResolveFixups()
 					d158 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase157) + int32(0)}
 					d159 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase157) + int32(16)}
@@ -40206,9 +40146,9 @@ Patterns can be any of:
 					ctx.BindReg(r38, &d2016)
 					ctx.BindReg(r39, &d2016)
 					ctx.EmitMovPairToResult(&d2015, &d2016)
-					ctx.EmitJmp(lbl103)
+					ctx.EmitJmp(lbl102)
 					bbpos_4_18 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl122)
+					ctx.MarkLabel(lbl121)
 					ctx.ResolveFixups()
 					d158 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase157) + int32(0)}
 					d159 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase157) + int32(16)}
@@ -40287,9 +40227,9 @@ Patterns can be any of:
 						ctx.UnprotectReg(d2019.Reg)
 						ctx.UnprotectReg(d2019.Reg2)
 					}
-					ctx.EmitJmp(lbl123)
+					ctx.EmitJmp(lbl122)
 					bbpos_4_22 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl126)
+					ctx.MarkLabel(lbl125)
 					ctx.ResolveFixups()
 					d158 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase157) + int32(0)}
 					d159 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase157) + int32(16)}
@@ -40338,28 +40278,28 @@ Patterns can be any of:
 					if d2026.Loc != LocImm && d2026.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl840 := ctx.ReserveLabel()
 					lbl841 := ctx.ReserveLabel()
-					lbl842 := ctx.ReserveLabel()
 					if d2026.Loc == LocImm {
 						if d2026.Imm.Bool() {
+							ctx.MarkLabel(lbl840)
+							ctx.EmitJmp(lbl123)
+						} else {
 							ctx.MarkLabel(lbl841)
 							ctx.EmitJmp(lbl124)
-						} else {
-							ctx.MarkLabel(lbl842)
-							ctx.EmitJmp(lbl125)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d2026.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl841)
-						ctx.EmitJmp(lbl842)
+						ctx.EmitJump(CondNotEqual, lbl840)
+						ctx.EmitJmp(lbl841)
+						ctx.MarkLabel(lbl840)
+						ctx.EmitJmp(lbl123)
 						ctx.MarkLabel(lbl841)
 						ctx.EmitJmp(lbl124)
-						ctx.MarkLabel(lbl842)
-						ctx.EmitJmp(lbl125)
 					}
 					ctx.FreeDesc(&d2025)
 					bbpos_4_31 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl135)
+					ctx.MarkLabel(lbl134)
 					ctx.ResolveFixups()
 					d158 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase157) + int32(0)}
 					d159 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase157) + int32(16)}
@@ -40386,9 +40326,9 @@ Patterns can be any of:
 					ctx.BindReg(r38, &d2028)
 					ctx.BindReg(r39, &d2028)
 					ctx.EmitMovPairToResult(&d2027, &d2028)
-					ctx.EmitJmp(lbl103)
+					ctx.EmitJmp(lbl102)
 					bbpos_4_20 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl124)
+					ctx.MarkLabel(lbl123)
 					ctx.ResolveFixups()
 					d158 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase157) + int32(0)}
 					d159 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase157) + int32(16)}
@@ -40544,7 +40484,7 @@ Patterns can be any of:
 						ctx.UnprotectReg(d2037.Reg2)
 					}
 					bbpos_4_23 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl127)
+					ctx.MarkLabel(lbl126)
 					ctx.ResolveFixups()
 					d158 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase157) + int32(0)}
 					d159 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase157) + int32(16)}
@@ -40591,26 +40531,26 @@ Patterns can be any of:
 					if d2044.Loc != LocImm && d2044.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
+					lbl842 := ctx.ReserveLabel()
 					lbl843 := ctx.ReserveLabel()
-					lbl844 := ctx.ReserveLabel()
 					if d2044.Loc == LocImm {
 						if d2044.Imm.Bool() {
+							ctx.MarkLabel(lbl842)
+							ctx.EmitJmp(lbl127)
+						} else {
 							ctx.MarkLabel(lbl843)
 							ctx.EmitJmp(lbl128)
-						} else {
-							ctx.MarkLabel(lbl844)
-							ctx.EmitJmp(lbl129)
 						}
 					} else {
-						ctx.EmitJump(d2044.Condition, lbl843)
-						ctx.EmitJmp(lbl844)
+						ctx.EmitJump(d2044.Condition, lbl842)
+						ctx.EmitJmp(lbl843)
+						ctx.MarkLabel(lbl842)
+						ctx.EmitJmp(lbl127)
 						ctx.MarkLabel(lbl843)
 						ctx.EmitJmp(lbl128)
-						ctx.MarkLabel(lbl844)
-						ctx.EmitJmp(lbl129)
 					}
 					bbpos_4_25 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl129)
+					ctx.MarkLabel(lbl128)
 					ctx.ResolveFixups()
 					d158 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase157) + int32(0)}
 					d159 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase157) + int32(16)}
@@ -40647,28 +40587,28 @@ Patterns can be any of:
 					if d2050.Loc != LocImm && d2050.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl844 := ctx.ReserveLabel()
 					lbl845 := ctx.ReserveLabel()
-					lbl846 := ctx.ReserveLabel()
 					if d2050.Loc == LocImm {
 						if d2050.Imm.Bool() {
-							ctx.MarkLabel(lbl845)
-							ctx.EmitJmp(lbl132)
-						} else {
-							ctx.MarkLabel(lbl846)
+							ctx.MarkLabel(lbl844)
 							ctx.EmitJmp(lbl131)
+						} else {
+							ctx.MarkLabel(lbl845)
+							ctx.EmitJmp(lbl130)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d2050.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl845)
-						ctx.EmitJmp(lbl846)
-						ctx.MarkLabel(lbl845)
-						ctx.EmitJmp(lbl132)
-						ctx.MarkLabel(lbl846)
+						ctx.EmitJump(CondNotEqual, lbl844)
+						ctx.EmitJmp(lbl845)
+						ctx.MarkLabel(lbl844)
 						ctx.EmitJmp(lbl131)
+						ctx.MarkLabel(lbl845)
+						ctx.EmitJmp(lbl130)
 					}
 					ctx.FreeDesc(&d2049)
 					bbpos_4_27 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl131)
+					ctx.MarkLabel(lbl130)
 					ctx.ResolveFixups()
 					d158 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase157) + int32(0)}
 					d159 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase157) + int32(16)}
@@ -40719,9 +40659,9 @@ Patterns can be any of:
 					d2056 = d2057
 					ctx.StabilizeDescForControlFlow(&d2056)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EmitJmp(lbl127)
+					ctx.EmitJmp(lbl126)
 					bbpos_4_24 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl128)
+					ctx.MarkLabel(lbl127)
 					ctx.ResolveFixups()
 					d158 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase157) + int32(0)}
 					d159 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase157) + int32(16)}
@@ -40730,7 +40670,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.EmitGoPanic("jit: invalid arguments for inlined Go helper")
 					bbpos_4_28 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl132)
+					ctx.MarkLabel(lbl131)
 					ctx.ResolveFixups()
 					d158 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase157) + int32(0)}
 					d159 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase157) + int32(16)}
@@ -40779,28 +40719,28 @@ Patterns can be any of:
 					if d2063.Loc != LocImm && d2063.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl846 := ctx.ReserveLabel()
 					lbl847 := ctx.ReserveLabel()
-					lbl848 := ctx.ReserveLabel()
 					if d2063.Loc == LocImm {
 						if d2063.Imm.Bool() {
+							ctx.MarkLabel(lbl846)
+							ctx.EmitJmp(lbl129)
+						} else {
 							ctx.MarkLabel(lbl847)
 							ctx.EmitJmp(lbl130)
-						} else {
-							ctx.MarkLabel(lbl848)
-							ctx.EmitJmp(lbl131)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d2063.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl847)
-						ctx.EmitJmp(lbl848)
+						ctx.EmitJump(CondNotEqual, lbl846)
+						ctx.EmitJmp(lbl847)
+						ctx.MarkLabel(lbl846)
+						ctx.EmitJmp(lbl129)
 						ctx.MarkLabel(lbl847)
 						ctx.EmitJmp(lbl130)
-						ctx.MarkLabel(lbl848)
-						ctx.EmitJmp(lbl131)
 					}
 					ctx.FreeDesc(&d2062)
 					bbpos_4_26 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl130)
+					ctx.MarkLabel(lbl129)
 					ctx.ResolveFixups()
 					d158 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase157) + int32(0)}
 					d159 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase157) + int32(16)}
@@ -40952,28 +40892,28 @@ Patterns can be any of:
 					if d2077.Loc != LocImm && d2077.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl848 := ctx.ReserveLabel()
 					lbl849 := ctx.ReserveLabel()
-					lbl850 := ctx.ReserveLabel()
 					if d2077.Loc == LocImm {
 						if d2077.Imm.Bool() {
+							ctx.MarkLabel(lbl848)
+							ctx.EmitJmp(lbl132)
+						} else {
 							ctx.MarkLabel(lbl849)
 							ctx.EmitJmp(lbl133)
-						} else {
-							ctx.MarkLabel(lbl850)
-							ctx.EmitJmp(lbl134)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d2077.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl849)
-						ctx.EmitJmp(lbl850)
+						ctx.EmitJump(CondNotEqual, lbl848)
+						ctx.EmitJmp(lbl849)
+						ctx.MarkLabel(lbl848)
+						ctx.EmitJmp(lbl132)
 						ctx.MarkLabel(lbl849)
 						ctx.EmitJmp(lbl133)
-						ctx.MarkLabel(lbl850)
-						ctx.EmitJmp(lbl134)
 					}
 					ctx.FreeDesc(&d2076)
 					bbpos_4_30 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl134)
+					ctx.MarkLabel(lbl133)
 					ctx.ResolveFixups()
 					d158 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase157) + int32(0)}
 					d159 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase157) + int32(16)}
@@ -40985,9 +40925,9 @@ Patterns can be any of:
 					ctx.BindReg(r38, &d2078)
 					ctx.BindReg(r39, &d2078)
 					ctx.EmitMovPairToResult(&d2071, &d2078)
-					ctx.EmitJmp(lbl103)
+					ctx.EmitJmp(lbl102)
 					bbpos_4_29 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl133)
+					ctx.MarkLabel(lbl132)
 					ctx.ResolveFixups()
 					d158 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase157) + int32(0)}
 					d159 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase157) + int32(16)}
@@ -41014,8 +40954,8 @@ Patterns can be any of:
 					ctx.BindReg(r38, &d2080)
 					ctx.BindReg(r39, &d2080)
 					ctx.EmitMovPairToResult(&d2079, &d2080)
-					ctx.EmitJmp(lbl103)
-					ctx.MarkLabel(lbl103)
+					ctx.EmitJmp(lbl102)
+					ctx.MarkLabel(lbl102)
 					d2081 = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: r38, Reg2: r39}
 					ctx.BindReg(r38, &d2081)
 					ctx.BindReg(r39, &d2081)
@@ -41054,9 +40994,9 @@ Patterns can be any of:
 					d2086 = d2087
 					ctx.StabilizeDescForControlFlow(&d2086)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EmitJmp(lbl65)
+					ctx.EmitJmp(lbl64)
 					bbpos_3_17 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl73)
+					ctx.MarkLabel(lbl72)
 					ctx.ResolveFixups()
 					d99 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase98) + int32(0)}
 					d100 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase98) + int32(16)}
@@ -41101,26 +41041,26 @@ Patterns can be any of:
 					if d2091.Loc != LocImm && d2091.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
+					lbl850 := ctx.ReserveLabel()
 					lbl851 := ctx.ReserveLabel()
-					lbl852 := ctx.ReserveLabel()
 					if d2091.Loc == LocImm {
 						if d2091.Imm.Bool() {
+							ctx.MarkLabel(lbl850)
+							ctx.EmitJmp(lbl70)
+						} else {
 							ctx.MarkLabel(lbl851)
 							ctx.EmitJmp(lbl71)
-						} else {
-							ctx.MarkLabel(lbl852)
-							ctx.EmitJmp(lbl72)
 						}
 					} else {
-						ctx.EmitJump(d2091.Condition, lbl851)
-						ctx.EmitJmp(lbl852)
+						ctx.EmitJump(d2091.Condition, lbl850)
+						ctx.EmitJmp(lbl851)
+						ctx.MarkLabel(lbl850)
+						ctx.EmitJmp(lbl70)
 						ctx.MarkLabel(lbl851)
 						ctx.EmitJmp(lbl71)
-						ctx.MarkLabel(lbl852)
-						ctx.EmitJmp(lbl72)
 					}
 					bbpos_3_10 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl66)
+					ctx.MarkLabel(lbl65)
 					ctx.ResolveFixups()
 					d99 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase98) + int32(0)}
 					d100 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase98) + int32(16)}
@@ -41129,7 +41069,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.EmitGoPanic("jit: invalid arguments for inlined Go helper")
 					bbpos_3_14 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl70)
+					ctx.MarkLabel(lbl69)
 					ctx.ResolveFixups()
 					d99 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase98) + int32(0)}
 					d100 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase98) + int32(16)}
@@ -41178,28 +41118,28 @@ Patterns can be any of:
 					if d2097.Loc != LocImm && d2097.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl852 := ctx.ReserveLabel()
 					lbl853 := ctx.ReserveLabel()
-					lbl854 := ctx.ReserveLabel()
 					if d2097.Loc == LocImm {
 						if d2097.Imm.Bool() {
+							ctx.MarkLabel(lbl852)
+							ctx.EmitJmp(lbl67)
+						} else {
 							ctx.MarkLabel(lbl853)
 							ctx.EmitJmp(lbl68)
-						} else {
-							ctx.MarkLabel(lbl854)
-							ctx.EmitJmp(lbl69)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d2097.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl853)
-						ctx.EmitJmp(lbl854)
+						ctx.EmitJump(CondNotEqual, lbl852)
+						ctx.EmitJmp(lbl853)
+						ctx.MarkLabel(lbl852)
+						ctx.EmitJmp(lbl67)
 						ctx.MarkLabel(lbl853)
 						ctx.EmitJmp(lbl68)
-						ctx.MarkLabel(lbl854)
-						ctx.EmitJmp(lbl69)
 					}
 					ctx.FreeDesc(&d2096)
 					bbpos_3_15 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl71)
+					ctx.MarkLabel(lbl70)
 					ctx.ResolveFixups()
 					d99 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase98) + int32(0)}
 					d100 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase98) + int32(16)}
@@ -41236,14 +41176,14 @@ Patterns can be any of:
 					if d2103.Loc != LocImm && d2103.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl854 := ctx.ReserveLabel()
 					lbl855 := ctx.ReserveLabel()
-					lbl856 := ctx.ReserveLabel()
 					if d2103.Loc == LocImm {
 						if d2103.Imm.Bool() {
-							ctx.MarkLabel(lbl855)
-							ctx.EmitJmp(lbl74)
+							ctx.MarkLabel(lbl854)
+							ctx.EmitJmp(lbl73)
 						} else {
-							ctx.MarkLabel(lbl856)
+							ctx.MarkLabel(lbl855)
 							ctx.SyncDesc(&d2100)
 							if d2100.Loc == LocReg {
 								ctx.ProtectReg(d2100.Reg)
@@ -41274,15 +41214,15 @@ Patterns can be any of:
 								ctx.UnprotectReg(d2100.Reg)
 								ctx.UnprotectReg(d2100.Reg2)
 							}
-							ctx.EmitJmp(lbl75)
+							ctx.EmitJmp(lbl74)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d2103.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl855)
-						ctx.EmitJmp(lbl856)
+						ctx.EmitJump(CondNotEqual, lbl854)
+						ctx.EmitJmp(lbl855)
+						ctx.MarkLabel(lbl854)
+						ctx.EmitJmp(lbl73)
 						ctx.MarkLabel(lbl855)
-						ctx.EmitJmp(lbl74)
-						ctx.MarkLabel(lbl856)
 						ctx.SyncDesc(&d2100)
 						if d2100.Loc == LocReg {
 							ctx.ProtectReg(d2100.Reg)
@@ -41313,11 +41253,11 @@ Patterns can be any of:
 							ctx.UnprotectReg(d2100.Reg)
 							ctx.UnprotectReg(d2100.Reg2)
 						}
-						ctx.EmitJmp(lbl75)
+						ctx.EmitJmp(lbl74)
 					}
 					ctx.FreeDesc(&d2102)
 					bbpos_3_19 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl75)
+					ctx.MarkLabel(lbl74)
 					ctx.ResolveFixups()
 					d99 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase98) + int32(0)}
 					d100 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase98) + int32(16)}
@@ -41342,28 +41282,28 @@ Patterns can be any of:
 					if d2107.Loc != LocImm && d2107.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl856 := ctx.ReserveLabel()
 					lbl857 := ctx.ReserveLabel()
-					lbl858 := ctx.ReserveLabel()
 					if d2107.Loc == LocImm {
 						if d2107.Imm.Bool() {
-							ctx.MarkLabel(lbl857)
-							ctx.EmitJmp(lbl78)
-						} else {
-							ctx.MarkLabel(lbl858)
+							ctx.MarkLabel(lbl856)
 							ctx.EmitJmp(lbl77)
+						} else {
+							ctx.MarkLabel(lbl857)
+							ctx.EmitJmp(lbl76)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d2107.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl857)
-						ctx.EmitJmp(lbl858)
-						ctx.MarkLabel(lbl857)
-						ctx.EmitJmp(lbl78)
-						ctx.MarkLabel(lbl858)
+						ctx.EmitJump(CondNotEqual, lbl856)
+						ctx.EmitJmp(lbl857)
+						ctx.MarkLabel(lbl856)
 						ctx.EmitJmp(lbl77)
+						ctx.MarkLabel(lbl857)
+						ctx.EmitJmp(lbl76)
 					}
 					ctx.FreeDesc(&d2106)
 					bbpos_3_21 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl77)
+					ctx.MarkLabel(lbl76)
 					ctx.ResolveFixups()
 					d99 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase98) + int32(0)}
 					d100 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase98) + int32(16)}
@@ -41517,28 +41457,28 @@ Patterns can be any of:
 					if d2121.Loc != LocImm && d2121.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl858 := ctx.ReserveLabel()
 					lbl859 := ctx.ReserveLabel()
-					lbl860 := ctx.ReserveLabel()
 					if d2121.Loc == LocImm {
 						if d2121.Imm.Bool() {
+							ctx.MarkLabel(lbl858)
+							ctx.EmitJmp(lbl86)
+						} else {
 							ctx.MarkLabel(lbl859)
 							ctx.EmitJmp(lbl87)
-						} else {
-							ctx.MarkLabel(lbl860)
-							ctx.EmitJmp(lbl88)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d2121.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl859)
-						ctx.EmitJmp(lbl860)
+						ctx.EmitJump(CondNotEqual, lbl858)
+						ctx.EmitJmp(lbl859)
+						ctx.MarkLabel(lbl858)
+						ctx.EmitJmp(lbl86)
 						ctx.MarkLabel(lbl859)
 						ctx.EmitJmp(lbl87)
-						ctx.MarkLabel(lbl860)
-						ctx.EmitJmp(lbl88)
 					}
 					ctx.FreeDesc(&d2120)
 					bbpos_3_32 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl88)
+					ctx.MarkLabel(lbl87)
 					ctx.ResolveFixups()
 					d99 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase98) + int32(0)}
 					d100 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase98) + int32(16)}
@@ -41550,9 +41490,9 @@ Patterns can be any of:
 					ctx.BindReg(r23, &d2122)
 					ctx.BindReg(r24, &d2122)
 					ctx.EmitMovPairToResult(&d2115, &d2122)
-					ctx.EmitJmp(lbl55)
+					ctx.EmitJmp(lbl54)
 					bbpos_3_12 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl68)
+					ctx.MarkLabel(lbl67)
 					ctx.ResolveFixups()
 					d99 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase98) + int32(0)}
 					d100 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase98) + int32(16)}
@@ -41655,9 +41595,9 @@ Patterns can be any of:
 					ctx.BindReg(r23, &d2132)
 					ctx.BindReg(r24, &d2132)
 					ctx.EmitMovPairToResult(&d2131, &d2132)
-					ctx.EmitJmp(lbl55)
+					ctx.EmitJmp(lbl54)
 					bbpos_3_18 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl74)
+					ctx.MarkLabel(lbl73)
 					ctx.ResolveFixups()
 					d99 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase98) + int32(0)}
 					d100 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase98) + int32(16)}
@@ -41736,9 +41676,9 @@ Patterns can be any of:
 						ctx.UnprotectReg(d2135.Reg)
 						ctx.UnprotectReg(d2135.Reg2)
 					}
-					ctx.EmitJmp(lbl75)
+					ctx.EmitJmp(lbl74)
 					bbpos_3_22 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl78)
+					ctx.MarkLabel(lbl77)
 					ctx.ResolveFixups()
 					d99 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase98) + int32(0)}
 					d100 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase98) + int32(16)}
@@ -41787,28 +41727,28 @@ Patterns can be any of:
 					if d2142.Loc != LocImm && d2142.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl860 := ctx.ReserveLabel()
 					lbl861 := ctx.ReserveLabel()
-					lbl862 := ctx.ReserveLabel()
 					if d2142.Loc == LocImm {
 						if d2142.Imm.Bool() {
+							ctx.MarkLabel(lbl860)
+							ctx.EmitJmp(lbl75)
+						} else {
 							ctx.MarkLabel(lbl861)
 							ctx.EmitJmp(lbl76)
-						} else {
-							ctx.MarkLabel(lbl862)
-							ctx.EmitJmp(lbl77)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d2142.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl861)
-						ctx.EmitJmp(lbl862)
+						ctx.EmitJump(CondNotEqual, lbl860)
+						ctx.EmitJmp(lbl861)
+						ctx.MarkLabel(lbl860)
+						ctx.EmitJmp(lbl75)
 						ctx.MarkLabel(lbl861)
 						ctx.EmitJmp(lbl76)
-						ctx.MarkLabel(lbl862)
-						ctx.EmitJmp(lbl77)
 					}
 					ctx.FreeDesc(&d2141)
 					bbpos_3_31 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl87)
+					ctx.MarkLabel(lbl86)
 					ctx.ResolveFixups()
 					d99 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase98) + int32(0)}
 					d100 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase98) + int32(16)}
@@ -41835,9 +41775,9 @@ Patterns can be any of:
 					ctx.BindReg(r23, &d2144)
 					ctx.BindReg(r24, &d2144)
 					ctx.EmitMovPairToResult(&d2143, &d2144)
-					ctx.EmitJmp(lbl55)
+					ctx.EmitJmp(lbl54)
 					bbpos_3_20 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl76)
+					ctx.MarkLabel(lbl75)
 					ctx.ResolveFixups()
 					d99 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase98) + int32(0)}
 					d100 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase98) + int32(16)}
@@ -41993,7 +41933,7 @@ Patterns can be any of:
 						ctx.UnprotectReg(d2153.Reg2)
 					}
 					bbpos_3_23 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl79)
+					ctx.MarkLabel(lbl78)
 					ctx.ResolveFixups()
 					d99 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase98) + int32(0)}
 					d100 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase98) + int32(16)}
@@ -42040,26 +41980,26 @@ Patterns can be any of:
 					if d2160.Loc != LocImm && d2160.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
+					lbl862 := ctx.ReserveLabel()
 					lbl863 := ctx.ReserveLabel()
-					lbl864 := ctx.ReserveLabel()
 					if d2160.Loc == LocImm {
 						if d2160.Imm.Bool() {
+							ctx.MarkLabel(lbl862)
+							ctx.EmitJmp(lbl79)
+						} else {
 							ctx.MarkLabel(lbl863)
 							ctx.EmitJmp(lbl80)
-						} else {
-							ctx.MarkLabel(lbl864)
-							ctx.EmitJmp(lbl81)
 						}
 					} else {
-						ctx.EmitJump(d2160.Condition, lbl863)
-						ctx.EmitJmp(lbl864)
+						ctx.EmitJump(d2160.Condition, lbl862)
+						ctx.EmitJmp(lbl863)
+						ctx.MarkLabel(lbl862)
+						ctx.EmitJmp(lbl79)
 						ctx.MarkLabel(lbl863)
 						ctx.EmitJmp(lbl80)
-						ctx.MarkLabel(lbl864)
-						ctx.EmitJmp(lbl81)
 					}
 					bbpos_3_25 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl81)
+					ctx.MarkLabel(lbl80)
 					ctx.ResolveFixups()
 					d99 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase98) + int32(0)}
 					d100 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase98) + int32(16)}
@@ -42096,28 +42036,28 @@ Patterns can be any of:
 					if d2166.Loc != LocImm && d2166.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl864 := ctx.ReserveLabel()
 					lbl865 := ctx.ReserveLabel()
-					lbl866 := ctx.ReserveLabel()
 					if d2166.Loc == LocImm {
 						if d2166.Imm.Bool() {
-							ctx.MarkLabel(lbl865)
-							ctx.EmitJmp(lbl84)
-						} else {
-							ctx.MarkLabel(lbl866)
+							ctx.MarkLabel(lbl864)
 							ctx.EmitJmp(lbl83)
+						} else {
+							ctx.MarkLabel(lbl865)
+							ctx.EmitJmp(lbl82)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d2166.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl865)
-						ctx.EmitJmp(lbl866)
-						ctx.MarkLabel(lbl865)
-						ctx.EmitJmp(lbl84)
-						ctx.MarkLabel(lbl866)
+						ctx.EmitJump(CondNotEqual, lbl864)
+						ctx.EmitJmp(lbl865)
+						ctx.MarkLabel(lbl864)
 						ctx.EmitJmp(lbl83)
+						ctx.MarkLabel(lbl865)
+						ctx.EmitJmp(lbl82)
 					}
 					ctx.FreeDesc(&d2165)
 					bbpos_3_27 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl83)
+					ctx.MarkLabel(lbl82)
 					ctx.ResolveFixups()
 					d99 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase98) + int32(0)}
 					d100 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase98) + int32(16)}
@@ -42168,9 +42108,9 @@ Patterns can be any of:
 					d2172 = d2173
 					ctx.StabilizeDescForControlFlow(&d2172)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EmitJmp(lbl79)
+					ctx.EmitJmp(lbl78)
 					bbpos_3_24 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl80)
+					ctx.MarkLabel(lbl79)
 					ctx.ResolveFixups()
 					d99 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase98) + int32(0)}
 					d100 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase98) + int32(16)}
@@ -42179,7 +42119,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.EmitGoPanic("jit: invalid arguments for inlined Go helper")
 					bbpos_3_28 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl84)
+					ctx.MarkLabel(lbl83)
 					ctx.ResolveFixups()
 					d99 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase98) + int32(0)}
 					d100 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase98) + int32(16)}
@@ -42228,28 +42168,28 @@ Patterns can be any of:
 					if d2179.Loc != LocImm && d2179.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl866 := ctx.ReserveLabel()
 					lbl867 := ctx.ReserveLabel()
-					lbl868 := ctx.ReserveLabel()
 					if d2179.Loc == LocImm {
 						if d2179.Imm.Bool() {
+							ctx.MarkLabel(lbl866)
+							ctx.EmitJmp(lbl81)
+						} else {
 							ctx.MarkLabel(lbl867)
 							ctx.EmitJmp(lbl82)
-						} else {
-							ctx.MarkLabel(lbl868)
-							ctx.EmitJmp(lbl83)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d2179.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl867)
-						ctx.EmitJmp(lbl868)
+						ctx.EmitJump(CondNotEqual, lbl866)
+						ctx.EmitJmp(lbl867)
+						ctx.MarkLabel(lbl866)
+						ctx.EmitJmp(lbl81)
 						ctx.MarkLabel(lbl867)
 						ctx.EmitJmp(lbl82)
-						ctx.MarkLabel(lbl868)
-						ctx.EmitJmp(lbl83)
 					}
 					ctx.FreeDesc(&d2178)
 					bbpos_3_26 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl82)
+					ctx.MarkLabel(lbl81)
 					ctx.ResolveFixups()
 					d99 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase98) + int32(0)}
 					d100 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase98) + int32(16)}
@@ -42401,28 +42341,28 @@ Patterns can be any of:
 					if d2193.Loc != LocImm && d2193.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl868 := ctx.ReserveLabel()
 					lbl869 := ctx.ReserveLabel()
-					lbl870 := ctx.ReserveLabel()
 					if d2193.Loc == LocImm {
 						if d2193.Imm.Bool() {
+							ctx.MarkLabel(lbl868)
+							ctx.EmitJmp(lbl84)
+						} else {
 							ctx.MarkLabel(lbl869)
 							ctx.EmitJmp(lbl85)
-						} else {
-							ctx.MarkLabel(lbl870)
-							ctx.EmitJmp(lbl86)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d2193.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl869)
-						ctx.EmitJmp(lbl870)
+						ctx.EmitJump(CondNotEqual, lbl868)
+						ctx.EmitJmp(lbl869)
+						ctx.MarkLabel(lbl868)
+						ctx.EmitJmp(lbl84)
 						ctx.MarkLabel(lbl869)
 						ctx.EmitJmp(lbl85)
-						ctx.MarkLabel(lbl870)
-						ctx.EmitJmp(lbl86)
 					}
 					ctx.FreeDesc(&d2192)
 					bbpos_3_30 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl86)
+					ctx.MarkLabel(lbl85)
 					ctx.ResolveFixups()
 					d99 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase98) + int32(0)}
 					d100 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase98) + int32(16)}
@@ -42434,9 +42374,9 @@ Patterns can be any of:
 					ctx.BindReg(r23, &d2194)
 					ctx.BindReg(r24, &d2194)
 					ctx.EmitMovPairToResult(&d2187, &d2194)
-					ctx.EmitJmp(lbl55)
+					ctx.EmitJmp(lbl54)
 					bbpos_3_29 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl85)
+					ctx.MarkLabel(lbl84)
 					ctx.ResolveFixups()
 					d99 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase98) + int32(0)}
 					d100 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase98) + int32(16)}
@@ -42463,8 +42403,8 @@ Patterns can be any of:
 					ctx.BindReg(r23, &d2196)
 					ctx.BindReg(r24, &d2196)
 					ctx.EmitMovPairToResult(&d2195, &d2196)
-					ctx.EmitJmp(lbl55)
-					ctx.MarkLabel(lbl55)
+					ctx.EmitJmp(lbl54)
+					ctx.MarkLabel(lbl54)
 					d2197 = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: r23, Reg2: r24}
 					ctx.BindReg(r23, &d2197)
 					ctx.BindReg(r24, &d2197)
@@ -42503,9 +42443,9 @@ Patterns can be any of:
 					d2202 = d2203
 					ctx.StabilizeDescForControlFlow(&d2202)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EmitJmp(lbl17)
+					ctx.EmitJmp(lbl16)
 					bbpos_2_17 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl25)
+					ctx.MarkLabel(lbl24)
 					ctx.ResolveFixups()
 					d40 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase39) + int32(0)}
 					d41 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase39) + int32(16)}
@@ -42550,26 +42490,26 @@ Patterns can be any of:
 					if d2207.Loc != LocImm && d2207.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
+					lbl870 := ctx.ReserveLabel()
 					lbl871 := ctx.ReserveLabel()
-					lbl872 := ctx.ReserveLabel()
 					if d2207.Loc == LocImm {
 						if d2207.Imm.Bool() {
+							ctx.MarkLabel(lbl870)
+							ctx.EmitJmp(lbl22)
+						} else {
 							ctx.MarkLabel(lbl871)
 							ctx.EmitJmp(lbl23)
-						} else {
-							ctx.MarkLabel(lbl872)
-							ctx.EmitJmp(lbl24)
 						}
 					} else {
-						ctx.EmitJump(d2207.Condition, lbl871)
-						ctx.EmitJmp(lbl872)
+						ctx.EmitJump(d2207.Condition, lbl870)
+						ctx.EmitJmp(lbl871)
+						ctx.MarkLabel(lbl870)
+						ctx.EmitJmp(lbl22)
 						ctx.MarkLabel(lbl871)
 						ctx.EmitJmp(lbl23)
-						ctx.MarkLabel(lbl872)
-						ctx.EmitJmp(lbl24)
 					}
 					bbpos_2_10 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl18)
+					ctx.MarkLabel(lbl17)
 					ctx.ResolveFixups()
 					d40 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase39) + int32(0)}
 					d41 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase39) + int32(16)}
@@ -42578,7 +42518,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.EmitGoPanic("jit: invalid arguments for inlined Go helper")
 					bbpos_2_14 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl22)
+					ctx.MarkLabel(lbl21)
 					ctx.ResolveFixups()
 					d40 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase39) + int32(0)}
 					d41 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase39) + int32(16)}
@@ -42627,28 +42567,28 @@ Patterns can be any of:
 					if d2213.Loc != LocImm && d2213.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl872 := ctx.ReserveLabel()
 					lbl873 := ctx.ReserveLabel()
-					lbl874 := ctx.ReserveLabel()
 					if d2213.Loc == LocImm {
 						if d2213.Imm.Bool() {
+							ctx.MarkLabel(lbl872)
+							ctx.EmitJmp(lbl19)
+						} else {
 							ctx.MarkLabel(lbl873)
 							ctx.EmitJmp(lbl20)
-						} else {
-							ctx.MarkLabel(lbl874)
-							ctx.EmitJmp(lbl21)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d2213.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl873)
-						ctx.EmitJmp(lbl874)
+						ctx.EmitJump(CondNotEqual, lbl872)
+						ctx.EmitJmp(lbl873)
+						ctx.MarkLabel(lbl872)
+						ctx.EmitJmp(lbl19)
 						ctx.MarkLabel(lbl873)
 						ctx.EmitJmp(lbl20)
-						ctx.MarkLabel(lbl874)
-						ctx.EmitJmp(lbl21)
 					}
 					ctx.FreeDesc(&d2212)
 					bbpos_2_15 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl23)
+					ctx.MarkLabel(lbl22)
 					ctx.ResolveFixups()
 					d40 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase39) + int32(0)}
 					d41 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase39) + int32(16)}
@@ -42685,14 +42625,14 @@ Patterns can be any of:
 					if d2219.Loc != LocImm && d2219.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl874 := ctx.ReserveLabel()
 					lbl875 := ctx.ReserveLabel()
-					lbl876 := ctx.ReserveLabel()
 					if d2219.Loc == LocImm {
 						if d2219.Imm.Bool() {
-							ctx.MarkLabel(lbl875)
-							ctx.EmitJmp(lbl26)
+							ctx.MarkLabel(lbl874)
+							ctx.EmitJmp(lbl25)
 						} else {
-							ctx.MarkLabel(lbl876)
+							ctx.MarkLabel(lbl875)
 							ctx.SyncDesc(&d2216)
 							if d2216.Loc == LocReg {
 								ctx.ProtectReg(d2216.Reg)
@@ -42723,15 +42663,15 @@ Patterns can be any of:
 								ctx.UnprotectReg(d2216.Reg)
 								ctx.UnprotectReg(d2216.Reg2)
 							}
-							ctx.EmitJmp(lbl27)
+							ctx.EmitJmp(lbl26)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d2219.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl875)
-						ctx.EmitJmp(lbl876)
+						ctx.EmitJump(CondNotEqual, lbl874)
+						ctx.EmitJmp(lbl875)
+						ctx.MarkLabel(lbl874)
+						ctx.EmitJmp(lbl25)
 						ctx.MarkLabel(lbl875)
-						ctx.EmitJmp(lbl26)
-						ctx.MarkLabel(lbl876)
 						ctx.SyncDesc(&d2216)
 						if d2216.Loc == LocReg {
 							ctx.ProtectReg(d2216.Reg)
@@ -42762,11 +42702,11 @@ Patterns can be any of:
 							ctx.UnprotectReg(d2216.Reg)
 							ctx.UnprotectReg(d2216.Reg2)
 						}
-						ctx.EmitJmp(lbl27)
+						ctx.EmitJmp(lbl26)
 					}
 					ctx.FreeDesc(&d2218)
 					bbpos_2_19 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl27)
+					ctx.MarkLabel(lbl26)
 					ctx.ResolveFixups()
 					d40 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase39) + int32(0)}
 					d41 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase39) + int32(16)}
@@ -42791,28 +42731,28 @@ Patterns can be any of:
 					if d2223.Loc != LocImm && d2223.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl876 := ctx.ReserveLabel()
 					lbl877 := ctx.ReserveLabel()
-					lbl878 := ctx.ReserveLabel()
 					if d2223.Loc == LocImm {
 						if d2223.Imm.Bool() {
-							ctx.MarkLabel(lbl877)
-							ctx.EmitJmp(lbl30)
-						} else {
-							ctx.MarkLabel(lbl878)
+							ctx.MarkLabel(lbl876)
 							ctx.EmitJmp(lbl29)
+						} else {
+							ctx.MarkLabel(lbl877)
+							ctx.EmitJmp(lbl28)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d2223.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl877)
-						ctx.EmitJmp(lbl878)
-						ctx.MarkLabel(lbl877)
-						ctx.EmitJmp(lbl30)
-						ctx.MarkLabel(lbl878)
+						ctx.EmitJump(CondNotEqual, lbl876)
+						ctx.EmitJmp(lbl877)
+						ctx.MarkLabel(lbl876)
 						ctx.EmitJmp(lbl29)
+						ctx.MarkLabel(lbl877)
+						ctx.EmitJmp(lbl28)
 					}
 					ctx.FreeDesc(&d2222)
 					bbpos_2_21 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl29)
+					ctx.MarkLabel(lbl28)
 					ctx.ResolveFixups()
 					d40 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase39) + int32(0)}
 					d41 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase39) + int32(16)}
@@ -42966,28 +42906,28 @@ Patterns can be any of:
 					if d2237.Loc != LocImm && d2237.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl878 := ctx.ReserveLabel()
 					lbl879 := ctx.ReserveLabel()
-					lbl880 := ctx.ReserveLabel()
 					if d2237.Loc == LocImm {
 						if d2237.Imm.Bool() {
+							ctx.MarkLabel(lbl878)
+							ctx.EmitJmp(lbl38)
+						} else {
 							ctx.MarkLabel(lbl879)
 							ctx.EmitJmp(lbl39)
-						} else {
-							ctx.MarkLabel(lbl880)
-							ctx.EmitJmp(lbl40)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d2237.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl879)
-						ctx.EmitJmp(lbl880)
+						ctx.EmitJump(CondNotEqual, lbl878)
+						ctx.EmitJmp(lbl879)
+						ctx.MarkLabel(lbl878)
+						ctx.EmitJmp(lbl38)
 						ctx.MarkLabel(lbl879)
 						ctx.EmitJmp(lbl39)
-						ctx.MarkLabel(lbl880)
-						ctx.EmitJmp(lbl40)
 					}
 					ctx.FreeDesc(&d2236)
 					bbpos_2_32 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl40)
+					ctx.MarkLabel(lbl39)
 					ctx.ResolveFixups()
 					d40 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase39) + int32(0)}
 					d41 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase39) + int32(16)}
@@ -42999,9 +42939,9 @@ Patterns can be any of:
 					ctx.BindReg(r8, &d2238)
 					ctx.BindReg(r9, &d2238)
 					ctx.EmitMovPairToResult(&d2231, &d2238)
-					ctx.EmitJmp(lbl7)
+					ctx.EmitJmp(lbl6)
 					bbpos_2_12 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl20)
+					ctx.MarkLabel(lbl19)
 					ctx.ResolveFixups()
 					d40 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase39) + int32(0)}
 					d41 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase39) + int32(16)}
@@ -43104,9 +43044,9 @@ Patterns can be any of:
 					ctx.BindReg(r8, &d2248)
 					ctx.BindReg(r9, &d2248)
 					ctx.EmitMovPairToResult(&d2247, &d2248)
-					ctx.EmitJmp(lbl7)
+					ctx.EmitJmp(lbl6)
 					bbpos_2_18 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl26)
+					ctx.MarkLabel(lbl25)
 					ctx.ResolveFixups()
 					d40 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase39) + int32(0)}
 					d41 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase39) + int32(16)}
@@ -43185,9 +43125,9 @@ Patterns can be any of:
 						ctx.UnprotectReg(d2251.Reg)
 						ctx.UnprotectReg(d2251.Reg2)
 					}
-					ctx.EmitJmp(lbl27)
+					ctx.EmitJmp(lbl26)
 					bbpos_2_22 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl30)
+					ctx.MarkLabel(lbl29)
 					ctx.ResolveFixups()
 					d40 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase39) + int32(0)}
 					d41 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase39) + int32(16)}
@@ -43236,28 +43176,28 @@ Patterns can be any of:
 					if d2258.Loc != LocImm && d2258.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl880 := ctx.ReserveLabel()
 					lbl881 := ctx.ReserveLabel()
-					lbl882 := ctx.ReserveLabel()
 					if d2258.Loc == LocImm {
 						if d2258.Imm.Bool() {
+							ctx.MarkLabel(lbl880)
+							ctx.EmitJmp(lbl27)
+						} else {
 							ctx.MarkLabel(lbl881)
 							ctx.EmitJmp(lbl28)
-						} else {
-							ctx.MarkLabel(lbl882)
-							ctx.EmitJmp(lbl29)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d2258.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl881)
-						ctx.EmitJmp(lbl882)
+						ctx.EmitJump(CondNotEqual, lbl880)
+						ctx.EmitJmp(lbl881)
+						ctx.MarkLabel(lbl880)
+						ctx.EmitJmp(lbl27)
 						ctx.MarkLabel(lbl881)
 						ctx.EmitJmp(lbl28)
-						ctx.MarkLabel(lbl882)
-						ctx.EmitJmp(lbl29)
 					}
 					ctx.FreeDesc(&d2257)
 					bbpos_2_31 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl39)
+					ctx.MarkLabel(lbl38)
 					ctx.ResolveFixups()
 					d40 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase39) + int32(0)}
 					d41 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase39) + int32(16)}
@@ -43284,9 +43224,9 @@ Patterns can be any of:
 					ctx.BindReg(r8, &d2260)
 					ctx.BindReg(r9, &d2260)
 					ctx.EmitMovPairToResult(&d2259, &d2260)
-					ctx.EmitJmp(lbl7)
+					ctx.EmitJmp(lbl6)
 					bbpos_2_20 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl28)
+					ctx.MarkLabel(lbl27)
 					ctx.ResolveFixups()
 					d40 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase39) + int32(0)}
 					d41 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase39) + int32(16)}
@@ -43442,7 +43382,7 @@ Patterns can be any of:
 						ctx.UnprotectReg(d2269.Reg2)
 					}
 					bbpos_2_23 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl31)
+					ctx.MarkLabel(lbl30)
 					ctx.ResolveFixups()
 					d40 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase39) + int32(0)}
 					d41 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase39) + int32(16)}
@@ -43489,26 +43429,26 @@ Patterns can be any of:
 					if d2276.Loc != LocImm && d2276.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
+					lbl882 := ctx.ReserveLabel()
 					lbl883 := ctx.ReserveLabel()
-					lbl884 := ctx.ReserveLabel()
 					if d2276.Loc == LocImm {
 						if d2276.Imm.Bool() {
+							ctx.MarkLabel(lbl882)
+							ctx.EmitJmp(lbl31)
+						} else {
 							ctx.MarkLabel(lbl883)
 							ctx.EmitJmp(lbl32)
-						} else {
-							ctx.MarkLabel(lbl884)
-							ctx.EmitJmp(lbl33)
 						}
 					} else {
-						ctx.EmitJump(d2276.Condition, lbl883)
-						ctx.EmitJmp(lbl884)
+						ctx.EmitJump(d2276.Condition, lbl882)
+						ctx.EmitJmp(lbl883)
+						ctx.MarkLabel(lbl882)
+						ctx.EmitJmp(lbl31)
 						ctx.MarkLabel(lbl883)
 						ctx.EmitJmp(lbl32)
-						ctx.MarkLabel(lbl884)
-						ctx.EmitJmp(lbl33)
 					}
 					bbpos_2_25 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl33)
+					ctx.MarkLabel(lbl32)
 					ctx.ResolveFixups()
 					d40 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase39) + int32(0)}
 					d41 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase39) + int32(16)}
@@ -43545,28 +43485,28 @@ Patterns can be any of:
 					if d2282.Loc != LocImm && d2282.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl884 := ctx.ReserveLabel()
 					lbl885 := ctx.ReserveLabel()
-					lbl886 := ctx.ReserveLabel()
 					if d2282.Loc == LocImm {
 						if d2282.Imm.Bool() {
-							ctx.MarkLabel(lbl885)
-							ctx.EmitJmp(lbl36)
-						} else {
-							ctx.MarkLabel(lbl886)
+							ctx.MarkLabel(lbl884)
 							ctx.EmitJmp(lbl35)
+						} else {
+							ctx.MarkLabel(lbl885)
+							ctx.EmitJmp(lbl34)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d2282.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl885)
-						ctx.EmitJmp(lbl886)
-						ctx.MarkLabel(lbl885)
-						ctx.EmitJmp(lbl36)
-						ctx.MarkLabel(lbl886)
+						ctx.EmitJump(CondNotEqual, lbl884)
+						ctx.EmitJmp(lbl885)
+						ctx.MarkLabel(lbl884)
 						ctx.EmitJmp(lbl35)
+						ctx.MarkLabel(lbl885)
+						ctx.EmitJmp(lbl34)
 					}
 					ctx.FreeDesc(&d2281)
 					bbpos_2_27 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl35)
+					ctx.MarkLabel(lbl34)
 					ctx.ResolveFixups()
 					d40 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase39) + int32(0)}
 					d41 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase39) + int32(16)}
@@ -43617,9 +43557,9 @@ Patterns can be any of:
 					d2288 = d2289
 					ctx.StabilizeDescForControlFlow(&d2288)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EmitJmp(lbl31)
+					ctx.EmitJmp(lbl30)
 					bbpos_2_24 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl32)
+					ctx.MarkLabel(lbl31)
 					ctx.ResolveFixups()
 					d40 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase39) + int32(0)}
 					d41 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase39) + int32(16)}
@@ -43628,7 +43568,7 @@ Patterns can be any of:
 					ctx.ReclaimUntrackedRegs()
 					ctx.EmitGoPanic("jit: invalid arguments for inlined Go helper")
 					bbpos_2_28 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl36)
+					ctx.MarkLabel(lbl35)
 					ctx.ResolveFixups()
 					d40 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase39) + int32(0)}
 					d41 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase39) + int32(16)}
@@ -43677,28 +43617,28 @@ Patterns can be any of:
 					if d2295.Loc != LocImm && d2295.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl886 := ctx.ReserveLabel()
 					lbl887 := ctx.ReserveLabel()
-					lbl888 := ctx.ReserveLabel()
 					if d2295.Loc == LocImm {
 						if d2295.Imm.Bool() {
+							ctx.MarkLabel(lbl886)
+							ctx.EmitJmp(lbl33)
+						} else {
 							ctx.MarkLabel(lbl887)
 							ctx.EmitJmp(lbl34)
-						} else {
-							ctx.MarkLabel(lbl888)
-							ctx.EmitJmp(lbl35)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d2295.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl887)
-						ctx.EmitJmp(lbl888)
+						ctx.EmitJump(CondNotEqual, lbl886)
+						ctx.EmitJmp(lbl887)
+						ctx.MarkLabel(lbl886)
+						ctx.EmitJmp(lbl33)
 						ctx.MarkLabel(lbl887)
 						ctx.EmitJmp(lbl34)
-						ctx.MarkLabel(lbl888)
-						ctx.EmitJmp(lbl35)
 					}
 					ctx.FreeDesc(&d2294)
 					bbpos_2_26 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl34)
+					ctx.MarkLabel(lbl33)
 					ctx.ResolveFixups()
 					d40 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase39) + int32(0)}
 					d41 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase39) + int32(16)}
@@ -43850,28 +43790,28 @@ Patterns can be any of:
 					if d2309.Loc != LocImm && d2309.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
+					lbl888 := ctx.ReserveLabel()
 					lbl889 := ctx.ReserveLabel()
-					lbl890 := ctx.ReserveLabel()
 					if d2309.Loc == LocImm {
 						if d2309.Imm.Bool() {
+							ctx.MarkLabel(lbl888)
+							ctx.EmitJmp(lbl36)
+						} else {
 							ctx.MarkLabel(lbl889)
 							ctx.EmitJmp(lbl37)
-						} else {
-							ctx.MarkLabel(lbl890)
-							ctx.EmitJmp(lbl38)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d2309.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl889)
-						ctx.EmitJmp(lbl890)
+						ctx.EmitJump(CondNotEqual, lbl888)
+						ctx.EmitJmp(lbl889)
+						ctx.MarkLabel(lbl888)
+						ctx.EmitJmp(lbl36)
 						ctx.MarkLabel(lbl889)
 						ctx.EmitJmp(lbl37)
-						ctx.MarkLabel(lbl890)
-						ctx.EmitJmp(lbl38)
 					}
 					ctx.FreeDesc(&d2308)
 					bbpos_2_30 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl38)
+					ctx.MarkLabel(lbl37)
 					ctx.ResolveFixups()
 					d40 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase39) + int32(0)}
 					d41 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase39) + int32(16)}
@@ -43883,9 +43823,9 @@ Patterns can be any of:
 					ctx.BindReg(r8, &d2310)
 					ctx.BindReg(r9, &d2310)
 					ctx.EmitMovPairToResult(&d2303, &d2310)
-					ctx.EmitJmp(lbl7)
+					ctx.EmitJmp(lbl6)
 					bbpos_2_29 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl37)
+					ctx.MarkLabel(lbl36)
 					ctx.ResolveFixups()
 					d40 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase39) + int32(0)}
 					d41 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase39) + int32(16)}
@@ -43912,8 +43852,8 @@ Patterns can be any of:
 					ctx.BindReg(r8, &d2312)
 					ctx.BindReg(r9, &d2312)
 					ctx.EmitMovPairToResult(&d2311, &d2312)
-					ctx.EmitJmp(lbl7)
-					ctx.MarkLabel(lbl7)
+					ctx.EmitJmp(lbl6)
+					ctx.MarkLabel(lbl6)
 					d2313 = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: r8, Reg2: r9}
 					ctx.BindReg(r8, &d2313)
 					ctx.BindReg(r9, &d2313)
@@ -44173,24 +44113,21 @@ Patterns can be any of:
 						return bbs[0].RenderPS(ps)
 					}
 					lbl4 := ctx.ReserveLabel()
-					lbl5 := ctx.ReserveLabel()
-					ctx.EmitJump(d4.Condition, lbl4)
-					ctx.EmitJmp(lbl5)
+					ctx.EmitJump(d4.Condition, lbl2)
+					ctx.EmitJmp(lbl4)
 					snap8 := d1
 					snap9 := d2
 					snap10 := d3
 					snap11 := d4
 					snap12 := d7
 					alloc13 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl4)
-					ctx.EmitJmp(lbl2)
 					ctx.RestoreAllocState(alloc13)
 					d1 = snap8
 					d2 = snap9
 					d3 = snap10
 					d4 = snap11
 					d7 = snap12
-					ctx.MarkLabel(lbl5)
+					ctx.MarkLabel(lbl4)
 					ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(20)}, int32(bbs[2].PhiBase)+int32(0))
 					ctx.EmitJmp(lbl3)
 					ctx.RestoreAllocState(alloc13)
@@ -44283,13 +44220,12 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d24)
 					d25 = d24
 					_ = d25
-					ctx.StabilizeDescForControlFlow(&d25)
 					bbpos_1_0 := int32(-1)
 					_ = bbpos_1_0
-					lbl6 := ctx.ReserveLabel()
-					_ = lbl6
+					lbl5 := ctx.ReserveLabel()
+					_ = lbl5
 					bbpos_1_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl6)
+					ctx.MarkLabel(lbl5)
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()

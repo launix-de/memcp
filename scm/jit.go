@@ -498,6 +498,38 @@ const (
 	CondNotParity
 )
 
+// InvertJITCondition returns the complementary architecture-neutral branch.
+func InvertJITCondition(condition JITCondition) JITCondition {
+	switch condition {
+	case CondEqual:
+		return CondNotEqual
+	case CondNotEqual:
+		return CondEqual
+	case CondSignedLess:
+		return CondSignedGreaterOrEqual
+	case CondSignedGreaterOrEqual:
+		return CondSignedLess
+	case CondSignedLessOrEqual:
+		return CondSignedGreater
+	case CondSignedGreater:
+		return CondSignedLessOrEqual
+	case CondUnsignedBelow:
+		return CondUnsignedAboveOrEqual
+	case CondUnsignedAboveOrEqual:
+		return CondUnsignedBelow
+	case CondUnsignedBelowOrEqual:
+		return CondUnsignedAbove
+	case CondUnsignedAbove:
+		return CondUnsignedBelowOrEqual
+	case CondParity:
+		return CondNotParity
+	case CondNotParity:
+		return CondParity
+	default:
+		panic("jit: invalid branch condition")
+	}
+}
+
 // Short condition names keep generated emitters source-compatible. New
 // lowering code should use the descriptive, architecture-neutral names above.
 const (
@@ -726,13 +758,18 @@ type JITContext struct {
 	ActiveBuiltinEmitters map[*Declaration]uint16
 	BuiltinInlineCost     int
 	NeedsStableArgs       bool
-	StackPhiTargets       bool
-	SelfSymbols           map[Symbol]struct{}
-	DefiningSymbol        Symbol
-	SelfLoopLabel         JITLabel
-	HasSelfLoop           bool
-	SelfParamCount        int
-	RegOwners             [16]*JITValueDesc // register → owner descriptor (nil = untracked)
+	// StorageInputsInRegisters is enabled for the optimistic first emission of
+	// a finalized storage reader. Any Go-call boundary aborts that emission and
+	// retries with rooted stack homes; a call-free getter keeps its incoming ABI
+	// values resident throughout the generated loop.
+	StorageInputsInRegisters bool
+	StackPhiTargets          bool
+	SelfSymbols              map[Symbol]struct{}
+	DefiningSymbol           Symbol
+	SelfLoopLabel            JITLabel
+	HasSelfLoop              bool
+	SelfParamCount           int
+	RegOwners                [16]*JITValueDesc // register → owner descriptor (nil = untracked)
 	// DynamicSP is the temporary distance below the static frame bottom. It
 	// covers pushed live registers, variadic arrays, and the Go call area.
 	DynamicSP    int32
@@ -775,6 +812,8 @@ type JITContext struct {
 	entrySet   map[*JITEntryPoint]struct{}
 	Arena      *jitArena // owning arena for source map entries
 }
+
+var jitStorageNeedsStableInputs = &struct{}{}
 
 // JITRegisterBank describes the long-lived general-purpose registers offered
 // by an architecture backend. Registers are ordered by suitability for values
@@ -3164,6 +3203,9 @@ func JITEmitGoCallScmerToFrame(ctx *JITContext, funcAddr uint64, args []JITValue
 }
 
 func (ctx *JITContext) emitGoCall(funcAddr uint64, argWords []goCallArgWord, numResultWords int, resultsBuf *[16]Reg, resultTargets []Reg, resultSlotBase Reg, resultSlotOffs []int32) []Reg {
+	if ctx.StorageInputsInRegisters {
+		panic(jitStorageNeedsStableInputs)
+	}
 	ctx.NeedsStableArgs = true
 	entryDynamicSP := ctx.DynamicSP
 	if numResultWords > len(GoABIIntRegs) {
@@ -4238,9 +4280,8 @@ func init_jit() {
 						return bbs[0].RenderPS(ps)
 					}
 					lbl7 := ctx.ReserveLabel()
-					lbl8 := ctx.ReserveLabel()
 					ctx.EmitJump(d6.Condition, lbl7)
-					ctx.EmitJmp(lbl8)
+					ctx.EmitJmp(lbl2)
 					snap10 := d1
 					snap11 := d2
 					snap12 := d3
@@ -4260,8 +4301,6 @@ func init_jit() {
 					d5 = snap14
 					d6 = snap15
 					d8 = snap16
-					ctx.MarkLabel(lbl8)
-					ctx.EmitJmp(lbl2)
 					ctx.RestoreAllocState(alloc17)
 					d1 = snap10
 					d2 = snap11
@@ -4431,10 +4470,9 @@ func init_jit() {
 						ps.General = true
 						return bbs[1].RenderPS(ps)
 					}
-					lbl9 := ctx.ReserveLabel()
-					lbl10 := ctx.ReserveLabel()
-					ctx.EmitJump(d33.Condition, lbl9)
-					ctx.EmitJmp(lbl10)
+					lbl8 := ctx.ReserveLabel()
+					ctx.EmitJump(d33.Condition, lbl6)
+					ctx.EmitJmp(lbl8)
 					snap37 := d1
 					snap38 := d2
 					snap39 := d3
@@ -4449,8 +4487,6 @@ func init_jit() {
 					snap48 := d33
 					snap49 := d36
 					alloc50 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl9)
-					ctx.EmitJmp(lbl6)
 					ctx.RestoreAllocState(alloc50)
 					d1 = snap37
 					d2 = snap38
@@ -4465,7 +4501,7 @@ func init_jit() {
 					d32 = snap47
 					d33 = snap48
 					d36 = snap49
-					ctx.MarkLabel(lbl10)
+					ctx.MarkLabel(lbl8)
 					ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewInt(0)}, int32(bbs[4].PhiBase)+int32(0))
 					ctx.EmitJmp(lbl5)
 					ctx.RestoreAllocState(alloc50)
@@ -5135,11 +5171,10 @@ func init_jit() {
 						ps.General = true
 						return bbs[5].RenderPS(ps)
 					}
-					lbl11 := ctx.ReserveLabel()
-					lbl12 := ctx.ReserveLabel()
+					lbl9 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d83.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl11)
-					ctx.EmitJmp(lbl12)
+					ctx.EmitJump(CondNotEqual, lbl4)
+					ctx.EmitJmp(lbl9)
 					snap87 := d1
 					snap88 := d2
 					snap89 := d3
@@ -5169,8 +5204,6 @@ func init_jit() {
 					snap113 := d83
 					snap114 := d86
 					alloc115 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl11)
-					ctx.EmitJmp(lbl4)
 					ctx.RestoreAllocState(alloc115)
 					d1 = snap87
 					d2 = snap88
@@ -5200,7 +5233,7 @@ func init_jit() {
 					d82 = snap112
 					d83 = snap113
 					d86 = snap114
-					ctx.MarkLabel(lbl12)
+					ctx.MarkLabel(lbl9)
 					ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewInt(0)}, int32(bbs[4].PhiBase)+int32(0))
 					ctx.EmitJmp(lbl5)
 					ctx.RestoreAllocState(alloc115)
@@ -5662,9 +5695,8 @@ func init_jit() {
 						return bbs[0].RenderPS(ps)
 					}
 					lbl12 := ctx.ReserveLabel()
-					lbl13 := ctx.ReserveLabel()
 					ctx.EmitJump(d7.Condition, lbl12)
-					ctx.EmitJmp(lbl13)
+					ctx.EmitJmp(lbl2)
 					snap11 := d1
 					snap12 := d2
 					snap13 := d3
@@ -5686,8 +5718,6 @@ func init_jit() {
 					d6 = snap16
 					d7 = snap17
 					d9 = snap18
-					ctx.MarkLabel(lbl13)
-					ctx.EmitJmp(lbl2)
 					ctx.RestoreAllocState(alloc19)
 					d1 = snap11
 					d2 = snap12
@@ -5863,10 +5893,9 @@ func init_jit() {
 						ps.General = true
 						return bbs[1].RenderPS(ps)
 					}
-					lbl14 := ctx.ReserveLabel()
-					lbl15 := ctx.ReserveLabel()
-					ctx.EmitJump(d35.Condition, lbl14)
-					ctx.EmitJmp(lbl15)
+					lbl13 := ctx.ReserveLabel()
+					ctx.EmitJump(d35.Condition, lbl6)
+					ctx.EmitJmp(lbl13)
 					snap39 := d1
 					snap40 := d2
 					snap41 := d3
@@ -5881,8 +5910,6 @@ func init_jit() {
 					snap50 := d35
 					snap51 := d38
 					alloc52 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl14)
-					ctx.EmitJmp(lbl6)
 					ctx.RestoreAllocState(alloc52)
 					d1 = snap39
 					d2 = snap40
@@ -5897,7 +5924,7 @@ func init_jit() {
 					d34 = snap49
 					d35 = snap50
 					d38 = snap51
-					ctx.MarkLabel(lbl15)
+					ctx.MarkLabel(lbl13)
 					ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewInt(0)}, int32(bbs[4].PhiBase)+int32(0))
 					ctx.EmitJmp(lbl5)
 					ctx.RestoreAllocState(alloc52)
@@ -6546,11 +6573,10 @@ func init_jit() {
 						ps.General = true
 						return bbs[5].RenderPS(ps)
 					}
-					lbl16 := ctx.ReserveLabel()
-					lbl17 := ctx.ReserveLabel()
+					lbl14 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d83.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl16)
-					ctx.EmitJmp(lbl17)
+					ctx.EmitJump(CondNotEqual, lbl4)
+					ctx.EmitJmp(lbl14)
 					snap87 := d1
 					snap88 := d2
 					snap89 := d3
@@ -6577,8 +6603,6 @@ func init_jit() {
 					snap110 := d83
 					snap111 := d86
 					alloc112 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl16)
-					ctx.EmitJmp(lbl4)
 					ctx.RestoreAllocState(alloc112)
 					d1 = snap87
 					d2 = snap88
@@ -6605,7 +6629,7 @@ func init_jit() {
 					d82 = snap109
 					d83 = snap110
 					d86 = snap111
-					ctx.MarkLabel(lbl17)
+					ctx.MarkLabel(lbl14)
 					ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewInt(0)}, int32(bbs[4].PhiBase)+int32(0))
 					ctx.EmitJmp(lbl5)
 					ctx.RestoreAllocState(alloc112)
@@ -7001,10 +7025,9 @@ func init_jit() {
 						ps.General = true
 						return bbs[6].RenderPS(ps)
 					}
-					lbl18 := ctx.ReserveLabel()
-					lbl19 := ctx.ReserveLabel()
-					ctx.EmitJump(d147.Condition, lbl18)
-					ctx.EmitJmp(lbl19)
+					lbl15 := ctx.ReserveLabel()
+					ctx.EmitJump(d147.Condition, lbl10)
+					ctx.EmitJmp(lbl15)
 					snap152 := d1
 					snap153 := d2
 					snap154 := d3
@@ -7039,8 +7062,6 @@ func init_jit() {
 					snap183 := d149
 					snap184 := d151
 					alloc185 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl18)
-					ctx.EmitJmp(lbl10)
 					ctx.RestoreAllocState(alloc185)
 					d1 = snap152
 					d2 = snap153
@@ -7075,7 +7096,7 @@ func init_jit() {
 					d147 = snap182
 					d149 = snap183
 					d151 = snap184
-					ctx.MarkLabel(lbl19)
+					ctx.MarkLabel(lbl15)
 					ctx.SyncDesc(&d144)
 					if d144.Loc == LocReg {
 						ctx.ProtectReg(d144.Reg)
@@ -7674,11 +7695,8 @@ func init_jit() {
 						ps.General = true
 						return bbs[8].RenderPS(ps)
 					}
-					lbl20 := ctx.ReserveLabel()
-					lbl21 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d226.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl20)
-					ctx.EmitJmp(lbl21)
+					ctx.EmitJump(CondNotEqual, lbl8)
 					snap229 := d1
 					snap230 := d2
 					snap231 := d3
@@ -7716,8 +7734,6 @@ func init_jit() {
 					snap263 := d189
 					snap264 := d226
 					alloc265 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl20)
-					ctx.EmitJmp(lbl8)
 					ctx.RestoreAllocState(alloc265)
 					d1 = snap229
 					d2 = snap230
@@ -7755,8 +7771,6 @@ func init_jit() {
 					d186 = snap262
 					d189 = snap263
 					d226 = snap264
-					ctx.MarkLabel(lbl21)
-					ctx.EmitJmp(lbl7)
 					ctx.RestoreAllocState(alloc265)
 					d1 = snap229
 					d2 = snap230

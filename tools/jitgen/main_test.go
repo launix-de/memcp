@@ -184,6 +184,55 @@ func rolling(a ...Scmer) Scmer {
 	}
 }
 
+func TestVariableShiftUsesMachineInstructionForBoundedUnsignedCount(t *testing.T) {
+	fn := buildTestSSAFunction(t, `package sample
+func shift(value, count uint64) uint64 {
+	return value << (count % 64)
+}
+`, "shift")
+	var shift *ssa.BinOp
+	for _, block := range fn.Blocks {
+		for _, instruction := range block.Instrs {
+			candidate, ok := instruction.(*ssa.BinOp)
+			if ok && candidate.Op == token.SHL {
+				shift = candidate
+			}
+		}
+	}
+	if shift == nil {
+		t.Fatal("shift expression not found in SSA")
+	}
+	if !ssaUnsignedValueBelow(shift.Y, 64) {
+		t.Fatalf("modulo-bounded shift count was not recognized: %s", shift.Y)
+	}
+}
+
+func TestInlineArgumentLivenessIgnoresMutuallyExclusiveSibling(t *testing.T) {
+	fn := buildTestSSAFunction(t, `package sample
+func identity(value uint32) uint32 { return value }
+func choose(value uint32, left bool) uint32 {
+	if left { return identity(value) }
+	return identity(value)
+}
+`, "choose")
+	var calls []*ssa.Call
+	for _, block := range fn.Blocks {
+		for _, instruction := range block.Instrs {
+			if call, ok := instruction.(*ssa.Call); ok {
+				calls = append(calls, call)
+			}
+		}
+	}
+	if len(calls) != 2 {
+		t.Fatalf("calls = %d, want two branch-local calls", len(calls))
+	}
+	for _, call := range calls {
+		if ssaValueNeededAfterInstruction(call, fn.Params[0]) {
+			t.Fatalf("value incorrectly live from %s into sibling branch", call.Block())
+		}
+	}
+}
+
 func TestLoopPhiRegisterPlanLeavesScmerWordsForSplitPlanner(t *testing.T) {
 	fn := buildTestSSAFunction(t, `package sample
 type Scmer struct { ptr, aux uint64 }

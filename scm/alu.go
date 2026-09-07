@@ -294,9 +294,8 @@ func init_alu() {
 						return bbs[0].RenderPS(ps)
 					}
 					lbl5 := ctx.ReserveLabel()
-					lbl6 := ctx.ReserveLabel()
 					ctx.EmitJump(d5.Condition, lbl5)
-					ctx.EmitJmp(lbl6)
+					ctx.EmitJmp(lbl4)
 					snap9 := d1
 					snap10 := d2
 					snap11 := d3
@@ -314,8 +313,6 @@ func init_alu() {
 					d4 = snap12
 					d5 = snap13
 					d7 = snap14
-					ctx.MarkLabel(lbl6)
-					ctx.EmitJmp(lbl4)
 					ctx.RestoreAllocState(alloc15)
 					d1 = snap9
 					d2 = snap10
@@ -628,10 +625,9 @@ func init_alu() {
 						ps.General = true
 						return bbs[3].RenderPS(ps)
 					}
-					lbl7 := ctx.ReserveLabel()
-					lbl8 := ctx.ReserveLabel()
-					ctx.EmitJump(d32.Condition, lbl7)
-					ctx.EmitJmp(lbl8)
+					lbl6 := ctx.ReserveLabel()
+					ctx.EmitJump(d32.Condition, lbl6)
+					ctx.EmitJmp(lbl2)
 					snap36 := d1
 					snap37 := d2
 					snap38 := d3
@@ -646,7 +642,7 @@ func init_alu() {
 					snap47 := d32
 					snap48 := d34
 					alloc49 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl7)
+					ctx.MarkLabel(lbl6)
 					ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewInt(1)}, int32(bbs[2].PhiBase)+int32(0))
 					ctx.EmitJmp(lbl3)
 					ctx.RestoreAllocState(alloc49)
@@ -663,8 +659,6 @@ func init_alu() {
 					d31 = snap46
 					d32 = snap47
 					d34 = snap48
-					ctx.MarkLabel(lbl8)
-					ctx.EmitJmp(lbl2)
 					ctx.RestoreAllocState(alloc49)
 					d1 = snap36
 					d2 = snap37
@@ -1311,11 +1305,8 @@ func init_alu() {
 						ps.General = true
 						return bbs[1].RenderPS(ps)
 					}
-					lbl15 := ctx.ReserveLabel()
-					lbl16 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d18.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl15)
-					ctx.EmitJmp(lbl16)
+					ctx.EmitJump(CondNotEqual, lbl5)
 					snap21 := d6
 					snap22 := d7
 					snap23 := d8
@@ -1327,8 +1318,6 @@ func init_alu() {
 					snap29 := d17
 					snap30 := d18
 					alloc31 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl15)
-					ctx.EmitJmp(lbl5)
 					ctx.RestoreAllocState(alloc31)
 					d6 = snap21
 					d7 = snap22
@@ -1340,8 +1329,6 @@ func init_alu() {
 					d16 = snap28
 					d17 = snap29
 					d18 = snap30
-					ctx.MarkLabel(lbl16)
-					ctx.EmitJmp(lbl3)
 					ctx.RestoreAllocState(alloc31)
 					d6 = snap21
 					d7 = snap22
@@ -1558,10 +1545,7 @@ func init_alu() {
 						ps.General = true
 						return bbs[2].RenderPS(ps)
 					}
-					lbl17 := ctx.ReserveLabel()
-					lbl18 := ctx.ReserveLabel()
-					ctx.EmitJump(d47.Condition, lbl17)
-					ctx.EmitJmp(lbl18)
+					ctx.EmitJump(d47.Condition, lbl6)
 					snap50 := d6
 					snap51 := d7
 					snap52 := d8
@@ -1576,8 +1560,6 @@ func init_alu() {
 					snap61 := d46
 					snap62 := d47
 					alloc63 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl17)
-					ctx.EmitJmp(lbl6)
 					ctx.RestoreAllocState(alloc63)
 					d6 = snap50
 					d7 = snap51
@@ -1592,8 +1574,6 @@ func init_alu() {
 					d45 = snap60
 					d46 = snap61
 					d47 = snap62
-					ctx.MarkLabel(lbl18)
-					ctx.EmitJmp(lbl7)
 					ctx.RestoreAllocState(alloc63)
 					d6 = snap50
 					d7 = snap51
@@ -1897,10 +1877,7 @@ func init_alu() {
 						ps.General = true
 						return bbs[3].RenderPS(ps)
 					}
-					lbl19 := ctx.ReserveLabel()
-					lbl20 := ctx.ReserveLabel()
-					ctx.EmitJump(d84.Condition, lbl19)
-					ctx.EmitJmp(lbl20)
+					ctx.EmitJump(d84.Condition, lbl2)
 					snap89 := d6
 					snap90 := d7
 					snap91 := d8
@@ -1922,8 +1899,6 @@ func init_alu() {
 					snap107 := d87
 					snap108 := d88
 					alloc109 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl19)
-					ctx.EmitJmp(lbl2)
 					ctx.RestoreAllocState(alloc109)
 					d6 = snap89
 					d7 = snap90
@@ -1945,8 +1920,6 @@ func init_alu() {
 					d84 = snap106
 					d87 = snap107
 					d88 = snap108
-					ctx.MarkLabel(lbl20)
-					ctx.EmitJmp(lbl3)
 					ctx.RestoreAllocState(alloc109)
 					d6 = snap89
 					d7 = snap90
@@ -2870,10 +2843,10 @@ func init_alu() {
 						ctx.EnsureDesc(&d8)
 						dynamicArgOff149 = ctx.AllocStack(16)
 						ctx.ProtectReg(d8.Reg)
-						lbl21 := ctx.ReserveLabel()
-						lbl22 := ctx.ReserveLabel()
+						lbl15 := ctx.ReserveLabel()
+						lbl16 := ctx.ReserveLabel()
 						ctx.EmitCmpRegImm32(d8.Reg, int32(len(args)-0))
-						ctx.EmitJump(CondUnsignedAboveOrEqual, lbl22)
+						ctx.EmitJump(CondUnsignedAboveOrEqual, lbl16)
 						for i := 0; i < len(args); i++ {
 							nextLbl := ctx.ReserveLabel()
 							ctx.EmitCmpRegImm32(d8.Reg, int32(i-0))
@@ -2881,12 +2854,12 @@ func init_alu() {
 							ai := args[i]
 							ai.ID = 0
 							ctx.EmitStoreScmerToStack(ai, int32(dynamicArgOff149))
-							ctx.EmitJmp(lbl21)
+							ctx.EmitJmp(lbl15)
 							ctx.MarkLabel(nextLbl)
 						}
-						ctx.MarkLabel(lbl22)
+						ctx.MarkLabel(lbl16)
 						ctx.EmitStoreScmerToStack(JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}, int32(dynamicArgOff149))
-						ctx.MarkLabel(lbl21)
+						ctx.MarkLabel(lbl15)
 						ctx.UnprotectReg(d8.Reg)
 						d148 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(dynamicArgOff149), Rooted: true}
 					}
@@ -2995,11 +2968,8 @@ func init_alu() {
 						ps.General = true
 						return bbs[7].RenderPS(ps)
 					}
-					lbl23 := ctx.ReserveLabel()
-					lbl24 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d153.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl23)
-					ctx.EmitJmp(lbl24)
+					ctx.EmitJump(CondNotEqual, lbl11)
 					snap156 := d6
 					snap157 := d7
 					snap158 := d8
@@ -3038,8 +3008,6 @@ func init_alu() {
 					snap191 := d152
 					snap192 := d153
 					alloc193 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl23)
-					ctx.EmitJmp(lbl11)
 					ctx.RestoreAllocState(alloc193)
 					d6 = snap156
 					d7 = snap157
@@ -3078,8 +3046,6 @@ func init_alu() {
 					d151 = snap190
 					d152 = snap191
 					d153 = snap192
-					ctx.MarkLabel(lbl24)
-					ctx.EmitJmp(lbl12)
 					ctx.RestoreAllocState(alloc193)
 					d6 = snap156
 					d7 = snap157
@@ -3795,10 +3761,7 @@ func init_alu() {
 						ps.General = true
 						return bbs[9].RenderPS(ps)
 					}
-					lbl25 := ctx.ReserveLabel()
-					lbl26 := ctx.ReserveLabel()
-					ctx.EmitJump(d239.Condition, lbl25)
-					ctx.EmitJmp(lbl26)
+					ctx.EmitJump(d239.Condition, lbl8)
 					snap244 := d6
 					snap245 := d7
 					snap246 := d8
@@ -3845,8 +3808,6 @@ func init_alu() {
 					snap287 := d242
 					snap288 := d243
 					alloc289 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl25)
-					ctx.EmitJmp(lbl8)
 					ctx.RestoreAllocState(alloc289)
 					d6 = snap244
 					d7 = snap245
@@ -3893,8 +3854,6 @@ func init_alu() {
 					d239 = snap286
 					d242 = snap287
 					d243 = snap288
-					ctx.MarkLabel(lbl26)
-					ctx.EmitJmp(lbl9)
 					ctx.RestoreAllocState(alloc289)
 					d6 = snap244
 					d7 = snap245
@@ -4924,25 +4883,18 @@ func init_alu() {
 						ps.General = true
 						return bbs[0].RenderPS(ps)
 					}
-					lbl9 := ctx.ReserveLabel()
-					lbl10 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d3.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl9)
-					ctx.EmitJmp(lbl10)
+					ctx.EmitJump(CondNotEqual, lbl2)
 					snap6 := d0
 					snap7 := d1
 					snap8 := d2
 					snap9 := d3
 					alloc10 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl9)
-					ctx.EmitJmp(lbl2)
 					ctx.RestoreAllocState(alloc10)
 					d0 = snap6
 					d1 = snap7
 					d2 = snap8
 					d3 = snap9
-					ctx.MarkLabel(lbl10)
-					ctx.EmitJmp(lbl3)
 					ctx.RestoreAllocState(alloc10)
 					d0 = snap6
 					d1 = snap7
@@ -5122,11 +5074,8 @@ func init_alu() {
 						ps.General = true
 						return bbs[2].RenderPS(ps)
 					}
-					lbl11 := ctx.ReserveLabel()
-					lbl12 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d22.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl11)
-					ctx.EmitJmp(lbl12)
+					ctx.EmitJump(CondNotEqual, lbl4)
 					snap25 := d0
 					snap26 := d1
 					snap27 := d2
@@ -5137,8 +5086,6 @@ func init_alu() {
 					snap32 := d21
 					snap33 := d22
 					alloc34 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl11)
-					ctx.EmitJmp(lbl4)
 					ctx.RestoreAllocState(alloc34)
 					d0 = snap25
 					d1 = snap26
@@ -5149,8 +5096,6 @@ func init_alu() {
 					d20 = snap31
 					d21 = snap32
 					d22 = snap33
-					ctx.MarkLabel(lbl12)
-					ctx.EmitJmp(lbl5)
 					ctx.RestoreAllocState(alloc34)
 					d0 = snap25
 					d1 = snap26
@@ -5395,11 +5340,8 @@ func init_alu() {
 						ps.General = true
 						return bbs[4].RenderPS(ps)
 					}
-					lbl13 := ctx.ReserveLabel()
-					lbl14 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d51.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl13)
-					ctx.EmitJmp(lbl14)
+					ctx.EmitJump(CondNotEqual, lbl8)
 					snap54 := d0
 					snap55 := d1
 					snap56 := d2
@@ -5415,8 +5357,6 @@ func init_alu() {
 					snap66 := d50
 					snap67 := d51
 					alloc68 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl13)
-					ctx.EmitJmp(lbl8)
 					ctx.RestoreAllocState(alloc68)
 					d0 = snap54
 					d1 = snap55
@@ -5432,8 +5372,6 @@ func init_alu() {
 					d49 = snap65
 					d50 = snap66
 					d51 = snap67
-					ctx.MarkLabel(lbl14)
-					ctx.EmitJmp(lbl7)
 					ctx.RestoreAllocState(alloc68)
 					d0 = snap54
 					d1 = snap55
@@ -6038,11 +5976,8 @@ func init_alu() {
 						ps.General = true
 						return bbs[7].RenderPS(ps)
 					}
-					lbl15 := ctx.ReserveLabel()
-					lbl16 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d101.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl15)
-					ctx.EmitJmp(lbl16)
+					ctx.EmitJump(CondNotEqual, lbl6)
 					snap104 := d0
 					snap105 := d1
 					snap106 := d2
@@ -6074,8 +6009,6 @@ func init_alu() {
 					snap132 := d100
 					snap133 := d101
 					alloc134 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl15)
-					ctx.EmitJmp(lbl6)
 					ctx.RestoreAllocState(alloc134)
 					d0 = snap104
 					d1 = snap105
@@ -6107,8 +6040,6 @@ func init_alu() {
 					d99 = snap131
 					d100 = snap132
 					d101 = snap133
-					ctx.MarkLabel(lbl16)
-					ctx.EmitJmp(lbl7)
 					ctx.RestoreAllocState(alloc134)
 					d0 = snap104
 					d1 = snap105
@@ -7017,10 +6948,7 @@ func init_alu() {
 						ps.General = true
 						return bbs[1].RenderPS(ps)
 					}
-					lbl20 := ctx.ReserveLabel()
-					lbl21 := ctx.ReserveLabel()
-					ctx.EmitJump(d22.Condition, lbl20)
-					ctx.EmitJmp(lbl21)
+					ctx.EmitJump(d22.Condition, lbl3)
 					snap26 := d9
 					snap27 := d10
 					snap28 := d11
@@ -7036,8 +6964,6 @@ func init_alu() {
 					snap38 := d22
 					snap39 := d25
 					alloc40 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl20)
-					ctx.EmitJmp(lbl3)
 					ctx.RestoreAllocState(alloc40)
 					d9 = snap26
 					d10 = snap27
@@ -7053,8 +6979,6 @@ func init_alu() {
 					d21 = snap37
 					d22 = snap38
 					d25 = snap39
-					ctx.MarkLabel(lbl21)
-					ctx.EmitJmp(lbl4)
 					ctx.RestoreAllocState(alloc40)
 					d9 = snap26
 					d10 = snap27
@@ -7251,10 +7175,10 @@ func init_alu() {
 						ctx.EnsureDesc(&d20)
 						dynamicArgOff59 = ctx.AllocStack(16)
 						ctx.ProtectReg(d20.Reg)
-						lbl22 := ctx.ReserveLabel()
-						lbl23 := ctx.ReserveLabel()
+						lbl20 := ctx.ReserveLabel()
+						lbl21 := ctx.ReserveLabel()
 						ctx.EmitCmpRegImm32(d20.Reg, int32(len(args)-0))
-						ctx.EmitJump(CondUnsignedAboveOrEqual, lbl23)
+						ctx.EmitJump(CondUnsignedAboveOrEqual, lbl21)
 						for i := 0; i < len(args); i++ {
 							nextLbl := ctx.ReserveLabel()
 							ctx.EmitCmpRegImm32(d20.Reg, int32(i-0))
@@ -7262,12 +7186,12 @@ func init_alu() {
 							ai := args[i]
 							ai.ID = 0
 							ctx.EmitStoreScmerToStack(ai, int32(dynamicArgOff59))
-							ctx.EmitJmp(lbl22)
+							ctx.EmitJmp(lbl20)
 							ctx.MarkLabel(nextLbl)
 						}
-						ctx.MarkLabel(lbl23)
+						ctx.MarkLabel(lbl21)
 						ctx.EmitStoreScmerToStack(JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}, int32(dynamicArgOff59))
-						ctx.MarkLabel(lbl22)
+						ctx.MarkLabel(lbl20)
 						ctx.UnprotectReg(d20.Reg)
 						d58 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(dynamicArgOff59), Rooted: true}
 					}
@@ -7360,11 +7284,10 @@ func init_alu() {
 						ps.General = true
 						return bbs[2].RenderPS(ps)
 					}
-					lbl24 := ctx.ReserveLabel()
-					lbl25 := ctx.ReserveLabel()
+					lbl22 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d62.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl24)
-					ctx.EmitJmp(lbl25)
+					ctx.EmitJump(CondNotEqual, lbl5)
+					ctx.EmitJmp(lbl22)
 					snap67 := d9
 					snap68 := d10
 					snap69 := d11
@@ -7386,8 +7309,6 @@ func init_alu() {
 					snap85 := d64
 					snap86 := d66
 					alloc87 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl24)
-					ctx.EmitJmp(lbl5)
 					ctx.RestoreAllocState(alloc87)
 					d9 = snap67
 					d10 = snap68
@@ -7409,7 +7330,7 @@ func init_alu() {
 					d62 = snap84
 					d64 = snap85
 					d66 = snap86
-					ctx.MarkLabel(lbl25)
+					ctx.MarkLabel(lbl22)
 					ctx.SyncDesc(&d20)
 					if d20.Loc == LocReg {
 						ctx.ProtectReg(d20.Reg)
@@ -7762,11 +7683,8 @@ func init_alu() {
 						ps.General = true
 						return bbs[3].RenderPS(ps)
 					}
-					lbl26 := ctx.ReserveLabel()
-					lbl27 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d118.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl26)
-					ctx.EmitJmp(lbl27)
+					ctx.EmitJump(CondNotEqual, lbl6)
 					snap121 := d9
 					snap122 := d10
 					snap123 := d11
@@ -7794,8 +7712,6 @@ func init_alu() {
 					snap145 := d117
 					snap146 := d118
 					alloc147 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl26)
-					ctx.EmitJmp(lbl6)
 					ctx.RestoreAllocState(alloc147)
 					d9 = snap121
 					d10 = snap122
@@ -7823,8 +7739,6 @@ func init_alu() {
 					d116 = snap144
 					d117 = snap145
 					d118 = snap146
-					ctx.MarkLabel(lbl27)
-					ctx.EmitJmp(lbl7)
 					ctx.RestoreAllocState(alloc147)
 					d9 = snap121
 					d10 = snap122
@@ -8793,10 +8707,10 @@ func init_alu() {
 						ctx.EnsureDesc(&d11)
 						dynamicArgOff191 = ctx.AllocStack(16)
 						ctx.ProtectReg(d11.Reg)
-						lbl28 := ctx.ReserveLabel()
-						lbl29 := ctx.ReserveLabel()
+						lbl23 := ctx.ReserveLabel()
+						lbl24 := ctx.ReserveLabel()
 						ctx.EmitCmpRegImm32(d11.Reg, int32(len(args)-0))
-						ctx.EmitJump(CondUnsignedAboveOrEqual, lbl29)
+						ctx.EmitJump(CondUnsignedAboveOrEqual, lbl24)
 						for i := 0; i < len(args); i++ {
 							nextLbl := ctx.ReserveLabel()
 							ctx.EmitCmpRegImm32(d11.Reg, int32(i-0))
@@ -8804,12 +8718,12 @@ func init_alu() {
 							ai := args[i]
 							ai.ID = 0
 							ctx.EmitStoreScmerToStack(ai, int32(dynamicArgOff191))
-							ctx.EmitJmp(lbl28)
+							ctx.EmitJmp(lbl23)
 							ctx.MarkLabel(nextLbl)
 						}
-						ctx.MarkLabel(lbl29)
+						ctx.MarkLabel(lbl24)
 						ctx.EmitStoreScmerToStack(JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}, int32(dynamicArgOff191))
-						ctx.MarkLabel(lbl28)
+						ctx.MarkLabel(lbl23)
 						ctx.UnprotectReg(d11.Reg)
 						d190 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(dynamicArgOff191), Rooted: true}
 					}
@@ -9355,10 +9269,7 @@ func init_alu() {
 						ps.General = true
 						return bbs[8].RenderPS(ps)
 					}
-					lbl30 := ctx.ReserveLabel()
-					lbl31 := ctx.ReserveLabel()
-					ctx.EmitJump(d202.Condition, lbl30)
-					ctx.EmitJmp(lbl31)
+					ctx.EmitJump(d202.Condition, lbl12)
 					snap205 := d9
 					snap206 := d10
 					snap207 := d11
@@ -9408,8 +9319,6 @@ func init_alu() {
 					snap251 := d201
 					snap252 := d202
 					alloc253 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl30)
-					ctx.EmitJmp(lbl12)
 					ctx.RestoreAllocState(alloc253)
 					d9 = snap205
 					d10 = snap206
@@ -9459,8 +9368,6 @@ func init_alu() {
 					d200 = snap250
 					d201 = snap251
 					d202 = snap252
-					ctx.MarkLabel(lbl31)
-					ctx.EmitJmp(lbl13)
 					ctx.RestoreAllocState(alloc253)
 					d9 = snap205
 					d10 = snap206
@@ -10129,10 +10036,7 @@ func init_alu() {
 						ps.General = true
 						return bbs[9].RenderPS(ps)
 					}
-					lbl32 := ctx.ReserveLabel()
-					lbl33 := ctx.ReserveLabel()
-					ctx.EmitJump(d309.Condition, lbl32)
-					ctx.EmitJmp(lbl33)
+					ctx.EmitJump(d309.Condition, lbl11)
 					snap314 := d9
 					snap315 := d10
 					snap316 := d11
@@ -10189,8 +10093,6 @@ func init_alu() {
 					snap367 := d312
 					snap368 := d313
 					alloc369 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl32)
-					ctx.EmitJmp(lbl11)
 					ctx.RestoreAllocState(alloc369)
 					d9 = snap314
 					d10 = snap315
@@ -10247,8 +10149,6 @@ func init_alu() {
 					d309 = snap366
 					d312 = snap367
 					d313 = snap368
-					ctx.MarkLabel(lbl33)
-					ctx.EmitJmp(lbl9)
 					ctx.RestoreAllocState(alloc369)
 					d9 = snap314
 					d10 = snap315
@@ -10773,10 +10673,10 @@ func init_alu() {
 						ctx.EnsureDesc(&d11)
 						dynamicArgOff429 = ctx.AllocStack(16)
 						ctx.ProtectReg(d11.Reg)
-						lbl34 := ctx.ReserveLabel()
-						lbl35 := ctx.ReserveLabel()
+						lbl25 := ctx.ReserveLabel()
+						lbl26 := ctx.ReserveLabel()
 						ctx.EmitCmpRegImm32(d11.Reg, int32(len(args)-0))
-						ctx.EmitJump(CondUnsignedAboveOrEqual, lbl35)
+						ctx.EmitJump(CondUnsignedAboveOrEqual, lbl26)
 						for i := 0; i < len(args); i++ {
 							nextLbl := ctx.ReserveLabel()
 							ctx.EmitCmpRegImm32(d11.Reg, int32(i-0))
@@ -10784,12 +10684,12 @@ func init_alu() {
 							ai := args[i]
 							ai.ID = 0
 							ctx.EmitStoreScmerToStack(ai, int32(dynamicArgOff429))
-							ctx.EmitJmp(lbl34)
+							ctx.EmitJmp(lbl25)
 							ctx.MarkLabel(nextLbl)
 						}
-						ctx.MarkLabel(lbl35)
+						ctx.MarkLabel(lbl26)
 						ctx.EmitStoreScmerToStack(JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}, int32(dynamicArgOff429))
-						ctx.MarkLabel(lbl34)
+						ctx.MarkLabel(lbl25)
 						ctx.UnprotectReg(d11.Reg)
 						d428 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(dynamicArgOff429), Rooted: true}
 					}
@@ -10937,11 +10837,8 @@ func init_alu() {
 						ps.General = true
 						return bbs[10].RenderPS(ps)
 					}
-					lbl36 := ctx.ReserveLabel()
-					lbl37 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d432.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl36)
-					ctx.EmitJmp(lbl37)
+					ctx.EmitJump(CondNotEqual, lbl8)
 					snap435 := d9
 					snap436 := d10
 					snap437 := d11
@@ -11002,8 +10899,6 @@ func init_alu() {
 					snap492 := d431
 					snap493 := d432
 					alloc494 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl36)
-					ctx.EmitJmp(lbl8)
 					ctx.RestoreAllocState(alloc494)
 					d9 = snap435
 					d10 = snap436
@@ -11064,8 +10959,6 @@ func init_alu() {
 					d430 = snap491
 					d431 = snap492
 					d432 = snap493
-					ctx.MarkLabel(lbl37)
-					ctx.EmitJmp(lbl9)
 					ctx.RestoreAllocState(alloc494)
 					d9 = snap435
 					d10 = snap436
@@ -12261,10 +12154,10 @@ func init_alu() {
 						ctx.EnsureDesc(&d12)
 						dynamicArgOff565 = ctx.AllocStack(16)
 						ctx.ProtectReg(d12.Reg)
-						lbl38 := ctx.ReserveLabel()
-						lbl39 := ctx.ReserveLabel()
+						lbl27 := ctx.ReserveLabel()
+						lbl28 := ctx.ReserveLabel()
 						ctx.EmitCmpRegImm32(d12.Reg, int32(len(args)-0))
-						ctx.EmitJump(CondUnsignedAboveOrEqual, lbl39)
+						ctx.EmitJump(CondUnsignedAboveOrEqual, lbl28)
 						for i := 0; i < len(args); i++ {
 							nextLbl := ctx.ReserveLabel()
 							ctx.EmitCmpRegImm32(d12.Reg, int32(i-0))
@@ -12272,12 +12165,12 @@ func init_alu() {
 							ai := args[i]
 							ai.ID = 0
 							ctx.EmitStoreScmerToStack(ai, int32(dynamicArgOff565))
-							ctx.EmitJmp(lbl38)
+							ctx.EmitJmp(lbl27)
 							ctx.MarkLabel(nextLbl)
 						}
-						ctx.MarkLabel(lbl39)
+						ctx.MarkLabel(lbl28)
 						ctx.EmitStoreScmerToStack(JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}, int32(dynamicArgOff565))
-						ctx.MarkLabel(lbl38)
+						ctx.MarkLabel(lbl27)
 						ctx.UnprotectReg(d12.Reg)
 						d564 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(dynamicArgOff565), Rooted: true}
 					}
@@ -13331,10 +13224,7 @@ func init_alu() {
 						ps.General = true
 						return bbs[15].RenderPS(ps)
 					}
-					lbl40 := ctx.ReserveLabel()
-					lbl41 := ctx.ReserveLabel()
-					ctx.EmitJump(d579.Condition, lbl40)
-					ctx.EmitJmp(lbl41)
+					ctx.EmitJump(d579.Condition, lbl14)
 					snap584 := d9
 					snap585 := d10
 					snap586 := d11
@@ -13417,8 +13307,6 @@ func init_alu() {
 					snap663 := d582
 					snap664 := d583
 					alloc665 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl40)
-					ctx.EmitJmp(lbl14)
 					ctx.RestoreAllocState(alloc665)
 					d9 = snap584
 					d10 = snap585
@@ -13501,8 +13389,6 @@ func init_alu() {
 					d579 = snap662
 					d582 = snap663
 					d583 = snap664
-					ctx.MarkLabel(lbl41)
-					ctx.EmitJmp(lbl15)
 					ctx.RestoreAllocState(alloc665)
 					d9 = snap584
 					d10 = snap585
@@ -14501,10 +14387,7 @@ func init_alu() {
 						ps.General = true
 						return bbs[16].RenderPS(ps)
 					}
-					lbl42 := ctx.ReserveLabel()
-					lbl43 := ctx.ReserveLabel()
-					ctx.EmitJump(d754.Condition, lbl42)
-					ctx.EmitJmp(lbl43)
+					ctx.EmitJump(d754.Condition, lbl18)
 					snap759 := d9
 					snap760 := d10
 					snap761 := d11
@@ -14594,8 +14477,6 @@ func init_alu() {
 					snap845 := d757
 					snap846 := d758
 					alloc847 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl42)
-					ctx.EmitJmp(lbl18)
 					ctx.RestoreAllocState(alloc847)
 					d9 = snap759
 					d10 = snap760
@@ -14685,8 +14566,6 @@ func init_alu() {
 					d754 = snap844
 					d757 = snap845
 					d758 = snap846
-					ctx.MarkLabel(lbl43)
-					ctx.EmitJmp(lbl19)
 					ctx.RestoreAllocState(alloc847)
 					d9 = snap759
 					d10 = snap760
@@ -15475,10 +15354,10 @@ func init_alu() {
 						ctx.EnsureDesc(&d15)
 						dynamicArgOff940 = ctx.AllocStack(16)
 						ctx.ProtectReg(d15.Reg)
-						lbl44 := ctx.ReserveLabel()
-						lbl45 := ctx.ReserveLabel()
+						lbl29 := ctx.ReserveLabel()
+						lbl30 := ctx.ReserveLabel()
 						ctx.EmitCmpRegImm32(d15.Reg, int32(len(args)-0))
-						ctx.EmitJump(CondUnsignedAboveOrEqual, lbl45)
+						ctx.EmitJump(CondUnsignedAboveOrEqual, lbl30)
 						for i := 0; i < len(args); i++ {
 							nextLbl := ctx.ReserveLabel()
 							ctx.EmitCmpRegImm32(d15.Reg, int32(i-0))
@@ -15486,12 +15365,12 @@ func init_alu() {
 							ai := args[i]
 							ai.ID = 0
 							ctx.EmitStoreScmerToStack(ai, int32(dynamicArgOff940))
-							ctx.EmitJmp(lbl44)
+							ctx.EmitJmp(lbl29)
 							ctx.MarkLabel(nextLbl)
 						}
-						ctx.MarkLabel(lbl45)
+						ctx.MarkLabel(lbl30)
 						ctx.EmitStoreScmerToStack(JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}, int32(dynamicArgOff940))
-						ctx.MarkLabel(lbl44)
+						ctx.MarkLabel(lbl29)
 						ctx.UnprotectReg(d15.Reg)
 						d939 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(dynamicArgOff940), Rooted: true}
 					}
@@ -16920,10 +16799,7 @@ func init_alu() {
 						ps.General = true
 						return bbs[1].RenderPS(ps)
 					}
-					lbl19 := ctx.ReserveLabel()
-					lbl20 := ctx.ReserveLabel()
-					ctx.EmitJump(d19.Condition, lbl19)
-					ctx.EmitJmp(lbl20)
+					ctx.EmitJump(d19.Condition, lbl3)
 					snap23 := d7
 					snap24 := d8
 					snap25 := d9
@@ -16938,8 +16814,6 @@ func init_alu() {
 					snap34 := d19
 					snap35 := d22
 					alloc36 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl19)
-					ctx.EmitJmp(lbl3)
 					ctx.RestoreAllocState(alloc36)
 					d7 = snap23
 					d8 = snap24
@@ -16954,8 +16828,6 @@ func init_alu() {
 					d18 = snap33
 					d19 = snap34
 					d22 = snap35
-					ctx.MarkLabel(lbl20)
-					ctx.EmitJmp(lbl4)
 					ctx.RestoreAllocState(alloc36)
 					d7 = snap23
 					d8 = snap24
@@ -17135,10 +17007,10 @@ func init_alu() {
 						ctx.EnsureDesc(&d17)
 						dynamicArgOff54 = ctx.AllocStack(16)
 						ctx.ProtectReg(d17.Reg)
-						lbl21 := ctx.ReserveLabel()
-						lbl22 := ctx.ReserveLabel()
+						lbl19 := ctx.ReserveLabel()
+						lbl20 := ctx.ReserveLabel()
 						ctx.EmitCmpRegImm32(d17.Reg, int32(len(args)-0))
-						ctx.EmitJump(CondUnsignedAboveOrEqual, lbl22)
+						ctx.EmitJump(CondUnsignedAboveOrEqual, lbl20)
 						for i := 0; i < len(args); i++ {
 							nextLbl := ctx.ReserveLabel()
 							ctx.EmitCmpRegImm32(d17.Reg, int32(i-0))
@@ -17146,12 +17018,12 @@ func init_alu() {
 							ai := args[i]
 							ai.ID = 0
 							ctx.EmitStoreScmerToStack(ai, int32(dynamicArgOff54))
-							ctx.EmitJmp(lbl21)
+							ctx.EmitJmp(lbl19)
 							ctx.MarkLabel(nextLbl)
 						}
-						ctx.MarkLabel(lbl22)
+						ctx.MarkLabel(lbl20)
 						ctx.EmitStoreScmerToStack(JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}, int32(dynamicArgOff54))
-						ctx.MarkLabel(lbl21)
+						ctx.MarkLabel(lbl19)
 						ctx.UnprotectReg(d17.Reg)
 						d53 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(dynamicArgOff54), Rooted: true}
 					}
@@ -17242,11 +17114,10 @@ func init_alu() {
 						ps.General = true
 						return bbs[2].RenderPS(ps)
 					}
-					lbl23 := ctx.ReserveLabel()
-					lbl24 := ctx.ReserveLabel()
+					lbl21 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d57.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl23)
-					ctx.EmitJmp(lbl24)
+					ctx.EmitJump(CondNotEqual, lbl5)
+					ctx.EmitJmp(lbl21)
 					snap62 := d7
 					snap63 := d8
 					snap64 := d9
@@ -17267,8 +17138,6 @@ func init_alu() {
 					snap79 := d59
 					snap80 := d61
 					alloc81 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl23)
-					ctx.EmitJmp(lbl5)
 					ctx.RestoreAllocState(alloc81)
 					d7 = snap62
 					d8 = snap63
@@ -17289,7 +17158,7 @@ func init_alu() {
 					d57 = snap78
 					d59 = snap79
 					d61 = snap80
-					ctx.MarkLabel(lbl24)
+					ctx.MarkLabel(lbl21)
 					ctx.SyncDesc(&d17)
 					if d17.Loc == LocReg {
 						ctx.ProtectReg(d17.Reg)
@@ -17864,10 +17733,10 @@ func init_alu() {
 						ctx.EnsureDesc(&d9)
 						dynamicArgOff113 = ctx.AllocStack(16)
 						ctx.ProtectReg(d9.Reg)
-						lbl25 := ctx.ReserveLabel()
-						lbl26 := ctx.ReserveLabel()
+						lbl22 := ctx.ReserveLabel()
+						lbl23 := ctx.ReserveLabel()
 						ctx.EmitCmpRegImm32(d9.Reg, int32(len(args)-0))
-						ctx.EmitJump(CondUnsignedAboveOrEqual, lbl26)
+						ctx.EmitJump(CondUnsignedAboveOrEqual, lbl23)
 						for i := 0; i < len(args); i++ {
 							nextLbl := ctx.ReserveLabel()
 							ctx.EmitCmpRegImm32(d9.Reg, int32(i-0))
@@ -17875,12 +17744,12 @@ func init_alu() {
 							ai := args[i]
 							ai.ID = 0
 							ctx.EmitStoreScmerToStack(ai, int32(dynamicArgOff113))
-							ctx.EmitJmp(lbl25)
+							ctx.EmitJmp(lbl22)
 							ctx.MarkLabel(nextLbl)
 						}
-						ctx.MarkLabel(lbl26)
+						ctx.MarkLabel(lbl23)
 						ctx.EmitStoreScmerToStack(JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}, int32(dynamicArgOff113))
-						ctx.MarkLabel(lbl25)
+						ctx.MarkLabel(lbl22)
 						ctx.UnprotectReg(d9.Reg)
 						d112 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(dynamicArgOff113), Rooted: true}
 					}
@@ -17971,11 +17840,8 @@ func init_alu() {
 						ps.General = true
 						return bbs[5].RenderPS(ps)
 					}
-					lbl27 := ctx.ReserveLabel()
-					lbl28 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d117.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl27)
-					ctx.EmitJmp(lbl28)
+					ctx.EmitJump(CondNotEqual, lbl10)
 					snap120 := d7
 					snap121 := d8
 					snap122 := d9
@@ -18005,8 +17871,6 @@ func init_alu() {
 					snap146 := d116
 					snap147 := d117
 					alloc148 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl27)
-					ctx.EmitJmp(lbl10)
 					ctx.RestoreAllocState(alloc148)
 					d7 = snap120
 					d8 = snap121
@@ -18036,8 +17900,6 @@ func init_alu() {
 					d115 = snap145
 					d116 = snap146
 					d117 = snap147
-					ctx.MarkLabel(lbl28)
-					ctx.EmitJmp(lbl11)
 					ctx.RestoreAllocState(alloc148)
 					d7 = snap120
 					d8 = snap121
@@ -18440,10 +18302,7 @@ func init_alu() {
 						ps.General = true
 						return bbs[6].RenderPS(ps)
 					}
-					lbl29 := ctx.ReserveLabel()
-					lbl30 := ctx.ReserveLabel()
-					ctx.EmitJump(d182.Condition, lbl29)
-					ctx.EmitJmp(lbl30)
+					ctx.EmitJump(d182.Condition, lbl14)
 					snap185 := d7
 					snap186 := d8
 					snap187 := d9
@@ -18476,8 +18335,6 @@ func init_alu() {
 					snap214 := d181
 					snap215 := d182
 					alloc216 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl29)
-					ctx.EmitJmp(lbl14)
 					ctx.RestoreAllocState(alloc216)
 					d7 = snap185
 					d8 = snap186
@@ -18510,8 +18367,6 @@ func init_alu() {
 					d180 = snap213
 					d181 = snap214
 					d182 = snap215
-					ctx.MarkLabel(lbl30)
-					ctx.EmitJmp(lbl15)
 					ctx.RestoreAllocState(alloc216)
 					d7 = snap185
 					d8 = snap186
@@ -19001,10 +18856,7 @@ func init_alu() {
 						ps.General = true
 						return bbs[7].RenderPS(ps)
 					}
-					lbl31 := ctx.ReserveLabel()
-					lbl32 := ctx.ReserveLabel()
-					ctx.EmitJump(d255.Condition, lbl31)
-					ctx.EmitJmp(lbl32)
+					ctx.EmitJump(d255.Condition, lbl6)
 					snap260 := d7
 					snap261 := d8
 					snap262 := d9
@@ -19044,8 +18896,6 @@ func init_alu() {
 					snap296 := d258
 					snap297 := d259
 					alloc298 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl31)
-					ctx.EmitJmp(lbl6)
 					ctx.RestoreAllocState(alloc298)
 					d7 = snap260
 					d8 = snap261
@@ -19085,8 +18935,6 @@ func init_alu() {
 					d255 = snap295
 					d258 = snap296
 					d259 = snap297
-					ctx.MarkLabel(lbl32)
-					ctx.EmitJmp(lbl7)
 					ctx.RestoreAllocState(alloc298)
 					d7 = snap260
 					d8 = snap261
@@ -20191,11 +20039,8 @@ func init_alu() {
 						ps.General = true
 						return bbs[10].RenderPS(ps)
 					}
-					lbl33 := ctx.ReserveLabel()
-					lbl34 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d352.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl33)
-					ctx.EmitJmp(lbl34)
+					ctx.EmitJump(CondNotEqual, lbl12)
 					snap355 := d7
 					snap356 := d8
 					snap357 := d9
@@ -20246,8 +20091,6 @@ func init_alu() {
 					snap402 := d351
 					snap403 := d352
 					alloc404 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl33)
-					ctx.EmitJmp(lbl12)
 					ctx.RestoreAllocState(alloc404)
 					d7 = snap355
 					d8 = snap356
@@ -20298,8 +20141,6 @@ func init_alu() {
 					d350 = snap401
 					d351 = snap402
 					d352 = snap403
-					ctx.MarkLabel(lbl34)
-					ctx.EmitJmp(lbl7)
 					ctx.RestoreAllocState(alloc404)
 					d7 = snap355
 					d8 = snap356
@@ -20950,11 +20791,8 @@ func init_alu() {
 						ps.General = true
 						return bbs[11].RenderPS(ps)
 					}
-					lbl35 := ctx.ReserveLabel()
-					lbl36 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d460.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl35)
-					ctx.EmitJmp(lbl36)
+					ctx.EmitJump(CondNotEqual, lbl13)
 					snap463 := d7
 					snap464 := d8
 					snap465 := d9
@@ -21009,8 +20847,6 @@ func init_alu() {
 					snap514 := d459
 					snap515 := d460
 					alloc516 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl35)
-					ctx.EmitJmp(lbl13)
 					ctx.RestoreAllocState(alloc516)
 					d7 = snap463
 					d8 = snap464
@@ -21065,8 +20901,6 @@ func init_alu() {
 					d458 = snap513
 					d459 = snap514
 					d460 = snap515
-					ctx.MarkLabel(lbl36)
-					ctx.EmitJmp(lbl7)
 					ctx.RestoreAllocState(alloc516)
 					d7 = snap463
 					d8 = snap464
@@ -22486,10 +22320,10 @@ func init_alu() {
 						ctx.EnsureDesc(&d11)
 						dynamicArgOff584 = ctx.AllocStack(16)
 						ctx.ProtectReg(d11.Reg)
-						lbl37 := ctx.ReserveLabel()
-						lbl38 := ctx.ReserveLabel()
+						lbl24 := ctx.ReserveLabel()
+						lbl25 := ctx.ReserveLabel()
 						ctx.EmitCmpRegImm32(d11.Reg, int32(len(args)-0))
-						ctx.EmitJump(CondUnsignedAboveOrEqual, lbl38)
+						ctx.EmitJump(CondUnsignedAboveOrEqual, lbl25)
 						for i := 0; i < len(args); i++ {
 							nextLbl := ctx.ReserveLabel()
 							ctx.EmitCmpRegImm32(d11.Reg, int32(i-0))
@@ -22497,12 +22331,12 @@ func init_alu() {
 							ai := args[i]
 							ai.ID = 0
 							ctx.EmitStoreScmerToStack(ai, int32(dynamicArgOff584))
-							ctx.EmitJmp(lbl37)
+							ctx.EmitJmp(lbl24)
 							ctx.MarkLabel(nextLbl)
 						}
-						ctx.MarkLabel(lbl38)
+						ctx.MarkLabel(lbl25)
 						ctx.EmitStoreScmerToStack(JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}, int32(dynamicArgOff584))
-						ctx.MarkLabel(lbl37)
+						ctx.MarkLabel(lbl24)
 						ctx.UnprotectReg(d11.Reg)
 						d583 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(dynamicArgOff584), Rooted: true}
 					}
@@ -23502,10 +23336,7 @@ func init_alu() {
 						ps.General = true
 						return bbs[17].RenderPS(ps)
 					}
-					lbl39 := ctx.ReserveLabel()
-					lbl40 := ctx.ReserveLabel()
-					ctx.EmitJump(d598.Condition, lbl39)
-					ctx.EmitJmp(lbl40)
+					ctx.EmitJump(d598.Condition, lbl16)
 					snap603 := d7
 					snap604 := d8
 					snap605 := d9
@@ -23584,8 +23415,6 @@ func init_alu() {
 					snap678 := d601
 					snap679 := d602
 					alloc680 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl39)
-					ctx.EmitJmp(lbl16)
 					ctx.RestoreAllocState(alloc680)
 					d7 = snap603
 					d8 = snap604
@@ -23664,8 +23493,6 @@ func init_alu() {
 					d598 = snap677
 					d601 = snap678
 					d602 = snap679
-					ctx.MarkLabel(lbl40)
-					ctx.EmitJmp(lbl17)
 					ctx.RestoreAllocState(alloc680)
 					d7 = snap603
 					d8 = snap604
@@ -24510,10 +24337,7 @@ func init_alu() {
 						ps.General = true
 						return bbs[1].RenderPS(ps)
 					}
-					lbl9 := ctx.ReserveLabel()
-					lbl10 := ctx.ReserveLabel()
-					ctx.EmitJump(d14.Condition, lbl9)
-					ctx.EmitJmp(lbl10)
+					ctx.EmitJump(d14.Condition, lbl3)
 					snap18 := d5
 					snap19 := d6
 					snap20 := d7
@@ -24525,8 +24349,6 @@ func init_alu() {
 					snap26 := d14
 					snap27 := d17
 					alloc28 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl9)
-					ctx.EmitJmp(lbl3)
 					ctx.RestoreAllocState(alloc28)
 					d5 = snap18
 					d6 = snap19
@@ -24538,8 +24360,6 @@ func init_alu() {
 					d13 = snap25
 					d14 = snap26
 					d17 = snap27
-					ctx.MarkLabel(lbl10)
-					ctx.EmitJmp(lbl4)
 					ctx.RestoreAllocState(alloc28)
 					d5 = snap18
 					d6 = snap19
@@ -24684,10 +24504,10 @@ func init_alu() {
 						ctx.EnsureDesc(&d12)
 						dynamicArgOff43 = ctx.AllocStack(16)
 						ctx.ProtectReg(d12.Reg)
-						lbl11 := ctx.ReserveLabel()
-						lbl12 := ctx.ReserveLabel()
+						lbl9 := ctx.ReserveLabel()
+						lbl10 := ctx.ReserveLabel()
 						ctx.EmitCmpRegImm32(d12.Reg, int32(len(args)-0))
-						ctx.EmitJump(CondUnsignedAboveOrEqual, lbl12)
+						ctx.EmitJump(CondUnsignedAboveOrEqual, lbl10)
 						for i := 0; i < len(args); i++ {
 							nextLbl := ctx.ReserveLabel()
 							ctx.EmitCmpRegImm32(d12.Reg, int32(i-0))
@@ -24695,12 +24515,12 @@ func init_alu() {
 							ai := args[i]
 							ai.ID = 0
 							ctx.EmitStoreScmerToStack(ai, int32(dynamicArgOff43))
-							ctx.EmitJmp(lbl11)
+							ctx.EmitJmp(lbl9)
 							ctx.MarkLabel(nextLbl)
 						}
-						ctx.MarkLabel(lbl12)
+						ctx.MarkLabel(lbl10)
 						ctx.EmitStoreScmerToStack(JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}, int32(dynamicArgOff43))
-						ctx.MarkLabel(lbl11)
+						ctx.MarkLabel(lbl9)
 						ctx.UnprotectReg(d12.Reg)
 						d42 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(dynamicArgOff43), Rooted: true}
 					}
@@ -24785,11 +24605,10 @@ func init_alu() {
 						ps.General = true
 						return bbs[2].RenderPS(ps)
 					}
-					lbl13 := ctx.ReserveLabel()
-					lbl14 := ctx.ReserveLabel()
+					lbl11 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d46.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl13)
-					ctx.EmitJmp(lbl14)
+					ctx.EmitJump(CondNotEqual, lbl5)
+					ctx.EmitJmp(lbl11)
 					snap51 := d5
 					snap52 := d6
 					snap53 := d7
@@ -24807,8 +24626,6 @@ func init_alu() {
 					snap65 := d48
 					snap66 := d50
 					alloc67 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl13)
-					ctx.EmitJmp(lbl5)
 					ctx.RestoreAllocState(alloc67)
 					d5 = snap51
 					d6 = snap52
@@ -24826,7 +24643,7 @@ func init_alu() {
 					d46 = snap64
 					d48 = snap65
 					d50 = snap66
-					ctx.MarkLabel(lbl14)
+					ctx.MarkLabel(lbl11)
 					ctx.SyncDesc(&d12)
 					if d12.Loc == LocReg {
 						ctx.ProtectReg(d12.Reg)
@@ -25562,10 +25379,7 @@ func init_alu() {
 						ps.General = true
 						return bbs[5].RenderPS(ps)
 					}
-					lbl15 := ctx.ReserveLabel()
-					lbl16 := ctx.ReserveLabel()
-					ctx.EmitJump(d103.Condition, lbl15)
-					ctx.EmitJmp(lbl16)
+					ctx.EmitJump(d103.Condition, lbl7)
 					snap108 := d5
 					snap109 := d6
 					snap110 := d7
@@ -25599,8 +25413,6 @@ func init_alu() {
 					snap138 := d106
 					snap139 := d107
 					alloc140 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl15)
-					ctx.EmitJmp(lbl7)
 					ctx.RestoreAllocState(alloc140)
 					d5 = snap108
 					d6 = snap109
@@ -25634,8 +25446,6 @@ func init_alu() {
 					d103 = snap137
 					d106 = snap138
 					d107 = snap139
-					ctx.MarkLabel(lbl16)
-					ctx.EmitJmp(lbl8)
 					ctx.RestoreAllocState(alloc140)
 					d5 = snap108
 					d6 = snap109
@@ -25956,10 +25766,10 @@ func init_alu() {
 						ctx.EnsureDesc(&d101)
 						dynamicArgOff177 = ctx.AllocStack(16)
 						ctx.ProtectReg(d101.Reg)
-						lbl17 := ctx.ReserveLabel()
-						lbl18 := ctx.ReserveLabel()
+						lbl12 := ctx.ReserveLabel()
+						lbl13 := ctx.ReserveLabel()
 						ctx.EmitCmpRegImm32(d101.Reg, int32(len(args)-1))
-						ctx.EmitJump(CondUnsignedAboveOrEqual, lbl18)
+						ctx.EmitJump(CondUnsignedAboveOrEqual, lbl13)
 						for i := 1; i < len(args); i++ {
 							nextLbl := ctx.ReserveLabel()
 							ctx.EmitCmpRegImm32(d101.Reg, int32(i-1))
@@ -25967,12 +25777,12 @@ func init_alu() {
 							ai := args[i]
 							ai.ID = 0
 							ctx.EmitStoreScmerToStack(ai, int32(dynamicArgOff177))
-							ctx.EmitJmp(lbl17)
+							ctx.EmitJmp(lbl12)
 							ctx.MarkLabel(nextLbl)
 						}
-						ctx.MarkLabel(lbl18)
+						ctx.MarkLabel(lbl13)
 						ctx.EmitStoreScmerToStack(JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}, int32(dynamicArgOff177))
-						ctx.MarkLabel(lbl17)
+						ctx.MarkLabel(lbl12)
 						ctx.UnprotectReg(d101.Reg)
 						d176 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(dynamicArgOff177), Rooted: true}
 					}
@@ -26601,25 +26411,18 @@ func init_alu() {
 						ps.General = true
 						return bbs[0].RenderPS(ps)
 					}
-					lbl18 := ctx.ReserveLabel()
-					lbl19 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d3.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl18)
-					ctx.EmitJmp(lbl19)
+					ctx.EmitJump(CondNotEqual, lbl2)
 					snap6 := d0
 					snap7 := d1
 					snap8 := d2
 					snap9 := d3
 					alloc10 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl18)
-					ctx.EmitJmp(lbl2)
 					ctx.RestoreAllocState(alloc10)
 					d0 = snap6
 					d1 = snap7
 					d2 = snap8
 					d3 = snap9
-					ctx.MarkLabel(lbl19)
-					ctx.EmitJmp(lbl4)
 					ctx.RestoreAllocState(alloc10)
 					d0 = snap6
 					d1 = snap7
@@ -26798,11 +26601,8 @@ func init_alu() {
 						ps.General = true
 						return bbs[2].RenderPS(ps)
 					}
-					lbl20 := ctx.ReserveLabel()
-					lbl21 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d22.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl20)
-					ctx.EmitJmp(lbl21)
+					ctx.EmitJump(CondNotEqual, lbl7)
 					snap25 := d0
 					snap26 := d1
 					snap27 := d2
@@ -26813,8 +26613,6 @@ func init_alu() {
 					snap32 := d21
 					snap33 := d22
 					alloc34 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl20)
-					ctx.EmitJmp(lbl7)
 					ctx.RestoreAllocState(alloc34)
 					d0 = snap25
 					d1 = snap26
@@ -26825,8 +26623,6 @@ func init_alu() {
 					d20 = snap31
 					d21 = snap32
 					d22 = snap33
-					ctx.MarkLabel(lbl21)
-					ctx.EmitJmp(lbl6)
 					ctx.RestoreAllocState(alloc34)
 					d0 = snap25
 					d1 = snap26
@@ -26991,11 +26787,8 @@ func init_alu() {
 						ps.General = true
 						return bbs[3].RenderPS(ps)
 					}
-					lbl22 := ctx.ReserveLabel()
-					lbl23 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d50.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl22)
-					ctx.EmitJmp(lbl23)
+					ctx.EmitJump(CondNotEqual, lbl2)
 					snap53 := d0
 					snap54 := d1
 					snap55 := d2
@@ -27010,8 +26803,6 @@ func init_alu() {
 					snap64 := d49
 					snap65 := d50
 					alloc66 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl22)
-					ctx.EmitJmp(lbl2)
 					ctx.RestoreAllocState(alloc66)
 					d0 = snap53
 					d1 = snap54
@@ -27026,8 +26817,6 @@ func init_alu() {
 					d48 = snap63
 					d49 = snap64
 					d50 = snap65
-					ctx.MarkLabel(lbl23)
-					ctx.EmitJmp(lbl3)
 					ctx.RestoreAllocState(alloc66)
 					d0 = snap53
 					d1 = snap54
@@ -27257,10 +27046,7 @@ func init_alu() {
 						ps.General = true
 						return bbs[4].RenderPS(ps)
 					}
-					lbl24 := ctx.ReserveLabel()
-					lbl25 := ctx.ReserveLabel()
-					ctx.EmitJump(d86.Condition, lbl24)
-					ctx.EmitJmp(lbl25)
+					ctx.EmitJump(d86.Condition, lbl8)
 					snap89 := d0
 					snap90 := d1
 					snap91 := d2
@@ -27279,8 +27065,6 @@ func init_alu() {
 					snap104 := d85
 					snap105 := d86
 					alloc106 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl24)
-					ctx.EmitJmp(lbl8)
 					ctx.RestoreAllocState(alloc106)
 					d0 = snap89
 					d1 = snap90
@@ -27299,8 +27083,6 @@ func init_alu() {
 					d84 = snap103
 					d85 = snap104
 					d86 = snap105
-					ctx.MarkLabel(lbl25)
-					ctx.EmitJmp(lbl10)
 					ctx.RestoreAllocState(alloc106)
 					d0 = snap89
 					d1 = snap90
@@ -27570,11 +27352,8 @@ func init_alu() {
 						ps.General = true
 						return bbs[5].RenderPS(ps)
 					}
-					lbl26 := ctx.ReserveLabel()
-					lbl27 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d130.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl26)
-					ctx.EmitJmp(lbl27)
+					ctx.EmitJump(CondNotEqual, lbl12)
 					snap133 := d0
 					snap134 := d1
 					snap135 := d2
@@ -27597,8 +27376,6 @@ func init_alu() {
 					snap152 := d129
 					snap153 := d130
 					alloc154 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl26)
-					ctx.EmitJmp(lbl12)
 					ctx.RestoreAllocState(alloc154)
 					d0 = snap133
 					d1 = snap134
@@ -27621,8 +27398,6 @@ func init_alu() {
 					d128 = snap151
 					d129 = snap152
 					d130 = snap153
-					ctx.MarkLabel(lbl27)
-					ctx.EmitJmp(lbl13)
 					ctx.RestoreAllocState(alloc154)
 					d0 = snap133
 					d1 = snap134
@@ -27907,11 +27682,8 @@ func init_alu() {
 						ps.General = true
 						return bbs[6].RenderPS(ps)
 					}
-					lbl28 := ctx.ReserveLabel()
-					lbl29 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d182.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl28)
-					ctx.EmitJmp(lbl29)
+					ctx.EmitJump(CondNotEqual, lbl5)
 					snap185 := d0
 					snap186 := d1
 					snap187 := d2
@@ -27938,8 +27710,6 @@ func init_alu() {
 					snap208 := d181
 					snap209 := d182
 					alloc210 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl28)
-					ctx.EmitJmp(lbl5)
 					ctx.RestoreAllocState(alloc210)
 					d0 = snap185
 					d1 = snap186
@@ -27966,8 +27736,6 @@ func init_alu() {
 					d180 = snap207
 					d181 = snap208
 					d182 = snap209
-					ctx.MarkLabel(lbl29)
-					ctx.EmitJmp(lbl6)
 					ctx.RestoreAllocState(alloc210)
 					d0 = snap185
 					d1 = snap186
@@ -28612,10 +28380,7 @@ func init_alu() {
 						ps.General = true
 						return bbs[9].RenderPS(ps)
 					}
-					lbl30 := ctx.ReserveLabel()
-					lbl31 := ctx.ReserveLabel()
-					ctx.EmitJump(d247.Condition, lbl30)
-					ctx.EmitJmp(lbl31)
+					ctx.EmitJump(d247.Condition, lbl11)
 					snap250 := d0
 					snap251 := d1
 					snap252 := d2
@@ -28651,8 +28416,6 @@ func init_alu() {
 					snap282 := d246
 					snap283 := d247
 					alloc284 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl30)
-					ctx.EmitJmp(lbl11)
 					ctx.RestoreAllocState(alloc284)
 					d0 = snap250
 					d1 = snap251
@@ -28688,8 +28451,6 @@ func init_alu() {
 					d245 = snap281
 					d246 = snap282
 					d247 = snap283
-					ctx.MarkLabel(lbl31)
-					ctx.EmitJmp(lbl9)
 					ctx.RestoreAllocState(alloc284)
 					d0 = snap250
 					d1 = snap251
@@ -29103,10 +28864,7 @@ func init_alu() {
 						ps.General = true
 						return bbs[10].RenderPS(ps)
 					}
-					lbl32 := ctx.ReserveLabel()
-					lbl33 := ctx.ReserveLabel()
-					ctx.EmitJump(d323.Condition, lbl32)
-					ctx.EmitJmp(lbl33)
+					ctx.EmitJump(d323.Condition, lbl8)
 					snap326 := d0
 					snap327 := d1
 					snap328 := d2
@@ -29144,8 +28902,6 @@ func init_alu() {
 					snap360 := d322
 					snap361 := d323
 					alloc362 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl32)
-					ctx.EmitJmp(lbl8)
 					ctx.RestoreAllocState(alloc362)
 					d0 = snap326
 					d1 = snap327
@@ -29183,8 +28939,6 @@ func init_alu() {
 					d247 = snap359
 					d322 = snap360
 					d323 = snap361
-					ctx.MarkLabel(lbl33)
-					ctx.EmitJmp(lbl9)
 					ctx.RestoreAllocState(alloc362)
 					d0 = snap326
 					d1 = snap327
@@ -29741,14 +29495,13 @@ func init_alu() {
 					ctx.EnsureDesc(&d406)
 					d407 = d406
 					_ = d407
-					ctx.StabilizeDescForControlFlow(&d407)
 					ctx.StabilizeDescForControlFlow(&d406)
 					bbpos_1_0 := int32(-1)
 					_ = bbpos_1_0
-					lbl34 := ctx.ReserveLabel()
-					_ = lbl34
+					lbl18 := ctx.ReserveLabel()
+					_ = lbl18
 					bbpos_1_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl34)
+					ctx.MarkLabel(lbl18)
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
@@ -29891,11 +29644,8 @@ func init_alu() {
 						ps.General = true
 						return bbs[12].RenderPS(ps)
 					}
-					lbl35 := ctx.ReserveLabel()
-					lbl36 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d409.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl35)
-					ctx.EmitJmp(lbl36)
+					ctx.EmitJump(CondNotEqual, lbl14)
 					snap412 := d0
 					snap413 := d1
 					snap414 := d2
@@ -29941,8 +29691,6 @@ func init_alu() {
 					snap454 := d408
 					snap455 := d409
 					alloc456 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl35)
-					ctx.EmitJmp(lbl14)
 					ctx.RestoreAllocState(alloc456)
 					d0 = snap412
 					d1 = snap413
@@ -29988,8 +29736,6 @@ func init_alu() {
 					d407 = snap453
 					d408 = snap454
 					d409 = snap455
-					ctx.MarkLabel(lbl36)
-					ctx.EmitJmp(lbl17)
 					ctx.RestoreAllocState(alloc456)
 					d0 = snap412
 					d1 = snap413
@@ -30880,11 +30626,8 @@ func init_alu() {
 						ps.General = true
 						return bbs[15].RenderPS(ps)
 					}
-					lbl37 := ctx.ReserveLabel()
-					lbl38 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d508.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl37)
-					ctx.EmitJmp(lbl38)
+					ctx.EmitJump(CondNotEqual, lbl14)
 					snap511 := d0
 					snap512 := d1
 					snap513 := d2
@@ -30935,8 +30678,6 @@ func init_alu() {
 					snap558 := d507
 					snap559 := d508
 					alloc560 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl37)
-					ctx.EmitJmp(lbl14)
 					ctx.RestoreAllocState(alloc560)
 					d0 = snap511
 					d1 = snap512
@@ -30987,8 +30728,6 @@ func init_alu() {
 					d506 = snap557
 					d507 = snap558
 					d508 = snap559
-					ctx.MarkLabel(lbl38)
-					ctx.EmitJmp(lbl15)
 					ctx.RestoreAllocState(alloc560)
 					d0 = snap511
 					d1 = snap512
@@ -31554,11 +31293,8 @@ func init_alu() {
 						ps.General = true
 						return bbs[16].RenderPS(ps)
 					}
-					lbl39 := ctx.ReserveLabel()
-					lbl40 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d614.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl39)
-					ctx.EmitJmp(lbl40)
+					ctx.EmitJump(CondNotEqual, lbl14)
 					snap617 := d0
 					snap618 := d1
 					snap619 := d2
@@ -31611,8 +31347,6 @@ func init_alu() {
 					snap666 := d613
 					snap667 := d614
 					alloc668 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl39)
-					ctx.EmitJmp(lbl14)
 					ctx.RestoreAllocState(alloc668)
 					d0 = snap617
 					d1 = snap618
@@ -31665,8 +31399,6 @@ func init_alu() {
 					d508 = snap665
 					d613 = snap666
 					d614 = snap667
-					ctx.MarkLabel(lbl40)
-					ctx.EmitJmp(lbl16)
 					ctx.RestoreAllocState(alloc668)
 					d0 = snap617
 					d1 = snap618
@@ -32179,25 +31911,18 @@ func init_alu() {
 						ps.General = true
 						return bbs[0].RenderPS(ps)
 					}
-					lbl12 := ctx.ReserveLabel()
-					lbl13 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d3.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl12)
-					ctx.EmitJmp(lbl13)
+					ctx.EmitJump(CondNotEqual, lbl2)
 					snap6 := d0
 					snap7 := d1
 					snap8 := d2
 					snap9 := d3
 					alloc10 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl12)
-					ctx.EmitJmp(lbl2)
 					ctx.RestoreAllocState(alloc10)
 					d0 = snap6
 					d1 = snap7
 					d2 = snap8
 					d3 = snap9
-					ctx.MarkLabel(lbl13)
-					ctx.EmitJmp(lbl4)
 					ctx.RestoreAllocState(alloc10)
 					d0 = snap6
 					d1 = snap7
@@ -32376,11 +32101,8 @@ func init_alu() {
 						ps.General = true
 						return bbs[2].RenderPS(ps)
 					}
-					lbl14 := ctx.ReserveLabel()
-					lbl15 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d22.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl14)
-					ctx.EmitJmp(lbl15)
+					ctx.EmitJump(CondNotEqual, lbl7)
 					snap25 := d0
 					snap26 := d1
 					snap27 := d2
@@ -32391,8 +32113,6 @@ func init_alu() {
 					snap32 := d21
 					snap33 := d22
 					alloc34 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl14)
-					ctx.EmitJmp(lbl7)
 					ctx.RestoreAllocState(alloc34)
 					d0 = snap25
 					d1 = snap26
@@ -32403,8 +32123,6 @@ func init_alu() {
 					d20 = snap31
 					d21 = snap32
 					d22 = snap33
-					ctx.MarkLabel(lbl15)
-					ctx.EmitJmp(lbl6)
 					ctx.RestoreAllocState(alloc34)
 					d0 = snap25
 					d1 = snap26
@@ -32569,11 +32287,8 @@ func init_alu() {
 						ps.General = true
 						return bbs[3].RenderPS(ps)
 					}
-					lbl16 := ctx.ReserveLabel()
-					lbl17 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d50.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl16)
-					ctx.EmitJmp(lbl17)
+					ctx.EmitJump(CondNotEqual, lbl2)
 					snap53 := d0
 					snap54 := d1
 					snap55 := d2
@@ -32588,8 +32303,6 @@ func init_alu() {
 					snap64 := d49
 					snap65 := d50
 					alloc66 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl16)
-					ctx.EmitJmp(lbl2)
 					ctx.RestoreAllocState(alloc66)
 					d0 = snap53
 					d1 = snap54
@@ -32604,8 +32317,6 @@ func init_alu() {
 					d48 = snap63
 					d49 = snap64
 					d50 = snap65
-					ctx.MarkLabel(lbl17)
-					ctx.EmitJmp(lbl3)
 					ctx.RestoreAllocState(alloc66)
 					d0 = snap53
 					d1 = snap54
@@ -32835,10 +32546,7 @@ func init_alu() {
 						ps.General = true
 						return bbs[4].RenderPS(ps)
 					}
-					lbl18 := ctx.ReserveLabel()
-					lbl19 := ctx.ReserveLabel()
-					ctx.EmitJump(d86.Condition, lbl18)
-					ctx.EmitJmp(lbl19)
+					ctx.EmitJump(d86.Condition, lbl8)
 					snap89 := d0
 					snap90 := d1
 					snap91 := d2
@@ -32857,8 +32565,6 @@ func init_alu() {
 					snap104 := d85
 					snap105 := d86
 					alloc106 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl18)
-					ctx.EmitJmp(lbl8)
 					ctx.RestoreAllocState(alloc106)
 					d0 = snap89
 					d1 = snap90
@@ -32877,8 +32583,6 @@ func init_alu() {
 					d84 = snap103
 					d85 = snap104
 					d86 = snap105
-					ctx.MarkLabel(lbl19)
-					ctx.EmitJmp(lbl9)
 					ctx.RestoreAllocState(alloc106)
 					d0 = snap89
 					d1 = snap90
@@ -33148,11 +32852,8 @@ func init_alu() {
 						ps.General = true
 						return bbs[5].RenderPS(ps)
 					}
-					lbl20 := ctx.ReserveLabel()
-					lbl21 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d130.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl20)
-					ctx.EmitJmp(lbl21)
+					ctx.EmitJump(CondNotEqual, lbl10)
 					snap133 := d0
 					snap134 := d1
 					snap135 := d2
@@ -33175,8 +32876,6 @@ func init_alu() {
 					snap152 := d129
 					snap153 := d130
 					alloc154 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl20)
-					ctx.EmitJmp(lbl10)
 					ctx.RestoreAllocState(alloc154)
 					d0 = snap133
 					d1 = snap134
@@ -33199,8 +32898,6 @@ func init_alu() {
 					d128 = snap151
 					d129 = snap152
 					d130 = snap153
-					ctx.MarkLabel(lbl21)
-					ctx.EmitJmp(lbl11)
 					ctx.RestoreAllocState(alloc154)
 					d0 = snap133
 					d1 = snap134
@@ -33485,11 +33182,8 @@ func init_alu() {
 						ps.General = true
 						return bbs[6].RenderPS(ps)
 					}
-					lbl22 := ctx.ReserveLabel()
-					lbl23 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d182.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl22)
-					ctx.EmitJmp(lbl23)
+					ctx.EmitJump(CondNotEqual, lbl5)
 					snap185 := d0
 					snap186 := d1
 					snap187 := d2
@@ -33516,8 +33210,6 @@ func init_alu() {
 					snap208 := d181
 					snap209 := d182
 					alloc210 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl22)
-					ctx.EmitJmp(lbl5)
 					ctx.RestoreAllocState(alloc210)
 					d0 = snap185
 					d1 = snap186
@@ -33544,8 +33236,6 @@ func init_alu() {
 					d180 = snap207
 					d181 = snap208
 					d182 = snap209
-					ctx.MarkLabel(lbl23)
-					ctx.EmitJmp(lbl6)
 					ctx.RestoreAllocState(alloc210)
 					d0 = snap185
 					d1 = snap186
@@ -34446,25 +34136,18 @@ func init_alu() {
 						ps.General = true
 						return bbs[0].RenderPS(ps)
 					}
-					lbl5 := ctx.ReserveLabel()
-					lbl6 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d3.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl5)
-					ctx.EmitJmp(lbl6)
+					ctx.EmitJump(CondNotEqual, lbl2)
 					snap6 := d0
 					snap7 := d1
 					snap8 := d2
 					snap9 := d3
 					alloc10 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl5)
-					ctx.EmitJmp(lbl2)
 					ctx.RestoreAllocState(alloc10)
 					d0 = snap6
 					d1 = snap7
 					d2 = snap8
 					d3 = snap9
-					ctx.MarkLabel(lbl6)
-					ctx.EmitJmp(lbl4)
 					ctx.RestoreAllocState(alloc10)
 					d0 = snap6
 					d1 = snap7
@@ -34762,11 +34445,8 @@ func init_alu() {
 						ps.General = true
 						return bbs[3].RenderPS(ps)
 					}
-					lbl7 := ctx.ReserveLabel()
-					lbl8 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d27.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl7)
-					ctx.EmitJmp(lbl8)
+					ctx.EmitJump(CondNotEqual, lbl2)
 					snap30 := d0
 					snap31 := d1
 					snap32 := d2
@@ -34782,8 +34462,6 @@ func init_alu() {
 					snap42 := d26
 					snap43 := d27
 					alloc44 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl7)
-					ctx.EmitJmp(lbl2)
 					ctx.RestoreAllocState(alloc44)
 					d0 = snap30
 					d1 = snap31
@@ -34799,8 +34477,6 @@ func init_alu() {
 					d25 = snap41
 					d26 = snap42
 					d27 = snap43
-					ctx.MarkLabel(lbl8)
-					ctx.EmitJmp(lbl3)
 					ctx.RestoreAllocState(alloc44)
 					d0 = snap30
 					d1 = snap31
@@ -35039,25 +34715,18 @@ func init_alu() {
 						ps.General = true
 						return bbs[0].RenderPS(ps)
 					}
-					lbl5 := ctx.ReserveLabel()
-					lbl6 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d3.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl5)
-					ctx.EmitJmp(lbl6)
+					ctx.EmitJump(CondNotEqual, lbl2)
 					snap6 := d0
 					snap7 := d1
 					snap8 := d2
 					snap9 := d3
 					alloc10 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl5)
-					ctx.EmitJmp(lbl2)
 					ctx.RestoreAllocState(alloc10)
 					d0 = snap6
 					d1 = snap7
 					d2 = snap8
 					d3 = snap9
-					ctx.MarkLabel(lbl6)
-					ctx.EmitJmp(lbl4)
 					ctx.RestoreAllocState(alloc10)
 					d0 = snap6
 					d1 = snap7
@@ -35325,11 +34994,8 @@ func init_alu() {
 						ps.General = true
 						return bbs[3].RenderPS(ps)
 					}
-					lbl7 := ctx.ReserveLabel()
-					lbl8 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d26.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl7)
-					ctx.EmitJmp(lbl8)
+					ctx.EmitJump(CondNotEqual, lbl2)
 					snap29 := d0
 					snap30 := d1
 					snap31 := d2
@@ -35344,8 +35010,6 @@ func init_alu() {
 					snap40 := d25
 					snap41 := d26
 					alloc42 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl7)
-					ctx.EmitJmp(lbl2)
 					ctx.RestoreAllocState(alloc42)
 					d0 = snap29
 					d1 = snap30
@@ -35360,8 +35024,6 @@ func init_alu() {
 					d24 = snap39
 					d25 = snap40
 					d26 = snap41
-					ctx.MarkLabel(lbl8)
-					ctx.EmitJmp(lbl3)
 					ctx.RestoreAllocState(alloc42)
 					d0 = snap29
 					d1 = snap30
@@ -35595,25 +35257,18 @@ func init_alu() {
 						ps.General = true
 						return bbs[0].RenderPS(ps)
 					}
-					lbl5 := ctx.ReserveLabel()
-					lbl6 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d3.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl5)
-					ctx.EmitJmp(lbl6)
+					ctx.EmitJump(CondNotEqual, lbl2)
 					snap6 := d0
 					snap7 := d1
 					snap8 := d2
 					snap9 := d3
 					alloc10 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl5)
-					ctx.EmitJmp(lbl2)
 					ctx.RestoreAllocState(alloc10)
 					d0 = snap6
 					d1 = snap7
 					d2 = snap8
 					d3 = snap9
-					ctx.MarkLabel(lbl6)
-					ctx.EmitJmp(lbl4)
 					ctx.RestoreAllocState(alloc10)
 					d0 = snap6
 					d1 = snap7
@@ -35881,11 +35536,8 @@ func init_alu() {
 						ps.General = true
 						return bbs[3].RenderPS(ps)
 					}
-					lbl7 := ctx.ReserveLabel()
-					lbl8 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d26.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl7)
-					ctx.EmitJmp(lbl8)
+					ctx.EmitJump(CondNotEqual, lbl2)
 					snap29 := d0
 					snap30 := d1
 					snap31 := d2
@@ -35900,8 +35552,6 @@ func init_alu() {
 					snap40 := d25
 					snap41 := d26
 					alloc42 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl7)
-					ctx.EmitJmp(lbl2)
 					ctx.RestoreAllocState(alloc42)
 					d0 = snap29
 					d1 = snap30
@@ -35916,8 +35566,6 @@ func init_alu() {
 					d24 = snap39
 					d25 = snap40
 					d26 = snap41
-					ctx.MarkLabel(lbl8)
-					ctx.EmitJmp(lbl3)
 					ctx.RestoreAllocState(alloc42)
 					d0 = snap29
 					d1 = snap30
@@ -36153,25 +35801,18 @@ func init_alu() {
 						ps.General = true
 						return bbs[0].RenderPS(ps)
 					}
-					lbl5 := ctx.ReserveLabel()
-					lbl6 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d3.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl5)
-					ctx.EmitJmp(lbl6)
+					ctx.EmitJump(CondNotEqual, lbl2)
 					snap6 := d0
 					snap7 := d1
 					snap8 := d2
 					snap9 := d3
 					alloc10 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl5)
-					ctx.EmitJmp(lbl2)
 					ctx.RestoreAllocState(alloc10)
 					d0 = snap6
 					d1 = snap7
 					d2 = snap8
 					d3 = snap9
-					ctx.MarkLabel(lbl6)
-					ctx.EmitJmp(lbl4)
 					ctx.RestoreAllocState(alloc10)
 					d0 = snap6
 					d1 = snap7
@@ -36469,11 +36110,8 @@ func init_alu() {
 						ps.General = true
 						return bbs[3].RenderPS(ps)
 					}
-					lbl7 := ctx.ReserveLabel()
-					lbl8 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d27.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl7)
-					ctx.EmitJmp(lbl8)
+					ctx.EmitJump(CondNotEqual, lbl2)
 					snap30 := d0
 					snap31 := d1
 					snap32 := d2
@@ -36489,8 +36127,6 @@ func init_alu() {
 					snap42 := d26
 					snap43 := d27
 					alloc44 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl7)
-					ctx.EmitJmp(lbl2)
 					ctx.RestoreAllocState(alloc44)
 					d0 = snap30
 					d1 = snap31
@@ -36506,8 +36142,6 @@ func init_alu() {
 					d25 = snap41
 					d26 = snap42
 					d27 = snap43
-					ctx.MarkLabel(lbl8)
-					ctx.EmitJmp(lbl3)
 					ctx.RestoreAllocState(alloc44)
 					d0 = snap30
 					d1 = snap31
@@ -36877,25 +36511,18 @@ func init_alu() {
 						ps.General = true
 						return bbs[0].RenderPS(ps)
 					}
-					lbl4 := ctx.ReserveLabel()
-					lbl5 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d3.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl4)
-					ctx.EmitJmp(lbl5)
+					ctx.EmitJump(CondNotEqual, lbl2)
 					snap6 := d0
 					snap7 := d1
 					snap8 := d2
 					snap9 := d3
 					alloc10 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl4)
-					ctx.EmitJmp(lbl2)
 					ctx.RestoreAllocState(alloc10)
 					d0 = snap6
 					d1 = snap7
 					d2 = snap8
 					d3 = snap9
-					ctx.MarkLabel(lbl5)
-					ctx.EmitJmp(lbl3)
 					ctx.RestoreAllocState(alloc10)
 					d0 = snap6
 					d1 = snap7
@@ -37326,25 +36953,18 @@ func init_alu() {
 						ps.General = true
 						return bbs[0].RenderPS(ps)
 					}
-					lbl12 := ctx.ReserveLabel()
-					lbl13 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d3.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl12)
-					ctx.EmitJmp(lbl13)
+					ctx.EmitJump(CondNotEqual, lbl2)
 					snap6 := d0
 					snap7 := d1
 					snap8 := d2
 					snap9 := d3
 					alloc10 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl12)
-					ctx.EmitJmp(lbl2)
 					ctx.RestoreAllocState(alloc10)
 					d0 = snap6
 					d1 = snap7
 					d2 = snap8
 					d3 = snap9
-					ctx.MarkLabel(lbl13)
-					ctx.EmitJmp(lbl4)
 					ctx.RestoreAllocState(alloc10)
 					d0 = snap6
 					d1 = snap7
@@ -37602,10 +37222,7 @@ func init_alu() {
 						ps.General = true
 						return bbs[2].RenderPS(ps)
 					}
-					lbl14 := ctx.ReserveLabel()
-					lbl15 := ctx.ReserveLabel()
-					ctx.EmitJump(d28.Condition, lbl14)
-					ctx.EmitJmp(lbl15)
+					ctx.EmitJump(d28.Condition, lbl7)
 					snap31 := d0
 					snap32 := d1
 					snap33 := d2
@@ -37622,8 +37239,6 @@ func init_alu() {
 					snap44 := d27
 					snap45 := d28
 					alloc46 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl14)
-					ctx.EmitJmp(lbl7)
 					ctx.RestoreAllocState(alloc46)
 					d0 = snap31
 					d1 = snap32
@@ -37640,8 +37255,6 @@ func init_alu() {
 					d26 = snap43
 					d27 = snap44
 					d28 = snap45
-					ctx.MarkLabel(lbl15)
-					ctx.EmitJmp(lbl8)
 					ctx.RestoreAllocState(alloc46)
 					d0 = snap31
 					d1 = snap32
@@ -37865,11 +37478,8 @@ func init_alu() {
 						ps.General = true
 						return bbs[3].RenderPS(ps)
 					}
-					lbl16 := ctx.ReserveLabel()
-					lbl17 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d68.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl16)
-					ctx.EmitJmp(lbl17)
+					ctx.EmitJump(CondNotEqual, lbl2)
 					snap71 := d0
 					snap72 := d1
 					snap73 := d2
@@ -37890,8 +37500,6 @@ func init_alu() {
 					snap88 := d67
 					snap89 := d68
 					alloc90 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl16)
-					ctx.EmitJmp(lbl2)
 					ctx.RestoreAllocState(alloc90)
 					d0 = snap71
 					d1 = snap72
@@ -37912,8 +37520,6 @@ func init_alu() {
 					d66 = snap87
 					d67 = snap88
 					d68 = snap89
-					ctx.MarkLabel(lbl17)
-					ctx.EmitJmp(lbl3)
 					ctx.RestoreAllocState(alloc90)
 					d0 = snap71
 					d1 = snap72
@@ -38147,16 +37753,14 @@ func init_alu() {
 					d119 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString("_ci")}
 					d120 = d22
 					_ = d120
-					ctx.StabilizeDescForControlFlow(&d120)
 					d121 = d119
 					_ = d121
-					ctx.StabilizeDescForControlFlow(&d121)
 					bbpos_1_0 := int32(-1)
 					_ = bbpos_1_0
-					lbl18 := ctx.ReserveLabel()
-					_ = lbl18
+					lbl12 := ctx.ReserveLabel()
+					_ = lbl12
 					bbpos_1_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl18)
+					ctx.MarkLabel(lbl12)
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
@@ -38322,11 +37926,8 @@ func init_alu() {
 						ps.General = true
 						return bbs[4].RenderPS(ps)
 					}
-					lbl19 := ctx.ReserveLabel()
-					lbl20 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d124.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl19)
-					ctx.EmitJmp(lbl20)
+					ctx.EmitJump(CondNotEqual, lbl10)
 					snap127 := d0
 					snap128 := d1
 					snap129 := d2
@@ -38359,8 +37960,6 @@ func init_alu() {
 					snap156 := d123
 					snap157 := d124
 					alloc158 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl19)
-					ctx.EmitJmp(lbl10)
 					ctx.RestoreAllocState(alloc158)
 					d0 = snap127
 					d1 = snap128
@@ -38393,8 +37992,6 @@ func init_alu() {
 					d122 = snap155
 					d123 = snap156
 					d124 = snap157
-					ctx.MarkLabel(lbl20)
-					ctx.EmitJmp(lbl11)
 					ctx.RestoreAllocState(alloc158)
 					d0 = snap127
 					d1 = snap128
@@ -38951,10 +38548,7 @@ func init_alu() {
 						ps.General = true
 						return bbs[6].RenderPS(ps)
 					}
-					lbl21 := ctx.ReserveLabel()
-					lbl22 := ctx.ReserveLabel()
-					ctx.EmitJump(d197.Condition, lbl21)
-					ctx.EmitJmp(lbl22)
+					ctx.EmitJump(d197.Condition, lbl5)
 					snap200 := d0
 					snap201 := d1
 					snap202 := d2
@@ -38992,8 +38586,6 @@ func init_alu() {
 					snap234 := d196
 					snap235 := d197
 					alloc236 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl21)
-					ctx.EmitJmp(lbl5)
 					ctx.RestoreAllocState(alloc236)
 					d0 = snap200
 					d1 = snap201
@@ -39031,8 +38623,6 @@ func init_alu() {
 					d195 = snap233
 					d196 = snap234
 					d197 = snap235
-					ctx.MarkLabel(lbl22)
-					ctx.EmitJmp(lbl9)
 					ctx.RestoreAllocState(alloc236)
 					d0 = snap200
 					d1 = snap201
@@ -39466,10 +39056,7 @@ func init_alu() {
 						ps.General = true
 						return bbs[7].RenderPS(ps)
 					}
-					lbl23 := ctx.ReserveLabel()
-					lbl24 := ctx.ReserveLabel()
-					ctx.EmitJump(d277.Condition, lbl23)
-					ctx.EmitJmp(lbl24)
+					ctx.EmitJump(d277.Condition, lbl7)
 					snap280 := d0
 					snap281 := d1
 					snap282 := d2
@@ -39509,8 +39096,6 @@ func init_alu() {
 					snap316 := d276
 					snap317 := d277
 					alloc318 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl23)
-					ctx.EmitJmp(lbl7)
 					ctx.RestoreAllocState(alloc318)
 					d0 = snap280
 					d1 = snap281
@@ -39550,8 +39135,6 @@ func init_alu() {
 					d197 = snap315
 					d276 = snap316
 					d277 = snap317
-					ctx.MarkLabel(lbl24)
-					ctx.EmitJmp(lbl6)
 					ctx.RestoreAllocState(alloc318)
 					d0 = snap280
 					d1 = snap281
@@ -40005,10 +39588,7 @@ func init_alu() {
 						ps.General = true
 						return bbs[8].RenderPS(ps)
 					}
-					lbl25 := ctx.ReserveLabel()
-					lbl26 := ctx.ReserveLabel()
-					ctx.EmitJump(d361.Condition, lbl25)
-					ctx.EmitJmp(lbl26)
+					ctx.EmitJump(d361.Condition, lbl5)
 					snap364 := d0
 					snap365 := d1
 					snap366 := d2
@@ -40050,8 +39630,6 @@ func init_alu() {
 					snap402 := d360
 					snap403 := d361
 					alloc404 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl25)
-					ctx.EmitJmp(lbl5)
 					ctx.RestoreAllocState(alloc404)
 					d0 = snap364
 					d1 = snap365
@@ -40093,8 +39671,6 @@ func init_alu() {
 					d277 = snap401
 					d360 = snap402
 					d361 = snap403
-					ctx.MarkLabel(lbl26)
-					ctx.EmitJmp(lbl6)
 					ctx.RestoreAllocState(alloc404)
 					d0 = snap364
 					d1 = snap365
@@ -40903,11 +40479,8 @@ func init_alu() {
 						ps.General = true
 						return bbs[0].RenderPS(ps)
 					}
-					lbl4 := ctx.ReserveLabel()
-					lbl5 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d12.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl4)
-					ctx.EmitJmp(lbl5)
+					ctx.EmitJump(CondNotEqual, lbl2)
 					snap15 := d1
 					snap16 := d2
 					snap17 := d3
@@ -40920,8 +40493,6 @@ func init_alu() {
 					snap24 := d11
 					snap25 := d12
 					alloc26 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl4)
-					ctx.EmitJmp(lbl2)
 					ctx.RestoreAllocState(alloc26)
 					d1 = snap15
 					d2 = snap16
@@ -40934,8 +40505,6 @@ func init_alu() {
 					d10 = snap23
 					d11 = snap24
 					d12 = snap25
-					ctx.MarkLabel(lbl5)
-					ctx.EmitJmp(lbl3)
 					ctx.RestoreAllocState(alloc26)
 					d1 = snap15
 					d2 = snap16
@@ -41793,10 +41362,7 @@ func init_alu() {
 						ps.General = true
 						return bbs[1].RenderPS(ps)
 					}
-					lbl9 := ctx.ReserveLabel()
-					lbl10 := ctx.ReserveLabel()
-					ctx.EmitJump(d13.Condition, lbl9)
-					ctx.EmitJmp(lbl10)
+					ctx.EmitJump(d13.Condition, lbl3)
 					snap18 := d3
 					snap19 := d4
 					snap20 := d5
@@ -41810,8 +41376,6 @@ func init_alu() {
 					snap28 := d16
 					snap29 := d17
 					alloc30 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl9)
-					ctx.EmitJmp(lbl3)
 					ctx.RestoreAllocState(alloc30)
 					d3 = snap18
 					d4 = snap19
@@ -41825,8 +41389,6 @@ func init_alu() {
 					d13 = snap27
 					d16 = snap28
 					d17 = snap29
-					ctx.MarkLabel(lbl10)
-					ctx.EmitJmp(lbl4)
 					ctx.RestoreAllocState(alloc30)
 					d3 = snap18
 					d4 = snap19
@@ -41978,10 +41540,10 @@ func init_alu() {
 						ctx.EnsureDesc(&d11)
 						dynamicArgOff47 = ctx.AllocStack(16)
 						ctx.ProtectReg(d11.Reg)
-						lbl11 := ctx.ReserveLabel()
-						lbl12 := ctx.ReserveLabel()
+						lbl9 := ctx.ReserveLabel()
+						lbl10 := ctx.ReserveLabel()
 						ctx.EmitCmpRegImm32(d11.Reg, int32(len(args)-0))
-						ctx.EmitJump(CondUnsignedAboveOrEqual, lbl12)
+						ctx.EmitJump(CondUnsignedAboveOrEqual, lbl10)
 						for i := 0; i < len(args); i++ {
 							nextLbl := ctx.ReserveLabel()
 							ctx.EmitCmpRegImm32(d11.Reg, int32(i-0))
@@ -41989,12 +41551,12 @@ func init_alu() {
 							ai := args[i]
 							ai.ID = 0
 							ctx.EmitStoreScmerToStack(ai, int32(dynamicArgOff47))
-							ctx.EmitJmp(lbl11)
+							ctx.EmitJmp(lbl9)
 							ctx.MarkLabel(nextLbl)
 						}
-						ctx.MarkLabel(lbl12)
+						ctx.MarkLabel(lbl10)
 						ctx.EmitStoreScmerToStack(JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}, int32(dynamicArgOff47))
-						ctx.MarkLabel(lbl11)
+						ctx.MarkLabel(lbl9)
 						ctx.UnprotectReg(d11.Reg)
 						d46 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(dynamicArgOff47), Rooted: true}
 					}
@@ -42061,11 +41623,8 @@ func init_alu() {
 						ps.General = true
 						return bbs[2].RenderPS(ps)
 					}
-					lbl13 := ctx.ReserveLabel()
-					lbl14 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d51.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl13)
-					ctx.EmitJmp(lbl14)
+					ctx.EmitJump(CondNotEqual, lbl5)
 					snap54 := d3
 					snap55 := d4
 					snap56 := d5
@@ -42083,8 +41642,6 @@ func init_alu() {
 					snap68 := d50
 					snap69 := d51
 					alloc70 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl13)
-					ctx.EmitJmp(lbl5)
 					ctx.RestoreAllocState(alloc70)
 					d3 = snap54
 					d4 = snap55
@@ -42102,8 +41659,6 @@ func init_alu() {
 					d49 = snap67
 					d50 = snap68
 					d51 = snap69
-					ctx.MarkLabel(lbl14)
-					ctx.EmitJmp(lbl6)
 					ctx.RestoreAllocState(alloc70)
 					d3 = snap54
 					d4 = snap55
@@ -42650,11 +42205,10 @@ func init_alu() {
 						ps.General = true
 						return bbs[5].RenderPS(ps)
 					}
-					lbl15 := ctx.ReserveLabel()
-					lbl16 := ctx.ReserveLabel()
+					lbl11 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d97.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl15)
-					ctx.EmitJmp(lbl16)
+					ctx.EmitJump(CondNotEqual, lbl11)
+					ctx.EmitJmp(lbl8)
 					snap102 := d3
 					snap103 := d4
 					snap104 := d5
@@ -42681,7 +42235,7 @@ func init_alu() {
 					snap125 := d98
 					snap126 := d100
 					alloc127 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl15)
+					ctx.MarkLabel(lbl11)
 					ctx.SyncDesc(&d11)
 					if d11.Loc == LocReg {
 						ctx.ProtectReg(d11.Reg)
@@ -42732,8 +42286,6 @@ func init_alu() {
 					d97 = snap124
 					d98 = snap125
 					d100 = snap126
-					ctx.MarkLabel(lbl16)
-					ctx.EmitJmp(lbl8)
 					ctx.RestoreAllocState(alloc127)
 					d3 = snap102
 					d4 = snap103
@@ -43340,11 +42892,10 @@ func init_alu() {
 						ps.General = true
 						return bbs[7].RenderPS(ps)
 					}
-					lbl17 := ctx.ReserveLabel()
-					lbl18 := ctx.ReserveLabel()
+					lbl12 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d166.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl17)
-					ctx.EmitJmp(lbl18)
+					ctx.EmitJump(CondNotEqual, lbl7)
+					ctx.EmitJmp(lbl12)
 					snap171 := d3
 					snap172 := d4
 					snap173 := d5
@@ -43381,8 +42932,6 @@ func init_alu() {
 					snap204 := d168
 					snap205 := d170
 					alloc206 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl17)
-					ctx.EmitJmp(lbl7)
 					ctx.RestoreAllocState(alloc206)
 					d3 = snap171
 					d4 = snap172
@@ -43419,7 +42968,7 @@ func init_alu() {
 					d166 = snap203
 					d168 = snap204
 					d170 = snap205
-					ctx.MarkLabel(lbl18)
+					ctx.MarkLabel(lbl12)
 					ctx.SyncDesc(&d11)
 					if d11.Loc == LocReg {
 						ctx.ProtectReg(d11.Reg)
@@ -44059,10 +43608,7 @@ func init_alu() {
 						ps.General = true
 						return bbs[1].RenderPS(ps)
 					}
-					lbl9 := ctx.ReserveLabel()
-					lbl10 := ctx.ReserveLabel()
-					ctx.EmitJump(d13.Condition, lbl9)
-					ctx.EmitJmp(lbl10)
+					ctx.EmitJump(d13.Condition, lbl3)
 					snap18 := d3
 					snap19 := d4
 					snap20 := d5
@@ -44076,8 +43622,6 @@ func init_alu() {
 					snap28 := d16
 					snap29 := d17
 					alloc30 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl9)
-					ctx.EmitJmp(lbl3)
 					ctx.RestoreAllocState(alloc30)
 					d3 = snap18
 					d4 = snap19
@@ -44091,8 +43635,6 @@ func init_alu() {
 					d13 = snap27
 					d16 = snap28
 					d17 = snap29
-					ctx.MarkLabel(lbl10)
-					ctx.EmitJmp(lbl4)
 					ctx.RestoreAllocState(alloc30)
 					d3 = snap18
 					d4 = snap19
@@ -44244,10 +43786,10 @@ func init_alu() {
 						ctx.EnsureDesc(&d11)
 						dynamicArgOff47 = ctx.AllocStack(16)
 						ctx.ProtectReg(d11.Reg)
-						lbl11 := ctx.ReserveLabel()
-						lbl12 := ctx.ReserveLabel()
+						lbl9 := ctx.ReserveLabel()
+						lbl10 := ctx.ReserveLabel()
 						ctx.EmitCmpRegImm32(d11.Reg, int32(len(args)-0))
-						ctx.EmitJump(CondUnsignedAboveOrEqual, lbl12)
+						ctx.EmitJump(CondUnsignedAboveOrEqual, lbl10)
 						for i := 0; i < len(args); i++ {
 							nextLbl := ctx.ReserveLabel()
 							ctx.EmitCmpRegImm32(d11.Reg, int32(i-0))
@@ -44255,12 +43797,12 @@ func init_alu() {
 							ai := args[i]
 							ai.ID = 0
 							ctx.EmitStoreScmerToStack(ai, int32(dynamicArgOff47))
-							ctx.EmitJmp(lbl11)
+							ctx.EmitJmp(lbl9)
 							ctx.MarkLabel(nextLbl)
 						}
-						ctx.MarkLabel(lbl12)
+						ctx.MarkLabel(lbl10)
 						ctx.EmitStoreScmerToStack(JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}, int32(dynamicArgOff47))
-						ctx.MarkLabel(lbl11)
+						ctx.MarkLabel(lbl9)
 						ctx.UnprotectReg(d11.Reg)
 						d46 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(dynamicArgOff47), Rooted: true}
 					}
@@ -44327,11 +43869,8 @@ func init_alu() {
 						ps.General = true
 						return bbs[2].RenderPS(ps)
 					}
-					lbl13 := ctx.ReserveLabel()
-					lbl14 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d51.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl13)
-					ctx.EmitJmp(lbl14)
+					ctx.EmitJump(CondNotEqual, lbl5)
 					snap54 := d3
 					snap55 := d4
 					snap56 := d5
@@ -44349,8 +43888,6 @@ func init_alu() {
 					snap68 := d50
 					snap69 := d51
 					alloc70 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl13)
-					ctx.EmitJmp(lbl5)
 					ctx.RestoreAllocState(alloc70)
 					d3 = snap54
 					d4 = snap55
@@ -44368,8 +43905,6 @@ func init_alu() {
 					d49 = snap67
 					d50 = snap68
 					d51 = snap69
-					ctx.MarkLabel(lbl14)
-					ctx.EmitJmp(lbl6)
 					ctx.RestoreAllocState(alloc70)
 					d3 = snap54
 					d4 = snap55
@@ -44916,11 +44451,10 @@ func init_alu() {
 						ps.General = true
 						return bbs[5].RenderPS(ps)
 					}
-					lbl15 := ctx.ReserveLabel()
-					lbl16 := ctx.ReserveLabel()
+					lbl11 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d97.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl15)
-					ctx.EmitJmp(lbl16)
+					ctx.EmitJump(CondNotEqual, lbl11)
+					ctx.EmitJmp(lbl8)
 					snap102 := d3
 					snap103 := d4
 					snap104 := d5
@@ -44947,7 +44481,7 @@ func init_alu() {
 					snap125 := d98
 					snap126 := d100
 					alloc127 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl15)
+					ctx.MarkLabel(lbl11)
 					ctx.SyncDesc(&d11)
 					if d11.Loc == LocReg {
 						ctx.ProtectReg(d11.Reg)
@@ -44998,8 +44532,6 @@ func init_alu() {
 					d97 = snap124
 					d98 = snap125
 					d100 = snap126
-					ctx.MarkLabel(lbl16)
-					ctx.EmitJmp(lbl8)
 					ctx.RestoreAllocState(alloc127)
 					d3 = snap102
 					d4 = snap103
@@ -45606,11 +45138,10 @@ func init_alu() {
 						ps.General = true
 						return bbs[7].RenderPS(ps)
 					}
-					lbl17 := ctx.ReserveLabel()
-					lbl18 := ctx.ReserveLabel()
+					lbl12 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d166.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl17)
-					ctx.EmitJmp(lbl18)
+					ctx.EmitJump(CondNotEqual, lbl7)
+					ctx.EmitJmp(lbl12)
 					snap171 := d3
 					snap172 := d4
 					snap173 := d5
@@ -45647,8 +45178,6 @@ func init_alu() {
 					snap204 := d168
 					snap205 := d170
 					alloc206 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl17)
-					ctx.EmitJmp(lbl7)
 					ctx.RestoreAllocState(alloc206)
 					d3 = snap171
 					d4 = snap172
@@ -45685,7 +45214,7 @@ func init_alu() {
 					d166 = snap203
 					d168 = snap204
 					d170 = snap205
-					ctx.MarkLabel(lbl18)
+					ctx.MarkLabel(lbl12)
 					ctx.SyncDesc(&d11)
 					if d11.Loc == LocReg {
 						ctx.ProtectReg(d11.Reg)
@@ -46766,25 +46295,18 @@ func init_alu() {
 						ps.General = true
 						return bbs[0].RenderPS(ps)
 					}
-					lbl10 := ctx.ReserveLabel()
-					lbl11 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d3.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl10)
-					ctx.EmitJmp(lbl11)
+					ctx.EmitJump(CondNotEqual, lbl2)
 					snap6 := d0
 					snap7 := d1
 					snap8 := d2
 					snap9 := d3
 					alloc10 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl10)
-					ctx.EmitJmp(lbl2)
 					ctx.RestoreAllocState(alloc10)
 					d0 = snap6
 					d1 = snap7
 					d2 = snap8
 					d3 = snap9
-					ctx.MarkLabel(lbl11)
-					ctx.EmitJmp(lbl3)
 					ctx.RestoreAllocState(alloc10)
 					d0 = snap6
 					d1 = snap7
@@ -46921,13 +46443,12 @@ func init_alu() {
 					ctx.EnsureDesc(&d19)
 					d20 = d19
 					_ = d20
-					ctx.StabilizeDescForControlFlow(&d20)
 					bbpos_1_0 := int32(-1)
 					_ = bbpos_1_0
-					lbl12 := ctx.ReserveLabel()
-					_ = lbl12
+					lbl10 := ctx.ReserveLabel()
+					_ = lbl10
 					bbpos_1_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl12)
+					ctx.MarkLabel(lbl10)
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
@@ -47010,10 +46531,7 @@ func init_alu() {
 						ps.General = true
 						return bbs[2].RenderPS(ps)
 					}
-					lbl13 := ctx.ReserveLabel()
-					lbl14 := ctx.ReserveLabel()
-					ctx.EmitJump(d24.Condition, lbl13)
-					ctx.EmitJmp(lbl14)
+					ctx.EmitJump(d24.Condition, lbl4)
 					snap27 := d0
 					snap28 := d1
 					snap29 := d2
@@ -47026,8 +46544,6 @@ func init_alu() {
 					snap36 := d23
 					snap37 := d24
 					alloc38 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl13)
-					ctx.EmitJmp(lbl4)
 					ctx.RestoreAllocState(alloc38)
 					d0 = snap27
 					d1 = snap28
@@ -47040,8 +46556,6 @@ func init_alu() {
 					d22 = snap35
 					d23 = snap36
 					d24 = snap37
-					ctx.MarkLabel(lbl14)
-					ctx.EmitJmp(lbl6)
 					ctx.RestoreAllocState(alloc38)
 					d0 = snap27
 					d1 = snap28
@@ -47274,14 +46788,13 @@ func init_alu() {
 					ctx.EnsureDesc(&d55)
 					d56 = d55
 					_ = d56
-					ctx.StabilizeDescForControlFlow(&d56)
 					ctx.StabilizeDescForControlFlow(&d55)
 					bbpos_2_0 := int32(-1)
 					_ = bbpos_2_0
-					lbl15 := ctx.ReserveLabel()
-					_ = lbl15
+					lbl11 := ctx.ReserveLabel()
+					_ = lbl11
 					bbpos_2_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl15)
+					ctx.MarkLabel(lbl11)
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
@@ -47370,11 +46883,8 @@ func init_alu() {
 						ps.General = true
 						return bbs[4].RenderPS(ps)
 					}
-					lbl16 := ctx.ReserveLabel()
-					lbl17 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d58.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl16)
-					ctx.EmitJmp(lbl17)
+					ctx.EmitJump(CondNotEqual, lbl7)
 					snap61 := d0
 					snap62 := d1
 					snap63 := d2
@@ -47393,8 +46903,6 @@ func init_alu() {
 					snap76 := d57
 					snap77 := d58
 					alloc78 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl16)
-					ctx.EmitJmp(lbl7)
 					ctx.RestoreAllocState(alloc78)
 					d0 = snap61
 					d1 = snap62
@@ -47413,8 +46921,6 @@ func init_alu() {
 					d56 = snap75
 					d57 = snap76
 					d58 = snap77
-					ctx.MarkLabel(lbl17)
-					ctx.EmitJmp(lbl9)
 					ctx.RestoreAllocState(alloc78)
 					d0 = snap61
 					d1 = snap62
@@ -47659,10 +47165,7 @@ func init_alu() {
 						ps.General = true
 						return bbs[5].RenderPS(ps)
 					}
-					lbl18 := ctx.ReserveLabel()
-					lbl19 := ctx.ReserveLabel()
-					ctx.EmitJump(d100.Condition, lbl18)
-					ctx.EmitJmp(lbl19)
+					ctx.EmitJump(d100.Condition, lbl4)
 					snap103 := d0
 					snap104 := d1
 					snap105 := d2
@@ -47683,8 +47186,6 @@ func init_alu() {
 					snap120 := d99
 					snap121 := d100
 					alloc122 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl18)
-					ctx.EmitJmp(lbl4)
 					ctx.RestoreAllocState(alloc122)
 					d0 = snap103
 					d1 = snap104
@@ -47705,8 +47206,6 @@ func init_alu() {
 					d58 = snap119
 					d99 = snap120
 					d100 = snap121
-					ctx.MarkLabel(lbl19)
-					ctx.EmitJmp(lbl5)
 					ctx.RestoreAllocState(alloc122)
 					d0 = snap103
 					d1 = snap104
@@ -48011,38 +47510,36 @@ func init_alu() {
 					d147 = d21
 					_ = d147
 					ctx.StabilizeDescForControlFlow(&d147)
-					ctx.StabilizeDescForControlFlow(&d55)
-					ctx.StabilizeDescForControlFlow(&d21)
 					phiBase148 = ctx.AllocStack(int32(16))
 					d149 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase148) + int32(0)}
 					_ = d149
-					lbl20 := ctx.ReserveLabel()
+					lbl12 := ctx.ReserveLabel()
 					bbpos_3_0 := int32(-1)
 					_ = bbpos_3_0
-					lbl21 := ctx.ReserveLabel()
-					_ = lbl21
+					lbl13 := ctx.ReserveLabel()
+					_ = lbl13
 					bbpos_3_1 := int32(-1)
 					_ = bbpos_3_1
-					lbl22 := ctx.ReserveLabel()
-					_ = lbl22
+					lbl14 := ctx.ReserveLabel()
+					_ = lbl14
 					bbpos_3_2 := int32(-1)
 					_ = bbpos_3_2
-					lbl23 := ctx.ReserveLabel()
-					_ = lbl23
+					lbl15 := ctx.ReserveLabel()
+					_ = lbl15
 					bbpos_3_3 := int32(-1)
 					_ = bbpos_3_3
-					lbl24 := ctx.ReserveLabel()
-					_ = lbl24
+					lbl16 := ctx.ReserveLabel()
+					_ = lbl16
 					bbpos_3_4 := int32(-1)
 					_ = bbpos_3_4
-					lbl25 := ctx.ReserveLabel()
-					_ = lbl25
+					lbl17 := ctx.ReserveLabel()
+					_ = lbl17
 					bbpos_3_5 := int32(-1)
 					_ = bbpos_3_5
-					lbl26 := ctx.ReserveLabel()
-					_ = lbl26
+					lbl18 := ctx.ReserveLabel()
+					_ = lbl18
 					bbpos_3_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl21)
+					ctx.MarkLabel(lbl13)
 					ctx.ResolveFixups()
 					d149 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase148) + int32(0)}
 					ctx.ReclaimUntrackedRegs()
@@ -48095,14 +47592,13 @@ func init_alu() {
 					ctx.EnsureDesc(&d151)
 					d152 = d151
 					_ = d152
-					ctx.StabilizeDescForControlFlow(&d152)
 					ctx.StabilizeDescForControlFlow(&d151)
 					bbpos_4_0 := int32(-1)
 					_ = bbpos_4_0
-					lbl27 := ctx.ReserveLabel()
-					_ = lbl27
+					lbl19 := ctx.ReserveLabel()
+					_ = lbl19
 					bbpos_4_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl27)
+					ctx.MarkLabel(lbl19)
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
@@ -48140,28 +47636,28 @@ func init_alu() {
 					if d154.Loc != LocImm && d154.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
-					lbl28 := ctx.ReserveLabel()
-					lbl29 := ctx.ReserveLabel()
+					lbl20 := ctx.ReserveLabel()
+					lbl21 := ctx.ReserveLabel()
 					if d154.Loc == LocImm {
 						if d154.Imm.Bool() {
-							ctx.MarkLabel(lbl28)
-							ctx.EmitJmp(lbl22)
+							ctx.MarkLabel(lbl20)
+							ctx.EmitJmp(lbl14)
 						} else {
-							ctx.MarkLabel(lbl29)
-							ctx.EmitJmp(lbl24)
+							ctx.MarkLabel(lbl21)
+							ctx.EmitJmp(lbl16)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d154.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl28)
-						ctx.EmitJmp(lbl29)
-						ctx.MarkLabel(lbl28)
-						ctx.EmitJmp(lbl22)
-						ctx.MarkLabel(lbl29)
-						ctx.EmitJmp(lbl24)
+						ctx.EmitJump(CondNotEqual, lbl20)
+						ctx.EmitJmp(lbl21)
+						ctx.MarkLabel(lbl20)
+						ctx.EmitJmp(lbl14)
+						ctx.MarkLabel(lbl21)
+						ctx.EmitJmp(lbl16)
 					}
 					ctx.FreeDesc(&d153)
 					bbpos_3_3 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl24)
+					ctx.MarkLabel(lbl16)
 					ctx.ResolveFixups()
 					d149 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase148) + int32(0)}
 					ctx.ReclaimUntrackedRegs()
@@ -48180,33 +47676,33 @@ func init_alu() {
 					_ = d159
 					d160 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase158) + int32(16)}
 					_ = d160
-					lbl30 := ctx.ReserveLabel()
+					lbl22 := ctx.ReserveLabel()
 					bbpos_5_0 := int32(-1)
 					_ = bbpos_5_0
-					lbl31 := ctx.ReserveLabel()
-					_ = lbl31
+					lbl23 := ctx.ReserveLabel()
+					_ = lbl23
 					bbpos_5_1 := int32(-1)
 					_ = bbpos_5_1
-					lbl32 := ctx.ReserveLabel()
-					_ = lbl32
+					lbl24 := ctx.ReserveLabel()
+					_ = lbl24
 					bbpos_5_2 := int32(-1)
 					_ = bbpos_5_2
-					lbl33 := ctx.ReserveLabel()
-					_ = lbl33
+					lbl25 := ctx.ReserveLabel()
+					_ = lbl25
 					bbpos_5_3 := int32(-1)
 					_ = bbpos_5_3
-					lbl34 := ctx.ReserveLabel()
-					_ = lbl34
+					lbl26 := ctx.ReserveLabel()
+					_ = lbl26
 					bbpos_5_4 := int32(-1)
 					_ = bbpos_5_4
-					lbl35 := ctx.ReserveLabel()
-					_ = lbl35
+					lbl27 := ctx.ReserveLabel()
+					_ = lbl27
 					bbpos_5_5 := int32(-1)
 					_ = bbpos_5_5
-					lbl36 := ctx.ReserveLabel()
-					_ = lbl36
+					lbl28 := ctx.ReserveLabel()
+					_ = lbl28
 					bbpos_5_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl31)
+					ctx.MarkLabel(lbl23)
 					ctx.ResolveFixups()
 					d159 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase158) + int32(0)}
 					d160 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase158) + int32(16)}
@@ -48228,26 +47724,26 @@ func init_alu() {
 					if d162.Loc != LocImm && d162.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
-					lbl37 := ctx.ReserveLabel()
-					lbl38 := ctx.ReserveLabel()
+					lbl29 := ctx.ReserveLabel()
+					lbl30 := ctx.ReserveLabel()
 					if d162.Loc == LocImm {
 						if d162.Imm.Bool() {
-							ctx.MarkLabel(lbl37)
-							ctx.EmitJmp(lbl34)
+							ctx.MarkLabel(lbl29)
+							ctx.EmitJmp(lbl26)
 						} else {
-							ctx.MarkLabel(lbl38)
-							ctx.EmitJmp(lbl32)
+							ctx.MarkLabel(lbl30)
+							ctx.EmitJmp(lbl24)
 						}
 					} else {
-						ctx.EmitJump(d162.Condition, lbl37)
-						ctx.EmitJmp(lbl38)
-						ctx.MarkLabel(lbl37)
-						ctx.EmitJmp(lbl34)
-						ctx.MarkLabel(lbl38)
-						ctx.EmitJmp(lbl32)
+						ctx.EmitJump(d162.Condition, lbl29)
+						ctx.EmitJmp(lbl30)
+						ctx.MarkLabel(lbl29)
+						ctx.EmitJmp(lbl26)
+						ctx.MarkLabel(lbl30)
+						ctx.EmitJmp(lbl24)
 					}
 					bbpos_5_1 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl32)
+					ctx.MarkLabel(lbl24)
 					ctx.ResolveFixups()
 					d159 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase158) + int32(0)}
 					d160 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase158) + int32(16)}
@@ -48270,28 +47766,28 @@ func init_alu() {
 					if d164.Loc != LocImm && d164.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
-					lbl39 := ctx.ReserveLabel()
-					lbl40 := ctx.ReserveLabel()
+					lbl31 := ctx.ReserveLabel()
+					lbl32 := ctx.ReserveLabel()
 					if d164.Loc == LocImm {
 						if d164.Imm.Bool() {
-							ctx.MarkLabel(lbl39)
-							ctx.EmitJmp(lbl35)
+							ctx.MarkLabel(lbl31)
+							ctx.EmitJmp(lbl27)
 						} else {
-							ctx.MarkLabel(lbl40)
+							ctx.MarkLabel(lbl32)
 							ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewInt(0)}, int32(phiBase158)+int32(16))
-							ctx.EmitJmp(lbl36)
+							ctx.EmitJmp(lbl28)
 						}
 					} else {
-						ctx.EmitJump(d164.Condition, lbl39)
-						ctx.EmitJmp(lbl40)
-						ctx.MarkLabel(lbl39)
-						ctx.EmitJmp(lbl35)
-						ctx.MarkLabel(lbl40)
+						ctx.EmitJump(d164.Condition, lbl31)
+						ctx.EmitJmp(lbl32)
+						ctx.MarkLabel(lbl31)
+						ctx.EmitJmp(lbl27)
+						ctx.MarkLabel(lbl32)
 						ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewInt(0)}, int32(phiBase158)+int32(16))
-						ctx.EmitJmp(lbl36)
+						ctx.EmitJmp(lbl28)
 					}
 					bbpos_5_5 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl36)
+					ctx.MarkLabel(lbl28)
 					ctx.ResolveFixups()
 					d159 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase158) + int32(0)}
 					d160 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase158) + int32(16)}
@@ -48319,7 +47815,7 @@ func init_alu() {
 						ctx.UnprotectReg(d160.Reg2)
 					}
 					bbpos_5_2 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl33)
+					ctx.MarkLabel(lbl25)
 					ctx.ResolveFixups()
 					d159 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase158) + int32(0)}
 					d160 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase158) + int32(16)}
@@ -48334,9 +47830,9 @@ func init_alu() {
 					} else {
 						ctx.EmitMovToReg(r11, d159)
 					}
-					ctx.EmitJmp(lbl30)
+					ctx.EmitJmp(lbl22)
 					bbpos_5_3 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl34)
+					ctx.MarkLabel(lbl26)
 					ctx.ResolveFixups()
 					d159 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase158) + int32(0)}
 					d160 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase158) + int32(16)}
@@ -48359,30 +47855,30 @@ func init_alu() {
 					if d167.Loc != LocImm && d167.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
-					lbl41 := ctx.ReserveLabel()
-					lbl42 := ctx.ReserveLabel()
+					lbl33 := ctx.ReserveLabel()
+					lbl34 := ctx.ReserveLabel()
 					if d167.Loc == LocImm {
 						if d167.Imm.Bool() {
-							ctx.MarkLabel(lbl41)
+							ctx.MarkLabel(lbl33)
 							ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewInt(1)}, int32(phiBase158)+int32(0))
-							ctx.EmitJmp(lbl33)
+							ctx.EmitJmp(lbl25)
 						} else {
-							ctx.MarkLabel(lbl42)
-							ctx.EmitJmp(lbl32)
+							ctx.MarkLabel(lbl34)
+							ctx.EmitJmp(lbl24)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d167.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl41)
-						ctx.EmitJmp(lbl42)
-						ctx.MarkLabel(lbl41)
+						ctx.EmitJump(CondNotEqual, lbl33)
+						ctx.EmitJmp(lbl34)
+						ctx.MarkLabel(lbl33)
 						ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewInt(1)}, int32(phiBase158)+int32(0))
-						ctx.EmitJmp(lbl33)
-						ctx.MarkLabel(lbl42)
-						ctx.EmitJmp(lbl32)
+						ctx.EmitJmp(lbl25)
+						ctx.MarkLabel(lbl34)
+						ctx.EmitJmp(lbl24)
 					}
 					ctx.FreeDesc(&d166)
 					bbpos_5_4 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl35)
+					ctx.MarkLabel(lbl27)
 					ctx.ResolveFixups()
 					d159 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase158) + int32(0)}
 					d160 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase158) + int32(16)}
@@ -48403,8 +47899,8 @@ func init_alu() {
 					ctx.EmitStoreToStack(d168, int32(phiBase158)+int32(16))
 					ctx.StabilizeDescForControlFlow(&d168)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EmitJmp(lbl36)
-					ctx.MarkLabel(lbl30)
+					ctx.EmitJmp(lbl28)
+					ctx.MarkLabel(lbl22)
 					d169 = JITValueDesc{Loc: LocReg, Reg: r11}
 					ctx.BindReg(r11, &d169)
 					ctx.BindReg(r11, &d169)
@@ -48414,28 +47910,28 @@ func init_alu() {
 					if d170.Loc != LocImm && d170.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
-					lbl43 := ctx.ReserveLabel()
-					lbl44 := ctx.ReserveLabel()
+					lbl35 := ctx.ReserveLabel()
+					lbl36 := ctx.ReserveLabel()
 					if d170.Loc == LocImm {
 						if d170.Imm.Bool() {
-							ctx.MarkLabel(lbl43)
-							ctx.EmitJmp(lbl22)
+							ctx.MarkLabel(lbl35)
+							ctx.EmitJmp(lbl14)
 						} else {
-							ctx.MarkLabel(lbl44)
-							ctx.EmitJmp(lbl23)
+							ctx.MarkLabel(lbl36)
+							ctx.EmitJmp(lbl15)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d170.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl43)
-						ctx.EmitJmp(lbl44)
-						ctx.MarkLabel(lbl43)
-						ctx.EmitJmp(lbl22)
-						ctx.MarkLabel(lbl44)
-						ctx.EmitJmp(lbl23)
+						ctx.EmitJump(CondNotEqual, lbl35)
+						ctx.EmitJmp(lbl36)
+						ctx.MarkLabel(lbl35)
+						ctx.EmitJmp(lbl14)
+						ctx.MarkLabel(lbl36)
+						ctx.EmitJmp(lbl15)
 					}
 					ctx.FreeDesc(&d169)
 					bbpos_3_2 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl23)
+					ctx.MarkLabel(lbl15)
 					ctx.ResolveFixups()
 					d149 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase148) + int32(0)}
 					ctx.ReclaimUntrackedRegs()
@@ -48492,25 +47988,25 @@ func init_alu() {
 					phiBase176 = ctx.AllocStack(int32(16))
 					d177 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase176) + int32(0)}
 					_ = d177
-					lbl45 := ctx.ReserveLabel()
+					lbl37 := ctx.ReserveLabel()
 					bbpos_6_0 := int32(-1)
 					_ = bbpos_6_0
-					lbl46 := ctx.ReserveLabel()
-					_ = lbl46
+					lbl38 := ctx.ReserveLabel()
+					_ = lbl38
 					bbpos_6_1 := int32(-1)
 					_ = bbpos_6_1
-					lbl47 := ctx.ReserveLabel()
-					_ = lbl47
+					lbl39 := ctx.ReserveLabel()
+					_ = lbl39
 					bbpos_6_2 := int32(-1)
 					_ = bbpos_6_2
-					lbl48 := ctx.ReserveLabel()
-					_ = lbl48
+					lbl40 := ctx.ReserveLabel()
+					_ = lbl40
 					bbpos_6_3 := int32(-1)
 					_ = bbpos_6_3
-					lbl49 := ctx.ReserveLabel()
-					_ = lbl49
+					lbl41 := ctx.ReserveLabel()
+					_ = lbl41
 					bbpos_6_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl46)
+					ctx.MarkLabel(lbl38)
 					ctx.ResolveFixups()
 					d177 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase176) + int32(0)}
 					ctx.ReclaimUntrackedRegs()
@@ -48532,33 +48028,33 @@ func init_alu() {
 					if d179.Loc != LocImm && d179.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
-					lbl50 := ctx.ReserveLabel()
-					lbl51 := ctx.ReserveLabel()
+					lbl42 := ctx.ReserveLabel()
+					lbl43 := ctx.ReserveLabel()
 					if d179.Loc == LocImm {
 						if d179.Imm.Bool() {
-							ctx.MarkLabel(lbl50)
-							ctx.EmitJmp(lbl47)
+							ctx.MarkLabel(lbl42)
+							ctx.EmitJmp(lbl39)
 						} else {
-							ctx.MarkLabel(lbl51)
-							ctx.EmitJmp(lbl49)
+							ctx.MarkLabel(lbl43)
+							ctx.EmitJmp(lbl41)
 						}
 					} else {
-						ctx.EmitJump(d179.Condition, lbl50)
-						ctx.EmitJmp(lbl51)
-						ctx.MarkLabel(lbl50)
-						ctx.EmitJmp(lbl47)
-						ctx.MarkLabel(lbl51)
-						ctx.EmitJmp(lbl49)
+						ctx.EmitJump(d179.Condition, lbl42)
+						ctx.EmitJmp(lbl43)
+						ctx.MarkLabel(lbl42)
+						ctx.EmitJmp(lbl39)
+						ctx.MarkLabel(lbl43)
+						ctx.EmitJmp(lbl41)
 					}
 					bbpos_6_3 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl49)
+					ctx.MarkLabel(lbl41)
 					ctx.ResolveFixups()
 					d177 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase176) + int32(0)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(-4503599627370496)}, int32(phiBase176)+int32(0))
 					bbpos_6_2 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl48)
+					ctx.MarkLabel(lbl40)
 					ctx.ResolveFixups()
 					d177 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase176) + int32(0)}
 					ctx.ReclaimUntrackedRegs()
@@ -48567,13 +48063,12 @@ func init_alu() {
 					ctx.EnsureDesc(&d177)
 					d180 = d177
 					_ = d180
-					ctx.StabilizeDescForControlFlow(&d180)
 					bbpos_7_0 := int32(-1)
 					_ = bbpos_7_0
-					lbl52 := ctx.ReserveLabel()
-					_ = lbl52
+					lbl44 := ctx.ReserveLabel()
+					_ = lbl44
 					bbpos_7_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl52)
+					ctx.MarkLabel(lbl44)
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
@@ -48602,16 +48097,16 @@ func init_alu() {
 					} else {
 						ctx.EmitMovToReg(r15, d184)
 					}
-					ctx.EmitJmp(lbl45)
+					ctx.EmitJmp(lbl37)
 					bbpos_6_1 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl47)
+					ctx.MarkLabel(lbl39)
 					ctx.ResolveFixups()
 					d177 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase176) + int32(0)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(9218868437227405312)}, int32(phiBase176)+int32(0))
-					ctx.EmitJmp(lbl48)
-					ctx.MarkLabel(lbl45)
+					ctx.EmitJmp(lbl40)
+					ctx.MarkLabel(lbl37)
 					d185 = JITValueDesc{Loc: LocReg, Reg: r15}
 					ctx.BindReg(r15, &d185)
 					ctx.BindReg(r15, &d185)
@@ -48630,57 +48125,57 @@ func init_alu() {
 					_ = d189
 					d190 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase188) + int32(16)}
 					_ = d190
-					lbl53 := ctx.ReserveLabel()
+					lbl45 := ctx.ReserveLabel()
 					bbpos_8_0 := int32(-1)
 					_ = bbpos_8_0
-					lbl54 := ctx.ReserveLabel()
-					_ = lbl54
+					lbl46 := ctx.ReserveLabel()
+					_ = lbl46
 					bbpos_8_1 := int32(-1)
 					_ = bbpos_8_1
-					lbl55 := ctx.ReserveLabel()
-					_ = lbl55
+					lbl47 := ctx.ReserveLabel()
+					_ = lbl47
 					bbpos_8_2 := int32(-1)
 					_ = bbpos_8_2
-					lbl56 := ctx.ReserveLabel()
-					_ = lbl56
+					lbl48 := ctx.ReserveLabel()
+					_ = lbl48
 					bbpos_8_3 := int32(-1)
 					_ = bbpos_8_3
-					lbl57 := ctx.ReserveLabel()
-					_ = lbl57
+					lbl49 := ctx.ReserveLabel()
+					_ = lbl49
 					bbpos_8_4 := int32(-1)
 					_ = bbpos_8_4
-					lbl58 := ctx.ReserveLabel()
-					_ = lbl58
+					lbl50 := ctx.ReserveLabel()
+					_ = lbl50
 					bbpos_8_5 := int32(-1)
 					_ = bbpos_8_5
-					lbl59 := ctx.ReserveLabel()
-					_ = lbl59
+					lbl51 := ctx.ReserveLabel()
+					_ = lbl51
 					bbpos_8_6 := int32(-1)
 					_ = bbpos_8_6
-					lbl60 := ctx.ReserveLabel()
-					_ = lbl60
+					lbl52 := ctx.ReserveLabel()
+					_ = lbl52
 					bbpos_8_7 := int32(-1)
 					_ = bbpos_8_7
-					lbl61 := ctx.ReserveLabel()
-					_ = lbl61
+					lbl53 := ctx.ReserveLabel()
+					_ = lbl53
 					bbpos_8_8 := int32(-1)
 					_ = bbpos_8_8
-					lbl62 := ctx.ReserveLabel()
-					_ = lbl62
+					lbl54 := ctx.ReserveLabel()
+					_ = lbl54
 					bbpos_8_9 := int32(-1)
 					_ = bbpos_8_9
-					lbl63 := ctx.ReserveLabel()
-					_ = lbl63
+					lbl55 := ctx.ReserveLabel()
+					_ = lbl55
 					bbpos_8_10 := int32(-1)
 					_ = bbpos_8_10
-					lbl64 := ctx.ReserveLabel()
-					_ = lbl64
+					lbl56 := ctx.ReserveLabel()
+					_ = lbl56
 					bbpos_8_11 := int32(-1)
 					_ = bbpos_8_11
-					lbl65 := ctx.ReserveLabel()
-					_ = lbl65
+					lbl57 := ctx.ReserveLabel()
+					_ = lbl57
 					bbpos_8_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl54)
+					ctx.MarkLabel(lbl46)
 					ctx.ResolveFixups()
 					d189 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase188) + int32(0)}
 					d190 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase188) + int32(16)}
@@ -48689,14 +48184,13 @@ func init_alu() {
 					ctx.EnsureDesc(&d186)
 					d191 = d186
 					_ = d191
-					ctx.StabilizeDescForControlFlow(&d191)
 					ctx.StabilizeDescForControlFlow(&d186)
 					bbpos_9_0 := int32(-1)
 					_ = bbpos_9_0
-					lbl66 := ctx.ReserveLabel()
-					_ = lbl66
+					lbl58 := ctx.ReserveLabel()
+					_ = lbl58
 					bbpos_9_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl66)
+					ctx.MarkLabel(lbl58)
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
@@ -48734,30 +48228,30 @@ func init_alu() {
 					if d193.Loc != LocImm && d193.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
-					lbl67 := ctx.ReserveLabel()
-					lbl68 := ctx.ReserveLabel()
+					lbl59 := ctx.ReserveLabel()
+					lbl60 := ctx.ReserveLabel()
 					if d193.Loc == LocImm {
 						if d193.Imm.Bool() {
-							ctx.MarkLabel(lbl67)
+							ctx.MarkLabel(lbl59)
 							ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewInt(1)}, int32(phiBase188)+int32(16))
-							ctx.EmitJmp(lbl60)
+							ctx.EmitJmp(lbl52)
 						} else {
-							ctx.MarkLabel(lbl68)
-							ctx.EmitJmp(lbl59)
+							ctx.MarkLabel(lbl60)
+							ctx.EmitJmp(lbl51)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d193.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl67)
-						ctx.EmitJmp(lbl68)
-						ctx.MarkLabel(lbl67)
-						ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewInt(1)}, int32(phiBase188)+int32(16))
+						ctx.EmitJump(CondNotEqual, lbl59)
 						ctx.EmitJmp(lbl60)
-						ctx.MarkLabel(lbl68)
-						ctx.EmitJmp(lbl59)
+						ctx.MarkLabel(lbl59)
+						ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewInt(1)}, int32(phiBase188)+int32(16))
+						ctx.EmitJmp(lbl52)
+						ctx.MarkLabel(lbl60)
+						ctx.EmitJmp(lbl51)
 					}
 					ctx.FreeDesc(&d192)
 					bbpos_8_6 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl60)
+					ctx.MarkLabel(lbl52)
 					ctx.ResolveFixups()
 					d189 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase188) + int32(0)}
 					d190 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase188) + int32(16)}
@@ -48769,28 +48263,28 @@ func init_alu() {
 					if d194.Loc != LocImm && d194.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
-					lbl69 := ctx.ReserveLabel()
-					lbl70 := ctx.ReserveLabel()
+					lbl61 := ctx.ReserveLabel()
+					lbl62 := ctx.ReserveLabel()
 					if d194.Loc == LocImm {
 						if d194.Imm.Bool() {
-							ctx.MarkLabel(lbl69)
-							ctx.EmitJmp(lbl56)
+							ctx.MarkLabel(lbl61)
+							ctx.EmitJmp(lbl48)
 						} else {
-							ctx.MarkLabel(lbl70)
-							ctx.EmitJmp(lbl58)
+							ctx.MarkLabel(lbl62)
+							ctx.EmitJmp(lbl50)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d194.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl69)
-						ctx.EmitJmp(lbl70)
-						ctx.MarkLabel(lbl69)
-						ctx.EmitJmp(lbl56)
-						ctx.MarkLabel(lbl70)
-						ctx.EmitJmp(lbl58)
+						ctx.EmitJump(CondNotEqual, lbl61)
+						ctx.EmitJmp(lbl62)
+						ctx.MarkLabel(lbl61)
+						ctx.EmitJmp(lbl48)
+						ctx.MarkLabel(lbl62)
+						ctx.EmitJmp(lbl50)
 					}
 					ctx.FreeDesc(&d190)
 					bbpos_8_4 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl58)
+					ctx.MarkLabel(lbl50)
 					ctx.ResolveFixups()
 					d189 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase188) + int32(0)}
 					d190 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase188) + int32(16)}
@@ -48828,28 +48322,28 @@ func init_alu() {
 					if d196.Loc != LocImm && d196.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
-					lbl71 := ctx.ReserveLabel()
-					lbl72 := ctx.ReserveLabel()
+					lbl63 := ctx.ReserveLabel()
+					lbl64 := ctx.ReserveLabel()
 					if d196.Loc == LocImm {
 						if d196.Imm.Bool() {
-							ctx.MarkLabel(lbl71)
-							ctx.EmitJmp(lbl57)
+							ctx.MarkLabel(lbl63)
+							ctx.EmitJmp(lbl49)
 						} else {
-							ctx.MarkLabel(lbl72)
-							ctx.EmitJmp(lbl62)
+							ctx.MarkLabel(lbl64)
+							ctx.EmitJmp(lbl54)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d196.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl71)
-						ctx.EmitJmp(lbl72)
-						ctx.MarkLabel(lbl71)
-						ctx.EmitJmp(lbl57)
-						ctx.MarkLabel(lbl72)
-						ctx.EmitJmp(lbl62)
+						ctx.EmitJump(CondNotEqual, lbl63)
+						ctx.EmitJmp(lbl64)
+						ctx.MarkLabel(lbl63)
+						ctx.EmitJmp(lbl49)
+						ctx.MarkLabel(lbl64)
+						ctx.EmitJmp(lbl54)
 					}
 					ctx.FreeDesc(&d195)
 					bbpos_8_8 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl62)
+					ctx.MarkLabel(lbl54)
 					ctx.ResolveFixups()
 					d189 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase188) + int32(0)}
 					d190 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase188) + int32(16)}
@@ -48872,28 +48366,28 @@ func init_alu() {
 					if d198.Loc != LocImm && d198.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
-					lbl73 := ctx.ReserveLabel()
-					lbl74 := ctx.ReserveLabel()
+					lbl65 := ctx.ReserveLabel()
+					lbl66 := ctx.ReserveLabel()
 					if d198.Loc == LocImm {
 						if d198.Imm.Bool() {
-							ctx.MarkLabel(lbl73)
-							ctx.EmitJmp(lbl61)
+							ctx.MarkLabel(lbl65)
+							ctx.EmitJmp(lbl53)
 						} else {
-							ctx.MarkLabel(lbl74)
-							ctx.EmitJmp(lbl64)
+							ctx.MarkLabel(lbl66)
+							ctx.EmitJmp(lbl56)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d198.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl73)
-						ctx.EmitJmp(lbl74)
-						ctx.MarkLabel(lbl73)
-						ctx.EmitJmp(lbl61)
-						ctx.MarkLabel(lbl74)
-						ctx.EmitJmp(lbl64)
+						ctx.EmitJump(CondNotEqual, lbl65)
+						ctx.EmitJmp(lbl66)
+						ctx.MarkLabel(lbl65)
+						ctx.EmitJmp(lbl53)
+						ctx.MarkLabel(lbl66)
+						ctx.EmitJmp(lbl56)
 					}
 					ctx.FreeDesc(&d197)
 					bbpos_8_10 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl64)
+					ctx.MarkLabel(lbl56)
 					ctx.ResolveFixups()
 					d189 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase188) + int32(0)}
 					d190 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase188) + int32(16)}
@@ -48974,26 +48468,26 @@ func init_alu() {
 					if d202.Loc != LocImm && d202.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
-					lbl75 := ctx.ReserveLabel()
-					lbl76 := ctx.ReserveLabel()
+					lbl67 := ctx.ReserveLabel()
+					lbl68 := ctx.ReserveLabel()
 					if d202.Loc == LocImm {
 						if d202.Imm.Bool() {
-							ctx.MarkLabel(lbl75)
-							ctx.EmitJmp(lbl63)
+							ctx.MarkLabel(lbl67)
+							ctx.EmitJmp(lbl55)
 						} else {
-							ctx.MarkLabel(lbl76)
-							ctx.EmitJmp(lbl65)
+							ctx.MarkLabel(lbl68)
+							ctx.EmitJmp(lbl57)
 						}
 					} else {
-						ctx.EmitJump(d202.Condition, lbl75)
-						ctx.EmitJmp(lbl76)
-						ctx.MarkLabel(lbl75)
-						ctx.EmitJmp(lbl63)
-						ctx.MarkLabel(lbl76)
-						ctx.EmitJmp(lbl65)
+						ctx.EmitJump(d202.Condition, lbl67)
+						ctx.EmitJmp(lbl68)
+						ctx.MarkLabel(lbl67)
+						ctx.EmitJmp(lbl55)
+						ctx.MarkLabel(lbl68)
+						ctx.EmitJmp(lbl57)
 					}
 					bbpos_8_11 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl65)
+					ctx.MarkLabel(lbl57)
 					ctx.ResolveFixups()
 					d189 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase188) + int32(0)}
 					d190 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase188) + int32(16)}
@@ -49002,14 +48496,13 @@ func init_alu() {
 					ctx.EnsureDesc(&d186)
 					d203 = d186
 					_ = d203
-					ctx.StabilizeDescForControlFlow(&d203)
 					ctx.StabilizeDescForControlFlow(&d186)
 					bbpos_10_0 := int32(-1)
 					_ = bbpos_10_0
-					lbl77 := ctx.ReserveLabel()
-					_ = lbl77
+					lbl69 := ctx.ReserveLabel()
+					_ = lbl69
 					bbpos_10_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl77)
+					ctx.MarkLabel(lbl69)
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
@@ -49050,13 +48543,12 @@ func init_alu() {
 					ctx.EnsureDesc(&d208)
 					d209 = d208
 					_ = d209
-					ctx.StabilizeDescForControlFlow(&d209)
 					bbpos_11_0 := int32(-1)
 					_ = bbpos_11_0
-					lbl78 := ctx.ReserveLabel()
-					_ = lbl78
+					lbl70 := ctx.ReserveLabel()
+					_ = lbl70
 					bbpos_11_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl78)
+					ctx.MarkLabel(lbl70)
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
@@ -49098,7 +48590,7 @@ func init_alu() {
 						ctx.UnprotectReg(d213.Reg2)
 					}
 					bbpos_8_1 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl55)
+					ctx.MarkLabel(lbl47)
 					ctx.ResolveFixups()
 					d189 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase188) + int32(0)}
 					d190 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase188) + int32(16)}
@@ -49113,9 +48605,9 @@ func init_alu() {
 					} else {
 						ctx.EmitMovToReg(r30, d189)
 					}
-					ctx.EmitJmp(lbl53)
+					ctx.EmitJmp(lbl45)
 					bbpos_8_5 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl59)
+					ctx.MarkLabel(lbl51)
 					ctx.ResolveFixups()
 					d189 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase188) + int32(0)}
 					d190 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase188) + int32(16)}
@@ -49124,14 +48616,13 @@ func init_alu() {
 					ctx.EnsureDesc(&d187)
 					d215 = d187
 					_ = d215
-					ctx.StabilizeDescForControlFlow(&d215)
 					ctx.StabilizeDescForControlFlow(&d187)
 					bbpos_12_0 := int32(-1)
 					_ = bbpos_12_0
-					lbl79 := ctx.ReserveLabel()
-					_ = lbl79
+					lbl71 := ctx.ReserveLabel()
+					_ = lbl71
 					bbpos_12_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl79)
+					ctx.MarkLabel(lbl71)
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
@@ -49184,9 +48675,9 @@ func init_alu() {
 						ctx.UnprotectReg(d216.Reg)
 						ctx.UnprotectReg(d216.Reg2)
 					}
-					ctx.EmitJmp(lbl60)
+					ctx.EmitJmp(lbl52)
 					bbpos_8_2 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl56)
+					ctx.MarkLabel(lbl48)
 					ctx.ResolveFixups()
 					d189 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase188) + int32(0)}
 					d190 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase188) + int32(16)}
@@ -49194,23 +48685,22 @@ func init_alu() {
 					ctx.ReclaimUntrackedRegs()
 					bbpos_13_0 := int32(-1)
 					_ = bbpos_13_0
-					lbl80 := ctx.ReserveLabel()
-					_ = lbl80
+					lbl72 := ctx.ReserveLabel()
+					_ = lbl72
 					bbpos_13_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl80)
+					ctx.MarkLabel(lbl72)
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					d218 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(9221120237041090561)}
 					d219 = d218
 					_ = d219
-					ctx.StabilizeDescForControlFlow(&d219)
 					bbpos_14_0 := int32(-1)
 					_ = bbpos_14_0
-					lbl81 := ctx.ReserveLabel()
-					_ = lbl81
+					lbl73 := ctx.ReserveLabel()
+					_ = lbl73
 					bbpos_14_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl81)
+					ctx.MarkLabel(lbl73)
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
@@ -49253,9 +48743,9 @@ func init_alu() {
 						ctx.UnprotectReg(d223.Reg)
 						ctx.UnprotectReg(d223.Reg2)
 					}
-					ctx.EmitJmp(lbl55)
+					ctx.EmitJmp(lbl47)
 					bbpos_8_3 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl57)
+					ctx.MarkLabel(lbl49)
 					ctx.ResolveFixups()
 					d189 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase188) + int32(0)}
 					d190 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase188) + int32(16)}
@@ -49280,9 +48770,9 @@ func init_alu() {
 						ctx.UnprotectReg(d186.Reg)
 						ctx.UnprotectReg(d186.Reg2)
 					}
-					ctx.EmitJmp(lbl55)
+					ctx.EmitJmp(lbl47)
 					bbpos_8_7 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl61)
+					ctx.MarkLabel(lbl53)
 					ctx.ResolveFixups()
 					d189 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase188) + int32(0)}
 					d190 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase188) + int32(16)}
@@ -49291,13 +48781,12 @@ func init_alu() {
 					d226 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(1)}
 					d227 = d226
 					_ = d227
-					ctx.StabilizeDescForControlFlow(&d227)
 					bbpos_15_0 := int32(-1)
 					_ = bbpos_15_0
-					lbl82 := ctx.ReserveLabel()
-					_ = lbl82
+					lbl74 := ctx.ReserveLabel()
+					_ = lbl74
 					bbpos_15_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl82)
+					ctx.MarkLabel(lbl74)
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
@@ -49355,9 +48844,9 @@ func init_alu() {
 						ctx.UnprotectReg(d232.Reg)
 						ctx.UnprotectReg(d232.Reg2)
 					}
-					ctx.EmitJmp(lbl55)
+					ctx.EmitJmp(lbl47)
 					bbpos_8_9 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl63)
+					ctx.MarkLabel(lbl55)
 					ctx.ResolveFixups()
 					d189 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase188) + int32(0)}
 					d190 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase188) + int32(16)}
@@ -49366,14 +48855,13 @@ func init_alu() {
 					ctx.EnsureDesc(&d186)
 					d234 = d186
 					_ = d234
-					ctx.StabilizeDescForControlFlow(&d234)
 					ctx.StabilizeDescForControlFlow(&d186)
 					bbpos_16_0 := int32(-1)
 					_ = bbpos_16_0
-					lbl83 := ctx.ReserveLabel()
-					_ = lbl83
+					lbl75 := ctx.ReserveLabel()
+					_ = lbl75
 					bbpos_16_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl83)
+					ctx.MarkLabel(lbl75)
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
@@ -49414,13 +48902,12 @@ func init_alu() {
 					ctx.EnsureDesc(&d239)
 					d240 = d239
 					_ = d240
-					ctx.StabilizeDescForControlFlow(&d240)
 					bbpos_17_0 := int32(-1)
 					_ = bbpos_17_0
-					lbl84 := ctx.ReserveLabel()
-					_ = lbl84
+					lbl76 := ctx.ReserveLabel()
+					_ = lbl76
 					bbpos_17_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl84)
+					ctx.MarkLabel(lbl76)
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
@@ -49461,8 +48948,8 @@ func init_alu() {
 						ctx.UnprotectReg(d244.Reg)
 						ctx.UnprotectReg(d244.Reg2)
 					}
-					ctx.EmitJmp(lbl55)
-					ctx.MarkLabel(lbl53)
+					ctx.EmitJmp(lbl47)
+					ctx.MarkLabel(lbl45)
 					d246 = JITValueDesc{Loc: LocReg, Reg: r30}
 					ctx.BindReg(r30, &d246)
 					ctx.BindReg(r30, &d246)
@@ -49532,25 +49019,25 @@ func init_alu() {
 					phiBase252 = ctx.AllocStack(int32(16))
 					d253 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase252) + int32(0)}
 					_ = d253
-					lbl85 := ctx.ReserveLabel()
+					lbl77 := ctx.ReserveLabel()
 					bbpos_18_0 := int32(-1)
 					_ = bbpos_18_0
-					lbl86 := ctx.ReserveLabel()
-					_ = lbl86
+					lbl78 := ctx.ReserveLabel()
+					_ = lbl78
 					bbpos_18_1 := int32(-1)
 					_ = bbpos_18_1
-					lbl87 := ctx.ReserveLabel()
-					_ = lbl87
+					lbl79 := ctx.ReserveLabel()
+					_ = lbl79
 					bbpos_18_2 := int32(-1)
 					_ = bbpos_18_2
-					lbl88 := ctx.ReserveLabel()
-					_ = lbl88
+					lbl80 := ctx.ReserveLabel()
+					_ = lbl80
 					bbpos_18_3 := int32(-1)
 					_ = bbpos_18_3
-					lbl89 := ctx.ReserveLabel()
-					_ = lbl89
+					lbl81 := ctx.ReserveLabel()
+					_ = lbl81
 					bbpos_18_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl86)
+					ctx.MarkLabel(lbl78)
 					ctx.ResolveFixups()
 					d253 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase252) + int32(0)}
 					ctx.ReclaimUntrackedRegs()
@@ -49572,33 +49059,33 @@ func init_alu() {
 					if d255.Loc != LocImm && d255.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
-					lbl90 := ctx.ReserveLabel()
-					lbl91 := ctx.ReserveLabel()
+					lbl82 := ctx.ReserveLabel()
+					lbl83 := ctx.ReserveLabel()
 					if d255.Loc == LocImm {
 						if d255.Imm.Bool() {
-							ctx.MarkLabel(lbl90)
-							ctx.EmitJmp(lbl87)
+							ctx.MarkLabel(lbl82)
+							ctx.EmitJmp(lbl79)
 						} else {
-							ctx.MarkLabel(lbl91)
-							ctx.EmitJmp(lbl89)
+							ctx.MarkLabel(lbl83)
+							ctx.EmitJmp(lbl81)
 						}
 					} else {
-						ctx.EmitJump(d255.Condition, lbl90)
-						ctx.EmitJmp(lbl91)
-						ctx.MarkLabel(lbl90)
-						ctx.EmitJmp(lbl87)
-						ctx.MarkLabel(lbl91)
-						ctx.EmitJmp(lbl89)
+						ctx.EmitJump(d255.Condition, lbl82)
+						ctx.EmitJmp(lbl83)
+						ctx.MarkLabel(lbl82)
+						ctx.EmitJmp(lbl79)
+						ctx.MarkLabel(lbl83)
+						ctx.EmitJmp(lbl81)
 					}
 					bbpos_18_3 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl89)
+					ctx.MarkLabel(lbl81)
 					ctx.ResolveFixups()
 					d253 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase252) + int32(0)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(-4503599627370496)}, int32(phiBase252)+int32(0))
 					bbpos_18_2 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl88)
+					ctx.MarkLabel(lbl80)
 					ctx.ResolveFixups()
 					d253 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase252) + int32(0)}
 					ctx.ReclaimUntrackedRegs()
@@ -49607,13 +49094,12 @@ func init_alu() {
 					ctx.EnsureDesc(&d253)
 					d256 = d253
 					_ = d256
-					ctx.StabilizeDescForControlFlow(&d256)
 					bbpos_19_0 := int32(-1)
 					_ = bbpos_19_0
-					lbl92 := ctx.ReserveLabel()
-					_ = lbl92
+					lbl84 := ctx.ReserveLabel()
+					_ = lbl84
 					bbpos_19_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl92)
+					ctx.MarkLabel(lbl84)
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
@@ -49642,16 +49128,16 @@ func init_alu() {
 					} else {
 						ctx.EmitMovToReg(r36, d260)
 					}
-					ctx.EmitJmp(lbl85)
+					ctx.EmitJmp(lbl77)
 					bbpos_18_1 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl87)
+					ctx.MarkLabel(lbl79)
 					ctx.ResolveFixups()
 					d253 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase252) + int32(0)}
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(9218868437227405312)}, int32(phiBase252)+int32(0))
-					ctx.EmitJmp(lbl88)
-					ctx.MarkLabel(lbl85)
+					ctx.EmitJmp(lbl80)
+					ctx.MarkLabel(lbl77)
 					d261 = JITValueDesc{Loc: LocReg, Reg: r36}
 					ctx.BindReg(r36, &d261)
 					ctx.BindReg(r36, &d261)
@@ -49670,57 +49156,57 @@ func init_alu() {
 					_ = d265
 					d266 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase264) + int32(16)}
 					_ = d266
-					lbl93 := ctx.ReserveLabel()
+					lbl85 := ctx.ReserveLabel()
 					bbpos_20_0 := int32(-1)
 					_ = bbpos_20_0
-					lbl94 := ctx.ReserveLabel()
-					_ = lbl94
+					lbl86 := ctx.ReserveLabel()
+					_ = lbl86
 					bbpos_20_1 := int32(-1)
 					_ = bbpos_20_1
-					lbl95 := ctx.ReserveLabel()
-					_ = lbl95
+					lbl87 := ctx.ReserveLabel()
+					_ = lbl87
 					bbpos_20_2 := int32(-1)
 					_ = bbpos_20_2
-					lbl96 := ctx.ReserveLabel()
-					_ = lbl96
+					lbl88 := ctx.ReserveLabel()
+					_ = lbl88
 					bbpos_20_3 := int32(-1)
 					_ = bbpos_20_3
-					lbl97 := ctx.ReserveLabel()
-					_ = lbl97
+					lbl89 := ctx.ReserveLabel()
+					_ = lbl89
 					bbpos_20_4 := int32(-1)
 					_ = bbpos_20_4
-					lbl98 := ctx.ReserveLabel()
-					_ = lbl98
+					lbl90 := ctx.ReserveLabel()
+					_ = lbl90
 					bbpos_20_5 := int32(-1)
 					_ = bbpos_20_5
-					lbl99 := ctx.ReserveLabel()
-					_ = lbl99
+					lbl91 := ctx.ReserveLabel()
+					_ = lbl91
 					bbpos_20_6 := int32(-1)
 					_ = bbpos_20_6
-					lbl100 := ctx.ReserveLabel()
-					_ = lbl100
+					lbl92 := ctx.ReserveLabel()
+					_ = lbl92
 					bbpos_20_7 := int32(-1)
 					_ = bbpos_20_7
-					lbl101 := ctx.ReserveLabel()
-					_ = lbl101
+					lbl93 := ctx.ReserveLabel()
+					_ = lbl93
 					bbpos_20_8 := int32(-1)
 					_ = bbpos_20_8
-					lbl102 := ctx.ReserveLabel()
-					_ = lbl102
+					lbl94 := ctx.ReserveLabel()
+					_ = lbl94
 					bbpos_20_9 := int32(-1)
 					_ = bbpos_20_9
-					lbl103 := ctx.ReserveLabel()
-					_ = lbl103
+					lbl95 := ctx.ReserveLabel()
+					_ = lbl95
 					bbpos_20_10 := int32(-1)
 					_ = bbpos_20_10
-					lbl104 := ctx.ReserveLabel()
-					_ = lbl104
+					lbl96 := ctx.ReserveLabel()
+					_ = lbl96
 					bbpos_20_11 := int32(-1)
 					_ = bbpos_20_11
-					lbl105 := ctx.ReserveLabel()
-					_ = lbl105
+					lbl97 := ctx.ReserveLabel()
+					_ = lbl97
 					bbpos_20_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl94)
+					ctx.MarkLabel(lbl86)
 					ctx.ResolveFixups()
 					d265 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase264) + int32(0)}
 					d266 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase264) + int32(16)}
@@ -49729,14 +49215,13 @@ func init_alu() {
 					ctx.EnsureDesc(&d262)
 					d267 = d262
 					_ = d267
-					ctx.StabilizeDescForControlFlow(&d267)
 					ctx.StabilizeDescForControlFlow(&d262)
 					bbpos_21_0 := int32(-1)
 					_ = bbpos_21_0
-					lbl106 := ctx.ReserveLabel()
-					_ = lbl106
+					lbl98 := ctx.ReserveLabel()
+					_ = lbl98
 					bbpos_21_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl106)
+					ctx.MarkLabel(lbl98)
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
@@ -49774,30 +49259,30 @@ func init_alu() {
 					if d269.Loc != LocImm && d269.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
-					lbl107 := ctx.ReserveLabel()
-					lbl108 := ctx.ReserveLabel()
+					lbl99 := ctx.ReserveLabel()
+					lbl100 := ctx.ReserveLabel()
 					if d269.Loc == LocImm {
 						if d269.Imm.Bool() {
-							ctx.MarkLabel(lbl107)
+							ctx.MarkLabel(lbl99)
 							ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewInt(1)}, int32(phiBase264)+int32(16))
-							ctx.EmitJmp(lbl100)
+							ctx.EmitJmp(lbl92)
 						} else {
-							ctx.MarkLabel(lbl108)
-							ctx.EmitJmp(lbl99)
+							ctx.MarkLabel(lbl100)
+							ctx.EmitJmp(lbl91)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d269.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl107)
-						ctx.EmitJmp(lbl108)
-						ctx.MarkLabel(lbl107)
-						ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewInt(1)}, int32(phiBase264)+int32(16))
+						ctx.EmitJump(CondNotEqual, lbl99)
 						ctx.EmitJmp(lbl100)
-						ctx.MarkLabel(lbl108)
-						ctx.EmitJmp(lbl99)
+						ctx.MarkLabel(lbl99)
+						ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewInt(1)}, int32(phiBase264)+int32(16))
+						ctx.EmitJmp(lbl92)
+						ctx.MarkLabel(lbl100)
+						ctx.EmitJmp(lbl91)
 					}
 					ctx.FreeDesc(&d268)
 					bbpos_20_6 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl100)
+					ctx.MarkLabel(lbl92)
 					ctx.ResolveFixups()
 					d265 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase264) + int32(0)}
 					d266 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase264) + int32(16)}
@@ -49809,28 +49294,28 @@ func init_alu() {
 					if d270.Loc != LocImm && d270.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
-					lbl109 := ctx.ReserveLabel()
-					lbl110 := ctx.ReserveLabel()
+					lbl101 := ctx.ReserveLabel()
+					lbl102 := ctx.ReserveLabel()
 					if d270.Loc == LocImm {
 						if d270.Imm.Bool() {
-							ctx.MarkLabel(lbl109)
-							ctx.EmitJmp(lbl96)
+							ctx.MarkLabel(lbl101)
+							ctx.EmitJmp(lbl88)
 						} else {
-							ctx.MarkLabel(lbl110)
-							ctx.EmitJmp(lbl98)
+							ctx.MarkLabel(lbl102)
+							ctx.EmitJmp(lbl90)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d270.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl109)
-						ctx.EmitJmp(lbl110)
-						ctx.MarkLabel(lbl109)
-						ctx.EmitJmp(lbl96)
-						ctx.MarkLabel(lbl110)
-						ctx.EmitJmp(lbl98)
+						ctx.EmitJump(CondNotEqual, lbl101)
+						ctx.EmitJmp(lbl102)
+						ctx.MarkLabel(lbl101)
+						ctx.EmitJmp(lbl88)
+						ctx.MarkLabel(lbl102)
+						ctx.EmitJmp(lbl90)
 					}
 					ctx.FreeDesc(&d266)
 					bbpos_20_4 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl98)
+					ctx.MarkLabel(lbl90)
 					ctx.ResolveFixups()
 					d265 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase264) + int32(0)}
 					d266 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase264) + int32(16)}
@@ -49868,28 +49353,28 @@ func init_alu() {
 					if d272.Loc != LocImm && d272.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
-					lbl111 := ctx.ReserveLabel()
-					lbl112 := ctx.ReserveLabel()
+					lbl103 := ctx.ReserveLabel()
+					lbl104 := ctx.ReserveLabel()
 					if d272.Loc == LocImm {
 						if d272.Imm.Bool() {
-							ctx.MarkLabel(lbl111)
-							ctx.EmitJmp(lbl97)
+							ctx.MarkLabel(lbl103)
+							ctx.EmitJmp(lbl89)
 						} else {
-							ctx.MarkLabel(lbl112)
-							ctx.EmitJmp(lbl102)
+							ctx.MarkLabel(lbl104)
+							ctx.EmitJmp(lbl94)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d272.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl111)
-						ctx.EmitJmp(lbl112)
-						ctx.MarkLabel(lbl111)
-						ctx.EmitJmp(lbl97)
-						ctx.MarkLabel(lbl112)
-						ctx.EmitJmp(lbl102)
+						ctx.EmitJump(CondNotEqual, lbl103)
+						ctx.EmitJmp(lbl104)
+						ctx.MarkLabel(lbl103)
+						ctx.EmitJmp(lbl89)
+						ctx.MarkLabel(lbl104)
+						ctx.EmitJmp(lbl94)
 					}
 					ctx.FreeDesc(&d271)
 					bbpos_20_8 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl102)
+					ctx.MarkLabel(lbl94)
 					ctx.ResolveFixups()
 					d265 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase264) + int32(0)}
 					d266 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase264) + int32(16)}
@@ -49912,28 +49397,28 @@ func init_alu() {
 					if d274.Loc != LocImm && d274.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
-					lbl113 := ctx.ReserveLabel()
-					lbl114 := ctx.ReserveLabel()
+					lbl105 := ctx.ReserveLabel()
+					lbl106 := ctx.ReserveLabel()
 					if d274.Loc == LocImm {
 						if d274.Imm.Bool() {
-							ctx.MarkLabel(lbl113)
-							ctx.EmitJmp(lbl101)
+							ctx.MarkLabel(lbl105)
+							ctx.EmitJmp(lbl93)
 						} else {
-							ctx.MarkLabel(lbl114)
-							ctx.EmitJmp(lbl104)
+							ctx.MarkLabel(lbl106)
+							ctx.EmitJmp(lbl96)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d274.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl113)
-						ctx.EmitJmp(lbl114)
-						ctx.MarkLabel(lbl113)
-						ctx.EmitJmp(lbl101)
-						ctx.MarkLabel(lbl114)
-						ctx.EmitJmp(lbl104)
+						ctx.EmitJump(CondNotEqual, lbl105)
+						ctx.EmitJmp(lbl106)
+						ctx.MarkLabel(lbl105)
+						ctx.EmitJmp(lbl93)
+						ctx.MarkLabel(lbl106)
+						ctx.EmitJmp(lbl96)
 					}
 					ctx.FreeDesc(&d273)
 					bbpos_20_10 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl104)
+					ctx.MarkLabel(lbl96)
 					ctx.ResolveFixups()
 					d265 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase264) + int32(0)}
 					d266 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase264) + int32(16)}
@@ -50014,26 +49499,26 @@ func init_alu() {
 					if d278.Loc != LocImm && d278.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
-					lbl115 := ctx.ReserveLabel()
-					lbl116 := ctx.ReserveLabel()
+					lbl107 := ctx.ReserveLabel()
+					lbl108 := ctx.ReserveLabel()
 					if d278.Loc == LocImm {
 						if d278.Imm.Bool() {
-							ctx.MarkLabel(lbl115)
-							ctx.EmitJmp(lbl103)
+							ctx.MarkLabel(lbl107)
+							ctx.EmitJmp(lbl95)
 						} else {
-							ctx.MarkLabel(lbl116)
-							ctx.EmitJmp(lbl105)
+							ctx.MarkLabel(lbl108)
+							ctx.EmitJmp(lbl97)
 						}
 					} else {
-						ctx.EmitJump(d278.Condition, lbl115)
-						ctx.EmitJmp(lbl116)
-						ctx.MarkLabel(lbl115)
-						ctx.EmitJmp(lbl103)
-						ctx.MarkLabel(lbl116)
-						ctx.EmitJmp(lbl105)
+						ctx.EmitJump(d278.Condition, lbl107)
+						ctx.EmitJmp(lbl108)
+						ctx.MarkLabel(lbl107)
+						ctx.EmitJmp(lbl95)
+						ctx.MarkLabel(lbl108)
+						ctx.EmitJmp(lbl97)
 					}
 					bbpos_20_11 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl105)
+					ctx.MarkLabel(lbl97)
 					ctx.ResolveFixups()
 					d265 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase264) + int32(0)}
 					d266 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase264) + int32(16)}
@@ -50042,14 +49527,13 @@ func init_alu() {
 					ctx.EnsureDesc(&d262)
 					d279 = d262
 					_ = d279
-					ctx.StabilizeDescForControlFlow(&d279)
 					ctx.StabilizeDescForControlFlow(&d262)
 					bbpos_22_0 := int32(-1)
 					_ = bbpos_22_0
-					lbl117 := ctx.ReserveLabel()
-					_ = lbl117
+					lbl109 := ctx.ReserveLabel()
+					_ = lbl109
 					bbpos_22_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl117)
+					ctx.MarkLabel(lbl109)
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
@@ -50090,13 +49574,12 @@ func init_alu() {
 					ctx.EnsureDesc(&d284)
 					d285 = d284
 					_ = d285
-					ctx.StabilizeDescForControlFlow(&d285)
 					bbpos_23_0 := int32(-1)
 					_ = bbpos_23_0
-					lbl118 := ctx.ReserveLabel()
-					_ = lbl118
+					lbl110 := ctx.ReserveLabel()
+					_ = lbl110
 					bbpos_23_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl118)
+					ctx.MarkLabel(lbl110)
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
@@ -50138,7 +49621,7 @@ func init_alu() {
 						ctx.UnprotectReg(d289.Reg2)
 					}
 					bbpos_20_1 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl95)
+					ctx.MarkLabel(lbl87)
 					ctx.ResolveFixups()
 					d265 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase264) + int32(0)}
 					d266 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase264) + int32(16)}
@@ -50153,9 +49636,9 @@ func init_alu() {
 					} else {
 						ctx.EmitMovToReg(r51, d265)
 					}
-					ctx.EmitJmp(lbl93)
+					ctx.EmitJmp(lbl85)
 					bbpos_20_5 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl99)
+					ctx.MarkLabel(lbl91)
 					ctx.ResolveFixups()
 					d265 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase264) + int32(0)}
 					d266 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase264) + int32(16)}
@@ -50164,14 +49647,13 @@ func init_alu() {
 					ctx.EnsureDesc(&d263)
 					d291 = d263
 					_ = d291
-					ctx.StabilizeDescForControlFlow(&d291)
 					ctx.StabilizeDescForControlFlow(&d263)
 					bbpos_24_0 := int32(-1)
 					_ = bbpos_24_0
-					lbl119 := ctx.ReserveLabel()
-					_ = lbl119
+					lbl111 := ctx.ReserveLabel()
+					_ = lbl111
 					bbpos_24_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl119)
+					ctx.MarkLabel(lbl111)
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
@@ -50224,9 +49706,9 @@ func init_alu() {
 						ctx.UnprotectReg(d292.Reg)
 						ctx.UnprotectReg(d292.Reg2)
 					}
-					ctx.EmitJmp(lbl100)
+					ctx.EmitJmp(lbl92)
 					bbpos_20_2 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl96)
+					ctx.MarkLabel(lbl88)
 					ctx.ResolveFixups()
 					d265 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase264) + int32(0)}
 					d266 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase264) + int32(16)}
@@ -50234,23 +49716,22 @@ func init_alu() {
 					ctx.ReclaimUntrackedRegs()
 					bbpos_25_0 := int32(-1)
 					_ = bbpos_25_0
-					lbl120 := ctx.ReserveLabel()
-					_ = lbl120
+					lbl112 := ctx.ReserveLabel()
+					_ = lbl112
 					bbpos_25_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl120)
+					ctx.MarkLabel(lbl112)
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					d294 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(9221120237041090561)}
 					d295 = d294
 					_ = d295
-					ctx.StabilizeDescForControlFlow(&d295)
 					bbpos_26_0 := int32(-1)
 					_ = bbpos_26_0
-					lbl121 := ctx.ReserveLabel()
-					_ = lbl121
+					lbl113 := ctx.ReserveLabel()
+					_ = lbl113
 					bbpos_26_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl121)
+					ctx.MarkLabel(lbl113)
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
@@ -50293,9 +49774,9 @@ func init_alu() {
 						ctx.UnprotectReg(d299.Reg)
 						ctx.UnprotectReg(d299.Reg2)
 					}
-					ctx.EmitJmp(lbl95)
+					ctx.EmitJmp(lbl87)
 					bbpos_20_3 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl97)
+					ctx.MarkLabel(lbl89)
 					ctx.ResolveFixups()
 					d265 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase264) + int32(0)}
 					d266 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase264) + int32(16)}
@@ -50320,9 +49801,9 @@ func init_alu() {
 						ctx.UnprotectReg(d262.Reg)
 						ctx.UnprotectReg(d262.Reg2)
 					}
-					ctx.EmitJmp(lbl95)
+					ctx.EmitJmp(lbl87)
 					bbpos_20_7 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl101)
+					ctx.MarkLabel(lbl93)
 					ctx.ResolveFixups()
 					d265 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase264) + int32(0)}
 					d266 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase264) + int32(16)}
@@ -50331,13 +49812,12 @@ func init_alu() {
 					d302 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(1)}
 					d303 = d302
 					_ = d303
-					ctx.StabilizeDescForControlFlow(&d303)
 					bbpos_27_0 := int32(-1)
 					_ = bbpos_27_0
-					lbl122 := ctx.ReserveLabel()
-					_ = lbl122
+					lbl114 := ctx.ReserveLabel()
+					_ = lbl114
 					bbpos_27_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl122)
+					ctx.MarkLabel(lbl114)
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
@@ -50395,9 +49875,9 @@ func init_alu() {
 						ctx.UnprotectReg(d308.Reg)
 						ctx.UnprotectReg(d308.Reg2)
 					}
-					ctx.EmitJmp(lbl95)
+					ctx.EmitJmp(lbl87)
 					bbpos_20_9 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl103)
+					ctx.MarkLabel(lbl95)
 					ctx.ResolveFixups()
 					d265 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase264) + int32(0)}
 					d266 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase264) + int32(16)}
@@ -50406,14 +49886,13 @@ func init_alu() {
 					ctx.EnsureDesc(&d262)
 					d310 = d262
 					_ = d310
-					ctx.StabilizeDescForControlFlow(&d310)
 					ctx.StabilizeDescForControlFlow(&d262)
 					bbpos_28_0 := int32(-1)
 					_ = bbpos_28_0
-					lbl123 := ctx.ReserveLabel()
-					_ = lbl123
+					lbl115 := ctx.ReserveLabel()
+					_ = lbl115
 					bbpos_28_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl123)
+					ctx.MarkLabel(lbl115)
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
@@ -50454,13 +49933,12 @@ func init_alu() {
 					ctx.EnsureDesc(&d315)
 					d316 = d315
 					_ = d316
-					ctx.StabilizeDescForControlFlow(&d316)
 					bbpos_29_0 := int32(-1)
 					_ = bbpos_29_0
-					lbl124 := ctx.ReserveLabel()
-					_ = lbl124
+					lbl116 := ctx.ReserveLabel()
+					_ = lbl116
 					bbpos_29_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl124)
+					ctx.MarkLabel(lbl116)
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
@@ -50501,8 +49979,8 @@ func init_alu() {
 						ctx.UnprotectReg(d320.Reg)
 						ctx.UnprotectReg(d320.Reg2)
 					}
-					ctx.EmitJmp(lbl95)
-					ctx.MarkLabel(lbl93)
+					ctx.EmitJmp(lbl87)
+					ctx.MarkLabel(lbl85)
 					d322 = JITValueDesc{Loc: LocReg, Reg: r51}
 					ctx.BindReg(r51, &d322)
 					ctx.BindReg(r51, &d322)
@@ -50703,14 +50181,14 @@ func init_alu() {
 					if d333.Loc != LocImm && d333.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
-					lbl125 := ctx.ReserveLabel()
-					lbl126 := ctx.ReserveLabel()
+					lbl117 := ctx.ReserveLabel()
+					lbl118 := ctx.ReserveLabel()
 					if d333.Loc == LocImm {
 						if d333.Imm.Bool() {
-							ctx.MarkLabel(lbl125)
-							ctx.EmitJmp(lbl25)
+							ctx.MarkLabel(lbl117)
+							ctx.EmitJmp(lbl17)
 						} else {
-							ctx.MarkLabel(lbl126)
+							ctx.MarkLabel(lbl118)
 							ctx.SyncDesc(&d151)
 							if d151.Loc == LocReg {
 								ctx.ProtectReg(d151.Reg)
@@ -50730,15 +50208,15 @@ func init_alu() {
 								ctx.UnprotectReg(d151.Reg)
 								ctx.UnprotectReg(d151.Reg2)
 							}
-							ctx.EmitJmp(lbl26)
+							ctx.EmitJmp(lbl18)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d333.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl125)
-						ctx.EmitJmp(lbl126)
-						ctx.MarkLabel(lbl125)
-						ctx.EmitJmp(lbl25)
-						ctx.MarkLabel(lbl126)
+						ctx.EmitJump(CondNotEqual, lbl117)
+						ctx.EmitJmp(lbl118)
+						ctx.MarkLabel(lbl117)
+						ctx.EmitJmp(lbl17)
+						ctx.MarkLabel(lbl118)
 						ctx.SyncDesc(&d151)
 						if d151.Loc == LocReg {
 							ctx.ProtectReg(d151.Reg)
@@ -50758,11 +50236,11 @@ func init_alu() {
 							ctx.UnprotectReg(d151.Reg)
 							ctx.UnprotectReg(d151.Reg2)
 						}
-						ctx.EmitJmp(lbl26)
+						ctx.EmitJmp(lbl18)
 					}
 					ctx.FreeDesc(&d332)
 					bbpos_3_5 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl26)
+					ctx.MarkLabel(lbl18)
 					ctx.ResolveFixups()
 					d149 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase148) + int32(0)}
 					ctx.ReclaimUntrackedRegs()
@@ -50817,9 +50295,9 @@ func init_alu() {
 					} else {
 						ctx.EmitMovToReg(r60, d337)
 					}
-					ctx.EmitJmp(lbl20)
+					ctx.EmitJmp(lbl12)
 					bbpos_3_1 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl22)
+					ctx.MarkLabel(lbl14)
 					ctx.ResolveFixups()
 					d149 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase148) + int32(0)}
 					ctx.ReclaimUntrackedRegs()
@@ -50831,9 +50309,9 @@ func init_alu() {
 					} else {
 						ctx.EmitMovToReg(r60, d146)
 					}
-					ctx.EmitJmp(lbl20)
+					ctx.EmitJmp(lbl12)
 					bbpos_3_4 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl25)
+					ctx.MarkLabel(lbl17)
 					ctx.ResolveFixups()
 					d149 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(phiBase148) + int32(0)}
 					ctx.ReclaimUntrackedRegs()
@@ -50857,8 +50335,8 @@ func init_alu() {
 						ctx.UnprotectReg(d173.Reg)
 						ctx.UnprotectReg(d173.Reg2)
 					}
-					ctx.EmitJmp(lbl26)
-					ctx.MarkLabel(lbl20)
+					ctx.EmitJmp(lbl18)
+					ctx.MarkLabel(lbl12)
 					d339 = JITValueDesc{Loc: LocReg, Reg: r60}
 					ctx.BindReg(r60, &d339)
 					ctx.BindReg(r60, &d339)
@@ -51538,33 +51016,33 @@ func init_alu() {
 					_ = d345
 					d346 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase344) + int32(16)}
 					_ = d346
-					lbl127 := ctx.ReserveLabel()
+					lbl119 := ctx.ReserveLabel()
 					bbpos_30_0 := int32(-1)
 					_ = bbpos_30_0
-					lbl128 := ctx.ReserveLabel()
-					_ = lbl128
+					lbl120 := ctx.ReserveLabel()
+					_ = lbl120
 					bbpos_30_1 := int32(-1)
 					_ = bbpos_30_1
-					lbl129 := ctx.ReserveLabel()
-					_ = lbl129
+					lbl121 := ctx.ReserveLabel()
+					_ = lbl121
 					bbpos_30_2 := int32(-1)
 					_ = bbpos_30_2
-					lbl130 := ctx.ReserveLabel()
-					_ = lbl130
+					lbl122 := ctx.ReserveLabel()
+					_ = lbl122
 					bbpos_30_3 := int32(-1)
 					_ = bbpos_30_3
-					lbl131 := ctx.ReserveLabel()
-					_ = lbl131
+					lbl123 := ctx.ReserveLabel()
+					_ = lbl123
 					bbpos_30_4 := int32(-1)
 					_ = bbpos_30_4
-					lbl132 := ctx.ReserveLabel()
-					_ = lbl132
+					lbl124 := ctx.ReserveLabel()
+					_ = lbl124
 					bbpos_30_5 := int32(-1)
 					_ = bbpos_30_5
-					lbl133 := ctx.ReserveLabel()
-					_ = lbl133
+					lbl125 := ctx.ReserveLabel()
+					_ = lbl125
 					bbpos_30_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl128)
+					ctx.MarkLabel(lbl120)
 					ctx.ResolveFixups()
 					d345 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase344) + int32(0)}
 					d346 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase344) + int32(16)}
@@ -51586,26 +51064,26 @@ func init_alu() {
 					if d348.Loc != LocImm && d348.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
-					lbl134 := ctx.ReserveLabel()
-					lbl135 := ctx.ReserveLabel()
+					lbl126 := ctx.ReserveLabel()
+					lbl127 := ctx.ReserveLabel()
 					if d348.Loc == LocImm {
 						if d348.Imm.Bool() {
-							ctx.MarkLabel(lbl134)
-							ctx.EmitJmp(lbl131)
+							ctx.MarkLabel(lbl126)
+							ctx.EmitJmp(lbl123)
 						} else {
-							ctx.MarkLabel(lbl135)
-							ctx.EmitJmp(lbl129)
+							ctx.MarkLabel(lbl127)
+							ctx.EmitJmp(lbl121)
 						}
 					} else {
-						ctx.EmitJump(d348.Condition, lbl134)
-						ctx.EmitJmp(lbl135)
-						ctx.MarkLabel(lbl134)
-						ctx.EmitJmp(lbl131)
-						ctx.MarkLabel(lbl135)
-						ctx.EmitJmp(lbl129)
+						ctx.EmitJump(d348.Condition, lbl126)
+						ctx.EmitJmp(lbl127)
+						ctx.MarkLabel(lbl126)
+						ctx.EmitJmp(lbl123)
+						ctx.MarkLabel(lbl127)
+						ctx.EmitJmp(lbl121)
 					}
 					bbpos_30_1 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl129)
+					ctx.MarkLabel(lbl121)
 					ctx.ResolveFixups()
 					d345 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase344) + int32(0)}
 					d346 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase344) + int32(16)}
@@ -51628,28 +51106,28 @@ func init_alu() {
 					if d350.Loc != LocImm && d350.Loc != LocFlags {
 						panic("jit: fused If condition is neither LocImm nor LocFlags")
 					}
-					lbl136 := ctx.ReserveLabel()
-					lbl137 := ctx.ReserveLabel()
+					lbl128 := ctx.ReserveLabel()
+					lbl129 := ctx.ReserveLabel()
 					if d350.Loc == LocImm {
 						if d350.Imm.Bool() {
-							ctx.MarkLabel(lbl136)
-							ctx.EmitJmp(lbl132)
+							ctx.MarkLabel(lbl128)
+							ctx.EmitJmp(lbl124)
 						} else {
-							ctx.MarkLabel(lbl137)
+							ctx.MarkLabel(lbl129)
 							ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewInt(0)}, int32(phiBase344)+int32(16))
-							ctx.EmitJmp(lbl133)
+							ctx.EmitJmp(lbl125)
 						}
 					} else {
-						ctx.EmitJump(d350.Condition, lbl136)
-						ctx.EmitJmp(lbl137)
-						ctx.MarkLabel(lbl136)
-						ctx.EmitJmp(lbl132)
-						ctx.MarkLabel(lbl137)
+						ctx.EmitJump(d350.Condition, lbl128)
+						ctx.EmitJmp(lbl129)
+						ctx.MarkLabel(lbl128)
+						ctx.EmitJmp(lbl124)
+						ctx.MarkLabel(lbl129)
 						ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewInt(0)}, int32(phiBase344)+int32(16))
-						ctx.EmitJmp(lbl133)
+						ctx.EmitJmp(lbl125)
 					}
 					bbpos_30_5 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl133)
+					ctx.MarkLabel(lbl125)
 					ctx.ResolveFixups()
 					d345 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase344) + int32(0)}
 					d346 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase344) + int32(16)}
@@ -51677,7 +51155,7 @@ func init_alu() {
 						ctx.UnprotectReg(d346.Reg2)
 					}
 					bbpos_30_2 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl130)
+					ctx.MarkLabel(lbl122)
 					ctx.ResolveFixups()
 					d345 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase344) + int32(0)}
 					d346 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase344) + int32(16)}
@@ -51692,9 +51170,9 @@ func init_alu() {
 					} else {
 						ctx.EmitMovToReg(r63, d345)
 					}
-					ctx.EmitJmp(lbl127)
+					ctx.EmitJmp(lbl119)
 					bbpos_30_3 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl131)
+					ctx.MarkLabel(lbl123)
 					ctx.ResolveFixups()
 					d345 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase344) + int32(0)}
 					d346 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase344) + int32(16)}
@@ -51717,30 +51195,30 @@ func init_alu() {
 					if d353.Loc != LocImm && d353.Loc != LocReg {
 						panic("jit: If condition is neither LocImm nor LocReg")
 					}
-					lbl138 := ctx.ReserveLabel()
-					lbl139 := ctx.ReserveLabel()
+					lbl130 := ctx.ReserveLabel()
+					lbl131 := ctx.ReserveLabel()
 					if d353.Loc == LocImm {
 						if d353.Imm.Bool() {
-							ctx.MarkLabel(lbl138)
+							ctx.MarkLabel(lbl130)
 							ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewInt(1)}, int32(phiBase344)+int32(0))
-							ctx.EmitJmp(lbl130)
+							ctx.EmitJmp(lbl122)
 						} else {
-							ctx.MarkLabel(lbl139)
-							ctx.EmitJmp(lbl129)
+							ctx.MarkLabel(lbl131)
+							ctx.EmitJmp(lbl121)
 						}
 					} else {
 						ctx.EmitCmpRegImm32(d353.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl138)
-						ctx.EmitJmp(lbl139)
-						ctx.MarkLabel(lbl138)
+						ctx.EmitJump(CondNotEqual, lbl130)
+						ctx.EmitJmp(lbl131)
+						ctx.MarkLabel(lbl130)
 						ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewInt(1)}, int32(phiBase344)+int32(0))
-						ctx.EmitJmp(lbl130)
-						ctx.MarkLabel(lbl139)
-						ctx.EmitJmp(lbl129)
+						ctx.EmitJmp(lbl122)
+						ctx.MarkLabel(lbl131)
+						ctx.EmitJmp(lbl121)
 					}
 					ctx.FreeDesc(&d352)
 					bbpos_30_4 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl132)
+					ctx.MarkLabel(lbl124)
 					ctx.ResolveFixups()
 					d345 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase344) + int32(0)}
 					d346 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase344) + int32(16)}
@@ -51761,8 +51239,8 @@ func init_alu() {
 					ctx.EmitStoreToStack(d354, int32(phiBase344)+int32(16))
 					ctx.StabilizeDescForControlFlow(&d354)
 					ctx.ReclaimUntrackedRegs()
-					ctx.EmitJmp(lbl133)
-					ctx.MarkLabel(lbl127)
+					ctx.EmitJmp(lbl125)
+					ctx.MarkLabel(lbl119)
 					d355 = JITValueDesc{Loc: LocReg, Reg: r63}
 					ctx.BindReg(r63, &d355)
 					ctx.BindReg(r63, &d355)
@@ -52237,11 +51715,8 @@ func init_alu() {
 						ps.General = true
 						return bbs[8].RenderPS(ps)
 					}
-					lbl140 := ctx.ReserveLabel()
-					lbl141 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d356.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl140)
-					ctx.EmitJmp(lbl141)
+					ctx.EmitJump(CondNotEqual, lbl7)
 					snap359 := d0
 					snap360 := d1
 					snap361 := d2
@@ -52467,8 +51942,6 @@ func init_alu() {
 					snap581 := d355
 					snap582 := d356
 					alloc583 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl140)
-					ctx.EmitJmp(lbl7)
 					ctx.RestoreAllocState(alloc583)
 					d0 = snap359
 					d1 = snap360
@@ -52694,8 +52167,6 @@ func init_alu() {
 					d354 = snap580
 					d355 = snap581
 					d356 = snap582
-					ctx.MarkLabel(lbl141)
-					ctx.EmitJmp(lbl8)
 					ctx.RestoreAllocState(alloc583)
 					d0 = snap359
 					d1 = snap360
@@ -54056,27 +53527,20 @@ func init_alu() {
 						ps.General = true
 						return bbs[0].RenderPS(ps)
 					}
-					lbl9 := ctx.ReserveLabel()
-					lbl10 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d5.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl9)
-					ctx.EmitJmp(lbl10)
+					ctx.EmitJump(CondNotEqual, lbl2)
 					snap8 := d1
 					snap9 := d2
 					snap10 := d3
 					snap11 := d4
 					snap12 := d5
 					alloc13 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl9)
-					ctx.EmitJmp(lbl2)
 					ctx.RestoreAllocState(alloc13)
 					d1 = snap8
 					d2 = snap9
 					d3 = snap10
 					d4 = snap11
 					d5 = snap12
-					ctx.MarkLabel(lbl10)
-					ctx.EmitJmp(lbl3)
 					ctx.RestoreAllocState(alloc13)
 					d1 = snap8
 					d2 = snap9
@@ -54319,11 +53783,10 @@ func init_alu() {
 						ps.General = true
 						return bbs[2].RenderPS(ps)
 					}
-					lbl11 := ctx.ReserveLabel()
-					lbl12 := ctx.ReserveLabel()
+					lbl9 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d26.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl11)
-					ctx.EmitJmp(lbl12)
+					ctx.EmitJump(CondNotEqual, lbl4)
+					ctx.EmitJmp(lbl9)
 					snap31 := d1
 					snap32 := d2
 					snap33 := d3
@@ -54337,8 +53800,6 @@ func init_alu() {
 					snap41 := d28
 					snap42 := d30
 					alloc43 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl11)
-					ctx.EmitJmp(lbl4)
 					ctx.RestoreAllocState(alloc43)
 					d1 = snap31
 					d2 = snap32
@@ -54352,7 +53813,7 @@ func init_alu() {
 					d26 = snap40
 					d28 = snap41
 					d30 = snap42
-					ctx.MarkLabel(lbl12)
+					ctx.MarkLabel(lbl9)
 					ctx.SyncDesc(&d24)
 					if d24.Loc == LocReg {
 						ctx.ProtectReg(d24.Reg)
@@ -54684,13 +54145,12 @@ func init_alu() {
 					ctx.EnsureDesc(&d68)
 					d69 = d68
 					_ = d69
-					ctx.StabilizeDescForControlFlow(&d69)
 					bbpos_1_0 := int32(-1)
 					_ = bbpos_1_0
-					lbl13 := ctx.ReserveLabel()
-					_ = lbl13
+					lbl10 := ctx.ReserveLabel()
+					_ = lbl10
 					bbpos_1_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl13)
+					ctx.MarkLabel(lbl10)
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
@@ -54836,10 +54296,7 @@ func init_alu() {
 						ps.General = true
 						return bbs[4].RenderPS(ps)
 					}
-					lbl14 := ctx.ReserveLabel()
-					lbl15 := ctx.ReserveLabel()
-					ctx.EmitJump(d74.Condition, lbl14)
-					ctx.EmitJmp(lbl15)
+					ctx.EmitJump(d74.Condition, lbl8)
 					snap78 := d1
 					snap79 := d2
 					snap80 := d3
@@ -54867,8 +54324,6 @@ func init_alu() {
 					snap102 := d74
 					snap103 := d77
 					alloc104 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl14)
-					ctx.EmitJmp(lbl8)
 					ctx.RestoreAllocState(alloc104)
 					d1 = snap78
 					d2 = snap79
@@ -54896,8 +54351,6 @@ func init_alu() {
 					d73 = snap101
 					d74 = snap102
 					d77 = snap103
-					ctx.MarkLabel(lbl15)
-					ctx.EmitJmp(lbl7)
 					ctx.RestoreAllocState(alloc104)
 					d1 = snap78
 					d2 = snap79
@@ -55533,11 +54986,8 @@ func init_alu() {
 						ps.General = true
 						return bbs[7].RenderPS(ps)
 					}
-					lbl16 := ctx.ReserveLabel()
-					lbl17 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d140.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl16)
-					ctx.EmitJmp(lbl17)
+					ctx.EmitJump(CondNotEqual, lbl6)
 					snap143 := d1
 					snap144 := d2
 					snap145 := d3
@@ -55572,8 +55022,6 @@ func init_alu() {
 					snap174 := d139
 					snap175 := d140
 					alloc176 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl16)
-					ctx.EmitJmp(lbl6)
 					ctx.RestoreAllocState(alloc176)
 					d1 = snap143
 					d2 = snap144
@@ -55608,8 +55056,6 @@ func init_alu() {
 					d138 = snap173
 					d139 = snap174
 					d140 = snap175
-					ctx.MarkLabel(lbl17)
-					ctx.EmitJmp(lbl7)
 					ctx.RestoreAllocState(alloc176)
 					d1 = snap143
 					d2 = snap144
@@ -55950,25 +55396,18 @@ func init_alu() {
 						ps.General = true
 						return bbs[0].RenderPS(ps)
 					}
-					lbl6 := ctx.ReserveLabel()
-					lbl7 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d3.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl6)
-					ctx.EmitJmp(lbl7)
+					ctx.EmitJump(CondNotEqual, lbl2)
 					snap6 := d0
 					snap7 := d1
 					snap8 := d2
 					snap9 := d3
 					alloc10 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl6)
-					ctx.EmitJmp(lbl2)
 					ctx.RestoreAllocState(alloc10)
 					d0 = snap6
 					d1 = snap7
 					d2 = snap8
 					d3 = snap9
-					ctx.MarkLabel(lbl7)
-					ctx.EmitJmp(lbl3)
 					ctx.RestoreAllocState(alloc10)
 					d0 = snap6
 					d1 = snap7
@@ -56173,11 +55612,8 @@ func init_alu() {
 						ps.General = true
 						return bbs[2].RenderPS(ps)
 					}
-					lbl8 := ctx.ReserveLabel()
-					lbl9 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d22.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl8)
-					ctx.EmitJmp(lbl9)
+					ctx.EmitJump(CondNotEqual, lbl4)
 					snap25 := d0
 					snap26 := d1
 					snap27 := d2
@@ -56188,8 +55624,6 @@ func init_alu() {
 					snap32 := d21
 					snap33 := d22
 					alloc34 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl8)
-					ctx.EmitJmp(lbl4)
 					ctx.RestoreAllocState(alloc34)
 					d0 = snap25
 					d1 = snap26
@@ -56200,8 +55634,6 @@ func init_alu() {
 					d20 = snap31
 					d21 = snap32
 					d22 = snap33
-					ctx.MarkLabel(lbl9)
-					ctx.EmitJmp(lbl5)
 					ctx.RestoreAllocState(alloc34)
 					d0 = snap25
 					d1 = snap26

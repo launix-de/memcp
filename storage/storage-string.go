@@ -1191,17 +1191,6 @@ func (s *StorageString) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resul
 	} else {
 		idxInt = idx
 	}
-	if idxInt.Loc == scm.LocImm {
-		idxInt = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(int64(uint64(idxInt.Imm.Int()) & 0xffffffff))}
-	} else {
-		ctx.EnsureDesc(&idxInt)
-		if idxInt.Loc != scm.LocReg {
-			panic("jit: idxInt not in register")
-		}
-		ctx.EmitShlRegImm8(idxInt.Reg, 32)
-		ctx.EmitShrRegImm8(idxInt.Reg, 32)
-		ctx.BindReg(idxInt.Reg, &idxInt)
-	}
 	d0 := scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(1)}
 	r0 := ctx.AllocReg()
 	if thisptr.Loc == scm.LocImm {
@@ -1303,9 +1292,8 @@ func (s *StorageString) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resul
 		ctx.BindReg(result.Reg, &result)
 		ctx.BindReg(result.Reg2, &result)
 	}
-	d7 := scm.JITPrepareScmerGoArg(ctx, d6)
-	ctx.EmitMovPairToResult(&d7, &result)
-	result.Type = d7.Type
+	ctx.EmitMovPairToResult(&d6, &result)
+	result.Type = d6.Type
 	return result
 	return result
 }

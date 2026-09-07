@@ -18,6 +18,7 @@ Copyright (C) 2026  Carl-Philip Hänsch
 package storage
 
 import (
+	"fmt"
 	"math/rand"
 	"runtime"
 	"syscall"
@@ -31,10 +32,23 @@ const benchN = 60000
 
 // buildBenchStorageInt creates a StorageInt with n random values (0..999).
 func buildBenchStorageInt(n int) *StorageInt {
+	return buildBenchStorageIntMask(n, 999)
+}
+
+func buildBenchStorageIntMask(n int, mask int64) *StorageInt {
 	rng := rand.New(rand.NewSource(42))
 	values := make([]scm.Scmer, n)
 	for i := range values {
-		values[i] = scm.NewInt(int64(rng.Intn(1000)))
+		values[i] = scm.NewInt(rng.Int63n(mask + 1))
+	}
+	// Pin both extrema so compression selects exactly the requested bit width.
+	// Relying on random samples makes specialization benchmarks silently test a
+	// narrower encoding for large masks.
+	if n > 0 {
+		values[0] = scm.NewInt(0)
+	}
+	if n > 1 {
+		values[1] = scm.NewInt(mask)
 	}
 	return buildStorageInt(values)
 }
@@ -358,15 +372,16 @@ func BenchmarkStorageIntFinishedReaders(b *testing.B) {
 	if scalar == nil || rangeReader == nil || multiReader == nil {
 		b.Fatal("finish did not install every JIT reader")
 	}
+	goScalar := scm.JITStorageGetValueFunc(s.GetValue)
+	goRange := scm.JITStorageGetValueRangeFunc(s.GetValueRange)
+	goMulti := scm.JITStorageGetValueMultiFunc(s.GetValueMulti)
 
 	b.Run("Scalar/Go", func(b *testing.B) {
 		var sum int64
 		b.ReportAllocs()
 		b.ResetTimer()
 		for sample := 0; sample < b.N; sample++ {
-			for recid := uint32(0); recid < benchN; recid++ {
-				sum += s.GetValue(recid).Int()
-			}
+			sum += benchmarkStorageScalar(goScalar, benchN)
 		}
 		runtime.KeepAlive(sum)
 	})
@@ -375,9 +390,7 @@ func BenchmarkStorageIntFinishedReaders(b *testing.B) {
 		b.ReportAllocs()
 		b.ResetTimer()
 		for sample := 0; sample < b.N; sample++ {
-			for recid := uint32(0); recid < benchN; recid++ {
-				sum += scalar(recid).Int()
-			}
+			sum += benchmarkStorageScalar(scalar, benchN)
 		}
 		runtime.KeepAlive(sum)
 	})
@@ -386,13 +399,13 @@ func BenchmarkStorageIntFinishedReaders(b *testing.B) {
 	b.Run("Range/Go", func(b *testing.B) {
 		b.ReportAllocs()
 		for sample := 0; sample < b.N; sample++ {
-			s.GetValueRange(0, benchN, target, 1)
+			benchmarkStorageRange(goRange, benchN, target)
 		}
 	})
 	b.Run("Range/JIT", func(b *testing.B) {
 		b.ReportAllocs()
 		for sample := 0; sample < b.N; sample++ {
-			rangeReader(0, benchN, target, 1)
+			benchmarkStorageRange(rangeReader, benchN, target)
 		}
 	})
 
@@ -403,13 +416,167 @@ func BenchmarkStorageIntFinishedReaders(b *testing.B) {
 	b.Run("Multi/Go", func(b *testing.B) {
 		b.ReportAllocs()
 		for sample := 0; sample < b.N; sample++ {
-			s.GetValueMulti(recids, target, 1)
+			benchmarkStorageMulti(goMulti, recids, target)
 		}
 	})
 	b.Run("Multi/JIT", func(b *testing.B) {
 		b.ReportAllocs()
 		for sample := 0; sample < b.N; sample++ {
-			multiReader(recids, target, 1)
+			benchmarkStorageMulti(multiReader, recids, target)
 		}
 	})
+}
+
+func BenchmarkStorageIntByteFinishedReaders(b *testing.B) {
+	benchmarkStorageIntAlignedFinishedReaders(b, 8)
+}
+
+func BenchmarkStorageIntAlignedFinishedReaders(b *testing.B) {
+	for _, bits := range []uint8{8, 16, 32} {
+		b.Run(fmt.Sprintf("Bits%d", bits), func(b *testing.B) {
+			benchmarkStorageIntAlignedFinishedReaders(b, bits)
+		})
+	}
+}
+
+func benchmarkStorageIntAlignedFinishedReaders(b *testing.B, bits uint8) {
+	if !scm.JITEnabled() {
+		b.Skip("requires the JIT experiment")
+	}
+	mask := int64((uint64(1) << bits) - 1)
+	s := buildBenchStorageIntMask(benchN, mask)
+	if s.bitsize != bits {
+		b.Fatalf("fixture selected %d-bit encoding, want %d", s.bitsize, bits)
+	}
+	scalar := s.GetJITGetValue()
+	rangeReader := s.GetJITGetValueRange()
+	multiReader := s.GetJITGetValueMulti()
+	if scalar == nil || rangeReader == nil || multiReader == nil {
+		b.Fatal("finish did not install every aligned-width JIT reader")
+	}
+	goScalar := scm.JITStorageGetValueFunc(s.GetValue)
+	goRange := scm.JITStorageGetValueRangeFunc(s.GetValueRange)
+	goMulti := scm.JITStorageGetValueMultiFunc(s.GetValueMulti)
+	b.Run("Scalar/Go", func(b *testing.B) {
+		var sum int64
+		for sample := 0; sample < b.N; sample++ {
+			sum += benchmarkStorageScalar(goScalar, benchN)
+		}
+		runtime.KeepAlive(sum)
+	})
+	b.Run("Scalar/JIT", func(b *testing.B) {
+		var sum int64
+		for sample := 0; sample < b.N; sample++ {
+			sum += benchmarkStorageScalar(scalar, benchN)
+		}
+		runtime.KeepAlive(sum)
+	})
+	target := make([]scm.Scmer, benchN)
+	b.Run("Range/Go", func(b *testing.B) {
+		for sample := 0; sample < b.N; sample++ {
+			benchmarkStorageRange(goRange, benchN, target)
+		}
+	})
+	b.Run("Range/JIT", func(b *testing.B) {
+		for sample := 0; sample < b.N; sample++ {
+			benchmarkStorageRange(rangeReader, benchN, target)
+		}
+	})
+	recids := make([]uint32, benchN)
+	for index := range recids {
+		recids[index] = uint32((index * 7919) % benchN)
+	}
+	b.Run("Multi/Go", func(b *testing.B) {
+		for sample := 0; sample < b.N; sample++ {
+			benchmarkStorageMulti(goMulti, recids, target)
+		}
+	})
+	b.Run("Multi/JIT", func(b *testing.B) {
+		for sample := 0; sample < b.N; sample++ {
+			benchmarkStorageMulti(multiReader, recids, target)
+		}
+	})
+}
+
+func BenchmarkStorageConstFinishedReaders(b *testing.B) {
+	if !scm.JITEnabled() {
+		b.Skip("requires the JIT experiment")
+	}
+	s := &StorageConst{value: scm.NewInt(42), count: benchN}
+	s.finish()
+	scalar := s.GetJITGetValue()
+	rangeReader := s.GetJITGetValueRange()
+	multiReader := s.GetJITGetValueMulti()
+	if scalar == nil || rangeReader == nil || multiReader == nil {
+		b.Fatal("finish did not install every JIT reader")
+	}
+	goScalar := scm.JITStorageGetValueFunc(s.GetValue)
+	goRange := scm.JITStorageGetValueRangeFunc(s.GetValueRange)
+	goMulti := scm.JITStorageGetValueMultiFunc(s.GetValueMulti)
+
+	b.Run("Scalar/Go", func(b *testing.B) {
+		var sum int64
+		for sample := 0; sample < b.N; sample++ {
+			sum += benchmarkStorageScalar(goScalar, benchN)
+		}
+		runtime.KeepAlive(sum)
+	})
+	b.Run("Scalar/JIT", func(b *testing.B) {
+		var sum int64
+		for sample := 0; sample < b.N; sample++ {
+			sum += benchmarkStorageScalar(scalar, benchN)
+		}
+		runtime.KeepAlive(sum)
+	})
+
+	target := make([]scm.Scmer, benchN)
+	b.Run("Range/Go", func(b *testing.B) {
+		for sample := 0; sample < b.N; sample++ {
+			benchmarkStorageRange(goRange, benchN, target)
+		}
+	})
+	b.Run("Range/JIT", func(b *testing.B) {
+		for sample := 0; sample < b.N; sample++ {
+			benchmarkStorageRange(rangeReader, benchN, target)
+		}
+	})
+
+	recids := make([]uint32, benchN)
+	for index := range recids {
+		recids[index] = uint32(index)
+	}
+	b.Run("Multi/Go", func(b *testing.B) {
+		for sample := 0; sample < b.N; sample++ {
+			benchmarkStorageMulti(goMulti, recids, target)
+		}
+	})
+	b.Run("Multi/JIT", func(b *testing.B) {
+		for sample := 0; sample < b.N; sample++ {
+			benchmarkStorageMulti(multiReader, recids, target)
+		}
+	})
+}
+
+// These helpers preserve the indirect typed-function boundary used after a
+// scan resolves its storage readers. Benchmarking a concrete storage method
+// directly would let Go inline the getter into the harness while the JIT
+// necessarily enters through an equally typed function value.
+//
+//go:noinline
+func benchmarkStorageScalar(reader scm.JITStorageGetValueFunc, count uint32) int64 {
+	var sum int64
+	for recid := uint32(0); recid < count; recid++ {
+		sum += reader(recid).Int()
+	}
+	return sum
+}
+
+//go:noinline
+func benchmarkStorageRange(reader scm.JITStorageGetValueRangeFunc, count uint32, target []scm.Scmer) {
+	reader(0, count, target, 1)
+}
+
+//go:noinline
+func benchmarkStorageMulti(reader scm.JITStorageGetValueMultiFunc, recids []uint32, target []scm.Scmer) {
+	reader(recids, target, 1)
 }

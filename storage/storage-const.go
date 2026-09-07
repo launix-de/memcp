@@ -104,9 +104,8 @@ func (s *StorageConst) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result
 		ctx.BindReg(result.Reg, &result)
 		ctx.BindReg(result.Reg2, &result)
 	}
-	d1 := scm.JITPrepareScmerGoArg(ctx, d0)
-	ctx.EmitMovPairToResult(&d1, &result)
-	result.Type = d1.Type
+	ctx.EmitMovPairToResult(&d0, &result)
+	result.Type = d0.Type
 	return result
 	return result
 }

@@ -88,42 +88,29 @@ func (s *StorageSCMER) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result
 	} else {
 		idxInt = idx
 	}
-	if idxInt.Loc == scm.LocImm {
-		idxInt = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(int64(uint64(idxInt.Imm.Int()) & 0xffffffff))}
-	} else {
-		ctx.EnsureDesc(&idxInt)
-		if idxInt.Loc != scm.LocReg {
-			panic("jit: idxInt not in register")
-		}
-		ctx.EmitShlRegImm8(idxInt.Reg, 32)
-		ctx.EmitShrRegImm8(idxInt.Reg, 32)
-		ctx.BindReg(idxInt.Reg, &idxInt)
-	}
 	var d0 scm.JITValueDesc
-	r0 := ctx.AllocReg()
-	r1 := ctx.AllocRegExcept(r0)
-	r2 := ctx.AllocRegExcept(r0, r1)
 	if thisptr.Loc == scm.LocImm {
 		fieldAddr := uintptr(thisptr.Imm.Int()) + unsafe.Offsetof((*StorageSCMER)(nil).values)
 		dataPtr := *(*uintptr)(unsafe.Pointer(fieldAddr))
 		sliceLen := *(*int)(unsafe.Pointer(fieldAddr + 8))
 		sliceCap := *(*int)(unsafe.Pointer(fieldAddr + 16))
-		ctx.EmitMovRegImm64(r0, uint64(dataPtr))
-		ctx.EmitMovRegImm64(r1, uint64(sliceLen))
-		ctx.EmitMovRegImm64(r2, uint64(sliceCap))
+		d0 = scm.JITValueDesc{Loc: scm.LocMem, Type: scm.TagSlice, MemPtr: dataPtr, KnownSliceLen: int32(sliceLen), KnownSliceCap: int32(sliceCap), SliceSizeKnown: true, GoArray: true, RelocatablePointer: true, Rooted: true}
 	} else {
+		r0 := ctx.AllocReg()
+		r1 := ctx.AllocRegExcept(r0)
+		r2 := ctx.AllocRegExcept(r0, r1)
 		off := int32(unsafe.Offsetof((*StorageSCMER)(nil).values))
 		ctx.EmitMovRegMem(r0, thisptr.Reg, off)
 		ctx.EmitMovRegMem(r1, thisptr.Reg, off+8)
 		ctx.EmitMovRegMem(r2, thisptr.Reg, off+16)
+		d0 = scm.JITValueDesc{Loc: scm.LocRegTriple, Type: scm.TagSlice, Reg: r0, Reg2: r1, Reg3: r2}
+		ctx.BindReg(r0, &d0)
+		ctx.BindReg(r1, &d0)
+		ctx.BindReg(r2, &d0)
+		ctx.BindReg(r0, &d0)
+		ctx.BindReg(r1, &d0)
+		ctx.BindReg(r2, &d0)
 	}
-	d0 = scm.JITValueDesc{Loc: scm.LocRegTriple, Type: scm.TagSlice, Reg: r0, Reg2: r1, Reg3: r2}
-	ctx.BindReg(r0, &d0)
-	ctx.BindReg(r1, &d0)
-	ctx.BindReg(r2, &d0)
-	ctx.BindReg(r0, &d0)
-	ctx.BindReg(r1, &d0)
-	ctx.BindReg(r2, &d0)
 	ctx.EnsureDesc(&idxInt)
 	d2 := ctx.EmitSliceElementAddress(&d0, &idxInt, 16)
 	ctx.EnsureDesc(&d2)
@@ -144,9 +131,8 @@ func (s *StorageSCMER) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result
 		ctx.BindReg(result.Reg, &result)
 		ctx.BindReg(result.Reg2, &result)
 	}
-	d3 := scm.JITPrepareScmerGoArg(ctx, d1)
-	ctx.EmitMovPairToResult(&d3, &result)
-	result.Type = d3.Type
+	ctx.EmitMovPairToResult(&d1, &result)
+	result.Type = d1.Type
 	return result
 	return result
 }

@@ -83,17 +83,6 @@ func (s *OverlayBlob) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result 
 	} else {
 		idxInt = idx
 	}
-	if idxInt.Loc == scm.LocImm {
-		idxInt = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(int64(uint64(idxInt.Imm.Int()) & 0xffffffff))}
-	} else {
-		ctx.EnsureDesc(&idxInt)
-		if idxInt.Loc != scm.LocReg {
-			panic("jit: idxInt not in register")
-		}
-		ctx.EmitShlRegImm8(idxInt.Reg, 32)
-		ctx.EmitShrRegImm8(idxInt.Reg, 32)
-		ctx.BindReg(idxInt.Reg, &idxInt)
-	}
 	var d0 scm.JITValueDesc
 	if thisptr.Loc == scm.LocImm {
 		fieldAddr := uintptr(thisptr.Imm.Int()) + unsafe.Offsetof((*OverlayBlob)(nil).Base)
@@ -143,9 +132,8 @@ func (s *OverlayBlob) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result 
 		ctx.BindReg(result.Reg, &result)
 		ctx.BindReg(result.Reg2, &result)
 	}
-	d3 := scm.JITPrepareScmerGoArg(ctx, d2)
-	ctx.EmitMovPairToResult(&d3, &result)
-	result.Type = d3.Type
+	ctx.EmitMovPairToResult(&d2, &result)
+	result.Type = d2.Type
 	return result
 	return result
 }

@@ -389,22 +389,15 @@ func init_scheduler() {
 						ps.General = true
 						return bbs[0].RenderPS(ps)
 					}
-					lbl4 := ctx.ReserveLabel()
-					lbl5 := ctx.ReserveLabel()
-					ctx.EmitJump(d2.Condition, lbl4)
-					ctx.EmitJmp(lbl5)
+					ctx.EmitJump(d2.Condition, lbl2)
 					snap5 := d0
 					snap6 := d1
 					snap7 := d2
 					alloc8 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl4)
-					ctx.EmitJmp(lbl2)
 					ctx.RestoreAllocState(alloc8)
 					d0 = snap5
 					d1 = snap6
 					d2 = snap7
-					ctx.MarkLabel(lbl5)
-					ctx.EmitJmp(lbl3)
 					ctx.RestoreAllocState(alloc8)
 					d0 = snap5
 					d1 = snap6
@@ -503,13 +496,12 @@ func init_scheduler() {
 					ctx.EnsureDesc(&d15)
 					d16 = d15
 					_ = d16
-					ctx.StabilizeDescForControlFlow(&d16)
 					bbpos_1_0 := int32(-1)
 					_ = bbpos_1_0
-					lbl6 := ctx.ReserveLabel()
-					_ = lbl6
+					lbl4 := ctx.ReserveLabel()
+					_ = lbl4
 					bbpos_1_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl6)
+					ctx.MarkLabel(lbl4)
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()

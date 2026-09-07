@@ -328,22 +328,15 @@ func init_timezone() {
 						ps.General = true
 						return bbs[0].RenderPS(ps)
 					}
-					lbl8 := ctx.ReserveLabel()
-					lbl9 := ctx.ReserveLabel()
-					ctx.EmitJump(d2.Condition, lbl8)
-					ctx.EmitJmp(lbl9)
+					ctx.EmitJump(d2.Condition, lbl2)
 					snap5 := d0
 					snap6 := d1
 					snap7 := d2
 					alloc8 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl8)
-					ctx.EmitJmp(lbl2)
 					ctx.RestoreAllocState(alloc8)
 					d0 = snap5
 					d1 = snap6
 					d2 = snap7
-					ctx.MarkLabel(lbl9)
-					ctx.EmitJmp(lbl3)
 					ctx.RestoreAllocState(alloc8)
 					d0 = snap5
 					d1 = snap6
@@ -522,11 +515,8 @@ func init_timezone() {
 						ps.General = true
 						return bbs[2].RenderPS(ps)
 					}
-					lbl10 := ctx.ReserveLabel()
-					lbl11 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d21.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl10)
-					ctx.EmitJmp(lbl11)
+					ctx.EmitJump(CondNotEqual, lbl4)
 					snap24 := d0
 					snap25 := d1
 					snap26 := d2
@@ -538,8 +528,6 @@ func init_timezone() {
 					snap32 := d20
 					snap33 := d21
 					alloc34 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl10)
-					ctx.EmitJmp(lbl4)
 					ctx.RestoreAllocState(alloc34)
 					d0 = snap24
 					d1 = snap25
@@ -551,8 +539,6 @@ func init_timezone() {
 					d19 = snap31
 					d20 = snap32
 					d21 = snap33
-					ctx.MarkLabel(lbl11)
-					ctx.EmitJmp(lbl5)
 					ctx.RestoreAllocState(alloc34)
 					d0 = snap24
 					d1 = snap25
@@ -816,11 +802,8 @@ func init_timezone() {
 						ps.General = true
 						return bbs[4].RenderPS(ps)
 					}
-					lbl12 := ctx.ReserveLabel()
-					lbl13 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d53.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl12)
-					ctx.EmitJmp(lbl13)
+					ctx.EmitJump(CondNotEqual, lbl7)
 					snap56 := d0
 					snap57 := d1
 					snap58 := d2
@@ -837,8 +820,6 @@ func init_timezone() {
 					snap69 := d52
 					snap70 := d53
 					alloc71 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl12)
-					ctx.EmitJmp(lbl7)
 					ctx.RestoreAllocState(alloc71)
 					d0 = snap56
 					d1 = snap57
@@ -855,8 +836,6 @@ func init_timezone() {
 					d51 = snap68
 					d52 = snap69
 					d53 = snap70
-					ctx.MarkLabel(lbl13)
-					ctx.EmitJmp(lbl6)
 					ctx.RestoreAllocState(alloc71)
 					d0 = snap56
 					d1 = snap57
@@ -1524,27 +1503,20 @@ func init_timezone() {
 						ps.General = true
 						return bbs[0].RenderPS(ps)
 					}
-					lbl15 := ctx.ReserveLabel()
-					lbl16 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d5.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl15)
-					ctx.EmitJmp(lbl16)
+					ctx.EmitJump(CondNotEqual, lbl2)
 					snap8 := d1
 					snap9 := d2
 					snap10 := d3
 					snap11 := d4
 					snap12 := d5
 					alloc13 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl15)
-					ctx.EmitJmp(lbl2)
 					ctx.RestoreAllocState(alloc13)
 					d1 = snap8
 					d2 = snap9
 					d3 = snap10
 					d4 = snap11
 					d5 = snap12
-					ctx.MarkLabel(lbl16)
-					ctx.EmitJmp(lbl5)
 					ctx.RestoreAllocState(alloc13)
 					d1 = snap8
 					d2 = snap9
@@ -1808,11 +1780,8 @@ func init_timezone() {
 						ps.General = true
 						return bbs[2].RenderPS(ps)
 					}
-					lbl17 := ctx.ReserveLabel()
-					lbl18 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d30.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl17)
-					ctx.EmitJmp(lbl18)
+					ctx.EmitJump(CondNotEqual, lbl6)
 					snap33 := d1
 					snap34 := d2
 					snap35 := d3
@@ -1827,8 +1796,6 @@ func init_timezone() {
 					snap44 := d29
 					snap45 := d30
 					alloc46 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl17)
-					ctx.EmitJmp(lbl6)
 					ctx.RestoreAllocState(alloc46)
 					d1 = snap33
 					d2 = snap34
@@ -1843,8 +1810,6 @@ func init_timezone() {
 					d28 = snap43
 					d29 = snap44
 					d30 = snap45
-					ctx.MarkLabel(lbl18)
-					ctx.EmitJmp(lbl7)
 					ctx.RestoreAllocState(alloc46)
 					d1 = snap33
 					d2 = snap34
@@ -2050,11 +2015,8 @@ func init_timezone() {
 						ps.General = true
 						return bbs[3].RenderPS(ps)
 					}
-					lbl19 := ctx.ReserveLabel()
-					lbl20 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d66.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl19)
-					ctx.EmitJmp(lbl20)
+					ctx.EmitJump(CondNotEqual, lbl2)
 					snap69 := d1
 					snap70 := d2
 					snap71 := d3
@@ -2073,8 +2035,6 @@ func init_timezone() {
 					snap84 := d65
 					snap85 := d66
 					alloc86 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl19)
-					ctx.EmitJmp(lbl2)
 					ctx.RestoreAllocState(alloc86)
 					d1 = snap69
 					d2 = snap70
@@ -2093,8 +2053,6 @@ func init_timezone() {
 					d64 = snap83
 					d65 = snap84
 					d66 = snap85
-					ctx.MarkLabel(lbl20)
-					ctx.EmitJmp(lbl3)
 					ctx.RestoreAllocState(alloc86)
 					d1 = snap69
 					d2 = snap70
@@ -2340,11 +2298,8 @@ func init_timezone() {
 						ps.General = true
 						return bbs[4].RenderPS(ps)
 					}
-					lbl21 := ctx.ReserveLabel()
-					lbl22 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d110.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl21)
-					ctx.EmitJmp(lbl22)
+					ctx.EmitJump(CondNotEqual, lbl2)
 					snap113 := d1
 					snap114 := d2
 					snap115 := d3
@@ -2367,8 +2322,6 @@ func init_timezone() {
 					snap132 := d109
 					snap133 := d110
 					alloc134 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl21)
-					ctx.EmitJmp(lbl2)
 					ctx.RestoreAllocState(alloc134)
 					d1 = snap113
 					d2 = snap114
@@ -2391,8 +2344,6 @@ func init_timezone() {
 					d108 = snap131
 					d109 = snap132
 					d110 = snap133
-					ctx.MarkLabel(lbl22)
-					ctx.EmitJmp(lbl4)
 					ctx.RestoreAllocState(alloc134)
 					d1 = snap113
 					d2 = snap114
@@ -2864,11 +2815,8 @@ func init_timezone() {
 						ps.General = true
 						return bbs[6].RenderPS(ps)
 					}
-					lbl23 := ctx.ReserveLabel()
-					lbl24 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d167.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl23)
-					ctx.EmitJmp(lbl24)
+					ctx.EmitJump(CondNotEqual, lbl8)
 					snap170 := d1
 					snap171 := d2
 					snap172 := d3
@@ -2899,8 +2847,6 @@ func init_timezone() {
 					snap197 := d166
 					snap198 := d167
 					alloc199 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl23)
-					ctx.EmitJmp(lbl8)
 					ctx.RestoreAllocState(alloc199)
 					d1 = snap170
 					d2 = snap171
@@ -2931,8 +2877,6 @@ func init_timezone() {
 					d165 = snap196
 					d166 = snap197
 					d167 = snap198
-					ctx.MarkLabel(lbl24)
-					ctx.EmitJmp(lbl9)
 					ctx.RestoreAllocState(alloc199)
 					d1 = snap170
 					d2 = snap171
@@ -3447,10 +3391,7 @@ func init_timezone() {
 						ps.General = true
 						return bbs[8].RenderPS(ps)
 					}
-					lbl25 := ctx.ReserveLabel()
-					lbl26 := ctx.ReserveLabel()
-					ctx.EmitJump(d236.Condition, lbl25)
-					ctx.EmitJmp(lbl26)
+					ctx.EmitJump(d236.Condition, lbl11)
 					snap239 := d1
 					snap240 := d2
 					snap241 := d3
@@ -3486,8 +3427,6 @@ func init_timezone() {
 					snap271 := d235
 					snap272 := d236
 					alloc273 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl25)
-					ctx.EmitJmp(lbl11)
 					ctx.RestoreAllocState(alloc273)
 					d1 = snap239
 					d2 = snap240
@@ -3523,8 +3462,6 @@ func init_timezone() {
 					d234 = snap270
 					d235 = snap271
 					d236 = snap272
-					ctx.MarkLabel(lbl26)
-					ctx.EmitJmp(lbl12)
 					ctx.RestoreAllocState(alloc273)
 					d1 = snap239
 					d2 = snap240
@@ -4899,11 +4836,8 @@ func init_timezone() {
 						ps.General = true
 						return bbs[11].RenderPS(ps)
 					}
-					lbl27 := ctx.ReserveLabel()
-					lbl28 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d346.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl27)
-					ctx.EmitJmp(lbl28)
+					ctx.EmitJump(CondNotEqual, lbl14)
 					snap349 := d1
 					snap350 := d2
 					snap351 := d3
@@ -4973,8 +4907,6 @@ func init_timezone() {
 					snap415 := d345
 					snap416 := d346
 					alloc417 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl27)
-					ctx.EmitJmp(lbl14)
 					ctx.RestoreAllocState(alloc417)
 					d1 = snap349
 					d2 = snap350
@@ -5044,8 +4976,6 @@ func init_timezone() {
 					d344 = snap414
 					d345 = snap415
 					d346 = snap416
-					ctx.MarkLabel(lbl28)
-					ctx.EmitJmp(lbl13)
 					ctx.RestoreAllocState(alloc417)
 					d1 = snap349
 					d2 = snap350
@@ -6297,11 +6227,8 @@ func init_timezone() {
 						ps.General = true
 						return bbs[0].RenderPS(ps)
 					}
-					lbl11 := ctx.ReserveLabel()
-					lbl12 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d6.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl11)
-					ctx.EmitJmp(lbl12)
+					ctx.EmitJump(CondNotEqual, lbl2)
 					snap9 := d1
 					snap10 := d2
 					snap11 := d3
@@ -6309,8 +6236,6 @@ func init_timezone() {
 					snap13 := d5
 					snap14 := d6
 					alloc15 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl11)
-					ctx.EmitJmp(lbl2)
 					ctx.RestoreAllocState(alloc15)
 					d1 = snap9
 					d2 = snap10
@@ -6318,8 +6243,6 @@ func init_timezone() {
 					d4 = snap12
 					d5 = snap13
 					d6 = snap14
-					ctx.MarkLabel(lbl12)
-					ctx.EmitJmp(lbl3)
 					ctx.RestoreAllocState(alloc15)
 					d1 = snap9
 					d2 = snap10
@@ -6561,10 +6484,9 @@ func init_timezone() {
 						ps.General = true
 						return bbs[2].RenderPS(ps)
 					}
-					lbl13 := ctx.ReserveLabel()
-					lbl14 := ctx.ReserveLabel()
-					ctx.EmitJump(d30.Condition, lbl13)
-					ctx.EmitJmp(lbl14)
+					lbl11 := ctx.ReserveLabel()
+					ctx.EmitJump(d30.Condition, lbl4)
+					ctx.EmitJmp(lbl11)
 					snap34 := d1
 					snap35 := d2
 					snap36 := d3
@@ -6579,8 +6501,6 @@ func init_timezone() {
 					snap45 := d30
 					snap46 := d33
 					alloc47 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl13)
-					ctx.EmitJmp(lbl4)
 					ctx.RestoreAllocState(alloc47)
 					d1 = snap34
 					d2 = snap35
@@ -6595,7 +6515,7 @@ func init_timezone() {
 					d29 = snap44
 					d30 = snap45
 					d33 = snap46
-					ctx.MarkLabel(lbl14)
+					ctx.MarkLabel(lbl11)
 					ctx.EmitStoreScmerToStack(JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString("UTC")}, int32(bbs[4].PhiBase)+int32(0))
 					ctx.EmitJmp(lbl5)
 					ctx.RestoreAllocState(alloc47)
@@ -7071,11 +6991,10 @@ func init_timezone() {
 						ps.General = true
 						return bbs[4].RenderPS(ps)
 					}
-					lbl15 := ctx.ReserveLabel()
-					lbl16 := ctx.ReserveLabel()
+					lbl12 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d77.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl15)
-					ctx.EmitJmp(lbl16)
+					ctx.EmitJump(CondNotEqual, lbl6)
+					ctx.EmitJmp(lbl12)
 					snap83 := d1
 					snap84 := d2
 					snap85 := d3
@@ -7104,8 +7023,6 @@ func init_timezone() {
 					snap108 := d81
 					snap109 := d82
 					alloc110 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl15)
-					ctx.EmitJmp(lbl6)
 					ctx.RestoreAllocState(alloc110)
 					d1 = snap83
 					d2 = snap84
@@ -7134,7 +7051,7 @@ func init_timezone() {
 					d79 = snap107
 					d81 = snap108
 					d82 = snap109
-					ctx.MarkLabel(lbl16)
+					ctx.MarkLabel(lbl12)
 					ctx.SyncDesc(&d74)
 					if d74.Loc == LocReg {
 						ctx.ProtectReg(d74.Reg)
@@ -7733,10 +7650,7 @@ func init_timezone() {
 						ps.General = true
 						return bbs[6].RenderPS(ps)
 					}
-					lbl17 := ctx.ReserveLabel()
-					lbl18 := ctx.ReserveLabel()
-					ctx.EmitJump(d152.Condition, lbl17)
-					ctx.EmitJmp(lbl18)
+					ctx.EmitJump(d152.Condition, lbl10)
 					snap156 := d1
 					snap157 := d2
 					snap158 := d3
@@ -7775,8 +7689,6 @@ func init_timezone() {
 					snap191 := d152
 					snap192 := d155
 					alloc193 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl17)
-					ctx.EmitJmp(lbl10)
 					ctx.RestoreAllocState(alloc193)
 					d1 = snap156
 					d2 = snap157
@@ -7815,8 +7727,6 @@ func init_timezone() {
 					d151 = snap190
 					d152 = snap191
 					d155 = snap192
-					ctx.MarkLabel(lbl18)
-					ctx.EmitJmp(lbl9)
 					ctx.RestoreAllocState(alloc193)
 					d1 = snap156
 					d2 = snap157
@@ -8736,11 +8646,8 @@ func init_timezone() {
 						ps.General = true
 						return bbs[9].RenderPS(ps)
 					}
-					lbl19 := ctx.ReserveLabel()
-					lbl20 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d246.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl19)
-					ctx.EmitJmp(lbl20)
+					ctx.EmitJump(CondNotEqual, lbl9)
 					snap249 := d1
 					snap250 := d2
 					snap251 := d3
@@ -8792,8 +8699,6 @@ func init_timezone() {
 					snap297 := d245
 					snap298 := d246
 					alloc299 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl19)
-					ctx.EmitJmp(lbl9)
 					ctx.RestoreAllocState(alloc299)
 					d1 = snap249
 					d2 = snap250
@@ -8845,8 +8750,6 @@ func init_timezone() {
 					d244 = snap296
 					d245 = snap297
 					d246 = snap298
-					ctx.MarkLabel(lbl20)
-					ctx.EmitJmp(lbl8)
 					ctx.RestoreAllocState(alloc299)
 					d1 = snap249
 					d2 = snap250
@@ -10089,11 +9992,8 @@ func init_timezone() {
 						ps.General = true
 						return bbs[0].RenderPS(ps)
 					}
-					lbl12 := ctx.ReserveLabel()
-					lbl13 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d6.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl12)
-					ctx.EmitJmp(lbl13)
+					ctx.EmitJump(CondNotEqual, lbl2)
 					snap9 := d1
 					snap10 := d2
 					snap11 := d3
@@ -10101,8 +10001,6 @@ func init_timezone() {
 					snap13 := d5
 					snap14 := d6
 					alloc15 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl12)
-					ctx.EmitJmp(lbl2)
 					ctx.RestoreAllocState(alloc15)
 					d1 = snap9
 					d2 = snap10
@@ -10110,8 +10008,6 @@ func init_timezone() {
 					d4 = snap12
 					d5 = snap13
 					d6 = snap14
-					ctx.MarkLabel(lbl13)
-					ctx.EmitJmp(lbl4)
 					ctx.RestoreAllocState(alloc15)
 					d1 = snap9
 					d2 = snap10
@@ -10390,11 +10286,8 @@ func init_timezone() {
 						ps.General = true
 						return bbs[2].RenderPS(ps)
 					}
-					lbl14 := ctx.ReserveLabel()
-					lbl15 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d33.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl14)
-					ctx.EmitJmp(lbl15)
+					ctx.EmitJump(CondNotEqual, lbl5)
 					snap36 := d1
 					snap37 := d2
 					snap38 := d3
@@ -10410,8 +10303,6 @@ func init_timezone() {
 					snap48 := d32
 					snap49 := d33
 					alloc50 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl14)
-					ctx.EmitJmp(lbl5)
 					ctx.RestoreAllocState(alloc50)
 					d1 = snap36
 					d2 = snap37
@@ -10427,8 +10318,6 @@ func init_timezone() {
 					d31 = snap47
 					d32 = snap48
 					d33 = snap49
-					ctx.MarkLabel(lbl15)
-					ctx.EmitJmp(lbl6)
 					ctx.RestoreAllocState(alloc50)
 					d1 = snap36
 					d2 = snap37
@@ -10645,11 +10534,8 @@ func init_timezone() {
 						ps.General = true
 						return bbs[3].RenderPS(ps)
 					}
-					lbl16 := ctx.ReserveLabel()
-					lbl17 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d71.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl16)
-					ctx.EmitJmp(lbl17)
+					ctx.EmitJump(CondNotEqual, lbl2)
 					snap74 := d1
 					snap75 := d2
 					snap76 := d3
@@ -10669,8 +10555,6 @@ func init_timezone() {
 					snap90 := d70
 					snap91 := d71
 					alloc92 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl16)
-					ctx.EmitJmp(lbl2)
 					ctx.RestoreAllocState(alloc92)
 					d1 = snap74
 					d2 = snap75
@@ -10690,8 +10574,6 @@ func init_timezone() {
 					d69 = snap89
 					d70 = snap90
 					d71 = snap91
-					ctx.MarkLabel(lbl17)
-					ctx.EmitJmp(lbl3)
 					ctx.RestoreAllocState(alloc92)
 					d1 = snap74
 					d2 = snap75
@@ -11065,10 +10947,7 @@ func init_timezone() {
 						ps.General = true
 						return bbs[5].RenderPS(ps)
 					}
-					lbl18 := ctx.ReserveLabel()
-					lbl19 := ctx.ReserveLabel()
-					ctx.EmitJump(d118.Condition, lbl18)
-					ctx.EmitJmp(lbl19)
+					ctx.EmitJump(d118.Condition, lbl7)
 					snap121 := d1
 					snap122 := d2
 					snap123 := d3
@@ -11093,8 +10972,6 @@ func init_timezone() {
 					snap142 := d117
 					snap143 := d118
 					alloc144 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl18)
-					ctx.EmitJmp(lbl7)
 					ctx.RestoreAllocState(alloc144)
 					d1 = snap121
 					d2 = snap122
@@ -11119,8 +10996,6 @@ func init_timezone() {
 					d116 = snap141
 					d117 = snap142
 					d118 = snap143
-					ctx.MarkLabel(lbl19)
-					ctx.EmitJmp(lbl9)
 					ctx.RestoreAllocState(alloc144)
 					d1 = snap121
 					d2 = snap122
@@ -11362,13 +11237,12 @@ func init_timezone() {
 					ctx.EnsureDesc(&d172)
 					d173 = d172
 					_ = d173
-					ctx.StabilizeDescForControlFlow(&d173)
 					bbpos_1_0 := int32(-1)
 					_ = bbpos_1_0
-					lbl20 := ctx.ReserveLabel()
-					_ = lbl20
+					lbl12 := ctx.ReserveLabel()
+					_ = lbl12
 					bbpos_1_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl20)
+					ctx.MarkLabel(lbl12)
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
@@ -11393,13 +11267,12 @@ func init_timezone() {
 					ctx.EnsureDesc(&d174)
 					d175 = d174
 					_ = d175
-					ctx.StabilizeDescForControlFlow(&d175)
 					bbpos_2_0 := int32(-1)
 					_ = bbpos_2_0
-					lbl21 := ctx.ReserveLabel()
-					_ = lbl21
+					lbl13 := ctx.ReserveLabel()
+					_ = lbl13
 					bbpos_2_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl21)
+					ctx.MarkLabel(lbl13)
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
@@ -11485,13 +11358,12 @@ func init_timezone() {
 					ctx.EnsureDesc(&d181)
 					d182 = d181
 					_ = d182
-					ctx.StabilizeDescForControlFlow(&d182)
 					bbpos_3_0 := int32(-1)
 					_ = bbpos_3_0
-					lbl22 := ctx.ReserveLabel()
-					_ = lbl22
+					lbl14 := ctx.ReserveLabel()
+					_ = lbl14
 					bbpos_3_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl22)
+					ctx.MarkLabel(lbl14)
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
@@ -11516,13 +11388,12 @@ func init_timezone() {
 					ctx.EnsureDesc(&d183)
 					d184 = d183
 					_ = d184
-					ctx.StabilizeDescForControlFlow(&d184)
 					bbpos_4_0 := int32(-1)
 					_ = bbpos_4_0
-					lbl23 := ctx.ReserveLabel()
-					_ = lbl23
+					lbl15 := ctx.ReserveLabel()
+					_ = lbl15
 					bbpos_4_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl23)
+					ctx.MarkLabel(lbl15)
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
@@ -11986,10 +11857,7 @@ func init_timezone() {
 						ps.General = true
 						return bbs[7].RenderPS(ps)
 					}
-					lbl24 := ctx.ReserveLabel()
-					lbl25 := ctx.ReserveLabel()
-					ctx.EmitJump(d196.Condition, lbl24)
-					ctx.EmitJmp(lbl25)
+					ctx.EmitJump(d196.Condition, lbl10)
 					snap201 := d1
 					snap202 := d2
 					snap203 := d3
@@ -12041,8 +11909,6 @@ func init_timezone() {
 					snap249 := d199
 					snap250 := d200
 					alloc251 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl24)
-					ctx.EmitJmp(lbl10)
 					ctx.RestoreAllocState(alloc251)
 					d1 = snap201
 					d2 = snap202
@@ -12094,8 +11960,6 @@ func init_timezone() {
 					d196 = snap248
 					d199 = snap249
 					d200 = snap250
-					ctx.MarkLabel(lbl25)
-					ctx.EmitJmp(lbl11)
 					ctx.RestoreAllocState(alloc251)
 					d1 = snap201
 					d2 = snap202
@@ -13927,25 +13791,18 @@ func init_timezone() {
 						ps.General = true
 						return bbs[0].RenderPS(ps)
 					}
-					lbl22 := ctx.ReserveLabel()
-					lbl23 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d3.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl22)
-					ctx.EmitJmp(lbl23)
+					ctx.EmitJump(CondNotEqual, lbl2)
 					snap6 := d0
 					snap7 := d1
 					snap8 := d2
 					snap9 := d3
 					alloc10 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl22)
-					ctx.EmitJmp(lbl2)
 					ctx.RestoreAllocState(alloc10)
 					d0 = snap6
 					d1 = snap7
 					d2 = snap8
 					d3 = snap9
-					ctx.MarkLabel(lbl23)
-					ctx.EmitJmp(lbl4)
 					ctx.RestoreAllocState(alloc10)
 					d0 = snap6
 					d1 = snap7
@@ -14151,11 +14008,8 @@ func init_timezone() {
 						ps.General = true
 						return bbs[2].RenderPS(ps)
 					}
-					lbl24 := ctx.ReserveLabel()
-					lbl25 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d27.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl24)
-					ctx.EmitJmp(lbl25)
+					ctx.EmitJump(CondNotEqual, lbl7)
 					snap30 := d0
 					snap31 := d1
 					snap32 := d2
@@ -14169,8 +14023,6 @@ func init_timezone() {
 					snap40 := d26
 					snap41 := d27
 					alloc42 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl24)
-					ctx.EmitJmp(lbl7)
 					ctx.RestoreAllocState(alloc42)
 					d0 = snap30
 					d1 = snap31
@@ -14184,8 +14036,6 @@ func init_timezone() {
 					d25 = snap39
 					d26 = snap40
 					d27 = snap41
-					ctx.MarkLabel(lbl25)
-					ctx.EmitJmp(lbl5)
 					ctx.RestoreAllocState(alloc42)
 					d0 = snap30
 					d1 = snap31
@@ -14380,11 +14230,8 @@ func init_timezone() {
 						ps.General = true
 						return bbs[3].RenderPS(ps)
 					}
-					lbl26 := ctx.ReserveLabel()
-					lbl27 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d61.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl26)
-					ctx.EmitJmp(lbl27)
+					ctx.EmitJump(CondNotEqual, lbl2)
 					snap64 := d0
 					snap65 := d1
 					snap66 := d2
@@ -14402,8 +14249,6 @@ func init_timezone() {
 					snap78 := d60
 					snap79 := d61
 					alloc80 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl26)
-					ctx.EmitJmp(lbl2)
 					ctx.RestoreAllocState(alloc80)
 					d0 = snap64
 					d1 = snap65
@@ -14421,8 +14266,6 @@ func init_timezone() {
 					d59 = snap77
 					d60 = snap78
 					d61 = snap79
-					ctx.MarkLabel(lbl27)
-					ctx.EmitJmp(lbl3)
 					ctx.RestoreAllocState(alloc80)
 					d0 = snap64
 					d1 = snap65
@@ -14850,11 +14693,8 @@ func init_timezone() {
 						ps.General = true
 						return bbs[5].RenderPS(ps)
 					}
-					lbl28 := ctx.ReserveLabel()
-					lbl29 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d109.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl28)
-					ctx.EmitJmp(lbl29)
+					ctx.EmitJump(CondNotEqual, lbl8)
 					snap112 := d0
 					snap113 := d1
 					snap114 := d2
@@ -14882,8 +14722,6 @@ func init_timezone() {
 					snap136 := d108
 					snap137 := d109
 					alloc138 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl28)
-					ctx.EmitJmp(lbl8)
 					ctx.RestoreAllocState(alloc138)
 					d0 = snap112
 					d1 = snap113
@@ -14911,8 +14749,6 @@ func init_timezone() {
 					d107 = snap135
 					d108 = snap136
 					d109 = snap137
-					ctx.MarkLabel(lbl29)
-					ctx.EmitJmp(lbl10)
 					ctx.RestoreAllocState(alloc138)
 					d0 = snap112
 					d1 = snap113
@@ -15235,11 +15071,8 @@ func init_timezone() {
 						ps.General = true
 						return bbs[6].RenderPS(ps)
 					}
-					lbl30 := ctx.ReserveLabel()
-					lbl31 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d168.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl30)
-					ctx.EmitJmp(lbl31)
+					ctx.EmitJump(CondNotEqual, lbl6)
 					snap171 := d0
 					snap172 := d1
 					snap173 := d2
@@ -15268,8 +15101,6 @@ func init_timezone() {
 					snap196 := d109
 					snap197 := d168
 					alloc198 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl30)
-					ctx.EmitJmp(lbl6)
 					ctx.RestoreAllocState(alloc198)
 					d0 = snap171
 					d1 = snap172
@@ -15298,8 +15129,6 @@ func init_timezone() {
 					d108 = snap195
 					d109 = snap196
 					d168 = snap197
-					ctx.MarkLabel(lbl31)
-					ctx.EmitJmp(lbl5)
 					ctx.RestoreAllocState(alloc198)
 					d0 = snap171
 					d1 = snap172
@@ -15555,10 +15384,10 @@ func init_timezone() {
 					ctx.EnsureDesc(&d105)
 					bbpos_1_0 := int32(-1)
 					_ = bbpos_1_0
-					lbl32 := ctx.ReserveLabel()
-					_ = lbl32
+					lbl22 := ctx.ReserveLabel()
+					_ = lbl22
 					bbpos_1_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl32)
+					ctx.MarkLabel(lbl22)
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
@@ -15828,10 +15657,10 @@ func init_timezone() {
 					ctx.EnsureDesc(&d105)
 					bbpos_2_0 := int32(-1)
 					_ = bbpos_2_0
-					lbl33 := ctx.ReserveLabel()
-					_ = lbl33
+					lbl23 := ctx.ReserveLabel()
+					_ = lbl23
 					bbpos_2_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl33)
+					ctx.MarkLabel(lbl23)
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
@@ -16257,11 +16086,8 @@ func init_timezone() {
 						ps.General = true
 						return bbs[9].RenderPS(ps)
 					}
-					lbl34 := ctx.ReserveLabel()
-					lbl35 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d248.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl34)
-					ctx.EmitJmp(lbl35)
+					ctx.EmitJump(CondNotEqual, lbl9)
 					snap251 := d0
 					snap252 := d1
 					snap253 := d2
@@ -16310,8 +16136,6 @@ func init_timezone() {
 					snap296 := d247
 					snap297 := d248
 					alloc298 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl34)
-					ctx.EmitJmp(lbl9)
 					ctx.RestoreAllocState(alloc298)
 					d0 = snap251
 					d1 = snap252
@@ -16360,8 +16184,6 @@ func init_timezone() {
 					d246 = snap295
 					d247 = snap296
 					d248 = snap297
-					ctx.MarkLabel(lbl35)
-					ctx.EmitJmp(lbl12)
 					ctx.RestoreAllocState(alloc298)
 					d0 = snap251
 					d1 = snap252
@@ -16778,10 +16600,10 @@ func init_timezone() {
 					ctx.EnsureDesc(&d105)
 					bbpos_3_0 := int32(-1)
 					_ = bbpos_3_0
-					lbl36 := ctx.ReserveLabel()
-					_ = lbl36
+					lbl24 := ctx.ReserveLabel()
+					_ = lbl24
 					bbpos_3_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl36)
+					ctx.MarkLabel(lbl24)
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
@@ -17267,11 +17089,8 @@ func init_timezone() {
 						ps.General = true
 						return bbs[11].RenderPS(ps)
 					}
-					lbl37 := ctx.ReserveLabel()
-					lbl38 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d360.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl37)
-					ctx.EmitJmp(lbl38)
+					ctx.EmitJump(CondNotEqual, lbl11)
 					snap363 := d0
 					snap364 := d1
 					snap365 := d2
@@ -17332,8 +17151,6 @@ func init_timezone() {
 					snap420 := d359
 					snap421 := d360
 					alloc422 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl37)
-					ctx.EmitJmp(lbl11)
 					ctx.RestoreAllocState(alloc422)
 					d0 = snap363
 					d1 = snap364
@@ -17394,8 +17211,6 @@ func init_timezone() {
 					d358 = snap419
 					d359 = snap420
 					d360 = snap421
-					ctx.MarkLabel(lbl38)
-					ctx.EmitJmp(lbl14)
 					ctx.RestoreAllocState(alloc422)
 					d0 = snap363
 					d1 = snap364
@@ -17908,10 +17723,10 @@ func init_timezone() {
 					ctx.EnsureDesc(&d105)
 					bbpos_4_0 := int32(-1)
 					_ = bbpos_4_0
-					lbl39 := ctx.ReserveLabel()
-					_ = lbl39
+					lbl25 := ctx.ReserveLabel()
+					_ = lbl25
 					bbpos_4_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl39)
+					ctx.MarkLabel(lbl25)
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
@@ -18477,11 +18292,8 @@ func init_timezone() {
 						ps.General = true
 						return bbs[13].RenderPS(ps)
 					}
-					lbl40 := ctx.ReserveLabel()
-					lbl41 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d497.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl40)
-					ctx.EmitJmp(lbl41)
+					ctx.EmitJump(CondNotEqual, lbl13)
 					snap500 := d0
 					snap501 := d1
 					snap502 := d2
@@ -18555,8 +18367,6 @@ func init_timezone() {
 					snap570 := d496
 					snap571 := d497
 					alloc572 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl40)
-					ctx.EmitJmp(lbl13)
 					ctx.RestoreAllocState(alloc572)
 					d0 = snap500
 					d1 = snap501
@@ -18630,8 +18440,6 @@ func init_timezone() {
 					d495 = snap569
 					d496 = snap570
 					d497 = snap571
-					ctx.MarkLabel(lbl41)
-					ctx.EmitJmp(lbl16)
 					ctx.RestoreAllocState(alloc572)
 					d0 = snap500
 					d1 = snap501
@@ -19248,10 +19056,10 @@ func init_timezone() {
 					ctx.EnsureDesc(&d105)
 					bbpos_5_0 := int32(-1)
 					_ = bbpos_5_0
-					lbl42 := ctx.ReserveLabel()
-					_ = lbl42
+					lbl26 := ctx.ReserveLabel()
+					_ = lbl26
 					bbpos_5_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl42)
+					ctx.MarkLabel(lbl26)
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
@@ -19882,11 +19690,8 @@ func init_timezone() {
 						ps.General = true
 						return bbs[15].RenderPS(ps)
 					}
-					lbl43 := ctx.ReserveLabel()
-					lbl44 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d660.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl43)
-					ctx.EmitJmp(lbl44)
+					ctx.EmitJump(CondNotEqual, lbl15)
 					snap663 := d0
 					snap664 := d1
 					snap665 := d2
@@ -19973,8 +19778,6 @@ func init_timezone() {
 					snap746 := d659
 					snap747 := d660
 					alloc748 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl43)
-					ctx.EmitJmp(lbl15)
 					ctx.RestoreAllocState(alloc748)
 					d0 = snap663
 					d1 = snap664
@@ -20061,8 +19864,6 @@ func init_timezone() {
 					d658 = snap745
 					d659 = snap746
 					d660 = snap747
-					ctx.MarkLabel(lbl44)
-					ctx.EmitJmp(lbl18)
 					ctx.RestoreAllocState(alloc748)
 					d0 = snap663
 					d1 = snap664
@@ -21522,11 +21323,8 @@ func init_timezone() {
 						ps.General = true
 						return bbs[17].RenderPS(ps)
 					}
-					lbl45 := ctx.ReserveLabel()
-					lbl46 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d854.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl45)
-					ctx.EmitJmp(lbl46)
+					ctx.EmitJump(CondNotEqual, lbl17)
 					snap857 := d0
 					snap858 := d1
 					snap859 := d2
@@ -21629,8 +21427,6 @@ func init_timezone() {
 					snap956 := d853
 					snap957 := d854
 					alloc958 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl45)
-					ctx.EmitJmp(lbl17)
 					ctx.RestoreAllocState(alloc958)
 					d0 = snap857
 					d1 = snap858
@@ -21733,8 +21529,6 @@ func init_timezone() {
 					d852 = snap955
 					d853 = snap956
 					d854 = snap957
-					ctx.MarkLabel(lbl46)
-					ctx.EmitJmp(lbl20)
 					ctx.RestoreAllocState(alloc958)
 					d0 = snap857
 					d1 = snap858
@@ -23285,11 +23079,8 @@ func init_timezone() {
 						ps.General = true
 						return bbs[19].RenderPS(ps)
 					}
-					lbl47 := ctx.ReserveLabel()
-					lbl48 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d1077.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl47)
-					ctx.EmitJmp(lbl48)
+					ctx.EmitJump(CondNotEqual, lbl19)
 					snap1080 := d0
 					snap1081 := d1
 					snap1082 := d2
@@ -23405,8 +23196,6 @@ func init_timezone() {
 					snap1192 := d1076
 					snap1193 := d1077
 					alloc1194 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl47)
-					ctx.EmitJmp(lbl19)
 					ctx.RestoreAllocState(alloc1194)
 					d0 = snap1080
 					d1 = snap1081
@@ -23522,8 +23311,6 @@ func init_timezone() {
 					d1075 = snap1191
 					d1076 = snap1192
 					d1077 = snap1193
-					ctx.MarkLabel(lbl48)
-					ctx.EmitJmp(lbl21)
 					ctx.RestoreAllocState(alloc1194)
 					d0 = snap1080
 					d1 = snap1081

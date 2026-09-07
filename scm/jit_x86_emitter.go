@@ -690,6 +690,18 @@ func (ctx *JITContext) EmitSubInt64(dst, src Reg) {
 	ctx.emitAluRegReg(0x29, dst, src) // SUB r/m64, r64
 }
 
+// EmitAddInt32 emits a 32-bit ADD. Writing the low word zero-extends the result
+// on amd64, so uint32 SSA values become canonical without a following mask or
+// shift pair.
+func (ctx *JITContext) EmitAddInt32(dst, src Reg) {
+	ctx.emitAluRegRegWidth(0x01, dst, src, false)
+}
+
+// EmitSubInt32 is the subtraction counterpart of EmitAddInt32.
+func (ctx *JITContext) EmitSubInt32(dst, src Reg) {
+	ctx.emitAluRegRegWidth(0x29, dst, src, false)
+}
+
 // EmitImulInt64 emits: IMUL dst, src (GPR *= GPR, signed)
 func (ctx *JITContext) EmitImulInt64(dst, src Reg) {
 	// IMUL dst, src: REX.W + 0F AF /r (dst = dst * src)
@@ -1081,6 +1093,82 @@ func (ctx *JITContext) EmitLeaRegMem(dst, base Reg, disp int32) {
 	ctx.emitRegMemOp(0x8D, dst, base, disp)
 }
 
+// EmitLeaRegBaseIndex emits LEA dst, [base + index*scale]. Keeping this
+// addressing primitive in the architecture backend lets common lowering fuse
+// IndexAddr+Store without manufacturing an allocator-owned address value.
+func (ctx *JITContext) EmitLeaRegBaseIndex(dst, base, index Reg, scale uint8) {
+	var scaleBits byte
+	switch scale {
+	case 1:
+		scaleBits = 0
+	case 2:
+		scaleBits = 1
+	case 4:
+		scaleBits = 2
+	case 8:
+		scaleBits = 3
+	default:
+		panic("jit: x86 indexed address scale must be 1, 2, 4, or 8")
+	}
+	rex := byte(0x48)
+	if dst >= 8 {
+		rex |= 0x04 // REX.R
+	}
+	if index >= 8 {
+		rex |= 0x02 // REX.X
+	}
+	if base >= 8 {
+		rex |= 0x01 // REX.B
+	}
+	modrm := byte(dst&7)<<3 | 0x04
+	sib := scaleBits<<6 | byte(index&7)<<3 | byte(base&7)
+	ctx.emitBytes(rex, 0x8D, modrm, sib)
+}
+
+// EmitMovRegBaseIndex loads an unsigned scalar from [base+index*scale]. The
+// semantic slice-element lowering lives in common code; only this SIB encoding
+// is architecture-specific.
+func (ctx *JITContext) EmitMovRegBaseIndex(dst, base, index Reg, scale uint8, width int32) {
+	var scaleBits byte
+	switch scale {
+	case 1:
+		scaleBits = 0
+	case 2:
+		scaleBits = 1
+	case 4:
+		scaleBits = 2
+	case 8:
+		scaleBits = 3
+	default:
+		panic("jit: x86 indexed load scale must be 1, 2, 4, or 8")
+	}
+	rex := byte(0x40)
+	if width != 4 {
+		rex |= 0x08 // 64-bit destination for MOV/MOVZX
+	}
+	if dst >= 8 {
+		rex |= 0x04
+	}
+	if index >= 8 {
+		rex |= 0x02
+	}
+	if base >= 8 {
+		rex |= 0x01
+	}
+	modrm := byte(dst&7)<<3 | 0x04
+	sib := scaleBits<<6 | byte(index&7)<<3 | byte(base&7)
+	switch width {
+	case 1:
+		ctx.emitBytes(rex, 0x0F, 0xB6, modrm, sib)
+	case 2:
+		ctx.emitBytes(rex, 0x0F, 0xB7, modrm, sib)
+	case 4, 8:
+		ctx.emitBytes(rex, 0x8B, modrm, sib)
+	default:
+		panic("jit: x86 indexed load width must be 1, 2, 4, or 8")
+	}
+}
+
 // EmitMovRegMem64 loads a 64-bit value from an absolute memory address into dst.
 // Uses dst itself as scratch for the address (avoids clobbering R11).
 func (ctx *JITContext) EmitMovRegMem64(dst Reg, addr uintptr) {
@@ -1340,6 +1428,17 @@ func (ctx *JITContext) EmitAddRegImm32(dst Reg, imm int32) {
 	ctx.emitU32(uint32(imm))
 }
 
+// EmitAddRegImm32Low emits ADD r32, imm32 and therefore canonicalizes a uint32
+// result as part of the arithmetic instruction itself.
+func (ctx *JITContext) EmitAddRegImm32Low(dst Reg, imm int32) {
+	rex := byte(0x40)
+	if dst >= 8 {
+		rex |= 0x01
+	}
+	ctx.emitBytes(rex, 0x81, 0xC0|byte(dst&7))
+	ctx.emitU32(uint32(imm))
+}
+
 // EmitSubRegImm32 emits SUB r64, sign-extended imm32.
 func (ctx *JITContext) EmitSubRegImm32(dst Reg, imm int32) {
 	rex := byte(0x48)
@@ -1348,6 +1447,16 @@ func (ctx *JITContext) EmitSubRegImm32(dst Reg, imm int32) {
 	}
 	modrm := byte(0xE8) | byte(dst&7) // /5 = SUB
 	ctx.emitBytes(rex, 0x81, modrm)
+	ctx.emitU32(uint32(imm))
+}
+
+// EmitSubRegImm32Low emits SUB r32, imm32 and canonicalizes a uint32 result.
+func (ctx *JITContext) EmitSubRegImm32Low(dst Reg, imm int32) {
+	rex := byte(0x40)
+	if dst >= 8 {
+		rex |= 0x01
+	}
+	ctx.emitBytes(rex, 0x81, 0xE8|byte(dst&7))
 	ctx.emitU32(uint32(imm))
 }
 
@@ -2333,7 +2442,14 @@ func (ctx *JITContext) emitStoreRegMem(src, base Reg, disp int32) {
 // emitAluRegReg emits a REX.W ALU op: <opcode> r/m64, r64
 // opcode: 0x01=ADD, 0x29=SUB, 0x39=CMP, 0x09=OR, 0x21=AND, 0x31=XOR
 func (ctx *JITContext) emitAluRegReg(opcode byte, dst, src Reg) {
+	ctx.emitAluRegRegWidth(opcode, dst, src, true)
+}
+
+func (ctx *JITContext) emitAluRegRegWidth(opcode byte, dst, src Reg, wide bool) {
 	rex := byte(0x48)
+	if !wide {
+		rex = 0x40
+	}
 	if src >= 8 {
 		rex |= 0x04
 	}
@@ -2348,6 +2464,35 @@ func (ctx *JITContext) emitAluRegReg(opcode byte, dst, src Reg) {
 // MOV [base+disp], src (64-bit store).
 func (ctx *JITContext) EmitStoreRegMem(src, base Reg, disp int32) {
 	ctx.emitStoreRegMem(src, base, disp)
+}
+
+// EmitStoreImm32Mem stores a sign-extended 32-bit immediate into a 64-bit
+// memory word. x86-64 has no general imm64-to-memory encoding; constants that
+// fit this form avoid occupying a temporary register in tight generated loops.
+func (ctx *JITContext) EmitStoreImm32Mem(base Reg, disp int32, value int32) {
+	rex := byte(0x48)
+	if base >= 8 {
+		rex |= 0x01
+	}
+	baseEnc := byte(base & 7)
+	mod := byte(0)
+	if disp == 0 && baseEnc != 5 {
+		mod = 0x00
+	} else if disp >= -128 && disp <= 127 {
+		mod = 0x40
+	} else {
+		mod = 0x80
+	}
+	ctx.emitBytes(rex, 0xC7, mod|baseEnc)
+	if baseEnc == 4 {
+		ctx.emitByte(0x24)
+	}
+	if mod == 0x40 {
+		ctx.emitByte(byte(int8(disp)))
+	} else if mod == 0x80 {
+		ctx.emitU32(uint32(disp))
+	}
+	ctx.emitU32(uint32(value))
 }
 
 func (ctx *JITContext) emitStoreRegMemWidth(src, base Reg, disp int32, opcode byte, rexW bool) {

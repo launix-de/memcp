@@ -610,10 +610,7 @@ func init_list_assoc_extra() {
 						ps.General = true
 						return bbs[1].RenderPS(ps)
 					}
-					lbl11 := ctx.ReserveLabel()
-					lbl12 := ctx.ReserveLabel()
-					ctx.EmitJump(d25.Condition, lbl11)
-					ctx.EmitJmp(lbl12)
+					ctx.EmitJump(d25.Condition, lbl3)
 					snap29 := d3
 					snap30 := d4
 					snap31 := d5
@@ -636,8 +633,6 @@ func init_list_assoc_extra() {
 					snap48 := d25
 					snap49 := d28
 					alloc50 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl11)
-					ctx.EmitJmp(lbl3)
 					ctx.RestoreAllocState(alloc50)
 					d3 = snap29
 					d4 = snap30
@@ -660,8 +655,6 @@ func init_list_assoc_extra() {
 					d24 = snap47
 					d25 = snap48
 					d28 = snap49
-					ctx.MarkLabel(lbl12)
-					ctx.EmitJmp(lbl4)
 					ctx.RestoreAllocState(alloc50)
 					d3 = snap29
 					d4 = snap30
@@ -1772,10 +1765,7 @@ func init_list_assoc_extra() {
 						ps.General = true
 						return bbs[1].RenderPS(ps)
 					}
-					lbl11 := ctx.ReserveLabel()
-					lbl12 := ctx.ReserveLabel()
-					ctx.EmitJump(d25.Condition, lbl11)
-					ctx.EmitJmp(lbl12)
+					ctx.EmitJump(d25.Condition, lbl3)
 					snap29 := d3
 					snap30 := d4
 					snap31 := d5
@@ -1798,8 +1788,6 @@ func init_list_assoc_extra() {
 					snap48 := d25
 					snap49 := d28
 					alloc50 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl11)
-					ctx.EmitJmp(lbl3)
 					ctx.RestoreAllocState(alloc50)
 					d3 = snap29
 					d4 = snap30
@@ -1822,8 +1810,6 @@ func init_list_assoc_extra() {
 					d24 = snap47
 					d25 = snap48
 					d28 = snap49
-					ctx.MarkLabel(lbl12)
-					ctx.EmitJmp(lbl4)
 					ctx.RestoreAllocState(alloc50)
 					d3 = snap29
 					d4 = snap30
@@ -2974,10 +2960,7 @@ func init_list_assoc_extra() {
 						ps.General = true
 						return bbs[1].RenderPS(ps)
 					}
-					lbl11 := ctx.ReserveLabel()
-					lbl12 := ctx.ReserveLabel()
-					ctx.EmitJump(d25.Condition, lbl11)
-					ctx.EmitJmp(lbl12)
+					ctx.EmitJump(d25.Condition, lbl3)
 					snap29 := d3
 					snap30 := d4
 					snap31 := d5
@@ -3000,8 +2983,6 @@ func init_list_assoc_extra() {
 					snap48 := d25
 					snap49 := d28
 					alloc50 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl11)
-					ctx.EmitJmp(lbl3)
 					ctx.RestoreAllocState(alloc50)
 					d3 = snap29
 					d4 = snap30
@@ -3024,8 +3005,6 @@ func init_list_assoc_extra() {
 					d24 = snap47
 					d25 = snap48
 					d28 = snap49
-					ctx.MarkLabel(lbl12)
-					ctx.EmitJmp(lbl4)
 					ctx.RestoreAllocState(alloc50)
 					d3 = snap29
 					d4 = snap30
@@ -4207,10 +4186,7 @@ func init_list_assoc_extra() {
 						ps.General = true
 						return bbs[1].RenderPS(ps)
 					}
-					lbl11 := ctx.ReserveLabel()
-					lbl12 := ctx.ReserveLabel()
-					ctx.EmitJump(d22.Condition, lbl11)
-					ctx.EmitJmp(lbl12)
+					ctx.EmitJump(d22.Condition, lbl3)
 					snap26 := d3
 					snap27 := d4
 					snap28 := d5
@@ -4231,8 +4207,6 @@ func init_list_assoc_extra() {
 					snap43 := d22
 					snap44 := d25
 					alloc45 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl11)
-					ctx.EmitJmp(lbl3)
 					ctx.RestoreAllocState(alloc45)
 					d3 = snap26
 					d4 = snap27
@@ -4253,8 +4227,6 @@ func init_list_assoc_extra() {
 					d21 = snap42
 					d22 = snap43
 					d25 = snap44
-					ctx.MarkLabel(lbl12)
-					ctx.EmitJmp(lbl4)
 					ctx.RestoreAllocState(alloc45)
 					d3 = snap26
 					d4 = snap27
@@ -5273,10 +5245,7 @@ func init_list_assoc_extra() {
 						ps.General = true
 						return bbs[1].RenderPS(ps)
 					}
-					lbl11 := ctx.ReserveLabel()
-					lbl12 := ctx.ReserveLabel()
-					ctx.EmitJump(d22.Condition, lbl11)
-					ctx.EmitJmp(lbl12)
+					ctx.EmitJump(d22.Condition, lbl3)
 					snap26 := d3
 					snap27 := d4
 					snap28 := d5
@@ -5297,8 +5266,6 @@ func init_list_assoc_extra() {
 					snap43 := d22
 					snap44 := d25
 					alloc45 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl11)
-					ctx.EmitJmp(lbl3)
 					ctx.RestoreAllocState(alloc45)
 					d3 = snap26
 					d4 = snap27
@@ -5319,8 +5286,6 @@ func init_list_assoc_extra() {
 					d21 = snap42
 					d22 = snap43
 					d25 = snap44
-					ctx.MarkLabel(lbl12)
-					ctx.EmitJmp(lbl4)
 					ctx.RestoreAllocState(alloc45)
 					d3 = snap26
 					d4 = snap27

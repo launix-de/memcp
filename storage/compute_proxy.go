@@ -1160,17 +1160,6 @@ func (s *StorageComputeProxy) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc,
 	} else {
 		idxInt = idx
 	}
-	if idxInt.Loc == scm.LocImm {
-		idxInt = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(int64(uint64(idxInt.Imm.Int()) & 0xffffffff))}
-	} else {
-		ctx.EnsureDesc(&idxInt)
-		if idxInt.Loc != scm.LocReg {
-			panic("jit: idxInt not in register")
-		}
-		ctx.EmitShlRegImm8(idxInt.Reg, 32)
-		ctx.EmitShrRegImm8(idxInt.Reg, 32)
-		ctx.BindReg(idxInt.Reg, &idxInt)
-	}
 	ctx.EnsureDesc(&thisptr)
 	ctx.EnsureDesc(&thisptr)
 	if thisptr.Loc == scm.LocRegPair || thisptr.Loc == scm.LocStackPair || thisptr.Loc == scm.LocRegTriple || thisptr.Loc == scm.LocStackTriple {
@@ -1204,9 +1193,8 @@ func (s *StorageComputeProxy) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc,
 		ctx.BindReg(result.Reg, &result)
 		ctx.BindReg(result.Reg2, &result)
 	}
-	d2 := scm.JITPrepareScmerGoArg(ctx, d1)
-	ctx.EmitMovPairToResult(&d2, &result)
-	result.Type = d2.Type
+	ctx.EmitMovPairToResult(&d1, &result)
+	result.Type = d1.Type
 	return result
 	return result
 }

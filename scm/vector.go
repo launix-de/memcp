@@ -624,9 +624,8 @@ func init_vector() {
 						return bbs[0].RenderPS(ps)
 					}
 					lbl16 := ctx.ReserveLabel()
-					lbl17 := ctx.ReserveLabel()
-					ctx.EmitJump(d22.Condition, lbl16)
-					ctx.EmitJmp(lbl17)
+					ctx.EmitJump(d22.Condition, lbl2)
+					ctx.EmitJmp(lbl16)
 					snap26 := d8
 					snap27 := d9
 					snap28 := d10
@@ -644,8 +643,6 @@ func init_vector() {
 					snap40 := d22
 					snap41 := d25
 					alloc42 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl16)
-					ctx.EmitJmp(lbl2)
 					ctx.RestoreAllocState(alloc42)
 					d8 = snap26
 					d9 = snap27
@@ -663,7 +660,7 @@ func init_vector() {
 					d21 = snap39
 					d22 = snap40
 					d25 = snap41
-					ctx.MarkLabel(lbl17)
+					ctx.MarkLabel(lbl16)
 					ctx.EmitStoreScmerToStack(JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString("DOT")}, int32(bbs[2].PhiBase)+int32(0))
 					ctx.EmitJmp(lbl3)
 					ctx.RestoreAllocState(alloc42)
@@ -1238,11 +1235,8 @@ func init_vector() {
 						ps.General = true
 						return bbs[2].RenderPS(ps)
 					}
-					lbl18 := ctx.ReserveLabel()
-					lbl19 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d76.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl18)
-					ctx.EmitJmp(lbl19)
+					ctx.EmitJump(CondNotEqual, lbl4)
 					snap80 := d8
 					snap81 := d9
 					snap82 := d10
@@ -1274,8 +1268,6 @@ func init_vector() {
 					snap108 := d76
 					snap109 := d79
 					alloc110 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl18)
-					ctx.EmitJmp(lbl4)
 					ctx.RestoreAllocState(alloc110)
 					d8 = snap80
 					d9 = snap81
@@ -1307,8 +1299,6 @@ func init_vector() {
 					d75 = snap107
 					d76 = snap108
 					d79 = snap109
-					ctx.MarkLabel(lbl19)
-					ctx.EmitJmp(lbl6)
 					ctx.RestoreAllocState(alloc110)
 					d8 = snap80
 					d9 = snap81
@@ -2523,10 +2513,7 @@ func init_vector() {
 						ps.General = true
 						return bbs[6].RenderPS(ps)
 					}
-					lbl20 := ctx.ReserveLabel()
-					lbl21 := ctx.ReserveLabel()
-					ctx.EmitJump(d160.Condition, lbl20)
-					ctx.EmitJmp(lbl21)
+					ctx.EmitJump(d160.Condition, lbl10)
 					snap167 := d8
 					snap168 := d9
 					snap169 := d10
@@ -2577,8 +2564,6 @@ func init_vector() {
 					snap214 := d165
 					snap215 := d166
 					alloc216 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl20)
-					ctx.EmitJmp(lbl10)
 					ctx.RestoreAllocState(alloc216)
 					d8 = snap167
 					d9 = snap168
@@ -2629,8 +2614,6 @@ func init_vector() {
 					d164 = snap213
 					d165 = snap214
 					d166 = snap215
-					ctx.MarkLabel(lbl21)
-					ctx.EmitJmp(lbl9)
 					ctx.RestoreAllocState(alloc216)
 					d8 = snap167
 					d9 = snap168
@@ -3103,13 +3086,12 @@ func init_vector() {
 					ctx.EnsureDesc(&d269)
 					d271 = d269
 					_ = d271
-					ctx.StabilizeDescForControlFlow(&d271)
 					bbpos_1_0 := int32(-1)
 					_ = bbpos_1_0
-					lbl22 := ctx.ReserveLabel()
-					_ = lbl22
+					lbl17 := ctx.ReserveLabel()
+					_ = lbl17
 					bbpos_1_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl22)
+					ctx.MarkLabel(lbl17)
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
@@ -3145,13 +3127,12 @@ func init_vector() {
 					ctx.EnsureDesc(&d273)
 					d275 = d273
 					_ = d275
-					ctx.StabilizeDescForControlFlow(&d275)
 					bbpos_2_0 := int32(-1)
 					_ = bbpos_2_0
-					lbl23 := ctx.ReserveLabel()
-					_ = lbl23
+					lbl18 := ctx.ReserveLabel()
+					_ = lbl18
 					bbpos_2_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl23)
+					ctx.MarkLabel(lbl18)
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
@@ -4567,10 +4548,7 @@ func init_vector() {
 						ps.General = true
 						return bbs[9].RenderPS(ps)
 					}
-					lbl24 := ctx.ReserveLabel()
-					lbl25 := ctx.ReserveLabel()
-					ctx.EmitJump(d300.Condition, lbl24)
-					ctx.EmitJmp(lbl25)
+					ctx.EmitJump(d300.Condition, lbl8)
 					snap303 := d8
 					snap304 := d9
 					snap305 := d10
@@ -4651,8 +4629,6 @@ func init_vector() {
 					snap380 := d299
 					snap381 := d300
 					alloc382 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl24)
-					ctx.EmitJmp(lbl8)
 					ctx.RestoreAllocState(alloc382)
 					d8 = snap303
 					d9 = snap304
@@ -4733,8 +4709,6 @@ func init_vector() {
 					d298 = snap379
 					d299 = snap380
 					d300 = snap381
-					ctx.MarkLabel(lbl25)
-					ctx.EmitJmp(lbl9)
 					ctx.RestoreAllocState(alloc382)
 					d8 = snap303
 					d9 = snap304
@@ -5726,10 +5700,7 @@ func init_vector() {
 						ps.General = true
 						return bbs[10].RenderPS(ps)
 					}
-					lbl26 := ctx.ReserveLabel()
-					lbl27 := ctx.ReserveLabel()
-					ctx.EmitJump(d469.Condition, lbl26)
-					ctx.EmitJmp(lbl27)
+					ctx.EmitJump(d469.Condition, lbl14)
 					snap474 := d8
 					snap475 := d9
 					snap476 := d10
@@ -5817,8 +5788,6 @@ func init_vector() {
 					snap558 := d472
 					snap559 := d473
 					alloc560 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl26)
-					ctx.EmitJmp(lbl14)
 					ctx.RestoreAllocState(alloc560)
 					d8 = snap474
 					d9 = snap475
@@ -5906,8 +5875,6 @@ func init_vector() {
 					d469 = snap557
 					d472 = snap558
 					d473 = snap559
-					ctx.MarkLabel(lbl27)
-					ctx.EmitJmp(lbl13)
 					ctx.RestoreAllocState(alloc560)
 					d8 = snap474
 					d9 = snap475
@@ -6676,13 +6643,12 @@ func init_vector() {
 					ctx.EnsureDesc(&d650)
 					d652 = d650
 					_ = d652
-					ctx.StabilizeDescForControlFlow(&d652)
 					bbpos_3_0 := int32(-1)
 					_ = bbpos_3_0
-					lbl28 := ctx.ReserveLabel()
-					_ = lbl28
+					lbl19 := ctx.ReserveLabel()
+					_ = lbl19
 					bbpos_3_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl28)
+					ctx.MarkLabel(lbl19)
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
@@ -6718,13 +6684,12 @@ func init_vector() {
 					ctx.EnsureDesc(&d654)
 					d656 = d654
 					_ = d656
-					ctx.StabilizeDescForControlFlow(&d656)
 					bbpos_4_0 := int32(-1)
 					_ = bbpos_4_0
-					lbl29 := ctx.ReserveLabel()
-					_ = lbl29
+					lbl20 := ctx.ReserveLabel()
+					_ = lbl20
 					bbpos_4_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl29)
+					ctx.MarkLabel(lbl20)
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
@@ -7651,11 +7616,10 @@ func init_vector() {
 						ps.General = true
 						return bbs[12].RenderPS(ps)
 					}
-					lbl30 := ctx.ReserveLabel()
-					lbl31 := ctx.ReserveLabel()
+					lbl21 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d670.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl30)
-					ctx.EmitJmp(lbl31)
+					ctx.EmitJump(CondNotEqual, lbl15)
+					ctx.EmitJmp(lbl21)
 					snap675 := d8
 					snap676 := d9
 					snap677 := d10
@@ -7765,8 +7729,6 @@ func init_vector() {
 					snap781 := d672
 					snap782 := d674
 					alloc783 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl30)
-					ctx.EmitJmp(lbl15)
 					ctx.RestoreAllocState(alloc783)
 					d8 = snap675
 					d9 = snap676
@@ -7876,7 +7838,7 @@ func init_vector() {
 					d670 = snap780
 					d672 = snap781
 					d674 = snap782
-					ctx.MarkLabel(lbl31)
+					ctx.MarkLabel(lbl21)
 					ctx.SyncDesc(&d14)
 					if d14.Loc == LocReg {
 						ctx.ProtectReg(d14.Reg)
@@ -9140,10 +9102,7 @@ func init_vector() {
 						ps.General = true
 						return bbs[13].RenderPS(ps)
 					}
-					lbl32 := ctx.ReserveLabel()
-					lbl33 := ctx.ReserveLabel()
-					ctx.EmitJump(d901.Condition, lbl32)
-					ctx.EmitJmp(lbl33)
+					ctx.EmitJump(d901.Condition, lbl12)
 					snap904 := d8
 					snap905 := d9
 					snap906 := d10
@@ -9258,8 +9217,6 @@ func init_vector() {
 					snap1015 := d900
 					snap1016 := d901
 					alloc1017 := ctx.SnapshotAllocState()
-					ctx.MarkLabel(lbl32)
-					ctx.EmitJmp(lbl12)
 					ctx.RestoreAllocState(alloc1017)
 					d8 = snap904
 					d9 = snap905
@@ -9374,8 +9331,6 @@ func init_vector() {
 					d899 = snap1014
 					d900 = snap1015
 					d901 = snap1016
-					ctx.MarkLabel(lbl33)
-					ctx.EmitJmp(lbl13)
 					ctx.RestoreAllocState(alloc1017)
 					d8 = snap904
 					d9 = snap905
