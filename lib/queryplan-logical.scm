@@ -897,10 +897,6 @@ the shallow guard instead of walking the wide expression it is about to drop. */
 	(filter (coalesceNil sources '()) (lambda (src)
 		(and (not (source_outer? src)) (source_is_base_table? src))))))
 
-(define expr_referenced_aliases (lambda (default_alias expr)
-	(map (expr_collect_tagged_nth_unique expr (quote get_column) 1)
-		(lambda (tblvar) (resolve_column_alias tblvar default_alias)))))
-
 (define expr_refs_alias? (lambda (default_alias alias expr)
 	(match expr
 		((symbol get_column) tblvar _ _ _) (equal?? (resolve_column_alias tblvar default_alias) alias)
