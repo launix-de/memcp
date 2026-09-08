@@ -177,7 +177,13 @@ func (db *database) IncrBlobRefcount(hash string) {
 }
 
 // DecrBlobRefcount decrements the reference count for a blob hash in db.`.blobs`.
-// If the count reaches 0, the row is deleted and the blob file is removed.
+// If the count reaches 0, only the operational counter row is deleted.
+// A counter can undercount committed owners after a crash or an interrupted
+// lifecycle update. It is therefore NEVER authority to delete payload data.
+// CleanDatabase reclaims unowned files using the complete committed-generation
+// manifests under persistenceLifecycle. Do not scan those manifests here:
+// callers can already hold schema/shard lifecycle locks, and doing so would
+// introduce lock inversions as well as a full catalog walk per decrement.
 func (db *database) DecrBlobRefcount(hash string) {
 	defer db.lockBlobRef(hash)()
 	state := db.blobRefState()
@@ -220,15 +226,10 @@ func (db *database) DecrBlobRefcount(hash string) {
 	})
 
 	aggr := sumProc()
-	result := t.scan(
+	t.scan(
 		nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil,
 		[]string{"hash"}, blobCondition(hashVal),
 		[]string{"refcount", "$update"}, callback,
 		scm.NewInt(0), aggr, false,
 	)
-
-	// If row was deleted (RC was <=1), remove the blob file
-	if scm.ToInt(result) > 0 && db.persistence != nil {
-		db.persistence.DeleteBlob(hash)
-	}
 }

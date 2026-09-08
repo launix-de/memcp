@@ -1,0 +1,34 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: "1.0"
+  description: "An undercounted blob must survive retirement of another owner"
+setup:
+  - sql: "DROP TABLE IF EXISTS blob_owner_a"
+  - sql: "DROP TABLE IF EXISTS blob_owner_b"
+  - sql: "CREATE TABLE blob_owner_a (id INT, payload TEXT)"
+  - sql: "CREATE TABLE blob_owner_b (id INT, payload TEXT)"
+  - sql: "INSERT INTO blob_owner_a VALUES (1, REPEAT('A', 6000)), (2, REPEAT('B', 6000)), (3, REPEAT('C', 6000))"
+  - sql: "INSERT INTO blob_owner_b SELECT * FROM blob_owner_a"
+  - scm: '(rebuild (table "memcp-tests" "blob_owner_a") true false)'
+  - scm: '(rebuild (table "memcp-tests" "blob_owner_b") true false)'
+test_cases:
+  - name: "Fixture has externally stored payloads with two owners"
+    sql: "SELECT COUNT(*) AS n FROM `.blobs` WHERE hash IN ('f5ddb39412a9924f220f6c16749f0ca53083cf2aa56c4e4ca3d8994141bee964','344edcc59c0872f3a6dff5edd2a586226d0f11faf6dcee6783d3a91dcbfe072b','1658327e53de73a559075f5a4edf9784fd1930cde3ea4f0db91367910f3a57ce') AND refcount >= 2"
+    expect:
+      data: [{n: 3}]
+  - name: "Simulate stale operational counters for only this fixture"
+    sql: "UPDATE `.blobs` SET refcount = 1 WHERE hash IN ('f5ddb39412a9924f220f6c16749f0ca53083cf2aa56c4e4ca3d8994141bee964','344edcc59c0872f3a6dff5edd2a586226d0f11faf6dcee6783d3a91dcbfe072b','1658327e53de73a559075f5a4edf9784fd1930cde3ea4f0db91367910f3a57ce')"
+  - name: "Retire one warm owner"
+    sql: "DROP TABLE blob_owner_a"
+  - name: "Surviving owner retains every payload despite stale counters"
+    sql: "SELECT id, payload = REPEAT(CASE id WHEN 1 THEN 'A' WHEN 2 THEN 'B' ELSE 'C' END, 6000) AS intact FROM blob_owner_b ORDER BY id"
+    expect:
+      data: [{id: 1, intact: true}, {id: 2, intact: true}, {id: 3, intact: true}]
+  - name: "Repeated payload reads remain intact"
+    sql: "SELECT id, LENGTH(payload) AS bytes FROM blob_owner_b ORDER BY id"
+    expect:
+      data: [{id: 1, bytes: 6000}, {id: 2, bytes: 6000}, {id: 3, bytes: 6000}]
+cleanup:
+  - sql: "DROP TABLE IF EXISTS blob_owner_a"
+  - sql: "DROP TABLE IF EXISTS blob_owner_b"
