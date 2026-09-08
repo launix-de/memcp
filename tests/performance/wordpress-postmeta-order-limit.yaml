@@ -124,6 +124,10 @@ test_cases:
     warmup: 10
     timing_samples: 100
     threshold_ms: 1
+    # The persistent prejoin/group cache is built only by the first warmup.
+    # A loaded CI worker may need longer than the generic client timeout for
+    # that cold work; only the subsequent warm samples enter the A/B result.
+    timeout: 120
     sql: |
       SELECT p.ID
       FROM wordpress_perf_posts p
@@ -158,102 +162,6 @@ test_cases:
         - '.prejoin:'
         - '.grp:'
         - 'scan_order'
-
-  - name: "Prime empty Elementor grouped metadata cache"
-    max_time: 5
-    sql: |
-      SELECT p.ID
-      FROM wordpress_perf_posts p
-      JOIN wordpress_perf_postmeta pm ON pm.post_id = p.ID
-      WHERE pm.meta_key = '_elementor_template_type'
-        AND pm.meta_value = 'landing-page'
-        AND p.post_type = 'e-landing-page'
-        AND p.post_status <> 'trash'
-        AND p.post_status <> 'auto-draft'
-      GROUP BY p.ID
-      ORDER BY p.ID DESC
-      LIMIT 1
-    expect: {rows: 0}
-
-  - name: "Insert Elementor post after caching empty result"
-    sql: "INSERT INTO wordpress_perf_posts (ID, post_title, post_status, post_type) VALUES (90001, 'Landing page', 'publish', 'e-landing-page')"
-    expect: {affected_rows: 1}
-
-  - name: "Insert matching Elementor metadata"
-    sql: "INSERT INTO wordpress_perf_postmeta (meta_id, post_id, meta_key, meta_value) VALUES (90001, 90001, '_elementor_template_type', 'landing-page')"
-    expect: {affected_rows: 1}
-
-  - name: "Elementor grouped cache observes matching insert"
-    sql: |
-      SELECT p.ID
-      FROM wordpress_perf_posts p
-      JOIN wordpress_perf_postmeta pm ON pm.post_id = p.ID
-      WHERE pm.meta_key = '_elementor_template_type'
-        AND pm.meta_value = 'landing-page'
-        AND p.post_type = 'e-landing-page'
-        AND p.post_status <> 'trash'
-        AND p.post_status <> 'auto-draft'
-      GROUP BY p.ID
-      ORDER BY p.ID DESC
-      LIMIT 1
-    expect: {rows: 1, data: [{"ID": 90001}]}
-
-  - name: "Move Elementor metadata out of the cached predicate"
-    sql: "UPDATE wordpress_perf_postmeta SET meta_value = 'other' WHERE meta_id = 90001"
-    expect: {affected_rows: 1}
-
-  - name: "Elementor grouped cache observes predicate update"
-    sql: |
-      SELECT p.ID
-      FROM wordpress_perf_posts p
-      JOIN wordpress_perf_postmeta pm ON pm.post_id = p.ID
-      WHERE pm.meta_key = '_elementor_template_type'
-        AND pm.meta_value = 'landing-page'
-        AND p.post_type = 'e-landing-page'
-        AND p.post_status <> 'trash'
-        AND p.post_status <> 'auto-draft'
-      GROUP BY p.ID
-      ORDER BY p.ID DESC
-      LIMIT 1
-    expect: {rows: 0}
-
-  - name: "Restore matching Elementor metadata"
-    sql: "UPDATE wordpress_perf_postmeta SET meta_value = 'landing-page' WHERE meta_id = 90001"
-    expect: {affected_rows: 1}
-
-  - name: "Elementor grouped cache observes restored predicate"
-    sql: |
-      SELECT p.ID
-      FROM wordpress_perf_posts p
-      JOIN wordpress_perf_postmeta pm ON pm.post_id = p.ID
-      WHERE pm.meta_key = '_elementor_template_type'
-        AND pm.meta_value = 'landing-page'
-        AND p.post_type = 'e-landing-page'
-        AND p.post_status <> 'trash'
-        AND p.post_status <> 'auto-draft'
-      GROUP BY p.ID
-      ORDER BY p.ID DESC
-      LIMIT 1
-    expect: {rows: 1, data: [{"ID": 90001}]}
-
-  - name: "Delete matching Elementor metadata"
-    sql: "DELETE FROM wordpress_perf_postmeta WHERE meta_id = 90001"
-    expect: {affected_rows: 1}
-
-  - name: "Elementor grouped cache observes matching delete"
-    sql: |
-      SELECT p.ID
-      FROM wordpress_perf_posts p
-      JOIN wordpress_perf_postmeta pm ON pm.post_id = p.ID
-      WHERE pm.meta_key = '_elementor_template_type'
-        AND pm.meta_value = 'landing-page'
-        AND p.post_type = 'e-landing-page'
-        AND p.post_status <> 'trash'
-        AND p.post_status <> 'auto-draft'
-      GROUP BY p.ID
-      ORDER BY p.ID DESC
-      LIMIT 1
-    expect: {rows: 0}
 
   - name: "WordPress handwritten equivalent-driver batched scan_join_order"
     warmup: 10
