@@ -17,6 +17,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 package scm
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -226,6 +227,76 @@ func TestDeclarationOwnsOptimizerHook(t *testing.T) {
 	}
 	if !optimized.IsInt() || optimized.Int() != 42 {
 		t.Fatalf("declaration optimizer hook returned %s, want 42", String(optimized))
+	}
+}
+
+func TestOptimizerOnlyDeclarationIsInternalToGeneratedCode(t *testing.T) {
+	oldTitles, oldDeclarations, oldFunctions := declaration_titles, declarations, declarationsByFunction
+	defer func() {
+		declaration_titles, declarations, declarationsByFunction = oldTitles, oldDeclarations, oldFunctions
+	}()
+	declaration_titles = nil
+	declarations = make(map[string]*Declaration)
+	declarationsByFunction = make(map[uintptr]*Declaration)
+
+	env := Env{Vars: make(Vars)}
+	DeclareTitle("Internal")
+	Declare(&env, &Declaration{
+		Name:          "optimizer_only_test",
+		Fn:            func(...Scmer) Scmer { return NewInt(42) },
+		OptimizerOnly: true,
+		Type: &TypeDescriptor{
+			Kind:        "func",
+			Description: "must not be user-visible",
+			Return:      &TypeDescriptor{Kind: "int"},
+		},
+	})
+
+	// Optimized output still resolves and executes the registered primitive.
+	call := NewSlice([]Scmer{NewSymbol("optimizer_only_test")})
+	if got := Eval(call, &env); !got.IsInt() || got.Int() != 42 {
+		t.Fatalf("optimizer-only generated call returned %s, want 42", String(got))
+	}
+
+	assertPanics := func(want string, fn func()) {
+		t.Helper()
+		defer func() {
+			recovered := recover()
+			if recovered == nil || !strings.Contains(fmt.Sprint(recovered), want) {
+				t.Fatalf("panic = %v, want text %q", recovered, want)
+			}
+		}()
+		fn()
+	}
+	assertPanics("optimizer-only function optimizer_only_test", func() {
+		EvalAll(t.Name(), "(optimizer_only_test)", &env)
+	})
+	if help := Help(NewNil()); strings.Contains(help, "optimizer_only_test") {
+		t.Fatalf("optimizer-only declaration appears in help index:\n%s", help)
+	}
+	assertPanics("function not found", func() {
+		Help(NewString("optimizer_only_test"))
+	})
+
+	folder := t.TempDir()
+	if err := WriteDocumentation(folder); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(folder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		content, err := os.ReadFile(filepath.Join(folder, entry.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(content), "optimizer_only_test") {
+			t.Fatalf("optimizer-only declaration appears in generated documentation %s", entry.Name())
+		}
 	}
 }
 
