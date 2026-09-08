@@ -3276,20 +3276,12 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 	/* query_expr_alias_set is the planner JIT coverage target. Native compilation
 	is atomic, so a compiled descriptor means every expression in the function was
-	lowered without a whole-procedure fallback. The callback-free tree collector
-	deduplicates tagged leaves before Scheme builds the alias dictionary. */
+	lowered without a whole-procedure fallback. Its Scheme definition remains a
+	functional tree fold; the optimizer recognizes and lowers the complete shape. */
 	(set resolve_column_alias (jit resolve_column_alias))
 	(set query_expr_alias_set (jit query_expr_alias_set))
 	(assert (jit? resolve_column_alias) (jit-enabled?) "jit coverage: resolve_column_alias is 100% native")
 	(assert (jit? query_expr_alias_set) (jit-enabled?) "jit coverage: query_expr_alias_set is 100% native")
-	(assert (tree_collect_tagged_nth_unique
-		(list 'root
-			(list 'tag 'a)
-			(list 'nested (list 'tag 'b) (list 'tag 'a))
-			(list 'tag 'c (list 'tag 'payload-is-not-a-child)))
-		'tag 1)
-		(list 'a 'b 'c)
-		"tree collector preserves first-seen order, uniqueness, and tagged-leaf boundaries")
 	(assert (expr_collect_tagged_nth_unique
 		(list (list 'lambda (list 'row) (list 'tag 'operator-scope))
 			(list 'tag 'operand-scope))

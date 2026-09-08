@@ -2009,6 +2009,90 @@ func optimizerIsLambda(expr Scmer) bool {
 	return ok && len(items) >= 3 && scmerIsSymbol(items[0], "lambda")
 }
 
+// optimizeRecursiveTaggedAssocFold recognizes the complete functional tree
+// fold used by planner analyses. The source procedure remains an ordinary
+// recursive match/reduce rule; only the optimized body receives the native,
+// callback-friendly traversal. Matching the complete subtree keeps near-miss
+// procedures on their original semantics.
+func optimizeRecursiveTaggedAssocFold(name Symbol, expression Scmer) (Scmer, bool) {
+	lambda, ok := scmerSlice(expression)
+	if !ok || len(lambda) < 3 || !scmerIsSymbol(lambda[0], "lambda") {
+		return expression, false
+	}
+	params, ok := scmerSlice(lambda[1])
+	if !ok || len(params) != 3 {
+		return expression, false
+	}
+	root, rootOK := scmerSymbol(params[1])
+	accumulator, accumulatorOK := scmerSymbol(params[2])
+	body, ok := scmerSlice(lambda[2])
+	if !rootOK || !accumulatorOK || !ok || len(body) != 10 || !scmerIsSymbol(body[0], "match") || !scmerIsSymbol(body[1], string(root)) {
+		return expression, false
+	}
+
+	firstPattern, firstResultOK := scmerSlice(body[2])
+	firstResult := body[3]
+	secondPattern, secondResultOK := scmerSlice(body[4])
+	consPattern, consPatternOK := scmerSlice(body[6])
+	consResult, consResultOK := scmerSlice(body[7])
+	if !firstResultOK || !secondResultOK || !consPatternOK || !consResultOK ||
+		len(firstPattern) != 5 || len(secondPattern) != 5 || len(consPattern) != 3 || len(consResult) != 4 ||
+		!scmerIsSymbol(consPattern[0], "cons") || !scmerIsSymbol(consResult[0], "reduce") ||
+		!scmerIsSymbol(body[8], "_") || !scmerIsSymbol(body[9], string(accumulator)) {
+		return expression, false
+	}
+	firstHead, firstHeadOK := scmerSlice(firstPattern[0])
+	secondHead, secondHeadOK := scmerSlice(secondPattern[0])
+	if !firstHeadOK || !secondHeadOK || len(firstHead) != 2 || len(secondHead) != 2 ||
+		!scmerIsSymbol(firstHead[0], "symbol") || !scmerIsSymbol(secondHead[0], "quote") ||
+		!astStructuralEqual(firstHead[1], secondHead[1]) || !astStructuralEqual(firstResult, body[5]) {
+		return expression, false
+	}
+	leaf, leafOK := scmerSlice(firstResult)
+	leafValue, leafValueOK := scmerSymbol(firstPattern[1])
+	if !leafOK || !leafValueOK || len(leaf) != 4 || !scmerIsSymbol(leaf[0], "set_assoc") ||
+		!scmerIsSymbol(leaf[1], string(accumulator)) || !scmerIsSymbol(leaf[3], "true") {
+		return expression, false
+	}
+
+	head, headOK := scmerSymbol(consPattern[1])
+	tail, tailOK := scmerSymbol(consPattern[2])
+	reducer, reducerOK := scmerSlice(consResult[2])
+	initial, initialOK := scmerSlice(consResult[3])
+	if !headOK || !tailOK || !reducerOK || !initialOK || !scmerIsSymbol(consResult[1], string(tail)) ||
+		len(reducer) < 3 || !scmerIsSymbol(reducer[0], "lambda") {
+		return expression, false
+	}
+	reducerParams, reducerParamsOK := scmerSlice(reducer[1])
+	recursiveTail, recursiveTailOK := scmerSlice(reducer[2])
+	if !reducerParamsOK || len(reducerParams) != 2 || !recursiveTailOK || len(recursiveTail) != 4 || len(initial) != 4 ||
+		!scmerIsSymbol(recursiveTail[0], string(name)) || !scmerIsSymbol(initial[0], string(name)) ||
+		!astStructuralEqual(recursiveTail[1], params[0]) || !astStructuralEqual(initial[1], params[0]) ||
+		!astStructuralEqual(recursiveTail[2], reducerParams[1]) || !astStructuralEqual(recursiveTail[3], reducerParams[0]) ||
+		!scmerIsSymbol(initial[2], string(head)) || !scmerIsSymbol(initial[3], string(accumulator)) {
+		return expression, false
+	}
+
+	callback := NewSlice([]Scmer{
+		NewSymbol("lambda"),
+		NewSlice([]Scmer{NewSymbol(string(accumulator)), NewSymbol(string(leafValue))}),
+		firstResult,
+	})
+	rewritten := append([]Scmer(nil), lambda...)
+	rewritten[2] = NewSlice([]Scmer{
+		NewSymbol("reduce"),
+		NewSlice([]Scmer{
+			NewSymbol("optimizer_tree_collect_tagged_nth_unique"),
+			params[1],
+			NewSlice([]Scmer{NewSymbol("quote"), firstHead[1]}),
+			NewInt(1),
+		}),
+		callback,
+		params[2],
+	})
+	return NewSlice(rewritten), true
+}
+
 func optimizerProcSequenceForDefinition(name Symbol, expression Scmer) procSequenceKind {
 	if name != Symbol("split_and_terms") {
 		return procSequenceNone
@@ -2617,6 +2701,12 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 		}
 		if v[1].IsNthLocalVar() {
 			v[0] = NewSymbol("setN")
+		}
+		if hasDefinedSym {
+			if rewritten, ok := optimizeRecursiveTaggedAssocFold(definedSym, v[2]); ok {
+				v[2] = rewritten
+				ome.rewrite.rewrites++
+			}
 		}
 		var returnType TypeInfo
 		v[2], returnType = OptimizeEx(v[2], env, ome, true)

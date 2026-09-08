@@ -137,6 +137,64 @@ func TestOptimizeDoesNotFuseUnrecognizedSplitAndTerms(t *testing.T) {
 	}
 }
 
+const plannerTaggedAssocFoldSource = `(define planner_test_resolve_alias (lambda (value fallback)
+	(coalesceNil value fallback)))
+(define planner_test_tagged_assoc_fold (lambda (default_alias expr aliases)
+	(match expr
+		((symbol get_column) tblvar _ _ _) (set_assoc aliases (planner_test_resolve_alias tblvar default_alias) true)
+		((quote get_column) tblvar _ _ _) (set_assoc aliases (planner_test_resolve_alias tblvar default_alias) true)
+		(cons head tail) (reduce tail (lambda (found item)
+			(planner_test_tagged_assoc_fold default_alias item found))
+			(planner_test_tagged_assoc_fold default_alias head aliases))
+		_ aliases)))`
+
+func TestOptimizeRecognizesRecursiveTaggedAssocFold(t *testing.T) {
+	env := newOptimizerTestEnv()
+	definitionOffset := strings.Index(plannerTaggedAssocFoldSource, "(define planner_test_tagged_assoc_fold")
+	definition, ok := scmerSlice(Read(t.Name(), plannerTaggedAssocFoldSource[definitionOffset:]))
+	if !ok || len(definition) != 3 {
+		t.Fatal("could not parse recursive tagged assoc fold definition")
+	}
+	if _, recognized := optimizeRecursiveTaggedAssocFold(Symbol("planner_test_tagged_assoc_fold"), definition[2]); !recognized {
+		t.Fatalf("raw recursive tagged assoc fold was not recognized: %s", String(definition[2]))
+	}
+	EvalAll(t.Name(), plannerTaggedAssocFoldSource, env)
+	proc := env.Vars[Symbol("planner_test_tagged_assoc_fold")]
+	if !proc.IsProc() {
+		t.Fatal("tagged assoc fold was not defined")
+	}
+	serialized := serializedTestExpr(t, env, proc.Proc().Body)
+	if !strings.Contains(serialized, "optimizer_tree_collect_tagged_nth_unique") || strings.Contains(serialized, "(match ") {
+		t.Fatalf("recursive tagged assoc fold was not lowered after full-shape recognition: %s", serialized)
+	}
+	got := Apply(proc,
+		NewSymbol("default"),
+		NewSlice([]Scmer{
+			NewSymbol("root"),
+			NewSlice([]Scmer{NewSymbol("get_column"), NewSymbol("a"), NewNil(), NewNil(), NewNil()}),
+			NewSlice([]Scmer{NewSymbol("nested"), NewSlice([]Scmer{NewSymbol("get_column"), NewNil(), NewNil(), NewNil(), NewNil()})}),
+		}),
+		NewSlice(nil),
+	)
+	want := NewSlice([]Scmer{NewSymbol("a"), NewBool(true), NewSymbol("default"), NewBool(true)})
+	if !Equal(got, want) {
+		t.Fatalf("lowered tagged assoc fold returned %s, want %s", String(got), String(want))
+	}
+}
+
+func TestOptimizeRejectsPartialTaggedAssocFoldShape(t *testing.T) {
+	env := newOptimizerTestEnv()
+	source := strings.Replace(plannerTaggedAssocFoldSource, "\t\t_ aliases)))", "\t\t_ (list))))", 1)
+	EvalAll(t.Name(), source, env)
+	proc := env.Vars[Symbol("planner_test_tagged_assoc_fold")]
+	if !proc.IsProc() {
+		t.Fatal("near-miss tagged assoc fold was not defined")
+	}
+	if serialized := serializedTestExpr(t, env, proc.Proc().Body); strings.Contains(serialized, "optimizer_tree_collect_tagged_nth_unique") {
+		t.Fatalf("partial tagged assoc fold shape was lowered: %s", serialized)
+	}
+}
+
 func plannerFusionAndTree(depth int, next *int64) Scmer {
 	if depth == 0 {
 		value := NewInt(*next)

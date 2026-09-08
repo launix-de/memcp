@@ -126,7 +126,8 @@ func groupAssocCapacity(inputLength int) int {
 
 func init_list_assoc_extra() {
 	Declare(&Globalenv, &Declaration{
-		Name: "tree_collect_tagged_nth_unique",
+		Name:          "optimizer_tree_collect_tagged_nth_unique",
+		OptimizerOnly: true,
 		Fn: func(a ...Scmer) Scmer {
 			return treeCollectTaggedNthUnique(a[0], a[1], int(ToInt(a[2])))
 		},

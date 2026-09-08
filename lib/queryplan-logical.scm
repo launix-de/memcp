@@ -922,10 +922,15 @@ the shallow guard instead of walking the wide expression it is about to drop. */
 projection for every source; that turns read-model queries into O(N^2) planner
 work before decorrelation has even started. */
 (define query_expr_alias_set (lambda (default_alias expr aliases)
-	(reduce (tree_collect_tagged_nth_unique expr (quote get_column) 1)
-		(lambda (found tblvar)
-			(set_assoc found (resolve_column_alias tblvar default_alias) true))
-		aliases)))
+	(match expr
+		((symbol get_column) tblvar _ _ _)
+		(set_assoc aliases (resolve_column_alias tblvar default_alias) true)
+		((quote get_column) tblvar _ _ _)
+		(set_assoc aliases (resolve_column_alias tblvar default_alias) true)
+		(cons head tail) (reduce tail (lambda (found item)
+			(query_expr_alias_set default_alias item found))
+			(query_expr_alias_set default_alias head aliases))
+		_ aliases)))
 
 (define query_exprs_alias_set (lambda (default_alias exprs)
 	(reduce (coalesceNil exprs '()) (lambda (aliases expr)
