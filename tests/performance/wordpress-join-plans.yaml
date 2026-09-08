@@ -1,0 +1,65 @@
+# Copyright (C) 2026 Carl-Philip Haensch
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+metadata:
+  description: WordPress comment exclusion and grouped numeric metadata joins
+  isolated: true
+  physical_calibration: true
+  cache_state: warm_operator_state
+  compile_state: cached_plan_execution_only
+setup:
+- sql: DROP TABLE IF EXISTS wpbench_comments
+- sql: DROP TABLE IF EXISTS wpbench_postmeta
+- sql: DROP TABLE IF EXISTS wpbench_posts
+- sql: CREATE TABLE wpbench_posts (ID BIGINT PRIMARY KEY, post_type TEXT, post_status TEXT, post_date BIGINT) ENGINE=sloppy
+- sql: CREATE TABLE wpbench_comments (comment_ID BIGINT PRIMARY KEY, comment_post_ID BIGINT, comment_approved TEXT,
+    comment_type TEXT) ENGINE=sloppy
+- sql: CREATE TABLE wpbench_postmeta (meta_id BIGINT PRIMARY KEY, post_id BIGINT, meta_key TEXT, meta_value TEXT)
+    ENGINE=sloppy
+- scm: |
+    (insert (table "memcp-tests" "wpbench_posts") '("ID" "post_type" "post_status" "post_date")
+      (map (produceN 22062) (lambda (i) (list (+ i 1) (if (< i 200) "product" "post") "publish" i))))
+- scm: |
+    (insert (table "memcp-tests" "wpbench_comments") '("comment_ID" "comment_post_ID" "comment_approved" "comment_type")
+      (map (produceN 6001) (lambda (i) (list (+ i 1) (+ i 1) "1" "comment"))))
+- scm: |
+    (insert (table "memcp-tests" "wpbench_postmeta") '("meta_id" "post_id" "meta_key" "meta_value")
+      (map (produceN 60000) (lambda (i) (list (+ i 1) (+ 1 (mod i 22062))
+        (if (< (mod i 10) 2) "_yoast_wpseo_linkdex" "other") "99"))))
+- scm: (rebuild)
+test_cases:
+- name: Count comments after nullable-side exclusion
+  warmup: 20
+  timing_samples: 11
+  sql: |
+    SELECT COUNT(*) AS n FROM wpbench_comments c
+    LEFT JOIN wpbench_posts p ON c.comment_post_ID = p.ID
+    WHERE c.comment_approved = '1' AND c.comment_type NOT IN ('note')
+      AND c.comment_type != 'order_note' AND c.comment_type != 'webhook_delivery'
+      AND c.comment_type != 'action_log' AND p.post_type NOT IN ('product')
+  expect:
+    rows: 1
+    data:
+    - n: 5801
+  physical_calibration: true
+  calibration_decision: semijoin_carrier
+  threshold_ms: 1000
+- name: Grouped metadata cast with found rows and empty matching range
+  warmup: 20
+  timing_samples: 11
+  sql: |
+    SELECT SQL_CALC_FOUND_ROWS p.ID FROM wpbench_posts p
+    INNER JOIN wpbench_postmeta m ON p.ID = m.post_id
+    WHERE m.meta_key = '_yoast_wpseo_linkdex'
+      AND CAST(m.meta_value AS SIGNED) BETWEEN '1' AND '40'
+      AND p.post_type = 'post' AND p.post_status = 'publish'
+    GROUP BY p.ID ORDER BY p.post_date DESC LIMIT 0, 10
+  expect:
+    rows: 0
+  physical_calibration: true
+  calibration_decision: semijoin_carrier
+  threshold_ms: 1000
+cleanup:
+- sql: DROP TABLE IF EXISTS wpbench_comments
+- sql: DROP TABLE IF EXISTS wpbench_postmeta
+- sql: DROP TABLE IF EXISTS wpbench_posts

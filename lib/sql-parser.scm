@@ -1101,7 +1101,8 @@ arithmetic; leave expressions containing columns or functions untouched. */
 	(define sql_build_select_plan (lambda (query) (begin
 		(define expanded_query (sql_expand_views query policy))
 		(define actual_plan (build_queryplan_term expanded_query planning_session tx))
-		(define execution_plan (if (sql_select_calc_found_rows? query)
+		(define execution_plan (if (and (sql_select_calc_found_rows? query)
+			(not (equal? (car actual_plan) (quote found_rows_result))))
 			(begin
 				(define count_plan (build_queryplan_term (sql_select_found_rows_count_query expanded_query) planning_session tx))
 				(list (quote !begin)

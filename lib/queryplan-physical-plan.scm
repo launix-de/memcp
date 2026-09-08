@@ -6677,15 +6677,15 @@ the costgen threshold. */
 				(list "column" "accumulated_ns" "int" (list) (list)))
 			(list "engine" "sloppy") true)
 		(define claim (newsession))
-		(claim "build" (>= elapsed_ns threshold_ns))
+		(claim "build" (and (number? threshold_ns) (>= elapsed_ns threshold_ns)))
 		(insert (table "system_statistic" "group_cache_candidates")
 			'("canonical_name" "accumulated_ns")
-			(list (list canonical_name (if (>= elapsed_ns threshold_ns) 0 elapsed_ns)))
+			(list (list canonical_name (if (and (number? threshold_ns) (>= elapsed_ns threshold_ns)) 0 elapsed_ns)))
 			'("accumulated_ns" "NEW.accumulated_ns" "$update")
 			(lambda (old_accumulated_ns new_elapsed_ns $update)
 				(begin
 					(define next_accumulated_ns (+ old_accumulated_ns new_elapsed_ns))
-					(define build (>= next_accumulated_ns threshold_ns))
+					(define build (and (number? threshold_ns) (>= next_accumulated_ns threshold_ns)))
 					(claim "build" build)
 					($update (list "accumulated_ns"
 						(if build 0 next_accumulated_ns)))
@@ -9523,26 +9523,42 @@ row callback. */
 
 (define emit_physical_queryplan (lambda (ir)
 	(begin
-		(define plan (match (ir_return ir)
-			(symbol rows) (match (logical_op (ir_root ir))
-				(symbol query-block) (lower_query_block_with_cataloged_stages (ir_root ir))
-				(symbol union-block) (lower_union_block (ir_root ir))
-				_ (neumann_fail "build_queryplan" "unknown logical root"))
-			((symbol dml) target_schema target_tbl) (match (logical_op (ir_root ir))
-				(symbol query-block) (lower_dml_query_block_with_stages (ir_root ir) target_schema target_tbl)
-				(symbol union-block) (lower_dml_union_block_with_stages (ir_root ir) target_schema target_tbl)
-				_ (neumann_fail "build_queryplan" "DML lowering expects a query-block root"))
-			((symbol dml-many) target_specs) (match (logical_op (ir_root ir))
-				(symbol query-block) (lower_multi_target_delete_with_stages (ir_root ir) target_specs)
-				_ (neumann_fail "build_queryplan" "multi-target DELETE lowering expects a query-block root"))
-			_ (neumann_fail "build_queryplan" "DML lowering is intentionally not scaffolded yet")))
+		(define candidate (if (equal? (ir_return ir) (quote rows)) (semijoin_carrier_spec (ir_root ir)) nil))
+		(define carrier (if (nil? candidate) nil
+			(begin
+				(define cache_name (if (and (nth candidate 5)
+					(not (equal? (prejoin_source_table_key (car candidate)) (prejoin_source_table_key (cadr candidate)))))
+					(car (semijoin_cached_predicate candidate)) nil))
+				(define selected (semijoin_root_preferred? candidate cache_name))
+				(planner_record_guard_condition
+					(list (quote equal?) (list (quote semijoin_root_preferred?) (quoted_runtime_list candidate) cache_name) selected)
+					(planner_context_session (qb_facts (ir_root ir))))
+				(if selected candidate nil))))
+		(define plan (if (not (nil? carrier))
+			(lower_semijoin_carrier (ir_root ir) carrier)
+			(match (ir_return ir)
+				(symbol rows) (match (logical_op (ir_root ir))
+					(symbol query-block) (lower_query_block_with_cataloged_stages (ir_root ir))
+					(symbol union-block) (lower_union_block (ir_root ir))
+					_ (neumann_fail "build_queryplan" "unknown logical root"))
+				((symbol dml) target_schema target_tbl) (match (logical_op (ir_root ir))
+					(symbol query-block) (lower_dml_query_block_with_stages (ir_root ir) target_schema target_tbl)
+					(symbol union-block) (lower_dml_union_block_with_stages (ir_root ir) target_schema target_tbl)
+					_ (neumann_fail "build_queryplan" "DML lowering expects a query-block root"))
+				((symbol dml-many) target_specs) (match (logical_op (ir_root ir))
+					(symbol query-block) (lower_multi_target_delete_with_stages (ir_root ir) target_specs)
+					_ (neumann_fail "build_queryplan" "multi-target DELETE lowering expects a query-block root"))
+				_ (neumann_fail "build_queryplan" "DML lowering is intentionally not scaffolded yet"))))
 		(define consolidated_plan (consolidate_closed_group_prepares ir plan))
 		(define complete_plan (complete_emitted_prepare_bindings ir consolidated_plan))
 		(define deduplicated_plan (deduplicate_lazy_prepare_recipes complete_plan))
 		(define memoized_plan (if (empty_list? (ir_stages ir))
 			deduplicated_plan
 			(consolidate_query_invariant_presence_memos deduplicated_plan)))
-		(require_physical_scan_relations memoized_plan))))
+		(define checked (require_physical_scan_relations memoized_plan))
+		(if (and (not (nil? carrier)) (and (not (nth carrier 5))
+			(qassoc_get (qb_facts (ir_root ir)) (quote sql_calc_found_rows) false)))
+			(list (quote found_rows_result) checked) checked))))
 
 (define build_queryplan (lambda (ir)
 	(emit_physical_queryplan (prepare_physical_queryplan ir nil nil))))
@@ -9806,41 +9822,45 @@ RecSet node is written into logical IR. */
 (define physical_operator_family_for_decision (lambda (plan decision)
 	(begin
 		(define kind (qassoc_get decision "decision" nil))
-		(if (equal? kind "membership_carrier")
-			(begin
-				(define chosen (qassoc_get decision "chosen" nil))
-				/* A compound query may contain key indexes and projected RecSets for
-				unrelated ACL stages. Validate the primitive required by this decision's
-				chosen alternative instead of assigning the whole plan to the first
-				operator family found globally. Falling back to the global classifier
-				still makes a genuinely unreachable forced alternative fail calibration. */
-				(if (or
-					(and (equal? chosen "ordered_batch_accept")
-						(physical_expr_has_head? plan (quote scan_order_batch_accept)))
-					(and (equal? chosen "prefiltered_candidate_keyset")
-						(physical_prefiltered_membership_expr? plan))
-					(and (equal? chosen "candidate_keyset")
-						(physical_expr_has_head? plan (quote recset_project_join)))
-					(and (equal? chosen "driver_order_membership_probe")
-						(physical_expr_has_head? plan (quote recset_key_index)))
-					(and (equal? chosen "driver_filter_join_probe")
-						(not (physical_expr_has_head? plan (quote scan_order_batch_accept)))))
-					chosen
-					(physical_membership_operator_family plan)))
-			(if (equal? kind "scan_join_order")
-				(if (physical_expr_has_head? plan (quote scan_join_order))
-					(if (equal? (qassoc_get decision "chosen" nil)
-						"scan_join_order_batched_probe")
-						"scan_join_order_batched_probe" "scan_join_order")
-					"legacy_join_tree")
-				(if (equal? kind "direct_group_join")
-					(if (physical_expr_has_group_relation? plan)
-						"group_carrier" "direct_group_join")
-					(if (equal? kind "scan_lookup")
-						(if (physical_expr_has_head? plan (quote scan_lookup))
-							"scan_lookup"
-							(if (physical_expr_has_head? plan (quote scan_order)) "scan_order" "unknown"))
-						"unknown")))))))
+		(if (equal? kind "semijoin_carrier")
+			(if (semijoin_plan_has_operator? plan "recset_project_join")
+				(if (semijoin_plan_has_operator? plan "initialize_cache_table") "prejoin_recset" "projected_recset")
+				(if (semijoin_plan_has_operator? plan "createcolumn") "predicate_cache" "unknown"))
+			(if (equal? kind "membership_carrier")
+				(begin
+					(define chosen (qassoc_get decision "chosen" nil))
+					/* A compound query may contain key indexes and projected RecSets for
+					unrelated ACL stages. Validate the primitive required by this decision's
+					chosen alternative instead of assigning the whole plan to the first
+					operator family found globally. Falling back to the global classifier
+					still makes a genuinely unreachable forced alternative fail calibration. */
+					(if (or
+						(and (equal? chosen "ordered_batch_accept")
+							(physical_expr_has_head? plan (quote scan_order_batch_accept)))
+						(and (equal? chosen "prefiltered_candidate_keyset")
+							(physical_prefiltered_membership_expr? plan))
+						(and (equal? chosen "candidate_keyset")
+							(physical_expr_has_head? plan (quote recset_project_join)))
+						(and (equal? chosen "driver_order_membership_probe")
+							(physical_expr_has_head? plan (quote recset_key_index)))
+						(and (equal? chosen "driver_filter_join_probe")
+							(not (physical_expr_has_head? plan (quote scan_order_batch_accept)))))
+						chosen
+						(physical_membership_operator_family plan)))
+				(if (equal? kind "scan_join_order")
+					(if (physical_expr_has_head? plan (quote scan_join_order))
+						(if (equal? (qassoc_get decision "chosen" nil)
+							"scan_join_order_batched_probe")
+							"scan_join_order_batched_probe" "scan_join_order")
+						"legacy_join_tree")
+					(if (equal? kind "direct_group_join")
+						(if (physical_expr_has_group_relation? plan)
+							"group_carrier" "direct_group_join")
+						(if (equal? kind "scan_lookup")
+							(if (physical_expr_has_head? plan (quote scan_lookup))
+								"scan_lookup"
+								(if (physical_expr_has_head? plan (quote scan_order)) "scan_order" "unknown"))
+							"unknown"))))))))
 
 (define physical_expr_has_group_relation? (lambda (expr)
 	(match expr
@@ -9916,7 +9936,7 @@ protocol callback receives only the calibration row. */
 	(begin
 		(define decision_id (qassoc_get decision "decision_id" "unknown"))
 		(define decision_kind (qassoc_get decision "decision" nil))
-		(define expected_family (if (or (equal? decision_kind "membership_carrier")
+		(define expected_family (if (or (equal? decision_kind "semijoin_carrier") (equal? decision_kind "membership_carrier")
 			(or (equal? decision_kind "scan_join_order")
 				(equal? decision_kind "direct_group_join")))
 			variant operator_family))
@@ -10274,3 +10294,383 @@ protocol callback receives only the calibration row. */
 				"group_caches" raw_group_caches
 				/* Backward-compatible telemetry alias; use group_caches in new integrations. */
 				"group_carriers" raw_group_caches)))))
+
+/* Exact base-record carriers for two-leaf joins. The logical tree remains
+intact. A unique lookup preserves COUNT multiplicity; grouping by the carrier
+PK permits projecting a many-side RecSet without multiplying output rows. */
+(define semijoin_count_field? (lambda (expr)
+	(match expr
+		((symbol aggregate) 1 (symbol +) 0) true
+		_ false)))
+
+(define semijoin_stable_expr? (lambda (expr)
+	(match expr
+		((symbol quote) value) true
+		((symbol get_column) alias ci col cci) true
+		(cons head tail)
+		(and (contains? '("list" "and" "or" "equal??" "sql_not" "sql_in" "<" ">" "<=" ">=" "simplify") (string head))
+			(reduce tail (lambda (ok item) (and ok (semijoin_stable_expr? item))) true))
+		_ (or (nil? expr) (or (number? expr) (or (string? expr) (or (equal? expr true) (equal? expr false))))))))
+
+(define semijoin_carrier_spec (lambda (block)
+	(if (or (not (query_block? block))
+		(or (not (equal? (count (qb_sources block)) 2))
+			(or (not (empty_list? (qb_stages block)))
+				(or (not (nil? (qb_having block))) (not (empty_list? (qb_hidden block)))))))
+		nil
+		(begin
+			(define sources (qb_sources block))
+			(define tree (query_block_join_plan block sources))
+			(define aliases (join_optimizer_tree_aliases tree))
+			(define grouped_sources (filter sources (lambda (src) (source_primary_key_grouped? block src))))
+			(define driver (if (single_source? grouped_sources) (car grouped_sources)
+				(join_optimizer_source_by_alias sources (car aliases))))
+			(define lookup (car (filter sources (lambda (src) (not (equal? (source_alias src) (source_alias driver)))))))
+			(define default_alias (qassoc_get (qb_facts block) (quote default_alias) (source_alias (car sources))))
+			(define terms (merge_unique (list
+				(map (join_optimizer_tree_predicates tree) join_order_pred_expr)
+				(split_and_terms (coalesceNil (qb_where block) true))
+				(merge (map sources (lambda (src) (split_and_terms (coalesceNil (source_join_expr src) true))))))))
+			(define edges (filter terms (lambda (term)
+				(not (nil? (union_semijoin_equal_parts driver lookup term))))))
+			(define local (filter terms (lambda (term) (not (contains? edges term)))))
+			(define driver_terms (filter local (lambda (term)
+				(not (expr_refs_sources? default_alias (list lookup) term)))))
+			(define lookup_terms (filter local (lambda (term) (not (contains? driver_terms term)))))
+			(define fields (expand_query_block_fields sources (qb_fields block)))
+			(define count_mode (and (equal? (count fields) 2)
+				(and (semijoin_count_field? (cadr fields))
+					(and (empty_list? (qb_group block)) (empty_list? (qb_order block))))))
+			(define grouped_mode (and (not (query_block_has_aggregates? block))
+				(and (source_primary_key_grouped? block driver)
+					(not (reduce (merge (list (qb_group block) (order_exprs (qb_order block))
+						(extract_assoc fields (lambda (_name expr) expr))))
+						(lambda (used expr) (or used (expr_refs_sources? default_alias (list lookup) expr))) false)))))
+			(define keys (map edges (lambda (term) (union_semijoin_equal_parts driver lookup term))))
+			(define lookup_unique (and (not (empty_list? (source_primary_key_columns lookup)))
+				(reduce (source_primary_key_columns lookup) (lambda (ok col)
+					(and ok (contains? (map keys car) col))) true)))
+			(if (and (source_is_base_table? driver) (source_is_base_table? lookup)
+				(not (source_outer? driver))
+				(or (not (source_outer? lookup))
+					(contains? (qassoc_get (qb_facts block) (quote null_rejected_aliases) '()) (source_alias lookup)))
+				(not (empty_list? edges))
+				(reduce lookup_terms (lambda (ok term)
+					(and ok (not (expr_refs_sources? default_alias (list driver) term)))) true)
+				(reduce terms (lambda (ok term) (and ok (semijoin_stable_expr? term))) true)
+				(or (and count_mode lookup_unique)
+					(and grouped_mode
+						(reduce (qb_group block) (lambda (ok expr) (and ok (semijoin_stable_expr? expr))) true)
+						(reduce (order_exprs (qb_order block)) (lambda (ok expr)
+							(and ok (not (nil? (direct_column_name_for_alias driver expr))))) true)
+						(reduce (extract_assoc fields (lambda (_title expr) expr)) (lambda (ok expr)
+							(and ok (semijoin_stable_expr? expr))) true))))
+				(list driver lookup keys (combine_where_terms driver_terms true)
+					(combine_where_terms lookup_terms true) count_mode fields)
+				nil)))))
+
+/* Indexable local comparisons precede computed residuals when their estimated
+saved expression work pays for another scan. All coefficients are costgen's
+existing scan and expression primitives. No predicate is discarded. */
+(define semijoin_index_term? (lambda (src term)
+	(match term
+		'(op left right)
+		(and (contains? '("equal??" "<" ">" "<=" ">=") (string op))
+			(or (and (not (nil? (direct_column_name_for_alias src left)))
+				(or (number? right) (string? right)))
+				(and (not (nil? (direct_column_name_for_alias src right)))
+					(or (number? left) (string? left)))))
+		_ false)))
+
+(define semijoin_filter_recset (lambda (src input condition)
+	(begin
+		(define terms (split_and_terms condition))
+		(define indexed (filter terms (lambda (term) (semijoin_index_term? src term))))
+		(define residual (filter terms (lambda (term) (not (contains? indexed term)))))
+		(if (empty_list? residual)
+			(candidate_recset_filter_source src input condition)
+			(if (empty_list? indexed)
+				(semijoin_residual_recset src input condition)
+				(list (quote if)
+					(list (quote semijoin_split_filter_wins?) (quoted_runtime_list src)
+						(quoted_runtime_list indexed) (count residual))
+					(semijoin_residual_recset src
+						(candidate_recset_filter_source src input (combine_where_terms indexed true))
+						(combine_where_terms residual true))
+					(semijoin_residual_recset src input condition)))))))
+
+(define semijoin_direct_recset (lambda (spec)
+	(begin
+		(define driver (nth spec 0))
+		(define lookup (nth spec 1))
+		(define keys (nth spec 2))
+		(define projected (list (quote recset_project_join) (physical_query_tx_symbol)
+			(semijoin_filter_recset lookup (source_table_expr lookup) (nth spec 4))
+			(quoted_runtime_list (map keys car)) (source_table_expr driver)
+			(quoted_runtime_list (map keys cadr))))
+		(if (nth spec 5)
+			(begin
+				(define cols (extract_columns_for_alias driver (nth spec 3)))
+				(compile_scan_plan (quote scan) (physical_query_tx_symbol) projected
+					(quoted_runtime_list cols)
+					(list (quote lambda) (map cols (lambda (col) (scan_callback_symbol_for_alias (source_alias driver) col)))
+						(lower_column_expr_for_alias driver (nth spec 3)))
+					(quoted_runtime_list '()) (quote scan_count) 0 (quote +) false))
+			(candidate_recset_filter_source driver projected (nth spec 3))))))
+
+(define semijoin_output_plan (lambda (block spec accepted)
+	(begin
+		(define driver (car spec))
+		(define fields (nth spec 6))
+		(if (nth spec 5)
+			(semijoin_count_output block fields (list (quote recset_count) accepted))
+			(begin
+				(define order (coalesceNil (qb_order block) '()))
+
+				(define mapcols (merge_unique (map (extract_assoc fields (lambda (_title expr) expr))
+					(lambda (expr) (extract_columns_for_alias driver expr)))))
+				(list (quote !begin)
+					(if (qassoc_get (qb_facts block) (quote sql_calc_found_rows) false)
+						(list (quote session) "found_rows" (list (quote recset_count) accepted)) nil)
+					(compile_scan_plan (quote scan_order) (physical_query_tx_symbol) accepted
+						(quoted_runtime_list '()) (list (quote lambda) '() true)
+						(quoted_runtime_list (map order (lambda (item) (direct_column_name_for_alias driver (car item)))))
+						(cons (quote list) (map order (lambda (item)
+							(canonical_order_relation (cadr item) (source_column_order_collation driver (direct_column_name_for_alias driver (car item))))))) 0
+						(coalesceNil (qb_offset block) 0) (coalesceNil (qb_limit block) -1)
+						(quoted_runtime_list mapcols)
+						(list (quote lambda) (cons (quote _acc) (map mapcols (lambda (col) (scan_callback_symbol_for_alias (source_alias driver) col))))
+							(list (quote !begin)
+								(list (quote resultrow) (cons (quote list) (map_assoc fields
+									(lambda (_title expr) (lower_column_expr_for_alias driver expr))))) (quote _acc)))
+						nil false)))))))
+
+(define semijoin_cached_predicate (lambda (spec)
+	(begin
+		(define driver (car spec))
+		(define lookup (cadr spec))
+		(define keys (nth spec 2))
+		(define local (nth spec 3))
+		(define remote (nth spec 4))
+		(define columns (merge_unique (list (extract_columns_for_alias driver local) (map keys cadr))))
+		(define lookup_columns (merge_unique (list (extract_columns_for_alias lookup remote) (map keys car))))
+		(define test (combine_where_terms (cons (lower_column_expr_for_alias lookup remote)
+			(map keys (lambda (pair)
+				(list (quote equal??) (scan_callback_symbol_for_alias (source_alias lookup) (car pair))
+					(list (quote outer) 1 (scan_callback_symbol_for_alias (source_alias driver) (cadr pair))))))) true))
+		(define qualified_body (list (quote and) (lower_column_expr_for_alias driver local)
+			(list (quote >) (compile_scan_plan (quote scan) nil (source_table_expr lookup)
+				(quoted_runtime_list lookup_columns)
+				(list (quote lambda) (map lookup_columns (lambda (col) (scan_callback_symbol_for_alias (source_alias lookup) col))) test)
+				(quoted_runtime_list '()) (quote scan_count) 0 (quote +) false) 0)))
+		(define names (merge (list
+			(map columns (lambda (col) (list (scan_callback_symbol_for_alias (source_alias driver) col) (symbol col))))
+			(map lookup_columns (lambda (col) (list (scan_callback_symbol_for_alias (source_alias lookup) col) (symbol col)))))))
+		(define unqualify (lambda (expr) (match expr
+			(cons head tail) (cons (unqualify head) (map tail unqualify))
+			_ (qassoc_get names expr expr))))
+		(define body (unqualify qualified_body))
+		(define name (concat ".predicate:" (stable_structural_hash (list (source_schema driver) (source_relation driver) (source_schema lookup) (source_relation lookup) columns body) true)))
+		(list name
+			(list (quote createcolumn) (source_table_expr driver) name "any" (quoted_runtime_list '()) (quoted_runtime_list '("temp" true))
+				(quoted_runtime_list columns)
+				(list (quote lambda) (map columns symbol) body))
+			(compile_scan_plan (quote scan) (physical_query_tx_symbol) (source_table_expr driver)
+				(quoted_runtime_list (list name)) (list (quote lambda) (list (quote accepted)) (list (quote equal?) (quote accepted) true))
+				(quoted_runtime_list '()) (quote scan_count) 0 (quote +) false)))))
+
+/* Marker is an identity at execution time; only the root physical emitter may
+wrap a plan with it. The SQL frontend then omits its independent count plan. */
+(define found_rows_result (lambda (value) value))
+
+(define semijoin_complete_block (lambda (block)
+	(make_query_block (qb_schema block) (qb_sources block) (qb_fields block)
+		(combine_where_terms (merge_unique (list
+			(split_and_terms (coalesceNil (qb_where block) true))
+			(map (join_optimizer_tree_predicates (query_block_join_plan block (qb_sources block))) join_order_pred_expr))) true)
+		(qb_group block) (qb_having block) (qb_order block) (qb_limit block) (qb_offset block)
+		(qb_hidden block) (qb_stages block) (qb_facts block))))
+
+(define semijoin_prejoin_plan (lambda (block spec)
+	(begin
+		(define complete (semijoin_complete_block block))
+		(if (not (physical_prejoin_supported? complete)) nil
+			(begin
+				(define sources (qb_sources block))
+				(define driver (car spec))
+				(define lookup (cadr spec))
+				(define default_alias (qassoc_get (qb_facts block) (quote default_alias) (source_alias (car sources))))
+				(define name (prejoin_table_name complete default_alias))
+				(define src (list name (qb_schema block) name false nil))
+				(define columns (map (extract_columns_for_alias lookup (nth spec 4))
+					(lambda (col) (prejoin_column_name sources (source_alias lookup) col))))
+				(define prepare (car (physical_prejoin_plan complete)))
+				(define narrow (lambda (expr)
+					(match expr
+						(cons (symbol createcolumn) args)
+						(if (contains? columns (cadr args)) expr nil)
+						(cons (symbol !begin) rest)
+						(cons (quote !begin) (map rest narrow))
+						_ expr)))
+				(define matches (semijoin_filter_recset src (source_table_expr src)
+					(prejoin_rewrite_expr sources default_alias name (nth spec 4))))
+				(define keys (source_primary_key_columns driver))
+				(list name (narrow prepare)
+					(candidate_recset_filter_source driver
+						(list (quote recset_project_join) (physical_query_tx_symbol) matches
+							(quoted_runtime_list (map keys (lambda (col) (prejoin_column_name sources (source_alias driver) col))))
+							(source_table_expr driver) (quoted_runtime_list keys)) (nth spec 3))))))))
+
+/* Runtime selection reads only immutable catalog metadata. Keeping the whole
+inequality here also handles DML growth, repartitioning and cache eviction
+without freezing a statistics-dependent decision in the SQL plan cache. */
+(define semijoin_scan_work_ns (lambda (input columns)
+	(+ (* (table_shard_count input) planner_membership_scan_invocation_ns)
+		(* (scan_estimate input) (+ planner_membership_scan_row_ns
+			(* columns planner_membership_filter_column_row_ns))))))
+
+(define semijoin_cache_wins? (lambda (driver lookup cache count_mode)
+	(if (nil? cache) false
+		(< (if count_mode
+			(semijoin_scan_work_ns driver 1)
+			(semijoin_scan_work_ns cache 1))
+			(+ (semijoin_scan_work_ns lookup 1)
+				(* (scan_estimate driver) planner_membership_recset_build_row_ns))))))
+
+(define lower_semijoin_carrier (lambda (block spec)
+	(begin
+		(define driver (car spec))
+		(define lookup (cadr spec))
+		(define count_mode (nth spec 5))
+		(define cached (if count_mode
+			(if (equal? (prejoin_source_table_key driver) (prejoin_source_table_key lookup)) nil (semijoin_cached_predicate spec))
+			(semijoin_prejoin_plan block spec)))
+		(define direct (semijoin_direct_recset spec))
+		(define accepted (quote __semijoin_accepted))
+		(define output (if count_mode (semijoin_count_output block (nth spec 6) accepted)
+			(semijoin_output_plan block spec accepted)))
+		(define direct_plan (list (quote !begin) (list (quote define) accepted direct) output))
+		(if (nil? cached) direct_plan
+			(begin
+				(define name (car cached))
+				(define ready (if count_mode
+					(list (quote resolve_column_name) (source_schema driver) (source_relation driver) name false)
+					(list (quote table) (qb_schema block) name)))
+				(define warm_plan (list (quote !begin) (nth cached 1)
+					(list (quote define) accepted (nth cached 2))
+					(if count_mode (semijoin_count_output block (nth spec 6) accepted) output)))
+				(define planning_session (planner_context_session (qb_facts block)))
+				(define decision_id (concat "semijoin_carrier:" (stable_structural_hash
+					(list (source_schema driver) (source_relation driver) (source_schema lookup) (source_relation lookup)
+						(nth spec 2) (nth spec 3) (nth spec 4) count_mode) true)))
+				(define driver_table (table (source_schema driver) (source_relation driver)))
+				(define lookup_table (table (source_schema lookup) (source_relation lookup)))
+				(define cache_table (if count_mode driver_table (table (qb_schema block) name)))
+				(define is_ready (if count_mode
+					(not (nil? (resolve_column_name (source_schema driver) (source_relation driver) name false)))
+					(cache_table_ready? cache_table)))
+				(define cache_variant (if count_mode "predicate_cache" "prejoin_recset"))
+				(define projected_ns (+ (semijoin_scan_work_ns lookup_table 1)
+					(* (scan_estimate driver_table) planner_membership_recset_build_row_ns)))
+				(define cached_ns (+
+					(if (nil? cache_table) planner_membership_scan_invocation_ns (semijoin_scan_work_ns cache_table 1))
+					(if is_ready 0 (if count_mode (* (scan_estimate driver_table) planner_membership_direct_probe_row_ns)
+						(+ projected_ns (* (scan_estimate lookup_table) planner_group_relation_build_row_ns))))))
+				(define normal_choice (if (and is_ready (< cached_ns projected_ns)) cache_variant "projected_recset"))
+				(define chosen (planner_physical_choice decision_id normal_choice (list "projected_recset" cache_variant) planning_session))
+				(define forced (planner_physical_override decision_id planning_session))
+				(planner_record_physical_decision (list
+					(list "decision_id" decision_id) (list "decision" "semijoin_carrier")
+					(list "chosen" chosen) (list "selection" (if (nil? forced) "runtime_cost" "forced"))
+					(list "reason" "exact_base_records; live_partition_and_cache_costs")
+					(list "inputs" (list (list "input_rows" (scan_estimate lookup_table))
+						(list "driver_input_rows" (scan_estimate driver_table))
+						(list "cache_ready" is_ready)))
+					(list "alternatives" (map (list (list "projected_recset" projected_ns) (list cache_variant cached_ns))
+						(lambda (entry) (list (list "plan" (car entry)) (list "cost"
+							(planner_cost_explain (planner_cost (cadr entry) 0 0 0 0 0 0 0 0 0.5)))))))) planning_session)
+				(define budget (list (quote *) (list (quote scan_estimate) (source_table_expr driver)) planner_membership_direct_probe_row_ns))
+				(define cold_plan (if count_mode
+					(list (quote if)
+						(list (quote and)
+							(list (quote semijoin_cache_wins?) (source_table_expr driver) (source_table_expr lookup)
+								(source_table_expr driver) true)
+							(list (quote semijoin_cache_work_paid?) (physical_query_tx_symbol) name budget))
+						warm_plan
+						(list (quote !begin)
+							(list (quote define) (quote __semijoin_started) (list (quote nanotime)))
+							direct_plan
+							/* Credit observed work after returning the relational result.
+							A later invocation, which demonstrates reuse, may pay for
+							the cache. The first call never builds a speculative cache. */
+							(list (quote group_cache_candidate_accumulate) name
+								(list (quote -) (list (quote nanotime)) (quote __semijoin_started)) nil)
+							nil))
+					direct_plan))
+				(if (not (nil? forced)) (if (equal? chosen "projected_recset") direct_plan warm_plan)
+					(list (quote if) (list (quote tx_requires_query_local_cache) (physical_query_tx_symbol)) direct_plan
+						(list (quote if)
+							(list (quote and) (if count_mode (list (quote not) (list (quote nil?) ready))
+								(list (quote cache_table_ready?) ready))
+								(list (quote semijoin_cache_wins?) (source_table_expr driver) (source_table_expr lookup)
+									(if count_mode (source_table_expr driver) ready) count_mode))
+							warm_plan cold_plan))))))))
+
+(define semijoin_count_output (lambda (block fields value)
+	(list (quote if)
+		(list (quote and) (list (quote <=) (coalesceNil (qb_offset block) 0) 0)
+			(list (quote not) (list (quote equal?) (coalesceNil (qb_limit block) -1) 0)))
+		(list (quote resultrow) (list (quote list) (car fields) value)) nil)))
+
+(define semijoin_split_filter_wins? (lambda (src indexed residual_width)
+	(begin
+		(define input_rows (scan_estimate (table (source_schema src) (source_relation src))))
+		(define selectivity (reduce indexed (lambda (value term)
+			(* value (join_optimizer_expr_selectivity (list src) (source_alias src) term))) 1))
+		(define matching_rows (* input_rows selectivity))
+		(< (+ planner_membership_scan_invocation_ns (* matching_rows planner_membership_recset_build_row_ns))
+			(* (- input_rows matching_rows) residual_width planner_membership_expression_operation_row_ns)))))
+
+/* A small unique indexed join can beat constructing a complete projected
+carrier. Guard this crossover as well as the runtime cache/direct decision. */
+(define semijoin_root_preferred? (lambda (spec cache_name)
+	(if (not (nth spec 5)) true
+		(begin
+			(define driver (table (source_schema (car spec)) (source_relation (car spec))))
+			(define lookup (table (source_schema (cadr spec)) (source_relation (cadr spec))))
+			(if (or (nil? driver) (nil? lookup)) false
+				(or (and (not (nil? cache_name))
+					(not (nil? (resolve_column_name (source_schema (car spec)) (source_relation (car spec)) cache_name false)))
+					(semijoin_cache_wins? driver lookup driver true))
+					(< (+ (semijoin_scan_work_ns lookup 1)
+						(* (scan_estimate driver) planner_membership_recset_build_row_ns))
+						(* (scan_estimate driver) planner_membership_direct_probe_row_ns))))))))
+
+/* An index definition over the base table is not proof that a computed range
+has been applied to a RecSet boundary. Keep the residual callback explicit;
+this also avoids preparing a whole computed column for a small subset. */
+(define semijoin_residual_recset (lambda (src input condition)
+	(begin
+		(define cols (extract_columns_for_alias src condition))
+		(list (quote scan_recset) (physical_query_tx_symbol) input
+			(quoted_runtime_list '()) (quoted_runtime_list '())
+			(quoted_runtime_list cols)
+			(list (quote lambda) (map cols (lambda (col) (scan_callback_symbol_for_alias (source_alias src) col)))
+				(lower_column_expr_for_alias src condition))))))
+
+(define semijoin_plan_has_operator? (lambda (expr name)
+	(match expr
+		((symbol quote) _value) false
+		(cons head tail) (or (equal? (serialize head) name)
+			(or (semijoin_plan_has_operator? head name)
+				(reduce tail (lambda (found item) (or found (semijoin_plan_has_operator? item name))) false)))
+		_ false)))
+
+(define semijoin_cache_work_paid? (lambda (tx name threshold_ns)
+	(begin
+		(define candidates (table "system_statistic" "group_cache_candidates"))
+		(if (nil? candidates) false
+			(scan tx candidates
+				(list 369436175368192 (scan_boundary "equal" "canonical_name" 0 0 true true "" false)) (list name)
+				'() (lambda () true) '("accumulated_ns")
+				(lambda (_acc elapsed) (>= elapsed threshold_ns)) false (lambda (a b) (or a b)) false)))))

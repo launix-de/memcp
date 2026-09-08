@@ -1,0 +1,587 @@
+# Copyright (C) 2026 Carl-Philip Haensch
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+metadata:
+  description: Exact semijoin carriers, nullable joins, cache invalidation and FOUND_ROWS
+  isolated: true
+  requires_mysql: true
+setup:
+- sql: DROP TABLE IF EXISTS sj_guard_children
+- sql: DROP TABLE IF EXISTS sj_guard_parents
+- sql: CREATE TABLE sj_guard_parents (id INT PRIMARY KEY, flag TEXT)
+- sql: CREATE TABLE sj_guard_children (id INT PRIMARY KEY, pid INT)
+- sql: INSERT INTO sj_guard_parents VALUES (1,NULL),(2,'ok')
+- scm: (insert (table "memcp-tests" "sj_guard_parents") '("id" "flag") (map (produceN 40) (lambda (i) (list (+ i
+    3) "bad"))))
+- sql: INSERT INTO sj_guard_children VALUES (1,1),(2,2),(3,999),(4,NULL),(5,2)
+test_cases:
+- name: DROP TABLE IF EXISTS wp_comments
+  sql: DROP TABLE IF EXISTS wp_comments
+  expect: {}
+- name: DROP TABLE IF EXISTS wp_postmeta
+  sql: DROP TABLE IF EXISTS wp_postmeta
+  expect: {}
+- name: DROP TABLE IF EXISTS wp_posts
+  sql: DROP TABLE IF EXISTS wp_posts
+  expect: {}
+- name: CREATE TABLE wp_posts (ID BIGINT PRIMARY KEY, post_type TEXT, post_status TEXT, post_date BIGIN
+  sql: CREATE TABLE wp_posts (ID BIGINT PRIMARY KEY, post_type TEXT, post_status TEXT, post_date BIGINT)
+  expect: {}
+- name: CREATE TABLE wp_comments (comment_ID BIGINT PRIMARY KEY, comment_post_ID BIGINT, comment_approv
+  sql: CREATE TABLE wp_comments (comment_ID BIGINT PRIMARY KEY, comment_post_ID BIGINT, comment_approved TEXT, comment_type
+    TEXT)
+  expect: {}
+- name: CREATE TABLE wp_postmeta (meta_id BIGINT PRIMARY KEY, post_id BIGINT, meta_key TEXT, meta_value
+  sql: CREATE TABLE wp_postmeta (meta_id BIGINT PRIMARY KEY, post_id BIGINT, meta_key TEXT, meta_value TEXT)
+  expect: {}
+- name: INSERT INTO wp_posts VALUES (1,'post','publish',10),(2,'product','publish',20),(3,NULL,'publish
+  sql: INSERT INTO wp_posts VALUES (1,'post','publish',10),(2,'product','publish',20),(3,NULL,'publish',30),(4,'page','publish',40)
+  expect: {}
+- name: INSERT INTO wp_comments VALUES (1,1,'1','comment'),(2,1,'1','comment'),(3,2,'1','comment'),(4,3
+  sql: INSERT INTO wp_comments VALUES (1,1,'1','comment'),(2,1,'1','comment'),(3,2,'1','comment'),(4,3,'1','comment'),(5,999,'1','comment'),(6,NULL,'1','comment'),(7,4,'1','note'),(8,4,'1','order_note'),(9,4,'1',NULL),(10,4,'0','comment'),(11,4,'1','comment'),(12,1,NULL,'comment')
+  expect: {}
+- name: Q1 NULLs, misses and repeated comment-to-post keys
+  sql: |
+    SELECT COUNT(*) FROM wp_comments LEFT JOIN wp_posts AS wp_posts_to_exclude_reviews ON comment_post_ID = wp_posts_to_exclude_reviews.ID WHERE ( comment_approved = '1' ) AND comment_type NOT IN ('note') AND comment_type != 'order_note' AND comment_type != 'webhook_delivery' AND comment_type != 'action_log' AND wp_posts_to_exclude_reviews.post_type NOT IN ('product');
+  expect:
+    rows: 1
+    data:
+    - COUNT(*): 3
+  warmup: 20
+  timing_samples: 3
+- name: Q1 NULLs, misses and repeated comment-to-post keys with forced carriers
+  sql: |
+    EXPLAIN PHYSICAL CALIBRATE SELECT COUNT(*) FROM wp_comments LEFT JOIN wp_posts AS wp_posts_to_exclude_reviews ON comment_post_ID = wp_posts_to_exclude_reviews.ID WHERE ( comment_approved = '1' ) AND comment_type NOT IN ('note') AND comment_type != 'order_note' AND comment_type != 'webhook_delivery' AND comment_type != 'action_log' AND wp_posts_to_exclude_reviews.post_type NOT IN ('product');
+  expect:
+    rows: 2
+    data:
+    - result_equal: true
+    - result_equal: true
+- name: UPDATE wp_posts SET post_type='product' WHERE ID=1
+  sql: UPDATE wp_posts SET post_type='product' WHERE ID=1
+  expect: {}
+- name: Q1 post filter invalidation
+  sql: |
+    SELECT COUNT(*) FROM wp_comments LEFT JOIN wp_posts AS wp_posts_to_exclude_reviews ON comment_post_ID = wp_posts_to_exclude_reviews.ID WHERE ( comment_approved = '1' ) AND comment_type NOT IN ('note') AND comment_type != 'order_note' AND comment_type != 'webhook_delivery' AND comment_type != 'action_log' AND wp_posts_to_exclude_reviews.post_type NOT IN ('product');
+  expect:
+    rows: 1
+    data:
+    - COUNT(*): 1
+  warmup: 20
+  timing_samples: 3
+- name: Q1 post filter invalidation with forced carriers
+  sql: |
+    EXPLAIN PHYSICAL CALIBRATE SELECT COUNT(*) FROM wp_comments LEFT JOIN wp_posts AS wp_posts_to_exclude_reviews ON comment_post_ID = wp_posts_to_exclude_reviews.ID WHERE ( comment_approved = '1' ) AND comment_type NOT IN ('note') AND comment_type != 'order_note' AND comment_type != 'webhook_delivery' AND comment_type != 'action_log' AND wp_posts_to_exclude_reviews.post_type NOT IN ('product');
+  expect:
+    rows: 2
+    data:
+    - result_equal: true
+    - result_equal: true
+- name: UPDATE wp_posts SET post_type='post' WHERE ID=2
+  sql: UPDATE wp_posts SET post_type='post' WHERE ID=2
+  expect: {}
+- name: Q1 post becomes eligible
+  sql: |
+    SELECT COUNT(*) FROM wp_comments LEFT JOIN wp_posts AS wp_posts_to_exclude_reviews ON comment_post_ID = wp_posts_to_exclude_reviews.ID WHERE ( comment_approved = '1' ) AND comment_type NOT IN ('note') AND comment_type != 'order_note' AND comment_type != 'webhook_delivery' AND comment_type != 'action_log' AND wp_posts_to_exclude_reviews.post_type NOT IN ('product');
+  expect:
+    rows: 1
+    data:
+    - COUNT(*): 2
+  warmup: 20
+  timing_samples: 3
+- name: Q1 post becomes eligible with forced carriers
+  sql: |
+    EXPLAIN PHYSICAL CALIBRATE SELECT COUNT(*) FROM wp_comments LEFT JOIN wp_posts AS wp_posts_to_exclude_reviews ON comment_post_ID = wp_posts_to_exclude_reviews.ID WHERE ( comment_approved = '1' ) AND comment_type NOT IN ('note') AND comment_type != 'order_note' AND comment_type != 'webhook_delivery' AND comment_type != 'action_log' AND wp_posts_to_exclude_reviews.post_type NOT IN ('product');
+  expect:
+    rows: 2
+    data:
+    - result_equal: true
+    - result_equal: true
+- name: UPDATE wp_posts SET post_type='post' WHERE ID=3
+  sql: UPDATE wp_posts SET post_type='post' WHERE ID=3
+  expect: {}
+- name: Q1 NULL becomes eligible
+  sql: |
+    SELECT COUNT(*) FROM wp_comments LEFT JOIN wp_posts AS wp_posts_to_exclude_reviews ON comment_post_ID = wp_posts_to_exclude_reviews.ID WHERE ( comment_approved = '1' ) AND comment_type NOT IN ('note') AND comment_type != 'order_note' AND comment_type != 'webhook_delivery' AND comment_type != 'action_log' AND wp_posts_to_exclude_reviews.post_type NOT IN ('product');
+  expect:
+    rows: 1
+    data:
+    - COUNT(*): 3
+  warmup: 20
+  timing_samples: 3
+- name: Q1 NULL becomes eligible with forced carriers
+  sql: |
+    EXPLAIN PHYSICAL CALIBRATE SELECT COUNT(*) FROM wp_comments LEFT JOIN wp_posts AS wp_posts_to_exclude_reviews ON comment_post_ID = wp_posts_to_exclude_reviews.ID WHERE ( comment_approved = '1' ) AND comment_type NOT IN ('note') AND comment_type != 'order_note' AND comment_type != 'webhook_delivery' AND comment_type != 'action_log' AND wp_posts_to_exclude_reviews.post_type NOT IN ('product');
+  expect:
+    rows: 2
+    data:
+    - result_equal: true
+    - result_equal: true
+- name: INSERT INTO wp_posts VALUES (999,'post','publish',99)
+  sql: INSERT INTO wp_posts VALUES (999,'post','publish',99)
+  expect: {}
+- name: Q1 previously missing post inserted
+  sql: |
+    SELECT COUNT(*) FROM wp_comments LEFT JOIN wp_posts AS wp_posts_to_exclude_reviews ON comment_post_ID = wp_posts_to_exclude_reviews.ID WHERE ( comment_approved = '1' ) AND comment_type NOT IN ('note') AND comment_type != 'order_note' AND comment_type != 'webhook_delivery' AND comment_type != 'action_log' AND wp_posts_to_exclude_reviews.post_type NOT IN ('product');
+  expect:
+    rows: 1
+    data:
+    - COUNT(*): 4
+  warmup: 20
+  timing_samples: 3
+- name: Q1 previously missing post inserted with forced carriers
+  sql: |
+    EXPLAIN PHYSICAL CALIBRATE SELECT COUNT(*) FROM wp_comments LEFT JOIN wp_posts AS wp_posts_to_exclude_reviews ON comment_post_ID = wp_posts_to_exclude_reviews.ID WHERE ( comment_approved = '1' ) AND comment_type NOT IN ('note') AND comment_type != 'order_note' AND comment_type != 'webhook_delivery' AND comment_type != 'action_log' AND wp_posts_to_exclude_reviews.post_type NOT IN ('product');
+  expect:
+    rows: 2
+    data:
+    - result_equal: true
+    - result_equal: true
+- name: DELETE FROM wp_posts WHERE ID=4
+  sql: DELETE FROM wp_posts WHERE ID=4
+  expect: {}
+- name: Q1 post deleted
+  sql: |
+    SELECT COUNT(*) FROM wp_comments LEFT JOIN wp_posts AS wp_posts_to_exclude_reviews ON comment_post_ID = wp_posts_to_exclude_reviews.ID WHERE ( comment_approved = '1' ) AND comment_type NOT IN ('note') AND comment_type != 'order_note' AND comment_type != 'webhook_delivery' AND comment_type != 'action_log' AND wp_posts_to_exclude_reviews.post_type NOT IN ('product');
+  expect:
+    rows: 1
+    data:
+    - COUNT(*): 3
+  warmup: 20
+  timing_samples: 3
+- name: Q1 post deleted with forced carriers
+  sql: |
+    EXPLAIN PHYSICAL CALIBRATE SELECT COUNT(*) FROM wp_comments LEFT JOIN wp_posts AS wp_posts_to_exclude_reviews ON comment_post_ID = wp_posts_to_exclude_reviews.ID WHERE ( comment_approved = '1' ) AND comment_type NOT IN ('note') AND comment_type != 'order_note' AND comment_type != 'webhook_delivery' AND comment_type != 'action_log' AND wp_posts_to_exclude_reviews.post_type NOT IN ('product');
+  expect:
+    rows: 2
+    data:
+    - result_equal: true
+    - result_equal: true
+- name: UPDATE wp_comments SET comment_post_ID=3 WHERE comment_ID=1
+  sql: UPDATE wp_comments SET comment_post_ID=3 WHERE comment_ID=1
+  expect: {}
+- name: Q1 comment join key changes
+  sql: |
+    SELECT COUNT(*) FROM wp_comments LEFT JOIN wp_posts AS wp_posts_to_exclude_reviews ON comment_post_ID = wp_posts_to_exclude_reviews.ID WHERE ( comment_approved = '1' ) AND comment_type NOT IN ('note') AND comment_type != 'order_note' AND comment_type != 'webhook_delivery' AND comment_type != 'action_log' AND wp_posts_to_exclude_reviews.post_type NOT IN ('product');
+  expect:
+    rows: 1
+    data:
+    - COUNT(*): 4
+  warmup: 20
+  timing_samples: 3
+- name: Q1 comment join key changes with forced carriers
+  sql: |
+    EXPLAIN PHYSICAL CALIBRATE SELECT COUNT(*) FROM wp_comments LEFT JOIN wp_posts AS wp_posts_to_exclude_reviews ON comment_post_ID = wp_posts_to_exclude_reviews.ID WHERE ( comment_approved = '1' ) AND comment_type NOT IN ('note') AND comment_type != 'order_note' AND comment_type != 'webhook_delivery' AND comment_type != 'action_log' AND wp_posts_to_exclude_reviews.post_type NOT IN ('product');
+  expect:
+    rows: 2
+    data:
+    - result_equal: true
+    - result_equal: true
+- name: UPDATE wp_posts SET ID=30 WHERE ID=3
+  sql: UPDATE wp_posts SET ID=30 WHERE ID=3
+  expect: {}
+- name: Q1 post primary key changes
+  sql: |
+    SELECT COUNT(*) FROM wp_comments LEFT JOIN wp_posts AS wp_posts_to_exclude_reviews ON comment_post_ID = wp_posts_to_exclude_reviews.ID WHERE ( comment_approved = '1' ) AND comment_type NOT IN ('note') AND comment_type != 'order_note' AND comment_type != 'webhook_delivery' AND comment_type != 'action_log' AND wp_posts_to_exclude_reviews.post_type NOT IN ('product');
+  expect:
+    rows: 1
+    data:
+    - COUNT(*): 2
+  warmup: 20
+  timing_samples: 3
+- name: Q1 post primary key changes with forced carriers
+  sql: |
+    EXPLAIN PHYSICAL CALIBRATE SELECT COUNT(*) FROM wp_comments LEFT JOIN wp_posts AS wp_posts_to_exclude_reviews ON comment_post_ID = wp_posts_to_exclude_reviews.ID WHERE ( comment_approved = '1' ) AND comment_type NOT IN ('note') AND comment_type != 'order_note' AND comment_type != 'webhook_delivery' AND comment_type != 'action_log' AND wp_posts_to_exclude_reviews.post_type NOT IN ('product');
+  expect:
+    rows: 2
+    data:
+    - result_equal: true
+    - result_equal: true
+- name: INSERT INTO wp_comments VALUES (13,2,'1','comment')
+  sql: INSERT INTO wp_comments VALUES (13,2,'1','comment')
+  expect: {}
+- name: Q1 comment inserted
+  sql: |
+    SELECT COUNT(*) FROM wp_comments LEFT JOIN wp_posts AS wp_posts_to_exclude_reviews ON comment_post_ID = wp_posts_to_exclude_reviews.ID WHERE ( comment_approved = '1' ) AND comment_type NOT IN ('note') AND comment_type != 'order_note' AND comment_type != 'webhook_delivery' AND comment_type != 'action_log' AND wp_posts_to_exclude_reviews.post_type NOT IN ('product');
+  expect:
+    rows: 1
+    data:
+    - COUNT(*): 3
+  warmup: 20
+  timing_samples: 3
+- name: Q1 comment inserted with forced carriers
+  sql: |
+    EXPLAIN PHYSICAL CALIBRATE SELECT COUNT(*) FROM wp_comments LEFT JOIN wp_posts AS wp_posts_to_exclude_reviews ON comment_post_ID = wp_posts_to_exclude_reviews.ID WHERE ( comment_approved = '1' ) AND comment_type NOT IN ('note') AND comment_type != 'order_note' AND comment_type != 'webhook_delivery' AND comment_type != 'action_log' AND wp_posts_to_exclude_reviews.post_type NOT IN ('product');
+  expect:
+    rows: 2
+    data:
+    - result_equal: true
+    - result_equal: true
+- name: UPDATE wp_comments SET comment_approved='0' WHERE comment_ID=13
+  sql: UPDATE wp_comments SET comment_approved='0' WHERE comment_ID=13
+  expect: {}
+- name: Q1 comment approval changes
+  sql: |
+    SELECT COUNT(*) FROM wp_comments LEFT JOIN wp_posts AS wp_posts_to_exclude_reviews ON comment_post_ID = wp_posts_to_exclude_reviews.ID WHERE ( comment_approved = '1' ) AND comment_type NOT IN ('note') AND comment_type != 'order_note' AND comment_type != 'webhook_delivery' AND comment_type != 'action_log' AND wp_posts_to_exclude_reviews.post_type NOT IN ('product');
+  expect:
+    rows: 1
+    data:
+    - COUNT(*): 2
+  warmup: 20
+  timing_samples: 3
+- name: Q1 comment approval changes with forced carriers
+  sql: |
+    EXPLAIN PHYSICAL CALIBRATE SELECT COUNT(*) FROM wp_comments LEFT JOIN wp_posts AS wp_posts_to_exclude_reviews ON comment_post_ID = wp_posts_to_exclude_reviews.ID WHERE ( comment_approved = '1' ) AND comment_type NOT IN ('note') AND comment_type != 'order_note' AND comment_type != 'webhook_delivery' AND comment_type != 'action_log' AND wp_posts_to_exclude_reviews.post_type NOT IN ('product');
+  expect:
+    rows: 2
+    data:
+    - result_equal: true
+    - result_equal: true
+- name: DELETE FROM wp_comments WHERE comment_ID=3
+  sql: DELETE FROM wp_comments WHERE comment_ID=3
+  expect: {}
+- name: Q1 comment deleted
+  sql: |
+    SELECT COUNT(*) FROM wp_comments LEFT JOIN wp_posts AS wp_posts_to_exclude_reviews ON comment_post_ID = wp_posts_to_exclude_reviews.ID WHERE ( comment_approved = '1' ) AND comment_type NOT IN ('note') AND comment_type != 'order_note' AND comment_type != 'webhook_delivery' AND comment_type != 'action_log' AND wp_posts_to_exclude_reviews.post_type NOT IN ('product');
+  expect:
+    rows: 1
+    data:
+    - COUNT(*): 1
+  warmup: 20
+  timing_samples: 3
+- name: Q1 comment deleted with forced carriers
+  sql: |
+    EXPLAIN PHYSICAL CALIBRATE SELECT COUNT(*) FROM wp_comments LEFT JOIN wp_posts AS wp_posts_to_exclude_reviews ON comment_post_ID = wp_posts_to_exclude_reviews.ID WHERE ( comment_approved = '1' ) AND comment_type NOT IN ('note') AND comment_type != 'order_note' AND comment_type != 'webhook_delivery' AND comment_type != 'action_log' AND wp_posts_to_exclude_reviews.post_type NOT IN ('product');
+  expect:
+    rows: 2
+    data:
+    - result_equal: true
+    - result_equal: true
+- name: INSERT INTO wp_posts VALUES (1,'post','publish',10)
+  sql: INSERT INTO wp_posts VALUES (1,'post','publish',10)
+  expect:
+    error: true
+- name: DELETE FROM wp_comments
+  sql: DELETE FROM wp_comments
+  expect: {}
+- name: DELETE FROM wp_posts
+  sql: DELETE FROM wp_posts
+  expect: {}
+- name: INSERT INTO wp_posts VALUES (1,'post','publish',101),(2,'post','publish',102),(3,'post','publis
+  sql: INSERT INTO wp_posts VALUES (1,'post','publish',101),(2,'post','publish',102),(3,'post','publish',103),(4,'post','publish',104),(5,'post','publish',105),(6,'post','publish',106),(7,'post','publish',107),(8,'post','publish',108),(9,'post','publish',109),(10,'post','publish',110),(11,'post','publish',111),(12,'post','publish',112),(13,'post','publish',113),(14,'post','publish',114),(15,'post','publish',115),(16,'product','publish',116),(17,'post','draft',117),(18,'post','publish',118),(19,'post','publish',119),(20,'post','publish',120),(21,'post','publish',121)
+  expect: {}
+- name: INSERT INTO wp_postmeta VALUES (1,1,'_yoast_wpseo_linkdex','20'),(2,2,'_yoast_wpseo_linkdex','2
+  sql: INSERT INTO wp_postmeta VALUES (1,1,'_yoast_wpseo_linkdex','20'),(2,2,'_yoast_wpseo_linkdex','20'),(3,3,'_yoast_wpseo_linkdex','20'),(4,4,'_yoast_wpseo_linkdex','20'),(5,5,'_yoast_wpseo_linkdex','20'),(6,6,'_yoast_wpseo_linkdex','20'),(7,7,'_yoast_wpseo_linkdex','20'),(8,8,'_yoast_wpseo_linkdex','20'),(9,9,'_yoast_wpseo_linkdex','20'),(10,10,'_yoast_wpseo_linkdex','20'),(11,11,'_yoast_wpseo_linkdex','20'),(12,12,'_yoast_wpseo_linkdex','20'),(13,13,'_yoast_wpseo_linkdex','20'),(14,14,'_yoast_wpseo_linkdex','1'),(15,15,'_yoast_wpseo_linkdex','40'),(16,16,'_yoast_wpseo_linkdex','20'),(17,17,'_yoast_wpseo_linkdex','20'),(18,1,'_yoast_wpseo_linkdex','1'),(19,1,'_yoast_wpseo_linkdex','40'),(20,1,'_yoast_wpseo_linkdex','0'),(21,1,'_yoast_wpseo_linkdex','41'),(22,1,'_yoast_wpseo_linkdex',NULL),(23,1,NULL,'20'),(24,999,'_yoast_wpseo_linkdex','20'),(25,NULL,'_yoast_wpseo_linkdex','20'),(27,18,'_yoast_wpseo_linkdex','0'),(28,19,'_yoast_wpseo_linkdex','41'),(29,20,'_yoast_wpseo_linkdex',NULL),(30,21,'unrelated','20')
+  expect: {}
+- name: Prepare and compare both nonempty grouped semijoin alternatives
+  sql: EXPLAIN PHYSICAL CALIBRATE SELECT SQL_CALC_FOUND_ROWS wp_posts.ID FROM wp_posts INNER JOIN wp_postmeta ON
+    ( wp_posts.ID = wp_postmeta.post_id ) WHERE 1=1 AND ( ( wp_postmeta.meta_key = '_yoast_wpseo_linkdex' AND CAST(wp_postmeta.meta_value
+    AS SIGNED) BETWEEN '1' AND '40' ) ) AND wp_posts.post_type = 'post' AND ((wp_posts.post_status = 'publish'))
+    GROUP BY wp_posts.ID ORDER BY wp_posts.post_date DESC LIMIT 0, 10
+  expect:
+    rows: 2
+    data:
+    - result_equal: true
+    - result_equal: true
+- name: Q3 duplicates, NULLs, sort and LIMIT
+  mysql:
+    statements:
+    - sql: SELECT SQL_CALC_FOUND_ROWS wp_posts.ID FROM wp_posts INNER JOIN wp_postmeta ON ( wp_posts.ID = wp_postmeta.post_id
+        ) WHERE 1=1 AND ( ( wp_postmeta.meta_key = '_yoast_wpseo_linkdex' AND CAST(wp_postmeta.meta_value AS SIGNED)
+        BETWEEN '1' AND '40' ) ) AND wp_posts.post_type = 'post' AND ((wp_posts.post_status = 'publish')) GROUP
+        BY wp_posts.ID ORDER BY wp_posts.post_date DESC LIMIT 0, 10
+      expect:
+        rows: 10
+        data:
+        - ID: 15
+        - ID: 14
+        - ID: 13
+        - ID: 12
+        - ID: 11
+        - ID: 10
+        - ID: 9
+        - ID: 8
+        - ID: 7
+        - ID: 6
+    - sql: SELECT FOUND_ROWS() AS n
+      expect:
+        rows: 1
+        data:
+        - n: 15
+- name: UPDATE wp_postmeta SET meta_value='41' WHERE post_id=15
+  sql: UPDATE wp_postmeta SET meta_value='41' WHERE post_id=15
+  expect: {}
+- name: Q3 cast leaves range
+  mysql:
+    statements:
+    - sql: SELECT SQL_CALC_FOUND_ROWS wp_posts.ID FROM wp_posts INNER JOIN wp_postmeta ON ( wp_posts.ID = wp_postmeta.post_id
+        ) WHERE 1=1 AND ( ( wp_postmeta.meta_key = '_yoast_wpseo_linkdex' AND CAST(wp_postmeta.meta_value AS SIGNED)
+        BETWEEN '1' AND '40' ) ) AND wp_posts.post_type = 'post' AND ((wp_posts.post_status = 'publish')) GROUP
+        BY wp_posts.ID ORDER BY wp_posts.post_date DESC LIMIT 0, 10
+      expect:
+        rows: 10
+        data:
+        - ID: 14
+        - ID: 13
+        - ID: 12
+        - ID: 11
+        - ID: 10
+        - ID: 9
+        - ID: 8
+        - ID: 7
+        - ID: 6
+        - ID: 5
+    - sql: SELECT FOUND_ROWS() AS n
+      expect:
+        rows: 1
+        data:
+        - n: 14
+- name: UPDATE wp_posts SET post_status='publish' WHERE ID=17
+  sql: UPDATE wp_posts SET post_status='publish' WHERE ID=17
+  expect: {}
+- name: Q3 post status enters result
+  mysql:
+    statements:
+    - sql: SELECT SQL_CALC_FOUND_ROWS wp_posts.ID FROM wp_posts INNER JOIN wp_postmeta ON ( wp_posts.ID = wp_postmeta.post_id
+        ) WHERE 1=1 AND ( ( wp_postmeta.meta_key = '_yoast_wpseo_linkdex' AND CAST(wp_postmeta.meta_value AS SIGNED)
+        BETWEEN '1' AND '40' ) ) AND wp_posts.post_type = 'post' AND ((wp_posts.post_status = 'publish')) GROUP
+        BY wp_posts.ID ORDER BY wp_posts.post_date DESC LIMIT 0, 10
+      expect:
+        rows: 10
+        data:
+        - ID: 17
+        - ID: 14
+        - ID: 13
+        - ID: 12
+        - ID: 11
+        - ID: 10
+        - ID: 9
+        - ID: 8
+        - ID: 7
+        - ID: 6
+    - sql: SELECT FOUND_ROWS() AS n
+      expect:
+        rows: 1
+        data:
+        - n: 15
+- name: DELETE FROM wp_postmeta WHERE post_id=14
+  sql: DELETE FROM wp_postmeta WHERE post_id=14
+  expect: {}
+- name: Q3 last metadata row removed
+  mysql:
+    statements:
+    - sql: SELECT SQL_CALC_FOUND_ROWS wp_posts.ID FROM wp_posts INNER JOIN wp_postmeta ON ( wp_posts.ID = wp_postmeta.post_id
+        ) WHERE 1=1 AND ( ( wp_postmeta.meta_key = '_yoast_wpseo_linkdex' AND CAST(wp_postmeta.meta_value AS SIGNED)
+        BETWEEN '1' AND '40' ) ) AND wp_posts.post_type = 'post' AND ((wp_posts.post_status = 'publish')) GROUP
+        BY wp_posts.ID ORDER BY wp_posts.post_date DESC LIMIT 0, 10
+      expect:
+        rows: 10
+        data:
+        - ID: 17
+        - ID: 13
+        - ID: 12
+        - ID: 11
+        - ID: 10
+        - ID: 9
+        - ID: 8
+        - ID: 7
+        - ID: 6
+        - ID: 5
+    - sql: SELECT FOUND_ROWS() AS n
+      expect:
+        rows: 1
+        data:
+        - n: 14
+- name: INSERT INTO wp_postmeta VALUES (26,15,'_yoast_wpseo_linkdex','40')
+  sql: INSERT INTO wp_postmeta VALUES (26,15,'_yoast_wpseo_linkdex','40')
+  expect: {}
+- name: Q3 new matching metadata inserted
+  mysql:
+    statements:
+    - sql: SELECT SQL_CALC_FOUND_ROWS wp_posts.ID FROM wp_posts INNER JOIN wp_postmeta ON ( wp_posts.ID = wp_postmeta.post_id
+        ) WHERE 1=1 AND ( ( wp_postmeta.meta_key = '_yoast_wpseo_linkdex' AND CAST(wp_postmeta.meta_value AS SIGNED)
+        BETWEEN '1' AND '40' ) ) AND wp_posts.post_type = 'post' AND ((wp_posts.post_status = 'publish')) GROUP
+        BY wp_posts.ID ORDER BY wp_posts.post_date DESC LIMIT 0, 10
+      expect:
+        rows: 10
+        data:
+        - ID: 17
+        - ID: 15
+        - ID: 13
+        - ID: 12
+        - ID: 11
+        - ID: 10
+        - ID: 9
+        - ID: 8
+        - ID: 7
+        - ID: 6
+    - sql: SELECT FOUND_ROWS() AS n
+      expect:
+        rows: 1
+        data:
+        - n: 15
+- name: UPDATE wp_posts SET post_date=999 WHERE ID=1
+  sql: UPDATE wp_posts SET post_date=999 WHERE ID=1
+  expect: {}
+- name: Q3 ordering column invalidated
+  mysql:
+    statements:
+    - sql: SELECT SQL_CALC_FOUND_ROWS wp_posts.ID FROM wp_posts INNER JOIN wp_postmeta ON ( wp_posts.ID = wp_postmeta.post_id
+        ) WHERE 1=1 AND ( ( wp_postmeta.meta_key = '_yoast_wpseo_linkdex' AND CAST(wp_postmeta.meta_value AS SIGNED)
+        BETWEEN '1' AND '40' ) ) AND wp_posts.post_type = 'post' AND ((wp_posts.post_status = 'publish')) GROUP
+        BY wp_posts.ID ORDER BY wp_posts.post_date DESC LIMIT 0, 10
+      expect:
+        rows: 10
+        data:
+        - ID: 1
+        - ID: 17
+        - ID: 15
+        - ID: 13
+        - ID: 12
+        - ID: 11
+        - ID: 10
+        - ID: 9
+        - ID: 8
+        - ID: 7
+    - sql: SELECT FOUND_ROWS() AS n
+      expect:
+        rows: 1
+        data:
+        - n: 15
+- name: Q3 OFFSET counts distinct groups
+  mysql:
+    statements:
+    - sql: SELECT SQL_CALC_FOUND_ROWS wp_posts.ID FROM wp_posts INNER JOIN wp_postmeta ON ( wp_posts.ID = wp_postmeta.post_id
+        ) WHERE 1=1 AND ( ( wp_postmeta.meta_key = '_yoast_wpseo_linkdex' AND CAST(wp_postmeta.meta_value AS SIGNED)
+        BETWEEN '1' AND '40' ) ) AND wp_posts.post_type = 'post' AND ((wp_posts.post_status = 'publish')) GROUP
+        BY wp_posts.ID ORDER BY wp_posts.post_date DESC LIMIT 2, 3
+      expect:
+        rows: 3
+        data:
+        - ID: 15
+        - ID: 13
+        - ID: 12
+    - sql: SELECT FOUND_ROWS() AS n
+      expect:
+        rows: 1
+        data:
+        - n: 15
+- name: Q3 LIMIT zero still counts all groups
+  mysql:
+    statements:
+    - sql: SELECT SQL_CALC_FOUND_ROWS wp_posts.ID FROM wp_posts INNER JOIN wp_postmeta ON ( wp_posts.ID = wp_postmeta.post_id
+        ) WHERE 1=1 AND ( ( wp_postmeta.meta_key = '_yoast_wpseo_linkdex' AND CAST(wp_postmeta.meta_value AS SIGNED)
+        BETWEEN '1' AND '40' ) ) AND wp_posts.post_type = 'post' AND ((wp_posts.post_status = 'publish')) GROUP
+        BY wp_posts.ID ORDER BY wp_posts.post_date DESC LIMIT 0, 0
+      expect:
+        rows: 0
+        data: []
+    - sql: SELECT FOUND_ROWS() AS n
+      expect:
+        rows: 1
+        data:
+        - n: 15
+- name: UPDATE wp_postmeta SET meta_value='0'
+  sql: UPDATE wp_postmeta SET meta_value='0'
+  expect: {}
+- name: Q3 empty result replaces previous FOUND_ROWS
+  mysql:
+    statements:
+    - sql: SELECT SQL_CALC_FOUND_ROWS wp_posts.ID FROM wp_posts INNER JOIN wp_postmeta ON ( wp_posts.ID = wp_postmeta.post_id
+        ) WHERE 1=1 AND ( ( wp_postmeta.meta_key = '_yoast_wpseo_linkdex' AND CAST(wp_postmeta.meta_value AS SIGNED)
+        BETWEEN '1' AND '40' ) ) AND wp_posts.post_type = 'post' AND ((wp_posts.post_status = 'publish')) GROUP
+        BY wp_posts.ID ORDER BY wp_posts.post_date DESC LIMIT 0, 0
+      expect:
+        rows: 0
+        data: []
+    - sql: SELECT FOUND_ROWS() AS n
+      expect:
+        rows: 1
+        data:
+        - n: 0
+- name: DROP TABLE wp_comments
+  sql: DROP TABLE wp_comments
+  expect: {}
+- name: DROP TABLE wp_postmeta
+  sql: DROP TABLE wp_postmeta
+  expect: {}
+- name: DROP TABLE wp_posts
+  sql: DROP TABLE wp_posts
+  expect: {}
+- name: Null rejecting lookup preserves repeated foreign keys
+  sql: SELECT COUNT(*) AS n FROM sj_guard_children c LEFT JOIN sj_guard_parents p ON p.id=c.pid WHERE p.flag NOT
+    IN ('bad')
+  expect:
+    rows: 1
+    data:
+    - n: 2
+- name: Nullable WHERE disjunction keeps missing partners
+  sql: SELECT COUNT(*) AS n FROM sj_guard_children c LEFT JOIN sj_guard_parents p ON p.id=c.pid WHERE p.flag NOT
+    IN ('bad') OR p.id IS NULL
+  expect:
+    rows: 1
+    data:
+    - n: 4
+- name: COALESCE keeps null extended partners
+  sql: SELECT COUNT(*) AS n FROM sj_guard_children c LEFT JOIN sj_guard_parents p ON p.id=c.pid WHERE COALESCE(p.flag,'ok')='ok'
+  expect:
+    rows: 1
+    data:
+    - n: 5
+- name: IS NULL is not a rejecting predicate
+  sql: SELECT COUNT(*) AS n FROM sj_guard_children c LEFT JOIN sj_guard_parents p ON p.id=c.pid WHERE p.flag IS
+    NULL
+  expect:
+    rows: 1
+    data:
+    - n: 3
+- name: Negated nullable equality preserves unknown
+  sql: SELECT COUNT(*) AS n FROM sj_guard_children c LEFT JOIN sj_guard_parents p ON p.id=c.pid WHERE NOT (p.flag='bad')
+  expect:
+    rows: 1
+    data:
+    - n: 2
+- name: Prepare guarded count cache before transaction tests
+  sql: EXPLAIN PHYSICAL CALIBRATE SELECT COUNT(*) AS n FROM sj_guard_children c LEFT JOIN sj_guard_parents p ON
+    p.id=c.pid WHERE p.flag NOT IN ('bad')
+  expect:
+    rows: 2
+    data:
+    - result_equal: true
+    - result_equal: true
+- name: Shared semijoin caches are bypassed for explicit transactions
+  mysql:
+    statements:
+    - sql: SELECT COUNT(*) AS n FROM sj_guard_children c LEFT JOIN sj_guard_parents p ON p.id=c.pid WHERE p.flag
+        NOT IN ('bad')
+      expect:
+        rows: 1
+        data:
+        - n: 2
+    - sql: BEGIN
+    - sql: UPDATE sj_guard_parents SET flag='bad' WHERE id=2
+    - sql: SELECT COUNT(*) AS n FROM sj_guard_children c LEFT JOIN sj_guard_parents p ON p.id=c.pid WHERE p.flag
+        NOT IN ('bad')
+      expect:
+        rows: 1
+        data:
+        - n: 0
+    - sql: ROLLBACK
+    - sql: SELECT COUNT(*) AS n FROM sj_guard_children c LEFT JOIN sj_guard_parents p ON p.id=c.pid WHERE p.flag
+        NOT IN ('bad')
+      expect:
+        rows: 1
+        data:
+        - n: 2
+- name: Nonunique lookup keeps join multiplicity
+  sql: SELECT COUNT(*) n FROM sj_guard_parents p JOIN sj_guard_children c ON p.id=c.pid
+  expect:
+    rows: 1
+    data:
+    - n: 3
+cleanup:
+- sql: DROP TABLE IF EXISTS sj_guard_children
+- sql: DROP TABLE IF EXISTS sj_guard_parents
+- sql: DROP TABLE IF EXISTS wp_comments
+- sql: DROP TABLE IF EXISTS wp_postmeta
+- sql: DROP TABLE IF EXISTS wp_posts

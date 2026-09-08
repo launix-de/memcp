@@ -428,6 +428,66 @@ func TestJITPersistentRegisterBankExcludesGoScratchR15(t *testing.T) {
 	}
 }
 
+//go:noinline
+//go:nosplit
+func jitTestZeroBuffer(dst *[32]byte) {
+	*dst = [32]byte{}
+}
+
+func TestJITFloatRegisterPressurePreservesGoZeroRegister(t *testing.T) {
+	const name = "jit_test_fp_zero_register"
+	for _, nativeCall := range []bool{false, true} {
+		label := "return"
+		if nativeCall {
+			label = "native call"
+		}
+		t.Run(label, func(t *testing.T) {
+			buffer := new([32]byte)
+			declaration := &Declaration{
+				Name: name,
+				Fn:   func(...Scmer) Scmer { return NewInt(0) },
+				Type: &TypeDescriptor{Kind: "func", Return: &TypeDescriptor{Kind: "int"},
+					JITEmit: func(ctx *JITContext, _ []Scmer, _ []JITValueDesc, result JITValueDesc) JITValueDesc {
+						// Exhaust the production FP bank, as scalar overflow and
+						// generated builtin temporaries do under register pressure.
+						ctx.EmitMovRegImm64(ctx.ScratchReg, 1)
+						for ctx.FreeFPRegs != 0 {
+							ctx.EmitMovGPRToFP(ctx.AllocFPReg(), ctx.ScratchReg)
+						}
+						if nativeCall {
+							ctx.TrackPointer(unsafe.Pointer(buffer))
+							ctx.EmitGoCallVoid(GoFuncAddr(jitTestZeroBuffer), []JITValueDesc{
+								{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(uintptr(unsafe.Pointer(buffer)))), NoHeapPointer: true},
+							})
+						}
+						target := jitEnsureResultPair(ctx, result)
+						ctx.EmitMakeInt(target, JITValueDesc{Loc: LocFPReg, Type: tagInt, Reg: RegX15})
+						// Restore the ABI even on the broken implementation so the
+						// test reports failure without corrupting the test runner.
+						ctx.EmitMovRegImm64(ctx.ScratchReg, 0)
+						ctx.EmitMovGPRToFP(RegX15, ctx.ScratchReg)
+						return target
+					},
+				},
+			}
+			Declare(&Globalenv, declaration)
+			defer func() {
+				delete(Globalenv.Vars, Symbol(name))
+				delete(declarations, name)
+				delete(declarationsByFunction, FunctionIdentity(declaration.Fn))
+			}()
+			compiled := compileJITExpressionTestProc(t, `(lambda () (jit_test_fp_zero_register))`)
+			got := compiled.Proc().jitFunction()()
+			if got.Int() != 0 {
+				t.Errorf("Go ABI zero register contains %d after FP register pressure", got.Int())
+			}
+			if *buffer != [32]byte{} {
+				t.Errorf("native Go zero initialization wrote %x", *buffer)
+			}
+		})
+	}
+}
+
 func TestJITRegisterHomesTradeOuterForMoreValuableInnerPlan(t *testing.T) {
 	code := make([]byte, 256)
 	start := unsafe.Pointer(&code[0])

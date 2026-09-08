@@ -243,7 +243,12 @@ type constants struct {
 func main() {
 	patch := flag.Bool("patch", false, "rewrite lib/queryplan-physical-expr.scm")
 	jsonl := flag.String("jsonl", "", "write raw measurements as JSONL")
+	suiteFilter := flag.String("suite", "", "restrict workload paths to this substring")
+	validateOnly := flag.Bool("validate-only", false, "execute and validate forced alternatives without refitting coefficients")
 	flag.Parse()
+	if *suiteFilter != "" && !*validateOnly {
+		fatal(errors.New("--suite requires --validate-only; coefficient fitting needs the complete workload set"))
+	}
 
 	root, err := repoRoot()
 	if err != nil {
@@ -252,6 +257,15 @@ func main() {
 	suites, err := discoverSuites(root)
 	if err != nil {
 		fatal(err)
+	}
+	if *suiteFilter != "" {
+		selected := suites[:0]
+		for _, current := range suites {
+			if strings.Contains(current.Path, *suiteFilter) {
+				selected = append(selected, current)
+			}
+		}
+		suites = selected
 	}
 	if len(suites) == 0 {
 		fatal(errors.New("no tests/**/*.yaml suite has metadata.physical_calibration: true"))
@@ -294,6 +308,10 @@ func main() {
 		if err := writeJSONL(*jsonl, raw); err != nil {
 			fatal(err)
 		}
+	}
+	if *validateOnly {
+		fmt.Printf("Validated %d forced-plan observations across %d suites; coefficients unchanged.\n", len(observations), len(suites))
+		return
 	}
 	// Coefficient fitting remains scoped to the membership-carrier family. Other
 	// calibrated decision families are executed and result-checked above, but
@@ -1097,6 +1115,10 @@ func validateRaceWinner(row calibrationRow, decisionID, plan string) error {
 			row.RowsPerProbe == nil || row.AggregateWidth == nil {
 			return fmt.Errorf("direct grouped join variant has incomplete measurements: %+v", row)
 		}
+	} else if row.Decision == "semijoin_carrier" {
+		if row.InputRows == nil || row.DriverInputRows == nil {
+			return fmt.Errorf("semijoin variant has incomplete measurements: %+v", row)
+		}
 	} else if isScanLookupDecision(row.Decision) {
 		if row.ProbeInvocations == nil {
 			return fmt.Errorf("%s variant has incomplete measurements: %+v", row.Decision, row)
@@ -1261,6 +1283,11 @@ func medianRows(runs [][]calibrationRow) ([]calibrationRow, error) {
 }
 
 func rowFeatures(row calibrationRow) ([]float64, error) {
+	// Semijoin formulas reuse existing primitive coefficients. These rows
+	// validate complete alternatives and must not become membership-fit inputs.
+	if row.Decision == "semijoin_carrier" {
+		return make([]float64, 25), nil
+	}
 	if isScanLookupDecision(row.Decision) {
 		if row.ProbeInvocations == nil {
 			return nil, fmt.Errorf("%s work profile contains nil probe count: %+v", row.Decision, row)
