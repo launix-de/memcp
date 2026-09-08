@@ -259,7 +259,7 @@ func emitJITFilterBuffer(ctx *JITContext, proc *Proc, valueTypes []uint8, reader
 		}
 		ctx.FreeDesc(&address)
 	}
-	predicate := JITEmitProcInline(ctx, proc, args, RegR12, JITValueDesc{Loc: LocAny})
+	predicate := jitEmitStorageProc(ctx, proc, args)
 	boolean := ctx.EmitBoolDesc(&predicate, JITValueDesc{Loc: LocAny})
 	ctx.FreeDesc(&predicate)
 	if boolean.Loc == LocImm {
@@ -315,6 +315,35 @@ func emitJITFilterBuffer(ctx *JITContext, proc *Proc, valueTypes []uint8, reader
 	ctx.EmitLoadFromStack(RegRAX, outOff)
 }
 
+// jitEmitStorageProc binds the concrete callback, not the storage emitter's
+// lexical frame. Compiled closures keep captured numbered locals in their
+// ProcJIT tail; treating those slots as fresh nil locals changes SQL filters.
+func jitEmitStorageProc(ctx *JITContext, proc *Proc, args []JITValueDesc) JITValueDesc {
+	base, captures := proc.JITCapturedLocals()
+	if len(captures) != 0 {
+		if base < len(args) {
+			panic("jit: storage callback captures overlap arguments")
+		}
+		locals := make([]JITValueDesc, base+len(captures))
+		copy(locals, args)
+		for index := len(args); index < base; index++ {
+			locals[index] = JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}
+		}
+		for index, value := range captures {
+			ctx.TrackImm(value)
+			locals[base+index] = JITValueDesc{Loc: LocImm, Type: value.GetTag(), Imm: value}
+		}
+		args = locals
+	}
+	runtimeEnv := proc.En
+	if runtimeEnv == nil {
+		runtimeEnv = &Globalenv
+	}
+	ctx.RuntimeEnv = NewAny(runtimeEnv)
+	ctx.TrackImm(ctx.RuntimeEnv)
+	return JITEmitProcInlineWithOuter(ctx, proc, jitCapturedEnv(proc.En), args, RegR12, JITValueDesc{Loc: LocAny})
+}
+
 func emitJITMapReduceBuffer(ctx *JITContext, proc *Proc, valueTypes []uint8) {
 	// The accumulator is the loop-carried phi. Its canonical home is a rooted
 	// stack pair so calls, type changes and stack growth remain safe. Physical
@@ -366,7 +395,7 @@ func emitJITMapReduceBuffer(ctx *JITContext, proc *Proc, valueTypes []uint8) {
 		}
 		ctx.FreeDesc(&address)
 	}
-	newAccumulator := JITEmitProcInline(ctx, proc, args, RegR12, JITValueDesc{Loc: LocAny})
+	newAccumulator := jitEmitStorageProc(ctx, proc, args)
 	ctx.EmitStoreScmerToStack(newAccumulator, accumulator.StackOff)
 	ctx.FreeDesc(&newAccumulator)
 
