@@ -185901,6 +185901,38 @@ func optimizeMerge(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *Typ
 	if !ok || len(rv) < 2 {
 		return result, td
 	}
+	// Flattening a base list followed by a freshly constructed singleton is
+	// append, regardless of whether the base can be transferred. Keep the
+	// non-mutating form for borrowed bases. Besides avoiding the temporary list,
+	// this removes the general merge loop from nested native expressions.
+	// Both forms evaluate base then item exactly once before validating the
+	// base as a list. Direct list/list concatenation keeps its flattening rule
+	// below, which can eliminate the copy altogether.
+	if len(rv) == 2 {
+		if outer, ok := scmerSlice(rv[1]); ok {
+			var parts []Scmer
+			if len(outer) == 3 && scmerIsSymbol(outer[0], "list") {
+				parts = outer[1:]
+			} else if len(outer) == 5 && scmerIsSymbol(outer[0], "!list") && outer[2].IsInt() && outer[2].Int() == 2 {
+				parts = outer[3:]
+			}
+			if len(parts) == 2 {
+				base, constructed := scmerSlice(parts[0])
+				constructed = constructed && len(base) > 0 && (scmerIsSymbol(base[0], "list") || scmerIsSymbol(base[0], "!list"))
+				if item, ok := optimizedSingletonListItem(parts[1]); ok && !constructed {
+					baseType := tiZero
+					if outerType := optimizedArgumentType(argumentTypes, 1); outerType.Extra != nil && outerType.Extra.Keys != nil {
+						baseType = TypeInfoFromTD(outerType.Extra.Keys["0"])
+					}
+					length := exactOptimizedListArgumentLength(parts[0], baseType)
+					if length >= 0 {
+						length++
+					}
+					return NewSlice([]Scmer{NewSymbol("append"), parts[0], item}), descriptorWithLength(FreshAlloc, length)
+				}
+			}
+		}
+	}
 	if len(rv) == 3 && optimizedArgumentType(argumentTypes, 1).Transfer() {
 		if singleton, ok := optimizedSingletonListItem(rv[2]); ok {
 			length := UnknownLength
