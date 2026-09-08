@@ -97,6 +97,46 @@ func verifyStorage(t *testing.T, col ColumnStorage, n int, gen func(int) scm.Scm
 
 // --- StorageInt tests ---
 
+func TestCompressionDoesNotCollapseBooleanText(t *testing.T) {
+	values := []scm.Scmer{scm.NewBool(true), scm.NewString("yes"), scm.NewString("3"), scm.NewString("view")}
+	col := buildViaCompression(len(values), func(i int) scm.Scmer { return values[i] })
+	for i, want := range values {
+		got := col.GetValue(uint32(i))
+		if scm.String(got) != scm.String(want) {
+			t.Fatalf("row %d: got %v, want %v (%T)", i, got, want, col)
+		}
+	}
+}
+
+func TestStorageValueIdentity(t *testing.T) {
+	pairs := [][2]scm.Scmer{
+		{scm.NewInt(1 << 53), scm.NewInt((1 << 53) + 1)},
+		{scm.NewFloat(0), scm.NewFloat(math.Copysign(0, -1))},
+		{scm.NewFloat(math.Float64frombits(0x7ff8000000000001)), scm.NewFloat(math.Float64frombits(0x7ff8000000000002))},
+		{scm.NewInt(1), scm.NewFloat(1)},
+		{scm.NewBool(true), scm.NewString("true")},
+		{scm.NewString("symbol"), scm.NewSymbol("symbol")},
+	}
+	for _, pair := range pairs {
+		if !storageValueEqual(pair[0], pair[0]) || storageValueEqual(pair[0], pair[1]) || storageValueEqual(pair[1], pair[0]) {
+			t.Fatalf("storage identity merged distinct scalar representations: %v / %v", pair[0], pair[1])
+		}
+	}
+}
+
+func TestEnumPreservesDistinctScalarValues(t *testing.T) {
+	values := []scm.Scmer{scm.NewBool(true), scm.NewString("view"), scm.NewInt(1), scm.NewString("1"), scm.NewBool(false), scm.NewInt(0), scm.NewNil(), scm.NewString("")}
+	col := buildEnum(256, func(i int) scm.Scmer { return values[i%len(values)] })
+	for _, stored := range []ColumnStorage{col, serializeDeserialize(col)} {
+		for i := 0; i < 256; i++ {
+			got, want := stored.GetValue(uint32(i)), values[i%len(values)]
+			if got.GetTag() != want.GetTag() || scm.String(got) != scm.String(want) {
+				t.Fatalf("row %d: got %v (tag %d), want %v (tag %d)", i, got, got.GetTag(), want, want.GetTag())
+			}
+		}
+	}
+}
+
 func TestStorageIntPipeline(t *testing.T) {
 	// Build StorageInt directly (bypass proposeCompression heuristics)
 	n := 200

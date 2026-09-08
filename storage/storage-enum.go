@@ -122,8 +122,7 @@ func (s *StorageEnum) symbolLo(idx int) uint64 {
 
 func (s *StorageEnum) findValue(val scm.Scmer) int {
 	for i := uint8(0); i < s.k; i++ {
-		// strict: NULL only matches NULL
-		if val.IsNil() == s.values[i].IsNil() && (val.IsNil() || scm.Equal(s.values[i], val)) {
+		if storageValueEqual(s.values[i], val) {
 			return int(i)
 		}
 	}
@@ -181,9 +180,9 @@ func (s *StorageEnum) prepare() {
 
 func (s *StorageEnum) scan(i uint32, value scm.Scmer) {
 	s.scanTotal++
-	// find existing symbol (strict: NULL only matches NULL)
+	// Dictionary identity must not coerce distinct stored values.
 	for j := uint8(0); j < s.k; j++ {
-		if value.IsNil() == s.values[j].IsNil() && (value.IsNil() || scm.Equal(s.values[j], value)) {
+		if storageValueEqual(s.values[j], value) {
 			s.scanFreqs[j]++
 			return
 		}
