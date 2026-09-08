@@ -1608,17 +1608,23 @@ type ShardMapReducer struct {
 	isBreak            []bool // true for $break column
 	hasBreakCol        bool
 	// tagClosure hoisted fn ptrs — allocated once per mapper, reused per row
-	setClosureFn     []*func(uint32, ...scm.Scmer) scm.Scmer // per $set col
-	incrClosureFn    []*func(uint32, ...scm.Scmer) scm.Scmer // per $increment col
-	invClosureFn     []*func(uint32, ...scm.Scmer) scm.Scmer // per $invalidate col
-	noopClosureFn    *func(uint32, ...scm.Scmer) scm.Scmer   // shared noop
-	breakClosureFn   *func(uint32, ...scm.Scmer) scm.Scmer   // shared break
-	args             []scm.Scmer                             // pre-allocated [accumulator, column...] buffer
-	mapProgram       scm.SerialProc
-	mapReduceProgram scm.SerialProc
-	mapReduceScmer   scm.Scmer     // original Scmer for network serialization
-	deleteBatch      *triggerBatch // when set, DELETE triggers are batched instead of per-row
-	deletedRows      uint64        // applied DELETEs, published once when the mapper flushes
+	setClosureFn      []*func(uint32, ...scm.Scmer) scm.Scmer // per $set col
+	incrClosureFn     []*func(uint32, ...scm.Scmer) scm.Scmer // per $increment col
+	invClosureFn      []*func(uint32, ...scm.Scmer) scm.Scmer // per $invalidate col
+	noopClosureFn     *func(uint32, ...scm.Scmer) scm.Scmer   // shared noop
+	breakClosureFn    *func(uint32, ...scm.Scmer) scm.Scmer   // shared break
+	args              []scm.Scmer                             // pre-allocated [accumulator, column...] buffer
+	mapProgram        scm.SerialProc
+	mapReduceProgram  scm.SerialProc
+	mapReduceScmer    scm.Scmer // original Scmer for network serialization
+	bufferReduceProc  *scm.Proc // source retained for a profitable typed main-buffer specialization
+	bufferReduceFn    scm.JITMapReduceBufferFunc
+	bufferValueTypes  [1]uint8
+	bufferColumnCount int
+	bufferMinRows     int
+	bufferSeenRows    int
+	deleteBatch       *triggerBatch // when set, DELETE triggers are batched instead of per-row
+	deletedRows       uint64        // applied DELETEs, published once when the mapper flushes
 	// Batched side effects: collected during scan, flushed after lock release.
 	// $increment calls are aggregated per (proxy, recid) → one update per unique target.
 	incrementBatch  map[*StorageComputeProxy]map[uint32]scm.Scmer // proxy → recid → accumulated delta
@@ -1698,6 +1704,34 @@ func (t *storageShard) initReadMapReducer(mr *ShardMapReducer, cols []string, ma
 			mr.mainValuesCompiled = false
 		}
 	}
+	mr.prepareJITBufferReducer()
+}
+
+func (m *ShardMapReducer) prepareJITBufferReducer() {
+	if (m.mapReduceProgram.Kind != scm.SerialProcJIT && m.mapReduceProgram.Kind != scm.SerialProcNative) || len(m.mainCols) > len(m.bufferValueTypes) {
+		return
+	}
+	proc := scm.PrepareJITMapReduceBufferProc(m.mapReduceScmer, len(m.mainCols)+1)
+	if proc == nil {
+		return
+	}
+	for index, column := range m.mainCols {
+		if column == nil || m.mainBulkReaders[index] == nil {
+			return
+		}
+		valueType := column.JITValueType()
+		if valueType == scm.JITTypeUnknown {
+			return
+		}
+		m.bufferValueTypes[index] = valueType
+	}
+	minimumRows := scm.CurrentJITCosts().MapReduceBufferBreakEven(scm.JITExpressionCost(proc.Body), len(m.mainCols))
+	if minimumRows > int(m.mainCount) {
+		return
+	}
+	m.bufferReduceProc = proc
+	m.bufferColumnCount = len(m.mainCols)
+	m.bufferMinRows = minimumRows
 }
 
 // MapOne evaluates the mapper for one already-visible record. Ordered scans use
@@ -1992,6 +2026,7 @@ func (t *storageShard) initMapReducer(mr *ShardMapReducer, cols []string, mapRed
 			}
 		}
 	}
+	mr.prepareJITBufferReducer()
 }
 
 // OpenMapReducer creates a retained MapReducer for operators whose mapper
@@ -2097,6 +2132,22 @@ func (m *ShardMapReducer) loadDirectReadArgs(id uint32, rowOffset int, useBulkVa
 	}
 }
 
+func (m *ShardMapReducer) processJITBuffer(acc scm.Scmer, recids []uint32) (scm.Scmer, bool) {
+	if m.bufferReduceProc == nil {
+		return acc, false
+	}
+	m.bufferSeenRows += len(recids)
+	if m.bufferReduceFn == nil && m.bufferSeenRows >= m.bufferMinRows {
+		m.bufferReduceFn = scm.CompileJITMapReduceBuffer(m.bufferReduceProc, m.bufferValueTypes[:m.bufferColumnCount])
+	}
+	if m.bufferReduceFn == nil {
+		return acc, false
+	}
+	acc = m.bufferReduceFn(acc, m.mainBulkValues, len(recids))
+	runtime.KeepAlive(m.bufferReduceProc)
+	return acc, true
+}
+
 func (m *ShardMapReducer) processDirectReadBlock(acc scm.Scmer, recids []uint32) scm.Scmer {
 	if len(recids) == 0 {
 		return acc
@@ -2117,6 +2168,11 @@ func (m *ShardMapReducer) processDirectReadBlock(acc scm.Scmer, recids []uint32)
 	}
 	if recids[0] < m.mainCount {
 		m.prefetchMainColumns(recids)
+	}
+	if recids[0] < m.mainCount {
+		if reduced, ok := m.processJITBuffer(acc, recids); ok {
+			return reduced
+		}
 	}
 	if m.mapReduceProgram.Kind == scm.SerialProcNative {
 		if recids[0] < m.mainCount && len(m.mainBulkReaders) == 1 {
@@ -2218,6 +2274,9 @@ func (m *ShardMapReducer) processMainBlock(acc scm.Scmer, recids []uint32) scm.S
 	needsPerRowLock := (m.hasUpdateCol || m.hasIncrementCol || m.hasSetCol) && !m.shardWriteLocked
 	if !needsPerRowLock && !m.hasUpdateCol && !m.hasIncrementCol && !m.hasSetCol {
 		m.prefetchMainColumns(recids)
+		if reduced, ok := m.processJITBuffer(acc, recids); ok {
+			return reduced
+		}
 	}
 	bulkWidth := len(m.mainBulkReaders)
 	hasBulkValues := bulkWidth > 0 && len(m.mainBulkValues) == len(recids)*bulkWidth
@@ -2272,6 +2331,9 @@ func (m *ShardMapReducer) processMainBlockBatch(acc scm.Scmer, recids []uint32, 
 	needsPerRowLock := (m.hasUpdateCol || m.hasIncrementCol || m.hasSetCol) && !m.shardWriteLocked
 	if !needsPerRowLock && !m.hasUpdateCol && !m.hasIncrementCol && !m.hasSetCol {
 		m.prefetchMainColumns(recids)
+		if reduced, ok := m.processJITBuffer(acc, recids); ok {
+			return reduced
+		}
 	}
 	bulkWidth := len(m.mainBulkReaders)
 	hasBulkValues := bulkWidth > 0 && len(m.mainBulkValues) == len(recids)*bulkWidth

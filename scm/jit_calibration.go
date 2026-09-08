@@ -48,6 +48,9 @@ type JITCostCalibration struct {
 	PublishFixedNS  float64
 	DirectCallNS    float64
 	PredicateUnitNS float64
+	BufferCompileNS float64
+	BufferSavedNS   float64
+	BufferMaxUnits  int
 }
 
 // EstimateCompileNS estimates one query-local emission and publication. The
@@ -85,6 +88,21 @@ func (calibration JITCostCalibration) BreakEvenCandidates(expressionCost, predic
 	return int(math.Ceil(calibration.EstimateCompileNS(expressionCost) / (saved * float64(expectedExecutions))))
 }
 
+// MapReduceBufferBreakEven returns the number of rows needed to amortize one
+// typed buffer-loop compilation. The startup probe measures the same simple
+// accumulator shape admitted by this criterion. Reducers with more than one
+// physical column or more expensive callbacks keep the already compiled
+// callback loop; measurements show that inlining those shapes does not recover
+// its larger loop overhead.
+func (calibration JITCostCalibration) MapReduceBufferBreakEven(expressionCost, columnCount int) int {
+	if !calibration.Enabled || columnCount < 0 || columnCount > 1 || expressionCost > calibration.BufferMaxUnits || calibration.BufferSavedNS <= 0 {
+		return math.MaxInt
+	}
+	// Require twice the measured break-even before switching. This absorbs timer
+	// noise and keeps short scans on the allocation-free existing callback loop.
+	return int(math.Ceil(2 * calibration.BufferCompileNS / calibration.BufferSavedNS))
+}
+
 type jitCalibrationShape struct {
 	source  string
 	argSets [][]Scmer
@@ -117,11 +135,59 @@ func CalibrateJITCosts() JITCostCalibration {
 				return measureJITCalibrationShapes()
 			}()
 			calibration = summarizeJITCalibration(observations)
+			calibration.BufferCompileNS, calibration.BufferSavedNS, calibration.BufferMaxUnits = measureMapReduceBufferCalibration()
 		}
 		calibration.CalibrationNS = time.Since(started).Nanoseconds()
 		jitCalibrationData.Store(&calibration)
 	})
 	return CurrentJITCosts()
+}
+
+func measureMapReduceBufferCalibration() (compileNS, savedNS float64, expressionUnits int) {
+	template := calibrationProcedure(`(lambda (acc value) (sql_sum_reduce acc value))`)
+	compiled := CompileJIT(NewProcStruct(*cloneCalibrationProcedure(template)), true)
+	proc := compiled.Proc()
+	if proc == nil || proc.Compiled == nil {
+		return 0, 0, 0
+	}
+	expressionUnits = JITExpressionCost(proc.Body)
+	compileSamples := make([]float64, jitCalibrationSamples)
+	var fused JITMapReduceBufferFunc
+	for sample := range compileSamples {
+		started := time.Now()
+		fused = CompileJITMapReduceBuffer(proc, []uint8{tagInt})
+		compileSamples[sample] = float64(time.Since(started).Nanoseconds())
+	}
+	if fused == nil {
+		return 0, 0, 0
+	}
+	values := make([]Scmer, 16*1024)
+	for index := range values {
+		values[index] = NewInt(int64(index & 255))
+	}
+	currentSamples := make([]float64, jitCalibrationSamples)
+	fusedSamples := make([]float64, jitCalibrationSamples)
+	args := []Scmer{NewInt(0), NewInt(0)}
+	for sample := range currentSamples {
+		started := time.Now()
+		acc := NewInt(0)
+		for _, value := range values {
+			args[0], args[1] = acc, value
+			acc = proc.Compiled.Native(args...)
+		}
+		currentSamples[sample] = float64(time.Since(started).Nanoseconds()) / float64(len(values))
+		jitCalibrationSink = acc
+
+		started = time.Now()
+		acc = fused(NewInt(0), values, len(values))
+		fusedSamples[sample] = float64(time.Since(started).Nanoseconds()) / float64(len(values))
+		jitCalibrationSink = acc
+	}
+	compileNS = medianFloat64(compileSamples)
+	savedNS = math.Max(0, medianFloat64(currentSamples)-medianFloat64(fusedSamples))
+	runtime.KeepAlive(compiled)
+	runtime.KeepAlive(fused)
+	return compileNS, savedNS, expressionUnits
 }
 
 // CurrentJITCosts returns a value copy so callers cannot mutate the globally
