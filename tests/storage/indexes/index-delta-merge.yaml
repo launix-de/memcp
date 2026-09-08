@@ -1,3 +1,6 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
 # Tests for non-unique index delta+main streaming merge
 # Exercises StorageIndex.iterate() where main items (StorageInt) and
 # delta items (deltaBtree) are interleaved in sorted order.
@@ -8,7 +11,50 @@ metadata:
   version: "1.0"
   description: "Non-unique index: delta+main streaming merge, matrix multiply"
 
+# A degree-8 delta B-tree splits with this 17-row reduction of the MINUS
+# regression. The mixed boolean/text comparator must remain symmetric across
+# cold and warm lookup.
+setup:
+  - sql: "DROP TABLE IF EXISTS idx_merge_bool_text"
+  - sql: "CREATE TABLE idx_merge_bool_text (s TEXT, p TEXT, o TEXT) ENGINE=MEMORY"
+  - scm: |
+      (insert (table "memcp-tests" "idx_merge_bool_text") '("s" "p" "o")
+        (list (list "http://spec11-minus.example/b" "http://spec11-minus.example/deleted" true)
+          (list "http://test26.org/item" "http://test26.org/val" "yes")
+          (list "http://test25.org/c" "http://test25.org/p" "3")
+          (list "http://test25.org/b" "http://test25.org/p" "2")
+          (list "http://test25.org/a" "http://test25.org/p" "1")
+          (list "http://test23.org/item" "http://www.w3.org/1999/02/22-rdf-syntax-ns#type" "http://test23.org/Thing")
+          (list "http://test07.org/x3" "http://test07.org/y" "three")
+          (list "http://test07.org/x2" "http://test07.org/y" "two")
+          (list "http://test07.org/x1" "http://test07.org/y" "one")
+          (list "http://test06.org/second" "http://test06.org/n" "2")
+          (list "http://test03.org/bob" "http://test03.org/name" "Bob")
+          (list "http://test02.org/alice" "http://www.w3.org/1999/02/22-rdf-syntax-ns#type" "http://test02.org/Person")
+          (list "t01_main" "http://www.w3.org/1999/02/22-rdf-syntax-ns#type" "t01_Page")
+          (list "http://robust07.org/item" "http://robust07.org/path" "C:\\Users\\\test\\file.txt")
+          (list "http://robust06.org/item" "http://robust06.org/html" "<h1>Hello</h1><p>World</p>")
+          (list "http://robust05.org/item" "http://robust05.org/val" "it's a test")
+          (list "http://robust01.org/comp" "http://robust01.org/componentName" "view")))
+
 test_cases:
+  - name: "RHS row exists without object access boundary"
+    sql: "SELECT COUNT(*) AS n FROM idx_merge_bool_text WHERE p = 'http://spec11-minus.example/deleted'"
+    expect: {rows: 1, data: [{n: 1}]}
+  - name: "Indexed boolean RHS lookup must retain the same row"
+    sql: "SELECT COUNT(*) AS n FROM idx_merge_bool_text WHERE p = 'http://spec11-minus.example/deleted' AND o = true"
+    expect: {rows: 1, data: [{n: 1}]}
+  - name: "Warm indexed boolean RHS lookup must retain the same row"
+    sql: "SELECT COUNT(*) AS n FROM idx_merge_bool_text WHERE p = 'http://spec11-minus.example/deleted' AND o = true"
+    expect: {rows: 1, data: [{n: 1}]}
+  - name: "Ordered indexed boolean lookup retains the RHS row"
+    sql: "SELECT s FROM idx_merge_bool_text WHERE p = 'http://spec11-minus.example/deleted' AND o = true ORDER BY s"
+    expect: {rows: 1, data: [{s: "http://spec11-minus.example/b"}]}
+
+  - name: "Boolean/text lookup rejects unknown columns"
+    sql: "SELECT missing FROM idx_merge_bool_text WHERE o = true"
+    expect: {error: true}
+
   # ==============================================================
   # Phase 1: Setup — populate main, build non-unique index
   # ==============================================================
@@ -315,6 +361,7 @@ test_cases:
           total: 342
 
 cleanup:
+  - sql: "DROP TABLE IF EXISTS idx_merge_bool_text"
   - sql: "DROP TABLE IF EXISTS idx_merge"
   - sql: "DROP TABLE IF EXISTS idx_dim"
   - sql: "DROP TABLE IF EXISTS idx93_mat_a"

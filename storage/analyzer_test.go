@@ -25,6 +25,24 @@ import (
 
 var benchmarkBoundaries analyzedBoundaries
 
+func TestInterpolationUsesIndexOrder(t *testing.T) {
+	order := scm.Apply(scm.Globalenv.Vars[scm.Symbol("collate")], scm.NewString("bin"), scm.NewBool(false))
+	less := scm.OrderRelationLess(order.Func())
+	values := []scm.Scmer{scm.NewNil(), scm.NewString("3"), scm.NewBool(false), scm.NewString("false"), scm.NewBool(true), scm.NewString("true"), scm.NewString("view")}
+	for _, key := range values {
+		want := 0
+		for want < len(values) && less(values[want], key) {
+			want++
+		}
+		for _, min := range []scm.Scmer{scm.NewNil(), values[1]} {
+			got := interpolationSearch(0, len(values), key, min, values[len(values)-1], func(i int) scm.Scmer { return values[i] }, less)
+			if got != want {
+				t.Fatalf("key %v: got %d, want %d", key, got, want)
+			}
+		}
+	}
+}
+
 func testEqualScanAccess(column string, value scm.Scmer) (scm.Scmer, []scm.Scmer) {
 	return scm.NewSlice([]scm.Scmer{
 		newScanAccessHeader(1, scanAccessConsumerScan, 0, -1),
