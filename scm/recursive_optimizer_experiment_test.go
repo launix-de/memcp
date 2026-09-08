@@ -16,7 +16,10 @@ Copyright (C) 2026  Carl-Philip Hänsch
 */
 package scm
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 const recursiveSpecializationBenchmarkSource = `(define benchmark_recursive_collect (lambda (expr acc)
 	(match expr
@@ -38,6 +41,38 @@ func BenchmarkOptimizeRecursiveOwnershipVariants(b *testing.B) {
 		if !env.Vars[Symbol("benchmark_recursive_collect_entry")].IsProc() {
 			b.Fatal("recursive benchmark Proc was not defined")
 		}
+	}
+}
+
+func TestRecursiveDefinitionDoesNotInlinePreviousBinding(t *testing.T) {
+	env := newOptimizerTestEnv()
+	EvalAll(t.Name(), recursiveSpecializationBenchmarkSource, env)
+	// Imported modules can be evaluated again in the same global environment.
+	// The old recursive Proc must not be inlined while its replacement definition
+	// is optimized: doing so grows the body once per recursive ownership shape.
+	EvalAll(t.Name(), recursiveSpecializationBenchmarkSource, env)
+
+	collector := env.Vars[Symbol("benchmark_recursive_collect")]
+	if !collector.IsProc() {
+		t.Fatal("recursive collector was not defined")
+	}
+	serialized := serializedTestExpr(t, env, collector.Proc().Body)
+	if calls := strings.Count(serialized, "benchmark_recursive_collect"); calls > 8 {
+		t.Fatalf("recursive definition expanded its previous binding into %d calls (%d bytes)", calls, len(serialized))
+	}
+	if len(serialized) > 8<<10 {
+		t.Fatalf("recursive definition grew to %d bytes, want at most 8192", len(serialized))
+	}
+
+	entry := env.Vars[Symbol("benchmark_recursive_collect_entry")]
+	got := Apply(entry, NewSlice([]Scmer{
+		NewSymbol("root"),
+		NewSlice([]Scmer{NewSymbol("value"), NewInt(1)}),
+		NewSlice([]Scmer{NewSymbol("value"), NewInt(2)}),
+	}))
+	want := NewSlice([]Scmer{NewInt(1), NewInt(2)})
+	if !Equal(got, want) {
+		t.Fatalf("recursive collector returned %s, want %s", String(got), String(want))
 	}
 }
 

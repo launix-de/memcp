@@ -2286,27 +2286,6 @@ probe. */
 						(lower_scalar_cardinality_scan_lookup_choice
 							stage lookup_kind lookup_expr scan_expr))))))))
 
-(define collect_join_probe_lookup_columns_acc (lambda (sources default_alias target_alias stage columns_by_alias)
-	(reduce (qassoc_get (gs_facts stage) (quote lookup-keys) '()) (lambda (acc key)
-		(collect_join_columns_acc sources default_alias target_alias key acc)) columns_by_alias)))
-
-(define collect_join_scalar_aggregate_columns_acc (lambda (sources default_alias target_alias stage columns_by_alias)
-	(reduce (scalar_aggregate_probe_outer_exprs stage) (lambda (acc expr)
-		(collect_join_columns_acc sources default_alias target_alias expr acc)) columns_by_alias)))
-
-(define collect_join_get_column_acc (lambda (sources default_alias target_alias tblvar tbl_ignorecase col col_ignorecase columns_by_alias)
-	(begin
-		(define src (if (nil? tblvar)
-			(source_for_unqualified_column sources default_alias col col_ignorecase)
-			(source_for_alias sources default_alias tblvar tbl_ignorecase)))
-		(if (or (nil? src) (and (not (nil? target_alias)) (not (equal?? (source_alias src) target_alias))))
-			columns_by_alias
-			(begin
-				(define alias (source_alias src))
-				(define physical_col (resolve_physical_column_name src col col_ignorecase))
-				(qassoc_set columns_by_alias alias
-					(merge_unique (list (qassoc_get columns_by_alias alias '()) (list physical_col)))))))))
-
 (define collect_join_columns_acc (lambda (sources default_alias target_alias expr columns_by_alias)
 	(match expr
 		((symbol driver_membership_probe) _stage probe)
@@ -2322,25 +2301,39 @@ probe. */
 		((quote dml_driver_membership_probe) _fallback_schema _stage probe)
 		(collect_join_columns_acc sources default_alias target_alias probe columns_by_alias)
 		((symbol scalar_first_probe) stage _requested_col)
-		(collect_join_probe_lookup_columns_acc sources default_alias target_alias stage columns_by_alias)
+		(reduce (qassoc_get (gs_facts stage) (quote lookup-keys) '()) (lambda (acc key)
+			(collect_join_columns_acc sources default_alias target_alias key acc)) columns_by_alias)
 		((symbol scalar_first_probe) stage _requested_col _stages)
-		(collect_join_probe_lookup_columns_acc sources default_alias target_alias stage columns_by_alias)
-		((quote scalar_first_probe) stage _requested_col)
-		(collect_join_probe_lookup_columns_acc sources default_alias target_alias stage columns_by_alias)
-		((quote scalar_first_probe) stage _requested_col _stages)
-		(collect_join_probe_lookup_columns_acc sources default_alias target_alias stage columns_by_alias)
+		(reduce (qassoc_get (gs_facts stage) (quote lookup-keys) '()) (lambda (acc key)
+			(collect_join_columns_acc sources default_alias target_alias key acc)) columns_by_alias)
+		((quote scalar_first_probe) stage requested_col)
+		(collect_join_columns_acc sources default_alias target_alias (list (quote scalar_first_probe) stage requested_col) columns_by_alias)
+		((quote scalar_first_probe) stage requested_col _stages)
+		(collect_join_columns_acc sources default_alias target_alias (list (quote scalar_first_probe) stage requested_col) columns_by_alias)
 		((symbol scalar_aggregate_probe) stage _requested_col)
-		(collect_join_scalar_aggregate_columns_acc sources default_alias target_alias stage columns_by_alias)
-		((quote scalar_aggregate_probe) stage _requested_col)
-		(collect_join_scalar_aggregate_columns_acc sources default_alias target_alias stage columns_by_alias)
+		(reduce (scalar_aggregate_probe_outer_exprs stage) (lambda (acc expr)
+			(collect_join_columns_acc sources default_alias target_alias expr acc)) columns_by_alias)
+		((quote scalar_aggregate_probe) stage requested_col)
+		(collect_join_columns_acc sources default_alias target_alias (list (quote scalar_aggregate_probe) stage requested_col) columns_by_alias)
 		((symbol scalar_cardinality_probe) stage _requested_col)
-		(collect_join_probe_lookup_columns_acc sources default_alias target_alias stage columns_by_alias)
-		((quote scalar_cardinality_probe) stage _requested_col)
-		(collect_join_probe_lookup_columns_acc sources default_alias target_alias stage columns_by_alias)
-		((symbol get_column) tblvar tbl_ignorecase col col_ignorecase)
-		(collect_join_get_column_acc sources default_alias target_alias tblvar tbl_ignorecase col col_ignorecase columns_by_alias)
+		(reduce (qassoc_get (gs_facts stage) (quote lookup-keys) '()) (lambda (acc key)
+			(collect_join_columns_acc sources default_alias target_alias key acc)) columns_by_alias)
+		((quote scalar_cardinality_probe) stage requested_col)
+		(collect_join_columns_acc sources default_alias target_alias (list (quote scalar_cardinality_probe) stage requested_col) columns_by_alias)
+		((symbol get_column) tblvar tbl_ignorecase col col_ignorecase) (begin
+			(define src (if (nil? tblvar)
+				(source_for_unqualified_column sources default_alias col col_ignorecase)
+				(source_for_alias sources default_alias tblvar tbl_ignorecase)))
+			(if (or (nil? src) (and (not (nil? target_alias)) (not (equal?? (source_alias src) target_alias))))
+				columns_by_alias
+				(begin
+					(define alias (source_alias src))
+					(define physical_col (resolve_physical_column_name src col col_ignorecase))
+					(qassoc_set columns_by_alias alias
+						(merge_unique (list (qassoc_get columns_by_alias alias '()) (list physical_col)))))))
 		((quote get_column) tblvar tbl_ignorecase col col_ignorecase)
-		(collect_join_get_column_acc sources default_alias target_alias tblvar tbl_ignorecase col col_ignorecase columns_by_alias)
+		(collect_join_columns_acc sources default_alias target_alias
+			(list (symbol "get_column") tblvar tbl_ignorecase col col_ignorecase) columns_by_alias)
 		(cons _head tail) (reduce tail (lambda (acc item)
 			(collect_join_columns_acc sources default_alias target_alias item acc)) columns_by_alias)
 		_ columns_by_alias)))

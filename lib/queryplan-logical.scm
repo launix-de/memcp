@@ -902,7 +902,11 @@ the shallow guard instead of walking the wide expression it is about to drop. */
 		(lambda (tblvar) (resolve_column_alias tblvar default_alias)))))
 
 (define expr_refs_alias? (lambda (default_alias alias expr)
-	(expr_tagged_nth_equal? expr (quote get_column) 1 default_alias alias)))
+	(match expr
+		((symbol get_column) tblvar _ _ _) (equal?? (resolve_column_alias tblvar default_alias) alias)
+		((quote get_column) tblvar _ _ _) (equal?? (resolve_column_alias tblvar default_alias) alias)
+		(cons _head tail) (reduce tail (lambda (found item) (or found (expr_refs_alias? default_alias alias item))) false)
+		_ false)))
 
 (define expr_only_refs_alias? (lambda (default_alias alias expr)
 	(match expr
@@ -912,11 +916,8 @@ the shallow guard instead of walking the wide expression it is about to drop. */
 		_ true)))
 
 (define expr_refs_any_alias? (lambda (default_alias aliases expr)
-	/* Testing references must not allocate an intermediate alias list or walk the
-	same expression once per candidate alias. The native predicate short-circuits
-	on the first match and keeps its traversal stack local. */
-	(expr_tagged_nth_matches_any? expr (quote get_column) 1 default_alias
-		(coalesceNil aliases '()))))
+	(reduce (coalesceNil aliases '()) (lambda (found alias)
+		(or found (expr_refs_alias? default_alias alias expr))) false)))
 
 /* Collect bound source aliases once. Join pruning must not rescan a wide
 projection for every source; that turns read-model queries into O(N^2) planner

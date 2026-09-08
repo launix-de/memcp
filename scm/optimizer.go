@@ -360,6 +360,7 @@ type optimizerMetainfo struct {
 	beginDepth                int             // >0 in lexical begin scopes; their definitions do not reach the caller Env
 	inlineDepth               int
 	inlineStack               map[Symbol]bool
+	definitionStack           map[Symbol]bool
 	specializationStack       map[procSpecializationStackKey]bool
 	specializationParamMask   uint64
 	specializationDepth       int
@@ -795,6 +796,7 @@ func (ome *optimizerMetainfo) Copy() (result optimizerMetainfo) {
 	result.beginDepth = ome.beginDepth
 	result.inlineDepth = ome.inlineDepth
 	result.inlineStack = ome.inlineStack
+	result.definitionStack = ome.definitionStack
 	result.specializationStack = ome.specializationStack
 	result.specializationParamMask = ome.specializationParamMask
 	result.specializationDepth = ome.specializationDepth
@@ -829,6 +831,7 @@ func (ome *optimizerMetainfo) CopySharedScope() (result optimizerMetainfo) {
 	result.beginDepth = ome.beginDepth
 	result.inlineDepth = ome.inlineDepth
 	result.inlineStack = ome.inlineStack
+	result.definitionStack = ome.definitionStack
 	result.specializationStack = ome.specializationStack
 	result.specializationParamMask = ome.specializationParamMask
 	result.specializationDepth = ome.specializationDepth
@@ -995,7 +998,7 @@ func tryInlineLeafProc(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bo
 		return NewNil(), tiZero, false
 	}
 	callee, ok := scmerSymbol(v[0])
-	if !ok || (ome.inlineStack != nil && ome.inlineStack[callee]) {
+	if !ok || (ome.inlineStack != nil && ome.inlineStack[callee]) || (ome.definitionStack != nil && ome.definitionStack[callee]) {
 		return NewNil(), tiZero, false
 	}
 	owner := env.FindRead(callee)
@@ -1514,7 +1517,7 @@ func trySpecializeProcCall(v []Scmer, argTypes []TypeInfo, env *Env, ome *optimi
 		return NewNil(), false
 	}
 	callee, ok := scmerSymbol(v[0])
-	if !ok {
+	if !ok || (ome.definitionStack != nil && ome.definitionStack[callee]) {
 		return NewNil(), false
 	}
 	owner := env.FindRead(callee)
@@ -2709,7 +2712,21 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 			}
 		}
 		var returnType TypeInfo
-		v[2], returnType = OptimizeEx(v[2], env, ome, true)
+		if hasDefinedSym && optimizerIsLambda(v[2]) {
+			if ome.definitionStack == nil {
+				ome.definitionStack = make(map[Symbol]bool)
+			}
+			wasDefining := ome.definitionStack[definedSym]
+			ome.definitionStack[definedSym] = true
+			v[2], returnType = OptimizeEx(v[2], env, ome, true)
+			if wasDefining {
+				ome.definitionStack[definedSym] = true
+			} else {
+				delete(ome.definitionStack, definedSym)
+			}
+		} else {
+			v[2], returnType = OptimizeEx(v[2], env, ome, true)
+		}
 		transferOwnership = returnType.Transfer()
 		if v[1].IsNthLocalVar() {
 			localType := returnType.ToTypeDescriptor()
