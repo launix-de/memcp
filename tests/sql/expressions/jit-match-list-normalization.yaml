@@ -1,0 +1,50 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: "1.0"
+  description: "JIT match normalization preserves dynamic list values and escaping tails"
+setup: []
+test_cases:
+  - name: "Dynamic record matching preserves values and rejects non-lists"
+    scm: |
+      (begin
+        (define project (jit (lambda (value)
+          (match value '(a b c d e) c _ false))))
+        (if (equal? (map (list (list 1 2 3 4 5) (list 6 7 8 9 10)
+                             (list) nil "not a list" (list 1 2)) project)
+                    (list 3 8 false false false false))
+          true (error "dynamic match changed record or failure semantics")))
+  - name: "Escaping matched tails remain valid across subsequent calls"
+    scm: |
+      (begin
+        (define tail (jit (lambda (value)
+          (match value (cons head rest) rest _ (list)))))
+        (define rows (map (produceN 1000) (lambda (i)
+          (tail (list i (+ i 1) (+ i 2))))))
+        (if (equal? rows (map (produceN 1000) (lambda (i) (list (+ i 1) (+ i 2)))))
+          true (error "matched tails retained transient storage")))
+  - name: "Empty list match differs from non-list fallback"
+    scm: |
+      (begin
+        (define classify (jit (lambda (value)
+          (match value '() "empty" (cons head tail) "nonempty" _ "other"))))
+        (if (equal? (map (list (list) (list nil) nil false 0 "") classify)
+                    (list "empty" "nonempty" "other" "other" "other" "other"))
+          true (error "empty-list normalization changed match semantics")))
+  - name: "Wrapped lists retain matching semantics"
+    scm: |
+      (begin
+        (define project (jit (lambda (value)
+          (match value '(a b c d e) c _ false))))
+        (if (equal? (project (source "match-test" 1 1 (list 1 2 3 4 5))) 3)
+          true (error "source-wrapped list failed to normalize")))
+  - name: "Dictionary matching retains flat-list normalization"
+    scm: |
+      (begin
+        (define data (reduce (produceN 20) (lambda (acc i)
+          (set_assoc acc (concat "k" i) i)) (list)))
+        (define size (jit (lambda (value)
+          (match value (list? items) (count items) _ -1))))
+        (if (equal? (size data) 40)
+          true (error "dictionary match changed its flattened length")))
+cleanup: []
