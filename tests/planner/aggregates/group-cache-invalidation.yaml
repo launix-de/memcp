@@ -1044,6 +1044,67 @@ test_cases:
   - name: "Cleanup empty-cache base source"
     sql: "DROP TABLE IF EXISTS empty_cache_base"
 
+  # An empty session-independent grouped join is a complete persistent cache,
+  # not a signal to rebuild it on every query. Keep this fixture intentionally
+  # tiny: the separate WordPress performance suite owns realistic cardinality.
+  - name: "Create empty grouped-join parent source"
+    sql: "CREATE TABLE empty_join_parent (id INT PRIMARY KEY, state VARCHAR(20))"
+
+  - name: "Create empty grouped-join detail source"
+    sql: "CREATE TABLE empty_join_detail (id INT PRIMARY KEY, parent_id INT, kind VARCHAR(20))"
+
+  - &empty_grouped_join_read
+    name: "Materialize an empty session-independent grouped join"
+    sql: |
+      SELECT p.id
+      FROM empty_join_parent p
+      JOIN empty_join_detail d ON d.parent_id = p.id
+      WHERE p.state = 'active' AND d.kind = 'match'
+      GROUP BY p.id
+      ORDER BY p.id DESC
+      LIMIT 1
+    expect: {rows: 0}
+
+  - name: "Insert a matching grouped-join parent"
+    sql: "INSERT INTO empty_join_parent VALUES (1, 'active')"
+    expect: {affected_rows: 1}
+
+  - name: "Insert a matching grouped-join detail"
+    sql: "INSERT INTO empty_join_detail VALUES (1, 1, 'match')"
+    expect: {affected_rows: 1}
+
+  - <<: *empty_grouped_join_read
+    name: "Empty grouped-join cache observes matching insert"
+    expect: {rows: 1, data: [{"id": 1}]}
+
+  - name: "Move grouped-join detail out of the predicate"
+    sql: "UPDATE empty_join_detail SET kind = 'other' WHERE id = 1"
+    expect: {affected_rows: 1}
+
+  - <<: *empty_grouped_join_read
+    name: "Grouped-join cache observes predicate update"
+
+  - name: "Restore matching grouped-join detail"
+    sql: "UPDATE empty_join_detail SET kind = 'match' WHERE id = 1"
+    expect: {affected_rows: 1}
+
+  - <<: *empty_grouped_join_read
+    name: "Grouped-join cache observes restored predicate"
+    expect: {rows: 1, data: [{"id": 1}]}
+
+  - name: "Delete matching grouped-join detail"
+    sql: "DELETE FROM empty_join_detail WHERE id = 1"
+    expect: {affected_rows: 1}
+
+  - <<: *empty_grouped_join_read
+    name: "Grouped-join cache observes matching delete"
+
+  - name: "Cleanup empty grouped-join detail source"
+    sql: "DROP TABLE IF EXISTS empty_join_detail"
+
+  - name: "Cleanup empty grouped-join parent source"
+    sql: "DROP TABLE IF EXISTS empty_join_parent"
+
   # --- Cleanup ---
   - name: "Cleanup sc_base"
     sql: "DROP TABLE IF EXISTS sc_base"

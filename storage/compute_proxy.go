@@ -105,6 +105,17 @@ type StorageComputeProxy struct {
 	invalidateNsSinceRead atomic.Int64  // cumulative invalidation nanoseconds since last read
 	lastRecomputeNs       atomic.Int64  // nanoseconds of the last full/suffix recompute
 	revision              atomic.Uint64 // logical value changes; index readers use this for lazy invalidation
+	// preparedRevision records the revision for which an ordinary proxy was
+	// completely materialized. Repeated idempotent createcolumn calls consult
+	// this O(1) generation instead of walking every live delta row merely to
+	// prove that no repair work exists. A mutation which leaves a hole advances
+	// revision without advancing preparedRevision.
+	preparedRevision atomic.Uint64
+	// plannerDeltaRows is the monotonically growing number of appended delta
+	// records in this shard (deletions only change their visibility). Remembering
+	// the prepared length makes a later append invalidate the O(1) proof without
+	// rescanning the delta slice or its deletion bitmap.
+	preparedDeltaRows atomic.Uint64
 }
 
 // cloneComputeProxyRows ports a compute/ORC proxy onto a rebuilt shard without
@@ -291,18 +302,11 @@ func (p *StorageComputeProxy) visibleDeltaRecids() []uint32 {
 }
 
 func (p *StorageComputeProxy) needsUnfilteredPreparation() bool {
-	recids := p.visibleDeltaRecids()
 	p.mu.RLock()
-	defer p.mu.RUnlock()
-	if !p.compressed {
-		return true
-	}
-	for _, recid := range recids {
-		if _, present := p.delta[recid]; !present {
-			return true
-		}
-	}
-	return false
+	compressed := p.compressed
+	p.mu.RUnlock()
+	return !compressed || p.preparedRevision.Load() != p.revision.Load() ||
+		p.preparedDeltaRows.Load() != p.shard.plannerDeltaRows.Load()
 }
 
 func (p *StorageComputeProxy) prewarmDeltaRows(_ *TxContext, filterCols []string, filter scm.Scmer, onlyMissing bool) {
@@ -582,6 +586,8 @@ func (p *StorageComputeProxy) GetCachedReader() ColumnReader {
 // Compress materializes all values into a compressed main storage.
 func (p *StorageComputeProxy) Compress(_ *TxContext) {
 	compressStart := time.Now()
+	startRevision := p.revision.Load()
+	startDeltaRows := p.shard.plannerDeltaRows.Load()
 	compressedNow := false
 	readers := make([]ColumnReader, len(p.inputCols))
 	for i, col := range p.inputCols {
@@ -642,6 +648,14 @@ func (p *StorageComputeProxy) Compress(_ *TxContext) {
 		compressedNow = true
 	}()
 	p.prewarmDeltaRows(nil, nil, scm.NewNil(), true)
+	// Invalidation advances revision before publishing a hole. Store only the
+	// generation observed before materialization: a concurrent mutation then
+	// necessarily leaves the two generations unequal and the next ensure call
+	// performs repair instead of accepting a stale full-preparation proof.
+	if p.revision.Load() == startRevision && p.shard.plannerDeltaRows.Load() == startDeltaRows {
+		p.preparedRevision.Store(startRevision)
+		p.preparedDeltaRows.Store(startDeltaRows)
+	}
 	if compressedNow {
 		p.ResetInvalidationTelemetry(time.Since(compressStart).Nanoseconds())
 	}

@@ -348,3 +348,50 @@ func TestFilteredComputeColumnConservativelyRecomputesRepeatedFilter(t *testing.
 		t.Fatalf("changing filtered materialization invoked computor %d times, want 7 total", got)
 	}
 }
+
+func TestUnfilteredComputeColumnReusesCompletePreparationUntilMutation(t *testing.T) {
+	defer setupComputeConcurrencyTest(t)()
+
+	CreateDatabase("compconc", false)
+	tbl, _ := CreateTable("compconc", "unfiltered", Memory, false)
+	tbl.CreateColumn("id", "INT", nil, nil)
+	tbl.CreateColumn("val", "INT", nil, nil)
+	tbl.CreateColumn("cached", "INT", nil, nil)
+	tbl.Insert([]string{"id", "val"}, [][]scm.Scmer{
+		{scm.NewInt(1), scm.NewInt(10)},
+		{scm.NewInt(2), scm.NewInt(20)},
+		{scm.NewInt(3), scm.NewInt(30)},
+	}, nil, scm.NewNil(), false, nil)
+
+	var computeCalls atomic.Int64
+	computor := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
+		computeCalls.Add(1)
+		return scm.NewInt(a[0].Int() * 2)
+	})
+
+	tbl.ComputeColumn("cached", []string{"val"}, computor, nil, scm.NewNil())
+	if got := computeCalls.Load(); got != 3 {
+		t.Fatalf("first unfiltered compute invoked computor %d times, want 3", got)
+	}
+
+	// Planner-generated cache plans issue the same createcolumn on every use.
+	// A complete generation is an O(1) no-op; proving that fact must not walk
+	// every delta record or invoke the computor again.
+	tbl.ComputeColumn("cached", []string{"val"}, computor, nil, scm.NewNil())
+	if got := computeCalls.Load(); got != 3 {
+		t.Fatalf("repeated unfiltered compute invoked computor %d times, want 3 total", got)
+	}
+
+	tbl.Insert([]string{"id", "val"}, [][]scm.Scmer{
+		{scm.NewInt(4), scm.NewInt(40)},
+	}, nil, scm.NewNil(), false, nil)
+	tbl.ComputeColumn("cached", []string{"val"}, computor, nil, scm.NewNil())
+	if got := computeCalls.Load(); got != 4 {
+		t.Fatalf("post-insert repair invoked computor %d times, want 4 total", got)
+	}
+
+	reader := tbl.ActiveShards()[0].ColumnReaderTx(nil, "cached")
+	if got := reader(3).Int(); got != 80 {
+		t.Fatalf("repaired appended computed value = %d, want 80", got)
+	}
+}

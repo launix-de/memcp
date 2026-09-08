@@ -120,6 +120,49 @@ test_cases:
       result_not_contains:
         - '(join_driver \"p\")'
 
+  - name: "Elementor empty grouped metadata lookup reuses prepared caches"
+    warmup: 10
+    timing_samples: 100
+    threshold_ms: 1
+    # The persistent prejoin/group cache is built only by the first warmup.
+    # A loaded CI worker may need longer than the generic client timeout for
+    # that cold work; only the subsequent warm samples enter the A/B result.
+    timeout: 120
+    sql: |
+      SELECT p.ID
+      FROM wordpress_perf_posts p
+      JOIN wordpress_perf_postmeta pm ON pm.post_id = p.ID
+      WHERE pm.meta_key = '_elementor_template_type'
+        AND pm.meta_value = 'landing-page'
+        AND p.post_type = 'e-landing-page'
+        AND p.post_status <> 'trash'
+        AND p.post_status <> 'auto-draft'
+      GROUP BY p.ID
+      ORDER BY p.ID DESC
+      LIMIT 1
+    expect: {rows: 0}
+
+  - name: "Elementor grouped metadata cache physical plan"
+    sql: |
+      EXPLAIN PHYSICAL
+      SELECT p.ID
+      FROM wordpress_perf_posts p
+      JOIN wordpress_perf_postmeta pm ON pm.post_id = p.ID
+      WHERE pm.meta_key = '_elementor_template_type'
+        AND pm.meta_value = 'landing-page'
+        AND p.post_type = 'e-landing-page'
+        AND p.post_status <> 'trash'
+        AND p.post_status <> 'auto-draft'
+      GROUP BY p.ID
+      ORDER BY p.ID DESC
+      LIMIT 1
+    expect:
+      rows: 1
+      result_contains:
+        - '.prejoin:'
+        - '.grp:'
+        - 'scan_order'
+
   - name: "WordPress handwritten equivalent-driver batched scan_join_order"
     warmup: 10
     timing_samples: 100
