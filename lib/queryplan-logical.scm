@@ -5939,9 +5939,46 @@ names in projections, predicates, and correlated subqueries. */
 			(union_offset block)
 			(union_facts block)))))
 
+/* A projection grouped by its sole base source's complete primary key has
+exactly one row per group. With no aggregates or HAVING, grouping is an
+identity, not a competing physical operator. Remove it before decorrelation
+so a surrounding COUNT (including FOUND_ROWS) sees the same row relation and
+membership remains available to the ordinary costed scan alternatives.
+Do not generalize this proof to joins, nullable UNIQUE keys or partial PKs. */
+(define remove_identity_primary_key_group (lambda (block)
+	(if (and (query_block? block)
+		(and (single_source? (qb_sources block))
+			(and (not (empty_list? (qb_group block)))
+				(and (nil? (qb_having block))
+					(and (empty_list? (qb_stages block))
+						(not (or (expr_has_local_aggregates? (qb_fields block))
+							(or (reduce (qb_order block) (lambda (found item)
+								(or found (expr_has_local_aggregates? (car item)))) false)
+								(expr_has_local_aggregates? (qb_hidden block))))))))))
+		(begin
+			(define src (car (qb_sources block)))
+			(define pk (source_primary_key_columns src))
+			(define cols (map (qb_group block) (lambda (expr)
+				(match expr
+					'(op alias alias_ic col col_ic)
+					(if (and (or (equal? op (symbol "get_column")) (equal? op (quote get_column)))
+						(equal? (source_for_alias (list src) (source_alias src) alias alias_ic) src))
+						(source_column_name src col col_ic) nil)
+					_ nil))))
+			(if (and (not (empty_list? pk))
+				(and (not (contains? cols nil))
+					(reduce pk (lambda (complete col)
+						(and complete (and (contains? cols col)
+							(source_column_guaranteed_nonnull? src col)))) true)))
+				(make_query_block (qb_schema block) (qb_sources block) (qb_fields block)
+					(qb_where block) '() nil (qb_order block) (qb_limit block) (qb_offset block)
+					(qb_hidden block) (qb_stages block) (qb_facts block))
+				block))
+		block)))
+
 (define untangle_query (lambda (query ctx)
 	(begin
-		(define normalized (normalize_query_ast query))
+		(define normalized (remove_identity_primary_key_group (normalize_query_ast query)))
 		(match (logical_op normalized)
 			(symbol query-block) (untangle_query_block normalized ctx)
 			(symbol union-block) (untangle_union_block normalized ctx)

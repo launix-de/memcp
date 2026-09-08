@@ -1489,7 +1489,7 @@ outer joins. */
 				leave aggregate values to the filtered lazy computed columns. */
 				(if (empty_list? aggregate_probe_bindings)
 					(non_scalar_order_aggregates ags)
-					'()))))
+					'()) (gs_facts stage))))
 		(define cleanup_plan (if (query_block? src)
 			nil
 			(build_group_keytable_cleanup schema tbl alias grouptbl keys key_names)))
