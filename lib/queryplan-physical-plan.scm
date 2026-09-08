@@ -10590,7 +10590,10 @@ without freezing a statistics-dependent decision in the SQL plan cache. */
 				(define budget (list (quote *) (list (quote scan_estimate) (source_table_expr driver)) planner_membership_direct_probe_row_ns))
 				(define cold_plan (if count_mode
 					(list (quote if)
-						(list (quote semijoin_cache_work_paid?) (physical_query_tx_symbol) name budget)
+						(list (quote and)
+							(list (quote semijoin_cache_wins?) (source_table_expr driver) (source_table_expr lookup)
+								(source_table_expr driver) true)
+							(list (quote semijoin_cache_work_paid?) (physical_query_tx_symbol) name budget))
 						warm_plan
 						(list (quote !begin)
 							(list (quote define) (quote __semijoin_started) (list (quote nanotime)))
