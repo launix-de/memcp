@@ -55,6 +55,67 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS imc_file"
 
 test_cases:
+  - name: "Unique partition dominance needs no per-request selectivity scan"
+    scm: |
+      (begin
+        (define planning (sql_queryplan_compile_session (newsession) nil))
+        (with_session planning (lambda ()
+          (parse_sql "memcp-tests"
+            "SELECT SQL_CALC_FOUND_ROWS d.id FROM imc_domain d WHERE d.direct_flag = 0 AND NOT EXISTS (SELECT 1 FROM imc_assignment a WHERE a.actor_id = 99 AND a.domain_id = d.id) ORDER BY d.id DESC LIMIT 10"
+            (lambda args true) planning nil)))
+        (not (strlike (serialize (sql_queryplan_guard_from_session planning))
+          "%scan_selectivity_estimate%")))
+    expect:
+      data: [true]
+
+  - name: "Partition dominance requires every non-null unique key component"
+    scm: |
+      (begin
+        (define src '("d" "memcp-tests" "imc_domain" false nil))
+        (and (aggregate_pushdown_identity_partition? src '("id" "direct_flag"))
+          (not (aggregate_pushdown_identity_partition? src '("direct_flag")))))
+    expect:
+      data: [true]
+
+  - name: "Ordered anti-membership keeps a broad residual inside the limited scan"
+    sql: |
+      EXPLAIN PHYSICAL
+      SELECT d.id FROM imc_domain d
+      WHERE d.direct_flag = 0 AND NOT EXISTS (
+        SELECT 1 FROM imc_assignment a WHERE a.actor_id = 99 AND a.domain_id = d.id
+      ) ORDER BY d.id DESC LIMIT 10
+    expect:
+      result_contains: ["anti_membership_filter", "chosen ordered_complement_filter", "recset_not"]
+      result_not_contains: ["recset_difference"]
+
+  - name: "Ordered anti-membership returns the complete page and found-row count"
+    session_id: "imc_ordered_anti"
+    warmup: 5
+    timing_samples: 20
+    sql: |
+      SELECT SQL_CALC_FOUND_ROWS d.id FROM imc_domain d
+      WHERE d.direct_flag = 0 AND NOT EXISTS (
+        SELECT 1 FROM imc_assignment a WHERE a.actor_id = 99 AND a.domain_id = d.id
+      ) ORDER BY d.id DESC LIMIT 10
+    expect:
+      data: [{id: 639}, {id: 637}, {id: 636}, {id: 635}, {id: 634},
+             {id: 633}, {id: 632}, {id: 631}, {id: 630}, {id: 629}]
+
+  - name: "Ordered anti-membership counts all matches before LIMIT"
+    session_id: "imc_ordered_anti"
+    sql: "SELECT FOUND_ROWS() AS n"
+    expect:
+      data: [{n: 581}]
+
+  - name: "Ordered anti-membership retains OFFSET and nonempty exclusions"
+    sql: |
+      SELECT d.id FROM imc_domain d
+      WHERE d.direct_flag = 0 AND NOT EXISTS (
+        SELECT 1 FROM imc_assignment a WHERE a.actor_id = 7 AND a.domain_id = d.id
+      ) ORDER BY d.id DESC LIMIT 2 OFFSET 2
+    expect:
+      data: [{id: 635}, {id: 633}]
+
   - name: "Grouped anti-membership enumerates physical carriers"
     sql: |
       EXPLAIN PHYSICAL

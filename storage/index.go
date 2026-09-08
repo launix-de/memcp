@@ -1767,14 +1767,16 @@ start_scan:
 	if selected != nil {
 		selected(s, true)
 	}
-	// A fully index-covered filter cannot reject an otherwise visible row. When
-	// this active index also supplies ORDER BY, emit only the requested prefix
-	// per callback so LIMIT can brake inside the index walk. The caller-owned
-	// pooled buffer remains allocated at its normal size; only its visible slice
-	// is shortened, so the hot path adds no allocation.
+	// Start an ordered LIMIT with only its requested window. A residual predicate
+	// may reject it, but that is a reason to refill, not to fetch a full batch of
+	// expensive text columns before the consumer gets its first chance to brake.
+	// If the window is insufficient, geometrically grow to the ordinary batch
+	// size. The backing buffer is unchanged: no allocation or row materialization
+	// is added, and sparse/no-hit predicates regain bulk throughput quickly.
 	cmpCols := s.queryIndexPrefixLen(bounds, indexBounds)
 	firstSorted, lastSorted, sortedMask, unboundedMask := s.boundKernel(bounds, cmpCols)
-	if options != nil && options.boundaryCoveredLimit && options.orderedLimit > 0 &&
+	maxBatchSize := len(buf)
+	if options != nil && options.orderedLimit > 0 &&
 		options.orderedLimit < len(buf) && indexCoversBoundaryOrder(s, true, bounds, cmpCols) {
 		buf = buf[:options.orderedLimit]
 	}
@@ -1957,6 +1959,10 @@ start_scan:
 		if bufN == len(buf) {
 			if !emitRowMatchers(matchers, buf[:bufN], callback) {
 				stopped = true
+			} else if len(buf) < maxBatchSize && !options.boundaryCoveredLimit {
+				// Only a continuing consumer asks for more. Do not equate a short
+				// physical batch with SQL LIMIT satisfaction or discard rejected rows.
+				buf = buf[:min(maxBatchSize, len(buf)*2)]
 			}
 			bufN = 0
 		}
