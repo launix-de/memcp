@@ -5608,10 +5608,10 @@ func init() {
 
 		Fn: func(a ...Scmer) Scmer {
 			state := append([]Scmer{}, asSlice(a[0], "for init")...)
-			cond := OptimizeProcToSerialFunction(a[1])
-			next := OptimizeProcToSerialFunction(a[2])
-			for ToBool(cond(state...)) {
-				v := next(state...)
+			cond := PrepareSerialProc(a[1])
+			next := PrepareSerialProc(a[2])
+			for ToBool(cond.Call(state)) {
+				v := next.Call(state)
 				if v.IsNil() {
 					state = []Scmer{}
 					continue
@@ -5798,7 +5798,7 @@ func init() {
 					if d9.Loc == LocLambdaTemplate {
 						d10 = d9
 					} else if d9.Loc == LocImm {
-						optimizedCallback11 := NewFunc(OptimizeProcToSerialFunction(d9.Imm))
+						optimizedCallback11 := jitPrepareCallback(d9.Imm)
 						ctx.TrackImm(optimizedCallback11)
 						d10 = JITValueDesc{Loc: LocImm, Type: tagFunc, Imm: optimizedCallback11, Rooted: true}
 					} else {
@@ -5808,15 +5808,16 @@ func init() {
 							d10 = jitCopyScmerToPair(ctx, d9)
 						}
 					}
-					ctx.StabilizeDescForControlFlow(&d10)
 					ctx.FreeDesc(&d9)
+					ctx.EnsureDesc(&d10)
+					ctx.StabilizeDescForControlFlow(&d10)
 					d12 = args[2]
 					d12.ID = 0
 					var d13 JITValueDesc
 					if d12.Loc == LocLambdaTemplate {
 						d13 = d12
 					} else if d12.Loc == LocImm {
-						optimizedCallback14 := NewFunc(OptimizeProcToSerialFunction(d12.Imm))
+						optimizedCallback14 := jitPrepareCallback(d12.Imm)
 						ctx.TrackImm(optimizedCallback14)
 						d13 = JITValueDesc{Loc: LocImm, Type: tagFunc, Imm: optimizedCallback14, Rooted: true}
 					} else {
@@ -5826,8 +5827,9 @@ func init() {
 							d13 = jitCopyScmerToPair(ctx, d12)
 						}
 					}
-					ctx.StabilizeDescForControlFlow(&d13)
 					ctx.FreeDesc(&d12)
+					ctx.EnsureDesc(&d13)
+					ctx.StabilizeDescForControlFlow(&d13)
 					if ps.General {
 					}
 					ps15 := PhiState{General: ps.General}
@@ -5903,6 +5905,7 @@ func init() {
 					}
 					ctx.ReclaimUntrackedRegs()
 					ctx.StabilizeDescForControlFlow(&d1)
+					ctx.StabilizeDescForControlFlow(&d13)
 					d16 = jitCopyScmerToPair(ctx, d13)
 					d17 = ctx.EmitGoCallScalar(GoFuncAddr(jitInvokeCallbackSlice), []JITValueDesc{d16, d1}, 2)
 					ctx.StabilizeDescForControlFlow(&d17)
@@ -6269,6 +6272,7 @@ func init() {
 						d1 = ps.PhiValues[0]
 					}
 					ctx.ReclaimUntrackedRegs()
+					ctx.StabilizeDescForControlFlow(&d10)
 					ctx.StabilizeDescForControlFlow(&d7)
 					ctx.StabilizeDescForControlFlow(&d1)
 					d59 = jitCopyScmerToPair(ctx, d10)
@@ -6904,7 +6908,7 @@ func init() {
 			},
 			JITVirtualArgs:     true,
 			JITInlineCallbacks: true,
-			JITInlineCost:      32,
+			JITInlineCost:      36,
 		},
 		Optimize:                 FirstParameterMutable("for_mut"),
 		OptimizeFirstArgTransfer: true,
@@ -6914,10 +6918,10 @@ func init() {
 
 		Fn: func(a ...Scmer) Scmer {
 			state := asSlice(a[0], "for_mut init")
-			cond := OptimizeProcToSerialFunction(a[1])
-			next := OptimizeProcToSerialFunction(a[2])
-			for ToBool(cond(state...)) {
-				v := next(state...)
+			cond := PrepareSerialProc(a[1])
+			next := PrepareSerialProc(a[2])
+			for ToBool(cond.Call(state)) {
+				v := next.Call(state)
 				if v.IsNil() {
 					state = []Scmer{}
 					continue
@@ -7089,7 +7093,7 @@ func init() {
 					if d4.Loc == LocLambdaTemplate {
 						d5 = d4
 					} else if d4.Loc == LocImm {
-						optimizedCallback6 := NewFunc(OptimizeProcToSerialFunction(d4.Imm))
+						optimizedCallback6 := jitPrepareCallback(d4.Imm)
 						ctx.TrackImm(optimizedCallback6)
 						d5 = JITValueDesc{Loc: LocImm, Type: tagFunc, Imm: optimizedCallback6, Rooted: true}
 					} else {
@@ -7099,15 +7103,16 @@ func init() {
 							d5 = jitCopyScmerToPair(ctx, d4)
 						}
 					}
-					ctx.StabilizeDescForControlFlow(&d5)
 					ctx.FreeDesc(&d4)
+					ctx.EnsureDesc(&d5)
+					ctx.StabilizeDescForControlFlow(&d5)
 					d7 = args[2]
 					d7.ID = 0
 					var d8 JITValueDesc
 					if d7.Loc == LocLambdaTemplate {
 						d8 = d7
 					} else if d7.Loc == LocImm {
-						optimizedCallback9 := NewFunc(OptimizeProcToSerialFunction(d7.Imm))
+						optimizedCallback9 := jitPrepareCallback(d7.Imm)
 						ctx.TrackImm(optimizedCallback9)
 						d8 = JITValueDesc{Loc: LocImm, Type: tagFunc, Imm: optimizedCallback9, Rooted: true}
 					} else {
@@ -7117,8 +7122,9 @@ func init() {
 							d8 = jitCopyScmerToPair(ctx, d7)
 						}
 					}
-					ctx.StabilizeDescForControlFlow(&d8)
 					ctx.FreeDesc(&d7)
+					ctx.EnsureDesc(&d8)
+					ctx.StabilizeDescForControlFlow(&d8)
 					if ps.General {
 						ctx.SyncDesc(&d3)
 						if d3.Loc == LocReg || d3.Loc == LocFPReg {
@@ -7219,6 +7225,7 @@ func init() {
 					}
 					ctx.ReclaimUntrackedRegs()
 					ctx.StabilizeDescForControlFlow(&d1)
+					ctx.StabilizeDescForControlFlow(&d8)
 					d13 = jitCopyScmerToPair(ctx, d8)
 					d14 = ctx.EmitGoCallScalar(GoFuncAddr(jitInvokeCallbackSlice), []JITValueDesc{d13, d1}, 2)
 					ctx.StabilizeDescForControlFlow(&d14)
@@ -7570,6 +7577,7 @@ func init() {
 						d1 = ps.PhiValues[0]
 					}
 					ctx.ReclaimUntrackedRegs()
+					ctx.StabilizeDescForControlFlow(&d5)
 					ctx.StabilizeDescForControlFlow(&d1)
 					d54 = jitCopyScmerToPair(ctx, d5)
 					d55 = ctx.EmitGoCallScalar(GoFuncAddr(jitInvokeCallbackSlice), []JITValueDesc{d54, d1}, 2)
@@ -8205,7 +8213,7 @@ func init() {
 			},
 			JITVirtualArgs:     true,
 			JITInlineCallbacks: true,
-			JITInlineCost:      26,
+			JITInlineCost:      30,
 		},
 	})
 	Declare(&Globalenv, &Declaration{

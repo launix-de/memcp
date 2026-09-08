@@ -86,7 +86,7 @@ const nestedOwnershipBenchmarkSource = `(define benchmark_nested_filter (lambda 
 func BenchmarkNestedOwnershipMatchFilter(b *testing.B) {
 	env := newOptimizerTestEnv()
 	EvalAll(b.Name(), nestedOwnershipBenchmarkSource, env)
-	fn := OptimizeProcToSerialFunction(env.Vars[Symbol("benchmark_nested_filter_entry")])
+	fn := serialTestCallable(env.Vars[Symbol("benchmark_nested_filter_entry")])
 	if got := fn(NewInt(0)); len(got.Slice()) != 64 {
 		b.Fatalf("nested filter returned %s", String(got))
 	}

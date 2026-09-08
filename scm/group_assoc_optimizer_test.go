@@ -38,7 +38,7 @@ func TestGroupAssocReducesEachKeyFromNeutral(t *testing.T) {
 			(lambda (value) (> value 2))
 			(lambda (sum value) (+ sum value))
 			0))`)
-	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+	fn := serialTestCallable(Eval(optimized, env))
 	got := fn(NewSlice([]Scmer{NewInt(1), NewInt(2), NewInt(3), NewInt(4)}))
 	requireAssocValue(t, got, NewBool(false), NewInt(3))
 	requireAssocValue(t, got, NewBool(true), NewInt(7))
@@ -76,7 +76,7 @@ func TestOptimizeGroupAssocLowersAppendAndCountReducers(t *testing.T) {
 func TestGroupAssocPhysicalLoweringsPreserveResults(t *testing.T) {
 	appendOptimized, appendEnv := optimizeListPipeline(t, `(lambda (pairs) (group_assoc pairs car
 		(lambda (values pair) (append values (cadr pair))) '()))`)
-	appendFn := OptimizeProcToSerialFunction(Eval(appendOptimized, appendEnv))
+	appendFn := serialTestCallable(Eval(appendOptimized, appendEnv))
 	input := NewSlice([]Scmer{
 		NewSlice([]Scmer{NewString("a"), NewInt(1)}),
 		NewSlice([]Scmer{NewString("b"), NewInt(2)}),
@@ -88,7 +88,7 @@ func TestGroupAssocPhysicalLoweringsPreserveResults(t *testing.T) {
 
 	countOptimized, countEnv := optimizeListPipeline(t, `(lambda (values)
 		(group_assoc values (lambda (value) value) (lambda (count value) (+ count 1)) 0))`)
-	countFn := OptimizeProcToSerialFunction(Eval(countOptimized, countEnv))
+	countFn := serialTestCallable(Eval(countOptimized, countEnv))
 	counted := countFn(NewSlice([]Scmer{NewString("a"), NewString("b"), NewString("a")}))
 	requireAssocValue(t, counted, NewString("a"), NewInt(2))
 	requireAssocValue(t, counted, NewString("b"), NewInt(1))
@@ -97,7 +97,7 @@ func TestGroupAssocPhysicalLoweringsPreserveResults(t *testing.T) {
 func TestGroupAssocBareItemCallbackKeepsNestedFrame(t *testing.T) {
 	optimized, env := optimizeListPipeline(t, `(lambda (nodes aliases connected)
 		(group_assoc connected car (lambda (subsets subset) (append subsets subset)) '()))`)
-	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+	fn := serialTestCallable(Eval(optimized, env))
 	subsetA := NewSlice([]Scmer{NewString("a"), NewString("b")})
 	subsetB := NewSlice([]Scmer{NewString("a"), NewString("c")})
 	got := fn(NewNil(), NewString("outer-alias"), NewSlice([]Scmer{subsetA, subsetB}))

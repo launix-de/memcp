@@ -39,7 +39,7 @@ func TestOptimizeMatchEliminatesEquivalentSymbolBranches(t *testing.T) {
 		t.Fatalf("symbol-literal patterns were not canonicalized: %s", serialized)
 	}
 
-	fn := OptimizeProcToSerialFunction(proc)
+	fn := serialTestCallable(proc)
 	add := NewSlice([]Scmer{NewSymbol("add"), NewInt(7), NewInt(5)})
 	sub := NewSlice([]Scmer{NewSymbol("sub"), NewInt(7), NewInt(5)})
 	if got := fn(add); !Equal(got, NewInt(12)) {
@@ -63,7 +63,7 @@ func TestOptimizeMatchEliminatesNestedEquivalentSymbolBranches(t *testing.T) {
 		t.Fatalf("unreachable nested match branch survived optimization: %s", serialized)
 	}
 
-	fn := OptimizeProcToSerialFunction(proc)
+	fn := serialTestCallable(proc)
 	expr := NewSlice([]Scmer{
 		NewSymbol("not"),
 		NewSlice([]Scmer{NewSymbol("exists"), NewInt(42)}),
@@ -128,7 +128,7 @@ func BenchmarkOptimizeRecursiveMatchWalker(b *testing.B) {
 func BenchmarkRecursiveMatchWalker(b *testing.B) {
 	env := newOptimizerTestEnv()
 	EvalAll("recursive match benchmark", recursiveMatchBenchmarkSource, env)
-	fn := OptimizeProcToSerialFunction(env.FindRead(Symbol("recursive_match_benchmark")).Vars[Symbol("recursive_match_benchmark")])
+	fn := serialTestCallable(env.FindRead(Symbol("recursive_match_benchmark")).Vars[Symbol("recursive_match_benchmark")])
 	tree := recursiveMatchBenchmarkTree(9)
 	want := NewInt(512)
 	b.ReportAllocs()

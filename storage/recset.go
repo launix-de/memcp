@@ -1279,7 +1279,7 @@ func (t *storageShard) recSetPartExists(part *recSetShard, conditionCols []strin
 }
 
 func (t *storageShard) scanRecSetPart(part *recSetShard, conditionCols []string, condition scm.Scmer, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, currentTx *TxContext, ss *scm.SessionState) (scm.Scmer, int64) {
-	conditionFn := scm.OptimizeProcToSerialFunction(condition)
+	conditionFn := scm.PrepareSerialProc(condition)
 	t.ensureLoaded()
 	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
 	t.ensureMainCount(skipShardReadLock)
@@ -1389,7 +1389,7 @@ func (t *storageShard) scanRecSetPart(part *recSetShard, conditionCols []string,
 						cdataset[i] = colBufs[i][row]
 					}
 				}
-				if !scm.ToBool(conditionFn(cdataset...)) {
+				if !scm.ToBool(conditionFn.Call(cdataset)) {
 					continue
 				}
 				pending = append(pending, idx)
@@ -1411,7 +1411,7 @@ func (t *storageShard) scanRecSetPart(part *recSetShard, conditionCols []string,
 					cdataset[i] = t.getDelta(int(idx-mainCount), col)
 				}
 			}
-			if !scm.ToBool(conditionFn(cdataset...)) {
+			if !scm.ToBool(conditionFn.Call(cdataset)) {
 				continue
 			}
 			pending = append(pending, idx)

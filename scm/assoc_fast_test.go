@@ -131,7 +131,7 @@ func BenchmarkFunctionalAssocBuild(b *testing.B) {
 	optimized := optimizeTestSource(b, env, `(lambda (items)
 		(reduce items (lambda (index item)
 			(set_assoc index item item)) '()))`)
-	build := OptimizeProcToSerialFunction(Eval(optimized, env))
+	build := serialTestCallable(Eval(optimized, env))
 	for _, size := range []int{1, 2, 4, 5, 8, 12, 64} {
 		items := make([]Scmer, size)
 		for i := range items {

@@ -189,7 +189,9 @@ func (t *table) executeScanLookup(currentTx *TxContext, plan scanLookupPlan) scm
 			return scm.NewNil()
 		}
 		mapProgram := scm.PrepareSerialProc(plan.mapper)
-		return mapProgram.Call(mappedValues)
+		// The point probe allocated these values for this sole invocation;
+		// no scan loop or pool will reuse the frame after the mapper returns.
+		return mapProgram.CallOwned(mappedValues)
 	}
 	switch plan.consumer {
 	case scanLookupExists:
@@ -276,7 +278,8 @@ func (t *table) scanLookupMap(currentTx *TxContext, access scanAccess, mapCols [
 	if matches == 0 {
 		return scm.NewNil()
 	}
-	return mapProgram.Call(values)
+	// scanLookupMapValues creates an owned row, not reusable scan scratch.
+	return mapProgram.CallOwned(values)
 }
 
 func (t *table) scanLookupMapOne(currentTx *TxContext, access scanAccess, mapCols []string) ([]scm.Scmer, int) {

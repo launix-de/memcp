@@ -239,7 +239,7 @@ func BenchmarkRunSingleUseLocalOwnership(b *testing.B) {
 	if serialized := serializeSliceAllocTestExpr(b, optimized); !strings.Contains(serialized, "filter_mut") {
 		b.Fatalf("single-use fresh local did not transfer ownership: %s", serialized)
 	}
-	fn := OptimizeProcToSerialFunction(Eval(optimized, &Globalenv))
+	fn := serialTestCallable(Eval(optimized, &Globalenv))
 	value := NewInt(1)
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -406,7 +406,7 @@ func benchmarkRepeatedLocalBindings(b *testing.B, serial bool) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	if serial {
-		fn := OptimizeProcToSerialFunction(proc)
+		fn := serialTestCallable(proc)
 		for i := 0; i < b.N; i++ {
 			fn(value)
 		}

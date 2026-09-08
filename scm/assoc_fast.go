@@ -682,16 +682,18 @@ func (d *FastDict) Set(key, value Scmer, merge func(oldV, newV Scmer) Scmer) {
 // ReduceValue updates one bucket from its current value and an input item. A
 // missing bucket starts at neutral. The reducer must treat both arguments as
 // borrowed; only its returned value becomes owned by the dictionary.
-func (d *FastDict) ReduceValue(key, item, neutral Scmer, reduce func(...Scmer) Scmer) {
+func (d *FastDict) ReduceValue(key, item, neutral Scmer, reduce *SerialProc, args []Scmer) {
 	if d.index == nil {
 		d.index = make(map[uint64]int)
 	}
 	h := HashKey(key)
 	if pos, ok := d.findPos(key, h); ok {
-		d.Pairs[pos+1] = reduce(d.Pairs[pos+1], item)
+		args[0], args[1] = d.Pairs[pos+1], item
+		d.Pairs[pos+1] = reduce.Call(args)
 		return
 	}
-	value := reduce(neutral, item)
+	args[0], args[1] = neutral, item
+	value := reduce.Call(args)
 	d.insertHashed(key, value, h)
 }
 

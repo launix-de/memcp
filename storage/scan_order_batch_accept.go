@@ -98,10 +98,8 @@ func collectPartitionOrderedCandidateBatch(currentTx *TxContext, source scanOrde
 	ascending := strings.HasSuffix(orderMeta, ":asc")
 	if !ascending && !descending {
 		relationID := scm.FunctionIdentity(sortdirs[0])
-		ascending = relationID == scm.FunctionIdentity(scm.OptimizeProcToSerialFunction(
-			scm.Eval(scm.NewSymbol("<"), &scm.Globalenv)))
-		descending = relationID == scm.FunctionIdentity(scm.OptimizeProcToSerialFunction(
-			scm.Eval(scm.NewSymbol(">"), &scm.Globalenv)))
+		ascending = relationID == scm.FunctionIdentity(scm.Globalenv.Vars[scm.Symbol("<")].Func())
+		descending = relationID == scm.FunctionIdentity(scm.Globalenv.Vars[scm.Symbol(">")].Func())
 		if !ascending && !descending {
 			return nil, nil, false
 		}

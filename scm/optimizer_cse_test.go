@@ -55,7 +55,7 @@ func TestOptimizeSharesFoldableCallAcrossBeginExpressions(t *testing.T) {
 	if calls := countOptimizerCalls(proc.Proc().Body, "toUpper"); calls != 1 {
 		t.Fatalf("optimized body contains %d toUpper calls, want 1: %s", calls, SerializeToString(proc.Proc().Body, nil))
 	}
-	fn := OptimizeProcToSerialFunction(proc)
+	fn := serialTestCallable(proc)
 	got := fn(NewString("select"), NewBool(true))
 	want := NewSlice([]Scmer{NewBool(true), NewBool(true), NewBool(false)})
 	if !Equal(got, want) {
@@ -72,7 +72,7 @@ func TestOptimizeDoesNotHoistFoldableCallFromLazyPath(t *testing.T) {
 	if calls := countOptimizerCalls(proc.Proc().Body, "toUpper"); calls != 2 {
 		t.Fatalf("optimized body contains %d toUpper calls, want 2: %s", calls, SerializeToString(proc.Proc().Body, nil))
 	}
-	fn := OptimizeProcToSerialFunction(proc)
+	fn := serialTestCallable(proc)
 	got := fn(NewString("select"), NewBool(false))
 	want := NewSlice([]Scmer{NewBool(false), NewBool(true)})
 	if !Equal(got, want) {
@@ -97,7 +97,7 @@ func TestOptimizeDoesNotTreatShadowedCallableAsDeclaredFoldable(t *testing.T) {
 			(define first (toUpper value))
 			(define second (toUpper value))
 			(list first second)))`)
-	fn := OptimizeProcToSerialFunction(proc)
+	fn := serialTestCallable(proc)
 	calls := 0
 	callable := NewFunc(func(arguments ...Scmer) Scmer {
 		calls++
@@ -139,7 +139,7 @@ func TestOptimizeKeepsCapturingRegexMatch(t *testing.T) {
 func TestOptimizeBooleanRegexMatchPreservesTypeFailure(t *testing.T) {
 	proc := optimizeCSETestProc(t, `(lambda (value)
 		(match value (regex "^SELECT" _) true _ false))`)
-	fn := OptimizeProcToSerialFunction(proc)
+	fn := serialTestCallable(proc)
 	defer func() {
 		if recover() == nil {
 			t.Fatal("lowered regex match accepted a non-string value")
@@ -156,7 +156,7 @@ func BenchmarkFoldableCSEUpperClassifiers(b *testing.B) {
 			(define guarded (and enabled (equal? (toUpper value) "SELECT * FROM ITEMS")))
 			(define diagnostic (equal? (toUpper value) "EXPLAIN COMPILE SELECT * FROM ITEMS"))
 			(list direct guarded diagnostic)))`), environment, nil), environment)
-	fn := OptimizeProcToSerialFunction(proc)
+	fn := serialTestCallable(proc)
 	value := NewString("select * from items")
 	enabled := NewBool(true)
 	b.ReportAllocs()
@@ -170,7 +170,7 @@ func BenchmarkOptimizedBooleanRegexMatch(b *testing.B) {
 	environment := newOptimizerTestEnv()
 	proc := Eval(Optimize(Read(b.Name(), `(lambda (value)
 		(match value (regex "^\\s*SELECT\\b" _) true _ false))`), environment, nil), environment)
-	fn := OptimizeProcToSerialFunction(proc)
+	fn := serialTestCallable(proc)
 	value := NewString("SELECT * FROM items WHERE id = 42")
 	b.ReportAllocs()
 	b.ResetTimer()

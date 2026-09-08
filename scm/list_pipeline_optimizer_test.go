@@ -215,7 +215,7 @@ func TestOptimizeFusesFilterOverMap(t *testing.T) {
 		t.Fatalf("filter/map pipeline was not fused: %s", serialized)
 	}
 
-	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+	fn := serialTestCallable(Eval(optimized, env))
 	got := fn(NewSlice([]Scmer{NewInt(0), NewInt(2), NewInt(3)}))
 	want := NewSlice([]Scmer{NewInt(3), NewInt(4)})
 	if !Equal(got, want) {
@@ -232,7 +232,7 @@ func TestOptimizeFusesMapAndNonNilFilter(t *testing.T) {
 		t.Fatalf("map/non-nil filter pipeline was not fused: %s", serialized)
 	}
 
-	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+	fn := serialTestCallable(Eval(optimized, env))
 	got := fn(NewSlice([]Scmer{NewInt(0), NewInt(2), NewInt(3)}))
 	want := NewSlice([]Scmer{NewInt(20), NewInt(30)})
 	if !Equal(got, want) {
@@ -284,7 +284,7 @@ func TestOptimizeLowersBooleanReducers(t *testing.T) {
 			if !strings.Contains(serialized, tc.fused) {
 				t.Fatalf("boolean reducer was not lowered to %s: %s", tc.fused, serialized)
 			}
-			fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+			fn := serialTestCallable(Eval(optimized, env))
 			got := fn(NewSlice(tc.input))
 			if !Equal(got, tc.expected) {
 				t.Fatalf("lowered reducer returned %s, want %s", String(got), String(tc.expected))
@@ -304,7 +304,7 @@ func TestOptimizeLowersFirstNonNilReducer(t *testing.T) {
 		t.Fatalf("first non-nil reducer was not lowered: %s", serialized)
 	}
 
-	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+	fn := serialTestCallable(Eval(optimized, env))
 	got := fn(NewSlice([]Scmer{NewInt(1), NewInt(3), NewInt(4)}))
 	want := NewInt(30)
 	if !Equal(got, want) {
@@ -323,7 +323,7 @@ func TestOptimizeFusesFirstNonNilReducerOverRange(t *testing.T) {
 		t.Fatalf("range search was not fused: %s", serialized)
 	}
 
-	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+	fn := serialTestCallable(Eval(optimized, env))
 	if got := fn(NewInt(8), NewInt(5)); !Equal(got, NewInt(5)) {
 		t.Fatalf("fused range search returned %s, want 5", String(got))
 	}
@@ -344,7 +344,7 @@ func TestOptimizeFusesDirectFirstNonNilSearchOverRange(t *testing.T) {
 		t.Fatalf("direct range search was not fused: %s", serialized)
 	}
 
-	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+	fn := serialTestCallable(Eval(optimized, env))
 	if got := fn(NewInt(8), NewInt(5)); !Equal(got, NewInt(5)) {
 		t.Fatalf("direct fused range search returned %s, want 5", String(got))
 	}
@@ -358,7 +358,7 @@ func TestOptimizeFusesGeneralReducerOverRange(t *testing.T) {
 		t.Fatalf("range reducer was not fused: %s", serialized)
 	}
 
-	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+	fn := serialTestCallable(Eval(optimized, env))
 	got := fn(NewInt(4))
 	want := NewSlice([]Scmer{NewInt(3), NewInt(2), NewInt(1), NewInt(0)})
 	if !Equal(got, want) {
@@ -374,7 +374,7 @@ func TestOptimizeFusesRangeReducerWithoutNeutral(t *testing.T) {
 		t.Fatalf("range reducer without neutral was not fused: %s", serialized)
 	}
 
-	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+	fn := serialTestCallable(Eval(optimized, env))
 	if got := fn(NewInt(4)); !Equal(got, NewInt(6)) {
 		t.Fatalf("fused range reducer returned %s, want 6", String(got))
 	}
@@ -391,7 +391,7 @@ func TestOptimizeRangeReducerPreservesRetainedCallbackArguments(t *testing.T) {
 		t.Fatalf("range reducer with retaining callback was not fused: %s", serialized)
 	}
 
-	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+	fn := serialTestCallable(Eval(optimized, env))
 	got := fn(NewInt(3))
 	want := NewSlice([]Scmer{
 		NewSlice([]Scmer{NewInt(0), NewInt(1)}),
@@ -408,7 +408,7 @@ func BenchmarkOptimizerRangeFindPlanner(b *testing.B) {
 			(lambda (found index)
 				(if (not (nil? found)) found (if (equal? index target) index nil)))
 			nil))`)
-	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+	fn := serialTestCallable(Eval(optimized, env))
 	count := NewInt(64)
 	target := NewInt(63)
 	b.ReportAllocs()
@@ -428,7 +428,7 @@ func TestOptimizeLowersMappedSumReducer(t *testing.T) {
 		t.Fatalf("mapped sum reducer was not lowered: %s", serialized)
 	}
 
-	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+	fn := serialTestCallable(Eval(optimized, env))
 	got := fn(NewSlice([]Scmer{NewInt(1), NewInt(2), NewInt(3)}))
 	want := NewInt(12)
 	if !Equal(got, want) {
@@ -463,7 +463,7 @@ func TestOptimizeFusesFixedWidthMergeOverMap(t *testing.T) {
 		t.Fatalf("fixed-width merge/map pipeline was not fused: %s", serialized)
 	}
 
-	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+	fn := serialTestCallable(Eval(optimized, env))
 	got := fn(NewSlice([]Scmer{NewInt(1), NewInt(2)}))
 	want := NewSlice([]Scmer{NewInt(1), NewInt(11), NewInt(2), NewInt(12)})
 	if !Equal(got, want) {
@@ -488,7 +488,7 @@ func TestOptimizeFusesFixedWidthMergeOverProduceN(t *testing.T) {
 		t.Fatalf("fixed-width merge/produceN pipeline was not fused: %s", serialized)
 	}
 
-	got := OptimizeProcToSerialFunction(Eval(optimized, env))()
+	got := serialTestCallable(Eval(optimized, env))()
 	want := NewSlice([]Scmer{NewInt(0), NewInt(10), NewInt(1), NewInt(11), NewInt(2), NewInt(12)})
 	if !Equal(got, want) {
 		t.Fatalf("fused merge/produceN returned %s, want %s", String(got), String(want))
@@ -503,7 +503,7 @@ func TestOptimizeFusesMapOverFilter(t *testing.T) {
 		t.Fatalf("map/filter pipeline was not fused: %s", serialized)
 	}
 
-	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+	fn := serialTestCallable(Eval(optimized, env))
 	got := fn(NewSlice([]Scmer{NewInt(0), NewInt(1), NewInt(2), NewInt(3)}))
 	want := NewSlice([]Scmer{NewInt(3), NewInt(4)})
 	if !Equal(got, want) {
@@ -519,7 +519,7 @@ func TestOptimizeFusesMapOverMap(t *testing.T) {
 		t.Fatalf("map/map pipeline was not fused: %s", serialized)
 	}
 
-	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+	fn := serialTestCallable(Eval(optimized, env))
 	got := fn(NewSlice([]Scmer{NewInt(1), NewInt(2), NewInt(3)}))
 	want := NewSlice([]Scmer{NewInt(4), NewInt(6), NewInt(8)})
 	if !Equal(got, want) {
@@ -535,7 +535,7 @@ func TestOptimizeFusesFilterOverFilter(t *testing.T) {
 		t.Fatalf("filter/filter pipeline was not fused: %s", serialized)
 	}
 
-	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+	fn := serialTestCallable(Eval(optimized, env))
 	got := fn(NewSlice([]Scmer{NewInt(-1), NewInt(1), NewInt(3), NewInt(5)}))
 	want := NewSlice([]Scmer{NewInt(1), NewInt(3)})
 	if !Equal(got, want) {
@@ -551,7 +551,7 @@ func TestOptimizeFusesReduceOverMap(t *testing.T) {
 		t.Fatalf("reduce/map pipeline was not fused: %s", serialized)
 	}
 
-	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+	fn := serialTestCallable(Eval(optimized, env))
 	got := fn(NewSlice([]Scmer{NewInt(1), NewInt(2), NewInt(3)}))
 	want := NewInt(9)
 	if !Equal(got, want) {
@@ -568,7 +568,7 @@ func TestOptimizeLeavesGeneralIndexedReduceUnfused(t *testing.T) {
 		t.Fatalf("general indexed reduce must stay unspecialized: %s", serialized)
 	}
 
-	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+	fn := serialTestCallable(Eval(optimized, env))
 	if got := fn(NewSlice([]Scmer{NewInt(10), NewInt(20), NewInt(30)})); !Equal(got, NewInt(63)) {
 		t.Fatalf("general indexed reduce returned %s, want 63", String(got))
 	}
@@ -583,7 +583,7 @@ func TestOptimizeBuildsIndexedAssocWithoutMappedPairs(t *testing.T) {
 		t.Fatalf("indexed assoc construction was not fused: %s", serialized)
 	}
 
-	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+	fn := serialTestCallable(Eval(optimized, env))
 	got := fn(NewSlice([]Scmer{NewString("left"), NewString("right"), NewString("left")}))
 	want := NewSlice([]Scmer{NewString("left"), NewInt(2), NewString("right"), NewInt(1)})
 	if !Equal(got, want) {
@@ -602,7 +602,7 @@ func TestOptimizeBuildsIndexedAssocFromOptionalAliases(t *testing.T) {
 		t.Fatalf("optional alias index construction was not specialized: %s", serialized)
 	}
 
-	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+	fn := serialTestCallable(Eval(optimized, env))
 	got := fn(NewSlice([]Scmer{NewString("LEFT"), NewString("Right")}))
 	want := NewSlice([]Scmer{
 		NewString("left"), NewSlice([]Scmer{NewString("LEFT"), NewInt(0)}),
@@ -624,7 +624,7 @@ func TestOptimizeFusesReduceOverFilter(t *testing.T) {
 		t.Fatalf("reduce/filter pipeline was not fused: %s", serialized)
 	}
 
-	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+	fn := serialTestCallable(Eval(optimized, env))
 	got := fn(NewSlice([]Scmer{NewInt(1), NewInt(2), NewInt(4)}))
 	want := NewInt(6)
 	if !Equal(got, want) {
@@ -641,7 +641,7 @@ func TestOptimizeFusesReduceOverMapThenFilter(t *testing.T) {
 		t.Fatalf("reduce/map/filter pipeline was not fused: %s", serialized)
 	}
 
-	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+	fn := serialTestCallable(Eval(optimized, env))
 	got := fn(NewSlice([]Scmer{NewInt(1), NewInt(2), NewInt(3)}))
 	want := NewInt(10)
 	if !Equal(got, want) {
@@ -657,7 +657,7 @@ func TestOptimizeFusesMergeUniqueOverMapOfLists(t *testing.T) {
 		t.Fatalf("merge_unique/map-of-lists pipeline was not fused: %s", serialized)
 	}
 
-	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+	fn := serialTestCallable(Eval(optimized, env))
 	got := fn(NewSlice([]Scmer{NewInt(1), NewInt(2), NewInt(2), NewInt(3)}))
 	want := NewSlice([]Scmer{NewInt(2), NewInt(3), NewInt(4)})
 	if !Equal(got, want) {
@@ -682,7 +682,7 @@ func TestOptimizeKeepsMergeUniqueOverFilterMapOfLists(t *testing.T) {
 		t.Fatalf("merge_unique/map/filter-of-lists pipeline lost its filter: %s", serialized)
 	}
 
-	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+	fn := serialTestCallable(Eval(optimized, env))
 	got := fn(NewSlice([]Scmer{NewInt(0), NewInt(1), NewInt(2), NewInt(2), NewInt(3)}))
 	want := NewSlice([]Scmer{NewInt(4), NewInt(6)})
 	if !Equal(got, want) {
@@ -739,7 +739,7 @@ func TestOptimizeMergeUniqueMutatesFreshList(t *testing.T) {
 		t.Fatalf("transferred merge_unique input was lowered to a frame-local list: %s", serialized)
 	}
 
-	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+	fn := serialTestCallable(Eval(optimized, env))
 	got := fn(NewInt(1), NewInt(2), NewInt(3))
 	want := NewSlice([]Scmer{NewInt(1), NewInt(2), NewInt(3)})
 	if !Equal(got, want) {
@@ -827,7 +827,7 @@ func BenchmarkPlannerReducerLowerings(b *testing.B) {
 	for _, tc := range tests {
 		b.Run(tc.name, func(b *testing.B) {
 			optimized, env := optimizeListPipeline(b, tc.source)
-			fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+			fn := serialTestCallable(Eval(optimized, env))
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
@@ -843,7 +843,7 @@ func BenchmarkOptimizerIndexedAliasMap(b *testing.B) {
 	optimized, env := optimizeListPipeline(b, `(lambda (aliases)
 		(reduce (mapIndex aliases (lambda (position alias) (list alias position)))
 			(lambda (index entry) (set_assoc index (car entry) (cadr entry))) '()))`)
-	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+	fn := serialTestCallable(Eval(optimized, env))
 	aliases := make([]Scmer, 128)
 	for i := range aliases {
 		aliases[i] = NewString(fmt.Sprintf("alias-%d", i))
@@ -868,7 +868,7 @@ func BenchmarkPlannerFlatMapUnique(b *testing.B) {
 	input := NewSlice(values)
 	optimized, env := optimizeListPipeline(b, `(lambda (values)
 		(merge_unique (map values (lambda (value) (list value value)))))`)
-	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+	fn := serialTestCallable(Eval(optimized, env))
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {

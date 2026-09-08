@@ -1657,10 +1657,7 @@ func declareScanJoinOrder(en *scm.Env) {
 				panic("scan_join_order: access schemas must match the table count")
 			}
 			sortDirections := mustScmerSlice(a[10], "sortDirections")
-			orderDirs := make([]func(...scm.Scmer) scm.Scmer, len(sortDirections))
-			for i, direction := range sortDirections {
-				orderDirs[i] = scm.OptimizeProcToSerialFunction(direction)
-			}
+			orderDirs := scanSortDirections(sortDirections)
 			neutral := scm.NewNil()
 			if len(a) > 16 {
 				neutral = a[16]

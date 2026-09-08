@@ -409,12 +409,12 @@ func buildComputedFn(formulaExpr scm.Scmer, origParams scm.Scmer, env *scm.Env, 
 	}
 	// The body may already contain NthLocalVar references (when the condition lambda
 	// was pre-compiled by the optimizer). Ensure NumVars is set so that
-	// OptimizeProcToSerialFunction uses VarsNumbered instead of Vars[sym], which
+	// PrepareSerialProc uses VarsNumbered instead of Vars[sym], which
 	// would leave NthLocalVar(i) unresolvable and cause an index-out-of-range panic.
 	if result.IsProc() {
 		// Important: only set NumVars when the body actually uses NthLocalVar.
 		// For symbol-based bodies, forcing NumVars would skip symbol bindings in
-		// OptimizeProcToSerialFunction and make every param read as nil.
+		// PrepareSerialProc and make every param read as nil.
 		if containsNthLocalVar(result.Proc().Body) {
 			result.Proc().NumVars = len(conditionCols)
 		} else {
