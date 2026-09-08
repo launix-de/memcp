@@ -1,3 +1,5 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
 # IN subselect with multiple tables (multi-table JOIN inside IN)
 
 metadata:
@@ -14,7 +16,7 @@ setup:
 
 test_cases:
   - name: "IN subselect single table (baseline)"
-    sql: "SELECT name FROM insub_author WHERE id IN (SELECT author_id FROM insub_post)"
+    sql: "SELECT name FROM insub_author WHERE id IN (SELECT author_id FROM insub_post) ORDER BY name"
     expect:
       rows: 3
       data:
@@ -23,7 +25,7 @@ test_cases:
         - name: Carol
 
   - name: "IN subselect multi-table inner join"
-    sql: "SELECT name FROM insub_author WHERE id IN (SELECT p.author_id FROM insub_post p JOIN insub_author a ON p.author_id = a.id WHERE a.name <> 'Carol')"
+    sql: "SELECT name FROM insub_author WHERE id IN (SELECT p.author_id FROM insub_post p JOIN insub_author a ON p.author_id = a.id WHERE a.name <> 'Carol') ORDER BY name"
     expect:
       rows: 2
       data:
@@ -31,7 +33,7 @@ test_cases:
         - name: Bob
 
   - name: "IN subselect multi-table LEFT JOIN"
-    sql: "SELECT name FROM insub_author WHERE id IN (SELECT p.author_id FROM insub_post p LEFT JOIN insub_author a ON p.author_id = a.id)"
+    sql: "SELECT name FROM insub_author WHERE id IN (SELECT p.author_id FROM insub_post p LEFT JOIN insub_author a ON p.author_id = a.id) ORDER BY name"
     expect:
       rows: 3
       data:
