@@ -67844,40 +67844,8 @@ func init_list() {
 						d304 = ps.OverlayValues[304]
 					}
 					ctx.ReclaimUntrackedRegs()
-					var d305 JITValueDesc
-					if d1.Loc == LocImm {
-						d305 = JITValueDesc{Loc: LocImm, Type: tagFloat, Imm: NewFloat(d1.Imm.Float())}
-					} else if d1.Type == tagFloat && d1.Loc == LocReg {
-						d305 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: d1.Reg}
-						ctx.BindReg(d1.Reg, &d305)
-						ctx.BindReg(d1.Reg, &d305)
-					} else if d1.Type == tagFloat && d1.Loc == LocRegPair {
-						ctx.FreeReg(d1.Reg)
-						d305 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: d1.Reg2}
-						ctx.BindReg(d1.Reg2, &d305)
-						ctx.BindReg(d1.Reg2, &d305)
-					} else {
-						d305 = ctx.EmitGoCallScalar(GoFuncAddr(JITScmerToFloatBits), []JITValueDesc{d1}, 1)
-						d305.Type = tagFloat
-						ctx.BindReg(d305.Reg, &d305)
-					}
-					var d306 JITValueDesc
-					if d67.Loc == LocImm {
-						d306 = JITValueDesc{Loc: LocImm, Type: tagFloat, Imm: NewFloat(d67.Imm.Float())}
-					} else if d67.Type == tagFloat && d67.Loc == LocReg {
-						d306 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: d67.Reg}
-						ctx.BindReg(d67.Reg, &d306)
-						ctx.BindReg(d67.Reg, &d306)
-					} else if d67.Type == tagFloat && d67.Loc == LocRegPair {
-						ctx.FreeReg(d67.Reg)
-						d306 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: d67.Reg2}
-						ctx.BindReg(d67.Reg2, &d306)
-						ctx.BindReg(d67.Reg2, &d306)
-					} else {
-						d306 = ctx.EmitGoCallScalar(GoFuncAddr(JITScmerToFloatBits), []JITValueDesc{d67}, 1)
-						d306.Type = tagFloat
-						ctx.BindReg(d306.Reg, &d306)
-					}
+					d305 = ctx.EmitFloatDesc(d1)
+					d306 = ctx.EmitFloatDesc(d67)
 					ctx.EnsureDesc(&d305)
 					ctx.EnsureDesc(&d306)
 					ctx.EnsureDescsTogether(&d305, &d306)
@@ -69000,23 +68968,7 @@ func init_list() {
 					_ = stackArray13
 					d14 = args[2]
 					d14.ID = 0
-					var d15 JITValueDesc
-					if d14.Loc == LocImm {
-						d15 = JITValueDesc{Loc: LocImm, Type: tagFloat, Imm: NewFloat(d14.Imm.Float())}
-					} else if d14.Type == tagFloat && d14.Loc == LocReg {
-						d15 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: d14.Reg}
-						ctx.BindReg(d14.Reg, &d15)
-						ctx.BindReg(d14.Reg, &d15)
-					} else if d14.Type == tagFloat && d14.Loc == LocRegPair {
-						ctx.FreeReg(d14.Reg)
-						d15 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: d14.Reg2}
-						ctx.BindReg(d14.Reg2, &d15)
-						ctx.BindReg(d14.Reg2, &d15)
-					} else {
-						d15 = ctx.EmitGoCallScalar(GoFuncAddr(JITScmerToFloatBits), []JITValueDesc{d14}, 1)
-						d15.Type = tagFloat
-						ctx.BindReg(d15.Reg, &d15)
-					}
+					d15 = ctx.EmitFloatDesc(d14)
 					ctx.StabilizeDescForControlFlow(&d15)
 					ctx.FreeDesc(&d14)
 					d16 = args[2]
@@ -71109,23 +71061,7 @@ func init_list() {
 						d273 = ps.OverlayValues[273]
 					}
 					ctx.ReclaimUntrackedRegs()
-					var d274 JITValueDesc
-					if d102.Loc == LocImm {
-						d274 = JITValueDesc{Loc: LocImm, Type: tagFloat, Imm: NewFloat(d102.Imm.Float())}
-					} else if d102.Type == tagFloat && d102.Loc == LocReg {
-						d274 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: d102.Reg}
-						ctx.BindReg(d102.Reg, &d274)
-						ctx.BindReg(d102.Reg, &d274)
-					} else if d102.Type == tagFloat && d102.Loc == LocRegPair {
-						ctx.FreeReg(d102.Reg)
-						d274 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: d102.Reg2}
-						ctx.BindReg(d102.Reg2, &d274)
-						ctx.BindReg(d102.Reg2, &d274)
-					} else {
-						d274 = ctx.EmitGoCallScalar(GoFuncAddr(JITScmerToFloatBits), []JITValueDesc{d102}, 1)
-						d274.Type = tagFloat
-						ctx.BindReg(d274.Reg, &d274)
-					}
+					d274 = ctx.EmitFloatDesc(d102)
 					ctx.EnsureDesc(&d5)
 					ctx.EnsureDesc(&d274)
 					d275 = ctx.EmitFloatBinary(&d5, &d274, JITFloatAdd)

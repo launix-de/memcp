@@ -2138,6 +2138,47 @@ func (ctx *JITContext) EmitTagEqualsBorrowed(src *JITValueDesc, tag uint8, resul
 	return ctx.EmitTagEquals(&tmp, tag, result)
 }
 
+// EmitFloatDesc borrows a Scmer descriptor and returns raw float64 bits.
+// Known numeric types retain their conversion after spills; only unknown or
+// coercible nonnumeric values need the general runtime conversion helper.
+func (ctx *JITContext) EmitFloatDesc(src JITValueDesc) JITValueDesc {
+	ctx.SyncDesc(&src)
+	if src.Loc == LocImm {
+		return JITValueDesc{Loc: LocImm, Type: tagFloat, Imm: NewFloat(src.Imm.Float())}
+	}
+	if src.Type != tagInt && src.Type != tagFloat {
+		out := ctx.EmitGoCallScalar(GoFuncAddr(JITScmerToFloatBits), []JITValueDesc{src}, 1)
+		out.Type = tagFloat
+		ctx.BindReg(out.Reg, &out)
+		return out
+	}
+	ctx.EnsureDesc(&src)
+	ctx.ProtectReg(src.Reg)
+	if src.Loc == LocRegPair {
+		ctx.ProtectReg(src.Reg2)
+	}
+	out := JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: ctx.AllocReg()}
+	if src.Loc == LocRegPair {
+		ctx.UnprotectReg(src.Reg2)
+	}
+	ctx.UnprotectReg(src.Reg)
+	ctx.BindReg(out.Reg, &out)
+	switch src.Loc {
+	case LocReg:
+		ctx.EmitMovRegReg(out.Reg, src.Reg)
+	case LocRegPair:
+		ctx.EmitMovRegReg(out.Reg, src.Reg2)
+	case LocFPReg:
+		ctx.EmitMovFPToGPR(out.Reg, src.Reg)
+	default:
+		panic("jit: numeric conversion requires a materialized value")
+	}
+	if src.Type == tagInt {
+		ctx.EmitCvtInt64ToFloat64(RegX0, out.Reg)
+	}
+	return out
+}
+
 // EmitBoolDesc evaluates Scmer truthiness equivalent to (Scmer).Bool().
 // It consumes src and returns a bool descriptor (LocImm or LocReg).
 // Fast paths are emitted for compile-time constants and known primitive types;

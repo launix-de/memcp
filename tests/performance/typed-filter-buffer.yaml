@@ -13,6 +13,15 @@ metadata:
   isolated: true
 
 setup:
+  - sql: "DROP TABLE IF EXISTS typed_filter_wide"
+  - sql: "CREATE TABLE typed_filter_wide (c0 INT, c1 INT, c2 INT, c3 INT, c4 INT, c5 INT, c6 INT, c7 INT, c8 INT, c9 INT, c10 INT, c11 INT, c12 INT, c13 INT, c14 INT, c15 INT) ENGINE=memory"
+  - scm: |
+      (begin
+        (insert (table "memcp-tests" "typed_filter_wide")
+          (map (produceN 16) (lambda (c) (concat "c" c)))
+          (map (produceN 60000) (lambda (i)
+            (map (produceN 16) (lambda (c) (+ (mod (* i i 7919) 60000) c))))))
+        (rebuild))
   - sql: "DROP TABLE IF EXISTS typed_filter_buffer"
   - sql: "CREATE TABLE typed_filter_buffer (a INT, b INT, c INT) ENGINE=memory"
   - scm: |
@@ -23,6 +32,30 @@ setup:
         (rebuild))
 
 test_cases:
+  - name: "Sixteen bound integer columns preserve comparison results"
+    sql: "SELECT COUNT(*) AS n FROM typed_filter_wide WHERE c0<c1 AND c2<c3 AND c4<c5 AND c6<c7 AND c8<c9 AND c10<c11 AND c12<c13 AND c14<c15"
+    timing_samples: 5
+    expect:
+      data: [{n: 60000}]
+  - name: "Wide integer filter and arithmetic reducer performance"
+    sql: "SELECT SUM(c0+c1*c2) AS total FROM typed_filter_wide WHERE c0<c1 AND c2<c3 AND c4<c5 AND c6<c7 AND c8<c9 AND c10<c11 AND c12<c13 AND c14<c15"
+    threshold_ms: 1000
+    performance_rows: 60000
+    # Measure the first fill, not repeated reads of the aggregate cache.
+    warmup: 0
+    timing_samples: 1
+    expect:
+      data: [{total: 74211485358000}]
+  - name: "Point aggregate stays correct"
+    sql: "SELECT SUM(a+b*c) AS total FROM typed_filter_buffer WHERE a=42"
+    timing_samples: 5
+    expect:
+      data: [{total: 48}]
+  - name: "Small range aggregate stays correct"
+    sql: "SELECT SUM(a+b*c) AS total FROM typed_filter_buffer WHERE a>=1000 AND a<1064"
+    timing_samples: 5
+    expect:
+      data: [{total: 66400}]
   - name: "Full main shard arithmetic aggregate"
     sql: "SELECT SUM(a+b*c) AS total FROM typed_filter_buffer"
     timing_samples: 5
@@ -48,4 +81,5 @@ test_cases:
     expect: {error: true}
 
 cleanup:
+  - sql: "DROP TABLE IF EXISTS typed_filter_wide"
   - sql: "DROP TABLE IF EXISTS typed_filter_buffer"

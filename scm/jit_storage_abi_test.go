@@ -27,6 +27,82 @@ import (
 	"unsafe"
 )
 
+func TestJITTypedFloatConversionLocations(t *testing.T) {
+	for _, value := range []Scmer{NewInt(-7), NewInt(1<<53 + 1), NewInt(math.MinInt64), NewInt(math.MaxInt64), NewFloat(math.Copysign(0, -1)), NewFloat(math.Inf(1)), NewFloat(math.NaN()), NewFloat(1.25)} {
+		for _, location := range []string{"scalar", "pair", "stack", "stack-pair", "fp", "fp-stack"} {
+			if (location == "fp" || location == "fp-stack") && !value.IsFloat() {
+				continue
+			}
+			for _, preserve := range []bool{false, true} {
+				fn := CompileJITStorageGetValue(func(ctx *JITContext, input, target JITValueDesc) JITValueDesc {
+					input.Type = value.GetTag()
+					var bits uint64
+					if value.IsFloat() {
+						bits = math.Float64bits(value.Float())
+					} else {
+						bits = uint64(value.Int())
+					}
+					ctx.EmitMovRegImm64(input.Reg, bits)
+					if location == "fp" || location == "fp-stack" {
+						// Standalone storage emitters normally reserve only GPRs.
+						// Enable one native FP home to exercise the shared Proc path.
+						ctx.AllFPRegs = 1 << uint(RegX2)
+						ctx.FreeFPRegs = ctx.AllFPRegs
+						ctx.EnsureFPReg(&input)
+					}
+					if location == "pair" || location == "stack-pair" {
+						input = jitCopyScmerToPair(ctx, input)
+					}
+					if location == "stack" || location == "stack-pair" || location == "fp-stack" {
+						ctx.StabilizeDescForControlFlow(&input)
+					}
+					before := len(ctx.Safepoints)
+					converted := ctx.EmitFloatDesc(input)
+					if len(ctx.Safepoints) != before {
+						t.Errorf("%v/%s: typed conversion emitted a Go call", value, location)
+					}
+					if preserve {
+						ctx.FreeDesc(&converted)
+						return jitPlaceIntoPair(ctx, &input, target)
+					}
+					ctx.EmitMakeFloat(target, converted)
+					return target
+				})
+				if fn == nil {
+					t.Fatalf("%v/%s/preserve=%v: compile failed", value, location, preserve)
+				}
+				got, want := fn(0), NewFloat(value.Float())
+				if preserve {
+					want = value
+				}
+				if got != want {
+					t.Fatalf("%v/%s/preserve=%v: got %#v, want %#v", value, location, preserve, got, want)
+				}
+			}
+		}
+	}
+}
+
+func TestJITFloatConversionDynamicFallback(t *testing.T) {
+	for _, value := range []Scmer{NewInt(-7), NewFloat(1.25), NewString("12.5"), NewBool(true), NewNil()} {
+		fn := CompileJITStorageGetValue(func(ctx *JITContext, input, target JITValueDesc) JITValueDesc {
+			ctx.TrackImm(value)
+			input = jitCopyScmerToPair(ctx, JITValueDesc{Loc: LocImm, Type: value.GetTag(), Imm: value})
+			input.Type = JITTypeUnknown
+			ctx.StabilizeDescForControlFlow(&input)
+			converted := ctx.EmitFloatDesc(input)
+			ctx.EmitMakeFloat(target, converted)
+			return target
+		})
+		if fn == nil {
+			t.Fatal("dynamic conversion did not compile")
+		}
+		if got, want := fn(0), NewFloat(value.Float()); got != want {
+			t.Fatalf("%v: got %#v, want %#v", value, got, want)
+		}
+	}
+}
+
 func TestEmitCmpFloat64AvoidsDuplicateSameOperandMove(t *testing.T) {
 	code := make([]byte, 16)
 	ctx := &JITContext{
