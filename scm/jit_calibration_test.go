@@ -128,6 +128,14 @@ func TestJITCalibrationFilterBufferBestOf(t *testing.T) {
 	if got := calibration.FilterBufferBreakEven(20, 0); got != math.MaxInt {
 		t.Fatalf("zero-column filter break-even = %d, want MaxInt", got)
 	}
+	calibration.FilterBufferCompileUnitNS = 0
+	if got := calibration.FilterBufferBreakEven(100, 16); got != 40 {
+		t.Fatalf("a measured flat compile slope disabled wide filters: %d", got)
+	}
+	calibration.FilterBufferCompileUnitNS = -1
+	if got := calibration.FilterBufferBreakEven(100, 16); got != math.MaxInt {
+		t.Fatalf("an unavailable compile slope admitted wide filters: %d", got)
+	}
 }
 
 func TestJITCalibrationAnchorsCallBoundaryToTrivialShapes(t *testing.T) {

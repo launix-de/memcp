@@ -128,7 +128,7 @@ func (calibration JITCostCalibration) MapReduceBufferProbeBreakEven(expressionCo
 	}
 	compileNS := calibration.BufferCompileNS
 	if expressionCost > calibration.BufferMaxUnits {
-		if calibration.BufferCompileUnitNS <= 0 {
+		if calibration.BufferCompileUnitNS < 0 {
 			return math.MaxInt
 		}
 		compileNS += float64(expressionCost-calibration.BufferMaxUnits) * calibration.BufferCompileUnitNS
@@ -147,7 +147,7 @@ func (calibration JITCostCalibration) FilterBufferBreakEven(expressionCost, colu
 	}
 	compileNS := calibration.FilterBufferCompileNS
 	if expressionCost > calibration.FilterBufferMaxUnits {
-		if calibration.FilterBufferCompileUnitNS <= 0 {
+		if calibration.FilterBufferCompileUnitNS < 0 {
 			return math.MaxInt
 		}
 		compileNS += float64(expressionCost-calibration.FilterBufferMaxUnits) * calibration.FilterBufferCompileUnitNS
@@ -191,6 +191,7 @@ func CalibrateJITCosts() JITCostCalibration {
 			calibration.BufferCompileNS, calibration.BufferCurrentNS, calibration.BufferFusedNS, calibration.BufferMaxUnits = measureMapReduceBufferCalibration("(lambda (acc value) (sql_sum_reduce acc value))", 1)
 			complexCompileNS, complexCurrentNS, complexFusedNS, complexUnits := measureMapReduceBufferCalibration("(lambda (acc a b c) (+ acc (+ a (* b c))))", 3)
 			calibration.BufferProbeCurrentNS, calibration.BufferProbeFusedNS = complexCurrentNS, complexFusedNS
+			calibration.BufferCompileUnitNS = -1
 			if complexUnits > calibration.BufferMaxUnits {
 				calibration.BufferCompileUnitNS = math.Max(0, (complexCompileNS-calibration.BufferCompileNS)/float64(complexUnits-calibration.BufferMaxUnits))
 			}
@@ -268,11 +269,11 @@ func measureFilterBufferCompileUnit(simpleNS float64, simpleUnits int) float64 {
 	compiled := CompileJIT(NewProcStruct(*cloneCalibrationProcedure(template)), true)
 	proc := compiled.Proc()
 	if proc == nil || proc.Compiled == nil {
-		return 0
+		return -1
 	}
 	units := JITExpressionCost(proc.Body)
 	if units <= simpleUnits {
-		return 0
+		return -1
 	}
 	samples := make([]float64, jitCalibrationSamples)
 	for sample := range samples {
@@ -280,7 +281,7 @@ func measureFilterBufferCompileUnit(simpleNS float64, simpleUnits int) float64 {
 		kernel := CompileJITFilterBuffer(proc, []uint8{tagInt, tagInt, tagInt})
 		samples[sample] = float64(time.Since(started).Nanoseconds())
 		if kernel == nil {
-			return 0
+			return -1
 		}
 		runtime.KeepAlive(kernel)
 	}
