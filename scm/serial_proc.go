@@ -462,6 +462,17 @@ func (p *SerialProc) CallPrepared(args []Scmer) Scmer {
 	return result
 }
 
+// CallOwned transfers a freshly allocated argument frame to the callback.
+// The caller must not reuse or mutate its backing array afterwards. Unlike
+// Call, this permits retaining natives to keep the original array without a
+// defensive copy. Use Call for stack, pooled or otherwise reusable frames.
+func (p *SerialProc) CallOwned(args []Scmer) Scmer {
+	if p.Kind == SerialProcRetainingNative {
+		return p.Function(args...)
+	}
+	return p.Call(args)
+}
+
 // Call evaluates a prepared callback with a caller-owned argument frame. Hot
 // physical loops should dispatch dominant simple Kinds once; compound programs
 // use Call so the prepared expression can reuse its nested native-call frames.
