@@ -18,13 +18,15 @@ package storage
 
 import (
 	"fmt"
+	"runtime"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/launix-de/memcp/scm"
 )
 
-const scanColumnCostRows = 65536
+const scanColumnCostRows = 60000
 
 func scanColumnCostTable(b testing.TB, name string, rows int) (*table, []string) {
 	b.Helper()
@@ -395,5 +397,315 @@ func BenchmarkScanFilterExpressionCost(b *testing.B) {
 				}
 			})
 		}
+	}
+}
+
+func BenchmarkScanFilterSpectrum(b *testing.B) {
+	for _, rows := range []int{1, 8, 64, 1024, 8192, 60000} {
+		tbl, cols := scanColumnCostTable(b, fmt.Sprintf("filter_spectrum_%d", rows), rows)
+		for _, shape := range []struct {
+			name      string
+			source    string
+			columnCnt int
+		}{
+			{name: "simple", source: "(lambda (a) (> a -1))", columnCnt: 1},
+			{name: "arithmetic", source: "(lambda (a b c) (> (+ a (* b c)) -1))", columnCnt: 3},
+		} {
+			condition := scm.Eval(scm.Optimize(scm.Read("scan filter spectrum", shape.source), &scm.Globalenv, nil), &scm.Globalenv)
+			callback := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[0] })
+			b.Run(fmt.Sprintf("rows=%05d/shape=%s", rows, shape.name), func(b *testing.B) {
+				b.ReportAllocs()
+				b.ResetTimer()
+				for range b.N {
+					tbl.scan(nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil,
+						cols[:shape.columnCnt], condition, nil, callback, scm.NewNil(), scm.NewNil(), false)
+				}
+			})
+		}
+	}
+}
+
+func TestJITTypedFilterBufferCompactsRecordIDs(t *testing.T) {
+	if !scm.JITEnabled() {
+		t.Skip("requires the JIT experiment")
+	}
+	costs := scm.CurrentJITCosts()
+	t.Logf("filter calibration: compile %.0f ns, scalar %.2f ns/row, fused %.2f ns/row, minimum %d rows",
+		costs.FilterBufferCompileNS, costs.FilterBufferCurrentNS, costs.FilterBufferFusedNS, costs.FilterBufferMinimumRows)
+	predicate := optimizedScanProc(t, "(lambda (a b) (and (> a 1) (< b 8)))")
+	proc := predicate.Proc()
+	if proc == nil {
+		t.Fatal("optimized predicate has no JIT procedure")
+	}
+	kernel := scm.CompileJITFilterBuffer(proc, []uint8{scm.TagInt, scm.TagInt})
+	if kernel == nil {
+		t.Fatal("typed filter buffer did not compile")
+	}
+	if count := kernel(nil, nil); count != 0 {
+		t.Fatalf("empty filter returned %d records", count)
+	}
+	ids := []uint32{10, 11, 12, 13}
+	values := []scm.Scmer{
+		scm.NewInt(1), scm.NewInt(7),
+		scm.NewInt(2), scm.NewInt(8),
+		scm.NewInt(3), scm.NewInt(6),
+		scm.NewInt(4), scm.NewInt(5),
+	}
+	if count := kernel(ids, values); count != 2 || ids[0] != 12 || ids[1] != 13 {
+		t.Fatalf("filtered ids = %v count=%d, want [12 13] count=2", ids, count)
+	}
+}
+
+func BenchmarkFilterBufferLocalCompile(b *testing.B) {
+	if !scm.JITEnabled() {
+		b.Skip("requires JIT")
+	}
+	for _, shape := range []struct {
+		name, source string
+		width        int
+	}{
+		{"simple", "(lambda (a) (> a 127))", 1},
+		{"arithmetic", "(lambda (a b c) (> (+ a (* b c)) 127))", 3},
+	} {
+		proc := benchmarkMapReduceFusionProc(b, shape.source).Proc()
+		for _, typed := range []bool{false, true} {
+			tags := make([]uint8, shape.width)
+			for i := range tags {
+				tags[i] = scm.JITTypeUnknown
+				if typed {
+					tags[i] = scm.TagInt
+				}
+			}
+			b.Run(fmt.Sprintf("%s/typed=%v", shape.name, typed), func(b *testing.B) {
+				b.ReportAllocs()
+				for range b.N {
+					kernel := scm.CompileJITFilterBuffer(proc, tags)
+					if kernel == nil {
+						b.Fatal("compile failed")
+					}
+					runtime.KeepAlive(kernel)
+				}
+			})
+		}
+	}
+}
+
+func BenchmarkFilterBufferLocalScan(b *testing.B) {
+	if !scm.JITEnabled() {
+		b.Skip("requires JIT")
+	}
+	shard := benchmarkMapReduceFusionShard(60000)
+	cols := []string{"amount", "quantity", "factor"}
+	readers := make([]ColumnReader, len(cols))
+	emitters := make([]scm.JITStorageGetValueEmitter, len(cols))
+	for i, col := range cols {
+		storage := shard.getColumnStorageOrPanic(col, false, nil)
+		readers[i] = newCachedColumnReaderTx(storage, nil)
+		emitters[i] = storage.JITEmit
+	}
+	for _, shape := range []struct {
+		name, source string
+		width        int
+	}{
+		{"simple", "(lambda (a) (> a 127))", 1},
+		{"arithmetic", "(lambda (a b c) (> (+ a (* b c)) 127))", 3},
+	} {
+		proc := benchmarkMapReduceFusionProc(b, shape.source)
+		for _, rows := range []int{0, 1, 64, 1024, 8192, 60000} {
+			for _, mode := range []string{"lambda", "buffer-dynamic", "buffer-typed", "direct-typed"} {
+				b.Run(fmt.Sprintf("%s/rows=%d/%s", shape.name, rows, mode), func(b *testing.B) {
+					ids := make([]uint32, defaultScanBufferSize)
+					args := make([]scm.Scmer, shape.width)
+					want := 0
+					for row := 0; row < rows; row++ {
+						for col := range args {
+							args[col] = readers[col].GetValue(uint32(row))
+						}
+						if scm.ToBool(scm.Apply(proc, args...)) {
+							want++
+						}
+					}
+					tags := make([]uint8, shape.width)
+					for i := range tags {
+						tags[i] = scm.JITTypeUnknown
+						if mode == "buffer-typed" || mode == "direct-typed" {
+							tags[i] = scm.TagInt
+						}
+					}
+					b.ReportAllocs()
+					b.ResetTimer()
+					for range b.N {
+						filter := typedScanFilter{width: shape.width}
+						if mode != "lambda" {
+							if mode == "direct-typed" {
+								filter.kernel = scm.CompileJITFilterStorage(proc.Proc(), tags, emitters[:shape.width])
+							} else {
+								filter.kernel = scm.CompileJITFilterBuffer(proc.Proc(), tags)
+							}
+							if filter.kernel == nil {
+								b.Fatal("compile failed")
+							}
+							filter.multiFuncs = make([]scm.JITStorageGetValueMultiFunc, shape.width)
+							for i := range filter.multiFuncs {
+								filter.multiFuncs[i] = compiledColumnGetValueMulti(readers[i])
+							}
+						}
+						count := 0
+						for offset := 0; offset < rows; offset += len(ids) {
+							batch := ids[:min(len(ids), rows-offset)]
+							for i := range batch {
+								batch[i] = uint32(offset + i)
+							}
+							if filter.kernel != nil {
+								if mode == "direct-typed" {
+									count += filter.kernel(batch, nil)
+									continue
+								}
+								count += filter.filterMain(batch, readers[:shape.width])
+								continue
+							}
+							for _, id := range batch {
+								for i := range args {
+									args[i] = readers[i].GetValue(id)
+								}
+								if scm.ToBool(scm.Apply(proc, args...)) {
+									count++
+								}
+							}
+						}
+						filter.close()
+						if count != want {
+							b.Fatalf("got %d matches, want %d", count, want)
+						}
+						runtime.KeepAlive(count)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestFilterBufferWideArithmetic(t *testing.T) {
+	if !scm.JITEnabled() {
+		t.Skip("requires JIT")
+	}
+	for _, width := range []int{1, 3, 8, 16} {
+		params := make([]string, width)
+		tags := make([]uint8, width)
+		for i := range params {
+			params[i] = fmt.Sprintf("c%d", i)
+			tags[i] = scm.TagInt
+		}
+		proc := benchmarkMapReduceFusionProc(t, fmt.Sprintf("(lambda (%s) (> (+ %s) 100))", strings.Join(params, " "), strings.Join(params, " ")))
+		kernel := scm.CompileJITFilterBuffer(proc.Proc(), tags)
+		if kernel == nil {
+			t.Fatalf("width %d failed compilation", width)
+		}
+		ids := make([]uint32, 128)
+		values := make([]scm.Scmer, len(ids)*width)
+		var want []uint32
+		for row := range ids {
+			ids[row] = uint32(row + 200)
+			for col := 0; col < width; col++ {
+				values[row*width+col] = scm.NewInt(int64(row + col))
+			}
+			if scm.ToBool(scm.Apply(proc, values[row*width:(row+1)*width]...)) {
+				want = append(want, ids[row])
+			}
+		}
+		count := kernel(ids, values)
+		if count != len(want) {
+			t.Fatalf("width %d count %d want %d", width, count, len(want))
+		}
+		for i := range want {
+			if ids[i] != want[i] {
+				t.Fatalf("width %d row %d got %d want %d", width, i, ids[i], want[i])
+			}
+		}
+	}
+}
+
+func TestTypedFilterMixedMainDelta(t *testing.T) {
+	if !scm.JITEnabled() {
+		t.Skip("requires JIT")
+	}
+	shard := benchmarkMapReduceFusionShard(4)
+	shard.mu.Lock()
+	shard.deltaColumns["amount"] = 0
+	shard.inserts = [][]scm.Scmer{{scm.NewFloat(3.5)}, {scm.NewNil()}}
+	shard.mu.Unlock()
+	column := shard.getColumnStorageOrPanic("amount", false, nil)
+	readers := []ColumnReader{newCachedColumnReaderTx(column, nil)}
+	predicate := benchmarkMapReduceFusionProc(t, "(lambda (a) (> a 2))")
+	kernel := scm.CompileJITFilterBuffer(predicate.Proc(), []uint8{column.JITValueType()})
+	if kernel == nil {
+		t.Fatal("filter did not compile")
+	}
+	filter := typedScanFilter{shard: shard, mainCount: 4, width: 1, kernel: kernel,
+		multiFuncs: []scm.JITStorageGetValueMultiFunc{compiledColumnGetValueMulti(readers[0])}}
+	defer filter.close()
+	condition := scm.PrepareSerialProc(predicate)
+	ids := []uint32{0, 4, 3, 5, 1, 2}
+	shard.mu.RLock()
+	defer shard.mu.RUnlock()
+	count := filter.filterBatch(ids, []string{"amount"}, []ColumnStorage{column}, readers,
+		make([]mapArgGetter, 1), make([]scm.Scmer, 1), &condition)
+	want := []uint32{4, 3, 2}
+	if count != len(want) {
+		t.Fatalf("got %d matches, want %d", count, len(want))
+	}
+	for i := range want {
+		if ids[i] != want[i] {
+			t.Fatalf("got %v, want %v", ids[:count], want)
+		}
+	}
+}
+
+// Exercise concurrent ownership transfers through the actual shared pool.
+// Both scan consumers must finish every read/write before returning a buffer.
+func TestScanBulkBufferConcurrentRelease(t *testing.T) {
+	for _, reducer := range []bool{false, true} {
+		t.Run(fmt.Sprintf("reducer=%v", reducer), func(t *testing.T) {
+			var workers sync.WaitGroup
+			for worker := 0; worker < 8; worker++ {
+				workers.Add(1)
+				go func(worker int) {
+					defer workers.Done()
+					for iteration := 0; iteration < 2000; iteration++ {
+						pooled, _ := mapReducerBulkBufferPools[0].Get().(*mapReducerBulkBuffer)
+						if pooled == nil {
+							pooled = &mapReducerBulkBuffer{values: make([]scm.Scmer, defaultScanBufferSize)}
+						}
+						want := scm.NewInt(int64(worker*2000 + iteration + 1))
+						for index := range pooled.values {
+							pooled.values[index] = want
+						}
+						runtime.Gosched()
+						for _, value := range pooled.values {
+							if !scm.Equal(value, want) {
+								t.Errorf("buffer changed while owned by worker %d", worker)
+								return
+							}
+						}
+						if reducer {
+							mapper := ShardMapReducer{mainBulkBuffer: pooled, mainBulkValues: pooled.values}
+							mapper.Close()
+							if mapper.mainBulkBuffer != nil || mapper.mainBulkValues != nil {
+								t.Error("reducer retained released buffer")
+								return
+							}
+						} else {
+							filter := typedScanFilter{width: 1, pooled: pooled, values: pooled.values}
+							filter.close()
+							if filter.pooled != nil || filter.values != nil {
+								t.Error("filter retained released buffer")
+								return
+							}
+						}
+					}
+				}(worker)
+			}
+			workers.Wait()
+		})
 	}
 }
