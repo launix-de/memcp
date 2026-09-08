@@ -162,6 +162,19 @@ func OrderRelationLess(fn func(...Scmer) Scmer) func(Scmer, Scmer) bool {
 	return func(a, b Scmer) bool { return ToBool(fn(a, b)) }
 }
 
+// binaryCollationLess keeps boolean/text keys in the same textual order in
+// both directions. Less is the coercing expression comparator: its bool-left
+// arm converts to integers, while its string-left arm renders a bool as text.
+// That asymmetry must not enter an index (true < "3" and "3" < true).
+// Keep expression comparison itself unchanged, including numeric coercions.
+func binaryCollationLess(a, b Scmer) bool {
+	if (a.IsBool() && (b.IsString() || b.IsSymbol())) ||
+		(b.IsBool() && (a.IsString() || a.IsSymbol())) {
+		return String(a) < String(b)
+	}
+	return Less(a, b)
+}
+
 /* SQL LIKE operator implementation on strings */
 func StrLike(str, pattern string) bool {
 	if !strings.ContainsAny(pattern, "%_\\") {
@@ -11778,16 +11791,16 @@ func init_strings() {
 				return cached.(Scmer)
 			}
 			// Binary and bare-charset relations are the dominant index case. Keep
-			// their canonical callback to one function dispatch: Less already owns
+			// their canonical callback to one function dispatch: binaryCollationLess owns
 			// the required ASC NULL-first semantics, and swapping its operands owns
 			// DESC NULL-last semantics. A closure per metadata key keeps callback
 			// identity distinct even when two names have identical byte ordering.
 			if collationName == "bin" || collationName == "binary" || collationName == "utf8" || collationName == "utf8mb4" {
 				less := func(left, right Scmer) bool {
 					if reverse {
-						return Less(right, left)
+						return binaryCollationLess(right, left)
 					}
-					return Less(left, right)
+					return binaryCollationLess(left, right)
 				}
 				fn := func(args ...Scmer) Scmer {
 					return NewBool(less(args[0], args[1]))
@@ -11819,14 +11832,14 @@ func init_strings() {
 					if m[2] == "bin" { // binary
 						// Return closures that compare raw UTF-8 byte order; register for serialization
 						if len(a) > 1 && ToBool(a[1]) {
-							f := func(a ...Scmer) Scmer { return GreaterScm(a...) }
+							f := func(a ...Scmer) Scmer { return NewBool(binaryCollationLess(a[1], a[0])) }
 							collateRegistry.Store(FunctionIdentity(f), struct {
 								Collation string
 								Reverse   bool
 							}{Collation: String(a[0]), Reverse: true})
 							return NewFunc(f)
 						}
-						f := func(a ...Scmer) Scmer { return LessScm(a...) }
+						f := func(a ...Scmer) Scmer { return NewBool(binaryCollationLess(a[0], a[1])) }
 						collateRegistry.Store(FunctionIdentity(f), struct {
 							Collation string
 							Reverse   bool
