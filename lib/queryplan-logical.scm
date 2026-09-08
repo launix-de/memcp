@@ -3305,6 +3305,14 @@ without separately proving two-valued semantics. */
 		(define keys (if (empty_list? (gs_keys stage)) '(1) (gs_keys stage)))
 		(define key_names (group_key_cols keys))
 		(define ags (gs_aggregates stage))
+		(define derived_having (if (nil? (gs_having stage))
+			nil
+			(replace_group_expr
+				(gs_input stage) input_alias alias keys key_names ags (gs_having stage))))
+		(define derived_join (rewrite_derived_ref alias projection (source_join_expr src)))
+		(define source_condition (if (nil? derived_having)
+			derived_join
+			(if (nil? derived_join) derived_having (combine_where derived_having derived_join))))
 		(define logical_extra_sources (if (query_block? (gs_input stage))
 			(map
 				(filter (cdr (qb_sources (gs_input stage))) (lambda (extra)
@@ -3317,7 +3325,7 @@ without separately proving two-valued semantics. */
 			(group_stage_schema stage)
 			(make_stage_output_relation (gs_id stage))
 			(source_outer? src)
-			(rewrite_derived_ref alias projection (source_join_expr src))))
+			source_condition))
 		(list (cons source logical_extra_sources) projection stage))))
 
 (define direct_source_order_item? (lambda (src item)

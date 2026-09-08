@@ -104,6 +104,24 @@ test_cases:
             data:
               - total: 3
 
+  - name: "SQL_CALC_FOUND_ROWS preserves the one-argument resultrow ABI"
+    scm: |
+      (begin
+        (define cache (newcachemap))
+        (define sess (newsession))
+        (sess "username" "root")
+        (sess "schema" "memcp-tests")
+        (define formula
+          (cached_parse cache (list parse_sql) "memcp-tests"
+            "SELECT SQL_CALC_FOUND_ROWS ID FROM wpcompat_posts WHERE post_type = 'post' ORDER BY ID LIMIT 2"
+            nil "root" sess true))
+        (sql_execute_formula sess nil formula (lambda (_row) true) (lambda (_fields) nil))
+        (if (equal? (sess "found_rows") 3)
+          "ok"
+          (error (concat "unexpected found_rows: " (sess "found_rows")))))
+    expect:
+      data: ["ok"]
+
   - name: "Grouped SQL_CALC_FOUND_ROWS counts a non-null anti join in the output driver"
     mysql:
       statements:
@@ -119,6 +137,64 @@ test_cases:
             data:
               - total: 3
 
+  - name: "SQL_CALC_FOUND_ROWS counts distinct result rows"
+    mysql:
+      statements:
+        - sql: "SELECT SQL_CALC_FOUND_ROWS DISTINCT comment_type FROM wpcompat_comments ORDER BY comment_type LIMIT 1"
+          expect:
+            rows: 1
+            data:
+              - comment_type: "comment"
+        - sql: "SELECT FOUND_ROWS() AS total"
+          expect:
+            rows: 1
+            data:
+              - total: 2
+
+  - name: "SQL_CALC_FOUND_ROWS counts grouped result rows"
+    mysql:
+      statements:
+        - sql: "SELECT SQL_CALC_FOUND_ROWS taxonomy, COUNT(*) AS taxonomy_count FROM wpcompat_term_taxonomy GROUP BY taxonomy ORDER BY taxonomy LIMIT 1"
+          expect:
+            rows: 1
+            data:
+              - taxonomy: "category"
+                taxonomy_count: 1
+        - sql: "SELECT FOUND_ROWS() AS total"
+          expect:
+            rows: 1
+            data:
+              - total: 2
+
+  - name: "SQL_CALC_FOUND_ROWS applies HAVING before counting"
+    mysql:
+      statements:
+        - sql: "SELECT SQL_CALC_FOUND_ROWS taxonomy, COUNT(*) AS taxonomy_count FROM wpcompat_term_taxonomy GROUP BY taxonomy HAVING COUNT(*) > 1 LIMIT 1"
+          expect:
+            rows: 1
+            data:
+              - taxonomy: "wp_theme"
+                taxonomy_count: 2
+        - sql: "SELECT FOUND_ROWS() AS total"
+          expect:
+            rows: 1
+            data:
+              - total: 1
+
+  - name: "Derived aggregate preserves its HAVING filter"
+    sql: |
+      SELECT COUNT(*) AS total
+      FROM (
+        SELECT taxonomy, COUNT(*) AS taxonomy_count
+        FROM wpcompat_term_taxonomy
+        GROUP BY taxonomy
+        HAVING COUNT(*) > 1
+      ) AS filtered_taxonomies
+    expect:
+      rows: 1
+      data:
+        - total: 1
+
   - name: "Empty SQL_CALC_FOUND_ROWS replaces a previous count with zero"
     mysql:
       statements:
@@ -130,6 +206,18 @@ test_cases:
             rows: 1
             data:
               - total: 0
+
+  - name: "SQL_CALC_FOUND_ROWS counts a no-FROM row hidden by LIMIT zero"
+    mysql:
+      statements:
+        - sql: "SELECT SQL_CALC_FOUND_ROWS 1 AS value LIMIT 0"
+          expect:
+            rows: 0
+        - sql: "SELECT FOUND_ROWS() AS total"
+          expect:
+            rows: 1
+            data:
+              - total: 1
 
   - name: "Non-null NOT IN selects the anti-presence rewrite"
     sql: |
