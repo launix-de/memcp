@@ -80,7 +80,7 @@ func integerOrder(descending bool) (scm.Scmer, func(...scm.Scmer) scm.Scmer) {
 		}
 		return scm.NewBool(scm.ToInt(values[0]) < scm.ToInt(values[1]))
 	})
-	return relation, scm.OptimizeProcToSerialFunction(relation)
+	return relation, serialTestCallable(relation)
 }
 
 func recSetModuloFilter(batchSizes *[]int64, divisor int, remainder int) scm.Scmer {
@@ -203,7 +203,7 @@ func TestCollectOrderedCandidateBatchPrunesRangePartitions(t *testing.T) {
 		return ids
 	}
 	collect := func(operator string, offset int, limit int) ([]orderedBatchRecord, *recSet, bool) {
-		relation := scm.OptimizeProcToSerialFunction(scm.Eval(scm.NewSymbol(operator), &scm.Globalenv))
+		relation := serialTestCallable(scm.Eval(scm.NewSymbol(operator), &scm.Globalenv))
 		return collectPartitionOrderedCandidateBatch(nil, scanOrderTableSpec{table: table},
 			[]scm.Scmer{scm.NewString("id")}, []func(...scm.Scmer) scm.Scmer{relation}, offset, limit)
 	}

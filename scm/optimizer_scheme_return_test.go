@@ -678,7 +678,7 @@ func BenchmarkSchemeHelperOwnedReturnAppend(b *testing.B) {
 	env := newOptimizerTestEnv()
 	EvalAll("optimizer return benchmark", `(define benchmark_filtered (lambda (a b c d) (filter (list a b c d) (lambda (x) (> x 1)))))`, env)
 	optimized := optimizeTestSource(b, env, `(lambda (a b c d e) (append (benchmark_filtered a b c d) e))`)
-	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+	fn := serialTestCallable(Eval(optimized, env))
 	args := []Scmer{NewInt(0), NewInt(2), NewInt(3), NewInt(4), NewInt(5)}
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -731,7 +731,7 @@ func BenchmarkOptimizeInlinedNestedLambdaHelper(b *testing.B) {
 	EvalAll("nested lambda inline benchmark", `(define benchmark_filter_owned (lambda (values) (filter values (lambda (x) (> x 1)))))`, env)
 	optimized := optimizeTestSource(b, env, `(lambda (a b c d e)
 		(append (benchmark_filter_owned (list a b c d)) e))`)
-	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+	fn := serialTestCallable(Eval(optimized, env))
 	args := []Scmer{NewInt(0), NewInt(2), NewInt(3), NewInt(4), NewInt(5)}
 	b.ReportAllocs()
 	b.ResetTimer()

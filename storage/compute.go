@@ -378,8 +378,8 @@ func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard,
 	for i, sc := range col.OrcSortCols {
 		sortcolsScmer[i] = scm.NewString(sc)
 	}
-	ltFn := scm.OptimizeProcToSerialFunction(scm.Eval(scm.NewSymbol("<"), &scm.Globalenv))
-	gtFn := scm.OptimizeProcToSerialFunction(scm.Eval(scm.NewSymbol(">"), &scm.Globalenv))
+	ltFn := scm.Globalenv.Vars[scm.Symbol("<")].Func()
+	gtFn := scm.Globalenv.Vars[scm.Symbol(">")].Func()
 	sortdirsFns := make([]func(...scm.Scmer) scm.Scmer, len(col.OrcSortDirs))
 	for i, desc := range col.OrcSortDirs {
 		if desc {
@@ -422,7 +422,7 @@ func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard,
 	condCols := make([]string, 0, len(partCols)+len(col.OrcFilterCols))
 	condCols = append(condCols, partCols...)
 	condCols = append(condCols, col.OrcFilterCols...)
-	filterFn := scm.OptimizeProcToSerialFunction(col.OrcFilterFn)
+	filterFn := scm.PrepareSerialProc(col.OrcFilterFn)
 	condFn := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
 		for i := 0; i < partCount; i++ {
 			if scm.Less(a[i], partKeys[i]) || scm.Less(partKeys[i], a[i]) {
@@ -432,7 +432,7 @@ func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard,
 		if col.OrcFilterFn.IsNil() {
 			return scm.NewBool(true)
 		}
-		return scm.NewBool(scm.ToBool(filterFn(a[partCount:]...)))
+		return scm.NewBool(scm.ToBool(filterFn.Call(a[partCount:])))
 	})
 
 	// A domain-filtered ORC has intentional holes: rows outside the predicate
@@ -466,7 +466,7 @@ func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard,
 		}
 
 		domainCondFn := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
-			return scm.NewBool(scm.ToBool(filterFn(a...)))
+			return scm.NewBool(scm.ToBool(filterFn.Call(a)))
 		})
 		scanCallbackCols := make([]string, 0, 1+len(col.OrcMapCols))
 		scanCallbackCols = append(scanCallbackCols, "$set:"+name)
@@ -507,7 +507,7 @@ func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard,
 	scanCallbackCols = append(scanCallbackCols, "$orc_stored:"+name)
 	scanCallbackCols = append(scanCallbackCols, col.OrcMapCols...)
 
-	innerMapReduceFn := scm.OptimizeProcToSerialFunction(col.OrcMapReduceFn)
+	innerMapReduceFn := scm.PrepareSerialProc(col.OrcMapReduceFn)
 	recomputeStarted := false
 	scanMapReduceFn := scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
 		brk := args[2]
@@ -527,7 +527,7 @@ func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard,
 		innerArgs[0] = args[0]
 		innerArgs[1] = args[1]
 		copy(innerArgs[2:], args[4:])
-		newAcc := innerMapReduceFn(innerArgs...)
+		newAcc := innerMapReduceFn.Call(innerArgs)
 
 		if isIdentity && recomputeStarted && !storedVal.IsNil() && !newAcc.IsNil() {
 			// Phase 3 (identity only): valid row after recompute region.

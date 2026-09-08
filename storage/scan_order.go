@@ -268,10 +268,11 @@ func compileScanOrderAccess(schemaExpr, valuesExpr, sortColsExpr, sortDirsExpr s
 		}
 		// Only canonical collation relations are accepted below. Runtime-capturing
 		// procedures and arbitrary native callbacks retain the runtime fallback.
-		order := scm.OptimizeProcToSerialFunction(directionValue)
-		if order == nil {
+		preparedOrder := scm.PrepareSerialProc(directionValue)
+		if preparedOrder.Kind != scm.SerialProcNative && preparedOrder.Kind != scm.SerialProcRetainingNative {
 			return schemaExpr, valuesExpr, false
 		}
+		order := preparedOrder.Function
 		collation, reverse, persistable := scm.LookupCollate(order)
 		if !persistable {
 			return schemaExpr, valuesExpr, false
@@ -641,6 +642,23 @@ func (s *scanOrderTableSpec) backingTable() *table {
 		return s.recset.table
 	}
 	return s.table
+}
+
+// scanSortDirections binds the existing index-order callback ABI. Keep native
+// identities intact: collation metadata and index compatibility use them.
+// Non-native directions use the same prepared dispatcher as filter/map loops;
+// only this ABI boundary needs a Go callable, not the ordinary scan callbacks.
+func scanSortDirections(values []scm.Scmer) []func(...scm.Scmer) scm.Scmer {
+	result := make([]func(...scm.Scmer) scm.Scmer, len(values))
+	for i, value := range values {
+		program := scm.PrepareSerialProc(value)
+		if program.Kind == scm.SerialProcNative || program.Kind == scm.SerialProcRetainingNative {
+			result[i] = program.Function
+		} else {
+			result[i] = func(args ...scm.Scmer) scm.Scmer { return program.Call(args) }
+		}
+	}
+	return result
 }
 
 // extendBoundariesWithSortCols inserts sort columns before candidate matchers

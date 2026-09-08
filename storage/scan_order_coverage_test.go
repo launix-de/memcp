@@ -23,9 +23,13 @@ import (
 	"github.com/launix-de/memcp/scm"
 )
 
+func serialTestCallable(value scm.Scmer) func(...scm.Scmer) scm.Scmer {
+	return scanSortDirections([]scm.Scmer{value})[0]
+}
+
 func persistableTestOrder(reverse bool) (scm.Scmer, func(...scm.Scmer) scm.Scmer) {
 	value := scm.Apply(scm.Globalenv.Vars[scm.Symbol("collate")], scm.NewString("utf8mb4"), scm.NewBool(reverse))
-	return value, scm.OptimizeProcToSerialFunction(value)
+	return value, serialTestCallable(value)
 }
 
 func TestScanOrderOptimizerCompilesOrderIntoAccessSchema(t *testing.T) {

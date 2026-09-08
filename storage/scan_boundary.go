@@ -203,7 +203,7 @@ func scanBoundaryOrderFromMetadata(metadata string) func(...scm.Scmer) scm.Scmer
 	}
 	value := scm.Apply(scm.Globalenv.Vars[scm.Symbol("collate")],
 		scm.NewString(metadata[:separator]), scm.NewBool(direction == ":desc"))
-	return scm.OptimizeProcToSerialFunction(value)
+	return value.Func() // the collation factory already returns the native relation
 }
 
 func scanBoundaryJSONInt(value any) int {

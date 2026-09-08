@@ -1,0 +1,65 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: "1.0"
+  description: "Reusable serial callback frames preserve escaping values and JIT/interpreter dispatch"
+setup: []
+test_cases:
+  - name: "Native list callback retains a distinct argument list per element"
+    scm: |
+      (if (equal? (map (list 1 2 3) list) (list (list 1) (list 2) (list 3)))
+        true (error "native callback retained a reused argument frame"))
+  - name: "Variadic callback retains independent argument lists"
+    scm: |
+      (begin
+        (define identity_args (lambda args args))
+        (if (equal? (mapIndex (list 10 20 30) identity_args)
+                    (list (list 0 10) (list 1 20) (list 2 30)))
+          true (error "variadic callback results alias a reused frame")))
+  - name: "Nested closures retain the value from their own invocation"
+    scm: |
+      (begin
+        (define closures (map (list 10 20 30) (lambda (x) (lambda (y) (+ x y)))))
+        (if (equal? (map closures (lambda (f) (f 1))) (list 11 21 31))
+          true (error "escaped lexical bindings changed on later calls")))
+  - name: "Compiled higher-order callbacks preserve native and lambda semantics"
+    scm: |
+      (begin
+        (define run (jit (lambda (items callback) (map items callback))))
+        (if (and
+              (equal? (run (list 1 2 3) list) (list (list 1) (list 2) (list 3)))
+              (equal? (run (list 1 2 3) (jit (lambda (x) (+ x 7)))) (list 8 9 10)))
+          true (error "compiled dynamic callback changed semantics")))
+  - name: "Reduction may retain both previous accumulator and current row"
+    scm: |
+      (if (equal? (reduce (list 1 2 3) list (list))
+                  (list (list (list (list) 1) 2) 3))
+        true (error "reduction overwrote retained accumulator arguments"))
+  - name: "Bound native operands are refreshed for every call"
+    scm: |
+      (if (and
+            (equal? (map (list 1 2 3) (lambda (x) (+ x 7))) (list 8 9 10))
+            (equal? (map (list 1 2 3) (lambda (x) (< x 2))) (list true false false))
+            (equal? (map (list 1 2 3) (lambda (x) (< 2 x))) (list false false true)))
+        true (error "bound native arguments retained a previous input"))
+  - name: "Parallel workers preserve escaping lexical values"
+    scm: |
+      (begin
+        (define input (produceN 100))
+        (define closures (parallel_map input (lambda (x) (lambda (y) (+ x y)))))
+        (if (equal? (map closures (lambda (f) (f 1)))
+                    (map input (lambda (x) (+ x 1))))
+          true (error "parallel callbacks shared invocation state")))
+  - name: "Empty inputs do not execute the callback"
+    scm: |
+      (begin
+        (define fail (lambda (x) (error "callback must not run")))
+        (if (and (equal? (map (list) fail) (list))
+                 (equal? (filter (list) fail) (list))
+                 (equal? (reduce (list) (lambda (a b) (error "reducer must not run")) 42) 42))
+          true (error "empty collection semantics changed")))
+  - name: "Callback failures propagate"
+    scm: '(map (list 1) (lambda (x) (error "serial-callback-failure")))'
+    expect:
+      error: true
+cleanup: []

@@ -32,7 +32,7 @@ func BenchmarkScanFamilyFixedCosts(b *testing.B) {
 	mapReduceFn := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[0] })
 	nilValue := scm.NewNil()
 	sortCols := []scm.Scmer{scm.NewString("id")}
-	sortDirs := []func(...scm.Scmer) scm.Scmer{scm.OptimizeProcToSerialFunction(scm.Globalenv.Vars[scm.Symbol("<")])}
+	sortDirs := []func(...scm.Scmer) scm.Scmer{serialTestCallable(scm.Globalenv.Vars[scm.Symbol("<")])}
 	orderedSpec := scanOrderTableSpec{
 		table:          tbl,
 		accessSchema:   newScanAccessSchema(scanAccessConsumerScan, nil, -1),

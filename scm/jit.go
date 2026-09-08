@@ -243,7 +243,7 @@ func (jep *JITEntryPoint) callFunction(function func(...Scmer) Scmer, args []Scm
 			if spec.SourceInput < 0 || spec.SourceInput >= len(args) {
 				panic("JIT: invalid hidden argument input")
 			}
-			args = append(args, NewFunc(OptimizeProcToSerialFunction(args[spec.SourceInput])))
+			args = append(args, jitPrepareCallback(args[spec.SourceInput]))
 		default:
 			panic("JIT: invalid hidden argument kind")
 		}

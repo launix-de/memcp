@@ -554,6 +554,19 @@ func jitInvokeCallbackSlice(callback Scmer, args []Scmer) Scmer {
 	return Apply(callback, args...)
 }
 
+// jitPrepareCallback adapts only the JIT's callable-value ABI. Native callbacks
+// keep their identity (including retaining-argument metadata). Procedures use
+// the same prepared JIT/interpreter dispatch as the operators, retaining arity
+// padding at this dynamic ABI boundary. Operator loops use Call with explicit,
+// reusable argument frames, never a variadic adapter of their own.
+func jitPrepareCallback(source Scmer) Scmer {
+	if source.GetTag() == tagFunc {
+		return source
+	}
+	program := PrepareSerialProc(source)
+	return NewFunc(func(args ...Scmer) Scmer { return program.Call(args) })
+}
+
 func jitInvokeGoFunctionSlice(callback func(...Scmer) Scmer, args []Scmer) Scmer {
 	return callback(args...)
 }

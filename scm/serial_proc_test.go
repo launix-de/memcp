@@ -19,6 +19,13 @@ package scm
 import "runtime"
 import "testing"
 
+// serialTestCallable is a test-only adapter for assertions which store Go
+// callbacks. Production consumers use SerialProc.Call and own their frames.
+func serialTestCallable(value Scmer) func(...Scmer) Scmer {
+	program := PrepareSerialProc(value)
+	return func(args ...Scmer) Scmer { return program.Call(args) }
+}
+
 func preparedTestProc(t testing.TB, source string) Scmer {
 	t.Helper()
 	return Eval(Optimize(Read("serial proc test", source), &Globalenv, nil), &Globalenv)
@@ -139,7 +146,7 @@ func BenchmarkSerialProcJITMapReducerDispatch(b *testing.B) {
 	direct := PrepareSerialProc(compiled)
 	adapter := SerialProc{
 		Kind:     SerialProcGeneral,
-		borrowed: optimizeProcToSerialBorrowed(compiled),
+		borrowed: prepareSerialInterpreter(compiled),
 	}
 	b.Run("general_adapter", func(b *testing.B) {
 		args := []Scmer{NewInt(1), NewInt(1)}
@@ -179,7 +186,7 @@ func TestPrepareSerialProcNativeForwardMatchesInterpreterAdapter(t *testing.T) {
 	source := preparedTestProc(t, "(lambda (acc row) (append acc row))")
 	empty := Eval(Read("serial proc test", "'()"), &Globalenv)
 	row := NewSlice([]Scmer{NewInt(1)})
-	baseline := OptimizeProcToSerialFunction(source)(empty, row)
+	baseline := Apply(source, empty, row)
 	prepared := PrepareSerialProc(source)
 	got := prepared.Call([]Scmer{empty, row})
 	if !Equal(got, baseline) {

@@ -1630,7 +1630,9 @@ func (t *table) scanWithBatchFrom(currentTx *TxContext, source *recSet, accessSc
 			if msg.outCount > 0 {
 				hadValue = true
 				if !combine.IsNil() {
-					akkumulator = scm.OptimizeProcToSerialFunction(combine)(akkumulator, msg.res)
+					program := scm.PrepareSerialProc(combine)
+					args := [2]scm.Scmer{akkumulator, msg.res}
+					akkumulator = program.Call(args[:])
 				}
 			}
 		}
@@ -1653,7 +1655,8 @@ func (t *table) scanWithBatchFrom(currentTx *TxContext, source *recSet, accessSc
 		values.finish(done)
 
 		if !combine.IsNil() {
-			fn := scm.OptimizeProcToSerialFunction(combine)
+			fn := scm.PrepareSerialProc(combine)
+			var args [2]scm.Scmer
 			for msg, ok := values.next(); ok; msg, ok = values.next() {
 				if msg.err.r != nil {
 					if scanErr.r == nil {
@@ -1668,7 +1671,8 @@ func (t *table) scanWithBatchFrom(currentTx *TxContext, source *recSet, accessSc
 				candidateCount += msg.candidateCount
 				outCount += msg.outCount
 				if msg.outCount > 0 {
-					akkumulator = fn(akkumulator, msg.res)
+					args[0], args[1] = akkumulator, msg.res
+					akkumulator = fn.Call(args[:])
 					hadValue = true
 				}
 			}

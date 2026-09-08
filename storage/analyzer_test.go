@@ -115,7 +115,7 @@ func TestCompileScanAccessKeepsRangeEndpointsInAdjacentValues(t *testing.T) {
 func TestScanBoundarySurvivesPersistedProcedureRoundTrip(t *testing.T) {
 	registerScanBoundaryFormats()
 	orderValue := scm.Apply(scm.Globalenv.Vars[scm.Symbol("collate")], scm.NewString("utf8mb4"), scm.NewBool(true))
-	order := scm.OptimizeProcToSerialFunction(orderValue)
+	order := serialTestCallable(orderValue)
 	boundary := newScanBoundarySpec("tenant", EqualMatcher, 0, 0, true, true,
 		"utf8mb4_general_ci", true, 1, []string{"document"}, order, "utf8mb4:desc", true)
 	procedure := scm.NewProcStruct(scm.Proc{
