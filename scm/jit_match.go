@@ -19,25 +19,26 @@ package scm
 import (
 	"fmt"
 	"regexp"
-	"unsafe"
 )
 
 // Match lowering is architecture-independent. It describes values, branches,
 // loads, and calls through the common JIT emitter API; only that API's machine
 // instruction implementation belongs in an architecture-specific file.
-var jitMatchEmptyListStorage [1]Scmer
-
-func jitMatchAsGoSlice(value Scmer) []Scmer {
+// Matching inspects an existing Scheme list; it is not a new list producer.
+// Preserve its backing storage just as the statically known tagSlice path does.
+// Do not use the general escaping Go-slice materializer here: that API must
+// copy potentially frame-backed producer buffers, whereas doing so for every
+// match arm duplicates immutable input trees even in read-only accessors.
+func jitMatchListValueNative(value Scmer) Scmer {
+	if value.GetTag() == tagSlice {
+		return value
+	}
 	list, ok := scmerAsSlice(value)
 	if !ok {
-		return nil
+		return NewNil()
 	}
-	// A non-nil pointer distinguishes a successfully normalized empty list from
-	// a non-list without adding a fourth ABI result word to the emitted call.
-	if len(list) == 0 && unsafe.SliceData(list) == nil {
-		return jitMatchEmptyListStorage[:0]
-	}
-	return list
+	// Keep the existing snapshot behavior for dictionaries and wrapped values.
+	return NewSlice(append([]Scmer(nil), list...))
 }
 
 func jitMatchSymbolLiteralWords(valuePtr *byte, valueAux uint64, expectedPtr *byte, expectedAux uint64) bool {
@@ -259,13 +260,13 @@ func jitMatchListValue(ctx *JITContext, value JITValueDesc, failLabel JITLabel) 
 	normalized := value
 	typeKnown := value.Type == tagSlice
 	if !typeKnown {
-		header := ctx.EmitGoCallScalar(GoFuncAddr(jitMatchAsGoSlice), []JITValueDesc{value}, 3)
-		ctx.BindReg(header.Reg, &header)
-		ctx.BindReg(header.Reg2, &header)
-		ctx.BindReg(header.Reg3, &header)
-		ctx.EmitCmpRegImm32(header.Reg, 0)
-		ctx.EmitJump(CondEqual, failLabel)
-		normalized = ctx.EmitNewSliceFromGoSlice(&header)
+		normalized = ctx.EmitGoCallScalar(GoFuncAddr(jitMatchListValueNative), []JITValueDesc{value}, 2)
+		ctx.EmitMovRegReg(ctx.ScratchReg, normalized.Reg2)
+		ctx.EmitAndRegImm32(ctx.ScratchReg, 0xff)
+		ctx.EmitCmpRegImm32(ctx.ScratchReg, int32(tagSlice))
+		ctx.EmitJump(CondNotEqual, failLabel)
+		normalized.Type = tagSlice
+		normalized.Rooted = true
 	}
 	normalized.KnownSliceLen = value.KnownSliceLen
 	normalized.KnownSliceCap = value.KnownSliceCap
@@ -731,7 +732,3 @@ func jitCompileMatch(ctx *JITContext, list []Scmer, sliceBase Reg, result JITVal
 	}
 	return target
 }
-
-// EmitNewSliceFromGoSlice retags a Go []Scmer header as a Scheme list without
-// allocating or copying its backing storage. Ownership of the data pointer is
-// transferred from slice to the returned descriptor.
