@@ -3296,6 +3296,20 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		'tag 1)
 		(list 'operand-scope)
 		"expression collector excludes references embedded in operator heads")
+	(assert (expr_tagged_nth_equal?
+		(list '+ (list 'tag nil) (list 'tag 'later)) 'tag 1 'default 'default)
+		true
+		"tagged expression equality applies the default and short-circuits")
+	(assert (expr_tagged_nth_matches_any?
+		(list (list 'lambda '() (list 'tag 'operator-scope))
+			(list 'nested (list 'tag 'operand-scope)))
+		'tag 1 'default (list 'missing 'operand-scope))
+		true
+		"tagged expression membership searches operands without entering the operator")
+	(assert (expr_tagged_nth_matches_any?
+		(list 'root (list 'tag 'present)) 'tag 1 'default (list 'absent))
+		false
+		"tagged expression membership reports a missing value")
 	(assert (query_expr_alias_set 'default (list 'get_column 'a 'x nil nil) '()) (list 'a true)
 		"jit coverage: symbol get_column match")
 	(assert (query_expr_alias_set 'default

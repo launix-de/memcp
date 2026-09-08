@@ -78,6 +78,44 @@ func collectTaggedNthUnique(root, tag Scmer, position int, traverseHeads bool) S
 	return NewSlice(result)
 }
 
+func exprTaggedNthMatchesAny(root, tag Scmer, position int, nilReplacement Scmer, candidates []Scmer) bool {
+	if position < 0 {
+		panic("tagged nth matcher expects a non-negative position")
+	}
+
+	var pendingStorage [64]Scmer
+	pending := pendingStorage[:1]
+	pending[0] = root
+	for len(pending) != 0 {
+		last := len(pending) - 1
+		current := pending[last].WithoutSourceInfo()
+		pending = pending[:last]
+		if !current.IsSlice() {
+			continue
+		}
+		items := current.Slice()
+		if len(items) != 0 && Equal(items[0], tag) {
+			if len(items) > position {
+				candidate := items[position].WithoutSourceInfo()
+				if candidate.IsNil() {
+					candidate = nilReplacement
+				}
+				for _, expected := range candidates {
+					if Equal(candidate, expected) {
+						return true
+					}
+				}
+			}
+			continue
+		}
+		// Expression heads are operators, not operands in the caller's scope.
+		for index := len(items) - 1; index >= 1; index-- {
+			pending = append(pending, items[index])
+		}
+	}
+	return false
+}
+
 func groupAssocCapacity(inputLength int) int {
 	const initialGroups = 32
 	if inputLength < initialGroups {
@@ -114,6 +152,40 @@ func init_list_assoc_extra() {
 				{Kind: "number", Label: "position"},
 			},
 			Return: FreshAlloc,
+			Const:  true,
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		Name: "expr_tagged_nth_equal?",
+		Fn: func(a ...Scmer) Scmer {
+			return NewBool(exprTaggedNthMatchesAny(a[0], a[1], int(ToInt(a[2])), a[3], a[4:5]))
+		},
+		Type: &TypeDescriptor{Kind: "func", Description: "tests whether a tagged operand has the expected nth value, replacing nil with a supplied default",
+			Params: []*TypeDescriptor{
+				{Kind: "any", Label: "expression", NoEscape: true},
+				{Kind: "any", Label: "tag", NoEscape: true},
+				{Kind: "number", Label: "position"},
+				{Kind: "any", Label: "nil replacement", NoEscape: true},
+				{Kind: "any", Label: "expected", NoEscape: true},
+			},
+			Return: &TypeDescriptor{Kind: "bool"},
+			Const:  true,
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		Name: "expr_tagged_nth_matches_any?",
+		Fn: func(a ...Scmer) Scmer {
+			return NewBool(exprTaggedNthMatchesAny(a[0], a[1], int(ToInt(a[2])), a[3], asSlice(a[4], "expr_tagged_nth_matches_any?")))
+		},
+		Type: &TypeDescriptor{Kind: "func", Description: "tests whether a tagged operand has any expected nth value, replacing nil with a supplied default",
+			Params: []*TypeDescriptor{
+				{Kind: "any", Label: "expression", NoEscape: true},
+				{Kind: "any", Label: "tag", NoEscape: true},
+				{Kind: "number", Label: "position"},
+				{Kind: "any", Label: "nil replacement", NoEscape: true},
+				{Kind: "list", Label: "expected values", NoEscape: true},
+			},
+			Return: &TypeDescriptor{Kind: "bool"},
 			Const:  true,
 		},
 	})

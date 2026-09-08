@@ -902,8 +902,7 @@ the shallow guard instead of walking the wide expression it is about to drop. */
 		(lambda (tblvar) (resolve_column_alias tblvar default_alias)))))
 
 (define expr_refs_alias? (lambda (default_alias alias expr)
-	(reduce (expr_referenced_aliases default_alias expr) (lambda (found referenced_alias)
-		(or found (equal?? referenced_alias alias))) false)))
+	(expr_tagged_nth_equal? expr (quote get_column) 1 default_alias alias)))
 
 (define expr_only_refs_alias? (lambda (default_alias alias expr)
 	(match expr
@@ -913,14 +912,11 @@ the shallow guard instead of walking the wide expression it is about to drop. */
 		_ true)))
 
 (define expr_refs_any_alias? (lambda (default_alias aliases expr)
-	(begin
-		/* Collect once: testing N aliases must not recursively traverse the same
-		expression N times. This predicate is used throughout logical optimization
-		and physical lowering, so keeping that complexity linear is important. */
-		(define referenced_aliases (expr_referenced_aliases default_alias expr))
-		(reduce (coalesceNil aliases '()) (lambda (found alias)
-			(or found (reduce referenced_aliases (lambda (matched referenced_alias)
-				(or matched (equal?? referenced_alias alias))) false))) false))))
+	/* Testing references must not allocate an intermediate alias list or walk the
+	same expression once per candidate alias. The native predicate short-circuits
+	on the first match and keeps its traversal stack local. */
+	(expr_tagged_nth_matches_any? expr (quote get_column) 1 default_alias
+		(coalesceNil aliases '()))))
 
 /* Collect bound source aliases once. Join pruning must not rescan a wide
 projection for every source; that turns read-model queries into O(N^2) planner
