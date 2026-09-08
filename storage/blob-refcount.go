@@ -177,7 +177,10 @@ func (db *database) IncrBlobRefcount(hash string) {
 }
 
 // DecrBlobRefcount decrements the reference count for a blob hash in db.`.blobs`.
-// If the count reaches 0, the row is deleted and the blob file is removed.
+// If the count reaches 0, remove only the operational row. Its absence makes
+// the blob a cleanup candidate, never a deletion proof: counts can lag committed
+// owners after a crash. CleanDatabase alone may delete the file after checking
+// all active generations under the publication barrier.
 func (db *database) DecrBlobRefcount(hash string) {
 	defer db.lockBlobRef(hash)()
 	state := db.blobRefState()
@@ -220,15 +223,10 @@ func (db *database) DecrBlobRefcount(hash string) {
 	})
 
 	aggr := sumProc()
-	result := t.scan(
+	t.scan(
 		nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil,
 		[]string{"hash"}, blobCondition(hashVal),
 		[]string{"refcount", "$update"}, callback,
 		scm.NewInt(0), aggr, false,
 	)
-
-	// If row was deleted (RC was <=1), remove the blob file
-	if scm.ToInt(result) > 0 && db.persistence != nil {
-		db.persistence.DeleteBlob(hash)
-	}
 }

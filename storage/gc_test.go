@@ -598,3 +598,114 @@ func TestBlobManifestSurvivesUnchangedColdRebuild(t *testing.T) {
 		t.Fatalf("cold rebuild lost %d live blobs", deleted)
 	}
 }
+
+// A crash may leave the operational count below the number of committed owners.
+// Releasing one owner must never remove another owner's payload.
+func TestBlobUndercountRetainsCommittedOwners(t *testing.T) {
+	for _, scenario := range []string{"shared", "restart", "rebuild", "failed-publication"} {
+		t.Run(scenario, func(t *testing.T) {
+			defer setupGCTest(t)()
+			CreateDatabase("gcdb", false)
+			payloads := []string{strings.Repeat("a", maxInlineBlobBytes+1), strings.Repeat("b", maxInlineBlobBytes+1), strings.Repeat("c", maxInlineBlobBytes+1)}
+			for _, name := range []string{"first", "second"} {
+				tbl, _ := CreateTable("gcdb", name, Safe, false)
+				tbl.CreateColumn("id", "INT", nil, nil)
+				tbl.CreateColumn("content", "TEXT", nil, nil)
+				insertLongRows(t, tbl, payloads)
+			}
+			db := GetDatabase("gcdb")
+			for hash, count := range queryBlobsTable(t, db) {
+				if count != 2 {
+					t.Fatalf("fixture count = %d, want 2", count)
+				}
+				db.DecrBlobRefcount(hash)
+			}
+			if scenario == "restart" {
+				Rebuild(true, true)
+				databases.Remove("gcdb")
+				LoadDatabases()
+				db = GetDatabase("gcdb")
+				db.ensureLoaded()
+			}
+			if scenario == "rebuild" {
+				Rebuild(true, true)
+			}
+			if scenario == "failed-publication" {
+				persistence := db.persistence
+				failing := &failSchemaWritePersistence{PersistenceEngine: persistence, failAt: 1}
+				db.persistence = failing
+				tbl := db.tables.Get("second")
+				tbl.Insert([]string{"id", "content"}, [][]scm.Scmer{{scm.NewInt(4), scm.NewString(payloads[0])}}, nil, scm.NewNil(), false, nil)
+				result := Rebuild(true, true)
+				db.persistence = persistence
+				if !strings.Contains(result, "schema publication failure") {
+					t.Fatalf("missing injected failure: %s", result)
+				}
+			}
+			DropTable("gcdb", "first", false)
+			if got := len(blobFiles(t, "gcdb")); got != 3 {
+				t.Fatalf("decrement deleted committed blobs: got %d, want 3", got)
+			}
+			if deleted, _ := CleanDatabase(db); deleted != 0 {
+				t.Fatalf("cleanup deleted %d owned blobs", deleted)
+			}
+			references, complete := activeBlobReferences(db)
+			if !complete || len(references) != 3 {
+				t.Fatalf("references = %v, complete = %v", references, complete)
+			}
+			for _, payload := range payloads {
+				hash := fmt.Sprintf("%x", sha256.Sum256([]byte(payload)))
+				reader := db.persistence.ReadBlob(hash)
+				value, ok := gunzipReader(reader)
+				reader.Close()
+				if !ok || value.String() != payload {
+					t.Fatalf("surviving payload %s unreadable", hash)
+				}
+			}
+			DropTable("gcdb", "second", false)
+			if got := len(blobFiles(t, "gcdb")); got != 3 {
+				t.Fatalf("drop deleted blobs before ownership check: %d", got)
+			}
+			if deleted, _ := CleanDatabase(db); deleted != 3 {
+				t.Fatalf("cleanup deleted %d orphans, want 3", deleted)
+			}
+		})
+	}
+}
+
+func TestCleanReportsMissingReferencesAndRetainsOrphans(t *testing.T) {
+	defer setupGCTest(t)()
+	CreateDatabase("gcdb", false)
+	tbl, _ := CreateTable("gcdb", "docs", Safe, false)
+	tbl.CreateColumn("id", "INT", nil, nil)
+	tbl.CreateColumn("content", "TEXT", nil, nil)
+	insertLongRows(t, tbl, []string{strings.Repeat("x", maxInlineBlobBytes+1), strings.Repeat("y", maxInlineBlobBytes+1), strings.Repeat("z", maxInlineBlobBytes+1)})
+	db := GetDatabase("gcdb")
+	references, complete := activeBlobReferences(db)
+	if !complete || len(references) != 3 {
+		t.Fatal("incomplete fixture")
+	}
+	if !checkReferencedBlobFiles(db, references) {
+		t.Fatal("healthy inventory rejected")
+	}
+	for hash := range references {
+		db.persistence.DeleteBlob(hash)
+	}
+	orphan := strings.Repeat("ab", 32)
+	writer := db.persistence.WriteBlob(orphan)
+	if _, err := writer.Write([]byte("orphan")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if checkReferencedBlobFiles(db, references) {
+		t.Fatal("missing referenced blobs accepted")
+	}
+	if deleted, _ := CleanDatabase(db); deleted != 0 {
+		t.Fatalf("deleted %d blobs with incomplete inventory", deleted)
+	}
+	if got := len(blobFiles(t, "gcdb")); got != 1 {
+		t.Fatalf("orphan not retained: %d files", got)
+	}
+}

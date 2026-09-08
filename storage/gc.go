@@ -61,6 +61,10 @@ func CleanDatabase(db *database) (blobsDeleted, shardsDeleted int) {
 func cleanBlobs(db *database) int {
 	references, complete := activeBlobReferences(db)
 	if !complete {
+		fmt.Printf("blob cleanup %s: ownership check incomplete; retaining all blobs\n", db.Name)
+		return 0
+	}
+	if !checkReferencedBlobFiles(db, references) {
 		return 0
 	}
 
@@ -73,6 +77,26 @@ func cleanBlobs(db *database) int {
 		}
 	})
 	return deleted
+}
+
+// Check the reverse direction too: every committed reference must have a file.
+// This checks availability, not payload integrity, and never loads/decompresses
+// payloads. Continue after missing files so one run reports the entire inventory.
+// The caller holds persistenceLifecycle exclusively throughout the check.
+func checkReferencedBlobFiles(db *database, references map[string]struct{}) bool {
+	complete := true
+	for hash := range references {
+		reader := db.persistence.ReadBlob(hash)
+		if readErr, failed := reader.(ErrorReader); failed {
+			complete = false
+			fmt.Printf("blob cleanup %s: referenced blob %s unavailable: %v\n", db.Name, hash, readErr.e)
+		}
+		if err := reader.Close(); err != nil {
+			complete = false
+			fmt.Printf("blob cleanup %s: referenced blob %s close failed: %v\n", db.Name, hash, err)
+		}
+	}
+	return complete
 }
 
 func activeBlobReferences(db *database) (map[string]struct{}, bool) {
