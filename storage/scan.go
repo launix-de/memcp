@@ -2365,6 +2365,13 @@ func (t *storageShard) scan(access scanAccess, conditionCols []string, condition
 					locked = false
 				}
 				outCount += int64(outN)
+				if access.len() == 0 && candidateCount > 0 {
+					// Full scans have a known candidate horizon. Estimate accepted
+					// remaining rows from observed selectivity; index/RecSet scans
+					// must not use the population of the containing shard.
+					remaining := max(int64(0), int64(mapper.mainCount)-candidateCount)
+					mapper.bufferRemainingRows = outN + int(remaining*outCount/candidateCount)
+				}
 				akkumulator = mapper.Stream(akkumulator, batch[:outN], nil)
 				hadValue = true
 				if !skipShardReadLock {

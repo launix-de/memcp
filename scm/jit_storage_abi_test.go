@@ -27,6 +27,46 @@ import (
 	"unsafe"
 )
 
+func TestJITTypedInliningKeepsLargeNativeBoundaries(t *testing.T) {
+	for _, cost := range []uint16{18, 38, 48, 49, 57, 256} {
+		ctx := &JITContext{}
+		decl := &Declaration{Type: &TypeDescriptor{JITInlineCost: cost}}
+		args := []JITValueDesc{{Type: tagInt, Loc: LocStack}, {Type: tagInt, Loc: LocStack}}
+		if got := jitGeneratedEmitterInline(ctx, decl, args); got != (cost <= 48) {
+			t.Errorf("typed inline cost %d = %v", cost, got)
+		}
+	}
+}
+
+func TestJITBufferLoopsPreserveClosureCaptures(t *testing.T) {
+	values := []Scmer{NewInt(6), NewInt(9)}
+	for _, source := range []string{
+		"(lambda (limit) (lambda (a) (> a limit)))",
+		"(lambda (limit) (lambda (unused) (lambda (a) (> a limit))))",
+	} {
+		producer := CompileJIT(NewProcStruct(*calibrationProcedure(source)), true)
+		callback := Apply(producer, NewInt(7))
+		if len(callback.Proc().Params.Slice()) == 1 && callback.Proc().Params.Slice()[0].SymbolEquals("unused") {
+			callback = Apply(callback, NewNil())
+		}
+		_, captures := callback.Proc().JITCapturedLocals()
+		if len(captures) == 0 {
+			t.Fatal("test did not produce an inline closure capture")
+		}
+		kernel := CompileJITFilterBuffer(callback.Proc(), []uint8{tagInt})
+		ids := []uint32{0, 1}
+		if kernel == nil || kernel(ids, values) != 1 || ids[0] != 1 {
+			t.Fatalf("filter lost captured limit: %s", source)
+		}
+	}
+	producer := CompileJIT(NewProcStruct(*calibrationProcedure("(lambda (factor) (lambda (acc a) (+ acc (* a factor))))")), true)
+	callback := Apply(producer, NewInt(2))
+	reduce := CompileJITMapReduceBuffer(callback.Proc(), []uint8{tagInt})
+	if reduce == nil || !Equal(reduce(NewInt(0), values, 2), NewInt(30)) {
+		t.Fatal("reducer lost captured multiplier")
+	}
+}
+
 func TestJITTypedFloatConversionLocations(t *testing.T) {
 	for _, value := range []Scmer{NewInt(-7), NewInt(1<<53 + 1), NewInt(math.MinInt64), NewInt(math.MaxInt64), NewFloat(math.Copysign(0, -1)), NewFloat(math.Inf(1)), NewFloat(math.NaN()), NewFloat(1.25)} {
 		for _, location := range []string{"scalar", "pair", "stack", "stack-pair", "fp", "fp-stack"} {

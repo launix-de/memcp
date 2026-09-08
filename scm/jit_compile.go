@@ -2919,7 +2919,10 @@ func jitGeneratedEmitterInline(ctx *JITContext, declaration *Declaration, args [
 			inline = true
 		case declaration.Type.JITVirtualArgs && hasVirtualArgs && cost <= 32:
 			inline = true
-		case len(args) > 0 && knownTypes == len(args) && cost <= 256:
+		// Known tags do not eliminate dynamic variadic loops. Keep the
+		// generated body bounded even when every argument has a known type;
+		// larger bodies retain their native boundary inside the fused loop.
+		case len(args) > 0 && knownTypes == len(args) && cost <= 48:
 			inline = true
 		case knownShapes == len(args) && knownArgs == len(args) && cost <= 32:
 			inline = true

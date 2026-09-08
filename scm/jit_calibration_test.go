@@ -51,13 +51,15 @@ func TestJITCalibrationBreakEvenHasNoHiddenSafetyFactor(t *testing.T) {
 
 func TestJITCalibrationMapReduceBufferBestOf(t *testing.T) {
 	calibration := JITCostCalibration{
-		Enabled:             true,
-		BufferCompileNS:     100,
-		BufferCompileUnitNS: 4,
-		BufferCurrentNS:     10,
-		BufferFusedNS:       5,
-		BufferSavedNS:       2,
-		BufferMaxUnits:      40,
+		Enabled:              true,
+		BufferCompileNS:      100,
+		BufferCompileUnitNS:  4,
+		BufferCurrentNS:      10,
+		BufferFusedNS:        5,
+		BufferSavedNS:        2,
+		BufferProbeCurrentNS: 7,
+		BufferProbeFusedNS:   5,
+		BufferMaxUnits:       40,
 	}
 	if got := calibration.MapReduceBufferBreakEven(40, 1); got != 100 {
 		t.Fatalf("buffer break-even rows = %d, want 100", got)
@@ -74,6 +76,38 @@ func TestJITCalibrationMapReduceBufferBestOf(t *testing.T) {
 	}
 	if got := calibration.MapReduceBufferProbeBreakEven(80, 3, 1024); got == math.MaxInt {
 		t.Fatal("arbitrary-arity expression was not admitted for an adaptive probe")
+	}
+	// 260ns compilation + 5120ns duplicate execution, twice amortized at
+	// 2ns/row, plus the probe rows themselves. No hidden >60k floor.
+	if got := calibration.MapReduceBufferProbeBreakEven(80, 3, 1024); got != 6404 {
+		t.Fatalf("probe break-even = %d, want 6404", got)
+	}
+	calibration.BufferProbeFusedNS = 9
+	if got := calibration.MapReduceBufferProbeBreakEven(80, 3, 1024); got != math.MaxInt {
+		t.Fatal("a losing probe with no measured call saving was admitted")
+	}
+	calibration.DirectCallNS = 2
+	if got := calibration.MapReduceBufferProbeBreakEven(80, 3, 1024); got != 10500 {
+		t.Fatalf("call-boundary trial break-even = %d, want 10500", got)
+	}
+}
+
+func TestJITBufferProbeRequiresPureNumericExpression(t *testing.T) {
+	for _, test := range []struct {
+		source string
+		arity  int
+		want   bool
+	}{
+		{"(lambda (acc a b c) (+ acc (+ a (* b c))))", 4, true},
+		{"(lambda (acc a) (sql_sum_reduce acc a))", 2, true},
+		{"(lambda (acc a) (set_assoc acc a true))", 2, false},
+		{"(lambda (acc a) (begin (print a) (+ acc a)))", 2, false},
+		{"(lambda (acc a) (a acc))", 2, false},
+	} {
+		proc := calibrationProcedure(test.source)
+		if got := JITBufferProbeSafe(proc, test.arity); got != test.want {
+			t.Errorf("probe safety %s = %v, want %v; body=%s", test.source, got, test.want, String(proc.Body))
+		}
 	}
 }
 
@@ -93,6 +127,14 @@ func TestJITCalibrationFilterBufferBestOf(t *testing.T) {
 	}
 	if got := calibration.FilterBufferBreakEven(20, 0); got != math.MaxInt {
 		t.Fatalf("zero-column filter break-even = %d, want MaxInt", got)
+	}
+	calibration.FilterBufferCompileUnitNS = 0
+	if got := calibration.FilterBufferBreakEven(100, 16); got != 40 {
+		t.Fatalf("a measured flat compile slope disabled wide filters: %d", got)
+	}
+	calibration.FilterBufferCompileUnitNS = -1
+	if got := calibration.FilterBufferBreakEven(100, 16); got != math.MaxInt {
+		t.Fatalf("an unavailable compile slope admitted wide filters: %d", got)
 	}
 }
 

@@ -727,6 +727,66 @@ type JITMapReduceBufferFunc func(Scmer, []Scmer, int) Scmer
 // are compile-time properties of the function.
 type JITFilterBufferFunc func([]uint32, []Scmer) int
 
+// JITBufferProbeSafe proves that replaying a numeric reducer cannot mutate its
+// accumulator or invoke callbacks. Const alone is insufficient: aggregate
+// containers can have ownership-based mutable implementations.
+func JITBufferProbeSafe(proc *Proc, arity int) bool {
+	if proc == nil || arity < 1 {
+		return false
+	}
+	var safe func(Scmer) bool
+	safe = func(expr Scmer) bool {
+		for expr.GetTag() == tagSourceInfo {
+			expr = expr.SourceInfo().value
+		}
+		switch expr.GetTag() {
+		case tagNil, tagInt, tagFloat:
+			return true
+		case tagNthLocalVar:
+			return int(expr.NthLocalVar()) < arity
+		case tagSymbol:
+			if proc.Params.GetTag() == tagSlice {
+				for _, param := range proc.Params.Slice() {
+					if param.GetTag() == tagSymbol && param.Symbol() == expr.Symbol() {
+						return true
+					}
+				}
+			}
+			return false
+		case tagSlice:
+			list := expr.Slice()
+			if len(list) == 0 {
+				return false
+			}
+			decl := DeclarationForValue(list[0])
+			if decl == nil || decl.RetainsCallArgs || decl.Type == nil || !decl.Type.Const || decl.Type.Return == nil {
+				return false
+			}
+			switch decl.Type.Return.Kind {
+			case "number", "number|nil", "int", "int|nil":
+			default:
+				return false
+			}
+			for _, param := range decl.Type.Params {
+				switch param.Kind {
+				case "number", "number|nil", "int", "int|nil":
+				default:
+					return false
+				}
+			}
+			for _, arg := range list[1:] {
+				if !safe(arg) {
+					return false
+				}
+			}
+			return true
+		default:
+			return false
+		}
+	}
+	return safe(proc.Body)
+}
+
 // PrepareJITBufferProc returns source suitable for typed buffer-loop inlining.
 // Native declarations with a JIT emitter are wrapped in a procedure so physical
 // operators can specialize the same implementation without teaching the
