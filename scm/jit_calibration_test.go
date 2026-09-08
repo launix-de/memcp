@@ -51,10 +51,13 @@ func TestJITCalibrationBreakEvenHasNoHiddenSafetyFactor(t *testing.T) {
 
 func TestJITCalibrationMapReduceBufferBestOf(t *testing.T) {
 	calibration := JITCostCalibration{
-		Enabled:         true,
-		BufferCompileNS: 100,
-		BufferSavedNS:   2,
-		BufferMaxUnits:  40,
+		Enabled:             true,
+		BufferCompileNS:     100,
+		BufferCompileUnitNS: 4,
+		BufferCurrentNS:     10,
+		BufferFusedNS:       5,
+		BufferSavedNS:       2,
+		BufferMaxUnits:      40,
 	}
 	if got := calibration.MapReduceBufferBreakEven(40, 1); got != 100 {
 		t.Fatalf("buffer break-even rows = %d, want 100", got)
@@ -68,6 +71,9 @@ func TestJITCalibrationMapReduceBufferBestOf(t *testing.T) {
 		if got := calibration.MapReduceBufferBreakEven(test.units, test.columns); got != math.MaxInt {
 			t.Fatalf("ineligible buffer shape (%d units, %d columns) break-even = %d, want MaxInt", test.units, test.columns, got)
 		}
+	}
+	if got := calibration.MapReduceBufferProbeBreakEven(80, 3, 1024); got == math.MaxInt {
+		t.Fatal("arbitrary-arity expression was not admitted for an adaptive probe")
 	}
 }
 

@@ -109,28 +109,60 @@ func TestJITMapReduceBufferBestOf(t *testing.T) {
 	wideMapper := shard.OpenMapReducer([]string{"amount", "quantity"}, wide, false, 0, nil, nil)
 	defer wideMapper.Close()
 	if wideMapper.bufferReduceProc != nil {
-		t.Fatal("wide reducer entered the slower buffer-loop class")
+		t.Fatal("short wide reduction should not pay for adaptive compilation")
+	}
+
+	largeShard := benchmarkMapReduceFusionShard(mapReduceFusionBenchmarkRows)
+	expression := benchmarkMapReduceFusionProc(t, "(lambda (acc amount quantity factor) (+ acc (+ amount (* quantity factor))))")
+	expressionMapper := largeShard.OpenMapReducer([]string{"amount", "quantity", "factor"}, expression, false, 0, nil, nil)
+	defer expressionMapper.Close()
+	wantExpression := expressionMapper.Stream(scm.NewInt(0), ids, nil)
+	expressionMapper.prefetchMainColumns(ids)
+	valueTypes := make([]uint8, len(expressionMapper.mainCols))
+	for index, column := range expressionMapper.mainCols {
+		valueTypes[index] = column.JITValueType()
+	}
+	kernel := scm.CompileJITMapReduceBuffer(expression.Proc(), valueTypes)
+	if kernel == nil {
+		t.Fatal("arbitrary-arity reducer did not compile")
+	}
+	if got := kernel(scm.NewInt(0), expressionMapper.mainBulkValues, len(ids)); !scm.Equal(got, wantExpression) {
+		t.Fatalf("typed expression reducer = %s, want %s", scm.String(got), scm.String(wantExpression))
+	}
+	lifecycleMapper := largeShard.OpenMapReducer([]string{"amount", "quantity", "factor"}, expression, false, 0, nil, nil)
+	lifecycleMapper.prefetchMainColumns(ids)
+	if len(lifecycleMapper.mainBulkValues) == 0 {
+		t.Fatal("lifecycle test did not allocate the query-local value buffer")
+	}
+	lifecycleMapper.Close()
+	if lifecycleMapper.mainBulkValues != nil || lifecycleMapper.bufferReduceProc != nil || lifecycleMapper.bufferValueTypes != nil {
+		t.Fatal("Close retained query-local map-reduce buffer state")
 	}
 }
 
 func benchmarkMapReduceFusionShard(rows int) *storageShard {
 	amountValues := make([]scm.Scmer, rows)
 	quantityValues := make([]scm.Scmer, rows)
+	factorValues := make([]scm.Scmer, rows)
 	for index := range rows {
 		amountValues[index] = scm.NewInt(int64(index%251 + 1))
 		quantityValues[index] = scm.NewInt(int64(index%7 + 1))
+		factorValues[index] = scm.NewInt(int64(index%5 + 1))
 	}
 	amount := buildStorageInt(amountValues)
 	quantity := buildStorageInt(quantityValues)
+	factor := buildStorageInt(factorValues)
 	tbl := &table{Columns: []*column{
 		{Name: "amount", Typ: "int"},
 		{Name: "quantity", Typ: "int"},
+		{Name: "factor", Typ: "int"},
 	}}
 	shard := &storageShard{
 		t: tbl,
 		columns: map[string]ColumnStorage{
 			"amount":   amount,
 			"quantity": quantity,
+			"factor":   factor,
 		},
 		deltaColumns: make(map[string]int),
 		main_count:   uint32(rows),
@@ -172,6 +204,7 @@ func BenchmarkMapReduceBufferedSpectrum(b *testing.B) {
 		{name: "Sum", cols: []string{"amount"}, source: "(lambda (acc amount) (+ acc amount))", neutral: scm.NewInt(0)},
 		{name: "AffineSum", cols: []string{"amount"}, source: "(lambda (acc amount) (+ acc (* amount 3)))", neutral: scm.NewInt(0)},
 		{name: "TwoColumnSum", cols: []string{"amount", "quantity"}, source: "(lambda (acc amount quantity) (+ acc (* amount quantity)))", neutral: scm.NewInt(0)},
+		{name: "ExpressionSum", cols: []string{"amount", "quantity", "factor"}, source: "(lambda (acc amount quantity factor) (+ acc (+ amount (* quantity factor))))", neutral: scm.NewInt(0)},
 	}
 	batchSizes := []int{1, 8, 64, 1_024, 60_000, mapReduceFusionBenchmarkRows}
 
@@ -231,15 +264,30 @@ func BenchmarkMapReduceBufferCompile(b *testing.B) {
 	if !scm.JITEnabled() {
 		b.Skip("requires the JIT experiment")
 	}
-	callback := benchmarkMapReduceFusionProc(b, "(lambda (acc amount) (+ acc amount))")
-	b.ReportAllocs()
-	b.ResetTimer()
-	for range b.N {
-		compiled := scm.CompileJITMapReduceBuffer(callback.Proc(), []uint8{scm.NewInt(0).GetTag()})
-		if compiled == nil {
-			b.Fatal("failed to compile buffer reducer")
+	shapes := []struct {
+		name   string
+		source string
+		cols   int
+	}{
+		{name: "Sum", source: "(lambda (acc amount) (+ acc amount))", cols: 1},
+		{name: "ExpressionSum", source: "(lambda (acc amount quantity factor) (+ acc (+ amount (* quantity factor))))", cols: 3},
+	}
+	for _, shape := range shapes {
+		callback := benchmarkMapReduceFusionProc(b, shape.source)
+		valueTypes := make([]uint8, shape.cols)
+		for index := range valueTypes {
+			valueTypes[index] = scm.NewInt(0).GetTag()
 		}
-		runtime.KeepAlive(compiled)
+		b.Run(shape.name, func(b *testing.B) {
+			b.ReportAllocs()
+			for range b.N {
+				compiled := scm.CompileJITMapReduceBuffer(callback.Proc(), valueTypes)
+				if compiled == nil {
+					b.Fatal("failed to compile buffer reducer")
+				}
+				runtime.KeepAlive(compiled)
+			}
+		})
 	}
 }
 
@@ -264,6 +312,7 @@ func BenchmarkMapReduceBufferedBestOf(b *testing.B) {
 		{name: "Sum", cols: []string{"amount"}, source: "(lambda (acc amount) (+ acc amount))", neutral: scm.NewInt(0)},
 		{name: "AffineSum", cols: []string{"amount"}, source: "(lambda (acc amount) (+ acc (* amount 3)))", neutral: scm.NewInt(0)},
 		{name: "TwoColumnSum", cols: []string{"amount", "quantity"}, source: "(lambda (acc amount quantity) (+ acc (* amount quantity)))", neutral: scm.NewInt(0)},
+		{name: "ExpressionSum", cols: []string{"amount", "quantity", "factor"}, source: "(lambda (acc amount quantity factor) (+ acc (+ amount (* quantity factor))))", neutral: scm.NewInt(0)},
 	}
 	for _, shape := range shapes {
 		callback := benchmarkMapReduceFusionProc(b, shape.source)

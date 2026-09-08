@@ -142,7 +142,7 @@ func CompileJITStorageGetValueMulti(emit JITStorageGetValueMultiEmitter) JITStor
 // row-major Scmer buffer. Exact physical column types flow into the inlined
 // callback even though the buffer retains the general Scmer representation.
 func CompileJITMapReduceBuffer(proc *Proc, valueTypes []uint8) JITMapReduceBufferFunc {
-	if proc == nil || len(valueTypes) > 16 {
+	if proc == nil {
 		return nil
 	}
 	types := append([]uint8(nil), valueTypes...)
@@ -158,6 +158,9 @@ func CompileJITMapReduceBuffer(proc *Proc, valueTypes []uint8) JITMapReduceBuffe
 }
 
 func emitJITMapReduceBuffer(ctx *JITContext, proc *Proc, valueTypes []uint8) {
+	// The accumulator is the loop-carried phi. Its canonical home is a rooted
+	// stack pair so calls, type changes and stack growth remain safe. Physical
+	// storage inputs retain their exact types across the same backedge.
 	accumulator := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: RegRAX, Reg2: RegRBX}
 	values := jitStorageSliceArg(ctx, RegRCX, RegRDI, RegRSI)
 	rows := jitStorageScalarArg(ctx, RegR8)
