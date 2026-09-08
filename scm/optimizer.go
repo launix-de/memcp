@@ -360,6 +360,7 @@ type optimizerMetainfo struct {
 	beginDepth                int             // >0 in lexical begin scopes; their definitions do not reach the caller Env
 	inlineDepth               int
 	inlineStack               map[Symbol]bool
+	definitionStack           map[Symbol]bool
 	specializationStack       map[procSpecializationStackKey]bool
 	specializationParamMask   uint64
 	specializationDepth       int
@@ -795,6 +796,7 @@ func (ome *optimizerMetainfo) Copy() (result optimizerMetainfo) {
 	result.beginDepth = ome.beginDepth
 	result.inlineDepth = ome.inlineDepth
 	result.inlineStack = ome.inlineStack
+	result.definitionStack = ome.definitionStack
 	result.specializationStack = ome.specializationStack
 	result.specializationParamMask = ome.specializationParamMask
 	result.specializationDepth = ome.specializationDepth
@@ -829,6 +831,7 @@ func (ome *optimizerMetainfo) CopySharedScope() (result optimizerMetainfo) {
 	result.beginDepth = ome.beginDepth
 	result.inlineDepth = ome.inlineDepth
 	result.inlineStack = ome.inlineStack
+	result.definitionStack = ome.definitionStack
 	result.specializationStack = ome.specializationStack
 	result.specializationParamMask = ome.specializationParamMask
 	result.specializationDepth = ome.specializationDepth
@@ -995,7 +998,7 @@ func tryInlineLeafProc(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bo
 		return NewNil(), tiZero, false
 	}
 	callee, ok := scmerSymbol(v[0])
-	if !ok || (ome.inlineStack != nil && ome.inlineStack[callee]) {
+	if !ok || (ome.inlineStack != nil && ome.inlineStack[callee]) || (ome.definitionStack != nil && ome.definitionStack[callee]) {
 		return NewNil(), tiZero, false
 	}
 	owner := env.FindRead(callee)
@@ -1514,7 +1517,7 @@ func trySpecializeProcCall(v []Scmer, argTypes []TypeInfo, env *Env, ome *optimi
 		return NewNil(), false
 	}
 	callee, ok := scmerSymbol(v[0])
-	if !ok {
+	if !ok || (ome.definitionStack != nil && ome.definitionStack[callee]) {
 		return NewNil(), false
 	}
 	owner := env.FindRead(callee)
@@ -2007,6 +2010,254 @@ func optimizerIsLambda(expr Scmer) bool {
 	}
 	items, ok := scmerSlice(expr)
 	return ok && len(items) >= 3 && scmerIsSymbol(items[0], "lambda")
+}
+
+// optimizeRecursiveTaggedAssocFold recognizes the complete functional tree
+// fold used by planner analyses. The source procedure remains an ordinary
+// recursive match/reduce rule; only the optimized body receives the native,
+// callback-friendly traversal. Matching the complete subtree keeps near-miss
+// procedures on their original semantics.
+func optimizeRecursiveTaggedAssocFold(name Symbol, expression Scmer) (Scmer, bool) {
+	lambda, ok := scmerSlice(expression)
+	if !ok || len(lambda) < 3 || !scmerIsSymbol(lambda[0], "lambda") {
+		return expression, false
+	}
+	params, ok := scmerSlice(lambda[1])
+	if !ok || len(params) != 3 {
+		return expression, false
+	}
+	root, rootOK := scmerSymbol(params[1])
+	accumulator, accumulatorOK := scmerSymbol(params[2])
+	body, ok := scmerSlice(lambda[2])
+	if !rootOK || !accumulatorOK || !ok || len(body) != 10 || !scmerIsSymbol(body[0], "match") || !scmerIsSymbol(body[1], string(root)) {
+		return expression, false
+	}
+
+	firstPattern, firstResultOK := scmerSlice(body[2])
+	firstResult := body[3]
+	secondPattern, secondResultOK := scmerSlice(body[4])
+	consPattern, consPatternOK := scmerSlice(body[6])
+	consResult, consResultOK := scmerSlice(body[7])
+	if !firstResultOK || !secondResultOK || !consPatternOK || !consResultOK ||
+		len(firstPattern) != 5 || len(secondPattern) != 5 || len(consPattern) != 3 || len(consResult) != 4 ||
+		!scmerIsSymbol(consPattern[0], "cons") || !scmerIsSymbol(consResult[0], "reduce") ||
+		!scmerIsSymbol(body[8], "_") || !scmerIsSymbol(body[9], string(accumulator)) {
+		return expression, false
+	}
+	firstHead, firstHeadOK := scmerSlice(firstPattern[0])
+	secondHead, secondHeadOK := scmerSlice(secondPattern[0])
+	if !firstHeadOK || !secondHeadOK || len(firstHead) != 2 || len(secondHead) != 2 ||
+		!scmerIsSymbol(firstHead[0], "symbol") || !scmerIsSymbol(secondHead[0], "quote") ||
+		!astStructuralEqual(firstHead[1], secondHead[1]) || !astStructuralEqual(firstResult, body[5]) {
+		return expression, false
+	}
+	leaf, leafOK := scmerSlice(firstResult)
+	leafValue, leafValueOK := scmerSymbol(firstPattern[1])
+	if !leafOK || !leafValueOK || len(leaf) != 4 || !scmerIsSymbol(leaf[0], "set_assoc") ||
+		!scmerIsSymbol(leaf[1], string(accumulator)) || !scmerIsSymbol(leaf[3], "true") {
+		return expression, false
+	}
+
+	head, headOK := scmerSymbol(consPattern[1])
+	tail, tailOK := scmerSymbol(consPattern[2])
+	reducer, reducerOK := scmerSlice(consResult[2])
+	initial, initialOK := scmerSlice(consResult[3])
+	if !headOK || !tailOK || !reducerOK || !initialOK || !scmerIsSymbol(consResult[1], string(tail)) ||
+		len(reducer) < 3 || !scmerIsSymbol(reducer[0], "lambda") {
+		return expression, false
+	}
+	reducerParams, reducerParamsOK := scmerSlice(reducer[1])
+	recursiveTail, recursiveTailOK := scmerSlice(reducer[2])
+	if !reducerParamsOK || len(reducerParams) != 2 || !recursiveTailOK || len(recursiveTail) != 4 || len(initial) != 4 ||
+		!scmerIsSymbol(recursiveTail[0], string(name)) || !scmerIsSymbol(initial[0], string(name)) ||
+		!astStructuralEqual(recursiveTail[1], params[0]) || !astStructuralEqual(initial[1], params[0]) ||
+		!astStructuralEqual(recursiveTail[2], reducerParams[1]) || !astStructuralEqual(recursiveTail[3], reducerParams[0]) ||
+		!scmerIsSymbol(initial[2], string(head)) || !scmerIsSymbol(initial[3], string(accumulator)) {
+		return expression, false
+	}
+
+	callback := NewSlice([]Scmer{
+		NewSymbol("lambda"),
+		NewSlice([]Scmer{NewSymbol(string(accumulator)), NewSymbol(string(leafValue))}),
+		firstResult,
+	})
+	rewritten := append([]Scmer(nil), lambda...)
+	rewritten[2] = NewSlice([]Scmer{
+		NewSymbol("reduce"),
+		NewSlice([]Scmer{
+			NewSymbol("optimizer_tree_collect_tagged_nth_unique"),
+			params[1],
+			NewSlice([]Scmer{NewSymbol("quote"), firstHead[1]}),
+			NewInt(1),
+		}),
+		callback,
+		params[2],
+	})
+	return NewSlice(rewritten), true
+}
+
+// optimizeRecursiveTaggedPredicate recognizes a complete operand-only tree
+// search. It deliberately requires both literal-pattern spellings, the
+// short-circuiting reducer, and the false fallback before replacing the
+// functional recursion with the physical matcher.
+func optimizeRecursiveTaggedPredicate(name Symbol, expression Scmer) (Scmer, bool) {
+	lambda, ok := scmerSlice(expression)
+	if !ok || len(lambda) < 3 || !scmerIsSymbol(lambda[0], "lambda") {
+		return expression, false
+	}
+	params, ok := scmerSlice(lambda[1])
+	body, bodyOK := scmerSlice(lambda[2])
+	if !ok || len(params) != 3 || !bodyOK || len(body) != 10 || !scmerIsSymbol(body[0], "match") ||
+		!astStructuralEqual(body[1], params[2]) || !scmerIsSymbol(body[8], "_") || !scmerIsSymbol(body[9], "false") {
+		return expression, false
+	}
+	firstPattern, firstPatternOK := scmerSlice(body[2])
+	secondPattern, secondPatternOK := scmerSlice(body[4])
+	firstHead, firstHeadOK := func() ([]Scmer, bool) {
+		if !firstPatternOK || len(firstPattern) != 5 {
+			return nil, false
+		}
+		return scmerSlice(firstPattern[0])
+	}()
+	secondHead, secondHeadOK := func() ([]Scmer, bool) {
+		if !secondPatternOK || len(secondPattern) != 5 {
+			return nil, false
+		}
+		return scmerSlice(secondPattern[0])
+	}()
+	if !firstHeadOK || !secondHeadOK || len(firstHead) != 2 || len(secondHead) != 2 ||
+		!scmerIsSymbol(firstHead[0], "symbol") || !scmerIsSymbol(secondHead[0], "quote") ||
+		!astStructuralEqual(firstHead[1], secondHead[1]) || !astStructuralEqual(body[3], body[5]) {
+		return expression, false
+	}
+	leafValue, leafValueOK := scmerSymbol(firstPattern[1])
+	comparison, comparisonOK := scmerSlice(body[3])
+	resolved, resolvedOK := func() ([]Scmer, bool) {
+		if !comparisonOK || len(comparison) != 3 || !scmerIsSymbol(comparison[0], "equal??") || !astStructuralEqual(comparison[2], params[1]) {
+			return nil, false
+		}
+		return scmerSlice(comparison[1])
+	}()
+	if !leafValueOK || !resolvedOK || len(resolved) != 3 ||
+		!scmerIsSymbol(resolved[1], string(leafValue)) || !astStructuralEqual(resolved[2], params[0]) {
+		return expression, false
+	}
+
+	consPattern, consPatternOK := scmerSlice(body[6])
+	reduce, reduceOK := scmerSlice(body[7])
+	if !consPatternOK || !reduceOK || len(consPattern) != 3 || len(reduce) != 4 ||
+		!scmerIsSymbol(consPattern[0], "cons") || !scmerIsSymbol(reduce[0], "reduce") ||
+		!astStructuralEqual(reduce[1], consPattern[2]) || !scmerIsSymbol(reduce[3], "false") {
+		return expression, false
+	}
+	reducer, reducerOK := scmerSlice(reduce[2])
+	if !reducerOK || len(reducer) < 3 || !scmerIsSymbol(reducer[0], "lambda") {
+		return expression, false
+	}
+	reducerParams, reducerParamsOK := scmerSlice(reducer[1])
+	reducerBody, reducerBodyOK := scmerSlice(reducer[2])
+	if !reducerParamsOK || len(reducerParams) != 2 || !reducerBodyOK || len(reducerBody) != 3 ||
+		!scmerIsSymbol(reducerBody[0], "or") || !astStructuralEqual(reducerBody[1], reducerParams[0]) {
+		return expression, false
+	}
+	recursive, recursiveOK := scmerSlice(reducerBody[2])
+	if !recursiveOK || len(recursive) != 4 || !scmerIsSymbol(recursive[0], string(name)) ||
+		!astStructuralEqual(recursive[1], params[0]) || !astStructuralEqual(recursive[2], params[1]) ||
+		!astStructuralEqual(recursive[3], reducerParams[1]) {
+		return expression, false
+	}
+
+	rewritten := append([]Scmer(nil), lambda...)
+	rewritten[2] = NewSlice([]Scmer{
+		NewSymbol("optimizer_expr_tagged_nth_matches_any"),
+		params[2],
+		NewSlice([]Scmer{NewSymbol("quote"), firstHead[1]}),
+		NewInt(1),
+		params[0],
+		NewSlice([]Scmer{NewSymbol("list"), params[1]}),
+	})
+	return NewSlice(rewritten), true
+}
+
+func optimizedTaggedPredicateSpec(value Scmer) (rootSlot, nilSlot, candidateSlot NthLocalVar, tag Scmer, position int, ok bool) {
+	if !value.IsProc() {
+		return 0, 0, 0, NewNil(), 0, false
+	}
+	body, bodyOK := scmerSlice(value.Proc().Body)
+	if !bodyOK || len(body) != 6 || !scmerIsSymbol(body[0], "optimizer_expr_tagged_nth_matches_any") ||
+		!body[1].IsNthLocalVar() || !body[4].IsNthLocalVar() {
+		return 0, 0, 0, NewNil(), 0, false
+	}
+	positionValue := body[3]
+	if stripped, strippedOK := scmerStripSourceInfo(positionValue); strippedOK {
+		positionValue = stripped
+	}
+	candidates, candidatesOK := scmerSlice(body[5])
+	if !positionValue.IsInt() || !candidatesOK {
+		return 0, 0, 0, NewNil(), 0, false
+	}
+	var candidate Scmer
+	switch {
+	case len(candidates) == 2 && scmerIsSymbol(candidates[0], "list"):
+		candidate = candidates[1]
+	case len(candidates) == 4 && scmerIsSymbol(candidates[0], "!list") && candidates[2].IsInt() && candidates[2].Int() == 1:
+		candidate = candidates[3]
+	default:
+		return 0, 0, 0, NewNil(), 0, false
+	}
+	if !candidate.IsNthLocalVar() {
+		return 0, 0, 0, NewNil(), 0, false
+	}
+	return body[1].NthLocalVar(), body[4].NthLocalVar(), candidate.NthLocalVar(), body[2], int(positionValue.Int()), true
+}
+
+// optimizeTaggedPredicateSet recognizes a reduction which ORs calls to an
+// already-recognized tagged predicate. It consolidates N tree walks into one
+// native walk over the candidate set.
+func optimizeTaggedPredicateSet(expression Scmer, env *Env) (Scmer, bool) {
+	lambda, ok := scmerSlice(expression)
+	if !ok || len(lambda) < 3 || !scmerIsSymbol(lambda[0], "lambda") {
+		return expression, false
+	}
+	params, paramsOK := scmerSlice(lambda[1])
+	reduce, reduceOK := scmerSlice(lambda[2])
+	if !paramsOK || len(params) != 3 || !reduceOK || len(reduce) != 4 || !scmerIsSymbol(reduce[0], "reduce") || !scmerIsSymbol(reduce[3], "false") {
+		return expression, false
+	}
+	input, inputOK := scmerSlice(reduce[1])
+	reducer, reducerOK := scmerSlice(reduce[2])
+	if !inputOK || len(input) != 3 || !scmerIsSymbol(input[0], "coalesceNil") || !astStructuralEqual(input[1], params[1]) ||
+		!reducerOK || len(reducer) < 3 || !scmerIsSymbol(reducer[0], "lambda") {
+		return expression, false
+	}
+	reducerParams, reducerParamsOK := scmerSlice(reducer[1])
+	reducerBody, reducerBodyOK := scmerSlice(reducer[2])
+	if !reducerParamsOK || len(reducerParams) != 2 || !reducerBodyOK || len(reducerBody) != 3 ||
+		!scmerIsSymbol(reducerBody[0], "or") || !astStructuralEqual(reducerBody[1], reducerParams[0]) {
+		return expression, false
+	}
+	call, callOK := scmerSlice(reducerBody[2])
+	if !callOK || len(call) != 4 {
+		return expression, false
+	}
+	callee, calleeOK := scmerSymbol(call[0])
+	owner := env.FindRead(callee)
+	if !calleeOK || owner == nil {
+		return expression, false
+	}
+	rootSlot, nilSlot, candidateSlot, tag, position, specOK := optimizedTaggedPredicateSpec(owner.Vars[callee])
+	if !specOK || int(rootSlot) >= len(call)-1 || int(nilSlot) >= len(call)-1 || int(candidateSlot) >= len(call)-1 ||
+		!astStructuralEqual(call[1+int(rootSlot)], params[2]) || !astStructuralEqual(call[1+int(nilSlot)], params[0]) ||
+		!astStructuralEqual(call[1+int(candidateSlot)], reducerParams[1]) {
+		return expression, false
+	}
+
+	rewritten := append([]Scmer(nil), lambda...)
+	rewritten[2] = NewSlice([]Scmer{
+		NewSymbol("optimizer_expr_tagged_nth_matches_any"),
+		params[2], tag, NewInt(int64(position)), params[0], reduce[1],
+	})
+	return NewSlice(rewritten), true
 }
 
 func optimizerProcSequenceForDefinition(name Symbol, expression Scmer) procSequenceKind {
@@ -2618,8 +2869,36 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 		if v[1].IsNthLocalVar() {
 			v[0] = NewSymbol("setN")
 		}
+		if hasDefinedSym {
+			if rewritten, ok := optimizeRecursiveTaggedPredicate(definedSym, v[2]); ok {
+				v[2] = rewritten
+				ome.rewrite.rewrites++
+			}
+			if rewritten, ok := optimizeTaggedPredicateSet(v[2], env); ok {
+				v[2] = rewritten
+				ome.rewrite.rewrites++
+			}
+			if rewritten, ok := optimizeRecursiveTaggedAssocFold(definedSym, v[2]); ok {
+				v[2] = rewritten
+				ome.rewrite.rewrites++
+			}
+		}
 		var returnType TypeInfo
-		v[2], returnType = OptimizeEx(v[2], env, ome, true)
+		if hasDefinedSym && optimizerIsLambda(v[2]) {
+			if ome.definitionStack == nil {
+				ome.definitionStack = make(map[Symbol]bool)
+			}
+			wasDefining := ome.definitionStack[definedSym]
+			ome.definitionStack[definedSym] = true
+			v[2], returnType = OptimizeEx(v[2], env, ome, true)
+			if wasDefining {
+				ome.definitionStack[definedSym] = true
+			} else {
+				delete(ome.definitionStack, definedSym)
+			}
+		} else {
+			v[2], returnType = OptimizeEx(v[2], env, ome, true)
+		}
 		transferOwnership = returnType.Transfer()
 		if v[1].IsNthLocalVar() {
 			localType := returnType.ToTypeDescriptor()

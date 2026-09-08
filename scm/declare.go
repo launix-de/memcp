@@ -45,10 +45,14 @@ const (
 
 // Declaration describes a built-in or Scheme-defined function.
 type Declaration struct {
-	Name            string
-	Fn              func(...Scmer) Scmer
-	SpecialForm     SpecialForm
-	IsSpecialForm   bool
+	Name          string
+	Fn            func(...Scmer) Scmer
+	SpecialForm   SpecialForm
+	IsSpecialForm bool
+	// OptimizerOnly marks an implementation primitive that may be emitted by an
+	// optimizer rewrite, but is not part of the Scheme source language. It stays
+	// registered so optimized code can resolve, interpret, and JIT the call.
+	OptimizerOnly   bool
 	Type            *TypeDescriptor
 	RetainsCallArgs bool // native result or state may retain the variadic argument array
 	SyntaxKind      SyntaxKind
@@ -334,7 +338,7 @@ func DeclareTitle(title string) {
 var FreshAlloc = &TypeDescriptor{Kind: "list", Transfer: true, Length: UnknownLength}
 
 func (d *Declaration) IsForbidden() bool {
-	return d.Type != nil && d.Type.Forbidden
+	return d.OptimizerOnly || d.Type != nil && d.Type.Forbidden
 }
 
 func (d *Declaration) IsFoldable() bool {
@@ -533,7 +537,7 @@ func WriteDocumentation(folder string) error {
 		}
 		// function name
 		def, ok := declarations[t]
-		if !ok {
+		if !ok || def.IsForbidden() {
 			// unknown entry — ignore gracefully
 			continue
 		}
@@ -758,6 +762,9 @@ func Validate(val Scmer, require string) string {
 		if len(slice) > 0 {
 			def := DeclarationForValue(slice[0])
 			if def != nil {
+				if def.OptimizerOnly {
+					panic(source_info.String() + ": optimizer-only function " + def.Name + " cannot be used in source code")
+				}
 				if len(slice)-1 < def.MinParams() {
 					panic(source_info.String() + ": function " + def.Name + " expects at least " + fmt.Sprintf("%d", def.MinParams()) + " parameters")
 				}
@@ -1062,7 +1069,7 @@ func Help(fn Scmer) string {
 		b.WriteString("\nget further information by typing (help \"functionname\") to get more info\n")
 	} else {
 		def := DeclarationForValue(fn)
-		if def != nil {
+		if def != nil && !def.IsForbidden() {
 			b.WriteString("Help for: " + def.Name + "\n===\n\n")
 			b.WriteString(def.Type.Description + "\n\n")
 			b.WriteString(fmt.Sprintf("Allowed nø of parameters: %d-%d\n\n", def.MinParams(), def.MaxParams()))

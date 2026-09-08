@@ -137,6 +137,118 @@ func TestOptimizeDoesNotFuseUnrecognizedSplitAndTerms(t *testing.T) {
 	}
 }
 
+const plannerTaggedAssocFoldSource = `(define planner_test_resolve_alias (lambda (value fallback)
+	(coalesceNil value fallback)))
+(define planner_test_tagged_assoc_fold (lambda (default_alias expr aliases)
+	(match expr
+		((symbol get_column) tblvar _ _ _) (set_assoc aliases (planner_test_resolve_alias tblvar default_alias) true)
+		((quote get_column) tblvar _ _ _) (set_assoc aliases (planner_test_resolve_alias tblvar default_alias) true)
+		(cons head tail) (reduce tail (lambda (found item)
+			(planner_test_tagged_assoc_fold default_alias item found))
+			(planner_test_tagged_assoc_fold default_alias head aliases))
+		_ aliases)))`
+
+func TestOptimizeRecognizesRecursiveTaggedAssocFold(t *testing.T) {
+	env := newOptimizerTestEnv()
+	definitionOffset := strings.Index(plannerTaggedAssocFoldSource, "(define planner_test_tagged_assoc_fold")
+	definition, ok := scmerSlice(Read(t.Name(), plannerTaggedAssocFoldSource[definitionOffset:]))
+	if !ok || len(definition) != 3 {
+		t.Fatal("could not parse recursive tagged assoc fold definition")
+	}
+	if _, recognized := optimizeRecursiveTaggedAssocFold(Symbol("planner_test_tagged_assoc_fold"), definition[2]); !recognized {
+		t.Fatalf("raw recursive tagged assoc fold was not recognized: %s", String(definition[2]))
+	}
+	EvalAll(t.Name(), plannerTaggedAssocFoldSource, env)
+	proc := env.Vars[Symbol("planner_test_tagged_assoc_fold")]
+	if !proc.IsProc() {
+		t.Fatal("tagged assoc fold was not defined")
+	}
+	serialized := serializedTestExpr(t, env, proc.Proc().Body)
+	if !strings.Contains(serialized, "optimizer_tree_collect_tagged_nth_unique") || strings.Contains(serialized, "(match ") {
+		t.Fatalf("recursive tagged assoc fold was not lowered after full-shape recognition: %s", serialized)
+	}
+	got := Apply(proc,
+		NewSymbol("default"),
+		NewSlice([]Scmer{
+			NewSymbol("root"),
+			NewSlice([]Scmer{NewSymbol("get_column"), NewSymbol("a"), NewNil(), NewNil(), NewNil()}),
+			NewSlice([]Scmer{NewSymbol("nested"), NewSlice([]Scmer{NewSymbol("get_column"), NewNil(), NewNil(), NewNil(), NewNil()})}),
+		}),
+		NewSlice(nil),
+	)
+	want := NewSlice([]Scmer{NewSymbol("a"), NewBool(true), NewSymbol("default"), NewBool(true)})
+	if !Equal(got, want) {
+		t.Fatalf("lowered tagged assoc fold returned %s, want %s", String(got), String(want))
+	}
+}
+
+func TestOptimizeRejectsPartialTaggedAssocFoldShape(t *testing.T) {
+	env := newOptimizerTestEnv()
+	source := strings.Replace(plannerTaggedAssocFoldSource, "\t\t_ aliases)))", "\t\t_ (list))))", 1)
+	EvalAll(t.Name(), source, env)
+	proc := env.Vars[Symbol("planner_test_tagged_assoc_fold")]
+	if !proc.IsProc() {
+		t.Fatal("near-miss tagged assoc fold was not defined")
+	}
+	if serialized := serializedTestExpr(t, env, proc.Proc().Body); strings.Contains(serialized, "optimizer_tree_collect_tagged_nth_unique") {
+		t.Fatalf("partial tagged assoc fold shape was lowered: %s", serialized)
+	}
+}
+
+const plannerTaggedPredicateSource = `(define planner_test_predicate_resolve (lambda (value fallback)
+	(coalesceNil value fallback)))
+(define planner_test_tagged_predicate (lambda (default_alias alias expr)
+	(match expr
+		((symbol get_column) tblvar _ _ _) (equal?? (planner_test_predicate_resolve tblvar default_alias) alias)
+		((quote get_column) tblvar _ _ _) (equal?? (planner_test_predicate_resolve tblvar default_alias) alias)
+		(cons _head tail) (reduce tail (lambda (found item)
+			(or found (planner_test_tagged_predicate default_alias alias item))) false)
+		_ false)))
+(define planner_test_tagged_predicate_set (lambda (default_alias aliases expr)
+	(reduce (coalesceNil aliases '()) (lambda (found alias)
+		(or found (planner_test_tagged_predicate default_alias alias expr))) false)))`
+
+func TestOptimizeRecognizesTaggedPredicateAndCandidateSet(t *testing.T) {
+	env := newOptimizerTestEnv()
+	EvalAll(t.Name(), plannerTaggedPredicateSource, env)
+	predicate := env.Vars[Symbol("planner_test_tagged_predicate")]
+	setPredicate := env.Vars[Symbol("planner_test_tagged_predicate_set")]
+	if !predicate.IsProc() || !setPredicate.IsProc() {
+		t.Fatal("tagged predicates were not defined")
+	}
+	for name, proc := range map[string]Scmer{"single": predicate, "set": setPredicate} {
+		serialized := serializedTestExpr(t, env, proc.Proc().Body)
+		if !strings.Contains(serialized, "optimizer_expr_tagged_nth_matches_any") || strings.Contains(serialized, "(reduce ") || strings.Contains(serialized, "(match ") {
+			t.Fatalf("%s tagged predicate was not fused after full-shape recognition: %s", name, serialized)
+		}
+	}
+	tree := NewSlice([]Scmer{
+		NewSlice([]Scmer{
+			NewSlice([]Scmer{NewSymbol("lambda"), NewSlice(nil), NewSlice([]Scmer{NewSymbol("get_column"), NewSymbol("operator"), NewNil(), NewNil(), NewNil()})}),
+		}),
+		NewSlice([]Scmer{NewSymbol("nested"), NewSlice([]Scmer{NewSymbol("get_column"), NewSymbol("operand"), NewNil(), NewNil(), NewNil()})}),
+	})
+	if got := Apply(predicate, NewSymbol("default"), NewSymbol("operator"), tree); !got.IsBool() || got.Bool() {
+		t.Fatalf("tagged predicate entered an operator head: %s", String(got))
+	}
+	if got := Apply(setPredicate, NewSymbol("default"), NewSlice([]Scmer{NewSymbol("missing"), NewSymbol("operand")}), tree); !got.IsBool() || !got.Bool() {
+		t.Fatalf("tagged candidate-set predicate missed an operand: %s", String(got))
+	}
+}
+
+func TestOptimizeRejectsPartialTaggedPredicateShape(t *testing.T) {
+	env := newOptimizerTestEnv()
+	source := strings.Replace(plannerTaggedPredicateSource, "\t\t_ false)))", "\t\t_ true)))", 1)
+	EvalAll(t.Name(), source, env)
+	predicate := env.Vars[Symbol("planner_test_tagged_predicate")]
+	if !predicate.IsProc() {
+		t.Fatal("near-miss tagged predicate was not defined")
+	}
+	if serialized := serializedTestExpr(t, env, predicate.Proc().Body); strings.Contains(serialized, "optimizer_expr_tagged_nth_matches_any") {
+		t.Fatalf("partial tagged predicate shape was fused: %s", serialized)
+	}
+}
+
 func plannerFusionAndTree(depth int, next *int64) Scmer {
 	if depth == 0 {
 		value := NewInt(*next)
