@@ -17,8 +17,8 @@ setup:
   - sql: "CREATE TABLE imc_file (id INT PRIMARY KEY, filename VARCHAR(64), search VARCHAR(4096))"
   - sql: "CREATE TABLE imc_document (id INT PRIMARY KEY, file_id INT, sort_key INT)"
   - sql: "CREATE TABLE imc_acl (document_id INT PRIMARY KEY, allowed INT)"
-  - sql: "CREATE TABLE imc_domain (id INT PRIMARY KEY, direct_flag INT)"
-  - sql: "CREATE TABLE imc_assignment (domain_id INT, actor_id INT, allowed INT)"
+  - sql: "CREATE TABLE imc_domain (id INT NOT NULL PRIMARY KEY, direct_flag INT)"
+  - sql: "CREATE TABLE imc_assignment (domain_id INT NOT NULL, actor_id INT, allowed INT)"
   - sql: "CREATE TABLE imc_override (domain_id INT, actor_id INT, allowed INT)"
   - scm: |
       (begin
@@ -55,6 +55,144 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS imc_file"
 
 test_cases:
+  - name: "Unique partition dominance needs no per-request selectivity scan"
+    scm: |
+      (begin
+        (define planning (sql_queryplan_compile_session (newsession) nil))
+        (with_session planning (lambda ()
+          (parse_sql "memcp-tests"
+            "SELECT SQL_CALC_FOUND_ROWS d.id FROM imc_domain d WHERE d.direct_flag = 0 AND NOT EXISTS (SELECT 1 FROM imc_assignment a WHERE a.actor_id = 99 AND a.domain_id = d.id) ORDER BY d.id DESC LIMIT 10"
+            (lambda args true) planning nil)))
+        (not (strlike (serialize (sql_queryplan_guard_from_session planning))
+          "%scan_selectivity_estimate%")))
+    expect:
+      data: [true]
+
+  - name: "Partition dominance requires every non-null unique key component"
+    scm: |
+      (begin
+        (define src '("d" "memcp-tests" "imc_domain" false nil))
+        (and (aggregate_pushdown_identity_partition? src '("id" "direct_flag"))
+          (not (aggregate_pushdown_identity_partition? src '("direct_flag")))))
+    expect:
+      data: [true]
+
+  - name: "Ordered anti-membership keeps a broad residual inside the limited scan"
+    sql: |
+      EXPLAIN PHYSICAL
+      SELECT d.id FROM imc_domain d
+      WHERE d.direct_flag = 0 AND NOT EXISTS (
+        SELECT 1 FROM imc_assignment a WHERE a.actor_id = 99 AND a.domain_id = d.id
+      ) ORDER BY d.id DESC LIMIT 10
+    expect:
+      result_contains: ["anti_membership_filter", "chosen ordered_complement_filter", "recset_not"]
+      result_not_contains: ["recset_difference"]
+
+  - name: "Ordered anti-membership returns the complete page and found-row count"
+    session_id: "imc_ordered_anti"
+    warmup: 5
+    timing_samples: 20
+    sql: |
+      SELECT SQL_CALC_FOUND_ROWS d.id FROM imc_domain d
+      WHERE d.direct_flag = 0 AND NOT EXISTS (
+        SELECT 1 FROM imc_assignment a WHERE a.actor_id = 99 AND a.domain_id = d.id
+      ) ORDER BY d.id DESC LIMIT 10
+    expect:
+      data: [{id: 639}, {id: 637}, {id: 636}, {id: 635}, {id: 634},
+             {id: 633}, {id: 632}, {id: 631}, {id: 630}, {id: 629}]
+
+  - name: "Ordered anti-membership counts all matches before LIMIT"
+    session_id: "imc_ordered_anti"
+    sql: "SELECT FOUND_ROWS() AS n"
+    expect:
+      data: [{n: 581}]
+
+  - name: "Ordered anti-membership retains OFFSET and nonempty exclusions"
+    sql: |
+      SELECT d.id FROM imc_domain d
+      WHERE d.direct_flag = 0 AND NOT EXISTS (
+        SELECT 1 FROM imc_assignment a WHERE a.actor_id = 7 AND a.domain_id = d.id
+      ) ORDER BY d.id DESC LIMIT 2 OFFSET 2
+    expect:
+      data: [{id: 635}, {id: 633}]
+
+  - name: "Grouped anti-membership enumerates physical carriers"
+    sql: |
+      EXPLAIN PHYSICAL
+      SELECT d.id, COUNT(*) AS n FROM imc_domain d
+      WHERE d.id NOT IN (
+        SELECT a.domain_id FROM imc_assignment a WHERE a.actor_id = 7
+      ) GROUP BY d.id ORDER BY d.id DESC LIMIT 10
+    expect:
+      result_contains:
+        - "candidate_keyset"
+        - "driver_filter_join_probe"
+        - "driver_rows 640"
+      result_not_contains:
+        - ".grp:imc_assignment:"
+
+  - name: "Grouped anti-membership returns the ordered page"
+    warmup: 5
+    timing_samples: 20
+    sql: |
+      SELECT SQL_CALC_FOUND_ROWS d.id FROM imc_domain d
+      WHERE d.id NOT IN (
+        SELECT a.domain_id FROM imc_assignment a WHERE a.actor_id = 7
+      ) GROUP BY d.id ORDER BY d.id DESC LIMIT 10
+    expect:
+      data: [{id: 639}, {id: 637}, {id: 635}, {id: 633}, {id: 631},
+             {id: 629}, {id: 627}, {id: 625}, {id: 623}, {id: 621}]
+
+  - name: "Grouped anti-membership alternatives preserve the complete result"
+    sql: |
+      EXPLAIN PHYSICAL CALIBRATE
+      SELECT d.id, COUNT(*) AS n FROM imc_domain d
+      WHERE d.id NOT IN (
+        SELECT a.domain_id FROM imc_assignment a WHERE a.actor_id = 7
+      ) GROUP BY d.id ORDER BY d.id DESC LIMIT 10
+    expect:
+      result_contains: ["candidate_keyset", "driver_filter_join_probe", "result_equal"]
+      result_not_contains: ['"result_equal": false']
+
+  - name: "Primary-key projection grouping does not create a group cache"
+    sql: |
+      EXPLAIN PHYSICAL
+      SELECT d.id FROM imc_domain d
+      WHERE d.id NOT IN (SELECT a.domain_id FROM imc_assignment a WHERE a.actor_id = 7)
+      GROUP BY d.id ORDER BY d.id DESC LIMIT 10
+    expect:
+      result_contains: ["scan_order", "membership_carrier"]
+      result_not_contains: [".grp:imc_domain:"]
+
+  - name: "Non-unique grouping still removes duplicates"
+    sql: "SELECT direct_flag FROM imc_domain GROUP BY direct_flag ORDER BY direct_flag"
+    expect:
+      data: [{direct_flag: 0}, {direct_flag: 1}]
+
+  - name: "Primary-key grouping retains HAVING"
+    sql: "SELECT id FROM imc_domain GROUP BY id HAVING COUNT(*) > 1"
+    expect: {rows: 0}
+
+  - name: "Grouped anti-membership preserves unmatched rows"
+    sql: |
+      SELECT COUNT(*) AS n FROM imc_domain d
+      WHERE NOT EXISTS (
+        SELECT 1 FROM imc_assignment a WHERE a.domain_id = d.id AND a.actor_id = 7
+      )
+    expect:
+      data: [{n: 320}]
+
+  - name: "Grouped positive and negative membership preserve intersection"
+    sql: |
+      SELECT COUNT(*) AS n FROM imc_domain d
+      WHERE EXISTS (
+        SELECT 1 FROM imc_assignment a WHERE a.domain_id = d.id AND a.actor_id = 7
+      ) AND NOT EXISTS (
+        SELECT 1 FROM imc_override o WHERE o.domain_id = d.id AND o.actor_id = 7
+      )
+    expect:
+      data: [{n: 213}]
+
   - name: "UNION estimate algebra preserves hook upper bounds"
     scm: |
       (begin

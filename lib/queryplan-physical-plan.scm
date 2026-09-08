@@ -1489,7 +1489,7 @@ outer joins. */
 				leave aggregate values to the filtered lazy computed columns. */
 				(if (empty_list? aggregate_probe_bindings)
 					(non_scalar_order_aggregates ags)
-					'()))))
+					'()) (gs_facts stage))))
 		(define cleanup_plan (if (query_block? src)
 			nil
 			(build_group_keytable_cleanup schema tbl alias grouptbl keys key_names)))
@@ -4002,6 +4002,74 @@ RecSet; membership edges retain their own physical operators. */
 				(quote membership_consumer) nil)
 				(quote order_limit))))))
 
+/* Both trees implement exactly residual AND NOT EXISTS. Eager difference
+filters the entire driver before ordering; a complement boundary leaves the
+same residual inside scan_order so LIMIT can brake. Do not push the residual
+eagerly merely because it is present: cost the work at its actual consumer.
+Only scalar estimates and Costgen coefficients are used here, never alternative
+plan construction or timing during compilation. */
+(define anti_membership_prefilter_preferred? (lambda (src residual formula block)
+	(if (not (and (query_limit_active? (qb_offset block) (qb_limit block))
+		(order_items_belong_to_source? src (qb_order block))))
+		true
+		(begin
+			(define planning_session (planner_context_session (qb_facts block)))
+			(define tx (planner_context_tx (qb_facts block)))
+			(define rows (planner_source_row_count src))
+			(define target (probe_limit_work_rows (qb_limit block) planning_session))
+			(define offset (planner_literal_value (coalesceNil (qb_offset block) 0) planning_session))
+			(define estimate (planner_source_filter_estimate src residual 512 tx planning_session))
+			(define matches (planner_estimated_matching_rows estimate rows rows))
+			/* The excluded set's density must be complemented. Treating a zero-row
+			EXISTS domain as zero surviving NOT EXISTS rows destroys the LIMIT estimate.
+			Unknown domains conservatively deny an early-stop benefit. */
+			(define retained_fraction (reduce (car formula) (lambda (fraction term)
+				(begin
+					(define stage (car term))
+					(define input (gs_input stage))
+					(define input_rows (if (source_is_base_table? input) (planner_source_row_count input) nil))
+					(define candidate_estimate (if (source_is_base_table? input)
+						(planner_source_filter_estimate input
+							(coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true)
+							512 tx planning_session) nil))
+					(define candidate_rows (planner_estimated_matching_rows candidate_estimate input_rows input_rows))
+					(planner_record_table_statistics_guards (list input) planning_session)
+					(if (and (number? input_rows) (number? candidate_rows))
+						(* fraction (if (> input_rows 0) (- 1 (min 1 (/ candidate_rows input_rows))) 1))
+						0))) 1))
+			(if (not (and (number? rows) (and (number? matches) (and (number? target) (number? offset)))))
+				true
+				(begin
+					(define accepted (* matches retained_fraction))
+					(define visited (if (> accepted 0) (min rows (/ (* (+ target offset) rows) accepted)) rows))
+					(define work (membership_source_work_profile src residual '() planning_session))
+					(define row_ns (+ planner_membership_scan_row_ns
+						(* (qassoc_get work (quote filter_columns) 0) planner_membership_filter_column_row_ns)
+						(* (qassoc_get work (quote expression_operations) 0) planner_membership_expression_operation_row_ns)))
+					(define eager_ns (+ planner_membership_scan_invocation_ns (* rows row_ns)
+						(* matches planner_membership_recset_build_row_ns)
+						(* (membership_ordered_recset_sort_work accepted) planner_membership_ordered_recset_sort_unit_ns)))
+					(define lazy_ns (+ (* visited row_ns)
+						(* rows planner_membership_recset_build_row_ns)
+						(* visited planner_membership_ordered_driver_input_row_ns)))
+					(define decision_id (concat "anti_membership_filter:" (source_alias src) ":"
+						(stable_structural_hash residual true)))
+					(define normal (if (< lazy_ns eager_ns) "ordered_complement_filter" "prefiltered_difference"))
+					(define chosen (planner_physical_choice decision_id normal
+						(list "ordered_complement_filter" "prefiltered_difference") planning_session))
+					(planner_record_table_statistics_guards (list src) planning_session)
+					(planner_record_session_value_guards (list residual (qb_limit block) (qb_offset block)) planning_session)
+					(planner_record_physical_decision (list
+						(list "decision_id" decision_id) (list "decision" "anti_membership_filter")
+						(list "chosen" chosen) (list "reason" "lowest_total_ns")
+						(list "inputs" (list (list "input_rows" rows) (list "residual_rows" matches)
+							(list "retained_fraction" retained_fraction) (list "visited_rows" visited)
+							(list "limit" target) (list "offset" offset)))
+						(list "alternatives" (list
+							(list (list "plan" "ordered_complement_filter") (list "total_ns" lazy_ns))
+							(list (list "plan" "prefiltered_difference") (list "total_ns" eager_ns))))) planning_session)
+					(equal? chosen "prefiltered_difference")))))))
+
 (define lower_single_source_query_block (lambda (block)
 	(begin
 		(define src (car (qb_sources block)))
@@ -4155,7 +4223,8 @@ RecSet; membership edges retain their own physical operators. */
 				whole visible table. This is both exact and the useful Difference case. */
 				(define membership_formula_difference_driver (and membership_formula_driver
 					(and (empty_list? (nth membership_formula 3))
-						(not (equal? membership_formula_residual true)))))
+						(and (not (equal? membership_formula_residual true))
+							(anti_membership_prefilter_preferred? src membership_formula_residual membership_formula block)))))
 				(define membership_formula_expr (if membership_formula_difference_driver
 					(begin
 						(define base_cols (extract_columns_for_alias src membership_formula_residual))
@@ -8232,12 +8301,12 @@ physical decision and preserve its runtime recompile gate. */
 								(qb_schema block) scan_sources scan_plan first_alias needed_exprs
 								final_condition fields order_items (qb_offset block) (qb_limit block)
 								stage_catalog (qb_facts block))
-						(if (physical_prejoin_supported? block)
-							(lower_query_block_through_prejoin block)
-							(lower_materialized_join_order
-								(qb_schema block) scan_sources scan_plan first_alias needed_exprs
-								final_condition fields order_items (qb_offset block) (qb_limit block)
-								stage_catalog (qb_facts block)))))
+							(if (physical_prejoin_supported? block)
+								(lower_query_block_through_prejoin block)
+								(lower_materialized_join_order
+									(qb_schema block) scan_sources scan_plan first_alias needed_exprs
+									final_condition fields order_items (qb_offset block) (qb_limit block)
+									stage_catalog (qb_facts block)))))
 ))))))
 
 (define zero_source_field_expr_key (lambda (expr)

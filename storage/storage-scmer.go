@@ -234,15 +234,29 @@ func (s *StorageSCMER) SetValue(i uint32, v scm.Scmer) {
 	s.values[i] = v
 }
 
+// storageValueEqual identifies interchangeable dictionary/constant values,
+// not values that happen to compare equal after expression coercions. Scalar
+// representation equality also preserves large integers, signed zero, NaN
+// payloads and date zones. Text may have distinct backing allocations.
+func storageValueEqual(a, b scm.Scmer) bool {
+	if a == b {
+		return true
+	}
+	if a.IsString() && b.IsString() {
+		return a.String() == b.String()
+	}
+	if a.IsSymbol() && b.IsSymbol() {
+		return a.String() == b.String()
+	}
+	return false
+}
+
 func (s *StorageSCMER) scan(i uint32, value scm.Scmer) {
 	// enum detection: track up to enumMaxSymbols distinct values with frequencies
 	if s.enumK != 0xFF {
 		found := false
 		for j := uint8(0); j < s.enumK; j++ {
-			// Use strict comparison: NULL is only equal to NULL
-			// (scm.Equal treats NULL == 0 == false per Scheme semantics,
-			// but storage needs them distinguished)
-			if value.IsNil() == s.enumVals[j].IsNil() && (value.IsNil() || scm.Equal(s.enumVals[j], value)) {
+			if storageValueEqual(s.enumVals[j], value) {
 				s.enumFreqs[j]++
 				found = true
 				break
