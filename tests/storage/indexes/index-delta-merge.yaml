@@ -55,6 +55,33 @@ test_cases:
     sql: "SELECT missing FROM idx_merge_bool_text WHERE o = true"
     expect: {error: true}
 
+  - name: "Rebuild preserves distinct boolean and text values"
+    setup:
+      - scm: '(rebuild (table "memcp-tests" "idx_merge_bool_text") true true)'
+    sql: "SELECT s, CONCAT(o, '') AS value FROM idx_merge_bool_text WHERE s IN ('http://spec11-minus.example/b', 'http://test26.org/item', 'http://test25.org/c', 'http://robust01.org/comp') ORDER BY s"
+    expect:
+      rows: 4
+      data:
+        - {s: "http://robust01.org/comp", value: "view"}
+        - {s: "http://spec11-minus.example/b", value: "true"}
+        - {s: "http://test25.org/c", value: "3"}
+        - {s: "http://test26.org/item", value: "yes"}
+
+  - name: "Boolean delta lookup agrees with rebuilt text storage"
+    setup:
+      - scm: |
+          (insert (table "memcp-tests" "idx_merge_bool_text") '("s" "p" "o")
+            (list (list "second" "http://spec11-minus.example/deleted" true)
+              (list "null" "http://spec11-minus.example/deleted" nil)))
+    sql: "SELECT s FROM idx_merge_bool_text WHERE p = 'http://spec11-minus.example/deleted' AND o = true ORDER BY s"
+    expect: {rows: 2, data: [{s: "http://spec11-minus.example/b"}, {s: "second"}]}
+
+  - name: "Boolean/text lookup survives another rebuild"
+    setup:
+      - scm: '(rebuild (table "memcp-tests" "idx_merge_bool_text") true true)'
+    sql: "SELECT s FROM idx_merge_bool_text WHERE p = 'http://spec11-minus.example/deleted' AND o = true ORDER BY s"
+    expect: {rows: 2, data: [{s: "http://spec11-minus.example/b"}, {s: "second"}]}
+
   # ==============================================================
   # Phase 1: Setup — populate main, build non-unique index
   # ==============================================================
