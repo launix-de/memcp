@@ -10387,15 +10387,17 @@ existing scan and expression primitives. No predicate is discarded. */
 		(define terms (split_and_terms condition))
 		(define indexed (filter terms (lambda (term) (semijoin_index_term? src term))))
 		(define residual (filter terms (lambda (term) (not (contains? indexed term)))))
-		(if (or (empty_list? indexed) (empty_list? residual))
-			(semijoin_residual_recset src input condition)
-			(list (quote if)
-				(list (quote semijoin_split_filter_wins?) (quoted_runtime_list src)
-					(quoted_runtime_list indexed) (count residual))
-				(semijoin_residual_recset src
-					(candidate_recset_filter_source src input (combine_where_terms indexed true))
-					(combine_where_terms residual true))
-				(semijoin_residual_recset src input condition))))))
+		(if (empty_list? residual)
+			(candidate_recset_filter_source src input condition)
+			(if (empty_list? indexed)
+				(semijoin_residual_recset src input condition)
+				(list (quote if)
+					(list (quote semijoin_split_filter_wins?) (quoted_runtime_list src)
+						(quoted_runtime_list indexed) (count residual))
+					(semijoin_residual_recset src
+						(candidate_recset_filter_source src input (combine_where_terms indexed true))
+						(combine_where_terms residual true))
+					(semijoin_residual_recset src input condition)))))))
 
 (define semijoin_direct_recset (lambda (spec)
 	(begin

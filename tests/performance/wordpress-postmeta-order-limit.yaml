@@ -160,7 +160,8 @@ test_cases:
       rows: 1
       result_contains:
         - '.prejoin:'
-        - '.grp:'
+        - 'semijoin_carrier'
+        - 'recset_project_join'
         - 'scan_order'
 
   - name: "WordPress handwritten equivalent-driver batched scan_join_order"
