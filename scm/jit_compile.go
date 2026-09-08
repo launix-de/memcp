@@ -1834,9 +1834,19 @@ func jitNewSliceResult(values []Scmer, length uint64) Scmer {
 	}
 }
 
+func jitNewSlice1(a Scmer) Scmer {
+	values := []Scmer{a}
+	return jitNewSliceResult(values, 1)
+}
+
 func jitNewSlice2(a, b Scmer) Scmer {
 	values := []Scmer{a, b}
 	return jitNewSliceResult(values, 2)
+}
+
+func jitNewSlice3(a, b, c Scmer) Scmer {
+	values := []Scmer{a, b, c}
+	return jitNewSliceResult(values, 3)
 }
 
 func jitNewSlice4(a, b, c, d Scmer) Scmer {
@@ -1852,6 +1862,16 @@ func jitNewSlice6(a, b, c, d Scmer, tail *[2]Scmer) Scmer {
 	return jitNewSliceResult(values, 6)
 }
 
+func jitNewSlice5(a, b, c, d Scmer, tail *[1]Scmer) Scmer {
+	values := []Scmer{a, b, c, d, tail[0]}
+	return jitNewSliceResult(values, 5)
+}
+
+func jitNewSlice7(a, b, c, d Scmer, tail *[3]Scmer) Scmer {
+	values := []Scmer{a, b, c, d, tail[0], tail[1], tail[2]}
+	return jitNewSliceResult(values, 7)
+}
+
 func jitNewSlice8(a, b, c, d Scmer, tail *[4]Scmer) Scmer {
 	values := []Scmer{a, b, c, d, tail[0], tail[1], tail[2], tail[3]}
 	return jitNewSliceResult(values, 8)
@@ -1859,16 +1879,37 @@ func jitNewSlice8(a, b, c, d Scmer, tail *[4]Scmer) Scmer {
 
 func jitDirectSliceBuilder(length int) uint64 {
 	switch length {
+	case 1:
+		return GoFuncAddr(jitNewSlice1)
 	case 2:
 		return GoFuncAddr(jitNewSlice2)
+	case 3:
+		return GoFuncAddr(jitNewSlice3)
 	case 4:
 		return GoFuncAddr(jitNewSlice4)
+	case 5:
+		return GoFuncAddr(jitNewSlice5)
 	case 6:
 		return GoFuncAddr(jitNewSlice6)
+	case 7:
+		return GoFuncAddr(jitNewSlice7)
 	case 8:
 		return GoFuncAddr(jitNewSlice8)
 	default:
 		return 0
+	}
+}
+
+// jitDirectSliceBuilder historically doubled as an inlining heuristic while
+// only even-width builders existed. Direct materialization is profitable for
+// odd widths too, but that must not silently broaden the set of builtin calls
+// duplicated into callers. Keep policy separate from mechanism.
+func jitDirectSliceBuilderPrefersInlining(length int) bool {
+	switch length {
+	case 2, 4, 6, 8:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -2861,7 +2902,7 @@ func jitGeneratedEmitterInline(ctx *JITContext, declaration *Declaration, args [
 		inline = declaration.Type.JITInlineCallbacks && knownCallback
 	} else if !inline {
 		switch {
-		case declaration.Type.JITVirtualArgs && cost <= jitTrivialVirtualInlineCost && (jitDirectSliceBuilder(len(args)) != 0 || len(args) > 8):
+		case declaration.Type.JITVirtualArgs && cost <= jitTrivialVirtualInlineCost && (jitDirectSliceBuilderPrefersInlining(len(args)) || len(args) > 8):
 			inline = true
 		case declaration.Type.JITVirtualArgs && hasVirtualArgs && cost <= 32:
 			inline = true
