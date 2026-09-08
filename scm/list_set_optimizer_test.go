@@ -46,7 +46,7 @@ func TestOptimizeLowersListMembershipFolds(t *testing.T) {
 			if !strings.Contains(serialized, tc.lowered) {
 				t.Fatalf("membership fold was not lowered to %s: %s", tc.lowered, serialized)
 			}
-			fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+			fn := serialTestCallable(Eval(optimized, env))
 			got := fn(
 				NewSlice([]Scmer{NewString("a"), NewString("c")}),
 				NewSlice([]Scmer{NewString("a"), NewString("b"), NewString("c")}))
@@ -60,7 +60,7 @@ func TestOptimizeLowersListMembershipFolds(t *testing.T) {
 func TestListMembershipFoldPreservesCoerciveEquality(t *testing.T) {
 	optimized, env := optimizeListPipeline(t, `(lambda (required available)
 		(reduce required (lambda (ok value) (and ok (contains? available value))) true))`)
-	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+	fn := serialTestCallable(Eval(optimized, env))
 	required := make([]Scmer, 12)
 	available := make([]Scmer, 16)
 	for index := range available {
@@ -109,7 +109,7 @@ func TestListMembershipFoldSemantics(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			optimized, env := optimizeListPipeline(t, tc.source)
-			fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+			fn := serialTestCallable(Eval(optimized, env))
 			got := fn(NewSlice(tc.input), NewSlice(tc.available)).Bool()
 			if got != tc.want {
 				t.Fatalf("got %t, want %t", got, tc.want)
@@ -121,7 +121,7 @@ func TestListMembershipFoldSemantics(t *testing.T) {
 func TestListMembershipFoldKeepsEmptyInputValidationOrder(t *testing.T) {
 	optimized, env := optimizeListPipeline(t, `(lambda (required available)
 		(reduce required (lambda (ok value) (and ok (contains? available value))) true))`)
-	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+	fn := serialTestCallable(Eval(optimized, env))
 	if !fn(NewSlice(nil), NewInt(1)).Bool() {
 		t.Fatal("empty all-fold did not preserve its true neutral")
 	}
@@ -134,7 +134,7 @@ func TestOptimizeKeepsComputedMembershipCaptureInsideReducer(t *testing.T) {
 	if strings.Contains(serialized, "list_contains_all") {
 		t.Fatalf("computed callback capture was evaluated eagerly: %s", serialized)
 	}
-	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+	fn := serialTestCallable(Eval(optimized, env))
 	if !fn(NewSlice(nil), NewSlice(nil)).Bool() {
 		t.Fatal("empty fold lost its neutral value")
 	}
@@ -143,7 +143,7 @@ func TestOptimizeKeepsComputedMembershipCaptureInsideReducer(t *testing.T) {
 func BenchmarkPlannerJoinSetSubset(b *testing.B) {
 	optimized, env := optimizeListPipeline(b, `(lambda (required available)
 		(reduce (coalesceNil required '()) (lambda (ok alias) (and ok (contains? available alias))) true))`)
-	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+	fn := serialTestCallable(Eval(optimized, env))
 	required := make([]Scmer, 12)
 	available := make([]Scmer, 16)
 	for index := range available {

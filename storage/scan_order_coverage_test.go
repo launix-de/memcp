@@ -23,9 +23,13 @@ import (
 	"github.com/launix-de/memcp/scm"
 )
 
+func serialTestCallable(value scm.Scmer) func(...scm.Scmer) scm.Scmer {
+	return scanSortDirections([]scm.Scmer{value})[0]
+}
+
 func persistableTestOrder(reverse bool) (scm.Scmer, func(...scm.Scmer) scm.Scmer) {
 	value := scm.Apply(scm.Globalenv.Vars[scm.Symbol("collate")], scm.NewString("utf8mb4"), scm.NewBool(reverse))
-	return value, scm.OptimizeProcToSerialFunction(value)
+	return value, serialTestCallable(value)
 }
 
 func TestScanOrderOptimizerCompilesOrderIntoAccessSchema(t *testing.T) {
@@ -333,8 +337,8 @@ func TestCoveredOrderedLimitBrakesInsideIndexBatch(t *testing.T) {
 			queue.candidateCount, limit)
 	}
 
-	// An additional acceptance predicate can still reject index matches, so it
-	// must retain the ordinary scan batch instead of claiming full coverage.
+	// A residual predicate does not prove coverage. It can still start with a
+	// small batch, provided continuation refills/grows rather than truncating.
 	acceptAll := buildProc([]string{"bucket"}, scm.NewSlice([]scm.Scmer{
 		scm.NewSymbol("equal?"),
 		scm.NewSymbol("bucket"),
@@ -342,9 +346,27 @@ func TestCoveredOrderedLimitBrakesInsideIndexBatch(t *testing.T) {
 	}))
 	acceptAll.Proc().En.Vars[equalSymbol] = equalFn
 	queue = run([]string{"bucket"}, acceptAll)
-	if queue.candidateCount <= limit {
-		t.Fatalf("acceptance predicate incorrectly used covered LIMIT batch: %d candidates",
+	if queue.candidateCount != limit {
+		t.Fatalf("all-accepting residual loaded an oversized first batch: %d candidates",
 			queue.candidateCount)
+	}
+	for _, threshold := range []int64{5, 3000, rows} {
+		accept := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
+			return scm.NewBool(values[0].Int() >= threshold)
+		})
+		queue = run([]string{"rank"}, accept)
+		want := min(limit, rows-int(threshold))
+		if len(queue.items) != want {
+			t.Fatalf("residual threshold %d returned %d rows, want %d", threshold, len(queue.items), want)
+		}
+		for i, id := range queue.items {
+			if int64(id) != threshold+int64(i) {
+				t.Fatalf("residual threshold %d item %d = %d", threshold, i, id)
+			}
+		}
+		if queue.candidateCount < threshold+int64(want) {
+			t.Fatalf("residual threshold %d failed to refill: %d candidates", threshold, queue.candidateCount)
+		}
 	}
 
 	// Visibility is checked after index iteration. A short covered batch may be

@@ -3112,23 +3112,7 @@ func init_vector() {
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					var d272 JITValueDesc
-					if d271.Loc == LocImm {
-						d272 = JITValueDesc{Loc: LocImm, Type: tagFloat, Imm: NewFloat(d271.Imm.Float())}
-					} else if d271.Type == tagFloat && d271.Loc == LocReg {
-						d272 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: d271.Reg}
-						ctx.BindReg(d271.Reg, &d272)
-						ctx.BindReg(d271.Reg, &d272)
-					} else if d271.Type == tagFloat && d271.Loc == LocRegPair {
-						ctx.FreeReg(d271.Reg)
-						d272 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: d271.Reg2}
-						ctx.BindReg(d271.Reg2, &d272)
-						ctx.BindReg(d271.Reg2, &d272)
-					} else {
-						d272 = ctx.EmitGoCallScalar(GoFuncAddr(JITScmerToFloatBits), []JITValueDesc{d271}, 1)
-						d272.Type = tagFloat
-						ctx.BindReg(d272.Reg, &d272)
-					}
+					d272 = ctx.EmitFloatDesc(d271)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d272)
 					ctx.FreeDesc(&d269)
@@ -3153,23 +3137,7 @@ func init_vector() {
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					var d276 JITValueDesc
-					if d275.Loc == LocImm {
-						d276 = JITValueDesc{Loc: LocImm, Type: tagFloat, Imm: NewFloat(d275.Imm.Float())}
-					} else if d275.Type == tagFloat && d275.Loc == LocReg {
-						d276 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: d275.Reg}
-						ctx.BindReg(d275.Reg, &d276)
-						ctx.BindReg(d275.Reg, &d276)
-					} else if d275.Type == tagFloat && d275.Loc == LocRegPair {
-						ctx.FreeReg(d275.Reg)
-						d276 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: d275.Reg2}
-						ctx.BindReg(d275.Reg2, &d276)
-						ctx.BindReg(d275.Reg2, &d276)
-					} else {
-						d276 = ctx.EmitGoCallScalar(GoFuncAddr(JITScmerToFloatBits), []JITValueDesc{d275}, 1)
-						d276.Type = tagFloat
-						ctx.BindReg(d276.Reg, &d276)
-					}
+					d276 = ctx.EmitFloatDesc(d275)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d276)
 					ctx.FreeDesc(&d273)
@@ -6408,23 +6376,7 @@ func init_vector() {
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					var d653 JITValueDesc
-					if d652.Loc == LocImm {
-						d653 = JITValueDesc{Loc: LocImm, Type: tagFloat, Imm: NewFloat(d652.Imm.Float())}
-					} else if d652.Type == tagFloat && d652.Loc == LocReg {
-						d653 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: d652.Reg}
-						ctx.BindReg(d652.Reg, &d653)
-						ctx.BindReg(d652.Reg, &d653)
-					} else if d652.Type == tagFloat && d652.Loc == LocRegPair {
-						ctx.FreeReg(d652.Reg)
-						d653 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: d652.Reg2}
-						ctx.BindReg(d652.Reg2, &d653)
-						ctx.BindReg(d652.Reg2, &d653)
-					} else {
-						d653 = ctx.EmitGoCallScalar(GoFuncAddr(JITScmerToFloatBits), []JITValueDesc{d652}, 1)
-						d653.Type = tagFloat
-						ctx.BindReg(d653.Reg, &d653)
-					}
+					d653 = ctx.EmitFloatDesc(d652)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d653)
 					ctx.FreeDesc(&d650)
@@ -6449,23 +6401,7 @@ func init_vector() {
 					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
-					var d657 JITValueDesc
-					if d656.Loc == LocImm {
-						d657 = JITValueDesc{Loc: LocImm, Type: tagFloat, Imm: NewFloat(d656.Imm.Float())}
-					} else if d656.Type == tagFloat && d656.Loc == LocReg {
-						d657 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: d656.Reg}
-						ctx.BindReg(d656.Reg, &d657)
-						ctx.BindReg(d656.Reg, &d657)
-					} else if d656.Type == tagFloat && d656.Loc == LocRegPair {
-						ctx.FreeReg(d656.Reg)
-						d657 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: d656.Reg2}
-						ctx.BindReg(d656.Reg2, &d657)
-						ctx.BindReg(d656.Reg2, &d657)
-					} else {
-						d657 = ctx.EmitGoCallScalar(GoFuncAddr(JITScmerToFloatBits), []JITValueDesc{d656}, 1)
-						d657.Type = tagFloat
-						ctx.BindReg(d657.Reg, &d657)
-					}
+					d657 = ctx.EmitFloatDesc(d656)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d657)
 					ctx.FreeDesc(&d654)

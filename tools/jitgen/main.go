@@ -2326,7 +2326,7 @@ func (g *codeGen) stabilizeLiveSliceIndicesAcrossCallback() {
 }
 
 // emitSerialCallableCall lowers a call through a callback prepared by
-// PrepareSerialProc or OptimizeProcToSerialFunction. SSA represents these calls
+// PrepareSerialProc. SSA represents these calls
 // either as an indirect function call or as a statically resolved
 // (*SerialProc).Call method. Keeping both representations on this path lets a
 // known lambda recursively invoke its JIT emitter at the actual callback site.
@@ -5183,14 +5183,14 @@ func addScmPrefix(code string) string {
 		"NewFastDict": true, "NewFastDictValue": true,
 		"Scmer": true, "GoFuncAddr": true, "JITBuildMergeClosure": true,
 		"JITIntDiv": true, "JITEmitGoCallResults": true, "JITCloneScmerSlice": true, "JITAppendScmerSlice": true, "JITAppendScmerSliceCopy": true, "JITNewSliceCopy": true,
-		"JITPanic":                     true,
-		"InvertJITCondition":           true,
-		"JITPrepareScmerGoArg":         true,
-		"JITAtomicAddUint64":           true,
-		"EnsureDesc":                   true,
-		"ConcatStrings":                true,
-		"OptimizeProcToSerialFunction": true,
-		"CondEqual":                    true, "CondNotEqual": true, "CondSignedLess": true, "CondSignedGreater": true, "CondSignedLessOrEqual": true, "CondSignedGreaterOrEqual": true,
+		"JITPanic":             true,
+		"InvertJITCondition":   true,
+		"JITPrepareScmerGoArg": true,
+		"JITAtomicAddUint64":   true,
+		"EnsureDesc":           true,
+		"ConcatStrings":        true,
+		"PrepareSerialProc":    true,
+		"CondEqual":            true, "CondNotEqual": true, "CondSignedLess": true, "CondSignedGreater": true, "CondSignedLessOrEqual": true, "CondSignedGreaterOrEqual": true,
 		"CondParity":        true,
 		"CondUnsignedBelow": true, "CondUnsignedAboveOrEqual": true, "CondUnsignedBelowOrEqual": true, "CondUnsignedAbove": true,
 		"RegRAX": true, "RegRBX": true, "RegRCX": true, "RegRDX": true,
@@ -7490,21 +7490,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			// (Scmer).Float() — extract float64 from Scmer.
 			arg := g.vals[v.Call.Args[0].Name()]
 			dv := g.allocDesc()
-			g.emit("var %s JITValueDesc", dv)
-			g.emit("if %s.Loc == LocImm {", arg.goVar)
-			g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagFloat, Imm: NewFloat(%s.Imm.Float())}", dv, arg.goVar)
-			g.emit("} else if %s.Type == tagFloat && %s.Loc == LocReg {", arg.goVar, arg.goVar)
-			g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: %s.Reg}", dv, arg.goVar)
-			g.emit("\tctx.BindReg(%s.Reg, &%s)", arg.goVar, dv)
-			g.emit("} else if %s.Type == tagFloat && %s.Loc == LocRegPair {", arg.goVar, arg.goVar)
-			g.emit("\tctx.FreeReg(%s.Reg)", arg.goVar) // free ptr, keep aux (float bits)
-			g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: %s.Reg2}", dv, arg.goVar)
-			g.emit("\tctx.BindReg(%s.Reg2, &%s)", arg.goVar, dv)
-			g.emit("} else {")
-			g.emit("\t%s = ctx.EmitGoCallScalar(GoFuncAddr(JITScmerToFloatBits), []JITValueDesc{%s}, 1)", dv, arg.goVar)
-			g.emit("\t%s.Type = tagFloat", dv)
-			g.emit("\tctx.BindReg(%s.Reg, &%s)", dv, dv)
-			g.emit("}")
+			g.emit("%s := ctx.EmitFloatDesc(%s)", dv, arg.goVar)
 			g.vals[name] = genVal{goVar: dv, isDesc: true}
 		case "String":
 			// (Scmer).String() string — extract Go string from Scmer
@@ -7645,8 +7631,8 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			dv := g.allocDesc()
 			g.emit("%s := JITValueDesc{Loc: LocVirtualSlice, Type: tagSlice, Virtual: append([]JITValueDesc(nil), args...)}", dv)
 			g.vals[name] = genVal{goVar: dv, isDesc: true, marker: "_newargslice"}
-		case "OptimizeProcToSerialFunction", "PrepareSerialProc":
-			// Both callback preparation helpers are compiler-only when the callback
+		case "PrepareSerialProc":
+			// Callback preparation is compiler-only when the callback
 			// shape is known. Preserve the lambda template so the generated Call
 			// instruction below recursively invokes its emitter at the loop site.
 			// Known lambda templates remain compile-time values and can be inlined by
@@ -7659,7 +7645,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			dv := g.allocDesc()
 			if arg.marker == "_knownimm" {
 				optimizedVar := g.allocTemp("optimizedCallback")
-				g.emit("%s := NewFunc(OptimizeProcToSerialFunction(%s.Imm))", optimizedVar, arg.goVar)
+				g.emit("%s := jitPrepareCallback(%s.Imm)", optimizedVar, arg.goVar)
 				g.emit("ctx.TrackImm(%s)", optimizedVar)
 				g.emit("%s := JITValueDesc{Loc: LocImm, Type: tagFunc, Imm: %s, Rooted: true}", dv, optimizedVar)
 				g.vals[name] = genVal{goVar: dv, isDesc: true, marker: "_serial_callable"}
@@ -7670,7 +7656,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			g.emit("\t%s = %s", dv, arg.goVar)
 			g.emit("} else if %s.Loc == LocImm {", arg.goVar)
 			optimizedVar := g.allocTemp("optimizedCallback")
-			g.emit("\t%s := NewFunc(OptimizeProcToSerialFunction(%s.Imm))", optimizedVar, arg.goVar)
+			g.emit("\t%s := jitPrepareCallback(%s.Imm)", optimizedVar, arg.goVar)
 			g.emit("\tctx.TrackImm(%s)", optimizedVar)
 			g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagFunc, Imm: %s, Rooted: true}", dv, optimizedVar)
 			g.emit("} else {")
@@ -9324,6 +9310,13 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 
 	case *ssa.Alloc:
 		if ptr, ok := v.Type().Underlying().(*types.Pointer); ok {
+			if named, ok := ptr.Elem().(*types.Named); ok && named.Obj().Name() == "SerialProc" && named.Obj().Pkg() != nil && named.Obj().Pkg().Path() == "github.com/launix-de/memcp/scm" {
+				// PrepareSerialProc is erased to a callable descriptor in native
+				// code. Taking its address for Call must not allocate a Go struct
+				// or lose the lambda template needed for callback inlining.
+				g.vals[name] = genVal{marker: "_serial_cell"}
+				break
+			}
 			if isScmerType(ptr.Elem()) {
 				dataReg := g.allocReg()
 				auxReg := g.allocReg()
@@ -9369,6 +9362,19 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 
 	case *ssa.Store:
 		dst := g.vals[v.Addr.Name()]
+		if dst.marker == "_serial_cell" {
+			src := g.resolveValue(v.Val)
+			if src.marker != "_serial_callable" {
+				panic(fmt.Sprintf("serial callback cell requires a prepared callback: %s", v))
+			}
+			// The receiver address, rather than the temporary preparation result,
+			// is live across the loop backedge. Give its callable a stable home;
+			// lambda templates and immediates remain compile-time-only values.
+			g.emit("ctx.StabilizeDescForControlFlow(&%s)", src.goVar)
+			src.pinAcrossBlock = true
+			g.vals[v.Addr.Name()] = src
+			break
+		}
 		if global, ok := v.Addr.(*ssa.Global); ok {
 			expr, resolved := g.globalSourceExpr(global)
 			if !resolved {

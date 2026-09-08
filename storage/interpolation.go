@@ -30,7 +30,9 @@ import (
 //
 // getVal reads the value at a given position in the sorted index.
 // minVal/maxVal are the first/last values in the sorted range.
-func interpolationSearch(lo, n int, key scm.Scmer, minVal, maxVal scm.Scmer, getVal func(int) scm.Scmer) int {
+// less must be the index's ordering, including its equivalence classes;
+// coercing expression equality cannot safely decide a search direction.
+func interpolationSearch(lo, n int, key scm.Scmer, minVal, maxVal scm.Scmer, getVal func(int) scm.Scmer, less func(scm.Scmer, scm.Scmer) bool) int {
 	if n <= 0 {
 		return lo
 	}
@@ -48,14 +50,14 @@ func interpolationSearch(lo, n int, key scm.Scmer, minVal, maxVal scm.Scmer, get
 			}
 			// Probe the guess position
 			gv := getVal(guess)
-			if scm.Less(key, gv) || scm.Equal(key, gv) {
+			if !less(gv, key) {
 				// key <= guess: search in [lo, guess+1)
 				upperN := guess - lo + 1
 				if upperN > n {
 					upperN = n
 				}
 				return lo + sort.Search(upperN, func(i int) bool {
-					return !scm.Less(getVal(lo+i), key) // getVal(pos) >= key
+					return !less(getVal(lo+i), key) // getVal(pos) >= key
 				})
 			}
 			// key > guess: search in [guess+1, lo+n)
@@ -65,13 +67,13 @@ func interpolationSearch(lo, n int, key scm.Scmer, minVal, maxVal scm.Scmer, get
 				return lo + n
 			}
 			return newLo + sort.Search(newN, func(i int) bool {
-				return !scm.Less(getVal(newLo+i), key)
+				return !less(getVal(newLo+i), key)
 			})
 		}
 	}
 	// Fallback: plain binary search
 	return lo + sort.Search(n, func(i int) bool {
-		return !scm.Less(getVal(lo+i), key)
+		return !less(getVal(lo+i), key)
 	})
 }
 

@@ -32,7 +32,7 @@ func TestOptimizeSinksSingleUseClosureIntoOnceCallback(t *testing.T) {
 		t.Fatalf("single-use closure stayed outside once callback: %s", serialized)
 	}
 
-	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+	fn := serialTestCallable(Eval(optimized, env))
 	session := Eval(Read(t.Name(), `(newsession)`), env)
 	if got := fn(session, NewInt(8)); !Equal(got, NewInt(9)) {
 		t.Fatalf("sunk closure returned %s, want 9", String(got))
@@ -51,7 +51,7 @@ func TestOptimizeKeepsClosureOutsideRepeatedCallback(t *testing.T) {
 		t.Fatalf("inner once callback hid its repeated parent: %s", serialized)
 	}
 
-	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+	fn := serialTestCallable(Eval(optimized, env))
 	session := Eval(Read(t.Name(), `(newsession)`), env)
 	got := fn(session, NewSlice([]Scmer{NewInt(1), NewInt(2)}), NewInt(8))
 	want := NewSlice([]Scmer{NewInt(9), NewInt(10)})
@@ -73,7 +73,7 @@ func TestOptimizeKeepsBindingClosureAheadOfOnceCallback(t *testing.T) {
 		t.Fatalf("binding closure crossed callback scope: %s", serialized)
 	}
 
-	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+	fn := serialTestCallable(Eval(optimized, env))
 	session := Eval(Read(t.Name(), `(newsession)`), env)
 	if got := fn(session, NewInt(8)); !Equal(got, NewInt(9)) {
 		t.Fatalf("retained binding closure returned %s, want 9", String(got))
@@ -98,7 +98,7 @@ func TestOptimizeSinksThroughTypedNativeCallable(t *testing.T) {
 		t.Fatalf("typed dynamic callable did not expose once callback: %s", serialized)
 	}
 
-	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+	fn := serialTestCallable(Eval(optimized, env))
 	if got := fn(NewInt(8)); !Equal(got, NewInt(11)) {
 		t.Fatalf("typed callable returned %s, want 11", String(got))
 	}
@@ -169,7 +169,7 @@ func TestOptimizeSinksMultiUseClosureIntoExclusiveBranch(t *testing.T) {
 		t.Fatalf("multi-use closure stayed ahead of its exclusive branch: %s", serialized)
 	}
 
-	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+	fn := serialTestCallable(Eval(optimized, env))
 	if got := fn(NewBool(false), NewBool(true), NewInt(8)); !Equal(got, NewInt(0)) {
 		t.Fatalf("cold branch returned %s, want 0", String(got))
 	}
@@ -200,7 +200,7 @@ func BenchmarkOptimizedOnceCallbackClosureSinking(b *testing.B) {
 		(begin
 			(define helper (lambda () (+ captured 1)))
 			(with_session session (lambda () (helper)))))`), env, nil)
-	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+	fn := serialTestCallable(Eval(optimized, env))
 	session := Eval(Read(b.Name(), `(newsession)`), env)
 	args := []Scmer{session, NewInt(8)}
 	b.ReportAllocs()
@@ -220,7 +220,7 @@ func BenchmarkOptimizedExclusiveBranchClosureSinking(b *testing.B) {
 				(define incremented (+ captured 1))
 				incremented)))
 			(if guarded 7 (if direct (helper) (helper)))))`), env, nil)
-	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+	fn := serialTestCallable(Eval(optimized, env))
 	args := []Scmer{NewInt(8), NewBool(true), NewBool(false)}
 	b.ReportAllocs()
 	b.ResetTimer()

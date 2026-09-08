@@ -30,7 +30,7 @@ func TestOptimizeFlattensMappedRangeWithoutIntermediate(t *testing.T) {
 	if !strings.Contains(serialized, "flat_map_range") || strings.Contains(serialized, "produceN") {
 		t.Fatalf("mapped range was not fused with flatten: %s", serialized)
 	}
-	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+	fn := serialTestCallable(Eval(optimized, env))
 	got := fn(NewInt(3))
 	want := NewSlice([]Scmer{NewInt(0), NewInt(1), NewInt(1), NewInt(2), NewInt(2), NewInt(3)})
 	if !Equal(got, want) {
@@ -46,7 +46,7 @@ func TestOptimizeFlattensAssocMapWithoutIntermediate(t *testing.T) {
 	if !strings.Contains(serialized, "flat_map_assoc") || strings.Contains(serialized, "extract_assoc") {
 		t.Fatalf("assoc map was not fused with flatten: %s", serialized)
 	}
-	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+	fn := serialTestCallable(Eval(optimized, env))
 	got := fn(NewSlice([]Scmer{NewString("a"), NewInt(1), NewString("b"), NewInt(2)}))
 	want := NewSlice([]Scmer{NewString("a"), NewInt(1), NewString("b"), NewInt(2)})
 	if !Equal(got, want) {
@@ -58,7 +58,7 @@ func benchmarkPlannerFusionProc(b *testing.B, source string) func(...Scmer) Scme
 	b.Helper()
 	env := newOptimizerTestEnv()
 	optimized := optimizeTestSource(b, env, source)
-	return OptimizeProcToSerialFunction(Eval(optimized, env))
+	return serialTestCallable(Eval(optimized, env))
 }
 
 func BenchmarkPlannerFlattenMappedRange(b *testing.B) {
@@ -113,7 +113,7 @@ func TestOptimizeFiltersAndTermsWithoutIntermediate(t *testing.T) {
 	if !strings.Contains(serialized, "filter_and_terms") || strings.Contains(serialized, "(split_and_terms ") {
 		t.Fatalf("AND-tree split and filter were not fused: %s", serialized)
 	}
-	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+	fn := serialTestCallable(Eval(optimized, env))
 	tree := NewSlice([]Scmer{
 		NewSymbol("and"),
 		NewInt(1),
@@ -267,7 +267,7 @@ func BenchmarkPlannerFilterAndTerms(b *testing.B) {
 	EvalAll("planner fusion benchmark", plannerFusionSplitAndTermsSource, env)
 	optimized := optimizeTestSource(b, env, `(lambda (tree)
 		(filter (split_and_terms tree) (lambda (term) (> term 127))))`)
-	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+	fn := serialTestCallable(Eval(optimized, env))
 	var next int64
 	tree := plannerFusionAndTree(8, &next)
 	b.ReportAllocs()

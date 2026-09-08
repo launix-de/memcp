@@ -18,18 +18,18 @@ package scm
 
 import "testing"
 
-func TestOptimizeProcToSerialFunctionUsesNumberedFixedParams(t *testing.T) {
+func TestSerialProcUsesNumberedFixedParams(t *testing.T) {
 	lambda := Eval(Optimize(Read("test", "(lambda (value) (+ value value))"), &Globalenv, nil), &Globalenv)
 	if !lambda.Proc().NumberedOnly {
 		t.Fatal("expected optimized lambda to use numbered bindings only")
 	}
-	got := OptimizeProcToSerialFunction(lambda)(NewInt(6))
+	got := serialTestCallable(lambda)(NewInt(6))
 	if ToInt(got) != 12 {
 		t.Fatalf("expected numbered callback result 12, got %v", got)
 	}
 }
 
-func TestOptimizeProcToSerialFunctionUsesNumberedVariadicParam(t *testing.T) {
+func TestSerialProcUsesNumberedVariadicParam(t *testing.T) {
 	lambda := NewProcStruct(Proc{
 		Params:       NewSymbol("values"),
 		Body:         NewSlice([]Scmer{NewSymbol("list"), NewNthLocalVar(0)}),
@@ -37,21 +37,21 @@ func TestOptimizeProcToSerialFunctionUsesNumberedVariadicParam(t *testing.T) {
 		NumVars:      1,
 		NumberedOnly: true,
 	})
-	got := OptimizeProcToSerialFunction(lambda)(NewInt(3), NewInt(4))
+	got := serialTestCallable(lambda)(NewInt(3), NewInt(4))
 	want := NewSlice([]Scmer{NewSlice([]Scmer{NewInt(3), NewInt(4)})})
 	if !Equal(got, want) {
 		t.Fatalf("expected numbered variadic callback result %v, got %v", want, got)
 	}
 }
 
-func TestOptimizeProcToSerialFunctionExplicitNumVarsKeepsNamedParamBinding(t *testing.T) {
+func TestSerialProcExplicitNumVarsKeepsNamedParamBinding(t *testing.T) {
 	lambda := Eval(Read("test", "(lambda ($update) ($update) 1)"), &Globalenv)
 	called := false
 	update := NewFunc(func(args ...Scmer) Scmer {
 		called = true
 		return NewInt(7)
 	})
-	got := OptimizeProcToSerialFunction(lambda)(update)
+	got := serialTestCallable(lambda)(update)
 	if !called {
 		t.Fatal("expected explicit-numvars callback to invoke bound parameter")
 	}
@@ -60,34 +60,34 @@ func TestOptimizeProcToSerialFunctionExplicitNumVarsKeepsNamedParamBinding(t *te
 	}
 }
 
-func TestOptimizeProcToSerialFunctionExplicitNumVarsKeepsNamedVariadicBinding(t *testing.T) {
+func TestSerialProcExplicitNumVarsKeepsNamedVariadicBinding(t *testing.T) {
 	lambda := NewProcStruct(Proc{
 		Params:  NewSymbol("values"),
 		Body:    NewSymbol("values"),
 		En:      &Globalenv,
 		NumVars: 1,
 	})
-	got := OptimizeProcToSerialFunction(lambda)(NewInt(3), NewInt(4))
+	got := serialTestCallable(lambda)(NewInt(3), NewInt(4))
 	want := NewSlice([]Scmer{NewInt(3), NewInt(4)})
 	if !Equal(got, want) {
 		t.Fatalf("expected named variadic callback result %v, got %v", want, got)
 	}
 }
 
-func TestOptimizeProcToSerialFunctionKeepsCompatibilitySlotsForNamedProc(t *testing.T) {
+func TestSerialProcKeepsCompatibilitySlotsForNamedProc(t *testing.T) {
 	lambda := NewProcStruct(Proc{
 		Params:  NewSlice([]Scmer{NewSymbol("value")}),
 		Body:    NewSlice([]Scmer{NewSymbol("list"), NewNthLocalVar(1)}),
 		En:      &Globalenv,
 		NumVars: 1,
 	})
-	got := OptimizeProcToSerialFunction(lambda)(NewInt(3))
+	got := serialTestCallable(lambda)(NewInt(3))
 	if !Equal(got, NewSlice([]Scmer{NewNil()})) {
 		t.Fatalf("expected an unbound compatibility slot to be nil, got %v", got)
 	}
 }
 
-func BenchmarkOptimizeProcToSerialFunctionNumberedAdapter(b *testing.B) {
+func BenchmarkSerialProcNumberedAdapter(b *testing.B) {
 	body := NewNthLocalVar(0)
 	for i := 0; i < 256; i++ {
 		body = NewSlice([]Scmer{NewSymbol("+"), body, NewInt(1)})
@@ -102,6 +102,6 @@ func BenchmarkOptimizeProcToSerialFunctionNumberedAdapter(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		OptimizeProcToSerialFunction(proc)
+		serialTestCallable(proc)
 	}
 }

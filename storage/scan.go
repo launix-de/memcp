@@ -1668,7 +1668,9 @@ func (t *table) scanWithBatchFrom(currentTx *TxContext, source *recSet, accessSc
 			if msg.outCount > 0 {
 				hadValue = true
 				if !combine.IsNil() {
-					akkumulator = scm.OptimizeProcToSerialFunction(combine)(akkumulator, msg.res)
+					program := scm.PrepareSerialProc(combine)
+					args := [2]scm.Scmer{akkumulator, msg.res}
+					akkumulator = program.Call(args[:])
 				}
 			}
 		}
@@ -1691,7 +1693,8 @@ func (t *table) scanWithBatchFrom(currentTx *TxContext, source *recSet, accessSc
 		values.finish(done)
 
 		if !combine.IsNil() {
-			fn := scm.OptimizeProcToSerialFunction(combine)
+			fn := scm.PrepareSerialProc(combine)
+			var args [2]scm.Scmer
 			for msg, ok := values.next(); ok; msg, ok = values.next() {
 				if msg.err.r != nil {
 					if scanErr.r == nil {
@@ -1706,7 +1709,8 @@ func (t *table) scanWithBatchFrom(currentTx *TxContext, source *recSet, accessSc
 				candidateCount += msg.candidateCount
 				outCount += msg.outCount
 				if msg.outCount > 0 {
-					akkumulator = fn(akkumulator, msg.res)
+					args[0], args[1] = akkumulator, msg.res
+					akkumulator = fn.Call(args[:])
 					hadValue = true
 				}
 			}
@@ -1857,6 +1861,120 @@ func (t *storageShard) filterNativeArgConstantScanBatch(batch []uint32, conditio
 	return outN
 }
 
+type typedScanFilter struct {
+	shard      *storageShard
+	mainCount  uint32
+	width      int
+	multiFuncs []scm.JITStorageGetValueMultiFunc
+	kernel     scm.JITFilterBufferFunc
+	values     []scm.Scmer
+	pooled     *mapReducerBulkBuffer
+}
+
+func (t *storageShard) prepareTypedScanFilter(condition scm.Scmer, ccols []ColumnStorage, cReaders []ColumnReader, estimatedRows int) *typedScanFilter {
+	if len(ccols) == 0 || estimatedRows <= 0 {
+		return nil
+	}
+	proc := scm.PrepareJITBufferProc(condition, len(ccols))
+	if proc == nil {
+		return nil
+	}
+	minimumRows := scm.CurrentJITCosts().FilterBufferBreakEven(scm.JITExpressionCost(proc.Body), len(ccols))
+	if minimumRows > estimatedRows {
+		return nil
+	}
+	valueTypes := make([]uint8, len(ccols))
+	multiFuncs := make([]scm.JITStorageGetValueMultiFunc, len(ccols))
+	for index, column := range ccols {
+		if column == nil || cReaders[index] == nil {
+			return nil
+		}
+		valueType := column.JITValueType()
+		if valueType == scm.JITTypeUnknown {
+			return nil
+		}
+		valueTypes[index] = valueType
+		multiFuncs[index] = compiledColumnGetValueMulti(cReaders[index])
+	}
+	kernel := scm.CompileJITFilterBuffer(proc, valueTypes)
+	if kernel == nil {
+		return nil
+	}
+	return &typedScanFilter{
+		shard: t, mainCount: t.main_count, width: len(ccols),
+		multiFuncs: multiFuncs, kernel: kernel,
+	}
+}
+
+func (filter *typedScanFilter) close() {
+	if filter == nil {
+		return
+	}
+	clear(filter.values)
+	filter.values = nil
+	if filter.pooled != nil {
+		clear(filter.pooled.values)
+		mapReducerBulkBufferPools[filter.width-1].Put(filter.pooled)
+		filter.pooled = nil
+	}
+	filter.kernel = nil
+}
+
+func (filter *typedScanFilter) filterMain(batch []uint32, readers []ColumnReader) int {
+	needed := len(batch) * filter.width
+	if cap(filter.values) < needed {
+		if filter.pooled == nil && filter.width <= inlineMapReducerColumns && needed <= defaultScanBufferSize*filter.width {
+			pool := &mapReducerBulkBufferPools[filter.width-1]
+			if pooled := pool.Get(); pooled != nil {
+				filter.pooled = pooled.(*mapReducerBulkBuffer)
+			} else {
+				filter.pooled = &mapReducerBulkBuffer{values: make([]scm.Scmer, defaultScanBufferSize*filter.width)}
+			}
+			filter.values = filter.pooled.values[:needed]
+		} else {
+			filter.values = make([]scm.Scmer, needed)
+		}
+	} else {
+		filter.values = filter.values[:needed]
+	}
+	for index, reader := range readers {
+		if getValueMulti := filter.multiFuncs[index]; getValueMulti != nil {
+			getValueMulti(batch, filter.values[index:], filter.width)
+		} else {
+			reader.GetValueMulti(batch, filter.values[index:], filter.width)
+		}
+	}
+	return filter.kernel(batch, filter.values)
+}
+
+func (filter *typedScanFilter) filterBatch(batch []uint32, conditionCols []string, ccols []ColumnStorage, cReaders []ColumnReader, conditionGetters []mapArgGetter, cdataset []scm.Scmer, condition *scm.SerialProc) int {
+	out := 0
+	for start := 0; start < len(batch); {
+		main := batch[start] < filter.mainCount
+		end := start + 1
+		for end < len(batch) && (batch[end] < filter.mainCount) == main {
+			end++
+		}
+		selected := 0
+		if main {
+			selected = filter.filterMain(batch[start:end], cReaders)
+		} else {
+			selected = filter.shard.filterScanBatchDynamic(batch[start:end], conditionCols, ccols, cReaders, conditionGetters, cdataset, condition)
+		}
+		copy(batch[out:], batch[start:start+selected])
+		out += selected
+		start = end
+	}
+	return out
+}
+
+func (t *storageShard) filterScanBatchDynamic(batch []uint32, conditionCols []string, ccols []ColumnStorage, cReaders []ColumnReader, conditionGetters []mapArgGetter, cdataset []scm.Scmer, condition *scm.SerialProc) int {
+	if condition.Kind == scm.SerialProcNativeArgConstant {
+		return t.filterNativeArgConstantScanBatch(batch, conditionCols, ccols, cReaders, conditionGetters, condition)
+	}
+	return t.filterConditionScanBatch(batch, conditionCols, ccols, cReaders, conditionGetters, cdataset, condition)
+}
+
 func (t *storageShard) filterVisibleBatchedScanBatch(batch []uint32, batchIDs []uint32, batchID uint32, visibleUpper uint32, hasMutationCallback bool, currentTx *TxContext, mutationSeen map[uint64]struct{}) int {
 	outN := 0
 	for _, idx := range batch {
@@ -1935,7 +2053,6 @@ func (t *storageShard) scanFirstRecord(access scanAccess, conditionCols []string
 		}
 		cdataset = make([]scm.Scmer, len(conditionCols))
 	}
-
 	locked := false
 	if !skipShardReadLock {
 		t.mu.RLock()
@@ -2196,6 +2313,17 @@ func (t *storageShard) scan(access scanAccess, conditionCols []string, condition
 		}
 		cdataset = make([]scm.Scmer, len(conditionCols))
 	}
+	estimatedFilterRows := int(t.main_count)
+	var typedFilter *typedScanFilter
+	// Shard population is not an estimate of an index range's candidates.
+	// Only full scans can use it to amortize a scan-local compilation.
+	if !conditionAlwaysTrue && access.len() == 0 && estimatedFilterRows > defaultScanBufferSize {
+		minimumFilterRows := scm.CurrentJITCosts().FilterBufferMinimumRows
+		if minimumFilterRows > 0 && estimatedFilterRows >= minimumFilterRows {
+			typedFilter = t.prepareTypedScanFilter(condition, ccols, cReaders, estimatedFilterRows)
+		}
+	}
+	defer typedFilter.close()
 
 	// MapReducer for the fused callback phase (builds column readers internally)
 	var mapperStorage ShardMapReducer
@@ -2261,10 +2389,10 @@ func (t *storageShard) scan(access scanAccess, conditionCols []string, condition
 		outN := t.filterVisibleScanBatch(batch, visibleUpper, hasMutationCallback, currentTx, mutationSeen)
 		feedbackCandidates += int64(outN)
 		if !conditionAlwaysTrue && outN > 0 {
-			if conditionProgram.Kind == scm.SerialProcNativeArgConstant {
-				outN = t.filterNativeArgConstantScanBatch(batch[:outN], conditionCols, ccols, cReaders, conditionGetters, &conditionProgram)
+			if typedFilter != nil {
+				outN = typedFilter.filterBatch(batch[:outN], conditionCols, ccols, cReaders, conditionGetters, cdataset, &conditionProgram)
 			} else {
-				outN = t.filterConditionScanBatch(batch[:outN], conditionCols, ccols, cReaders, conditionGetters, cdataset, &conditionProgram)
+				outN = t.filterScanBatchDynamic(batch[:outN], conditionCols, ccols, cReaders, conditionGetters, cdataset, &conditionProgram)
 			}
 		}
 		if outN > 0 {

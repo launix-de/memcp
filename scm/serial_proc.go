@@ -18,10 +18,9 @@ package scm
 
 import "runtime"
 
-// SerialProcKind describes callback shapes whose semantics can be consumed by
-// a physical operator without entering Eval. Operators must dispatch on Kind
-// outside their row loops; Call is the compatibility path for code which does
-// not have a shape-specific kernel.
+// SerialProcKind describes callback shapes consumed by serial list and storage
+// operators. Specialized kernels dispatch on Kind outside their loops; Call is
+// the common borrowed-frame interface, including JIT/interpreter selection.
 type SerialProcKind uint8
 
 const (
@@ -31,6 +30,7 @@ const (
 	SerialProcNative
 	SerialProcNativeArgConstant
 	SerialProcJIT
+	SerialProcRetainingNative
 )
 
 // SerialProc exposes trivial executable shapes to physical operators. Callers
@@ -49,6 +49,142 @@ type SerialProc struct {
 	borrowed      func([]Scmer) Scmer
 	jitEntry      *JITEntryPoint
 	jitArity      int
+	// Only bound native calls need this two-slot frame. Keep it separate from
+	// the descriptor so passing the frame to a Go callback does not force every
+	// SerialProc (including identity and constant callbacks) onto the heap.
+	nativeArgs *[2]Scmer
+}
+
+// prepareSerialInterpreter prepares the residual procedure body after the
+// public dispatcher has classified native, constant, argument and JIT shapes.
+// One instance belongs to one serial worker. Capturing bodies get invocation-
+// owned lexical environments; non-capturing bodies reuse their call storage.
+func prepareSerialInterpreter(val Scmer) func([]Scmer) Scmer {
+	proc := val.Proc()
+	if proc.JITCode != 0 {
+		return func(args []Scmer) Scmer { return proc.callJIT(args) }
+	}
+	p := *proc
+	if serialExprMayCaptureEnv(p.Body) {
+		return func(args []Scmer) Scmer { return ApplyEx(val, args, p.En) }
+	}
+	numVars := p.NumVars
+	// Numbered-only optimized lambdas carry their complete frame size as the
+	// fourth lambda item. Walking a large generated callback again at every
+	// adapter creation duplicates optimizer work and can dominate compilation.
+	// Hand-built and named procedures retain the compatibility scan.
+	if numVars == 0 || !p.NumberedOnly {
+		if required := requiredNumberedSlots(p.Body); required > numVars {
+			numVars = required
+		}
+	}
+	var vars Vars
+	en := &Env{Vars: vars, VarsNumbered: make([]Scmer, numVars), Outer: p.En, Nodefine: false}
+	body := prepareSerialExpr(&p, p.Body)
+	params := p.Params
+	if stripped, ok := scmerStripSourceInfo(params); ok {
+		params = stripped
+	}
+	if params.IsSlice() {
+		paramSlice := params.Slice()
+		if numVars > 0 {
+			bindNamed := false
+			if !p.NumberedOnly {
+				named := make(map[Symbol]struct{}, len(paramSlice))
+				for i, param := range paramSlice {
+					if i >= numVars {
+						break
+					}
+					if stripped, ok := scmerStripSourceInfo(param); ok {
+						param = stripped
+					}
+					if param.IsSymbol() && !param.SymbolEquals("_") {
+						named[mustSymbol(param)] = struct{}{}
+					}
+				}
+				bindNamed = procBodyUsesNamedParam(p.Body, named)
+				if bindNamed {
+					vars = make(Vars, len(named))
+					en.Vars = vars
+				}
+			}
+			return func(args []Scmer) Scmer {
+				for i := 0; i < numVars; i++ {
+					if i < len(args) {
+						en.VarsNumbered[i] = args[i]
+					} else {
+						en.VarsNumbered[i] = NewNil()
+					}
+				}
+				if bindNamed {
+					for i, param := range paramSlice {
+						if stripped, ok := scmerStripSourceInfo(param); ok {
+							param = stripped
+						}
+						if !param.IsSymbol() || param.SymbolEquals("_") {
+							continue
+						}
+						sym := mustSymbol(param)
+						if i < len(args) {
+							en.Vars[sym] = args[i]
+						} else {
+							en.Vars[sym] = NewNil()
+						}
+					}
+				}
+				return body(en)
+			}
+		}
+		vars = make(Vars, len(paramSlice))
+		en.Vars = vars
+		return func(args []Scmer) Scmer {
+			for i, param := range paramSlice {
+				if stripped, ok := scmerStripSourceInfo(param); ok {
+					param = stripped
+				}
+				if !param.IsSymbol() || param.SymbolEquals("_") {
+					continue
+				}
+				sym := mustSymbol(param)
+				if i < len(args) {
+					en.Vars[sym] = args[i]
+				} else {
+					en.Vars[sym] = NewNil()
+				}
+			}
+			return body(en)
+		}
+	}
+	if params.IsSymbol() {
+		sym := mustSymbol(params)
+		if p.NumVars > 0 {
+			bindNamed := false
+			if !p.NumberedOnly {
+				bindNamed = procBodyUsesNamedParam(p.Body, map[Symbol]struct{}{sym: {}})
+				if bindNamed {
+					vars = make(Vars, 1)
+					en.Vars = vars
+				}
+			}
+			return func(args []Scmer) Scmer {
+				argsList := NewSlice(append([]Scmer(nil), args...))
+				en.VarsNumbered[0] = argsList
+				if bindNamed {
+					en.Vars[sym] = argsList
+				}
+				return body(en)
+			}
+		}
+		vars = make(Vars, 1)
+		en.Vars = vars
+		return func(args []Scmer) Scmer {
+			en.Vars[sym] = NewSlice(append([]Scmer(nil), args...))
+			return body(en)
+		}
+	}
+	return func(args []Scmer) Scmer {
+		return body(en)
+	}
 }
 
 func serialProcBody(v Scmer) Scmer {
@@ -174,8 +310,8 @@ func serialProcNativeArgConstant(proc *Proc, body Scmer) (native Scmer, argument
 }
 
 // PrepareSerialProc classifies the dominant constant, argument-projection and
-// exact native-forwarding callback shapes. More complex procedures retain the
-// existing interpreter adapter until the fused scan JIT owns them.
+// exact native-forwarding callback shapes. Compiled procedures dispatch to the
+// JIT; other bodies use the serial interpreter with explicit frame ownership.
 func PrepareSerialProc(source Scmer) SerialProc {
 	prepared := SerialProc{Argument: -1}
 	if source.IsNil() {
@@ -196,13 +332,16 @@ func PrepareSerialProc(source Scmer) SerialProc {
 			}
 		}
 		prepared.Kind = SerialProcNative
+		if declaration := DeclarationForValue(source); declaration == nil || declaration.RetainsCallArgs {
+			prepared.Kind = SerialProcRetainingNative
+		}
 		prepared.Function = function
 		prepared.Value = source
 		return prepared
 	}
 	if source.GetTag() == tagAny {
 		if fn, ok := source.Any().(func(...Scmer) Scmer); ok {
-			prepared.Kind = SerialProcNative
+			prepared.Kind = SerialProcRetainingNative
 			prepared.Function = fn
 			prepared.Value = source
 			return prepared
@@ -231,7 +370,7 @@ func PrepareSerialProc(source Scmer) SerialProc {
 			return prepared
 		}
 		prepared.Kind = SerialProcGeneral
-		prepared.borrowed = optimizeProcToSerialBorrowed(source)
+		prepared.borrowed = prepareSerialInterpreter(source)
 		return prepared
 	}
 	body := serialProcBody(proc.Body)
@@ -273,11 +412,12 @@ func PrepareSerialProc(source Scmer) SerialProc {
 		prepared.Argument = int16(argument)
 		prepared.Value = constant
 		prepared.ConstantFirst = constantFirst
+		prepared.nativeArgs = new([2]Scmer)
 		return prepared
 	}
 
 	prepared.Kind = SerialProcGeneral
-	prepared.borrowed = optimizeProcToSerialBorrowed(source)
+	prepared.borrowed = prepareSerialInterpreter(source)
 	return prepared
 }
 
@@ -322,6 +462,17 @@ func (p *SerialProc) CallPrepared(args []Scmer) Scmer {
 	return result
 }
 
+// CallOwned transfers a freshly allocated argument frame to the callback.
+// The caller must not reuse or mutate its backing array afterwards. Unlike
+// Call, this permits retaining natives to keep the original array without a
+// defensive copy. Use Call for stack, pooled or otherwise reusable frames.
+func (p *SerialProc) CallOwned(args []Scmer) Scmer {
+	if p.Kind == SerialProcRetainingNative {
+		return p.Function(args...)
+	}
+	return p.Call(args)
+}
+
 // Call evaluates a prepared callback with a caller-owned argument frame. Hot
 // physical loops should dispatch dominant simple Kinds once; compound programs
 // use Call so the prepared expression can reuse its nested native-call frames.
@@ -333,10 +484,14 @@ func (p *SerialProc) Call(args []Scmer) Scmer {
 		return args[int(p.Argument)]
 	case SerialProcNative:
 		return p.Function(args...)
+	case SerialProcRetainingNative:
+		// Callers own and reuse args. Unknown native callbacks, like declared
+		// retaining callbacks, may keep the array rather than just its values.
+		return p.Function(append([]Scmer(nil), args...)...)
 	case SerialProcJIT:
 		return p.CallPrepared(p.PrepareCallFrame(args))
 	case SerialProcNativeArgConstant:
-		var call [2]Scmer
+		call := p.nativeArgs
 		if p.ConstantFirst {
 			call[0], call[1] = p.Value, args[int(p.Argument)]
 		} else {

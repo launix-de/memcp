@@ -945,6 +945,26 @@ func Init(en scm.Env) {
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
+		Name: "table_shard_count",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			if a[0].IsNil() {
+				return scm.NewInt(0)
+			}
+			t := TableFromScmer(a[0])
+			if t == nil {
+				return scm.NewInt(0)
+			}
+			// The topology is an immutable atomic snapshot. No shard internals
+			// are read, and repartitioning cannot invalidate this slice.
+			return scm.NewInt(int64(len(t.ActiveShards())))
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "return the O(1) active partition count for physical scan costing",
+			Params: []*scm.TypeDescriptor{{Kind: "table", Label: "table"}},
+			Return: &scm.TypeDescriptor{Kind: "int"},
+		},
+	})
+
+	scm.Declare(&en, &scm.Declaration{
 		Name: "table_planner_statistics",
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
@@ -1495,7 +1515,7 @@ func Init(en scm.Env) {
 			filtercols := scmerSliceToStrings(mustScmerSlice(a[4], "filterColumns"))
 			tableArg := a[1]
 			if list, ok := scmerSlice(tableArg); ok {
-				filterfn := scm.OptimizeProcToSerialFunction(a[5])
+				filterfn := scm.PrepareSerialProc(a[5])
 				filterparams := make([]scm.Scmer, len(filtercols))
 				for _, val := range list {
 					row := mustScmerSlice(val, "scan_exists list row")
@@ -1503,7 +1523,7 @@ func Init(en scm.Env) {
 					for i, col := range filtercols {
 						filterparams[i], _ = ds.GetI(col)
 					}
-					if scm.ToBool(filterfn(filterparams...)) {
+					if scm.ToBool(filterfn.Call(filterparams)) {
 						return scm.NewBool(true)
 					}
 				}
@@ -1578,9 +1598,9 @@ func Init(en scm.Env) {
 					neutral = a[layout.neutralIdx]
 				}
 				result := neutral
-				filterfn := scm.OptimizeProcToSerialFunction(a[layout.filterFnIdx])
+				filterfn := scm.PrepareSerialProc(a[layout.filterFnIdx])
 				filterparams := make([]scm.Scmer, len(filtercols))
-				mapReduceFn := scm.OptimizeProcToSerialFunction(a[layout.mapReduceIdx])
+				mapReduceFn := scm.PrepareSerialProc(a[layout.mapReduceIdx])
 				mapReduceParams := make([]scm.Scmer, len(mapcols)+1)
 				hadValue := false
 				for _, val := range list {
@@ -1589,7 +1609,7 @@ func Init(en scm.Env) {
 					for i, col := range filtercols {
 						filterparams[i], _ = ds.GetI(col)
 					}
-					if !scm.ToBool(filterfn(filterparams...)) {
+					if !scm.ToBool(filterfn.Call(filterparams)) {
 						continue
 					}
 					hadValue = true
@@ -1597,22 +1617,22 @@ func Init(en scm.Env) {
 					for i, col := range mapcols {
 						mapReduceParams[i+1], _ = ds.GetI(col)
 					}
-					result = mapReduceFn(mapReduceParams...)
+					result = mapReduceFn.Call(mapReduceParams)
 				}
 				if !hadValue && isOuter {
 					mapReduceParams[0] = result
 					for i := 1; i < len(mapReduceParams); i++ {
 						mapReduceParams[i] = scm.NewNil()
 					}
-					result = mapReduceFn(mapReduceParams...)
+					result = mapReduceFn.Call(mapReduceParams)
 				}
 				if len(a) > layout.combineIdx && !a[layout.combineIdx].IsNil() {
-					combineFn := scm.OptimizeProcToSerialFunction(a[layout.combineIdx])
+					combineFn := scm.PrepareSerialProc(a[layout.combineIdx])
 					base := neutral
 					if len(a) > layout.neutralIdx {
 						base = a[layout.neutralIdx]
 					}
-					result = combineFn(base, result)
+					result = combineFn.Call([]scm.Scmer{base, result})
 				}
 				return result
 			}
@@ -1684,9 +1704,9 @@ func Init(en scm.Env) {
 					neutral = a[layout.neutralIdx+sbShift]
 				}
 				result := neutral
-				filterfn := scm.OptimizeProcToSerialFunction(a[layout.filterFnIdx])
+				filterfn := scm.PrepareSerialProc(a[layout.filterFnIdx])
 				filterparams := make([]scm.Scmer, len(filtercols))
-				mapReduceFn := scm.OptimizeProcToSerialFunction(a[layout.mapReduceIdx])
+				mapReduceFn := scm.PrepareSerialProc(a[layout.mapReduceIdx])
 				mapReduceParams := make([]scm.Scmer, len(mapcols)+1)
 				hadValue := false
 				batchCount := 0
@@ -1704,7 +1724,7 @@ func Init(en scm.Env) {
 								filterparams[i], _ = ds.GetI(col)
 							}
 						}
-						if !scm.ToBool(filterfn(filterparams...)) {
+						if !scm.ToBool(filterfn.Call(filterparams)) {
 							continue
 						}
 						hadValue = true
@@ -1716,7 +1736,7 @@ func Init(en scm.Env) {
 								mapReduceParams[i+1], _ = ds.GetI(col)
 							}
 						}
-						result = mapReduceFn(mapReduceParams...)
+						result = mapReduceFn.Call(mapReduceParams)
 					}
 				}
 				if !hadValue && isOuter {
@@ -1724,15 +1744,15 @@ func Init(en scm.Env) {
 					for i := 1; i < len(mapReduceParams); i++ {
 						mapReduceParams[i] = scm.NewNil()
 					}
-					result = mapReduceFn(mapReduceParams...)
+					result = mapReduceFn.Call(mapReduceParams)
 				}
 				if len(a) > layout.combineIdx+sbShift && !a[layout.combineIdx+sbShift].IsNil() {
-					combineFn := scm.OptimizeProcToSerialFunction(a[layout.combineIdx+sbShift])
+					combineFn := scm.PrepareSerialProc(a[layout.combineIdx+sbShift])
 					base := neutral
 					if len(a) > layout.neutralIdx+sbShift {
 						base = a[layout.neutralIdx+sbShift]
 					}
-					result = combineFn(base, result)
+					result = combineFn.Call([]scm.Scmer{base, result})
 				}
 				return result
 			}
@@ -1787,10 +1807,7 @@ func Init(en scm.Env) {
 			batchFilter := a[4]
 			sortcolsVals := mustScmerSlice(a[5], "sortcols")
 			sortdirsVals := mustScmerSlice(a[6], "sortdirs")
-			sortdirs := make([]func(...scm.Scmer) scm.Scmer, len(sortdirsVals))
-			for i, dir := range sortdirsVals {
-				sortdirs[i] = scm.OptimizeProcToSerialFunction(dir)
-			}
+			sortdirs := scanSortDirections(sortdirsVals)
 			limitPartitionCols := scm.ToInt(a[7])
 			offset := scm.ToInt(a[8])
 			limit := scm.ToInt(a[9])
@@ -1857,10 +1874,7 @@ func Init(en scm.Env) {
 				neutral = a[layout.limitIdx+3]
 			}
 
-			sortdirs := make([]func(...scm.Scmer) scm.Scmer, len(sortcolsVals))
-			for i, dir := range sortdirsVals {
-				sortdirs[i] = scm.OptimizeProcToSerialFunction(dir)
-			}
+			sortdirs := scanSortDirections(sortdirsVals)
 
 			isOuter := len(a) > layout.limitIdx+4 && scm.ToBool(a[layout.limitIdx+4])
 			notFoundValue := neutral
@@ -1878,14 +1892,14 @@ func Init(en scm.Env) {
 			// materialize cardinality-dependent rows into SCM lists.
 			if list, ok := scmerSlice(tableArg); ok {
 				result := neutral
-				filterfn := scm.OptimizeProcToSerialFunction(a[layout.filterFnIdx])
+				filterfn := scm.PrepareSerialProc(a[layout.filterFnIdx])
 				filterparams := make([]scm.Scmer, len(filtercols))
-				mapReduceFn := scm.OptimizeProcToSerialFunction(a[layout.limitIdx+2])
+				mapReduceFn := scm.PrepareSerialProc(a[layout.limitIdx+2])
 				mapReduceParams := make([]scm.Scmer, len(mapcols)+1)
-				var postOrderFn func(...scm.Scmer) scm.Scmer
+				var postOrderFn scm.SerialProc
 				postOrderParams := make([]scm.Scmer, len(postOrderCols))
 				if !postOrderFilter.IsNil() {
-					postOrderFn = scm.OptimizeProcToSerialFunction(postOrderFilter)
+					postOrderFn = scm.PrepareSerialProc(postOrderFilter)
 				}
 				var filtered []scm.Scmer
 				for _, val := range list {
@@ -1894,7 +1908,7 @@ func Init(en scm.Env) {
 					for i, col := range filtercols {
 						filterparams[i], _ = ds.GetI(col)
 					}
-					if scm.ToBool(filterfn(filterparams...)) {
+					if scm.ToBool(filterfn.Call(filterparams)) {
 						filtered = append(filtered, val)
 					}
 				}
@@ -1910,19 +1924,19 @@ func Init(en scm.Env) {
 						}
 						continue
 					}
-					proc := scm.OptimizeProcToSerialFunction(scol)
+					proc := scm.PrepareSerialProc(scol)
 					var params []scm.Scmer
 					if slice, ok := scmerSlice(scol); ok {
 						params = slice
 					}
+					args := make([]scm.Scmer, len(params))
 					scols[i] = func(idx uint32) scm.Scmer {
 						row := mustScmerSlice(filtered[idx], "sort row")
 						ds := dataset(row)
-						args := make([]scm.Scmer, len(params))
 						for j, p := range params {
 							args[j], _ = ds.GetI(scm.String(p))
 						}
-						return proc(args...)
+						return proc.Call(args)
 					}
 				}
 				hybridsort.Slice(filtered, func(i, j int) bool {
@@ -1945,11 +1959,11 @@ func Init(en scm.Env) {
 				for _, val := range filtered {
 					row := mustScmerSlice(val, "scan_order row")
 					ds := dataset(row)
-					if postOrderFn != nil {
+					if !postOrderFilter.IsNil() {
 						for i, col := range postOrderCols {
 							postOrderParams[i], _ = ds.GetI(col)
 						}
-						if !scm.ToBool(postOrderFn(postOrderParams...)) {
+						if !scm.ToBool(postOrderFn.Call(postOrderParams)) {
 							continue
 						}
 					}
@@ -1964,7 +1978,7 @@ func Init(en scm.Env) {
 					for i, col := range mapcols {
 						mapReduceParams[i+1], _ = ds.GetI(col)
 					}
-					result = mapReduceFn(mapReduceParams...)
+					result = mapReduceFn.Call(mapReduceParams)
 					hadValue = true
 					count++
 				}
@@ -1973,7 +1987,7 @@ func Init(en scm.Env) {
 					for i := 1; i < len(mapReduceParams); i++ {
 						mapReduceParams[i] = scm.NewNil()
 					}
-					result = mapReduceFn(mapReduceParams...)
+					result = mapReduceFn.Call(mapReduceParams)
 				}
 				if !hadValue && !isOuter {
 					result = notFoundValue
@@ -2070,10 +2084,7 @@ func Init(en scm.Env) {
 				panic("scan_order_multi: all per-table arrays must have the same length")
 			}
 
-			sortdirs := make([]func(...scm.Scmer) scm.Scmer, len(sortdirsVals))
-			for i, dir := range sortdirsVals {
-				sortdirs[i] = scm.OptimizeProcToSerialFunction(dir)
-			}
+			sortdirs := scanSortDirections(sortdirsVals)
 
 			specs := make([]scanOrderTableSpec, n)
 			for i := 0; i < n; i++ {
@@ -3371,6 +3382,26 @@ func Init(en scm.Env) {
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
 	})
+	scm.Declare(&en, &scm.Declaration{
+		Name: "cache_table_ready?",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			if a[0].IsNil() {
+				return scm.NewBool(false)
+			}
+			t := TableFromScmer(a[0])
+			if t == nil {
+				return scm.NewBool(false)
+			}
+			t.cacheInitMu.Lock()
+			defer t.cacheInitMu.Unlock()
+			return scm.NewBool(t.cacheInitialized)
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "inspect canonical cache initialization without building or waiting for it",
+			Params: []*scm.TypeDescriptor{{Kind: "table", Label: "table"}},
+			Return: &scm.TypeDescriptor{Kind: "bool"},
+		},
+	})
+
 	scm.Declare(&en, &scm.Declaration{
 		Name: "initialize_cache_table",
 

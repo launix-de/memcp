@@ -1,0 +1,85 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+# This program is distributed without any warranty; see
+# <https://www.gnu.org/licenses/> for the GNU General Public License.
+
+metadata:
+  version: "1.0"
+  description: "Typed main-storage filtering and multi-column arithmetic aggregates"
+  isolated: true
+
+setup:
+  - sql: "DROP TABLE IF EXISTS typed_filter_wide"
+  - sql: "CREATE TABLE typed_filter_wide (c0 INT, c1 INT, c2 INT, c3 INT, c4 INT, c5 INT, c6 INT, c7 INT, c8 INT, c9 INT, c10 INT, c11 INT, c12 INT, c13 INT, c14 INT, c15 INT) ENGINE=memory"
+  - scm: |
+      (begin
+        (insert (table "memcp-tests" "typed_filter_wide")
+          (map (produceN 16) (lambda (c) (concat "c" c)))
+          (map (produceN 60000) (lambda (i)
+            (map (produceN 16) (lambda (c) (+ (mod (* i i 7919) 60000) c))))))
+        (rebuild))
+  - sql: "DROP TABLE IF EXISTS typed_filter_buffer"
+  - sql: "CREATE TABLE typed_filter_buffer (a INT, b INT, c INT) ENGINE=memory"
+  - scm: |
+      (begin
+        (insert (table "memcp-tests" "typed_filter_buffer")
+          '("a" "b" "c")
+          (map (produceN 60000) (lambda (i) (list i 2 3))))
+        (rebuild))
+
+test_cases:
+  - name: "Sixteen bound integer columns preserve comparison results"
+    sql: "SELECT COUNT(*) AS n FROM typed_filter_wide WHERE c0<c1 AND c2<c3 AND c4<c5 AND c6<c7 AND c8<c9 AND c10<c11 AND c12<c13 AND c14<c15"
+    timing_samples: 5
+    expect:
+      data: [{n: 60000}]
+  - name: "Wide integer filter and arithmetic reducer performance"
+    sql: "SELECT SUM(c0+c1*c2) AS total FROM typed_filter_wide WHERE c0<c1 AND c2<c3 AND c4<c5 AND c6<c7 AND c8<c9 AND c10<c11 AND c12<c13 AND c14<c15"
+    threshold_ms: 1000
+    performance_rows: 60000
+    # Measure the first fill, not repeated reads of the aggregate cache.
+    warmup: 0
+    timing_samples: 1
+    expect:
+      data: [{total: 74211485358000}]
+  - name: "Point aggregate stays correct"
+    sql: "SELECT SUM(a+b*c) AS total FROM typed_filter_buffer WHERE a=42"
+    timing_samples: 5
+    expect:
+      data: [{total: 48}]
+  - name: "Small range aggregate stays correct"
+    sql: "SELECT SUM(a+b*c) AS total FROM typed_filter_buffer WHERE a>=1000 AND a<1064"
+    timing_samples: 5
+    expect:
+      data: [{total: 66400}]
+  - name: "Full main shard arithmetic aggregate"
+    sql: "SELECT SUM(a+b*c) AS total FROM typed_filter_buffer"
+    timing_samples: 5
+    expect:
+      data: [{total: 1800330000}]
+  - name: "Residual filter before arithmetic aggregate"
+    sql: "SELECT COUNT(*) AS n, SUM(a+b*c) AS total FROM typed_filter_buffer WHERE a+0 >= 30000"
+    timing_samples: 5
+    expect:
+      data: [{n: 30000, total: 1350165000}]
+  - name: "Empty filtered aggregate"
+    sql: "SELECT COUNT(*) AS n FROM typed_filter_buffer WHERE a+0 < 0"
+    expect:
+      data: [{n: 0}]
+  - name: "Add delta row"
+    sql: "INSERT INTO typed_filter_buffer (a,b,c) VALUES (60000,2,3)"
+  - name: "Main and delta use the same predicate semantics"
+    sql: "SELECT COUNT(*) AS n, SUM(a+b*c) AS total FROM typed_filter_buffer WHERE a+0 >= 30000"
+    expect:
+      data: [{n: 30001, total: 1350225006}]
+  - name: "Invalid filter binding fails"
+    sql: "SELECT COUNT(*) FROM typed_filter_buffer WHERE missing_column > 0"
+    expect: {error: true}
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS typed_filter_wide"
+  - sql: "DROP TABLE IF EXISTS typed_filter_buffer"

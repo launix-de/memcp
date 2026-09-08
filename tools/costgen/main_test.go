@@ -697,3 +697,15 @@ func TestRaceCalibrationVariantsCancelsSlowerPlan(t *testing.T) {
 		t.Fatalf("timeout lower bound %f must exceed winner time %f", rows[1].LowerBoundNS, rows[0].WholeQueryExecutionNS)
 	}
 }
+
+func TestSemijoinCalibrationDoesNotRequireMembershipFeatures(t *testing.T) {
+	features, err := rowFeatures(calibrationRow{Decision: "semijoin_carrier", Plan: "projected_recset"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, feature := range features {
+		if feature != 0 {
+			t.Fatal("semijoin observation leaked into membership coefficient fitting")
+		}
+	}
+}

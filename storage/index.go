@@ -70,9 +70,10 @@ type computedRevision struct {
 // For raw columns it reads directly from ColumnStorage; for computed columns
 // it evaluates the mapFn over the source column storages.
 type colGetter struct {
-	raw     ColumnReader                 // non-nil for raw columns
-	mapCols []ColumnReader               // non-nil for computed columns
-	mapFn   func(...scm.Scmer) scm.Scmer // non-nil for computed columns
+	raw     ColumnReader    // non-nil for raw columns
+	mapCols []ColumnReader  // non-nil for computed columns
+	mapFn   *scm.SerialProc // non-nil for computed columns; owned by this serial reader
+	mapArgs []scm.Scmer
 }
 
 const inlineIndexGetters = 8
@@ -89,11 +90,10 @@ var indexGetterScratchPool = sync.Pool{
 
 func (g colGetter) get(recid uint32) scm.Scmer {
 	if g.mapFn != nil {
-		vals := make([]scm.Scmer, len(g.mapCols))
 		for i, cs := range g.mapCols {
-			vals[i] = cs.GetValue(recid)
+			g.mapArgs[i] = cs.GetValue(recid)
 		}
-		return g.mapFn(vals...)
+		return g.mapFn.Call(g.mapArgs)
 	}
 	return g.raw.GetValue(recid)
 }
@@ -146,7 +146,7 @@ func canonicalColumnOrder(t *table, col string) (func(scm.Scmer, scm.Scmer) bool
 		}
 	}
 	value := scm.Apply(scm.Globalenv.Vars[scm.Symbol("collate")], scm.NewString(collation), scm.NewBool(false))
-	order := scm.OptimizeProcToSerialFunction(value)
+	order := value.Func() // collate returns a native relation with registered metadata
 	return scm.OrderRelationLess(order), orderRelationMeta(order)
 }
 
@@ -165,7 +165,7 @@ func boundaryOrder(t *table, boundary analyzedBoundary) (func(scm.Scmer, scm.Scm
 	if boundary.collation != "" && strings.HasPrefix(t.Name, ".grp:") &&
 		(boundary.lower.IsString() || boundary.lower.IsSymbol()) {
 		value := scm.Apply(scm.Globalenv.Vars[scm.Symbol("collate")], scm.NewString(boundary.collation), scm.NewBool(false))
-		order := scm.OptimizeProcToSerialFunction(value)
+		order := value.Func()
 		return scm.OrderRelationLess(order), orderRelationMeta(order)
 	}
 	return canonicalColumnOrder(t, boundary.col)
@@ -183,7 +183,7 @@ func scanAccessBoundaryOrder(t *table, access scanAccess, column int) (func(scm.
 	lower := access.boundValue(column, false)
 	if collation != "" && strings.HasPrefix(t.Name, ".grp:") && (lower.IsString() || lower.IsSymbol()) {
 		value := scm.Apply(scm.Globalenv.Vars[scm.Symbol("collate")], scm.NewString(collation), scm.NewBool(false))
-		order = scm.OptimizeProcToSerialFunction(value)
+		order = value.Func()
 		return scm.OrderRelationLess(order), orderRelationMeta(order)
 	}
 	return canonicalColumnOrder(t, access.boundaryColumn(column))
@@ -315,8 +315,8 @@ func (s *StorageIndex) buildGetters(_ *TxContext, storage []colGetter) []colGett
 				mapColReaders[j] = newCachedColumnReaderTx(cs, nil)
 			}
 			mapFn := s.ColMapFn[i]
-			fn := scm.OptimizeProcToSerialFunction(mapFn)
-			getters[i] = colGetter{mapCols: mapColReaders, mapFn: fn}
+			fn := scm.PrepareSerialProc(mapFn)
+			getters[i] = colGetter{mapCols: mapColReaders, mapFn: &fn, mapArgs: make([]scm.Scmer, len(mapColReaders))}
 		} else {
 			cs := s.t.getColumnStorageRLocked(col)
 			getters[i] = colGetter{raw: newCachedColumnReaderTx(cs, nil)}
@@ -494,7 +494,7 @@ func (s *StorageIndex) getDeltaColValue(recid uint32, data []scm.Scmer, colIdx i
 
 func (s *StorageIndex) getDeltaColValueTx(tx *TxContext, recid uint32, data []scm.Scmer, colIdx int) scm.Scmer {
 	if len(s.ColMapFn) > colIdx && !s.ColMapFn[colIdx].IsNil() {
-		fn := scm.OptimizeProcToSerialFunction(s.ColMapFn[colIdx])
+		fn := scm.PrepareSerialProc(s.ColMapFn[colIdx])
 		vals := make([]scm.Scmer, len(s.ColMapCols[colIdx]))
 		for i, mc := range s.ColMapCols[colIdx] {
 			if isScanPseudoColName(mc) {
@@ -512,7 +512,7 @@ func (s *StorageIndex) getDeltaColValueTx(tx *TxContext, recid uint32, data []sc
 				vals[i] = s.getDeltaValue(data, mc)
 			}
 		}
-		return fn(vals...)
+		return fn.Call(vals)
 	}
 	cs := s.t.getColumnStorageRLocked(s.Cols[colIdx])
 	if proxy, ok := cs.(*StorageComputeProxy); ok {
@@ -1767,14 +1767,16 @@ start_scan:
 	if selected != nil {
 		selected(s, true)
 	}
-	// A fully index-covered filter cannot reject an otherwise visible row. When
-	// this active index also supplies ORDER BY, emit only the requested prefix
-	// per callback so LIMIT can brake inside the index walk. The caller-owned
-	// pooled buffer remains allocated at its normal size; only its visible slice
-	// is shortened, so the hot path adds no allocation.
+	// Start an ordered LIMIT with only its requested window. A residual predicate
+	// may reject it, but that is a reason to refill, not to fetch a full batch of
+	// expensive text columns before the consumer gets its first chance to brake.
+	// If the window is insufficient, geometrically grow to the ordinary batch
+	// size. The backing buffer is unchanged: no allocation or row materialization
+	// is added, and sparse/no-hit predicates regain bulk throughput quickly.
 	cmpCols := s.queryIndexPrefixLen(bounds, indexBounds)
 	firstSorted, lastSorted, sortedMask, unboundedMask := s.boundKernel(bounds, cmpCols)
-	if options != nil && options.boundaryCoveredLimit && options.orderedLimit > 0 &&
+	maxBatchSize := len(buf)
+	if options != nil && options.orderedLimit > 0 &&
 		options.orderedLimit < len(buf) && indexCoversBoundaryOrder(s, true, bounds, cmpCols) {
 		buf = buf[:options.orderedLimit]
 	}
@@ -1814,6 +1816,10 @@ start_scan:
 	mainIdx := 0
 	if firstSorted >= 0 && !indexBounds.lower(bounds, firstSorted).IsNil() {
 		if s.usesNaturalAscendingOrder(firstSorted) {
+			less := scm.Less
+			if firstSorted < len(s.ColOrder) && s.ColOrder[firstSorted] != nil {
+				less = s.ColOrder[firstSorted]
+			}
 			var interpMin, interpMax scm.Scmer
 			if len(state.minVals) > firstSorted {
 				interpMin = state.minVals[firstSorted]
@@ -1822,7 +1828,7 @@ start_scan:
 			mainIdx = interpolationSearch(searchLo, searchN, indexBounds.lower(bounds, firstSorted), interpMin, interpMax,
 				func(idx int) scm.Scmer {
 					return cols[firstSorted].get(getRecid(idx))
-				})
+				}, less)
 		} else {
 			mainIdx = searchLo + sort.Search(searchN, func(idx int) bool {
 				value := cols[firstSorted].get(getRecid(searchLo + idx))
@@ -1957,6 +1963,10 @@ start_scan:
 		if bufN == len(buf) {
 			if !emitRowMatchers(matchers, buf[:bufN], callback) {
 				stopped = true
+			} else if len(buf) < maxBatchSize && !options.boundaryCoveredLimit {
+				// Only a continuing consumer asks for more. Do not equate a short
+				// physical batch with SQL LIMIT satisfaction or discard rejected rows.
+				buf = buf[:min(maxBatchSize, len(buf)*2)]
 			}
 			bufN = 0
 		}

@@ -98,20 +98,31 @@ partner. */
 			col
 			(coalesceNil (source_column_name src col true) col)))))
 
+/* A membership marker carries one distinguished probe, but its decorrelated
+domain can contain additional lookup keys. Both direct and joined scan filters
+must bind the whole domain before lowering; otherwise a non-leading key becomes
+an unbound symbol in the callback when costing selects the probe alternative. */
+(define membership_probe_outer_exprs (lambda (stage probe)
+	(cons probe (qassoc_get (gs_facts stage) (quote lookup-keys) '()))))
+
+(define extract_membership_columns_for_alias (lambda (src stage probe)
+	(merge_unique (map (membership_probe_outer_exprs stage probe) (lambda (expr)
+		(extract_columns_for_alias src expr))))))
+
 (define extract_columns_for_alias (lambda (src expr)
 	(match expr
-		((symbol driver_membership_probe) _stage probe)
-		(extract_columns_for_alias src probe)
-		((quote driver_membership_probe) _stage probe)
-		(extract_columns_for_alias src probe)
-		((symbol driver_membership_subscan_probe) _stage probe)
-		(extract_columns_for_alias src probe)
-		((quote driver_membership_subscan_probe) _stage probe)
-		(extract_columns_for_alias src probe)
-		((symbol dml_driver_membership_probe) _fallback_schema _stage probe)
-		(extract_columns_for_alias src probe)
-		((quote dml_driver_membership_probe) _fallback_schema _stage probe)
-		(extract_columns_for_alias src probe)
+		((symbol driver_membership_probe) stage probe)
+		(extract_membership_columns_for_alias src stage probe)
+		((quote driver_membership_probe) stage probe)
+		(extract_membership_columns_for_alias src stage probe)
+		((symbol driver_membership_subscan_probe) stage probe)
+		(extract_membership_columns_for_alias src stage probe)
+		((quote driver_membership_subscan_probe) stage probe)
+		(extract_membership_columns_for_alias src stage probe)
+		((symbol dml_driver_membership_probe) _fallback_schema stage probe)
+		(extract_membership_columns_for_alias src stage probe)
+		((quote dml_driver_membership_probe) _fallback_schema stage probe)
+		(extract_membership_columns_for_alias src stage probe)
 		((symbol scalar_first_probe) stage _requested_col)
 		(merge_unique (map (qassoc_get (gs_facts stage) (quote lookup-keys) '()) (lambda (key)
 			(extract_columns_for_alias src key))))
@@ -2309,18 +2320,24 @@ probe. */
 
 (define collect_join_columns_acc (lambda (sources default_alias target_alias expr columns_by_alias)
 	(match expr
-		((symbol driver_membership_probe) _stage probe)
-		(collect_join_columns_acc sources default_alias target_alias probe columns_by_alias)
-		((quote driver_membership_probe) _stage probe)
-		(collect_join_columns_acc sources default_alias target_alias probe columns_by_alias)
-		((symbol driver_membership_subscan_probe) _stage probe)
-		(collect_join_columns_acc sources default_alias target_alias probe columns_by_alias)
-		((quote driver_membership_subscan_probe) _stage probe)
-		(collect_join_columns_acc sources default_alias target_alias probe columns_by_alias)
-		((symbol dml_driver_membership_probe) _fallback_schema _stage probe)
-		(collect_join_columns_acc sources default_alias target_alias probe columns_by_alias)
-		((quote dml_driver_membership_probe) _fallback_schema _stage probe)
-		(collect_join_columns_acc sources default_alias target_alias probe columns_by_alias)
+		((symbol driver_membership_probe) stage probe)
+		(reduce (membership_probe_outer_exprs stage probe) (lambda (acc expr)
+			(collect_join_columns_acc sources default_alias target_alias expr acc)) columns_by_alias)
+		((quote driver_membership_probe) stage probe)
+		(reduce (membership_probe_outer_exprs stage probe) (lambda (acc expr)
+			(collect_join_columns_acc sources default_alias target_alias expr acc)) columns_by_alias)
+		((symbol driver_membership_subscan_probe) stage probe)
+		(reduce (membership_probe_outer_exprs stage probe) (lambda (acc expr)
+			(collect_join_columns_acc sources default_alias target_alias expr acc)) columns_by_alias)
+		((quote driver_membership_subscan_probe) stage probe)
+		(reduce (membership_probe_outer_exprs stage probe) (lambda (acc expr)
+			(collect_join_columns_acc sources default_alias target_alias expr acc)) columns_by_alias)
+		((symbol dml_driver_membership_probe) _fallback_schema stage probe)
+		(reduce (membership_probe_outer_exprs stage probe) (lambda (acc expr)
+			(collect_join_columns_acc sources default_alias target_alias expr acc)) columns_by_alias)
+		((quote dml_driver_membership_probe) _fallback_schema stage probe)
+		(reduce (membership_probe_outer_exprs stage probe) (lambda (acc expr)
+			(collect_join_columns_acc sources default_alias target_alias expr acc)) columns_by_alias)
 		((symbol scalar_first_probe) stage _requested_col)
 		(collect_join_probe_lookup_columns_acc sources default_alias target_alias stage columns_by_alias)
 		((symbol scalar_first_probe) stage _requested_col _stages)
@@ -3502,27 +3519,70 @@ the auto-index chooses the concrete access path on both tables. */
 				(source_table_expr target_src)
 				(quoted_runtime_list (list target_col)))))))
 
+/* An equality-only presence domain needs no aggregate cache: duplicate RHS
+keys do not change existence. Partition the complete domain into target-column
+joins and query-invariant lookup filters (including explicit session keys).
+Never drop a domain component or reconstruct a dependent/computed-key stage. */
+(define direct_presence_projection_parts (lambda (src membership)
+	(begin
+		(define stage (car membership))
+		(define input (gs_input stage))
+		(define keys (gs_keys stage))
+		(define lookup (qassoc_get (gs_facts stage) (quote lookup-keys) '()))
+		(if (and (presence_probe_stage? stage)
+			(and (source_is_base_table? input)
+				(and (not (empty_list? keys)) (equal? (count keys) (count lookup)))))
+			(begin
+				(define parts (map (produceN (count keys)) (lambda (idx)
+					(begin
+						(define rhs (direct_column_name_for_alias input (nth keys idx)))
+						(define lhs (direct_column_name_for_alias src (nth lookup idx)))
+						(if (or (nil? rhs)
+							(and (nil? lhs) (not (empty_list? (query_expr_alias_set nil (nth lookup idx) '())))))
+							nil
+							(list rhs lhs (if (nil? lhs)
+								(list (quote equal??) (nth keys idx) (nth lookup idx)) true)))))))
+				(define condition (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
+				(if (or (contains? parts nil)
+					(not (empty_list? (external_column_refs_for_alias (source_alias input) condition))))
+					nil
+					(begin
+						(define joins (filter parts (lambda (part) (not (nil? (cadr part))))))
+						(if (not (contains? (map joins cadr) (nth membership 2))) nil
+							(list input (map joins car) (map joins cadr)
+								(combine_where_terms (cons condition (map parts (lambda (part) (nth part 2)))) true))))))
+			nil))))
+
 (define recset_project_join_expr_for_membership_raw (lambda (src membership)
 	(begin
 		(define stage (nth membership 0))
 		(define target_col (nth membership 2))
 		(define input (gs_input stage))
-		(if (union_block? input)
-			(begin
-				(define projected (map (union_branches input) (lambda (branch)
-					(recset_project_join_branch_expr src branch target_col))))
-				(if (reduce projected (lambda (unsupported item) (or unsupported (nil? item))) false)
-					nil
-					(if (single_source? projected)
-						(car projected)
-						(list (quote recset_union)
-							(physical_query_tx_symbol)
-							(cons (quote list) projected)))))
-			(if (equal? (qassoc_get (gs_facts stage) (quote purpose) nil) (quote in_membership))
-				(membership_cache_recset_project_join_expr src stage target_col)
-				(if (recset_probe_stage_shape? stage)
-					(exists_recset_project_join_expr src stage)
-					nil))))))
+		(define direct (direct_presence_projection_parts src membership))
+		(if (not (nil? direct))
+			(list (quote recset_project_join)
+				(physical_query_tx_symbol)
+				(candidate_recset_filter_source (nth direct 0)
+					(source_table_expr (nth direct 0)) (nth direct 3))
+				(quoted_runtime_list (nth direct 1))
+				(source_table_expr src)
+				(quoted_runtime_list (nth direct 2)))
+			(if (union_block? input)
+				(begin
+					(define projected (map (union_branches input) (lambda (branch)
+						(recset_project_join_branch_expr src branch target_col))))
+					(if (reduce projected (lambda (unsupported item) (or unsupported (nil? item))) false)
+						nil
+						(if (single_source? projected)
+							(car projected)
+							(list (quote recset_union)
+								(physical_query_tx_symbol)
+								(cons (quote list) projected)))))
+				(if (equal? (qassoc_get (gs_facts stage) (quote purpose) nil) (quote in_membership))
+					(membership_cache_recset_project_join_expr src stage target_col)
+					(if (recset_probe_stage_shape? stage)
+						(exists_recset_project_join_expr src stage)
+						nil)))))))
 
 /* A source-local estimate cannot describe cardinality after an FK projection:
 matching most keys may still reach only a handful of driver rows. Translate an
@@ -3600,7 +3660,7 @@ plan, while an autoindex or data growth which changes the winner recompiles it. 
 					candidate_input_rows candidate_rows driver_rows facts)
 				(membership_driver_probe_cost driver_rows
 					(qassoc_get facts (quote membership_candidate_probe_branches) 1)
-					(qassoc_get facts (quote membership_downstream_probe_branches) 0)))
+					(qassoc_get facts (quote membership_downstream_probe_branches) 0) facts))
 			nil))
 		(define batch_facts (merge (list
 			(list
@@ -3769,12 +3829,18 @@ filter; they must not reconstruct the choice from enclosing block facts. */
 		/* merge is right-biased. Reorder telemetry owns statistics-sensitive
 		physical work, so place it after the late-consumer fallback; otherwise the
 		fallback replaces index-reduced row and byte counts. */
-		(define facts (merge (list
+		(define estimated_facts (merge (list
 			(membership_candidate_work_facts stage planning_session)
 			(gs_facts stage))))
+		/* Carrier-specific work belongs here, after the logical estimates. A
+		direct RHS projection neither prepares nor reads an aggregate cache. */
+		(define facts (if (nil? (direct_presence_projection_parts src membership))
+			estimated_facts
+			(qassoc_set estimated_facts (quote membership_candidate_cache_backed) false)))
 		(define consumer_facts (qassoc_set
 			(if (equal? consumer (quote aggregate))
-				(qassoc_set facts (quote membership_consumer) (quote aggregate))
+				(qassoc_set (qassoc_set facts (quote membership_consumer) (quote aggregate))
+					(quote membership_order_limit_driver) false)
 				facts)
 			(quote membership_downstream_probe_branches)
 			/* ORDER/LIMIT carriers change how many rows reach downstream work even
@@ -3794,7 +3860,8 @@ filter; they must not reconstruct the choice from enclosing block facts. */
 		(if (or (nil? raw_expr)
 			(not (or
 				(equal? (qassoc_get facts (quote purpose) nil) (quote in_membership))
-				(equal? (qassoc_get facts (quote purpose) nil) (quote in_candidate)))))
+				(or (equal? (qassoc_get facts (quote purpose) nil) (quote in_candidate))
+					(presence_probe_stage? stage)))))
 			(if (nil? raw_expr) nil (list "candidate_keyset" raw_expr))
 			(begin
 				/* Membership reorder already records this estimate in stage facts. Only
@@ -3900,7 +3967,7 @@ filter; they must not reconstruct the choice from enclosing block facts. */
 							candidate_input_rows candidate_rows driver_rows cost_facts)
 						(membership_driver_probe_cost driver_rows
 							(qassoc_get facts (quote membership_candidate_probe_branches) 1)
-							(qassoc_get cost_facts (quote membership_downstream_probe_branches) 0)))
+							(qassoc_get cost_facts (quote membership_downstream_probe_branches) 0) cost_facts))
 					nil))
 				(define batch_cost_facts (if allow_ordered_batch
 					(merge (list
@@ -4985,7 +5052,9 @@ self-joins of the same base table still describe two distinct row roles. */
 			(list
 				(list (quote condition) (coalesceNil (qb_where block) true))
 				(list (quote domain) session_keys)
-				(list (quote lookup-keys) session_keys))))))
+				(list (quote lookup-keys) session_keys)
+				(list (quote physical_planning_session) (planner_context_session (qb_facts block)))
+				(list (quote physical_planning_tx) (planner_context_tx (qb_facts block))))))))
 
 (define make_group_stage_for_query_block (lambda (block)
 	(begin
@@ -5523,7 +5592,7 @@ every group row and its canonical identity stays independent of bound values. */
 		(cons agg_expr (cons agg_reduce (cons agg_neutral _rest))) (begin
 			(define src (list alias schema tbl false nil))
 			(define agg_col (aggregate_col_name_using src ag))
-			(define membership_parts (base_group_membership_parts src condition))
+			(define membership_parts (base_group_membership_parts src condition (gs_facts stage)))
 			(define membership_expr (car membership_parts))
 			(define effective_condition (cadr membership_parts))
 			(if (expr_contains_driver_membership? condition)
@@ -5687,7 +5756,7 @@ otherwise unnecessary one-entry associative group. */
 			true)
 		(define ag (cadr scalar_parts))
 		(define condition (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
-		(define membership_parts (base_group_membership_parts src condition))
+		(define membership_parts (base_group_membership_parts src condition (gs_facts stage)))
 		(define membership_expr (car membership_parts))
 		(define effective_condition (cadr membership_parts))
 		(define membership_var (symbol "__group_membership_recset"))
@@ -5829,18 +5898,48 @@ state through an assoc and one-element payload lists adds no semantics. */
 					true))
 			state_plan))))
 
-(define base_group_membership_parts (lambda (src condition)
+(define base_group_membership_parts (lambda (src condition facts)
 	(begin
+		/* Group fills consume the complete input, not the outer ORDER/LIMIT
+		window. Keep anti-membership visible to the same costed carrier builder
+		as positive membership; only two-valued presence stages may participate
+		in the exact complement/difference formula. Nullable IN remains a
+		residual unless its separate truth contract has been discharged. */
+		(define formula_terms (driver_membership_formula_terms_for_source src condition))
+		(define formula_bindings (if (reduce formula_terms (lambda (found term)
+			(or found (nth term 4))) false)
+			(filter (map formula_terms (lambda (term)
+				(begin
+					(define plan (recset_project_join_plan_for_membership_using
+						/* This marker runs in the group fill's input filter, before
+						the residual predicates. The output LIMIT does not bound its
+						probes: every input row can reach this call. */
+						src term (quote aggregate) (planner_source_row_count src) false nil 0 true nil
+						(quote group_fill) (planner_context_session facts) (planner_context_tx facts)))
+					(if (and (not (nil? plan)) (equal? (car plan) "candidate_keyset"))
+						(list term (membership_recset_var src term) (cadr plan)) nil))))
+				(lambda (binding) (not (nil? binding))))
+			'()))
+		(define formula (driver_membership_recset_formula src condition formula_bindings))
 		(define membership (driver_membership_for_source src condition))
-		(define table_expr (if (nil? membership)
-			nil
-			(recset_project_join_expr_for_membership src membership)))
+		(define table_expr (if (nil? formula)
+			(if (nil? membership)
+				nil
+				(begin
+					(define plan (recset_project_join_plan_for_membership_using
+						src membership (quote aggregate) (planner_source_row_count src) false nil 0 true nil
+						(quote group_fill) (planner_context_session facts) (planner_context_tx facts)))
+					(if (and (not (nil? plan)) (equal? (car plan) "candidate_keyset"))
+						(cadr plan) nil)))
+			(nth formula 1)))
 		(list table_expr
-			(strip_driver_membership_for_source src condition (if (nil? table_expr) nil membership))))))
+			(if (nil? formula)
+				(strip_driver_membership_for_source src condition (if (nil? table_expr) nil membership))
+				(strip_driver_membership_formula_terms condition (car formula)))))))
 
-(define build_base_group_into_plan (lambda (schema tbl alias src grouptbl keys key_names condition ags)
+(define build_base_group_into_plan (lambda (schema tbl alias src grouptbl keys key_names condition ags facts)
 	(begin
-		(define membership_parts (base_group_membership_parts src condition))
+		(define membership_parts (base_group_membership_parts src condition facts))
 		(define membership_expr (car membership_parts))
 		(define effective_condition (cadr membership_parts))
 		(define membership_var (symbol "__group_membership_recset"))

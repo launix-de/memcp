@@ -1719,7 +1719,7 @@ func (m *ShardMapReducer) prepareJITBufferReducer() {
 	if m.mapReduceProgram.Kind != scm.SerialProcJIT && m.mapReduceProgram.Kind != scm.SerialProcNative {
 		return
 	}
-	proc := scm.PrepareJITMapReduceBufferProc(m.mapReduceScmer, len(m.mainCols)+1)
+	proc := scm.PrepareJITBufferProc(m.mapReduceScmer, len(m.mainCols)+1)
 	if proc == nil {
 		return
 	}
@@ -2535,14 +2535,14 @@ func (m *ShardMapReducer) Close() {
 	if m.hasUpdateCol && m.currentTx != nil && m.currentTx.getShardTx(m.shard) != nil {
 		m.currentTx.RegisterTouchedShard(m.shard)
 	}
+	clear(m.mainBulkValues)
+	m.mainBulkValues = nil
 	if m.mainBulkBuffer != nil {
 		clear(m.mainBulkBuffer.values)
 		width := cap(m.mainBulkBuffer.values) / defaultScanBufferSize
 		mapReducerBulkBufferPools[width-1].Put(m.mainBulkBuffer)
 		m.mainBulkBuffer = nil
 	}
-	clear(m.mainBulkValues)
-	m.mainBulkValues = nil
 	m.bufferReduceFn = nil
 	m.bufferReduceProc = nil
 	m.bufferValueTypes = nil

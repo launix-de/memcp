@@ -32,6 +32,7 @@ const (
 	jitStorageGetValueRangeABI
 	jitStorageGetValueMultiABI
 	jitMapReduceBufferABI
+	jitFilterBufferABI
 )
 
 type jitStorageFuncValue struct {
@@ -155,6 +156,163 @@ func CompileJITMapReduceBuffer(proc *Proc, valueTypes []uint8) JITMapReduceBuffe
 	}
 	valuePointer := unsafe.Pointer(holders[0])
 	return *(*JITMapReduceBufferFunc)(unsafe.Pointer(&valuePointer))
+}
+
+// CompileJITFilterBuffer emits one predicate body around the complete batch
+// loop. Exact physical tags let arithmetic and comparisons skip runtime type
+// dispatch even though values retain their general Scmer representation.
+func CompileJITFilterBuffer(proc *Proc, valueTypes []uint8) JITFilterBufferFunc {
+	if proc == nil {
+		return nil
+	}
+	types := append([]uint8(nil), valueTypes...)
+	requests := []jitStorageCompileRequest{{abi: jitFilterBufferABI, emit: func(ctx *JITContext) {
+		emitJITFilterBuffer(ctx, proc, types, nil)
+	}}}
+	entries, holders := compileJITStorageBatch(requests)
+	if len(entries) != 1 || entries[0] == nil || holders[0] == nil {
+		return nil
+	}
+	valuePointer := unsafe.Pointer(holders[0])
+	return *(*JITFilterBufferFunc)(unsafe.Pointer(&valuePointer))
+}
+
+// CompileJITFilterStorage compiles main-storage reads directly into a filter
+// loop. The returned function uses the record-ID slice; its value slice is unused.
+func CompileJITFilterStorage(proc *Proc, valueTypes []uint8, readers []JITStorageGetValueEmitter) JITFilterBufferFunc {
+	if proc == nil || len(valueTypes) != len(readers) {
+		return nil
+	}
+	entries, holders := compileJITStorageBatch([]jitStorageCompileRequest{{abi: jitFilterBufferABI, emit: func(ctx *JITContext) {
+		emitJITFilterBuffer(ctx, proc, valueTypes, readers)
+	}}})
+	if len(entries) != 1 || entries[0] == nil || holders[0] == nil {
+		return nil
+	}
+	valuePointer := unsafe.Pointer(holders[0])
+	return *(*JITFilterBufferFunc)(unsafe.Pointer(&valuePointer))
+}
+
+func emitJITFilterBuffer(ctx *JITContext, proc *Proc, valueTypes []uint8, readers []JITStorageGetValueEmitter) {
+	recids := jitStorageSliceArg(ctx, RegRAX, RegRBX, RegRCX)
+	values := jitStorageSliceArg(ctx, RegRDI, RegRSI, RegR8)
+	ctx.StabilizeDescForControlFlow(&recids)
+	ctx.StabilizeDescForControlFlow(&values)
+	rowOff := ctx.AllocStack(8)
+	outOff := ctx.AllocStack(8)
+	ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}, rowOff)
+	ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}, outOff)
+
+	loop := ctx.ReserveLabel()
+	accepted := ctx.ReserveLabel()
+	next := ctx.ReserveLabel()
+	done := ctx.ReserveLabel()
+	ctx.MarkLabel(loop)
+	rowReg := ctx.AllocReg()
+	limitReg := ctx.AllocRegExcept(rowReg)
+	ctx.EmitLoadFromStack(rowReg, rowOff)
+	ctx.EmitLoadFromStack(limitReg, recids.StackOff+8)
+	ctx.EmitCmpInt64(rowReg, limitReg)
+	ctx.FreeReg(limitReg)
+	ctx.FreeReg(rowReg)
+	ctx.EmitJcc(CondSignedGreaterOrEqual, done)
+
+	args := make([]JITValueDesc, len(valueTypes))
+	if readers != nil {
+		for column, reader := range readers {
+			reg := ctx.AllocReg()
+			ctx.EmitLoadFromStack(reg, rowOff)
+			index := JITValueDesc{Loc: LocReg, Type: tagInt, Reg: reg, NoHeapPointer: true}
+			ctx.BindReg(reg, &index)
+			address := ctx.EmitSliceElementAddress(&recids, &index, 4)
+			ctx.FreeDesc(&index)
+			idReg := ctx.AllocRegExcept(address.Reg)
+			ctx.EmitMovRegMemL(idReg, address.Reg, 0)
+			ctx.FreeDesc(&address)
+			id := JITValueDesc{Loc: LocReg, Type: tagInt, Reg: idReg, NoHeapPointer: true}
+			ctx.BindReg(idReg, &id)
+			args[column] = reader(ctx, id, JITValueDesc{Loc: LocAny})
+			args[column].Type = valueTypes[column]
+			ctx.StabilizeDescForControlFlow(&args[column])
+		}
+	} else if len(valueTypes) != 0 {
+		elementReg := ctx.AllocReg()
+		ctx.EmitLoadFromStack(elementReg, rowOff)
+		if len(valueTypes) != 1 {
+			ctx.EmitImulRegImm32(elementReg, int32(len(valueTypes)))
+		}
+		index := JITValueDesc{Loc: LocReg, Type: tagInt, Reg: elementReg, NoHeapPointer: true}
+		ctx.BindReg(elementReg, &index)
+		address := ctx.EmitSliceElementAddress(&values, &index, 16)
+		ctx.FreeDesc(&index)
+		ctx.EnsureDesc(&address)
+		for column, valueType := range valueTypes {
+			ctx.EnsureDesc(&address)
+			value := JITValueDesc{Loc: LocRegPair, Type: valueType, Reg: ctx.AllocRegExcept(address.Reg)}
+			value.Reg2 = ctx.AllocRegExcept(address.Reg, value.Reg)
+			ctx.EmitMovRegMem(value.Reg, address.Reg, int32(column*16))
+			ctx.EmitMovRegMem(value.Reg2, address.Reg, int32(column*16+8))
+			args[column] = value
+			ctx.BindReg(value.Reg, &args[column])
+			ctx.BindReg(value.Reg2, &args[column])
+			ctx.StabilizeDescForControlFlow(&args[column])
+		}
+		ctx.FreeDesc(&address)
+	}
+	predicate := JITEmitProcInline(ctx, proc, args, RegR12, JITValueDesc{Loc: LocAny})
+	boolean := ctx.EmitBoolDesc(&predicate, JITValueDesc{Loc: LocAny})
+	ctx.FreeDesc(&predicate)
+	if boolean.Loc == LocImm {
+		if boolean.Imm.Bool() {
+			ctx.EmitJmp(accepted)
+		} else {
+			ctx.EmitJmp(next)
+		}
+	} else {
+		ctx.EmitCmpRegImm32(boolean.Reg, 0)
+		ctx.FreeDesc(&boolean)
+		ctx.EmitJcc(CondNotEqual, accepted)
+		ctx.EmitJmp(next)
+	}
+
+	ctx.MarkLabel(accepted)
+	rowReg = ctx.AllocReg()
+	ctx.EmitLoadFromStack(rowReg, rowOff)
+	row := JITValueDesc{Loc: LocReg, Type: tagInt, Reg: rowReg, NoHeapPointer: true}
+	ctx.BindReg(rowReg, &row)
+	readAddress := ctx.EmitSliceElementAddress(&recids, &row, 4)
+	ctx.FreeDesc(&row)
+	recidReg := ctx.AllocRegExcept(readAddress.Reg)
+	ctx.EmitMovRegMemL(recidReg, readAddress.Reg, 0)
+	ctx.FreeDesc(&readAddress)
+	recid := JITValueDesc{Loc: LocReg, Type: tagInt, Reg: recidReg, NoHeapPointer: true}
+	ctx.BindReg(recidReg, &recid)
+	ctx.ProtectReg(recidReg)
+	outReg := ctx.AllocRegExcept(recidReg)
+	ctx.EmitLoadFromStack(outReg, outOff)
+	outIndex := JITValueDesc{Loc: LocReg, Type: tagInt, Reg: outReg, NoHeapPointer: true}
+	ctx.BindReg(outReg, &outIndex)
+	writeAddress := ctx.EmitSliceElementAddress(&recids, &outIndex, 4)
+	ctx.FreeDesc(&outIndex)
+	ctx.EmitStoreRegMemL(recidReg, writeAddress.Reg, 0)
+	ctx.UnprotectReg(recidReg)
+	ctx.FreeDesc(&recid)
+	ctx.FreeDesc(&writeAddress)
+	outReg = ctx.AllocReg()
+	ctx.EmitLoadFromStack(outReg, outOff)
+	ctx.EmitAddRegImm32(outReg, 1)
+	ctx.EmitStoreToStack(JITValueDesc{Loc: LocReg, Type: tagInt, Reg: outReg}, outOff)
+	ctx.FreeReg(outReg)
+
+	ctx.MarkLabel(next)
+	rowReg = ctx.AllocReg()
+	ctx.EmitLoadFromStack(rowReg, rowOff)
+	ctx.EmitAddRegImm32(rowReg, 1)
+	ctx.EmitStoreToStack(JITValueDesc{Loc: LocReg, Type: tagInt, Reg: rowReg}, rowOff)
+	ctx.FreeReg(rowReg)
+	ctx.EmitJmp(loop)
+	ctx.MarkLabel(done)
+	ctx.EmitLoadFromStack(RegRAX, outOff)
 }
 
 func emitJITMapReduceBuffer(ctx *JITContext, proc *Proc, valueTypes []uint8) {
@@ -356,6 +514,8 @@ func jitStorageABIName(abi jitStorageABI) string {
 		return "storage.GetValueMulti"
 	case jitMapReduceBufferABI:
 		return "storage.MapReduceBuffer"
+	case jitFilterBufferABI:
+		return "storage.FilterBuffer"
 	default:
 		return "storage.unknown"
 	}
@@ -522,6 +682,8 @@ func jitStorageABIInputRegisters(abi jitStorageABI) uint64 {
 		registers = []Reg{RegRAX, RegRBX, RegRCX, RegRDI, RegRSI, RegR8, RegR9}
 	case jitMapReduceBufferABI:
 		registers = []Reg{RegRAX, RegRBX, RegRCX, RegRDI, RegRSI, RegR8}
+	case jitFilterBufferABI:
+		registers = []Reg{RegRAX, RegRBX, RegRCX, RegRDI, RegRSI, RegR8}
 	}
 	var mask uint64
 	for _, reg := range registers {
@@ -560,6 +722,14 @@ func jitStorageSpillEntryArgs(ctx *JITContext, abi jitStorageABI) (uintptr, []by
 		ctx.EmitStoreRegMem(RegRSI, RegRSP, 40)
 		ctx.EmitStoreRegMem(RegR8, RegRSP, 48)
 		return 7, []byte{0b00001010}
+	case jitFilterBufferABI:
+		ctx.EmitStoreRegMem(RegRAX, RegRSP, 8)
+		ctx.EmitStoreRegMem(RegRBX, RegRSP, 16)
+		ctx.EmitStoreRegMem(RegRCX, RegRSP, 24)
+		ctx.EmitStoreRegMem(RegRDI, RegRSP, 32)
+		ctx.EmitStoreRegMem(RegRSI, RegRSP, 40)
+		ctx.EmitStoreRegMem(RegR8, RegRSP, 48)
+		return 7, []byte{0b00010010}
 	default:
 		panic("jit: unknown storage ABI")
 	}
@@ -585,6 +755,13 @@ func jitStorageReloadEntryArgs(ctx *JITContext, abi jitStorageABI) {
 		ctx.EmitMovRegMem(RegR8, RegRSP, 48)
 		ctx.EmitMovRegMem(RegR9, RegRSP, 56)
 	case jitMapReduceBufferABI:
+		ctx.EmitMovRegMem(RegRAX, RegRSP, 8)
+		ctx.EmitMovRegMem(RegRBX, RegRSP, 16)
+		ctx.EmitMovRegMem(RegRCX, RegRSP, 24)
+		ctx.EmitMovRegMem(RegRDI, RegRSP, 32)
+		ctx.EmitMovRegMem(RegRSI, RegRSP, 40)
+		ctx.EmitMovRegMem(RegR8, RegRSP, 48)
+	case jitFilterBufferABI:
 		ctx.EmitMovRegMem(RegRAX, RegRSP, 8)
 		ctx.EmitMovRegMem(RegRBX, RegRSP, 16)
 		ctx.EmitMovRegMem(RegRCX, RegRSP, 24)

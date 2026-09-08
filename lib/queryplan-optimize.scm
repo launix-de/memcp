@@ -3342,15 +3342,17 @@ planning preserves the proven bound without consulting index availability. */
 					(or found (membership_expr_has_driver_alternative? item))) false)))
 		_ false)))
 
-(define membership_driver_local_filter (lambda (driver sources block)
+(define membership_driver_local_filter (lambda (driver block)
 	(begin
 		(define default_alias (qassoc_get (qb_facts block) (quote default_alias)
 			(source_alias driver)))
-		(define other_aliases (map (filter (coalesceNil sources '()) (lambda (src)
-			(not (equal? (source_alias src) (source_alias driver))))) source_alias))
+		/* A promoted presence stage may already be absent from sources while
+		its output is still referenced by this predicate. Prove locality positively:
+		a negative check against the remaining aliases would sample that unbound
+		stage output as nil and incorrectly estimate zero driver rows. */
 		(combine_where_terms
 			(filter (split_and_terms (membership_driver_filter (qb_where block))) (lambda (term)
-				(not (expr_refs_any_alias? default_alias other_aliases term))))
+				(expr_only_refs_alias? default_alias (source_alias driver) term)))
 			true))))
 
 (define membership_aggregate_pushdown_driver_rows (lambda (block)
@@ -3521,6 +3523,9 @@ either physical alternative or sampling the table again. */
 			other supported candidate carrier reads a prepared group-stage cache. */
 			(list (quote membership_candidate_cache_backed)
 				(not (union_block? (gs_input stage))))
+			(list (quote membership_driver_cache_backed)
+				(and (not (union_block? (gs_input stage)))
+					(nil? (recset_domain_source (gs_input stage)))))
 			(list (quote membership_candidate_scan_invocations) (qassoc_get work (quote scan_invocations) 1))
 			(list (quote membership_candidate_filter_columns) (qassoc_get work (quote filter_columns) 0))
 			(list (quote membership_candidate_map_columns) (qassoc_get work (quote map_columns) (count (gs_keys stage))))
@@ -3536,7 +3541,7 @@ either physical alternative or sampling the table again. */
 	(if (nil? driver)
 		'()
 		(begin
-			(define condition (membership_driver_local_filter driver sources block))
+			(define condition (membership_driver_local_filter driver block))
 			(define profile (membership_source_work_profile driver condition
 				(list (qb_fields block) (qb_group block) (qb_having block)
 					(qb_order block) (qb_hidden block)) planning_session))
@@ -3595,7 +3600,7 @@ carrier crossover. */
 		(define driver_estimate (if (nil? driver)
 			nil
 			(planner_source_filter_estimate driver
-				(membership_driver_local_filter driver sources block) 512 tx planning_session)))
+				(membership_driver_local_filter driver block) 512 tx planning_session)))
 		(define driver_rows (membership_estimated_work_rows driver_estimate driver_input_rows))
 		(define candidate_rows (planner_stage_input_rows (gs_input stage)))
 		(define candidate_probe_branches (if (union_block? (gs_input stage))
@@ -4122,14 +4127,31 @@ calibrated components used by the other membership carriers. */
 					(membership_work_value work (quote membership_downstream_probe_branches) 0)))
 			driver_rows 0.65))))
 
-(define membership_driver_probe_cost (lambda (driver_rows probe_branches downstream_probe_branches)
+(define membership_driver_probe_cost (lambda (driver_rows probe_branches downstream_probe_branches work)
 	(begin
 		(define probes (* driver_rows probe_branches))
+		/* Compare complete executable alternatives. Projection already charges
+		its driver scan; charging only point probes on this side incorrectly makes
+		that scan free. A complex domain also prepares its canonical cache before
+		probing it, exactly as the projected-cache alternative does. */
+		(define driver_scan (planner_cost
+			(+ (* (membership_work_value work (quote membership_driver_scan_invocations) 1)
+				planner_membership_scan_invocation_ns)
+				(if (membership_work_value work (quote membership_driver_cache_backed) false)
+					planner_membership_group_cache_startup_ns 0))
+			(* driver_rows (+ planner_membership_scan_row_ns
+				(* (membership_work_value work (quote membership_driver_filter_columns) 0)
+					planner_membership_filter_column_row_ns)
+				(* (membership_work_value work (quote membership_driver_map_columns) 0)
+					planner_membership_map_column_row_ns)
+				(* (membership_work_value work (quote membership_driver_expression_operations) 0)
+					planner_membership_expression_operation_row_ns)))
+			0 0 0 0 0 0 driver_rows 0.75))
 		/* A driver membership check lowers each candidate branch to an indexed
 		point-presence probe. Keep that storage subscan distinct from the ordered
 		candidate-key index calibrated below. */
 		(planner_cost_add
-			(planner_membership_direct_probe_cost probes)
+			(planner_cost_add driver_scan (planner_membership_direct_probe_cost probes) driver_rows 0.75)
 			(planner_membership_downstream_probe_cost
 				(* driver_rows downstream_probe_branches))
 			driver_rows 0.75))))
@@ -4183,7 +4205,7 @@ calibrated components used by the other membership carriers. */
 				(if (equal? driver_strategy (quote driver_order_membership_probe))
 					(membership_ordered_driver_probe_cost candidate_input_rows candidate_rows driver_rows work)
 					(membership_driver_probe_cost driver_rows probe_branches
-						(membership_work_value work (quote membership_downstream_probe_branches) 0))))))))
+						(membership_work_value work (quote membership_downstream_probe_branches) 0) work)))))))
 
 (define membership_cost_options_for_telemetry (lambda (telemetry planning_session)
 	(begin
@@ -5072,7 +5094,7 @@ the logical lookup still carries an alias which no longer exists. */
 
 (define join_reorder_node_using (lambda (stage_catalog node planning_session tx)
 	(if (query_block? node)
-		(reorder_query_block_with_candidate_strategy_using stage_catalog node planning_session tx)
+		(reorder_query_block_with_candidate_strategy_using stage_catalog (join_null_rejection_facts node) planning_session tx)
 		(if (union_block? node)
 			(make_union_block
 				(union_mode node)
@@ -5557,10 +5579,10 @@ deliberately retained: dropping one would change COUNT and other aggregates. */
 						(equal? (qassoc_get (gs_facts stage) (quote null_semantics) nil) (quote scalar))
 						(equal? (qassoc_get (gs_facts stage) (quote null_semantics) nil) (quote exists)))
 						(and (not (stage_has_residual_outer_refs? stage))
-						(and (equal? (count (gs_keys stage))
-							(count (qassoc_get (gs_facts stage) (quote lookup-keys) '())))
-							(and (equal? (stage_result_max_rows_per_partition stage) 1)
-								(not (has_assoc? referenced_aliases (source_alias src)))))))))))))
+							(and (equal? (count (gs_keys stage))
+								(count (qassoc_get (gs_facts stage) (quote lookup-keys) '())))
+								(and (equal? (stage_result_max_rows_per_partition stage) 1)
+									(not (has_assoc? referenced_aliases (source_alias src)))))))))))))
 
 (define prune_unused_stage_outputs_reversed (lambda (reversed_sources default_alias stage_index referenced_aliases)
 	(match (coalesceNil reversed_sources '())
@@ -6594,6 +6616,18 @@ remain ordinary residual predicates. */
 			ir
 			(make_ir (ir_kind ir) outer_block all_stages (ir_context_of ir) (ir_return ir))))))
 
+/* Partitioning on a complete non-null unique key cannot reduce the number of
+stage probes: each surviving row still owns one group. The partition alternative
+adds strictly positive startup/build cost to the same probes, independently of
+selectivity. Prove that dominance before sampling, and do not install a runtime
+sampling guard for a choice that no cardinality change can reverse. */
+(define aggregate_pushdown_identity_partition? (lambda (driver columns)
+	(reduce (source_unique_key_sets driver) (lambda (found key)
+		(or found (and (not (empty_list? key))
+			(reduce key (lambda (complete col)
+				(and complete (and (contains? columns col)
+					(source_column_guaranteed_nonnull? driver col)))) true)))) false)))
+
 (define aggregate_pushdown_logical (lambda (ir planning_session tx)
 	(begin
 		(define block (ir_root ir))
@@ -6614,8 +6648,12 @@ remain ordinary residual predicates. */
 					(aggregate_pushdown_probe_bindings driver bound_terms))
 				(define columns
 					(aggregate_pushdown_key_columns block driver movable_terms))
-				(if (or (empty_list? movable_terms) (empty_list? columns))
-					ir
+				(if (or (or (empty_list? movable_terms) (empty_list? columns))
+					(aggregate_pushdown_identity_partition? driver columns))
+					(begin
+						/* Schema changes invalidate the uniqueness proof as well as the plan. */
+						(planner_record_table_statistics_guards (list driver) planning_session)
+						ir)
 					(begin
 						(define residual (combine_where_terms residual_terms true))
 						(define stage_count (max 1 (count
@@ -6672,3 +6710,28 @@ remain ordinary residual predicates. */
 			(ir_return ir)))))
 
 /* ------------------------------------------------------------------------- */
+
+/* A nullable-side WHERE predicate rejects the synthetic row only when it is
+provably UNKNOWN there. Keep this proof in logical optimization; physical
+semijoin carriers consume the fact without moving predicates across a barrier.
+The whitelist is deliberately conservative (COALESCE/IS NULL are not strict). */
+(define join_null_propagating? (lambda (src expr)
+	(match expr
+		((symbol get_column) alias _ci col _cci)
+		(source_alias_matches? src (source_alias src) alias false)
+		(cons head tail)
+		(if (equal? (string head) "sql_in")
+			(join_null_propagating? src (cadr tail))
+			(and (contains? '("equal??" "sql_not") (string head))
+				(reduce tail (lambda (found item)
+					(or found (join_null_propagating? src item))) false)))
+		_ false)))
+
+(define join_null_rejection_facts (lambda (block)
+	(begin
+		(define rejected (map (filter (qb_sources block) (lambda (src)
+			(and (source_outer? src)
+				(reduce (split_and_terms (coalesceNil (qb_where block) true))
+					(lambda (found term) (or found (join_null_propagating? src term))) false)))) source_alias))
+		(if (empty_list? rejected) block
+			(query_block_with_reorder_facts block (list (list (quote null_rejected_aliases) rejected)))))))

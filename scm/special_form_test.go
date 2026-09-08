@@ -248,8 +248,8 @@ func TestOptimizerRebasesExplicitOuterWhenRemovingBeginScope(t *testing.T) {
 	if strings.Contains(serialized, "(outer 2 (var 0))") {
 		t.Fatalf("removed begin scope retained stale outer depth: %s", serialized)
 	}
-	outer := OptimizeProcToSerialFunction(Eval(optimized, &Globalenv))
-	inner := OptimizeProcToSerialFunction(outer(NewInt(7)))
+	outer := serialTestCallable(Eval(optimized, &Globalenv))
+	inner := serialTestCallable(outer(NewInt(7)))
 	if got := inner(NewInt(5)); !Equal(got, NewInt(12)) {
 		t.Fatalf("rebased closure returned %s, want 12", String(got))
 	}
@@ -268,9 +268,9 @@ func TestOptimizerKeepsReferencesInsideRemovedBeginSubtree(t *testing.T) {
 	if !strings.Contains(serialized, "(outer 2 (var 0))") {
 		t.Fatalf("external capture was not rebased across removed begin: %s", serialized)
 	}
-	outer := OptimizeProcToSerialFunction(Eval(optimized, &Globalenv))
-	middle := OptimizeProcToSerialFunction(outer(NewInt(7)))
-	inner := OptimizeProcToSerialFunction(middle(NewInt(3)))
+	outer := serialTestCallable(Eval(optimized, &Globalenv))
+	middle := serialTestCallable(outer(NewInt(7)))
+	inner := serialTestCallable(middle(NewInt(3)))
 	if got := inner(NewInt(2)); !Equal(got, NewInt(12)) {
 		t.Fatalf("nested rebased closure returned %s, want 12", String(got))
 	}
