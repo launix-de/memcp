@@ -18,6 +18,55 @@ package scm
 
 import "testing"
 
+func TestBinaryCollationBooleanTextOrder(t *testing.T) {
+	values := []Scmer{NewNil(), NewBool(false), NewBool(true),
+		NewString(""), NewString("0"), NewString("1"), NewString("3"),
+		NewString("false"), NewString("true"), NewString("view"), NewString("yes"),
+		NewSymbol("true"), NewString("ä")}
+	for _, name := range []string{"bin", "binary", "utf8", "utf8mb4", "utf8mb4_bin"} {
+		for _, reverse := range []bool{false, true} {
+			factory := Apply(Globalenv.Vars[Symbol("collate")], NewString(name), NewBool(reverse))
+			less := OrderRelationLess(factory.Func())
+			for i, a := range values {
+				if less(a, a) {
+					t.Fatalf("%s reverse=%v: irreflexivity at %d", name, reverse, i)
+				}
+				for j, b := range values {
+					ab, ba := less(a, b), less(b, a)
+					if ab && ba {
+						t.Fatalf("%s reverse=%v: asymmetric order at %d,%d", name, reverse, i, j)
+					}
+					for k, c := range values {
+						if ab && less(b, c) && !less(a, c) {
+							t.Fatalf("%s reverse=%v: non-transitive order at %d,%d,%d", name, reverse, i, j, k)
+						}
+						if !ab && !ba && !less(b, c) && !less(c, b) && (less(a, c) || less(c, a)) {
+							t.Fatalf("%s reverse=%v: non-transitive equivalence at %d,%d,%d", name, reverse, i, j, k)
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestBinaryCollationPreservesNumericAndExpressionComparisons(t *testing.T) {
+	// The index fix must not redefine coercing expression comparisons or
+	// change the existing numeric/string search-key conversions.
+	if !Less(NewBool(true), NewString("3")) {
+		t.Fatal("coercing expression comparison changed")
+	}
+	values := []Scmer{NewNil(), NewInt(-1), NewInt(2), NewInt(10), NewFloat(2.5),
+		NewString("2"), NewString("10"), NewDate(42)}
+	for _, a := range values {
+		for _, b := range values {
+			if binaryCollationLess(a, b) != Less(a, b) {
+				t.Fatalf("numeric/text compatibility changed for %v and %v", a, b)
+			}
+		}
+	}
+}
+
 func TestLikePatternNeedsCaseFold(t *testing.T) {
 	tests := []struct {
 		pattern string

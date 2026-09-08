@@ -1814,6 +1814,10 @@ start_scan:
 	mainIdx := 0
 	if firstSorted >= 0 && !indexBounds.lower(bounds, firstSorted).IsNil() {
 		if s.usesNaturalAscendingOrder(firstSorted) {
+			less := scm.Less
+			if firstSorted < len(s.ColOrder) && s.ColOrder[firstSorted] != nil {
+				less = s.ColOrder[firstSorted]
+			}
 			var interpMin, interpMax scm.Scmer
 			if len(state.minVals) > firstSorted {
 				interpMin = state.minVals[firstSorted]
@@ -1822,7 +1826,7 @@ start_scan:
 			mainIdx = interpolationSearch(searchLo, searchN, indexBounds.lower(bounds, firstSorted), interpMin, interpMax,
 				func(idx int) scm.Scmer {
 					return cols[firstSorted].get(getRecid(idx))
-				})
+				}, less)
 		} else {
 			mainIdx = searchLo + sort.Search(searchN, func(idx int) bool {
 				value := cols[firstSorted].get(getRecid(searchLo + idx))
