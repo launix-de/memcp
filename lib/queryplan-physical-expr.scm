@@ -2766,6 +2766,35 @@ retain the scalar's complete value, including SQL NULL. */
 					(define collation (meta "Collation"))
 					(if (or (nil? collation) (equal? collation "")) "bin" collation)))))))
 
+/* Preserve value provenance before physical helper columns replace the input.
+Aggregate wrappers carry the input value's collation; explicit ORDER BY COLLATE
+callbacks remain authoritative. Numeric aggregate results ignore string collation. */
+(define physical_expr_collation_source (lambda (input expr)
+	(match expr
+		((symbol aggregate) value _reduce _neutral) (physical_expr_collation_source input value)
+		((symbol aggregate) value _reduce _neutral _finalize) (physical_expr_collation_source input value)
+		((symbol get_column) tblvar ignorecase col _col_ignorecase)
+		(begin
+			(define sources (canonical_helper_sources input))
+			(define alias (resolve_column_alias tblvar (if (empty_list? sources) nil (source_alias (car sources)))))
+			(define src (find sources (lambda (candidate)
+				(source_alias_matches? candidate (source_alias candidate) alias ignorecase)) nil))
+			(if (or (nil? src) (not (source_is_base_table? src))) nil (list src col)))
+		_ nil)))
+
+(define physical_expr_collation (lambda (input expr)
+	(match (physical_expr_collation_source input expr)
+		'(src col) (source_column_order_collation src col)
+		_ "bin")))
+
+/* Evaluate metadata after prerequisite prejoin columns have been created.
+Only the physical table/column handle crosses into the generated expression. */
+(define physical_column_collation_expr (lambda (input expr)
+	(match (physical_expr_collation_source input expr)
+		'(src col) (list (quote source_column_order_collation)
+			(quoted_runtime_list (list (source_alias src) (source_schema src) (source_relation src) false nil)) col)
+		_ "bin")))
+
 (define canonical_order_relation (lambda (dir collation)
 	(if (or (equal? dir <) (equal? dir >))
 		(collate collation (equal? dir >))
@@ -2831,7 +2860,7 @@ is still available. Explicit COLLATE and user callbacks pass through intact. */
 		(define group_src (list grouptbl schema grouptbl false nil))
 		(define value_expr (replace_group_expr (gs_input stage) alias grouptbl keys key_names ags (first_projection_expr (gs_output stage))))
 		(define replaced_order (map (coalesceNil (gs_order stage) '()) (lambda (item)
-			(match item '(expr dir) (list (replace_group_order_expr (gs_input stage) alias grouptbl keys key_names ags expr) dir)))))
+			(match item '(expr dir) (list (replace_group_order_expr (gs_input stage) alias grouptbl keys key_names ags expr) (canonical_order_relation dir (physical_expr_collation (gs_input stage) expr)))))))
 		(define session_filter (group_stage_session_filter_expr stage grouptbl keys key_names))
 		(define filtercols (extract_columns_for_alias group_src session_filter))
 		(define ordercols (order_cols_for_alias group_src replaced_order))
@@ -4733,9 +4762,10 @@ the enclosing carrier identity supplies the remaining query context. */
 (define group_table_name (lambda (schema label input_identity keys condition)
 	/* The readable label is not an identity. The hash covers the canonical input
 	graph, source-role-aware keys, and complete filter, so equivalent aliases
-	converge while self-join roles and different predicates remain separated. */
+	converge while self-join roles and different predicates remain separated.
+	Version 6 creates helper columns with source collation metadata. */
 	(concat ".grp:" label ":" (stable_structural_hash (list
-		"canonical-group-keytable-v5" schema input_identity keys condition) true))))
+		"canonical-group-keytable-v6" schema input_identity keys condition) true))))
 
 /* Persistent helper objects must be named by the physical data they represent,
 not by disposable SQL aliases. Source position remains part of the identity so
@@ -5435,14 +5465,14 @@ every group row and its canonical identity stays independent of bound values. */
 					(list (quote lambda) (map filter_names symbol)
 						(combine_where_terms filter_terms true))))))))
 
-(define group_aggregate_column_options (lambda (stage src keys key_names)
+(define group_aggregate_column_options (lambda (stage src keys key_names agg_expr)
 	(begin
 		(define filter_parts
 			(group_aggregate_probe_filter_parts stage src keys key_names))
 		(if (nil? filter_parts)
-			(quoted_runtime_list '("temp" true))
+			(list (quote list) "temp" true "collate" (physical_column_collation_expr src agg_expr))
 			(list (quote list)
-				"temp" true
+				"temp" true "collate" (physical_column_collation_expr src agg_expr)
 				"filtercols" (quoted_runtime_list (car filter_parts))
 				"filter" (cadr filter_parts))))))
 
@@ -5656,7 +5686,7 @@ every group row and its canonical identity stays independent of bound values. */
 				agg_col
 				"any"
 				(list (quote list))
-				(group_aggregate_column_options stage src keys key_names)
+				(group_aggregate_column_options stage src keys key_names agg_expr)
 				(cons (quote list) key_names)
 				(list (quote lambda)
 					(map key_names (lambda (col) (symbol col)))

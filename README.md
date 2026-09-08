@@ -204,6 +204,35 @@ MemCP supports several storage engines, selectable per table via `CREATE TABLE .
 For production data, use `safe` unless you have explicitly accepted another
 engine's weaker durability contract.
 
+### Blob format compatibility
+
+<!-- Copyright (C) 2026 Carl-Philip Hänsch -->
+Large text/blob columns now use OverlayBlob format version 1. References have
+an explicit `!b` tag followed by the 32-byte SHA-256 digest; literals beginning
+with `!` are escaped as `!!`. Rebuilding a column writes the new format. Existing
+version 0 and pre-versioned (ASCII `1`) columns remain readable, and serializing
+an unchanged old column preserves its old encoding.
+
+The old format cannot distinguish a blob whose digest begins with `!` from an
+escaped 32-byte literal with exactly the same bytes. For these ambiguous values,
+the reader prefers an available blob whose decompressed content matches the
+SHA-256 digest. Without a payload, it preserves the escaped-literal interpretation.
+If both interpretations represent real source values, only an authoritative
+source or backup can resolve the ambiguity; rebuilding alone cannot recover
+information absent from the old format. Missing unambiguous references and
+checksum mismatches fail explicitly.
+
+Blob manifest v2 is reconstructed from committed columns when upgrading older
+manifests, which may have omitted references. An unchanged shard retains its
+manifest even when only some columns are loaded.
+
+Blob manifests retain ambiguous legacy candidates conservatively. Releasing a
+loaded legacy column does not decrement an ambiguous candidate without known
+build/migration ownership, since a colliding literal could otherwise delete
+another column's blob. Generation-based cleanup can reclaim these retained blobs
+once no active or recoverable generation references them. Version 1 has no such
+ambiguity, including for hashes beginning with `!`.
+
 ### Storage failure notifications
 
 Administrators can register named Scheme callbacks for persistence failures.

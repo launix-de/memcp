@@ -19,6 +19,8 @@ package storage
 import (
 	"bytes"
 	"compress/gzip"
+	"crypto/sha256"
+	"encoding/binary"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -67,7 +69,7 @@ func TestOverlayBlobKeepsSmallTextInline(t *testing.T) {
 	if raw := column.Base.GetValue(0).String(); raw != values[0] {
 		t.Fatal("text at the inline limit should remain in the base column")
 	}
-	if raw := column.Base.GetValue(1).String(); len(raw) != 33 || raw[0] != '!' {
+	if raw := column.Base.GetValue(1).String(); len(raw) != 34 || raw[:2] != "!b" {
 		t.Fatal("text above the inline limit should be stored as a blob reference")
 	}
 	for i, want := range values {
@@ -75,6 +77,176 @@ func TestOverlayBlobKeepsSmallTextInline(t *testing.T) {
 			t.Fatalf("row %d = %q, want %q", i, got.String(), want)
 		}
 	}
+}
+
+// This deterministic payload has SHA-256 prefix 0x21, colliding with the
+// literal escape marker in the legacy OverlayBlob format.
+func blobBangPayload() string { return "blob-prefix-66:" + strings.Repeat("x", 5300) }
+
+func TestOverlayBlobBangHashReads(t *testing.T) {
+	payload := blobBangPayload()
+	hash := sha256.Sum256([]byte(payload))
+	if hash[0] != '!' {
+		t.Fatal("fixture must exercise a bang-prefixed hash")
+	}
+	values := []string{payload, strings.Repeat("y", 5300), strings.Repeat("z", 5300),
+		"", "!", "!!", "!literal", "!!literal", string(hash[:]), "!b" + string(hash[:])}
+	column := buildViaCompression(len(values), func(i int) scm.Scmer { return scm.NewString(values[i]) }).(*OverlayBlob)
+	for i, want := range values {
+		if got := column.GetValue(uint32(i)).String(); got != want {
+			t.Errorf("single row %d: got length %d, want %d", i, len(got), len(want))
+		}
+	}
+	buffer := make([]scm.Scmer, len(values)*2)
+	column.GetValueRange(0, uint32(len(values)), buffer, 2)
+	for i, want := range values {
+		if buffer[i*2].String() != want {
+			t.Errorf("range row %d differs", i)
+		}
+		if !buffer[i*2+1].IsNil() {
+			t.Errorf("range overwrote stride gap %d", i)
+		}
+	}
+	ids := []uint32{0, 8, 0, 9, 5}
+	column.GetValueMulti(ids, buffer, 2)
+	for i, id := range ids {
+		if buffer[i*2].String() != values[id] {
+			t.Errorf("multi row %d differs", id)
+		}
+	}
+	// Force the disk-loaded reference-discovery path, with no build-time refs.
+	column.refs = nil
+	refs := make(map[string]struct{})
+	column.appendBlobReferences(refs, uint32(len(values)))
+	if _, found := refs[fmt.Sprintf("%x", hash)]; !found {
+		t.Error("bang hash missing from generation references")
+	}
+	if len(refs) != 3 {
+		t.Errorf("got %d references, want 3 blobs and no escaped literals", len(refs))
+	}
+}
+
+// Construct the historical wire format independently of the current writer.
+func legacyBlobFixture(version byte, raw []string, payloads map[[32]byte]string) []byte {
+	var wire bytes.Buffer
+	wire.WriteByte(31)
+	wire.WriteByte(version)
+	wire.Write(make([]byte, 6))
+	binary.Write(&wire, binary.LittleEndian, uint64(len(payloads)))
+	for hash, value := range payloads {
+		var compressed bytes.Buffer
+		gz := gzip.NewWriter(&compressed)
+		gz.Write([]byte(value))
+		gz.Close()
+		wire.Write(hash[:])
+		binary.Write(&wire, binary.LittleEndian, uint64(compressed.Len()))
+		wire.Write(compressed.Bytes())
+	}
+	base := buildViaCompression(len(raw), func(i int) scm.Scmer { return scm.NewString(raw[i]) })
+	base.Serialize(&wire)
+	return wire.Bytes()
+}
+
+func TestOverlayBlobVersionsAndLegacyAmbiguity(t *testing.T) {
+	payload := blobBangPayload()
+	hash := sha256.Sum256([]byte(payload))
+	for _, version := range []byte{0, '1'} {
+		t.Run(fmt.Sprint(version), func(t *testing.T) {
+			raw := []string{"!" + string(hash[:]), "!!", "!!!", "!!literal"}
+			wire := legacyBlobFixture(version, raw, map[[32]byte]string{hash: payload})
+			var column OverlayBlob
+			if n := column.Deserialize(bytes.NewReader(wire[1:])); n != uint(len(raw)) {
+				t.Fatalf("row count %d", n)
+			}
+			want := []string{payload, "!", "!!", "!literal"}
+			check := func(c *OverlayBlob) {
+				t.Helper()
+				buf := make([]scm.Scmer, len(want))
+				c.GetValueRange(0, uint32(len(want)), buf, 1)
+				for i, v := range want {
+					if c.GetValue(uint32(i)).String() != v || buf[i].String() != v {
+						t.Errorf("row %d differs", i)
+					}
+				}
+				c.GetValueMulti([]uint32{0, 2, 0}, buf, 1)
+				if buf[0].String() != payload || buf[1].String() != "!!" || buf[2].String() != payload {
+					t.Error("multi differs")
+				}
+			}
+			check(&column)
+			var saved bytes.Buffer
+			column.Serialize(&saved)
+			if saved.Bytes()[1] != 0 {
+				t.Fatal("legacy base relabeled as v1")
+			}
+			var reloaded OverlayBlob
+			reloaded.Deserialize(bytes.NewReader(saved.Bytes()[1:]))
+			check(&reloaded)
+			// Without a matching payload, exactly the same bytes denote a literal.
+			reloaded.values = nil
+			if reloaded.GetValue(0).String() != string(hash[:]) {
+				t.Error("legacy literal lost")
+			}
+			refs := make(map[string]struct{})
+			reloaded.appendBlobReferences(refs, uint32(len(raw)))
+			if _, ok := refs[fmt.Sprintf("%x", hash)]; !ok {
+				t.Error("ambiguous candidate missing from manifest")
+			}
+		})
+	}
+	values := []string{payload, strings.Repeat("y", 5300), strings.Repeat("z", 5300), string(hash[:]), "!", "!!", "!b" + string(hash[:])}
+	column := buildViaCompression(len(values), func(i int) scm.Scmer { return scm.NewString(values[i]) }).(*OverlayBlob)
+	var wire bytes.Buffer
+	column.Serialize(&wire)
+	if wire.Bytes()[1] != 1 {
+		t.Fatal("new column did not serialize as v1")
+	}
+	var reloaded OverlayBlob
+	reloaded.Deserialize(bytes.NewReader(wire.Bytes()[1:]))
+	buf := make([]scm.Scmer, len(values))
+	reloaded.GetValueRange(0, uint32(len(values)), buf, 1)
+	for i, want := range values {
+		if reloaded.GetValue(uint32(i)).String() != want || buf[i].String() != want {
+			t.Errorf("v1 reload row %d differs", i)
+		}
+	}
+	reloaded.GetValueMulti([]uint32{0, 3, 0}, buf, 1)
+	if buf[0].String() != payload || buf[1].String() != string(hash[:]) || buf[2].String() != payload {
+		t.Error("v1 reload multi differs")
+	}
+}
+
+func TestOverlayBlobInvalidReferences(t *testing.T) {
+	for _, raw := range []string{"!", "!b", "!x", "!b" + strings.Repeat("x", 32)} {
+		t.Run(fmt.Sprintf("%x", raw), func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Error("invalid/missing blob must fail explicitly")
+				}
+			}()
+			new(OverlayBlob).resolveBlob(scm.NewString(raw))
+		})
+	}
+	t.Run("unknown version", func(t *testing.T) {
+		defer func() {
+			if recover() == nil {
+				t.Error("unknown format accepted")
+			}
+		}()
+		new(OverlayBlob).Deserialize(bytes.NewReader([]byte{255, 0, 0, 0, 0, 0, 0}))
+	})
+	t.Run("legacy checksum", func(t *testing.T) {
+		hash := sha256.Sum256([]byte(blobBangPayload()))
+		wire := legacyBlobFixture(0, []string{"!" + string(hash[:])}, map[[32]byte]string{hash: "wrong contents"})
+		var column OverlayBlob
+		column.Deserialize(bytes.NewReader(wire[1:]))
+		defer func() {
+			if recover() == nil {
+				t.Error("mismatching legacy blob accepted")
+			}
+		}()
+		column.GetValue(0)
+	})
 }
 
 // countBlobFiles counts blob files under db's blob/ directory.
@@ -166,7 +338,7 @@ func TestBlobInsertRebuildAndRead(t *testing.T) {
 	db := GetDatabase("tdb1")
 
 	// Need >2 long strings to trigger OverlayBlob compression
-	longA := strings.Repeat("X", maxInlineBlobBytes+1000)
+	longA := blobBangPayload()
 	longB := strings.Repeat("Y", maxInlineBlobBytes+500)
 	rows := [][]scm.Scmer{
 		{scm.NewInt(1), scm.NewString(longA)},
@@ -415,7 +587,7 @@ func TestBlobSharedAcrossTables(t *testing.T) {
 	db := GetDatabase("tdb3")
 
 	// Same long strings in both tables
-	shared := strings.Repeat("S", maxInlineBlobBytes+1000)
+	shared := blobBangPayload()
 	for _, tbl := range []*table{tbl1, tbl2} {
 		rows := [][]scm.Scmer{
 			{scm.NewInt(1), scm.NewString(shared)},
@@ -633,5 +805,61 @@ func TestDoubleRebuildPreservesShardFiles(t *testing.T) {
 		if readName != tc.name {
 			t.Errorf("row id=%d: expected name %q, got %q", tc.id, tc.name, readName)
 		}
+	}
+}
+
+func TestOverlayBlobLoadedReferenceLifecycle(t *testing.T) {
+	defer setupGCTest(t)()
+	CreateDatabase("gcdb", false)
+	db := GetDatabase("gcdb")
+	payload := blobBangPayload()
+	hash := sha256.Sum256([]byte(payload))
+	hexHash := fmt.Sprintf("%x", hash)
+	wire := legacyBlobFixture(0, []string{"!" + string(hash[:])}, map[[32]byte]string{hash: payload})
+	var legacy OverlayBlob
+	legacy.Deserialize(bytes.NewReader(wire[1:]))
+	legacy.SetSchema(db)
+	if legacy.GetValue(0).String() != payload {
+		t.Fatal("external legacy blob not decoded")
+	}
+	// A colliding legacy literal must not decrement another column's ownership.
+	literal := OverlayBlob{legacy: true, schema: db, Base: &StorageConst{value: scm.NewString("!" + string(hash[:])), count: 1}}
+	literal.ReleaseBlobs(1)
+	if queryBlobsTable(t, db)[hexHash] != 1 {
+		t.Fatal("legacy literal decremented real blob owner")
+	}
+	if legacy.GetValue(0).String() != payload {
+		t.Fatal("legacy literal deleted real blob")
+	}
+	// Rebuild into v1 and reload without the build-time ownership map.
+	current := &OverlayBlob{Base: &StorageSCMER{}, schema: db}
+	current.prepare()
+	current.scan(0, scm.NewString(payload))
+	current.init(1)
+	current.build(0, scm.NewString(payload))
+	current.finish()
+	var saved bytes.Buffer
+	current.Serialize(&saved)
+	var loaded OverlayBlob
+	loaded.Deserialize(bytes.NewReader(saved.Bytes()[1:]))
+	loaded.SetSchema(db)
+	if loaded.GetValue(0).String() != payload {
+		t.Fatal("external v1 reload lost payload")
+	}
+	refs := make(map[string]struct{})
+	loaded.appendBlobReferences(refs, 1)
+	if _, ok := refs[hexHash]; !ok {
+		t.Fatal("loaded v1 manifest omitted bang hash")
+	}
+	loaded.ReleaseBlobs(1)
+	if queryBlobsTable(t, db)[hexHash] != 1 {
+		t.Fatal("loaded v1 did not release exactly one reference")
+	}
+	if legacy.GetValue(0).String() != payload {
+		t.Fatal("v1 release removed legacy owner's blob")
+	}
+	legacy.ReleaseBlobs(1) // Known build/migration ownership is unambiguous.
+	if countBlobFiles(t, "gcdb") != 0 {
+		t.Fatal("last known owner failed to release blob")
 	}
 }

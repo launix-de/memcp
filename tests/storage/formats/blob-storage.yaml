@@ -7,6 +7,7 @@ metadata:
   isolated: true
 
 setup:
+  - sql: "DROP TABLE IF EXISTS blob_bang"
   - sql: "DROP TABLE IF EXISTS blob_test"
 
 test_cases:
@@ -411,6 +412,32 @@ test_cases:
     expect:
       rows: 0
 
+  - name: "Create bang hash regression table"
+    sql: "CREATE TABLE blob_bang (id INT PRIMARY KEY, payload TEXT)"
+    expect: {rows: 0}
+  - name: "Insert bang hash and genuine escape literals"
+    sql: |
+      INSERT INTO blob_bang VALUES
+      (1, CONCAT('blob-prefix-66:', REPEAT('x', 5300))),
+      (2, REPEAT('y', 5300)), (3, REPEAT('z', 5300)),
+      (4, '!'), (5, '!!'), (6, '!b-literal')
+    expect: {affected_rows: 6}
+  - name: "Rebuild and reload bang hash"
+    sql: "SHUTDOWN"
+    expect: {rows: 0}
+  - name: "Bang hash returns content and SQL length after reload"
+    sql: "SELECT LENGTH(payload) AS len, payload = CONCAT('blob-prefix-66:', REPEAT('x', 5300)) AS ok FROM blob_bang WHERE id = 1"
+    expect: {rows: 1, data: [{len: 5315, ok: 1}]}
+  - name: "Escaped literals survive blob rebuild"
+    sql: "SELECT payload FROM blob_bang WHERE id >= 4 ORDER BY id"
+    expect: {rows: 3, data: [{payload: '!'}, {payload: '!!'}, {payload: '!b-literal'}]}
+  - name: "Second rebuild of bang hash"
+    sql: "SHUTDOWN"
+    expect: {rows: 0}
+  - name: "Bang hash survives second rebuild"
+    sql: "SELECT LENGTH(payload) AS len, payload = CONCAT('blob-prefix-66:', REPEAT('x', 5300)) AS ok FROM blob_bang WHERE id = 1"
+    expect: {rows: 1, data: [{len: 5315, ok: 1}]}
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS blob_test"
   - sql: "DROP TABLE IF EXISTS blob_rc1"
@@ -418,3 +445,4 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS blob_shared2"
   - sql: "DROP TABLE IF EXISTS blob_rcpersist"
   - sql: "DROP TABLE IF EXISTS blob_external"
+  - sql: "DROP TABLE IF EXISTS blob_bang"

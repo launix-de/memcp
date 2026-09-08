@@ -1031,7 +1031,7 @@ from silently overriding the physical planner. */
 					(define replaced_order_expr (replace_group_order_expr_indexed
 						src alias grouptbl keys key_names ags key_index expr
 						(nth resolved_order_exprs i)))
-					(list (group_order_physical_expr grouptbl replaced_order_expr) dir)))))
+					(list (group_order_physical_expr grouptbl replaced_order_expr) (canonical_order_relation dir (physical_expr_collation src expr)))))))
 			(gs_limit stage)
 			(gs_offset stage)
 			'() '() '()))))
@@ -1459,7 +1459,9 @@ outer joins. */
 		(define nested_prepare_expr (if (empty_list? nested_prepare)
 			nil
 			(cons (quote !begin) (merge (list nested_prepare nested_materialize)))))
-		(define key_columns (map key_names (lambda (col) (list (quote list) "column" col "any" (quoted_runtime_list '()) (quoted_runtime_list '())))))
+		(define key_columns (map (zip key_names keys) (lambda (binding)
+			(list (quote list) "column" (car binding) "any" (quoted_runtime_list '())
+				(list (quote list) "collate" (physical_column_collation_expr src (cadr binding)))))))
 		(define create_cols (cons (quote list)
 			(cons (cons (quote list) (cons "unique" (cons "group" (list (cons (quote list) key_names)))))
 				key_columns)))
@@ -1470,7 +1472,7 @@ outer joins. */
 					(nth aggregate_cols i)
 					"any"
 					(quoted_runtime_list '())
-					(quoted_runtime_list '()))))
+					(list (quote list) "collate" (physical_column_collation_expr src (car (nth ags i)))))))
 			'()))
 		(define collect_plan (if (not query_input)
 			nil
@@ -7447,12 +7449,13 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 			(not (prejoin_where_join_term? block term))))
 		true)))
 
+/* Version 3 prevents reuse of helper columns created without source collation. */
 (define prejoin_table_name (lambda (block default_alias)
 	(begin
 		(define sources (qb_sources block))
 		(define canonical_alias "__prejoin")
 		(define signature (list
-			"physical-prejoin-v2"
+			"physical-prejoin-v3"
 			(map sources prejoin_source_table_key)
 			(prejoin_rewrite_expr sources default_alias canonical_alias (prejoin_join_condition block))))
 		(concat ".prejoin:" (stable_structural_hash signature true)))))
@@ -7472,8 +7475,11 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 		(define key_names (prejoin_primary_key_names sources))
 		(cons (quote list)
 			(cons (list (quote list) "unique" "rows" (cons (quote list) key_names))
-				(map key_names (lambda (col)
-					(list (quote list) "column" col "any" (quoted_runtime_list '()) (quoted_runtime_list '())))))))))
+				(merge (map sources (lambda (src)
+					(map (prejoin_primary_key_columns src) (lambda (col)
+						(list (quote list) "column" (prejoin_column_name sources (source_alias src) col)
+							"any" (quoted_runtime_list '())
+							(quoted_runtime_list (list "collate" (source_column_order_collation src col))))))))))))))
 
 (define prejoin_sources_without_join_conditions (lambda (sources)
 	(map sources (lambda (src) (source_with_join_expr src true)))))
@@ -7620,7 +7626,7 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 			(prejoin_column_name sources alias col)
 			"any"
 			(quoted_runtime_list '())
-			(quoted_runtime_list '("temp" true))
+			(quoted_runtime_list (list "temp" true "collate" (source_column_order_collation src col)))
 			(cons (quote list) input_cols)
 			computor))))
 
@@ -7648,7 +7654,7 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 			(map (qb_group block) (lambda (expr) (prejoin_rewrite_expr sources default_alias alias expr)))
 			(if (nil? (qb_having block)) nil (prejoin_rewrite_expr sources default_alias alias (qb_having block)))
 			(map (qb_order block) (lambda (item) (match item
-				'(expr dir) (list (prejoin_rewrite_expr sources default_alias alias expr) dir)
+				'(expr dir) (list (prejoin_rewrite_expr sources default_alias alias expr) (canonical_order_relation dir (physical_expr_collation block expr)))
 				_ (neumann_fail "build_queryplan" "malformed prejoin ORDER BY item"))))
 			(qb_limit block)
 			(qb_offset block)
