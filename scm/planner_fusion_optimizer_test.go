@@ -195,6 +195,60 @@ func TestOptimizeRejectsPartialTaggedAssocFoldShape(t *testing.T) {
 	}
 }
 
+const plannerTaggedPredicateSource = `(define planner_test_predicate_resolve (lambda (value fallback)
+	(coalesceNil value fallback)))
+(define planner_test_tagged_predicate (lambda (default_alias alias expr)
+	(match expr
+		((symbol get_column) tblvar _ _ _) (equal?? (planner_test_predicate_resolve tblvar default_alias) alias)
+		((quote get_column) tblvar _ _ _) (equal?? (planner_test_predicate_resolve tblvar default_alias) alias)
+		(cons _head tail) (reduce tail (lambda (found item)
+			(or found (planner_test_tagged_predicate default_alias alias item))) false)
+		_ false)))
+(define planner_test_tagged_predicate_set (lambda (default_alias aliases expr)
+	(reduce (coalesceNil aliases '()) (lambda (found alias)
+		(or found (planner_test_tagged_predicate default_alias alias expr))) false)))`
+
+func TestOptimizeRecognizesTaggedPredicateAndCandidateSet(t *testing.T) {
+	env := newOptimizerTestEnv()
+	EvalAll(t.Name(), plannerTaggedPredicateSource, env)
+	predicate := env.Vars[Symbol("planner_test_tagged_predicate")]
+	setPredicate := env.Vars[Symbol("planner_test_tagged_predicate_set")]
+	if !predicate.IsProc() || !setPredicate.IsProc() {
+		t.Fatal("tagged predicates were not defined")
+	}
+	for name, proc := range map[string]Scmer{"single": predicate, "set": setPredicate} {
+		serialized := serializedTestExpr(t, env, proc.Proc().Body)
+		if !strings.Contains(serialized, "optimizer_expr_tagged_nth_matches_any") || strings.Contains(serialized, "(reduce ") || strings.Contains(serialized, "(match ") {
+			t.Fatalf("%s tagged predicate was not fused after full-shape recognition: %s", name, serialized)
+		}
+	}
+	tree := NewSlice([]Scmer{
+		NewSlice([]Scmer{
+			NewSlice([]Scmer{NewSymbol("lambda"), NewSlice(nil), NewSlice([]Scmer{NewSymbol("get_column"), NewSymbol("operator"), NewNil(), NewNil(), NewNil()})}),
+		}),
+		NewSlice([]Scmer{NewSymbol("nested"), NewSlice([]Scmer{NewSymbol("get_column"), NewSymbol("operand"), NewNil(), NewNil(), NewNil()})}),
+	})
+	if got := Apply(predicate, NewSymbol("default"), NewSymbol("operator"), tree); !got.IsBool() || got.Bool() {
+		t.Fatalf("tagged predicate entered an operator head: %s", String(got))
+	}
+	if got := Apply(setPredicate, NewSymbol("default"), NewSlice([]Scmer{NewSymbol("missing"), NewSymbol("operand")}), tree); !got.IsBool() || !got.Bool() {
+		t.Fatalf("tagged candidate-set predicate missed an operand: %s", String(got))
+	}
+}
+
+func TestOptimizeRejectsPartialTaggedPredicateShape(t *testing.T) {
+	env := newOptimizerTestEnv()
+	source := strings.Replace(plannerTaggedPredicateSource, "\t\t_ false)))", "\t\t_ true)))", 1)
+	EvalAll(t.Name(), source, env)
+	predicate := env.Vars[Symbol("planner_test_tagged_predicate")]
+	if !predicate.IsProc() {
+		t.Fatal("near-miss tagged predicate was not defined")
+	}
+	if serialized := serializedTestExpr(t, env, predicate.Proc().Body); strings.Contains(serialized, "optimizer_expr_tagged_nth_matches_any") {
+		t.Fatalf("partial tagged predicate shape was fused: %s", serialized)
+	}
+}
+
 func plannerFusionAndTree(depth int, next *int64) Scmer {
 	if depth == 0 {
 		value := NewInt(*next)
