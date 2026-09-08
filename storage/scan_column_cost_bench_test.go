@@ -494,14 +494,18 @@ func BenchmarkFilterBufferLocalScan(b *testing.B) {
 	if !scm.JITEnabled() {
 		b.Skip("requires JIT")
 	}
-	shard := benchmarkMapReduceFusionShard(60000)
-	cols := []string{"amount", "quantity", "factor"}
-	readers := make([]ColumnReader, len(cols))
-	emitters := make([]scm.JITStorageGetValueEmitter, len(cols))
-	for i, col := range cols {
-		storage := shard.getColumnStorageOrPanic(col, false, nil)
+	readers := make([]ColumnReader, 16)
+	emitters := make([]scm.JITStorageGetValueEmitter, len(readers))
+	valueTypes := make([]uint8, len(readers))
+	for i := range readers {
+		values := make([]scm.Scmer, 60000)
+		for row := range values {
+			values[row] = scm.NewInt(int64(row + i))
+		}
+		storage := buildStorageInt(values)
 		readers[i] = newCachedColumnReaderTx(storage, nil)
 		emitters[i] = storage.JITEmit
+		valueTypes[i] = storage.JITValueType()
 	}
 	for _, shape := range []struct {
 		name, source string
@@ -509,6 +513,7 @@ func BenchmarkFilterBufferLocalScan(b *testing.B) {
 	}{
 		{"simple", "(lambda (a) (> a 127))", 1},
 		{"arithmetic", "(lambda (a b c) (> (+ a (* b c)) 127))", 3},
+		{"distinct16", "(lambda (c0 c1 c2 c3 c4 c5 c6 c7 c8 c9 c10 c11 c12 c13 c14 c15) (and (> c0 -1) (< c1 60001) (> c2 -3) (< c3 60003) (> c4 -5) (< c5 60005) (> c6 -7) (< c7 60007) (> c8 -9) (< c9 60009) (> c10 -11) (< c11 60011) (> c12 -13) (< c13 60013) (> c14 -15) (< c15 60015)))", 16},
 	} {
 		proc := benchmarkMapReduceFusionProc(b, shape.source)
 		for _, rows := range []int{0, 1, 64, 1024, 8192, 60000} {
@@ -529,7 +534,7 @@ func BenchmarkFilterBufferLocalScan(b *testing.B) {
 					for i := range tags {
 						tags[i] = scm.JITTypeUnknown
 						if mode == "buffer-typed" || mode == "direct-typed" {
-							tags[i] = scm.TagInt
+							tags[i] = valueTypes[i]
 						}
 					}
 					b.ReportAllocs()
@@ -582,6 +587,58 @@ func BenchmarkFilterBufferLocalScan(b *testing.B) {
 				})
 			}
 		}
+	}
+}
+
+func TestFilterBufferComparisonWidths(t *testing.T) {
+	if !scm.JITEnabled() {
+		t.Skip("requires JIT")
+	}
+	for width := 1; width <= 16; width++ {
+		t.Run(fmt.Sprint(width), func(t *testing.T) {
+			params, terms := make([]string, width), make([]string, width)
+			tags := make([]uint8, width)
+			for i := range params {
+				params[i] = fmt.Sprintf("c%d", i)
+				terms[i] = fmt.Sprintf("(> c%d %d)", i, -i-1)
+				if i%2 == 1 {
+					terms[i] = fmt.Sprintf("(< c%d %d)", i, 60000+i)
+				}
+				tags[i] = scm.TagInt
+			}
+			proc := benchmarkMapReduceFusionProc(t, fmt.Sprintf("(lambda (%s) (and %s))", strings.Join(params, " "), strings.Join(terms, " ")))
+			kernel := scm.CompileJITFilterBuffer(proc.Proc(), tags)
+			if kernel == nil {
+				t.Fatal("compile failed")
+			}
+			ids := make([]uint32, 1024)
+			batch := make([]scm.Scmer, len(ids)*width)
+			var want []uint32
+			for row := range ids {
+				ids[row] = uint32(row)
+				for col := range tags {
+					batch[row*width+col] = scm.NewInt(int64(row + col))
+				}
+				if row%3 == 0 {
+					col := (row / 3) % width
+					boundary := -col - 1
+					if col%2 == 1 {
+						boundary = 60000 + col
+					}
+					batch[row*width+col] = scm.NewInt(int64(boundary))
+				} else {
+					want = append(want, uint32(row))
+				}
+			}
+			if got := kernel(ids, batch); got != len(want) {
+				t.Fatalf("got %d, want %d", got, len(want))
+			}
+			for i, id := range want {
+				if ids[i] != id {
+					t.Fatalf("row %d: got ID %d, want %d", i, ids[i], id)
+				}
+			}
+		})
 	}
 }
 

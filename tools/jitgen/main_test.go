@@ -219,6 +219,22 @@ func choose(a ...Scmer) Scmer {
 	}
 }
 
+func TestFloatConversionUsesSharedTypedLowering(t *testing.T) {
+	fn := buildTestSSAFunction(t, `package sample
+type Scmer struct{}
+func (Scmer) Float() float64
+func NewFloat(float64) Scmer
+func convert(a ...Scmer) Scmer { return NewFloat(a[0].Float()) }
+`, "convert")
+	code, errMsg := generateClosure("convert", fn, nil)
+	if errMsg != "" {
+		t.Fatal(errMsg)
+	}
+	if !strings.Contains(code, "ctx.EmitFloatDesc(") || strings.Contains(code, "GoFuncAddr(JITScmerToFloatBits)") {
+		t.Fatalf("conversion bypasses shared typed lowering:\n%s", code)
+	}
+}
+
 func TestIsNaNConsumedByBranchKeepsParityFlag(t *testing.T) {
 	fn := buildTestSSAFunction(t, `package sample
 import "math"

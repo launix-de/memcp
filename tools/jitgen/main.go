@@ -7490,21 +7490,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			// (Scmer).Float() — extract float64 from Scmer.
 			arg := g.vals[v.Call.Args[0].Name()]
 			dv := g.allocDesc()
-			g.emit("var %s JITValueDesc", dv)
-			g.emit("if %s.Loc == LocImm {", arg.goVar)
-			g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagFloat, Imm: NewFloat(%s.Imm.Float())}", dv, arg.goVar)
-			g.emit("} else if %s.Type == tagFloat && %s.Loc == LocReg {", arg.goVar, arg.goVar)
-			g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: %s.Reg}", dv, arg.goVar)
-			g.emit("\tctx.BindReg(%s.Reg, &%s)", arg.goVar, dv)
-			g.emit("} else if %s.Type == tagFloat && %s.Loc == LocRegPair {", arg.goVar, arg.goVar)
-			g.emit("\tctx.FreeReg(%s.Reg)", arg.goVar) // free ptr, keep aux (float bits)
-			g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: %s.Reg2}", dv, arg.goVar)
-			g.emit("\tctx.BindReg(%s.Reg2, &%s)", arg.goVar, dv)
-			g.emit("} else {")
-			g.emit("\t%s = ctx.EmitGoCallScalar(GoFuncAddr(JITScmerToFloatBits), []JITValueDesc{%s}, 1)", dv, arg.goVar)
-			g.emit("\t%s.Type = tagFloat", dv)
-			g.emit("\tctx.BindReg(%s.Reg, &%s)", dv, dv)
-			g.emit("}")
+			g.emit("%s := ctx.EmitFloatDesc(%s)", dv, arg.goVar)
 			g.vals[name] = genVal{goVar: dv, isDesc: true}
 		case "String":
 			// (Scmer).String() string — extract Go string from Scmer
