@@ -945,6 +945,26 @@ func Init(en scm.Env) {
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
+		Name: "table_shard_count",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			if a[0].IsNil() {
+				return scm.NewInt(0)
+			}
+			t := TableFromScmer(a[0])
+			if t == nil {
+				return scm.NewInt(0)
+			}
+			// The topology is an immutable atomic snapshot. No shard internals
+			// are read, and repartitioning cannot invalidate this slice.
+			return scm.NewInt(int64(len(t.ActiveShards())))
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "return the O(1) active partition count for physical scan costing",
+			Params: []*scm.TypeDescriptor{{Kind: "table", Label: "table"}},
+			Return: &scm.TypeDescriptor{Kind: "int"},
+		},
+	})
+
+	scm.Declare(&en, &scm.Declaration{
 		Name: "table_planner_statistics",
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
@@ -3324,6 +3344,26 @@ func Init(en scm.Env) {
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
 	})
+	scm.Declare(&en, &scm.Declaration{
+		Name: "cache_table_ready?",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			if a[0].IsNil() {
+				return scm.NewBool(false)
+			}
+			t := TableFromScmer(a[0])
+			if t == nil {
+				return scm.NewBool(false)
+			}
+			t.cacheInitMu.Lock()
+			defer t.cacheInitMu.Unlock()
+			return scm.NewBool(t.cacheInitialized)
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "inspect canonical cache initialization without building or waiting for it",
+			Params: []*scm.TypeDescriptor{{Kind: "table", Label: "table"}},
+			Return: &scm.TypeDescriptor{Kind: "bool"},
+		},
+	})
+
 	scm.Declare(&en, &scm.Declaration{
 		Name: "initialize_cache_table",
 

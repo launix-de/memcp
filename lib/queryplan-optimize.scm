@@ -5075,7 +5075,7 @@ the logical lookup still carries an alias which no longer exists. */
 
 (define join_reorder_node_using (lambda (stage_catalog node planning_session tx)
 	(if (query_block? node)
-		(reorder_query_block_with_candidate_strategy_using stage_catalog node planning_session tx)
+		(reorder_query_block_with_candidate_strategy_using stage_catalog (join_null_rejection_facts node) planning_session tx)
 		(if (union_block? node)
 			(make_union_block
 				(union_mode node)
@@ -6691,3 +6691,28 @@ sampling guard for a choice that no cardinality change can reverse. */
 			(ir_return ir)))))
 
 /* ------------------------------------------------------------------------- */
+
+/* A nullable-side WHERE predicate rejects the synthetic row only when it is
+provably UNKNOWN there. Keep this proof in logical optimization; physical
+semijoin carriers consume the fact without moving predicates across a barrier.
+The whitelist is deliberately conservative (COALESCE/IS NULL are not strict). */
+(define join_null_propagating? (lambda (src expr)
+	(match expr
+		((symbol get_column) alias _ci col _cci)
+		(source_alias_matches? src (source_alias src) alias false)
+		(cons head tail)
+		(if (equal? (string head) "sql_in")
+			(join_null_propagating? src (cadr tail))
+			(and (contains? '("equal??" "sql_not") (string head))
+				(reduce tail (lambda (found item)
+					(or found (join_null_propagating? src item))) false)))
+		_ false)))
+
+(define join_null_rejection_facts (lambda (block)
+	(begin
+		(define rejected (map (filter (qb_sources block) (lambda (src)
+			(and (source_outer? src)
+				(reduce (split_and_terms (coalesceNil (qb_where block) true))
+					(lambda (found term) (or found (join_null_propagating? src term))) false)))) source_alias))
+		(if (empty_list? rejected) block
+			(query_block_with_reorder_facts block (list (list (quote null_rejected_aliases) rejected)))))))
