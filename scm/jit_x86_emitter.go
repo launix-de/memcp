@@ -54,12 +54,15 @@ var jitX86RegisterBank = JITRegisterBank{
 	TemporaryReserve: 7,
 }
 
+// Go ABIInternal requires X15 to contain zero at calls and returns. Keep it
+// out of both persistent FP homes and temporary/overflow allocation: native
+// Go code uses it to initialize stack frames and zero heap objects.
 var jitX86FPRegisterBank = JITRegisterBank{
 	Registers: [16]Reg{
 		RegX2, RegX3, RegX4, RegX5, RegX6, RegX7, RegX8,
-		RegX9, RegX10, RegX11, RegX12, RegX13, RegX14, RegX15,
+		RegX9, RegX10, RegX11, RegX12, RegX13, RegX14,
 	},
-	Count:            14,
+	Count:            13,
 	TemporaryReserve: 2,
 }
 
