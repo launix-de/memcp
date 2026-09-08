@@ -1,0 +1,51 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: "1.0"
+  description: "Singleton concatenation avoids intermediate lists and preserves ownership"
+setup: []
+test_cases:
+  - name: "Join source selector remains compilable with nested merge control flow"
+    scm: |
+      (if (equal? (jit? (jit join_optimizer_reorder_sources)) (jit-enabled?))
+        true (error "join source selector exhausted JIT registers"))
+  - name: "Nested merge preserves empty arms and escaped list results"
+    scm: |
+      (begin
+        (define build (jit (lambda (xs x)
+          (if (empty_list? xs) (list)
+            (list (list 'ordered (merge (list xs (list x)))))))))
+        (define results (map (produceN 100) (lambda (i) (build (list i) (+ i 1)))))
+        (if (and (equal? (build (list) 1) (list))
+                 (equal? results (map (produceN 100) (lambda (i)
+                   (list (list 'ordered (list i (+ i 1))))))))
+          true (error "nested list result or empty branch was corrupted")))
+  - name: "Nested list lengths and payloads survive repeated calls"
+    scm: |
+      (begin
+        (define build (jit (lambda (parts marker)
+          (list marker (merge parts) marker (count (merge parts))))))
+        (define results (map (produceN 100) (lambda (i)
+          (build (list (produceN i) (list "tail" nil true)) (list i "kept")))))
+        (define expected (map (produceN 100) (lambda (i)
+          (list (list i "kept") (append (produceN i) "tail" nil true)
+                (list i "kept") (+ i 3)))))
+        (if (equal? results expected) true
+          (error "spilled slice lengths or pointer-bearing siblings changed")))
+  - name: "Invalid merge item still raises an error"
+    scm: |
+      ((jit (lambda (base) (merge (list base (list 2))))) 3)
+    expect:
+      error: true
+  - name: "Singleton concatenation does not mutate a borrowed base"
+    scm: |
+      (begin
+        (define build (jit (lambda (base item)
+          (list (merge (list base (list item))) base))))
+        (define base (list 1 "two" nil))
+        (if (and
+              (equal? (build base 4) (list (list 1 "two" nil 4) (list 1 "two" nil)))
+              (equal? (build base 5) (list (list 1 "two" nil 5) (list 1 "two" nil)))
+              (equal? base (list 1 "two" nil)))
+          true (error "singleton concatenation mutated its borrowed input")))
+cleanup: []
