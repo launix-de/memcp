@@ -708,6 +708,38 @@ func TestJITExpressionListResultOwnsBackingStorage(t *testing.T) {
 	}
 }
 
+func TestJITDirectOddSliceBuildersOwnBackingStorage(t *testing.T) {
+	for _, width := range []int{1, 3, 5, 7} {
+		if jitDirectSliceBuilder(width) == 0 {
+			t.Fatalf("missing direct slice builder for width %d", width)
+		}
+		if jitDirectSliceBuilderPrefersInlining(width) {
+			t.Fatalf("materialization support unexpectedly changed inlining policy for width %d", width)
+		}
+		parts := make([]string, width)
+		for index := range parts {
+			parts[index] = "value"
+		}
+		compiled := compileJITExpressionTestProc(t, fmt.Sprintf("(lambda (value) (list %s))", strings.Join(parts, " ")))
+		first := Apply(compiled, NewString("first"))
+		_ = Apply(compiled, NewString("replacement"))
+		items := first.Slice()
+		if len(items) != width {
+			t.Fatalf("width %d builder returned %d items", width, len(items))
+		}
+		for _, item := range items {
+			if !Equal(item, NewString("first")) {
+				t.Fatalf("width %d builder retained transient storage: %s", width, String(first))
+			}
+		}
+	}
+	for _, width := range []int{2, 4, 6, 8} {
+		if !jitDirectSliceBuilderPrefersInlining(width) {
+			t.Fatalf("existing inlining policy changed for width %d", width)
+		}
+	}
+}
+
 func TestJITDynamicListCallOwnsBackingStorage(t *testing.T) {
 	compiled := compileJITExpressionTestProc(t, `(lambda (callback value) (callback value 2 3))`)
 	callableType := &TypeDescriptor{Kind: "func", Return: &TypeDescriptor{Kind: "list"}}

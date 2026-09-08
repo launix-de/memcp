@@ -3276,18 +3276,47 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 	/* query_expr_alias_set is the planner JIT coverage target. Native compilation
 	is atomic, so a compiled descriptor means every expression in the function was
-	lowered without a whole-procedure fallback. Exercise representative match paths,
-	the nested reduce lambda, recursion, and both resolve_column_alias branches. */
+	lowered without a whole-procedure fallback. The callback-free tree collector
+	deduplicates tagged leaves before Scheme builds the alias dictionary. */
 	(set resolve_column_alias (jit resolve_column_alias))
 	(set query_expr_alias_set (jit query_expr_alias_set))
 	(assert (jit? resolve_column_alias) (jit-enabled?) "jit coverage: resolve_column_alias is 100% native")
 	(assert (jit? query_expr_alias_set) (jit-enabled?) "jit coverage: query_expr_alias_set is 100% native")
+	(assert (tree_collect_tagged_nth_unique
+		(list 'root
+			(list 'tag 'a)
+			(list 'nested (list 'tag 'b) (list 'tag 'a))
+			(list 'tag 'c (list 'tag 'payload-is-not-a-child)))
+		'tag 1)
+		(list 'a 'b 'c)
+		"tree collector preserves first-seen order, uniqueness, and tagged-leaf boundaries")
+	(assert (expr_collect_tagged_nth_unique
+		(list (list 'lambda (list 'row) (list 'tag 'operator-scope))
+			(list 'tag 'operand-scope))
+		'tag 1)
+		(list 'operand-scope)
+		"expression collector excludes references embedded in operator heads")
+	(assert (expr_tagged_nth_equal?
+		(list '+ (list 'tag nil) (list 'tag 'later)) 'tag 1 'default 'default)
+		true
+		"tagged expression equality applies the default and short-circuits")
+	(assert (expr_tagged_nth_matches_any?
+		(list (list 'lambda '() (list 'tag 'operator-scope))
+			(list 'nested (list 'tag 'operand-scope)))
+		'tag 1 'default (list 'missing 'operand-scope))
+		true
+		"tagged expression membership searches operands without entering the operator")
+	(assert (expr_tagged_nth_matches_any?
+		(list 'root (list 'tag 'present)) 'tag 1 'default (list 'absent))
+		false
+		"tagged expression membership reports a missing value")
 	(assert (query_expr_alias_set 'default (list 'get_column 'a 'x nil nil) '()) (list 'a true)
 		"jit coverage: symbol get_column match")
 	(assert (query_expr_alias_set 'default
-		(list '+ (list 'get_column 'a 'x nil nil) (list 'get_column nil 'y nil nil)) '())
+		(list '+ (list 'get_column 'a 'x nil nil)
+			(list 'nested (list 'get_column nil 'y nil nil) (list 'get_column 'a 'z nil nil))) '())
 		(list 'a true 'default true)
-		"jit coverage: cons recursion and nested reduce lambda")
+		"jit coverage: nested traversal, deduplication, and default alias")
 	(assert (query_expr_alias_set 'default 42 (list 'existing true)) (list 'existing true)
 		"jit coverage: scalar fallback match")
 

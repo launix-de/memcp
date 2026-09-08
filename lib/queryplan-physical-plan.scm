@@ -4355,15 +4355,26 @@ that touch the current nullable source run in its map callback, after scan has
 either bound a real row or supplied the synthetic NULL row. */
 (define physical_partition_condition_terms (lambda (default_alias current_source future_sources terms scan_ready post_outer pending)
 	(match (coalesceNil terms '())
-		(cons term rest) (if (or
-			(expr_contains_orc_column? term)
-			(expr_refs_any_alias? default_alias (source_aliases future_sources) term))
+		(cons term rest) (if (expr_contains_orc_column? term)
 			(physical_partition_condition_terms default_alias current_source future_sources rest scan_ready post_outer (cons term pending))
-			(if (and
-				(source_outer? current_source)
-				(expr_refs_alias? default_alias (source_alias current_source) term))
-				(physical_partition_condition_terms default_alias current_source future_sources rest scan_ready (cons term post_outer) pending)
-				(physical_partition_condition_terms default_alias current_source future_sources rest (cons term scan_ready) post_outer pending)))
+			(begin
+				/* Classify the term from one alias walk. The former nested
+				expr_refs_any_alias? call rescanned it for every future source and
+				expr_refs_alias? scanned it again for nullable current sources. */
+				(define referenced_aliases (map
+					(expr_collect_tagged_nth_unique term (quote get_column) 1)
+					(lambda (tblvar) (resolve_column_alias tblvar default_alias))))
+				(define references_future (reduce future_sources (lambda (found src)
+					(or found (reduce referenced_aliases (lambda (matched referenced_alias)
+						(or matched (equal?? referenced_alias (source_alias src)))) false))) false))
+				(if references_future
+					(physical_partition_condition_terms default_alias current_source future_sources rest scan_ready post_outer (cons term pending))
+					(if (and
+						(source_outer? current_source)
+						(reduce referenced_aliases (lambda (matched referenced_alias)
+							(or matched (equal?? referenced_alias (source_alias current_source)))) false))
+						(physical_partition_condition_terms default_alias current_source future_sources rest scan_ready (cons term post_outer) pending)
+						(physical_partition_condition_terms default_alias current_source future_sources rest (cons term scan_ready) post_outer pending)))))
 		_ (list
 			(combine_where_terms (reverse scan_ready) true)
 			(combine_where_terms (reverse post_outer) true)

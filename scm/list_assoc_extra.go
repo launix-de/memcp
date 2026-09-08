@@ -16,6 +16,106 @@ Copyright (C) 2026  Carl-Philip Hänsch
 */
 package scm
 
+func treeCollectTaggedNthUnique(root, tag Scmer, position int) Scmer {
+	return collectTaggedNthUnique(root, tag, position, true)
+}
+
+func exprCollectTaggedNthUnique(root, tag Scmer, position int) Scmer {
+	return collectTaggedNthUnique(root, tag, position, false)
+}
+
+func collectTaggedNthUnique(root, tag Scmer, position int, traverseHeads bool) Scmer {
+	if position < 0 {
+		panic("tagged nth collector expects a non-negative position")
+	}
+
+	// Compiler trees are normally shallow and aliases are few. Keep traversal
+	// state on the stack for those common cases; append retains correct behavior
+	// for unusually deep trees without imposing a fixed planner limit.
+	var pendingStorage [64]Scmer
+	pending := pendingStorage[:1]
+	pending[0] = root
+	var uniqueStorage [8]Scmer
+	unique := uniqueStorage[:0]
+
+	for len(pending) != 0 {
+		last := len(pending) - 1
+		current := pending[last].WithoutSourceInfo()
+		pending = pending[:last]
+		if !current.IsSlice() {
+			continue
+		}
+		items := current.Slice()
+		if len(items) != 0 && Equal(items[0], tag) {
+			if len(items) > position {
+				candidate := items[position].WithoutSourceInfo()
+				seen := false
+				for _, existing := range unique {
+					if Equal(existing, candidate) {
+						seen = true
+						break
+					}
+				}
+				if !seen {
+					unique = append(unique, candidate)
+				}
+			}
+			// A tagged node is one logical leaf for this operation. Its payload is
+			// data, not another expression to inspect for the same tag.
+			continue
+		}
+		firstChild := 0
+		if !traverseHeads {
+			firstChild = 1
+		}
+		for index := len(items) - 1; index >= firstChild; index-- {
+			pending = append(pending, items[index])
+		}
+	}
+
+	result := make([]Scmer, len(unique))
+	copy(result, unique)
+	return NewSlice(result)
+}
+
+func exprTaggedNthMatchesAny(root, tag Scmer, position int, nilReplacement Scmer, candidates []Scmer) bool {
+	if position < 0 {
+		panic("tagged nth matcher expects a non-negative position")
+	}
+
+	var pendingStorage [64]Scmer
+	pending := pendingStorage[:1]
+	pending[0] = root
+	for len(pending) != 0 {
+		last := len(pending) - 1
+		current := pending[last].WithoutSourceInfo()
+		pending = pending[:last]
+		if !current.IsSlice() {
+			continue
+		}
+		items := current.Slice()
+		if len(items) != 0 && Equal(items[0], tag) {
+			if len(items) > position {
+				candidate := items[position].WithoutSourceInfo()
+				if candidate.IsNil() {
+					candidate = nilReplacement
+				}
+				for _, expected := range candidates {
+					if Equal(candidate, expected) {
+						return true
+					}
+				}
+			}
+			continue
+		}
+		// Expression heads are operators, not operands in the caller's scope.
+		for index := len(items) - 1; index >= 1; index-- {
+			pending = append(pending, items[index])
+		}
+	}
+	return false
+}
+
 func groupAssocCapacity(inputLength int) int {
 	const initialGroups = 32
 	if inputLength < initialGroups {
@@ -25,6 +125,70 @@ func groupAssocCapacity(inputLength int) int {
 }
 
 func init_list_assoc_extra() {
+	Declare(&Globalenv, &Declaration{
+		Name: "tree_collect_tagged_nth_unique",
+		Fn: func(a ...Scmer) Scmer {
+			return treeCollectTaggedNthUnique(a[0], a[1], int(ToInt(a[2])))
+		},
+		Type: &TypeDescriptor{Kind: "func", Description: "collects the unique zero-based nth values of tagged nodes in a nested list tree",
+			Params: []*TypeDescriptor{
+				{Kind: "any", Label: "tree", NoEscape: true},
+				{Kind: "any", Label: "tag", NoEscape: true},
+				{Kind: "number", Label: "position"},
+			},
+			Return: FreshAlloc,
+			Const:  true,
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		Name: "expr_collect_tagged_nth_unique",
+		Fn: func(a ...Scmer) Scmer {
+			return exprCollectTaggedNthUnique(a[0], a[1], int(ToInt(a[2])))
+		},
+		Type: &TypeDescriptor{Kind: "func", Description: "collects unique zero-based nth values of tagged operand expressions without traversing operator heads",
+			Params: []*TypeDescriptor{
+				{Kind: "any", Label: "expression", NoEscape: true},
+				{Kind: "any", Label: "tag", NoEscape: true},
+				{Kind: "number", Label: "position"},
+			},
+			Return: FreshAlloc,
+			Const:  true,
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		Name: "expr_tagged_nth_equal?",
+		Fn: func(a ...Scmer) Scmer {
+			return NewBool(exprTaggedNthMatchesAny(a[0], a[1], int(ToInt(a[2])), a[3], a[4:5]))
+		},
+		Type: &TypeDescriptor{Kind: "func", Description: "tests whether a tagged operand has the expected nth value, replacing nil with a supplied default",
+			Params: []*TypeDescriptor{
+				{Kind: "any", Label: "expression", NoEscape: true},
+				{Kind: "any", Label: "tag", NoEscape: true},
+				{Kind: "number", Label: "position"},
+				{Kind: "any", Label: "nil replacement", NoEscape: true},
+				{Kind: "any", Label: "expected", NoEscape: true},
+			},
+			Return: &TypeDescriptor{Kind: "bool"},
+			Const:  true,
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		Name: "expr_tagged_nth_matches_any?",
+		Fn: func(a ...Scmer) Scmer {
+			return NewBool(exprTaggedNthMatchesAny(a[0], a[1], int(ToInt(a[2])), a[3], asSlice(a[4], "expr_tagged_nth_matches_any?")))
+		},
+		Type: &TypeDescriptor{Kind: "func", Description: "tests whether a tagged operand has any expected nth value, replacing nil with a supplied default",
+			Params: []*TypeDescriptor{
+				{Kind: "any", Label: "expression", NoEscape: true},
+				{Kind: "any", Label: "tag", NoEscape: true},
+				{Kind: "number", Label: "position"},
+				{Kind: "any", Label: "nil replacement", NoEscape: true},
+				{Kind: "list", Label: "expected values", NoEscape: true},
+			},
+			Return: &TypeDescriptor{Kind: "bool"},
+			Const:  true,
+		},
+	})
 	Declare(&Globalenv, &Declaration{
 		Name: "group_assoc",
 		Fn: func(a ...Scmer) Scmer {

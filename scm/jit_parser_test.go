@@ -89,6 +89,12 @@ func TestJITParserReleaseDropsOversizedMemoStorage(t *testing.T) {
 }
 
 func TestJITParserMemoCapacityHintIsBounded(t *testing.T) {
+	if got := jitParserMemoEntryCapacity(8 << 10); got != 0 {
+		t.Fatalf("short input capacity hint = %d, want 0", got)
+	}
+	if got := jitParserMemoEntryCapacity(32 << 10); got != (32<<10)*jitParserMemoEntriesPerByteHint {
+		t.Fatalf("complex input capacity hint = %d, want %d", got, (32<<10)*jitParserMemoEntriesPerByteHint)
+	}
 	if got := jitParserMemoEntryCapacity(jitParserLargeInputBytes); got != 0 {
 		t.Fatalf("small input capacity hint = %d, want 0", got)
 	}

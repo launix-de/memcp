@@ -28,7 +28,10 @@ import (
 )
 
 const (
-	jitParserLargeInputBytes           = 64 << 10
+	// Medium generated SQL already creates hundreds of thousands of packrat
+	// entries. Preallocating from 16 KiB avoids repeated slice growth and GC,
+	// while smaller OLTP statements keep the allocation-free lazy path.
+	jitParserLargeInputBytes           = 16 << 10
 	jitParserMemoEntriesPerByteHint    = 20
 	jitParserMemoPreallocateLimit      = 4 << 20
 	jitParserMemoRuleSlotsPerByteHint  = 120
