@@ -61,6 +61,14 @@ test_cases:
     timing_samples: 5
     expect:
       data: [{total: 1800330000}]
+  - name: "One batch range aggregate"
+    sql: "SELECT SUM(a+b*c) AS total FROM typed_filter_buffer WHERE a>=0 AND a<1024"
+    expect:
+      data: [{total: 529920}]
+  - name: "Medium range aggregate"
+    sql: "SELECT SUM(a+b*c) AS total FROM typed_filter_buffer WHERE a>=0 AND a<8192"
+    expect:
+      data: [{total: 33599488}]
   - name: "Residual filter before arithmetic aggregate"
     sql: "SELECT COUNT(*) AS n, SUM(a+b*c) AS total FROM typed_filter_buffer WHERE a+0 >= 30000"
     timing_samples: 5
@@ -70,6 +78,17 @@ test_cases:
     sql: "SELECT COUNT(*) AS n FROM typed_filter_buffer WHERE a+0 < 0"
     expect:
       data: [{n: 0}]
+  - name: "Uncached arithmetic aggregate performance"
+    setup:
+      # Invalidate the aggregate previously filled by correctness cases.
+      - sql: "UPDATE typed_filter_buffer SET b=4 WHERE a=0"
+    sql: "SELECT SUM(a+b*c) AS total FROM typed_filter_buffer"
+    threshold_ms: 1000
+    performance_rows: 60000
+    warmup: 0
+    timing_samples: 1
+    expect:
+      data: [{total: 1800330006}]
   - name: "Add delta row"
     sql: "INSERT INTO typed_filter_buffer (a,b,c) VALUES (60000,2,3)"
   - name: "Main and delta use the same predicate semantics"

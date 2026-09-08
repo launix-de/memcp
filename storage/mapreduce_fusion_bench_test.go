@@ -26,6 +26,26 @@ import (
 
 const mapReduceFusionBenchmarkRows = 1_000_000
 
+func TestJITBufferCostThresholds(t *testing.T) {
+	if !scm.JITEnabled() {
+		t.Skip("JIT")
+	}
+	costs := scm.CurrentJITCosts()
+	t.Logf("calibration %+v", costs)
+	for _, shape := range []struct {
+		source string
+		width  int
+	}{
+		{"(lambda (acc a) (+ acc a))", 1},
+		{"(lambda (acc a) (+ acc (* a 3)))", 1},
+		{"(lambda (acc a b c) (+ acc (+ a (* b c))))", 3},
+	} {
+		proc := benchmarkMapReduceFusionProc(t, shape.source)
+		units := scm.JITExpressionCost(proc.Proc().Body)
+		t.Logf("%s units=%d direct_min=%d probe_min=%d", shape.source, units, costs.MapReduceBufferBreakEven(units, shape.width), costs.MapReduceBufferProbeBreakEven(units, shape.width, defaultScanBufferSize))
+	}
+}
+
 func TestJITMapReduceBufferBestOf(t *testing.T) {
 	if !scm.JITEnabled() {
 		t.Skip("requires the JIT experiment")
@@ -59,7 +79,7 @@ func TestJITMapReduceBufferBestOf(t *testing.T) {
 		t.Fatalf("fused reduction = %s, want %d", scm.String(got), want)
 	}
 	if mapper.bufferReduceFn == nil {
-		t.Fatalf("profitable reducer did not compile after its break-even: seen=%d min=%d columns=%d kind=%d", mapper.bufferSeenRows, mapper.bufferMinRows, mapper.bufferColumnCount, mapper.mapReduceProgram.Kind)
+		t.Fatalf("profitable reducer did not compile: min=%d columns=%d kind=%d", mapper.bufferMinRows, mapper.bufferColumnCount, mapper.mapReduceProgram.Kind)
 	}
 	count := benchmarkMapReduceFusionProc(t, "(lambda (acc) (+ acc 1))")
 	countMapper := shard.OpenMapReducer(nil, count, false, 0, nil, nil)
@@ -137,6 +157,55 @@ func TestJITMapReduceBufferBestOf(t *testing.T) {
 	lifecycleMapper.Close()
 	if lifecycleMapper.mainBulkValues != nil || lifecycleMapper.bufferReduceProc != nil || lifecycleMapper.bufferValueTypes != nil {
 		t.Fatal("Close retained query-local map-reduce buffer state")
+	}
+}
+
+func TestJITMapReduceCompilationUsesRemainingRows(t *testing.T) {
+	if !scm.JITEnabled() {
+		t.Skip("requires the JIT experiment")
+	}
+	shard := benchmarkMapReduceFusionShard(60000)
+	callback := benchmarkMapReduceFusionProc(t, "(lambda (acc amount) (+ acc amount))")
+	unsafeProbe := ShardMapReducer{bufferReduceProc: callback.Proc(), bufferProbe: true, bufferMinRows: 1}
+	container := scm.NewSlice([]scm.Scmer{scm.NewInt(1)})
+	if _, processed := unsafeProbe.processJITBuffer(container, []uint32{0}); processed || !unsafeProbe.bufferRejected || unsafeProbe.bufferReduceFn != nil {
+		t.Fatal("a mutable accumulator entered the replay probe")
+	}
+	mapper := shard.OpenMapReducer([]string{"amount"}, callback, false, 0, nil, nil)
+	defer mapper.Close()
+	// Force a deterministic threshold, independent of startup timer noise.
+	mapper.bufferReduceProc = callback.Proc()
+	mapper.bufferColumnCount = 1
+	mapper.bufferMinRows = 128
+	mapper.bufferProbe = false
+	ids := make([]uint32, 64)
+	for index := range ids {
+		ids[index] = uint32(index)
+	}
+	if got := mapper.Stream(scm.NewInt(0), ids, nil); !scm.Equal(got, scm.NewInt(2080)) {
+		t.Fatal("64-row callback changed the result")
+	}
+	if mapper.bufferReduceFn != nil {
+		t.Fatal("64 candidates inherited the containing shard's 60000-row horizon")
+	}
+	mapper.bufferMinRows = 8
+	for range 16 {
+		mapper.Stream(scm.NewInt(0), []uint32{0}, nil)
+	}
+	if got := mapper.Stream(scm.NewInt(0), []uint32{0}, nil); !scm.Equal(got, scm.NewInt(1)) {
+		t.Fatal("last-batch callback changed the result")
+	}
+	if mapper.bufferReduceFn != nil {
+		t.Fatal("already processed rows justified a last-batch compilation")
+	}
+	mapper.bufferRemainingRows = 60000
+	mapper.Stream(scm.NewInt(0), []uint32{0}, nil)
+	if mapper.bufferReduceFn == nil {
+		t.Fatal("known remaining work did not enable early compilation")
+	}
+	mapper.Close()
+	if mapper.bufferReduceFn != nil || mapper.bufferReduceProc != nil || mapper.mainBulkValues != nil {
+		t.Fatal("scan-local specialization survived Close")
 	}
 }
 
@@ -297,8 +366,8 @@ func BenchmarkMapReduceBufferedBestOf(b *testing.B) {
 	if !scm.JITEnabled() {
 		b.Skip("requires the JIT experiment")
 	}
-	shard := benchmarkMapReduceFusionShard(mapReduceFusionBenchmarkRows)
-	recids := make([]uint32, mapReduceFusionBenchmarkRows)
+	shard := benchmarkMapReduceFusionShard(60000)
+	recids := make([]uint32, 60000)
 	for index := range recids {
 		recids[index] = uint32(index)
 	}
@@ -316,29 +385,53 @@ func BenchmarkMapReduceBufferedBestOf(b *testing.B) {
 	}
 	for _, shape := range shapes {
 		callback := benchmarkMapReduceFusionProc(b, shape.source)
-		for _, rowCount := range []int{1, 8, 1_024, 60_000, mapReduceFusionBenchmarkRows} {
-			for _, bestOf := range []bool{false, true} {
-				mode := "Baseline"
-				if bestOf {
-					mode = "BestOf"
-				}
+		for _, rowCount := range []int{0, 1, 64, 1024, 8192, 60000} {
+			for _, mode := range []string{"Baseline", "BestOf", "Forced"} {
 				b.Run(fmt.Sprintf("%s/Rows%d/%s", shape.name, rowCount, mode), func(b *testing.B) {
 					b.ReportAllocs()
 					b.ReportMetric(float64(rowCount), "rows/op")
 					var result scm.Scmer
+					fusedScans := 0
+					want := shape.neutral
+					args := make([]scm.Scmer, len(shape.cols)+1)
+					for _, id := range recids[:rowCount] {
+						args[0] = want
+						for col, name := range shape.cols {
+							args[col+1] = shard.getColumnStorageOrPanic(name, false, nil).GetValue(id)
+						}
+						want = scm.Apply(callback, args...)
+					}
+					b.ResetTimer()
 					for sample := 0; sample < b.N; sample++ {
 						mapper := shard.OpenMapReducer(shape.cols, callback, false, 0, nil, nil)
-						if !bestOf {
+						if mode == "Baseline" {
 							mapper.bufferReduceProc = nil
+						}
+						if mode == "Forced" {
+							mapper.bufferReduceProc = callback.Proc()
+							mapper.bufferMinRows = 0
+							mapper.bufferColumnCount = len(shape.cols)
+							mapper.bufferProbe = false
 						}
 						result = shape.neutral
 						for offset := 0; offset < rowCount; offset += defaultScanBufferSize {
 							end := min(offset+defaultScanBufferSize, rowCount)
+							mapper.bufferRemainingRows = rowCount - offset
 							result = mapper.Stream(result, recids[offset:end], nil)
 						}
+						if mode == "Forced" && rowCount > 0 && mapper.bufferReduceFn == nil {
+							b.Fatal("forced kernel did not compile")
+						}
+						if mapper.bufferReduceFn != nil && !mapper.bufferRejected {
+							fusedScans++
+						}
 						mapper.Close()
+						if !scm.Equal(result, want) {
+							b.Fatal("incorrect fused result")
+						}
 					}
 					runtime.KeepAlive(result)
+					b.ReportMetric(float64(fusedScans)/float64(b.N), "fused/op")
 				})
 			}
 		}

@@ -27,6 +27,17 @@ import (
 	"unsafe"
 )
 
+func TestJITTypedInliningKeepsLargeNativeBoundaries(t *testing.T) {
+	for _, cost := range []uint16{18, 38, 48, 49, 57, 256} {
+		ctx := &JITContext{}
+		decl := &Declaration{Type: &TypeDescriptor{JITInlineCost: cost}}
+		args := []JITValueDesc{{Type: tagInt, Loc: LocStack}, {Type: tagInt, Loc: LocStack}}
+		if got := jitGeneratedEmitterInline(ctx, decl, args); got != (cost <= 48) {
+			t.Errorf("typed inline cost %d = %v", cost, got)
+		}
+	}
+}
+
 func TestJITTypedFloatConversionLocations(t *testing.T) {
 	for _, value := range []Scmer{NewInt(-7), NewInt(1<<53 + 1), NewInt(math.MinInt64), NewInt(math.MaxInt64), NewFloat(math.Copysign(0, -1)), NewFloat(math.Inf(1)), NewFloat(math.NaN()), NewFloat(1.25)} {
 		for _, location := range []string{"scalar", "pair", "stack", "stack-pair", "fp", "fp-stack"} {

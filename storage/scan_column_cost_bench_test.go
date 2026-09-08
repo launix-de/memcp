@@ -517,7 +517,7 @@ func BenchmarkFilterBufferLocalScan(b *testing.B) {
 	} {
 		proc := benchmarkMapReduceFusionProc(b, shape.source)
 		for _, rows := range []int{0, 1, 64, 1024, 8192, 60000} {
-			for _, mode := range []string{"lambda", "buffer-dynamic", "buffer-typed", "direct-typed"} {
+			for _, mode := range []string{"lambda", "buffer-dynamic", "buffer-mixed", "buffer-typed", "direct-typed"} {
 				b.Run(fmt.Sprintf("%s/rows=%d/%s", shape.name, rows, mode), func(b *testing.B) {
 					ids := make([]uint32, defaultScanBufferSize)
 					args := make([]scm.Scmer, shape.width)
@@ -533,7 +533,7 @@ func BenchmarkFilterBufferLocalScan(b *testing.B) {
 					tags := make([]uint8, shape.width)
 					for i := range tags {
 						tags[i] = scm.JITTypeUnknown
-						if mode == "buffer-typed" || mode == "direct-typed" {
+						if mode == "buffer-typed" || mode == "direct-typed" || (mode == "buffer-mixed" && i%2 == 0) {
 							tags[i] = valueTypes[i]
 						}
 					}
