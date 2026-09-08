@@ -717,6 +717,42 @@ type JITStorageGetValueRangeFunc func(uint32, uint32, []Scmer, int)
 // JITStorageGetValueMultiFunc is the native arbitrary-record column-reader ABI.
 type JITStorageGetValueMultiFunc func([]uint32, []Scmer, int)
 
+// JITMapReduceBufferFunc folds rows from a row-major Scmer buffer. The row
+// width and callback are compile-time properties of the function; rows remains
+// explicit so zero-column reducers such as COUNT(*) need no synthetic values.
+type JITMapReduceBufferFunc func(Scmer, []Scmer, int) Scmer
+
+// PrepareJITMapReduceBufferProc returns source suitable for typed buffer-loop
+// inlining. Native declarations with a JIT emitter are wrapped in a procedure
+// so physical operators can specialize the same implementation without
+// teaching the storage package about individual aggregate names.
+func PrepareJITMapReduceBufferProc(source Scmer, arity int) *Proc {
+	if arity < 1 {
+		return nil
+	}
+	if source.GetTag() == tagProc && source.Proc() != nil {
+		return source.Proc()
+	}
+	if source.GetTag() == tagFunc {
+		if proc := JITProcForFunction(source.Func()); proc != nil {
+			return proc
+		}
+	}
+	declaration := DeclarationForValue(source)
+	if declaration == nil || declaration.Type == nil || declaration.Type.JITEmit == nil || len(declaration.Type.Params) != arity {
+		return nil
+	}
+	params := make([]Scmer, arity)
+	body := make([]Scmer, arity+1)
+	body[0] = source
+	for index := range params {
+		parameter := NewSymbol(fmt.Sprintf("\x00buffer-reduce-%d", index))
+		params[index] = parameter
+		body[index+1] = parameter
+	}
+	return &Proc{Params: NewSlice(params), Body: NewSlice(body), En: &Globalenv}
+}
+
 // JITStorageGetValueEmitter emits one scalar storage read. The bound method
 // receiver is the concrete finished storage; index and result use the typed Go ABI.
 type JITStorageGetValueEmitter func(*JITContext, JITValueDesc, JITValueDesc) JITValueDesc

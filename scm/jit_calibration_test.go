@@ -49,6 +49,34 @@ func TestJITCalibrationBreakEvenHasNoHiddenSafetyFactor(t *testing.T) {
 	}
 }
 
+func TestJITCalibrationMapReduceBufferBestOf(t *testing.T) {
+	calibration := JITCostCalibration{
+		Enabled:             true,
+		BufferCompileNS:     100,
+		BufferCompileUnitNS: 4,
+		BufferCurrentNS:     10,
+		BufferFusedNS:       5,
+		BufferSavedNS:       2,
+		BufferMaxUnits:      40,
+	}
+	if got := calibration.MapReduceBufferBreakEven(40, 1); got != 100 {
+		t.Fatalf("buffer break-even rows = %d, want 100", got)
+	}
+	for _, test := range []struct {
+		units, columns int
+	}{
+		{units: 41, columns: 1},
+		{units: 40, columns: 2},
+	} {
+		if got := calibration.MapReduceBufferBreakEven(test.units, test.columns); got != math.MaxInt {
+			t.Fatalf("ineligible buffer shape (%d units, %d columns) break-even = %d, want MaxInt", test.units, test.columns, got)
+		}
+	}
+	if got := calibration.MapReduceBufferProbeBreakEven(80, 3, 1024); got == math.MaxInt {
+		t.Fatal("arbitrary-arity expression was not admitted for an adaptive probe")
+	}
+}
+
 func TestJITCalibrationAnchorsCallBoundaryToTrivialShapes(t *testing.T) {
 	observations := []jitCalibrationObservation{
 		{workUnits: 0, callNS: 4},
@@ -111,7 +139,7 @@ func TestJITStartupCalibrationPublishesImmutableCostModel(t *testing.T) {
 		t.Fatalf("invalid calibration sampling metadata: %+v", first)
 	}
 	if first.EmitFixedNS < 0 || first.EmitUnitNS < 0 || first.PublishFixedNS < 0 ||
-		first.DirectCallNS < 0 || first.PredicateUnitNS < 0 {
+		first.DirectCallNS < 0 || first.PredicateUnitNS < 0 || first.BufferCompileNS < 0 || first.BufferSavedNS < 0 {
 		t.Fatalf("calibration published a negative cost: %+v", first)
 	}
 	t.Logf("JIT startup calibration: %+v", first)

@@ -38,3 +38,8 @@ func CompileJITStorageGetValueMulti(JITStorageGetValueMultiEmitter) JITStorageGe
 func CompileJITStorageReaders(JITStorageGetValueEmitter, JITStorageGetValueRangeEmitter, JITStorageGetValueMultiEmitter) (JITStorageGetValueFunc, JITStorageGetValueRangeFunc, JITStorageGetValueMultiFunc) {
 	return nil, nil, nil
 }
+
+// CompileJITMapReduceBuffer is unavailable without the patched Go JIT backend.
+func CompileJITMapReduceBuffer(*Proc, []uint8) JITMapReduceBufferFunc {
+	return nil
+}
