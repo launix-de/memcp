@@ -1,0 +1,58 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: "1.0"
+  description: "Numeric parser specialization preserves grammar bounds"
+setup: []
+test_cases:
+  # Explicit optional digits are equivalent to {1,9}, but also give the FIRST
+  # analysis a precise digit set. Repetition plus two precedence levels makes
+  # this exercise the speculative numeric leaf, not only the generic parser.
+  - name: "Nine-digit numeric grammar accepts its upper boundary"
+    scm: |
+      (begin
+        (define parse_number (jit (lambda (input) (begin
+          (define number (parser (define x (regex "-?(?:[0-9][0-9]?[0-9]?[0-9]?[0-9]?[0-9]?[0-9]?[0-9]?[0-9]?(?:\\.[0-9]*)?|\\.[0-9]+)(?:e-?[0-9]+)?" true)) (simplify x)))
+          (define primary (parser (or number "a" "b" "c" "d" "f" "g" "h" "i")))
+          (define level1 (parser (or "x" primary)))
+          (define level2 (parser (or "y" level1)))
+          ((parser '((define values (+ level2 ",")) ";" $) values) input)))))
+        (if (equal? (parse_number "123456789;") (list 123456789))
+          true (error "numeric parser changed the parsed value")))
+  - name: "Numeric fast path must not accept a tenth digit"
+    scm: |
+      (begin
+        (define parse_number (jit (lambda (input) (begin
+          (define number (parser (define x (regex "-?(?:[0-9][0-9]?[0-9]?[0-9]?[0-9]?[0-9]?[0-9]?[0-9]?[0-9]?(?:\\.[0-9]*)?|\\.[0-9]+)(?:e-?[0-9]+)?" true)) (simplify x)))
+          (define primary (parser (or number "a" "b" "c" "d" "f" "g" "h" "i")))
+          (define level1 (parser (or "x" primary)))
+          (define level2 (parser (or "y" level1)))
+          ((parser '((define values (+ level2 ",")) ";" $) values) input)))))
+        (parse_number "1234567890;"))
+    expect:
+      error: true
+  - name: "Canonical numeric grammar preserves decimal and exponent values"
+    scm: |
+      (begin
+        (define parse_number (jit (lambda (input) (begin
+          (define number (parser (define x (regex "-?(?:[0-9]+\\.?[0-9]*|\\.[0-9]+)(?:e-?[0-9]+)?" true)) (simplify x)))
+          (define primary (parser (or number "a" "b" "c" "d" "f" "g" "h" "i")))
+          (define level1 (parser (or "x" primary)))
+          (define level2 (parser (or "y" level1)))
+          ((parser '((define values (+ level2 ",")) ";" $) values) input)))))
+        (if (equal? (parse_number "1234567890, 12.5, 1E3, -.5, 7.;")
+                    (list 1234567890 12.5 1000 -0.5 7))
+          true (error "canonical numeric parser changed values")))
+  - name: "Case-sensitive exponent grammar must not accept uppercase E"
+    scm: |
+      (begin
+        (define parse_number (jit (lambda (input) (begin
+          (define number (parser (define x (regex "-?(?:[0-9]+\\.?[0-9]*|\\.[0-9]+)(?:e-?[0-9]+)?" false)) (simplify x)))
+          (define primary (parser (or number "a" "b" "c" "d" "f" "g" "h" "i")))
+          (define level1 (parser (or "x" primary)))
+          (define level2 (parser (or "y" level1)))
+          ((parser '((define values (+ level2 ",")) ";" $) values) input)))))
+        (parse_number "1E3;"))
+    expect:
+      error: true
+cleanup: []
