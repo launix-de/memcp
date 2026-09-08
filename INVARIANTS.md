@@ -675,6 +675,7 @@ representation behind that scalar depends on the predicate:
 | Complete table-local expression, including correlated conjuncts on that table | Exact expression/value cache with shard-local EMA | Existing planner prior |
 | Simple column LIKE pattern | Exact cache first; otherwise per-column/collation/wildcard-topology literal-length buckets | Interpolate between observed lengths; extrapolate at most four characters using the prior decay slope |
 | Equality to a particular scalar | Exact cache; existing distinct estimate on a miss | Never interpolate categorical values |
+| Bound UNIQUE/PRIMARY KEY point probe | Existing hard one-row bound; no learning | Zero/one outcomes must not invalidate table-wide cached plans |
 | Numeric/date range threshold | Exact cache in this implementation | A future rebuild-collected value CDF can interpolate thresholds; query-frequency buckets are not a data histogram |
 | Join between relations | Existing join statistics | A table-local filter rate cannot describe key overlap or join fanout |
 | LIMIT/EXISTS, restricted RecSet input, batched/correlated probes | No general table-filter feedback | Keep existing costing and population/coverage distinctions |

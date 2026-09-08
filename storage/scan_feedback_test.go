@@ -212,6 +212,26 @@ func TestFilterFeedbackLearnsCompleteScan(t *testing.T) {
 	}
 }
 
+func TestFilterFeedbackUniquePointRetainsPlanStatistics(t *testing.T) {
+	Init(scm.Globalenv)
+	tbl, cols := scanColumnCostTable(t, "feedback_unique", 100)
+	tbl.mu.Lock()
+	tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: cols[:1]}}
+	tbl.mu.Unlock()
+	token, fingerprint := tbl.PlannerStatsToken(), tbl.PlannerStatisticsFingerprint()
+	for _, body := range []string{`(equal? x 1)`, `(equal? x 101)`} {
+		schema, values, filter := feedbackTestCompile(t, body)
+		tbl.scan(nil, schema, values, cols[:1], scm.Eval(filter, &scm.Globalenv), nil,
+			scm.Globalenv.Vars[scm.Symbol("scan_count")], scm.NewInt(0), scm.Globalenv.Vars[scm.Symbol("+")], false)
+		if _, _, known := tbl.filterSelectivity(bindFilterFeedback(schema.Slice(), values)); known {
+			t.Fatal("unique point probe trained redundant selectivity")
+		}
+	}
+	if tbl.PlannerStatsToken() != token || tbl.PlannerStatisticsFingerprint() != fingerprint {
+		t.Fatal("unique point probe invalidated cached planning statistics")
+	}
+}
+
 func TestFilterFeedbackOnlyCompilationDoesNotEvaluateBoundaries(t *testing.T) {
 	for _, body := range []string{`(equal? x (print "must not run"))`, `(equal? x (outer 1 x))`} {
 		schema, bindings := compileFilterFeedbackAccess(scm.NewSlice([]scm.Scmer{scm.NewString("c0")}), scm.Read("feedback-test", "(lambda (x) "+body+")"))

@@ -1625,7 +1625,10 @@ func (t *table) scanWithBatchFrom(currentTx *TxContext, source *recSet, accessSc
 		nullArgs[0] = neutral
 		return scm.Apply(mapReduce, nullArgs...)
 	}
-	if source == nil && requiredAccess.len() == 0 && stride == 0 && !hasMutationCallback &&
+	// Unique point probes already have a hard one-row bound. Learning their
+	// zero/one outcome adds no useful cardinality class and needlessly invalidates
+	// every cached plan on the table after its first lookup.
+	if source == nil && requiredAccess.len() == 0 && stride == 0 && !hasMutationCallback && !t.hasBoundUniquePoint(access) &&
 		(currentTx == nil || currentTx.Mode != TxACID) && !strings.HasPrefix(t.Name, ".") {
 		access.feedback = bindFilterFeedback(access.schema, access.values)
 		if access.feedback != nil {
