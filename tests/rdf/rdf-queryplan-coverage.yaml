@@ -125,5 +125,47 @@ test_cases:
     expect:
       rows: 1
 
+  - name: "SPARQL ORDER BY preserves rows from a shared-variable BGP join"
+    ttl_data: |
+      @prefix rorder: <http://rdfcov/order-join/> .
+      rorder:parent rorder:child rorder:first, rorder:second .
+      rorder:first rorder:order "10" .
+      rorder:second rorder:order "20" .
+      rorder:noise01 rorder:order "1" . rorder:noise02 rorder:order "2" .
+      rorder:noise03 rorder:order "3" . rorder:noise04 rorder:order "4" .
+      rorder:noise05 rorder:order "5" . rorder:noise06 rorder:order "6" .
+      rorder:noise07 rorder:order "7" . rorder:noise08 rorder:order "8" .
+      rorder:noise09 rorder:order "9" . rorder:noise10 rorder:order "10" .
+      rorder:noise11 rorder:order "11" . rorder:noise12 rorder:order "12" .
+      rorder:noise13 rorder:order "13" . rorder:noise14 rorder:order "14" .
+      rorder:noise15 rorder:order "15" . rorder:noise16 rorder:order "16" .
+      rorder:noise17 rorder:order "17" . rorder:noise18 rorder:order "18" .
+      rorder:noise19 rorder:order "19" . rorder:noise20 rorder:order "20" .
+      rorder:noise21 rorder:order "21" . rorder:noise22 rorder:order "22" .
+      rorder:noise23 rorder:order "23" . rorder:noise24 rorder:order "24" .
+      rorder:noise25 rorder:order "25" . rorder:noise26 rorder:order "26" .
+      rorder:noise27 rorder:order "27" . rorder:noise28 rorder:order "28" .
+      rorder:noise29 rorder:order "29" . rorder:noise30 rorder:order "30" .
+      rorder:noise31 rorder:order "31" . rorder:noise32 rorder:order "32" .
+      rorder:noise33 rorder:order "33" . rorder:noise34 rorder:order "34" .
+      rorder:noise35 rorder:order "35" . rorder:noise36 rorder:order "36" .
+      rorder:noise37 rorder:order "37" . rorder:noise38 rorder:order "38" .
+      rorder:noise39 rorder:order "39" . rorder:noise40 rorder:order "40" .
+      rorder:noise41 rorder:order "41" . rorder:noise42 rorder:order "42" .
+      rorder:noise43 rorder:order "43" . rorder:noise44 rorder:order "44" .
+      rorder:noise45 rorder:order "45" . rorder:noise46 rorder:order "46" .
+      rorder:noise47 rorder:order "47" . rorder:noise48 rorder:order "48" .
+    sparql: |
+      @prefix rorder: <http://rdfcov/order-join/> .
+      SELECT ?child ?order WHERE {
+        rorder:parent rorder:child ?child .
+        ?child rorder:order ?order
+      } ORDER BY ?order
+    expect:
+      rows: 2
+      data:
+        - {"?child": "http://rdfcov/order-join/first", "?order": "10"}
+        - {"?child": "http://rdfcov/order-join/second", "?order": "20"}
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS rdf"
