@@ -33,8 +33,10 @@ import "github.com/launix-de/go-mysqlstack/sqldb"
 import "github.com/launix-de/NonLockingReadMap"
 
 type storageShard struct {
-	t    *table
-	uuid uuid.UUID // uuid.String()
+	// Immutable feedback cells; only whole-shard completions publish via CAS.
+	filterFeedback filterFeedbackCache
+	t              *table
+	uuid           uuid.UUID // uuid.String()
 	// main storage
 	main_count uint32 // size of main storage
 	// plannerMainRows and plannerDeltaRows publish only row counts. They may be

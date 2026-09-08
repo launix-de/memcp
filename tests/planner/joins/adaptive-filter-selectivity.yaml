@@ -1,0 +1,91 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: "1.0"
+  description: "Learn scalar filter cardinalities and LIKE length buckets from complete scans"
+  isolated: true
+
+setup:
+  - sql: "DROP TABLE IF EXISTS afs_check"
+  - sql: "CREATE TABLE afs_check (id INT PRIMARY KEY, label VARCHAR(64)) ENGINE=sloppy"
+  - scm: |
+      (begin
+        (insert (table "memcp-tests" "afs_check") '("id" "label")
+          (map (produceN 1000) (lambda (i)
+            (list i (if (< i 900) "common" nil)))))
+        (rebuild))
+cleanup:
+  - sql: "DROP TABLE IF EXISTS afs_check"
+
+test_cases:
+  - name: "Complete filter feedback replaces a range constant and participates in plan guards"
+    scm: |
+      (begin
+        (define tbl (table "memcp-tests" "afs_check"))
+        (define src (list "a" "memcp-tests" "afs_check" false nil))
+        (define expr (list '< (list 'get_column "a" false "id" false) 100))
+        (define before_token (table_planner_statistics_token tbl))
+        (define before_fingerprint (table_planner_statistics_fingerprint tbl))
+        (define callback (list 'lambda (list 'x) (list '< 'x 100)))
+        (define access (compile_scan_access '("id") callback))
+        (define values (map (nth access 1) (lambda (value) (eval value))))
+        (define matches (scan nil tbl (nth access 0) values '("id") (eval callback)
+          '() scan_count 0 + false))
+        (define estimate (join_optimizer_expr_selectivity_estimate (list src) "a" expr))
+        (and (equal? matches 100)
+          (equal? (qassoc_get estimate 'source nil) 'scan_feedback)
+          (equal? (qassoc_get estimate 'value nil) 0.1)
+          (not (table_planner_statistics_compatible? "memcp-tests" "afs_check"
+            before_token before_fingerprint))))
+    expect:
+      data: [true]
+
+  - name: "LIKE length buckets interpolate unknown patterns without crossing wildcard topology"
+    scm: |
+      (begin
+        (define tbl (table "memcp-tests" "afs_check"))
+        (define access_for (lambda (pattern)
+          (compile_scan_access '("label") (list 'lambda (list 'x)
+            (list 'strlike 'x pattern "utf8mb4_general_ci")))))
+        (define train (lambda (pattern) (begin
+          (define callback (list 'lambda (list 'x) (list 'strlike 'x pattern "utf8mb4_general_ci")))
+          (define access (access_for pattern))
+          (scan nil tbl (nth access 0) (map (nth access 1) (lambda (v) (eval v)))
+            '("label") (eval callback) '() scan_count 0 + false))))
+        (train "%co%")
+        (train "%comm%")
+        (define estimate_for (lambda (pattern) (begin
+          (define access (access_for pattern))
+          (table_filter_selectivity tbl (nth access 0)
+            (map (nth access 1) (lambda (v) (eval v)))))))
+        (define interpolated (estimate_for "%com%"))
+        (and (equal? (qassoc_get interpolated 'source nil) 'like_length_histogram)
+          (equal? (qassoc_get interpolated 'value nil) 0.9)
+          (nil? (estimate_for "com%")))))
+    expect:
+      data: [true]
+
+  - name: "Observed zero LIKE matches override the nonzero text prior"
+    scm: |
+      (begin
+        (define tbl (table "memcp-tests" "afs_check"))
+        (define callback (list 'lambda (list 'x) (list 'strlike 'x "%absent%" "utf8mb4_general_ci")))
+        (define access (compile_scan_access '("label") callback))
+        (define values (map (nth access 1) (lambda (v) (eval v))))
+        (scan nil tbl (nth access 0) values '("label") (eval callback) '() scan_count 0 + false)
+        (define estimate (table_filter_selectivity tbl (nth access 0) values))
+        (and (equal? (qassoc_get estimate 'source nil) 'scan_feedback)
+          (equal? (qassoc_get estimate 'value nil) 0))))
+    expect:
+      data: [true]
+
+  - name: "Feedback preserves SQL NULL filtering"
+    sql: "SELECT COUNT(*) AS n FROM afs_check WHERE label LIKE '%com%'"
+    expect:
+      rows: 1
+      data: [{n: 900}]
+
+  - name: "Learned filters do not suppress invalid column errors"
+    sql: "SELECT COUNT(*) FROM afs_check WHERE missing_column LIKE '%com%'"
+    expect:
+      error: true

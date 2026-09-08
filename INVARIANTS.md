@@ -664,6 +664,55 @@ Physical options include:
 The selected physical shape should be visible in EXPLAIN when it matters for
 review or regression protection.
 
+## Adaptive Filter Selectivity
+
+Cost consumers still take a scalar probability: local filtered row counts,
+join cardinalities, probe work and physical cost comparisons. The statistical
+representation behind that scalar depends on the predicate:
+
+| Predicate/input | Representation | Unknown values |
+| --- | --- | --- |
+| Complete table-local expression, including correlated conjuncts on that table | Exact expression/value cache with shard-local EMA | Existing planner prior |
+| Simple column LIKE pattern | Exact cache first; otherwise per-column/collation/wildcard-topology literal-length buckets | Interpolate between observed lengths; extrapolate at most four characters using the prior decay slope |
+| Equality to a particular scalar | Exact cache; existing distinct estimate on a miss | Never interpolate categorical values |
+| Numeric/date range threshold | Exact cache in this implementation | A future rebuild-collected value CDF can interpolate thresholds; query-frequency buckets are not a data histogram |
+| Join between relations | Existing join statistics | A table-local filter rate cannot describe key overlap or join fanout |
+| LIMIT/EXISTS, restricted RecSet input, batched/correlated probes | No general table-filter feedback | Keep existing costing and population/coverage distinctions |
+
+Feedback describes the complete predicate before physical residual pruning.
+Candidates before/after a residual filter are not interchangeable with table
+population: an index may already enforce some or all of the predicate. Full
+ordinary scans count locally at batch boundaries and publish only at successful
+shard completion. They use the visible shard population for the complete
+predicate's denominator. No additional per-element atomics, locks, callbacks or
+histogram updates are allowed. Mutation scans and ACID snapshots do not train
+this shared model.
+
+Each shard retains at most 64 immutable observations. One CAS publishes an EMA
+update; contention may drop an observation and must never trigger a retry loop.
+A first complete observation replaces the cold prior; subsequent observations
+use 99% previous / 1% new. Table publication merges shard rates by row population,
+retaining the prior for missing shards. The table cache also has 64 entries and
+full keys prevent hash collisions from being interpreted as matches. Histogram
+buckets average distinct retained patterns, not their query execution counts.
+The histogram is a weak workload-derived prior, not proof that a new word occurs.
+It cannot cross columns, collations, or prefix/suffix/substring pattern classes.
+
+Publication uses immutable snapshots. Reads do not acquire an RWMutex or write
+LRU/access counters. Scalar generation IDs invalidate feedback after DDL/rebuild
+without retaining retired shards. No learned state changes persistence formats,
+row visibility, or query results. Existing integer scan headers remain readable;
+new optional feedback metadata is ordinary serializable Scheme data.
+
+Published feedback cost classes participate in the existing table statistics
+cache guards. Small EMA changes within one geometric class do not invalidate
+plans; changed classes/new keys do. This bounded table-wide invalidation is
+conservative and may recompile unrelated plans on the same table. A future
+per-predicate guard can narrow that dependency without changing scan sampling.
+These are power-of-two selectivity classes, not the exact cost crossover points
+of competing plans. A crossover within a class can therefore remain unnoticed
+until another guard changes; exact plan-specific thresholds remain future work.
+
 ## Canonical Naming and Reuse
 
 Helper identities must be canonical.

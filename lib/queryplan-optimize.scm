@@ -295,7 +295,7 @@ and barrier ownership come from the pre-normalization query block. */
 					(join_optimizer_column_selectivity_estimate right_ref)
 					(planner_unknown_selectivity_estimate)))))))
 
-(define join_optimizer_expr_selectivity_estimate (lambda (sources default_alias expr)
+(define join_optimizer_expr_prior_estimate (lambda (sources default_alias expr)
 	(match expr
 		((symbol equal?) left right) (join_optimizer_equality_selectivity_estimate sources default_alias left right)
 		((quote equal?) left right) (join_optimizer_expr_selectivity_estimate sources default_alias (list (symbol "equal?") left right))
@@ -333,6 +333,31 @@ and barrier ownership come from the pre-normalization query block. */
 			(list (symbol "strlike") value pattern collation))
 		_ (planner_unknown_selectivity_estimate))))
 
+/* Feedback keys describe the complete table-local logical predicate, before
+physical residual pruning. Compiling its access metadata here only canonicalizes
+bounded scalar metadata; this lookup never scans, loads columns or builds indexes. */
+(define planner_filter_feedback (lambda (sources default_alias expr)
+	(begin
+		(define aliases (join_hypergraph_expr_aliases default_alias (source_aliases sources) expr))
+		(if (not (single_source? aliases)) nil
+			(begin
+				(define src (join_optimizer_source_by_alias sources (car aliases)))
+				(if (not (source_is_base_table? src)) nil
+					(try (lambda ()
+						(begin
+							(define cols (extract_columns_for_alias src expr))
+							(define callback (list (quote lambda)
+								(map cols (lambda (col) (symbol (concat (source_alias src) "." col))))
+								(lower_column_expr_for_alias src expr)))
+							(define access (compile_scan_access cols callback true))
+							(table_filter_selectivity (table (source_schema src) (source_relation src))
+								(nth access 0) (map (nth access 1) (lambda (value) (eval value))))))
+						(lambda (_e) nil))))))))
+
+(define join_optimizer_expr_selectivity_estimate (lambda (sources default_alias expr)
+	(coalesceNil (planner_filter_feedback sources default_alias expr)
+		(join_optimizer_expr_prior_estimate sources default_alias expr))))
+
 (define join_optimizer_expr_selectivity (lambda (sources default_alias expr)
 	(begin
 		(define estimate (join_optimizer_expr_selectivity_estimate sources default_alias expr))
@@ -357,7 +382,11 @@ and barrier ownership come from the pre-normalization query block. */
 				(lambda (entry)
 					(join_optimizer_expr_selectivity sources default_alias
 						(qassoc_get entry (quote predicate) true))))))
-		(max 1 (* base_rows local_selectivity)))))
+		(define combined (reduce (filter local_predicates (lambda (entry)
+			(not (and (source_outer? src) (equal? (qassoc_get entry (quote origin) nil) (quote where))))))
+			(lambda (condition entry) (combine_where condition (qassoc_get entry (quote predicate) true))) true))
+		(define feedback (planner_filter_feedback sources default_alias combined))
+		(max 1 (* base_rows (if (nil? feedback) local_selectivity (qassoc_get feedback (quote value) local_selectivity)))))))
 
 (define join_optimizer_source_rows (lambda (stages sources default_alias graph src)
 	(join_optimizer_source_rows_from_base
@@ -1722,18 +1751,9 @@ particular star shape. */
 (define planner_table_statistics_aliases (lambda (sources)
 	(map (filter sources source_is_base_table?) source_alias)))
 
-/* Equality and join selectivity depend only on immutable table statistics.
-Text-pattern priors additionally depend on the current pattern value, so keep
-that value in the guard. Table dependencies use a token fast path and compare
-their published statistics fingerprint only when REBUILD changes generation. */
-(define planner_selectivity_value_dependent? (lambda (expr)
-	(match expr
-		((symbol strlike) _value _pattern) true
-		((quote strlike) _value _pattern) true
-		((symbol strlike) _value _pattern _collation) true
-		((quote strlike) _value _pattern _collation) true
-		_ false)))
-
+/* Table dependencies cover rebuild statistics and published feedback classes.
+Every local filter may now depend on a bound value; record all session-value
+dependencies, not only text-pattern parameters. */
 (define join_order_record_cost_dependencies (lambda (sources nodes predicates planning_session)
 	(begin
 		(planner_record_table_statistics_guards sources planning_session)
@@ -1750,8 +1770,7 @@ their published statistics fingerprint only when REBUILD changes generation. */
 		(reduce predicates (lambda (_ predicate)
 			(begin
 				(define expr (join_order_pred_expr predicate))
-				(if (planner_selectivity_value_dependent? expr)
-					(planner_record_session_value_guards expr planning_session) nil))) nil))))
+				(planner_record_session_value_guards expr planning_session))) nil))))
 
 /* Every subset containing one vertex and any selection of its regular-edge
 neighbors is connected. A degree d therefore proves at least 2^d connected
