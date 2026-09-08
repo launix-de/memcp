@@ -4923,7 +4923,11 @@ self-joins of the same base table still describe two distinct row roles. */
 	(begin
 		(define pairs (group_stage_session_key_pairs stage keys key_names))
 		(if (empty_list? pairs)
-			(list (quote table_empty?) (list (quote table) schema grouptbl))
+			/* createtable waits for the table-local oninit barrier, including
+			legacy or freshly reloaded empty CACHE tables. Once that call returns,
+			an empty session-independent group is a valid cached result rather than
+			an initialization signal. Only session-keyed caches need a row probe. */
+			false
 			(begin
 				(define cols (map pairs (lambda (pair) (nth pair 1))))
 				(define params (map cols (lambda (col) (symbol (concat grouptbl "." col)))))
