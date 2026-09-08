@@ -31,9 +31,12 @@ import (
 	"github.com/google/uuid"
 )
 
-const blobManifestColumn = ".blobrefs-v1"
+// v1 could omit bang-prefixed legacy references and could be overwritten by
+// an unchanged, partially loaded shard. It is not a deletion proof. Discover
+// references from committed columns once and publish a v2 manifest instead.
+const blobManifestColumn = ".blobrefs-v2"
 
-const blobManifestHeader = "memcp-blob-references-v1\n"
+const blobManifestHeader = "memcp-blob-references-v2\n"
 
 // CleanDatabase removes only disk objects proven unowned by the complete active
 // generation. It serializes against rebuild/repartition publication, but does

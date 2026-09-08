@@ -36,6 +36,7 @@ type OverlayBlob struct {
 	size   uint
 	schema *database       // reference to owning database
 	refs   map[string]bool // hex-hashes referenced in this build()
+	legacy bool            // v0/ASCII-49 base encoding; preserved until the next rebuild
 }
 
 // Keep ordinary text values in the columnar string storage. Small text values
@@ -55,18 +56,21 @@ func (s *OverlayBlob) String() string {
 // overlayBlobVersion is the current binary format version for OverlayBlob.
 // Increment this constant and add a new deserializeBlobV* helper whenever the
 // layout after the magic byte changes.  Never delete old helpers.
-const overlayBlobVersion = 0
+const overlayBlobVersion = 1
 
 // OverlayBlob binary layout (magic byte 31 consumed by shard loader):
 //
 //	[version uint8]      ← first byte read by Deserialize
 //	[pad 6 bytes]        ← alignment padding
-//	[size uint64]        ← number of inline blobs (always 0 in v0; legacy may have >0)
+//	[size uint64]        ← number of inline blobs (0 when stored externally)
 //	[base storage]       ← magic byte + full serialized base column
 //
 // Version history:
 //
-//	0 (current): layout as above; the version byte was previously the first byte
+//	1 (current): references are "!b" + 32 hash bytes; literals beginning with
+//	             "!" are escaped with another "!". The tags cannot collide.
+//	0: references were "!" + 32 hash bytes, ambiguous with escaped literals
+//	   when the hash begins with "!". The version byte was previously the first byte
 //	             of a 7-byte ASCII dummy "1234567" (byte value '1'=49).
 //	             Legacy: version byte '1'=49 → treat as v0 (inline blobs still possible).
 func (s *OverlayBlob) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc {
@@ -135,12 +139,23 @@ func (s *OverlayBlob) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result 
 }
 
 func (s *OverlayBlob) Serialize(f io.Writer) {
-	binary.Write(f, binary.LittleEndian, uint8(31))                 // 31 = OverlayBlob
-	binary.Write(f, binary.LittleEndian, uint8(overlayBlobVersion)) // version byte (was '1' in legacy)
+	binary.Write(f, binary.LittleEndian, uint8(31)) // 31 = OverlayBlob
+	version := uint8(overlayBlobVersion)
+	if s.legacy {
+		version = 0
+	} // Never relabel a legacy base as the new encoding.
+	binary.Write(f, binary.LittleEndian, version)
 	var pad [6]byte
-	f.Write(pad[:])                                 // remaining alignment padding (was "234567")
-	binary.Write(f, binary.LittleEndian, uint64(0)) // size=0: no inline blobs
-	s.Base.Serialize(f)                             // serialize base
+	f.Write(pad[:]) // remaining alignment padding (was "234567")
+	binary.Write(f, binary.LittleEndian, uint64(len(s.values)))
+	// Detached/in-memory columns and legacy inline payloads must survive a
+	// serialize/reload before SetSchema migrates them to external storage.
+	for hash, compressed := range s.values {
+		f.Write(hash[:])
+		binary.Write(f, binary.LittleEndian, uint64(len(compressed)))
+		io.WriteString(f, compressed)
+	}
+	s.Base.Serialize(f) // serialize base
 }
 
 func (s *OverlayBlob) Deserialize(f io.Reader) uint {
@@ -150,10 +165,19 @@ func (s *OverlayBlob) Deserialize(f io.Reader) uint {
 	f.Read(pad[:])
 	switch version {
 	case 0, '1': // '1'=49: legacy pre-versioning dummy byte; treat as v0
+		s.legacy = true
 		return s.deserializeBlobV0(f)
+	case 1:
+		s.legacy = false
+		return s.deserializeBlobV1(f)
 	default:
 		panic(fmt.Sprintf("OverlayBlob: unknown version %d", version))
 	}
+}
+
+// v1 changes the base string tags, not the enclosing binary layout.
+func (s *OverlayBlob) deserializeBlobV1(f io.Reader) uint {
+	return s.deserializeBlobV0(f)
 }
 
 func (s *OverlayBlob) deserializeBlobV0(f io.Reader) uint {
@@ -270,45 +294,72 @@ func (s *OverlayBlob) GetValueMulti(recids []uint32, target []scm.Scmer, stride 
 	}
 }
 
-// resolveBlob turns a base-storage value into its logical value: a plain
-// value passes through unchanged; a "!"-prefixed string is either an
-// escaped literal ("!!...") or a blob reference that must be loaded from
-// persistence (or the in-memory build-time cache) and gunzipped.
-func (s *OverlayBlob) resolveBlob(v scm.Scmer) scm.Scmer {
-	if v.IsString() {
-		vs := v.String()
-		if vs != "" && vs[0] == '!' {
-			if len(vs) > 1 && vs[1] == '!' {
-				return scm.NewString(vs[1:]) // escaped string
-			}
-			hashKey := *(*[32]byte)(unsafe.Pointer(unsafe.StringData(vs[1:])))
+// blobReference recognizes references without fetching payloads. For v0, a
+// 33-byte "!!..." is ambiguous: it can also be an escaped 32-byte literal.
+// Manifest discovery must conservatively retain that candidate hash.
+func (s *OverlayBlob) blobReference(raw string) (hash [32]byte, reference, ambiguous bool) {
+	if s.legacy {
+		if len(raw) == 33 && raw[0] == '!' {
+			copy(hash[:], raw[1:])
+			return hash, true, raw[1] == '!'
+		}
+	} else if len(raw) == 34 && raw[:2] == "!b" {
+		copy(hash[:], raw[2:])
+		return hash, true, false
+	}
+	return hash, false, false
+}
 
-			// load from persistence (no RAM caching)
-			if s.schema != nil && s.schema.persistence != nil {
-				hexHash := fmt.Sprintf("%x", hashKey[:])
-				r := s.schema.persistence.ReadBlob(hexHash)
-				if _, readFailed := r.(ErrorReader); !readFailed {
-					value, ok := gunzipReader(r)
-					r.Close()
-					if ok {
-						return value
-					}
-				} else {
-					r.Close()
-				}
+func (s *OverlayBlob) readBlob(hash [32]byte) (scm.Scmer, bool) {
+	if s.schema != nil && s.schema.persistence != nil {
+		reader := s.schema.persistence.ReadBlob(fmt.Sprintf("%x", hash))
+		defer reader.Close()
+		if failure, failed := reader.(ErrorReader); failed {
+			if !failure.Missing() {
+				panic(failure)
 			}
-
-			// fallback: check in-memory values (memory-mode or during build)
-			if s.values != nil {
-				if val, ok := s.values[hashKey]; ok {
-					return gunzipValue(val)
-				}
+		} else {
+			value, ok := gunzipReader(reader)
+			if !ok {
+				panic(fmt.Sprintf("OverlayBlob: empty blob %x", hash))
 			}
-
-			return scm.NewNil() // value lost
+			return value, true
 		}
 	}
-	return v
+	if compressed, found := s.values[hash]; found {
+		return gunzipValue(compressed), true
+	}
+	return scm.NewNil(), false
+}
+
+// Legacy ambiguous values prefer a present, content-verified blob. Without
+// that evidence they retain the old escaped-literal interpretation. An actual
+// literal identical to a present blob reference cannot be distinguished in v0;
+// only a rebuild from an authoritative source can resolve that case.
+func (s *OverlayBlob) resolveBlob(v scm.Scmer) scm.Scmer {
+	if !v.IsString() {
+		return v
+	}
+	raw := v.String()
+	if raw == "" || raw[0] != '!' {
+		return v
+	}
+	hash, reference, ambiguous := s.blobReference(raw)
+	if reference {
+		if value, found := s.readBlob(hash); found {
+			if ambiguous && sha256.Sum256([]byte(value.String())) != hash {
+				panic(fmt.Sprintf("OverlayBlob: legacy blob checksum mismatch %x", hash))
+			}
+			return value
+		}
+		if !ambiguous {
+			panic(fmt.Sprintf("OverlayBlob: missing blob %x", hash))
+		}
+	}
+	if len(raw) > 1 && raw[1] == '!' {
+		return scm.NewString(raw[1:])
+	}
+	panic("OverlayBlob: malformed reference encoding")
 }
 
 func (s *OverlayBlob) prepare() {
@@ -321,7 +372,7 @@ func (s *OverlayBlob) scan(i uint32, value scm.Scmer) {
 		if len(vs) > maxInlineBlobBytes {
 			h := sha256.New()
 			io.WriteString(h, vs)
-			s.Base.scan(i, scm.NewString("!"+string(h.Sum(nil))))
+			s.Base.scan(i, scm.NewString("!b"+string(h.Sum(nil))))
 		} else {
 			if vs != "" && vs[0] == '!' {
 				s.Base.scan(i, scm.NewString("!"+vs))
@@ -334,6 +385,7 @@ func (s *OverlayBlob) scan(i uint32, value scm.Scmer) {
 	s.Base.scan(i, value)
 }
 func (s *OverlayBlob) init(i uint32) {
+	s.legacy = false
 	s.values = make(map[[32]byte]string)
 	s.size = 0
 	s.refs = make(map[string]bool)
@@ -351,7 +403,7 @@ func (s *OverlayBlob) build(i uint32, value scm.Scmer) {
 			io.WriteString(h, vs)
 			hashsum := h.Sum(nil)
 			hashKey := *(*[32]byte)(unsafe.Pointer(&hashsum[0]))
-			s.Base.build(i, scm.NewString("!"+string(hashsum)))
+			s.Base.build(i, scm.NewString("!b"+string(hashsum)))
 
 			// deduplicate: only compress+write if not already seen
 			if _, exists := s.values[hashKey]; !exists {
@@ -411,8 +463,8 @@ func (s *OverlayBlob) appendBlobReferences(dst map[string]struct{}, count uint32
 			continue
 		}
 		raw := value.String()
-		if len(raw) == 33 && raw[0] == '!' && raw[1] != '!' {
-			dst[fmt.Sprintf("%x", []byte(raw[1:]))] = struct{}{}
+		if hash, reference, _ := s.blobReference(raw); reference {
+			dst[fmt.Sprintf("%x", hash)] = struct{}{}
 		}
 	}
 }
@@ -436,21 +488,20 @@ func (s *OverlayBlob) ReleaseBlobs(count uint) {
 		return
 	}
 
-	// Case 2: loaded from disk, refs unknown -- scan Base column
-	seen := make(map[string]bool)
+	// A legacy ambiguous value is sufficient evidence to retain a blob, but
+	// not to decrement ownership: a colliding literal could otherwise delete
+	// another column's last reference. Generation-based clean reclaims such
+	// blobs after all possible owning generations have been retired.
+	seen := make(map[[32]byte]bool)
 	for i := uint32(0); i < uint32(count); i++ {
-		v := s.Base.GetValue(i)
-		if v.IsString() {
-			vs := v.String()
-			// Blob reference: "!" + 32 bytes hash, NOT "!!" (escaped)
-			if len(vs) == 33 && vs[0] == '!' && vs[1] != '!' {
-				hashKey := *(*[32]byte)(unsafe.Pointer(unsafe.StringData(vs[1:])))
-				hexHash := fmt.Sprintf("%x", hashKey[:])
-				if !seen[hexHash] {
-					seen[hexHash] = true
-					s.schema.DecrBlobRefcount(hexHash)
-				}
-			}
+		value := s.Base.GetValue(i)
+		if !value.IsString() {
+			continue
+		}
+		hash, reference, ambiguous := s.blobReference(value.String())
+		if reference && !ambiguous && !seen[hash] {
+			seen[hash] = true
+			s.schema.DecrBlobRefcount(fmt.Sprintf("%x", hash))
 		}
 	}
 }

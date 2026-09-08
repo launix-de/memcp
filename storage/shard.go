@@ -3865,7 +3865,12 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 		GlobalCache.Remove(t)
 		removedFromCache = true
 	}
-	writeBlobManifest(result)
+	// Unchanged generations may have only a subset of their columns loaded.
+	// Preserve their committed manifest; startup discovery handles old/missing
+	// manifests by inspecting every persisted column, never this partial map.
+	if result.uuid != t.uuid {
+		writeBlobManifest(result)
+	}
 	// Unlock result before registration (ComputeSize needs RLock)
 	result.mu.Unlock()
 	resultLocked = false
