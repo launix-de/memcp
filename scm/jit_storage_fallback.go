@@ -43,3 +43,12 @@ func CompileJITStorageReaders(JITStorageGetValueEmitter, JITStorageGetValueRange
 func CompileJITMapReduceBuffer(*Proc, []uint8) JITMapReduceBufferFunc {
 	return nil
 }
+
+// CompileJITFilterBuffer is unavailable without the patched Go JIT backend.
+func CompileJITFilterBuffer(*Proc, []uint8) JITFilterBufferFunc {
+	return nil
+}
+
+func CompileJITFilterStorage(*Proc, []uint8, []JITStorageGetValueEmitter) JITFilterBufferFunc {
+	return nil
+}

@@ -77,6 +77,25 @@ func TestJITCalibrationMapReduceBufferBestOf(t *testing.T) {
 	}
 }
 
+func TestJITCalibrationFilterBufferBestOf(t *testing.T) {
+	calibration := JITCostCalibration{
+		Enabled:                   true,
+		FilterBufferCompileNS:     100,
+		FilterBufferCompileUnitNS: 4,
+		FilterBufferSavedNS:       5,
+		FilterBufferMaxUnits:      20,
+	}
+	if got := calibration.FilterBufferBreakEven(20, 3); got != 40 {
+		t.Fatalf("filter buffer break-even rows = %d, want 40", got)
+	}
+	if got := calibration.FilterBufferBreakEven(30, 3); got != 56 {
+		t.Fatalf("complex filter buffer break-even rows = %d, want 56", got)
+	}
+	if got := calibration.FilterBufferBreakEven(20, 0); got != math.MaxInt {
+		t.Fatalf("zero-column filter break-even = %d, want MaxInt", got)
+	}
+}
+
 func TestJITCalibrationAnchorsCallBoundaryToTrivialShapes(t *testing.T) {
 	observations := []jitCalibrationObservation{
 		{workUnits: 0, callNS: 4},

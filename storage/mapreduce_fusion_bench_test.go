@@ -86,7 +86,7 @@ func TestJITMapReduceBufferBestOf(t *testing.T) {
 	nativeMapper := shard.OpenMapReducer([]string{"amount"}, sumBinding.Vars[scm.Symbol("sql_sum_reduce")], false, 0, nil, nil)
 	defer nativeMapper.Close()
 	if nativeMapper.bufferReduceProc == nil {
-		wrapped := scm.PrepareJITMapReduceBufferProc(sumBinding.Vars[scm.Symbol("sql_sum_reduce")], 2)
+		wrapped := scm.PrepareJITBufferProc(sumBinding.Vars[scm.Symbol("sql_sum_reduce")], 2)
 		wrappedCost := -1
 		if wrapped != nil {
 			wrappedCost = scm.JITExpressionCost(wrapped.Body)

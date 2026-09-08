@@ -722,11 +722,16 @@ type JITStorageGetValueMultiFunc func([]uint32, []Scmer, int)
 // explicit so zero-column reducers such as COUNT(*) need no synthetic values.
 type JITMapReduceBufferFunc func(Scmer, []Scmer, int) Scmer
 
-// PrepareJITMapReduceBufferProc returns source suitable for typed buffer-loop
-// inlining. Native declarations with a JIT emitter are wrapped in a procedure
-// so physical operators can specialize the same implementation without
-// teaching the storage package about individual aggregate names.
-func PrepareJITMapReduceBufferProc(source Scmer, arity int) *Proc {
+// JITFilterBufferFunc evaluates a typed row-major Scmer buffer and compacts
+// the corresponding record identifiers in place. The row width and predicate
+// are compile-time properties of the function.
+type JITFilterBufferFunc func([]uint32, []Scmer) int
+
+// PrepareJITBufferProc returns source suitable for typed buffer-loop inlining.
+// Native declarations with a JIT emitter are wrapped in a procedure so physical
+// operators can specialize the same implementation without teaching the
+// storage package about individual scalar or aggregate names.
+func PrepareJITBufferProc(source Scmer, arity int) *Proc {
 	if arity < 1 {
 		return nil
 	}
@@ -746,7 +751,7 @@ func PrepareJITMapReduceBufferProc(source Scmer, arity int) *Proc {
 	body := make([]Scmer, arity+1)
 	body[0] = source
 	for index := range params {
-		parameter := NewSymbol(fmt.Sprintf("\x00buffer-reduce-%d", index))
+		parameter := NewSymbol(fmt.Sprintf("\x00buffer-arg-%d", index))
 		params[index] = parameter
 		body[index+1] = parameter
 	}
