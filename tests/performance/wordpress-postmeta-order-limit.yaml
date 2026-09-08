@@ -160,7 +160,7 @@ test_cases:
         - 'scan_order'
 
   - name: "Prime empty Elementor grouped metadata cache"
-    max_time: 15
+    max_time: 5
     sql: |
       SELECT p.ID
       FROM wordpress_perf_posts p
