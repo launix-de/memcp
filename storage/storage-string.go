@@ -18,20 +18,20 @@ package storage
 
 import "io"
 import "fmt"
-import "github.com/carli2/hybridsort"
 import "sync"
 import "time"
 import "unsafe"
 import "strings"
+import "sync/atomic"
 import "encoding/hex"
 import "encoding/base64"
 import "encoding/binary"
-import "sync/atomic"
-import "github.com/launix-de/memcp/scm"
 import "github.com/pierrec/lz4/v4"
+import "github.com/carli2/hybridsort"
+import "github.com/launix-de/memcp/scm"
 
 // StringFormat describes how the string bytes in the dictionary are encoded.
-// The lowest bit encodes case for formats that have a case variant:
+// In legacy IDs 0..10, the lowest bit encodes case for paired formats:
 //
 //	bit 0 == 0  →  lowercase  (or no-case)
 //	bit 0 == 1  →  uppercase  (or no-case variant at odd positions)
@@ -49,13 +49,22 @@ const (
 	FormatDecimal     StringFormat = 8  // [0-9+\-.,eE] 4 bit/char — DE+EN numbers, IPv4, scientific
 	FormatDateTime    StringFormat = 9  // [0-9\-:. T] 4 bit/char — ISO 8601 dates and times
 	FormatPhoneDTMF   StringFormat = 10 // [0-9+\-()#*] 4 bit/char — DTMF dialing sequences
+
+	// Permanent new IDs: sorted alphabets, high nibble first. Old IDs stay readable.
+	FormatOrderedHexLower  StringFormat = 11
+	FormatOrderedHexUpper  StringFormat = 12
+	FormatOrderedPhone     StringFormat = 13
+	FormatOrderedPhoneDTMF StringFormat = 14
+	FormatOrderedDecimal   StringFormat = 15
+	FormatOrderedDateTime  StringFormat = 16
 )
 
 // nibbleCharset holds the encode (index→char) and decode (char→index) tables
 // for 4-bit nibble-packed string formats.
 type nibbleCharset struct {
-	enc [16]byte
-	dec [256]int8
+	highFirst bool
+	enc       [16]byte
+	dec       [256]int8
 }
 
 func makeNibbleCharset(chars []byte) nibbleCharset {
@@ -85,7 +94,18 @@ var (
 	dateTimeCharset = makeNibbleCharset([]byte("0123456789-:. T"))
 )
 
-// allFormatsValid is the initial bitmask with all format bits set.
+// orderedCharsets uses the same immutable alphabet definitions as CString comparisons.
+var orderedCharsets = func() [6]nibbleCharset {
+	var result [6]nibbleCharset
+	for i := range result {
+		result[i] = makeNibbleCharset([]byte(scm.CStringAlphabet(uint8(i + 11))))
+		result[i].highFirst = true
+	}
+	return result
+}()
+
+// allFormatsValid tracks eligibility using legacy alphabet IDs only.
+// chooseBestFormat maps eligible nibble alphabets to their ordered writer IDs.
 const allFormatsValid uint16 = (1 << 11) - 1 // bits 0..10
 
 // checkFormatBits returns which StringFormat bits remain compatible with s.
@@ -193,22 +213,22 @@ func chooseBestFormat(valid uint16) StringFormat {
 	}
 	// Hex/nibble sets: 50% savings
 	if valid&(1<<FormatHexLower) != 0 {
-		return FormatHexLower
+		return FormatOrderedHexLower
 	}
 	if valid&(1<<FormatHexUpper) != 0 {
-		return FormatHexUpper
+		return FormatOrderedHexUpper
 	}
 	if valid&(1<<FormatPhone) != 0 {
-		return FormatPhone
+		return FormatOrderedPhone
 	}
 	if valid&(1<<FormatPhoneDTMF) != 0 {
-		return FormatPhoneDTMF
+		return FormatOrderedPhoneDTMF
 	}
 	if valid&(1<<FormatDecimal) != 0 {
-		return FormatDecimal
+		return FormatOrderedDecimal
 	}
 	if valid&(1<<FormatDateTime) != 0 {
-		return FormatDateTime
+		return FormatOrderedDateTime
 	}
 	// Base64: ~25% savings
 	if valid&(1<<FormatBase64Upper) != 0 {
@@ -224,12 +244,16 @@ func chooseBestFormat(valid uint16) StringFormat {
 // compNibble is the absolute nibble position in the buffer (= byte_offset*2 + nibble_within_byte).
 // Returns (new dst, new absolute nibble position = compNibble + len(s)).
 func appendNibbles(dst []byte, s string, cs *nibbleCharset, compNibble int) ([]byte, int) {
+	firstShift := uint(0)
+	if cs.highFirst {
+		firstShift = 4
+	}
 	for i := 0; i < len(s); i++ {
 		nib := byte(cs.dec[s[i]])
 		if (compNibble+i)%2 == 0 {
-			dst = append(dst, nib) // low nibble of a new byte
+			dst = append(dst, nib<<firstShift)
 		} else {
-			dst[len(dst)-1] |= nib << 4 // high nibble of last byte
+			dst[len(dst)-1] |= nib << (firstShift ^ 4)
 		}
 	}
 	return dst, compNibble + len(s)
@@ -237,6 +261,9 @@ func appendNibbles(dst []byte, s string, cs *nibbleCharset, compNibble int) ([]b
 
 // isNibbleFormat reports whether format uses 4-bit nibble packing.
 func isNibbleFormat(f StringFormat) bool {
+	if f >= FormatOrderedHexLower && f <= FormatOrderedDateTime {
+		return true
+	}
 	switch f {
 	case FormatHexLower, FormatHexUpper, FormatPhone, FormatPhoneDTMF, FormatDecimal, FormatDateTime:
 		return true
@@ -246,6 +273,9 @@ func isNibbleFormat(f StringFormat) bool {
 
 // nibbleCharsetFor returns the nibble charset for a nibble format, or nil.
 func nibbleCharsetFor(f StringFormat) *nibbleCharset {
+	if f >= FormatOrderedHexLower && f <= FormatOrderedDateTime {
+		return &orderedCharsets[f-FormatOrderedHexLower]
+	}
 	switch f {
 	case FormatHexLower:
 		return &hexLowerCharset
@@ -318,14 +348,40 @@ func adjustStartsForFormat(starts *StorageInt) {
 // (readNibbles) and the bulk arena decode path (bulkDecoder), so the nibble
 // unpacking logic exists exactly once regardless of whether the caller
 // wants a freshly allocated string or a slice of a shared batch buffer.
+// Decode full bytes in pairs. Peel the first/last half-byte and select the
+// nibble order once, keeping parity calculations out of the main loops.
 func writeNibblesInto(dst []byte, ptr *byte, nibbleOff int, cs *nibbleCharset) {
-	for i := range dst {
-		absNibble := nibbleOff + i
-		b := *(*byte)(unsafe.Pointer(uintptr(unsafe.Pointer(ptr)) + uintptr(absNibble/2)))
-		if absNibble%2 == 0 {
-			dst[i] = cs.enc[b&0x0F]
+	if len(dst) == 0 {
+		return
+	}
+	data := unsafe.Slice(ptr, (len(dst)+nibbleOff+1)/2)
+	i, j := 0, 0
+	if nibbleOff != 0 {
+		if cs.highFirst {
+			dst[0] = cs.enc[data[0]&15]
 		} else {
-			dst[i] = cs.enc[(b>>4)&0x0F]
+			dst[0] = cs.enc[data[0]>>4]
+		}
+		i++
+		j++
+	}
+	if cs.highFirst {
+		for ; i+1 < len(dst); i, j = i+2, j+1 {
+			v := data[j]
+			dst[i] = cs.enc[v>>4]
+			dst[i+1] = cs.enc[v&15]
+		}
+		if i < len(dst) {
+			dst[i] = cs.enc[data[j]>>4]
+		}
+	} else {
+		for ; i+1 < len(dst); i, j = i+2, j+1 {
+			v := data[j]
+			dst[i] = cs.enc[v&15]
+			dst[i+1] = cs.enc[v>>4]
+		}
+		if i < len(dst) {
+			dst[i] = cs.enc[data[j]&15]
 		}
 	}
 }
@@ -370,24 +426,15 @@ func readUUID(ptr *byte, upper bool) string {
 
 // cstringDecompress materialises a tagCString Scmer into a plain Go string.
 // ptr is a byte-aligned pointer into the StorageString dictionary.
-// val encodes: bits 47-44 = format, bit 43 = nibbleOff, bits 42-0 = charLen.
+// val encodes: bits 47-43 = format, bit 42 = nibbleOff, bits 41-0 = charLen (RAM only).
 func cstringDecompress(ptr *byte, val uint64) string {
-	format := StringFormat(val >> 44)
-	nibbleOff := int((val >> 43) & 1)
-	charLen := int(val & ((1 << 43) - 1))
+	format := StringFormat(val >> scm.CStringFormatShift)
+	nibbleOff := int((val >> scm.CStringOffsetShift) & 1)
+	charLen := int(val & scm.CStringLengthMask)
+	if cs := nibbleCharsetFor(format); cs != nil {
+		return readNibbles(ptr, nibbleOff, charLen, cs)
+	}
 	switch format {
-	case FormatHexLower:
-		return readNibbles(ptr, nibbleOff, charLen, &hexLowerCharset)
-	case FormatHexUpper:
-		return readNibbles(ptr, nibbleOff, charLen, &hexUpperCharset)
-	case FormatPhone:
-		return readNibbles(ptr, nibbleOff, charLen, &phoneCharset)
-	case FormatPhoneDTMF:
-		return readNibbles(ptr, nibbleOff, charLen, &phoneDTMFCharset)
-	case FormatDecimal:
-		return readNibbles(ptr, nibbleOff, charLen, &decimalCharset)
-	case FormatDateTime:
-		return readNibbles(ptr, nibbleOff, charLen, &dateTimeCharset)
 	case FormatUUIDLower:
 		return readUUID(ptr, false)
 	case FormatUUIDUpper:
@@ -555,18 +602,16 @@ func (s *StorageString) ensureDict() string {
 // format).  Old "smallerstrings" data had 0 there (pad was zero-filled), so it
 // reads correctly as version 0.
 //
-// CAUTION: StringFormat values only go up to 10.  If a future StringFormat
-// reaches 11 or higher, the legacy sentinel (>10 for old "123456" dummy) must
-// be revisited.  New binary layout changes must use a version increment, NOT
-// a new StringFormat value.
-const storageStringVersion = 1
+// Version 2 introduces ordered nibble IDs 11..16. The body layout remains V1.
+// The historical raw sentinel is exactly ASCII '1' (49), never a format range.
+const storageStringVersion = 2
 
 // StorageString binary layout (magic byte 20 consumed by shard loader):
 //
 //	[nodict uint8]         ← 0=dict mode, 1=buffer mode
-//	[format uint8]         ← StringFormat (0..10); if >10: legacy pre-smallerstrings sentinel
+//	[format uint8]         ← StringFormat (0..16); ASCII 49: legacy raw sentinel
 //
-//	Legacy (format byte > 10, i.e. '1'=49 from old ASCII dummy "123456"):
+//	Legacy (format byte == 49, i.e. '1'=49 from old ASCII dummy "123456"):
 //	  [legacyPad 5 bytes]  ← consume remaining dummy bytes; format = FormatRaw
 //	  [count uint64] [values StorageInt] [starts StorageInt] [lens StorageInt]
 //	  [dictlen uint64] [dict bytes]
@@ -577,8 +622,8 @@ const storageStringVersion = 1
 //	  [count uint64] [values StorageInt] [starts StorageInt] [lens StorageInt]
 //	  [dictlen uint64] [dict bytes]
 //
-//	Version 1 (current):
-//	  [version uint8]      ← 1
+//	Version 1/2:
+//	  [version uint8]      ← 1 or 2
 //	  [pad 4 bytes]        ← alignment padding
 //	  [compressed uint8]   ← 0=uncompressed dict, 1=lz4-compressed dict
 //	  [count uint64] [values StorageInt] [starts StorageInt] [lens StorageInt]
@@ -588,7 +633,8 @@ const storageStringVersion = 1
 // Version history:
 //
 //	0: smallerstrings format; format byte 0..10; version in pad[0].
-//	1 (current): adds lz4-compressed dictionary support.
+//	1: adds lz4-compressed dictionary support.
+//	2 (current): ordered nibble IDs 11..16; V1 body layout.
 func (s *StorageString) Serialize(f io.Writer) {
 	binary.Write(f, binary.LittleEndian, uint8(20)) // 20 = StorageString
 	var nodict uint8 = 0
@@ -639,25 +685,31 @@ func (s *StorageString) Deserialize(f io.Reader) uint {
 	binary.Read(f, binary.LittleEndian, &formatByte)
 	// Legacy compatibility: old format wrote the ASCII string "123456" as a
 	// 6-byte dummy.  The first byte of that dummy is '1' (0x31 = 49).
-	// No valid StringFormat constant uses a value > 10, so we detect legacy
-	// by checking formatByte > 10: consume the remaining 5 legacy dummy bytes
-	// and treat the column as FormatRaw (the only format the old code supported).
-	if formatByte > 10 {
+	// Recognize the actual historical sentinel, preserving IDs above 10.
+	if formatByte == '1' {
 		var legacyPad [5]byte
 		f.Read(legacyPad[:])
 		s.format = FormatRaw
 		return s.deserializeStringBody(f)
+	}
+	if formatByte > uint8(FormatOrderedDateTime) {
+		panic(fmt.Sprintf("StorageString: unknown format %d", formatByte))
 	}
 	s.format = StringFormat(formatByte)
 	var version uint8
 	binary.Read(f, binary.LittleEndian, &version) // pad[0] repurposed as version byte
 	var pad [4]byte
 	f.Read(pad[:])
+	if formatByte >= 11 && version < 2 {
+		panic("StorageString: ordered format requires version 2")
+	}
 	switch version {
 	case 0:
 		return s.deserializeStringBody(f)
 	case 1:
 		return s.deserializeStringV1(f)
+	case 2:
+		return s.deserializeStringV2(f)
 	default:
 		panic(fmt.Sprintf("StorageString: unknown version %d", version))
 	}
@@ -703,6 +755,10 @@ func (s *StorageString) deserializeStringV1(f io.Reader) uint {
 		}
 	}
 	return uint(l)
+}
+
+func (s *StorageString) deserializeStringV2(f io.Reader) uint {
+	return s.deserializeStringV1(f)
 }
 
 func (s *StorageString) GetCachedReader() ColumnReader { return s.storageJITFunctions.reader(s) }
@@ -753,7 +809,8 @@ func (s *StorageString) decodeAt(i uint32, dict string, dictBase unsafe.Pointer)
 		byteStart := startVal
 		return scm.NewString(dict[byteStart : byteStart+lensVal])
 	case FormatHexLower, FormatHexUpper,
-		FormatPhone, FormatPhoneDTMF, FormatDecimal, FormatDateTime:
+		FormatPhone, FormatPhoneDTMF, FormatDecimal, FormatDateTime,
+		FormatOrderedHexLower, FormatOrderedHexUpper, FormatOrderedPhone, FormatOrderedPhoneDTMF, FormatOrderedDecimal, FormatOrderedDateTime:
 		nibblePos := startVal
 		nibbleOff := uint8(nibblePos & 1)
 		byteOff := nibblePos >> 1

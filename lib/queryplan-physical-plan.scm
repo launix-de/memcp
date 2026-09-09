@@ -9916,6 +9916,43 @@ opaque implementation detail in EXPLAIN PHYSICAL. */
 				(merge (list decisions (physical_recset_project_join_decisions item)))) own))
 		_ '())))
 
+/* Prepared observation values retain their producer in the compilation registry.
+For diagnostics, follow that provenance before inspecting physical operators;
+otherwise an ordered RecSet looks like an opaque session read. This builds data
+only: the returned executable plan still consumes the prepared value once. */
+(define physical_queryplan_observation_view (lambda (expr planning_session)
+	(begin
+		(define producers (make_structural_catalog (quote ast)))
+		(define preparations (planning_session "__memcp_queryplan_preparations"))
+		(if (nil? preparations) nil
+			(map (produceN (coalesceNil (preparations "count") 0)) (lambda (idx)
+				(match (preparations (concat "preparation:" idx))
+					'(decision_id producer metric) (begin
+						(define key (planner_queryplan_observation_value_key decision_id))
+						(define preparation (list decision_id producer metric))
+						(producers (planner_queryplan_observation_read_expr key) preparation)
+						(producers (planner_queryplan_observation_current_read_expr key) preparation))))))
+		/* Return dependencies with each subtree, rather than counting writes
+		while recursively walking it: input dependencies must precede consumers. */
+		(define resolve (lambda (node)
+			(match node
+				((symbol quote) _value) (list node '())
+				(cons head tail) (begin
+					(define producer (producers node))
+					(if (nil? producer)
+						(begin
+							(define children (map node resolve))
+							(list (map children car) (merge (map children cadr))))
+						(begin
+							(define input (resolve (cadr producer)))
+							(list (car input) (merge (list (cadr input) (list producer)))))))
+				_ (list node '()))))
+		(define resolved (resolve expr))
+		(define used (newsession))
+		(list (car resolved) (filter (cadr resolved) (lambda (preparation)
+			(if (used (car preparation)) false
+				(begin (used (car preparation) true) true))))))))
+
 (define compile_physical_explain_variant (lambda (reordered overrides planning_session)
 	(begin
 		(define accumulator (newsession))
@@ -9924,15 +9961,30 @@ opaque implementation detail in EXPLAIN PHYSICAL. */
 		(planning_session "__memcp_physical_overrides" overrides)
 		(define prepared (prepare_physical_queryplan reordered planning_session nil))
 		(define plan (emit_physical_queryplan prepared))
-		(define operator_family (physical_membership_operator_family plan))
-		(define optimized_plan (optimize plan))
+		(define preparations (planning_session "__memcp_queryplan_preparations"))
+		(define observation_view (if (or (nil? preparations)
+			(equal? (coalesceNil (preparations "count") 0) 0)) (list plan '())
+			(physical_queryplan_observation_view plan planning_session)))
+		(define observation_plan (if (empty_list? (cadr observation_view)) nil
+			(optimize (clone_optimizer_expression (car observation_view)))))
+		(define operator_family (physical_membership_operator_family
+			(coalesceNil observation_plan plan)))
+		/* CALIBRATE executes this returned plan directly, outside SELECT dispatch.
+		Include only its reachable preparations, in dependency order, so isolated
+		measurements include their cost and never inherit another variant's work. */
+		(define execution_plan (if (empty_list? (cadr observation_view)) plan
+			(cons (quote !begin) (merge (list
+				(map (cadr observation_view) sql_queryplan_preparation_expr)
+				(list plan))))))
+		(define optimized_plan (optimize execution_plan))
+		(define diagnostic_plan (coalesceNil observation_plan optimized_plan))
 		(define decisions (merge (list
 			(planner_physical_explain_decisions accumulator)
-			(physical_ordered_recset_decisions optimized_plan)
-			(physical_recset_project_join_decisions optimized_plan))))
+			(physical_ordered_recset_decisions diagnostic_plan)
+			(physical_recset_project_join_decisions diagnostic_plan))))
 		(planning_session "__memcp_explain_physical" nil)
 		(planning_session "__memcp_physical_overrides" nil)
-		(list optimized_plan decisions operator_family))))
+		(list optimized_plan decisions operator_family diagnostic_plan))))
 
 (define physical_decision_by_id (lambda (decisions decision_id)
 	(reduce decisions (lambda (found decision)
@@ -10084,7 +10136,7 @@ protocol callback receives only the calibration row. */
 					variant
 					(qassoc_get variant_cost "total_ns" nil)
 					(physical_operator_family_for_decision
-						(nth compilation 0) variant_decision)
+						(nth compilation 3) variant_decision)
 					suite_var)))))))
 
 (define physical_decision_has_costed_alternatives? (lambda (decision)
@@ -10152,7 +10204,7 @@ protocol callback receives only the calibration row. */
 						variant
 						(qassoc_get (qassoc_get alternative "cost" '()) "total_ns" nil)
 						(physical_operator_family_for_decision
-							(nth compilation 0) decision)
+							(nth compilation 3) decision)
 						suite_var)))))))
 
 (define explain_queryplan_physical_calibrate (lambda (query planning_session)

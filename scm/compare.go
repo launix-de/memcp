@@ -16,10 +16,8 @@ Copyright (C) 2023-2026  Carl-Philip Hänsch
 */
 package scm
 
-import (
-	"strings"
-	"unsafe"
-)
+import "unsafe"
+import "strings"
 
 // nibbleAt reads the 4-bit nibble at absolute nibble index absIdx from ptr.
 // absIdx = byte_offset*2 + nibble_within_byte (0=low nibble, 1=high nibble).
@@ -86,8 +84,8 @@ func nibbleRangeEqual(ptrA, ptrB *byte, nibOff, charLen int) bool {
 	return true
 }
 
-// cstringIsNibble reports whether the format field of a tagCString aux value
-// uses 4-bit nibble packing (one nibble per character).
+// cstringIsNibble identifies the legacy 4-bit formats handled by cstringEqual.
+// Ordered IDs are dispatched separately before this legacy path.
 // Must stay in sync with storage.StringFormat constants:
 //
 //	1=Phone, 2=HexLower, 3=HexUpper, 8=Decimal, 9=DateTime, 10=PhoneDTMF
@@ -96,22 +94,26 @@ func cstringIsNibble(format uint8) bool {
 }
 
 // cstringEqual compares two tagCString Scmers without materializing strings.
-// Algorithm: len≠len → false; fmt≠fmt → materialize; fmt=fmt → nibble or byte compare.
+// Length mismatch rejects immediately; mixed formats compare decoded prefixes;
+// matching formats compare packed nibbles or raw UUID bytes.
 func cstringEqual(a, b Scmer) bool {
 	aVal := auxVal(a.aux)
 	bVal := auxVal(b.aux)
-	aCharLen := int(aVal & ((1 << 43) - 1))
-	bCharLen := int(bVal & ((1 << 43) - 1))
+	aCharLen := int(aVal & CStringLengthMask)
+	bCharLen := int(bVal & CStringLengthMask)
 	if aCharLen != bCharLen {
 		return false
 	}
-	aFmt := uint8(aVal >> 44)
-	bFmt := uint8(bVal >> 44)
+	aFmt := uint8(aVal >> CStringFormatShift)
+	bFmt := uint8(bVal >> CStringFormatShift)
 	if aFmt != bFmt {
-		return a.String() == b.String() // different formats, materialize
+		return equalStringValues(a, b, false) // decode only until a difference
 	}
-	aNibOff := int((aVal >> 43) & 1)
-	bNibOff := int((bVal >> 43) & 1)
+	if aFmt >= 11 {
+		return equalStringValues(a, b, false)
+	}
+	aNibOff := int((aVal >> CStringOffsetShift) & 1)
+	bNibOff := int((bVal >> CStringOffsetShift) & 1)
 	if cstringIsNibble(aFmt) {
 		if aNibOff == bNibOff {
 			// Same offset: memcmp inner bytes + mask overhangs, zero allocation.
@@ -276,9 +278,9 @@ func Equal(a, b Scmer) bool {
 		if tb == tagBool {
 			return a.Bool() == b.Bool()
 		}
-		return a.String() == b.String()
+		return equalStringValues(a, b, false)
 	case tagCString:
-		return a.String() == b.String()
+		return equalStringValues(a, b, false)
 	case tagBString:
 		if tb == tagBString {
 			aLen := int(auxVal(a.aux) & ((1 << 47) - 1))
@@ -288,12 +290,12 @@ func Equal(a, b Scmer) bool {
 			}
 			return unsafe.String(a.ptr, aLen) == unsafe.String(b.ptr, bLen)
 		}
-		return a.String() == b.String()
+		return equalStringValues(a, b, false)
 	case tagBSON:
 		if tb == tagBSON {
 			return bsonRawEqual(bsonRawValue(a), bsonRawValue(b))
 		}
-		return a.String() == b.String()
+		return equalStringValues(a, b, false)
 	case tagSlice:
 		if len(a.Slice()) == 0 {
 			return !b.Bool()
@@ -322,7 +324,7 @@ func Equal(a, b Scmer) bool {
 		}
 	}
 
-	return a.String() == b.String()
+	return equalStringValues(a, b, false)
 }
 
 func assocPairs(v Scmer) ([]Scmer, bool) {
@@ -408,9 +410,9 @@ func EqualSQL(a, b Scmer) Scmer {
 		case tagFloat:
 			return NewBool(a.Float() == b.Float())
 		case tagString, tagSymbol:
-			return NewBool(strings.EqualFold(a.String(), b.String()))
+			return NewBool(equalStringValues(a, b, true))
 		case tagCString:
-			return NewBool(cstringEqual(a, b))
+			return NewBool(equalStringValues(a, b, true))
 		case tagBString:
 			aLen := int(auxVal(a.aux) & ((1 << 47) - 1))
 			bLen := int(auxVal(b.aux) & ((1 << 47) - 1))
@@ -488,7 +490,7 @@ func EqualSQL(a, b Scmer) Scmer {
 		if tb == tagBool {
 			return NewBool(a.Bool() == b.Bool())
 		}
-		return NewBool(strings.EqualFold(a.String(), b.String()))
+		return NewBool(equalStringValues(a, b, true))
 	case tagBString:
 		if tb == tagInt {
 			return NewBool(numericStringEqualsInt(a.String(), b.Int()))
@@ -507,7 +509,7 @@ func EqualSQL(a, b Scmer) Scmer {
 			}
 			return NewBool(unsafe.String(a.ptr, aLen) == unsafe.String(b.ptr, bLen))
 		}
-		return NewBool(strings.EqualFold(a.String(), b.String()))
+		return NewBool(equalStringValues(a, b, true))
 	case tagBSON:
 		if tb == tagBSON {
 			return NewBool(bsonRawEqual(bsonRawValue(a), bsonRawValue(b)))
@@ -537,7 +539,7 @@ func EqualSQL(a, b Scmer) Scmer {
 		return NewBool(a.Any() == b.Any())
 	}
 
-	return NewBool(strings.EqualFold(a.String(), b.String()))
+	return NewBool(equalStringValues(a, b, true))
 }
 
 func LessScm(a ...Scmer) Scmer    { return NewBool(Less(a[0], a[1])) }
@@ -579,6 +581,11 @@ func Less(a, b Scmer) bool {
 
 //jitgen:noinline
 func lessNonNumeric(a, b Scmer, ta, tb uint8) bool {
+	if ta == tagCString || tb == tagCString {
+		if c, ok := compareCString(a, b, false); ok {
+			return c < 0
+		}
+	}
 	switch ta {
 	case tagBSON:
 		switch tb {

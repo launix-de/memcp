@@ -666,6 +666,9 @@ review or regression protection.
 
 ## Adaptive Filter Selectivity
 
+See [the Omnestum analysis and measurement report](ADAPTIVE_SELECTIVITY.md) for
+representation limits and the persistence/RecSet follow-up.
+
 Cost consumers still take a scalar probability: local filtered row counts,
 join cardinalities, probe work and physical cost comparisons. The statistical
 representation behind that scalar depends on the predicate:
@@ -683,7 +686,8 @@ representation behind that scalar depends on the predicate:
 Feedback describes the complete predicate before physical residual pruning.
 Candidates before/after a residual filter are not interchangeable with table
 population: an index may already enforce some or all of the predicate. Full
-ordinary scans count locally at batch boundaries and publish only at successful
+ordinary scans count locally at batch boundaries; complete table-input RecSet
+scans reuse the builder's distinct result count. Both publish only at successful
 shard completion. They use the visible shard population for the complete
 predicate's denominator. No additional per-element atomics, locks, callbacks or
 histogram updates are allowed. Mutation scans and ACID snapshots do not train
@@ -692,7 +696,9 @@ this shared model.
 Each shard retains at most 64 immutable observations. One CAS publishes an EMA
 update; contention may drop an observation and must never trigger a retry loop.
 A first complete observation replaces the cold prior; subsequent observations
-use 99% previous / 1% new. Table publication merges shard rates by row population,
+use 99% previous / 1% new. Identical population/rate observations retain the
+existing immutable cells without allocation or CAS; sample counts are best-effort
+accepted updates, not execution counters. Table publication merges shard rates by row population,
 retaining the prior for missing shards. The table cache also has 64 entries and
 full keys prevent hash collisions from being interpreted as matches. Histogram
 buckets average distinct retained patterns, not their query execution counts.
@@ -700,9 +706,19 @@ The histogram is a weak workload-derived prior, not proof that a new word occurs
 It cannot cross columns, collations, or prefix/suffix/substring pattern classes.
 
 Publication uses immutable snapshots. Reads do not acquire an RWMutex or write
-LRU/access counters. Scalar generation IDs invalidate feedback after DDL/rebuild
-without retaining retired shards. No learned state changes persistence formats,
-row visibility, or query results. Existing integer scan headers remain readable;
+LRU/access counters. A changed statistics generation retains compatible table
+aggregates as `historical_scan_feedback` with confidence 0.35. A static column
+semantics fingerprint rejects hints from incompatible schemas. Shard EMA state
+still belongs to one runtime generation; no retired shards are retained.
+
+The existing schema checkpoint optionally stores a versioned `filter_feedback`
+object with at most 64 table aggregates. Reads and scans never request schema
+writes. Restart restores historical aggregates and their LIKE families without
+loading shards or inventing per-shard observations. Unknown versions and invalid
+optional hints are ignored; schemas without hints remain readable. Memory/cache
+tables omit this field. Observations after the last schema checkpoint can be
+lost; these are disposable planning hints and have no WAL/durability guarantee.
+No learned state changes row visibility, shard binary formats, or query results. Existing integer scan headers remain readable;
 new optional feedback metadata is ordinary serializable Scheme data.
 
 Published feedback cost classes participate in the existing table statistics

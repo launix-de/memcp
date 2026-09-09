@@ -16,21 +16,19 @@ Copyright (C) 2023-2026  Carl-Philip Hänsch
 */
 package scm
 
-import (
-	"bytes"
-	"encoding/base64"
-	"encoding/json"
-	"fmt"
-	"io"
-	"math"
-	"regexp"
-	"strconv"
-	"strings"
-	"sync"
-	"time"
-	"unicode/utf8"
-	"unsafe"
-)
+import "io"
+import "fmt"
+import "math"
+import "sync"
+import "time"
+import "bytes"
+import "regexp"
+import "unsafe"
+import "strconv"
+import "strings"
+import "unicode/utf8"
+import "encoding/json"
+import "encoding/base64"
 
 // Scmer is a compact tagged value container (16 bytes). !! NEVER CHANGE IT TO MORE THAN THAT, THE STRUCT SIZE IS CRUCIAL FOR PERFORMANCE
 type Scmer struct {
@@ -104,7 +102,7 @@ const (
 
 // CStringDecompress is set by the storage package to materialize a compressed string.
 // ptr points into the StorageString dictionary; val is the 48-bit aux value carrying
-// format (bits 47-44), nibbleOffset (bit 43), and charLen (bits 42-0).
+// format (bits 47-43), nibbleOffset (bit 42), and charLen (bits 41-0).
 var CStringDecompress func(ptr *byte, val uint64) string
 
 // CustomStringer maps custom tags to their serialization functions.
@@ -123,9 +121,9 @@ var CustomJSONCodecs [256]CustomJSONCodec
 
 // NewCString creates a lazy compressed-string Scmer.
 // ptr points into the StorageString dictionary (must stay alive as long as the Scmer).
-// format: storage.StringFormat value (4 bits); nibbleOff: 0 or 1; charLen: original char count.
+// format: storage.StringFormat value (5 bits); nibbleOff: 0 or 1; charLen: original char count.
 func NewCString(ptr *byte, format uint8, nibbleOff uint8, charLen int) Scmer {
-	val := uint64(format)<<44 | uint64(nibbleOff)<<43 | uint64(charLen)
+	val := uint64(format)<<CStringFormatShift | uint64(nibbleOff)<<CStringOffsetShift | uint64(charLen)
 	return Scmer{ptr, makeAux(tagCString, val)}
 }
 

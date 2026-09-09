@@ -59,8 +59,8 @@ func TestFilterFeedbackMixAndWeightedMerge(t *testing.T) {
 		t.Fatal("published observation was mutated")
 	}
 	tbl.plannerStatsToken.Store(2)
-	if _, _, known := tbl.filterSelectivity(key); known {
-		t.Fatal("rebuild/DDL generation reused stale feedback")
+	if _, source, known := tbl.filterSelectivity(key); !known || source != "historical_scan_feedback" {
+		t.Fatal("new generation must retain historical feedback with lower confidence")
 	}
 }
 
@@ -119,6 +119,9 @@ func TestFilterFeedbackConcurrentPublication(t *testing.T) {
 			for i := 0; i < 100; i++ {
 				tbl.topology.Load().shards[0].filterFeedback.observe(key, 100, int64(i))
 				tbl.publishFilterFeedback(key)
+				if _, err := json.Marshal(tbl.persistFilterFeedback()); err != nil {
+					t.Error(err)
+				}
 				value, _, known := tbl.filterSelectivity(key)
 				if known && (value < 0 || value > 1 || math.IsNaN(value)) {
 					t.Errorf("invalid concurrent estimate %v", value)
@@ -223,6 +226,7 @@ func TestFilterFeedbackUniquePointRetainsPlanStatistics(t *testing.T) {
 		schema, values, filter := feedbackTestCompile(t, body)
 		tbl.scan(nil, schema, values, cols[:1], scm.Eval(filter, &scm.Globalenv), nil,
 			scm.Globalenv.Vars[scm.Symbol("scan_count")], scm.NewInt(0), scm.Globalenv.Vars[scm.Symbol("+")], false)
+		tbl.scanRecSet(nil, schema, values, cols[:1], scm.Eval(filter, &scm.Globalenv))
 		if _, _, known := tbl.filterSelectivity(bindFilterFeedback(schema.Slice(), values)); known {
 			t.Fatal("unique point probe trained redundant selectivity")
 		}
@@ -245,5 +249,169 @@ func TestFilterFeedbackOnlyCompilationDoesNotEvaluateBoundaries(t *testing.T) {
 	physical, bound, _ := feedbackTestCompile(t, `(strlike x "%abc%" "utf8mb4_general_ci")`)
 	if bindFilterFeedback(schema.Slice(), values).key != bindFilterFeedback(physical.Slice(), bound).key {
 		t.Fatal("logical and physical filter identities differ")
+	}
+}
+
+func TestFilterFeedbackCheckpoint(t *testing.T) {
+	tbl := feedbackTestTable(1000)
+	tbl.Name = "documents"
+	tbl.publishShowColumnsSnapshot()
+	key := &filterObservation{key: "contains-word", family: "name:contains", length: 4, generation: tbl.plannerStatsToken.Load()}
+	tbl.topology.Load().shards[0].filterFeedback.observe(key, 1000, 123)
+	tbl.publishFilterFeedback(key)
+	// Maintenance changes the runtime generation before schema checkpointing.
+	tbl.plannerStatsToken.Add(1)
+	encoded, err := json.Marshal(tbl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var restored table
+	if err := json.Unmarshal(encoded, &restored); err != nil {
+		t.Fatal(err)
+	}
+	restored.plannerStatsToken.Store(9)
+	restored.publishShowColumnsSnapshot()
+	restored.restoreFilterFeedback()
+	value, source, known := restored.filterSelectivity(key)
+	if !known || value != .123 || source != "historical_scan_feedback" {
+		t.Fatalf("restored: %v %s %v; %s", value, source, known, encoded)
+	}
+	value, source, known = restored.filterSelectivity(&filterObservation{key: "unseen", family: key.family, length: 5})
+	if !known || math.Abs(value-.123*.35) > 1e-12 || source != "like_length_histogram" {
+		t.Fatalf("restored histogram: %v %s %v", value, source, known)
+	}
+	if restored.RestoredFilterFeedback != nil {
+		t.Fatal("retained decode buffer")
+	}
+	restored.Collation = "utf8mb4_bin"
+	restored.publishShowColumnsSnapshot()
+	if _, _, known := restored.filterSelectivity(key); known {
+		t.Fatal("incompatible schema reused feedback")
+	}
+	tbl.PersistencyMode = Memory
+	if tbl.persistFilterFeedback() != nil {
+		t.Fatal("persisted memory hints")
+	}
+}
+
+func TestFilterFeedbackInvalidCheckpoint(t *testing.T) {
+	for _, data := range []string{`{"version":99}`, `{"version":1,"entries":"wrong"}`, `[]`, `{"version":1,"entries":[{"key":"x","length":-1,"value":0.2,"population":100,"samples":1}]}`} {
+		tbl := feedbackTestTable(100)
+		if err := json.Unmarshal([]byte(data), &tbl.RestoredFilterFeedback); err != nil {
+			t.Fatal(err)
+		}
+		tbl.restoreFilterFeedback()
+		if _, _, known := tbl.filterSelectivity(&filterObservation{key: "x"}); known {
+			t.Fatal("invalid persisted hint accepted")
+		}
+	}
+}
+
+func TestCompleteRecSetFilterFeedback(t *testing.T) {
+	Init(scm.Globalenv)
+	tbl, cols := scanColumnCostTable(t, "recset_feedback_test", 1000)
+	schema, values, filter := feedbackTestCompile(t, `(not (equal? (mod x 10) 0))`)
+	condition := scm.Eval(scm.Optimize(filter, &scm.Globalenv, nil), &scm.Globalenv)
+	result := tbl.scanRecSet(nil, schema, values, cols[:1], condition)
+	key := bindFilterFeedback(schema.Slice(), values)
+	value, source, known := tbl.filterSelectivity(key)
+	if result.count != 900 || !known || value != .9 || source != "scan_feedback" {
+		t.Fatalf("count=%d value=%v source=%s known=%v", result.count, value, source, known)
+	}
+}
+
+func TestFilterFeedbackColdDatabaseRestart(t *testing.T) {
+	tbl, persistence := createDurabilityTestTable(t, "feedback_restart", 1000)
+	RebuildTable(tbl, true, false)
+	filter := scm.Read("feedback-restart", `(lambda (x) (< x 124))`)
+	schema, values, _ := compileScanAccess(scm.NewSlice([]scm.Scmer{scm.NewString("id")}), filter)
+	for i := range values {
+		values[i] = scm.Eval(values[i], &scm.Globalenv)
+	}
+	tbl.scanRecSet(nil, schema, values, []string{"id"}, scm.Eval(filter, &scm.Globalenv))
+	key := bindFilterFeedback(schema.Slice(), values)
+	if value, _, known := tbl.filterSelectivity(key); !known || value != .123 {
+		t.Fatalf("training %v %v", value, known)
+	}
+	RebuildTable(tbl, true, false)
+	db := newDatabase()
+	db.Name = "feedback_restart"
+	db.persistence = persistence
+	db.srState = COLD
+	db.ensureLoaded()
+	restored := db.GetTable("items")
+	if value, source, known := restored.filterSelectivity(key); !known || value != .123 || source != "historical_scan_feedback" {
+		t.Fatalf("restart %v %s %v", value, source, known)
+	}
+	for _, shard := range restored.ActiveShards() {
+		if shard.srState != COLD {
+			t.Fatal("feedback lookup loaded shard")
+		}
+		if shard.filterFeedback[filterFeedbackSlot(key.key)].Load() != nil {
+			t.Fatal("invented shard samples on restart")
+		}
+	}
+}
+
+func TestRestrictedRecSetDoesNotTrainTableFeedback(t *testing.T) {
+	Init(scm.Globalenv)
+	tbl, cols := scanColumnCostTable(t, "restricted_feedback", 1000)
+	schema, values, filter := feedbackTestCompile(t, `(< x 100)`)
+	source := tbl.scanRecSet(nil, schema, values, cols[:1], scm.Eval(filter, &scm.Globalenv))
+	restrictedSchema, restrictedValues, restrictedFilter := feedbackTestCompile(t, `(< x 50)`)
+	result := source.filterToRecSet(nil, cols[:1], scm.Eval(restrictedFilter, &scm.Globalenv), restrictedSchema, restrictedValues)
+	if result.count != 50 {
+		t.Fatalf("count %d", result.count)
+	}
+	key := bindFilterFeedback(restrictedSchema.Slice(), restrictedValues)
+	if _, _, known := tbl.filterSelectivity(key); known {
+		t.Fatal("conditional 50/100 trained global filter")
+	}
+}
+
+func TestFilterFeedbackUnchangedMeasurementDoesNotWrite(t *testing.T) {
+	tbl := feedbackTestTable(100)
+	key := &filterObservation{key: "stable", generation: tbl.plannerStatsToken.Load()}
+	shard := tbl.topology.Load().shards[0]
+	shard.filterFeedback.observe(key, 100, 90)
+	tbl.publishFilterFeedback(key)
+	beforeShard := shard.filterFeedback[filterFeedbackSlot(key.key)].Load()
+	beforeTable := tbl.filterFeedback.Load()
+	shard.filterFeedback.observe(key, 100, 90)
+	tbl.publishFilterFeedback(key)
+	if beforeShard != shard.filterFeedback[filterFeedbackSlot(key.key)].Load() || beforeTable != tbl.filterFeedback.Load() {
+		t.Fatal("identical observation dirtied a published cache cell")
+	}
+	shard.filterFeedback.observe(key, 200, 180)
+	if beforeShard == shard.filterFeedback[filterFeedbackSlot(key.key)].Load() {
+		t.Fatal("changed population was ignored")
+	}
+}
+
+func TestFilterFeedbackSameLengthWordsRetainExactRates(t *testing.T) {
+	tbl := feedbackTestTable(1000)
+	shard := tbl.topology.Load().shards[0]
+	common := &filterObservation{key: "alpha", family: "label:contains", length: 5, generation: tbl.plannerStatsToken.Load()}
+	rare := &filterObservation{key: "bravo", family: common.family, length: 5, generation: common.generation}
+	shard.filterFeedback.observe(common, 1000, 900)
+	tbl.publishFilterFeedback(common)
+	shard.filterFeedback.observe(rare, 1000, 10)
+	tbl.publishFilterFeedback(rare)
+	for i := 0; i < 20; i++ {
+		shard.filterFeedback.observe(common, 1000, 900)
+		tbl.publishFilterFeedback(common)
+	}
+	for key, want := range map[*filterObservation]float64{common: .9, rare: .01} {
+		if value, source, known := tbl.filterSelectivity(key); !known || value != want || source != "scan_feedback" {
+			t.Fatalf("exact word %s: %v %s %v", key.key, value, source, known)
+		}
+	}
+	unknown := &filterObservation{key: "cider", family: common.family, length: 5}
+	if value, source, known := tbl.filterSelectivity(unknown); !known || math.Abs(value-.455) > 1e-12 || source != "like_length_histogram" {
+		t.Fatalf("unseen word %v %s %v", value, source, known)
+	}
+	unknown.family = "different-column:contains"
+	if _, _, known := tbl.filterSelectivity(unknown); known {
+		t.Fatal("histogram crossed columns")
 	}
 }
