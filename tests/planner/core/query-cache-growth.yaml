@@ -22,6 +22,10 @@ setup:
   - sql: "INSERT INTO cg_rows VALUES (1, 'needle-a'), (2, 'needle-b'), (3, 'other-a'), (4, 'other-b')"
   - scm: "(rebuild (table \"memcp-tests\" \"cg_rows\") true false)"
 test_cases:
+  - name: "Literal parameterizer compiles natively"
+    scm: |
+      (if (equal? (jit? (jit parameterize_sql_select_literals)) (jit-enabled?))
+        true (error "literal parameterizer fell back to the interpreter"))
   - name: "Same cached LIKE plan recompiles after cardinality growth"
     scm: |
       (begin
@@ -84,6 +88,22 @@ test_cases:
         (if (and (equal? normalized "SELECT id FROM items WHERE id >= ? AND label = ? ORDER BY id LIMIT ? OFFSET ?")
           (equal? bindings (list 12 "open" 5 2)) (equal? shape_hash (fnv_hash normalized)))
           "ok" (error (concat "parameterization mismatch: " normalized " / " bindings))))
+    expect:
+      data: ["ok"]
+  - name: "Uncached lexical parameterization batch"
+    warmup: 3
+    timing_samples: 7
+    threshold_ms: 100
+    scm: |
+      (reduce (produceN 100) (lambda (_ idx)
+        (match (parameterize_sql_select_literals
+          "SELECT id FROM items WHERE id >= 12 AND label = 'open' ORDER BY id LIMIT 5 OFFSET 2")
+          '(normalized bindings shape_hash)
+          (if (and
+            (equal? normalized "SELECT id FROM items WHERE id >= ? AND label = ? ORDER BY id LIMIT ? OFFSET ?")
+            (equal? bindings (list 12 "open" 5 2))
+            (equal? shape_hash (fnv_hash normalized)))
+            "ok" (error "parameterization batch changed the query")))) nil)
     expect:
       data: ["ok"]
   - name: "Literal parameterization preserves comments and identifiers"

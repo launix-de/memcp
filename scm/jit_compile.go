@@ -2921,6 +2921,20 @@ func jitGeneratedEmitterInline(ctx *JITContext, declaration *Declaration, args [
 	if !jitEnabled || declaration == nil || declaration.Type == nil {
 		return false
 	}
+	// Dynamic callback argument slices cannot inline a compiler-only lambda:
+	// their SerialProc path needs a real callable. Materialize callbacks once
+	// at the declaration boundary instead of abandoning the enclosing JIT proc.
+	for index, arg := range args {
+		if arg.Loc == LocLambdaTemplate {
+			if param := jitDeclarationParam(declaration, index); param != nil && param.Kind == "func" {
+				for _, input := range param.Params {
+					if input != nil && input.Variadic {
+						return false
+					}
+				}
+			}
+		}
+	}
 	inline := declaration.RetainsCallArgs
 	knownTypes, knownShapes, knownArgs := 0, 0, 0
 	hasVirtualArgs := false
