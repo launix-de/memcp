@@ -1069,21 +1069,28 @@ func Init(en scm.Env) {
 				{Kind: "list", Label: "filterColumns", Description: "physical columns corresponding to the filter lambda parameters"},
 				{Kind: "list", Label: "filterExpression", Description: "unevaluated filter lambda AST"},
 				{Kind: "bool", Label: "feedback_only", Description: "compile only safe statistical identity metadata, without access boundaries", Optional: true},
+				{Kind: "bool", Label: "bind_values", Description: "evaluate value expressions now (default true); false returns their ASTs for compile-time guard generation", Optional: true},
 			},
 			Return: &scm.TypeDescriptor{Kind: "list", Description: "pair of static schema and bound runtime values"},
 		},
 	}, func(code []scm.Scmer, caller *scm.Env) scm.Scmer {
-		if len(code) < 2 || len(code) > 3 {
-			panic("compile_scan_access expects filter columns, a filter expression and optional feedback_only")
+		if len(code) < 2 || len(code) > 4 {
+			panic("compile_scan_access expects filter columns, a filter expression, optional feedback_only and bind_values")
 		}
 		columns := scm.Eval(code[0], caller)
 		filter := scm.Eval(code[1], caller)
 		var schema scm.Scmer
 		var valueExprs []scm.Scmer
-		if len(code) == 3 && scm.ToBool(scm.Eval(code[2], caller)) {
+		if len(code) >= 3 && scm.ToBool(scm.Eval(code[2], caller)) {
 			schema, valueExprs = compileFilterFeedbackAccess(columns, filter)
 		} else {
 			schema, valueExprs, _ = compileScanAccess(columns, filter)
+		}
+		// A cached guard must bind the executing request, not the values seen
+		// while compiling it. Return the same schema and its binding recipe;
+		// never run access compilation or a scan from the runtime guard.
+		if len(code) == 4 && !scm.ToBool(scm.Eval(code[3], caller)) {
+			return scm.NewSlice([]scm.Scmer{schema, scm.NewSlice(valueExprs)})
 		}
 		values := make([]scm.Scmer, len(valueExprs))
 		for i, expression := range valueExprs {

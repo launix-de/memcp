@@ -5,6 +5,10 @@ metadata:
   description: "Unrelated learned predicates must not invalidate cached ordered plans"
   isolated: true
 setup:
+  - sql: "DROP TABLE IF EXISTS qfi_single"
+  - sql: "CREATE TABLE qfi_single (id INT PRIMARY KEY) ENGINE=sloppy"
+  - sql: "INSERT INTO qfi_single VALUES (999)"
+  - scm: '(rebuild (table "memcp-tests" "qfi_single") true false)'
   - sql: "DROP TABLE IF EXISTS qfi_document"
   - sql: "CREATE TABLE qfi_document (id INT PRIMARY KEY, label TEXT) ENGINE=sloppy"
   - scm: |
@@ -13,6 +17,70 @@ setup:
           (map (produceN 1000) (lambda (i) (list i (if (< i 10) "needle" "ordinary")))))
         (rebuild (table "memcp-tests" "qfi_document") true false))
 test_cases:
+  - name: "Access templates retain runtime binding expressions without evaluating them"
+    scm: |
+      (begin
+        (define access (compile_scan_access '("id")
+          (list 'lambda (list 'id) (list '> 'id (list 'session "unbound_guard_value"))) true false))
+        (if (and (not (empty_list? (car access)))
+          (equal? (cadr access) (list (list 'session "unbound_guard_value"))))
+          true (error "access template froze or lost its binding expression")))
+    expect:
+      data: [true]
+  - name: "Runtime range bindings reuse a provably constant singleton cost regime"
+    scm: |
+      (begin
+        (define cache (newcachemap))
+        (define sess (newsession))
+        (sess "username" "root")
+        (sess "schema" "memcp-tests")
+        (define q "SELECT a.id,b.label FROM qfi_single a LEFT JOIN qfi_document b ON b.id=a.id WHERE a.id > @cutoff ORDER BY a.id LIMIT 2")
+        (define rows (newsession))
+        (define run (lambda (cutoff)
+          (begin
+            (sess "cutoff" cutoff)
+            (rows "n" 0)
+            (sql_execute_formula sess nil
+              (cached_parse cache (list parse_sql) "memcp-tests" q nil "root" sess true)
+              (lambda (_row) (rows "n" (+ (rows "n") 1)))
+              (lambda (_fields) nil))
+            (rows "n"))))
+        (define first (run 998))
+        (define entry (car (cache (car (cache)))))
+        (define before (count (entry "variants")))
+        (define second (run 999))
+        (define third (run 1000))
+        (define null_result (run nil))
+        (if (and (equal? first 1) (equal? second 0) (equal? third 0)
+          (equal? null_result 0)
+          (equal? before (count (entry "variants")))) true
+          (error (concat "runtime binding must change results without recompiling an unchanged choice: "
+            first "/" second "/" third " variants=" before " -> "
+            (count (entry "variants")) " guard="
+            (serialize (car (car (entry "variants"))))))))
+    expect:
+      data: [true]
+  - name: "A binding shared by a filter and LIMIT still controls execution"
+    scm: |
+      (begin
+        (define cache (newcachemap))
+        (define sess (newsession))
+        (sess "username" "root")
+        (sess "schema" "memcp-tests")
+        (define q "SELECT a.id,b.label FROM qfi_single a LEFT JOIN qfi_document b ON b.id=a.id WHERE a.id > @bound ORDER BY a.id LIMIT @bound")
+        (define rows (newsession))
+        (define run (lambda (bound)
+          (begin
+            (sess "bound" bound)
+            (rows "n" 0)
+            (sql_execute_formula sess nil
+              (cached_parse cache (list parse_sql) "memcp-tests" q nil "root" sess true)
+              (lambda (_row) (rows "n" (+ (rows "n") 1))) (lambda (_fields) nil))
+            (rows "n"))))
+        (if (equal? (list (run 998) (run 0) (run 999)) (list 1 0 0))
+          true (error "cost-only guard hid a binding needed by LIMIT")))
+    expect:
+      data: [true]
   - name: "Unrelated learned LIKE leaves an ordered self-join cache variant reusable"
     scm: |
       (begin
@@ -75,5 +143,35 @@ test_cases:
             " guard=" (serialize (car (car (entry "variants"))))))))
     expect:
       data: [true]
+  - name: "Growth invalidates the singleton dominance proof"
+    scm: |
+      (begin
+        (define cache (newcachemap))
+        (define sess (newsession))
+        (sess "username" "root")
+        (sess "schema" "memcp-tests")
+        (sess "cutoff" -1)
+        (define q "SELECT a.id,b.label FROM qfi_single a LEFT JOIN qfi_document b ON b.id=a.id WHERE a.id > @cutoff ORDER BY a.id LIMIT 2")
+        (define rows (newsession))
+        (define run (lambda ()
+          (begin
+            (rows "n" 0)
+            (sql_execute_formula sess nil
+              (cached_parse cache (list parse_sql) "memcp-tests" q nil "root" sess true)
+              (lambda (_row) (rows "n" (+ (rows "n") 1))) (lambda (_fields) nil))
+            (rows "n"))))
+        (define first (run))
+        (define entry (car (cache (car (cache)))))
+        (define before (count (entry "variants")))
+        (insert (table "memcp-tests" "qfi_single") '("id")
+          (map (produceN 256) (lambda (i) (list i))))
+        (rebuild (table "memcp-tests" "qfi_single") true false)
+        (define second (run))
+        (if (and (equal? first 1) (equal? second 2)
+          (> (count (entry "variants")) before)) true
+          (error "singleton plan survived growth without rechecking its assumptions")))
+    expect:
+      data: [true]
 cleanup:
+  - sql: "DROP TABLE IF EXISTS qfi_single"
   - sql: "DROP TABLE IF EXISTS qfi_document"

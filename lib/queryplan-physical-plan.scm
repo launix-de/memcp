@@ -5177,12 +5177,17 @@ until the caller has selected this physical alternative. */
 						(combine_where_terms (nth local_terms index) true))
 					(if (equal? local_condition true)
 						base_rows
+						/* The clamped estimate is identically one for a population
+						of at most one row. Sampling cannot affect this cost, so do
+						not introduce a dependency on an irrelevant session value.
+						Table-statistics guards still protect against data growth. */
+						(if (<= base_rows 1) 1
 						(begin
 							(define estimate
 								(planner_source_filter_estimate src local_condition 512
 									planning_tx planning_session))
 							(max 1 (planner_estimated_matching_rows estimate
-								base_rows base_rows))))))) nil))
+								base_rows base_rows)))))))) nil))
 		/* A local driver predicate is only the first acceptance stage. Every
 		later input may reject the driver row as well, so price ordered braking
 		from the product of the independently estimated inner selectivities.

@@ -5,6 +5,10 @@ metadata:
   description: "Warm ordered queries amid unrelated bound-predicate learning"
   isolated: true
 setup:
+  - sql: "DROP TABLE IF EXISTS qfc_clock"
+  - sql: "CREATE TABLE qfc_clock (id INT PRIMARY KEY) ENGINE=sloppy"
+  - sql: "INSERT INTO qfc_clock VALUES (999)"
+  - scm: '(rebuild (table "memcp-tests" "qfc_clock") true false)'
   - sql: "DROP TABLE IF EXISTS qfc_document"
   - sql: "CREATE TABLE qfc_document (id INT PRIMARY KEY, category INT) ENGINE=sloppy"
   - scm: |
@@ -14,6 +18,29 @@ setup:
         (rebuild (table "memcp-tests" "qfc_document") true false)
         (globalvars "qfc_sequence" 1000))
 test_cases:
+  - name: "Changing runtime cutoffs retain a singleton ordered plan"
+    performance_rows: 1000
+    threshold_ms: 1000
+    scm: |
+      (begin
+        (define cache (newcachemap))
+        (define sess (newsession))
+        (sess "username" "root")
+        (sess "schema" "memcp-tests")
+        (define q "SELECT a.id,b.category,c.category,d.category FROM qfc_clock a LEFT JOIN qfc_document b ON b.id=a.id LEFT JOIN qfc_document c ON c.id=a.id LEFT JOIN qfc_document d ON d.id=a.id WHERE a.id > @cutoff ORDER BY a.id LIMIT 72")
+        (define rows (newsession))
+        (rows "n" 0)
+        (reduce (produceN 16) (lambda (_ i)
+          (begin
+            (sess "cutoff" (+ 998 i))
+            (sql_execute_formula sess nil
+              (cached_parse cache (list parse_sql) "memcp-tests" q nil "root" sess true)
+              (lambda (_row) (rows "n" (+ (rows "n") 1)))
+              (lambda (_fields) nil)))) nil)
+        (if (equal? (rows "n") 1) true (error "runtime cutoff changed query results")))
+    expect:
+      rows: 1
+      result_contains: ["true"]
   - name: "Ordered cache reuse survives a sequence of unrelated learned filters"
     performance_rows: 1000
     threshold_ms: 1000
@@ -45,4 +72,5 @@ test_cases:
       rows: 1
       result_contains: ["true"]
 cleanup:
+  - sql: "DROP TABLE IF EXISTS qfc_clock"
   - sql: "DROP TABLE IF EXISTS qfc_document"
