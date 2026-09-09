@@ -350,8 +350,9 @@ bounded scalar metadata; this lookup never scans, loads columns or builds indexe
 								(map cols (lambda (col) (symbol (concat (source_alias src) "." col))))
 								(lower_column_expr_for_alias src expr)))
 							(define access (compile_scan_access cols callback true))
-							(table_filter_selectivity (table (source_schema src) (source_relation src))
-								(nth access 0) (map (nth access 1) (lambda (value) (eval value))))))
+							(scan_selectivity_estimate nil (table (source_schema src) (source_relation src))
+								(nth access 0) (map (nth access 1) (lambda (value) (eval value)))
+								cols (eval callback) (int 0))))
 						(lambda (_e) nil))))))))
 
 (define join_optimizer_expr_selectivity_estimate (lambda (sources default_alias expr)
@@ -3240,6 +3241,8 @@ logical IR: it samples once per request and is shared by every guard binding. */
 
 (define planner_merge_estimate_coverage (lambda (estimates)
 	(begin
+		(define has_feedback (reduce estimates (lambda (found estimate)
+			(or found (equal? (planner_estimate_coverage estimate) (quote feedback)))) false))
 		(define has_lower (reduce estimates (lambda (found estimate)
 			(or found (equal? (planner_estimate_coverage estimate) (quote lower_bound)))) false))
 		(define has_upper (reduce estimates (lambda (found estimate)
@@ -3249,10 +3252,14 @@ logical IR: it samples once per request and is shared by every guard binding. */
 		/* Adding UNION branch cardinalities preserves a one-sided bound only when
 		every inexact branch points in the same direction. Mixed bounds describe an
 		interval, while a sampled branch remains a sample of the complete sum. */
-		(if (or has_sampled (and has_lower has_upper))
-			(quote sampled)
-			(if has_lower (quote lower_bound)
-				(if has_upper (quote upper_bound) (quote exact)))))))
+		/* A learned rate is neither a fresh exact observation nor a one-sided
+		bound. UNION must preserve that provenance instead of upgrading it to an
+		exact count merely because no branch reports a sampling limit. */
+		(if has_feedback (quote feedback)
+			(if (or has_sampled (and has_lower has_upper))
+				(quote sampled)
+				(if has_lower (quote lower_bound)
+					(if has_upper (quote upper_bound) (quote exact))))))))
 
 (define planner_query_block_input_rows (lambda (block)
 	(planner_add_estimates (map (qb_sources block) planner_source_row_count))))
