@@ -1901,6 +1901,15 @@ class SQLTestRunner:
             for i, row in enumerate(expect["data"]):
                 if i >= len(results):
                     return False
+                # /scm returns JSON values, not necessarily SQL row objects.
+                # Keep these cases in the measured A/B path and validate the
+                # value instead of bypassing assertions or calling .items().
+                if not isinstance(row, dict):
+                    if type(row) is not type(results[i]) or row != results[i]:
+                        return False
+                    continue
+                if not isinstance(results[i], dict):
+                    return False
                 for k, v in row.items():
                     if isinstance(v, float) and isinstance(results[i].get(k), (int, float)):
                         if abs(results[i][k] - v) > 0.01:

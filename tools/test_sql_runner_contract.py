@@ -101,6 +101,21 @@ class PerformanceScaleContractTest(unittest.TestCase):
         self.assertFalse(result)
         self.assertEqual(post.call_count, 2)
 
+    def test_scm_scalar_data_expectations_are_validated(self) -> None:
+        runner = SQLTestRunner("http://localhost:1")
+        for expected, actual, wanted in [
+            ("ok", "ok", True), ("ok", "wrong", False),
+            (True, True, True), (True, 1, False),
+            (20, 20, True), (20, 19, False),
+            (None, None, True), ([1, 2], [1, 2], True),
+            ({"n": 1}, "not a row", False),
+        ]:
+            with self.subTest(expected=expected, actual=actual):
+                response = SimpleNamespace(status_code=200, text="value", headers={})
+                self.assertEqual(runner.validate_expectation(
+                    {"scm": "value", "expect": {"data": [expected]}},
+                    response, [actual]), wanted)
+
     def test_ci_workload_seed_initializes_safe_rows(self) -> None:
         seed = Path(__file__).resolve().parents[1] / "tests/performance/ci-workloads.json"
         with tempfile.TemporaryDirectory() as tmp:
