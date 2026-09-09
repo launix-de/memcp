@@ -307,7 +307,11 @@ current request bindings. Quoted planner/catalog payloads remain data. */
 			(sql_queryplan_guard_references_symbol? head target)
 			(reduce tail (lambda (found item)
 				(or found (sql_queryplan_guard_references_symbol? item target))) false))
-		_ (equal? expr target))))
+		/* equal? admits truth-value coercion: true compares equal to a symbol.
+		Liveness is syntactic, not SQL/SCM value equality. Without this type
+		check a literal true keeps every discarded cost binding alive, executing
+		unused estimator calls on each cached query. */
+		_ (and (symbol? expr) (equal? expr target)))))
 
 /* Avoid degenerate generated `and` forms while retaining normal short-circuit
 semantics for multiple independent cache assumptions. */

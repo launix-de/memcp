@@ -1,0 +1,41 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: "1.0"
+  description: "Ordered unique-key probes retain predicates consumed by access boundaries"
+setup:
+  - sql: "DROP TABLE IF EXISTS olb_driver"
+  - sql: "DROP TABLE IF EXISTS olb_lookup"
+  - sql: "CREATE TABLE olb_driver (id INT PRIMARY KEY, label TEXT)"
+  - sql: "CREATE TABLE olb_lookup (id INT PRIMARY KEY, enabled INT)"
+  - sql: "INSERT INTO olb_lookup VALUES (999, 1)"
+  - scm: |
+      (begin
+        (insert (table "memcp-tests" "olb_driver") '("id" "label")
+          (map (produceN 1000) (lambda (i) (list i "ordinary"))))
+        (rebuild (table "memcp-tests" "olb_driver") true false)
+        (rebuild (table "memcp-tests" "olb_lookup") true false))
+test_cases:
+  - name: "Exclusive lower bound rejects an otherwise matching unique lookup"
+    sql: "SELECT a.id FROM olb_lookup a JOIN olb_driver b ON b.id=a.id WHERE a.id > 999 AND b.label IS NOT NULL ORDER BY a.id LIMIT 2"
+    expect:
+      rows: 0
+  - name: "Inclusive lower bound preserves the matching unique lookup"
+    sql: "SELECT a.id FROM olb_lookup a JOIN olb_driver b ON b.id=a.id WHERE a.id >= 999 AND b.label IS NOT NULL ORDER BY a.id LIMIT 2"
+    expect:
+      data: [{id: 999}]
+  - name: "A remaining residual does not replace a consumed upper bound"
+    sql: "SELECT a.id FROM olb_lookup a JOIN olb_driver b ON b.id=a.id WHERE a.id < 999 AND a.enabled + 1 = 2 AND b.label IS NOT NULL ORDER BY a.id LIMIT 2"
+    expect:
+      rows: 0
+  - name: "A non-key equality still rejects the unique batch lookup"
+    sql: "SELECT a.id FROM olb_lookup a JOIN olb_driver b ON b.id=a.id WHERE a.enabled=0 AND b.label IS NOT NULL ORDER BY a.id LIMIT 2"
+    expect:
+      rows: 0
+  - name: "A matching non-key equality preserves the unique batch lookup"
+    sql: "SELECT a.id FROM olb_lookup a JOIN olb_driver b ON b.id=a.id WHERE a.enabled=1 AND b.label IS NOT NULL ORDER BY a.id LIMIT 2"
+    expect:
+      data: [{id: 999}]
+cleanup:
+  - sql: "DROP TABLE IF EXISTS olb_lookup"
+  - sql: "DROP TABLE IF EXISTS olb_driver"

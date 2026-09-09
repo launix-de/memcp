@@ -336,12 +336,16 @@ and barrier ownership come from the pre-normalization query block. */
 /* Feedback keys describe the complete table-local logical predicate, before
 physical residual pruning. Compiling its access metadata here only canonicalizes
 bounded scalar metadata; this lookup never scans, loads columns or builds indexes. */
-(define planner_record_filter_feedback_guard (lambda (src access values planning_session)
+(define planner_record_filter_feedback_guard (lambda (src columns callback planning_session)
 	(begin
 		(define planning_session (planner_effective_session planning_session))
 		(if (or (nil? planning_session)
-			(nil? (planning_session "__memcp_queryplan_guard_conditions"))
-			(empty_list? (car access))
+			(nil? (planning_session "__memcp_queryplan_guard_conditions"))) nil
+		(begin
+		/* Keep the predicate unbound while generating metadata. Its slots must
+		read the executing session, not a literal/memo key from compilation. */
+		(define access (compile_scan_access columns callback true false))
+		(if (or (empty_list? (car access))
 			(not (list? (car (car access))))) nil
 			(begin
 				/* Guard precisely the metadata input, including an unknown result.
@@ -351,7 +355,7 @@ bounded scalar metadata; this lookup never scans, loads columns or builds indexe
 				Budget zero is essential: guards never sample or run a filter. */
 				(define read_expr (list (quote scan_selectivity_estimate) nil
 					(list (quote table) (source_schema src) (source_relation src))
-					(list (quote quote) (car access)) (list (quote quote) values)
+					(list (quote quote) (car access)) (cons (quote list) (cadr access))
 					(list (quote quote) '()) (list (quote lambda) '() true) 0))
 				/* Provenance matters too: a prior from other LIKE words may be
 				resampled, whereas a same-predicate measurement need not be. Read
@@ -361,7 +365,8 @@ bounded scalar metadata; this lookup never scans, loads columns or builds indexe
 						(list (quote qassoc_get) (quote estimate) (list (quote quote) (quote value)) nil)
 						(list (quote qassoc_get) (quote estimate) (list (quote quote) (quote source)) nil))) read_expr))
 				(planner_record_guard_condition
-					(list (quote equal?) value_expr (list (quote quote) (eval value_expr))) planning_session))))))
+					(list (quote equal?) value_expr (list (quote quote)
+						(eval (planner_bind_session_values value_expr planning_session)))) planning_session))))))))
 
 (define planner_filter_feedback (lambda (sources default_alias expr planning_session)
 	(begin
@@ -375,11 +380,11 @@ bounded scalar metadata; this lookup never scans, loads columns or builds indexe
 							(define cols (extract_columns_for_alias src expr))
 							(define callback (list (quote lambda)
 								(map cols (lambda (col) (symbol (concat (source_alias src) "." col))))
-								(planner_bind_session_values (lower_column_expr_for_alias src expr) planning_session)))
-							(define access (compile_scan_access cols callback true))
+								(lower_column_expr_for_alias src expr)))
+							(define access (compile_scan_access cols
+								(planner_bind_session_values callback planning_session) true))
 							(define values (map (nth access 1) (lambda (value) (eval value))))
-							(planner_record_session_value_guards expr planning_session)
-							(planner_record_filter_feedback_guard src access values planning_session)
+							(planner_record_filter_feedback_guard src cols callback planning_session)
 							(scan_selectivity_estimate nil (table (source_schema src) (source_relation src))
 								(nth access 0) values
 								cols (eval callback) 0)))
@@ -429,7 +434,7 @@ bounded scalar metadata; this lookup never scans, loads columns or builds indexe
 (define planner_quoted_value (lambda (value)
 	(list (quote quote) value)))
 
-(define join_optimizer_source_rows_expr (lambda (stages sources default_alias graph src)
+(define join_optimizer_source_rows_expr (lambda (stages sources default_alias graph src planning_session)
 	(begin
 		(define local_predicates
 			(join_optimizer_local_predicates graph (source_alias src)))
@@ -458,19 +463,42 @@ bounded scalar metadata; this lookup never scans, loads columns or builds indexe
 				(planner_quoted_value local_sources)
 				default_alias
 				(planner_quoted_value local_predicates)
-				(planner_quoted_value src) (quote session))))))
+				(planner_quoted_value src) (quote session)) planning_session))))
 
-(define join_optimizer_selectivity_expr (lambda (sources default_alias predicate)
+(define join_optimizer_selectivity_expr (lambda (sources default_alias predicate planning_session)
 	(begin
 		(define aliases (join_hypergraph_expr_aliases
 			default_alias (source_aliases sources) predicate))
 		(define local_sources (filter sources (lambda (src)
 			(contains? aliases (source_alias src)))))
-		(planner_guard_runtime_binding
-			(list (quote join_optimizer_expr_selectivity)
-				(planner_quoted_value local_sources)
-				default_alias
-				(planner_quoted_value predicate) (quote session))))))
+		(define src (if (single_source? local_sources) (car local_sources) nil))
+		(define prior (join_optimizer_expr_prior_estimate sources default_alias predicate planning_session))
+		(define fallback (planner_estimate_planning_value prior
+			(if (equal? (qassoc_get prior (quote source) nil) (quote range_unknown))
+				0.3333333333333333 0.1)))
+		/* Emit the metadata read once, not the optimizer/access compiler itself.
+		The predicate shape and column statistics are compile-time inputs; only
+		its scalar value slots are rebound on a cache lookup. */
+		/* A catalog-backed virtual source can have a named relation without a
+		storage table. It has no scan feedback: retain the prior, never emit a
+		storage metadata call for a nonexistent handle (or materialize its rows
+		inside a guard). Semantic source validation still belongs to lowering. */
+		(if (or (not (source_is_base_table? src))
+			(nil? (planner_table_statistics (source_schema src) (source_relation src)))) fallback
+			(begin
+				(define cols (extract_columns_for_alias src predicate))
+				(define callback (list (quote lambda)
+					(map cols (lambda (col) (symbol (concat (source_alias src) "." col))))
+					(lower_column_expr_for_alias src predicate)))
+				(define access (compile_scan_access cols callback true false))
+				(if (empty_list? (car access)) fallback
+					(planner_guard_runtime_binding
+						(list (quote qassoc_get)
+							(list (quote scan_selectivity_estimate) nil
+								(list (quote table) (source_schema src) (source_relation src))
+								(planner_quoted_value (car access)) (cons (quote list) (cadr access))
+								(planner_quoted_value '()) (list (quote lambda) '() true) 0)
+							(planner_quoted_value (quote value)) fallback) planning_session))))))))
 
 (define join_optimizer_alias_subset? (lambda (required available)
 	(reduce (coalesceNil required '()) (lambda (ok alias)
@@ -546,7 +574,7 @@ cost-reordered around the complete relation unit. */
 				(if (or singleton fixed_cardinality) 1
 					(join_optimizer_source_rows stages sources default_alias graph src planning_session))
 				(if (or singleton fixed_cardinality) 1
-					(join_optimizer_source_rows_expr stages sources default_alias graph src))
+					(join_optimizer_source_rows_expr stages sources default_alias graph src planning_session))
 				(if (join_optimizer_inner_source? stages src) (quote inner) (quote left-outer))
 				(join_optimizer_outer_requirements stages relation_units sources default_alias alias_index src)
 				(if (group_stage? stage) (stage_result_max_rows_per_partition stage) nil)
@@ -573,7 +601,7 @@ cost-reordered around the complete relation unit. */
 					(qassoc_get entry (quote owner) nil)
 					predicate
 					barrier_owner
-					(join_optimizer_selectivity_expr sources default_alias predicate)))
+					(join_optimizer_selectivity_expr sources default_alias predicate planning_session)))
 				metadata)))))
 
 (define join_optimizer_metadata_predicates (lambda (sources default_alias graph aliases planning_session)
@@ -1786,8 +1814,8 @@ particular star shape. */
 
 /* Table dependencies cover rebuild statistics; individual metadata reads guard
 their own bound filter estimates instead of invalidating on unrelated learning.
-Every local filter may now depend on a bound value; record all session-value
-dependencies, not only text-pattern parameters. */
+Guard cost inputs, not the SQL values used only to obtain those inputs. Exact
+value guards remain necessary for sampled or executable specialization. */
 (define join_order_record_cost_dependencies (lambda (sources nodes predicates planning_session)
 	(begin
 		(planner_record_table_statistics_guards sources planning_session)
@@ -1803,8 +1831,13 @@ dependencies, not only text-pattern parameters. */
 						(cadr node)) planning_session))) nil)
 		(reduce predicates (lambda (_ predicate)
 			(begin
-				(define expr (join_order_pred_expr predicate))
-				(planner_record_session_value_guards expr planning_session))) nil))))
+				/* A changed SQL value is not itself a changed cost input. Keep the
+				chosen input regime using the compiled metadata expression. This is
+				still conservative where no crossover inequality is available, but
+				does not force recompilation for every clock tick/range threshold. */
+				(planner_record_guard_condition
+					(list (quote equal?) (join_order_pred_selectivity_expr predicate)
+						(join_order_pred_selectivity predicate)) planning_session))) nil))))
 
 /* Every subset containing one vertex and any selection of its regular-edge
 neighbors is connected. A degree d therefore proves at least 2^d connected
@@ -2446,11 +2479,15 @@ the lowerer can cost it. */
 			stage_catalog sources default_alias graph src planning_session))
 		(define base_rows (planner_source_row_count src))
 		(define condition (join_optimizer_source_local_condition graph src))
+		/* max(1, matches) is constant when the entire population is <= 1.
+		This is dominance, not a selective-filter heuristic: do not sample or
+		bind a changing parameter for a choice it cannot influence. */
+		(if (and (number? base_rows) (<= base_rows 1)) 1
 		(if (or (not (number? base_rows)) (equal? condition true))
 			fallback
 			(begin
 				(define estimate (planner_source_filter_estimate src condition 512 tx planning_session))
-				(max 1 (planner_estimated_matching_rows estimate base_rows fallback)))))))
+				(max 1 (planner_estimated_matching_rows estimate base_rows fallback))))))))
 
 (define join_optimizer_ordered_driver_work (lambda (sources base_row_catalog filtered_row_catalog planned target)
 	(begin
@@ -2895,7 +2932,10 @@ floor avoids pretending that an unseen word is impossible. */
 					(define access (compile_scan_access filtercols filter_expr))
 					(define values (map (nth access 1) (lambda (value_expr) (eval value_expr))))
 					(planner_record_session_value_guards condition planning_session)
-					(planner_record_filter_feedback_guard src access values planning_session)
+					(planner_record_filter_feedback_guard src filtercols
+						(list (quote lambda)
+							(map filtercols (lambda (col) (symbol (concat alias "." col))))
+							(lower_column_expr_for_alias src condition)) planning_session)
 					(define estimate (scan_selectivity_estimate
 						tx
 						(table (source_schema src) (source_relation src))
@@ -2903,7 +2943,7 @@ floor avoids pretending that an unseen word is impossible. */
 						values
 						filtercols
 						(eval filter_expr)
-						max_rows))
+							max_rows))
 					(define text_prior (expr_text_selectivity_prior condition))
 					(define enriched (if (number? text_prior)
 						(qassoc_set estimate (quote fallback_selectivity) text_prior)
@@ -6664,17 +6704,21 @@ remain ordinary residual predicates. */
 			ir
 			(make_ir (ir_kind ir) outer_block all_stages (ir_context_of ir) (ir_return ir))))))
 
-/* Partitioning on a complete non-null unique key cannot reduce the number of
+/* Partitioning at most one input row, or a complete non-null unique key,
+cannot reduce the number of
 stage probes: each surviving row still owns one group. The partition alternative
 adds strictly positive startup/build cost to the same probes, independently of
 selectivity. Prove that dominance before sampling, and do not install a runtime
 sampling guard for a choice that no cardinality change can reverse. */
 (define aggregate_pushdown_identity_partition? (lambda (driver columns)
-	(reduce (source_unique_key_sets driver) (lambda (found key)
+	(begin
+		(define rows (planner_source_row_count driver))
+		(or (and (number? rows) (<= rows 1))
+		(reduce (source_unique_key_sets driver) (lambda (found key)
 		(or found (and (not (empty_list? key))
 			(reduce key (lambda (complete col)
 				(and complete (and (contains? columns col)
-					(source_column_guaranteed_nonnull? driver col)))) true)))) false)))
+					(source_column_guaranteed_nonnull? driver col)))) true)))) false)))))
 
 (define aggregate_pushdown_logical (lambda (ir planning_session tx)
 	(begin

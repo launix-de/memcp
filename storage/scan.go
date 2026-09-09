@@ -1618,7 +1618,13 @@ func (t *table) scanWithBatchFrom(currentTx *TxContext, source *recSet, accessSc
 	}
 	if requiredAccess.len() > 0 || source != nil {
 		runtime := access.ensureRuntime()
-		runtime.suffix = scanAccessAsSegment(requiredAccess)
+		// Batch join keys are equality seeks, not advisory trailing hooks.
+		// Put them before the local access constraints: otherwise a local range
+		// can hide the key from the sorted prefix, or a broad local equality
+		// index can be scanned afresh for every batch item. Keep every local
+		// boundary after the keys; uniqueness never makes its predicate optional.
+		runtime.insertAt = 0
+		runtime.inserted = scanAccessAsSegment(requiredAccess)
 		if source != nil {
 			runtime.extra = scanAccessSegmentFromAnalyzed(appendRecSetBoundary(nil, source))
 		}
