@@ -18,7 +18,10 @@ package storage
 
 import (
 	"bytes"
+	"encoding/json"
+	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
@@ -274,6 +277,152 @@ func TestExtractScanJoinInfoUsesCompiledAccessWhenResidualIsEmpty(t *testing.T) 
 		len(refs[0].srcCols) != 1 || refs[0].srcCols[0] != "source_ref" ||
 		len(refs[0].inputCols) != 1 || refs[0].inputCols[0] != "ref_id" {
 		t.Fatalf("compiled access dependency was not extracted: %#v; plan=%s", refs, serializeScmerForTest(computor))
+	}
+}
+
+func TestExtractScanJoinInfoIncludesCompiledFilterDependencies(t *testing.T) {
+	for _, residual := range []bool{false, true} {
+		for _, dynamicValues := range []bool{false, true} {
+			t.Run(fmt.Sprintf("residual=%t/dynamic_values=%t", residual, dynamicValues), func(t *testing.T) {
+				computor := scm.Read(t.Name(), `(lambda (ref_id)
+					(scan nil (table "tcompileddependency" "src")
+						'() (list ref_id 1)
+						'() (lambda () true)
+						'("value") (lambda (acc value) value)
+						nil nil false))`)
+				root := stripSourceInfo(computor).Slice()
+				scan := stripSourceInfo(root[2]).Slice()
+				schema := scm.NewSlice([]scm.Scmer{
+					newScanAccessHeader(3, scanAccessConsumerScan, 0, -1),
+					newScanBoundarySpec("source_ref", EqualMatcher, 0, 0, true, true, "", false, -1, nil, nil, "", false),
+					newScanBoundarySpec("allowed", EqualMatcher, 1, 1, true, true, "", false, -1, nil, nil, "", false),
+					newScanBoundarySpec(".score", RangeMatcher, 1, -1, true, true, "", false, 2, []string{"priority", "weight"}, nil, "", false),
+				})
+				scan[3] = scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), schema})
+				if residual {
+					scan[5] = scm.Read(t.Name(), `'("source_ref")`)
+					scan[6] = scm.Read(t.Name(), `(lambda (source_ref) (equal? source_ref (outer 1 ref_id)))`)
+				}
+				if dynamicValues {
+					scan[4] = scm.NewSymbol("runtime_values")
+				}
+				refs := extractScanJoinInfo(computor)
+				if len(refs) != 1 {
+					t.Fatalf("expected one source dependency, got %#v", refs)
+				}
+				for _, column := range []string{"source_ref", "allowed", ".score", "priority", "weight"} {
+					if !slices.Contains(refs[0].condCols, column) {
+						t.Errorf("compiled predicate dependency %q missing from %#v", column, refs[0])
+					}
+				}
+				if residual || !dynamicValues {
+					if strings.Join(refs[0].srcCols, ",") != "source_ref" || strings.Join(refs[0].inputCols, ",") != "ref_id" {
+						t.Fatalf("constant/expression filters changed selective join mapping: %#v", refs[0])
+					}
+				} else if len(refs[0].srcCols) != 0 || len(refs[0].inputCols) != 0 {
+					t.Fatalf("dynamic access values manufactured a reverse mapping: %#v", refs[0])
+				}
+			})
+		}
+	}
+}
+
+// A schema written by an older binary can contain generated guards that omit
+// compiled-only predicates. Rebinding their target must also replace that code.
+func TestRestoredComputeDependencyTriggersRefreshGuards(t *testing.T) {
+	oldBasepath := Basepath
+	Basepath = t.TempDir()
+	defer func() { Basepath = oldBasepath }()
+	Init(scm.Globalenv)
+	LoadDatabases()
+	const schemaName = "trestoredcomputedependency"
+	defer databases.Remove(schemaName)
+	CreateDatabase(schemaName, false)
+	base, _ := CreateTable(schemaName, "base", Safe, false)
+	src, _ := CreateTable(schemaName, "src", Safe, false)
+	base.CreateColumn("ref_id", "INT", nil, nil)
+	base.CreateColumn("cached", "INT", nil, nil)
+	src.CreateColumn("ref_id", "INT", nil, nil)
+	src.CreateColumn("val", "INT", nil, nil)
+	src.CreateColumn("allowed", "INT", nil, nil)
+
+	for _, orc := range []bool{false, true} {
+		t.Run(fmt.Sprintf("orc=%t", orc), func(t *testing.T) {
+			computor := lambdaAst([]string{"ref_id"}, nestedScanAst(schemaName, "src", "ref_id"))
+			register := func() {
+				if orc {
+					base.registerORCDependencyTriggers("cached", base.Columns[1], extractScanJoinInfo(computor))
+				} else {
+					base.registerComputeTriggers("cached", computor)
+				}
+			}
+			register()
+			prefix := ".cache:base:cached|scan0|src|"
+			if orc {
+				prefix = ".orcdep:base:cached|scan0|src|"
+			}
+			old, found := findTriggerByPrefixAndTiming(src.Triggers, prefix, AfterUpdate)
+			if !found || strings.Contains(triggerPlanStringForTest(old), `"allowed"`) {
+				t.Fatal("fixture must begin with the old incomplete update guard")
+			}
+			encoded, err := json.Marshal(src.Triggers)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var restored []TriggerDescription
+			if err := json.Unmarshal(encoded, &restored); err != nil {
+				t.Fatal(err)
+			}
+			src.mu.Lock()
+			src.Triggers = restored
+			src.mu.Unlock()
+			// Exercise lazy compilation too: cached native/vector code from the
+			// restored body must not survive replacement of its scalar procedure.
+			src.GetTriggers(AfterUpdate)
+			before := make([]string, len(src.Triggers))
+			for i, tr := range src.Triggers {
+				before[i] = tr.Name
+			}
+			scan := computor.Slice()[2].Slice()
+			scan[3] = scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), scm.NewSlice([]scm.Scmer{
+				newScanAccessHeader(1, scanAccessConsumerScan, 0, -1),
+				newScanBoundarySpec("allowed", EqualMatcher, 0, 0, true, true, "", false, -1, nil, nil, "", false),
+			})})
+			scan[4] = listAst(scm.NewInt(1))
+			register()
+			register()
+			after := make([]string, len(src.Triggers))
+			for i, tr := range src.Triggers {
+				after[i] = tr.Name
+			}
+			if !slices.Equal(before, after) {
+				t.Fatalf("refresh changed trigger count/order: %v -> %v", before, after)
+			}
+			updated, found := findTriggerByPrefixAndTiming(src.Triggers, prefix, AfterUpdate)
+			if !found {
+				t.Fatal("updated trigger missing")
+			}
+			plan := triggerPlanStringForTest(updated)
+			for _, want := range []string{`(get_assoc OLD "allowed")`, `(get_assoc NEW "allowed")`} {
+				if !strings.Contains(plan, want) {
+					t.Fatalf("restored trigger kept obsolete dependency guard, missing %s:\n%s", want, plan)
+				}
+			}
+			parsedBody := stripSourceInfo(scm.Read(t.Name(), plan)).Slice()
+			guard := scm.Eval(lambdaAst([]string{"OLD", "NEW"}, parsedBody[1]), &scm.Globalenv)
+			oldRow := src.rowToDict(dataset{scm.NewInt(7), scm.NewInt(10), scm.NewInt(1)})
+			newRow := src.rowToDict(dataset{scm.NewInt(7), scm.NewInt(10), scm.NewInt(0)})
+			if !scm.ToBool(scm.Apply(guard, oldRow, newRow)) {
+				t.Fatal("updated guard suppressed an allowed-only mutation")
+			}
+			if scm.ToBool(scm.Apply(guard, oldRow, oldRow)) {
+				t.Fatal("updated guard invalidated an unchanged source row")
+			}
+			if !updated.acquireTarget(nil) {
+				t.Fatal("refreshed trigger target remained inert")
+			}
+			updated.releaseTarget()
+		})
 	}
 }
 

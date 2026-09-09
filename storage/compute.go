@@ -862,7 +862,7 @@ type scanJoinInfo struct {
 	table     string
 	srcCols   []string // source table columns in equality filter
 	inputCols []string // corresponding computor input column names
-	condCols  []string // source table columns read by the scan filter
+	condCols  []string // source table columns read by compiled access or the residual filter
 	mapCols   []string // source table columns read by the scan mapper
 }
 
@@ -913,9 +913,13 @@ func extractScanJoinInfoBody(expr scm.Scmer, outerParams []scm.Scmer) []scanJoin
 		if len(condCols) > 0 {
 			info.srcCols, info.inputCols = extractEqualityJoins(items[filterIdx], condCols, outerParams)
 		}
+		// Exact access boundaries may remove predicates from the residual filter.
+		// Those columns still affect the cached result even when their boundary
+		// is constant or a residual equality already supplies the reverse join.
+		accessCols, accessSrcCols, accessInputCols := extractCompiledScanDependencies(items[3], items[4], outerParams)
+		info.condCols = mergeUniqueStrings(info.condCols, accessCols)
 		if len(info.srcCols) == 0 {
-			info.srcCols, info.inputCols = extractCompiledScanEqualityJoins(items[3], items[4], outerParams)
-			info.condCols = mergeUniqueStrings(info.condCols, info.srcCols)
+			info.srcCols, info.inputCols = accessSrcCols, accessInputCols
 		}
 		// A physical table expression can itself be a plan (for example a
 		// recset_project_join whose producer prepares correlated stage caches).
@@ -936,22 +940,19 @@ func extractScanJoinInfoBody(expr scm.Scmer, outerParams []scm.Scmer) []scanJoin
 	return result
 }
 
-func extractCompiledScanEqualityJoins(schemaExpr, valuesExpr scm.Scmer, computorParams []scm.Scmer) (srcCols, inputCols []string) {
+func extractCompiledScanDependencies(schemaExpr, valuesExpr scm.Scmer, computorParams []scm.Scmer) (condCols, srcCols, inputCols []string) {
 	schema, schemaOK := scanStaticListElements(schemaExpr)
 	if !schemaOK {
-		return nil, nil
+		return nil, nil, nil
 	}
 	if len(schema) < scanAccessSchemaHeaderSize {
-		return nil, nil
+		return nil, nil, nil
 	}
 	meta, valid := decodeScanAccessHeader(stripSourceInfo(schema[0]))
 	if !valid {
-		return nil, nil
+		return nil, nil, nil
 	}
 	valueItems, valuesOK := scanStaticListElements(valuesExpr)
-	if !valuesOK {
-		return nil, nil
-	}
 	count := meta.count
 	for i := 0; i < count; i++ {
 		offset := scanAccessSchemaHeaderSize + i*scanAccessBoundaryStride
@@ -959,7 +960,9 @@ func extractCompiledScanEqualityJoins(schemaExpr, valuesExpr scm.Scmer, computor
 			continue
 		}
 		boundary := ScanBoundaryFromScmer(stripSourceInfo(schema[offset]))
-		if boundary.Analyzer() != EqualMatcher {
+		condCols = append(condCols, boundary.ColumnName())
+		condCols = append(condCols, boundary.MapColumns()...)
+		if !valuesOK || boundary.Analyzer() != EqualMatcher {
 			continue
 		}
 		lowerSlot := boundary.LowerSlot()
@@ -972,7 +975,7 @@ func extractCompiledScanEqualityJoins(schemaExpr, valuesExpr scm.Scmer, computor
 			inputCols = append(inputCols, inputCol)
 		}
 	}
-	return srcCols, inputCols
+	return condCols, srcCols, inputCols
 }
 
 func compiledScanOuterColumn(expr scm.Scmer, computorParams []scm.Scmer) (string, bool) {
@@ -1834,6 +1837,44 @@ func registerInvalidationPropagationTrigger(prefix string, srcTable, targetTable
 	return triggerName
 }
 
+// reuseComputeDependencyTrigger rebinds current generated code without repeating
+// compilation. Restored dependency guards may omit columns learned by a newer
+// analyzer, so they remain inert until installComputeDependencyTrigger replaces
+// the entire compiled description. Callers serialize registration with schemalock.
+func (t *table) reuseComputeDependencyTrigger(name string, acquire func(*TxContext) bool, release func()) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for i := range t.Triggers {
+		trigger := &t.Triggers[i]
+		if trigger.Name == name {
+			if trigger.needsRegeneration {
+				return false
+			}
+			trigger.Acquire = acquire
+			trigger.Release = release
+			return true
+		}
+	}
+	return false
+}
+
+func (t *table) installComputeDependencyTrigger(trigger TriggerDescription) {
+	// Compile outside the table lock, just like AddTrigger. Replacing the whole
+	// description also discards obsolete FuncPlan, native and vectorized bodies.
+	finalizeTriggerCompilation(&trigger)
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for i := range t.Triggers {
+		if t.Triggers[i].Name == trigger.Name {
+			// Generated dependency triggers keep their fixed priority and original
+			// slot; concurrent readers see either complete immutable description.
+			t.Triggers[i] = trigger
+			return
+		}
+	}
+	t.addTriggerLocked(trigger)
+}
+
 // registerComputeTriggers installs AfterInsert/AfterUpdate/AfterDelete triggers
 // on source tables so that changes automatically invalidate the computed column.
 // AfterInvalidate edges propagate changes through nested computed caches. It also
@@ -1887,15 +1928,7 @@ func (t *table) registerComputeTriggers(name string, computor scm.Scmer) {
 
 		for _, timing := range []TriggerTiming{AfterInsert, AfterUpdate, AfterDelete} {
 			triggerName := ".cache:" + t.Name + ":" + name + "|scan" + strconv.Itoa(refIdx) + "|" + srcTable.Name + "|" + timing.String()
-			// idempotency: skip if trigger already exists
-			exists := false
-			for _, tr := range srcTable.Triggers {
-				if tr.Name == triggerName {
-					exists = true
-					break
-				}
-			}
-			if !exists {
+			if !srcTable.reuseComputeDependencyTrigger(triggerName, acquireTarget, releaseTarget) {
 				var body scm.Scmer
 				if incremental && timing != AfterInvalidate {
 					// scan layout: [fn, tx, table, accessSchema, accessValues,
@@ -1930,7 +1963,7 @@ func (t *table) registerComputeTriggers(name string, computor scm.Scmer) {
 				if timing == AfterUpdate {
 					body = wrapUpdateBodyWithRelevantChangeGuard(body, relevantCols)
 				}
-				srcTable.AddTrigger(TriggerDescription{
+				srcTable.installComputeDependencyTrigger(TriggerDescription{
 					Name:     triggerName,
 					Timing:   timing,
 					IsSystem: true,
@@ -1939,8 +1972,6 @@ func (t *table) registerComputeTriggers(name string, computor scm.Scmer) {
 					Acquire:  acquireTarget,
 					Release:  releaseTarget,
 				})
-			} else {
-				srcTable.SetTriggerTarget(triggerName, acquireTarget, releaseTarget)
 			}
 			registeredNames = append(registeredNames, triggerRef{ref.schema, triggerName})
 		}
@@ -2037,15 +2068,7 @@ func (t *table) registerORCDependencyTriggers(name string, col *column, refs []s
 		relevantCols := scanRelevantSourceCols(ref, srcTable)
 		for _, timing := range []TriggerTiming{AfterInsert, AfterUpdate, AfterDelete} {
 			triggerName := ".orcdep:" + t.Name + ":" + name + "|scan" + strconv.Itoa(refIdx) + "|" + srcTable.Name + "|" + timing.String()
-			exists := false
-			for _, tr := range srcTable.Triggers {
-				if tr.Name == triggerName {
-					exists = true
-					break
-				}
-			}
-			if exists {
-				srcTable.SetTriggerTarget(triggerName, acquireTarget, releaseTarget)
+			if srcTable.reuseComputeDependencyTrigger(triggerName, acquireTarget, releaseTarget) {
 				continue
 			}
 			tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewString(t.Name)})
@@ -2060,7 +2083,7 @@ func (t *table) registerORCDependencyTriggers(name string, col *column, refs []s
 			if timing == AfterUpdate {
 				body = wrapUpdateBodyWithRelevantChangeGuard(body, relevantCols)
 			}
-			srcTable.AddTrigger(TriggerDescription{
+			srcTable.installComputeDependencyTrigger(TriggerDescription{
 				Name:     triggerName,
 				Timing:   timing,
 				IsSystem: true,

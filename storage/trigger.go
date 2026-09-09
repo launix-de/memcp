@@ -161,6 +161,9 @@ type TriggerDescription struct {
 	VectorFunc scm.Scmer             `json:"-"`                   // Vectorized trigger: (lambda (OLD_batch NEW_batch) ...) for batch execution
 	Acquire    func(*TxContext) bool `json:"-"`                   // Optional lock-free pin for an ephemeral trigger target
 	Release    func()                `json:"-"`                   // Releases a successful Acquire
+	// Guarded by table.mu after publication. Generated dependency code restored
+	// from a previous binary must be regenerated before its target is rebound.
+	needsRegeneration bool
 }
 
 func acquireCacheUse(users *int64) bool {
@@ -273,6 +276,7 @@ func (tr *TriggerDescription) UnmarshalJSON(data []byte) error {
 	tr.IsSystem = persist.IsSystem
 	tr.Hidden = persist.Hidden
 	tr.Priority = persist.Priority
+	tr.needsRegeneration = strings.HasPrefix(tr.Name, ".cache:") || strings.HasPrefix(tr.Name, ".orcdep:")
 	tr.Async = persist.Async
 	tr.FuncPlan = scm.NewNil()
 	tr.VectorFunc = scm.NewNil()
@@ -465,6 +469,11 @@ func (t *table) AddTrigger(trigger TriggerDescription) {
 	finalizeTriggerCompilation(&trigger)
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	t.addTriggerLocked(trigger)
+}
+
+// addTriggerLocked inserts a compiled trigger while the caller holds t.mu.
+func (t *table) addTriggerLocked(trigger TriggerDescription) {
 	// Keep trigger list ordered by priority (lower = earlier). For equal
 	// priorities preserve registration order by inserting after existing ties.
 	insertAt := len(t.Triggers)

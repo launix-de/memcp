@@ -136,3 +136,66 @@ test_cases:
 
   - name: "Learned LIKE selectivity retains the cheap cached batch plan"
     scm: *boc_cached_plan
+
+  - name: "Revoke an ACL value enforced entirely by compiled scan access"
+    sql: "UPDATE boc_acl SET allowed = 0 WHERE id = 14"
+    expect:
+      affected_rows: 1
+
+  - name: "Revoked ACL value is visible in the source row"
+    sql: "SELECT id, allowed FROM boc_acl WHERE id = 14"
+    expect:
+      data: [{id: 14, allowed: 0}]
+
+  - name: "Cached membership excludes a revoked grant from the ordered page"
+    sql: *boc_query
+    expect:
+      data: [{id: 19996, allowed: 1}, {id: 19994, allowed: 1}, {id: 19992, allowed: 1}, {id: 19990, allowed: 1}, {id: 19988, allowed: 1}]
+
+  - name: "OFFSET follows updated ACL membership"
+    sql: &boc_updated_offset |
+      SELECT d.id FROM boc_document d
+      LEFT JOIN boc_acl label ON label.id = d.domain_id
+      WHERE d.file_id IN (
+        SELECT id FROM boc_file WHERE filename LIKE '%alternate%'
+        UNION SELECT id FROM boc_file WHERE body LIKE '%commonneedle%'
+      ) AND EXISTS (SELECT 1 FROM boc_acl a WHERE a.id = d.domain_id AND a.allowed = 1)
+      ORDER BY d.rank_value DESC LIMIT 2 OFFSET 1
+    expect: &boc_denied_offset
+      data: [{id: 19994}, {id: 19992}]
+
+  - name: "A NULL grant remains denied"
+    sql: "UPDATE boc_acl SET allowed = NULL WHERE id = 14"
+    expect:
+      affected_rows: 1
+
+  - name: "NULL ACL values do not reappear through cached membership"
+    sql: *boc_updated_offset
+    expect: *boc_denied_offset
+
+  - name: "Restore a previously cached ACL grant"
+    sql: "UPDATE boc_acl SET allowed = 1 WHERE id = 14"
+    expect:
+      affected_rows: 1
+
+  - name: "Cached membership includes the restored grant"
+    sql: *boc_query
+    expect: *boc_page
+
+  - name: "Delete a warmed ACL grant"
+    sql: "DELETE FROM boc_acl WHERE id = 14"
+    expect:
+      affected_rows: 1
+
+  - name: "Missing grants are excluded before OFFSET"
+    sql: *boc_updated_offset
+    expect: *boc_denied_offset
+
+  - name: "Reinsert a removed ACL grant"
+    sql: "INSERT INTO boc_acl VALUES (14, 1)"
+    expect:
+      affected_rows: 1
+
+  - name: "Cached membership includes the reinserted grant"
+    sql: *boc_query
+    expect: *boc_page

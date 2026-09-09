@@ -666,14 +666,34 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		"single-character text patterns use a broad prior")
 	(assert (text_pattern_selectivity_prior "%needle%") 0.01
 		"long text patterns use the selective prior floor")
-	(assert (membership_runtime_source_rows_expr
-		(list "f" "memcp-tests" "membership_text_source" false nil)
-		(list (quote strlike) "filename" "%alternate%" "utf8mb4_general_ci")
-		20000)
-		(list (quote max) 1
-			(list (quote *) 20000
-				(list (quote text_pattern_selectivity_prior) "%alternate%")))
-		"membership text guards use the prior without emitting a zero-hit scan")
+	/* Membership guards must repeat learned cardinalities, including zero.
+	Only unknown metadata falls back to the text prior. Check the emitted
+	metadata read separately, then execute its cardinality expression against
+	deterministic observations without creating a table during startup. */
+	(define membership_text_source
+		(list "f" "memcp-tests" "membership_text_source" false nil))
+	(define membership_text_condition
+		(list (quote strlike) "filename" "%alternate%" "utf8mb4_general_ci"))
+	(define membership_text_rows_expr (membership_runtime_source_rows_expr
+		membership_text_source membership_text_condition 20000))
+	(assert (match membership_text_rows_expr
+		((symbol planner_estimated_matching_rows) estimate 20000 _fallback)
+		(equal? estimate (query_scoped_source_filter_estimate_expr
+			membership_text_source membership_text_condition 0))
+		_ false)
+		true "membership text guards read metadata with zero sampling budget")
+	(define membership_text_rows (lambda (observation)
+		(match membership_text_rows_expr
+			((symbol planner_estimated_matching_rows) _estimate input_rows fallback)
+			(eval (list (quote planner_estimated_matching_rows)
+				(list (quote quote) observation) input_rows fallback))
+			_ (error "unexpected membership cardinality expression"))))
+	(assert (membership_text_rows nil) 200
+		"membership text guards use the text prior for unknown metadata")
+	(assert (membership_text_rows (list (list (quote rows) 0) (list (quote coverage) (quote feedback)))) 0
+		"membership text guards preserve learned zero instead of the text prior")
+	(assert (membership_text_rows (list (list (quote rows) 3500) (list (quote coverage) (quote feedback)))) 3500
+		"membership text guards preserve learned positive cardinalities")
 	(assert (planner_estimated_matching_rows
 		(list
 			(list (quote rows) 512)
