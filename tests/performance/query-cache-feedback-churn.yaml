@@ -41,6 +41,29 @@ test_cases:
     expect:
       rows: 1
       result_contains: ["true"]
+  - name: "Changing runtime cutoffs retain an ACL count plan"
+    performance_rows: 1000
+    threshold_ms: 1000
+    scm: |
+      (begin
+        (define cache (newcachemap))
+        (define sess (newsession))
+        (sess "username" "root")
+        (sess "schema" "memcp-tests")
+        (define q "SELECT COUNT(*) AS n FROM qfc_clock a WHERE a.id > @cutoff AND COALESCE((SELECT CASE WHEN b.category=9 THEN TRUE ELSE EXISTS(SELECT 1 FROM qfc_document c WHERE c.id=b.id AND c.category=9) END FROM qfc_document b WHERE b.id=a.id LIMIT 1),FALSE)")
+        (define rows (newsession))
+        (rows "n" 0)
+        (reduce (produceN 16) (lambda (_ i)
+          (begin
+            (sess "cutoff" (+ 998 i))
+            (sql_execute_formula sess nil
+              (cached_parse cache (list parse_sql) "memcp-tests" q nil "root" sess true)
+              (lambda (row) (rows "n" (+ (rows "n") (cadr row))))
+              (lambda (_fields) nil)))) nil)
+        (if (equal? (rows "n") 1) true (error "runtime cutoff changed ACL count results")))
+    expect:
+      rows: 1
+      result_contains: ["true"]
   - name: "Ordered cache reuse survives a sequence of unrelated learned filters"
     performance_rows: 1000
     threshold_ms: 1000
