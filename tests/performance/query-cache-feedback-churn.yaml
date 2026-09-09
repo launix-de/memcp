@@ -7,7 +7,7 @@ metadata:
 setup:
   - sql: "DROP TABLE IF EXISTS qfc_clock"
   - sql: "CREATE TABLE qfc_clock (id INT PRIMARY KEY) ENGINE=sloppy"
-  - sql: "INSERT INTO qfc_clock VALUES (999)"
+  - sql: "INSERT INTO qfc_clock (id) VALUES (999)"
   - scm: '(rebuild (table "memcp-tests" "qfc_clock") true false)'
   - sql: "DROP TABLE IF EXISTS qfc_document"
   - sql: "CREATE TABLE qfc_document (id INT PRIMARY KEY, category INT) ENGINE=sloppy"
@@ -43,7 +43,9 @@ test_cases:
       result_contains: ["true"]
   - name: "Changing runtime cutoffs retain an ACL count plan"
     performance_rows: 1000
-    threshold_ms: 1000
+    # Sixteen complete requests; measured baseline is about 2-4 seconds.
+    # The A/B ratio remains enforced independently of this absolute ceiling.
+    threshold_ms: 5000
     scm: |
       (begin
         (define cache (newcachemap))

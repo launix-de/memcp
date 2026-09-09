@@ -6699,17 +6699,21 @@ remain ordinary residual predicates. */
 			ir
 			(make_ir (ir_kind ir) outer_block all_stages (ir_context_of ir) (ir_return ir))))))
 
-/* Partitioning on a complete non-null unique key cannot reduce the number of
+/* Partitioning at most one input row, or a complete non-null unique key,
+cannot reduce the number of
 stage probes: each surviving row still owns one group. The partition alternative
 adds strictly positive startup/build cost to the same probes, independently of
 selectivity. Prove that dominance before sampling, and do not install a runtime
 sampling guard for a choice that no cardinality change can reverse. */
 (define aggregate_pushdown_identity_partition? (lambda (driver columns)
-	(reduce (source_unique_key_sets driver) (lambda (found key)
+	(begin
+		(define rows (planner_source_row_count driver))
+		(or (and (number? rows) (<= rows 1))
+		(reduce (source_unique_key_sets driver) (lambda (found key)
 		(or found (and (not (empty_list? key))
 			(reduce key (lambda (complete col)
 				(and complete (and (contains? columns col)
-					(source_column_guaranteed_nonnull? driver col)))) true)))) false)))
+					(source_column_guaranteed_nonnull? driver col)))) true)))) false)))))
 
 (define aggregate_pushdown_logical (lambda (ir planning_session tx)
 	(begin

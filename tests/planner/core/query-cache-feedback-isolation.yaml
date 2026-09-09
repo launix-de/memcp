@@ -143,6 +143,28 @@ test_cases:
             " guard=" (serialize (car (car (entry "variants"))))))))
     expect:
       data: [true]
+  - name: "An ACL count does not reconsider a dominated singleton partition for every cutoff"
+    scm: |
+      (begin
+        (define cache (newcachemap))
+        (define sess (newsession))
+        (sess "username" "root")
+        (sess "schema" "memcp-tests")
+        (define q "SELECT COUNT(*) AS n FROM qfi_single a WHERE a.id > @cutoff AND COALESCE((SELECT CASE WHEN b.label='ordinary' THEN TRUE ELSE EXISTS(SELECT 1 FROM qfi_document c WHERE c.id=b.id AND c.label='needle') END FROM qfi_document b WHERE b.id=a.id LIMIT 1),FALSE)")
+        (define rows (newsession))
+        (rows "n" 0)
+        (reduce (list 998 999 1000) (lambda (_ cutoff)
+          (begin
+            (sess "cutoff" cutoff)
+            (sql_execute_formula sess nil
+              (cached_parse cache (list parse_sql) "memcp-tests" q nil "root" sess true)
+              (lambda (row) (rows "n" (+ (rows "n") (cadr row))))
+              (lambda (_fields) nil)))) nil)
+        (define entry (car (cache (car (cache)))))
+        (if (and (equal? (rows "n") 1) (equal? (count (entry "variants")) 1))
+          true (error "singleton ACL count recompiled or changed its result")))
+    expect:
+      data: [true]
   - name: "Growth invalidates the singleton dominance proof"
     scm: |
       (begin
