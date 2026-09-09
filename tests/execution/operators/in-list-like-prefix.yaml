@@ -176,3 +176,9 @@ test_cases:
   - name: "Numeric IN with an ordered join preserves results"
     sql: "SELECT a.id, b.val FROM inlike a JOIN inlike b ON b.id = a.id WHERE a.id IN (13,10,13) ORDER BY a.id LIMIT 2"
     expect: {rows: 2, data: [{id: 10, val: 50}, {id: 13, val: 65}]}
+
+  - name: "Numeric IN bounds retain adjacent large BIGINT values"
+    setup:
+      - sql: "INSERT INTO inlike (id,name,val) VALUES (9007199254740992,'large-low',1),(9007199254740993,'large-high',2)"
+    sql: "SELECT name FROM inlike WHERE id IN (9007199254740993,9007199254740992) ORDER BY val"
+    expect: {rows: 2, data: [{name: "large-low"}, {name: "large-high"}]}
