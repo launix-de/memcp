@@ -1193,7 +1193,11 @@ func Init(en scm.Env) {
 			// it index_hook_candidates or pretend that a new population was sampled.
 			value, source, known := t.filterSelectivity(bindFilterFeedback(
 				mustScmerSlice(accessSchema, "selectivity access schema"), accessValues))
-			if known {
+			// Same-predicate observations (including historical measurements) can
+			// replace sampling. A LIKE-length histogram describes OTHER words: it
+			// is only a prior and must not suppress an explicitly permitted sample.
+			// Metadata-only consumers still receive that prior with its provenance.
+			if known && (source != "like_length_histogram" || scm.ToInt(a[6]) == 0) {
 				confidence := .9
 				if source != "scan_feedback" {
 					confidence = .35
@@ -1313,7 +1317,7 @@ func Init(en scm.Env) {
 				{Kind: "list", Label: "accessValues", Description: "flat runtime values referenced by accessSchema", NoEscape: true, CrossGoroutine: true},
 				columnList("condition_cols", "columns passed to the selectivity predicate"),
 				scanCallback("condition", "predicate sampled to estimate matching rows", "bool", "true when the sampled row matches"),
-				{Kind: "int", Label: "max_rows", Description: "0 reads metadata only and returns nil on a miss; positive values bound fallback sampling"},
+				{Kind: "number", Label: "max_rows", Description: "0 reads metadata only and returns nil on a miss; positive values bound fallback sampling"},
 			},
 			Return: &scm.TypeDescriptor{Kind: "any"}, HasSideEffects: true,
 		},

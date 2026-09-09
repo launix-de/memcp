@@ -29,11 +29,12 @@ test_cases:
         (define forbidden (lambda (x) (error "measured selectivity must not rescan")))
         (define measured (scan_selectivity_estimate nil tbl (nth access 0) values '("id") forbidden 512))
         (define metadata (scan_selectivity_estimate nil tbl (nth access 0) values '("id") forbidden 0))
-        (and (equal? measured metadata)
+        (if (and (equal? measured metadata)
           (equal? (qassoc_get measured 'source nil) 'scan_feedback)
           (equal? (qassoc_get measured 'value nil) 0.8)
           (equal? (qassoc_get measured 'rows nil) 800)
-          (equal? (qassoc_get measured 'sampled nil) 0)))
+          (equal? (qassoc_get measured 'sampled nil) 0)) true
+          (error "unified estimator failed to reuse measured feedback")))
     expect:
       data: [true]
 
@@ -47,9 +48,10 @@ test_cases:
         (define unknown (scan_selectivity_estimate nil tbl (nth access 0) values '("id")
           (lambda (x) (error "metadata miss must not sample")) 0))
         (define sampled (scan_selectivity_estimate nil tbl (nth access 0) values '("id") (eval callback) 1024))
-        (and (nil? unknown)
+        (if (and (nil? unknown)
           (equal? (qassoc_get sampled 'rows nil) 799)
-          (> (qassoc_get sampled 'sampled 0) 0)))
+          (> (qassoc_get sampled 'sampled 0) 0)) true
+          (error "unified estimator mixed bindings or failed its bounded fallback")))
     expect:
       data: [true]
 
@@ -60,12 +62,34 @@ test_cases:
         (define predicate (list '>= (list 'get_column "a" false "id" false) 200))
         (define reorder (join_optimizer_expr_selectivity_estimate (list src) "a" predicate))
         (define physical (planner_source_filter_estimate src predicate 512 nil nil))
-        (and (equal? (qassoc_get reorder 'source nil) 'scan_feedback)
+        (if (and (equal? (qassoc_get reorder 'source nil) 'scan_feedback)
           (equal? (qassoc_get physical 'source nil) 'scan_feedback)
           (equal? (qassoc_get reorder 'value nil) (qassoc_get physical 'value nil))
           (equal? (qassoc_get physical 'estimated_rows nil) 800)
           (equal? (planner_merge_estimate_coverage
-            (list physical (list (list 'coverage 'exact)))) 'feedback)))
+            (list physical (list (list 'coverage 'exact)))) 'feedback)) true
+          (error "reorder and physical costing did not consume the same measured rate")))
+    expect:
+      data: [true]
+
+  - name: "A different-word length prior must not suppress permitted sampling"
+    scm: |
+      (begin
+        (define tbl (table "memcp-tests" "afs_check"))
+        (define rare (list 'lambda (list 'x) (list 'strlike 'x "%rarexx%" "utf8mb4_general_ci")))
+        (define rare_access (compile_scan_access '("label") rare))
+        (scan_recset nil tbl (nth rare_access 0)
+          (map (nth rare_access 1) (lambda (v) (eval v))) '("label") (eval rare))
+        (define common (list 'lambda (list 'x) (list 'strlike 'x "%common%" "utf8mb4_general_ci")))
+        (define access (compile_scan_access '("label") common))
+        (define values (map (nth access 1) (lambda (v) (eval v))))
+        (define prior (scan_selectivity_estimate nil tbl (nth access 0) values '("label") (eval common) 0))
+        (define measured (scan_selectivity_estimate nil tbl (nth access 0) values '("label") (eval common) 1024))
+        (if (and (equal? (qassoc_get prior 'source nil) 'like_length_histogram)
+          (equal? (qassoc_get prior 'value nil) 0)
+          (equal? (qassoc_get measured 'rows nil) 900)
+          (> (qassoc_get measured 'sampled 0) 0)) true
+          (error "a different-word prior displaced the permitted measurement")))
     expect:
       data: [true]
 

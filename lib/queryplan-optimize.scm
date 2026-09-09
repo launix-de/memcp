@@ -352,7 +352,7 @@ bounded scalar metadata; this lookup never scans, loads columns or builds indexe
 							(define access (compile_scan_access cols callback true))
 							(scan_selectivity_estimate nil (table (source_schema src) (source_relation src))
 								(nth access 0) (map (nth access 1) (lambda (value) (eval value)))
-								cols (eval callback) (int 0))))
+								cols (eval callback) 0)))
 						(lambda (_e) nil))))))))
 
 (define join_optimizer_expr_selectivity_estimate (lambda (sources default_alias expr)

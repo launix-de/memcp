@@ -671,7 +671,10 @@ reordering, physical costing and runtime plan guards. It reads bound-predicate
 feedback before accessing shards. A zero sampling budget means metadata only:
 unknown feedback returns nil, never zero selectivity, and never loads columns,
 builds an index or evaluates the callback. Positive budgets permit the existing
-one-shard fallback only when feedback is unavailable. Do not add a separate
+one-shard fallback when same-predicate observations are unavailable. A LIKE
+length histogram is a prior about other words, not a measurement of this
+binding: it may answer metadata-only requests but cannot suppress permitted
+sampling. Do not add a separate
 feedback reader which individual planner paths can accidentally bypass.
 
 Learned rates retain their source/confidence and use `coverage=feedback`,
