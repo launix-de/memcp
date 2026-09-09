@@ -15,8 +15,13 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    uses: ./.github/workflows/detect-changes.yml
+
   performance-ab:
     name: performance-ab
+    needs: changes
+    if: ${{ needs.changes.outputs.relevant == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
 

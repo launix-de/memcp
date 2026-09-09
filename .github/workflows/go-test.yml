@@ -33,8 +33,13 @@ env:
   JIT_GO_REF: jit-foreign-frames-go1.27.0
 
 jobs:
+  changes:
+    uses: ./.github/workflows/detect-changes.yml
+
   go-test:
     name: go-test
+    needs: changes
+    if: ${{ needs.changes.outputs.relevant == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -52,6 +57,8 @@ jobs:
 
   jit-go-test:
     name: jit-go-test
+    needs: changes
+    if: ${{ needs.changes.outputs.relevant == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
