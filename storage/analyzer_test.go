@@ -326,6 +326,37 @@ func TestCompileScanAccessKeepsCandidateHooksAfterSortedPrefix(t *testing.T) {
 	}
 }
 
+func TestPruneScanResidualListPreservesColumnData(t *testing.T) {
+	filters := scm.Read(t.Name(), `(list
+		(lambda () true)
+		(lambda (slug) (contains? (list "alpha") slug))
+		(lambda (id name) (and (equal? id 7) (strlike name "A%"))))`)
+	for _, source := range []string{
+		`(quote (() ("slug") ("id" "name")))`,
+		`(list (list) (list "slug") (list "id" "name"))`,
+		`(list (quote ()) (quote ("slug")) (quote ("id" "name")))`,
+	} {
+		t.Run(source, func(t *testing.T) {
+			columns := scm.Read(t.Name(), source)
+			_, _, compiled, _ := compileScanAccessList(columns, filters, false)
+			if len(compiled) != 3 || compiled[1] || !compiled[2] {
+				t.Fatalf("expected an uncompiled membership and a compiled equality: %v", compiled)
+			}
+			columnExpr, filterExpr := pruneScanResidualList(columns, filters, compiled, false)
+			actual := scm.Eval(columnExpr, &scm.Globalenv)
+			expected := scm.Eval(scm.Read(t.Name(), `(quote (() ("slug") ("name")))`), &scm.Globalenv)
+			if !scm.Equal(actual, expected) {
+				t.Fatalf("residual columns = %s, want %s", scm.SerializeToString(actual, &scm.Globalenv), scm.SerializeToString(expected, &scm.Globalenv))
+			}
+			callbacks := scm.Eval(filterExpr, &scm.Globalenv).Slice()
+			if !scm.ToBool(scm.Apply(callbacks[1], scm.NewString("alpha"))) ||
+				scm.ToBool(scm.Apply(callbacks[1], scm.NewString("beta"))) {
+				t.Fatal("uncompiled membership callback changed its result")
+			}
+		})
+	}
+}
+
 func TestPruneScanResidualDropsExactProbesAndKeepsLike(t *testing.T) {
 	columns := scm.NewSlice([]scm.Scmer{
 		scm.NewSymbol("list"), scm.NewString("id"), scm.NewString("age"), scm.NewString("name"),

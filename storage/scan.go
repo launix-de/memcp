@@ -363,8 +363,14 @@ func pruneScanResidualList(columnListsExpr, filtersExpr scm.Scmer, compiled []bo
 	prunedColumns[0], prunedFilters[0] = scm.NewSymbol("list"), scm.NewSymbol("list")
 	for i := range filters {
 		prunedColumns[i+1], prunedFilters[i+1] = columnLists[i], filters[i]
+		// A quoted outer list contains column data, not expressions. Quote each
+		// static column list before placing it in the executable list constructor,
+		// including entries whose filter cannot be compiled into scan boundaries.
+		if columns, static := scanStaticColumns(columnLists[i]); static {
+			prunedColumns[i+1] = scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), scm.NewSlice(columns)})
+		}
 		if compiled[i] {
-			prunedColumns[i+1], prunedFilters[i+1] = pruneScanResidual(columnLists[i], filters[i], allowBatch)
+			prunedColumns[i+1], prunedFilters[i+1] = pruneScanResidual(prunedColumns[i+1], filters[i], allowBatch)
 		}
 	}
 	return scm.NewSlice(prunedColumns), scm.NewSlice(prunedFilters)
