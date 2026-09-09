@@ -161,3 +161,21 @@ Outputs matched. Wall time improved in these two rounds while process CPU rose
 slightly; this is an integration overhead check, not evidence of a better plan
 for the application query. Focused validation after integration: adaptive
 feedback 8/8, batch observation 7/7, prepared statements 57/57, range scans 114/114.
+
+The full SQL CI also exposed diagnostic/calibration paths which had treated a
+prepared observation as an opaque session read. Physical diagnostics now resolve
+its registered producer as data. Calibration carries only reachable preparations,
+in dependency order, in its measured executable plan. Forced prefiltered carriers
+retain their own producer rather than substituting the normal prepared carrier.
+The original operator/result assertions are unchanged: IN subqueries 73/73 and
+indexed membership costing 20/20 pass; a new diagnostic test checks non-execution,
+quoting, dependency order, deduplication and omission of unreachable preparations.
+
+One CI cold wide-integer aggregate sample rose from 51.374 to 155.186 ms. A manual
+follow-up used the unchanged 60,000-row, 16-column fixture, normal GC,
+GOMAXPROCS=4 on CPUs 22–25, six fresh processes/data directories per revision,
+alternating revision order, zero warmups and one measured first fill per process:
+master `ae5c20c5d` median 47.987811 ms, PR 49.857372 ms (+3.90%); means 53.450502
+and 54.048901 ms (+1.12%). Outputs matched, and first-fill variation occurred on
+both revisions. This does not reproduce the CI-sized slowdown; the CI threshold
+and fixture remain unchanged and must pass on the final revision.

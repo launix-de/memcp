@@ -152,3 +152,32 @@ test_cases:
             true (error "newly compiled plan ran without its prepared input")))))
     expect:
       data: [true]
+
+  - name: "Physical diagnostics follow observation producers without executing or unquoting them"
+    scm: |
+      (begin
+        (define planning (newsession))
+        (define preparations (newsession))
+        (planning "__memcp_queryplan_preparations" preparations)
+        (define producer (list 'error "diagnostics must not execute prepared inputs"))
+        (preparations "count" 1)
+        (preparations "preparation:0" (list "diagnostic-input" producer 0))
+        (define key (planner_queryplan_observation_value_key "diagnostic-input"))
+        (define source (planner_queryplan_observation_read_expr key))
+        (define quoted (list 'quote source))
+        (preparations "count" 3)
+        (preparations "preparation:1" (list "dependent-input" (list '+ source 1) 0))
+        (preparations "preparation:2" (list "unused-input" producer 0))
+        (define dependent (planner_queryplan_observation_read_expr
+          (planner_queryplan_observation_value_key "dependent-input")))
+        (define view (physical_queryplan_observation_view (list 'list dependent source) planning))
+        (if (and
+          (equal? (map (cadr view) car) '("diagnostic-input" "dependent-input"))
+          (empty_list? (cadr (physical_queryplan_observation_view quoted planning)))
+          (equal? (car (physical_queryplan_observation_view source planning)) producer)
+          (equal? (car (physical_queryplan_observation_view
+            (planner_queryplan_observation_current_read_expr key) planning)) producer)
+          (equal? (car (physical_queryplan_observation_view quoted planning)) quoted))
+          true (error "physical diagnostics lost prepared input provenance or quoting"))))
+    expect:
+      data: [true]

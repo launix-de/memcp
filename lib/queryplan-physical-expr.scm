@@ -4304,10 +4304,13 @@ filter; they must not reconstruct the choice from enclosing block facts. */
 									(list "reason" (if (equal? chosen "prefiltered_candidate_keyset") "selected" "higher_total_ns_or_forced_alternative"))
 									(list "cost" (planner_cost_explain prefiltered_cost)))
 								nil)) (lambda (alternative) (not (nil? alternative)))))) planning_session)
-				(list chosen (if (not (nil? observation_keys))
-					(planner_queryplan_observation_read_expr (car observation_keys))
-					(if (equal? chosen "prefiltered_candidate_keyset")
-						prefiltered_expr raw_expr))))))))
+				/* A forced prefiltered alternative owns a different producer. A complete
+				candidate registered for the normal choice must not replace that tree. */
+				(list chosen (if (equal? chosen "prefiltered_candidate_keyset")
+					prefiltered_expr
+					(if (not (nil? observation_keys))
+						(planner_queryplan_observation_read_expr (car observation_keys))
+						raw_expr))))))))
 
 /* General expression callers preserve the established contract: only a
 candidate-keyset choice replaces the marker with a projected RecSet carrier. */
