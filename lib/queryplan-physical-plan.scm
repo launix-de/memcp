@@ -3801,9 +3801,10 @@ as it would for an ordinary scan input. */
 			(begin
 				(define stage (nth membership 0))
 				(define facts (merge (list
-					(membership_candidate_work_facts stage planning_session)
-					/* merge is right-biased; retain the index-reduced stage facts. */
-					(gs_facts stage))))
+					/* qassoc_get takes the first match in concatenated pair lists.
+					Stage statistics therefore precede the late-consumer fallback. */
+					(gs_facts stage)
+					(membership_candidate_work_facts stage planning_session))))
 				(define candidate_input_rows (coalesceNil
 					(qassoc_get facts (quote membership_candidate_input_rows) nil)
 					(planner_stage_input_rows (gs_input stage))))
@@ -4132,7 +4133,14 @@ plan construction or timing during compilation. */
 							(if (and scan_order_supported bounded)
 								(probe_limit_work_rows (qb_limit block)
 									(planner_context_session (qb_facts block))) nil)
-							allow_ordered_batch_binding
+							/* The batch emitter can intersect an implied membership.
+							Below OR it must retain the membership in its scalar residual,
+							whose current emitter requires single-source branches. Joined
+							branches there use the complete projected-carrier alternative.
+							This is executability, not a cardinality preference. */
+							(and allow_ordered_batch_binding
+								(or (equal? membership implied_membership)
+									(membership_driver_subscan_supported? (nth membership 0))))
 							/* An implied membership becomes batch_membership_table_expr
 							below. Its complete preparation is shared with observation;
 							branch-local OR memberships remain window-local instead. */
@@ -4310,13 +4318,17 @@ plan construction or timing during compilation. */
 							(cons (quote list) (list
 								effective_scalar_carrier
 								membership_table_expr))))))
-				(define filter_expr (list (quote lambda)
+				/* Emit only the selected consumer. Batch membership can project joined
+				UNION branches that the scalar callback cannot probe. Eagerly lowering
+				that unused callback would reject a valid batch plan (and duplicate
+				physical decisions even for shapes supported by both consumers). */
+				(define filter_expr (if batch_membership_selected nil (list (quote lambda)
 					(map filtercols (lambda (col) (scan_callback_symbol_for_alias alias col)))
 					(if scalar_membership_filter
 						(list (quote and)
 							(recset_contains_call_expr scalar_membership_var)
 							(lower_column_expr_for_alias src filter_condition))
-						(lower_column_expr_for_alias src filter_condition))))
+						(lower_column_expr_for_alias src filter_condition)))))
 				(define batch_residual_condition (if batch_driver_selected
 					(strip_driver_membership_for_source src filter_condition batch_membership)
 					filter_condition))

@@ -666,6 +666,23 @@ review or regression protection.
 
 ## Adaptive Filter Selectivity
 
+`scan_selectivity_estimate` is the single storage statistics entrance for
+reordering, physical costing and runtime plan guards. It reads bound-predicate
+feedback before accessing shards. A zero sampling budget means metadata only:
+unknown feedback returns nil, never zero selectivity, and never loads columns,
+builds an index or evaluates the callback. Positive budgets permit the existing
+one-shard fallback when same-predicate observations are unavailable. A LIKE
+length histogram is a prior about other words, not a measurement of this
+binding: it may answer metadata-only requests but cannot suppress permitted
+sampling. Do not add a separate
+feedback reader which individual planner paths can accidentally bypass.
+
+Learned rates retain their source/confidence and use `coverage=feedback`,
+`population=table_rows`, and `sampled=0`. Their row estimate is the rate times
+the current table population, not a new exact observation. In particular,
+learned LIKE matches must never be relabeled as `index_hook_candidates`: those
+are distinct pre-residual work bounds, not the predicate's output cardinality.
+
 See [the Omnestum analysis and measurement report](ADAPTIVE_SELECTIVITY.md) for
 representation limits and the persistence/RecSet follow-up.
 

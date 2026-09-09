@@ -116,7 +116,7 @@ test_cases:
         batch cannot. Prove that this test really has the new learned input. */
         (define matched (scan nil tbl (nth access 0) values '("body")
           (eval callback) '() scan_count 0 + false))
-        (define estimate (table_filter_selectivity tbl (nth access 0) values))
+        (define estimate (scan_selectivity_estimate nil tbl (nth access 0) values '() (lambda () true) 0))
         (if (and (equal? matched 10000)
           (equal? (qassoc_get estimate 'source nil) 'scan_feedback)
           (equal? (qassoc_get estimate 'value nil) 0.5))

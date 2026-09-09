@@ -350,8 +350,9 @@ bounded scalar metadata; this lookup never scans, loads columns or builds indexe
 								(map cols (lambda (col) (symbol (concat (source_alias src) "." col))))
 								(lower_column_expr_for_alias src expr)))
 							(define access (compile_scan_access cols callback true))
-							(table_filter_selectivity (table (source_schema src) (source_relation src))
-								(nth access 0) (map (nth access 1) (lambda (value) (eval value))))))
+							(scan_selectivity_estimate nil (table (source_schema src) (source_relation src))
+								(nth access 0) (map (nth access 1) (lambda (value) (eval value)))
+								cols (eval callback) 0)))
 						(lambda (_e) nil))))))))
 
 (define join_optimizer_expr_selectivity_estimate (lambda (sources default_alias expr)
@@ -3240,6 +3241,8 @@ logical IR: it samples once per request and is shared by every guard binding. */
 
 (define planner_merge_estimate_coverage (lambda (estimates)
 	(begin
+		(define has_feedback (reduce estimates (lambda (found estimate)
+			(or found (equal? (planner_estimate_coverage estimate) (quote feedback)))) false))
 		(define has_lower (reduce estimates (lambda (found estimate)
 			(or found (equal? (planner_estimate_coverage estimate) (quote lower_bound)))) false))
 		(define has_upper (reduce estimates (lambda (found estimate)
@@ -3249,10 +3252,14 @@ logical IR: it samples once per request and is shared by every guard binding. */
 		/* Adding UNION branch cardinalities preserves a one-sided bound only when
 		every inexact branch points in the same direction. Mixed bounds describe an
 		interval, while a sampled branch remains a sample of the complete sum. */
-		(if (or has_sampled (and has_lower has_upper))
-			(quote sampled)
-			(if has_lower (quote lower_bound)
-				(if has_upper (quote upper_bound) (quote exact)))))))
+		/* A learned rate is neither a fresh exact observation nor a one-sided
+		bound. UNION must preserve that provenance instead of upgrading it to an
+		exact count merely because no branch reports a sampling limit. */
+		(if has_feedback (quote feedback)
+			(if (or has_sampled (and has_lower has_upper))
+				(quote sampled)
+				(if has_lower (quote lower_bound)
+					(if has_upper (quote upper_bound) (quote exact))))))))
 
 (define planner_query_block_input_rows (lambda (block)
 	(planner_add_estimates (map (qb_sources block) planner_source_row_count))))
@@ -4051,6 +4058,10 @@ owned by the membership-carrier guard; do not create another consumer guard. */
 				(* (+ candidate_rows projected_rows) 8) 0 projection_rows 0.65)
 			projection_rows 0.65)
 			candidate_cache_cost projection_rows 0.65))
+		/* LIMIT brakes the final scan, not an independently prepared scalar
+		truth carrier. Do not discount downstream work until the physical
+		consumer explicitly represents bounded probes instead of full preparation.
+		Keep this population in sync with tools/costgen's candidate feature. */
 		(define downstream_cost (planner_membership_downstream_probe_cost
 			(* projected_rows
 				(membership_work_value work (quote membership_downstream_probe_branches) 0))))
@@ -4299,6 +4310,10 @@ ordered batch is executable and what its actual driver workload is. */
 				driver_condition 512 tx planning_session)))
 		(define driver_rows (membership_estimated_work_rows driver_estimate driver_input_rows))
 		(merge (list
+			/* Pair-list lookup takes the FIRST match, not the last. Keep stage
+			statistics ahead of reconstructed defaults, including unknown (nil)
+			candidate estimates for UNION sources. */
+			(gs_facts stage)
 			(list
 				(list (quote membership_candidate_input_rows) candidate_input_rows)
 				(list (quote membership_candidate_estimated_rows) candidate_rows)
@@ -4317,10 +4332,7 @@ ordered batch is executable and what its actual driver workload is. */
 				(list (quote membership_driver_input_rows) driver_input_rows)
 				(list (quote membership_driver_condition) driver_condition)
 				(list (quote membership_driver_rows) driver_rows))
-			(membership_candidate_work_facts stage planning_session)
-			/* merge is right-biased: stage telemetry is authoritative over
-			the reconstructed late-consumer fallback. */
-			(gs_facts stage))))))
+			(membership_candidate_work_facts stage planning_session))))))
 
 (define membership_truth_projection_preferred? (lambda (block stage _guarded_alternative)
 	(begin

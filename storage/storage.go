@@ -1041,36 +1041,6 @@ func Init(en scm.Env) {
 	})
 
 	scm.Declare(&en, &scm.Declaration{
-		Name: "table_filter_selectivity",
-		Fn: func(a ...scm.Scmer) scm.Scmer {
-			schema := mustScmerSlice(a[1], "filter feedback schema")
-			values := mustScmerSlice(a[2], "filter feedback values")
-			value, source, known := TableFromScmer(a[0]).filterSelectivity(bindFilterFeedback(schema, values))
-			if !known {
-				return scm.NewNil()
-			}
-			confidence := .9
-			if source == "like_length_histogram" || source == "partial_scan_feedback" || source == "historical_scan_feedback" {
-				confidence = .35
-			}
-			return scm.NewSlice([]scm.Scmer{
-				scm.NewSlice([]scm.Scmer{scm.NewSymbol("value"), scm.NewFloat(value)}),
-				scm.NewSlice([]scm.Scmer{scm.NewSymbol("confidence"), scm.NewFloat(confidence)}),
-				scm.NewSlice([]scm.Scmer{scm.NewSymbol("source"), scm.NewSymbol(source)}),
-				scm.NewSlice([]scm.Scmer{scm.NewSymbol("known"), scm.NewBool(true)}),
-			})
-		},
-		Type: &scm.TypeDescriptor{Kind: "func", Description: "read an immutable learned filter selectivity; nil means no observation or suitable LIKE length bucket",
-			Params: []*scm.TypeDescriptor{
-				{Kind: "table", Label: "table"},
-				{Kind: "list", Label: "schema"},
-				{Kind: "list", Label: "values"},
-			},
-			Return: &scm.TypeDescriptor{Kind: "any"}, HasSideEffects: true,
-		},
-	})
-
-	scm.Declare(&en, &scm.Declaration{
 		Name: "table_order_partitioned?",
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
@@ -1215,6 +1185,41 @@ func Init(en scm.Env) {
 			t := TableFromScmer(a[1])
 			accessSchema := a[2]
 			accessValues := mustScmerSlice(a[3], "scan_selectivity_estimate access values")
+			input := int64(t.CountEstimate())
+			// One statistics entrance for reorder, physical costing and cache guards.
+			// The key describes the COMPLETE predicate, before residual pruning.
+			// Read feedback before touching shards or constructing callback frames.
+			// A learned output rate is not an index-hook candidate bound: never label
+			// it index_hook_candidates or pretend that a new population was sampled.
+			value, source, known := t.filterSelectivity(bindFilterFeedback(
+				mustScmerSlice(accessSchema, "selectivity access schema"), accessValues))
+			// Same-predicate observations (including historical measurements) can
+			// replace sampling. A LIKE-length histogram describes OTHER words: it
+			// is only a prior and must not suppress an explicitly permitted sample.
+			// Metadata-only consumers still receive that prior with its provenance.
+			if known && (source != "like_length_histogram" || scm.ToInt(a[6]) == 0) {
+				confidence := .9
+				if source != "scan_feedback" {
+					confidence = .35
+				}
+				return scm.NewSlice([]scm.Scmer{
+					scm.NewSlice([]scm.Scmer{scm.NewSymbol("value"), scm.NewFloat(value)}),
+					scm.NewSlice([]scm.Scmer{scm.NewSymbol("confidence"), scm.NewFloat(confidence)}),
+					scm.NewSlice([]scm.Scmer{scm.NewSymbol("source"), scm.NewSymbol(source)}),
+					scm.NewSlice([]scm.Scmer{scm.NewSymbol("known"), scm.NewBool(true)}),
+					scm.NewSlice([]scm.Scmer{scm.NewSymbol("rows"), scm.NewFloat(float64(input) * value)}),
+					scm.NewSlice([]scm.Scmer{scm.NewSymbol("input"), scm.NewInt(input)}),
+					scm.NewSlice([]scm.Scmer{scm.NewSymbol("sampled"), scm.NewInt(0)}),
+					scm.NewSlice([]scm.Scmer{scm.NewSymbol("capped"), scm.NewBool(false)}),
+					scm.NewSlice([]scm.Scmer{scm.NewSymbol("population"), scm.NewSymbol("table_rows")}),
+					scm.NewSlice([]scm.Scmer{scm.NewSymbol("coverage"), scm.NewSymbol("feedback")}),
+				})
+			}
+			// Reorder and cheap guards may request metadata only. A miss is unknown,
+			// not zero selectivity, and must not initialize an index or load a shard.
+			if scm.ToInt(a[6]) == 0 {
+				return scm.NewNil()
+			}
 			conditionCols := scmerSliceToStrings(mustScmerSlice(a[4], "condition columns"))
 			condition := a[5]
 			limit := scm.ToInt(a[6])
@@ -1222,7 +1227,6 @@ func Init(en scm.Env) {
 				limit = 1024
 			}
 			shards := t.ActiveShards()
-			input := int64(t.CountEstimate())
 			if len(shards) == 0 || input == 0 {
 				return scm.NewSlice([]scm.Scmer{
 					scm.NewSlice([]scm.Scmer{scm.NewSymbol("rows"), scm.NewInt(0)}),
@@ -1305,7 +1309,7 @@ func Init(en scm.Env) {
 				scm.NewSlice([]scm.Scmer{scm.NewSymbol("coverage"), scm.NewSymbol("lower_bound")}),
 			})
 		},
-		Type: &scm.TypeDescriptor{Kind: "func", Description: "bounded estimate of visible rows matching a table filter; stops at max_rows and does not log scan telemetry",
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "central filter statistics: learned selectivity first, otherwise one-shard/index estimate when sampling is allowed; feedback rates and index candidate bounds retain distinct coverage",
 			Params: []*scm.TypeDescriptor{
 				{Kind: "any", Label: "tx", Description: "transaction context to use for visibility; usually ((context \"session\") \"__memcp_tx\")"},
 				{Kind: "table", Label: "table"},
@@ -1313,9 +1317,9 @@ func Init(en scm.Env) {
 				{Kind: "list", Label: "accessValues", Description: "flat runtime values referenced by accessSchema", NoEscape: true, CrossGoroutine: true},
 				columnList("condition_cols", "columns passed to the selectivity predicate"),
 				scanCallback("condition", "predicate sampled to estimate matching rows", "bool", "true when the sampled row matches"),
-				{Kind: "int", Label: "max_rows"},
+				{Kind: "number", Label: "max_rows", Description: "0 reads metadata only and returns nil on a miss; positive values bound fallback sampling"},
 			},
-			Return: &scm.TypeDescriptor{Kind: "list"},
+			Return: &scm.TypeDescriptor{Kind: "any"}, HasSideEffects: true,
 		},
 		Optimize: optimizeScanSelectivity,
 	})

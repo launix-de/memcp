@@ -18,6 +18,81 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS afs_check"
 
 test_cases:
+  - name: "Unified estimator reads measured feedback without evaluating the predicate again"
+    scm: |
+      (begin
+        (define tbl (table "memcp-tests" "afs_check"))
+        (define callback (list 'lambda (list 'x) (list '>= 'x 200)))
+        (define access (compile_scan_access '("id") callback))
+        (define values (map (nth access 1) (lambda (v) (eval v))))
+        (scan nil tbl (nth access 0) values '("id") (eval callback) '() scan_count 0 + false)
+        (define forbidden (lambda (x) (error "measured selectivity must not rescan")))
+        (define measured (scan_selectivity_estimate nil tbl (nth access 0) values '("id") forbidden 512))
+        (define metadata (scan_selectivity_estimate nil tbl (nth access 0) values '("id") forbidden 0))
+        (if (and (equal? measured metadata)
+          (equal? (qassoc_get measured 'source nil) 'scan_feedback)
+          (equal? (qassoc_get measured 'value nil) 0.8)
+          (equal? (qassoc_get measured 'rows nil) 800)
+          (equal? (qassoc_get measured 'sampled nil) 0)) true
+          (error "unified estimator failed to reuse measured feedback")))
+    expect:
+      data: [true]
+
+  - name: "Unified estimator preserves unknown bindings and permits bounded fallback explicitly"
+    scm: |
+      (begin
+        (define tbl (table "memcp-tests" "afs_check"))
+        (define callback (list 'lambda (list 'x) (list '>= 'x 201)))
+        (define access (compile_scan_access '("id") callback))
+        (define values (map (nth access 1) (lambda (v) (eval v))))
+        (define unknown (scan_selectivity_estimate nil tbl (nth access 0) values '("id")
+          (lambda (x) (error "metadata miss must not sample")) 0))
+        (define sampled (scan_selectivity_estimate nil tbl (nth access 0) values '("id") (eval callback) 1024))
+        (if (and (nil? unknown)
+          (equal? (qassoc_get sampled 'rows nil) 799)
+          (> (qassoc_get sampled 'sampled 0) 0)) true
+          (error "unified estimator mixed bindings or failed its bounded fallback")))
+    expect:
+      data: [true]
+
+  - name: "Physical source costing consumes the same learned selectivity as reorder"
+    scm: |
+      (begin
+        (define src (list "a" "memcp-tests" "afs_check" false nil))
+        (define predicate (list '>= (list 'get_column "a" false "id" false) 200))
+        (define reorder (join_optimizer_expr_selectivity_estimate (list src) "a" predicate))
+        (define physical (planner_source_filter_estimate src predicate 512 nil nil))
+        (if (and (equal? (qassoc_get reorder 'source nil) 'scan_feedback)
+          (equal? (qassoc_get physical 'source nil) 'scan_feedback)
+          (equal? (qassoc_get reorder 'value nil) (qassoc_get physical 'value nil))
+          (equal? (qassoc_get physical 'estimated_rows nil) 800)
+          (equal? (planner_merge_estimate_coverage
+            (list physical (list (list 'coverage 'exact)))) 'feedback)) true
+          (error "reorder and physical costing did not consume the same measured rate")))
+    expect:
+      data: [true]
+
+  - name: "A different-word length prior must not suppress permitted sampling"
+    scm: |
+      (begin
+        (define tbl (table "memcp-tests" "afs_check"))
+        (define rare (list 'lambda (list 'x) (list 'strlike 'x "%rarexx%" "utf8mb4_general_ci")))
+        (define rare_access (compile_scan_access '("label") rare))
+        (scan_recset nil tbl (nth rare_access 0)
+          (map (nth rare_access 1) (lambda (v) (eval v))) '("label") (eval rare))
+        (define common (list 'lambda (list 'x) (list 'strlike 'x "%common%" "utf8mb4_general_ci")))
+        (define access (compile_scan_access '("label") common))
+        (define values (map (nth access 1) (lambda (v) (eval v))))
+        (define prior (scan_selectivity_estimate nil tbl (nth access 0) values '("label") (eval common) 0))
+        (define measured (scan_selectivity_estimate nil tbl (nth access 0) values '("label") (eval common) 1024))
+        (if (and (equal? (qassoc_get prior 'source nil) 'like_length_histogram)
+          (equal? (qassoc_get prior 'value nil) 0)
+          (equal? (qassoc_get measured 'rows nil) 900)
+          (> (qassoc_get measured 'sampled 0) 0)) true
+          (error "a different-word prior displaced the permitted measurement")))
+    expect:
+      data: [true]
+
   - name: "Complete filter feedback replaces a range constant and participates in plan guards"
     scm: |
       (begin
@@ -56,8 +131,8 @@ test_cases:
         (train "%comm%")
         (define estimate_for (lambda (pattern) (begin
           (define access (access_for pattern))
-          (table_filter_selectivity tbl (nth access 0)
-            (map (nth access 1) (lambda (v) (eval v)))))))
+          (scan_selectivity_estimate nil tbl (nth access 0)
+            (map (nth access 1) (lambda (v) (eval v))) '() (lambda () true) 0))))
         (define interpolated (estimate_for "%com%"))
         (and (equal? (qassoc_get interpolated 'source nil) 'like_length_histogram)
           (equal? (qassoc_get interpolated 'value nil) 0.9)
@@ -73,7 +148,7 @@ test_cases:
         (define access (compile_scan_access '("label") callback))
         (define values (map (nth access 1) (lambda (v) (eval v))))
         (scan nil tbl (nth access 0) values '("label") (eval callback) '() scan_count 0 + false)
-        (define estimate (table_filter_selectivity tbl (nth access 0) values))
+        (define estimate (scan_selectivity_estimate nil tbl (nth access 0) values '() (lambda () true) 0))
         (and (equal? (qassoc_get estimate 'source nil) 'scan_feedback)
           (equal? (qassoc_get estimate 'value nil) 0))))
     expect:
@@ -100,7 +175,7 @@ test_cases:
         (define before_token (table_planner_statistics_token tbl))
         (define before_fingerprint (table_planner_statistics_fingerprint tbl))
         (define matches (recset_count (scan_recset nil tbl (nth access 0) values '("label") (eval callback))))
-        (define estimate (table_filter_selectivity tbl (nth access 0) values))
+        (define estimate (scan_selectivity_estimate nil tbl (nth access 0) values '() (lambda () true) 0))
         (if (and (equal? matches 900)
           (equal? (qassoc_get estimate 'source nil) 'scan_feedback)
           (equal? (qassoc_get estimate 'value nil) 0.9)
