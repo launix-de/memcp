@@ -25,4 +25,6 @@ typedef struct {
 } memcp_result;
 void memcp_result_free(memcp_result *result);
 void *memcp_module(void);
+/* Set before PHP MINIT; zero disables automatic PDO DSN routing. */
+void memcp_set_mysql_port(unsigned int port);
 #endif

@@ -7,6 +7,7 @@ package main
 
 import "fmt"
 import "strings"
+import "github.com/launix-de/memcp/scm"
 
 func startPHP(args []string) error {
 	for _, arg := range args {
@@ -18,3 +19,7 @@ func startPHP(args []string) error {
 }
 
 func stopPHP() {}
+
+func getServePHP(wd string) func(...scm.Scmer) scm.Scmer {
+	return func(a ...scm.Scmer) scm.Scmer { panic("PHP support is not built in; use make php") }
+}

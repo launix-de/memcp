@@ -22,13 +22,24 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 (set static_files (serveStatic "../assets"))
 
+/* Install the application below the SQL/dashboard/RDF wrappers. CLI paths
+resolve against the process working directory, not this module's lib/ folder. */
+(define cli_php_root (arg "serve" nil))
+(define cli_php_handler (if (nil? cli_php_root) nil (begin
+	(if (or (not (string? cli_php_root)) (equal? cli_php_root ""))
+		(error "--serve requires a directory path"))
+	(servePHP (if (equal? (substr cli_php_root 0 1) "/")
+		cli_php_root (concat __CWD__ "/" cli_php_root)) "" "index.php")
+)))
+
 /* this can be overhooked */
 (define http_handler (lambda (req res) (begin
 	(print "request " req)
-	(if (equal? (req "path") "/") (begin
-		((res "header") "Location" "/dashboard")
-		((res "status") 301)
-	) (static_files req res))
+	(if (not (nil? cli_php_handler)) (cli_php_handler req res)
+		(if (equal? (req "path") "/") (begin
+			((res "header") "Location" "/dashboard")
+			((res "status") 301)
+		) (static_files req res)))
 	/*
 	((res "header") "Content-Type" "text/plain")
 	((res "status") 404)

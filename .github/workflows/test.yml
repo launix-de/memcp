@@ -69,6 +69,11 @@ jobs:
           --mariadb-port=3306
           --mysqldump=mariadb-dump
 
+  php:
+    needs: [changes, test]
+    if: ${{ needs.changes.outputs.php == 'true' }}
+    uses: ./.github/workflows/php.yml
+
   packaging:
     needs: [changes, test]
     if: ${{ needs.changes.outputs.relevant == 'true' }}

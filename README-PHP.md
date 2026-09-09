@@ -4,7 +4,7 @@
 
 MemCP can optionally host PHP applications in its own process using the
 versioned FrankenPHP Go library. The host is application-independent: choose
-an application's document root, listen address, thread count, and optional
+an application's document root, URL mount, thread count, and optional
 front controller. WordPress is one example; other PHP applications can use the
 same host and their usual PHP extensions.
 
@@ -34,21 +34,63 @@ PHP build requirements. The shared Go module graph now requires Go 1.26 due
 to FrankenPHP. The PHP build disables optional Watcher, Brotli and Mercure
 features; no Caddy dependency is added.
 
-## Serve an application
+## Mount applications from Scheme
+
+For a single application, the standard Scheme bootstrap accepts a document root
+relative to the current working directory (or an absolute path):
+
+```sh
+./memcp-php --serve /srv/my-app/public --api-port=8080 --mysql-port=3307
+```
+
+`--serve=PATH` is equivalent. `lib/main.scm` installs the PHP folder at `/`
+with `index.php` as front controller, below the existing SQL/dashboard/RDF
+handlers. `/dashboard`, its API/WebSocket routes, and the SQL API remain
+available with their normal authentication. No application-specific Scheme
+module is needed for this mode.
+
+`servePHP` returns a `(req res)` handler, just like `serveStatic`. It creates no
+listener. Mount any number of applications in the existing Scheme HTTP router;
+all mounts share the process-wide FrankenPHP thread pool.
+
+For example, place this in a Scheme module loaded after `lib/main.scm`:
+
+```scheme
+(define blog (servePHP "/srv/blog/public" "/blog" "index.php"))
+(define wiki (servePHP "/srv/wiki" "/wiki" "index.php"))
+(define http_handler (begin
+    (define previous http_handler)
+    (lambda (req res)
+        (match (req "path")
+            (regex "^/blog(/|$)" _ _) (blog req res)
+            (regex "^/wiki(/|$)" _ _) (wiki req res)
+            _ (previous req res)))))
+```
 
 ```sh
 ./memcp-php --no-repl -data /path/to/persistent/memcp-data \
-  --php-root=/path/to/application/public \
-  --php-listen=127.0.0.1:8080 --php-threads=4 \
-  --php-front-controller=index.php lib/main.scm
+  --api-port=8080 --php-threads=4 lib/main.scm /path/to/apps.scm
 ```
 
-Use the application's actual public directory. Without `--php-front-controller`,
-missing files return 404. Existing directories use `index.php` or `index.html`; PHP `PATH_INFO` is supported. Static files
-are served from the document root. Dotfiles, PHP source backups, and symlinks
-outside the root are rejected. The PHP listener is separate from the SQL API;
-it binds to loopback by default. Configure an HTTPS reverse proxy when exposing
-it remotely. SIGTERM/SIGINT drains PHP before shutting down storage.
+The arguments are document root, optional URL prefix, and optional fallback PHP
+filename. Relative roots resolve against the importing Scheme file. An empty
+prefix mounts at `/`; without a fallback, missing files return 404. For an
+independent listener, explicitly call `(serve port app_handler)` from Scheme,
+using the same HTTP machinery as every other handler. Its optional third
+argument binds an address, e.g. `(serve 8080 app_handler "127.0.0.1")`.
+The former
+`--php-root`, `--php-listen` and `--php-front-controller` options are removed.
+
+PHP receives the original request URI, query, body, cookies and headers;
+`SCRIPT_NAME` and `PHP_SELF` include the mount prefix, while script lookup stays
+inside the configured document root. Existing directories use `index.php` or
+`index.html`, and PHP `PATH_INFO` is supported. Static assets remain within the
+root; dotfiles, PHP source backups and escaping symlinks are rejected. Routing
+and HTTP authentication can run in Scheme before invoking the PHP handler.
+
+The shared PHP runtime starts lazily after Scheme bootstrap, on its first
+request. `--php-threads` configures its fixed thread count. SIGTERM/SIGINT drains
+the Scheme HTTP servers before shutting down PHP and storage.
 
 The host uses classic PHP request lifecycles. Request globals and ordinary
 objects are released after each request; OPcache stays warm. Long-lived PHP
@@ -57,14 +99,30 @@ crashes affect the entire process, including MemCP.
 
 ## PDO connections
 
-The addon registers **only `memcp:`**. It neither replaces `PDO` nor intercepts
-other DSNs. Existing driver extensions continue to resolve their own schemes:
+The addon registers **only `memcp:`** and leaves other driver registrations
+intact. It also routes a narrow set of local MySQL DSNs at base `PDO` connection
+construction, before the original constructor selects a driver:
 
 ```php
 $local = new PDO('memcp:dbname=shop', $user, $password);
 $mysql = new PDO('mysql:host=db.example;dbname=shop', $user, $password);
 $sqlite = new PDO('sqlite:/path/to/cache.sqlite');
 ```
+
+A base `new PDO(...)` or `PDO::connect(...)` using
+`mysql:host=127.0.0.1;port=3307;dbname=shop` automatically selects the RAM path
+if 3307 is this process's successfully started, Scheme-registered MySQL port.
+The exact hostname `localhost` also matches. Host, port and database must all
+be explicit; optional `charset=utf8mb4` or `charset=utf8` is accepted.
+The resulting PDO driver name is `memcp`, and the same username/password
+authentication applies. The caller's DSN string is preserved.
+
+Other hosts/ports, Unix sockets, omitted/ambiguous DSN fields, other charsets,
+driver-specific options, timeouts, native-prepare requests and persistent connections
+retain native PDO behavior. PDO subclasses (including `Pdo\Mysql`) retain
+their original behavior too. The constructor dispatch is installed once during
+PHP module initialization, before request threads start; no handler pointers
+change while requests execute. No external source is patched.
 
 Create the MemCP database and account using the existing SQL administration
 interface before connecting. Authentication uses MemCP's user catalog, and
@@ -80,35 +138,68 @@ hex literals. They do not yet provide native parameter binding or persistent
 connections; unsupported modes fail explicitly. Values retain MemCP's runtime
 numeric types (an integral SQL literal may be a PHP float).
 
-Results are buffered with a 64 MiB limit per result and copied into C-owned
-memory in one batch. Strings retain arbitrary bytes. Use SQL pagination for
-larger results. SQL execution has a 30-second timeout. Connections have separate
-sessions, appear in the process list, and roll back unfinished transactions on
-close. PDO teardown also runs after PHP exceptions. This is an initial driver,
-not a claim of compatibility with every framework-specific PDO attribute.
+### Result callbacks and sessions
+
+Every `new PDO('memcp:...', user, password)` authenticates against `mysql_auth`
+before a connection handle is created. An HTTP login or PHP session does not
+bypass this check. Database existence is checked separately, and every query
+uses the existing SQL permission checks for that authenticated username.
+
+Each PDO connection owns a separate Scheme session initialized with `username`
+and `schema`, plus a registered `SessionState`. Neither is borrowed from the
+HTTP request's `__session` or from PHP's `$_SESSION`. Transactions, connection
+variables and insert IDs therefore belong to the PDO connection. Persistent
+PDO connections are not supported.
+
+The Go bridge creates stable row/metadata callback closures when the connection
+is opened and wraps them with `scm.NewFunc`. On each query it calls the existing
+Scheme `mysql_handler` with `(schema, sql, resultrow_sql, resultfields_sql,
+connection_session, session_state, query_sequence)`. SQL result execution calls
+these supplied closures; no global result handler is replaced.
+
+A connection mutex serializes query/close. The result collector has a separate
+mutex because storage workers may invoke the row callback concurrently. The
+synchronous SQL call completes its workers before the collector is copied and
+reset. Reusable cell/byte buffers are each bounded to 64 KiB of retained capacity;
+larger buffers are released after the query. Metadata keys are cleared between
+queries. Rows are written directly into the collector's flat cell array.
+
+Results are limited to 64 MiB and copied into independent C-owned memory in one
+batch. Existing PDO statements retain their own data when another query reuses
+the collector; fetching rows never calls back into Go. Strings preserve arbitrary
+bytes. Use SQL pagination for larger results. The 30-second query timeout,
+process-list tracking, cancellation and transaction handling remain active.
+Closing a connection rolls back unfinished transactions, releases its locks and
+unregisters its session, including during request teardown after PHP exceptions.
 
 Applications or ORMs that recognize only specific PDO driver names may need a
 MemCP/MySQL-dialect adapter. Applications using `mysqli`, including unmodified
 WordPress, can instead use MemCP's existing MySQL TCP/Unix socket frontend.
 That path uses the MySQL protocol even though PHP runs in the same process.
-A native PDO driver alone cannot transparently replace `mysqli`.
+The normal MySQL host/port/username/password installer fields work with this
+wire frontend; neither application needs a MemCP-specific DSN. PDO constructor
+routing does **not** accelerate `mysqli`: that additionally requires integration
+with mysqlnd.
 
 ## Verification
 
-Install `pdo_sqlite` alongside PDO in the ZTS build, then run:
+Install `pdo_sqlite` and `pdo_mysql` alongside PDO in the ZTS build, then run:
 
 ```sh
 make test-php PHP_CONFIG=/path/to/php-zts/bin/php-config
-make test
 ```
 
 `test-php` creates a disposable server and database. It checks ZTS/OPcache,
-coexistence with SQLite, authentication failures, binary parameters, request
-teardown rollback, independent parallel requests, and HTTP file boundaries.
+coexistence with MySQL wire and SQLite, authentication failures, binary
+parameters, request teardown rollback, independent parallel requests, and HTTP
+file boundaries. It also checks multiple Scheme mounts, POST/cookies/headers,
+independent statement buffers and concurrent result callbacks. Full SQL tests
+run in CI; the PHP job depends on the successful SQL job and a PHP-related path
+guard.
 It contains only our own PHP test fixtures and does not download applications.
 
 For a WordPress demonstration, download WordPress and WP-CLI into a directory
 outside the checkout. Configure a dedicated persistent MemCP database and
-Unix socket in `wp-config.php`, set the PHP document root to the WordPress
-directory, and run the normal WordPress installer. Keep credentials, uploaded
-files, and the MemCP data directory outside the source tree.
+Unix socket in `wp-config.php`, mount the WordPress directory with `servePHP`
+in a Scheme module, and run the normal WordPress installer. Keep credentials,
+uploaded files, and the MemCP data directory outside the source tree.

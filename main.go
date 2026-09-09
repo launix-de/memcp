@@ -590,6 +590,7 @@ func getImport(path string) func(a ...scm.Scmer) scm.Scmer {
 				"watch":       scm.NewFunc(getWatch(wd)),
 				"readfile":    scm.NewFunc(getReadfile(wd)),
 				"serveStatic": scm.NewFunc(scm.HTTPStaticGetter(wd)),
+				"servePHP":    scm.NewFunc(getServePHP(wd)),
 			},
 			VarsNumbered: nil,
 			Outer:        &IOEnv,
@@ -724,9 +725,13 @@ func (i *arrayFlags) Set(value string) error {
 }
 
 func setupIO(wd string) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		panic(err)
+	}
 	// define some IO functions (scm will not provide them since it is sandboxable)
 	IOEnv = scm.Env{
-		Vars:         scm.Vars{},
+		Vars:         scm.Vars{"__CWD__": scm.NewString(cwd)},
 		VarsNumbered: nil,
 		Outer:        &scm.Globalenv,
 		Nodefine:     true, // other defines go into Globalenv
@@ -874,6 +879,7 @@ func setupIO(wd string) {
 			Params: []*scm.TypeDescriptor{
 				{Kind: "number", Label: "port", Description: "port number for HTTP server"},
 				{Kind: "func", Label: "handler", Description: "handler that processes each HTTP request", Params: []*scm.TypeDescriptor{{Kind: "any", Label: "req", Description: "HTTP request object"}, {Kind: "any", Label: "res", Description: "HTTP response object"}}, Return: &scm.TypeDescriptor{Kind: "any", Label: "result", Description: "handler result"}},
+				{Kind: "string", Label: "host", Description: "optional bind address; defaults to all interfaces", Optional: true},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
@@ -900,6 +906,25 @@ func setupIO(wd string) {
 				{Kind: "string", Label: "directory", Description: "folder with the files to serve"},
 			},
 			Return: &scm.TypeDescriptor{Kind: "func", Label: "handler", Description: "HTTP handler that serves files from the configured directory",
+				Params: []*scm.TypeDescriptor{
+					{Kind: "any", Label: "req", Description: "HTTP request object"},
+					{Kind: "any", Label: "res", Description: "HTTP response object"},
+				},
+				Return: &scm.TypeDescriptor{Kind: "any", Label: "result", Description: "handler result"},
+			},
+		},
+	})
+	scm.Declare(&IOEnv, &scm.Declaration{
+		Name: "servePHP",
+
+		Fn: getServePHP(wd),
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "creates a PHP HTTP handler for use with serve", HasSideEffects: true,
+			Params: []*scm.TypeDescriptor{
+				{Kind: "string", Label: "directory", Description: "application document root, relative to this Scheme file"},
+				{Kind: "string", Label: "prefix", Description: "URL mount prefix", Optional: true},
+				{Kind: "string", Label: "front_controller", Description: "optional fallback PHP script", Optional: true},
+			},
+			Return: &scm.TypeDescriptor{Kind: "func", Label: "handler", Description: "HTTP handler that serves PHP and static files from the configured directory",
 				Params: []*scm.TypeDescriptor{
 					{Kind: "any", Label: "req", Description: "HTTP request object"},
 					{Kind: "any", Label: "res", Description: "HTTP response object"},
@@ -1215,11 +1240,8 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  --mysql-socket=PATH    Unix socket path (default /tmp/memcp.sock, empty to disable)\n")
 		fmt.Fprintf(os.Stderr, "  --root-password-file=PATH  Read the initial root password from a file\n")
 		fmt.Fprintf(os.Stderr, "  --disable-mysql        Disable MySQL protocol server\n")
-		fmt.Fprintf(os.Stderr, "\nOptional PHP host (make php):\n")
-		fmt.Fprintf(os.Stderr, "  --php-root=PATH        Application document root\n")
-		fmt.Fprintf(os.Stderr, "  --php-listen=ADDRESS   HTTP listen address (default 127.0.0.1:8080)\n")
+		fmt.Fprintf(os.Stderr, "  --serve PATH           Mount a PHP application at /; keep /dashboard (make php)\n")
 		fmt.Fprintf(os.Stderr, "  --php-threads=N        PHP threads (default 4)\n")
-		fmt.Fprintf(os.Stderr, "  --php-front-controller=FILE  Optional fallback PHP script\n")
 		fmt.Fprintf(os.Stderr, "... and much more (please refer to your module's documentation)\n\n")
 	}
 
@@ -1250,6 +1272,12 @@ func main() {
 		} else if len(arg) > 2 && arg[:2] == "--" {
 			// This is a long flag for Scheme - don't treat as import file
 			schemeArgs = append(schemeArgs, arg)
+			// Preserve the separate PATH token for Scheme, not as an import.
+			// lib/main.scm owns validation and mounting.
+			if arg == "--serve" && i+2 < len(os.Args) && !strings.HasPrefix(os.Args[i+2], "-") {
+				schemeArgs = append(schemeArgs, os.Args[i+2])
+				skipNext = true
+			}
 		} else if len(arg) > 1 && arg[0] == '-' {
 			// This looks like a short flag but we don't recognize it - also for Scheme
 			schemeArgs = append(schemeArgs, arg)
@@ -1445,9 +1473,9 @@ func cronroutine() {
 
 func exitroutine() {
 	exitOnce.Do(func() {
-		stopPHP()
 		drainSecs := storage.Settings.ShutdownDrainSeconds
 		scm.ShutdownServers(drainSecs)
+		stopPHP()
 		exitsignal <- true
 		exitable.Wait()
 		fmt.Println("Exit procedure...")

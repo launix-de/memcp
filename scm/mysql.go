@@ -145,11 +145,11 @@ type MySQLWrapper struct {
 }
 
 func mysqlScmSession(session *driver.Session) Scmer {
-	if scmSessionAny, ok := mysqlsessions.Load(session.ID()); ok {
+	if scmSessionAny, ok := mysqlsessions.Load(session); ok {
 		return NewFunc(scmSessionAny.(func(...Scmer) Scmer))
 	}
 	newSession := NewSession().Func()
-	mysqlsessions.Store(session.ID(), newSession)
+	mysqlsessions.Store(session, newSession)
 	return NewFunc(newSession)
 }
 
@@ -157,14 +157,16 @@ func withMySQLScmSession(session *driver.Session, fn func()) {
 	fn()
 }
 
-/* session storage -> map from session id to SCM session object */
+// Protocol connection IDs are only unique within one listener. Key both maps
+// by the connection object so TCP/Unix listeners cannot overwrite or delete
+// each other's sessions. Entries are removed by SessionClosed.
 var mysqlsessions sync.Map
 
-// mysqlStates maps driver session ID -> *SessionState for SHOW PROCESSLIST
+// mysqlStates maps *driver.Session -> *SessionState for SHOW PROCESSLIST
 var mysqlStates sync.Map
 
 func refreshMySQLSessionProcesslistMeta(session *driver.Session) {
-	if v, ok := mysqlStates.Load(session.ID()); ok {
+	if v, ok := mysqlStates.Load(session); ok {
 		ss := v.(*SessionState)
 		if user := session.User(); user != "" {
 			ss.User = user
@@ -183,9 +185,9 @@ func (m *MySQLWrapper) SetServerVersion() {
 }
 func (m *MySQLWrapper) NewSession(session *driver.Session) {
 	m.log.Info("%s", "New Session from "+session.Addr())
-	mysqlsessions.Store(session.ID(), NewSession().Func())
+	mysqlsessions.Store(session, NewSession().Func())
 	ss := RegisterSession(session.User(), session.Addr(), session.Schema())
-	mysqlStates.Store(session.ID(), ss)
+	mysqlStates.Store(session, ss)
 	refreshMySQLSessionProcesslistMeta(session)
 }
 func (m *MySQLWrapper) SessionInc(session *driver.Session) {
@@ -196,8 +198,8 @@ func (m *MySQLWrapper) SessionDec(session *driver.Session) {
 }
 func (m *MySQLWrapper) SessionClosed(session *driver.Session) {
 	m.log.Info("%s", "Closed Session "+session.User()+" from "+session.Addr())
-	mysqlsessions.Delete(session.ID())
-	if v, ok := mysqlStates.LoadAndDelete(session.ID()); ok {
+	mysqlsessions.Delete(session)
+	if v, ok := mysqlStates.LoadAndDelete(session); ok {
 		st := v.(*SessionState)
 		st.ReleaseAllLocks()
 		UnregisterSession(st.ID)
@@ -390,7 +392,7 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 	var querySeq uint64
 	queryCtx, queryCancel := context.WithCancel(context.Background())
 	defer queryCancel()
-	if v, ok := mysqlStates.Load(session.ID()); ok {
+	if v, ok := mysqlStates.Load(session); ok {
 		ss = v.(*SessionState)
 		refreshMySQLSessionProcesslistMeta(session)
 		ss.Touch()
@@ -475,7 +477,7 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 		bufferedRowCount = 0
 	}
 	// load scm session object
-	scmSessionAny, _ := mysqlsessions.Load(session.ID())
+	scmSessionAny, _ := mysqlsessions.Load(session)
 	// result from scheme
 	sessionFunc := scmSessionAny.(func(...Scmer) Scmer)
 	scmSessionScmer := NewFunc(sessionFunc)
