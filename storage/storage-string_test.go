@@ -16,15 +16,12 @@ Copyright (C) 2023-2026  Carl-Philip Hänsch
 */
 package storage
 
-import (
-	"bytes"
-	"encoding/binary"
-	"fmt"
-	"sync"
-	"testing"
-
-	"github.com/launix-de/memcp/scm"
-)
+import "fmt"
+import "sync"
+import "bytes"
+import "testing"
+import "encoding/binary"
+import "github.com/launix-de/memcp/scm"
 
 // buildStringColumn runs the full StorageString pipeline for the given strings
 // and returns the finished column ready for GetValue.
@@ -72,7 +69,7 @@ func TestFormatSelection(t *testing.T) {
 				"d41d8cd98f00b204e9800998ecf8427e",
 				"098f6bcd4621d373cade4e832627b4f6",
 			},
-			want: FormatHexLower,
+			want: FormatOrderedHexLower,
 		},
 		{
 			name: "hex uppercase",
@@ -80,7 +77,7 @@ func TestFormatSelection(t *testing.T) {
 				"D41D8CD98F00B204E9800998ECF8427E",
 				"098F6BCD4621D373CADE4E832627B4F6",
 			},
-			want: FormatHexUpper,
+			want: FormatOrderedHexUpper,
 		},
 		{
 			name: "phone with spaces and slashes",
@@ -88,7 +85,7 @@ func TestFormatSelection(t *testing.T) {
 				"+49 30 123456",
 				"0800/123 456",
 			},
-			want: FormatPhone,
+			want: FormatOrderedPhone,
 		},
 		{
 			name: "DTMF sequences",
@@ -96,7 +93,7 @@ func TestFormatSelection(t *testing.T) {
 				"*100#",
 				"+49123*456#",
 			},
-			want: FormatPhoneDTMF,
+			want: FormatOrderedPhoneDTMF,
 		},
 		{
 			name: "decimal / scientific notation",
@@ -105,7 +102,7 @@ func TestFormatSelection(t *testing.T) {
 				"-1,23e+10",
 				"42.0",
 			},
-			want: FormatDecimal,
+			want: FormatOrderedDecimal,
 		},
 		{
 			name: "ISO 8601 datetime",
@@ -113,7 +110,7 @@ func TestFormatSelection(t *testing.T) {
 				"2024-03-07 15:30:00",
 				"2023-12-31T23:59:59",
 			},
-			want: FormatDateTime,
+			want: FormatOrderedDateTime,
 		},
 		{
 			name: "raw (mixed content)",
@@ -374,9 +371,9 @@ func TestNibbleOddLength(t *testing.T) {
 		inputs []string
 		format StringFormat
 	}{
-		{[]string{"+4", "+49", "+490", "+4900"}, FormatPhone},
-		{[]string{"1.2", "3.14", "31.4"}, FormatDecimal},
-		{[]string{"2024-3", "2024-03", "2024-03-7"}, FormatDateTime},
+		{[]string{"+4", "+49", "+490", "+4900"}, FormatOrderedPhone},
+		{[]string{"1.2", "3.14", "31.4"}, FormatOrderedDecimal},
+		{[]string{"2024-3", "2024-03", "2024-03-7"}, FormatOrderedDateTime},
 	} {
 		s := buildStringColumn(tc.inputs)
 		if s.format != tc.format {

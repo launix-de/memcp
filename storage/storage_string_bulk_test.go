@@ -16,12 +16,10 @@ Copyright (C) 2026  Carl-Philip Hänsch
 */
 package storage
 
-import (
-	"math/rand"
-	"testing"
-
-	"github.com/launix-de/memcp/scm"
-)
+import "fmt"
+import "testing"
+import "math/rand"
+import "github.com/launix-de/memcp/scm"
 
 // stringBulkFixtures builds one StorageString per StringFormat by cycling a
 // small set of format-valid sample values (with occasional NULLs), so the
@@ -39,22 +37,22 @@ func stringBulkFixtures(n int) []struct {
 		want    StringFormat
 		samples []string
 	}{
-		{"HexLower", FormatHexLower, []string{
+		{"HexLower", FormatOrderedHexLower, []string{
 			"d41d8cd98f00b204e9800998ecf8427e", "098f6bcd4621d373cade4e832627b4f6", "0123456789abcdef",
 		}},
-		{"HexUpper", FormatHexUpper, []string{
+		{"HexUpper", FormatOrderedHexUpper, []string{
 			"D41D8CD98F00B204E9800998ECF8427E", "098F6BCD4621D373CADE4E832627B4F6", "0123456789ABCDEF",
 		}},
-		{"Phone", FormatPhone, []string{
+		{"Phone", FormatOrderedPhone, []string{
 			"+49 30 123456", "0800/123 456", "(030) 123-456",
 		}},
-		{"PhoneDTMF", FormatPhoneDTMF, []string{
+		{"PhoneDTMF", FormatOrderedPhoneDTMF, []string{
 			"*100#", "+49123*456#", "(1)2*3#",
 		}},
-		{"Decimal", FormatDecimal, []string{
+		{"Decimal", FormatOrderedDecimal, []string{
 			"3.14", "-1,23e+10", "42.0", "0.0001",
 		}},
-		{"DateTime", FormatDateTime, []string{
+		{"DateTime", FormatOrderedDateTime, []string{
 			"2024-03-07 15:30:00", "2023-12-31T23:59:59", "2020-01-01 00:00:00",
 		}},
 		{"UUIDLower", FormatUUIDLower, []string{
@@ -390,4 +388,36 @@ func BenchmarkPrefixPerRowVsBulk(b *testing.B) {
 			s.GetValueMulti(recids, target, 1)
 		}
 	})
+}
+
+// BenchmarkStringNibbleDecode isolates parity/offset handling from allocations
+// and column-reader setup. It also covers persisted legacy nibble order.
+func BenchmarkStringNibbleDecode(b *testing.B) {
+	for _, n := range []int{3, 16, 64, 1024} {
+		for _, off := range []int{0, 1} {
+			for _, format := range []StringFormat{FormatHexLower, FormatOrderedHexLower} {
+				data := make([]byte, (n+off+1)/2)
+				for i := range data {
+					data[i] = byte(i)
+				}
+				dst := make([]byte, n)
+				cs := nibbleCharsetFor(format)
+				b.Run(fmt.Sprintf("length%d/offset%d/format%d", n, off, format), func(b *testing.B) {
+					b.ReportAllocs()
+					b.SetBytes(int64(n))
+					for i := 0; i < b.N; i++ {
+						writeNibblesInto(dst, &data[0], off, cs)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestStringNibbleDecodeEmpty(t *testing.T) {
+	for _, format := range []StringFormat{FormatHexLower, FormatOrderedHexLower} {
+		for _, offset := range []int{0, 1} {
+			writeNibblesInto(nil, nil, offset, nibbleCharsetFor(format))
+		}
+	}
 }
