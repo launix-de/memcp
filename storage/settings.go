@@ -16,21 +16,25 @@ Copyright (C) 2024-2026  Carl-Philip Hänsch
 */
 package storage
 
-import (
-	"bufio"
-	"encoding/json"
-	"os"
-	"path/filepath"
-	"strconv"
-	"strings"
-	"sync"
-	"time"
-
-	"github.com/dc0d/onexit"
-	"github.com/launix-de/memcp/scm"
-)
+import "os"
+import "fmt"
+import "sync"
+import "time"
+import "bufio"
+import "strconv"
+import "strings"
+import "encoding/json"
+import "path/filepath"
+import "github.com/dc0d/onexit"
+import "github.com/launix-de/memcp/scm"
 
 type SettingsT struct {
+	PHPThreads             int64 // Global PHP startup setting; changes require a restart.
+	PHPMemoryLimit         int64 // Global PHP startup setting; changes require a restart.
+	PHPMaxWaitMilliseconds int64 // Global PHP startup setting; changes require a restart.
+	PHPOutputBuffer        int64 // Global PHP startup setting; changes require a restart.
+	PHPOpcacheMemory       int64 // Global PHP startup setting; changes require a restart.
+
 	Backtrace              bool
 	Trace                  bool
 	TracePrint             bool
@@ -130,6 +134,12 @@ func (r CreateTableTriggerRegistration) triggerDescription() TriggerDescription 
 }
 
 var Settings = SettingsT{
+	PHPThreads:             4,
+	PHPMemoryLimit:         1073741824,
+	PHPMaxWaitMilliseconds: 30000,
+	PHPOutputBuffer:        4096,
+	PHPOpcacheMemory:       536870912,
+
 	PartitionMaxDimensions: 10,
 	DefaultEngine:          "safe",
 	ShardSize:              60000,
@@ -138,6 +148,32 @@ var Settings = SettingsT{
 	ExplainWidth:           20,
 	JoinReorderDPBudget:    256,
 }
+
+// settingsMu serializes settings API changes and PHP startup snapshots.
+var settingsMu sync.Mutex
+
+// PHPConfig holds one consistent snapshot for initializing the shared PHP runtime.
+type PHPConfig struct {
+	Threads, MemoryLimit, MaxWaitMilliseconds, OutputBuffer, OpcacheMemory int64
+}
+
+func PHPStartupSettings() PHPConfig {
+	settingsMu.Lock()
+	defer settingsMu.Unlock()
+	return PHPConfig{Settings.PHPThreads, Settings.PHPMemoryLimit, Settings.PHPMaxWaitMilliseconds, Settings.PHPOutputBuffer, Settings.PHPOpcacheMemory}
+}
+
+func validatePHPSetting(key string, value scm.Scmer, minimum, maximum int64) int64 {
+	if !value.IsInt() && !value.IsFloat() {
+		panic(key + " requires a numeric value")
+	}
+	n := scm.ToFloat(value)
+	if n < float64(minimum) || n > float64(maximum) || n != float64(int64(n)) {
+		panic(fmt.Sprintf("%s must be a whole number between %d and %d", key, minimum, maximum))
+	}
+	return int64(n)
+}
+
 var createTableTriggerMu sync.Mutex
 
 func registerCreateTableTrigger(reg CreateTableTriggerRegistration) {
@@ -188,9 +224,17 @@ func InitSettings() {
 }
 
 func ChangeSettings(a ...scm.Scmer) scm.Scmer {
+	settingsMu.Lock()
+	defer settingsMu.Unlock()
 	// schema, filename
 	if len(a) == 0 {
 		return scm.NewSlice([]scm.Scmer{
+			scm.NewString("PHPThreads"), scm.NewInt(Settings.PHPThreads),
+			scm.NewString("PHPMemoryLimit"), scm.NewInt(Settings.PHPMemoryLimit),
+			scm.NewString("PHPMaxWaitMilliseconds"), scm.NewInt(Settings.PHPMaxWaitMilliseconds),
+			scm.NewString("PHPOutputBuffer"), scm.NewInt(Settings.PHPOutputBuffer),
+			scm.NewString("PHPOpcacheMemory"), scm.NewInt(Settings.PHPOpcacheMemory),
+
 			scm.NewString("Backtrace"), scm.NewBool(Settings.Backtrace),
 			scm.NewString("Trace"), scm.NewBool(Settings.Trace),
 			scm.NewString("TracePrint"), scm.NewBool(Settings.TracePrint),
@@ -220,6 +264,16 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 		})
 	} else if len(a) == 1 {
 		switch scm.String(a[0]) {
+		case "PHPThreads":
+			return scm.NewInt(Settings.PHPThreads)
+		case "PHPMemoryLimit":
+			return scm.NewInt(Settings.PHPMemoryLimit)
+		case "PHPMaxWaitMilliseconds":
+			return scm.NewInt(Settings.PHPMaxWaitMilliseconds)
+		case "PHPOutputBuffer":
+			return scm.NewInt(Settings.PHPOutputBuffer)
+		case "PHPOpcacheMemory":
+			return scm.NewInt(Settings.PHPOpcacheMemory)
 		case "Backtrace":
 			return scm.NewBool(Settings.Backtrace)
 		case "Trace":
@@ -277,6 +331,16 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 		}
 	} else {
 		switch scm.String(a[0]) {
+		case "PHPThreads":
+			Settings.PHPThreads = validatePHPSetting("PHPThreads", a[1], 1, 1024)
+		case "PHPMemoryLimit":
+			Settings.PHPMemoryLimit = validatePHPSetting("PHPMemoryLimit", a[1], 8388608, 9007199254740991)
+		case "PHPMaxWaitMilliseconds":
+			Settings.PHPMaxWaitMilliseconds = validatePHPSetting("PHPMaxWaitMilliseconds", a[1], 0, 86400000)
+		case "PHPOutputBuffer":
+			Settings.PHPOutputBuffer = validatePHPSetting("PHPOutputBuffer", a[1], 0, 2147483647)
+		case "PHPOpcacheMemory":
+			Settings.PHPOpcacheMemory = validatePHPSetting("PHPOpcacheMemory", a[1], 33554432, 1099511627776)
 		case "Backtrace":
 			scm.SettingsHaveGoodBacktraces = Settings.Backtrace
 			Settings.Backtrace = scm.ToBool(a[1])

@@ -532,7 +532,8 @@ body{display:flex;flex-direction:column}
 <tbody></tbody>
 </table>
 </div>
-<div class="settings-status" id="settings-status"></div>
+<p class="desc">Memory sizes accept MB (decimal) and MiB (binary), for example 10MB or 1GiB. Press Enter or leave a field to apply it. Settings are written to disk when MemCP shuts down cleanly.</p>
+<div class="settings-status" id="settings-status" role="status"></div>
 <div class="settings-grid" id="settings-grid"></div>
 <div class="detail-section" style="margin-top:28px">
 <h3>Storage Failure Hooks</h3>
@@ -1355,41 +1356,48 @@ renderStorageFailureHooks();
 
 /* settings grouped by topic */
 var settingsGroups=[
+{group:"PHP (changes require a restart)",items:[
+{key:"PHPMemoryLimit",label:"Memory per request",desc:"Includes retained PDO results. Minimum 8 MiB; default 1 GiB.",type:"bytes",min:8388608},
+{key:"PHPOpcacheMemory",label:"Shared opcode cache",desc:"Shared by all PHP requests. Minimum 32 MiB; rounded up to whole MiB.",type:"bytes",min:33554432},
+{key:"PHPThreads",label:"Concurrent PHP requests",desc:"Global thread limit. Additional requests wait.",type:"number",min:1},
+{key:"PHPMaxWaitMilliseconds",label:"Queue timeout (milliseconds)",desc:"Wait for a free PHP thread before HTTP 503. 0 waits indefinitely.",type:"number",min:0},
+{key:"PHPOutputBuffer",label:"Output buffer per request",desc:"0 disables buffering.",type:"bytes",min:0}
+]},
 {group:"Memory",items:[
-{key:"MaxRamPercent",desc:"Total memory budget (% of system RAM, 0=50%)",type:"number"},
-{key:"MaxRamBytes",desc:"Override total budget in bytes (0=use percent)",type:"number"},
-{key:"MaxPersistPercent",desc:"Persisted shard budget (% of RAM, 0=30%)",type:"number"},
-{key:"MaxPersistBytes",desc:"Override persisted budget in bytes (0=use percent)",type:"number"}
+{key:"MaxRamPercent",label:"Total memory (% of RAM)",desc:"Total memory budget (% of system RAM, 0=50%)",type:"number"},
+{key:"MaxRamBytes",label:"Total memory limit",desc:"Override total budget (0 uses the percentage)",type:"bytes",min:0},
+{key:"MaxPersistPercent",label:"Persisted data cache (% of RAM)",desc:"Persisted shard budget (% of RAM, 0=30%)",type:"number"},
+{key:"MaxPersistBytes",label:"Persisted data cache limit",desc:"Override persisted data budget (0 uses the percentage)",type:"bytes",min:0}
 ]},
 {group:"Storage",items:[
-{key:"ShardSize",desc:"Max rows per shard before splitting",type:"number"},
-{key:"PartitionMaxDimensions",desc:"Max partition dimensions for table sharding",type:"number"},
-{key:"DefaultEngine",desc:"Default storage engine for new tables",type:"select",options:["safe","logged","sloppy","memory"]}
+{key:"ShardSize",label:"Target rows per shard",desc:"Max rows per shard before splitting",type:"number"},
+{key:"PartitionMaxDimensions",label:"Maximum partition dimensions",desc:"Max partition dimensions for table sharding",type:"number"},
+{key:"DefaultEngine",label:"Default storage engine",desc:"Default storage engine for new tables",type:"select",options:["safe","logged","sloppy","memory"]}
 ]},
 {group:"Query Optimizer",items:[
-{key:"AnalyzeMinItems",desc:"Min table size for cardinality estimation",type:"number"},
-{key:"IndexThreshold",desc:"Min shard rows before creating an adaptive index (0=5); below this a full scan is cheaper",type:"number"},
-{key:"ExplainWidth",desc:"Max chars per expression before EXPLAIN expands to multiple lines (default 20)",type:"number"}
+{key:"AnalyzeMinItems",label:"Minimum rows for analysis",desc:"Min table size for cardinality estimation",type:"number"},
+{key:"IndexThreshold",label:"Index creation threshold",desc:"Min shard rows before creating an adaptive index (0=5); below this a full scan is cheaper",type:"number"},
+{key:"ExplainWidth",label:"EXPLAIN line width",desc:"Max chars per expression before EXPLAIN expands to multiple lines (default 20)",type:"number"}
 ]},
 {group:"Metrics",items:[
-{key:"MetricsTracing",desc:"Periodically record metrics to system_statistic.perf_metrics",type:"bool"},
-{key:"MetricsTracingInterval",desc:"Metrics sampling interval in seconds (0=60s)",type:"number"}
+{key:"MetricsTracing",label:"Record performance metrics",desc:"Periodically record metrics to system_statistic.perf_metrics",type:"bool"},
+{key:"MetricsTracingInterval",label:"Metrics interval (seconds)",desc:"Metrics sampling interval in seconds (0=60s)",type:"number"}
 ]},
 {group:"Error Log",items:[
-{key:"ErrorQueryLog",desc:"Log failed queries to system_statistic.errors (view in Errors tab)",type:"bool"},
-{key:"MaxErrorQueryLog",desc:"Max rows to keep in error log (0=unlimited, trimmed every 15min)",type:"number"}
+{key:"ErrorQueryLog",label:"Record failed queries",desc:"Log failed queries to system_statistic.errors (view in Errors tab)",type:"bool"},
+{key:"MaxErrorQueryLog",label:"Maximum error log entries",desc:"Max rows to keep in error log (0=unlimited, trimmed every 15min)",type:"number"}
 ]},
 {group:"Shutdown",items:[
-{key:"ShutdownDrainSeconds",desc:"Seconds to wait for in-flight requests during shutdown (0=10s)",type:"number"}
+{key:"ShutdownDrainSeconds",label:"Shutdown grace period (seconds)",desc:"Seconds to wait for in-flight requests during shutdown (0=10s)",type:"number"}
 ]},
 {group:"Debugging",items:[
-{key:"Backtrace",desc:"Enable detailed error backtraces (requires restart)",type:"bool"},
-{key:"Trace",desc:"Enable Scheme runtime tracing to file",type:"bool"},
-{key:"TracePrint",desc:"Print trace timing to stdout/log",type:"bool"},
-{key:"TracePrintMaxLength",desc:"TracePrint payload bytes retained before a visible truncation marker (0=unlimited)",type:"number"},
-{key:"ScanDebugging",desc:"Log every scan/scan_order: db+table+boundaries+index",type:"bool"},
-{key:"PrintLog",desc:"Log (print) output to system_statistic.logs (view in Log tab)",type:"bool"},
-{key:"MaxPrintLog",desc:"Max rows to keep in print log (0=unlimited, trimmed every 15min)",type:"number"}
+{key:"Backtrace",label:"Detailed backtraces",desc:"Enable detailed error backtraces (requires restart)",type:"bool"},
+{key:"Trace",label:"Write execution trace",desc:"Enable Scheme runtime tracing to file",type:"bool"},
+{key:"TracePrint",label:"Print query timings",desc:"Print trace timing to stdout/log",type:"bool"},
+{key:"TracePrintMaxLength",label:"Maximum trace record size",desc:"Trace payload retained before truncation (0 is unlimited)",type:"bytes",min:0},
+{key:"ScanDebugging",label:"Log individual scans",desc:"Log every scan/scan_order: db+table+boundaries+index",type:"bool"},
+{key:"PrintLog",label:"Record console output",desc:"Log (print) output to system_statistic.logs (view in Log tab)",type:"bool"},
+{key:"MaxPrintLog",label:"Maximum console log entries",desc:"Max rows to keep in print log (0=unlimited, trimmed every 15min)",type:"number"}
 ]}
 ];
 
@@ -1877,6 +1885,21 @@ h+="<tr><td>"+esc(s.name||"")+"</td><td>"+esc(s.port||"")+"</td><td>"+esc(s.rout
 tb.innerHTML=h||"<tr><td colspan='4' style='color:#888;text-align:center'>No services registered</td></tr>";
 }
 
+function parseSettingBytes(text){
+var match=/^\s*(\d+(?:[.,]\d+)?)\s*(B|KB|MB|GB|TB|KiB|MiB|GiB|TiB)?\s*$/i.exec(text);
+if(!match)throw new Error("Enter a size such as 10MB, 1.5GiB or 4096. Use 0 where allowed.");
+var unit=(match[2]||"B").toUpperCase();
+var factors={B:1,KB:1e3,MB:1e6,GB:1e9,TB:1e12,KIB:1024,MIB:1048576,GIB:1073741824,TIB:1099511627776};
+var value=Number(match[1].replace(",","."))*factors[unit];
+if(!Number.isSafeInteger(value)||value<0)throw new Error("Size must be a whole number of bytes within the supported range.");
+return value;
+}
+function formatSettingBytes(value){
+if(!value)return "0";
+var units=[[1099511627776,"TiB"],[1073741824,"GiB"],[1048576,"MiB"],[1024,"KiB"],[1e12,"TB"],[1e9,"GB"],[1e6,"MB"],[1e3,"KB"]];
+for(var i=0;i<units.length;i++)if(value>=units[i][0]&&value%units[i][0]===0)return (value/units[i][0])+" "+units[i][1];
+return value+" B";
+}
 function renderSettings(data){
 var grid=document.getElementById("settings-grid");
 var h="";
@@ -1886,7 +1909,7 @@ h+="<div class='settings-group-header'>"+esc(grp.group)+"</div>";
 for(var i=0;i<grp.items.length;i++){
 var s=grp.items[i];
 var val=data[s.key];
-h+="<div class='setting-card'><div class='info'><div class='name'>"+esc(s.key)+"</div><div class='desc'>"+esc(s.desc)+"</div></div>";
+h+="<div class='setting-card'><div class='info'><div class='name'>"+esc(s.label||s.key.replace(/([a-z])([A-Z])/g,"$1 $2"))+"</div><div class='desc'>"+esc(s.desc)+"</div></div>";
 if(s.type==="bool"){
 h+="<label class='toggle'><input type='checkbox' data-key='"+esc(s.key)+"'"+(val?" checked":"")+"><span class='slider'></span></label>";
 }else if(s.type==="select"){
@@ -1895,8 +1918,10 @@ for(var j=0;j<s.options.length;j++){
 h+="<option value='"+esc(s.options[j])+"'"+(val===s.options[j]?" selected":"")+">"+esc(s.options[j])+"</option>";
 }
 h+="</select>";
+}else if(s.type==="bytes"){
+h+="<input type='text' data-type='bytes' data-min='"+(s.min||0)+"' data-key='"+esc(s.key)+"' aria-label='"+esc(s.label||s.key)+"' title='MB = 1,000,000 bytes; MiB = 1,048,576 bytes. Save with Enter or by leaving the field.' value='"+esc(formatSettingBytes(val))+"'>";
 }else{
-h+="<input type='number' data-key='"+esc(s.key)+"' value='"+(val||0)+"'>";
+h+="<input type='number' step='1' min='"+(s.min||0)+"' data-key='"+esc(s.key)+"' aria-label='"+esc(s.label||s.key)+"' value='"+(val||0)+"'>";
 }
 h+="</div>";
 }
@@ -1907,12 +1932,24 @@ function saveSettingEl(el){
 var key=el.getAttribute("data-key");
 var value;
 if(el.type==="checkbox")value=el.checked;
-else if(el.type==="number")value=Number(el.value);
+else if(el.dataset.type==="bytes"){
+try{
+value=parseSettingBytes(el.value);
+if(value<Number(el.dataset.min))throw new Error("Minimum: "+formatSettingBytes(Number(el.dataset.min)));
+el.setCustomValidity("");
+}catch(e){el.setCustomValidity(e.message);el.reportValidity();return;}
+}
+else if(el.type==="number"){
+value=Number(el.value);
+if(el.value.trim()===""||!Number.isSafeInteger(value)||value<Number(el.min)){el.setCustomValidity("Enter a whole number.");el.reportValidity();return;}
+el.setCustomValidity("");
+}
 else value=el.value;
 var statusEl=document.getElementById("settings-status");
 statusEl.textContent="Saving "+key+"...";
 saveSetting(key,value,function(){
-statusEl.textContent=key+" saved";
+statusEl.textContent=key+" saved"+(key.indexOf("PHP")===0?" — restart MemCP to apply":"");
+if(el.dataset.type==="bytes")el.value=formatSettingBytes(value);
 setTimeout(function(){statusEl.textContent=""},2000);
 });
 }
@@ -1920,13 +1957,11 @@ setTimeout(function(){statusEl.textContent=""},2000);
 grid.querySelectorAll("input[type='checkbox'],select").forEach(function(el){
 el.addEventListener("change",function(){saveSettingEl(el)});
 });
-/* number inputs: debounced on input */
-grid.querySelectorAll("input[type='number']").forEach(function(el){
-var timer=null;
-el.addEventListener("input",function(){
-if(timer)clearTimeout(timer);
-timer=setTimeout(function(){saveSettingEl(el)},500);
-});
+/* Save complete values, so typing a unit does not submit a partial size. */
+grid.querySelectorAll("input[type='number'],input[data-type='bytes']").forEach(function(el){
+el.addEventListener("input",function(){el.setCustomValidity("")});
+el.addEventListener("change",function(){saveSettingEl(el)});
+el.addEventListener("keydown",function(e){if(e.key==="Enter"){e.preventDefault();el.blur();}});
 });
 }
 

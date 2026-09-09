@@ -144,9 +144,9 @@ func testPHPIntegration(t *testing.T, front, cli string, queueTimeout bool) {
 			t.Fatal(err)
 		}
 	}
-	cmd := exec.Command(binary, "--no-repl", apiFlag, "--mysql-port="+mysqlPort, "--mysql-socket="+socketPath, "-data", filepath.Join(dir, "data"), "-c", `(createdatabase "memcp-tests" true)`, "--php-threads=4", "--php-memory-limit=32M", "--php-max-wait=5s", "lib/main.scm", mountFile)
+	cmd := exec.Command(binary, "--no-repl", apiFlag, "--mysql-port="+mysqlPort, "--mysql-socket="+socketPath, "-data", filepath.Join(dir, "data"), "-c", `(createdatabase "memcp-tests" true)`, "-c", `(settings "PHPMemoryLimit" 33554432)`, "-c", `(settings "PHPMaxWaitMilliseconds" 5000)`, "lib/main.scm", mountFile)
 	if queueTimeout {
-		cmd.Args = append(cmd.Args, "--php-max-wait=100ms")
+		cmd.Args = append(cmd.Args, "-c", `(settings "PHPMaxWaitMilliseconds" 100)`)
 	}
 	if cli != "" {
 		workingDir, err := os.Getwd()
@@ -368,21 +368,6 @@ func testPHPIntegration(t *testing.T, front, cli string, queueTimeout bool) {
 		if status, body, err := get("/app/probe.php?action=verify"); err != nil || status != 200 {
 			t.Fatalf("pool failed to recover: %d %s %v", status, body, err)
 		}
-	}
-}
-
-func TestPHPConfig(t *testing.T) {
-	for _, option := range []string{"--php-memory-limit=-1", "--php-memory-limit=0", "--php-memory-limit=999999999999999999G", "--php-memory-limit=1M", "--php-threads=0", "--php-threads=-1", "--php-max-wait=-1s", "--php-output-buffer=-1", "--php-opcache-memory=0", "--php-unknown=1", "--php-threads"} {
-		if _, err := parsePHPConfig([]string{option}); err == nil {
-			t.Errorf("accepted %s", option)
-		}
-	}
-	c, err := parsePHPConfig([]string{"--php-threads=2", "--php-memory-limit=64M", "--php-max-wait=1s", "--php-output-buffer=0", "--php-opcache-memory=64"})
-	if err != nil || c.threads != 2 || c.memoryLimit != 64<<20 || c.maxWait != time.Second || c.outputBuffer != 0 || c.opcacheMemory != 64 {
-		t.Fatalf("config: %+v %v", c, err)
-	}
-	if c.ini()["max_memory_limit"] != "67108864" {
-		t.Fatal("missing immutable memory ceiling")
 	}
 }
 

@@ -16,6 +16,7 @@ import "net/http"
 import "path/filepath"
 import "github.com/dunglas/frankenphp"
 import "github.com/launix-de/memcp/scm"
+import "github.com/launix-de/memcp/storage"
 import "github.com/launix-de/memcp/phpbridge"
 
 var phpLifecycle sync.Mutex
@@ -31,62 +32,20 @@ type phpConfig struct {
 
 var phpSettings phpConfig
 
-func parsePHPConfig(args []string) (phpConfig, error) {
-	c := phpConfig{4, 256 << 20, 30 * time.Second, 4096, 128}
-	for _, arg := range args {
-		if !strings.HasPrefix(arg, "--php-") {
-			continue
-		}
-		key, value, ok := strings.Cut(arg, "=")
-		if !ok {
-			return c, fmt.Errorf("%s requires =VALUE", key)
-		}
-		switch key {
-		case "--php-threads", "--php-output-buffer", "--php-opcache-memory":
-			n, err := strconv.Atoi(value)
-			if err != nil || n < 0 || (key != "--php-output-buffer" && n == 0) {
-				return c, fmt.Errorf("invalid %s: %q", key, value)
-			}
-			switch key {
-			case "--php-threads":
-				c.threads = n
-			case "--php-output-buffer":
-				c.outputBuffer = n
-			case "--php-opcache-memory":
-				if n < 32 {
-					return c, fmt.Errorf("php-opcache-memory must be at least 32 MiB")
-				}
-				c.opcacheMemory = n
-			}
-		case "--php-memory-limit":
-			shift := uint(0)
-			if len(value) > 0 {
-				switch value[len(value)-1] {
-				case 'k', 'K':
-					shift = 10
-				case 'm', 'M':
-					shift = 20
-				case 'g', 'G':
-					shift = 30
-				}
-				if shift > 0 {
-					value = value[:len(value)-1]
-				}
-			}
-			n, err := strconv.ParseUint(value, 10, int(63-shift))
-			if err != nil || n<<shift < 8<<20 {
-				return c, fmt.Errorf("php-memory-limit must be finite and at least 8 MiB (e.g. 256M)")
-			}
-			c.memoryLimit = int64(n << shift)
-		case "--php-max-wait":
-			d, err := time.ParseDuration(value)
-			if err != nil || d < 0 {
-				return c, fmt.Errorf("php-max-wait must be a nonnegative duration")
-			}
-			c.maxWait = d
-		default:
-			return c, fmt.Errorf("unsupported PHP option %s", key)
-		}
+func loadPHPConfig() (phpConfig, error) {
+	values := storage.PHPStartupSettings()
+	c := phpConfig{int(values.Threads), values.MemoryLimit, time.Duration(values.MaxWaitMilliseconds) * time.Millisecond, int(values.OutputBuffer), int((values.OpcacheMemory + (1 << 20) - 1) >> 20)}
+	if values.Threads < 1 ||
+		values.Threads > 1024 ||
+		values.MemoryLimit < 8<<20 ||
+		values.MemoryLimit > 9007199254740991 ||
+		values.MaxWaitMilliseconds < 0 ||
+		values.MaxWaitMilliseconds > 86400000 ||
+		values.OutputBuffer < 0 ||
+		values.OutputBuffer > 2147483647 ||
+		values.OpcacheMemory < 32<<20 ||
+		values.OpcacheMemory > 1<<40 {
+		return c, fmt.Errorf("invalid PHP settings: check PHPThreads, PHPMemoryLimit, PHPMaxWaitMilliseconds, PHPOutputBuffer and PHPOpcacheMemory")
 	}
 	return c, nil
 }
@@ -111,7 +70,12 @@ var phpAccessCaches []*phpAccessCache
 // HTTP listeners belong to Scheme's serve. This only publishes PHP settings
 // after Scheme initialization; the first PHP request starts the shared runtime.
 func startPHP(args []string) error {
-	settings, err := parsePHPConfig(args)
+	for _, arg := range args {
+		if strings.HasPrefix(arg, "--php-") {
+			return fmt.Errorf("PHP flags have been removed; configure PHP through (settings) or the dashboard")
+		}
+	}
+	settings, err := loadPHPConfig()
 	if err != nil {
 		return err
 	}

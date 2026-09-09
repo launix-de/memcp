@@ -69,7 +69,7 @@ For example, place this in a Scheme module loaded after `lib/main.scm`:
 
 ```sh
 ./memcp-php --no-repl -data /path/to/persistent/memcp-data \
-  --api-port=8080 --php-threads=4 lib/main.scm /path/to/apps.scm
+  --api-port=8080 lib/main.scm /path/to/apps.scm
 ```
 
 The arguments are document root, optional URL prefix, and optional fallback PHP
@@ -89,7 +89,7 @@ root; dotfiles, PHP source backups and escaping symlinks are rejected. Routing
 and HTTP authentication can run in Scheme before invoking the PHP handler.
 
 The shared PHP runtime starts lazily after Scheme bootstrap, on its first
-request. `--php-threads` configures its fixed thread count. SIGTERM/SIGINT drains
+request. `(settings "PHPThreads")` configures its fixed thread count. SIGTERM/SIGINT drains
 the Scheme HTTP servers before shutting down PHP and storage.
 
 The host uses classic PHP request lifecycles. Request globals and ordinary
@@ -99,15 +99,24 @@ crashes affect the entire process, including MemCP.
 
 ## PHP quotas, concurrency and tuning
 
-The following startup flags apply globally to all `servePHP` mounts:
+Configure PHP globally through `(settings)` or the **PHP** group in the dashboard.
+Changes take effect after restarting MemCP. The existing settings mechanism saves
+values to `data/settings.json` on orderly shutdown and loads them on startup.
+PHP tuning CLI flags are no longer supported.
 
-| Flag | Default | Meaning |
+| Setting | Default | Meaning |
 | --- | --- | --- |
-| `--php-threads=N` | `4` | Fixed maximum simultaneous PHP executions; excess requests wait. |
-| `--php-memory-limit=SIZE` | `256M` | Per-request PHP allocation ceiling, including retained MemCP PDO results. Accepts bytes or K/M/G suffixes, minimum 8 MiB; unlimited values are rejected. |
-| `--php-max-wait=DURATION` | `30s` | Time waiting for a PHP thread before HTTP 503; `0s` waits indefinitely. This is not the execution timeout. |
-| `--php-output-buffer=BYTES` | `4096` | PHP output buffering; `0` disables it for applications requiring unbuffered output. |
-| `--php-opcache-memory=MIB` | `128` | Shared opcode-cache allocation, minimum 32 MiB. |
+| `PHPThreads` | `4` | Maximum simultaneous PHP executions; excess requests wait. |
+| `PHPMemoryLimit` | `1073741824` (1 GiB) | Per-request allocation ceiling including retained PDO results; minimum 8 MiB. |
+| `PHPMaxWaitMilliseconds` | `30000` | Queue timeout before HTTP 503; `0` waits indefinitely. |
+| `PHPOutputBuffer` | `4096` | Output buffer bytes; `0` disables buffering. |
+| `PHPOpcacheMemory` | `536870912` (512 MiB) | Shared opcode cache bytes; minimum 32 MiB, rounded up to whole MiB. |
+
+For example: `(settings "PHPMemoryLimit" 1073741824)` sets the request quota
+to 1 GiB. The dashboard accepts `1024MiB` or `1GiB` in this field and stores
+numeric bytes. Existing memory budget fields also accept sizes such as `10MB`
+(10,000,000 bytes) and `10MiB` (10,485,760 bytes). Save by leaving the field or
+pressing Enter. Invalid sizes are rejected without changing the setting.
 
 MemCP sets both `memory_limit` and PHP 8.5's startup-only
 [`max_memory_limit`](https://www.php.net/manual/en/ini.core.php#ini.max-memory-limit)
@@ -124,7 +133,7 @@ request. PDO teardown rolls back unfinished transactions. The authenticated
 in-process SQL bridge remains in use; no MySQL socket round trip is introduced.
 
 This is an allocation quota, **not a process-wide RAM limit or tenant sandbox**.
-At four threads and 256 MiB, PHP request heaps may total about 1 GiB, plus the
+At four threads and 1 GiB, PHP request heaps may total about 4 GiB, plus the
 shared opcode cache, interpreter overhead, transient bridge buffers, and MemCP
 storage/query memory. The bridge retains its 64 MiB per-result bound during
 transfer. Native extension allocations and child processes, such as an external

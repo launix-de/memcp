@@ -1267,11 +1267,6 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  --root-password-file=PATH  Read the initial root password from a file\n")
 		fmt.Fprintf(os.Stderr, "  --disable-mysql        Disable MySQL protocol server\n")
 		fmt.Fprintf(os.Stderr, "  --serve PATH           Mount a PHP application at /; keep /dashboard (make php)\n")
-		fmt.Fprintf(os.Stderr, "  --php-threads=N        Global maximum PHP threads (default 4)\n")
-		fmt.Fprintln(os.Stderr, "  --php-memory-limit=256M  Per-request PHP memory ceiling, including retained PDO results")
-		fmt.Fprintln(os.Stderr, "  --php-max-wait=30s      Maximum wait for a PHP thread (0s: unlimited)")
-		fmt.Fprintln(os.Stderr, "  --php-output-buffer=4096  PHP output buffer bytes (0: disabled)")
-		fmt.Fprintln(os.Stderr, "  --php-opcache-memory=128  Shared PHP opcode cache in MiB")
 		fmt.Fprintf(os.Stderr, "... and much more (please refer to your module's documentation)\n\n")
 	}
 
