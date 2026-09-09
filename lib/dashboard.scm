@@ -161,6 +161,16 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(lambda (req res) (begin
 		(define session (req "__session"))
 		(match (req "path")
+			/* API: user/access overview shared by the Users and Databases views. */
+			"/dashboard/api/users" (begin
+				(if (dashboard_check_admin req)
+					(dashboard_send_json res (dashboard_json_array
+						(scan nil (table "system" "user") '(369435906932736) '()
+							'() (lambda () true) '("username")
+							(lambda (acc username) (cons (dashboard_build_user_json username) acc))
+							'() (lambda (a b) (merge (list a b))))))
+					(dashboard_send_401 res))
+			)
 			/* API: persistent storage failure hooks (admin only) */
 			"/dashboard/api/storage-failure-hooks/save" (begin
 				(if (dashboard_check_admin req) (begin
