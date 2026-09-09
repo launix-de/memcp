@@ -685,6 +685,7 @@ func (db *database) ensureLoaded() {
 			t.publishTopologyLocked()
 			t.initializeLegacyPlannerRowEstimate()
 			t.publishShowColumnsSnapshot()
+			t.restoreFilterFeedback()
 		}
 		// FK declarations are authoritative, while their system triggers are
 		// generated code. Rebuild that code at the persistence boundary so schema

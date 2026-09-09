@@ -49,3 +49,19 @@ test_cases:
     expect:
       rows: 1
       data: [{n: 2000}]
+
+  - name: "Broad text candidate membership with adaptive feedback"
+    setup: *afs_fixture
+    performance_rows: 20000
+    warmup: 3
+    timing_samples: 9
+    threshold_ms: 5000
+    sql: |
+      SELECT COUNT(*) = {rows} AS complete FROM afs_fact
+      WHERE dimension_id IN (
+        SELECT id FROM afs_dimension WHERE label LIKE '%very-common-long-pattern%'
+        UNION SELECT id FROM afs_dimension WHERE label LIKE '%other%'
+      )
+    expect:
+      rows: 1
+      data: [{complete: 1}]

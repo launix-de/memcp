@@ -89,3 +89,21 @@ test_cases:
     sql: "SELECT COUNT(*) FROM afs_check WHERE missing_column LIKE '%com%'"
     expect:
       error: true
+
+  - name: "Complete indexed RecSet learns a table rate and refreshes plan guards"
+    scm: |
+      (begin
+        (define tbl (table "memcp-tests" "afs_check"))
+        (define callback (list 'lambda (list 'x) (list 'strlike 'x "%common%" "utf8mb4_general_ci")))
+        (define access (compile_scan_access '("label") callback))
+        (define values (map (nth access 1) (lambda (v) (eval v))))
+        (define before_token (table_planner_statistics_token tbl))
+        (define before_fingerprint (table_planner_statistics_fingerprint tbl))
+        (define matches (recset_count (scan_recset nil tbl (nth access 0) values '("label") (eval callback))))
+        (define estimate (table_filter_selectivity tbl (nth access 0) values))
+        (and (equal? matches 900)
+          (equal? (qassoc_get estimate 'source nil) 'scan_feedback)
+          (equal? (qassoc_get estimate 'value nil) 0.9)
+          (not (table_planner_statistics_compatible? "memcp-tests" "afs_check" before_token before_fingerprint))))
+    expect:
+      data: [true]

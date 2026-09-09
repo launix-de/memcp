@@ -788,3 +788,22 @@ func TestScanBulkBufferConcurrentRelease(t *testing.T) {
 		})
 	}
 }
+
+// Measure whole-table RecSet feedback independently of SQL plan preparation.
+func BenchmarkCompleteRecSetFeedback(b *testing.B) {
+	Init(scm.Globalenv)
+	tbl, cols := scanColumnCostTable(b, "recset_feedback", 65536)
+	filter := scm.Read("feedback-benchmark", "(lambda (x) (not (equal? (mod x 10) 0)))")
+	schema, values, _ := compileScanAccess(scm.NewSlice([]scm.Scmer{scm.NewString(cols[0])}), filter)
+	for i := range values {
+		values[i] = scm.Eval(values[i], &scm.Globalenv)
+	}
+	condition := scm.Eval(scm.Optimize(filter, &scm.Globalenv, nil), &scm.Globalenv)
+	run := func() { tbl.scanRecSet(nil, schema, values, cols[:1], condition) }
+	run()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		run()
+	}
+}

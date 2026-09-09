@@ -22,6 +22,7 @@ import "fmt"
 import "math"
 import "runtime/debug"
 import "sort"
+import "strings"
 import "sync/atomic"
 import "unsafe"
 import "github.com/launix-de/memcp/scm"
@@ -460,6 +461,22 @@ func (t *table) scanRecSet(currentTx *TxContext, accessSchema scm.Scmer, accessV
 	if !compiled {
 		panic("scan_recset received an invalid compiled access schema")
 	}
+	// Restricted RecSets use filterToRecSet, not this complete-table path.
+	// Never learn unique points, transaction-private views or restricted hooks.
+	if (currentTx == nil || currentTx.Mode != TxACID) && !strings.HasPrefix(t.Name, ".") && !t.hasBoundUniquePoint(access) {
+		access.feedback = bindFilterFeedback(access.schema, access.values)
+		if access.feedback != nil {
+			for i := 0; i < access.len(); i++ {
+				if isScanPseudoColName(access.boundaryColumn(i)) {
+					access.feedback = nil
+					break
+				}
+			}
+		}
+		if access.feedback != nil {
+			access.feedback.generation = t.plannerStatsToken.Load()
+		}
+	}
 	result := &recSet{table: t}
 	if access.impossible() {
 		return result
@@ -506,6 +523,7 @@ func (t *table) scanRecSet(currentTx *TxContext, accessSchema scm.Scmer, accessV
 	if buildErr.r != nil {
 		panic(buildErr)
 	}
+	t.publishFilterFeedback(access.feedback)
 	return result
 }
 
@@ -625,7 +643,12 @@ func (t *storageShard) collectRecSet(access scanAccess, conditionCols []string, 
 		}
 		return true
 	})
-	return builder.finish()
+	part := builder.finish()
+	// The builder already counted distinct output IDs; no extra element work.
+	if access.feedback != nil {
+		t.filterFeedback.observe(access.feedback, int64(visibleUpper)-int64(t.deletions.Count()), part.count)
+	}
+	return part
 }
 
 func (r *recSet) projectJoin(currentTx *TxContext, sourceKeyCols []string, target *table, targetKeyCols []string) *recSet {
