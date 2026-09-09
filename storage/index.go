@@ -23,6 +23,7 @@ import "math/bits"
 import "sort"
 import "sync"
 import "time"
+import "unsafe"
 import "strings"
 import "sync/atomic"
 
@@ -410,17 +411,33 @@ func (idx *StorageIndex) storeSavings(value float64) {
 }
 
 func (idx *StorageIndex) ComputeSize() uint {
-	var sz uint = 24 * 8 // heuristic
-	for _, state := range []*storageIndexState{&idx.baseState} {
-		if !idx.Native {
-			sz += state.mainIndexes.ComputeSize()
-		}
-		if state.mainIndexPositions.count > 0 {
-			sz += state.mainIndexPositions.ComputeSize()
-		}
-		sz += uint(state.indexHookBytes.Load())
-		sz += idx.computeDeltaBtreeSize(state)
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+	return idx.computeSizeLocked()
+}
+
+// Inclusive owned allocations. The shard and immutable source values referenced
+// by bounds/revisions are borrowed, not recursively owned by the index. This
+// walk runs at publication and explicit diagnostics, never per matched row.
+func (idx *StorageIndex) computeSizeLocked() uint {
+	state := &idx.baseState
+	sz := uint(unsafe.Sizeof(*idx))
+	sz += uint(cap(idx.Cols)+cap(idx.ColOrderMeta)) * uint(unsafe.Sizeof(""))
+	sz += uint(cap(idx.ColMapCols)) * uint(unsafe.Sizeof([]string{}))
+	for _, cols := range idx.ColMapCols {
+		sz += uint(cap(cols)) * uint(unsafe.Sizeof(""))
 	}
+	sz += uint(cap(idx.ColMapFn)) * uint(unsafe.Sizeof(scm.Scmer{}))
+	sz += uint(cap(idx.ColMatchers)) * uint(unsafe.Sizeof((*IndexAnalyzer)(nil))) * 2
+	sz += uint(cap(idx.ColOrder)) * uint(unsafe.Sizeof((func(scm.Scmer, scm.Scmer) bool)(nil)))
+	// StorageInt structs are embedded; only their backing allocations add RAM.
+	sz += state.mainIndexes.ComputeSize() - uint(unsafe.Sizeof(state.mainIndexes))
+	sz += state.mainIndexPositions.ComputeSize() - uint(unsafe.Sizeof(state.mainIndexPositions))
+	sz += uint(cap(state.minVals)+cap(state.maxVals)) * uint(unsafe.Sizeof(scm.Scmer{}))
+	sz += uint(cap(state.indexHooks)) * uint(unsafe.Sizeof((*IndexHook)(nil))) * 2
+	sz += uint(cap(state.computedRevisions)) * uint(unsafe.Sizeof(computedRevision{}))
+	sz += uint(state.indexHookBytes.Load())
+	sz += idx.computeDeltaBtreeSize(state)
 	return sz
 }
 
@@ -1276,7 +1293,7 @@ func (s *StorageIndex) buildMainIndexPositionsLocked(state *storageIndexState) u
 		}
 		base += chunkCount
 	}
-	return state.mainIndexPositions.ComputeSize()
+	return state.mainIndexPositions.ComputeSize() - uint(unsafe.Sizeof(state.mainIndexPositions))
 }
 
 func recSetSortWork(rows int64) int64 {

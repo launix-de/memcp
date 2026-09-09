@@ -21,6 +21,7 @@ import "sync"
 import "time"
 import "strings"
 import "sync/atomic"
+import "unsafe"
 import "github.com/launix-de/memcp/scm"
 
 // One optional RAM owner per immutable OverlayBlob generation. It deliberately
@@ -102,6 +103,18 @@ func (c *blobRAMCache) size() int64 {
 		return 0
 	}
 	return blobRAMRegistrationBytes + int64(len(c.entries))*blobRAMEntryBytes + c.payloadBytes
+}
+
+// ComputeSize is inclusive. The fixed object survives payload eviction; only
+// cachedBytes is registered as the independently reclaimable child portion.
+func (c *blobRAMCache) ComputeSize() uint {
+	return uint(unsafe.Sizeof(*c)) + c.cachedBytes()
+}
+
+func (c *blobRAMCache) cachedBytes() uint {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return uint(c.size())
 }
 
 func blobRAMLastUsed(pointer any) time.Time {

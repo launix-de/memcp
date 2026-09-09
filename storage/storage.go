@@ -3530,6 +3530,7 @@ func Init(en scm.Env) {
 			if len(a) == 0 {
 				memTotal, memAvail := ReadMemInfo()
 				processMem := ReadProcessRSS()
+				goMem := scm.CachedMemStats()
 				cs := GlobalCache.Stat()
 				maintenance := GlobalMaintenanceRAMBudget.Stat()
 				nonEvictable := processMem - cs.CurrentMemory
@@ -3540,6 +3541,16 @@ func Init(en scm.Env) {
 					scm.NewString("mem_available"), scm.NewInt(memAvail),
 					scm.NewString("mem_total"), scm.NewInt(memTotal),
 					scm.NewString("process_memory"), scm.NewInt(processMem),
+					// Runtime diagnostics explain why object payloads do not equal RSS.
+					// These cached runtime samples are a separate view (possibly older
+					// than RSS), not additional bytes to add to RSS. Never force a
+					// runtime-wide heap walk on the metrics polling path.
+					scm.NewString("go_heap_allocated"), scm.NewInt(int64(goMem.HeapAlloc)),
+					scm.NewString("go_heap_inuse"), scm.NewInt(int64(goMem.HeapInuse)),
+					scm.NewString("go_heap_idle"), scm.NewInt(int64(goMem.HeapIdle)),
+					scm.NewString("go_heap_released"), scm.NewInt(int64(goMem.HeapReleased)),
+					scm.NewString("go_stack_inuse"), scm.NewInt(int64(goMem.StackInuse)),
+					scm.NewString("cache_accounting_over_rss"), scm.NewInt(max(0, cs.CurrentMemory-processMem)),
 					scm.NewString("evictable_memory"), scm.NewInt(cs.CurrentMemory),
 					scm.NewString("non_evictable_process_memory"), scm.NewInt(nonEvictable),
 					scm.NewString("shard_memory"), scm.NewInt(cs.CurrentMemory),
@@ -3679,7 +3690,7 @@ func Init(en scm.Env) {
 							scm.NewString("name"), scm.NewString(t.Name),
 							scm.NewString("engine"), scm.NewString(engine),
 							scm.NewString("row_count"), scm.NewInt(stats.rowCount),
-							scm.NewString("size_bytes"), scm.NewInt(stats.sizeBytes),
+							scm.NewString("size_bytes"), scm.NewInt(int64(t.residentMemory().total())),
 							scm.NewString("collation"), scm.NewString(t.Collation),
 							scm.NewString("comment"), scm.NewString(t.Comment),
 						}))
@@ -3736,6 +3747,7 @@ func Init(en scm.Env) {
 					}
 					return scm.NewSlice([]scm.Scmer{
 						scm.NewString("columns"), t.ShowColumns(),
+						scm.NewString("size_bytes"), scm.NewInt(int64(t.residentMemory().total())),
 						scm.NewString("meta"), showBuildMeta(db, t),
 						scm.NewString("shards"), scm.NewSlice(shardRows),
 						scm.NewString("triggers"), scm.NewSlice(triggerRows),
@@ -3810,6 +3822,7 @@ func Init(en scm.Env) {
 						colRows = scm.NewSlice(colSlice)
 						idxSlice := make([]scm.Scmer, 0, len(s.Indexes))
 						for _, ix := range s.Indexes {
+							ix.mu.Lock()
 							orders := make([]scm.Scmer, len(ix.ColOrderMeta))
 							for i, order := range ix.ColOrderMeta {
 								orders[i] = scm.NewString(order)
@@ -3820,8 +3833,9 @@ func Init(en scm.Env) {
 								scm.NewString("active"), scm.NewBool(ix.baseState.active),
 								scm.NewString("native"), scm.NewBool(ix.Native),
 								scm.NewString("savings"), scm.NewFloat(ix.loadSavings()),
-								scm.NewString("size_bytes"), scm.NewInt(int64(ix.ComputeSize())),
+								scm.NewString("size_bytes"), scm.NewInt(int64(ix.computeSizeLocked())),
 							}))
+							ix.mu.Unlock()
 						}
 						indexRows = scm.NewSlice(idxSlice)
 						s.mu.RUnlock()
@@ -4332,18 +4346,19 @@ func (db *database) PrintMemUsage() string {
 		return b.String()
 	}
 	b.WriteString("Disjoint owner-payload estimate (not RSS; excludes Go runtime, allocator slack, stacks, and shared process overhead)\n")
-	b.WriteString("Table                    \tColumns\tShards\tBase\tIndexes\tTemp columns\tString dicts\tMetadata\tTotal\n")
+	b.WriteString("Table                    \tColumns\tShards\tBase\tIndexes\tTemp columns\tString dicts\tBlob caches\tMetadata\tTotal\n")
 	var total memoryOwnerSnapshot
 	db.schemalock.RLock()
 	defer db.schemalock.RUnlock()
 	for _, t := range db.tables.GetAll() {
 		snapshot := t.memoryOwnerSnapshotLocked()
-		b.WriteString(fmt.Sprintf("%-25s\t%d\t%d\t%s\t%s\t%s\t%s\t%s\t%s\n",
+		b.WriteString(fmt.Sprintf("%-25s\t%d\t%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			t.Name, len(t.Columns), len(t.ActiveShards()),
 			units.BytesSize(float64(snapshot.base)),
 			units.BytesSize(float64(snapshot.indexes)),
 			units.BytesSize(float64(snapshot.tempColumns)),
 			units.BytesSize(float64(snapshot.stringDictionaries)),
+			units.BytesSize(float64(snapshot.blobCaches)),
 			units.BytesSize(float64(snapshot.metadata)),
 			units.BytesSize(float64(snapshot.total()))))
 		total.add(snapshot)
@@ -4370,6 +4385,7 @@ func (t *table) PrintMemUsage() string {
 	b.WriteString(fmt.Sprintf("indexes: %s\n", units.BytesSize(float64(snapshot.indexes))))
 	b.WriteString(fmt.Sprintf("temporary columns: %s\n", units.BytesSize(float64(snapshot.tempColumns))))
 	b.WriteString(fmt.Sprintf("materialized string dictionaries: %s\n", units.BytesSize(float64(snapshot.stringDictionaries))))
+	b.WriteString(fmt.Sprintf("decoded blob caches: %s\n", units.BytesSize(float64(snapshot.blobCaches))))
 	b.WriteString(fmt.Sprintf("table metadata estimate: %s\n", units.BytesSize(float64(snapshot.metadata))))
 	b.WriteString(fmt.Sprintf("total owner payload estimate: %s\n", units.BytesSize(float64(snapshot.total()))))
 	return b.String()
@@ -4380,11 +4396,12 @@ type memoryOwnerSnapshot struct {
 	indexes            uint
 	tempColumns        uint
 	stringDictionaries uint
+	blobCaches         uint
 	metadata           uint
 }
 
 func (m memoryOwnerSnapshot) total() uint {
-	return m.base + m.indexes + m.tempColumns + m.stringDictionaries + m.metadata
+	return m.base + m.indexes + m.tempColumns + m.stringDictionaries + m.blobCaches + m.metadata
 }
 
 func (m *memoryOwnerSnapshot) add(other memoryOwnerSnapshot) {
@@ -4392,6 +4409,7 @@ func (m *memoryOwnerSnapshot) add(other memoryOwnerSnapshot) {
 	m.indexes += other.indexes
 	m.tempColumns += other.tempColumns
 	m.stringDictionaries += other.stringDictionaries
+	m.blobCaches += other.blobCaches
 	m.metadata += other.metadata
 }
 
@@ -4400,30 +4418,26 @@ func (m *memoryOwnerSnapshot) add(other memoryOwnerSnapshot) {
 // of size ownership and remain independently applied by cache.go. The caller
 // holds the schema read lock so table topology and column ownership are stable.
 func (t *table) memoryOwnerSnapshotLocked() memoryOwnerSnapshot {
-	snapshot := memoryOwnerSnapshot{metadata: 10*8 + 32*uint(len(t.Columns))}
+	snapshot := memoryOwnerSnapshot{metadata: t.metadataMemory()}
 	for _, shard := range t.ActiveShards() {
 		if shard == nil {
 			continue
 		}
 		shard.mu.RLock()
-		snapshot.base += shard.computeSizeLocked()
-		for name, storage := range shard.columns {
-			if storage == nil {
-				continue
-			}
-			if !shard.ownsColumnMemory(name) {
-				snapshot.tempColumns += ownedColumnMemory(storage)
-			}
-			snapshot.stringDictionaries += materializedDictionaryMemory(storage)
-		}
-		for _, index := range shard.Indexes {
-			if index != nil {
-				snapshot.indexes += index.ComputeSize()
-			}
-		}
+		snapshot.add(shard.residentMemoryLocked())
 		shard.mu.RUnlock()
 	}
 	return snapshot
+}
+
+func (t *table) residentMemory() memoryOwnerSnapshot {
+	// Deliberately diagnostic-only: this visits resident owners and may walk
+	// delta values. Query planning uses statistics()/ShowColumns snapshots.
+	if t.schema != nil {
+		t.schema.schemalock.RLock()
+		defer t.schema.schemalock.RUnlock()
+	}
+	return t.memoryOwnerSnapshotLocked()
 }
 
 // fkExistenceCheck checks if values exist in tbl[filterCols]. Returns true if found or all NULL.
@@ -5095,13 +5109,23 @@ func showBuildShardRow(t *table, i int, s *storageShard) scm.Scmer {
 		})
 	}
 	stats := s.statsSnapshot()
+	// The display is a resident total, never the exclusive eviction ledger.
+	// Keep planner statistics and their immutable fast-path snapshots unchanged.
+	s.mu.RLock()
+	memory := s.residentMemoryLocked()
+	s.mu.RUnlock()
 	return scm.NewSlice([]scm.Scmer{
 		scm.NewString("shard"), scm.NewInt(int64(i)),
 		scm.NewString("state"), scm.NewString(sharedStateStr(stats.state)),
 		scm.NewString("main_count"), scm.NewInt(int64(stats.mainCount)),
 		scm.NewString("delta"), scm.NewInt(int64(stats.delta)),
 		scm.NewString("deletions"), scm.NewInt(int64(stats.deletions)),
-		scm.NewString("size_bytes"), scm.NewInt(int64(stats.size)),
+		scm.NewString("size_bytes"), scm.NewInt(int64(memory.total())),
+		scm.NewString("base_size_bytes"), scm.NewInt(int64(memory.base)),
+		scm.NewString("index_size_bytes"), scm.NewInt(int64(memory.indexes)),
+		scm.NewString("temp_column_size_bytes"), scm.NewInt(int64(memory.tempColumns)),
+		scm.NewString("dictionary_size_bytes"), scm.NewInt(int64(memory.stringDictionaries)),
+		scm.NewString("blob_cache_size_bytes"), scm.NewInt(int64(memory.blobCaches)),
 	})
 }
 

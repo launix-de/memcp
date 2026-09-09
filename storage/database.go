@@ -1820,16 +1820,16 @@ func registerCreatedTable(t *table) {
 	// to avoid deadlock: AddItem → run() → evict → keytableCleanup → TryLock(schemalock)
 	if t.isEphemeralQueryTable() {
 		schemaName := t.schema.Name
-		GlobalCache.AddItem(t, int64(t.ComputeSize()), TypeTempKeytable, func(ptr any, freedByType *[numEvictableTypes]int64) bool {
+		GlobalCache.AddItem(t, int64(t.exclusiveSize()), TypeTempKeytable, func(ptr any, freedByType *[numEvictableTypes]int64) bool {
 			return keytableCleanup(ptr.(*table), schemaName, freedByType)
 		}, keytableLastUsed, nil)
 	} else if t.PersistencyMode == Cache {
 		// Register the initial shard so eviction can reach it before the first rebuild.
-		GlobalCache.AddItem(t.Shards[0], int64(t.Shards[0].ComputeSize()), TypeCacheEntry, cacheShardCleanup, shardLastUsed, nil)
+		GlobalCache.AddItem(t.Shards[0], int64(t.Shards[0].exclusiveSize()), TypeCacheEntry, cacheShardCleanup, shardLastUsed, nil)
 	} else if t.PersistencyMode != Memory {
 		// The initial writable generation owns WAL/delta memory before its first
 		// rebuild just as much as a rebuilt shard does.
-		GlobalCache.AddItem(t.Shards[0], int64(t.Shards[0].ComputeSize()), TypeShard, shardCleanup, shardLastUsed, nil)
+		GlobalCache.AddItem(t.Shards[0], int64(t.Shards[0].exclusiveSize()), TypeShard, shardCleanup, shardLastUsed, nil)
 	}
 }
 
@@ -1956,9 +1956,19 @@ func keytableCleanup(tbl *table, schemaName string, freedByType *[numEvictableTy
 			db.schemalock.Unlock()
 			return false
 		}
+		// Release child caches while the catalog entry is still recoverable.
+		// A busy child must not leave a removed table with untracked indexes.
+		if !tbl.evictShardChildren(freedByType) {
+			atomic.StoreInt64(&tbl.cacheUsers, 0)
+			db.schemalock.Unlock()
+			return false
+		}
 		db.tables.Remove(tbl.Name)
 		db.saveLockedAndUnlock(tbl.schemaSaveMode())
 	} else if !tbl.beginCacheEviction() {
+		return false
+	} else if !tbl.evictShardChildren(freedByType) {
+		atomic.StoreInt64(&tbl.cacheUsers, 0)
 		return false
 	}
 	// remove all shard+index+temp column registrations for this table (recursive)
@@ -1969,17 +1979,9 @@ func keytableCleanup(tbl *table, schemaName string, freedByType *[numEvictableTy
 	}
 	for _, s := range tbl.Shards {
 		GlobalCache.removeInternal(s, freedByType)
-		for _, idx := range s.Indexes {
-			GlobalCache.removeInternal(idx, freedByType)
-			idx.evict(evictFull, 0, freedByType)
-		}
 	}
 	for _, s := range tbl.PShards {
 		GlobalCache.removeInternal(s, freedByType)
-		for _, idx := range s.Indexes {
-			GlobalCache.removeInternal(idx, freedByType)
-			idx.evict(evictFull, 0, freedByType)
-		}
 	}
 	for _, s := range tbl.Shards {
 		s.RemoveFromDisk()
@@ -2002,4 +2004,21 @@ func keytableCleanup(tbl *table, schemaName string, freedByType *[numEvictableTy
 func keytableLastUsed(ptr any) time.Time {
 	tbl := ptr.(*table)
 	return time.Unix(0, int64(atomic.LoadUint64(&tbl.lastAccessed)))
+}
+
+func (t *table) evictShardChildren(freedByType *[numEvictableTypes]int64) bool {
+	for _, shard := range t.ActiveShards() {
+		if shard == nil {
+			continue
+		}
+		if !shard.mu.TryLock() {
+			return false
+		}
+		ok := shard.evictChildrenLocked(freedByType)
+		shard.mu.Unlock()
+		if !ok {
+			return false
+		}
+	}
+	return true
 }

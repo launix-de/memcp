@@ -38,7 +38,7 @@ func (s *StorageConst) String() string {
 }
 
 func (s *StorageConst) ComputeSize() uint {
-	return 48 + scm.ComputeSize(s.value)
+	return uint(unsafe.Sizeof(*s)-unsafe.Sizeof(s.value)) + scm.ComputeSize(s.value)
 }
 
 func (s *StorageConst) GetValue(i uint32) scm.Scmer {

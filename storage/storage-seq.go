@@ -40,7 +40,7 @@ type StorageSeq struct {
 }
 
 func (s *StorageSeq) ComputeSize() uint {
-	return s.recordId.ComputeSize() + s.start.ComputeSize() + s.stride.ComputeSize() + 8*8
+	return uint(unsafe.Sizeof(*s)-unsafe.Sizeof(s.recordId)-unsafe.Sizeof(s.start)-unsafe.Sizeof(s.stride)) + s.recordId.ComputeSize() + s.start.ComputeSize() + s.stride.ComputeSize()
 }
 
 func (s *StorageSeq) String() string {
