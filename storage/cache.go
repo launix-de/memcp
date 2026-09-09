@@ -16,19 +16,16 @@ Copyright (C) 2025-2026  MemCP Contributors
 */
 package storage
 
-import (
-	"container/heap"
-	"fmt"
-	"github.com/carli2/hybridsort"
-	"log"
-	"os"
-	"strings"
-	"sync/atomic"
-	"syscall"
-	"time"
-
-	units "github.com/docker/go-units"
-)
+import "os"
+import "fmt"
+import "log"
+import "time"
+import "strings"
+import "syscall"
+import "sync/atomic"
+import "container/heap"
+import units "github.com/docker/go-units"
+import "github.com/carli2/hybridsort"
 
 // EvictableType identifies the kind of cached object for factor lookup and stat reporting.
 type EvictableType uint8
@@ -249,6 +246,7 @@ type CacheManager struct {
 }
 
 type cacheOp struct {
+	ready              <-chan struct{} // optional: owner released its lock after enqueueing
 	add                *softItem
 	del                any
 	updatePtr          any
@@ -509,6 +507,9 @@ func (cm *CacheManager) run() {
 			if !ok {
 				return
 			}
+			if op.ready != nil {
+				<-op.ready
+			}
 			if op.add != nil {
 				cm.addInternal(op.add)
 			} else if op.del != nil {
@@ -753,7 +754,10 @@ func (cm *CacheManager) evict(currentUsage, budget, additionalSize int64, typeFi
 		}
 		var candidates []evictionCandidate
 		var candidateSum int64
-		for candidateSum < candidateTarget && cm.h.Len() > 0 {
+		// A single large owner can exceed the byte target by itself. Still
+		// collect a bounded comparison window: otherwise telemetry never gets
+		// to compare that warm owner with small, low-benefit probation caches.
+		for (candidateSum < candidateTarget || len(candidates) < 16) && cm.h.Len() > 0 {
 			item := heap.Pop(&cm.h).(*softItem)
 			if typeFilter != nil && !typeFilter(item.evictType) {
 				skipped = append(skipped, item)

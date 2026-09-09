@@ -120,6 +120,13 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
 - `storageShard.filterFeedback` contains immutable observations published with one best-effort CAS after a complete shard scan. Readers may load these atomics without shard locks or concurrency rights; they must not inspect shard containers. `table.filterFeedback` publishes an immutable, bounded merged snapshot. Generation IDs are scalar planner-statistics tokens, never retained shard/topology pointers. No feedback synchronization or publication is permitted inside element or filter-batch loops.
 - When adding new storage fields, document the locking discipline and update this section.
 
+- `OverlayBlob.ram` belongs to one immutable column generation. Its `blobRAMCache.mu`
+  protects admission metadata, decoded strings, and byte/benefit accounting;
+  `lastUsed` is atomic and updated once per read batch. Cache callbacks use
+  `TryLock` and never acquire shard/table locks or call public CacheManager APIs.
+  Generation construction and `SetSchema` replace the cache under the existing
+  exclusive column lifecycle. Cache registrations retain no shard/database.
+
 ### Scheme AST and Codegen Quoting (lib/queryplan.scm and lib/queryplan-*.scm)
 - Build AST as data: most builder blocks use a single leading quote `'(...)` so nested lists are data, not executed at construction.
 - Lambdas: embed as `'((quote lambda) (param-list) body)` where:

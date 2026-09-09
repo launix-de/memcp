@@ -7,6 +7,12 @@ metadata:
   isolated: true
 
 setup:
+  - sql: "DROP TABLE IF EXISTS blob_rc1"
+  - sql: "DROP TABLE IF EXISTS blob_shared1"
+  - sql: "DROP TABLE IF EXISTS blob_shared2"
+  - sql: "DROP TABLE IF EXISTS blob_rcpersist"
+  - sql: "DROP TABLE IF EXISTS blob_external"
+  - sql: "DROP TABLE IF EXISTS blob_ram_scan"
   - sql: "DROP TABLE IF EXISTS blob_bang"
   - sql: "DROP TABLE IF EXISTS blob_test"
 
@@ -297,14 +303,14 @@ test_cases:
       rows: 0
 
   - name: "Shared blob: insert long string in first"
-    sql: "INSERT INTO blob_shared1 (id, payload) VALUES (1, REPEAT('S', 1000))"
+    sql: "INSERT INTO blob_shared1 (id, payload) VALUES (1, REPEAT('S', 4096)), (2, REPEAT('T', 4096)), (3, REPEAT('V', 4096))"
     expect:
-      affected_rows: 1
+      affected_rows: 3
 
   - name: "Shared blob: insert same long string in second"
-    sql: "INSERT INTO blob_shared2 (id, payload) VALUES (1, REPEAT('S', 1000))"
+    sql: "INSERT INTO blob_shared2 (id, payload) VALUES (1, REPEAT('S', 4096)), (2, REPEAT('T', 4096)), (3, REPEAT('V', 4096))"
     expect:
-      affected_rows: 1
+      affected_rows: 3
 
   - name: "Shared blob: rebuild both tables concurrently"
     sql: "SHUTDOWN"
@@ -314,8 +320,8 @@ test_cases:
   - name: "Shared blob: both tables survive concurrent rebuild"
     sql: |
       SELECT
-        (SELECT payload = REPEAT('S', 1000) FROM blob_shared1 WHERE id = 1) AS first_ok,
-        (SELECT payload = REPEAT('S', 1000) FROM blob_shared2 WHERE id = 1) AS second_ok
+        (SELECT payload = REPEAT('S', 4096) FROM blob_shared1 WHERE id = 1) AS first_ok,
+        (SELECT payload = REPEAT('S', 4096) FROM blob_shared2 WHERE id = 1) AS second_ok
     expect:
       rows: 1
       data:
@@ -328,7 +334,7 @@ test_cases:
       rows: 0
 
   - name: "Shared blob: second table still has blob"
-    sql: "SELECT payload = REPEAT('S', 1000) AS ok FROM blob_shared2 WHERE id = 1"
+    sql: "SELECT payload = REPEAT('S', 4096) AS ok FROM blob_shared2 WHERE id = 1"
     expect:
       rows: 1
       data:
@@ -385,9 +391,11 @@ test_cases:
     sql: |
       INSERT INTO blob_external (id, payload) VALUES
       (1, REPEAT('E', 3000)),
-      (2, FROM_BASE64(REPEAT('AAAA', 1000)))
+      (2, FROM_BASE64(REPEAT('AAAA', 1000))),
+      (3, REPEAT('Q', 3000)),
+      (4, REPEAT('E', 3000))
     expect:
-      affected_rows: 2
+      affected_rows: 4
 
   - name: "Persist external blobs above 2 KiB"
     sql: "SHUTDOWN"
@@ -400,12 +408,64 @@ test_cases:
       FROM blob_external
       ORDER BY id
     expect:
-      rows: 2
+      rows: 4
       data:
         - id: 1
           len: 3000
         - id: 2
           len: 3000
+        - id: 3
+          len: 3000
+        - id: 4
+          len: 3000
+
+  - name: "Repeated external reads retain exact text and binary"
+    sql: "SELECT id, payload = CASE WHEN id = 1 OR id = 4 THEN REPEAT('E', 3000) WHEN id = 2 THEN FROM_BASE64(REPEAT('AAAA', 1000)) ELSE REPEAT('Q', 3000) END AS ok FROM blob_external ORDER BY id"
+    repetitions: 4
+    expect: {rows: 4, data: [{id: 1, ok: 1}, {id: 2, ok: 1}, {id: 3, ok: 1}, {id: 4, ok: 1}]}
+
+  - name: "Update warmed external content"
+    sql: "UPDATE blob_external SET payload = REPEAT('N', 4096) WHERE id = 1"
+    expect: {affected_rows: 1}
+
+  - name: "Warmed generation does not replace updated contents"
+    sql: "SELECT payload = REPEAT('N', 4096) AS ok FROM blob_external WHERE id = 1"
+    repetitions: 3
+    expect: {rows: 1, data: [{ok: 1}]}
+
+  - name: "Another row retains the shared original hash after update"
+    sql: "SELECT payload = REPEAT('E', 3000) AS ok FROM blob_external WHERE id = 4"
+    expect: {rows: 1, data: [{ok: 1}]}
+
+  - name: "Persist updated external contents"
+    sql: "SHUTDOWN"
+    expect: {rows: 0}
+
+  - name: "Updated external contents recover without RAM cache"
+    sql: "SELECT payload = REPEAT('N', 4096) AS ok FROM blob_external WHERE id = 1"
+    repetitions: 3
+    expect: {rows: 1, data: [{ok: 1}]}
+
+  - name: "Pressure during concurrent external reads"
+    parallel: blob_ram_pressure
+    scm: (settings "MaxRamBytes" 1024)
+    expect: {}
+
+  - name: "Concurrent reader preserves updated text under pressure"
+    parallel: blob_ram_pressure
+    sql: "SELECT payload = REPEAT('N', 4096) AS ok FROM blob_external WHERE id = 1"
+    repetitions: 12
+    expect: {rows: 1, data: [{ok: 1}]}
+
+  - name: "Concurrent reader preserves binary under pressure"
+    parallel: blob_ram_pressure
+    sql: "SELECT TO_BASE64(payload) = REPEAT('AAAA', 1000) AS ok FROM blob_external WHERE id = 2"
+    repetitions: 12
+    expect: {rows: 1, data: [{ok: 1}]}
+
+  - name: "Restore RAM budget after external read pressure"
+    scm: (settings "MaxRamBytes" 0)
+    expect: {}
 
   - name: "Drop external blob boundary table"
     sql: "DROP TABLE blob_external"
@@ -438,7 +498,56 @@ test_cases:
     sql: "SELECT LENGTH(payload) AS len, payload = CONCAT('blob-prefix-66:', REPEAT('x', 5300)) AS ok FROM blob_bang WHERE id = 1"
     expect: {rows: 1, data: [{len: 5315, ok: 1}]}
 
+  - name: "Create anonymous repeated blob scan fixture"
+    sql: "CREATE TABLE blob_ram_scan (id INT PRIMARY KEY, payload TEXT)"
+    expect: {rows: 0}
+  - name: "Populate anonymous repeated blob scan fixture"
+    scm: |
+      (begin
+        (set text (reduce (produceN 1024) (lambda (acc i) (concat acc "payload-")) ""))
+        (insert (table "memcp-tests" "blob_ram_scan") '("id" "payload")
+          (map (produceN 256) (lambda (i) (list i (concat i ":" text)))))
+        (rebuild (table "memcp-tests" "blob_ram_scan") true false))
+    expect: {}
+  # Per-row projections require reading payloads on every execution. Aggregates
+  # would reuse a group keytable and stop exercising blob decoding after warmup.
+  - name: "Repeated LIKE projection over external blobs"
+    sql: "SELECT id, payload LIKE '%payload%' AS matched FROM blob_ram_scan"
+    threshold_ms: 200
+    performance_rows: 256
+    warmup: 3
+    repetitions: 7
+    expect: {rows: 256}
+  - name: "Repeated full content length projection"
+    sql: "SELECT id, LENGTH(payload) AS bytes FROM blob_ram_scan"
+    threshold_ms: 200
+    performance_rows: 256
+    warmup: 3
+    repetitions: 7
+    expect: {rows: 256}
+  - name: "A different LIKE pattern reuses decoded content"
+    sql: "SELECT id, payload LIKE '%absent-pattern%' AS matched FROM blob_ram_scan"
+    threshold_ms: 200
+    performance_rows: 256
+    warmup: 3
+    repetitions: 7
+    expect: {rows: 256}
+  - name: "Repeated point read of external content"
+    sql: "SELECT LENGTH(payload) AS bytes FROM blob_ram_scan WHERE id = 123"
+    threshold_ms: 200
+    performance_rows: 1
+    warmup: 3
+    repetitions: 7
+    expect: {rows: 1, data: [{bytes: 8196}]}
+  - name: "Reject a conflicting write to a warmed blob row"
+    sql: "INSERT INTO blob_ram_scan (id, payload) VALUES (0, REPEAT('rejected', 1024))"
+    expect: {error: true}
+  - name: "Failed write preserves warmed committed content"
+    sql: "SELECT payload = CONCAT('0:', REPEAT('payload-', 1024)) AS ok FROM blob_ram_scan WHERE id = 0"
+    expect: {rows: 1, data: [{ok: 1}]}
+
 cleanup:
+  - sql: "DROP TABLE IF EXISTS blob_ram_scan"
   - sql: "DROP TABLE IF EXISTS blob_test"
   - sql: "DROP TABLE IF EXISTS blob_rc1"
   - sql: "DROP TABLE IF EXISTS blob_shared1"

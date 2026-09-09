@@ -19,6 +19,7 @@ package storage
 import "io"
 import "fmt"
 import "sync"
+import "time"
 import "unsafe"
 import "reflect"
 import "strings"
@@ -37,6 +38,7 @@ type OverlayBlob struct {
 	schema *database       // reference to owning database
 	refs   map[string]bool // hex-hashes referenced in this build()
 	legacy bool            // v0/ASCII-49 base encoding; preserved until the next rebuild
+	ram    *blobRAMCache   // generation-local; its mutex protects decoded contents and admission
 }
 
 // Keep ordinary text values in the columnar string storage. Small text values
@@ -46,7 +48,7 @@ type OverlayBlob struct {
 const maxInlineBlobBytes = 2 * 1024
 
 func (s *OverlayBlob) ComputeSize() uint {
-	return 48 + s.Base.ComputeSize()
+	return uint(unsafe.Sizeof(*s)) + uint(unsafe.Sizeof(blobRAMCache{})) + s.size + s.Base.ComputeSize()
 }
 
 func (s *OverlayBlob) String() string {
@@ -184,6 +186,7 @@ func (s *OverlayBlob) deserializeBlobV0(f io.Reader) uint {
 	var size uint64
 	binary.Read(f, binary.LittleEndian, &size) // read size
 	s.values = make(map[[32]byte]string)
+	s.resetBlobRAM()
 
 	if size > 0 {
 		// LEGACY: read inline blobs (migration in SetPersistence)
@@ -208,6 +211,7 @@ func (s *OverlayBlob) deserializeBlobV0(f io.Reader) uint {
 // SetSchema sets the owning database and migrates legacy inline blobs.
 func (s *OverlayBlob) SetSchema(db *database) {
 	s.schema = db
+	s.resetBlobRAM() // source changed; never reuse a detached representation
 	s.refs = make(map[string]bool)
 	for hash, data := range s.values {
 		hexHash := fmt.Sprintf("%x", hash[:])
@@ -274,11 +278,7 @@ func (s *OverlayBlob) GetValueRange(recid uint32, count uint32, target []scm.Scm
 		stride = 1
 	}
 	s.Base.GetValueRange(recid, count, target, stride)
-	idx := 0
-	for k := uint32(0); k < count; k++ {
-		target[idx] = s.resolveBlob(target[idx])
-		idx += stride
-	}
+	s.resolveBlobBatch(target, int(count), stride)
 }
 
 //jitgen:control-flow-stable recids/2 target/1 stride
@@ -287,11 +287,7 @@ func (s *OverlayBlob) GetValueMulti(recids []uint32, target []scm.Scmer, stride 
 		stride = 1
 	}
 	s.Base.GetValueMulti(recids, target, stride)
-	idx := 0
-	for range recids {
-		target[idx] = s.resolveBlob(target[idx])
-		idx += stride
-	}
+	s.resolveBlobBatch(target, len(recids), stride)
 }
 
 // blobReference recognizes references without fetching payloads. For v0, a
@@ -337,6 +333,63 @@ func (s *OverlayBlob) readBlob(hash [32]byte) (scm.Scmer, bool) {
 // literal identical to a present blob reference cannot be distinguished in v0;
 // only a rebuild from an authoritative source can resolve that case.
 func (s *OverlayBlob) resolveBlob(v scm.Scmer) scm.Scmer {
+	if !v.IsString() || v.String() == "" || v.String()[0] != '!' {
+		return v
+	}
+	var values [1]scm.Scmer
+	values[0] = v
+	s.resolveBlobBatch(values[:], 1, 1)
+	return values[0]
+}
+
+// The base column is already fetched. Inline-only batches retain the old path;
+// external payloads synchronize once per batch, including scalar point reads.
+func (s *OverlayBlob) resolveBlobBatch(values []scm.Scmer, count, stride int) {
+	for i := 0; i < count; i++ {
+		v := values[i*stride]
+		if !v.IsString() {
+			continue
+		}
+		raw := v.String()
+		if raw == "" || raw[0] != '!' {
+			continue
+		}
+		_, reference, ambiguous := s.blobReference(raw)
+		if reference && !ambiguous && s.ram != nil && GlobalCache.opChan != nil && !GlobalCache.stopped.Load() {
+			// Bound cold-reader admission buffers and publication delay.
+			for i < count {
+				n := min(256, count-i)
+				s.resolveBlobRAMBatch(values[i*stride:], n, stride)
+				i += n
+			}
+			return
+		}
+		values[i*stride] = s.resolveBlobUncached(v)
+	}
+}
+
+func (s *OverlayBlob) resolveBlobRAMBatch(values []scm.Scmer, count, stride int) {
+	c := s.ram
+	c.mu.Lock()
+	before := c.size()
+	// Publish even on panic: successfully decoded earlier values still own RAM.
+	defer c.endBatch(before)
+	limit := int64(-1) // lazy budget snapshot, only when a batch actually misses
+	c.lastUsed.Store(time.Now().UnixNano())
+	for i := 0; i < count; i++ {
+		v := values[i*stride]
+		if v.IsString() {
+			hash, reference, ambiguous := s.blobReference(v.String())
+			if reference && !ambiguous {
+				values[i*stride] = c.read(s, hash, &limit)
+				continue
+			}
+		}
+		values[i*stride] = s.resolveBlobUncached(v)
+	}
+}
+
+func (s *OverlayBlob) resolveBlobUncached(v scm.Scmer) scm.Scmer {
 	if !v.IsString() {
 		return v
 	}
@@ -387,6 +440,7 @@ func (s *OverlayBlob) scan(i uint32, value scm.Scmer) {
 func (s *OverlayBlob) init(i uint32) {
 	s.legacy = false
 	s.values = make(map[[32]byte]string)
+	s.resetBlobRAM()
 	s.size = 0
 	s.refs = make(map[string]bool)
 	s.Base.init(i)
