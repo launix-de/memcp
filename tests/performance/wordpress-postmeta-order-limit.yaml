@@ -179,8 +179,11 @@ test_cases:
             (list
               (list 370535686995968 (scan_boundary "equal" "meta_key" 0 0 true true "" false))
               (list 370535955431424
-                (scan_boundary "equal" "post_status" 0 0 true true "" false)
-                (scan_boundary "equal" "post_type" 1 1 true true "" false)))
+                /* Slots address the single shared accessValues array below,
+                not an array per input. Dropping unique-probe boundaries
+                used to hide incorrect slots here (status=custom_color). */
+                (scan_boundary "equal" "post_status" 1 1 true true "" false)
+                (scan_boundary "equal" "post_type" 2 2 true true "" false)))
             (list "custom_color" "publish" "post")
             (list (list) (list))
             (list (lambda () true) (lambda () true))
