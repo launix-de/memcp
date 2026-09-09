@@ -3943,22 +3943,6 @@ physical alternative. */
 					(min driver_input_rows (/ requested_rows density))
 					driver_input_rows))))))
 
-/* Preparing the complete membership is not the same work as consuming it.
-An ordered candidate scan probes the residual only for membership hits until
-OFFSET + LIMIT is filled. Use the same visited-row estimate as the competing
-ordered carriers, including local rejection, and cap it by the available
-projection. Never apply this braking to an unbounded aggregate/filter. Keep
-tools/costgen's candidate consumer feature in sync with this equation. */
-(define membership_candidate_consumer_rows (lambda (candidate_input_rows candidate_rows driver_rows work)
-	(begin
-		(define projected_rows (membership_projected_driver_rows
-			candidate_input_rows candidate_rows (membership_driver_input_rows driver_rows work) work))
-		(if (membership_work_value work (quote membership_order_limit_driver) false)
-			(min projected_rows (*
-				(membership_expected_driver_rows_visited candidate_input_rows candidate_rows driver_rows work)
-				(membership_candidate_density candidate_input_rows candidate_rows work)))
-			projected_rows))))
-
 (define membership_common_scan_cost (lambda (candidate_input_rows candidate_rows driver_rows candidate_map_columns ordered_scan_invocations work)
 	(begin
 		(define scan_invocations (+
@@ -4067,8 +4051,12 @@ owned by the membership-carrier guard; do not create another consumer guard. */
 				(* (+ candidate_rows projected_rows) 8) 0 projection_rows 0.65)
 			projection_rows 0.65)
 			candidate_cache_cost projection_rows 0.65))
+		/* LIMIT brakes the final scan, not an independently prepared scalar
+		truth carrier. Do not discount downstream work until the physical
+		consumer explicitly represents bounded probes instead of full preparation.
+		Keep this population in sync with tools/costgen's candidate feature. */
 		(define downstream_cost (planner_membership_downstream_probe_cost
-			(* (membership_candidate_consumer_rows candidate_input_rows candidate_rows driver_rows work)
+			(* projected_rows
 				(membership_work_value work (quote membership_downstream_probe_branches) 0))))
 		(define carrier_cost (planner_cost_add
 			(planner_cost_add base_cost adaptive_consumer_cost projected_rows 0.65)

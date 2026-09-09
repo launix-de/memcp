@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 metadata:
   version: "1.0"
-  description: "Membership carrier costs distinguish complete preparation from bounded residual probes"
+  description: "Membership statistics survive lowering and LIMIT does not discount full preparation"
 
 setup: []
 cleanup: []
@@ -22,7 +22,7 @@ test_cases:
               (equal? (qassoc_get facts 'membership_candidate_broad_text_match_bytes nil) 128))
           true (error "late fallback shadowed authoritative membership statistics")))
 
-  - name: "Ordered candidate preparation does not charge ACL probes for the complete projection"
+  - name: "LIMIT does not discount independently prepared downstream work"
     scm: |
       (begin
         (define facts (list
@@ -34,11 +34,11 @@ test_cases:
         (define with (membership_projection_cost 100000 50000 72
           (qassoc_set facts 'membership_downstream_probe_branches 1)))
         (define extra (- (qassoc_get with 'total_ns 0) (qassoc_get without 'total_ns 0)))
-        (define expected (qassoc_get (planner_membership_downstream_probe_cost 80) 'total_ns 0))
+        (define expected (qassoc_get (planner_membership_downstream_probe_cost 50000) 'total_ns 0))
         (if (< (sql_abs (- extra expected)) 1) true
-          (error "ordered candidate cost charged all projected rows after LIMIT")))
+          (error "LIMIT incorrectly discounted full downstream preparation")))
 
-  - name: "Selective residuals increase the candidate consumer work before LIMIT"
+  - name: "Residual rejection does not turn full preparation into bounded probes"
     scm: |
       (begin
         (define facts (list
@@ -51,9 +51,9 @@ test_cases:
         (define with (membership_projection_cost 100000 50000 72
           (qassoc_set facts 'membership_downstream_probe_branches 1)))
         (define extra (- (qassoc_get with 'total_ns 0) (qassoc_get without 'total_ns 0)))
-        (define expected (qassoc_get (planner_membership_downstream_probe_cost 800) 'total_ns 0))
+        (define expected (qassoc_get (planner_membership_downstream_probe_cost 50000) 'total_ns 0))
         (if (< (sql_abs (- extra expected)) 1) true
-          (error "candidate consumer ignored residual selectivity or OFFSET")))
+          (error "residual selectivity incorrectly discounted full preparation")))
 
   - name: "Unbounded candidate consumers retain complete residual work"
     scm: |
