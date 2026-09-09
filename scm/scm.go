@@ -4555,9 +4555,11 @@ func init() {
 				} else {
 					d2 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d1}, 3)
 				}
-				ctx.BindReg(d2.Reg, &d2)
-				ctx.BindReg(d2.Reg2, &d2)
-				ctx.BindReg(d2.Reg3, &d2)
+				if d2.Loc == LocRegTriple {
+					ctx.BindReg(d2.Reg, &d2)
+					ctx.BindReg(d2.Reg2, &d2)
+					ctx.BindReg(d2.Reg3, &d2)
+				}
 				ctx.FreeDesc(&d1)
 				ctx.EnsureDesc(&d0)
 				ctx.EnsureDesc(&d2)
@@ -4665,9 +4667,11 @@ func init() {
 				} else {
 					d2 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d1}, 3)
 				}
-				ctx.BindReg(d2.Reg, &d2)
-				ctx.BindReg(d2.Reg2, &d2)
-				ctx.BindReg(d2.Reg3, &d2)
+				if d2.Loc == LocRegTriple {
+					ctx.BindReg(d2.Reg, &d2)
+					ctx.BindReg(d2.Reg2, &d2)
+					ctx.BindReg(d2.Reg3, &d2)
+				}
 				ctx.FreeDesc(&d1)
 				ctx.EnsureDesc(&d0)
 				ctx.EnsureDesc(&d2)
@@ -5784,9 +5788,11 @@ func init() {
 					} else {
 						d5 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d4}, 3)
 					}
-					ctx.BindReg(d5.Reg, &d5)
-					ctx.BindReg(d5.Reg2, &d5)
-					ctx.BindReg(d5.Reg3, &d5)
+					if d5.Loc == LocRegTriple {
+						ctx.BindReg(d5.Reg, &d5)
+						ctx.BindReg(d5.Reg2, &d5)
+						ctx.BindReg(d5.Reg3, &d5)
+					}
 					ctx.FreeDesc(&d4)
 					callResults6 := JITEmitGoCallResults(ctx, GoFuncAddr(JITCloneScmerSlice), []JITValueDesc{d5}, []uint8{3}, []uint8{1})
 					d7 = callResults6[0]
@@ -6846,9 +6852,11 @@ func init() {
 					} else {
 						d127 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d17}, 3)
 					}
-					ctx.BindReg(d127.Reg, &d127)
-					ctx.BindReg(d127.Reg2, &d127)
-					ctx.BindReg(d127.Reg3, &d127)
+					if d127.Loc == LocRegTriple {
+						ctx.BindReg(d127.Reg, &d127)
+						ctx.BindReg(d127.Reg2, &d127)
+						ctx.BindReg(d127.Reg3, &d127)
+					}
 					callResults128 := JITEmitGoCallResults(ctx, GoFuncAddr(JITCloneScmerSlice), []JITValueDesc{d127}, []uint8{3}, []uint8{1})
 					d129 = callResults128[0]
 					d130 = JITValueDesc{Loc: LocStackTriple, Type: tagSlice, StackOff: int32(bbs[3].PhiBase) + int32(0)}
@@ -7085,9 +7093,11 @@ func init() {
 					} else {
 						d3 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d2}, 3)
 					}
-					ctx.BindReg(d3.Reg, &d3)
-					ctx.BindReg(d3.Reg2, &d3)
-					ctx.BindReg(d3.Reg3, &d3)
+					if d3.Loc == LocRegTriple {
+						ctx.BindReg(d3.Reg, &d3)
+						ctx.BindReg(d3.Reg2, &d3)
+						ctx.BindReg(d3.Reg3, &d3)
+					}
 					ctx.StabilizeDescForControlFlow(&d3)
 					ctx.FreeDesc(&d2)
 					d4 = args[1]
@@ -8130,9 +8140,11 @@ func init() {
 					} else {
 						d118 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d14}, 3)
 					}
-					ctx.BindReg(d118.Reg, &d118)
-					ctx.BindReg(d118.Reg2, &d118)
-					ctx.BindReg(d118.Reg3, &d118)
+					if d118.Loc == LocRegTriple {
+						ctx.BindReg(d118.Reg, &d118)
+						ctx.BindReg(d118.Reg2, &d118)
+						ctx.BindReg(d118.Reg3, &d118)
+					}
 					ctx.StabilizeDescForControlFlow(&d118)
 					if ps.General {
 						ctx.SyncDesc(&d118)

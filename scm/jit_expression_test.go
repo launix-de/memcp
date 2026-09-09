@@ -635,6 +635,46 @@ func TestJITDynamicNativeFuncPreservesClosureContextAcrossGC(t *testing.T) {
 	}
 }
 
+func TestJITNestedCallPreservesPointerValues(t *testing.T) {
+	for _, source := range []string{
+		`(lambda (a b c value) (concat a (concat b (concat c (nth (list value "tail") 0)))))`,
+		`(lambda (a b c callback) (concat a (concat b (concat c (callback "value")))))`,
+	} {
+		t.Run(source, func(t *testing.T) {
+			compiled := compileJITExpressionTestProc(t, source)
+			value := NewString("value")
+			if strings.Contains(source, "callback") {
+				value = NewFunc(func(args ...Scmer) Scmer {
+					return jitCallbackTestSafepoint(args...)
+				})
+			}
+			got := Apply(compiled, NewString("a"), NewString("b"), NewString("c"), value)
+			if String(got) != "abcvalue" {
+				t.Fatalf("nested call returned %s", String(got))
+			}
+		})
+	}
+}
+
+func TestJITConditionalCallbackPreservesPointerValues(t *testing.T) {
+	compiled := compileJITExpressionTestProc(t, `(lambda (callback a b c)
+		(if a (if (and b (callback c)) (list a b c) (list c b a)) (list a b c)))`)
+	for _, enabled := range []bool{true, false} {
+		callback := NewFunc(func(args ...Scmer) Scmer {
+			_ = jitCallbackTestSafepoint(args...)
+			return NewBool(enabled)
+		})
+		a, b, c := NewString("first"), NewString("second"), NewString("third")
+		want := NewSlice([]Scmer{a, b, c})
+		if !enabled {
+			want = NewSlice([]Scmer{c, b, a})
+		}
+		if got := Apply(compiled, callback, a, b, c); !Equal(got, want) {
+			t.Fatalf("conditional callback returned %s, want %s", String(got), String(want))
+		}
+	}
+}
+
 func BenchmarkJITDynamicNativeFuncCall(b *testing.B) {
 	compiled := compileJITExpressionTestProc(b, `(lambda (callback value) (callback value))`)
 	callback := NewFunc(func(args ...Scmer) Scmer { return args[0] })

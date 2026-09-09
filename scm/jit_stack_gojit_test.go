@@ -211,6 +211,25 @@ func newJITStackMapTestContext(code []byte) *JITContext {
 	}
 }
 
+func TestJITKnownSliceHeaderWithTwoRegistersKeepsPreciseRoot(t *testing.T) {
+	ctx := newJITStackMapTestContext(make([]byte, 256))
+	source := JITValueDesc{Loc: LocStackPair, Type: tagSlice, StackOff: -16, Rooted: true}
+	header := jitKnownSliceHeader(ctx, &source)
+	if header.Loc != LocStackTriple || !header.Rooted {
+		t.Fatalf("slice header did not get a stable stack home: %#v", header)
+	}
+	for word := int32(0); word < 3; word++ {
+		root := jitStackRoot{base: jitStackRootFrameSP, offset: header.StackOff + word*8}
+		_, pointer := ctx.StackRoots[root]
+		if pointer != (word == 0) {
+			t.Fatalf("slice header word %d pointer=%v; only the backing array is a GC root", word, pointer)
+		}
+	}
+	if ctx.FreeRegs != ctx.AllRegs {
+		t.Fatal("stack header extraction consumed the caller's remaining registers")
+	}
+}
+
 func TestJITUnboxedScalarStabilizationDoesNotCreateGCStackRoot(t *testing.T) {
 	t.Run("control flow", func(t *testing.T) {
 		code := make([]byte, 128)

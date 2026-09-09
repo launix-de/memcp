@@ -540,9 +540,11 @@ func init_vector() {
 					} else {
 						d17 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d16}, 3)
 					}
-					ctx.BindReg(d17.Reg, &d17)
-					ctx.BindReg(d17.Reg2, &d17)
-					ctx.BindReg(d17.Reg3, &d17)
+					if d17.Loc == LocRegTriple {
+						ctx.BindReg(d17.Reg, &d17)
+						ctx.BindReg(d17.Reg2, &d17)
+						ctx.BindReg(d17.Reg3, &d17)
+					}
 					ctx.StabilizeDescForControlFlow(&d17)
 					ctx.FreeDesc(&d16)
 					d18 = args[1]
@@ -553,9 +555,11 @@ func init_vector() {
 					} else {
 						d19 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d18}, 3)
 					}
-					ctx.BindReg(d19.Reg, &d19)
-					ctx.BindReg(d19.Reg2, &d19)
-					ctx.BindReg(d19.Reg3, &d19)
+					if d19.Loc == LocRegTriple {
+						ctx.BindReg(d19.Reg, &d19)
+						ctx.BindReg(d19.Reg2, &d19)
+						ctx.BindReg(d19.Reg3, &d19)
+					}
 					ctx.StabilizeDescForControlFlow(&d19)
 					ctx.FreeDesc(&d18)
 					d20 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(len(args)))}
