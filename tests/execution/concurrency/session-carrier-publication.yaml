@@ -297,7 +297,7 @@ test_cases:
         (lambda (id)
           (scan nil
             (table "memcp-tests" "scp_source")
-            (car (compile_scan_access '() (scheme "(lambda () true)"))) (cadr (compile_scan_access '() (scheme "(lambda () true)"))) '() (lambda () true)
+            (car (eval (compile_scan_access '() (scheme "(lambda () true)")))) (cadr (eval (compile_scan_access '() (scheme "(lambda () true)")))) '() (lambda () true)
             '("amount") (lambda (acc amount) (+ acc amount))
             0 +)))
 
@@ -310,7 +310,7 @@ test_cases:
         (lambda (id)
           (scan nil
             (table "memcp-tests" "scp_middle_cache")
-            (car (compile_scan_access '() (scheme "(lambda () true)"))) (cadr (compile_scan_access '() (scheme "(lambda () true)"))) '() (lambda () true)
+            (car (eval (compile_scan_access '() (scheme "(lambda () true)")))) (cadr (eval (compile_scan_access '() (scheme "(lambda () true)")))) '() (lambda () true)
             '("total") (lambda (acc total) (+ acc (* total 2)))
             0 +)))
 

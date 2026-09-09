@@ -81,7 +81,7 @@ test_cases:
       (begin
         (define tbl (table "memcp-tests" "recset_items"))
         (define rs (scan_recset nil tbl
-          (car (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))"))) (cadr (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))"))) '("tenant")
+          (car (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) (cadr (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) '("tenant")
           (lambda (tenant) (equal? tenant 1))))
         (if (equal? (recset_count rs) 3)
           "ok"
@@ -92,11 +92,11 @@ test_cases:
       (begin
         (define tbl (table "memcp-tests" "recset_items"))
         (define rs (scan_recset nil tbl
-          (car (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))"))) (cadr (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))"))) '("tenant")
+          (car (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) (cadr (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) '("tenant")
           (lambda (tenant) (equal? tenant 1))))
         (define sum_active
           (scan nil rs
-            (car (compile_scan_access '("active") (scheme "(lambda (active) (equal? active 1))"))) (cadr (compile_scan_access '("active") (scheme "(lambda (active) (equal? active 1))"))) '("active")
+            (car (eval (compile_scan_access '("active") (scheme "(lambda (active) (equal? active 1))")))) (cadr (eval (compile_scan_access '("active") (scheme "(lambda (active) (equal? active 1))")))) '("active")
             (lambda (active) (equal? active 1))
             '("id")
             (lambda (acc id) (+ acc id))
@@ -113,11 +113,11 @@ test_cases:
           (begin
             (define tbl (table "memcp-tests" "recset_items"))
             (define rs (scan_recset nil tbl
-              (car (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))"))) (cadr (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))"))) '("tenant")
+              (car (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) (cadr (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) '("tenant")
               (lambda (tenant) (equal? tenant 1))))
             (scan nil tbl
-              (car (compile_scan_access '("$recset_contains") (scheme "(lambda (in_recset) (in_recset rs))")))
-              (cadr (compile_scan_access '("$recset_contains") (scheme "(lambda (in_recset) (in_recset rs))")))
+              (car (eval (compile_scan_access '("$recset_contains") (scheme "(lambda (in_recset) (in_recset rs))"))))
+              (cadr (eval (compile_scan_access '("$recset_contains") (scheme "(lambda (in_recset) (in_recset rs))"))))
               '("$recset_contains" "active")
               (lambda (in_recset active) (and (in_recset rs) (equal? active 1)))
               '("id")
@@ -139,11 +139,11 @@ test_cases:
       (begin
         (define tbl (table "memcp-tests" "recset_items"))
         (define rs (scan_recset nil tbl
-          (car (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))"))) (cadr (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))"))) '("tenant")
+          (car (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) (cadr (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) '("tenant")
           (lambda (tenant) (equal? tenant 1))))
         (define sum_active
           (scan nil tbl
-            (car (compile_scan_access '("$recset_contains" "active") (scheme "(lambda (in_recset active) (and (in_recset rs) (equal? active 1)))"))) (cadr (compile_scan_access '("$recset_contains" "active") (scheme "(lambda (in_recset active) (and (in_recset rs) (equal? active 1)))"))) '("$recset_contains" "active")
+            (car (eval (compile_scan_access '("$recset_contains" "active") (scheme "(lambda (in_recset active) (and (in_recset rs) (equal? active 1)))")))) (cadr (eval (compile_scan_access '("$recset_contains" "active") (scheme "(lambda (in_recset active) (and (in_recset rs) (equal? active 1)))")))) '("$recset_contains" "active")
             (lambda (in_recset active) (and (in_recset rs) (equal? active 1)))
             '("id")
             (lambda (acc id) (+ acc id))
@@ -157,14 +157,14 @@ test_cases:
       (begin
         (define tbl (table "memcp-tests" "recset_items"))
         (define tenant1 (scan_recset nil tbl
-          (car (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))"))) (cadr (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))"))) '("tenant")
+          (car (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) (cadr (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) '("tenant")
           (lambda (tenant) (equal? tenant 1))))
         (define active (scan_recset nil tbl
-          (car (compile_scan_access '("active") (scheme "(lambda (active) (equal? active 1))"))) (cadr (compile_scan_access '("active") (scheme "(lambda (active) (equal? active 1))"))) '("active")
+          (car (eval (compile_scan_access '("active") (scheme "(lambda (active) (equal? active 1))")))) (cadr (eval (compile_scan_access '("active") (scheme "(lambda (active) (equal? active 1))")))) '("active")
           (lambda (active) (equal? active 1))))
         (define sum_ids
           (scan nil tbl
-            (car (compile_scan_access '("$recset_contains" "$recset_contains") (scheme "(lambda (in_tenant1 in_active) (and (in_tenant1 tenant1) (in_active active)))"))) (cadr (compile_scan_access '("$recset_contains" "$recset_contains") (scheme "(lambda (in_tenant1 in_active) (and (in_tenant1 tenant1) (in_active active)))"))) '("$recset_contains" "$recset_contains")
+            (car (eval (compile_scan_access '("$recset_contains" "$recset_contains") (scheme "(lambda (in_tenant1 in_active) (and (in_tenant1 tenant1) (in_active active)))")))) (cadr (eval (compile_scan_access '("$recset_contains" "$recset_contains") (scheme "(lambda (in_tenant1 in_active) (and (in_tenant1 tenant1) (in_active active)))")))) '("$recset_contains" "$recset_contains")
             (lambda (in_tenant1 in_active) (and (in_tenant1 tenant1) (in_active active)))
             '("id")
             (lambda (acc id) (+ acc id))
@@ -179,11 +179,11 @@ test_cases:
         (define source (table "memcp-tests" "recset_items"))
         (define other (table "memcp-tests" "recset_other"))
         (define rs (scan_recset nil source
-          (car (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))"))) (cadr (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))"))) '("tenant")
+          (car (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) (cadr (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) '("tenant")
           (lambda (tenant) (equal? tenant 1))))
         (define matches
           (scan nil other
-            (car (compile_scan_access '("$recset_contains") (scheme "(lambda (in_recset) (if (in_recset rs) true false))"))) (cadr (compile_scan_access '("$recset_contains") (scheme "(lambda (in_recset) (if (in_recset rs) true false))"))) '("$recset_contains")
+            (car (eval (compile_scan_access '("$recset_contains") (scheme "(lambda (in_recset) (if (in_recset rs) true false))")))) (cadr (eval (compile_scan_access '("$recset_contains") (scheme "(lambda (in_recset) (if (in_recset rs) true false))")))) '("$recset_contains")
             (lambda (in_recset) (if (in_recset rs) true false))
             '("id")
             (lambda (acc id) (+ acc 1))
@@ -197,11 +197,11 @@ test_cases:
       (begin
         (define tbl (table "memcp-tests" "recset_items"))
         (define rs (scan_recset nil tbl
-          (car (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))"))) (cadr (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))"))) '("tenant")
+          (car (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) (cadr (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) '("tenant")
           (lambda (tenant) (equal? tenant 1))))
         (define ordered
           (scan_order nil tbl
-            (car (compile_scan_access '("$recset_contains" "active") (scheme "(lambda (in_recset active) (and (in_recset rs) (equal? active 1)))"))) (cadr (compile_scan_access '("$recset_contains" "active") (scheme "(lambda (in_recset active) (and (in_recset rs) (equal? active 1)))"))) '("$recset_contains" "active")
+            (car (eval (compile_scan_access '("$recset_contains" "active") (scheme "(lambda (in_recset active) (and (in_recset rs) (equal? active 1)))")))) (cadr (eval (compile_scan_access '("$recset_contains" "active") (scheme "(lambda (in_recset active) (and (in_recset rs) (equal? active 1)))")))) '("$recset_contains" "active")
             (lambda (in_recset active) (and (in_recset rs) (equal? active 1)))
             '("id") '(<)
             0 0 10
@@ -221,10 +221,10 @@ test_cases:
           (begin
             (define tbl (table "memcp-tests" "recset_items"))
             (define rs (scan_recset nil tbl
-              (car (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))"))) (cadr (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))"))) '("tenant")
+              (car (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) (cadr (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) '("tenant")
               (lambda (tenant) (equal? tenant 1))))
             (scan_order nil rs
-              (car (compile_scan_access '("active") (scheme "(lambda (active) (equal? active 1))"))) (cadr (compile_scan_access '("active") (scheme "(lambda (active) (equal? active 1))"))) '("active")
+              (car (eval (compile_scan_access '("active") (scheme "(lambda (active) (equal? active 1))")))) (cadr (eval (compile_scan_access '("active") (scheme "(lambda (active) (equal? active 1))")))) '("active")
               (lambda (active) (equal? active 1))
               '("id") '(<)
               0 0 10
@@ -248,14 +248,14 @@ test_cases:
       (begin
         (define tbl (table "memcp-tests" "recset_items"))
         (define tenant1 (scan_recset nil tbl
-          (car (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))"))) (cadr (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))"))) '("tenant")
+          (car (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) (cadr (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) '("tenant")
           (lambda (tenant) (equal? tenant 1))))
         (define active (scan_recset nil tbl
-          (car (compile_scan_access '("active") (scheme "(lambda (active) (equal? active 1))"))) (cadr (compile_scan_access '("active") (scheme "(lambda (active) (equal? active 1))"))) '("active")
+          (car (eval (compile_scan_access '("active") (scheme "(lambda (active) (equal? active 1))")))) (cadr (eval (compile_scan_access '("active") (scheme "(lambda (active) (equal? active 1))")))) '("active")
           (lambda (active) (equal? active 1))))
         (define ordered
           (scan_order nil tbl
-            (car (compile_scan_access '("$recset_contains") (scheme "(lambda (in_recset) (and (in_recset tenant1) (in_recset active)))"))) (cadr (compile_scan_access '("$recset_contains") (scheme "(lambda (in_recset) (and (in_recset tenant1) (in_recset active)))"))) '("$recset_contains")
+            (car (eval (compile_scan_access '("$recset_contains") (scheme "(lambda (in_recset) (and (in_recset tenant1) (in_recset active)))")))) (cadr (eval (compile_scan_access '("$recset_contains") (scheme "(lambda (in_recset) (and (in_recset tenant1) (in_recset active)))")))) '("$recset_contains")
             (lambda (in_recset) (and (in_recset tenant1) (in_recset active)))
             '("id") '(<)
             0 0 10
@@ -272,14 +272,14 @@ test_cases:
       (begin
         (define tbl (table "memcp-tests" "recset_items"))
         (define tenant1 (scan_recset nil tbl
-          (car (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))"))) (cadr (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))"))) '("tenant")
+          (car (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) (cadr (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) '("tenant")
           (lambda (tenant) (equal? tenant 1))))
         (define active (scan_recset nil tbl
-          (car (compile_scan_access '("active") (scheme "(lambda (active) (equal? active 1))"))) (cadr (compile_scan_access '("active") (scheme "(lambda (active) (equal? active 1))"))) '("active")
+          (car (eval (compile_scan_access '("active") (scheme "(lambda (active) (equal? active 1))")))) (cadr (eval (compile_scan_access '("active") (scheme "(lambda (active) (equal? active 1))")))) '("active")
           (lambda (active) (equal? active 1))))
         (define ordered
           (scan_order nil tbl
-            (car (compile_scan_access '("$recset_contains") (scheme "(lambda (in_recset) (or (in_recset tenant1) (in_recset active)))"))) (cadr (compile_scan_access '("$recset_contains") (scheme "(lambda (in_recset) (or (in_recset tenant1) (in_recset active)))"))) '("$recset_contains")
+            (car (eval (compile_scan_access '("$recset_contains") (scheme "(lambda (in_recset) (or (in_recset tenant1) (in_recset active)))")))) (cadr (eval (compile_scan_access '("$recset_contains") (scheme "(lambda (in_recset) (or (in_recset tenant1) (in_recset active)))")))) '("$recset_contains")
             (lambda (in_recset) (or (in_recset tenant1) (in_recset active)))
             '("id") '(<)
             0 0 10
@@ -296,14 +296,14 @@ test_cases:
       (begin
         (define tbl (table "memcp-tests" "recset_items"))
         (define rs (scan_recset nil tbl
-          (car (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))"))) (cadr (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))"))) '("tenant")
+          (car (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) (cadr (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) '("tenant")
           (lambda (tenant) (equal? tenant 1))))
         (if (and
               (scan_exists nil rs
-                (car (compile_scan_access '("active") (scheme "(lambda (active) (equal? active 0))"))) (cadr (compile_scan_access '("active") (scheme "(lambda (active) (equal? active 0))"))) '("active")
+                (car (eval (compile_scan_access '("active") (scheme "(lambda (active) (equal? active 0))")))) (cadr (eval (compile_scan_access '("active") (scheme "(lambda (active) (equal? active 0))")))) '("active")
                 (lambda (active) (equal? active 0)))
               (not (scan_exists nil rs
-                (car (compile_scan_access '("id") (scheme "(lambda (id) (equal? id 3))"))) (cadr (compile_scan_access '("id") (scheme "(lambda (id) (equal? id 3))"))) '("id")
+                (car (eval (compile_scan_access '("id") (scheme "(lambda (id) (equal? id 3))")))) (cadr (eval (compile_scan_access '("id") (scheme "(lambda (id) (equal? id 3))")))) '("id")
                 (lambda (id) (equal? id 3)))))
           "ok"
           (error "scan_exists over recset returned wrong result")))
@@ -313,14 +313,14 @@ test_cases:
       (begin
         (define tbl (table "memcp-tests" "recset_items"))
         (define tenant1 (scan_recset nil tbl
-          (car (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))"))) (cadr (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))"))) '("tenant")
+          (car (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) (cadr (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) '("tenant")
           (lambda (tenant) (equal? tenant 1))))
         (if (and
               (scan_exists nil tbl
-                (car (compile_scan_access '("$recset_contains" "id") (scheme "(lambda (in_recset id) (and (in_recset tenant1) (equal? id 5)))"))) (cadr (compile_scan_access '("$recset_contains" "id") (scheme "(lambda (in_recset id) (and (in_recset tenant1) (equal? id 5)))"))) '("$recset_contains" "id")
+                (car (eval (compile_scan_access '("$recset_contains" "id") (scheme "(lambda (in_recset id) (and (in_recset tenant1) (equal? id 5)))")))) (cadr (eval (compile_scan_access '("$recset_contains" "id") (scheme "(lambda (in_recset id) (and (in_recset tenant1) (equal? id 5)))")))) '("$recset_contains" "id")
                 (lambda (in_recset id) (and (in_recset tenant1) (equal? id 5))))
               (not (scan_exists nil tbl
-                (car (compile_scan_access '("$recset_contains" "id") (scheme "(lambda (in_recset id) (and (in_recset tenant1) (equal? id 3)))"))) (cadr (compile_scan_access '("$recset_contains" "id") (scheme "(lambda (in_recset id) (and (in_recset tenant1) (equal? id 3)))"))) '("$recset_contains" "id")
+                (car (eval (compile_scan_access '("$recset_contains" "id") (scheme "(lambda (in_recset id) (and (in_recset tenant1) (equal? id 3)))")))) (cadr (eval (compile_scan_access '("$recset_contains" "id") (scheme "(lambda (in_recset id) (and (in_recset tenant1) (equal? id 3)))")))) '("$recset_contains" "id")
                 (lambda (in_recset id) (and (in_recset tenant1) (equal? id 3))))))
           "ok"
           (error "scan_exists recset membership returned wrong result")))
@@ -330,10 +330,10 @@ test_cases:
       (begin
         (define tbl (table "memcp-tests" "recset_items"))
         (define tenant1 (scan_recset nil tbl
-          (car (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))"))) (cadr (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))"))) '("tenant")
+          (car (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) (cadr (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) '("tenant")
           (lambda (tenant) (equal? tenant 1))))
         (define active_tenant1 (scan_recset nil tbl
-          (car (compile_scan_access '("$recset_contains" "active") (scheme "(lambda (in_recset active) (and (in_recset tenant1) (equal? active 1)))"))) (cadr (compile_scan_access '("$recset_contains" "active") (scheme "(lambda (in_recset active) (and (in_recset tenant1) (equal? active 1)))"))) '("$recset_contains" "active")
+          (car (eval (compile_scan_access '("$recset_contains" "active") (scheme "(lambda (in_recset active) (and (in_recset tenant1) (equal? active 1)))")))) (cadr (eval (compile_scan_access '("$recset_contains" "active") (scheme "(lambda (in_recset active) (and (in_recset tenant1) (equal? active 1)))")))) '("$recset_contains" "active")
           (lambda (in_recset active) (and (in_recset tenant1) (equal? active 1)))))
         (if (equal? (recset_count active_tenant1) 2)
           "ok"
@@ -344,10 +344,10 @@ test_cases:
       (begin
         (define tbl (table "memcp-tests" "recset_items"))
         (define tenant1 (scan_recset nil tbl
-          (car (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))"))) (cadr (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))"))) '("tenant")
+          (car (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) (cadr (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) '("tenant")
           (lambda (tenant) (equal? tenant 1))))
         (define sum_ids (scan_batch nil tbl
-          (car (compile_scan_access '("$recset_contains" "id" "#0") (scheme "(lambda (in_recset id wanted_id)\n            (and (in_recset tenant1) (equal? id wanted_id)))"))) (cadr (compile_scan_access '("$recset_contains" "id" "#0") (scheme "(lambda (in_recset id wanted_id)\n            (and (in_recset tenant1) (equal? id wanted_id)))"))) '("$recset_contains" "id" "#0")
+          (car (eval (compile_scan_access '("$recset_contains" "id" "#0") (scheme "(lambda (in_recset id wanted_id)\n            (and (in_recset tenant1) (equal? id wanted_id)))")))) (cadr (eval (compile_scan_access '("$recset_contains" "id" "#0") (scheme "(lambda (in_recset id wanted_id)\n            (and (in_recset tenant1) (equal? id wanted_id)))")))) '("$recset_contains" "id" "#0")
           (lambda (in_recset id wanted_id)
             (and (in_recset tenant1) (equal? id wanted_id)))
           '("id")
@@ -363,11 +363,11 @@ test_cases:
       (begin
         (define tbl (table "memcp-tests" "recset_items"))
         (define rs (scan_recset nil tbl
-          (car (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))"))) (cadr (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))"))) '("tenant")
+          (car (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) (cadr (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) '("tenant")
           (lambda (tenant) (equal? tenant 1))))
         (define ordered
           (scan_order nil rs
-            (car (compile_scan_access '("active") (scheme "(lambda (active) true)"))) (cadr (compile_scan_access '("active") (scheme "(lambda (active) true)"))) '("active")
+            (car (eval (compile_scan_access '("active") (scheme "(lambda (active) true)")))) (cadr (eval (compile_scan_access '("active") (scheme "(lambda (active) true)")))) '("active")
             (lambda (active) true)
             '("id") '(<)
             0 0 2
@@ -384,10 +384,10 @@ test_cases:
       (begin
         (define tbl (table "memcp-tests" "recset_items"))
         (define rs1 (scan_recset nil tbl
-          (car (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))"))) (cadr (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))"))) '("tenant")
+          (car (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) (cadr (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) '("tenant")
           (lambda (tenant) (equal? tenant 1))))
         (define rs2 (scan_recset nil tbl
-          (car (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 2))"))) (cadr (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 2))"))) '("tenant")
+          (car (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 2))")))) (cadr (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 2))")))) '("tenant")
           (lambda (tenant) (equal? tenant 2))))
         (define ordered
           (scan_order_multi nil
@@ -416,12 +416,12 @@ test_cases:
         (define links (table "memcp-tests" "recset_link"))
         (define items (table "memcp-tests" "recset_items"))
         (define link_rs (scan_recset nil links
-          (car (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))"))) (cadr (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))"))) '("tenant")
+          (car (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) (cadr (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) '("tenant")
           (lambda (tenant) (equal? tenant 1))))
         (define item_rs (recset_project_join nil link_rs '("item_id") items '("id")))
         (define sum_ids
           (scan nil item_rs
-            (car (compile_scan_access '() (scheme "(lambda () true)"))) (cadr (compile_scan_access '() (scheme "(lambda () true)"))) '()
+            (car (eval (compile_scan_access '() (scheme "(lambda () true)")))) (cadr (eval (compile_scan_access '() (scheme "(lambda () true)")))) '()
             (lambda () true)
             '("id")
             (lambda (acc id) (+ acc id))
@@ -438,12 +438,12 @@ test_cases:
         (define links (table "memcp-tests" "recset_link"))
         (define items (table "memcp-tests" "recset_items"))
         (define link_rs (scan_recset nil links
-          (car (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))"))) (cadr (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))"))) '("tenant")
+          (car (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) (cadr (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) '("tenant")
           (lambda (tenant) (equal? tenant 1))))
         (define item_rs (recset_project_join nil link_rs '("item_id") items '("id")))
         (define ordered
           (scan_order nil item_rs
-            (car (compile_scan_access '() (scheme "(lambda () true)"))) (cadr (compile_scan_access '() (scheme "(lambda () true)"))) '()
+            (car (eval (compile_scan_access '() (scheme "(lambda () true)")))) (cadr (eval (compile_scan_access '() (scheme "(lambda () true)")))) '()
             (lambda () true)
             '("id") '(<)
             0 0 10
@@ -484,7 +484,7 @@ test_cases:
       (begin
         (define tbl (table "memcp-tests" "recset_items"))
         (define selected (scan_recset nil tbl
-          (car (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))"))) (cadr (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))"))) '("tenant")
+          (car (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) (cadr (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) '("tenant")
           (lambda (tenant) (equal? tenant 1))))
         (define lookup (recset_key_index nil selected '("id")))
         (if (and
@@ -500,10 +500,10 @@ test_cases:
       (begin
         (define tbl (table "memcp-tests" "recset_items"))
         (define tenant1 (scan_recset nil tbl
-          (car (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))"))) (cadr (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))"))) '("tenant")
+          (car (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) (cadr (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) '("tenant")
           (lambda (tenant) (equal? tenant 1))))
         (define active (scan_recset nil tbl
-          (car (compile_scan_access '("active") (scheme "(lambda (value) (equal? value 1))"))) (cadr (compile_scan_access '("active") (scheme "(lambda (value) (equal? value 1))"))) '("active")
+          (car (eval (compile_scan_access '("active") (scheme "(lambda (value) (equal? value 1))")))) (cadr (eval (compile_scan_access '("active") (scheme "(lambda (value) (equal? value 1))")))) '("active")
           (lambda (value) (equal? value 1))))
         (define lookup (recset_key_index nil
           (recset_union nil (list tenant1 active))
@@ -520,7 +520,7 @@ test_cases:
     scm: |
       (begin
         (define tbl (table "memcp-tests" "recset_items"))
-        (define selected (scan_recset nil tbl (car (compile_scan_access '() (scheme "(lambda () true)"))) (cadr (compile_scan_access '() (scheme "(lambda () true)"))) '() (lambda () true)))
+        (define selected (scan_recset nil tbl (car (eval (compile_scan_access '() (scheme "(lambda () true)")))) (cadr (eval (compile_scan_access '() (scheme "(lambda () true)")))) '() (lambda () true)))
         (define lookup (recset_key_index nil selected '("tenant" "active")))
         (lookup 1))
     expect:
@@ -531,15 +531,15 @@ test_cases:
       (begin
         (define tbl (table "memcp-tests" "recset_items"))
         (define tenant1 (scan_recset nil tbl
-          (car (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))"))) (cadr (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))"))) '("tenant")
+          (car (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) (cadr (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) '("tenant")
           (lambda (tenant) (equal? tenant 1))))
         (define active (scan_recset nil tbl
-          (car (compile_scan_access '("active") (scheme "(lambda (active) (equal? active 1))"))) (cadr (compile_scan_access '("active") (scheme "(lambda (active) (equal? active 1))"))) '("active")
+          (car (eval (compile_scan_access '("active") (scheme "(lambda (active) (equal? active 1))")))) (cadr (eval (compile_scan_access '("active") (scheme "(lambda (active) (equal? active 1))")))) '("active")
           (lambda (active) (equal? active 1))))
         (define combined (recset_union nil (list tenant1 active)))
         (define sum_ids
           (scan nil combined
-            (car (compile_scan_access '() (scheme "(lambda () true)"))) (cadr (compile_scan_access '() (scheme "(lambda () true)"))) '()
+            (car (eval (compile_scan_access '() (scheme "(lambda () true)")))) (cadr (eval (compile_scan_access '() (scheme "(lambda () true)")))) '()
             (lambda () true)
             '("id")
             (lambda (acc id) (+ acc id))
@@ -554,16 +554,16 @@ test_cases:
     scm: |
       (begin
         (define tbl (table "memcp-tests" "recset_adaptive"))
-        (define full (scan_recset nil tbl (car (compile_scan_access '() (scheme "(lambda () true)"))) (cadr (compile_scan_access '() (scheme "(lambda () true)"))) '() (lambda () true)))
-        (define empty (scan_recset nil tbl (car (compile_scan_access '() (scheme "(lambda () false)"))) (cadr (compile_scan_access '() (scheme "(lambda () false)"))) '() (lambda () false)))
-        (define positive (scan_recset nil tbl (car (compile_scan_access '("id") (scheme "(lambda (id) (> id 4086))"))) (cadr (compile_scan_access '("id") (scheme "(lambda (id) (> id 4086))"))) '("id") (lambda (id) (> id 4086))))
-        (define positive2 (scan_recset nil tbl (car (compile_scan_access '("id") (scheme "(lambda (id) (and (>= id 4083) (<= id 4092)))"))) (cadr (compile_scan_access '("id") (scheme "(lambda (id) (and (>= id 4083) (<= id 4092)))"))) '("id") (lambda (id) (and (>= id 4083) (<= id 4092)))))
-        (define negative (scan_recset nil tbl (car (compile_scan_access '("id") (scheme "(lambda (id) (not (> (mod id 5000) 4086)))"))) (cadr (compile_scan_access '("id") (scheme "(lambda (id) (not (> (mod id 5000) 4086)))"))) '("id") (lambda (id) (not (> (mod id 5000) 4086)))))
-        (define negative2 (scan_recset nil tbl (car (compile_scan_access '("id") (scheme "(lambda (id)\n          (not (and (>= (mod id 5000) 6) (<= (mod id 5000) 15))))"))) (cadr (compile_scan_access '("id") (scheme "(lambda (id)\n          (not (and (>= (mod id 5000) 6) (<= (mod id 5000) 15))))"))) '("id") (lambda (id)
+        (define full (scan_recset nil tbl (car (eval (compile_scan_access '() (scheme "(lambda () true)")))) (cadr (eval (compile_scan_access '() (scheme "(lambda () true)")))) '() (lambda () true)))
+        (define empty (scan_recset nil tbl (car (eval (compile_scan_access '() (scheme "(lambda () false)")))) (cadr (eval (compile_scan_access '() (scheme "(lambda () false)")))) '() (lambda () false)))
+        (define positive (scan_recset nil tbl (car (eval (compile_scan_access '("id") (scheme "(lambda (id) (> id 4086))")))) (cadr (eval (compile_scan_access '("id") (scheme "(lambda (id) (> id 4086))")))) '("id") (lambda (id) (> id 4086))))
+        (define positive2 (scan_recset nil tbl (car (eval (compile_scan_access '("id") (scheme "(lambda (id) (and (>= id 4083) (<= id 4092)))")))) (cadr (eval (compile_scan_access '("id") (scheme "(lambda (id) (and (>= id 4083) (<= id 4092)))")))) '("id") (lambda (id) (and (>= id 4083) (<= id 4092)))))
+        (define negative (scan_recset nil tbl (car (eval (compile_scan_access '("id") (scheme "(lambda (id) (not (> (mod id 5000) 4086)))")))) (cadr (eval (compile_scan_access '("id") (scheme "(lambda (id) (not (> (mod id 5000) 4086)))")))) '("id") (lambda (id) (not (> (mod id 5000) 4086)))))
+        (define negative2 (scan_recset nil tbl (car (eval (compile_scan_access '("id") (scheme "(lambda (id)\n          (not (and (>= (mod id 5000) 6) (<= (mod id 5000) 15))))")))) (cadr (eval (compile_scan_access '("id") (scheme "(lambda (id)\n          (not (and (>= (mod id 5000) 6) (<= (mod id 5000) 15))))")))) '("id") (lambda (id)
           (not (and (>= (mod id 5000) 6) (<= (mod id 5000) 15))))))
-        (define negative3 (scan_recset nil tbl (car (compile_scan_access '("id") (scheme "(lambda (id) (not (> (mod id 5000) 4091)))"))) (cadr (compile_scan_access '("id") (scheme "(lambda (id) (not (> (mod id 5000) 4091)))"))) '("id") (lambda (id) (not (> (mod id 5000) 4091)))))
-        (define even (scan_recset nil tbl (car (compile_scan_access '("id") (scheme "(lambda (id) (equal? (mod id 2) 0))"))) (cadr (compile_scan_access '("id") (scheme "(lambda (id) (equal? (mod id 2) 0))"))) '("id") (lambda (id) (equal? (mod id 2) 0))))
-        (define third (scan_recset nil tbl (car (compile_scan_access '("id") (scheme "(lambda (id) (equal? (mod id 3) 0))"))) (cadr (compile_scan_access '("id") (scheme "(lambda (id) (equal? (mod id 3) 0))"))) '("id") (lambda (id) (equal? (mod id 3) 0))))
+        (define negative3 (scan_recset nil tbl (car (eval (compile_scan_access '("id") (scheme "(lambda (id) (not (> (mod id 5000) 4091)))")))) (cadr (eval (compile_scan_access '("id") (scheme "(lambda (id) (not (> (mod id 5000) 4091)))")))) '("id") (lambda (id) (not (> (mod id 5000) 4091)))))
+        (define even (scan_recset nil tbl (car (eval (compile_scan_access '("id") (scheme "(lambda (id) (equal? (mod id 2) 0))")))) (cadr (eval (compile_scan_access '("id") (scheme "(lambda (id) (equal? (mod id 2) 0))")))) '("id") (lambda (id) (equal? (mod id 2) 0))))
+        (define third (scan_recset nil tbl (car (eval (compile_scan_access '("id") (scheme "(lambda (id) (equal? (mod id 3) 0))")))) (cadr (eval (compile_scan_access '("id") (scheme "(lambda (id) (equal? (mod id 3) 0))")))) '("id") (lambda (id) (equal? (mod id 3) 0))))
         (if (and
               (equal? (recset_count full) 4096)
               (equal? (recset_count empty) 0)
@@ -599,11 +599,11 @@ test_cases:
       (begin
         (define tbl (table "memcp-tests" "recset_items"))
         (define tenant1 (scan_recset nil tbl
-          (car (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))"))) (cadr (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))"))) '("tenant")
+          (car (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) (cadr (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) '("tenant")
           (lambda (tenant) (equal? tenant 1))))
         (define complement (recset_not nil tenant1))
         (define sum_ids
-          (scan nil complement (car (compile_scan_access '() (scheme "(lambda () true)"))) (cadr (compile_scan_access '() (scheme "(lambda () true)"))) '() (lambda () true) '("id")
+          (scan nil complement (car (eval (compile_scan_access '() (scheme "(lambda () true)")))) (cadr (eval (compile_scan_access '() (scheme "(lambda () true)")))) '() (lambda () true) '("id")
             (lambda (acc id) (+ acc id)) 0 +))
         (if (and (equal? (recset_count complement) 2) (equal? sum_ids 7))
           "ok"
@@ -613,12 +613,12 @@ test_cases:
     scm: |
       (begin
         (define tbl (table "memcp-tests" "recset_items"))
-        (define full (scan_recset nil tbl (car (compile_scan_access '() (scheme "(lambda () true)"))) (cadr (compile_scan_access '() (scheme "(lambda () true)"))) '() (lambda () true)))
-        (define tenant1 (scan_recset nil tbl (car (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))"))) (cadr (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))"))) '("tenant") (lambda (tenant) (equal? tenant 1))))
-        (define active (scan_recset nil tbl (car (compile_scan_access '("active") (scheme "(lambda (value) (equal? value 1))"))) (cadr (compile_scan_access '("active") (scheme "(lambda (value) (equal? value 1))"))) '("active") (lambda (value) (equal? value 1))))
+        (define full (scan_recset nil tbl (car (eval (compile_scan_access '() (scheme "(lambda () true)")))) (cadr (eval (compile_scan_access '() (scheme "(lambda () true)")))) '() (lambda () true)))
+        (define tenant1 (scan_recset nil tbl (car (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) (cadr (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) '("tenant") (lambda (tenant) (equal? tenant 1))))
+        (define active (scan_recset nil tbl (car (eval (compile_scan_access '("active") (scheme "(lambda (value) (equal? value 1))")))) (cadr (eval (compile_scan_access '("active") (scheme "(lambda (value) (equal? value 1))")))) '("active") (lambda (value) (equal? value 1))))
         (define remaining (recset_difference nil (list full tenant1 active)))
         (define sum_ids
-          (scan nil remaining (car (compile_scan_access '() (scheme "(lambda () true)"))) (cadr (compile_scan_access '() (scheme "(lambda () true)"))) '() (lambda () true) '("id")
+          (scan nil remaining (car (eval (compile_scan_access '() (scheme "(lambda () true)")))) (cadr (eval (compile_scan_access '() (scheme "(lambda () true)")))) '() (lambda () true) '("id")
             (lambda (acc id) (+ acc id)) 0 +))
         (if (and (equal? (recset_count remaining) 1) (equal? sum_ids 4))
           "ok"
@@ -632,8 +632,8 @@ test_cases:
   - name: "recset_union rejects recsets from different tables"
     scm: |
       (begin
-        (define left (scan_recset nil (table "memcp-tests" "recset_items") (car (compile_scan_access '() (scheme "(lambda () true)"))) (cadr (compile_scan_access '() (scheme "(lambda () true)"))) '() (lambda () true)))
-        (define right (scan_recset nil (table "memcp-tests" "recset_other") (car (compile_scan_access '() (scheme "(lambda () true)"))) (cadr (compile_scan_access '() (scheme "(lambda () true)"))) '() (lambda () true)))
+        (define left (scan_recset nil (table "memcp-tests" "recset_items") (car (eval (compile_scan_access '() (scheme "(lambda () true)")))) (cadr (eval (compile_scan_access '() (scheme "(lambda () true)")))) '() (lambda () true)))
+        (define right (scan_recset nil (table "memcp-tests" "recset_other") (car (eval (compile_scan_access '() (scheme "(lambda () true)")))) (cadr (eval (compile_scan_access '() (scheme "(lambda () true)")))) '() (lambda () true)))
         (recset_union nil (list left right)))
     expect:
       error: true
@@ -641,8 +641,8 @@ test_cases:
   - name: "recset_intersect rejects recsets from different tables"
     scm: |
       (begin
-        (define left (scan_recset nil (table "memcp-tests" "recset_items") (car (compile_scan_access '() (scheme "(lambda () true)"))) (cadr (compile_scan_access '() (scheme "(lambda () true)"))) '() (lambda () true)))
-        (define right (scan_recset nil (table "memcp-tests" "recset_other") (car (compile_scan_access '() (scheme "(lambda () true)"))) (cadr (compile_scan_access '() (scheme "(lambda () true)"))) '() (lambda () true)))
+        (define left (scan_recset nil (table "memcp-tests" "recset_items") (car (eval (compile_scan_access '() (scheme "(lambda () true)")))) (cadr (eval (compile_scan_access '() (scheme "(lambda () true)")))) '() (lambda () true)))
+        (define right (scan_recset nil (table "memcp-tests" "recset_other") (car (eval (compile_scan_access '() (scheme "(lambda () true)")))) (cadr (eval (compile_scan_access '() (scheme "(lambda () true)")))) '() (lambda () true)))
         (recset_intersect nil (list left right)))
     expect:
       error: true
@@ -650,8 +650,8 @@ test_cases:
   - name: "recset_difference rejects recsets from different tables"
     scm: |
       (begin
-        (define left (scan_recset nil (table "memcp-tests" "recset_items") (car (compile_scan_access '() (scheme "(lambda () true)"))) (cadr (compile_scan_access '() (scheme "(lambda () true)"))) '() (lambda () true)))
-        (define right (scan_recset nil (table "memcp-tests" "recset_other") (car (compile_scan_access '() (scheme "(lambda () true)"))) (cadr (compile_scan_access '() (scheme "(lambda () true)"))) '() (lambda () true)))
+        (define left (scan_recset nil (table "memcp-tests" "recset_items") (car (eval (compile_scan_access '() (scheme "(lambda () true)")))) (cadr (eval (compile_scan_access '() (scheme "(lambda () true)")))) '() (lambda () true)))
+        (define right (scan_recset nil (table "memcp-tests" "recset_other") (car (eval (compile_scan_access '() (scheme "(lambda () true)")))) (cadr (eval (compile_scan_access '() (scheme "(lambda () true)")))) '() (lambda () true)))
         (recset_difference nil (list left right)))
     expect:
       error: true
@@ -661,7 +661,7 @@ test_cases:
       (begin
         (define source (table "memcp-tests" "recset_project_source"))
         (define target (table "memcp-tests" "recset_project_target"))
-        (define selected (scan_recset nil source (car (compile_scan_access '("selected") (scheme "(lambda (v) (equal? v 1))"))) (cadr (compile_scan_access '("selected") (scheme "(lambda (v) (equal? v 1))"))) '("selected") (lambda (v) (equal? v 1))))
+        (define selected (scan_recset nil source (car (eval (compile_scan_access '("selected") (scheme "(lambda (v) (equal? v 1))")))) (cadr (eval (compile_scan_access '("selected") (scheme "(lambda (v) (equal? v 1))")))) '("selected") (lambda (v) (equal? v 1))))
         (define projected (recset_project_join nil selected '("k1") target '("k1")))
         (if (equal? (recset_count projected) 19976)
           "ok"
@@ -672,7 +672,7 @@ test_cases:
       (begin
         (define source (table "memcp-tests" "recset_project_source"))
         (define target (table "memcp-tests" "recset_project_target"))
-        (define selected (scan_recset nil source (car (compile_scan_access '("selected") (scheme "(lambda (v) (equal? v 1))"))) (cadr (compile_scan_access '("selected") (scheme "(lambda (v) (equal? v 1))"))) '("selected") (lambda (v) (equal? v 1))))
+        (define selected (scan_recset nil source (car (eval (compile_scan_access '("selected") (scheme "(lambda (v) (equal? v 1))")))) (cadr (eval (compile_scan_access '("selected") (scheme "(lambda (v) (equal? v 1))")))) '("selected") (lambda (v) (equal? v 1))))
         (define projected (recset_project_join nil selected '("k1" "k2") target '("k1" "k2")))
         (if (equal? (recset_count projected) 4994)
           "ok"
@@ -683,7 +683,7 @@ test_cases:
       (begin
         (define tbl (table "memcp-tests" "recset_items"))
         (define rs (scan_recset nil tbl
-          (car (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))"))) (cadr (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))"))) '("tenant")
+          (car (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) (cadr (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) '("tenant")
           (lambda (tenant) (equal? tenant 1))))
         (if (and
               (equal? (show rs) (show tbl))
@@ -697,10 +697,10 @@ test_cases:
       (begin
         (define tbl (table "memcp-tests" "recset_items"))
         (define rs (scan_recset nil tbl
-          (car (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))"))) (cadr (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))"))) '("tenant")
+          (car (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) (cadr (eval (compile_scan_access '("tenant") (scheme "(lambda (tenant) (equal? tenant 1))")))) '("tenant")
           (lambda (tenant) (equal? tenant 1))))
         (scan nil rs
-          (car (compile_scan_access '() (scheme "(lambda () true)"))) (cadr (compile_scan_access '() (scheme "(lambda () true)"))) '()
+          (car (eval (compile_scan_access '() (scheme "(lambda () true)")))) (cadr (eval (compile_scan_access '() (scheme "(lambda () true)")))) '()
           (lambda () true)
           '("$update")
           (lambda (acc update) (begin (update) acc))

@@ -1,4 +1,5 @@
 # Copyright (C) 2026  Carl-Philip Hänsch
+# Use the stable scan-plan AST contract for handwritten access in cross-version A/B runs.
 #
 # Original-scale reproduction of https://stackoverflow.com/questions/73024688/mysql-inner-join-and-order-by-bad-performance
 # This suite deliberately stays out of CI: it builds 6,276,445 products and
@@ -45,7 +46,7 @@ setup:
   - scm: |
       (scan_order nil
         (table "memcp-tests" "so_730_large_images")
-        (car (compile_scan_access '() (scheme "(lambda () true)"))) (cadr (compile_scan_access '() (scheme "(lambda () true)"))) '() (lambda () true) '("id") '(<) 0 0 1
+        (car (eval (cons (quote list) (slice (compile_scan_plan (quote scan) nil nil '() (scheme "(lambda () true)") '()) 3 5)))) (cadr (eval (cons (quote list) (slice (compile_scan_plan (quote scan) nil nil '() (scheme "(lambda () true)") '()) 3 5)))) '() (lambda () true) '("id") '(<) 0 0 1
         '() (lambda () true) (lambda (acc _row) acc) true false)
   - sql: "ALTER TABLE so_730_large_products ENGINE=sloppy"
   - sql: "ALTER TABLE so_730_large_images ENGINE=sloppy"
@@ -85,11 +86,11 @@ test_cases:
         (define tx (session "__memcp_tx"))
         (define products (table "memcp-tests" "so_730_large_products"))
         (define images (table "memcp-tests" "so_730_large_images"))
-        (define selected (scan_recset tx products (car (compile_scan_access '("project_1") (scheme "(lambda (project_1) (equal? project_1 1))"))) (cadr (compile_scan_access '("project_1") (scheme "(lambda (project_1) (equal? project_1 1))"))) '("project_1")
+        (define selected (scan_recset tx products (car (eval (cons (quote list) (slice (compile_scan_plan (quote scan) nil nil '("project_1") (scheme "(lambda (project_1) (equal? project_1 1))") '()) 3 5)))) (cadr (eval (cons (quote list) (slice (compile_scan_plan (quote scan) nil nil '("project_1") (scheme "(lambda (project_1) (equal? project_1 1))") '()) 3 5)))) '("project_1")
           (lambda (project_1) (equal? project_1 1))))
         (define lookup (recset_key_index tx selected '("unique_id")))
         (define found (scan_order_batch_accept tx images
-          '(369435906932736) '() (lambda (input) (scan_recset tx input (car (compile_scan_access '("product_unique_id") (scheme "(lambda (product_unique_id) (lookup product_unique_id))"))) (cadr (compile_scan_access '("product_unique_id") (scheme "(lambda (product_unique_id) (lookup product_unique_id))"))) '("product_unique_id")
+          '(369435906932736) '() (lambda (input) (scan_recset tx input (car (eval (cons (quote list) (slice (compile_scan_plan (quote scan) nil nil '("product_unique_id") (scheme "(lambda (product_unique_id) (lookup product_unique_id))") '()) 3 5)))) (cadr (eval (cons (quote list) (slice (compile_scan_plan (quote scan) nil nil '("product_unique_id") (scheme "(lambda (product_unique_id) (lookup product_unique_id))") '()) 3 5)))) '("product_unique_id")
             (lambda (product_unique_id) (lookup product_unique_id))))
           '("id") '(<) 0 0 1000 '() (lambda () 1) + 0 false 0))
         (if (equal? found 1000) "ok" (error "wrong batch result")))
@@ -100,11 +101,11 @@ test_cases:
         (define tx (session "__memcp_tx"))
         (define products (table "memcp-tests" "so_730_large_products"))
         (define images (table "memcp-tests" "so_730_large_images"))
-        (define selected (scan_recset tx products (car (compile_scan_access '("project_late") (scheme "(lambda (project_late) (equal? project_late 1))"))) (cadr (compile_scan_access '("project_late") (scheme "(lambda (project_late) (equal? project_late 1))"))) '("project_late")
+        (define selected (scan_recset tx products (car (eval (cons (quote list) (slice (compile_scan_plan (quote scan) nil nil '("project_late") (scheme "(lambda (project_late) (equal? project_late 1))") '()) 3 5)))) (cadr (eval (cons (quote list) (slice (compile_scan_plan (quote scan) nil nil '("project_late") (scheme "(lambda (project_late) (equal? project_late 1))") '()) 3 5)))) '("project_late")
           (lambda (project_late) (equal? project_late 1))))
         (define projected (recset_project_join tx selected '("unique_id")
           images '("product_unique_id")))
-        (define found (scan_order tx projected (car (compile_scan_access '() (scheme "(lambda () true)"))) (cadr (compile_scan_access '() (scheme "(lambda () true)"))) '() (lambda () true)
+        (define found (scan_order tx projected (car (eval (cons (quote list) (slice (compile_scan_plan (quote scan) nil nil '() (scheme "(lambda () true)") '()) 3 5)))) (cadr (eval (cons (quote list) (slice (compile_scan_plan (quote scan) nil nil '() (scheme "(lambda () true)") '()) 3 5)))) '() (lambda () true)
           '("id") '(<) 0 0 1000 '() (lambda () 1) + 0 false 0))
         (if (equal? found 1000) "ok" (error "wrong projected result")))
 

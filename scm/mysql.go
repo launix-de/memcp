@@ -24,7 +24,6 @@ import "net"
 import "sync"
 import "strings"
 import "github.com/launix-de/go-mysqlstack/sqldb"
-import "runtime"
 import "sync/atomic"
 import "github.com/launix-de/go-mysqlstack/xlog"
 import "github.com/launix-de/go-mysqlstack/driver"
@@ -413,29 +412,6 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 			ss.SetDB(session.Schema())
 		}
 	}()
-	// max_allowed_packet: PHP PDO queries this to size buffers.
-	// Return 40MB so large result sets work without tripping client-side
-	// packet buffer limits on wide login/dashboard views.
-	if query == "select @@max_allowed_packet" || query == "SELECT @@max_allowed_packet" {
-		return output.WriteResult(&sqltypes.Result{
-			Fields: []*querypb.Field{
-				{Name: "@@max_allowed_packet", Type: querypb.Type_INT64},
-			},
-			Rows: [][]sqltypes.Value{
-				{sqltypes.MakeTrusted(querypb.Type_INT64, []byte("41943040"))},
-			},
-		})
-	}
-	if query == "select @@version_comment limit 1" {
-		return output.WriteResult(&sqltypes.Result{
-			Fields: []*querypb.Field{
-				{Name: "@@version_comment", Type: querypb.Type_TEXT, Charset: 45},
-			},
-			Rows: [][]sqltypes.Value{
-				{sqltypes.MakeTrusted(querypb.Type_TEXT, []byte(runtime.GOOS))},
-			},
-		})
-	}
 	colmap := make(map[string]int)
 	var fields []*querypb.Field
 	var rowValues []Scmer

@@ -468,20 +468,6 @@ func preserveScanFeedbackHeader(header, old scm.Scmer) scm.Scmer {
 
 // Logical costing only needs a statistical identity. It must not compile/eval
 // physical boundaries, which can contain correlated or effectful expressions.
-func compileFilterFeedbackAccess(columnExpr, filterExpr scm.Scmer) (scm.Scmer, []scm.Scmer) {
-	columns, columnsOK := scanStaticColumns(columnExpr)
-	params, body, lambdaOK := scanLambdaParts(filterExpr)
-	if !columnsOK || !lambdaOK || len(params) != len(columns) {
-		return scm.NewSlice(nil), nil
-	}
-	var bindings []scm.Scmer
-	spec := compileFilterFeedback(params, columns, body, &bindings)
-	if spec.IsNil() {
-		return scm.NewSlice(nil), nil
-	}
-	return scm.NewSlice([]scm.Scmer{scm.NewSlice([]scm.Scmer{newScanAccessHeader(0, scanAccessConsumerScan, 0, -1), spec})}), bindings
-}
-
 // Literal-only scans reuse a serialized, compile-time identity. Dynamic session
 // parameters still bind once per invocation. Neither path does key work in a
 // shard loop, and the common literal path avoids building/hashing AST strings.

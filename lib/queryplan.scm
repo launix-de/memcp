@@ -20,5 +20,6 @@ loaded into the shared Scheme namespace for compatibility with existing
 queryplan.scm importers. */
 (import "queryplan-logical.scm")
 (import "queryplan-optimize.scm")
+(import "queryplan-physical-scan.scm")
 (import "queryplan-physical-expr.scm")
 (import "queryplan-physical-plan.scm")

@@ -23,7 +23,7 @@ test_cases:
           '("value") (lambda (value)
             (if (and (fail "enabled") (equal? value 64))
               (error "intentional index column failure") value)))
-        (define access (compile_scan_access '() (lambda () true)))
+        (define access (eval (compile_scan_access '() (lambda () true))))
         (define query (lambda ()
           (scan_order nil (table "memcp-tests" "index_panic_rows")
             (car access) (cadr access) '() (lambda () true)

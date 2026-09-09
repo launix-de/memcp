@@ -3386,6 +3386,15 @@ const constListQuoteThreshold = 32
 // as variable references.
 // Only wraps plain slices — FastDicts are left as-is since they are self-evaluating.
 func wrapConstListForCode(val Scmer, resultType *TypeDescriptor, embedded bool) Scmer {
+	// A reader result may wrap an AST in source information. Returning that
+	// wrapper as executable code would evaluate its contents (for example,
+	// turn a parsed lambda into a procedure) instead of returning the AST.
+	if val.IsSourceInfo() {
+		if resultType != nil {
+			resultType.Transfer = false
+		}
+		return NewSlice([]Scmer{NewSymbol("quote"), val})
+	}
 	if val.IsSlice() {
 		if !embedded && resultType != nil && resultType.Const && len(val.Slice()) >= constListQuoteThreshold {
 			resultType.Transfer = false

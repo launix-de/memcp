@@ -15,6 +15,41 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
+/* SQL system-variable defaults and state have one owner. Both @@ reads and
+SHOW VARIABLES use this catalog; wire frontends only transport their results.
+Keep the 40 MiB packet advertisement used by PDO on the MySQL frontend. */
+(define sql_system_variable_defaults (list
+	(list "version" "0.9")
+	(list "version_comment" runtime_os)
+	(list "lower_case_table_names" 0)
+	(list "character_set_server" "utf8mb4")
+	(list "collation_server" "utf8mb4_general_ci")
+	(list "character_set_client" "utf8mb4")
+	(list "character_set_results" "utf8mb4")
+	(list "collation_connection" "utf8mb4_general_ci")
+	(list "collation_database" "utf8mb4_general_ci")
+	(list "sql_mode" "")
+	(list "unique_checks" 1)
+	(list "foreign_key_checks" 1)
+	(list "sql_notes" 1)
+	(list "time_zone" "UTC")
+	(list "system_time_zone" (system_time_zone))
+	(list "key_buffer_size" 0)
+	(list "max_allowed_packet" 41943040)
+	(list "max_connections" 151)
+	(list "innodb_buffer_pool_size" 0)))
+(define globalvars (newsession))
+(reduce sql_system_variable_defaults (lambda (_ entry) (globalvars (car entry) (cadr entry))) nil)
+
+/* Execution shadows session_globalvar with its request-local reader. */
+(define session_globalvar (lambda (key) (globalvars key)))
+(define session_globalvar_explicit (lambda (session key) (coalesceNil (session key) (globalvars key))))
+
+/* Build row expressions so mutable values are read when a cached SHOW runs. */
+(define sql_system_variable_rows (lambda ()
+	(map sql_system_variable_defaults (lambda (entry)
+		(list (car entry) (list (quote session_globalvar) (car entry)))))))
+
 (define sql_metadata_identity (lambda (x) x))
 
 (define quote_mysql_identifier (lambda (id)

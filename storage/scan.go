@@ -330,63 +330,6 @@ func shiftCompiledScanAccessSlots(schemaValue scm.Scmer, shift int) scm.Scmer {
 	return scm.NewSlice(shifted)
 }
 
-func compileScanAccessList(columnListsExpr, filtersExpr scm.Scmer, allowBatch bool) ([]scm.Scmer, []scm.Scmer, []bool, bool) {
-	columnLists, columnsOK := scanStaticListElements(columnListsExpr)
-	filters, filtersOK := scanStaticListElements(filtersExpr)
-	if !columnsOK || !filtersOK || len(columnLists) != len(filters) {
-		return nil, nil, nil, false
-	}
-	schemas := make([]scm.Scmer, len(columnLists))
-	bindings := make([]scm.Scmer, 0)
-	compiledEntries := make([]bool, len(columnLists))
-	compiledAny := false
-	for i := range columnLists {
-		schema, sourceBindings, ok := compileScanAccessMode(columnLists[i], filters[i], allowBatch)
-		schemas[i] = shiftCompiledScanAccessSlots(schema, len(bindings))
-		if ok {
-			bindings = append(bindings, sourceBindings...)
-			compiledEntries[i] = true
-			compiledAny = true
-		}
-	}
-	return schemas, bindings, compiledEntries, compiledAny
-}
-
-func pruneScanResidualList(columnListsExpr, filtersExpr scm.Scmer, compiled []bool, allowBatch bool) (scm.Scmer, scm.Scmer) {
-	columnLists, columnsOK := scanStaticListElements(columnListsExpr)
-	filters, filtersOK := scanStaticListElements(filtersExpr)
-	if !columnsOK || !filtersOK || len(columnLists) != len(filters) || len(compiled) != len(filters) {
-		return columnListsExpr, filtersExpr
-	}
-	prunedColumns := make([]scm.Scmer, len(columnLists)+1)
-	prunedFilters := make([]scm.Scmer, len(filters)+1)
-	prunedColumns[0], prunedFilters[0] = scm.NewSymbol("list"), scm.NewSymbol("list")
-	for i := range filters {
-		prunedColumns[i+1], prunedFilters[i+1] = columnLists[i], filters[i]
-		// A quoted outer list contains column data, not expressions. Quote each
-		// static column list before placing it in the executable list constructor,
-		// including entries whose filter cannot be compiled into scan boundaries.
-		if columns, static := scanStaticColumns(columnLists[i]); static {
-			prunedColumns[i+1] = scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), scm.NewSlice(columns)})
-		}
-		if compiled[i] {
-			prunedColumns[i+1], prunedFilters[i+1] = pruneScanResidual(prunedColumns[i+1], filters[i], allowBatch)
-		}
-	}
-	return scm.NewSlice(prunedColumns), scm.NewSlice(prunedFilters)
-}
-
-func markCoveredScanAccessSchemas(schemas []scm.Scmer, filtersExpr scm.Scmer) []scm.Scmer {
-	filters, ok := scanStaticListElements(filtersExpr)
-	if !ok || len(filters) != len(schemas) {
-		return schemas
-	}
-	for i, filter := range filters {
-		schemas[i] = markCoveredScanAccessSchema(schemas[i], filter)
-	}
-	return schemas
-}
-
 func markCoveredScanAccessSchema(schema, residual scm.Scmer) scm.Scmer {
 	if !schema.IsSlice() || len(schema.Slice()) < scanAccessSchemaHeaderSize {
 		return schema

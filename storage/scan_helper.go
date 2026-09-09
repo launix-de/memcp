@@ -17,10 +17,6 @@ Copyright (C) 2025-2026  MemCP Contributors
 package storage
 
 import (
-	"bytes"
-	"fmt"
-	"io"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -50,7 +46,7 @@ func init() {
 					} else if arr, ok := proc.Params.Any().([]scm.Scmer); ok {
 						params = arr
 					}
-					event.filter = encodeScmerToString(proc.Body, event.conditionCols, params)
+					event.filter = scm.ExpressionName(proc.Body, event.conditionCols, params)
 				}
 			}
 			safeLogScan(event.schema, event.table, event.ordered, event.filter, event.order, event.indexCols,
@@ -67,149 +63,6 @@ func enqueueScanLog(event scanLogEvent) {
 	case scanLogQueue <- event:
 	default:
 	}
-}
-
-// encodeScmer prints a compact textual encoding of a Scheme AST to w.
-// Unknowns print as "?".
-// - Unknown symbols (not a global function and not one of the provided column names) => "?".
-// - Lambdas (scm.Proc) => "?".
-// - Go builtins (func(...scm.Scmer) scm.Scmer) => function name if found in Globalenv, else "?".
-// For filters, pass the condition Proc.Body as v and the filter columns as context.
-// For sort expressions, pass the string column name or the Proc.Body with its params as context.
-// columnSymbols must be the Proc.Params list when encoding a lambda body. If present:
-// - Any symbol equal to a param prints as the corresponding column name by index.
-// - Any NthLocalVar(i) prints as columns[i] (when i < len(columns)); otherwise "?".
-func encodeScmer(v scm.Scmer, w io.Writer, columns []string, columnSymbols []scm.Scmer) {
-	cols := make(map[string]bool, len(columns))
-	for _, c := range columns {
-		cols[strings.ToLower(c)] = true
-	}
-	// Build symbol->index from Proc.Params to map lambda params to actual columns
-	symIndex := make(map[string]int, len(columnSymbols))
-	for i, s := range columnSymbols {
-		if s.IsSymbol() {
-			symIndex[strings.ToLower(s.String())] = i
-			continue
-		}
-		if sym, ok := s.Any().(scm.Symbol); ok {
-			symIndex[strings.ToLower(string(sym))] = i
-		}
-	}
-
-	var enc func(scm.Scmer)
-	writeSymbolOrColumn := func(s string) {
-		sLower := strings.ToLower(s)
-		// Prefer mapping lambda param -> column name
-		if idx, ok := symIndex[sLower]; ok {
-			if idx >= 0 && idx < len(columns) {
-				io.WriteString(w, columns[idx])
-				return
-			}
-			io.WriteString(w, "?")
-			return
-		}
-		// Otherwise, if it looks like a global function/operator, print symbol
-		if scm.Globalenv.FindRead(scm.Symbol(s)) != nil {
-			io.WriteString(w, s)
-			return
-		}
-		// Unknown
-		io.WriteString(w, "?")
-	}
-
-	var numBuf [64]byte // stack-allocated buffer for number formatting
-	enc = func(node scm.Scmer) {
-		switch {
-		case node.IsNil():
-			io.WriteString(w, "nil")
-		case node.IsBool():
-			if node.Bool() {
-				io.WriteString(w, "true")
-			} else {
-				io.WriteString(w, "false")
-			}
-		case node.IsInt():
-			b := strconv.AppendInt(numBuf[:0], node.Int(), 10)
-			w.Write(b)
-		case node.IsFloat():
-			b := strconv.AppendFloat(numBuf[:0], node.Float(), 'g', -1, 64)
-			w.Write(b)
-		case node.IsString():
-			s, _ := node.AppendString(nil) // zero-alloc for tagString
-			io.WriteString(w, "\"")
-			io.WriteString(w, s)
-			io.WriteString(w, "\"")
-		case node.IsSymbol():
-			s, _ := node.AppendString(nil) // zero-alloc for tagSymbol
-			writeSymbolOrColumn(s)
-		case node.IsSlice():
-			slice := node.Slice()
-			if len(slice) > 0 {
-				if slice[0].SymbolEquals("outer") {
-					io.WriteString(w, "?")
-					return
-				}
-				// Normalize !list optimizer form back to (list ...) for stable canonical names.
-				// (!list NthLocalVar(start) count expr...) encodes (list expr...) but the
-				// storage slot (items[1]) varies per call site, so two identical lists would
-				// get different canonical names. Strip items[1] and items[2] and use "list".
-				if slice[0].SymbolEquals("!list") && len(slice) >= 3 {
-					count := int(scm.ToInt(slice[2]))
-					if count == len(slice)-3 {
-						io.WriteString(w, "(list")
-						for _, item := range slice[3:] {
-							io.WriteString(w, " ")
-							enc(item)
-						}
-						io.WriteString(w, ")")
-						return
-					}
-				}
-			}
-			io.WriteString(w, "(")
-			for i, item := range slice {
-				if i > 0 {
-					io.WriteString(w, " ")
-				}
-				enc(item)
-			}
-			io.WriteString(w, ")")
-		default:
-			// Prefer tag-based decoding for special cases.
-			if node.IsProc() {
-				// Use pointer address to produce a unique stable name per lambda within
-				// the session. Prevents YEAR, MONTH, DAY, etc. from colliding on the
-				// same canonical index name.
-				io.WriteString(w, fmt.Sprintf("%p", node.Proc()))
-				return
-			}
-			if node.IsNthLocalVar() {
-				i := int(node.NthLocalVar())
-				if i >= 0 && i < len(columns) {
-					io.WriteString(w, columns[i])
-				} else {
-					io.WriteString(w, "?")
-				}
-				return
-			}
-			// Native function: try to resolve declaration if present.
-			if def := scm.DeclarationForValue(node); def != nil {
-				io.WriteString(w, def.Name)
-				return
-			}
-			// Fallback unknown
-			io.WriteString(w, "?")
-		}
-	}
-
-	enc(v)
-}
-
-// helper that returns encoded string
-func encodeScmerToString(v scm.Scmer, columns []string, columnSymbols []scm.Scmer) string {
-	var b bytes.Buffer
-	encodeScmer(v, &b, columns, columnSymbols)
-	return b.String()
 }
 
 // Minimum table size required to collect scan statistics.

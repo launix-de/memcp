@@ -341,32 +341,32 @@ bounded scalar metadata; this lookup never scans, loads columns or builds indexe
 		(define planning_session (planner_effective_session planning_session))
 		(if (or (nil? planning_session)
 			(nil? (planning_session "__memcp_queryplan_guard_conditions"))) nil
-		(begin
-		/* Keep the predicate unbound while generating metadata. Its slots must
-		read the executing session, not a literal/memo key from compilation. */
-		(define access (compile_scan_access columns callback true false))
-		(if (or (empty_list? (car access))
-			(not (list? (car (car access))))) nil
 			(begin
-				/* Guard precisely the metadata input, including an unknown result.
-				A measurement of another bound predicate must not invalidate this
-				plan. The equality is a conservative fallback where no cost crossover
-				inequality has been derived; it is not permission to omit that input.
-				Budget zero is essential: guards never sample or run a filter. */
-				(define read_expr (list (quote scan_selectivity_estimate) nil
-					(list (quote table) (source_schema src) (source_relation src))
-					(list (quote quote) (car access)) (cons (quote list) (cadr access))
-					(list (quote quote) '()) (list (quote lambda) '() true) 0))
-				/* Provenance matters too: a prior from other LIKE words may be
-				resampled, whereas a same-predicate measurement need not be. Read
-				the metadata once and retain both decision inputs. */
-				(define value_expr (list (list (quote lambda) (list (quote estimate))
-					(list (quote list)
-						(list (quote qassoc_get) (quote estimate) (list (quote quote) (quote value)) nil)
-						(list (quote qassoc_get) (quote estimate) (list (quote quote) (quote source)) nil))) read_expr))
-				(planner_record_guard_condition
-					(list (quote equal?) value_expr (list (quote quote)
-						(eval (planner_bind_session_values value_expr planning_session)))) planning_session))))))))
+				/* Keep the predicate unbound while generating metadata. Its slots must
+				read the executing session, not a literal/memo key from compilation. */
+				(define access (eval (compile_scan_access columns callback true false)))
+				(if (or (empty_list? (car access))
+					(not (list? (car (car access))))) nil
+					(begin
+						/* Guard precisely the metadata input, including an unknown result.
+						A measurement of another bound predicate must not invalidate this
+						plan. The equality is a conservative fallback where no cost crossover
+						inequality has been derived; it is not permission to omit that input.
+						Budget zero is essential: guards never sample or run a filter. */
+						(define read_expr (list (quote scan_selectivity_estimate) nil
+							(list (quote table) (source_schema src) (source_relation src))
+							(list (quote quote) (car access)) (cons (quote list) (cadr access))
+							(list (quote quote) '()) (list (quote lambda) '() true) 0))
+						/* Provenance matters too: a prior from other LIKE words may be
+						resampled, whereas a same-predicate measurement need not be. Read
+						the metadata once and retain both decision inputs. */
+						(define value_expr (list (list (quote lambda) (list (quote estimate))
+							(list (quote list)
+								(list (quote qassoc_get) (quote estimate) (list (quote quote) (quote value)) nil)
+								(list (quote qassoc_get) (quote estimate) (list (quote quote) (quote source)) nil))) read_expr))
+						(planner_record_guard_condition
+							(list (quote equal?) value_expr (list (quote quote)
+								(eval (planner_bind_session_values value_expr planning_session)))) planning_session))))))))
 
 (define planner_filter_feedback (lambda (sources default_alias expr planning_session)
 	(begin
@@ -381,8 +381,8 @@ bounded scalar metadata; this lookup never scans, loads columns or builds indexe
 							(define callback (list (quote lambda)
 								(map cols (lambda (col) (symbol (concat (source_alias src) "." col))))
 								(lower_column_expr_for_alias src expr)))
-							(define access (compile_scan_access cols
-								(planner_bind_session_values callback planning_session) true))
+							(define access (eval (compile_scan_access cols
+								(planner_bind_session_values callback planning_session) true)))
 							(define values (map (nth access 1) (lambda (value) (eval value))))
 							(planner_record_filter_feedback_guard src cols callback planning_session)
 							(scan_selectivity_estimate nil (table (source_schema src) (source_relation src))
@@ -491,7 +491,7 @@ bounded scalar metadata; this lookup never scans, loads columns or builds indexe
 				(define callback (list (quote lambda)
 					(map cols (lambda (col) (symbol (concat (source_alias src) "." col))))
 					(lower_column_expr_for_alias src predicate)))
-				(define access (compile_scan_access cols callback true false))
+				(define access (eval (compile_scan_access cols callback true false)))
 				(if (empty_list? (car access)) fallback
 					(planner_guard_runtime_binding
 						(list (quote qassoc_get)
@@ -2484,11 +2484,11 @@ the lowerer can cost it. */
 		This is dominance, not a selective-filter heuristic: do not sample or
 		bind a changing parameter for a choice it cannot influence. */
 		(if (and (number? base_rows) (<= base_rows 1)) 1
-		(if (or (not (number? base_rows)) (equal? condition true))
-			fallback
-			(begin
-				(define estimate (planner_source_filter_estimate src condition 512 tx planning_session))
-				(max 1 (planner_estimated_matching_rows estimate base_rows fallback))))))))
+			(if (or (not (number? base_rows)) (equal? condition true))
+				fallback
+				(begin
+					(define estimate (planner_source_filter_estimate src condition 512 tx planning_session))
+					(max 1 (planner_estimated_matching_rows estimate base_rows fallback))))))))
 
 (define join_optimizer_ordered_driver_work (lambda (sources base_row_catalog filtered_row_catalog planned target)
 	(begin
@@ -2933,11 +2933,12 @@ floor avoids pretending that an unseen word is impossible. */
 					/* This callback is evaluated during costing, before the enclosing
 					physical plan reaches its one recursive optimization pass. Compile it
 					here; callbacks emitted into the final plan must remain unwrapped. */
-					(define filter_expr (optimize (list (quote lambda)
+					(define filter_source (list (quote lambda)
 						(map filtercols (lambda (col) (symbol (concat alias "." col))))
 						(planner_bind_session_values
-							(lower_column_expr_for_alias src condition) planning_session))))
-					(define access (compile_scan_access filtercols filter_expr))
+							(lower_column_expr_for_alias src condition) planning_session)))
+					(define access (eval (compile_scan_access filtercols filter_source)))
+					(define filter_expr (optimize filter_source))
 					(define values (map (nth access 1) (lambda (value_expr) (eval value_expr))))
 					(planner_record_session_value_guards condition planning_session)
 					(planner_record_filter_feedback_guard src filtercols
@@ -2951,7 +2952,7 @@ floor avoids pretending that an unseen word is impossible. */
 						values
 						filtercols
 						(eval filter_expr)
-							max_rows))
+						max_rows))
 					(define text_prior (expr_text_selectivity_prior condition))
 					(define enriched (if (number? text_prior)
 						(qassoc_set estimate (quote fallback_selectivity) text_prior)
@@ -6722,11 +6723,11 @@ sampling guard for a choice that no cardinality change can reverse. */
 	(begin
 		(define rows (planner_source_row_count driver))
 		(or (and (number? rows) (<= rows 1))
-		(reduce (source_unique_key_sets driver) (lambda (found key)
-		(or found (and (not (empty_list? key))
-			(reduce key (lambda (complete col)
-				(and complete (and (contains? columns col)
-					(source_column_guaranteed_nonnull? driver col)))) true)))) false)))))
+			(reduce (source_unique_key_sets driver) (lambda (found key)
+				(or found (and (not (empty_list? key))
+					(reduce key (lambda (complete col)
+						(and complete (and (contains? columns col)
+							(source_column_guaranteed_nonnull? driver col)))) true)))) false)))))
 
 (define aggregate_pushdown_logical (lambda (ir planning_session tx)
 	(begin

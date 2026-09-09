@@ -108,6 +108,30 @@ test_cases:
       LIMIT 20
     expect: {rows: 20}
 
+  - name: "WordPress point-query literal variants share one compiled shape"
+    performance_rows: 100
+    threshold_ms: 1000
+    scm: |
+      (begin
+        (define cache (newcachemap))
+        (define sess (newsession))
+        (sess "username" "root")
+        (sess "schema" "memcp-tests")
+        (define results (newsession))
+        (results "count" 0)
+        (map (produceN 100) (lambda (i)
+          (sql_execute_formula sess nil
+            (cached_parse cache (list parse_sql) "memcp-tests"
+              (concat "SELECT ID FROM wordpress_perf_posts WHERE ID = " (+ i 1000)) nil "root" sess true)
+            (lambda (row) (if (equal? (cadr row) (+ i 1000))
+              (results "count" (+ (results "count") 1)) (error "literal binding changed")))
+            (lambda (_fields) nil))))
+        (if (and (equal? (results "count") 100) (equal? (count (cache)) 1))
+          true (error "literal variants did not share their compiled shape")))
+    expect:
+      rows: 1
+      result_contains: ["true"]
+
   - name: "WordPress filtered postmeta join physical plan"
     sql: |
       EXPLAIN PHYSICAL

@@ -238,14 +238,14 @@ func TestFilterFeedbackUniquePointRetainsPlanStatistics(t *testing.T) {
 
 func TestFilterFeedbackOnlyCompilationDoesNotEvaluateBoundaries(t *testing.T) {
 	for _, body := range []string{`(equal? x (print "must not run"))`, `(equal? x (outer 1 x))`} {
-		schema, bindings := compileFilterFeedbackAccess(scm.NewSlice([]scm.Scmer{scm.NewString("c0")}), scm.Read("feedback-test", "(lambda (x) "+body+")"))
+		schema, bindings := feedbackTestAccess(scm.NewSlice([]scm.Scmer{scm.NewString("c0")}), scm.Read("feedback-test", "(lambda (x) "+body+")"))
 		if len(schema.Slice()) != 0 || len(bindings) != 0 {
 			t.Fatalf("unsafe statistical compilation: %s", body)
 		}
 	}
 	filter := scm.Read("feedback-test", `(lambda (different_alias) (strlike different_alias "%abc%" "utf8mb4_general_ci"))`)
 	cols := scm.NewSlice([]scm.Scmer{scm.NewString("c0")})
-	schema, values := compileFilterFeedbackAccess(cols, filter)
+	schema, values := feedbackTestAccess(cols, filter)
 	physical, bound, _ := feedbackTestCompile(t, `(strlike x "%abc%" "utf8mb4_general_ci")`)
 	if bindFilterFeedback(schema.Slice(), values).key != bindFilterFeedback(physical.Slice(), bound).key {
 		t.Fatal("logical and physical filter identities differ")
@@ -414,4 +414,19 @@ func TestFilterFeedbackSameLengthWordsRetainExactRates(t *testing.T) {
 	if _, _, known := tbl.filterSelectivity(unknown); known {
 		t.Fatal("histogram crossed columns")
 	}
+}
+
+// Test fixture construction for native feedback publication and binding.
+func feedbackTestAccess(columnExpr, filterExpr scm.Scmer) (scm.Scmer, []scm.Scmer) {
+	columns, columnsOK := scanStaticColumns(columnExpr)
+	params, body, lambdaOK := scanLambdaParts(filterExpr)
+	if !columnsOK || !lambdaOK || len(params) != len(columns) {
+		return scm.NewSlice(nil), nil
+	}
+	var bindings []scm.Scmer
+	spec := compileFilterFeedback(params, columns, body, &bindings)
+	if spec.IsNil() {
+		return scm.NewSlice(nil), nil
+	}
+	return scm.NewSlice([]scm.Scmer{scm.NewSlice([]scm.Scmer{newScanAccessHeader(0, scanAccessConsumerScan, 0, -1), spec})}), bindings
 }

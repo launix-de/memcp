@@ -1022,6 +1022,9 @@ func init() {
 			Symbol("true"):  NewBool(true),
 			Symbol("false"): NewBool(false),
 
+			// Host metadata for language-level frontends and diagnostics.
+			Symbol("runtime_os"): NewString(runtime.GOOS),
+
 			// basic
 			Symbol("list"): NewFunc(List),
 		},

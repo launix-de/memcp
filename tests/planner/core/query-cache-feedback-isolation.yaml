@@ -224,8 +224,8 @@ test_cases:
   - name: "Access templates retain runtime binding expressions without evaluating them"
     scm: |
       (begin
-        (define access (compile_scan_access '("id")
-          (list 'lambda (list 'id) (list '> 'id (list 'session "unbound_guard_value"))) true false))
+        (define access (eval (compile_scan_access '("id")
+          (list 'lambda (list 'id) (list '> 'id (list 'session "unbound_guard_value"))) true false)))
         (if (and (not (empty_list? (car access)))
           (equal? (cadr access) (list (list 'session "unbound_guard_value"))))
           true (error "access template froze or lost its binding expression")))
@@ -301,7 +301,7 @@ test_cases:
         (define entry (car (cache (car (cache)))))
         (define variants (count (entry "variants")))
         (define pred (list 'lambda (list 'x) (list 'strlike 'x "%needle%" "utf8mb4_general_ci")))
-        (define access (compile_scan_access '("label") pred))
+        (define access (eval (compile_scan_access '("label") pred)))
         (scan_recset nil (table "memcp-tests" "qfi_document") (car access)
           (map (cadr access) (lambda (v) (eval v))) '("label") (eval pred))
         (sql_execute_formula sess nil
@@ -330,7 +330,7 @@ test_cases:
         (define entry (car (cache (car (cache)))))
         (define before (count (entry "variants")))
         (define pred (list 'lambda (list 'x) (list '< 'x 4)))
-        (define access (compile_scan_access '("id") pred))
+        (define access (eval (compile_scan_access '("id") pred)))
         (scan_recset nil (table "memcp-tests" "qfi_document") (car access)
           (map (cadr access) (lambda (v) (eval v))) '("id") (eval pred))
         (sql_execute_formula sess nil

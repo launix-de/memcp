@@ -18,6 +18,37 @@ package scm
 
 import "testing"
 
+func TestExpressionSyntaxPreservesLiteralTypes(t *testing.T) {
+	for _, word := range []string{"lambda", "if", "quote"} {
+		literal := NewString(word)
+		if got := ExpressionSyntax(literal); got != literal {
+			t.Fatalf("literal %q became syntax: %v", word, got)
+		}
+	}
+	expr := Read(t.Name(), `(lambda (x) (list "lambda" x))`)
+	got := ExpressionSyntax(expr)
+	if !got.IsSlice() || !got.Slice()[0].SymbolEquals("lambda") {
+		t.Fatalf("reader special form was not normalized: %v", got)
+	}
+	if !got.Slice()[2].Slice()[1].IsString() {
+		t.Fatalf("literal inside reader expression lost its type: %v", got)
+	}
+}
+
+func TestFoldedReaderResultRemainsExpressionData(t *testing.T) {
+	for _, source := range []string{
+		`(scheme "(lambda (x) (+ x 1))")`,
+		`(scheme "(error \"must remain data\")")`,
+	} {
+		expr := Read(t.Name(), source)
+		want := Eval(expr, &Globalenv)
+		got := Eval(Optimize(expr, &Globalenv, nil), &Globalenv)
+		if !astStructuralEqual(got, want) || got.WithoutSourceInfo().IsProc() {
+			t.Fatalf("folded reader evaluated its result: %s", SerializeToString(got, &Globalenv))
+		}
+	}
+}
+
 func TestOptimizeQuoteIsBorrowedPassthrough(t *testing.T) {
 	ome := newOptimizerMetainfo()
 	optimized, resultType := OptimizeEx(Read("test", "(quote ((1 2) (3 4)))"), &Globalenv, &ome, true)
