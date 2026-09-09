@@ -1,4 +1,5 @@
 # Copyright (C) 2026 Carl-Philip Hänsch
+# Use the stable scan-plan AST contract for handwritten access in cross-version A/B runs.
 # SPDX-License-Identifier: GPL-3.0-or-later
 metadata:
   version: "1.0"
@@ -110,7 +111,7 @@ test_cases:
         (define tbl (table "memcp-tests" "boc_file"))
         (define callback (list 'lambda (list 'x)
           (list 'strlike 'x "%commonneedle%" "utf8mb4_general_ci")))
-        (define access (eval (compile_scan_access '("body") callback)))
+        (define access (eval (cons (quote list) (slice (compile_scan_plan (quote scan) nil nil '("body") callback '()) 3 5))))
         (define values (map (nth access 1) (lambda (v) (eval v))))
         /* A complete ordinary scan can train table feedback; a restricted
         batch cannot. Prove that this test really has the new learned input. */

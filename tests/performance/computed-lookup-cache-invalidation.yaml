@@ -1,4 +1,5 @@
 # Copyright (C) 2026  MemCP Contributors
+# Use the stable scan-plan AST contract for handwritten access in cross-version A/B runs.
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -49,7 +50,7 @@ test_cases:
               '("val") (lambda (acc val) val)
               0 (lambda (old value) value) false)))
         (scan nil (table "memcp-tests" "lookup_invalidation_driver")
-          (car (eval (compile_scan_access '() (scheme "(lambda () true)")))) (cadr (eval (compile_scan_access '() (scheme "(lambda () true)")))) '() (lambda () true)
+          (car (eval (cons (quote list) (slice (compile_scan_plan (quote scan) nil nil '() (scheme "(lambda () true)") '()) 3 5)))) (cadr (eval (cons (quote list) (slice (compile_scan_plan (quote scan) nil nil '() (scheme "(lambda () true)") '()) 3 5)))) '() (lambda () true)
           '(".lookup:value") (lambda (acc value) (+ acc value))
           0 + false))
 

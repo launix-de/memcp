@@ -1,4 +1,5 @@
 # Copyright (C) 2026  Carl-Philip Hänsch
+# Use the stable scan-plan AST contract for handwritten access in cross-version A/B runs.
 
 metadata:
   version: "1.0"
@@ -237,11 +238,11 @@ test_cases:
         (define posts (table "memcp-tests" "forum_hierarchy_posts"))
         (define users (table "memcp-tests" "forum_hierarchy_users"))
         (define selected_heritage
-          (scan tx forums (car (eval (compile_scan_access '("forumID") (scheme "(lambda (forumID) (equal? forumID 8))")))) (cadr (eval (compile_scan_access '("forumID") (scheme "(lambda (forumID) (equal? forumID 8))")))) '("forumID") (lambda (forumID) (equal? forumID 8))
+          (scan tx forums (car (eval (cons (quote list) (slice (compile_scan_plan (quote scan) nil nil '("forumID") (scheme "(lambda (forumID) (equal? forumID 8))") '()) 3 5)))) (cadr (eval (cons (quote list) (slice (compile_scan_plan (quote scan) nil nil '("forumID") (scheme "(lambda (forumID) (equal? forumID 8))") '()) 3 5)))) '("forumID") (lambda (forumID) (equal? forumID 8))
             '("heritage") (lambda (_old heritage) heritage)
             nil (lambda (_old value) value) false))
         (define found
-          (scan tx forums (car (eval (compile_scan_access '("heritage") (scheme "(lambda (heritage) (strlike selected_heritage (concat heritage \"%\")))")))) (cadr (eval (compile_scan_access '("heritage") (scheme "(lambda (heritage) (strlike selected_heritage (concat heritage \"%\")))")))) '("heritage")
+          (scan tx forums (car (eval (cons (quote list) (slice (compile_scan_plan (quote scan) nil nil '("heritage") (scheme "(lambda (heritage) (strlike selected_heritage (concat heritage \"%\")))") '()) 3 5)))) (cadr (eval (cons (quote list) (slice (compile_scan_plan (quote scan) nil nil '("heritage") (scheme "(lambda (heritage) (strlike selected_heritage (concat heritage \"%\")))") '()) 3 5)))) '("heritage")
             (lambda (heritage) (strlike selected_heritage (concat heritage "%")))
             '("forumID")
             (lambda (count forumID)

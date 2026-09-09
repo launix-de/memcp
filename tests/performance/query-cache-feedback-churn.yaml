@@ -1,4 +1,5 @@
 # Copyright (C) 2026 Carl-Philip Hänsch
+# Use the stable scan-plan AST contract for handwritten access in cross-version A/B runs.
 # SPDX-License-Identifier: GPL-3.0-or-later
 metadata:
   version: "1.0"
@@ -86,9 +87,16 @@ test_cases:
         (run)
         (define start (globalvars "qfc_sequence"))
         (globalvars "qfc_sequence" (+ start 16))
+        /* This measures learned-value churn against a warm query plan. Compile
+        the independent learning scan once, as production parameterized scans do;
+        each iteration must bind a different value and publish its observation. */
+        (define session (newsession))
+        (define callback (scheme "(lambda (x) (< x (session \"learned_cutoff\")))"))
+        (define access_program (cons (quote list)
+          (slice (compile_scan_plan (quote scan) nil nil '("category") callback '()) 3 5)))
         (map (produceN 16) (lambda (i) (begin
-          (define callback (list 'lambda (list 'x) (list '< 'x (+ start i))))
-          (define access (eval (compile_scan_access '("category") callback)))
+          (session "learned_cutoff" (+ start i))
+          (define access (eval access_program))
           (scan_recset nil (table "memcp-tests" "qfc_document") (car access)
             (map (cadr access) (lambda (v) (eval v))) '("category") (eval callback))
           (run))))
