@@ -178,6 +178,26 @@ func jitEmitMatchTag(ctx *JITContext, value *JITValueDesc, tag uint8, failLabel 
 	return jitEmitMatchBool(ctx, condition, failLabel)
 }
 
+// Header extraction can leave ptr/len/cap on the stack under register pressure.
+// Length guards need only len; materializing the whole triple would recreate
+// the register pressure that caused it to be parked in the first place.
+func jitMatchCompareLength(ctx *JITContext, slice *JITValueDesc, length int32) {
+	ctx.SyncDesc(slice)
+	switch slice.Loc {
+	case LocStackTriple:
+		base := ctx.StackReg
+		if slice.StackOff < 0 {
+			base = ctx.FrameReg
+		}
+		ctx.EmitMovRegMem(ctx.ScratchReg, base, slice.StackOff+8)
+		ctx.EmitCmpRegImm32(ctx.ScratchReg, length)
+	case LocRegTriple:
+		ctx.EmitCmpRegImm32(slice.Reg2, length)
+	default:
+		panic("jit: match length requires a Go slice header")
+	}
+}
+
 func jitMatchLoadElement(ctx *JITContext, slice *JITValueDesc, index int) JITValueDesc {
 	ctx.EnsureDesc(slice)
 	if slice.Loc != LocRegTriple {
@@ -449,7 +469,7 @@ func jitMatchFixedList(ctx *JITContext, value JITValueDesc, patterns []Scmer, en
 			return jitMatchOutcome{}
 		}
 	} else {
-		ctx.EmitCmpRegImm32(header.Reg2, int32(len(patterns)))
+		jitMatchCompareLength(ctx, &header, int32(len(patterns)))
 		ctx.EmitJump(CondNotEqual, failLabel)
 		listOutcome.always = false
 	}
@@ -512,7 +532,7 @@ func jitMatchCons(ctx *JITContext, value JITValueDesc, patterns []Scmer, env *JI
 			return jitMatchOutcome{}
 		}
 	} else {
-		ctx.EmitCmpRegImm32(header.Reg2, 0)
+		jitMatchCompareLength(ctx, &header, 0)
 		ctx.EmitJump(CondEqual, failLabel)
 		listOutcome.always = false
 	}

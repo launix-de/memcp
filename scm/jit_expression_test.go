@@ -1383,6 +1383,34 @@ func TestJITExpressionRecursiveMatchKeepsEarlierFixedListBranch(t *testing.T) {
 	}
 }
 
+func TestJITMatchSingletonAfterReduce(t *testing.T) {
+	compiled := compileJITExpressionTestProc(t, `(lambda (terms predicate)
+		(begin
+			(define kept (reduce terms (lambda (acc term)
+				(if (predicate term) acc (append_unique acc term))) '()))
+			(if (predicate kept) false
+				(match kept
+					'() true
+					(cons single '()) single
+					_ (cons 'and kept)))))`)
+	predicate := NewFunc(func(args ...Scmer) Scmer { return NewBool(args[0].IsBool() && args[0].Bool()) })
+	column := NewSlice([]Scmer{NewSymbol("get_column"), NewString("a"), NewBool(false), NewString("x"), NewBool(false)})
+	for _, test := range []struct {
+		input []Scmer
+		want  Scmer
+	}{
+		{nil, NewBool(true)},
+		{[]Scmer{NewBool(true)}, NewBool(true)},
+		{[]Scmer{NewBool(true), column}, column},
+		{[]Scmer{column, column}, column},
+		{[]Scmer{column, NewString("other")}, NewSlice([]Scmer{NewSymbol("and"), column, NewString("other")})},
+	} {
+		if got := Apply(compiled, NewSlice(test.input), predicate); !Equal(got, test.want) {
+			t.Fatalf("match after reduce of %s returned %s, want %s", String(NewSlice(test.input)), String(got), String(test.want))
+		}
+	}
+}
+
 func TestJITExpressionWideMatchPreservesEveryCapture(t *testing.T) {
 	compiled := compileJITExpressionTestProc(t, `(lambda (query) (match query
 		((symbol query-block) schema tables fields condition group having order limit offset hidden stages facts)
