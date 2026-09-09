@@ -156,10 +156,46 @@ allocates its 16-byte result instead of a complete 2,048-byte value.
 | JIT SQL query | Baseline ms | Change ms | Change |
 |---|---:|---:|---:|
 | CString mixed SQL equality projection | 5.900 | 5.700 | -3.4% |
-| CString LIKE projection | 6.250 | 5.800 | -7.2% |
-| CString ordered range | 1.700 | 1.200 | -29.4% |
+| CString LIKE projection | 6.700 | 6.400 | -4.5% |
+| CString ordered range | 1.900 | 1.400 | -26.3% |
 
 HTTP measurements on this shared host include transport, JSON output and scan
 costs, and remain noisier than the kernel measurements. In particular, batch
 projections already receive arena-decoded strings; no CString-specific SQL
 speedup is inferred from such a projection alone.
+
+## Follow-up: decode complete bytes in pairs
+
+The general storage decoder now peels an initial partial byte, runs a loop
+containing only complete two-character decodes, then handles a single trailing
+character after the loop. Legacy and ordered nibble order are selected outside
+the loop. This also benefits callers that materialize strings and the shared
+bulk decode arena. The existing whole-byte comparison paths are unchanged.
+
+A targeted comparison against the PR's initial `a4f82aa79` decoder used both
+function bodies in the same Go 1.24 benchmark binary, preallocated input/output,
+`GOMAXPROCS=4`, 50 ms calibration/measurement and two samples per case. Means
+for an initial nibble offset of one:
+
+| Characters | Format | Initial PR ns/op | Pair decoder ns/op | Change |
+|---|---|---:|---:|---:|
+| 3 | Ordered hex | 4.120 | 3.351 | −18.7% |
+| 16 | Ordered hex | 14.960 | 7.500 | −49.9% |
+| 64 | Legacy hex | 60.810 | 24.765 | −59.3% |
+| 64 | Ordered hex | 57.460 | 22.135 | −61.5% |
+| 1024 | Legacy hex | 835.650 | 337.900 | −59.6% |
+| 1024 | Ordered hex | 815.300 | 322.000 | −60.5% |
+
+`BenchmarkStringNibbleDecode` retains the lengths, offsets and formats for
+future A/B comparisons. Empty output with a nil source is also tested.
+
+A separate prototype replaced the mixed-offset comparison fallback with pair
+lookups. Identical 64-character values improved from 104.35 to 66.61 ns, but an
+immediate mismatch worsened from 4.36 to 5.15 ns; three-character cases also
+regressed. That prototype was not adopted. These measurements isolate the
+fallback itself, not the already optimized whole-byte paths or full queries.
+
+After the decoder change, the 55-case compression SQL suite, targeted Go and
+race checks pass again. The SQL table above was refreshed with a new A/B/B/A
+run against the original development baseline; the kernel tables are unchanged
+except for the separately reported decoder measurements.

@@ -348,15 +348,41 @@ func adjustStartsForFormat(starts *StorageInt) {
 // (readNibbles) and the bulk arena decode path (bulkDecoder), so the nibble
 // unpacking logic exists exactly once regardless of whether the caller
 // wants a freshly allocated string or a slice of a shared batch buffer.
+// Decode full bytes in pairs. Peel the first/last half-byte and select the
+// nibble order once, keeping parity calculations out of the main loops.
 func writeNibblesInto(dst []byte, ptr *byte, nibbleOff int, cs *nibbleCharset) {
-	xor := 0
-	if cs.highFirst {
-		xor = 1
+	if len(dst) == 0 {
+		return
 	}
-	for i := range dst {
-		pos := nibbleOff + i
-		b := *(*byte)(unsafe.Add(unsafe.Pointer(ptr), pos/2))
-		dst[i] = cs.enc[(b>>uint(((pos&1)^xor)*4))&15]
+	data := unsafe.Slice(ptr, (len(dst)+nibbleOff+1)/2)
+	i, j := 0, 0
+	if nibbleOff != 0 {
+		if cs.highFirst {
+			dst[0] = cs.enc[data[0]&15]
+		} else {
+			dst[0] = cs.enc[data[0]>>4]
+		}
+		i++
+		j++
+	}
+	if cs.highFirst {
+		for ; i+1 < len(dst); i, j = i+2, j+1 {
+			v := data[j]
+			dst[i] = cs.enc[v>>4]
+			dst[i+1] = cs.enc[v&15]
+		}
+		if i < len(dst) {
+			dst[i] = cs.enc[data[j]>>4]
+		}
+	} else {
+		for ; i+1 < len(dst); i, j = i+2, j+1 {
+			v := data[j]
+			dst[i] = cs.enc[v&15]
+			dst[i+1] = cs.enc[v>>4]
+		}
+		if i < len(dst) {
+			dst[i] = cs.enc[data[j]&15]
+		}
 	}
 }
 

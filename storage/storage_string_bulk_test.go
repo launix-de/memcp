@@ -16,6 +16,7 @@ Copyright (C) 2026  Carl-Philip Hänsch
 */
 package storage
 
+import "fmt"
 import "testing"
 import "math/rand"
 import "github.com/launix-de/memcp/scm"
@@ -387,4 +388,36 @@ func BenchmarkPrefixPerRowVsBulk(b *testing.B) {
 			s.GetValueMulti(recids, target, 1)
 		}
 	})
+}
+
+// BenchmarkStringNibbleDecode isolates parity/offset handling from allocations
+// and column-reader setup. It also covers persisted legacy nibble order.
+func BenchmarkStringNibbleDecode(b *testing.B) {
+	for _, n := range []int{3, 16, 64, 1024} {
+		for _, off := range []int{0, 1} {
+			for _, format := range []StringFormat{FormatHexLower, FormatOrderedHexLower} {
+				data := make([]byte, (n+off+1)/2)
+				for i := range data {
+					data[i] = byte(i)
+				}
+				dst := make([]byte, n)
+				cs := nibbleCharsetFor(format)
+				b.Run(fmt.Sprintf("length%d/offset%d/format%d", n, off, format), func(b *testing.B) {
+					b.ReportAllocs()
+					b.SetBytes(int64(n))
+					for i := 0; i < b.N; i++ {
+						writeNibblesInto(dst, &data[0], off, cs)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestStringNibbleDecodeEmpty(t *testing.T) {
+	for _, format := range []StringFormat{FormatHexLower, FormatOrderedHexLower} {
+		for _, offset := range []int{0, 1} {
+			writeNibblesInto(nil, nil, offset, nibbleCharsetFor(format))
+		}
+	}
 }
