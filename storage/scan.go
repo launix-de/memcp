@@ -86,6 +86,13 @@ func newScanAccessHeader(count int, consumer string, projections int, mapperSlot
 }
 
 func decodeScanAccessHeader(value scm.Scmer) (scanAccessSchemaMeta, bool) {
+	if value.IsSlice() {
+		header := value.Slice()
+		if len(header) != 2 {
+			return scanAccessSchemaMeta{}, false
+		}
+		value = header[0]
+	}
 	raw := scm.ToInt(value)
 	if raw&(0xff<<44) != scanAccessHeaderMagic {
 		return scanAccessSchemaMeta{}, false
@@ -290,6 +297,20 @@ func shiftCompiledScanAccessSlots(schemaValue scm.Scmer, shift int) scm.Scmer {
 	if !valid {
 		panic("invalid scan access header")
 	}
+	if spec, ok := scmerSlice(scanFeedbackMetadata(shifted)); ok && len(spec) >= 4 {
+		clone := append([]scm.Scmer(nil), spec...)
+		parts := append([]scm.Scmer(nil), spec[0].Slice()...)
+		for i, part := range parts {
+			if part.IsInt() {
+				parts[i] = scm.NewInt(part.Int() + int64(shift))
+			}
+		}
+		clone[0] = scm.NewSlice(parts)
+		if clone[1].Int() >= 0 {
+			clone[1] = scm.NewInt(clone[1].Int() + int64(shift))
+		}
+		shifted[0] = scm.NewSlice([]scm.Scmer{shifted[0].Slice()[0], scm.NewSlice(clone)})
+	}
 	for offset, count := scanAccessSchemaHeaderSize, meta.count; count > 0; offset, count = offset+scanAccessBoundaryStride, count-1 {
 		boundary := ScanBoundaryFromScmer(shifted[offset])
 		lowerSlot, upperSlot, mapperSlot := boundary.LowerSlot(), boundary.UpperSlot(), boundary.MapperSlot()
@@ -373,7 +394,7 @@ func markCoveredScanAccessSchema(schema, residual scm.Scmer) scm.Scmer {
 	if !valid {
 		return schema
 	}
-	items[0] = newScanAccessHeader(meta.count, scanAccessConsumerCoveredScan, meta.projections, meta.mapperSlot)
+	items[0] = preserveScanFeedbackHeader(newScanAccessHeader(meta.count, scanAccessConsumerCoveredScan, meta.projections, meta.mapperSlot), items[0])
 	return scm.NewSlice(items)
 }
 
@@ -810,8 +831,8 @@ func compileScanAccessMode(columnExpr, filterExpr scm.Scmer, allowBatch bool) (s
 		return newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, false
 	}
 	compiled, valid := collectCompiledScanBoundaries(body, params, columns, nil, allowBatch)
-	if !valid || len(compiled) == 0 {
-		return newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, false
+	if !valid {
+		compiled = nil
 	}
 	sort.SliceStable(compiled, func(i, j int) bool {
 		iSorted := compiled[i].kind == "equal" || compiled[i].kind == "range"
@@ -892,7 +913,17 @@ func compileScanAccessMode(columnExpr, filterExpr scm.Scmer, allowBatch bool) (s
 	for _, column := range mapCols {
 		schema = append(schema, scm.NewString(column))
 	}
-	return scm.NewSlice(schema), bindings, true
+	if !allowBatch {
+		if feedback := compileFilterFeedback(params, columns, body, &bindings); !feedback.IsNil() {
+			schema[0] = scm.NewSlice([]scm.Scmer{schema[0], feedback})
+		}
+	}
+	if len(compiled) == 0 && !schema[0].IsSlice() {
+		return newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, false
+	}
+	// The boolean reports compiled access boundaries, independently of optional
+	// feedback metadata. In particular OR remains a full residual filter.
+	return scm.NewSlice(schema), bindings, len(compiled) > 0
 }
 
 func newScanAccessSchema(consumer string, projections []scm.Scmer, mapperSlot int) scm.Scmer {
@@ -1594,6 +1625,16 @@ func (t *table) scanWithBatchFrom(currentTx *TxContext, source *recSet, accessSc
 		nullArgs[0] = neutral
 		return scm.Apply(mapReduce, nullArgs...)
 	}
+	// Unique point probes already have a hard one-row bound. Learning their
+	// zero/one outcome adds no useful cardinality class and needlessly invalidates
+	// every cached plan on the table after its first lookup.
+	if source == nil && requiredAccess.len() == 0 && stride == 0 && !hasMutationCallback && !t.hasBoundUniquePoint(access) &&
+		(currentTx == nil || currentTx.Mode != TxACID) && !strings.HasPrefix(t.Name, ".") {
+		access.feedback = bindFilterFeedback(access.schema, access.values)
+		if access.feedback != nil {
+			access.feedback.generation = t.plannerStatsToken.Load()
+		}
+	}
 	executionAccess := access
 	if Settings.ScanDebugging {
 		dbg := fmt.Sprintf("[SCAN] %s.%s", t.schema.Name, t.Name)
@@ -1702,6 +1743,7 @@ func (t *table) scanWithBatchFrom(currentTx *TxContext, source *recSet, accessSc
 	if scanErr.r != nil {
 		panic(scanErr)
 	}
+	t.publishFilterFeedback(executionAccess.feedback)
 	// log statistics (best-effort, async so it doesn't add latency)
 	execNs := time.Since(execStart).Nanoseconds()
 	if Settings.ScanDebugging || candidateCount > int64(Settings.AnalyzeMinItems) {
@@ -2331,6 +2373,8 @@ func (t *storageShard) scan(access scanAccess, conditionCols []string, condition
 		}
 	}()
 	maxInsertIndex := len(t.inserts)
+	feedbackPopulation := int64(t.main_count) + int64(maxInsertIndex) - int64(t.deletions.Count())
+	var feedbackCandidates int64
 	visibleUpper := t.main_count + uint32(maxInsertIndex)
 	var pendingRecids []uint32
 	var mutationSeen map[uint32]struct{}
@@ -2346,6 +2390,7 @@ func (t *storageShard) scan(access scanAccess, conditionCols []string, condition
 	t.iterateIndex(currentTx, access, maxInsertIndex, buf, 1, nil, func(batch []uint32) bool {
 		candidateCount += int64(len(batch))
 		outN := t.filterVisibleScanBatch(batch, visibleUpper, hasMutationCallback, currentTx, mutationSeen)
+		feedbackCandidates += int64(outN)
 		if !conditionAlwaysTrue && outN > 0 {
 			if typedFilter != nil {
 				outN = typedFilter.filterBatch(batch[:outN], conditionCols, ccols, cReaders, conditionGetters, cdataset, &conditionProgram)
@@ -2395,6 +2440,9 @@ func (t *storageShard) scan(access scanAccess, conditionCols []string, condition
 			locked = false
 		}
 		mapper.FlushSideEffects()
+		if feedbackCandidates <= feedbackPopulation {
+			t.filterFeedback.observe(access.feedback, feedbackPopulation, outCount)
+		}
 		return scm.NewNil(), outCount, candidateCount
 	}
 	if hasMutationCallback && len(pendingRecids) > 0 {
@@ -2427,6 +2475,9 @@ func (t *storageShard) scan(access scanAccess, conditionCols []string, condition
 		writeLocked = false
 	}
 	mapper.FlushSideEffects()
+	if feedbackCandidates <= feedbackPopulation {
+		t.filterFeedback.observe(access.feedback, feedbackPopulation, outCount)
+	}
 	return akkumulator, outCount, candidateCount
 }
 

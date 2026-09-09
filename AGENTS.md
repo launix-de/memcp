@@ -1,3 +1,5 @@
+<!-- Copyright (C) 2026 Carl-Philip Hänsch -->
+
 # Repository Guidelines
 
 ## Project Structure & Modules
@@ -115,6 +117,7 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
   - Use `ColumnReader(name)` rather than reading `t.columns[name]` directly.
 - Scan/plan code must not read from `t.columns[...]` directly. Fetch storages with helpers outside of long-held locks; then take `RLock` only for index iteration and reading `inserts`/`deletions`/`deltaColumns`.
 - Log replay and rebuild mutate shard state and must hold `t.mu.Lock()` for their critical sections. They must not take table locks inside shard locks to avoid cycles.
+- `storageShard.filterFeedback` contains immutable observations published with one best-effort CAS after a complete shard scan. Readers may load these atomics without shard locks or concurrency rights; they must not inspect shard containers. `table.filterFeedback` publishes an immutable, bounded merged snapshot. Generation IDs are scalar planner-statistics tokens, never retained shard/topology pointers. No feedback synchronization or publication is permitted inside element or filter-batch loops.
 - When adding new storage fields, document the locking discipline and update this section.
 
 ### Scheme AST and Codegen Quoting (lib/queryplan.scm and lib/queryplan-*.scm)

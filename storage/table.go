@@ -468,6 +468,8 @@ foreign keys:
 	delete: I am tbl2 -> check all cols2 (old values): do the values exist in tbl1.cols1? if so -> CASCADE a delete in tbl1, SET NULL in tbl1 or RESTRICT
 */
 type table struct {
+	// Immutable, bounded filter observations, published after complete scans.
+	filterFeedback  atomic.Pointer[tableFilterFeedback]
 	schema          *database
 	Name            string
 	Columns         []*column
@@ -622,7 +624,7 @@ func (t *table) publishPlannerStatsToken() {
 }
 
 func (t *table) PlannerStatsToken() uint64 {
-	return t.plannerStatsToken.Load()
+	return plannerFingerprintMix(t.plannerStatsToken.Load(), t.filterFeedbackFingerprint())
 }
 
 func (t *table) signalTransactionDrain() {
@@ -1716,7 +1718,7 @@ func (t *table) PlannerStatisticsFingerprint() uint64 {
 	for {
 		snapshot := t.showColumnsSnapshot.Load()
 		if snapshot != nil {
-			return snapshot.plannerFingerprint
+			return plannerFingerprintMix(snapshot.plannerFingerprint, t.filterFeedbackFingerprint())
 		}
 		t.publishShowColumnsSnapshot()
 	}
