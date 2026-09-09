@@ -26,13 +26,13 @@ func TestPHPIntegration(t *testing.T) {
 		if front != "" {
 			name = "front-controller"
 		}
-		t.Run(name, func(t *testing.T) { testPHPIntegration(t, front, "") })
+		t.Run(name, func(t *testing.T) { testPHPIntegration(t, front, "", false) })
 	}
 }
 
 func TestPHPServeCLI(t *testing.T) {
 	for _, mode := range []string{"split", "equals"} {
-		t.Run(mode, func(t *testing.T) { testPHPIntegration(t, "index.php", mode) })
+		t.Run(mode, func(t *testing.T) { testPHPIntegration(t, "index.php", mode, false) })
 	}
 }
 
@@ -49,7 +49,9 @@ func TestPHPServeCLIRequiresPath(t *testing.T) {
 	}
 }
 
-func testPHPIntegration(t *testing.T, front, cli string) {
+func TestPHPWaitTimeout(t *testing.T) { testPHPIntegration(t, "", "", true) }
+
+func testPHPIntegration(t *testing.T, front, cli string, queueTimeout bool) {
 	binary, err := filepath.Abs("memcp-php")
 	if err != nil {
 		t.Fatal(err)
@@ -142,7 +144,10 @@ func testPHPIntegration(t *testing.T, front, cli string) {
 			t.Fatal(err)
 		}
 	}
-	cmd := exec.Command(binary, "--no-repl", apiFlag, "--mysql-port="+mysqlPort, "--mysql-socket="+socketPath, "-data", filepath.Join(dir, "data"), "-c", `(createdatabase "memcp-tests" true)`, "--php-threads=4", "lib/main.scm", mountFile)
+	cmd := exec.Command(binary, "--no-repl", apiFlag, "--mysql-port="+mysqlPort, "--mysql-socket="+socketPath, "-data", filepath.Join(dir, "data"), "-c", `(createdatabase "memcp-tests" true)`, "-c", `(settings "PHPMemoryLimit" 33554432)`, "-c", `(settings "PHPMaxWaitMilliseconds" 5000)`, "lib/main.scm", mountFile)
+	if queueTimeout {
+		cmd.Args = append(cmd.Args, "-c", `(settings "PHPMaxWaitMilliseconds" 100)`)
+	}
 	if cli != "" {
 		workingDir, err := os.Getwd()
 		if err != nil {
@@ -249,13 +254,13 @@ func testPHPIntegration(t *testing.T, front, cli string) {
 			}
 		}
 	}
-	for _, action := range []string{"setup", "pdo", "wire", "route-dsn", "buffers", "latency", "abandon", "verify"} {
+	for _, action := range []string{"setup", "quota", "oom-php", "oom-pdo", "pdo", "wire", "route-dsn", "buffers", "latency", "abandon", "verify"} {
 		status, body, err := get("/app/probe.php?action=" + action)
 		want := 200
-		if action == "abandon" {
+		if action == "abandon" || strings.HasPrefix(action, "oom-") {
 			want = 500
 		}
-		if err != nil || status != want {
+		if err != nil || status != want || (strings.HasPrefix(action, "oom-") && strings.Contains(body, "Memory ceiling was not enforced")) {
 			t.Fatalf("%s: status %d, %s, %v", action, status, body, err)
 		}
 	}
@@ -312,12 +317,17 @@ func testPHPIntegration(t *testing.T, front, cli string) {
 		t.Fatalf("mount boundary: %d %v", status, err)
 	}
 	var wg sync.WaitGroup
-	var intervals [4]struct{ Start, End float64 }
-	for i := 0; i < 4; i++ {
+	var intervals [12]struct{ Start, End float64 }
+	var rejected [12]bool
+	for i := range intervals {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
 			status, body, err := get(fmt.Sprintf("/app/probe.php?action=parallel&value=%d", i))
+			if queueTimeout && err == nil && status == 503 {
+				rejected[i] = true
+				return
+			}
 			if err != nil || status != 200 {
 				t.Errorf("parallel: %d %s %v", status, body, err)
 			}
@@ -329,6 +339,15 @@ func testPHPIntegration(t *testing.T, front, cli string) {
 	wg.Wait()
 	overlap := false
 	for i, a := range intervals {
+		active := 0
+		for _, b := range intervals {
+			if b.Start <= a.Start && a.Start < b.End {
+				active++
+			}
+		}
+		if active > 4 {
+			t.Errorf("PHP thread cap exceeded: %d", active)
+		}
 		for j, b := range intervals {
 			if i != j && a.Start < b.End && b.Start < a.End {
 				overlap = true
@@ -337,5 +356,32 @@ func testPHPIntegration(t *testing.T, front, cli string) {
 	}
 	if !overlap {
 		t.Error("PHP requests did not overlap")
+	}
+	if queueTimeout {
+		found := false
+		for _, r := range rejected {
+			found = found || r
+		}
+		if !found {
+			t.Error("saturated PHP pool did not time out queued requests")
+		}
+		if status, body, err := get("/app/probe.php?action=verify"); err != nil || status != 200 {
+			t.Fatalf("pool failed to recover: %d %s %v", status, body, err)
+		}
+	}
+}
+
+func TestPHPQuotaRequiresZendAllocator(t *testing.T) {
+	for _, value := range []string{"0", "", "false"} {
+		t.Run("value="+value, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, "./memcp-php", "--no-repl", "--disable-api", "--disable-mysql", "--mysql-socket=", "-data", t.TempDir())
+			cmd.Env = append(os.Environ(), "USE_ZEND_ALLOC="+value)
+			output, err := cmd.CombinedOutput()
+			if err == nil || !strings.Contains(string(output), "PHP memory quota requires USE_ZEND_ALLOC") {
+				t.Fatalf("allocator bypass: %v %s", err, output)
+			}
+		})
 	}
 }

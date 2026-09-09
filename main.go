@@ -1267,7 +1267,6 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  --root-password-file=PATH  Read the initial root password from a file\n")
 		fmt.Fprintf(os.Stderr, "  --disable-mysql        Disable MySQL protocol server\n")
 		fmt.Fprintf(os.Stderr, "  --serve PATH           Mount a PHP application at /; keep /dashboard (make php)\n")
-		fmt.Fprintf(os.Stderr, "  --php-threads=N        PHP threads (default 4)\n")
 		fmt.Fprintf(os.Stderr, "... and much more (please refer to your module's documentation)\n\n")
 	}
 

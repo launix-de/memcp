@@ -69,7 +69,7 @@ For example, place this in a Scheme module loaded after `lib/main.scm`:
 
 ```sh
 ./memcp-php --no-repl -data /path/to/persistent/memcp-data \
-  --api-port=8080 --php-threads=4 lib/main.scm /path/to/apps.scm
+  --api-port=8080 lib/main.scm /path/to/apps.scm
 ```
 
 The arguments are document root, optional URL prefix, and optional fallback PHP
@@ -89,13 +89,63 @@ root; dotfiles, PHP source backups and escaping symlinks are rejected. Routing
 and HTTP authentication can run in Scheme before invoking the PHP handler.
 
 The shared PHP runtime starts lazily after Scheme bootstrap, on its first
-request. `--php-threads` configures its fixed thread count. SIGTERM/SIGINT drains
+request. `(settings "PHPThreads")` configures its fixed thread count. SIGTERM/SIGINT drains
 the Scheme HTTP servers before shutting down PHP and storage.
 
 The host uses classic PHP request lifecycles. Request globals and ordinary
 objects are released after each request; OPcache stays warm. Long-lived PHP
 application workers are not enabled by this integration. Native extension
 crashes affect the entire process, including MemCP.
+
+## PHP quotas, concurrency and tuning
+
+Configure PHP globally through `(settings)` or the **PHP** group in the dashboard.
+Changes take effect after restarting MemCP. The existing settings mechanism saves
+values to `data/settings.json` on orderly shutdown and loads them on startup.
+PHP tuning CLI flags are no longer supported.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `PHPThreads` | `4` | Maximum simultaneous PHP executions; excess requests wait. |
+| `PHPMemoryLimit` | `1073741824` (1 GiB) | Per-request allocation ceiling including retained PDO results; minimum 8 MiB. |
+| `PHPMaxWaitMilliseconds` | `30000` | Queue timeout before HTTP 503; `0` waits indefinitely. |
+| `PHPOutputBuffer` | `4096` | Output buffer bytes; `0` disables buffering. |
+| `PHPOpcacheMemory` | `536870912` (512 MiB) | Shared opcode cache bytes; minimum 32 MiB, rounded up to whole MiB. |
+
+For example: `(settings "PHPMemoryLimit" 1073741824)` sets the request quota
+to 1 GiB. The dashboard accepts `1024MiB` or `1GiB` in this field and stores
+numeric bytes. Existing memory budget fields also accept sizes such as `10MB`
+(10,000,000 bytes) and `10MiB` (10,485,760 bytes). Save by leaving the field or
+pressing Enter. Invalid sizes are rejected without changing the setting.
+
+MemCP sets both `memory_limit` and PHP 8.5's startup-only
+[`max_memory_limit`](https://www.php.net/manual/en/ini.core.php#ini.max-memory-limit)
+to the selected quota. A script can lower its limit but cannot raise it above
+the ceiling or disable it with `ini_set()`. These host settings override the
+corresponding external `php.ini` values. Zend's allocator must remain enabled;
+`USE_ZEND_ALLOC` must be unset or `1`; other values, including an empty value,
+are rejected.
+
+The quota includes unfetched PDO statement buffers, not just strings returned
+by `fetch()`. Results transfer to the PHP request heap after the Go call returns;
+an allocation failure frees the temporary bridge buffer before PHP aborts the
+request. PDO teardown rolls back unfinished transactions. The authenticated
+in-process SQL bridge remains in use; no MySQL socket round trip is introduced.
+
+This is an allocation quota, **not a process-wide RAM limit or tenant sandbox**.
+At four threads and 1 GiB, PHP request heaps may total about 4 GiB, plus the
+shared opcode cache, interpreter overhead, transient bridge buffers, and MemCP
+storage/query memory. The bridge retains its 64 MiB per-result bound during
+transfer. Native extension allocations and child processes, such as an external
+`php dbcheck.php`, are outside this quota. An OS memory limit on this shared
+process also limits MemCP and can terminate the database process.
+
+OPcache is enabled with room for 20,000 scripts and a 16 MiB interned-string
+buffer. PHP JIT is disabled. Timestamp validation stays enabled on every request
+(`opcache.revalidate_freq=0`) so redeployments do not require disabling cache
+validation or restarting the database. Output buffering batches small writes;
+streaming endpoints can finish their output buffers and call `flush()` as usual.
+Other PHP settings and extension loading remain in the external `php.ini`.
 
 ## Per-directory routing and access rules
 
@@ -145,7 +195,6 @@ short_open_tag=Off
 upload_max_filesize=256M
 post_max_size=272M
 max_execution_time=900
-memory_limit=512M
 ```
 
 `short_open_tag=Off` also allows XML declarations in PHP templates. For a local
@@ -227,8 +276,9 @@ reset. Reusable cell/byte buffers are each bounded to 64 KiB of retained capacit
 larger buffers are released after the query. Metadata keys are cleared between
 queries. Rows are written directly into the collector's flat cell array.
 
-Results are limited to 64 MiB and copied into independent C-owned memory in one
-batch. Existing PDO statements retain their own data when another query reuses
+Results are limited to 64 MiB and copied through a temporary C-owned buffer
+into the PHP request heap, where they count against the memory quota. Existing
+PDO statements retain their own data when another query reuses
 the collector; fetching rows never calls back into Go. Strings preserve arbitrary
 bytes. Use SQL pagination for larger results. The 30-second query timeout,
 process-list tracking, cancellation and transaction handling remain active.

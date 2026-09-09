@@ -30,6 +30,26 @@ try {
     if ($action === 'setup') {
         $db->exec('CREATE TABLE php_test (id INT PRIMARY KEY AUTO_INCREMENT, value TEXT)');
         $db->exec("CREATE USER php_reader IDENTIFIED BY 'reader-password'");
+     } elseif ($action === 'quota') {
+        check((int)ini_get('max_memory_limit') === 32*1024*1024, 'Host memory ceiling');
+        @ini_set('max_memory_limit', '-1');
+        @ini_set('memory_limit', '-1');
+        check((int)ini_get('memory_limit') === 32*1024*1024, 'Unlimited memory bypass');
+        @ini_set('memory_limit', '64M');
+        check((int)ini_get('memory_limit') === 32*1024*1024, 'Raised memory bypass');
+        check((int)ini_get('output_buffering') === 4096, 'Output buffering preset');
+        $before = memory_get_usage();
+        $held = $db->query("SELECT REPEAT('q', 1048576) AS payload");
+        check(memory_get_usage() - $before >= 1048576, 'Unfetched PDO result must count against quota');
+        $held->closeCursor();
+        check(memory_get_usage() - $before < 131072, 'Closed PDO cursor releases its quota');
+    } elseif ($action === 'oom-php' || $action === 'oom-pdo') {
+        $db->beginTransaction();
+        $db->exec("INSERT INTO php_test(value) VALUES ('oom rollback')");
+        if ($action === 'oom-php') { $huge = str_repeat('x', 64*1024*1024); }
+        $held = [];
+        for ($i = 0; $i < 64; $i++) { $held[] = $db->query("SELECT REPEAT('q', 1048576) AS payload"); }
+        throw new RuntimeException('Memory ceiling was not enforced');
     } elseif ($action === 'pdo') {
         $reader = new PDO('memcp:dbname=memcp-tests', 'php_reader', 'reader-password');
         fails(fn() => $reader->query('SELECT COUNT(*) FROM php_test'));

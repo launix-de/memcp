@@ -271,6 +271,8 @@ func memcp_query(handle C.uintptr_t, sql *C.char, length C.size_t) (r *C.memcp_r
 		r.transaction = 1
 	}
 	r.columns = C.size_t(b.columnCount)
+	r.cells_length = C.size_t(len(b.cells))
+	r.bytes_length = C.size_t(len(b.data))
 	if len(b.cells) > 0 {
 		r.cells = (*C.memcp_cell)(C.calloc(C.size_t(len(b.cells)), C.size_t(unsafe.Sizeof(C.memcp_cell{}))))
 		copy(unsafe.Slice(r.cells, len(b.cells)), b.cells)

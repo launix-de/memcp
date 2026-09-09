@@ -8,6 +8,7 @@ package main
 import "os"
 import "fmt"
 import "sync"
+import "time"
 import "path"
 import "strconv"
 import "strings"
@@ -15,11 +16,52 @@ import "net/http"
 import "path/filepath"
 import "github.com/dunglas/frankenphp"
 import "github.com/launix-de/memcp/scm"
+import "github.com/launix-de/memcp/storage"
 import "github.com/launix-de/memcp/phpbridge"
 
 var phpLifecycle sync.Mutex
 var phpReady = make(chan struct{})
-var phpThreads = 4
+
+type phpConfig struct {
+	threads       int
+	memoryLimit   int64
+	maxWait       time.Duration
+	outputBuffer  int
+	opcacheMemory int
+}
+
+var phpSettings phpConfig
+
+func loadPHPConfig() (phpConfig, error) {
+	values := storage.PHPStartupSettings()
+	c := phpConfig{int(values.Threads), values.MemoryLimit, time.Duration(values.MaxWaitMilliseconds) * time.Millisecond, int(values.OutputBuffer), int((values.OpcacheMemory + (1 << 20) - 1) >> 20)}
+	if values.Threads < 1 ||
+		values.Threads > 1024 ||
+		values.MemoryLimit < 8<<20 ||
+		values.MemoryLimit > 9007199254740991 ||
+		values.MaxWaitMilliseconds < 0 ||
+		values.MaxWaitMilliseconds > 86400000 ||
+		values.OutputBuffer < 0 ||
+		values.OutputBuffer > 2147483647 ||
+		values.OpcacheMemory < 32<<20 ||
+		values.OpcacheMemory > 1<<40 {
+		return c, fmt.Errorf("invalid PHP settings: check PHPThreads, PHPMemoryLimit, PHPMaxWaitMilliseconds, PHPOutputBuffer and PHPOpcacheMemory")
+	}
+	return c, nil
+}
+
+func (c phpConfig) ini() map[string]string {
+	limit := strconv.FormatInt(c.memoryLimit, 10)
+	return map[string]string{
+		"expose_php": "0", "display_errors": "0", "log_errors": "1",
+		"memory_limit": limit, "max_memory_limit": limit,
+		"output_buffering": strconv.Itoa(c.outputBuffer), "implicit_flush": "0",
+		"opcache.enable": "1", "opcache.memory_consumption": strconv.Itoa(c.opcacheMemory),
+		"opcache.interned_strings_buffer": "16", "opcache.max_accelerated_files": "20000",
+		"opcache.validate_timestamps": "1", "opcache.revalidate_freq": "0", "opcache.jit": "disable",
+	}
+}
+
 var phpStarted, phpStopping bool
 var phpInitErr error
 var phpAccessCachesMu sync.Mutex
@@ -29,19 +71,18 @@ var phpAccessCaches []*phpAccessCache
 // after Scheme initialization; the first PHP request starts the shared runtime.
 func startPHP(args []string) error {
 	for _, arg := range args {
-		if !strings.HasPrefix(arg, "--php-") {
-			continue
+		if strings.HasPrefix(arg, "--php-") {
+			return fmt.Errorf("PHP flags have been removed; configure PHP through (settings) or the dashboard")
 		}
-		key, value, ok := strings.Cut(arg, "=")
-		if !ok || key != "--php-threads" {
-			return fmt.Errorf("%s is not supported; mount (servePHP directory prefix front_controller) in a Scheme HTTP handler", key)
-		}
-		n, err := strconv.Atoi(value)
-		if err != nil || n < 1 {
-			return fmt.Errorf("php-threads must be positive")
-		}
-		phpThreads = n
 	}
+	settings, err := loadPHPConfig()
+	if err != nil {
+		return err
+	}
+	if allocator, present := os.LookupEnv("USE_ZEND_ALLOC"); present && allocator != "1" {
+		return fmt.Errorf("PHP memory quota requires USE_ZEND_ALLOC to be unset or 1")
+	}
+	phpSettings = settings
 	close(phpReady)
 	return nil
 }
@@ -59,9 +100,7 @@ func ensurePHP() error {
 		phpInitErr = err
 		return err
 	}
-	if err := frankenphp.Init(frankenphp.WithNumThreads(phpThreads), frankenphp.WithMaxThreads(phpThreads), frankenphp.WithPhpIni(map[string]string{
-		"expose_php": "0", "display_errors": "0", "log_errors": "1", "opcache.enable": "1",
-	})); err != nil {
+	if err := frankenphp.Init(frankenphp.WithNumThreads(phpSettings.threads), frankenphp.WithMaxThreads(phpSettings.threads), frankenphp.WithMaxWaitTime(phpSettings.maxWait), frankenphp.WithPhpIni(phpSettings.ini())); err != nil {
 		phpInitErr = err
 		return err
 	}
