@@ -3943,6 +3943,22 @@ physical alternative. */
 					(min driver_input_rows (/ requested_rows density))
 					driver_input_rows))))))
 
+/* Preparing the complete membership is not the same work as consuming it.
+An ordered candidate scan probes the residual only for membership hits until
+OFFSET + LIMIT is filled. Use the same visited-row estimate as the competing
+ordered carriers, including local rejection, and cap it by the available
+projection. Never apply this braking to an unbounded aggregate/filter. Keep
+tools/costgen's candidate consumer feature in sync with this equation. */
+(define membership_candidate_consumer_rows (lambda (candidate_input_rows candidate_rows driver_rows work)
+	(begin
+		(define projected_rows (membership_projected_driver_rows
+			candidate_input_rows candidate_rows (membership_driver_input_rows driver_rows work) work))
+		(if (membership_work_value work (quote membership_order_limit_driver) false)
+			(min projected_rows (*
+				(membership_expected_driver_rows_visited candidate_input_rows candidate_rows driver_rows work)
+				(membership_candidate_density candidate_input_rows candidate_rows work)))
+			projected_rows))))
+
 (define membership_common_scan_cost (lambda (candidate_input_rows candidate_rows driver_rows candidate_map_columns ordered_scan_invocations work)
 	(begin
 		(define scan_invocations (+
@@ -4052,7 +4068,7 @@ owned by the membership-carrier guard; do not create another consumer guard. */
 			projection_rows 0.65)
 			candidate_cache_cost projection_rows 0.65))
 		(define downstream_cost (planner_membership_downstream_probe_cost
-			(* projected_rows
+			(* (membership_candidate_consumer_rows candidate_input_rows candidate_rows driver_rows work)
 				(membership_work_value work (quote membership_downstream_probe_branches) 0))))
 		(define carrier_cost (planner_cost_add
 			(planner_cost_add base_cost adaptive_consumer_cost projected_rows 0.65)
@@ -4299,6 +4315,10 @@ ordered batch is executable and what its actual driver workload is. */
 				driver_condition 512 tx planning_session)))
 		(define driver_rows (membership_estimated_work_rows driver_estimate driver_input_rows))
 		(merge (list
+			/* Pair-list lookup takes the FIRST match, not the last. Keep stage
+			statistics ahead of reconstructed defaults, including unknown (nil)
+			candidate estimates for UNION sources. */
+			(gs_facts stage)
 			(list
 				(list (quote membership_candidate_input_rows) candidate_input_rows)
 				(list (quote membership_candidate_estimated_rows) candidate_rows)
@@ -4317,10 +4337,7 @@ ordered batch is executable and what its actual driver workload is. */
 				(list (quote membership_driver_input_rows) driver_input_rows)
 				(list (quote membership_driver_condition) driver_condition)
 				(list (quote membership_driver_rows) driver_rows))
-			(membership_candidate_work_facts stage planning_session)
-			/* merge is right-biased: stage telemetry is authoritative over
-			the reconstructed late-consumer fallback. */
-			(gs_facts stage))))))
+			(membership_candidate_work_facts stage planning_session))))))
 
 (define membership_truth_projection_preferred? (lambda (block stage _guarded_alternative)
 	(begin

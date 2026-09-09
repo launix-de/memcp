@@ -1,0 +1,68 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: "1.0"
+  description: "Membership carrier costs distinguish complete preparation from bounded residual probes"
+
+setup: []
+cleanup: []
+test_cases:
+  - name: "Late consumer fallback must not shadow measured stage work"
+    scm: |
+      (begin
+        (define input (make_union_block 'all '() nil nil nil '()))
+        (define stage (make_group_stage "work-test" input nil nil nil nil nil nil nil nil
+          (list (list 'membership_candidate_input_rows 100000)
+            (list 'membership_candidate_estimated_rows 4)
+            (list 'membership_candidate_index_filter_rows 4)
+            (list 'membership_candidate_broad_text_match_bytes 128))))
+        (define block (make_query_block "memcp-tests" nil nil true nil nil nil nil nil nil nil nil))
+        (define facts (membership_truth_cost_facts block stage))
+        (if (and (equal? (qassoc_get facts 'membership_candidate_estimated_rows nil) 4)
+              (equal? (qassoc_get facts 'membership_candidate_broad_text_match_bytes nil) 128))
+          true (error "late fallback shadowed authoritative membership statistics")))
+
+  - name: "Ordered candidate preparation does not charge ACL probes for the complete projection"
+    scm: |
+      (begin
+        (define facts (list
+          (list 'membership_driver_input_rows 100000)
+          (list 'membership_order_limit_driver true)
+          (list 'membership_order_limit 72)
+          (list 'membership_order_offset 8)))
+        (define without (membership_projection_cost 100000 50000 72 facts))
+        (define with (membership_projection_cost 100000 50000 72
+          (qassoc_set facts 'membership_downstream_probe_branches 1)))
+        (define extra (- (qassoc_get with 'total_ns 0) (qassoc_get without 'total_ns 0)))
+        (define expected (qassoc_get (planner_membership_downstream_probe_cost 80) 'total_ns 0))
+        (if (< (sql_abs (- extra expected)) 1) true
+          (error "ordered candidate cost charged all projected rows after LIMIT")))
+
+  - name: "Selective residuals increase the candidate consumer work before LIMIT"
+    scm: |
+      (begin
+        (define facts (list
+          (list 'membership_driver_input_rows 100000)
+          (list 'membership_local_filter_rows 10000)
+          (list 'membership_order_limit_driver true)
+          (list 'membership_order_limit 72)
+          (list 'membership_order_offset 8)))
+        (define without (membership_projection_cost 100000 50000 72 facts))
+        (define with (membership_projection_cost 100000 50000 72
+          (qassoc_set facts 'membership_downstream_probe_branches 1)))
+        (define extra (- (qassoc_get with 'total_ns 0) (qassoc_get without 'total_ns 0)))
+        (define expected (qassoc_get (planner_membership_downstream_probe_cost 800) 'total_ns 0))
+        (if (< (sql_abs (- extra expected)) 1) true
+          (error "candidate consumer ignored residual selectivity or OFFSET")))
+
+  - name: "Unbounded candidate consumers retain complete residual work"
+    scm: |
+      (begin
+        (define facts (list (list 'membership_driver_input_rows 100000)))
+        (define without (membership_projection_cost 100000 50000 100000 facts))
+        (define with (membership_projection_cost 100000 50000 100000
+          (qassoc_set facts 'membership_downstream_probe_branches 1)))
+        (define extra (- (qassoc_get with 'total_ns 0) (qassoc_get without 'total_ns 0)))
+        (define expected (qassoc_get (planner_membership_downstream_probe_cost 50000) 'total_ns 0))
+        (if (< (sql_abs (- extra expected)) 1) true
+          (error "unbounded candidate consumer incorrectly received LIMIT braking")))

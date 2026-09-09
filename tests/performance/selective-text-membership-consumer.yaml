@@ -1,0 +1,65 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: "1.0"
+  description: "Selective indexed text preparation and bounded ACL consumption"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS stmc_document"
+  - sql: "DROP TABLE IF EXISTS stmc_file"
+  - sql: "DROP TABLE IF EXISTS stmc_acl"
+  - sql: "CREATE TABLE stmc_file (id INT PRIMARY KEY, name TEXT, body TEXT) ENGINE=memory"
+  - sql: "CREATE TABLE stmc_document (id INT PRIMARY KEY, file_id INT, rank_value INT, domain_id INT) ENGINE=memory"
+  - sql: "CREATE TABLE stmc_acl (id INT PRIMARY KEY, allowed INT) ENGINE=memory"
+  - scm: |
+      (begin
+        (insert (table "memcp-tests" "stmc_file") '("id" "name" "body")
+          (map (produceN 6000) (lambda (i)
+            (list i "file" (concat
+              (if (< i 60) "needle" "unrelated") (string_repeat "padding-" 512))))))
+        (insert (table "memcp-tests" "stmc_document") '("id" "file_id" "rank_value" "domain_id")
+          (map (produceN 12000) (lambda (i) (list i (mod i 6000) i (mod i 16)))))
+        (insert (table "memcp-tests" "stmc_acl") '("id" "allowed")
+          (map (produceN 16) (lambda (i) (list i (mod i 2)))))
+        (rebuild (table "memcp-tests" "stmc_file") true false)
+        (rebuild (table "memcp-tests" "stmc_document") true false)
+        (rebuild (table "memcp-tests" "stmc_acl") true false))
+  - sql: "SELECT COUNT(*) FROM stmc_file WHERE body LIKE '%needle%'"
+  - sql: "SELECT COUNT(*) FROM stmc_file WHERE body LIKE '%needle%'"
+  # Exercise the ordinary adaptive-index activation before checking its work
+  # facts. No forced carrier or test-only index construction is involved.
+  - sql: &stmc_query |
+      SELECT d.id, label.allowed FROM stmc_document d
+      LEFT JOIN stmc_acl label ON label.id = d.domain_id
+      WHERE d.file_id IN (
+        SELECT id FROM stmc_file WHERE name LIKE '%needle%'
+        UNION SELECT id FROM stmc_file WHERE body LIKE '%needle%'
+      ) AND EXISTS (SELECT 1 FROM stmc_acl a WHERE a.id = d.domain_id AND a.allowed = 1)
+      ORDER BY d.rank_value DESC LIMIT 5 OFFSET 2
+  - sql: *stmc_query
+  - sql: *stmc_query
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS stmc_document"
+  - sql: "DROP TABLE IF EXISTS stmc_file"
+  - sql: "DROP TABLE IF EXISTS stmc_acl"
+
+test_cases:
+  - name: "Selective text and rejecting ACL return the exact ordered page"
+    performance_rows: 12000
+    warmup: 3
+    timing_samples: 9
+    threshold_ms: 5000
+    sql: *stmc_query
+    expect:
+      data: [{id: 6055, allowed: 1}, {id: 6053, allowed: 1}, {id: 6051, allowed: 1}, {id: 6049, allowed: 1}, {id: 6047, allowed: 1}]
+
+  - name: "Unbounded text membership counts every ACL survivor"
+    sql: |
+      SELECT COUNT(*) AS n FROM stmc_document d
+      WHERE d.file_id IN (
+        SELECT id FROM stmc_file WHERE name LIKE '%needle%'
+        UNION SELECT id FROM stmc_file WHERE body LIKE '%needle%'
+      ) AND EXISTS (SELECT 1 FROM stmc_acl a WHERE a.id = d.domain_id AND a.allowed = 1)
+    expect:
+      data: [{n: 60}]

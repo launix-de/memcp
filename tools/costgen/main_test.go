@@ -299,8 +299,18 @@ func TestRowFeaturesChargesOrderedProjectedRecsetSortWork(t *testing.T) {
 	if features[17] != 125 {
 		t.Fatalf("ordered RecSet sort work = %v, want 125", features[17])
 	}
+	// 120 visited driver rows * 10% membership density * two residual probes.
+	// Building all 25 projected rows does not imply consuming them all.
+	if features[18] != 24 {
+		t.Fatalf("downstream probe rows = %v, want 24", features[18])
+	}
+	row.Consumer = "filter"
+	features, err = rowFeatures(row)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if features[18] != 50 {
-		t.Fatalf("downstream probe rows = %v, want 50", features[18])
+		t.Fatalf("unbounded downstream probe rows = %v, want 50", features[18])
 	}
 }
 

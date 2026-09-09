@@ -1426,6 +1426,13 @@ func rowFeatures(row calibrationRow) ([]float64, error) {
 	}
 	switch row.Plan {
 	case "candidate_keyset":
+		// The full projection is built, but an ordered consumer evaluates the
+		// residual only for visited membership hits before OFFSET/LIMIT. Mirror
+		// membership_candidate_consumer_rows, including local-filter rejection.
+		consumerRows := *row.ProjectedDriverRows
+		if row.Consumer == "order_limit" {
+			consumerRows = math.Min(consumerRows, *row.ExpectedDriverRowsVisited*candidateDensity)
+		}
 		cacheStartup, cacheBuildRows := 0.0, 0.0
 		if row.CandidateCacheBacked {
 			cacheStartup, cacheBuildRows = 1, *row.CandidateRows
@@ -1437,7 +1444,7 @@ func rowFeatures(row calibrationRow) ([]float64, error) {
 			aggregateDriverRows, 0, *row.CandidateBroadTextMatchRows,
 			*row.CandidateBroadTextMatchBytes, orderedScanInvocations, 0,
 			adaptiveSortWork,
-			*row.ProjectedDriverRows * downstreamProbeBranches,
+			consumerRows * downstreamProbeBranches,
 		}, nil
 	case "driver_order_membership_probe", "scan_order":
 		recsetStartup, recsetBuildRows, recsetProbeRows := 1.0, *row.CandidateRows, *row.ExpectedDriverRowsVisited
