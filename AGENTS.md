@@ -207,6 +207,11 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
 - `storageShard.tempColumnBytes` is protected by the shard mutex. It records
   per-shard portions of a separately registered temporary column so the manager
   can offer/release those portions without blocking on column computation.
+- `blobRAMCache.residentBytes` is an atomic snapshot published at batch and
+  eviction boundaries under the blob mutex. Size diagnostics must read that
+  snapshot, never wait on the blob mutex while holding catalog/shard locks:
+  readers can wait for CacheManager while holding the blob mutex, and eviction
+  can need catalog locks. Do not add memory traversals to scan hot paths.
 - Resident payload estimates and process RSS are not interchangeable. Keep
   allocator/runtime/stack and unassigned process memory visible; do not force
   agreement by rescaling database sizes.
