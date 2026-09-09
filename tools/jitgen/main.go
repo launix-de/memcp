@@ -7383,9 +7383,11 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			g.emit("} else {")
 			g.emit("\t%s = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{%s}, 3)", dv, arg.goVar)
 			g.emit("}")
-			g.emit("ctx.BindReg(%s.Reg, &%s)", dv, dv)
-			g.emit("ctx.BindReg(%s.Reg2, &%s)", dv, dv)
-			g.emit("ctx.BindReg(%s.Reg3, &%s)", dv, dv)
+			g.emit("if %s.Loc == LocRegTriple {", dv)
+			g.emit("\tctx.BindReg(%s.Reg, &%s)", dv, dv)
+			g.emit("\tctx.BindReg(%s.Reg2, &%s)", dv, dv)
+			g.emit("\tctx.BindReg(%s.Reg3, &%s)", dv, dv)
+			g.emit("}")
 			g.vals[name] = genVal{goVar: dv, isDesc: true, marker: "_slice", sliceInput: arg.sourceInput, hasSliceInput: arg.hasSourceInput}
 		case "GetTag":
 			arg := g.vals[v.Call.Args[0].Name()]

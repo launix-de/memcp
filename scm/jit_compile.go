@@ -2169,6 +2169,30 @@ func jitKnownSliceHeader(ctx *JITContext, value *JITValueDesc) JITValueDesc {
 		ctx.EmitMovRegImm64(capReg, uint64(capacity))
 	} else if value.Loc == LocStackPair {
 		ctx.ReclaimUntrackedRegs()
+		if bits.OnesCount64(ctx.FreeRegs&ctx.AllRegs&^ctx.ProtectedRegs) < 3 {
+			// A nested consumer may have only one or two scratch registers left.
+			// Decode into a stable header so consumers can load just the fields
+			// they use, without reserving pointer, length and capacity together.
+			off := ctx.AllocStack(24)
+			base := ctx.StackReg
+			if value.StackOff < 0 {
+				base = ctx.FrameReg
+			}
+			ctx.EmitMovRegMem(ctx.ScratchReg, base, value.StackOff)
+			ctx.EmitStoreRegMem(ctx.ScratchReg, ctx.StackReg, off)
+			ctx.EmitMovRegMem(ctx.ScratchReg, base, value.StackOff+8)
+			ctx.EmitShrRegImm8(ctx.ScratchReg, 8+sliceCapBits)
+			ctx.EmitStoreRegMem(ctx.ScratchReg, ctx.StackReg, off+8)
+			ctx.EmitMovRegMem(ctx.ScratchReg, base, value.StackOff+8)
+			ctx.EmitShrRegImm8(ctx.ScratchReg, 8)
+			ctx.EmitAndRegImm32(ctx.ScratchReg, int32(sliceCapMask))
+			ctx.EmitStoreRegMem(ctx.ScratchReg, ctx.StackReg, off+16)
+			ctx.setStackPointer(jitStackRootFrameSP, off-ctx.DynamicSP, true)
+			return JITValueDesc{
+				Loc: LocStackTriple, Type: tagSlice, StackOff: off, Rooted: true,
+				KnownSliceLen: value.KnownSliceLen, KnownSliceCap: value.KnownSliceCap, SliceSizeKnown: value.SliceSizeKnown,
+			}
+		}
 		ptrReg = ctx.AllocReg()
 		lenReg = ctx.AllocRegExcept(ptrReg)
 		capReg = ctx.AllocRegExcept(ptrReg, lenReg)
@@ -2682,6 +2706,15 @@ func jitEmitDynamicCallableAt(ctx *JITContext, callable JITValueDesc, operandVal
 	// loop state. Keep the callable in a branch-stable home, then restore this
 	// snapshot before emitting each mutually exclusive arm.
 	ctx.StabilizeDescAcrossNestedCall(&callable)
+	// Dispatch needs scratch registers even when a surrounding expression or
+	// generated loop has pinned its live values. The callable and operands are
+	// already stack-backed; save the outer register contract until every arm
+	// has committed its result to callResult.
+	var boundary JITRegisterBoundary
+	releaseOuter := bits.OnesCount64(ctx.FreeRegs&ctx.AllRegs&^ctx.ProtectedRegs) < 6
+	if releaseOuter {
+		boundary = ctx.PreserveRegisters(JITRegisterBoundaryOptions{ReleaseHomes: true})
+	}
 	fallbackLabel := ctx.ReserveLabel()
 	endLabel := ctx.ReserveLabel()
 
@@ -2816,6 +2849,9 @@ func jitEmitDynamicCallableAt(ctx *JITContext, callable JITValueDesc, operandVal
 	ctx.FreeDesc(&fallbackResult)
 	ctx.RestoreAllocState(dispatchState)
 	ctx.MarkLabel(endLabel)
+	if releaseOuter {
+		boundary.Restore(ctx)
+	}
 	var out JITValueDesc
 	if result.Loc == LocStackPair {
 		out = result

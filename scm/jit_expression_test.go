@@ -635,6 +635,46 @@ func TestJITDynamicNativeFuncPreservesClosureContextAcrossGC(t *testing.T) {
 	}
 }
 
+func TestJITNestedCallPreservesPointerValues(t *testing.T) {
+	for _, source := range []string{
+		`(lambda (a b c value) (concat a (concat b (concat c (nth (list value "tail") 0)))))`,
+		`(lambda (a b c callback) (concat a (concat b (concat c (callback "value")))))`,
+	} {
+		t.Run(source, func(t *testing.T) {
+			compiled := compileJITExpressionTestProc(t, source)
+			value := NewString("value")
+			if strings.Contains(source, "callback") {
+				value = NewFunc(func(args ...Scmer) Scmer {
+					return jitCallbackTestSafepoint(args...)
+				})
+			}
+			got := Apply(compiled, NewString("a"), NewString("b"), NewString("c"), value)
+			if String(got) != "abcvalue" {
+				t.Fatalf("nested call returned %s", String(got))
+			}
+		})
+	}
+}
+
+func TestJITConditionalCallbackPreservesPointerValues(t *testing.T) {
+	compiled := compileJITExpressionTestProc(t, `(lambda (callback a b c)
+		(if a (if (and b (callback c)) (list a b c) (list c b a)) (list a b c)))`)
+	for _, enabled := range []bool{true, false} {
+		callback := NewFunc(func(args ...Scmer) Scmer {
+			_ = jitCallbackTestSafepoint(args...)
+			return NewBool(enabled)
+		})
+		a, b, c := NewString("first"), NewString("second"), NewString("third")
+		want := NewSlice([]Scmer{a, b, c})
+		if !enabled {
+			want = NewSlice([]Scmer{c, b, a})
+		}
+		if got := Apply(compiled, callback, a, b, c); !Equal(got, want) {
+			t.Fatalf("conditional callback returned %s, want %s", String(got), String(want))
+		}
+	}
+}
+
 func BenchmarkJITDynamicNativeFuncCall(b *testing.B) {
 	compiled := compileJITExpressionTestProc(b, `(lambda (callback value) (callback value))`)
 	callback := NewFunc(func(args ...Scmer) Scmer { return args[0] })
@@ -1340,6 +1380,34 @@ func TestJITExpressionRecursiveMatchKeepsEarlierFixedListBranch(t *testing.T) {
 	}
 	if got := callJITExpressionAtDepth(compiled, input, 128); !got.IsBool() || !got.Bool() {
 		t.Fatalf("deep-stack fixed-list branch returned %s, want true", String(got))
+	}
+}
+
+func TestJITMatchSingletonAfterReduce(t *testing.T) {
+	compiled := compileJITExpressionTestProc(t, `(lambda (terms predicate)
+		(begin
+			(define kept (reduce terms (lambda (acc term)
+				(if (predicate term) acc (append_unique acc term))) '()))
+			(if (predicate kept) false
+				(match kept
+					'() true
+					(cons single '()) single
+					_ (cons 'and kept)))))`)
+	predicate := NewFunc(func(args ...Scmer) Scmer { return NewBool(args[0].IsBool() && args[0].Bool()) })
+	column := NewSlice([]Scmer{NewSymbol("get_column"), NewString("a"), NewBool(false), NewString("x"), NewBool(false)})
+	for _, test := range []struct {
+		input []Scmer
+		want  Scmer
+	}{
+		{nil, NewBool(true)},
+		{[]Scmer{NewBool(true)}, NewBool(true)},
+		{[]Scmer{NewBool(true), column}, column},
+		{[]Scmer{column, column}, column},
+		{[]Scmer{column, NewString("other")}, NewSlice([]Scmer{NewSymbol("and"), column, NewString("other")})},
+	} {
+		if got := Apply(compiled, NewSlice(test.input), predicate); !Equal(got, test.want) {
+			t.Fatalf("match after reduce of %s returned %s, want %s", String(NewSlice(test.input)), String(got), String(test.want))
+		}
 	}
 }
 

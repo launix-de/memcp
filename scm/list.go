@@ -3155,9 +3155,11 @@ func init_list() {
 					} else {
 						d1 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d0}, 3)
 					}
-					ctx.BindReg(d1.Reg, &d1)
-					ctx.BindReg(d1.Reg2, &d1)
-					ctx.BindReg(d1.Reg3, &d1)
+					if d1.Loc == LocRegTriple {
+						ctx.BindReg(d1.Reg, &d1)
+						ctx.BindReg(d1.Reg2, &d1)
+						ctx.BindReg(d1.Reg3, &d1)
+					}
 					ctx.StabilizeDescForControlFlow(&d1)
 					ctx.FreeDesc(&d0)
 					d2 = args[1]
@@ -3804,9 +3806,11 @@ func init_list() {
 					} else {
 						d1 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d0}, 3)
 					}
-					ctx.BindReg(d1.Reg, &d1)
-					ctx.BindReg(d1.Reg2, &d1)
-					ctx.BindReg(d1.Reg3, &d1)
+					if d1.Loc == LocRegTriple {
+						ctx.BindReg(d1.Reg, &d1)
+						ctx.BindReg(d1.Reg2, &d1)
+						ctx.BindReg(d1.Reg3, &d1)
+					}
 					ctx.StabilizeDescForControlFlow(&d1)
 					ctx.FreeDesc(&d0)
 					d2 = args[1]
@@ -4578,9 +4582,11 @@ func init_list() {
 					} else {
 						d4 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d3}, 3)
 					}
-					ctx.BindReg(d4.Reg, &d4)
-					ctx.BindReg(d4.Reg2, &d4)
-					ctx.BindReg(d4.Reg3, &d4)
+					if d4.Loc == LocRegTriple {
+						ctx.BindReg(d4.Reg, &d4)
+						ctx.BindReg(d4.Reg2, &d4)
+						ctx.BindReg(d4.Reg3, &d4)
+					}
 					ctx.StabilizeDescForControlFlow(&d4)
 					ctx.FreeDesc(&d3)
 					d5 = args[1]
@@ -6663,9 +6669,11 @@ func init_list() {
 					} else {
 						d3 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d2}, 3)
 					}
-					ctx.BindReg(d3.Reg, &d3)
-					ctx.BindReg(d3.Reg2, &d3)
-					ctx.BindReg(d3.Reg3, &d3)
+					if d3.Loc == LocRegTriple {
+						ctx.BindReg(d3.Reg, &d3)
+						ctx.BindReg(d3.Reg2, &d3)
+						ctx.BindReg(d3.Reg3, &d3)
+					}
 					ctx.StabilizeDescForControlFlow(&d3)
 					ctx.FreeDesc(&d2)
 					var d4 JITValueDesc
@@ -7269,9 +7277,11 @@ func init_list() {
 				} else {
 					d3 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d2}, 3)
 				}
-				ctx.BindReg(d3.Reg, &d3)
-				ctx.BindReg(d3.Reg2, &d3)
-				ctx.BindReg(d3.Reg3, &d3)
+				if d3.Loc == LocRegTriple {
+					ctx.BindReg(d3.Reg, &d3)
+					ctx.BindReg(d3.Reg2, &d3)
+					ctx.BindReg(d3.Reg3, &d3)
+				}
 				ctx.FreeDesc(&d2)
 				callResults4 := JITEmitGoCallResults(ctx, GoFuncAddr(JITCloneScmerSlice), []JITValueDesc{d3}, []uint8{3}, []uint8{1})
 				d5 := callResults4[0]
@@ -7538,9 +7548,11 @@ func init_list() {
 					} else {
 						d7 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d6}, 3)
 					}
-					ctx.BindReg(d7.Reg, &d7)
-					ctx.BindReg(d7.Reg2, &d7)
-					ctx.BindReg(d7.Reg3, &d7)
+					if d7.Loc == LocRegTriple {
+						ctx.BindReg(d7.Reg, &d7)
+						ctx.BindReg(d7.Reg2, &d7)
+						ctx.BindReg(d7.Reg3, &d7)
+					}
 					ctx.FreeDesc(&d6)
 					callResults8 := JITEmitGoCallResults(ctx, GoFuncAddr(JITCloneScmerSlice), []JITValueDesc{d7}, []uint8{3}, []uint8{1})
 					d9 = callResults8[0]
@@ -9983,9 +9995,11 @@ func init_list() {
 					} else {
 						d1 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d0}, 3)
 					}
-					ctx.BindReg(d1.Reg, &d1)
-					ctx.BindReg(d1.Reg2, &d1)
-					ctx.BindReg(d1.Reg3, &d1)
+					if d1.Loc == LocRegTriple {
+						ctx.BindReg(d1.Reg, &d1)
+						ctx.BindReg(d1.Reg2, &d1)
+						ctx.BindReg(d1.Reg3, &d1)
+					}
 					ctx.StabilizeDescForControlFlow(&d1)
 					ctx.FreeDesc(&d0)
 					var d2 JITValueDesc
@@ -10343,9 +10357,11 @@ func init_list() {
 					} else {
 						d1 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d0}, 3)
 					}
-					ctx.BindReg(d1.Reg, &d1)
-					ctx.BindReg(d1.Reg2, &d1)
-					ctx.BindReg(d1.Reg3, &d1)
+					if d1.Loc == LocRegTriple {
+						ctx.BindReg(d1.Reg, &d1)
+						ctx.BindReg(d1.Reg2, &d1)
+						ctx.BindReg(d1.Reg3, &d1)
+					}
 					ctx.StabilizeDescForControlFlow(&d1)
 					ctx.FreeDesc(&d0)
 					var d2 JITValueDesc
@@ -10798,9 +10814,11 @@ func init_list() {
 					} else {
 						d1 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d0}, 3)
 					}
-					ctx.BindReg(d1.Reg, &d1)
-					ctx.BindReg(d1.Reg2, &d1)
-					ctx.BindReg(d1.Reg3, &d1)
+					if d1.Loc == LocRegTriple {
+						ctx.BindReg(d1.Reg, &d1)
+						ctx.BindReg(d1.Reg2, &d1)
+						ctx.BindReg(d1.Reg3, &d1)
+					}
 					ctx.StabilizeDescForControlFlow(&d1)
 					ctx.FreeDesc(&d0)
 					var d2 JITValueDesc
@@ -11505,9 +11523,11 @@ func init_list() {
 					} else {
 						d31 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d30}, 3)
 					}
-					ctx.BindReg(d31.Reg, &d31)
-					ctx.BindReg(d31.Reg2, &d31)
-					ctx.BindReg(d31.Reg3, &d31)
+					if d31.Loc == LocRegTriple {
+						ctx.BindReg(d31.Reg, &d31)
+						ctx.BindReg(d31.Reg2, &d31)
+						ctx.BindReg(d31.Reg3, &d31)
+					}
 					ctx.StabilizeDescForControlFlow(&d31)
 					ctx.FreeDesc(&d30)
 					if ps.General {
@@ -12089,9 +12109,11 @@ func init_list() {
 					} else {
 						d88 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d86}, 3)
 					}
-					ctx.BindReg(d88.Reg, &d88)
-					ctx.BindReg(d88.Reg2, &d88)
-					ctx.BindReg(d88.Reg3, &d88)
+					if d88.Loc == LocRegTriple {
+						ctx.BindReg(d88.Reg, &d88)
+						ctx.BindReg(d88.Reg2, &d88)
+						ctx.BindReg(d88.Reg3, &d88)
+					}
 					ctx.FreeDesc(&d86)
 					var d89 JITValueDesc
 					if d88.SliceSizeKnown {
@@ -13773,9 +13795,11 @@ func init_list() {
 					} else {
 						d268 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d266}, 3)
 					}
-					ctx.BindReg(d268.Reg, &d268)
-					ctx.BindReg(d268.Reg2, &d268)
-					ctx.BindReg(d268.Reg3, &d268)
+					if d268.Loc == LocRegTriple {
+						ctx.BindReg(d268.Reg, &d268)
+						ctx.BindReg(d268.Reg2, &d268)
+						ctx.BindReg(d268.Reg3, &d268)
+					}
 					ctx.StabilizeDescForControlFlow(&d268)
 					ctx.FreeDesc(&d266)
 					var d269 JITValueDesc
@@ -15501,9 +15525,11 @@ func init_list() {
 					} else {
 						d37 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d36}, 3)
 					}
-					ctx.BindReg(d37.Reg, &d37)
-					ctx.BindReg(d37.Reg2, &d37)
-					ctx.BindReg(d37.Reg3, &d37)
+					if d37.Loc == LocRegTriple {
+						ctx.BindReg(d37.Reg, &d37)
+						ctx.BindReg(d37.Reg2, &d37)
+						ctx.BindReg(d37.Reg3, &d37)
+					}
 					ctx.StabilizeDescForControlFlow(&d37)
 					ctx.FreeDesc(&d36)
 					if ps.General {
@@ -16238,9 +16264,11 @@ func init_list() {
 					} else {
 						d111 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d109}, 3)
 					}
-					ctx.BindReg(d111.Reg, &d111)
-					ctx.BindReg(d111.Reg2, &d111)
-					ctx.BindReg(d111.Reg3, &d111)
+					if d111.Loc == LocRegTriple {
+						ctx.BindReg(d111.Reg, &d111)
+						ctx.BindReg(d111.Reg2, &d111)
+						ctx.BindReg(d111.Reg3, &d111)
+					}
 					ctx.FreeDesc(&d109)
 					var d112 JITValueDesc
 					if d111.SliceSizeKnown {
@@ -17408,9 +17436,11 @@ func init_list() {
 					} else {
 						d227 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d225}, 3)
 					}
-					ctx.BindReg(d227.Reg, &d227)
-					ctx.BindReg(d227.Reg2, &d227)
-					ctx.BindReg(d227.Reg3, &d227)
+					if d227.Loc == LocRegTriple {
+						ctx.BindReg(d227.Reg, &d227)
+						ctx.BindReg(d227.Reg2, &d227)
+						ctx.BindReg(d227.Reg3, &d227)
+					}
 					ctx.FreeDesc(&d225)
 					callResults228 := JITEmitGoCallResults(ctx, GoFuncAddr(JITAppendScmerSlice), []JITValueDesc{d4, d227}, []uint8{3}, []uint8{1})
 					d229 = callResults228[0]
@@ -18401,9 +18431,11 @@ func init_list() {
 					} else {
 						d49 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d48}, 3)
 					}
-					ctx.BindReg(d49.Reg, &d49)
-					ctx.BindReg(d49.Reg2, &d49)
-					ctx.BindReg(d49.Reg3, &d49)
+					if d49.Loc == LocRegTriple {
+						ctx.BindReg(d49.Reg, &d49)
+						ctx.BindReg(d49.Reg2, &d49)
+						ctx.BindReg(d49.Reg3, &d49)
+					}
 					ctx.StabilizeDescForControlFlow(&d49)
 					ctx.FreeDesc(&d48)
 					if ps.General {
@@ -19230,9 +19262,11 @@ func init_list() {
 					} else {
 						d131 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d129}, 3)
 					}
-					ctx.BindReg(d131.Reg, &d131)
-					ctx.BindReg(d131.Reg2, &d131)
-					ctx.BindReg(d131.Reg3, &d131)
+					if d131.Loc == LocRegTriple {
+						ctx.BindReg(d131.Reg, &d131)
+						ctx.BindReg(d131.Reg2, &d131)
+						ctx.BindReg(d131.Reg3, &d131)
+					}
 					ctx.FreeDesc(&d129)
 					var d132 JITValueDesc
 					if d131.SliceSizeKnown {
@@ -20492,9 +20526,11 @@ func init_list() {
 					} else {
 						d255 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d253}, 3)
 					}
-					ctx.BindReg(d255.Reg, &d255)
-					ctx.BindReg(d255.Reg2, &d255)
-					ctx.BindReg(d255.Reg3, &d255)
+					if d255.Loc == LocRegTriple {
+						ctx.BindReg(d255.Reg, &d255)
+						ctx.BindReg(d255.Reg2, &d255)
+						ctx.BindReg(d255.Reg3, &d255)
+					}
 					ctx.StabilizeDescForControlFlow(&d255)
 					ctx.FreeDesc(&d253)
 					var d256 JITValueDesc
@@ -26864,9 +26900,11 @@ func init_list() {
 					} else {
 						d3 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d2}, 3)
 					}
-					ctx.BindReg(d3.Reg, &d3)
-					ctx.BindReg(d3.Reg2, &d3)
-					ctx.BindReg(d3.Reg3, &d3)
+					if d3.Loc == LocRegTriple {
+						ctx.BindReg(d3.Reg, &d3)
+						ctx.BindReg(d3.Reg2, &d3)
+						ctx.BindReg(d3.Reg3, &d3)
+					}
 					ctx.StabilizeDescForControlFlow(&d3)
 					ctx.FreeDesc(&d2)
 					var d4 JITValueDesc
@@ -27857,9 +27895,11 @@ func init_list() {
 					} else {
 						d4 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d3}, 3)
 					}
-					ctx.BindReg(d4.Reg, &d4)
-					ctx.BindReg(d4.Reg2, &d4)
-					ctx.BindReg(d4.Reg3, &d4)
+					if d4.Loc == LocRegTriple {
+						ctx.BindReg(d4.Reg, &d4)
+						ctx.BindReg(d4.Reg2, &d4)
+						ctx.BindReg(d4.Reg3, &d4)
+					}
 					ctx.StabilizeDescForControlFlow(&d4)
 					ctx.FreeDesc(&d3)
 					var d5 JITValueDesc
@@ -29361,9 +29401,11 @@ func init_list() {
 					} else {
 						d3 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d2}, 3)
 					}
-					ctx.BindReg(d3.Reg, &d3)
-					ctx.BindReg(d3.Reg2, &d3)
-					ctx.BindReg(d3.Reg3, &d3)
+					if d3.Loc == LocRegTriple {
+						ctx.BindReg(d3.Reg, &d3)
+						ctx.BindReg(d3.Reg2, &d3)
+						ctx.BindReg(d3.Reg3, &d3)
+					}
 					ctx.StabilizeDescForControlFlow(&d3)
 					ctx.FreeDesc(&d2)
 					d4 = args[1]
@@ -31058,9 +31100,11 @@ func init_list() {
 					} else {
 						d3 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d2}, 3)
 					}
-					ctx.BindReg(d3.Reg, &d3)
-					ctx.BindReg(d3.Reg2, &d3)
-					ctx.BindReg(d3.Reg3, &d3)
+					if d3.Loc == LocRegTriple {
+						ctx.BindReg(d3.Reg, &d3)
+						ctx.BindReg(d3.Reg2, &d3)
+						ctx.BindReg(d3.Reg3, &d3)
+					}
 					ctx.StabilizeDescForControlFlow(&d3)
 					ctx.FreeDesc(&d2)
 					var d4 JITValueDesc
@@ -32045,9 +32089,11 @@ func init_list() {
 					} else {
 						d3 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d2}, 3)
 					}
-					ctx.BindReg(d3.Reg, &d3)
-					ctx.BindReg(d3.Reg2, &d3)
-					ctx.BindReg(d3.Reg3, &d3)
+					if d3.Loc == LocRegTriple {
+						ctx.BindReg(d3.Reg, &d3)
+						ctx.BindReg(d3.Reg2, &d3)
+						ctx.BindReg(d3.Reg3, &d3)
+					}
 					ctx.StabilizeDescForControlFlow(&d3)
 					ctx.FreeDesc(&d2)
 					var d4 JITValueDesc
@@ -32957,9 +33003,11 @@ func init_list() {
 					} else {
 						d4 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d3}, 3)
 					}
-					ctx.BindReg(d4.Reg, &d4)
-					ctx.BindReg(d4.Reg2, &d4)
-					ctx.BindReg(d4.Reg3, &d4)
+					if d4.Loc == LocRegTriple {
+						ctx.BindReg(d4.Reg, &d4)
+						ctx.BindReg(d4.Reg2, &d4)
+						ctx.BindReg(d4.Reg3, &d4)
+					}
 					ctx.StabilizeDescForControlFlow(&d4)
 					ctx.FreeDesc(&d3)
 					d5 = args[1]
@@ -40436,9 +40484,11 @@ func init_list() {
 					} else {
 						d101 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d100}, 3)
 					}
-					ctx.BindReg(d101.Reg, &d101)
-					ctx.BindReg(d101.Reg2, &d101)
-					ctx.BindReg(d101.Reg3, &d101)
+					if d101.Loc == LocRegTriple {
+						ctx.BindReg(d101.Reg, &d101)
+						ctx.BindReg(d101.Reg2, &d101)
+						ctx.BindReg(d101.Reg3, &d101)
+					}
 					ctx.StabilizeDescForControlFlow(&d101)
 					ctx.FreeDesc(&d100)
 					var d102 JITValueDesc
@@ -44342,9 +44392,11 @@ func init_list() {
 					} else {
 						d3 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d2}, 3)
 					}
-					ctx.BindReg(d3.Reg, &d3)
-					ctx.BindReg(d3.Reg2, &d3)
-					ctx.BindReg(d3.Reg3, &d3)
+					if d3.Loc == LocRegTriple {
+						ctx.BindReg(d3.Reg, &d3)
+						ctx.BindReg(d3.Reg2, &d3)
+						ctx.BindReg(d3.Reg3, &d3)
+					}
 					ctx.StabilizeDescForControlFlow(&d3)
 					ctx.FreeDesc(&d2)
 					var d4 JITValueDesc
@@ -45364,9 +45416,11 @@ func init_list() {
 					} else {
 						d4 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d3}, 3)
 					}
-					ctx.BindReg(d4.Reg, &d4)
-					ctx.BindReg(d4.Reg2, &d4)
-					ctx.BindReg(d4.Reg3, &d4)
+					if d4.Loc == LocRegTriple {
+						ctx.BindReg(d4.Reg, &d4)
+						ctx.BindReg(d4.Reg2, &d4)
+						ctx.BindReg(d4.Reg3, &d4)
+					}
 					ctx.StabilizeDescForControlFlow(&d4)
 					ctx.FreeDesc(&d3)
 					d5 = args[1]
@@ -52597,9 +52651,11 @@ func init_list() {
 					} else {
 						d3 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d2}, 3)
 					}
-					ctx.BindReg(d3.Reg, &d3)
-					ctx.BindReg(d3.Reg2, &d3)
-					ctx.BindReg(d3.Reg3, &d3)
+					if d3.Loc == LocRegTriple {
+						ctx.BindReg(d3.Reg, &d3)
+						ctx.BindReg(d3.Reg2, &d3)
+						ctx.BindReg(d3.Reg3, &d3)
+					}
 					ctx.StabilizeDescForControlFlow(&d3)
 					ctx.FreeDesc(&d2)
 					var d4 JITValueDesc
@@ -55771,9 +55827,11 @@ func init_list() {
 					} else {
 						d10 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d9}, 3)
 					}
-					ctx.BindReg(d10.Reg, &d10)
-					ctx.BindReg(d10.Reg2, &d10)
-					ctx.BindReg(d10.Reg3, &d10)
+					if d10.Loc == LocRegTriple {
+						ctx.BindReg(d10.Reg, &d10)
+						ctx.BindReg(d10.Reg2, &d10)
+						ctx.BindReg(d10.Reg3, &d10)
+					}
 					ctx.StabilizeDescForControlFlow(&d10)
 					ctx.FreeDesc(&d9)
 					var d11 JITValueDesc
@@ -56239,9 +56297,11 @@ func init_list() {
 					} else {
 						d61 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d59}, 3)
 					}
-					ctx.BindReg(d61.Reg, &d61)
-					ctx.BindReg(d61.Reg2, &d61)
-					ctx.BindReg(d61.Reg3, &d61)
+					if d61.Loc == LocRegTriple {
+						ctx.BindReg(d61.Reg, &d61)
+						ctx.BindReg(d61.Reg2, &d61)
+						ctx.BindReg(d61.Reg3, &d61)
+					}
 					ctx.FreeDesc(&d59)
 					if ps.General {
 						ctx.SyncDesc(&d15)
@@ -58239,9 +58299,11 @@ func init_list() {
 					} else {
 						d276 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d274}, 3)
 					}
-					ctx.BindReg(d276.Reg, &d276)
-					ctx.BindReg(d276.Reg2, &d276)
-					ctx.BindReg(d276.Reg3, &d276)
+					if d276.Loc == LocRegTriple {
+						ctx.BindReg(d276.Reg, &d276)
+						ctx.BindReg(d276.Reg2, &d276)
+						ctx.BindReg(d276.Reg3, &d276)
+					}
 					ctx.StabilizeDescForControlFlow(&d276)
 					ctx.FreeDesc(&d274)
 					var d277 JITValueDesc
@@ -62033,9 +62095,11 @@ func init_list() {
 					} else {
 						d4 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d3}, 3)
 					}
-					ctx.BindReg(d4.Reg, &d4)
-					ctx.BindReg(d4.Reg2, &d4)
-					ctx.BindReg(d4.Reg3, &d4)
+					if d4.Loc == LocRegTriple {
+						ctx.BindReg(d4.Reg, &d4)
+						ctx.BindReg(d4.Reg2, &d4)
+						ctx.BindReg(d4.Reg3, &d4)
+					}
 					ctx.StabilizeDescForControlFlow(&d4)
 					ctx.FreeDesc(&d3)
 					d5 = args[1]
@@ -63729,9 +63793,11 @@ func init_list() {
 					} else {
 						d4 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d3}, 3)
 					}
-					ctx.BindReg(d4.Reg, &d4)
-					ctx.BindReg(d4.Reg2, &d4)
-					ctx.BindReg(d4.Reg3, &d4)
+					if d4.Loc == LocRegTriple {
+						ctx.BindReg(d4.Reg, &d4)
+						ctx.BindReg(d4.Reg2, &d4)
+						ctx.BindReg(d4.Reg3, &d4)
+					}
 					ctx.StabilizeDescForControlFlow(&d4)
 					ctx.FreeDesc(&d3)
 					d5 = args[1]
@@ -65297,9 +65363,11 @@ func init_list() {
 					} else {
 						d4 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d3}, 3)
 					}
-					ctx.BindReg(d4.Reg, &d4)
-					ctx.BindReg(d4.Reg2, &d4)
-					ctx.BindReg(d4.Reg3, &d4)
+					if d4.Loc == LocRegTriple {
+						ctx.BindReg(d4.Reg, &d4)
+						ctx.BindReg(d4.Reg2, &d4)
+						ctx.BindReg(d4.Reg3, &d4)
+					}
 					ctx.StabilizeDescForControlFlow(&d4)
 					ctx.FreeDesc(&d3)
 					d5 = args[1]
@@ -68940,9 +69008,11 @@ func init_list() {
 					} else {
 						d9 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d8}, 3)
 					}
-					ctx.BindReg(d9.Reg, &d9)
-					ctx.BindReg(d9.Reg2, &d9)
-					ctx.BindReg(d9.Reg3, &d9)
+					if d9.Loc == LocRegTriple {
+						ctx.BindReg(d9.Reg, &d9)
+						ctx.BindReg(d9.Reg2, &d9)
+						ctx.BindReg(d9.Reg3, &d9)
+					}
 					ctx.StabilizeDescForControlFlow(&d9)
 					ctx.FreeDesc(&d8)
 					d10 = args[1]
@@ -72457,9 +72527,11 @@ func init_list() {
 					} else {
 						d4 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d3}, 3)
 					}
-					ctx.BindReg(d4.Reg, &d4)
-					ctx.BindReg(d4.Reg2, &d4)
-					ctx.BindReg(d4.Reg3, &d4)
+					if d4.Loc == LocRegTriple {
+						ctx.BindReg(d4.Reg, &d4)
+						ctx.BindReg(d4.Reg2, &d4)
+						ctx.BindReg(d4.Reg3, &d4)
+					}
 					ctx.StabilizeDescForControlFlow(&d4)
 					ctx.FreeDesc(&d3)
 					d5 = args[1]
@@ -74368,9 +74440,11 @@ func init_list() {
 				} else {
 					d9 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d8}, 3)
 				}
-				ctx.BindReg(d9.Reg, &d9)
-				ctx.BindReg(d9.Reg2, &d9)
-				ctx.BindReg(d9.Reg3, &d9)
+				if d9.Loc == LocRegTriple {
+					ctx.BindReg(d9.Reg, &d9)
+					ctx.BindReg(d9.Reg2, &d9)
+					ctx.BindReg(d9.Reg3, &d9)
+				}
 				ctx.StabilizeDescForControlFlow(&d9)
 				ctx.FreeDesc(&d8)
 				ctx.ReclaimUntrackedRegs()
@@ -74448,9 +74522,11 @@ func init_list() {
 				} else {
 					d14 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d13}, 3)
 				}
-				ctx.BindReg(d14.Reg, &d14)
-				ctx.BindReg(d14.Reg2, &d14)
-				ctx.BindReg(d14.Reg3, &d14)
+				if d14.Loc == LocRegTriple {
+					ctx.BindReg(d14.Reg, &d14)
+					ctx.BindReg(d14.Reg2, &d14)
+					ctx.BindReg(d14.Reg3, &d14)
+				}
 				ctx.StabilizeDescForControlFlow(&d14)
 				ctx.FreeDesc(&d13)
 				ctx.ReclaimUntrackedRegs()
@@ -75843,9 +75919,11 @@ func init_list() {
 				} else {
 					d9 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d8}, 3)
 				}
-				ctx.BindReg(d9.Reg, &d9)
-				ctx.BindReg(d9.Reg2, &d9)
-				ctx.BindReg(d9.Reg3, &d9)
+				if d9.Loc == LocRegTriple {
+					ctx.BindReg(d9.Reg, &d9)
+					ctx.BindReg(d9.Reg2, &d9)
+					ctx.BindReg(d9.Reg3, &d9)
+				}
 				ctx.StabilizeDescForControlFlow(&d9)
 				ctx.FreeDesc(&d8)
 				ctx.ReclaimUntrackedRegs()
@@ -75923,9 +76001,11 @@ func init_list() {
 				} else {
 					d14 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d13}, 3)
 				}
-				ctx.BindReg(d14.Reg, &d14)
-				ctx.BindReg(d14.Reg2, &d14)
-				ctx.BindReg(d14.Reg3, &d14)
+				if d14.Loc == LocRegTriple {
+					ctx.BindReg(d14.Reg, &d14)
+					ctx.BindReg(d14.Reg2, &d14)
+					ctx.BindReg(d14.Reg3, &d14)
+				}
 				ctx.StabilizeDescForControlFlow(&d14)
 				ctx.FreeDesc(&d13)
 				ctx.ReclaimUntrackedRegs()
@@ -77372,9 +77452,11 @@ func init_list() {
 					} else {
 						d4 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d3}, 3)
 					}
-					ctx.BindReg(d4.Reg, &d4)
-					ctx.BindReg(d4.Reg2, &d4)
-					ctx.BindReg(d4.Reg3, &d4)
+					if d4.Loc == LocRegTriple {
+						ctx.BindReg(d4.Reg, &d4)
+						ctx.BindReg(d4.Reg2, &d4)
+						ctx.BindReg(d4.Reg3, &d4)
+					}
 					ctx.StabilizeDescForControlFlow(&d4)
 					ctx.FreeDesc(&d3)
 					d5 = args[1]
@@ -108501,9 +108583,11 @@ func init_list() {
 					} else {
 						d3 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d2}, 3)
 					}
-					ctx.BindReg(d3.Reg, &d3)
-					ctx.BindReg(d3.Reg2, &d3)
-					ctx.BindReg(d3.Reg3, &d3)
+					if d3.Loc == LocRegTriple {
+						ctx.BindReg(d3.Reg, &d3)
+						ctx.BindReg(d3.Reg2, &d3)
+						ctx.BindReg(d3.Reg3, &d3)
+					}
 					ctx.StabilizeDescForControlFlow(&d3)
 					ctx.FreeDesc(&d2)
 					d4 = args[1]
@@ -109722,9 +109806,11 @@ func init_list() {
 					} else {
 						d4 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d3}, 3)
 					}
-					ctx.BindReg(d4.Reg, &d4)
-					ctx.BindReg(d4.Reg2, &d4)
-					ctx.BindReg(d4.Reg3, &d4)
+					if d4.Loc == LocRegTriple {
+						ctx.BindReg(d4.Reg, &d4)
+						ctx.BindReg(d4.Reg2, &d4)
+						ctx.BindReg(d4.Reg3, &d4)
+					}
 					ctx.StabilizeDescForControlFlow(&d4)
 					ctx.FreeDesc(&d3)
 					d5 = args[1]
@@ -111335,9 +111421,11 @@ func init_list() {
 					} else {
 						d3 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d2}, 3)
 					}
-					ctx.BindReg(d3.Reg, &d3)
-					ctx.BindReg(d3.Reg2, &d3)
-					ctx.BindReg(d3.Reg3, &d3)
+					if d3.Loc == LocRegTriple {
+						ctx.BindReg(d3.Reg, &d3)
+						ctx.BindReg(d3.Reg2, &d3)
+						ctx.BindReg(d3.Reg3, &d3)
+					}
 					ctx.StabilizeDescForControlFlow(&d3)
 					ctx.FreeDesc(&d2)
 					d4 = args[1]
@@ -112295,9 +112383,11 @@ func init_list() {
 					} else {
 						d3 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d2}, 3)
 					}
-					ctx.BindReg(d3.Reg, &d3)
-					ctx.BindReg(d3.Reg2, &d3)
-					ctx.BindReg(d3.Reg3, &d3)
+					if d3.Loc == LocRegTriple {
+						ctx.BindReg(d3.Reg, &d3)
+						ctx.BindReg(d3.Reg2, &d3)
+						ctx.BindReg(d3.Reg3, &d3)
+					}
 					ctx.StabilizeDescForControlFlow(&d3)
 					ctx.FreeDesc(&d2)
 					d4 = args[1]
@@ -113372,9 +113462,11 @@ func init_list() {
 					} else {
 						d7 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d6}, 3)
 					}
-					ctx.BindReg(d7.Reg, &d7)
-					ctx.BindReg(d7.Reg2, &d7)
-					ctx.BindReg(d7.Reg3, &d7)
+					if d7.Loc == LocRegTriple {
+						ctx.BindReg(d7.Reg, &d7)
+						ctx.BindReg(d7.Reg2, &d7)
+						ctx.BindReg(d7.Reg3, &d7)
+					}
 					ctx.StabilizeDescForControlFlow(&d7)
 					ctx.FreeDesc(&d6)
 					d8 = args[1]
@@ -116584,9 +116676,11 @@ func init_list() {
 					} else {
 						d7 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d6}, 3)
 					}
-					ctx.BindReg(d7.Reg, &d7)
-					ctx.BindReg(d7.Reg2, &d7)
-					ctx.BindReg(d7.Reg3, &d7)
+					if d7.Loc == LocRegTriple {
+						ctx.BindReg(d7.Reg, &d7)
+						ctx.BindReg(d7.Reg2, &d7)
+						ctx.BindReg(d7.Reg3, &d7)
+					}
 					ctx.StabilizeDescForControlFlow(&d7)
 					ctx.FreeDesc(&d6)
 					d8 = args[1]
@@ -121080,9 +121174,11 @@ func init_list() {
 					} else {
 						d41 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d40}, 3)
 					}
-					ctx.BindReg(d41.Reg, &d41)
-					ctx.BindReg(d41.Reg2, &d41)
-					ctx.BindReg(d41.Reg3, &d41)
+					if d41.Loc == LocRegTriple {
+						ctx.BindReg(d41.Reg, &d41)
+						ctx.BindReg(d41.Reg2, &d41)
+						ctx.BindReg(d41.Reg3, &d41)
+					}
 					ctx.StabilizeDescForControlFlow(&d41)
 					ctx.FreeDesc(&d40)
 					d42 = args[1]
@@ -121093,9 +121189,11 @@ func init_list() {
 					} else {
 						d43 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d42}, 3)
 					}
-					ctx.BindReg(d43.Reg, &d43)
-					ctx.BindReg(d43.Reg2, &d43)
-					ctx.BindReg(d43.Reg3, &d43)
+					if d43.Loc == LocRegTriple {
+						ctx.BindReg(d43.Reg, &d43)
+						ctx.BindReg(d43.Reg2, &d43)
+						ctx.BindReg(d43.Reg3, &d43)
+					}
 					ctx.StabilizeDescForControlFlow(&d43)
 					ctx.FreeDesc(&d42)
 					d44 = args[2]
@@ -128042,9 +128140,11 @@ func init_list() {
 					} else {
 						d7 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d6}, 3)
 					}
-					ctx.BindReg(d7.Reg, &d7)
-					ctx.BindReg(d7.Reg2, &d7)
-					ctx.BindReg(d7.Reg3, &d7)
+					if d7.Loc == LocRegTriple {
+						ctx.BindReg(d7.Reg, &d7)
+						ctx.BindReg(d7.Reg2, &d7)
+						ctx.BindReg(d7.Reg3, &d7)
+					}
 					ctx.StabilizeDescForControlFlow(&d7)
 					ctx.FreeDesc(&d6)
 					d8 = args[1]
@@ -132483,9 +132583,11 @@ func init_list() {
 					} else {
 						d7 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d6}, 3)
 					}
-					ctx.BindReg(d7.Reg, &d7)
-					ctx.BindReg(d7.Reg2, &d7)
-					ctx.BindReg(d7.Reg3, &d7)
+					if d7.Loc == LocRegTriple {
+						ctx.BindReg(d7.Reg, &d7)
+						ctx.BindReg(d7.Reg2, &d7)
+						ctx.BindReg(d7.Reg3, &d7)
+					}
 					ctx.StabilizeDescForControlFlow(&d7)
 					ctx.FreeDesc(&d6)
 					d8 = args[1]
@@ -136770,9 +136872,11 @@ func init_list() {
 					} else {
 						d4 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d3}, 3)
 					}
-					ctx.BindReg(d4.Reg, &d4)
-					ctx.BindReg(d4.Reg2, &d4)
-					ctx.BindReg(d4.Reg3, &d4)
+					if d4.Loc == LocRegTriple {
+						ctx.BindReg(d4.Reg, &d4)
+						ctx.BindReg(d4.Reg2, &d4)
+						ctx.BindReg(d4.Reg3, &d4)
+					}
 					ctx.StabilizeDescForControlFlow(&d4)
 					ctx.FreeDesc(&d3)
 					d5 = args[1]
@@ -139065,9 +139169,11 @@ func init_list() {
 					} else {
 						d3 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d2}, 3)
 					}
-					ctx.BindReg(d3.Reg, &d3)
-					ctx.BindReg(d3.Reg2, &d3)
-					ctx.BindReg(d3.Reg3, &d3)
+					if d3.Loc == LocRegTriple {
+						ctx.BindReg(d3.Reg, &d3)
+						ctx.BindReg(d3.Reg2, &d3)
+						ctx.BindReg(d3.Reg3, &d3)
+					}
 					ctx.StabilizeDescForControlFlow(&d3)
 					ctx.FreeDesc(&d2)
 					d4 = args[2]
@@ -140081,9 +140187,11 @@ func init_list() {
 					} else {
 						d4 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d3}, 3)
 					}
-					ctx.BindReg(d4.Reg, &d4)
-					ctx.BindReg(d4.Reg2, &d4)
-					ctx.BindReg(d4.Reg3, &d4)
+					if d4.Loc == LocRegTriple {
+						ctx.BindReg(d4.Reg, &d4)
+						ctx.BindReg(d4.Reg2, &d4)
+						ctx.BindReg(d4.Reg3, &d4)
+					}
 					ctx.StabilizeDescForControlFlow(&d4)
 					ctx.FreeDesc(&d3)
 					d5 = args[1]
@@ -140813,9 +140921,11 @@ func init_list() {
 					} else {
 						d94 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d86}, 3)
 					}
-					ctx.BindReg(d94.Reg, &d94)
-					ctx.BindReg(d94.Reg2, &d94)
-					ctx.BindReg(d94.Reg3, &d94)
+					if d94.Loc == LocRegTriple {
+						ctx.BindReg(d94.Reg, &d94)
+						ctx.BindReg(d94.Reg2, &d94)
+						ctx.BindReg(d94.Reg3, &d94)
+					}
 					ctx.FreeDesc(&d86)
 					callResults95 := JITEmitGoCallResults(ctx, GoFuncAddr(JITAppendScmerSlice), []JITValueDesc{d1, d94}, []uint8{3}, []uint8{1})
 					d96 = callResults95[0]
@@ -142474,9 +142584,11 @@ func init_list() {
 					} else {
 						d148 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d140}, 3)
 					}
-					ctx.BindReg(d148.Reg, &d148)
-					ctx.BindReg(d148.Reg2, &d148)
-					ctx.BindReg(d148.Reg3, &d148)
+					if d148.Loc == LocRegTriple {
+						ctx.BindReg(d148.Reg, &d148)
+						ctx.BindReg(d148.Reg2, &d148)
+						ctx.BindReg(d148.Reg3, &d148)
+					}
 					ctx.FreeDesc(&d140)
 					callResults149 := JITEmitGoCallResults(ctx, GoFuncAddr(JITAppendScmerSlice), []JITValueDesc{d2, d148}, []uint8{3}, []uint8{1})
 					d150 = callResults149[0]
@@ -143029,9 +143141,11 @@ func init_list() {
 					} else {
 						d4 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d3}, 3)
 					}
-					ctx.BindReg(d4.Reg, &d4)
-					ctx.BindReg(d4.Reg2, &d4)
-					ctx.BindReg(d4.Reg3, &d4)
+					if d4.Loc == LocRegTriple {
+						ctx.BindReg(d4.Reg, &d4)
+						ctx.BindReg(d4.Reg2, &d4)
+						ctx.BindReg(d4.Reg3, &d4)
+					}
 					ctx.StabilizeDescForControlFlow(&d4)
 					ctx.FreeDesc(&d3)
 					d5 = args[1]
@@ -143491,9 +143605,11 @@ func init_list() {
 					} else {
 						d63 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d55}, 3)
 					}
-					ctx.BindReg(d63.Reg, &d63)
-					ctx.BindReg(d63.Reg2, &d63)
-					ctx.BindReg(d63.Reg3, &d63)
+					if d63.Loc == LocRegTriple {
+						ctx.BindReg(d63.Reg, &d63)
+						ctx.BindReg(d63.Reg2, &d63)
+						ctx.BindReg(d63.Reg3, &d63)
+					}
 					ctx.StabilizeDescForControlFlow(&d63)
 					ctx.FreeDesc(&d55)
 					var d64 JITValueDesc
@@ -148463,9 +148579,11 @@ func init_list() {
 				} else {
 					d1 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d0}, 3)
 				}
-				ctx.BindReg(d1.Reg, &d1)
-				ctx.BindReg(d1.Reg2, &d1)
-				ctx.BindReg(d1.Reg3, &d1)
+				if d1.Loc == LocRegTriple {
+					ctx.BindReg(d1.Reg, &d1)
+					ctx.BindReg(d1.Reg2, &d1)
+					ctx.BindReg(d1.Reg3, &d1)
+				}
 				ctx.FreeDesc(&d0)
 				d2 := jitMaterializeVirtualGoSlice(ctx, args[1:])
 				callResults3 := JITEmitGoCallResults(ctx, GoFuncAddr(JITAppendScmerSlice), []JITValueDesc{d1, d2}, []uint8{3}, []uint8{1})
@@ -148722,9 +148840,11 @@ func init_list() {
 					} else {
 						d5 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d4}, 3)
 					}
-					ctx.BindReg(d5.Reg, &d5)
-					ctx.BindReg(d5.Reg2, &d5)
-					ctx.BindReg(d5.Reg3, &d5)
+					if d5.Loc == LocRegTriple {
+						ctx.BindReg(d5.Reg, &d5)
+						ctx.BindReg(d5.Reg2, &d5)
+						ctx.BindReg(d5.Reg3, &d5)
+					}
 					ctx.StabilizeDescForControlFlow(&d5)
 					ctx.FreeDesc(&d4)
 					d6 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(len(args) - 1))}
@@ -151696,9 +151816,11 @@ func init_list() {
 					} else {
 						d65 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d64}, 3)
 					}
-					ctx.BindReg(d65.Reg, &d65)
-					ctx.BindReg(d65.Reg2, &d65)
-					ctx.BindReg(d65.Reg3, &d65)
+					if d65.Loc == LocRegTriple {
+						ctx.BindReg(d65.Reg, &d65)
+						ctx.BindReg(d65.Reg2, &d65)
+						ctx.BindReg(d65.Reg3, &d65)
+					}
 					ctx.FreeDesc(&d64)
 					stackArray66 = ctx.AllocStack(int32(0))
 					_ = stackArray66
@@ -152006,9 +152128,11 @@ func init_list() {
 					} else {
 						d82 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d81}, 3)
 					}
-					ctx.BindReg(d82.Reg, &d82)
-					ctx.BindReg(d82.Reg2, &d82)
-					ctx.BindReg(d82.Reg3, &d82)
+					if d82.Loc == LocRegTriple {
+						ctx.BindReg(d82.Reg, &d82)
+						ctx.BindReg(d82.Reg2, &d82)
+						ctx.BindReg(d82.Reg3, &d82)
+					}
 					ctx.FreeDesc(&d81)
 					stackArray83 = ctx.AllocStack(int32(0))
 					_ = stackArray83
@@ -153191,9 +153315,11 @@ func init_list() {
 					} else {
 						d221 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d219}, 3)
 					}
-					ctx.BindReg(d221.Reg, &d221)
-					ctx.BindReg(d221.Reg2, &d221)
-					ctx.BindReg(d221.Reg3, &d221)
+					if d221.Loc == LocRegTriple {
+						ctx.BindReg(d221.Reg, &d221)
+						ctx.BindReg(d221.Reg2, &d221)
+						ctx.BindReg(d221.Reg3, &d221)
+					}
 					ctx.StabilizeDescForControlFlow(&d221)
 					ctx.FreeDesc(&d219)
 					var d222 JITValueDesc
@@ -171849,9 +171975,11 @@ func init_list() {
 					} else {
 						d2502 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d2500}, 3)
 					}
-					ctx.BindReg(d2502.Reg, &d2502)
-					ctx.BindReg(d2502.Reg2, &d2502)
-					ctx.BindReg(d2502.Reg3, &d2502)
+					if d2502.Loc == LocRegTriple {
+						ctx.BindReg(d2502.Reg, &d2502)
+						ctx.BindReg(d2502.Reg2, &d2502)
+						ctx.BindReg(d2502.Reg3, &d2502)
+					}
 					ctx.StabilizeDescForControlFlow(&d2502)
 					var d2503 JITValueDesc
 					if d2502.SliceSizeKnown {
@@ -185411,9 +185539,11 @@ func init_list() {
 					} else {
 						d1 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d0}, 3)
 					}
-					ctx.BindReg(d1.Reg, &d1)
-					ctx.BindReg(d1.Reg2, &d1)
-					ctx.BindReg(d1.Reg3, &d1)
+					if d1.Loc == LocRegTriple {
+						ctx.BindReg(d1.Reg, &d1)
+						ctx.BindReg(d1.Reg2, &d1)
+						ctx.BindReg(d1.Reg3, &d1)
+					}
 					ctx.StabilizeDescForControlFlow(&d1)
 					ctx.FreeDesc(&d0)
 					ctx.EnsureDesc(&d1)

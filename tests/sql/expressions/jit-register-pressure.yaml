@@ -1,0 +1,46 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: "1.0"
+  description: "SQL frontend stays native under nested JIT register pressure"
+setup:
+  - sql: "DROP TABLE IF EXISTS jit_register_pressure"
+  - sql: "CREATE TABLE jit_register_pressure (id INT PRIMARY KEY)"
+test_cases:
+  - name: "Query cache dispatcher compiles natively"
+    scm: |
+      (if (equal? (jit? (jit cached_parse)) (jit-enabled?))
+        true (error "cached_parse exhausted JIT registers"))
+  - name: "Table policy compiler and its closure compile natively"
+    scm: |
+      (if (equal? (jit? (jit sql_compile_table_policy)) (jit-enabled?))
+        true (error "sql_compile_table_policy exhausted JIT registers"))
+  - name: "Compiled policy preserves captures and catalog memoization"
+    scm: |
+      (begin
+        (define calls (newsession))
+        (calls "count" 0)
+        (define compile_policy (jit sql_compile_table_policy))
+        (define check (compile_policy (lambda (schema tbl write)
+          (begin
+            (calls "count" (+ (calls "count") 1))
+            (if (and (equal? schema "memcp-tests") (equal? tbl "jit_register_pressure"))
+              true (error "policy arguments changed"))))))
+        (check "memcp-tests" "jit_register_pressure" false)
+        (check "memcp-tests" "jit_register_pressure" false)
+        (check "memcp-tests" "jit_register_pressure" true)
+        (if (equal? (calls "count") 2) true (error "policy memoization changed")))
+  - name: "Compiled read policy still rejects access"
+    scm: |
+      (((jit sql_compile_table_policy) (lambda (schema tbl write) (error "denied")))
+        "memcp-tests" "jit_register_pressure" false)
+    expect:
+      error: true
+  - name: "Compiled write policy still rejects access"
+    scm: |
+      (((jit sql_compile_table_policy) (lambda (schema tbl write) (error "denied")))
+        "memcp-tests" "jit_register_pressure" true)
+    expect:
+      error: true
+cleanup:
+  - sql: "DROP TABLE IF EXISTS jit_register_pressure"
