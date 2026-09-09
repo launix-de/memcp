@@ -59,8 +59,9 @@ func CleanDatabase(db *database) (blobsDeleted, shardsDeleted int) {
 // safe. Missing legacy manifests are reconstructed from committed column files;
 // corrupt manifests and all ambiguous I/O failures remain a fail-closed no-op.
 func cleanBlobs(db *database) int {
-	references, complete := activeBlobReferences(db)
+	references, complete := activeBlobReferences(db, true)
 	if !complete {
+		fmt.Printf("blob cleanup %s: ownership check incomplete; retaining all blobs\n", db.Name)
 		return 0
 	}
 
@@ -75,7 +76,53 @@ func cleanBlobs(db *database) int {
 	return deleted
 }
 
-func activeBlobReferences(db *database) (map[string]struct{}, bool) {
+// BlobInventory describes listed objects, not payload readability or integrity.
+// Missing hashes are sorted for deterministic diagnostics. An incomplete scan
+// raises an error instead of returning a potentially misleading partial report.
+type BlobInventory struct {
+	Referenced   int
+	Listed       int
+	Unreferenced int
+	Missing      []string
+}
+
+// AuditBlobInventory is an explicit maintenance operation. It reads generation
+// metadata and lists object names, never fetching blob payloads or deleting data.
+// The exclusive lifecycle capability keeps publication and cleanup out of the
+// snapshot. Ordinary row reads/writes do not participate in this lock.
+func AuditBlobInventory(db *database) BlobInventory {
+	db.ensureLoaded()
+	db.persistenceLifecycle.Lock()
+	defer db.persistenceLifecycle.Unlock()
+	references, complete := activeBlobReferences(db, false)
+	if !complete {
+		panic("blob inventory: incomplete generation references for database " + db.Name)
+	}
+	result := BlobInventory{Referenced: len(references)}
+	// Keep the reference set intact: repeated backend listings must not turn a
+	// live object into an apparent orphan. The bool only records whether seen.
+	seen := make(map[string]bool, len(references))
+	for hash := range references {
+		seen[hash] = false
+	}
+	db.persistence.WalkBlobs(func(hash string) {
+		result.Listed++
+		if _, live := seen[hash]; live {
+			seen[hash] = true
+		} else {
+			result.Unreferenced++
+		}
+	})
+	for hash, present := range seen {
+		if !present {
+			result.Missing = append(result.Missing, hash)
+		}
+	}
+	sort.Strings(result.Missing)
+	return result
+}
+
+func activeBlobReferences(db *database, persistManifests bool) (map[string]struct{}, bool) {
 	db.schemalock.RLock()
 	defer db.schemalock.RUnlock()
 	references := make(map[string]struct{})
@@ -93,7 +140,7 @@ func activeBlobReferences(db *database) (map[string]struct{}, bool) {
 				if !readErr.Missing() {
 					return nil, false
 				}
-				legacyReferences, ok := backfillBlobManifest(shard)
+				legacyReferences, ok := backfillBlobManifest(shard, persistManifests)
 				if !ok {
 					return nil, false
 				}
@@ -143,8 +190,9 @@ func readBlobManifest(reader io.ReadCloser) (map[string]struct{}, bool) {
 // backfillBlobManifest upgrades one legacy active generation without loading
 // blob payloads or forcing a rebuild. It inspects only committed column files,
 // deserializes reference-bearing OverlayBlob/compute-proxy columns, and then
-// publishes the same checksummed manifest used by new generations.
-func backfillBlobManifest(shard *storageShard) (references map[string]struct{}, ok bool) {
+// optionally publishes the same checksummed manifest used by new generations.
+// Explicit inventory audits only inspect metadata and do not publish a backfill.
+func backfillBlobManifest(shard *storageShard, persistManifest bool) (references map[string]struct{}, ok bool) {
 	if shard == nil || shard.t == nil || shard.t.schema == nil {
 		return nil, false
 	}
@@ -185,7 +233,7 @@ func backfillBlobManifest(shard *storageShard) (references map[string]struct{}, 
 		}
 		appendColumnBlobReferences(storage, references, count)
 	}
-	if !tryWriteBlobManifestReferences(shard, references) {
+	if persistManifest && !tryWriteBlobManifestReferences(shard, references) {
 		return nil, false
 	}
 	return references, true

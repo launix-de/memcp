@@ -863,6 +863,9 @@ func TestOverlayBlobLoadedReferenceLifecycle(t *testing.T) {
 		t.Fatal("v1 release removed legacy owner's blob")
 	}
 	legacy.ReleaseBlobs(1) // Known build/migration ownership is unambiguous.
+	if countBlobFiles(t, "gcdb") != 1 {
+		t.Fatal("last decrement deleted blob before ownership check")
+	}
 	CleanDatabase(db)
 	if countBlobFiles(t, "gcdb") != 0 {
 		t.Fatal("last known owner failed to release blob")
