@@ -754,6 +754,14 @@ it must not be described as a derived operator crossover or removed unchecked.
 EXPLAIN diagnostics and the public default table-statistics API retain the
 table-wide feedback fingerprint so cached diagnostics refresh their estimates.
 
+Performance coverage for these guards must include changing predicates between
+cached executions, not only repetitions of a single already-learned query.
+Expensive suites excluded from ordinary SQL CI with `metadata.ci: false` can
+opt into automatic A/B with `metadata.perf_ci: true`; discovery requires a
+`threshold_ms` case. `metadata.performance_rows` supplies the suite fixture size
+unless a case overrides it. SCM cases with `threshold_ms` must use the same
+warmup, repetitions and A/B timing gate as SQL, with explicit result validation.
+
 ## Canonical Naming and Reuse
 
 Helper identities must be canonical.

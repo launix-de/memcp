@@ -1,4 +1,3 @@
-<!-- Copyright (C) 2026 Carl-Philip Hänsch; SPDX-License-Identifier: GPL-3.0-or-later -->
 # SQL Test Taxonomy
 
 SQL integration suites use descriptive lower kebab-case filenames without
@@ -15,14 +14,8 @@ sequence numbers. The directory is the stable ownership and selection unit:
 - `performance/`: explicit latency, scaling, and benchmark suites
 
 Every YAML suite is discovered recursively by `git-pre-commit`. A suite may
-opt out with `metadata.ci: false` for manual benchmarks or expensive fixtures.
-An expensive performance suite must additionally set `metadata.perf_ci: true`
-to remain part of automatic performance A/B while skipping ordinary SQL CI.
-Performance discovery requires at least one `threshold_ms` case. Suite-level
-`metadata.performance_rows` supplies the fixture size unless a case overrides it.
-SCM cases with `threshold_ms` use the same warmup, repetition and A/B gate as SQL;
-their assertions must fail explicitly or check the returned JSON result.
-Every suite must provide
+opt out only with `metadata.ci: false`, which is reserved for manual benchmarks
+that do not assert a stable CI budget. Every suite must provide
 `metadata.description`.
 
 Place a regression at the layer that owns its root cause, not at the layer
