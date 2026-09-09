@@ -1847,7 +1847,7 @@ func (t *storageShard) scan_order(access scanAccess, conditionCols []string, con
 	for i, scol := range sortcols {
 		if scol.IsString() {
 			colname := scol.String()
-			result.scols[i] = t.ColumnReaderTx(currentTx, colname)
+			result.scols[i] = t.ColumnReaderTx(currentTx, colname, false)
 			continue
 		}
 		if scol.IsProc() {
@@ -1872,7 +1872,7 @@ func (t *storageShard) scan_order(access scanAccess, conditionCols []string, con
 					txValue := scm.NewAny(currentTx)
 					largs[j] = func(uint32) scm.Scmer { return txValue }
 				} else {
-					largs[j] = t.ColumnReaderTx(currentTx, name)
+					largs[j] = t.ColumnReaderTx(currentTx, name, false)
 				}
 			}
 			procFn := scm.PrepareSerialProc(scol)
@@ -1919,7 +1919,7 @@ func (t *storageShard) scan_order(access scanAccess, conditionCols []string, con
 				continue
 			}
 			ccols[i] = t.getColumnStorageOrPanic(k, skipShardReadLock, currentTx)
-			cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx)
+			cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx, false)
 			if _, ok := ccols[i].(*StorageComputeProxy); ok {
 				cNeedsCachedReader[i] = true
 			}
@@ -1936,7 +1936,7 @@ func (t *storageShard) scan_order(access scanAccess, conditionCols []string, con
 	aMultiFuncs := make([]scm.JITStorageGetValueMultiFunc, len(acceptCols))
 	for i, column := range acceptCols {
 		acols[i] = t.getColumnStorageOrPanic(column, skipShardReadLock, currentTx)
-		aReaders[i] = newCachedColumnReaderTx(acols[i], currentTx)
+		aReaders[i] = newCachedColumnReaderTx(acols[i], currentTx, false)
 		if _, ok := acols[i].(*StorageComputeProxy); ok {
 			aNeedsCachedReader[i] = true
 		}

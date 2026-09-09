@@ -142,6 +142,22 @@ test_cases:
     scm: '(rebuild (table "memcp-tests" "rks_rows") true false)'
     timeout: 20
 
+  - name: "Warm a computed result index before shutdown"
+    scm: |
+      (begin
+        (define cache (newcachemap))
+        (define sess (newsession))
+        (sess "username" "root")
+        (sess "schema" "memcp-tests")
+        (define query "SELECT SQL_CALC_FOUND_ROWS id FROM rks_rows WHERE payload LIKE '%payload%' ORDER BY id LIMIT 2")
+        (map (produceN 6) (lambda (_)
+          (sql_execute_formula sess nil
+            (cached_parse cache (list parse_sql) "memcp-tests" query nil "root" sess true nil)
+            (lambda (_row) true) (lambda (_fields) nil))))
+        (if (equal? (sess "found_rows") 20000) "ok"
+          (error (concat "unexpected prepared count: " (sess "found_rows")))))
+    expect: {data: ["ok"]}
+
   - name: "Second graceful shutdown completes"
     sql: "SHUTDOWN"
     restart_timeout: 30

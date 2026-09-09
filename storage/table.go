@@ -2971,7 +2971,7 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 								}
 							}
 						} else {
-							params[i] = s.ColumnReaderTx(currentTx, p)(uid)
+							params[i] = s.ColumnReaderTx(currentTx, p, false)(uid)
 						}
 					}
 					func() {

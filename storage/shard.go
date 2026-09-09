@@ -1516,13 +1516,20 @@ func (t *storageShard) propagateDeleteToNext(next *storageShard, oldRecid uint32
 	next.UpdateFunction(targetRecid, false, false, currentTx)()
 }
 
-func (t *storageShard) ColumnReaderTx(tx *TxContext, col string) func(uint32) scm.Scmer {
+func (t *storageShard) ColumnReaderTx(tx *TxContext, col string, alreadyLocked bool) func(uint32) scm.Scmer {
 	// Computed readers recursively bind their input columns. A mutation scan
 	// initializes them while holding this shard's write lock, recorded explicitly
 	// on the transaction, so re-entering the RWMutex here would self-deadlock.
-	alreadyLocked := tx != nil && tx.HasShardWrite(t)
-	cstorage := t.getColumnStorageOrPanic(col, alreadyLocked, tx)
-	reader := newCachedColumnReaderTx(cstorage, tx)
+	writeLocked := tx != nil && tx.HasShardWrite(t)
+	var cstorage ColumnStorage
+	if alreadyLocked && !writeLocked {
+		// Index setup may own only a read lock. Its columns must already be
+		// loaded; this path must neither acquire a lock nor attach runtime data.
+		cstorage = t.getColumnStorageRLocked(col)
+	} else {
+		cstorage = t.getColumnStorageOrPanic(col, writeLocked, tx)
+	}
+	reader := newCachedColumnReaderTx(cstorage, tx, alreadyLocked || writeLocked)
 	_, computed := cstorage.(*StorageComputeProxy)
 	return func(idx uint32) scm.Scmer {
 		if idx < t.main_count {
@@ -1702,7 +1709,7 @@ func (t *storageShard) initReadMapReducer(mr *ShardMapReducer, cols []string, ma
 
 	for i, colName := range cols {
 		mainCol := t.getColumnStorageOrPanic(colName, alreadyLocked, currentTx)
-		mainReader := newCachedColumnReaderTx(mainCol, currentTx)
+		mainReader := newCachedColumnReaderTx(mainCol, currentTx, false)
 		mr.mainCols[i] = mainCol
 		mr.mainBulkReaders[i] = mainReader
 		mr.mainValueFuncs[i] = compiledColumnGetValue(mainReader)
@@ -2024,7 +2031,7 @@ func (t *storageShard) initMapReducer(mr *ShardMapReducer, cols []string, mapRed
 			continue
 		}
 		mainCol := mr.mainCols[i]
-		mainReader := newCachedColumnReaderTx(mainCol, mr.currentTx)
+		mainReader := newCachedColumnReaderTx(mainCol, mr.currentTx, false)
 		mr.mainBulkReaders[i] = mainReader
 		mr.mainMultiFuncs[i] = compiledColumnGetValueMulti(mainReader)
 		colName := mr.colNames[i]

@@ -92,9 +92,10 @@ func (f ColumnReaderFunc) GetValueRange(recid uint32, count uint32, target []scm
 
 // TxColumnReaderProvider optionally exposes a transaction-bound reader.
 // Storages that do not depend on tx/session context can ignore it and rely on
-// the legacy GetCachedReader path.
+// the legacy GetCachedReader path. The boolean records an already-held shard
+// lock and must propagate when binding computed-column dependencies.
 type TxColumnReaderProvider interface {
-	GetCachedReaderTx(*TxContext) ColumnReader
+	GetCachedReaderTx(*TxContext, bool) ColumnReader
 }
 
 func scmerToTxContext(v scm.Scmer) *TxContext {
