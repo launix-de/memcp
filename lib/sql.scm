@@ -341,16 +341,25 @@ semantics for multiple independent cache assumptions. */
 						(cadr dependency) (nth dependency 2) (coalesceNil (nth dependency 3) false)))))
 				(sql_queryplan_conjoin_guards dependency_guards))))))
 
+/* Bindings are registered producer-first. Walk backwards from surviving
+decision guards to retain their complete dependency closure, not unused cost
+enumeration work. A guarded derived estimate covers its session inputs too:
+adding a raw value equality would needlessly partition the cache per user. */
+(define sql_queryplan_guard_live_bindings (lambda (guard bindings)
+	(reduce (reverse bindings) (lambda (live binding)
+		(if (or (sql_queryplan_guard_references_symbol? guard (car binding))
+			(reduce live (lambda (needed consumer)
+				(or needed (sql_queryplan_guard_references_symbol? (cadr consumer) (car binding)))) false))
+			(cons binding live) live)) '())))
+
 (define sql_queryplan_guard_from_session (lambda (planning_session)
 	(begin
 		(define condition_accumulator (planning_session "__memcp_queryplan_guard_conditions"))
 		(define condition_catalog (planning_session "__memcp_queryplan_guard_condition_catalog"))
-		(define conditions (merge (list
-			(if (nil? condition_catalog)
+		(define conditions (if (nil? condition_catalog)
 				(map (condition_accumulator) (lambda (key) (condition_accumulator key)))
 				(map (produceN (coalesceNil (condition_accumulator "count") 0))
-					(lambda (idx) (condition_accumulator (concat "condition:" idx)))))
-			(sql_queryplan_uncovered_binding_conditions planning_session))))
+					(lambda (idx) (condition_accumulator (concat "condition:" idx))))))
 		(define statistics_guard (sql_queryplan_statistics_guard_from_session planning_session))
 		(define raw_guard (sql_queryplan_conjoin_guards
 			(merge (list conditions (list statistics_guard)))))
@@ -363,13 +372,19 @@ semantics for multiple independent cache assumptions. */
 		/* Cost enumeration may bind expressions which no surviving guard uses.
 		Materializing those lambda arguments would retain the discarded planning
 		work on every cached execution. */
-		(define bindings (filter all_bindings (lambda (binding)
-			(sql_queryplan_guard_references_symbol? raw_guard (car binding)))))
-		(sql_queryplan_runtime_guard_expr (if (empty_list? bindings)
-			raw_guard
-			(cons
-				(list (quote lambda) (map bindings car) raw_guard)
-				(map bindings cadr)))))))
+		(define bindings (sql_queryplan_guard_live_bindings raw_guard all_bindings))
+		(define covered (planning_session "__memcp_queryplan_guarded_session_keys"))
+		(reduce bindings (lambda (_ binding)
+			(reduce (nth binding 2) (lambda (_ expr)
+				(covered (if (nil? condition_catalog) (string expr) expr) true)) nil)) nil)
+		(define complete_guard (sql_queryplan_conjoin_guards
+			(cons raw_guard (sql_queryplan_uncovered_binding_conditions planning_session))))
+		/* Nested lexical bindings let a cost formula consume an earlier shared
+		statistic. One flat lambda evaluates all arguments in the outer scope and
+		cannot represent that dependency. The optimizer can inline these lets. */
+		(sql_queryplan_runtime_guard_expr
+			(reduce (reverse bindings) (lambda (body binding)
+				(list (list (quote lambda) (list (car binding)) body) (cadr binding))) complete_guard)))))
 
 (define sql_invoke_parse_fn (lambda (parse_fn schema parse_query policy planning_session tx)
 	(if (list? parse_fn)

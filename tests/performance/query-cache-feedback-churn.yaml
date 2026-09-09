@@ -22,6 +22,28 @@ setup:
         (rebuild (table "memcp-tests" "qfc_document") true false)
         (globalvars "qfc_sequence" 1000))
 test_cases:
+  - name: "ACL counts share a cost regime across different named session bindings"
+    performance_rows: 1000
+    threshold_ms: 5000
+    scm: |
+      (begin
+        (define cache (newcachemap))
+        (define sess (newsession))
+        (sess "username" "root")
+        (sess "schema" "memcp-tests")
+        (define q "SELECT COUNT(*) AS n FROM qfc_clock a LEFT JOIN qfc_document z ON z.id=a.id WHERE a.id>@clock AND COALESCE((SELECT CASE WHEN EXISTS(SELECT 1 FROM qfc_access x WHERE x.viewer=@viewer AND x.domain_id IS NULL LIMIT 1) THEN TRUE ELSE EXISTS(SELECT 1 FROM qfc_access y WHERE y.viewer=@viewer AND y.domain_id=b.id LIMIT 1) END FROM qfc_document b WHERE b.id=a.id LIMIT 1),FALSE)")
+        (define rows (newsession))
+        (rows "n" 0)
+        (reduce (produceN 16) (lambda (_ i) (begin
+          (sess "viewer" (+ 999 i))
+          (sess "clock" i)
+          (sql_execute_formula sess nil
+            (cached_parse cache (list parse_sql) "memcp-tests" q nil "root" sess true)
+            (lambda (row) (rows "n" (+ (rows "n") (cadr row)))) (lambda (_fields) nil)))) nil)
+        (if (equal? (rows "n") 1) true (error "changing named ACL bindings changed counts")))
+    expect:
+      rows: 1
+      result_contains: ["true"]
   - name: "Named session ACL counts do not recompile on every cached execution"
     performance_rows: 1000
     threshold_ms: 5000

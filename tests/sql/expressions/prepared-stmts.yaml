@@ -624,14 +624,15 @@ test_cases:
         (define planning (sql_queryplan_compile_session (newsession) nil))
         (define guard (with_session planning (lambda ()
           (begin
-            (planner_guard_runtime_binding (list (quote +) 1 2))
-            (define used (planner_guard_runtime_binding (list (quote -) 5 3)))
-            (planner_record_guard_condition (list (quote equal?) used 2))
+            (planner_guard_runtime_binding (list (quote +) 1 2) planning nil)
+            (define used (planner_guard_runtime_binding (list (quote -) 5 3) planning nil))
+            (planner_record_guard_condition (list (quote equal?) used 2) planning)
             (sql_queryplan_guard_from_session planning)))))
         (match guard
           (cons (cons (symbol lambda) (cons parameters (cons _body '()))) arguments)
-            (and (equal? (count parameters) 1) (equal? (count arguments) 1))
-          _ false))
+            (if (and (equal? (count parameters) 1) (equal? (count arguments) 1)) true
+              (error "guard retained discarded bindings"))
+          _ (error "guard omitted its required binding")))
     expect:
       data: [true]
 

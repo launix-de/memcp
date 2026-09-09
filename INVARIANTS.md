@@ -264,6 +264,15 @@ per guard evaluation. If a useful generalized inequality is unavailable, an
 exact parameter/statistics-input guard is the conservative fallback; an old
 specialized plan must never be selected after an unguarded cost input changes.
 
+Coverage of session inputs is transitive through shared guard bindings. A
+surviving cost formula which consumes a bound statistic also covers the runtime
+inputs used to obtain that statistic; do not additionally guard their raw values
+for equality. Otherwise cost-equivalent users or clock ticks churn plan variants.
+Retain the complete producer dependency closure and evaluate it in lexical
+dependency order, once per validation. Discarded costing work provides no
+coverage. Quoted data is not executable: helpers interpreting an opaque metadata
+argument must explicitly declare the session inputs that argument represents.
+
 When an unknown cardinality interval crosses a costly operator boundary, the
 cache formula may execute one query-local observation *before* guard dispatch.
 That preparation is not part of the guard: it produces a physical value such

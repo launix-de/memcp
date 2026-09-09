@@ -134,7 +134,7 @@ deduplicate immutable ASTs without serializing the growing expressions. */
 				(define covered_bindings (planning_session "__memcp_queryplan_guarded_session_keys"))
 				(if (nil? covered_bindings)
 					nil
-					(reduce (query_expr_session_reads condition) (lambda (_ expr)
+					(reduce (planner_guard_runtime_session_reads condition) (lambda (_ expr)
 						(covered_bindings (if (nil? condition_catalog) (string expr) expr) true)) nil))
 				condition)))))
 
@@ -234,7 +234,19 @@ an override intended for a sibling edge. */
 /* Runtime statistic expressions recur throughout dynamic-programming costs.
 Bind each unique expression once in the final guard instead of rereading the
 catalog for every comparison. The binding catalog is compile-local as well. */
-(define planner_guard_runtime_binding (lambda (expr planning_session)
+(define planner_guard_runtime_session_reads (lambda (expr)
+	(match expr
+		((symbol quote) _value) '()
+		_ (begin
+			(define read (query_session_read_expr expr))
+			(if (not (nil? read)) (list read)
+				(match expr
+					(cons head tail) (merge_unique (cons
+						(planner_guard_runtime_session_reads head)
+						(map tail planner_guard_runtime_session_reads)))
+					_ '())))))))
+
+(define planner_guard_runtime_binding (lambda (expr planning_session dependencies)
 	(begin
 		(define planning_session (planner_effective_session planning_session))
 		(define bindings (if (nil? planning_session) nil (planning_session "__memcp_queryplan_guard_bindings")))
@@ -248,7 +260,11 @@ catalog for every comparison. The binding catalog is compile-local as well. */
 					(begin
 						(define binding (list
 							(symbol (concat "__queryplan_guard_value_" (stable_structural_hash expr false)))
-							expr))
+							expr
+							/* Opaque metadata consumers declare their interpreted inputs;
+							ordinary quoted data must not count as a runtime session read. */
+							(merge_unique (list (planner_guard_runtime_session_reads expr)
+								(coalesceNil dependencies '())))))
 						(if (nil? binding_catalog)
 							(bindings key binding)
 							(begin
