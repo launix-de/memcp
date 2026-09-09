@@ -527,6 +527,19 @@ test_cases:
         (rebuild)
         2048)
 
+  - name: "Text cardinality participates in the common join reorder"
+    sql: |
+      EXPLAIN REORDER
+      SELECT f.id
+      FROM selective_text_peer p
+      JOIN selective_text_driver f ON f.id = p.id
+      WHERE f.search LIKE '%needle%'
+    expect:
+      rows: 1
+      result_contains:
+        - '(source text_pattern_prior)'
+        - '(planning_value 0.01)'
+
   - name: "Selective local text filter becomes an exact RecSet carrier"
     sql: |
       EXPLAIN PHYSICAL
@@ -597,7 +610,7 @@ test_cases:
         - 'scan_access_path'
         - 'chosen fused_base_scan'
 
-  - name: "Text cardinality participates in the common join reorder"
+  - name: "Measured text cardinality participates in the common join reorder"
     sql: |
       EXPLAIN REORDER
       SELECT f.id
@@ -607,8 +620,8 @@ test_cases:
     expect:
       rows: 1
       result_contains:
-        - '(source text_pattern_prior)'
-        - '(planning_value 0.01)'
+        - '(source scan_feedback)'
+        - '(planning_value 0.00390625)'
 
   - name: "Cached text filter recompiles across the RecSet cost crossover"
     scm: |

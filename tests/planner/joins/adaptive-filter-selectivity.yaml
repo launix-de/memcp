@@ -107,3 +107,21 @@ test_cases:
           (not (table_planner_statistics_compatible? "memcp-tests" "afs_check" before_token before_fingerprint))))
     expect:
       data: [true]
+
+  - name: "EXPLAIN cache checks never execute candidate preparations"
+    scm: |
+      (begin
+        (define sess (newsession))
+        (define cache (newcachemap))
+        (define diagnostic_parser (lambda (schema query policy planning tx) (begin
+          (define preparations (planning "__memcp_queryplan_preparations"))
+          (preparations "count" 1)
+          (preparations "preparation:0" (list "must-not-prepare"
+            (list 'error "candidate preparation must not run for EXPLAIN") 0))
+          (list 'resultrow (list 'list "ok" true)))))
+        (with_autocommit sess nil 1 "explain feedback guard test" (lambda (tx) (begin
+          (define formula (cached_parse cache (list diagnostic_parser) "memcp-tests"
+            "EXPLAIN SELECT 1" nil "root" sess false tx))
+          (sql_execute_formula sess tx formula (lambda (_row) true) (lambda (_fields) nil))))))
+    expect:
+      data: [true]

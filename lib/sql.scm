@@ -397,10 +397,18 @@ serialization still see the complete plan. */
 		(define plan (sql_queryplan_compile_formula
 			(sql_queryplan_bind_execution_session raw_plan)))
 		(tx_check tx)
+		(define statistics_diagnostic (match (toUpper parse_query)
+			(regex "^\\s*EXPLAIN\\b" _) true
+			_ false))
+		/* Diagnostics must refresh their captured estimates when table statistics
+		change, but checking their cache must never execute candidate preparations. */
 		(list
-			(sql_queryplan_guard_from_session planning_session)
+			(if statistics_diagnostic
+				(sql_queryplan_statistics_guard_from_session planning_session)
+				(sql_queryplan_guard_from_session planning_session))
 			plan
-			(sql_queryplan_preparations_from_session planning_session)))))
+			(if statistics_diagnostic '()
+				(sql_queryplan_preparations_from_session planning_session))))))
 
 (define sql_queryplan_preparation_expr (lambda (preparation)
 	(match preparation '(decision_id producer metric_expr) (begin
@@ -568,13 +576,12 @@ user table merely to discard a newly constructed policy closure. */
 			(define select_query (match (toUpper parse_query)
 				(regex "^\\s*SELECT\\b" _) true
 				_ false))
-			/* Polymorphic entries exist only where the planner can actually make a
-			parameter/statistics-dependent physical choice. Ordinary point and
-			ordered scans retain the smaller exact cache path. */
-			(define guarded_select (and select_query
+			/* EXPLAIN captures planning statistics and needs their invalidation too.
+			Ordinary point and ordered scans retain the smaller exact cache path. */
+			(define guarded_query (or explain_query (and select_query
 				(match (toUpper parse_query)
 					(regex "\\b(?:LIKE|MATCH|JOIN|EXISTS)\\b" _) true
-					_ false)))
+					_ false))))
 			(define compile_diagnostic (match (toUpper parse_query)
 				(regex "^\\s*EXPLAIN\\s+COMPILE\\b" _) true
 				_ false))
@@ -592,7 +599,7 @@ user table merely to discard a newly constructed policy closure. */
 						(sql_queryplan_bind_execution_session
 							(with_session session (lambda ()
 								(sql_invoke_parse_fn parse_fn schema parse_query compile_policy session compile_tx)))))))))
-			(define formula (if (or compile_diagnostic (not guarded_select))
+			(define formula (if (or compile_diagnostic (not guarded_query))
 				(if compile_diagnostic
 					(exact_compile tx)
 					(queryplan_cache "get_or_compute" cache_key tx exact_compile))

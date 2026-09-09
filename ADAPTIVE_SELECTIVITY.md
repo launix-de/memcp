@@ -82,6 +82,12 @@ geometric selectivity classes or changed coverage invalidate cached costing.
 These are table-wide power-of-two classes, not exact plan-specific crossover
 guards. A crossover within one class can still go unnoticed.
 
+Cached EXPLAIN output now uses the same table-statistics dependencies, without
+executing candidate preparations while checking its cache. An existing text
+fixture verifies the identical EXPLAIN REORDER query changes from the cold 1%
+prior to the learned 8/2048 = 0.390625% rate. EXPLAIN COMPILE still bypasses caching
+so it measures an actual compilation.
+
 ## Verification
 
 Tests cover full/restricted RecSets, unique points, shard EMA and weighted merges,
@@ -109,10 +115,10 @@ round swapped CPUs:
 
 | SQL measurement | Baseline | Change | Difference |
 | --- | ---: | ---: | ---: |
-| Round 1, mean wall time | 23.255281 ms | 23.269594 ms | +0.06% |
-| Round 2, mean wall time | 23.456292 ms | 23.621569 ms | +0.70% |
-| Combined mean wall time | 23.355787 ms | 23.445581 ms | +0.38% |
-| Total process CPU, both rounds incl. warmups | 9.98 s | 10.05 s | +0.70% |
+| Round 1, mean wall time | 20.112562 ms | 20.305865 ms | +0.96% |
+| Round 2, mean wall time | 23.886269 ms | 24.154979 ms | +1.12% |
+| Combined mean wall time | 21.999416 ms | 22.230422 ms | +1.05% |
+| Total process CPU, both rounds incl. warmups | 10.73 s | 10.92 s | +1.77% |
 
 All SQL outputs matched. Inspection of generated code, IR, physical plan and
 reorder output found no plan change for this fixture. Earlier trials pinned both
@@ -125,3 +131,10 @@ The demonstrated improvements are coverage (full RecSet feedback), restart
 availability (the checkpoint test retains a measured 12.3% rate before any shard
 loads), retention of LIKE buckets, and no redundant publication for unchanged
 observations. No end-to-end speedup of the private application query is claimed.
+
+The EXPLAIN cache follow-up was also measured with the same membership fixture,
+normal GC, separate CPUs, 10 warmups and 200 timed cached EXPLAIN REORDER calls:
+0.345551 ms baseline versus 0.350319 ms after the change (+0.004769 ms / +1.38%).
+Schema persistence goes exclusively through the backend-neutral ReadSchema /
+WriteSchema byte interface (FileStorage, S3Storage and CephStorage), with no new
+backend-specific operation.
