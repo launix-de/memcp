@@ -9,7 +9,7 @@ setup:
   - sql: INSERT INTO coll_t (id, name) VALUES (1, 'a'), (2, 'B'), (3, 'aa'), (4, 'Ä')
   - sql: DROP TABLE IF EXISTS coll_link
   - sql: DROP TABLE IF EXISTS coll_names
-  - sql: CREATE TABLE coll_names (id INT PRIMARY KEY, name VARCHAR(50) COLLATE utf8mb4_unicode_520_ci)
+  - sql: CREATE TABLE coll_names (id INT PRIMARY KEY, name VARCHAR(50)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_520_ci
   - sql: CREATE TABLE coll_link (id INT PRIMARY KEY, name_id INT)
   - sql: INSERT INTO coll_names VALUES (1, 'apple'), (2, 'Banana'), (3, 'cherry')
   - sql: INSERT INTO coll_link VALUES (1, 1), (2, 1), (3, 2), (4, 3)

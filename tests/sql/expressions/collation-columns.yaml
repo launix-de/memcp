@@ -1,3 +1,5 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
 metadata:
   version: "1.0"
   description: "Column-level COLLATE in CREATE/ALTER TABLE; verify persistence via SHOW"
@@ -11,6 +13,10 @@ setup:
         txt TEXT COLLATE utf8mb4_general_ci
       )
   - sql: "INSERT INTO coll_cols (id, txt) VALUES (1, 'a'), (2, 'B')"
+
+  - sql: DROP TABLE IF EXISTS coll_inherited
+  - sql: CREATE TABLE coll_inherited (id INT, name VARCHAR(100), explicit_bin TEXT COLLATE bin, payload VARBINARY(100)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_520_ci
+  - sql: INSERT INTO coll_inherited VALUES (1, 'lab-tag-42', 'lab-tag-42', 'lab-tag-42'), (2, 'Uncategorized', 'Uncategorized', 'Uncategorized'), (10, 'Lab Category 1', 'Lab Category 1', 'Lab Category 1')
 
 test_cases:
   - name: "SHOW FULL COLUMNS exposes column collation"
@@ -78,5 +84,56 @@ test_cases:
         - txt: "a"
         - txt: "B"
 
+  - name: Table collation is inherited and persisted while explicit overrides win
+    sql: SHOW FULL COLUMNS FROM coll_inherited
+    expect:
+      rows: 4
+      data:
+        - Field: id
+          Collation: utf8mb4
+        - Field: name
+          Collation: utf8mb4_unicode_520_ci
+        - Field: explicit_bin
+          Collation: bin
+        - Field: payload
+          Collation: utf8mb4
+
+  - name: Inherited taxonomy name order after restart
+    sql: SELECT id FROM coll_inherited ORDER BY name
+    expect: {rows: 3, data: [{id: 10}, {id: 1}, {id: 2}]}
+
+  - name: Inherited taxonomy name descending limit
+    sql: SELECT id FROM coll_inherited ORDER BY name DESC LIMIT 2
+    expect: {rows: 2, data: [{id: 2}, {id: 1}]}
+
+  - name: Explicit binary override preserves byte ordering
+    sql: SELECT id FROM coll_inherited ORDER BY explicit_bin
+    expect: {rows: 3, data: [{id: 10}, {id: 2}, {id: 1}]}
+
+  - name: Numeric ordering does not inherit a text comparator
+    sql: SELECT id FROM coll_inherited ORDER BY id
+    expect: {rows: 3, data: [{id: 1}, {id: 2}, {id: 10}]}
+
+  - name: Added text column inherits the persisted table default
+    sql: ALTER TABLE coll_inherited ADD COLUMN added TEXT
+    expect: {rows: 0}
+
+  - name: Added column reports inherited collation
+    sql: SHOW FULL COLUMNS FROM coll_inherited
+    expect:
+      rows: 5
+      data:
+        - Field: id
+        - Field: name
+        - Field: explicit_bin
+        - Field: payload
+        - Field: added
+          Collation: utf8mb4_unicode_520_ci
+
+  - name: Invalid inherited-table sort column fails
+    sql: SELECT id FROM coll_inherited ORDER BY missing_sort_column
+    expect: {error: true}
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS coll_cols"
+  - sql: DROP TABLE IF EXISTS coll_inherited
