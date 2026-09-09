@@ -4268,10 +4268,13 @@ plan construction or timing during compilation. */
 						(strip_driver_membership_for_source src condition direct_membership)
 						(replace_driver_membership_markers src condition bound_memberships))))
 				(define filter_condition (physical_numeric_in_intervals src
-					(if use_membership_keysets
-						(replace_driver_membership_keyset_markers
-							candidate_filter_condition membership_keysets)
-						candidate_filter_condition) (planner_context_session (qb_facts block))))
+					(physical_order_filter_terms src
+						(if use_membership_keysets
+							(replace_driver_membership_keyset_markers
+								candidate_filter_condition membership_keysets)
+							candidate_filter_condition)
+						(planner_context_session (qb_facts block)))
+					(planner_context_session (qb_facts block))))
 				(define filtercols (merge_unique (list
 					(if (or membership_filter scalar_membership_filter)
 						(list "$recset_contains") '())

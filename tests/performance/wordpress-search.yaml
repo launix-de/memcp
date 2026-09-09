@@ -1,0 +1,147 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# Ten historical revisions per article reproduce a content-heavy search table.
+metadata:
+  version: '1.0'
+  description: WordPress search excludes revision history before scanning article
+    text
+  isolated: true
+  ci: true
+  restart_after_setup: true
+setup:
+- sql: DROP TABLE IF EXISTS wordpress_search_posts
+- sql: CREATE TABLE wordpress_search_posts (ID BIGINT PRIMARY KEY, post_title TEXT,
+    post_excerpt TEXT, post_content TEXT, post_status VARCHAR(20), post_type VARCHAR(20),
+    post_password VARCHAR(20), post_date BIGINT) ENGINE=sloppy
+- scm: |-
+    (insert (table "memcp-tests" "wordpress_search_posts")
+      '("ID" "post_title" "post_excerpt" "post_content" "post_status" "post_type" "post_password" "post_date")
+      (map (produceN 22000) (lambda (i)
+        (begin
+          (define k (mod i 2000))
+          (define rare (equal? (mod k 197) 0))
+          (list (+ i 1)
+            (concat "Article " k (if (and rare (equal? (mod k 3) 0)) " nightjar" ""))
+            (concat "Summary " k (if (and rare (equal? (mod k 3) 1)) " nightjar" ""))
+            (concat (reduce (produceN (+ 3 (mod k 7))) (lambda (text n)
+              (concat text " This article discusses everyday publishing and readers in chapter " n ".")) "")
+              (if (and rare (equal? (mod k 3) 2)) " nightjar" "")
+              (if (equal? (mod k 3) 0) " performance" ""))
+            (if (>= i 2000) "inherit" (if (equal? (mod k 20) 0) "draft" "publish"))
+            (if (>= i 2000) "revision" (if (equal? (mod k 17) 0) "page" (if (equal? (mod k 11) 0) "attachment" "post")))
+            (if (equal? (mod k 29) 0) "protected" "") k)))))
+- scm: (rebuild)
+test_cases:
+- name: WordPress rare search with revision history
+  warmup: 10
+  timing_samples: 30
+  threshold_ms: 200
+  sql: |-
+    SELECT SQL_CALC_FOUND_ROWS ID FROM wordpress_search_posts
+    WHERE ((post_title LIKE '%nightjar%') OR (post_excerpt LIKE '%nightjar%') OR (post_content LIKE '%nightjar%'))
+      AND post_password = ''
+      AND ((post_type = 'attachment' AND post_status = 'publish')
+        OR (post_type = 'page' AND post_status = 'publish')
+        OR (post_type = 'post' AND post_status = 'publish'))
+    ORDER BY post_title LIKE '%nightjar%' DESC, post_date DESC LIMIT 10
+  expect:
+    rows: 10
+    data:
+    - ID: 1774
+    - ID: 1183
+    - ID: 592
+    - ID: 1971
+    - ID: 1577
+    - ID: 1380
+    - ID: 986
+    - ID: 789
+    - ID: 395
+    - ID: 198
+- name: WordPress common search with revision history
+  warmup: 10
+  timing_samples: 30
+  threshold_ms: 200
+  sql: |-
+    SELECT SQL_CALC_FOUND_ROWS ID FROM wordpress_search_posts
+    WHERE ((post_title LIKE '%performance%') OR (post_excerpt LIKE '%performance%') OR (post_content LIKE '%performance%'))
+      AND post_password = ''
+      AND ((post_type = 'attachment' AND post_status = 'publish')
+        OR (post_type = 'page' AND post_status = 'publish')
+        OR (post_type = 'post' AND post_status = 'publish'))
+    ORDER BY post_title LIKE '%performance%' DESC, post_date DESC LIMIT 10
+  expect:
+    rows: 10
+    data:
+    - ID: 1999
+    - ID: 1996
+    - ID: 1993
+    - ID: 1990
+    - ID: 1987
+    - ID: 1984
+    - ID: 1978
+    - ID: 1975
+    - ID: 1972
+    - ID: 1969
+- name: WordPress absent search with revision history
+  warmup: 10
+  timing_samples: 30
+  threshold_ms: 200
+  sql: |-
+    SELECT SQL_CALC_FOUND_ROWS ID FROM wordpress_search_posts
+    WHERE ((post_title LIKE '%quasarless%') OR (post_excerpt LIKE '%quasarless%') OR (post_content LIKE '%quasarless%'))
+      AND post_password = ''
+      AND ((post_type = 'attachment' AND post_status = 'publish')
+        OR (post_type = 'page' AND post_status = 'publish')
+        OR (post_type = 'post' AND post_status = 'publish'))
+    ORDER BY post_title LIKE '%quasarless%' DESC, post_date DESC LIMIT 10
+  expect:
+    rows: 0
+    data: []
+- name: WordPress rare search with revision history total before LIMIT
+  scm: |-
+    (begin
+      (define cache (newcachemap))
+      (define sess (newsession))
+      (sess "username" "root")
+      (sess "schema" "memcp-tests")
+      (define formula (cached_parse cache (list parse_sql) "memcp-tests"
+        "SELECT SQL_CALC_FOUND_ROWS ID FROM wordpress_search_posts\nWHERE ((post_title LIKE '%nightjar%') OR (post_excerpt LIKE '%nightjar%') OR (post_content LIKE '%nightjar%'))\n  AND post_password = ''\n  AND ((post_type = 'attachment' AND post_status = 'publish')\n    OR (post_type = 'page' AND post_status = 'publish')\n    OR (post_type = 'post' AND post_status = 'publish'))\nORDER BY post_title LIKE '%nightjar%' DESC, post_date DESC LIMIT 10" nil "root" sess true nil))
+      (sql_execute_formula sess nil formula (lambda (_row) true) (lambda (_fields) nil))
+      (if (equal? (sess "found_rows") 10) "ok"
+        (error (concat "unexpected FOUND_ROWS: " (sess "found_rows")))))
+  expect:
+    data:
+    - ok
+- name: WordPress common search with revision history total before LIMIT
+  scm: |-
+    (begin
+      (define cache (newcachemap))
+      (define sess (newsession))
+      (sess "username" "root")
+      (sess "schema" "memcp-tests")
+      (define formula (cached_parse cache (list parse_sql) "memcp-tests"
+        "SELECT SQL_CALC_FOUND_ROWS ID FROM wordpress_search_posts\nWHERE ((post_title LIKE '%performance%') OR (post_excerpt LIKE '%performance%') OR (post_content LIKE '%performance%'))\n  AND post_password = ''\n  AND ((post_type = 'attachment' AND post_status = 'publish')\n    OR (post_type = 'page' AND post_status = 'publish')\n    OR (post_type = 'post' AND post_status = 'publish'))\nORDER BY post_title LIKE '%performance%' DESC, post_date DESC LIMIT 10" nil "root" sess true nil))
+      (sql_execute_formula sess nil formula (lambda (_row) true) (lambda (_fields) nil))
+      (if (equal? (sess "found_rows") 612) "ok"
+        (error (concat "unexpected FOUND_ROWS: " (sess "found_rows")))))
+  expect:
+    data:
+    - ok
+- name: WordPress absent search with revision history total before LIMIT
+  scm: |-
+    (begin
+      (define cache (newcachemap))
+      (define sess (newsession))
+      (sess "username" "root")
+      (sess "schema" "memcp-tests")
+      (define formula (cached_parse cache (list parse_sql) "memcp-tests"
+        "SELECT SQL_CALC_FOUND_ROWS ID FROM wordpress_search_posts\nWHERE ((post_title LIKE '%quasarless%') OR (post_excerpt LIKE '%quasarless%') OR (post_content LIKE '%quasarless%'))\n  AND post_password = ''\n  AND ((post_type = 'attachment' AND post_status = 'publish')\n    OR (post_type = 'page' AND post_status = 'publish')\n    OR (post_type = 'post' AND post_status = 'publish'))\nORDER BY post_title LIKE '%quasarless%' DESC, post_date DESC LIMIT 10" nil "root" sess true nil))
+      (sql_execute_formula sess nil formula (lambda (_row) true) (lambda (_fields) nil))
+      (if (equal? (sess "found_rows") 0) "ok"
+        (error (concat "unexpected FOUND_ROWS: " (sess "found_rows")))))
+  expect:
+    data:
+    - ok
+cleanup:
+- sql: DROP TABLE wordpress_search_posts
