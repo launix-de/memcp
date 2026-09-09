@@ -101,10 +101,11 @@ test_cases:
         (define before_fingerprint (table_planner_statistics_fingerprint tbl))
         (define matches (recset_count (scan_recset nil tbl (nth access 0) values '("label") (eval callback))))
         (define estimate (table_filter_selectivity tbl (nth access 0) values))
-        (and (equal? matches 900)
+        (if (and (equal? matches 900)
           (equal? (qassoc_get estimate 'source nil) 'scan_feedback)
           (equal? (qassoc_get estimate 'value nil) 0.9)
-          (not (table_planner_statistics_compatible? "memcp-tests" "afs_check" before_token before_fingerprint))))
+          (not (table_planner_statistics_compatible? "memcp-tests" "afs_check" before_token before_fingerprint)))
+          true (error "complete RecSet feedback did not invalidate the planner guard"))))
     expect:
       data: [true]
 
@@ -123,5 +124,31 @@ test_cases:
           (define formula (cached_parse cache (list diagnostic_parser) "memcp-tests"
             "EXPLAIN SELECT 1" nil "root" sess false tx))
           (sql_execute_formula sess tx formula (lambda (_row) true) (lambda (_fields) nil))))))
+    expect:
+      data: [true]
+
+  - name: "A cache miss prepares the newly compiled variant before its first execution"
+    scm: |
+      (begin
+        (define sess (newsession))
+        (define cache (newcachemap))
+        (define entry (newsession))
+        (entry "compile_lock" (mutex))
+        (entry "variants" '())
+        (sess "v1" 17)
+        (define parser (lambda (schema query policy planning tx) (begin
+          (define preparations (planning "__memcp_queryplan_preparations"))
+          (preparations "count" 1)
+          (preparations "preparation:0" (list "new-variant-input" (list 'session "v1")
+            (symbol "__queryplan_observed_value")))
+          (list 'equal?
+            (planner_queryplan_observation_current_read_expr
+              (planner_queryplan_observation_value_key "new-variant-input"))
+            17))))
+        (with_autocommit sess nil 1 "cache miss preparation test" (lambda (tx)
+          (if (sql_queryplan_variant_miss cache "new-variant" entry (list parser)
+            "memcp-tests" "SELECT 1" nil sess tx
+            (lambda (_row) true) (lambda (_fields) nil))
+            true (error "newly compiled plan ran without its prepared input")))))
     expect:
       data: [true]

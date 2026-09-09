@@ -511,7 +511,9 @@ otherwise side-effect-free guard. */
 			variant under the compile lock. Prepare that newly visible variant before
 			rechecking its guard; preparation expressions are request-idempotent. */
 			(map (nth variant 2) (lambda (preparation)
-				(eval (sql_queryplan_preparation_expr preparation))))
+				((sql_queryplan_compile_formula
+					(sql_queryplan_preparation_expr preparation))
+					session tx resultrow resultfields)))
 			/* Guards are code, not expressions in this helper's lexical scope. Compile
 			them against the same explicit request boundary as the cached dispatcher;
 			naked eval would couple their symbols/NthLocalVars to this helper's frame. */
@@ -527,24 +529,31 @@ variant. New variants are prepended so the most recent statistics regime wins
 the common guard-dispatch path. */
 (define sql_queryplan_variant_miss (lambda (queryplan_cache cache_key entry parse_fn schema parse_query policy session tx resultrow resultfields)
 	(begin
-		(define plan ((entry "compile_lock") tx (lambda ()
+		(define chosen_variant ((entry "compile_lock") tx (lambda ()
 			(begin
 				(define current_variants (entry "variants"))
 				(define matching (sql_queryplan_matching_variant current_variants
 					session tx resultrow resultfields))
-				/* Return the chosen plan directly. Re-entering entry.formula would
+				/* Return the chosen variant directly. Re-entering entry.formula would
 				re-evaluate the guard which just missed and can recurse indefinitely;
 				another request's freshly installed matching variant is already safe to
 				execute under the current explicit request arguments. */
 				(if (not (nil? matching))
-					(cadr matching)
+					matching
 					(begin
 						(define variant (sql_compile_queryplan_variant parse_fn schema parse_query policy session tx))
 						(define formula (sql_queryplan_install_variants queryplan_cache cache_key entry parse_fn schema parse_query policy
 							(cons variant current_variants)))
 						(queryplan_cache cache_key (list entry formula))
-						(cadr variant)))))))
-		(plan session tx resultrow resultfields))))
+						variant))))))
+		/* A miss can introduce preparations absent from every previous variant.
+		Run them before the new consumer, outside the compile lock. Preparations
+		already checked by matching_variant are request-idempotent. */
+		(map (nth chosen_variant 2) (lambda (preparation)
+			((sql_queryplan_compile_formula
+				(sql_queryplan_preparation_expr preparation))
+				session tx resultrow resultfields)))
+		((cadr chosen_variant) session tx resultrow resultfields))))
 
 /* cached_parse: wraps SELECT planning with a lazy polymorphic Scheme plan
 cache. DDL, DML and transaction-control formulas retain the original exact

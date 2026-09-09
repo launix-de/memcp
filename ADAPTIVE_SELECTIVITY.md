@@ -138,3 +138,26 @@ normal GC, separate CPUs, 10 warmups and 200 timed cached EXPLAIN REORDER calls:
 Schema persistence goes exclusively through the backend-neutral ReadSchema /
 WriteSchema byte interface (FileStorage, S3Storage and CephStorage), with no new
 backend-specific operation.
+
+After integrating master `ae5c20c5d` (#840), its absent-search regression exposed
+an existing cache-miss bug: a newly compiled variant could consume an observation
+whose preparation existed only in that new variant. The miss path now prepares
+the chosen variant outside its compile lock before execution, using an explicit
+session/transaction procedure boundary. This also avoids evaluating prepared
+ASTs in the helper's unrelated lexical frame. A focused test fails before the
+fix; the #840 batch/ACL suite passes afterward, including the empty result.
+
+A further manual A/B against `ae5c20c5d`, using the same SQL fixture, normal GC,
+10 warmups, 200 samples per revision, separate CPUs and then swapped CPUs, gave:
+
+| Integration measurement | Master | PR | Difference |
+| --- | ---: | ---: | ---: |
+| Round 1, mean | 22.558117 ms | 21.188738 ms | -6.07% |
+| Round 2, mean | 24.012778 ms | 22.988399 ms | -4.27% |
+| Combined mean | 23.285448 ms | 22.088569 ms | -1.196879 ms / -5.14% |
+| Process CPU, both rounds incl. warmups | 10.84 s | 11.16 s | +2.95% |
+
+Outputs matched. Wall time improved in these two rounds while process CPU rose
+slightly; this is an integration overhead check, not evidence of a better plan
+for the application query. Focused validation after integration: adaptive
+feedback 8/8, batch observation 7/7, prepared statements 57/57, range scans 114/114.
