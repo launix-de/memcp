@@ -107,6 +107,33 @@ func TestDropTableLifecycleTriggerMayDropAnotherTable(t *testing.T) {
 	}
 }
 
+func TestDropTriggerDoesNotWaitForUnrelatedRebuild(t *testing.T) {
+	defer setupGCTest(t)()
+	CreateDatabase("gcdb", false)
+	db := GetDatabase("gcdb")
+	CreateTable("gcdb", "first", Memory, false)
+	CreateTable("gcdb", "second", Memory, false)
+	tables := db.tables.GetAll()
+	unrelated, owner := tables[0], tables[len(tables)-1]
+	owner.AddTrigger(TriggerDescription{Name: "owned_cleanup", Timing: AfterInsert})
+	// A rebuild holds this read lock while waiting for CacheManager.Remove.
+	// Cleanup of a trigger on another table must not take its DDL write lock.
+	unrelated.ddlMu.RLock()
+	done := make(chan bool, 1)
+	go func() { done <- db.dropTrigger("owned_cleanup") }()
+	select {
+	case removed := <-done:
+		unrelated.ddlMu.RUnlock()
+		if !removed {
+			t.Fatal("target trigger was not removed")
+		}
+	case <-time.After(time.Second):
+		unrelated.ddlMu.RUnlock()
+		<-done // release the old implementation before failing the test
+		t.Fatal("trigger cleanup waited for an unrelated rebuild DDL lock")
+	}
+}
+
 func TestLanguageTriggerPersistenceKeepsOnlySourceDefinition(t *testing.T) {
 	trigger := TriggerDescription{
 		Name:     "source_defined",
