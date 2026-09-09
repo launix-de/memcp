@@ -86,7 +86,7 @@ func String(v Scmer) string {
 	switch v.GetTag() {
 	case tagNil:
 		return "nil"
-	case tagBool, tagInt, tagFloat:
+	case tagBool, tagInt, tagFloat, tagDate:
 		return v.String()
 	case tagString, tagCString, tagBString, tagBSON:
 		return v.String()
@@ -169,7 +169,7 @@ func WriteStringValue(w *schemeTextWriter, v Scmer) {
 		w.WriteString("nil")
 	case tagCString, tagBString:
 		w.writeCompressedText(v)
-	case tagBool, tagString, tagSymbol:
+	case tagBool, tagString, tagSymbol, tagDate:
 		w.WriteString(v.String())
 	case tagSpecialForm:
 		w.WriteString(v.SpecialFormName())

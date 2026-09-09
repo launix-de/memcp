@@ -74,7 +74,7 @@ func toTime(v Scmer) (time.Time, bool) {
 		return time.Unix(v.Int(), 0).UTC(), true
 	case tagFloat:
 		return time.Unix(int64(v.Float()), 0).UTC(), true
-	case tagString, tagSymbol:
+	case tagString, tagSymbol, tagCString, tagBString:
 		if ts, ok := ParseDateString(v.String()); ok {
 			return time.Unix(ts, 0).UTC(), true
 		}
@@ -88,7 +88,11 @@ func sqlTemporalOutput(value Scmer, sqlType string, timezone Scmer) Scmer {
 	if value.IsNil() {
 		return NewNil()
 	}
-	if value.GetTag() == tagDate && value.Int() == mysqlZeroDateUnix {
+	t, ok := toTime(value)
+	if !ok {
+		return value
+	}
+	if t.Unix() == mysqlZeroDateUnix {
 		switch strings.ToUpper(sqlType) {
 		case "DATE":
 			return NewString("0000-00-00")
@@ -97,10 +101,6 @@ func sqlTemporalOutput(value Scmer, sqlType string, timezone Scmer) Scmer {
 		default:
 			return value
 		}
-	}
-	t, ok := toTime(value)
-	if !ok {
-		return value
 	}
 	loc, err := ResolveLocation(timezone.String())
 	if err != nil {

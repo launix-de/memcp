@@ -17,6 +17,7 @@ Copyright (C) 2026  Carl-Philip Hänsch
 package scm
 
 import (
+	"bytes"
 	"testing"
 )
 
@@ -52,8 +53,30 @@ func TestSQLTemporalOutputPreservesMySQLZeroDates(t *testing.T) {
 		if !ok {
 			t.Fatalf("ParseDateString(%q) rejected a MySQL zero date", test.input)
 		}
-		if got := sqlTemporalOutput(NewDate(unix), test.sqlType, NewString("UTC")).String(); got != test.want {
-			t.Fatalf("%s output = %q, want %q", test.sqlType, got, test.want)
+		for _, value := range []Scmer{NewDate(unix), NewString(test.input)} {
+			if got := sqlTemporalOutput(value, test.sqlType, NewString("UTC")).String(); got != test.want {
+				t.Fatalf("%s output (tag %d) = %q, want %q", test.sqlType, value.GetTag(), got, test.want)
+			}
 		}
+	}
+}
+
+func TestDateStringConversionsPreserveTemporalValues(t *testing.T) {
+	for _, input := range []string{"1970-01-01 00:00:00", "2024-06-15 10:30:45", "0000-00-00 00:00:00"} {
+		t.Run(input, func(t *testing.T) {
+			unix, ok := ParseDateString(input)
+			if !ok {
+				t.Fatal("invalid test date")
+			}
+			value := NewDate(unix)
+			if got := String(value); got != input {
+				t.Errorf("String(date) = %q, want %q", got, input)
+			}
+			var buffer bytes.Buffer
+			WriteStringValue(bufferTextWriter(&buffer), value)
+			if got := buffer.String(); got != input {
+				t.Errorf("WriteStringValue(date) = %q, want %q", got, input)
+			}
+		})
 	}
 }
