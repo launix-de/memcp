@@ -92,9 +92,10 @@ func (f ColumnReaderFunc) GetValueRange(recid uint32, count uint32, target []scm
 
 // TxColumnReaderProvider optionally exposes a transaction-bound reader.
 // Storages that do not depend on tx/session context can ignore it and rely on
-// the legacy GetCachedReader path.
+// the legacy GetCachedReader path. The boolean records an already-held shard
+// lock and must propagate when binding computed-column dependencies.
 type TxColumnReaderProvider interface {
-	GetCachedReaderTx(*TxContext) ColumnReader
+	GetCachedReaderTx(*TxContext, bool) ColumnReader
 }
 
 func scmerToTxContext(v scm.Scmer) *TxContext {
@@ -2523,6 +2524,23 @@ func Init(en scm.Env) {
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
+		Name: "init_sql_catalog_keys",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			for _, key := range []struct {
+				table, name string
+				cols        []string
+			}{
+				{"user", "uniq_username", []string{"username"}},
+				{"access", "uniq_user_db", []string{"username", "database"}},
+				{"views", "uniq_database_name", []string{"database", "name"}},
+			} {
+				createTableKey(GetDatabase("system").GetTable(key.table), key.name, key.cols, nil)
+			}
+			return scm.NewBool(true)
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "Initializes the fixed SQL catalog uniqueness constraints; refuses duplicate catalog data", HasSideEffects: true, Params: []*scm.TypeDescriptor{}, Return: &scm.TypeDescriptor{Kind: "bool"}},
+	})
+	scm.Declare(&en, &scm.Declaration{
 		Name: "createkey",
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
@@ -2531,61 +2549,11 @@ func Init(en scm.Env) {
 			if len(a) > 4 {
 				currentTx = scmerToTxContext(a[4])
 			}
-
 			if !scm.ToBool(a[2]) {
 				return scm.NewBool(true)
 			}
-
-			cols := scmerSliceToStrings(mustScmerSlice(a[3], "unique columns"))
-			name := scm.String(a[1])
 			requireTableMaintenance(t.schema.Name, t.Name, maintenanceAlter)
-
-			// SQL DDL runs with a query session. Its exclusive table lock closes the
-			// race with writers which selected the no-UNIQUE insert path before the
-			// metadata was published. Boot-time catalog creation is single-threaded
-			// and therefore does not require a user-level lock.
-			unlockTable := func() {}
-			if ss := SessionStateFromTx(currentTx); ss != nil {
-				unlockTable = acquireTableLock(t.schema.Name, t.Name, true, false, ss, querySeqFromTx(currentTx))
-			}
-			defer unlockTable()
-
-			// Validate under the table-local schema lock, but do not hold the
-			// database-wide catalog lock while scanning table data.
-			alreadyExists, hasDuplicates := func() (bool, bool) {
-				t.ddlMu.Lock()
-				defer t.ddlMu.Unlock()
-				for _, u := range t.Unique {
-					if strings.EqualFold(u.Id, name) {
-						return true, false
-					}
-				}
-				return false, t.hasDuplicateUniqueValues(cols, currentTx)
-			}()
-			if alreadyExists {
-				return scm.NewBool(false)
-			}
-			if hasDuplicates {
-				panic(sqldb.NewSQLError1(1062, "23000", "Duplicate entry in table %s prevents unique key %s", t.Name, name))
-			}
-
-			// Publication follows the documented database -> table DDL lock order.
-			// Recheck the name because another internal DDL operation may have
-			// published metadata between validation and catalog publication.
-			t.schema.schemalock.Lock()
-			t.ddlMu.Lock()
-			defer t.ddlMu.Unlock()
-			for _, u := range t.Unique {
-				if strings.EqualFold(u.Id, name) {
-					t.schema.schemalock.Unlock()
-					return scm.NewBool(false)
-				}
-			}
-			t.Unique = append(t.Unique, uniqueKey{name, cols})
-			t.publishShowColumnsSnapshot()
-			t.schema.saveLockedAndUnlock(t.schemaSaveMode())
-
-			return scm.NewBool(true)
+			return scm.NewBool(createTableKey(t, scm.String(a[1]), scmerSliceToStrings(mustScmerSlice(a[3], "unique columns")), currentTx))
 		},
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "creates a new key on a table", HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
@@ -5128,4 +5096,54 @@ func showBuildShardRow(t *table, i int, s *storageShard) scm.Scmer {
 		scm.NewString("deletions"), scm.NewInt(int64(stats.deletions)),
 		scm.NewString("size_bytes"), scm.NewInt(int64(stats.size)),
 	})
+}
+
+// createTableKey publishes validated uniqueness metadata. Callers enforce user
+// maintenance policy; the fixed bootstrap key list is initialized before serving.
+func createTableKey(t *table, name string, cols []string, currentTx *TxContext) bool {
+	// SQL DDL runs with a query session. Its exclusive table lock closes the
+	// race with writers which selected the no-UNIQUE insert path before the
+	// metadata was published. Boot-time catalog creation is single-threaded
+	// and therefore does not require a user-level lock.
+	unlockTable := func() {}
+	if ss := SessionStateFromTx(currentTx); ss != nil {
+		unlockTable = acquireTableLock(t.schema.Name, t.Name, true, false, ss, querySeqFromTx(currentTx))
+	}
+	defer unlockTable()
+
+	// Validate under the table-local schema lock, but do not hold the
+	// database-wide catalog lock while scanning table data.
+	alreadyExists, hasDuplicates := func() (bool, bool) {
+		t.ddlMu.Lock()
+		defer t.ddlMu.Unlock()
+		for _, u := range t.Unique {
+			if strings.EqualFold(u.Id, name) {
+				return true, false
+			}
+		}
+		return false, t.hasDuplicateUniqueValues(cols, currentTx)
+	}()
+	if alreadyExists {
+		return false
+	}
+	if hasDuplicates {
+		panic(sqldb.NewSQLError1(1062, "23000", "Duplicate entry in table %s prevents unique key %s", t.Name, name))
+	}
+
+	// Publication follows the documented database -> table DDL lock order.
+	// Recheck the name because another internal DDL operation may have
+	// published metadata between validation and catalog publication.
+	t.schema.schemalock.Lock()
+	t.ddlMu.Lock()
+	defer t.ddlMu.Unlock()
+	for _, u := range t.Unique {
+		if strings.EqualFold(u.Id, name) {
+			t.schema.schemalock.Unlock()
+			return false
+		}
+	}
+	t.Unique = append(t.Unique, uniqueKey{name, cols})
+	t.publishShowColumnsSnapshot()
+	t.schema.saveLockedAndUnlock(t.schemaSaveMode())
+	return true
 }

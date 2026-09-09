@@ -290,8 +290,9 @@ func (s *StorageIndex) usesNaturalAscendingOrder(col int) bool {
 }
 
 // buildGetters returns per-column value getters for this index, reading from the
-// shard under a currently-held RLock. Must be called with s.t.mu.RLock held.
-func (s *StorageIndex) buildGetters(_ *TxContext, storage []colGetter) []colGetter {
+// shard under its currently-held read or write lock. Recursive computed
+// readers must use that same lock instead of entering it again.
+func (s *StorageIndex) buildGetters(tx *TxContext, storage []colGetter) []colGetter {
 	var getters []colGetter
 	if cap(storage) >= len(s.Cols) {
 		getters = storage[:len(s.Cols)]
@@ -312,14 +313,14 @@ func (s *StorageIndex) buildGetters(_ *TxContext, storage []colGetter) []colGett
 					continue
 				}
 				cs := s.t.getColumnStorageRLocked(mc)
-				mapColReaders[j] = newCachedColumnReaderTx(cs, nil)
+				mapColReaders[j] = newCachedColumnReaderTx(cs, tx, true)
 			}
 			mapFn := s.ColMapFn[i]
 			fn := scm.PrepareSerialProc(mapFn)
 			getters[i] = colGetter{mapCols: mapColReaders, mapFn: &fn, mapArgs: make([]scm.Scmer, len(mapColReaders))}
 		} else {
 			cs := s.t.getColumnStorageRLocked(col)
-			getters[i] = colGetter{raw: newCachedColumnReaderTx(cs, nil)}
+			getters[i] = colGetter{raw: newCachedColumnReaderTx(cs, tx, true)}
 		}
 	}
 	return getters
@@ -506,7 +507,7 @@ func (s *StorageIndex) getDeltaColValueTx(tx *TxContext, recid uint32, data []sc
 				if !proxy.isOrdered {
 					vals[i] = proxy.getValueRLocked(tx, recid)
 				} else {
-					vals[i] = s.t.ColumnReaderTx(tx, mc)(recid)
+					vals[i] = s.t.ColumnReaderTx(tx, mc, true)(recid)
 				}
 			} else {
 				vals[i] = s.getDeltaValue(data, mc)
@@ -519,7 +520,7 @@ func (s *StorageIndex) getDeltaColValueTx(tx *TxContext, recid uint32, data []sc
 		if !proxy.isOrdered {
 			return proxy.getValueRLocked(tx, recid)
 		}
-		return s.t.ColumnReaderTx(tx, s.Cols[colIdx])(recid)
+		return s.t.ColumnReaderTx(tx, s.Cols[colIdx], true)(recid)
 	}
 	return s.getDeltaValue(data, s.Cols[colIdx])
 }
@@ -1523,7 +1524,7 @@ func (s *StorageIndex) bindRowMatchers(tx *TxContext, bounds scanAccess, indexBo
 			if alignedWithIndex && colIdx < len(cols) {
 				reader = cols[colIdx].raw
 			} else if _, mapFn := bounds.boundaryMap(colIdx); !isScanPseudoColName(column) && mapFn.IsNil() {
-				reader = newCachedColumnReaderTx(s.t.getColumnStorageRLocked(column), tx)
+				reader = newCachedColumnReaderTx(s.t.getColumnStorageRLocked(column), tx, true)
 			}
 			hook = analyzer.Deploy(IndexDeployContext{
 				MainCount: s.t.main_count,

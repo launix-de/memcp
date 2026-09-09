@@ -24,6 +24,7 @@ import "io"
 import "os"
 import "path/filepath"
 import "testing"
+import "github.com/launix-de/memcp/scm"
 
 func TestOpenStreamDecompressesFinalGzipFile(t *testing.T) {
 	t.Parallel()
@@ -163,5 +164,24 @@ func writeZipFile(t *testing.T, path string, files map[string][]byte) {
 	}
 	if err := writer.Close(); err != nil {
 		t.Fatalf("zip.Close(%q): %v", path, err)
+	}
+}
+
+func TestWatchInitialErrorsPropagate(t *testing.T) {
+	for _, missing := range []bool{true, false} {
+		t.Run(map[bool]string{true: "missing-file", false: "callback-panic"}[missing], func(t *testing.T) {
+			dir := t.TempDir()
+			if !missing {
+				if err := os.WriteFile(filepath.Join(dir, "watched"), []byte("initial"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			defer func() {
+				if recover() == nil {
+					t.Error("initial watch error was swallowed")
+				}
+			}()
+			getWatch(dir)(scm.NewString("watched"), scm.NewFunc(func(...scm.Scmer) scm.Scmer { panic("initial callback failed") }))
+		})
 	}
 }

@@ -4267,10 +4267,14 @@ plan construction or timing during compilation. */
 					(if membership_driver
 						(strip_driver_membership_for_source src condition direct_membership)
 						(replace_driver_membership_markers src condition bound_memberships))))
-				(define filter_condition (if use_membership_keysets
-					(replace_driver_membership_keyset_markers
-						candidate_filter_condition membership_keysets)
-					candidate_filter_condition))
+				(define filter_condition (physical_numeric_in_intervals src
+					(physical_order_filter_terms src
+						(if use_membership_keysets
+							(replace_driver_membership_keyset_markers
+								candidate_filter_condition membership_keysets)
+							candidate_filter_condition)
+						(planner_context_session (qb_facts block)))
+					(planner_context_session (qb_facts block))))
 				(define filtercols (merge_unique (list
 					(if (or membership_filter scalar_membership_filter)
 						(list "$recset_contains") '())
@@ -5177,12 +5181,17 @@ until the caller has selected this physical alternative. */
 						(combine_where_terms (nth local_terms index) true))
 					(if (equal? local_condition true)
 						base_rows
+						/* The clamped estimate is identically one for a population
+						of at most one row. Sampling cannot affect this cost, so do
+						not introduce a dependency on an irrelevant session value.
+						Table-statistics guards still protect against data growth. */
+						(if (<= base_rows 1) 1
 						(begin
 							(define estimate
 								(planner_source_filter_estimate src local_condition 512
 									planning_tx planning_session))
 							(max 1 (planner_estimated_matching_rows estimate
-								base_rows base_rows))))))) nil))
+								base_rows base_rows)))))))) nil))
 		/* A local driver predicate is only the first acceptance stage. Every
 		later input may reject the driver row as well, so price ordered braking
 		from the product of the independently estimated inner selectivities.
@@ -5402,7 +5411,7 @@ until the caller has selected this physical alternative. */
 		base table ordered and replaces a supported direct-column marker with the
 		query-scoped key index; unsupported computed keys retain the established probe
 		fallback and its separately calibrated cost. */
-		(define filter_condition effective_condition)
+		(define filter_condition (physical_numeric_in_intervals src effective_condition planning_session))
 		/* Stage-output column references require a relational source and cannot be
 		read directly from the driver callback. Scalar/EXISTS probe markers are not
 		deferred: lowering them at batch cardinality is the purpose of this path. */
@@ -7108,8 +7117,9 @@ carrier remains on the measured direct path and is never built eagerly. */
 					(equal? (car access_path_plan)
 						(qassoc_get access_path_candidate (quote plan) nil))))
 				(define residual_condition
-					(strip_scan_access_path_predicate effective_condition
-						(if access_path_selected access_path_candidate nil)))
+					(physical_numeric_in_intervals src
+						(strip_scan_access_path_predicate effective_condition
+							(if access_path_selected access_path_candidate nil)) planning_session))
 				(define membership_var (symbol "__membership_recset"))
 				(define membership_filter_expr (if membership_filter
 					(recset_contains_call_expr membership_var)

@@ -560,7 +560,7 @@ func (t *storageShard) collectRecSet(access scanAccess, conditionCols []string, 
 				continue
 			}
 			ccols[i] = t.getColumnStorageOrPanic(k, skipShardReadLock, currentTx)
-			cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx)
+			cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx, false)
 			if _, ok := ccols[i].(*StorageComputeProxy); ok {
 				cNeedsCachedReader[i] = true
 			}
@@ -1233,7 +1233,7 @@ func (t *storageShard) recSetPartExists(part *recSetShard, conditionCols []strin
 			continue
 		}
 		ccols[i] = t.getColumnStorageOrPanic(k, skipShardReadLock, currentTx)
-		cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx)
+		cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx, false)
 	}
 	cdataset := make([]scm.Scmer, len(conditionCols))
 
@@ -1320,7 +1320,7 @@ func (t *storageShard) scanRecSetPart(part *recSetShard, conditionCols []string,
 			continue
 		}
 		ccols[i] = t.getColumnStorageOrPanic(k, skipShardReadLock, currentTx)
-		cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx)
+		cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx, false)
 	}
 	cdataset := make([]scm.Scmer, len(conditionCols))
 	var mapperStorage ShardMapReducer
@@ -1495,7 +1495,7 @@ func (t *storageShard) filterRecSetPart(part *recSetShard, conditionCols []strin
 				continue
 			}
 			ccols[i] = t.getColumnStorageOrPanic(k, skipShardReadLock, currentTx)
-			cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx)
+			cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx, false)
 		}
 		cdataset = make([]scm.Scmer, len(conditionCols))
 	}

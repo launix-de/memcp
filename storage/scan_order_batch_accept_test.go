@@ -197,7 +197,7 @@ func TestCollectOrderedCandidateBatchPrunesRangePartitions(t *testing.T) {
 		ids := make([]int64, len(records))
 		for i, record := range records {
 			release := record.shard.GetRead()
-			ids[i] = int64(scm.ToInt(record.shard.ColumnReaderTx(nil, "id")(record.recid)))
+			ids[i] = int64(scm.ToInt(record.shard.ColumnReaderTx(nil, "id", false)(record.recid)))
 			release()
 		}
 		return ids

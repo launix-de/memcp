@@ -5,6 +5,10 @@ metadata:
   description: "Warm ordered queries amid unrelated bound-predicate learning"
   isolated: true
 setup:
+  - sql: "DROP TABLE IF EXISTS qfc_clock"
+  - sql: "CREATE TABLE qfc_clock (id INT PRIMARY KEY) ENGINE=sloppy"
+  - sql: "INSERT INTO qfc_clock (id) VALUES (999)"
+  - scm: '(rebuild (table "memcp-tests" "qfc_clock") true false)'
   - sql: "DROP TABLE IF EXISTS qfc_document"
   - sql: "CREATE TABLE qfc_document (id INT PRIMARY KEY, category INT) ENGINE=sloppy"
   - scm: |
@@ -14,6 +18,54 @@ setup:
         (rebuild (table "memcp-tests" "qfc_document") true false)
         (globalvars "qfc_sequence" 1000))
 test_cases:
+  - name: "Changing runtime cutoffs retain a singleton ordered plan"
+    performance_rows: 1000
+    threshold_ms: 1000
+    scm: |
+      (begin
+        (define cache (newcachemap))
+        (define sess (newsession))
+        (sess "username" "root")
+        (sess "schema" "memcp-tests")
+        (define q "SELECT a.id,b.category,c.category,d.category FROM qfc_clock a LEFT JOIN qfc_document b ON b.id=a.id LEFT JOIN qfc_document c ON c.id=a.id LEFT JOIN qfc_document d ON d.id=a.id WHERE a.id > @cutoff ORDER BY a.id LIMIT 72")
+        (define rows (newsession))
+        (rows "n" 0)
+        (reduce (produceN 16) (lambda (_ i)
+          (begin
+            (sess "cutoff" (+ 998 i))
+            (sql_execute_formula sess nil
+              (cached_parse cache (list parse_sql) "memcp-tests" q nil "root" sess true)
+              (lambda (_row) (rows "n" (+ (rows "n") 1)))
+              (lambda (_fields) nil)))) nil)
+        (if (equal? (rows "n") 1) true (error "runtime cutoff changed query results")))
+    expect:
+      rows: 1
+      result_contains: ["true"]
+  - name: "Changing runtime cutoffs retain an ACL count plan"
+    performance_rows: 1000
+    # Sixteen complete requests; measured baseline is about 2-4 seconds.
+    # The A/B ratio remains enforced independently of this absolute ceiling.
+    threshold_ms: 5000
+    scm: |
+      (begin
+        (define cache (newcachemap))
+        (define sess (newsession))
+        (sess "username" "root")
+        (sess "schema" "memcp-tests")
+        (define q "SELECT COUNT(*) AS n FROM qfc_clock a WHERE a.id > @cutoff AND COALESCE((SELECT CASE WHEN b.category=9 THEN TRUE ELSE EXISTS(SELECT 1 FROM qfc_document c WHERE c.id=b.id AND c.category=9) END FROM qfc_document b WHERE b.id=a.id LIMIT 1),FALSE)")
+        (define rows (newsession))
+        (rows "n" 0)
+        (reduce (produceN 16) (lambda (_ i)
+          (begin
+            (sess "cutoff" (+ 998 i))
+            (sql_execute_formula sess nil
+              (cached_parse cache (list parse_sql) "memcp-tests" q nil "root" sess true)
+              (lambda (row) (rows "n" (+ (rows "n") (cadr row))))
+              (lambda (_fields) nil)))) nil)
+        (if (equal? (rows "n") 1) true (error "runtime cutoff changed ACL count results")))
+    expect:
+      rows: 1
+      result_contains: ["true"]
   - name: "Ordered cache reuse survives a sequence of unrelated learned filters"
     performance_rows: 1000
     threshold_ms: 1000
@@ -45,4 +97,5 @@ test_cases:
       rows: 1
       result_contains: ["true"]
 cleanup:
+  - sql: "DROP TABLE IF EXISTS qfc_clock"
   - sql: "DROP TABLE IF EXISTS qfc_document"

@@ -46,6 +46,34 @@ test_cases:
     sql: "SELECT post_title FROM wordpress_perf_posts WHERE ID = 4242"
     expect: {rows: 1}
 
+  - name: "WordPress batch post lookup"
+    warmup: 10
+    timing_samples: 30
+    performance_rows: 8214
+    threshold_ms: 2
+    sql: "SELECT * FROM wordpress_perf_posts WHERE ID IN (4249,4248,4247,4246,4245,4244,4243,4242,4241,4240) ORDER BY ID"
+    expect:
+      rows: 10
+      data:
+        - {ID: 4240, post_title: "Benchmark Post 4240", post_status: "draft", post_type: "post"}
+        - {ID: 4241, post_title: "Benchmark Post 4241", post_status: "publish", post_type: "post"}
+        - {ID: 4242, post_title: "Benchmark Post 4242", post_status: "publish", post_type: "post"}
+        - {ID: 4243, post_title: "Benchmark Post 4243", post_status: "publish", post_type: "post"}
+        - {ID: 4244, post_title: "Benchmark Post 4244", post_status: "publish", post_type: "post"}
+        - {ID: 4245, post_title: "Benchmark Post 4245", post_status: "publish", post_type: "post"}
+        - {ID: 4246, post_title: "Benchmark Post 4246", post_status: "publish", post_type: "post"}
+        - {ID: 4247, post_title: "Benchmark Post 4247", post_status: "publish", post_type: "post"}
+        - {ID: 4248, post_title: "Benchmark Post 4248", post_status: "publish", post_type: "post"}
+        - {ID: 4249, post_title: "Benchmark Post 4249", post_status: "publish", post_type: "post"}
+
+  - name: "WordPress batch metadata lookup"
+    warmup: 10
+    timing_samples: 30
+    performance_rows: 75000
+    threshold_ms: 3
+    sql: "SELECT post_id, meta_key, meta_value FROM wordpress_perf_postmeta WHERE post_id IN (4249,4248,4247,4246,4245,4244,4243,4242,4241,4240) ORDER BY meta_id"
+    expect: {rows: 90}
+
   - name: "WordPress post ordered limit"
     warmup: 10
     timing_samples: 50
@@ -203,8 +231,11 @@ test_cases:
             (list
               (list 370535686995968 (scan_boundary "equal" "meta_key" 0 0 true true "" false))
               (list 370535955431424
-                (scan_boundary "equal" "post_status" 0 0 true true "" false)
-                (scan_boundary "equal" "post_type" 1 1 true true "" false)))
+                /* Slots address the single shared accessValues array below,
+                not an array per input. Dropping unique-probe boundaries
+                used to hide incorrect slots here (status=custom_color). */
+                (scan_boundary "equal" "post_status" 1 1 true true "" false)
+                (scan_boundary "equal" "post_type" 2 2 true true "" false)))
             (list "custom_color" "publish" "post")
             (list (list) (list))
             (list (lambda () true) (lambda () true))

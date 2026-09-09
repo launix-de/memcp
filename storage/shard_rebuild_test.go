@@ -731,7 +731,7 @@ func TestShardRebuildUpdatePropagationUsesStableTranslation(t *testing.T) {
 	rebuilt.mu.RLock()
 	rowOneDeleted := rebuilt.deletions.Get(1)
 	rebuilt.mu.RUnlock()
-	got := rebuilt.ColumnReaderTx(nil, "payload")(2)
+	got := rebuilt.ColumnReaderTx(nil, "payload", false)(2)
 	if !rowOneDeleted || got.String() != "two-updated" {
 		t.Fatalf("rebuilt update state = (deleted=%v, payload=%v), want (true, two-updated)", rowOneDeleted, got)
 	}
@@ -2184,5 +2184,52 @@ func TestCursorRollbackOfMainDeleteSurvivesRestart(t *testing.T) {
 	reloaded := reloadTableFromPersistence(t, "tcursorrollbackreload", persistence)
 	if got := reloaded.Count(); got != 1 {
 		t.Fatalf("reloaded count after cursor rollback = %d, want 1; rollback was not represented in WAL", got)
+	}
+}
+
+// Rebuild warms indexes while its unpublished replacement shard is locked.
+// Computed index inputs must bind recursively without entering that lock again.
+func TestIndexComputedReadersRespectHeldShardLock(t *testing.T) {
+	for _, mapped := range []bool{false, true} {
+		t.Run(fmt.Sprintf("mapped=%t", mapped), func(t *testing.T) {
+			shard := &storageShard{t: &table{}, srState: SHARED, main_count: 1,
+				columns: map[string]ColumnStorage{
+					"raw": &StorageSCMER{values: []scm.Scmer{scm.NewInt(7)}},
+				}}
+			release := shard.GetExclusive()
+			defer release()
+			shard.mu.Lock()
+			shard.columns["input"] = &StorageComputeProxy{
+				shard: shard, colName: "input", inputCols: []string{"raw"}, count: 1,
+				delta: map[uint32]scm.Scmer{0: scm.NewInt(7)},
+			}
+			shard.columns["computed"] = &StorageComputeProxy{
+				shard: shard, colName: "computed", inputCols: []string{"input"}, count: 1,
+				delta: map[uint32]scm.Scmer{0: scm.NewInt(14)},
+			}
+			index := &StorageIndex{t: shard, Cols: []string{"computed"}}
+			if mapped {
+				index.Cols = []string{".mapped"}
+				index.ColMapCols = [][]string{{"computed"}}
+				index.ColMapFn = []scm.Scmer{scm.NewFunc(func(args ...scm.Scmer) scm.Scmer { return args[0] })}
+			}
+			done := make(chan []colGetter, 1)
+			go func() { done <- index.buildGetters(nil, nil) }()
+			var getters []colGetter
+			select {
+			case getters = <-done:
+				shard.mu.Unlock()
+			case <-time.After(time.Second):
+				// Release the lock before failing so the baseline worker can exit.
+				shard.mu.Unlock()
+				getters = <-done
+				t.Error("index reader recursively acquired the held shard lock")
+			}
+			shard.mu.RLock()
+			defer shard.mu.RUnlock()
+			if got := getters[0].get(0); got.Int() != 14 {
+				t.Fatalf("computed index value = %v, want 14", got)
+			}
+		})
 	}
 }

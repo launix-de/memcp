@@ -315,6 +315,20 @@ test_cases:
     expect:
       data: ["ok"]
 
+  - name: "Metadata binding recipes read the executing session"
+    scm: |
+      (begin
+        (define session (newsession))
+        (session "cutoff" 47)
+        (define access (eval (compile_scan_access '("id")
+          (scheme "(lambda (id) (> id (session \"cutoff\")))") true false)))
+        (session "cutoff" 48)
+        (if (and (scan_access_schema? (car access))
+            (equal? (map (cadr access) (lambda (expr) (eval expr))) '(48)))
+          "ok" (error "metadata recipe captured the compilation session value")))
+    expect:
+      data: ["ok"]
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS sb_orders"
   - sql: "DROP TABLE IF EXISTS sb_customers"

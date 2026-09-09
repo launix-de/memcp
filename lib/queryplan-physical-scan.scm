@@ -325,7 +325,9 @@ one compilation result. All consumers share the same boundary/coverage proof. */
 								bindings remaining_columns remaining_filter)))))))))
 
 /* The returned expression is evaluated by the caller, so references to its
-lexical bindings never escape into the compiler's environment. */
+lexical bindings never escape into the compiler's environment. With bind_values
+false, evaluating this expression returns the binding ASTs as data for guards
+that will read the executing request later. */
 (define compile_scan_access (lambda arguments
 	(match arguments (merge '(columns callback) options)
 		(begin
@@ -337,7 +339,8 @@ lexical bindings never escape into the compiler's environment. */
 					_ (list '() '()))
 				(scan_plan_compile_filter columns callback)))
 			(list (quote list) (list (quote quote) (scan_access_cover (car compiled) false))
-				(scan_plan_values (cadr compiled)))))))
+				(if (and (> (count options) 1) (not (cadr options)))
+					(list (quote quote) (cadr compiled)) (scan_plan_values (cadr compiled))))))))
 
 (define scan_plan_compile_multi (lambda (columns filters shift)
 	(if (equal? columns '()) (list '() '() '() '())

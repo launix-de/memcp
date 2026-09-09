@@ -335,7 +335,7 @@ func (t *storageShard) scanLookupMapOne(access scanAccess, mapCols []string, cur
 	t.ensureMainCount(false)
 	lookupCol := access.boundaryColumn(0)
 	lookupValue := access.boundValue(0, false)
-	lookupReader := newCachedColumnReaderTx(t.getColumnStorageOrPanic(lookupCol, false, currentTx), currentTx)
+	lookupReader := newCachedColumnReaderTx(t.getColumnStorageOrPanic(lookupCol, false, currentTx), currentTx, false)
 	lookupGetValue := compiledColumnGetValue(lookupReader)
 	var fixedMapReaders [8]scanLookupMapReader
 	mapReaders := fixedMapReaders[:]
@@ -391,7 +391,7 @@ func (t *storageShard) scanLookupMapOne(access scanAccess, mapCols []string, cur
 func (t *storageShard) prepareScanLookupMapReaders(mapCols []string, readers []scanLookupMapReader, currentTx *TxContext) {
 	for i, col := range mapCols {
 		storage := t.getColumnStorageOrPanic(col, false, currentTx)
-		readers[i].reader = newCachedColumnReaderTx(storage, currentTx)
+		readers[i].reader = newCachedColumnReaderTx(storage, currentTx, false)
 		readers[i].compiled = compiledColumnGetValue(readers[i].reader)
 		_, readers[i].computed = storage.(*StorageComputeProxy)
 	}
@@ -480,14 +480,14 @@ func (t *storageShard) scanLookupOne(access scanAccess, resultCol string, return
 	lookupCol := access.boundaryColumn(0)
 	lookupValue := access.boundValue(0, false)
 	lookupStorage := t.getColumnStorageOrPanic(lookupCol, false, currentTx)
-	lookupReader := newCachedColumnReaderTx(lookupStorage, currentTx)
+	lookupReader := newCachedColumnReaderTx(lookupStorage, currentTx, false)
 	lookupGetValue := compiledColumnGetValue(lookupReader)
 	var resultReader ColumnReader
 	var resultGetValue scm.JITStorageGetValueFunc
 	resultComputed := false
 	if returnValue {
 		resultStorage := t.getColumnStorageOrPanic(resultCol, false, currentTx)
-		resultReader = newCachedColumnReaderTx(resultStorage, currentTx)
+		resultReader = newCachedColumnReaderTx(resultStorage, currentTx, false)
 		resultGetValue = compiledColumnGetValue(resultReader)
 		_, resultComputed = resultStorage.(*StorageComputeProxy)
 	}
@@ -635,13 +635,13 @@ func (t *storageShard) scanLookupMany(access scanAccess, resultCol string, retur
 		lookupReaders = make([]scanLookupValueReader, access.len())
 	}
 	for i := range lookupReaders {
-		lookupReaders[i] = newScanLookupValueReader(newCachedColumnReaderTx(t.getColumnStorageOrPanic(access.boundaryColumn(i), false, currentTx), currentTx))
+		lookupReaders[i] = newScanLookupValueReader(newCachedColumnReaderTx(t.getColumnStorageOrPanic(access.boundaryColumn(i), false, currentTx), currentTx, false))
 	}
 	var resultReader scanLookupValueReader
 	resultComputed := false
 	if returnValue {
 		resultStorage := t.getColumnStorageOrPanic(resultCol, false, currentTx)
-		resultReader = newScanLookupValueReader(newCachedColumnReaderTx(resultStorage, currentTx))
+		resultReader = newScanLookupValueReader(newCachedColumnReaderTx(resultStorage, currentTx, false))
 		_, resultComputed = resultStorage.(*StorageComputeProxy)
 	}
 
@@ -769,7 +769,7 @@ func (t *storageShard) scanLookupMapMany(access scanAccess, mapCols []string, cu
 		lookupReaders = make([]scanLookupValueReader, access.len())
 	}
 	for i := range lookupReaders {
-		lookupReaders[i] = newScanLookupValueReader(newCachedColumnReaderTx(t.getColumnStorageOrPanic(access.boundaryColumn(i), false, currentTx), currentTx))
+		lookupReaders[i] = newScanLookupValueReader(newCachedColumnReaderTx(t.getColumnStorageOrPanic(access.boundaryColumn(i), false, currentTx), currentTx, false))
 	}
 	var fixedMapReaders [8]scanLookupMapReader
 	mapReaders := fixedMapReaders[:]

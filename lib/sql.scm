@@ -213,7 +213,11 @@ current request bindings. Quoted planner/catalog payloads remain data. */
 			(sql_queryplan_guard_references_symbol? head target)
 			(reduce tail (lambda (found item)
 				(or found (sql_queryplan_guard_references_symbol? item target))) false))
-		_ (equal? expr target))))
+		/* equal? admits truth-value coercion: true compares equal to a symbol.
+		Liveness is syntactic, not SQL/SCM value equality. Without this type
+		check a literal true keeps every discarded cost binding alive, executing
+		unused estimator calls on each cached query. */
+		_ (and (symbol? expr) (equal? expr target)))))
 
 /* Avoid degenerate generated `and` forms while retaining normal short-circuit
 semantics for multiple independent cache assumptions. */
@@ -613,13 +617,6 @@ if the user is not allowed to access this property, the function will throw an e
 		true)
 )) (lambda (e) true))
 
-/* ensure unique username constraint to avoid duplicates */
-(try (lambda () (begin
-	(if (has? (show "system") "user")
-		(createkey (table "system" "user") "uniq_username" true '("username"))
-		true)
-)) (lambda (e) true))
-
 /* error query log table */
 (if (not (has? (show "system_statistic") "errors")) (begin
 	(print "creating table system_statistic.errors")
@@ -669,21 +666,12 @@ the latter is expanded before logical planning and never materialized. */
 	(eval (parse_sql "system" "CREATE TABLE `views`(`database` text, `name` text, `dialect` text, `sql` text, `ir` text) ENGINE=SAFE" (lambda (schema tblname write) true)))
 ))
 
-(try (lambda () (begin
-	(if (has? (show "system") "views")
-		(createkey (table "system" "views") "uniq_database_name" true '("database" "name"))
-		true)
-)) (lambda (e) true))
-
 (sql_view_catalog_set_count
 	(scan nil (table "system" "views") '(369435906932736) '() '() (lambda () true) '() (lambda (acc) (+ acc 1)) 0 +))
 
-/* migration: ensure unique (username, database) constraint on system.access */
-(try (lambda () (begin
-	(if (has? (show "system") "access")
-		(createkey (table "system" "access") "uniq_user_db" true '("username" "database"))
-		true)
-)) (lambda (e) true))
+/* Bootstrap owns these fixed catalog constraints. Do not suppress failures:
+without them repeated grants create duplicate accounts and ambiguous authentication. */
+(init_sql_catalog_keys)
 
 /* global variables exposed via @@ and SHOW VARIABLES */
 (set globalvars (newsession))
