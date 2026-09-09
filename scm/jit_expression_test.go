@@ -1475,3 +1475,31 @@ func TestJITExpressionRecursivePanicAcrossDirectFrames(t *testing.T) {
 		t.Fatal("panic did not unwind through consecutive JIT frames")
 	}
 }
+
+func TestJITCompressedTextOperators(t *testing.T) {
+	constant := compileJITExpressionTestProc(t, `(lambda () (base64_encode "foo"))`)
+	if got := Apply(constant).String(); got != "Zm9v" {
+		t.Fatal(got)
+	}
+	compiled := compileJITExpressionTestProc(t, `(lambda (s) (list (string? s) (strlen s) (substr s 1 3) (toUpper s) (strtrim s) (concat s "!") (strlike_cs s "%m9%") (base64_decode s) (md5 s) (sha1 s) (sha256 s)))`)
+	text := "foo"
+	compressed := NewBString(unsafe.StringData(text), len(text), false)
+	got := Apply(compiled, compressed)
+	want := Apply(compiled, NewString(compressed.String()))
+	if String(got) != String(want) {
+		t.Fatalf("compressed %s, plain %s", String(got), String(want))
+	}
+	large := strings.Repeat("foo", 1024)
+	largeValue := NewBString(unsafe.StringData(large), len(large), false)
+	if got, want := Apply(compiled, largeValue), Apply(compiled, NewString(largeValue.String())); String(got) != String(want) {
+		t.Fatal("large compressed operator chain differs from plain text")
+	}
+	for _, literal := range []Scmer{compressed, NewCString(unsafe.StringData(text), 0, 0, len(text))} {
+		proc := jitCompile(NewProcStruct(Proc{Params: NewSlice(nil), Body: literal, En: &Globalenv}))
+		runtime.GC()
+		result := Apply(proc)
+		if result != literal {
+			t.Fatal("compressed literal changed during compilation")
+		}
+	}
+}
