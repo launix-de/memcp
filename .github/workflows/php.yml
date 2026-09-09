@@ -28,9 +28,9 @@ jobs:
           ./configure --prefix="$RUNNER_TEMP/php-zts" \
             --disable-all --enable-cli --enable-embed=shared --enable-zts \
             --disable-zend-signals --enable-zend-max-execution-timers \
-            --with-gettext --enable-mbstring --enable-intl --with-zip --with-gmp \
+            --with-gettext --enable-mbstring --enable-mbregex --enable-intl --with-zip --with-gmp \
             --with-curl --with-openssl --with-zlib --with-iconv \
-            --enable-dom --enable-xml --enable-xmlreader --enable-xmlwriter --enable-simplexml \
+            --with-libxml --enable-dom --enable-xml --enable-xmlreader --enable-xmlwriter --enable-simplexml \
             --enable-fileinfo --enable-filter --enable-tokenizer --enable-ctype \
             --enable-gd --with-jpeg --with-freetype --with-webp \
             --enable-pdo --with-pdo-sqlite --with-pdo-mysql=mysqlnd --enable-mysqlnd --enable-session
