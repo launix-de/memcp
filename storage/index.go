@@ -158,12 +158,9 @@ func boundaryOrder(t *table, boundary analyzedBoundary) (func(scm.Scmer, scm.Scm
 		}
 		return scm.OrderRelationLess(boundary.order), meta
 	}
-	// Materialized group keys currently carry "any" column metadata. Preserve
-	// the EqualSQL order encoded by the compiled predicate there. Base-table
-	// columns retain their declared canonical order; their residual callback is
-	// still authoritative for SQL equality semantics.
-	if boundary.collation != "" && strings.HasPrefix(t.Name, ".grp:") &&
-		(boundary.lower.IsString() || boundary.lower.IsSymbol()) {
+	// Predicate collation defines the search interval, including explicit COLLATE
+	// overrides on base columns. It is independent of the requested output order.
+	if boundary.collation != "" && (boundary.lower.IsString() || boundary.lower.IsSymbol() || boundary.upper.IsString() || boundary.upper.IsSymbol()) {
 		value := scm.Apply(scm.Globalenv.Vars[scm.Symbol("collate")], scm.NewString(boundary.collation), scm.NewBool(false))
 		order := value.Func()
 		return scm.OrderRelationLess(order), orderRelationMeta(order)
@@ -180,8 +177,8 @@ func scanAccessBoundaryOrder(t *table, access scanAccess, column int) (func(scm.
 		return scm.OrderRelationLess(order), meta
 	}
 	collation := access.boundaryCollation(column)
-	lower := access.boundValue(column, false)
-	if collation != "" && strings.HasPrefix(t.Name, ".grp:") && (lower.IsString() || lower.IsSymbol()) {
+	lower, upper := access.boundValue(column, false), access.boundValue(column, true)
+	if collation != "" && (lower.IsString() || lower.IsSymbol() || upper.IsString() || upper.IsSymbol()) {
 		value := scm.Apply(scm.Globalenv.Vars[scm.Symbol("collate")], scm.NewString(collation), scm.NewBool(false))
 		order = value.Func()
 		return scm.OrderRelationLess(order), orderRelationMeta(order)
@@ -206,8 +203,7 @@ func indexOrderMatchesBoundary(t *table, index *StorageIndex, column int, bounda
 		}
 		return meta == required
 	}
-	if boundary.collation != "" && strings.HasPrefix(t.Name, ".grp:") &&
-		(boundary.lower.IsString() || boundary.lower.IsSymbol()) {
+	if boundary.collation != "" && (boundary.lower.IsString() || boundary.lower.IsSymbol() || boundary.upper.IsString() || boundary.upper.IsSymbol()) {
 		return ascendingOrderMetaMatches(meta, boundary.collation)
 	}
 	collation := "bin"
@@ -235,8 +231,8 @@ func indexOrderMatchesScanAccess(t *table, index *StorageIndex, column int, acce
 		return meta == required
 	}
 	collation := access.boundaryCollation(column)
-	lower := access.boundValue(column, false)
-	if collation != "" && strings.HasPrefix(t.Name, ".grp:") && (lower.IsString() || lower.IsSymbol()) {
+	lower, upper := access.boundValue(column, false), access.boundValue(column, true)
+	if collation != "" && (lower.IsString() || lower.IsSymbol() || upper.IsString() || upper.IsSymbol()) {
 		return ascendingOrderMetaMatches(meta, collation)
 	}
 	collation = "bin"

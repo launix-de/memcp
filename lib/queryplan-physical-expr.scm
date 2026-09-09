@@ -2818,31 +2818,24 @@ coercion and collations do not have the same ordering proof. */
 /* Preserve value provenance before physical helper columns replace the input.
 Aggregate wrappers carry the input value's collation; explicit ORDER BY COLLATE
 callbacks remain authoritative. Numeric aggregate results ignore string collation. */
-(define physical_expr_collation_source (lambda (input expr)
-	(match expr
-		((symbol aggregate) value _reduce _neutral) (physical_expr_collation_source input value)
-		((symbol aggregate) value _reduce _neutral _finalize) (physical_expr_collation_source input value)
-		((symbol get_column) tblvar ignorecase col _col_ignorecase)
-		(begin
-			(define sources (canonical_helper_sources input))
-			(define alias (resolve_column_alias tblvar (if (empty_list? sources) nil (source_alias (car sources)))))
-			(define src (find sources (lambda (candidate)
-				(source_alias_matches? candidate (source_alias candidate) alias ignorecase)) nil))
-			(if (or (nil? src) (not (source_is_base_table? src))) nil (list src col)))
-		_ nil)))
-
 (define physical_expr_collation (lambda (input expr)
-	(match (physical_expr_collation_source input expr)
-		'(src col) (source_column_order_collation src col)
-		_ "bin")))
+	(sql_collation_name (sql_expr_info (canonical_helper_sources input) expr))))
 
-/* Evaluate metadata after prerequisite prejoin columns have been created.
-Only the physical table/column handle crosses into the generated expression. */
+/* Helper source columns may only exist after prerequisite preparation. Resolve
+this metadata once in setup, using the same descriptor compiler as SQL. */
 (define physical_column_collation_expr (lambda (input expr)
-	(match (physical_expr_collation_source input expr)
-		'(src col) (list (quote source_column_order_collation)
-			(quoted_runtime_list (list (source_alias src) (source_schema src) (source_relation src) false nil)) col)
-		_ "bin")))
+	(list (quote sql_collation_name)
+		(list (quote sql_expr_info) (list (quote quote) (canonical_helper_sources input))
+			(list (quote quote) expr)))))
+
+(define merge_collated_group_plan (lambda (input keys grouped combine)
+	(begin
+		(define infos (map keys (lambda (key) (sql_expr_info (canonical_helper_sources input) key))))
+		(if (reduce infos (lambda (needed info)
+			(or needed (not (nil? (sql_info_collation info))))) false)
+			(list (quote sql_merge_collated_groups) grouped
+				(cons (quote list) (map infos (lambda (info) (collate (sql_collation_name info) false)))) combine)
+			grouped))))
 
 (define canonical_order_relation (lambda (dir collation)
 	(if (or (equal? dir <) (equal? dir >))
@@ -4838,9 +4831,9 @@ the enclosing carrier identity supplies the remaining query context. */
 	/* The readable label is not an identity. The hash covers the canonical input
 	graph, source-role-aware keys, and complete filter, so equivalent aliases
 	converge while self-join roles and different predicates remain separated.
-	Version 6 creates helper columns with source collation metadata. */
+	Version 7 merges keys using the propagated expression collation. */
 	(concat ".grp:" label ":" (stable_structural_hash (list
-		"canonical-group-keytable-v6" schema input_identity keys condition) true))))
+		"canonical-group-keytable-v7" schema input_identity keys condition) true))))
 
 /* Persistent helper objects must be named by the physical data they represent,
 not by disposable SQL aliases. Source position remains part of the identity so
@@ -5497,15 +5490,16 @@ ever-larger subtrees. */
 				(map cols (lambda (col) (symbol col)))
 				(lower_group_computed_order_expr expr))))))
 
-(define group_key_equality_terms (lambda (alias key_names keys)
-	(begin
-		(define src (list alias nil nil false nil))
-		(map (produceN (count keys)) (lambda (i)
-			(if (query_session_read? (nth keys i))
-				true
-				(list (quote equal?)
-					(lower_column_expr_for_alias src (nth keys i))
-					(list (quote outer) 1 (symbol (nth key_names i))))))))))
+(define group_key_equality_terms (lambda (src key_names keys)
+	(map (produceN (count keys)) (lambda (i)
+		(if (query_session_read? (nth keys i)) true
+			(begin
+				(define key (nth keys i))
+				(define info (sql_expr_info (list src) key))
+				(define left (lower_column_expr_for_alias src key))
+				(define right (list (quote outer) 1 (symbol (nth key_names i))))
+				(if (nil? (sql_info_collation info)) (list (quote equal?) left right)
+					(list (quote sql_group_equal) left right (collate (sql_collation_name info) false)))))))))
 
 /* aggregate_probe_bindings describe query-local equality probes over a shared
 partitioned aggregate. They affect only which computed group rows are eagerly
@@ -5583,7 +5577,7 @@ every group row and its canonical identity stays independent of bound values. */
 		(list
 			(list (quote lambda) (list (quote grouped))
 				(group_insert_batches_expr schema grouptbl key_names '() false (quote grouped)))
-			(lower_query_block_as_dataset_reduce
+			(merge_collated_group_plan input keys (lower_query_block_as_dataset_reduce
 				input
 				key_fields
 				(list (quote lambda)
@@ -5592,7 +5586,7 @@ every group row and its canonical identity stays independent of bound values. */
 				(list (quote lambda) (list (quote acc) (quote rowvals))
 					(list (quote set_assoc) (quote acc) (quote rowvals) (list (quote list))))
 				(list (quote list))
-				combine_grouped)))))
+				combine_grouped) keep_old)))))
 
 (define build_group_ordered_scalar_column (lambda (stage schema tbl alias grouptbl keys key_names condition ag value_expr order_exprs dirs offset_value agg_reduce agg_neutral)
 	(begin
@@ -5621,7 +5615,7 @@ every group row and its canonical identity stays independent of bound values. */
 						(map filtercols (lambda (col) (symbol (concat alias "." col))))
 						(cons (quote and) (cons
 							(lower_column_expr_for_alias src condition)
-							(group_key_equality_terms alias key_names keys))))
+							(group_key_equality_terms src key_names keys))))
 					(quoted_runtime_list order_cols)
 					(cons (quote list) dirs)
 					0
@@ -5745,7 +5739,7 @@ every group row and its canonical identity stays independent of bound values. */
 						(map filtercols (lambda (col) (symbol (concat alias "." col))))
 						(cons (quote and) (cons
 							(lower_column_expr_for_alias src condition)
-							(group_key_equality_terms alias key_names keys))))
+							(group_key_equality_terms src key_names keys))))
 					(cons (quote list) aggcols)
 					(scan_mapreduce_expr
 						(map aggcols (lambda (col) (symbol (concat alias "." col))))
@@ -5930,7 +5924,7 @@ otherwise unnecessary one-entry associative group. */
 			(aggregate_payload_merge_expr ags 0)))
 		(define merge_groups (list (quote lambda) (list (quote acc) (quote grouped))
 			(list (quote merge_assoc) (quote acc) (quote grouped) merge_payload)))
-		(compile_scan_plan (quote scan)
+		(define grouped (compile_scan_plan (quote scan)
 			(physical_query_tx_symbol)
 			table_expr
 			(cons (quote list) filtercols)
@@ -5947,7 +5941,8 @@ otherwise unnecessary one-entry associative group. */
 					merge_payload))
 			(list (quote list))
 			merge_groups
-			false))))
+			false))
+		(merge_collated_group_plan src keys grouped merge_payload))))
 
 (define build_base_ungrouped_aggregate_state_plan (lambda (schema tbl alias table_expr condition ag)
 	(match ag

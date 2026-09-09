@@ -297,7 +297,7 @@ func updateMySQLFieldMetadata(field *querypb.Field, val Scmer) {
 	}
 }
 
-func prepareMySQLResultRow(fields *[]*querypb.Field, colmap map[string]int, item []Scmer, row []Scmer, schemaInitialized bool, refineNullTypes bool) ([]Scmer, bool) {
+func prepareMySQLResultRow(fields *[]*querypb.Field, colmap map[string]int, item []Scmer, row []Scmer, schemaInitialized bool) ([]Scmer, bool) {
 	if schemaInitialized {
 		if len(item) == len(*fields)*2 {
 			ordered := true
@@ -311,9 +311,6 @@ func prepareMySQLResultRow(fields *[]*querypb.Field, colmap map[string]int, item
 				for i := range *fields {
 					val := item[i*2+1]
 					row[i] = val
-					if refineNullTypes && (*fields)[i].Type == querypb.Type_NULL_TYPE && !val.IsNil() {
-						updateMySQLFieldMetadata((*fields)[i], val)
-					}
 				}
 				return row, false
 			}
@@ -331,7 +328,7 @@ func prepareMySQLResultRow(fields *[]*querypb.Field, colmap map[string]int, item
 		colid, ok := colmap[colname]
 		if ok {
 			row[colid] = val
-			if !schemaInitialized || (refineNullTypes && (*fields)[colid].Type == querypb.Type_NULL_TYPE && !val.IsNil()) {
+			if !schemaInitialized {
 				updateMySQLFieldMetadata((*fields)[colid], val)
 			}
 		} else if schemaInitialized {
@@ -363,24 +360,88 @@ func appendScmerToMySQLRow(row *driver.RowWriter, val Scmer) {
 	}
 }
 
-const mysqlFieldDiscoveryRows = 1024
-
-func mysqlFieldsResolved(fields []*querypb.Field) bool {
-	for _, field := range fields {
-		if field.Type == querypb.Type_NULL_TYPE {
-			return false
-		}
-	}
-	return true
+// SQLResultField is the compiler's result contract, shared by wire and RAM PDO.
+// No row sampling is involved: even an empty result has declared types.
+type SQLResultField struct {
+	Name, Type, Collation string
 }
 
-func prepareMySQLResultFields(titles []Scmer) ([]*querypb.Field, map[string]int, []Scmer) {
-	fields := make([]*querypb.Field, len(titles))
-	colmap := make(map[string]int, len(titles))
-	for i, title := range titles {
-		name := title.String()
-		fields[i] = &querypb.Field{Name: name, Type: querypb.Type_NULL_TYPE}
-		colmap[name] = i
+func ParseSQLResultField(value Scmer) SQLResultField {
+	if value.IsSlice() {
+		parts := value.Slice()
+		if len(parts) != 3 {
+			panic("result field must contain name, type and collation")
+		}
+		return SQLResultField{parts[0].String(), strings.ToUpper(parts[1].String()), parts[2].String()}
+	}
+	// Non-SELECT producers may still declare names only.
+	return SQLResultField{Name: value.String(), Type: "VARCHAR", Collation: "utf8mb4"}
+}
+
+func (f SQLResultField) Value(value Scmer) Scmer {
+	if value.IsNil() {
+		return value
+	}
+	switch f.Type {
+	case "BOOL", "BOOLEAN", "INT", "INTEGER", "BIGINT", "SMALLINT", "MEDIUMINT", "TINYINT", "BIT":
+		return NewInt(value.Int())
+	case "FLOAT", "DOUBLE", "REAL":
+		return NewFloat(value.Float())
+	case "NULL":
+		return NewNil()
+	default:
+		return NewString(value.String())
+	}
+}
+
+func (f SQLResultField) mysqlField() *querypb.Field {
+	field := &querypb.Field{Name: f.Name, Type: querypb.Type_VARCHAR, Charset: 45}
+	switch f.Type {
+	case "BOOL", "BOOLEAN", "INT", "INTEGER", "BIGINT", "SMALLINT", "MEDIUMINT", "TINYINT", "BIT":
+		field.Type, field.Charset = querypb.Type_INT64, 63
+	case "FLOAT", "DOUBLE", "REAL":
+		field.Type, field.Charset = querypb.Type_FLOAT64, 63
+	case "DECIMAL", "NUMERIC":
+		field.Type, field.Charset = querypb.Type_DECIMAL, 63
+	case "DATE":
+		field.Type, field.Charset = querypb.Type_DATE, 63
+	case "DATETIME":
+		field.Type, field.Charset = querypb.Type_DATETIME, 63
+	case "TIMESTAMP":
+		field.Type, field.Charset = querypb.Type_TIMESTAMP, 63
+	case "TIME":
+		field.Type, field.Charset = querypb.Type_TIME, 63
+	case "BINARY", "VARBINARY", "BLOB", "TINYBLOB", "MEDIUMBLOB", "LONGBLOB":
+		field.Type, field.Charset = querypb.Type_VARBINARY, 63
+	case "NULL":
+		field.Type, field.Charset = querypb.Type_NULL_TYPE, 63
+	}
+	if field.Type == querypb.Type_VARCHAR {
+		switch f.Collation {
+		case "bin", "binary":
+			field.Charset = 63
+		case "utf8mb4_bin":
+			field.Charset = 46
+		case "utf8mb4_unicode_ci":
+			field.Charset = 224
+		case "utf8mb4_unicode_520_ci":
+			field.Charset = 246
+		case "utf8_bin":
+			field.Charset = 83
+		case "utf8_general_ci":
+			field.Charset = 33
+		}
+	}
+	return field
+}
+
+func prepareMySQLResultFields(descriptors []Scmer) ([]*querypb.Field, map[string]int, []Scmer) {
+	fields := make([]*querypb.Field, len(descriptors))
+	colmap := make(map[string]int, len(descriptors))
+	for i, descriptor := range descriptors {
+		field := ParseSQLResultField(descriptor)
+		fields[i] = field.mysqlField()
+		colmap[field.Name] = i
 	}
 	return fields, colmap, make([]Scmer, len(fields))
 }
@@ -418,8 +479,7 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 	schemaInitialized := false
 	fieldsPublished := false
 	resultSet := false
-	var bufferedRows []Scmer
-	bufferedRowCount := 0
+	var resultFields []SQLResultField
 	var rowStatus driver.RowStatus
 	var resultlock sync.Mutex
 	emitPreparedRow := func(values []Scmer) {
@@ -428,7 +488,10 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 			panic(err)
 		}
 		defer row.Abort()
-		for _, val := range values {
+		for i, val := range values {
+			if len(resultFields) > 0 {
+				val = resultFields[i].Value(val)
+			}
 			appendScmerToMySQLRow(row, val)
 		}
 		status, err := row.End()
@@ -436,21 +499,6 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 		if err != nil {
 			panic(err)
 		}
-	}
-	publishAndFlushRows := func() {
-		if fieldsPublished {
-			return
-		}
-		if err := output.SetFields(fields); err != nil {
-			panic(err)
-		}
-		fieldsPublished = true
-		width := len(fields)
-		for offset := 0; offset < len(bufferedRows); offset += width {
-			emitPreparedRow(bufferedRows[offset : offset+width])
-		}
-		bufferedRows = nil
-		bufferedRowCount = 0
 	}
 	// load scm session object
 	scmSessionAny, _ := mysqlsessions.Load(session)
@@ -490,31 +538,18 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 			item := a[0].Slice()
 
 			var unknownColumn bool
-			rowValues, unknownColumn = prepareMySQLResultRow(&fields, colmap, item, rowValues, schemaInitialized, !fieldsPublished)
+			rowValues, unknownColumn = prepareMySQLResultRow(&fields, colmap, item, rowValues, schemaInitialized)
 			if unknownColumn {
 				rowStatus |= driver.RowTruncated
 			}
 			schemaInitialized = true
-			if !fieldsPublished && !mysqlFieldsResolved(fields) && bufferedRowCount+1 < mysqlFieldDiscoveryRows {
-				bufferedRows = append(bufferedRows, rowValues...)
-				bufferedRowCount++
-				return NewBool(true)
-			}
 			if !fieldsPublished {
-				if bufferedRowCount == 0 {
-					if err := output.SetFields(fields); err != nil {
-						panic(err)
-					}
-					fieldsPublished = true
-					emitPreparedRow(rowValues)
-				} else {
-					bufferedRows = append(bufferedRows, rowValues...)
-					bufferedRowCount++
-					publishAndFlushRows()
+				if err := output.SetFields(fields); err != nil {
+					panic(err)
 				}
-			} else {
-				emitPreparedRow(rowValues)
+				fieldsPublished = true
 			}
+			emitPreparedRow(rowValues)
 			return NewBool(true)
 		})
 		fieldsFn := NewFunc(func(a ...Scmer) Scmer {
@@ -523,7 +558,16 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 			if schemaInitialized || fieldsPublished || len(a) != 1 {
 				panic("result fields must be declared exactly once before result rows")
 			}
-			fields, colmap, rowValues = prepareMySQLResultFields(a[0].Slice())
+			descriptors := a[0].Slice()
+			fields, colmap, rowValues = prepareMySQLResultFields(descriptors)
+			resultFields = make([]SQLResultField, len(descriptors))
+			for i, descriptor := range descriptors {
+				resultFields[i] = ParseSQLResultField(descriptor)
+			}
+			if err := output.SetFields(fields); err != nil {
+				panic(err)
+			}
+			fieldsPublished = true
 			schemaInitialized = true
 			resultSet = true
 			return NewBool(true)
@@ -535,7 +579,9 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 		return myerr
 	}
 	if schemaInitialized && !fieldsPublished {
-		publishAndFlushRows()
+		if err := output.SetFields(fields); err != nil {
+			return err
+		}
 	}
 	if rowStatus != driver.RowComplete {
 		m.log.Warning("mysql result rows required recovery flags=%d", rowStatus)

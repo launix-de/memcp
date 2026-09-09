@@ -67,7 +67,7 @@ func TestAppendMySQLResultRowDuplicateAliasUsesLastValueType(t *testing.T) {
 	row, unknown := prepareMySQLResultRow(&fields, colmap, []Scmer{
 		NewString("x"), NewInt(1),
 		NewString("x"), NewString("EUR"),
-	}, nil, false, true)
+	}, nil, false)
 
 	if unknown {
 		t.Fatal("first row unexpectedly reported an unknown column")
@@ -94,7 +94,7 @@ func TestPrepareMySQLResultRowPadsMissingAndRejectsNewPublishedColumns(t *testin
 	row, unknown := prepareMySQLResultRow(&fields, colmap, []Scmer{
 		NewString("b"), NewString("new"),
 		NewString("c"), NewString("ignored"),
-	}, row, true, false)
+	}, row, true)
 
 	if !unknown {
 		t.Fatal("new column after publishing fields was not reported")
@@ -107,22 +107,34 @@ func TestPrepareMySQLResultRowPadsMissingAndRejectsNewPublishedColumns(t *testin
 	}
 }
 
-func TestPrepareMySQLResultRowRefinesInitiallyNullMetadata(t *testing.T) {
-	var fields []*querypb.Field
-	colmap := map[string]int{}
-
-	row, _ := prepareMySQLResultRow(&fields, colmap, []Scmer{
-		NewString("value"), NewNil(),
-	}, nil, false, true)
-	if fields[0].Type != querypb.Type_NULL_TYPE {
-		t.Fatalf("initial NULL has type %v, want NULL_TYPE", fields[0].Type)
+func TestPrepareMySQLResultRowUsesCompilerTypeAcrossNullRows(t *testing.T) {
+	fields, colmap, row := prepareMySQLResultFields([]Scmer{
+		NewSlice([]Scmer{NewString("value"), NewString("BIGINT"), NewString("bin")}),
+	})
+	for _, value := range []Scmer{NewNil(), NewFloat(42)} {
+		row, _ = prepareMySQLResultRow(&fields, colmap, []Scmer{NewString("value"), value}, row, true)
+		if fields[0].Type != querypb.Type_INT64 {
+			t.Fatalf("declared integer metadata changed: %v", fields[0].Type)
+		}
 	}
+}
 
-	row, _ = prepareMySQLResultRow(&fields, colmap, []Scmer{
-		NewString("value"), NewInt(42),
-	}, row, true, true)
-	if fields[0].Type != querypb.Type_INT64 {
-		t.Fatalf("later integer has type %v, want INT64", fields[0].Type)
+func TestSQLResultFieldPackingUsesDeclaredType(t *testing.T) {
+	for _, test := range []struct {
+		typ         string
+		input, want Scmer
+	}{
+		{"BIGINT", NewFloat(42), NewInt(42)},
+		{"VARCHAR", NewInt(42), NewString("42")},
+		{"DECIMAL", NewFloat(12.5), NewString("12.5")},
+		{"DOUBLE", NewInt(42), NewFloat(42)},
+		{"BIGINT", NewNil(), NewNil()},
+		{"VARBINARY", NewString("a\x00b"), NewString("a\x00b")},
+	} {
+		got := (SQLResultField{Type: test.typ}).Value(test.input)
+		if got.GetTag() != test.want.GetTag() || got.String() != test.want.String() {
+			t.Fatalf("%s packed %v as %v, want %v", test.typ, test.input, got, test.want)
+		}
 	}
 }
 
@@ -140,7 +152,7 @@ func BenchmarkPrepareMySQLResultRow10PublishedColumns(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		row, _ = prepareMySQLResultRow(&fields, colmap, item, row, true, false)
+		row, _ = prepareMySQLResultRow(&fields, colmap, item, row, true)
 	}
 }
 
@@ -152,7 +164,9 @@ func TestMySQLServerVersionHasClientCompatiblePrefix(t *testing.T) {
 
 func TestPrepareMySQLResultFieldsPreservesCompilerOrderAndDuplicates(t *testing.T) {
 	fields, colmap, row := prepareMySQLResultFields([]Scmer{
-		NewString("id"), NewString("value"), NewString("value"),
+		NewSlice([]Scmer{NewString("id"), NewString("INT"), NewString("bin")}),
+		NewSlice([]Scmer{NewString("value"), NewString("VARCHAR"), NewString("utf8mb4_unicode_520_ci")}),
+		NewSlice([]Scmer{NewString("value"), NewString("DOUBLE"), NewString("bin")}),
 	})
 	if len(fields) != 3 || len(row) != 3 {
 		t.Fatalf("prepared %d fields and %d row slots, want 3 each", len(fields), len(row))
@@ -160,10 +174,8 @@ func TestPrepareMySQLResultFieldsPreservesCompilerOrderAndDuplicates(t *testing.
 	if fields[0].Name != "id" || fields[1].Name != "value" || fields[2].Name != "value" {
 		t.Fatalf("compiler field order was not preserved: %+v", fields)
 	}
-	for _, field := range fields {
-		if field.Type != querypb.Type_NULL_TYPE {
-			t.Fatalf("unobserved field %q has type %v, want NULL_TYPE", field.Name, field.Type)
-		}
+	if fields[0].Type != querypb.Type_INT64 || fields[1].Type != querypb.Type_VARCHAR || fields[2].Type != querypb.Type_FLOAT64 || fields[1].Charset != 246 {
+		t.Fatalf("compiler types/collation not preserved: %+v", fields)
 	}
 	if colmap["id"] != 0 || colmap["value"] != 2 {
 		t.Fatalf("unexpected fallback column map: %+v", colmap)

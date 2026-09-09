@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 metadata:
   version: "1.0"
-  description: "Column-level COLLATE in CREATE/ALTER TABLE; verify persistence via SHOW"
+  description: "SQL expression type and collation propagation through conversions, comparisons, grouping and result metadata"
   isolated: true
 
 setup:
@@ -18,6 +18,9 @@ setup:
   - sql: CREATE TABLE coll_inherited (id INT, name VARCHAR(100), explicit_bin TEXT COLLATE bin, payload VARBINARY(100)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_520_ci
   - sql: INSERT INTO coll_inherited VALUES (1, 'lab-tag-42', 'lab-tag-42', 'lab-tag-42'), (2, 'Uncategorized', 'Uncategorized', 'Uncategorized'), (10, 'Lab Category 1', 'Lab Category 1', 'Lab Category 1')
 
+  - sql: DROP TABLE IF EXISTS coll_groups
+  - sql: CREATE TABLE coll_groups (id INT, name VARCHAR(40)) COLLATE=utf8mb4_unicode_520_ci
+  - sql: INSERT INTO coll_groups VALUES (1, 'apple'), (2, 'Apple'), (3, 'Banana'), (4, 'banana')
 test_cases:
   - name: "SHOW FULL COLUMNS exposes column collation"
     sql: "SHOW FULL COLUMNS FROM coll_cols"
@@ -134,6 +137,298 @@ test_cases:
     sql: SELECT id FROM coll_inherited ORDER BY missing_sort_column
     expect: {error: true}
 
+  - name: Inherited expression comparison =
+    sql: SELECT id FROM coll_inherited WHERE CONCAT(name, '') = 'UNCATEGORIZED' ORDER BY id
+    expect:
+      rows: 1
+      data:
+      - id: 2
+  - name: Inherited expression comparison <>
+    sql: SELECT id FROM coll_inherited WHERE CONCAT(name, '') <> 'UNCATEGORIZED' ORDER BY id
+    expect:
+      rows: 2
+      data:
+      - id: 1
+      - id: 10
+  - name: Inherited expression comparison <
+    sql: SELECT id FROM coll_inherited WHERE CONCAT(name, '') < 'UNCATEGORIZED' ORDER BY id
+    expect:
+      rows: 2
+      data:
+      - id: 1
+      - id: 10
+  - name: Inherited expression comparison <=
+    sql: SELECT id FROM coll_inherited WHERE CONCAT(name, '') <= 'UNCATEGORIZED' ORDER BY id
+    expect:
+      rows: 3
+      data:
+      - id: 1
+      - id: 2
+      - id: 10
+  - name: Inherited expression comparison >
+    sql: SELECT id FROM coll_inherited WHERE CONCAT(name, '') > 'UNCATEGORIZED' ORDER BY id
+    expect:
+      rows: 0
+      data: []
+  - name: Inherited expression comparison >=
+    sql: SELECT id FROM coll_inherited WHERE CONCAT(name, '') >= 'UNCATEGORIZED' ORDER BY id
+    expect:
+      rows: 1
+      data:
+      - id: 2
+  - name: Comparison projection preserves SQL NULL
+    sql: SELECT CONCAT(NULL, name) = 'x' AS value FROM coll_inherited WHERE id=1
+    expect:
+      rows: 1
+      data:
+      - value: null
+  - name: Nested explicit binary collation has priority
+    sql: SELECT id FROM coll_inherited WHERE CONCAT(name COLLATE bin, '') = 'UNCATEGORIZED' ORDER BY id
+    expect:
+      rows: 0
+      data: []
+  - name: Explicit unicode collation reaches right operand
+    sql: SELECT id FROM coll_inherited WHERE 'UNCATEGORIZED' = (explicit_bin COLLATE utf8mb4_unicode_520_ci) ORDER BY id
+    expect:
+      rows: 1
+      data:
+      - id: 2
+  - name: IN uses expression collation
+    sql: SELECT id FROM coll_inherited WHERE CONCAT(name, '') IN ('UNCATEGORIZED', 'absent') ORDER BY id
+    expect:
+      rows: 1
+      data:
+      - id: 2
+  - name: NOT IN retains NULL semantics
+    sql: SELECT id FROM coll_inherited WHERE CONCAT(name, '') NOT IN ('UNCATEGORIZED', NULL) ORDER BY id
+    expect:
+      rows: 0
+      data: []
+  - name: LIKE inherits binary column collation
+    sql: SELECT id FROM coll_inherited WHERE explicit_bin LIKE 'UNCATEGORIZED' ORDER BY id
+    expect:
+      rows: 0
+      data: []
+  - name: Numeric CAST does not retain text collation
+    sql: SELECT CAST('10' AS SIGNED) < CAST('2' AS SIGNED) AS value
+    expect:
+      rows: 1
+      data:
+      - value: false
+  - name: Text CAST does not retain numeric ordering
+    sql: SELECT CAST(10 AS CHAR CHARACTER SET utf8) COLLATE bin < CAST(2 AS CHAR CHARACTER SET utf8) AS value
+    expect:
+      rows: 1
+      data:
+      - value: true
+  - name: CASE string result preserves branch collation
+    sql: SELECT id FROM coll_inherited WHERE (CASE WHEN id=2 THEN name ELSE NULL END) = 'UNCATEGORIZED' ORDER BY id
+    expect:
+      rows: 1
+      data:
+      - id: 2
+  - name: Reject conflicting explicit collations
+    sql: SELECT (name COLLATE utf8mb4_unicode_520_ci) = (explicit_bin COLLATE bin) FROM coll_inherited
+    expect:
+      error: true
+  - name: Empty result retains declared type and collation
+    scm: "(begin\n  (define captured (newsession))\n  (define session (newsession))\n  (define tx nil)\n  (define resultfields\
+      \ (lambda (fields) (captured \"fields\" fields)))\n  (define resultrow (lambda (row) true))\n  (eval (parse_sql \"memcp-tests\"\
+      \ \"SELECT id, name FROM coll_inherited WHERE id = -1\" nil nil nil))\n  (if (equal? (captured \"fields\") (list (list\
+      \ \"id\" \"INT\" \"bin\") (list \"name\" \"VARCHAR\" \"utf8mb4_unicode_520_ci\"))) true\n    (error \"Unexpected compiler\
+      \ result metadata: \" (captured \"fields\"))))"
+  - name: NULL projection and explicit conversions declare metadata
+    scm: "(begin\n  (define captured (newsession))\n  (define session (newsession))\n  (define tx nil)\n  (define resultfields\
+      \ (lambda (fields) (captured \"fields\" fields)))\n  (define resultrow (lambda (row) true))\n  (eval (parse_sql \"memcp-tests\"\
+      \ \"SELECT NULL AS n, CAST(NULL AS SIGNED) AS i, CAST(10 AS CHAR CHARACTER SET utf8) AS s\" nil nil nil))\n  (if (equal?\
+      \ (captured \"fields\") (list (list \"n\" \"NULL\" \"bin\") (list \"i\" \"BIGINT\" \"bin\") (list \"s\" \"VARCHAR\" \"\
+      utf8mb4_unicode_520_ci\"))) true\n    (error \"Unexpected compiler result metadata: \" (captured \"fields\"))))"
+  - name: Numeric function result does not inherit input collation
+    scm: "(begin\n  (define captured (newsession))\n  (define session (newsession))\n  (define tx nil)\n  (define resultfields\
+      \ (lambda (fields) (captured \"fields\" fields)))\n  (define resultrow (lambda (row) true))\n  (eval (parse_sql \"memcp-tests\"\
+      \ \"SELECT LENGTH(name) AS size FROM coll_inherited WHERE id = -1\" nil nil nil))\n  (if (equal? (captured \"fields\"\
+      ) (list (list \"size\" \"BIGINT\" \"bin\"))) true\n    (error \"Unexpected compiler result metadata: \" (captured \"fields\"\
+      ))))"
+  - name: CASE aggregates result types independently of selected branch
+    scm: "(begin\n  (define captured (newsession))\n  (define session (newsession))\n  (define tx nil)\n  (define resultfields\
+      \ (lambda (fields) (captured \"fields\" fields)))\n  (define resultrow (lambda (row) true))\n  (eval (parse_sql \"memcp-tests\"\
+      \ \"SELECT CASE WHEN id=1 THEN 12 ELSE name END AS mixed FROM coll_inherited WHERE id = -1\" nil nil nil))\n  (if (equal?\
+      \ (captured \"fields\") (list (list \"mixed\" \"VARCHAR\" \"utf8mb4_unicode_520_ci\"))) true\n    (error \"Unexpected\
+      \ compiler result metadata: \" (captured \"fields\"))))"
+  - name: UNION type aggregation survives initial NULL branch
+    scm: "(begin\n  (define captured (newsession))\n  (define session (newsession))\n  (define tx nil)\n  (define resultfields\
+      \ (lambda (fields) (captured \"fields\" fields)))\n  (define resultrow (lambda (row) true))\n  (eval (parse_sql \"memcp-tests\"\
+      \ \"SELECT NULL AS n UNION ALL SELECT 2\" nil nil nil))\n  (if (equal? (captured \"fields\") (list (list \"n\" \"BIGINT\"\
+      \ \"bin\"))) true\n    (error \"Unexpected compiler result metadata: \" (captured \"fields\"))))"
+  - name: COUNT output declares integer even for empty input
+    scm: "(begin\n  (define captured (newsession))\n  (define session (newsession))\n  (define tx nil)\n  (define resultfields\
+      \ (lambda (fields) (captured \"fields\" fields)))\n  (define resultrow (lambda (row) true))\n  (eval (parse_sql \"memcp-tests\"\
+      \ \"SELECT COUNT(*) AS n FROM coll_inherited WHERE id = -1\" nil nil nil))\n  (if (equal? (captured \"fields\") (list\
+      \ (list \"n\" \"BIGINT\" \"bin\"))) true\n    (error \"Unexpected compiler result metadata: \" (captured \"fields\"))))"
+  - name: Duplicate output aliases retain separate types
+    scm: "(begin\n  (define captured (newsession))\n  (define session (newsession))\n  (define tx nil)\n  (define resultfields\
+      \ (lambda (fields) (captured \"fields\" fields)))\n  (define resultrow (lambda (row) true))\n  (eval (parse_sql \"memcp-tests\"\
+      \ \"SELECT 1 AS x, 'text' AS x\" nil nil nil))\n  (if (equal? (captured \"fields\") (list (list \"x\" \"BIGINT\" \"bin\"\
+      ) (list \"x\" \"VARCHAR\" \"utf8mb4_unicode_520_ci\"))) true\n    (error \"Unexpected compiler result metadata: \" (captured\
+      \ \"fields\"))))"
+  - name: GROUP BY uses inherited collation
+    sql: SELECT COUNT(*) AS c FROM coll_groups GROUP BY name ORDER BY c
+    expect:
+      rows: 2
+      data:
+      - c: 2
+      - c: 2
+  - name: Computed GROUP BY uses inherited collation
+    sql: SELECT COUNT(*) AS c FROM coll_groups GROUP BY CONCAT(name, '') ORDER BY c
+    expect:
+      rows: 2
+      data:
+      - c: 2
+      - c: 2
+  - name: COUNT DISTINCT uses inherited collation
+    sql: SELECT COUNT(DISTINCT name) AS c FROM coll_groups
+    expect:
+      rows: 1
+      data:
+      - c: 2
+  - name: Text join uses inherited collation
+    sql: SELECT a.id AS a, b.id AS b FROM coll_groups a JOIN coll_groups b ON a.name=b.name WHERE a.id=1 ORDER BY b.id
+    expect:
+      rows: 2
+      data:
+      - a: 1
+        b: 1
+      - a: 1
+        b: 2
+  - name: Text correlated EXISTS uses inherited collation
+    sql: SELECT a.id FROM coll_groups a WHERE EXISTS (SELECT 1 FROM coll_groups b WHERE b.name=a.name AND b.id=2) ORDER BY a.id
+    expect:
+      rows: 2
+      data:
+      - id: 1
+      - id: 2
+  - name: Insert another equivalent spelling after group cache warmup
+    sql: INSERT INTO coll_groups VALUES (5, 'APPLE')
+    expect:
+      affected_rows: 1
+  - name: Collated group cache follows insert
+    sql: SELECT COUNT(*) AS c FROM coll_groups GROUP BY CONCAT(name, '') ORDER BY c
+    expect:
+      rows: 2
+      data:
+      - c: 2
+      - c: 3
+  - name: Delete a representative after group cache warmup
+    sql: DELETE FROM coll_groups WHERE id=1
+    expect:
+      affected_rows: 1
+  - name: Collated group cache follows representative deletion
+    sql: SELECT COUNT(*) AS c FROM coll_groups GROUP BY CONCAT(name, '') ORDER BY c
+    expect:
+      rows: 2
+      data:
+      - c: 2
+      - c: 2
+  - name: Text MIN uses input collation
+    sql: SELECT LOWER(MIN(name)) AS n FROM coll_groups
+    expect:
+      rows: 1
+      data:
+      - n: apple
+  - name: Text MAX uses input collation
+    sql: SELECT LOWER(MAX(name)) AS n FROM coll_groups
+    expect:
+      rows: 1
+      data:
+      - n: banana
+  - name: Mixed CASE converts values before comparison
+    sql: SELECT (CASE WHEN 1=1 THEN 10 ELSE '2' END) COLLATE bin < '2' AS v
+    expect:
+      rows: 1
+      data:
+      - v: true
+  - name: Mixed UNION converts all branch values
+    sql: SELECT 2 AS v UNION ALL SELECT '10'
+    expect:
+      rows: 2
+      data:
+      - v: '2'
+      - v: '10'
+  - name: Mixed derived UNION compares using merged text type
+    sql: SELECT u.v FROM (SELECT 2 AS v UNION ALL SELECT '10') u WHERE u.v COLLATE bin < '2'
+    expect:
+      rows: 1
+      data:
+      - v: '10'
+  - name: Text CAST preserves NULL intermediate value
+    sql: SELECT CAST(NULL AS CHAR CHARACTER SET utf8) IS NULL AS v
+    expect:
+      rows: 1
+      data:
+      - v: true
+  - name: GROUP CONCAT DISTINCT uses input collation
+    sql: SELECT LOWER(GROUP_CONCAT(DISTINCT name)) AS v FROM coll_groups
+    expect:
+      rows: 1
+      data:
+      - v: apple,banana
+  - name: Explicit binary equality keeps case distinctions after warming unicode index
+    sql: SELECT id FROM coll_groups WHERE name COLLATE bin = 'Apple' ORDER BY id
+    expect:
+      rows: 1
+      data:
+      - id: 2
+  - name: Explicit binary range uses predicate collation independently of integer order
+    sql: SELECT id FROM coll_groups WHERE name COLLATE bin < 'banana' ORDER BY id
+    expect:
+      rows: 3
+      data:
+      - id: 2
+      - id: 3
+      - id: 5
+  - name: COUNT nullable expression declares integer
+    scm: |-
+      (begin
+        (define captured (newsession))
+        (define session (newsession))
+        (define tx nil)
+        (define resultfields (lambda (fields) (captured "fields" fields)))
+        (define resultrow (lambda (row) true))
+        (eval (parse_sql "memcp-tests" "SELECT COUNT(name) AS n FROM coll_groups" nil nil nil))
+        (if (equal? (captured "fields") (list (list "n" "BIGINT" "bin"))) true
+          (error "Unexpected compiler result metadata: " (captured "fields"))))
+  - name: Window rank declares integer
+    scm: |-
+      (begin
+        (define captured (newsession))
+        (define session (newsession))
+        (define tx nil)
+        (define resultfields (lambda (fields) (captured "fields" fields)))
+        (define resultrow (lambda (row) true))
+        (eval (parse_sql "memcp-tests" "SELECT ROW_NUMBER() OVER (ORDER BY id) AS n FROM coll_groups" nil nil nil))
+        (if (equal? (captured "fields") (list (list "n" "BIGINT" "bin"))) true
+          (error "Unexpected compiler result metadata: " (captured "fields"))))
+  - name: JSON aggregate declares string result
+    scm: |-
+      (begin
+        (define captured (newsession))
+        (define session (newsession))
+        (define tx nil)
+        (define resultfields (lambda (fields) (captured "fields" fields)))
+        (define resultrow (lambda (row) true))
+        (eval (parse_sql "memcp-tests" "SELECT JSON_ARRAYAGG(id) AS j FROM coll_groups" nil nil nil))
+        (if (equal? (captured "fields") (list (list "j" "VARCHAR" "utf8mb4_unicode_520_ci"))) true
+          (error "Unexpected compiler result metadata: " (captured "fields"))))
+  - name: Explicit binary GROUP BY keeps equivalent Unicode spellings separate
+    sql: SELECT COUNT(*) AS c FROM coll_groups GROUP BY name COLLATE bin ORDER BY c
+    expect: {rows: 4, data: [{c: 1}, {c: 1}, {c: 1}, {c: 1}]}
+  - name: Explicit binary COUNT DISTINCT uses expression override
+    sql: SELECT COUNT(DISTINCT (name COLLATE bin)) AS c FROM coll_groups
+    expect: {rows: 1, data: [{c: 4}]}
+  - name: Derived explicit binary collation survives projection
+    sql: SELECT d.id FROM (SELECT id, name COLLATE bin AS label FROM coll_groups) d WHERE d.label='apple' ORDER BY d.id
+    expect: {rows: 0, data: []}
 cleanup:
+  - sql: DROP TABLE IF EXISTS coll_groups
   - sql: "DROP TABLE IF EXISTS coll_cols"
   - sql: DROP TABLE IF EXISTS coll_inherited

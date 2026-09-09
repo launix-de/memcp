@@ -16,6 +16,9 @@ setup:
   - sql: DROP TABLE IF EXISTS coll_third
   - sql: CREATE TABLE coll_third (id INT PRIMARY KEY, link_id INT)
   - sql: INSERT INTO coll_third VALUES (1,1),(2,2),(3,3),(4,4)
+  - sql: DROP TABLE IF EXISTS coll_cast
+  - sql: CREATE TABLE coll_cast (id INT, numeric_text VARCHAR(20), number_value INT) COLLATE=utf8mb4_unicode_520_ci
+  - sql: INSERT INTO coll_cast VALUES (1, '10', 10), (2, '2', 2), (3, '30', 30)
 test_cases:
   - name: Three-table distinct retains name collation ASC
     sql: SELECT DISTINCT n.id AS name_id, l.id AS link_id FROM coll_names n JOIN coll_link l ON n.id=l.name_id JOIN coll_third z ON z.link_id=l.id ORDER
@@ -291,6 +294,131 @@ test_cases:
           c: 2
         - id: 2
           c: 1
+  # Expression metadata must survive functions, conversions and relational boundaries.
+  - name: CONCAT preserves input collation
+    sql: SELECT id FROM coll_names ORDER BY CONCAT(name, ''), id
+    expect:
+      rows: 3
+      data:
+      - id: 1
+      - id: 2
+      - id: 3
+  - name: SUBSTRING preserves input collation
+    sql: SELECT id FROM coll_names ORDER BY SUBSTRING(name, 1, 50), id
+    expect:
+      rows: 3
+      data:
+      - id: 1
+      - id: 2
+      - id: 3
+  - name: COALESCE preserves input collation
+    sql: SELECT id FROM coll_names ORDER BY COALESCE(name, ''), id
+    expect:
+      rows: 3
+      data:
+      - id: 1
+      - id: 2
+      - id: 3
+  - name: CASE preserves input collation
+    sql: SELECT id FROM coll_names ORDER BY CASE WHEN id = 2 THEN name ELSE CONCAT(name, '') END, id
+    expect:
+      rows: 3
+      data:
+      - id: 1
+      - id: 2
+      - id: 3
+  - name: Computed alias preserves input collation
+    sql: SELECT id FROM (SELECT id, CONCAT(name, '') AS label FROM coll_names) d ORDER BY label, id
+    expect:
+      rows: 3
+      data:
+      - id: 1
+      - id: 2
+      - id: 3
+  - name: Derived column preserves input collation
+    sql: SELECT id FROM (SELECT id, name AS label FROM coll_names) d ORDER BY label, id
+    expect:
+      rows: 3
+      data:
+      - id: 1
+      - id: 2
+      - id: 3
+  - name: UNION ALL output preserves input collation
+    sql: SELECT id FROM (SELECT id, name AS label FROM coll_names WHERE id < 3 UNION ALL SELECT id, name AS label FROM coll_names
+      WHERE id = 3) d ORDER BY label, id
+    expect:
+      rows: 3
+      data:
+      - id: 1
+      - id: 2
+      - id: 3
+  - name: Computed sort DESC LIMIT preserves input collation
+    sql: SELECT id FROM coll_names ORDER BY CONCAT(name, '') DESC, id LIMIT 2
+    expect:
+      rows: 2
+      data:
+      - id: 3
+      - id: 2
+  - name: Explicit binary overrides computed input collation
+    sql: SELECT id FROM coll_names ORDER BY CONCAT(name, '') COLLATE bin, id
+    expect:
+      rows: 3
+      data:
+      - id: 2
+      - id: 1
+      - id: 3
+  - name: Explicit unicode overrides computed sort fallback
+    sql: SELECT id FROM coll_names ORDER BY CONCAT(name, '') COLLATE utf8mb4_unicode_520_ci, id
+    expect:
+      rows: 3
+      data:
+      - id: 1
+      - id: 2
+      - id: 3
+  - name: Distinct join computed order preserves input collation
+    sql: SELECT DISTINCT n.id FROM coll_names n JOIN coll_link l ON n.id=l.name_id ORDER BY CONCAT(n.name, ''), n.id
+    expect:
+      rows: 3
+      data:
+      - id: 1
+      - id: 2
+      - id: 3
+  - name: Numeric CAST orders by numeric result
+    sql: SELECT id FROM coll_cast ORDER BY CAST(numeric_text AS SIGNED), id
+    expect:
+      rows: 3
+      data:
+      - id: 2
+      - id: 1
+      - id: 3
+  - name: Numeric CONVERT orders by numeric result
+    sql: SELECT id FROM coll_cast ORDER BY CONVERT(numeric_text, DECIMAL(10,2)), id
+    expect:
+      rows: 3
+      data:
+      - id: 2
+      - id: 1
+      - id: 3
+  - name: Text CAST orders by text result
+    sql: SELECT id FROM coll_cast ORDER BY CAST(number_value AS CHAR CHARACTER SET utf8) COLLATE bin, id
+    expect:
+      rows: 3
+      data:
+      - id: 1
+      - id: 2
+      - id: 3
+  - name: Derived numeric CAST retains result type
+    sql: SELECT id FROM (SELECT id, CAST(numeric_text AS SIGNED) AS value FROM coll_cast) d ORDER BY value, id
+    expect:
+      rows: 3
+      data:
+      - id: 2
+      - id: 1
+      - id: 3
+  - name: Reject unknown column inside collated expression
+    sql: SELECT id FROM coll_names ORDER BY CONCAT(missing_name, '') COLLATE utf8mb4_unicode_520_ci
+    expect:
+      error: true
   - name: Update cached sort source
     sql: UPDATE coll_names SET name = 'Zebra' WHERE id = 1
     expect:
@@ -331,7 +459,11 @@ test_cases:
         - {id: 1, c: 2}
         - {id: 3, c: 1}
         - {id: 2, c: 1}
+  - name: UNION hidden ORDER field cannot shadow a user alias
+    sql: SELECT u.id AS __union_order_0 FROM (SELECT 1 AS id, 'z' AS label UNION ALL SELECT 2, 'a') u ORDER BY u.label
+    expect: {rows: 2, data: [{__union_order_0: 2}, {__union_order_0: 1}]}
 cleanup:
+  - sql: DROP TABLE IF EXISTS coll_cast
   - sql: DROP TABLE IF EXISTS coll_third
   - sql: DROP TABLE IF EXISTS coll_t
   - sql: DROP TABLE IF EXISTS coll_link

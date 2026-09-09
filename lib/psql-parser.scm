@@ -979,7 +979,9 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(alter auto_increment), not be wrapped as a SELECT projection. */
 		(parser '((atom "SELECT" true) (atom "pg_catalog" true) "." (atom "setval" true) "(" (define seq_name psql_string) "," (define val psql_expression) "," (define is_called psql_expression) ")")
 			(psql_setval_command seq_name val is_called))
-		(parser (define query psql_select) (build_queryplan_term (sql_expand_views query policy) planning_session tx))
+		(parser (define query psql_select) (begin
+			(define compiled (neumann_compile_pipeline (sql_expand_views query policy) planning_session tx))
+			(list (quote !begin) (sql_resultfields_expr (cadr compiled)) (car compiled))))
 		(parser '((atom "EXPLAIN" true) (atom "IR" true) (define query psql_select)) (explain_queryplan_ir (sql_expand_views query policy)))
 		(parser '((atom "EXPLAIN" true) (atom "REORDER" true) (define query psql_select)) (explain_queryplan_reorder (sql_expand_views query policy) planning_session))
 		(parser '((atom "EXPLAIN" true) (atom "COMPILE" true) (define query psql_select)) (explain_queryplan_compile (sql_expand_views query policy) parse_started_ns (strlen s) planning_session))

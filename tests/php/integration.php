@@ -94,6 +94,12 @@ try {
         fails(fn() => new PDO('memcp:dbname=memcp-tests', 'root', 'admin', [PDO::ATTR_PERSISTENT => true]));
         $stmt = $db->query('SELECT id, value FROM php_test WHERE id = -1');
         check($stmt->columnCount() === 2 && $stmt->fetch() === false, 'Empty-result metadata');
+        $typed = $db->query("SELECT NULL AS n, CAST('42' AS SIGNED) AS i, CAST(12 AS CHAR CHARACTER SET utf8) AS s")->fetch(PDO::FETCH_ASSOC);
+        check($typed === ['n' => null, 'i' => 42, 's' => '12'], 'Compiler types drive RAM packing');
+        $typed = $db->query("SELECT 1 AS x, 'text' AS x")->fetch(PDO::FETCH_NUM);
+        check($typed === [1, 'text'], 'Duplicate aliases retain positional types');
+        $typed = $db->query("SELECT NULL AS x UNION ALL SELECT CAST('42' AS SIGNED)")->fetchAll(PDO::FETCH_NUM);
+        check($typed === [[null], [42]], 'UNION types apply after initial NULL');
         $db->beginTransaction();
         check($db->inTransaction(), 'BEGIN');
         $db->exec("INSERT INTO php_test (value) VALUES ('rollback')");
@@ -109,6 +115,19 @@ try {
         $config = json_decode(file_get_contents(__DIR__ . '/wire.json'), true);
         $wire = new PDO('mysql:unix_socket=' . $config['socket'] . ';dbname=memcp-tests', 'root', 'admin', [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
         check($wire->getAttribute(PDO::ATTR_DRIVER_NAME) === 'mysql', 'PDO mysql dispatch');
+        $typed = $wire->query("SELECT NULL AS n, CAST('42' AS SIGNED) AS i, CAST(12 AS CHAR CHARACTER SET utf8) AS s")->fetch(PDO::FETCH_ASSOC);
+        check($typed === ['n' => null, 'i' => 42, 's' => '12'], 'Compiler types drive wire packing');
+        $empty = $wire->query("SELECT CAST(NULL AS SIGNED) AS i FROM php_test WHERE id=-1");
+        check($empty->getColumnMeta(0)['native_type'] === 'LONGLONG' && $empty->fetch() === false, 'Typed empty wire header');
+        $wire->setAttribute(PDO::ATTR_EMULATE_PREPARES, false);
+        $prepared = $wire->prepare('SELECT ? AS value');
+        foreach ([[42, PDO::PARAM_INT], ['007', PDO::PARAM_STR], [null, PDO::PARAM_NULL], [17, PDO::PARAM_INT]] as [$value, $type]) {
+            $prepared->bindValue(1, $value, $type);
+            $prepared->execute();
+            check($prepared->fetchColumn() === $value, 'Native parameter type changes invalidate compiler metadata');
+            $prepared->closeCursor();
+        }
+        $wire->setAttribute(PDO::ATTR_EMULATE_PREPARES, true);
         for ($i = 0; $i < 30; $i++) {
             check($wire->query('SELECT 1')->fetchColumn() == 1, 'PDO wire query');
             check($db->query('SELECT 2')->fetchColumn() == 2, 'PDO direct query alongside wire');

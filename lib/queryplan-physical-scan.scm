@@ -75,7 +75,7 @@ callbacks. Local operator optimizer hooks may subsequently transform the plan. *
 (define scan_plan_hoist_safe (lambda (expr)
 	(match expr
 		((quote quote) _) true
-		(cons head args) (and (has? (list (quote session) (quote equal?) (quote equal??) (quote nil?)
+		(cons head args) (and (has? (list (quote session) (quote sql_typed_value) (quote sql_parameter_value) (quote equal?) (quote equal??) (quote nil?)
 			(quote not) (quote sql_not) (quote and) (quote or) (quote coalesceNil) (quote bool?)
 			(quote int?) (quote float?) (quote string?) (quote <) (quote <=) (quote >) (quote >=)) head)
 			(reduce args (lambda (safe arg) (and safe (scan_plan_hoist_safe arg))) true))
@@ -108,6 +108,10 @@ callbacks. Local operator optimizer hooks may subsequently transform the plan. *
 
 (define scan_plan_comparison (lambda (expr params columns)
 	(match expr
+		((symbol sql_compare) left right less operator collation)
+		(begin
+			(define boundary (scan_plan_comparison (list (symbol operator) left right) params columns))
+			(if (nil? boundary) nil (set_assoc boundary "collation" collation)))
 		'(operator left right)
 		(if (has? (list (quote equal?) (quote equal??) (quote <) (quote <=) (quote >) (quote >=)) operator)
 			(begin

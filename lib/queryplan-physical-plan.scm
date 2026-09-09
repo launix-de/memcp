@@ -3104,9 +3104,6 @@ tools/costgen; this lowering adds no hand-tuned crossover. */
 (define lower_query_block_with_stages (lambda (block)
 	(lower_query_block_with_cataloged_stages (query_block_with_full_stage_catalog block))))
 
-(define source_is_base_table? (lambda (src)
-	(string? (source_relation src))))
-
 (define information_schema_source? (lambda (schema relation)
 	(and (string? schema)
 		(and (string? relation)
@@ -3173,37 +3170,6 @@ tools/costgen; this lowering adds no hand-tuned crossover. */
 
 (define query_block_has_aggregates? (lambda (block)
 	(not (empty_list? (stage_aggregates_for_fields (qb_fields block))))))
-
-(define star_expr_alias (lambda (expr)
-	(match expr
-		((symbol get_column) tblvar _ "*" _) tblvar
-		((quote get_column) tblvar _ "*" _) tblvar
-		_ false)))
-
-(define star_expr? (lambda (expr)
-	(match expr
-		((symbol get_column) _ _ "*" _) true
-		((quote get_column) _ _ "*" _) true
-		_ false)))
-
-/* Star expansion must use each source's SQL-visible exported columns. A source
-may be a base table, table function, query block, or union; consulting only the
-base-table schema silently produces empty result metadata for derived.*. */
-(define expand_star_for_sources (lambda (sources requested_alias)
-	(merge (map (coalesceNil sources '()) (lambda (src)
-		(if (or (nil? requested_alias) (equal? requested_alias (source_alias src)))
-			(merge (map (binding_source_columns src) (lambda (col)
-				(list col (list (quote get_column) (source_alias src) false col false)))))
-			'()))))))
-
-(define expand_query_block_fields (lambda (sources fields)
-	(match (coalesceNil fields '())
-		(cons title (cons expr rest)) (begin
-			(define requested_alias (star_expr_alias expr))
-			(if (star_expr? expr)
-				(merge (list (expand_star_for_sources sources requested_alias) (expand_query_block_fields sources rest)))
-				(cons title (cons expr (expand_query_block_fields sources rest)))))
-		_ '())))
 
 /* SQL permits columns functionally dependent on a grouped primary key. Expand
 qualified stars before group lowering and carry the selected source columns as
@@ -8955,12 +8921,15 @@ stars through the same catalog-aware path used by physical lowering. */
 					pos))
 			_ (neumann_fail "build_queryplan" "malformed UNION ORDER BY item"))))))
 
-(define union_order_relations (lambda (order_items)
-	/* UNION branches share one merge relation. Until the logical UNION model
-	carries result-column collation metadata, use the canonical binary factory
-	relation rather than letting individual storage scans infer incompatible
-	per-branch callbacks. */
-	(order_relations_default order_items)))
+(define union_order_relations (lambda (block)
+	(begin
+		(define branches (union_branches block))
+		(define titles (projection_titles (qb_fields (car branches))))
+		(map (union_order block) (lambda (item) (begin
+			(define pos (union_order_position titles (car item)))
+			(define infos (map branches (lambda (branch)
+				(sql_expr_info (qb_sources branch) (nth (projection_exprs (qb_fields branch)) pos)))))
+			(canonical_order_relation (cadr item) (sql_collation_name (sql_merge_infos infos)))))))))
 
 (define union_ordered_branch_supported? (lambda (branch)
 	(and (query_block? branch)
@@ -9276,7 +9245,7 @@ stars through the same catalog-aware path used by physical lowering. */
 						(list (quote lambda) (list (quote __union_materialized_index))
 							(list rows (quote __union_materialized_index))))
 					(list (quote quote) order_positions)
-					(cons (quote list) (union_order_relations (union_order block)))
+					(cons (quote list) (union_order_relations block))
 					(coalesceNil (union_offset block) 0)
 					(coalesceNil (union_limit block) -1))
 				emit)))
@@ -9301,7 +9270,7 @@ stars through the same catalog-aware path used by physical lowering. */
 					(cons (quote list) (map specs (lambda (spec) (cons (quote list) (nth spec 1)))))
 					(cons (quote list) (map specs (lambda (spec) (nth spec 2))))
 					(cons (quote list) (map specs (lambda (spec) (cons (quote list) (nth spec 3)))))
-					(cons (quote list) (union_order_relations (union_order block)))
+					(cons (quote list) (union_order_relations block))
 					nil
 					nil
 					0
@@ -9382,14 +9351,24 @@ stars through the same catalog-aware path used by physical lowering. */
 			plan))))
 
 (define lower_union_block (lambda (block)
-	(if (equal? (union_mode block) (quote all))
-		(lower_union_all_successive block)
-		(if (or (equal? (union_mode block) (quote distinct)) (equal? (union_mode block) (quote union_distinct)))
-			(if (and (not (empty_list? (union_order block))) (not (union_direct_order_supported? block)))
-				(wrap_plan_with_distinct_resultrow
-					(lower_union_all_successive (make_union_block (quote all) (union_branches block) '() nil nil (union_facts block))))
-				(wrap_plan_with_distinct_resultrow (lower_union_all_successive block)))
-			(neumann_fail "build_queryplan" "unknown UNION mode")))))
+	(begin
+		(define plan
+			(if (equal? (union_mode block) (quote all))
+				(lower_union_all_successive block)
+				(if (or (equal? (union_mode block) (quote distinct)) (equal? (union_mode block) (quote union_distinct)))
+					(if (and (not (empty_list? (union_order block))) (not (union_direct_order_supported? block)))
+						(wrap_plan_with_distinct_resultrow
+							(lower_union_all_successive (make_union_block (quote all) (union_branches block) '() nil nil (union_facts block))))
+						(wrap_plan_with_distinct_resultrow (lower_union_all_successive block)))
+					(neumann_fail "build_queryplan" "unknown UNION mode"))))
+
+		(define visible (qassoc_get (union_facts block) (quote visible-fields) nil))
+		(if (nil? visible) plan
+			(list (list (quote lambda) (list (quote resultrow)) plan)
+				(list (quote lambda) (list (quote __union_visible_row))
+					(list (quote resultrow)
+						(cons (quote list) (merge (map visible (lambda (title)
+							(list title (list (quote get_assoc) (quote __union_visible_row) title)))))))))))))
 
 /* Physical preparation expands and attaches the canonical stage catalog once,
 without emitting runtime operators. Keeping this boundary explicit makes
@@ -9847,7 +9826,7 @@ RecSet node is written into logical IR. */
 (define neumann_compile_pipeline (lambda (ast planning_session tx)
 	(begin
 		(tx_check tx)
-		(define ir (decorrelate_logical_query ast))
+		(define ir (decorrelate_logical_query (sql_bind_expression_types ast planning_session)))
 		(tx_check tx)
 		(define reordered (optimize_logical_query ir planning_session tx))
 		(tx_check tx)
@@ -9855,7 +9834,7 @@ RecSet node is written into logical IR. */
 		(tx_check tx)
 		(define plan (emit_physical_queryplan prepared))
 		(tx_check tx)
-		plan)))
+		(list plan (uctx_get (ir_context_of ir) (quote result-types) '())))))
 
 (define neumann_compile_ir_pipeline (lambda (ir planning_session tx)
 	(begin
@@ -9874,7 +9853,7 @@ RecSet node is written into logical IR. */
 /* Parser-facing adapters                                                     */
 
 (define build_queryplan_term (lambda (query planning_session tx)
-	(neumann_compile_pipeline query planning_session tx)))
+	(car (neumann_compile_pipeline query planning_session tx))))
 
 (define build_dml_plan (lambda (schema tbl _tblalias all_defs cols condition order limit offset planning_session tx)
 	(begin

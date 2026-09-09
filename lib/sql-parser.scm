@@ -66,6 +66,7 @@ row, avoiding a copy of the complete prefix for each input value. */
 	(regex "[a-zA-Z_][a-zA-Z0-9_]*")
 	/* exceptions for things that can't be identifiers */
 	(atom "NOT" true)
+	(atom "DISTINCT" true)
 	(atom "IN" true)
 	(atom "BETWEEN" true)
 	(atom "AS" true)
@@ -757,10 +758,6 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(parser '((define a sql_expression3) (atom "IN" true) "(" (define sub sql_select) ")") '('inner_select_in a sub))
 		(parser '((define a sql_expression3) (atom "NOT" true) (atom "IN" true) "(" (define sub sql_select) ")") (list (quote not) (list (quote inner_select_in) a sub)))
 		/* Collation-aware comparisons (MySQL): enforce given collation on string comparisons */
-		(parser '((define a sql_expression3) (atom "COLLATE" true) (define collation sql_identifier) "=" (define b sql_expression2)) '('equal_collate a b collation))
-		(parser '((define a sql_expression3) (atom "COLLATE" true) (define collation sql_identifier) "==" (define b sql_expression2)) '('equal_collate a b collation))
-		(parser '((define a sql_expression3) (atom "COLLATE" true) (define collation sql_identifier) "<>" (define b sql_expression2)) '('notequal_collate a b collation))
-		(parser '((define a sql_expression3) (atom "COLLATE" true) (define collation sql_identifier) "!=" (define b sql_expression2)) '('notequal_collate a b collation))
 		(parser '((define a sql_expression3) (define op (or
 			(parser "==" "eq")
 			(parser "=" "eq")
@@ -771,7 +768,6 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			(parser "<" "lt")
 			(parser ">" "gt")
 		)) (define b sql_expression2)) (sql_comparison_expr op a b))
-		(parser '((define a sql_expression3) (atom "COLLATE" true) (define collation sql_identifier) (atom "LIKE" true) (define b sql_expression2)) '('strlike a b collation))
 		/* MySQL default collation is case-insensitive in this project (utf8mb4_general_ci). */
 		(parser '((define a sql_expression3) (atom "LIKE" true) (define b sql_expression2)) '('strlike a b "utf8mb4_general_ci"))
 		(parser '((define a sql_expression3) (atom "NOT" true) (atom "LIKE" true) (define b sql_expression2)) '('sql_not '('strlike a b "utf8mb4_general_ci")))
@@ -819,6 +815,8 @@ arithmetic; leave expressions containing columns or functions untouched. */
 	) (reduce terms sql_fold_multiplicative_term a)))
 
 	(define sql_expression5 (parser (or
+		(parser '((define value sql_expression6) (atom "COLLATE" true) (define collation sql_identifier))
+			(list (quote sql_collation) value collation))
 		/* unary minus: -(expr) */
 		(parser '("-" (define expr sql_expression6)) '((quote -) 0 expr))
 		/* MySQL JSON path operators. Test the longer token first. */
@@ -865,7 +863,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		/* plain aggregates: look up (reduce neutral) from registry */
 		(parser '((atom "COUNT" true) "(" (atom "DISTINCT" true) (define e sql_expression) ")") '('count_distinct e))
 		(parser '((atom "COUNT" true) "(" "*" ")") '((quote aggregate) 1 (quote +) 0))
-		(parser '((atom "COUNT" true) "(" (define e sql_expression) ")") '('aggregate '((quote if) '((quote nil?) e) 0 1) (quote +) 0))
+		(parser '((atom "COUNT" true) "(" (define e sql_expression) ")") '('sql_typed_value '('aggregate '((quote if) '((quote nil?) e) 0 1) (quote +) 0) "BIGINT" nil))
 		(parser '((atom "SUM" true) "(" (define s sql_expression) ")") (begin (define d (sql_aggregates "SUM")) '('aggregate s (car d) (cadr d))))
 		(parser '((atom "AVG" true) "(" (define s sql_expression) ")")
 			(sql_avg_expr s (sql_aggregates "SUM") (sql_aggregates "COUNT")))
@@ -923,21 +921,21 @@ arithmetic; leave expressions containing columns or functions untouched. */
 
 		/* DATE(expr) - extract date part */
 		(parser '((atom "DATE" true) "(" (define e sql_expression) ")") '('date_trunc_day e))
-		(parser '((atom "CAST" true) "(" (define p sql_expression) (atom "AS" true) (atom "UNSIGNED" true) ")") '('simplify p))
-		(parser '((atom "CAST" true) "(" (define p sql_expression) (atom "AS" true) (atom "SIGNED" true) ")") '('simplify p))
-		(parser '((atom "CAST" true) "(" (define p sql_expression) (atom "AS" true) (atom "INTEGER" true) ")") '('simplify p))
-		(parser '((atom "CAST" true) "(" (define p sql_expression) (atom "AS" true) (atom "DECIMAL" true) "(" sql_int "," sql_int ")" ")") '('simplify p))
-		(parser '((atom "CAST" true) "(" (define p sql_expression) (atom "AS" true) (atom "DECIMAL" true) "(" sql_int ")" ")") '('simplify p))
-		(parser '((atom "CAST" true) "(" (define p sql_expression) (atom "AS" true) (atom "DECIMAL" true) ")") '('simplify p))
-		(parser '((atom "CAST" true) "(" (define p sql_expression) (atom "AS" true) (atom "VARCHAR" true) "(" sql_int ")" ")") '('concat p))
-		(parser '((atom "CAST" true) "(" (define p sql_expression) (atom "AS" true) (atom "VARCHAR" true) ")") '('concat p))
-		(parser '((atom "CAST" true) "(" (define p sql_expression) (atom "AS" true) (atom "CHAR" true) (atom "CHARACTER" true) (atom "SET" true) (atom "utf8" true) ")") '('concat p))
-		(parser '((atom "CONVERT" true) "(" (define p sql_expression) "," (atom "DECIMAL" true) "(" sql_int "," sql_int ")" ")") '('simplify p))
-		(parser '((atom "CONVERT" true) "(" (define p sql_expression) "," (atom "DECIMAL" true) "(" sql_int ")" ")") '('simplify p))
-		(parser '((atom "CONVERT" true) "(" (define p sql_expression) "," (atom "DECIMAL" true) ")") '('simplify p))
-		(parser '((atom "CONVERT" true) "(" (define p sql_expression) "," (atom "UNSIGNED" true) ")") '('simplify p))
-		(parser '((atom "CONVERT" true) "(" (define p sql_expression) "," (atom "SIGNED" true) ")") '('simplify p))
-		(parser '((atom "CONVERT" true) "(" (define p sql_expression) "," (atom "INTEGER" true) ")") '('simplify p))
+		(parser '((atom "CAST" true) "(" (define p sql_expression) (atom "AS" true) (atom "UNSIGNED" true) ")") '('sql_typed_value '('sql_cast_value p "BIGINT") "BIGINT" nil))
+		(parser '((atom "CAST" true) "(" (define p sql_expression) (atom "AS" true) (atom "SIGNED" true) ")") '('sql_typed_value '('sql_cast_value p "BIGINT") "BIGINT" nil))
+		(parser '((atom "CAST" true) "(" (define p sql_expression) (atom "AS" true) (atom "INTEGER" true) ")") '('sql_typed_value '('sql_cast_value p "BIGINT") "BIGINT" nil))
+		(parser '((atom "CAST" true) "(" (define p sql_expression) (atom "AS" true) (atom "DECIMAL" true) "(" sql_int "," sql_int ")" ")") '('sql_typed_value '('sql_cast_value p "DECIMAL") "DECIMAL" nil))
+		(parser '((atom "CAST" true) "(" (define p sql_expression) (atom "AS" true) (atom "DECIMAL" true) "(" sql_int ")" ")") '('sql_typed_value '('sql_cast_value p "DECIMAL") "DECIMAL" nil))
+		(parser '((atom "CAST" true) "(" (define p sql_expression) (atom "AS" true) (atom "DECIMAL" true) ")") '('sql_typed_value '('sql_cast_value p "DECIMAL") "DECIMAL" nil))
+		(parser '((atom "CAST" true) "(" (define p sql_expression) (atom "AS" true) (atom "VARCHAR" true) "(" sql_int ")" ")") '('sql_typed_value '('sql_cast_value p "VARCHAR") "VARCHAR" "utf8mb4_unicode_520_ci"))
+		(parser '((atom "CAST" true) "(" (define p sql_expression) (atom "AS" true) (atom "VARCHAR" true) ")") '('sql_typed_value '('sql_cast_value p "VARCHAR") "VARCHAR" "utf8mb4_unicode_520_ci"))
+		(parser '((atom "CAST" true) "(" (define p sql_expression) (atom "AS" true) (atom "CHAR" true) (atom "CHARACTER" true) (atom "SET" true) (atom "utf8" true) ")") '('sql_typed_value '('sql_cast_value p "VARCHAR") "VARCHAR" "utf8mb4_unicode_520_ci"))
+		(parser '((atom "CONVERT" true) "(" (define p sql_expression) "," (atom "DECIMAL" true) "(" sql_int "," sql_int ")" ")") '('sql_typed_value '('sql_cast_value p "DECIMAL") "DECIMAL" nil))
+		(parser '((atom "CONVERT" true) "(" (define p sql_expression) "," (atom "DECIMAL" true) "(" sql_int ")" ")") '('sql_typed_value '('sql_cast_value p "DECIMAL") "DECIMAL" nil))
+		(parser '((atom "CONVERT" true) "(" (define p sql_expression) "," (atom "DECIMAL" true) ")") '('sql_typed_value '('sql_cast_value p "DECIMAL") "DECIMAL" nil))
+		(parser '((atom "CONVERT" true) "(" (define p sql_expression) "," (atom "UNSIGNED" true) ")") '('sql_typed_value '('sql_cast_value p "BIGINT") "BIGINT" nil))
+		(parser '((atom "CONVERT" true) "(" (define p sql_expression) "," (atom "SIGNED" true) ")") '('sql_typed_value '('sql_cast_value p "BIGINT") "BIGINT" nil))
+		(parser '((atom "CONVERT" true) "(" (define p sql_expression) "," (atom "INTEGER" true) ")") '('sql_typed_value '('sql_cast_value p "BIGINT") "BIGINT" nil))
 		(parser '((atom "CONCAT" true) "(" (define p (+ sql_expression ",")) ")") (cons 'sql_concat p))
 		/* TRIM/LTRIM/RTRIM as explicit parser rules for reliable dispatch */
 		(parser '((atom "TRIM" true) "(" (define e sql_expression) ")") '((quote sql_trim) e))
@@ -1119,7 +1117,8 @@ arithmetic; leave expressions containing columns or functions untouched. */
 				true nil nil nil nil nil '() '() '())))))
 	(define sql_build_select_plan (lambda (query) (begin
 		(define expanded_query (sql_expand_views query policy))
-		(define actual_plan (build_queryplan_term expanded_query planning_session tx))
+		(define compiled (neumann_compile_pipeline expanded_query planning_session tx))
+		(define actual_plan (car compiled))
 		(define execution_plan (if (and (sql_select_calc_found_rows? query)
 			(not (equal? (car actual_plan) (quote found_rows_result))))
 			(begin
@@ -1134,7 +1133,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 					actual_plan))
 			actual_plan))
 		(list (quote !begin)
-			(list (quote resultfields) (list (quote quote) (queryplan_result_titles expanded_query)))
+			(sql_resultfields_expr (cadr compiled))
 			execution_plan)
 	)))
 	(define sql_union_all_parts (lambda (query)

@@ -263,9 +263,9 @@ adding a raw value equality would needlessly partition the cache per user. */
 		(define condition_accumulator (planning_session "__memcp_queryplan_guard_conditions"))
 		(define condition_catalog (planning_session "__memcp_queryplan_guard_condition_catalog"))
 		(define conditions (if (nil? condition_catalog)
-				(map (condition_accumulator) (lambda (key) (condition_accumulator key)))
-				(map (produceN (coalesceNil (condition_accumulator "count") 0))
-					(lambda (idx) (condition_accumulator (concat "condition:" idx))))))
+			(map (condition_accumulator) (lambda (key) (condition_accumulator key)))
+			(map (produceN (coalesceNil (condition_accumulator "count") 0))
+				(lambda (idx) (condition_accumulator (concat "condition:" idx))))))
 		(define statistics_guard (sql_queryplan_statistics_guard_from_session planning_session))
 		(define raw_guard (sql_queryplan_conjoin_guards
 			(merge (list conditions (list statistics_guard)))))
@@ -528,6 +528,7 @@ user table merely to discard a newly constructed policy closure. */
 			(define guarded_query (or explain_query (and select_query
 				(match (toUpper parse_query)
 					(regex "\\b(?:LIKE|MATCH|JOIN|EXISTS)\\b" _) true
+					(regex "[?$@]" _) true
 					_ false))))
 			(define compile_diagnostic (match (toUpper parse_query)
 				(regex "^\\s*EXPLAIN\\s+COMPILE\\b" _) true

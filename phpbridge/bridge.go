@@ -66,13 +66,14 @@ type connection struct {
 // SQL call has joined its workers. Result callbacks can run on different shard
 // goroutines and serialize access with mu. No Go pointer is retained by C.
 type resultBuffer struct {
-	mu          sync.Mutex
-	columns     map[string]int
-	columnCount int
-	metadata    bool
-	cells       []C.memcp_cell
-	data        []byte
-	rowCount    C.size_t
+	resultFields []scm.SQLResultField
+	mu           sync.Mutex
+	columns      map[string]int
+	columnCount  int
+	metadata     bool
+	cells        []C.memcp_cell
+	data         []byte
+	rowCount     C.size_t
 }
 
 const resultLimit = 64 << 20
@@ -97,6 +98,12 @@ func (b *resultBuffer) release() {
 		b.data = b.data[:0]
 	}
 	b.metadata, b.columnCount, b.rowCount = false, 0, 0
+	clear(b.resultFields)
+	if cap(b.resultFields) > 256 {
+		b.resultFields = nil
+	} else {
+		b.resultFields = b.resultFields[:0]
+	}
 }
 
 func (b *resultBuffer) appendValue(value scm.Scmer) C.memcp_cell {
@@ -152,7 +159,14 @@ func (b *resultBuffer) captureFields(a ...scm.Scmer) scm.Scmer {
 	if b.metadata {
 		panic("duplicate result metadata")
 	}
-	b.setColumns(a[0].Slice())
+	descriptors := a[0].Slice()
+	titles := make([]scm.Scmer, len(descriptors))
+	for i, descriptor := range descriptors {
+		field := scm.ParseSQLResultField(descriptor)
+		b.resultFields = append(b.resultFields, field)
+		titles[i] = scm.NewString(field.Name)
+	}
+	b.setColumns(titles)
 	return scm.NewBool(true)
 }
 
@@ -168,9 +182,26 @@ func (b *resultBuffer) captureRow(a ...scm.Scmer) scm.Scmer {
 		b.setColumns(titles)
 	}
 	start := b.growCells(b.columnCount)
+	ordered := len(row) == b.columnCount*2 && len(b.resultFields) == b.columnCount
+	if ordered {
+		for i, field := range b.resultFields {
+			if row[i*2].String() != field.Name {
+				ordered = false
+				break
+			}
+		}
+	}
 	for i := 0; i+1 < len(row); i += 2 {
-		if j, ok := b.columns[row[i].String()]; ok {
-			b.cells[start+j] = b.appendValue(row[i+1])
+		j, ok := i/2, ordered
+		if !ordered {
+			j, ok = b.columns[row[i].String()]
+		}
+		if ok {
+			value := row[i+1]
+			if len(b.resultFields) > 0 {
+				value = b.resultFields[j].Value(value)
+			}
+			b.cells[start+j] = b.appendValue(value)
 		}
 	}
 	b.rowCount++

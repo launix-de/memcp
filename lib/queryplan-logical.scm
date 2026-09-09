@@ -5753,21 +5753,32 @@ names in projections, predicates, and correlated subqueries. */
 			(qb_stages inner)
 			(qb_facts inner)))))
 
+/* Preserve non-projected ORDER expressions through distribution. They belong
+in the logical UNION carrier until sorting/LIMIT finish, then projection removes
+these hidden fields. They must never be discarded by branch projection. */
 (define rewrite_query_block_over_union_source (lambda (block src)
-	(begin
-		(if (not (union_wrapper_rewrite_allowed? block))
-			nil
-			(begin
-				(define relation (normalize_query_ast (source_relation src)))
-				(define canonical_fields (union_canonical_fields relation))
-				(make_union_block
-					(union_mode relation)
-					(map (union_branches relation) (lambda (branch)
-						(wrap_union_branch_query block (source_alias src) branch canonical_fields)))
-					(if (empty_list? (qb_order block)) (union_order relation) (qb_order block))
-					(coalesceNil (qb_limit block) (union_limit relation))
-					(coalesceNil (qb_offset block) (union_offset relation))
-					(union_facts relation)))))))
+	(if (not (union_wrapper_rewrite_allowed? block)) nil
+		(begin
+			(define relation (normalize_query_ast (source_relation src)))
+			(define canonical_fields (union_canonical_fields relation))
+			(define orders (coalesceNil (qb_order block) '()))
+			(define hidden_prefix (union_hidden_order_prefix (binding_field_titles (qb_fields block)) "__union_order_"))
+			(define hidden (merge (map (produceN (count orders)) (lambda (i)
+				(list (concat hidden_prefix i) (car (nth orders i)))))))
+			(define projected (make_query_block (qb_schema block) (qb_sources block)
+				(merge (list (qb_fields block) hidden)) (qb_where block) (qb_group block)
+				(qb_having block) '() (qb_limit block) (qb_offset block)
+				(qb_hidden block) (qb_stages block) (qb_facts block)))
+			(make_union_block (union_mode relation)
+				(map (union_branches relation) (lambda (branch)
+					(wrap_union_branch_query projected (source_alias src) branch canonical_fields)))
+				(if (empty_list? orders) (union_order relation)
+					(map (produceN (count orders)) (lambda (i)
+						(list (list (quote get_column) nil false (concat hidden_prefix i) false) (cadr (nth orders i))))))
+				(coalesceNil (qb_limit block) (union_limit relation))
+				(coalesceNil (qb_offset block) (union_offset relation))
+				(if (empty_list? hidden) (union_facts relation)
+					(qassoc_set (union_facts relation) (quote visible-fields) (binding_field_titles (qb_fields block)))))))))
 
 (define replace_union_source_branch (lambda (sources union_src branch)
 	(map (coalesceNil sources '()) (lambda (src)
@@ -6012,16 +6023,58 @@ Do not generalize this proof to joins, nullable UNIQUE keys or partial PKs. */
 
 (define untangle_query_term (lambda (query ctx)
 	(begin
-		(define bound_query (bind_query_names query '()))
+		(define bound_query (if (nil? sql_builtins) (bind_query_names query '())
+			(sql_type_query (bind_query_names query '()) '())))
 		(define guarded_query (fold_bound_query_truth_guards bound_query))
 		(define root (require_unnested_node "untangle_query" (untangle_query guarded_query ctx)))
 		(define ir (make_ir (if (union_block? root) (quote union) (quote select))
 			root
 			(if (query_block? root) (qb_stages root) '())
 			(make_uctx ctx (list
+				(list (quote result-types) (sql_query_result_infos bound_query))
 				(list (quote compile-budget-ms) 1000)
 				(list (quote operator-model) (quote combined))))
 			(quote rows)))
 		(require_flat_stage_dependencies "untangle_query" (normalize_stage_dependencies ir)))))
 
 /* ------------------------------------------------------------------------- */
+
+(define star_expr_alias (lambda (expr)
+	(match expr
+		((symbol get_column) tblvar _ "*" _) tblvar
+		((quote get_column) tblvar _ "*" _) tblvar
+		_ false)))
+
+(define star_expr? (lambda (expr)
+	(match expr
+		((symbol get_column) _ _ "*" _) true
+		((quote get_column) _ _ "*" _) true
+		_ false)))
+
+/* Star expansion must use each source's SQL-visible exported columns. A source
+may be a base table, table function, query block, or union; consulting only the
+base-table schema silently produces empty result metadata for derived.*. */
+(define expand_star_for_sources (lambda (sources requested_alias)
+	(merge (map (coalesceNil sources '()) (lambda (src)
+		(if (or (nil? requested_alias) (equal? requested_alias (source_alias src)))
+			(merge (map (binding_source_columns src) (lambda (col)
+				(list col (list (quote get_column) (source_alias src) false col false)))))
+			'()))))))
+
+(define expand_query_block_fields (lambda (sources fields)
+	(match (coalesceNil fields '())
+		(cons title (cons expr rest)) (begin
+			(define requested_alias (star_expr_alias expr))
+			(if (star_expr? expr)
+				(merge (list (expand_star_for_sources sources requested_alias) (expand_query_block_fields sources rest)))
+				(cons title (cons expr (expand_query_block_fields sources rest)))))
+		_ '())))
+
+
+(define source_is_base_table? (lambda (src)
+	(string? (source_relation src))))
+
+
+(define union_hidden_order_prefix (lambda (titles prefix)
+	(if (reduce titles (lambda (conflict title) (or conflict (equal? (substr title 0 (min (strlen title) (strlen prefix))) prefix))) false)
+		(union_hidden_order_prefix titles (concat "_" prefix)) prefix)))

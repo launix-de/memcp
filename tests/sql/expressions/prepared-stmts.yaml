@@ -971,3 +971,12 @@ test_cases:
     sql: "SELECT id FROM ps_test WHERE id = ?"
     expect:
       rows: 0
+
+  - name: Parameter projection changes to text without losing leading zeros
+    sql: SELECT ? AS value
+    params: ["007"]
+    expect: {rows: 1, data: [{value: "007"}]}
+  - name: Parameter comparison changes from numeric to textual collation
+    sql: SELECT ? COLLATE bin < ? AS value
+    params: ["10", "2"]
+    expect: {rows: 1, data: [{value: true}]}

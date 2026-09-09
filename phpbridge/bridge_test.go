@@ -11,7 +11,7 @@ import "github.com/launix-de/memcp/scm"
 
 func TestResultBufferConcurrentRows(t *testing.T) {
 	var b resultBuffer
-	b.captureFields(scm.NewSlice([]scm.Scmer{scm.NewString("id"), scm.NewString("optional")}))
+	b.captureFields(scm.NewSlice([]scm.Scmer{scm.NewSlice([]scm.Scmer{scm.NewString("id"), scm.NewString("BIGINT"), scm.NewString("bin")}), scm.NewString("optional")}))
 	var wg sync.WaitGroup
 	for worker := 0; worker < 8; worker++ {
 		wg.Add(1)
@@ -64,5 +64,21 @@ func TestResultBufferBoundedReuse(t *testing.T) {
 	b.release()
 	if cap(b.cells) == 0 {
 		t.Fatal("small cell buffer not reused")
+	}
+}
+
+func TestResultBufferDeclaredPackingAndDuplicateNames(t *testing.T) {
+	var b resultBuffer
+	b.captureFields(scm.NewSlice([]scm.Scmer{
+		scm.NewSlice([]scm.Scmer{scm.NewString("x"), scm.NewString("BIGINT"), scm.NewString("bin")}),
+		scm.NewSlice([]scm.Scmer{scm.NewString("x"), scm.NewString("VARCHAR"), scm.NewString("utf8mb4_unicode_520_ci")}),
+	}))
+	b.captureRow(scm.NewSlice([]scm.Scmer{scm.NewString("x"), scm.NewFloat(12), scm.NewString("x"), scm.NewInt(34)}))
+	if b.cells[2].kind != 1 || b.cells[2].integer != 12 || b.cells[3].kind != 3 {
+		t.Fatal("compiler types or duplicate positions lost during packing")
+	}
+	cell := b.cells[3]
+	if string(b.data[int(cell.offset):int(cell.offset+cell.length)]) != "34" {
+		t.Fatal("declared string was not packed as text")
 	}
 }

@@ -1221,3 +1221,28 @@ func TestSnapshotDropsLegacySortedMatcherMetadata(t *testing.T) {
 		t.Fatalf("snapshot retained sorted matcher metadata: %#v", snapshot[0].ColMatchers)
 	}
 }
+
+// Search intervals carry the predicate collation, independently of both the
+// declared column collation and a separate ORDER BY relation.
+func TestBoundaryCollationOverridesColumnOrder(t *testing.T) {
+	tbl := &table{Name: "typed_columns", Columns: []*column{{Name: "name", Collation: "utf8mb4_unicode_520_ci"}}}
+	for _, upperOnly := range []bool{false, true} {
+		boundary := analyzedBoundary{col: "name", matcher: RangeMatcher, collation: "bin", upper: scm.NewString("a")}
+		if !upperOnly {
+			boundary.lower = scm.NewString("A")
+		}
+		access := scanAccessFromAnalyzed(analyzedBoundaries{boundary})
+		less, metadata := scanAccessBoundaryOrder(tbl, access, 0)
+		if metadata != "bin:asc" || !less(scm.NewString("A"), scm.NewString("a")) {
+			t.Fatalf("upperOnly=%v: lost binary predicate collation: %s", upperOnly, metadata)
+		}
+		index := &StorageIndex{Cols: []string{"name"}, ColOrderMeta: []string{"bin:asc"}}
+		if !indexOrderMatchesScanAccess(tbl, index, 0, access) || !indexOrderMatchesBoundary(tbl, index, 0, boundary) {
+			t.Fatal("predicate-compatible index was rejected")
+		}
+		index.ColOrderMeta[0] = "utf8mb4_unicode_520_ci:asc"
+		if indexOrderMatchesScanAccess(tbl, index, 0, access) || indexOrderMatchesBoundary(tbl, index, 0, boundary) {
+			t.Fatal("incompatible column-order index was accepted")
+		}
+	}
+}
