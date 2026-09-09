@@ -2736,13 +2736,20 @@ the lowerer can cost it. */
 				(lambda () (begin
 					(define compile_bindings (if (nil? planning_session) nil (planning_session "__memcp_queryplan_compile_bindings")))
 					(define observed (if (nil? planning_session) nil (planning_session "__memcp_queryplan_observed_session_keys")))
-					(if (and (not (nil? compile_bindings)) (not (nil? observed)))
-						(observed key true)
-						nil)
 					(define direct (if (nil? planning_session) nil (planning_session key)))
-					(if (not (nil? direct))
-						direct
-						(if (nil? compile_bindings) nil (compile_bindings key)))))
+					(define value (if (not (nil? direct)) direct
+						(if (nil? compile_bindings) nil (compile_bindings key))))
+					(if (and (not (nil? compile_bindings)) (not (nil? observed)))
+						(begin
+							/* Snapshot the value actually consumed by costing, not just vN
+							literal parameters. The uncovered-binding guard reads this snapshot:
+							missing named values would emit (= runtime_value nil), rejecting even
+							the compiling request and recompiling on every execution. Record only
+							observed inputs; do not copy opaque execution/preparation state. */
+							(compile_bindings key value)
+							(observed key true))
+						nil)
+					value))
 				(lambda (_e) nil))
 			((quote session) key) (planner_literal_value (list (quote session) key) planning_session)
 			((symbol session_globalvar) key) (coalesceNil

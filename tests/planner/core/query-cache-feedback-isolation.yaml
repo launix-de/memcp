@@ -5,6 +5,10 @@ metadata:
   description: "Unrelated learned predicates must not invalidate cached ordered plans"
   isolated: true
 setup:
+  - sql: "DROP TABLE IF EXISTS qfi_access"
+  - sql: "CREATE TABLE qfi_access (viewer INT, domain_id INT) ENGINE=sloppy"
+  - sql: "INSERT INTO qfi_access VALUES (999,NULL),(998,998),(997,999)"
+  - scm: '(rebuild (table "memcp-tests" "qfi_access") true false)'
   - sql: "DROP TABLE IF EXISTS qfi_single"
   - sql: "CREATE TABLE qfi_single (id INT PRIMARY KEY) ENGINE=sloppy"
   - sql: "INSERT INTO qfi_single VALUES (999)"
@@ -17,6 +21,99 @@ setup:
           (map (produceN 1000) (lambda (i) (list i (if (< i 10) "needle" "ordinary")))))
         (rebuild (table "memcp-tests" "qfi_document") true false))
 test_cases:
+  - name: "Observed named bindings guard their compile-time value, including false and NULL"
+    scm: |
+      (begin
+        (define sess (newsession))
+        (sess "viewer" 999)
+        (sess "enabled" false)
+        (define planning (sql_queryplan_compile_session sess nil))
+        (define values (list
+          (planner_literal_value (quote (session "viewer")) planning)
+          (planner_literal_value (quote (session "enabled")) planning)
+          (planner_literal_value (quote (session "missing")) planning)))
+        (if (not (equal? values (list 999 false nil))) (error "planner read incorrect bindings") nil)
+        (define guard (sql_queryplan_compile_formula
+          (sql_queryplan_conjoin_guards (sql_queryplan_uncovered_binding_conditions planning))))
+        (define original (guard sess nil nil nil))
+        (sess "viewer" 998)
+        (define changed (guard sess nil nil nil))
+        (sess "viewer" 999)
+        (sess "missing" 1)
+        (define formerly_null (guard sess nil nil nil))
+        (sess "missing" nil)
+        (sess "enabled" true)
+        (define formerly_false (guard sess nil nil nil))
+        (if (and original (not changed) (not formerly_null) (not formerly_false)) true
+          (error "named binding guard lost the observed value or accepted a changed binding")))
+    expect:
+      rows: 1
+      result_contains: ["true"]
+  - name: "Named lookup bindings reuse plans but still change visible rows"
+    scm: |
+      (begin
+        (define cache (newcachemap))
+        (define sess (newsession))
+        (sess "username" "root")
+        (sess "schema" "memcp-tests")
+        (define q "SELECT a.id,b.label FROM qfi_single a LEFT JOIN qfi_document b ON b.id=a.id WHERE b.id=@viewer ORDER BY a.id LIMIT 2")
+        (define rows (newsession))
+        (define run (lambda (viewer) (begin
+          (sess "viewer" viewer)
+          (rows "n" 0)
+          (sql_execute_formula sess nil
+            (cached_parse cache (list parse_sql) "memcp-tests" q nil "root" sess true)
+            (lambda (row) (rows "n" (+ (rows "n") 1))) (lambda (_fields) nil))
+          (rows "n"))))
+        (define first (run 999))
+        (run 999)
+        (define entry (car (cache (car (cache)))))
+        (define before (count (entry "variants")))
+        (define repeated (run 999))
+        (define after (count (entry "variants")))
+        (define changed (run 998))
+        (define restored (run 999))
+        (define missing (run nil))
+        (if (and (equal? first 1) (equal? repeated 1) (equal? changed 0)
+          (equal? restored 1) (equal? missing 0) (equal? before after)) true
+          (error (concat "ACL binding results or plan reuse failed: " first "/" repeated "/"
+            changed "/" restored "/" missing " variants " before " -> " after)))))
+    expect:
+      rows: 1
+      result_contains: ["true"]
+  - name: "Named ACL count guards accept their own compilation and reuse the variant"
+    scm: |
+      (begin
+        (define cache (newcachemap))
+        (define sess (newsession))
+        (sess "username" "root")
+        (sess "schema" "memcp-tests")
+        (define q "SELECT COUNT(*) AS n FROM qfi_single a LEFT JOIN qfi_document z ON z.id=a.id WHERE COALESCE((SELECT CASE WHEN EXISTS(SELECT 1 FROM qfi_access x WHERE x.viewer=@viewer AND x.domain_id IS NULL LIMIT 1) THEN TRUE ELSE EXISTS(SELECT 1 FROM qfi_access y WHERE y.viewer=@viewer AND y.domain_id=b.id LIMIT 1) END FROM qfi_document b WHERE b.id=a.id LIMIT 1),FALSE)")
+        (define rows (newsession))
+        (define run (lambda (viewer) (begin
+          (sess "viewer" viewer)
+          (rows "n" -1)
+          (sql_execute_formula sess nil
+            (cached_parse cache (list parse_sql) "memcp-tests" q nil "root" sess true)
+            (lambda (row) (rows "n" (cadr row))) (lambda (_fields) nil))
+          (rows "n"))))
+        (define first (run 999))
+        (run 999)
+        (define entry (car (cache (car (cache)))))
+        (define before (count (entry "variants")))
+        (define repeated (run 999))
+        (define after (count (entry "variants")))
+        (define changed (run 998))
+        (define scoped (run 997))
+        (define restored (run 999))
+        (if (and (equal? first 1) (equal? repeated 1) (equal? changed 0)
+          (equal? scoped 1) (equal? restored 1)
+          (equal? before after)) true
+          (error (concat "ACL count results or cache reuse failed: " first "/" repeated "/"
+            changed "/" scoped "/" restored " variants " before " -> " after)))))
+    expect:
+      rows: 1
+      result_contains: ["true"]
   - name: "Truthy guard literals are not references to statistic bindings"
     scm: |
       (begin
@@ -208,5 +305,6 @@ test_cases:
     expect:
       data: [true]
 cleanup:
+  - sql: "DROP TABLE IF EXISTS qfi_access"
   - sql: "DROP TABLE IF EXISTS qfi_single"
   - sql: "DROP TABLE IF EXISTS qfi_document"
