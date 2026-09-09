@@ -21,10 +21,14 @@ from __future__ import annotations
 
 from pathlib import Path
 import shutil
+import json
+import subprocess
 import tempfile
 import unittest
 
 from check_sql_time_limit import GuardFailure
+from check_sql_time_limit import check_base_regressions
+from check_sql_time_limit import read_head_suites
 from check_sql_time_limit import check_added_planner_lines
 from check_sql_time_limit import check_runner
 from check_sql_time_limit import compare_suites
@@ -210,6 +214,68 @@ class BaseComparisonTest(unittest.TestCase):
             }
         )
         compare_suites(old, new, "tests/planner/regression.yaml")
+
+
+class NonYamlFixtureDiffTest(unittest.TestCase):
+    def check_diff(self, before: dict[str, str], after: dict[str, str]) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+
+            def git(*args: str) -> str:
+                return subprocess.check_output(
+                    ["git", "-c", "user.name=Guard test", "-c",
+                     "user.email=guard@example.invalid", "-c",
+                     "core.hooksPath=/dev/null", *args],
+                    cwd=root, text=True, stderr=subprocess.DEVNULL,
+                ).strip()
+
+            def write(files: dict[str, str]) -> None:
+                for name, content in files.items():
+                    path = root / name
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(content, encoding="utf-8")
+
+            git("init", "-q")
+            write(before)
+            git("add", ".")
+            git("commit", "-qm", "baseline")
+            base = git("rev-parse", "HEAD")
+            for name in before:
+                (root / name).unlink()
+            write(after)
+            git("add", "-A")
+            git("commit", "-qm", "candidate")
+            check_base_regressions(root, base, read_head_suites(root))
+
+    def test_non_yaml_fixture_changes_do_not_parse_as_sql_suites(self) -> None:
+        source = "<?php\n// SPDX-License-Identifier: GPL-3.0-or-later\necho 'fixture';\n"
+        before = {"tests/php/integration.php": source}
+        for after in [
+            {"tests/php/integration.php": source + "echo 'updated';\n"},
+            {},
+            {"tests/php/renamed.php": source},
+        ]:
+            with self.subTest(paths=list(after)):
+                self.check_diff(before, after)
+
+    def test_yaml_suite_cannot_be_hidden_by_a_non_yaml_extension(self) -> None:
+        source = json.dumps(suite())
+        with self.assertRaisesRegex(GuardFailure, "must not disappear"):
+            self.check_diff(
+                {"tests/regression.yaml": source},
+                {"tests/regression.php": source},
+            )
+
+    def test_yaml_limits_remain_protected_alongside_php_changes(self) -> None:
+        old = suite({"name": "regression", "sql": "SELECT 1", "max_time": 1,
+                     "expect": {"rows": 1}})
+        new = suite({"name": "regression", "sql": "SELECT 1", "max_time": 2,
+                     "expect": {"rows": 1}})
+        with self.assertRaisesRegex(GuardFailure, "max_time"):
+            self.check_diff(
+                {"tests/regression.yaml": json.dumps(old), "tests/fixture.php": "<?php"},
+                {"tests/regression.yaml": json.dumps(new), "tests/fixture.php": "<?php echo 1;"},
+            )
 
 
 class PlannerSourceDiffTest(unittest.TestCase):

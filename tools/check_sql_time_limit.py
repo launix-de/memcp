@@ -596,7 +596,10 @@ def check_base_regressions(
 ) -> None:
     git(root, "rev-parse", "--verify", f"{base_ref}^{{commit}}")
     for status, old_path, new_path in changed_test_paths(root, base_ref):
-        if old_path is None:
+        # The runner discovers *.yaml suites. PHP fixtures and documentation
+        # under tests/ are not SQL suites. Check the OLD suffix so renaming a
+        # protected YAML suite to another extension still fails as a deletion.
+        if old_path is None or not old_path.endswith(".yaml"):
             continue
         old_suite = load_base_suite(root, base_ref, old_path)
         if new_path is None or new_path not in head_suites:
