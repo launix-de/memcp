@@ -1050,7 +1050,7 @@ func Init(en scm.Env) {
 				return scm.NewNil()
 			}
 			confidence := .9
-			if source == "like_length_histogram" || source == "partial_scan_feedback" {
+			if source == "like_length_histogram" || source == "partial_scan_feedback" || source == "historical_scan_feedback" {
 				confidence = .35
 			}
 			return scm.NewSlice([]scm.Scmer{

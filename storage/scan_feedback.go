@@ -38,6 +38,7 @@ type filterFeedbackCache [filterFeedbackSlots]atomic.Pointer[filterObservation]
 type tableFilterFeedback struct {
 	entries     [filterFeedbackSlots]*filterObservation
 	fingerprint uint64
+	schema      uint64
 }
 
 type filterObservation struct {
@@ -259,11 +260,16 @@ func (cache *filterFeedbackCache) observe(key *filterObservation, population, ma
 	}
 	cell := &cache[filterFeedbackSlot(key.key)]
 	old := cell.Load()
+	measured := float64(matched) / float64(population)
+	// Repeating the identical population/rate cannot improve the estimate. Do
+	// not allocate or dirty a shared cache line just to count redundant samples.
+	if old != nil && old.key == key.key && old.generation == key.generation && old.population == population && old.value == measured {
+		return
+	}
 	next := *key
 	next.population = population
 	next.observed = population
 	next.samples = 1
-	measured := float64(matched) / float64(population)
 	// A complete first observation replaces the cold prior. Subsequent complete
 	// observations use the requested 99/1 EMA; no per-batch weighting bias.
 	next.value = measured
@@ -323,19 +329,19 @@ func (t *table) publishFilterFeedback(key *filterObservation) {
 	}
 	next.value /= float64(next.population)
 	old := t.filterFeedback.Load()
-	snapshot := &tableFilterFeedback{}
-	if old != nil {
-		*snapshot = *old
-	}
-	snapshot.entries[filterFeedbackSlot(key.key)] = &next
-	snapshot.fingerprint = 0
-	for _, entry := range snapshot.entries {
-		if entry != nil && entry.generation == key.generation {
-			snapshot.fingerprint = plannerFingerprintString(snapshot.fingerprint, entry.key)
-			snapshot.fingerprint = plannerFingerprintMix(snapshot.fingerprint, filterFeedbackClass(entry.value))
-			snapshot.fingerprint = plannerFingerprintMix(snapshot.fingerprint, plannerFractionBucket(float64(entry.observed)/float64(entry.population)))
+	if old != nil && old.schema == t.filterSchemaFingerprint() {
+		previous := old.entries[filterFeedbackSlot(key.key)]
+		if previous != nil && *previous == next {
+			return
 		}
 	}
+	snapshot := &tableFilterFeedback{}
+	if old != nil && old.schema == t.filterSchemaFingerprint() {
+		*snapshot = *old
+	}
+	snapshot.schema = t.filterSchemaFingerprint()
+	snapshot.entries[filterFeedbackSlot(key.key)] = &next
+	snapshot.updateFingerprint()
 	if t.plannerStatsToken.Load() == key.generation {
 		t.filterFeedback.CompareAndSwap(old, snapshot)
 	}
@@ -350,11 +356,14 @@ func (t *table) filterSelectivity(key *filterObservation) (float64, string, bool
 	}
 	generation := t.plannerStatsToken.Load()
 	snapshot := t.filterFeedback.Load()
-	if snapshot == nil {
+	if snapshot == nil || snapshot.schema != t.filterSchemaFingerprint() {
 		return 0, "", false
 	}
 	entry := snapshot.entries[filterFeedbackSlot(key.key)]
-	if entry != nil && entry.key == key.key && entry.generation == generation {
+	if entry != nil && entry.key == key.key {
+		if entry.generation != generation {
+			return entry.value, "historical_scan_feedback", true
+		}
 		if entry.observed < entry.population {
 			return entry.value, "partial_scan_feedback", true
 		}
@@ -366,7 +375,7 @@ func (t *table) filterSelectivity(key *filterObservation) (float64, string, bool
 	var sums [65]float64
 	var counts [65]int
 	for _, entry := range snapshot.entries {
-		if entry == nil || entry.generation != generation || entry.family != key.family || entry.length > 64 {
+		if entry == nil || entry.family != key.family || entry.length > 64 {
 			continue
 		}
 		sums[entry.length] += entry.value
@@ -422,7 +431,7 @@ func filterFeedbackClass(value float64) uint64 {
 }
 
 func (t *table) filterFeedbackFingerprint() uint64 {
-	if snapshot := t.filterFeedback.Load(); snapshot != nil {
+	if snapshot := t.filterFeedback.Load(); snapshot != nil && snapshot.schema == t.filterSchemaFingerprint() {
 		return snapshot.fingerprint
 	}
 	return 0
@@ -485,4 +494,15 @@ func staticFilterFeedbackKey(spec scm.Scmer, bindings []scm.Scmer) scm.Scmer {
 	result := append([]scm.Scmer(nil), spec.Slice()...)
 	result = append(result, scm.NewSlice([]scm.Scmer{scm.NewString(key.key), scm.NewString(key.family), scm.NewInt(int64(key.length)), scm.NewFloat(key.value), scm.NewSlice(expected)}))
 	return scm.NewSlice(result)
+}
+
+func (s *tableFilterFeedback) updateFingerprint() {
+	s.fingerprint = 0
+	for _, entry := range s.entries {
+		if entry != nil {
+			s.fingerprint = plannerFingerprintString(s.fingerprint, entry.key)
+			s.fingerprint = plannerFingerprintMix(s.fingerprint, filterFeedbackClass(entry.value))
+			s.fingerprint = plannerFingerprintMix(s.fingerprint, plannerFractionBucket(float64(entry.observed)/float64(entry.population)))
+		}
+	}
 }

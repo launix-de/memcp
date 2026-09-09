@@ -615,6 +615,9 @@ type table struct {
 	repartitionPendingMu         sync.Mutex
 	repartitionPendingDels       []translatedRecid
 	repartitionPendingSourceDels []pendingSourceDelete
+
+	// Cold decode state, consumed before publication; keep out of hot field groups.
+	RestoredFilterFeedback *persistedFilterFeedback `json:"filter_feedback,omitempty"`
 }
 
 var nextPlannerStatsToken atomic.Uint64
@@ -790,7 +793,8 @@ func (t *table) MarshalJSON() ([]byte, error) {
 		Collation          string
 		Charset            string
 		Comment            string
-		PlannerRowEstimate uint64 `json:"planner_row_estimate"`
+		PlannerRowEstimate uint64                   `json:"planner_row_estimate"`
+		FilterFeedback     *persistedFilterFeedback `json:"filter_feedback,omitempty"`
 		ShardMode          ShardMode
 		Shards             []*storageShard
 		PShards            []*storageShard
@@ -809,6 +813,7 @@ func (t *table) MarshalJSON() ([]byte, error) {
 		Charset:            t.Charset,
 		Comment:            t.Comment,
 		PlannerRowEstimate: t.PlannerRowEstimate.value.Load(),
+		FilterFeedback:     t.persistFilterFeedback(),
 		ShardMode:          topology.mode,
 		Shards:             shards,
 		PShards:            partitionedShards,
@@ -1467,6 +1472,7 @@ type tableShowColumnsSnapshot struct {
 	value              scm.Scmer
 	plannerValue       scm.Scmer
 	plannerFingerprint uint64
+	filterSchema       uint64 // stable column semantics, independent of row statistics
 	rowEstimate        uint
 	metadata           *tableShowColumnsSnapshotMetadata
 }
@@ -1576,7 +1582,15 @@ func (t *table) buildShowColumnsSnapshot(rowEstimate uint) *tableShowColumnsSnap
 	distinctEstimates := make([]uint64, len(t.Columns))
 	plannerStatistics := make([]*columnPlannerStatistics, len(t.Columns))
 	columnNames := t.buildColumnNamesSnapshot()
+	filterSchema := plannerFingerprintString(0x1d26d8e71, t.Collation)
 	for i, c := range t.Columns {
+		filterSchema = plannerFingerprintString(filterSchema, c.Name)
+		filterSchema = plannerFingerprintString(filterSchema, c.Typ)
+		filterSchema = plannerFingerprintString(filterSchema, c.Collation)
+		for _, dimension := range c.Typdimensions {
+			filterSchema = plannerFingerprintMix(filterSchema, uint64(dimension))
+		}
+		filterSchema = plannerFingerprintMix(filterSchema, uint64(len(c.Typdimensions)))
 		keyType := ""
 		for _, uk := range t.Unique {
 			for _, col := range uk.Cols {
@@ -1613,6 +1627,7 @@ func (t *table) buildShowColumnsSnapshot(rowEstimate uint) *tableShowColumnsSnap
 		value:              scm.NewSlice(result),
 		plannerValue:       plannerValue,
 		plannerFingerprint: plannerStatisticsFingerprint(uint64(rowEstimate), plannerColumnsFingerprint),
+		filterSchema:       filterSchema,
 		rowEstimate:        rowEstimate,
 		metadata: &tableShowColumnsSnapshotMetadata{
 			plannerColumnsFingerprint: plannerColumnsFingerprint,

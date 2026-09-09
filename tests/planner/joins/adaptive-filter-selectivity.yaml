@@ -89,3 +89,95 @@ test_cases:
     sql: "SELECT COUNT(*) FROM afs_check WHERE missing_column LIKE '%com%'"
     expect:
       error: true
+
+  - name: "Complete indexed RecSet learns a table rate and refreshes plan guards"
+    scm: |
+      (begin
+        (define tbl (table "memcp-tests" "afs_check"))
+        (define callback (list 'lambda (list 'x) (list 'strlike 'x "%common%" "utf8mb4_general_ci")))
+        (define access (compile_scan_access '("label") callback))
+        (define values (map (nth access 1) (lambda (v) (eval v))))
+        (define before_token (table_planner_statistics_token tbl))
+        (define before_fingerprint (table_planner_statistics_fingerprint tbl))
+        (define matches (recset_count (scan_recset nil tbl (nth access 0) values '("label") (eval callback))))
+        (define estimate (table_filter_selectivity tbl (nth access 0) values))
+        (if (and (equal? matches 900)
+          (equal? (qassoc_get estimate 'source nil) 'scan_feedback)
+          (equal? (qassoc_get estimate 'value nil) 0.9)
+          (not (table_planner_statistics_compatible? "memcp-tests" "afs_check" before_token before_fingerprint)))
+          true (error "complete RecSet feedback did not invalidate the planner guard"))))
+    expect:
+      data: [true]
+
+  - name: "EXPLAIN cache checks never execute candidate preparations"
+    scm: |
+      (begin
+        (define sess (newsession))
+        (define cache (newcachemap))
+        (define diagnostic_parser (lambda (schema query policy planning tx) (begin
+          (define preparations (planning "__memcp_queryplan_preparations"))
+          (preparations "count" 1)
+          (preparations "preparation:0" (list "must-not-prepare"
+            (list 'error "candidate preparation must not run for EXPLAIN") 0))
+          (list 'resultrow (list 'list "ok" true)))))
+        (with_autocommit sess nil 1 "explain feedback guard test" (lambda (tx) (begin
+          (define formula (cached_parse cache (list diagnostic_parser) "memcp-tests"
+            "EXPLAIN SELECT 1" nil "root" sess false tx))
+          (sql_execute_formula sess tx formula (lambda (_row) true) (lambda (_fields) nil))))))
+    expect:
+      data: [true]
+
+  - name: "A cache miss prepares the newly compiled variant before its first execution"
+    scm: |
+      (begin
+        (define sess (newsession))
+        (define cache (newcachemap))
+        (define entry (newsession))
+        (entry "compile_lock" (mutex))
+        (entry "variants" '())
+        (sess "v1" 17)
+        (define parser (lambda (schema query policy planning tx) (begin
+          (define preparations (planning "__memcp_queryplan_preparations"))
+          (preparations "count" 1)
+          (preparations "preparation:0" (list "new-variant-input" (list 'session "v1")
+            (symbol "__queryplan_observed_value")))
+          (list 'equal?
+            (planner_queryplan_observation_current_read_expr
+              (planner_queryplan_observation_value_key "new-variant-input"))
+            17))))
+        (with_autocommit sess nil 1 "cache miss preparation test" (lambda (tx)
+          (if (sql_queryplan_variant_miss cache "new-variant" entry (list parser)
+            "memcp-tests" "SELECT 1" nil sess tx
+            (lambda (_row) true) (lambda (_fields) nil))
+            true (error "newly compiled plan ran without its prepared input")))))
+    expect:
+      data: [true]
+
+  - name: "Physical diagnostics follow observation producers without executing or unquoting them"
+    scm: |
+      (begin
+        (define planning (newsession))
+        (define preparations (newsession))
+        (planning "__memcp_queryplan_preparations" preparations)
+        (define producer (list 'error "diagnostics must not execute prepared inputs"))
+        (preparations "count" 1)
+        (preparations "preparation:0" (list "diagnostic-input" producer 0))
+        (define key (planner_queryplan_observation_value_key "diagnostic-input"))
+        (define source (planner_queryplan_observation_read_expr key))
+        (define quoted (list 'quote source))
+        (preparations "count" 3)
+        (preparations "preparation:1" (list "dependent-input" (list '+ source 1) 0))
+        (preparations "preparation:2" (list "unused-input" producer 0))
+        (define dependent (planner_queryplan_observation_read_expr
+          (planner_queryplan_observation_value_key "dependent-input")))
+        (define view (physical_queryplan_observation_view (list 'list dependent source) planning))
+        (if (and
+          (equal? (map (cadr view) car) '("diagnostic-input" "dependent-input"))
+          (empty_list? (cadr (physical_queryplan_observation_view quoted planning)))
+          (equal? (car (physical_queryplan_observation_view source planning)) producer)
+          (equal? (car (physical_queryplan_observation_view
+            (planner_queryplan_observation_current_read_expr key) planning)) producer)
+          (equal? (car (physical_queryplan_observation_view quoted planning)) quoted))
+          true (error "physical diagnostics lost prepared input provenance or quoting"))))
+    expect:
+      data: [true]
