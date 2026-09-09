@@ -4006,6 +4006,11 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 		// buffered deletes, then switch subsequent mutations to direct forwarding.
 		t.mu.Lock()
 		t.catchUpRebuildLocked(result, maxInsertIndex)
+		// Transfer ownership while both generations are locked, BEFORE enabling
+		// source -> successor commit forwarding. Reacquiring the source mutex
+		// afterwards while holding result.mu would reverse that lock order.
+		result.tempColumnBytes = t.tempColumnBytes
+		t.tempColumnBytes = nil
 		t.nextReady.Store(true)
 		t.mu.Unlock()
 	} else {
@@ -4036,6 +4041,9 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 		for _, idx := range result.Indexes {
 			idx.t = result
 		}
+		// Same publication boundary as the rebuilt-generation path above.
+		result.tempColumnBytes = t.tempColumnBytes
+		t.tempColumnBytes = nil
 		t.nextReady.Store(true)
 		t.mu.Unlock()
 		locked = false
@@ -4049,13 +4057,6 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 	if result.uuid != t.uuid {
 		writeBlobManifest(result)
 	}
-	// The replacement generation inherits the already registered temporary
-	// column portions. Recounting a repaired proxy later adjusts this baseline
-	// instead of charging the same column again after every rebuild.
-	t.mu.Lock()
-	result.tempColumnBytes = t.tempColumnBytes
-	t.tempColumnBytes = nil
-	t.mu.Unlock()
 	// Unlock result before registration (ComputeSize needs RLock)
 	result.mu.Unlock()
 	resultLocked = false
