@@ -1603,3 +1603,26 @@ func TestJITBase64Representations(t *testing.T) {
 		}
 	}
 }
+
+func TestJITWideNestedCallableCapture(t *testing.T) {
+	for _, count := range []int{32, 128, 180, 256, 512} {
+		t.Run(fmt.Sprint(count), func(t *testing.T) {
+			params := make([]string, count)
+			args := make([]Scmer, count)
+			for i := range params {
+				params[i] = fmt.Sprintf("p%d", i)
+				args[i] = NewInt(int64(i))
+			}
+			row := strings.Join(params, " ")
+			compiled := compileJITExpressionTestProc(t, "(lambda (callback) (lambda ("+row+") (lambda (a) (lambda (b) (lambda (c) (callback (list "+row+" a b c)))))))")
+			fn := Apply(compiled, NewFunc(func(args ...Scmer) Scmer { return args[0] }))
+			fn = Apply(fn, args...)
+			fn = Apply(fn, NewString("a"))
+			fn = Apply(fn, NewString("b"))
+			want := NewSlice(append(args, NewString("a"), NewString("b"), NewString("c")))
+			if got := Apply(fn, NewString("c")); !Equal(got, want) {
+				t.Fatalf("wide nested closure returned %s", String(got))
+			}
+		})
+	}
+}
