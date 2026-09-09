@@ -943,16 +943,12 @@ func probeScanJoinOrderInput(currentTx *TxContext, spec *scanJoinOrderSpec, tupl
 	combine := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
 		return scm.NewSlice(append(values[0].Slice(), values[1].Slice()...))
 	})
-	accessSchema := input.accessSchema
-	accessValues := input.accessValues
-	if input.table.hasUniqueColumns(input.targetKeyCols) {
-		// A complete dynamic unique-key probe dominates every local access
-		// boundary. Keep the local predicates in the residual callback so this
-		// path reads at most one candidate instead of building a wider index.
-		accessSchema = emptyScanAccessSchema
-		accessValues = nil
-	}
-	rows := input.table.scanWithBatchFrom(currentTx, nil, accessSchema, accessValues, runtimeScanAccess(required), conditionCols, condition,
+	// A unique probe dominates the choice of seek, not the other predicates.
+	// Access compilation may already have removed exact bounds from condition,
+	// including when some unrelated residual remains. Keep those bounds while
+	// merging the mandatory batch keys; dropping them silently admits rows that
+	// SQL rejects. Never infer predicate redundancy from key uniqueness alone.
+	rows := input.table.scanWithBatchFrom(currentTx, nil, input.accessSchema, input.accessValues, runtimeScanAccess(required), conditionCols, condition,
 		callbackCols, mapReduce, scm.NewSlice(nil), combine, false,
 		stride, batchdata).Slice()
 	hits := make([][]*scanJoinOrderRecord, len(tuples))
