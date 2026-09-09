@@ -7,9 +7,9 @@ package main
 
 import "os"
 import "fmt"
+import "path"
 import "sync"
 import "time"
-import "path"
 import "strconv"
 import "strings"
 import "net/http"
@@ -23,6 +23,7 @@ var phpLifecycle sync.Mutex
 var phpReady = make(chan struct{})
 
 type phpConfig struct {
+	imapBinary    string
 	threads       int
 	memoryLimit   int64
 	maxWait       time.Duration
@@ -34,7 +35,7 @@ var phpSettings phpConfig
 
 func loadPHPConfig() (phpConfig, error) {
 	values := storage.PHPStartupSettings()
-	c := phpConfig{int(values.Threads), values.MemoryLimit, time.Duration(values.MaxWaitMilliseconds) * time.Millisecond, int(values.OutputBuffer), int((values.OpcacheMemory + (1 << 20) - 1) >> 20)}
+	c := phpConfig{values.IMAPBinary, int(values.Threads), values.MemoryLimit, time.Duration(values.MaxWaitMilliseconds) * time.Millisecond, int(values.OutputBuffer), int((values.OpcacheMemory + (1 << 20) - 1) >> 20)}
 	if values.Threads < 1 ||
 		values.Threads > 1024 ||
 		values.MemoryLimit < 8<<20 ||
@@ -96,7 +97,7 @@ func ensurePHP() error {
 	if phpStarted || phpInitErr != nil {
 		return phpInitErr
 	}
-	if err := phpbridge.Register(&IOEnv); err != nil {
+	if err := phpbridge.Register(&IOEnv, phpSettings.imapBinary, phpSettings.memoryLimit); err != nil {
 		phpInitErr = err
 		return err
 	}

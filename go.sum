@@ -121,6 +121,8 @@ github.com/launix-de/go-mysqlstack v0.2.0 h1:ZlgQWvlRIQ/HFqH7GwSbFMB22iA+LvzfZEg
 github.com/launix-de/go-mysqlstack v0.2.0/go.mod h1:VdLcZx5196xfE/j4IceJPF462Xf50LvSk5vzuJRdSVs=
 github.com/launix-de/go-packrat/v2 v2.1.24 h1:6t55f4Exfk8c7B/btuh5qRcb5zF2iHNXBGIXUmKbv/M=
 github.com/launix-de/go-packrat/v2 v2.1.24/go.mod h1:Xb1/gZg0UMb2CPgmCfBdwvpMZYhKLjZ5BdqoWa/oQjw=
+github.com/leonelquinteros/gotext v1.7.2 h1:bDPndU8nt+/kRo1m4l/1OXiiy2v7Z7dfPQ9+YP7G1Mc=
+github.com/leonelquinteros/gotext v1.7.2/go.mod h1:9/haCkm5P7Jay1sxKDGJ5WIg4zkz8oZKw4ekNpALob8=
 github.com/lib/pq v1.11.2 h1:x6gxUeu39V0BHZiugWe8LXZYZ+Utk7hSJGThs8sdzfs=
 github.com/lib/pq v1.11.2/go.mod h1:/p+8NSbOcwzAEI7wiMXFlgydTwcgTr3OSKMsD2BitpA=
 github.com/maypok86/otter/v2 v2.3.0 h1:8H8AVVFUSzJwIegKwv1uF5aGitTY+AIrtktg7OcLs8w=

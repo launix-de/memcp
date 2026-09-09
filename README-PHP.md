@@ -10,7 +10,7 @@ same host and their usual PHP extensions.
 
 No PHP interpreter, FrankenPHP implementation, WordPress, or other external
 application sources are copied into this repository. Install those dependencies
-outside the checkout. `phpbridge/` contains only MemCP's own PDO integration.
+outside the checkout. `phpbridge/` contains MemCP's own PDO, locale and isolated IMAP adapters.
 
 ## Build
 
@@ -97,6 +97,71 @@ objects are released after each request; OPcache stays warm. Long-lived PHP
 application workers are not enabled by this integration. Native extension
 crashes affect the entire process, including MemCP.
 
+## Gettext and extension isolation
+
+On Linux/glibc, `setlocale()` uses a request-owned thread locale. Gettext's
+current domain, directory bindings and output encodings also belong to the
+request. Applications can keep their existing `putenv`, `setlocale`,
+`bindtextdomain`, `textdomain` and plural Gettext calls. Two applications may
+both use the `messages` domain with different catalogs. Locale state survives
+shutdown callbacks and destructors, then is restored before the next request.
+
+MO catalogs are immutable shared cache entries, accounted to MemCP's cache
+budget and invalidated on a later request when file size or modification time
+changes. Catalogs are limited to 16 MiB on disk and a conservative 64 MiB parsed
+allocation estimate. The loader validates string ranges and expansion before
+parsing. A request keeps its catalog references until cleanup. This shared Go
+cache is separate from PHP's Zend allocation quota.
+
+Native IMAP/c-client must **not** be loaded into the embedded ZTS runtime.
+Configure `(settings "PHPIMAPBinary" "/usr/bin/php")`, or the corresponding
+PHP dashboard field, with an NTS PHP CLI that has native IMAP installed. Restart
+MemCP afterwards. An empty value disables the IMAP adapter. On Ubuntu, the
+helper can use the distribution's `php-cli` and `php-imap` packages; its extension
+ABI is independent of the embedded PHP build.
+
+The adapter exposes the helper's IMAP functions and constants, and reports the
+`imap` extension as loaded. It forwards positional/named arguments, binary
+strings, arrays, objects and `imap_savebody` stream output. Function reflection
+shows the adapter's variadic signature. Only IMAP calls run in a lazily started
+helper process, one per request; PHP application code and PDO queries keep the
+direct in-process MemCP bridge. Separate helpers isolate c-client global state
+and contain a native IMAP crash. An individual call is bounded to 60 seconds,
+and each protocol frame to 64 MiB. The helper inherits the configured PHP
+request memory ceiling.
+
+Explicit `imap_close()` and normal object destruction close handles. During
+request shutdown, leftover connections are closed by the helper's CLI shutdown;
+MemCP allows 200 ms for cleanup, then kills and reaps a stuck helper. The request
+retains helper ownership through PHP's final object cleanup, including an early
+`exit`, uncaught exception or Zend memory-limit failure. Other in-process native
+extensions still require ZTS support: arbitrary native memory corruption cannot
+be contained inside the same process.
+
+## Application extension build
+
+Use the same ZTS `php-config` for all extensions loaded into embedded PHP.
+The PHP CI workflow builds and tests `gettext`, PDO/MySQL, XML/DOM, Imagick,
+Intl, ZIP, JSON, Session, GMP, mbstring, cURL and OpenSSL, plus IMAP through
+its separate NTS helper. It also checks `mb_regex_encoding`: building mbstring
+with `--disable-mbregex` prevents mPDF from starting.
+
+The relevant PHP configure options are:
+
+```sh
+--with-gettext --enable-mbstring --enable-intl --with-zip --with-gmp \
+--with-curl --with-openssl --with-zlib --with-iconv \
+--enable-dom --enable-xml --enable-xmlreader --enable-xmlwriter --enable-simplexml \
+--enable-pdo --with-pdo-mysql=mysqlnd --enable-mysqlnd --enable-session
+```
+
+Install the development headers for Oniguruma, libzip, ICU, GMP, libxml2,
+cURL, OpenSSL and ImageMagick. Build the released Imagick extension separately
+using the ZTS installation's `phpize` and `--with-php-config=...`, then enable
+`extension=imagick.so` in that installation's `php.ini`. The CI workflow pins
+PHP 8.5.10 and Imagick 3.8.1 downloads by checksum and keeps all external sources
+outside this repository.
+
 ## PHP quotas, concurrency and tuning
 
 Configure PHP globally through `(settings)` or the **PHP** group in the dashboard.
@@ -106,6 +171,7 @@ PHP tuning CLI flags are no longer supported.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
+| `PHPIMAPBinary` | empty | NTS PHP CLI executable with native IMAP; empty disables the adapter. |
 | `PHPThreads` | `4` | Maximum simultaneous PHP executions; excess requests wait. |
 | `PHPMemoryLimit` | `1073741824` (1 GiB) | Per-request allocation ceiling including retained PDO results; minimum 8 MiB. |
 | `PHPMaxWaitMilliseconds` | `30000` | Queue timeout before HTTP 503; `0` waits indefinitely. |
@@ -316,3 +382,12 @@ outside the checkout. Configure a dedicated persistent MemCP database and
 Unix socket in `wp-config.php`, mount the WordPress directory with `servePHP`
 in a Scheme module, and run the normal WordPress installer. Keep credentials,
 uploaded files, and the MemCP data directory outside the source tree.
+
+For extension/IMAP integration coverage with a local build:
+
+```sh
+MEMCP_TEST_IMAP_BINARY=/usr/bin/php MEMCP_TEST_PHP_EXTENSIONS=1 \
+  make test-php PHP_CONFIG=/path/to/php-zts/bin/php-config
+```
+
+The IMAP tests use a private local mock mailbox; no external mail account is required.

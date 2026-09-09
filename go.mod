@@ -22,6 +22,7 @@ require (
 	github.com/launix-de/NonLockingReadMap v1.1.1
 	github.com/launix-de/go-mysqlstack v0.2.0
 	github.com/launix-de/go-packrat/v2 v2.1.24
+	github.com/leonelquinteros/gotext v1.7.2
 	github.com/lib/pq v1.11.2
 	github.com/pierrec/lz4/v4 v4.1.26
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
