@@ -125,7 +125,7 @@ mode, and hardware. MemCP is not universally faster than another database.
 
 Current application measurements include:
 
-- **up to 30x faster than PostgreSQL** for selected real application searches
+- **up to 90x faster than PostgreSQL** for selected real application searches
   and paged lists over the same dataset of roughly 800,000 documents. These
   queries combine full-text conditions, sorting, exact counts, pagination, and
   user-specific access checks;
@@ -134,9 +134,46 @@ Current application measurements include:
 
 These ranges describe the measured workloads, not a blanket guarantee. Publish
 or compare results together with the fixture, database configuration, indexes,
-hardware, cold/warm state, repetitions, and individual query timings. MemCP's
-repository includes explicit performance suites and CI compares every pull
-request against its exact target revision.
+hardware, cold/warm state, repetitions, and individual query timings.
+
+## Performance tuning
+
+MemCP's query performance is a property of the cost-based planner, not of
+hand-tuned switches. Making a slow query fast means getting the planner to
+choose the plan you would write by hand, and — only when the operators
+genuinely cannot go faster — improving the operators themselves.
+
+The workflow used in this repository:
+
+1. **Add a perf regression case** for the query under `tests/`, with its setup
+   and measurement configuration, then run and measure it.
+2. **Inspect the plan.** `EXPLAIN <query>` prints the generated Scheme plan;
+   `EXPLAIN IR`, `EXPLAIN REORDER`, and `EXPLAIN PHYSICAL` show the logical IR,
+   the chosen join order, and the lowered physical operators with their cost
+   estimates.
+3. **Measure the parts.** Send the extracted plan fragments to the `/scm`
+   endpoint one by one to find where the time goes. `(help)` lists the storage
+   operators.
+4. **Build the target plan by hand** from different scan variants, RecSets, and
+   operator fusions; measure until you have the optimal plan.
+5. **Make the planner reach it.** Review the planner, the physical lowerer, and
+   `tools/costgen`, then refactor so the hand-built plan is inside the search
+   space and is estimated as the cheapest — calibrate its cost against the
+   competing operators rather than special-casing it.
+6. **Introduce a new storage operator only when the existing ones are
+   exhausted.** It must be integrated into the planner and cost-calibrated
+   against the alternatives, not bolted on beside them.
+
+`tools/costgen` runs the tagged YAML workloads through every forced physical
+alternative, validates the results and operators, solves a non-negative cost
+equation system from the measurements, and regenerates the planner's cost
+constants.
+
+Every pull request is compared against its exact base revision by a CI A/B
+benchmark using the same fixtures, warm-up, and repetitions; no protected case
+may regress more than 20%. Run the local perf suite with `PERF_TEST=1 make
+test`. Performance PRs must additionally include manual A/B measurements
+(development baseline vs. change, same fixture and sampling) in the description.
 
 ## Docker
 
@@ -204,60 +241,6 @@ MemCP supports several storage engines, selectable per table via `CREATE TABLE .
 For production data, use `safe` unless you have explicitly accepted another
 engine's weaker durability contract.
 
-### Blob format compatibility
-
-<!-- Copyright (C) 2026 Carl-Philip Hänsch -->
-Large text/blob columns now use OverlayBlob format version 1. References have
-an explicit `!b` tag followed by the 32-byte SHA-256 digest; literals beginning
-with `!` are escaped as `!!`. Rebuilding a column writes the new format. Existing
-version 0 and pre-versioned (ASCII `1`) columns remain readable, and serializing
-an unchanged old column preserves its old encoding.
-
-The old format cannot distinguish a blob whose digest begins with `!` from an
-escaped 32-byte literal with exactly the same bytes. For these ambiguous values,
-the reader prefers an available blob whose decompressed content matches the
-SHA-256 digest. Without a payload, it preserves the escaped-literal interpretation.
-If both interpretations represent real source values, only an authoritative
-source or backup can resolve the ambiguity; rebuilding alone cannot recover
-information absent from the old format. Missing unambiguous references and
-checksum mismatches fail explicitly.
-
-Blob manifest v2 is reconstructed from committed columns when upgrading older
-manifests, which may have omitted references. An unchanged shard retains its
-manifest even when only some columns are loaded.
-
-Blob manifests retain ambiguous legacy candidates conservatively. Releasing a
-loaded legacy column does not decrement an ambiguous candidate without known
-build/migration ownership, since a colliding literal could otherwise delete
-another column's blob. Generation-based cleanup can reclaim these retained blobs
-once no active or recoverable generation references them. Version 1 has no such
-ambiguity, including for hashes beginning with `!`.
-
-### Explicit blob inventory check
-
-Run `(blob_inventory "my_database")` in the administrative Scheme interface to
-compare committed blob references with backend object names. The result is an
-association list with `referenced_blobs`, `listed_blobs`, `unreferenced_blobs`
-(counts), and a sorted `missing_blobs` list of hashes. An empty missing list means
-all discovered references were listed; it does not prove payload readability,
-checksums, or integrity. Legacy ambiguous references are conservative candidates.
-Incomplete generation metadata or backend listing errors raise an error instead
-of returning a partial success report.
-
-The audit does not fetch blob payloads, delete objects, repair reference counts,
-or publish legacy manifest backfills. It is explicit maintenance, not part of
-startup cleanup or ordinary queries. It reads generation manifests (or reconstructs references from committed column
-files for legacy generations) and traverses the backend listing once (filesystem traversal, paginated S3 listing, or Ceph
-object iteration). Ceph may enumerate the wider pool before prefix filtering.
-Memory grows with the reference set and reported missing hashes. The database's
-lifecycle lock prevents concurrent publication and cleanup during the audit;
-rebuilds, backend migration, and some DDL can wait, and resource contention can
-indirectly affect queries. Schedule large inventories accordingly.
-
-Automatic cleanup continues to delete only objects proven unreferenced by all
-active generations. It does not run this availability audit. A missing live blob
-does not prevent collecting a separate, proven-unreferenced object.
-
 ### Storage failure notifications
 
 Administrators can register named Scheme callbacks for persistence failures.
@@ -303,6 +286,132 @@ make docs
 ```
 
 This writes the generated files to `docs/`.
+
+## Remote storage backends
+
+MemCP supports storing databases on remote storage backends instead of the local filesystem. To configure a remote backend, create a JSON configuration file in the data folder instead of a directory.
+
+### S3 / MinIO Storage
+
+Store your database on Amazon S3 or any S3-compatible storage (MinIO, Ceph RGW, etc.).
+
+**Configuration file** (`data/mydb.json`):
+```json
+{
+  "backend": "s3",
+  "access_key_id": "your-access-key",
+  "secret_access_key": "your-secret-key",
+  "region": "us-east-1",
+  "bucket": "memcp-data",
+  "prefix": "databases"
+}
+```
+
+**For MinIO or self-hosted S3-compatible storage:**
+```json
+{
+  "backend": "s3",
+  "access_key_id": "minioadmin",
+  "secret_access_key": "minioadmin",
+  "endpoint": "http://localhost:9000",
+  "bucket": "memcp",
+  "prefix": "data",
+  "force_path_style": true
+}
+```
+
+**Quick MinIO setup for testing:**
+```bash
+# Start MinIO with Docker
+docker run -d --name minio \
+  -p 9000:9000 -p 9001:9001 \
+  -e MINIO_ROOT_USER=minioadmin \
+  -e MINIO_ROOT_PASSWORD=minioadmin \
+  minio/minio server /data --console-address ":9001"
+
+# Create a bucket (via MinIO Console at http://localhost:9001)
+# Or via mc CLI:
+mc alias set local http://localhost:9000 minioadmin minioadmin
+mc mb local/memcp
+```
+
+### Ceph/RADOS Storage
+
+Store your database directly on Ceph RADOS for high-performance distributed storage.
+
+**Why is Ceph optional?** The Ceph backend uses CGO to link against `librados` (the Ceph client library). This requires the C headers and library to be installed at compile time and the shared library at runtime. To keep the default build simple and portable, Ceph support is behind a build tag.
+
+```bash
+# Install Ceph development libraries (Ubuntu/Debian)
+sudo apt-get install librados-dev
+
+# Build MemCP with Ceph support
+make ceph
+# or: go build -tags=ceph
+```
+
+**Configuration file** (`data/mydb.json`):
+```json
+{
+  "backend": "ceph",
+  "username": "client.memcp",
+  "cluster": "ceph",
+  "pool": "memcp",
+  "prefix": "databases"
+}
+```
+
+**Optional fields:**
+- `conf_file`: Path to ceph.conf (defaults to `/etc/ceph/ceph.conf`)
+
+**Setting up a Ceph development cluster with vstart.sh:**
+```bash
+# Clone Ceph source
+git clone https://github.com/ceph/ceph.git
+cd ceph
+
+# Install dependencies and build (only vstart target needed)
+./install-deps.sh
+pip install cython setuptools
+./do_cmake.sh
+cd build && ninja vstart
+
+# Start a development cluster
+cd ..
+MON=1 OSD=3 MDS=0 MGR=1 ./build/bin/vstart.sh -d -n -x
+
+# Create a pool for MemCP
+./build/bin/ceph osd pool create memcp 32
+
+# Create a user for MemCP (optional, can also use client.admin)
+./build/bin/ceph auth get-or-create client.memcp \
+  mon 'allow r' \
+  osd 'allow rwx pool=memcp' \
+  -o ceph.client.memcp.keyring
+```
+
+**Environment variables for vstart cluster:**
+```bash
+export CEPH_CONF=/path/to/ceph/build/ceph.conf
+export CEPH_KEYRING=/path/to/ceph/build/keyring
+```
+
+### Backend Configuration Reference
+
+| Field | Backend | Description |
+|-------|---------|-------------|
+| `backend` | all | Backend type: `"s3"` or `"ceph"` |
+| `prefix` | all | Object key prefix for database objects |
+| `access_key_id` | S3 | AWS or S3-compatible access key |
+| `secret_access_key` | S3 | AWS or S3-compatible secret key |
+| `region` | S3 | AWS region (e.g., `"us-east-1"`) |
+| `endpoint` | S3 | Custom endpoint URL (for MinIO, etc.) |
+| `bucket` | S3 | S3 bucket name |
+| `force_path_style` | S3 | Use path-style URLs (required for MinIO) |
+| `username` | Ceph | Ceph user (e.g., `"client.admin"`) |
+| `cluster` | Ceph | Cluster name (usually `"ceph"`) |
+| `conf_file` | Ceph | Path to ceph.conf (optional) |
+| `pool` | Ceph | RADOS pool name |
 
 ## Quick start
 
@@ -522,6 +631,26 @@ or take a verified backup when that data must be retained.
 Parameters: `host` (nil → 127.0.0.1), `port` (nil → 3306), `username`, `password`,
 `sourcedb` (nil → all), `targetdb` (nil → sourcedb), `sourcetable` (nil → all), `targettable` (nil → sourcetable).
 
+`mysql_import` connects to a running MySQL/MariaDB server over the wire
+protocol. Row copying is parallelised across up to 8 workers, and trigger
+metadata in `system.triggers` is reset at the start of each run.
+
+#### Alternative: replay a `mysqldump` file
+
+When you only have a dump file and no live server, replay it through any MySQL
+client against MemCP's own wire-protocol port. MemCP's SQL parser accepts the
+constructs `mysqldump` emits — versioned `/*!… */` executable comments
+(including split `CREATE`/`DEFINER`/`TRIGGER` blocks), `LOCK TABLES` /
+`UNLOCK TABLES`, savepoint and session-isolation statements, and the
+`INFORMATION_SCHEMA.FILES` tablespace probes:
+
+```bash
+mysql -h 127.0.0.1 -P 3307 -u root -p myapp < dump.sql
+```
+
+Take the dump with `--databases` (or prepend `CREATE DATABASE` / `USE`) so the
+statements target the intended database.
+
 ### Import from PostgreSQL
 
 PostgreSQL has an extra hierarchy level — **database → schema → table** — compared to MySQL.
@@ -545,11 +674,35 @@ Parameters: `host` (nil → 127.0.0.1), `port` (nil → 5432), `username`, `pass
 
 Both functions print a line for each imported table and return `true` on success.
 
+#### Alternative: load a `pg_dump` file
+
+MemCP has no PostgreSQL wire protocol, so a dump file is replayed by the
+built-in dump loader rather than by a client. `load_psql` takes the target
+MemCP database, the dump source, and a policy:
+
+```scheme
+(load_psql "myapp" "/path/to/dump.sql" (sql_policy "root"))
+(load_psql "myapp" "/path/to/dump.sql.gz" (sql_policy "root"))
+(load_psql "myapp" "/path/to/dump.tar" (sql_policy "root"))
+```
+
+It accepts a plain-format dump (`pg_dump -Fp`, the default) or a tar-format
+archive (`pg_dump -Ft`), each optionally gzip-compressed; the loader reads
+`COPY … FROM '…'` data files out of the archive automatically. The custom
+format (`-Fc`) is not supported. The loader skips `psql` meta-commands and
+`CREATE FUNCTION` bodies, applies `CREATE TABLE` / `ALTER TABLE`, streams both
+`COPY … FROM stdin` and `COPY … FROM 'file'` data, retargets the dump's
+database/schema name onto the target database, and replays
+`pg_catalog.setval()` so auto-increment sequences resume correctly. Run it from
+the REPL or the `/scm` endpoint.
+
 ## Use cases
 
 MemCP is designed for applications that mix ordinary reads and writes with
 large or structurally complex reads, for example:
 
+- **drop-in replacement for an existing database once it holds too much data
+  and has become slow**, keeping the same SQL application in place;
 - dashboards, reports, and grouped statistics;
 - ordered and paged lists over large datasets;
 - full-text-like searches combined with relational filters;
@@ -575,21 +728,10 @@ Useful contributions include SQL compatibility cases, correctness fixes,
 measured performance work, documentation, storage formats, and new operators.
 
 ### Getting started
-```bash
-# 1. Fork the repository
-# 2. Clone your fork
-git clone https://github.com/launix-de/memcp.git
 
-# 3. Set up development environment
-cd memcp
-go build -o memcp
-
-# 4. Run the test suite (starts its own server automatically)
-python3 run_sql_tests.py tests/sql/expressions/basic-sql.yaml
-
-# 5. Make your changes and add tests
-# 6. Submit a pull request!
-```
+Fork the repository, then build and test your clone as described under
+[Quick start](#quick-start) and [Testing](#testing). Develop on a branch, add
+regression coverage for every change, and open a pull request against `master`.
 
 ## Testing
 
@@ -610,225 +752,6 @@ python3 run_sql_tests.py tests/sql/expressions/error-cases.yaml # Error handling
 # Connect to an already-running instance (skip startup)
 python3 run_sql_tests.py tests/sql/expressions/basic-sql.yaml 4321 --connect-only
 ```
-
-## Performance testing
-
-MemCP includes an auto-calibrating local performance framework and a required
-CI A/B workflow. Pull requests measure the exact base revision and candidate
-with the same fixtures, warm-up policy, repetitions, and runner. The default CI
-regression allowance is 20% per protected case.
-
-### Running performance tests
-
-```bash
-# Run perf tests (uses calibrated baselines)
-PERF_TEST=1 make test
-
-# Calibrate for your machine (run ~10 times to reach target time range)
-PERF_TEST=1 PERF_CALIBRATE=1 make test
-
-# Freeze row counts for bisecting performance regressions
-PERF_TEST=1 PERF_NORECALIBRATE=1 make test
-
-# Show query plans for each test
-PERF_TEST=1 PERF_EXPLAIN=1 make test
-
-# Run only the CI performance workload selection
-python3 run_sql_tests.py --perf-ci
-```
-
-### How local calibration works
-
-1. **Initial run** starts with 10,000 rows per test
-2. Each calibration run **scales row counts by 30%** up/down
-3. Target is **10-20 seconds** query time per test
-4. Baselines are stored in `.perf_baseline.json`
-5. After ~10 runs, row counts stabilize in the target range
-
-The CI workflow additionally uses `PERF_AB_MODE=record` for the base revision
-and `PERF_AB_MODE=compare` for the candidate. These modes are intended for the
-automated base-versus-candidate protocol rather than ordinary development runs.
-
-### Output format
-
-```
-✅ Perf: COUNT (7.9ms / 8700ms, 20,000 rows, 0.39µs/row, 11.4MB heap)
-         │       │        │           │        │           └─ Heap memory after insert
-         │       │        │           │        └─ Time per row
-         │       │        │           └─ Calibrated row count
-         │       │        └─ Threshold (from baseline × 1.1)
-         │       └─ Actual query time
-         └─ Test name
-```
-
-### Performance debugging cookbook
-
-**Detecting a performance regression:**
-```bash
-# 1. Freeze baselines to use consistent row counts
-PERF_TEST=1 PERF_NORECALIBRATE=1 make test
-
-# 2. If a test fails threshold, you have a regression
-```
-
-**Bisecting a performance bug:**
-```bash
-# 1. Checkout the known-good commit, run calibration
-git checkout good-commit
-PERF_TEST=1 PERF_CALIBRATE=1 make test  # run 10x to calibrate
-
-# 2. Save the baseline
-cp .perf_baseline.json .perf_baseline_good.json
-
-# 3. Bisect with frozen row counts
-git bisect start
-git bisect bad HEAD
-git bisect good good-commit
-git bisect run bash -c 'PERF_TEST=1 PERF_NORECALIBRATE=1 make test'
-```
-
-**Analyzing slow queries:**
-```bash
-# Show query plans to understand execution
-PERF_TEST=1 PERF_EXPLAIN=1 make test
-```
-
-### Environment variables
-
-| Variable | Values | Description |
-|----------|--------|-------------|
-| `PERF_TEST` | `0`/`1` | Enable performance tests |
-| `PERF_CALIBRATE` | `0`/`1` | Update baselines with new times |
-| `PERF_NORECALIBRATE` | `0`/`1` | Freeze row counts (for bisecting) |
-| `PERF_EXPLAIN` | `0`/`1` | Show query plans |
-| `PERF_REPEAT` | integer | Maximum repetitions for stable short-query samples |
-| `PERF_MIN_MEASURE_MS` | milliseconds | Minimum accumulated sample duration |
-
-## Remote storage backends
-
-MemCP supports storing databases on remote storage backends instead of the local filesystem. To configure a remote backend, create a JSON configuration file in the data folder instead of a directory.
-
-### S3 / MinIO Storage
-
-Store your database on Amazon S3 or any S3-compatible storage (MinIO, Ceph RGW, etc.).
-
-**Configuration file** (`data/mydb.json`):
-```json
-{
-  "backend": "s3",
-  "access_key_id": "your-access-key",
-  "secret_access_key": "your-secret-key",
-  "region": "us-east-1",
-  "bucket": "memcp-data",
-  "prefix": "databases"
-}
-```
-
-**For MinIO or self-hosted S3-compatible storage:**
-```json
-{
-  "backend": "s3",
-  "access_key_id": "minioadmin",
-  "secret_access_key": "minioadmin",
-  "endpoint": "http://localhost:9000",
-  "bucket": "memcp",
-  "prefix": "data",
-  "force_path_style": true
-}
-```
-
-**Quick MinIO setup for testing:**
-```bash
-# Start MinIO with Docker
-docker run -d --name minio \
-  -p 9000:9000 -p 9001:9001 \
-  -e MINIO_ROOT_USER=minioadmin \
-  -e MINIO_ROOT_PASSWORD=minioadmin \
-  minio/minio server /data --console-address ":9001"
-
-# Create a bucket (via MinIO Console at http://localhost:9001)
-# Or via mc CLI:
-mc alias set local http://localhost:9000 minioadmin minioadmin
-mc mb local/memcp
-```
-
-### Ceph/RADOS Storage
-
-Store your database directly on Ceph RADOS for high-performance distributed storage.
-
-**Why is Ceph optional?** The Ceph backend uses CGO to link against `librados` (the Ceph client library). This requires the C headers and library to be installed at compile time and the shared library at runtime. To keep the default build simple and portable, Ceph support is behind a build tag.
-
-```bash
-# Install Ceph development libraries (Ubuntu/Debian)
-sudo apt-get install librados-dev
-
-# Build MemCP with Ceph support
-make ceph
-# or: go build -tags=ceph
-```
-
-**Configuration file** (`data/mydb.json`):
-```json
-{
-  "backend": "ceph",
-  "username": "client.memcp",
-  "cluster": "ceph",
-  "pool": "memcp",
-  "prefix": "databases"
-}
-```
-
-**Optional fields:**
-- `conf_file`: Path to ceph.conf (defaults to `/etc/ceph/ceph.conf`)
-
-**Setting up a Ceph development cluster with vstart.sh:**
-```bash
-# Clone Ceph source
-git clone https://github.com/ceph/ceph.git
-cd ceph
-
-# Install dependencies and build (only vstart target needed)
-./install-deps.sh
-pip install cython setuptools
-./do_cmake.sh
-cd build && ninja vstart
-
-# Start a development cluster
-cd ..
-MON=1 OSD=3 MDS=0 MGR=1 ./build/bin/vstart.sh -d -n -x
-
-# Create a pool for MemCP
-./build/bin/ceph osd pool create memcp 32
-
-# Create a user for MemCP (optional, can also use client.admin)
-./build/bin/ceph auth get-or-create client.memcp \
-  mon 'allow r' \
-  osd 'allow rwx pool=memcp' \
-  -o ceph.client.memcp.keyring
-```
-
-**Environment variables for vstart cluster:**
-```bash
-export CEPH_CONF=/path/to/ceph/build/ceph.conf
-export CEPH_KEYRING=/path/to/ceph/build/keyring
-```
-
-### Backend Configuration Reference
-
-| Field | Backend | Description |
-|-------|---------|-------------|
-| `backend` | all | Backend type: `"s3"` or `"ceph"` |
-| `prefix` | all | Object key prefix for database objects |
-| `access_key_id` | S3 | AWS or S3-compatible access key |
-| `secret_access_key` | S3 | AWS or S3-compatible secret key |
-| `region` | S3 | AWS region (e.g., `"us-east-1"`) |
-| `endpoint` | S3 | Custom endpoint URL (for MinIO, etc.) |
-| `bucket` | S3 | S3 bucket name |
-| `force_path_style` | S3 | Use path-style URLs (required for MinIO) |
-| `username` | Ceph | Ceph user (e.g., `"client.admin"`) |
-| `cluster` | Ceph | Cluster name (usually `"ceph"`) |
-| `conf_file` | Ceph | Path to ceph.conf (optional) |
-| `pool` | Ceph | RADOS pool name |
 
 ## License
 
