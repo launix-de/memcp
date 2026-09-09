@@ -497,3 +497,16 @@ test_cases:
       rows: 1
       data:
         - {id: 8}
+
+  - name: "Cast lowering evaluates a volatile operand once"
+    scm: |
+      (begin
+        (define calls (newsession))
+        (calls "n" 0)
+        (define next_value (lambda () (begin
+          (calls "n" (+ (calls "n") 1))
+          "7")))
+        (define formula (physical_cast_value_expr (list next_value) "BIGINT" '()))
+        (define result (eval formula))
+        (if (and (equal? result 7) (equal? (calls "n") 1)) true
+          (error "CAST duplicated its volatile operand")))

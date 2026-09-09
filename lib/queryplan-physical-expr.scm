@@ -159,9 +159,11 @@ Do not lower arbitrary subtrees again while matching a session-domain key. */
 
 /* Lower casts to the pure value formula before scan access extraction. Keep
 SQL metadata in its descriptor; a shared computed-index lambda must contain
-only row inputs and pure operators, not the SQL dispatch procedure. */
-(define physical_cast_value_expr (lambda (value type)
-	(if (equal? type "BOOLEAN") (list (quote sql_cast_value) value type)
+only row inputs and pure operators, not the SQL dispatch procedure. Keep
+non-repeatable operands as one procedure argument: the NULL guard must not
+evaluate a volatile or correlated expression a second time. */
+(define physical_cast_value_expr (lambda (value type params)
+	(if (or (equal? type "BOOLEAN") (not (scan_plan_computed_safe value params))) (list (quote sql_cast_value) value type)
 		(list (quote if) (list (quote nil?) value) nil
 			(if (sql_text_type? type) (list (quote concat) value)
 				(if (equal? type "BIGINT") (list (quote intdiv) (list (quote simplify) value) 1)
@@ -170,7 +172,8 @@ only row inputs and pure operators, not the SQL dispatch procedure. */
 (define lower_column_expr_for_alias_in_context (lambda (src expr probe_work_rows)
 	(match expr
 		((symbol sql_cast_value) value type)
-		(physical_cast_value_expr (lower_column_expr_for_alias_in_context src value probe_work_rows) type)
+		(physical_cast_value_expr (lower_column_expr_for_alias_in_context src value probe_work_rows) type
+			(map (extract_columns_for_alias src value) (lambda (col) (symbol (concat (source_alias src) "." col)))))
 		/* Type/collation descriptors have been consumed by planning. Identity
 		annotations must not obscure runtime column dependencies or scan bounds. */
 		((symbol sql_typed_value) value _type _collation)
@@ -2397,7 +2400,10 @@ probe. */
 (define lower_column_expr_for_join_in_context (lambda (sources default_alias expr probe_work_rows)
 	(match expr
 		((symbol sql_cast_value) value type)
-		(physical_cast_value_expr (lower_column_expr_for_join_in_context sources default_alias value probe_work_rows) type)
+		(physical_cast_value_expr (lower_column_expr_for_join_in_context sources default_alias value probe_work_rows) type
+			(merge_unique (map sources (lambda (src)
+				(map (extract_columns_for_join_alias sources default_alias (source_alias src) value)
+					(lambda (col) (symbol (concat (source_alias src) "." col))))))))
 		/* Type/collation descriptors have been consumed by planning. Identity
 		annotations must not obscure runtime column dependencies or scan bounds. */
 		((symbol sql_typed_value) value _type _collation)
