@@ -1,0 +1,292 @@
+# Copyright (C) 2026 Carl-Philip Haensch
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+metadata:
+  description: Ordered index scans retain equality-prefix bounds with unbounded trailing
+    sort keys
+  isolated: true
+  restart_after_setup: true
+setup:
+- sql: DROP TABLE IF EXISTS ordered_prefix_posts
+- sql: CREATE TABLE ordered_prefix_posts (id INT PRIMARY KEY, kind VARCHAR(20), status
+    VARCHAR(20), stamp INT) ENGINE=sloppy
+- scm: |-
+    (insert (table "memcp-tests" "ordered_prefix_posts") '("id" "kind" "status" "stamp")
+      (map (produceN 22000) (lambda (i)
+        (list (+ i 1) (if (< i 2000) "post" "revision")
+          (if (< i 2000) (if (equal? (mod i 2) 0) "publish" "private") (if (equal? i 21999) "leaked" "inherit")) i))))
+- sql: INSERT INTO ordered_prefix_posts VALUES (22001, NULL, 'publish', 99999), (22002,
+    NULL, 'private', 99998)
+- scm: (rebuild)
+test_cases:
+- name: Warm ordered equality prefix descending
+  warmup: 10
+  timing_samples: 30
+  threshold_ms: 100
+  sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'post' AND (status = 'publish'
+    OR status = 'private') ORDER BY stamp DESC LIMIT 4
+  expect:
+    rows: 4
+    data:
+    - id: 2000
+    - id: 1999
+    - id: 1998
+    - id: 1997
+- name: Warm ordered equality prefix ascending
+  warmup: 10
+  timing_samples: 30
+  threshold_ms: 100
+  sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'post' AND (status = 'publish'
+    OR status = 'private') ORDER BY stamp ASC LIMIT 4
+  expect:
+    rows: 4
+    data:
+    - id: 1
+    - id: 2
+    - id: 3
+    - id: 4
+- name: Warm ordered equality prefix two trailing keys
+  warmup: 10
+  timing_samples: 30
+  threshold_ms: 100
+  sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'post' AND (status = 'publish'
+    OR status = 'private') ORDER BY stamp DESC, id DESC LIMIT 4
+  expect:
+    rows: 4
+    data:
+    - id: 2000
+    - id: 1999
+    - id: 1998
+    - id: 1997
+- name: missing prefix
+  sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'missing' ORDER BY stamp DESC
+    LIMIT 4
+  expect:
+    rows: 0
+    data: []
+  setup:
+  - sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'missing' ORDER BY stamp
+      DESC LIMIT 4
+  - sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'missing' ORDER BY stamp
+      DESC LIMIT 4
+  - sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'missing' ORDER BY stamp
+      DESC LIMIT 4
+  - sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'missing' ORDER BY stamp
+      DESC LIMIT 4
+  - sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'missing' ORDER BY stamp
+      DESC LIMIT 4
+  - sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'missing' ORDER BY stamp
+      DESC LIMIT 4
+  - sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'missing' ORDER BY stamp
+      DESC LIMIT 4
+  - sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'missing' ORDER BY stamp
+      DESC LIMIT 4
+  - sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'missing' ORDER BY stamp
+      DESC LIMIT 4
+  - sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'missing' ORDER BY stamp
+      DESC LIMIT 4
+- name: upper one-sided range
+  sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'post' AND stamp < 1000 ORDER
+    BY stamp DESC LIMIT 4
+  expect:
+    rows: 4
+    data:
+    - id: 1000
+    - id: 999
+    - id: 998
+    - id: 997
+  setup:
+  - sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'post' AND stamp < 1000
+      ORDER BY stamp DESC LIMIT 4
+  - sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'post' AND stamp < 1000
+      ORDER BY stamp DESC LIMIT 4
+  - sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'post' AND stamp < 1000
+      ORDER BY stamp DESC LIMIT 4
+  - sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'post' AND stamp < 1000
+      ORDER BY stamp DESC LIMIT 4
+  - sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'post' AND stamp < 1000
+      ORDER BY stamp DESC LIMIT 4
+  - sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'post' AND stamp < 1000
+      ORDER BY stamp DESC LIMIT 4
+  - sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'post' AND stamp < 1000
+      ORDER BY stamp DESC LIMIT 4
+  - sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'post' AND stamp < 1000
+      ORDER BY stamp DESC LIMIT 4
+  - sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'post' AND stamp < 1000
+      ORDER BY stamp DESC LIMIT 4
+  - sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'post' AND stamp < 1000
+      ORDER BY stamp DESC LIMIT 4
+- name: lower one-sided range
+  sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'post' AND stamp >= 1996 ORDER
+    BY stamp DESC LIMIT 4
+  expect:
+    rows: 4
+    data:
+    - id: 2000
+    - id: 1999
+    - id: 1998
+    - id: 1997
+  setup:
+  - sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'post' AND stamp >= 1996
+      ORDER BY stamp DESC LIMIT 4
+  - sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'post' AND stamp >= 1996
+      ORDER BY stamp DESC LIMIT 4
+  - sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'post' AND stamp >= 1996
+      ORDER BY stamp DESC LIMIT 4
+  - sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'post' AND stamp >= 1996
+      ORDER BY stamp DESC LIMIT 4
+  - sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'post' AND stamp >= 1996
+      ORDER BY stamp DESC LIMIT 4
+  - sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'post' AND stamp >= 1996
+      ORDER BY stamp DESC LIMIT 4
+  - sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'post' AND stamp >= 1996
+      ORDER BY stamp DESC LIMIT 4
+  - sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'post' AND stamp >= 1996
+      ORDER BY stamp DESC LIMIT 4
+  - sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'post' AND stamp >= 1996
+      ORDER BY stamp DESC LIMIT 4
+  - sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'post' AND stamp >= 1996
+      ORDER BY stamp DESC LIMIT 4
+- name: Unknown ordering column must fail
+  sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'post' AND (status = 'publish'
+    OR status = 'private') ORDER BY missing_sort_key LIMIT 1
+  expect:
+    error: true
+- name: Residual match outside equality prefix must not leak
+  sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'post' AND (status = 'publish'
+    OR status = 'private' OR status = 'leaked') ORDER BY stamp DESC LIMIT 4
+  expect:
+    data:
+    - id: 2000
+    - id: 1999
+    - id: 1998
+    - id: 1997
+    rows: 4
+  setup:
+  - sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'post' AND (status = 'publish'
+      OR status = 'private' OR status = 'leaked') ORDER BY stamp DESC LIMIT 4
+  - sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'post' AND (status = 'publish'
+      OR status = 'private' OR status = 'leaked') ORDER BY stamp DESC LIMIT 4
+  - sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'post' AND (status = 'publish'
+      OR status = 'private' OR status = 'leaked') ORDER BY stamp DESC LIMIT 4
+  - sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'post' AND (status = 'publish'
+      OR status = 'private' OR status = 'leaked') ORDER BY stamp DESC LIMIT 4
+  - sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'post' AND (status = 'publish'
+      OR status = 'private' OR status = 'leaked') ORDER BY stamp DESC LIMIT 4
+  - sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'post' AND (status = 'publish'
+      OR status = 'private' OR status = 'leaked') ORDER BY stamp DESC LIMIT 4
+  - sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'post' AND (status = 'publish'
+      OR status = 'private' OR status = 'leaked') ORDER BY stamp DESC LIMIT 4
+  - sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'post' AND (status = 'publish'
+      OR status = 'private' OR status = 'leaked') ORDER BY stamp DESC LIMIT 4
+  - sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'post' AND (status = 'publish'
+      OR status = 'private' OR status = 'leaked') ORDER BY stamp DESC LIMIT 4
+  - sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'post' AND (status = 'publish'
+      OR status = 'private' OR status = 'leaked') ORDER BY stamp DESC LIMIT 4
+- name: NULL equality prefix with unbounded ordering
+  sql: SELECT id FROM ordered_prefix_posts WHERE kind IS NULL ORDER BY stamp DESC
+    LIMIT 4
+  expect:
+    data:
+    - id: 22001
+    - id: 22002
+    rows: 2
+  setup:
+  - sql: SELECT id FROM ordered_prefix_posts WHERE kind IS NULL ORDER BY stamp DESC
+      LIMIT 4
+  - sql: SELECT id FROM ordered_prefix_posts WHERE kind IS NULL ORDER BY stamp DESC
+      LIMIT 4
+  - sql: SELECT id FROM ordered_prefix_posts WHERE kind IS NULL ORDER BY stamp DESC
+      LIMIT 4
+  - sql: SELECT id FROM ordered_prefix_posts WHERE kind IS NULL ORDER BY stamp DESC
+      LIMIT 4
+  - sql: SELECT id FROM ordered_prefix_posts WHERE kind IS NULL ORDER BY stamp DESC
+      LIMIT 4
+  - sql: SELECT id FROM ordered_prefix_posts WHERE kind IS NULL ORDER BY stamp DESC
+      LIMIT 4
+  - sql: SELECT id FROM ordered_prefix_posts WHERE kind IS NULL ORDER BY stamp DESC
+      LIMIT 4
+  - sql: SELECT id FROM ordered_prefix_posts WHERE kind IS NULL ORDER BY stamp DESC
+      LIMIT 4
+  - sql: SELECT id FROM ordered_prefix_posts WHERE kind IS NULL ORDER BY stamp DESC
+      LIMIT 4
+  - sql: SELECT id FROM ordered_prefix_posts WHERE kind IS NULL ORDER BY stamp DESC
+      LIMIT 4
+- name: Two equality keys before unbounded ordering
+  sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'post' AND status = 'private'
+    ORDER BY stamp DESC, id DESC LIMIT 4
+  expect:
+    data:
+    - id: 2000
+    - id: 1998
+    - id: 1996
+    - id: 1994
+    rows: 4
+  setup:
+  - sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'post' AND status = 'private'
+      ORDER BY stamp DESC, id DESC LIMIT 4
+  - sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'post' AND status = 'private'
+      ORDER BY stamp DESC, id DESC LIMIT 4
+  - sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'post' AND status = 'private'
+      ORDER BY stamp DESC, id DESC LIMIT 4
+  - sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'post' AND status = 'private'
+      ORDER BY stamp DESC, id DESC LIMIT 4
+  - sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'post' AND status = 'private'
+      ORDER BY stamp DESC, id DESC LIMIT 4
+  - sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'post' AND status = 'private'
+      ORDER BY stamp DESC, id DESC LIMIT 4
+  - sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'post' AND status = 'private'
+      ORDER BY stamp DESC, id DESC LIMIT 4
+  - sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'post' AND status = 'private'
+      ORDER BY stamp DESC, id DESC LIMIT 4
+  - sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'post' AND status = 'private'
+      ORDER BY stamp DESC, id DESC LIMIT 4
+  - sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'post' AND status = 'private'
+      ORDER BY stamp DESC, id DESC LIMIT 4
+- name: Main prefix and delta merge exclude other prefixes
+  setup:
+  - sql: INSERT INTO ordered_prefix_posts VALUES (22003, 'post', 'private', 30000),
+      (22004, 'revision', 'private', 30001)
+  sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'post' AND (status = 'publish'
+    OR status = 'private') ORDER BY stamp DESC LIMIT 4
+  expect:
+    rows: 4
+    data:
+    - id: 22003
+    - id: 2000
+    - id: 1999
+    - id: 1998
+- name: Prefix boundary survives rebuild into main storage
+  setup:
+  - scm: (rebuild)
+  - sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'post' AND (status = 'publish'
+      OR status = 'private') ORDER BY stamp DESC LIMIT 4
+  - sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'post' AND (status = 'publish'
+      OR status = 'private') ORDER BY stamp DESC LIMIT 4
+  - sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'post' AND (status = 'publish'
+      OR status = 'private') ORDER BY stamp DESC LIMIT 4
+  - sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'post' AND (status = 'publish'
+      OR status = 'private') ORDER BY stamp DESC LIMIT 4
+  - sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'post' AND (status = 'publish'
+      OR status = 'private') ORDER BY stamp DESC LIMIT 4
+  - sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'post' AND (status = 'publish'
+      OR status = 'private') ORDER BY stamp DESC LIMIT 4
+  - sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'post' AND (status = 'publish'
+      OR status = 'private') ORDER BY stamp DESC LIMIT 4
+  - sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'post' AND (status = 'publish'
+      OR status = 'private') ORDER BY stamp DESC LIMIT 4
+  - sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'post' AND (status = 'publish'
+      OR status = 'private') ORDER BY stamp DESC LIMIT 4
+  - sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'post' AND (status = 'publish'
+      OR status = 'private') ORDER BY stamp DESC LIMIT 4
+  sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'post' AND (status = 'publish'
+    OR status = 'private') ORDER BY stamp DESC LIMIT 4
+  expect:
+    rows: 4
+    data:
+    - id: 22003
+    - id: 2000
+    - id: 1999
+    - id: 1998
+cleanup:
+- sql: DROP TABLE IF EXISTS ordered_prefix_posts
