@@ -97,7 +97,11 @@ jobs:
           sudo apt-get install -y mariadb-client
 
       - name: Run tests with JIT enabled
-        run: bash git-pre-commit --fail-fast
+        run: |
+          if ! MEMCP_CACHE_DIAGNOSTIC=1 bash git-pre-commit --fail-fast; then
+            tail -n 8000 /tmp/memcp-test.log
+            exit 1
+          fi
 
       - name: Verify dump and restore compatibility with JIT enabled
         env:
