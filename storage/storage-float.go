@@ -34,7 +34,7 @@ type StorageFloat struct {
 }
 
 func (s *StorageFloat) ComputeSize() uint {
-	return 16 + 8*uint(len(s.values)) + 24 /* a slice */
+	return uint(unsafe.Sizeof(*s)) + 8*uint(cap(s.values))
 }
 
 func (s *StorageFloat) String() string {

@@ -2415,7 +2415,7 @@ func (s *StorageInt) deserializeIntV0(f io.Reader) uint {
 }
 
 func (s *StorageInt) ComputeSize() uint {
-	return 8*uint(len(s.chunk)) + 64 // management overhead
+	return uint(unsafe.Sizeof(*s)) + 8*uint(cap(s.chunk))
 }
 
 func (s *StorageInt) String() string {

@@ -1242,12 +1242,12 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension, maint
 		if t.PersistencyMode == Cache && !t.isEphemeralQueryTable() {
 			for _, s := range newshards {
 				atomic.StoreUint64(&s.lastAccessed, uint64(time.Now().UnixNano()))
-				GlobalCache.AddItem(s, int64(s.ComputeSize()), TypeCacheEntry, cacheShardCleanup, shardLastUsed, nil)
+				GlobalCache.AddItem(s, int64(s.exclusiveSize()), TypeCacheEntry, cacheShardCleanup, shardLastUsed, nil)
 			}
 		} else if t.PersistencyMode != Memory && !t.isEphemeralQueryTable() {
 			for _, s := range newshards {
 				atomic.StoreUint64(&s.lastAccessed, uint64(time.Now().UnixNano()))
-				GlobalCache.AddItem(s, int64(s.ComputeSize()), TypeShard, shardCleanup, shardLastUsed, nil)
+				GlobalCache.AddItem(s, int64(s.exclusiveSize()), TypeShard, shardCleanup, shardLastUsed, nil)
 			}
 		}
 	}

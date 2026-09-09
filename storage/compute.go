@@ -121,7 +121,7 @@ func (t *table) computeColumnDDLLocked(name string, inputCols []string, computor
 			}
 			// update CacheManager size for temp columns
 			if c.IsTemp {
-				GlobalCache.SetSize(c, t.tempColumnMemory(c, shardlist))
+				t.updateTempColumnMemory(c, shardlist)
 			}
 			if metadataChanged {
 				t.ddlMu.Lock()
@@ -145,20 +145,36 @@ func (t *table) computeColumnDDLLocked(name string, inputCols []string, computor
 	panic("column " + t.Name + "." + name + " does not exist")
 }
 
-func (t *table) tempColumnMemory(column *column, shards []*storageShard) int64 {
-	var size int64
+// Publish changed portions in shard mutation order. An absolute table sum
+// published after unlocking all shards could resurrect bytes already evicted
+// in the meantime. Unchanged cached columns do not send a manager operation.
+func (t *table) updateTempColumnMemory(col *column, shards []*storageShard) {
 	for _, shard := range shards {
 		if shard == nil {
 			continue
 		}
-		shard.mu.RLock()
-		storage := shard.columns[column.Name]
+		shard.mu.Lock()
+		storage := shard.columns[col.Name]
+		var part int64
 		if storage != nil {
-			size += int64(ownedColumnMemory(storage))
+			part = int64(ownedColumnMemory(storage))
 		}
-		shard.mu.RUnlock()
+		if shard.tempColumnBytes == nil {
+			shard.tempColumnBytes = make(map[*column]int64)
+		}
+		delta := part - shard.tempColumnBytes[col]
+		shard.tempColumnBytes[col] = part
+		var ready, done chan struct{}
+		if delta != 0 && GlobalCache.opChan != nil && !GlobalCache.stopped.Load() {
+			ready, done = make(chan struct{}), make(chan struct{})
+			GlobalCache.opChan <- cacheOp{updatePtr: col, updateDelta: delta, ready: ready, done: done}
+		}
+		shard.mu.Unlock()
+		if ready != nil {
+			close(ready)
+			<-done
+		}
 	}
-	return size
 }
 
 func (t *table) ComputeColumn(name string, inputCols []string, computor scm.Scmer, filterCols []string, filter scm.Scmer) {

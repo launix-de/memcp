@@ -31,7 +31,7 @@ type StorageSparse struct {
 }
 
 func (s *StorageSparse) ComputeSize() uint {
-	var sz uint = 16 + 8 + 24 + s.recids.ComputeSize() + 8*uint(len(s.values))
+	sz := uint(unsafe.Sizeof(*s)-unsafe.Sizeof(s.recids)) + s.recids.ComputeSize() + uint(cap(s.values)-len(s.values))*uint(unsafe.Sizeof(scm.Scmer{}))
 	for _, v := range s.values {
 		sz += scm.ComputeSize(v)
 	}
