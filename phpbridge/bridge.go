@@ -15,6 +15,7 @@ import "sync"
 import "time"
 import "unsafe"
 import "context"
+import "strconv"
 import "runtime/cgo"
 import "github.com/dunglas/frankenphp"
 import "github.com/launix-de/memcp/scm"
@@ -34,6 +35,18 @@ func Register(env *scm.Env) error {
 	auth, schemaCheck, query, rollback = lookup("mysql_auth"), lookup("mysql_schema"), lookup("mysql_handler"), lookup("tx_rollback")
 	if auth.IsNil() || schemaCheck.IsNil() || query.IsNil() || rollback.IsNil() {
 		return fmt.Errorf("PHP PDO requires the SQL frontend (lib/main.scm)")
+	}
+	// Snapshot the actually started Scheme listener before PHP workers start.
+	C.memcp_set_mysql_port(0)
+	if registry := lookup("service_registry"); !registry.IsNil() {
+		if service := scm.Apply(registry, scm.NewString("MySQL Protocol")); !service.IsNil() {
+			items := service.Slice()
+			if len(items) > 0 {
+				if port, err := strconv.ParseUint(items[0].String(), 10, 16); err == nil && port != 0 {
+					C.memcp_set_mysql_port(C.uint(port))
+				}
+			}
+		}
 	}
 	frankenphp.RegisterExtension(C.memcp_module())
 	return nil

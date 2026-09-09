@@ -221,8 +221,125 @@ static int connect_db(pdo_dbh_t *dbh, zval *options) {
 }
 
 static const pdo_driver_t driver = { PDO_DRIVER_HEADER(memcp), connect_db };
-PHP_MINIT_FUNCTION(pdo_memcp) { return php_pdo_register_driver(&driver); }
-PHP_MSHUTDOWN_FUNCTION(pdo_memcp) { php_pdo_unregister_driver(&driver); return SUCCESS; }
+
+/* Constructor dispatch is installed at MINIT, before request threads start.
+ * The native MySQL driver's registry entry and methods are never modified. */
+static unsigned int local_mysql_port;
+static zif_handler original_construct, original_connect;
+void memcp_set_mysql_port(unsigned int port) { local_mysql_port = port; }
+
+static zend_string *local_dsn(zend_execute_data *execute_data) {
+	if (!local_mysql_port || ZEND_CALL_NUM_ARGS(execute_data) < 1 ||
+		zend_get_called_scope(execute_data) != php_pdo_get_dbh_ce()) return NULL;
+	zval *arg = ZEND_CALL_ARG(execute_data, 1);
+	if (Z_TYPE_P(arg) != IS_STRING || Z_STRLEN_P(arg) < 6 ||
+		memcmp(Z_STRVAL_P(arg), "mysql:", 6) || strlen(Z_STRVAL_P(arg)) != Z_STRLEN_P(arg)) return NULL;
+	/* Keep options whose semantics require native MySQL on the wire path. */
+	if (ZEND_CALL_NUM_ARGS(execute_data) >= 4) {
+		zval *options = ZEND_CALL_ARG(execute_data, 4);
+		if (Z_TYPE_P(options) != IS_NULL && Z_TYPE_P(options) != IS_ARRAY) return NULL;
+		if (Z_TYPE_P(options) == IS_ARRAY) {
+			zend_ulong key; zend_string *name; zval *value;
+			ZEND_HASH_FOREACH_KEY_VAL(Z_ARRVAL_P(options), key, name, value) {
+				if (name) return NULL;
+				switch (key) {
+				case PDO_ATTR_ERRMODE: case PDO_ATTR_CASE: case PDO_ATTR_ORACLE_NULLS:
+				case PDO_ATTR_DEFAULT_FETCH_MODE: case PDO_ATTR_STRINGIFY_FETCHES:
+					break; /* handled by PDO itself */
+				case PDO_ATTR_EMULATE_PREPARES:
+					if (!zend_is_true(value)) return NULL;
+					break;
+				default: return NULL;
+				}
+			} ZEND_HASH_FOREACH_END();
+		}
+	}
+	/* An exact, unambiguous subset only; native PDO parses every other DSN.
+	 * Require explicit host/port/database; never capture Unix socket DSNs. */
+	const char *host = NULL, *database = NULL;
+	size_t host_len = 0, database_len = 0;
+	unsigned int port = 0, seen = 0;
+	const char *p = Z_STRVAL_P(arg)+6, *end = Z_STRVAL_P(arg)+Z_STRLEN_P(arg);
+	while (p < end) {
+		const char *stop = memchr(p, ';', (size_t)(end-p));
+		if (!stop) stop = end;
+		const char *equal = memchr(p, '=', (size_t)(stop-p));
+		if (!equal || equal+1 == stop) return NULL;
+		const char *value = equal+1;
+		size_t length = (size_t)(stop-value), key_len = (size_t)(equal-p);
+		unsigned int bit;
+		if (key_len == 4 && !memcmp(p, "host", 4)) {
+			bit = 1; host = value; host_len = length;
+		} else if (key_len == 4 && !memcmp(p, "port", 4)) {
+			bit = 2;
+			if (length > 5) return NULL;
+			for (const char *digit = value; digit < stop; digit++) {
+				if (*digit < '0' || *digit > '9') return NULL;
+				port = port*10+(unsigned int)(*digit-'0');
+			}
+		} else if (key_len == 6 && !memcmp(p, "dbname", 6)) {
+			bit = 4; database = value; database_len = length;
+		} else if (key_len == 7 && !memcmp(p, "charset", 7)) {
+			bit = 8;
+			if (!((length == 7 && !memcmp(value, "utf8mb4", 7)) ||
+				(length == 4 && !memcmp(value, "utf8", 4)))) return NULL;
+		} else return NULL;
+		if (seen & bit) return NULL;
+		seen |= bit;
+		p = stop == end ? end : stop+1;
+	}
+	if ((seen & 7) != 7 || port != local_mysql_port ||
+		!((host_len == 9 && !memcmp(host, "localhost", 9)) ||
+		  (host_len == 9 && !memcmp(host, "127.0.0.1", 9)))) return NULL;
+	zend_string *dsn = zend_string_alloc(sizeof("memcp:dbname=")-1+database_len, 0);
+	memcpy(ZSTR_VAL(dsn), "memcp:dbname=", sizeof("memcp:dbname=")-1);
+	memcpy(ZSTR_VAL(dsn)+sizeof("memcp:dbname=")-1, database, database_len);
+	ZSTR_VAL(dsn)[ZSTR_LEN(dsn)] = '\0';
+	return dsn;
+}
+
+static void routed_construct(zif_handler original, INTERNAL_FUNCTION_PARAMETERS) {
+	zend_string *dsn = local_dsn(execute_data);
+	if (!dsn) { original(INTERNAL_FUNCTION_PARAM_PASSTHRU); return; }
+	zval *arg = ZEND_CALL_ARG(execute_data, 1), saved;
+	ZVAL_COPY_VALUE(&saved, arg);
+	ZVAL_STR(arg, dsn);
+	/* Preserve the original argument and PDO's own exceptions/SQLSTATE. */
+	zend_try {
+		original(INTERNAL_FUNCTION_PARAM_PASSTHRU);
+	} zend_catch {
+		zval_ptr_dtor(arg); ZVAL_COPY_VALUE(arg, &saved);
+		zend_bailout();
+	} zend_end_try();
+	zval_ptr_dtor(arg); ZVAL_COPY_VALUE(arg, &saved);
+}
+static void routed_pdo_construct(INTERNAL_FUNCTION_PARAMETERS) {
+	routed_construct(original_construct, INTERNAL_FUNCTION_PARAM_PASSTHRU);
+}
+static void routed_pdo_connect(INTERNAL_FUNCTION_PARAMETERS) {
+	routed_construct(original_connect, INTERNAL_FUNCTION_PARAM_PASSTHRU);
+}
+PHP_MINIT_FUNCTION(pdo_memcp) {
+	if (php_pdo_register_driver(&driver) != SUCCESS) return FAILURE;
+	zend_class_entry *ce = php_pdo_get_dbh_ce();
+	original_construct = ce->constructor->internal_function.handler;
+	ce->constructor->internal_function.handler = routed_pdo_construct;
+	zend_function *connect = zend_hash_str_find_ptr(&ce->function_table, "connect", sizeof("connect")-1);
+	if (connect) {
+		original_connect = connect->internal_function.handler;
+		connect->internal_function.handler = routed_pdo_connect;
+	}
+	return SUCCESS;
+}
+PHP_MSHUTDOWN_FUNCTION(pdo_memcp) {
+	zend_class_entry *ce = php_pdo_get_dbh_ce();
+	if (ce->constructor->internal_function.handler == routed_pdo_construct)
+		ce->constructor->internal_function.handler = original_construct;
+	zend_function *connect = zend_hash_str_find_ptr(&ce->function_table, "connect", sizeof("connect")-1);
+	if (connect && connect->internal_function.handler == routed_pdo_connect)
+		connect->internal_function.handler = original_connect;
+	php_pdo_unregister_driver(&driver); return SUCCESS;
+}
 static const zend_module_dep dependencies[] = { ZEND_MOD_REQUIRED("pdo") ZEND_MOD_END };
 static zend_module_entry module = {
 	STANDARD_MODULE_HEADER_EX, NULL, dependencies, "pdo_memcp", NULL,

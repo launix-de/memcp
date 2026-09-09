@@ -36,6 +36,19 @@ features; no Caddy dependency is added.
 
 ## Mount applications from Scheme
 
+For a single application, the standard Scheme bootstrap accepts a document root
+relative to the current working directory (or an absolute path):
+
+```sh
+./memcp-php --serve /srv/my-app/public --api-port=8080 --mysql-port=3307
+```
+
+`--serve=PATH` is equivalent. `lib/main.scm` installs the PHP folder at `/`
+with `index.php` as front controller, below the existing SQL/dashboard/RDF
+handlers. `/dashboard`, its API/WebSocket routes, and the SQL API remain
+available with their normal authentication. No application-specific Scheme
+module is needed for this mode.
+
 `servePHP` returns a `(req res)` handler, just like `serveStatic`. It creates no
 listener. Mount any number of applications in the existing Scheme HTTP router;
 all mounts share the process-wide FrankenPHP thread pool.
@@ -86,14 +99,30 @@ crashes affect the entire process, including MemCP.
 
 ## PDO connections
 
-The addon registers **only `memcp:`**. It neither replaces `PDO` nor intercepts
-other DSNs. Existing driver extensions continue to resolve their own schemes:
+The addon registers **only `memcp:`** and leaves other driver registrations
+intact. It also routes a narrow set of local MySQL DSNs at base `PDO` connection
+construction, before the original constructor selects a driver:
 
 ```php
 $local = new PDO('memcp:dbname=shop', $user, $password);
 $mysql = new PDO('mysql:host=db.example;dbname=shop', $user, $password);
 $sqlite = new PDO('sqlite:/path/to/cache.sqlite');
 ```
+
+A base `new PDO(...)` or `PDO::connect(...)` using
+`mysql:host=127.0.0.1;port=3307;dbname=shop` automatically selects the RAM path
+if 3307 is this process's successfully started, Scheme-registered MySQL port.
+The exact hostname `localhost` also matches. Host, port and database must all
+be explicit; optional `charset=utf8mb4` or `charset=utf8` is accepted.
+The resulting PDO driver name is `memcp`, and the same username/password
+authentication applies. The caller's DSN string is preserved.
+
+Other hosts/ports, Unix sockets, omitted/ambiguous DSN fields, other charsets,
+driver-specific options, timeouts, native-prepare requests and persistent connections
+retain native PDO behavior. PDO subclasses (including `Pdo\Mysql`) retain
+their original behavior too. The constructor dispatch is installed once during
+PHP module initialization, before request threads start; no handler pointers
+change while requests execute. No external source is patched.
 
 Create the MemCP database and account using the existing SQL administration
 interface before connecting. Authentication uses MemCP's user catalog, and
@@ -147,7 +176,10 @@ Applications or ORMs that recognize only specific PDO driver names may need a
 MemCP/MySQL-dialect adapter. Applications using `mysqli`, including unmodified
 WordPress, can instead use MemCP's existing MySQL TCP/Unix socket frontend.
 That path uses the MySQL protocol even though PHP runs in the same process.
-A native PDO driver alone cannot transparently replace `mysqli`.
+The normal MySQL host/port/username/password installer fields work with this
+wire frontend; neither application needs a MemCP-specific DSN. PDO constructor
+routing does **not** accelerate `mysqli`: that additionally requires integration
+with mysqlnd.
 
 ## Verification
 

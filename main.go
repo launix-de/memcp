@@ -725,9 +725,13 @@ func (i *arrayFlags) Set(value string) error {
 }
 
 func setupIO(wd string) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		panic(err)
+	}
 	// define some IO functions (scm will not provide them since it is sandboxable)
 	IOEnv = scm.Env{
-		Vars:         scm.Vars{},
+		Vars:         scm.Vars{"__CWD__": scm.NewString(cwd)},
 		VarsNumbered: nil,
 		Outer:        &scm.Globalenv,
 		Nodefine:     true, // other defines go into Globalenv
@@ -1236,6 +1240,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  --mysql-socket=PATH    Unix socket path (default /tmp/memcp.sock, empty to disable)\n")
 		fmt.Fprintf(os.Stderr, "  --root-password-file=PATH  Read the initial root password from a file\n")
 		fmt.Fprintf(os.Stderr, "  --disable-mysql        Disable MySQL protocol server\n")
+		fmt.Fprintf(os.Stderr, "  --serve PATH           Mount a PHP application at /; keep /dashboard (make php)\n")
 		fmt.Fprintf(os.Stderr, "  --php-threads=N        PHP threads (default 4)\n")
 		fmt.Fprintf(os.Stderr, "... and much more (please refer to your module's documentation)\n\n")
 	}
@@ -1267,6 +1272,12 @@ func main() {
 		} else if len(arg) > 2 && arg[:2] == "--" {
 			// This is a long flag for Scheme - don't treat as import file
 			schemeArgs = append(schemeArgs, arg)
+			// Preserve the separate PATH token for Scheme, not as an import.
+			// lib/main.scm owns validation and mounting.
+			if arg == "--serve" && i+2 < len(os.Args) && !strings.HasPrefix(os.Args[i+2], "-") {
+				schemeArgs = append(schemeArgs, os.Args[i+2])
+				skipNext = true
+			}
 		} else if len(arg) > 1 && arg[0] == '-' {
 			// This looks like a short flag but we don't recognize it - also for Scheme
 			schemeArgs = append(schemeArgs, arg)

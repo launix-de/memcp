@@ -93,6 +93,37 @@ try {
             check($wire->query('SELECT 1')->fetchColumn() == 1, 'PDO wire query');
             check($db->query('SELECT 2')->fetchColumn() == 2, 'PDO direct query alongside wire');
         }
+    } elseif ($action === 'route-dsn') {
+        $config = json_decode(file_get_contents(__DIR__ . '/wire.json'), true);
+        foreach (['localhost', '127.0.0.1'] as $host) {
+            $dsn = 'mysql:host=' . $host . ';port=' . $config['port'] . ';dbname=memcp-tests;charset=utf8mb4';
+            $before = $dsn;
+            foreach ([
+                fn() => new PDO($dsn, 'root', 'admin'),
+                fn() => PDO::connect(dsn: $dsn, username: 'root', password: 'admin')
+            ] as $open) {
+                $local = $open();
+                check($local->getAttribute(PDO::ATTR_DRIVER_NAME) === 'memcp', 'Local PDO DSN routes in-process');
+                check($local->query('SELECT 1')->fetchColumn() == 1, 'Routed PDO result');
+                check($dsn === $before, 'Caller DSN must remain unchanged');
+            }
+            fails(fn() => new PDO($dsn, 'root', 'wrong'), '28000');
+            fails(fn() => PDO::connect($dsn), '28000');
+            $reader = new PDO($dsn, 'php_reader', 'reader-password');
+            check($reader->getAttribute(PDO::ATTR_DRIVER_NAME) === 'memcp', 'Non-root route');
+        }
+        $dsn = 'mysql:host=127.0.0.1;port=' . $config['other_port'] . ';dbname=memcp-tests';
+        $wire = new PDO($dsn, 'root', 'admin');
+        check($wire->getAttribute(PDO::ATTR_DRIVER_NAME) === 'mysql', 'Other TCP port remains wire');
+        check($wire->query('SELECT 2')->fetchColumn() == 2, 'Other port wire query');
+        $dsn = 'mysql:host=127.0.0.1;port=' . $config['port'] . ';dbname=memcp-tests';
+        $wire = new PDO($dsn, 'root', 'admin', [PDO::ATTR_EMULATE_PREPARES => false]);
+        check($wire->getAttribute(PDO::ATTR_DRIVER_NAME) === 'mysql', 'Native prepare option keeps wire');
+        check(!$wire->getAttribute(PDO::ATTR_EMULATE_PREPARES), 'Native prepare option preserved');
+        $wire->setAttribute(PDO::ATTR_EMULATE_PREPARES, true);
+        check($wire->query('SELECT 3')->fetchColumn() == 3, 'Wire query after enabling emulation');
+        $wire = Pdo\Mysql::connect($dsn, 'root', 'admin');
+        check($wire->getAttribute(PDO::ATTR_DRIVER_NAME) === 'mysql', 'Driver-specific PDO class keeps wire');
     } elseif ($action === 'buffers') {
         $first = $db->query("SELECT 'first' AS value, NULL AS optional UNION ALL SELECT 'second', 'present'");
         $second = $db->query("SELECT 'different' AS other");
@@ -127,6 +158,9 @@ try {
     } elseif ($action === 'verify') {
         check($db->query("SELECT COUNT(*) FROM php_test WHERE value = 'abandoned'")->fetchColumn() == 0, 'Request teardown rollback');
     } elseif ($action === 'parallel') {
+        $config = json_decode(file_get_contents(__DIR__ . '/wire.json'), true);
+        $db = new PDO('mysql:host=127.0.0.1;port=' . $config['port'] . ';dbname=memcp-tests', 'root', 'admin');
+        check($db->getAttribute(PDO::ATTR_DRIVER_NAME) === 'memcp', 'Parallel routed PDO');
         $stmt = $db->prepare('SELECT ? AS value');
         $value = $_GET['value'];
         $stmt->execute([$value]);
@@ -140,5 +174,5 @@ try {
     echo json_encode(['ok' => true]);
 } catch (Throwable $e) {
     http_response_code(500);
-    echo json_encode(['error' => $e->getMessage()]);
+    echo json_encode(['error' => $e->getMessage(), 'line' => $e->getLine()]);
 }

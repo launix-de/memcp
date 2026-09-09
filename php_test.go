@@ -15,6 +15,7 @@ import "os/exec"
 import "strings"
 import "strconv"
 import "testing"
+import "context"
 import "net/http"
 import "encoding/json"
 import "path/filepath"
@@ -25,17 +26,39 @@ func TestPHPIntegration(t *testing.T) {
 		if front != "" {
 			name = "front-controller"
 		}
-		t.Run(name, func(t *testing.T) { testPHPIntegration(t, front) })
+		t.Run(name, func(t *testing.T) { testPHPIntegration(t, front, "") })
 	}
 }
 
-func testPHPIntegration(t *testing.T, front string) {
+func TestPHPServeCLI(t *testing.T) {
+	for _, mode := range []string{"split", "equals"} {
+		t.Run(mode, func(t *testing.T) { testPHPIntegration(t, "index.php", mode) })
+	}
+}
+
+func TestPHPServeCLIRequiresPath(t *testing.T) {
+	for _, option := range []string{"--serve", "--serve="} {
+		t.Run(option, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			output, err := exec.CommandContext(ctx, "./memcp-php", "--no-repl", "--disable-api", "--disable-mysql", "--mysql-socket=", "-data", t.TempDir(), option).CombinedOutput()
+			if err == nil || !strings.Contains(string(output), "--serve requires a directory path") {
+				t.Fatalf("expected missing PATH error: %v %s", err, output)
+			}
+		})
+	}
+}
+
+func testPHPIntegration(t *testing.T, front, cli string) {
 	binary, err := filepath.Abs("memcp-php")
 	if err != nil {
 		t.Fatal(err)
 	}
 	dir := t.TempDir()
 	root := filepath.Join(dir, "public")
+	if cli != "" {
+		root += ".scm"
+	}
 	if err := os.Mkdir(root, 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +104,17 @@ func testPHPIntegration(t *testing.T, front string) {
 	if err := os.WriteFile(filepath.Join(other, "second.txt"), []byte("second app"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	config, _ := json.Marshal(map[string]string{"socket": socketPath})
+	freePort := func() string {
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, port, _ := net.SplitHostPort(listener.Addr().String())
+		listener.Close()
+		return port
+	}
+	mysqlPort, otherPort := freePort(), freePort()
+	config, _ := json.Marshal(map[string]string{"socket": socketPath, "port": mysqlPort, "other_port": otherPort})
 	if err := os.WriteFile(filepath.Join(root, "wire.json"), config, 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -93,19 +126,38 @@ func testPHPIntegration(t *testing.T, front string) {
   (regex "^/other(/|$)" _ _) (second req res)
   "/outside" ((res "print") "Scheme handler")
   _ (previous req res)))))`, strconv.Quote(front))
+	if cli != "" {
+		mount = strings.ReplaceAll(mount, `"public"`, `"public.scm"`)
+	}
+	mount += "\n(mysql " + otherPort + " mysql_auth mysql_schema mysql_handler)"
 	mountFile := filepath.Join(dir, "mount.scm")
 	if err := os.WriteFile(mountFile, []byte(mount), 0600); err != nil {
 		t.Fatal(err)
 	}
 	_, port, _ := net.SplitHostPort(address)
 	apiFlag := "--api-port=" + port
-	if front != "" {
+	if front != "" && cli == "" {
 		apiFlag = "--disable-api"
 		if err := os.WriteFile(mountFile, []byte(mount+"\n(serve "+port+" (lambda (req res) (http_handler req res)) \"127.0.0.1\")"), 0600); err != nil {
 			t.Fatal(err)
 		}
 	}
-	cmd := exec.Command(binary, "--no-repl", apiFlag, "--disable-mysql", "--mysql-socket="+socketPath, "-data", filepath.Join(dir, "data"), "-c", `(createdatabase "memcp-tests" true)`, "--php-threads=4", "lib/main.scm", mountFile)
+	cmd := exec.Command(binary, "--no-repl", apiFlag, "--mysql-port="+mysqlPort, "--mysql-socket="+socketPath, "-data", filepath.Join(dir, "data"), "-c", `(createdatabase "memcp-tests" true)`, "--php-threads=4", "lib/main.scm", mountFile)
+	if cli != "" {
+		workingDir, err := os.Getwd()
+		if err != nil {
+			t.Fatal(err)
+		}
+		relative, err := filepath.Rel(workingDir, root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cli == "split" {
+			cmd.Args = append(cmd.Args, "--serve", relative)
+		} else {
+			cmd.Args = append(cmd.Args, "--serve="+relative)
+		}
+	}
 	cmd.Stdout = log
 	cmd.Stderr = log
 	if err := cmd.Start(); err != nil {
@@ -168,7 +220,36 @@ func testPHPIntegration(t *testing.T, front string) {
 	if !ready {
 		t.Fatal("PHP did not become ready")
 	}
-	for _, action := range []string{"setup", "pdo", "wire", "buffers", "latency", "abandon", "verify"} {
+	if cli != "" {
+		for _, path := range []string{"/", "/a/pretty/permalink"} {
+			status, body, err := get(path + "?action=routing")
+			var result map[string]string
+			if err != nil || status != 200 || json.Unmarshal([]byte(body), &result) != nil || result["script"] != "/index.php" || result["uri"] != path+"?action=routing" {
+				t.Fatalf("CLI root %s: %d %s %v", path, status, body, err)
+			}
+		}
+		status, _, err := get("/dashboard")
+		if err != nil || status != 401 {
+			t.Fatalf("dashboard authentication: %d %v", status, err)
+		}
+		for _, path := range []string{"/dashboard", "/dashboard/api/whoami", "/sql/memcp-tests"} {
+			req, err := http.NewRequest("GET", "http://"+address+path, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.SetBasicAuth("root", "admin")
+			response, err := client.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, err := io.ReadAll(response.Body)
+			response.Body.Close()
+			if err != nil || response.StatusCode != 200 || strings.Contains(string(body), `"script":"/index.php"`) {
+				t.Fatalf("MemCP route %s: %d %s %v", path, response.StatusCode, body, err)
+			}
+		}
+	}
+	for _, action := range []string{"setup", "pdo", "wire", "route-dsn", "buffers", "latency", "abandon", "verify"} {
 		status, body, err := get("/app/probe.php?action=" + action)
 		want := 200
 		if action == "abandon" {
@@ -227,7 +308,7 @@ func testPHPIntegration(t *testing.T, front string) {
 		}
 	}
 	status, _, err = get("/application/probe.php")
-	if err != nil || status != 404 {
+	if err != nil || (cli == "" && status != 404) || (cli != "" && status != 200) {
 		t.Fatalf("mount boundary: %d %v", status, err)
 	}
 	var wg sync.WaitGroup
