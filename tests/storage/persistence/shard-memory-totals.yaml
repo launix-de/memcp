@@ -175,6 +175,18 @@ test_cases:
           (>= (s "go_heap_inuse") (s "go_heap_allocated"))
           (>= (s "cache_accounting_over_rss") 0)) true
           (error "invalid process/runtime memory diagnostics")))
+  - name: "Rebuild publication overlaps transaction commits"
+    parallel: ram_rebuild_commit
+    repetitions: 30
+    scm: '(rebuild (table "memcp-tests" "ram_cleanup") true false)'
+  - name: "Commit forwarding does not deadlock RAM ownership transfer"
+    parallel: ram_rebuild_commit
+    sql: "UPDATE ram_cleanup SET payload = 'committed' WHERE id = 1"
+  - name: "Committed payload survives concurrent rebuild publication"
+    sql: "SELECT payload FROM ram_cleanup WHERE id = 1"
+    expect:
+      rows: 1
+      data: [{payload: committed}]
 cleanup:
   - sql: "DROP TABLE IF EXISTS ram_cleanup"
   - sql: "DROP TABLE IF EXISTS ram_multishard"
