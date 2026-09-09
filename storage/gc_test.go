@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -596,5 +597,231 @@ func TestBlobManifestSurvivesUnchangedColdRebuild(t *testing.T) {
 	}
 	if deleted, _ := CleanDatabase(db); deleted != 0 {
 		t.Fatalf("cold rebuild lost %d live blobs", deleted)
+	}
+}
+
+// A crash may leave the operational count below the number of committed owners.
+// Releasing one owner must never remove another owner's payload.
+func TestBlobUndercountRetainsCommittedOwners(t *testing.T) {
+	for _, scenario := range []string{"shared", "restart", "rebuild", "failed-publication"} {
+		t.Run(scenario, func(t *testing.T) {
+			defer setupGCTest(t)()
+			CreateDatabase("gcdb", false)
+			payloads := []string{strings.Repeat("a", maxInlineBlobBytes+1), strings.Repeat("b", maxInlineBlobBytes+1), strings.Repeat("c", maxInlineBlobBytes+1)}
+			for _, name := range []string{"first", "second"} {
+				tbl, _ := CreateTable("gcdb", name, Safe, false)
+				tbl.CreateColumn("id", "INT", nil, nil)
+				tbl.CreateColumn("content", "TEXT", nil, nil)
+				insertLongRows(t, tbl, payloads)
+			}
+			db := GetDatabase("gcdb")
+			for hash, count := range queryBlobsTable(t, db) {
+				if count != 2 {
+					t.Fatalf("fixture count = %d, want 2", count)
+				}
+				db.DecrBlobRefcount(hash)
+			}
+			if scenario == "restart" {
+				Rebuild(true, true)
+				databases.Remove("gcdb")
+				LoadDatabases()
+				db = GetDatabase("gcdb")
+				db.ensureLoaded()
+			}
+			if scenario == "rebuild" {
+				Rebuild(true, true)
+			}
+			if scenario == "failed-publication" {
+				persistence := db.persistence
+				failing := &failSchemaWritePersistence{PersistenceEngine: persistence, failAt: 1}
+				db.persistence = failing
+				tbl := db.tables.Get("second")
+				tbl.Insert([]string{"id", "content"}, [][]scm.Scmer{{scm.NewInt(4), scm.NewString(payloads[0])}}, nil, scm.NewNil(), false, nil)
+				result := Rebuild(true, true)
+				db.persistence = persistence
+				if !strings.Contains(result, "schema publication failure") {
+					t.Fatalf("missing injected failure: %s", result)
+				}
+			}
+			DropTable("gcdb", "first", false)
+			if got := len(blobFiles(t, "gcdb")); got != 3 {
+				t.Fatalf("decrement deleted committed blobs: got %d, want 3", got)
+			}
+			if deleted, _ := CleanDatabase(db); deleted != 0 {
+				t.Fatalf("cleanup deleted %d owned blobs", deleted)
+			}
+			references, complete := activeBlobReferences(db, true)
+			if !complete || len(references) != 3 {
+				t.Fatalf("references = %v, complete = %v", references, complete)
+			}
+			for _, payload := range payloads {
+				hash := fmt.Sprintf("%x", sha256.Sum256([]byte(payload)))
+				reader := db.persistence.ReadBlob(hash)
+				value, ok := gunzipReader(reader)
+				reader.Close()
+				if !ok || value.String() != payload {
+					t.Fatalf("surviving payload %s unreadable", hash)
+				}
+			}
+			DropTable("gcdb", "second", false)
+			if got := len(blobFiles(t, "gcdb")); got != 3 {
+				t.Fatalf("drop deleted blobs before ownership check: %d", got)
+			}
+			if deleted, _ := CleanDatabase(db); deleted != 3 {
+				t.Fatalf("cleanup deleted %d orphans, want 3", deleted)
+			}
+		})
+	}
+}
+
+// Audits must work even on backends whose ReadBlob eagerly loads the payload.
+type inventoryMetadataOnlyPersistence struct {
+	PersistenceEngine
+	failList bool
+}
+
+func (p *inventoryMetadataOnlyPersistence) ReadBlob(string) io.ReadCloser {
+	panic("inventory fetched payload")
+}
+func (p *inventoryMetadataOnlyPersistence) WriteColumn(string, string) io.WriteCloser {
+	panic("inventory wrote column metadata")
+}
+func (p *inventoryMetadataOnlyPersistence) DeleteBlob(string) { panic("inventory deleted blob") }
+func (p *inventoryMetadataOnlyPersistence) WalkBlobs(fn func(string)) {
+	if p.failList {
+		panic("injected inventory listing failure")
+	}
+	p.PersistenceEngine.WalkBlobs(fn)
+}
+
+func TestBlobInventoryListsMissingReferencesWithoutFetchingPayloads(t *testing.T) {
+	defer setupGCTest(t)()
+	CreateDatabase("gcdb", false)
+	tbl, _ := CreateTable("gcdb", "docs", Safe, false)
+	tbl.CreateColumn("id", "INT", nil, nil)
+	tbl.CreateColumn("content", "TEXT", nil, nil)
+	insertLongRows(t, tbl, []string{strings.Repeat("x", maxInlineBlobBytes+1), strings.Repeat("y", maxInlineBlobBytes+1), strings.Repeat("z", maxInlineBlobBytes+1)})
+	db := GetDatabase("gcdb")
+	references, complete := activeBlobReferences(db, true)
+	if !complete || len(references) != 3 {
+		t.Fatal("incomplete fixture")
+	}
+	backend := db.persistence
+	db.persistence = &inventoryMetadataOnlyPersistence{PersistenceEngine: backend}
+	report := AuditBlobInventory(db)
+	if report.Referenced != 3 || report.Listed != 3 || len(report.Missing) != 0 || report.Unreferenced != 0 {
+		t.Fatalf("healthy inventory: %+v", report)
+	}
+	if deleted, _ := CleanDatabase(db); deleted != 0 {
+		t.Fatalf("cleanup deleted %d live blobs", deleted)
+	}
+	// Missing legacy manifests are discovered without publishing a backfill.
+	for _, shard := range tbl.ActiveShards() {
+		backend.RemoveColumn(shard.uuid.String(), blobManifestColumn)
+	}
+	legacy := AuditBlobInventory(db)
+	if legacy.Referenced != 3 || len(legacy.Missing) != 0 {
+		t.Fatalf("legacy inventory: %+v", legacy)
+	}
+	for _, shard := range tbl.ActiveShards() {
+		reader := backend.ReadColumn(shard.uuid.String(), blobManifestColumn)
+		reader.Close()
+		if missing, ok := reader.(ErrorReader); !ok || !missing.Missing() {
+			t.Fatal("audit published legacy manifest")
+		}
+	}
+	for hash := range references {
+		backend.DeleteBlob(hash)
+	}
+	orphan := strings.Repeat("ab", 32)
+	writer := db.persistence.WriteBlob(orphan)
+	if _, err := writer.Write([]byte("orphan")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	report = AuditBlobInventory(db)
+	if report.Referenced != 3 || report.Listed != 1 || len(report.Missing) != 3 || report.Unreferenced != 1 {
+		t.Fatalf("damaged inventory: %+v", report)
+	}
+	for _, hash := range report.Missing {
+		if _, expected := references[hash]; !expected {
+			t.Fatalf("unexpected missing hash %s", hash)
+		}
+	}
+	if len(blobFiles(t, "gcdb")) != 1 {
+		t.Fatal("audit deleted the orphan")
+	}
+	db.persistence = backend
+	if deleted, _ := CleanDatabase(db); deleted != 1 {
+		t.Fatalf("cleanup retained an unowned blob because another file is missing: deleted %d", deleted)
+	}
+	if got := len(blobFiles(t, "gcdb")); got != 0 {
+		t.Fatalf("orphan not collected: %d files", got)
+	}
+}
+
+func TestBlobInventoryRejectsIncompleteSnapshotsAndReleasesLock(t *testing.T) {
+	for _, failure := range []string{"manifest", "listing"} {
+		t.Run(failure, func(t *testing.T) {
+			defer setupGCTest(t)()
+			CreateDatabase("gcdb", false)
+			tbl, _ := CreateTable("gcdb", "docs", Safe, false)
+			tbl.CreateColumn("id", "INT", nil, nil)
+			tbl.CreateColumn("content", "TEXT", nil, nil)
+			insertLongRows(t, tbl, []string{strings.Repeat("a", maxInlineBlobBytes+1), strings.Repeat("b", maxInlineBlobBytes+1), strings.Repeat("c", maxInlineBlobBytes+1)})
+			db := GetDatabase("gcdb")
+			if failure == "manifest" {
+				writer := db.persistence.WriteColumn(tbl.ActiveShards()[0].uuid.String(), blobManifestColumn)
+				if _, err := writer.Write([]byte("corrupt")); err != nil {
+					t.Fatal(err)
+				}
+				if err := writer.Close(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			db.persistence = &inventoryMetadataOnlyPersistence{PersistenceEngine: db.persistence, failList: failure == "listing"}
+			var caught any
+			func() { defer func() { caught = recover() }(); AuditBlobInventory(db) }()
+			expected := "incomplete generation references"
+			if failure == "listing" {
+				expected = "injected inventory listing failure"
+			}
+			if !strings.Contains(fmt.Sprint(caught), expected) {
+				t.Fatalf("unexpected error: %v", caught)
+			}
+			if !db.persistenceLifecycle.TryLock() {
+				t.Fatal("audit retained lifecycle lock after failure")
+			}
+			db.persistenceLifecycle.Unlock()
+			if len(blobFiles(t, "gcdb")) != 3 {
+				t.Fatal("failed audit changed files")
+			}
+		})
+	}
+}
+
+func TestBlobInventoryWaitsForGenerationPublication(t *testing.T) {
+	defer setupGCTest(t)()
+	CreateDatabase("gcdb", false)
+	db := GetDatabase("gcdb")
+	db.persistenceLifecycle.RLock()
+	done := make(chan BlobInventory, 1)
+	go func() { done <- AuditBlobInventory(db) }()
+	select {
+	case <-done:
+		db.persistenceLifecycle.RUnlock()
+		t.Fatal("audit entered an unpublished generation")
+	case <-time.After(25 * time.Millisecond):
+	}
+	db.persistenceLifecycle.RUnlock()
+	select {
+	case report := <-done:
+		if report.Referenced != 0 || report.Listed != 0 {
+			t.Fatalf("empty inventory: %+v", report)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("audit did not resume after publication")
 	}
 }

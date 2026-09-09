@@ -3613,6 +3613,31 @@ func Init(en scm.Env) {
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
+		Name: "blob_inventory",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			db := GetDatabase(scm.String(a[0]))
+			if db == nil {
+				panic("blob_inventory: database does not exist: " + scm.String(a[0]))
+			}
+			report := AuditBlobInventory(db)
+			missing := make([]scm.Scmer, len(report.Missing))
+			for i, hash := range report.Missing {
+				missing[i] = scm.NewString(hash)
+			}
+			return scm.NewSlice([]scm.Scmer{
+				scm.NewString("referenced_blobs"), scm.NewInt(int64(report.Referenced)),
+				scm.NewString("listed_blobs"), scm.NewInt(int64(report.Listed)),
+				scm.NewString("unreferenced_blobs"), scm.NewInt(int64(report.Unreferenced)),
+				scm.NewString("missing_blobs"), scm.NewSlice(missing),
+			})
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", HasSideEffects: true,
+			Description: "Explicit maintenance audit of committed blob references against backend object names; no payload reads or deletion. Incomplete scans raise an error.",
+			Params:      []*scm.TypeDescriptor{{Kind: "string", Label: "database"}},
+			Return:      &scm.TypeDescriptor{Kind: "list"},
+		},
+	})
+	scm.Declare(&en, &scm.Declaration{
 		Name: "stat",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			if len(a) == 0 {

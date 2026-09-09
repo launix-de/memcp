@@ -1,0 +1,126 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: "1.0"
+  description: "Exact observations must pay their full preparation cost before displacing LIMIT batching"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS boc_document"
+  - sql: "DROP TABLE IF EXISTS boc_file"
+  - sql: "DROP TABLE IF EXISTS boc_acl"
+  - sql: "CREATE TABLE boc_file (id INT PRIMARY KEY, filename TEXT, body TEXT) ENGINE=memory"
+  - sql: "CREATE TABLE boc_document (id INT PRIMARY KEY, file_id INT, rank_value INT, domain_id INT) ENGINE=memory"
+  - sql: "CREATE TABLE boc_acl (id INT PRIMARY KEY, allowed INT) ENGINE=memory"
+  - scm: |
+      (begin
+        (define hit (string_repeat "commonneedle-" 512))
+        (define miss (string_repeat "co--om--mm--mo--on--nn--ne--ee--ed--dl--le--" 170))
+        (insert (table "memcp-tests" "boc_file") '("id" "filename" "body")
+          (map (produceN 20000) (lambda (i)
+            (list i "file" (if (equal? (mod i 2) 0) hit miss)))))
+        (insert (table "memcp-tests" "boc_document") '("id" "file_id" "rank_value" "domain_id")
+          (map (produceN 20000) (lambda (i) (list i i i (mod i 16)))))
+        (insert (table "memcp-tests" "boc_acl") '("id" "allowed")
+          (map (produceN 16) (lambda (i) (list i 1))))
+        (rebuild (table "memcp-tests" "boc_file") true false)
+        (rebuild (table "memcp-tests" "boc_document") true false)
+        (rebuild (table "memcp-tests" "boc_acl") true false))
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS boc_document"
+  - sql: "DROP TABLE IF EXISTS boc_file"
+  - sql: "DROP TABLE IF EXISTS boc_acl"
+
+test_cases:
+  - name: "Observation admission charges complete execution and preserves cheaper exact paths"
+    scm: |
+      (begin
+        (define cheap (list (list (quote total_ns) 100) (list (quote memory_bytes) 10)))
+        (define expensive (list (list (quote total_ns) 1000) (list (quote memory_bytes) 100)))
+        (if (and
+          (not (membership_observation_cost_preferred? expensive cheap false))
+          (membership_observation_cost_preferred? cheap expensive false)
+          (membership_observation_cost_preferred? cheap cheap false)
+          (membership_observation_cost_preferred? expensive cheap true)
+          (not (membership_observation_cost_preferred? nil cheap false))
+          (not (membership_observation_cost_preferred? cheap nil false)))
+          true (error "exact observation admission ignored its full cost")))
+
+  - name: "Cached LIMIT plan retains batching without a full search observation"
+    scm: &boc_cached_plan |
+      (begin
+        (define cache (newcachemap))
+        (define sess (newsession))
+        (define query "SELECT d.id, label.allowed FROM boc_document d LEFT JOIN boc_acl label ON label.id = d.domain_id WHERE d.file_id IN (SELECT id FROM boc_file WHERE filename LIKE '%alternate%' UNION SELECT id FROM boc_file WHERE body LIKE '%commonneedle%') AND EXISTS (SELECT 1 FROM boc_acl a WHERE a.id = d.domain_id AND a.allowed = 1) ORDER BY d.rank_value DESC LIMIT 5")
+        (define formula (with_autocommit sess nil 1 query (lambda (tx)
+          (cached_parse cache (list parse_sql) "memcp-tests" query
+            (sql_policy "root") "root" sess true tx))))
+        (define code (serialize formula))
+        (if (and (strlike code "%scan_order_batch_accept%")
+          (not (strlike code "%__memcp_queryplan_observation_value_%")))
+          true (error "cached plan replaced LIMIT batching with an expensive exact observation")))
+
+  - name: "Batch search with ACL returns the exact ordered page"
+    sql: &boc_query |
+      SELECT d.id, label.allowed FROM boc_document d
+      LEFT JOIN boc_acl label ON label.id = d.domain_id
+      WHERE d.file_id IN (
+        SELECT id FROM boc_file WHERE filename LIKE '%alternate%'
+        UNION SELECT id FROM boc_file WHERE body LIKE '%commonneedle%'
+      ) AND EXISTS (SELECT 1 FROM boc_acl a WHERE a.id = d.domain_id AND a.allowed = 1)
+      ORDER BY d.rank_value DESC LIMIT 5
+    expect: &boc_page
+      data: [{id: 19998, allowed: 1}, {id: 19996, allowed: 1}, {id: 19994, allowed: 1}, {id: 19992, allowed: 1}, {id: 19990, allowed: 1}]
+
+  - name: "Repeated cached broad search does not pay for the full text population"
+    performance_rows: 20000
+    warmup: 3
+    timing_samples: 9
+    threshold_ms: 5000
+    sql: *boc_query
+    expect: *boc_page
+
+  - name: "OFFSET is applied after membership and ACL filtering"
+    sql: |
+      SELECT d.id FROM boc_document d
+      LEFT JOIN boc_acl label ON label.id = d.domain_id
+      WHERE d.file_id IN (
+        SELECT id FROM boc_file WHERE filename LIKE '%alternate%'
+        UNION SELECT id FROM boc_file WHERE body LIKE '%commonneedle%'
+      ) AND EXISTS (SELECT 1 FROM boc_acl a WHERE a.id = d.domain_id AND a.allowed = 1)
+      ORDER BY d.rank_value DESC LIMIT 2 OFFSET 1
+    expect:
+      data: [{id: 19996}, {id: 19994}]
+
+  - name: "Absent search exhausts candidates without manufacturing a page"
+    sql: |
+      SELECT d.id, label.allowed FROM boc_document d
+      LEFT JOIN boc_acl label ON label.id = d.domain_id
+      WHERE d.file_id IN (
+        SELECT id FROM boc_file WHERE filename LIKE '%absent%'
+        UNION SELECT id FROM boc_file WHERE body LIKE '%absent%'
+      ) AND EXISTS (SELECT 1 FROM boc_acl a WHERE a.id = d.domain_id AND a.allowed = 1)
+      ORDER BY d.rank_value DESC LIMIT 5
+    expect:
+      rows: 0
+
+  - name: "A complete scan learns the source LIKE selectivity"
+    scm: |
+      (begin
+        (define tbl (table "memcp-tests" "boc_file"))
+        (define callback (list 'lambda (list 'x)
+          (list 'strlike 'x "%commonneedle%" "utf8mb4_general_ci")))
+        (define access (compile_scan_access '("body") callback))
+        (define values (map (nth access 1) (lambda (v) (eval v))))
+        /* A complete ordinary scan can train table feedback; a restricted
+        batch cannot. Prove that this test really has the new learned input. */
+        (define matched (scan nil tbl (nth access 0) values '("body")
+          (eval callback) '() scan_count 0 + false))
+        (define estimate (table_filter_selectivity tbl (nth access 0) values))
+        (if (and (equal? matched 10000)
+          (equal? (qassoc_get estimate 'source nil) 'scan_feedback)
+          (equal? (qassoc_get estimate 'value nil) 0.5))
+          true (error "complete LIKE scan did not publish the expected selectivity")))
+
+  - name: "Learned LIKE selectivity retains the cheap cached batch plan"
+    scm: *boc_cached_plan

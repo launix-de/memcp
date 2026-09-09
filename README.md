@@ -233,6 +233,31 @@ another column's blob. Generation-based cleanup can reclaim these retained blobs
 once no active or recoverable generation references them. Version 1 has no such
 ambiguity, including for hashes beginning with `!`.
 
+### Explicit blob inventory check
+
+Run `(blob_inventory "my_database")` in the administrative Scheme interface to
+compare committed blob references with backend object names. The result is an
+association list with `referenced_blobs`, `listed_blobs`, `unreferenced_blobs`
+(counts), and a sorted `missing_blobs` list of hashes. An empty missing list means
+all discovered references were listed; it does not prove payload readability,
+checksums, or integrity. Legacy ambiguous references are conservative candidates.
+Incomplete generation metadata or backend listing errors raise an error instead
+of returning a partial success report.
+
+The audit does not fetch blob payloads, delete objects, repair reference counts,
+or publish legacy manifest backfills. It is explicit maintenance, not part of
+startup cleanup or ordinary queries. It reads generation manifests (or reconstructs references from committed column
+files for legacy generations) and traverses the backend listing once (filesystem traversal, paginated S3 listing, or Ceph
+object iteration). Ceph may enumerate the wider pool before prefix filtering.
+Memory grows with the reference set and reported missing hashes. The database's
+lifecycle lock prevents concurrent publication and cleanup during the audit;
+rebuilds, backend migration, and some DDL can wait, and resource contention can
+indirectly affect queries. Schedule large inventories accordingly.
+
+Automatic cleanup continues to delete only objects proven unreferenced by all
+active generations. It does not run this availability audit. A missing live blob
+does not prevent collecting a separate, proven-unreferenced object.
+
 ### Storage failure notifications
 
 Administrators can register named Scheme callbacks for persistence failures.
