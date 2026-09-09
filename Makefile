@@ -12,6 +12,7 @@ GOARCH       ?= $(shell go env GOARCH)
 CGO_ENABLED  ?= 0
 BUILD_FLAGS  ?= -trimpath -buildvcs=false
 LDFLAGS      ?=
+PHP_CONFIG   ?= php-config
 PACKAGE_LDFLAGS ?= -s -w
 DIST_DIR     ?= dist
 PACKAGE_DIR  ?= .build/packages
@@ -23,6 +24,19 @@ export SOURCE_DATE_EPOCH
 
 all:
 	CGO_ENABLED=$(CGO_ENABLED) GOOS=$(GOOS) GOARCH=$(GOARCH) go build $(BUILD_FLAGS) -ldflags="$(LDFLAGS)" -o memcp .
+
+# libphp and its extensions are external dependencies. Use a matching ZTS
+# php-config; optional FrankenPHP services are excluded from this host.
+.PHONY: php test-php
+php:
+	CGO_ENABLED=1 CGO_CFLAGS="$$($(PHP_CONFIG) --includes)" \
+		CGO_LDFLAGS="-L$$($(PHP_CONFIG) --prefix)/lib -Wl,-rpath,$$($(PHP_CONFIG) --prefix)/lib $$($(PHP_CONFIG) --ldflags) $$($(PHP_CONFIG) --libs)" \
+		go build $(BUILD_FLAGS) -tags=php,nowatcher,nobrotli,nomercure -ldflags="$(LDFLAGS)" -o memcp-php .
+
+test-php: php
+	CGO_ENABLED=1 CGO_CFLAGS="$$($(PHP_CONFIG) --includes)" \
+		CGO_LDFLAGS="-L$$($(PHP_CONFIG) --prefix)/lib -Wl,-rpath,$$($(PHP_CONFIG) --prefix)/lib $$($(PHP_CONFIG) --ldflags) $$($(PHP_CONFIG) --libs)" \
+		go test -tags=php,nowatcher,nobrotli,nomercure -run TestPHP -count=1 -v .
 
 # Keep the experimental compiler outside the tracked source tree. Clean
 # checkouts fast-forward on every invocation, while a checkout with local

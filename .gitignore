@@ -6,7 +6,9 @@
 tools/Makefile
 memcp-logo.png
 test.jsonl
+# Copyright (C) 2026 Carl-Philip Hänsch
 memcp
+memcp-php
 .memcp-history.tmp
 data
 memcp.sif

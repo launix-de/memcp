@@ -1215,6 +1215,11 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  --mysql-socket=PATH    Unix socket path (default /tmp/memcp.sock, empty to disable)\n")
 		fmt.Fprintf(os.Stderr, "  --root-password-file=PATH  Read the initial root password from a file\n")
 		fmt.Fprintf(os.Stderr, "  --disable-mysql        Disable MySQL protocol server\n")
+		fmt.Fprintf(os.Stderr, "\nOptional PHP host (make php):\n")
+		fmt.Fprintf(os.Stderr, "  --php-root=PATH        Application document root\n")
+		fmt.Fprintf(os.Stderr, "  --php-listen=ADDRESS   HTTP listen address (default 127.0.0.1:8080)\n")
+		fmt.Fprintf(os.Stderr, "  --php-threads=N        PHP threads (default 4)\n")
+		fmt.Fprintf(os.Stderr, "  --php-front-controller=FILE  Optional fallback PHP script\n")
 		fmt.Fprintf(os.Stderr, "... and much more (please refer to your module's documentation)\n\n")
 	}
 
@@ -1336,6 +1341,13 @@ func main() {
 	}()
 	<-initDone
 	scm.CompleteMySQLInitialization()
+	if !initialize {
+		if err := startPHP(os.Args[1:]); err != nil {
+			fmt.Fprintln(os.Stderr, "PHP:", err)
+			exitroutine()
+			os.Exit(1)
+		}
+	}
 	if initialize {
 		fmt.Println(storage.Clean())
 		exitroutine()
@@ -1433,6 +1445,7 @@ func cronroutine() {
 
 func exitroutine() {
 	exitOnce.Do(func() {
+		stopPHP()
 		drainSecs := storage.Settings.ShutdownDrainSeconds
 		scm.ShutdownServers(drainSecs)
 		exitsignal <- true

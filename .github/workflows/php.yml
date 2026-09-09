@@ -1,0 +1,36 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+name: PHP integration
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+jobs:
+  php:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          go-version-file: go.mod
+      - name: Build external PHP ZTS runtime
+        env:
+          PHP_VERSION: 8.5.10
+          PHP_SHA256: 6a8bebaa4d5a979a38db29a9373e9851f60c6b11f72172c585947e78f3081957
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config bison re2c libsqlite3-dev
+          cd "$RUNNER_TEMP"
+          curl -fsSL "https://www.php.net/distributions/php-${PHP_VERSION}.tar.xz" -o php.tar.xz
+          echo "$PHP_SHA256  php.tar.xz" | sha256sum --check
+          tar -xf php.tar.xz
+          cd "php-${PHP_VERSION}"
+          ./configure --prefix="$RUNNER_TEMP/php-zts" \
+            --disable-all --enable-cli --enable-embed=shared --enable-zts \
+            --disable-zend-signals --enable-zend-max-execution-timers \
+            --enable-pdo --with-pdo-sqlite --enable-session
+          make -j2
+          make install
+      - name: Test embedded PHP and PDO coexistence
+        run: make test-php PHP_CONFIG="$RUNNER_TEMP/php-zts/bin/php-config"

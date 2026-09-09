@@ -438,6 +438,12 @@ curl -X POST http://localhost:4321/sql/myapp \
 
 ```
 
+### Optional PHP hosting
+
+`make php` builds an application-independent PHP host with FrankenPHP and the
+additional `memcp:` PDO driver. See [Embedded PHP](README-PHP.md) for external
+PHP-ZTS dependencies, configuration, driver coexistence, and tests.
+
 ### Build with the experimental JIT
 
 MemCP can compile Scheme expressions and query-planning code to native code. This
