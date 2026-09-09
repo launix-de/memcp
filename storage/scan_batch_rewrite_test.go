@@ -149,3 +149,42 @@ func TestParallelScanOptimizerAvoidsFrameLocalAccessValues(t *testing.T) {
 		t.Fatalf("parallel scan access values use frame-local storage: %s", plan)
 	}
 }
+
+func TestScanBatchRecompilePreservesExplicitFilterReadSet(t *testing.T) {
+	call := nestedScanBatchRewriteCall(scm.NewSymbol("inner_id"))
+	inner := call[8].Slice()[2].Slice()
+	readColumns := scm.NewSlice([]scm.Scmer{scm.NewString("allowed")})
+	schema := scm.NewSlice([]scm.Scmer{
+		scm.NewSlice([]scm.Scmer{newScanAccessHeader(0, scanAccessConsumerScan, 0, -1), scm.NewNil(), readColumns}),
+	})
+	inner[3] = scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), schema})
+	inner[5] = readColumns
+	inner[7] = readColumns
+	original := scm.SerializeToString(schema, &scm.Globalenv)
+
+	rewritten := rewriteInnerScanToBatch(inner,
+		[]scm.Scmer{scm.NewString("#0")}, []scm.Scmer{scm.NewSymbol("batch_key")},
+		map[string]string{"outer_id": "batch_key"}, nil, 1)
+	if len(rewritten) == 0 {
+		t.Fatal("batch rewrite rejected the metadata-only access schema")
+	}
+	items, ok := scanStaticListElements(rewritten[3])
+	if !ok || len(items) < 2 {
+		t.Fatal("batch rewrite did not compile the residual equality into access")
+	}
+	meta, valid := decodeScanAccessHeader(items[0])
+	if !valid || meta.count != 1 {
+		t.Fatalf("expected one recompiled boundary, got %#v", meta)
+	}
+	boundary := ScanBoundaryFromScmer(items[1])
+	if boundary.ColumnName() != "allowed" || boundary.LowerSlot() != -2 {
+		t.Fatalf("expected allowed equality against batch slot #0, got %s", scm.String(items[1]))
+	}
+	columns, known := scanAccessReadColumns(items)
+	if !known || len(columns) != 1 || columns[0] != "allowed" {
+		t.Fatalf("batch recompile lost producer readset or added pseudo columns: known=%t columns=%v", known, columns)
+	}
+	if got := scm.SerializeToString(schema, &scm.Globalenv); got != original {
+		t.Fatal("batch recompile mutated the original shared metadata")
+	}
+}

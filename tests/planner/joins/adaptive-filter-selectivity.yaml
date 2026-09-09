@@ -92,8 +92,10 @@ test_cases:
       (begin
         (define callback (list 'lambda (list 'x) (list '>= 'x (list 'quote '(200)))))
         (define access (eval (compile_scan_access '("id") callback)))
-        (if (list? (car (car access)))
-          (error "quoted list incorrectly acquired a scalar feedback identity") true))
+        (define header (car (car access)))
+        (if (and (equal? (nth header 1) nil)
+          (equal? (nth header 2) '("id"))) true
+          (error "quoted list must retain its readset without a scalar feedback identity")))
     expect:
       result_contains: ["true"]
 

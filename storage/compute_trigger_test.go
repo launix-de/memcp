@@ -175,6 +175,10 @@ func TestComputeTriggersGuardRelevantSourceColumns(t *testing.T) {
 	src.CreateColumn("note", "TEXT", nil, nil)
 
 	computor := lambdaAst([]string{"ref_id"}, nestedScanAst("tcomputetrigger", "src", "ref_id"))
+	computor.Slice()[2].Slice()[3] = scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), scm.NewSlice([]scm.Scmer{
+		scm.NewSlice([]scm.Scmer{newScanAccessHeader(0, scanAccessConsumerScan, 0, -1), scm.NewNil(),
+			scm.NewSlice([]scm.Scmer{scm.NewString("ref_id")})}),
+	})})
 	refs := extractScanJoinInfo(computor)
 	base.registerComputeTriggers("cached", computor)
 
@@ -280,7 +284,7 @@ func TestExtractScanJoinInfoUsesCompiledAccessWhenResidualIsEmpty(t *testing.T) 
 	}
 }
 
-func TestExtractScanJoinInfoIncludesCompiledFilterDependencies(t *testing.T) {
+func TestExplicitReadDependenciesSurvivePrunedFilters(t *testing.T) {
 	for _, residual := range []bool{false, true} {
 		for _, dynamicValues := range []bool{false, true} {
 			t.Run(fmt.Sprintf("residual=%t/dynamic_values=%t", residual, dynamicValues), func(t *testing.T) {
@@ -292,11 +296,10 @@ func TestExtractScanJoinInfoIncludesCompiledFilterDependencies(t *testing.T) {
 						nil nil false))`)
 				root := stripSourceInfo(computor).Slice()
 				scan := stripSourceInfo(root[2]).Slice()
+				readColumns := scm.NewSlice([]scm.Scmer{scm.NewString("source_ref"), scm.NewString("allowed"), scm.NewString("priority"), scm.NewString("weight")})
 				schema := scm.NewSlice([]scm.Scmer{
-					newScanAccessHeader(3, scanAccessConsumerScan, 0, -1),
+					scm.NewSlice([]scm.Scmer{newScanAccessHeader(1, scanAccessConsumerScan, 0, -1), scm.NewNil(), readColumns}),
 					newScanBoundarySpec("source_ref", EqualMatcher, 0, 0, true, true, "", false, -1, nil, nil, "", false),
-					newScanBoundarySpec("allowed", EqualMatcher, 1, 1, true, true, "", false, -1, nil, nil, "", false),
-					newScanBoundarySpec(".score", RangeMatcher, 1, -1, true, true, "", false, 2, []string{"priority", "weight"}, nil, "", false),
 				})
 				scan[3] = scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), schema})
 				if residual {
@@ -310,9 +313,12 @@ func TestExtractScanJoinInfoIncludesCompiledFilterDependencies(t *testing.T) {
 				if len(refs) != 1 {
 					t.Fatalf("expected one source dependency, got %#v", refs)
 				}
-				for _, column := range []string{"source_ref", "allowed", ".score", "priority", "weight"} {
+				if refs[0].unknownReads {
+					t.Fatal("explicit complete readset was classified as unknown")
+				}
+				for _, column := range []string{"source_ref", "allowed", "priority", "weight"} {
 					if !slices.Contains(refs[0].condCols, column) {
-						t.Errorf("compiled predicate dependency %q missing from %#v", column, refs[0])
+						t.Errorf("explicit predicate dependency %q missing from %#v", column, refs[0])
 					}
 				}
 				if residual || !dynamicValues {
@@ -324,6 +330,37 @@ func TestExtractScanJoinInfoIncludesCompiledFilterDependencies(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestLegacyScanAccessDoesNotClaimCompleteReadDependencies(t *testing.T) {
+	for _, access := range []scm.Scmer{
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), scm.NewSlice([]scm.Scmer{
+			newScanAccessHeader(0, scanAccessConsumerScan, 0, -1),
+		})}),
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), scm.NewSlice([]scm.Scmer{
+			scm.NewSlice([]scm.Scmer{newScanAccessHeader(0, scanAccessConsumerScan, 0, -1), scm.NewNil()}),
+		})}),
+		scm.NewSymbol("dynamic_access"),
+	} {
+		scan := nestedScanAst("legacy", "src", "ref_id")
+		scan.Slice()[3] = access
+		refs := extractScanJoinInfo(lambdaAst([]string{"ref_id"}, scan))
+		if len(refs) != 1 || !refs[0].unknownReads {
+			t.Fatalf("legacy/dynamic access claimed a complete filter readset: %#v", refs)
+		}
+		if got := scanRelevantSourceCols(refs[0], nil); len(got) != 0 {
+			t.Fatalf("legacy access restricted update invalidation to partial readset: %v", got)
+		}
+		if strings.Join(refs[0].srcCols, ",") != "ref_id" || strings.Join(refs[0].inputCols, ",") != "ref_id" {
+			t.Fatalf("legacy read uncertainty discarded selective reverse join: %#v", refs[0])
+		}
+	}
+	scan := nestedScanAst("legacy", "src", "ref_id")
+	scan.Slice()[3] = scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), scm.NewSlice(nil)})
+	refs := extractScanJoinInfo(lambdaAst([]string{"ref_id"}, scan))
+	if len(refs) != 1 || refs[0].unknownReads || len(scanRelevantSourceCols(refs[0], nil)) != 2 {
+		t.Fatalf("empty access lost its complete residual/mapper readset: %#v", refs)
 	}
 }
 
@@ -349,6 +386,10 @@ func TestRestoredComputeDependencyTriggersRefreshGuards(t *testing.T) {
 	for _, orc := range []bool{false, true} {
 		t.Run(fmt.Sprintf("orc=%t", orc), func(t *testing.T) {
 			computor := lambdaAst([]string{"ref_id"}, nestedScanAst(schemaName, "src", "ref_id"))
+			computor.Slice()[2].Slice()[3] = scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), scm.NewSlice([]scm.Scmer{
+				scm.NewSlice([]scm.Scmer{newScanAccessHeader(0, scanAccessConsumerScan, 0, -1), scm.NewNil(),
+					scm.NewSlice([]scm.Scmer{scm.NewString("ref_id")})}),
+			})})
 			register := func() {
 				if orc {
 					base.registerORCDependencyTriggers("cached", base.Columns[1], extractScanJoinInfo(computor))
@@ -385,10 +426,9 @@ func TestRestoredComputeDependencyTriggersRefreshGuards(t *testing.T) {
 			}
 			scan := computor.Slice()[2].Slice()
 			scan[3] = scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), scm.NewSlice([]scm.Scmer{
-				newScanAccessHeader(1, scanAccessConsumerScan, 0, -1),
-				newScanBoundarySpec("allowed", EqualMatcher, 0, 0, true, true, "", false, -1, nil, nil, "", false),
+				scm.NewSlice([]scm.Scmer{newScanAccessHeader(0, scanAccessConsumerScan, 0, -1), scm.NewNil(),
+					scm.NewSlice([]scm.Scmer{scm.NewString("ref_id"), scm.NewString("allowed")})}),
 			})})
-			scan[4] = listAst(scm.NewInt(1))
 			register()
 			register()
 			after := make([]string, len(src.Triggers))

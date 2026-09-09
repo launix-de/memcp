@@ -26,7 +26,19 @@ func initScanAccessData(en *scm.Env) {
 	}
 	declare("scan_access_schema", func(a ...scm.Scmer) scm.Scmer {
 		boundaries, projections := a[0].Slice(), a[1].Slice()
-		if len(boundaries) == 0 && len(projections) == 0 && a[2].IsNil() {
+		knownReads := len(a) > 4 && !a[4].IsNil()
+		if knownReads {
+			if !a[4].IsSlice() {
+				panic("scan access read columns must be a list of strings")
+			}
+			for _, column := range a[4].Slice() {
+				if !column.IsString() {
+					panic("scan access read columns must be a list of strings")
+				}
+			}
+		}
+		// A genuinely empty access/readset keeps the existing empty-plan ABI.
+		if len(boundaries) == 0 && len(projections) == 0 && a[2].IsNil() && (!knownReads || len(a[4].Slice()) == 0) {
 			return scm.NewSlice(nil)
 		}
 		consumer := scanAccessConsumerScan
@@ -34,14 +46,16 @@ func initScanAccessData(en *scm.Env) {
 			consumer = scanAccessConsumerCoveredScan
 		}
 		header := newScanAccessHeader(len(boundaries), consumer, len(projections), -1)
-		if !a[2].IsNil() {
+		if knownReads {
+			header = scm.NewSlice([]scm.Scmer{header, a[2], a[4]})
+		} else if !a[2].IsNil() {
 			header = scm.NewSlice([]scm.Scmer{header, a[2]})
 		}
 		result := make([]scm.Scmer, 1, 1+len(boundaries)+len(projections))
 		result[0] = header
 		result = append(result, boundaries...)
 		return scm.NewSlice(append(result, projections...))
-	}, "packs explicit boundaries, projections, feedback metadata and coverage into an immutable operator argument")
+	}, "packs explicit boundaries, projections, feedback, coverage and optional full filter read columns into an immutable operator argument; read columns are registration metadata, not scan inputs")
 	declare("scan_access_schema?", func(a ...scm.Scmer) scm.Scmer {
 		if !a[0].IsSlice() || len(a[0].Slice()) == 0 {
 			return scm.NewBool(false)
@@ -65,10 +79,32 @@ func initScanAccessData(en *scm.Env) {
 		if scm.ToBool(a[1]) {
 			consumer = scanAccessConsumerCoveredScan
 		}
-		items[0] = preserveScanFeedbackHeader(newScanAccessHeader(meta.count, consumer, meta.projections, meta.mapperSlot), items[0])
+		items[0] = preserveScanAccessHeaderMetadata(newScanAccessHeader(meta.count, consumer, meta.projections, meta.mapperSlot), items[0])
 		return scm.NewSlice(items)
 	}, "records planner-proven residual coverage in a physical schema")
 	declare("scan_feedback_key", func(a ...scm.Scmer) scm.Scmer {
 		return staticFilterFeedbackKey(a[0], a[1].Slice())
 	}, "prebinds explicit statistics identity tokens to literal values")
+}
+
+// scanAccessReadColumns consumes the producer's explicit filter dependencies.
+// Called only when registering computed-cache dependencies, never by scan readers.
+// Old headers omit this field; unknown is deliberately distinct from an empty set.
+func scanAccessReadColumns(schema []scm.Scmer) ([]string, bool) {
+	if len(schema) == 0 || !schema[0].IsSlice() {
+		return nil, false
+	}
+	header := schema[0].Slice()
+	if len(header) != 3 || !header[2].IsSlice() {
+		return nil, false
+	}
+	columns := header[2].Slice()
+	result := make([]string, len(columns))
+	for i, column := range columns {
+		if !column.IsString() {
+			return nil, false
+		}
+		result[i] = column.String()
+	}
+	return result, true
 }

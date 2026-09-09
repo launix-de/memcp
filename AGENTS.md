@@ -126,6 +126,9 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
   publication and protected by `table.mu` afterwards. Restored compute dependency
   triggers stay inert until registration atomically replaces their generated code
   and runtime target; current triggers reuse their code without recompilation.
+- `scanJoinInfo.unknownReads` is local to dependency registration and never shared
+  with scan execution. Access-header filter readsets are immutable plan data;
+  only cache registration reads them, not row or batch processing.
 
 - `OverlayBlob.ram` belongs to one immutable column generation. Its `blobRAMCache.mu`
   protects admission metadata, decoded strings, and byte/benefit accounting;

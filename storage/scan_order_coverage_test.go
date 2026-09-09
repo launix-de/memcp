@@ -397,3 +397,66 @@ func TestDirectScanOrderOuterRowSupportsWideProjection(t *testing.T) {
 		t.Fatalf("outer callback received %d arguments, want %d", got, want)
 	}
 }
+
+func TestExplicitScanReadSetSurvivesHeaderTransforms(t *testing.T) {
+	Init(scm.Globalenv)
+	readColumns := scm.NewSlice([]scm.Scmer{scm.NewString("allowed"), scm.NewString("priority"), scm.NewString("weight")})
+	feedback := scm.NewSlice([]scm.Scmer{
+		scm.NewSlice([]scm.Scmer{scm.NewInt(0)}), scm.NewInt(0), scm.NewString("allowed"), scm.NewFloat(0.1),
+	})
+	for _, withFeedback := range []bool{false, true} {
+		name := "without_feedback"
+		spec := scm.NewNil()
+		if withFeedback {
+			name, spec = "with_feedback", feedback
+		}
+		t.Run(name, func(t *testing.T) {
+			boundary := newScanBoundarySpec("allowed", EqualMatcher, 0, 0, true, true, "", false, -1, nil, nil, "", false)
+			schema := scm.Apply(scm.Globalenv.Vars[scm.Symbol("scan_access_schema")],
+				scm.NewSlice([]scm.Scmer{boundary}), scm.NewSlice(nil), spec, scm.NewBool(false), readColumns)
+			metadataOnly := scm.Apply(scm.Globalenv.Vars[scm.Symbol("scan_access_schema")],
+				scm.NewSlice(nil), scm.NewSlice(nil), spec, scm.NewBool(false), readColumns)
+			if len(metadataOnly.Slice()) != 1 || !scm.Equal(metadataOnly.Slice()[0].Slice()[2], readColumns) {
+				t.Fatalf("readset-only schema was dropped without access boundaries: %s", scm.String(metadataOnly))
+			}
+			original := scm.SerializeToString(schema, &scm.Globalenv)
+			shifted := shiftCompiledScanAccessSlots(schema, 3)
+			covered := scm.Apply(scm.Globalenv.Vars[scm.Symbol("scan_access_cover")], schema, scm.NewBool(true))
+			marked := markCoveredScanAccessSchema(schema, lambdaAst(nil, scm.NewBool(true)))
+			direction, _ := persistableTestOrder(false)
+			ordered, _, ok := compileScanOrderAccess(
+				scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), schema}), listAst(scm.NewInt(1)),
+				scm.NewSlice([]scm.Scmer{scm.NewString("rank")}), scm.NewSlice([]scm.Scmer{direction}))
+			if !ok {
+				t.Fatal("order compilation rejected explicit read metadata")
+			}
+			orderItems, _ := scanStaticListElements(ordered)
+			for _, value := range []scm.Scmer{schema, shifted, covered, marked, scm.NewSlice(orderItems)} {
+				items := value.Slice()
+				header := items[0]
+				if !header.IsSlice() || len(header.Slice()) != 3 || !scm.Equal(header.Slice()[2], readColumns) {
+					t.Fatalf("header transformation lost explicit read columns: %s", scm.String(value))
+				}
+				meta, valid := decodeScanAccessHeader(header)
+				if !valid || meta.projections != 0 || len(items) != 1+meta.count {
+					t.Fatalf("read metadata became runtime projection/boundary reads: %#v, %s", meta, scm.String(value))
+				}
+				if withFeedback == header.Slice()[1].IsNil() {
+					t.Fatalf("header transformation changed feedback presence: %s", scm.String(value))
+				}
+			}
+			if got := ScanBoundaryFromScmer(shifted.Slice()[1]).LowerSlot(); got != 3 {
+				t.Fatalf("boundary slot shift = %d, want 3", got)
+			}
+			if withFeedback {
+				shiftedSpec := shifted.Slice()[0].Slice()[1].Slice()
+				if shiftedSpec[0].Slice()[0].Int() != 3 || shiftedSpec[1].Int() != 3 {
+					t.Fatal("readset preservation prevented feedback slot relocation")
+				}
+			}
+			if scm.SerializeToString(schema, &scm.Globalenv) != original {
+				t.Fatal("header transformation mutated its shared input")
+			}
+		})
+	}
+}

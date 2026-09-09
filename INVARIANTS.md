@@ -834,6 +834,14 @@ must not capture a request's transaction or lexical bindings.
 `storage/` owns physical operators, immutable access-data representations,
 catalog observations, and data lifecycle. Constructors may pack and validate
 explicit access requirements, but must not choose a query plan or parse SQL.
+Scan lowering preserves its complete original filter-column readset as immutable
+access metadata before pruning index-enforced predicates. This readset is separate
+from residual callback inputs and is consumed only during cache dependency
+registration; it must not add column readers, predicate evaluations, or checks to
+scan loops. Storage must not reconstruct this readset from physical boundaries.
+Legacy/opaque access metadata without a complete readset cannot justify suppressing
+an update trigger based on a partial residual-column list. Existing proven
+selective target mappings remain valid independently of that change guard.
 `scm/` owns language semantics, generic expression metadata, closure handling,
 and JIT compilation. SQL keywords and SELECT parameterization policy do not
 belong in its tokenizer or optimizer. MySQL client probes pass through the same

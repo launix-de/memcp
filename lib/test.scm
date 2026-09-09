@@ -666,6 +666,21 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		"single-character text patterns use a broad prior")
 	(assert (text_pattern_selectivity_prior "%needle%") 0.01
 		"long text patterns use the selective prior floor")
+	/* Exact access removes duplicate per-row filter work, while the readset
+	retains its original inputs for cache dependency registration. */
+	(define exact_readset_plan (scan_plan_compile_filter
+		(list (quote quote) '("allowed" "unused"))
+		(list (quote lambda) (list (quote allowed) (quote unused))
+			(list (quote equal?) (quote allowed) 1))))
+	(assert (scan_plan_columns (nth exact_readset_plan 2)) '()
+		"exact scan access leaves no duplicate residual column readers")
+	(assert (scan_plan_lambda (nth exact_readset_plan 3)) (list '() true)
+		"exact scan access prunes its predicate instead of evaluating it twice")
+	(define exact_readset_schema (car exact_readset_plan))
+	(assert (nth (car exact_readset_schema) 2) '("allowed" "unused")
+		"scan metadata retains declared filter reads before residual pruning")
+	(assert (nth (car (scan_access_cover (scan_access_shift exact_readset_schema 2) true)) 2)
+		'("allowed" "unused") "scan coverage and slot shifts preserve filter read metadata")
 	/* Membership guards must repeat learned cardinalities, including zero.
 	Only unknown metadata falls back to the text prior. Check the emitted
 	metadata read separately, then execute its cardinality expression against

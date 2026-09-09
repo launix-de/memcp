@@ -395,7 +395,21 @@ func rewriteInnerScanToBatch(inner []scm.Scmer, pseudocols, pseudoparams []scm.S
 	// rewritten residual once here so scan_batch still receives the one ABI.
 	if schemaItems, schemaOK := scanStaticListElements(accessSchema); schemaOK && scanAccessSchemaIsEmpty(schemaItems) {
 		if compiledSchema, bindings, compiled := compileScanAccessMode(filterColumns, filterFn, true); compiled {
-			accessSchema = scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), compiledSchema})
+			// Recompilation may rebuild value slots and feedback, but the producer's
+			// complete readset is independent of both and must survive unchanged.
+			if len(schemaItems) > 0 && schemaItems[0].IsSlice() && len(schemaItems[0].Slice()) == 3 {
+				items := append([]scm.Scmer(nil), compiledSchema.Slice()...)
+				if len(items) == 0 {
+					items = []scm.Scmer{newScanAccessHeader(0, scanAccessConsumerScan, 0, -1)}
+				}
+				feedback := scanFeedbackMetadata(items)
+				header := items[0]
+				if header.IsSlice() {
+					header = header.Slice()[0]
+				}
+				items[0] = scm.NewSlice([]scm.Scmer{header, feedback, schemaItems[0].Slice()[2]})
+				compiledSchema = scm.NewSlice(items)
+			}
 			accessValues = scanAccessValuesExpr(bindings)
 			_, residual := pruneScanResidual(filterColumns, filterFn, true)
 			accessSchema = scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), markCoveredScanAccessSchema(compiledSchema, residual)})

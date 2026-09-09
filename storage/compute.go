@@ -858,12 +858,13 @@ func scanTableReference(expr scm.Scmer) (tableRef, bool) {
 // scanJoinInfo describes a source table scanned by a computor and the equality
 // join conditions connecting source columns to computor input columns.
 type scanJoinInfo struct {
-	schema    string
-	table     string
-	srcCols   []string // source table columns in equality filter
-	inputCols []string // corresponding computor input column names
-	condCols  []string // source table columns read by compiled access or the residual filter
-	mapCols   []string // source table columns read by the scan mapper
+	schema       string
+	table        string
+	srcCols      []string // source table columns in equality filter
+	inputCols    []string // corresponding computor input column names
+	condCols     []string // complete filter readset supplied by the plan producer
+	unknownReads bool     // preparation-local: no complete filter dependency metadata available
+	mapCols      []string // source table columns read by the scan mapper
 }
 
 // extractScanJoinInfo walks a computor lambda and returns one scanJoinInfo per
@@ -913,13 +914,20 @@ func extractScanJoinInfoBody(expr scm.Scmer, outerParams []scm.Scmer) []scanJoin
 		if len(condCols) > 0 {
 			info.srcCols, info.inputCols = extractEqualityJoins(items[filterIdx], condCols, outerParams)
 		}
-		// Exact access boundaries may remove predicates from the residual filter.
-		// Those columns still affect the cached result even when their boundary
-		// is constant or a residual equality already supplies the reverse join.
-		accessCols, accessSrcCols, accessInputCols := extractCompiledScanDependencies(items[3], items[4], outerParams)
-		info.condCols = mergeUniqueStrings(info.condCols, accessCols)
+		// The plan producer owns the full filter readset, independently of the
+		// residual callback's actual input columns. Read this immutable data only
+		// during cache registration; never rediscover dependencies from boundaries.
+		if schema, static := scanStaticListElements(items[3]); static {
+			if columns, known := scanAccessReadColumns(schema); known {
+				info.condCols = columns
+			} else {
+				info.unknownReads = len(schema) != 0
+			}
+		} else {
+			info.unknownReads = true
+		}
 		if len(info.srcCols) == 0 {
-			info.srcCols, info.inputCols = accessSrcCols, accessInputCols
+			info.srcCols, info.inputCols = extractCompiledScanEqualityJoins(items[3], items[4], outerParams)
 		}
 		// A physical table expression can itself be a plan (for example a
 		// recset_project_join whose producer prepares correlated stage caches).
@@ -940,19 +948,22 @@ func extractScanJoinInfoBody(expr scm.Scmer, outerParams []scm.Scmer) []scanJoin
 	return result
 }
 
-func extractCompiledScanDependencies(schemaExpr, valuesExpr scm.Scmer, computorParams []scm.Scmer) (condCols, srcCols, inputCols []string) {
+func extractCompiledScanEqualityJoins(schemaExpr, valuesExpr scm.Scmer, computorParams []scm.Scmer) (srcCols, inputCols []string) {
 	schema, schemaOK := scanStaticListElements(schemaExpr)
 	if !schemaOK {
-		return nil, nil, nil
+		return nil, nil
 	}
 	if len(schema) < scanAccessSchemaHeaderSize {
-		return nil, nil, nil
+		return nil, nil
 	}
 	meta, valid := decodeScanAccessHeader(stripSourceInfo(schema[0]))
 	if !valid {
-		return nil, nil, nil
+		return nil, nil
 	}
 	valueItems, valuesOK := scanStaticListElements(valuesExpr)
+	if !valuesOK {
+		return nil, nil
+	}
 	count := meta.count
 	for i := 0; i < count; i++ {
 		offset := scanAccessSchemaHeaderSize + i*scanAccessBoundaryStride
@@ -960,9 +971,7 @@ func extractCompiledScanDependencies(schemaExpr, valuesExpr scm.Scmer, computorP
 			continue
 		}
 		boundary := ScanBoundaryFromScmer(stripSourceInfo(schema[offset]))
-		condCols = append(condCols, boundary.ColumnName())
-		condCols = append(condCols, boundary.MapColumns()...)
-		if !valuesOK || boundary.Analyzer() != EqualMatcher {
+		if boundary.Analyzer() != EqualMatcher {
 			continue
 		}
 		lowerSlot := boundary.LowerSlot()
@@ -975,7 +984,7 @@ func extractCompiledScanDependencies(schemaExpr, valuesExpr scm.Scmer, computorP
 			inputCols = append(inputCols, inputCol)
 		}
 	}
-	return condCols, srcCols, inputCols
+	return srcCols, inputCols
 }
 
 func compiledScanOuterColumn(expr scm.Scmer, computorParams []scm.Scmer) (string, bool) {
@@ -1519,6 +1528,11 @@ func mergeUniqueStrings(parts ...[]string) []string {
 }
 
 func scanRelevantSourceCols(ref scanJoinInfo, srcTable *table) []string {
+	if ref.unknownReads {
+		// Legacy/opaque access plans must not suppress a relevant mutation based
+		// on an incomplete residual readset. Selective target keys remain usable.
+		return nil
+	}
 	result := mergeUniqueStrings(ref.condCols, ref.mapCols)
 	if srcTable == nil {
 		return result

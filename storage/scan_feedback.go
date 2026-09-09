@@ -482,20 +482,22 @@ func (t *table) filterFeedbackFingerprint() uint64 {
 	return 0
 }
 
-// A wrapped header carries optional serializable feedback metadata. The original
+// A wrapped header carries optional feedback and filter-readset metadata. The original
 // integer header and boundary layout remain readable, including persisted plans.
 func scanFeedbackMetadata(schema []scm.Scmer) scm.Scmer {
 	if len(schema) > 0 && schema[0].IsSlice() {
 		header := schema[0].Slice()
-		if len(header) == 2 {
+		if len(header) == 2 || len(header) == 3 {
 			return header[1]
 		}
 	}
 	return scm.NewNil()
 }
-func preserveScanFeedbackHeader(header, old scm.Scmer) scm.Scmer {
-	if old.IsSlice() && len(old.Slice()) == 2 {
-		return scm.NewSlice([]scm.Scmer{header, old.Slice()[1]})
+func preserveScanAccessHeaderMetadata(header, old scm.Scmer) scm.Scmer {
+	if old.IsSlice() && (len(old.Slice()) == 2 || len(old.Slice()) == 3) {
+		fields := append([]scm.Scmer(nil), old.Slice()...)
+		fields[0] = header
+		return scm.NewSlice(fields)
 	}
 	return header
 }

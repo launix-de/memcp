@@ -318,7 +318,7 @@ func compileScanOrderAccess(schemaExpr, valuesExpr, sortColsExpr, sortDirsExpr s
 	result := make([]scm.Scmer, 0, len(schema)+len(compiled))
 	header := newScanAccessHeader(meta.count+len(compiled), meta.consumer, meta.projections, meta.mapperSlot)
 	if len(schema) > 0 {
-		header = preserveScanFeedbackHeader(header, schema[0])
+		header = preserveScanAccessHeaderMetadata(header, schema[0])
 	}
 	result = append(result, header)
 	if len(schema) > scanAccessSchemaHeaderSize {
