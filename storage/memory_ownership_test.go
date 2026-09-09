@@ -23,6 +23,25 @@ import (
 	"github.com/launix-de/memcp/scm"
 )
 
+func TestBlobSizeDoesNotWaitForReader(t *testing.T) {
+	cache := &blobRAMCache{}
+	want := cache.ComputeSize()
+	cache.mu.Lock()
+	done := make(chan uint, 1)
+	go func() { done <- cache.ComputeSize() }()
+	select {
+	case got := <-done:
+		cache.mu.Unlock()
+		if got != want {
+			t.Fatalf("fixed owner bytes changed: got %d, want %d", got, want)
+		}
+	case <-time.After(time.Second):
+		cache.mu.Unlock()
+		<-done
+		t.Fatal("memory display waits for a blob reader that may wait for CacheManager")
+	}
+}
+
 func TestPersistedInternalTableIsNotRegisteredAsTempKeytable(t *testing.T) {
 	defer setupGCTest(t)()
 
