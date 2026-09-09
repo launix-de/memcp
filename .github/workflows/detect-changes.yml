@@ -15,6 +15,9 @@ on:
       relevant:
         description: "'true' unless the change set is documentation-only"
         value: ${{ jobs.detect.outputs.relevant }}
+      php:
+        description: "'true' for PHP integration or shared frontend/build changes"
+        value: ${{ jobs.detect.outputs.php }}
 
 permissions:
   contents: read
@@ -25,6 +28,7 @@ jobs:
     timeout-minutes: 5
     outputs:
       relevant: ${{ steps.filter.outputs.relevant }}
+      php: ${{ steps.filter.outputs.php }}
     steps:
       - name: Classify changed files
         id: filter
@@ -35,7 +39,7 @@ jobs:
           set -euo pipefail
 
           # Any uncertainty about the diff errs on the side of running CI.
-          emit() { echo "relevant=$1" >> "$GITHUB_OUTPUT"; exit 0; }
+          emit() { echo "relevant=$1" >> "$GITHUB_OUTPUT"; echo "php=${2:-$1}" >> "$GITHUB_OUTPUT"; exit 0; }
 
           case "${GITHUB_EVENT_NAME}" in
             pull_request|pull_request_target)
@@ -60,7 +64,7 @@ jobs:
             echo "Compare API unavailable; running the full CI." >&2; emit true
           fi
 
-          mapfile -t files < <(jq -r '.files[]?.filename' <<<"${compare}")
+          mapfile -t files < <(jq -r '.files[]? | .filename, (.previous_filename // empty)' <<<"${compare}")
           nfiles="${#files[@]}"
 
           # The compare response lists at most 300 files. Anything at or above
@@ -75,14 +79,19 @@ jobs:
           printf 'changed: %s\n' "${files[@]}" >&2
 
           relevant=false
+          php=false
           for f in "${files[@]}"; do
             case "${f}" in
-              tests/*|scm/*|storage/*|lib/*|tools/*|apps/*|corelib/*|packaging/*|debian/*|.github/*) relevant=true ;;
+              phpbridge/*|tests/*|scm/*|storage/*|lib/*|tools/*|apps/*|corelib/*|packaging/*|debian/*|.github/*) relevant=true ;;
               *.go|go.mod|go.sum|Makefile|Dockerfile|memcp.spec|memcp.service|git-pre-commit) relevant=true ;;
               run_sql_tests.py|run_tests_unbuffered.py|CHANGELOG.md) relevant=true ;;
             esac
-            [ "${relevant}" = true ] && break
+            case "${f}" in
+              phpbridge/*|tests/php/*|php*.go|main.go|go.mod|go.sum|Makefile) php=true ;;
+              scm/network.go|scm/mysql.go|scm/session*.go|lib/main.scm|lib/sql.scm) php=true ;;
+              .github/workflows/php.yml|.github/workflows/test.yml|.github/workflows/detect-changes.yml) php=true ;;
+            esac
           done
 
           echo "Relevant paths changed: ${relevant}" | tee -a "$GITHUB_STEP_SUMMARY" >&2
-          emit "${relevant}"
+          emit "${relevant}" "${php}"

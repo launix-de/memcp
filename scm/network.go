@@ -77,11 +77,15 @@ func HTTPRequest(a ...Scmer) Scmer {
 
 // build this function into your SCM environment to offer http server capabilities
 func HTTPServe(a ...Scmer) Scmer {
-	// HTTP endpoint; params: (port, handler)
+	// HTTP endpoint; params: (port, handler, optional bind host)
 	port := a[0].String()
+	host := ""
+	if len(a) > 2 {
+		host = a[2].String()
+	}
 	handler := &HttpServer{a[1]}
 	server := &http.Server{
-		Addr:           fmt.Sprintf(":%v", port),
+		Addr:           net.JoinHostPort(host, port),
 		Handler:        handler,
 		ReadTimeout:    300 * time.Second,
 		WriteTimeout:   300 * time.Second,

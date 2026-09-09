@@ -7,121 +7,150 @@ package main
 
 import "os"
 import "fmt"
-import "net"
 import "sync"
-import "time"
-import "context"
+import "path"
 import "strconv"
 import "strings"
 import "net/http"
 import "path/filepath"
 import "github.com/dunglas/frankenphp"
+import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/memcp/phpbridge"
 
-var phpServer *http.Server
 var phpLifecycle sync.Mutex
+var phpReady = make(chan struct{})
+var phpThreads = 4
+var phpStarted, phpStopping bool
+var phpInitErr error
 
+// HTTP listeners belong to Scheme's serve. This only publishes PHP settings
+// after Scheme initialization; the first PHP request starts the shared runtime.
 func startPHP(args []string) error {
-	phpLifecycle.Lock()
-	defer phpLifecycle.Unlock()
-	root, listen, front := "", "127.0.0.1:8080", ""
-	threads := 4
 	for _, arg := range args {
 		if !strings.HasPrefix(arg, "--php-") {
 			continue
 		}
 		key, value, ok := strings.Cut(arg, "=")
-		if !ok {
-			return fmt.Errorf("use %s=value", key)
+		if !ok || key != "--php-threads" {
+			return fmt.Errorf("%s is not supported; mount (servePHP directory prefix front_controller) in a Scheme HTTP handler", key)
 		}
-		switch key {
-		case "--php-root":
-			root = value
-		case "--php-listen":
-			listen = value
-		case "--php-front-controller":
-			front = value
-		case "--php-threads":
-			n, err := strconv.Atoi(value)
-			if err != nil || n < 1 {
-				return fmt.Errorf("php-threads must be positive")
-			}
-			threads = n
-		default:
-			return fmt.Errorf("unknown PHP option %s", key)
+		n, err := strconv.Atoi(value)
+		if err != nil || n < 1 {
+			return fmt.Errorf("php-threads must be positive")
 		}
+		phpThreads = n
 	}
-	if root == "" {
-		for _, arg := range args {
-			if strings.HasPrefix(arg, "--php-") {
-				return fmt.Errorf("--php-root is required")
-			}
-		}
-		return nil
+	close(phpReady)
+	return nil
+}
+
+func ensurePHP() error {
+	phpLifecycle.Lock()
+	defer phpLifecycle.Unlock()
+	if phpStopping {
+		return fmt.Errorf("PHP is shutting down")
 	}
-	abs, err := filepath.Abs(root)
-	if err != nil {
-		return err
-	}
-	abs, err = filepath.EvalSymlinks(abs)
-	if err != nil {
-		return err
-	}
-	info, err := os.Stat(abs)
-	if err != nil {
-		return err
-	}
-	if !info.IsDir() {
-		return fmt.Errorf("PHP root is not a directory")
-	}
-	if front != "" && (filepath.Base(front) != front || !strings.HasSuffix(front, ".php")) {
-		return fmt.Errorf("PHP front controller must be a PHP filename inside the document root")
-	}
-	listener, err := net.Listen("tcp", listen)
-	if err != nil {
-		return err
+	if phpStarted || phpInitErr != nil {
+		return phpInitErr
 	}
 	if err := phpbridge.Register(&IOEnv); err != nil {
-		listener.Close()
+		phpInitErr = err
 		return err
 	}
-	if err = frankenphp.Init(frankenphp.WithNumThreads(threads), frankenphp.WithMaxThreads(threads), frankenphp.WithPhpIni(map[string]string{
+	if err := frankenphp.Init(frankenphp.WithNumThreads(phpThreads), frankenphp.WithMaxThreads(phpThreads), frankenphp.WithPhpIni(map[string]string{
 		"expose_php": "0", "display_errors": "0", "log_errors": "1", "opcache.enable": "1",
 	})); err != nil {
-		listener.Close()
+		phpInitErr = err
 		return err
 	}
-	phpServer = &http.Server{Handler: phpHandler(abs, front), ReadHeaderTimeout: 10 * time.Second}
-	server := phpServer
-	go func() {
-		if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
-			fmt.Fprintln(os.Stderr, "PHP server:", err)
-		}
-	}()
-	fmt.Printf("PHP serving %s at http://%s (%d threads)\n", abs, listener.Addr(), threads)
+	phpStarted = true
 	return nil
 }
 
 func stopPHP() {
 	phpLifecycle.Lock()
 	defer phpLifecycle.Unlock()
-	if phpServer == nil {
-		return
+	phpStopping = true
+	if phpStarted {
+		frankenphp.Shutdown()
+		phpStarted = false
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	if err := phpServer.Shutdown(ctx); err != nil {
-		phpServer.Close()
+}
+
+// Like serveStatic, relative document roots resolve against the importing SCM
+// file. Each returned handler has its own root/mount; PHP threads are shared.
+func getServePHP(wd string) func(...scm.Scmer) scm.Scmer {
+	return func(a ...scm.Scmer) scm.Scmer {
+		root := a[0].String()
+		if !filepath.IsAbs(root) {
+			root = filepath.Join(wd, root)
+		}
+		root, err := filepath.Abs(root)
+		if err != nil {
+			panic(err)
+		}
+		root, err = filepath.EvalSymlinks(root)
+		if err != nil {
+			panic(err)
+		}
+		info, err := os.Stat(root)
+		if err != nil || !info.IsDir() {
+			panic("PHP root must be a directory")
+		}
+		mount, front := "", ""
+		if len(a) > 1 {
+			mount = strings.TrimSuffix(a[1].String(), "/")
+		}
+		if len(a) > 2 {
+			front = a[2].String()
+		}
+		if mount != "" && (!strings.HasPrefix(mount, "/") || path.Clean(mount) != mount || strings.ContainsAny(mount, "?\\#")) {
+			panic("PHP mount must be an absolute URL path prefix")
+		}
+		if front != "" && (filepath.Base(front) != front || !strings.HasSuffix(front, ".php")) {
+			panic("PHP front controller must be a PHP filename inside the document root")
+		}
+		handler := phpHandler(root, front, mount)
+		return scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
+			req := scm.Apply(a[0], scm.NewString("req")).Any().(*http.Request)
+			res := scm.Apply(a[1], scm.NewString("res")).Any().(http.ResponseWriter)
+			select {
+			case <-phpReady:
+			case <-req.Context().Done():
+				return scm.NewNil()
+			}
+			if err := ensurePHP(); err != nil {
+				panic(err)
+			}
+			res.Header().Del("Content-Type")
+			handler.ServeHTTP(res, req)
+			return scm.NewNil()
+		})
 	}
-	frankenphp.Shutdown()
-	phpServer = nil
 }
 
 // PHP gets only existing script paths. Static files stay inside the resolved
 // document root; dotfiles and PHP configuration/source backups are not served.
-func phpHandler(root, front string) http.Handler {
+func phpHandler(root, front, mount string) http.Handler {
 	files := http.FileServer(http.Dir(root))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		original := r
+		if mount != "" {
+			if r.URL.Path == mount {
+				u := *r.URL
+				u.Path += "/"
+				http.Redirect(w, r, u.String(), http.StatusMovedPermanently)
+				return
+			}
+			if !strings.HasPrefix(r.URL.Path, mount+"/") {
+				http.NotFound(w, r)
+				return
+			}
+			r = r.Clone(r.Context())
+			r.URL.Path = strings.TrimPrefix(r.URL.Path, mount)
+			r.URL.RawPath = ""
+		}
+
 		for _, part := range strings.Split(r.URL.Path, "/") {
 			if strings.HasPrefix(part, ".") || strings.Contains(part, "\\") {
 				http.NotFound(w, r)
@@ -142,7 +171,7 @@ func phpHandler(root, front string) http.Handler {
 		if err == nil && info.IsDir() {
 			if !strings.HasSuffix(requestPath, "/") {
 				u := *r.URL
-				u.Path += "/"
+				u.Path = mount + u.Path + "/"
 				http.Redirect(w, r, u.String(), http.StatusMovedPermanently)
 				return
 			}
@@ -179,16 +208,22 @@ func phpHandler(root, front string) http.Handler {
 			files.ServeHTTP(w, r)
 			return
 		}
-		original := r
 		r = r.Clone(r.Context())
 		r.URL.Path = requestPath
+		r.URL.RawPath = ""
 		// CGI maps '-' to '_'; drop ambiguous header spellings before the SAPI.
 		for name := range r.Header {
 			if strings.Contains(name, "_") {
 				r.Header.Del(name)
 			}
 		}
-		request, err := frankenphp.NewRequestWithContext(r, frankenphp.WithRequestDocumentRoot(root, false), frankenphp.WithOriginalRequest(original))
+		scriptName := requestPath
+		if split := strings.Index(strings.ToLower(scriptName), ".php/"); split >= 0 {
+			scriptName = scriptName[:split+4]
+		}
+		request, err := frankenphp.NewRequestWithContext(r, frankenphp.WithRequestDocumentRoot(root, false), frankenphp.WithOriginalRequest(original), frankenphp.WithRequestEnv(map[string]string{
+			"SCRIPT_NAME": mount + scriptName, "PHP_SELF": mount + requestPath,
+		}))
 		if err != nil {
 			http.Error(w, "PHP request initialization failed", 500)
 			return

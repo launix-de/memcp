@@ -13,6 +13,7 @@ import "sync"
 import "time"
 import "os/exec"
 import "strings"
+import "strconv"
 import "testing"
 import "net/http"
 import "encoding/json"
@@ -70,10 +71,41 @@ func testPHPIntegration(t *testing.T, front string) {
 		t.Fatal(err)
 	}
 	defer log.Close()
-	cmd := exec.Command(binary, "--no-repl", "--disable-api", "--disable-mysql", "--mysql-socket=", "-data", filepath.Join(dir, "data"), "-c", `(createdatabase "memcp-tests" true)`, "--php-root="+root, "--php-listen="+address, "--php-threads=4", "lib/main.scm")
-	if front != "" {
-		cmd.Args = append(cmd.Args, "--php-front-controller="+front)
+	socketPath := filepath.Join(dir, "mysql.sock")
+	// Apps are attached by Scheme on the ordinary HTTP listener. Resolve root
+	// relative to this imported script, and keep a second mount independent.
+	other := filepath.Join(dir, "other")
+	if err := os.Mkdir(other, 0700); err != nil {
+		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(other, "second.txt"), []byte("second app"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	config, _ := json.Marshal(map[string]string{"socket": socketPath})
+	if err := os.WriteFile(filepath.Join(root, "wire.json"), config, 0600); err != nil {
+		t.Fatal(err)
+	}
+	mount := fmt.Sprintf(`(define app (servePHP "public" "/app" %s))
+(define second (servePHP "other" "/other"))
+(define http_handler (begin (define previous http_handler) (lambda (req res)
+ (match (req "path")
+  (regex "^/app(/|$)" _ _) (app req res)
+  (regex "^/other(/|$)" _ _) (second req res)
+  "/outside" ((res "print") "Scheme handler")
+  _ (previous req res)))))`, strconv.Quote(front))
+	mountFile := filepath.Join(dir, "mount.scm")
+	if err := os.WriteFile(mountFile, []byte(mount), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, port, _ := net.SplitHostPort(address)
+	apiFlag := "--api-port=" + port
+	if front != "" {
+		apiFlag = "--disable-api"
+		if err := os.WriteFile(mountFile, []byte(mount+"\n(serve "+port+" (lambda (req res) (http_handler req res)) \"127.0.0.1\")"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cmd := exec.Command(binary, "--no-repl", apiFlag, "--disable-mysql", "--mysql-socket="+socketPath, "-data", filepath.Join(dir, "data"), "-c", `(createdatabase "memcp-tests" true)`, "--php-threads=4", "lib/main.scm", mountFile)
 	cmd.Stdout = log
 	cmd.Stderr = log
 	if err := cmd.Start(); err != nil {
@@ -106,7 +138,7 @@ func testPHPIntegration(t *testing.T, front string) {
 	}
 	ready := false
 	for deadline := time.Now().Add(120 * time.Second); time.Now().Before(deadline); {
-		status, body, err := get("/probe.php")
+		status, body, err := get("/app/probe.php")
 		if err == nil && status == 200 {
 			var probe struct {
 				Zts     bool
@@ -136,8 +168,8 @@ func testPHPIntegration(t *testing.T, front string) {
 	if !ready {
 		t.Fatal("PHP did not become ready")
 	}
-	for _, action := range []string{"setup", "pdo", "abandon", "verify"} {
-		status, body, err := get("/probe.php?action=" + action)
+	for _, action := range []string{"setup", "pdo", "wire", "buffers", "latency", "abandon", "verify"} {
+		status, body, err := get("/app/probe.php?action=" + action)
 		want := 200
 		if action == "abandon" {
 			want = 500
@@ -151,25 +183,52 @@ func testPHPIntegration(t *testing.T, front string) {
 		missingStatus = 200
 	}
 	for path, want := range map[string]int{"/hello.txt": 200, "/.env": 404, "/source.php.bak": 404, "/link.txt": 404, "/absent.php": missingStatus, "/": 200} {
-		status, body, err := get(path)
+		status, body, err := get("/app" + path)
 		if err != nil || status != want {
 			t.Fatalf("%s: %d %s %v", path, status, body, err)
 		}
 	}
-	status, body, err := get("/probe.php/extra?action=routing")
+	status, body, err := get("/app/probe.php/extra?action=routing")
 	var routing struct {
 		Script   string
 		PathInfo string `json:"path_info"`
 		URI      string `json:"uri"`
 	}
-	if err != nil || status != 200 || json.Unmarshal([]byte(body), &routing) != nil || routing.Script != "/probe.php" || routing.PathInfo != "/extra" || routing.URI != "/probe.php/extra?action=routing" {
+	if err != nil || status != 200 || json.Unmarshal([]byte(body), &routing) != nil || routing.Script != "/app/probe.php" || routing.PathInfo != "/extra" || routing.URI != "/app/probe.php/extra?action=routing" {
 		t.Fatalf("PATH_INFO: %d %s %v", status, body, err)
 	}
+	req, err := http.NewRequest("POST", "http://"+address+"/app/probe.php?action=routing", strings.NewReader("value=hello%26world"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Cookie", "probe=cookie-value")
+	req.Header.Set("X-Probe", "header-value")
+	response, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var posted map[string]string
+	err = json.NewDecoder(response.Body).Decode(&posted)
+	response.Body.Close()
+	if err != nil || response.StatusCode != 200 || posted["method"] != "POST" || posted["post"] != "hello&world" || posted["cookie"] != "cookie-value" || posted["header"] != "header-value" {
+		t.Fatalf("POST/cookie/header routing: %v %v", posted, err)
+	}
 	if front != "" {
-		status, body, err := get("/example/route?action=routing")
-		if err != nil || status != 200 || json.Unmarshal([]byte(body), &routing) != nil || routing.Script != "/index.php" || routing.URI != "/example/route?action=routing" {
+		status, body, err := get("/app/example/route?action=routing")
+		if err != nil || status != 200 || json.Unmarshal([]byte(body), &routing) != nil || routing.Script != "/app/index.php" || routing.URI != "/app/example/route?action=routing" {
 			t.Fatalf("front controller: %d %s %v", status, body, err)
 		}
+	}
+	for path, want := range map[string]string{"/outside": "Scheme handler", "/other/second.txt": "second app"} {
+		status, body, err := get(path)
+		if err != nil || status != 200 || body != want {
+			t.Fatalf("mount %s: %d %s %v", path, status, body, err)
+		}
+	}
+	status, _, err = get("/application/probe.php")
+	if err != nil || status != 404 {
+		t.Fatalf("mount boundary: %d %v", status, err)
 	}
 	var wg sync.WaitGroup
 	var intervals [4]struct{ Start, End float64 }
@@ -177,7 +236,7 @@ func testPHPIntegration(t *testing.T, front string) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			status, body, err := get(fmt.Sprintf("/probe.php?action=parallel&value=%d", i))
+			status, body, err := get(fmt.Sprintf("/app/probe.php?action=parallel&value=%d", i))
 			if err != nil || status != 200 {
 				t.Errorf("parallel: %d %s %v", status, body, err)
 			}

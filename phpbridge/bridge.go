@@ -40,10 +40,128 @@ func Register(env *scm.Env) error {
 }
 
 type connection struct {
-	mu      sync.Mutex // one SQL execution or close per connection
-	session scm.Scmer
-	state   *scm.SessionState
-	schema  string
+	mu           sync.Mutex // one SQL execution or close per connection
+	session      scm.Scmer
+	state        *scm.SessionState
+	schema       scm.Scmer
+	stateValue   scm.Scmer
+	buffer       resultBuffer
+	fields, rows scm.Scmer
+}
+
+// Only the connection owner resets/releases buffers, after the synchronous
+// SQL call has joined its workers. Result callbacks can run on different shard
+// goroutines and serialize access with mu. No Go pointer is retained by C.
+type resultBuffer struct {
+	mu          sync.Mutex
+	columns     map[string]int
+	columnCount int
+	metadata    bool
+	cells       []C.memcp_cell
+	data        []byte
+	rowCount    C.size_t
+}
+
+const resultLimit = 64 << 20
+const retainedResultBytes = 64 << 10
+
+func (b *resultBuffer) release() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.columnCount > 256 {
+		b.columns = nil
+	} else {
+		clear(b.columns)
+	}
+	if cap(b.cells)*int(unsafe.Sizeof(C.memcp_cell{})) > retainedResultBytes {
+		b.cells = nil
+	} else {
+		b.cells = b.cells[:0]
+	}
+	if cap(b.data) > retainedResultBytes {
+		b.data = nil
+	} else {
+		b.data = b.data[:0]
+	}
+	b.metadata, b.columnCount, b.rowCount = false, 0, 0
+}
+
+func (b *resultBuffer) appendValue(value scm.Scmer) C.memcp_cell {
+	v := C.memcp_cell{}
+	switch {
+	case value.IsNil():
+	case value.IsBool():
+		v.kind = 4
+		if value.Bool() {
+			v.integer = 1
+		}
+	case value.IsInt():
+		v.kind, v.integer = 1, C.int64_t(value.Int())
+	case value.IsFloat():
+		v.kind, v.number = 2, C.double(value.Float())
+	default:
+		s := value.String()
+		if len(s) > resultLimit-len(b.data)-len(b.cells)*int(unsafe.Sizeof(v)) {
+			panic("PDO result exceeds 64 MiB; use SQL LIMIT or pagination")
+		}
+		v.kind, v.offset, v.length = 3, C.size_t(len(b.data)), C.size_t(len(s))
+		b.data = append(b.data, s...)
+	}
+	return v
+}
+
+// Callers hold mu. Metadata and rows share the flat C-cell layout, avoiding
+// a second temporary allocation/copy for every returned row.
+func (b *resultBuffer) growCells(count int) int {
+	if count > (resultLimit-len(b.data))/int(unsafe.Sizeof(C.memcp_cell{}))-len(b.cells) {
+		panic("PDO result exceeds 64 MiB; use SQL LIMIT or pagination")
+	}
+	start := len(b.cells)
+	b.cells = append(b.cells, make([]C.memcp_cell, count)...)
+	return start
+}
+
+func (b *resultBuffer) setColumns(titles []scm.Scmer) {
+	b.metadata, b.columnCount = true, len(titles)
+	if b.columns == nil {
+		b.columns = make(map[string]int, len(titles))
+	}
+	b.growCells(len(titles))
+	for i, title := range titles {
+		b.columns[title.String()] = i
+		b.cells[i] = b.appendValue(title)
+	}
+}
+
+func (b *resultBuffer) captureFields(a ...scm.Scmer) scm.Scmer {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.metadata {
+		panic("duplicate result metadata")
+	}
+	b.setColumns(a[0].Slice())
+	return scm.NewBool(true)
+}
+
+func (b *resultBuffer) captureRow(a ...scm.Scmer) scm.Scmer {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	row := a[0].Slice()
+	if !b.metadata {
+		titles := make([]scm.Scmer, 0, len(row)/2)
+		for i := 0; i+1 < len(row); i += 2 {
+			titles = append(titles, row[i])
+		}
+		b.setColumns(titles)
+	}
+	start := b.growCells(b.columnCount)
+	for i := 0; i+1 < len(row); i += 2 {
+		if j, ok := b.columns[row[i].String()]; ok {
+			b.cells[start+j] = b.appendValue(row[i+1])
+		}
+	}
+	b.rowCount++
+	return scm.NewBool(true)
 }
 
 func result() *C.memcp_result {
@@ -83,7 +201,10 @@ func memcp_open(db, username, password *C.char) (r *C.memcp_result) {
 	s := scm.NewSession()
 	s.Func()(scm.NewString("username"), u)
 	s.Func()(scm.NewString("schema"), d)
-	c := &connection{session: scm.NewFunc(s.Func()), state: scm.RegisterSession(u.String(), "PHP in-process", d.String()), schema: d.String()}
+	c := &connection{session: scm.NewFunc(s.Func()), state: scm.RegisterSession(u.String(), "PHP in-process", d.String()), schema: d}
+	c.stateValue = scm.NewAny(c.state)
+	c.fields = scm.NewFunc(c.buffer.captureFields)
+	c.rows = scm.NewFunc(c.buffer.captureRow)
 	r.handle = C.uintptr_t(cgo.NewHandle(c))
 	return r
 }
@@ -119,79 +240,14 @@ func memcp_query(handle C.uintptr_t, sql *C.char, length C.size_t) (r *C.memcp_r
 	c.state.SetCancel(seq, cancel)
 	c.state.SetQueryContext(seq, ctx)
 	defer c.state.EndQuery(seq, "Sleep", "")
-	var mu sync.Mutex
-	var names []string
-	var cells []C.memcp_cell
-	var data []byte
-	var columns map[string]int
-	const maxBytes = 64 << 20
-	appendValue := func(value scm.Scmer) C.memcp_cell {
-		v := C.memcp_cell{}
-		switch {
-		case value.IsNil():
-		case value.IsBool():
-			v.kind = 4
-			if value.Bool() {
-				v.integer = 1
-			}
-		case value.IsInt():
-			v.kind = 1
-			v.integer = C.int64_t(value.Int())
-		case value.IsFloat():
-			v.kind = 2
-			v.number = C.double(value.Float())
-		default:
-			s := value.String()
-			v.kind = 3
-			v.offset = C.size_t(len(data))
-			v.length = C.size_t(len(s))
-			data = append(data, s...)
-		}
-		return v
-	}
-	setColumns := func(titles []scm.Scmer) {
-		columns = make(map[string]int, len(titles))
-		for i, title := range titles {
-			names = append(names, title.String())
-			columns[title.String()] = i
-			cells = append(cells, appendValue(title))
-		}
-	}
-	fields := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
-		mu.Lock()
-		defer mu.Unlock()
-		if columns != nil {
-			panic("duplicate result metadata")
-		}
-		setColumns(a[0].Slice())
-		return scm.NewBool(true)
-	})
-	rows := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
-		mu.Lock()
-		defer mu.Unlock()
-		row := a[0].Slice()
-		if columns == nil {
-			titles := make([]scm.Scmer, 0, len(row)/2)
-			for i := 0; i < len(row); i += 2 {
-				titles = append(titles, row[i])
-			}
-			setColumns(titles)
-		}
-		values := make([]C.memcp_cell, len(names))
-		for i := 0; i+1 < len(row); i += 2 {
-			if j, ok := columns[row[i].String()]; ok {
-				values[j] = appendValue(row[i+1])
-			}
-		}
-		cells = append(cells, values...)
-		if len(data)+len(cells)*int(unsafe.Sizeof(C.memcp_cell{})) > maxBytes {
-			panic("PDO result exceeds 64 MiB; use SQL LIMIT or pagination")
-		}
-		r.rows++
-		return scm.NewBool(true)
-	})
-	ret := scm.Apply(query, scm.NewString(c.schema), scm.NewString(statement), rows, fields, c.session, scm.NewAny(c.state), scm.NewInt(int64(seq)))
-	if columns == nil && !ret.IsNil() {
+	b := &c.buffer
+	defer b.release()
+	ret := scm.Apply(query, c.schema, scm.NewString(statement), c.rows, c.fields, c.session, c.stateValue, scm.NewInt(int64(seq)))
+	// The SQL frontend has completed all result callbacks before returning.
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	r.rows = b.rowCount
+	if !b.metadata && !ret.IsNil() {
 		r.affected = C.int64_t(ret.Int())
 	} else {
 		r.affected = C.int64_t(r.rows)
@@ -201,13 +257,13 @@ func memcp_query(handle C.uintptr_t, sql *C.char, length C.size_t) (r *C.memcp_r
 	if !f(scm.NewString("transaction")).IsNil() {
 		r.transaction = 1
 	}
-	r.columns = C.size_t(len(names))
-	if len(cells) > 0 {
-		r.cells = (*C.memcp_cell)(C.calloc(C.size_t(len(cells)), C.size_t(unsafe.Sizeof(C.memcp_cell{}))))
-		copy(unsafe.Slice(r.cells, len(cells)), cells)
+	r.columns = C.size_t(b.columnCount)
+	if len(b.cells) > 0 {
+		r.cells = (*C.memcp_cell)(C.calloc(C.size_t(len(b.cells)), C.size_t(unsafe.Sizeof(C.memcp_cell{}))))
+		copy(unsafe.Slice(r.cells, len(b.cells)), b.cells)
 	}
-	if len(data) > 0 {
-		r.bytes = (*C.char)(C.CBytes(data))
+	if len(b.data) > 0 {
+		r.bytes = (*C.char)(C.CBytes(b.data))
 	}
 	return r
 }
