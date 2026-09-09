@@ -2443,6 +2443,55 @@ retain the scalar's complete value, including SQL NULL. */
 							(or (equal? head (quote optimize))
 								(equal? head (symbol "optimize")))))))))))
 
+/* A numeric IN list supplies a candidate interval, never an exact filter.
+Keep IN as the residual for gaps and duplicates. Bounds depend on this request's
+values and are evaluated by the scan access program before the scan. Restrict
+this to numeric base columns and numeric literal/session lists: SQL string
+coercion and collations do not have the same ordering proof. */
+(define physical_in_binding? (lambda (expr)
+	(match expr
+		((symbol session) key) (string? key)
+		((quote session) key) (string? key)
+		_ (or (number? expr) (or (string? expr) (nil? expr))))))
+
+(define physical_numeric_in_interval (lambda (src terms term planning_session)
+	(match term
+		((symbol sql_in) (cons constructor values) probe) (begin
+			(define col (direct_column_name_for_alias src probe))
+			(define info (if (or (nil? col) (not (source_is_base_table? src))) nil
+				(find (get_schema (source_schema src) (source_relation src))
+					(lambda (candidate) (equal?? (candidate "Field") col)) nil)))
+			(define eligible (and (or (equal? constructor list) (equal? constructor (quote list)))
+				(not (nil? info)) (not (empty_list? values))
+				(contains? '("int" "integer" "bigint" "smallint" "tinyint" "mediumint" "float" "double" "decimal")
+					(toLower (coalesceNil (info "RawType") "")))
+				(reduce values (lambda (ok value) (and ok (physical_in_binding? value))) true)
+				(not (reduce terms (lambda (conflict other)
+					(or conflict (and (not (equal? other term))
+						(contains? (extract_columns_for_alias src other) col)))) false))))
+			(if (not eligible) term (begin
+				(define numeric (lambda (value) (and (number? value) (<= value value))))
+				(define supported (reduce values (lambda (ok value)
+					(and ok (numeric (planner_literal_value value planning_session)))) true))
+				(define guard (cons (quote and) (map values (lambda (value)
+					(list (quote and) (list (quote number?) value) (list (quote <=) value value))))))
+				(planner_record_guard_condition (if supported guard (list (quote not) guard)) planning_session)
+				(if (not supported) term (begin
+					(define bound (lambda (op)
+						(list (quote reduce) (cons (quote list) values)
+							(list (quote lambda) (list (quote lo) (quote value))
+								(list (quote if) (list op (quote value) (quote lo)) (quote value) (quote lo)))
+							(car values))))
+					(list (quote and) (list (quote >=) probe (bound (quote <)))
+						(list (quote <=) probe (bound (quote >))) term))))))
+		_ term)))
+
+(define physical_numeric_in_intervals (lambda (src condition planning_session)
+	(begin
+		(define terms (split_and_terms condition))
+		(combine_where_terms (map terms (lambda (term)
+			(physical_numeric_in_interval src terms term planning_session))) true))))
+
 (define lower_column_expr_for_join_truth_context (lambda (sources default_alias expr probe_work_rows)
 	(match expr
 		((symbol scalar_first_probe) stage requested_col)
