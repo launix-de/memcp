@@ -10586,8 +10586,13 @@ PK permits projecting a many-side RecSet without multiplying output rows. */
 	(match expr
 		((symbol quote) value) true
 		((symbol get_column) alias ci col cci) true
+		((symbol sql_compare) left right _less _operator _collation)
+		(and (semijoin_stable_expr? left) (semijoin_stable_expr? right))
+		((symbol sql_collated_in) values probe _less)
+		(and (semijoin_stable_expr? values) (semijoin_stable_expr? probe))
 		(cons head tail)
-		(and (contains? '("list" "and" "or" "equal??" "sql_not" "sql_in" "<" ">" "<=" ">=" "simplify") (string head))
+		(and (contains? '("list" "and" "or" "equal??" "sql_not" "sql_in" "<" ">" "<=" ">=" "simplify"
+			"sql_typed_value" "sql_parameter_value" "sql_collation") (string head))
 			(reduce tail (lambda (ok item) (and ok (semijoin_stable_expr? item))) true))
 		_ (or (nil? expr) (or (number? expr) (or (string? expr) (or (equal? expr true) (equal? expr false))))))))
 
@@ -10653,12 +10658,14 @@ saved expression work pays for another scan. All coefficients are costgen's
 existing scan and expression primitives. No predicate is discarded. */
 (define semijoin_index_term? (lambda (src term)
 	(match term
+		((symbol sql_compare) left right _less operator _collation)
+		(semijoin_index_term? src (list (symbol operator) left right))
 		'(op left right)
 		(and (contains? '("equal??" "<" ">" "<=" ">=") (string op))
 			(or (and (not (nil? (direct_column_name_for_alias src left)))
-				(or (number? right) (string? right)))
+				(physical_in_binding? right))
 				(and (not (nil? (direct_column_name_for_alias src right)))
-					(or (number? left) (string? left)))))
+					(physical_in_binding? left))))
 		_ false)))
 
 (define semijoin_filter_recset (lambda (src input condition)

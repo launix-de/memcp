@@ -949,8 +949,8 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(parser '((atom "NULLIF" true) "(" (define a sql_expression) "," (define b sql_expression) ")") '((quote if) '((quote equal??) a b) nil a))
 		(parser '((atom "MOD" true) "(" (define a sql_expression) "," (define b sql_expression) ")") (sql_mod_expr a b))
 		/* MySQL LAST_INSERT_ID(): direct session lookup to support session scoping */
-		(parser '((atom "LAST_INSERT_ID" true) "(" ")") '('session "last_insert_id"))
-		(parser '((atom "FOUND_ROWS" true) "(" ")") '('session "found_rows"))
+		(parser '((atom "LAST_INSERT_ID" true) "(" ")") '('sql_typed_value '('coalesceNil '('session "last_insert_id") 0) "BIGINT" nil))
+		(parser '((atom "FOUND_ROWS" true) "(" ")") '('sql_typed_value '('coalesceNil '('session "found_rows") 0) "BIGINT" nil))
 		/* Keep SQL VERSION() aligned with the MySQL handshake string. */
 		(parser '((atom "VERSION" true) "(" ")") "5.7.44-MemCP")
 		/* MySQL IF(condition, true_expr, false_expr) with short-circuit semantics */

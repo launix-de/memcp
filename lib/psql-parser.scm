@@ -383,15 +383,15 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		/* IFNULL(val, default) - alias for COALESCE with 2 args */
 		(parser '((atom "IFNULL" true) "(" (define a psql_expression) "," (define b psql_expression) ")") '((quote coalesceNil) a b))
 		/* CONVERT(expr, type) */
-		(parser '((atom "CONVERT" true) "(" (define p psql_expression) "," (atom "DECIMAL" true) (? "(" psql_int (? "," psql_int) ")") ")") '('simplify p))
-		(parser '((atom "CONVERT" true) "(" (define p psql_expression) "," (atom "UNSIGNED" true) ")") '('simplify p))
-		(parser '((atom "CONVERT" true) "(" (define p psql_expression) "," (atom "SIGNED" true) ")") '('simplify p))
-		(parser '((atom "CONVERT" true) "(" (define p psql_expression) "," (atom "INTEGER" true) ")") '('simplify p))
-		(parser '((atom "CAST" true) "(" (define p psql_expression) (atom "AS" true) (atom "UNSIGNED" true) ")") '('simplify p)) /* TODO: proper implement CAST; for now make vscode work */
-		(parser '((atom "CAST" true) "(" (define p psql_expression) (atom "AS" true) (atom "INTEGER" true) ")") '('simplify p)) /* TODO: proper implement CAST; for now make vscode work */
-		(parser '((atom "CAST" true) "(" (define p psql_expression) (atom "AS" true) (atom "VARCHAR" true) "(" psql_int ")" ")") '('concat p))
-		(parser '((atom "CAST" true) "(" (define p psql_expression) (atom "AS" true) (atom "VARCHAR" true) ")") '('concat p))
-		(parser '((atom "CAST" true) "(" (define p psql_expression) (atom "AS" true) (atom "CHAR" true) (atom "CHARACTER" true) (atom "SET" true) (atom "utf8" true) ")") '('concat p)) /* TODO: proper implement CAST; for now make vscode work */
+		(parser '((atom "CONVERT" true) "(" (define p psql_expression) "," (atom "DECIMAL" true) (? "(" psql_int (? "," psql_int) ")") ")") '('sql_typed_value '('sql_cast_value p "DECIMAL") "DECIMAL" nil))
+		(parser '((atom "CONVERT" true) "(" (define p psql_expression) "," (atom "UNSIGNED" true) ")") '('sql_typed_value '('sql_cast_value p "BIGINT") "BIGINT" nil))
+		(parser '((atom "CONVERT" true) "(" (define p psql_expression) "," (atom "SIGNED" true) ")") '('sql_typed_value '('sql_cast_value p "BIGINT") "BIGINT" nil))
+		(parser '((atom "CONVERT" true) "(" (define p psql_expression) "," (atom "INTEGER" true) ")") '('sql_typed_value '('sql_cast_value p "BIGINT") "BIGINT" nil))
+		(parser '((atom "CAST" true) "(" (define p psql_expression) (atom "AS" true) (atom "UNSIGNED" true) ")") '('sql_typed_value '('sql_cast_value p "BIGINT") "BIGINT" nil)) /* TODO: proper implement CAST; for now make vscode work */
+		(parser '((atom "CAST" true) "(" (define p psql_expression) (atom "AS" true) (atom "INTEGER" true) ")") '('sql_typed_value '('sql_cast_value p "BIGINT") "BIGINT" nil)) /* TODO: proper implement CAST; for now make vscode work */
+		(parser '((atom "CAST" true) "(" (define p psql_expression) (atom "AS" true) (atom "VARCHAR" true) "(" psql_int ")" ")") '('sql_typed_value '('sql_cast_value p "VARCHAR") "VARCHAR" "bin"))
+		(parser '((atom "CAST" true) "(" (define p psql_expression) (atom "AS" true) (atom "VARCHAR" true) ")") '('sql_typed_value '('sql_cast_value p "VARCHAR") "VARCHAR" "bin"))
+		(parser '((atom "CAST" true) "(" (define p psql_expression) (atom "AS" true) (atom "CHAR" true) (atom "CHARACTER" true) (atom "SET" true) (atom "utf8" true) ")") '('sql_typed_value '('sql_cast_value p "VARCHAR") "VARCHAR" "bin")) /* TODO: proper implement CAST; for now make vscode work */
 		(parser '((atom "CONCAT" true) "(" (define p (+ psql_expression ",")) ")") (cons 'sql_concat p))
 		/* TRIM/LTRIM/RTRIM as explicit parser rules for reliable dispatch */
 		(parser '((atom "TRIM" true) "(" (define e psql_expression) ")") '((quote sql_trim) e))
@@ -435,15 +435,15 @@ arithmetic; leave expressions containing columns or functions untouched. */
 
 	/* Postgres cast syntax: expr::type (postfix operator; avoid left recursion) */
 	(define psql_expression6 (parser (or
-		(parser '((define a psql_expression7) "::" (atom "text" true)) '('concat a))
-		(parser '((define a psql_expression7) "::" (atom "varchar" true)) '('concat a))
-		(parser '((define a psql_expression7) "::" (atom "integer" true)) '('simplify a))
-		(parser '((define a psql_expression7) "::" (atom "int" true)) '('simplify a))
-		(parser '((define a psql_expression7) "::" (atom "bigint" true)) '('simplify a))
-		(parser '((define a psql_expression7) "::" (atom "float" true)) '('simplify a))
-		(parser '((define a psql_expression7) "::" (atom "double" true)) '('simplify a))
-		(parser '((define a psql_expression7) "::" (atom "numeric" true)) '('simplify a))
-		(parser '((define a psql_expression7) "::" (atom "boolean" true)) '('simplify a))
+		(parser '((define a psql_expression7) "::" (atom "text" true)) '('sql_typed_value '('sql_cast_value a "VARCHAR") "VARCHAR" "bin"))
+		(parser '((define a psql_expression7) "::" (atom "varchar" true)) '('sql_typed_value '('sql_cast_value a "VARCHAR") "VARCHAR" "bin"))
+		(parser '((define a psql_expression7) "::" (atom "integer" true)) '('sql_typed_value '('sql_cast_value a "BIGINT") "BIGINT" nil))
+		(parser '((define a psql_expression7) "::" (atom "int" true)) '('sql_typed_value '('sql_cast_value a "BIGINT") "BIGINT" nil))
+		(parser '((define a psql_expression7) "::" (atom "bigint" true)) '('sql_typed_value '('sql_cast_value a "BIGINT") "BIGINT" nil))
+		(parser '((define a psql_expression7) "::" (atom "float" true)) '('sql_typed_value '('sql_cast_value a "DOUBLE") "DOUBLE" nil))
+		(parser '((define a psql_expression7) "::" (atom "double" true)) '('sql_typed_value '('sql_cast_value a "DOUBLE") "DOUBLE" nil))
+		(parser '((define a psql_expression7) "::" (atom "numeric" true)) '('sql_typed_value '('sql_cast_value a "DECIMAL") "DECIMAL" nil))
+		(parser '((define a psql_expression7) "::" (atom "boolean" true)) '('sql_typed_value '('sql_cast_value a "BOOLEAN") "BOOLEAN" nil))
 		(parser '((define a psql_expression7) "::" (atom "date" true)) '('concat a))
 		(parser '((define a psql_expression7) "::" (atom "timestamp" true)) '('concat a))
 		(parser '((define a psql_expression7) "::" (atom "timestamptz" true)) '('parse_date a))

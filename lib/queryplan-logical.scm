@@ -1220,6 +1220,12 @@ their expressions in Domain D so reusable group caches are keyed by the binding
 instead of capturing whichever session populated the cache first. */
 (define query_session_read_expr (lambda (expr)
 	(match expr
+		/* Keep the descriptor on domain bindings, so equivalence classes can
+		match the same typed operand in a predicate and choose its source key. */
+		((symbol sql_parameter_value) value type collation)
+		(begin
+			(define read (query_session_read_expr value))
+			(if (nil? read) nil (list (quote sql_parameter_value) read type collation)))
 		((symbol session) "__memcp_tx") nil
 		((quote session) "__memcp_tx") nil
 		((symbol session) key) (list (quote session) key)
@@ -1350,6 +1356,7 @@ instead of capturing whichever session populated the cache first. */
 
 (define session_dependency_expr? (lambda (expr)
 	(match expr
+		((symbol sql_parameter_value) value _type _collation) (session_dependency_expr? value)
 		((symbol session) key) (not (equal? key "__memcp_tx"))
 		((quote session) key) (not (equal? key "__memcp_tx"))
 		_ false)))

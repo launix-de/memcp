@@ -17,7 +17,14 @@ canonical collate callbacks, and result descriptors survive in the IR context. *
 (define sql_cast_value (lambda (value type)
 	(if (nil? value) nil
 		(if (sql_text_type? type) (concat value)
-			(if (equal? type "BIGINT") (intdiv (simplify value) 1) (simplify value))))))
+			(if (equal? type "BOOLEAN")
+				(if (string? value)
+					(match (toLower value)
+						(regex "^(?:true|t|yes|y|on|1)$" _) true
+						(regex "^(?:false|f|no|n|off|0)$" _) false
+						_ (error "Invalid boolean cast"))
+					(not (equal? value 0)))
+				(if (equal? type "BIGINT") (intdiv (simplify value) 1) (simplify value)))))))
 (define sql_typed_value (lambda (value type collation) value))
 (define sql_parameter_value (lambda (value type collation) value))
 (define sql_info_formula car)

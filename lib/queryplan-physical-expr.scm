@@ -148,8 +148,25 @@ an unbound symbol in the callback when costing selects the probe alternative. */
 		(cons head tail) (merge_unique (map tail (lambda (item) (extract_columns_for_alias src item))))
 		_ '())))
 
+/* Descriptor identity for matching values which have already been lowered.
+Do not lower arbitrary subtrees again while matching a session-domain key. */
+(define physical_unannotated_value (lambda (expr)
+	(match expr
+		((symbol sql_typed_value) value _type _collation) (physical_unannotated_value value)
+		((symbol sql_parameter_value) value _type _collation) (physical_unannotated_value value)
+		((symbol sql_collation) value _collation) (physical_unannotated_value value)
+		_ expr)))
+
 (define lower_column_expr_for_alias_in_context (lambda (src expr probe_work_rows)
 	(match expr
+		/* Type/collation descriptors have been consumed by planning. Identity
+		annotations must not obscure runtime column dependencies or scan bounds. */
+		((symbol sql_typed_value) value _type _collation)
+		(lower_column_expr_for_alias_in_context src value probe_work_rows)
+		((symbol sql_parameter_value) value _type _collation)
+		(lower_column_expr_for_alias_in_context src value probe_work_rows)
+		((symbol sql_collation) value _collation)
+		(lower_column_expr_for_alias_in_context src value probe_work_rows)
 		((symbol driver_membership_probe) stage probe)
 		(lower_driver_membership_probe_expr (list src) (source_alias src) stage probe)
 		((quote driver_membership_probe) stage probe)
@@ -2367,6 +2384,14 @@ probe. */
 
 (define lower_column_expr_for_join_in_context (lambda (sources default_alias expr probe_work_rows)
 	(match expr
+		/* Type/collation descriptors have been consumed by planning. Identity
+		annotations must not obscure runtime column dependencies or scan bounds. */
+		((symbol sql_typed_value) value _type _collation)
+		(lower_column_expr_for_join_in_context sources default_alias value probe_work_rows)
+		((symbol sql_parameter_value) value _type _collation)
+		(lower_column_expr_for_join_in_context sources default_alias value probe_work_rows)
+		((symbol sql_collation) value _collation)
+		(lower_column_expr_for_join_in_context sources default_alias value probe_work_rows)
 		((symbol driver_membership_probe) stage probe)
 		(lower_driver_membership_probe_expr sources default_alias stage probe)
 		((quote driver_membership_probe) stage probe)
@@ -2450,6 +2475,8 @@ this to numeric base columns and numeric literal/session lists: SQL string
 coercion and collations do not have the same ordering proof. */
 (define physical_in_binding? (lambda (expr)
 	(match expr
+		((symbol sql_parameter_value) value _type _collation) (physical_in_binding? value)
+		((symbol sql_typed_value) value _type _collation) (physical_in_binding? value)
 		((symbol session) key) (string? key)
 		((quote session) key) (string? key)
 		_ (or (number? expr) (or (string? expr) (nil? expr))))))
@@ -5072,7 +5099,11 @@ self-joins of the same base table still describe two distinct row roles. */
 	(begin
 		(define normalized_expr (coalesceNil (query_session_read_expr expr) expr))
 		(define pairs (group_stage_session_key_pairs stage keys key_names))
-		(define pair_idx (group_key_expr_index (map pairs (lambda (pair) (nth pair 0))) normalized_expr))
+		/* Runtime expressions have already consumed identity annotations. Match
+		the domain binding's lowered value, retaining its logical descriptor above. */
+		(define pair_idx (group_key_expr_index (map pairs (lambda (pair)
+			(physical_unannotated_value (nth pair 0))))
+			(physical_unannotated_value normalized_expr)))
 		(if (not (nil? pair_idx))
 			(list (quote outer) 1 (symbol (nth (nth pairs pair_idx) 1)))
 			(if (and (list? expr) (not (empty_list? expr)))
@@ -7532,6 +7563,11 @@ threshold outside Costgen's model. */
 user functions, CASE and other evaluation boundaries retain their order. */
 (define physical_reorderable_filter? (lambda (expr)
 	(match expr
+		((symbol sql_compare) left right _less _operator _collation)
+		(and (physical_reorderable_filter? left) (physical_reorderable_filter? right))
+		((symbol sql_parameter_value) value _type _collation) (physical_reorderable_filter? value)
+		((symbol sql_typed_value) value _type _collation) (physical_reorderable_filter? value)
+		((symbol sql_collation) value _collation) (physical_reorderable_filter? value)
 		((symbol get_column) _alias _ci _column _column_ci) true
 		((symbol session) key) (string? key)
 		(cons head tail) (and

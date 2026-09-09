@@ -439,6 +439,83 @@ test_cases:
           (ordered_or_disjoint? src (comparison "apple") (comparison "banana") nil)
           (not (ordered_or_disjoint? src (comparison "apple") (comparison "APPLE") nil))) true
           (error "Typed OR split lost collation-aware disjointness: " (comparison "apple") " point=" (ordered_or_literal_point src (comparison "apple") nil))))
+  - name: PostgreSQL casts use the same compiler result descriptors
+    scm: |
+      (begin
+        (define captured (newsession))
+        (define session (newsession))
+        (define tx nil)
+        (define resultfields (lambda (fields) (captured "fields" fields)))
+        (define resultrow (lambda (row) (captured "row" row)))
+        (eval (parse_psql "memcp-tests" "SELECT '12'::integer AS i, 12::text AS s, 'false'::boolean AS b" nil nil nil))
+        (if (and
+          (equal? (captured "fields") (list (list "i" "BIGINT" "bin") (list "s" "VARCHAR" "bin") (list "b" "BOOLEAN" "bin")))
+          (equal? (captured "row") '("i" 12 "s" "12" "b" false))) true
+          (error "PostgreSQL cast descriptors or values lost: " (captured "fields") (captured "row"))))
+  - name: PostgreSQL text cast preserves NULL
+    sql: SELECT NULL::text IS NULL AS v
+    syntax: postgresql
+    expect: {rows: 1, data: [{v: true}]}
+  - name: Invalid PostgreSQL boolean cast fails
+    sql: SELECT 'banana'::boolean
+    syntax: postgresql
+    expect: {error: true}
+  - name: Session counters declare integer before any value exists
+    scm: |
+      (begin
+        (define captured (newsession))
+        (define session (newsession))
+        (define tx nil)
+        (define resultfields (lambda (fields) (captured "fields" fields)))
+        (define resultrow (lambda (row) (captured "row" row)))
+        (define plan (parse_sql "memcp-tests" "SELECT FOUND_ROWS() AS n, LAST_INSERT_ID() AS i" nil session nil))
+        (eval plan)
+        (if (equal? (captured "row") '("n" 0 "i" 0)) true (error "Empty session counters must be zero"))
+        (session "found_rows" 7)
+        (session "last_insert_id" 12)
+        (eval plan)
+        (if (and
+          (equal? (captured "fields") (list (list "n" "BIGINT" "bin") (list "i" "BIGINT" "bin")))
+          (equal? (captured "row") '("n" 7 "i" 12))) true
+          (error "Session counter result contract changed: " (captured "fields") (captured "row"))))
+  - name: Typed strict predicates preserve nullable-side rejection proofs
+    scm: |
+      (begin
+        (define src (list "g" "memcp-tests" "coll_groups" true nil))
+        (define column (list (quote get_column) "g" false "name" false))
+        (define comparison (car (sql_expr_info (list src) (list 'equal?? column "apple"))))
+        (define membership (car (sql_expr_info (list src) (list 'sql_in (list 'list "apple") column))))
+        (if (and
+          (join_null_propagating? src comparison)
+          (join_null_propagating? src (list 'sql_not membership))
+          (not (join_null_propagating? src (list 'coalesceNil comparison true)))
+          (semijoin_stable_expr? comparison)
+          (semijoin_stable_expr? membership)
+          (not (semijoin_stable_expr? (list 'sql_parameter_value (list 'session "actor") "BIGINT" nil)))) true
+          (error "Typed predicates lost null rejection or request-local stability"))))
+  - name: Physical lowering consumes identity descriptors before runtime dependency analysis
+    scm: |
+      (begin
+        (define src (list "g" "memcp-tests" "coll_groups" false nil))
+        (define expr (list 'sql_typed_value (list 'sql_collation
+          (list 'get_column "g" false "name" false) "bin") "VARCHAR" "bin"))
+        (if (and
+          (equal? (lower_column_expr_for_alias src expr) (symbol "g.name"))
+          (equal? (lower_column_expr_for_join (list src) "g" expr) (symbol "g.name"))) true
+          (error "Compile-time descriptors escaped into the physical value formula"))))
+  - name: Typed parameters retain their descriptor in correlation domains
+    scm: |
+      (begin
+        (define input (list "g" "memcp-tests" "coll_groups" false nil))
+        (define parameter (list 'sql_parameter_value (list 'session "actor") "BIGINT" nil))
+        (define column (list 'get_column "g" false "id" false))
+        (if (and
+          (equal? (query_expr_session_reads parameter) (list parameter))
+          (equal? (presence_correlation_pair "g" (list input) '()
+            (list 'equal?? column parameter)) (list column parameter))
+          (physical_in_binding? parameter)
+          (semijoin_index_term? input (list 'equal?? column parameter))) true
+          (error "Typed parameter no longer shares its predicate and correlation-domain identity"))))
 cleanup:
   - sql: DROP TABLE IF EXISTS coll_groups
   - sql: "DROP TABLE IF EXISTS coll_cols"
