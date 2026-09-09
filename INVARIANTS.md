@@ -692,6 +692,19 @@ the current table population, not a new exact observation. In particular,
 learned LIKE matches must never be relabeled as `index_hook_candidates`: those
 are distinct pre-residual work bounds, not the predicate's output cardinality.
 
+Complete scans also publish `filter_input_selectivity` and `filter_input_rows`
+for their pre-residual candidate work. These are costing observations, not
+membership proofs. Count candidates at existing batch boundaries, independently
+of accepted output rows. Unknown shards retain full-input work. Restricted
+RecSets, LIMIT probes and other incomplete scans cannot train this table-wide
+quantity. Physical work is generation-local and is not restored from persisted
+result hints. Its latest observation replaces the previous work value: an
+autoindex becoming effective must not wait for the output-selectivity EMA.
+The central metadata reader returns both quantities without shard access;
+guards consuming this work must cover changes to it as well as result rates.
+UNION adds branch work independently of output cardinality. Costgen consumes
+the same work features and must not infer matcher input from result rows.
+
 See [the Omnestum analysis and measurement report](ADAPTIVE_SELECTIVITY.md) for
 representation limits and the persistence/RecSet follow-up.
 

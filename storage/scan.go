@@ -2396,7 +2396,7 @@ func (t *storageShard) scan(access scanAccess, conditionCols []string, condition
 		}
 		mapper.FlushSideEffects()
 		if feedbackCandidates <= feedbackPopulation {
-			t.filterFeedback.observe(access.feedback, feedbackPopulation, outCount)
+			t.filterFeedback.observe(access.feedback, feedbackPopulation, outCount, feedbackCandidates)
 		}
 		return scm.NewNil(), outCount, candidateCount
 	}
@@ -2431,7 +2431,7 @@ func (t *storageShard) scan(access scanAccess, conditionCols []string, condition
 	}
 	mapper.FlushSideEffects()
 	if feedbackCandidates <= feedbackPopulation {
-		t.filterFeedback.observe(access.feedback, feedbackPopulation, outCount)
+		t.filterFeedback.observe(access.feedback, feedbackPopulation, outCount, feedbackCandidates)
 	}
 	return akkumulator, outCount, candidateCount
 }

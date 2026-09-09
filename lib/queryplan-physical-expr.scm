@@ -3844,22 +3844,18 @@ request bindings and current autoindex statistics. It never builds the
 candidate RecSet. */
 (define membership_runtime_source_rows_expr (lambda (src condition fallback_rows)
 	(begin
-		/* Membership carrier selection needs a directional selectivity estimate,
-		not hundreds of successful executions of a potentially nested ACL filter.
-		A single match supplies the runtime existence signal; table statistics and
-		text-pattern priors provide the cardinality direction without repeatedly
-		executing a potentially nested ACL filter during cold planning. */
-		(define estimate_expr (query_scoped_source_filter_estimate_expr src condition 1))
+		/* Repeat the cost input, not a different heuristic: a learned zero must
+		remain zero in the guard. Using a word-length prior here after costing
+		used feedback makes the newly compiled plan reject itself forever.
+		Budget zero also forbids scans/index builds inside cache validation. */
+		(define estimate_expr (query_scoped_source_filter_estimate_expr src condition 0))
 		(define text_prior (expr_text_pattern_expr condition))
-		(if (nil? text_prior)
-			(list (quote planner_estimated_matching_rows)
-				estimate_expr fallback_rows fallback_rows)
-			/* A zero-match text probe must inspect the complete source even with a
-			one-match cap. Text predicates already have a calibrated cardinality
-			prior, so use it directly instead of executing a cold planning scan. */
+		(define fallback (if (nil? text_prior) fallback_rows
 			(list (quote max) 1
 				(list (quote *) fallback_rows
-					(list (quote text_pattern_selectivity_prior) text_prior)))))))
+					(list (quote text_pattern_selectivity_prior) text_prior)))))
+		(list (quote planner_estimated_matching_rows)
+			estimate_expr fallback_rows fallback))))
 
 (define membership_runtime_stage_rows_expr (lambda (input fallback_rows)
 	(if (union_block? input)

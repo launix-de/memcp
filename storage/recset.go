@@ -634,7 +634,9 @@ func (t *storageShard) collectRecSet(access scanAccess, conditionCols []string, 
 	}
 	buf, pooledFullBuf, pooledPointBuf := acquireScanIDBuffer(defaultScanBufferSize)
 	defer releaseScanIDBuffer(pooledFullBuf, pooledPointBuf)
+	var feedbackCandidates int64
 	t.iterateIndexMatchAware(currentTx, access, maxInsertIndex, buf, true, &exactLikeMain, func(batch []uint32) bool {
+		feedbackCandidates += int64(len(batch))
 		for _, idx := range batch {
 			if idx >= visibleUpper {
 				continue
@@ -646,7 +648,7 @@ func (t *storageShard) collectRecSet(access scanAccess, conditionCols []string, 
 	part := builder.finish()
 	// The builder already counted distinct output IDs; no extra element work.
 	if access.feedback != nil {
-		t.filterFeedback.observe(access.feedback, int64(visibleUpper)-int64(t.deletions.Count()), part.count)
+		t.filterFeedback.observe(access.feedback, int64(visibleUpper)-int64(t.deletions.Count()), part.count, feedbackCandidates)
 	}
 	return part
 }

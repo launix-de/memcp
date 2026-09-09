@@ -1378,6 +1378,10 @@ func rowFeatures(row calibrationRow) ([]float64, error) {
 		driverWorkRows = *row.ExpectedDriverRowsVisited
 	}
 	scanRows := *row.CandidateInputRows + driverWorkRows
+	// These pre-residual work features come from the planner's central statistics
+	// reader (index candidate estimates or complete-scan input observations).
+	// CandidateRows is OUTPUT cardinality: never substitute it for matcher work,
+	// nor reset observed work to the full population when feedback becomes known.
 	candidateFilterValues := *row.CandidateInputRows * *row.CandidateFilterColumns
 	if row.CandidateFilterValueRows != nil {
 		candidateFilterValues = *row.CandidateFilterValueRows

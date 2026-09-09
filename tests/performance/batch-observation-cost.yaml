@@ -94,6 +94,10 @@ test_cases:
       data: [{id: 19996}, {id: 19994}]
 
   - name: "Absent search exhausts candidates without manufacturing a page"
+    performance_rows: 20000
+    warmup: 3
+    timing_samples: 9
+    threshold_ms: 1000
     sql: |
       SELECT d.id, label.allowed FROM boc_document d
       LEFT JOIN boc_acl label ON label.id = d.domain_id

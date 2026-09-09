@@ -1100,19 +1100,26 @@ func Init(en scm.Env) {
 			// Read feedback before touching shards or constructing callback frames.
 			// A learned output rate is not an index-hook candidate bound: never label
 			// it index_hook_candidates or pretend that a new population was sampled.
-			value, source, known := t.filterSelectivity(bindFilterFeedback(
-				mustScmerSlice(accessSchema, "selectivity access schema"), accessValues))
+			feedbackKey := bindFilterFeedback(mustScmerSlice(accessSchema, "selectivity access schema"), accessValues)
+			value, source, known := t.filterSelectivity(feedbackKey)
 			// Same-predicate observations (including historical measurements) can
 			// replace sampling. A LIKE-length histogram describes OTHER words: it
 			// is only a prior and must not suppress an explicitly permitted sample.
 			// Metadata-only consumers still receive that prior with its provenance.
 			if known && (source != "like_length_histogram" || scm.ToInt(a[6]) == 0) {
+				work := t.filterInputSelectivity(feedbackKey)
+				workRows := scm.NewNil()
+				if !work.IsNil() {
+					workRows = scm.NewFloat(float64(input) * work.Float())
+				}
 				confidence := .9
 				if source != "scan_feedback" {
 					confidence = .35
 				}
 				return scm.NewSlice([]scm.Scmer{
 					scm.NewSlice([]scm.Scmer{scm.NewSymbol("value"), scm.NewFloat(value)}),
+					scm.NewSlice([]scm.Scmer{scm.NewSymbol("filter_input_selectivity"), work}),
+					scm.NewSlice([]scm.Scmer{scm.NewSymbol("filter_input_rows"), workRows}),
 					scm.NewSlice([]scm.Scmer{scm.NewSymbol("confidence"), scm.NewFloat(confidence)}),
 					scm.NewSlice([]scm.Scmer{scm.NewSymbol("source"), scm.NewSymbol(source)}),
 					scm.NewSlice([]scm.Scmer{scm.NewSymbol("known"), scm.NewBool(true)}),
