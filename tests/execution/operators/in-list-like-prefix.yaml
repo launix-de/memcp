@@ -1,3 +1,5 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
 # Tests for IN-list and LIKE prefix boundary extraction for index usage.
 # IN (1,2,3) → range [min,max]; LIKE 'foo%' → range [prefix, prefix+1)
 
@@ -109,3 +111,68 @@ test_cases:
     expect:
       data:
         - cnt: 10
+
+  - name: "Numeric IN bounds preserve gaps and duplicate values"
+    sql: "SELECT id FROM inlike WHERE id IN (13,10,13) ORDER BY id"
+    expect: {rows: 2, data: [{id: 10}, {id: 13}]}
+
+  - name: "Numeric IN bounds change with cached bindings"
+    sql: "SELECT id FROM inlike WHERE id IN (73,70,73) ORDER BY id"
+    expect: {rows: 2, data: [{id: 70}, {id: 73}]}
+
+  - name: "Numeric IN bounds preserve existing tighter comparison"
+    sql: "SELECT id FROM inlike WHERE id IN (13,10,13) AND id > 11 ORDER BY id"
+    expect: {rows: 1, data: [{id: 13}]}
+
+  - name: "Numeric IN bounds preserve NULL list semantics"
+    sql: "SELECT id FROM inlike WHERE id IN (NULL,10,13) ORDER BY id"
+    expect: {rows: 2, data: [{id: 10}, {id: 13}]}
+
+  - name: "Numeric IN bounds never narrow NOT IN"
+    sql: "SELECT id FROM inlike WHERE id NOT IN (10,NULL) ORDER BY id"
+    expect: {rows: 0}
+
+  - name: "Numeric IN bounds never narrow disjunction"
+    sql: "SELECT id FROM inlike WHERE id IN (10,13) OR id = 199 ORDER BY id"
+    expect: {rows: 3, data: [{id: 10}, {id: 13}, {id: 199}]}
+
+  - name: "Numeric IN projection keeps SQL UNKNOWN"
+    sql: "SELECT id, id IN (10,NULL) AS member FROM inlike WHERE id IN (10,13) ORDER BY id"
+    expect: {rows: 2, data: [{id: 10, member: true}, {id: 13, member: null}]}
+
+  - name: "Numeric IN malformed list is rejected"
+    sql: "SELECT id FROM inlike WHERE id IN (10,,13)"
+    expect: {error: true}
+
+  - name: "Numeric IN access plan has bounds and retains membership"
+    sql: "EXPLAIN SELECT id FROM inlike WHERE id IN (10,13)"
+    expect:
+      rows: 1
+      result_contains:
+        - '(scan_boundary \"range\" \"id\" 0 1 true true \"\" false)'
+        - 'sql_in'
+
+  - name: "IN cached shape accepts string values after numeric values"
+    sql: "SELECT id FROM inlike WHERE id IN ('13','10','13') ORDER BY id"
+    expect: {rows: 2, data: [{id: 10}, {id: 13}]}
+
+  - name: "IN cached shape returns to numeric values"
+    sql: "SELECT id FROM inlike WHERE id IN (23,20,23) ORDER BY id"
+    expect: {rows: 2, data: [{id: 20}, {id: 23}]}
+
+  - name: "Numeric IN bounds reject NULL column values"
+    setup:
+      - sql: "INSERT INTO inlike (id,name,val) VALUES (NULL,'null-id',9999)"
+    sql: "SELECT id FROM inlike WHERE id IN (23,20,23) ORDER BY id"
+    expect: {rows: 2, data: [{id: 20}, {id: 23}]}
+
+  - name: "Numeric IN access bounds stay out of logical IR"
+    sql: "EXPLAIN IR SELECT id FROM inlike WHERE id IN (10,13)"
+    expect:
+      rows: 1
+      result_contains: ['sql_in']
+      result_not_contains: ['scan_boundary', 'reduce']
+
+  - name: "Numeric IN with an ordered join preserves results"
+    sql: "SELECT a.id, b.val FROM inlike a JOIN inlike b ON b.id = a.id WHERE a.id IN (13,10,13) ORDER BY a.id LIMIT 2"
+    expect: {rows: 2, data: [{id: 10, val: 50}, {id: 13, val: 65}]}
