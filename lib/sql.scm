@@ -21,6 +21,7 @@ execution shadows it with the concrete session captured by the frontend. */
 (define session (quote session))
 
 (import "sql-parser.scm")
+(import "sql-parameters.scm")
 (import "psql-parser.scm")
 (import "sql-builtins.scm")
 (import "sql-metadata.scm")
@@ -55,35 +56,6 @@ the dispatch formula and retained ASTs without limit. */
 	(map (produceN (min sql_queryplan_max_variants (count variants)))
 		(lambda (idx) (nth variants idx)))))
 
-/* Keep exact SQL variants out of the parser while sharing their compiled plan.
-Only parameterized results enter the small front cache; exact-only statements
-continue to occupy just their existing query-plan entry. The third result item
-is the normalized shape hash. Keeping it beside the bindings avoids traversing
-the same normalized query again on every warm literal-specialization hit. */
-(define sql_parameterized_shape_result (lambda (result)
-	(match result
-		'(normalized bindings shape_hash) result
-		'(normalized bindings) (list normalized bindings (fnv_hash normalized)))))
-
-(define sql_parameterize_select_literals_cached (lambda (cache query enabled)
-	(if (not enabled)
-		(list query '() (fnv_hash query))
-		(begin
-			(define cached (cache query))
-			(if cached
-				cached
-				(match (parameterize_sql_select_literals query) '(normalized bindings shape_hash)
-					(begin
-						(define result (if (equal? bindings '())
-							(sql_parameterized_shape_result (sql_parameterize_select_like_strings query enabled))
-							(list normalized bindings shape_hash)))
-						(if (equal? (cadr result) '())
-							result
-							(cache query result)))))))))
-
-(define sql_parameterize_select_literals (lambda (query enabled)
-	(sql_parameterize_select_literals_cached sql_literal_shape_cache query enabled)))
-
 /* A parse can mention the same physical table through many aliases. Resolve
 and authorize each readable table once, then keep using show's immutable table
 snapshot through the stable handle for the rest of this compile only. */
@@ -105,72 +77,6 @@ snapshot through the stable handle for the rest of this compile only. */
 									(catalog handle true))
 								true)
 							true))))))))
-
-/* sql_parameterize_select_like_strings: query-plan-cache helper for ad-hoc
-fulltext-ish SELECTs. It replaces string literals directly following LIKE or
-inside MATCH...AGAINST(...) with ? placeholders and returns (normalized-query bindings). Other string
-literals, DDL/DML and already-parameterized statements keep exact cache keys. */
-(define sql_parameterize_select_like_strings (lambda (query enabled) (begin
-	(define starts_like_select (lambda (q)
-		(match q (regex "^\\s*SELECT\\b" _) true false)))
-	(define parameterized_rhs_literal? (lambda (q pos) (begin
-		(define prefix (toUpper (strrtrim (substr q 0 pos))))
-		(or
-			(match prefix (regex "(?s:.*)\\bLIKE$" _) true false)
-			(match prefix (regex "(?s:.*)\\bAGAINST\\s*\\($" _) true false)))))
-	(define read_string_literal (lambda (q start quote_ch) (begin
-		(define len (strlen q))
-		/* Store each piece under its own session key (O(1) amortized per
-		write, like any dict built incrementally in a loop) instead of
-		concat-in-a-loop, which would copy the whole prefix on every
-		character (O(n^2) for a literal of length n). cons/append aren't an
-		O(1) alternative here either: both are implemented as a full copy of
-		the existing list on this slice-backed representation. */
-		(define pieces (newsession))
-		(match (for (list (+ start 1) 0 false)
-			(lambda (i count done) (and (not done) (< i len)))
-			(lambda (i count done) (begin
-				(define ch (substr q i 1))
-				(if (equal? ch "\\")
-					(if (< (+ i 1) len)
-						(begin (pieces count (substr q (+ i 1) 1)) (list (+ i 2) (+ count 1) false))
-						(list (+ i 1) count false))
-					(if (equal? ch quote_ch)
-						(list (+ i 1) count true)
-						(begin (pieces count ch) (list (+ i 1) (+ count 1) false)))))))
-			'(next_i count done)
-			(list next_i (apply concat (map (produceN count) (lambda (idx) (pieces idx)))) done)))))
-	(if (or
-		(not enabled)
-		(not (starts_like_select query))
-		(match (toUpper query)
-			(regex "(?:\\b(?:COUNT|SUM|AVG|MIN|MAX|GROUP_CONCAT)\\s*\\(|\\bGROUP\\s+BY\\b|\\bHAVING\\b)" _)
-			true false)
-		(not (or
-			(match (toUpper query) (regex "\\bLIKE\\b" _) true false)
-			(match (toUpper query) (regex "\\bAGAINST\\b" _) true false)))
-		(match query (regex "\\?" _) true false))
-		(list query '())
-		(begin
-			(define len (strlen query))
-			/* Same session-backed accumulation as read_string_literal: out
-			collects pieces (single chars or a "?" placeholder) by index
-			instead of concatenating on every character. */
-			(define out (newsession))
-			(define state (for (list 0 0 '() false)
-				(lambda (i out_count bindings invalid) (and (not invalid) (< i len)))
-				(lambda (i out_count bindings invalid) (begin
-					(define ch (substr query i 1))
-					(if (and (or (equal? ch "'") (equal? ch "\"")) (parameterized_rhs_literal? query i))
-						(match (read_string_literal query i ch) '(next_i value done)
-							(if done
-								(begin (out out_count "?") (list next_i (+ out_count 1) (merge bindings (list value)) false))
-								(list len out_count '() true)))
-						(begin (out out_count ch) (list (+ i 1) (+ out_count 1) bindings false)))))))
-			(match state '(end_i out_count bindings invalid)
-				(if (or invalid (equal? bindings '()))
-					(list query '())
-					(list (apply concat (map (produceN out_count) (lambda (idx) (out idx)))) bindings))))))))
 
 /* Copy request bindings and catalog context into an isolated planning session.
 The request transaction is deliberately excluded: cached plans must obtain
@@ -575,16 +481,26 @@ user table merely to discard a newly constructed policy closure. */
 		(sql_policy (cadr policy_spec))
 		policy_spec)))
 
+(define sql_queryplan_cache_key (lambda (username schema query shape_hash)
+	(concat username ":" schema ":" (sql_view_query_generation query) ":" shape_hash)))
+
 (define cached_parse (lambda (queryplan_cache parse_fn schema query policy username session parameterize_literals tx)
 	(begin
 		(define explain_query (match (toUpper query)
 			(regex "^\\s*EXPLAIN\\b" _) true
 			_ false))
-		(define parameterized (if explain_query
-			(list query '() (fnv_hash query))
-			(sql_parameterize_select_literals query parameterize_literals)))
+		(define cached_shape (if (and parameterize_literals (not explain_query)) (sql_literal_shape_cache query) nil))
+		(define parameterized (if cached_shape cached_shape
+			(begin
+				(define exact_shape (list query '() (fnv_hash query)))
+				/* An exact-only statement already occupies its query-cache entry.
+				Reuse that lexical decision without retaining a second cache entry or
+				repeating SQL tokenization. Normal policy and plan guards still run. */
+				(if (or explain_query (not parameterize_literals)
+					(queryplan_cache (sql_queryplan_cache_key username schema query (nth exact_shape 2))))
+					exact_shape (sql_parameterize_select_literals query true)))))
 		(match parameterized '(parse_query bindings shape_hash) (begin
-			(define cache_key (concat username ":" schema ":" (sql_view_query_generation parse_query) ":" shape_hash))
+			(define cache_key (sql_queryplan_cache_key username schema parse_query shape_hash))
 			(define select_query (match (toUpper parse_query)
 				(regex "^\\s*SELECT\\b" _) true
 				_ false))

@@ -110,7 +110,7 @@ test_cases:
         (define tbl (table "memcp-tests" "boc_file"))
         (define callback (list 'lambda (list 'x)
           (list 'strlike 'x "%commonneedle%" "utf8mb4_general_ci")))
-        (define access (compile_scan_access '("body") callback))
+        (define access (eval (compile_scan_access '("body") callback)))
         (define values (map (nth access 1) (lambda (v) (eval v))))
         /* A complete ordinary scan can train table feedback; a restricted
         batch cannot. Prove that this test really has the new learned input. */

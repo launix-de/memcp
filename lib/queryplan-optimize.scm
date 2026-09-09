@@ -376,7 +376,7 @@ bounded scalar metadata; this lookup never scans, loads columns or builds indexe
 							(define callback (list (quote lambda)
 								(map cols (lambda (col) (symbol (concat (source_alias src) "." col))))
 								(planner_bind_session_values (lower_column_expr_for_alias src expr) planning_session)))
-							(define access (compile_scan_access cols callback true))
+							(define access (eval (compile_scan_access cols callback true)))
 							(define values (map (nth access 1) (lambda (value) (eval value))))
 							(planner_record_session_value_guards expr planning_session)
 							(planner_record_filter_feedback_guard src access values planning_session)
@@ -2888,11 +2888,12 @@ floor avoids pretending that an unseen word is impossible. */
 					/* This callback is evaluated during costing, before the enclosing
 					physical plan reaches its one recursive optimization pass. Compile it
 					here; callbacks emitted into the final plan must remain unwrapped. */
-					(define filter_expr (optimize (list (quote lambda)
+					(define filter_source (list (quote lambda)
 						(map filtercols (lambda (col) (symbol (concat alias "." col))))
 						(planner_bind_session_values
-							(lower_column_expr_for_alias src condition) planning_session))))
-					(define access (compile_scan_access filtercols filter_expr))
+							(lower_column_expr_for_alias src condition) planning_session)))
+					(define access (eval (compile_scan_access filtercols filter_source)))
+					(define filter_expr (optimize filter_source))
 					(define values (map (nth access 1) (lambda (value_expr) (eval value_expr))))
 					(planner_record_session_value_guards condition planning_session)
 					(planner_record_filter_feedback_guard src access values planning_session)

@@ -236,6 +236,85 @@ test_cases:
       data_not_contains:
         - code: "legacy_materialized"
 
+  - name: "Scheme scan compiler preserves mixed multi-scan residual column data"
+    scm: |
+      (begin
+        (define callbacks (scheme "(list (lambda () true) (lambda (slug) (contains? (list \"alpha\") slug)) (lambda (id name) (and (equal? id 7) (strlike name \"A%\"))))"))
+        (map (list
+          (scheme "(quote (() (\"slug\") (\"id\" \"name\")))")
+          (scheme "(list (list) (list \"slug\") (list \"id\" \"name\"))")
+          (scheme "(list (quote ()) (quote (\"slug\")) (quote (\"id\" \"name\")))"))
+          (lambda (columns)
+            (begin
+              (define plan (compile_scan_plan (quote scan_order_multi) nil nil columns callbacks))
+              (define actual (eval (nth plan 5)))
+              (define filters (eval (nth plan 6)))
+              (if (and (equal? actual (list '() '("slug") '("name")))
+                ((nth filters 1) "alpha") (not ((nth filters 1) "beta")))
+                true (error (concat "multi-scan residual changed: " actual))))))
+        "ok")
+    expect:
+      data: ["ok"]
+
+  - name: "Scheme access binding uses the caller lexical environment"
+    scm: |
+      (begin
+        (define wanted 47)
+        (define access (eval (compile_scan_access '("id") (scheme "(lambda (id) (equal? id wanted))"))))
+        (if (and (scan_access_schema? (car access)) (equal? (car (cadr access)) wanted))
+          "ok" (error "scan access lost its caller binding")))
+    expect:
+      data: ["ok"]
+
+  - name: "Scan coverage never coerces a residual symbol to TRUE"
+    scm: |
+      (begin
+        (define plan (compile_scan_plan (quote scan) nil nil '("id" "flag")
+          (scheme "(lambda (id flag) (and (equal? id 7) flag))") '("id")
+          (scheme "(lambda (acc id) (+ acc id))") 0))
+        (define columns (eval (nth plan 5)))
+        (define residual (eval (nth plan 6)))
+        (if (and (equal? columns '("flag")) (not (residual false)) (residual true))
+          "ok" (error "scan compiler discarded a boolean residual")))
+    expect:
+      data: ["ok"]
+
+  - name: "Scan coverage compares bound expressions without boolean coercion"
+    scm: |
+      (begin
+        (define plan (compile_scan_plan (quote scan) nil nil '("id")
+          (scheme "(lambda (id) (and (equal? id true) (equal? id 7)))") '("id")
+          (scheme "(lambda (acc id) (+ acc id))") 0))
+        (if (equal? (eval (nth plan 5)) '("id"))
+          "ok" (error "distinct expressions shared a coverage proof")))
+    expect:
+      data: ["ok"]
+
+  - name: "Scan compiler rejects unsupported operators"
+    scm: |
+      (compile_scan_plan (quote unsupported_scan) nil nil '() (scheme "(lambda () true)"))
+    expect:
+      error: true
+
+  - name: "Multi-scan access keeps empty schemas"
+    scm: |
+      (begin
+        (define plan (compile_scan_plan (quote scan_order_multi) nil nil
+          (scheme "(list (list))") (scheme "(list (lambda () true))")))
+        (if (and (equal? (eval (nth plan 3)) '(())) (equal? (eval (nth plan 4)) '()))
+          "ok" (error "empty scan acquired access state")))
+    expect:
+      data: ["ok"]
+
+  - name: "Metadata-only compilation never executes unsafe filter expressions"
+    scm: |
+      (begin
+        (define result (eval (compile_scan_access '("id")
+          (scheme "(lambda (id) (equal? id (error \"must not run\")))") true)))
+        (if (equal? result '(() ())) "ok" (error "unsafe filter acquired statistical identity")))
+    expect:
+      data: ["ok"]
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS sb_orders"
   - sql: "DROP TABLE IF EXISTS sb_customers"

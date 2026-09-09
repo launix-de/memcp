@@ -883,11 +883,17 @@ func Init(en scm.Env) {
 	scm.Declare(&en, &scm.Declaration{
 		Name: "scan_boundary",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
-			if len(a) != 8 {
+			if len(a) != 8 && len(a) != 10 {
 				panic("scan_boundary expects kind, column, lower slot, upper slot, inclusiveness, collation, and null-safety")
 			}
+			mapperSlot := -1
+			var mapColumns []string
+			if len(a) == 10 {
+				mapperSlot = scm.ToInt(a[8])
+				mapColumns = scmerSliceToStrings(a[9].Slice())
+			}
 			return newScanBoundarySpec(scm.String(a[1]), scanBoundaryAnalyzer(scm.String(a[0])), scm.ToInt(a[2]), scm.ToInt(a[3]),
-				a[4].Bool(), a[5].Bool(), scm.String(a[6]), a[7].Bool(), -1, nil, nil, "", false)
+				a[4].Bool(), a[5].Bool(), scm.String(a[6]), a[7].Bool(), mapperSlot, mapColumns, nil, "", false)
 		},
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "construct an immutable physical scan boundary for a cached access schema",
 			Params: []*scm.TypeDescriptor{
@@ -895,6 +901,7 @@ func Init(en scm.Env) {
 				{Kind: "number", Label: "lower_slot"}, {Kind: "number", Label: "upper_slot"},
 				{Kind: "bool", Label: "lower_inclusive"}, {Kind: "bool", Label: "upper_inclusive"},
 				{Kind: "string", Label: "collation"}, {Kind: "bool", Label: "null_safe"},
+				{Kind: "number", Label: "mapper_slot", Optional: true}, {Kind: "list", Label: "map_columns", Optional: true},
 			}, Return: &scm.TypeDescriptor{Kind: "any", Label: "boundary"}},
 	})
 
@@ -1062,35 +1069,7 @@ func Init(en scm.Env) {
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
 	})
-	scm.DeclareSpecialForm(&en, &scm.Declaration{
-		Name: "compile_scan_access",
-		Type: &scm.TypeDescriptor{Kind: "func", Description: "compiles filter AST data into the common immutable scan access schema and binds its flat runtime values in the caller scope",
-			Params: []*scm.TypeDescriptor{
-				{Kind: "list", Label: "filterColumns", Description: "physical columns corresponding to the filter lambda parameters"},
-				{Kind: "list", Label: "filterExpression", Description: "unevaluated filter lambda AST"},
-				{Kind: "bool", Label: "feedback_only", Description: "compile only safe statistical identity metadata, without access boundaries", Optional: true},
-			},
-			Return: &scm.TypeDescriptor{Kind: "list", Description: "pair of static schema and bound runtime values"},
-		},
-	}, func(code []scm.Scmer, caller *scm.Env) scm.Scmer {
-		if len(code) < 2 || len(code) > 3 {
-			panic("compile_scan_access expects filter columns, a filter expression and optional feedback_only")
-		}
-		columns := scm.Eval(code[0], caller)
-		filter := scm.Eval(code[1], caller)
-		var schema scm.Scmer
-		var valueExprs []scm.Scmer
-		if len(code) == 3 && scm.ToBool(scm.Eval(code[2], caller)) {
-			schema, valueExprs = compileFilterFeedbackAccess(columns, filter)
-		} else {
-			schema, valueExprs, _ = compileScanAccess(columns, filter)
-		}
-		values := make([]scm.Scmer, len(valueExprs))
-		for i, expression := range valueExprs {
-			values[i] = scm.Eval(expression, caller)
-		}
-		return scm.NewSlice([]scm.Scmer{schema, scm.NewSlice(values)})
-	}, nil)
+
 	scm.Declare(&en, &scm.Declaration{
 		Name: "compile_scan_computed_index",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
@@ -1104,83 +1083,8 @@ func Init(en scm.Env) {
 			Return: &scm.TypeDescriptor{Kind: "list"},
 		},
 	})
-	scm.Declare(&en, &scm.Declaration{
-		Name: "compile_scan_plan",
-		Fn: func(a ...scm.Scmer) scm.Scmer {
-			if len(a) < 5 {
-				panic("compile_scan_plan expects an operator, transaction, source, filter columns, and filter callback")
-			}
-			head, ok := scanSymbolName(a[0])
-			if !ok {
-				panic("compile_scan_plan expects a scan operator symbol")
-			}
-			args := a[1:]
-			if schema, static := scanStaticListElements(args[2]); static && len(schema) >= scanAccessSchemaHeaderSize {
-				if _, valid := decodeScanAccessHeader(schema[0]); valid {
-					if len(args) > 5 {
-						schema = markCoveredScanAccessSchema(scm.NewSlice(schema), args[5]).Slice()
-						args = append([]scm.Scmer(nil), args...)
-						args[2] = scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), scm.NewSlice(schema)})
-					}
-					return scm.NewSlice(append([]scm.Scmer{scm.NewSymbol(head)}, args...))
-				}
-			}
-			if schemas, static := scanStaticListElements(args[2]); static && len(schemas) > 0 {
-				if schema, schemaStatic := scanStaticListElements(schemas[0]); schemaStatic && len(schema) >= scanAccessSchemaHeaderSize {
-					if _, valid := decodeScanAccessHeader(schema[0]); valid {
-						if len(args) > 5 {
-							schemas = markCoveredScanAccessSchemas(append([]scm.Scmer(nil), schemas...), args[5])
-							args = append([]scm.Scmer(nil), args...)
-							args[2] = scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), scm.NewSlice(schemas)})
-						}
-						return scm.NewSlice(append([]scm.Scmer{scm.NewSymbol(head)}, args...))
-					}
-				}
-			}
-			if head == "scan_order_multi" || head == "scan_join_order" {
-				if len(args) < 4 {
-					panic("compile_scan_plan expects multi-scan filter lists")
-				}
-				schemas, values, compiled, _ := compileScanAccessList(args[2], args[3], false)
-				if schemas == nil {
-					panic("compile_scan_plan expects matching static multi-scan filters")
-				}
-				filterColumns, filters := pruneScanResidualList(args[2], args[3], compiled, false)
-				schemas = markCoveredScanAccessSchemas(schemas, filters)
-				result := []scm.Scmer{scm.NewSymbol(head), args[0], args[1],
-					scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), scm.NewSlice(schemas)}),
-					scanAccessValuesExpr(values), filterColumns, filters}
-				return scm.NewSlice(append(result, args[4:]...))
-			}
-			if head != "scan" && head != "scan_order" && head != "scan_recset" && head != "scan_exists" && head != "scan_selectivity_estimate" {
-				panic("compile_scan_plan received unsupported operator " + head)
-			}
-			schema, values, compiled := compileScanAccess(args[2], args[3])
-			filterColumns, filter := args[2], args[3]
-			if compiled {
-				prunedColumns, residual := pruneScanResidual(filterColumns, filter, false)
-				schema = markCoveredScanAccessSchema(schema, residual)
-				if head != "scan" || !scanCallbackColumnsMutate(args[4]) {
-					filterColumns, filter = prunedColumns, residual
-				}
-			}
-			schemaExpr := schema
-			if schema.IsSlice() && len(schema.Slice()) > 0 {
-				schemaExpr = scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), schema})
-			}
-			result := []scm.Scmer{scm.NewSymbol(head), args[0], args[1],
-				schemaExpr,
-				scanAccessValuesExpr(values), filterColumns, filter}
-			return scm.NewSlice(append(result, args[4:]...))
-		},
-		Type: &scm.TypeDescriptor{Kind: "func", Description: "lowers one functional scan rule to the single physical scan ABI before optimizer/JIT execution",
-			Params: []*scm.TypeDescriptor{
-				{Kind: "symbol", Label: "operator", Description: "physical scan-family operator"},
-				{Kind: "any", Label: "arguments", Description: "functional scan arguments beginning with transaction and source", Variadic: true},
-			},
-			Return: &scm.TypeDescriptor{Kind: "list", Description: "physical scan AST with static access schema and flat runtime values"},
-		},
-	})
+	initScanAccessData(&en)
+
 	scm.Declare(&en, &scm.Declaration{
 		Name: "scan_selectivity_estimate",
 
@@ -4409,20 +4313,6 @@ func Init(en scm.Env) {
 	})
 	initTransaction(en)
 	initFKBuiltins(en)
-}
-
-func scanCallbackColumnsMutate(columnsExpr scm.Scmer) bool {
-	columns, static := scanStaticColumns(columnsExpr)
-	if !static {
-		return true
-	}
-	for _, column := range columns {
-		name := column.String()
-		if name == "$update" || strings.HasPrefix(name, "$increment:") {
-			return true
-		}
-	}
-	return false
 }
 
 func PrintMemUsage() string {

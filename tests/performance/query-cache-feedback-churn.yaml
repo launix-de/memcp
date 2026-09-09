@@ -36,7 +36,7 @@ test_cases:
         (globalvars "qfc_sequence" (+ start 16))
         (map (produceN 16) (lambda (i) (begin
           (define callback (list 'lambda (list 'x) (list '< 'x (+ start i))))
-          (define access (compile_scan_access '("category") callback))
+          (define access (eval (compile_scan_access '("category") callback)))
           (scan_recset nil (table "memcp-tests" "qfc_document") (car access)
             (map (cadr access) (lambda (v) (eval v))) '("category") (eval callback))
           (run))))

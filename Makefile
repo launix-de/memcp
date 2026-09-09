@@ -75,7 +75,7 @@ jitgen:
 	jitgen_bin=$$(mktemp /tmp/memcp-jitgen.XXXXXX); \
 	trap 'rm -f "$$jitgen_bin"' EXIT; \
 	go build -o "$$jitgen_bin" ./tools/jitgen/; \
-	"$$jitgen_bin" -patch scm/alu.go scm/compare.go scm/list.go scm/strings.go scm/scm.go scm/date.go scm/streams.go scm/sync.go scm/metrics.go scm/scheduler.go scm/window.go scm/vector.go scm/packrat.go scm/jit.go scm/timezone.go scm/processlist.go scm/list_assoc_extra.go scm/sql_literals.go scm/json_functions.go; \
+	"$$jitgen_bin" -patch scm/alu.go scm/compare.go scm/list.go scm/strings.go scm/scm.go scm/date.go scm/streams.go scm/sync.go scm/metrics.go scm/scheduler.go scm/window.go scm/vector.go scm/packrat.go scm/jit.go scm/timezone.go scm/processlist.go scm/list_assoc_extra.go scm/expression_name.go scm/json_functions.go; \
 	"$$jitgen_bin" -patch storage/storage-int.go storage/storage-float.go storage/storage-decimal.go storage/storage-string.go storage/storage-prefix.go storage/storage-enum.go storage/storage-scmer.go storage/storage-sparse.go storage/storage-seq.go storage/storage-const.go storage/overlay-blob.go storage/compute_proxy.go storage/jit_getters.go; \
 	gofmt -w scm storage
 
@@ -84,7 +84,7 @@ jitgen-policy:
 	jitgen_bin=$$(mktemp /tmp/memcp-jitgen.XXXXXX); \
 	trap 'rm -f "$$jitgen_bin"' EXIT; \
 	go build -o "$$jitgen_bin" ./tools/jitgen/; \
-	"$$jitgen_bin" -patch -policy-only scm/alu.go scm/compare.go scm/list.go scm/strings.go scm/scm.go scm/date.go scm/streams.go scm/sync.go scm/metrics.go scm/scheduler.go scm/window.go scm/vector.go scm/packrat.go scm/jit.go scm/timezone.go scm/processlist.go scm/list_assoc_extra.go scm/sql_literals.go scm/json_functions.go; \
+	"$$jitgen_bin" -patch -policy-only scm/alu.go scm/compare.go scm/list.go scm/strings.go scm/scm.go scm/date.go scm/streams.go scm/sync.go scm/metrics.go scm/scheduler.go scm/window.go scm/vector.go scm/packrat.go scm/jit.go scm/timezone.go scm/processlist.go scm/list_assoc_extra.go scm/expression_name.go scm/json_functions.go; \
 	gofmt -w scm
 
 costgen:

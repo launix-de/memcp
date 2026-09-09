@@ -18,6 +18,35 @@ package scm
 
 import "testing"
 
+func TestRegexpMatches(t *testing.T) {
+	fn := Globalenv.Vars[Symbol("regexp_matches")]
+	for _, test := range []struct {
+		text, pattern string
+		want          []Scmer
+	}{
+		{"one 23 ä", `[[:alpha:]]+|[0-9]+|ä`, []Scmer{NewString("one"), NewString("23"), NewString("ä")}},
+		{"abc", `[0-9]+`, nil},
+		{"", `.`, nil},
+	} {
+		got := Apply(fn, NewString(test.text), NewString(test.pattern))
+		if !Equal(got, NewSlice(test.want)) {
+			t.Fatalf("regexp_matches(%q, %q) = %v", test.text, test.pattern, got)
+		}
+		reader := NewSlice([]Scmer{NewSymbol("lambda"), NewSlice([]Scmer{NewSymbol("text")}),
+			NewSlice([]Scmer{NewSymbol("regexp_matches"), NewSymbol("text"), NewString(test.pattern)})})
+		compiled := Eval(Optimize(reader, &Globalenv, nil), &Globalenv)
+		if got := Apply(compiled, NewString(test.text)); !Equal(got, NewSlice(test.want)) {
+			t.Fatalf("precompiled regexp_matches(%q, %q) = %v", test.text, test.pattern, got)
+		}
+	}
+	defer func() {
+		if recover() == nil {
+			t.Fatal("invalid regular expression must fail")
+		}
+	}()
+	Apply(fn, NewString("abc"), NewString("["))
+}
+
 func TestBinaryCollationBooleanTextOrder(t *testing.T) {
 	values := []Scmer{NewNil(), NewBool(false), NewBool(true),
 		NewString(""), NewString("0"), NewString("1"), NewString("3"),

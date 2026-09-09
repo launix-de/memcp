@@ -1400,7 +1400,7 @@ func logScanOrderStats(execStart time.Time, tables []scanOrderTableSpec, stats [
 			} else if arr, ok := proc.Params.Any().([]scm.Scmer); ok {
 				params = arr
 			}
-			filterEnc = encodeScmerToString(proc.Body, spec.conditionCols, params)
+			filterEnc = scm.ExpressionName(proc.Body, spec.conditionCols, params)
 		}
 		var sb strings.Builder
 		for j, sortcol := range spec.sortcols {
@@ -1410,7 +1410,7 @@ func logScanOrderStats(execStart time.Time, tables []scanOrderTableSpec, stats [
 			if sortcol.IsString() {
 				sb.WriteString(sortcol.String())
 			} else {
-				encodeScmer(sortcol, &sb, nil, nil)
+				scm.WriteExpressionName(sortcol, &sb, nil, nil)
 			}
 		}
 		orderEnc := sb.String()

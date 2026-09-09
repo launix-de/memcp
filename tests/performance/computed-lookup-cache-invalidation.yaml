@@ -49,7 +49,7 @@ test_cases:
               '("val") (lambda (acc val) val)
               0 (lambda (old value) value) false)))
         (scan nil (table "memcp-tests" "lookup_invalidation_driver")
-          (car (compile_scan_access '() (scheme "(lambda () true)"))) (cadr (compile_scan_access '() (scheme "(lambda () true)"))) '() (lambda () true)
+          (car (eval (compile_scan_access '() (scheme "(lambda () true)")))) (cadr (eval (compile_scan_access '() (scheme "(lambda () true)")))) '() (lambda () true)
           '(".lookup:value") (lambda (acc value) (+ acc value))
           0 + false))
 

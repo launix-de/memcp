@@ -23,7 +23,7 @@ test_cases:
       (begin
         (define tbl (table "memcp-tests" "afs_check"))
         (define callback (list 'lambda (list 'x) (list '>= 'x 200)))
-        (define access (compile_scan_access '("id") callback))
+        (define access (eval (compile_scan_access '("id") callback)))
         (define values (map (nth access 1) (lambda (v) (eval v))))
         (scan nil tbl (nth access 0) values '("id") (eval callback) '() scan_count 0 + false)
         (define forbidden (lambda (x) (error "measured selectivity must not rescan")))
@@ -43,7 +43,7 @@ test_cases:
       (begin
         (define tbl (table "memcp-tests" "afs_check"))
         (define callback (list 'lambda (list 'x) (list '>= 'x 201)))
-        (define access (compile_scan_access '("id") callback))
+        (define access (eval (compile_scan_access '("id") callback)))
         (define values (map (nth access 1) (lambda (v) (eval v))))
         (define unknown (scan_selectivity_estimate nil tbl (nth access 0) values '("id")
           (lambda (x) (error "metadata miss must not sample")) 0))
@@ -77,7 +77,7 @@ test_cases:
       (begin
         (define tbl (table "memcp-tests" "afs_check"))
         (define callback (list 'lambda (list 'x) (list '>= 'x (list 'quote 200))))
-        (define access (compile_scan_access '("id") callback))
+        (define access (eval (compile_scan_access '("id") callback)))
         (define estimate (scan_selectivity_estimate nil tbl (car access)
           (map (cadr access) (lambda (v) (eval v))) '()
           (lambda () (error "quoted binding must reuse metadata without sampling")) 0))
@@ -91,7 +91,7 @@ test_cases:
     scm: |
       (begin
         (define callback (list 'lambda (list 'x) (list '>= 'x (list 'quote '(200)))))
-        (define access (compile_scan_access '("id") callback))
+        (define access (eval (compile_scan_access '("id") callback)))
         (if (list? (car (car access)))
           (error "quoted list incorrectly acquired a scalar feedback identity") true))
     expect:
@@ -102,11 +102,11 @@ test_cases:
       (begin
         (define tbl (table "memcp-tests" "afs_check"))
         (define rare (list 'lambda (list 'x) (list 'strlike 'x "%rarexx%" "utf8mb4_general_ci")))
-        (define rare_access (compile_scan_access '("label") rare))
+        (define rare_access (eval (compile_scan_access '("label") rare)))
         (scan_recset nil tbl (nth rare_access 0)
           (map (nth rare_access 1) (lambda (v) (eval v))) '("label") (eval rare))
         (define common (list 'lambda (list 'x) (list 'strlike 'x "%common%" "utf8mb4_general_ci")))
-        (define access (compile_scan_access '("label") common))
+        (define access (eval (compile_scan_access '("label") common)))
         (define values (map (nth access 1) (lambda (v) (eval v))))
         (define prior (scan_selectivity_estimate nil tbl (nth access 0) values '("label") (eval common) 0))
         (define measured (scan_selectivity_estimate nil tbl (nth access 0) values '("label") (eval common) 1024))
@@ -127,7 +127,7 @@ test_cases:
         (define before_token (table_planner_statistics_token tbl))
         (define before_fingerprint (table_planner_statistics_fingerprint tbl))
         (define callback (list 'lambda (list 'x) (list '< 'x 100)))
-        (define access (compile_scan_access '("id") callback))
+        (define access (eval (compile_scan_access '("id") callback)))
         (define values (map (nth access 1) (lambda (value) (eval value))))
         (define matches (scan nil tbl (nth access 0) values '("id") (eval callback)
           '() scan_count 0 + false))
@@ -145,8 +145,8 @@ test_cases:
       (begin
         (define tbl (table "memcp-tests" "afs_check"))
         (define access_for (lambda (pattern)
-          (compile_scan_access '("label") (list 'lambda (list 'x)
-            (list 'strlike 'x pattern "utf8mb4_general_ci")))))
+          (eval (compile_scan_access '("label") (list 'lambda (list 'x)
+            (list 'strlike 'x pattern "utf8mb4_general_ci"))))))
         (define train (lambda (pattern) (begin
           (define callback (list 'lambda (list 'x) (list 'strlike 'x pattern "utf8mb4_general_ci")))
           (define access (access_for pattern))
@@ -170,7 +170,7 @@ test_cases:
       (begin
         (define tbl (table "memcp-tests" "afs_check"))
         (define callback (list 'lambda (list 'x) (list 'strlike 'x "%absent%" "utf8mb4_general_ci")))
-        (define access (compile_scan_access '("label") callback))
+        (define access (eval (compile_scan_access '("label") callback)))
         (define values (map (nth access 1) (lambda (v) (eval v))))
         (scan nil tbl (nth access 0) values '("label") (eval callback) '() scan_count 0 + false)
         (define estimate (scan_selectivity_estimate nil tbl (nth access 0) values '() (lambda () true) 0))
@@ -195,7 +195,7 @@ test_cases:
       (begin
         (define tbl (table "memcp-tests" "afs_check"))
         (define callback (list 'lambda (list 'x) (list 'strlike 'x "%common%" "utf8mb4_general_ci")))
-        (define access (compile_scan_access '("label") callback))
+        (define access (eval (compile_scan_access '("label") callback)))
         (define values (map (nth access 1) (lambda (v) (eval v))))
         (define before_token (table_planner_statistics_token tbl))
         (define before_fingerprint (table_planner_statistics_fingerprint tbl))

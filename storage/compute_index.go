@@ -369,7 +369,7 @@ func evalIndependentProcBodyScmer(expr scm.Scmer, proc *scm.Proc) (scm.Scmer, bo
 // canonicalColName builds a stable canonical name for a computed index column.
 // The name starts with "." to distinguish it from real column names.
 func canonicalColName(expr scm.Scmer, params []scm.Scmer, conditionCols []string) string {
-	return "." + encodeScmerToString(expr, conditionCols, params)
+	return "." + scm.ExpressionName(expr, conditionCols, params)
 }
 
 // buildComputedFn builds a compute function for a rawDataset formula expression.

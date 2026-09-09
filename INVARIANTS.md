@@ -802,6 +802,29 @@ elsewhere.
 
 ## Planner Source Layout
 
+`lib/` owns SQL syntax, parameterization policy, logical planning, and initial
+physical plan construction. In particular, `compile_scan_plan` and
+`compile_scan_access` are Scheme code generators. The latter returns an
+expression: its caller evaluates that expression in its own lexical context
+to obtain immutable access metadata and the runtime value vector. The compiler
+must not capture a request's transaction or lexical bindings.
+
+`storage/` owns physical operators, immutable access-data representations,
+catalog observations, and data lifecycle. Constructors may pack and validate
+explicit access requirements, but must not choose a query plan or parse SQL.
+`scm/` owns language semantics, generic expression metadata, closure handling,
+and JIT compilation. SQL keywords and SELECT parameterization policy do not
+belong in its tokenizer or optimizer.
+
+Local optimizer hooks on an existing operator plan remain valid in Go. This
+includes scan batching, invariant-filter hoisting, EXISTS reduction rewrites,
+order-access specialization, and maintenance-callback transformations. Such a
+hook consumes an already chosen operator and obeys its semantic/ownership
+contract and the common rewrite budget; it must not become a second SQL
+planner, choose a new logical join order, or recreate undecorrelated queries.
+Its native boundary and expression machinery is shared with operator execution;
+initial query construction remains in the Scheme lowerer.
+
 Source files follow the planner phases rather than feature history.
 `lib/queryplan.scm` imports them in one-way pipeline order: shared logical IR,
 decorrelation and logical rewrites, reorder/cost facts, physical lowering, then
