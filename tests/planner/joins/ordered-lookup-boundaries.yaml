@@ -28,6 +28,14 @@ test_cases:
     sql: "SELECT a.id FROM olb_lookup a JOIN olb_driver b ON b.id=a.id WHERE a.id < 999 AND a.enabled + 1 = 2 AND b.label IS NOT NULL ORDER BY a.id LIMIT 2"
     expect:
       rows: 0
+  - name: "A non-key equality still rejects the unique batch lookup"
+    sql: "SELECT a.id FROM olb_lookup a JOIN olb_driver b ON b.id=a.id WHERE a.enabled=0 AND b.label IS NOT NULL ORDER BY a.id LIMIT 2"
+    expect:
+      rows: 0
+  - name: "A matching non-key equality preserves the unique batch lookup"
+    sql: "SELECT a.id FROM olb_lookup a JOIN olb_driver b ON b.id=a.id WHERE a.enabled=1 AND b.label IS NOT NULL ORDER BY a.id LIMIT 2"
+    expect:
+      data: [{id: 999}]
 cleanup:
   - sql: "DROP TABLE IF EXISTS olb_lookup"
   - sql: "DROP TABLE IF EXISTS olb_driver"

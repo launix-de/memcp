@@ -167,9 +167,9 @@ type scanAccessSegment struct {
 type scanAccessRuntime struct {
 	// computedMapCols is populated only for compiled computed-index probes.
 	computedMapCols []string
-	// inserted contains runtime-only ordered constraints. insertAt places them
-	// between the compiled sorted prefix and advisory matchers without copying
-	// either segment.
+	// inserted contains runtime-only sorted constraints. insertAt places order
+	// columns after the compiled sorted prefix, or mandatory batch equality
+	// keys before local filters, without copying either segment.
 	insertAt int
 	inserted scanAccessSegment
 	suffix   scanAccessSegment
