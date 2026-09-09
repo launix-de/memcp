@@ -388,8 +388,104 @@ test_cases:
     threshold_ms: 200
     expect: {rows: 4096}
 
+  - name: "Exact Base64 text survives rebuild"
+    setup:
+      - sql: "DROP TABLE IF EXISTS sc_b64exact"
+      - sql: "CREATE TABLE sc_b64exact (id INT, val TEXT)"
+      - sql: "INSERT INTO sc_b64exact VALUES (1, 'Zh=='), (2, 'Zm9='), (3, 'AA=A')"
+      - scm: "(rebuild)"
+    sql: "SELECT id, val FROM sc_b64exact ORDER BY id"
+    expect: {data: [{id: 1, val: 'Zh=='}, {id: 2, val: 'Zm9='}, {id: 3, val: 'AA=A'}]}
+
+  - name: "SQL equality is independent of Base64 representation"
+    setup:
+      - sql: "DROP TABLE IF EXISTS sc_b64case"
+      - sql: "CREATE TABLE sc_b64case (id INT, val TEXT)"
+      - sql: "INSERT INTO sc_b64case VALUES (1, 'AAAA'), (2, 'aaaa')"
+      - scm: "(rebuild)"
+    sql: "SELECT a.val = b.val AS matched FROM sc_b64case a CROSS JOIN sc_b64case b"
+    expect: {data: [{matched: true}, {matched: true}, {matched: true}, {matched: true}]}
+
+  - name: "Binary collation respects Base64 case"
+    sql: "SELECT id, val COLLATE utf8mb4_bin = 'aaaa' AS matched FROM sc_b64case ORDER BY id"
+    expect: {data: [{id: 1, matched: false}, {id: 2, matched: true}]}
+
+  - name: "Binary collation respects CString case"
+    sql: "SELECT lo COLLATE utf8mb4_bin = up AS matched FROM sc_compare_cases WHERE id = 3"
+    expect: {data: [{matched: false}]}
+
+  - name: "UUIDs mixed with empty text rebuild losslessly"
+    setup:
+      - sql: "INSERT INTO sc_uuid VALUES (4, '')"
+      - scm: "(rebuild)"
+    sql: "SELECT id, val FROM sc_uuid WHERE id IN (1, 4) ORDER BY id"
+    expect: {data: [{id: 1, val: '550e8400-e29b-41d4-a716-446655440000'}, {id: 4, val: ''}]}
+
+  - name: "Unpadded Base64 roundtrip and operators"
+    setup:
+      - sql: "DROP TABLE IF EXISTS sc_b64raw"
+      - sql: "CREATE TABLE sc_b64raw (id INT, val TEXT)"
+      - sql: "INSERT INTO sc_b64raw VALUES (1, '-w'), (2, '__8'), (3, 'Zm8'), (4, '')"
+      - scm: "(rebuild)"
+    sql: "SELECT id, val, LENGTH(val) AS n, SUBSTRING(val, 1, 2) AS part FROM sc_b64raw ORDER BY id"
+    expect: {data: [{id: 1, val: '-w', n: 2, part: '-w'}, {id: 2, val: '__8', n: 3, part: '__'}, {id: 3, val: 'Zm8', n: 3, part: Zm}, {id: 4, val: '', n: 0, part: ''}]}
+
+  - name: "Standard Base64 decoder still rejects missing padding"
+    sql: "SELECT FROM_BASE64(val) FROM sc_b64raw WHERE id = 3"
+    expect: {error: true}
+
+  - name: "Standard Base64 decoder still rejects malformed padding"
+    sql: "SELECT FROM_BASE64(val) FROM sc_b64exact WHERE id = 3"
+    expect: {error: true}
+
+  - name: "New formats reload"
+    sql: "SHUTDOWN"
+    expect: {rows: 0}
+
+  - name: "Unpadded Base64 reload keeps spelling"
+    sql: "SELECT id, val FROM sc_b64raw ORDER BY id"
+    expect: {data: [{id: 1, val: '-w'}, {id: 2, val: '__8'}, {id: 3, val: Zm8}, {id: 4, val: ''}]}
+
+  - name: "Base64 comparison performance fixture"
+    setup:
+      - sql: "DROP TABLE IF EXISTS sc_b64perf"
+      - sql: "CREATE TABLE sc_b64perf (id INT, val TEXT, stamp TEXT)"
+      - scm: |
+          (insert (table "memcp-tests" "sc_b64perf") '("id" "val" "stamp")
+            (map (produceN 4096) (lambda (i)
+              (list i (base64_encode (concat (string_repeat "x" 1024) (string i)))
+                (concat "2026-09-09T12:34:56." (string i) "+02:00")))))
+      - scm: "(rebuild)"
+    sql: "SELECT COUNT(*) AS n FROM sc_b64perf"
+    expect: {data: [{n: 4096}]}
+
+  - name: "Base64 mixed early comparison projection"
+    sql: "SELECT id, val < '!AAA' AS matched FROM sc_b64perf"
+    warmup: 3
+    repetitions: 7
+    threshold_ms: 200
+    expect: {rows: 4096}
+
+  - name: "Base64 index sort"
+    sql: "SELECT id FROM sc_b64perf ORDER BY val LIMIT 100"
+    warmup: 3
+    repetitions: 7
+    threshold_ms: 200
+    expect: {rows: 100}
+
+  - name: "Timestamp compressed operator projection"
+    sql: "SELECT id, LENGTH(stamp) AS n, SUBSTRING(stamp, 1, 10) AS day, stamp LIKE '%+02:00' AS matched FROM sc_b64perf"
+    warmup: 3
+    repetitions: 7
+    threshold_ms: 200
+    expect: {rows: 4096}
+
   - name: "Cleanup"
     cleanup:
+      - sql: "DROP TABLE IF EXISTS sc_b64exact"
+      - sql: "DROP TABLE IF EXISTS sc_b64case"
+      - sql: "DROP TABLE IF EXISTS sc_b64raw"
+      - sql: "DROP TABLE IF EXISTS sc_b64perf"
       - sql: "DROP TABLE IF EXISTS sc_compare_cases"
       - sql: "DROP TABLE IF EXISTS sc_compare"
       - sql: "DROP TABLE IF EXISTS `sc_uuid`"

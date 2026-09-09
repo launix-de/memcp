@@ -57,6 +57,11 @@ const (
 	FormatOrderedPhoneDTMF StringFormat = 14
 	FormatOrderedDecimal   StringFormat = 15
 	FormatOrderedDateTime  StringFormat = 16
+	// Permanent IDs: unpadded Base64 and sorted timestamp alphabets.
+	FormatRawBase64Std   StringFormat = 17
+	FormatRawBase64URL   StringFormat = 18
+	FormatDateTimeZulu   StringFormat = 19
+	FormatDateTimeOffset StringFormat = 20
 )
 
 // nibbleCharset holds the encode (index→char) and decode (char→index) tables
@@ -95,8 +100,8 @@ var (
 )
 
 // orderedCharsets uses the same immutable alphabet definitions as CString comparisons.
-var orderedCharsets = func() [6]nibbleCharset {
-	var result [6]nibbleCharset
+var orderedCharsets = func() [10]nibbleCharset {
+	var result [10]nibbleCharset
 	for i := range result {
 		result[i] = makeNibbleCharset([]byte(scm.CStringAlphabet(uint8(i + 11))))
 		result[i].highFirst = true
@@ -104,16 +109,17 @@ var orderedCharsets = func() [6]nibbleCharset {
 	return result
 }()
 
-// allFormatsValid tracks eligibility using legacy alphabet IDs only.
+// allFormatsValid tracks legacy alphabet IDs and the new IDs 17..20.
 // chooseBestFormat maps eligible nibble alphabets to their ordered writer IDs.
-const allFormatsValid uint16 = (1 << 11) - 1 // bits 0..10
+const allFormatsValid uint32 = (1 << 11) - 1 | 1<<17 | 1<<18 | 1<<19 | 1<<20
 
 // checkFormatBits returns which StringFormat bits remain compatible with s.
 // bit i is set iff StringFormat(i) is still a valid encoding for s.
 // FormatRaw (bit 0) is always set.
-func checkFormatBits(s string) uint16 {
+func checkFormatBits(s string) uint32 {
 	if len(s) == 0 {
-		return allFormatsValid // empty string is compatible with everything
+		// Fixed-width UUID readers always emit 36 characters, so cannot represent empty text.
+		return allFormatsValid &^ (1<<FormatUUIDLower | 1<<FormatUUIDUpper)
 	}
 	valid := allFormatsValid
 
@@ -146,14 +152,23 @@ func checkFormatBits(s string) uint16 {
 		isAlpha := (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
 		isDigit := c >= '0' && c <= '9'
 		if !isAlpha && !isDigit && c != '+' && c != '/' && c != '=' {
-			valid &^= 1 << FormatBase64Upper
+			valid &^= 1<<FormatBase64Upper | 1<<FormatRawBase64Std
 		}
 		if !isAlpha && !isDigit && c != '-' && c != '_' && c != '=' {
-			valid &^= 1 << FormatBase64Lower
+			valid &^= 1<<FormatBase64Lower | 1<<FormatRawBase64URL
 		}
 		// '=' is only valid at the last two positions in a base64 string
 		if c == '=' && i < len(s)-2 {
 			valid &^= (1 << FormatBase64Upper) | (1 << FormatBase64Lower)
+		}
+		if orderedCharsets[FormatDateTimeZulu-11].dec[c] < 0 {
+			valid &^= 1 << FormatDateTimeZulu
+		}
+		if orderedCharsets[FormatDateTimeOffset-11].dec[c] < 0 {
+			valid &^= 1 << FormatDateTimeOffset
+		}
+		if c == '=' {
+			valid &^= 1<<FormatRawBase64Std | 1<<FormatRawBase64URL
 		}
 		// early exit once only FormatRaw remains
 		if valid == 1 {
@@ -161,6 +176,20 @@ func checkFormatBits(s string) uint16 {
 		}
 	}
 
+	// Character checks above prove all complete interior quartets valid.
+	// Strictly validate the tail: padding shape and unused bits must round-trip.
+	tail := len(s) % 4
+	if tail == 0 {
+		tail = 4
+	}
+	var decoded [3]byte
+	for _, candidate := range base64Formats {
+		if valid&(1<<candidate.format) != 0 {
+			if _, err := candidate.encoding.Decode(decoded[:], []byte(s[len(s)-tail:])); err != nil {
+				valid &^= 1 << candidate.format
+			}
+		}
+	}
 	isUUIDLow, isUUIDUp := checkUUID(s)
 	if !isUUIDLow {
 		valid &^= 1 << FormatUUIDLower
@@ -203,7 +232,7 @@ func checkUUID(s string) (lower, upper bool) {
 }
 
 // chooseBestFormat picks the most space-efficient format from validFormats.
-func chooseBestFormat(valid uint16) StringFormat {
+func chooseBestFormat(valid uint32) StringFormat {
 	// UUID: 16 bytes vs 36 chars → ~56% savings (best for fixed-length UUID columns)
 	if valid&(1<<FormatUUIDLower) != 0 {
 		return FormatUUIDLower
@@ -230,12 +259,23 @@ func chooseBestFormat(valid uint16) StringFormat {
 	if valid&(1<<FormatDateTime) != 0 {
 		return FormatOrderedDateTime
 	}
+	for _, f := range []StringFormat{FormatDateTimeZulu, FormatDateTimeOffset} {
+		if valid&(1<<f) != 0 {
+			return f
+		}
+	}
 	// Base64: ~25% savings
 	if valid&(1<<FormatBase64Upper) != 0 {
 		return FormatBase64Upper
 	}
 	if valid&(1<<FormatBase64Lower) != 0 {
 		return FormatBase64Lower
+	}
+	if valid&(1<<FormatRawBase64Std) != 0 {
+		return FormatRawBase64Std
+	}
+	if valid&(1<<FormatRawBase64URL) != 0 {
+		return FormatRawBase64URL
 	}
 	return FormatRaw
 }
@@ -261,7 +301,7 @@ func appendNibbles(dst []byte, s string, cs *nibbleCharset, compNibble int) ([]b
 
 // isNibbleFormat reports whether format uses 4-bit nibble packing.
 func isNibbleFormat(f StringFormat) bool {
-	if f >= FormatOrderedHexLower && f <= FormatOrderedDateTime {
+	if (f >= FormatOrderedHexLower && f <= FormatOrderedDateTime) || f == FormatDateTimeZulu || f == FormatDateTimeOffset {
 		return true
 	}
 	switch f {
@@ -273,7 +313,7 @@ func isNibbleFormat(f StringFormat) bool {
 
 // nibbleCharsetFor returns the nibble charset for a nibble format, or nil.
 func nibbleCharsetFor(f StringFormat) *nibbleCharset {
-	if f >= FormatOrderedHexLower && f <= FormatOrderedDateTime {
+	if (f >= FormatOrderedHexLower && f <= FormatOrderedDateTime) || f == FormatDateTimeZulu || f == FormatDateTimeOffset {
 		return &orderedCharsets[f-FormatOrderedHexLower]
 	}
 	switch f {
@@ -296,16 +336,10 @@ func nibbleCharsetFor(f StringFormat) *nibbleCharset {
 // compressNonNibble encodes s for UUID, Base64, or Raw formats and appends to dst.
 func compressNonNibble(dst []byte, s string, format StringFormat) []byte {
 	switch format {
-	case FormatBase64Upper:
-		b, err := base64.StdEncoding.DecodeString(s)
+	case FormatBase64Upper, FormatBase64Lower, FormatRawBase64Std, FormatRawBase64URL:
+		b, err := base64Encoding(format).DecodeString(s)
 		if err != nil {
-			panic(fmt.Sprintf("compressNonNibble: invalid standard base64 %q: %v", s, err))
-		}
-		return append(dst, b...)
-	case FormatBase64Lower:
-		b, err := base64.URLEncoding.DecodeString(s)
-		if err != nil {
-			panic(fmt.Sprintf("compressNonNibble: invalid URL-safe base64 %q: %v", s, err))
+			panic(fmt.Sprintf("compressNonNibble: invalid base64: %v", err))
 		}
 		return append(dst, b...)
 	case FormatUUIDLower, FormatUUIDUpper:
@@ -322,11 +356,11 @@ func compressNonNibble(dst []byte, s string, format StringFormat) []byte {
 // bitsize.  Must be called BEFORE lens.init().
 func adjustLensForFormat(lens *StorageInt, format StringFormat) {
 	switch format {
-	case FormatBase64Upper, FormatBase64Lower:
+	case FormatBase64Upper, FormatBase64Lower, FormatRawBase64Std, FormatRawBase64URL:
 		// build() stores decoded byte count; use 0 as safe lower bound to avoid
 		// negative relative values from padding variability
 		lens.offset = 0
-		lens.max = int64(base64.StdEncoding.DecodedLen(int(lens.max)))
+		lens.max = int64(base64Encoding(format).DecodedLen(int(lens.max)))
 		// All nibble formats (Hex, Phone, PhoneDTMF, Decimal, DateTime): char count == raw len → no adjustment
 		// UUID: lens is never read → no adjustment
 		// Raw: byte count == char count → no adjustment
@@ -476,7 +510,7 @@ type StorageString struct {
 	reverseMap   map[string][3]uint
 	count        uint
 	allsize      int
-	validFormats uint16
+	validFormats uint32
 	// prefix statistics
 	prefixstat map[string]int
 	laststr    string
@@ -602,14 +636,15 @@ func (s *StorageString) ensureDict() string {
 // format).  Old "smallerstrings" data had 0 there (pad was zero-filled), so it
 // reads correctly as version 0.
 //
-// Version 2 introduces ordered nibble IDs 11..16. The body layout remains V1.
+// Version 2 introduces ordered nibble IDs 11..16; version 3 adds IDs 17..20.
+// Both retain the V1 body layout.
 // The historical raw sentinel is exactly ASCII '1' (49), never a format range.
-const storageStringVersion = 2
+const storageStringVersion = 3
 
 // StorageString binary layout (magic byte 20 consumed by shard loader):
 //
 //	[nodict uint8]         ← 0=dict mode, 1=buffer mode
-//	[format uint8]         ← StringFormat (0..16); ASCII 49: legacy raw sentinel
+//	[format uint8]         ← StringFormat (0..20); ASCII 49: legacy raw sentinel
 //
 //	Legacy (format byte == 49, i.e. '1'=49 from old ASCII dummy "123456"):
 //	  [legacyPad 5 bytes]  ← consume remaining dummy bytes; format = FormatRaw
@@ -622,8 +657,8 @@ const storageStringVersion = 2
 //	  [count uint64] [values StorageInt] [starts StorageInt] [lens StorageInt]
 //	  [dictlen uint64] [dict bytes]
 //
-//	Version 1/2:
-//	  [version uint8]      ← 1 or 2
+//	Version 1/2/3:
+//	  [version uint8]      ← 1, 2 or 3
 //	  [pad 4 bytes]        ← alignment padding
 //	  [compressed uint8]   ← 0=uncompressed dict, 1=lz4-compressed dict
 //	  [count uint64] [values StorageInt] [starts StorageInt] [lens StorageInt]
@@ -634,7 +669,8 @@ const storageStringVersion = 2
 //
 //	0: smallerstrings format; format byte 0..10; version in pad[0].
 //	1: adds lz4-compressed dictionary support.
-//	2 (current): ordered nibble IDs 11..16; V1 body layout.
+//	2: ordered nibble IDs 11..16; V1 body layout.
+//	3 (current): unpadded Base64 and timestamp IDs 17..20; V1 body layout.
 func (s *StorageString) Serialize(f io.Writer) {
 	binary.Write(f, binary.LittleEndian, uint8(20)) // 20 = StorageString
 	var nodict uint8 = 0
@@ -692,7 +728,7 @@ func (s *StorageString) Deserialize(f io.Reader) uint {
 		s.format = FormatRaw
 		return s.deserializeStringBody(f)
 	}
-	if formatByte > uint8(FormatOrderedDateTime) {
+	if formatByte > uint8(FormatDateTimeOffset) {
 		panic(fmt.Sprintf("StorageString: unknown format %d", formatByte))
 	}
 	s.format = StringFormat(formatByte)
@@ -703,6 +739,9 @@ func (s *StorageString) Deserialize(f io.Reader) uint {
 	if formatByte >= 11 && version < 2 {
 		panic("StorageString: ordered format requires version 2")
 	}
+	if formatByte >= 17 && version < 3 {
+		panic("StorageString: new format requires version 3")
+	}
 	switch version {
 	case 0:
 		return s.deserializeStringBody(f)
@@ -710,6 +749,8 @@ func (s *StorageString) Deserialize(f io.Reader) uint {
 		return s.deserializeStringV1(f)
 	case 2:
 		return s.deserializeStringV2(f)
+	case 3:
+		return s.deserializeStringV3(f)
 	default:
 		panic(fmt.Sprintf("StorageString: unknown version %d", version))
 	}
@@ -761,6 +802,8 @@ func (s *StorageString) deserializeStringV2(f io.Reader) uint {
 	return s.deserializeStringV1(f)
 }
 
+func (s *StorageString) deserializeStringV3(f io.Reader) uint { return s.deserializeStringV1(f) }
+
 func (s *StorageString) GetCachedReader() ColumnReader { return s.storageJITFunctions.reader(s) }
 
 func (s *StorageString) GetValue(i uint32) scm.Scmer {
@@ -810,7 +853,7 @@ func (s *StorageString) decodeAt(i uint32, dict string, dictBase unsafe.Pointer)
 		return scm.NewString(dict[byteStart : byteStart+lensVal])
 	case FormatHexLower, FormatHexUpper,
 		FormatPhone, FormatPhoneDTMF, FormatDecimal, FormatDateTime,
-		FormatOrderedHexLower, FormatOrderedHexUpper, FormatOrderedPhone, FormatOrderedPhoneDTMF, FormatOrderedDecimal, FormatOrderedDateTime:
+		FormatOrderedHexLower, FormatOrderedHexUpper, FormatOrderedPhone, FormatOrderedPhoneDTMF, FormatOrderedDecimal, FormatOrderedDateTime, FormatDateTimeZulu, FormatDateTimeOffset:
 		nibblePos := startVal
 		nibbleOff := uint8(nibblePos & 1)
 		byteOff := nibblePos >> 1
@@ -824,14 +867,14 @@ func (s *StorageString) decodeAt(i uint32, dict string, dictBase unsafe.Pointer)
 		byteOff := startVal
 		ptr := (*byte)(unsafe.Pointer(uintptr(dictBase) + uintptr(byteOff)))
 		return scm.NewCString(ptr, uint8(s.format), 0, 36)
-	case FormatBase64Upper, FormatBase64Lower:
+	case FormatBase64Upper, FormatBase64Lower, FormatRawBase64Std, FormatRawBase64URL:
 		byteOff := startVal
 		decodedLen := int(lensVal)
 		if decodedLen == 0 {
 			return scm.NewString("")
 		}
 		ptr := (*byte)(unsafe.Pointer(uintptr(dictBase) + uintptr(byteOff)))
-		return scm.NewBString(ptr, decodedLen, s.format == FormatBase64Lower)
+		return scm.NewBString(ptr, decodedLen, s.format == FormatBase64Lower || s.format == FormatRawBase64URL, s.format == FormatRawBase64Std || s.format == FormatRawBase64URL)
 	default:
 		return scm.NewNil()
 	}
@@ -955,17 +998,12 @@ func (s *StorageString) bulkDecoder() (outLen func(lensVal uint64) int, decode b
 				ptr := (*byte)(unsafe.Pointer(uintptr(dictBase) + uintptr(startVal)))
 				writeUUIDInto(dst, ptr, upper)
 			}, false
-	case FormatBase64Upper:
-		return func(lensVal uint64) int { return base64.StdEncoding.EncodedLen(int(lensVal)) },
+	case FormatBase64Upper, FormatBase64Lower, FormatRawBase64Std, FormatRawBase64URL:
+		enc := base64Encoding(s.format)
+		return func(lensVal uint64) int { return enc.EncodedLen(int(lensVal)) },
 			func(dst []byte, dictBase unsafe.Pointer, dict string, startVal, lensVal uint64) {
-				ptr := (*byte)(unsafe.Pointer(uintptr(dictBase) + uintptr(startVal)))
-				base64.StdEncoding.Encode(dst, unsafe.Slice(ptr, int(lensVal)))
-			}, false
-	case FormatBase64Lower:
-		return func(lensVal uint64) int { return base64.URLEncoding.EncodedLen(int(lensVal)) },
-			func(dst []byte, dictBase unsafe.Pointer, dict string, startVal, lensVal uint64) {
-				ptr := (*byte)(unsafe.Pointer(uintptr(dictBase) + uintptr(startVal)))
-				base64.URLEncoding.Encode(dst, unsafe.Slice(ptr, int(lensVal)))
+				ptr := (*byte)(unsafe.Add(dictBase, startVal))
+				enc.Encode(dst, unsafe.Slice(ptr, int(lensVal)))
 			}, false
 	default:
 		return nil, nil, true
@@ -1161,7 +1199,7 @@ func (s *StorageString) init(i uint32) {
 				switch s.format {
 				case FormatUUIDLower, FormatUUIDUpper:
 					// lens unused for UUID (always 16 bytes)
-				case FormatBase64Upper, FormatBase64Lower:
+				case FormatBase64Upper, FormatBase64Lower, FormatRawBase64Std, FormatRawBase64URL:
 					s.lens.build(e.idx, scm.NewInt(int64(compLen)))
 				}
 			}
@@ -1196,7 +1234,7 @@ func (s *StorageString) build(i uint32, value scm.Scmer) {
 			switch s.format {
 			case FormatUUIDLower, FormatUUIDUpper:
 				// lens unused for UUID (always 16 bytes)
-			case FormatBase64Upper, FormatBase64Lower:
+			case FormatBase64Upper, FormatBase64Lower, FormatRawBase64Std, FormatRawBase64URL:
 				s.lens.build(i, scm.NewInt(int64(compLen)))
 			default: // FormatRaw
 				s.lens.build(i, scm.NewInt(int64(len(v))))
@@ -1346,4 +1384,28 @@ func (s *StorageString) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resul
 	result.Type = d6.Type
 	return result
 	return result
+}
+
+var base64Formats = [...]struct {
+	format   StringFormat
+	encoding *base64.Encoding
+}{
+	{FormatBase64Upper, base64.StdEncoding.Strict()},
+	{FormatBase64Lower, base64.URLEncoding.Strict()},
+	{FormatRawBase64Std, base64.RawStdEncoding.Strict()},
+	{FormatRawBase64URL, base64.RawURLEncoding.Strict()},
+}
+
+func base64Encoding(format StringFormat) *base64.Encoding {
+	switch format {
+	case FormatBase64Upper:
+		return base64.StdEncoding
+	case FormatBase64Lower:
+		return base64.URLEncoding
+	case FormatRawBase64Std:
+		return base64.RawStdEncoding
+	case FormatRawBase64URL:
+		return base64.RawURLEncoding
+	}
+	panic("not a Base64 format")
 }

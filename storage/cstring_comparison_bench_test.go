@@ -20,6 +20,7 @@ import "fmt"
 import "sort"
 import "strings"
 import "testing"
+import "encoding/base64"
 import "github.com/launix-de/memcp/scm"
 
 var cstringBenchSink bool
@@ -131,5 +132,95 @@ func BenchmarkCStringLegacy(b *testing.B) {
 				cstringBenchSink = scm.Equal(a, plain)
 			}
 		})
+	}
+}
+
+// Identical fixtures on the development baseline and candidate; constructors
+// are intentionally reached through storage to measure the selected format.
+func BenchmarkBase64Compare(b *testing.B) {
+	for _, size := range []int{16, 2048} {
+		text := base64.StdEncoding.EncodeToString([]byte(strings.Repeat("x", size)))
+		for _, at := range []int{0, len(text) - 4} {
+			other := text[:at] + "A" + text[at+1:]
+			col := buildStringColumn([]string{text, other})
+			a, c := col.GetValue(0), col.GetValue(1)
+			p := scm.NewString(other)
+			for _, op := range []struct {
+				name string
+				fn   func() bool
+			}{
+				{"equal-BS", func() bool { return scm.Equal(a, p) }},
+				{"less-BS", func() bool { return scm.Less(a, p) }},
+				{"less-BB", func() bool { return scm.Less(a, c) }},
+				{"equal-BB", func() bool { return scm.Equal(a, c) }},
+				{"equal-same-BB", func() bool { return scm.Equal(a, a) }},
+				{"equalSQL-BS", func() bool { return scm.EqualSQL(a, p).Bool() }},
+				{"equalSQL-same-BB", func() bool { return scm.EqualSQL(a, a).Bool() }},
+			} {
+				b.Run(fmt.Sprintf("%d/difference-%d/%s", size, at, op.name), func(b *testing.B) {
+					b.ReportAllocs()
+					for i := 0; i < b.N; i++ {
+						cstringBenchSink = op.fn()
+					}
+				})
+			}
+		}
+	}
+}
+
+func BenchmarkBase64IndexSort(b *testing.B) {
+	values := make([]string, 4096)
+	for i := range values {
+		values[i] = base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("prefix-%032d", (i*2654435761)%4096)))
+	}
+	col := buildStringColumn(values)
+	original := make([]scm.Scmer, len(values))
+	work := make([]scm.Scmer, len(values))
+	for i := range original {
+		original[i] = col.GetValue(uint32(i))
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		copy(work, original)
+		sort.Slice(work, func(i, j int) bool { return scm.Less(work[i], work[j]) })
+	}
+}
+
+func BenchmarkStringFormatBuild(b *testing.B) {
+	for _, format := range []string{"hex", "base64", "raw-base64", "timestamp"} {
+		for _, size := range []int{16, 2048} {
+			if format == "timestamp" && size != 16 {
+				continue
+			}
+			values := make([]string, 128)
+			for i := range values {
+				switch format {
+				case "hex":
+					values[i] = fmt.Sprintf("%0*x", size, i%8)
+				case "base64", "raw-base64":
+					raw := []byte(strings.Repeat("x", size))
+					raw[len(raw)-1] = byte(i % 8)
+					enc := base64.StdEncoding
+					if format == "raw-base64" {
+						enc = base64.RawStdEncoding
+					}
+					values[i] = enc.EncodeToString(raw)
+				case "timestamp":
+					values[i] = fmt.Sprintf("2026-09-09T12:34:56.%03d+02:00", i%8)
+				}
+			}
+			b.Run(fmt.Sprintf("%s/%d", format, size), func(b *testing.B) {
+				col := buildStringColumn(values)
+				b.ReportAllocs()
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					col = buildStringColumn(values)
+				}
+				b.StopTimer()
+				b.ReportMetric(float64(len(col.ensureDict())), "dict-B")
+				cstringValueSink = col.GetValue(0)
+			})
+		}
 	}
 }

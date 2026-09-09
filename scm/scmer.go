@@ -76,7 +76,7 @@ const (
 	tagAny
 	tagRegex       // *regexp.Regexp
 	tagCString     // compressed string; ptr=bytes in StorageString dict, aux=format+nibbleOff+charLen
-	tagBString     // binary blob; ptr=raw bytes in StorageString dict, aux=urlSafe(bit47)+byteLen(bits46-0)
+	tagBString     // binary blob; ptr=raw bytes in StorageString dict, aux=urlSafe(bit47)+unpadded(bit46)+byteLen(bits45-0)
 	tagClosure     // lightweight id-carrying closure; ptr=*func(uint32,...Scmer)Scmer, aux=(id<<8)|tagClosure
 	tagPromise     // tagPromise Scmer; ptr points to cells[0] of a [2]Scmer backing (auxVal==0 heap, auxVal==1 list-backed)
 	tagBSON        // raw BSON value; ptr=payload bytes, aux packs BSON type and payload length
@@ -129,11 +129,14 @@ func NewCString(ptr *byte, format uint8, nibbleOff uint8, charLen int) Scmer {
 
 // NewBString creates a binary-blob Scmer whose string representation is Base64.
 // ptr points to raw bytes in the StorageString dictionary (must stay alive as long as the Scmer).
-// byteLen is the number of raw bytes. urlSafe selects URL-safe vs standard Base64 on .String().
-func NewBString(ptr *byte, byteLen int, urlSafe bool) Scmer {
+// byteLen is the number of raw bytes. urlSafe selects the alphabet; unpadded omits trailing equals signs.
+func NewBString(ptr *byte, byteLen int, urlSafe, unpadded bool) Scmer {
 	var flag uint64
 	if urlSafe {
 		flag = 1 << 47
+	}
+	if unpadded {
+		flag |= 1 << 46
 	}
 	return Scmer{ptr, makeAux(tagBString, flag|uint64(byteLen))}
 }
@@ -833,13 +836,7 @@ func (s Scmer) AppendString(dst []byte) (string, []byte) {
 		}
 		return "<compressed string>", dst
 	case tagBString:
-		val := auxVal(s.aux)
-		byteLen := int(val & ((1 << 47) - 1))
-		b := unsafe.Slice(s.ptr, byteLen)
-		if val>>47 != 0 {
-			return base64.URLEncoding.EncodeToString(b), dst
-		}
-		return base64.StdEncoding.EncodeToString(b), dst
+		return bstringEncoding(s).EncodeToString(unsafe.Slice(s.ptr, int(auxVal(s.aux)&bstringLengthMask))), dst
 	case tagBSON:
 		start := len(dst)
 		var err error

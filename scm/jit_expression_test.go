@@ -1483,14 +1483,14 @@ func TestJITCompressedTextOperators(t *testing.T) {
 	}
 	compiled := compileJITExpressionTestProc(t, `(lambda (s) (list (string? s) (strlen s) (substr s 1 3) (toUpper s) (strtrim s) (concat s "!") (strlike_cs s "%m9%") (base64_decode s) (md5 s) (sha1 s) (sha256 s)))`)
 	text := "foo"
-	compressed := NewBString(unsafe.StringData(text), len(text), false)
+	compressed := NewBString(unsafe.StringData(text), len(text), false, false)
 	got := Apply(compiled, compressed)
 	want := Apply(compiled, NewString(compressed.String()))
 	if String(got) != String(want) {
 		t.Fatalf("compressed %s, plain %s", String(got), String(want))
 	}
 	large := strings.Repeat("foo", 1024)
-	largeValue := NewBString(unsafe.StringData(large), len(large), false)
+	largeValue := NewBString(unsafe.StringData(large), len(large), false, false)
 	if got, want := Apply(compiled, largeValue), Apply(compiled, NewString(largeValue.String())); String(got) != String(want) {
 		t.Fatal("large compressed operator chain differs from plain text")
 	}
@@ -1500,6 +1500,24 @@ func TestJITCompressedTextOperators(t *testing.T) {
 		result := Apply(proc)
 		if result != literal {
 			t.Fatal("compressed literal changed during compilation")
+		}
+	}
+}
+
+func TestJITBase64Representations(t *testing.T) {
+	op := compileJITExpressionTestProc(t, `(lambda (s other) (list (equal? s other) (equal?? s other) (equal_collate s other "utf8_bin") (equal_collate s other "utf8_general_ci") (< s other) (strlen s) (substr s 0 (min (strlen s) 2)) (toLower s) (strlike_cs s "%A%") (sha256 s)))`)
+	for _, raw := range []string{"", "x", "xy", "xyz", "\xfb\xff", strings.Repeat("x", 2048)} {
+		for _, url := range []bool{false, true} {
+			for _, unpadded := range []bool{false, true} {
+				v := NewBString(unsafe.StringData(raw), len(raw), url, unpadded)
+				for _, other := range []Scmer{v, NewString(v.String()), NewString(strings.ToLower(v.String())), NewString("!")} {
+					got := Apply(op, v, other)
+					want := Apply(op, NewString(v.String()), NewString(other.String()))
+					if String(got) != String(want) {
+						t.Fatalf("%q: got %s want %s", v.String(), String(got), String(want))
+					}
+				}
+			}
 		}
 	}
 }
