@@ -5,7 +5,10 @@ metadata:
   description: "Membership statistics survive lowering and LIMIT does not discount full preparation"
 
 setup: []
-cleanup: []
+cleanup:
+  - sql: "DROP TABLE IF EXISTS mcw_docs"
+  - sql: "DROP TABLE IF EXISTS mcw_files"
+  - sql: "DROP TABLE IF EXISTS mcw_acl"
 test_cases:
   - name: "Late consumer fallback must not shadow measured stage work"
     scm: |
@@ -66,3 +69,51 @@ test_cases:
         (define expected (qassoc_get (planner_membership_downstream_probe_cost 50000) 'total_ns 0))
         (if (< (sql_abs (- extra expected)) 1) true
           (error "unbounded candidate consumer incorrectly received LIMIT braking")))
+
+  - name: "COUNT lowering does not erase population-dependent residual costs"
+    setup:
+      - sql: "DROP TABLE IF EXISTS mcw_docs"
+      - sql: "DROP TABLE IF EXISTS mcw_files"
+      - sql: "DROP TABLE IF EXISTS mcw_acl"
+      - sql: "CREATE TABLE mcw_docs (id INT PRIMARY KEY, file_id INT, site_id INT) ENGINE=sloppy"
+      - sql: "CREATE TABLE mcw_files (id INT PRIMARY KEY, name TEXT, content TEXT) ENGINE=sloppy"
+      - sql: "CREATE TABLE mcw_acl (id INT PRIMARY KEY, allowed INT) ENGINE=sloppy"
+      - scm: |
+          (begin
+            (insert (table "memcp-tests" "mcw_docs") '("id" "file_id" "site_id")
+              (map (produceN 2000) (lambda (i) (list i (mod i 100) (mod i 8)))))
+            (insert (table "memcp-tests" "mcw_files") '("id" "name" "content")
+              (map (produceN 100) (lambda (i) (list i (if (< i 5) "needle" "ordinary") "ordinary"))))
+            (insert (table "memcp-tests" "mcw_acl") '("id" "allowed")
+              (map (produceN 8) (lambda (i) (list i 1))))
+            (rebuild))
+    scm: |
+      (begin
+        (define planning (newsession))
+        (define sink (newsession))
+        (planning "__memcp_explain_physical" sink)
+        (parse_sql "memcp-tests"
+          "SELECT COUNT(*) FROM mcw_docs d WHERE d.file_id IN (SELECT f.id FROM mcw_files f WHERE f.name LIKE '%needle%' UNION SELECT f.id FROM mcw_files f WHERE f.content LIKE '%needle%') AND COALESCE((SELECT a.allowed FROM mcw_acl a WHERE a.id=d.site_id LIMIT 1), FALSE)"
+          nil planning nil)
+        (define decisions (filter (planner_physical_explain_decisions sink)
+          (lambda (d) (equal? (qassoc_get d "decision" nil) "membership_carrier"))))
+        (define alternatives (merge (map decisions (lambda (d) (qassoc_get d "alternatives" '())))))
+        (define carriers (filter alternatives (lambda (a)
+          (contains? '("candidate_keyset" "prefiltered_candidate_keyset") (qassoc_get a "plan" nil)))))
+        (if (and (>= (count carriers) 2)
+          (reduce carriers (lambda (ok a)
+            (and ok (> (qassoc_get (qassoc_get a "cost" '()) 'probe_ns 0) 0))) true))
+          true (error "COUNT erased residual probe work from carrier alternatives")))
+    expect:
+      result_contains: ["true"]
+
+  - name: "COUNT with projected membership and scalar ACL retains exact results"
+    sql: |
+      SELECT COUNT(*) AS n FROM mcw_docs d
+      WHERE d.file_id IN (
+        SELECT f.id FROM mcw_files f WHERE f.name LIKE '%needle%'
+        UNION SELECT f.id FROM mcw_files f WHERE f.content LIKE '%needle%'
+      ) AND COALESCE((SELECT a.allowed FROM mcw_acl a WHERE a.id=d.site_id LIMIT 1), FALSE)
+    expect:
+      rows: 1
+      data: [{n: 100}]
