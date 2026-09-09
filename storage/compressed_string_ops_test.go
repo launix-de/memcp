@@ -25,7 +25,7 @@ import "github.com/launix-de/memcp/scm"
 
 func compressedOpValues() []scm.Scmer {
 	var values []scm.Scmer
-	for _, f := range []StringFormat{1, 2, 3, 8, 9, 10, 11, 12, 13, 14, 15, 16} {
+	for _, f := range []StringFormat{1, 2, 3, 8, 9, 10, 11, 12, 13, 14, 15, 16, 19, 20} {
 		alphabet := scm.CStringAlphabet(uint8(f))
 		for _, text := range []string{"", "0", "00", alphabet, strings.Repeat(alphabet, 100)} {
 			for offset := 0; offset < 2; offset++ {
@@ -42,7 +42,9 @@ func compressedOpValues() []scm.Scmer {
 	}
 	for _, s := range []string{"", "x", "xy", "xyz", "xyzw", "xyzwa", "\xfb\xff\xff", strings.Repeat("abcdef?\xff", 200)} {
 		for _, url := range []bool{false, true} {
-			values = append(values, scm.NewBString(unsafe.StringData(s), len(s), url))
+			for _, raw := range []bool{false, true} {
+				values = append(values, scm.NewBString(unsafe.StringData(s), len(s), url, raw))
+			}
 		}
 	}
 	return values
@@ -126,7 +128,7 @@ func BenchmarkCompressedStringOperators(b *testing.B) {
 				v = comparisonCString(text, 11, 1)
 			}
 			if representation == "bstring" {
-				v = scm.NewBString(unsafe.StringData(text), len(text), false)
+				v = scm.NewBString(unsafe.StringData(text), len(text), false, false)
 			}
 			for _, op := range []struct {
 				name string
@@ -150,7 +152,7 @@ func BenchmarkCompressedStringOperators(b *testing.B) {
 }
 
 func TestCompressedStringGenericCompatibility(t *testing.T) {
-	for _, v := range []scm.Scmer{scm.NewAny("text"), scm.NewString("text"), scm.NewBString(nil, 0, false)} {
+	for _, v := range []scm.Scmer{scm.NewAny("text"), scm.NewString("text"), scm.NewBString(nil, 0, false, false)} {
 		if !scm.Globalenv.Vars["string?"].Func()(v).Bool() {
 			t.Fatal("string type rejected")
 		}

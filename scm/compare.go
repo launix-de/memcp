@@ -110,6 +110,22 @@ func cstringEqual(a, b Scmer) bool {
 		return equalStringValues(a, b, false) // decode only until a difference
 	}
 	if aFmt >= 11 {
+		av, aok := makeStringView(a)
+		bv, bok := makeStringView(b)
+		if aok && bok && av.offset == bv.offset {
+			start, n := 0, aCharLen
+			if av.offset == 1 && n > 0 {
+				if av.data[0]&15 != bv.data[0]&15 {
+					return false
+				}
+				start, n = 1, n-1
+			}
+			full := n / 2
+			if av.data[start:start+full] != bv.data[start:start+full] {
+				return false
+			}
+			return n&1 == 0 || av.data[start+full]>>4 == bv.data[start+full]>>4
+		}
 		return equalStringValues(a, b, false)
 	}
 	aNibOff := int((aVal >> CStringOffsetShift) & 1)
@@ -185,12 +201,11 @@ func Equal(a, b Scmer) bool {
 		case tagCString:
 			return cstringEqual(a, b)
 		case tagBString:
-			aLen := int(auxVal(a.aux) & ((1 << 47) - 1))
-			bLen := int(auxVal(b.aux) & ((1 << 47) - 1))
-			if aLen != bLen {
-				return false
+			if auxVal(a.aux)>>46 == auxVal(b.aux)>>46 {
+				an, bn := int(auxVal(a.aux)&bstringLengthMask), int(auxVal(b.aux)&bstringLengthMask)
+				return an == bn && unsafe.String(a.ptr, an) == unsafe.String(b.ptr, bn)
 			}
-			return unsafe.String(a.ptr, aLen) == unsafe.String(b.ptr, bLen)
+			return equalStringValues(a, b, false)
 		case tagBSON:
 			return bsonRawEqual(bsonRawValue(a), bsonRawValue(b))
 		case tagSlice:
@@ -282,14 +297,6 @@ func Equal(a, b Scmer) bool {
 	case tagCString:
 		return equalStringValues(a, b, false)
 	case tagBString:
-		if tb == tagBString {
-			aLen := int(auxVal(a.aux) & ((1 << 47) - 1))
-			bLen := int(auxVal(b.aux) & ((1 << 47) - 1))
-			if aLen != bLen {
-				return false
-			}
-			return unsafe.String(a.ptr, aLen) == unsafe.String(b.ptr, bLen)
-		}
 		return equalStringValues(a, b, false)
 	case tagBSON:
 		if tb == tagBSON {
@@ -414,12 +421,10 @@ func EqualSQL(a, b Scmer) Scmer {
 		case tagCString:
 			return NewBool(equalStringValues(a, b, true))
 		case tagBString:
-			aLen := int(auxVal(a.aux) & ((1 << 47) - 1))
-			bLen := int(auxVal(b.aux) & ((1 << 47) - 1))
-			if aLen != bLen {
-				return NewBool(false)
+			if a.aux == b.aux && unsafe.String(a.ptr, int(auxVal(a.aux)&bstringLengthMask)) == unsafe.String(b.ptr, int(auxVal(b.aux)&bstringLengthMask)) {
+				return NewBool(true)
 			}
-			return NewBool(unsafe.String(a.ptr, aLen) == unsafe.String(b.ptr, bLen))
+			return NewBool(equalStringValues(a, b, true))
 		case tagBSON:
 			return NewBool(bsonRawEqual(bsonRawValue(a), bsonRawValue(b)))
 		case tagSlice:
@@ -501,14 +506,6 @@ func EqualSQL(a, b Scmer) Scmer {
 		if tb == tagBool {
 			return NewBool(a.Bool() == b.Bool())
 		}
-		if tb == tagBString {
-			aLen := int(auxVal(a.aux) & ((1 << 47) - 1))
-			bLen := int(auxVal(b.aux) & ((1 << 47) - 1))
-			if aLen != bLen {
-				return NewBool(false)
-			}
-			return NewBool(unsafe.String(a.ptr, aLen) == unsafe.String(b.ptr, bLen))
-		}
 		return NewBool(equalStringValues(a, b, true))
 	case tagBSON:
 		if tb == tagBSON {
@@ -540,6 +537,17 @@ func EqualSQL(a, b Scmer) Scmer {
 	}
 
 	return NewBool(equalStringValues(a, b, true))
+}
+
+// Keep representation dispatch out of generated collation emitters; their
+// existing plain-string arm stays small and eligible for JIT inlining.
+//
+//jitgen:noinline
+func equalCollatedValues(a, b Scmer, collation string) Scmer {
+	if (a.IsString() || a.IsSymbol()) && (b.IsString() || b.IsSymbol()) {
+		return NewBool(equalStringValues(a, b, strings.Contains(collation, "_ci")))
+	}
+	return EqualSQL(a, b)
 }
 
 func LessScm(a ...Scmer) Scmer    { return NewBool(Less(a[0], a[1])) }
@@ -583,6 +591,11 @@ func Less(a, b Scmer) bool {
 func lessNonNumeric(a, b Scmer, ta, tb uint8) bool {
 	if ta == tagCString || tb == tagCString {
 		if c, ok := compareCString(a, b, false); ok {
+			return c < 0
+		}
+	}
+	if ta == tagBString || tb == tagBString {
+		if c, ok := compareBase64Text(a, b, false); ok {
 			return c < 0
 		}
 	}

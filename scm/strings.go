@@ -31283,22 +31283,28 @@ func init_strings() {
 				if d6.Loc == LocRegPair || d6.Loc == LocStackPair || d6.Loc == LocRegTriple || d6.Loc == LocStackTriple {
 					panic("jit: generic call arg expects 1-word value")
 				}
+				d7 := JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(false)}
+				if d7.Loc == LocRegPair || d7.Loc == LocStackPair || d7.Loc == LocRegTriple || d7.Loc == LocStackTriple {
+					panic("jit: generic call arg expects 1-word value")
+				}
 				ctx.SyncDesc(&d4)
 				ctx.SyncDesc(&d5)
 				ctx.SyncDesc(&d6)
-				d7 := ctx.EmitGoCallScalar(GoFuncAddr(NewBString), []JITValueDesc{d4, d5, d6}, 2)
-				d7.NoHeapPointer = false
-				ctx.BindReg(d7.Reg, &d7)
-				ctx.BindReg(d7.Reg2, &d7)
+				ctx.SyncDesc(&d7)
+				d8 := ctx.EmitGoCallScalar(GoFuncAddr(NewBString), []JITValueDesc{d4, d5, d6, d7}, 2)
+				d8.NoHeapPointer = false
+				ctx.BindReg(d8.Reg, &d8)
+				ctx.BindReg(d8.Reg2, &d8)
 				ctx.FreeDesc(&d6)
+				ctx.FreeDesc(&d7)
 				ctx.FreeDesc(&d4)
 				ctx.FreeDesc(&d5)
 				ctx.ReclaimUntrackedRegs()
-				ctx.EnsureDesc(&d7)
+				ctx.EnsureDesc(&d8)
 				ctx.FreeDesc(&d0)
-				if d7.Loc == LocImm {
+				if d8.Loc == LocImm {
 					if result.Loc == LocAny {
-						return d7
+						return d8
 					}
 				}
 				if result.Loc == LocAny {
@@ -31306,20 +31312,20 @@ func init_strings() {
 					ctx.BindReg(result.Reg, &result)
 					ctx.BindReg(result.Reg2, &result)
 				}
-				ctx.SyncDesc(&d7)
-				if d7.Loc == LocRegPair || d7.Loc == LocStackPair || d7.Loc == LocInputPair {
-					ctx.EmitMovPairToResult(&d7, &result)
-					result.Type = d7.Type
+				ctx.SyncDesc(&d8)
+				if d8.Loc == LocRegPair || d8.Loc == LocStackPair || d8.Loc == LocInputPair {
+					ctx.EmitMovPairToResult(&d8, &result)
+					result.Type = d8.Type
 				} else {
-					switch d7.Type {
+					switch d8.Type {
 					case tagBool:
-						ctx.EmitMakeBool(result, d7)
+						ctx.EmitMakeBool(result, d8)
 						result.Type = tagBool
 					case tagInt:
-						ctx.EmitMakeInt(result, d7)
+						ctx.EmitMakeInt(result, d8)
 						result.Type = tagInt
 					case tagFloat:
-						ctx.EmitMakeFloat(result, d7)
+						ctx.EmitMakeFloat(result, d8)
 						result.Type = tagFloat
 					case tagNil:
 						ctx.EmitMakeNil(result)
@@ -31339,7 +31345,7 @@ func init_strings() {
 		Name: "base64_decode",
 
 		Fn: func(a ...Scmer) Scmer {
-			if a[0].IsBString() && auxVal(a[0].aux)>>47 == 0 {
+			if a[0].IsBString() && auxVal(a[0].aux)>>46 == 0 {
 				return bstringRawText(a[0])
 			}
 			decoded, err := base64.StdEncoding.DecodeString(String(a[0]))
@@ -31996,9 +32002,9 @@ func init_strings() {
 					ctx.EnsureDesc(&d61)
 					var d62 JITValueDesc
 					if d61.Loc == LocImm {
-						d62 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(uint64(d61.Imm.Int()) >> 47))}
+						d62 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(uint64(d61.Imm.Int()) >> 46))}
 					} else {
-						ctx.EmitShrRegImm8(d61.Reg, 47)
+						ctx.EmitShrRegImm8(d61.Reg, 46)
 						d62 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d61.Reg}
 						ctx.BindReg(d61.Reg, &d62)
 					}

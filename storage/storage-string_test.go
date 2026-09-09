@@ -19,7 +19,10 @@ package storage
 import "fmt"
 import "sync"
 import "bytes"
+import "unsafe"
+import "strings"
 import "testing"
+import "encoding/base64"
 import "encoding/binary"
 import "github.com/launix-de/memcp/scm"
 
@@ -715,4 +718,158 @@ func TestConcurrentReadAfterCompress(t *testing.T) {
 	for e := range errs {
 		t.Error(e)
 	}
+}
+
+// Arbitrary text resembling Base64 must never be normalized or panic at rebuild.
+func TestBase64ExactText(t *testing.T) {
+	for _, value := range []string{"", "Zh==", "Zm9=", "AA=A", "A===", "====", "Zg=", "Z", "Zg===", "Zg==\n", "Zh", "Zm9", "-_9=", "-_9", "Zg==", "Zm8=", "Zg", "Zm8"} {
+		t.Run(value, func(t *testing.T) {
+			c := buildStringColumn([]string{value})
+			if got := c.GetValue(0).String(); got != value {
+				t.Fatalf("got %q want %q", got, value)
+			}
+			var buf bytes.Buffer
+			c.Serialize(&buf)
+			var restored StorageString
+			restored.Deserialize(bytes.NewReader(buf.Bytes()[1:]))
+			if got := restored.GetValue(0).String(); got != value {
+				t.Fatalf("restored %q want %q", got, value)
+			}
+		})
+	}
+}
+
+func TestNewStringFormats(t *testing.T) {
+	for _, fixture := range []struct {
+		format StringFormat
+		values []string
+	}{
+		{FormatRawBase64Std, []string{"+w", "//8", "Zm9v", ""}},
+		{FormatRawBase64URL, []string{"-w", "__8", "Zm9v", ""}},
+		{FormatDateTimeZulu, []string{"2026-09-09 12:34:56.789Z", "2026-09-09T00:00:00Z", ""}},
+		{FormatDateTimeOffset, []string{"2026-09-09T12:34:56+02:00", "2026-09-09T00:00:00Z", ""}},
+	} {
+		for _, nodict := range []bool{false, true} {
+			values := fixture.values
+			if nodict {
+				values = make([]string, 128)
+				for i := range values {
+					switch fixture.format {
+					case FormatRawBase64Std:
+						values[i] = base64.RawStdEncoding.EncodeToString([]byte{251, byte(i)})
+					case FormatRawBase64URL:
+						values[i] = base64.RawURLEncoding.EncodeToString([]byte{251, byte(i)})
+					case FormatDateTimeZulu:
+						values[i] = fmt.Sprintf("2026-09-09 12:34:56.%03dZ", i)
+					case FormatDateTimeOffset:
+						values[i] = fmt.Sprintf("2026-09-09T12:34:56.%03d+02:00", i)
+					}
+				}
+			}
+			c := buildStringColumn(values)
+			if c.format != fixture.format || c.nodict != nodict {
+				t.Fatalf("format=%d nodict=%v want %d %v", c.format, c.nodict, fixture.format, nodict)
+			}
+			check := func(c *StorageString) {
+				for i, v := range values {
+					if got := c.GetValue(uint32(i)).String(); got != v {
+						t.Fatalf("got %q want %q", got, v)
+					}
+				}
+				verifyStringBulkAgainstGetValue(t, "new format", c, len(values))
+			}
+			check(c)
+			nullable := make([]scm.Scmer, len(values)+1)
+			for i, v := range values {
+				nullable[i] = scm.NewString(v)
+			}
+			nullable[len(values)] = scm.NewNil()
+			withNull := buildStorageString(nullable)
+			if withNull.format != fixture.format {
+				t.Fatal("NULL changed the selected format")
+			}
+			verifyStringBulkAgainstGetValue(t, "new format with NULL", withNull, len(nullable))
+			var buf bytes.Buffer
+			c.Serialize(&buf)
+			var restored StorageString
+			restored.Deserialize(bytes.NewReader(buf.Bytes()[1:]))
+			check(&restored)
+		}
+	}
+}
+
+func TestBase64ComparisonRepresentations(t *testing.T) {
+	texts := []string{strings.Repeat("a", 300), "Zh==", "Zm9=", "AA=A", "Zh", "", "AAAA", "aaaa", "++//", "--__", "Zg==", "Zg", "Zm8=", "Zm8", "KAAA", "kAAA", "SAAA", "sAAA", "AAAAZg==", "aaaaZg=="}
+	for _, tail := range []string{"Zg==", "Zh==", "Zm8=", "Zm9=", "Zg", "Zh"} {
+		texts = append(texts, strings.Repeat("AAAA", 70)+tail)
+	}
+	for _, at := range []int{0, 3, 4, 127, 128, 129, 2047} {
+		raw := strings.Repeat("x", 2048)
+		texts = append(texts, base64.StdEncoding.EncodeToString([]byte(raw[:at]+"y"+raw[at+1:])))
+	}
+	variants := func(s string) []scm.Scmer {
+		out := []scm.Scmer{scm.NewString(s)}
+		for _, f := range base64Formats {
+			if raw, err := f.encoding.DecodeString(s); err == nil && base64Encoding(f.format).EncodeToString(raw) == s {
+				out = append(out, scm.NewBString(unsafe.SliceData(raw), len(raw), f.format == FormatBase64Lower || f.format == FormatRawBase64URL, f.format == FormatRawBase64Std || f.format == FormatRawBase64URL))
+			}
+		}
+		return out
+	}
+	// Include mixed CString and Unicode strings, whose case folding can change byte length.
+	values := []scm.Scmer{comparisonCString(strings.Repeat("a", 300), FormatOrderedHexLower, 1), comparisonCString("aaaa", FormatOrderedHexLower, 1), scm.NewString("KAAA"), scm.NewString("ſAAA")}
+	for _, text := range texts {
+		values = append(values, variants(text)...)
+	}
+	for _, a := range values {
+		for _, b := range values {
+			ap, bp := scm.NewString(a.String()), scm.NewString(b.String())
+			for _, coll := range []string{"utf8_bin", "utf8_general_ci"} {
+				for _, name := range []string{"equal_collate", "notequal_collate"} {
+					fn := scm.Globalenv.Vars[scm.Symbol(name)].Func()
+					if fn(a, b, scm.NewString(coll)).Bool() != fn(ap, bp, scm.NewString(coll)).Bool() {
+						t.Fatalf("%s %s differs across representations: %q vs %q", name, coll, ap.String(), bp.String())
+					}
+				}
+			}
+			if scm.Equal(a, b) != scm.Equal(ap, bp) || scm.EqualSQL(a, b).Bool() != scm.EqualSQL(ap, bp).Bool() || scm.Less(a, b) != scm.Less(ap, bp) {
+				t.Fatalf("comparison mismatch %q/%d and %q/%d", ap.String(), a.GetTag(), bp.String(), b.GetTag())
+			}
+		}
+	}
+}
+
+func TestBase64PackedOrderBits(t *testing.T) {
+	for size := 1; size <= 9; size++ {
+		left := make([]byte, size)
+		for i := range left {
+			left[i] = byte(i*37 + 251)
+		}
+		for pos := range left {
+			for bit := 0; bit < 8; bit++ {
+				right := append([]byte(nil), left...)
+				right[pos] ^= 1 << bit
+				for _, url := range []bool{false, true} {
+					for _, raw := range []bool{false, true} {
+						a := scm.NewBString(unsafe.SliceData(left), len(left), url, raw)
+						b := scm.NewBString(unsafe.SliceData(right), len(right), url, raw)
+						if scm.Less(a, b) != (a.String() < b.String()) || scm.Less(b, a) != (b.String() < a.String()) {
+							t.Fatalf("size=%d pos=%d bit=%d url=%v raw=%v", size, pos, bit, url, raw)
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestStringUUIDWithEmpty(t *testing.T) {
+	values := []string{"550e8400-e29b-41d4-a716-446655440000", ""}
+	c := buildStringColumn(values)
+	for i, want := range values {
+		if got := c.GetValue(uint32(i)).String(); got != want {
+			t.Fatalf("got %q want %q", got, want)
+		}
+	}
+	verifyStringBulkAgainstGetValue(t, "UUID with empty", c, len(values))
 }

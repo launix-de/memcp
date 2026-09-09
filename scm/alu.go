@@ -33804,7 +33804,7 @@ func init_alu() {
 				}
 				return NewBool(as == bs)
 			}
-			return EqualSQL(a[0], a[1])
+			return equalCollatedValues(a[0], a[1], coll)
 		},
 		Type: &TypeDescriptor{Kind: "func", Description: "performs SQL equality with a specified collation (e.g. *_ci case-insensitive, *_bin case-sensitive); returns nil if either arg is nil",
 			Params: []*TypeDescriptor{
@@ -35449,9 +35449,36 @@ func init_alu() {
 					d208.ID = 0
 					d207 = JITPrepareScmerGoArg(ctx, d207)
 					d208 = JITPrepareScmerGoArg(ctx, d208)
+					ctx.EnsureDesc(&d22)
+					if d22.Loc == LocImm {
+						tmpPair := JITValueDesc{Loc: LocRegPair, Type: d22.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+						ctx.TrackImm(d22.Imm)
+						ptrWord, _ := d22.Imm.RawWords()
+						ctx.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
+						ctx.EmitMovRegImm64(tmpPair.Reg2, uint64(len(d22.Imm.String())))
+						d22 = tmpPair
+					} else if d22.Loc == LocReg {
+						tmpPair := JITValueDesc{Loc: LocRegPair, Type: d22.Type, Reg: ctx.AllocRegExcept(d22.Reg), Reg2: ctx.AllocRegExcept(d22.Reg)}
+						switch d22.Type {
+						case tagBool:
+							ctx.EmitMakeBool(tmpPair, d22)
+						case tagInt:
+							ctx.EmitMakeInt(tmpPair, d22)
+						case tagFloat:
+							ctx.EmitMakeFloat(tmpPair, d22)
+						default:
+							panic("jit: generic call arg scalar type unknown for 2-word value")
+						}
+						ctx.FreeDesc(&d22)
+						d22 = tmpPair
+					}
+					if d22.Loc != LocRegPair && d22.Loc != LocStackPair && d22.Loc != LocInputPair {
+						panic("jit: generic call arg expects 2-word value (equalCollatedValues arg2)")
+					}
 					ctx.SyncDesc(&d207)
 					ctx.SyncDesc(&d208)
-					d209 = ctx.EmitGoCallScalar(GoFuncAddr(EqualSQL), []JITValueDesc{d207, d208}, 2)
+					ctx.SyncDesc(&d22)
+					d209 = ctx.EmitGoCallScalar(GoFuncAddr(equalCollatedValues), []JITValueDesc{d207, d208, d22}, 2)
 					d209.NoHeapPointer = false
 					ctx.BindReg(d209.Reg, &d209)
 					ctx.BindReg(d209.Reg2, &d209)

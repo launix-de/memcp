@@ -26,43 +26,39 @@ const CStringFormatShift = 43
 const CStringOffsetShift = 42
 const CStringLengthMask = (1 << CStringOffsetShift) - 1
 
-// CStringAlphabet is the shared immutable format registry for storage and
+// cstringAlphabets is the shared immutable format registry for storage and
 // execution. IDs 1..10 are permanent legacy assignments; 11..16 are sorted,
-// high-nibble-first encodings. UUIDs have fixed separators, not a nibble table.
+// high-nibble-first encodings, as are timestamp IDs 19/20. UUIDs have fixed
+// separators, not a nibble table. IDs 17/18 belong to BString storage.
+var cstringAlphabets = [...]string{
+	1:  "0123456789 +-/()",
+	2:  "0123456789abcdef",
+	3:  "0123456789ABCDEF",
+	8:  "0123456789+-.,eE",
+	9:  "0123456789-:. T",
+	10: "0123456789+-()#*",
+	11: "0123456789abcdef",
+	12: "0123456789ABCDEF",
+	13: " ()+-/0123456789",
+	14: "#()*+-0123456789",
+	15: "+,-.0123456789Ee",
+	16: " -.0123456789:T",
+	19: " -.0123456789:TZ",
+	20: "+-.0123456789:TZ",
+}
+
+// CStringAlphabet returns an immutable nibble alphabet, or empty for other formats.
 func CStringAlphabet(format uint8) string {
-	switch format {
-	case 1:
-		return "0123456789 +-/()"
-	case 2:
-		return "0123456789abcdef"
-	case 3:
-		return "0123456789ABCDEF"
-	case 8:
-		return "0123456789+-.,eE"
-	case 9:
-		return "0123456789-:. T"
-	case 10:
-		return "0123456789+-()#*"
-	case 11:
-		return "0123456789abcdef"
-	case 12:
-		return "0123456789ABCDEF"
-	case 13:
-		return " ()+-/0123456789"
-	case 14:
-		return "#()*+-0123456789"
-	case 15:
-		return "+,-.0123456789Ee"
-	case 16:
-		return " -.0123456789:T"
+	if int(format) < len(cstringAlphabets) {
+		return cstringAlphabets[format]
 	}
 	return ""
 }
 
 // Two decoded ASCII characters per packed byte, in text order. The folded
 // table keeps case conversion out of compressed/plain comparison loops.
-var cstringPairs, cstringFoldedPairs = func() ([17][256]uint16, [17][256]uint16) {
-	var plain, folded [17][256]uint16
+var cstringPairs, cstringFoldedPairs = func() ([21][256]uint16, [21][256]uint16) {
+	var plain, folded [21][256]uint16
 	for f := 0; f < len(plain); f++ {
 		alphabet := CStringAlphabet(uint8(f))
 		if alphabet == "" {
@@ -152,6 +148,15 @@ func (s stringView) at(i int) byte {
 }
 
 func (v stringView) decodeInto(dst []byte, start int, fold bool) {
+	if v.format == 0 {
+		copy(dst, v.data[start:start+len(dst)])
+		if fold {
+			for i, c := range dst {
+				dst[i] = asciiFoldByte(c)
+			}
+		}
+		return
+	}
 	if v.alphabet != "" {
 		pairs := &cstringPairs[v.format]
 		if fold {
@@ -463,6 +468,20 @@ func equalStringValues(a, b Scmer, fold bool) bool {
 			if c, ok := compareStringViews(av, bv, fold); ok {
 				return c == 0
 			}
+		}
+	}
+	if a.IsBString() || b.IsBString() {
+		if !fold && a.IsBString() && b.IsBString() && auxVal(a.aux)>>46 == auxVal(b.aux)>>46 {
+			an, bn := int(auxVal(a.aux)&bstringLengthMask), int(auxVal(b.aux)&bstringLengthMask)
+			return unsafe.String(a.ptr, an) == unsafe.String(b.ptr, bn)
+		}
+		if !fold {
+			if equal, ok := equalBase64Bytes(a, b); ok {
+				return equal
+			}
+		}
+		if c, ok := compareBase64Text(a, b, fold); ok {
+			return c == 0
 		}
 	}
 	if fold {
