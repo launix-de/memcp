@@ -69,4 +69,37 @@ test_cases:
       data:
         - collation_database: "utf8mb4_general_ci"
 
+  - name: "Packet-size metadata uses the SQL frontend over HTTP"
+    sql: "SELECT @@max_allowed_packet AS packet_size"
+    expect:
+      data: [{packet_size: 41943040}]
+
+  - name: "MySQL client probes use the same SQL system-variable catalog"
+    mysql:
+      statements:
+        - sql: "select @@max_allowed_packet"
+          expect:
+            data: [{"@@max_allowed_packet": 41943040}]
+        - sql: "  SeLeCt @@max_allowed_packet AS packet_size"
+          expect:
+            data: [{packet_size: 41943040}]
+        - sql: "SHOW VARIABLES LIKE 'max_allowed_packet'"
+          expect:
+            data: [{Variable_name: "max_allowed_packet", Value: 41943040}]
+        - sql: "SHOW VARIABLES WHERE Variable_name = 'max_allowed_packet'"
+          expect:
+            data: [{Variable_name: "max_allowed_packet", Value: 41943040}]
+        - sql: "select @@version_comment limit 1"
+          expect:
+            rows: 1
+        - sql: "SELECT @@version_comment <> '' AS has_comment"
+          expect:
+            data: [{has_comment: 1}]
+
+  - name: "Malformed client-variable probes are rejected by SQL parsing"
+    mysql:
+      statements:
+        - sql: "SELECT @@max_allowed_packet FROM"
+          expect: {error: true}
+
 cleanup: []

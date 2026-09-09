@@ -2055,18 +2055,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		/* SHOW [GLOBAL|SESSION] VARIABLES [LIKE pattern] — filter at parse time, dynamic values at query time */
 		(parser '((atom "SHOW" true) (? (or (atom "GLOBAL" true) (atom "SESSION" true))) (atom "VARIABLES" true) (atom "WHERE" true) (define where sql_expression))
 			(begin
-				(define all_rows (list
-					(list "version"                 "0.9")
-					(list "character_set_server"    "utf8mb4")
-					(list "collation_server"        "utf8mb4_general_ci")
-					(list "lower_case_table_names"  0)
-					(list "time_zone"               (list (quote session_globalvar) "time_zone"))
-					(list "system_time_zone"        (list (quote session_globalvar) "system_time_zone"))
-					(list "key_buffer_size"         0)
-					(list "max_allowed_packet"      67108864)
-					(list "max_connections"         151)
-					(list "innodb_buffer_pool_size" 0)
-				))
+				(define all_rows (sql_system_variable_rows))
 				(define transform_col (lambda (expr row_expr) (match expr
 					'('get_column _ _ col _) (list (quote get_assoc) row_expr col)
 					(cons head tail) (cons (transform_col head row_expr) (map tail (lambda (item) (transform_col item row_expr))))
@@ -2080,18 +2069,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		)
 		(parser '((atom "SHOW" true) (? (or (atom "GLOBAL" true) (atom "SESSION" true))) (atom "VARIABLES" true) (? (atom "LIKE" true) (define likepattern sql_expression)))
 			(begin
-				(define all_rows (list
-					(list "version"                 "0.9")
-					(list "character_set_server"    "utf8mb4")
-					(list "collation_server"        "utf8mb4_general_ci")
-					(list "lower_case_table_names"  0)
-					(list "time_zone"               (list (quote session_globalvar) "time_zone"))
-					(list "system_time_zone"        (list (quote session_globalvar) "system_time_zone"))
-					(list "key_buffer_size"         0)
-					(list "max_allowed_packet"      67108864)
-					(list "max_connections"         151)
-					(list "innodb_buffer_pool_size" 0)
-				))
+				(define all_rows (sql_system_variable_rows))
 				(define pat (coalesce likepattern "%"))
 				(define filtered (filter all_rows (lambda (row) (strlike (nth row 0) pat "utf8mb4_general_ci"))))
 				(cons (quote !begin) (map filtered (lambda (row)

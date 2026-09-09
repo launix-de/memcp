@@ -814,7 +814,9 @@ catalog observations, and data lifecycle. Constructors may pack and validate
 explicit access requirements, but must not choose a query plan or parse SQL.
 `scm/` owns language semantics, generic expression metadata, closure handling,
 and JIT compilation. SQL keywords and SELECT parameterization policy do not
-belong in its tokenizer or optimizer.
+belong in its tokenizer or optimizer. MySQL client probes pass through the same
+SQL parser and system-variable catalog as HTTP queries; defaults, mutable
+variable state, and SHOW row construction belong together in `lib/sql-metadata.scm`.
 
 Local optimizer hooks on an existing operator plan remain valid in Go. This
 includes scan batching, invariant-filter hoisting, EXISTS reduction rewrites,

@@ -673,28 +673,6 @@ the latter is expanded before logical planning and never materialized. */
 without them repeated grants create duplicate accounts and ambiguous authentication. */
 (init_sql_catalog_keys)
 
-/* global variables exposed via @@ and SHOW VARIABLES */
-(set globalvars (newsession))
-(globalvars "lower_case_table_names" 0)
-(globalvars "character_set_server" "utf8mb4")
-(globalvars "collation_server" "utf8mb4_general_ci")
-(globalvars "character_set_client" "utf8mb4")
-(globalvars "character_set_results" "utf8mb4")
-(globalvars "collation_connection" "utf8mb4_general_ci")
-(globalvars "collation_database" "utf8mb4_general_ci")
-(globalvars "sql_mode" "")
-(globalvars "unique_checks" 1)
-(globalvars "foreign_key_checks" 1)
-(globalvars "sql_notes" 1)
-(globalvars "time_zone" "UTC")
-(globalvars "system_time_zone" (system_time_zone))
-
-/* session_globalvar: reads from session first, falls back to globalvars.
-Used for @@var resolution so per-session SET affects @@var reads. */
-(define session_globalvar (lambda (key) (globalvars key)))
-(define session_globalvar_explicit (lambda (session key) (coalesceNil (session key) (globalvars key))))
-
-
 /* http hook for handling SQL */
 (define http_handler (begin
 	(set old_handler http_handler)
