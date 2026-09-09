@@ -1876,7 +1876,17 @@ start_scan:
 	// membership walk cheaper even when the RecSet is small relative to the
 	// whole table; whole-table density is therefore the wrong crossover input.
 	mainEnd := int(s.t.main_count)
-	if lastSorted >= 0 && !indexBounds.upperLast().IsNil() && mainIdx < mainEnd {
+	// An unbounded trailing ORDER BY key does not remove the upper end of
+	// an earlier equality prefix. Resolve that end before treating the main
+	// interval as exact or using its size to choose a RecSet traversal.
+	hasUpperBound := lastSorted >= 0 && !indexBounds.upperLast().IsNil()
+	for i := 0; i < lastSorted && !hasUpperBound; i++ {
+		if s.columnIsSorted(i) {
+			hasUpperBound = scanAccessBoundaryIsPoint(bounds, i) ||
+				!bounds.boundValue(i, false).IsNil() || !bounds.boundValue(i, true).IsNil()
+		}
+	}
+	if hasUpperBound && mainIdx < mainEnd {
 		mainEnd = mainIdx + sort.Search(mainEnd-mainIdx, func(offset int) bool {
 			recid := getRecid(mainIdx + offset)
 			_, beyond := s.rowWithinBounds(bounds, indexBounds, cmpCols, lastSorted, sortedMask, unboundedMask, lowerInclusive, upperInclusive, func(col int) scm.Scmer {
