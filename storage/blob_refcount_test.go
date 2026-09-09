@@ -468,6 +468,8 @@ func TestBlobDeleteRowsAndRebuild(t *testing.T) {
 
 	// Rebuild: old shard (3 blobs) replaced by new shard (1 blob: longA)
 	Rebuild(true, true)
+	// Reclamation requires committed-generation evidence, not an RC decrement.
+	CleanDatabase(db)
 
 	// Only blob A should remain
 	if n := countBlobFiles(t, "tdb4"); n != 1 {
@@ -547,8 +549,9 @@ func TestBlobDropTableReleasesBlobs(t *testing.T) {
 		t.Fatalf("expected 3 blob refs before drop, got %d", len(refs))
 	}
 
-	// Drop table should release blob refcounts and delete blob files
+	// Drop retires ownership; only generation-based cleanup may delete files.
 	DropTable("tdb2", "docs", false)
+	CleanDatabase(db)
 
 	if n := countBlobFiles(t, "tdb2"); n != 0 {
 		t.Fatalf("expected 0 blob files after drop, got %d", n)
@@ -642,8 +645,9 @@ func TestBlobSharedAcrossTables(t *testing.T) {
 		t.Fatalf("t2 content after t1 drop: expected %d, got %d", len(shared), readLen)
 	}
 
-	// Drop second table: blobs should be deleted
+	// Drop second table, then reclaim the now-unowned files by generation proof.
 	DropTable("tdb3", "t2", false)
+	CleanDatabase(db)
 
 	if n := countBlobFiles(t, "tdb3"); n != 0 {
 		t.Fatalf("after dropping both tables: expected 0 blob files, got %d", n)
@@ -859,6 +863,7 @@ func TestOverlayBlobLoadedReferenceLifecycle(t *testing.T) {
 		t.Fatal("v1 release removed legacy owner's blob")
 	}
 	legacy.ReleaseBlobs(1) // Known build/migration ownership is unambiguous.
+	CleanDatabase(db)
 	if countBlobFiles(t, "gcdb") != 0 {
 		t.Fatal("last known owner failed to release blob")
 	}

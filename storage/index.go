@@ -1035,6 +1035,22 @@ func (s *StorageIndex) fullScan(maxInsertIndex int, buf []uint32, matchers []Ind
 // cols must contain value getters for each index column in order.
 // The caller must hold s.mu.Lock() or have exclusive access.
 func (s *StorageIndex) buildIndex(state *storageIndexState, cols []colGetter, tx *TxContext) {
+	// A reader, comparator or hook may panic (for example on a missing blob).
+	// Never publish or retain a partially constructed index as usable state.
+	// The caller owns mu throughout construction and failure cleanup.
+	complete := false
+	state.active = false
+	defer func() {
+		if !complete {
+			state.mainIndexes = StorageInt{}
+			state.mainIndexPositions = StorageInt{}
+			state.deltaBtree = nil
+			state.minVals, state.maxVals = nil, nil
+			state.indexHooks = nil
+			state.indexHookBytes.Store(0)
+			state.computedRevisions = nil
+		}
+	}()
 	startRevisions := s.computedRevisionsRLocked()
 	if !s.Native {
 		// main storage: build sort-order index
@@ -1229,6 +1245,7 @@ func (s *StorageIndex) buildIndex(state *storageIndexState, cols []colGetter, tx
 	endRevisions := s.computedRevisionsRLocked()
 	state.computedRevisions = endRevisions
 	state.active = sameComputedRevisions(startRevisions, endRevisions)
+	complete = true
 }
 
 // buildMainIndexPositionsLocked lazily constructs the inverse of mainIndexes
@@ -1727,8 +1744,12 @@ func (s *StorageIndex) iterate(tx *TxContext, bounds scanAccess, indexBoundsValu
 				s.mu.Unlock()
 				goto start_scan
 			}
-			s.buildIndex(state, cols, tx)
-			s.mu.Unlock()
+			func() {
+				// Error propagation must not strand the shared index mutex:
+				// every later scan snapshots state under this same lock.
+				defer s.mu.Unlock()
+				s.buildIndex(state, cols, tx)
+			}()
 			// register with CacheManager
 			GlobalCache.AddItem(s, int64(s.ComputeSize()), TypeIndex, indexCleanup, indexLastUsed, indexGetScore)
 		}
