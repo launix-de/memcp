@@ -363,6 +363,7 @@ bounded scalar metadata; this lookup never scans, loads columns or builds indexe
 						(define value_expr (list (list (quote lambda) (list (quote estimate))
 							(list (quote list)
 								(list (quote qassoc_get) (quote estimate) (list (quote quote) (quote value)) nil)
+								(list (quote qassoc_get) (quote estimate) (list (quote quote) (quote filter_input_selectivity)) nil)
 								(list (quote qassoc_get) (quote estimate) (list (quote quote) (quote source)) nil))) read_expr))
 						(planner_record_guard_condition
 							(list (quote equal?) value_expr (list (quote quote)
@@ -3381,6 +3382,14 @@ planning preserves the proven bound without consulting index availability. */
 					(min 1 (coalesceNil (qassoc_get base (quote estimated_rows) nil) 1)))
 				(quote capped) false)))))
 
+/* Result cardinality and the input consumed by a residual matcher are distinct
+cost inputs. Learned output rates must not erase measured access work. Neither
+quantity proves membership: the residual predicate is always retained. */
+(define planner_filter_input_rows (lambda (estimate fallback)
+	(coalesceNil (qassoc_get estimate (quote filter_input_rows) nil)
+		(if (equal? (qassoc_get estimate (quote population) nil) (quote index_hook_candidates))
+			(qassoc_get estimate (quote rows) fallback) fallback))))
+
 (define planner_stage_filter_estimate (lambda (input max_rows tx planning_session)
 	(if (union_block? input)
 		(begin
@@ -3408,6 +3417,9 @@ planning preserves the proven bound without consulting index availability. */
 						(list (quote capped) capped)
 						(list (quote sampled) sampled_rows)
 						(list (quote input) input_rows)
+						(list (quote filter_input_rows) (planner_add_estimates
+							(map available (lambda (estimate)
+								(planner_filter_input_rows estimate (qassoc_get estimate (quote input) nil))))))
 						(list (quote estimated_rows) estimated_rows)
 						(list (quote population) (planner_merge_estimate_population available))
 						(list (quote coverage) (planner_merge_estimate_coverage available))))))
@@ -3738,11 +3750,8 @@ carrier crossover. */
 		candidate bound, not over the complete source. Keep the logical cardinality
 		separate: an approximate hook upper bound is physical work, not proof that
 		those rows satisfy LIKE/MATCH. */
-		(define index_filter_rows (if (and
-			(equal? estimate_population (quote index_hook_candidates))
-			(and (number? estimate_rows) (number? candidate_rows)))
-			(min candidate_rows estimate_rows)
-			candidate_rows))
+		(define index_filter_rows (min candidate_rows
+			(planner_filter_input_rows candidate_estimate candidate_rows)))
 		(define index_filter_fraction (if (and (number? candidate_rows) (> candidate_rows 0))
 			(min 1 (/ index_filter_rows candidate_rows)) 1))
 		(define driver_work (membership_driver_work_profile driver sources block planning_session))

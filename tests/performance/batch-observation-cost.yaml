@@ -94,7 +94,7 @@ test_cases:
       data: [{id: 19996}, {id: 19994}]
 
   - name: "Absent search exhausts candidates without manufacturing a page"
-    sql: |
+    sql: &boc_absent_query |
       SELECT d.id, label.allowed FROM boc_document d
       LEFT JOIN boc_acl label ON label.id = d.domain_id
       WHERE d.file_id IN (
@@ -102,6 +102,17 @@ test_cases:
         UNION SELECT id FROM boc_file WHERE body LIKE '%absent%'
       ) AND EXISTS (SELECT 1 FROM boc_acl a WHERE a.id = d.domain_id AND a.allowed = 1)
       ORDER BY d.rank_value DESC LIMIT 5
+    expect:
+      rows: 0
+
+  # Keep the original correctness/compile-size gate above intact. A separate
+  # timed case additionally protects against guards recompiling every request.
+  - name: "Cached absent search retains learned-zero plan guards"
+    performance_rows: 20000
+    warmup: 3
+    timing_samples: 9
+    threshold_ms: 1000
+    sql: *boc_absent_query
     expect:
       rows: 0
 

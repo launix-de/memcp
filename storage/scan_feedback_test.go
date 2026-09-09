@@ -41,20 +41,20 @@ func TestFilterFeedbackMixAndWeightedMerge(t *testing.T) {
 	tbl := feedbackTestTable(100, 900)
 	key := &filterObservation{key: "predicate", value: .1, generation: tbl.plannerStatsToken.Load()}
 	shards := tbl.topology.Load().shards
-	shards[0].filterFeedback.observe(key, 100, 100)
-	shards[1].filterFeedback.observe(key, 900, 0)
+	shards[0].filterFeedback.observe(key, 100, 100, 100)
+	shards[1].filterFeedback.observe(key, 900, 0, 900)
 	tbl.publishFilterFeedback(key)
 	value, source, known := tbl.filterSelectivity(key)
 	if !known || source != "scan_feedback" || math.Abs(value-.1) > 1e-12 {
 		t.Fatalf("weighted estimate %v %s %v", value, source, known)
 	}
-	shards[0].filterFeedback.observe(key, 100, 0)
+	shards[0].filterFeedback.observe(key, 100, 0, 100)
 	entry := shards[0].filterFeedback[filterFeedbackSlot(key.key)].Load()
 	if entry.value != .99 || entry.samples != 2 {
 		t.Fatalf("EMA = %+v", entry)
 	}
 	// The immutable old entry remains unchanged after publishing its successor.
-	shards[0].filterFeedback.observe(key, 100, 0)
+	shards[0].filterFeedback.observe(key, 100, 0, 100)
 	if entry.value != .99 {
 		t.Fatal("published observation was mutated")
 	}
@@ -68,16 +68,16 @@ func TestFilterFeedbackUnknownShardAndInvalidSamples(t *testing.T) {
 	tbl := feedbackTestTable(100, 900)
 	key := &filterObservation{key: "predicate", value: .1, generation: tbl.plannerStatsToken.Load()}
 	shard := tbl.topology.Load().shards[0]
-	shard.filterFeedback.observe(key, 100, 50)
+	shard.filterFeedback.observe(key, 100, 50, 100)
 	tbl.publishFilterFeedback(key)
 	value, _, _ := tbl.filterSelectivity(key)
 	if math.Abs(value-.14) > 1e-12 {
 		t.Fatalf("missing shard prior = %v", value)
 	}
 	before := shard.filterFeedback[filterFeedbackSlot(key.key)].Load()
-	shard.filterFeedback.observe(key, 0, 0)
-	shard.filterFeedback.observe(key, 100, 101)
-	shard.filterFeedback.observe(key, 100, -1)
+	shard.filterFeedback.observe(key, 0, 0, 0)
+	shard.filterFeedback.observe(key, 100, 101, 100)
+	shard.filterFeedback.observe(key, 100, -1, 100)
 	if shard.filterFeedback[filterFeedbackSlot(key.key)].Load() != before {
 		t.Fatal("invalid observation published")
 	}
@@ -87,7 +87,7 @@ func TestFilterFeedbackHistogramInterpolation(t *testing.T) {
 	tbl := feedbackTestTable(10000)
 	add := func(key string, length int, matched int64) {
 		k := &filterObservation{key: key, family: "label:contains", length: length, generation: tbl.plannerStatsToken.Load()}
-		tbl.topology.Load().shards[0].filterFeedback.observe(k, 10000, matched)
+		tbl.topology.Load().shards[0].filterFeedback.observe(k, 10000, matched, 10000)
 		tbl.publishFilterFeedback(k)
 	}
 	add("short", 2, 5000)
@@ -117,7 +117,7 @@ func TestFilterFeedbackConcurrentPublication(t *testing.T) {
 		go func() {
 			defer workers.Done()
 			for i := 0; i < 100; i++ {
-				tbl.topology.Load().shards[0].filterFeedback.observe(key, 100, int64(i))
+				tbl.topology.Load().shards[0].filterFeedback.observe(key, 100, int64(i), 100)
 				tbl.publishFilterFeedback(key)
 				if _, err := json.Marshal(tbl.persistFilterFeedback()); err != nil {
 					t.Error(err)
@@ -257,7 +257,7 @@ func TestFilterFeedbackCheckpoint(t *testing.T) {
 	tbl.Name = "documents"
 	tbl.publishShowColumnsSnapshot()
 	key := &filterObservation{key: "contains-word", family: "name:contains", length: 4, generation: tbl.plannerStatsToken.Load()}
-	tbl.topology.Load().shards[0].filterFeedback.observe(key, 1000, 123)
+	tbl.topology.Load().shards[0].filterFeedback.observe(key, 1000, 123, 1000)
 	tbl.publishFilterFeedback(key)
 	// Maintenance changes the runtime generation before schema checkpointing.
 	tbl.plannerStatsToken.Add(1)
@@ -373,16 +373,16 @@ func TestFilterFeedbackUnchangedMeasurementDoesNotWrite(t *testing.T) {
 	tbl := feedbackTestTable(100)
 	key := &filterObservation{key: "stable", generation: tbl.plannerStatsToken.Load()}
 	shard := tbl.topology.Load().shards[0]
-	shard.filterFeedback.observe(key, 100, 90)
+	shard.filterFeedback.observe(key, 100, 90, 100)
 	tbl.publishFilterFeedback(key)
 	beforeShard := shard.filterFeedback[filterFeedbackSlot(key.key)].Load()
 	beforeTable := tbl.filterFeedback.Load()
-	shard.filterFeedback.observe(key, 100, 90)
+	shard.filterFeedback.observe(key, 100, 90, 100)
 	tbl.publishFilterFeedback(key)
 	if beforeShard != shard.filterFeedback[filterFeedbackSlot(key.key)].Load() || beforeTable != tbl.filterFeedback.Load() {
 		t.Fatal("identical observation dirtied a published cache cell")
 	}
-	shard.filterFeedback.observe(key, 200, 180)
+	shard.filterFeedback.observe(key, 200, 180, 200)
 	if beforeShard == shard.filterFeedback[filterFeedbackSlot(key.key)].Load() {
 		t.Fatal("changed population was ignored")
 	}
@@ -393,12 +393,12 @@ func TestFilterFeedbackSameLengthWordsRetainExactRates(t *testing.T) {
 	shard := tbl.topology.Load().shards[0]
 	common := &filterObservation{key: "alpha", family: "label:contains", length: 5, generation: tbl.plannerStatsToken.Load()}
 	rare := &filterObservation{key: "bravo", family: common.family, length: 5, generation: common.generation}
-	shard.filterFeedback.observe(common, 1000, 900)
+	shard.filterFeedback.observe(common, 1000, 900, 1000)
 	tbl.publishFilterFeedback(common)
-	shard.filterFeedback.observe(rare, 1000, 10)
+	shard.filterFeedback.observe(rare, 1000, 10, 1000)
 	tbl.publishFilterFeedback(rare)
 	for i := 0; i < 20; i++ {
-		shard.filterFeedback.observe(common, 1000, 900)
+		shard.filterFeedback.observe(common, 1000, 900, 1000)
 		tbl.publishFilterFeedback(common)
 	}
 	for key, want := range map[*filterObservation]float64{common: .9, rare: .01} {

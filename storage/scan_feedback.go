@@ -48,8 +48,12 @@ type filterObservation struct {
 	value      float64
 	population int64
 	observed   int64
-	samples    uint32
-	generation uint64
+	// Pre-residual input work is independent of output selectivity. This is
+	// generation-local costing telemetry, never a semantic membership bound.
+	filterInput float64
+	workKnown   bool
+	samples     uint32
+	generation  uint64
 }
 
 type filterFeedbackPart struct {
@@ -265,16 +269,17 @@ func filterFeedbackSlot(key string) uint64 {
 
 // Called exactly once after successful completion, never from an element loop.
 // One failed CAS drops a sample instead of spinning against concurrent queries.
-func (cache *filterFeedbackCache) observe(key *filterObservation, population, matched int64) {
+func (cache *filterFeedbackCache) observe(key *filterObservation, population, matched, candidates int64) {
 	if key == nil || population <= 0 || matched < 0 || matched > population {
 		return
 	}
 	cell := &cache[filterFeedbackSlot(key.key)]
 	old := cell.Load()
 	measured := float64(matched) / float64(population)
+	work := math.Min(1, math.Max(measured, float64(candidates)/float64(population)))
 	// Repeating the identical population/rate cannot improve the estimate. Do
 	// not allocate or dirty a shared cache line just to count redundant samples.
-	if old != nil && old.key == key.key && old.generation == key.generation && old.population == population && old.value == measured {
+	if old != nil && old.key == key.key && old.generation == key.generation && old.population == population && old.value == measured && old.workKnown && old.filterInput == work {
 		return
 	}
 	next := *key
@@ -284,8 +289,11 @@ func (cache *filterFeedbackCache) observe(key *filterObservation, population, ma
 	// A complete first observation replaces the cold prior. Subsequent complete
 	// observations use the requested 99/1 EMA; no per-batch weighting bias.
 	next.value = measured
+	next.filterInput, next.workKnown = work, true
 	if old != nil && old.key == key.key && old.generation == key.generation {
 		next.value = .99*old.value + .01*measured
+		// Access work can change abruptly when an autoindex becomes effective.
+		// Do not smear that change over 100 queries using the result-rate EMA.
 		next.samples = old.samples
 		if next.samples < 1000000 {
 			next.samples++
@@ -310,6 +318,7 @@ func (t *table) publishFilterFeedback(key *filterObservation) {
 	next.population = 0
 	next.observed = 0
 	next.samples = 0
+	next.filterInput, next.workKnown = 0, false
 	for _, shard := range topology.shards {
 		if shard == nil {
 			continue
@@ -319,26 +328,34 @@ func (t *table) publishFilterFeedback(key *filterObservation) {
 			continue
 		}
 		value := key.value
+		work := 1.0 // Missing shards receive no speculative index discount.
 		entry := shard.filterFeedback[filterFeedbackSlot(key.key)].Load()
 		if entry != nil && entry.key == key.key && entry.generation == key.generation {
 			value = entry.value
 			population = entry.population
 			next.observed += population
 			next.samples += entry.samples
+			if entry.workKnown {
+				work = entry.filterInput
+				next.workKnown = true
+			}
 		}
 		next.value += float64(population) * value
+		next.filterInput += float64(population) * work
 		next.population += population
 	}
 	// Cold shards may not yet expose their main count. Retain the prior for
 	// the remaining table population instead of extrapolating warm shards alone.
 	if missing := int64(t.CountEstimate()) - next.population; missing > 0 {
 		next.value += float64(missing) * key.value
+		next.filterInput += float64(missing)
 		next.population += missing
 	}
 	if next.population <= 0 || next.samples == 0 {
 		return
 	}
 	next.value /= float64(next.population)
+	next.filterInput /= float64(next.population)
 	old := t.filterFeedback.Load()
 	if old != nil && old.schema == t.filterSchemaFingerprint() {
 		previous := old.entries[filterFeedbackSlot(key.key)]
@@ -431,6 +448,23 @@ func (t *table) filterSelectivity(key *filterObservation) (float64, string, bool
 	return math.Max(0, math.Min(1, estimate)), "like_length_histogram", true
 }
 
+// Internal companion to the single public statistics reader. No shard access,
+// and no inference of physical work from another predicate's LIKE histogram.
+func (t *table) filterInputSelectivity(key *filterObservation) scm.Scmer {
+	if key == nil {
+		return scm.NewNil()
+	}
+	snapshot := t.filterFeedback.Load()
+	if snapshot == nil || snapshot.schema != t.filterSchemaFingerprint() {
+		return scm.NewNil()
+	}
+	entry := snapshot.entries[filterFeedbackSlot(key.key)]
+	if entry == nil || entry.key != key.key || !entry.workKnown || entry.generation != t.plannerStatsToken.Load() {
+		return scm.NewNil()
+	}
+	return scm.NewFloat(entry.filterInput)
+}
+
 // Geometric classes retain discrimination for very small selectivities. A
 // changed class invalidates cached costing, while small EMA changes do not.
 func filterFeedbackClass(value float64) uint64 {
@@ -499,6 +533,9 @@ func (s *tableFilterFeedback) updateFingerprint() {
 		if entry != nil {
 			s.fingerprint = plannerFingerprintString(s.fingerprint, entry.key)
 			s.fingerprint = plannerFingerprintMix(s.fingerprint, filterFeedbackClass(entry.value))
+			if entry.workKnown {
+				s.fingerprint = plannerFingerprintMix(s.fingerprint, filterFeedbackClass(entry.filterInput)+1)
+			}
 			s.fingerprint = plannerFingerprintMix(s.fingerprint, plannerFractionBucket(float64(entry.observed)/float64(entry.population)))
 		}
 	}

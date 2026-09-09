@@ -1,0 +1,116 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: "1.0"
+  description: "Keep pre-residual scan work separate from learned output cardinality"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS fif_rows"
+  - sql: "CREATE TABLE fif_rows (id INT PRIMARY KEY, label TEXT)"
+  - scm: |
+      (begin
+        (insert (table "memcp-tests" "fif_rows") '("id" "label")
+          (map (produceN 1000) (lambda (i) (list i (if (< i 10) "needle" "unrelated")))))
+        (rebuild (table "memcp-tests" "fif_rows") true false))
+cleanup:
+  - sql: "DROP TABLE fif_rows"
+
+test_cases:
+  - name: "Complete indexed scan reports input work independently from output rows"
+    scm: |
+      (begin
+        (define tbl (table "memcp-tests" "fif_rows"))
+        (define callback (quote (lambda (id) (and (>= id 900) (or (equal? id 905) (equal? id 915))))))
+        (define access (eval (compile_scan_access '("id") callback)))
+        (define values (map (cadr access) (lambda (v) (eval v))))
+        (define n (scan nil tbl (car access) values '("id") (eval callback) '() scan_count 0 + false))
+        (define estimate (scan_selectivity_estimate nil tbl (car access) values '()
+          (lambda () (error "feedback read must not scan")) 0))
+        (if (and (equal? n 2) (equal? (qassoc_get estimate 'rows nil) 2)
+          (equal? (qassoc_get estimate 'filter_input_rows nil) 100)) true
+          (error (concat "lost independent filter input work: " (serialize estimate)))))
+    expect:
+      result_contains: ["true"]
+
+  - name: "Costing keeps learned input work separate from exact output and unknown work"
+    scm: |
+      (begin
+        (define learned (list (list 'rows 2) (list 'filter_input_rows 100) (list 'population 'table_rows)))
+        (define unknown (list (list 'rows 2) (list 'population 'table_rows)))
+        (define bound (list (list 'rows 40) (list 'population 'index_hook_candidates)))
+        (if (and (equal? (planner_filter_input_rows learned 1000) 100)
+          (equal? (planner_filter_input_rows unknown 1000) 1000)
+          (equal? (planner_filter_input_rows bound 1000) 40)) true
+          (error "result cardinality was substituted for pre-residual work")))
+    expect:
+      result_contains: ["true"]
+
+  - name: "Complete LIKE RecSet retains index-reduced work after learning"
+    scm: |
+      (begin
+        (define tbl (table "memcp-tests" "fif_rows"))
+        (define callback (quote (lambda (label) (strlike label "%needle%" "utf8mb4_general_ci"))))
+        (define access (eval (compile_scan_access '("label") callback)))
+        (define values (map (cadr access) (lambda (v) (eval v))))
+        (map (produceN 4) (lambda (i)
+          (recset_count (scan_recset nil tbl (car access) values '("label") (eval callback)))))
+        (define result (scan_recset nil tbl (car access) values '("label") (eval callback)))
+        (define estimate (scan_selectivity_estimate nil tbl (car access) values '()
+          (lambda () (error "feedback read must not scan")) 0))
+        (if (and (equal? (recset_count result) 10)
+          (equal? (qassoc_get estimate 'rows nil) 10)
+          (number? (qassoc_get estimate 'filter_input_rows nil))
+          (<= (qassoc_get estimate 'filter_input_rows 1000) 100)) true
+          (error (concat "learned LIKE lost index work: " (serialize estimate)))))
+    expect:
+      result_contains: ["true"]
+
+  - name: "Restricted RecSets cannot overwrite whole-table work observations"
+    scm: |
+      (begin
+        (define tbl (table "memcp-tests" "fif_rows"))
+        (define callback (quote (lambda (label) (strlike label "%needle%" "utf8mb4_general_ci"))))
+        (define access (eval (compile_scan_access '("label") callback)))
+        (define values (map (cadr access) (lambda (v) (eval v))))
+        (define read (lambda () (scan_selectivity_estimate nil tbl (car access) values '()
+          (lambda () (error "metadata must not evaluate a filter")) 0)))
+        (define before (read))
+        (define ids (eval (compile_scan_access '("id") (quote (lambda (id) (< id 5))))))
+        (define subset (scan_recset nil tbl (car ids) (map (cadr ids) (lambda (v) (eval v)))
+          '("id") (lambda (id) (< id 5))))
+        (define result (scan_recset nil subset (car access) values '("label") (eval callback)))
+        (if (and (equal? (recset_count result) 5) (equal? before (read))) true
+          (error "restricted input contaminated whole-table metadata")))
+    expect:
+      result_contains: ["true"]
+
+  - name: "Rebuild retains result hints but invalidates physical access work"
+    scm: |
+      (begin
+        (define tbl (table "memcp-tests" "fif_rows"))
+        (rebuild tbl true false)
+        (define access (eval (compile_scan_access '("label")
+          (quote (lambda (label) (strlike label "%needle%" "utf8mb4_general_ci"))))))
+        (define estimate (scan_selectivity_estimate nil tbl (car access)
+          (map (cadr access) (lambda (v) (eval v))) '()
+          (lambda () (error "historical metadata must not sample")) 0))
+        (if (nil? (qassoc_get estimate 'filter_input_rows nil)) true
+          (error "retired physical access work was reused after rebuild")))
+    expect:
+      result_contains: ["true"]
+
+  - name: "Membership cost guard preserves learned zero instead of reverting to a text prior"
+    scm: |
+      (begin
+        (define tbl (table "memcp-tests" "fif_rows"))
+        (define callback (quote (lambda (label) (strlike label "%absent%" "utf8mb4_general_ci"))))
+        (define access (eval (compile_scan_access '("label") callback)))
+        (scan_recset nil tbl (car access) (map (cadr access) (lambda (v) (eval v))) '("label") (eval callback))
+        (define src (list "a" "memcp-tests" "fif_rows" false nil))
+        (define predicate (list 'strlike (list 'get_column "a" false "label" false) "%absent%" "utf8mb4_general_ci"))
+        (define expression (membership_runtime_source_rows_expr src predicate 1000))
+        (define compiled (sql_queryplan_compile_formula expression))
+        (if (equal? (compiled (newsession) nil nil nil) 0) true
+          (error "guard replaced measured zero with a text prior")))
+    expect:
+      result_contains: ["true"]
