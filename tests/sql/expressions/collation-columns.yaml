@@ -516,6 +516,18 @@ test_cases:
           (physical_in_binding? parameter)
           (semijoin_index_term? input (list 'equal?? column parameter))) true
           (error "Typed parameter no longer shares its predicate and correlation-domain identity"))))
+  - name: COUNT DISTINCT initializes singleton numeric groups as aggregate states
+    sql: SELECT id, COUNT(DISTINCT id) AS n FROM coll_groups GROUP BY id ORDER BY id
+    expect: {rows: 4, data: [{id: 2, n: 1}, {id: 3, n: 1}, {id: 4, n: 1}, {id: 5, n: 1}]}
+  - name: GROUP CONCAT DISTINCT initializes singleton text groups as aggregate states
+    sql: SELECT id, GROUP_CONCAT(DISTINCT name) AS n FROM coll_groups GROUP BY id ORDER BY id
+    expect: {rows: 4, data: [{id: 2, n: Apple}, {id: 3, n: Banana}, {id: 4, n: banana}, {id: 5, n: APPLE}]}
+  - name: COUNT DISTINCT singleton NULL groups remain empty
+    sql: SELECT id, COUNT(DISTINCT NULL) AS n FROM coll_groups GROUP BY id ORDER BY id
+    expect: {rows: 4, data: [{id: 2, n: 0}, {id: 3, n: 0}, {id: 4, n: 0}, {id: 5, n: 0}]}
+  - name: GROUP CONCAT DISTINCT singleton NULL groups remain NULL
+    sql: SELECT id, GROUP_CONCAT(DISTINCT NULL) AS n FROM coll_groups GROUP BY id ORDER BY id
+    expect: {rows: 4, data: [{id: 2, n: null}, {id: 3, n: null}, {id: 4, n: null}, {id: 5, n: null}]}
 cleanup:
   - sql: DROP TABLE IF EXISTS coll_groups
   - sql: "DROP TABLE IF EXISTS coll_cols"

@@ -4481,6 +4481,9 @@ mapping uses the native unary callback selected here. */
 
 (define count_distinct_descriptor? (lambda (ag)
 	(match ag
+		/* Collated DISTINCT adds a finalizer, but still accumulates a set of
+		values. Seed singleton groups with that state, never the raw scalar. */
+		'(_expr (symbol sql_distinct_accumulate) _neutral _finalizer) true
 		'(_expr reduce _neutral) (equal? reduce (count_distinct_reduce))
 		_ false)))
 
