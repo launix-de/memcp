@@ -13,6 +13,18 @@ setup:
   - scm: '(rebuild (table "memcp-tests" "blob_owner_a") true false)'
   - scm: '(rebuild (table "memcp-tests" "blob_owner_b") true false)'
 test_cases:
+  - name: "Explicit inventory reports shared blob references without missing files"
+    scm: |
+      (begin
+        (define report (blob_inventory "memcp-tests"))
+        (and (>= (get_assoc report "referenced_blobs") 3)
+             (equal? (get_assoc report "missing_blobs") (list))))
+    expect:
+      data: [true]
+  - name: "Inventory rejects an unknown database"
+    scm: '(blob_inventory "memcp-tests-inventory-missing")'
+    expect:
+      error: true
   - name: "Fixture has externally stored payloads with two owners"
     sql: "SELECT COUNT(*) AS n FROM `.blobs` WHERE hash IN ('f5ddb39412a9924f220f6c16749f0ca53083cf2aa56c4e4ca3d8994141bee964','344edcc59c0872f3a6dff5edd2a586226d0f11faf6dcee6783d3a91dcbfe072b','1658327e53de73a559075f5a4edf9784fd1930cde3ea4f0db91367910f3a57ce') AND refcount >= 2"
     expect:
