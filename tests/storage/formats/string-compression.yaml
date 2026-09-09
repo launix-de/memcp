@@ -305,6 +305,30 @@ test_cases:
     sql: "SELECT LENGTH(lo) AS n, SUBSTRING(lo, 3, 4) AS part FROM sc_compare_cases WHERE id = 4"
     expect: {data: [{n: 16, part: 'cdef'}]}
 
+  - name: "Compressed text operator composition"
+    sql: "SELECT LOWER(UPPER(SUBSTRING(lo, 2, 5))) AS part, CONCAT(TRIM(lo), '!') AS joined FROM sc_compare_cases WHERE id = 4"
+    expect: {data: [{part: bcdef, joined: 'abcdef0123456789!'}]}
+
+  - name: "Base64 stored text length and substring"
+    sql: "SELECT id, LENGTH(val) AS n, SUBSTRING(val, 2, 3) AS part FROM sc_b64std ORDER BY id"
+    expect: {data: [{id: 1, n: 8, part: GVz}, {id: 2, n: 4, part: AAA}, {id: 3, n: 4, part: '+//'}]}
+
+  - name: "Base64 decoding and encoding compose"
+    sql: "SELECT FROM_BASE64(val) AS decoded, TO_BASE64(FROM_BASE64(val)) AS encoded FROM sc_b64std WHERE id = 1"
+    expect: {data: [{decoded: test, encoded: 'dGVzdA=='}]}
+
+  - name: "Operators consume generated Base64 values"
+    sql: "SELECT LENGTH(TO_BASE64(val)) AS n, SUBSTRING(TO_BASE64(val), 2, 3) AS part, LOWER(TO_BASE64(val)) AS folded FROM sc_b64std WHERE id = 1"
+    expect: {data: [{n: 12, part: 'EdW', folded: 'zedwemrbpt0='}]}
+
+  - name: "Base64 decoder rejects URL alphabet"
+    sql: "SELECT FROM_BASE64(val) FROM sc_b64url WHERE id = 2"
+    expect: {error: true}
+
+  - name: "Store a generated Base64 value"
+    sql: "INSERT INTO sc_b64std VALUES (4, TO_BASE64('four'))"
+    expect: {affected_rows: 1}
+
   - name: "Persist ordered string formats"
     sql: "SHUTDOWN"
     expect: {rows: 0}
@@ -312,6 +336,10 @@ test_cases:
   - name: "Reload ordered string formats"
     sql: "SELECT id, lo FROM sc_compare_cases ORDER BY lo"
     expect: {data: [{id: 0, lo: null}, {id: 1, lo: ''}, {id: 2, lo: a}, {id: 3, lo: aa}, {id: 4, lo: abcdef0123456789}, {id: 5, lo: abcdef01234567890}]}
+
+  - name: "Reload a generated Base64 value"
+    sql: "SELECT val, FROM_BASE64(val) AS decoded FROM sc_b64std WHERE id = 4"
+    expect: {data: [{val: 'Zm91cg==', decoded: four}]}
 
   - name: "CString comparison performance fixture"
     setup:
@@ -345,6 +373,20 @@ test_cases:
     repetitions: 7
     threshold_ms: 200
     expect: {rows: 100}
+
+  - name: "Compressed text composed projection"
+    sql: "SELECT id, LOWER(UPPER(SUBSTRING(val, 2, 16))) AS part, LENGTH(TRIM(val)) AS n FROM sc_compare"
+    warmup: 3
+    repetitions: 7
+    threshold_ms: 200
+    expect: {rows: 4096}
+
+  - name: "Compressed text Base64 roundtrip projection"
+    sql: "SELECT id, FROM_BASE64(TO_BASE64(val)) AS val FROM sc_compare"
+    warmup: 3
+    repetitions: 7
+    threshold_ms: 200
+    expect: {rows: 4096}
 
   - name: "Cleanup"
     cleanup:

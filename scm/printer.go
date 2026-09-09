@@ -54,9 +54,11 @@ func (w *schemeTextWriter) Write(value []byte) (int, error) {
 	if w.buffer != nil {
 		return w.buffer.Write(value)
 	}
+	hash := w.hash
 	for _, b := range value {
-		w.hash = (w.hash ^ uint64(b)) * fnv64Prime
+		hash = (hash ^ uint64(b)) * fnv64Prime
 	}
+	w.hash = hash
 	return len(value), nil
 }
 
@@ -72,9 +74,11 @@ func (w *schemeTextWriter) WriteString(value string) (int, error) {
 	if w.buffer != nil {
 		return w.buffer.WriteString(value)
 	}
+	hash := w.hash
 	for i := 0; i < len(value); i++ {
-		w.hash = (w.hash ^ uint64(value[i])) * fnv64Prime
+		hash = (hash ^ uint64(value[i])) * fnv64Prime
 	}
+	w.hash = hash
 	return len(value), nil
 }
 
@@ -163,7 +167,9 @@ func WriteStringValue(w *schemeTextWriter, v Scmer) {
 	switch v.GetTag() {
 	case tagNil:
 		w.WriteString("nil")
-	case tagBool, tagString, tagCString, tagBString, tagSymbol:
+	case tagCString, tagBString:
+		w.writeCompressedText(v)
+	case tagBool, tagString, tagSymbol:
 		w.WriteString(v.String())
 	case tagSpecialForm:
 		w.WriteString(v.SpecialFormName())
@@ -308,7 +314,22 @@ func serializeEx(b *schemeTextWriter, v Scmer, en *Env, glob *Env, p *Proc) {
 		_, _ = b.Write(value)
 	case tagString, tagCString, tagBString:
 		b.WriteByte('"')
-		b.WriteString(schemeStringEscaper.Replace(v.String()))
+		if isCompressedText(v) {
+			view, ok := makeOperatorView(v)
+			if ok {
+				var chunk [768]byte
+				for pos := 0; pos < view.n; {
+					n := min(len(chunk), view.n-pos)
+					view.decodeInto(chunk[:n], pos, false)
+					b.WriteString(schemeStringEscaper.Replace(string(chunk[:n])))
+					pos += n
+				}
+			} else {
+				b.WriteString(schemeStringEscaper.Replace(v.String()))
+			}
+		} else {
+			b.WriteString(schemeStringEscaper.Replace(v.String()))
+		}
 		b.WriteByte('"')
 	case tagBSON:
 		b.WriteString("(json_parse_bson \"")

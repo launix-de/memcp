@@ -218,7 +218,7 @@ func (v stringView) matchRange(start int, pattern string, fold bool) (bool, bool
 }
 
 func cstringSubstring(s Scmer, start, end int) Scmer {
-	v, ok := makeStringView(s)
+	v, ok := makeOperatorView(s)
 	if !ok {
 		return NewString(s.String()[start:end])
 	}
@@ -227,6 +227,13 @@ func cstringSubstring(s Scmer, start, end int) Scmer {
 	}
 	if start == end {
 		return NewString("")
+	}
+	if start == 0 && end == v.n {
+		return s
+	}
+	if v.alphabet != "" {
+		pos := v.offset + start
+		return NewCString((*byte)(unsafe.Add(unsafe.Pointer(s.ptr), pos/2)), v.format, uint8(pos&1), end-start)
 	}
 	result := make([]byte, end-start)
 	v.decodeInto(result, start, false)
@@ -510,8 +517,8 @@ func generalCStringLess(a, b Scmer, reverse bool) (bool, bool) {
 // suffixes and wildcard backtracking possible without a decoded copy. For
 // literal contains, decode overlapping stack chunks to use strings.Contains.
 func strLikeCString(value Scmer, pattern, collation string) (bool, bool) {
-	v, ok := makeStringView(value)
-	if !ok || v.format == 0 {
+	v, ok := makeOperatorView(value)
+	if !ok || (v.format == 0 && v.base64 == "") {
 		return false, false
 	}
 	fold := strings.Contains(strings.ToLower(collation), "_ci")
@@ -524,6 +531,9 @@ func strLikeCString(value Scmer, pattern, collation string) (bool, bool) {
 				break
 			}
 		}
+	}
+	if !likeAlphabetPossible(v, pattern, fold) {
+		return false, true
 	}
 	if !strings.ContainsAny(pattern, "_\\") {
 		count := strings.Count(pattern, "%")
