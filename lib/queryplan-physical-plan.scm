@@ -7938,7 +7938,7 @@ physical decision and preserve its runtime recompile gate. */
 			(join_optimizer_tree_first_alias plan)))
 		(define filter_probe_work_rows (membership_probe_work_rows facts final_condition
 			(planner_row_count_after_selectivity
-				driver_source sources default_alias final_condition nil)))
+				driver_source sources default_alias final_condition nil (planner_context_session facts))))
 		/* A native ordered LIMIT bounds every consumer inside the driver scan,
 		including rejecting scalar probes. Cost that continuation by the rows the
 		window requests, just as join_ordered_streaming_limit_plan does. Plans whose
@@ -8105,7 +8105,7 @@ physical decision and preserve its runtime recompile gate. */
 				source's own row count, scaled by the residual condition's selectivity. */
 				(define unbounded_probe_work_rows (membership_probe_work_rows (qb_facts block) final_condition
 					(planner_row_count_after_selectivity
-						driver_source scan_sources first_alias final_condition nil)))
+						driver_source scan_sources first_alias final_condition nil (planner_context_session (qb_facts block)))))
 				(define projection_probe_work_rows (if (query_limit_active? (qb_offset block) (qb_limit block))
 					(coalesceNil (probe_limit_work_rows (qb_limit block)
 						(planner_context_session (qb_facts block))) 0)
@@ -10469,7 +10469,7 @@ existing scan and expression primitives. No predicate is discarded. */
 				(semijoin_residual_recset src input condition)
 				(list (quote if)
 					(list (quote semijoin_split_filter_wins?) (quoted_runtime_list src)
-						(quoted_runtime_list indexed) (count residual))
+						(quoted_runtime_list indexed) (count residual) (quote session))
 					(semijoin_residual_recset src
 						(candidate_recset_filter_source src input (combine_where_terms indexed true))
 						(combine_where_terms residual true))
@@ -10698,11 +10698,11 @@ without freezing a statistics-dependent decision in the SQL plan cache. */
 			(list (quote not) (list (quote equal?) (coalesceNil (qb_limit block) -1) 0)))
 		(list (quote resultrow) (list (quote list) (car fields) value)) nil)))
 
-(define semijoin_split_filter_wins? (lambda (src indexed residual_width)
+(define semijoin_split_filter_wins? (lambda (src indexed residual_width execution_session)
 	(begin
 		(define input_rows (scan_estimate (table (source_schema src) (source_relation src))))
 		(define selectivity (reduce indexed (lambda (value term)
-			(* value (join_optimizer_expr_selectivity (list src) (source_alias src) term))) 1))
+			(* value (join_optimizer_expr_selectivity (list src) (source_alias src) term execution_session))) 1))
 		(define matching_rows (* input_rows selectivity))
 		(< (+ planner_membership_scan_invocation_ns (* matching_rows planner_membership_recset_build_row_ns))
 			(* (- input_rows matching_rows) residual_width planner_membership_expression_operation_row_ns)))))

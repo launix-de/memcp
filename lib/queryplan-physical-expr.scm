@@ -1251,7 +1251,7 @@ both names therefore bind to the same parameter. */
 		(define condition (combine_where (qb_where prepared) (source_join_expr src)))
 		(define probe_term (list (quote equal??) key_expr probe))
 		(define probe_work_rows (planner_row_count_after_selectivity
-			src (list src) (source_alias src) probe_term 1))
+			src (list src) (source_alias src) probe_term 1 (planner_context_session (qb_facts prepared))))
 		(define filtercols (merge_unique (list
 			(extract_columns_for_alias src condition)
 			(extract_columns_for_alias src key_expr))))
@@ -3885,15 +3885,15 @@ filter; they must not reconstruct the choice from enclosing block facts. */
 					(quote membership_order_limit_driver) false)
 				facts)
 			(quote membership_downstream_probe_branches)
-			/* ORDER/LIMIT carriers change how many rows reach downstream work even
-			when adaptive batching is structurally unavailable (for example an ordered
-			joined driver). Filter/aggregate carriers feed the same complete residual
-			pipeline, so charging their common work here would estimate the enclosing
-			query a second time. */
-			(if (equal? consumer (quote order_limit))
-				(max (coalesceNil downstream_probe_branches 0)
-					(qassoc_get facts (quote membership_downstream_probe_branches) 0))
-				0)))
+			/* Residual work is common only when its INPUT POPULATION is common.
+			A candidate-first projection feeds matching driver rows to the residual;
+			a driver-first prefilter can evaluate it over the entire local domain.
+			This remains true for COUNT without LIMIT. Zeroing this feature for
+			aggregates hides that difference and disagrees with costgen's features.
+			Keep the measured/calibrated branch cost for every consumer; each carrier
+			cost formula owns the number of rows that actually reach those branches. */
+			(max (coalesceNil downstream_probe_branches 0)
+				(qassoc_get facts (quote membership_downstream_probe_branches) 0))))
 		(define cost_facts (qassoc_set consumer_facts
 			(quote membership_driver_order_partitioned) driver_order_partitioned))
 		(define driver_probe_supported (and allow_driver_probe

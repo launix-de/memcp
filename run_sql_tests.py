@@ -1172,7 +1172,7 @@ class SQLTestRunner:
                 workload_config.get("default_rows", PERF_DEFAULT_ROWS)
                 if isinstance(workload_config, dict) else PERF_DEFAULT_ROWS
             )
-            declared_rows = test_case.get("performance_rows", ci_default_rows)
+            declared_rows = test_case.get("performance_rows", self.suite_metadata.get("performance_rows", ci_default_rows))
             baseline = self.perf_baselines.get(
                 perf_key, self.perf_baselines.get(name, {})
             )
@@ -1360,9 +1360,9 @@ class SQLTestRunner:
             return self._record_fail(
                 name, str(exc), None, None, None, is_noncritical,
             )
-        if scm_code:
-            if is_perf_test:
-                scm_code = scm_code.replace("{rows}", str(perf_rows)).replace("{database}", database)
+        # SCM performance cases must use the same measured repetitions and A/B
+        # gate as SQL. The correctness-only shortcut below has no timing gate.
+        if scm_code and not is_perf_test:
             expect = test_case.get("expect", {})
             expect_error = expect.get("error", False)
             scm_timeout = int(test_case.get(
@@ -1509,7 +1509,7 @@ class SQLTestRunner:
             self._record_success(name, is_noncritical)
             return True
 
-        query = test_case.get("sql") or test_case.get("sparql")
+        query = scm_code or test_case.get("sql") or test_case.get("sparql")
         if query and is_perf_test:
             query = query.replace("{rows}", str(perf_rows)).replace("{database}", database)
         is_sparql = "sparql" in test_case
@@ -1524,6 +1524,21 @@ class SQLTestRunner:
         active_syntax = self._normalize_syntax(test_syntax) if test_syntax is not None else self.suite_syntax
         sql_timeout = int(test_case.get("timeout", 10))
         sql_params = test_case.get("params")
+
+        def execute_sample():
+            if scm_code:
+                try:
+                    return requests.post(f"{self.base_url}/scm", data=query,
+                                         headers=auth_header, timeout=sql_timeout)
+                except requests.RequestException:
+                    return None
+            if is_sparql:
+                return self.execute_sparql(database, query, auth_header, timeout=sql_timeout)
+            return self.execute_sql(
+                database, query, auth_header, active_syntax,
+                session_id=session_id, timeout=sql_timeout, params=sql_params,
+                retry_on_connection_failure=not self._expect_interrupted_ok(test_case.get("expect")),
+            )
 
         # TTL preload if SPARQL
         if is_sparql and "ttl_data" in test_case:
@@ -1583,7 +1598,7 @@ class SQLTestRunner:
             response = resp
         else:
             # Show query plan if PERF_EXPLAIN is enabled
-            if is_perf_test and PERF_EXPLAIN and not is_sparql:
+            if is_perf_test and PERF_EXPLAIN and not is_sparql and not scm_code:
                 explain_resp = self.execute_sql(database, f"DESCRIBE {query}", auth_header, active_syntax)
                 if explain_resp and explain_resp.status_code == 200:
                     print(f"    📋 Query plan for {name}:")
@@ -1685,7 +1700,7 @@ class SQLTestRunner:
                     repeat = resolve_timing_samples(test_case, False)
                 except ValueError as exc:
                     return self._record_fail(name, str(exc), query, None, None, is_noncritical)
-            repeatable_query = query.lstrip().upper().startswith("SELECT")
+            repeatable_query = bool(scm_code) or query.lstrip().upper().startswith("SELECT")
             if ("timing_samples" in test_case or "repetitions" in test_case) and not repeatable_query:
                 return self._record_fail(
                     name, "timing_samples/repetitions is only supported for SELECT queries",
@@ -1694,7 +1709,10 @@ class SQLTestRunner:
             gate = performance_server_gate(exclusive=True) if is_perf_test else PerformanceGate()
             with gate:
                 for _ in range(warmup_runs):
-                    self.execute_sparql(database, query, auth_header, timeout=sql_timeout) if is_sparql else self.execute_sql(database, query, auth_header, active_syntax, timeout=sql_timeout)
+                    warm_response = execute_sample()
+                    if is_error_response(warm_response):
+                        return self._record_fail(name, "Warmup failed", query, warm_response,
+                                                 test_case.get("expect"), is_noncritical)
 
                 # Scans publish telemetry asynchronously after returning the
                 # query result. Let warmup-triggered writes, group-cache hooks,
@@ -1724,11 +1742,7 @@ class SQLTestRunner:
                 measured_total_ns = 0
                 for _ in range(repeat):
                     start_ns = time.monotonic_ns()
-                    response = self.execute_sparql(database, query, auth_header, timeout=sql_timeout) if is_sparql else self.execute_sql(
-                        database, query, auth_header, active_syntax,
-                        session_id=session_id, timeout=sql_timeout, params=sql_params,
-                        retry_on_connection_failure=not self._expect_interrupted_ok(test_case.get("expect")),
-                    )
+                    response = execute_sample()
                     sample_ns = time.monotonic_ns() - start_ns
                     samples_ns.append(sample_ns)
                     measured_total_ns += sample_ns
@@ -1886,6 +1900,15 @@ class SQLTestRunner:
         if expect.get("data"):
             for i, row in enumerate(expect["data"]):
                 if i >= len(results):
+                    return False
+                # /scm returns JSON values, not necessarily SQL row objects.
+                # Keep these cases in the measured A/B path and validate the
+                # value instead of bypassing assertions or calling .items().
+                if not isinstance(row, dict):
+                    if type(row) is not type(results[i]) or row != results[i]:
+                        return False
+                    continue
+                if not isinstance(results[i], dict):
                     return False
                 for k, v in row.items():
                     if isinstance(v, float) and isinstance(results[i].get(k), (int, float)):
@@ -2439,7 +2462,10 @@ def discover_performance_ci_suites(root: Path = Path("tests/performance")) -> Li
         with path.open('r', encoding='utf-8') as handle:
             spec = yaml.safe_load(handle) or {}
         metadata = spec.get("metadata", {}) or {}
-        if metadata.get("ci", True) is False:
+        # SQL correctness CI and performance CI have independent opt-ins.
+        # Large fixtures may intentionally skip the former without silently
+        # losing their regression measurements in the latter.
+        if metadata.get("ci", True) is False and not metadata.get("perf_ci", False):
             continue
         cases = spec.get("test_cases", [])
         has_measurement = any(

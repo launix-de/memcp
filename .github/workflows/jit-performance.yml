@@ -3,24 +3,30 @@
 
 name: JIT Performance A/B
 
-# Kept manual until the JIT correctness workflow is a stable required check.
-# Add the pull_request trigger only after jit-test is enabled and reliable.
+# Production uses JIT; interpreter-only A/B cannot protect that execution path.
 on:
+  pull_request:
+    branches: [master]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: jit-performance-ab-${{ github.ref }}
+  group: jit-performance-ab-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 env:
   JIT_GO_REF: jit-foreign-frames-go1.27.0
 
 jobs:
+  changes:
+    uses: ./.github/workflows/detect-changes.yml
+
   jit-performance-ab:
     name: jit-performance-ab
+    needs: changes
+    if: ${{ needs.changes.outputs.relevant == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
 

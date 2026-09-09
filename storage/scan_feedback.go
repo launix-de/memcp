@@ -112,6 +112,17 @@ func compileFilterFeedback(params, columns []scm.Scmer, body scm.Scmer, bindings
 		if name == "optimize" && len(items) == 2 {
 			return visit(items[1])
 		}
+		// Literal parameter binding emits (quote value), whereas scan callback
+		// optimization may already have folded it to value. Both denote the same
+		// scalar predicate. Do not recurse into quoted lists: those are data, not
+		// executable filter expressions, and must never be interpreted as columns.
+		if name == "quote" && len(items) == 2 {
+			value := items[1]
+			if value.IsNil() || value.IsBool() || value.IsInt() || value.IsFloat() || value.IsString() {
+				return visit(value)
+			}
+			return false
+		}
 		// Session parameters are constant over a scan; correlated outer-row values
 		// deliberately do not enter this table-local model.
 		if name == "session" && len(items) == 2 && items[1].IsString() {

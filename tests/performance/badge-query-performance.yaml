@@ -42,7 +42,8 @@ test_cases:
     expect:
       rows_affected: 0
 
-  - name: "badge count with correlated session subselect"
+  - &badge_count
+    name: "badge count with correlated session subselect"
     session_id: "bp_sess"
     sql: |
       SELECT 1,
@@ -58,7 +59,8 @@ test_cases:
         - "1": 1
           badgeDoc: 2
 
-  - name: "docType list with permission subselects"
+  - &badge_types
+    name: "docType list with permission subselects"
     session_id: "bp_sess"
     sql: |
       SELECT dt.ID, dt.name,
@@ -88,3 +90,13 @@ test_cases:
       data:
         - "1": 1
           badgeDoc: 2
+
+  # Keep the original correctness/plan-size gates, and ADD measured copies.
+  # Turning the originals into performance cases would exempt those gates.
+  - <<: *badge_count
+    name: "Perf: cached badge count with correlated session subselect"
+    threshold_ms: 500
+
+  - <<: *badge_types
+    name: "Perf: cached type list with permission subselects"
+    threshold_ms: 500

@@ -626,8 +626,14 @@ func (t *table) publishPlannerStatsToken() {
 	t.plannerStatsToken.Store(nextPlannerStatsToken.Add(1))
 }
 
-func (t *table) PlannerStatsToken() uint64 {
-	return plannerFingerprintMix(t.plannerStatsToken.Load(), t.filterFeedbackFingerprint())
+// PlannerStatsToken can scope dependencies to structural statistics only.
+// Callers excluding feedback must separately guard every consumed filter rate.
+func (t *table) PlannerStatsToken(includeFeedback bool) uint64 {
+	token := t.plannerStatsToken.Load()
+	if includeFeedback {
+		return plannerFingerprintMix(token, t.filterFeedbackFingerprint())
+	}
+	return token
 }
 
 func (t *table) signalTransactionDrain() {
@@ -1726,14 +1732,17 @@ func (t *table) PlannerStatistics() scm.Scmer {
 // PlannerStatisticsFingerprint identifies the coarse cost class of immutable
 // statistics independently of its rebuild generation. It is computed once
 // while publishing the snapshot, so cache revalidation remains O(1).
-func (t *table) PlannerStatisticsFingerprint() uint64 {
+func (t *table) PlannerStatisticsFingerprint(includeFeedback bool) uint64 {
 	if t == nil {
 		return 0
 	}
 	for {
 		snapshot := t.showColumnsSnapshot.Load()
 		if snapshot != nil {
-			return plannerFingerprintMix(snapshot.plannerFingerprint, t.filterFeedbackFingerprint())
+			if includeFeedback {
+				return plannerFingerprintMix(snapshot.plannerFingerprint, t.filterFeedbackFingerprint())
+			}
+			return snapshot.plannerFingerprint
 		}
 		t.publishShowColumnsSnapshot()
 	}

@@ -187,19 +187,19 @@ func TestPlannerStatisticsUsesHashedImmutableSnapshot(t *testing.T) {
 	})
 	atomic.StoreUint64(&tbl.Columns[1].DistinctEstimate, 17)
 	tbl.publishShowColumnsSnapshot()
-	publishedToken := tbl.PlannerStatsToken()
+	publishedToken := tbl.PlannerStatsToken(true)
 	if publishedToken == 0 {
 		t.Fatal("published planner statistics have no dependency token")
 	}
-	publishedFingerprint := tbl.PlannerStatisticsFingerprint()
+	publishedFingerprint := tbl.PlannerStatisticsFingerprint(true)
 	tbl.publishShowColumnsSnapshot()
-	if tbl.PlannerStatsToken() == publishedToken {
+	if tbl.PlannerStatsToken(true) == publishedToken {
 		t.Fatal("republished planner statistics retained their generation token")
 	}
-	if got := tbl.PlannerStatisticsFingerprint(); got != publishedFingerprint {
+	if got := tbl.PlannerStatisticsFingerprint(true); got != publishedFingerprint {
 		t.Fatalf("unchanged planner statistics changed fingerprint from %d to %d", publishedFingerprint, got)
 	}
-	publishedToken = tbl.PlannerStatsToken()
+	publishedToken = tbl.PlannerStatsToken(true)
 
 	root := tbl.PlannerStatistics().FastDict()
 	rowCount, ok := root.Get(scm.NewString("row_count"))
@@ -231,16 +231,16 @@ func TestPlannerStatisticsUsesHashedImmutableSnapshot(t *testing.T) {
 	if tbl.PlannerStatistics().FastDict() != root {
 		t.Fatal("planner statistics rebuilt an already-published snapshot")
 	}
-	if got := tbl.PlannerStatsToken(); got != publishedToken {
+	if got := tbl.PlannerStatsToken(true); got != publishedToken {
 		t.Fatalf("immutable planner statistics changed token from %d to %d", publishedToken, got)
 	}
 
 	tbl.adjustPlannerRows(9)
-	adjustedToken := tbl.PlannerStatsToken()
+	adjustedToken := tbl.PlannerStatsToken(true)
 	if adjustedToken == publishedToken {
 		t.Fatal("planner row-count update retained a stale dependency token")
 	}
-	if got := tbl.PlannerStatisticsFingerprint(); got != publishedFingerprint {
+	if got := tbl.PlannerStatisticsFingerprint(true); got != publishedFingerprint {
 		t.Fatalf("same-magnitude row-count update changed fingerprint from %d to %d", publishedFingerprint, got)
 	}
 	updatedRoot := tbl.PlannerStatistics().FastDict()

@@ -738,14 +738,29 @@ lost; these are disposable planning hints and have no WAL/durability guarantee.
 No learned state changes row visibility, shard binary formats, or query results. Existing integer scan headers remain readable;
 new optional feedback metadata is ordinary serializable Scheme data.
 
-Published feedback cost classes participate in the existing table statistics
-cache guards. Small EMA changes within one geometric class do not invalidate
-plans; changed classes/new keys do. This bounded table-wide invalidation is
-conservative and may recompile unrelated plans on the same table. A future
-per-predicate guard can narrow that dependency without changing scan sampling.
-These are power-of-two selectivity classes, not the exact cost crossover points
-of competing plans. A crossover within a class can therefore remain unnoticed
-until another guard changes; exact plan-specific thresholds remain future work.
+Execution plans guard structural table statistics separately from learned filter
+estimates. Table generation/fingerprint guards with `include_feedback=false`
+must be accompanied by guards for the bound filter metadata actually consumed
+by costing. Learning an unrelated predicate must not invalidate these plans.
+Session bindings must be passed explicitly through reorder and lowering; a
+missing session must not silently substitute another binding's observations.
+
+Filter metadata guards use the central `scan_selectivity_estimate` reader with
+sampling budget zero: validation must never scan, load columns, or build an
+index. An unknown estimate is also a dependency, so newly available feedback
+can cause replanning. Existing cost crossover guards remain active. Where a
+crossover has not been derived, an exact metadata-input guard is conservative;
+it must not be described as a derived operator crossover or removed unchecked.
+EXPLAIN diagnostics and the public default table-statistics API retain the
+table-wide feedback fingerprint so cached diagnostics refresh their estimates.
+
+Performance coverage for these guards must include changing predicates between
+cached executions, not only repetitions of a single already-learned query.
+Expensive suites excluded from ordinary SQL CI with `metadata.ci: false` can
+opt into automatic A/B with `metadata.perf_ci: true`; discovery requires a
+`threshold_ms` case. `metadata.performance_rows` supplies the suite fixture size
+unless a case overrides it. SCM cases with `threshold_ms` must use the same
+warmup, repetitions and A/B timing gate as SQL, with explicit result validation.
 
 ## Canonical Naming and Reuse
 

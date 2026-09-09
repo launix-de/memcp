@@ -21,6 +21,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 import os
+import itertools
 import signal
 import sys
 import tempfile
@@ -42,6 +43,7 @@ from run_sql_tests import (  # noqa: E402
     SQLTestRunner,
     _load_runner_config,
     adaptive_measurement_complete,
+    discover_performance_ci_suites,
     is_error_response,
     initialize_performance_recording,
     load_performance_scale,
@@ -70,6 +72,50 @@ from tools.check_test_table_names import mutable_table_collisions  # noqa: E402
 
 
 class PerformanceScaleContractTest(unittest.TestCase):
+    def test_performance_discovery_honors_independent_ci_opt_in(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "enabled.yaml").write_text(
+                "metadata: {ci: false, perf_ci: true}\n"
+                "test_cases: [{name: measured, sql: SELECT 1, threshold_ms: 10}]\n"
+            )
+            (root / "manual.yaml").write_text(
+                "metadata: {ci: false}\n"
+                "test_cases: [{name: manual, sql: SELECT 1, threshold_ms: 10}]\n"
+            )
+            self.assertEqual(discover_performance_ci_suites(root), [str(root / "enabled.yaml")])
+
+    def test_scm_performance_cannot_bypass_timing_gate(self) -> None:
+        runner = SQLTestRunner("http://localhost:1")
+        response = SimpleNamespace(status_code=200, text="true", headers={})
+        clock = itertools.count(0, 1_000_000)
+        with mock.patch("run_sql_tests.PERF_TEST_ENABLED", True), \
+                mock.patch("run_sql_tests.PERF_AB_MODE", ""), \
+                mock.patch("run_sql_tests.find_memcp_pid", return_value=None), \
+                mock.patch("run_sql_tests.time.monotonic_ns", side_effect=lambda: next(clock)), \
+                mock.patch("run_sql_tests.requests.post", return_value=response) as post:
+            result = runner.run_test_case({
+                "name": "SCM must be measured", "scm": "true", "threshold_ms": 0.01,
+                "repetitions": 2, "warmup": 0, "expect": {"rows": 1},
+            }, "memcp-tests")
+        self.assertFalse(result)
+        self.assertEqual(post.call_count, 2)
+
+    def test_scm_scalar_data_expectations_are_validated(self) -> None:
+        runner = SQLTestRunner("http://localhost:1")
+        for expected, actual, wanted in [
+            ("ok", "ok", True), ("ok", "wrong", False),
+            (True, True, True), (True, 1, False),
+            (20, 20, True), (20, 19, False),
+            (None, None, True), ([1, 2], [1, 2], True),
+            ({"n": 1}, "not a row", False),
+        ]:
+            with self.subTest(expected=expected, actual=actual):
+                response = SimpleNamespace(status_code=200, text="value", headers={})
+                self.assertEqual(runner.validate_expectation(
+                    {"scm": "value", "expect": {"data": [expected]}},
+                    response, [actual]), wanted)
+
     def test_ci_workload_seed_initializes_safe_rows(self) -> None:
         seed = Path(__file__).resolve().parents[1] / "tests/performance/ci-workloads.json"
         with tempfile.TemporaryDirectory() as tmp:

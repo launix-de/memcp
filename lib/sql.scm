@@ -334,7 +334,7 @@ semantics for multiple independent cache assumptions. */
 				(define dependency_guards (map dependencies (lambda (dependency)
 					(list (quote table_planner_statistics_compatible?)
 						(cadr (car dependency)) (nth (car dependency) 2)
-						(cadr dependency) (nth dependency 2)))))
+						(cadr dependency) (nth dependency 2) (coalesceNil (nth dependency 3) false)))))
 				(sql_queryplan_conjoin_guards dependency_guards))))))
 
 (define sql_queryplan_guard_from_session (lambda (planning_session)
@@ -388,6 +388,12 @@ serialization still see the complete plan. */
 	(begin
 		(tx_check tx)
 		(define planning_session (sql_queryplan_compile_session source_session tx))
+		(define statistics_diagnostic (match (toUpper parse_query)
+			(regex "^\\s*EXPLAIN\\b" _) true
+			_ false))
+		/* EXPLAIN reports metadata, not just a reusable execution decision. Keep
+		its table-wide refresh dependency without executing relational guards. */
+		(planning_session "__memcp_queryplan_diagnostic_statistics" statistics_diagnostic)
 		(define compile_policy (sql_compile_table_policy policy))
 		(define raw_plan (with_session planning_session (lambda ()
 			(sql_invoke_parse_fn parse_fn schema parse_query compile_policy planning_session tx))))
@@ -397,9 +403,6 @@ serialization still see the complete plan. */
 		(define plan (sql_queryplan_compile_formula
 			(sql_queryplan_bind_execution_session raw_plan)))
 		(tx_check tx)
-		(define statistics_diagnostic (match (toUpper parse_query)
-			(regex "^\\s*EXPLAIN\\b" _) true
-			_ false))
 		/* Diagnostics must refresh their captured estimates when table statistics
 		change, but checking their cache must never execute candidate preparations. */
 		(list
