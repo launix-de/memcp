@@ -1,0 +1,76 @@
+# Copyright (C) 2026 Carl-Philip Haensch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Execute the SQL extracted from the real dashboard, confined to memcp-tests.
+
+metadata:
+  version: '1.0'
+  description: Dashboard log clear actions execute their actual browser SQL against
+    isolated log fixtures
+  isolated: true
+setup:
+- sql: DROP TABLE IF EXISTS `errors`
+- sql: CREATE TABLE `errors` (message TEXT) ENGINE=SLOPPY
+- sql: INSERT INTO `errors` VALUES ('first'), ('second')
+- sql: DROP TABLE IF EXISTS `logs`
+- sql: CREATE TABLE `logs` (message TEXT) ENGINE=SLOPPY
+- sql: INSERT INTO `logs` VALUES ('first'), ('second')
+test_cases:
+- name: Browser errors clear query deletes only its target and accepts an empty table
+  scm: |-
+    (begin
+      (define query (match (readfile "../assets/dashboard.html")
+      (regex "execSQL[(]\"system_statistic\",\"([^\"]*)\",function[(][)][{]loadErrors[(][)]" _ query) query
+      _ (error "dashboard clear action must use the SQL API")))
+      (map '(1 2) (lambda (_)
+        (eval (parse_sql "memcp-tests" query
+          (lambda (db tbl write)
+            (if (and (equal? db "memcp-tests") (equal? tbl "errors") write)
+              true (error "unexpected clear-query access"))))))))
+- name: Clearing errors preserves print logs
+  sql: SELECT (SELECT COUNT(*) FROM errors) AS errors, (SELECT COUNT(*) FROM logs)
+    AS logs
+  expect:
+    rows: 1
+    data:
+    - errors: 0
+      logs: 2
+- name: Browser logs clear query deletes only its target and accepts an empty table
+  scm: |-
+    (begin
+      (define query (match (readfile "../assets/dashboard.html")
+      (regex "execSQL[(]\"system_statistic\",\"([^\"]*)\",function[(][)][{]loadLogs[(][)]" _ query) query
+      _ (error "dashboard clear action must use the SQL API")))
+      (map '(1 2) (lambda (_)
+        (eval (parse_sql "memcp-tests" query
+          (lambda (db tbl write)
+            (if (and (equal? db "memcp-tests") (equal? tbl "logs") write)
+              true (error "unexpected clear-query access"))))))))
+- name: Both log fixtures are empty
+  sql: SELECT (SELECT COUNT(*) FROM errors) AS errors, (SELECT COUNT(*) FROM logs)
+    AS logs
+  expect:
+    rows: 1
+    data:
+    - errors: 0
+      logs: 0
+- name: Browser errors clear query respects denied SQL policy
+  scm: |-
+    (eval (parse_sql "memcp-tests"
+      (match (readfile "../assets/dashboard.html")
+      (regex "execSQL[(]\"system_statistic\",\"([^\"]*)\",function[(][)][{]loadErrors[(][)]" _ query) query
+      _ (error "dashboard clear action must use the SQL API"))
+      (lambda (db tbl write) (error "access denied"))))
+  expect:
+    error: true
+- name: Browser logs clear query respects denied SQL policy
+  scm: |-
+    (eval (parse_sql "memcp-tests"
+      (match (readfile "../assets/dashboard.html")
+      (regex "execSQL[(]\"system_statistic\",\"([^\"]*)\",function[(][)][{]loadLogs[(][)]" _ query) query
+      _ (error "dashboard clear action must use the SQL API"))
+      (lambda (db tbl write) (error "access denied"))))
+  expect:
+    error: true
+cleanup:
+- sql: DROP TABLE IF EXISTS `errors`
+- sql: DROP TABLE IF EXISTS `logs`

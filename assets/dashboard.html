@@ -737,7 +737,7 @@ if(arcb)arcb.addEventListener("change",function(){syncDashboardPolling();});
 var btn=document.getElementById("btn-clear-errors");
 if(btn)btn.addEventListener("click",function(){
 if(!confirm("Clear all error log entries?"))return;
-scmFetch('(begin (scan "system_statistic" "errors" \'() (lambda () true) \'("$update") (lambda ($update) ($update))) (error_log_counter "count" 0) true)',function(){loadErrors()});
+execSQL("system_statistic","DELETE FROM `errors`",function(){loadErrors()});
 });
 /* Error Log inline settings — auto-save */
 var elEnable=document.getElementById("el-setting-enable");
@@ -801,7 +801,7 @@ if(cb)cb.addEventListener("change",function(){syncDashboardPolling();});
 var btn=document.getElementById("btn-clear-logs");
 if(btn)btn.addEventListener("click",function(){
 if(!confirm("Clear all log entries?"))return;
-scmFetch('(begin (scan "system_statistic" "logs" \'() (lambda () true) \'("$update") (lambda ($update) ($update))) true)',function(){loadLogs()});
+execSQL("system_statistic","DELETE FROM `logs`",function(){loadLogs()});
 });
 /* Print Log inline settings — auto-save */
 var plEnable=document.getElementById("pl-setting-enable");
