@@ -162,6 +162,24 @@ func TestJITNativeRegexpTestPreservesNil(t *testing.T) {
 	}
 }
 
+func TestJITNativeRegexpUnderNestedConditions(t *testing.T) {
+	compiled := compileJITExpressionTestProc(t, `(lambda (value a b c)
+		(if a (if (and b (regexp_test value "^[a-z]+$"))
+			(list a b c true) (list a b c (regexp_test value "^42$"))) (list c)))`)
+	a, b, c := NewString("outer a"), NewString("outer b"), NewSlice([]Scmer{NewString("outer c")})
+	for _, test := range []struct{ input, want Scmer }{
+		{NewString("abc"), NewBool(true)},
+		{NewString("ABC"), NewBool(false)},
+		{NewInt(42), NewBool(true)},
+		{NewNil(), NewNil()},
+	} {
+		want := NewSlice([]Scmer{a, b, c, test.want})
+		if got := Apply(compiled, test.input, a, b, c); !Equal(got, want) {
+			t.Fatalf("nested regexp returned %s, want %s", String(got), String(want))
+		}
+	}
+}
+
 func compileNativeRegexCaptures(t *testing.T, pattern string) Scmer {
 	t.Helper()
 	captureCount := regexp.MustCompile(pattern).NumSubexp() + 1

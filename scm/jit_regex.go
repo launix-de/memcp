@@ -989,6 +989,18 @@ func jitEmitConstantRegexpTest(ctx *JITContext, pattern *regexp.Regexp, value JI
 		return jitPlaceScmerIntoTarget(ctx, JITValueDesc{Loc: LocImm, Type: out.GetTag(), Imm: out}, result)
 	}
 	program := jitCompileRegexProgram(pattern)
+	value = ctx.stabilizeForNested(value)
+	// Regex state competes with enclosing branch results and planned homes.
+	// Commit bool/nil to a pointer-free slot before restoring those registers.
+	var outer JITRegisterBoundary
+	var savedResult JITValueDesc
+	requested := result
+	releaseOuter := bits.OnesCount64(ctx.FreeRegs&ctx.AllRegs&^ctx.ProtectedRegs) < 6
+	if releaseOuter {
+		savedResult = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: ctx.AllocSpill(16), NoHeapPointer: true}
+		outer = ctx.PreserveRegisters(JITRegisterBoundaryOptions{ReleaseHomes: true})
+		result = JITValueDesc{Loc: LocAny}
+	}
 	target := jitEnsureResultPair(ctx, result)
 	success := ctx.ReserveLabel()
 	fail := ctx.ReserveLabel()
@@ -1005,6 +1017,12 @@ func jitEmitConstantRegexpTest(ctx *JITContext, pattern *regexp.Regexp, value JI
 	ctx.EmitMakeNil(target)
 	ctx.MarkLabel(done)
 	target.Type = JITTypeUnknown
+	target.NoHeapPointer = true
+	if releaseOuter {
+		savedResult = jitPlaceScmerIntoTarget(ctx, target, savedResult)
+		outer.Restore(ctx)
+		return jitPlaceScmerIntoTarget(ctx, savedResult, requested)
+	}
 	return target
 }
 

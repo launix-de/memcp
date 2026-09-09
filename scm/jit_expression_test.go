@@ -656,6 +656,20 @@ func TestJITNestedCallPreservesPointerValues(t *testing.T) {
 	}
 }
 
+func TestJITLoopMaterializesVariadicCallbacks(t *testing.T) {
+	compiled := compileJITExpressionTestProc(t, `(lambda (limit marker)
+		(for (list 0 marker 2 3 4 5 6 7 8)
+			(lambda (i a b c d e f g h) (< i limit))
+			(lambda (i a b c d e f g h) (list (+ i 1) a b c d e f g h))))`)
+	marker := NewSlice([]Scmer{NewString("retained"), NewInt(42)})
+	for _, limit := range []int64{0, 1, 100} {
+		want := NewSlice([]Scmer{NewInt(limit), marker, NewInt(2), NewInt(3), NewInt(4), NewInt(5), NewInt(6), NewInt(7), NewInt(8)})
+		if got := Apply(compiled, NewInt(limit), marker); !Equal(got, want) {
+			t.Fatalf("wide loop returned %s, want %s", String(got), String(want))
+		}
+	}
+}
+
 func TestJITConditionalCallbackPreservesPointerValues(t *testing.T) {
 	compiled := compileJITExpressionTestProc(t, `(lambda (callback a b c)
 		(if a (if (and b (callback c)) (list a b c) (list c b a)) (list a b c)))`)
