@@ -16,6 +16,8 @@ jobs:
           PHP_VERSION: 8.5.10
           PHP_SHA256: 6a8bebaa4d5a979a38db29a9373e9851f60c6b11f72172c585947e78f3081957
         run: |
+          # Browser repositories are unrelated to these Ubuntu build dependencies.
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.list /etc/apt/sources.list.d/google-chrome.sources
           sudo apt-get update
           sudo apt-get install -y build-essential pkg-config bison re2c libsqlite3-dev libonig-dev libzip-dev libicu-dev libpng-dev libjpeg-dev libfreetype6-dev libwebp-dev
           cd "$RUNNER_TEMP"

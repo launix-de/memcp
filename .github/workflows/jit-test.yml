@@ -91,6 +91,8 @@ jobs:
       - name: Install test dependencies
         run: |
           pip install requests PyYAML
+          # Browser repositories are unrelated to these Ubuntu build dependencies.
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.list /etc/apt/sources.list.d/google-chrome.sources
           sudo apt-get update
           sudo apt-get install -y mariadb-client
 

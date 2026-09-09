@@ -82,5 +82,51 @@ test_cases:
         "ok"
         (error "an empty authentication scan result must be rejected"))
 
+
+  - name: "Dashboard users API returns admin and non-admin rows for the database access column"
+    scm: |
+      (begin
+        (define response (newsession))
+        (http_handler
+          (lambda (key) (match key
+            "path" "/dashboard/api/users"
+            "username" "root"
+            "password" "admin"
+            "__session" (newsession)
+            nil))
+          (lambda (key) (match key
+            "header" (lambda (name value) (response name value))
+            "status" (lambda (value) (response "status" value))
+            "print" (lambda (value) (response "body" value))
+            nil)))
+        (define users (json_decode (response "body")))
+        (define admins (filter users (lambda (u) (equal? (u "username") "root"))))
+        (define readers (filter users (lambda (u) (equal? (u "username") "auth_scan_nil_repro"))))
+        (if (and
+            (equal? (response "Content-Type") "application/json")
+            (equal? (count admins) 1) ((car admins) "admin")
+            (equal? (count readers) 1) (not ((car readers) "admin"))
+            (empty_list? ((car readers) "databases")))
+          "ok" (error "dashboard user overview returned incorrect access metadata")))
+
+  - name: "Dashboard users API rejects non-admin and unauthenticated requests"
+    scm: |
+      (map '("auth_scan_nil_repro" "") (lambda (username) (begin
+        (define response (newsession))
+        (http_handler
+          (lambda (key) (match key
+            "path" "/dashboard/api/users"
+            "username" username
+            "password" "secret123"
+            "__session" (newsession)
+            nil))
+          (lambda (key) (match key
+            "header" (lambda (name value) (response name value))
+            "status" (lambda (value) (response "status" value))
+            "print" (lambda (value) (response "body" value))
+            nil)))
+        (if (and (equal? (response "status") 401) (equal? (response "body") "Unauthorized"))
+          "ok" (error "dashboard exposed user overview without admin credentials")))))
+
 cleanup:
   - sql: "DELETE FROM system.user WHERE username IN ('auth_scan_nil_repro', 'auth_scan_nil_other')"
