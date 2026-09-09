@@ -709,3 +709,41 @@ func TestSemijoinCalibrationDoesNotRequireMembershipFeatures(t *testing.T) {
 		}
 	}
 }
+
+func TestOrderedOrWorkUsesExistingPrimitivePrices(t *testing.T) {
+	row := calibrationRow{Decision: "ordered_or", Plan: "scan_order_multi", OrderedOrWork: []float64{3, 100, 200, 20, 400, 100, 10000, 10}}
+	features, err := rowFeatures(row)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := constants{orderedScanInvocationNS: 10, scanRowNS: 2, filterColumnRowNS: 3, mapColumnRowNS: 4, expressionOperationNS: 5, broadTextMatchRowNS: 6, broadTextMatchByteNS: 7}
+	if got := estimatedNS(observation{decision: "ordered_or", plan: row.Plan, x: features}, c); got != 73510 {
+		t.Fatalf("cost %v, want 73510", got)
+	}
+	for _, work := range [][]float64{nil, {1, 2}, {1, 2, 3, 4, 5, 6, -1, 8}} {
+		row.OrderedOrWork = work
+		if _, err := rowFeatures(row); err == nil {
+			t.Fatalf("accepted incomplete or negative work: %v", work)
+		}
+	}
+	row.Plan = "unknown"
+	row.OrderedOrWork = make([]float64, 8)
+	if _, err := rowFeatures(row); err == nil {
+		t.Fatal("accepted unknown operator")
+	}
+}
+
+func TestOrderedOrRejectsWrongWinnerBelowMembershipRiskBudget(t *testing.T) {
+	rows := []observation{
+		{caseName: "or", decision: "ordered_or", plan: "scan_order", y: 27000000, x: make([]float64, 25)},
+		{caseName: "or", decision: "ordered_or", plan: "scan_order_multi", y: 2000000, x: make([]float64, 25)},
+	}
+	rows[0].x[15], rows[1].x[15] = 1, 3
+	if err := validateDecisionOrdering(rows, constants{orderedScanInvocationNS: 1}); err == nil {
+		t.Fatal("accepted a materially wrong ordered OR winner")
+	}
+	rows[0].x[1] = 100
+	if err := validateDecisionOrdering(rows, constants{orderedScanInvocationNS: 1, scanRowNS: 1}); err != nil {
+		t.Fatal(err)
+	}
+}

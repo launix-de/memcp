@@ -1,3 +1,6 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 metadata:
   version: "1.0"
   description: "OR-based multi-range index scanning with dedup"
@@ -162,3 +165,73 @@ test_cases:
     sql: "SELECT * FROM or_test WHERE a=10 OR"
     expect:
       error: true
+
+  - name: Disjoint branches preserve ordered offset and duplicate projected values
+    sql: EXPLAIN PHYSICAL CALIBRATE SELECT b FROM or_test WHERE a=10 OR a=20 ORDER BY b DESC, a LIMIT 1 OFFSET 1
+    expect:
+      rows: 2
+      data:
+        - plan: scan_order
+          rows: 1
+          result_equal: true
+          operator_consistent: true
+        - plan: scan_order_multi
+          rows: 1
+          result_equal: true
+          operator_consistent: true
+
+  - name: Disjoint branches preserve computed ordering
+    sql: EXPLAIN PHYSICAL CALIBRATE SELECT a FROM or_test WHERE a=10 OR a=20 ORDER BY b+1 DESC, a LIMIT 3
+    expect:
+      rows: 2
+      data:
+        - plan: scan_order
+          rows: 3
+          result_equal: true
+          operator_consistent: true
+        - plan: scan_order_multi
+          rows: 3
+          result_equal: true
+          operator_consistent: true
+
+  - name: Disjoint branches preserve repeated projected rows
+    sql: EXPLAIN PHYSICAL CALIBRATE SELECT 1 AS n FROM or_test WHERE a=10 OR a=20 ORDER BY a,b
+    expect:
+      rows: 2
+      data:
+        - plan: scan_order
+          rows: 4
+          result_equal: true
+        - plan: scan_order_multi
+          rows: 4
+          result_equal: true
+
+  - name: Overlapping cross-column branches stay in one scan
+    sql: EXPLAIN PHYSICAL SELECT a FROM or_test WHERE a=10 OR b=100 ORDER BY a LIMIT 3
+    expect:
+      rows: 1
+      result_not_contains: ['ordered_or:', 'scan_order_multi']
+
+  - name: SQL case-insensitive equality cannot prove disjointness
+    sql: EXPLAIN PHYSICAL SELECT a FROM or_test WHERE c='alpha' OR c='ALPHA' ORDER BY a LIMIT 3
+    expect:
+      rows: 1
+      result_not_contains: ['ordered_or:', 'scan_order_multi']
+
+  - name: NULL equality cannot establish a disjoint branch
+    sql: EXPLAIN PHYSICAL SELECT a FROM or_test WHERE c='alpha' OR c=NULL ORDER BY a LIMIT 3
+    expect:
+      rows: 1
+      result_not_contains: ['ordered_or:', 'scan_order_multi']
+
+  - name: A small table keeps the cheaper single scan
+    sql: EXPLAIN PHYSICAL SELECT a FROM or_test WHERE a=10 OR a=20 ORDER BY a,b LIMIT 2
+    expect:
+      rows: 1
+      result_contains: ['(chosen scan_order)', '(plan scan_order_multi)']
+
+  - name: Numeric coercion of distinct strings cannot prove disjointness
+    sql: EXPLAIN PHYSICAL SELECT a FROM or_test WHERE a='10' OR a='010' ORDER BY a LIMIT 3
+    expect:
+      rows: 1
+      result_not_contains: ['ordered_or:', 'scan_order_multi']

@@ -243,6 +243,22 @@ test_cases:
       ORDER BY stamp DESC, id DESC LIMIT 4
   - sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'post' AND status = 'private'
       ORDER BY stamp DESC, id DESC LIMIT 4
+- name: Complete composite prefix skips preceding groups in both sort directions
+  warmup: 10
+  timing_samples: 30
+  threshold_ms: 100
+  sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'post' AND status = 'publish' ORDER BY stamp ASC, id DESC LIMIT 3 OFFSET 1
+  expect:
+    rows: 3
+    data: [{id: 3}, {id: 5}, {id: 7}]
+- name: Missing second equality key yields an empty interval
+  warmup: 10
+  sql: SELECT id FROM ordered_prefix_posts WHERE kind = 'post' AND status = 'missing' ORDER BY stamp DESC LIMIT 4
+  expect: {rows: 0, data: []}
+- name: Composite NULL prefix keeps its boundary checks
+  warmup: 10
+  sql: SELECT id FROM ordered_prefix_posts WHERE kind IS NULL AND status = 'publish' ORDER BY stamp DESC LIMIT 4
+  expect: {rows: 1, data: [{id: 22001}]}
 - name: Main prefix and delta merge exclude other prefixes
   setup:
   - sql: INSERT INTO ordered_prefix_posts VALUES (22003, 'post', 'private', 30000),
