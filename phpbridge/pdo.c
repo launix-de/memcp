@@ -3,6 +3,9 @@
 /* Copyright (C) 2026 Carl-Philip Hänsch
  * SPDX-License-Identifier: GPL-3.0-or-later */
 #include <php.h>
+#if PHP_VERSION_ID < 80500
+#error "MemCP PHP quotas require PHP 8.5 or newer (max_memory_limit)"
+#endif
 #include <ext/pdo/php_pdo_driver.h>
 #include "bridge.h"
 #include "_cgo_export.h"
@@ -23,6 +26,34 @@ typedef struct {
 void memcp_result_free(memcp_result *r) {
 	if (!r) return;
 	free(r->cells); free(r->bytes); free(r->error); free(r);
+}
+
+/* Transfer retained results into Zend's request heap only after Go has returned.
+ * A PHP allocation bailout must never unwind through an active Go stack. The
+ * temporary C buffer is freed on OOM too, and an unclaimed connection is closed. */
+static memcp_result *request_result(memcp_result *r) {
+	const size_t cells_size = r->cells_length * sizeof(memcp_cell);
+	const size_t error_size = r->error ? strlen(r->error) + 1 : 0;
+	memcp_result *owned = NULL;
+	zend_try {
+		owned = emalloc(sizeof(*r) + cells_size + r->bytes_length + error_size);
+	} zend_catch {
+		if (r->handle) memcp_close(r->handle);
+		memcp_result_free(r);
+		zend_bailout();
+	} zend_end_try();
+	*owned = *r;
+	char *buffer = (char *)(owned + 1);
+	owned->cells = cells_size ? (memcp_cell *)buffer : NULL;
+	if (cells_size) memcpy(buffer, r->cells, cells_size);
+	buffer += cells_size;
+	owned->bytes = r->bytes_length ? buffer : NULL;
+	if (r->bytes_length) memcpy(buffer, r->bytes, r->bytes_length);
+	buffer += r->bytes_length;
+	owned->error = error_size ? buffer : NULL;
+	if (error_size) memcpy(buffer, r->error, error_size);
+	memcp_result_free(r);
+	return owned;
 }
 
 static bool accept_result(pdo_dbh_t *dbh, pdo_stmt_t *stmt, memcp_result *r) {
@@ -49,7 +80,7 @@ static void fetch_error(pdo_dbh_t *dbh, pdo_stmt_t *stmt, zval *info) {
 
 static int close_cursor(pdo_stmt_t *stmt) {
 	memcp_stmt *s = stmt->driver_data;
-	memcp_result_free(s->result); s->result = NULL; s->position = 0;
+	if (s->result) efree(s->result); s->result = NULL; s->position = 0;
 	return 1;
 }
 
@@ -67,8 +98,8 @@ static int execute_stmt(pdo_stmt_t *stmt) {
 	if (s->parameters_required && (!stmt->bound_params || zend_hash_num_elements(stmt->bound_params) == 0)) {
 		pdo_raise_impl_error(stmt->dbh, stmt, "HY093", "Statement requires bound parameters"); return 0;
 	}
-	memcp_result *r = memcp_query(db->handle, ZSTR_VAL(stmt->active_query_string), ZSTR_LEN(stmt->active_query_string));
-	if (!accept_result(stmt->dbh, stmt, r)) { memcp_result_free(r); return 0; }
+	memcp_result *r = request_result(memcp_query(db->handle, ZSTR_VAL(stmt->active_query_string), ZSTR_LEN(stmt->active_query_string)));
+	if (!accept_result(stmt->dbh, stmt, r)) { efree(r); return 0; }
 	s->result = r;
 	php_pdo_stmt_set_column_count(stmt, (int)r->columns);
 	stmt->row_count = r->affected;
@@ -137,9 +168,9 @@ static bool prepare(pdo_dbh_t *dbh, zend_string *sql, pdo_stmt_t *stmt, zval *op
 
 static zend_long execute(pdo_dbh_t *dbh, const zend_string *sql) {
 	memcp_db *db = dbh->driver_data;
-	memcp_result *r = memcp_query(db->handle, (char *)ZSTR_VAL(sql), ZSTR_LEN(sql));
+	memcp_result *r = request_result(memcp_query(db->handle, (char *)ZSTR_VAL(sql), ZSTR_LEN(sql)));
 	zend_long count = accept_result(dbh, NULL, r) ? r->affected : -1;
-	memcp_result_free(r); return count;
+	efree(r); return count;
 }
 
 /* Hex literals preserve arbitrary bytes and cannot be affected by SQL quote
@@ -208,14 +239,14 @@ static int connect_db(pdo_dbh_t *dbh, zval *options) {
 	dbh->driver_data = ecalloc(1, sizeof(memcp_db));
 	dbh->methods = &database_methods;
 	memcp_db *db = dbh->driver_data;
-	memcp_result *r = memcp_open((char *)dbh->data_source + sizeof(prefix)-1,
-		(char *)(dbh->username ? dbh->username : ""), (char *)(dbh->password ? dbh->password : ""));
+	memcp_result *r = request_result(memcp_open((char *)dbh->data_source + sizeof(prefix)-1,
+		(char *)(dbh->username ? dbh->username : ""), (char *)(dbh->password ? dbh->password : "")));
 	if (!accept_result(dbh, NULL, r)) {
 		pdo_throw_exception(0, r->error, &dbh->error_code);
-		memcp_result_free(r); return 0;
+		efree(r); return 0;
 	}
 	db->handle = r->handle;
-	memcp_result_free(r);
+	efree(r);
 	dbh->max_escaped_char_length = 2;
 	return 1;
 }

@@ -18,6 +18,7 @@ typedef struct {
 	int64_t affected, insert_id;
 	int transaction;
 	size_t columns, rows;
+	size_t cells_length, bytes_length;
 	memcp_cell *cells; /* column names followed by row-major values */
 	char *bytes;
 	char *error;

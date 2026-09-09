@@ -97,6 +97,47 @@ objects are released after each request; OPcache stays warm. Long-lived PHP
 application workers are not enabled by this integration. Native extension
 crashes affect the entire process, including MemCP.
 
+## PHP quotas, concurrency and tuning
+
+The following startup flags apply globally to all `servePHP` mounts:
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--php-threads=N` | `4` | Fixed maximum simultaneous PHP executions; excess requests wait. |
+| `--php-memory-limit=SIZE` | `256M` | Per-request PHP allocation ceiling, including retained MemCP PDO results. Accepts bytes or K/M/G suffixes, minimum 8 MiB; unlimited values are rejected. |
+| `--php-max-wait=DURATION` | `30s` | Time waiting for a PHP thread before HTTP 503; `0s` waits indefinitely. This is not the execution timeout. |
+| `--php-output-buffer=BYTES` | `4096` | PHP output buffering; `0` disables it for applications requiring unbuffered output. |
+| `--php-opcache-memory=MIB` | `128` | Shared opcode-cache allocation, minimum 32 MiB. |
+
+MemCP sets both `memory_limit` and PHP 8.5's startup-only
+[`max_memory_limit`](https://www.php.net/manual/en/ini.core.php#ini.max-memory-limit)
+to the selected quota. A script can lower its limit but cannot raise it above
+the ceiling or disable it with `ini_set()`. These host settings override the
+corresponding external `php.ini` values. Zend's allocator must remain enabled;
+`USE_ZEND_ALLOC` must be unset or `1`; other values, including an empty value,
+are rejected.
+
+The quota includes unfetched PDO statement buffers, not just strings returned
+by `fetch()`. Results transfer to the PHP request heap after the Go call returns;
+an allocation failure frees the temporary bridge buffer before PHP aborts the
+request. PDO teardown rolls back unfinished transactions. The authenticated
+in-process SQL bridge remains in use; no MySQL socket round trip is introduced.
+
+This is an allocation quota, **not a process-wide RAM limit or tenant sandbox**.
+At four threads and 256 MiB, PHP request heaps may total about 1 GiB, plus the
+shared opcode cache, interpreter overhead, transient bridge buffers, and MemCP
+storage/query memory. The bridge retains its 64 MiB per-result bound during
+transfer. Native extension allocations and child processes, such as an external
+`php dbcheck.php`, are outside this quota. An OS memory limit on this shared
+process also limits MemCP and can terminate the database process.
+
+OPcache is enabled with room for 20,000 scripts and a 16 MiB interned-string
+buffer. PHP JIT is disabled. Timestamp validation stays enabled on every request
+(`opcache.revalidate_freq=0`) so redeployments do not require disabling cache
+validation or restarting the database. Output buffering batches small writes;
+streaming endpoints can finish their output buffers and call `flush()` as usual.
+Other PHP settings and extension loading remain in the external `php.ini`.
+
 ## Per-directory routing and access rules
 
 The PHP host reads `.htaccess` before serving either PHP or static files.
@@ -145,7 +186,6 @@ short_open_tag=Off
 upload_max_filesize=256M
 post_max_size=272M
 max_execution_time=900
-memory_limit=512M
 ```
 
 `short_open_tag=Off` also allows XML declarations in PHP templates. For a local
@@ -227,8 +267,9 @@ reset. Reusable cell/byte buffers are each bounded to 64 KiB of retained capacit
 larger buffers are released after the query. Metadata keys are cleared between
 queries. Rows are written directly into the collector's flat cell array.
 
-Results are limited to 64 MiB and copied into independent C-owned memory in one
-batch. Existing PDO statements retain their own data when another query reuses
+Results are limited to 64 MiB and copied through a temporary C-owned buffer
+into the PHP request heap, where they count against the memory quota. Existing
+PDO statements retain their own data when another query reuses
 the collector; fetching rows never calls back into Go. Strings preserve arbitrary
 bytes. Use SQL pagination for larger results. The 30-second query timeout,
 process-list tracking, cancellation and transaction handling remain active.
