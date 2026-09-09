@@ -4048,6 +4048,10 @@ NULL never proves disjointness. Parameter values observed at compilation are
 protected by session-value guards before a split plan can enter the cache. */
 (define ordered_or_literal_point (lambda (src expr planning_session)
 	(match (expression_syntax expr)
+		((symbol sql_compare) left right _less "equal??" collation)
+		(begin
+			(define point (ordered_or_literal_point src (list (quote equal??) left right) planning_session))
+			(if (nil? point) nil (list (car point) (cadr point) collation)))
 		'(op left right) (if (has? (list (quote equal?) (quote equal??)) op)
 			(begin
 				(define left_col (direct_column_name_for_alias src left))
@@ -4064,7 +4068,7 @@ protected by session-value guards before a split plan can enter the cache. */
 					(and (string? value) (has? '("char" "varchar" "text" "tinytext" "mediumtext" "longtext") typ))
 					(and (number? value) (> value -9007199254740992) (< value 9007199254740992)
 						(has? '("int" "integer" "bigint" "smallint" "tinyint" "mediumint" "float" "double" "decimal" "numeric") typ)))
-					(list col value) nil)) nil)
+					(list col value (if (string? value) "utf8mb4_general_ci" "bin")) nil)) nil)
 		_ nil)))
 
 (define ordered_or_disjoint? (lambda (src left right planning_session)
@@ -4078,7 +4082,10 @@ protected by session-value guards before a split plan can enter the cache. */
 						(and (not (nil? b)) (equal? (car a) (car b))
 							(or (and (string? (cadr a)) (string? (cadr b)))
 								(and (number? (cadr a)) (number? (cadr b))))
-							(equal? (equal?? (cadr a) (cadr b)) false))))) false))))) false)))
+							(equal? (nth a 2) (nth b 2))
+							(begin
+								(define less (collate (nth a 2) false))
+								(or (less (cadr a) (cadr b)) (less (cadr b) (cadr a)))))))) false))))) false)))
 
 (define ordered_or_pairwise_disjoint? (lambda (src branches planning_session)
 	(match branches

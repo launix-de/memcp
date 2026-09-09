@@ -428,6 +428,17 @@ test_cases:
   - name: Derived explicit binary collation survives projection
     sql: SELECT d.id FROM (SELECT id, name COLLATE bin AS label FROM coll_groups) d WHERE d.label='apple' ORDER BY d.id
     expect: {rows: 0, data: []}
+  - name: Ordered OR split uses the propagated collation for disjointness
+    scm: |
+      (begin
+        (define src (list "g" "memcp-tests" "coll_groups" false nil))
+        (define column (list (quote get_column) "g" false "name" false))
+        (define comparison (lambda (value)
+          (car (sql_expr_info (list src) (list 'equal?? column value)))))
+        (if (and
+          (ordered_or_disjoint? src (comparison "apple") (comparison "banana") nil)
+          (not (ordered_or_disjoint? src (comparison "apple") (comparison "APPLE") nil))) true
+          (error "Typed OR split lost collation-aware disjointness: " (comparison "apple") " point=" (ordered_or_literal_point src (comparison "apple") nil))))
 cleanup:
   - sql: DROP TABLE IF EXISTS coll_groups
   - sql: "DROP TABLE IF EXISTS coll_cols"

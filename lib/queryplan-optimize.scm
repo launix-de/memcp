@@ -2734,6 +2734,9 @@ the lowerer can cost it. */
 	(begin
 		(define planning_session (planner_effective_session planning_session))
 		(match expr
+			((symbol sql_parameter_value) value _type _collation) (planner_literal_value value planning_session)
+			((symbol sql_typed_value) value _type _collation) (planner_literal_value value planning_session)
+			((symbol sql_collation) value _collation) (planner_literal_value value planning_session)
 			((symbol session) key) (try
 				(lambda () (begin
 					(define compile_bindings (if (nil? planning_session) nil (planning_session "__memcp_queryplan_compile_bindings")))
