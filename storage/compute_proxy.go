@@ -267,20 +267,19 @@ func (r *computeProxyReader) GetValueMulti(recids []uint32, target []scm.Scmer, 
 	}
 }
 
-func (p *StorageComputeProxy) GetCachedReaderTx(tx *TxContext) ColumnReader {
+func (p *StorageComputeProxy) GetCachedReaderTx(tx *TxContext, alreadyLocked bool) ColumnReader {
 	if p.isOrdered {
 		return &orderedComputeProxyReader{proxy: p, tx: tx}
 	}
-	// Bind input readers before the physical scan acquires the shard read lock.
-	// A cache miss may compute a value, but it must stay within the already
-	// acquired shard capability instead of re-entering GetRead/ColumnReaderTx.
-	// This also keeps the reader executable on a future remote shard owner.
+	// Ordinary scans bind before locking; index/rebuild setup already holds
+	// the shard lock. Propagate that ownership through every computed input
+	// instead of recursively acquiring the same write-preferring RWMutex.
 	readers := make([]ColumnReader, len(p.inputCols))
 	for i, col := range p.inputCols {
 		// tx is a physical lock-capability token here, not callback state.
 		// Passing it through prevents a mutation scan which already owns the
 		// shard write lock from recursively acquiring the same RWMutex.
-		readers[i] = ColumnReaderFunc(p.shard.ColumnReaderTx(tx, col))
+		readers[i] = ColumnReaderFunc(p.shard.ColumnReaderTx(tx, col, alreadyLocked))
 	}
 	return &computeProxyReader{
 		proxy:   p,
@@ -312,11 +311,11 @@ func (p *StorageComputeProxy) needsUnfilteredPreparation() bool {
 func (p *StorageComputeProxy) prewarmDeltaRows(_ *TxContext, filterCols []string, filter scm.Scmer, onlyMissing bool) {
 	filterReaders := make([]ColumnReader, len(filterCols))
 	for i, col := range filterCols {
-		filterReaders[i] = ColumnReaderFunc(p.shard.ColumnReaderTx(nil, col))
+		filterReaders[i] = ColumnReaderFunc(p.shard.ColumnReaderTx(nil, col, false))
 	}
 	inputReaders := make([]ColumnReader, len(p.inputCols))
 	for i, col := range p.inputCols {
-		inputReaders[i] = ColumnReaderFunc(p.shard.ColumnReaderTx(nil, col))
+		inputReaders[i] = ColumnReaderFunc(p.shard.ColumnReaderTx(nil, col, false))
 	}
 
 	recids := p.visibleDeltaRecids()
@@ -442,7 +441,7 @@ func (p *StorageComputeProxy) getValueTx(tx *TxContext, idx uint32) scm.Scmer {
 	for i, col := range p.inputCols {
 		// Delta rows must be read via the shard-level ColumnReader; direct
 		// ColumnStorage access only understands main-row indexes.
-		colvalues[i] = p.shard.ColumnReaderTx(tx, col)(idx)
+		colvalues[i] = p.shard.ColumnReaderTx(tx, col, false)(idx)
 	}
 	val := scm.Apply(p.computor, colvalues...)
 
@@ -497,7 +496,7 @@ func (p *StorageComputeProxy) getValueRLocked(_ *TxContext, idx uint32) scm.Scme
 			continue
 		}
 		if idx < p.shard.main_count {
-			values[i] = newCachedColumnReaderTx(cs, nil).GetValue(idx)
+			values[i] = newCachedColumnReaderTx(cs, nil, true).GetValue(idx)
 			continue
 		}
 		deltaIndex := int(idx - p.shard.main_count)
@@ -580,7 +579,7 @@ func (p *StorageComputeProxy) GetValueMulti(recids []uint32, target []scm.Scmer,
 }
 
 func (p *StorageComputeProxy) GetCachedReader() ColumnReader {
-	return p.GetCachedReaderTx(nil)
+	return p.GetCachedReaderTx(nil, false)
 }
 
 // Compress materializes all values into a compressed main storage.
@@ -591,7 +590,7 @@ func (p *StorageComputeProxy) Compress(_ *TxContext) {
 	compressedNow := false
 	readers := make([]ColumnReader, len(p.inputCols))
 	for i, col := range p.inputCols {
-		readers[i] = newCachedColumnReaderTx(p.shard.getColumnStorageOrPanic(col, false, nil), nil)
+		readers[i] = newCachedColumnReaderTx(p.shard.getColumnStorageOrPanic(col, false, nil), nil, false)
 	}
 	func() {
 		p.mu.Lock()
@@ -670,11 +669,11 @@ func (p *StorageComputeProxy) Compress(_ *TxContext) {
 func (p *StorageComputeProxy) CompressFiltered(_ *TxContext, filterCols []string, filter scm.Scmer) {
 	filterReaders := make([]ColumnReader, len(filterCols))
 	for i, col := range filterCols {
-		filterReaders[i] = newCachedColumnReaderTx(p.shard.getColumnStorageOrPanic(col, false, nil), nil)
+		filterReaders[i] = newCachedColumnReaderTx(p.shard.getColumnStorageOrPanic(col, false, nil), nil, false)
 	}
 	readers := make([]ColumnReader, len(p.inputCols))
 	for i, col := range p.inputCols {
-		readers[i] = newCachedColumnReaderTx(p.shard.getColumnStorageOrPanic(col, false, nil), nil)
+		readers[i] = newCachedColumnReaderTx(p.shard.getColumnStorageOrPanic(col, false, nil), nil, false)
 	}
 
 	func() {

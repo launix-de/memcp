@@ -34,15 +34,16 @@ func requireStatelessComputedCallback(label string, callback scm.Scmer) {
 }
 
 // newCachedColumnReaderTx returns a per-goroutine ColumnReader for the given
-// storage and tx context.
+// storage and tx context. alreadyLocked records an existing read or write lock
+// on the owning shard; recursive computed inputs must not acquire it again.
 //
 // For StorageEnum this gives O(1) sequential decode; for others it's a no-op.
 // Do not strip runtime overlays here: generic scan/read paths must still see
 // user-visible values (for example OverlayBlob must dereference its hash marker
 // back to the persisted blob payload after restart).
-func newCachedColumnReaderTx(col ColumnStorage, tx *TxContext) ColumnReader {
+func newCachedColumnReaderTx(col ColumnStorage, tx *TxContext, alreadyLocked bool) ColumnReader {
 	if provider, ok := col.(TxColumnReaderProvider); ok {
-		return provider.GetCachedReaderTx(tx)
+		return provider.GetCachedReaderTx(tx, alreadyLocked)
 	}
 	return col.GetCachedReader()
 }
