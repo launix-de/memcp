@@ -479,7 +479,12 @@ bounded scalar metadata; this lookup never scans, loads columns or builds indexe
 		/* Emit the metadata read once, not the optimizer/access compiler itself.
 		The predicate shape and column statistics are compile-time inputs; only
 		its scalar value slots are rebound on a cache lookup. */
-		(if (not (source_is_base_table? src)) fallback
+		/* A catalog-backed virtual source can have a named relation without a
+		storage table. It has no scan feedback: retain the prior, never emit a
+		storage metadata call for a nonexistent handle (or materialize its rows
+		inside a guard). Semantic source validation still belongs to lowering. */
+		(if (or (not (source_is_base_table? src))
+			(nil? (planner_table_statistics (source_schema src) (source_relation src)))) fallback
 			(begin
 				(define cols (extract_columns_for_alias src predicate))
 				(define callback (list (quote lambda)
