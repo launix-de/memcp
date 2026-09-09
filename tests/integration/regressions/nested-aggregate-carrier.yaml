@@ -19,6 +19,12 @@ metadata:
   isolated: true
 
 setup:
+  - sql: "DROP TABLE IF EXISTS nac_kpi_item"
+  - sql: "DROP TABLE IF EXISTS nac_kpi_offer"
+  - sql: "CREATE TABLE nac_kpi_offer (id INT PRIMARY KEY, created INT, customer INT)"
+  - sql: "CREATE TABLE nac_kpi_item (offer_id INT, quantity INT, price INT)"
+  - sql: "INSERT INTO nac_kpi_offer VALUES (1, 2, 1), (2, 3, 1), (3, 12, 2), (4, 13, 2)"
+  - sql: "INSERT INTO nac_kpi_item VALUES (1, 2, 10), (1, 1, 5), (2, 3, 10), (3, 1, 7)"
   - sql: "DROP TABLE IF EXISTS nac_team_item"
   - sql: "DROP TABLE IF EXISTS nac_ticket"
   - sql: "DROP TABLE IF EXISTS nac_state"
@@ -48,6 +54,8 @@ setup:
   - scm: '(settings "ShardSize" 60000)'
 
 cleanup:
+  - sql: "DROP TABLE IF EXISTS nac_kpi_item"
+  - sql: "DROP TABLE IF EXISTS nac_kpi_offer"
   - sql: "DROP TABLE IF EXISTS nac_team_item"
   - sql: "DROP TABLE IF EXISTS nac_ticket"
   - sql: "DROP TABLE IF EXISTS nac_state"
@@ -97,3 +105,103 @@ test_cases:
       rows: 1
       data:
         - {assigned_count: null}
+
+  - name: "KPI UNION prepares all nested aggregate columns cold"
+    sql: |
+      SELECT history.period, params.pindex,
+        COALESCE((SELECT COUNT(1) FROM nac_kpi_offer counted
+          WHERE counted.created BETWEEN history.start_time AND history.end_time LIMIT 1), 0) AS offers,
+        COALESCE((SELECT SUM((SELECT SUM(item.quantity * item.price)
+          FROM nac_kpi_item item WHERE item.offer_id = summed.id LIMIT 1))
+          FROM nac_kpi_offer summed
+          WHERE summed.created BETWEEN history.start_time AND history.end_time LIMIT 1), 0) AS total,
+        COALESCE((SELECT SUM((SELECT SUM(position.quantity * position.price)
+          FROM nac_kpi_item position WHERE position.offer_id = repeated.id LIMIT 1))
+          FROM nac_kpi_offer repeated
+          WHERE repeated.created BETWEEN history.start_time AND history.end_time LIMIT 1), 0) / 5 AS per_day,
+        COALESCE((SELECT AVG((SELECT SUM(element.quantity * element.price)
+          FROM nac_kpi_item element WHERE element.offer_id = averaged.id LIMIT 1))
+          FROM nac_kpi_offer averaged
+          WHERE averaged.created BETWEEN history.start_time AND history.end_time LIMIT 1), 0) AS average,
+        (SELECT COUNT(DISTINCT distinct_offer.customer) FROM nac_kpi_offer distinct_offer
+          WHERE distinct_offer.created BETWEEN history.start_time AND history.end_time LIMIT 1) AS customers
+      FROM (SELECT 0 AS period, 0 AS start_time, 9 AS end_time
+        UNION SELECT 1 AS period, 10 AS start_time, 19 AS end_time
+        UNION SELECT 2 AS period, 20 AS start_time, 29 AS end_time) history
+      CROSS JOIN (SELECT 0 AS pindex) params
+      ORDER BY history.period
+    expect:
+      rows: 3
+      data:
+        - {period: 0, pindex: 0, offers: 2, total: 55, per_day: 11, average: 27.5, customers: 1}
+        - {period: 1, pindex: 0, offers: 2, total: 7, per_day: 1.4, average: 7, customers: 1}
+        - {period: 2, pindex: 0, offers: 0, total: 0, per_day: 0, average: 0, customers: 0}
+
+  - name: "KPI UNION reuses all nested aggregate columns warm"
+    sql: |
+      SELECT history.period, params.pindex,
+        COALESCE((SELECT COUNT(1) FROM nac_kpi_offer counted
+          WHERE counted.created BETWEEN history.start_time AND history.end_time LIMIT 1), 0) AS offers,
+        COALESCE((SELECT SUM((SELECT SUM(item.quantity * item.price)
+          FROM nac_kpi_item item WHERE item.offer_id = summed.id LIMIT 1))
+          FROM nac_kpi_offer summed
+          WHERE summed.created BETWEEN history.start_time AND history.end_time LIMIT 1), 0) AS total,
+        COALESCE((SELECT SUM((SELECT SUM(position.quantity * position.price)
+          FROM nac_kpi_item position WHERE position.offer_id = repeated.id LIMIT 1))
+          FROM nac_kpi_offer repeated
+          WHERE repeated.created BETWEEN history.start_time AND history.end_time LIMIT 1), 0) / 5 AS per_day,
+        COALESCE((SELECT AVG((SELECT SUM(element.quantity * element.price)
+          FROM nac_kpi_item element WHERE element.offer_id = averaged.id LIMIT 1))
+          FROM nac_kpi_offer averaged
+          WHERE averaged.created BETWEEN history.start_time AND history.end_time LIMIT 1), 0) AS average,
+        (SELECT COUNT(DISTINCT distinct_offer.customer) FROM nac_kpi_offer distinct_offer
+          WHERE distinct_offer.created BETWEEN history.start_time AND history.end_time LIMIT 1) AS customers
+      FROM (SELECT 0 AS period, 0 AS start_time, 9 AS end_time
+        UNION SELECT 1 AS period, 10 AS start_time, 19 AS end_time
+        UNION SELECT 2 AS period, 20 AS start_time, 29 AS end_time) history
+      CROSS JOIN (SELECT 0 AS pindex) params
+      ORDER BY history.period
+    expect:
+      rows: 3
+      data:
+        - {period: 0, pindex: 0, offers: 2, total: 55, per_day: 11, average: 27.5, customers: 1}
+        - {period: 1, pindex: 0, offers: 2, total: 7, per_day: 1.4, average: 7, customers: 1}
+        - {period: 2, pindex: 0, offers: 0, total: 0, per_day: 0, average: 0, customers: 0}
+
+  - name: "KPI UNION ALL retains aggregate producers across branches"
+    sql: |
+      SELECT history.period, params.pindex,
+        COALESCE((SELECT COUNT(1) FROM nac_kpi_offer counted
+          WHERE counted.created BETWEEN history.start_time AND history.end_time LIMIT 1), 0) AS offers,
+        COALESCE((SELECT SUM((SELECT SUM(item.quantity * item.price)
+          FROM nac_kpi_item item WHERE item.offer_id = summed.id LIMIT 1))
+          FROM nac_kpi_offer summed
+          WHERE summed.created BETWEEN history.start_time AND history.end_time LIMIT 1), 0) AS total,
+        COALESCE((SELECT SUM((SELECT SUM(position.quantity * position.price)
+          FROM nac_kpi_item position WHERE position.offer_id = repeated.id LIMIT 1))
+          FROM nac_kpi_offer repeated
+          WHERE repeated.created BETWEEN history.start_time AND history.end_time LIMIT 1), 0) / 5 AS per_day,
+        COALESCE((SELECT AVG((SELECT SUM(element.quantity * element.price)
+          FROM nac_kpi_item element WHERE element.offer_id = averaged.id LIMIT 1))
+          FROM nac_kpi_offer averaged
+          WHERE averaged.created BETWEEN history.start_time AND history.end_time LIMIT 1), 0) AS average,
+        (SELECT COUNT(DISTINCT distinct_offer.customer) FROM nac_kpi_offer distinct_offer
+          WHERE distinct_offer.created BETWEEN history.start_time AND history.end_time LIMIT 1) AS customers
+      FROM (SELECT 0 AS period, 0 AS start_time, 9 AS end_time
+        UNION ALL SELECT 1 AS period, 10 AS start_time, 19 AS end_time
+        UNION ALL SELECT 2 AS period, 20 AS start_time, 29 AS end_time) history
+      CROSS JOIN (SELECT 0 AS pindex) params
+      ORDER BY history.period
+    expect:
+      rows: 3
+      data:
+        - {period: 0, pindex: 0, offers: 2, total: 55, per_day: 11, average: 27.5, customers: 1}
+        - {period: 1, pindex: 0, offers: 2, total: 7, per_day: 1.4, average: 7, customers: 1}
+        - {period: 2, pindex: 0, offers: 0, total: 0, per_day: 0, average: 0, customers: 0}
+
+  - name: "KPI aggregate rejects a missing user column"
+    sql: |
+      SELECT (SELECT SUM(item.missing_price) FROM nac_kpi_item item
+        WHERE item.offer_id = offer.id) AS total
+      FROM nac_kpi_offer offer
+    expect: {error: true}

@@ -9391,6 +9391,29 @@ stars through the same catalog-aware path used by physical lowering. */
 				(wrap_plan_with_distinct_resultrow (lower_union_all_successive block)))
 			(neumann_fail "build_queryplan" "unknown UNION mode")))))
 
+/* UNION roots retain the catalogs of their query-block branches. Physical
+prepare ownership and missing-handle completion must see those stages too. */
+(define physical_node_stage_catalog (lambda (node)
+	(if (query_block? node)
+		(stage_catalog_with_nested (query_block_stage_catalog node))
+		(if (union_block? node)
+			(unique_stages_by_id
+				(merge (map (union_branches node) physical_node_stage_catalog)))
+			'()))))
+
+(define physical_node_with_stage_catalog (lambda (node)
+	(if (query_block? node)
+		(query_block_with_full_stage_catalog node)
+		(if (union_block? node)
+			(make_union_block
+				(union_mode node)
+				(map (union_branches node) physical_node_with_stage_catalog)
+				(union_order node)
+				(union_limit node)
+				(union_offset node)
+				(union_facts node))
+			node))))
+
 /* Physical preparation expands and attaches the canonical stage catalog once,
 without emitting runtime operators. Keeping this boundary explicit makes
 analysis and emission independently measurable while preserving the normal
@@ -9408,14 +9431,9 @@ build_queryplan contract. */
 					(list (quote physical_planning_tx) tx)))
 			(ir_root ir)))
 		(define contextual_root (apply_join_optimizer_plan_node contextual_input))
-		(define stages (if (query_block? contextual_root)
-			(stage_catalog_with_nested (query_block_stage_catalog contextual_root))
-			'()))
 		(make_ir
 			(ir_kind ir)
-			(if (query_block? contextual_root)
-				(query_block_with_full_stage_catalog_using contextual_root stages)
-				contextual_root)
+			(physical_node_with_stage_catalog contextual_root)
 			(map (ir_stages ir) apply_join_optimizer_plan_stage)
 			(ir_context_of ir)
 			(ir_return ir)))))
@@ -9503,11 +9521,10 @@ build_queryplan contract. */
 their physical recipe has been merged into another owner. Keep those logical
 handles callable without rebuilding the already consolidated carrier. */
 (define complete_emitted_prepare_bindings (lambda (ir plan)
-	(if (not (query_block? (ir_root ir)))
+	(if (not (or (query_block? (ir_root ir)) (union_block? (ir_root ir))))
 		plan
 		(begin
-			(define catalog (unique_stages_by_id
-				(stage_catalog_with_nested (query_block_stage_catalog (ir_root ir)))))
+			(define catalog (physical_node_stage_catalog (ir_root ir)))
 			(define bound_keys (emitted_prepare_binding_keys plan '()))
 			(define called_keys (emitted_prepare_call_keys plan '()))
 			(define missing_roots (filter catalog (lambda (stage)
@@ -9637,13 +9654,10 @@ recipe in one zero-argument helper. */
 					(quoted_runtime_list '())))))))
 
 (define closed_group_prepare_consolidation_required? (lambda (ir)
-	(and (query_block? (ir_root ir))
-		(reduce
-			(stage_catalog_with_nested
-				(query_block_stage_catalog (ir_root ir)))
-			(lambda (shared stage)
-				(or shared (stage_shared_prepare? stage)))
-			false))))
+	(reduce (physical_node_stage_catalog (ir_root ir))
+		(lambda (shared stage)
+			(or shared (stage_shared_prepare? stage)))
+		false)))
 
 /* Recipe emission is a two-step physical pass: normal lowering records which
 lazy stage keys are actually reachable, then this collector emits one closed
@@ -9653,8 +9667,7 @@ Both AST walks are linear; no pairwise recipe comparison is performed. */
 	(if (not (closed_group_prepare_consolidation_required? ir))
 		plan
 		(begin
-			(define catalog (stage_catalog_with_nested
-				(query_block_stage_catalog (ir_root ir))))
+			(define catalog (physical_node_stage_catalog (ir_root ir)))
 			/* Unique carriers already own exactly one initializer. The consolidation
 			pass exists only for canonical backbones shared by multiple logical
 			stages; without one, its repeated full-plan usage and rewrite walks are
