@@ -205,3 +205,197 @@ test_cases:
         WHERE item.offer_id = offer.id) AS total
       FROM nac_kpi_offer offer
     expect: {error: true}
+
+  - name: KPI projected columns require a costed reusable scalar lookup
+    setup:
+      - scm: |-
+          (insert (table "memcp-tests" "nac_kpi_offer") '("id" "created" "customer")
+           (map (produceN 2000) (lambda (i) (list (+ i 100) 1000 9))))
+      - sql: INSERT INTO nac_kpi_item VALUES (4, NULL, 7)
+    scm: |-
+      (begin
+      (define planning (newsession))
+      (define sink (newsession))
+      (planning "__memcp_explain_physical" sink)
+      (parse_sql "memcp-tests" "SELECT history.period,\n (SELECT COUNT(*) FROM nac_kpi_offer o WHERE o.created BETWEEN history.lo AND history.hi) AS offers,\n COALESCE((SELECT SUM((SELECT SUM(i.quantity*i.price) FROM nac_kpi_item i WHERE i.offer_id=o.id))\n  FROM nac_kpi_offer o WHERE o.created BETWEEN history.lo AND history.hi),0) AS total,\n COALESCE((SELECT AVG((SELECT SUM(i.quantity*i.price) FROM nac_kpi_item i WHERE i.offer_id=o.id))\n  FROM nac_kpi_offer o WHERE o.created BETWEEN history.lo AND history.hi),0) AS average\nFROM (SELECT 0 AS period, 0 AS lo, 9 AS hi UNION SELECT 1,10,19 UNION SELECT 2,20,29) history\nORDER BY history.period" nil planning nil)
+      (define decisions (filter (planner_physical_explain_decisions sink)
+       (lambda (d) (equal? (qassoc_get d "decision" nil) "scalar_group_projection"))))
+       (if (empty_list? decisions) (error "missing scalar projection cost alternative") true)
+       (map decisions (lambda (d)
+        (begin
+         (if (> (qassoc_get (qassoc_get d "inputs" '()) "build_ns" 0) 0) true
+          (error "projection omitted full cache build cost"))
+         (group_cache_candidate_accumulate (qassoc_get d "decision_id" nil) 1000000000000 nil))))
+       true)
+    expect:
+      result_contains:
+        - 'true'
+  - name: KPI projection preserves absent and all-NULL children and empty periods
+    sql: |-
+      SELECT history.period,
+       (SELECT COUNT(*) FROM nac_kpi_offer o WHERE o.created BETWEEN history.lo AND history.hi) AS offers,
+       COALESCE((SELECT SUM((SELECT SUM(i.quantity*i.price) FROM nac_kpi_item i WHERE i.offer_id=o.id))
+        FROM nac_kpi_offer o WHERE o.created BETWEEN history.lo AND history.hi),0) AS total,
+       COALESCE((SELECT AVG((SELECT SUM(i.quantity*i.price) FROM nac_kpi_item i WHERE i.offer_id=o.id))
+        FROM nac_kpi_offer o WHERE o.created BETWEEN history.lo AND history.hi),0) AS average
+      FROM (SELECT 0 AS period, 0 AS lo, 9 AS hi UNION SELECT 1,10,19 UNION SELECT 2,20,29) history
+      ORDER BY history.period
+    expect:
+      rows: 3
+      data:
+        - period: 0
+          offers: 2
+          total: 55
+          average: 27.5
+        - period: 1
+          offers: 2
+          total: 7
+          average: 7
+        - period: 2
+          offers: 0
+          total: 0
+          average: 0
+  - name: KPI projection is materialized and reused
+    scm: |-
+      (begin
+      (define planning (newsession))
+      (define sink (newsession))
+      (planning "__memcp_explain_physical" sink)
+      (parse_sql "memcp-tests" "SELECT history.period,\n (SELECT COUNT(*) FROM nac_kpi_offer o WHERE o.created BETWEEN history.lo AND history.hi) AS offers,\n COALESCE((SELECT SUM((SELECT SUM(i.quantity*i.price) FROM nac_kpi_item i WHERE i.offer_id=o.id))\n  FROM nac_kpi_offer o WHERE o.created BETWEEN history.lo AND history.hi),0) AS total,\n COALESCE((SELECT AVG((SELECT SUM(i.quantity*i.price) FROM nac_kpi_item i WHERE i.offer_id=o.id))\n  FROM nac_kpi_offer o WHERE o.created BETWEEN history.lo AND history.hi),0) AS average\nFROM (SELECT 0 AS period, 0 AS lo, 9 AS hi UNION SELECT 1,10,19 UNION SELECT 2,20,29) history\nORDER BY history.period" nil planning nil)
+      (define decisions (filter (planner_physical_explain_decisions sink)
+       (lambda (d) (equal? (qassoc_get d "decision" nil) "scalar_group_projection"))))
+       (if (and (not (empty_list? decisions))
+        (reduce decisions (lambda (ok d)
+         (and ok (qassoc_get (qassoc_get d "inputs" '()) "cache_ready" false))) true))
+        true (error "query did not materialize the costed scalar projection")))
+    expect:
+      result_contains:
+        - 'true'
+  - name: Update a warmed KPI line item
+    sql: UPDATE nac_kpi_item SET price=20 WHERE offer_id=1 AND quantity=2
+    expect:
+      rows: 1
+  - name: KPI projection invalidates through the nested aggregate
+    sql: |-
+      SELECT history.period,
+       (SELECT COUNT(*) FROM nac_kpi_offer o WHERE o.created BETWEEN history.lo AND history.hi) AS offers,
+       COALESCE((SELECT SUM((SELECT SUM(i.quantity*i.price) FROM nac_kpi_item i WHERE i.offer_id=o.id))
+        FROM nac_kpi_offer o WHERE o.created BETWEEN history.lo AND history.hi),0) AS total,
+       COALESCE((SELECT AVG((SELECT SUM(i.quantity*i.price) FROM nac_kpi_item i WHERE i.offer_id=o.id))
+        FROM nac_kpi_offer o WHERE o.created BETWEEN history.lo AND history.hi),0) AS average
+      FROM (SELECT 0 AS period, 0 AS lo, 9 AS hi UNION SELECT 1,10,19 UNION SELECT 2,20,29) history
+      ORDER BY history.period
+    expect:
+      rows: 3
+      data:
+        - period: 0
+          offers: 2
+          total: 75
+          average: 37.5
+        - period: 1
+          offers: 2
+          total: 7
+          average: 7
+        - period: 2
+          offers: 0
+          total: 0
+          average: 0
+  - name: Insert the first non-NULL item of an existing offer
+    sql: INSERT INTO nac_kpi_item VALUES (4,2,9)
+    expect:
+      rows: 1
+  - name: KPI AVG counts offers with non-NULL sums
+    sql: |-
+      SELECT history.period,
+       (SELECT COUNT(*) FROM nac_kpi_offer o WHERE o.created BETWEEN history.lo AND history.hi) AS offers,
+       COALESCE((SELECT SUM((SELECT SUM(i.quantity*i.price) FROM nac_kpi_item i WHERE i.offer_id=o.id))
+        FROM nac_kpi_offer o WHERE o.created BETWEEN history.lo AND history.hi),0) AS total,
+       COALESCE((SELECT AVG((SELECT SUM(i.quantity*i.price) FROM nac_kpi_item i WHERE i.offer_id=o.id))
+        FROM nac_kpi_offer o WHERE o.created BETWEEN history.lo AND history.hi),0) AS average
+      FROM (SELECT 0 AS period, 0 AS lo, 9 AS hi UNION SELECT 1,10,19 UNION SELECT 2,20,29) history
+      ORDER BY history.period
+    expect:
+      rows: 3
+      data:
+        - period: 0
+          offers: 2
+          total: 75
+          average: 37.5
+        - period: 1
+          offers: 2
+          total: 25
+          average: 12.5
+        - period: 2
+          offers: 0
+          total: 0
+          average: 0
+  - name: Remove every item of a warmed offer
+    sql: DELETE FROM nac_kpi_item WHERE offer_id=1
+    expect:
+      rows: 1
+  - name: KPI projection repairs a disappearing child group
+    sql: |-
+      SELECT history.period,
+       (SELECT COUNT(*) FROM nac_kpi_offer o WHERE o.created BETWEEN history.lo AND history.hi) AS offers,
+       COALESCE((SELECT SUM((SELECT SUM(i.quantity*i.price) FROM nac_kpi_item i WHERE i.offer_id=o.id))
+        FROM nac_kpi_offer o WHERE o.created BETWEEN history.lo AND history.hi),0) AS total,
+       COALESCE((SELECT AVG((SELECT SUM(i.quantity*i.price) FROM nac_kpi_item i WHERE i.offer_id=o.id))
+        FROM nac_kpi_offer o WHERE o.created BETWEEN history.lo AND history.hi),0) AS average
+      FROM (SELECT 0 AS period, 0 AS lo, 9 AS hi UNION SELECT 1,10,19 UNION SELECT 2,20,29) history
+      ORDER BY history.period
+    expect:
+      rows: 3
+      data:
+        - period: 0
+          offers: 2
+          total: 30
+          average: 30
+        - period: 1
+          offers: 2
+          total: 25
+          average: 12.5
+        - period: 2
+          offers: 0
+          total: 0
+          average: 0
+  - name: Move an offer between periods
+    sql: UPDATE nac_kpi_offer SET created=12 WHERE id=2
+    expect:
+      rows: 1
+  - name: KPI range scans use current parent dates
+    sql: |-
+      SELECT history.period,
+       (SELECT COUNT(*) FROM nac_kpi_offer o WHERE o.created BETWEEN history.lo AND history.hi) AS offers,
+       COALESCE((SELECT SUM((SELECT SUM(i.quantity*i.price) FROM nac_kpi_item i WHERE i.offer_id=o.id))
+        FROM nac_kpi_offer o WHERE o.created BETWEEN history.lo AND history.hi),0) AS total,
+       COALESCE((SELECT AVG((SELECT SUM(i.quantity*i.price) FROM nac_kpi_item i WHERE i.offer_id=o.id))
+        FROM nac_kpi_offer o WHERE o.created BETWEEN history.lo AND history.hi),0) AS average
+      FROM (SELECT 0 AS period, 0 AS lo, 9 AS hi UNION SELECT 1,10,19 UNION SELECT 2,20,29) history
+      ORDER BY history.period
+    expect:
+      rows: 3
+      data:
+        - period: 0
+          offers: 1
+          total: 0
+          average: 0
+        - period: 1
+          offers: 3
+          total: 55
+          average: 18.333333333333332
+        - period: 2
+          offers: 0
+          total: 0
+          average: 0
+  - name: KPI projection rejects an unknown child column
+    sql: |-
+      SELECT history.period,
+       (SELECT COUNT(*) FROM nac_kpi_offer o WHERE o.created BETWEEN history.lo AND history.hi) AS offers,
+       COALESCE((SELECT SUM((SELECT SUM(i.quantity*i.missing_price) FROM nac_kpi_item i WHERE i.offer_id=o.id))
+        FROM nac_kpi_offer o WHERE o.created BETWEEN history.lo AND history.hi),0) AS total,
+       COALESCE((SELECT AVG((SELECT SUM(i.quantity*i.missing_price) FROM nac_kpi_item i WHERE i.offer_id=o.id))
+        FROM nac_kpi_offer o WHERE o.created BETWEEN history.lo AND history.hi),0) AS average
+      FROM (SELECT 0 AS period, 0 AS lo, 9 AS hi UNION SELECT 1,10,19 UNION SELECT 2,20,29) history
+      ORDER BY history.period
+    expect:
+      error: true

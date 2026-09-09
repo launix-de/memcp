@@ -1500,7 +1500,8 @@ outer joins. */
 				'()
 				(list (if (union_block? src)
 					(build_union_group_aggregates_insert_plan prepared_src src grouptbl keys key_names ags)
-					(build_query_group_aggregates_insert_plan prepared_src grouptbl keys key_names lowering_ags aggregate_cols))))
+					(build_query_group_aggregates_insert_plan prepared_src grouptbl keys key_names lowering_ags aggregate_cols
+						(lowering_catalog_planning_session raw_stage_lookup)))))
 			(if scalar_order_base_stage
 				(list (build_group_ordered_scalar_columns_insert_plan schema tbl alias grouptbl keys key_names condition ags))
 				(map ags (lambda (ag)
@@ -3060,7 +3061,9 @@ tools/costgen; this lowering adds no hand-tuned crossover. */
 						probe_recipe_bindings
 						(lazy_stage_prepare_bindings stage_lookup lazy_stages)
 						(prepared_stage_bindings eager_stages)
-						(lower_unique_stage_prepares_with_graph eager_dependency_graph eager_stage_lookup eager_stages)
+						(lower_unique_stage_prepares_with_graph eager_dependency_graph
+							(lowering_catalog_with_planning_session eager_stage_lookup
+								(planner_context_session (qb_facts block))) eager_stages)
 						(lower_stage_materialize_all eager_stages)))
 					core_block
 					(direct_group_join_usage_flush_exprs direct_group_join_stages)))))))
@@ -9418,18 +9421,25 @@ prepare ownership and missing-handle completion must see those stages too. */
 without emitting runtime operators. Keeping this boundary explicit makes
 analysis and emission independently measurable while preserving the normal
 build_queryplan contract. */
+(define physical_node_with_planning_context (lambda (node planning_session tx)
+	(if (query_block? node)
+		(query_block_with_reorder_facts node (list
+			(list (quote physical_planning_session) planning_session)
+			(list (quote physical_planning_tx) tx)))
+		(if (union_block? node)
+			(make_union_block (union_mode node)
+				(map (union_branches node) (lambda (branch)
+					(physical_node_with_planning_context branch planning_session tx)))
+				(union_order node) (union_limit node) (union_offset node) (union_facts node))
+			node))))
+
 (define prepare_physical_queryplan (lambda (ir planning_session tx)
 	(begin
 		(require_unnested_node "build_queryplan input" (ir_root ir))
 		/* This native handle exists only between physical preparation and emission.
 		It never enters the logical IR or the emitted/cached runtime plan. */
-		(define contextual_input (if (and (query_block? (ir_root ir))
-			(not (nil? planning_session)))
-			(query_block_with_reorder_facts (ir_root ir)
-				(list
-					(list (quote physical_planning_session) planning_session)
-					(list (quote physical_planning_tx) tx)))
-			(ir_root ir)))
+		(define contextual_input (if (nil? planning_session) (ir_root ir)
+			(physical_node_with_planning_context (ir_root ir) planning_session tx)))
 		(define contextual_root (apply_join_optimizer_plan_node contextual_input))
 		(make_ir
 			(ir_kind ir)
