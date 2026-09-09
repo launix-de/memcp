@@ -60,7 +60,7 @@ test_cases:
       (begin
         (define src (list "a" "memcp-tests" "afs_check" false nil))
         (define predicate (list '>= (list 'get_column "a" false "id" false) 200))
-        (define reorder (join_optimizer_expr_selectivity_estimate (list src) "a" predicate))
+        (define reorder (join_optimizer_expr_selectivity_estimate (list src) "a" predicate nil))
         (define physical (planner_source_filter_estimate src predicate 512 nil nil))
         (if (and (equal? (qassoc_get reorder 'source nil) 'scan_feedback)
           (equal? (qassoc_get physical 'source nil) 'scan_feedback)
@@ -71,6 +71,31 @@ test_cases:
           (error "reorder and physical costing did not consume the same measured rate")))
     expect:
       data: [true]
+
+  - name: "Bound scalar literals share feedback with their unquoted scan predicate"
+    scm: |
+      (begin
+        (define tbl (table "memcp-tests" "afs_check"))
+        (define callback (list 'lambda (list 'x) (list '>= 'x (list 'quote 200))))
+        (define access (compile_scan_access '("id") callback))
+        (define estimate (scan_selectivity_estimate nil tbl (car access)
+          (map (cadr access) (lambda (v) (eval v))) '()
+          (lambda () (error "quoted binding must reuse metadata without sampling")) 0))
+        (if (and (equal? (qassoc_get estimate 'source nil) 'scan_feedback)
+          (equal? (qassoc_get estimate 'value nil) 0.8)) true
+          (error "quoted binding lost the measured predicate identity")))
+    expect:
+      result_contains: ["true"]
+
+  - name: "Quoted lists must not be interpreted as scalar feedback parameters"
+    scm: |
+      (begin
+        (define callback (list 'lambda (list 'x) (list '>= 'x (list 'quote '(200)))))
+        (define access (compile_scan_access '("id") callback))
+        (if (list? (car (car access)))
+          (error "quoted list incorrectly acquired a scalar feedback identity") true))
+    expect:
+      result_contains: ["true"]
 
   - name: "A different-word length prior must not suppress permitted sampling"
     scm: |
@@ -106,7 +131,7 @@ test_cases:
         (define values (map (nth access 1) (lambda (value) (eval value))))
         (define matches (scan nil tbl (nth access 0) values '("id") (eval callback)
           '() scan_count 0 + false))
-        (define estimate (join_optimizer_expr_selectivity_estimate (list src) "a" expr))
+        (define estimate (join_optimizer_expr_selectivity_estimate (list src) "a" expr nil))
         (and (equal? matches 100)
           (equal? (qassoc_get estimate 'source nil) 'scan_feedback)
           (equal? (qassoc_get estimate 'value nil) 0.1)

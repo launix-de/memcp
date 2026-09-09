@@ -768,10 +768,10 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	unknown" discipline as the keytable cost check above. */
 	(define row_count_unknown_src (list "rc" "memcp-tests" "row_count_unknown_source" false nil))
 	(assert (equal? (planner_row_count_after_selectivity
-		row_count_unknown_src (list row_count_unknown_src) "rc" true nil) nil) true
+		row_count_unknown_src (list row_count_unknown_src) "rc" true nil nil) nil) true
 		"row count after selectivity falls back to the caller's sentinel for an unverifiable source")
 	(assert (equal? (planner_row_count_after_selectivity
-		row_count_unknown_src (list row_count_unknown_src) "rc" true 1) 1) true
+		row_count_unknown_src (list row_count_unknown_src) "rc" true 1 nil) 1) true
 		"row count after selectivity preserves whatever fallback the caller passed in")
 	/* query_invariant_presence_stage?/query_invariant_probe_entries_for_stages:
 	a presence probe whose lookup key is a session read (not a reference to

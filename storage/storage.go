@@ -984,11 +984,12 @@ func Init(en scm.Env) {
 			if a[0].IsNil() {
 				return scm.NewNil()
 			}
-			return scm.NewInt(int64(TableFromScmer(a[0]).PlannerStatsToken()))
+			return scm.NewInt(int64(TableFromScmer(a[0]).PlannerStatsToken(len(a) < 2 || scm.ToBool(a[1]))))
 		},
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "return the process-unique dependency token of a table's immutable planner-statistics snapshot",
 			Params: []*scm.TypeDescriptor{
 				{Kind: "table", Label: "table"},
+				{Kind: "bool", Label: "include_feedback", Optional: true, Description: "default true; false requires separate guards for every consumed filter estimate"},
 			},
 			Return: &scm.TypeDescriptor{Kind: "int"},
 		},
@@ -1000,11 +1001,12 @@ func Init(en scm.Env) {
 			if a[0].IsNil() {
 				return scm.NewNil()
 			}
-			return scm.NewInt(int64(TableFromScmer(a[0]).PlannerStatisticsFingerprint()))
+			return scm.NewInt(int64(TableFromScmer(a[0]).PlannerStatisticsFingerprint(len(a) < 2 || scm.ToBool(a[1]))))
 		},
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "return the coarse cost-class fingerprint of a table's immutable planner-statistics snapshot",
 			Params: []*scm.TypeDescriptor{
 				{Kind: "table", Label: "table"},
+				{Kind: "bool", Label: "include_feedback", Optional: true, Description: "default true; false requires separate guards for every consumed filter estimate"},
 			},
 			Return: &scm.TypeDescriptor{Kind: "int"},
 		},
@@ -1022,11 +1024,12 @@ func Init(en scm.Env) {
 				return scm.NewBool(false)
 			}
 			compileToken := uint64(a[2].Int())
-			if tbl.PlannerStatsToken() == compileToken {
+			includeFeedback := len(a) < 5 || scm.ToBool(a[4])
+			if tbl.PlannerStatsToken(includeFeedback) == compileToken {
 				return scm.NewBool(true)
 			}
 			compileFingerprint := uint64(a[3].Int())
-			return scm.NewBool(tbl.PlannerStatisticsFingerprint() == compileFingerprint)
+			return scm.NewBool(tbl.PlannerStatisticsFingerprint(includeFeedback) == compileFingerprint)
 		},
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "check whether cached-plan table statistics remain in the same cost class",
 			Params: []*scm.TypeDescriptor{
@@ -1034,6 +1037,7 @@ func Init(en scm.Env) {
 				{Kind: "string", Label: "table"},
 				{Kind: "int", Label: "compile_token"},
 				{Kind: "int", Label: "compile_fingerprint"},
+				{Kind: "bool", Label: "include_feedback", Optional: true, Description: "must match the scope of the supplied token and fingerprint"},
 			},
 			Return:         &scm.TypeDescriptor{Kind: "bool"},
 			HasSideEffects: true,

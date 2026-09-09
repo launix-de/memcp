@@ -295,14 +295,14 @@ and barrier ownership come from the pre-normalization query block. */
 					(join_optimizer_column_selectivity_estimate right_ref)
 					(planner_unknown_selectivity_estimate)))))))
 
-(define join_optimizer_expr_prior_estimate (lambda (sources default_alias expr)
+(define join_optimizer_expr_prior_estimate (lambda (sources default_alias expr planning_session)
 	(match expr
 		((symbol equal?) left right) (join_optimizer_equality_selectivity_estimate sources default_alias left right)
-		((quote equal?) left right) (join_optimizer_expr_selectivity_estimate sources default_alias (list (symbol "equal?") left right))
+		((quote equal?) left right) (join_optimizer_expr_selectivity_estimate sources default_alias (list (symbol "equal?") left right) planning_session)
 		((symbol equal??) left right) (join_optimizer_equality_selectivity_estimate sources default_alias left right)
-		((quote equal??) left right) (join_optimizer_expr_selectivity_estimate sources default_alias (list (symbol "equal??") left right))
+		((quote equal??) left right) (join_optimizer_expr_selectivity_estimate sources default_alias (list (symbol "equal??") left right) planning_session)
 		((symbol =) left right) (join_optimizer_equality_selectivity_estimate sources default_alias left right)
-		((quote =) left right) (join_optimizer_expr_selectivity_estimate sources default_alias (list (symbol "=") left right))
+		((quote =) left right) (join_optimizer_expr_selectivity_estimate sources default_alias (list (symbol "=") left right) planning_session)
 		((symbol <) _left _right) (planner_estimate nil 0 (quote range_unknown) false)
 		((quote <) _left _right) (planner_estimate nil 0 (quote range_unknown) false)
 		((symbol <=) _left _right) (planner_estimate nil 0 (quote range_unknown) false)
@@ -327,16 +327,43 @@ and barrier ownership come from the pre-normalization query block. */
 				(planner_unknown_selectivity_estimate)))
 		((quote strlike) value pattern)
 		(join_optimizer_expr_selectivity_estimate sources default_alias
-			(list (symbol "strlike") value pattern))
+			(list (symbol "strlike") value pattern) planning_session)
 		((quote strlike) value pattern collation)
 		(join_optimizer_expr_selectivity_estimate sources default_alias
-			(list (symbol "strlike") value pattern collation))
+			(list (symbol "strlike") value pattern collation) planning_session)
 		_ (planner_unknown_selectivity_estimate))))
 
 /* Feedback keys describe the complete table-local logical predicate, before
 physical residual pruning. Compiling its access metadata here only canonicalizes
 bounded scalar metadata; this lookup never scans, loads columns or builds indexes. */
-(define planner_filter_feedback (lambda (sources default_alias expr)
+(define planner_record_filter_feedback_guard (lambda (src access values planning_session)
+	(begin
+		(define planning_session (planner_effective_session planning_session))
+		(if (or (nil? planning_session)
+			(nil? (planning_session "__memcp_queryplan_guard_conditions"))
+			(empty_list? (car access))
+			(not (list? (car (car access))))) nil
+			(begin
+				/* Guard precisely the metadata input, including an unknown result.
+				A measurement of another bound predicate must not invalidate this
+				plan. The equality is a conservative fallback where no cost crossover
+				inequality has been derived; it is not permission to omit that input.
+				Budget zero is essential: guards never sample or run a filter. */
+				(define read_expr (list (quote scan_selectivity_estimate) nil
+					(list (quote table) (source_schema src) (source_relation src))
+					(list (quote quote) (car access)) (list (quote quote) values)
+					(list (quote quote) '()) (list (quote lambda) '() true) 0))
+				/* Provenance matters too: a prior from other LIKE words may be
+				resampled, whereas a same-predicate measurement need not be. Read
+				the metadata once and retain both decision inputs. */
+				(define value_expr (list (list (quote lambda) (list (quote estimate))
+					(list (quote list)
+						(list (quote qassoc_get) (quote estimate) (list (quote quote) (quote value)) nil)
+						(list (quote qassoc_get) (quote estimate) (list (quote quote) (quote source)) nil))) read_expr))
+				(planner_record_guard_condition
+					(list (quote equal?) value_expr (list (quote quote) (eval value_expr))) planning_session))))))
+
+(define planner_filter_feedback (lambda (sources default_alias expr planning_session)
 	(begin
 		(define aliases (join_hypergraph_expr_aliases default_alias (source_aliases sources) expr))
 		(if (not (single_source? aliases)) nil
@@ -348,20 +375,23 @@ bounded scalar metadata; this lookup never scans, loads columns or builds indexe
 							(define cols (extract_columns_for_alias src expr))
 							(define callback (list (quote lambda)
 								(map cols (lambda (col) (symbol (concat (source_alias src) "." col))))
-								(lower_column_expr_for_alias src expr)))
+								(planner_bind_session_values (lower_column_expr_for_alias src expr) planning_session)))
 							(define access (compile_scan_access cols callback true))
+							(define values (map (nth access 1) (lambda (value) (eval value))))
+							(planner_record_session_value_guards expr planning_session)
+							(planner_record_filter_feedback_guard src access values planning_session)
 							(scan_selectivity_estimate nil (table (source_schema src) (source_relation src))
-								(nth access 0) (map (nth access 1) (lambda (value) (eval value)))
+								(nth access 0) values
 								cols (eval callback) 0)))
 						(lambda (_e) nil))))))))
 
-(define join_optimizer_expr_selectivity_estimate (lambda (sources default_alias expr)
-	(coalesceNil (planner_filter_feedback sources default_alias expr)
-		(join_optimizer_expr_prior_estimate sources default_alias expr))))
+(define join_optimizer_expr_selectivity_estimate (lambda (sources default_alias expr planning_session)
+	(coalesceNil (planner_filter_feedback sources default_alias expr planning_session)
+		(join_optimizer_expr_prior_estimate sources default_alias expr planning_session))))
 
-(define join_optimizer_expr_selectivity (lambda (sources default_alias expr)
+(define join_optimizer_expr_selectivity (lambda (sources default_alias expr planning_session)
 	(begin
-		(define estimate (join_optimizer_expr_selectivity_estimate sources default_alias expr))
+		(define estimate (join_optimizer_expr_selectivity_estimate sources default_alias expr planning_session))
 		(planner_estimate_planning_value estimate
 			(if (equal? (qassoc_get estimate (quote source) nil) (quote range_unknown))
 				0.3333333333333333 0.1)))))
@@ -369,7 +399,7 @@ bounded scalar metadata; this lookup never scans, loads columns or builds indexe
 (define join_optimizer_product (lambda (values)
 	(reduce (coalesceNil values '()) (lambda (product value) (* product value)) 1)))
 
-(define join_optimizer_source_rows_from_base (lambda (base_rows_value sources default_alias local_predicates src)
+(define join_optimizer_source_rows_from_base (lambda (base_rows_value sources default_alias local_predicates src planning_session)
 	(begin
 		(define base_rows (coalesceNil base_rows_value 1000000))
 		(define local_selectivity (join_optimizer_product
@@ -382,19 +412,19 @@ bounded scalar metadata; this lookup never scans, loads columns or builds indexe
 						(equal? (qassoc_get entry (quote origin) nil) (quote where))))))
 				(lambda (entry)
 					(join_optimizer_expr_selectivity sources default_alias
-						(qassoc_get entry (quote predicate) true))))))
+						(qassoc_get entry (quote predicate) true) planning_session)))))
 		(define combined (reduce (filter local_predicates (lambda (entry)
 			(not (and (source_outer? src) (equal? (qassoc_get entry (quote origin) nil) (quote where))))))
 			(lambda (condition entry) (combine_where condition (qassoc_get entry (quote predicate) true))) true))
-		(define feedback (planner_filter_feedback sources default_alias combined))
+		(define feedback (planner_filter_feedback sources default_alias combined planning_session))
 		(max 1 (* base_rows (if (nil? feedback) local_selectivity (qassoc_get feedback (quote value) local_selectivity)))))))
 
-(define join_optimizer_source_rows (lambda (stages sources default_alias graph src)
+(define join_optimizer_source_rows (lambda (stages sources default_alias graph src planning_session)
 	(join_optimizer_source_rows_from_base
 		(planner_estimate_planning_value
 			(planner_source_row_estimate_using_stages stages src) 1000000)
 		sources default_alias
-		(join_optimizer_local_predicates graph (source_alias src)) src)))
+		(join_optimizer_local_predicates graph (source_alias src)) src planning_session)))
 
 (define planner_quoted_value (lambda (value)
 	(list (quote quote) value)))
@@ -428,7 +458,7 @@ bounded scalar metadata; this lookup never scans, loads columns or builds indexe
 				(planner_quoted_value local_sources)
 				default_alias
 				(planner_quoted_value local_predicates)
-				(planner_quoted_value src))))))
+				(planner_quoted_value src) (quote session))))))
 
 (define join_optimizer_selectivity_expr (lambda (sources default_alias predicate)
 	(begin
@@ -440,7 +470,7 @@ bounded scalar metadata; this lookup never scans, loads columns or builds indexe
 			(list (quote join_optimizer_expr_selectivity)
 				(planner_quoted_value local_sources)
 				default_alias
-				(planner_quoted_value predicate))))))
+				(planner_quoted_value predicate) (quote session))))))
 
 (define join_optimizer_alias_subset? (lambda (required available)
 	(reduce (coalesceNil required '()) (lambda (ok alias)
@@ -506,7 +536,7 @@ cost-reordered around the complete relation unit. */
 						relation_units sources alias))
 					(if (nil? anchor) required (list anchor)))))))))
 
-(define join_optimizer_metadata_nodes (lambda (stages relation_units sources default_alias alias_index graph fixed_cardinality)
+(define join_optimizer_metadata_nodes (lambda (stages relation_units sources default_alias alias_index graph fixed_cardinality planning_session)
 	(map sources (lambda (src)
 		(begin
 			(define stage (join_optimizer_source_stage stages src))
@@ -514,7 +544,7 @@ cost-reordered around the complete relation unit. */
 			(list
 				(source_alias src)
 				(if (or singleton fixed_cardinality) 1
-					(join_optimizer_source_rows stages sources default_alias graph src))
+					(join_optimizer_source_rows stages sources default_alias graph src planning_session))
 				(if (or singleton fixed_cardinality) 1
 					(join_optimizer_source_rows_expr stages sources default_alias graph src))
 				(if (join_optimizer_inner_source? stages src) (quote inner) (quote left-outer))
@@ -522,7 +552,7 @@ cost-reordered around the complete relation unit. */
 				(if (group_stage? stage) (stage_result_max_rows_per_partition stage) nil)
 				singleton))))))
 
-(define join_optimizer_metadata_predicates_from (lambda (sources default_alias entries aliases)
+(define join_optimizer_metadata_predicates_from (lambda (sources default_alias entries aliases planning_session)
 	(map (filter entries (lambda (entry)
 		(join_optimizer_alias_subset? (qassoc_get entry (quote aliases) '()) aliases)))
 		(lambda (entry)
@@ -538,7 +568,7 @@ cost-reordered around the complete relation unit. */
 				(define metadata (list
 					predicate_aliases
 					(join_optimizer_expr_selectivity sources default_alias
-						predicate)
+						predicate planning_session)
 					origin
 					(qassoc_get entry (quote owner) nil)
 					predicate
@@ -546,13 +576,13 @@ cost-reordered around the complete relation unit. */
 					(join_optimizer_selectivity_expr sources default_alias predicate)))
 				metadata)))))
 
-(define join_optimizer_metadata_predicates (lambda (sources default_alias graph aliases)
+(define join_optimizer_metadata_predicates (lambda (sources default_alias graph aliases planning_session)
 	(join_optimizer_metadata_predicates_from
-		sources default_alias (join_optimizer_predicates graph) aliases)))
+		sources default_alias (join_optimizer_predicates graph) aliases planning_session)))
 
-(define join_optimizer_metadata_costed_predicates (lambda (sources default_alias graph aliases)
+(define join_optimizer_metadata_costed_predicates (lambda (sources default_alias graph aliases planning_session)
 	(join_optimizer_metadata_predicates_from
-		sources default_alias (join_optimizer_costed_predicates graph) aliases)))
+		sources default_alias (join_optimizer_costed_predicates graph) aliases planning_session)))
 
 (define join_optimizer_source_by_alias (lambda (sources alias)
 	(reduce sources (lambda (found src)
@@ -1743,16 +1773,19 @@ particular star shape. */
 			(define table_value (table (source_schema src) (source_relation src)))
 			(define table_expr
 				(list (quote table) (source_schema src) (source_relation src)))
+			(define include_feedback (and (not (nil? planning_session))
+				(planning_session "__memcp_queryplan_diagnostic_statistics")))
 			(planner_record_statistics_dependency
 				table_expr
-				(table_planner_statistics_token table_value)
-				(table_planner_statistics_fingerprint table_value)
-				planning_session))) nil)))
+				(table_planner_statistics_token table_value include_feedback)
+				(table_planner_statistics_fingerprint table_value include_feedback)
+				planning_session include_feedback))) nil)))
 
 (define planner_table_statistics_aliases (lambda (sources)
 	(map (filter sources source_is_base_table?) source_alias)))
 
-/* Table dependencies cover rebuild statistics and published feedback classes.
+/* Table dependencies cover rebuild statistics; individual metadata reads guard
+their own bound filter estimates instead of invalidating on unrelated learning.
 Every local filter may now depend on a bound value; record all session-value
 dependencies, not only text-pattern parameters. */
 (define join_order_record_cost_dependencies (lambda (sources nodes predicates planning_session)
@@ -2314,7 +2347,7 @@ source catalog. join_plan remains the single owner of physical join order. */
 		(define aliases (map segment source_alias))
 		(define alias_index (join_hypergraph_alias_index aliases))
 		(define predicates (join_optimizer_metadata_costed_predicates
-			all_sources default_alias graph aliases))
+			all_sources default_alias graph aliases planning_session))
 		(define fixed_functional_pair (and (equal? (count segment) 2)
 			(and (empty_list? required_drivers)
 				(begin
@@ -2331,7 +2364,7 @@ source catalog. join_plan remains the single owner of physical join order. */
 										(list (source_alias driver)))))))))))
 		(define planned (join_order_adaptive segment
 			(join_optimizer_metadata_nodes stages relation_units
-				segment default_alias alias_index graph fixed_functional_pair)
+				segment default_alias alias_index graph fixed_functional_pair planning_session)
 			predicates
 			required_drivers
 			planning_session))
@@ -2410,7 +2443,7 @@ the lowerer can cost it. */
 (define join_optimizer_ordered_source_rows (lambda (stage_catalog sources default_alias graph src planning_session tx)
 	(begin
 		(define fallback (join_optimizer_source_rows
-			stage_catalog sources default_alias graph src))
+			stage_catalog sources default_alias graph src planning_session))
 		(define base_rows (planner_source_row_count src))
 		(define condition (join_optimizer_source_local_condition graph src))
 		(if (or (not (number? base_rows)) (equal? condition true))
@@ -2445,7 +2478,7 @@ the lowerer can cost it. */
 		(define base_row_catalog (map sources (lambda (src)
 			(list (source_alias src)
 				(coalesceNil (planner_source_row_count src)
-					(join_optimizer_source_rows stage_catalog sources default_alias graph src))))))
+					(join_optimizer_source_rows stage_catalog sources default_alias graph src planning_session))))))
 		(define filtered_row_catalog (map sources (lambda (src)
 			(list (source_alias src)
 				(join_optimizer_ordered_source_rows
@@ -2860,11 +2893,14 @@ floor avoids pretending that an unseen word is impossible. */
 						(planner_bind_session_values
 							(lower_column_expr_for_alias src condition) planning_session))))
 					(define access (compile_scan_access filtercols filter_expr))
+					(define values (map (nth access 1) (lambda (value_expr) (eval value_expr))))
+					(planner_record_session_value_guards condition planning_session)
+					(planner_record_filter_feedback_guard src access values planning_session)
 					(define estimate (scan_selectivity_estimate
 						tx
 						(table (source_schema src) (source_relation src))
 						(nth access 0)
-						(map (nth access 1) (lambda (value_expr) (eval value_expr)))
+						values
 						filtercols
 						(eval filter_expr)
 						max_rows))
@@ -2890,11 +2926,11 @@ real estimate instead of an unconditional "unknown": an unbounded scan still
 has a knowable multiplicity (its source's row count), it just isn't capped
 by a LIMIT or a unique point lookup. Falls back to `fallback` only when the
 source itself has no known row count (not a base table). */
-(define planner_row_count_after_selectivity (lambda (src sources default_alias condition fallback)
+(define planner_row_count_after_selectivity (lambda (src sources default_alias condition fallback planning_session)
 	(begin
 		(define source_rows (planner_source_row_count src))
 		(if (number? source_rows)
-			(max 1 (* source_rows (join_optimizer_expr_selectivity sources default_alias condition)))
+			(max 1 (* source_rows (join_optimizer_expr_selectivity sources default_alias condition planning_session)))
 			fallback))))
 
 (define planner_source_row_estimate (lambda (src)
@@ -3104,7 +3140,7 @@ fact table with a small FK domain still selects the reusable partition. */
 					(planner_source_filter_estimate src residual 512 tx planning_session)
 					total_rows
 					(planner_row_count_after_selectivity src (list src)
-						(source_alias src) residual total_rows)))))))
+						(source_alias src) residual total_rows planning_session)))))))
 
 /* Aggregate pushdown runs before physical lowering, but its cached decision
 must observe the same source-local statistic that a later access-path choice
@@ -3177,7 +3213,7 @@ logical IR: it samples once per request and is shared by every guard binding. */
 				(list (quote null_extension_barrier) true)
 				(list (quote reuse) 1))))))
 
-(define query_block_selectivity_estimates (lambda (block)
+(define query_block_selectivity_estimates (lambda (block planning_session)
 	(begin
 		(define sources (qb_sources block))
 		(define default_alias (qassoc_get (qb_facts block) (quote default_alias)
@@ -3190,7 +3226,7 @@ logical IR: it samples once per request and is shared by every guard binding. */
 			(lambda (predicate)
 				(begin
 					(define estimate (join_optimizer_expr_selectivity_estimate
-						sources default_alias predicate))
+						sources default_alias predicate planning_session))
 					(list
 						(list (quote predicate) predicate)
 						(list (quote estimate) estimate)
@@ -3207,7 +3243,7 @@ logical IR: it samples once per request and is shared by every guard binding. */
 	(merge (list
 		(list (list (quote source_estimates) (map (qb_sources block) source_reorder_estimate)))
 		(if (explain_reorder_selectivities? planning_session)
-			(list (list (quote selectivity_estimates) (query_block_selectivity_estimates block)))
+			(list (list (quote selectivity_estimates) (query_block_selectivity_estimates block planning_session)))
 			'())
 		(list (list (quote left_join_requirements) (filter
 			(map (qb_sources block) left_join_requirement)

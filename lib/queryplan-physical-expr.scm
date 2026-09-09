@@ -1251,7 +1251,7 @@ both names therefore bind to the same parameter. */
 		(define condition (combine_where (qb_where prepared) (source_join_expr src)))
 		(define probe_term (list (quote equal??) key_expr probe))
 		(define probe_work_rows (planner_row_count_after_selectivity
-			src (list src) (source_alias src) probe_term 1))
+			src (list src) (source_alias src) probe_term 1 (planner_context_session (qb_facts prepared))))
 		(define filtercols (merge_unique (list
 			(extract_columns_for_alias src condition)
 			(extract_columns_for_alias src key_expr))))

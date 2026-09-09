@@ -1,0 +1,79 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: "1.0"
+  description: "Unrelated learned predicates must not invalidate cached ordered plans"
+  isolated: true
+setup:
+  - sql: "DROP TABLE IF EXISTS qfi_document"
+  - sql: "CREATE TABLE qfi_document (id INT PRIMARY KEY, label TEXT) ENGINE=sloppy"
+  - scm: |
+      (begin
+        (insert (table "memcp-tests" "qfi_document") '("id" "label")
+          (map (produceN 1000) (lambda (i) (list i (if (< i 10) "needle" "ordinary")))))
+        (rebuild (table "memcp-tests" "qfi_document") true false))
+test_cases:
+  - name: "Unrelated learned LIKE leaves an ordered self-join cache variant reusable"
+    scm: |
+      (begin
+        (define cache (newcachemap))
+        (define sess (newsession))
+        (sess "username" "root")
+        (sess "schema" "memcp-tests")
+        (define q "SELECT a.id FROM qfi_document a LEFT JOIN qfi_document b ON b.id=a.id ORDER BY a.id LIMIT 2")
+        (define first (cached_parse cache (list parse_sql) "memcp-tests" q nil "root" sess true))
+        (define rows (newsession))
+        (rows "n" 0)
+        (define emit (lambda (_row) (rows "n" (+ (rows "n") 1))))
+        (sql_execute_formula sess nil first emit (lambda (_fields) nil))
+        (define entry (car (cache (car (cache)))))
+        (define variants (count (entry "variants")))
+        (define pred (list 'lambda (list 'x) (list 'strlike 'x "%needle%" "utf8mb4_general_ci")))
+        (define access (compile_scan_access '("label") pred))
+        (scan_recset nil (table "memcp-tests" "qfi_document") (car access)
+          (map (cadr access) (lambda (v) (eval v))) '("label") (eval pred))
+        (sql_execute_formula sess nil
+          (cached_parse cache (list parse_sql) "memcp-tests" q nil "root" sess true)
+          emit (lambda (_fields) nil))
+        (if (and (equal? (rows "n") 4) (equal? (count (entry "variants")) variants))
+          true
+          (error (concat "unrelated feedback recompiled ordered plan: before=" variants
+            " after=" (count (entry "variants")) " rows=" (rows "n")))))
+    expect:
+      data: [true]
+  - name: "Learning the consumed predicate still recompiles and then reuses its plan"
+    scm: |
+      (begin
+        (define cache (newcachemap))
+        (define sess (newsession))
+        (sess "username" "root")
+        (sess "schema" "memcp-tests")
+        (define q "SELECT a.id FROM qfi_document a JOIN qfi_document b ON b.id<=a.id WHERE a.id < 4 ORDER BY a.id LIMIT 2")
+        (define rows (newsession))
+        (rows "n" 0)
+        (define emit (lambda (_row) (rows "n" (+ (rows "n") 1))))
+        (sql_execute_formula sess nil
+          (cached_parse cache (list parse_sql) "memcp-tests" q nil "root" sess true)
+          emit (lambda (_fields) nil))
+        (define entry (car (cache (car (cache)))))
+        (define before (count (entry "variants")))
+        (define pred (list 'lambda (list 'x) (list '< 'x 4)))
+        (define access (compile_scan_access '("id") pred))
+        (scan_recset nil (table "memcp-tests" "qfi_document") (car access)
+          (map (cadr access) (lambda (v) (eval v))) '("id") (eval pred))
+        (sql_execute_formula sess nil
+          (cached_parse cache (list parse_sql) "memcp-tests" q nil "root" sess true)
+          emit (lambda (_fields) nil))
+        (define after (count (entry "variants")))
+        (sql_execute_formula sess nil
+          (cached_parse cache (list parse_sql) "memcp-tests" q nil "root" sess true)
+          emit (lambda (_fields) nil))
+        (if (and (> after before) (equal? after (count (entry "variants")))
+          (equal? (rows "n") 6)) true
+          (error (concat "relevant feedback guard failed: " before " -> " after
+            " -> " (count (entry "variants")) " rows=" (rows "n")
+            " guard=" (serialize (car (car (entry "variants"))))))))
+    expect:
+      data: [true]
+cleanup:
+  - sql: "DROP TABLE IF EXISTS qfi_document"

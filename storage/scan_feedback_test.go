@@ -221,7 +221,7 @@ func TestFilterFeedbackUniquePointRetainsPlanStatistics(t *testing.T) {
 	tbl.mu.Lock()
 	tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: cols[:1]}}
 	tbl.mu.Unlock()
-	token, fingerprint := tbl.PlannerStatsToken(), tbl.PlannerStatisticsFingerprint()
+	token, fingerprint := tbl.PlannerStatsToken(true), tbl.PlannerStatisticsFingerprint(true)
 	for _, body := range []string{`(equal? x 1)`, `(equal? x 101)`} {
 		schema, values, filter := feedbackTestCompile(t, body)
 		tbl.scan(nil, schema, values, cols[:1], scm.Eval(filter, &scm.Globalenv), nil,
@@ -231,7 +231,7 @@ func TestFilterFeedbackUniquePointRetainsPlanStatistics(t *testing.T) {
 			t.Fatal("unique point probe trained redundant selectivity")
 		}
 	}
-	if tbl.PlannerStatsToken() != token || tbl.PlannerStatisticsFingerprint() != fingerprint {
+	if tbl.PlannerStatsToken(true) != token || tbl.PlannerStatisticsFingerprint(true) != fingerprint {
 		t.Fatal("unique point probe invalidated cached planning statistics")
 	}
 }
