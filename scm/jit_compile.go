@@ -74,6 +74,13 @@ func jitParkCallArgument(ctx *JITContext, value *JITValueDesc) bool {
 // operates on JITValueDesc values and the common register-bank/emitter API;
 // instruction encoding and ABI frame construction remain architecture-owned.
 func jitRequiredLocalSlots(expr Scmer, minimum int) int {
+	return jitRequiredLocalSlotsAtDepth(expr, minimum, 0)
+}
+
+// begin and match share the invocation's numbered frame, whereas outer may
+// address a different invocation. Counting those foreign slots as local space
+// makes each nested closure reserve its parent's captures again.
+func jitRequiredLocalSlotsAtDepth(expr Scmer, minimum, depth int) int {
 	for expr.IsSourceInfo() {
 		expr = expr.SourceInfo().value
 	}
@@ -92,10 +99,28 @@ func jitRequiredLocalSlots(expr Scmer, minimum int) int {
 		switch jitSyntaxKind(items[0]) {
 		case SyntaxQuote, SyntaxParser, SyntaxLambda:
 			return minimum
+		case SyntaxOuter:
+			if len(items) == 3 {
+				levels, valid := outerDepthLiteral(items[1])
+				if valid && levels <= int64(depth) {
+					return jitRequiredLocalSlotsAtDepth(items[2], minimum, depth-int(levels))
+				}
+			}
+			return minimum
+		case SyntaxBegin:
+			depth++
+		case SyntaxBeginMut, SyntaxMatch:
+			if len(items) > 1 {
+				minimum = jitRequiredLocalSlotsAtDepth(items[1], minimum, depth)
+				for _, item := range items[2:] {
+					minimum = jitRequiredLocalSlotsAtDepth(item, minimum, depth+1)
+				}
+			}
+			return minimum
 		}
 	}
 	for _, item := range items {
-		minimum = jitRequiredLocalSlots(item, minimum)
+		minimum = jitRequiredLocalSlotsAtDepth(item, minimum, depth)
 	}
 	return minimum
 }
