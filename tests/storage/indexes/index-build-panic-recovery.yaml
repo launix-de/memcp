@@ -1,0 +1,42 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: "1.0"
+  description: "Failed index construction releases ownership and permits retry"
+setup:
+  - sql: "DROP TABLE IF EXISTS index_panic_rows"
+  - sql: "CREATE TABLE index_panic_rows (id INT, value INT) ENGINE=memory"
+  - scm: |
+      (begin
+        (insert (table "memcp-tests" "index_panic_rows") '("id" "value")
+          (map (produceN 128) (lambda (i) (list i (- 128 i)))))
+        (rebuild (table "memcp-tests" "index_panic_rows") true false))
+test_cases:
+  - name: "Repeated column-read failures do not poison the index lock"
+    timeout: 10
+    scm: |
+      (begin
+        (define fail (newsession))
+        (fail "enabled" true)
+        (createcolumn (table "memcp-tests" "index_panic_rows")
+          "computed_value" "INT" '() (list "temp" true "filtercols" (list) "filter" (lambda () false))
+          '("value") (lambda (value)
+            (if (and (fail "enabled") (equal? value 64))
+              (error "intentional index column failure") value)))
+        (define access (compile_scan_access '() (lambda () true)))
+        (define query (lambda ()
+          (scan_order nil (table "memcp-tests" "index_panic_rows")
+            (car access) (cadr access) '() (lambda () true)
+            '("computed_value") '(<) 0 0 3 '("id")
+            (lambda (acc id) (+ acc id)) 0 false)))
+        (define failures (reduce (produceN 4) (lambda (n i)
+          (+ n (try (lambda () (begin (query) 0)) (lambda (e) 1)))) 0))
+        (fail "enabled" false)
+        (if (and (equal? failures 4) (equal? (query) 378) (equal? (query) 378))
+          true (error "index retry lost rows or swallowed a build failure")))
+  - name: "Rows remain intact after failed index construction"
+    sql: "SELECT COUNT(*) AS n, SUM(id) AS total FROM index_panic_rows"
+    expect:
+      data: [{n: 128, total: 8128}]
+cleanup:
+  - sql: "DROP TABLE IF EXISTS index_panic_rows"

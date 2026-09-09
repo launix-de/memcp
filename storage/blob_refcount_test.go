@@ -468,8 +468,7 @@ func TestBlobDeleteRowsAndRebuild(t *testing.T) {
 
 	// Rebuild: old shard (3 blobs) replaced by new shard (1 blob: longA)
 	Rebuild(true, true)
-
-	// Physical deletion waits for the complete generation ownership check.
+	// Reclamation requires committed-generation evidence, not an RC decrement.
 	CleanDatabase(db)
 
 	// Only blob A should remain
@@ -550,7 +549,7 @@ func TestBlobDropTableReleasesBlobs(t *testing.T) {
 		t.Fatalf("expected 3 blob refs before drop, got %d", len(refs))
 	}
 
-	// Drop releases counts; cleanup proves the files are unowned.
+	// Drop retires ownership; only generation-based cleanup may delete files.
 	DropTable("tdb2", "docs", false)
 	CleanDatabase(db)
 
@@ -646,7 +645,7 @@ func TestBlobSharedAcrossTables(t *testing.T) {
 		t.Fatalf("t2 content after t1 drop: expected %d, got %d", len(shared), readLen)
 	}
 
-	// Drop second table, then collect the now-unowned blobs.
+	// Drop second table, then reclaim the now-unowned files by generation proof.
 	DropTable("tdb3", "t2", false)
 	CleanDatabase(db)
 

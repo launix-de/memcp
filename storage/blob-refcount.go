@@ -177,10 +177,13 @@ func (db *database) IncrBlobRefcount(hash string) {
 }
 
 // DecrBlobRefcount decrements the reference count for a blob hash in db.`.blobs`.
-// If the count reaches 0, remove only the operational row. Its absence makes
-// the blob a cleanup candidate, never a deletion proof: counts can lag committed
-// owners after a crash. CleanDatabase alone may delete the file after checking
-// all active generations under the publication barrier.
+// If the count reaches 0, only the operational counter row is deleted.
+// A counter can undercount committed owners after a crash or an interrupted
+// lifecycle update. It is therefore NEVER authority to delete payload data.
+// CleanDatabase reclaims unowned files using the complete committed-generation
+// manifests under persistenceLifecycle. Do not scan those manifests here:
+// callers can already hold schema/shard lifecycle locks, and doing so would
+// introduce lock inversions as well as a full catalog walk per decrement.
 func (db *database) DecrBlobRefcount(hash string) {
 	defer db.lockBlobRef(hash)()
 	state := db.blobRefState()

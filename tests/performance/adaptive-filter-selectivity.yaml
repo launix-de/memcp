@@ -1,0 +1,51 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: "1.0"
+  description: "Repeated skewed filters train cardinality estimates before join planning"
+  isolated: true
+
+fixture_setup: &afs_fixture
+  - sql: "DROP TABLE IF EXISTS afs_fact"
+  - sql: "DROP TABLE IF EXISTS afs_dimension"
+  - sql: "CREATE TABLE afs_dimension (id INT PRIMARY KEY, label VARCHAR(80)) ENGINE=sloppy"
+  - sql: "CREATE TABLE afs_fact (id INT PRIMARY KEY, dimension_id INT, amount INT) ENGINE=sloppy"
+  - scm: |
+      (begin
+        (insert (table "memcp-tests" "afs_dimension") '("id" "label")
+          (map (produceN 2000) (lambda (i)
+            (list i (if (< i 1800) "very-common-long-pattern" "other")))))
+        (insert (table "memcp-tests" "afs_fact") '("id" "dimension_id" "amount")
+          (map (produceN {rows}) (lambda (i) (list i (mod i 2000) 1))))
+        (rebuild))
+  - sql: "SELECT COUNT(*) FROM afs_dimension WHERE label LIKE '%very-common-long-pattern%'"
+  - sql: "SELECT COUNT(*) FROM afs_fact WHERE id < 100"
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS afs_fact"
+  - sql: "DROP TABLE IF EXISTS afs_dimension"
+
+test_cases:
+  - name: "Learned broad LIKE before selective fact join"
+    setup: *afs_fixture
+    performance_rows: 20000
+    warmup: 3
+    timing_samples: 9
+    threshold_ms: 5000
+    sql: |
+      SELECT SUM(f.amount) AS total FROM afs_dimension d
+      JOIN afs_fact f ON f.dimension_id = d.id
+      WHERE d.label LIKE '%very-common-long-pattern%' AND f.id < 100
+    expect:
+      rows: 1
+      data: [{total: 100}]
+  - name: "Cached aggregate after filter feedback"
+    setup: *afs_fixture
+    performance_rows: 20000
+    warmup: 3
+    timing_samples: 9
+    threshold_ms: 5000
+    sql: "SELECT COUNT(*) AS n FROM afs_fact WHERE MOD(id, 10) = 0"
+    expect:
+      rows: 1
+      data: [{n: 2000}]

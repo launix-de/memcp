@@ -186,6 +186,7 @@ type scanAccessRuntime struct {
 // introduced after local-filter compilation, such as a RecSet input or join
 // batch keys; it is never used to re-materialize the compiled schema.
 type scanAccess struct {
+	feedback      *filterObservation // invocation-local identity; immutable across shard workers
 	schema        []scm.Scmer
 	values        []scm.Scmer
 	compiledCount int

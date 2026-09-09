@@ -1039,6 +1039,37 @@ func Init(en scm.Env) {
 			HasSideEffects: true,
 		},
 	})
+
+	scm.Declare(&en, &scm.Declaration{
+		Name: "table_filter_selectivity",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			schema := mustScmerSlice(a[1], "filter feedback schema")
+			values := mustScmerSlice(a[2], "filter feedback values")
+			value, source, known := TableFromScmer(a[0]).filterSelectivity(bindFilterFeedback(schema, values))
+			if !known {
+				return scm.NewNil()
+			}
+			confidence := .9
+			if source == "like_length_histogram" || source == "partial_scan_feedback" {
+				confidence = .35
+			}
+			return scm.NewSlice([]scm.Scmer{
+				scm.NewSlice([]scm.Scmer{scm.NewSymbol("value"), scm.NewFloat(value)}),
+				scm.NewSlice([]scm.Scmer{scm.NewSymbol("confidence"), scm.NewFloat(confidence)}),
+				scm.NewSlice([]scm.Scmer{scm.NewSymbol("source"), scm.NewSymbol(source)}),
+				scm.NewSlice([]scm.Scmer{scm.NewSymbol("known"), scm.NewBool(true)}),
+			})
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "read an immutable learned filter selectivity; nil means no observation or suitable LIKE length bucket",
+			Params: []*scm.TypeDescriptor{
+				{Kind: "table", Label: "table"},
+				{Kind: "list", Label: "schema"},
+				{Kind: "list", Label: "values"},
+			},
+			Return: &scm.TypeDescriptor{Kind: "any"}, HasSideEffects: true,
+		},
+	})
+
 	scm.Declare(&en, &scm.Declaration{
 		Name: "table_order_partitioned?",
 
@@ -1063,16 +1094,23 @@ func Init(en scm.Env) {
 			Params: []*scm.TypeDescriptor{
 				{Kind: "list", Label: "filterColumns", Description: "physical columns corresponding to the filter lambda parameters"},
 				{Kind: "list", Label: "filterExpression", Description: "unevaluated filter lambda AST"},
+				{Kind: "bool", Label: "feedback_only", Description: "compile only safe statistical identity metadata, without access boundaries", Optional: true},
 			},
 			Return: &scm.TypeDescriptor{Kind: "list", Description: "pair of static schema and bound runtime values"},
 		},
 	}, func(code []scm.Scmer, caller *scm.Env) scm.Scmer {
-		if len(code) != 2 {
-			panic("compile_scan_access expects filter columns and a filter expression")
+		if len(code) < 2 || len(code) > 3 {
+			panic("compile_scan_access expects filter columns, a filter expression and optional feedback_only")
 		}
 		columns := scm.Eval(code[0], caller)
 		filter := scm.Eval(code[1], caller)
-		schema, valueExprs, _ := compileScanAccess(columns, filter)
+		var schema scm.Scmer
+		var valueExprs []scm.Scmer
+		if len(code) == 3 && scm.ToBool(scm.Eval(code[2], caller)) {
+			schema, valueExprs = compileFilterFeedbackAccess(columns, filter)
+		} else {
+			schema, valueExprs, _ = compileScanAccess(columns, filter)
+		}
 		values := make([]scm.Scmer, len(valueExprs))
 		for i, expression := range valueExprs {
 			values[i] = scm.Eval(expression, caller)
