@@ -109,6 +109,15 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 	sql_identifier
 )))
 
+/* Account creation is emitted as part of the same statement as GRANT. */
+(define sql_grant_account_plan (lambda (username identified)
+	(if identified
+		'('insert '('table "system" "user") '('list "username" "password" "admin")
+			'('list '('list username '('password (car identified)) false))
+			'('list "$update")
+			'('lambda '('$update) '('$update '('list "password" '('password (car identified))))))
+		true)))
+
 (define sql_column (parser (or
 	(parser '((define tbl sql_identifier_unquoted) "." (define col sql_identifier_unquoted)) '((quote get_column) tbl true col true))
 	(parser '((define tbl sql_identifier_unquoted) "." (define col sql_identifier_quoted)) '((quote get_column) tbl true col true))
@@ -555,7 +564,14 @@ arithmetic; leave expressions containing columns or functions untouched. */
 					(list (symbol "lambda") params
 						(list (symbol "begin")
 							(list (symbol "define") changed_rows_sym (symbol "NEW"))
-							(cons '!begin valid_stmts)
+							(cons '!begin (map valid_stmts (lambda (stmt) (begin
+								/* Later statements read the row after preceding SET NEW
+								assignments, including assignments inside IF branches. */
+								(define current_new (lambda (expr) (match expr
+									'('get_assoc 'NEW col) (list (quote get_assoc) changed_rows_sym col)
+									(cons head tail) (cons head (map tail current_new))
+									expr)))
+								(current_new stmt)))))
 							changed_rows_sym)))
 			)
 			/* SET assignments (legacy format) - body is AST (list (col1 expr1) ...), eval to get actual list */
@@ -572,6 +588,9 @@ arithmetic; leave expressions containing columns or functions untouched. */
 
 	/* Simple trigger statements (non-IF) */
 	(define sql_trigger_simple_stmt (parser (or
+		/* MySQL no-op used in generated empty trigger branches. Other DO
+		expressions remain unsupported rather than silently dropping evaluation. */
+		(parser '((atom "DO" true) (atom "NULL" true) (? (atom ";" false))) '!nop)
 		/* SET NEW.col = expr[;] */
 		(parser '(
 			(atom "SET" true)
@@ -1876,22 +1895,20 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		/* FLUSH PRIVILEGES / FLUSH TABLES / FLUSH ... — no-op in memcp */
 		(parser '((atom "FLUSH" true) (+ (or sql_identifier (atom "TABLES" true) (atom "PRIVILEGES" true) ","))) true)
 
-		/* GRANT syntax (MySQL-style) -> reflect only admin and database-level access */
-		/* GRANT ALL [PRIVILEGES] ON *.* TO user -> set admin true */
-		(parser '((atom "GRANT" true) (atom "ALL" true) (? (atom "PRIVILEGES" true)) (atom "ON" true) (atom "*" true) (atom "." true) (atom "*" true) (atom "TO" true) (define username sql_user_ident))
+		/* MySQL/MariaDB legacy GRANT ... IDENTIFIED BY creates an account or
+		updates its password. Permission checks precede both account and grant writes;
+		an existing account's admin flag must be preserved on a database grant. */
+		(parser '((atom "GRANT" true) (atom "ALL" true) (? (atom "PRIVILEGES" true)) (atom "ON" true) (atom "*" true) (atom "." true) (atom "*" true) (atom "TO" true) (define username sql_user_ident)
+			(define identified (? (parser '((atom "IDENTIFIED" true) (atom "BY" true) (define password sql_expression)) (list password)))))
 			(begin (if policy (policy "system" true true) true)
-				(compile_scan_plan (quote scan) '(session "__memcp_tx") '('table "system" "user") '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('__scan_acc '$update) '('begin '('$update '('list "admin" true)) '__scan_acc)) nil nil false)
-		))
-		/* GRANT <anything> ON db.* TO user -> insert access (idempotent) */
-		(parser '((atom "GRANT" true) (+ (or sql_identifier "," (atom "SELECT" true) (atom "ALL" true) (atom "PRIVILEGES" true))) (atom "ON" true) (define db sql_identifier) (atom "." true) (or (atom "*" true) sql_identifier) (atom "TO" true) (define username sql_user_ident))
+				(cons '!begin (list (sql_grant_account_plan username identified)
+					(compile_scan_plan (quote scan) '(session "__memcp_tx") '('table "system" "user") '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('__scan_acc '$update) '('begin '('$update '('list "admin" true)) '__scan_acc)) nil nil false)))))
+		/* Existing MemCP grants are database-wide, including db.table syntax. */
+		(parser '((atom "GRANT" true) (+ (or sql_identifier "," (atom "SELECT" true) (atom "ALL" true) (atom "PRIVILEGES" true))) (atom "ON" true) (define db sql_identifier) (atom "." true) (or (atom "*" true) sql_identifier) (atom "TO" true) (define username sql_user_ident)
+			(define identified (? (parser '((atom "IDENTIFIED" true) (atom "BY" true) (define password sql_expression)) (list password)))))
 			(begin (if policy (policy "system" true true) true)
-				'('insert '('table "system" "access") '('list "username" "database") '('list '('list username db)) '(list) '((quote lambda) '() false))
-		))
-		/* GRANT <anything> ON db.table TO user -> also insert access at db level (idempotent) */
-		(parser '((atom "GRANT" true) (+ (or sql_identifier "," (atom "SELECT" true) (atom "ALL" true) (atom "PRIVILEGES" true))) (atom "ON" true) (define db sql_identifier) (atom "." true) sql_identifier (atom "TO" true) (define username sql_user_ident))
-			(begin (if policy (policy "system" true true) true)
-				'('insert '('table "system" "access") '('list "username" "database") '('list '('list username db)) '(list) '((quote lambda) '() false))
-		))
+				(cons '!begin (list (sql_grant_account_plan username identified)
+					'('insert '('table "system" "access") '('list "username" "database") '('list '('list username db)) '(list) '((quote lambda) '() false))))))
 
 		/* REVOKE syntax (MySQL-style) -> mirror GRANT behavior */
 		/* REVOKE ALL [PRIVILEGES] ON *.* FROM user -> set admin false */
@@ -2182,7 +2199,16 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			(atom "FOR" true) (atom "EACH" true) (atom "ROW" true)
 			(define body sql_trigger_body)
 		) (begin
-				(define compiled (compile_trigger_body schema timing (car (cdr body))))
+				/* MySQL validates trigger syntax now, but resolves referenced
+				relations when it fires. Retry unresolved names through the registered
+				source compiler; retain the error if the schema is still invalid. */
+				(define compiled (try (lambda () (compile_trigger_body schema timing (car (cdr body))))
+					(lambda (err) (if (and
+						(not (and planning_session (planning_session "__compile_trigger_source")))
+						(match err (regex "^bind_query_names: (unknown relation alias:|Column does not exist:)" _ _) true _ false))
+						'('eval '('nth '('sql_trigger_source_compile (car body)
+							'('list "schema" schema "table" tbl "name" name "timing" timing)) 1))
+						(error err)))))
 				(list 'createtrigger (list 'table schema tbl) name timing (car body) "sql" (list 'quote (list 'deferred_trigger compiled)) true)
 		))
 		/* DROP TRIGGER syntax */
@@ -2231,7 +2257,9 @@ different frontend (for example RDF) is used. */
 		"CREATE TRIGGER " (sql_trigger_quote_identifier (context "name")) " "
 		(sql_trigger_source_timing (context "timing")) " ON "
 		(sql_trigger_quote_identifier (context "table")) " FOR EACH ROW " source))
-	(define plan (parse_sql (context "schema") sql (lambda (schema read write) true) nil nil))
+	(define compile_session (newsession))
+	(compile_session "__compile_trigger_source" true)
+	(define plan (parse_sql (context "schema") sql (lambda (schema read write) true) compile_session nil))
 	(nth plan 6))))
 (registertriggerlanguage "sql" sql_trigger_source_compile)
 

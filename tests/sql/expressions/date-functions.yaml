@@ -499,5 +499,13 @@ test_cases:
       data:
         - yw: null
 
+  - name: "Date arithmetic propagates a NULL interval"
+    sql: "SELECT DATE_ADD('2024-01-01', INTERVAL NULL SECOND) AS a, DATE_SUB('2024-01-01', INTERVAL NULL DAY) AS b, TIMESTAMPDIFF(YEAR, FROM_UNIXTIME(0)+INTERVAL NULL SECOND, '2026-09-09') AS age"
+    expect: {data: [{a: null, b: null, age: null}]}
+
+  - name: "Date arithmetic propagates a runtime NULL interval"
+    sql: "SELECT DATE_ADD('2024-01-01', INTERVAL NULLIF(id, 1) SECOND) AS a, DATE_SUB('2024-01-01', INTERVAL NULLIF(id, 1) DAY) AS b FROM date_test WHERE id=1"
+    expect: {data: [{a: null, b: null}]}
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS date_test"

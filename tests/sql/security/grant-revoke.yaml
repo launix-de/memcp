@@ -1,3 +1,4 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
 # GRANT/REVOKE Test Suite
 
 metadata:
@@ -5,6 +6,7 @@ metadata:
   description: "User privileges: GRANT and REVOKE"
 
 setup:
+  - sql: "DROP USER IF EXISTS legacygrant"
   - sql: "DROP TABLE IF EXISTS grant_t"
     expect: {}
   - sql: "DELETE FROM `system`.`access` WHERE username='alice'"
@@ -29,6 +31,54 @@ setup:
     expect: {}
 
 test_cases:
+  - name: "Legacy GRANT provisions an account with a password"
+    sql: "GRANT ALL ON `memcp-tests`.* TO 'legacygrant'@'%' IDENTIFIED BY 'first-password'"
+    expect: {}
+
+  - name: "Legacy account authenticates and has database access"
+    username: legacygrant
+    password: first-password
+    sql: "SHOW TABLES"
+    expect: {}
+
+  - name: "Database grant does not grant administration"
+    sql: "SELECT admin FROM system.user WHERE username='legacygrant'"
+    expect: {data: [{admin: false}]}
+
+  - name: "Unprivileged legacy GRANT must not create an account"
+    username: legacygrant
+    password: first-password
+    sql: "GRANT ALL ON `memcp-tests`.* TO 'legacyforbidden'@'%' IDENTIFIED BY 'bad'"
+    expect: {error: true}
+
+  - name: "Denied GRANT leaves no account"
+    sql: "SELECT username FROM system.user WHERE username='legacyforbidden'"
+    expect: {rows: 0}
+
+  - name: "Legacy GRANT changes the existing password"
+    sql: "GRANT ALL ON `memcp-tests`.* TO 'legacygrant'@'%' IDENTIFIED BY 'second-password'"
+    expect: {}
+
+  - name: "New password authenticates"
+    username: legacygrant
+    password: second-password
+    sql: "SELECT 1 AS n"
+    expect: {data: [{n: 1}]}
+
+  - name: "Old password no longer authenticates"
+    username: legacygrant
+    password: first-password
+    sql: "SELECT 1"
+    expect: {error: true}
+
+  - name: "Legacy account and grant are unique"
+    sql: "SELECT COUNT(*) AS cnt FROM system.access WHERE username='legacygrant'"
+    expect: {data: [{cnt: 1}]}
+
+  - name: "Remove legacy test account"
+    sql: "DROP USER legacygrant"
+    expect: {}
+
   - name: "CREATE USER alice"
     sql: "CREATE USER alice IDENTIFIED BY 'pw'"
     expect:

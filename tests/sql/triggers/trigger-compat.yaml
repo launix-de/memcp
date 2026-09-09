@@ -5,6 +5,8 @@ metadata:
   description: "Trigger body parsing compatibility tests (Bug 4a: backtick table names + BEGIN-less, Bug 4b: column notation)"
 
 setup:
+  - sql: "DROP TABLE IF EXISTS trigger_do_src"
+  - sql: "CREATE TABLE trigger_do_src (id INT PRIMARY KEY, val INT)"
   - sql: "DROP TABLE IF EXISTS derived_src"
   - sql: "DROP TABLE IF EXISTS derived_assoc"
   - sql: "DROP TABLE IF EXISTS derived_target"
@@ -65,6 +67,7 @@ setup:
   - sql: "CREATE TABLE trigger_literal_src (id INT PRIMARY KEY)"
 
 cleanup:
+  - sql: "DROP TABLE IF EXISTS trigger_do_src"
   - sql: "DROP TRIGGER IF EXISTS `derived_src.ai`"
   - sql: "DROP TRIGGER IF EXISTS `derived_src.au`"
   - sql: "DROP TRIGGER IF EXISTS after_items_insert"
@@ -436,3 +439,52 @@ test_cases:
       rows: 1
       data:
         - {cnt: 2, total_marker: 500}
+
+  - name: "DO NULL permits empty branches and preserves following SET NEW"
+    sql: "CREATE TRIGGER trigger_do_before BEFORE INSERT ON trigger_do_src FOR EACH ROW BEGIN IF NEW.id = 1 THEN DO NULL; ELSE IF NEW.id = 2 THEN DO NULL; ELSE SET NEW.val = 99; END IF; END IF; SET NEW.val = NEW.val + 1; END"
+    expect: {affected_rows: 0}
+
+  - name: "Exercise both no-op branches and the nonempty branch"
+    sql: "INSERT INTO trigger_do_src VALUES (1,10),(2,20),(3,30)"
+    expect: {affected_rows: 3}
+
+  - name: "DO NULL does not discard surrounding trigger statements"
+    sql: "SELECT id, val FROM trigger_do_src ORDER BY id"
+    expect:
+      data: [{id: 1, val: 11}, {id: 2, val: 21}, {id: 3, val: 100}]
+
+  - name: "A whole AFTER trigger may be DO NULL"
+    sql: "CREATE TRIGGER trigger_do_after AFTER UPDATE ON trigger_do_src FOR EACH ROW DO NULL"
+    expect: {affected_rows: 0}
+
+  - name: "Fire a BEGIN-less DO NULL trigger"
+    sql: "UPDATE trigger_do_src SET val = 12 WHERE id = 1"
+    expect: {affected_rows: 1}
+
+  - name: "DO expressions with effects must not be silently discarded"
+    sql: "CREATE TRIGGER trigger_do_invalid AFTER DELETE ON trigger_do_src FOR EACH ROW BEGIN DO NULL, (@effect := 1); END"
+    expect: {error: true}
+
+  - name: "MySQL accepts unresolved relation names in a trigger definition"
+    sql: "CREATE TRIGGER trigger_unresolved_delete AFTER DELETE ON trigger_do_src FOR EACH ROW UPDATE trig_log SET id=1 WHERE missing.id=trig_log.id"
+    expect: {affected_rows: 0}
+
+  - name: "Unresolved trigger reports the original name error when fired"
+    sql: "DELETE FROM trigger_do_src WHERE id=1"
+    expect: {error: true, contains: "unknown relation alias: missing"}
+
+  - name: "Failed trigger leaves the source row intact"
+    sql: "SELECT val FROM trigger_do_src WHERE id=1"
+    expect: {data: [{val: 12}]}
+
+  - name: "Restart with an unresolved trigger definition"
+    sql: "SHUTDOWN"
+    expect: {rows: 0}
+
+  - name: "Unresolved trigger still reports its name error after restart"
+    sql: "DELETE FROM trigger_do_src WHERE id=1"
+    expect: {error: true, contains: "unknown relation alias: missing"}
+
+  - name: "Restarted failed trigger preserves its row"
+    sql: "SELECT val FROM trigger_do_src WHERE id=1"
+    expect: {data: [{val: 12}]}
