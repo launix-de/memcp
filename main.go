@@ -655,6 +655,54 @@ func getLoad(path string) func(a ...scm.Scmer) scm.Scmer {
 	}
 }
 
+// watchFile watches the parent directory so atomic replacement, deletion and
+// recreation keep working. Register before the initial read to avoid a gap.
+// Callbacks receive read errors too: security-sensitive consumers must fail closed.
+func watchFile(filename string, update func([]byte, error)) (func(), error) {
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		return nil, err
+	}
+	if err = watcher.Add(filepath.Dir(filename)); err != nil {
+		watcher.Close()
+		return nil, err
+	}
+	read := func() { data, err := os.ReadFile(filename); update(data, err) }
+	func() {
+		defer func() {
+			if err := recover(); err != nil {
+				watcher.Close()
+				panic(err)
+			}
+		}()
+		read()
+	}()
+	done := make(chan struct{})
+	var once sync.Once
+	go func() {
+		defer watcher.Close()
+		for {
+			select {
+			case <-done:
+				return
+			case event, ok := <-watcher.Events:
+				if !ok {
+					return
+				}
+				if filepath.Clean(event.Name) == filename {
+					read()
+				}
+			case err, ok := <-watcher.Errors:
+				if !ok {
+					return
+				}
+				update(nil, err)
+			}
+		}
+	}()
+	return func() { once.Do(func() { close(done) }) }, nil
+}
+
 func getWatch(path string) func(a ...scm.Scmer) scm.Scmer {
 	return func(a ...scm.Scmer) scm.Scmer {
 		filename := resolveIOPath(path, scm.String(a[0]))
@@ -662,49 +710,27 @@ func getWatch(path string) func(a ...scm.Scmer) scm.Scmer {
 		if !ok {
 			panic("watch does not support archive-backed virtual paths")
 		}
-		reread := func() {
-			bytes, err := readVirtualFile(filename)
-			if err != nil {
-				panic(err)
-			}
-			scm.Apply(a[1], scm.NewString(string(bytes)))
-		}
-		reread() // read once at the beginning in sync
-		// watch for changes
-		watcher, err := fsnotify.NewWatcher()
-		if err != nil {
-			panic(err)
-		}
-		go func() {
-			for {
-				select {
-				case /*event :=*/ <-watcher.Events:
-					// flush all other events
-					for {
-						time.Sleep(10 * time.Millisecond) // delay a bit, so we don't read empty files
-						select {
-						case <-watcher.Events:
-							// ignore
-						default:
-							goto to_reread
-						}
-					}
-				to_reread:
-					// now reread the file
-					func() {
-						defer func() {
-							if err := recover(); err != nil {
-								// error happens during reload: log to console
-								fmt.Println(err)
-							}
-						}()
-						reread()
-					}()
-					watcher.Add(hostPath) // text editors rename, so we have to rewatch
+		initial := true
+		_, err := watchFile(hostPath, func(data []byte, err error) {
+			if initial {
+				initial = false
+				if err != nil {
+					panic(err)
 				}
+				scm.Apply(a[1], scm.NewString(string(data)))
+				return
 			}
-		}()
-		err = watcher.Add(hostPath)
+			defer func() {
+				if err := recover(); err != nil {
+					fmt.Println(err)
+				}
+			}()
+			if err != nil {
+				fmt.Println(err)
+				return
+			}
+			scm.Apply(a[1], scm.NewString(string(data)))
+		})
 		if err != nil {
 			panic(err)
 		}

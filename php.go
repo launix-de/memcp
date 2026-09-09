@@ -22,6 +22,8 @@ var phpReady = make(chan struct{})
 var phpThreads = 4
 var phpStarted, phpStopping bool
 var phpInitErr error
+var phpAccessCachesMu sync.Mutex
+var phpAccessCaches []*phpAccessCache
 
 // HTTP listeners belong to Scheme's serve. This only publishes PHP settings
 // after Scheme initialization; the first PHP request starts the shared runtime.
@@ -68,6 +70,12 @@ func ensurePHP() error {
 }
 
 func stopPHP() {
+	phpAccessCachesMu.Lock()
+	for _, cache := range phpAccessCaches {
+		cache.close()
+	}
+	phpAccessCaches = nil
+	phpAccessCachesMu.Unlock()
 	phpLifecycle.Lock()
 	defer phpLifecycle.Unlock()
 	phpStopping = true
@@ -133,6 +141,10 @@ func getServePHP(wd string) func(...scm.Scmer) scm.Scmer {
 // document root; dotfiles and PHP configuration/source backups are not served.
 func phpHandler(root, front, mount string) http.Handler {
 	files := http.FileServer(http.Dir(root))
+	access := newPHPAccessCache()
+	phpAccessCachesMu.Lock()
+	phpAccessCaches = append(phpAccessCaches, access)
+	phpAccessCachesMu.Unlock()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		original := r
 		if mount != "" {
@@ -157,37 +169,70 @@ func phpHandler(root, front, mount string) http.Handler {
 				return
 			}
 		}
-		requestPath := r.URL.Path
-		filename := filepath.Join(root, filepath.FromSlash(requestPath))
-		info, err := os.Stat(filename)
-		// Keep PATH_INFO in the request passed to PHP, but check the actual
-		// script on disk before letting the SAPI split the path.
-		if err != nil {
-			if split := strings.Index(strings.ToLower(requestPath), ".php/"); split >= 0 {
-				filename = filepath.Join(root, filepath.FromSlash(requestPath[:split+4]))
-				info, err = os.Stat(filename)
-			}
+		var status int
+		r, status = access.rewrite(root, r)
+		if status != 0 {
+			http.Error(w, http.StatusText(status), status)
+			return
 		}
-		if err == nil && info.IsDir() {
-			if !strings.HasSuffix(requestPath, "/") {
-				u := *r.URL
-				u.Path = mount + u.Path + "/"
-				http.Redirect(w, r, u.String(), http.StatusMovedPermanently)
+		var requestPath, filename string
+		var info os.FileInfo
+		var err error
+		for resolve := 0; ; resolve++ {
+			if resolve == 16 {
+				http.Error(w, http.StatusText(http.StatusLoopDetected), http.StatusLoopDetected)
 				return
 			}
-			requestPath += "index.php"
-			filename = filepath.Join(filename, "index.php")
+			requestPath = r.URL.Path
+			filename = filepath.Join(root, filepath.FromSlash(requestPath))
 			info, err = os.Stat(filename)
-			if os.IsNotExist(err) {
-				requestPath = strings.TrimSuffix(requestPath, "index.php") + "index.html"
-				filename = filepath.Join(filepath.Dir(filename), "index.html")
+			// Keep PATH_INFO in the request passed to PHP, but check the actual
+			// script on disk before letting the SAPI split the path.
+			if err != nil {
+				if split := strings.Index(strings.ToLower(requestPath), ".php/"); split >= 0 {
+					filename = filepath.Join(root, filepath.FromSlash(requestPath[:split+4]))
+					info, err = os.Stat(filename)
+				}
+			}
+			if err == nil && info.IsDir() {
+				if !strings.HasSuffix(requestPath, "/") {
+					u := *r.URL
+					u.Path = mount + u.Path + "/"
+					http.Redirect(w, r, u.String(), http.StatusMovedPermanently)
+					return
+				}
+				requestPath += "index.php"
+				filename = filepath.Join(filename, "index.php")
+				info, err = os.Stat(filename)
+				if os.IsNotExist(err) {
+					requestPath = strings.TrimSuffix(requestPath, "index.php") + "index.html"
+					filename = filepath.Join(filepath.Dir(filename), "index.html")
+					info, err = os.Stat(filename)
+				}
+			}
+			if os.IsNotExist(err) && front != "" {
+				requestPath = "/" + front
+				filename = filepath.Join(root, front)
 				info, err = os.Stat(filename)
 			}
-		}
-		if os.IsNotExist(err) && front != "" {
-			requestPath = "/" + front
-			filename = filepath.Join(root, front)
-			info, err = os.Stat(filename)
+
+			// DirectoryIndex and the configured fallback select another resource;
+			// that resource's access rules apply just like an internal rewrite.
+			if err == nil && requestPath != r.URL.Path {
+				candidate := r.Clone(r.Context())
+				candidate.URL.Path = requestPath
+				candidate.URL.RawPath = ""
+				checked, status := access.rewrite(root, candidate)
+				if status != 0 {
+					http.Error(w, http.StatusText(status), status)
+					return
+				}
+				r = checked
+				if r.URL.Path != requestPath {
+					continue
+				}
+			}
+			break
 		}
 		if err != nil || !info.Mode().IsRegular() {
 			http.NotFound(w, r)

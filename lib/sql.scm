@@ -697,13 +697,6 @@ if the user is not allowed to access this property, the function will throw an e
 		true)
 )) (lambda (e) true))
 
-/* ensure unique username constraint to avoid duplicates */
-(try (lambda () (begin
-	(if (has? (show "system") "user")
-		(createkey (table "system" "user") "uniq_username" true '("username"))
-		true)
-)) (lambda (e) true))
-
 /* error query log table */
 (if (not (has? (show "system_statistic") "errors")) (begin
 	(print "creating table system_statistic.errors")
@@ -753,21 +746,12 @@ the latter is expanded before logical planning and never materialized. */
 	(eval (parse_sql "system" "CREATE TABLE `views`(`database` text, `name` text, `dialect` text, `sql` text, `ir` text) ENGINE=SAFE" (lambda (schema tblname write) true)))
 ))
 
-(try (lambda () (begin
-	(if (has? (show "system") "views")
-		(createkey (table "system" "views") "uniq_database_name" true '("database" "name"))
-		true)
-)) (lambda (e) true))
-
 (sql_view_catalog_set_count
 	(scan nil (table "system" "views") '(369435906932736) '() '() (lambda () true) '() (lambda (acc) (+ acc 1)) 0 +))
 
-/* migration: ensure unique (username, database) constraint on system.access */
-(try (lambda () (begin
-	(if (has? (show "system") "access")
-		(createkey (table "system" "access") "uniq_user_db" true '("username" "database"))
-		true)
-)) (lambda (e) true))
+/* Bootstrap owns these fixed catalog constraints. Do not suppress failures:
+without them repeated grants create duplicate accounts and ambiguous authentication. */
+(init_sql_catalog_keys)
 
 /* global variables exposed via @@ and SHOW VARIABLES */
 (set globalvars (newsession))

@@ -97,6 +97,69 @@ objects are released after each request; OPcache stays warm. Long-lived PHP
 application workers are not enabled by this integration. Native extension
 crashes affect the entire process, including MemCP.
 
+## Per-directory routing and access rules
+
+The PHP host reads `.htaccess` before serving either PHP or static files.
+Rules are cached using the same directory watcher as Scheme's `(watch)`;
+file changes, atomic replacements, removal and recreation invalidate the cache.
+Parent-directory rules run before descendant rules.
+
+Supported directives are `RewriteEngine`, `RewriteCond %{REQUEST_FILENAME}`
+with `-f`, `!-f`, `-d`, or `!-d`, and `RewriteRule`. Supported flags are `NC`,
+`L`, `END`, `QSA`, `B`, `UnsafeAllow3F`, `F`, and `G`. Internal rewrites preserve
+PHP's original request URI. `B` escapes captured query characters; `QSA` retains
+the incoming query. Invalid or unsupported directives and read errors return
+HTTP 500, so a configuration error cannot silently disable access rules.
+This is a rewrite subset, not an Apache configuration interpreter: directives
+such as `Options`, `Require`, and `<Files>` must be expressed using the supported
+rules before hosting that application.
+
+## Foployment deployment
+
+Use an external PHP ZTS installation with the application's extensions,
+including `gettext`, `mbstring`, `intl`, `gd`, and `pdo_mysql`. Foployment also
+executes `php dbcheck.php`, so its command-line PHP must have the required
+extensions and be available on the server's `PATH`. Install `tar` and the archive
+utilities required by the release format.
+
+Place the unmodified `foployment/out` contents in `htdocs/foployment` and start:
+
+```sh
+./memcp-php --no-repl -data /srv/memcp-data --api-port=8080 \
+  --mysql-port=3307 --serve /srv/htdocs lib/main.scm
+```
+
+In Foployment's `conf.json`, set `FOP.Database` to its dedicated MemCP database
+and an administrative MemCP account. Set `FOP.Configuration.path` to `"../"`,
+`baseurl` to `"http://localhost:8080"`, and `Baseurl` to
+`"http://localhost:8080/foployment/"`. `FOP.Configuration.dbhost` becomes the
+child application's database host; for a nonstandard local MySQL port, use
+`"127.0.0.1;port=3307"`, since the generated child configuration does not copy
+the parent's `Database.Port`. The child uses its own account and database,
+created through `GRANT ALL ... IDENTIFIED BY`.
+
+Configure the external embedded PHP's `php.ini` for the archive size, e.g.:
+
+```ini
+short_open_tag=Off
+upload_max_filesize=256M
+post_max_size=272M
+max_execution_time=900
+memory_limit=512M
+```
+
+`short_open_tag=Off` also allows XML declarations in PHP templates. For a local
+test deployment, set `FOP.Cron.cronmode` to `"none"` in both application configs
+(use Foployment's child configuration editor before uploading), so the fixture
+does not install scheduled jobs. Production cron configuration is an
+application administration choice.
+
+Open `/foployment/`, create its first user, create an instance with path `eur`,
+and upload the original `release.tar.xz` through the instance form. The deployed
+application is served at `/eur/`; each application's own `.htaccess` protects
+its configuration and routes its virtual URLs. Enable MemCP `TracePrint` and
+set `TracePrintMaxLength` to `0` when collecting an untruncated query log.
+
 ## PDO connections
 
 The addon registers **only `memcp:`** and leaves other driver registrations
