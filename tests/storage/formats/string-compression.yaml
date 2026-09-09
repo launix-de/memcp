@@ -1,3 +1,5 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+
 metadata:
   version: "1.0"
   description: "String compression: round-trip correctness for UUID, hex, phone, decimal, datetime, raw"
@@ -5,6 +7,8 @@ metadata:
 test_cases:
   - name: "Setup: drop tables if exist"
     setup:
+      - sql: "DROP TABLE IF EXISTS sc_compare_cases"
+      - sql: "DROP TABLE IF EXISTS sc_compare"
       - sql: "DROP TABLE IF EXISTS `sc_uuid`"
       - sql: "DROP TABLE IF EXISTS `sc_hex`"
       - sql: "DROP TABLE IF EXISTS `sc_phone`"
@@ -256,8 +260,96 @@ test_cases:
         - val: "dGVzdA=="
         - val: "--__"
 
+  - name: "Ordered phone punctuation uses text order"
+    sql: "SELECT id FROM sc_phone ORDER BY val"
+    expect: {data: [{id: 3}, {id: 1}, {id: 2}]}
+
+  - name: "Ordered decimals keep lexical comparison"
+    sql: "SELECT id FROM sc_decimal ORDER BY val"
+    expect: {data: [{id: 2}, {id: 4}, {id: 3}, {id: 1}]}
+
+  - name: "CString comparison boundary fixture"
+    setup:
+      - sql: "DROP TABLE IF EXISTS sc_compare_cases"
+      - sql: "CREATE TABLE sc_compare_cases (id INT PRIMARY KEY, lo TEXT, up TEXT)"
+    sql: "INSERT INTO sc_compare_cases VALUES (0,NULL,NULL),(1,'',''),(2,'a','A'),(3,'aa','AA'),(4,'abcdef0123456789','ABCDEF0123456789'),(5,'abcdef01234567890','ABCDEF01234567890')"
+    expect: {affected_rows: 6}
+
+  - name: "Rebuild comparison boundary fixture"
+    setup:
+      - scm: "(rebuild)"
+    sql: "SELECT id, lo = up AS same FROM sc_compare_cases ORDER BY id"
+    expect: {data: [{id: 0, same: null}, {id: 1, same: 1}, {id: 2, same: 1}, {id: 3, same: 1}, {id: 4, same: 1}, {id: 5, same: 1}]}
+
+  - name: "CString prefixes and empty values order correctly"
+    sql: "SELECT id FROM sc_compare_cases ORDER BY lo DESC"
+    expect: {data: [{id: 5}, {id: 4}, {id: 3}, {id: 2}, {id: 1}, {id: 0}]}
+
+  - name: "CString mixed equality in both operand orders"
+    sql: "SELECT id FROM sc_compare_cases WHERE 'abcdef0123456789' = lo AND lo = 'abcdef0123456789'"
+    expect: {data: [{id: 4}]}
+
+  - name: "CString LIKE wildcard state and folding"
+    sql: "SELECT id FROM sc_compare_cases WHERE lo LIKE 'A%def_123%9%' ORDER BY id"
+    expect: {data: [{id: 4}, {id: 5}]}
+
+  - name: "CString LIKE negative result"
+    sql: "SELECT id FROM sc_compare_cases WHERE lo LIKE '%fedc%'"
+    expect: {rows: 0}
+
+  - name: "CString rejected write preserves compressed values"
+    sql: "INSERT INTO sc_compare_cases VALUES (4,'bad','BAD')"
+    expect: {error: true}
+
+  - name: "CString length and partial substring"
+    sql: "SELECT LENGTH(lo) AS n, SUBSTRING(lo, 3, 4) AS part FROM sc_compare_cases WHERE id = 4"
+    expect: {data: [{n: 16, part: 'cdef'}]}
+
+  - name: "Persist ordered string formats"
+    sql: "SHUTDOWN"
+    expect: {rows: 0}
+
+  - name: "Reload ordered string formats"
+    sql: "SELECT id, lo FROM sc_compare_cases ORDER BY lo"
+    expect: {data: [{id: 0, lo: null}, {id: 1, lo: ''}, {id: 2, lo: a}, {id: 3, lo: aa}, {id: 4, lo: abcdef0123456789}, {id: 5, lo: abcdef01234567890}]}
+
+  - name: "CString comparison performance fixture"
+    setup:
+      - sql: "DROP TABLE IF EXISTS sc_compare"
+      - sql: "CREATE TABLE sc_compare (id INT, val TEXT)"
+      - scm: |
+          (insert (table "memcp-tests" "sc_compare") '("id" "val")
+            (map (produceN 4096) (lambda (i)
+              (list i (concat "abcdef0123456789abcdef0123456789" (string i))))))
+      - scm: "(rebuild)"
+    sql: "SELECT COUNT(*) AS n FROM sc_compare"
+    expect: {data: [{n: 4096}]}
+
+  - name: "CString mixed SQL equality projection"
+    sql: "SELECT id, val = 'abcdef0123456789abcdef0123456789123' AS matched FROM sc_compare"
+    warmup: 3
+    repetitions: 7
+    threshold_ms: 200
+    expect: {rows: 4096}
+
+  - name: "CString LIKE projection"
+    sql: "SELECT id, val LIKE '%def0123%' AS matched FROM sc_compare"
+    warmup: 3
+    repetitions: 7
+    threshold_ms: 200
+    expect: {rows: 4096}
+
+  - name: "CString ordered range"
+    sql: "SELECT id FROM sc_compare WHERE val >= 'abcdef0123456789abcdef0123456789123' ORDER BY val LIMIT 100"
+    warmup: 3
+    repetitions: 7
+    threshold_ms: 200
+    expect: {rows: 100}
+
   - name: "Cleanup"
     cleanup:
+      - sql: "DROP TABLE IF EXISTS sc_compare_cases"
+      - sql: "DROP TABLE IF EXISTS sc_compare"
       - sql: "DROP TABLE IF EXISTS `sc_uuid`"
       - sql: "DROP TABLE IF EXISTS `sc_hex`"
       - sql: "DROP TABLE IF EXISTS `sc_phone`"
