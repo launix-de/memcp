@@ -1,0 +1,88 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# Reusable gate: decides whether a push or pull request touches build- or
+# test-relevant paths. Documentation-only changes (README, wiki, papers,
+# assets, *.md) return relevant=false so the callers can skip their heavy
+# jobs. A job skipped through `if:` reports "success", so required status
+# checks stay green for docs-only pull requests.
+
+name: Detect relevant changes
+
+on:
+  workflow_call:
+    outputs:
+      relevant:
+        description: "'true' unless the change set is documentation-only"
+        value: ${{ jobs.detect.outputs.relevant }}
+
+permissions:
+  contents: read
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      relevant: ${{ steps.filter.outputs.relevant }}
+    steps:
+      - name: Classify changed files
+        id: filter
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Any uncertainty about the diff errs on the side of running CI.
+          emit() { echo "relevant=$1" >> "$GITHUB_OUTPUT"; exit 0; }
+
+          case "${GITHUB_EVENT_NAME}" in
+            pull_request|pull_request_target)
+              base="$(jq -r '.pull_request.base.sha' "$GITHUB_EVENT_PATH")"
+              head="$(jq -r '.pull_request.head.sha' "$GITHUB_EVENT_PATH")"
+              ;;
+            push)
+              base="$(jq -r '.before' "$GITHUB_EVENT_PATH")"
+              head="${GITHUB_SHA}"
+              case "${base}" in ""|0000000000000000000000000000000000000000)
+                echo "New branch push; running the full CI." >&2; emit true ;;
+              esac
+              ;;
+            *)
+              emit true ;;
+          esac
+
+          # The compare API needs only `contents: read`; `...` is merge-base
+          # based, so this is exactly the change set the pull request adds.
+          compare="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${base}...${head}" 2>/dev/null || true)"
+          if [ -z "${compare}" ]; then
+            echo "Compare API unavailable; running the full CI." >&2; emit true
+          fi
+
+          mapfile -t files < <(jq -r '.files[]?.filename' <<<"${compare}")
+          nfiles="${#files[@]}"
+
+          # The compare response lists at most 300 files. Anything at or above
+          # that is certainly not a documentation-only change.
+          if [ "${nfiles}" -eq 0 ]; then
+            echo "No files in comparison; running the full CI." >&2; emit true
+          fi
+          if [ "${nfiles}" -ge 300 ]; then
+            echo "Comparison capped at 300 files; running the full CI." >&2; emit true
+          fi
+
+          printf 'changed: %s\n' "${files[@]}" >&2
+
+          relevant=false
+          for f in "${files[@]}"; do
+            case "${f}" in
+              tests/*|scm/*|storage/*|lib/*|tools/*|apps/*|corelib/*|packaging/*|debian/*|.github/*) relevant=true ;;
+              *.go|go.mod|go.sum|Makefile|Dockerfile|memcp.spec|memcp.service|git-pre-commit) relevant=true ;;
+              run_sql_tests.py|run_tests_unbuffered.py|CHANGELOG.md) relevant=true ;;
+            esac
+            [ "${relevant}" = true ] && break
+          done
+
+          echo "Relevant paths changed: ${relevant}" | tee -a "$GITHUB_STEP_SUMMARY" >&2
+          emit "${relevant}"

@@ -10,7 +10,12 @@ on:
     branches: [master]
 
 jobs:
+  changes:
+    uses: ./.github/workflows/detect-changes.yml
+
   sql-time-limit-guard:
+    needs: changes
+    if: ${{ needs.changes.outputs.relevant == 'true' }}
     runs-on: ubuntu-latest
 
     steps:

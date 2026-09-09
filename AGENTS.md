@@ -47,6 +47,8 @@ Every change — bugfix, feature, refactor — must go through a **branch + PR**
 4. **CI must be green** (`test` GitHub Actions job) before the PR can be merged.
 5. **Merge the PR** on GitHub (or `gh pr merge`). Delete the branch and worktree afterwards.
 
+Each CI workflow first runs a small `changes` gate (`.github/workflows/detect-changes.yml`). When a pull request touches **only** documentation (`*.md`, `wiki/`, `papers/`, `assets/`, …) the build/test jobs — `test`, `performance-ab`, `sql-time-limit-guard`, the JIT jobs, packaging — are skipped and report success, so a docs-only PR is mergeable without a full run. Touching anything under `tests/`, `scm/`, `storage/`, `lib/`, `tools/`, `apps/`, `corelib/`, `.github/`, or any `*.go` / build file runs the full CI as before. When in doubt the gate runs everything.
+
 `git commit --no-verify` is allowed for intermediate commits on non-`master` branches, after a successful `make test` run in the current worktree/session to save iteration time, or for documentation-only changes (e.g. `README*`, docs, manuals) that do not modify executable code or tests. Before pushing/opening a PR, run the full hook-equivalent test suite (e.g. `make test`) again for any change set that includes code/test changes.
 
 ## Build, Test, and Dev Commands

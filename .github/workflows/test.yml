@@ -22,7 +22,12 @@ on:
     branches: [master]
 
 jobs:
+  changes:
+    uses: ./.github/workflows/detect-changes.yml
+
   test:
+    needs: changes
+    if: ${{ needs.changes.outputs.relevant == 'true' }}
     runs-on: ubuntu-latest
 
     services:
@@ -65,7 +70,8 @@ jobs:
           --mysqldump=mariadb-dump
 
   packaging:
-    needs: test
+    needs: [changes, test]
+    if: ${{ needs.changes.outputs.relevant == 'true' }}
     runs-on: ubuntu-latest
 
     steps:
@@ -100,7 +106,8 @@ jobs:
         run: docker build --check .
 
   alternative-storage:
-    needs: test
+    needs: [changes, test]
+    if: ${{ needs.changes.outputs.relevant == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
     env:
