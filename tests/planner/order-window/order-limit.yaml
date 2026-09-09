@@ -991,6 +991,80 @@ test_cases:
         - "scan_join_order"
         - "legacy_join_tree"
 
+  - name: "Ordered join retains an inner membership filter"
+    sql: |
+      SELECT d.id
+      FROM ord_join_order_driver d
+      JOIN ord_join_order_lookup l ON d.lookup_id = l.id
+      WHERE l.enabled IN (1)
+      ORDER BY d.score DESC
+      LIMIT 2
+    expect:
+      rows: 2
+      data:
+        - id: 3
+        - id: 1
+
+  - name: "Ordered join retains a driver membership filter"
+    sql: |
+      SELECT d.id
+      FROM ord_join_order_driver d
+      JOIN ord_join_order_lookup l ON d.lookup_id = l.id
+      WHERE d.score IN (10, 30)
+      ORDER BY d.score DESC
+      LIMIT 1 OFFSET 1
+    expect:
+      rows: 1
+      data:
+        - id: 1
+
+  - name: "Ordered join membership rejects nonmatching rows"
+    sql: |
+      SELECT d.id
+      FROM ord_join_order_driver d
+      JOIN ord_join_order_lookup l ON d.lookup_id = l.id
+      WHERE l.enabled IN (99)
+      ORDER BY d.score DESC
+      LIMIT 2
+    expect:
+      rows: 0
+
+  - name: "Ordered join membership preserves NULL semantics"
+    sql: |
+      SELECT d.id
+      FROM ord_join_order_driver d
+      JOIN ord_join_order_lookup l ON d.lookup_id = l.id
+      WHERE l.enabled IN (1, NULL)
+      ORDER BY d.score DESC
+      LIMIT 2
+    expect:
+      rows: 2
+      data:
+        - id: 3
+        - id: 1
+
+  - name: "Ordered join NOT IN with NULL rejects unknown results"
+    sql: |
+      SELECT d.id
+      FROM ord_join_order_driver d
+      JOIN ord_join_order_lookup l ON d.lookup_id = l.id
+      WHERE l.enabled NOT IN (1, NULL)
+      ORDER BY d.score DESC
+      LIMIT 2
+    expect:
+      rows: 0
+
+  - name: "Ordered join still rejects unknown filter columns"
+    sql: |
+      SELECT d.id
+      FROM ord_join_order_driver d
+      JOIN ord_join_order_lookup l ON d.lookup_id = l.id
+      WHERE l.missing IN (1)
+      ORDER BY d.score DESC
+      LIMIT 2
+    expect:
+      error: true
+
   - name: "Sparse ordered join costs all visited driver rows"
     setup:
       - sql: "DROP TABLE IF EXISTS ord_join_order_driver"
