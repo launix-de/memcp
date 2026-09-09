@@ -157,8 +157,20 @@ Do not lower arbitrary subtrees again while matching a session-domain key. */
 		((symbol sql_collation) value _collation) (physical_unannotated_value value)
 		_ expr)))
 
+/* Lower casts to the pure value formula before scan access extraction. Keep
+SQL metadata in its descriptor; a shared computed-index lambda must contain
+only row inputs and pure operators, not the SQL dispatch procedure. */
+(define physical_cast_value_expr (lambda (value type)
+	(if (equal? type "BOOLEAN") (list (quote sql_cast_value) value type)
+		(list (quote if) (list (quote nil?) value) nil
+			(if (sql_text_type? type) (list (quote concat) value)
+				(if (equal? type "BIGINT") (list (quote intdiv) (list (quote simplify) value) 1)
+					(list (quote simplify) value)))))))
+
 (define lower_column_expr_for_alias_in_context (lambda (src expr probe_work_rows)
 	(match expr
+		((symbol sql_cast_value) value type)
+		(physical_cast_value_expr (lower_column_expr_for_alias_in_context src value probe_work_rows) type)
 		/* Type/collation descriptors have been consumed by planning. Identity
 		annotations must not obscure runtime column dependencies or scan bounds. */
 		((symbol sql_typed_value) value _type _collation)
@@ -2384,6 +2396,8 @@ probe. */
 
 (define lower_column_expr_for_join_in_context (lambda (sources default_alias expr probe_work_rows)
 	(match expr
+		((symbol sql_cast_value) value type)
+		(physical_cast_value_expr (lower_column_expr_for_join_in_context sources default_alias value probe_work_rows) type)
 		/* Type/collation descriptors have been consumed by planning. Identity
 		annotations must not obscure runtime column dependencies or scan bounds. */
 		((symbol sql_typed_value) value _type _collation)
@@ -2847,13 +2861,6 @@ Aggregate wrappers carry the input value's collation; explicit ORDER BY COLLATE
 callbacks remain authoritative. Numeric aggregate results ignore string collation. */
 (define physical_expr_collation (lambda (input expr)
 	(sql_collation_name (sql_expr_info (canonical_helper_sources input) expr))))
-
-/* Helper source columns may only exist after prerequisite preparation. Resolve
-this metadata once in setup, using the same descriptor compiler as SQL. */
-(define physical_column_collation_expr (lambda (input expr)
-	(list (quote sql_collation_name)
-		(list (quote sql_expr_info) (list (quote quote) (canonical_helper_sources input))
-			(list (quote quote) expr)))))
 
 (define merge_collated_group_plan (lambda (input keys grouped combine)
 	(begin
@@ -5573,9 +5580,9 @@ every group row and its canonical identity stays independent of bound values. */
 		(define filter_parts
 			(group_aggregate_probe_filter_parts stage src keys key_names))
 		(if (nil? filter_parts)
-			(list (quote list) "temp" true "collate" (physical_column_collation_expr src agg_expr))
+			(list (quote list) "temp" true "collate" (physical_expr_collation src agg_expr))
 			(list (quote list)
-				"temp" true "collate" (physical_column_collation_expr src agg_expr)
+				"temp" true "collate" (physical_expr_collation src agg_expr)
 				"filtercols" (quoted_runtime_list (car filter_parts))
 				"filter" (cadr filter_parts))))))
 

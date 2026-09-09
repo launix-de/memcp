@@ -122,7 +122,8 @@ The parser may use named runtime operators or registered function values. */
 			(define typed_spec (list (map (car spec) (lambda (key) (car (sql_expr_info sources key))))
 				(map (cadr spec) (lambda (item) (begin
 					(define info (sql_expr_info sources (car item)))
-					(list (car info) (if (or (equal? (cadr item) <) (equal? (cadr item) >))
+					(list (car info) (if (and (not (nil? (sql_info_collation info)))
+						(or (equal? (cadr item) <) (equal? (cadr item) >)))
 						(collate (sql_collation_name info) (equal? (cadr item) >)) (cadr item))))))))
 			(sql_info (list (quote window_func) name (map infos car) typed_spec) type
 				(if (sql_text_type? type) (sql_info_collation first) nil)))
@@ -253,7 +254,8 @@ this named scalar primitive so physical scan lowering can also derive bounds. */
 				(car (compile (qb_having query)))
 				(map (coalesceNil (qb_order query) '()) (lambda (item) (begin
 					(define info (compile (car item)))
-					(list (car info) (if (or (equal? (cadr item) <) (equal? (cadr item) >))
+					(list (car info) (if (and (not (nil? (sql_info_collation info)))
+						(or (equal? (cadr item) <) (equal? (cadr item) >)))
 						(collate (sql_collation_name info) (equal? (cadr item) >)) (cadr item))))))
 				(qb_limit query) (qb_offset query) (qb_hidden query) (qb_stages query)
 				(qassoc_set (qb_facts query) (quote result-types)

@@ -1461,7 +1461,7 @@ outer joins. */
 			(cons (quote !begin) (merge (list nested_prepare nested_materialize)))))
 		(define key_columns (map (zip key_names keys) (lambda (binding)
 			(list (quote list) "column" (car binding) "any" (quoted_runtime_list '())
-				(list (quote list) "collate" (physical_column_collation_expr src (cadr binding)))))))
+				(list (quote list) "collate" (physical_expr_collation src (cadr binding)))))))
 		(define create_cols (cons (quote list)
 			(cons (cons (quote list) (cons "unique" (cons "group" (list (cons (quote list) key_names)))))
 				key_columns)))
@@ -1472,7 +1472,7 @@ outer joins. */
 					(nth aggregate_cols i)
 					"any"
 					(quoted_runtime_list '())
-					(list (quote list) "collate" (physical_column_collation_expr src (car (nth ags i)))))))
+					(list (quote list) "collate" (physical_expr_collation src (car (nth ags i)))))))
 			'()))
 		(define collect_plan (if (not query_input)
 			nil

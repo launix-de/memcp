@@ -451,3 +451,49 @@ test_cases:
           result: ok
     cleanup:
       - scm: '(settings "ScanDebugging" false)'
+
+  - name: "Numeric cast exposes a computed-index lambda"
+    sql: "EXPLAIN SELECT id FROM ci_events WHERE CAST(name AS SIGNED) = 2"
+    expect:
+      result_contains: "compile_scan_computed_index"
+
+  - name: "Cast grouping preserves truncation and NULL"
+    sql: "SELECT CAST(id / 3 AS SIGNED) AS bucket, COUNT(*) AS n FROM ci_events GROUP BY CAST(id / 3 AS SIGNED) ORDER BY bucket"
+    expect:
+      rows: 3
+      data:
+        - {bucket: 0, n: 2}
+        - {bucket: 1, n: 3}
+        - {bucket: 2, n: 3}
+
+  - name: "Text cast computed index retains explicit collation"
+    sql: "SELECT id FROM ci_events WHERE CAST(name AS VARCHAR) COLLATE utf8mb4_unicode_520_ci = 'alpha'"
+    expect:
+      rows: 1
+      data:
+        - {id: 1}
+
+  - name: "Computed group plan contains no descriptor compiler calls"
+    sql: "EXPLAIN SELECT id % 4 AS bucket, COUNT(*) AS n FROM ci_events GROUP BY id % 4"
+    expect:
+      result_contains: "compile_scan_computed_index"
+      result_not_contains:
+        - "sql_expr_info"
+        - "sql_collation_name"
+        - "sql_typed_value"
+
+  - name: "Computed JSON group plan contains only runtime formulas"
+    sql: "EXPLAIN SELECT id % 4 AS bucket, JSON_ARRAYAGG(payload) AS docs FROM ci_json_docs GROUP BY id % 4"
+    expect:
+      result_contains: "compile_scan_computed_index"
+      result_not_contains:
+        - "sql_expr_info"
+        - "sql_collation_name"
+        - "sql_typed_value"
+
+  - name: "NULL cast remains NULL in computed predicate"
+    sql: "SELECT id FROM ci_events WHERE CAST(dt AS VARCHAR) IS NULL"
+    expect:
+      rows: 1
+      data:
+        - {id: 8}
