@@ -463,7 +463,8 @@ bounded scalar metadata; this lookup never scans, loads columns or builds indexe
 				(planner_quoted_value local_sources)
 				default_alias
 				(planner_quoted_value local_predicates)
-				(planner_quoted_value src) (quote session)) planning_session))))
+				(planner_quoted_value src) (quote session)) planning_session
+			(query_expr_session_reads (list local_predicates local_sources))))))
 
 (define join_optimizer_selectivity_expr (lambda (sources default_alias predicate planning_session)
 	(begin
@@ -498,7 +499,7 @@ bounded scalar metadata; this lookup never scans, loads columns or builds indexe
 								(list (quote table) (source_schema src) (source_relation src))
 								(planner_quoted_value (car access)) (cons (quote list) (cadr access))
 								(planner_quoted_value '()) (list (quote lambda) '() true) 0)
-							(planner_quoted_value (quote value)) fallback) planning_session))))))))
+							(planner_quoted_value (quote value)) fallback) planning_session nil))))))))
 
 (define join_optimizer_alias_subset? (lambda (required available)
 	(reduce (coalesceNil required '()) (lambda (ok alias)
@@ -6765,13 +6766,13 @@ sampling guard for a choice that no cardinality change can reverse. */
 							driver_rows group_rows stage_count))
 						(define driver_rows_expr (planner_guard_runtime_binding
 							(aggregate_pushdown_runtime_driver_rows_expr driver residual)
-							planning_session))
+							planning_session nil))
 						(define group_rows_expr (planner_guard_runtime_binding
 							(list (quote planner_aggregate_pushdown_group_estimate)
 								(planner_quoted_value driver)
 								(planner_quoted_value keys)
 								driver_rows_expr)
-							planning_session))
+							planning_session nil))
 						(if (planner_guarded_choice chosen
 							(list (quote aggregate_pushdown_cost_preferred?)
 								driver_rows_expr group_rows_expr stage_count)

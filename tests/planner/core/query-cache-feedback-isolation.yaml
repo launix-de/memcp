@@ -21,6 +21,100 @@ setup:
           (map (produceN 1000) (lambda (i) (list i (if (< i 10) "needle" "ordinary")))))
         (rebuild (table "memcp-tests" "qfi_document") true false))
 test_cases:
+  - name: "A shared cost guard covers its runtime binding without an identity guard"
+    scm: |
+      (begin
+        (define sess (newsession))
+        (sess "viewer" 10)
+        (define planning (sql_queryplan_compile_session sess nil))
+        (define input (planner_literal_value (quote (session "viewer")) planning))
+        (define value (planner_guard_runtime_binding (quote (session "viewer")) planning nil))
+        (define cost (planner_guard_runtime_binding (list (quote *) value 2) planning nil))
+        (planner_guarded_choice (< (* input 2) 100) (list (quote <) cost 100) planning)
+        (define guard (sql_queryplan_compile_formula (sql_queryplan_guard_from_session planning)))
+        (define original (guard sess nil nil nil))
+        (sess "viewer" 20)
+        (define same_region (guard sess nil nil nil))
+        (sess "viewer" 60)
+        (define crossed (guard sess nil nil nil))
+        (if (and original same_region (not crossed)) true
+          (error "shared cost guard did not preserve the decision region")))
+    expect:
+      rows: 1
+      result_contains: ["true"]
+  - name: "ACL counts reuse their cost regime across named users and clock ticks"
+    scm: |
+      (begin
+        (define cache (newcachemap))
+        (define sess (newsession))
+        (sess "username" "root")
+        (sess "schema" "memcp-tests")
+        (define q "SELECT COUNT(*) AS n FROM qfi_single a LEFT JOIN qfi_document z ON z.id=a.id WHERE a.id>@clock AND COALESCE((SELECT CASE WHEN EXISTS(SELECT 1 FROM qfi_access x WHERE x.viewer=@viewer AND x.domain_id IS NULL LIMIT 1) THEN TRUE ELSE EXISTS(SELECT 1 FROM qfi_access y WHERE y.viewer=@viewer AND y.domain_id=b.id LIMIT 1) END FROM qfi_document b WHERE b.id=a.id LIMIT 1),FALSE)")
+        (define rows (newsession))
+        (define run (lambda (viewer clock) (begin
+          (sess "viewer" viewer)
+          (sess "clock" clock)
+          (rows "n" -1)
+          (sql_execute_formula sess nil
+            (cached_parse cache (list parse_sql) "memcp-tests" q nil "root" sess true)
+            (lambda (row) (rows "n" (cadr row))) (lambda (_fields) nil))
+          (rows "n"))))
+        (define first (run 999 0))
+        (run 999 0)
+        (define entry (car (cache (car (cache)))))
+        (define before (count (entry "variants")))
+        (define allowed (run 997 1))
+        (define denied (run 998 2))
+        (define expired (run 999 1000))
+        (define restored (run 999 0))
+        (define other_users (reduce (produceN 200) (lambda (valid i)
+          (and valid (equal? (run (+ 1000 i) i) 0))) true))
+        (if (and (equal? first 1) (equal? allowed 1) (equal? denied 0)
+          (equal? expired 0) (equal? restored 1) other_users
+          (equal? before (count (entry "variants")))) true
+          (error (concat "cost-equivalent session bindings changed variants/results: "
+            before " -> " (count (entry "variants")) " values " first "/" allowed "/"
+            denied "/" expired "/" restored)))))
+    expect:
+      rows: 1
+      result_contains: ["true"]
+  - name: "Quoted session-shaped data is not a covered runtime dependency"
+    scm: |
+      (begin
+        (define sess (newsession))
+        (sess "viewer" 10)
+        (define planning (sql_queryplan_compile_session sess nil))
+        (define input (planner_literal_value (quote (session "viewer")) planning))
+        (planner_record_guard_condition
+          (quote (equal? (quote (session "viewer")) (quote (session "viewer")))) planning)
+        (define guard (sql_queryplan_compile_formula (sql_queryplan_guard_from_session planning)))
+        (define original (guard sess nil nil nil))
+        (sess "viewer" (+ input 1))
+        (if (and original (not (guard sess nil nil nil))
+          (empty_list? (planner_guard_runtime_session_reads
+            (quote (quote (session "viewer")))))) true
+          (error "quoted data was mistaken for a runtime session dependency")))
+    expect:
+      rows: 1
+      result_contains: ["true"]
+  - name: "Discarded cost bindings cannot suppress an uncovered specialization guard"
+    scm: |
+      (begin
+        (define sess (newsession))
+        (sess "viewer" 10)
+        (define planning (sql_queryplan_compile_session sess nil))
+        (define input (planner_literal_value (quote (session "viewer")) planning))
+        (define unused (planner_guard_runtime_binding (quote (session "viewer")) planning nil))
+        (define raw (sql_queryplan_guard_from_session planning))
+        (define guard (sql_queryplan_compile_formula raw))
+        (define original (guard sess nil nil nil))
+        (sess "viewer" (+ input 1))
+        (if (and original (not (guard sess nil nil nil))
+          (not (sql_queryplan_guard_references_symbol? raw unused))) true
+          (error "discarded cost binding incorrectly covered an input")))
+    expect:
+      rows: 1
+      result_contains: ["true"]
   - name: "Observed named bindings guard their compile-time value, including false and NULL"
     scm: |
       (begin
