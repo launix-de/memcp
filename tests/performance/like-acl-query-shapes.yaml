@@ -1,7 +1,7 @@
 # Copyright (C) 2026  Carl-Philip Hänsch
 #
 # Performance regressions for ordered LIKE searches combined with a compound
-# correlated ACL. The performance CI runner executes this suite explicitly;
+# correlated ACL. The performance CI runner discovers the perf_ci opt-in;
 # ordinary SQL CI must not pay for the production-scale fixture.
 
 metadata:
@@ -9,6 +9,8 @@ metadata:
   description: "Ordered direct and projected LIKE searches with compound ACLs"
   isolated: true
   ci: false
+  perf_ci: true
+  performance_rows: 40000
 
 fixture_setup: &like_acl_fixture
   - sql: "DROP TABLE IF EXISTS pla_assignment"

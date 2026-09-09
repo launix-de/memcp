@@ -43,6 +43,7 @@ test_cases:
       rows_affected: 0
 
   - name: "badge count with correlated session subselect"
+    threshold_ms: 500
     session_id: "bp_sess"
     sql: |
       SELECT 1,
@@ -59,6 +60,7 @@ test_cases:
           badgeDoc: 2
 
   - name: "docType list with permission subselects"
+    threshold_ms: 500
     session_id: "bp_sess"
     sql: |
       SELECT dt.ID, dt.name,
@@ -74,6 +76,7 @@ test_cases:
           doc_count: 2
 
   - name: "badge count warm (second run, must be fast)"
+    threshold_ms: 500
     session_id: "bp_sess"
     sql: |
       SELECT 1,

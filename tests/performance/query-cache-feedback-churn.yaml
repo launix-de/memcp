@@ -1,0 +1,48 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: "1.0"
+  description: "Warm ordered queries amid unrelated bound-predicate learning"
+  isolated: true
+setup:
+  - sql: "DROP TABLE IF EXISTS qfc_document"
+  - sql: "CREATE TABLE qfc_document (id INT PRIMARY KEY, category INT) ENGINE=sloppy"
+  - scm: |
+      (begin
+        (insert (table "memcp-tests" "qfc_document") '("id" "category")
+          (map (produceN 1000) (lambda (i) (list i (mod i 10)))))
+        (rebuild (table "memcp-tests" "qfc_document") true false)
+        (globalvars "qfc_sequence" 1000))
+test_cases:
+  - name: "Ordered cache reuse survives a sequence of unrelated learned filters"
+    performance_rows: 1000
+    threshold_ms: 1000
+    scm: |
+      (begin
+        (define cache (newcachemap))
+        (define sess (newsession))
+        (sess "username" "root")
+        (sess "schema" "memcp-tests")
+        (define q "SELECT a.id FROM qfc_document a LEFT JOIN qfc_document b ON b.id=a.id LEFT JOIN qfc_document c ON c.id=b.id ORDER BY a.id LIMIT 2")
+        (define rows (newsession))
+        (rows "n" 0)
+        (define emit (lambda (_row) (rows "n" (+ (rows "n") 1))))
+        (define run (lambda ()
+          (sql_execute_formula sess nil
+            (cached_parse cache (list parse_sql) "memcp-tests" q nil "root" sess true)
+            emit (lambda (_fields) nil))))
+        (run)
+        (define start (globalvars "qfc_sequence"))
+        (globalvars "qfc_sequence" (+ start 16))
+        (map (produceN 16) (lambda (i) (begin
+          (define callback (list 'lambda (list 'x) (list '< 'x (+ start i))))
+          (define access (compile_scan_access '("category") callback))
+          (scan_recset nil (table "memcp-tests" "qfc_document") (car access)
+            (map (cadr access) (lambda (v) (eval v))) '("category") (eval callback))
+          (run))))
+        (if (equal? (rows "n") 34) true (error "ordered cache churn changed results")))
+    expect:
+      rows: 1
+      result_contains: ["true"]
+cleanup:
+  - sql: "DROP TABLE IF EXISTS qfc_document"
