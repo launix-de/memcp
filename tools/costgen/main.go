@@ -123,6 +123,8 @@ type suite struct {
 }
 
 type calibrationRow struct {
+	OrderedOrWork []float64 `json:"ordered_or_work"`
+
 	CaseName                         string   `json:"case_name"`
 	Error                            string   `json:"error"`
 	CacheState                       string   `json:"cache_state"`
@@ -309,6 +311,10 @@ func main() {
 			fatal(err)
 		}
 	}
+	orderedOrObservations := filterDecisionObservations(observations, "ordered_or")
+	if err := validateDecisionOrdering(orderedOrObservations, currentConstants); err != nil {
+		fatal(fmt.Errorf("ordered_or: %w", err))
+	}
 	if *validateOnly {
 		fmt.Printf("Validated %d forced-plan observations across %d suites; coefficients unchanged.\n", len(observations), len(suites))
 		return
@@ -371,6 +377,10 @@ func main() {
 		}
 	}
 	printDecisionOrdering(membershipObservations, c)
+	if err := validateDecisionOrdering(orderedOrObservations, c); err != nil {
+		fatal(fmt.Errorf("ordered_or: %w", err))
+	}
+	printDecisionOrdering(orderedOrObservations, c)
 	orderedJoinObservations := filterDecisionObservations(observations, "scan_join_order")
 	if len(orderedJoinObservations) > 0 {
 		// scan_join_order deliberately reuses the calibrated scan/map/expression
@@ -1104,7 +1114,10 @@ func validateRaceWinner(row calibrationRow, decisionID, plan string) error {
 	if row.EstimatedNS == nil || row.WholeQueryExecutionNS <= 0 {
 		return fmt.Errorf("forced race variant has incomplete measurements: %+v", row)
 	}
-	if row.Decision == "scan_join_order" {
+	if row.Decision == "ordered_or" {
+		_, err := rowFeatures(row)
+		return err
+	} else if row.Decision == "scan_join_order" {
 		if row.JoinInputRows == nil || row.JoinProbeRows == nil || row.JoinEstimatedRows == nil ||
 			row.JoinOutputRows == nil || row.JoinMapWidth == nil || row.JoinTableCount == nil ||
 			row.JoinLegacyProbeRows == nil {
@@ -1283,6 +1296,31 @@ func medianRows(runs [][]calibrationRow) ([]calibrationRow, error) {
 }
 
 func rowFeatures(row calibrationRow) ([]float64, error) {
+	if row.Decision == "ordered_or" {
+		if row.Plan != "scan_order" && row.Plan != "scan_order_multi" {
+			return nil, fmt.Errorf("unsupported ordered OR plan %q", row.Plan)
+		}
+		if len(row.OrderedOrWork) != 8 {
+			return nil, fmt.Errorf("ordered OR requires eight primitive work quantities")
+		}
+		for _, value := range row.OrderedOrWork {
+			if math.IsNaN(value) || math.IsInf(value, 0) || value < 0 {
+				return nil, fmt.Errorf("invalid ordered OR work quantity %v", value)
+			}
+		}
+		// Same primitive prices as ordered_or_work_cost; comparison work also
+		// includes sorting/merging. No separate, uncalibrated OR coefficient.
+		features := make([]float64, 25)
+		features[15] = row.OrderedOrWork[0]
+		features[1] = row.OrderedOrWork[1]
+		features[2] = row.OrderedOrWork[2]
+		features[3] = row.OrderedOrWork[3]
+		features[4] = row.OrderedOrWork[4]
+		features[13] = row.OrderedOrWork[5]
+		features[14] = row.OrderedOrWork[6]
+		return features, nil
+	}
+
 	// Semijoin formulas reuse existing primitive coefficients. These rows
 	// validate complete alternatives and must not become membership-fit inputs.
 	if row.Decision == "semijoin_carrier" {
@@ -2111,6 +2149,11 @@ func decisionAlternatives(rows []observation) (map[string]map[string]observation
 				return nil, fmt.Errorf("plan %q belongs to scan_join_order, got decision %q", row.plan, row.decision)
 			}
 			groups[row.caseName][row.plan] = row
+		case "scan_order", "scan_order_multi":
+			if row.decision != "ordered_or" {
+				return nil, fmt.Errorf("plan %q belongs to ordered_or, got decision %q", row.plan, row.decision)
+			}
+			groups[row.caseName][row.plan] = row
 		case "group_carrier", "direct_group_join":
 			if row.decision != "direct_group_join" {
 				return nil, fmt.Errorf("plan %q belongs to direct_group_join, got decision %q", row.plan, row.decision)
@@ -2121,6 +2164,15 @@ func decisionAlternatives(rows []observation) (map[string]map[string]observation
 		}
 	}
 	for name, plans := range groups {
+		if decisions[name] == "ordered_or" {
+			if _, ok := plans["scan_order"]; !ok {
+				return nil, fmt.Errorf("incomplete ordered OR alternatives for %q", name)
+			}
+			if _, ok := plans["scan_order_multi"]; !ok {
+				return nil, fmt.Errorf("incomplete ordered OR alternatives for %q", name)
+			}
+			continue
+		}
 		if decisions[name] == "scan_join_order" {
 			if _, legacy := plans["legacy_join_tree"]; !legacy {
 				return nil, fmt.Errorf("incomplete ordered join alternatives for %q", name)
@@ -2318,7 +2370,7 @@ func plansStatisticallyEquivalent(plans map[string]observation, left, right stri
 	if !leftOK || !rightOK || leftRow.censored || rightRow.censored {
 		return false
 	}
-	if math.Max(leftRow.y, rightRow.y) <= calibrationDecisionRiskBudgetNS {
+	if leftRow.decision != "ordered_or" && math.Max(leftRow.y, rightRow.y) <= calibrationDecisionRiskBudgetNS {
 		return true
 	}
 	difference := math.Abs(leftRow.y - rightRow.y)

@@ -8,6 +8,9 @@ metadata:
     text
   isolated: true
   ci: true
+  physical_calibration: true
+  cache_state: warm_operator_state
+  compile_state: cached_plan_execution_only
   restart_after_setup: true
 setup:
 - sql: DROP TABLE IF EXISTS wordpress_search_posts
@@ -143,5 +146,78 @@ test_cases:
   expect:
     data:
     - ok
+# These are ordinary SQL checks in CI and forced two-plan observations in costgen.
+- name: Costed disjoint OR search branches
+  physical_calibration: true
+  calibration_decision: ordered_or
+  warmup: 10
+  repetitions: 30
+  threshold_ms: 200
+  sql: |-
+    SELECT ID FROM wordpress_search_posts
+    WHERE (post_title LIKE '%quasarless%' OR post_excerpt LIKE '%quasarless%' OR post_content LIKE '%quasarless%')
+      AND post_password = ''
+      AND ((post_type = 'attachment' AND post_status = 'publish')
+        OR (post_type = 'page' AND post_status = 'publish')
+        OR (post_type = 'post' AND post_status = 'publish'))
+    ORDER BY post_title LIKE '%quasarless%' DESC, post_date DESC, ID LIMIT 10
+  expect:
+    rows: 0
+    data: []
+- name: Costed broad OR keeps cheap ordered filter
+  physical_calibration: true
+  calibration_decision: ordered_or
+  warmup: 10
+  repetitions: 10
+  sql: |-
+    SELECT ID FROM wordpress_search_posts
+    WHERE post_type = 'revision' OR post_type = 'post'
+    ORDER BY ID LIMIT 2
+  expect:
+    rows: 2
+    data:
+    - ID: 2
+    - ID: 3
+- name: Cached OR split becomes overlapping after a session binding changes
+  scm: "(begin\n  (define cache (newcachemap))\n  (define sess (newsession))\n  (sess\
+    \ \"username\" \"root\")\n  (sess \"schema\" \"memcp-tests\")\n  (define query\
+    \ \"SELECT ID FROM wordpress_search_posts\\nWHERE ((post_title LIKE '%nightjar%')\
+    \ OR (post_excerpt LIKE '%nightjar%') OR (post_content LIKE '%nightjar%'))\\n\
+    \  AND post_password = ''\\n  AND ((post_type = @kind AND post_status = 'publish')\\\
+    n    OR (post_type = 'page' AND post_status = 'publish')\\n    OR (post_type =\
+    \ 'post' AND post_status = 'publish'))\\nORDER BY post_title LIKE '%nightjar%'\
+    \ DESC, post_date DESC LIMIT 10\")\n  (define run (lambda (kind) (begin\n    (sess\
+    \ \"kind\" kind)\n    (sess \"ids\" \"\")\n    (sql_execute_formula sess nil\n\
+    \      (cached_parse cache (list parse_sql) \"memcp-tests\" query nil \"root\"\
+    \ sess true)\n      (lambda (row) (sess \"ids\" (concat (sess \"ids\") (cadr row)\
+    \ \",\")))\n      (lambda (_fields) nil))\n    (sess \"ids\"))))\n  (define first\
+    \ (run \"attachment\"))\n  (define overlap (run \"post\"))\n  (define restored\
+    \ (run \"attachment\"))\n  (if (and (equal? first \"1774,1183,592,1971,1577,1380,986,789,395,198,\"\
+    )\n    (equal? overlap first) (equal? restored first)) \"ok\"\n    (error (concat\
+    \ \"cached OR proof leaked across bindings: \" first \" / \" overlap \" / \" restored))))"
+  expect:
+    data:
+    - ok
+- name: Selective disjoint OR chooses the ordered merge
+  sql: "EXPLAIN PHYSICAL SELECT ID FROM wordpress_search_posts\nWHERE (post_title\
+    \ LIKE '%quasarless%' OR post_excerpt LIKE '%quasarless%' OR post_content LIKE\
+    \ '%quasarless%')\n  AND post_password = ''\n  AND ((post_type = 'attachment'\
+    \ AND post_status = 'publish')\n    OR (post_type = 'page' AND post_status = 'publish')\n\
+    \    OR (post_type = 'post' AND post_status = 'publish'))\nORDER BY post_title\
+    \ LIKE '%quasarless%' DESC, post_date DESC, ID LIMIT 10"
+  expect:
+    rows: 1
+    result_contains:
+    - (chosen scan_order_multi)
+- name: Broad OR keeps the single ordered scan
+  sql: 'EXPLAIN PHYSICAL SELECT ID FROM wordpress_search_posts
+
+    WHERE post_type = ''revision'' OR post_type = ''post''
+
+    ORDER BY ID LIMIT 2'
+  expect:
+    rows: 1
+    result_contains:
+    - (chosen scan_order)
 cleanup:
 - sql: DROP TABLE wordpress_search_posts

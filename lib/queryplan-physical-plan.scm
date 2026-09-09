@@ -4073,7 +4073,210 @@ plan construction or timing during compilation. */
 							(list (list "plan" "prefiltered_difference") (list "total_ns" eager_ns))))) planning_session)
 					(equal? chosen "prefiltered_difference")))))))
 
+/* A WHERE disjunction is a physical access alternative, not a UNION in the
+logical IR. Split one conjunct only (never expand a Cartesian DNF). Distinct
+constant equality guards on the same column prove disjoint truth sets, so the
+ordered merge preserves SQL bag multiplicity without a deduplication buffer.
+Use SQL equality for the proof: case/accent-equivalent strings are not disjoint.
+NULL never proves disjointness. Parameter values observed at compilation are
+protected by session-value guards before a split plan can enter the cache. */
+(define ordered_or_literal_point (lambda (src expr planning_session)
+	(match (expression_syntax expr)
+		'(op left right) (if (has? (list (quote equal?) (quote equal??)) op)
+			(begin
+				(define left_col (direct_column_name_for_alias src left))
+				(define right_col (direct_column_name_for_alias src right))
+				(define col (if (nil? left_col) right_col left_col))
+				(define value (planner_literal_value (if (nil? left_col) left right) planning_session))
+				(define meta (if (or (nil? col) (not (source_is_base_table? src))) nil
+					(find (get_schema (source_schema src) (source_relation src))
+						(lambda (candidate) (equal?? (candidate "Field") col)) nil)))
+				(define typ (if (nil? meta) "" (toLower (meta "RawType"))))
+				/* Cross-type SQL coercion is not transitive: e.g. numeric 1
+				matches both string '1' and '01'. Prove within a typed domain. */
+				(if (or
+					(and (string? value) (has? '("char" "varchar" "text" "tinytext" "mediumtext" "longtext") typ))
+					(and (number? value) (> value -9007199254740992) (< value 9007199254740992)
+						(has? '("int" "integer" "bigint" "smallint" "tinyint" "mediumint" "float" "double" "decimal" "numeric") typ)))
+					(list col value) nil)) nil)
+		_ nil)))
+
+(define ordered_or_disjoint? (lambda (src left right planning_session)
+	(reduce (split_and_terms left) (lambda (proven term)
+		(or proven (begin
+			(define a (ordered_or_literal_point src term planning_session))
+			(if (nil? a) false
+				(reduce (split_and_terms right) (lambda (different other)
+					(or different (begin
+						(define b (ordered_or_literal_point src other planning_session))
+						(and (not (nil? b)) (equal? (car a) (car b))
+							(or (and (string? (cadr a)) (string? (cadr b)))
+								(and (number? (cadr a)) (number? (cadr b))))
+							(equal? (equal?? (cadr a) (cadr b)) false))))) false))))) false)))
+
+(define ordered_or_pairwise_disjoint? (lambda (src branches planning_session)
+	(match branches
+		(cons first rest) (and
+			(reduce rest (lambda (safe branch) (and safe (ordered_or_disjoint? src first branch planning_session))) true)
+			(ordered_or_pairwise_disjoint? src rest planning_session))
+		_ true)))
+
+(define ordered_or_branches (lambda (src condition planning_session)
+	(begin
+		(define terms (split_and_terms condition))
+		(reduce terms (lambda (found term)
+			(if (not (nil? found)) found
+				(match (expression_syntax term)
+					(cons (quote or) branches)
+					(if (and (> (count branches) 1) (ordered_or_pairwise_disjoint? src branches planning_session))
+						(map branches (lambda (branch)
+							(combine_where_terms (map terms (lambda (other)
+								(if (expression_equal? other term) branch other))) true))) nil)
+					_ nil))) nil))))
+
+/* Cost the same sorted prefix which compile_scan_plan can enforce. Remaining
+OR/LIKE terms stay residual; sampling their total selectivity must never be
+mistaken for an index's candidate population. */
+(define ordered_or_scan_work (lambda (block condition)
+	(begin
+		(define src (car (qb_sources block)))
+		(define planning_session (planner_context_session (qb_facts block)))
+		(define tx (planner_context_tx (qb_facts block)))
+		(define columns (extract_columns_for_alias src condition))
+		(define params (map columns (lambda (col) (scan_callback_symbol_for_alias (source_alias src) col))))
+		(define lowered (expression_syntax (lower_column_expr_for_alias src condition)))
+		(define bounds (sort (coalesceNil (scan_plan_collect lowered params columns '()) '()) scan_plan_boundary_order))
+		(define prefix (scan_plan_exact_prefix bounds))
+		(define covered? (lambda (term)
+			(begin
+				(define boundary (scan_plan_comparison (expression_syntax (lower_column_expr_for_alias src term)) params columns))
+				(and (not (nil? boundary))
+					(reduce prefix (lambda (found have)
+						(or found (scan_plan_boundary_covers have boundary))) false)))))
+		(define terms (split_and_terms condition))
+		(define indexed (combine_where_terms (filter terms covered?) true))
+		(define residual (combine_where_terms (filter terms (lambda (term) (not (covered? term)))) true))
+		(define total (planner_source_row_count src))
+		(define candidates (if (equal? indexed true) total
+			(coalesceNil (qassoc_get (planner_source_filter_estimate src indexed 512 tx planning_session)
+				(quote estimated_rows) nil) total)))
+		(define matches (if (equal? residual true) candidates
+			(coalesceNil (qassoc_get (planner_source_filter_estimate src condition 512 tx planning_session)
+				(quote estimated_rows) nil) candidates)))
+		(define limit_value (planner_literal_value (qb_limit block) planning_session))
+		(define offset_value (planner_literal_value (coalesceNil (qb_offset block) 0) planning_session))
+		(define window (if (and (number? limit_value) (>= limit_value 0) (number? offset_value))
+			(+ limit_value offset_value) nil))
+		(define ordered (reduce bounds (lambda (ok boundary) (and ok (equal? (boundary "kind") "equal"))) true))
+		(define visited (if (and ordered (number? window) (> matches 0))
+			(min candidates (* candidates (min 1 (/ window matches)))) candidates))
+		(define output_rows (if (number? window) (min window matches) matches))
+		(define work (physical_expression_work_profile src residual planning_session))
+		(define sort_width (count (coalesceNil (qb_order block) '())))
+		(define sort_units (if ordered 0 (* sort_width (membership_ordered_recset_sort_work matches))))
+		(list 1 visited
+			(* visited (count (extract_columns_for_alias src residual)))
+			(* output_rows (count (merge_unique (map (projection_exprs (expand_query_block_fields (qb_sources block) (qb_fields block)))
+				(lambda (expr) (extract_columns_for_alias src expr))))))
+			(+ (* visited (qassoc_get work (quote operations) 0)) sort_units)
+			(* visited (qassoc_get work (quote broad_text_matches) 0))
+			(* visited (qassoc_get work (quote broad_text_average_bytes) 0))
+			output_rows))))
+
+/* Work vector: ordered invocations, visited rows, filter values, mapped
+values, scalar/comparison operations, text matches, text bytes, output rows.
+All prices are existing costgen-calibrated primitives; merge comparisons use
+scalar comparison work rather than an uncalibrated multiplier. */
+(define ordered_or_work_cost (lambda (work)
+	(planner_cost (* (nth work 0) planner_membership_ordered_scan_invocation_ns)
+		(+ (* (nth work 1) planner_membership_scan_row_ns)
+			(* (nth work 2) planner_membership_filter_column_row_ns)
+			(* (nth work 3) planner_membership_map_column_row_ns)
+			(* (nth work 4) planner_membership_expression_operation_row_ns)
+			(* (nth work 5) planner_membership_broad_text_match_row_ns)
+			(* (nth work 6) planner_membership_broad_text_match_byte_ns))
+		0 0 0 0 0 0 (nth work 7) 0.65)))
+
+(define ordered_or_merge_work (lambda (block works)
+	(begin
+		(define combined (map (produceN 8) (lambda (i)
+			(reduce works (lambda (total work) (+ total (nth work i))) 0))))
+		(define comparisons (* (nth combined 7)
+			(count (coalesceNil (qb_order block) '()))
+			(membership_integer_log2_ceil_from (count works) 1 0)))
+		(map (produceN 8) (lambda (i) (+ (nth combined i) (if (equal? i 4) comparisons 0)))))))
+
+(define ordered_or_multi_plan (lambda (block branches)
+	(begin
+		(define src (car (qb_sources block)))
+		(define alias (source_alias src))
+		(define fields (expand_query_block_fields (qb_sources block) (qb_fields block)))
+		(define orders (coalesceNil (qb_order block) '()))
+		(define sortcols (scan_order_sort_columns_for_alias src orders))
+		(define mapcols (merge_unique (map (projection_exprs fields) (lambda (expr) (extract_columns_for_alias src expr)))))
+		(define filtercols (map branches (lambda (branch) (extract_columns_for_alias src branch))))
+		(define callbacks (mapIndex branches (lambda (i branch)
+			(list (quote lambda) (map (nth filtercols i) (lambda (col) (scan_callback_symbol_for_alias alias col)))
+				(lower_column_expr_for_alias src branch)))))
+		(define mapper (list (quote lambda)
+			(cons (quote __scan_acc) (map mapcols (lambda (col) (scan_callback_symbol_for_alias alias col))))
+			(list (quote resultrow) (cons (quote list) (map_assoc fields (lambda (_title expr) (lower_column_expr_for_alias src expr)))))))
+		(compile_scan_plan (quote scan_order_multi) (physical_query_tx_symbol)
+			(cons (quote list) (map branches (lambda (_) (source_table_expr src))))
+			(cons (quote list) (map filtercols (lambda (cols) (cons (quote list) cols))))
+			(cons (quote list) callbacks)
+			(cons (quote list) (map branches (lambda (_) (cons (quote list) sortcols))))
+			(cons (quote list) (order_relations_for_source src orders))
+			nil nil 0 (coalesceNil (qb_offset block) 0) (coalesceNil (qb_limit block) -1)
+			(cons (quote list) (map branches (lambda (_) (cons (quote list) mapcols))))
+			(cons (quote list) (map branches (lambda (_) mapper))) nil false nil))))
+
 (define lower_single_source_query_block (lambda (block)
+	(begin
+		(define src (car (qb_sources block)))
+		(define condition (combine_where (qb_where block) (source_join_expr src)))
+		(define candidates (ordered_or_branches src condition (planner_context_session (qb_facts block))))
+		(define branches (if (and
+			(not (nil? candidates))
+			(source_is_base_table? src) (not (source_outer? src))
+			(empty_list? (qb_group block)) (nil? (qb_having block))
+			(not (query_block_has_aggregates? block)) (empty_list? (qb_stages block))
+			(empty_list? (expr_probe_stages (list condition (qb_fields block) (qb_order block))))
+			(or (not (empty_list? (qb_order block))) (query_limit_active? (qb_offset block) (qb_limit block)))
+			(order_items_belong_to_source? src (coalesceNil (qb_order block) '()))
+			(number? (planner_source_row_count src))
+			(reduce (merge (list (list condition) (projection_exprs (qb_fields block))
+				(order_exprs (qb_order block))))
+				(lambda (safe expr) (and safe (begin
+					(define cols (extract_columns_for_alias src expr))
+					(scan_plan_computed_safe (expression_syntax (lower_column_expr_for_alias src expr))
+						(map cols (lambda (col) (scan_callback_symbol_for_alias (source_alias src) col))))))) true))
+			candidates nil))
+		(if (nil? branches) (lower_single_source_scan_plan block)
+			(begin
+				(define planning_session (planner_context_session (qb_facts block)))
+				(planner_record_table_statistics_guards (list src) planning_session)
+				(planner_record_session_value_guards (list condition (qb_limit block) (qb_offset block)) planning_session)
+				(define filter_work (ordered_or_scan_work block condition))
+				(define multi_work (ordered_or_merge_work block (map branches (lambda (branch) (ordered_or_scan_work block branch)))))
+				(define filter_cost (ordered_or_work_cost filter_work))
+				(define multi_cost (ordered_or_work_cost multi_work))
+				(define normal (if (planner_cost_better? multi_cost filter_cost) "scan_order_multi" "scan_order"))
+				(define id (concat "ordered_or:" (source_alias src) ":" (stable_structural_hash condition true)))
+				(define chosen (planner_physical_choice id normal '("scan_order" "scan_order_multi") planning_session))
+				(planner_record_physical_decision (list
+					(list "decision_id" id) (list "decision" "ordered_or")
+					(list "decision_site" "single_source") (list "chosen" chosen)
+					(list "normally_chosen" normal) (list "reason" "disjoint_constant_guards_cost")
+					(list "inputs" (list (list "branch_count" (count branches))
+						(list "ordered_or_work" (if (equal? chosen "scan_order_multi") multi_work filter_work))))
+					(list "alternatives" (list
+						(list (list "plan" "scan_order") (list "cost" (planner_cost_explain filter_cost)))
+						(list (list "plan" "scan_order_multi") (list "cost" (planner_cost_explain multi_cost)))))) planning_session)
+				(if (equal? chosen "scan_order_multi") (ordered_or_multi_plan block branches)
+					(lower_single_source_scan_plan block)))))))
+
+(define lower_single_source_scan_plan (lambda (block)
 	(begin
 		(define src (car (qb_sources block)))
 		(define fields (expand_query_block_fields (qb_sources block) (qb_fields block)))
@@ -5186,12 +5389,12 @@ until the caller has selected this physical alternative. */
 						not introduce a dependency on an irrelevant session value.
 						Table-statistics guards still protect against data growth. */
 						(if (<= base_rows 1) 1
-						(begin
-							(define estimate
-								(planner_source_filter_estimate src local_condition 512
-									planning_tx planning_session))
-							(max 1 (planner_estimated_matching_rows estimate
-								base_rows base_rows)))))))) nil))
+							(begin
+								(define estimate
+									(planner_source_filter_estimate src local_condition 512
+										planning_tx planning_session))
+								(max 1 (planner_estimated_matching_rows estimate
+									base_rows base_rows)))))))) nil))
 		/* A local driver predicate is only the first acceptance stage. Every
 		later input may reject the driver row as well, so price ordered braking
 		from the product of the independently estimated inner selectivities.
@@ -9856,45 +10059,48 @@ RecSet node is written into logical IR. */
 (define physical_operator_family_for_decision (lambda (plan decision)
 	(begin
 		(define kind (qassoc_get decision "decision" nil))
-		(if (equal? kind "semijoin_carrier")
-			(if (semijoin_plan_has_operator? plan "recset_project_join")
-				(if (semijoin_plan_has_operator? plan "initialize_cache_table") "prejoin_recset" "projected_recset")
-				(if (semijoin_plan_has_operator? plan "createcolumn") "predicate_cache" "unknown"))
-			(if (equal? kind "membership_carrier")
-				(begin
-					(define chosen (qassoc_get decision "chosen" nil))
-					/* A compound query may contain key indexes and projected RecSets for
-					unrelated ACL stages. Validate the primitive required by this decision's
-					chosen alternative instead of assigning the whole plan to the first
-					operator family found globally. Falling back to the global classifier
-					still makes a genuinely unreachable forced alternative fail calibration. */
-					(if (or
-						(and (equal? chosen "ordered_batch_accept")
-							(physical_expr_has_head? plan (quote scan_order_batch_accept)))
-						(and (equal? chosen "prefiltered_candidate_keyset")
-							(physical_prefiltered_membership_expr? plan))
-						(and (equal? chosen "candidate_keyset")
-							(physical_expr_has_head? plan (quote recset_project_join)))
-						(and (equal? chosen "driver_order_membership_probe")
-							(physical_expr_has_head? plan (quote recset_key_index)))
-						(and (equal? chosen "driver_filter_join_probe")
-							(not (physical_expr_has_head? plan (quote scan_order_batch_accept)))))
-						chosen
-						(physical_membership_operator_family plan)))
-				(if (equal? kind "scan_join_order")
-					(if (physical_expr_has_head? plan (quote scan_join_order))
-						(if (equal? (qassoc_get decision "chosen" nil)
-							"scan_join_order_batched_probe")
-							"scan_join_order_batched_probe" "scan_join_order")
-						"legacy_join_tree")
-					(if (equal? kind "direct_group_join")
-						(if (physical_expr_has_group_relation? plan)
-							"group_carrier" "direct_group_join")
-						(if (equal? kind "scan_lookup")
-							(if (physical_expr_has_head? plan (quote scan_lookup))
-								"scan_lookup"
-								(if (physical_expr_has_head? plan (quote scan_order)) "scan_order" "unknown"))
-							"unknown"))))))))
+		(if (equal? kind "ordered_or")
+			(if (physical_expr_has_head? plan (quote scan_order_multi)) "scan_order_multi"
+				(if (physical_expr_has_head? plan (quote scan_order)) "scan_order" "unknown"))
+			(if (equal? kind "semijoin_carrier")
+				(if (semijoin_plan_has_operator? plan "recset_project_join")
+					(if (semijoin_plan_has_operator? plan "initialize_cache_table") "prejoin_recset" "projected_recset")
+					(if (semijoin_plan_has_operator? plan "createcolumn") "predicate_cache" "unknown"))
+				(if (equal? kind "membership_carrier")
+					(begin
+						(define chosen (qassoc_get decision "chosen" nil))
+						/* A compound query may contain key indexes and projected RecSets for
+						unrelated ACL stages. Validate the primitive required by this decision's
+						chosen alternative instead of assigning the whole plan to the first
+						operator family found globally. Falling back to the global classifier
+						still makes a genuinely unreachable forced alternative fail calibration. */
+						(if (or
+							(and (equal? chosen "ordered_batch_accept")
+								(physical_expr_has_head? plan (quote scan_order_batch_accept)))
+							(and (equal? chosen "prefiltered_candidate_keyset")
+								(physical_prefiltered_membership_expr? plan))
+							(and (equal? chosen "candidate_keyset")
+								(physical_expr_has_head? plan (quote recset_project_join)))
+							(and (equal? chosen "driver_order_membership_probe")
+								(physical_expr_has_head? plan (quote recset_key_index)))
+							(and (equal? chosen "driver_filter_join_probe")
+								(not (physical_expr_has_head? plan (quote scan_order_batch_accept)))))
+							chosen
+							(physical_membership_operator_family plan)))
+					(if (equal? kind "scan_join_order")
+						(if (physical_expr_has_head? plan (quote scan_join_order))
+							(if (equal? (qassoc_get decision "chosen" nil)
+								"scan_join_order_batched_probe")
+								"scan_join_order_batched_probe" "scan_join_order")
+							"legacy_join_tree")
+						(if (equal? kind "direct_group_join")
+							(if (physical_expr_has_group_relation? plan)
+								"group_carrier" "direct_group_join")
+							(if (equal? kind "scan_lookup")
+								(if (physical_expr_has_head? plan (quote scan_lookup))
+									"scan_lookup"
+									(if (physical_expr_has_head? plan (quote scan_order)) "scan_order" "unknown"))
+								"unknown")))))))))
 
 (define physical_expr_has_group_relation? (lambda (expr)
 	(match expr
@@ -10076,6 +10282,7 @@ protocol callback receives only the calibration row. */
 							"estimated_ns" estimated_ns
 							"whole_query_execution_ns" (quote __calibration_whole_query_execution_ns)
 							"operator_ns" nil
+							"ordered_or_work" (cons (quote list) (coalesceNil (physical_calibration_input decision "ordered_or_work") '()))
 							"measurement_scope" (if shared_suite "shared_sequential_diagnostic" "isolated_variant_request")
 							"fit_eligible" (not shared_suite)
 							"candidate_input_rows" (physical_calibration_input decision "candidate_input_rows")

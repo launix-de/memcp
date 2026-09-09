@@ -1895,6 +1895,37 @@ start_scan:
 			return beyond
 		})
 	}
+	// Complete a multi-column equality seek before entering the row loop.
+	// Trailing unbounded ordering keys do not constrain this interval. The
+	// first-key interpolation above remains a useful narrowing step, but is
+	// not an exact lower bound for a composite equality prefix.
+	completePointPrefix := firstSorted >= 0
+	pointKeys := 0
+	trailingOrder := false
+	for i := 0; i < cmpCols && completePointPrefix; i++ {
+		if !s.columnIsSorted(i) {
+			continue
+		}
+		if i < 64 && unboundedMask&(uint64(1)<<i) != 0 {
+			trailingOrder = true
+			continue
+		}
+		if trailingOrder || !scanAccessBoundaryIsPoint(bounds, i) || bounds.boundValue(i, false).IsNil() {
+			completePointPrefix = false
+			break
+		}
+		pointKeys++
+	}
+	completePointPrefix = completePointPrefix && pointKeys > 1
+	if completePointPrefix {
+		mainIdx += sort.Search(mainEnd-mainIdx, func(offset int) bool {
+			recid := getRecid(mainIdx + offset)
+			inRange, beyond := s.rowWithinBounds(bounds, indexBounds, cmpCols, lastSorted, sortedMask, unboundedMask, lowerInclusive, upperInclusive, func(col int) scm.Scmer {
+				return cols[col].get(recid)
+			})
+			return inRange || beyond
+		})
+	}
 	mainStart := mainIdx
 	indexSpanRows = int64(mainEnd-mainStart) + int64(maxInsertIndex)
 	if candidateSpan != nil {
@@ -1938,12 +1969,12 @@ start_scan:
 	matchers := s.bindRowMatchers(tx, bounds, indexBounds, upperInclusive, cols, snapIndexHooks, true, exactMain)
 	// For one constrained sorted key, the two binary searches define the exact
 	// main-row interval. Non-sorted access hooks still run in emitRowMatchers.
-	// Composite prefixes keep their row checks because their lower search uses
-	// only the first sorted key.
-	mainRangeCovered := false
+	// Complete non-NULL equality prefixes now have the same exact interval.
+	// Other composite shapes retain their per-row boundary checks.
+	mainRangeCovered := completePointPrefix
 	if firstSorted >= 0 && lastSorted < 64 {
 		constrainedSorted := sortedMask &^ unboundedMask
-		mainRangeCovered = constrainedSorted == uint64(1)<<firstSorted
+		mainRangeCovered = mainRangeCovered || constrainedSorted == uint64(1)<<firstSorted
 	}
 	adaptiveSwitchRows := int64(0)
 	if options != nil && hasRecSetBoundary && maxInsertIndex == 0 {
