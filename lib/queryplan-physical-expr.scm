@@ -7536,3 +7536,43 @@ threshold outside Costgen's model. */
 				planner_membership_scan_invocation_ns)
 				0 0 0 0 0 0 0 target 0.65)
 			target 0.65))))
+
+/* Reorder only a closed, side-effect-free scalar subset. Probe markers,
+user functions, CASE and other evaluation boundaries retain their order. */
+(define physical_reorderable_filter? (lambda (expr)
+	(match expr
+		((symbol get_column) _alias _ci _column _column_ci) true
+		((symbol session) key) (string? key)
+		(cons head tail) (and
+			(contains? '("and" "or" "equal??" "equal?" "<" ">" "<=" ">=" "strlike" "strlike_cs" "nil?") (string head))
+			(reduce tail (lambda (valid item) (and valid (physical_reorderable_filter? item))) true))
+		_ (or (nil? expr) (or (number? expr) (or (string? expr) (or (equal? expr true) (equal? expr false))))))))
+
+/* For short-circuit AND, sorting by cost / rejection probability minimizes
+expected work under the same independent-selectivity assumption as join
+costing. Unknown selectivity uses the same neutral prior for every term.
+Costs reuse costgen's scalar-operation and decoded-text-byte coefficients.
+Only callback evaluation order changes; access candidates and logical IR
+remain the inputs already chosen by the planner. */
+(define physical_filter_order_score (lambda (src term planning_session)
+	(begin
+		(define work (physical_expression_work_profile src term planning_session))
+		(define cost (+
+			(* (qassoc_get work (quote operations) 0) planner_membership_expression_operation_row_ns)
+			(* (qassoc_get work (quote broad_text_matches) 0) planner_membership_broad_text_match_row_ns)
+			(* (qassoc_get work (quote broad_text_average_bytes) 0) planner_membership_broad_text_match_byte_ns)))
+		(define selectivity (planner_estimate_planning_value
+			(join_optimizer_expr_prior_estimate (list src) (source_alias src) term planning_session) 0.5))
+		(/ cost (max 0.000001 (- 1 selectivity))))))
+
+(define physical_order_filter_terms (lambda (src condition planning_session)
+	(begin
+		(define terms (split_and_terms condition))
+		(if (or (< (count terms) 2) (not (physical_reorderable_filter? condition)))
+			condition
+			(begin
+				(define scored (map (produceN (count terms)) (lambda (i)
+					(list (nth terms i) (physical_filter_order_score src (nth terms i) planning_session) i))))
+				(combine_where_terms (map
+					(sort scored (lambda (a b) (if (equal? (cadr a) (cadr b))
+						(< (nth a 2) (nth b 2)) (< (cadr a) (cadr b))))) car) true))))))

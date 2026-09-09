@@ -1,5 +1,6 @@
 # Copyright (C) 2026 Carl-Philip Hänsch
 # SPDX-License-Identifier: GPL-3.0-or-later
+
 # Tests for IN-list and LIKE prefix boundary extraction for index usage.
 # IN (1,2,3) → range [min,max]; LIKE 'foo%' → range [prefix, prefix+1)
 
@@ -182,3 +183,18 @@ test_cases:
       - sql: "INSERT INTO inlike (id,name,val) VALUES (9007199254740992,'large-low',1),(9007199254740993,'large-high',2)"
     sql: "SELECT name FROM inlike WHERE id IN (9007199254740993,9007199254740992) ORDER BY val"
     expect: {rows: 2, data: [{name: "large-low"}, {name: "large-high"}]}
+  - name: "LIKE disjunction and cheap equality disjunction preserve rows"
+    sql: "SELECT id FROM inlike WHERE (name LIKE '%19%' OR name LIKE '%18%') AND (val = 900 OR val = 950) ORDER BY id"
+    expect: {rows: 2, data: [{id: 180}, {id: 190}]}
+
+  - name: "Nullable text disjunction preserves WHERE truth semantics"
+    sql: "SELECT id FROM inlike WHERE (name LIKE '%19%' OR NULL) AND (val = 900 OR val = 950) ORDER BY id"
+    expect: {rows: 1, data: [{id: 190}]}
+
+  - name: "CASE remains an evaluation boundary in a text filter"
+    sql: "SELECT id FROM inlike WHERE (CASE WHEN val = 950 THEN name LIKE '%19%' ELSE FALSE END) AND id > 0 ORDER BY id"
+    expect: {rows: 1, data: [{id: 190}]}
+
+  - name: "Malformed text filter is rejected"
+    sql: "SELECT id FROM inlike WHERE name LIKE AND val = 950"
+    expect: {error: true}
