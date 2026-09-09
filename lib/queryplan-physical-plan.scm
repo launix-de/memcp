@@ -4133,6 +4133,10 @@ plan construction or timing during compilation. */
 								(probe_limit_work_rows (qb_limit block)
 									(planner_context_session (qb_facts block))) nil)
 							allow_ordered_batch_binding
+							/* An implied membership becomes batch_membership_table_expr
+							below. Its complete preparation is shared with observation;
+							branch-local OR memberships remain window-local instead. */
+							(equal? membership implied_membership)
 							(prefiltered_driver_recset_expr_for_membership
 								src source_table raw_condition membership)
 							(+ (count (acceptance_required_sources
@@ -5308,6 +5312,7 @@ until the caller has selected this physical alternative. */
 				(if (query_limit_active? offset_value limit_value)
 					(probe_limit_work_rows limit_value planning_session) nil)
 				allow_ordered_batch
+				false
 				(prefiltered_driver_recset_expr_for_membership
 					src (source_table_expr_using stages src) raw_condition membership)
 				(+ (count (acceptance_required_sources
@@ -6966,6 +6971,7 @@ carrier remains on the measured direct path and is never built eagerly. */
 							(query_limit_active? offset_value limit_value))
 							(probe_limit_work_rows limit_value planning_session) nil)
 						allow_ordered_batch
+						false
 						(prefiltered_driver_recset_expr_for_membership
 							src (source_table_expr_using stages src) condition membership)
 						(+ (count (acceptance_required_sources

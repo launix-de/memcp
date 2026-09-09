@@ -3667,6 +3667,19 @@ below it remain guarded, but do not precompute an exact projection merely to
 choose between alternatives whose complete runtime is already negligible. */
 (define planner_adaptive_observation_budget_ns 100000000)
 
+/* Exact preparation is an executed plan prefix, not free statistics. Once it
+has run, candidate consumption wins by reuse, but that conditional dominance
+does NOT justify paying for the prefix. Compare preparation plus consumption
+with the executable no-observation winner using the same calibrated costs.
+Uncertainty and the risk budget alone must not erase LIMIT's early braking.
+Unknown costs cannot prove that adding a complete scan is beneficial. A prefix
+already required by the selected consumer is shared work, not an added scan:
+its exact count can still guard against projection skew. */
+(define membership_observation_cost_preferred? (lambda (prepared_cost unprepared_cost preparation_shared)
+	(or preparation_shared (and (not (nil? prepared_cost))
+		(and (not (nil? unprepared_cost))
+			(not (planner_cost_better? unprepared_cost prepared_cost)))))))
+
 /* A prepared exact candidate is already the strongest reusable boundary for
 an ordered scan. The storage operator adapts its traversal to the RecSet's
 runtime cardinality, so rebuilding cumulative prefixes cannot win afterward. */
@@ -3841,7 +3854,7 @@ candidate RecSet. */
 /* Cost one physical tree edge once and return (strategy RecSet-expression).
 Consumers decide whether that RecSet is their scan carrier or a membership
 filter; they must not reconstruct the choice from enclosing block facts. */
-(define recset_project_join_plan_for_membership_using (lambda (src membership consumer driver_rows_override allow_ordered_batch prefiltered_driver_expr downstream_probe_branches allow_driver_probe driver_order_partitioning decision_scope planning_session tx)
+(define recset_project_join_plan_for_membership_using (lambda (src membership consumer driver_rows_override allow_ordered_batch batch_prepares_candidate prefiltered_driver_expr downstream_probe_branches allow_driver_probe driver_order_partitioning decision_scope planning_session tx)
 	(begin
 		(define stage (nth membership 0))
 		(define driver_order_partitioned (if (nil? driver_order_partitioning)
@@ -4089,8 +4102,20 @@ filter; they must not reconstruct the choice from enclosing block facts. */
 						(qassoc_get lower_best_cost (quote total_ns) 0)
 						(qassoc_get upper_best_cost (quote total_ns) 0))
 					0))
+				/* The emitter owns this topology fact: some batch consumers already
+				use the complete candidate as their input, others project only each
+				window. Counting an already required input adds no relational work.
+				Do not infer that from the operator name or SQL shape. Conversely,
+				availability of such a carrier does not make preparation free when
+				the actual no-observation winner uses another topology. */
+				(define observation_preparation_shared (and batch_prepares_candidate
+					(equal? estimated_normal_choice "ordered_batch_accept")))
+				(define observation_cost_preferred (membership_observation_cost_preferred?
+					candidate_cost (if (nil? cost_choice) nil (cadr cost_choice))
+					observation_preparation_shared))
 				(define observe_projection (and interval_crosses
-					(> interval_worst_ns planner_adaptive_observation_budget_ns)))
+					(and (> interval_worst_ns planner_adaptive_observation_budget_ns)
+						observation_cost_preferred)))
 				(define observation_keys (if observe_projection
 					(planner_register_queryplan_observation decision_id raw_expr
 						(list (quote recset_count) (symbol "__queryplan_observed_value")) planning_session)
@@ -4220,6 +4245,8 @@ filter; they must not reconstruct the choice from enclosing block facts. */
 							(list "projection_interval_upper_rows" (if observation_supported source_rows nil))
 							(list "projection_crossover_rows" crossover)
 							(list "adaptive_observation_required" observe_projection)
+							(list "adaptive_observation_cost_preferred" observation_cost_preferred)
+							(list "adaptive_observation_preparation_shared" observation_preparation_shared)
 							(list "adaptive_observation_budget_ns" planner_adaptive_observation_budget_ns)
 							(list "expected_driver_rows_visited" (membership_expected_driver_rows_visited
 								candidate_input_rows candidate_rows driver_rows facts))
@@ -4287,7 +4314,7 @@ candidate-keyset choice replaces the marker with a projected RecSet carrier. */
 (define recset_project_join_expr_for_membership_using (lambda (src membership consumer driver_rows_override allow_ordered_batch)
 	(begin
 		(define plan (recset_project_join_plan_for_membership_using
-			src membership consumer driver_rows_override allow_ordered_batch nil 0 true nil
+			src membership consumer driver_rows_override allow_ordered_batch false nil 0 true nil
 			(quote expression) nil nil))
 		(if (and (not (nil? plan)) (equal? (car plan) "candidate_keyset"))
 			(cadr plan)
@@ -5944,7 +5971,7 @@ state through an assoc and one-element payload lists adds no semantics. */
 						/* This marker runs in the group fill's input filter, before
 						the residual predicates. The output LIMIT does not bound its
 						probes: every input row can reach this call. */
-						src term (quote aggregate) (planner_source_row_count src) false nil 0 true nil
+						src term (quote aggregate) (planner_source_row_count src) false false nil 0 true nil
 						(quote group_fill) (planner_context_session facts) (planner_context_tx facts)))
 					(if (and (not (nil? plan)) (equal? (car plan) "candidate_keyset"))
 						(list term (membership_recset_var src term) (cadr plan)) nil))))
@@ -5957,7 +5984,7 @@ state through an assoc and one-element payload lists adds no semantics. */
 				nil
 				(begin
 					(define plan (recset_project_join_plan_for_membership_using
-						src membership (quote aggregate) (planner_source_row_count src) false nil 0 true nil
+						src membership (quote aggregate) (planner_source_row_count src) false false nil 0 true nil
 						(quote group_fill) (planner_context_session facts) (planner_context_tx facts)))
 					(if (and (not (nil? plan)) (equal? (car plan) "candidate_keyset"))
 						(cadr plan) nil)))
