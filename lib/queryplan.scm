@@ -22,4 +22,9 @@ queryplan.scm importers. */
 (import "queryplan-optimize.scm")
 (import "queryplan-physical-scan.scm")
 (import "queryplan-physical-expr.scm")
+/* Forward stub: prepare_physical_queryplan calls sql_type_annotate_ir, whose
+real definition (sql-types.scm) needs helpers from queryplan-physical-plan.scm
+and is loaded right after it. */
+(define sql_type_annotate_ir (lambda (ir) ir))
 (import "queryplan-physical-plan.scm")
+(import "sql-types.scm")
