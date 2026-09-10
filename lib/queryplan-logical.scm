@@ -3087,6 +3087,14 @@ without separately proving two-valued semantics. */
 			where_corr_pairs having_corr_pairs))))
 		(define local_value_expr (decorrelate_expr_with_pairs inner_default all_corr_pairs value_expr))
 		(define ags (dedupe_aggregates_by_col (merge (list (extract_aggregates local_value_expr) (list aggregate_count_descriptor)))))
+		/* COUNT(DISTINCT)/GROUP_CONCAT(DISTINCT) lower to a merge_unique LIST
+		accumulator whose empty-group row the physical group cache does not emit, so
+		`preserve_empty_domain` cannot make an INNER join safe here. Keep the stage
+		source as a real LEFT join; a no-match outer row then reads NULL and
+		count_distinct_read_expr / group_concat_distinct_read_expr coalesce it to
+		0 / NULL. Neumann NK15 3.2: outer joins keep unmatched tuples. */
+		(define ags_have_list_accumulator (reduce ags (lambda (found ag)
+			(or found (count_distinct_descriptor? ag))) false))
 		(if (empty_list? ags)
 			(neumann_fail "untangle_query" "table-backed scalar subquery without aggregate needs partition_limit=2 and overflow checking")
 			true)
@@ -3126,7 +3134,7 @@ without separately proving two-valued semantics. */
 					(list (quote condition) stage_condition)
 					(list (quote domain) outer_domain)
 					(list (quote lookup-keys) lookup_keys)
-					(list (quote preserve_empty_domain) true)
+					(list (quote preserve_empty_domain) (not ags_have_list_accumulator))
 					(list (quote null_semantics) (quote aggregate))
 					(list (quote partition_by) keys)
 					(list (quote result_max_rows_per_partition) 1))
@@ -3138,7 +3146,7 @@ without separately proving two-valued semantics. */
 			stage_alias
 			(group_stage_schema stage)
 			(make_stage_output_relation stage_id)
-			(or (stage_source_outer? outer_sources) (not (equal? local_having true)))
+			(or (stage_source_outer? outer_sources) (not (equal? local_having true)) ags_have_list_accumulator)
 			(make_stage_lookup_condition stage_alias key_names lookup_keys post_condition)))
 		(define presence_expr (list (quote get_column) stage_alias false (aggregate_col_name aggregate_count_descriptor) false))
 		(define scalar_value_expr (replace_group_expr stage_input inner_default stage_alias keys key_names ags local_value_expr))
