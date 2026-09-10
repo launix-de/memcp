@@ -314,6 +314,16 @@ relation for scan bounds / ORDER without re-deriving it. */
 				(sql_merge_collation (sql_info_collation left_info) (sql_info_collation right_info)))
 			(sql_info plain "BOOLEAN" nil)))))
 
+/* IF / searched CASE lowers to (if cond1 val1 cond2 val2 ... else). Only the
+value arms (and the trailing else) contribute to the result type/collation;
+the conditions are booleans and would otherwise pollute the merge. */
+(define sql_case_value_infos (lambda (infos)
+	(begin
+		(define n (count infos))
+		(map (filter (produceN n)
+			(lambda (i) (or (equal? i (- n 1)) (equal? (- i (* 2 (intdiv i 2))) 1))))
+			(lambda (i) (nth infos i))))))
+
 (define sql_call_info (lambda (sources head args)
 	(begin
 		(define infos (map args (lambda (a) (sql_expr_info sources a))))
@@ -329,13 +339,18 @@ relation for scan bounds / ORDER without re-deriving it. */
 			(define rule (sql_function_rule head))
 			(define rtype (cadr rule))
 			(define mode (nth rule 2))
-			(define merged (sql_merge_infos infos))
+			(define value_infos (if (equal? mode "case") (sql_case_value_infos infos) infos))
+			(define merged (sql_merge_infos value_infos))
 			(define type (if (has? (list "merge" "case") mode) (sql_info_type merged) rtype))
-			(define collation (if (sql_text_type? type)
+			/* fixed: the function owns its result, no operand collation inherited.
+			   first: inherit from the first argument. text/merge/case: merge the
+			   value operands. */
+			(define collation (if (not (sql_text_type? type)) nil
 				(if (equal? mode "first")
 					(if (empty_list? infos) nil (sql_info_collation (car infos)))
-					(sql_info_collation merged))
-				nil))
+				(if (has? (list "text" "merge" "case") mode)
+					(sql_info_collation merged)
+					nil))))
 			(sql_info (cons head forms) type collation)))))))
 
 (define sql_expr_info (lambda (sources expr)
