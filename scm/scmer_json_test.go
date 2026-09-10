@@ -174,7 +174,7 @@ func TestScmerJSON_PrimitivesRoundTrip(t *testing.T) {
 }
 
 func TestScmerJSON_NthLocalVarRoundtrip(t *testing.T) {
-	for _, idx := range []NthLocalVar{0, 1, 5, 127, 255} {
+	for _, idx := range []NthLocalVar{0, 1, 5, 127, 255, 256, 1024, 65536} {
 		v := NewNthLocalVar(idx)
 		b, err := json.Marshal(v)
 		if err != nil {

@@ -17,11 +17,90 @@ Copyright (C) 2026  Carl-Philip Hänsch
 package storage
 
 import (
+	"io"
 	"testing"
 	"time"
 
 	"github.com/launix-de/memcp/scm"
 )
+
+type memoryPublicationPersistence struct {
+	PersistenceEngine
+	manifestReached chan struct{}
+	resume          chan struct{}
+}
+
+func (p *memoryPublicationPersistence) WriteColumn(shard, column string) io.WriteCloser {
+	if column == blobManifestColumn {
+		close(p.manifestReached)
+		<-p.resume
+	}
+	return p.PersistenceEngine.WriteColumn(shard, column)
+}
+
+func TestRebuildMemoryTransferPrecedesCommitForwarding(t *testing.T) {
+	oldBasepath := Basepath
+	Basepath = t.TempDir()
+	defer func() { Basepath = oldBasepath }()
+	Init(scm.Globalenv)
+	LoadDatabases()
+	CreateDatabase("trampublication", false)
+	defer databases.Remove("trampublication")
+	tbl, _ := CreateTable("trampublication", "items", Safe, false)
+	tbl.CreateColumn("id", "INT", nil, nil)
+	tbl.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(1)}}, nil, scm.NewNil(), false, nil)
+	shard := tbl.Shards[0]
+	col := &column{}
+	shard.mu.Lock()
+	shard.tempColumnBytes = map[*column]int64{col: 128}
+	shard.mu.Unlock()
+	p := &memoryPublicationPersistence{tbl.schema.persistence, make(chan struct{}), make(chan struct{})}
+	tbl.schema.persistence = p
+	done := make(chan *storageShard, 1)
+	go func() { done <- shard.rebuild(true) }()
+	<-p.manifestReached
+	// This is the source lock held by commit's syncNextVisibilityLocked.
+	// Once nextReady is published, commit may wait for the successor lock;
+	// rebuild must release that lock without ever reacquiring this one.
+	shard.mu.Lock()
+	if !shard.nextReady.Load() {
+		t.Error("fixture did not reach commit-forwarding publication")
+	}
+	close(p.resume)
+	select {
+	case rebuilt := <-done:
+		shard.mu.Unlock()
+		rebuilt.mu.RLock()
+		got := rebuilt.tempColumnBytes[col]
+		rebuilt.mu.RUnlock()
+		if got != 128 {
+			t.Fatalf("successor lost temporary-column accounting: %d", got)
+		}
+	case <-time.After(time.Second):
+		shard.mu.Unlock()
+		<-done
+		t.Fatal("rebuild reacquired source lock after enabling commit forwarding")
+	}
+}
+
+func TestBlobSizeDoesNotWaitForReader(t *testing.T) {
+	cache := &blobRAMCache{}
+	want := cache.ComputeSize()
+	cache.mu.Lock()
+	done := make(chan uint, 1)
+	go func() { done <- cache.ComputeSize() }()
+	select {
+	case got := <-done:
+		cache.mu.Unlock()
+		if got != want {
+			t.Fatalf("fixed owner bytes changed: got %d, want %d", got, want)
+		}
+	case <-time.After(time.Second):
+		cache.mu.Unlock()
+		<-done
+		t.Fatal("memory display waits for a blob reader that may wait for CacheManager")
+	}
+}
 
 func TestPersistedInternalTableIsNotRegisteredAsTempKeytable(t *testing.T) {
 	defer setupGCTest(t)()

@@ -933,8 +933,9 @@ func closeProcedureCaptures(expression Scmer, callFrame *Env, bound map[Symbol]s
 	return NewSlice(closed)
 }
 
-// helper pseudo type to optimize parameter reading from indices
-type NthLocalVar uint8 // equals to (var i)
+// Numbered locals include the captures appended when the JIT closes a lambda.
+// Wide projections can exceed 255 slots even when each SQL row is smaller.
+type NthLocalVar uint32 // equals to (var i)
 
 /*
  Environments
