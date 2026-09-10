@@ -48,7 +48,14 @@ type OverlayBlob struct {
 const maxInlineBlobBytes = 2 * 1024
 
 func (s *OverlayBlob) ComputeSize() uint {
-	return uint(unsafe.Sizeof(*s)) + uint(unsafe.Sizeof(blobRAMCache{})) + s.size + s.Base.ComputeSize()
+	size := uint(unsafe.Sizeof(*s)) + s.size
+	if s.ram != nil {
+		size += s.ram.ComputeSize()
+	}
+	if s.Base != nil {
+		size += s.Base.ComputeSize()
+	}
+	return size
 }
 
 func (s *OverlayBlob) String() string {

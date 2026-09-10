@@ -101,12 +101,12 @@ func (s *StorageEnum) String() string {
 }
 
 func (s *StorageEnum) ComputeSize() uint {
-	var sz uint = 200 // struct overhead estimate
-	sz += 8 * uint(len(s.data))
-	sz += 4 * uint(len(s.jumpL1))
-	sz += 2 * uint(len(s.jumpL2))
+	sz := uint(unsafe.Sizeof(*s))
+	sz += 8 * uint(cap(s.data))
+	sz += 4 * uint(cap(s.jumpL1))
+	sz += 2 * uint(cap(s.jumpL2))
 	for i := uint8(0); i < s.k; i++ {
-		sz += scm.ComputeSize(s.values[i])
+		sz += scm.ComputeSize(s.values[i]) - uint(unsafe.Sizeof(s.values[i]))
 	}
 	return sz
 }

@@ -501,6 +501,24 @@ func (db *database) dropTrigger(name string) bool {
 	db.schemalock.RUnlock()
 
 	for _, t := range tables {
+		// Resolve ownership before taking a DDL lock. In particular, eviction
+		// invokes cache-cleanup triggers on the CacheManager goroutine while an
+		// unrelated group-table rebuild can hold ddlMu.RLock and wait for that
+		// same manager. Locking every catalog table here closes a wait cycle.
+		// Revalidate below under the usual DDL/schema locks; this snapshot only
+		// excludes non-owners and does not authorize removing a stale trigger.
+		t.mu.Lock()
+		ownsTrigger := false
+		for _, tr := range t.Triggers {
+			if tr.Name == name {
+				ownsTrigger = true
+				break
+			}
+		}
+		t.mu.Unlock()
+		if !ownsTrigger {
+			continue
+		}
 		t.ddlMu.Lock()
 		db.schemalock.Lock()
 		if db.tables.Get(t.Name) != t {

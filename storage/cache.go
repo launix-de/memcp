@@ -30,6 +30,10 @@ import "github.com/carli2/hybridsort"
 // EvictableType identifies the kind of cached object for factor lookup and stat reporting.
 type EvictableType uint8
 
+// CacheFreedBytes is the per-object-type accounting passed to cache cleanup
+// callbacks, including consumers outside the storage package.
+type CacheFreedBytes = [numEvictableTypes]int64
+
 const (
 	TypeTempColumn    EvictableType = iota // weight 20 — cheap to recompute
 	TypeShard                              // weight 1  — expensive (disk I/O)
@@ -51,7 +55,10 @@ const (
 //   - Division cannot distinguish between "slightly less important" items
 //
 // Phase 1 (heap) pulls candidates by evictionScore (max-heap).
-// Phase 2 sorts candidates by dynamicScore = age * evictionScore - telemetry*1000.
+// Phase 2 sorts candidates by dynamicScore = age * typeWeight - telemetry*50.
+// Bytes select the bounded comparison window; priority and reuse rank it.
+// Neither score is a memory size. Parent offers include cascading releases,
+// while item.size is exclusive ledger ownership (children register separately).
 // Callers that need a minimum lifetime set it explicitly. Query-local cache
 // consumers should instead retain a Go reference for the duration of their use.
 //
@@ -706,7 +713,9 @@ func (cm *CacheManager) applyEviction(candidate evictionCandidate, mode eviction
 	before := cm.currentMemory
 	result := item.object.evict(mode, item.size, freedByType)
 	if !result.success {
-		return 0
+		// A parent can shed children before another busy child prevents full
+		// eviction. Account only the bytes actually removed, even on that retry.
+		return before - cm.currentMemory
 	}
 	if result.fullyEvicted {
 		cm.removeInternal(item.pointer, freedByType)

@@ -1603,3 +1603,53 @@ func TestJITBase64Representations(t *testing.T) {
 		}
 	}
 }
+
+func TestJITWideNestedCallableCapture(t *testing.T) {
+	for _, count := range []int{32, 128, 180, 256, 512} {
+		t.Run(fmt.Sprint(count), func(t *testing.T) {
+			params := make([]string, count)
+			args := make([]Scmer, count)
+			for i := range params {
+				params[i] = fmt.Sprintf("p%d", i)
+				args[i] = NewInt(int64(i))
+			}
+			row := strings.Join(params, " ")
+			compiled := compileJITExpressionTestProc(t, "(lambda (callback) (lambda ("+row+") (lambda (a) (lambda (b) (lambda (c) (callback (list "+row+" a b c)))))))")
+			fn := Apply(compiled, NewFunc(func(args ...Scmer) Scmer { return args[0] }))
+			fn = Apply(fn, args...)
+			fn = Apply(fn, NewString("a"))
+			fn = Apply(fn, NewString("b"))
+			want := NewSlice(append(args, NewString("a"), NewString("b"), NewString("c")))
+			if got := Apply(fn, NewString("c")); !Equal(got, want) {
+				t.Fatalf("wide nested closure returned %s", String(got))
+			}
+		})
+	}
+}
+
+func TestJITRequiredLocalSlotsRespectInvocation(t *testing.T) {
+	outer := func(depth int64, value Scmer) Scmer {
+		return NewSlice([]Scmer{NewSymbol("outer"), NewInt(depth), value})
+	}
+	wide := NewNthLocalVar(4095)
+	for _, tc := range []struct {
+		name string
+		body Scmer
+		want int
+	}{
+		{"local", wide, 4096},
+		{"same scope", outer(0, wide), 4096},
+		{"parent invocation", outer(1, wide), 2},
+		{"begin shared frame", NewSlice([]Scmer{NewSymbol("begin"), outer(1, wide)}), 4096},
+		{"begin parent invocation", NewSlice([]Scmer{NewSymbol("begin"), outer(2, wide)}), 2},
+		{"reserved scope", NewSlice([]Scmer{NewSymbol("begin_mut"), NewInt(2), outer(2, wide)}), 2},
+		{"match shared frame", NewSlice([]Scmer{NewSymbol("match"), NewNil(), NewNil(), outer(1, wide)}), 4096},
+		{"match parent invocation", NewSlice([]Scmer{NewSymbol("match"), NewNil(), NewNil(), outer(2, wide)}), 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := jitRequiredLocalSlots(tc.body, 2); got != tc.want {
+				t.Fatalf("required slots = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}

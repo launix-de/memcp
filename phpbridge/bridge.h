@@ -26,6 +26,16 @@ typedef struct {
 } memcp_result;
 void memcp_result_free(memcp_result *result);
 void *memcp_module(void);
+void *memcp_locale_module(void);
+typedef struct {
+	char *data;
+	size_t length;
+	char *error;
+} memcp_text;
 /* Set before PHP MINIT; zero disables automatic PDO DSN routing. */
 void memcp_set_mysql_port(unsigned int port);
+uintptr_t memcp_php_request(void);
+void *memcp_imap_module(void);
+int memcp_imap_is_safe(void);
+void memcp_imap_configure(const char *source, const char *functions);
 #endif

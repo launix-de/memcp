@@ -36,7 +36,7 @@ php:
 test-php: php
 	CGO_ENABLED=1 CGO_CFLAGS="$$($(PHP_CONFIG) --includes)" \
 		CGO_LDFLAGS="-L$$($(PHP_CONFIG) --prefix)/lib -Wl,-rpath,$$($(PHP_CONFIG) --prefix)/lib $$($(PHP_CONFIG) --ldflags) $$($(PHP_CONFIG) --libs)" \
-		go test -tags=php,nowatcher,nobrotli,nomercure -run 'TestPHP|TestResultBuffer' -count=1 -v . ./phpbridge
+		go test -tags=php,nowatcher,nobrotli,nomercure -run 'TestPHP|TestResultBuffer|TestCatalog|TestIMAP' -count=1 -v . ./phpbridge
 
 # Keep the experimental compiler outside the tracked source tree. Clean
 # checkouts fast-forward on every invocation, while a checkout with local

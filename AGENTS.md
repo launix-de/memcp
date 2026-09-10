@@ -188,6 +188,36 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
 - Join pipelines: drive ordered/filtered side; hash/range-probe the other; keep fuse-friendly structure; precompute hidden computed columns for FK/PK group reuse.
 
 ## Memory & CPU Efficiency
+
+### Inclusive size and eviction ownership contract (2026)
+
+- `ComputeSize()` includes the object's retained allocations and all owned
+  children. It is never an eviction weight or an exclusive registration size.
+- A global ledger charges each allocation once. Where children have their own
+  registrations, subtract them explicitly at the registration boundary.
+- Dashboard/show resident totals include indexes, temporary columns, decoded
+  dictionaries and blob caches, whether evictable or not. Do not substitute
+  cached planner sizes or the eviction ledger for these totals; never load cold
+  columns just to measure resident memory.
+- A parent eviction offer includes all children released by that action. Parent
+  and child offers can overlap; actual releases are booked exactly once, only
+  after successful cleanup. A failed TryLock cannot authorize deregistration.
+- Memory bytes, reclaimable bytes and replacement-cost weights are distinct.
+  Changing accounting does not authorize changing the policy weights.
+- `storageShard.tempColumnBytes` is protected by the shard mutex. It records
+  per-shard portions of a separately registered temporary column so the manager
+  can offer/release those portions without blocking on column computation.
+- `blobRAMCache.residentBytes` is an atomic snapshot published at batch and
+  eviction boundaries under the blob mutex. Size diagnostics must read that
+  snapshot, never wait on the blob mutex while holding catalog/shard locks:
+  readers can wait for CacheManager while holding the blob mutex, and eviction
+  can need catalog locks. Do not add memory traversals to scan hot paths.
+- Resident payload estimates and process RSS are not interchangeable. Keep
+  allocator/runtime/stack and unassigned process memory visible; do not force
+  agreement by rescaling database sizes.
+- Full ownership traversal is an explicit diagnostic/maintenance operation,
+  not a query, scan-row, guard, or planner-statistics hot path. Reuse published
+  scalar statistics and incremental cache-ledger updates in those paths.
 - Design principle: Cache misses are more expensive than lightweight compression. Prefer compact encodings (e.g., bit-packing 3/5‑bit integers) and sequential scans over scattered, cache‑cold access.
 - Use columnar storage to keep footprints small and hot; compress where it reduces cache lines touched even if it adds tiny (de)compression overhead.
 - Pull function calls out of loops whenever possible

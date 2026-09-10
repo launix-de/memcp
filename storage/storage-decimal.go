@@ -98,7 +98,7 @@ func detectFloatScale(f float64) int8 {
 }
 
 func (s *StorageDecimal) ComputeSize() uint {
-	return s.inner.ComputeSize() + 2 // 1 byte magic + 1 byte scaleExp
+	return uint(unsafe.Sizeof(*s)-unsafe.Sizeof(s.inner)) + s.inner.ComputeSize()
 }
 
 func (s *StorageDecimal) String() string {

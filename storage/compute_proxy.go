@@ -371,10 +371,15 @@ func (p *StorageComputeProxy) orcCol() *column {
 }
 
 func (p *StorageComputeProxy) ComputeSize() uint {
-	var sz uint = 128 // struct overhead
+	sz := uint(unsafe.Sizeof(*p))
 	sz += p.validMask.ComputeSize()
 	p.mu.RLock()
-	sz += uint(len(p.delta)) * 24 // rough estimate per map entry
+	// Map bookkeeping plus owned Scmer payloads; the shard/computor references
+	// are non-owning and must not recursively recount the catalog/plan graph.
+	sz += uint(len(p.delta)) * 32
+	for _, value := range p.delta {
+		sz += scm.ComputeSize(value)
+	}
 	if p.main != nil {
 		sz += p.main.ComputeSize()
 	}

@@ -463,6 +463,16 @@ test_cases:
     repetitions: 12
     expect: {rows: 1, data: [{ok: 1}]}
 
+  - name: "Memory display must not deadlock concurrent blob readers and eviction"
+    parallel: blob_ram_pressure
+    scm: |
+      (reduce (produceN 12) (lambda (_ i)
+        (begin
+          (define snapshot (show "memcp-tests" "blob_external" true))
+          (if (> (snapshot "size_bytes") 0) true
+            (error "memory display lost the table owner")))) true)
+    expect: {result_contains: ["true"]}
+
   - name: "Restore RAM budget after external read pressure"
     scm: (settings "MaxRamBytes" 0)
     expect: {}

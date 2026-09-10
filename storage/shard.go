@@ -23,6 +23,7 @@ import "sync/atomic"
 import "time"
 import "strings"
 import "reflect"
+import "unsafe"
 import "runtime"
 import "encoding/json"
 import "encoding/binary"
@@ -49,6 +50,9 @@ type storageShard struct {
 	// must treat s.mu as the only authority for shard-local state and must not
 	// read Go maps here lock-free.
 	columns map[string]ColumnStorage
+	// Published alongside temp-column size accounting, under mu. Eviction uses
+	// these exclusive per-shard portions without blocking on a computing column.
+	tempColumnBytes map[*column]int64
 	// delta storage
 	deltaColumns map[string]int
 	inserts      [][]scm.Scmer                       // items added to storage
@@ -287,10 +291,14 @@ func (s *storageShard) recordNextInsertRange(oldStartRecid, newStartRecid uint32
 	s.nextTranslationMu.Unlock()
 }
 
-// computeSizeLocked computes the shard's memory footprint without acquiring s.mu.
+// exclusiveSizeLocked is EXCLUSIVE ownership for CacheManager registration, not
+// the shard's resident total or the bytes a cascading eviction can release.
+// Children have separate registrations and must not be charged twice globally.
 // Caller must already hold s.mu (read or write).
-func (s *storageShard) computeSizeLocked() uint {
-	var result uint = 14*8 + 32*8 // heuristic for columns map
+func (s *storageShard) exclusiveSizeLocked() uint {
+	// Fixed layout is exact; Go map bucket overhead remains an estimate.
+	result := uint(unsafe.Sizeof(*s)) + 64*uint(len(s.columns)+len(s.deltaColumns)+len(s.tempColumnBytes))
+	result += uint(cap(s.Indexes)) * uint(unsafe.Sizeof((*StorageIndex)(nil)))
 	if s.srState != COLD {
 		for name, c := range s.columns {
 			if c != nil && s.ownsColumnMemory(name) {
@@ -309,7 +317,73 @@ func (s *storageShard) computeSizeLocked() uint {
 func (s *storageShard) ComputeSize() uint {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.computeSizeLocked()
+	return s.residentMemoryLocked().total()
+}
+
+func (s *storageShard) exclusiveSize() uint {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.exclusiveSizeLocked()
+}
+
+// residentMemoryLocked includes every child owner, irrespective of eviction
+// eligibility or weight. It never loads a cold column. Caller holds s.mu.
+func (s *storageShard) residentMemoryLocked() memoryOwnerSnapshot {
+	m := memoryOwnerSnapshot{base: s.exclusiveSizeLocked()}
+	for name, column := range s.columns {
+		if column == nil {
+			continue
+		}
+		if !s.ownsColumnMemory(name) {
+			m.tempColumns += ownedColumnMemory(column)
+		}
+		m.stringDictionaries += materializedDictionaryMemory(column)
+		visitColumnCaches(column, false, func(owner any) bool {
+			if blob, ok := owner.(*blobRAMCache); ok {
+				m.blobCaches += blob.cachedBytes()
+			}
+			return true
+		})
+	}
+	for _, index := range s.Indexes {
+		if index != nil {
+			m.indexes += index.ComputeSize()
+		}
+	}
+	return m
+}
+
+// Child ownership follows storage wrappers, not just the outer column type.
+// These callbacks must not acquire a shard lock or call the public manager API.
+func visitColumnCaches(column any, nonblocking bool, visit func(any) bool) bool {
+	switch c := column.(type) {
+	case *StorageString:
+		if c.compressed {
+			return visit(c)
+		}
+	case *OverlayBlob:
+		if c.ram != nil && !visit(c.ram) {
+			return false
+		}
+		if c.Base != nil {
+			return visitColumnCaches(c.Base, nonblocking, visit)
+		}
+	case *StoragePrefix:
+		return visitColumnCaches(&c.values, nonblocking, visit)
+	case *StorageComputeProxy:
+		if nonblocking {
+			if !c.mu.TryRLock() {
+				return false
+			}
+		} else {
+			c.mu.RLock()
+		}
+		defer c.mu.RUnlock()
+		if c.main != nil {
+			return visitColumnCaches(c.main, nonblocking, visit)
+		}
+	}
+	return true
 }
 
 func (s *storageShard) ownsColumnMemory(name string) bool {
@@ -333,6 +407,12 @@ func ownedColumnMemory(storage ColumnStorage) uint {
 	}
 	size := storage.ComputeSize()
 	materialized := materializedDictionaryMemory(storage)
+	visitColumnCaches(storage, false, func(owner any) bool {
+		if blob, ok := owner.(*blobRAMCache); ok {
+			materialized += blob.cachedBytes()
+		}
+		return true
+	})
 	if materialized <= size {
 		size -= materialized
 	}
@@ -390,7 +470,7 @@ func (s *storageShard) statsSnapshotRLocked() shardStatsSnapshot {
 		delta:     len(s.inserts),
 		deletions: s.deletions.Count(),
 		state:     s.srState,
-		size:      s.computeSizeLocked(),
+		size:      s.exclusiveSizeLocked(),
 	}
 }
 
@@ -808,9 +888,9 @@ func (s *storageShard) ensureLoaded() {
 	atomic.StoreUint64(&s.lastAccessed, uint64(time.Now().UnixNano()))
 	// register with CacheManager (skip Memory-engine shards and temp tables)
 	if s.t.PersistencyMode == Cache && !s.t.isEphemeralQueryTable() {
-		GlobalCache.AddItem(s, int64(s.ComputeSize()), TypeCacheEntry, cacheShardCleanup, shardLastUsed, nil)
+		GlobalCache.AddItem(s, int64(s.exclusiveSize()), TypeCacheEntry, cacheShardCleanup, shardLastUsed, nil)
 	} else if s.t.PersistencyMode != Memory && !s.t.isEphemeralQueryTable() {
-		GlobalCache.AddItem(s, int64(s.ComputeSize()), TypeShard, shardCleanup, shardLastUsed, nil)
+		GlobalCache.AddItem(s, int64(s.exclusiveSize()), TypeShard, shardCleanup, shardLastUsed, nil)
 	}
 }
 
@@ -831,25 +911,117 @@ func shardCleanup(ptr any, freedByType *[numEvictableTypes]int64) bool {
 		s.mu.Unlock()
 		return false // has unflushed deltas, skip eviction (rebuild will flush them)
 	}
+	if !s.evictChildrenLocked(freedByType) {
+		s.mu.Unlock()
+		return false
+	}
 	if s.logfile != nil {
 		s.logfile.Close()
 		s.logfile = nil
 	}
-	// remove indexes from CacheManager (recursive free)
-	for _, idx := range s.Indexes {
-		GlobalCache.removeInternal(idx, freedByType)
-		idx.evict(evictFull, 0, freedByType)
-	}
+	s.releaseTempColumnBytesLocked(freedByType)
 	// release column storage (deregister compressed string dicts first)
 	for col := range s.columns {
-		if str, ok := s.columns[col].(*StorageString); ok && str.compressed {
-			GlobalCache.removeInternal(str, freedByType)
-		}
 		s.columns[col] = nil
 	}
 	s.srState = COLD
 	s.mu.Unlock()
 	return true
+}
+
+// A shard's full offer includes its children. Exclusive ledger bytes are NOT
+// its reclamation potential. Children may be evicted separately first; the
+// manager revalidates registrations and books their union only once.
+func (s *storageShard) evictionOffer(currentSize int64) evictionOffer {
+	if !s.mu.TryRLock() {
+		return evictionOffer{}
+	}
+	defer s.mu.RUnlock()
+	if s.t != nil && (s.t.PersistencyMode == Memory ||
+		(s.t.PersistencyMode != Cache && (len(s.inserts) > 0 || s.deletions.Count() > 0))) {
+		return evictionOffer{}
+	}
+	full := currentSize
+	for _, index := range s.Indexes {
+		if item := GlobalCache.itemMap[index]; item != nil {
+			full += item.size
+		}
+	}
+	for column, size := range s.tempColumnBytes {
+		if item := GlobalCache.itemMap[column]; item != nil {
+			full += min(size, item.size)
+		}
+	}
+	for _, column := range s.columns {
+		if !visitColumnCaches(column, true, func(owner any) bool {
+			if item := GlobalCache.itemMap[owner]; item != nil {
+				full += item.size
+			}
+			return true
+		}) {
+			return evictionOffer{}
+		}
+	}
+	return evictionOffer{fullBytes: full}
+}
+
+func (s *storageShard) evict(mode evictionMode, currentSize int64, freedByType *[numEvictableTypes]int64) evictionResult {
+	if mode != evictFull {
+		return evictionResult{}
+	}
+	var ok bool
+	if s.t != nil && s.t.PersistencyMode == Cache {
+		ok = cacheShardCleanup(s, freedByType)
+	} else {
+		ok = shardCleanup(s, freedByType)
+	}
+	return evictionResult{success: ok, fullyEvicted: ok, freedBytes: currentSize}
+}
+
+// Called on the manager goroutine under the shard lock. A busy child remains
+// registered and prevents parent release. Never book a failed TryLock as freed.
+func (s *storageShard) evictChildrenLocked(freedByType *[numEvictableTypes]int64) bool {
+	for _, index := range s.Indexes {
+		if !index.evict(evictFull, 0, freedByType).success {
+			return false
+		}
+		GlobalCache.removeInternal(index, freedByType)
+	}
+	for _, column := range s.columns {
+		if !evictColumnCaches(column, freedByType) {
+			return false
+		}
+	}
+	return true
+}
+
+// Book temporary column payload only when this shard actually detaches it.
+// Merely evicting child caches is insufficient: another shard may prevent a
+// parent table eviction, leaving these column buffers resident and usable.
+func (s *storageShard) releaseTempColumnBytesLocked(freedByType *[numEvictableTypes]int64) {
+	for column, size := range s.tempColumnBytes {
+		if item := GlobalCache.itemMap[column]; item != nil {
+			freed := min(size, item.size)
+			GlobalCache.updateSizeInternal(column, -freed)
+			if freedByType != nil {
+				freedByType[TypeTempColumn] += freed
+			}
+		}
+	}
+	clear(s.tempColumnBytes)
+}
+
+func evictColumnCaches(column ColumnStorage, freedByType *[numEvictableTypes]int64) bool {
+	return visitColumnCaches(column, true, func(owner any) bool {
+		if item := GlobalCache.itemMap[owner]; item != nil {
+			result := item.object.evict(evictFull, item.size, freedByType)
+			if !result.success || !result.fullyEvicted {
+				return false
+			}
+			GlobalCache.removeInternal(owner, freedByType)
+		}
+		return true
+	})
 }
 
 func shardLastUsed(ptr any) time.Time {
@@ -863,21 +1035,18 @@ func cacheShardCleanup(ptr any, freedByType *[numEvictableTypes]int64) bool {
 	if !s.mu.TryLock() {
 		return false // shard is in use, retry later
 	}
-	// remove indexes from CacheManager (recursive free)
-	for _, idx := range s.Indexes {
-		GlobalCache.removeInternal(idx, freedByType)
-		idx.evict(evictFull, 0, freedByType)
+	if !s.evictChildrenLocked(freedByType) {
+		s.mu.Unlock()
+		return false
 	}
 	// clear in-memory data (no disk backing to flush to)
+	s.releaseTempColumnBytesLocked(freedByType)
 	s.inserts = nil
 	s.plannerDeltaRows.Store(0)
 	s.deletions.Reset()
 	s.main_count = 0
 	s.plannerMainRows.Store(0)
 	for col := range s.columns {
-		if str, ok := s.columns[col].(*StorageString); ok && str.compressed {
-			GlobalCache.removeInternal(str, freedByType)
-		}
 		s.columns[col] = nil
 	}
 	// COLD: on next access ensureLoaded re-initialises as empty and re-registers
@@ -3342,7 +3511,7 @@ func transitionShardEngine(s *storageShard, oldMode, newMode PersistencyMode) {
 		s.removePersistence()
 		if newMode == Cache && !s.t.isEphemeralQueryTable() {
 			s.srState = SHARED
-			GlobalCache.AddItem(s, int64(s.computeSizeLocked()), TypeCacheEntry, cacheShardCleanup, shardLastUsed, nil)
+			GlobalCache.AddItem(s, int64(s.exclusiveSizeLocked()), TypeCacheEntry, cacheShardCleanup, shardLastUsed, nil)
 		} else {
 			s.srState = WRITE
 		}
@@ -3371,14 +3540,14 @@ func transitionShardEngine(s *storageShard, oldMode, newMode PersistencyMode) {
 		}
 		s.srState = SHARED
 		if !s.t.isEphemeralQueryTable() {
-			GlobalCache.AddItem(s, int64(s.computeSizeLocked()), TypeShard, shardCleanup, shardLastUsed, nil)
+			GlobalCache.AddItem(s, int64(s.exclusiveSizeLocked()), TypeShard, shardCleanup, shardLastUsed, nil)
 		}
 
 	case oldMode == Memory && newMode == Cache:
 		// Memory → Cache: register with CacheManager as TypeCacheEntry
 		s.srState = SHARED
 		if !s.t.isEphemeralQueryTable() {
-			GlobalCache.AddItem(s, int64(s.computeSizeLocked()), TypeCacheEntry, cacheShardCleanup, shardLastUsed, nil)
+			GlobalCache.AddItem(s, int64(s.exclusiveSizeLocked()), TypeCacheEntry, cacheShardCleanup, shardLastUsed, nil)
 		}
 
 	case oldMode == Cache && newMode == Memory:
@@ -3542,9 +3711,9 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 			// Re-register old shard with CacheManager if we deregistered it
 			if removedFromCache && t.t != nil {
 				if t.t.PersistencyMode == Cache && !t.t.isEphemeralQueryTable() {
-					GlobalCache.AddItem(t, int64(t.ComputeSize()), TypeCacheEntry, cacheShardCleanup, shardLastUsed, nil)
+					GlobalCache.AddItem(t, int64(t.exclusiveSize()), TypeCacheEntry, cacheShardCleanup, shardLastUsed, nil)
 				} else if t.t.PersistencyMode != Memory && !t.t.isEphemeralQueryTable() {
-					GlobalCache.AddItem(t, int64(t.ComputeSize()), TypeShard, shardCleanup, shardLastUsed, nil)
+					GlobalCache.AddItem(t, int64(t.exclusiveSize()), TypeShard, shardCleanup, shardLastUsed, nil)
 				}
 			}
 			panic(r)
@@ -3837,6 +4006,11 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 		// buffered deletes, then switch subsequent mutations to direct forwarding.
 		t.mu.Lock()
 		t.catchUpRebuildLocked(result, maxInsertIndex)
+		// Transfer ownership while both generations are locked, BEFORE enabling
+		// source -> successor commit forwarding. Reacquiring the source mutex
+		// afterwards while holding result.mu would reverse that lock order.
+		result.tempColumnBytes = t.tempColumnBytes
+		t.tempColumnBytes = nil
 		t.nextReady.Store(true)
 		t.mu.Unlock()
 	} else {
@@ -3867,6 +4041,9 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 		for _, idx := range result.Indexes {
 			idx.t = result
 		}
+		// Same publication boundary as the rebuilt-generation path above.
+		result.tempColumnBytes = t.tempColumnBytes
+		t.tempColumnBytes = nil
 		t.nextReady.Store(true)
 		t.mu.Unlock()
 		locked = false
@@ -3886,9 +4063,9 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 	// Register the new shard with CacheManager
 	atomic.StoreUint64(&result.lastAccessed, uint64(time.Now().UnixNano()))
 	if result.t.PersistencyMode == Cache && !result.t.isEphemeralQueryTable() {
-		GlobalCache.AddItem(result, int64(result.ComputeSize()), TypeCacheEntry, cacheShardCleanup, shardLastUsed, nil)
+		GlobalCache.AddItem(result, int64(result.exclusiveSize()), TypeCacheEntry, cacheShardCleanup, shardLastUsed, nil)
 	} else if result.t.PersistencyMode != Memory && !result.t.isEphemeralQueryTable() {
-		GlobalCache.AddItem(result, int64(result.ComputeSize()), TypeShard, shardCleanup, shardLastUsed, nil)
+		GlobalCache.AddItem(result, int64(result.exclusiveSize()), TypeShard, shardCleanup, shardLastUsed, nil)
 	}
 	return result
 }

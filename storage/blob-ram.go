@@ -21,6 +21,7 @@ import "sync"
 import "time"
 import "strings"
 import "sync/atomic"
+import "unsafe"
 import "github.com/launix-de/memcp/scm"
 
 // One optional RAM owner per immutable OverlayBlob generation. It deliberately
@@ -31,7 +32,10 @@ import "github.com/launix-de/memcp/scm"
 // Existing cachemap entries admit on the first access, expire by idle time when
 // configured, and have per-key synchronization/registrations. A single partial
 // cacheObject instead batches synchronization and owns probation metadata too.
-// mu protects everything except lastUsed (published once per batch). Eviction
+// mu protects everything except lastUsed and residentBytes (published per batch
+// or eviction). Size readers must never wait for mu: SHOW holds catalog locks,
+// while a blob reader can hold mu and wait for CacheManager, whose cleanup may
+// need those same catalog locks. Eviction
 // only TryLocks: readers may publish to CacheManager while holding storage locks.
 type blobRAMCache struct {
 	requestedBytes int64 // largest denied admission in this batch, under mu
@@ -41,6 +45,7 @@ type blobRAMCache struct {
 	savedWork      float64
 	registered     bool
 	lastUsed       atomic.Int64
+	residentBytes  atomic.Int64 // completed mutation snapshot, not an eviction weight
 }
 
 // Queue publication under mu to preserve mutation order, but let the manager
@@ -50,6 +55,7 @@ func (c *blobRAMCache) endBatch(before int64) {
 	requested := c.requestedBytes
 	c.requestedBytes = 0
 	size := c.size()
+	c.residentBytes.Store(size)
 	var ready, done chan struct{}
 	if size > 0 && (!c.registered || size != before) {
 		ready, done = make(chan struct{}), make(chan struct{})
@@ -102,6 +108,16 @@ func (c *blobRAMCache) size() int64 {
 		return 0
 	}
 	return blobRAMRegistrationBytes + int64(len(c.entries))*blobRAMEntryBytes + c.payloadBytes
+}
+
+// ComputeSize is inclusive. The fixed object survives payload eviction; only
+// cachedBytes is registered as the independently reclaimable child portion.
+func (c *blobRAMCache) ComputeSize() uint {
+	return uint(unsafe.Sizeof(*c)) + c.cachedBytes()
+}
+
+func (c *blobRAMCache) cachedBytes() uint {
+	return uint(c.residentBytes.Load())
 }
 
 func blobRAMLastUsed(pointer any) time.Time {
@@ -190,6 +206,7 @@ func (c *blobRAMCache) evict(mode evictionMode, size int64, _ *[numEvictableType
 		c.payloadBytes = 0
 		c.savedWork = 0
 		c.registered = false
+		c.residentBytes.Store(0)
 		return evictionResult{freedBytes: size, fullyEvicted: true, success: true}
 	}
 	// Shed the lower-benefit payloads first. Keep metadata until full eviction;
@@ -212,6 +229,7 @@ func (c *blobRAMCache) evict(mode evictionMode, size int64, _ *[numEvictableType
 			c.entries[hash] = e
 		}
 	}
+	c.residentBytes.Store(c.size())
 	return evictionResult{freedBytes: before - c.payloadBytes, success: before > c.payloadBytes}
 }
 

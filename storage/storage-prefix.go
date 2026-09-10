@@ -30,7 +30,12 @@ type StoragePrefix struct {
 }
 
 func (s *StoragePrefix) ComputeSize() uint {
-	return s.prefixes.ComputeSize() + 24 + s.values.ComputeSize()
+	size := uint(unsafe.Sizeof(*s)-unsafe.Sizeof(s.prefixes)-unsafe.Sizeof(s.values)) + s.prefixes.ComputeSize() + s.values.ComputeSize()
+	size += uint(cap(s.prefixdictionary)) * uint(unsafe.Sizeof(string("")))
+	for _, prefix := range s.prefixdictionary {
+		size += uint(len(prefix))
+	}
+	return size
 }
 
 func (s *StoragePrefix) String() string {

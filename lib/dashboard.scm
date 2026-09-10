@@ -120,9 +120,10 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	)
 ))
 
-/* helper: sum size_bytes across all shards of a table */
+/* Resident table total includes metadata and all child allocations. Never use
+eviction registrations or planner snapshots as a substitute for resident RAM. */
 (define dashboard_table_size (lambda (db tbl)
-	(reduce ((show db tbl true) "shards") (lambda (acc shard) (+ acc (shard "size_bytes"))) 0)
+	((show db tbl true) "size_bytes")
 ))
 
 /* helper: join list of JSON strings into a JSON array */

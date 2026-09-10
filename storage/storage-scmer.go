@@ -47,8 +47,8 @@ type StorageSCMER struct {
 }
 
 func (s *StorageSCMER) ComputeSize() uint {
-	// ! size of Scmer values is not considered
-	var sz uint = 80 + 24
+	// ComputeSize(v) includes its Scmer slot; charge spare capacity separately.
+	sz := uint(unsafe.Sizeof(*s)) + uint(cap(s.values)-len(s.values))*uint(unsafe.Sizeof(scm.Scmer{}))
 	for _, v := range s.values {
 		sz += scm.ComputeSize(v)
 	}

@@ -517,8 +517,11 @@ type StorageString struct {
 }
 
 func (s *StorageString) ComputeSize() uint {
-	base := s.values.ComputeSize() + 8 + uint(len(s.dictionary)) + 24 + s.starts.ComputeSize() + s.lens.ComputeSize() + 8*8
-	base += uint(len(s.compressedDict))
+	s.dictMu.RLock()
+	defer s.dictMu.RUnlock()
+	base := uint(unsafe.Sizeof(*s) - unsafe.Sizeof(s.values) - unsafe.Sizeof(s.starts) - unsafe.Sizeof(s.lens))
+	base += s.values.ComputeSize() + s.starts.ComputeSize() + s.lens.ComputeSize() + uint(len(s.dictionary))
+	base += uint(cap(s.compressedDict))
 	return base
 }
 
@@ -583,11 +586,14 @@ func (s *StorageString) EvictDictionary() int64 {
 // string dictionary.  The pointer is a *StorageString.
 func stringDictCleanup(ptr any, freedByType *[numEvictableTypes]int64) bool {
 	s := ptr.(*StorageString)
-	freed := s.EvictDictionary()
-	if freed > 0 && freedByType != nil {
-		freedByType[TypeStringDict] += freed
+	// ensureDict can publish to the manager while holding dictMu. Never wait
+	// here, and let removeInternal book the successful release exactly once.
+	if !s.dictMu.TryLock() {
+		return false
 	}
-	return freed > 0
+	defer s.dictMu.Unlock()
+	s.dictionary = ""
+	return true
 }
 
 // stringDictLastUsed returns a zero time so that materialized dicts are

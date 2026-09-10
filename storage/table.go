@@ -1387,13 +1387,49 @@ func (t *table) CountExact() (result uint) {
 	return result
 }
 
-func (t table) ComputeSize() uint {
-	var size uint = 10*8 + 32*uint(len(t.Columns))
-	for _, s := range t.Shards {
-		size += s.ComputeSize()
+func (t *table) ComputeSize() uint {
+	return t.residentMemory().total()
+}
+
+// Registrations charge only exclusive allocations. ComputeSize is inclusive;
+// its separately registered descendants must not inflate the global ledger.
+func (t *table) exclusiveSize() uint {
+	size := t.metadataMemory()
+	for _, shard := range t.ActiveShards() {
+		if shard != nil {
+			size += shard.exclusiveSize()
+		}
 	}
-	for _, s := range t.PShards {
-		size += s.ComputeSize()
+	return size
+}
+
+func (t *table) evictionOffer(currentSize int64) evictionOffer {
+	if !t.isEphemeralQueryTable() {
+		return evictionOffer{}
+	}
+	full := currentSize
+	for _, shard := range t.ActiveShards() {
+		if shard != nil {
+			full += shard.evictionOffer(0).fullBytes
+		}
+	}
+	return evictionOffer{fullBytes: full}
+}
+
+func (t *table) evict(mode evictionMode, currentSize int64, freedByType *[numEvictableTypes]int64) evictionResult {
+	if mode != evictFull || !t.isEphemeralQueryTable() {
+		return evictionResult{}
+	}
+	ok := keytableCleanup(t, t.schema.Name, freedByType)
+	return evictionResult{success: ok, fullyEvicted: ok, freedBytes: currentSize}
+}
+
+// Schema metadata belongs to the table, never to every referencing shard.
+func (t *table) metadataMemory() uint {
+	size := uint(unsafe.Sizeof(*t)) + uint(len(t.Name))
+	size += uint(cap(t.Columns)) * uint(unsafe.Sizeof((*column)(nil)))
+	for _, c := range t.Columns {
+		size += uint(unsafe.Sizeof(*c)) + uint(len(c.Name))
 	}
 	return size
 }
@@ -2182,17 +2218,33 @@ func (t *table) registerTempColumn(cp *column) {
 					tbl.schema.schemalock.Unlock()
 					return false
 				}
+				for _, shard := range tbl.ActiveShards() {
+					if !shard.mu.TryLock() {
+						atomic.StoreInt64(&col.cacheUsers, 0)
+						tbl.schema.schemalock.Unlock()
+						return false
+					}
+					ok := evictColumnCaches(shard.columns[colName], freedByType)
+					shard.mu.Unlock()
+					if !ok {
+						atomic.StoreInt64(&col.cacheUsers, 0)
+						tbl.schema.schemalock.Unlock()
+						return false
+					}
+				}
 				tbl.removeComputeTriggers(colName)
 				tbl.removeORCDependencyTriggers(colName)
 				tbl.Columns = append(tbl.Columns[:i], tbl.Columns[i+1:]...)
 				for _, s := range tbl.Shards {
 					s.mu.Lock()
 					delete(s.columns, colName)
+					delete(s.tempColumnBytes, col)
 					s.mu.Unlock()
 				}
 				for _, s := range tbl.PShards {
 					s.mu.Lock()
 					delete(s.columns, colName)
+					delete(s.tempColumnBytes, col)
 					s.mu.Unlock()
 				}
 				tbl.invalidateShowColumnsSnapshot()

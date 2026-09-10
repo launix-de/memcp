@@ -1,0 +1,193 @@
+# Copyright (C) 2026 MemCP Contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: "1.0"
+  description: "Resident memory includes index and computed-column child owners"
+  isolated: true
+setup:
+  - sql: "DROP TABLE IF EXISTS ram_cleanup"
+  - sql: "DROP TABLE IF EXISTS ram_multishard"
+  - sql: "DROP TABLE IF EXISTS ram_totals"
+  - sql: "CREATE TABLE ram_totals (id INT, payload TEXT) ENGINE=SAFE"
+  - scm: |
+      (begin
+        (insert (table "memcp-tests" "ram_totals") '("id" "payload")
+          (map (produceN 2000) (lambda (i) (list i (sha256 (string i)))))
+          '() (lambda () true) false)
+        (rebuild (table "memcp-tests" "ram_totals") true false))
+test_cases:
+  - name: "Build LIKE index on a small base column"
+    sql: "SELECT COUNT(*) AS n FROM ram_totals WHERE payload LIKE '%abcd%'"
+    expect:
+      rows: 1
+  - name: "Shard total includes all columns and indexes"
+    scm: |
+      (begin
+        (define shard (show "memcp-tests" "ram_totals" 0 true))
+        (define columns (reduce (shard "columns") (lambda (n c) (+ n (c "size_bytes"))) 0))
+        (define indexes (reduce (shard "indexes") (lambda (n i) (+ n (i "size_bytes"))) 0))
+        (if (and (> indexes 0) (>= (shard "size_bytes") (+ columns indexes))) true
+          (error "shard total omits index memory")))
+    expect:
+      result_contains: ["true"]
+  - name: "Temporary column remains part of shard RAM"
+    scm: |
+      (begin
+        (createcolumn (table "memcp-tests" "ram_totals") "cached_length" "int" '() '("temp" true)
+          '("payload") (lambda (payload) (strlen payload)))
+        (define shard (show "memcp-tests" "ram_totals" 0 true))
+        (if (>= (shard "size_bytes")
+          (+ (reduce (shard "columns") (lambda (n c) (+ n (c "size_bytes"))) 0)
+             (reduce (shard "indexes") (lambda (n i) (+ n (i "size_bytes"))) 0))) true
+          (error "shard total omits temporary column memory")))
+    expect:
+      result_contains: ["true"]
+  - name: "Table listing includes current child owners without rebuild"
+    scm: |
+      (begin
+        (define rows (show "memcp-tests" true))
+        (define tbl (car (filter rows (lambda (r) (equal? (r "name") "ram_totals")))))
+        (define shards ((show "memcp-tests" "ram_totals" true) "shards"))
+        (if (>= (tbl "size_bytes") (reduce shards (lambda (n s) (+ n (s "size_bytes"))) 0)) true
+          (error "table total is stale or incomplete")))
+    expect:
+      result_contains: ["true"]
+  - name: "Resident categories partition the shard total"
+    scm: |
+      (begin
+        (define s (show "memcp-tests" "ram_totals" 0 true))
+        (if (equal? (s "size_bytes") (+ (s "base_size_bytes") (s "index_size_bytes")
+          (s "temp_column_size_bytes") (s "dictionary_size_bytes") (s "blob_cache_size_bytes"))) true
+          (error "resident categories overlap or omit memory")))
+  - name: "Prepare external blob payload"
+    sql: "UPDATE ram_totals SET payload = REPEAT('a long blob value ', 200) WHERE id < 4"
+  - name: "Publish blob column and populate its decoded cache"
+    scm: |
+      (begin
+        (rebuild (table "memcp-tests" "ram_totals") true false)
+        (for '(0) (lambda (i) (< i 3)) (lambda (i)
+          (begin
+            (scan nil (table "memcp-tests" "ram_totals") '() '() '() (lambda () true)
+              '("payload") (lambda (acc payload) (+ acc (strlen payload))) 0 + false)
+            (list (+ i 1))))))
+  - name: "Blob RAM participates in inclusive column and shard totals"
+    scm: |
+      (begin
+        (define s (show "memcp-tests" "ram_totals" 0 true))
+        (if (and (> (s "blob_cache_size_bytes") 0)
+          (>= (s "size_bytes") (+
+            (reduce (s "columns") (lambda (n c) (+ n (c "size_bytes"))) 0)
+            (reduce (s "indexes") (lambda (n i) (+ n (i "size_bytes"))) 0)))) true
+          (error "decoded blob RAM is omitted")))
+  - name: "Invalid shard lookup fails explicitly"
+    scm: '(show "memcp-tests" "ram_totals" 999999 true)'
+    expect:
+      error: true
+  - name: "Create small multishard fixture"
+    sql: "CREATE TABLE ram_multishard (id INT, payload TEXT) ENGINE=SAFE"
+  - name: "Split only 256 rows across small shards"
+    scm: |
+      (begin
+        (settings "ShardSize" 64)
+        (insert (table "memcp-tests" "ram_multishard") '("id" "payload")
+          (map (produceN 256) (lambda (i) (list i (sha256 (string i)))))
+          '() (lambda () true) false)
+        (rebuild (table "memcp-tests" "ram_multishard") true false)
+        (settings "ShardSize" 60000))
+  - name: "Build multi-shard child owners"
+    scm: |
+      (begin
+        (createcolumn (table "memcp-tests" "ram_multishard") "cached_length" "int" '() '("temp" true)
+          '("payload") (lambda (payload) (strlen payload))))
+  - name: "Warm multi-shard LIKE access"
+    sql: "SELECT id FROM ram_multishard WHERE payload LIKE '%ab%'"
+  - name: "Build multi-shard LIKE index"
+    sql: "SELECT id FROM ram_multishard WHERE payload LIKE '%cd%'"
+  - name: "Reuse multi-shard LIKE index"
+    sql: "SELECT id FROM ram_multishard WHERE payload LIKE '%ef%'"
+  - name: "All shards and child allocations contribute exactly once"
+    scm: |
+      (begin
+        (define t (show "memcp-tests" "ram_multishard" true))
+        (define shards (t "shards"))
+        (if (and (> (count shards) 1)
+          (> (reduce shards (lambda (n s) (+ n (s "index_size_bytes"))) 0) 0)
+          (> (reduce shards (lambda (n s) (+ n (s "temp_column_size_bytes"))) 0) 0)
+          (>= (t "size_bytes") (reduce shards (lambda (n s) (+ n (s "size_bytes"))) 0))) true
+          (error (concat "multi-shard owner accounting incomplete: " (serialize t)))))
+  - name: "Allow owners to become evictable"
+    scm: '(sleep 1.1)'
+  - name: "Exercise recursive eviction under pressure"
+    scm: '(settings "MaxRamBytes" 1)'
+  - name: "Restore normal budget"
+    scm: '(settings "MaxRamBytes" 0)'
+  - name: "Resident display must not reload evicted columns"
+    scm: |
+      (begin
+        (define first (show "memcp-tests" "ram_multishard" true))
+        (define second (show "memcp-tests" "ram_multishard" true))
+        (if (and
+          (> (count (filter (first "shards") (lambda (s) (equal? (s "state") "COLD")))) 0)
+          (equal? (first "size_bytes") (second "size_bytes"))) true
+          (error "diagnostic loads cold data or eviction did not run")))
+  - name: "All persisted rows survive eviction and reload"
+    sql: "SELECT COUNT(*) AS n, SUM(id) AS total, SUM(LENGTH(payload)) AS bytes FROM ram_multishard"
+    expect:
+      rows: 1
+      data: [{n: 256, total: 32640, bytes: 16384}]
+  - name: "Create small cache-cleanup fixture"
+    sql: "CREATE TABLE ram_cleanup (id INT PRIMARY KEY, payload TEXT)"
+  - name: "Populate cache-cleanup fixture"
+    sql: "INSERT INTO ram_cleanup VALUES (1, REPEAT('N',4096)), (2, REPEAT('M',4096))"
+  - name: "Rebuild cache-cleanup fixture"
+    scm: '(rebuild (table "memcp-tests" "ram_cleanup") true false)'
+  - name: "Group-cache cleanup must not block unrelated rebuilds"
+    # The deterministic lock-order assertion also lives in
+    # TestDropTriggerDoesNotWaitForUnrelatedRebuild. This exercises the real
+    # cache lifecycle: group rebuilds overlap eviction's trigger removal.
+    scm: |
+      (begin
+        (define session (newsession))
+        (session "username" "root")
+        (session "schema" "memcp-tests")
+        (define execute (lambda (i)
+          (begin
+            (define formula
+              (cached_parse (newcachemap) (list parse_sql) "memcp-tests"
+                (concat "SELECT COUNT(*) AS n FROM ram_cleanup WHERE id < " (+ i 100))
+                (lambda (_schema _table _write) true) "root" session true))
+            (with_session session (lambda ()
+              (with_autocommit session nil 0 "cache cleanup regression" (lambda (tx)
+                (sql_execute_formula session tx formula
+                  (lambda (row) (if (equal? (row "n") 2) true
+                    (error "cache cleanup changed persisted rows")))
+                  (lambda (_fields) nil)))))))))
+        (reduce (produceN 40) (lambda (_ i) (execute i)) true)
+        (sleep 1.1)
+        (settings "MaxRamBytes" 1024)
+        (reduce (produceN 200) (lambda (_ i) (execute (+ i 40))) true)
+        (settings "MaxRamBytes" 0))
+  - name: "Runtime accounting remains a distinct nonnegative view"
+    scm: |
+      (begin
+        (define s (stat))
+        (if (and (> (s "process_memory") 0) (> (s "go_heap_allocated") 0)
+          (>= (s "go_heap_inuse") (s "go_heap_allocated"))
+          (>= (s "cache_accounting_over_rss") 0)) true
+          (error "invalid process/runtime memory diagnostics")))
+  - name: "Rebuild publication overlaps transaction commits"
+    parallel: ram_rebuild_commit
+    repetitions: 30
+    scm: '(rebuild (table "memcp-tests" "ram_cleanup") true false)'
+  - name: "Commit forwarding does not deadlock RAM ownership transfer"
+    parallel: ram_rebuild_commit
+    sql: "UPDATE ram_cleanup SET payload = 'committed' WHERE id = 1"
+  - name: "Committed payload survives concurrent rebuild publication"
+    sql: "SELECT payload FROM ram_cleanup WHERE id = 1"
+    expect:
+      rows: 1
+      data: [{payload: committed}]
+cleanup:
+  - sql: "DROP TABLE IF EXISTS ram_cleanup"
+  - sql: "DROP TABLE IF EXISTS ram_multishard"
+  - sql: "DROP TABLE IF EXISTS ram_totals"
