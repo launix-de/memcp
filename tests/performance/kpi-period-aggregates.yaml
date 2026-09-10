@@ -1,0 +1,178 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+# 36 months of fixtures: 360,000 offers and 1,800,000 line items.
+# Measure 12 months (2026) plus 3 complete years (2024-2026).
+# See perf-tests/kpi-periods/README.md for fixed-fixture A/B commands.
+metadata:
+  version: '1.0'
+  description: Twelve monthly and three yearly KPIs over large offer histories
+  isolated: true
+  ci: false
+  perf_ci: true
+  performance_rows: 10000
+test_cases:
+- name: Perf KPI 15 periods cold nested aggregates
+  setup:
+  - sql: DROP TABLE IF EXISTS kpi_perf_item
+  - sql: DROP TABLE IF EXISTS kpi_perf_offer
+  - sql: CREATE TABLE kpi_perf_offer (id INT PRIMARY KEY, created BIGINT) ENGINE=sloppy
+  - sql: CREATE TABLE kpi_perf_item (offer_id INT, quantity INT, unit_price INT) ENGINE=sloppy
+  - scm: |
+      (begin
+        (map (produceN 36) (lambda (period)
+          (begin
+            (define start_time (nth '(1704067200 1706745600 1709251200 1711929600 1714521600 1717200000 1719792000 1722470400 1725148800 1727740800 1730419200 1733011200 1735689600 1738368000 1740787200 1743465600 1746057600 1748736000 1751328000 1754006400 1756684800 1759276800 1761955200 1764547200 1767225600 1769904000 1772323200 1775001600 1777593600 1780272000 1782864000 1785542400 1788220800 1790812800 1793491200 1796083200) period))
+            (insert (table "{database}" "kpi_perf_offer") '("id" "created")
+              (map (produceN {rows}) (lambda (i)
+                (list (+ 1 i (* period {rows})) (+ start_time (* i 60)))))))))
+        (map (produceN 36) (lambda (period)
+          (insert (table "{database}" "kpi_perf_item") '("offer_id" "quantity" "unit_price")
+            (map (produceN (* 5 {rows})) (lambda (i)
+              (list (+ 1 (floor (/ i 5)) (* period {rows}))
+                (+ 1 (mod i 5)) (+ 1 (mod (floor (/ i 5)) 100))))))))
+        (rebuild)
+        (* 216 {rows}))
+  warmup: false
+  repetitions: 1
+  timeout: 300
+  threshold_ms: 120000
+  sql: |-
+    SELECT history.period,
+      (SELECT COUNT(1) FROM kpi_perf_offer counted
+        WHERE counted.created BETWEEN history.start_time AND history.end_time LIMIT 1) AS offer_count,
+      COALESCE((SELECT SUM((SELECT SUM(item.quantity * item.unit_price)
+        FROM kpi_perf_item item WHERE item.offer_id = summed.id LIMIT 1))
+        FROM kpi_perf_offer summed
+        WHERE summed.created BETWEEN history.start_time AND history.end_time LIMIT 1), 0) AS offer_sum,
+      COALESCE((SELECT AVG((SELECT SUM(position.quantity * position.unit_price)
+        FROM kpi_perf_item position WHERE position.offer_id = averaged.id LIMIT 1))
+        FROM kpi_perf_offer averaged
+        WHERE averaged.created BETWEEN history.start_time AND history.end_time LIMIT 1), 0) AS offer_average
+    FROM (SELECT 0 AS period, 1767225600 AS start_time, 1769903999 AS end_time
+      UNION SELECT 1 AS period, 1769904000 AS start_time, 1772323199 AS end_time
+      UNION SELECT 2 AS period, 1772323200 AS start_time, 1775001599 AS end_time
+      UNION SELECT 3 AS period, 1775001600 AS start_time, 1777593599 AS end_time
+      UNION SELECT 4 AS period, 1777593600 AS start_time, 1780271999 AS end_time
+      UNION SELECT 5 AS period, 1780272000 AS start_time, 1782863999 AS end_time
+      UNION SELECT 6 AS period, 1782864000 AS start_time, 1785542399 AS end_time
+      UNION SELECT 7 AS period, 1785542400 AS start_time, 1788220799 AS end_time
+      UNION SELECT 8 AS period, 1788220800 AS start_time, 1790812799 AS end_time
+      UNION SELECT 9 AS period, 1790812800 AS start_time, 1793491199 AS end_time
+      UNION SELECT 10 AS period, 1793491200 AS start_time, 1796083199 AS end_time
+      UNION SELECT 11 AS period, 1796083200 AS start_time, 1798761599 AS end_time
+      UNION SELECT 12 AS period, 1704067200 AS start_time, 1735689599 AS end_time
+      UNION SELECT 13 AS period, 1735689600 AS start_time, 1767225599 AS end_time
+      UNION SELECT 14 AS period, 1767225600 AS start_time, 1798761599 AS end_time) history
+    ORDER BY history.period
+  expect: &id001
+    rows: 15
+    data:
+    - period: 0
+      offer_count: 10000
+      offer_sum: 7575000
+      offer_average: 757.5
+    - period: 1
+      offer_count: 10000
+      offer_sum: 7575000
+      offer_average: 757.5
+    - period: 2
+      offer_count: 10000
+      offer_sum: 7575000
+      offer_average: 757.5
+    - period: 3
+      offer_count: 10000
+      offer_sum: 7575000
+      offer_average: 757.5
+    - period: 4
+      offer_count: 10000
+      offer_sum: 7575000
+      offer_average: 757.5
+    - period: 5
+      offer_count: 10000
+      offer_sum: 7575000
+      offer_average: 757.5
+    - period: 6
+      offer_count: 10000
+      offer_sum: 7575000
+      offer_average: 757.5
+    - period: 7
+      offer_count: 10000
+      offer_sum: 7575000
+      offer_average: 757.5
+    - period: 8
+      offer_count: 10000
+      offer_sum: 7575000
+      offer_average: 757.5
+    - period: 9
+      offer_count: 10000
+      offer_sum: 7575000
+      offer_average: 757.5
+    - period: 10
+      offer_count: 10000
+      offer_sum: 7575000
+      offer_average: 757.5
+    - period: 11
+      offer_count: 10000
+      offer_sum: 7575000
+      offer_average: 757.5
+    - period: 12
+      offer_count: 120000
+      offer_sum: 90900000
+      offer_average: 757.5
+    - period: 13
+      offer_count: 120000
+      offer_sum: 90900000
+      offer_average: 757.5
+    - period: 14
+      offer_count: 120000
+      offer_sum: 90900000
+      offer_average: 757.5
+- name: Perf KPI 15 periods warm nested aggregates
+  warmup: 20
+  repetitions: 7
+  threshold_ms: 5000
+  sql: |-
+    SELECT history.period,
+      (SELECT COUNT(1) FROM kpi_perf_offer counted
+        WHERE counted.created BETWEEN history.start_time AND history.end_time LIMIT 1) AS offer_count,
+      COALESCE((SELECT SUM((SELECT SUM(item.quantity * item.unit_price)
+        FROM kpi_perf_item item WHERE item.offer_id = summed.id LIMIT 1))
+        FROM kpi_perf_offer summed
+        WHERE summed.created BETWEEN history.start_time AND history.end_time LIMIT 1), 0) AS offer_sum,
+      COALESCE((SELECT AVG((SELECT SUM(position.quantity * position.unit_price)
+        FROM kpi_perf_item position WHERE position.offer_id = averaged.id LIMIT 1))
+        FROM kpi_perf_offer averaged
+        WHERE averaged.created BETWEEN history.start_time AND history.end_time LIMIT 1), 0) AS offer_average
+    FROM (SELECT 0 AS period, 1767225600 AS start_time, 1769903999 AS end_time
+      UNION SELECT 1 AS period, 1769904000 AS start_time, 1772323199 AS end_time
+      UNION SELECT 2 AS period, 1772323200 AS start_time, 1775001599 AS end_time
+      UNION SELECT 3 AS period, 1775001600 AS start_time, 1777593599 AS end_time
+      UNION SELECT 4 AS period, 1777593600 AS start_time, 1780271999 AS end_time
+      UNION SELECT 5 AS period, 1780272000 AS start_time, 1782863999 AS end_time
+      UNION SELECT 6 AS period, 1782864000 AS start_time, 1785542399 AS end_time
+      UNION SELECT 7 AS period, 1785542400 AS start_time, 1788220799 AS end_time
+      UNION SELECT 8 AS period, 1788220800 AS start_time, 1790812799 AS end_time
+      UNION SELECT 9 AS period, 1790812800 AS start_time, 1793491199 AS end_time
+      UNION SELECT 10 AS period, 1793491200 AS start_time, 1796083199 AS end_time
+      UNION SELECT 11 AS period, 1796083200 AS start_time, 1798761599 AS end_time
+      UNION SELECT 12 AS period, 1704067200 AS start_time, 1735689599 AS end_time
+      UNION SELECT 13 AS period, 1735689600 AS start_time, 1767225599 AS end_time
+      UNION SELECT 14 AS period, 1767225600 AS start_time, 1798761599 AS end_time) history
+    ORDER BY history.period
+  expect: *id001
+cleanup:
+- sql: DROP TABLE IF EXISTS kpi_perf_item
+- sql: DROP TABLE IF EXISTS kpi_perf_offer

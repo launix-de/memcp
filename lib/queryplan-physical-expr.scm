@@ -780,21 +780,25 @@ bound once outside row callbacks; a column reference would make that unsafe. */
 (define stage_lookup_with_query_invariant_probe_bindings (lambda (stages entries)
 	(begin
 		(define binding_keys (query_invariant_probe_key_set entries))
-		(make_lowering_catalog
-			(map (lowering_catalog_stages stages) (lambda (stage)
-				(stage_with_query_invariant_probe_binding_using binding_keys stage)))))))
+		(lowering_catalog_with_planning_session
+			(make_lowering_catalog
+				(map (lowering_catalog_stages stages) (lambda (stage)
+					(stage_with_query_invariant_probe_binding_using binding_keys stage))))
+			(lowering_catalog_planning_session stages)))))
 
 /* A closed physical producer cannot capture the main plan's lexical invariant
 binding. Mark only its invariant stages for an inline query-scoped probe; the
 ordinary scalar lowerer keeps its established outer-binding behavior. */
 (define stage_lookup_with_inline_query_invariant_probes (lambda (stages)
-	(make_lowering_catalog
-		(map (lowering_catalog_stages stages) (lambda (stage)
-			(if (query_invariant_presence_stage? stage)
-				(group_stage_with_facts stage
-					(qassoc_set (gs_facts stage)
-						(quote inline_query_invariant_probe) true))
-				stage))))))
+	(lowering_catalog_with_planning_session
+		(make_lowering_catalog
+			(map (lowering_catalog_stages stages) (lambda (stage)
+				(if (query_invariant_presence_stage? stage)
+					(group_stage_with_facts stage
+						(qassoc_set (gs_facts stage)
+							(quote inline_query_invariant_probe) true))
+					stage))))
+		(lowering_catalog_planning_session stages))))
 
 (define query_invariant_probe_sources (lambda (stages sources)
 	(filter (coalesceNil sources '()) (lambda (src)
@@ -6321,13 +6325,44 @@ slot per syntactically repeated COUNT. */
 						(list (+ count 1) rows))))
 			(list 0 (list))))))
 
+/* Bulk INSERT stores ordinary row values, whereas reads of computed columns
+use their proxy. Install the already reduced payload through the existing
+computed-column setters before rebuilding the key table. Otherwise the first
+consumer recomputes every group with a separate scan of the source. */
+(define group_seed_computed_values_plan (lambda (schema grouptbl key_names value_cols grouped_expr)
+	(begin
+		(define key_symbols (map key_names symbol))
+		(define setters (map (produceN (count value_cols)) (lambda (i)
+			(symbol (concat "__seed_group_value_" i)))))
+		(compile_scan_plan (quote scan)
+			(physical_query_tx_symbol)
+			(list (quote table) schema grouptbl)
+			(quoted_runtime_list '())
+			(list (quote lambda) '() true)
+			(quoted_runtime_list (merge (list key_names
+				(map value_cols (lambda (col) (concat "$set:" col))))))
+			(list (quote lambda) (cons (quote __scan_acc) (merge (list key_symbols setters)))
+				(list
+					(list (quote lambda) (list (quote __group_payload))
+						(cons (quote begin) (merge (list
+							(map (produceN (count value_cols)) (lambda (i)
+								(list (nth setters i) (list (quote nth) (quote __group_payload) i))))
+							(list (quote __scan_acc))))))
+					(list (quote get_assoc) grouped_expr (runtime_cons_list_expr key_symbols))))
+			nil nil false))))
+
 (define group_insert_batches_expr (lambda (schema grouptbl key_names value_cols computed_values grouped_expr)
-	(list (quote group_insert_batches)
-		(list (quote table) schema grouptbl)
-		(cons (quote list) (merge (list key_names value_cols)))
-		(group_upsert_collision_cols value_cols computed_values)
-		(group_upsert_collision_lambda value_cols computed_values)
-		grouped_expr)))
+	(begin
+		(define insert_plan (list (quote group_insert_batches)
+			(list (quote table) schema grouptbl)
+			(cons (quote list) (merge (list key_names value_cols)))
+			(group_upsert_collision_cols value_cols computed_values)
+			(group_upsert_collision_lambda value_cols computed_values)
+			grouped_expr))
+		(if (and computed_values (not (empty_list? value_cols)))
+			(list (quote !begin) insert_plan
+				(group_seed_computed_values_plan schema grouptbl key_names value_cols grouped_expr))
+			insert_plan))))
 
 (define group_insert_finish_expr (lambda (schema grouptbl key_names value_cols computed_values)
 	(list (quote !begin)
@@ -6484,19 +6519,179 @@ on the same columns. */
 					(build_query_ungrouped_aggregate_state_plan input ag)
 					false))))))
 
-(define build_query_group_aggregates_insert_plan (lambda (input grouptbl keys key_names ags aggregate_cols)
+/* A unique, prepared group lookup is a scalar column of its driving relation.
+Keep the logical LEFT JOIN intact until this physical alternative is selected:
+its missing-row value is NULL, and the original aggregate descriptors retain
+SUM/AVG empty and NULL semantics. */
+(define scalar_group_projection_spec (lambda (input keys ags)
+	(if (not (and (query_block? input) (equal? keys '(1)) (> (count ags) 1)
+		(empty_list? (qb_stages input)) (empty_list? (qb_order input))
+		(nil? (qb_limit input)) (nil? (qb_offset input))
+		(equal? (count (qb_sources input)) 2)
+		(reduce ags (lambda (ok ag) (and ok
+			(or (equal? (cadr ag) (quote +)) (equal? (cadr ag) +)
+				(equal? (cadr ag) (quote sql_sum_reduce)) (equal? (cadr ag) sql_sum_reduce)))) true))) nil
+		(begin
+			(define driver (car (qb_sources input)))
+			(define lookup (cadr (qb_sources input)))
+			(define stage (stage_for_group_cache_source (query_block_stage_catalog input) lookup))
+			(define tree (query_block_join_plan input (qb_sources input)))
+			(define key_pairs (map (split_and_terms (source_join_expr lookup)) (lambda (term)
+				(match term
+					((symbol equal??) left right)
+					(list (direct_column_name_for_alias lookup left) (direct_column_name_for_alias driver right))
+					_ nil))))
+			(define columns (merge_unique (map ags (lambda (ag) (extract_columns_for_alias lookup (car ag))))))
+			(if (not (and (source_is_base_table? driver) (source_is_base_table? lookup)
+				(not (equal? (source_relation driver) (source_relation lookup)))
+				(source_outer? lookup) (not (nil? stage))
+				(equal? (car tree) (quote join-node)) (equal? (cadr tree) (quote left-outer))
+				(equal? (join_optimizer_tree_aliases (nth tree 2)) (list (source_alias driver)))
+				(equal? (join_optimizer_tree_aliases (nth tree 3)) (list (source_alias lookup)))
+				(empty_list? (extract_columns_for_alias lookup (qb_where input)))
+				(not (empty_list? columns))
+				(reduce key_pairs (lambda (ok pair) (and ok (not (nil? pair))
+					(not (nil? (car pair))) (not (nil? (cadr pair))))) true)
+				(equal? (map key_pairs car) (group_key_cols (gs_keys stage)))
+				(not (expr_contains_session_dependency? (gs_input stage)))
+				(not (expr_contains_session_dependency? (gs_aggregates stage)))
+				(not (expr_contains_session_dependency? (gs_facts stage))))) nil
+				(list driver lookup key_pairs columns (nth tree 2)))))))
+
+(define scalar_group_projection_name (lambda (spec col)
+	(concat ".scalar:" (stable_structural_hash
+		(list (source_schema (car spec)) (source_relation (car spec))
+			(source_schema (cadr spec)) (source_relation (cadr spec)) (nth spec 2) col) true))))
+
+(define scalar_group_projection_column (lambda (spec col)
+	(begin
+		(define input_cols (map (nth spec 2) cadr))
+		(define lookup_cols (map (nth spec 2) car))
+		(define params (map input_cols symbol))
+		(define remote_params (map lookup_cols (lambda (key) (symbol (concat "__lookup_" key)))))
+		(define condition (combine_where_terms (map (produceN (count params)) (lambda (i)
+			(list (quote equal??) (nth remote_params i) (list (quote outer) 1 (nth params i))))) true))
+		(list (quote createcolumn) (source_table_expr (car spec))
+			(scalar_group_projection_name spec col) "any" (quoted_runtime_list '())
+			(quoted_runtime_list '("temp" true)) (quoted_runtime_list input_cols)
+			(list (quote lambda) params
+				(compile_scan_plan (quote scan) nil (source_table_expr (cadr spec))
+					(quoted_runtime_list lookup_cols) (list (quote lambda) remote_params condition)
+					(quoted_runtime_list (list col))
+					(list (quote lambda) (list (quote _acc) (quote value)) (quote value))
+					nil (list (quote lambda) (list (quote _old) (quote value)) (quote value)) false))))))
+
+(define scalar_group_projection_rewrite (lambda (spec expr)
+	(match expr
+		((symbol get_column) alias _case col _colcase)
+		(if (equal? alias (source_alias (cadr spec)))
+			(list (quote get_column) (source_alias (car spec)) false (scalar_group_projection_name spec col) false)
+			expr)
+		(cons head tail) (cons (scalar_group_projection_rewrite spec head)
+			(map tail (lambda (item) (scalar_group_projection_rewrite spec item))))
+		_ expr)))
+
+/* The cache build is charged for every driving row, not just this period's
+matches. Reuse is demonstrated by measured work already spent on the same
+canonical projection, using the existing cache-admission accounting. */
+(define scalar_group_projection_costs (lambda (driver matching_rows width aggregate_width)
+	(begin
+		(define rows (scan_estimate driver))
+		(define starts (* (table_shard_count driver) planner_membership_scan_invocation_ns))
+		(define probe (* matching_rows width planner_membership_direct_probe_row_ns))
+		(define scan_cost (* matching_rows planner_membership_scan_row_ns))
+		(list
+			(planner_cost starts scan_cost probe 0 0 0 0 0 matching_rows 0.5)
+			(planner_cost (* starts aggregate_width)
+				(* matching_rows aggregate_width (+ planner_membership_scan_row_ns planner_membership_map_column_row_ns))
+				0 0 0 0 (* rows width 16) 0 matching_rows 0.5)
+			(* rows width planner_membership_direct_probe_row_ns)))))
+
+(define scalar_group_projection_ready? (lambda (schema relation columns)
+	(reduce columns (lambda (ready col)
+		(and ready (not (nil? (resolve_column_name schema relation col false))))) true)))
+
+(define scalar_group_projection_wins? (lambda (driver matching_rows width aggregate_width)
+	(begin
+		(define costs (scalar_group_projection_costs driver matching_rows width aggregate_width))
+		(planner_cost_better? (cadr costs) (car costs)))))
+
+(define build_scalar_group_projection_plan (lambda (input grouptbl keys key_names ags aggregate_cols direct_plan planning_session)
+	(begin
+		(define spec (scalar_group_projection_spec input keys ags))
+		(if (nil? spec) direct_plan
+			(begin
+				(define driver (car spec))
+				(define columns (map (nth spec 3) (lambda (col) (scalar_group_projection_name spec col))))
+				(define name (concat "scalar_projection:" (stable_structural_hash columns true)))
+				(define matching_rows (planner_row_count_after_selectivity driver (qb_sources input)
+					(source_alias driver) (qb_where input) nil planning_session))
+				(if (or (not (number? matching_rows))
+					(not (scalar_group_projection_wins? (table (source_schema driver) (source_relation driver))
+						matching_rows (count columns) (count ags)))) direct_plan
+					(begin
+						(define projected_input (make_query_block (qb_schema input) (list driver) '()
+							(qb_where input) '() nil '() nil nil '() '()
+							(qassoc_set (qb_facts input) (quote join_plan) (nth spec 4))))
+						(define rewritten_ags (map ags (lambda (ag) (scalar_group_projection_rewrite spec ag))))
+						(define aggregate_values (map rewritten_ags (lambda (ag)
+							(aggregate_finalize_expr ag (build_query_ungrouped_aggregate_state_plan projected_input ag)))))
+						(define projected_plan (cons (quote !begin) (merge (list
+							(list (list (physical_query_session_symbol) "get_or_compute_scoped"
+								(list (quote tx_query) (physical_query_tx_symbol)) name (physical_query_tx_symbol)
+								(list (quote lambda) (list (physical_query_tx_symbol))
+									(cons (quote !begin) (merge (list
+										(map (nth spec 3) (lambda (col) (scalar_group_projection_column spec col)))
+										(list true)))))))
+							(list (list (quote insert) (list (quote table) (qb_schema input) grouptbl)
+								(quoted_runtime_list (merge (list key_names aggregate_cols)))
+								(list (quote list) (cons (quote list) (cons 1 aggregate_values)))
+								(group_upsert_collision_cols aggregate_cols false)
+								(group_upsert_collision_lambda aggregate_cols false) true))))))
+						(define driver_table (source_table_expr driver))
+						(define costs (scalar_group_projection_costs (table (source_schema driver) (source_relation driver))
+							matching_rows (count columns) (count ags)))
+						(define ready_expr (list (quote scalar_group_projection_ready?) (source_schema driver)
+							(source_relation driver) (quoted_runtime_list columns)))
+						(define cold_plan (list (quote !begin)
+							(list (quote define) (quote __scalar_projection_started) (list (quote nanotime)))
+							direct_plan
+							(list (quote group_cache_candidate_accumulate) name
+								(list (quote -) (list (quote nanotime)) (quote __scalar_projection_started)) nil)))
+						(define ready (scalar_group_projection_ready? (source_schema driver) (source_relation driver) columns))
+						(planner_record_physical_decision (list (list "decision_id" name)
+							(list "decision" "scalar_group_projection") (list "chosen" (if (and ready (planner_cost_better? (cadr costs) (car costs))) "projected_columns" "direct_join"))
+							(list "selection" "runtime_cost") (list "inputs" (list (list "matching_rows" matching_rows)
+								(list "build_ns" (nth costs 2)) (list "cache_ready" ready)))
+							(list "alternatives" (list
+								(list (list "plan" "direct_join") (list "cost" (planner_cost_explain (car costs))))
+								(list (list "plan" "projected_columns") (list "cost" (planner_cost_explain
+									(if ready (cadr costs)
+										(planner_cost_add (cadr costs)
+											(planner_cost 0 0 0 0 0 (nth costs 2) 0 0 matching_rows 0.5)
+											matching_rows 0.5)))))))) planning_session)
+						(list (quote if)
+							(list (quote and)
+								(list (quote scalar_group_projection_wins?) driver_table matching_rows (count columns) (count ags))
+								(list (quote or) ready_expr
+									(list (quote semijoin_cache_work_paid?) (physical_query_tx_symbol) name
+										(list (quote *) (list (quote scan_estimate) driver_table) (count columns) planner_membership_direct_probe_row_ns))))
+							projected_plan cold_plan))))))))
+
+(define build_query_group_aggregates_insert_plan (lambda (input grouptbl keys key_names ags aggregate_cols planning_session)
 	(begin
 		(if (not (equal? (count ags) (count aggregate_cols)))
 			(neumann_fail "build_queryplan" "query-input aggregate columns do not match aggregate descriptors")
 			true)
 		(define ungrouped_plan (build_query_ungrouped_aggregate_insert_plan
 			input grouptbl keys key_names ags aggregate_cols))
-		(if (nil? ungrouped_plan)
+		(define direct_plan (if (nil? ungrouped_plan)
 			(list
 				(list (quote lambda) (list (quote grouped))
 					(group_insert_finish_expr (qb_schema input) grouptbl key_names aggregate_cols false))
 				(build_query_grouped_assoc_plan input keys key_names ags false))
-			ungrouped_plan))))
+			ungrouped_plan))
+		(build_scalar_group_projection_plan input grouptbl keys key_names ags aggregate_cols direct_plan planning_session))))
 
 /* Produce a domain RecSet for a scalar probe leaf before entering the domain
 scan. scan_recset callbacks are batch-parallel filters, so a nested scan cannot
@@ -6850,6 +7045,8 @@ once and every base-only leaf remains a vectorized domain scan. */
 	(match catalog
 		((symbol lowering-catalog) _stages _id_index _group_cache_index _parent) true
 		((quote lowering-catalog) _stages _id_index _group_cache_index _parent) true
+		((symbol lowering-catalog) _stages _id_index _group_cache_index _parent _planning_session) true
+		((quote lowering-catalog) _stages _id_index _group_cache_index _parent _planning_session) true
 		_ false)))
 
 (define lowering_catalog_stages (lambda (catalog)
@@ -6865,6 +7062,21 @@ once and every base-only leaf remains a vectorized domain scan. */
 (define lowering_catalog_id_index (lambda (catalog) (nth catalog 2)))
 (define lowering_catalog_group_cache_index (lambda (catalog) (nth catalog 3)))
 (define lowering_catalog_parent (lambda (catalog) (nth catalog 4)))
+
+/* Diagnostics context belongs to the physical catalog handle, never to
+nested aggregate facts: those can participate in structural identities. */
+(define lowering_catalog_with_planning_session (lambda (catalog planning_session)
+	(if (or (nil? planning_session) (empty_list? catalog)) catalog
+		(begin
+			(define indexed (if (lowering_catalog? catalog) catalog
+				(make_indexed_lowering_catalog catalog nil)))
+			(list (quote lowering-catalog) (nth indexed 1) (nth indexed 2)
+				(nth indexed 3) (nth indexed 4) planning_session)))))
+
+(define lowering_catalog_planning_session (lambda (catalog)
+	(if (not (lowering_catalog? catalog)) nil
+		(if (> (count catalog) 5) (nth catalog 5)
+			(lowering_catalog_planning_session (lowering_catalog_parent catalog))))))
 
 (define make_indexed_lowering_catalog (lambda (stages parent)
 	(list
