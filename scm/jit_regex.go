@@ -40,11 +40,12 @@ func jitConstantRegexpMatches(pattern, value Scmer) Scmer {
 	if value.IsNil() {
 		return NewSlice(nil)
 	}
-	s := String(value)
-	locs := pattern.Regex().FindAllStringIndex(s, -1)
-	out := make([]Scmer, len(locs))
-	for i, loc := range locs {
-		out[i] = NewString(s[loc[0]:loc[1]])
+	// FindAllString returns s[a:b] sub-slices (shared backing), and NewString
+	// keeps that view - no copy, and no per-match []int allocation.
+	matches := pattern.Regex().FindAllString(String(value), -1)
+	out := make([]Scmer, len(matches))
+	for i, m := range matches {
+		out[i] = NewString(m)
 	}
 	return NewSlice(out)
 }
