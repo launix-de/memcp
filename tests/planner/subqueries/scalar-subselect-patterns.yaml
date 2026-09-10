@@ -501,3 +501,20 @@ test_cases:
       FROM sq_prop
     expect:
       rows: 4
+
+  # Pattern 7: a correlated COUNT(DISTINCT) must keep the driver row for a
+  # parent with no matching inner rows (result 0), not drop it -- the
+  # list-accumulator empty-group case. sq_doc 3 has no sq_prop.
+  - name: "Correlated COUNT(DISTINCT) keeps rows with an empty inner group"
+    sql: |
+      SELECT sq_doc.ID,
+        (SELECT COUNT(DISTINCT sq_prop.type) FROM sq_prop
+         WHERE sq_prop.doc = sq_doc.ID LIMIT 1) AS distinct_types
+      FROM sq_doc
+      ORDER BY sq_doc.ID
+    expect:
+      rows: 3
+      data:
+        - {ID: 1, distinct_types: 2}
+        - {ID: 2, distinct_types: 2}
+        - {ID: 3, distinct_types: 0}
