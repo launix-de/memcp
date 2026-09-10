@@ -148,5 +148,35 @@ test_cases:
         "ok")
     expect:
       data: ["ok"]
+  - name: "Constant projection row folds to shared placeholders"
+    scm: |
+      (match (parameterize_sql_select_literals "SELECT h.i FROM (SELECT 0 AS i, 1704067200 AS s, 1789037871 AS e UNION SELECT 1 AS i, 1672531200 AS s, 1704067199 AS e) h") '(normalized bindings shape_hash)
+        (if (and (equal? normalized "SELECT h.i FROM (SELECT ? AS i, ? AS s, ? AS e UNION SELECT ? AS i, ? AS s, ? AS e) h")
+          (equal? bindings (list 0 1704067200 1789037871 1 1672531200 1704067199))
+          (equal? shape_hash (fnv_hash normalized)))
+          "ok" (error (concat "const-row mismatch: " normalized " / " bindings))))
+    expect:
+      data: ["ok"]
+  - name: "Constant projection row shape is now()-invariant"
+    scm: |
+      (if (equal?
+        (nth (parameterize_sql_select_literals "SELECT 0 AS i, 1704067200 AS s, 1789037871 AS e FROM dual") 2)
+        (nth (parameterize_sql_select_literals "SELECT 0 AS i, 1704067200 AS s, 1789099999 AS e FROM dual") 2))
+        "ok" (error "const-row shape hash still varies with the literal"))
+    expect:
+      data: ["ok"]
+  - name: "Mixed projection keeps a lone carrier literal exact"
+    scm: |
+      (begin
+        (map (list
+          "SELECT d.id, 1 AS _count FROM items d WHERE d.label LIKE '%x%'"
+          "SELECT 1 AS marker, id FROM items WHERE id = 3"
+          "SELECT count(*), 5 AS n FROM items") (lambda (query)
+          (match (parameterize_sql_select_literals query) '(normalized bindings shape_hash)
+            (if (match normalized (regex "(?s)^SELECT (?:count\\(\\*\\)|d\\.id, 1 AS _count|1 AS marker, id)" _) true false)
+              true (error (concat "carrier literal was folded: " normalized))))))
+        "ok")
+    expect:
+      data: ["ok"]
 cleanup:
   - sql: "DROP TABLE IF EXISTS cg_rows"
