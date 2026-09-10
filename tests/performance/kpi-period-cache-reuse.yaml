@@ -1,0 +1,122 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# A generated dashboard rebuilds the period derived table on every request with
+# now() baked in as a literal, so the exact query text -- and the plan-cache key
+# -- changes each time. With constant-projection-row parameterization the
+# compiled plan is shared across those literal variants; without it every
+# request pays a full nested-aggregate re-plan.
+#
+# The COUNT(DISTINCT) column additionally exercises the correlated list-
+# accumulator path: once the period bounds are session values the subquery is
+# genuinely correlated, and the empty period must still produce a row with 0.
+metadata:
+  version: '1.0'
+  description: KPI period plan is reused across rotating now()-style period bounds
+  isolated: true
+  ci: false
+  perf_ci: true
+  performance_rows: 1000
+
+test_cases:
+  # 20 KPI executions, each with a different end_time literal on period 0 that is
+  # already past every offer, so the result is identical every time. With plan
+  # reuse this is one nested-aggregate compile plus 19 cache hits; without it, 20
+  # compiles.
+  - name: "KPI plan is reused across rotating period-bound literals"
+    performance_rows: 1000
+    threshold_ms: 4000
+    # Periods 0-4 each hold {rows} offers with 3 distinct customers; period 5 is empty.
+    setup:
+      - sql: "DROP TABLE IF EXISTS kpr_item"
+      - sql: "DROP TABLE IF EXISTS kpr_offer"
+      - sql: "CREATE TABLE kpr_offer (id INT PRIMARY KEY, created BIGINT, customer INT) ENGINE=sloppy"
+      - sql: "CREATE TABLE kpr_item (offer_id INT, quantity INT, unit_price INT) ENGINE=sloppy"
+      - scm: |
+          (begin
+            (map (produceN 5) (lambda (p)
+              (insert (table "{database}" "kpr_offer") '("id" "created" "customer")
+                (map (produceN {rows}) (lambda (i)
+                  (list (+ 1 i (* p {rows})) (+ (* p 1000) (mod i 1000)) (mod i 3)))))))
+            (insert (table "{database}" "kpr_item") '("offer_id" "quantity" "unit_price")
+              (map (produceN (* 5 {rows})) (lambda (i)
+                (list (+ 1 (floor (/ i 5))) (+ 1 (mod i 5)) (+ 1 (mod (floor (/ i 5)) 100))))))
+            (rebuild)
+            (* 6 {rows}))
+    scm: |
+      (begin
+        (define cache (newcachemap))
+        (define sess (newsession))
+        (sess "username" "root")
+        (sess "schema" "{database}")
+        (define kpi (lambda (bound) (concat
+          "SELECT h.period,"
+          " (SELECT COUNT(1) FROM kpr_offer counted WHERE counted.created BETWEEN h.s AND h.e LIMIT 1) AS oc,"
+          " COALESCE((SELECT SUM((SELECT SUM(it.quantity * it.unit_price) FROM kpr_item it WHERE it.offer_id = s.id LIMIT 1))"
+          "   FROM kpr_offer s WHERE s.created BETWEEN h.s AND h.e LIMIT 1), 0) AS os"
+          " FROM (SELECT 0 AS period, 0 AS s, " (string bound) " AS e"
+          "   UNION SELECT 1 AS period, 1000 AS s, 1999 AS e"
+          "   UNION SELECT 2 AS period, 2000 AS s, 2999 AS e"
+          "   UNION SELECT 3 AS period, 3000 AS s, 3999 AS e"
+          "   UNION SELECT 4 AS period, 4000 AS s, 4999 AS e"
+          "   UNION SELECT 5 AS period, 90000 AS s, 99999 AS e) h"
+          " ORDER BY h.period")))
+        (define rows (newsession))
+        (rows "n" 0)
+        (define emit (lambda (_row) (rows "n" (+ (rows "n") 1))))
+        (map (produceN 20) (lambda (i)
+          (sql_execute_formula sess nil
+            (cached_parse cache (list parse_sql) "{database}" (kpi (+ 6000000 i)) nil "root" sess true)
+            emit (lambda (_fields) nil))))
+        (if (equal? (rows "n") 120) true (error (concat "rotating KPI literals changed the row count: " (string (rows "n"))))))
+    expect:
+      rows: 1
+      result_contains: ["true"]
+
+  # Same rotation, but the customers column is COUNT(DISTINCT). Once the bounds
+  # are session values the subquery is correlated; the empty period 5 must still
+  # yield a row with customers = 0.
+  - name: "KPI COUNT(DISTINCT) keeps every period and reuses the plan"
+    performance_rows: 1000
+    threshold_ms: 4000
+    scm: |
+      (begin
+        (define cache (newcachemap))
+        (define sess (newsession))
+        (sess "username" "root")
+        (sess "schema" "{database}")
+        (define kpi (lambda (bound) (concat
+          "SELECT h.period,"
+          " (SELECT COUNT(1) FROM kpr_offer counted WHERE counted.created BETWEEN h.s AND h.e LIMIT 1) AS oc,"
+          " (SELECT COUNT(DISTINCT c.customer) FROM kpr_offer c WHERE c.created BETWEEN h.s AND h.e LIMIT 1) AS customers"
+          " FROM (SELECT 0 AS period, 0 AS s, " (string bound) " AS e"
+          "   UNION SELECT 1 AS period, 1000 AS s, 1999 AS e"
+          "   UNION SELECT 2 AS period, 2000 AS s, 2999 AS e"
+          "   UNION SELECT 3 AS period, 3000 AS s, 3999 AS e"
+          "   UNION SELECT 4 AS period, 4000 AS s, 4999 AS e"
+          "   UNION SELECT 5 AS period, 90000 AS s, 99999 AS e) h"
+          " ORDER BY h.period")))
+        (define acc (newsession))
+        (acc "rows" 0)
+        (acc "empty_customers" -1)
+        (define emit (lambda (row) (begin
+          (acc "rows" (+ (acc "rows") 1))
+          (if (equal? (get_assoc row "period") 5)
+            (acc "empty_customers" (get_assoc row "customers"))
+            nil))))
+        (map (produceN 20) (lambda (i)
+          (sql_execute_formula sess nil
+            (cached_parse cache (list parse_sql) "{database}" (kpi (+ 6000000 i)) nil "root" sess true)
+            emit (lambda (_fields) nil))))
+        (if (not (equal? (acc "rows") 120))
+          (error (concat "rotating COUNT(DISTINCT) KPI changed the row count: " (string (acc "rows"))))
+          (if (not (equal? (acc "empty_customers") 0))
+            (error (concat "empty period dropped or wrong COUNT(DISTINCT): " (string (acc "empty_customers"))))
+            true)))
+    expect:
+      rows: 1
+      result_contains: ["true"]
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS kpr_item"
+  - sql: "DROP TABLE IF EXISTS kpr_offer"
