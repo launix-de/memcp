@@ -111,7 +111,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 (define psql_fold_multiplicative_term (lambda (acc term)
 	(match term
 		'("multiply" value) '((quote *) acc value)
-		'("divide" value) '((quote /) acc value)
+		'("divide" value) '((quote div_null) acc value)
 		'("intdiv" value) '((quote intdiv) acc value)
 		'("modulo" value) (psql_mod_expr acc value))))
 

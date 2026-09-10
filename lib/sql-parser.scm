@@ -22,8 +22,10 @@ ordered=false: ORDER BY in OVER() can be ignored (result independent of row orde
 ordered=true: ORDER BY matters → ORC running aggregate (e.g. GROUP_CONCAT)
 Users can register custom aggregates: (sql_aggregates "PRODUCT" '(* 1 false)) */
 (define sql_aggregates (coalesce sql_aggregates (newsession)))
+/* Marker symbol for AVG in result-title extraction (see psql-parser).
+NULL on an empty group (count 0) or all-NULL input (sum nil) comes from div_null. */
 (define sql_avg_divide (lambda (sum count)
-	(if (or (nil? sum) (equal? count 0)) nil (/ sum count))))
+	(div_null sum count)))
 (define sql_nonnull_count_expr (lambda (expr)
 	(list (quote if) (list (quote nil?) expr) 0 1)))
 (define sql_avg_expr (lambda (expr sum_descriptor count_descriptor)
@@ -184,7 +186,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 (define sql_fold_multiplicative_term (lambda (acc term)
 	(match term
 		'("multiply" value) '((quote *) acc value)
-		'("divide" value) '((quote /) acc value)
+		'("divide" value) '((quote div_null) acc value)
 		'("intdiv" value) '((quote intdiv) acc value)
 		'("modulo" value) (sql_mod_expr acc value))))
 

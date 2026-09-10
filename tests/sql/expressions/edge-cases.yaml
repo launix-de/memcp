@@ -181,13 +181,41 @@ test_cases:
   #     error: true
   #     error_type: "invalid_parameter"
 
-  # === DIVISION BY ZERO (SHOULD FAIL OR HANDLE GRACEFULLY) ===
-  # TODO: Division by zero causes timeout/hang - needs investigation
-  # - name: "Division by zero"
-  #   sql: "SELECT 1 / 0 AS result"
-  #   expect:
-  #     error: true
-  #     error_type: "division_by_zero"
+  # === DIVISION BY ZERO — MySQL semantics: the `/` operator yields NULL ===
+  - name: "Division by zero yields NULL"
+    sql: "SELECT 1 / 0 AS result"
+    expect:
+      rows: 1
+      data:
+        - result: null
+
+  - name: "Zero divided by zero yields NULL"
+    sql: "SELECT 0.0 / 0.0 AS result"
+    expect:
+      rows: 1
+      data:
+        - result: null
+
+  - name: "Division by zero inside an expression yields NULL"
+    sql: "SELECT 10 + (5 / 0) AS result"
+    expect:
+      rows: 1
+      data:
+        - result: null
+
+  - name: "AVG over an empty group is NULL, not a division-by-zero"
+    sql: "SELECT AVG(value) AS result FROM test_table WHERE id < 0"
+    expect:
+      rows: 1
+      data:
+        - result: null
+
+  - name: "SUM divided by COUNT over an empty group is NULL"
+    sql: "SELECT SUM(value) / COUNT(value) AS result FROM test_table WHERE id < 0"
+    expect:
+      rows: 1
+      data:
+        - result: null
 
   # === CONSTRAINT VIOLATIONS (TODO: When constraints are enforced) ===
   # TODO: Enable when PRIMARY KEY constraints are enforced

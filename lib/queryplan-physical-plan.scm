@@ -6481,7 +6481,7 @@ topology inequality by bounded binary search and guard that crossover. */
 						(qassoc_get candidate (quote downstream_probe_branches) 0))
 					(list "driver_rows" (qassoc_get candidate (quote rows) nil))
 					(list "driver_input_rows" (qassoc_get candidate (quote input_rows) nil))
-					(list "density" (/ (qassoc_get candidate (quote rows) 0)
+					(list "density" (div_null (qassoc_get candidate (quote rows) 0)
 						(qassoc_get candidate (quote input_rows) 1)))
 					(list "crossover_rows" crossover_rows)))
 				(list "alternatives" (list

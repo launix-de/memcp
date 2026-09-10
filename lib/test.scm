@@ -1179,6 +1179,21 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (/ 12 2 2) 3 "12 / 2 / 2 should be 3")
 	(assert (equal? (/ 7 2) 3.5) true "int / int yields float when needed")
 	(assert (nil? (/ 5 nil)) true "/ with nil returns nil")
+	/* / raises on division by zero (SQL data exception 22012) */
+	(define div_zero_panicked (newsession))
+	(try (lambda () (/ 5 0)) (lambda (e) (div_zero_panicked "p" true)))
+	(assert (div_zero_panicked "p") true "/ by zero must raise")
+	(define div_zero_panicked2 (newsession))
+	(try (lambda () (/ 10 2 0)) (lambda (e) (div_zero_panicked2 "p" true)))
+	(assert (div_zero_panicked2 "p") true "/ by zero in a later term must raise")
+
+	/* Test for div_null: NULL on nil operand or division by zero (SQL / and AVG semantics) */
+	(assert (div_null 6 2) 3 "div_null 6 / 2 should be 3")
+	(assert (equal? (div_null 7 2) 3.5) true "div_null yields float when needed")
+	(assert (nil? (div_null 5 nil)) true "div_null with nil returns nil")
+	(assert (nil? (div_null 5 0)) true "div_null by zero returns nil")
+	(assert (nil? (div_null 0 0)) true "div_null 0 / 0 returns nil")
+	(assert (nil? (div_null 10 2 0)) true "div_null by zero in a later term returns nil")
 
 	/* Test for < */
 	(assert (< 1 2) true "1 < 2 should be true")
@@ -2416,6 +2431,16 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert ((jit (lambda (a b) (/ a b))) 10.0 2.0) 5.0 "jit: a / b float")
 	(assert (nil? ((jit (lambda (x) (/ x nil))) 5)) true "jit: / with nil")
 	(assert ((jit (lambda () (/ 10 4)))) 2.5 "jit: / constant fold")
+	(define jit_div_zero_panicked (newsession))
+	(try (lambda () ((jit (lambda (a b) (/ a b))) 5 0)) (lambda (e) (jit_div_zero_panicked "p" true)))
+	(assert (jit_div_zero_panicked "p") true "jit: / by zero must raise")
+
+	/* JIT emitter: div_null */
+	(assert ((jit (lambda (a b) (div_null a b))) 10 4) 2.5 "jit: div_null a / b")
+	(assert ((jit (lambda (a b) (div_null a b))) 10.0 2.0) 5.0 "jit: div_null a / b float")
+	(assert (nil? ((jit (lambda (x) (div_null x nil))) 5)) true "jit: div_null with nil")
+	(assert (nil? ((jit (lambda (a b) (div_null a b))) 5 0)) true "jit: div_null by zero returns nil")
+	(assert ((jit (lambda () (div_null 10 4)))) 2.5 "jit: div_null constant fold")
 
 	/* JIT emitter: < <= > >= */
 	(assert ((jit (lambda (a b) (< a b))) 3 5) true "jit: 3 < 5")
