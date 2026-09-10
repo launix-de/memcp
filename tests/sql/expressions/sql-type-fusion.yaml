@@ -1,0 +1,101 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+# Unit coverage for the SQL type / collation resolution helpers in
+# lib/sql-types.scm. MemCP is dynamically typed: "any" is the default and only
+# operations that guarantee a result type sharpen it.
+
+metadata:
+  version: "1.0"
+  description: "SQL type and collation fusion helpers"
+  isolated: true
+
+test_cases:
+  - name: "type predicates classify SQL type names"
+    scm: |
+      (begin
+        (define checks (list
+          (equal? (sql_text_type? "VARCHAR") true)
+          (equal? (sql_text_type? "LONGTEXT") true)
+          (equal? (sql_text_type? "BIGINT") false)
+          (equal? (sql_text_type? "any") false)
+          (equal? (sql_numeric_type? "DECIMAL") true)
+          (equal? (sql_numeric_type? "DOUBLE") true)
+          (equal? (sql_numeric_type? "VARCHAR") false)
+          (equal? (sql_temporal_type? "DATETIME") true)
+          (equal? (sql_temporal_type? "BIGINT") false)))
+        (if (reduce checks (lambda (acc c) (and acc c)) true) true
+          (error (concat "type predicate mismatch: " (string checks)))))
+
+  - name: "literal typing"
+    scm: |
+      (begin
+        (define checks (list
+          (equal? (sql_type_of_literal 3) "BIGINT")
+          (equal? (sql_type_of_literal 3.5) "DOUBLE")
+          (equal? (sql_type_of_literal "x") "VARCHAR")
+          (equal? (sql_type_of_literal nil) "NULL")
+          (equal? (sql_type_of_literal true) "BOOLEAN")))
+        (if (reduce checks (lambda (acc c) (and acc c)) true) true
+          (error (concat "literal typing mismatch: " (string checks)))))
+
+  - name: "arithmetic type fusion: unknown in, unknown out"
+    scm: |
+      (begin
+        (define checks (list
+          (equal? (sql_type_fuse_arith "add" "BIGINT" "BIGINT") "BIGINT")
+          (equal? (sql_type_fuse_arith "sub" "BIGINT" "DECIMAL") "DECIMAL")
+          (equal? (sql_type_fuse_arith "multiply" "BIGINT" "DOUBLE") "DOUBLE")
+          (equal? (sql_type_fuse_arith "divide" "BIGINT" "BIGINT") "DECIMAL")
+          (equal? (sql_type_fuse_arith "add" "BIGINT" "any") "any")
+          (equal? (sql_type_fuse_arith "add" "any" "any") "any")
+          (equal? (sql_type_fuse_arith "add" "VARCHAR" "BIGINT") "any")
+          (equal? (sql_type_fuse_arith "add" "BIGINT" "NULL") "NULL")))
+        (if (reduce checks (lambda (acc c) (and acc c)) true) true
+          (error (concat "arith fusion mismatch: " (string checks)))))
+
+  - name: "collation coercion: lower coercibility wins, nil is ignorable"
+    scm: |
+      (begin
+        (define checks (list
+          (equal? (sql_merge_collation nil (list "utf8mb4_bin" 2)) (list "utf8mb4_bin" 2))
+          (equal? (sql_merge_collation (list "utf8mb4_bin" 2) nil) (list "utf8mb4_bin" 2))
+          (equal? (sql_merge_collation (list "utf8mb4_general_ci" 4) (list "utf8mb4_bin" 2)) (list "utf8mb4_bin" 2))
+          (equal? (sql_merge_collation (list "utf8mb4_general_ci" 2) (list "utf8mb4_general_ci" 4)) (list "utf8mb4_general_ci" 2))))
+        (if (reduce checks (lambda (acc c) (and acc c)) true) true
+          (error (concat "collation coercion mismatch: " (string checks)))))
+
+  - name: "type merge for CASE / COALESCE / UNION branches"
+    scm: |
+      (begin
+        (define checks (list
+          (equal? (sql_info_type (sql_merge_info (sql_info nil "NULL" nil) (sql_info nil "BIGINT" nil))) "BIGINT")
+          (equal? (sql_info_type (sql_merge_info (sql_info nil "BIGINT" nil) (sql_info nil "VARCHAR" nil))) "VARCHAR")
+          (equal? (sql_info_type (sql_merge_info (sql_info nil "BIGINT" nil) (sql_info nil "any" nil))) "any")
+          (equal? (sql_info_type (sql_merge_infos (list (sql_info nil "BIGINT" nil) (sql_info nil "DOUBLE" nil)))) "DOUBLE")))
+        (if (reduce checks (lambda (acc c) (and acc c)) true) true
+          (error (concat "type merge mismatch: " (string checks)))))
+
+  - name: "function return contracts"
+    scm: |
+      (begin
+        (define checks (list
+          (equal? (nth (sql_function_rule (quote concat)) 1) "VARCHAR")
+          (equal? (nth (sql_function_rule (quote strlen)) 1) "BIGINT")
+          (equal? (nth (sql_function_rule (quote coalesceNil)) 2) "merge")
+          (equal? (nth (sql_function_rule (quote if)) 2) "case")
+          (equal? (nth (sql_function_rule (quote totally_unknown_head)) 1) "any")))
+        (if (reduce checks (lambda (acc c) (and acc c)) true) true
+          (error (concat "function contract mismatch: " (string checks)))))

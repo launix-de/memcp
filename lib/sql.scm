@@ -26,6 +26,7 @@ execution shadows it with the concrete session captured by the frontend. */
 (import "sql-builtins.scm")
 (import "sql-metadata.scm")
 (import "queryplan.scm")
+(import "sql-types.scm")
 (import "sql-views.scm")
 
 /* Root is the recovery identity for a fresh/local installation. User-facing
