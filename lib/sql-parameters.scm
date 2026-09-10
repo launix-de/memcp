@@ -57,6 +57,31 @@ the complete statement. Tokenization uses the runtime's generic regex engine. */
 			(if (has? '("FROM" "WHERE" "HAVING" "LIMIT" "OFFSET" "GROUP" "ORDER" "UNION" "ON") word)
 				(scope "clause" (if (equal? word "ON") "WHERE" word)))))))
 
+(define sql_parameter_next_significant (lambda (tokens i)
+	(if (>= i (count tokens)) nil
+		(if (regexp_test (nth tokens i) "^(?:[ \\t\\r\\n]|--|#|/\\*)")
+			(sql_parameter_next_significant tokens (+ i 1))
+			(nth tokens i)))))
+
+/* One item of an all-constant projection row, e.g. each literal in
+`SELECT 0 AS i, 1704067200 AS s, 1789037871 AS e` (the shape a generated query
+emits for a UNION of synthetic period rows). Such a literal is the whole
+select-list expression: it only appears verbatim in the result and never
+influences plan shape, selectivity or grouping, so it is a forced candidate that
+survives an unsafe scope. Recognised lexically: it opens a select item (previous
+significant token is SELECT or a comma), sits at the scope's own paren depth and
+is directly AS-aliased. The caller gates this on const_row_ok, which additionally
+requires the entire select list to be constant-AS items. */
+(define sql_parameter_select_const_item (lambda (const_row_ok scope depth previous_token idx tokens)
+	(and const_row_ok
+		(not (nil? scope))
+		(equal? depth (scope "depth"))
+		(equal? (scope "clause") "SELECT")
+		(has? '("SELECT" ",") previous_token)
+		(match (sql_parameter_next_significant tokens (+ idx 1))
+			next (equal? (toUpper next) "AS")
+			_ false))))
+
 /* Candidates retain their owning scope until all tokens have been visited:
 a later GROUP/HAVING may disqualify an earlier literal in that scope. The
 sessions and token buffers belong to this one lexical compilation only. */
@@ -64,6 +89,11 @@ sessions and token buffers belong to this one lexical compilation only. */
 	(if (not (sql_parameter_prefix query)) (list query '() (fnv_hash query))
 		(begin
 			(define tokens (sql_parameter_tokens query))
+			/* Only fold constant projection items when the whole SELECT list is a
+			constant row (`SELECT <num> AS a, <num> AS b [...] FROM|UNION|)`), the shape a
+			generated query produces for a UNION of synthetic period rows. A lone
+			`1 AS _flag` mixed with real columns stays exact -- it is a match carrier. */
+			(define const_row_ok (regexp_test query "(?is)SELECT\\s+-?(?:0[xX][0-9a-fA-F]+|[0-9]+(?:\\.[0-9]*)?(?:[eE][+-]?[0-9]+)?)\\s+AS\\s+(?:`[^`]+`|[A-Za-z_$][A-Za-z0-9_$]*)\\s*(?:,\\s*-?(?:0[xX][0-9a-fA-F]+|[0-9]+(?:\\.[0-9]*)?(?:[eE][+-]?[0-9]+)?)\\s+AS\\s+(?:`[^`]+`|[A-Za-z_$][A-Za-z0-9_$]*)\\s*)*(?:FROM\\b|UNION\\b|\\)|;|$)"))
 			(define candidates (newsession))
 			(define pieces (newsession))
 			(define result (for (list 0 0 -1 "" "" '() false 0 0)
@@ -106,20 +136,28 @@ sessions and token buffers belong to this one lexical compilation only. */
 														(if (and (< (+ idx 2) (count tokens)) (regexp_test (nth tokens (+ idx 2)) "^[a-zA-Z0-9_$]"))
 															(begin (pieces piece_count token) (list (+ idx 1) depth type_depth previous_word token scopes false candidate_count (+ piece_count 1))) (begin (candidates candidate_count (list piece_count scope false (simplify (concat "-" number)))) (begin (pieces piece_count (concat "-" number)) (list (+ idx 2) depth type_depth previous_word "literal" scopes false (+ candidate_count 1) (+ piece_count 1))))))
 													(if (regexp_test token "^[0-9]")
-														(if (or (>= type_depth 0) (not (sql_parameter_scope_allows scope))
+														(if (or (>= type_depth 0)
+															(and (not (sql_parameter_scope_allows scope)) (not (sql_parameter_select_const_item const_row_ok scope depth previous_token idx tokens)))
 															(and (not (nil? scope)) (equal? (scope "order_depth") depth) (or (equal? previous_word "BY") (equal? previous_token ",")))
 															(and (< (+ idx 1) (count tokens)) (regexp_test (nth tokens (+ idx 1)) "^[a-zA-Z0-9_$]")))
-															(begin (pieces piece_count token) (list (+ idx 1) depth type_depth previous_word "literal" scopes false candidate_count (+ piece_count 1))) (begin (candidates candidate_count (list piece_count scope false (simplify token))) (begin (pieces piece_count token) (list (+ idx 1) depth type_depth previous_word "literal" scopes false (+ candidate_count 1) (+ piece_count 1)))))
+															(begin (pieces piece_count token) (list (+ idx 1) depth type_depth previous_word "literal" scopes false candidate_count (+ piece_count 1))) (begin (candidates candidate_count (list piece_count scope (sql_parameter_select_const_item const_row_ok scope depth previous_token idx tokens) (simplify token))) (begin (pieces piece_count token) (list (+ idx 1) depth type_depth previous_word "literal" scopes false (+ candidate_count 1) (+ piece_count 1)))))
 														(begin (pieces piece_count token) (list (+ idx 1) depth type_depth previous_word token scopes (or (equal? token "?") (and (equal? token "/") (< (+ idx 1) (count tokens)) (equal? (nth tokens (+ idx 1)) "*"))) candidate_count (+ piece_count 1)))))))))))))))
 			(match result '(_idx _depth _type _word _token scopes invalid candidate_count piece_count)
-				(if (or invalid (equal? scopes '()) ((car scopes) "unsafe") (equal? candidate_count 0))
+				(if (or invalid (equal? scopes '()) (equal? candidate_count 0))
 					(list query '() (fnv_hash query))
 					(begin
+						/* A forced candidate (a constant projection item) is safe even in an unsafe
+						scope; any other literal is kept only when neither its scope nor the outer
+						query block is unsafe. */
+						(define top_unsafe ((car scopes) "unsafe"))
 						(define accepted (filter (map (produceN candidate_count) (lambda (idx) (candidates idx)))
-							(lambda (candidate) (or (nth candidate 2) (not ((cadr candidate) "unsafe"))))))
-						(reduce accepted (lambda (_ candidate) (pieces (car candidate) "?")) nil)
-						(define normalized (apply concat (map (produceN piece_count) (lambda (idx) (pieces idx)))))
-						(list normalized (map accepted (lambda (candidate) (nth candidate 3))) (fnv_hash normalized)))))))))
+							(lambda (candidate) (or (nth candidate 2) (and (not top_unsafe) (not ((cadr candidate) "unsafe")))))))
+						(if (equal? accepted '())
+							(list query '() (fnv_hash query))
+							(begin
+								(reduce accepted (lambda (_ candidate) (pieces (car candidate) "?")) nil)
+								(define normalized (apply concat (map (produceN piece_count) (lambda (idx) (pieces idx)))))
+								(list normalized (map accepted (lambda (candidate) (nth candidate 3))) (fnv_hash normalized)))))))))))
 
 /* Keep exact SQL variants out of the parser while sharing their compiled plan.
 Only parameterized results enter the small front cache; exact-only statements
