@@ -25,6 +25,7 @@ metadata:
 setup:
   - sql: "DROP TABLE IF EXISTS stf_doc"
   - sql: "DROP TABLE IF EXISTS stf_ci"
+  - sql: "DROP TABLE IF EXISTS stf_dept"
   - sql: |
       CREATE TABLE stf_doc (
         id INT PRIMARY KEY,
@@ -34,9 +35,14 @@ setup:
   - sql: |
       CREATE TABLE stf_ci (
         id INT PRIMARY KEY,
-        nm VARCHAR(50) COLLATE utf8mb4_general_ci
+        nm VARCHAR(50) COLLATE utf8mb4_general_ci,
+        dept INT
       )
-  - sql: "INSERT INTO stf_ci VALUES (1,'banana'),(2,'Apple'),(3,'cherry'),(4,'Date')"
+  - sql: |
+      CREATE TABLE stf_dept (id INT PRIMARY KEY, label VARCHAR(30))
+  - sql: "INSERT INTO stf_doc VALUES (1,'beta',5),(2,'Alpha',9)"
+  - sql: "INSERT INTO stf_ci VALUES (1,'banana',1),(2,'Apple',1),(3,'cherry',2),(4,'Date',2)"
+  - sql: "INSERT INTO stf_dept VALUES (1,'eng'),(2,'ops')"
 
 test_cases:
   - name: "type predicates classify SQL type names"
@@ -182,12 +188,13 @@ test_cases:
           (error (concat "query block typing mismatch: " (string (qb_fields typed))
             " | rtypes " (string rtypes)))))
 
-  # End-to-end: a computed text ORDER BY key inherits its column's collation.
-  # Before recentralization physical_expr_collation only understood a bare
-  # get_column and treated UPPER(nm) as "bin", so this ordered byte-wise
-  # (Apple, Date, banana, cherry) instead of case-insensitively.
-  - name: "ORDER BY UPPER(ci-column) sorts case-insensitively"
-    sql: "SELECT nm FROM stf_ci ORDER BY UPPER(nm)"
+  # End-to-end: a case-preserving computed text ORDER BY key inherits its
+  # column's collation. On master physical_expr_collation only understood a bare
+  # get_column and treated SUBSTR(nm, ...) / CONCAT(...) as "bin", so these
+  # ordered byte-wise (Apple, Date, banana, cherry). Now case-insensitive.
+  # (UPPER/LOWER would hide the bug because they normalise case themselves.)
+  - name: "ORDER BY SUBSTR(ci-column) sorts case-insensitively"
+    sql: "SELECT nm FROM stf_ci ORDER BY SUBSTR(nm, 1, 10)"
     expect:
       data:
         - {nm: "Apple"}
@@ -195,14 +202,29 @@ test_cases:
         - {nm: "cherry"}
         - {nm: "Date"}
 
+  - name: "ORDER BY CONCAT(ci-column, literal) sorts case-insensitively"
+    sql: "SELECT nm FROM stf_ci ORDER BY CONCAT(nm, '')"
+    expect:
+      data:
+        - {nm: "Apple"}
+        - {nm: "banana"}
+        - {nm: "cherry"}
+        - {nm: "Date"}
+
+  - name: "a bin-collation column keeps byte ordering for a computed key"
+    sql: "SELECT title FROM stf_doc WHERE title IS NOT NULL ORDER BY SUBSTR(title, 1, 10)"
+    expect:
+      data:
+        - {title: "Alpha"}
+        - {title: "beta"}
+
   - name: "sql_type_order_item resolves a computed text key to its collation callback"
     scm: |
       (begin
         (define src (list "d" "memcp-tests" "stf_ci" false true))
-        (define compile (lambda (e) (sql_expr_info (list src) e)))
-        (define computed (sql_type_order_item compile
-          (list (list (quote toUpper) (list (quote get_column) "d" true "nm" true)) <)))
-        (define bare (sql_type_order_item compile
+        (define computed (sql_type_order_item (list src)
+          (list (list (quote sql_substr) (list (quote get_column) "d" true "nm" true) 1 5) <)))
+        (define bare (sql_type_order_item (list src)
           (list (list (quote get_column) "d" true "nm" true) <)))
         (define checks (list
           /* computed key: direction replaced by a resolved callback */
@@ -213,3 +235,41 @@ test_cases:
         (if (reduce checks (lambda (acc c) (and acc c)) true) true
           (error (concat "order item resolution mismatch: "
             (string computed) " | " (string bare)))))
+
+  # Central get_column canonicalization: a mixed-case column name resolves in
+  # every clause position, not just where the physical lowerer happened to.
+  - name: "mixed-case column resolves in WHERE"
+    sql: "SELECT Id FROM stf_ci WHERE NM = 'Apple'"
+    expect:
+      data: [{Id: 2}]
+
+  - name: "mixed-case column resolves in GROUP BY and HAVING"
+    sql: "SELECT DEPT, COUNT(*) c FROM stf_ci GROUP BY DEPT HAVING COUNT(*) >= 2 ORDER BY DEPT"
+    expect:
+      data:
+        - {DEPT: 1, c: 2}
+        - {DEPT: 2, c: 2}
+
+  - name: "mixed-case column resolves in JOIN ON"
+    sql: "SELECT c.nm FROM stf_ci c JOIN stf_dept d ON d.ID = c.DEPT WHERE d.label = 'ops' ORDER BY c.nm"
+    expect:
+      data:
+        - {nm: "cherry"}
+        - {nm: "Date"}
+
+  - name: "result-types fact is populated for plain, grouped and joined queries"
+    scm: |
+      (begin
+        (define ci (list "c" "memcp-tests" "stf_ci" false true))
+        (define plain (sql_type_query_block (make_query_block "memcp-tests" (list ci)
+          (list "nm" (list (quote get_column) "c" true "nm" true)
+                "d" (list (quote get_column) "c" true "dept" true))
+          true nil nil nil nil nil nil nil nil) nil))
+        (define rt (qassoc_get (qb_facts plain) (quote result-types) nil))
+        (define checks (list
+          (equal? (sql_info_type (nth rt 1)) "VARCHAR")
+          (not (nil? (sql_info_collation (nth rt 1))))
+          (equal? (sql_info_type (nth rt 3)) "INT")
+          (nil? (sql_info_collation (nth rt 3)))))
+        (if (reduce checks (lambda (acc c) (and acc c)) true) true
+          (error (concat "result-types fact wrong: " (string rt)))))

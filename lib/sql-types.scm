@@ -372,26 +372,35 @@ Derived-table sources and unions are passed through unchanged for now
 
 (define sql_column_ref? (lambda (expr)
 	(match expr
-		((symbol get_column) _t _ti _c _ci) true
-		((quote get_column) _t _ti _c _ci) true
+		((symbol get_column) alias alias_ci col col_ci) (or alias alias_ci col col_ci true)
+		((quote get_column) alias alias_ci col col_ci) (or alias alias_ci col col_ci true)
 		_ false)))
+
+/* Plain canonical formula for one expression against the resolved sources. */
+(define sql_type_formula (lambda (sources expr) (sql_info_formula (sql_expr_info sources expr))))
+
+/* Result-column descriptor (nil TYPE COLLATION) for one expression. */
+(define sql_type_result_descriptor (lambda (sources expr)
+	(begin
+		(define info (sql_expr_info sources expr))
+		(sql_info nil (sql_info_type info) (sql_info_collation info)))))
 
 /* Resolve the ORDER direction of a text-valued *expression* to its collation
 callback. Bare column keys keep their raw < / > so the existing native
 scan-order path (order_relations_for_source) is untouched; only computed keys
-(UPPER(x), a || b, x COLLATE y) — which the old physical_expr_collation always
-treated as "bin" — get the coercing relation. */
-(define sql_type_order_item (lambda (compile item)
+(UPPER(x), CONCAT(a, b), x COLLATE y) — which the old physical_expr_collation
+always treated as "bin" — get the coercing relation. */
+(define sql_type_order_item (lambda (sources item)
 	(match item
-		'(expr dir) (begin
-			(define info (compile expr))
+		'(order_expr order_dir) (begin
+			(define info (sql_expr_info sources order_expr))
 			(define coll (sql_info_collation info))
-			(if (and (or (equal? dir <) (equal? dir >))
+			(if (and (or (equal? order_dir <) (equal? order_dir >))
 					(not (sql_column_ref? (sql_info_formula info)))
 					(sql_text_type? (sql_info_type info))
 					(not (nil? coll)))
-				(list (sql_info_formula info) (collate (car coll) (equal? dir >)))
-				(list (sql_info_formula info) dir)))
+				(list (sql_info_formula info) (collate (car coll) (equal? order_dir >)))
+				(list (sql_info_formula info) order_dir)))
 		_ item)))
 
 (define sql_type_query_block (lambda (block outer_sources)
@@ -401,21 +410,21 @@ treated as "bin" — get the coercing relation. */
 			(define sources (qb_sources block))
 			(define outer (coalesceNil outer_sources '()))
 			(define all_sources (if (empty_list? outer) sources (merge (list sources outer))))
-			(define compile (lambda (expr) (sql_expr_info all_sources expr)))
-			(define field_infos (map_assoc (expand_query_block_fields sources (qb_fields block))
-				(lambda (_title expr) (compile expr))))
 			(make_query_block
 				(qb_schema block)
 				sources
-				(map_assoc field_infos (lambda (_title info) (sql_info_formula info)))
-				(sql_info_formula (compile (qb_where block)))
-				(map (coalesceNil (qb_group block) '()) (lambda (expr) (sql_info_formula (compile expr))))
-				(if (nil? (qb_having block)) nil (sql_info_formula (compile (qb_having block))))
-				(map (coalesceNil (qb_order block) '()) (lambda (item) (sql_type_order_item compile item)))
+				(map_assoc (expand_query_block_fields sources (qb_fields block))
+					(lambda (field_title field_expr) (sql_type_formula all_sources field_expr)))
+				(sql_type_formula all_sources (qb_where block))
+				(map (coalesceNil (qb_group block) '())
+					(lambda (group_expr) (sql_type_formula all_sources group_expr)))
+				(if (nil? (qb_having block)) nil (sql_type_formula all_sources (qb_having block)))
+				(map (coalesceNil (qb_order block) '())
+					(lambda (order_item) (sql_type_order_item all_sources order_item)))
 				(qb_limit block) (qb_offset block) (qb_hidden block) (qb_stages block)
 				(qassoc_set (qb_facts block) (quote result-types)
-					(map_assoc field_infos (lambda (_title info)
-						(sql_info nil (sql_info_type info) (sql_info_collation info))))))))))
+					(map_assoc (expand_query_block_fields sources (qb_fields block))
+						(lambda (rt_title rt_expr) (sql_type_result_descriptor all_sources rt_expr)))))))))
 
 /* Entry point: annotate the root query block of a compiled IR. Group/orc/window
 stages and non-query-block roots pass through untouched in this slice. */

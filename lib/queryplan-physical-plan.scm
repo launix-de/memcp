@@ -9436,23 +9436,17 @@ build_queryplan contract. */
 (define prepare_physical_queryplan (lambda (ir planning_session tx)
 	(begin
 		(require_unnested_node "build_queryplan input" (ir_root ir))
-		/* Central column resolution + type/collation annotation. Runs after
-		get_column aliases are resolved and before physical lowering replaces
-		columns with scan-lambda parameters. Canonicalizes get_column names once
-		here instead of at every physical lowering site, and records the result
-		column types/collations as a query-block fact. */
-		(define typed_ir (sql_type_annotate_ir ir))
 		/* This native handle exists only between physical preparation and emission.
 		It never enters the logical IR or the emitted/cached runtime plan. */
-		(define contextual_input (if (nil? planning_session) (ir_root typed_ir)
-			(physical_node_with_planning_context (ir_root typed_ir) planning_session tx)))
+		(define contextual_input (if (nil? planning_session) (ir_root ir)
+			(physical_node_with_planning_context (ir_root ir) planning_session tx)))
 		(define contextual_root (apply_join_optimizer_plan_node contextual_input))
 		(make_ir
-			(ir_kind typed_ir)
+			(ir_kind ir)
 			(physical_node_with_stage_catalog contextual_root)
-			(map (ir_stages typed_ir) apply_join_optimizer_plan_stage)
-			(ir_context_of typed_ir)
-			(ir_return typed_ir)))))
+			(map (ir_stages ir) apply_join_optimizer_plan_stage)
+			(ir_context_of ir)
+			(ir_return ir)))))
 
 (define physical_relational_list_collector? (lambda (expr)
 	(match expr
@@ -9867,11 +9861,19 @@ RecSet node is written into logical IR. */
 					(choose_scan_access_path driver candidates planning_session)))))))))
 
 (define optimize_logical_query (lambda (ir planning_session tx)
-	(join_reorder
-		(if (aggregate_pushdown_exact_access_dominates? ir planning_session tx)
-			ir
-			(aggregate_pushdown_logical ir planning_session tx))
-		planning_session tx)))
+	(begin
+		/* Central column resolution + type/collation annotation. Runs after
+		decorrelation has resolved get_column aliases and before logical join
+		reordering / physical lowering. Canonicalizes get_column names once here
+		instead of at every physical lowering site, records the result column
+		types/collations as a query-block fact, and resolves the collation of
+		computed text ORDER keys. */
+		(define typed_ir (sql_type_annotate_ir ir))
+		(join_reorder
+			(if (aggregate_pushdown_exact_access_dominates? typed_ir planning_session tx)
+				typed_ir
+				(aggregate_pushdown_logical typed_ir planning_session tx))
+			planning_session tx))))
 
 (define neumann_compile_pipeline (lambda (ast planning_session tx)
 	(begin
