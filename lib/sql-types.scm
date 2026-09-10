@@ -301,19 +301,17 @@ always plain and canonical; type/collation ride alongside for the consumer. */
 			(sql_info (list (quote get_column) tblvar tbl_ic col col_ic) "any" nil)
 			(sql_source_column_info src tblvar col col_ic)))))
 
-/* Comparison: BOOLEAN. When both operands resolve to text, bind the coercing
-Less relation now so scan lowering and ORDER share one collation authority. */
+/* Comparison: BOOLEAN. The formula stays plain (canonical operands); the merged
+operand collation rides in the info slot so a consumer can pick the Less
+relation for scan bounds / ORDER without re-deriving it. */
 (define sql_comparison_info (lambda (head left_info right_info)
 	(begin
 		(define lt (sql_info_type left_info))
 		(define rt (sql_info_type right_info))
 		(define plain (list head (sql_info_formula left_info) (sql_info_formula right_info)))
 		(if (and (sql_text_type? lt) (sql_text_type? rt))
-			(begin
-				(define merged (sql_merge_collation (sql_info_collation left_info) (sql_info_collation right_info)))
-				(define relation (if (nil? merged) "bin" (car merged)))
-				(sql_info (list (quote sql_compare) (sql_info_formula left_info) (sql_info_formula right_info)
-					(collate relation false) (string head) relation) "BOOLEAN" nil))
+			(sql_info plain "BOOLEAN"
+				(sql_merge_collation (sql_info_collation left_info) (sql_info_collation right_info)))
 			(sql_info plain "BOOLEAN" nil)))))
 
 (define sql_call_info (lambda (sources head args)
@@ -363,3 +361,48 @@ relation and operator string are resolved at plan time. */
 		(if (equal? operator "<=") (not (less right left))
 		(if (equal? operator ">=") (not (less left right))
 			(error "unsupported SQL comparison"))))))))))
+
+/* ---- query-block level type resolution ----
+
+sql_type_query_block walks every expression position of a query block through
+sql_expr_info: it canonicalizes get_column against the sources and records the
+projected column types/collations as the result-types fact. Formulas stay plain.
+Order directions are kept as-is here; a consumer turns collation-carrying keys
+into collate callbacks. Derived-table sources and unions are passed through
+unchanged for now (base-table columns are the immediate goal). */
+
+(define sql_type_order_item (lambda (compile item)
+	(match item
+		'(expr dir) (list (sql_info_formula (compile expr)) dir)
+		_ item)))
+
+(define sql_type_query_block (lambda (block outer_sources)
+	(if (not (query_block? block))
+		block
+		(begin
+			(define sources (qb_sources block))
+			(define outer (coalesceNil outer_sources '()))
+			(define all_sources (if (empty_list? outer) sources (merge (list sources outer))))
+			(define compile (lambda (expr) (sql_expr_info all_sources expr)))
+			(define field_infos (map_assoc (expand_query_block_fields sources (qb_fields block))
+				(lambda (_title expr) (compile expr))))
+			(make_query_block
+				(qb_schema block)
+				sources
+				(map_assoc field_infos (lambda (_title info) (sql_info_formula info)))
+				(sql_info_formula (compile (qb_where block)))
+				(map (coalesceNil (qb_group block) '()) (lambda (expr) (sql_info_formula (compile expr))))
+				(if (nil? (qb_having block)) nil (sql_info_formula (compile (qb_having block))))
+				(map (coalesceNil (qb_order block) '()) (lambda (item) (sql_type_order_item compile item)))
+				(qb_limit block) (qb_offset block) (qb_hidden block) (qb_stages block)
+				(qassoc_set (qb_facts block) (quote result-types)
+					(map_assoc field_infos (lambda (_title info)
+						(sql_info nil (sql_info_type info) (sql_info_collation info))))))))))
+
+/* Entry point: annotate the root query block of a compiled IR. Group/orc/window
+stages and non-query-block roots pass through untouched in this slice. */
+(define sql_type_annotate_ir (lambda (ir)
+	(if (query_block? (ir_root ir))
+		(make_ir (ir_kind ir) (sql_type_query_block (ir_root ir) '())
+			(ir_stages ir) (ir_context_of ir) (ir_return ir))
+		ir)))

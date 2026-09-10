@@ -138,13 +138,39 @@ test_cases:
                  (nil? (sql_info_collation info))) true
           (error (concat "arith over columns: " (string info)))))
 
-  - name: "text comparison rewrites to a collation-bound sql_compare"
+  - name: "text comparison stays plain but carries the merged operand collation"
     scm: |
       (begin
         (define src (list "d" "memcp-tests" "stf_doc" false true))
         (define info (sql_expr_info (list src)
           (list (quote equal??) (list (quote get_column) "d" true "title" true) "needle")))
         (define f (sql_info_formula info))
-        (if (and (equal? (car f) (quote sql_compare))
-                 (equal? (sql_info_type info) "BOOLEAN")) true
-          (error (concat "text comparison not rewritten: " (string info)))))
+        (if (and (equal? (car f) (quote equal??))
+                 (equal? (cadr f) (list (quote get_column) "d" false "title" false))
+                 (equal? (sql_info_type info) "BOOLEAN")
+                 (not (nil? (sql_info_collation info)))) true
+          (error (concat "text comparison info wrong: " (string info)))))
+
+  - name: "sql_type_query_block canonicalizes all positions and records result-types"
+    scm: |
+      (begin
+        (define block (make_query_block "memcp-tests"
+          (list (list "d" "memcp-tests" "stf_doc" false true))
+          (list "t" (list (quote get_column) "d" true "TITLE" true)
+                "w2" (list (quote +) (list (quote get_column) "d" true "WEIGHT" true) 1))
+          (list (quote equal??) (list (quote get_column) "d" true "id" true) 5)
+          nil nil nil nil nil nil nil nil))
+        (define typed (sql_type_query_block block nil))
+        (define rtypes (qassoc_get (qb_facts typed) (quote result-types) nil))
+        (define checks (list
+          (equal? (qb_fields typed)
+            (list "t" (list (quote get_column) "d" false "title" false)
+                  "w2" (list (quote +) (list (quote get_column) "d" false "weight" false) 1)))
+          (equal? (qb_where typed)
+            (list (quote equal??) (list (quote get_column) "d" false "id" false) 5))
+          (equal? (sql_info_type (nth rtypes 1)) "VARCHAR")
+          (not (nil? (sql_info_collation (nth rtypes 1))))
+          (equal? (sql_info_type (nth rtypes 3)) "BIGINT")))
+        (if (reduce checks (lambda (acc c) (and acc c)) true) true
+          (error (concat "query block typing mismatch: " (string (qb_fields typed))
+            " | rtypes " (string rtypes)))))
