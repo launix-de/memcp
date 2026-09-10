@@ -122,6 +122,14 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
 - `storageShard.filterFeedback` contains immutable observations published with one best-effort CAS after a complete shard scan. Readers may load these atomics without shard locks or concurrency rights; they must not inspect shard containers. `table.filterFeedback` publishes an immutable, bounded merged snapshot. Generation IDs are scalar planner-statistics tokens, never retained shard/topology pointers. No feedback synchronization or publication is permitted inside element or filter-batch loops. `tableShowColumnsSnapshot.filterSchema` is immutable column-semantics metadata published through the existing atomic snapshot. Optional `table.RestoredFilterFeedback` is touched only during schema loading before table publication and cleared after restoring historical aggregates; schema saves serialize an atomic table-feedback snapshot without accessing shard state.
 - When adding new storage fields, document the locking discipline and update this section.
 
+- `TriggerDescription.needsRegeneration` is initialized during JSON loading before
+  publication and protected by `table.mu` afterwards. Restored compute dependency
+  triggers stay inert until registration atomically replaces their generated code
+  and runtime target; current triggers reuse their code without recompilation.
+- `scanJoinInfo.unknownReads` is local to dependency registration and never shared
+  with scan execution. Access-header filter readsets are immutable plan data;
+  only cache registration reads them, not row or batch processing.
+
 - `OverlayBlob.ram` belongs to one immutable column generation. Its `blobRAMCache.mu`
   protects admission metadata, decoded strings, and byte/benefit accounting;
   `lastUsed` is atomic and updated once per read batch. Cache callbacks use

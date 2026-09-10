@@ -302,6 +302,9 @@ one compilation result. All consumers share the same boundary/coverage proof. */
 				(list (scan_feedback_key spec bindings) bindings))
 			_ (list nil values)))))
 
+/* Preserve the original filter inputs as static dependency metadata before
+pruning. These columns belong to cache registration, not residual readers: an
+index-enforced predicate must stay a dependency without being evaluated twice. */
 (define scan_plan_compile_filter (lambda (column_expr filter_expr)
 	(begin
 		(define columns (scan_plan_columns column_expr))
@@ -321,7 +324,7 @@ one compilation result. All consumers share the same boundary/coverage proof. */
 					(match (scan_plan_pack bounds '()) '(packed values)
 						(match (scan_plan_feedback params columns body values) '(feedback bindings)
 							(list (scan_access_schema packed (if (equal? mapped '()) '() ((car mapped) "map_columns"))
-								feedback (scan_plan_covered remaining_filter))
+								feedback (scan_plan_covered remaining_filter) columns)
 								bindings remaining_columns remaining_filter)))))))))
 
 /* The returned expression is evaluated by the caller, so references to its

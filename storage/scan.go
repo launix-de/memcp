@@ -88,7 +88,7 @@ func newScanAccessHeader(count int, consumer string, projections int, mapperSlot
 func decodeScanAccessHeader(value scm.Scmer) (scanAccessSchemaMeta, bool) {
 	if value.IsSlice() {
 		header := value.Slice()
-		if len(header) != 2 {
+		if len(header) != 2 && len(header) != 3 {
 			return scanAccessSchemaMeta{}, false
 		}
 		value = header[0]
@@ -309,7 +309,9 @@ func shiftCompiledScanAccessSlots(schemaValue scm.Scmer, shift int) scm.Scmer {
 		if clone[1].Int() >= 0 {
 			clone[1] = scm.NewInt(clone[1].Int() + int64(shift))
 		}
-		shifted[0] = scm.NewSlice([]scm.Scmer{shifted[0].Slice()[0], scm.NewSlice(clone)})
+		header := append([]scm.Scmer(nil), shifted[0].Slice()...)
+		header[1] = scm.NewSlice(clone)
+		shifted[0] = scm.NewSlice(header)
 	}
 	for offset, count := scanAccessSchemaHeaderSize, meta.count; count > 0; offset, count = offset+scanAccessBoundaryStride, count-1 {
 		boundary := ScanBoundaryFromScmer(shifted[offset])
@@ -343,7 +345,7 @@ func markCoveredScanAccessSchema(schema, residual scm.Scmer) scm.Scmer {
 	if !valid {
 		return schema
 	}
-	items[0] = preserveScanFeedbackHeader(newScanAccessHeader(meta.count, scanAccessConsumerCoveredScan, meta.projections, meta.mapperSlot), items[0])
+	items[0] = preserveScanAccessHeaderMetadata(newScanAccessHeader(meta.count, scanAccessConsumerCoveredScan, meta.projections, meta.mapperSlot), items[0])
 	return scm.NewSlice(items)
 }
 
