@@ -3261,18 +3261,24 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 	if d := DeclarationForValue(v[0]); d != nil {
 		argCount := len(v) - 1
 		if d.IsFoldable() && allConstArgs && d.Fn != nil && argCount >= d.MinParams() && argCount <= d.MaxParams() {
-			for i := range v {
-				v[i] = unwrapConstListFromCode(v[i])
+			foldArgs := make([]Scmer, argCount)
+			for i := range foldArgs {
+				foldArgs[i] = unwrapConstListFromCode(v[i+1])
 			}
-			result := d.Fn(v[1:]...)
-			td := &TypeDescriptor{Transfer: true, Const: true, Length: UnknownLength}
-			if d.Type != nil && d.Type.Return != nil {
-				td = &TypeDescriptor{Transfer: true, Const: true, Kind: d.Type.Return.Kind,
-					Params: d.Type.Return.Params, Return: d.Type.Return.Return,
-					HasSideEffects: d.Type.Return.HasSideEffects, Length: d.Type.Return.Length}
+			// A foldable Fn may still raise on otherwise-constant arguments
+			// (e.g. `/` on a zero divisor). Keep such an expression unfolded so
+			// the error surfaces at runtime, in query context, rather than
+			// aborting compilation.
+			if result, folded := tryConstFold(d.Fn, foldArgs); folded {
+				td := &TypeDescriptor{Transfer: true, Const: true, Length: UnknownLength}
+				if d.Type != nil && d.Type.Return != nil {
+					td = &TypeDescriptor{Transfer: true, Const: true, Kind: d.Type.Return.Kind,
+						Params: d.Type.Return.Params, Return: d.Type.Return.Return,
+						HasSideEffects: d.Type.Return.HasSideEffects, Length: d.Type.Return.Length}
+				}
+				result = wrapConstListForCode(result, td, false)
+				return result, td
 			}
-			result = wrapConstListForCode(result, td, false)
-			return result, td
 		}
 		if d.Type != nil && d.Type.Return != nil {
 			retTD = d.Type.Return
@@ -3374,6 +3380,18 @@ func (oc *OptimizerContext) applyDefaultOptimizationWithTypes(v []Scmer, useResu
 	oc.Ome.captureArgumentTypes = previousCapture
 	oc.Ome.argumentTypes = previousTypes
 	return optimizedCall{code: code, typeInfo: typeInfo, argumentTypes: argumentTypes}
+}
+
+// tryConstFold evaluates a foldable operator on constant arguments, recovering
+// from a raise (e.g. `/` on a zero divisor) so the optimizer can leave the
+// expression for runtime instead of aborting compilation.
+func tryConstFold(fn func(...Scmer) Scmer, args []Scmer) (result Scmer, ok bool) {
+	defer func() {
+		if recover() != nil {
+			result, ok = NewNil(), false
+		}
+	}()
+	return fn(args...), true
 }
 
 const constListQuoteThreshold = 32

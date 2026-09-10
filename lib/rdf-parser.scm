@@ -150,8 +150,11 @@ consumer stage. */
 	(if (nil? a) b (if (nil? b) a (merge a b)))
 ))
 (define rdf_sample_reduce (lambda (a b) (if (nil? a) b a)))
+/* SPARQL 17.4.1: an arithmetic error (here, division by zero) leaves the value
+unbound. div_null yields NULL on a zero divisor or nil operand, which the
+projection and BIND layers already surface as an unbound variable. */
 (define rdf_divide (lambda (left right)
-	(if (equal?? right 0) nil (/ left right))
+	(div_null left right)
 ))
 (define rdf_ordered_json_arrayagg_finalize (lambda (values descending)
 	(if (nil? values)
@@ -908,7 +911,10 @@ consumer stage. */
 	'((quote rdf_bound) ((quote get_var) sym)) (rdf_ctx_bound ctx sym)
 	'('get_var sym) (rdf_ctx_value ctx sym)
 	'((quote get_var) sym) (rdf_ctx_value ctx sym)
-	(cons head tail) (cons head (map tail (lambda (x) (rdf_replace_ctx x ctx))))
+	/* Match rdf_shared_expr: SPARQL division is error-on-zero (17.4.1), routed
+	through rdf_divide so a zero divisor leaves the value unbound. */
+	(cons head tail) (cons (if (equal? head (quote /)) (quote rdf_divide) head)
+		(map tail (lambda (x) (rdf_replace_ctx x ctx))))
 	expr
 )))
 
