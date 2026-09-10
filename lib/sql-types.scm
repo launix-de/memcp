@@ -367,13 +367,31 @@ relation and operator string are resolved at plan time. */
 sql_type_query_block walks every expression position of a query block through
 sql_expr_info: it canonicalizes get_column against the sources and records the
 projected column types/collations as the result-types fact. Formulas stay plain.
-Order directions are kept as-is here; a consumer turns collation-carrying keys
-into collate callbacks. Derived-table sources and unions are passed through
-unchanged for now (base-table columns are the immediate goal). */
+Derived-table sources and unions are passed through unchanged for now
+(base-table columns are the immediate goal). */
 
+(define sql_column_ref? (lambda (expr)
+	(match expr
+		((symbol get_column) _t _ti _c _ci) true
+		((quote get_column) _t _ti _c _ci) true
+		_ false)))
+
+/* Resolve the ORDER direction of a text-valued *expression* to its collation
+callback. Bare column keys keep their raw < / > so the existing native
+scan-order path (order_relations_for_source) is untouched; only computed keys
+(UPPER(x), a || b, x COLLATE y) — which the old physical_expr_collation always
+treated as "bin" — get the coercing relation. */
 (define sql_type_order_item (lambda (compile item)
 	(match item
-		'(expr dir) (list (sql_info_formula (compile expr)) dir)
+		'(expr dir) (begin
+			(define info (compile expr))
+			(define coll (sql_info_collation info))
+			(if (and (or (equal? dir <) (equal? dir >))
+					(not (sql_column_ref? (sql_info_formula info)))
+					(sql_text_type? (sql_info_type info))
+					(not (nil? coll)))
+				(list (sql_info_formula info) (collate (car coll) (equal? dir >)))
+				(list (sql_info_formula info) dir)))
 		_ item)))
 
 (define sql_type_query_block (lambda (block outer_sources)
