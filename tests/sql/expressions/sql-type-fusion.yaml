@@ -24,12 +24,19 @@ metadata:
 
 setup:
   - sql: "DROP TABLE IF EXISTS stf_doc"
+  - sql: "DROP TABLE IF EXISTS stf_ci"
   - sql: |
       CREATE TABLE stf_doc (
         id INT PRIMARY KEY,
         title VARCHAR(200),
         weight INT
       )
+  - sql: |
+      CREATE TABLE stf_ci (
+        id INT PRIMARY KEY,
+        nm VARCHAR(50) COLLATE utf8mb4_general_ci
+      )
+  - sql: "INSERT INTO stf_ci VALUES (1,'banana'),(2,'Apple'),(3,'cherry'),(4,'Date')"
 
 test_cases:
   - name: "type predicates classify SQL type names"
@@ -174,3 +181,35 @@ test_cases:
         (if (reduce checks (lambda (acc c) (and acc c)) true) true
           (error (concat "query block typing mismatch: " (string (qb_fields typed))
             " | rtypes " (string rtypes)))))
+
+  # End-to-end: a computed text ORDER BY key inherits its column's collation.
+  # Before recentralization physical_expr_collation only understood a bare
+  # get_column and treated UPPER(nm) as "bin", so this ordered byte-wise
+  # (Apple, Date, banana, cherry) instead of case-insensitively.
+  - name: "ORDER BY UPPER(ci-column) sorts case-insensitively"
+    sql: "SELECT nm FROM stf_ci ORDER BY UPPER(nm)"
+    expect:
+      data:
+        - {nm: "Apple"}
+        - {nm: "banana"}
+        - {nm: "cherry"}
+        - {nm: "Date"}
+
+  - name: "sql_type_order_item resolves a computed text key to its collation callback"
+    scm: |
+      (begin
+        (define src (list "d" "memcp-tests" "stf_ci" false true))
+        (define compile (lambda (e) (sql_expr_info (list src) e)))
+        (define computed (sql_type_order_item compile
+          (list (list (quote toUpper) (list (quote get_column) "d" true "nm" true)) <)))
+        (define bare (sql_type_order_item compile
+          (list (list (quote get_column) "d" true "nm" true) <)))
+        (define checks (list
+          /* computed key: direction replaced by a resolved callback */
+          (not (or (equal? (cadr computed) <) (equal? (cadr computed) >)))
+          /* bare column: raw direction kept for the native scan-order path */
+          (equal? (cadr bare) <)
+          (equal? (car bare) (list (quote get_column) "d" false "nm" false))))
+        (if (reduce checks (lambda (acc c) (and acc c)) true) true
+          (error (concat "order item resolution mismatch: "
+            (string computed) " | " (string bare)))))
