@@ -62,6 +62,20 @@ func (s firstByteSet) empty() bool {
 	return !s.any && s.bits == [4]uint64{}
 }
 
+// disjoint reports that no byte is in both sets. A modelled-out ("any") set on
+// either side is treated as overlapping everything.
+func (s firstByteSet) disjoint(other firstByteSet) bool {
+	if s.any || other.any {
+		return false
+	}
+	for i := range s.bits {
+		if s.bits[i]&other.bits[i] != 0 {
+			return false
+		}
+	}
+	return true
+}
+
 // union folds other into s and reports whether s changed.
 func (s *firstByteSet) union(other firstByteSet) bool {
 	if s.any {
@@ -200,6 +214,9 @@ func (program *jitParserProgram) nodeNullableFB(node *jitParserNode) bool {
 	case jitParserAtom:
 		return false
 	case jitParserRegex:
+		if node.regex == nil {
+			return node.goRegex.MatchString("")
+		}
 		return regexpNullable(node.regex.root)
 	case jitParserEnd, jitParserEmpty, jitParserRest:
 		return true
@@ -239,6 +256,10 @@ func (program *jitParserProgram) nodeFirstBytes(node *jitParserNode) firstByteSe
 	var out firstByteSet
 	switch node.kind {
 	case jitParserAtom, jitParserRegex:
+		if node.regex == nil {
+			out.markAny()
+			return out
+		}
 		fbs, _ := regexpFirstBytes(node.regex.root)
 		out.union(fbs)
 	case jitParserRest, jitParserExclude:

@@ -76,6 +76,75 @@ type jitRegexTerm struct {
 	capture int
 }
 
+// jitCompileRegexProgramOrGo lowers pattern to a native byte-walk program when
+// the emitter supports every construct it uses, and otherwise returns
+// (nil, pattern) so the caller can keep the pattern on a Go regexp call rather
+// than failing the enclosing JIT compilation. `regexp_*` builtins and parser
+// terminals use this; the direct `(match … (regex …))` path still requires a
+// lowerable pattern.
+func jitCompileRegexProgramOrGo(pattern *regexp.Regexp) (*jitRegexProgram, *regexp.Regexp) {
+	program := jitCompileRegexProgram(pattern)
+	if jitRegexTermsEmittable(jitRegexFlatten(program.root, false)) {
+		return program, nil
+	}
+	return nil, pattern
+}
+
+// jitRegexTermsEmittable mirrors emitSequence / emitRepeat / emitAlternatives:
+// it returns false exactly when one of those would panic on a construct the
+// byte-walk emitter cannot lower (an unbounded variable-width repeat whose
+// continuation neither is empty nor has a leading-byte set disjoint from the
+// body).
+func jitRegexTermsEmittable(terms []jitRegexTerm) bool {
+	for i := 0; i < len(terms); i++ {
+		term := terms[i]
+		if term.kind != jitRegexNode {
+			continue
+		}
+		node := term.node
+		rest := terms[i+1:]
+		switch node.Op {
+		case syntax.OpAlternate:
+			for _, branch := range node.Sub {
+				if !jitRegexTermsEmittable(append(jitRegexFlatten(branch, false), rest...)) {
+					return false
+				}
+			}
+			return true
+		case syntax.OpQuest:
+			if !jitRegexTermsEmittable(append(jitRegexFlatten(node.Sub[0], false), rest...)) {
+				return false
+			}
+			return jitRegexTermsEmittable(rest)
+		case syntax.OpStar, syntax.OpPlus, syntax.OpRepeat:
+			body := node.Sub[0]
+			if !jitRegexTermsEmittable(jitRegexFlatten(body, false)) {
+				return false
+			}
+			if node.Op == syntax.OpRepeat && node.Max >= 0 {
+				return jitRegexTermsEmittable(rest)
+			}
+			if _, simple := jitRegexSimpleWidth(body); simple {
+				return jitRegexTermsEmittable(rest)
+			}
+			greedy := node.Flags&syntax.NonGreedy == 0
+			if jitRegexTailOnly(rest) || (greedy && jitRegexGreedyRepeatUnambiguous(body, rest)) {
+				return jitRegexTermsEmittable(rest)
+			}
+			return false
+		case syntax.OpLiteral:
+			if node.Flags&syntax.FoldCase != 0 {
+				for _, r := range node.Rune {
+					if r >= 0x80 {
+						return false // Unicode case folding is not native
+					}
+				}
+			}
+		}
+	}
+	return true
+}
+
 func jitCompileRegexProgram(pattern *regexp.Regexp) *jitRegexProgram {
 	if pattern == nil {
 		panic("jit: nil constant regex")
@@ -602,10 +671,20 @@ func (emitter *jitRegexEmitter) emitRepeat(node *syntax.Regexp, min, max int, gr
 		emitter.emitSimpleRepeat(node, width, min, greedy, rest, successLabel, failLabel)
 		return
 	}
-	if !jitRegexTailOnly(rest) {
-		panic(fmt.Sprintf("jit: regex %q requires a variable-width repetition stack", emitter.program.pattern))
+	// A variable-width repeat commits without a backtracking stack when nothing
+	// consuming follows (tail), or - for a greedy repeat - when the body
+	// provably cannot swallow a byte the continuation needs (disjoint
+	// leading-byte sets, body non-nullable). The latter covers the
+	// quoted-string / backtick-identifier / block-comment token shapes
+	// `<q>(?:\\.|[^<q>\\])*<q>` whose body excludes the closing delimiter.
+	if jitRegexTailOnly(rest) || (greedy && jitRegexGreedyRepeatUnambiguous(node, rest)) {
+		emitter.emitComplexTailRepeat(node, min, rest, successLabel, failLabel)
+		return
 	}
-	emitter.emitComplexTailRepeat(node, min, rest, successLabel, failLabel)
+	// Anything left needs a real position-backtracking stack, which the emitter
+	// does not build. The caller (jitCompileRegexProgramOrGo / a constant-regexp
+	// builtin) recovers this and keeps the pattern on a Go regexp call.
+	panic(fmt.Sprintf("jit: regex %q requires a variable-width repetition stack", emitter.program.pattern))
 }
 
 func jitRegexTailOnly(terms []jitRegexTerm) bool {
@@ -619,6 +698,125 @@ func jitRegexTailOnly(terms []jitRegexTerm) bool {
 		return false
 	}
 	return true
+}
+
+// jitRegexTermsFirstBytes is the leading-byte set of the first consuming term
+// in a flattened continuation. ok is false when a leading term is nullable (so
+// a later term could also be the first consumed) or its shape is not modelled.
+func jitRegexTermsFirstBytes(terms []jitRegexTerm) (firstByteSet, bool) {
+	var out firstByteSet
+	for _, term := range terms {
+		if term.kind != jitRegexNode {
+			continue
+		}
+		switch term.node.Op {
+		case syntax.OpEndText, syntax.OpEndLine, syntax.OpBeginLine,
+			syntax.OpBeginText, syntax.OpWordBoundary, syntax.OpNoWordBoundary,
+			syntax.OpEmptyMatch:
+			continue
+		}
+		fb, nullable := regexpFirstBytes(term.node)
+		out.union(fb)
+		if nullable || fb.any {
+			return out, false
+		}
+		return out, true
+	}
+	return out, false
+}
+
+// jitRegexGreedyRepeatUnambiguous proves that greedily matching `node` as many
+// times as possible, then matching `rest` once at that position, is equivalent
+// to the backtracking semantics: the body is non-nullable and provably cannot
+// start with the single delimiter byte the continuation opens with, so no
+// repeat iteration can swallow a byte `rest` would need. This is the
+// `<q>(?:\\.|[^<q>\\])*<q>` token shape (the negated body class excludes <q>).
+func jitRegexGreedyRepeatUnambiguous(node *syntax.Regexp, rest []jitRegexTerm) bool {
+	if regexpNullable(node) {
+		return false
+	}
+	delim, ok := jitRegexLeadingLiteralByte(rest)
+	if !ok {
+		return false
+	}
+	return !jitRegexCanStartWith(node, delim)
+}
+
+// jitRegexLeadingLiteralByte returns the fixed first byte of the first consuming
+// term of a continuation when that term is a plain literal (the closing
+// delimiter of a quoted token). ok is false otherwise.
+func jitRegexLeadingLiteralByte(terms []jitRegexTerm) (byte, bool) {
+	for _, term := range terms {
+		if term.kind != jitRegexNode {
+			continue
+		}
+		switch term.node.Op {
+		case syntax.OpEndText, syntax.OpEndLine, syntax.OpBeginLine,
+			syntax.OpBeginText, syntax.OpWordBoundary, syntax.OpNoWordBoundary,
+			syntax.OpEmptyMatch:
+			continue
+		case syntax.OpLiteral:
+			if len(term.node.Rune) == 0 || term.node.Flags&syntax.FoldCase != 0 {
+				return 0, false
+			}
+			b := byte(term.node.Rune[0])
+			if term.node.Rune[0] >= 0x80 {
+				return 0, false
+			}
+			return b, true
+		}
+		return 0, false
+	}
+	return 0, false
+}
+
+// jitRegexCanStartWith reports whether node can begin a match with byte b.
+// Correct for negated character classes (a negated class can match high bytes
+// yet still exclude an ASCII delimiter).
+func jitRegexCanStartWith(node *syntax.Regexp, b byte) bool {
+	switch node.Op {
+	case syntax.OpEmptyMatch, syntax.OpNoMatch, syntax.OpEndText, syntax.OpEndLine:
+		return false
+	case syntax.OpBeginText, syntax.OpBeginLine, syntax.OpWordBoundary, syntax.OpNoWordBoundary:
+		return false
+	case syntax.OpLiteral:
+		if len(node.Rune) == 0 {
+			return false
+		}
+		if node.Flags&syntax.FoldCase != 0 {
+			return true // conservative for case folding
+		}
+		return node.Rune[0] == rune(b)
+	case syntax.OpCharClass:
+		for i := 0; i+1 < len(node.Rune); i += 2 {
+			if rune(b) >= node.Rune[i] && rune(b) <= node.Rune[i+1] {
+				return true
+			}
+		}
+		return false
+	case syntax.OpAnyChar, syntax.OpAnyCharNotNL:
+		return true
+	case syntax.OpCapture, syntax.OpStar, syntax.OpPlus, syntax.OpQuest, syntax.OpRepeat:
+		return jitRegexCanStartWith(node.Sub[0], b)
+	case syntax.OpConcat:
+		for _, sub := range node.Sub {
+			if jitRegexCanStartWith(sub, b) {
+				return true
+			}
+			if !regexpNullable(sub) {
+				return false
+			}
+		}
+		return false
+	case syntax.OpAlternate:
+		for _, sub := range node.Sub {
+			if jitRegexCanStartWith(sub, b) {
+				return true
+			}
+		}
+		return false
+	}
+	return true // unmodelled: assume it can
 }
 
 func (emitter *jitRegexEmitter) emitSimpleRepeat(node *syntax.Regexp, width, min int, greedy bool, rest []jitRegexTerm, successLabel, failLabel JITLabel) {
