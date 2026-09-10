@@ -259,3 +259,107 @@ Each entry is (HEAD TYPE MODE):
 		(or (equal? head (car entry))
 			(and (symbol? head) (equal? (string head) (string (car entry)))))) nil)
 		(list head "any" "fixed"))))
+
+/* ---- expression type/collation resolution walk ----
+
+sql_expr_info walks one expression bottom-up. For every (get_column ...) it
+resolves the physical column name against the source catalog (superseding the
+per-use resolution the physical lowerer does today) and reads its declared type
+and collation. Enclosing operators fuse their operands. The returned formula is
+always plain and canonical; type/collation ride alongside for the consumer. */
+
+(define sql_arith_head? (lambda (head)
+	(has? (list (quote +) (quote -) (quote *) (quote /) (quote intdiv)) head)))
+(define sql_arith_op_name (lambda (head)
+	(if (equal? head (quote /)) "divide" (if (equal? head (quote intdiv)) "intdiv" "add"))))
+(define sql_comparison_head? (lambda (head)
+	(has? (list (quote equal??) (quote equal?) (quote <) (quote >) (quote <=) (quote >=)) head)))
+
+/* Canonical get_column plus catalog type/collation for a resolved source. */
+(define sql_source_column_info (lambda (src tblvar col col_ignorecase)
+	(begin
+		(define alias (source_alias src))
+		(if (not (source_is_base_table? src))
+			(sql_info (list (quote get_column) alias false col false) "any" nil)
+			(begin
+				(define canonical (coalesceNil (source_column_name src col col_ignorecase) col))
+				(define meta (find (get_schema (source_schema src) (source_relation src))
+					(lambda (c) (equal?? (c "Field") canonical)) nil))
+				(define type (if (nil? meta) "any" (toUpper (coalesceNil (meta "RawType") "any"))))
+				(define collname (if (nil? meta) nil (meta "Collation")))
+				(sql_info
+					(list (quote get_column) alias false canonical false)
+					type
+					(if (and (sql_text_type? type) (string? collname) (not (equal? collname "")))
+						(list collname 2) nil)))))))
+
+(define sql_get_column_info (lambda (sources tblvar tbl_ic col col_ic)
+	(begin
+		(define default_alias (if (empty_list? sources) nil (source_alias (car sources))))
+		(define src (source_for_alias sources default_alias tblvar tbl_ic))
+		(if (nil? src)
+			(sql_info (list (quote get_column) tblvar tbl_ic col col_ic) "any" nil)
+			(sql_source_column_info src tblvar col col_ic)))))
+
+/* Comparison: BOOLEAN. When both operands resolve to text, bind the coercing
+Less relation now so scan lowering and ORDER share one collation authority. */
+(define sql_comparison_info (lambda (head left_info right_info)
+	(begin
+		(define lt (sql_info_type left_info))
+		(define rt (sql_info_type right_info))
+		(define plain (list head (sql_info_formula left_info) (sql_info_formula right_info)))
+		(if (and (sql_text_type? lt) (sql_text_type? rt))
+			(begin
+				(define merged (sql_merge_collation (sql_info_collation left_info) (sql_info_collation right_info)))
+				(define relation (if (nil? merged) "bin" (car merged)))
+				(sql_info (list (quote sql_compare) (sql_info_formula left_info) (sql_info_formula right_info)
+					(collate relation false) (string head) relation) "BOOLEAN" nil))
+			(sql_info plain "BOOLEAN" nil)))))
+
+(define sql_call_info (lambda (sources head args)
+	(begin
+		(define infos (map args (lambda (a) (sql_expr_info sources a))))
+		(define forms (map infos sql_info_formula))
+		(if (sql_arith_head? head)
+			(sql_info (cons head forms)
+				(reduce (cdr infos) (lambda (t i) (sql_type_fuse_arith (sql_arith_op_name head) t (sql_info_type i)))
+					(sql_info_type (car infos)))
+				nil)
+		(if (and (sql_comparison_head? head) (equal? (count infos) 2))
+			(sql_comparison_info head (car infos) (cadr infos))
+		(begin
+			(define rule (sql_function_rule head))
+			(define rtype (cadr rule))
+			(define mode (nth rule 2))
+			(define merged (sql_merge_infos infos))
+			(define type (if (has? (list "merge" "case") mode) (sql_info_type merged) rtype))
+			(define collation (if (sql_text_type? type)
+				(if (equal? mode "first")
+					(if (empty_list? infos) nil (sql_info_collation (car infos)))
+					(sql_info_collation merged))
+				nil))
+			(sql_info (cons head forms) type collation)))))))
+
+(define sql_expr_info (lambda (sources expr)
+	(match expr
+		((symbol get_column) tblvar tbl_ic col col_ic) (sql_get_column_info sources tblvar tbl_ic col col_ic)
+		((quote get_column) tblvar tbl_ic col col_ic) (sql_get_column_info sources tblvar tbl_ic col col_ic)
+		((symbol quote) _datum) (sql_info expr "any" nil)
+		((symbol session) _key) (sql_info expr "any" nil)
+		((symbol session_globalvar) _key) (sql_info expr "any" nil)
+		((symbol lambda) _params _body) (sql_info expr "any" nil)
+		(cons head args) (sql_call_info sources head args)
+		_ (sql_info expr (sql_type_of_literal expr)
+			(if (string? expr) (list "utf8mb4_general_ci" 4) nil)))))
+
+/* NULL-safe comparison primitive emitted by sql_comparison_info. The Less
+relation and operator string are resolved at plan time. */
+(define sql_compare (lambda (left right less operator collation)
+	(if (or (nil? left) (nil? right)) nil
+		(if (equal? operator "equal??") (and (not (less left right)) (not (less right left)))
+		(if (equal? operator "equal?") (and (not (less left right)) (not (less right left)))
+		(if (equal? operator "<") (less left right)
+		(if (equal? operator ">") (less right left)
+		(if (equal? operator "<=") (not (less right left))
+		(if (equal? operator ">=") (not (less left right))
+			(error "unsupported SQL comparison"))))))))))

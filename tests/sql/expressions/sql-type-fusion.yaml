@@ -22,6 +22,15 @@ metadata:
   description: "SQL type and collation fusion helpers"
   isolated: true
 
+setup:
+  - sql: "DROP TABLE IF EXISTS stf_doc"
+  - sql: |
+      CREATE TABLE stf_doc (
+        id INT PRIMARY KEY,
+        title VARCHAR(200),
+        weight INT
+      )
+
 test_cases:
   - name: "type predicates classify SQL type names"
     scm: |
@@ -99,3 +108,43 @@ test_cases:
           (equal? (nth (sql_function_rule (quote totally_unknown_head)) 1) "any")))
         (if (reduce checks (lambda (acc c) (and acc c)) true) true
           (error (concat "function contract mismatch: " (string checks)))))
+
+  - name: "sql_expr_info canonicalizes get_column and reads catalog type/collation"
+    scm: |
+      (begin
+        (define src (list "d" "memcp-tests" "stf_doc" false true))
+        (define title_info (sql_expr_info (list src)
+          (list (quote get_column) "d" true "TITLE" true)))
+        (define weight_info (sql_expr_info (list src)
+          (list (quote get_column) "d" true "weight" true)))
+        (define checks (list
+          /* case-corrected name, ignorecase flags dropped */
+          (equal? (sql_info_formula title_info) (list (quote get_column) "d" false "title" false))
+          (equal? (sql_info_type title_info) "VARCHAR")
+          (not (nil? (sql_info_collation title_info)))
+          (equal? (sql_info_type weight_info) "INT")
+          (nil? (sql_info_collation weight_info))))
+        (if (reduce checks (lambda (acc c) (and acc c)) true) true
+          (error (concat "get_column resolution mismatch: "
+            (string title_info) " / " (string weight_info)))))
+
+  - name: "arithmetic over resolved columns fuses to a numeric type"
+    scm: |
+      (begin
+        (define src (list "d" "memcp-tests" "stf_doc" false true))
+        (define info (sql_expr_info (list src)
+          (list (quote +) (list (quote get_column) "d" true "weight" true) 10)))
+        (if (and (sql_numeric_type? (sql_info_type info))
+                 (nil? (sql_info_collation info))) true
+          (error (concat "arith over columns: " (string info)))))
+
+  - name: "text comparison rewrites to a collation-bound sql_compare"
+    scm: |
+      (begin
+        (define src (list "d" "memcp-tests" "stf_doc" false true))
+        (define info (sql_expr_info (list src)
+          (list (quote equal??) (list (quote get_column) "d" true "title" true) "needle")))
+        (define f (sql_info_formula info))
+        (if (and (equal? (car f) (quote sql_compare))
+                 (equal? (sql_info_type info) "BOOLEAN")) true
+          (error (concat "text comparison not rewritten: " (string info)))))
