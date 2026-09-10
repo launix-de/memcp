@@ -45527,15 +45527,14 @@ func optimizeRegexpMatches(v []Scmer, oc *OptimizerContext, useResult bool) (Scm
 	if err != nil {
 		return result, td // Invalid patterns still fail when the call executes.
 	}
-	compiled := NewFunc(func(a ...Scmer) Scmer {
-		matches := re.FindAllString(String(a[0]), -1)
-		values := make([]Scmer, len(matches))
-		for i, match := range matches {
-			values[i] = NewString(match)
-		}
-		return NewSlice(values)
-	})
-	return NewSlice([]Scmer{compiled, rv[1]}), td
+	// Keep a declared callable identity so Eval and the JIT run the same
+	// precompiled-regex operation; the JIT emitter drives a native byte walk and
+	// returns input slice-views, the interpreter Fn does the same.
+	return NewSlice([]Scmer{
+		NewSymbol(jitConstantRegexpMatchesName),
+		NewRegex(re),
+		rv[1],
+	}), td
 }
 
 // optimizeRegexpReplace precompiles the regex when the pattern argument is a constant string.

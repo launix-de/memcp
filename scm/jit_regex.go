@@ -26,9 +26,46 @@ import (
 const (
 	jitConstantRegexpTestName          = "jit-constant-regexp-test"
 	jitConstantRegexpPredicateName     = "jit-constant-regexp-predicate"
+	jitConstantRegexpMatchesName       = "jit-constant-regexp-matches"
 	jitConstantRegexpReplaceFuncName   = "jit-constant-regexp-replace-func"
 	jitConstantRegexpReplaceInlineName = "jit-constant-regexp-replace-inline"
 )
+
+// jitConstantRegexpMatches is the interpreter implementation of the hidden
+// declaration the optimizer synthesizes for `(regexp_matches s "<const>")`. The
+// JIT emitter below drives a native left-to-right byte walk and appends a
+// slice-view of the input per match; this fallback and the emitter agree that
+// every result string is a view into the input, never a copy.
+func jitConstantRegexpMatches(pattern, value Scmer) Scmer {
+	if value.IsNil() {
+		return NewSlice(nil)
+	}
+	s := String(value)
+	locs := pattern.Regex().FindAllStringIndex(s, -1)
+	out := make([]Scmer, len(locs))
+	for i, loc := range locs {
+		out[i] = NewString(s[loc[0]:loc[1]])
+	}
+	return NewSlice(out)
+}
+
+// jitRegexMatchesNewNative / …AppendNative / …FinishNative back the JIT emitter's
+// growing result list. The list header is boxed so the JIT roots it across the
+// scan; each appended string is a view into the scanned input.
+func jitRegexMatchesNewNative() Scmer {
+	acc := make([]Scmer, 0, 8)
+	return NewAny(&acc)
+}
+
+func jitRegexMatchesAppendNative(acc, input Scmer, start, end int64) {
+	box := acc.Any().(*[]Scmer)
+	s := String(input)
+	*box = append(*box, NewString(s[start:end]))
+}
+
+func jitRegexMatchesFinishNative(acc Scmer) Scmer {
+	return NewSlice(*acc.Any().(*[]Scmer))
+}
 
 // jitConstantRegexpReplaceFunc is the interpreter implementation of the hidden
 // declaration the optimizer synthesizes for `(regexp_replace s "<const>" f)`
@@ -1315,7 +1352,109 @@ func jitEmitConstantRegexpCaptures(ctx *JITContext, pattern *regexp.Regexp, valu
 	return captures
 }
 
+// jitEmitConstantRegexpMatches lowers `(regexp_matches s "<const>")` to a native
+// left-to-right byte walk that appends a slice-view of the input per
+// non-overlapping match. The result list is grown through a boxed accumulator so
+// it survives GC across the scan; no match string is copied. A pattern the byte
+// walk cannot scan, or a non-string / nil input at compile time, falls back to
+// one call to jitConstantRegexpMatches.
+func jitEmitConstantRegexpMatches(ctx *JITContext, pattern *regexp.Regexp, value JITValueDesc, result JITValueDesc) JITValueDesc {
+	program, goRegex := jitCompileRegexProgramOrGo(pattern)
+	if program == nil {
+		reArg := jitCopyScmerToPair(ctx, JITValueDesc{Loc: LocImm, Type: tagRegex, Imm: NewRegex(goRegex)})
+		ctx.TrackImm(NewRegex(goRegex))
+		src := value
+		ctx.EnsureDesc(&src)
+		out := ctx.EmitGoCallScalar(GoFuncAddr(jitConstantRegexpMatches), []JITValueDesc{reArg, src}, 2)
+		ctx.FreeDesc(&reArg)
+		out.Type, out.Rooted = JITTypeUnknown, true
+		return jitPlaceScmerIntoTarget(ctx, out, result)
+	}
+
+	input := ctx.stabilizeForNested(value)
+	inputOff := ctx.AllocStack(16)
+	accOff := ctx.AllocStack(16)
+	{
+		src := input
+		ctx.EnsureDesc(&src)
+		dst := JITValueDesc{Loc: LocStackPair, Type: tagString, StackOff: inputOff}
+		ctx.EmitCopyScmerToDesc(&dst, &src)
+	}
+	ctx.EmitMovRegImm64(ctx.ScratchReg, 0)
+	ctx.EmitStoreRegMem(ctx.ScratchReg, ctx.StackReg, accOff)
+	ctx.EmitStoreRegMem(ctx.ScratchReg, ctx.StackReg, accOff+8)
+	ctx.setStackPointer(jitStackRootFrameSP, inputOff-ctx.DynamicSP, true)
+	ctx.setStackPointer(jitStackRootFrameSP, accOff-ctx.DynamicSP, true)
+	ctx.setStackPointer(jitStackRootFrameSP, accOff+8-ctx.DynamicSP, true)
+	accSlot := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: accOff, Rooted: true}
+	inputSlot := func() JITValueDesc {
+		return JITValueDesc{Loc: LocStackPair, Type: tagString, StackOff: inputOff}
+	}
+
+	acc := ctx.EmitGoCallScalar(GoFuncAddr(jitRegexMatchesNewNative), nil, 2)
+	acc.Type = JITTypeUnknown
+	{
+		dst := accSlot
+		ctx.EmitCopyScmerToDesc(&dst, &acc)
+		ctx.FreeDesc(&acc)
+	}
+
+	onMatch := func(startOff, endOff JITValueDesc) {
+		in := inputSlot()
+		ctx.EmitGoCallVoid(GoFuncAddr(jitRegexMatchesAppendNative),
+			[]JITValueDesc{accSlot, in, startOff, endOff})
+	}
+	onEnd := func(resultSlot JITValueDesc) {
+		out := ctx.EmitGoCallScalar(GoFuncAddr(jitRegexMatchesFinishNative), []JITValueDesc{accSlot}, 2)
+		out.Type, out.Rooted = JITTypeUnknown, true
+		dst := resultSlot
+		ctx.EmitCopyScmerToDesc(&dst, &out)
+		ctx.FreeDesc(&out)
+	}
+	nilPath := func(resultSlot JITValueDesc) {
+		out := ctx.EmitGoCallScalar(GoFuncAddr(jitRegexMatchesFinishNative), []JITValueDesc{accSlot}, 2)
+		out.Type, out.Rooted = JITTypeUnknown, true
+		dst := resultSlot
+		ctx.EmitCopyScmerToDesc(&dst, &out)
+		ctx.FreeDesc(&out)
+	}
+
+	resultSlot := jitEmitRegexScanReplace(ctx, program, input, onMatch, onEnd, nilPath)
+	ctx.FreeDesc(&input)
+	return jitPlaceScmerIntoTarget(ctx, resultSlot, result)
+}
+
 func registerJITRegexBuiltins() {
+	Declare(&Globalenv, &Declaration{
+		Name: jitConstantRegexpMatchesName,
+		Fn: func(arguments ...Scmer) Scmer {
+			if len(arguments) != 2 || !arguments[0].IsRegex() {
+				panic("jit constant regexp matches expects a precompiled regex and a value")
+			}
+			return jitConstantRegexpMatches(arguments[0], arguments[1])
+		},
+		Type: &TypeDescriptor{
+			Kind:      "func",
+			Forbidden: true,
+			Params: []*TypeDescriptor{
+				{Kind: "any", Label: "pattern"},
+				{Kind: "any", Label: "value"},
+			},
+			Return:         &TypeDescriptor{Kind: "list"},
+			Const:          true,
+			JITVirtualArgs: true,
+			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				if len(sourceArgs) != 2 || len(args) != 2 {
+					panic("jit: malformed constant regexp matches")
+				}
+				pattern := sourceArgs[0].WithoutSourceInfo()
+				if !pattern.IsRegex() {
+					panic("jit: constant regexp matches requires a precompiled regex")
+				}
+				return jitEmitConstantRegexpMatches(ctx, pattern.Regex(), args[1], result)
+			},
+		},
+	})
 	Declare(&Globalenv, &Declaration{
 		Name: jitConstantRegexpTestName,
 		Fn: func(arguments ...Scmer) Scmer {
