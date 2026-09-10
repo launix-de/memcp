@@ -30,6 +30,10 @@ import "github.com/carli2/hybridsort"
 // EvictableType identifies the kind of cached object for factor lookup and stat reporting.
 type EvictableType uint8
 
+// CacheFreedBytes is the per-object-type accounting passed to cache cleanup
+// callbacks, including consumers outside the storage package.
+type CacheFreedBytes = [numEvictableTypes]int64
+
 const (
 	TypeTempColumn    EvictableType = iota // weight 20 — cheap to recompute
 	TypeShard                              // weight 1  — expensive (disk I/O)

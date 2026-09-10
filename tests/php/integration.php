@@ -15,6 +15,60 @@ function fails($callback, $state = null) {
 header('Content-Type: application/json');
 try {
     $action = $_GET['action'] ?? 'probe';
+    if (str_starts_with($action, 'imap')) {
+        check(extension_loaded('imap') && function_exists('imap_open'), 'IMAP adapter missing');
+        check(imap_base64(base64_encode("binary\0value")) === "binary\0value", 'IMAP binary roundtrip');
+        check(imap_utf8('=?UTF-8?B?R3LDvMOfZQ==?=') === "Gru\u{0308}ße", 'IMAP UTF-8');
+        $wire = json_decode(file_get_contents(__DIR__ . '/wire.json'), true);
+        $mailbox = imap_open('{127.0.0.1:' . $wire['imap_port'] . '/imap/notls}INBOX', 'test', 'test', OP_READONLY);
+        check($mailbox instanceof IMAP\Connection, 'IMAP connection');
+        $GLOBALS['retained_imap'] = $mailbox;
+        if ($action === 'imap-oom') { str_repeat('x', 64*1024*1024); throw new RuntimeException('IMAP quota did not abort'); }
+        if ($action === 'imap-exit') exit;
+        if ($action === 'imap-abandon') throw new RuntimeException('Request abandoned with open IMAP handle');
+        check(imap_num_msg($mailbox) === 1, 'IMAP message count');
+        check(imap_check($mailbox)->Nmsgs === 1, 'IMAP object result');
+        check(str_contains(imap_body($mailbox, 1), 'hello mailbox'), 'IMAP message body');
+        $stream = fopen('php://temp', 'w+b');
+        check(imap_savebody($mailbox, $stream, 1), 'IMAP stream save');
+        rewind($stream); check(str_contains(stream_get_contents($stream), 'hello mailbox'), 'IMAP stream contents');
+        check(imap_close(imap: $mailbox), 'IMAP named-argument close');
+        check(!imap_is_open($mailbox), 'Closed IMAP connection');
+        echo json_encode(['ok' => true]);
+        return;
+    }
+    if ($action === 'extensions') {
+        foreach (['gettext', 'PDO', 'pdo_mysql', 'imap', 'xml', 'imagick', 'dom', 'intl', 'zip', 'json', 'session', 'gmp', 'mbstring', 'curl', 'openssl'] as $extension) check(extension_loaded($extension), 'Missing extension ' . $extension);
+        check(function_exists('mb_regex_encoding') && mb_ereg_match('ä+', 'ää'), 'mbregex required by PDF generation');
+        check(gmp_strval(gmp_pow(2, 64)) === '18446744073709551616', 'GMP');
+        $image = new Imagick(); $image->newImage(2, 2, 'white', 'png');
+        check(str_starts_with($image->getImageBlob(), "\x89PNG"), 'Imagick PNG');
+        echo json_encode(['ok' => true]);
+        return;
+    }
+    if ($action === 'gettext') {
+        $app = $_GET['app'];
+        check(in_array($app, ['first', 'second'], true), 'Fixture domain');
+        check(textdomain(null) === 'messages', 'Default domain leaked');
+        check(bindtextdomain('messages', null) === '/usr/share/locale', 'Domain binding leaked');
+        check(setlocale(LC_ALL, 'C.UTF-8', 'C.utf8') !== false, 'UTF-8 locale unavailable');
+        putenv('LANGUAGE=' . ($app === 'first' ? 'de' : 'fr'));
+        putenv('LC_ALL=C.UTF-8');
+        check(setlocale(LC_ALL, '') !== false, 'Request locale environment');
+        check(escapeshellarg('ä') === "'ä'", 'PHP character classification must use the request locale');
+        try { gettext([]); throw new RuntimeException('Accepted invalid gettext argument'); } catch (TypeError $expected) {}
+        bindtextdomain('messages', __DIR__ . '/catalogs/' . $app);
+        bind_textdomain_codeset('messages', 'UTF-8');
+        usleep(100000);
+        check(gettext('Hello') === $app, 'Concurrent gettext domain collision');
+        check(gettext('%s Discounts') === $app . ' %s', 'Gettext must preserve format placeholders');
+        check(ngettext('item', 'items', 2) === $app . ' plural', 'Plural translation');
+        check(dgettext('absent', 'Hello') === 'Hello', 'Missing catalog fallback');
+        check(setlocale(LC_MESSAGES, 'C') === 'C' && gettext('Hello') === 'Hello', 'C locale bypass');
+        textdomain('changed');
+        echo json_encode(['ok' => true]);
+        return;
+    }
     if ($action === 'routing') {
         echo json_encode(['script' => $_SERVER['SCRIPT_NAME'], 'path_info' => $_SERVER['PATH_INFO'] ?? '', 'uri' => $_SERVER['REQUEST_URI'], 'method' => $_SERVER['REQUEST_METHOD'], 'post' => $_POST['value'] ?? '', 'cookie' => $_COOKIE['probe'] ?? '', 'header' => $_SERVER['HTTP_X_PROBE'] ?? '']);
         return;

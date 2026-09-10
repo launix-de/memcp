@@ -29,11 +29,12 @@ import "github.com/dc0d/onexit"
 import "github.com/launix-de/memcp/scm"
 
 type SettingsT struct {
-	PHPThreads             int64 // Global PHP startup setting; changes require a restart.
-	PHPMemoryLimit         int64 // Global PHP startup setting; changes require a restart.
-	PHPMaxWaitMilliseconds int64 // Global PHP startup setting; changes require a restart.
-	PHPOutputBuffer        int64 // Global PHP startup setting; changes require a restart.
-	PHPOpcacheMemory       int64 // Global PHP startup setting; changes require a restart.
+	PHPIMAPBinary          string // NTS PHP CLI with native IMAP; empty disables the isolated adapter.
+	PHPThreads             int64  // Global PHP startup setting; changes require a restart.
+	PHPMemoryLimit         int64  // Global PHP startup setting; changes require a restart.
+	PHPMaxWaitMilliseconds int64  // Global PHP startup setting; changes require a restart.
+	PHPOutputBuffer        int64  // Global PHP startup setting; changes require a restart.
+	PHPOpcacheMemory       int64  // Global PHP startup setting; changes require a restart.
 
 	Backtrace              bool
 	Trace                  bool
@@ -154,13 +155,14 @@ var settingsMu sync.Mutex
 
 // PHPConfig holds one consistent snapshot for initializing the shared PHP runtime.
 type PHPConfig struct {
+	IMAPBinary                                                             string
 	Threads, MemoryLimit, MaxWaitMilliseconds, OutputBuffer, OpcacheMemory int64
 }
 
 func PHPStartupSettings() PHPConfig {
 	settingsMu.Lock()
 	defer settingsMu.Unlock()
-	return PHPConfig{Settings.PHPThreads, Settings.PHPMemoryLimit, Settings.PHPMaxWaitMilliseconds, Settings.PHPOutputBuffer, Settings.PHPOpcacheMemory}
+	return PHPConfig{Settings.PHPIMAPBinary, Settings.PHPThreads, Settings.PHPMemoryLimit, Settings.PHPMaxWaitMilliseconds, Settings.PHPOutputBuffer, Settings.PHPOpcacheMemory}
 }
 
 func validatePHPSetting(key string, value scm.Scmer, minimum, maximum int64) int64 {
@@ -229,6 +231,7 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 	// schema, filename
 	if len(a) == 0 {
 		return scm.NewSlice([]scm.Scmer{
+			scm.NewString("PHPIMAPBinary"), scm.NewString(Settings.PHPIMAPBinary),
 			scm.NewString("PHPThreads"), scm.NewInt(Settings.PHPThreads),
 			scm.NewString("PHPMemoryLimit"), scm.NewInt(Settings.PHPMemoryLimit),
 			scm.NewString("PHPMaxWaitMilliseconds"), scm.NewInt(Settings.PHPMaxWaitMilliseconds),
@@ -264,6 +267,8 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 		})
 	} else if len(a) == 1 {
 		switch scm.String(a[0]) {
+		case "PHPIMAPBinary":
+			return scm.NewString(Settings.PHPIMAPBinary)
 		case "PHPThreads":
 			return scm.NewInt(Settings.PHPThreads)
 		case "PHPMemoryLimit":
@@ -331,6 +336,11 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 		}
 	} else {
 		switch scm.String(a[0]) {
+		case "PHPIMAPBinary":
+			if !a[1].IsString() {
+				panic("PHPIMAPBinary requires a string")
+			}
+			Settings.PHPIMAPBinary = a[1].String()
 		case "PHPThreads":
 			Settings.PHPThreads = validatePHPSetting("PHPThreads", a[1], 1, 1024)
 		case "PHPMemoryLimit":

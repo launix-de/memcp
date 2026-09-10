@@ -24,7 +24,7 @@ var auth, schemaCheck, query, rollback scm.Scmer
 
 // Register snapshots frontend callbacks after Scheme initialization, before
 // starting PHP threads. Only the new memcp PDO driver is registered.
-func Register(env *scm.Env) error {
+func Register(env *scm.Env, imapBinary string, memoryLimit int64) error {
 	lookup := func(name string) scm.Scmer {
 		e := env.FindRead(scm.Symbol(name))
 		if e == nil {
@@ -48,7 +48,11 @@ func Register(env *scm.Env) error {
 			}
 		}
 	}
+	if err := registerIMAP(imapBinary, memoryLimit); err != nil {
+		return err
+	}
 	frankenphp.RegisterExtension(C.memcp_module())
+	frankenphp.RegisterExtension(C.memcp_locale_module())
 	return nil
 }
 

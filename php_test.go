@@ -11,14 +11,17 @@ import "fmt"
 import "net"
 import "sync"
 import "time"
-import "os/exec"
-import "strings"
-import "strconv"
-import "testing"
+import "bufio"
 import "context"
+import "os/exec"
+import "strconv"
+import "strings"
+import "testing"
 import "net/http"
+import "sync/atomic"
 import "encoding/json"
 import "path/filepath"
+import binaryencoding "encoding/binary"
 
 func TestPHPIntegration(t *testing.T) {
 	for _, front := range []string{"", "index.php"} {
@@ -73,6 +76,33 @@ func testPHPIntegration(t *testing.T, front, cli string, queueTimeout bool) {
 			t.Fatal(err)
 		}
 	}
+	for _, app := range []string{"first", "second"} {
+		language := "de"
+		if app == "second" {
+			language = "fr"
+		}
+		path := filepath.Join(root, "catalogs", app, language, "LC_MESSAGES")
+		if err := os.MkdirAll(path, 0700); err != nil {
+			t.Fatal(err)
+		}
+		originals := []string{"", "%s Discounts", "Hello", "item\x00items"}
+		translations := []string{"Content-Type: text/plain; charset=UTF-8\nPlural-Forms: nplurals=2; plural=(n != 1);\n", app + " %s", app, app + " singular\x00" + app + " plural"}
+		data := make([]byte, 28+16*len(originals))
+		binaryencoding.LittleEndian.PutUint32(data, 0x950412de)
+		binaryencoding.LittleEndian.PutUint32(data[8:], uint32(len(originals)))
+		binaryencoding.LittleEndian.PutUint32(data[12:], 28)
+		binaryencoding.LittleEndian.PutUint32(data[16:], uint32(28+8*len(originals)))
+		for i, value := range append(originals, translations...) {
+			binaryencoding.LittleEndian.PutUint32(data[28+i*8:], uint32(len(value)))
+			binaryencoding.LittleEndian.PutUint32(data[32+i*8:], uint32(len(data)))
+			data = append(data, []byte(value)...)
+			data = append(data, 0)
+		}
+		if err := os.WriteFile(filepath.Join(path, "messages.mo"), data, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
 	for _, name := range []string{"hello.txt", ".env", "source.php.bak"} {
 		if err := os.WriteFile(filepath.Join(root, name), []byte("fixture"), 0600); err != nil {
 			t.Fatal(err)
@@ -116,7 +146,11 @@ func testPHPIntegration(t *testing.T, front, cli string, queueTimeout bool) {
 		return port
 	}
 	mysqlPort, otherPort := freePort(), freePort()
-	config, _ := json.Marshal(map[string]string{"socket": socketPath, "port": mysqlPort, "other_port": otherPort})
+	imapPort := ""
+	if os.Getenv("MEMCP_TEST_IMAP_BINARY") != "" {
+		imapPort = testIMAPMailbox(t)
+	}
+	config, _ := json.Marshal(map[string]string{"socket": socketPath, "port": mysqlPort, "other_port": otherPort, "imap_port": imapPort})
 	if err := os.WriteFile(filepath.Join(root, "wire.json"), config, 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -145,6 +179,9 @@ func testPHPIntegration(t *testing.T, front, cli string, queueTimeout bool) {
 		}
 	}
 	cmd := exec.Command(binary, "--no-repl", apiFlag, "--mysql-port="+mysqlPort, "--mysql-socket="+socketPath, "-data", filepath.Join(dir, "data"), "-c", `(createdatabase "memcp-tests" true)`, "-c", `(settings "PHPMemoryLimit" 33554432)`, "-c", `(settings "PHPMaxWaitMilliseconds" 5000)`, "lib/main.scm", mountFile)
+	if helper := os.Getenv("MEMCP_TEST_IMAP_BINARY"); helper != "" {
+		cmd.Args = append(cmd.Args, "-c", `(settings "PHPIMAPBinary" `+strconv.Quote(helper)+`)`)
+	}
 	if queueTimeout {
 		cmd.Args = append(cmd.Args, "-c", `(settings "PHPMaxWaitMilliseconds" 100)`)
 	}
@@ -253,6 +290,39 @@ func testPHPIntegration(t *testing.T, front, cli string, queueTimeout bool) {
 				t.Fatalf("MemCP route %s: %d %s %v", path, response.StatusCode, body, err)
 			}
 		}
+	}
+	if os.Getenv("MEMCP_TEST_IMAP_BINARY") != "" {
+		for _, action := range []string{"imap", "imap-abandon", "imap-exit", "imap-oom", "imap"} {
+			status, body, err := get("/app/probe.php?action=" + action)
+			want := 200
+			if action == "imap-abandon" || action == "imap-oom" {
+				want = 500
+			}
+			if err != nil || status != want {
+				t.Fatalf("%s: %d %s %v", action, status, body, err)
+			}
+		}
+	}
+	if os.Getenv("MEMCP_TEST_PHP_EXTENSIONS") != "" {
+		status, body, err := get("/app/probe.php?action=extensions")
+		if err != nil || status != 200 {
+			t.Fatalf("extensions: %d %s %v", status, body, err)
+		}
+	}
+	for round := 0; round < 3; round++ {
+		var localeWG sync.WaitGroup
+		for i := 0; i < 4; i++ {
+			localeWG.Add(1)
+			go func(i int) {
+				defer localeWG.Done()
+				app := []string{"first", "second"}[i%2]
+				status, body, err := get("/app/probe.php?action=gettext&app=" + app)
+				if err != nil || status != 200 || !strings.Contains(body, `"ok":true`) {
+					t.Errorf("gettext %s: %d %s %v", app, status, body, err)
+				}
+			}(i)
+		}
+		localeWG.Wait()
 	}
 	for _, action := range []string{"setup", "quota", "oom-php", "oom-pdo", "pdo", "wire", "route-dsn", "buffers", "latency", "abandon", "verify"} {
 		status, body, err := get("/app/probe.php?action=" + action)
@@ -384,4 +454,72 @@ func TestPHPQuotaRequiresZendAllocator(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A private mailbox exercises native c-client handles and stream results
+// without depending on an external account or sending any mail.
+func testIMAPMailbox(t *testing.T) string {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var active atomic.Int32
+	t.Cleanup(func() {
+		listener.Close()
+		deadline := time.Now().Add(time.Second)
+		for active.Load() != 0 && time.Now().Before(deadline) {
+			time.Sleep(10 * time.Millisecond)
+		}
+		if active.Load() != 0 {
+			t.Errorf("IMAP request leaked %d mailbox connections", active.Load())
+		}
+	})
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			active.Add(1)
+			go func() {
+				defer active.Add(-1)
+				defer conn.Close()
+				conn.SetDeadline(time.Now().Add(20 * time.Second))
+				fmt.Fprint(conn, "* OK isolated test mailbox\r\n")
+				scanner := bufio.NewScanner(conn)
+				for scanner.Scan() {
+					parts := strings.SplitN(scanner.Text(), " ", 3)
+					if len(parts) < 2 {
+						return
+					}
+					tag, command := parts[0], strings.ToUpper(parts[1])
+					switch command {
+					case "CAPABILITY":
+						fmt.Fprint(conn, "* CAPABILITY IMAP4rev1\r\n")
+					case "LOGIN", "NOOP":
+					case "SELECT", "EXAMINE":
+						fmt.Fprint(conn, "* FLAGS (\\Seen)\r\n* 1 EXISTS\r\n* 0 RECENT\r\n* OK [UIDVALIDITY 1] valid\r\n* OK [UIDNEXT 2] next\r\n")
+					case "FETCH":
+						text := "hello mailbox\r\n"
+						field := "BODY[TEXT]"
+						if len(parts) > 2 && strings.Contains(parts[2], "BODY.PEEK[]") {
+							field = "BODY[]"
+							text = "From: sender@example.test\r\nSubject: Isolated IMAP\r\n\r\n" + text
+						}
+						fmt.Fprintf(conn, "* 1 FETCH (%s {%d}\r\n%s)\r\n", field, len(text), text)
+					case "LOGOUT":
+						fmt.Fprintf(conn, "* BYE closing\r\n%s OK logged out\r\n", tag)
+						return
+					default:
+						fmt.Fprintf(conn, "%s BAD unsupported %s\r\n", tag, command)
+						continue
+					}
+					fmt.Fprintf(conn, "%s OK complete\r\n", tag)
+				}
+			}()
+		}
+	}()
+	_, port, _ := net.SplitHostPort(listener.Addr().String())
+	return port
 }

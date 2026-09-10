@@ -1358,6 +1358,7 @@ var settingsGroups=[
 {group:"PHP (changes require a restart)",items:[
 {key:"PHPMemoryLimit",label:"Memory per request",desc:"Includes retained PDO results. Minimum 8 MiB; default 1 GiB.",type:"bytes",min:8388608},
 {key:"PHPOpcacheMemory",label:"Shared opcode cache",desc:"Shared by all PHP requests. Minimum 32 MiB; rounded up to whole MiB.",type:"bytes",min:33554432},
+{key:"PHPIMAPBinary",label:"Isolated IMAP interpreter",desc:"Path to an NTS PHP CLI with IMAP, e.g. /usr/bin/php. Empty disables IMAP. Each request gets its own helper process.",type:"text"},
 {key:"PHPThreads",label:"Concurrent PHP requests",desc:"Global thread limit. Additional requests wait.",type:"number",min:1},
 {key:"PHPMaxWaitMilliseconds",label:"Queue timeout (milliseconds)",desc:"Wait for a free PHP thread before HTTP 503. 0 waits indefinitely.",type:"number",min:0},
 {key:"PHPOutputBuffer",label:"Output buffer per request",desc:"0 disables buffering.",type:"bytes",min:0}
@@ -1917,6 +1918,8 @@ for(var j=0;j<s.options.length;j++){
 h+="<option value='"+esc(s.options[j])+"'"+(val===s.options[j]?" selected":"")+">"+esc(s.options[j])+"</option>";
 }
 h+="</select>";
+}else if(s.type==="text"){
+h+="<input type='text' data-key='"+esc(s.key)+"' aria-label='"+esc(s.label||s.key)+"' value='"+esc(val||"")+"'>";
 }else if(s.type==="bytes"){
 h+="<input type='text' data-type='bytes' data-min='"+(s.min||0)+"' data-key='"+esc(s.key)+"' aria-label='"+esc(s.label||s.key)+"' title='MB = 1,000,000 bytes; MiB = 1,048,576 bytes. Save with Enter or by leaving the field.' value='"+esc(formatSettingBytes(val))+"'>";
 }else{
@@ -1957,7 +1960,7 @@ grid.querySelectorAll("input[type='checkbox'],select").forEach(function(el){
 el.addEventListener("change",function(){saveSettingEl(el)});
 });
 /* Save complete values, so typing a unit does not submit a partial size. */
-grid.querySelectorAll("input[type='number'],input[data-type='bytes']").forEach(function(el){
+grid.querySelectorAll("input[type='number'],input[type='text']").forEach(function(el){
 el.addEventListener("input",function(){el.setCustomValidity("")});
 el.addEventListener("change",function(){saveSettingEl(el)});
 el.addEventListener("keydown",function(e){if(e.key==="Enter"){e.preventDefault();el.blur();}});
