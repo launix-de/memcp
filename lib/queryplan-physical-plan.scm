@@ -9436,17 +9436,23 @@ build_queryplan contract. */
 (define prepare_physical_queryplan (lambda (ir planning_session tx)
 	(begin
 		(require_unnested_node "build_queryplan input" (ir_root ir))
+		/* Central column resolution + type/collation annotation. Runs after
+		get_column aliases are resolved and before physical lowering replaces
+		columns with scan-lambda parameters. Canonicalizes get_column names once
+		here instead of at every physical lowering site, and records the result
+		column types/collations as a query-block fact. */
+		(define typed_ir (sql_type_annotate_ir ir))
 		/* This native handle exists only between physical preparation and emission.
 		It never enters the logical IR or the emitted/cached runtime plan. */
-		(define contextual_input (if (nil? planning_session) (ir_root ir)
-			(physical_node_with_planning_context (ir_root ir) planning_session tx)))
+		(define contextual_input (if (nil? planning_session) (ir_root typed_ir)
+			(physical_node_with_planning_context (ir_root typed_ir) planning_session tx)))
 		(define contextual_root (apply_join_optimizer_plan_node contextual_input))
 		(make_ir
-			(ir_kind ir)
+			(ir_kind typed_ir)
 			(physical_node_with_stage_catalog contextual_root)
-			(map (ir_stages ir) apply_join_optimizer_plan_stage)
-			(ir_context_of ir)
-			(ir_return ir)))))
+			(map (ir_stages typed_ir) apply_join_optimizer_plan_stage)
+			(ir_context_of typed_ir)
+			(ir_return typed_ir)))))
 
 (define physical_relational_list_collector? (lambda (expr)
 	(match expr
