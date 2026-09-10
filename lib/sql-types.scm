@@ -275,31 +275,36 @@ always plain and canonical; type/collation ride alongside for the consumer. */
 (define sql_comparison_head? (lambda (head)
 	(has? (list (quote equal??) (quote equal?) (quote <) (quote >) (quote <=) (quote >=)) head)))
 
-/* Canonical get_column plus catalog type/collation for a resolved source. */
-(define sql_source_column_info (lambda (src tblvar col col_ignorecase)
-	(begin
-		(define alias (source_alias src))
-		(if (not (source_is_base_table? src))
-			(sql_info (list (quote get_column) alias false col false) "any" nil)
-			(begin
-				(define canonical (coalesceNil (source_column_name src col col_ignorecase) col))
-				(define meta (find (get_schema (source_schema src) (source_relation src))
-					(lambda (c) (equal?? (c "Field") canonical)) nil))
-				(define type (if (nil? meta) "any" (toUpper (coalesceNil (meta "RawType") "any"))))
-				(define collname (if (nil? meta) nil (meta "Collation")))
-				(sql_info
-					(list (quote get_column) alias false canonical false)
-					type
-					(if (and (sql_text_type? type) (string? collname) (not (equal? collname "")))
-						(list collname 2) nil)))))))
+/* Catalog type/collation for a base-table column, name canonicalized. Only a
+resolved base table is rewritten: derived-table / stage-output columns and any
+column whose name does not resolve are returned verbatim so downstream lowering
+keeps its existing (ignorecase-flagged) resolution for them. */
+(define sql_source_column_info (lambda (src original tblvar col col_ignorecase)
+	(if (not (source_is_base_table? src))
+		(sql_info original "any" nil)
+		(begin
+			(define canonical (source_column_name src col col_ignorecase))
+			(if (nil? canonical)
+				(sql_info original "any" nil)
+				(begin
+					(define meta (find (get_schema (source_schema src) (source_relation src))
+						(lambda (c) (equal?? (c "Field") canonical)) nil))
+					(define type (if (nil? meta) "any" (toUpper (coalesceNil (meta "RawType") "any"))))
+					(define collname (if (nil? meta) nil (meta "Collation")))
+					(sql_info
+						(list (quote get_column) (source_alias src) false canonical false)
+						type
+						(if (and (sql_text_type? type) (string? collname) (not (equal? collname "")))
+							(list collname 2) nil))))))))
 
 (define sql_get_column_info (lambda (sources tblvar tbl_ic col col_ic)
 	(begin
+		(define original (list (quote get_column) tblvar tbl_ic col col_ic))
 		(define default_alias (if (empty_list? sources) nil (source_alias (car sources))))
 		(define src (source_for_alias sources default_alias tblvar tbl_ic))
 		(if (nil? src)
-			(sql_info (list (quote get_column) tblvar tbl_ic col col_ic) "any" nil)
-			(sql_source_column_info src tblvar col col_ic)))))
+			(sql_info original "any" nil)
+			(sql_source_column_info src original tblvar col col_ic)))))
 
 /* Comparison: BOOLEAN. The formula stays plain (canonical operands); the merged
 operand collation rides in the info slot so a consumer can pick the Less
@@ -400,6 +405,11 @@ Derived-table sources and unions are passed through unchanged for now
 		(define info (sql_expr_info sources expr))
 		(sql_info nil (sql_info_type info) (sql_info_collation info)))))
 
+/* Canonicalize a projected field, but leave a SELECT * / t.* entry as-is: the
+planner has its own star-expansion (and GROUP-BY-primary-key rules) downstream. */
+(define sql_type_field_formula (lambda (sources expr)
+	(if (star_expr? expr) expr (sql_type_formula sources expr))))
+
 /* Resolve the ORDER direction of a text-valued *expression* to its collation
 callback. Bare column keys keep their raw < / > so the existing native
 scan-order path (order_relations_for_source) is untouched; only computed keys
@@ -428,8 +438,8 @@ always treated as "bin" — get the coercing relation. */
 			(make_query_block
 				(qb_schema block)
 				sources
-				(map_assoc (expand_query_block_fields sources (qb_fields block))
-					(lambda (field_title field_expr) (sql_type_formula all_sources field_expr)))
+				(map_assoc (qb_fields block)
+					(lambda (field_title field_expr) (sql_type_field_formula all_sources field_expr)))
 				(sql_type_formula all_sources (qb_where block))
 				(map (coalesceNil (qb_group block) '())
 					(lambda (group_expr) (sql_type_formula all_sources group_expr)))
