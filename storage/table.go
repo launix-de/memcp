@@ -2416,8 +2416,18 @@ func (t *table) appendFreeShardDurably(topology *tableShardTopology, source *sto
 // finishOverflowRebuild owns maintenanceMu, which appendFreeShardDurably
 // acquired before publishing the appended shard. The replacement UUID becomes
 // authoritative only after schema.json durably names it.
+//
+// This background rebuild writes new blob files and only later publishes the
+// rebuilt generation into the table's active shard list. Retain a
+// persistenceLifecycle read capability across that whole build->publish
+// window, the same guarantee every other rebuild entry point (db.rebuild,
+// RebuildTable, rebuildDatabaseAndCompact) already gives: otherwise a
+// concurrent CleanDatabase cannot see the new blob as owned by any active
+// shard yet, and deletes it out from under this rebuild.
 func (t *table) finishOverflowRebuild(index int, source *storageShard) {
+	t.schema.persistenceLifecycle.RLock()
 	defer func() {
+		t.schema.persistenceLifecycle.RUnlock()
 		t.mu.Lock()
 		if t.maintenanceKind == 1 {
 			t.maintenanceKind = 0
