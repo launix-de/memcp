@@ -516,6 +516,18 @@ func (emitter *jitParserEmitter) emitTerminal(node *jitParserNode, rule int, suc
 	emitter.ctx.MarkLabel(matchStart)
 	matched := emitter.ctx.ReserveLabel()
 	failed := emitter.ctx.ReserveLabel()
+
+	if node.regex == nil {
+		// Pattern the native regex emitter could not lower: match it with a Go
+		// regexp call. Parser terminals never expose capture groups, so only the
+		// whole-match length matters.
+		emitter.emitGoRegexTerminal(node, success, failed, failure)
+		emitter.ctx.MarkLabel(failed)
+		emitter.emitRecordFailure(node.description)
+		emitter.ctx.EmitJmp(failure)
+		return
+	}
+
 	captures := jitRegexCaptureTargets(emitter.ctx, node.regex.captures)
 	input := emitter.substringAtPosition()
 	jitEmitNativeRegex(emitter.ctx, node.regex, input, captures, matched, failed, failed, nil, false)
@@ -536,6 +548,56 @@ func (emitter *jitParserEmitter) emitTerminal(node *jitParserNode, rule int, suc
 	emitter.emitRecordFailure(node.description)
 	emitter.ctx.EmitJmp(failure)
 	emitter.ctx.FreeStack(int32(len(captures) * 16))
+}
+
+// emitGoRegexTerminal matches node.goRegex (already `^`-anchored) at the current
+// position via a Go call, advances past the match on success, and pushes the
+// matched text as a slice-view Scmer (jitParserRegex) or node.value
+// (jitParserAtom). The caller marks `failed`.
+func (emitter *jitParserEmitter) emitGoRegexTerminal(node *jitParserNode, success, failed, failure JITLabel) {
+	ctx := emitter.ctx
+	reValue := NewRegex(node.goRegex)
+	ctx.TrackImm(reValue)
+	reArg := jitCopyScmerToPair(ctx, JITValueDesc{Loc: LocImm, Type: tagRegex, Imm: reValue})
+	input := emitter.substringAtPosition()
+	lenDesc := ctx.EmitGoCallScalar(GoFuncAddr(jitParserGoRegexpMatchLenNative), []JITValueDesc{reArg, input}, 1)
+	lenDesc.Type = tagInt
+	ctx.FreeDesc(&reArg)
+	lenOff := ctx.AllocStack(8)
+	ctx.EmitStoreRegMem(lenDesc.Reg, ctx.StackReg, lenOff)
+	ctx.EmitCmpRegImm32(lenDesc.Reg, 0)
+	ctx.FreeDesc(&lenDesc)
+	ctx.EmitJump(CondSignedLess, failed)
+
+	// Matched substring = a length-adjusted view of the remaining-input pair.
+	match := emitter.substringAtPosition()
+	ctx.EmitMovRegMem(ctx.ScratchReg, ctx.StackReg, lenOff)
+	ctx.EmitShlRegImm8(ctx.ScratchReg, 8)
+	ctx.EmitMovRegReg(match.Reg2, ctx.ScratchReg)
+	ctx.EmitMovRegImm64(ctx.ScratchReg, uint64(tagString))
+	ctx.EmitOrInt64(match.Reg2, ctx.ScratchReg)
+	match.Type = tagString
+	emitter.advanceBy(match)
+	if !node.ignoreResult {
+		if node.kind == jitParserAtom {
+			emitter.pushValue(JITValueDesc{Loc: LocImm, Type: node.value.GetTag(), Imm: node.value})
+		} else {
+			emitter.pushValue(match)
+		}
+	}
+	ctx.FreeDesc(&match)
+	ctx.FreeStack(8)
+	ctx.EmitJmp(success)
+}
+
+// jitParserGoRegexpMatchLenNative matches an already-`^`-anchored regexp at the
+// start of `remaining` and returns the match length, or -1 on no match.
+func jitParserGoRegexpMatchLenNative(re Scmer, remaining Scmer) int64 {
+	loc := re.Regex().FindStringIndex(remaining.String())
+	if loc == nil {
+		return -1
+	}
+	return int64(loc[1])
 }
 
 func (emitter *jitParserEmitter) emitSequence(node *jitParserNode, rule int, success, failure JITLabel) {

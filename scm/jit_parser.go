@@ -62,12 +62,17 @@ const (
 // Runtime code contains direct control flow for these nodes; it never walks
 // this representation.
 type jitParserNode struct {
-	kind         jitParserNodeKind
-	children     []*jitParserNode
-	rule         int
-	binding      int
-	value        Scmer
-	regex        *jitRegexProgram
+	kind     jitParserNodeKind
+	children []*jitParserNode
+	rule     int
+	binding  int
+	value    Scmer
+	regex    *jitRegexProgram
+	// goRegex: set (with regex left nil) when a terminal's pattern uses a
+	// construct the native regex emitter cannot lower (a variable-width
+	// alternation inside a non-tail repeat that also needs a backtracking
+	// stack). emitTerminal then matches it with a Go regexp call.
+	goRegex      *regexp.Regexp
 	skipWS       bool
 	ignoreResult bool
 	// skipBreakBefore/After: this terminal's literal begins / ends with a
@@ -685,8 +690,9 @@ func (builder *jitParserBuilder) buildNode(value Scmer, outer *Env, jitOuter *JI
 			if jitParserBool(items, 2, false) {
 				pattern = "(?i:" + pattern + ")"
 			}
+			program, goRegex := jitCompileRegexProgramOrGo(regexp.MustCompile("^(?:" + pattern + ")"))
 			return &jitParserNode{kind: jitParserRegex,
-				regex:  jitCompileRegexProgram(regexp.MustCompile("^(?:" + pattern + ")")),
+				regex: program, goRegex: goRegex,
 				skipWS: jitParserBool(items, 3, true), ignoreResult: ignoreResult, description: items[1].String()}
 		case "list":
 			return builder.buildChildren(jitParserSequence, items[1:], outer, jitOuter, ruleID, ignoreResult)

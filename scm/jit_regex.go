@@ -26,9 +26,85 @@ import (
 const (
 	jitConstantRegexpTestName          = "jit-constant-regexp-test"
 	jitConstantRegexpPredicateName     = "jit-constant-regexp-predicate"
+	jitConstantRegexpMatchesName       = "jit-constant-regexp-matches"
 	jitConstantRegexpReplaceFuncName   = "jit-constant-regexp-replace-func"
 	jitConstantRegexpReplaceInlineName = "jit-constant-regexp-replace-inline"
 )
+
+// jitConstantRegexpMatches is the interpreter implementation of the hidden
+// declaration the optimizer synthesizes for `(regexp_matches s "<const>")`. The
+// JIT emitter below drives a native left-to-right byte walk and appends a
+// slice-view of the input per match; this fallback and the emitter agree that
+// every result string is a view into the input, never a copy.
+func jitConstantRegexpMatches(pattern, value Scmer) Scmer {
+	if value.IsNil() {
+		return NewSlice(nil)
+	}
+	// FindAllString returns s[a:b] sub-slices (shared backing), and NewString
+	// keeps that view - no copy, and no per-match []int allocation.
+	matches := pattern.Regex().FindAllString(String(value), -1)
+	out := make([]Scmer, len(matches))
+	for i, m := range matches {
+		out[i] = NewString(m)
+	}
+	return NewSlice(out)
+}
+
+// jitRegexMatchesNewNative / …AppendNative / …FinishNative back the JIT emitter's
+// growing result list. The list header is boxed so the JIT roots it across the
+// scan; each appended string is a view into the scanned input.
+func jitRegexMatchesNewNative() Scmer {
+	acc := make([]Scmer, 0, 8)
+	return NewAny(&acc)
+}
+
+func jitRegexMatchesAppendNative(acc, input Scmer, start, end int64) {
+	box := acc.Any().(*[]Scmer)
+	s := String(input)
+	*box = append(*box, NewString(s[start:end]))
+}
+
+func jitRegexMatchesFinishNative(acc Scmer) Scmer {
+	return NewSlice(*acc.Any().(*[]Scmer))
+}
+
+// jitRegexBacktrackStack backs emitBacktrackingRepeat's growable position
+// stack for a greedy variable-width repeat whose continuation cannot be
+// proven unambiguous (jitRegexGreedyRepeatUnambiguous is false) - the
+// doubled-delimiter escape shape ('', ``) where the repeat body and the
+// closing delimiter share a leading byte. Stored values are raw cursor
+// pointers into the string being matched. The stack holds no live reference
+// to that string and needs none: Go's GC does not relocate heap memory, and
+// the caller (jitMatchStableValue / stabilizeForNested) already keeps the
+// string's backing array alive as a properly rooted Scmer for the whole
+// match, so a plain int64 alias of one of its addresses stays valid.
+type jitRegexBacktrackStack struct {
+	positions []int64
+}
+
+func jitRegexBacktrackNew() Scmer {
+	st := &jitRegexBacktrackStack{positions: make([]int64, 0, 16)}
+	return NewAny(st)
+}
+
+func jitRegexBacktrackPush(handle Scmer, pos int64) {
+	st := handle.Any().(*jitRegexBacktrackStack)
+	st.positions = append(st.positions, pos)
+}
+
+// jitRegexBacktrackPop returns the most recently pushed position, or 0 if the
+// stack is empty. 0 is never a valid cursor (a pointer into a live Go string
+// is never nil), so it doubles as the "backtracking exhausted" sentinel.
+func jitRegexBacktrackPop(handle Scmer) int64 {
+	st := handle.Any().(*jitRegexBacktrackStack)
+	n := len(st.positions)
+	if n == 0 {
+		return 0
+	}
+	pos := st.positions[n-1]
+	st.positions = st.positions[:n-1]
+	return pos
+}
 
 // jitConstantRegexpReplaceFunc is the interpreter implementation of the hidden
 // declaration the optimizer synthesizes for `(regexp_replace s "<const>" f)`
@@ -74,6 +150,80 @@ type jitRegexTerm struct {
 	kind    jitRegexTermKind
 	node    *syntax.Regexp
 	capture int
+}
+
+// jitCompileRegexProgramOrGo lowers pattern to a native byte-walk program when
+// the emitter supports every construct it uses, and otherwise returns
+// (nil, pattern) so the caller can keep the pattern on a Go regexp call rather
+// than failing the enclosing JIT compilation. `regexp_*` builtins and parser
+// terminals use this; the direct `(match … (regex …))` path still requires a
+// lowerable pattern.
+func jitCompileRegexProgramOrGo(pattern *regexp.Regexp) (*jitRegexProgram, *regexp.Regexp) {
+	program := jitCompileRegexProgram(pattern)
+	if jitRegexTermsEmittable(jitRegexFlatten(program.root, false)) {
+		return program, nil
+	}
+	return nil, pattern
+}
+
+// jitRegexTermsEmittable mirrors emitSequence / emitRepeat / emitAlternatives:
+// it returns false exactly when one of those would panic on a construct the
+// byte-walk emitter cannot lower (a non-tail-only, non-greedy unbounded
+// variable-width repeat - a greedy one always lowers now, either committed
+// via emitComplexTailRepeat or backtracked via emitBacktrackingRepeat).
+func jitRegexTermsEmittable(terms []jitRegexTerm) bool {
+	for i := 0; i < len(terms); i++ {
+		term := terms[i]
+		if term.kind != jitRegexNode {
+			continue
+		}
+		node := term.node
+		rest := terms[i+1:]
+		switch node.Op {
+		case syntax.OpAlternate:
+			for _, branch := range node.Sub {
+				if !jitRegexTermsEmittable(append(jitRegexFlatten(branch, false), rest...)) {
+					return false
+				}
+			}
+			return true
+		case syntax.OpQuest:
+			if !jitRegexTermsEmittable(append(jitRegexFlatten(node.Sub[0], false), rest...)) {
+				return false
+			}
+			return jitRegexTermsEmittable(rest)
+		case syntax.OpStar, syntax.OpPlus, syntax.OpRepeat:
+			body := node.Sub[0]
+			if !jitRegexTermsEmittable(jitRegexFlatten(body, false)) {
+				return false
+			}
+			if node.Op == syntax.OpRepeat && node.Max >= 0 {
+				return jitRegexTermsEmittable(rest)
+			}
+			if _, simple := jitRegexSimpleWidth(body); simple {
+				return jitRegexTermsEmittable(rest)
+			}
+			greedy := node.Flags&syntax.NonGreedy == 0
+			// Every greedy variable-width repeat is now emittable: the
+			// unambiguous case (emitComplexTailRepeat) commits without a
+			// stack, everything else (emitBacktrackingRepeat) backtracks
+			// iteration counts. Only a non-tail-only non-greedy repeat is
+			// still unsupported - see emitRepeat.
+			if jitRegexTailOnly(rest) || greedy {
+				return jitRegexTermsEmittable(rest)
+			}
+			return false
+		case syntax.OpLiteral:
+			if node.Flags&syntax.FoldCase != 0 {
+				for _, r := range node.Rune {
+					if r >= 0x80 {
+						return false // Unicode case folding is not native
+					}
+				}
+			}
+		}
+	}
+	return true
 }
 
 func jitCompileRegexProgram(pattern *regexp.Regexp) *jitRegexProgram {
@@ -602,10 +752,101 @@ func (emitter *jitRegexEmitter) emitRepeat(node *syntax.Regexp, min, max int, gr
 		emitter.emitSimpleRepeat(node, width, min, greedy, rest, successLabel, failLabel)
 		return
 	}
-	if !jitRegexTailOnly(rest) {
-		panic(fmt.Sprintf("jit: regex %q requires a variable-width repetition stack", emitter.program.pattern))
+	// A variable-width repeat commits without a backtracking stack when nothing
+	// consuming follows (tail), or - for a greedy repeat - when the body
+	// provably cannot swallow a byte the continuation needs (disjoint
+	// leading-byte sets, body non-nullable). The latter covers the
+	// quoted-string / backtick-identifier / block-comment token shapes
+	// `<q>(?:\\.|[^<q>\\])*<q>` whose body excludes the closing delimiter.
+	if jitRegexTailOnly(rest) || (greedy && jitRegexGreedyRepeatUnambiguous(node, rest)) {
+		emitter.emitComplexTailRepeat(node, min, rest, successLabel, failLabel)
+		return
 	}
-	emitter.emitComplexTailRepeat(node, min, rest, successLabel, failLabel)
+	if greedy {
+		// The body can start with a byte the continuation also needs (the
+		// doubled-delimiter escape shape, '' or ``): committing to the greedy
+		// maximum and trying the continuation once, like emitComplexTailRepeat
+		// does, is not always correct. emitBacktrackingRepeat gives back
+		// iterations one at a time until the continuation matches.
+		emitter.emitBacktrackingRepeat(node, min, rest, successLabel, failLabel)
+		return
+	}
+	// A non-greedy variable-width repeat that isn't tail-only would need to
+	// grow past a failed continuation while itself re-exploring alternatives -
+	// not built. The caller (jitCompileRegexProgramOrGo / a constant-regexp
+	// builtin) recovers this and keeps the pattern on a Go regexp call.
+	panic(fmt.Sprintf("jit: regex %q requires a variable-width repetition stack for a non-greedy repeat", emitter.program.pattern))
+}
+
+// emitBacktrackingRepeat lowers a greedy variable-width repeat whose
+// continuation cannot be proven unambiguous. It greedily matches the body,
+// pushing the cursor position before every attempt onto a growable stack;
+// when the continuation fails at the greedy maximum it gives back iterations
+// one at a time - popping the stack, restoring the cursor, retrying the
+// continuation - until either the continuation matches or the stack (and
+// with it every iteration count down to `min`) is exhausted. Only the
+// *iteration count* is backtracked here: which alternative matched within an
+// already-committed iteration is resolved irrevocably by emitAlternatives'
+// own save/restore, same as every other call into emitSequence.
+func (emitter *jitRegexEmitter) emitBacktrackingRepeat(node *syntax.Regexp, min int, rest []jitRegexTerm, successLabel, failLabel JITLabel) {
+	ctx := emitter.ctx
+	bodyTerms := jitRegexFlatten(node, len(emitter.captures) != 0)
+
+	for range min {
+		next := ctx.ReserveLabel()
+		emitter.emitSequence(bodyTerms, next, failLabel)
+		ctx.MarkLabel(next)
+	}
+
+	stackOff := ctx.AllocStack(16)
+	ctx.EmitMovRegImm64(ctx.ScratchReg, 0)
+	ctx.EmitStoreRegMem(ctx.ScratchReg, ctx.StackReg, stackOff)
+	ctx.EmitStoreRegMem(ctx.ScratchReg, ctx.StackReg, stackOff+8)
+	ctx.setStackPointer(jitStackRootFrameSP, stackOff-ctx.DynamicSP, true)
+	ctx.setStackPointer(jitStackRootFrameSP, stackOff+8-ctx.DynamicSP, true)
+	stackSlot := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: stackOff, Rooted: true}
+	{
+		handle := ctx.EmitGoCallScalar(GoFuncAddr(jitRegexBacktrackNew), nil, 2)
+		handle.Type = JITTypeUnknown
+		dst := stackSlot
+		ctx.EmitCopyScmerToDesc(&dst, &handle)
+		ctx.FreeDesc(&handle)
+	}
+	popCursor := func() {
+		popped := ctx.EmitGoCallScalar(GoFuncAddr(jitRegexBacktrackPop), []JITValueDesc{stackSlot}, 1)
+		ctx.EmitMovRegReg(emitter.cursor, popped.Reg)
+		ctx.FreeDesc(&popped)
+	}
+
+	loop := ctx.ReserveLabel()
+	bodyFailed := ctx.ReserveLabel()
+	tryContinuation := ctx.ReserveLabel()
+	backtrack := ctx.ReserveLabel()
+
+	ctx.MarkLabel(loop)
+	ctx.EmitGoCallVoid(GoFuncAddr(jitRegexBacktrackPush), []JITValueDesc{
+		stackSlot,
+		{Loc: LocReg, Reg: emitter.cursor, Type: tagInt},
+	})
+	emitter.emitSequence(bodyTerms, loop, bodyFailed)
+
+	ctx.MarkLabel(bodyFailed)
+	// The stack always has at least this iteration's own just-pushed entry;
+	// popping it both restores the pre-attempt cursor (this iteration matched
+	// nothing) and discards the redundant duplicate of what tryContinuation is
+	// about to try first.
+	popCursor()
+	emitter.emitResetCaptures(bodyTerms)
+
+	ctx.MarkLabel(tryContinuation)
+	emitter.emitSequence(rest, successLabel, backtrack)
+
+	ctx.MarkLabel(backtrack)
+	popCursor()
+	emitter.emitResetCaptures(bodyTerms)
+	ctx.EmitCmpRegImm32(emitter.cursor, 0)
+	ctx.EmitJump(CondEqual, failLabel)
+	ctx.EmitJmp(tryContinuation)
 }
 
 func jitRegexTailOnly(terms []jitRegexTerm) bool {
@@ -619,6 +860,125 @@ func jitRegexTailOnly(terms []jitRegexTerm) bool {
 		return false
 	}
 	return true
+}
+
+// jitRegexTermsFirstBytes is the leading-byte set of the first consuming term
+// in a flattened continuation. ok is false when a leading term is nullable (so
+// a later term could also be the first consumed) or its shape is not modelled.
+func jitRegexTermsFirstBytes(terms []jitRegexTerm) (firstByteSet, bool) {
+	var out firstByteSet
+	for _, term := range terms {
+		if term.kind != jitRegexNode {
+			continue
+		}
+		switch term.node.Op {
+		case syntax.OpEndText, syntax.OpEndLine, syntax.OpBeginLine,
+			syntax.OpBeginText, syntax.OpWordBoundary, syntax.OpNoWordBoundary,
+			syntax.OpEmptyMatch:
+			continue
+		}
+		fb, nullable := regexpFirstBytes(term.node)
+		out.union(fb)
+		if nullable || fb.any {
+			return out, false
+		}
+		return out, true
+	}
+	return out, false
+}
+
+// jitRegexGreedyRepeatUnambiguous proves that greedily matching `node` as many
+// times as possible, then matching `rest` once at that position, is equivalent
+// to the backtracking semantics: the body is non-nullable and provably cannot
+// start with the single delimiter byte the continuation opens with, so no
+// repeat iteration can swallow a byte `rest` would need. This is the
+// `<q>(?:\\.|[^<q>\\])*<q>` token shape (the negated body class excludes <q>).
+func jitRegexGreedyRepeatUnambiguous(node *syntax.Regexp, rest []jitRegexTerm) bool {
+	if regexpNullable(node) {
+		return false
+	}
+	delim, ok := jitRegexLeadingLiteralByte(rest)
+	if !ok {
+		return false
+	}
+	return !jitRegexCanStartWith(node, delim)
+}
+
+// jitRegexLeadingLiteralByte returns the fixed first byte of the first consuming
+// term of a continuation when that term is a plain literal (the closing
+// delimiter of a quoted token). ok is false otherwise.
+func jitRegexLeadingLiteralByte(terms []jitRegexTerm) (byte, bool) {
+	for _, term := range terms {
+		if term.kind != jitRegexNode {
+			continue
+		}
+		switch term.node.Op {
+		case syntax.OpEndText, syntax.OpEndLine, syntax.OpBeginLine,
+			syntax.OpBeginText, syntax.OpWordBoundary, syntax.OpNoWordBoundary,
+			syntax.OpEmptyMatch:
+			continue
+		case syntax.OpLiteral:
+			if len(term.node.Rune) == 0 || term.node.Flags&syntax.FoldCase != 0 {
+				return 0, false
+			}
+			b := byte(term.node.Rune[0])
+			if term.node.Rune[0] >= 0x80 {
+				return 0, false
+			}
+			return b, true
+		}
+		return 0, false
+	}
+	return 0, false
+}
+
+// jitRegexCanStartWith reports whether node can begin a match with byte b.
+// Correct for negated character classes (a negated class can match high bytes
+// yet still exclude an ASCII delimiter).
+func jitRegexCanStartWith(node *syntax.Regexp, b byte) bool {
+	switch node.Op {
+	case syntax.OpEmptyMatch, syntax.OpNoMatch, syntax.OpEndText, syntax.OpEndLine:
+		return false
+	case syntax.OpBeginText, syntax.OpBeginLine, syntax.OpWordBoundary, syntax.OpNoWordBoundary:
+		return false
+	case syntax.OpLiteral:
+		if len(node.Rune) == 0 {
+			return false
+		}
+		if node.Flags&syntax.FoldCase != 0 {
+			return true // conservative for case folding
+		}
+		return node.Rune[0] == rune(b)
+	case syntax.OpCharClass:
+		for i := 0; i+1 < len(node.Rune); i += 2 {
+			if rune(b) >= node.Rune[i] && rune(b) <= node.Rune[i+1] {
+				return true
+			}
+		}
+		return false
+	case syntax.OpAnyChar, syntax.OpAnyCharNotNL:
+		return true
+	case syntax.OpCapture, syntax.OpStar, syntax.OpPlus, syntax.OpQuest, syntax.OpRepeat:
+		return jitRegexCanStartWith(node.Sub[0], b)
+	case syntax.OpConcat:
+		for _, sub := range node.Sub {
+			if jitRegexCanStartWith(sub, b) {
+				return true
+			}
+			if !regexpNullable(sub) {
+				return false
+			}
+		}
+		return false
+	case syntax.OpAlternate:
+		for _, sub := range node.Sub {
+			if jitRegexCanStartWith(sub, b) {
+				return true
+			}
+		}
+		return false
+	}
+	return true // unmodelled: assume it can
 }
 
 func (emitter *jitRegexEmitter) emitSimpleRepeat(node *syntax.Regexp, width, min int, greedy bool, rest []jitRegexTerm, successLabel, failLabel JITLabel) {
@@ -1117,7 +1477,109 @@ func jitEmitConstantRegexpCaptures(ctx *JITContext, pattern *regexp.Regexp, valu
 	return captures
 }
 
+// jitEmitConstantRegexpMatches lowers `(regexp_matches s "<const>")` to a native
+// left-to-right byte walk that appends a slice-view of the input per
+// non-overlapping match. The result list is grown through a boxed accumulator so
+// it survives GC across the scan; no match string is copied. A pattern the byte
+// walk cannot scan, or a non-string / nil input at compile time, falls back to
+// one call to jitConstantRegexpMatches.
+func jitEmitConstantRegexpMatches(ctx *JITContext, pattern *regexp.Regexp, value JITValueDesc, result JITValueDesc) JITValueDesc {
+	program, goRegex := jitCompileRegexProgramOrGo(pattern)
+	if program == nil {
+		reArg := jitCopyScmerToPair(ctx, JITValueDesc{Loc: LocImm, Type: tagRegex, Imm: NewRegex(goRegex)})
+		ctx.TrackImm(NewRegex(goRegex))
+		src := value
+		ctx.EnsureDesc(&src)
+		out := ctx.EmitGoCallScalar(GoFuncAddr(jitConstantRegexpMatches), []JITValueDesc{reArg, src}, 2)
+		ctx.FreeDesc(&reArg)
+		out.Type, out.Rooted = JITTypeUnknown, true
+		return jitPlaceScmerIntoTarget(ctx, out, result)
+	}
+
+	input := ctx.stabilizeForNested(value)
+	inputOff := ctx.AllocStack(16)
+	accOff := ctx.AllocStack(16)
+	{
+		src := input
+		ctx.EnsureDesc(&src)
+		dst := JITValueDesc{Loc: LocStackPair, Type: tagString, StackOff: inputOff}
+		ctx.EmitCopyScmerToDesc(&dst, &src)
+	}
+	ctx.EmitMovRegImm64(ctx.ScratchReg, 0)
+	ctx.EmitStoreRegMem(ctx.ScratchReg, ctx.StackReg, accOff)
+	ctx.EmitStoreRegMem(ctx.ScratchReg, ctx.StackReg, accOff+8)
+	ctx.setStackPointer(jitStackRootFrameSP, inputOff-ctx.DynamicSP, true)
+	ctx.setStackPointer(jitStackRootFrameSP, accOff-ctx.DynamicSP, true)
+	ctx.setStackPointer(jitStackRootFrameSP, accOff+8-ctx.DynamicSP, true)
+	accSlot := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: accOff, Rooted: true}
+	inputSlot := func() JITValueDesc {
+		return JITValueDesc{Loc: LocStackPair, Type: tagString, StackOff: inputOff}
+	}
+
+	acc := ctx.EmitGoCallScalar(GoFuncAddr(jitRegexMatchesNewNative), nil, 2)
+	acc.Type = JITTypeUnknown
+	{
+		dst := accSlot
+		ctx.EmitCopyScmerToDesc(&dst, &acc)
+		ctx.FreeDesc(&acc)
+	}
+
+	onMatch := func(startOff, endOff JITValueDesc) {
+		in := inputSlot()
+		ctx.EmitGoCallVoid(GoFuncAddr(jitRegexMatchesAppendNative),
+			[]JITValueDesc{accSlot, in, startOff, endOff})
+	}
+	onEnd := func(resultSlot JITValueDesc) {
+		out := ctx.EmitGoCallScalar(GoFuncAddr(jitRegexMatchesFinishNative), []JITValueDesc{accSlot}, 2)
+		out.Type, out.Rooted = JITTypeUnknown, true
+		dst := resultSlot
+		ctx.EmitCopyScmerToDesc(&dst, &out)
+		ctx.FreeDesc(&out)
+	}
+	nilPath := func(resultSlot JITValueDesc) {
+		out := ctx.EmitGoCallScalar(GoFuncAddr(jitRegexMatchesFinishNative), []JITValueDesc{accSlot}, 2)
+		out.Type, out.Rooted = JITTypeUnknown, true
+		dst := resultSlot
+		ctx.EmitCopyScmerToDesc(&dst, &out)
+		ctx.FreeDesc(&out)
+	}
+
+	resultSlot := jitEmitRegexScanReplace(ctx, program, input, onMatch, onEnd, nilPath)
+	ctx.FreeDesc(&input)
+	return jitPlaceScmerIntoTarget(ctx, resultSlot, result)
+}
+
 func registerJITRegexBuiltins() {
+	Declare(&Globalenv, &Declaration{
+		Name: jitConstantRegexpMatchesName,
+		Fn: func(arguments ...Scmer) Scmer {
+			if len(arguments) != 2 || !arguments[0].IsRegex() {
+				panic("jit constant regexp matches expects a precompiled regex and a value")
+			}
+			return jitConstantRegexpMatches(arguments[0], arguments[1])
+		},
+		Type: &TypeDescriptor{
+			Kind:      "func",
+			Forbidden: true,
+			Params: []*TypeDescriptor{
+				{Kind: "any", Label: "pattern"},
+				{Kind: "any", Label: "value"},
+			},
+			Return:         &TypeDescriptor{Kind: "list"},
+			Const:          true,
+			JITVirtualArgs: true,
+			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				if len(sourceArgs) != 2 || len(args) != 2 {
+					panic("jit: malformed constant regexp matches")
+				}
+				pattern := sourceArgs[0].WithoutSourceInfo()
+				if !pattern.IsRegex() {
+					panic("jit: constant regexp matches requires a precompiled regex")
+				}
+				return jitEmitConstantRegexpMatches(ctx, pattern.Regex(), args[1], result)
+			},
+		},
+	})
 	Declare(&Globalenv, &Declaration{
 		Name: jitConstantRegexpTestName,
 		Fn: func(arguments ...Scmer) Scmer {
