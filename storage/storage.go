@@ -2787,6 +2787,15 @@ func Init(en scm.Env) {
 				}
 				requireTableMaintenance(db.Name, t.Name, maintenanceChangeEngine)
 
+				// A Memory/Cache -> Persisted transition below writes new blob
+				// files via s.rebuild(true) and only afterwards publishes the
+				// change. Hold a persistenceLifecycle read capability across
+				// that whole build->publish window, matching every other
+				// rebuild entry point: otherwise a concurrent CleanDatabase
+				// cannot see the new blob as owned yet and deletes it.
+				db.persistenceLifecycle.RLock()
+				defer db.persistenceLifecycle.RUnlock()
+
 				t.mu.Lock()
 
 				if (oldMode == Memory || oldMode == Cache) && newMode != Memory && newMode != Cache {

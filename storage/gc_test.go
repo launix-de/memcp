@@ -24,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -823,5 +824,149 @@ func TestBlobInventoryWaitsForGenerationPublication(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("audit did not resume after publication")
+	}
+}
+
+// pausingBlobPersistence pauses the first WriteBlob write right after the
+// blob file is durable on disk, so a test can deterministically interleave a
+// concurrent CleanDatabase call inside the build->publish window instead of
+// relying on goroutine-scheduling luck.
+type pausingBlobPersistence struct {
+	PersistenceEngine
+	once    sync.Once
+	written chan struct{}
+	resume  chan struct{}
+}
+
+func newPausingBlobPersistence(engine PersistenceEngine) *pausingBlobPersistence {
+	return &pausingBlobPersistence{PersistenceEngine: engine, written: make(chan struct{}), resume: make(chan struct{})}
+}
+
+func (p *pausingBlobPersistence) WriteBlob(hash string) io.WriteCloser {
+	return &pausingBlobWriter{WriteCloser: p.PersistenceEngine.WriteBlob(hash), p: p}
+}
+
+type pausingBlobWriter struct {
+	io.WriteCloser
+	p *pausingBlobPersistence
+}
+
+func (w *pausingBlobWriter) Close() error {
+	err := w.WriteCloser.Close()
+	w.p.once.Do(func() {
+		close(w.p.written)
+		<-w.p.resume
+	})
+	return err
+}
+
+// readContentColumn scans the "content" column, recovering a panic instead of
+// crashing the test process so a missing-blob corruption surfaces as a
+// regular test failure.
+func readContentColumn(tbl *table) (values []string, panicked any) {
+	defer func() { panicked = recover() }()
+	tbl.scan(nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, []string{}, trueCondition(), []string{"content"},
+		// mapReduce receives (accumulator, content); a[0] is the fold
+		// accumulator (unused here), a[1] is the requested column value.
+		scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { values = append(values, a[1].String()); return a[0] }),
+		scm.NewNil(), scm.NewNil(), false)
+	return
+}
+
+// TestOverflowRebuildBlobSurvivesConcurrentClean reproduces the file-upload
+// 500 seen in production: a shard-overflow rebuild (the automatic background
+// compaction triggered when ordinary INSERTs, e.g. uploaded file content,
+// push a shard past Settings.ShardSize) writes a new blob file to disk and
+// only later publishes the rebuilt generation into the table's active shard
+// list. Until that publish, activeBlobReferences cannot see the new blob
+// (the still-active old shard never referenced it), so a CleanDatabase sweep
+// racing this window treats the freshly-written blob as an orphan and
+// deletes it out from under the in-flight rebuild.
+func TestOverflowRebuildBlobSurvivesConcurrentClean(t *testing.T) {
+	defer setupGCTest(t)()
+	CreateDatabase("gcdb", false)
+	db := GetDatabase("gcdb")
+	pausing := newPausingBlobPersistence(db.persistence)
+	db.persistence = pausing
+
+	tbl, _ := CreateTable("gcdb", "uploads", Safe, false)
+	tbl.CreateColumn("id", "INT", nil, nil)
+	tbl.CreateColumn("content", "TEXT", nil, nil)
+
+	// A single distinct value would be optimized to a constant column and
+	// never touch OverlayBlob at all; use distinct values like the existing
+	// blob-producing fixtures elsewhere in this file (e.g. TestCleanNoOrphans).
+	uploaded := strings.Repeat("U", maxInlineBlobBytes+800)
+	tbl.Insert([]string{"id", "content"}, [][]scm.Scmer{
+		{scm.NewInt(1), scm.NewString(uploaded)},
+		{scm.NewInt(2), scm.NewString(strings.Repeat("V", maxInlineBlobBytes+800))},
+		{scm.NewInt(3), scm.NewString(strings.Repeat("W", maxInlineBlobBytes+800))},
+	}, nil, scm.NewNil(), false, nil)
+
+	topology := tbl.pinActiveTopology()
+	source := topology.shards[len(topology.shards)-1]
+
+	rebuildDone := make(chan struct{})
+	go func() {
+		defer close(rebuildDone)
+		// Force the overflow branch regardless of the configured ShardSize:
+		// this is exactly what an oversized upload triggers organically.
+		published, _ := tbl.appendFreeShardDurably(topology, source, Settings.ShardSize+1)
+		if published != nil {
+			topology.releaseOperation()
+		}
+	}()
+
+	select {
+	case <-pausing.written:
+		// blob file is now durable on disk; the rebuilt generation is not
+		// yet published into t.Shards.
+	case <-time.After(5 * time.Second):
+		t.Fatal("overflow rebuild never wrote the blob")
+	}
+
+	cleanDone := make(chan struct{})
+	go func() {
+		CleanDatabase(db)
+		close(cleanDone)
+	}()
+
+	select {
+	case <-cleanDone:
+		t.Fatal("CleanDatabase ran to completion while an overflow rebuild had an unpublished blob in flight")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(pausing.resume)
+
+	select {
+	case <-rebuildDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("overflow rebuild did not finish after being released")
+	}
+	select {
+	case <-cleanDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("CleanDatabase did not resume after the overflow rebuild published its generation")
+	}
+
+	values, panicked := readContentColumn(tbl)
+	if panicked != nil {
+		t.Fatalf("reading the uploaded rows panicked (a blob was deleted from under the in-flight rebuild): %v", panicked)
+	}
+	if len(values) != 3 {
+		t.Fatalf("uploaded rows corrupted by a concurrent GC race: got %d rows, want 3", len(values))
+	}
+	found := false
+	for _, v := range values {
+		if v == uploaded {
+			found = true
+		}
+	}
+	if !found {
+		for i, v := range values {
+			t.Logf("row %d: len=%d prefix=%q", i, len(v), v[:min(20, len(v))])
+		}
+		t.Fatalf("uploaded row content corrupted by a concurrent GC race")
 	}
 }
