@@ -3534,6 +3534,26 @@ func Init(en scm.Env) {
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
+		Name: "blob_cleanup",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			db := GetDatabase(scm.String(a[0]))
+			if db == nil {
+				panic("blob_cleanup: database does not exist: " + scm.String(a[0]))
+			}
+			blobsDeleted, shardsDeleted, complete := CleanDatabase(db)
+			return scm.NewSlice([]scm.Scmer{
+				scm.NewString("blobs_deleted"), scm.NewInt(int64(blobsDeleted)),
+				scm.NewString("shards_deleted"), scm.NewInt(int64(shardsDeleted)),
+				scm.NewString("complete"), scm.NewBool(complete),
+			})
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", HasSideEffects: true,
+			Description: "Explicit maintenance cleanup: deletes disk objects proven unowned by the complete active generation. complete=false means the ownership scan could not be proven this pass (e.g. a concurrent rebuild is publishing) and nothing was deleted; simply retry later.",
+			Params:      []*scm.TypeDescriptor{{Kind: "string", Label: "database"}},
+			Return:      &scm.TypeDescriptor{Kind: "list"},
+		},
+	})
+	scm.Declare(&en, &scm.Declaration{
 		Name: "stat",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			if len(a) == 0 {

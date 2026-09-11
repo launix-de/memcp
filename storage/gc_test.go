@@ -133,7 +133,7 @@ func TestCleanNoOrphans(t *testing.T) {
 	})
 
 	db := GetDatabase("gcdb")
-	b, s := CleanDatabase(db)
+	b, s, _ := CleanDatabase(db)
 	if b != 0 || s != 0 {
 		t.Errorf("expected 0 blobs, 0 shards deleted; got %d blobs, %d shards", b, s)
 	}
@@ -175,7 +175,7 @@ func TestCleanOrphanedBlob(t *testing.T) {
 	os.WriteFile(filepath.Join(orphanPath, orphanHash), []byte("fake"), 0640)
 
 	db := GetDatabase("gcdb")
-	b, _ := CleanDatabase(db)
+	b, _, _ := CleanDatabase(db)
 	if b != 1 {
 		t.Errorf("expected 1 orphaned blob deleted, got %d", b)
 	}
@@ -227,7 +227,7 @@ func TestCleanBlobsBackfillsMissingLegacyManifest(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	deleted, _ := CleanDatabase(tbl.schema)
+	deleted, _, _ := CleanDatabase(tbl.schema)
 	if deleted != 1 {
 		t.Fatalf("cleanup deleted %d blobs after legacy backfill, want 1 orphan", deleted)
 	}
@@ -282,7 +282,7 @@ func TestStartupCleanLoadsColdSchemaBeforeBlobDeletion(t *testing.T) {
 	if cold == nil || cold.srState != COLD {
 		t.Fatal("expected lazily loaded database after catalog discovery")
 	}
-	deleted, _ := CleanDatabase(cold)
+	deleted, _, _ := CleanDatabase(cold)
 	if deleted != 1 {
 		t.Fatalf("startup cleanup deleted %d blobs, want only the legacy orphan", deleted)
 	}
@@ -320,7 +320,7 @@ func TestCleanBlobsRejectsCorruptManifest(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(orphanPath, orphanHash), []byte("orphan"), 0640); err != nil {
 		t.Fatal(err)
 	}
-	deleted, _ := CleanDatabase(tbl.schema)
+	deleted, _, _ := CleanDatabase(tbl.schema)
 	if deleted != 0 {
 		t.Fatalf("cleanup trusted a corrupt manifest and deleted %d blobs", deleted)
 	}
@@ -389,7 +389,7 @@ func TestCleanOrphanedShardFile(t *testing.T) {
 	os.WriteFile(filepath.Join(Basepath, "gcdb", fakeName), []byte("garbage"), 0640)
 
 	db := GetDatabase("gcdb")
-	_, s := CleanDatabase(db)
+	_, s, _ := CleanDatabase(db)
 	if s != 1 {
 		t.Errorf("expected 1 orphaned shard file deleted, got %d", s)
 	}
@@ -417,7 +417,7 @@ func TestCleanIdempotent(t *testing.T) {
 
 	db := GetDatabase("gcdb")
 	CleanDatabase(db)
-	b, s := CleanDatabase(db)
+	b, s, _ := CleanDatabase(db)
 	if b != 0 || s != 0 {
 		t.Errorf("second Clean: expected 0+0, got %d+%d", b, s)
 	}
@@ -429,7 +429,7 @@ func TestCleanEmptyDatabase(t *testing.T) {
 
 	CreateDatabase("gcdb", false)
 	db := GetDatabase("gcdb")
-	b, s := CleanDatabase(db)
+	b, s, _ := CleanDatabase(db)
 	if b != 0 || s != 0 {
 		t.Errorf("empty db: expected 0+0, got %d+%d", b, s)
 	}
@@ -502,7 +502,7 @@ func TestCleanAfterRebuildSupersedesShards(t *testing.T) {
 	}
 
 	// GC should remove UUID-A files.
-	_, s := CleanDatabase(db)
+	_, s, _ := CleanDatabase(db)
 	if s == 0 {
 		t.Error("expected at least 1 orphaned shard file deleted, got 0")
 	}
@@ -553,7 +553,7 @@ func TestBlobManifestUpgradesIncompleteV1(t *testing.T) {
 	databases.Remove("gcdb")
 	LoadDatabases()
 	db := GetDatabase("gcdb")
-	if deleted, _ := CleanDatabase(db); deleted != 0 {
+	if deleted, _, _ := CleanDatabase(db); deleted != 0 {
 		t.Fatalf("upgrade deleted %d live blobs", deleted)
 	}
 	if len(blobFiles(t, "gcdb")) != len(values) {
@@ -596,7 +596,7 @@ func TestBlobManifestSurvivesUnchangedColdRebuild(t *testing.T) {
 	if !bytes.Equal(before, after) {
 		t.Fatal("unchanged cold rebuild overwrote ownership with a partial column map")
 	}
-	if deleted, _ := CleanDatabase(db); deleted != 0 {
+	if deleted, _, _ := CleanDatabase(db); deleted != 0 {
 		t.Fatalf("cold rebuild lost %d live blobs", deleted)
 	}
 }
@@ -648,7 +648,7 @@ func TestBlobUndercountRetainsCommittedOwners(t *testing.T) {
 			if got := len(blobFiles(t, "gcdb")); got != 3 {
 				t.Fatalf("decrement deleted committed blobs: got %d, want 3", got)
 			}
-			if deleted, _ := CleanDatabase(db); deleted != 0 {
+			if deleted, _, _ := CleanDatabase(db); deleted != 0 {
 				t.Fatalf("cleanup deleted %d owned blobs", deleted)
 			}
 			references, complete := activeBlobReferences(db, true)
@@ -668,7 +668,7 @@ func TestBlobUndercountRetainsCommittedOwners(t *testing.T) {
 			if got := len(blobFiles(t, "gcdb")); got != 3 {
 				t.Fatalf("drop deleted blobs before ownership check: %d", got)
 			}
-			if deleted, _ := CleanDatabase(db); deleted != 3 {
+			if deleted, _, _ := CleanDatabase(db); deleted != 3 {
 				t.Fatalf("cleanup deleted %d orphans, want 3", deleted)
 			}
 		})
@@ -713,7 +713,7 @@ func TestBlobInventoryListsMissingReferencesWithoutFetchingPayloads(t *testing.T
 	if report.Referenced != 3 || report.Listed != 3 || len(report.Missing) != 0 || report.Unreferenced != 0 {
 		t.Fatalf("healthy inventory: %+v", report)
 	}
-	if deleted, _ := CleanDatabase(db); deleted != 0 {
+	if deleted, _, _ := CleanDatabase(db); deleted != 0 {
 		t.Fatalf("cleanup deleted %d live blobs", deleted)
 	}
 	// Missing legacy manifests are discovered without publishing a backfill.
@@ -755,7 +755,7 @@ func TestBlobInventoryListsMissingReferencesWithoutFetchingPayloads(t *testing.T
 		t.Fatal("audit deleted the orphan")
 	}
 	db.persistence = backend
-	if deleted, _ := CleanDatabase(db); deleted != 1 {
+	if deleted, _, _ := CleanDatabase(db); deleted != 1 {
 		t.Fatalf("cleanup retained an unowned blob because another file is missing: deleted %d", deleted)
 	}
 	if got := len(blobFiles(t, "gcdb")); got != 0 {
@@ -860,13 +860,13 @@ func (w *pausingBlobWriter) Close() error {
 	return err
 }
 
-// readContentColumn scans the "content" column, recovering a panic instead of
-// crashing the test process so a missing-blob corruption surfaces as a
-// regular test failure.
-func readContentColumn(tbl *table) (values []string, panicked any) {
+// readColumn scans a single column, recovering a panic instead of crashing
+// the test process so a missing-blob corruption surfaces as a regular test
+// failure.
+func readColumn(tbl *table, col string) (values []string, panicked any) {
 	defer func() { panicked = recover() }()
-	tbl.scan(nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, []string{}, trueCondition(), []string{"content"},
-		// mapReduce receives (accumulator, content); a[0] is the fold
+	tbl.scan(nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, []string{}, trueCondition(), []string{col},
+		// mapReduce receives (accumulator, value); a[0] is the fold
 		// accumulator (unused here), a[1] is the requested column value.
 		scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { values = append(values, a[1].String()); return a[0] }),
 		scm.NewNil(), scm.NewNil(), false)
@@ -950,7 +950,7 @@ func TestOverflowRebuildBlobSurvivesConcurrentClean(t *testing.T) {
 		t.Fatal("CleanDatabase did not resume after the overflow rebuild published its generation")
 	}
 
-	values, panicked := readContentColumn(tbl)
+	values, panicked := readColumn(tbl, "content")
 	if panicked != nil {
 		t.Fatalf("reading the uploaded rows panicked (a blob was deleted from under the in-flight rebuild): %v", panicked)
 	}
@@ -969,4 +969,95 @@ func TestOverflowRebuildBlobSurvivesConcurrentClean(t *testing.T) {
 		}
 		t.Fatalf("uploaded row content corrupted by a concurrent GC race")
 	}
+}
+
+// blobCleanupCall invokes the "blob_cleanup" scm builtin registered by
+// storage.go's scm.Declare and returns its flat-list report as a map.
+func blobCleanupCall(t *testing.T, dbname string) map[string]scm.Scmer {
+	t.Helper()
+	fn, ok := scm.Globalenv.Vars[scm.Symbol("blob_cleanup")]
+	if !ok {
+		t.Fatal("blob_cleanup is not registered")
+	}
+	result := scm.Apply(fn, scm.NewString(dbname)).Slice()
+	if len(result)%2 != 0 {
+		t.Fatalf("blob_cleanup returned an odd-length list: %d", len(result))
+	}
+	report := make(map[string]scm.Scmer, len(result)/2)
+	for i := 0; i < len(result); i += 2 {
+		report[result[i].String()] = result[i+1]
+	}
+	return report
+}
+
+// TestBlobCleanupSCMFunction covers the "blob_cleanup" scm builtin that the
+// dashboard's cleanup action calls: a normal pass reports its deletions and
+// complete=true, while a pass that cannot prove ownership (the same corrupt
+// manifest fixture TestCleanBlobsRejectsCorruptManifest uses) reports
+// complete=false and deletes nothing, rather than silently claiming success.
+func TestBlobCleanupSCMFunction(t *testing.T) {
+	t.Run("normal", func(t *testing.T) {
+		defer setupGCTest(t)()
+		CreateDatabase("gcdb", false)
+		tbl, _ := CreateTable("gcdb", "docs", Safe, false)
+		tbl.CreateColumn("id", "INT", nil, nil)
+		tbl.CreateColumn("content", "TEXT", nil, nil)
+		insertLongRows(t, tbl, []string{
+			strings.Repeat("X", maxInlineBlobBytes+800),
+			strings.Repeat("Y", maxInlineBlobBytes+800),
+			strings.Repeat("Z", maxInlineBlobBytes+800),
+		})
+		if len(blobFiles(t, "gcdb")) == 0 {
+			t.Skip("no blobs created — OverlayBlob threshold not met")
+		}
+
+		orphanHash := "abcdefabcdefabcdefabcdefabcdefab"
+		orphanPath := filepath.Join(Basepath, "gcdb", "blob", orphanHash[:2], orphanHash[2:4])
+		if err := os.MkdirAll(orphanPath, 0750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(orphanPath, orphanHash), []byte("fake"), 0640); err != nil {
+			t.Fatal(err)
+		}
+
+		report := blobCleanupCall(t, "gcdb")
+		if got := scm.ToInt(report["blobs_deleted"]); got != 1 {
+			t.Fatalf("blobs_deleted = %d, want 1", got)
+		}
+		if !report["complete"].Bool() {
+			t.Fatal("complete = false, want true for a provable ownership scan")
+		}
+	})
+
+	t.Run("incomplete", func(t *testing.T) {
+		defer setupGCTest(t)()
+		CreateDatabase("gcdb", false)
+		tbl, _ := CreateTable("gcdb", "docs", Safe, false)
+		tbl.CreateColumn("id", "INT", nil, nil)
+		tbl.CreateColumn("content", "TEXT", nil, nil)
+		insertLongRows(t, tbl, []string{
+			strings.Repeat("p", maxInlineBlobBytes+1),
+			strings.Repeat("q", maxInlineBlobBytes+1),
+			strings.Repeat("r", maxInlineBlobBytes+1),
+		})
+
+		// Corrupt the active shard's manifest (bad checksum): the same fixture
+		// TestCleanBlobsRejectsCorruptManifest uses to force an unprovable scan.
+		shard := tbl.ActiveShards()[0]
+		writer := tbl.schema.persistence.WriteColumn(shard.uuid.String(), blobManifestColumn)
+		if _, err := writer.Write([]byte(blobManifestHeader + strings.Repeat("0", 64) + "\n" + strings.Repeat("f", 64) + "\n")); err != nil {
+			t.Fatal(err)
+		}
+		if err := writer.Close(); err != nil {
+			t.Fatal(err)
+		}
+
+		report := blobCleanupCall(t, "gcdb")
+		if got := scm.ToInt(report["blobs_deleted"]); got != 0 {
+			t.Fatalf("blobs_deleted = %d, want 0 for an unprovable scan", got)
+		}
+		if report["complete"].Bool() {
+			t.Fatal("complete = true, want false for a corrupt manifest")
+		}
+	})
 }

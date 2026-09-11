@@ -372,6 +372,7 @@ body{display:flex;flex-direction:column}
 <div class="tab-bar">
 <button class="tab-btn" id="tabbtn-db-tables" onclick="_switchDbTab('tables')">Tables</button>
 <button class="tab-btn" id="tabbtn-db-errors" onclick="_switchDbTab('errors')" data-admin-only>Errors</button>
+<button class="tab-btn" id="tabbtn-db-blobs" onclick="_switchDbTab('blobs')" data-admin-only>Blobs</button>
 <button class="tab-btn" id="tabbtn-db-console" onclick="_switchDbTab('console')">Console</button>
 </div>
 <div class="tab-panel" id="tabpanel-db-tables">
@@ -400,6 +401,22 @@ body{display:flex;flex-direction:column}
 <div style="display:flex;gap:8px;align-items:center;padding:10px 0" id="db-errors-pagination"></div>
 </div>
 </div><!-- end tabpanel-db-errors -->
+
+<div class="tab-panel" id="tabpanel-db-blobs" data-admin-only>
+<div class="browse-wrap">
+<div style="margin-bottom:12px;display:flex;gap:8px;align-items:center">
+<span id="db-blobs-status" style="color:#888;font-size:.8rem"></span>
+<button class="btn-warn" id="btn-reload-db-blobs" onclick="loadDbBlobs()">Reload</button>
+<button class="btn-danger" id="btn-cleanup-db-blobs" onclick="runDbBlobCleanup()">Run Cleanup</button>
+</div>
+<table class="browse-table" id="tbl-db-blobs">
+<thead><tr><th>Referenced</th><th>Listed on disk</th><th>Unreferenced</th><th>Missing</th></tr></thead>
+<tbody id="db-blobs-tbody"><tr><td colspan="4" style="color:#888;text-align:center">Loading…</td></tr></tbody>
+</table>
+<div id="db-blobs-missing" style="margin-top:10px;font-size:.8rem;color:#888"></div>
+<div id="db-blobs-cleanup-result" style="margin-top:10px;font-size:.85rem"></div>
+</div>
+</div><!-- end tabpanel-db-blobs -->
 
 <div class="tab-panel" id="tabpanel-db-console">
 <div class="console-wrap">
@@ -1110,7 +1127,7 @@ var _dbTab="tables";
 var _dbTabDb=null;
 function _switchDbTab(tab){
 _dbTab=tab;
-var tabs=["tables","errors","console"];
+var tabs=["tables","errors","blobs","console"];
 for(var i=0;i<tabs.length;i++){
 var p=document.getElementById("tabpanel-db-"+tabs[i]);
 var b=document.getElementById("tabbtn-db-"+tabs[i]);
@@ -1122,6 +1139,7 @@ if(tab==="tables") location.hash="db/"+encodeURIComponent(_dbTabDb);
 else location.hash="db/"+encodeURIComponent(_dbTabDb)+"/+"+tab;
 }
 if(tab==="errors") loadDbErrors();
+if(tab==="blobs") loadDbBlobs();
 if(tab==="console"){
 var lbl=document.getElementById("db-console-dbname");
 if(lbl)lbl.textContent=_dbTabDb||"";
@@ -1156,7 +1174,7 @@ if(b)b.classList.toggle("active",tabs[i]===tab);
 
 function _switchDbTabQuiet(tab){
 _dbTab=tab;
-var tabs=["tables","errors","console"];
+var tabs=["tables","errors","blobs","console"];
 for(var i=0;i<tabs.length;i++){
 var p=document.getElementById("tabpanel-db-"+tabs[i]);
 var b=document.getElementById("tabbtn-db-"+tabs[i]);
@@ -1227,6 +1245,40 @@ if(r.query)html+='<div style="color:#888;font-size:.7rem;text-transform:uppercas
 html+='<div style="color:#e74c3c;font-size:.7rem;text-transform:uppercase;margin:10px 0 4px">Error</div><pre style="color:#e74c3c;background:#1a1a2e;padding:10px;border-radius:4px;white-space:pre-wrap;word-break:break-all;font-size:.85rem">'+esc(r.error||"")+'</pre>';
 document.getElementById("error-detail-content").innerHTML=html;
 document.getElementById("error-detail-modal").style.display="flex";
+}
+
+/* DB blob storage stats for view-tables Blobs tab */
+function loadDbBlobs(){
+if(!_dbTabDb)return;
+var status=document.getElementById("db-blobs-status");
+if(status)status.textContent="Loading…";
+apiFetch(base+"/dashboard/api/db/"+encodeURIComponent(_dbTabDb)+"/blobs",renderDbBlobsTable);
+}
+function renderDbBlobsTable(data){
+var tbody=document.getElementById("db-blobs-tbody");
+if(!tbody)return;
+if(!data){tbody.innerHTML='<tr><td colspan="4" style="color:#e74c3c;text-align:center">Failed to load blob statistics.</td></tr>';return;}
+var missing=data.missing_blobs||[];
+tbody.innerHTML="<tr><td class='r'>"+fmt(data.referenced_blobs||0)+"</td><td class='r'>"+fmt(data.listed_blobs||0)+"</td><td class='r'>"+fmt(data.unreferenced_blobs||0)+"</td><td class='r'"+(missing.length?" style='color:#e74c3c'":"")+">"+fmt(missing.length)+"</td></tr>";
+var status=document.getElementById("db-blobs-status");
+if(status)status.textContent=data.unreferenced_blobs?data.unreferenced_blobs+" unreferenced blob(s) can be reclaimed by cleanup":"No unreferenced blobs";
+var missingEl=document.getElementById("db-blobs-missing");
+if(missingEl)missingEl.innerHTML=missing.length?("<b style='color:#e74c3c'>Missing (referenced but unreadable):</b> "+missing.map(esc).join(", ")):"";
+}
+function runDbBlobCleanup(){
+if(!_dbTabDb)return;
+if(!window.confirm("Run blob cleanup for database '"+_dbTabDb+"'? This permanently deletes disk objects proven unreferenced."))return;
+var result=document.getElementById("db-blobs-cleanup-result");
+if(result)result.innerHTML="<span style='color:#888'>Running cleanup…</span>";
+fetch(base+"/dashboard/api/db/"+encodeURIComponent(_dbTabDb)+"/blobs/cleanup",{method:"POST",credentials:"same-origin"})
+.then(function(r){if(!r.ok)throw new Error(r.status);return r.json();})
+.then(function(data){
+if(result)result.innerHTML=data.complete
+?("<span style='color:#2ecc71'>Cleanup complete: "+fmt(data.blobs_deleted||0)+" blob(s) and "+fmt(data.shards_deleted||0)+" shard file(s) deleted.</span>")
+:("<span style='color:#f39c12'>Ownership check was incomplete (a rebuild may be publishing) — nothing was deleted. Try again shortly.</span>");
+loadDbBlobs();
+})
+.catch(function(e){if(result)result.innerHTML="<span style='color:#e74c3c'>Cleanup failed: "+esc(e.message)+"</span>"});
 }
 
 function apiFetch(url,cb){
@@ -1530,7 +1582,7 @@ return;
 /* db/NAME/+errors or db/NAME/+console — literal + sigil for special tabs
    Table routes use @ sigil (db/NAME/@TABLE); both + and @ are encoded by
    encodeURIComponent (%2B / %40) so neither can appear literally from user data */
-m=hash.match(/^db\/([^/]+)\/\+(errors|console)$/);
+m=hash.match(/^db\/([^/]+)\/\+(errors|blobs|console)$/);
 if(m){
 var dbX=decodeURIComponent(m[1]),tabX=m[2];
 showView("view-tables");
@@ -1542,6 +1594,7 @@ setBreadcrumb([{label:"All Databases",href:"#databases"},{label:dbX}]);
 document.getElementById("tables-title").textContent="Tables in "+dbX;
 _switchDbTabQuiet(tabX);
 if(tabX==="errors") loadDbErrors();
+if(tabX==="blobs") loadDbBlobs();
 if(tabX==="console"){
 var lbl=document.getElementById("db-console-dbname");
 if(lbl)lbl.textContent=dbX;

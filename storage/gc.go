@@ -40,15 +40,17 @@ const blobManifestHeader = "memcp-blob-references-v2\n"
 
 // CleanDatabase removes only disk objects proven unowned by the complete active
 // generation. It serializes against rebuild/repartition publication, but does
-// not stop ordinary queries or DML.
-func CleanDatabase(db *database) (blobsDeleted, shardsDeleted int) {
+// not stop ordinary queries or DML. complete reports whether the ownership scan
+// could prove every active generation's references (false means this pass
+// deleted nothing and should simply be retried later).
+func CleanDatabase(db *database) (blobsDeleted, shardsDeleted int, complete bool) {
 	// Startup cleanup runs immediately after the lazy database catalog is
 	// discovered. An unloaded schema is not an empty schema: load its committed
 	// topology before proving that any disk object is unowned.
 	db.ensureLoaded()
 	db.persistenceLifecycle.Lock()
 	defer db.persistenceLifecycle.Unlock()
-	blobsDeleted = cleanBlobs(db)
+	blobsDeleted, complete = cleanBlobs(db)
 	shardsDeleted = cleanShards(db)
 	return
 }
@@ -58,14 +60,13 @@ func CleanDatabase(db *database) (blobsDeleted, shardsDeleted int) {
 // metadata and can lag after a crash, so it is never proof that deletion is
 // safe. Missing legacy manifests are reconstructed from committed column files;
 // corrupt manifests and all ambiguous I/O failures remain a fail-closed no-op.
-func cleanBlobs(db *database) int {
+func cleanBlobs(db *database) (deleted int, complete bool) {
 	references, complete := activeBlobReferences(db, true)
 	if !complete {
 		fmt.Printf("blob cleanup %s: ownership check incomplete; retaining all blobs\n", db.Name)
-		return 0
+		return 0, false
 	}
 
-	deleted := 0
 	db.persistence.WalkBlobs(func(hash string) {
 		defer db.lockBlobRef(hash)()
 		if _, live := references[hash]; !live {
@@ -73,7 +74,7 @@ func cleanBlobs(db *database) int {
 			deleted++
 		}
 	})
-	return deleted
+	return deleted, true
 }
 
 // BlobInventory describes listed objects, not payload readability or integrity.
@@ -359,10 +360,17 @@ func extractShardUUID(name string) string {
 // Clean runs CleanDatabase on all loaded databases and returns a summary string.
 func Clean() string {
 	totalBlobs, totalShards := 0, 0
+	incomplete := 0
 	for _, db := range databases.GetAll() {
-		b, s := CleanDatabase(db)
+		b, s, complete := CleanDatabase(db)
 		totalBlobs += b
 		totalShards += s
+		if !complete {
+			incomplete++
+		}
+	}
+	if incomplete > 0 {
+		return fmt.Sprintf("cleaned %d orphaned blobs, %d orphaned shard files (%d database(s) skipped: ownership check incomplete, retry later)", totalBlobs, totalShards, incomplete)
 	}
 	return fmt.Sprintf("cleaned %d orphaned blobs, %d orphaned shard files", totalBlobs, totalShards)
 }
