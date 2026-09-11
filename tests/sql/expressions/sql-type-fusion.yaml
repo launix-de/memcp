@@ -1,0 +1,275 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+# Unit coverage for the SQL type / collation resolution helpers in
+# lib/sql-types.scm. MemCP is dynamically typed: "any" is the default and only
+# operations that guarantee a result type sharpen it.
+
+metadata:
+  version: "1.0"
+  description: "SQL type and collation fusion helpers"
+  isolated: true
+
+setup:
+  - sql: "DROP TABLE IF EXISTS stf_doc"
+  - sql: "DROP TABLE IF EXISTS stf_ci"
+  - sql: "DROP TABLE IF EXISTS stf_dept"
+  - sql: |
+      CREATE TABLE stf_doc (
+        id INT PRIMARY KEY,
+        title VARCHAR(200),
+        weight INT
+      )
+  - sql: |
+      CREATE TABLE stf_ci (
+        id INT PRIMARY KEY,
+        nm VARCHAR(50) COLLATE utf8mb4_general_ci,
+        dept INT
+      )
+  - sql: |
+      CREATE TABLE stf_dept (id INT PRIMARY KEY, label VARCHAR(30))
+  - sql: "INSERT INTO stf_doc VALUES (1,'beta',5),(2,'Alpha',9)"
+  - sql: "INSERT INTO stf_ci VALUES (1,'banana',1),(2,'Apple',1),(3,'cherry',2),(4,'Date',2)"
+  - sql: "INSERT INTO stf_dept VALUES (1,'eng'),(2,'ops')"
+
+test_cases:
+  - name: "type predicates classify SQL type names"
+    scm: |
+      (begin
+        (define checks (list
+          (equal? (sql_text_type? "VARCHAR") true)
+          (equal? (sql_text_type? "LONGTEXT") true)
+          (equal? (sql_text_type? "BIGINT") false)
+          (equal? (sql_text_type? "any") false)
+          (equal? (sql_numeric_type? "DECIMAL") true)
+          (equal? (sql_numeric_type? "DOUBLE") true)
+          (equal? (sql_numeric_type? "VARCHAR") false)
+          (equal? (sql_temporal_type? "DATETIME") true)
+          (equal? (sql_temporal_type? "BIGINT") false)))
+        (if (reduce checks (lambda (acc c) (and acc c)) true) true
+          (error (concat "type predicate mismatch: " (string checks)))))
+
+  - name: "literal typing"
+    scm: |
+      (begin
+        (define checks (list
+          (equal? (sql_type_of_literal 3) "BIGINT")
+          (equal? (sql_type_of_literal 3.5) "DOUBLE")
+          (equal? (sql_type_of_literal "x") "VARCHAR")
+          (equal? (sql_type_of_literal nil) "NULL")
+          (equal? (sql_type_of_literal true) "BOOLEAN")))
+        (if (reduce checks (lambda (acc c) (and acc c)) true) true
+          (error (concat "literal typing mismatch: " (string checks)))))
+
+  - name: "arithmetic type fusion: unknown in, unknown out"
+    scm: |
+      (begin
+        (define checks (list
+          (equal? (sql_type_fuse_arith "add" "BIGINT" "BIGINT") "BIGINT")
+          (equal? (sql_type_fuse_arith "sub" "BIGINT" "DECIMAL") "DECIMAL")
+          (equal? (sql_type_fuse_arith "multiply" "BIGINT" "DOUBLE") "DOUBLE")
+          (equal? (sql_type_fuse_arith "divide" "BIGINT" "BIGINT") "DECIMAL")
+          (equal? (sql_type_fuse_arith "add" "BIGINT" "any") "any")
+          (equal? (sql_type_fuse_arith "add" "any" "any") "any")
+          (equal? (sql_type_fuse_arith "add" "VARCHAR" "BIGINT") "any")
+          (equal? (sql_type_fuse_arith "add" "BIGINT" "NULL") "NULL")))
+        (if (reduce checks (lambda (acc c) (and acc c)) true) true
+          (error (concat "arith fusion mismatch: " (string checks)))))
+
+  - name: "collation coercion: lower coercibility wins, nil is ignorable"
+    scm: |
+      (begin
+        (define checks (list
+          (equal? (sql_merge_collation nil (list "utf8mb4_bin" 2)) (list "utf8mb4_bin" 2))
+          (equal? (sql_merge_collation (list "utf8mb4_bin" 2) nil) (list "utf8mb4_bin" 2))
+          (equal? (sql_merge_collation (list "utf8mb4_general_ci" 4) (list "utf8mb4_bin" 2)) (list "utf8mb4_bin" 2))
+          (equal? (sql_merge_collation (list "utf8mb4_general_ci" 2) (list "utf8mb4_general_ci" 4)) (list "utf8mb4_general_ci" 2))))
+        (if (reduce checks (lambda (acc c) (and acc c)) true) true
+          (error (concat "collation coercion mismatch: " (string checks)))))
+
+  - name: "type merge for CASE / COALESCE / UNION branches"
+    scm: |
+      (begin
+        (define checks (list
+          (equal? (sql_info_type (sql_merge_info (sql_info nil "NULL" nil) (sql_info nil "BIGINT" nil))) "BIGINT")
+          (equal? (sql_info_type (sql_merge_info (sql_info nil "BIGINT" nil) (sql_info nil "VARCHAR" nil))) "VARCHAR")
+          (equal? (sql_info_type (sql_merge_info (sql_info nil "BIGINT" nil) (sql_info nil "any" nil))) "any")
+          (equal? (sql_info_type (sql_merge_infos (list (sql_info nil "BIGINT" nil) (sql_info nil "DOUBLE" nil)))) "DOUBLE")))
+        (if (reduce checks (lambda (acc c) (and acc c)) true) true
+          (error (concat "type merge mismatch: " (string checks)))))
+
+  - name: "function return contracts"
+    scm: |
+      (begin
+        (define checks (list
+          (equal? (nth (sql_function_rule (quote concat)) 1) "VARCHAR")
+          (equal? (nth (sql_function_rule (quote strlen)) 1) "BIGINT")
+          (equal? (nth (sql_function_rule (quote coalesceNil)) 2) "merge")
+          (equal? (nth (sql_function_rule (quote if)) 2) "case")
+          (equal? (nth (sql_function_rule (quote totally_unknown_head)) 1) "any")))
+        (if (reduce checks (lambda (acc c) (and acc c)) true) true
+          (error (concat "function contract mismatch: " (string checks)))))
+
+  - name: "sql_expr_info canonicalizes get_column and reads catalog type/collation"
+    scm: |
+      (begin
+        (define src (list "d" "memcp-tests" "stf_doc" false true))
+        (define title_info (sql_expr_info (list src)
+          (list (quote get_column) "d" true "TITLE" true)))
+        (define weight_info (sql_expr_info (list src)
+          (list (quote get_column) "d" true "weight" true)))
+        (define checks (list
+          /* case-corrected name, ignorecase flags dropped */
+          (equal? (sql_info_formula title_info) (list (quote get_column) "d" false "title" false))
+          (equal? (sql_info_type title_info) "VARCHAR")
+          (not (nil? (sql_info_collation title_info)))
+          (equal? (sql_info_type weight_info) "INT")
+          (nil? (sql_info_collation weight_info))))
+        (if (reduce checks (lambda (acc c) (and acc c)) true) true
+          (error (concat "get_column resolution mismatch: "
+            (string title_info) " / " (string weight_info)))))
+
+  - name: "arithmetic over resolved columns fuses to a numeric type"
+    scm: |
+      (begin
+        (define src (list "d" "memcp-tests" "stf_doc" false true))
+        (define info (sql_expr_info (list src)
+          (list (quote +) (list (quote get_column) "d" true "weight" true) 10)))
+        (if (and (sql_numeric_type? (sql_info_type info))
+                 (nil? (sql_info_collation info))) true
+          (error (concat "arith over columns: " (string info)))))
+
+  - name: "text comparison stays plain but carries the merged operand collation"
+    scm: |
+      (begin
+        (define src (list "d" "memcp-tests" "stf_doc" false true))
+        (define info (sql_expr_info (list src)
+          (list (quote equal??) (list (quote get_column) "d" true "title" true) "needle")))
+        (define f (sql_info_formula info))
+        (if (and (equal? (car f) (quote equal??))
+                 (equal? (cadr f) (list (quote get_column) "d" false "title" false))
+                 (equal? (sql_info_type info) "BOOLEAN")
+                 (not (nil? (sql_info_collation info)))) true
+          (error (concat "text comparison info wrong: " (string info)))))
+
+  - name: "sql_type_query_block canonicalizes all positions and records result-types"
+    scm: |
+      (begin
+        (define block (make_query_block "memcp-tests"
+          (list (list "d" "memcp-tests" "stf_doc" false true))
+          (list "t" (list (quote get_column) "d" true "TITLE" true)
+                "w2" (list (quote +) (list (quote get_column) "d" true "WEIGHT" true) 1))
+          (list (quote equal??) (list (quote get_column) "d" true "id" true) 5)
+          nil nil nil nil nil nil nil nil))
+        (define typed (sql_type_query_block block nil))
+        (define rtypes (qassoc_get (qb_facts typed) (quote result-types) nil))
+        (define checks (list
+          (equal? (qb_fields typed)
+            (list "t" (list (quote get_column) "d" false "title" false)
+                  "w2" (list (quote +) (list (quote get_column) "d" false "weight" false) 1)))
+          (equal? (qb_where typed)
+            (list (quote equal??) (list (quote get_column) "d" false "id" false) 5))
+          (equal? (sql_info_type (nth rtypes 1)) "VARCHAR")
+          (not (nil? (sql_info_collation (nth rtypes 1))))
+          (equal? (sql_info_type (nth rtypes 3)) "BIGINT")))
+        (if (reduce checks (lambda (acc c) (and acc c)) true) true
+          (error (concat "query block typing mismatch: " (string (qb_fields typed))
+            " | rtypes " (string rtypes)))))
+
+  # End-to-end: a case-preserving computed text ORDER BY key inherits its
+  # column's collation. On master physical_expr_collation only understood a bare
+  # get_column and treated SUBSTR(nm, ...) / CONCAT(...) as "bin", so these
+  # ordered byte-wise (Apple, Date, banana, cherry). Now case-insensitive.
+  # (UPPER/LOWER would hide the bug because they normalise case themselves.)
+  - name: "ORDER BY SUBSTR(ci-column) sorts case-insensitively"
+    sql: "SELECT nm FROM stf_ci ORDER BY SUBSTR(nm, 1, 10)"
+    expect:
+      data:
+        - {nm: "Apple"}
+        - {nm: "banana"}
+        - {nm: "cherry"}
+        - {nm: "Date"}
+
+  - name: "ORDER BY CONCAT(ci-column, literal) sorts case-insensitively"
+    sql: "SELECT nm FROM stf_ci ORDER BY CONCAT(nm, '')"
+    expect:
+      data:
+        - {nm: "Apple"}
+        - {nm: "banana"}
+        - {nm: "cherry"}
+        - {nm: "Date"}
+
+  - name: "a bin-collation column keeps byte ordering for a computed key"
+    sql: "SELECT title FROM stf_doc WHERE title IS NOT NULL ORDER BY SUBSTR(title, 1, 10)"
+    expect:
+      data:
+        - {title: "Alpha"}
+        - {title: "beta"}
+
+  - name: "sql_type_order_item resolves a computed text key to its collation callback"
+    scm: |
+      (begin
+        (define src (list "d" "memcp-tests" "stf_ci" false true))
+        (define computed (sql_type_order_item (list src)
+          (list (list (quote sql_substr) (list (quote get_column) "d" true "nm" true) 1 5) <)))
+        (define bare (sql_type_order_item (list src)
+          (list (list (quote get_column) "d" true "nm" true) <)))
+        (define checks (list
+          /* computed key: direction replaced by a resolved callback */
+          (not (or (equal? (cadr computed) <) (equal? (cadr computed) >)))
+          /* bare column: raw direction kept for the native scan-order path */
+          (equal? (cadr bare) <)
+          (equal? (car bare) (list (quote get_column) "d" false "nm" false))))
+        (if (reduce checks (lambda (acc c) (and acc c)) true) true
+          (error (concat "order item resolution mismatch: "
+            (string computed) " | " (string bare)))))
+
+  # Central get_column canonicalization: a mixed-case column name resolves in
+  # every clause position, not just where the physical lowerer happened to.
+  - name: "mixed-case column resolves in WHERE"
+    sql: "SELECT Id FROM stf_ci WHERE NM = 'Apple'"
+    expect:
+      data: [{Id: 2}]
+
+  - name: "mixed-case column resolves in GROUP BY and HAVING"
+    sql: "SELECT DEPT, COUNT(*) c FROM stf_ci GROUP BY DEPT HAVING COUNT(*) >= 2 ORDER BY DEPT"
+    expect:
+      data:
+        - {DEPT: 1, c: 2}
+        - {DEPT: 2, c: 2}
+
+  - name: "mixed-case column resolves in JOIN ON"
+    sql: "SELECT c.nm FROM stf_ci c JOIN stf_dept d ON d.ID = c.DEPT WHERE d.label = 'ops' ORDER BY c.nm"
+    expect:
+      data:
+        - {nm: "cherry"}
+        - {nm: "Date"}
+
+  - name: "result-types fact is populated for plain, grouped and joined queries"
+    scm: |
+      (begin
+        (define ci (list "c" "memcp-tests" "stf_ci" false true))
+        (define plain (sql_type_query_block (make_query_block "memcp-tests" (list ci)
+          (list "nm" (list (quote get_column) "c" true "nm" true)
+                "d" (list (quote get_column) "c" true "dept" true))
+          true nil nil nil nil nil nil nil nil) nil))
+        (define rt (qassoc_get (qb_facts plain) (quote result-types) nil))
+        (define checks (list
+          (equal? (sql_info_type (nth rt 1)) "VARCHAR")
+          (not (nil? (sql_info_collation (nth rt 1))))
+          (equal? (sql_info_type (nth rt 3)) "INT")
+          (nil? (sql_info_collation (nth rt 3)))))
+        (if (reduce checks (lambda (acc c) (and acc c)) true) true
+          (error (concat "result-types fact wrong: " (string rt)))))

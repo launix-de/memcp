@@ -1730,7 +1730,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			(parser '((atom "COLLATE" true) (define collation (regex "[a-zA-Z0-9_]+"))) '("collation" collation))
 			(parser '((atom "AUTO_INCREMENT" true) "=" (define collation (regex "[0-9]+"))) '("auto_increment" collation))
 		)))
-	) '((quote createtable) (coalesce schema2 schema) id (cons (quote list) cols) (cons (quote list) (merge options)) ifnotexists (quote tx))))
+	) '((quote sql_create_table) (coalesce schema2 schema) id (cons (quote list) cols) (cons (quote list) (merge options)) ifnotexists (quote tx))))
 
 	(define sql_alter_table (parser '(
 		(atom "ALTER" true)
@@ -1758,7 +1758,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 					(parser empty '((quote list)))
 				))
 				(define typeparams sql_column_attributes)
-			) (lambda (id) '((quote createcolumn) '((quote table) schema id) col type dimensions (cons 'list typeparams))))
+			) (lambda (id) '((quote sql_create_column) '((quote table) schema id) col type dimensions (cons 'list typeparams))))
 			(parser '((atom "MODIFY" true) (?(atom "COLUMN" true))
 				(define col sql_identifier)
 				(define type sql_column_type)

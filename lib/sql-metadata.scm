@@ -15,6 +15,30 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
+/* Resolve SQL table defaults into column metadata before storage sees DDL.
+The planner already uses that metadata with the canonical collate/Less factory.
+An explicit column COLLATE wins; non-character types retain their existing
+ordering. The inherited value is stored, so ADD COLUMN and restart agree. */
+(define sql_column_collation_defaults (lambda (typ attributes collation)
+	(if (and (string? collation) (not (equal? collation ""))
+		(nil? (get_assoc attributes "collate"))
+		(has? '("char" "varchar" "tinytext" "text" "mediumtext" "longtext") (toLower typ)))
+		(merge attributes (list "collate" collation)) attributes)))
+
+(define sql_create_table (lambda (schema name columns options ifnotexists tx)
+	(createtable schema name
+		(map columns (lambda (definition)
+			(match definition
+				'("column" col typ dimensions attributes)
+				(list "column" col typ dimensions
+					(sql_column_collation_defaults typ attributes (get_assoc options "collation")))
+				_ definition))) options ifnotexists tx)))
+
+(define sql_create_column (lambda (relation name typ dimensions attributes)
+	(createcolumn relation name typ dimensions
+		(sql_column_collation_defaults typ attributes
+			(get_assoc (show relation true) "Collation")))))
+
 /* SQL system-variable defaults and state have one owner. Both @@ reads and
 SHOW VARIABLES use this catalog; wire frontends only transport their results.
 Keep the 40 MiB packet advertisement used by PDO on the MySQL frontend. */

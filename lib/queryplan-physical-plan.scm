@@ -9861,11 +9861,19 @@ RecSet node is written into logical IR. */
 					(choose_scan_access_path driver candidates planning_session)))))))))
 
 (define optimize_logical_query (lambda (ir planning_session tx)
-	(join_reorder
-		(if (aggregate_pushdown_exact_access_dominates? ir planning_session tx)
-			ir
-			(aggregate_pushdown_logical ir planning_session tx))
-		planning_session tx)))
+	(begin
+		/* Central column resolution + type/collation annotation. Runs after
+		decorrelation has resolved get_column aliases and before logical join
+		reordering / physical lowering. Canonicalizes get_column names once here
+		instead of at every physical lowering site, records the result column
+		types/collations as a query-block fact, and resolves the collation of
+		computed text ORDER keys. */
+		(define typed_ir (sql_type_annotate_ir ir))
+		(join_reorder
+			(if (aggregate_pushdown_exact_access_dominates? typed_ir planning_session tx)
+				typed_ir
+				(aggregate_pushdown_logical typed_ir planning_session tx))
+			planning_session tx))))
 
 (define neumann_compile_pipeline (lambda (ast planning_session tx)
 	(begin
