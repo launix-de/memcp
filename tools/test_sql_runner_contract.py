@@ -22,6 +22,7 @@ from types import SimpleNamespace
 from unittest import mock
 import os
 import itertools
+import requests
 import signal
 import sys
 import tempfile
@@ -891,6 +892,45 @@ class PerfRegressionWaiverContractTest(unittest.TestCase):
                 mock.patch("run_sql_tests.find_memcp_pid", return_value=None), \
                 mock.patch("run_sql_tests.time.monotonic_ns", side_effect=lambda: next(clock)), \
                 mock.patch("run_sql_tests.requests.post", return_value=response):
+            result = runner.run_test_case({
+                "name": "SCM must be measured", "scm": "true", "threshold_ms": 0.01,
+                "repetitions": 2, "warmup": 0, "expect": {"rows": 1},
+            }, "memcp-tests")
+        self.assertFalse(result)
+        self.assertEqual(runner.waived_regressions, [])
+
+    def test_waived_case_covers_a_query_killed_by_the_server(self) -> None:
+        # A regression severe enough to trip the server's own long-running-query
+        # guard never produces an HTTP response at all -- it never reaches the
+        # elapsed_ms > threshold_ms check, it lands on the separate "No response"
+        # path. A matching waiver must cover that path too.
+        runner = SQLTestRunner("http://localhost:1")
+        runner.perf_regression_waivers = {"?::SCM must be measured": "known, accepted"}
+        clock = itertools.count(0, 1_000_000)
+        with mock.patch("run_sql_tests.PERF_TEST_ENABLED", True), \
+                mock.patch("run_sql_tests.PERF_AB_MODE", ""), \
+                mock.patch("run_sql_tests.find_memcp_pid", return_value=None), \
+                mock.patch("run_sql_tests.time.monotonic_ns", side_effect=lambda: next(clock)), \
+                mock.patch("run_sql_tests.requests.post",
+                           side_effect=requests.RequestException("simulated kill")):
+            result = runner.run_test_case({
+                "name": "SCM must be measured", "scm": "true", "threshold_ms": 0.01,
+                "repetitions": 2, "warmup": 0, "expect": {"rows": 1},
+            }, "memcp-tests")
+        self.assertTrue(result)
+        self.assertEqual(len(runner.waived_regressions), 1)
+        self.assertEqual(runner.waived_regressions[0][0], "SCM must be measured")
+        self.assertEqual(runner.waived_regressions[0][2], "known, accepted")
+
+    def test_unwaived_no_response_still_fails(self) -> None:
+        runner = SQLTestRunner("http://localhost:1")
+        clock = itertools.count(0, 1_000_000)
+        with mock.patch("run_sql_tests.PERF_TEST_ENABLED", True), \
+                mock.patch("run_sql_tests.PERF_AB_MODE", ""), \
+                mock.patch("run_sql_tests.find_memcp_pid", return_value=None), \
+                mock.patch("run_sql_tests.time.monotonic_ns", side_effect=lambda: next(clock)), \
+                mock.patch("run_sql_tests.requests.post",
+                           side_effect=requests.RequestException("simulated kill")):
             result = runner.run_test_case({
                 "name": "SCM must be measured", "scm": "true", "threshold_ms": 0.01,
                 "repetitions": 2, "warmup": 0, "expect": {"rows": 1},

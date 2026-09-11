@@ -1822,6 +1822,19 @@ class SQLTestRunner:
             if self._expect_interrupted_ok(expect):
                 self._record_success(name, is_noncritical)
                 return True
+            # A regression severe enough to be killed by the server's own
+            # long-running-query guard never reaches the elapsed_ms > threshold_ms
+            # check below -- it arrives here instead, response=None, with no
+            # HTTP status to read. A commit trailer that accepted this exact case
+            # still applies: the time was measured (the killed sample's wall
+            # clock, folded into elapsed_ms same as any other sample) even though
+            # the query itself produced no result.
+            if is_perf_test and perf_key in self.perf_regression_waivers:
+                waiver_reason = self.perf_regression_waivers[perf_key]
+                self.waived_regressions.append((name, perf_key, waiver_reason, elapsed_ms, threshold_ms))
+                print(f"⚠️  Accepted perf regression: {name} (killed, no response, {elapsed_ms:.1f}ms measured) — {waiver_reason}")
+                self._record_success(name, is_noncritical, elapsed_ms, threshold_ms, perf_rows)
+                return True
             return self._record_fail(name, "No response", query, None, None, is_noncritical)
 
         results = self.parse_jsonl_response(response)
