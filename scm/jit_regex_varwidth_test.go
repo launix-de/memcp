@@ -21,10 +21,13 @@ import (
 	"testing"
 )
 
-// A variable-width greedy repeat whose body provably cannot swallow the
-// continuation's leading delimiter byte (the quoted-string / block-comment
-// token shapes) lowers to a native byte walk; a doubled-delimiter escape needs
-// a backtracking stack and falls back to a correct Go regexp call.
+// A variable-width greedy repeat lowers to a native byte walk either way now:
+// when the body provably cannot swallow the continuation's leading delimiter
+// byte (the backslash-escaped quoted-string / block-comment token shapes),
+// emitComplexTailRepeat commits without a stack; a doubled-delimiter escape
+// ('', ``) needs emitBacktrackingRepeat's real position-backtracking stack
+// (exercised against actual JIT-compiled code, not just this classification,
+// by TestJITRegexBacktrackingRepeat).
 func TestJITRegexVariableWidthRepeat(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -40,9 +43,9 @@ func TestJITRegexVariableWidthRepeat(t *testing.T) {
 			[]string{`/* a */`, `/* * / */ x`, `/* unterminated`, `/ not`}},
 		{"number", `[0-9]+(?:\.[0-9]*)?(?:[eE][+-]?[0-9]+)?`, true,
 			[]string{`12`, `12.5`, `12.5e-3`, `12.e9`, `x`}},
-		{"sqstr-doubled", `'(?:''|[^'])*'`, false,
+		{"sqstr-doubled", `'(?:''|[^'])*'`, true,
 			[]string{`'a''b'`, `'ab'cd'`, `'unterminated`}},
-		{"backtick-doubled", "`(?:``|[^`])*`", false,
+		{"backtick-doubled", "`(?:``|[^`])*`", true,
 			[]string{"`a``b`", "`a`b`", "`unterminated"}},
 	}
 	for _, tc := range cases {

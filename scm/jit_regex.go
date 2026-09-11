@@ -68,6 +68,44 @@ func jitRegexMatchesFinishNative(acc Scmer) Scmer {
 	return NewSlice(*acc.Any().(*[]Scmer))
 }
 
+// jitRegexBacktrackStack backs emitBacktrackingRepeat's growable position
+// stack for a greedy variable-width repeat whose continuation cannot be
+// proven unambiguous (jitRegexGreedyRepeatUnambiguous is false) - the
+// doubled-delimiter escape shape ('', ``) where the repeat body and the
+// closing delimiter share a leading byte. Stored values are raw cursor
+// pointers into the string being matched. The stack holds no live reference
+// to that string and needs none: Go's GC does not relocate heap memory, and
+// the caller (jitMatchStableValue / stabilizeForNested) already keeps the
+// string's backing array alive as a properly rooted Scmer for the whole
+// match, so a plain int64 alias of one of its addresses stays valid.
+type jitRegexBacktrackStack struct {
+	positions []int64
+}
+
+func jitRegexBacktrackNew() Scmer {
+	st := &jitRegexBacktrackStack{positions: make([]int64, 0, 16)}
+	return NewAny(st)
+}
+
+func jitRegexBacktrackPush(handle Scmer, pos int64) {
+	st := handle.Any().(*jitRegexBacktrackStack)
+	st.positions = append(st.positions, pos)
+}
+
+// jitRegexBacktrackPop returns the most recently pushed position, or 0 if the
+// stack is empty. 0 is never a valid cursor (a pointer into a live Go string
+// is never nil), so it doubles as the "backtracking exhausted" sentinel.
+func jitRegexBacktrackPop(handle Scmer) int64 {
+	st := handle.Any().(*jitRegexBacktrackStack)
+	n := len(st.positions)
+	if n == 0 {
+		return 0
+	}
+	pos := st.positions[n-1]
+	st.positions = st.positions[:n-1]
+	return pos
+}
+
 // jitConstantRegexpReplaceFunc is the interpreter implementation of the hidden
 // declaration the optimizer synthesizes for `(regexp_replace s "<const>" f)`
 // where f is a function. The precompiled regex is applied once; the JIT emitter
@@ -130,9 +168,9 @@ func jitCompileRegexProgramOrGo(pattern *regexp.Regexp) (*jitRegexProgram, *rege
 
 // jitRegexTermsEmittable mirrors emitSequence / emitRepeat / emitAlternatives:
 // it returns false exactly when one of those would panic on a construct the
-// byte-walk emitter cannot lower (an unbounded variable-width repeat whose
-// continuation neither is empty nor has a leading-byte set disjoint from the
-// body).
+// byte-walk emitter cannot lower (a non-tail-only, non-greedy unbounded
+// variable-width repeat - a greedy one always lowers now, either committed
+// via emitComplexTailRepeat or backtracked via emitBacktrackingRepeat).
 func jitRegexTermsEmittable(terms []jitRegexTerm) bool {
 	for i := 0; i < len(terms); i++ {
 		term := terms[i]
@@ -166,7 +204,12 @@ func jitRegexTermsEmittable(terms []jitRegexTerm) bool {
 				return jitRegexTermsEmittable(rest)
 			}
 			greedy := node.Flags&syntax.NonGreedy == 0
-			if jitRegexTailOnly(rest) || (greedy && jitRegexGreedyRepeatUnambiguous(body, rest)) {
+			// Every greedy variable-width repeat is now emittable: the
+			// unambiguous case (emitComplexTailRepeat) commits without a
+			// stack, everything else (emitBacktrackingRepeat) backtracks
+			// iteration counts. Only a non-tail-only non-greedy repeat is
+			// still unsupported - see emitRepeat.
+			if jitRegexTailOnly(rest) || greedy {
 				return jitRegexTermsEmittable(rest)
 			}
 			return false
@@ -719,10 +762,91 @@ func (emitter *jitRegexEmitter) emitRepeat(node *syntax.Regexp, min, max int, gr
 		emitter.emitComplexTailRepeat(node, min, rest, successLabel, failLabel)
 		return
 	}
-	// Anything left needs a real position-backtracking stack, which the emitter
-	// does not build. The caller (jitCompileRegexProgramOrGo / a constant-regexp
+	if greedy {
+		// The body can start with a byte the continuation also needs (the
+		// doubled-delimiter escape shape, '' or ``): committing to the greedy
+		// maximum and trying the continuation once, like emitComplexTailRepeat
+		// does, is not always correct. emitBacktrackingRepeat gives back
+		// iterations one at a time until the continuation matches.
+		emitter.emitBacktrackingRepeat(node, min, rest, successLabel, failLabel)
+		return
+	}
+	// A non-greedy variable-width repeat that isn't tail-only would need to
+	// grow past a failed continuation while itself re-exploring alternatives -
+	// not built. The caller (jitCompileRegexProgramOrGo / a constant-regexp
 	// builtin) recovers this and keeps the pattern on a Go regexp call.
-	panic(fmt.Sprintf("jit: regex %q requires a variable-width repetition stack", emitter.program.pattern))
+	panic(fmt.Sprintf("jit: regex %q requires a variable-width repetition stack for a non-greedy repeat", emitter.program.pattern))
+}
+
+// emitBacktrackingRepeat lowers a greedy variable-width repeat whose
+// continuation cannot be proven unambiguous. It greedily matches the body,
+// pushing the cursor position before every attempt onto a growable stack;
+// when the continuation fails at the greedy maximum it gives back iterations
+// one at a time - popping the stack, restoring the cursor, retrying the
+// continuation - until either the continuation matches or the stack (and
+// with it every iteration count down to `min`) is exhausted. Only the
+// *iteration count* is backtracked here: which alternative matched within an
+// already-committed iteration is resolved irrevocably by emitAlternatives'
+// own save/restore, same as every other call into emitSequence.
+func (emitter *jitRegexEmitter) emitBacktrackingRepeat(node *syntax.Regexp, min int, rest []jitRegexTerm, successLabel, failLabel JITLabel) {
+	ctx := emitter.ctx
+	bodyTerms := jitRegexFlatten(node, len(emitter.captures) != 0)
+
+	for range min {
+		next := ctx.ReserveLabel()
+		emitter.emitSequence(bodyTerms, next, failLabel)
+		ctx.MarkLabel(next)
+	}
+
+	stackOff := ctx.AllocStack(16)
+	ctx.EmitMovRegImm64(ctx.ScratchReg, 0)
+	ctx.EmitStoreRegMem(ctx.ScratchReg, ctx.StackReg, stackOff)
+	ctx.EmitStoreRegMem(ctx.ScratchReg, ctx.StackReg, stackOff+8)
+	ctx.setStackPointer(jitStackRootFrameSP, stackOff-ctx.DynamicSP, true)
+	ctx.setStackPointer(jitStackRootFrameSP, stackOff+8-ctx.DynamicSP, true)
+	stackSlot := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: stackOff, Rooted: true}
+	{
+		handle := ctx.EmitGoCallScalar(GoFuncAddr(jitRegexBacktrackNew), nil, 2)
+		handle.Type = JITTypeUnknown
+		dst := stackSlot
+		ctx.EmitCopyScmerToDesc(&dst, &handle)
+		ctx.FreeDesc(&handle)
+	}
+	popCursor := func() {
+		popped := ctx.EmitGoCallScalar(GoFuncAddr(jitRegexBacktrackPop), []JITValueDesc{stackSlot}, 1)
+		ctx.EmitMovRegReg(emitter.cursor, popped.Reg)
+		ctx.FreeDesc(&popped)
+	}
+
+	loop := ctx.ReserveLabel()
+	bodyFailed := ctx.ReserveLabel()
+	tryContinuation := ctx.ReserveLabel()
+	backtrack := ctx.ReserveLabel()
+
+	ctx.MarkLabel(loop)
+	ctx.EmitGoCallVoid(GoFuncAddr(jitRegexBacktrackPush), []JITValueDesc{
+		stackSlot,
+		{Loc: LocReg, Reg: emitter.cursor, Type: tagInt},
+	})
+	emitter.emitSequence(bodyTerms, loop, bodyFailed)
+
+	ctx.MarkLabel(bodyFailed)
+	// The stack always has at least this iteration's own just-pushed entry;
+	// popping it both restores the pre-attempt cursor (this iteration matched
+	// nothing) and discards the redundant duplicate of what tryContinuation is
+	// about to try first.
+	popCursor()
+	emitter.emitResetCaptures(bodyTerms)
+
+	ctx.MarkLabel(tryContinuation)
+	emitter.emitSequence(rest, successLabel, backtrack)
+
+	ctx.MarkLabel(backtrack)
+	popCursor()
+	emitter.emitResetCaptures(bodyTerms)
+	ctx.EmitCmpRegImm32(emitter.cursor, 0)
+	ctx.EmitJump(CondEqual, failLabel)
+	ctx.EmitJmp(tryContinuation)
 }
 
 func jitRegexTailOnly(terms []jitRegexTerm) bool {
