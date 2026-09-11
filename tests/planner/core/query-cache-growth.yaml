@@ -23,13 +23,6 @@ setup:
   - scm: "(rebuild (table \"memcp-tests\" \"cg_rows\") true false)"
 test_cases:
   - name: "Literal parameterizer compiles natively"
-    # The token-walk implementation is being replaced by a (parser)-combinator
-    # rewrite (worktree preparser-parser-kleene) that JIT-compiles; this stays
-    # a visible, tracked failure rather than a silently accepted one until
-    # that lands. The interpreter fallback is functionally correct and the
-    # hot-path cost is still small (~100us/parse) -- this only asserts the
-    # aspirational JIT property, not correctness.
-    noncritical: true
     scm: |
       (if (equal? (jit? (jit parameterize_sql_select_literals)) (jit-enabled?))
         true (error "literal parameterizer fell back to the interpreter"))
