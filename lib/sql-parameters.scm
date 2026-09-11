@@ -18,7 +18,7 @@ belongs with SQL scopes and literal syntax. The ordinary parser still validates
 the complete statement. Tokenization uses the runtime's generic regex engine. */
 (define sql_parameter_tokens (lambda (query)
 	(regexp_matches query
-		"[ \\t\\r\\n]+|--[^\\n]*|#[^\\n]*|/\\*(?s:.*?)\\*/|`(?:\\\\.|``|[^`\\\\])*`|'(?:\\\\.|[^'\\\\])*'|\"(?:\\\\.|[^\"\\\\])*\"|[a-zA-Z_$][a-zA-Z0-9_$]*|[0-9]+(?:\\.[0-9]*)?(?:[eE][+-]?[0-9]+)?|(?s:.)")))
+		"[ \\t\\r\\n]+|--[^\\n]*|#[^\\n]*|/\\*(?s:.*?)\\*/|`(?:\\\\.|``|[^`\\\\])*`|'(?:\\\\.|''|[^'\\\\])*'|\"(?:\\\\.|\"\"|[^\"\\\\])*\"|[a-zA-Z_$][a-zA-Z0-9_$]*|[0-9]+(?:\\.[0-9]*)?(?:[eE][+-]?[0-9]+)?|(?s:.)")))
 
 (define sql_parameter_prefix (lambda (query)
 	(regexp_test (toUpper (strtrim query))
