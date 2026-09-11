@@ -430,6 +430,53 @@ def performance_case_key(spec_file: str, name: str) -> str:
     return f"{normalized}::{name}"
 
 
+# A commit that knowingly trades performance for something else (a correctness
+# fix, a necessary architectural change) can say so explicitly instead of
+# forcing a maintainer to bypass CI by hand. One line per accepted case, using
+# the exact key `performance_case_key` already prints in a "Too slow" failure:
+#
+#   Perf-Regression-Accepted: tests/performance/foo.yaml::Some case name | why
+#
+# The key must match exactly -- no prefixes, no globs -- so a waiver can only
+# ever cover the specific case it names. Waivers only ever come from the
+# commit messages of the PR under review (see PERF_REGRESSION_WAIVERS_FILE
+# below); there is no way to waive a case outside of that review, and the
+# waiver's reason is permanently in `git log` for whoever reads it next.
+PERF_REGRESSION_ACCEPTED_RE = re.compile(r"^Perf-Regression-Accepted:\s*(.+)$", re.MULTILINE)
+
+
+def parse_perf_regression_waivers(commit_messages: str) -> Dict[str, str]:
+    waivers: Dict[str, str] = {}
+    for match in PERF_REGRESSION_ACCEPTED_RE.finditer(commit_messages or ""):
+        rest = match.group(1).strip()
+        if "|" in rest:
+            key, reason = rest.split("|", 1)
+            key, reason = key.strip(), reason.strip()
+        else:
+            key, reason = rest, ""
+        if key:
+            waivers[key] = reason
+    return waivers
+
+
+def load_perf_regression_waivers() -> Dict[str, str]:
+    """Load accepted-regression waivers for this run, if any.
+
+    Source: PERF_REGRESSION_WAIVERS_FILE, a file the CI workflow populates
+    with `git log <base>..<head> --format=%B` for the PR under review.
+    Unset (the default, including every local/manual run): no waivers, every
+    regression fails exactly as before.
+    """
+    path = os.environ.get("PERF_REGRESSION_WAIVERS_FILE")
+    if not path:
+        return {}
+    try:
+        commit_messages = Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {}
+    return parse_perf_regression_waivers(commit_messages)
+
+
 def performance_case_fingerprint(
     test_case: Dict[str, Any], suite_setup: Any = None, suite_syntax: Any = None
 ) -> str:
@@ -699,6 +746,8 @@ class SQLTestRunner:
         self.perf_baselines = {}  # test_name -> {"time_ms": float, "rows": int}
         self.perf_results = {}  # test_name -> {"time_ms": float, "rows": int}
         self.perf_seen = set()
+        self.perf_regression_waivers: Dict[str, str] = load_perf_regression_waivers()  # case_key -> reason
+        self.waived_regressions = []  # [(name, case_key, reason, elapsed_ms, threshold_ms)]
         self.log_times = log_times  # emit QUERY_TIME ns=... lines for A/B benchmarking
         self.fail_fast = fail_fast
         self.current_spec_file = None
@@ -1793,9 +1842,19 @@ class SQLTestRunner:
                 f"{elapsed_ms:.3f}ms per repetition ({change_pct:+.1f}%)"
             )
         if is_perf_test and PERF_AB_MODE != "record" and elapsed_ms > threshold_ms:
-            diag = self._run_on_fail(test_case, database)
-            return self._record_fail(name, f"Too slow: {elapsed_ms:.1f}ms > {threshold_ms:.0f}ms", query, response,
-                                     test_case.get("expect"), is_noncritical, elapsed_ms, threshold_ms, diag)
+            waiver_reason = self.perf_regression_waivers.get(perf_key)
+            if waiver_reason is None:
+                diag = self._run_on_fail(test_case, database)
+                print(f"    Hint: if this regression is known and accepted, add to a commit message:")
+                print(f"      Perf-Regression-Accepted: {perf_key} | <reason>")
+                return self._record_fail(name, f"Too slow: {elapsed_ms:.1f}ms > {threshold_ms:.0f}ms", query, response,
+                                         test_case.get("expect"), is_noncritical, elapsed_ms, threshold_ms, diag)
+            # A commit trailer named this exact case: report the regression
+            # loudly but let the case through to the normal success path
+            # below (which still validates expect: and records the real
+            # numbers) instead of failing the build.
+            self.waived_regressions.append((name, perf_key, waiver_reason, elapsed_ms, threshold_ms))
+            print(f"⚠️  Accepted perf regression: {name} ({elapsed_ms:.1f}ms > {threshold_ms:.0f}ms) — {waiver_reason}")
 
         # Hard wall-clock limit — applies to every non-perf test case. A query
         # without an explicit `max_time` annotation must finish within
@@ -2074,6 +2133,7 @@ class SQLTestRunner:
             return True
 
         suite_start = time.perf_counter()
+        waived_before_suite = len(self.waived_regressions)
         self.ensure_runner_config_loaded()
 
         # Load performance baselines for this machine
@@ -2212,6 +2272,11 @@ class SQLTestRunner:
                 print(f"   {'⚠️' if is_noncrit else '❌'} {name}{suffix}")
         else:
             print("🎉 All tests passed!")
+        suite_waivers = self.waived_regressions[waived_before_suite:]
+        if suite_waivers:
+            print(f"⚠️  Accepted regressions: {len(suite_waivers)}")
+            for waived_name, waived_key, waived_reason, waived_ms, waived_threshold_ms in suite_waivers:
+                print(f"   ⚠️  {waived_name} ({waived_ms:.1f}ms > {waived_threshold_ms:.0f}ms) — {waived_reason}")
         print(f"⏱️  Suite duration: {self._format_duration(time.perf_counter() - suite_start)}")
         print("="*60)
 

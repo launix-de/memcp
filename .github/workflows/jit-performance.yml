@@ -36,12 +36,26 @@ jobs:
         with:
           ref: ${{ github.event_name == 'pull_request' && format('refs/pull/{0}/merge', github.event.pull_request.number) || github.sha }}
           path: candidate
+          fetch-depth: 0 # full history: needed to list this PR's commit messages below
 
       - name: Check out exact base revision
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || 'master' }}
           path: base
+
+      - name: Collect accepted-regression waivers from this PR's commits
+        # A commit can name an exact perf case it knowingly regresses (see
+        # `Perf-Regression-Accepted:` in run_sql_tests.py) instead of a
+        # maintainer bypassing this check by hand. Scoped to this PR's own
+        # commits only -- never to master or an unrelated PR. workflow_dispatch
+        # has no PR to scope to, so it gets no waivers file at all.
+        if: github.event_name == 'pull_request'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git -C candidate log ${{ github.event.pull_request.base.sha }}..HEAD --format=%B \
+            > "$GITHUB_WORKSPACE/jit-perf-regression-waivers.txt"
 
       - name: Check out patched Go compiler
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -126,6 +140,7 @@ jobs:
             MEMCP_TEST_JOBS=4 \
             MEMCP_TEST_WORKTREE="$GITHUB_WORKSPACE/candidate" \
             MEMCP_TEST_DATA_DIR=/tmp/memcp-jit-perf-candidate \
+            PERF_REGRESSION_WAIVERS_FILE="$GITHUB_WORKSPACE/jit-perf-regression-waivers.txt" \
             python3 -u "$runner" --perf-ci --jobs 4 --log-times)
 
       - name: Upload measured JIT base

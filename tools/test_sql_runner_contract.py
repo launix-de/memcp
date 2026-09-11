@@ -46,8 +46,10 @@ from run_sql_tests import (  # noqa: E402
     discover_performance_ci_suites,
     is_error_response,
     initialize_performance_recording,
+    load_perf_regression_waivers,
     load_performance_scale,
     observe_atomic_json,
+    parse_perf_regression_waivers,
     performance_ab_threshold_ms,
     performance_architecture,
     performance_case_fingerprint,
@@ -808,6 +810,94 @@ class SuiteIsolationContractTest(unittest.TestCase):
             encoding="utf-8",
         )
         self.assertIn('fail_fast_mode="${MEMCP_FAIL_FAST:-0}"', hook)
+
+class PerfRegressionWaiverContractTest(unittest.TestCase):
+    def test_parses_one_waiver_with_reason(self) -> None:
+        waivers = parse_perf_regression_waivers(
+            "Fix the thing\n\n"
+            "Perf-Regression-Accepted: tests/performance/foo.yaml::Slow case | "
+            "correlated plan is required for correctness here\n"
+        )
+        self.assertEqual(
+            waivers,
+            {"tests/performance/foo.yaml::Slow case": "correlated plan is required for correctness here"},
+        )
+
+    def test_parses_multiple_waivers_across_commits(self) -> None:
+        # git log --format=%B concatenates one PR's commit bodies like this.
+        waivers = parse_perf_regression_waivers(
+            "commit one\n\nPerf-Regression-Accepted: a.yaml::A | reason a\n\n"
+            "commit two\n\nPerf-Regression-Accepted: b.yaml::B | reason b\n"
+        )
+        self.assertEqual(waivers, {"a.yaml::A": "reason a", "b.yaml::B": "reason b"})
+
+    def test_reason_is_optional(self) -> None:
+        waivers = parse_perf_regression_waivers("Perf-Regression-Accepted: a.yaml::A\n")
+        self.assertEqual(waivers, {"a.yaml::A": ""})
+
+    def test_ignores_unrelated_commit_text(self) -> None:
+        self.assertEqual(parse_perf_regression_waivers("just a normal commit message\n"), {})
+        self.assertEqual(parse_perf_regression_waivers(""), {})
+        self.assertEqual(parse_perf_regression_waivers(None), {})
+
+    def test_key_matching_is_exact_no_prefix_or_glob(self) -> None:
+        waivers = parse_perf_regression_waivers(
+            "Perf-Regression-Accepted: a.yaml::Exact case | ok\n"
+        )
+        self.assertIn("a.yaml::Exact case", waivers)
+        self.assertNotIn("a.yaml::Exact case (extended)", waivers)
+        self.assertNotIn("a.yaml::Exact", waivers)
+
+    def test_load_from_file_env_var(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            waivers_file = Path(tmp) / "waivers.txt"
+            waivers_file.write_text("Perf-Regression-Accepted: a.yaml::A | ok\n")
+            with mock.patch.dict(os.environ, {"PERF_REGRESSION_WAIVERS_FILE": str(waivers_file)}):
+                self.assertEqual(load_perf_regression_waivers(), {"a.yaml::A": "ok"})
+
+    def test_load_is_empty_without_env_var_or_missing_file(self) -> None:
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("PERF_REGRESSION_WAIVERS_FILE", None)
+            self.assertEqual(load_perf_regression_waivers(), {})
+        with mock.patch.dict(os.environ, {"PERF_REGRESSION_WAIVERS_FILE": "/nonexistent/path"}):
+            self.assertEqual(load_perf_regression_waivers(), {})
+
+    def test_waived_case_passes_through_and_is_recorded(self) -> None:
+        runner = SQLTestRunner("http://localhost:1")
+        runner.perf_regression_waivers = {"?::SCM must be measured": "known, accepted"}
+        response = SimpleNamespace(status_code=200, text="true", headers={})
+        clock = itertools.count(0, 1_000_000)
+        with mock.patch("run_sql_tests.PERF_TEST_ENABLED", True), \
+                mock.patch("run_sql_tests.PERF_AB_MODE", ""), \
+                mock.patch("run_sql_tests.find_memcp_pid", return_value=None), \
+                mock.patch("run_sql_tests.time.monotonic_ns", side_effect=lambda: next(clock)), \
+                mock.patch("run_sql_tests.requests.post", return_value=response):
+            result = runner.run_test_case({
+                "name": "SCM must be measured", "scm": "true", "threshold_ms": 0.01,
+                "repetitions": 2, "warmup": 0, "expect": {"rows": 1},
+            }, "memcp-tests")
+        self.assertTrue(result)
+        self.assertEqual(len(runner.waived_regressions), 1)
+        self.assertEqual(runner.waived_regressions[0][0], "SCM must be measured")
+        self.assertEqual(runner.waived_regressions[0][2], "known, accepted")
+
+    def test_unrelated_waiver_does_not_cover_a_different_case(self) -> None:
+        runner = SQLTestRunner("http://localhost:1")
+        runner.perf_regression_waivers = {"?::Some other case": "known, accepted"}
+        response = SimpleNamespace(status_code=200, text="true", headers={})
+        clock = itertools.count(0, 1_000_000)
+        with mock.patch("run_sql_tests.PERF_TEST_ENABLED", True), \
+                mock.patch("run_sql_tests.PERF_AB_MODE", ""), \
+                mock.patch("run_sql_tests.find_memcp_pid", return_value=None), \
+                mock.patch("run_sql_tests.time.monotonic_ns", side_effect=lambda: next(clock)), \
+                mock.patch("run_sql_tests.requests.post", return_value=response):
+            result = runner.run_test_case({
+                "name": "SCM must be measured", "scm": "true", "threshold_ms": 0.01,
+                "repetitions": 2, "warmup": 0, "expect": {"rows": 1},
+            }, "memcp-tests")
+        self.assertFalse(result)
+        self.assertEqual(runner.waived_regressions, [])
+
 
 if __name__ == "__main__":
     unittest.main()
