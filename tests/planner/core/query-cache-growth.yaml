@@ -141,11 +141,23 @@ test_cases:
   - name: "Unsafe or incomplete literal shapes retain exact cache keys"
     scm: |
       (begin
-        (map (list "UPDATE items SET score = 2 WHERE id = 1" "SELECT id FROM items WHERE id = ?" "SELECT id FROM items WHERE created_at >= DATE '2026-01-01'" "SELECT category, COUNT(*) FROM items WHERE state = 'open' GROUP BY category" "SELECT COUNT(*) FROM items WHERE state = 'open'" "SELECT DISTINCT state FROM items WHERE score >= 2" "SELECT id FROM items WHERE id = 1 UNION SELECT id FROM items WHERE id = 2" "EXPLAIN COMPILE SELECT id FROM items WHERE id = 1" "SELECT id FROM items WHERE label = 'unterminated" "SELECT id FROM items WHERE id = 1 /* unterminated") (lambda (query)
+        (map (list "SELECT id FROM items WHERE id = ?" "SELECT id FROM items WHERE created_at >= DATE '2026-01-01'" "SELECT category, COUNT(*) FROM items WHERE state = 'open' GROUP BY category" "SELECT COUNT(*) FROM items WHERE state = 'open'" "SELECT DISTINCT state FROM items WHERE score >= 2" "SELECT id FROM items WHERE id = 1 UNION SELECT id FROM items WHERE id = 2" "EXPLAIN COMPILE SELECT id FROM items WHERE id = 1" "SELECT id FROM items WHERE label = 'unterminated" "SELECT id FROM items WHERE id = 1 /* unterminated") (lambda (query)
           (match (parameterize_sql_select_literals query) '(normalized bindings shape_hash)
             (if (and (equal? normalized query) (equal? bindings '()) (equal? shape_hash (fnv_hash query)))
               true (error (concat "unsafe parameterization: " query))))))
         "ok")
+    expect:
+      data: ["ok"]
+  - name: "UPDATE SET literals fold the same as SELECT literals"
+    # UPDATE/INSERT/DELETE literal-parameterization extension: "UPDATE items
+    # SET score = 2 WHERE id = 1" used to belong in the "stays exact" list
+    # above (DML was never parameterized at all) -- it now folds its SET and
+    # WHERE literals exactly like a SELECT's projection/WHERE literals do.
+    scm: |
+      (match (parameterize_sql_select_literals "UPDATE items SET score = 2 WHERE id = 1") '(normalized bindings shape_hash)
+        (if (and (equal? normalized "UPDATE items SET score = ? WHERE id = ?")
+          (equal? bindings (list 2 1)) (equal? shape_hash (fnv_hash normalized)))
+          "ok" (error (concat "parameterization mismatch: " normalized " / " bindings))))
     expect:
       data: ["ok"]
   - name: "Constant projection row folds to shared placeholders"
