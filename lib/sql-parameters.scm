@@ -122,21 +122,9 @@ sessions and token buffers belong to this one lexical compilation only. */
 											(if (equal? (strlen token) 1)
 												(begin (pieces piece_count token) (list (+ idx 1) depth type_depth previous_word token scopes true candidate_count (+ piece_count 1)))
 												(begin
-													/* LIKE/AGAINST at depth>0 makes a string literal an eligible
-													candidate even where sql_parameter_scope_allows would otherwise
-													reject it (a subquery, not a top-level/derived WHERE) -- but it
-													must NOT also exempt the candidate from an unsafe outer scope.
-													Only a genuine constant-projection-row item (numeric branch,
-													sql_parameter_select_const_item) is forced past top_unsafe;
-													storing false here keeps that exemption from leaking onto every
-													LIKE '%...%' inside a UNION/aggregate-scoped subquery (e.g.
-													IN (SELECT ... WHERE label LIKE ? UNION ...)), which would
-													otherwise lose its learned-selectivity plan-cache entry for no
-													benefit -- the literal never influences plan shape either way
-													once accepted, so it stays cacheable under its own exact key. */
-													(define like_eligible (and (not (nil? scope)) (> (scope "depth") 0) (has? '("LIKE" "AGAINST") previous_word)))
-													(if (and (not (has? '("AS" "DATE") previous_word)) (or like_eligible (sql_parameter_scope_allows scope)))
-														(begin (candidates candidate_count (list piece_count scope false (regexp_replace (substr token 1 (- (strlen token) 2)) "\\\\[\\\\'\"nr0]" sql_string_unescape))) (begin (pieces piece_count token) (list (+ idx 1) depth type_depth previous_word "literal" scopes false (+ candidate_count 1) (+ piece_count 1))))
+													(define forced (and (not (nil? scope)) (> (scope "depth") 0) (has? '("LIKE" "AGAINST") previous_word)))
+													(if (and (not (has? '("AS" "DATE") previous_word)) (or forced (sql_parameter_scope_allows scope)))
+														(begin (candidates candidate_count (list piece_count scope forced (regexp_replace (substr token 1 (- (strlen token) 2)) "\\\\[\\\\'\"nr0]" sql_string_unescape))) (begin (pieces piece_count token) (list (+ idx 1) depth type_depth previous_word "literal" scopes false (+ candidate_count 1) (+ piece_count 1))))
 														(begin (pieces piece_count token) (list (+ idx 1) depth type_depth previous_word "literal" scopes false candidate_count (+ piece_count 1))))))
 											(if (regexp_test token "^`")
 												(begin (pieces piece_count token) (list (+ idx 1) depth type_depth previous_word "identifier" scopes (equal? (strlen token) 1) candidate_count (+ piece_count 1)))
