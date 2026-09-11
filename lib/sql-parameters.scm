@@ -143,15 +143,21 @@ sessions and token buffers belong to this one lexical compilation only. */
 															(begin (pieces piece_count token) (list (+ idx 1) depth type_depth previous_word "literal" scopes false candidate_count (+ piece_count 1))) (begin (candidates candidate_count (list piece_count scope (sql_parameter_select_const_item const_row_ok scope depth previous_token idx tokens) (simplify token))) (begin (pieces piece_count token) (list (+ idx 1) depth type_depth previous_word "literal" scopes false (+ candidate_count 1) (+ piece_count 1)))))
 														(begin (pieces piece_count token) (list (+ idx 1) depth type_depth previous_word token scopes (or (equal? token "?") (and (equal? token "/") (< (+ idx 1) (count tokens)) (equal? (nth tokens (+ idx 1)) "*"))) candidate_count (+ piece_count 1)))))))))))))))
 			(match result '(_idx _depth _type _word _token scopes invalid candidate_count piece_count)
-				(if (or invalid (equal? scopes '()) (equal? candidate_count 0))
+				/* Unchanged from the pre-existing master logic: an unsafe OUTER query
+				block (an aggregate/UNION/DISTINCT at the top scope's own depth, e.g.
+				`SELECT COUNT(*) ... WHERE x IN (SELECT ... UNION ...)`) still bails the
+				whole statement to exact, no exceptions -- including constant-projection-
+				row candidates. They never need that exception: a const-row derived table
+				is always its own nested scope, and reaching an unsafe outer scope at all
+				requires an aggregate/UNION token at the outer scope's own depth, which the
+				const-row shape (bare `SELECT <num> AS x, ... UNION ...` with no aggregate
+				at that depth) does not produce. Only the candidate's OWN scope being
+				unsafe is exempted per-candidate below, exactly as before. */
+				(if (or invalid (equal? scopes '()) ((car scopes) "unsafe") (equal? candidate_count 0))
 					(list query '() (fnv_hash query))
 					(begin
-						/* A forced candidate (a constant projection item) is safe even in an unsafe
-						scope; any other literal is kept only when neither its scope nor the outer
-						query block is unsafe. */
-						(define top_unsafe ((car scopes) "unsafe"))
 						(define accepted (filter (map (produceN candidate_count) (lambda (idx) (candidates idx)))
-							(lambda (candidate) (or (nth candidate 2) (and (not top_unsafe) (not ((cadr candidate) "unsafe")))))))
+							(lambda (candidate) (or (nth candidate 2) (not ((cadr candidate) "unsafe"))))))
 						(if (equal? accepted '())
 							(list query '() (fnv_hash query))
 							(begin
