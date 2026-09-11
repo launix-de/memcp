@@ -1,0 +1,144 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Guards the INSERT/UPDATE/DELETE literal-parameterization extension in
+# sql-parameters.scm: a hot-path DML statement with a literal baked into its
+# text (an app-generated `INSERT INTO t VALUES (5, ...)`, an ORM's
+# `UPDATE t SET col=col+1 WHERE id=5`, a queue worker's `DELETE FROM q WHERE
+# id=5`) must share ONE compiled plan across distinct literal values instead
+# of building a new plan-cache entry per call, exactly like SELECT already
+# does after the constant-projection-row fix.
+#
+# For flat single-table DML the per-call COMPILE cost is small either way (a
+# plan without joins/subqueries compiles in well under a millisecond) -- the
+# wall-clock thresholds here are a generous sanity net, not the real guard.
+# The real guard is the cache-key count: on unfixed code every distinct
+# literal call gets its own entry (unbounded cache growth under sustained
+# load, the same "cache stuffs itself full" problem as the SELECT case, just
+# without a large per-call latency symptom to notice it by). These cases --
+# and their pre-fix numbers -- are also the harness for validating the
+# adaptive/curried literal-specialization follow-up design: same shapes, same
+# assertions, whatever eventually replaces the lexical fold should keep both
+# the cache-key bound and the timing sane.
+#
+# Each case rebuilds its own table from scratch, disables warmup, and pins
+# repetitions to 1: the workload (INSERT rows, or mutate rows that must not
+# already carry a prior run's changes) is not safe to repeat blindly, unlike
+# a read-only SELECT -- the harness's perf-test default otherwise re-executes
+# the measured body up to PERF_REPEAT times for timing stability, which would
+# re-INSERT already-taken primary keys or re-increment already-updated rows.
+metadata:
+  version: "1.0"
+  description: "INSERT/UPDATE/DELETE with baked-in literals share one compiled plan"
+  isolated: true
+
+test_cases:
+  - name: "Repeated single-row INSERT with distinct literals shares one compiled plan"
+    warmup: false
+    repetitions: 1
+    threshold_ms: 2000
+    setup:
+      - sql: "DROP TABLE IF EXISTS dlc_bench"
+      - sql: "CREATE TABLE dlc_bench (id INT PRIMARY KEY, col INT) ENGINE=sloppy"
+      - scm: '(rebuild (table "memcp-tests" "dlc_bench") true false)'
+    scm: |
+      (begin
+        (define sess (newsession))
+        (sess "username" "root")
+        (sess "schema" "memcp-tests")
+        (define cache (newcachemap))
+        (define exec (lambda (q) (sql_execute_formula sess nil
+          (cached_parse cache (list parse_sql) "memcp-tests" q nil "root" sess true)
+          (lambda (row) nil) (lambda (_fields) nil))))
+        (map (produceN 500) (lambda (i)
+          (exec (concat "INSERT INTO dlc_bench VALUES (" (string i) ", " (string (* i 2)) ")"))))
+        (define acc (newsession)) (acc "n" 0)
+        (sql_execute_formula sess nil
+          (cached_parse cache (list parse_sql) "memcp-tests" "SELECT COUNT(*) AS n FROM dlc_bench" nil "root" sess true)
+          (lambda (row) (acc "n" (get_assoc row "n"))) (lambda (_fields) nil))
+        (if (and (<= (count (cache)) 2) (equal? (acc "n") 500))
+          true
+          (error (concat "cachekeys=" (count (cache)) " rows=" (acc "n")))))
+    expect:
+      rows: 1
+      result_contains: ["true"]
+
+  - name: "Repeated UPDATE col=col+1 WHERE id=<literal> shares one compiled plan"
+    warmup: false
+    repetitions: 1
+    threshold_ms: 2000
+    setup:
+      - sql: "DROP TABLE IF EXISTS dlc_bench"
+      - sql: "CREATE TABLE dlc_bench (id INT PRIMARY KEY, col INT) ENGINE=sloppy"
+      - scm: |
+          (begin
+            (insert (table "memcp-tests" "dlc_bench") '("id" "col")
+              (map (produceN 500) (lambda (i) (list i (* i 2)))))
+            (rebuild (table "memcp-tests" "dlc_bench") true false)
+            true)
+    scm: |
+      (begin
+        (define sess (newsession))
+        (sess "username" "root")
+        (sess "schema" "memcp-tests")
+        (define cache (newcachemap))
+        (map (produceN 500) (lambda (i)
+          (sql_execute_formula sess nil
+            (cached_parse cache (list parse_sql) "memcp-tests"
+              (concat "UPDATE dlc_bench SET col = col + 1 WHERE id = " (string i))
+              nil "root" sess true)
+            (lambda (row) nil) (lambda (_fields) nil))))
+        (define acc (newsession)) (acc "s" 0)
+        (sql_execute_formula sess nil
+          (cached_parse cache (list parse_sql) "memcp-tests" "SELECT SUM(col) AS s FROM dlc_bench" nil "root" sess true)
+          (lambda (row) (acc "s" (get_assoc row "s"))) (lambda (_fields) nil))
+        /* every row's col was 2*id, then incremented by exactly 1 once each:
+        sum(2*id for id in [0,500)) + 500 = 2*124750 + 500 = 250000 */
+        (if (and (<= (count (cache)) 2) (equal? (acc "s") 250000))
+          true
+          (error (concat "cachekeys=" (count (cache)) " sum=" (acc "s")))))
+    expect:
+      rows: 1
+      result_contains: ["true"]
+
+  - name: "Repeated DELETE FROM t WHERE TRUE LIMIT 1 stays on one cached plan"
+    # No literal varies here at all -- the exact-text cache already covers
+    # this (predates the literal-folding fix). Kept as a guard that DML
+    # literal-folding never regresses the plain exact-cache path for a query
+    # that has nothing to fold.
+    warmup: false
+    repetitions: 1
+    threshold_ms: 2000
+    setup:
+      - sql: "DROP TABLE IF EXISTS dlc_bench"
+      - sql: "CREATE TABLE dlc_bench (id INT PRIMARY KEY, col INT) ENGINE=sloppy"
+      - scm: |
+          (begin
+            (insert (table "memcp-tests" "dlc_bench") '("id" "col")
+              (map (produceN 250) (lambda (i) (list i i))))
+            (rebuild (table "memcp-tests" "dlc_bench") true false)
+            true)
+    scm: |
+      (begin
+        (define sess (newsession))
+        (sess "username" "root")
+        (sess "schema" "memcp-tests")
+        (define cache (newcachemap))
+        (define q "DELETE FROM dlc_bench WHERE TRUE LIMIT 1")
+        (map (produceN 250) (lambda (i)
+          (sql_execute_formula sess nil
+            (cached_parse cache (list parse_sql) "memcp-tests" q nil "root" sess true)
+            (lambda (row) nil) (lambda (_fields) nil))))
+        (define acc (newsession)) (acc "n" 0)
+        (sql_execute_formula sess nil
+          (cached_parse cache (list parse_sql) "memcp-tests" "SELECT COUNT(*) AS n FROM dlc_bench" nil "root" sess true)
+          (lambda (row) (acc "n" (get_assoc row "n"))) (lambda (_fields) nil))
+        (if (and (<= (count (cache)) 2) (equal? (acc "n") 0))
+          true
+          (error (concat "cachekeys=" (count (cache)) " remaining=" (acc "n")))))
+    expect:
+      rows: 1
+      result_contains: ["true"]
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS dlc_bench"

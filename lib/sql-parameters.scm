@@ -22,24 +22,29 @@ the complete statement. Tokenization uses the runtime's generic regex engine. */
 
 (define sql_parameter_prefix (lambda (query)
 	(regexp_test (toUpper (strtrim query))
-		"^(?:SELECT[ \\t\\n]|EXPLAIN +(?:IR +)?(?:REORDER +)?SELECT(?:[ \\t\\n]|$))")))
+		"^(?:SELECT[ \\t\\n]|EXPLAIN +(?:IR +)?(?:REORDER +)?SELECT(?:[ \\t\\n]|$)|DELETE[ \\t\\n]+FROM[ \\t\\n]|UPDATE[ \\t\\n]|INSERT[ \\t\\n]+INTO[ \\t\\n])")))
 
+/* WHERE/HAVING gate a filter-affecting literal (needs the safe-scope check every
+other literal gets). SET (UPDATE's assignment list) and VALUES (INSERT's row
+tuples) are added here too: a literal there is a value being WRITTEN, not a
+filter or grouping key -- it can never change plan shape or selectivity, only
+the safe-scope check that already applies to every candidate here matters. */
 (define sql_parameter_scope_allows (lambda (scope)
 	(and (not (nil? scope))
 		(or (equal? (scope "depth") 0) (scope "derived"))
 		(if (has? '("LIMIT" "OFFSET") (scope "clause"))
 			(equal? (scope "depth") 0)
-			(has? '("WHERE" "HAVING") (scope "clause"))))))
+			(has? '("WHERE" "HAVING" "SET" "VALUES") (scope "clause"))))))
 
 (define sql_parameter_unary (lambda (token)
 	(has? '("" "(" "," "=" ">" "<" ">=" "<=" "<>" "!=" "+" "-" "*" "/"
 		"WHERE" "ON" "LIMIT" "OFFSET" "AND" "OR" "THEN" "ELSE") token)))
 
-(define sql_parameter_new_scope (lambda (depth previous_word)
+(define sql_parameter_new_scope (lambda (depth previous_word statement_word)
 	(begin
 		(define scope (newsession))
 		(scope "depth" depth)
-		(scope "clause" "SELECT")
+		(scope "clause" statement_word)
 		(scope "order_depth" -1)
 		(scope "unsafe" false)
 		(scope "derived" (or (equal? depth 0) (has? '("FROM" "JOIN") previous_word)))
@@ -54,7 +59,13 @@ the complete statement. Tokenization uses the runtime's generic regex engine. */
 			(if (and (equal? word "BY") (equal? previous_word "ORDER"))
 				(scope "order_depth" depth)
 				(if (has? '("LIMIT" "FOR") word) (scope "order_depth" -1)))
-			(if (has? '("FROM" "WHERE" "HAVING" "LIMIT" "OFFSET" "GROUP" "ORDER" "UNION" "ON") word)
+			/* SET (UPDATE ... SET a=1, b=2 ...) and VALUES (INSERT ... VALUES (1,2), (3,4))
+			enter the same allow-listed-clause tracking as WHERE/HAVING -- see
+			sql_parameter_scope_allows. ON DUPLICATE KEY UPDATE reuses the existing
+			ON->WHERE mapping below: its assignment list is exactly as safe to fold as
+			a WHERE literal, and giving it a dedicated clause name would add a state
+			with no different behavior. */
+			(if (has? '("FROM" "WHERE" "HAVING" "LIMIT" "OFFSET" "GROUP" "ORDER" "UNION" "ON" "SET" "VALUES") word)
 				(scope "clause" (if (equal? word "ON") "WHERE" word)))))))
 
 (define sql_parameter_next_significant (lambda (tokens i)
@@ -108,10 +119,18 @@ sessions and token buffers belong to this one lexical compilation only. */
 							(if (regexp_test token "^[a-zA-Z_$]")
 								(begin
 									(define word (toUpper token))
+									/* SELECT re-enters the same scope at the same depth (a UNION branch or
+									the SELECT half of INSERT ... SELECT); a nested SELECT at a deeper depth
+									gets its own scope, same as before. DELETE/UPDATE/INSERT only ever open
+									the outermost scope, once, as literally the first token sql_parameter_prefix
+									already required -- scopes is still empty at that point. */
 									(define next_scopes (if (equal? word "SELECT")
 										(if (and (not (nil? scope)) (equal? (scope "depth") depth))
 											(begin (scope "clause" "SELECT") (scope "order_depth" -1) scopes)
-											(cons (sql_parameter_new_scope depth previous_word) scopes)) scopes))
+											(cons (sql_parameter_new_scope depth previous_word word) scopes))
+										(if (and (equal? scopes '()) (equal? depth 0) (has? '("DELETE" "UPDATE" "INSERT") word))
+											(cons (sql_parameter_new_scope depth previous_word word) scopes)
+											scopes)))
 									(sql_parameter_scope_word (if (equal? next_scopes '()) nil (car next_scopes)) word previous_word depth)
 									(begin (pieces piece_count token) (list (+ idx 1) depth type_depth word word next_scopes (equal? word "OVER") candidate_count (+ piece_count 1))))
 								(if (equal? token "(")
