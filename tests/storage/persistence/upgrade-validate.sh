@@ -24,14 +24,23 @@ FAILURES=0
 # EXPECTED is compared verbatim against mysql's -N -B (tab-separated, no
 # headers) output. NULL prints as the literal string "NULL" in this mode.
 check() {
-  local desc="$1" query="$2" expected="$3" actual
+  local desc="$1" query="$2" expected="$3" actual stderr_out
   CHECKS=$((CHECKS + 1))
-  actual=$("${MYSQL_BASE[@]}" -e "$query" 2>&1)
+  # stdout and stderr must stay separate: the real MySQL client (unlike
+  # MariaDB's) prints "[Warning] Using a password on the command line
+  # interface can be insecure." to stderr on every invocation, which would
+  # corrupt every comparison if merged into the compared value.
+  actual=$("${MYSQL_BASE[@]}" -e "$query" 2>/tmp/upgrade-validate-stderr.$$)
+  stderr_out=$(cat /tmp/upgrade-validate-stderr.$$ 2>/dev/null)
+  rm -f /tmp/upgrade-validate-stderr.$$
   if [ "$actual" != "$expected" ]; then
     echo "MISMATCH: $desc"
     echo "  query:    $query"
     printf '  expected: %q\n' "$expected"
     printf '  actual:   %q\n' "$actual"
+    if [ -n "$stderr_out" ]; then
+      printf '  stderr:   %q\n' "$stderr_out"
+    fi
     FAILURES=$((FAILURES + 1))
   fi
 }
