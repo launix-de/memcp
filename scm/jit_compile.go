@@ -2913,8 +2913,39 @@ func jitCompileDynamicHigherOrderCall(ctx *JITContext, callableExpr Scmer, opera
 	return jitCompileDynamicCall(ctx, callableExpr, operands, nil, sliceBase, result)
 }
 
-const jitBuiltinInlineBudget = 2048
+// jitBuiltinInlineSafetyCap is a last-resort ceiling on one compiled function's
+// total inlined-builtin size, guarding only against pathological (e.g. deeply
+// recursive generated) code. It must NOT be the everyday admission policy: a
+// budget that accumulates across unrelated call sites in encounter order made
+// whether one call inlines depend on how much OTHER, textually earlier code in
+// the same function had already inlined - and, transitively, on how large the
+// global environment happened to be at all (loading unrelated top-level
+// definitions elsewhere shifted which call sites in a shared hot function fell
+// under or over the line; see the fix that introduced this comment). Real
+// admission is decided per call site by jitCallBoundaryCost and the
+// specialization checks in jitGeneratedEmitterInline; this cap only stops
+// runaway accumulation once those checks have already said yes.
+const jitBuiltinInlineSafetyCap = 1 << 16
 const jitTrivialVirtualInlineCost = 2
+
+// jitCallBoundaryCost estimates, in the same architecture-neutral SSA-instruction
+// units as Declaration.JITInlineCost, what a generated native call boundary for
+// argc arguments costs: per-argument marshaling into the call area
+// (jitEmitDeclaredGoVariadicCallFromExprs stores a value+tag pair per argument)
+// plus the fixed call/return sequence itself (stack (de)allocation,
+// EmitGoCallVariadic, result placement). A callee whose own inlinable body
+// costs no more than this is worth inlining purely on size grounds, regardless
+// of whether this call site's argument shapes are otherwise known - inlining
+// then strictly removes overhead without growing the caller by more than the
+// call it replaces would have cost anyway. The constants are a structural
+// estimate (like every other JITInlineCost in this system), not a live
+// measurement; recalibrate them if jitEmitGoVariadicCallFromDescs's emitted
+// sequence changes shape.
+func jitCallBoundaryCost(argc int) int {
+	const fixedCallCost = 8
+	const perArgCost = 3
+	return fixedCallCost + perArgCost*argc
+}
 
 // jitEmitGeneratedCallBoundary materializes compiler-only lambda templates
 // only when a generated builtin emitter chooses its native call boundary.
@@ -3009,10 +3040,25 @@ func jitGeneratedEmitterInline(ctx *JITContext, declaration *Declaration, args [
 			inline = false
 		}
 	}
-	if cost == 65535 || !declaration.RetainsCallArgs && ctx.BuiltinInlineCost+cost > jitBuiltinInlineBudget {
+	if cost == 65535 {
+		// Sentinel: jitgen generated no inlinable body for this declaration at
+		// all, only a call boundary. There is nothing to inline.
 		return false
 	}
+	if !inline && !declaration.Type.JITVirtualArgs {
+		// Case 1 (size vs. call frame): no specialization signal fired above,
+		// but the callee's own body is no larger than the native call boundary
+		// it would replace - inline anyway, purely because it cannot make this
+		// call site worse. Decided entirely from this call site's own argc and
+		// the callee's own declared cost; independent of every other call in
+		// this function. JITVirtualArgs declarations already have their own
+		// shape-aware admission/demotion above and are not reconsidered here.
+		inline = cost <= jitCallBoundaryCost(len(args))
+	}
 	if !inline {
+		return false
+	}
+	if !declaration.RetainsCallArgs && ctx.BuiltinInlineCost+cost > jitBuiltinInlineSafetyCap {
 		return false
 	}
 	ctx.BuiltinInlineCost += cost
