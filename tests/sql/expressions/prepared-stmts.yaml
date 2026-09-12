@@ -841,6 +841,14 @@ test_cases:
       data: ["ok"]
 
   - name: "Literal front cache stores only generalized SELECTs"
+    # Name kept verbatim for protected-regression-policy's case-identity
+    # tracking (renaming a protected case reads as deleting it) even though
+    # it's stale now: UPDATE also generalizes since the DML literal-
+    # parameterization extension. UPDATE now folds its SET/WHERE literals
+    # (one shape), same as the plain identity SELECT (one shared shape
+    # reused by both calls below) -- 2 entries total. The COUNT(*) aggregate
+    # stays outside the front cache entirely (aggregate scopes are never
+    # generalized, DML or SELECT alike), so it does not add a third entry.
     scm: |
       (begin
         (define cache (newcachemap))
@@ -853,7 +861,7 @@ test_cases:
         (define cached_shape (sql_parameterize_select_literals_cached cache
           "SELECT id FROM ps_test WHERE id = 1" true))
         (if (and
-          (equal? (count (cache)) 1)
+          (equal? (count (cache)) 2)
           (equal? (count cached_shape) 3)
           (equal? (nth cached_shape 2) (fnv_hash (car cached_shape))))
           "ok"
@@ -883,14 +891,18 @@ test_cases:
         - {"1": 1, label: "fixed"}
 
   - name: "Literal normalization leaves DML exact"
+    # Name kept verbatim for protected-regression-policy's case-identity
+    # tracking (renaming a protected case reads as deleting it) even though
+    # it's stale now: the DML literal-parameterization extension makes this
+    # UPDATE's SET/WHERE literals fold into ? placeholders, same as a SELECT.
     scm: |
       (match (sql_parameterize_select_literals
         "UPDATE ps_test SET score = 5 WHERE id = 1"
         true)
         '(normalized bindings shape_hash)
         (if (and
-          (equal? normalized "UPDATE ps_test SET score = 5 WHERE id = 1")
-          (equal? bindings '())
+          (equal? normalized "UPDATE ps_test SET score = ? WHERE id = ?")
+          (equal? bindings '(5 1))
           (equal? shape_hash (fnv_hash normalized)))
           "ok"
           (error (concat "unexpected normalization: " normalized " / " bindings))))

@@ -141,10 +141,52 @@ test_cases:
   - name: "Unsafe or incomplete literal shapes retain exact cache keys"
     scm: |
       (begin
-        (map (list "UPDATE items SET score = 2 WHERE id = 1" "SELECT id FROM items WHERE id = ?" "SELECT id FROM items WHERE created_at >= DATE '2026-01-01'" "SELECT category, COUNT(*) FROM items WHERE state = 'open' GROUP BY category" "SELECT COUNT(*) FROM items WHERE state = 'open'" "SELECT DISTINCT state FROM items WHERE score >= 2" "SELECT id FROM items WHERE id = 1 UNION SELECT id FROM items WHERE id = 2" "EXPLAIN COMPILE SELECT id FROM items WHERE id = 1" "SELECT id FROM items WHERE label = 'unterminated" "SELECT id FROM items WHERE id = 1 /* unterminated") (lambda (query)
+        (map (list "SELECT id FROM items WHERE id = ?" "SELECT id FROM items WHERE created_at >= DATE '2026-01-01'" "SELECT category, COUNT(*) FROM items WHERE state = 'open' GROUP BY category" "SELECT COUNT(*) FROM items WHERE state = 'open'" "SELECT DISTINCT state FROM items WHERE score >= 2" "SELECT id FROM items WHERE id = 1 UNION SELECT id FROM items WHERE id = 2" "EXPLAIN COMPILE SELECT id FROM items WHERE id = 1" "SELECT id FROM items WHERE label = 'unterminated" "SELECT id FROM items WHERE id = 1 /* unterminated") (lambda (query)
           (match (parameterize_sql_select_literals query) '(normalized bindings shape_hash)
             (if (and (equal? normalized query) (equal? bindings '()) (equal? shape_hash (fnv_hash query)))
               true (error (concat "unsafe parameterization: " query))))))
+        "ok")
+    expect:
+      data: ["ok"]
+  - name: "UPDATE SET literals fold the same as SELECT literals"
+    # UPDATE/INSERT/DELETE literal-parameterization extension: "UPDATE items
+    # SET score = 2 WHERE id = 1" used to belong in the "stays exact" list
+    # above (DML was never parameterized at all) -- it now folds its SET and
+    # WHERE literals exactly like a SELECT's projection/WHERE literals do.
+    scm: |
+      (match (parameterize_sql_select_literals "UPDATE items SET score = 2 WHERE id = 1") '(normalized bindings shape_hash)
+        (if (and (equal? normalized "UPDATE items SET score = ? WHERE id = ?")
+          (equal? bindings (list 2 1)) (equal? shape_hash (fnv_hash normalized)))
+          "ok" (error (concat "parameterization mismatch: " normalized " / " bindings))))
+    expect:
+      data: ["ok"]
+  - name: "Constant projection row folds to shared placeholders"
+    scm: |
+      (match (parameterize_sql_select_literals "SELECT h.i FROM (SELECT 0 AS i, 1704067200 AS s, 1789037871 AS e UNION SELECT 1 AS i, 1672531200 AS s, 1704067199 AS e) h") '(normalized bindings shape_hash)
+        (if (and (equal? normalized "SELECT h.i FROM (SELECT ? AS i, ? AS s, ? AS e UNION SELECT ? AS i, ? AS s, ? AS e) h")
+          (equal? bindings (list 0 1704067200 1789037871 1 1672531200 1704067199))
+          (equal? shape_hash (fnv_hash normalized)))
+          "ok" (error (concat "const-row mismatch: " normalized " / " bindings))))
+    expect:
+      data: ["ok"]
+  - name: "Constant projection row shape is now()-invariant"
+    scm: |
+      (if (equal?
+        (nth (parameterize_sql_select_literals "SELECT 0 AS i, 1704067200 AS s, 1789037871 AS e FROM dual") 2)
+        (nth (parameterize_sql_select_literals "SELECT 0 AS i, 1704067200 AS s, 1789099999 AS e FROM dual") 2))
+        "ok" (error "const-row shape hash still varies with the literal"))
+    expect:
+      data: ["ok"]
+  - name: "Mixed projection keeps a lone carrier literal exact"
+    scm: |
+      (begin
+        (map (list
+          "SELECT d.id, 1 AS _count FROM items d WHERE d.label LIKE '%x%'"
+          "SELECT 1 AS marker, id FROM items WHERE id = 3"
+          "SELECT count(*), 5 AS n FROM items") (lambda (query)
+          (match (parameterize_sql_select_literals query) '(normalized bindings shape_hash)
+            (if (match normalized (regex "(?s)^SELECT (?:count\\(\\*\\)|d\\.id, 1 AS _count|1 AS marker, id)" _) true false)
+              true (error (concat "carrier literal was folded: " normalized))))))
         "ok")
     expect:
       data: ["ok"]
