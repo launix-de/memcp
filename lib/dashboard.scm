@@ -256,6 +256,24 @@ eviction registrations or planner snapshots as a substitute for resident RAM. */
 						",\"indexes\":" index_items "}"))
 				)))
 			)
+			/* API: blob storage statistics for a database (admin only) */
+			(regex "^/dashboard/api/db/([^/]+)/blobs/cleanup$" _ dbname) (begin
+				(if (dashboard_check_admin req)
+					(dashboard_send_json res (json_encode_assoc (blob_cleanup dbname)))
+					(dashboard_send_401 res))
+			)
+			(regex "^/dashboard/api/db/([^/]+)/blobs$" _ dbname) (begin
+				(if (dashboard_check_admin req) (begin
+					(define report (blob_inventory dbname))
+					(define missing (get_assoc report "missing_blobs"))
+					(dashboard_send_json res (concat
+						"{\"referenced_blobs\":" (json_encode (get_assoc report "referenced_blobs"))
+						",\"listed_blobs\":" (json_encode (get_assoc report "listed_blobs"))
+						",\"unreferenced_blobs\":" (json_encode (get_assoc report "unreferenced_blobs"))
+						",\"missing_blobs\":" (dashboard_json_array (map missing (lambda (h) (json_encode h))))
+						"}"))
+				) (dashboard_send_401 res))
+			)
 			/* API: table detail with columns, shards, meta */
 			(regex "^/dashboard/api/db/([^/]+)/([^/]+)$" _ dbname tblname) (begin
 				(dashboard_check_db req res dbname (lambda (is_admin) (begin
