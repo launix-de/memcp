@@ -2993,7 +2993,7 @@ func jitGeneratedEmitterInline(ctx *JITContext, declaration *Declaration, args [
 	}
 	inline := declaration.RetainsCallArgs
 	knownTypes, knownShapes, knownArgs := 0, 0, 0
-	hasVirtualArgs := false
+	hasVirtualArgs, hasLambdaTemplate := false, false
 	knownCallback, hasCallback := false, false
 	for index, arg := range args {
 		if arg.Type != JITTypeUnknown {
@@ -3001,6 +3001,7 @@ func jitGeneratedEmitterInline(ctx *JITContext, declaration *Declaration, args [
 		}
 		hasKnownShape := arg.Loc == LocImm || arg.SliceSizeKnown || arg.Loc == LocVirtualSlice
 		hasVirtualArgs = hasVirtualArgs || arg.Loc == LocVirtualSlice
+		hasLambdaTemplate = hasLambdaTemplate || arg.Loc == LocLambdaTemplate
 		if hasKnownShape {
 			knownShapes++
 		}
@@ -3045,7 +3046,7 @@ func jitGeneratedEmitterInline(ctx *JITContext, declaration *Declaration, args [
 		// all, only a call boundary. There is nothing to inline.
 		return false
 	}
-	if !inline && !declaration.Type.JITVirtualArgs {
+	if !inline && !declaration.Type.JITVirtualArgs && !hasLambdaTemplate {
 		// Case 1 (size vs. call frame): no specialization signal fired above,
 		// but the callee's own body is no larger than the native call boundary
 		// it would replace - inline anyway, purely because it cannot make this
@@ -3053,6 +3054,11 @@ func jitGeneratedEmitterInline(ctx *JITContext, declaration *Declaration, args [
 		// the callee's own declared cost; independent of every other call in
 		// this function. JITVirtualArgs declarations already have their own
 		// shape-aware admission/demotion above and are not reconsidered here.
+		// A LocLambdaTemplate argument is excluded: it is an uncompiled
+		// callback, not yet a plain value this path can hand to a native call
+		// the way it stands - materializing it needs the callback-aware
+		// handling the specialization checks above (and jitEmitGeneratedCallBoundary
+		// for the non-inlined path) already give it.
 		inline = cost <= jitCallBoundaryCost(len(args))
 	}
 	if !inline {
