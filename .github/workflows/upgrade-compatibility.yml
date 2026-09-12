@@ -1,0 +1,124 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+name: Upgrade Compatibility
+
+on:
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upgrade-compatibility-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    uses: ./.github/workflows/detect-changes.yml
+
+  upgrade-compatibility:
+    name: upgrade-compatibility
+    needs: changes
+    if: ${{ needs.changes.outputs.relevant == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out merge candidate
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: refs/pull/${{ github.event.pull_request.number }}/merge
+          path: candidate
+
+      - name: Check out exact base revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: base
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: candidate/go.mod
+
+      - name: Build base and candidate
+        shell: bash
+        run: |
+          (cd base && go build -o memcp)
+          (cd candidate && go build -o memcp)
+
+      - name: Fill data with the base binary, then validate with the candidate binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          DATA_DIR="$GITHUB_WORKSPACE/upgrade-test-data"
+          API_PORT=14521
+          MYSQL_PORT=14522
+          rm -rf "$DATA_DIR"
+
+          echo "== starting base memcp (old binary + old lib) =="
+          (cd base && ./memcp -data "$DATA_DIR" --api-port=$API_PORT --mysql-port=$MYSQL_PORT --no-repl lib/main.scm) &
+          BASE_PID=$!
+
+          for i in $(seq 1 60); do
+            if mysql -h 127.0.0.1 -P $MYSQL_PORT -u root -padmin -e "SELECT 1" >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+          mysql -h 127.0.0.1 -P $MYSQL_PORT -u root -padmin -e "SELECT 1" >/dev/null 2>&1 || {
+            echo "base memcp never became ready"; exit 1;
+          }
+
+          echo "== filling data =="
+          mysql -h 127.0.0.1 -P $MYSQL_PORT -u root -padmin -e "CREATE DATABASE IF NOT EXISTS \`memcp-tests\`"
+          mysql -h 127.0.0.1 -P $MYSQL_PORT -u root -padmin -D memcp-tests < candidate/tests/storage/persistence/upgrade-fill.sql
+
+          echo "== adding the StorageComputeProxy column (createcolumn has no SQL equivalent) =="
+          curl -sf "http://127.0.0.1:$API_PORT/scm" -u root:admin -d '
+            (createcolumn (table "memcp-tests" "up_compute") "doubled" "INT" (quote ()) (quote ())
+              (quote ("val"))
+              (lambda (val) (* val 2)))
+          '
+
+          echo "== forcing final compaction =="
+          mysql -h 127.0.0.1 -P $MYSQL_PORT -u root -padmin -D memcp-tests -e "SHUTDOWN"
+
+          echo "== stopping base memcp gracefully =="
+          kill -TERM "$BASE_PID" 2>/dev/null || true
+          wait "$BASE_PID" || true
+
+          echo "== starting candidate memcp (new binary + new lib) against the SAME data dir =="
+          (cd candidate && ./memcp -data "$DATA_DIR" --api-port=$API_PORT --mysql-port=$MYSQL_PORT --no-repl lib/main.scm) &
+          CANDIDATE_PID=$!
+
+          for i in $(seq 1 60); do
+            if mysql -h 127.0.0.1 -P $MYSQL_PORT -u root -padmin -e "SELECT 1" >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+          mysql -h 127.0.0.1 -P $MYSQL_PORT -u root -padmin -e "SELECT 1" >/dev/null 2>&1 || {
+            echo "candidate memcp never became ready"; exit 1;
+          }
+
+          echo "== validating data survived the upgrade =="
+          set +e
+          bash candidate/tests/storage/persistence/upgrade-validate.sh $MYSQL_PORT
+          VALIDATE_STATUS=$?
+          set -e
+
+          echo "== stopping candidate memcp =="
+          kill -TERM "$CANDIDATE_PID" 2>/dev/null || true
+          wait "$CANDIDATE_PID" || true
+
+          exit $VALIDATE_STATUS
+
+      - name: Upload memcp logs on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: upgrade-compatibility-data
+          path: upgrade-test-data/
+          retention-days: 3
