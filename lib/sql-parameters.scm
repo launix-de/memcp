@@ -21,8 +21,24 @@ the complete statement. Tokenization uses the runtime's generic regex engine. */
 		"[ \\t\\r\\n]+|--[^\\n]*|#[^\\n]*|/\\*(?s:.*?)\\*/|`(?:\\\\.|``|[^`\\\\])*`|'(?:\\\\.|''|[^'\\\\])*'|\"(?:\\\\.|\"\"|[^\"\\\\])*\"|[a-zA-Z_$][a-zA-Z0-9_$]*|[0-9]+(?:\\.[0-9]*)?(?:[eE][+-]?[0-9]+)?|(?s:.)")))
 
 (define sql_parameter_prefix (lambda (query)
-	(regexp_test (toUpper (strtrim query))
-		"^(?:SELECT[ \\t\\n]|EXPLAIN +(?:IR +)?(?:REORDER +)?SELECT(?:[ \\t\\n]|$)|DELETE[ \\t\\n]+FROM[ \\t\\n]|UPDATE[ \\t\\n]|INSERT[ \\t\\n]+INTO[ \\t\\n])")))
+	(begin
+		(define upper (toUpper (strtrim query)))
+		(and (regexp_test upper
+				"^(?:SELECT[ \\t\\n]|EXPLAIN +(?:IR +)?(?:REORDER +)?SELECT(?:[ \\t\\n]|$)|DELETE[ \\t\\n]+FROM[ \\t\\n]|UPDATE[ \\t\\n]|INSERT[ \\t\\n]+INTO[ \\t\\n])")
+			/* DML with a subquery ANYWHERE (a derived table, EXISTS/IN-subquery, or
+			INSERT ... SELECT) is excluded from folding entirely: routing such a
+			statement through ?-bound prepared execution can hit a pre-existing hang
+			in this runtime's correlated-EXISTS-over-derived-self-scan bind-parameter
+			path -- reproduced directly on master with hand-written ? placeholders,
+			completely independent of this fold. DML literal-folding just newly
+			routes a matching query through that already-broken path automatically,
+			where before it always stayed on the exact-text cache. Flat, subquery-
+			free DML -- the shapes this extension actually targets (INSERT VALUES,
+			UPDATE col=col+1 WHERE id=?, DELETE WHERE ... LIMIT n) -- is unaffected.
+			SELECT statements already exercise subqueries extensively via this same
+			front cache and are not restricted here. */
+			(or (regexp_test upper "^(?:SELECT[ \\t\\n]|EXPLAIN)")
+				(not (regexp_test upper "\\bSELECT\\b")))))))
 
 /* WHERE/HAVING gate a filter-affecting literal (needs the safe-scope check every
 other literal gets). SET (UPDATE's assignment list) and VALUES (INSERT's row
