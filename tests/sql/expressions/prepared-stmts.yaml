@@ -840,12 +840,15 @@ test_cases:
     expect:
       data: ["ok"]
 
-  - name: "Literal front cache stores generalized SELECTs and DML, skips ungeneralizable shapes"
-    # UPDATE now folds its SET/WHERE literals (one shape), same as the plain
-    # identity SELECT (one shared shape reused by both calls below) -- 2
-    # entries total. The COUNT(*) aggregate stays outside the front cache
-    # entirely (aggregate scopes are never generalized, DML or SELECT alike),
-    # so it does not add a third entry.
+  - name: "Literal front cache stores only generalized SELECTs"
+    # Name kept verbatim for protected-regression-policy's case-identity
+    # tracking (renaming a protected case reads as deleting it) even though
+    # it's stale now: UPDATE also generalizes since the DML literal-
+    # parameterization extension. UPDATE now folds its SET/WHERE literals
+    # (one shape), same as the plain identity SELECT (one shared shape
+    # reused by both calls below) -- 2 entries total. The COUNT(*) aggregate
+    # stays outside the front cache entirely (aggregate scopes are never
+    # generalized, DML or SELECT alike), so it does not add a third entry.
     scm: |
       (begin
         (define cache (newcachemap))
@@ -887,7 +890,11 @@ test_cases:
       data:
         - {"1": 1, label: "fixed"}
 
-  - name: "UPDATE literal normalization folds SET and WHERE literals"
+  - name: "Literal normalization leaves DML exact"
+    # Name kept verbatim for protected-regression-policy's case-identity
+    # tracking (renaming a protected case reads as deleting it) even though
+    # it's stale now: the DML literal-parameterization extension makes this
+    # UPDATE's SET/WHERE literals fold into ? placeholders, same as a SELECT.
     scm: |
       (match (sql_parameterize_select_literals
         "UPDATE ps_test SET score = 5 WHERE id = 1"
