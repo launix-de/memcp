@@ -29,7 +29,17 @@ import (
 
 func TestJITTypedInliningKeepsLargeNativeBoundaries(t *testing.T) {
 	for _, cost := range []uint16{18, 38, 48, 49, 57, 256} {
-		ctx := &JITContext{}
+		// jitGeneratedEmitterInline's final gate reads ctx's real, live
+		// register state (see jitMinInlineRegisterHeadroom) instead of an
+		// abstract accumulated budget - a bare zero-value JITContext looks
+		// like every register is exhausted (FreeRegs == 0) rather than a
+		// fresh compile with headroom to spare. Give it the same free-register
+		// set jitCompileProcToExec seeds a real compile with.
+		freeRegs := uint64((1 << uint(RegRCX)) | (1 << uint(RegRDX)) |
+			(1 << uint(RegRSI)) | (1 << uint(RegRDI)) |
+			(1 << uint(RegR8)) | (1 << uint(RegR9)) | (1 << uint(RegR10)) |
+			(1 << uint(RegR13)) | (1 << uint(RegR15)))
+		ctx := &JITContext{FreeRegs: freeRegs, AllRegs: freeRegs}
 		decl := &Declaration{Type: &TypeDescriptor{JITInlineCost: cost}}
 		args := []JITValueDesc{{Type: tagInt, Loc: LocStack}, {Type: tagInt, Loc: LocStack}}
 		if got := jitGeneratedEmitterInline(ctx, decl, args); got != (cost <= 48) {
