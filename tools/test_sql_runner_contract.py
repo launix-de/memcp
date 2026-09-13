@@ -95,8 +95,8 @@ class UpgradeSnapshotContractTest(unittest.TestCase):
     def fixture(self):
         import base64
         encode = lambda value: base64.b64encode(value).decode("ascii")
-        columns = [{"name": "id", "encoding": "integer", "metadata": ["INT"]},
-                   {"name": "value", "encoding": "bytes-base64", "metadata": ["BLOB"]}]
+        columns = [{"name": "id", "encoding": "integer", "metadata": {"Type": encode(b"INT")}},
+                   {"name": "value", "encoding": "bytes-base64", "metadata": {"Type": encode(b"BLOB")}}]
         return {"format": "memcp-upgrade-values-v1", "tables": {
             "up_string_nodict": {"columns": columns, "rows": [
                 ["50", encode(b"previously unchecked row")],
@@ -104,7 +104,7 @@ class UpgradeSnapshotContractTest(unittest.TestCase):
                 ["53", encode(b"a\x00b\tc\nd\r\xff")]]},
             "up_blob": {"columns": columns, "rows": [["1", encode(b"a" * 3000)]]},
             "up_json": {"columns": columns, "rows": [["1", encode(b'{"nested":{"v":42}}')]]},
-            "up_float": {"columns": [{"name": "v", "encoding": "number", "metadata": ["DOUBLE"]}],
+            "up_float": {"columns": [{"name": "v", "encoding": "number", "metadata": {"Type": encode(b"DOUBLE")}}],
                          "rows": [["-0"], ["1.1557281258737144"]]}}}
 
     def test_every_value_and_inventory_difference_fails(self):
@@ -124,7 +124,7 @@ class UpgradeSnapshotContractTest(unittest.TestCase):
             lambda t: t["up_float"]["rows"][1].__setitem__(0, "1.1557281258737146"),
             lambda t: t["up_string_nodict"]["rows"][1].__setitem__(1, "TlVMTA=="),
             lambda t: t["up_string_nodict"]["rows"].append(t["up_string_nodict"]["rows"][0]),
-            lambda t: t["up_float"]["columns"][0].__setitem__("metadata", ["INT"]),
+            lambda t: t["up_float"]["columns"][0].__setitem__("metadata", {"Type": base64.b64encode(b"INT").decode("ascii")}),
             lambda t: t.pop("up_json"),
         ]
         expected = self.fixture()
@@ -135,6 +135,37 @@ class UpgradeSnapshotContractTest(unittest.TestCase):
                 self.exporter["capture"] = lambda: actual
                 with self.assertRaises(ValueError):
                     self.exporter["compare"](expected)
+
+    def test_decimal_zero_only_is_canonicalized_without_mutating_oracle(self):
+        import base64
+        import copy
+        for sql_type in ("DECIMAL(10,2)", "NUMERIC(10,2)"):
+            with self.subTest(sql_type=sql_type):
+                expected = {"format": "memcp-upgrade-values-v1", "tables": {"up_zero": {
+                    "columns": [{"name": "v", "encoding": "number", "metadata": {
+                        "Type": base64.b64encode(sql_type.encode("ascii")).decode("ascii")}}],
+                    "rows": [["-0"], ["0"], ["1.25"], [None]]}}}
+                unchanged = copy.deepcopy(expected)
+                actual = copy.deepcopy(expected)
+                actual["tables"]["up_zero"]["rows"] = [[None], ["1.25"], ["0"], ["0"]]
+                self.exporter["capture"] = lambda: actual
+                self.exporter["compare"](expected)
+                self.assertEqual(expected, unchanged)
+                for rows in ([[None], ["1.26"], ["0"], ["0"]],
+                             [[None], ["1.25"], [None], ["0"]],
+                             [[None], ["1.25"], ["0"]]):
+                    actual["tables"]["up_zero"]["rows"] = rows
+                    with self.assertRaises(ValueError):
+                        self.exporter["compare"](expected)
+
+    def test_malformed_snapshot_width_is_rejected_without_truncation(self):
+        import copy
+        expected = self.fixture()
+        self.exporter["capture"] = lambda: expected
+        malformed = copy.deepcopy(expected)
+        malformed["tables"]["up_float"]["rows"][0].append("extra")
+        with self.assertRaises(ValueError):
+            self.exporter["compare"](malformed)
 
     def test_binary_null_and_record_boundaries_survive_capture(self):
         import base64
