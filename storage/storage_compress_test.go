@@ -356,6 +356,7 @@ func TestDecimalHelpers(t *testing.T) {
 		exp int8
 	}{
 		{0.0, math.MaxInt8},
+		{math.Copysign(0, -1), math.MinInt8},
 		{100.0, 2},
 		{7.0, 0},
 		{3.5, -1},
@@ -800,5 +801,48 @@ func TestStorageSCMERKeepsBSONUncompressed(t *testing.T) {
 	storage.scan(1, scm.NewNil())
 	if proposed := storage.proposeCompression(2); proposed != nil {
 		t.Fatalf("BSON must remain in StorageSCMER, got %T", proposed)
+	}
+}
+
+// The upgrade fixture must survive compression and reopening bit for bit,
+// including the sign of zero. Numeric equality alone cannot assert this.
+func TestCompressionDecimalSignedZeroRoundtrip(t *testing.T) {
+	values := []scm.Scmer{}
+	for _, f := range []float64{12.5, -12.5, 0.01, -0.01, 99999.99, -99999.99, 0, math.Copysign(0, -1), 100, -100, 1.23, -1.23, 45.67, -45.67, 0.5, -0.5, 10.1, -10.1} {
+		values = append(values, scm.NewFloat(f))
+	}
+	values = append(values, scm.NewNil(), scm.NewNil())
+	negativeZero := scm.NewFloat(math.Copysign(0, -1))
+	skewed := make([]scm.Scmer, 101)
+	for i := range skewed {
+		skewed[i] = negativeZero
+	}
+	skewed[100] = scm.NewFloat(0)
+	for name, values := range map[string][]scm.Scmer{
+		"decimal_fixture": values,
+		"enum":            skewed,
+		"constant":        {negativeZero},
+		"both_zeros":      {scm.NewFloat(0), negativeZero},
+		"integers":        {negativeZero, scm.NewInt(1), scm.NewInt(2), scm.NewInt(3), scm.NewInt(4), scm.NewInt(5), scm.NewInt(6), scm.NewInt(7), scm.NewInt(8)},
+		"sparse":          {negativeZero, scm.NewInt(3), scm.NewNil(), scm.NewNil()},
+	} {
+		t.Run(name, func(t *testing.T) {
+			col := buildViaCompression(len(values), func(i int) scm.Scmer { return values[i] })
+			for _, stored := range []ColumnStorage{col, serializeDeserialize(col)} {
+				for i, want := range values {
+					got := stored.GetValue(uint32(i))
+					if want.IsNil() {
+						if !got.IsNil() {
+							t.Errorf("%T row %d: want NULL, got %v", stored, i, got)
+						}
+						continue
+					}
+					if math.Float64bits(got.Float()) != math.Float64bits(want.Float()) {
+						t.Errorf("%T row %d: got %g (%016x), want %g (%016x)", stored, i, got.Float(), math.Float64bits(got.Float()), want.Float(), math.Float64bits(want.Float()))
+					}
+				}
+			}
+
+		})
 	}
 }
