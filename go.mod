@@ -13,7 +13,7 @@ require (
 	github.com/chzyer/readline v1.5.1
 	github.com/dc0d/onexit v1.1.0
 	github.com/docker/go-units v0.5.0
-	github.com/dunglas/frankenphp v1.12.7
+	github.com/dunglas/frankenphp v1.12.7 // indirect
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/go-sql-driver/mysql v1.8.1
 	github.com/google/btree v1.1.3
