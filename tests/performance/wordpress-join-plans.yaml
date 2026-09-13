@@ -11,11 +11,14 @@ setup:
 - sql: DROP TABLE IF EXISTS wpbench_comments
 - sql: DROP TABLE IF EXISTS wpbench_postmeta
 - sql: DROP TABLE IF EXISTS wpbench_posts
+- sql: DROP TABLE IF EXISTS wpbench_term_relationships
 - sql: CREATE TABLE wpbench_posts (ID BIGINT PRIMARY KEY, post_type TEXT, post_status TEXT, post_date BIGINT) ENGINE=sloppy
 - sql: CREATE TABLE wpbench_comments (comment_ID BIGINT PRIMARY KEY, comment_post_ID BIGINT, comment_approved TEXT,
     comment_type TEXT) ENGINE=sloppy
 - sql: CREATE TABLE wpbench_postmeta (meta_id BIGINT PRIMARY KEY, post_id BIGINT, meta_key TEXT, meta_value TEXT)
     ENGINE=sloppy
+- sql: CREATE TABLE wpbench_term_relationships (object_id BIGINT, term_taxonomy_id BIGINT,
+    PRIMARY KEY (object_id, term_taxonomy_id)) ENGINE=sloppy
 - scm: |
     (insert (table "memcp-tests" "wpbench_posts") '("ID" "post_type" "post_status" "post_date")
       (map (produceN 22062) (lambda (i) (list (+ i 1) (if (< i 200) "product" "post") "publish" i))))
@@ -26,8 +29,50 @@ setup:
     (insert (table "memcp-tests" "wpbench_postmeta") '("meta_id" "post_id" "meta_key" "meta_value")
       (map (produceN 60000) (lambda (i) (list (+ i 1) (+ 1 (mod i 22062))
         (if (< (mod i 10) 2) "_yoast_wpseo_linkdex" "other") "99"))))
+- scm: |
+    (insert (table "memcp-tests" "wpbench_term_relationships") '("object_id" "term_taxonomy_id")
+      (map (produceN 44124) (lambda (i) (list (+ 1 (mod i 22062))
+        (if (< i 22062) 1 (+ 41 (mod (mod i 22062) 120)))))))
 - scm: (rebuild)
 test_cases:
+- name: Tag archive singleton IN preserves grouped page and found rows
+  warmup: 5
+  timing_samples: 11
+  sql: |
+    SELECT SQL_CALC_FOUND_ROWS p.ID FROM wpbench_posts p
+    LEFT JOIN wpbench_term_relationships r ON p.ID = r.object_id
+    WHERE r.term_taxonomy_id IN (122) AND p.post_type = 'post' AND p.post_status = 'publish'
+    GROUP BY p.ID ORDER BY p.post_date DESC LIMIT 0, 10
+  expect:
+    rows: 10
+    data:
+    - ID: 22042
+    - ID: 21922
+    - ID: 21802
+    - ID: 21682
+    - ID: 21562
+    - ID: 21442
+    - ID: 21322
+    - ID: 21202
+    - ID: 21082
+    - ID: 20962
+  threshold_ms: 1000
+- name: Tag archive found rows includes rows beyond the page
+  session_id: wpbench_tag_found_rows
+  setup:
+  - sql: |
+      SELECT SQL_CALC_FOUND_ROWS p.ID FROM wpbench_posts p
+      LEFT JOIN wpbench_term_relationships r ON p.ID = r.object_id
+      WHERE r.term_taxonomy_id IN (122) AND p.post_type = 'post' AND p.post_status = 'publish'
+      GROUP BY p.ID ORDER BY p.post_date DESC LIMIT 0, 10
+  sql: SELECT FOUND_ROWS() AS n
+  expect: {rows: 1, data: [{n: 183}]}
+- name: Singleton IN retains SQL NULL semantics
+  sql: SELECT 1 IN (NULL) AS rhs_null, NULL IN (1) AS lhs_null, NULL IN (NULL) AS both_null, 1 NOT IN (NULL) AS negated_null
+  expect: {rows: 1, data: [{rhs_null: null, lhs_null: null, both_null: null, negated_null: null}]}
+- name: Singleton IN still validates its only referenced column
+  sql: SELECT 1 IN (missing_column) FROM wpbench_posts
+  expect: {error: true}
 - name: Count comments after nullable-side exclusion
   warmup: 20
   timing_samples: 11
@@ -60,6 +105,7 @@ test_cases:
   calibration_decision: semijoin_carrier
   threshold_ms: 1000
 cleanup:
+- sql: DROP TABLE IF EXISTS wpbench_term_relationships
 - sql: DROP TABLE IF EXISTS wpbench_comments
 - sql: DROP TABLE IF EXISTS wpbench_postmeta
 - sql: DROP TABLE IF EXISTS wpbench_posts

@@ -686,6 +686,22 @@ parent stages are merged into a multi-output stage. */
 /* ------------------------------------------------------------------------- */
 /* Normalisation                                                              */
 
+/* A one-value IN list is SQL equality, including UNKNOWN for NULL operands.
+Normalize before binding/reordering so ordinary equality access paths can use
+the predicate. Quoted data and subquery membership retain their own semantics. */
+(define normalize_singleton_in_lists (lambda (expr)
+	(match expr
+		((symbol quote) value) expr
+		((symbol sql_in) (cons constructor values) probe)
+		(if (and (or (equal? constructor list) (equal? constructor (quote list)))
+			(equal? (count values) 1))
+			(list (quote equal??) (normalize_singleton_in_lists probe)
+				(normalize_singleton_in_lists (car values)))
+			(cons (quote sql_in) (map (list (cons constructor values) probe) normalize_singleton_in_lists)))
+		(cons head tail) (cons (normalize_singleton_in_lists head)
+			(map tail normalize_singleton_in_lists))
+		_ expr)))
+
 (define normalize_query_ast (lambda (query)
 	(match query
 		((symbol query-block) schema sources fields where group having order limit offset hidden stages facts)

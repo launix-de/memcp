@@ -1566,20 +1566,12 @@ func (t *storageShard) filterRecSetPart(part *recSetShard, conditionCols []strin
 		}
 		return true
 	}
-	/* A tiny batch is already the cheapest exact candidate iterator; walking a
-	whole inactive boundary index just to rediscover those IDs would defeat
-	adaptive LIMIT. Broad RecSets take the normal boundary path, where LIKE and
-	other hooks can reduce work below the incoming membership cardinality. */
-	if part.count*4 < int64(visibleUpper) {
-		part.forEachID(func(idx uint32) bool {
-			evaluateOne(idx)
-			return true
-		})
-	} else {
-		buf, pooledFullBuf, pooledPointBuf := acquireScanIDBuffer(defaultScanBufferSize)
-		defer releaseScanIDBuffer(pooledFullBuf, pooledPointBuf)
-		t.iterateIndexMatchAware(currentTx, access, len(t.inserts), buf, true, nil, evaluateBatch)
-	}
+	// The index iterator also handles sparse RecSets, while applying every
+	// access boundary. Direct membership iteration would skip predicates whose
+	// residual has already been removed by the planner.
+	buf, pooledFullBuf, pooledPointBuf := acquireScanIDBuffer(defaultScanBufferSize)
+	defer releaseScanIDBuffer(pooledFullBuf, pooledPointBuf)
+	t.iterateIndexMatchAware(currentTx, access, len(t.inserts), buf, true, nil, evaluateBatch)
 	return builder.finish()
 }
 

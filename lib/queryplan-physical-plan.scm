@@ -9829,7 +9829,7 @@ wrapper owns the output-shape normalizers which must precede binding.
 Decorrelation owns D and all subquery elimination; only then may logical join
 ordering run. Storage artifacts begin in build_queryplan. */
 (define normalize_sql_syntax (lambda (ast)
-	(sanitize_temporal_outputs (sanitize_decimal_aggregate_outputs ast))))
+	(sanitize_temporal_outputs (sanitize_decimal_aggregate_outputs (normalize_singleton_in_lists ast)))))
 
 (define decorrelate_logical_query (lambda (ast)
 	(untangle_query_term (normalize_sql_syntax ast) nil)))
