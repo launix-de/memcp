@@ -130,6 +130,18 @@ func jitCompileProcToExec(proc *Proc, buf *execBuf, recursiveLambdas bool) (int,
 	return jitCompileExprBodyToExec(proc, body, proc.NumVars, buf, recursiveLambdas)
 }
 
+// jitDefaultFreeGPRegs returns the general-purpose registers a fresh
+// compilation starts with free to allocate: all GPRs except RAX (result
+// ptr), RBX (result aux), RSP, RBP, R11 (scratch), R12 (slice base), R14 (Go
+// goroutine ptr "g"). Shared with tests that need a JITContext representative
+// of a real compile's register state (see jitMinInlineRegisterHeadroom).
+func jitDefaultFreeGPRegs() uint64 {
+	return uint64((1 << uint(RegRCX)) | (1 << uint(RegRDX)) |
+		(1 << uint(RegRSI)) | (1 << uint(RegRDI)) |
+		(1 << uint(RegR8)) | (1 << uint(RegR9)) | (1 << uint(RegR10)) |
+		(1 << uint(RegR13)) | (1 << uint(RegR15)))
+}
+
 // jitCompileExprBodyToExec compiles a Scheme expression body into a writable
 // executable buffer using Declaration.JITEmit callbacks.
 func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf, recursiveLambdas bool) (codeLen int, roots []unsafe.Pointer, dependencies []*JITEntryPoint, overflow bool, hiddenArgs []JITHiddenArg, needsStableArgs bool, coverage JITCoverage) {
@@ -151,12 +163,7 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 	}()
 	numVars = jitRequiredLocalSlots(body, numVars)
 
-	// Free registers: all GPRs except RAX (result ptr), RBX (result aux),
-	// RSP, RBP, R11 (scratch), R12 (slice base), R14 (Go goroutine ptr "g")
-	freeRegs := uint64((1 << uint(RegRCX)) | (1 << uint(RegRDX)) |
-		(1 << uint(RegRSI)) | (1 << uint(RegRDI)) |
-		(1 << uint(RegR8)) | (1 << uint(RegR9)) | (1 << uint(RegR10)) |
-		(1 << uint(RegR13)) | (1 << uint(RegR15)))
+	freeRegs := jitDefaultFreeGPRegs()
 	freeFPRegs := uint64(0)
 	for index := uint8(0); index < jitX86FPRegisterBank.Count; index++ {
 		freeFPRegs |= uint64(1) << uint(jitX86FPRegisterBank.Registers[index])
