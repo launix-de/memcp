@@ -143,6 +143,18 @@ def compare(expected):
         for name in sorted(set(actual["tables"]) | set(expected["tables"])):
             if actual["tables"].get(name) != expected["tables"].get(name):
                 print("MISMATCH: complete fixture table " + name, file=sys.stderr)
+                old_table = expected["tables"].get(name)
+                new_table = actual["tables"].get(name)
+                if old_table and new_table and old_table["columns"] == new_table["columns"]:
+                    old_rows, new_rows = old_table["rows"], new_table["rows"]
+                    print(f"  row counts: expected {len(old_rows)}, actual {len(new_rows)}", file=sys.stderr)
+                    for row_index, (old_row, new_row) in enumerate(zip(old_rows, new_rows)):
+                        if old_row != new_row:
+                            for column, old_value, new_value in zip(old_table["columns"], old_row, new_row):
+                                if old_value != new_value:
+                                    print(f"  sorted row {row_index}, column {column['name']}: "
+                                          f"expected {old_value!r}, actual {new_value!r}", file=sys.stderr)
+                            break
         raise ValueError("full fixture snapshot differs (no tolerances)")
     count = sum(len(t["rows"]) for t in actual["tables"].values())
     print(f"upgrade snapshot: all {len(actual['tables'])} tables / {count} rows match exactly")
