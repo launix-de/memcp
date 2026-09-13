@@ -38,6 +38,45 @@ func TestJITTypedInliningKeepsLargeNativeBoundaries(t *testing.T) {
 	}
 }
 
+// Identical call shapes must not change admission when unrelated earlier
+// code has claimed registers. The allocator still handles actual emission.
+func TestJITInlineAdmissionDependsOnCallShape(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		decl Declaration
+		args []JITValueDesc
+		want bool
+	}{
+		{"typed small body", Declaration{Type: &TypeDescriptor{JITInlineCost: 18}},
+			[]JITValueDesc{{Type: tagInt, Loc: LocStack}}, true},
+		{"typed large body", Declaration{Type: &TypeDescriptor{JITInlineCost: 49}},
+			[]JITValueDesc{{Type: tagInt, Loc: LocStack}}, false},
+		{"constant shape", Declaration{Type: &TypeDescriptor{JITInlineCost: 32}},
+			[]JITValueDesc{{Type: JITTypeUnknown, Loc: LocImm, Imm: NewInt(1)}}, true},
+		{"unknown dynamic argument", Declaration{Type: &TypeDescriptor{JITInlineCost: 18}},
+			[]JITValueDesc{{Type: JITTypeUnknown, Loc: LocStackPair}}, false},
+		{"no generated body", Declaration{RetainsCallArgs: true, Type: &TypeDescriptor{JITInlineCost: 65535}},
+			[]JITValueDesc{{Type: tagInt, Loc: LocStack}}, false},
+		{"unhandled lambda template", Declaration{RetainsCallArgs: true, Type: &TypeDescriptor{JITInlineCost: 18}},
+			[]JITValueDesc{{Type: JITTypeUnknown, Loc: LocLambdaTemplate}}, false},
+		{"variadic callback template", Declaration{RetainsCallArgs: true, Type: &TypeDescriptor{
+			JITInlineCost: 18, JITInlineCallbacks: true,
+			Params: []*TypeDescriptor{{Kind: "func", Params: []*TypeDescriptor{{Variadic: true}}}},
+		}}, []JITValueDesc{{Type: JITTypeUnknown, Loc: LocLambdaTemplate}}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, free := range []uint64{0, jitDefaultFreeGPRegs()} {
+				for _, protected := range []uint64{0, jitDefaultFreeGPRegs()} {
+					ctx := &JITContext{FreeRegs: free, ProtectedRegs: protected, AllRegs: jitDefaultFreeGPRegs()}
+					if got := jitGeneratedEmitterInline(ctx, &tc.decl, tc.args); got != tc.want {
+						t.Fatalf("free=%x protected=%x: inline=%v, want %v", free, protected, got, tc.want)
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestJITBufferLoopsPreserveClosureCaptures(t *testing.T) {
 	values := []Scmer{NewInt(6), NewInt(9)}
 	for _, source := range []string{

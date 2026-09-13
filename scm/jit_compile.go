@@ -2913,7 +2913,6 @@ func jitCompileDynamicHigherOrderCall(ctx *JITContext, callableExpr Scmer, opera
 	return jitCompileDynamicCall(ctx, callableExpr, operands, nil, sliceBase, result)
 }
 
-const jitBuiltinInlineBudget = 2048
 const jitTrivialVirtualInlineCost = 2
 
 // jitEmitGeneratedCallBoundary materializes compiler-only lambda templates
@@ -2962,7 +2961,7 @@ func jitGeneratedEmitterInline(ctx *JITContext, declaration *Declaration, args [
 	}
 	inline := declaration.RetainsCallArgs
 	knownTypes, knownShapes, knownArgs := 0, 0, 0
-	hasVirtualArgs := false
+	hasVirtualArgs, hasUnhandledLambdaTemplate := false, false
 	knownCallback, hasCallback := false, false
 	for index, arg := range args {
 		if arg.Type != JITTypeUnknown {
@@ -2983,6 +2982,15 @@ func jitGeneratedEmitterInline(ctx *JITContext, declaration *Declaration, args [
 				(arg.Loc == LocImm && (arg.Imm.GetTag() == tagProc || arg.Imm.GetTag() == tagFunc)) {
 				knownCallback = true
 			}
+		} else if arg.Loc == LocLambdaTemplate {
+			// An uncompiled callback landed on a parameter this declaration
+			// never declared Kind:"func" for - it has no materialization step
+			// prepared for it (that only exists for the hasCallback path above
+			// and jitEmitGeneratedCallBoundary's own handling of the
+			// non-inlined path). Inlining here would hand a compiler-only
+			// template straight to code that expects a plain, already-
+			// materialized Scmer.
+			hasUnhandledLambdaTemplate = true
 		}
 	}
 	cost := int(declaration.Type.JITInlineCost)
@@ -3009,13 +3017,24 @@ func jitGeneratedEmitterInline(ctx *JITContext, declaration *Declaration, args [
 			inline = false
 		}
 	}
-	if cost == 65535 || !declaration.RetainsCallArgs && ctx.BuiltinInlineCost+cost > jitBuiltinInlineBudget {
+	if cost == 65535 {
+		// Sentinel: jitgen generated no inlinable body for this declaration at
+		// all, only a call boundary. There is nothing to inline.
 		return false
 	}
 	if !inline {
 		return false
 	}
-	ctx.BuiltinInlineCost += cost
+	// From here on, every path above that said "inline" - RetainsCallArgs, the
+	// callback path, and the switch - passes through the same representation
+	// check. Admission depends on this call, not earlier allocator decisions.
+	if hasUnhandledLambdaTemplate {
+		// Applies regardless of which branch above admitted this call: an
+		// uncompiled callback on a plain (non-func) parameter cannot be
+		// rendered as a value by ANY inlined SSA body or native call this
+		// path emits.
+		return false
+	}
 	ctx.Coverage.InlinedCalls++
 	return true
 }
