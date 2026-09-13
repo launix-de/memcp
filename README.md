@@ -88,6 +88,11 @@ Important HTTP endpoints:
 - `/dashboard` — administration, system monitoring, query activity, storage,
   compression, and users
 
+`make` and `make jit` build `memcp` with PHP support. Use `make nophp` for a
+size-focused build without PHP. PHP remains an explicit feature: `--serve`
+mounts the app into the existing HTTP handler chain and does not create a
+second listener.
+
 These are SQL-over-HTTP APIs rather than a resource-oriented REST data model.
 
 ## Architecture

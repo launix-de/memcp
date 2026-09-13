@@ -19,19 +19,31 @@ SAPI, including PDO and OPcache. The PHP headers, `php-config`, `libphp`, and
 extensions must belong to the same build. A usual NTS PHP-FPM package is not
 sufficient. Follow the upstream [FrankenPHP build instructions](https://frankenphp.dev/docs/compile/).
 
+By default `make` builds the normal `memcp` binary with embedded PHP support
+so `--serve` is available.
+
 ```sh
+make
+
+# build with embedded PHP
 make php PHP_CONFIG=/path/to/php-zts/bin/php-config
+
+# explicit no-php size build
+make nophp
 ```
 
-This produces `memcp-php`. The executable dynamically links external `libphp`
+`make php` produces `memcp-php`. That executable dynamically links external
+`libphp`
 from the selected installation; it does not start PHP-FPM or a separate
 FrankenPHP/Caddy process. Install application-specific extensions such as
 `mysqli`, `pdo_mysql`, `pdo_pgsql`, `pdo_sqlite`, `intl`, or `mbstring` in that
 PHP installation. Its `php.ini` remains the place for PHP and OPcache settings.
 
-`make` still produces the ordinary `memcp` executable without PHP or native
-PHP build requirements. The shared Go module graph now requires Go 1.26 due
-to FrankenPHP. The PHP build disables optional Watcher, Brotli and Mercure
+The plain `make` build still produces the ordinary `memcp` executable and keeps
+the PHP integration available for `--serve`; it does not add separate PHP build
+requirements. The `make nophp` target disables PHP at compile time for a smaller
+binary. The shared Go module graph still requires Go 1.26 due to FrankenPHP
+integration. The PHP build disables optional Watcher, Brotli and Mercure
 features; no Caddy dependency is added.
 
 ## Mount applications from Scheme
