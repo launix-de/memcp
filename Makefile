@@ -228,8 +228,9 @@ $(RPM_OUT):
 	mkdir -p $(PACKAGE_DIR)/rpmbuild/BUILD $(PACKAGE_DIR)/rpmbuild/RPMS \
 		$(PACKAGE_DIR)/rpmbuild/SOURCES $(PACKAGE_DIR)/rpmbuild/SPECS \
 		$(PACKAGE_DIR)/rpmbuild/SRPMS $(DIST_DIR)
-	git archive --format=tar --prefix=memcp-$(VERSION)/ $(SOURCE_TREEISH) \
-		| gzip -9n > $(PACKAGE_DIR)/rpmbuild/SOURCES/memcp-$(VERSION).tar.gz
+	git archive --format=tar --prefix=memcp-$(VERSION)/ \
+		-o $(PACKAGE_DIR)/rpmbuild/SOURCES/memcp-$(VERSION).tar $(SOURCE_TREEISH)
+	gzip -9n $(PACKAGE_DIR)/rpmbuild/SOURCES/memcp-$(VERSION).tar
 	rpmbuild $(RPMBUILD_FLAGS) -ba memcp.spec \
 		--target "$(RPM_ARCH)" \
 		--define "_topdir $(PWD)/$(PACKAGE_DIR)/rpmbuild" \
