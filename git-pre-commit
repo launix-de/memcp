@@ -238,9 +238,17 @@ echo ""
 
 test_port=${MEMCP_TEST_PORT:-$(( (RANDOM % 10000) + 20000 ))}
 test_data_dir="${MEMCP_TEST_DATA_DIR:-/tmp/memcp-sql-tests-$test_port}"
-memcp_log="${MEMCP_LOG:-/tmp/memcp-test.log}"
+# A dedicated run directory survives errors and cancellation. CI pins the parent
+# directory so its always() artifact step can also collect successful runs.
+if [ -n "${MEMCP_TEST_LOGDIR:-}" ]; then
+  mkdir -p "$MEMCP_TEST_LOGDIR" || exit 1
+  tmpdir=$(mktemp -d "$MEMCP_TEST_LOGDIR/run.XXXXXX") || exit 1
+else
+  tmpdir=$(mktemp -d /tmp/memcp-test-logs.XXXXXX) || exit 1
+fi
+memcp_log="${MEMCP_LOG:-$tmpdir/memcp.log}"
+echo "📁 Test diagnostics: $tmpdir"
 supervisor_generation_file="${MEMCP_TEST_SUPERVISOR_GENERATION_FILE:-/tmp/memcp-test-supervisor-$test_port.generation}"
-tmpdir=""
 supervisor_pid=""
 enable_mysql=0
 
@@ -274,7 +282,7 @@ run_memcp_forever() {
     if [ -z "${memcp_pid:-}" ]; then
       return
     fi
-    kill "$memcp_pid" 2>/dev/null || true
+    kill -"${1:-TERM}" "$memcp_pid" 2>/dev/null || true
     for _ in {1..20}; do
       if ! kill -0 "$memcp_pid" 2>/dev/null; then
         return
@@ -284,6 +292,8 @@ run_memcp_forever() {
     kill -9 "$memcp_pid" 2>/dev/null || true
   }
   trap 'terminate_memcp_child; exit 0' TERM INT
+  # Stop this supervisor while asking only its own child for Go stack traces.
+  trap 'terminate_memcp_child QUIT; exit 0' USR2
   # A connect-only restart suite uses this signal only after graceful
   # SHUTDOWN failed to complete. The loop then restarts the same data store.
   trap 'terminate_memcp_child' USR1
@@ -318,7 +328,7 @@ run_memcp_forever() {
 
 start_supervisor() {
   rm -f "$supervisor_generation_file" "$supervisor_generation_file.tmp"
-  echo -n > /tmp/memcp-test.log
+  : > "$memcp_log"
   run_memcp_forever &
   supervisor_pid=$!
 
@@ -337,7 +347,8 @@ start_supervisor() {
 
 stop_supervisor() {
   if [ -n "${supervisor_pid:-}" ]; then
-    kill "$supervisor_pid" 2>/dev/null || true
+    kill -"${1:-TERM}" "$supervisor_pid" 2>/dev/null || true
+    wait "$supervisor_pid" 2>/dev/null || true
     supervisor_pid=""
   fi
   pkill -f "memcp.*--api-port=$test_port" 2>/dev/null || true
@@ -347,45 +358,61 @@ stop_supervisor() {
 wait_for_sql_ready() {
   local retries="${1:-60}"
   local delay="${2:-1}"
-  local http_code
-  for ((i=1; i<=retries; i++)); do
-    if curl -s "http://localhost:$test_port" >/dev/null 2>&1; then
-      http_code=$(curl -s -o /dev/null -w "%{http_code}" -u root:admin "http://localhost:$test_port/sql/memcp-tests" -d "SELECT 1")
-      if [ "$http_code" = "200" ]; then
-        return 0
-      fi
+  local deadline=$((SECONDS + retries * delay))
+  local remaining probe_timeout http_code
+  while (( SECONDS < deadline )); do
+    remaining=$((deadline - SECONDS))
+    probe_timeout=3
+    if (( remaining < probe_timeout )); then probe_timeout=$remaining; fi
+    if http_code=$(curl -s --connect-timeout 2 --max-time "$probe_timeout" \
+      -o /dev/null -w "%{http_code}" -u root:admin \
+      "http://localhost:$test_port/sql/memcp-tests" -d "SELECT 1") && [ "$http_code" = 200 ]; then
+      return 0
     fi
-    sleep "$delay"
+    if (( SECONDS < deadline )); then sleep "$delay"; fi
   done
   return 1
 }
 
-if ! start_supervisor; then
-  exit 1
-fi
-
 cleanup() {
+  local result="${1:-0}"
   # Make cleanup idempotent
   if [ "$did_cleanup" -eq 1 ]; then return; fi
   did_cleanup=1
   echo ""; echo "🛑 Stopping MemCP..."
+  if [ "$result" -ne 0 ]; then
+    # USR2 exits the supervisor after dumping its owned child's Go stacks.
+    stop_supervisor USR2
+  else
+    stop_supervisor
+  fi
   if [ ${#active_pids[@]} -gt 0 ]; then
     kill "${active_pids[@]}" 2>/dev/null || true
   fi
   for pid in $(jobs -p 2>/dev/null); do
     kill "$pid" 2>/dev/null || true
   done
-  stop_supervisor
   if [ -n "$tmpdir" ] && [ -d "$tmpdir" ]; then
-    rm -rf "$tmpdir" 2>/dev/null || true
+    if [ "$memcp_log" != "$tmpdir/memcp.log" ] && [ -f "$memcp_log" ]; then
+      cp "$memcp_log" "$tmpdir/memcp.log" || true
+    fi
+    if [ "$result" -ne 0 ] || [ -n "${MEMCP_TEST_LOGDIR:-}" ]; then
+      echo "📁 Preserved test diagnostics: $tmpdir (exit=$result)"
+    else
+      rm -rf "$tmpdir" 2>/dev/null || true
+    fi
   fi
   echo "✅ MemCP stopped"
 }
-trap cleanup EXIT
+trap 'cleanup "$?"' EXIT
 # Handle Ctrl+C and termination signals
-trap 'echo; echo "✋ Interrupted"; cleanup; exit 130' INT
-trap 'echo; echo "✋ Terminated"; cleanup; exit 143' TERM
-trap 'cleanup; exit 129' HUP
+trap 'echo; echo "✋ Interrupted"; cleanup 130; exit 130' INT
+trap 'echo; echo "✋ Terminated"; cleanup 143; exit 143' TERM
+trap 'cleanup 129; exit 129' HUP
+
+if ! start_supervisor; then
+  exit 1
+fi
 
 if [ "$fail_fast_mode" -eq 1 ]; then
   echo "🧪 Running SQL tests using single MemCP instance (fail-fast)..."
@@ -427,7 +454,6 @@ if ! [[ "$max_jobs" =~ ^[0-9]+$ ]] || [ "$max_jobs" -lt 1 ]; then
 fi
 if [ "$max_jobs" -gt 16 ]; then max_jobs=16; fi
 
-tmpdir=$(mktemp -d)
 lockfile="/tmp/memcp-print.lock"
 
 run_one() {
@@ -435,6 +461,7 @@ run_one() {
   local out="$2"
   local statusf="$3"
   local rc
+  echo "▶ START suite: $tf (output: $out)"
   local -a runner_args=()
   if [ "$fail_fast_mode" -eq 1 ]; then
     runner_args+=("--fail-fast")
@@ -616,9 +643,6 @@ if [ "$all_passed" != true ]; then
   done
   echo ""
 fi
-
-rm -rf "$tmpdir"
-tmpdir=""
 
 # Generate coverage report if coverage mode was enabled
 if [ "${MEMCP_COVERAGE:-}" = "1" ] && [ -d "$GOCOVERDIR" ]; then

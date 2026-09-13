@@ -29,6 +29,7 @@ jobs:
     needs: changes
     if: ${{ needs.changes.outputs.relevant == 'true' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 40
 
     services:
       mariadb:
@@ -60,7 +61,19 @@ jobs:
           sudo apt-get install -y mariadb-client
 
       - name: Run tests
+        timeout-minutes: 30
+        env:
+          MEMCP_TEST_LOGDIR: ${{ runner.temp }}/memcp-test-diagnostics
         run: bash git-pre-commit
+
+      - name: Upload test diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: test-diagnostics
+          path: ${{ runner.temp }}/memcp-test-diagnostics/
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Verify dump and restore compatibility
         env:
