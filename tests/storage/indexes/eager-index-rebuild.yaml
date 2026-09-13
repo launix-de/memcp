@@ -128,7 +128,8 @@ test_cases:
         - id: 99
         - id: 500
 
-  - name: "Favorite indexes before repartition fixture"
+  # Fixture creation and warming must also run when PERF_TEST is disabled.
+  - name: "Create and warm favorite index before repartition"
     setup:
       - sql: "DROP TABLE IF EXISTS repartition_favorites"
       - sql: "CREATE TABLE repartition_favorites (id INT, bucket INT) ENGINE=sloppy"
@@ -137,15 +138,22 @@ test_cases:
             (insert (table "memcp-tests" "repartition_favorites") '("id" "bucket")
               (map (produceN 50000) (lambda (i) (list i (mod i 2)))))
             (rebuild (table "memcp-tests" "repartition_favorites") true false))
+      - sql: "SELECT id FROM repartition_favorites WHERE id = 49999"
+      - sql: "SELECT id FROM repartition_favorites WHERE id = 49999"
+    sql: "SELECT id FROM repartition_favorites WHERE id = 49999"
+    expect: {rows: 1, data: [{id: 49999}]}
+
+  - name: "Favorite index point probe before repartition"
     warmup: 10
     timing_samples: 1
     threshold_ms: 200
     sql: "SELECT id FROM repartition_favorites WHERE id = 49999"
     expect: {rows: 1, data: [{id: 49999}]}
 
+  - name: "Repartition with a warmed favorite index"
+    scm: '(partitiontable (table "memcp-tests" "repartition_favorites") (list (list "bucket" (list 0))))'
+
   - name: "First point probe retains favorite after repartition"
-    setup:
-      - scm: '(partitiontable (table "memcp-tests" "repartition_favorites") (list (list "bucket" (list 0))))'
     warmup: 0
     timing_samples: 1
     threshold_ms: 200
