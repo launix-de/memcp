@@ -44,6 +44,31 @@ assert_integrity() {
 }
 
 sudo dpkg -i "$DEB"
+# Exercise PHP from the installed package, independently of the database
+# service. CI removes the ZTS build prefix before invoking this script.
+php_fixture=$(mktemp -d /tmp/memcp-package-php.XXXXXX)
+printf '%s\n' '<?php echo PHP_ZTS && extension_loaded("pdo") && extension_loaded("imagick") && str_starts_with(php_ini_loaded_file(), "/usr/lib/memcp/php/") && ini_get("extension_dir") === "/usr/lib/memcp/php/extensions" ? "package-php-ok" : "bad-runtime";' > "$php_fixture/index.php"
+/usr/bin/memcp --no-repl --disable-mysql --mysql-socket= --api-port=29494 \
+    -data "$php_fixture/data" --serve "$php_fixture" /usr/lib/memcp/lib/main.scm \
+    > "$php_fixture/server.log" 2>&1 &
+php_pid=$!
+trap 'kill "$php_pid" 2>/dev/null || true; wait "$php_pid" 2>/dev/null || true' EXIT HUP INT TERM
+php_ok=false
+for attempt in $(seq 1 60); do
+    if [ "$(curl -fsS http://127.0.0.1:29494/index.php 2>/dev/null || true)" = package-php-ok ]; then
+        php_ok=true
+        break
+    fi
+    sleep 1
+done
+if [ "$php_ok" != true ]; then
+    cat "$php_fixture/server.log" >&2
+    exit 1
+fi
+kill "$php_pid"
+wait "$php_pid" || true
+trap - EXIT HUP INT TERM
+
 PASSWORD=$(sudo sed -n '1p' "$CREDENTIAL")
 [ -n "$PASSWORD" ]
 wait_for_mysql

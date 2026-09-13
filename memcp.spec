@@ -5,6 +5,10 @@
 # the Free Software Foundation, either version 3 of the License, or
 # (at your option) any later version.
 
+# Go and the externally built PHP runtime are installed stripped. Their source
+# input is recorded in the SRPM/SDK release pins, not an empty debug subpackage.
+%global debug_package %{nil}
+
 Name:           memcp
 Version:        %{_version}
 Release:        1%{?dist}
@@ -15,12 +19,24 @@ Source0:        %{name}-%{version}.tar.gz
 BuildRequires:  golang
 BuildRequires:  make
 BuildRequires:  python3
+BuildRequires:  gcc
+# php-devel is the distribution's development baseline. The actual SDK selected
+# by _php_config must additionally be PHP >= 8.5, ZTS and shared embed; make
+# check-php validates this before compilation. CI builds that released SDK on
+# this same distribution, including Imagick, outside the MemCP source tree.
+BuildRequires:  php-devel >= 8.5
+%{!?_php_config:%global _php_config php-config}
+%{!?_php_license_dir:%global _php_license_dir /usr/share/licenses/php}
 Requires(pre):  shadow-utils
 Requires(post): coreutils
 Requires(post): systemd
 Requires(post): util-linux
 Requires(preun): systemd
 Requires(postun): systemd
+# The pre-install script creates these identities before installing owned files.
+# Fedora's file dependency generator requires the group for memcp.conf.
+Provides:       user(memcp)
+Provides:       group(memcp)
 
 %description
 MemCP is a persistent, column-oriented in-memory database with HTTP and
@@ -43,12 +59,14 @@ getent passwd memcp >/dev/null 2>&1 || \
         -c "memcp database daemon" memcp
 
 %build
-make all GOOS=linux GOARCH=%{_goarch} CGO_ENABLED=0 \
-    LDFLAGS="-s -w"
+make all GOOS=linux GOARCH=%{_goarch} PHP_CONFIG="%{_php_config}" \
+    PHP_RPATH='$$ORIGIN/../lib/memcp/php' BUILD_FLAGS="-trimpath -buildvcs=false -buildmode=pie" LDFLAGS="-s -w"
 
 %install
 make install-files DESTDIR=%{buildroot} \
     PREFIX=/usr SYSTEMD_DIR=/usr/lib/systemd/system PACKAGE_FORMAT=rpm
+make install-php-runtime DESTDIR=%{buildroot} PREFIX=/usr \
+    PHP_CONFIG="%{_php_config}" PHP_LICENSE_DIR="%{_php_license_dir}"
 
 %check
 python3 tools/test_packaging.py
@@ -86,6 +104,7 @@ fi
 %doc /usr/share/doc/memcp/copyright
 %doc /usr/share/doc/memcp/README.md
 %doc /usr/share/doc/memcp/CHANGELOG.md
+%license /usr/share/doc/memcp/php/
 /usr/bin/memcp
 /usr/lib/memcp/
 /usr/lib/systemd/system/memcp.service

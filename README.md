@@ -88,6 +88,11 @@ Important HTTP endpoints:
 - `/dashboard` — administration, system monitoring, query activity, storage,
   compression, and users
 
+`make` and `make jit` build `memcp` with PHP support. Use `make nophp` for a
+size-focused build without PHP. PHP remains an explicit feature: `--serve`
+mounts the app into the existing HTTP handler chain and does not create a
+second listener.
+
 These are SQL-over-HTTP APIs rather than a resource-oriented REST data model.
 
 ## Architecture
@@ -507,6 +512,10 @@ Tagged releases publish a static Linux binary, an amd64 DEB, an x86_64 RPM and
 source RPM, checksums, and a multi-architecture container image for amd64 and
 arm64. The version in the tag must exactly match the first word in
 `CHANGELOG.md` (for example `v0.2` for version `0.2`).
+
+`make`, `make jit`, and the DEB/RPM packages include embedded PHP. Packages
+supply their matching ZTS runtime, PHP configuration, and Imagick module.
+The standalone static release binary uses the explicit `nophp` build.
 
 ### Debian and Ubuntu
 
