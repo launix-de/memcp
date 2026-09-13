@@ -1831,6 +1831,194 @@ func TestRepartitionBuildFailureDoesNotPublishPartialGeneration(t *testing.T) {
 	}
 }
 
+func TestRepartitionInheritsWeightedIndexesFromEverySource(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "trepartitionfavoriteindexes", 128)
+	first := tbl.ActiveShards()[0]
+	makeIndex := func(shard *storageShard, column string, weight float64) *StorageIndex {
+		index := &StorageIndex{t: shard, Cols: []string{column}, ColOrderMeta: []string{"bin:asc"}, Native: true}
+		index.storeSavings(weight)
+		return index
+	}
+	first.mu.Lock()
+	first.Indexes = []*StorageIndex{makeIndex(first, "id", 20)}
+	first.mu.Unlock()
+	second := NewShard(tbl)
+	second.Indexes = []*StorageIndex{makeIndex(second, "id", 30), makeIndex(second, "payload", 10)}
+	tbl.mu.Lock()
+	tbl.Shards = append(tbl.Shards, second)
+	tbl.publishTopologyLocked()
+	tbl.mu.Unlock()
+	snapshot := snapshotRepartitionIndexes(tbl.ActiveShards())
+	if len(snapshot) != 2 {
+		t.Fatalf("union has %d definitions instead of 2", len(snapshot))
+	}
+	for _, index := range snapshot {
+		if index.t != nil || index.Native || index.baseState.active {
+			t.Fatal("definition snapshot retained source runtime state")
+		}
+		if index.Cols[0] == "id" && index.loadSavings() != 45 {
+			t.Fatalf("combined usage=%g, want one decay of50→45", index.loadSavings())
+		}
+	}
+	if !tbl.beginManualRepartition() {
+		t.Fatal("manual repartition not claimed")
+	}
+	tbl.repartition([]shardDimension{{Column: "id", NumPartitions: 2, Pivots: []scm.Scmer{scm.NewInt(64)}}})
+	for _, shard := range tbl.ActiveShards() {
+		release := shard.GetRead()
+		func() {
+			defer release()
+			shard.mu.RLock()
+			defer shard.mu.RUnlock()
+			if len(shard.Indexes) != 2 {
+				t.Fatalf("target inherited %d definitions", len(shard.Indexes))
+			}
+			for _, index := range shard.Indexes {
+				if index.t != shard || index.Native || !index.baseState.active {
+					t.Fatal("target index not independently active/non-Native")
+				}
+				if index.Cols[0] == "id" && index.loadSavings() != 45 {
+					t.Fatalf("target usage decayed twice: %g", index.loadSavings())
+				}
+			}
+		}()
+	}
+}
+
+func TestRepartitionIndexDefinitionsBoundedAndRecounted(t *testing.T) {
+	var shards []*storageShard
+	for source := 0; source < 32; source++ {
+		shard := &storageShard{t: &table{}, srState: SHARED}
+		for column := 0; column < 6; column++ {
+			name, weight := "hot", 10.0
+			if column > 0 {
+				name, weight = fmt.Sprintf("cold-%d-%d", source, column), 1
+			}
+			index := &StorageIndex{t: shard, Cols: []string{name}, ColOrderMeta: []string{"bin:asc"}}
+			index.storeSavings(weight)
+			shard.Indexes = append(shard.Indexes, index)
+		}
+		shards = append(shards, shard)
+	}
+	definitions := snapshotRepartitionIndexes(shards)
+	if len(definitions) != 64 {
+		t.Fatalf("retained %d definitions from161 layouts, want bounded64", len(definitions))
+	}
+	foundHot := false
+	for _, index := range definitions {
+		if index.Cols[0] == "hot" {
+			foundHot = true
+			if index.loadSavings() != 288 {
+				t.Fatalf("hot layout usage=%g, want exact32×10×.9=288", index.loadSavings())
+			}
+		} else if index.loadSavings() != 0.9 {
+			t.Fatalf("cold layout retained replacement estimate %g instead of exact.9", index.loadSavings())
+		}
+	}
+	if !foundHot {
+		t.Fatal("bounded selection lost a layout popular across all32sources")
+	}
+}
+
+func TestRepartitionIndexWarmBudgetAndThreshold(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		weights []float64
+		want    int
+	}{
+		{"budget", []float64{10, 10, 10, 10, 10, 10, 10, 10, 10, 10}, 8},
+		{"threshold", []float64{2, 1.99, .5}, 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			shard := &storageShard{t: &table{}, srState: SHARED, main_count: 4, columns: map[string]ColumnStorage{}}
+			var definitions []*StorageIndex
+			for i, weight := range test.weights {
+				name := fmt.Sprintf("col%d", i)
+				shard.columns[name] = &StorageSCMER{values: []scm.Scmer{scm.NewInt(3), scm.NewInt(1), scm.NewInt(2), scm.NewInt(0)}}
+				index := &StorageIndex{Cols: []string{name}, ColOrderMeta: []string{"bin:asc"}}
+				index.storeSavings(weight)
+				definitions = append(definitions, index)
+			}
+			rebuildRepartitionIndexes(definitions, shard)
+			release := shard.GetRead()
+			defer release()
+			shard.mu.RLock()
+			defer shard.mu.RUnlock()
+			warmed := 0
+			for _, index := range shard.Indexes {
+				if index.Native {
+					t.Fatal("warm permutation incorrectly claimed physical ordering")
+				}
+				if index.baseState.active {
+					warmed++
+				}
+			}
+			if warmed != test.want {
+				t.Fatalf("warmed %d layouts, want%d", warmed, test.want)
+			}
+		})
+	}
+}
+
+func TestRebuildIndexPrefixDoesNotMergeDifferentMappers(t *testing.T) {
+	mapperA := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return a[0] })
+	mapperB := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return scm.NewInt(a[0].Int() + 1) })
+	for _, pair := range [][2]*StorageIndex{
+		{{Cols: []string{"computed"}, ColMapFn: []scm.Scmer{mapperA}, ColMapCols: [][]string{{"id"}}, ColOrderMeta: []string{"bin:asc"}},
+			{Cols: []string{"computed", "id"}, ColMapFn: []scm.Scmer{mapperB}, ColMapCols: [][]string{{"id"}}, ColOrderMeta: []string{"bin:asc", "bin:asc"}}},
+		{{Cols: []string{"computed"}, ColMapFn: []scm.Scmer{mapperA}, ColMapCols: [][]string{{"id"}}, ColOrderMeta: []string{"bin:asc"}},
+			{Cols: []string{"computed", "id"}, ColMapFn: []scm.Scmer{mapperA}, ColMapCols: [][]string{{"other"}}, ColOrderMeta: []string{"bin:asc", "bin:asc"}}},
+	} {
+		shard := &storageShard{t: &table{}}
+		rebuildIndexes([]*StorageIndex{pair[0], pair[1]}, shard, false)
+		if len(shard.Indexes) != 2 {
+			t.Fatal("prefix dedup collapsed differing mapper semantics")
+		}
+	}
+}
+
+type failingInheritedIndexAnalyzer struct{ IndexAnalyzer }
+
+func (*failingInheritedIndexAnalyzer) Deploy(IndexDeployContext, bool) IndexHook {
+	panic("injected inherited index build failure")
+}
+
+func TestRepartitionInheritedIndexFailureKeepsOldGeneration(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "trepartitionindexfailure", 128)
+	old := tbl.activeTopology()
+	source := old.shards[0]
+	source.mu.Lock()
+	index := &StorageIndex{t: source, Cols: []string{"payload"}, ColMatchers: []IndexAnalyzer{&failingInheritedIndexAnalyzer{LikeMatcher}}, ColOrderMeta: []string{""}}
+	index.storeSavings(10)
+	source.Indexes = []*StorageIndex{index}
+	source.mu.Unlock()
+	beforeLedger := GlobalCache.Stat().CountByType[TypeIndex]
+	if !tbl.beginManualRepartition() {
+		t.Fatal("manual repartition not claimed")
+	}
+	var caught any
+	func() {
+		defer func() { caught = recover() }()
+		tbl.repartition([]shardDimension{{Column: "id", NumPartitions: 2, Pivots: []scm.Scmer{scm.NewInt(64)}}})
+	}()
+	if !strings.Contains(fmt.Sprint(caught), "injected inherited index build failure") {
+		t.Fatalf("unexpected failure: %v", caught)
+	}
+	if tbl.activeTopology() != old || tbl.repartitionDualWriteActive.Load() {
+		t.Fatal("failed inherited build published staging topology")
+	}
+	if tbl.Count() != 128 {
+		t.Fatalf("failed inherited build lost rows: %d", tbl.Count())
+	}
+	if after := GlobalCache.Stat().CountByType[TypeIndex]; after != beforeLedger {
+		t.Fatalf("failed inherited build retained index registration: before=%d after=%d", beforeLedger, after)
+	}
+	if !tbl.maintenanceMu.TryLock() {
+		t.Fatal("failed inherited build leaked maintenance claim")
+	}
+	tbl.maintenanceMu.Unlock()
+}
+
 func TestRepartitionConcurrentDeleteSurvivesReload(t *testing.T) {
 	const rows = 256
 	tbl, persistence := createDurabilityTestTable(t, "trepartitiondeletereload", rows)
