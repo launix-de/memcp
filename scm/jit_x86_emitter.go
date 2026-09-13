@@ -99,8 +99,8 @@ func jitCompileProcWithRoots(proc *Proc) ([]byte, []unsafe.Pointer) {
 	const defaultCodeBufSize = 16 * 1024
 	ptr, arena, reservation := globalJITPool.Alloc(defaultCodeBufSize)
 	buf := &execBuf{ptr: ptr, n: defaultCodeBufSize, arena: arena, reservation: reservation}
-	codeLen, roots, _, _, _, _, _ := jitCompileProcToExec(proc, buf, true)
-	arena.complete(reservation, buf.stackMaps)
+	codeLen, roots, dependencies, _, _, _, _ := jitCompileProcToExec(proc, buf, true)
+	arena.complete(reservation, buf.stackMaps, dependencies)
 	defer globalJITPool.Free(arena)
 	if codeLen == 0 {
 		return nil, nil
