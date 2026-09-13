@@ -14,6 +14,7 @@
 # Usage: upgrade-validate.sh <mysql-port> snapshot|compare <snapshot.json>
 #        upgrade-validate.sh <mysql-port> mutate <old.json> <post-dml.json>
 #        upgrade-validate.sh <mysql-port> checks  # legacy focused DML checks
+#        upgrade-validate.sh <mysql-port> zero-policy-checks
 set -uo pipefail
 
 PORT="${1:?usage: upgrade-validate.sh <mysql-port>}"
@@ -22,8 +23,10 @@ PORT="${1:?usage: upgrade-validate.sh <mysql-port>}"
 # never from candidate output. The workflow compares it again after a restart.
 MODE="${2:-checks}"
 if [ "$MODE" != checks ]; then
-  python3 - "$0" "$PORT" "$MODE" "${3:?snapshot path required}" "${4:-}" <<'PYTHON'
+  python3 - "$0" "$PORT" "$MODE" "${3:-}" "${4:-}" <<'PYTHON'
 import base64
+import contextlib
+import io
 import json
 import pathlib
 import re
@@ -131,6 +134,26 @@ def canonical(value):
     return json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
 
 
+def comparison_values(snapshot):
+    # Keep the saved old-writer oracle byte-for-byte intact. SQL DECIMAL and
+    # NUMERIC have one zero; only their exact wire token -0 compares as 0.
+    # FLOAT/DOUBLE, nonzero tokens, NULLs and schema metadata remain exact.
+    tables = {}
+    for name, table in snapshot["tables"].items():
+        decimal_columns = []
+        for column in table["columns"]:
+            sql_type = base64.b64decode(column["metadata"]["Type"], validate=True).decode("ascii")
+            kind = sql_type.lower().split("(")[0].split()[0]
+            decimal_columns.append(kind in {"decimal", "numeric"})
+        if any(len(row) != len(decimal_columns) for row in table["rows"]):
+            raise ValueError("unexpected snapshot row width in " + name)
+        rows = [["0" if decimal and value == "-0" else value
+                 for decimal, value in zip(decimal_columns, row)]
+                for row in table["rows"]]
+        tables[name] = {"columns": table["columns"], "rows": sorted(rows, key=canonical)}
+    return {**snapshot, "tables": tables}
+
+
 def write_new(path, value):
     # Exclusive creation prevents accidentally overwriting the OLD oracle.
     with open(path, "x", encoding="ascii") as out:
@@ -138,7 +161,8 @@ def write_new(path, value):
 
 
 def compare(expected):
-    actual = capture()
+    actual = comparison_values(capture())
+    expected = comparison_values(expected)
     if actual != expected:
         for name in sorted(set(actual["tables"]) | set(expected["tables"])):
             if actual["tables"].get(name) != expected["tables"].get(name):
@@ -158,6 +182,55 @@ def compare(expected):
         raise ValueError("full fixture snapshot differs (no tolerances)")
     count = sum(len(t["rows"]) for t in actual["tables"].values())
     print(f"upgrade snapshot: all {len(actual['tables'])} tables / {count} rows match exactly")
+
+
+def check_zero_policy():
+    name = "up_oracle_zero_policy"
+    # This runs only against the candidate, outside the saved old-writer
+    # fixture. Never replace or derive an original oracle from candidate data.
+    query("CREATE TABLE " + ident(name) +
+          " (id INT, d DECIMAL(10,2), n NUMERIC(10,2), f FLOAT, b DOUBLE, v DECIMAL(10,2))")
+    try:
+        query("INSERT INTO " + ident(name) + " VALUES (1,-0,-0,-0,-0,1.25),(2,NULL,NULL,NULL,NULL,NULL)")
+        expected = capture()
+        unchanged = canonical(expected)
+        malformed = json.loads(unchanged)
+        malformed["tables"][name]["rows"][0].append("extra")
+        try:
+            comparison_values(malformed)
+        except ValueError:
+            print("upgrade zero policy: correctly rejected malformed row width")
+        else:
+            raise ValueError("zero-policy comparison truncated malformed row")
+        zero_row = next(row for row in expected["tables"][name]["rows"] if row[0] == "1")
+        if zero_row[1:5] != ["-0"] * 4:
+            raise ValueError("zero-policy fixture did not preserve signed zero")
+        # SQL equality makes UPDATE -0 to +0 a no-op. Go through nonzero
+        # values to guarantee that the requested zero sign is really stored.
+        query("UPDATE " + ident(name) + " SET d=1,n=1 WHERE id=1")
+        query("UPDATE " + ident(name) + " SET d=0,n=0 WHERE id=1")
+        compare(expected)
+        checks = (("f=0", "f=-0"), ("b=0", "b=-0"),
+                  ("v=1.26", "v=1.25"), ("d=NULL", "d=0"),
+                  ("d=0.01", "d=0"))
+        for change, restore in checks:
+            column = change.split("=")[0]
+            query("UPDATE " + ident(name) + " SET " + column + "=999 WHERE id=1")
+            query("UPDATE " + ident(name) + " SET " + change + " WHERE id=1")
+            try:
+                with contextlib.redirect_stderr(io.StringIO()):
+                    compare(expected)
+            except ValueError:
+                print("upgrade zero policy: correctly rejected " + change)
+            else:
+                raise ValueError("zero-policy comparison accepted " + change)
+            query("UPDATE " + ident(name) + " SET " + column + "=999 WHERE id=1")
+            query("UPDATE " + ident(name) + " SET " + restore + " WHERE id=1")
+        compare(expected)
+        if canonical(expected) != unchanged:
+            raise ValueError("zero-policy comparison mutated the original oracle")
+    finally:
+        query("DROP TABLE " + ident(name))
 
 
 def changed_oracle(expected):
@@ -191,7 +264,11 @@ def changed_oracle(expected):
 
 
 try:
-    if mode == "snapshot":
+    if mode == "zero-policy-checks":
+        check_zero_policy()
+    elif not snapshot_path:
+        raise ValueError("snapshot path required")
+    elif mode == "snapshot":
         write_new(snapshot_path, capture())
     elif mode in {"compare", "mutate"}:
         expected = json.loads(pathlib.Path(snapshot_path).read_text(encoding="ascii"))
@@ -206,7 +283,7 @@ try:
             compare(expected)
             write_new(post_path, expected)
     else:
-        raise ValueError("mode must be snapshot, compare, mutate, or checks")
+        raise ValueError("mode must be snapshot, compare, mutate, checks, or zero-policy-checks")
 except (ValueError, OSError, subprocess.SubprocessError) as error:
     print("upgrade snapshot FAILED: " + str(error), file=sys.stderr)
     if isinstance(error, subprocess.CalledProcessError) and error.stderr:

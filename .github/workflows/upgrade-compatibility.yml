@@ -158,6 +158,7 @@ jobs:
           stop_server
 
           start_server candidate candidate-upgrade
+          bash "$VALIDATOR" "$MYSQL_PORT" zero-policy-checks
           bash "$VALIDATOR" "$MYSQL_PORT" compare "$ORACLES/before.json"
           bash "$VALIDATOR" "$MYSQL_PORT" mutate "$ORACLES/before.json" "$ORACLES/after-dml.json"
           stop_server
