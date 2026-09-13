@@ -291,3 +291,29 @@ func TestOrderedInverseRecSetInterlacesDeltaRows(t *testing.T) {
 		t.Fatalf("inverse RecSet main/delta merge rows = %v, want %v", got, want)
 	}
 }
+
+func TestSparseRecSetFilterAppliesPrunedAccessBoundary(t *testing.T) {
+	tbl := setupAdaptiveRecSetOrderTable(t, "trecsetprunedboundary", 200)
+	source := recSetForIDs(tbl, map[int64]bool{3: true, 103: true, 150: true})
+	equalSchema, equalValues := testEqualScanAccess("id", scm.NewInt(103))
+	rangeSchema, rangeValues := testUpperScanAccess("id", scm.NewInt(103), true)
+	for _, tc := range []struct {
+		name   string
+		schema scm.Scmer
+		values []scm.Scmer
+		want   []int64
+	}{
+		{"equality", equalSchema, equalValues, []int64{103}},
+		{"range", rangeSchema, rangeValues, []int64{3, 103}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			filtered := source.filterToRecSet(nil, nil, trueCondition(), tc.schema, tc.values)
+			got := make([]int64, 0)
+			filtered.scan(nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, nil, trueCondition(), []string{"id"},
+				scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { got = append(got, values[1].Int()); return values[0] }), scm.NewNil(), scm.NewNil(), false)
+			if !equalInt64s(got, tc.want) {
+				t.Fatalf("filtered rows = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
