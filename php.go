@@ -33,6 +33,34 @@ type phpConfig struct {
 
 var phpSettings phpConfig
 
+// Set only during startup, before any PHP request or worker is admitted.
+var phpPackageDirectory string
+
+func configurePackagedPHP() error {
+	// Explicit administrator configuration takes precedence over package defaults.
+	if _, configured := os.LookupEnv("PHPRC"); configured {
+		return nil
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	directory := filepath.Clean(filepath.Join(filepath.Dir(executable), "..", "lib", "memcp", "php"))
+	if _, err := os.Stat(filepath.Join(directory, "php.ini")); os.IsNotExist(err) {
+		return nil // A developer build uses its external PHP installation.
+	} else if err != nil {
+		return err
+	}
+	phpPackageDirectory = directory
+	if err := os.Setenv("PHPRC", filepath.Join(directory, "php.ini")); err != nil {
+		return err
+	}
+	if _, configured := os.LookupEnv("PHP_INI_SCAN_DIR"); !configured {
+		return os.Setenv("PHP_INI_SCAN_DIR", filepath.Join(directory, "conf.d"))
+	}
+	return nil
+}
+
 func loadPHPConfig() (phpConfig, error) {
 	values := storage.PHPStartupSettings()
 	c := phpConfig{values.IMAPBinary, int(values.Threads), values.MemoryLimit, time.Duration(values.MaxWaitMilliseconds) * time.Millisecond, int(values.OutputBuffer), int((values.OpcacheMemory + (1 << 20) - 1) >> 20)}
@@ -53,7 +81,7 @@ func loadPHPConfig() (phpConfig, error) {
 
 func (c phpConfig) ini() map[string]string {
 	limit := strconv.FormatInt(c.memoryLimit, 10)
-	return map[string]string{
+	ini := map[string]string{
 		"expose_php": "0", "display_errors": "0", "log_errors": "1",
 		"memory_limit": limit, "max_memory_limit": limit,
 		"output_buffering": strconv.Itoa(c.outputBuffer), "implicit_flush": "0",
@@ -61,6 +89,10 @@ func (c phpConfig) ini() map[string]string {
 		"opcache.interned_strings_buffer": "16", "opcache.max_accelerated_files": "20000",
 		"opcache.validate_timestamps": "1", "opcache.revalidate_freq": "0", "opcache.jit": "disable",
 	}
+	if phpPackageDirectory != "" {
+		ini["extension_dir"] = filepath.Join(phpPackageDirectory, "extensions")
+	}
+	return ini
 }
 
 var phpStarted, phpStopping bool
@@ -82,6 +114,9 @@ func startPHP(args []string) error {
 	}
 	if allocator, present := os.LookupEnv("USE_ZEND_ALLOC"); present && allocator != "1" {
 		return fmt.Errorf("PHP memory quota requires USE_ZEND_ALLOC to be unset or 1")
+	}
+	if err := configurePackagedPHP(); err != nil {
+		return err
 	}
 	phpSettings = settings
 	close(phpReady)

@@ -513,6 +513,10 @@ source RPM, checksums, and a multi-architecture container image for amd64 and
 arm64. The version in the tag must exactly match the first word in
 `CHANGELOG.md` (for example `v0.2` for version `0.2`).
 
+`make`, `make jit`, and the DEB/RPM packages include embedded PHP. Packages
+supply their matching ZTS runtime, PHP configuration, and Imagick module.
+The standalone static release binary uses the explicit `nophp` build.
+
 ### Debian and Ubuntu
 
 ```bash

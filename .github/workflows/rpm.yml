@@ -1,0 +1,205 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+name: Native RPM package
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  rpm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    # Build libphp and the package against the same distribution's libraries.
+    # The container intentionally has no running systemd; lifecycle checks run
+    # the installed daemon as its service account and execute real RPM scriptlets.
+    container:
+      image: registry.fedoraproject.org/fedora:44@sha256:e65d65b08c4b05c2f30fd921f451db12907e5f9b04717da125bb407cd07e7cba
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Install native build and lifecycle tools
+        run: |
+          dnf install -y git tar gzip xz findutils diffutils curl-minimal \
+            gcc gcc-c++ make python3 golang rpm-build php-devel \
+            shadow-utils coreutils systemd util-linux
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          go-version-file: go.mod
+
+      - uses: ./.github/actions/setup-php
+
+      - name: Build native RPM and source RPM
+        run: |
+          make memcp.rpm
+          version=$(make -s version)
+          printf 'MEMCP_RPM_VERSION=%s\n' "$version" >> "$GITHUB_ENV"
+          rpm -qp --requires "dist/memcp_${version}_x86_64.rpm"
+
+      - name: Rebuild the source RPM with the declared external SDK
+        run: |
+          # Sources remain external. The source RPM contains MemCP sources;
+          # its reproducible SDK input is the released PHP built by setup-php.
+          sdk_prefix=$("$PHP_CONFIG" --prefix)
+          rpmbuild --rebuild "dist/memcp_${MEMCP_RPM_VERSION}.src.rpm" \
+            --define "_topdir $RUNNER_TEMP/memcp-srpm-rebuild" \
+            --define "_version $MEMCP_RPM_VERSION" \
+            --define "_goarch amd64" \
+            --define "_php_config $PHP_CONFIG" \
+            --define "_php_license_dir $sdk_prefix/share/licenses/php"
+          # Ship and exercise the independently rebuilt binary package.
+          rebuilt=("$RUNNER_TEMP"/memcp-srpm-rebuild/RPMS/x86_64/memcp-[0-9]*.rpm)
+          test "${#rebuilt[@]}" -eq 1
+          cp "${rebuilt[0]}" "dist/memcp_${MEMCP_RPM_VERSION}_x86_64.rpm"
+          python3 tools/test_packaging.py --artifacts --format rpm
+
+      - name: Hide the build SDK before installing the package
+        run: |
+          sdk_prefix=$("$PHP_CONFIG" --prefix)
+          mv "$sdk_prefix" "${sdk_prefix}.build-only"
+          # The package must discover its own INI and modules without CI hints.
+          printf 'PHPRC=\nPHP_INI_SCAN_DIR=\nLD_LIBRARY_PATH=\n' >> "$GITHUB_ENV"
+
+      - name: Test native install, upgrade, removal, and PHP runtime
+        run: |
+          unset PHPRC PHP_INI_SCAN_DIR LD_LIBRARY_PATH
+          python3 - <<'PY'
+          import base64
+          import json
+          import os
+          import pathlib
+          import subprocess
+          import tempfile
+          import time
+          import urllib.request
+
+          package = pathlib.Path(f"dist/memcp_{os.environ['MEMCP_RPM_VERSION']}_x86_64.rpm").resolve()
+          credential = pathlib.Path('/etc/memcp/initial-root-password')
+          fixture = pathlib.Path(tempfile.mkdtemp(prefix='memcp-rpm-php-', dir='/tmp'))
+          fixture.chmod(0o755)
+          (fixture / 'index.php').write_text('''<?php
+          $modules = ['PDO', 'pdo_mysql', 'pdo_sqlite', 'imagick', 'mbstring',
+                      'intl', 'zip', 'gmp', 'gd', 'curl', 'openssl'];
+          foreach ($modules as $module) {
+              if (!extension_loaded($module)) { throw new Exception("missing module: " . $module); }
+          }
+          if (!PHP_ZTS || !in_array('memcp', PDO::getAvailableDrivers(), true)) {
+              throw new Exception('missing ZTS or PDO MemCP driver');
+          }
+          if (php_ini_loaded_file() !== '/usr/lib/memcp/php/php.ini' ||
+              ini_get('extension_dir') !== '/usr/lib/memcp/php/extensions') {
+              throw new Exception('PHP runtime paths are not package-owned');
+          }
+          echo 'package-php-ok';
+          ''')
+          process = None
+          log = None
+          password = None
+          endpoint = 'http://127.0.0.1:29495'
+
+          def sql(statement):
+              auth = base64.b64encode(('root:' + password).encode()).decode()
+              request = urllib.request.Request(endpoint + '/sql/memcp-tests',
+                  data=statement.encode(), headers={'Authorization': 'Basic ' + auth})
+              with urllib.request.urlopen(request, timeout=10) as response:
+                  rows = []
+                  for line in response.read().decode('utf-8').splitlines():
+                      if not line.strip():
+                          continue
+                      if line.lstrip().startswith(('SQL Error:', 'SCM Error:')):
+                          raise RuntimeError(line)
+                      row = json.loads(line)
+                      if isinstance(row, dict) and 'error' in row:
+                          raise RuntimeError(f'SQL error response: {row}')
+                      rows.append(row)
+                  return rows
+
+          def start():
+              global process, log
+              log = open(fixture / 'server.log', 'ab')
+              process = subprocess.Popen([
+                  '/usr/bin/memcp', '--no-repl', '--disable-mysql', '--mysql-socket=',
+                  '--api-port=29495', '-data', '/var/lib/memcp', '--serve', str(fixture),
+                  '/usr/lib/memcp/lib/main.scm'], user='memcp', group='memcp',
+                  extra_groups=[], cwd='/usr/lib/memcp', stdin=subprocess.DEVNULL,
+                  stdout=log, stderr=subprocess.STDOUT)
+              for _ in range(60):
+                  if process.poll() is not None:
+                      raise RuntimeError('installed daemon exited during startup')
+                  try:
+                      sql('SELECT 1')
+                      with urllib.request.urlopen(endpoint + '/index.php', timeout=10) as response:
+                          assert response.read() == b'package-php-ok'
+                      return
+                  except (OSError, AssertionError):
+                      time.sleep(1)
+              raise RuntimeError('installed SQL/PHP endpoints did not become ready')
+
+          def stop():
+              global process, log
+              if process is not None:
+                  process.terminate()
+                  try:
+                      code = process.wait(timeout=30)
+                  except subprocess.TimeoutExpired:
+                      process.kill()
+                      process.wait()
+                      raise
+                  finally:
+                      process = None
+                      log.close()
+                  assert code == 0, f'daemon did not shut down gracefully: {code}'
+
+          def check_retained():
+              assert credential.read_text().strip() == password, 'package changed credentials'
+              assert pathlib.Path('/var/lib/memcp/system').is_dir(), 'package removed database'
+
+          try:
+              subprocess.run(['dnf', 'install', '-y', str(package)], check=True)
+              password = credential.read_text().strip()
+              assert password, 'package did not initialize credentials'
+              assert credential.stat().st_mode & 0o777 == 0o600
+              start()
+              sql('CREATE TABLE package_integrity (id INT, label TEXT) ENGINE=SAFE')
+              sql("INSERT INTO package_integrity VALUES (1, 'alpha'), (2, 'beta')")
+              expected = [{'id': 1, 'label': 'alpha'}, {'id': 2, 'label': 'beta'}]
+              assert sql('SELECT id, label FROM package_integrity ORDER BY id') == expected
+              stop()
+
+              # --replacepkgs executes the upgrade scriptlet path for this exact
+              # reviewed package, avoiding a synthetic version of its source.
+              subprocess.run(['rpm', '-Uvh', '--replacepkgs', str(package)], check=True)
+              check_retained()
+              start()
+              assert sql('SELECT id, label FROM package_integrity ORDER BY id') == expected
+              stop()
+
+              subprocess.run(['dnf', 'remove', '-y', 'memcp'], check=True)
+              check_retained()
+              assert not pathlib.Path('/usr/bin/memcp').exists()
+              subprocess.run(['dnf', 'install', '-y', str(package)], check=True)
+              check_retained()
+              start()
+              assert sql('SELECT id, label FROM package_integrity ORDER BY id') == expected
+              stop()
+              subprocess.run(['dnf', 'remove', '-y', 'memcp'], check=True)
+              check_retained()
+          except BaseException:
+              print((fixture / 'server.log').read_text(errors='replace') if (fixture / 'server.log').exists() else 'No daemon log')
+              raise
+          finally:
+              stop()
+          PY
+
+      - name: Upload native RPM artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: memcp-rpm
+          path: dist/*.rpm
+          if-no-files-found: error

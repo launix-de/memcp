@@ -1,0 +1,13 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+Source: memcp
+Section: database
+Priority: optional
+Maintainer: Carl-Philip Hänsch <haensch@launix.de>
+Build-Depends: golang, gcc, dpkg-dev
+
+Package: memcp
+Architecture: any
+Depends: adduser, ${shlibs:Depends}
+Description: smart clusterable distributed database
+ MemCP with embedded ZTS PHP.

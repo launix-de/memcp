@@ -89,7 +89,7 @@ jobs:
             case "${f}" in
               phpbridge/*|tests/php/*|php*.go|main.go|go.mod|go.sum|Makefile) php=true ;;
               scm/network.go|scm/mysql.go|scm/session*.go|lib/main.scm|lib/sql.scm) php=true ;;
-              .github/workflows/php.yml|.github/workflows/test.yml|.github/workflows/detect-changes.yml) php=true ;;
+              .github/actions/setup-php/*|.github/workflows/php.yml|.github/workflows/test.yml|.github/workflows/detect-changes.yml) php=true ;;
             esac
           done
 

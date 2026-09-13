@@ -13,6 +13,12 @@ CGO_ENABLED  ?= 0
 BUILD_FLAGS  ?= -trimpath -buildvcs=false
 LDFLAGS      ?=
 PHP_CONFIG   ?= php-config
+PHP_TAGS     := php,nowatcher,nobrotli,nomercure
+PHP_RPATH    ?= $(shell $(PHP_CONFIG) --prefix)/lib
+PHP_ENV      = CGO_ENABLED=1 CGO_CFLAGS="$$($(PHP_CONFIG) --includes)" CGO_LDFLAGS="-L$$($(PHP_CONFIG) --prefix)/lib "'-Wl,-rpath,$(PHP_RPATH)'" $$($(PHP_CONFIG) --ldflags) $$($(PHP_CONFIG) --libs)"
+PHP_LICENSE_DIR ?= $(shell $(PHP_CONFIG) --prefix)/share/licenses/php
+PACKAGE_PHP_RPATH = '$$$$ORIGIN/../lib/memcp/php'
+STRIP ?= strip
 PACKAGE_LDFLAGS ?= -s -w
 DIST_DIR     ?= dist
 PACKAGE_DIR  ?= .build/packages
@@ -22,24 +28,29 @@ JIT_GO_REPOSITORY ?= https://github.com/launix-de/go.git
 JIT_GO_REF   ?= jit-foreign-frames-go1.27.0
 export SOURCE_DATE_EPOCH
 
-all:
-	CGO_ENABLED=1 GOOS=$(GOOS) GOARCH=$(GOARCH) go build $(BUILD_FLAGS) -tags=php -ldflags="$(LDFLAGS)" -o memcp .
+all: check-php
+	$(PHP_ENV) GOOS=$(GOOS) GOARCH=$(GOARCH) go build $(BUILD_FLAGS) -tags=$(PHP_TAGS) -ldflags="$(LDFLAGS)" -o memcp .
 
 nophp:
 	CGO_ENABLED=$(CGO_ENABLED) GOOS=$(GOOS) GOARCH=$(GOARCH) go build $(BUILD_FLAGS) -tags=nophp -ldflags="$(LDFLAGS)" -o memcp .
 
+# Fail before compiling when php-config points at an NTS/FPM-only SDK.
+.PHONY: check-php
+check-php:
+	@test "$$($(PHP_CONFIG) --vernum)" -ge 80500 || { echo "PHP >= 8.5 ZTS SDK required" >&2; exit 1; }
+	@case "$$($(PHP_CONFIG) --configure-options)" in *--enable-zts*) ;; *) echo "PHP ZTS SDK required" >&2; exit 1 ;; esac
+	@test -f "$$($(PHP_CONFIG) --prefix)/lib/libphp.so" || { echo "PHP embed shared library required" >&2; exit 1; }
+
 # libphp and its extensions are external dependencies. Use a matching ZTS
 # php-config; optional FrankenPHP services are excluded from this host.
 .PHONY: php test-php nophp
-php:
-	CGO_ENABLED=1 CGO_CFLAGS="$$($(PHP_CONFIG) --includes)" \
-		CGO_LDFLAGS="-L$$($(PHP_CONFIG) --prefix)/lib -Wl,-rpath,$$($(PHP_CONFIG) --prefix)/lib $$($(PHP_CONFIG) --ldflags) $$($(PHP_CONFIG) --libs)" \
-		go build $(BUILD_FLAGS) -tags=php,nowatcher,nobrotli,nomercure -ldflags="$(LDFLAGS)" -o memcp-php .
+php: check-php
+	$(PHP_ENV) \
+		go build $(BUILD_FLAGS) -tags=$(PHP_TAGS) -ldflags="$(LDFLAGS)" -o memcp-php .
 
 test-php: php
-	CGO_ENABLED=1 CGO_CFLAGS="$$($(PHP_CONFIG) --includes)" \
-		CGO_LDFLAGS="-L$$($(PHP_CONFIG) --prefix)/lib -Wl,-rpath,$$($(PHP_CONFIG) --prefix)/lib $$($(PHP_CONFIG) --ldflags) $$($(PHP_CONFIG) --libs)" \
-		go test -tags=php,nowatcher,nobrotli,nomercure -run 'TestPHP|TestResultBuffer|TestCatalog|TestIMAP' -count=1 -v . ./phpbridge
+	$(PHP_ENV) \
+		go test -tags=$(PHP_TAGS) -run 'TestPHP|TestResultBuffer|TestCatalog|TestIMAP' -count=1 -v . ./phpbridge
 
 # Keep the experimental compiler outside the tracked source tree. Clean
 # checkouts fast-forward on every invocation, while a checkout with local
@@ -68,10 +79,10 @@ jit-toolchain:
 		printf '%s\n' "$$revision" > "$(JIT_GOROOT)/.memcp-built-revision"; \
 	fi
 
-jit: jit-toolchain
-	CGO_ENABLED=$(CGO_ENABLED) GOOS=$(GOOS) GOARCH=$(GOARCH) \
+jit: check-php jit-toolchain
+	$(PHP_ENV) GOOS=$(GOOS) GOARCH=$(GOARCH) \
 		GOROOT="$(JIT_GOROOT)" GOEXPERIMENT=jit "$(JIT_GOROOT)/bin/go" \
-		build $(BUILD_FLAGS) -tags=php -ldflags="$(LDFLAGS)" -o memcp .
+		build $(BUILD_FLAGS) -tags=$(PHP_TAGS) -ldflags="$(LDFLAGS)" -o memcp .
 
 jitgen:
 	@set -eu; \
@@ -97,6 +108,18 @@ ceph:
 	go build -tags=ceph
 
 install: all install-files
+
+# Only the released, externally built runtime is installed; never PHP sources.
+install-php-runtime: check-php
+	install -d $(DESTDIR)$(PREFIX)/lib/memcp/php/extensions $(DESTDIR)$(PREFIX)/lib/memcp/php/conf.d $(DESTDIR)$(PREFIX)/share/doc/memcp/php
+	install -m 644 "$$($(PHP_CONFIG) --prefix)/lib/libphp.so" $(DESTDIR)$(PREFIX)/lib/memcp/php/libphp.so
+	test -f "$$($(PHP_CONFIG) --extension-dir)/imagick.so"
+	install -m 644 "$$($(PHP_CONFIG) --extension-dir)"/*.so $(DESTDIR)$(PREFIX)/lib/memcp/php/extensions/
+	$(STRIP) --strip-unneeded $(DESTDIR)$(PREFIX)/lib/memcp/php/libphp.so $(DESTDIR)$(PREFIX)/lib/memcp/php/extensions/*.so
+	install -m 644 packaging/php.ini $(DESTDIR)$(PREFIX)/lib/memcp/php/php.ini
+	test -f "$(PHP_LICENSE_DIR)/LICENSE"
+	cd "$(PHP_LICENSE_DIR)" && find . -type f \( -name LICENSE -o -name 'LICENSE.*' -o -name COPYING -o -name 'COPYING.*' -o -name NOTICE \) \
+		-exec install -D -m 644 '{}' '$(abspath $(DESTDIR)$(PREFIX)/share/doc/memcp/php)/{}' \;
 
 install-files:
 	install -d $(DESTDIR)$(PREFIX)/bin
@@ -172,12 +195,16 @@ artifact-names:
 
 memcp.deb: $(DEB_OUT)
 $(DEB_OUT):
-	$(MAKE) all GOOS=linux GOARCH=$(DEB_GOARCH) CGO_ENABLED=0 LDFLAGS="$(PACKAGE_LDFLAGS)"
+	$(MAKE) all GOOS=linux GOARCH=$(DEB_GOARCH) PHP_RPATH=$(PACKAGE_PHP_RPATH) BUILD_FLAGS="$(BUILD_FLAGS) -buildmode=pie" LDFLAGS="$(PACKAGE_LDFLAGS)"
 	rm -rf -- $(DEB_DIR)
 	mkdir -p $(DEB_DIR)/DEBIAN
 	$(MAKE) install-files DESTDIR=$(DEB_DIR) PREFIX=/usr SYSTEMD_DIR=/usr/lib/systemd/system PACKAGE_FORMAT=deb
-	printf "Package: memcp\nVersion: $(VERSION)\nArchitecture: $(DEB_ARCH)\nSection: database\nPriority: optional\nMaintainer: Carl-Philip Hänsch <hänsch@launix.de>\nDepends: adduser\nHomepage: https://github.com/launix-de/memcp\nDescription: smart clusterable distributed database\n MemCP is a persistent, column-oriented in-memory database with HTTP and\n MySQL-compatible interfaces.\n" \
-		> $(DEB_DIR)/DEBIAN/control
+	$(MAKE) install-php-runtime DESTDIR=$(DEB_DIR) PREFIX=/usr
+	@set -eu; \
+	deps=$$(dpkg-shlibdeps -O -I$(DEB_DIR)/usr/lib/memcp/php -l$(DEB_DIR)/usr/lib/memcp/php -e$(DEB_DIR)/usr/bin/memcp -e$(DEB_DIR)/usr/lib/memcp/php/libphp.so $(DEB_DIR)/usr/lib/memcp/php/extensions/*.so); \
+	deps=$${deps#shlibs:Depends=}; test -n "$$deps"; \
+	printf "Package: memcp\nVersion: $(VERSION)\nArchitecture: $(DEB_ARCH)\nSection: database\nPriority: optional\nMaintainer: Carl-Philip Hänsch <hänsch@launix.de>\nDepends: adduser, %s\nHomepage: https://github.com/launix-de/memcp\nDescription: smart clusterable distributed database\n MemCP is a persistent, column-oriented in-memory database with HTTP and\n MySQL-compatible interfaces.\n" \
+		"$$deps" > $(DEB_DIR)/DEBIAN/control
 	install -m 755 debian/postinst $(DEB_DIR)/DEBIAN/postinst
 	install -m 755 debian/prerm    $(DEB_DIR)/DEBIAN/prerm
 	install -m 755 debian/postrm   $(DEB_DIR)/DEBIAN/postrm
@@ -207,7 +234,8 @@ $(RPM_OUT):
 		--target "$(RPM_ARCH)" \
 		--define "_topdir $(PWD)/$(PACKAGE_DIR)/rpmbuild" \
 		--define "_version $(VERSION)" \
-		--define "_goarch $(RPM_GOARCH)"
+		--define "_goarch $(RPM_GOARCH)" \
+		--define "_php_config $(PHP_CONFIG)" --define "_php_license_dir $(PHP_LICENSE_DIR)"
 	@rpm_file=$$(find $(PACKAGE_DIR)/rpmbuild/RPMS/$(RPM_ARCH)/ -type f -name 'memcp-*.rpm' -print -quit); \
 		test -n "$$rpm_file"; \
 		cp "$$rpm_file" $(RPM_OUT)

@@ -126,6 +126,12 @@ class BuiltArtifactTests(unittest.TestCase):
 		self.assertEqual(run("dpkg-deb", "-f", str(self.deb), "Version").strip(), self.version)
 		listing = run("dpkg-deb", "-c", str(self.deb))
 		self.assertIn("./usr/lib/memcp/initialize", listing)
+		self.assertIn("./usr/lib/memcp/php/libphp.so", listing)
+		self.assertIn("./usr/lib/memcp/php/extensions/imagick.so", listing)
+		self.assertIn("./usr/lib/memcp/php/php.ini", listing)
+		self.assertIn("./usr/share/doc/memcp/php/LICENSE", listing)
+		dependencies = run("dpkg-deb", "-f", str(self.deb), "Depends")
+		self.assertIn("libc6", dependencies)
 		self.assertIn("./usr/lib/systemd/system/memcp.service", listing)
 
 	def test_rpm_artifact(self) -> None:
@@ -134,6 +140,11 @@ class BuiltArtifactTests(unittest.TestCase):
 		self.assertEqual(run("rpm", "-qp", "--qf", "%{VERSION}", str(self.rpm)), self.version)
 		listing = run("rpm", "-qpl", str(self.rpm))
 		self.assertIn("/usr/lib/memcp/initialize", listing)
+		self.assertIn("/usr/lib/memcp/php/libphp.so", listing)
+		self.assertIn("/usr/lib/memcp/php/extensions/imagick.so", listing)
+		self.assertIn("/usr/lib/memcp/php/php.ini", listing)
+		self.assertIn("/usr/share/doc/memcp/php/LICENSE", listing)
+		self.assertIn("libc.so.6", run("rpm", "-qp", "--requires", str(self.rpm)))
 		self.assertIn("/usr/lib/systemd/system/memcp.service", listing)
 
 	def test_source_rpm_artifact(self) -> None:
@@ -144,11 +155,14 @@ class BuiltArtifactTests(unittest.TestCase):
 def main() -> int:
 	parser = argparse.ArgumentParser()
 	parser.add_argument("--artifacts", action="store_true", help="also inspect built DEB/RPM files")
+	parser.add_argument("--format", choices=("all", "deb", "rpm"), default="all")
 	args, unittest_args = parser.parse_known_args()
 
 	suite = unittest.defaultTestLoader.loadTestsFromTestCase(ReleaseSourceTests)
 	if args.artifacts:
-		suite.addTests(unittest.defaultTestLoader.loadTestsFromTestCase(BuiltArtifactTests))
+		for name in unittest.defaultTestLoader.getTestCaseNames(BuiltArtifactTests):
+			if args.format == "all" or (args.format == "deb") == (name == "test_debian_artifact"):
+				suite.addTest(BuiltArtifactTests(name))
 	result = unittest.TextTestRunner(verbosity=2).run(suite)
 	return 0 if result.wasSuccessful() else 1
 

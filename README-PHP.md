@@ -40,8 +40,8 @@ FrankenPHP/Caddy process. Install application-specific extensions such as
 PHP installation. Its `php.ini` remains the place for PHP and OPcache settings.
 
 The plain `make` build still produces the ordinary `memcp` executable and keeps
-the PHP integration available for `--serve`; it does not add separate PHP build
-requirements. The `make nophp` target disables PHP at compile time for a smaller
+the PHP integration available for `--serve`; it requires a matching external
+ZTS PHP build, just like `make php`. The `make nophp` target disables PHP for a smaller
 binary. The shared Go module graph still requires Go 1.26 due to FrankenPHP
 integration. The PHP build disables optional Watcher, Brotli and Mercure
 features; no Caddy dependency is added.
@@ -403,3 +403,23 @@ MEMCP_TEST_IMAP_BINARY=/usr/bin/php MEMCP_TEST_PHP_EXTENSIONS=1 \
 ```
 
 The IMAP tests use a private local mock mailbox; no external mail account is required.
+
+DEB and RPM packages include the matching ZTS `libphp.so` privately under
+`/usr/lib/memcp/php`; native system dependencies are declared by the package.
+Build packages with `PHP_CONFIG` pointing at the ZTS installation and
+`PHP_LICENSE_DIR` pointing at that release's license directory (or PHP source
+root; only license/notice files are copied). PHP sources and
+headers are never included in the binary package. The standalone static release
+binary remains an explicit `nophp` build.
+
+Packages also ship the matching Imagick module and private `php.ini`. The host
+resolves their paths from the installed executable; no build prefix is needed.
+Set `PHPRC` explicitly to use an administrator-managed PHP configuration instead.
+Such a configuration is responsible for its own `extension_dir` and modules.
+
+RPMs must be built on the target RPM distribution so their native library
+requirements match its ABI. The reusable RPM workflow builds the released ZTS
+SDK on Fedora and verifies installation and a source-RPM rebuild there.
+A manual source-RPM rebuild requires PHP >= 8.5 with ZTS and shared embed,
+plus Imagick, selected through the `_php_config` and `_php_license_dir` macros;
+a normal NTS `php-devel` installation alone is insufficient.
