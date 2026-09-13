@@ -21,6 +21,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 import os
+import json
+import io
+from contextlib import redirect_stdout
 import itertools
 import requests
 import signal
@@ -52,6 +55,10 @@ from run_sql_tests import (  # noqa: E402
     observe_atomic_json,
     parse_perf_regression_waivers,
     performance_ab_threshold_ms,
+    performance_fixture_cases,
+    run_performance_ab,
+    summarize_performance_fixtures,
+    validate_performance_fixture,
     performance_architecture,
     performance_case_fingerprint,
     performance_case_key,
@@ -937,6 +944,227 @@ class PerfRegressionWaiverContractTest(unittest.TestCase):
             }, "memcp-tests")
         self.assertFalse(result)
         self.assertEqual(runner.waived_regressions, [])
+
+
+class PerformanceFixtureContractTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.base, self.candidate = self.root / "base", self.root / "candidate"
+        for tree in (self.base, self.candidate):
+            tree.mkdir()
+            (tree / "memcp").write_bytes(b"fake binary")
+        directory = self.candidate / "tests/performance"
+        directory.mkdir(parents=True)
+        self.suites = []
+        for name in ("cold", "later"):
+            path = directory / (name + ".yaml")
+            path.write_text(json.dumps({
+                "metadata": {"isolated": True, "restart_after_setup": True},
+                "setup": ["CREATE TABLE fixture (id int)"],
+                "test_cases": [{"name": name, "sql": "SELECT 1", "threshold_ms": 1000,
+                                "warmup": 0, "timing_samples": 1, "expect": {"rows": 1}}],
+            }))
+            self.suites.append(str(path))
+        self.seed = self.root / "seed.json"
+        self.seed.write_text(json.dumps({"schema_version": 1, "default_rows": 1000, "rows": {}}))
+        self.output = self.root / "result.json"
+        self.calls = []
+        self.durations = lambda suite, role, index: 100
+        self.mutate = lambda result, index: None
+        self.exit_code = 0
+
+    def subprocess(self, command, *, cwd, env, stdout, stderr):
+        suite = command[3]
+        role = "A" if Path(env["MEMCP_TEST_WORKTREE"]) == self.base else "B"
+        data = Path(env["MEMCP_TEST_DATA_DIR"])
+        self.assertTrue(data.is_dir())
+        self.assertEqual(list(data.iterdir()), [])
+        self.assertNotIn(str(data), [call[2] for call in self.calls])
+        (data / "mutated-fixture").write_text("each invocation changes its fixture")
+        self.assertEqual(env["PERF_AB_MODE"], "record")
+        self.assertEqual(env["PERF_FIXTURE_TRIAL"], "1")
+        self.assertIn("--fail-fast", command)
+        self.assertNotIn("--connect-only", command)
+        spec = json.loads(Path(suite).read_text())
+        self.assertTrue(spec["metadata"]["restart_after_setup"])
+        self.assertEqual(spec["test_cases"][0]["warmup"], 0)
+        self.assertEqual(spec["test_cases"][0]["timing_samples"], 1)
+        self.calls.append((Path(suite).stem, role, str(data)))
+        result = {"schema_version": 1}
+        for key, case in performance_fixture_cases(suite).items():
+            duration = self.durations(Path(suite).stem, role, len(self.calls))
+            result[key] = {"time_ms": duration, "time_per_repetition_ms": duration,
+                           "rows": 1000, "repetitions": 1, "warmup": 0,
+                           "max_regression_pct": 20.0, "samples_ns": [int(duration * 1_000_000)],
+                           "workload_sha256": performance_case_fingerprint(case, spec["setup"], None)}
+        self.mutate(result, len(self.calls))
+        Path(env["PERF_BASELINE_FILE"]).write_text(json.dumps(result))
+        stdout.write("QUERY_TIME raw preserved\n")
+        return SimpleNamespace(returncode=self.exit_code)
+
+    def run_experiment(self):
+        with mock.patch("run_sql_tests.PERF_BASELINE_FILE", str(self.output)), \
+                mock.patch("run_sql_tests.PERF_BASELINE_SEED", str(self.seed)), \
+                mock.patch("run_sql_tests.PERF_AB_JITTER_MS", 50), \
+                mock.patch("run_sql_tests.subprocess.run", side_effect=self.subprocess), \
+                redirect_stdout(io.StringIO()):
+            return run_performance_ab(self.base, self.candidate, self.suites)
+
+    def test_clean_initial_pass_does_not_repeat(self):
+        self.assertTrue(self.run_experiment())
+        self.assertEqual([(s, r) for s, r, _ in self.calls],
+                         [("cold", "A"), ("cold", "B"), ("later", "A"), ("later", "B")])
+        self.assertTrue(all(not Path(data).exists() for _, _, data in self.calls))
+
+    def test_verification_is_after_all_suites_and_keeps_original_slow_sample(self):
+        self.durations = lambda suite, role, index: 500 if index == 2 else 100
+        self.assertTrue(self.run_experiment())
+        self.assertEqual([(s, r) for s, r, _ in self.calls[:4]],
+                         [("cold", "A"), ("cold", "B"), ("later", "A"), ("later", "B")])
+        self.assertEqual("".join(r for _, r, _ in self.calls[4:]), "ABBA" * 3)
+        result = json.loads(self.output.read_text())[performance_case_key(self.suites[0], "cold")]
+        self.assertEqual(result["fixture_trials"], 7)
+        self.assertEqual(result["b_samples_ms"], [500] + [100] * 6)
+        self.assertAlmostEqual(result["threshold_ms"], 120 + 50 / 7)
+        self.assertFalse(result["verification_pending"])
+
+    def test_real_regression_fails_after_exactly_one_complete_verification(self):
+        self.durations = lambda suite, role, index: 200 if suite == "cold" and role == "B" else 100
+        self.assertFalse(self.run_experiment())
+        self.assertEqual(len(self.calls), 16)
+
+    def test_bad_measured_response_cannot_be_hidden_by_a_later_good_sample(self):
+        for bad in (None, SimpleNamespace(status_code=200, text="Error: broken", headers={}),
+                    SimpleNamespace(status_code=200, text="true\nfalse", headers={})):
+            with self.subTest(bad=bad):
+                runner = SQLTestRunner("http://localhost:1")
+                good = SimpleNamespace(status_code=200, text="true", headers={})
+                with mock.patch.dict(os.environ, {"PERF_FIXTURE_TRIAL": "1"}), \
+                        mock.patch("run_sql_tests.PERF_TEST_ENABLED", True), \
+                        mock.patch("run_sql_tests.PERF_AB_MODE", "record"), \
+                        mock.patch("run_sql_tests.find_memcp_pid", return_value=None), \
+                        mock.patch("run_sql_tests.requests.post", side_effect=[bad, good]) as post, \
+                        redirect_stdout(io.StringIO()):
+                    result = runner.run_test_case({
+                        "name": "each sample must succeed", "scm": "true", "threshold_ms": 1,
+                        "timing_samples": 2, "warmup": 0, "expect": {"rows": 1},
+                        "noncritical": True,
+                    }, "memcp-tests")
+                self.assertFalse(result)
+                self.assertEqual(post.call_count, 1)
+                self.assertEqual(runner.failed_critical, 1)
+
+    def test_execution_failure_never_enters_verification(self):
+        self.exit_code = 1
+        with self.assertRaisesRegex(RuntimeError, "fixture failed"):
+            self.run_experiment()
+        self.assertEqual(len(self.calls), 1)
+
+    def test_missing_trusted_case_from_both_roles_is_rejected_before_execution(self):
+        self.seed.write_text(json.dumps({"schema_version": 1, "rows": {
+            performance_case_key(self.suites[0], "deleted"): 1000}}))
+        with self.assertRaisesRegex(ValueError, "missing from both roles"):
+            self.run_experiment()
+        self.assertEqual(self.calls, [])
+
+    def test_changed_rows_or_hash_or_sample_count_fail_without_verification(self):
+        for field, bad in (("rows", 999), ("workload_sha256", "changed"), ("repetitions", 2)):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as output_dir:
+                self.output = Path(output_dir) / "result.json"
+                self.calls = []
+                def corrupt(result, index):
+                    if index == 2:
+                        result[performance_case_key(self.suites[0], "cold")][field] = bad
+                self.mutate = corrupt
+                with self.assertRaises(ValueError):
+                    self.run_experiment()
+                self.assertEqual(len(self.calls), 2)
+
+    def test_verification_rechecks_initially_successful_sibling_cases(self):
+        spec = json.loads(Path(self.suites[0]).read_text())
+        spec["test_cases"].append(dict(spec["test_cases"][0], name="sibling"))
+        Path(self.suites[0]).write_text(json.dumps(spec))
+        self.durations = lambda suite, role, index: 500 if index == 2 else 100
+        def regress_sibling(result, index):
+            key = performance_case_key(self.suites[0], "sibling")
+            if key in result:
+                duration = 200 if index > 4 and self.calls[-1][1] == "B" else 100
+                result[key].update(time_ms=duration, time_per_repetition_ms=duration,
+                                   samples_ns=[duration * 1_000_000])
+        self.mutate = regress_sibling
+        self.assertFalse(self.run_experiment())
+        summary = json.loads(self.output.read_text())
+        self.assertTrue(summary[performance_case_key(self.suites[0], "cold")]["passed"])
+        self.assertFalse(summary[performance_case_key(self.suites[0], "sibling")]["passed"])
+        self.assertEqual(len(self.calls), 16)
+
+    def test_missing_base_case_without_seed_override_is_rejected(self):
+        path = self.base / "tests/performance/cold.yaml"
+        path.parent.mkdir(parents=True)
+        spec = json.loads(Path(self.suites[0]).read_text())
+        spec["test_cases"].append(dict(spec["test_cases"][0], name="deleted"))
+        path.write_text(json.dumps(spec))
+        with self.assertRaisesRegex(ValueError, "base performance cases are missing"):
+            self.run_experiment()
+        self.assertEqual(self.calls, [])
+
+    def test_sql_select_supports_declared_and_adaptive_sample_counts(self):
+        path = Path(self.suites[0])
+        spec = json.loads(path.read_text())
+        case = spec["test_cases"][0]
+        key = performance_case_key(str(path), "cold")
+        for fixed, samples in ((True, 2), (False, 5)):
+            with self.subTest(fixed=fixed):
+                if fixed:
+                    case["timing_samples"] = samples
+                else:
+                    case.pop("timing_samples", None)
+                path.write_text(json.dumps(spec))
+                result = {"schema_version": 1, key: {
+                    "time_per_repetition_ms": 100, "rows": 1000,
+                    "warmup": 0, "repetitions": samples, "max_regression_pct": 20,
+                    "samples_ns": [100_000_000] * samples,
+                    "workload_sha256": performance_case_fingerprint(case, spec["setup"], None),
+                }}
+                with mock.patch("run_sql_tests.PERF_REPEAT", 10):
+                    self.assertEqual(validate_performance_fixture(result, str(path))[key]["repetitions"], samples)
+                    for bad_count in (1, 11):
+                        result[key]["repetitions"] = bad_count
+                        result[key]["samples_ns"] = [100_000_000] * bad_count
+                        with self.assertRaises(ValueError):
+                            validate_performance_fixture(result, str(path))
+
+    def test_wrong_warmup_result_stops_before_measuring(self):
+        runner = SQLTestRunner("http://localhost:1")
+        bad = SimpleNamespace(status_code=200, text="true\nfalse", headers={})
+        with mock.patch.dict(os.environ, {"PERF_FIXTURE_TRIAL": "1"}), \
+                mock.patch("run_sql_tests.PERF_TEST_ENABLED", True), \
+                mock.patch("run_sql_tests.PERF_AB_MODE", "record"), \
+                mock.patch("run_sql_tests.requests.post", return_value=bad) as post, \
+                redirect_stdout(io.StringIO()):
+            result = runner.run_test_case({
+                "name": "warmup must be correct", "scm": "true", "threshold_ms": 1,
+                "timing_samples": 2, "warmup": 1, "expect": {"rows": 1},
+            }, "memcp-tests")
+        self.assertFalse(result)
+        self.assertEqual(post.call_count, 1)
+
+    def test_incomplete_or_invalid_fixture_counts_are_rejected(self):
+        for count in (True, 0, 2, 6, "7"):
+            with self.subTest(count=count), self.assertRaises(ValueError):
+                summarize_performance_fixtures([], count)
+        with self.assertRaisesRegex(ValueError, "incomplete"):
+            summarize_performance_fixtures([], 7)
+
+    def test_existing_explicit_waiver_is_retained(self):
+        key = performance_case_key(self.suites[0], "cold")
+        self.durations = lambda suite, role, index: 200 if suite == "cold" and role == "B" else 100
+        with mock.patch("run_sql_tests.load_perf_regression_waivers", return_value={key: "reviewed tradeoff"}):
+            self.assertTrue(self.run_experiment())
+        self.assertEqual(len(self.calls), 4)
+        self.assertEqual(json.loads(self.output.read_text())[key]["waiver_reason"], "reviewed tradeoff")
 
 
 if __name__ == "__main__":

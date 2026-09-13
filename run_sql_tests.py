@@ -1128,7 +1128,8 @@ class SQLTestRunner:
             print(f"⏭️  {name} (skipped — RAM pressure abort)")
             return False
         self.test_count += 1
-        is_noncritical = bool(test_case.get("noncritical"))
+        fixture_trial = bool(os.environ.get("PERF_FIXTURE_TRIAL"))
+        is_noncritical = bool(test_case.get("noncritical")) and not fixture_trial
         if is_noncritical:
             self.noncritical_count += 1
 
@@ -1586,7 +1587,7 @@ class SQLTestRunner:
             return self.execute_sql(
                 database, query, auth_header, active_syntax,
                 session_id=session_id, timeout=sql_timeout, params=sql_params,
-                retry_on_connection_failure=not self._expect_interrupted_ok(test_case.get("expect")),
+                retry_on_connection_failure=not fixture_trial and not self._expect_interrupted_ok(test_case.get("expect")),
             )
 
         # TTL preload if SPARQL
@@ -1759,7 +1760,9 @@ class SQLTestRunner:
             with gate:
                 for _ in range(warmup_runs):
                     warm_response = execute_sample()
-                    if is_error_response(warm_response):
+                    if (is_error_response(warm_response) or (fixture_trial and warm_response is None)
+                            or (fixture_trial and repeatable_query and not self.validate_expectation(
+                                test_case, warm_response, self.parse_jsonl_response(warm_response)))):
                         return self._record_fail(name, "Warmup failed", query, warm_response,
                                                  test_case.get("expect"), is_noncritical)
 
@@ -1795,6 +1798,10 @@ class SQLTestRunner:
                     sample_ns = time.monotonic_ns() - start_ns
                     samples_ns.append(sample_ns)
                     measured_total_ns += sample_ns
+                    if fixture_trial and (response is None or not self.validate_expectation(
+                            test_case, response, self.parse_jsonl_response(response))):
+                        return self._record_fail(name, "Measured sample failed", query, response,
+                                                 test_case.get("expect"), is_noncritical)
                     if response is None or response.status_code != 200:
                         break  # don't hammer a broken endpoint
                     if adaptive_repetitions and adaptive_measurement_complete(samples_ns):
@@ -1900,6 +1907,8 @@ class SQLTestRunner:
                     "max_regression_pct": max_regression_pct,
                     "workload_sha256": fingerprint,
                 }
+                if os.environ.get("PERF_FIXTURE_TRIAL"):
+                    result["samples_ns"] = samples_ns
                 self.perf_results[perf_key if PERF_AB_MODE else name] = result
             else:
                 self._record_success(name, is_noncritical)
@@ -2779,8 +2788,240 @@ def run_test_specs(spec_files: List[str], base_url: str, port: int, log_times: b
     return True
 
 
+def performance_fixture_cases(spec_file: str) -> Dict[str, Dict[str, Any]]:
+    """Expand the same names as the suite runner, without changing its workload."""
+    spec = yaml.safe_load(Path(spec_file).read_text())
+    cases = {}
+    for case in spec.get("test_cases", []):
+        expanded = [case]
+        if "repeat" in case:
+            count = case["repeat"]
+            if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+                raise ValueError("repeat must be a positive integer")
+            expanded = [dict(inner, name=f"{inner.get('name', '?')} (iter {i+1}/{count})")
+                        for i in range(count) for inner in case.get("tests", [])]
+        for item in expanded:
+            if "threshold_ms" not in item:
+                continue
+            key = performance_case_key(spec_file, item["name"])
+            if key in cases:
+                raise ValueError(f"duplicate performance case: {key}")
+            cases[key] = item
+    if not cases:
+        raise ValueError(f"no performance cases in {spec_file}")
+    return cases
+
+
+def validate_performance_fixture(config: Dict[str, Any], spec_file: str) -> Dict[str, Any]:
+    """A successful subprocess must have measured every declared case exactly once."""
+    if config.get("schema_version") != 1:
+        raise ValueError("fixture result has an unsupported schema")
+    spec = yaml.safe_load(Path(spec_file).read_text())
+    cases = performance_fixture_cases(spec_file)
+    measured = {key: value for key, value in config.items()
+                if isinstance(value, dict) and "time_per_repetition_ms" in value}
+    if measured.keys() != cases.keys():
+        raise ValueError("fixture result has missing or unexpected performance cases")
+    for key, value in measured.items():
+        case = cases[key]
+        for field in ("rows", "repetitions"):
+            if type(value.get(field)) is not int or value[field] < 1:
+                raise ValueError(f"invalid fixture {field}: {key}")
+        duration = value["time_per_repetition_ms"]
+        if (isinstance(duration, bool) or not isinstance(duration, (int, float))
+                or not math.isfinite(duration) or duration <= 0):
+            raise ValueError(f"invalid fixture duration: {key}")
+        samples = value.get("samples_ns")
+        if (not isinstance(samples, list) or len(samples) != value["repetitions"]
+                or any(type(sample) is not int or sample <= 0 for sample in samples)
+                or performance_sample_ns(samples) / 1_000_000 != duration):
+            raise ValueError(f"fixture raw samples differ: {key}")
+        expected_hash = performance_case_fingerprint(case, spec.get("setup"), spec.get("metadata", {}).get("syntax"))
+        if value.get("workload_sha256") != expected_hash:
+            raise ValueError(f"fixture workload fingerprint differs: {key}")
+        if type(value.get("warmup")) is not int or value["warmup"] != resolve_warmup_runs(case, True):
+            raise ValueError(f"fixture warmup differs: {key}")
+        repeatable = bool(case.get("scm")) or (case.get("sql") or case.get("sparql") or "").lstrip().upper().startswith("SELECT")
+        fixed = "timing_samples" in case or "repetitions" in case
+        expected_n = resolve_timing_samples(case, True) if repeatable else 1
+        if (fixed or not repeatable) and value["repetitions"] != expected_n:
+            raise ValueError(f"fixture repetitions differ: {key}")
+        if repeatable and not fixed and (
+                value["repetitions"] > expected_n or
+                (value["repetitions"] < expected_n and not adaptive_measurement_complete(samples))):
+            raise ValueError(f"fixture repetitions violate adaptive policy: {key}")
+        if value.get("max_regression_pct") != performance_regression_pct(case, spec.get("metadata", {})):
+            raise ValueError(f"fixture regression policy differs: {key}")
+    return measured
+
+
+def summarize_performance_fixtures(trials: List[Dict[str, Any]], count: int) -> Dict[str, Any]:
+    if type(count) is not int or count not in (1, 7):
+        raise ValueError("fixture count must be the initial pair or all seven trials")
+    roles = {role: [trial["results"] for trial in trials if trial["role"] == role]
+             for role in ("A", "B")}
+    if any(len(values) != count for values in roles.values()):
+        raise ValueError("incomplete fixture trials")
+    first = roles["A"][0]
+    summary = {}
+    for values in roles.values():
+        for measured in values:
+            if measured.keys() != first.keys():
+                raise ValueError("fixture performance case set differs")
+            for key, value in measured.items():
+                for field in ("rows", "warmup", "workload_sha256", "max_regression_pct"):
+                    if value[field] != first[key][field]:
+                        raise ValueError(f"fixture {field} differs: {key}")
+    waivers = load_perf_regression_waivers()
+    for key, reference in first.items():
+        a = [value[key]["time_per_repetition_ms"] for value in roles["A"]]
+        b = [value[key]["time_per_repetition_ms"] for value in roles["B"]]
+        baseline, candidate = statistics.median(a), statistics.median(b)
+        repetitions = sum(value[key]["repetitions"] for value in roles["B"])
+        threshold = performance_ab_threshold_ms(baseline, reference["max_regression_pct"],
+                                               reference["warmup"], reference["warmup"],
+                                               repetitions, PERF_AB_JITTER_MS)
+        waived = candidate > threshold and key in waivers
+        summary[key] = dict(reference, time_ms=baseline, time_per_repetition_ms=baseline,
+                            candidate_ms=candidate, fixture_trials=count, a_samples_ms=a,
+                            candidate_total_repetitions=repetitions,
+                            b_samples_ms=b, threshold_ms=threshold,
+                            waiver_reason=waivers[key] if waived else None,
+                            passed=candidate <= threshold or waived)
+        # Individual repetition samples and totals belong to their trial JSON;
+        # they must not be mislabeled as samples of the cross-fixture median.
+        summary[key].pop("samples_ns", None)
+        summary[key].pop("total_ms", None)
+    return summary
+
+
+def run_performance_ab(base: Path, candidate: Path, spec_files: List[str]) -> bool:
+    """Interleave immutable suites across binaries, rebuilding every fixture."""
+    base, candidate = base.resolve(), candidate.resolve()
+    output = Path(PERF_BASELINE_FILE).resolve()
+    artifacts = output.with_suffix(".trials")
+    artifacts.mkdir(parents=True, exist_ok=False)
+    runner = Path(__file__).resolve()
+    seed = Path(PERF_BASELINE_SEED).resolve()
+    if not PERF_BASELINE_SEED:
+        raise ValueError("--perf-ab requires PERF_BASELINE_SEED")
+    all_suites = not spec_files
+    if all_suites:
+        spec_files = discover_performance_ci_suites(candidate / "tests/performance")
+    suite_paths = [Path(path).resolve() for path in spec_files]
+    if any(not path.is_relative_to(candidate) for path in suite_paths):
+        raise ValueError("performance fixtures must come from the candidate worktree")
+    workload_seed = json.loads(seed.read_text())
+    if workload_seed.get("schema_version") != 1:
+        raise ValueError("performance baseline seed has an unsupported schema")
+    default_rows = workload_seed.get("default_rows", PERF_DEFAULT_ROWS)
+    if type(default_rows) is not int or default_rows < 1:
+        raise ValueError("performance baseline seed default_rows must be positive")
+    seed_rows = workload_seed.get("rows", {})
+    if not isinstance(seed_rows, dict) or any(
+            not isinstance(key, str) or type(rows) is not int or rows < 1
+            for key, rows in seed_rows.items()):
+        raise ValueError("performance baseline seed rows must map names to positive integers")
+    declared = {key for path in suite_paths for key in performance_fixture_cases(str(path))}
+    # The workflow supplies every discovered suite. Explicit local needle runs
+    # retain coverage checks for every trusted case belonging to those suites.
+    prefixes = {performance_case_key(str(path), "") for path in suite_paths}
+    expected_seed = {key for key in seed_rows if all_suites or any(key.startswith(prefix) for prefix in prefixes)}
+    # Candidate discovery must not silently remove a case from both roles.
+    # New cases remain allowed, but existing base cases must still be measured.
+    base_directory = base / "tests/performance"
+    if base_directory.is_dir():
+        base_specs = (discover_performance_ci_suites(base_directory) if all_suites else
+                      [str(base / path.relative_to(candidate)) for path in suite_paths
+                       if (base / path.relative_to(candidate)).is_file()])
+        base_keys = {key for path in base_specs for key in performance_fixture_cases(path)}
+        if base_keys - declared:
+            raise ValueError("base performance cases are missing from both roles")
+    if expected_seed - declared:
+        raise ValueError("trusted performance seed cases are missing from both roles")
+    manifest = {"schema_version": 1, "runner_sha256": hashlib.sha256(runner.read_bytes()).hexdigest(),
+                "seed_sha256": hashlib.sha256(seed.read_bytes()).hexdigest(),
+                "binaries": {role: {"path": str(tree / "memcp"),
+                    "sha256": hashlib.sha256((tree / "memcp").read_bytes()).hexdigest()}
+                    for role, tree in (("A", base), ("B", candidate))},
+                "suites": {str(path): {"sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                    "verification_order": "ABBA" * 3}
+                    for path in suite_paths}}
+    (artifacts / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    complete = {"schema_version": 1}
+    pending = []
+
+    def measure(suite_index, suite, role, trials):
+        tree = base if role == "A" else candidate
+        name = f"{suite_index:03d}-{suite.stem}-{len(trials)+1:02d}-{role}"
+        result_path = artifacts / (name + ".json")
+        log_path = artifacts / (name + ".log")
+        with tempfile.TemporaryDirectory(prefix="memcp-perf-fixture-") as data:
+            env = os.environ.copy()
+            for variable in ("PERF_REGRESSION_WAIVERS_FILE", "PERF_CALIBRATE",
+                             "MEMCP_TEST_SUPERVISOR_PID", "MEMCP_TEST_SUPERVISOR_GENERATION_FILE"):
+                env.pop(variable, None)
+            env.update(PERF_AB_MODE="record", PERF_FIXTURE_TRIAL="1",
+                       PERF_BASELINE_FILE=str(result_path), PERF_BASELINE_SEED=str(seed),
+                       MEMCP_TEST_WORKTREE=str(tree), MEMCP_BINARY=str(tree / "memcp"),
+                       MEMCP_TEST_DATA_DIR=data)
+            command = [sys.executable, "-u", str(runner), str(suite), "--log-times", "--fail-fast"]
+            print(f"PERF_FIXTURE {name}: {tree}", flush=True)
+            with log_path.open("w") as log:
+                result = subprocess.run(command, cwd=candidate, env=env, stdout=log, stderr=subprocess.STDOUT)
+            print(log_path.read_text(), end="", flush=True)
+            if result.returncode:
+                raise RuntimeError(f"fixture failed: {name}; see {log_path}")
+        measured = validate_performance_fixture(json.loads(result_path.read_text()), str(suite))
+        suite_spec = yaml.safe_load(suite.read_text())
+        for key, case in performance_fixture_cases(str(suite)).items():
+            rows = seed_rows.get(key, case.get("performance_rows", suite_spec.get("metadata", {}).get("performance_rows", default_rows)))
+            if measured[key]["rows"] != rows:
+                raise ValueError(f"fixture rows differ from trusted workload: {key}")
+        if trials:
+            for key, value in measured.items():
+                for field in ("rows", "warmup", "workload_sha256", "max_regression_pct"):
+                    if value[field] != trials[0]["results"][key][field]:
+                        raise ValueError(f"fixture {field} differs: {key}")
+        trials.append({"role": role, "results": measured, "log": str(log_path)})
+
+    def report(summary, verification_pending=False):
+        for key, value in summary.items():
+            value["verification_pending"] = verification_pending
+            status = "PASS" if value["passed"] else "VERIFICATION PENDING" if verification_pending else "FAIL"
+            change = (value["candidate_ms"] / value["time_ms"] - 1) * 100
+            print(f"PERF_AB {status} {key}: {value['time_ms']:.3f}ms -> {value['candidate_ms']:.3f}ms "
+                  f"({change:+.1f}%, limit {value['threshold_ms']:.3f}ms, "
+                  f"{value['fixture_trials']} fresh fixtures)", flush=True)
+            if value["waiver_reason"] is not None:
+                print(f"⚠️  Accepted perf regression: {key} — {value['waiver_reason']}", flush=True)
+        complete.update(summary)
+        output.write_text(json.dumps(complete, indent=2) + "\n")
+
+    # Finish the entire initial pass before checking suspect timings again.
+    # Execution failures never reach this queue, only successful slow queries.
+    for suite_index, suite in enumerate(suite_paths):
+        trials = []
+        for role in "AB":
+            measure(suite_index, suite, role, trials)
+        summary = summarize_performance_fixtures(trials, 1)
+        suspect = any(not value["passed"] for value in summary.values())
+        report(summary, verification_pending=suspect)
+        if suspect:
+            pending.append((suite_index, suite, trials))
+
+    for suite_index, suite, trials in pending:
+        print(f"PERF_VERIFY {suite}: six additional fresh trials per role; original pair retained", flush=True)
+        for role in "ABBA" * 3:
+            measure(suite_index, suite, role, trials)
+        # Recheck every case in the suite, including initially successful ones.
+        # There is no further retry, filtering, or early stop on a lucky sample.
+        report(summarize_performance_fixtures(trials, 7))
+    return all(value["passed"] for key, value in complete.items() if key != "schema_version")
+
+
 def print_usage() -> None:
-    print("Usage: python3 run_sql_tests.py <test_spec.yaml> [<test_spec2.yaml> ...] [port] [--perf-ci] [--port N] [--connect-only] [--jobs N] [--fail-fast]")
+    print("Usage: python3 run_sql_tests.py <test_spec.yaml> [<test_spec2.yaml> ...] [port] [--perf-ci] [--port N] [--connect-only] [--jobs N] [--fail-fast] | --perf-ab BASE_WORKTREE CANDIDATE_WORKTREE [suite.yaml ...]")
 
 
 def parse_cli_args(argv: List[str]) -> Tuple[List[str], Optional[int], bool, bool, Optional[int], bool, bool]:
@@ -2845,6 +3086,11 @@ def main():
     if len(sys.argv) < 2:
         print_usage()
         sys.exit(1)
+
+    if sys.argv[1] == "--perf-ab":
+        if len(sys.argv) < 4:
+            raise ValueError("--perf-ab requires base and candidate worktrees")
+        sys.exit(0 if run_performance_ab(Path(sys.argv[2]), Path(sys.argv[3]), sys.argv[4:]) else 1)
 
     # Calibrate before a candidate MemCP process exists.  Publishing the
     # validated result makes all later suite workers use exactly this factor.
@@ -2922,13 +3168,14 @@ def main():
             memcp_process = start_memcp_process(port, enable_mysql=enable_mysql)
             return memcp_process is not None
         runner.set_restart_handler(restart_handler)
-    if len(spec_files) == 1:
-        success = runner.run_test_spec(spec_files[0])
-    else:
-        success = run_test_specs(spec_files, base_url, port, log_times, jobs, restart_handler if not connect_only else None, connect_only, fail_fast)
-
-    if not connect_only and memcp_process:
-        stop_memcp_process(memcp_process)
+    try:
+        if len(spec_files) == 1:
+            success = runner.run_test_spec(spec_files[0])
+        else:
+            success = run_test_specs(spec_files, base_url, port, log_times, jobs, restart_handler if not connect_only else None, connect_only, fail_fast)
+    finally:
+        if not connect_only and memcp_process:
+            stop_memcp_process(memcp_process)
 
     sys.exit(0 if success else 1)
 

@@ -76,40 +76,25 @@ jobs:
             seed="$GITHUB_WORKSPACE/candidate/tests/performance/ci-workloads.json"
           fi
 
-          # Discover YAMLs from the candidate for both sides. This makes newly
-          # added performance suites part of the A/B baseline without copying or
-          # running a separate fill workload; MEMCP_TEST_WORKTREE still selects
-          # the exact base binary and Scheme library.
+          # The reviewed runner interleaves both binaries on identical fresh
+          # fixtures. Only suspect timings get fixed ABBA verification trials,
+          # after the complete initial pass; original samples stay included.
           (cd candidate && env \
-            PERF_AB_MODE=record \
             PERF_BASELINE_FILE="$baseline" \
             PERF_BASELINE_SEED="$seed" \
             PERF_REPEAT=1000 \
             PERF_MIN_MEASURE_MS=1000 \
             PERF_AB_JITTER_MS=50 \
             PERF_SETUP_MAX_TIME_SEC=120 \
-            MEMCP_TEST_JOBS=4 \
-            MEMCP_TEST_WORKTREE="$GITHUB_WORKSPACE/base" \
-            MEMCP_TEST_DATA_DIR=/tmp/memcp-perf-base \
-            python3 -u "$runner" --perf-ci --jobs 4 --log-times)
-
-          (cd candidate && env \
-            PERF_AB_MODE=compare \
-            PERF_BASELINE_FILE="$baseline" \
-            PERF_REPEAT=1000 \
-            PERF_MIN_MEASURE_MS=1000 \
-            PERF_AB_JITTER_MS=50 \
-            PERF_SETUP_MAX_TIME_SEC=120 \
-            MEMCP_TEST_JOBS=4 \
-            MEMCP_TEST_WORKTREE="$GITHUB_WORKSPACE/candidate" \
-            MEMCP_TEST_DATA_DIR=/tmp/memcp-perf-candidate \
             PERF_REGRESSION_WAIVERS_FILE="$GITHUB_WORKSPACE/perf-regression-waivers.txt" \
-            python3 -u "$runner" --perf-ci --jobs 4 --log-times)
+            python3 -u "$runner" --perf-ab "$GITHUB_WORKSPACE/base" "$GITHUB_WORKSPACE/candidate")
 
       - name: Upload measured base
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: performance-ab-baseline
-          path: perf-baseline.json
+          path: |
+            perf-baseline.json
+            perf-baseline.trials/
           if-no-files-found: warn
