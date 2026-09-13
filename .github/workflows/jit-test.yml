@@ -68,6 +68,8 @@ jobs:
           go-version: ${{ steps.jit-go-version.outputs.version }}
           cache: false
 
+      - uses: ./.github/actions/setup-php
+
       - name: Build MemCP with patched Go compiler
         run: make jit
 
