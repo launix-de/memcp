@@ -16,10 +16,13 @@ Copyright (C) 2026  Carl-Philip Hänsch
 */
 package storage
 
-import "math"
-import "sort"
-import "unsafe"
-import "math/bits"
+import (
+	"math"
+	"sort"
+	"unsafe"
+
+	"math/bits"
+)
 
 import "github.com/launix-de/memcp/scm"
 
@@ -29,7 +32,7 @@ type inMatcher struct{}
 
 func (*inMatcher) Kind() string      { return "in" }
 func (*inMatcher) IsSorted() bool    { return false }
-func (*inMatcher) IsPointLike() bool { return true }
+func (*inMatcher) IsPointLike() bool { return false }
 
 func (m *inMatcher) Analyze(ctx IndexAnalyzeContext, node scm.Scmer) (IndexBoundary, bool) {
 	v, ok := scmerSlice(node)

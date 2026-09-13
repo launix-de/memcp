@@ -90,7 +90,7 @@ type IndexAnalyzer interface {
 	IsSorted() bool
 
 	// IsPointLike reports whether this column is a point lookup for index ordering.
-	// Equal and Like: true (sorted before range). Range: false.
+	// Equal and Like: true (sorted before range). Range and multi-value IN: false.
 	IsPointLike() bool
 
 	// Deploy binds this analyzer to a shard. persistent is false for a

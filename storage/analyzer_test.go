@@ -1225,6 +1225,9 @@ func TestSnapshotDropsLegacySortedMatcherMetadata(t *testing.T) {
 // Exact probes must preserve BIGINT identity even when adjacent values have
 // the same float64 representation, and must not mutate the bound value list.
 func TestInIndexCandidatesPrecisionAndImmutableBinding(t *testing.T) {
+	if InMatcher.IsSorted() || InMatcher.IsPointLike() {
+		t.Fatal("multi-value membership must not imply one constant ordered key")
+	}
 	values := []scm.Scmer{scm.NewInt(9007199254740993), scm.NewNil(), scm.NewInt(2), scm.NewInt(9007199254740992), scm.NewInt(2)}
 	reader := ColumnReaderFunc(func(id uint32) scm.Scmer { return values[id] })
 	hook := InMatcher.Deploy(IndexDeployContext{MainCount: uint32(len(values)), Column: reader}, true)

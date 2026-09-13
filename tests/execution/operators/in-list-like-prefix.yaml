@@ -7,6 +7,8 @@
 metadata:
   version: "1.0"
   description: "IN-list and LIKE prefix boundary extraction"
+  # Global rebuilds in this suite must not race other suites' maintenance.
+  isolated: true
 
 setup:
   - sql: "DROP TABLE IF EXISTS inlike"
@@ -234,6 +236,10 @@ test_cases:
   - name: "Sparse IN retains ordered LIMIT semantics"
     sql: "SELECT id FROM in_sparse WHERE id IN (49999,2,40000,0,25000,2) ORDER BY id DESC LIMIT 3"
     expect: {rows: 3, data: [{id: 49999}, {id: 40000}, {id: 25000}]}
+
+  - name: "Multi-value IN preserves secondary-column ordering"
+    sql: "SELECT id, bucket FROM in_sparse WHERE id IN (49999,2,40000,0,25000,2) ORDER BY bucket DESC, id ASC LIMIT 3"
+    expect: {rows: 3, data: [{id: 49999, bucket: 9999}, {id: 25000, bucket: 5000}, {id: 2, bucket: 2}]}
 
   - name: "Sparse IN preserves NULL and string coercion"
     sql: "SELECT COUNT(*) AS cnt FROM in_sparse WHERE id IN (NULL,'49999',2,2)"
