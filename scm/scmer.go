@@ -1381,6 +1381,11 @@ func (s *Scmer) UnmarshalJSON(data []byte) error {
 		case bool:
 			return NewBool(t)
 		case json.Number:
+			// JSON preserves the spelling of IEEE negative zero. Parsing it
+			// as an integer would discard its sign in persisted scalar values.
+			if t == "-0" {
+				return NewFloat(math.Copysign(0, -1))
+			}
 			if i, err := t.Int64(); err == nil {
 				return NewInt(i)
 			}

@@ -79,6 +79,11 @@ func trailingZeroPow10(v int64) int8 {
 // 0.0 → MaxInt8, 100.0 → 2, 7.0 → 0, 3.5 → -1, 12.57 → -2, π → MinInt8
 func detectFloatScale(f float64) int8 {
 	if f == 0 {
+		// Scaled integer formats cannot retain IEEE negative zero. Keep it in
+		// floating storage instead of changing the value during compression.
+		if math.Signbit(f) {
+			return math.MinInt8
+		}
 		return math.MaxInt8
 	}
 	v := math.Abs(f)
