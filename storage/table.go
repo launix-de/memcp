@@ -2914,6 +2914,7 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 		key := make([]scm.Scmer, len(uniq.Cols))
 		keyIdx := make([]int, len(uniq.Cols))
 		for i, col := range uniq.Cols {
+			keyIdx[i] = -1 // omitted nullable columns contribute NULL, not row[0]
 			for j, col2 := range columns {
 				if col == col2 {
 					keyIdx[i] = j
@@ -2974,7 +2975,11 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 			shardlist2 := shardlist
 			skipUniqueCheck := false
 			for i, colidx := range keyIdx {
-				key[i] = row[colidx]
+				if colidx < 0 {
+					key[i] = scm.NewNil()
+				} else {
+					key[i] = row[colidx]
+				}
 				if !mergeNull && key[i].IsNil() {
 					skipUniqueCheck = true
 				}
@@ -2984,7 +2989,7 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 			}
 			if allowPruning {
 				for j, xidx := range pruningMap {
-					pruningVals[j] = row[keyIdx[xidx]]
+					pruningVals[j] = key[xidx]
 				}
 				// only one shard to visit for unique check
 				shardlist2 = []*storageShard{shardlist[computeShardIndex(t.PDimensions, pruningVals)]} // (TODO: array pruning)

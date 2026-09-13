@@ -255,6 +255,14 @@ test_cases:
         - {option_name: other-cache, option_value: other}
         - {option_name: theme-cache, option_value: updated-again}
 
+  - name: "Omitted nullable unique key does not reuse first supplied column"
+    sql: "INSERT INTO upsert_options (option_name, option_value) VALUES ('theme', 'nullable-alias')"
+    expect: {affected_rows: 1}
+
+  - name: "Omitted nullable unique key stores NULL without false collision"
+    sql: "SELECT option_name, alias FROM upsert_options WHERE option_name = 'theme'"
+    expect: {rows: 1, data: [{option_name: theme, alias: null}]}
+
 cleanup:
   - sql: "DROP TABLE upsert_options"
   - sql: "DROP TABLE IF EXISTS upsert_t"
