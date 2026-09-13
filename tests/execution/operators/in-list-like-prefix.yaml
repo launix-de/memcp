@@ -16,6 +16,7 @@ setup:
 cleanup:
   - sql: "DROP TABLE IF EXISTS inlike"
   - sql: "DROP TABLE IF EXISTS in_sparse"
+  - sql: "DROP TABLE IF EXISTS in_partitioned_text"
 
 test_cases:
   - name: "Create table and insert data"
@@ -265,3 +266,36 @@ test_cases:
       (compile_scan_access '("id") (scheme "(lambda (id) (sql_in (list 49999 2 40000 0 25000 2 49999) id))"))
     expect:
       result_contains: ['scan_boundary "in"']
+
+  - name: "Partitioned text fallback fixture"
+    setup:
+      - sql: "DROP TABLE IF EXISTS in_partitioned_text"
+      - sql: "CREATE TABLE in_partitioned_text (id INT, name TEXT) ENGINE=sloppy"
+      - scm: |
+          (begin
+            (insert (table "memcp-tests" "in_partitioned_text") '("id" "name")
+              (map (produceN 512) (lambda (i)
+                (list i (if (< i 3) (nth '("cron" "home" "theme_patterns_cache") i) (concat "option-" i))))))
+            (rebuild (table "memcp-tests" "in_partitioned_text") true false)
+            (partitiontable (table "memcp-tests" "in_partitioned_text") (list (list "name" (list "option-200" "option-400")))))
+    sql: "SELECT COUNT(*) AS cnt FROM in_partitioned_text"
+    expect: {data: [{cnt: 512}]}
+
+  - name: "Partitioned string IN retains fallback across cached indexes"
+    warmup: 10
+    timing_samples: 30
+    threshold_ms: 200
+    sql: "SELECT id FROM in_partitioned_text WHERE name IN ('theme_patterns_cache','cron','option-300','cron',NULL)"
+    expect: {rows: 3}
+
+  - name: "Partitioned LIKE hook retains conservative shard selection"
+    sql: "SELECT id FROM in_partitioned_text WHERE name LIKE '%patterns%'"
+    expect: {rows: 1, data: [{id: 2}]}
+
+  - name: "Partitioned IN fallback retains ordered LIMIT"
+    sql: "SELECT id FROM in_partitioned_text WHERE name IN ('home','cron') ORDER BY id DESC LIMIT 1"
+    expect: {rows: 1, data: [{id: 1}]}
+
+  - name: "Partitioned mixed numeric IN retains fallback"
+    sql: "SELECT id FROM in_partitioned_text WHERE id IN ('0',1,NULL) ORDER BY id"
+    expect: {rows: 2, data: [{id: 0}, {id: 1}]}
