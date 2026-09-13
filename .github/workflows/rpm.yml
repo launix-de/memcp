@@ -106,9 +106,9 @@ jobs:
           password = None
           endpoint = 'http://127.0.0.1:29495'
 
-          def sql(statement):
+          def sql(statement, database='memcp-tests'):
               auth = base64.b64encode(('root:' + password).encode()).decode()
-              request = urllib.request.Request(endpoint + '/sql/memcp-tests',
+              request = urllib.request.Request(endpoint + '/sql/' + database,
                   data=statement.encode(), headers={'Authorization': 'Basic ' + auth})
               with urllib.request.urlopen(request, timeout=10) as response:
                   rows = []
@@ -136,7 +136,7 @@ jobs:
                   if process.poll() is not None:
                       raise RuntimeError('installed daemon exited during startup')
                   try:
-                      sql('SELECT 1')
+                      sql('SELECT 1', database='system')
                       with urllib.request.urlopen(endpoint + '/index.php', timeout=10) as response:
                           assert response.read() == b'package-php-ok'
                       return
@@ -169,6 +169,7 @@ jobs:
               assert password, 'package did not initialize credentials'
               assert credential.stat().st_mode & 0o777 == 0o600
               start()
+              sql('CREATE DATABASE IF NOT EXISTS `memcp-tests`', database='system')
               sql('CREATE TABLE package_integrity (id INT, label TEXT) ENGINE=SAFE')
               sql("INSERT INTO package_integrity VALUES (1, 'alpha'), (2, 'beta')")
               expected = [{'id': 1, 'label': 'alpha'}, {'id': 2, 'label': 'beta'}]
