@@ -134,7 +134,7 @@ func jitCompileProcToExec(proc *Proc, buf *execBuf, recursiveLambdas bool) (int,
 // compilation starts with free to allocate: all GPRs except RAX (result
 // ptr), RBX (result aux), RSP, RBP, R11 (scratch), R12 (slice base), R14 (Go
 // goroutine ptr "g"). Shared with tests that need a JITContext representative
-// of a real compile's register state (see jitMinInlineRegisterHeadroom).
+// of a real compile's register state.
 func jitDefaultFreeGPRegs() uint64 {
 	return uint64((1 << uint(RegRCX)) | (1 << uint(RegRDX)) |
 		(1 << uint(RegRSI)) | (1 << uint(RegRDI)) |
