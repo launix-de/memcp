@@ -5,6 +5,10 @@
 # the Free Software Foundation, either version 3 of the License, or
 # (at your option) any later version.
 
+# Go and the externally built PHP runtime are installed stripped. Their source
+# input is recorded in the SRPM/SDK release pins, not an empty debug subpackage.
+%global debug_package %{nil}
+
 Name:           memcp
 Version:        %{_version}
 Release:        1%{?dist}
@@ -29,6 +33,10 @@ Requires(post): systemd
 Requires(post): util-linux
 Requires(preun): systemd
 Requires(postun): systemd
+# The pre-install script creates these identities before installing owned files.
+# Fedora's file dependency generator requires the group for memcp.conf.
+Provides:       user(memcp)
+Provides:       group(memcp)
 
 %description
 MemCP is a persistent, column-oriented in-memory database with HTTP and
