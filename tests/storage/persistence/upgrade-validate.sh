@@ -24,18 +24,19 @@ FAILURES=0
 # EXPECTED is compared verbatim against mysql's -N -B (tab-separated, no
 # headers) output. NULL prints as the literal string "NULL" in this mode.
 check() {
-  local desc="$1" query="$2" expected="$3" actual stderr_out
+  local desc="$1" query="$2" expected="$3" actual stderr_out status=0
   CHECKS=$((CHECKS + 1))
   # stdout and stderr must stay separate: the real MySQL client (unlike
   # MariaDB's) prints "[Warning] Using a password on the command line
   # interface can be insecure." to stderr on every invocation, which would
   # corrupt every comparison if merged into the compared value.
-  actual=$("${MYSQL_BASE[@]}" -e "$query" 2>/tmp/upgrade-validate-stderr.$$)
+  actual=$("${MYSQL_BASE[@]}" -e "$query" 2>/tmp/upgrade-validate-stderr.$$) || status=$?
   stderr_out=$(cat /tmp/upgrade-validate-stderr.$$ 2>/dev/null)
   rm -f /tmp/upgrade-validate-stderr.$$
-  if [ "$actual" != "$expected" ]; then
+  if [ "$status" -ne 0 ] || [ "$actual" != "$expected" ]; then
     echo "MISMATCH: $desc"
     echo "  query:    $query"
+    echo "  mysql exit status: $status"
     printf '  expected: %q\n' "$expected"
     printf '  actual:   %q\n' "$actual"
     if [ -n "$stderr_out" ]; then
@@ -46,15 +47,18 @@ check() {
 }
 
 exec_sql() {
-  "${MYSQL_BASE[@]}" -e "$1"
+  check "DML statement succeeds" "$1" ""
 }
 
 # ==========================================================================
 # 1. StorageFloat
 # ==========================================================================
 check "Float: NULL survives"          "SELECT val FROM up_float WHERE id = 30"        "NULL"
-check "Float: count total"            "SELECT COUNT(*) FROM up_float"                 "31"
-check "Float: id=0 is non-null"       "SELECT val IS NOT NULL FROM up_float WHERE id = 0" "1"
+check "Float: count total"            "SELECT COUNT(*) FROM up_float"                 "32"
+check "Float: original first value"   "SELECT val = 1.1557281258737144 FROM up_float WHERE id = 0" "1"
+check "Float: original middle value"  "SELECT val = 2.8369278733601684 FROM up_float WHERE id = 15" "1"
+check "Float: original last value"    "SELECT val = 2.9714025949704714 FROM up_float WHERE id = 29" "1"
+check "Float: original small value"   "SELECT val = 0.000000012345678912345678 FROM up_float WHERE id = 31" "1"
 
 # ==========================================================================
 # 2. StorageString with dictionary
@@ -144,6 +148,7 @@ check "JSON: aggregate over tenant" "SELECT COUNT(*) FROM up_json WHERE JSON_VAL
 # 11. OverlayBlob
 # ==========================================================================
 check "Blob: length of large value"     "SELECT LENGTH(content) FROM up_blob WHERE id = 1" "3012"
+check "Blob: complete large value"      "SELECT content = CONCAT('alpha-', REPEAT('x', 3000), '-alpha') FROM up_blob WHERE id = 1" "1"
 check "Blob: content markers both ends" "SELECT LEFT(content, 6), RIGHT(content, 6) FROM up_blob WHERE id = 3" "$(printf 'charli\tharlie')"
 check "Blob: four large rows distinct"  "SELECT COUNT(DISTINCT content) FROM up_blob WHERE id <= 4" "4"
 check "Blob: short value alongside"     "SELECT content FROM up_blob WHERE id = 5" "short"
@@ -169,6 +174,7 @@ check "DML: enum DELETE visible" "SELECT COUNT(*) FROM up_enum" "99"
 
 exec_sql "UPDATE up_compute SET val = 100 WHERE id = 1"
 check "DML: compute base column UPDATE visible" "SELECT val FROM up_compute WHERE id = 1" "100"
+check "DML: computed column UPDATE visible" "SELECT doubled FROM up_compute WHERE id = 1" "200"
 
 echo "upgrade-validate: $((CHECKS - FAILURES))/$CHECKS checks passed"
 if [ "$FAILURES" -ne 0 ]; then

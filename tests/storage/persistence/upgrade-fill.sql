@@ -59,6 +59,10 @@ INSERT INTO up_float VALUES
   (28, 2.965862243914698),
   (29, 2.9714025949704714);
 INSERT INTO up_float VALUES (30, NULL);
+-- Keep this column in StorageFloat: this small, high-precision value cannot
+-- use the decimal compressor's supported scales. The values above alone can
+-- select StorageDecimal instead, so they do not establish float coverage.
+INSERT INTO up_float VALUES (31, 0.000000012345678912345678);
 
 -- 2. StorageString with dictionary: few distinct values, uniform distribution
 CREATE TABLE up_string_dict (id INT, city VARCHAR(50));
