@@ -1,3 +1,4 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
 # MySQL Compatibility v1 — INSERT ... ON DUPLICATE KEY UPDATE
 
 metadata:
@@ -5,6 +6,14 @@ metadata:
   description: "MySQL v1: upsert semantics for PK/UNIQUE keys"
 
 setup:
+  - sql: "DROP TABLE IF EXISTS upsert_options"
+  - sql: |
+      CREATE TABLE upsert_options (
+        option_id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+        option_name VARCHAR(191) NOT NULL UNIQUE,
+        option_value TEXT,
+        alias VARCHAR(191) UNIQUE
+      )
   - sql: "DROP TABLE IF EXISTS upsert_t"
   - sql: |
       CREATE TABLE upsert_t (
@@ -197,5 +206,55 @@ test_cases:
     expect:
       error: true
 
+  - name: "Omitted generated PK still checks secondary unique keys"
+    sql: "INSERT INTO upsert_options (option_name, option_value, alias) VALUES ('theme-cache', 'cached', 'theme'), ('other-cache', 'other', NULL)"
+    expect: {affected_rows: 2}
+
+  - name: "Duplicate option name errors with omitted generated PK"
+    sql: "INSERT INTO upsert_options (option_name, option_value) VALUES ('theme-cache', 'duplicate')"
+    expect: {error: true}
+
+  - name: "Duplicate later unique key errors with omitted generated PK"
+    sql: "INSERT INTO upsert_options (option_name, alias) VALUES ('different-name', 'theme')"
+    expect: {error: true}
+
+  - name: "INSERT IGNORE respects secondary uniqueness with generated PK"
+    sql: "INSERT IGNORE INTO upsert_options (option_name, option_value) VALUES ('theme-cache', 'ignored')"
+    expect: {affected_rows: 0}
+
+  - name: "Option upsert updates secondary key conflict with omitted generated PK"
+    sql: |
+      INSERT INTO upsert_options (option_name, option_value, alias)
+      VALUES ('theme-cache', 'updated', 'theme')
+      ON DUPLICATE KEY UPDATE option_value = VALUES(option_value)
+    expect: {affected_rows: 2}
+
+  - name: "Option upsert keeps original generated identity and row count"
+    sql: "SELECT option_id, option_name, option_value FROM upsert_options ORDER BY option_id"
+    expect:
+      rows: 2
+      data:
+        - {option_id: 1, option_name: theme-cache, option_value: updated}
+        - {option_id: 2, option_name: other-cache, option_value: other}
+
+  - name: "Rebuild option indexes before another generated-PK upsert"
+    setup:
+      - scm: '(rebuild (table "memcp-tests" "upsert_options") true false)'
+    sql: |
+      INSERT INTO upsert_options (option_name, option_value, alias)
+      VALUES ('theme-cache', 'updated-again', 'theme'), ('new-cache', 'new', NULL)
+      ON DUPLICATE KEY UPDATE option_value = VALUES(option_value)
+    expect: {affected_rows: 3}
+
+  - name: "Mixed option upsert preserves rebuilt uniqueness and NULL aliases"
+    sql: "SELECT option_name, option_value FROM upsert_options ORDER BY option_name"
+    expect:
+      rows: 3
+      data:
+        - {option_name: new-cache, option_value: new}
+        - {option_name: other-cache, option_value: other}
+        - {option_name: theme-cache, option_value: updated-again}
+
 cleanup:
+  - sql: "DROP TABLE upsert_options"
   - sql: "DROP TABLE IF EXISTS upsert_t"
