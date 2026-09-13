@@ -70,6 +70,18 @@ test_cases:
 - name: Singleton IN retains SQL NULL semantics
   sql: SELECT 1 IN (NULL) AS rhs_null, NULL IN (1) AS lhs_null, NULL IN (NULL) AS both_null, 1 NOT IN (NULL) AS negated_null
   expect: {rows: 1, data: [{rhs_null: null, lhs_null: null, both_null: null, negated_null: null}]}
+- name: Singleton IN preserves existing mixed operand coercion
+  sql: SELECT 2 IN (TRUE) AS numeric_probe, TRUE IN (2) AS boolean_probe
+  expect: {rows: 1, data: [{numeric_probe: true, boolean_probe: false}]}
+- name: Singleton boolean IN preserves numeric post membership
+  sql: SELECT COUNT(*) AS n FROM wpbench_posts WHERE ID IN (TRUE)
+  expect: {rows: 1, data: [{n: 22062}]}
+- name: Singleton numeric IN preserves text coercion
+  sql: SELECT COUNT(*) AS n FROM wpbench_posts WHERE post_type IN (0)
+  expect: {rows: 1, data: [{n: 22062}]}
+- name: Singleton text IN preserves numeric prefix coercion
+  sql: SELECT COUNT(*) AS n FROM wpbench_posts WHERE post_date IN ('foo')
+  expect: {rows: 1, data: [{n: 1}]}
 - name: Singleton IN still validates its only referenced column
   sql: SELECT 1 IN (missing_column) FROM wpbench_posts
   expect: {error: true}

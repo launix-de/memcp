@@ -9829,7 +9829,7 @@ wrapper owns the output-shape normalizers which must precede binding.
 Decorrelation owns D and all subquery elimination; only then may logical join
 ordering run. Storage artifacts begin in build_queryplan. */
 (define normalize_sql_syntax (lambda (ast)
-	(sanitize_temporal_outputs (sanitize_decimal_aggregate_outputs (normalize_singleton_in_lists ast)))))
+	(sanitize_temporal_outputs (sanitize_decimal_aggregate_outputs ast))))
 
 (define decorrelate_logical_query (lambda (ast)
 	(untangle_query_term (normalize_sql_syntax ast) nil)))
@@ -10627,12 +10627,15 @@ PK permits projecting a many-side RecSet without multiplying output rows. */
 		((symbol aggregate) 1 (symbol +) 0) true
 		_ false)))
 
+/* The SQL parser embeds the builtin list constructor in literal IN lists.
+It is as stable as its symbolic form; other procedures remain unproven. */
 (define semijoin_stable_expr? (lambda (expr)
 	(match expr
 		((symbol quote) value) true
 		((symbol get_column) alias ci col cci) true
 		(cons head tail)
-		(and (contains? '("list" "and" "or" "equal??" "sql_not" "sql_in" "<" ">" "<=" ">=" "simplify") (string head))
+		(and (or (equal? head list)
+			(contains? '("list" "and" "or" "equal??" "sql_not" "sql_in" "<" ">" "<=" ">=" "simplify") (string head)))
 			(reduce tail (lambda (ok item) (and ok (semijoin_stable_expr? item))) true))
 		_ (or (nil? expr) (or (number? expr) (or (string? expr) (or (equal? expr true) (equal? expr false))))))))
 
