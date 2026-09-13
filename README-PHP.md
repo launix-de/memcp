@@ -19,19 +19,31 @@ SAPI, including PDO and OPcache. The PHP headers, `php-config`, `libphp`, and
 extensions must belong to the same build. A usual NTS PHP-FPM package is not
 sufficient. Follow the upstream [FrankenPHP build instructions](https://frankenphp.dev/docs/compile/).
 
+By default `make` builds the normal `memcp` binary with embedded PHP support
+so `--serve` is available.
+
 ```sh
+make
+
+# build with embedded PHP
 make php PHP_CONFIG=/path/to/php-zts/bin/php-config
+
+# explicit no-php size build
+make nophp
 ```
 
-This produces `memcp-php`. The executable dynamically links external `libphp`
+`make php` produces `memcp-php`. That executable dynamically links external
+`libphp`
 from the selected installation; it does not start PHP-FPM or a separate
 FrankenPHP/Caddy process. Install application-specific extensions such as
 `mysqli`, `pdo_mysql`, `pdo_pgsql`, `pdo_sqlite`, `intl`, or `mbstring` in that
 PHP installation. Its `php.ini` remains the place for PHP and OPcache settings.
 
-`make` still produces the ordinary `memcp` executable without PHP or native
-PHP build requirements. The shared Go module graph now requires Go 1.26 due
-to FrankenPHP. The PHP build disables optional Watcher, Brotli and Mercure
+The plain `make` build still produces the ordinary `memcp` executable and keeps
+the PHP integration available for `--serve`; it requires a matching external
+ZTS PHP build, just like `make php`. The `make nophp` target disables PHP for a smaller
+binary. The shared Go module graph still requires Go 1.26 due to FrankenPHP
+integration. The PHP build disables optional Watcher, Brotli and Mercure
 features; no Caddy dependency is added.
 
 ## Mount applications from Scheme
@@ -391,3 +403,23 @@ MEMCP_TEST_IMAP_BINARY=/usr/bin/php MEMCP_TEST_PHP_EXTENSIONS=1 \
 ```
 
 The IMAP tests use a private local mock mailbox; no external mail account is required.
+
+DEB and RPM packages include the matching ZTS `libphp.so` privately under
+`/usr/lib/memcp/php`; native system dependencies are declared by the package.
+Build packages with `PHP_CONFIG` pointing at the ZTS installation and
+`PHP_LICENSE_DIR` pointing at that release's license directory (or PHP source
+root; only license/notice files are copied). PHP sources and
+headers are never included in the binary package. The standalone static release
+binary remains an explicit `nophp` build.
+
+Packages also ship the matching Imagick module and private `php.ini`. The host
+resolves their paths from the installed executable; no build prefix is needed.
+Set `PHPRC` explicitly to use an administrator-managed PHP configuration instead.
+Such a configuration is responsible for its own `extension_dir` and modules.
+
+RPMs must be built on the target RPM distribution so their native library
+requirements match its ABI. The reusable RPM workflow builds the released ZTS
+SDK on Fedora and verifies installation and a source-RPM rebuild there.
+A manual source-RPM rebuild requires PHP >= 8.5 with ZTS and shared embed,
+plus Imagick, selected through the `_php_config` and `_php_license_dir` macros;
+a normal NTS `php-devel` installation alone is insufficient.

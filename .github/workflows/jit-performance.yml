@@ -79,6 +79,8 @@ jobs:
           go-version: ${{ steps.jit-go-version.outputs.version }}
           cache: false
 
+      - uses: ./candidate/.github/actions/setup-php
+
       - name: Build JIT candidate and patched Go compiler
         run: make -C candidate jit
 
@@ -103,7 +105,11 @@ jobs:
         run: pip install requests PyYAML
 
       - name: Build JIT base with the same compiler
-        run: make -C base jit JIT_GOROOT="$GITHUB_WORKSPACE/candidate/.third_party/go-jit"
+        run: |
+          # Baselines before PHP became the default still have an explicit PHP
+          # target. The exported GOROOT/GOEXPERIMENT selects the same JIT Go.
+          make -C base php
+          mv base/memcp-php base/memcp
 
       - name: Measure JIT base and candidate with the SQL test runner
         shell: bash
