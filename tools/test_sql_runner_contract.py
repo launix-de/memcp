@@ -81,6 +81,169 @@ from run_sql_tests import (  # noqa: E402
 from tools.check_test_table_names import mutable_table_collisions  # noqa: E402
 
 
+class UpgradeSnapshotContractTest(unittest.TestCase):
+    """Exercise the existing shell runner's inline exporter without a server."""
+
+    def setUp(self):
+        script = Path(__file__).resolve().parents[1] / "tests/storage/persistence/upgrade-validate.sh"
+        code = script.read_text().split("<<'PYTHON'\n", 1)[1].split("\nPYTHON", 1)[0]
+        definitions = code.rsplit("\ntry:\n", 1)[0]
+        self.exporter = {}
+        with mock.patch.object(sys, "argv", ["-", str(script), "1", "compare", "unused", ""]):
+            exec(compile(definitions, str(script), "exec"), self.exporter)
+
+    def fixture(self):
+        import base64
+        encode = lambda value: base64.b64encode(value).decode("ascii")
+        columns = [{"name": "id", "encoding": "integer", "metadata": ["INT"]},
+                   {"name": "value", "encoding": "bytes-base64", "metadata": ["BLOB"]}]
+        return {"format": "memcp-upgrade-values-v1", "tables": {
+            "up_string_nodict": {"columns": columns, "rows": [
+                ["50", encode(b"previously unchecked row")],
+                ["51", None], ["52", encode(b"NULL")],
+                ["53", encode(b"a\x00b\tc\nd\r\xff")]]},
+            "up_blob": {"columns": columns, "rows": [["1", encode(b"a" * 3000)]]},
+            "up_json": {"columns": columns, "rows": [["1", encode(b'{"nested":{"v":42}}')]]},
+            "up_float": {"columns": [{"name": "v", "encoding": "number", "metadata": ["DOUBLE"]}],
+                         "rows": [["-0"], ["1.1557281258737144"]]}}}
+
+    def test_every_value_and_inventory_difference_fails(self):
+        import base64
+        import copy
+
+        def replace_bytes(tables, table, before, after):
+            row = tables[table]["rows"][0]
+            value = base64.b64decode(row[1]).replace(before, after, 1)
+            row[1] = base64.b64encode(value).decode("ascii")
+
+        changes = [
+            lambda t: t["up_string_nodict"]["rows"][0].__setitem__(1, "Y29ycnVwdA=="),
+            lambda t: replace_bytes(t, "up_blob", b"a" * 3000, b"a" * 1500 + b"b" + b"a" * 1499),
+            lambda t: replace_bytes(t, "up_json", b"42", b"43"),
+            lambda t: t["up_float"]["rows"][0].__setitem__(0, "0"),
+            lambda t: t["up_float"]["rows"][1].__setitem__(0, "1.1557281258737146"),
+            lambda t: t["up_string_nodict"]["rows"][1].__setitem__(1, "TlVMTA=="),
+            lambda t: t["up_string_nodict"]["rows"].append(t["up_string_nodict"]["rows"][0]),
+            lambda t: t["up_float"]["columns"][0].__setitem__("metadata", ["INT"]),
+            lambda t: t.pop("up_json"),
+        ]
+        expected = self.fixture()
+        for change in changes:
+            with self.subTest(change=change):
+                actual = copy.deepcopy(expected)
+                change(actual["tables"])
+                self.exporter["capture"] = lambda: actual
+                with self.assertRaises(ValueError):
+                    self.exporter["compare"](expected)
+
+    def test_binary_null_and_record_boundaries_survive_capture(self):
+        import base64
+        raw = b"nul\x00tab\tline\ncarriage\rslash\\invalid\xff"
+        token = base64.b64encode(raw)
+        replies = [
+            [[b"up_bytes"]],
+            [[b"Type", b"Field", b"Collation", b"RawType", b"Dimensions", b"Null",
+              b"Key", b"Default", b"DefaultExpression", b"Extra", b"Privileges", b"Comment",
+              b"RowEstimate"],
+             [b"INT", b"id"] + [b""] * 10 + [b"3"],
+             [b"BLOB", b"content"] + [b""] * 10 + [b"3"]],
+            [[b"0", b"1", b"0", token], [b"0", b"2", b"1", b"NULL"],
+             [b"0", b"3", b"0", base64.b64encode(b"NULL")]],
+        ]
+        self.exporter["query"] = mock.Mock(side_effect=replies)
+        captured = self.exporter["capture"]()["tables"]["up_bytes"]
+        self.assertNotIn("RowEstimate", captured["columns"][0]["metadata"])
+        self.assertEqual(captured["columns"][0]["name"], "id")
+        rows = captured["rows"]
+        self.assertEqual(base64.b64decode(rows[0][1]), raw)
+        self.assertIsNone(rows[1][1])
+        self.assertEqual(base64.b64decode(rows[2][1]), b"NULL")
+
+    def test_sql_failure_is_fatal_even_with_empty_stdout(self):
+        import subprocess
+        with mock.patch.object(subprocess, "run", side_effect=subprocess.CalledProcessError(1, "mysql", b"", b"SQL failed")):
+            with self.assertRaises(subprocess.CalledProcessError):
+                self.exporter["capture"]()
+
+    def test_post_dml_oracle_preserves_untouched_values(self):
+        def table(names, rows):
+            return {"columns": [{"name": n} for n in names], "rows": rows}
+        expected = {"tables": {
+            "up_float": table(["id", "val"], [["0", "1.25"], ["1", "2.75"]]),
+            "up_const": table(["id", "status"], [["0", "YWN0aXZl"]]),
+            "up_enum": table(["id", "grade"], [["98", "RA=="], ["99", "RA=="]]),
+            "up_compute": table(["id", "val", "doubled"], [["1", "5", "10"], ["2", "7", "14"]]),
+            "up_unrelated": table(["id", "bytes"], [["50", "AAkK/w=="]]),
+        }}
+        actual = self.exporter["changed_oracle"](expected)["tables"]
+        self.assertEqual(actual["up_float"]["rows"], [["0", "3.14159"], ["1", "2.75"]])
+        self.assertEqual(actual["up_const"]["rows"], [["0", "YWN0aXZl"], ["50", "YWN0aXZl"]])
+        self.assertEqual(actual["up_enum"]["rows"], [["98", "RA=="]])
+        self.assertEqual(actual["up_compute"]["rows"], [["1", "100", "200"], ["2", "7", "14"]])
+        self.assertEqual(actual["up_unrelated"]["rows"], [["50", "AAkK/w=="]])
+
+    def test_oracle_cannot_be_overwritten(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "old.json"
+            self.exporter["write_new"](path, self.fixture())
+            before = path.read_bytes()
+            with self.assertRaises(FileExistsError):
+                self.exporter["write_new"](path, {})
+            self.assertEqual(path.read_bytes(), before)
+
+
+class UpgradeWorkflowContractTest(unittest.TestCase):
+    def setUp(self):
+        import yaml
+        workflow = Path(__file__).resolve().parents[1] / ".github/workflows/upgrade-compatibility.yml"
+        self.jobs = yaml.safe_load(workflow.read_text())["jobs"]
+
+    def test_required_gate_rejects_failed_cancelled_and_skipped_work(self):
+        import subprocess
+        gate = self.jobs["upgrade-compatibility"]
+        self.assertEqual(gate["if"], "always()")
+        self.assertCountEqual(gate["needs"], ["changes", "versions", "check-upgrade"])
+        code = gate["steps"][0]["run"]
+        statuses = ("success", "failure", "cancelled", "skipped")
+        for relevant, event, changes, versions, upgrade in itertools.product(
+                ("true", "false"), ("pull_request", "workflow_dispatch"), statuses, statuses, statuses):
+            with self.subTest(relevant=relevant, event=event, changes=changes, versions=versions, upgrade=upgrade):
+                env = dict(os.environ, CHANGE_RESULT=changes, RELEVANT=relevant,
+                           VERSION_RESULT=versions, UPGRADE_RESULT=upgrade, EVENT_NAME=event)
+                result = subprocess.run(["bash", "-c", code], env=env, capture_output=True)
+                needed = relevant == "true" or event == "workflow_dispatch"
+                expected = changes == "success" and (
+                    versions == upgrade == ("success" if needed else "skipped"))
+                self.assertEqual(result.returncode == 0, expected)
+
+    def select_refs(self, requested, base=""):
+        import subprocess
+        step = self.jobs["versions"]["steps"][0]
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "output"
+            env = dict(os.environ, REQUESTED_REFS=requested, PR_BASE_REF=base,
+                       GITHUB_OUTPUT=str(output))
+            result = subprocess.run(["bash", "-c", step["run"]], env=env, capture_output=True)
+            refs = None
+            if output.exists():
+                refs = json.loads(output.read_text().removeprefix("refs="))
+            return result.returncode, refs
+
+    def test_predecessor_defaults_and_deduplication(self):
+        self.assertEqual(self.select_refs("[]", "abc123"), (0, ["abc123"]))
+        self.assertEqual(self.select_refs("[]"), (0, ["master"]))
+        self.assertEqual(self.select_refs('["v0.1", "master", "v0.1"]'), (0, ["v0.1", "master"]))
+        self.assertEqual(self.select_refs(json.dumps(["master"] * 17)), (0, ["master"]))
+
+    def test_predecessor_invalid_input_does_not_publish_matrix(self):
+        for value in ("invalid JSON", '"master"', "null", "{}", "[1]", '[""]', '["  "]',
+                      json.dumps(["ref" + str(i) for i in range(17)])):
+            with self.subTest(value=value):
+                status, refs = self.select_refs(value)
+                self.assertNotEqual(status, 0)
+                self.assertIsNone(refs)
+
+
 class PerformanceScaleContractTest(unittest.TestCase):
     def test_performance_discovery_honors_independent_ci_opt_in(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

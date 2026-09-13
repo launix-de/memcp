@@ -18,6 +18,7 @@ package storage
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -27,6 +28,57 @@ import (
 
 	"github.com/launix-de/memcp/scm"
 )
+
+func TestComputeProxyRestoresPersistedProcedures(t *testing.T) {
+	// Literal historical JSON, independent of the current procedure encoder.
+	// Both symbolic and optimized local-variable bodies occur in persisted files.
+	for _, encoded := range []string{
+		`[{"symbol":"lambda"},[{"symbol":"value"}],[{"symbol":"*"},{"symbol":"value"},2]]`,
+		`[{"symbol":"lambda"},[{"symbol":"value"}],[{"symbol":"*"},{"var":0},2],1]`,
+		`[{"symbol":"lambda"}`, // corrupt JSON must fail, not become a nil computor
+	} {
+		for version := uint8(0); version <= 2; version++ {
+			t.Run(fmt.Sprintf("version%d/%s", version, encoded), func(t *testing.T) {
+				var wire bytes.Buffer
+				// Magic 50 is already consumed by the shard loader. The shared
+				// v0 prefix carries count, input names, and computor JSON.
+				for _, field := range []any{version, uint32(1), uint16(1), uint16(5)} {
+					if err := binary.Write(&wire, binary.LittleEndian, field); err != nil {
+						t.Fatal(err)
+					}
+				}
+				wire.WriteString("value")
+				if err := binary.Write(&wire, binary.LittleEndian, uint32(len(encoded))); err != nil {
+					t.Fatal(err)
+				}
+				wire.WriteString(encoded)
+				// Uncompressed, no main storage, empty delta and valid-mask.
+				wire.Write(make([]byte, 10))
+				if version > 0 {
+					wire.WriteByte(0) // ordinary, unordered computed column
+				}
+				if !json.Valid([]byte(encoded)) {
+					defer func() {
+						if got := recover(); got == nil || !strings.Contains(fmt.Sprint(got), "decode computor") {
+							t.Fatalf("invalid computor JSON panic = %v", got)
+						}
+					}()
+					new(StorageComputeProxy).Deserialize(&wire)
+					return
+				}
+				var proxy StorageComputeProxy
+				if got := proxy.Deserialize(&wire); got != 1 {
+					t.Fatalf("restored count = %d, want 1", got)
+				}
+				for _, value := range []int64{5, 100, -3} {
+					if got := scm.Apply(proxy.computor, scm.NewInt(value)); !scm.Equal(got, scm.NewInt(value*2)) {
+						t.Fatalf("restored computor(%d) = %s, want %d", value, scm.String(got), value*2)
+					}
+				}
+			})
+		}
+	}
+}
 
 func serializeScmerForTest(v scm.Scmer) string {
 	var b bytes.Buffer

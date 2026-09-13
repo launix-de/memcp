@@ -1,0 +1,211 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+name: Upgrade Compatibility
+
+on:
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+    inputs:
+      base_refs:
+        description: 'JSON list of old refs to test; empty uses master. Release discovery is intentionally separate.'
+        required: false
+        default: '[]'
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upgrade-compatibility-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    uses: ./.github/workflows/detect-changes.yml
+
+  versions:
+    needs: changes
+    if: ${{ needs.changes.outputs.relevant == 'true' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    outputs:
+      refs: ${{ steps.refs.outputs.refs }}
+    steps:
+      - id: refs
+        name: Select predecessor revisions
+        env:
+          REQUESTED_REFS: ${{ inputs.base_refs || '[]' }}
+          PR_BASE_REF: ${{ github.event.pull_request.base.sha }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          refs = json.loads(os.environ['REQUESTED_REFS'])
+          if not isinstance(refs, list) or any(not isinstance(ref, str) or not ref.strip() for ref in refs):
+              raise ValueError('base_refs must be a JSON list of nonempty Git refs')
+          refs = refs or [os.environ.get('PR_BASE_REF') or 'master']
+          refs = list(dict.fromkeys(refs))
+          if len(refs) > 16:
+              raise ValueError('at most 16 predecessor refs per run')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('refs=' + json.dumps(refs) + '\n')
+          PY
+
+  check-upgrade:
+    name: upgrade (${{ matrix.base_ref }})
+    needs: versions
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        base_ref: ${{ fromJSON(needs.versions.outputs.refs) }}
+    steps:
+      - name: Check out merge candidate
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && format('refs/pull/{0}/merge', github.event.pull_request.number) || github.sha }}
+          path: candidate
+
+      - name: Check out predecessor revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ matrix.base_ref }}
+          path: base
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: candidate/go.mod
+
+      - name: Install SQL client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y default-mysql-client
+
+      - name: Build base and candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd base && go build -o memcp)
+          (cd candidate && go build -o memcp)
+          printf 'UPGRADE_BASE_SHA=%s\n' "$(git -C base rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - name: Compare all values before and after a clean upgrade
+        shell: bash
+        run: |
+          set -euo pipefail
+          DATA_DIR="$GITHUB_WORKSPACE/upgrade-test-data"
+          ORACLES="$GITHUB_WORKSPACE/upgrade-oracles"
+          LOGS="$GITHUB_WORKSPACE/upgrade-logs"
+          VALIDATOR="$GITHUB_WORKSPACE/candidate/tests/storage/persistence/upgrade-validate.sh"
+          API_PORT=14521
+          MYSQL_PORT=14522
+          MEMCP_PID=
+          mkdir -p "$DATA_DIR" "$ORACLES" "$LOGS"
+          mysql_args=(mysql -h 127.0.0.1 -P "$MYSQL_PORT" -u root -padmin)
+
+          cleanup() {
+            if [ -n "$MEMCP_PID" ]; then
+              kill -TERM "$MEMCP_PID" 2>/dev/null || true
+              wait "$MEMCP_PID" || true
+            fi
+          }
+          trap cleanup EXIT
+
+          start_server() {
+            local tree="$1" phase="$2"
+            (cd "$tree" && exec ./memcp -data "$DATA_DIR" \
+              --api-port="$API_PORT" --mysql-port="$MYSQL_PORT" --no-repl lib/main.scm) \
+              > "$LOGS/$phase.log" 2>&1 &
+            MEMCP_PID=$!
+            for attempt in $(seq 1 60); do
+              kill -0 "$MEMCP_PID" || { cat "$LOGS/$phase.log"; return 1; }
+              if "${mysql_args[@]}" -e 'SELECT 1' >/dev/null 2>&1; then
+                return 0
+              fi
+              sleep 1
+            done
+            cat "$LOGS/$phase.log"
+            echo "$phase never became ready" >&2
+            return 1
+          }
+
+          stop_server() {
+            "${mysql_args[@]}" -D memcp-tests -e 'SHUTDOWN'
+            if kill -0 "$MEMCP_PID" 2>/dev/null; then
+              kill -TERM "$MEMCP_PID"
+            fi
+            wait "$MEMCP_PID"
+            MEMCP_PID=
+          }
+
+          # Only the old binary supplies the original reference. It is stored
+          # outside data-dir and never replaced by a candidate's observed data.
+          start_server base base-fill
+          "${mysql_args[@]}" -e 'CREATE DATABASE IF NOT EXISTS `memcp-tests`'
+          "${mysql_args[@]}" -D memcp-tests < candidate/tests/storage/persistence/upgrade-fill.sql
+          curl -fsS "http://127.0.0.1:$API_PORT/scm" -u root:admin -d '
+            (createcolumn (table "memcp-tests" "up_compute") "doubled" "INT" (quote ()) (quote ())
+              (quote ("val")) (lambda (val) (* val 2)))
+          '
+          bash "$VALIDATOR" "$MYSQL_PORT" snapshot "$ORACLES/before.json"
+          stop_server
+
+          # Distinguish old-writer/restart defects from candidate reader defects.
+          start_server base base-restart
+          bash "$VALIDATOR" "$MYSQL_PORT" compare "$ORACLES/before.json"
+          stop_server
+
+          start_server candidate candidate-upgrade
+          bash "$VALIDATOR" "$MYSQL_PORT" compare "$ORACLES/before.json"
+          bash "$VALIDATOR" "$MYSQL_PORT" mutate "$ORACLES/before.json" "$ORACLES/after-dml.json"
+          stop_server
+
+          # The post-DML oracle is derived from the old reference plus specified
+          # mutations. Reopening must preserve that entire expected state.
+          start_server candidate candidate-restart
+          bash "$VALIDATOR" "$MYSQL_PORT" compare "$ORACLES/after-dml.json"
+          stop_server
+
+      - name: Upload references and server logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: upgrade-compatibility-${{ env.UPGRADE_BASE_SHA }}-${{ strategy.job-index }}
+          path: |
+            upgrade-oracles/
+            upgrade-logs/
+          retention-days: 7
+
+      - name: Upload data on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: upgrade-data-${{ env.UPGRADE_BASE_SHA }}-${{ strategy.job-index }}
+          path: upgrade-test-data/
+          retention-days: 3
+
+  upgrade-compatibility:
+    name: upgrade-compatibility
+    needs: [changes, versions, check-upgrade]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every selected predecessor to pass
+        env:
+          CHANGE_RESULT: ${{ needs.changes.result }}
+          RELEVANT: ${{ needs.changes.outputs.relevant }}
+          VERSION_RESULT: ${{ needs.versions.result }}
+          UPGRADE_RESULT: ${{ needs.check-upgrade.result }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          test "$CHANGE_RESULT" = success
+          if [ "$RELEVANT" != true ] && [ "$EVENT_NAME" != workflow_dispatch ]; then
+            test "$VERSION_RESULT" = skipped
+            test "$UPGRADE_RESULT" = skipped
+          else
+            test "$VERSION_RESULT" = success
+            test "$UPGRADE_RESULT" = success
+          fi

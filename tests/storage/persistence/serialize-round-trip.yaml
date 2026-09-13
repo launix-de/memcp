@@ -1,3 +1,5 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
 # Serialize round-trip test for computed columns (StorageComputeProxy).
 # Verifies that GROUP BY cache survives SHUTDOWN/restart and that
 # invalidation still works after deserialization.
@@ -23,6 +25,17 @@ test_cases:
         (3, 'Beta', 150),
         (4, 'Beta', 50),
         (5, 'Gamma', 300)
+
+  - name: "Create persistent scalar computed column"
+    scm: |
+      (createcolumn (table "memcp-tests" "sr_data") "doubled" "INT" '() '()
+        '("amount") (lambda (amount) (* amount 2)))
+
+  - name: "Baseline: scalar computed values are cached"
+    sql: "SELECT id, doubled FROM sr_data ORDER BY id"
+    expect:
+      rows: 5
+      data: [{id: 1, doubled: 200}, {id: 2, doubled: 400}, {id: 3, doubled: 300}, {id: 4, doubled: 100}, {id: 5, doubled: 600}]
 
   - name: "Create hidden sloppy table"
     scm: |
@@ -79,6 +92,12 @@ test_cases:
       rows: 0
 
   # --- Re-query after restart: must return identical results ---
+  - name: "After restart: persisted scalar values unchanged"
+    sql: "SELECT id, doubled FROM sr_data ORDER BY id"
+    expect:
+      rows: 5
+      data: [{id: 1, doubled: 200}, {id: 2, doubled: 400}, {id: 3, doubled: 300}, {id: 4, doubled: 100}, {id: 5, doubled: 600}]
+
   - name: "After restart: SUM per category unchanged"
     sql: "SELECT category, SUM(amount) AS s FROM sr_data GROUP BY category ORDER BY category"
     expect:
@@ -132,6 +151,12 @@ test_cases:
   - name: "Update row after restart"
     sql: "UPDATE sr_data SET amount = 999 WHERE id = 3"
 
+  - name: "After post-restart UPDATE: restored scalar procedure executes"
+    sql: "SELECT id, doubled FROM sr_data ORDER BY id"
+    expect:
+      rows: 6
+      data: [{id: 1, doubled: 200}, {id: 2, doubled: 400}, {id: 3, doubled: 1998}, {id: 4, doubled: 100}, {id: 5, doubled: 600}, {id: 6, doubled: 800}]
+
   - name: "After post-restart UPDATE: SUM reflects change"
     sql: "SELECT category, SUM(amount) AS s FROM sr_data GROUP BY category ORDER BY category"
     expect:
@@ -174,6 +199,10 @@ test_cases:
         - c: 3
 
   # --- Cleanup ---
+  - name: "After second restart: recomputed scalar value survived"
+    sql: "SELECT doubled FROM sr_data WHERE id = 3"
+    expect: {rows: 1, data: [{doubled: 1998}]}
+
   - name: "Cleanup sr_data"
     sql: "DROP TABLE IF EXISTS sr_data"
   - name: "Cleanup hidden sloppy table"
