@@ -890,7 +890,6 @@ type JITContext struct {
 	RuntimeEnv            Scmer
 	RecursiveLambdas      bool
 	ActiveBuiltinEmitters map[*Declaration]uint16
-	BuiltinInlineCost     int
 	NeedsStableArgs       bool
 	// StorageInputsInRegisters is enabled for the optimistic first emission of
 	// a finalized storage reader. Any Go-call boundary aborts that emission and

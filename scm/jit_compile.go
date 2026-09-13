@@ -2913,8 +2913,39 @@ func jitCompileDynamicHigherOrderCall(ctx *JITContext, callableExpr Scmer, opera
 	return jitCompileDynamicCall(ctx, callableExpr, operands, nil, sliceBase, result)
 }
 
-const jitBuiltinInlineBudget = 2048
 const jitTrivialVirtualInlineCost = 2
+
+// jitMinInlineRegisterHeadroom is the minimum number of currently allocatable
+// hardware registers jitGeneratedEmitterInline requires before it will let a
+// call inline, on top of whatever admitted it (the callback path, the switch
+// below, or RetainsCallArgs).
+//
+// An earlier version of this admission gated inlining on an abstract, hand-
+// picked cost-unit budget accumulated across every call already inlined into
+// this one compiled function - the classic "serial inlining budget". That was
+// wrong in two ways at once: as a guessed number disconnected from any real
+// resource, it could neither reliably protect a function about to exhaust the
+// register file (a size-based relaxation of that same budget is exactly what
+// "join source selector remains compilable", tests/sql/expressions/
+// merge-singleton-append.yaml, caught) nor stay local - because it accumulated
+// across every call in encounter order, whether one call fell under or over
+// the line depended on how much unrelated, textually earlier code in the same
+// function had already inlined, and transitively on the size of the whole
+// loaded global environment (two completely unused, uncalled top-level
+// defines in an unrelated file were enough to tip a shared function's
+// accumulated cost over the line). Register pressure is a real, already-
+// tracked quantity on this exact JITContext (ctx.FreeRegs/ctx.ProtectedRegs,
+// updated by every AllocReg/FreeReg as compilation proceeds) - reading it
+// directly, fresh at each call site, needs no separate accounting, no cross-
+// function budget, and cannot be perturbed by anything outside this one
+// function's own compilation, however large the rest of the program is.
+const jitMinInlineRegisterHeadroom = 3
+
+// jitInlineRegisterHeadroom returns how many hardware registers this
+// compilation can still allocate right now.
+func jitInlineRegisterHeadroom(ctx *JITContext) int {
+	return bits.OnesCount64(ctx.FreeRegs &^ ctx.ProtectedRegs)
+}
 
 // jitEmitGeneratedCallBoundary materializes compiler-only lambda templates
 // only when a generated builtin emitter chooses its native call boundary.
@@ -2962,7 +2993,7 @@ func jitGeneratedEmitterInline(ctx *JITContext, declaration *Declaration, args [
 	}
 	inline := declaration.RetainsCallArgs
 	knownTypes, knownShapes, knownArgs := 0, 0, 0
-	hasVirtualArgs := false
+	hasVirtualArgs, hasUnhandledLambdaTemplate := false, false
 	knownCallback, hasCallback := false, false
 	for index, arg := range args {
 		if arg.Type != JITTypeUnknown {
@@ -2983,6 +3014,15 @@ func jitGeneratedEmitterInline(ctx *JITContext, declaration *Declaration, args [
 				(arg.Loc == LocImm && (arg.Imm.GetTag() == tagProc || arg.Imm.GetTag() == tagFunc)) {
 				knownCallback = true
 			}
+		} else if arg.Loc == LocLambdaTemplate {
+			// An uncompiled callback landed on a parameter this declaration
+			// never declared Kind:"func" for - it has no materialization step
+			// prepared for it (that only exists for the hasCallback path above
+			// and jitEmitGeneratedCallBoundary's own handling of the
+			// non-inlined path). Inlining here would hand a compiler-only
+			// template straight to code that expects a plain, already-
+			// materialized Scmer.
+			hasUnhandledLambdaTemplate = true
 		}
 	}
 	cost := int(declaration.Type.JITInlineCost)
@@ -3009,13 +3049,35 @@ func jitGeneratedEmitterInline(ctx *JITContext, declaration *Declaration, args [
 			inline = false
 		}
 	}
-	if cost == 65535 || !declaration.RetainsCallArgs && ctx.BuiltinInlineCost+cost > jitBuiltinInlineBudget {
+	if cost == 65535 {
+		// Sentinel: jitgen generated no inlinable body for this declaration at
+		// all, only a call boundary. There is nothing to inline.
 		return false
 	}
 	if !inline {
 		return false
 	}
-	ctx.BuiltinInlineCost += cost
+	// From here on, every path above that said "inline" - RetainsCallArgs, the
+	// callback path, and the switch - passes through the same two real, final
+	// checks. Neither is specific to how admission was reached.
+	if hasUnhandledLambdaTemplate {
+		// Applies regardless of which branch above admitted this call: an
+		// uncompiled callback on a plain (non-func) parameter cannot be
+		// rendered as a value by ANY inlined SSA body or native call this
+		// path emits.
+		return false
+	}
+	if !declaration.RetainsCallArgs && jitInlineRegisterHeadroom(ctx) < jitMinInlineRegisterHeadroom {
+		// Real, live register pressure on this exact compilation, not an
+		// abstract cost sum accumulated across unrelated calls: refuse to
+		// inline further once headroom is tight, regardless of which
+		// admission branch said yes. ctx.FreeRegs/ctx.ProtectedRegs are
+		// already maintained by every AllocReg/FreeReg as this one function
+		// compiles; reading them here is local to this one JITContext and
+		// cannot be perturbed by anything outside it (see the history in
+		// jitMinInlineRegisterHeadroom's comment for why that property matters).
+		return false
+	}
 	ctx.Coverage.InlinedCalls++
 	return true
 }
