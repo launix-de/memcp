@@ -71,7 +71,7 @@ func jitRegexMatchesFinishNative(acc Scmer) Scmer {
 // jitRegexBacktrackStack backs emitBacktrackingRepeat's growable position
 // stack for a greedy variable-width repeat whose continuation cannot be
 // proven unambiguous (jitRegexGreedyRepeatUnambiguous is false) - the
-// doubled-delimiter escape shape ('', ``) where the repeat body and the
+// doubled single quotes or backticks, where the repeat body and the
 // closing delimiter share a leading byte. Stored values are raw cursor
 // pointers into the string being matched. The stack holds no live reference
 // to that string and needs none: Go's GC does not relocate heap memory, and
@@ -1353,37 +1353,35 @@ func jitEmitConstantRegexpTest(ctx *JITContext, pattern *regexp.Regexp, value JI
 	// Regex state competes with enclosing branch results and planned homes.
 	// Commit bool/nil to a pointer-free slot before restoring those registers.
 	var outer JITRegisterBoundary
-	var savedResult JITValueDesc
-	requested := result
+	// The matcher owns scratch registers until its control flow has joined.
+	// Keep the bool/nil result in a fixed slot so a spilled, not-yet-written
+	// register descriptor cannot redirect consumers to an obsolete value.
+	savedResult := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: ctx.AllocSpill(16), NoHeapPointer: true}
 	releaseOuter := bits.OnesCount64(ctx.FreeRegs&ctx.AllRegs&^ctx.ProtectedRegs) < 6
 	if releaseOuter {
-		savedResult = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: ctx.AllocSpill(16), NoHeapPointer: true}
 		outer = ctx.PreserveRegisters(JITRegisterBoundaryOptions{ReleaseHomes: true})
-		result = JITValueDesc{Loc: LocAny}
 	}
-	target := jitEnsureResultPair(ctx, result)
 	success := ctx.ReserveLabel()
 	fail := ctx.ReserveLabel()
 	nilResult := ctx.ReserveLabel()
 	done := ctx.ReserveLabel()
 	jitEmitNativeRegex(ctx, program, value, nil, success, fail, fail, &nilResult, true)
 	ctx.MarkLabel(success)
-	ctx.EmitMakeBool(target, JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(true)})
+	ctx.EmitStoreImm32Mem(ctx.FrameReg, savedResult.StackOff, 0)
+	ctx.EmitStoreImm32Mem(ctx.FrameReg, savedResult.StackOff+8, int32(makeAux(tagBool, 1)))
 	ctx.EmitJmp(done)
 	ctx.MarkLabel(fail)
-	ctx.EmitMakeBool(target, JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(false)})
+	ctx.EmitStoreImm32Mem(ctx.FrameReg, savedResult.StackOff, 0)
+	ctx.EmitStoreImm32Mem(ctx.FrameReg, savedResult.StackOff+8, int32(makeAux(tagBool, 0)))
 	ctx.EmitJmp(done)
 	ctx.MarkLabel(nilResult)
-	ctx.EmitMakeNil(target)
+	ctx.EmitStoreImm32Mem(ctx.FrameReg, savedResult.StackOff, 0)
+	ctx.EmitStoreImm32Mem(ctx.FrameReg, savedResult.StackOff+8, int32(makeAux(tagNil, 0)))
 	ctx.MarkLabel(done)
-	target.Type = JITTypeUnknown
-	target.NoHeapPointer = true
 	if releaseOuter {
-		savedResult = jitPlaceScmerIntoTarget(ctx, target, savedResult)
 		outer.Restore(ctx)
-		return jitPlaceScmerIntoTarget(ctx, savedResult, requested)
 	}
-	return target
+	return jitPlaceScmerIntoTarget(ctx, savedResult, result)
 }
 
 func jitEmitConstantRegexpPredicate(ctx *JITContext, pattern *regexp.Regexp, value JITValueDesc) JITValueDesc {

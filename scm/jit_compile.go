@@ -2652,6 +2652,16 @@ func jitCompileStaticProcCall(ctx *JITContext, callable Scmer, proc *Proc, opera
 	}
 	ctx.TrackImm(callable)
 	ctx.TrackEntry(proc.Compiled)
+	// The result must remain reserved and rooted after the boundary restores
+	// its spill allocator and stack-root snapshot.
+	resultOff := ctx.AllocSpill(16)
+	callResult := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: resultOff, Rooted: true}
+	ctx.EmitZeroDescWords(&callResult, 2)
+	ctx.setStackPointer(jitStackRootFrameBP, resultOff, true)
+	// Operands are rooted in their final frame slots. Preserve the enclosing
+	// register contract before allocating the three native call operands;
+	// pinned loop state must not prevent an otherwise valid direct call.
+	boundary := ctx.PreserveRegisters(JITRegisterBoundaryOptions{ReleaseHomes: true})
 	fnReg := ctx.AllocReg()
 	ctx.EmitMovRegImm64(fnReg, uint64(uintptr(unsafe.Pointer(proc))))
 	fnValue := JITValueDesc{Loc: LocReg, Type: tagFunc, Reg: fnReg, RelocatablePointer: true}
@@ -2667,14 +2677,11 @@ func jitCompileStaticProcCall(ctx *JITContext, callable Scmer, proc *Proc, opera
 		ctx.EmitLeaRegMem(argsPtr, ctx.StackReg, operandOff)
 	}
 	ctx.EmitMovRegImm64(argsLen, uint64(len(operands)))
-	resultOff := ctx.AllocSpill(16)
-	callResult := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: resultOff, Rooted: true}
-	ctx.EmitZeroDescWords(&callResult, 2)
-	ctx.setStackPointer(jitStackRootFrameBP, resultOff, true)
 	ctx.EmitProcCall(fnValue, argsSlice, callResult)
 	ctx.FreeDesc(&fnValue)
 	ctx.FreeDesc(&argsSlice)
 	ctx.Coverage.DirectProcs++
+	boundary.Restore(ctx)
 	out := jitPlaceScmerIntoTarget(ctx, callResult, result)
 	ctx.FreeStack(ctx.BPOffset - stackStart)
 	return out

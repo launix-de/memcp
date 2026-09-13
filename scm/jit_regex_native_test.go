@@ -250,3 +250,30 @@ func TestJITNativeRegexCaptures(t *testing.T) {
 		})
 	}
 }
+
+func TestJITNativeRegexpWordBoundaries(t *testing.T) {
+	if !jitEnabled {
+		t.Skip("requires JIT")
+	}
+	for _, pattern := range []string{`\bX`, `X\b`, `\BX`, `X\B`, `^(?:[a-z]+,)*(?:FROM\b|UNION\b)$`, "(?is)SELECT\\s+-?(?:0[xX][0-9a-fA-F]+|[0-9]+(?:\\.[0-9]*)?(?:[eE][+-]?[0-9]+)?)\\s+AS\\s+(?:`[^`]+`|[A-Za-z_$][A-Za-z0-9_$]*)\\s*(?:,\\s*-?(?:0[xX][0-9a-fA-F]+|[0-9]+(?:\\.[0-9]*)?(?:[eE][+-]?[0-9]+)?)\\s+AS\\s+(?:`[^`]+`|[A-Za-z_$][A-Za-z0-9_$]*)\\s*)*(?:FROM\\b|UNION\\b|\\)|;|$)"} {
+		t.Run(pattern, func(t *testing.T) {
+			compiled := compileNativeRegexpTest(t, pattern)
+			bound := compileJITExpressionTestProc(t, fmt.Sprintf("(lambda (value) (begin (define matched (regexp_test value %s)) (list matched value)))", strconv.Quote(pattern)))
+			reference := regexp.MustCompile(pattern)
+			inputs := []string{"", "X", "FROM", "UNION", "a,FROM", "a,b,UNION", "a,FROM_extra", "éX", "Xé", "世界", "SELECT 1 AS a FROM t", "SELECT -2 AS a, 3 AS b UNION SELECT 4 AS c", "SELECT 1 AS a FROMAGE", "SELECT 1 AS a UNIONIZED", "SELECT h.i FROM (SELECT 0 AS i, 1704067200 AS s, 1789037871 AS e UNION SELECT 1 AS i, 1672531200 AS s, 1704067199 AS e) h"}
+			for b := 0; b < 256; b++ {
+				inputs = append(inputs, string([]byte{byte(b), 'X'}), string([]byte{'X', byte(b)}))
+			}
+			for _, input := range inputs {
+				got := Apply(compiled, NewString(input))
+				wantBound := NewSlice([]Scmer{NewBool(reference.MatchString(input)), NewString(input)})
+				if gotBound := Apply(bound, NewString(input)); !Equal(gotBound, wantBound) {
+					t.Fatalf("bound pattern %q input %q: got %s, want %s", pattern, input, String(gotBound), String(wantBound))
+				}
+				if !got.IsBool() || got.Bool() != reference.MatchString(input) {
+					t.Fatalf("pattern %q input %q: got %s, want %v", pattern, input, String(got), reference.MatchString(input))
+				}
+			}
+		})
+	}
+}
