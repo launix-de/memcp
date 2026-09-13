@@ -442,12 +442,13 @@ func compileJITStorageBatch(requests []jitStorageCompileRequest) ([]*JITEntryPoi
 		for _, codeCap := range [...]int{16 * 1024, 64 * 1024, 256 * 1024, 1024 * 1024} {
 			ptr, arena, reservation := globalJITPool.Alloc(codeCap * len(requests))
 			type compiled struct {
-				index     int
-				ptr       unsafe.Pointer
-				codeLen   int
-				frameSize int32
-				roots     []unsafe.Pointer
-				maps      []jitStackMap
+				index        int
+				ptr          unsafe.Pointer
+				codeLen      int
+				frameSize    int32
+				roots        []unsafe.Pointer
+				maps         []jitStackMap
+				dependencies []*JITEntryPoint
 			}
 			compiledReaders := make([]compiled, 0, len(requests))
 			cursor := 0
@@ -475,12 +476,12 @@ func compileJITStorageBatch(requests []jitStorageCompileRequest) ([]*JITEntryPoi
 				}
 				compiledReaders = append(compiledReaders, compiled{
 					index: index, ptr: functionPtr, codeLen: codeLen,
-					frameSize: buf.stackFrameSize, roots: roots, maps: buf.stackMaps,
+					frameSize: buf.stackFrameSize, roots: roots, maps: buf.stackMaps, dependencies: buf.dependencies,
 				})
 				cursor = (cursor + codeLen + 15) &^ 15
 			}
 			if retryLarger || retryStable {
-				arena.complete(reservation, nil)
+				arena.complete(reservation, nil, nil)
 				globalJITPool.Free(arena)
 				if retryStable {
 					break
@@ -488,12 +489,13 @@ func compileJITStorageBatch(requests []jitStorageCompileRequest) ([]*JITEntryPoi
 				continue
 			}
 			if len(compiledReaders) == 0 {
-				arena.complete(reservation, nil)
+				arena.complete(reservation, nil, nil)
 				globalJITPool.Free(arena)
 				return entries, holders
 			}
 
 			allMaps := make([]jitStackMap, 0)
+			var dependencies []*JITEntryPoint
 			batch := &jitStorageCodeBatch{}
 			for _, function := range compiledReaders {
 				entry := &JITEntryPoint{
@@ -503,10 +505,13 @@ func compileJITStorageBatch(requests []jitStorageCompileRequest) ([]*JITEntryPoi
 					CodeLen:        function.codeLen,
 					Arena:          arena,
 					ConstRoots:     function.roots,
+					Dependencies:   function.dependencies,
+					reservation:    reservation,
 				}
 				entries[function.index] = entry
 				batch.entries = append(batch.entries, entry)
 				allMaps = append(allMaps, function.maps...)
+				dependencies = append(dependencies, function.dependencies...)
 			}
 			for index, entry := range entries {
 				if entry != nil {
@@ -519,7 +524,7 @@ func compileJITStorageBatch(requests []jitStorageCompileRequest) ([]*JITEntryPoi
 				arena: arena,
 				code:  uintptr(ptr),
 			})
-			arena.complete(reservation, allMaps)
+			arena.complete(reservation, allMaps, dependencies)
 			for _, entry := range entries {
 				if entry == nil {
 					continue
@@ -624,6 +629,7 @@ func emitJITStorageFunction(buf *execBuf, abi jitStorageABI, emit jitStorageEmit
 	leafBody := ctx.Ptr
 	leafFrameLimit := ctx.MaxBPOffset
 	emit(ctx)
+	buf.dependencies = ctx.EntryRoots
 	// A storage emitter without calls or storage beyond the precautionary
 	// closure root is a true leaf. No GC safepoint can observe its frame, and
 	// the calling Go funcval remains the owner of the code lease. Compact the

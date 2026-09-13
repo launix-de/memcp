@@ -22,7 +22,6 @@ package scm
 import (
 	"bytes"
 	"runtime"
-	"sync"
 	"testing"
 	"time"
 	"unsafe"
@@ -350,13 +349,12 @@ func TestJITArenaDefersCallbackUntilStackMapPublication(t *testing.T) {
 	first := &jitCodeReservation{}
 	second := &jitCodeReservation{}
 	arena := &jitArena{reservations: []*jitCodeReservation{first, second}}
-	arena.metaCond = sync.NewCond(&arena.metaMu)
 	published := false
-	arena.completeDeferred(second, nil, func() { published = true })
+	arena.completeDeferred(second, nil, nil, func() { published = true })
 	if published {
 		t.Fatal("deferred entry became visible before the preceding stack maps")
 	}
-	arena.complete(first, nil)
+	arena.complete(first, nil, nil)
 	if !published || !second.published {
 		t.Fatal("deferred entry was not installed with its stack maps")
 	}
@@ -367,12 +365,11 @@ func TestJITArenaParentWaitsForInterleavedDeferredStackMaps(t *testing.T) {
 	otherCompiler := &jitCodeReservation{}
 	child := &jitCodeReservation{}
 	arena := &jitArena{reservations: []*jitCodeReservation{parent, otherCompiler, child}}
-	arena.metaCond = sync.NewCond(&arena.metaMu)
-	arena.completeDeferred(child, nil, nil)
+	arena.completeDeferred(child, nil, nil, nil)
 
 	parentComplete := make(chan struct{})
 	go func() {
-		arena.complete(parent, nil)
+		arena.complete(parent, nil, []*JITEntryPoint{{reservation: child}})
 		close(parentComplete)
 	}()
 	select {
@@ -381,7 +378,7 @@ func TestJITArenaParentWaitsForInterleavedDeferredStackMaps(t *testing.T) {
 	case <-time.After(20 * time.Millisecond):
 	}
 
-	arena.complete(otherCompiler, nil)
+	arena.complete(otherCompiler, nil, nil)
 	select {
 	case <-parentComplete:
 	case <-time.After(time.Second):
@@ -389,6 +386,184 @@ func TestJITArenaParentWaitsForInterleavedDeferredStackMaps(t *testing.T) {
 	}
 	if !parent.published || !otherCompiler.published || !child.published {
 		t.Fatal("interleaved stack maps were not published as one reachable prefix")
+	}
+}
+
+func TestJITParentWaitsForDeferredChildAcrossArenas(t *testing.T) {
+	parentPtr, parentArena, parentReservation := globalJITPool.Alloc(jitArenaSize)
+	defer globalJITPool.Free(parentArena)
+	_, childArena, blocker := globalJITPool.Alloc(16 * 1024)
+	defer globalJITPool.Free(childArena)
+	defer childArena.complete(blocker, nil, nil)
+	if parentArena == childArena {
+		t.Fatal("fixture did not cross an arena boundary")
+	}
+
+	child := Eval(Read(t.Name(), `(lambda (value) value)`), &Globalenv)
+	child.Proc().Body = NewSlice([]Scmer{NewFunc(func(args ...Scmer) Scmer {
+		return jitPublicationTestGrowStack(64, args[0])
+	}), NewNthLocalVar(0)})
+	parent := Eval(Read(t.Name(), `(lambda (value) value)`), &Globalenv).Proc()
+	parent.Body = NewSlice([]Scmer{child, NewNthLocalVar(0)})
+	buf := &execBuf{ptr: parentPtr, n: jitArenaSize, arena: parentArena, reservation: parentReservation}
+	codeLen, roots, dependencies, overflow, hiddenArgs, needsStableArgs, coverage := jitCompileProcToExec(parent, buf, true)
+	if codeLen == 0 || overflow {
+		parentArena.completeDeferred(parentReservation, buf.stackMaps, dependencies, nil)
+		t.Fatal("parent did not compile")
+	}
+	if len(dependencies) == 0 {
+		parentArena.completeDeferred(parentReservation, buf.stackMaps, dependencies, nil)
+		t.Fatal("parent did not retain its deferred child dependency")
+	}
+	childEntry := dependencies[0]
+	if childEntry.Arena != childArena {
+		parentArena.completeDeferred(parentReservation, buf.stackMaps, dependencies, nil)
+		t.Fatal("child was not compiled behind the blocker in the second arena")
+	}
+	defer runtime.KeepAlive(roots)
+	defer runtime.KeepAlive(dependencies)
+
+	parentComplete := make(chan struct{})
+	go func() {
+		parentArena.complete(parentReservation, buf.stackMaps, dependencies)
+		close(parentComplete)
+	}()
+	select {
+	case <-parentComplete:
+		t.Fatal("parent became reachable before its child stack maps in another arena")
+	case <-time.After(20 * time.Millisecond):
+	}
+	childArena.complete(blocker, nil, nil)
+	select {
+	case <-parentComplete:
+	case <-time.After(time.Second):
+		t.Fatal("parent did not become reachable after its child stack maps")
+	}
+	entry := &JITEntryPoint{
+		CodePtr: parentPtr, CodeLen: codeLen, Arena: parentArena,
+		StackFrameSize: buf.stackFrameSize, ConstRoots: roots, Dependencies: dependencies,
+		HiddenArgs: hiddenArgs, NeedsStableArgs: needsStableArgs, Coverage: coverage,
+		Proc: *parent, reservation: parentReservation,
+	}
+	attachProcJIT(parent, entry)
+	defer jitNativeCodes.Delete(uintptr(parentPtr))
+	result := make(chan Scmer, 1)
+	// A fresh goroutine starts with a small stack. The Go callback must grow it
+	// across both native frames and then scan them during GC.
+	go func() { result <- entry.Call(NewString("relocated child")) }()
+	select {
+	case got := <-result:
+		if !got.IsString() || got.String() != "relocated child" {
+			t.Fatalf("native parent/child call after stack growth returned %s", String(got))
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("native parent/child call did not finish after stack growth")
+	}
+}
+
+//go:noinline
+func jitPublicationTestGrowStack(depth int, value Scmer) Scmer {
+	var padding [512]uintptr
+	padding[0] = uintptr(depth)
+	defer runtime.KeepAlive(&padding)
+	if depth == 0 {
+		runtime.GC()
+		return value
+	}
+	return jitPublicationTestGrowStack(depth-1, value)
+}
+
+func TestJITSharedPublicationWaitsForTransitiveDependencies(t *testing.T) {
+	grandchild, child, parent := &jitCodeReservation{}, &jitCodeReservation{}, &jitCodeReservation{}
+	grandchildArena := &jitArena{reservations: []*jitCodeReservation{grandchild}}
+	childArena := &jitArena{reservations: []*jitCodeReservation{child}}
+	parentArena := &jitArena{reservations: []*jitCodeReservation{parent}}
+	var installed []string
+	childArena.completeDeferred(child, nil, []*JITEntryPoint{{reservation: grandchild}}, func() {
+		installed = append(installed, "child")
+	})
+	parentArena.completeDeferred(parent, nil, []*JITEntryPoint{{reservation: child}}, func() {
+		installed = append(installed, "parent")
+	})
+	if !child.published || !parent.published || child.ready || parent.ready || len(installed) != 0 {
+		t.Fatal("shared callbacks ran before their transitive dependency was ready")
+	}
+	grandchildArena.complete(grandchild, nil, nil)
+	if len(installed) != 2 || installed[0] != "child" || installed[1] != "parent" || !parent.ready {
+		t.Fatalf("shared installation order = %v, want child then parent", installed)
+	}
+	if grandchild.dependents != nil || child.dependents != nil || child.onPublish != nil || parent.onPublish != nil {
+		t.Fatal("finished publication retained dependency callbacks or reverse edges")
+	}
+}
+
+func TestJITMetadataPublicationDoesNotWaitForCalleeReadiness(t *testing.T) {
+	parent, blocker, child := &jitCodeReservation{}, &jitCodeReservation{}, &jitCodeReservation{}
+	parentArena := &jitArena{reservations: []*jitCodeReservation{parent}}
+	childArena := &jitArena{reservations: []*jitCodeReservation{blocker, child}}
+	childArena.completeDeferred(child, nil, nil, nil)
+	parentArena.completeDeferred(parent, nil, []*JITEntryPoint{{reservation: child}}, nil)
+	if !parent.published || parent.ready || child.published {
+		t.Fatal("fixture did not leave parent waiting on blocked child metadata")
+	}
+	// The blocker's maps must unblock the child even though the blocker itself
+	// calls the parent. Readiness edges are child -> parent -> blocker.
+	childArena.completeDeferred(blocker, nil, []*JITEntryPoint{{reservation: parent}}, nil)
+	if !child.ready || !parent.ready || !blocker.ready {
+		t.Fatal("metadata ordering deadlocked an acyclic callee dependency chain")
+	}
+}
+
+func TestJITPublicationAllowsEntriesSharingReservation(t *testing.T) {
+	reservation := &jitCodeReservation{}
+	arena := &jitArena{reservations: []*jitCodeReservation{reservation}}
+	first := &JITEntryPoint{reservation: reservation}
+	second := &JITEntryPoint{reservation: reservation}
+	arena.completeDeferred(reservation, nil, []*JITEntryPoint{first, second}, nil)
+	if !reservation.ready {
+		t.Fatal("entries sharing one reservation waited on their own metadata")
+	}
+}
+
+func TestJITParentIgnoresUnrelatedSuccessor(t *testing.T) {
+	parent, unrelated := &jitCodeReservation{}, &jitCodeReservation{}
+	arena := &jitArena{reservations: []*jitCodeReservation{parent, unrelated}}
+	defer arena.complete(unrelated, nil, nil)
+	complete := make(chan struct{})
+	go func() {
+		arena.complete(parent, nil, nil)
+		close(complete)
+	}()
+	select {
+	case <-complete:
+	case <-time.After(time.Second):
+		t.Fatal("unrelated later compilation blocked parent publication")
+	}
+	if unrelated.published {
+		t.Fatal("unrelated unfinished metadata was published")
+	}
+}
+
+func TestJITTrackImmCollectsReadinessDependenciesAfterRootDeduplication(t *testing.T) {
+	ctx := &JITContext{}
+	value := NewProcStruct(Proc{})
+	ctx.TrackImm(value)
+	if len(ctx.ConstRoots) != 1 || len(ctx.EntryRoots) != 0 {
+		t.Fatal("uncompiled Proc was not retained without a native dependency")
+	}
+	procEntry := &JITEntryPoint{reservation: &jitCodeReservation{}}
+	value.Proc().Compiled = procEntry
+	ctx.TrackImm(value)
+	ctx.TrackImm(value)
+	if len(ctx.ConstRoots) != 1 || len(ctx.EntryRoots) != 1 || ctx.EntryRoots[0] != procEntry {
+		t.Fatal("GC-root deduplication lost the newly compiled Proc dependency")
+	}
+	helperEntry := &JITEntryPoint{reservation: &jitCodeReservation{}}
+	helper := NewAny(helperEntry)
+	ctx.TrackImm(helper)
+	ctx.TrackImm(helper)
+	if len(ctx.EntryRoots) != 2 || ctx.EntryRoots[1] != helperEntry {
+		t.Fatal("Any-wrapped parser or regex helper was not a readiness dependency")
 	}
 }
 
