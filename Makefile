@@ -22,7 +22,8 @@ JIT_GO_REPOSITORY ?= https://github.com/launix-de/go.git
 JIT_GO_REF   ?= jit-foreign-frames-go1.27.0
 export SOURCE_DATE_EPOCH
 
-all: nophp
+all:
+	CGO_ENABLED=1 GOOS=$(GOOS) GOARCH=$(GOARCH) go build $(BUILD_FLAGS) -tags=php -ldflags="$(LDFLAGS)" -o memcp .
 
 nophp:
 	CGO_ENABLED=$(CGO_ENABLED) GOOS=$(GOOS) GOARCH=$(GOARCH) go build $(BUILD_FLAGS) -tags=nophp -ldflags="$(LDFLAGS)" -o memcp .
@@ -70,7 +71,7 @@ jit-toolchain:
 jit: jit-toolchain
 	CGO_ENABLED=$(CGO_ENABLED) GOOS=$(GOOS) GOARCH=$(GOARCH) \
 		GOROOT="$(JIT_GOROOT)" GOEXPERIMENT=jit "$(JIT_GOROOT)/bin/go" \
-		build $(BUILD_FLAGS) -ldflags="$(LDFLAGS)" -o memcp .
+		build $(BUILD_FLAGS) -tags=php -ldflags="$(LDFLAGS)" -o memcp .
 
 jitgen:
 	@set -eu; \
