@@ -1121,11 +1121,7 @@ func (db *database) rebuildWithLifecycle(all bool, repartition bool, includeEphe
 						// it would actually create more than one shard; otherwise a
 						// small free table would be pointlessly converted into
 						// "partitioned with one shard" during a global rebuild.
-						desiredShards := int(1 + (2*maincount)/Settings.ShardSize)
-						minShards := 2 * runtime.NumCPU()
-						if desiredShards < minShards && maincount > Settings.ShardSize {
-							desiredShards = minShards
-						}
+						desiredShards := repartitionShardTarget(maincount, true)
 						doRepart = desiredShards > 1
 					}
 				}
