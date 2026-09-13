@@ -130,6 +130,13 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
   with scan execution. Access-header filter readsets are immutable plan data;
   only cache registration reads them, not row or batch processing.
 
+- `inIndexHook.positions` is an immutable compressed main-generation row-ID
+  permutation owned by its parent index hook. It retains no shard/catalog,
+  reader, transaction, or invocation binding. Candidate iterators borrow the
+  immutable bound IN list and the invocation's column reader under the scan's
+  existing shard lock and concurrency rights; they never modify/sort/copy the
+  list. The scan owns delta enumeration, visibility, bounds, and residual checks.
+
 - `OverlayBlob.ram` belongs to one immutable column generation. Its `blobRAMCache.mu`
   protects admission metadata, decoded strings, and byte/benefit accounting;
   `lastUsed` is atomic and updated once per read batch. Cache callbacks use

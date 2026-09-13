@@ -143,6 +143,8 @@ func scanBoundaryAnalyzer(kind string) IndexAnalyzer {
 		return RangeMatcher
 	case "like":
 		return LikeMatcher
+	case "in":
+		return InMatcher
 	case "recset":
 		return RecSetMatcher
 	default:

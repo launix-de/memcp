@@ -13,6 +13,7 @@ setup:
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS inlike"
+  - sql: "DROP TABLE IF EXISTS in_sparse"
 
 test_cases:
   - name: "Create table and insert data"
@@ -152,6 +153,7 @@ test_cases:
       result_contains:
         - '(scan_boundary \"range\" \"id\" 0 1 true true \"\" false)'
         - 'sql_in'
+        - 'scan_boundary \"in\"'
 
   - name: "IN cached shape accepts string values after numeric values"
     sql: "SELECT id FROM inlike WHERE id IN ('13','10','13') ORDER BY id"
@@ -198,3 +200,62 @@ test_cases:
   - name: "Malformed text filter is rejected"
     sql: "SELECT id FROM inlike WHERE name LIKE AND val = 950"
     expect: {error: true}
+
+  - name: "Sparse unsorted numeric IN index fixture"
+    setup:
+      - sql: "DROP TABLE IF EXISTS in_sparse"
+      - sql: "CREATE TABLE in_sparse (id BIGINT, bucket BIGINT) ENGINE=sloppy"
+      - scm: |
+          (begin
+            (insert (table "memcp-tests" "in_sparse") '("id" "bucket")
+              (map (produceN 50000) (lambda (i) (list i (mod i 10000)))))
+            (rebuild (table "memcp-tests" "in_sparse") true false))
+    sql: "SELECT COUNT(*) AS cnt FROM in_sparse"
+    expect: {data: [{cnt: 50000}]}
+
+  - name: "Sparse unsorted numeric IN exact probes"
+    warmup: 10
+    timing_samples: 30
+    threshold_ms: 200
+    sql: "SELECT id FROM in_sparse WHERE id IN (49999,2,40000,0,25000,2,49999)"
+    expect: {rows: 5}
+
+  - name: "Sparse unsorted numeric IN duplicate indexed values"
+    warmup: 10
+    timing_samples: 30
+    threshold_ms: 200
+    sql: "SELECT id FROM in_sparse WHERE bucket IN (9999,2,5000,0,2,9999)"
+    expect: {rows: 20}
+
+  - name: "Sparse IN preserves residual predicates"
+    sql: "SELECT COUNT(*) AS cnt FROM in_sparse WHERE id IN (49999,2,40000,0,25000,2) AND bucket > 0"
+    expect: {data: [{cnt: 3}]}
+
+  - name: "Sparse IN retains ordered LIMIT semantics"
+    sql: "SELECT id FROM in_sparse WHERE id IN (49999,2,40000,0,25000,2) ORDER BY id DESC LIMIT 3"
+    expect: {rows: 3, data: [{id: 49999}, {id: 40000}, {id: 25000}]}
+
+  - name: "Sparse IN preserves NULL and string coercion"
+    sql: "SELECT COUNT(*) AS cnt FROM in_sparse WHERE id IN (NULL,'49999',2,2)"
+    expect: {data: [{cnt: 2}]}
+
+  - name: "Sparse IN mutation visibility after index binding"
+    setup:
+      - sql: "INSERT INTO in_sparse (id,bucket) VALUES (123456,9999),(49999,9999)"
+      - sql: "DELETE FROM in_sparse WHERE id = 2"
+    sql: "SELECT COUNT(*) AS cnt FROM in_sparse WHERE id IN (49999,2,123456,0,49999)"
+    expect: {data: [{cnt: 4}]}
+
+  - name: "Sparse IN malformed list is rejected"
+    sql: "SELECT id FROM in_sparse WHERE id IN (49999,,2)"
+    expect: {error: true}
+
+  - name: "Sparse IN full result values remain exact"
+    sql: "SELECT SUM(id) AS total, COUNT(*) AS cnt FROM in_sparse WHERE id IN (49999,40000,0,25000,49999)"
+    expect: {data: [{total: 164998, cnt: 5}]}
+
+  - name: "IN hook appears in compiled scan access"
+    scm: |
+      (compile_scan_access '("id") (scheme "(lambda (id) (sql_in (list 49999 2 40000 0 25000 2 49999) id))"))
+    expect:
+      result_contains: ['scan_boundary "in"']
