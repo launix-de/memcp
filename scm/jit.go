@@ -155,10 +155,11 @@ type JITEntryPoint struct {
 	CodeLen    int              // bytes used
 	Arena      *jitArena        // owning arena (for free on GC)
 	ConstRoots []unsafe.Pointer // GC roots for constants embedded into machine code
-	// Dependencies keep directly called JIT entry points and their executable
-	// arenas alive for as long as this machine code can branch to them.
+	// Dependencies retain native callees and embedded callable values. Their
+	// stack maps must be ready before this entry point becomes executable.
 	Dependencies []*JITEntryPoint
-	Proc         Proc // original Proc for serialization
+	reservation  *jitCodeReservation // readiness of this code and its embedded callees
+	Proc         Proc                // original Proc for serialization
 	// NeedsStableArgs records that emitted code crosses into Go. Precise JIT
 	// stack maps now relocate the saved variadic data pointer during stack growth;
 	// the flag remains diagnostic metadata for compiled entry points.
@@ -1493,10 +1494,17 @@ func (ctx *JITContext) AllocSpill(size int32) int32 {
 	return -ctx.SpillOffset
 }
 
-// TrackImm records a LocImm constant's pointer payload as a GC root when needed.
+// TrackImm retains a constant's GC root and any embedded native dependency.
 func (ctx *JITContext) TrackImm(v Scmer) {
 	if ctx == nil {
 		return
+	}
+	if v.IsProc() && v.Proc() != nil {
+		ctx.TrackEntry(v.Proc().Compiled)
+	} else if v.GetTag() == tagAny {
+		if entry, ok := v.Any().(*JITEntryPoint); ok {
+			ctx.TrackEntry(entry)
+		}
 	}
 	if v.ptr == nil {
 		return
@@ -4455,67 +4463,101 @@ type jitArena struct {
 	sourceMu      sync.Mutex
 	sourceEntries []jitSourceEntry
 	sourceMap     atomic.Pointer[jitSourceMap]
-	metaMu        sync.Mutex
-	metaCond      *sync.Cond
-	reservations  []*jitCodeReservation
-	metaNext      int
+	// Metadata and reservation readiness use jitPublication. Allocation takes
+	// jitPool.mu before jitPublication; publication never takes the pool lock.
+	reservations []*jitCodeReservation
+	metaNext     int
+}
+
+// jitPublication serializes metadata publication across arenas. Code generation
+// remains parallel. A reservation becomes callable only after its own metadata
+// and every embedded callee are ready, even across arena boundaries.
+var jitPublication = struct {
+	sync.Mutex
+	cond *sync.Cond
+}{}
+
+func init() {
+	jitPublication.cond = sync.NewCond(&jitPublication.Mutex)
 }
 
 type jitCodeReservation struct {
-	offset    int
-	size      int
-	done      bool
-	published bool
-	maps      []jitStackMap
-	onPublish func()
+	offset int // immutable after allocation
+	size   int // guarded by jitPool.mu
+	// The remaining fields are guarded by jitPublication.
+	done       bool
+	published  bool
+	ready      bool
+	pending    int
+	dependents []*jitCodeReservation
+	maps       []jitStackMap
+	onPublish  func()
 }
 
-// complete publishes arena metadata in allocation order. Compilation itself
-// may run concurrently. Before an entry point becomes reachable, complete also
-// waits for every reservation allocated up to that compiler's completion. That
-// set includes deferred lambdas embedded in the entry point even when another
-// compiler's reservation was interleaved between parent and child.
-func (a *jitArena) complete(reservation *jitCodeReservation, maps []jitStackMap) {
-	a.completeMode(reservation, maps, true, nil)
+// complete publishes metadata in allocation order, then waits for this code's
+// explicit dependencies. Unrelated later reservations do not delay its caller.
+func (a *jitArena) complete(reservation *jitCodeReservation, maps []jitStackMap, dependencies []*JITEntryPoint) {
+	a.completeMode(reservation, maps, dependencies, true, nil)
 }
 
-// completeDeferred records metadata for code which cannot become reachable
-// before its enclosing reservation is published. Nested special-form thunks
-// use this to avoid waiting on the outer compiler which is currently emitting
-// them; the outer completion publishes both reservations in allocation order.
-func (a *jitArena) completeDeferred(reservation *jitCodeReservation, maps []jitStackMap, onPublish func()) {
-	a.completeMode(reservation, maps, false, onPublish)
+// completeDeferred returns private code to the enclosing compiler without
+// waiting. Shared templates are installed only after the complete dependency
+// graph is safe to execute; publishing the parent's maps alone is insufficient.
+func (a *jitArena) completeDeferred(reservation *jitCodeReservation, maps []jitStackMap, dependencies []*JITEntryPoint, onPublish func()) {
+	a.completeMode(reservation, maps, dependencies, false, onPublish)
 }
 
-func (a *jitArena) completeMode(reservation *jitCodeReservation, maps []jitStackMap, wait bool, onPublish func()) {
+func (a *jitArena) completeMode(reservation *jitCodeReservation, maps []jitStackMap, dependencies []*JITEntryPoint, wait bool, onPublish func()) {
 	if a == nil || reservation == nil {
 		return
 	}
-	a.metaMu.Lock()
-	reservation.maps = maps
-	reservation.onPublish = onPublish
-	reservation.done = true
-	waitThrough := 0
-	if wait {
-		waitThrough = len(a.reservations)
-	}
-	for a.metaNext < len(a.reservations) && a.reservations[a.metaNext].done {
-		ready := a.reservations[a.metaNext]
-		publishJITStackMaps(a, ready.maps)
-		if ready.onPublish != nil {
-			ready.onPublish()
-			ready.onPublish = nil
+	jitPublication.Lock()
+	defer jitPublication.Unlock()
+	if !reservation.done {
+		reservation.maps = maps
+		reservation.onPublish = onPublish
+		reservation.done = true
+		for _, entry := range dependencies {
+			dependency := entry.reservation
+			if dependency != nil && dependency != reservation && !dependency.ready {
+				reservation.pending++
+				dependency.dependents = append(dependency.dependents, reservation)
+			}
 		}
-		ready.published = true
+	}
+	var runnable []*jitCodeReservation
+	for a.metaNext < len(a.reservations) && a.reservations[a.metaNext].done {
+		next := a.reservations[a.metaNext]
+		publishJITStackMaps(a, next.maps)
+		next.maps = nil
+		next.published = true
+		if next.pending == 0 {
+			runnable = append(runnable, next)
+		}
 		a.metaNext++
 	}
-	a.metaCond.Broadcast()
+	for len(runnable) != 0 {
+		next := runnable[len(runnable)-1]
+		runnable = runnable[:len(runnable)-1]
+		if next.onPublish != nil {
+			next.onPublish()
+			next.onPublish = nil
+		}
+		next.ready = true
+		for _, dependent := range next.dependents {
+			dependent.pending--
+			if dependent.published && dependent.pending == 0 {
+				runnable = append(runnable, dependent)
+			}
+		}
+		next.dependents = nil
+	}
+	jitPublication.cond.Broadcast()
 	if wait {
-		for a.metaNext < waitThrough {
-			a.metaCond.Wait()
+		for !reservation.ready {
+			jitPublication.cond.Wait()
 		}
 	}
-	a.metaMu.Unlock()
 }
 
 // addSourceEntry publishes an immutable, offset-sorted source-map snapshot.
@@ -4572,9 +4614,9 @@ func (p *jitPool) Alloc(size int) (ptr unsafe.Pointer, arena *jitArena, reservat
 		if a.offset+size <= a.size {
 			ptr = unsafe.Add(a.base, a.offset)
 			reservation = &jitCodeReservation{offset: a.offset, size: size}
-			a.metaMu.Lock()
+			jitPublication.Lock()
 			a.reservations = append(a.reservations, reservation)
-			a.metaMu.Unlock()
+			jitPublication.Unlock()
 			a.offset += size
 			a.live++
 			p.mu.Unlock()
@@ -4607,7 +4649,6 @@ func (p *jitPool) Alloc(size int) (ptr unsafe.Pointer, arena *jitArena, reservat
 		size:    arenaBytes,
 		live:    1,
 	}
-	a.metaCond = sync.NewCond(&a.metaMu)
 	a.handle = registerJITArena(a)
 	ptr = a.base
 	reservation = &jitCodeReservation{size: size}
@@ -9632,6 +9673,7 @@ func jitCompileModePublish(recursiveLambdas bool, waitForPublication, install bo
 					Arena:            arena,
 					ConstRoots:       roots,
 					Dependencies:     dependencies,
+					reservation:      reservation,
 					Proc:             sourceProc,
 					RecursiveLambdas: recursiveLambdas,
 					NeedsStableArgs:  needsStableArgs,
@@ -9649,7 +9691,7 @@ func jitCompileModePublish(recursiveLambdas bool, waitForPublication, install bo
 					code:  uintptr(ptr),
 				})
 				if waitForPublication {
-					arena.complete(reservation, buf.stackMaps)
+					arena.complete(reservation, buf.stackMaps, dependencies)
 					targetProc := proc
 					if !install {
 						copy := sourceProc
@@ -9673,13 +9715,13 @@ func jitCompileModePublish(recursiveLambdas bool, waitForPublication, install bo
 						atomic.StoreUint32(&proc.jitCompiling, 0)
 					}
 				}
-				arena.completeDeferred(reservation, buf.stackMaps, onPublish)
+				arena.completeDeferred(reservation, buf.stackMaps, dependencies, onPublish)
 				return Scmer{ptr: (*byte)(unsafe.Pointer(targetProc)), aux: makeAux(tagProc, 0)}
 			}
 			if waitForPublication {
-				arena.complete(reservation, buf.stackMaps)
+				arena.complete(reservation, buf.stackMaps, dependencies)
 			} else {
-				arena.completeDeferred(reservation, buf.stackMaps, nil)
+				arena.completeDeferred(reservation, buf.stackMaps, dependencies, nil)
 			}
 			globalJITPool.Free(arena)
 			if !overflow {
@@ -9704,6 +9746,7 @@ type execBuf struct {
 	arena          *jitArena // owning arena (nil for standalone buffers)
 	reservation    *jitCodeReservation
 	stackMaps      []jitStackMap
+	dependencies   []*JITEntryPoint
 	stackFrameSize int32
 }
 

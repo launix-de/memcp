@@ -138,13 +138,19 @@ jobs:
 
       - name: Start S3-compatible storage
         run: |
-          docker pull minio/minio:latest
-          docker image inspect --format='Testing {{index .RepoDigests 0}}' minio/minio:latest
+          # quay.io is MinIO's other official registry for this image. Docker
+          # Hub anonymous pulls are rate-limited per source IP, and that pool
+          # is shared across every GitHub-hosted runner worldwide -- pulling
+          # from quay.io instead avoids that shared-IP exhaustion (confirmed
+          # on master itself: docker.io/minio/minio:latest intermittently
+          # fails with "pull access denied" unrelated to any code change).
+          docker pull quay.io/minio/minio:latest
+          docker image inspect --format='Testing {{index .RepoDigests 0}}' quay.io/minio/minio:latest
           docker run --detach --name memcp-minio \
             --publish 9000:9000 \
             --env MINIO_ROOT_USER \
             --env MINIO_ROOT_PASSWORD \
-            minio/minio:latest server /data
+            quay.io/minio/minio:latest server /data
           for attempt in $(seq 1 60); do
             if curl --fail --silent http://127.0.0.1:9000/minio/health/ready >/dev/null; then
               exit 0
