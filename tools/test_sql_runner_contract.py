@@ -244,6 +244,114 @@ class UpgradeWorkflowContractTest(unittest.TestCase):
                 self.assertIsNone(refs)
 
 
+class HookDiagnosticsContractTest(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(__file__).resolve().parents[1]
+        self.hook = (self.root / "git-pre-commit").read_text()
+
+    def function(self, name):
+        start = self.hook.index(name + "() {\n")
+        end = self.hook.index("\n}\n", start) + 3
+        return self.hook[start:end]
+
+    def test_nonresponding_http_readiness_has_overall_deadline(self):
+        import socketserver
+        import subprocess
+        release = threading.Event()
+        connected = threading.Event()
+
+        class SilentHandler(socketserver.BaseRequestHandler):
+            def handle(self):
+                connected.set()
+                release.wait(5)
+
+        try:
+            server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), SilentHandler)
+        except PermissionError as error:
+            self.skipTest("local sockets unavailable: " + str(error))
+        server.daemon_threads = True
+        worker = threading.Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        try:
+            code = self.function("wait_for_sql_ready") + "\ntest_port=" + str(server.server_address[1]) + "\nwait_for_sql_ready 1 1\n"
+            started = time.monotonic()
+            result = subprocess.run(["bash", "-c", code], capture_output=True, timeout=4,
+                                    env=dict(os.environ, NO_PROXY="localhost,127.0.0.1"))
+            self.assertNotEqual(result.returncode, 0)
+            self.assertTrue(connected.is_set(), "probe must reach the silent HTTP listener")
+            self.assertLess(time.monotonic() - started, 3)
+        finally:
+            release.set()
+            server.shutdown()
+            server.server_close()
+            worker.join(timeout=2)
+
+    def test_failed_curl_cannot_pass_with_http_200_output(self):
+        import subprocess
+        code = self.function("wait_for_sql_ready") + "\ncurl() { printf 200; return 28; }\ntest_port=1\nwait_for_sql_ready 1 1\n"
+        result = subprocess.run(["bash", "-c", code], capture_output=True, timeout=4)
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_failure_and_signal_keep_partial_suite_and_server_logs(self):
+        import subprocess
+        traps = self.hook[self.hook.index("trap 'cleanup"):self.hook.index("\nif ! start_supervisor;")]
+        for action, expected in (("exit 1", 1), ("kill -TERM $$", 143), ("kill -INT $$", 130)):
+            with self.subTest(action=action), tempfile.TemporaryDirectory() as tmp:
+                logs = Path(tmp) / "logs"
+                logs.mkdir()
+                (logs / "suite.out").write_bytes(b"partial test output\n")
+                server = Path(tmp) / "server.log"
+                server.write_bytes(b"server diagnostics\n")
+                code = self.function("cleanup") + "\nstop_supervisor() { printf '%s' \"${1:-TERM}\" > \"$tmpdir/stop-signal\"; }\n"
+                code += 'did_cleanup=0\nactive_pids=()\n' + traps + "\n" + action
+                result = subprocess.run(["bash", "-c", code], capture_output=True, timeout=4,
+                                        env=dict(os.environ, tmpdir=str(logs), memcp_log=str(server)))
+                self.assertEqual(result.returncode, expected)
+                self.assertEqual((logs / "suite.out").read_bytes(), b"partial test output\n")
+                self.assertEqual((logs / "memcp.log").read_bytes(), b"server diagnostics\n")
+                self.assertEqual((logs / "stop-signal").read_text(), "USR2")
+
+    def test_supervisor_dumps_only_owned_child_and_does_not_restart(self):
+        import subprocess
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            child = root / "memcp"
+            child.write_text("#!/usr/bin/env python3\nimport signal,sys,time\n"
+                             "def quit(sig, frame):\n print('OWNED STACK REQUEST', flush=True)\n sys.exit(0)\n"
+                             "signal.signal(signal.SIGQUIT, quit)\nprint('CHILD READY', flush=True)\n"
+                             "while True: time.sleep(0.1)\n")
+            child.chmod(0o755)
+            code = self.function("run_memcp_forever") + "\n" + self.function("stop_supervisor")
+            code += '\npkill() { :; }\nenable_mysql=0\ntest_port=12345\ntest_data_dir=unused\n'
+            code += 'run_memcp_forever &\nsupervisor_pid=$!\n'
+            code += 'for i in {1..40}; do if grep -q "CHILD READY" "$memcp_log" 2>/dev/null; then break; fi; sleep 0.1; done\n'
+            code += 'stop_supervisor USR2\n'
+            result = subprocess.run(["bash", "-c", code], cwd=root, capture_output=True, timeout=8,
+                                    env=dict(os.environ, memcp_log=str(root / "server.log"),
+                                             supervisor_generation_file=str(root / "generation")))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            log = (root / "server.log").read_text()
+            self.assertEqual(log.count("CHILD READY"), 1)
+            self.assertEqual(log.count("OWNED STACK REQUEST"), 1)
+
+    def test_suite_start_is_visible_before_readiness_and_traps_cover_startup(self):
+        code = self.function("run_one")
+        self.assertLess(code.index("START suite"), code.index("wait_for_sql_ready"))
+        self.assertLess(self.hook.index("trap 'cleanup"), self.hook.index("if ! start_supervisor;"))
+
+    def test_ci_timeout_leaves_time_to_upload_logs_on_any_outcome(self):
+        import yaml
+        for name, job in (("test.yml", "test"), ("jit-test.yml", "jit-test")):
+            with self.subTest(workflow=name):
+                spec = yaml.safe_load((self.root / ".github/workflows" / name).read_text())["jobs"][job]
+                run = next(step for step in spec["steps"] if "git-pre-commit" in step.get("run", ""))
+                artifact = next(step for step in spec["steps"] if step.get("name") == "Upload test diagnostics")
+                self.assertEqual(run["timeout-minutes"], 30)
+                self.assertGreater(spec["timeout-minutes"], run["timeout-minutes"])
+                self.assertEqual(artifact["if"], "always()")
+                self.assertEqual(artifact["with"]["path"].rstrip("/"), run["env"]["MEMCP_TEST_LOGDIR"])
+
+
 class PerformanceScaleContractTest(unittest.TestCase):
     def test_performance_discovery_honors_independent_ci_opt_in(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
