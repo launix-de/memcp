@@ -88,6 +88,11 @@ Important HTTP endpoints:
 - `/dashboard` — administration, system monitoring, query activity, storage,
   compression, and users
 
+`memcp` is built without PHP by default. Use `make php` to build `memcp-php`
+with embedded PHP support (`--serve` mounts the app into the existing HTTP handler
+chain; it does not create a second listener). Use `make nophp` or plain `make`
+to keep PHP disabled.
+
 These are SQL-over-HTTP APIs rather than a resource-oriented REST data model.
 
 ## Architecture

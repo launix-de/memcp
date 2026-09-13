@@ -22,12 +22,14 @@ JIT_GO_REPOSITORY ?= https://github.com/launix-de/go.git
 JIT_GO_REF   ?= jit-foreign-frames-go1.27.0
 export SOURCE_DATE_EPOCH
 
-all:
-	CGO_ENABLED=$(CGO_ENABLED) GOOS=$(GOOS) GOARCH=$(GOARCH) go build $(BUILD_FLAGS) -ldflags="$(LDFLAGS)" -o memcp .
+all: nophp
+
+nophp:
+	CGO_ENABLED=$(CGO_ENABLED) GOOS=$(GOOS) GOARCH=$(GOARCH) go build $(BUILD_FLAGS) -tags=nophp -ldflags="$(LDFLAGS)" -o memcp .
 
 # libphp and its extensions are external dependencies. Use a matching ZTS
 # php-config; optional FrankenPHP services are excluded from this host.
-.PHONY: php test-php
+.PHONY: php test-php nophp
 php:
 	CGO_ENABLED=1 CGO_CFLAGS="$$($(PHP_CONFIG) --includes)" \
 		CGO_LDFLAGS="-L$$($(PHP_CONFIG) --prefix)/lib -Wl,-rpath,$$($(PHP_CONFIG) --prefix)/lib $$($(PHP_CONFIG) --ldflags) $$($(PHP_CONFIG) --libs)" \

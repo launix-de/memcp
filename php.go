@@ -1,4 +1,4 @@
-//go:build php
+//go:build php && !nophp
 
 // Copyright (C) 2026 Carl-Philip Hänsch
 // SPDX-License-Identifier: GPL-3.0-or-later

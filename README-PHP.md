@@ -19,7 +19,15 @@ SAPI, including PDO and OPcache. The PHP headers, `php-config`, `libphp`, and
 extensions must belong to the same build. A usual NTS PHP-FPM package is not
 sufficient. Follow the upstream [FrankenPHP build instructions](https://frankenphp.dev/docs/compile/).
 
+By default `make` (or `make nophp`) builds the normal `memcp` binary without
+PHP support to keep the dependency graph small.
+
 ```sh
+make
+# optional explicit no-php build target
+make nophp
+
+# build with embedded PHP
 make php PHP_CONFIG=/path/to/php-zts/bin/php-config
 ```
 
