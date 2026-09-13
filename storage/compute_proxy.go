@@ -1088,10 +1088,15 @@ func (p *StorageComputeProxy) deserializeComputeProxyV0(f io.Reader) uint {
 	var computorLen uint32
 	binary.Read(f, binary.LittleEndian, &computorLen)
 	computorBuf := make([]byte, computorLen)
-	io.ReadFull(f, computorBuf)
-	var computorRaw any
-	json.Unmarshal(computorBuf, &computorRaw)
-	p.computor = scm.TransformFromJSON(computorRaw)
+	if _, err := io.ReadFull(f, computorBuf); err != nil {
+		panic(fmt.Errorf("StorageComputeProxy: read computor: %w", err))
+	}
+	// Serialize uses Scmer's persistence encoding for procedures, symbols and
+	// local variables. Generic JSON conversion treats these markers as data,
+	// so cached rows look correct until invalidation invokes the restored code.
+	if err := json.Unmarshal(computorBuf, &p.computor); err != nil {
+		panic(fmt.Errorf("StorageComputeProxy: decode computor: %w", err))
+	}
 
 	// compressed flag
 	var compressedFlag uint8
