@@ -1242,9 +1242,13 @@ func TestInIndexCandidatesPrecisionAndImmutableBinding(t *testing.T) {
 		t.Fatal("small IN list declined candidate enumeration")
 	}
 	var ids []uint32
-	completed := iterator(make([]uint32, 2), func(batch []uint32) bool { ids = append(ids, batch...); return true })
-	if !completed {
-		t.Fatal("complete consumer was stopped")
+	buf := make([]uint32, 2)
+	for {
+		count := iterator(buf)
+		if count == 0 {
+			break
+		}
+		ids = append(ids, buf[:count]...)
 	}
 	if len(ids) != 4 {
 		t.Fatalf("candidate IDs = %v, want four distinct matching rows", ids)
@@ -1261,9 +1265,11 @@ func TestInIndexCandidatesPrecisionAndImmutableBinding(t *testing.T) {
 			t.Fatalf("binding was modified at %d", i)
 		}
 	}
-	callbacks := 0
-	if iterator(make([]uint32, 1), func([]uint32) bool { callbacks++; return false }) || callbacks != 1 {
-		t.Fatalf("consumer stop ignored: callbacks = %d", callbacks)
+	// A stopped consumer simply does not pull again; a fresh cursor gives one
+	// requested row without materializing the complete candidate result.
+	one := make([]uint32, 1)
+	if source.BindCandidates(scm.NewSlice(bound), reader, 10000)(one) != 1 || one[0] != 0 {
+		t.Fatalf("first pull = %v, want original first bound value's row", one)
 	}
 	if source.BindCandidates(scm.NewSlice([]scm.Scmer{scm.NewString("2")}), reader, 10000) != nil {
 		t.Fatal("string SQL coercion must decline exact integer probes")
@@ -1285,7 +1291,14 @@ func TestInIndexCandidatesExactIntegralFloats(t *testing.T) {
 		t.Fatal("exact mixed integer representations declined probes")
 	}
 	var ids []uint32
-	iterator(make([]uint32, 4), func(batch []uint32) bool { ids = append(ids, batch...); return true })
+	buf := make([]uint32, 4)
+	for {
+		count := iterator(buf)
+		if count == 0 {
+			break
+		}
+		ids = append(ids, buf[:count]...)
+	}
 	if len(ids) != 2 || ids[0] != 900 || ids[1] != 2 {
 		t.Fatalf("candidates = %v", ids)
 	}

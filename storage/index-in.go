@@ -135,9 +135,24 @@ func (h *inIndexHook) BindCandidates(lower scm.Scmer, column ColumnReader, spanR
 	recid := func(position int) uint32 {
 		return uint32(int64(h.positions.GetValueUInt(uint32(position))) + h.positions.offset)
 	}
-	return func(buf []uint32, callback func([]uint32) bool) bool {
+	// One cursor belongs to this invocation. Pulling rather than retaining a
+	// scan callback keeps unrelated point-lookup callbacks allocation-free.
+	cursor := struct{ valueIndex, position, end int }{}
+	return func(buf []uint32) int {
 		count := 0
-		for i, value := range values {
+		for count < len(buf) {
+			if cursor.position < cursor.end {
+				buf[count] = recid(cursor.position)
+				count++
+				cursor.position++
+				continue
+			}
+			if cursor.valueIndex >= len(values) {
+				return count
+			}
+			i := cursor.valueIndex
+			cursor.valueIndex++
+			value := values[i]
 			if value.IsNil() {
 				continue
 			}
@@ -151,23 +166,13 @@ func (h *inIndexHook) BindCandidates(lower scm.Scmer, column ColumnReader, spanR
 			if duplicate {
 				continue
 			}
-			start := sort.Search(int(h.universe), func(position int) bool {
+			cursor.position = sort.Search(int(h.universe), func(position int) bool {
 				return !integerInLess(column.GetValue(recid(position)), value)
 			})
-			end := start + sort.Search(int(h.universe)-start, func(offset int) bool {
-				return integerInLess(value, column.GetValue(recid(start+offset)))
+			cursor.end = cursor.position + sort.Search(int(h.universe)-cursor.position, func(offset int) bool {
+				return integerInLess(value, column.GetValue(recid(cursor.position+offset)))
 			})
-			for position := start; position < end; position++ {
-				buf[count] = recid(position)
-				count++
-				if count == len(buf) {
-					if !callback(buf[:count]) {
-						return false
-					}
-					count = 0
-				}
-			}
 		}
-		return count == 0 || callback(buf[:count])
+		return count
 	}
 }

@@ -1972,8 +1972,14 @@ start_scan:
 				}
 				return emitRowMatchers(matchers, ids, callback)
 			}
-			if !iterator(buf, emit) {
-				return
+			for {
+				count := iterator(buf)
+				if count == 0 {
+					break
+				}
+				if !emit(buf[:count]) {
+					return
+				}
 			}
 			// Main index permutations exclude inserts; residual SQL/visibility
 			// checks handle the delta tail exactly as in the ordinary scan.

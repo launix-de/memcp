@@ -39,11 +39,11 @@ type IndexHook interface {
 	ComputeSize() uint
 }
 
-// IndexCandidateIterator streams distinct main-generation row IDs into caller
-// batches. It returns false when the consumer stops. It promises no row order.
-// The input value list is immutable invocation data and must not be copied or
-// sorted. Delta/transaction visibility and residual predicates belong to scans.
-type IndexCandidateIterator func([]uint32, func([]uint32) bool) bool
+// IndexCandidateIterator pulls distinct main-generation row IDs into caller
+// batches and returns their count; zero means exhausted. It promises no row
+// order. The scan owns consumer stop and never passes a callback into a hook.
+// The immutable invocation value list must not be copied or sorted.
+type IndexCandidateIterator func([]uint32) int
 
 // IndexCandidateSource is an optional exact main-row enumerator. A nil result
 // declines the access when probing is more expensive than the given span.
