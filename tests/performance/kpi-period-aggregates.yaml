@@ -141,6 +141,9 @@ test_cases:
       offer_sum: 90900000
       offer_average: 757.5
 - name: Perf KPI 15 periods warm nested aggregates
+  # Allow the accepted general-plan cost to be measured on CI workers; the
+  # performance threshold, A/B waiver and full result checks remain separate.
+  timeout: 60
   warmup: 20
   repetitions: 7
   threshold_ms: 5000

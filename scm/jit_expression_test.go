@@ -564,6 +564,14 @@ func TestJITExpressionDirectProcCallRelocatesArgsOnStackGrowth(t *testing.T) {
 	if got := callJITExpressionAtDepth(caller, want, 128); !Equal(got, want) {
 		t.Fatalf("direct call after stack growth = %s, want %s", String(got), String(want))
 	}
+	// A direct call must also restore live outer values after the callee
+	// grows the stack, without recycling its returned Scmer spill slot.
+	caller = compileJITExpressionTestProc(t, `(lambda (value)
+		(list value (jit_test_stack_growing_callee value) value))`)
+	expected := NewSlice([]Scmer{want, want, want})
+	if got := callJITExpressionAtDepth(caller, want, 128); !Equal(got, expected) {
+		t.Fatalf("live values around direct call = %s, want %s", String(got), String(expected))
+	}
 }
 
 func callJITExpressionAtDepth(callable, arg Scmer, depth int) Scmer {

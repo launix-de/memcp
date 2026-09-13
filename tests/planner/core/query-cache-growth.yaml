@@ -14,7 +14,7 @@
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 metadata:
   version: "1.0"
-  description: "Cached scan access plans invalidate on data growth"
+  description: "Cached scan access plans invalidate on data growth and DML literal keys stay bounded"
   isolated: true
 setup:
   - sql: "DROP TABLE IF EXISTS cg_rows"
@@ -141,12 +141,155 @@ test_cases:
   - name: "Unsafe or incomplete literal shapes retain exact cache keys"
     scm: |
       (begin
-        (map (list "UPDATE items SET score = 2 WHERE id = 1" "SELECT id FROM items WHERE id = ?" "SELECT id FROM items WHERE created_at >= DATE '2026-01-01'" "SELECT category, COUNT(*) FROM items WHERE state = 'open' GROUP BY category" "SELECT COUNT(*) FROM items WHERE state = 'open'" "SELECT DISTINCT state FROM items WHERE score >= 2" "SELECT id FROM items WHERE id = 1 UNION SELECT id FROM items WHERE id = 2" "EXPLAIN COMPILE SELECT id FROM items WHERE id = 1" "SELECT id FROM items WHERE label = 'unterminated" "SELECT id FROM items WHERE id = 1 /* unterminated") (lambda (query)
+        (map (list "SELECT id FROM items WHERE id = ?" "SELECT id FROM items WHERE created_at >= DATE '2026-01-01'" "SELECT category, COUNT(*) FROM items WHERE state = 'open' GROUP BY category" "SELECT COUNT(*) FROM items WHERE state = 'open'" "SELECT DISTINCT state FROM items WHERE score >= 2" "SELECT id FROM items WHERE id = 1 UNION SELECT id FROM items WHERE id = 2" "EXPLAIN COMPILE SELECT id FROM items WHERE id = 1" "SELECT id FROM items WHERE label = 'unterminated" "SELECT id FROM items WHERE id = 1 /* unterminated") (lambda (query)
           (match (parameterize_sql_select_literals query) '(normalized bindings shape_hash)
             (if (and (equal? normalized query) (equal? bindings '()) (equal? shape_hash (fnv_hash query)))
               true (error (concat "unsafe parameterization: " query))))))
         "ok")
     expect:
       data: ["ok"]
+  - name: "UPDATE SET literals fold the same as SELECT literals"
+    # UPDATE/INSERT/DELETE literal-parameterization extension: "UPDATE items
+    # SET score = 2 WHERE id = 1" used to belong in the "stays exact" list
+    # above (DML was never parameterized at all) -- it now folds its SET and
+    # WHERE literals exactly like a SELECT's projection/WHERE literals do.
+    scm: |
+      (match (parameterize_sql_select_literals "UPDATE items SET score = 2 WHERE id = 1") '(normalized bindings shape_hash)
+        (if (and (equal? normalized "UPDATE items SET score = ? WHERE id = ?")
+          (equal? bindings (list 2 1)) (equal? shape_hash (fnv_hash normalized)))
+          "ok" (error (concat "parameterization mismatch: " normalized " / " bindings))))
+    expect:
+      data: ["ok"]
+  - name: "Constant projection row folds to shared placeholders"
+    scm: |
+      (match (parameterize_sql_select_literals "SELECT h.i FROM (SELECT 0 AS i, 1704067200 AS s, 1789037871 AS e UNION SELECT 1 AS i, 1672531200 AS s, 1704067199 AS e) h") '(normalized bindings shape_hash)
+        (if (and (equal? normalized "SELECT h.i FROM (SELECT ? AS i, ? AS s, ? AS e UNION SELECT ? AS i, ? AS s, ? AS e) h")
+          (equal? bindings (list 0 1704067200 1789037871 1 1672531200 1704067199))
+          (equal? shape_hash (fnv_hash normalized)))
+          "ok" (error (concat "const-row mismatch: " normalized " / " bindings))))
+    expect:
+      data: ["ok"]
+  - name: "Constant projection row shape is now()-invariant"
+    scm: |
+      (if (equal?
+        (nth (parameterize_sql_select_literals "SELECT 0 AS i, 1704067200 AS s, 1789037871 AS e FROM dual") 2)
+        (nth (parameterize_sql_select_literals "SELECT 0 AS i, 1704067200 AS s, 1789099999 AS e FROM dual") 2))
+        "ok" (error "const-row shape hash still varies with the literal"))
+    expect:
+      data: ["ok"]
+  - name: "Mixed projection keeps a lone carrier literal exact"
+    scm: |
+      (begin
+        (map (list
+          "SELECT d.id, 1 AS _count FROM items d WHERE d.label LIKE '%x%'"
+          "SELECT 1 AS marker, id FROM items WHERE id = 3"
+          "SELECT count(*), 5 AS n FROM items") (lambda (query)
+          (match (parameterize_sql_select_literals query) '(normalized bindings shape_hash)
+            (if (match normalized (regex "(?s)^SELECT (?:count\\(\\*\\)|d\\.id, 1 AS _count|1 AS marker, id)" _) true false)
+              true (error (concat "carrier literal was folded: " normalized))))))
+        "ok")
+    expect:
+      data: ["ok"]
+  # DML plan-cache bounds are functional requirements. Keep them outside
+  # A/B workloads, which must also execute on a base without parameterization.
+  - name: "Repeated single-row INSERT with distinct literals shares one compiled plan"
+    setup:
+      - sql: "DROP TABLE IF EXISTS cg_dml_rows"
+      - sql: "CREATE TABLE cg_dml_rows (id INT PRIMARY KEY, col INT) ENGINE=sloppy"
+      - scm: '(rebuild (table "memcp-tests" "cg_dml_rows") true false)'
+    scm: |
+      (begin
+        (define sess (newsession))
+        (sess "username" "root")
+        (sess "schema" "memcp-tests")
+        (define cache (newcachemap))
+        (define exec (lambda (q) (sql_execute_formula sess nil
+          (cached_parse cache (list parse_sql) "memcp-tests" q nil "root" sess true)
+          (lambda (row) nil) (lambda (_fields) nil))))
+        (map (produceN 500) (lambda (i)
+          (exec (concat "INSERT INTO cg_dml_rows VALUES (" (string i) ", " (string (* i 2)) ")"))))
+        (define acc (newsession)) (acc "n" 0)
+        (sql_execute_formula sess nil
+          (cached_parse cache (list parse_sql) "memcp-tests" "SELECT COUNT(*) AS n FROM cg_dml_rows" nil "root" sess true)
+          (lambda (row) (acc "n" (get_assoc row "n"))) (lambda (_fields) nil))
+        (if (and (<= (count (cache)) 2) (equal? (acc "n") 500))
+          true
+          (error (concat "cachekeys=" (count (cache)) " rows=" (acc "n")))))
+    expect:
+      rows: 1
+      result_contains: ["true"]
+
+  - name: "Repeated UPDATE col=col+1 WHERE id=<literal> shares one compiled plan"
+    setup:
+      - sql: "DROP TABLE IF EXISTS cg_dml_rows"
+      - sql: "CREATE TABLE cg_dml_rows (id INT PRIMARY KEY, col INT) ENGINE=sloppy"
+      - scm: |
+          (begin
+            (insert (table "memcp-tests" "cg_dml_rows") '("id" "col")
+              (map (produceN 500) (lambda (i) (list i (* i 2)))))
+            (rebuild (table "memcp-tests" "cg_dml_rows") true false)
+            true)
+    scm: |
+      (begin
+        (define sess (newsession))
+        (sess "username" "root")
+        (sess "schema" "memcp-tests")
+        (define cache (newcachemap))
+        (map (produceN 500) (lambda (i)
+          (sql_execute_formula sess nil
+            (cached_parse cache (list parse_sql) "memcp-tests"
+              (concat "UPDATE cg_dml_rows SET col = col + 1 WHERE id = " (string i))
+              nil "root" sess true)
+            (lambda (row) nil) (lambda (_fields) nil))))
+        (define acc (newsession)) (acc "s" 0)
+        (sql_execute_formula sess nil
+          (cached_parse cache (list parse_sql) "memcp-tests" "SELECT SUM(col) AS s FROM cg_dml_rows" nil "root" sess true)
+          (lambda (row) (acc "s" (get_assoc row "s"))) (lambda (_fields) nil))
+        /* every row's col was 2*id, then incremented by exactly 1 once each:
+        sum(2*id for id in [0,500)) + 500 = 2*124750 + 500 = 250000 */
+        (if (and (<= (count (cache)) 2) (equal? (acc "s") 250000))
+          true
+          (error (concat "cachekeys=" (count (cache)) " sum=" (acc "s")))))
+    expect:
+      rows: 1
+      result_contains: ["true"]
+
+  - name: "Repeated DELETE FROM t WHERE TRUE LIMIT 1 stays on one cached plan"
+    # No literal varies here at all -- the exact-text cache already covers
+    # this (predates the literal-folding fix). Kept as a guard that DML
+    # literal-folding never regresses the plain exact-cache path for a query
+    # that has nothing to fold.
+    setup:
+      - sql: "DROP TABLE IF EXISTS cg_dml_rows"
+      - sql: "CREATE TABLE cg_dml_rows (id INT PRIMARY KEY, col INT) ENGINE=sloppy"
+      - scm: |
+          (begin
+            (insert (table "memcp-tests" "cg_dml_rows") '("id" "col")
+              (map (produceN 250) (lambda (i) (list i i))))
+            (rebuild (table "memcp-tests" "cg_dml_rows") true false)
+            true)
+    scm: |
+      (begin
+        (define sess (newsession))
+        (sess "username" "root")
+        (sess "schema" "memcp-tests")
+        (define cache (newcachemap))
+        (define q "DELETE FROM cg_dml_rows WHERE TRUE LIMIT 1")
+        (map (produceN 250) (lambda (i)
+          (sql_execute_formula sess nil
+            (cached_parse cache (list parse_sql) "memcp-tests" q nil "root" sess true)
+            (lambda (row) nil) (lambda (_fields) nil))))
+        (define acc (newsession)) (acc "n" 0)
+        (sql_execute_formula sess nil
+          (cached_parse cache (list parse_sql) "memcp-tests" "SELECT COUNT(*) AS n FROM cg_dml_rows" nil "root" sess true)
+          (lambda (row) (acc "n" (get_assoc row "n"))) (lambda (_fields) nil))
+        (if (and (<= (count (cache)) 2) (equal? (acc "n") 0))
+          true
+          (error (concat "cachekeys=" (count (cache)) " remaining=" (acc "n")))))
+    expect:
+      rows: 1
+      result_contains: ["true"]
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS cg_rows"
+  - sql: "DROP TABLE IF EXISTS cg_dml_rows"
