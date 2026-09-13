@@ -1,39 +1,20 @@
 # Copyright (C) 2026 Carl-Philip Hänsch
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
-# Guards the INSERT/UPDATE/DELETE literal-parameterization extension in
-# sql-parameters.scm: a hot-path DML statement with a literal baked into its
-# text (an app-generated `INSERT INTO t VALUES (5, ...)`, an ORM's
-# `UPDATE t SET col=col+1 WHERE id=5`, a queue worker's `DELETE FROM q WHERE
-# id=5`) must share ONE compiled plan across distinct literal values instead
-# of building a new plan-cache entry per call, exactly like SELECT already
-# does after the constant-projection-row fix.
+# Compare identical literal INSERT/UPDATE/DELETE workloads on base and candidate.
+# Assert data effects here; query-cache-growth.yaml separately enforces the DML
+# cache-key bounds introduced by literal parameterization. Requiring those new
+# bounds during baseline measurement would abort A/B before comparison.
 #
-# For flat single-table DML the per-call COMPILE cost is small either way (a
-# plan without joins/subqueries compiles in well under a millisecond) -- the
-# wall-clock thresholds here are a generous sanity net, not the real guard.
-# The real guard is the cache-key count: on unfixed code every distinct
-# literal call gets its own entry (unbounded cache growth under sustained
-# load, the same "cache stuffs itself full" problem as the SELECT case, just
-# without a large per-call latency symptom to notice it by). These cases --
-# and their pre-fix numbers -- are also the harness for validating the
-# adaptive/curried literal-specialization follow-up design: same shapes, same
-# assertions, whatever eventually replaces the lexical fold should keep both
-# the cache-key bound and the timing sane.
-#
-# Each case rebuilds its own table from scratch, disables warmup, and pins
-# repetitions to 1: the workload (INSERT rows, or mutate rows that must not
-# already carry a prior run's changes) is not safe to repeat blindly, unlike
-# a read-only SELECT -- the harness's perf-test default otherwise re-executes
-# the measured body up to PERF_REPEAT times for timing stability, which would
-# re-INSERT already-taken primary keys or re-increment already-updated rows.
+# Each case rebuilds its table, disables warmup and runs once because INSERT,
+# increment and DELETE workloads cannot safely reuse their mutated fixture.
 metadata:
   version: "1.0"
-  description: "INSERT/UPDATE/DELETE with baked-in literals share one compiled plan"
+  description: "Literal INSERT/UPDATE/DELETE workloads preserve data effects across A/B measurement"
   isolated: true
 
 test_cases:
-  - name: "Repeated single-row INSERT with distinct literals shares one compiled plan"
+  - name: "Repeated single-row INSERT with distinct literals inserts 500 rows"
     warmup: false
     repetitions: 1
     threshold_ms: 2000
@@ -56,14 +37,14 @@ test_cases:
         (sql_execute_formula sess nil
           (cached_parse cache (list parse_sql) "memcp-tests" "SELECT COUNT(*) AS n FROM dlc_bench" nil "root" sess true)
           (lambda (row) (acc "n" (get_assoc row "n"))) (lambda (_fields) nil))
-        (if (and (<= (count (cache)) 2) (equal? (acc "n") 500))
+        (if (equal? (acc "n") 500)
           true
-          (error (concat "cachekeys=" (count (cache)) " rows=" (acc "n")))))
+          (error (concat "rows=" (acc "n")))))
     expect:
       rows: 1
       result_contains: ["true"]
 
-  - name: "Repeated UPDATE col=col+1 WHERE id=<literal> shares one compiled plan"
+  - name: "Repeated UPDATE col=col+1 WHERE id=<literal> increments each row once"
     warmup: false
     repetitions: 1
     threshold_ms: 2000
@@ -94,14 +75,14 @@ test_cases:
           (lambda (row) (acc "s" (get_assoc row "s"))) (lambda (_fields) nil))
         /* every row's col was 2*id, then incremented by exactly 1 once each:
         sum(2*id for id in [0,500)) + 500 = 2*124750 + 500 = 250000 */
-        (if (and (<= (count (cache)) 2) (equal? (acc "s") 250000))
+        (if (equal? (acc "s") 250000)
           true
-          (error (concat "cachekeys=" (count (cache)) " sum=" (acc "s")))))
+          (error (concat "sum=" (acc "s")))))
     expect:
       rows: 1
       result_contains: ["true"]
 
-  - name: "Repeated DELETE FROM t WHERE TRUE LIMIT 1 stays on one cached plan"
+  - name: "Repeated DELETE FROM t WHERE TRUE LIMIT 1 empties the table"
     # No literal varies here at all -- the exact-text cache already covers
     # this (predates the literal-folding fix). Kept as a guard that DML
     # literal-folding never regresses the plain exact-cache path for a query
@@ -133,9 +114,9 @@ test_cases:
         (sql_execute_formula sess nil
           (cached_parse cache (list parse_sql) "memcp-tests" "SELECT COUNT(*) AS n FROM dlc_bench" nil "root" sess true)
           (lambda (row) (acc "n" (get_assoc row "n"))) (lambda (_fields) nil))
-        (if (and (<= (count (cache)) 2) (equal? (acc "n") 0))
+        (if (equal? (acc "n") 0)
           true
-          (error (concat "cachekeys=" (count (cache)) " remaining=" (acc "n")))))
+          (error (concat "remaining=" (acc "n")))))
     expect:
       rows: 1
       result_contains: ["true"]
