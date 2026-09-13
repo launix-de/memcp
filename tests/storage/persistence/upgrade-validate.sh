@@ -11,10 +11,199 @@
 # loaded storage to prove the new binary can mutate data the old binary
 # compressed, not just read it.
 #
-# Usage: upgrade-validate.sh <mysql-port>
+# Usage: upgrade-validate.sh <mysql-port> snapshot|compare <snapshot.json>
+#        upgrade-validate.sh <mysql-port> mutate <old.json> <post-dml.json>
+#        upgrade-validate.sh <mysql-port> checks  # legacy focused DML checks
 set -uo pipefail
 
 PORT="${1:?usage: upgrade-validate.sh <mysql-port>}"
+# Snapshots live outside the database directory and are written only by OLD.
+# Full comparison is read-only; mutate derives its oracle from the OLD snapshot,
+# never from candidate output. The workflow compares it again after a restart.
+MODE="${2:-checks}"
+if [ "$MODE" != checks ]; then
+  python3 - "$0" "$PORT" "$MODE" "${3:?snapshot path required}" "${4:-}" <<'PYTHON'
+import base64
+import json
+import pathlib
+import re
+import subprocess
+import sys
+
+script, port, mode, snapshot_path, post_path = sys.argv[1:]
+client = ["mysql", "-h", "127.0.0.1", "-P", port, "-u", "root", "-padmin",
+          "--batch", "--raw", "memcp-tests"]
+
+
+def query(sql, include_headers=False):
+    options = ["--column-names"] if include_headers else ["--skip-column-names"]
+    result = subprocess.run(client + options + ["-e", sql], capture_output=True, check=True, timeout=120)
+    # Numeric values travel directly through RowWriter.Float64 ->
+    # strconv.AppendFloat(value, 'g', -1, 64): shortest exact float64 roundtrip,
+    # including signed zero. Never CAST/ROUND, parse to float, or use tolerance.
+    # Every selected string is Base64 and numeric output is ASCII. Raw mode
+    # therefore cannot turn embedded tabs/newlines/NULs into record boundaries.
+    return [line.split(b"\t") for line in result.stdout.splitlines()]
+
+
+def ident(name):
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*", name):
+        raise ValueError("unexpected fixture identifier: " + repr(name))
+    return "`" + name + "`"
+
+
+def encoding(sql_type):
+    kind = sql_type.lower().split("(")[0].split()[0]
+    if kind in {"int", "integer", "bigint", "smallint", "tinyint", "mediumint"}:
+        return "integer"
+    if kind in {"float", "double", "real", "decimal", "numeric"}:
+        return "number"
+    if kind in {"json", "bson"}:
+        return "json-base64"
+    if kind in {"varchar", "char", "text", "longtext", "mediumtext", "tinytext",
+                "blob", "longblob", "mediumblob", "tinyblob", "binary", "varbinary", "enum"}:
+        return "bytes-base64"
+    raise ValueError("unhandled fixture column type: " + sql_type)
+
+
+def capture():
+    names = sorted(row[0].decode("ascii") for row in query("SHOW TABLES")
+                   if row[0].startswith(b"up_"))
+    if not names:
+        raise ValueError("no up_* fixture tables found")
+    tables = {}
+    for name in names:
+        # Only schema fields are persistent promises. SHOW COLUMNS also exposes
+        # planner statistics that legitimately change after compression/restart.
+        metadata = query("SHOW COLUMNS FROM " + ident(name), include_headers=True)
+        if not metadata:
+            raise ValueError("missing column metadata for " + name)
+        header = [field.decode("ascii") for field in metadata[0]]
+        stable_fields = ("Field", "Type", "Collation", "RawType", "Dimensions", "Null",
+                         "Key", "Default", "DefaultExpression", "Extra", "Privileges", "Comment")
+        if len(set(header)) != len(header) or not set(stable_fields).issubset(header):
+            raise ValueError("missing or duplicate schema metadata fields for " + name)
+        columns = []
+        expressions = []
+        for fields in metadata[1:]:
+            if len(fields) != len(header):
+                raise ValueError("unexpected column metadata width for " + name)
+            schema = dict(zip(header, fields))
+            column = schema["Field"].decode("ascii")
+            sql_type = schema["Type"].decode("ascii")
+            codec = encoding(sql_type)
+            columns.append({"name": column, "encoding": codec,
+                            "metadata": {key: base64.b64encode(schema[key]).decode("ascii")
+                                         for key in stable_fields}})
+            value = ident(column)
+            expressions.append(value + " IS NULL")
+            if codec == "json-base64":
+                value = "TO_BASE64(VECTOR_TO_STRING(" + value + "))"
+            elif codec == "bytes-base64":
+                value = "TO_BASE64(" + value + ")"
+            expressions.append(value)
+        if not columns:
+            raise ValueError("fixture table has no columns: " + name)
+        rows = []
+        for fields in query("SELECT " + ", ".join(expressions) + " FROM " + ident(name)):
+            if len(fields) != 2 * len(columns):
+                raise ValueError("unexpected export row width in " + name)
+            row = []
+            for i, column in enumerate(columns):
+                null, value = fields[2*i:2*i+2]
+                if null not in (b"0", b"1"):
+                    raise ValueError("invalid NULL marker in " + name)
+                if null == b"1":
+                    row.append(None)
+                else:
+                    token = value.decode("ascii")
+                    if column["encoding"].endswith("base64"):
+                        base64.b64decode(token, validate=True)
+                    row.append(token)
+            rows.append(row)
+        # Compare a multiset of complete records: row order is not persistent,
+        # while duplicate multiplicity, every column and every byte matter.
+        tables[name] = {"columns": columns, "rows": sorted(rows, key=canonical)}
+    return {"format": "memcp-upgrade-values-v1", "tables": tables}
+
+
+def canonical(value):
+    return json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+
+
+def write_new(path, value):
+    # Exclusive creation prevents accidentally overwriting the OLD oracle.
+    with open(path, "x", encoding="ascii") as out:
+        out.write(canonical(value) + "\n")
+
+
+def compare(expected):
+    actual = capture()
+    if actual != expected:
+        for name in sorted(set(actual["tables"]) | set(expected["tables"])):
+            if actual["tables"].get(name) != expected["tables"].get(name):
+                print("MISMATCH: complete fixture table " + name, file=sys.stderr)
+        raise ValueError("full fixture snapshot differs (no tolerances)")
+    count = sum(len(t["rows"]) for t in actual["tables"].values())
+    print(f"upgrade snapshot: all {len(actual['tables'])} tables / {count} rows match exactly")
+
+
+def changed_oracle(expected):
+    def table(name):
+        return expected["tables"][name]
+
+    def row_by_id(name, wanted):
+        target = table(name)
+        id_column = [c["name"] for c in target["columns"]].index("id")
+        matches = [r for r in target["rows"] if r[id_column] == str(wanted)]
+        if len(matches) != 1:
+            raise ValueError("DML oracle needs exactly one id in " + name)
+        return matches[0]
+
+    def update(name, wanted, column, value):
+        idx = [c["name"] for c in table(name)["columns"]].index(column)
+        row_by_id(name, wanted)[idx] = value
+
+    update("up_float", 0, "val", "3.14159")
+    const = table("up_const")
+    new_row = list(row_by_id("up_const", 0))
+    new_row[[c["name"] for c in const["columns"]].index("id")] = "50"
+    const["rows"].append(new_row)
+    enum = table("up_enum")
+    enum["rows"].remove(row_by_id("up_enum", 99))
+    update("up_compute", 1, "val", "100")
+    update("up_compute", 1, "doubled", "200")
+    for target in expected["tables"].values():
+        target["rows"].sort(key=canonical)
+    return expected
+
+
+try:
+    if mode == "snapshot":
+        write_new(snapshot_path, capture())
+    elif mode in {"compare", "mutate"}:
+        expected = json.loads(pathlib.Path(snapshot_path).read_text(encoding="ascii"))
+        if expected.get("format") != "memcp-upgrade-values-v1":
+            raise ValueError("unknown snapshot format")
+        compare(expected)
+        if mode == "mutate":
+            if not post_path:
+                raise ValueError("mutate requires a separate post-DML snapshot path")
+            expected = changed_oracle(expected)
+            subprocess.run(["bash", script, port, "checks"], check=True)
+            compare(expected)
+            write_new(post_path, expected)
+    else:
+        raise ValueError("mode must be snapshot, compare, mutate, or checks")
+except (ValueError, OSError, subprocess.SubprocessError) as error:
+    print("upgrade snapshot FAILED: " + str(error), file=sys.stderr)
+    if isinstance(error, subprocess.CalledProcessError) and error.stderr:
+        sys.stderr.buffer.write(error.stderr)
+    sys.exit(1)
+PYTHON
+  exit "$?"
+fi
+
 MYSQL_BASE=(mysql -h 127.0.0.1 -P "$PORT" -u root -padmin -N -B memcp-tests)
 
 CHECKS=0
