@@ -884,6 +884,23 @@ plan = (tree aliases cardinality cost size atomic driver-cardinality left right 
 		(list (quote join_order_cap_cardinality)
 			(list (quote *) extended_expr (join_order_product_expr post_selectivities))))))
 
+/* A composite right subtree is evaluated once per left result by the nested
+scan lowerer. Its execution work repeats; compilation, retained memory and
+reusable builds do not. A keyed leaf keeps its one-time scan/index estimate,
+with per-binding lookup work charged by the join below. */
+(define planner_repeat_execution_cost (lambda (cost repetitions)
+	(planner_cost
+		(* repetitions (qassoc_get cost (quote startup_ns) 0))
+		(* repetitions (qassoc_get cost (quote row_ns) 0))
+		(* repetitions (qassoc_get cost (quote probe_ns) 0))
+		(* repetitions (qassoc_get cost (quote batch_startup_ns) 0))
+		(* repetitions (qassoc_get cost (quote batch_row_ns) 0))
+		(qassoc_get cost (quote build_ns) 0)
+		(qassoc_get cost (quote memory_bytes) 0)
+		(qassoc_get cost (quote compile_ns) 0)
+		(qassoc_get cost (quote expected_rows) 0)
+		(qassoc_get cost (quote confidence) 0.5))))
+
 (define join_order_join_plan (lambda (universe predicates left right)
 	(if (or (nil? left) (nil? right))
 		nil
@@ -897,11 +914,15 @@ plan = (tree aliases cardinality cost size atomic driver-cardinality left right 
 					(define cardinality_expr (join_order_join_cardinality_expr predicates kind left right))
 					(define combined (join_order_set_union universe
 						(join_order_plan_aliases left) (join_order_plan_aliases right)))
+					(define right_repetitions (if (> (join_order_plan_size right) 1)
+						(join_order_plan_cardinality left) 1))
+					(define join_work (max cardinality (join_order_plan_cardinality left)))
 					(define children_cost (planner_cost_add
-						(join_order_plan_cost_domain left) (join_order_plan_cost_domain right)
+						(join_order_plan_cost_domain left)
+						(planner_repeat_execution_cost (join_order_plan_cost_domain right) right_repetitions)
 						cardinality 0.5))
 					(define cost_domain (planner_cost_add children_cost
-						(planner_join_work_cost cardinality 0.5) cardinality 0.5))
+						(planner_join_work_cost join_work 0.5) cardinality 0.5))
 					(list
 						(list (quote join-node) kind (join_order_plan_tree left) (join_order_plan_tree right) '())
 						combined
@@ -914,8 +935,17 @@ plan = (tree aliases cardinality cost size atomic driver-cardinality left right 
 						cardinality_expr
 						(list (quote +)
 							(join_order_plan_cost_expr left)
-							(join_order_plan_cost_expr right)
-							(list (quote *) cardinality_expr 1240))
+							(list (quote +)
+								(qassoc_get (join_order_plan_cost_domain right) (quote build_ns) 0)
+								(qassoc_get (join_order_plan_cost_domain right) (quote compile_ns) 0)
+								(list (quote *)
+									(if (> (join_order_plan_size right) 1)
+										(join_order_plan_cardinality_expr left) 1)
+									(list (quote -) (join_order_plan_cost_expr right)
+										(qassoc_get (join_order_plan_cost_domain right) (quote build_ns) 0)
+										(qassoc_get (join_order_plan_cost_domain right) (quote compile_ns) 0))))
+							(list (quote *)
+								(list (quote max) cardinality_expr (join_order_plan_cardinality_expr left)) 1240))
 						(join_order_plan_driver_expr left)
 						cost_domain
 						(nth shape 1)

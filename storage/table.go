@@ -1649,8 +1649,9 @@ func (t *table) buildShowColumnsSnapshot(rowEstimate uint) *tableShowColumnsSnap
 		if distinctEstimate == 0 {
 			distinctEstimate = uint64(rowEstimate)
 		}
-		distinctEstimates[i] = distinctEstimate
 		plannerStatistics[i] = c.PlannerStats.Load()
+		distinctEstimate = integerDomainDistinctEstimate(distinctEstimate, c.Typ, plannerStatistics[i])
+		distinctEstimates[i] = distinctEstimate
 		plannerColumnsFingerprint = plannerColumnFingerprint(
 			plannerColumnsFingerprint, c, distinctEstimate, plannerStatistics[i])
 		result[i] = c.show(keyType, distinctEstimate, rowEstimate, plannerStatistics[i])
@@ -1897,12 +1898,46 @@ func (c *column) show(keyType string, distinctEstimate uint64, rowEstimate uint,
 func (c *column) distinctEstimateFor(t *table) uint {
 	cached := atomic.LoadUint64(&c.DistinctEstimate)
 	if cached > 0 {
-		return uint(cached)
+		return uint(integerDomainDistinctEstimate(cached, c.Typ, c.PlannerStats.Load()))
 	}
 	// No rebuild statistics yet — use row count as conservative upper bound.
 	// This ensures join_reorder can still compare table sizes even before
 	// the first rebuild runs.
 	return uint(t.CountEstimate())
+}
+
+// Integer compression reports per-shard row counts as an NDV upper bound.
+// The immutable rebuild statistics already contain the table-wide domain;
+// bound that estimate without reading shards or adding a statistics traversal.
+// This is a planner estimate, never a visibility or index-pruning constraint.
+func integerDomainDistinctEstimate(estimate uint64, rawType string, stats *columnPlannerStatistics) uint64 {
+	if stats == nil || !stats.MinEstimate.IsInt() || !stats.MaxEstimate.IsInt() {
+		return estimate
+	}
+	switch strings.ToUpper(rawType) {
+	case "INT", "INTEGER", "BIGINT", "SMALLINT", "MEDIUMINT", "TINYINT":
+	default:
+		return estimate
+	}
+	minimum, maximum := stats.MinEstimate.Int(), stats.MaxEstimate.Int()
+	if maximum < minimum {
+		return estimate
+	}
+	span := uint64(maximum) - uint64(minimum)
+	if span == ^uint64(0) {
+		return estimate // the inclusive full signed range cannot fit in uint64
+	}
+	domain := span + 1
+	if stats.NullCount > 0 {
+		if domain == ^uint64(0) {
+			return estimate
+		}
+		domain++
+	}
+	if domain < estimate {
+		return domain
+	}
+	return estimate
 }
 
 // truncateStringCharacters applies SQL character limits to UTF-8 characters,

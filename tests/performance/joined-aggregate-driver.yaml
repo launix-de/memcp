@@ -1,0 +1,207 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+metadata:
+  version: '1.0'
+  description: Selective dimension drives composite-key fact joins before grouped aggregation
+  isolated: true
+  performance_rows: 8192
+  max_regression_pct: 20
+setup:
+  - sql: DROP TABLE IF EXISTS ja_lineitem
+  - sql: DROP TABLE IF EXISTS ja_partsupp
+  - sql: DROP TABLE IF EXISTS ja_orders
+  - sql: DROP TABLE IF EXISTS ja_part
+  - sql: DROP TABLE IF EXISTS ja_supplier
+  - sql: DROP TABLE IF EXISTS ja_nation
+  - sql: CREATE TABLE ja_part (p_id INT PRIMARY KEY, p_name VARCHAR(32)) ENGINE=memory
+  - sql: CREATE TABLE ja_supplier (s_id INT PRIMARY KEY, s_nation INT) ENGINE=memory
+  - sql: CREATE TABLE ja_nation (n_id INT PRIMARY KEY, n_name VARCHAR(32)) ENGINE=memory
+  - sql: CREATE TABLE ja_partsupp (ps_part INT, ps_supplier INT, ps_cost INT, PRIMARY KEY (ps_part, ps_supplier))
+      ENGINE=memory
+  - sql: CREATE TABLE ja_orders (o_id INT PRIMARY KEY, o_year INT) ENGINE=memory
+  - sql: CREATE TABLE ja_lineitem (l_part INT, l_supplier INT, l_order INT, l_price INT, l_quantity INT) ENGINE=memory
+  - scm: |-
+      (begin
+        (insert (table "memcp-tests" "ja_part") '("p_id" "p_name")
+          (map (produceN 256) (lambda (i) (list (+ i 1)
+            (if (equal? (mod i 8) 0) "green part" "ordinary part")))))
+        (insert (table "memcp-tests" "ja_supplier") '("s_id" "s_nation")
+          (map (produceN 32) (lambda (i) (list (+ i 1) (mod i 4)))))
+        (insert (table "memcp-tests" "ja_nation") '("n_id" "n_name")
+          (map (produceN 4) (lambda (i) (list i (concat "nation" (string i))))))
+        (insert (table "memcp-tests" "ja_partsupp") '("ps_part" "ps_supplier" "ps_cost")
+          (map (produceN 1024) (lambda (i) (begin
+            (define part_id (+ 1 (mod i 256)))
+            (define supplier_id (+ 1 (mod (+ (- part_id 1) (* 7 (floor (/ i 256)))) 32)))
+            (list part_id supplier_id (+ 1 (mod supplier_id 5)))))))
+        (insert (table "memcp-tests" "ja_orders") '("o_id" "o_year")
+          (map (produceN 1024) (lambda (i) (list (+ i 1) (+ 1992 (mod (floor (/ i 32)) 4))))))
+        (insert (table "memcp-tests" "ja_lineitem") '("l_part" "l_supplier" "l_order" "l_price" "l_quantity")
+          (map (produceN 8192) (lambda (i) (begin
+            (define part_id (+ 1 (mod i 256)))
+            (list part_id (+ 1 (mod (+ (- part_id 1) (* 7 (mod (floor (/ i 256)) 4))) 32))
+              (+ 1 (mod i 1024)) (+ 100 (mod i 10)) (+ 1 (mod i 3)))))))
+        (rebuild true false)
+        true)
+test_cases:
+  - name: 'Perf: selective six-table profit grouping'
+    threshold_ms: 60000
+    timeout: 60
+    warmup: 2
+    timing_samples: 5
+    sql: |-
+      SELECT n.n_name, o.o_year,
+        SUM(l.l_price - ps.ps_cost * l.l_quantity) AS profit
+      FROM ja_part p, ja_supplier s, ja_lineitem l,
+        ja_partsupp ps, ja_orders o, ja_nation n
+      WHERE s.s_id = l.l_supplier
+        AND ps.ps_supplier = l.l_supplier
+        AND ps.ps_part = l.l_part
+        AND p.p_id = l.l_part
+        AND o.o_id = l.l_order
+        AND s.s_nation = n.n_id
+        AND p.p_name LIKE '%green%'
+      GROUP BY n.n_name, o.o_year
+      ORDER BY n.n_name, o.o_year DESC
+    expect:
+      rows: 16
+      data:
+        - n_name: nation0
+          o_year: 1995
+          profit: 6300
+        - n_name: nation0
+          o_year: 1994
+          profit: 6306
+        - n_name: nation0
+          o_year: 1993
+          profit: 6306
+        - n_name: nation0
+          o_year: 1992
+          profit: 6306
+        - n_name: nation1
+          o_year: 1995
+          profit: 6311
+        - n_name: nation1
+          o_year: 1994
+          profit: 6305
+        - n_name: nation1
+          o_year: 1993
+          profit: 6302
+        - n_name: nation1
+          o_year: 1992
+          profit: 6307
+        - n_name: nation2
+          o_year: 1995
+          profit: 6330
+        - n_name: nation2
+          o_year: 1994
+          profit: 6334
+        - n_name: nation2
+          o_year: 1993
+          profit: 6338
+        - n_name: nation2
+          o_year: 1992
+          profit: 6336
+        - n_name: nation3
+          o_year: 1995
+          profit: 6207
+        - n_name: nation3
+          o_year: 1994
+          profit: 6210
+        - n_name: nation3
+          o_year: 1993
+          profit: 6209
+        - n_name: nation3
+          o_year: 1992
+          profit: 6203
+  - name: Selective six-table profit grouping preserves all groups
+    sql: |-
+      SELECT n.n_name, o.o_year,
+        SUM(l.l_price - ps.ps_cost * l.l_quantity) AS profit
+      FROM ja_part p, ja_supplier s, ja_lineitem l,
+        ja_partsupp ps, ja_orders o, ja_nation n
+      WHERE s.s_id = l.l_supplier
+        AND ps.ps_supplier = l.l_supplier
+        AND ps.ps_part = l.l_part
+        AND p.p_id = l.l_part
+        AND o.o_id = l.l_order
+        AND s.s_nation = n.n_id
+        AND p.p_name LIKE '%green%'
+      GROUP BY n.n_name, o.o_year
+      ORDER BY n.n_name, o.o_year DESC
+    expect:
+      rows: 16
+      data:
+        - n_name: nation0
+          o_year: 1995
+          profit: 6300
+        - n_name: nation0
+          o_year: 1994
+          profit: 6306
+        - n_name: nation0
+          o_year: 1993
+          profit: 6306
+        - n_name: nation0
+          o_year: 1992
+          profit: 6306
+        - n_name: nation1
+          o_year: 1995
+          profit: 6311
+        - n_name: nation1
+          o_year: 1994
+          profit: 6305
+        - n_name: nation1
+          o_year: 1993
+          profit: 6302
+        - n_name: nation1
+          o_year: 1992
+          profit: 6307
+        - n_name: nation2
+          o_year: 1995
+          profit: 6330
+        - n_name: nation2
+          o_year: 1994
+          profit: 6334
+        - n_name: nation2
+          o_year: 1993
+          profit: 6338
+        - n_name: nation2
+          o_year: 1992
+          profit: 6336
+        - n_name: nation3
+          o_year: 1995
+          profit: 6207
+        - n_name: nation3
+          o_year: 1994
+          profit: 6210
+        - n_name: nation3
+          o_year: 1993
+          profit: 6209
+        - n_name: nation3
+          o_year: 1992
+          profit: 6203
+  - name: Empty dimension filter preserves empty grouped result
+    sql: |-
+      SELECT n.n_name, o.o_year,
+        SUM(l.l_price - ps.ps_cost * l.l_quantity) AS profit
+      FROM ja_part p, ja_supplier s, ja_lineitem l,
+        ja_partsupp ps, ja_orders o, ja_nation n
+      WHERE s.s_id = l.l_supplier
+        AND ps.ps_supplier = l.l_supplier
+        AND ps.ps_part = l.l_part
+        AND p.p_id = l.l_part
+        AND o.o_id = l.l_order
+        AND s.s_nation = n.n_id
+        AND p.p_name LIKE '%absent%'
+      GROUP BY n.n_name, o.o_year
+      ORDER BY n.n_name, o.o_year DESC
+    expect:
+      rows: 0
+cleanup:
+  - sql: DROP TABLE IF EXISTS ja_lineitem
+  - sql: DROP TABLE IF EXISTS ja_partsupp
+  - sql: DROP TABLE IF EXISTS ja_orders
+  - sql: DROP TABLE IF EXISTS ja_part
+  - sql: DROP TABLE IF EXISTS ja_supplier
+  - sql: DROP TABLE IF EXISTS ja_nation
