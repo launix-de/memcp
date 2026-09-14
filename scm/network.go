@@ -27,6 +27,7 @@ import "strings"
 import "strconv"
 import "net/url"
 import "net/http"
+import "net/http/httputil"
 import "sync/atomic"
 import "encoding/json"
 import "path/filepath"
@@ -128,6 +129,41 @@ func HTTPStaticGetter(wd string) func(...Scmer) Scmer {
 			return NewNil()
 		})
 	}
+}
+
+// HTTPProxy creates a normal (req res) handler, like serveStatic. Scheme
+// routing wrappers choose when to invoke it and can delegate other paths to
+// their previous handler. Construction performs no upstream request.
+func HTTPProxy(a ...Scmer) Scmer {
+	if len(a) != 1 {
+		panic("serveProxy expects exactly one upstream URL")
+	}
+	upstream, err := url.Parse(a[0].String())
+	if err != nil || upstream.Host == "" || (upstream.Scheme != "http" && upstream.Scheme != "https") || upstream.Fragment != "" {
+		panic("serveProxy requires an absolute http(s) upstream URL without a fragment")
+	}
+	proxy := &httputil.ReverseProxy{
+		Rewrite: func(req *httputil.ProxyRequest) {
+			req.SetURL(upstream)
+			req.SetXForwarded()
+		},
+		// Flush each upstream chunk so ordinary streaming responses do not
+		// wait for a periodic flush or for the upstream body to finish.
+		FlushInterval: -1,
+	}
+	return NewFunc(func(a ...Scmer) Scmer {
+		if len(a) != 2 {
+			panic("serveProxy handler expects request and response")
+		}
+		req := mustSliceNet("proxy request", a[0])
+		res := mustSliceNet("proxy response", a[1])
+		writer := res[1].Any().(http.ResponseWriter)
+		// The outer Scheme HTTP server sets a default content type. The
+		// upstream owns this response, including its content type.
+		writer.Header().Del("Content-Type")
+		proxy.ServeHTTP(writer, req[1].Any().(*http.Request))
+		return NewNil()
+	})
 }
 
 // TODO: implement NewServeMux.Handle(route, http.StripPrefix(pfx, handler))
@@ -387,6 +423,12 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 		// catch panics and print out 500 Internal Server Error
 		defer func() {
 			if r := recover(); r != nil {
+				// A streaming handler may have committed headers and a body prefix.
+				// Let net/http abort that connection instead of appending a 500
+				// response to the partially forwarded upstream body.
+				if r == http.ErrAbortHandler {
+					panic(r)
+				}
 				if fmt.Sprint(r) != "websocket closed" {
 					PrintError("error in http handler: " + fmt.Sprint(r))
 				}

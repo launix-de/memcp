@@ -95,6 +95,28 @@ second listener.
 
 These are SQL-over-HTTP APIs rather than a resource-oriented REST data model.
 
+### Reverse-proxy handlers
+
+`(serveProxy "http://127.0.0.1:9000")` creates a normal `(req res)` handler.
+It can be passed to `serve` directly or mounted in the existing handler chain:
+
+```scheme
+(define backend (serveProxy "http://127.0.0.1:9000"))
+(define http_handler (begin
+	(define previous http_handler)
+	(lambda (req res)
+		(if (regexp_test (req "path") "^/backend(?:/|$)")
+			(backend req res)
+			(previous req res)))))
+```
+
+The upstream URL's base path is joined with the incoming path; the mount prefix
+is preserved. Upstream and incoming query parameters are combined. The handler
+forwards the method and body, streams the upstream response, and cancels the
+upstream request when the client disconnects. Unreachable upstreams return 502.
+Hop-by-hop headers are removed and forwarding headers are rebuilt from the
+incoming connection. Creating the handler does not contact the upstream.
+
 ## Architecture
 
 The storage engine and protocol/runtime integration are implemented in Go. SQL
