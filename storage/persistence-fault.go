@@ -204,6 +204,12 @@ func (p *faultPersistence) WalkBlobs(fn func(hash string)) {
 	p.around("blob.walk", func() { p.PersistenceEngine.WalkBlobs(fn) })
 }
 
+func (p *faultPersistence) CleanupAbandonedBlobWrites() {
+	if cleaner, ok := p.PersistenceEngine.(interface{ CleanupAbandonedBlobWrites() }); ok {
+		p.around("blob.write.recover", cleaner.CleanupAbandonedBlobWrites)
+	}
+}
+
 func (p *faultPersistence) OpenLog(shard string) (result PersistenceLogfile) {
 	p.around("log.open", func() { result = p.PersistenceEngine.OpenLog(shard) })
 	return &faultLogfile{PersistenceLogfile: result, owner: p}
@@ -295,6 +301,15 @@ type faultWriteCloser struct {
 	io.WriteCloser
 	owner     *faultPersistence
 	operation string
+}
+
+// Abort bypasses fault injection so failure cleanup cannot mask the original
+// error or publish the partially written object through Close.
+func (w *faultWriteCloser) Abort() error {
+	if aborter, ok := w.WriteCloser.(interface{ Abort() error }); ok {
+		return aborter.Abort()
+	}
+	return nil
 }
 
 func (w *faultWriteCloser) Write(buffer []byte) (n int, err error) {

@@ -144,6 +144,12 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
   Generation construction and `SetSchema` replace the cache under the existing
   exclusive column lifecycle. Cache registrations retain no shard/database.
 
+- `fileBlobWriter.closed` is exclusively owned by its caller. Writers are not
+  shared between goroutines. Abort closes the private descriptor and removes
+  only the temporary path, never the published blob. Startup recovery removes
+  abandoned blob temporary files under `persistenceLifecycle` before database
+  publication; runtime GC must not sweep temporary paths owned by live writers.
+
 ### Scheme AST and Codegen Quoting (lib/queryplan.scm and lib/queryplan-*.scm)
 - Build AST as data: most builder blocks use a single leading quote `'(...)` so nested lists are data, not executed at construction.
 - Lambdas: embed as `'((quote lambda) (param-list) body)` where:

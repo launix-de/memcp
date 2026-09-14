@@ -208,6 +208,13 @@ type fileObjectWriter struct {
 	operation string
 }
 
+func (w *fileObjectWriter) Abort() error {
+	if err := w.File.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
+		return err
+	}
+	return nil
+}
+
 func (w *fileObjectWriter) Write(buffer []byte) (int, error) {
 	n, err := w.File.Write(buffer)
 	if err != nil || n != len(buffer) {
@@ -241,6 +248,24 @@ type fileBlobWriter struct {
 	finalPath string
 	directory string
 	database  string
+	closed    bool // exclusively owned by the write caller, including panic cleanup
+}
+
+// Abort is idempotent and never removes the published content-addressed object.
+func (w *fileBlobWriter) Abort() error {
+	var closeErr error
+	if !w.closed {
+		w.closed = true
+		closeErr = w.File.Close()
+		if errors.Is(closeErr, os.ErrClosed) {
+			closeErr = nil
+		}
+	}
+	removeErr := os.Remove(w.File.Name())
+	if os.IsNotExist(removeErr) {
+		removeErr = nil
+	}
+	return errors.Join(closeErr, removeErr)
 }
 
 func (w *fileBlobWriter) Write(buffer []byte) (int, error) {
@@ -249,18 +274,20 @@ func (w *fileBlobWriter) Write(buffer []byte) (int, error) {
 		if err == nil {
 			err = io.ErrShortWrite
 		}
+		abortPersistenceWrite(w)
 		raisePersistenceFailure("filesystem", w.database, "blob.write", err)
 	}
 	return n, nil
 }
 
 func (w *fileBlobWriter) Close() error {
+	defer abortPersistenceWrite(w)
 	if err := w.File.Sync(); err != nil {
-		w.File.Close()
-		os.Remove(w.File.Name())
 		raisePersistenceFailure("filesystem", w.database, "blob.write.sync", err)
 	}
-	if err := w.File.Close(); err != nil {
+	closeErr := w.File.Close()
+	w.closed = true
+	if err := closeErr; err != nil {
 		os.Remove(w.File.Name())
 		raisePersistenceFailure("filesystem", w.database, "blob.write.close", err)
 	}
@@ -282,6 +309,23 @@ func (w *fileBlobWriter) Close() error {
 		raisePersistenceFailure("filesystem", w.database, "blob.write.close", err)
 	}
 	return nil
+}
+
+// CleanupAbandonedBlobWrites is a startup-only operation. The database must
+// not yet be published: a writer in this process may legitimately own a tempfile.
+func (s *FileStorage) CleanupAbandonedBlobWrites() {
+	err := filepath.WalkDir(s.path+"blob/", func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.Type().IsRegular() && strings.HasPrefix(entry.Name(), ".blob-write-") {
+			return os.Remove(path)
+		}
+		return nil
+	})
+	if err != nil && !os.IsNotExist(err) {
+		raisePersistenceFailure(s.BackendName(), s.path, "blob.write.recover", err)
+	}
 }
 
 func (s *FileStorage) DeleteBlob(hash string) {

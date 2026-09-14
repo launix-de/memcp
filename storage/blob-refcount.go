@@ -157,9 +157,11 @@ func (db *database) IncrBlobRefcount(hash string) {
 		)
 		return scm.ToInt(result) > 0
 	}
-	state.rows.RLock()
-	found := incrementExisting()
-	state.rows.RUnlock()
+	found := func() bool {
+		state.rows.RLock()
+		defer state.rows.RUnlock()
+		return incrementExisting()
+	}()
 	if found {
 		return
 	}

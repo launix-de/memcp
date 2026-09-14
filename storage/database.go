@@ -478,6 +478,7 @@ func LoadDatabases() {
 			db.Name = entry.Name()
 			db.persistence = instrumentPersistence(entry.Name(), &FileStorage{path: Basepath + "/" + entry.Name() + "/"})
 			db.srState = COLD
+			db.recoverAbandonedBlobWrites()
 			databases.Set(db.Name, db)
 		} else if strings.HasSuffix(entry.Name(), ".json") && entry.Name() != "settings.json" {
 			// Backend configuration file (e.g., Ceph, S3)
@@ -498,6 +499,7 @@ func LoadDatabases() {
 			db.Name = dbName
 			db.persistence = persistence
 			db.srState = COLD
+			db.recoverAbandonedBlobWrites()
 			databases.Set(db.Name, db)
 		}
 	}
