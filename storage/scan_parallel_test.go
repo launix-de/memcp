@@ -94,6 +94,23 @@ func TestCollectRelevantShardsUsesPartitionBounds(t *testing.T) {
 			},
 			wantShards: []int{0, 1},
 		},
+		{
+			name: "unordered IN binding is not a scalar partition interval",
+			boundary: analyzedBoundary{
+				col: "id", matcher: InMatcher,
+				lower: scm.NewSlice([]scm.Scmer{scm.NewInt(35), scm.NewInt(5)}), lowerInclusive: true,
+				upper: scm.NewSlice([]scm.Scmer{scm.NewInt(35), scm.NewInt(5)}), upperInclusive: true,
+			},
+			wantShards: []int{0, 1, 2, 3, 4},
+		},
+		{
+			name: "LIKE binding is not a scalar partition interval",
+			boundary: analyzedBoundary{
+				col: "id", matcher: LikeMatcher,
+				lower: scm.NewString("%3%"), upper: scm.NewString("%3%"),
+			},
+			wantShards: []int{0, 1, 2, 3, 4},
+		},
 	}
 
 	for _, tt := range tests {
@@ -106,6 +123,10 @@ func TestCollectRelevantShardsUsesPartitionBounds(t *testing.T) {
 				if got[i] != shards[wantIndex] {
 					t.Fatalf("collectRelevantShards shard %d = %p, want shard[%d] %p", i, got[i], wantIndex, shards[wantIndex])
 				}
+			}
+			one, single := singleRelevantShard(schema, runtimeScanAccess(analyzedBoundaries{tt.boundary}), shards)
+			if single != (len(tt.wantShards) == 1) || (single && one != shards[tt.wantShards[0]]) {
+				t.Fatalf("singleRelevantShard returned %p single=%v for expected shards %v", one, single, tt.wantShards)
 			}
 		})
 	}
@@ -138,6 +159,40 @@ func setupScanParallelTestTable(t *testing.T, dbName string) *table {
 	tbl, _ := CreateTable(dbName, "items", Memory, false)
 	tbl.CreateColumn("id", "INT", nil, nil)
 	return tbl
+}
+
+func TestGeneratedUniqueKeySkipReleasesOuterLockOnPanic(t *testing.T) {
+	for _, generatedFirst := range []bool{true, false} {
+		name := "generated_first"
+		if !generatedFirst {
+			name = "generated_last"
+		}
+		t.Run(name, func(t *testing.T) {
+			tbl := setupScanParallelTestTable(t, "tuniqueskiplock")
+			tbl.CreateColumn("name", "TEXT", nil, nil)
+			tbl.mu.Lock()
+			tbl.Columns[0].AutoIncrement = true
+			keys := []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}, {Id: "name", Cols: []string{"name"}}}
+			if !generatedFirst {
+				keys[0], keys[1] = keys[1], keys[0]
+			}
+			tbl.Unique = keys
+			tbl.mu.Unlock()
+			var caught any
+			func() {
+				defer func() { caught = recover() }()
+				tbl.ProcessUniqueCollision([]string{"name"}, [][]scm.Scmer{{scm.NewString("new")}}, false,
+					func([][]scm.Scmer) { panic("insert callback failed") }, nil, nil, 0, nil)
+			}()
+			if caught != "insert callback failed" {
+				t.Fatalf("expected callback panic, got %v", caught)
+			}
+			if !tbl.uniquelock.TryLock() {
+				t.Fatal("skipping a generated unique key retained the outer unique lock")
+			}
+			tbl.uniquelock.Unlock()
+		})
+	}
 }
 
 func TestIterateShardsParallelMarksFreeSingleShardSolo(t *testing.T) {

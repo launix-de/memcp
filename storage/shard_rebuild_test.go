@@ -2019,6 +2019,102 @@ func TestRepartitionInheritedIndexFailureKeepsOldGeneration(t *testing.T) {
 	tbl.maintenanceMu.Unlock()
 }
 
+func TestRepartitionTopologySizeRejectsCartesianExplosion(t *testing.T) {
+	for _, counts := range [][]int{
+		{2015, 3, 3, 143, 21, 15, 2, 13, 2},
+		{993, 993, 6},
+		{int(^uint(0) >> 1), 2},
+		{0}, {-1},
+	} {
+		dimensions := make([]shardDimension, len(counts))
+		for i, count := range counts {
+			dimensions[i].NumPartitions = count
+		}
+		if count, ok := checkedRepartitionShardCount(dimensions, maxRepartitionShards); ok {
+			t.Fatalf("unsafe Cartesian counts %v accepted as %d shards", counts, count)
+		}
+	}
+	if count, ok := checkedRepartitionShardCount([]shardDimension{{NumPartitions: 64}, {NumPartitions: 64}}, maxRepartitionShards); !ok || count != maxRepartitionShards {
+		t.Fatalf("valid cap topology count=%d ok=%v", count, ok)
+	}
+}
+
+func TestRepartitionRowTargetDoesNotOverflow(t *testing.T) {
+	oldSize := Settings.ShardSize
+	t.Cleanup(func() { Settings.ShardSize = oldSize })
+	Settings.ShardSize = 60000
+	for _, tc := range []struct {
+		rows uint
+		want int
+	}{{0, 1}, {30000, 2}, {60000, 3}, {^uint(0), maxRepartitionShards}} {
+		if got := repartitionShardTarget(tc.rows, false); got != tc.want {
+			t.Fatalf("row target(%d)=%d want %d", tc.rows, got, tc.want)
+		}
+	}
+}
+
+func TestRepartitionProposalScaleRemainsBounded(t *testing.T) {
+	for _, target := range []int{1, 2, 21, 128, maxRepartitionShards} {
+		for _, scores := range [][]int{{1000, 1000}, {int(^uint(0) >> 1), int(^uint(0) >> 1), 993, 6}, {2015000000, 3000000, 3000000, 143000000, 21000000, 15000000, 2000000, 13000000, 2000000}} {
+			candidates := make([]shardDimension, len(scores))
+			for i, score := range scores {
+				candidates[i].NumPartitions = score
+			}
+			scale := repartitionScale(candidates, target)
+			for i, score := range scores {
+				candidates[i].NumPartitions = scaledRepartitionCount(score, scale)
+			}
+			if count, ok := checkedRepartitionShardCount(candidates, maxRepartitionShards); !ok || count > 2*target {
+				t.Fatalf("target %d scores %v scale %g produced unsafe topology count=%d ok=%v", target, scores, scale, count, ok)
+			}
+		}
+	}
+	// 4x4 is five below 21, while 5x5 is four above. A negative stored
+	// deviation used to prevent the better overshooting candidate from winning.
+	scores := []shardDimension{{NumPartitions: 1000}, {NumPartitions: 1000}}
+	scale := repartitionScale(scores, 21)
+	if n := scaledRepartitionCount(1000, scale); n != 5 {
+		t.Fatalf("closest scale picks %dx%d instead of 5x5", n, n)
+	}
+}
+
+func TestRepartitionUnsafeRequestKeepsTopologyAndReleasesMaintenance(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "trepartitionunsafecount", 128)
+	before := tbl.activeTopology()
+	var dimensionPanic any
+	func() {
+		defer func() { dimensionPanic = recover() }()
+		tbl.NewShardDimension("id", int(^uint(0)>>1))
+	}()
+	if dimensionPanic == nil {
+		t.Fatal("unsafe pivot count did not fail before allocation")
+	}
+	if !tbl.beginManualRepartition() {
+		t.Fatal("manual repartition was not claimed")
+	}
+	var caught any
+	func() {
+		defer func() { caught = recover() }()
+		tbl.repartition([]shardDimension{{Column: "id", NumPartitions: maxRepartitionShards + 1}})
+	}()
+	if caught == nil {
+		t.Fatal("unsafe repartition did not fail before allocation")
+	}
+	if tbl.activeTopology() != before || tbl.repartitionDualWriteActive.Load() {
+		t.Fatal("unsafe request changed authoritative topology")
+	}
+	if !tbl.maintenanceMu.TryLock() {
+		t.Fatal("unsafe request leaked maintenance claim")
+	}
+	tbl.maintenanceMu.Unlock()
+	tbl.mu.Lock()
+	kind := tbl.maintenanceKind
+	tbl.mu.Unlock()
+	if kind != 0 {
+		t.Fatalf("unsafe request retained maintenance kind %d", kind)
+	}
+}
+
 func TestRepartitionConcurrentDeleteSurvivesReload(t *testing.T) {
 	const rows = 256
 	tbl, persistence := createDurabilityTestTable(t, "trepartitiondeletereload", rows)

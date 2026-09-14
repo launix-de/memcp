@@ -39,6 +39,19 @@ type IndexHook interface {
 	ComputeSize() uint
 }
 
+// IndexCandidateIterator pulls distinct main-generation row IDs into caller
+// batches and returns their count; zero means exhausted. It promises no row
+// order. The scan owns consumer stop and never passes a callback into a hook.
+// The immutable invocation value list must not be copied or sorted.
+type IndexCandidateIterator func([]uint32) int
+
+// IndexCandidateSource is an optional exact main-row enumerator. A nil result
+// declines the access when probing is more expensive than the given span.
+// Column is invocation-bound: reusable hooks must not retain a transaction.
+type IndexCandidateSource interface {
+	BindCandidates(lower scm.Scmer, column ColumnReader, spanRows int) IndexCandidateIterator
+}
+
 // IndexCandidateEstimator is an optional, constant-time cardinality view over
 // a bound hook. Candidate counts may be upper bounds because the residual SQL
 // predicate remains authoritative for correctness.
@@ -77,7 +90,7 @@ type IndexAnalyzer interface {
 	IsSorted() bool
 
 	// IsPointLike reports whether this column is a point lookup for index ordering.
-	// Equal and Like: true (sorted before range). Range: false.
+	// Equal and Like: true (sorted before range). Range and multi-value IN: false.
 	IsPointLike() bool
 
 	// Deploy binds this analyzer to a shard. persistent is false for a
@@ -92,10 +105,11 @@ var (
 	RangeMatcher  IndexAnalyzer = &rangeMatcher{}
 	LikeMatcher   IndexAnalyzer = &likeMatcher{}
 	RecSetMatcher IndexAnalyzer = &recSetMatcher{}
+	InMatcher     IndexAnalyzer = &inMatcher{}
 )
 
 // boundaryMatchers lists all known matcher types.
-var boundaryMatchers = []IndexAnalyzer{EqualMatcher, RangeMatcher, LikeMatcher, RecSetMatcher}
+var boundaryMatchers = []IndexAnalyzer{EqualMatcher, RangeMatcher, LikeMatcher, RecSetMatcher, InMatcher}
 
 // RegisterIndexAnalyzer installs a custom analyzer. Registration is intended
 // for package initialization, before queries start.
