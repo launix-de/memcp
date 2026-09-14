@@ -4573,7 +4573,11 @@ is still available and remains an ordinary scalar expression through untangle. *
 (define sanitize_decimal_aggregate_fields (lambda (sources fields)
 	(map_assoc (coalesceNil fields '()) (lambda (_title expr)
 		(begin
-			(define scale (decimal_aggregate_output_scale sources expr))
+			(define scale (coalesceNil (decimal_aggregate_output_scale sources expr)
+				(match expr
+					((symbol get_column) _tbl _ignorecase _col _col_ignorecase) (decimal_expr_scale sources expr)
+					((quote get_column) _tbl _ignorecase _col _col_ignorecase) (decimal_expr_scale sources expr)
+					_ nil)))
 			(if (nil? scale) expr (list (quote sql_decimal_output) expr scale)))))))
 
 (define sanitize_decimal_aggregate_outputs (lambda (query)
@@ -4582,9 +4586,9 @@ is still available and remains an ordinary scalar expression through untangle. *
 		(if (query_block? normalized)
 			(make_query_block
 				(qb_schema normalized)
-				(map (qb_sources normalized) (lambda (src)
-					(source_with_relation src
-						(sanitize_decimal_aggregate_outputs (source_relation src)))))
+				/* Derived/view fields are relational values, not output. Rounding
+				there changes predicates and aggregates in their consumers. */
+				(qb_sources normalized)
 				(sanitize_decimal_aggregate_fields (qb_sources normalized) (qb_fields normalized))
 				(qb_where normalized)
 				(qb_group normalized)

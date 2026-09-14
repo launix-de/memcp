@@ -1,0 +1,86 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+metadata:
+  version: '1.0'
+  description: 'Exact EXISTS probes allow multiple matching shards; scalar probes preserve zero/one/two-row semantics'
+  isolated: true
+
+setup:
+  - sql: DROP TABLE IF EXISTS es_child
+  - sql: DROP TABLE IF EXISTS es_parent
+  - sql: CREATE TABLE es_parent (id INT, balance DECIMAL(12,2)) ENGINE=MEMORY
+  - sql: CREATE TABLE es_child (id INT, parent_id INT, payload INT) ENGINE=MEMORY
+  - sql: INSERT INTO es_parent VALUES (1,100),(2,200),(3,300),(4,400)
+  - sql: INSERT INTO es_child VALUES (1,3,10),(2,3,20),(3,1,NULL),(4,NULL,40),(5,2,50)
+  - scm: |
+      (partitiontable (table "memcp-tests" "es_child")
+        (list (list "id" (list 1 4))))
+
+test_cases:
+  - name: Exact existence accepts matches in two shards
+    scm: |
+      (scan_lookup nil (table "memcp-tests" "es_child")
+        (list (compiled_scan_access_header 1 "exists" 0 -1)
+          (scan_boundary "equal" "parent_id" 0 0 true true "" false))
+        (list 3))
+    expect:
+      data: [true]
+
+  - name: Exact existence rejects absent keys
+    scm: |
+      (scan_lookup nil (table "memcp-tests" "es_child")
+        (list (compiled_scan_access_header 1 "exists" 0 -1)
+          (scan_boundary "equal" "parent_id" 0 0 true true "" false))
+        (list 4))
+    expect:
+      data: [false]
+
+  - name: Correlated EXISTS preserves duplicate child matches
+    sql: |
+      SELECT p.id, EXISTS (SELECT 1 FROM es_child c WHERE c.parent_id=p.id) AS present
+      FROM es_parent p ORDER BY p.id
+    expect:
+      rows: 4
+      data:
+        - {id: 1, present: true}
+        - {id: 2, present: true}
+        - {id: 3, present: true}
+        - {id: 4, present: false}
+
+  - name: Global AVG and NOT EXISTS compose across child shards
+    sql: |
+      SELECT bucket, COUNT(*) AS n, SUM(balance) AS total
+      FROM (
+        SELECT 1 AS bucket, p.balance FROM es_parent p
+        WHERE p.balance > (SELECT AVG(balance) FROM es_parent)
+          AND NOT EXISTS (SELECT 1 FROM es_child c WHERE c.parent_id=p.id)
+      ) candidates
+      GROUP BY bucket
+    expect:
+      rows: 1
+      data: [{bucket: 1, n: 1, total: 400}]
+
+  - name: Scalar lookup with two matches still fails
+    sql: SELECT (SELECT payload FROM es_child WHERE parent_id=3) AS value
+    expect: {error: true}
+
+  - name: Scalar lookup with one match returns its value
+    sql: SELECT (SELECT payload FROM es_child WHERE parent_id=2) AS value
+    expect: {rows: 1, data: [{value: 50}]}
+
+  - name: Scalar lookup with one NULL value returns NULL
+    sql: SELECT (SELECT payload FROM es_child WHERE parent_id=1) AS value
+    expect: {rows: 1, data: [{value: null}]}
+
+  - name: Scalar lookup without matches returns NULL
+    sql: SELECT (SELECT payload FROM es_child WHERE parent_id=4) AS value
+    expect: {rows: 1, data: [{value: null}]}
+
+  - name: NULL equality never becomes an existence match
+    sql: SELECT EXISTS (SELECT 1 FROM es_child WHERE parent_id=NULL) AS present
+    expect: {rows: 1, data: [{present: false}]}
+
+cleanup:
+  - sql: DROP TABLE IF EXISTS es_child
+  - sql: DROP TABLE IF EXISTS es_parent

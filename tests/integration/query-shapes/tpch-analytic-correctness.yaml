@@ -1,0 +1,687 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+metadata:
+  version: '1.0'
+  description: 'TPC-H analytic compositions: partitioned string groups, nested view aggregates, anti-joins and scalar
+    stages'
+  syntax: postgresql
+  isolated: true
+setup:
+  - sql: DROP TABLE IF EXISTS tc_region
+  - sql: |-
+      CREATE TABLE tc_region (
+          r_regionkey INTEGER , r_name CHAR(25) ,
+          r_comment VARCHAR(152)) ENGINE=MEMORY
+  - sql: INSERT INTO tc_region VALUES (0,'AFRICA',''),(1,'AMERICA',''),(2,'ASIA',''),(3,'EUROPE',''),(4,'MIDDLE
+      EAST','')
+  - sql: DROP TABLE IF EXISTS tc_nation
+  - sql: |-
+      CREATE TABLE tc_nation (
+          n_nationkey INTEGER , n_name CHAR(25) ,
+          n_regionkey INTEGER , n_comment VARCHAR(152)) ENGINE=MEMORY
+  - sql: INSERT INTO tc_nation VALUES (0,'GERMANY',3,''),(1,'FRANCE',3,''),(2,'BRAZIL',1,''),(3,'SAUDI ARABIA',4,''),(4,'CANADA',1,''),(5,'INDIA',2,'')
+  - sql: DROP TABLE IF EXISTS tc_supplier
+  - sql: |-
+      CREATE TABLE tc_supplier (
+          s_suppkey INTEGER , s_name CHAR(25) ,
+          s_address VARCHAR(40) , s_nationkey INTEGER ,
+          s_phone CHAR(15) , s_acctbal DECIMAL(15,2) ,
+          s_comment VARCHAR(101) ) ENGINE=MEMORY
+  - sql: INSERT INTO tc_supplier VALUES (1,'Supplier One','Addr1',0,'13-111',100,''),(2,'Supplier Two','Addr2',1,'31-222',200,''),(3,'Supplier
+      Three','Addr3',3,'23-333',300,''),(4,'Supplier Four','Addr4',2,'29-444',400,'')
+  - sql: DROP TABLE IF EXISTS tc_customer
+  - sql: "CREATE TABLE tc_customer (\n    c_custkey INTEGER , c_name VARCHAR(25) ,\n    c_address VARCHAR(40) ,\
+      \ c_nationkey INTEGER ,\n    c_phone CHAR(15) , c_acctbal DECIMAL(15,2) ,\n    c_mktsegment CHAR(10) , c_comment\
+      \ VARCHAR(117) \n  ) ENGINE=MEMORY"
+  - sql: INSERT INTO tc_customer VALUES (1,'Customer One','Addr1',2,'13-111',100,'BUILDING',''),(2,'Customer Two','Addr2',1,'31-222',200,'BUILDING',''),(3,'Customer
+      Three','Addr3',0,'23-333',300,'AUTOMOBILE',''),(4,'Customer Four','Addr4',2,'13-444',400,'BUILDING',''),(5,'Customer
+      Five','Addr5',3,'31-555',500,'BUILDING',''),(6,'Excluded','Addr6',5,'99-666',900,'BUILDING',''),(7,'Null Balance','Addr7',0,'13-777',NULL,'BUILDING','')
+  - sql: DROP TABLE IF EXISTS tc_part
+  - sql: |-
+      CREATE TABLE tc_part (
+          p_partkey INTEGER , p_name VARCHAR(55) ,
+          p_mfgr CHAR(25) , p_brand CHAR(10) ,
+          p_type VARCHAR(25) , p_size INTEGER ,
+          p_container CHAR(10) , p_retailprice DECIMAL(15,2) ,
+          p_comment VARCHAR(23) ) ENGINE=MEMORY
+  - sql: INSERT INTO tc_part VALUES (1,'forest green part','M1','Brand#12','ECONOMY ANODIZED STEEL',15,'SM BOX',100,''),(2,'green
+      brass part','M2','Brand#23','STANDARD BRASS',15,'MED BOX',200,''),(3,'plain brass part','M3','Brand#34','STANDARD
+      BRASS',15,'LG BOX',300,''),(4,'green economy part','M4','Brand#12','ECONOMY ANODIZED STEEL',3,'SM PACK',400,'')
+  - sql: DROP TABLE IF EXISTS tc_partsupp
+  - sql: |-
+      CREATE TABLE tc_partsupp (
+          ps_partkey INTEGER , ps_suppkey INTEGER ,
+          ps_availqty INTEGER , ps_supplycost DECIMAL(15,2) ,
+          ps_comment VARCHAR(199) ) ENGINE=MEMORY
+  - sql: INSERT INTO tc_partsupp VALUES (1,1,100,10,''),(1,2,100,20,''),(2,1,100,30,''),(2,2,100,15,''),(3,1,100,12,''),(3,2,100,25,''),(4,3,100,5,''),(4,4,100,7,'')
+  - sql: DROP TABLE IF EXISTS tc_orders
+  - sql: |-
+      CREATE TABLE tc_orders (
+          o_orderkey INTEGER , o_custkey INTEGER ,
+          o_orderstatus CHAR(1) , o_totalprice DECIMAL(15,2) ,
+          o_orderdate DATE , o_orderpriority CHAR(15) ,
+          o_clerk CHAR(15) , o_shippriority INTEGER ,
+          o_comment VARCHAR(79) ) ENGINE=MEMORY
+  - sql: INSERT INTO tc_orders VALUES (1,1,'F',100,'1995-03-01','1-URGENT','Clerk1',0,''),(2,2,'F',200,'1995-09-01','2-HIGH','Clerk2',0,''),(3,3,'F',300,'1996-01-01','3-MEDIUM','Clerk3',0,''),(4,1,'F',400,'1996-02-01','1-URGENT','Clerk4',0,''),(5,2,'F',500,'1994-01-01','2-HIGH','Clerk5',0,'special
+      pending requests')
+  - sql: DROP TABLE IF EXISTS tc_lineitem
+  - sql: "CREATE TABLE tc_lineitem (\n    l_orderkey INTEGER , l_partkey INTEGER ,\n    l_suppkey INTEGER , l_linenumber\
+      \ INTEGER ,\n    l_quantity DECIMAL(15,2) , l_extendedprice DECIMAL(15,2) ,\n    l_discount DECIMAL(15,2)\
+      \ , l_tax DECIMAL(15,2) ,\n    l_returnflag CHAR(1) , l_linestatus CHAR(1) ,\n    l_shipdate DATE , l_commitdate\
+      \ DATE ,\n    l_receiptdate DATE , l_shipinstruct CHAR(25) ,\n    l_shipmode CHAR(10) , l_comment VARCHAR(44)\
+      \ \n  ) ENGINE=MEMORY"
+  - sql: INSERT INTO tc_lineitem VALUES (1,1,1,1,200,100,0.05,0.02,'A','F','1995-03-20','1995-03-15','1995-03-25','DELIVER
+      IN PERSON','AIR',''),(1,2,2,2,200,200,0.07,0.03,'N','O','1995-03-21','1995-03-19','1995-03-25','DELIVER IN
+      PERSON','AIR REG',''),(2,1,1,1,5,300,0.04,0.01,'R','F','1995-09-10','1995-09-11','1995-09-15','DELIVER IN
+      PERSON','AIR',''),(2,2,2,2,15,400,0.06,0.02,'A','F','1995-09-11','1995-09-12','1995-09-15','DELIVER IN PERSON','AIR',''),(3,4,3,1,4,111.11,0.07,0.03,'N','O','1996-01-10','1996-01-05','1996-01-12','DELIVER
+      IN PERSON','AIR',''),(3,3,1,2,25,100,0.05,0.02,'R','F','1996-01-11','1996-01-12','1996-01-15','DELIVER IN
+      PERSON','AIR REG',''),(4,4,4,1,3,111.11,0.07,0.03,'A','F','1996-02-10','1996-02-11','1996-02-15','DELIVER
+      IN PERSON','AIR',''),(4,4,3,2,2,100,0.03,0.04,'N','O','1996-02-11','1996-02-12','1996-02-15','DELIVER IN PERSON','AIR',''),(5,1,1,1,5,100,0.06,0.02,'R','F','1994-01-15','1994-01-14','1994-01-16','DELIVER
+      IN PERSON','AIR','')
+  - sql: INSERT INTO tc_orders VALUES (6,3,'F',80,'1993-11-01','2-HIGH','Clerk6',0,''),(7,2,'F',250,'1995-12-01','3-MEDIUM','Clerk7',0,'')
+  - sql: |-
+      INSERT INTO tc_lineitem VALUES
+        (6,3,1,1,8,80,0.05,0.02,'R','F','1993-11-10','1993-11-11','1993-11-15','DELIVER IN PERSON','AIR',''),
+        (7,4,3,1,2,100,0.03,0.02,'N','O','1995-12-10','1995-12-05','1995-12-15','DELIVER IN PERSON','AIR',''),
+        (7,4,3,2,3,100,0.03,0.02,'N','O','1995-12-11','1995-12-05','1995-12-15','DELIVER IN PERSON','AIR',''),
+        (7,3,1,3,1,50,0.05,0.02,'N','O','1995-12-10','1995-12-15','1995-12-15','DELIVER IN PERSON','AIR','')
+  - scm: (partitiontable (table "memcp-tests" "tc_lineitem") (list (list "l_returnflag" (list "N" "R"))))
+test_cases:
+  - name: 'TPC-H Q01: Partitioned string groups with sums, averages and ordering'
+    sql: |-
+      select
+        l_returnflag,
+        l_linestatus,
+        sum(l_quantity) as sum_qty,
+        sum(l_extendedprice) as sum_base_price,
+        sum(l_extendedprice * (1 - l_discount)) as sum_disc_price,
+        sum(l_extendedprice * (1 - l_discount) * (1 + l_tax)) as sum_charge,
+        avg(l_quantity) as avg_qty,
+        avg(l_extendedprice) as avg_price,
+        avg(l_discount) as avg_disc,
+        count(*) as count_order
+      from
+        tc_lineitem
+      where
+        l_shipdate <= date '1998-12-01' - interval '90' day
+      group by
+        l_returnflag,
+        l_linestatus
+      order by
+        l_returnflag,
+        l_linestatus
+    expect:
+      rows: 3
+      data:
+        - l_returnflag: A
+          l_linestatus: F
+          sum_qty: 218.0
+          sum_base_price: 611.11
+          sum_disc_price: 574.33
+          sum_charge: 586.85
+          avg_qty: 72.67
+          avg_price: 203.7
+          avg_disc: 0.06
+          count_order: 3
+        - l_returnflag: N
+          l_linestatus: O
+          sum_qty: 212.0
+          sum_base_price: 661.11
+          sum_disc_price: 627.83
+          sum_charge: 645.22
+          avg_qty: 35.33
+          avg_price: 110.19
+          avg_disc: 0.05
+          count_order: 6
+        - l_returnflag: R
+          l_linestatus: F
+          sum_qty: 43.0
+          sum_base_price: 580.0
+          sum_disc_price: 553.0
+          sum_charge: 561.18
+          avg_qty: 10.75
+          avg_price: 145.0
+          avg_disc: 0.05
+          count_order: 4
+  - name: 'TPC-H Q02: Correlated minimum over a joined supplier domain'
+    sql: |-
+      select
+        s_acctbal,
+        s_name,
+        n_name,
+        p_partkey,
+        p_mfgr,
+        s_address,
+        s_phone,
+        s_comment
+      from
+        tc_part,
+        tc_supplier,
+        tc_partsupp,
+        tc_nation,
+        tc_region
+      where
+        p_partkey = ps_partkey
+        and s_suppkey = ps_suppkey
+        and p_size = 15
+        and p_type like '%BRASS'
+        and s_nationkey = n_nationkey
+        and n_regionkey = r_regionkey
+        and r_name = 'EUROPE'
+        and ps_supplycost = (
+          select
+            min(ps_supplycost)
+          from
+            tc_partsupp,
+            tc_supplier,
+            tc_nation,
+            tc_region
+          where
+            p_partkey = ps_partkey
+            and s_suppkey = ps_suppkey
+            and s_nationkey = n_nationkey
+            and n_regionkey = r_regionkey
+            and r_name = 'EUROPE'
+        )
+      order by
+        s_acctbal desc,
+        n_name,
+        s_name,
+        p_partkey LIMIT 100
+    expect:
+      rows: 2
+      data:
+        - s_acctbal: 200.0
+          s_name: Supplier Two
+          n_name: FRANCE
+          p_partkey: 2
+          p_mfgr: M2
+          s_address: Addr2
+          s_phone: 31-222
+          s_comment: ''
+        - s_acctbal: 100.0
+          s_name: Supplier One
+          n_name: GERMANY
+          p_partkey: 3
+          p_mfgr: M3
+          s_address: Addr1
+          s_phone: 13-111
+          s_comment: ''
+  - name: 'TPC-H Q03: Grouped three-way join with date filters and top-k'
+    sql: |-
+      select
+        l_orderkey,
+        sum(l_extendedprice * (1 - l_discount)) as revenue,
+        o_orderdate,
+        o_shippriority
+      from
+        tc_customer,
+        tc_orders,
+        tc_lineitem
+      where
+        c_mktsegment = 'BUILDING'
+        and c_custkey = o_custkey
+        and l_orderkey = o_orderkey
+        and o_orderdate < date '1995-03-15'
+        and l_shipdate > date '1995-03-15'
+      group by
+        l_orderkey,
+        o_orderdate,
+        o_shippriority
+      order by
+        revenue desc,
+        o_orderdate LIMIT 10
+    expect:
+      rows: 1
+      data:
+        - l_orderkey: 1
+          revenue: 281.0
+          o_orderdate: '1995-03-01'
+          o_shippriority: 0
+  - name: 'TPC-H Q08: CASE aggregate ratio over a multi-table derived query'
+    sql: |-
+      select
+        o_year,
+        sum(case
+          when tc_nation = 'BRAZIL' then volume
+          else 0
+        end) / sum(volume) as mkt_share
+      from
+        (
+          select
+            extract(year from o_orderdate) as o_year,
+            l_extendedprice * (1 - l_discount) as volume,
+            n2.n_name as tc_nation
+          from
+            tc_part,
+            tc_supplier,
+            tc_lineitem,
+            tc_orders,
+            tc_customer,
+            tc_nation n1,
+            tc_nation n2,
+            tc_region
+          where
+            p_partkey = l_partkey
+            and s_suppkey = l_suppkey
+            and l_orderkey = o_orderkey
+            and o_custkey = c_custkey
+            and c_nationkey = n1.n_nationkey
+            and n1.n_regionkey = r_regionkey
+            and r_name = 'AMERICA'
+            and s_nationkey = n2.n_nationkey
+            and o_orderdate between date '1995-01-01' and date '1996-12-31'
+            and p_type = 'ECONOMY ANODIZED STEEL'
+        ) as all_nations
+      group by
+        o_year
+      order by
+        o_year
+    expect:
+      rows: 2
+      data:
+        - o_year: 1995.0
+          mkt_share: 0.0
+        - o_year: 1996.0
+          mkt_share: 0.52
+  - name: 'TPC-H Q09: Derived profit aggregate preserves supplier-part join multiplicity'
+    sql: |-
+      select
+        tc_nation,
+        o_year,
+        sum(amount) as sum_profit
+      from
+        (
+          select
+            n_name as tc_nation,
+            extract(year from o_orderdate) as o_year,
+            l_extendedprice * (1 - l_discount) - ps_supplycost * l_quantity as amount
+          from
+            tc_part,
+            tc_supplier,
+            tc_lineitem,
+            tc_partsupp,
+            tc_orders,
+            tc_nation
+          where
+            s_suppkey = l_suppkey
+            and ps_suppkey = l_suppkey
+            and ps_partkey = l_partkey
+            and p_partkey = l_partkey
+            and o_orderkey = l_orderkey
+            and s_nationkey = n_nationkey
+            and p_name like '%green%'
+        ) as profit
+      group by
+        tc_nation,
+        o_year
+      order by
+        tc_nation,
+        o_year desc
+    expect:
+      rows: 6
+      data:
+        - tc_nation: BRAZIL
+          o_year: 1996.0
+          sum_profit: 82.33
+        - tc_nation: FRANCE
+          o_year: 1995.0
+          sum_profit: -2663.0
+        - tc_nation: GERMANY
+          o_year: 1995.0
+          sum_profit: -1667.0
+        - tc_nation: GERMANY
+          o_year: 1994.0
+          sum_profit: 44.0
+        - tc_nation: SAUDI ARABIA
+          o_year: 1996.0
+          sum_profit: 170.33
+        - tc_nation: SAUDI ARABIA
+          o_year: 1995.0
+          sum_profit: 169.0
+  - name: 'TPC-H Q10: Returned revenue groups customer columns after four-way joins'
+    sql: |-
+      select
+        c_custkey,
+        c_name,
+        sum(l_extendedprice * (1 - l_discount)) as revenue,
+        c_acctbal,
+        n_name,
+        c_address,
+        c_phone,
+        c_comment
+      from
+        tc_customer,
+        tc_orders,
+        tc_lineitem,
+        tc_nation
+      where
+        c_custkey = o_custkey
+        and l_orderkey = o_orderkey
+        and o_orderdate >= date '1993-10-01'
+        and o_orderdate < date '1993-10-01' + interval '3' month
+        and l_returnflag = 'R'
+        and c_nationkey = n_nationkey
+      group by
+        c_custkey,
+        c_name,
+        c_acctbal,
+        c_phone,
+        n_name,
+        c_address,
+        c_comment
+      order by
+        revenue desc LIMIT 20
+    expect:
+      rows: 1
+      data:
+        - c_custkey: 3
+          c_name: Customer Three
+          revenue: 76.0
+          c_acctbal: 300.0
+          n_name: GERMANY
+          c_address: Addr3
+          c_phone: 23-333
+          c_comment: ''
+  - name: 'TPC-H Q13: LEFT JOIN grouping retains zero-order customers'
+    sql: |-
+      select
+        c_count,
+        count(*) as custdist
+      from
+        (
+          select
+            c_custkey,
+            count(o_orderkey)
+          from
+            tc_customer left outer join tc_orders on
+              c_custkey = o_custkey
+              and o_comment not like '%special%requests%'
+          group by
+            c_custkey
+        ) as c_orders (c_custkey, c_count)
+      group by
+        c_count
+      order by
+        custdist desc,
+        c_count desc
+    expect:
+      rows: 2
+      data:
+        - c_count: 0
+          custdist: 4
+        - c_count: 2
+          custdist: 3
+  - name: TPC-H Q15 view lifecycle
+    sql: |-
+      create view tc_revenue (supplier_no, total_revenue) as
+        select
+          l_suppkey,
+          sum(l_extendedprice * (1 - l_discount))
+        from
+          tc_lineitem
+        where
+          l_shipdate >= date '1996-01-01'
+          and l_shipdate < date '1996-01-01' + interval '3' month
+        group by
+          l_suppkey
+  - name: 'TPC-H Q15: View aggregate compared with its global maximum'
+    sql: |-
+      select
+        s_suppkey,
+        s_name,
+        s_address,
+        s_phone,
+        total_revenue
+      from
+        tc_supplier,
+        tc_revenue
+      where
+        s_suppkey = supplier_no
+        and total_revenue = (
+          select
+            max(total_revenue)
+          from
+            tc_revenue
+        )
+      order by
+        s_suppkey
+    expect:
+      rows: 1
+      data:
+        - s_suppkey: 3
+          s_name: Supplier Three
+          s_address: Addr3
+          s_phone: 23-333
+          total_revenue: 200.33
+  - name: View decimal predicate uses unrounded aggregate values
+    sql: SELECT supplier_no FROM tc_revenue WHERE total_revenue > 200.331 AND total_revenue < 200.334 ORDER BY supplier_no
+    expect:
+      rows: 1
+      data:
+        - supplier_no: 3
+  - name: Derived decimal predicate uses unrounded aggregate values
+    sql: |-
+      SELECT supplier_no FROM (
+        SELECT l_suppkey AS supplier_no, SUM(l_extendedprice * (1-l_discount)) AS total_revenue
+        FROM tc_lineitem
+        WHERE l_shipdate >= DATE '1996-01-01' AND l_shipdate < DATE '1996-04-01'
+        GROUP BY l_suppkey
+      ) revenue
+      WHERE total_revenue > 200.331 AND total_revenue < 200.334
+      ORDER BY supplier_no
+    expect:
+      rows: 1
+      data:
+        - supplier_no: 3
+  - name: Nested aggregate over an empty view selection remains NULL
+    sql: SELECT (SELECT MAX(total_revenue) FROM tc_revenue WHERE supplier_no=-1) AS maximum
+    expect:
+      rows: 1
+      data:
+        - maximum: null
+  - name: View decimal predicates remain unrounded and logical in EXPLAIN IR
+    sql: |-
+      EXPLAIN IR SELECT supplier_no FROM tc_revenue
+      WHERE total_revenue > 200.331 AND total_revenue < 200.334
+    expect:
+      rows: 1
+      result_contains:
+        - group-stage
+        - stage-output
+      result_not_contains:
+        - sql_decimal_output
+        - '.grp:'
+        - inner_select
+        - '(scan '
+  - name: TPC-H Q15 view lifecycle
+    sql: drop view tc_revenue
+  - name: 'TPC-H Q18: Grouped IN with HAVING preserves outer quantity aggregation'
+    sql: |-
+      select
+        c_name,
+        c_custkey,
+        o_orderkey,
+        o_orderdate,
+        o_totalprice,
+        sum(l_quantity)
+      from
+        tc_customer,
+        tc_orders,
+        tc_lineitem
+      where
+        o_orderkey in (
+          select
+            l_orderkey
+          from
+            tc_lineitem
+          group by
+            l_orderkey having
+              sum(l_quantity) > 300
+        )
+        and c_custkey = o_custkey
+        and o_orderkey = l_orderkey
+      group by
+        c_name,
+        c_custkey,
+        o_orderkey,
+        o_orderdate,
+        o_totalprice
+      order by
+        o_totalprice desc,
+        o_orderdate LIMIT 100
+    expect:
+      rows: 1
+      data:
+        - c_name: Customer One
+          c_custkey: 1
+          o_orderkey: 1
+          o_orderdate: '1995-03-01'
+          o_totalprice: 100.0
+          sum: 400.0
+  - name: 'TPC-H Q19: OR branches preserve shared join constraints and quantity ranges'
+    sql: |-
+      select
+        sum(l_extendedprice* (1 - l_discount)) as revenue
+      from
+        tc_lineitem,
+        tc_part
+      where
+        (
+          p_partkey = l_partkey
+          and p_brand = 'Brand#12'
+          and p_container in ('SM CASE', 'SM BOX', 'SM PACK', 'SM PKG')
+          and l_quantity >= 1 and l_quantity <= 1 + 10
+          and p_size between 1 and 5
+          and l_shipmode in ('AIR', 'AIR REG')
+          and l_shipinstruct = 'DELIVER IN PERSON'
+        )
+        or
+        (
+          p_partkey = l_partkey
+          and p_brand = 'Brand#23'
+          and p_container in ('MED BAG', 'MED BOX', 'MED PKG', 'MED PACK')
+          and l_quantity >= 10 and l_quantity <= 10 + 10
+          and p_size between 1 and 10
+          and l_shipmode in ('AIR', 'AIR REG')
+          and l_shipinstruct = 'DELIVER IN PERSON'
+        )
+        or
+        (
+          p_partkey = l_partkey
+          and p_brand = 'Brand#34'
+          and p_container in ('LG CASE', 'LG BOX', 'LG PACK', 'LG PKG')
+          and l_quantity >= 20 and l_quantity <= 20 + 10
+          and p_size between 1 and 15
+          and l_shipmode in ('AIR', 'AIR REG')
+          and l_shipinstruct = 'DELIVER IN PERSON'
+        )
+    expect:
+      rows: 1
+      data:
+        - revenue: 592.66
+  - name: 'TPC-H Q21: EXISTS and NOT EXISTS retain supplier inequality semantics'
+    sql: |-
+      select
+        s_name,
+        count(*) as numwait
+      from
+        tc_supplier,
+        tc_lineitem l1,
+        tc_orders,
+        tc_nation
+      where
+        s_suppkey = l1.l_suppkey
+        and o_orderkey = l1.l_orderkey
+        and o_orderstatus = 'F'
+        and l1.l_receiptdate > l1.l_commitdate
+        and exists (
+          select
+            *
+          from
+            tc_lineitem l2
+          where
+            l2.l_orderkey = l1.l_orderkey
+            and l2.l_suppkey <> l1.l_suppkey
+        )
+        and not exists (
+          select
+            *
+          from
+            tc_lineitem l3
+          where
+            l3.l_orderkey = l1.l_orderkey
+            and l3.l_suppkey <> l1.l_suppkey
+            and l3.l_receiptdate > l3.l_commitdate
+        )
+        and s_nationkey = n_nationkey
+        and n_name = 'SAUDI ARABIA'
+      group by
+        s_name
+      order by
+        numwait desc,
+        s_name LIMIT 100
+    expect:
+      rows: 1
+      data:
+        - s_name: Supplier Three
+          numwait: 2
+  - name: 'TPC-H Q22: Global AVG and correlated anti-join inside derived grouping'
+    sql: |-
+      select
+        cntrycode,
+        count(*) as numcust,
+        sum(c_acctbal) as totacctbal
+      from
+        (
+          select
+            substring(c_phone from 1 for 2) as cntrycode,
+            c_acctbal
+          from
+            tc_customer
+          where
+            substring(c_phone from 1 for 2) in
+              ('13', '31', '23', '29', '30', '18', '17')
+            and c_acctbal > (
+              select
+                avg(c_acctbal)
+              from
+                tc_customer
+              where
+                c_acctbal > 0.00
+                and substring(c_phone from 1 for 2) in
+                  ('13', '31', '23', '29', '30', '18', '17')
+            )
+            and not exists (
+              select
+                *
+              from
+                tc_orders
+              where
+                o_custkey = c_custkey
+            )
+        ) as custsale
+      group by
+        cntrycode
+      order by
+        cntrycode
+    expect:
+      rows: 2
+      data:
+        - cntrycode: '13'
+          numcust: 1
+          totacctbal: 400.0
+        - cntrycode: '31'
+          numcust: 1
+          totacctbal: 500.0
+cleanup:
+  - sql: DROP VIEW IF EXISTS tc_revenue
+  - sql: DROP TABLE IF EXISTS tc_lineitem
+  - sql: DROP TABLE IF EXISTS tc_orders
+  - sql: DROP TABLE IF EXISTS tc_partsupp
+  - sql: DROP TABLE IF EXISTS tc_part
+  - sql: DROP TABLE IF EXISTS tc_customer
+  - sql: DROP TABLE IF EXISTS tc_supplier
+  - sql: DROP TABLE IF EXISTS tc_nation
+  - sql: DROP TABLE IF EXISTS tc_region
