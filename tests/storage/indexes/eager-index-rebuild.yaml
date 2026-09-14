@@ -1,3 +1,5 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
 # Tests for Opt 5: Hybrid Index Rebuild Tiers.
 # After rebuild, indexes with Savings >= 2.0 are eagerly built
 # so the first query does not pay a cold-start full-scan penalty.
@@ -5,12 +7,15 @@
 metadata:
   version: "1.0"
   description: "Eager index rebuild after shard rebuild"
+  isolated: true
 
 setup:
   - sql: "DROP TABLE IF EXISTS eager_idx"
+  - sql: "DROP TABLE IF EXISTS repartition_favorites"
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS eager_idx"
+  - sql: "DROP TABLE IF EXISTS repartition_favorites"
 
 test_cases:
   - name: "Create table and insert data"
@@ -122,3 +127,49 @@ test_cases:
         - id: 98
         - id: 99
         - id: 500
+
+  # Fixture creation and warming must also run when PERF_TEST is disabled.
+  - name: "Create and warm favorite index before repartition"
+    setup:
+      - sql: "DROP TABLE IF EXISTS repartition_favorites"
+      - sql: "CREATE TABLE repartition_favorites (id INT, bucket INT) ENGINE=sloppy"
+      - scm: |
+          (begin
+            (insert (table "memcp-tests" "repartition_favorites") '("id" "bucket")
+              (map (produceN 50000) (lambda (i) (list i (mod i 2)))))
+            (rebuild (table "memcp-tests" "repartition_favorites") true false))
+      - sql: "SELECT id FROM repartition_favorites WHERE id = 49999"
+      - sql: "SELECT id FROM repartition_favorites WHERE id = 49999"
+    sql: "SELECT id FROM repartition_favorites WHERE id = 49999"
+    expect: {rows: 1, data: [{id: 49999}]}
+
+  - name: "Favorite index point probe before repartition"
+    warmup: 10
+    timing_samples: 1
+    threshold_ms: 200
+    sql: "SELECT id FROM repartition_favorites WHERE id = 49999"
+    expect: {rows: 1, data: [{id: 49999}]}
+
+  - name: "Repartition with a warmed favorite index"
+    scm: '(partitiontable (table "memcp-tests" "repartition_favorites") (list (list "bucket" (list 0))))'
+
+  - name: "First point probe retains favorite after repartition"
+    warmup: 0
+    timing_samples: 1
+    threshold_ms: 200
+    sql: "SELECT id FROM repartition_favorites WHERE id = 49999"
+    expect: {rows: 1, data: [{id: 49999}]}
+
+  - name: "Inherited index serves delta duplicates"
+    setup:
+      - sql: "INSERT INTO repartition_favorites VALUES (49999,0)"
+    sql: "SELECT COUNT(*) AS cnt FROM repartition_favorites WHERE id = 49999"
+    expect: {data: [{cnt: 2}]}
+
+  - name: "Inherited index ordered range retains limit"
+    sql: "SELECT id FROM repartition_favorites WHERE id >= 49997 ORDER BY id DESC LIMIT 3"
+    expect: {rows: 3, data: [{id: 49999}, {id: 49999}, {id: 49998}]}
+
+  - name: "Malformed inherited-index predicate fails"
+    sql: "SELECT id FROM repartition_favorites WHERE id = AND bucket = 0"
+    expect: {error: true}

@@ -3644,7 +3644,7 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 				for col, storage := range t.columns {
 					columnSnapshot[col] = storage
 				}
-				indexSnapshot = snapshotIndexesForRebuild(t.Indexes)
+				indexSnapshot = snapshotIndexesForRebuild(t.Indexes, 0.9)
 				deltaColumnsSnapshot = make(map[string]int, len(t.deltaColumns))
 				for col, index := range t.deltaColumns {
 					deltaColumnsSnapshot[col] = index
@@ -3748,7 +3748,7 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 		removedFromCache = true
 
 		// transfer indexes early so we know which index is Native (physically sorted)
-		rebuildIndexes(indexSnapshot, result)
+		rebuildIndexes(indexSnapshot, result, true)
 
 		getDelta := func(idx int, col string) scm.Scmer {
 			item := insertsSnapshot[idx]

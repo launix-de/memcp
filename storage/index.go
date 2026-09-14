@@ -911,7 +911,7 @@ func indexHasComputedCol(s *storageShard, idx *StorageIndex) bool {
 // snapshotIndexesForRebuild copies the mutable index metadata while the caller
 // holds the source shard lock. Rebuild can then rank the candidates without
 // retaining or reacquiring the source lock.
-func snapshotIndexesForRebuild(indexes []*StorageIndex) []*StorageIndex {
+func snapshotIndexesForRebuild(indexes []*StorageIndex, usageDecay float64) []*StorageIndex {
 	if len(indexes) == 0 {
 		return nil
 	}
@@ -919,8 +919,11 @@ func snapshotIndexesForRebuild(indexes []*StorageIndex) []*StorageIndex {
 	for _, idx := range indexes {
 		clone := new(StorageIndex)
 		clone.Cols = append([]string(nil), idx.Cols...)
-		clone.ColMapCols = idx.ColMapCols // shallow copy OK (immutable per-col slices)
-		clone.ColMapFn = idx.ColMapFn     // shallow copy OK
+		clone.ColMapCols = make([][]string, len(idx.ColMapCols))
+		for i, columns := range idx.ColMapCols {
+			clone.ColMapCols[i] = append([]string(nil), columns...)
+		}
+		clone.ColMapFn = append([]scm.Scmer(nil), idx.ColMapFn...)
 		for i, matcher := range idx.ColMatchers {
 			if matcher == nil || matcher.IsSorted() {
 				continue
@@ -932,14 +935,172 @@ func snapshotIndexesForRebuild(indexes []*StorageIndex) []*StorageIndex {
 		}
 		clone.ColOrder = append([]func(scm.Scmer, scm.Scmer) bool(nil), idx.ColOrder...)
 		clone.ColOrderMeta = append([]string(nil), idx.ColOrderMeta...)
-		clone.storeSavings(idx.loadSavings() * 0.9)
+		clone.storeSavings(idx.loadSavings() * usageDecay)
 		clone.baseState.active = false
 		candidates = append(candidates, clone)
 	}
 	return candidates
 }
 
-func rebuildIndexes(candidates []*StorageIndex, t2 *storageShard) {
+func indexDefinitionPrefix(shorter, longer *StorageIndex) bool {
+	if len(shorter.Cols) > len(longer.Cols) {
+		return false
+	}
+	for i, column := range shorter.Cols {
+		if column != longer.Cols[i] {
+			return false
+		}
+		var a, b IndexAnalyzer
+		if i < len(shorter.ColMatchers) {
+			a = shorter.ColMatchers[i]
+		}
+		if i < len(longer.ColMatchers) {
+			b = longer.ColMatchers[i]
+		}
+		if !indexMatcherCompatible(a, b) || !indexMatcherCompatible(b, a) {
+			return false
+		}
+		var af, bf scm.Scmer
+		if i < len(shorter.ColMapFn) {
+			af = shorter.ColMapFn[i]
+		}
+		if i < len(longer.ColMapFn) {
+			bf = longer.ColMapFn[i]
+		}
+		if !scm.Equal(af, bf) {
+			return false
+		}
+		var ac, bc []string
+		if i < len(shorter.ColMapCols) {
+			ac = shorter.ColMapCols[i]
+		}
+		if i < len(longer.ColMapCols) {
+			bc = longer.ColMapCols[i]
+		}
+		if len(ac) != len(bc) {
+			return false
+		}
+		for j := range ac {
+			if ac[j] != bc[j] {
+				return false
+			}
+		}
+		if len(shorter.ColOrderMeta) <= i || len(longer.ColOrderMeta) <= i || shorter.ColOrderMeta[i] != longer.ColOrderMeta[i] {
+			return false
+		}
+	}
+	return true
+}
+
+const maxRepartitionIndexDefinitions = 64
+const maxRepartitionWarmIndexes = 8
+
+func (index *StorageIndex) hasAvailableColumnsRLocked() bool {
+	for i, name := range index.Cols {
+		if i < len(index.ColMapFn) && !index.ColMapFn[i].IsNil() {
+			if i >= len(index.ColMapCols) {
+				return false
+			}
+			for _, source := range index.ColMapCols[i] {
+				if isScanPseudoColName(source) {
+					continue
+				}
+				if index.t.columns[source] == nil {
+					return false
+				}
+			}
+		} else if !isScanPseudoColName(name) && index.t.columns[name] == nil {
+			return false
+		}
+	}
+	return true
+}
+
+func rebuildRepartitionIndexes(candidates []*StorageIndex, shard *storageShard) {
+	release := shard.GetRead()
+	defer release()
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
+	rebuildIndexes(snapshotIndexesForRebuild(candidates, 1), shard, false)
+	sort.SliceStable(shard.Indexes, func(i, j int) bool { return shard.Indexes[i].loadSavings() > shard.Indexes[j].loadSavings() })
+	warmed := 0
+	for _, index := range shard.Indexes {
+		if warmed >= maxRepartitionWarmIndexes || index.loadSavings() < 2 {
+			break
+		}
+		if !index.hasAvailableColumnsRLocked() || indexHasComputedCol(shard, index) {
+			continue
+		}
+		index.buildIndex(&index.baseState, index.buildGetters(nil, nil), nil)
+		warmed++
+	}
+}
+
+// Retain bounded weighted heavy-hitter definitions, then recount their exact
+// usage across all sources. Snapshots never retain source shards or readers.
+// Each source traversal owns read rights and its shard lock, panic-safely.
+func snapshotRepartitionIndexes(shards []*storageShard) []*StorageIndex {
+	var result []*StorageIndex
+	walk := func(visit func(*StorageIndex)) {
+		for _, shard := range shards {
+			if shard == nil {
+				continue
+			}
+			func() {
+				release := shard.GetRead()
+				defer release()
+				shard.mu.RLock()
+				defer shard.mu.RUnlock()
+				for _, index := range shard.Indexes {
+					visit(index)
+				}
+			}()
+		}
+	}
+	walk(func(index *StorageIndex) {
+		weight := index.loadSavings()
+		if weight <= 0 || math.IsNaN(weight) || math.IsInf(weight, 0) {
+			return
+		}
+		for _, candidate := range result {
+			if len(candidate.Cols) == len(index.Cols) && indexDefinitionPrefix(candidate, index) {
+				candidate.storeSavings(min(math.MaxFloat64, candidate.loadSavings()+weight))
+				return
+			}
+		}
+		clone := snapshotIndexesForRebuild([]*StorageIndex{index}, 1)[0]
+		if len(result) < maxRepartitionIndexDefinitions {
+			result = append(result, clone)
+			return
+		}
+		cold := 0
+		for i := range result {
+			if result[i].loadSavings() < result[cold].loadSavings() {
+				cold = i
+			}
+		}
+		clone.storeSavings(min(math.MaxFloat64, clone.loadSavings()+result[cold].loadSavings()))
+		result[cold] = clone
+	})
+	for _, candidate := range result {
+		candidate.storeSavings(0)
+	}
+	walk(func(index *StorageIndex) {
+		weight := index.loadSavings()
+		if weight <= 0 || math.IsNaN(weight) || math.IsInf(weight, 0) {
+			return
+		}
+		for _, candidate := range result {
+			if len(candidate.Cols) == len(index.Cols) && indexDefinitionPrefix(candidate, index) {
+				candidate.storeSavings(min(math.MaxFloat64, candidate.loadSavings()+weight*0.9))
+				return
+			}
+		}
+	})
+	return result
+}
+
+func rebuildIndexes(candidates []*StorageIndex, t2 *storageShard, allowNative bool) {
 	if len(candidates) == 0 {
 		return
 	}
@@ -966,30 +1127,7 @@ func rebuildIndexes(candidates []*StorageIndex, t2 *storageShard) {
 			if len(shorter.Cols) > len(longer.Cols) {
 				continue
 			}
-			isPrefix := true
-			for k := 0; k < len(shorter.Cols); k++ {
-				if shorter.Cols[k] != longer.Cols[k] {
-					isPrefix = false
-					break
-				}
-				var shorterMatcher, longerMatcher IndexAnalyzer
-				if len(shorter.ColMatchers) > k {
-					shorterMatcher = shorter.ColMatchers[k]
-				}
-				if len(longer.ColMatchers) > k {
-					longerMatcher = longer.ColMatchers[k]
-				}
-				if !indexMatcherCompatible(shorterMatcher, longerMatcher) {
-					isPrefix = false
-					break
-				}
-				if len(shorter.ColOrderMeta) <= k || len(longer.ColOrderMeta) <= k ||
-					shorter.ColOrderMeta[k] != longer.ColOrderMeta[k] {
-					isPrefix = false
-					break
-				}
-			}
-			if isPrefix {
+			if indexDefinitionPrefix(shorter, longer) {
 				longer.addSavings(nil, shorter.loadSavings())
 				removed[j] = true
 			}
@@ -1014,7 +1152,7 @@ func rebuildIndexes(candidates []*StorageIndex, t2 *storageShard) {
 			bestIdx = i
 		}
 	}
-	if bestIdx >= 0 {
+	if allowNative && bestIdx >= 0 {
 		result[bestIdx].Native = true
 	}
 	t2.Indexes = result

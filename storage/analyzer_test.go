@@ -1213,7 +1213,7 @@ func TestSnapshotDropsLegacySortedMatcherMetadata(t *testing.T) {
 		Cols:        []string{"status", "id"},
 		ColMatchers: []IndexAnalyzer{EqualMatcher, RangeMatcher},
 	}
-	snapshot := snapshotIndexesForRebuild([]*StorageIndex{legacy})
+	snapshot := snapshotIndexesForRebuild([]*StorageIndex{legacy}, 0.9)
 	if len(snapshot) != 1 {
 		t.Fatalf("snapshot count = %d, want 1", len(snapshot))
 	}

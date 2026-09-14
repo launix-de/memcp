@@ -780,6 +780,7 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension, maint
 	}
 
 	// ── Phase A: Prepare PShards and activate dual-write ──
+	inheritedIndexes := snapshotRepartitionIndexes(oldshards)
 	// Create empty new shards and set repartitionActive BEFORE releasing locks,
 	// so concurrent writes are forwarded to both shard sets.
 	newshards := make([]*storageShard, totalShards)
@@ -1174,6 +1175,20 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension, maint
 	if totalPending > 0 {
 		fmt.Println("repartition: applied", totalPending, "pending deletions after Phase D")
 	}
+	// Main and staging-delta RecIDs are final. Construct generation-local index
+	// permutations before publication; repartition preserves source row order,
+	// so inherited indexes must never claim Native physical ordering.
+	var indexBuildPanic any
+	func() {
+		defer func() { indexBuildPanic = recover() }()
+		for _, shard := range newshards {
+			rebuildRepartitionIndexes(inheritedIndexes, shard)
+		}
+	}()
+	if indexBuildPanic != nil {
+		abortRepartition()
+		panic(indexBuildPanic)
+	}
 
 	// ── Phase F: Durable publication + topology flip ──
 	// Keep the old immutable topology authoritative while schema.json is being
@@ -1284,6 +1299,18 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension, maint
 	t.mu.Unlock()
 	for i := len(oldshardsLocked) - 1; i >= 0; i-- {
 		oldshardsLocked[i].mu.Unlock()
+	}
+	for _, shard := range newshards {
+		indexes := func() []*StorageIndex {
+			release := shard.GetRead()
+			defer release()
+			shard.mu.RLock()
+			defer shard.mu.RUnlock()
+			return append([]*StorageIndex(nil), shard.Indexes...)
+		}()
+		for _, index := range indexes {
+			GlobalCache.AddItem(index, int64(index.ComputeSize()), TypeIndex, indexCleanup, indexLastUsed, indexGetScore)
+		}
 	}
 
 	finishRetirement := func() {
