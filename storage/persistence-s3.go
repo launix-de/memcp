@@ -239,6 +239,13 @@ type s3WriteCloser struct {
 	closed bool
 }
 
+// Abort discards buffered data without publishing a partial remote object.
+func (w *s3WriteCloser) Abort() error {
+	w.closed = true
+	w.buf = bytes.Buffer{}
+	return nil
+}
+
 func (w *s3WriteCloser) Write(p []byte) (int, error) {
 	if w.closed {
 		return 0, io.ErrClosedPipe

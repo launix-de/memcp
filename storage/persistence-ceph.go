@@ -203,6 +203,13 @@ type cephWriteCloser struct {
 	closed bool
 }
 
+// Abort discards buffered data without publishing a partial remote object.
+func (w *cephWriteCloser) Abort() error {
+	w.closed = true
+	w.buf = bytes.Buffer{}
+	return nil
+}
+
 func (w *cephWriteCloser) Write(p []byte) (int, error) {
 	if w.closed {
 		return 0, io.ErrClosedPipe

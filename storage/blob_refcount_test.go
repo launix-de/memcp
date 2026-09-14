@@ -871,3 +871,33 @@ func TestOverlayBlobLoadedReferenceLifecycle(t *testing.T) {
 		t.Fatal("last known owner failed to release blob")
 	}
 }
+
+func TestBlobRefcountPanicReleasesRowsLock(t *testing.T) {
+	defer setupGCTest(t)()
+	CreateDatabase("gcdb", false)
+	db := GetDatabase("gcdb")
+	hash := strings.Repeat("ab", 32)
+	db.IncrBlobRefcount(hash)
+	shard := db.ensureBlobTable().ActiveShards()[0]
+	func() {
+		defer shard.GetExclusive()()
+		shard.mu.Lock()
+		defer shard.mu.Unlock()
+		shard.logfile = &faultLogfile{PersistenceLogfile: shard.logfile,
+			owner: blobWriteFault(db.persistence, "log.write", "before")}
+	}()
+	var caught any
+	func() { defer func() { caught = recover() }(); db.IncrBlobRefcount(hash) }()
+	if caught == nil {
+		t.Fatal("expected WAL failure during existing-hash increment")
+	}
+	if !db.blobRefState().rows.TryLock() {
+		t.Fatal("panic retained the shared rows lock")
+	}
+	db.blobRefState().rows.Unlock()
+	if !db.blobRefState().locks[blobRefStripe(hash)].mu.TryLock() {
+		t.Fatal("panic retained hash stripe")
+	}
+	db.blobRefState().locks[blobRefStripe(hash)].mu.Unlock()
+	db.IncrBlobRefcount(strings.Repeat("cd", 32))
+}

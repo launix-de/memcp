@@ -97,6 +97,39 @@ type PersistenceLogfile interface {
 	Close()
 }
 
+// abortPersistenceWrite releases a private writer without publishing partial data.
+// Backends without private file resources need no abort operation. In particular,
+// Close must never be used as an abort: remote writers publish buffered contents.
+func abortPersistenceWrite(w io.WriteCloser) {
+	if aborter, ok := w.(interface{ Abort() error }); ok {
+		if err := aborter.Abort(); err != nil {
+			reportPersistenceCleanupFailure("unknown", "unknown", "blob.write.abort", err)
+		}
+	}
+}
+
+func writeBlobContents(engine PersistenceEngine, hash, contents string) {
+	writer := engine.WriteBlob(hash)
+	defer abortPersistenceWrite(writer)
+	if _, err := io.WriteString(writer, contents); err != nil {
+		raisePersistenceFailure(engine.BackendName(), "unknown", "blob.write", err)
+	}
+	if err := writer.Close(); err != nil {
+		raisePersistenceFailure(engine.BackendName(), "unknown", "blob.write.close", err)
+	}
+}
+
+// recoverAbandonedBlobWrites runs only during database discovery, before the
+// database is published or any new writer can access it. Runtime GC cannot
+// distinguish active tempfiles from writes abandoned by a previous process.
+func (db *database) recoverAbandonedBlobWrites() {
+	db.persistenceLifecycle.Lock()
+	defer db.persistenceLifecycle.Unlock()
+	if cleaner, ok := db.persistence.(interface{ CleanupAbandonedBlobWrites() }); ok {
+		cleaner.CleanupAbandonedBlobWrites()
+	}
+}
+
 func finishColumnWrite(w io.WriteCloser, durable bool) {
 	// Rebuild publication order is column data first, schema reference second.
 	// SAFE columns must reach stable storage before schema.json can name their
@@ -204,13 +237,21 @@ func isPersistenceLogObject(name string) bool {
 }
 
 func copyPersistenceObject(reader io.ReadCloser, writer io.WriteCloser, dst PersistenceEngine, operation string) {
+	defer abortPersistenceWrite(writer)
+	readerClosed := false
+	closeReader := func() error {
+		if readerClosed {
+			return nil
+		}
+		readerClosed = true
+		return reader.Close()
+	}
+	defer closeReader()
 	if _, err := io.Copy(writer, reader); err != nil {
-		_ = reader.Close()
-		_ = writer.Close()
+		_ = closeReader()
 		raisePersistenceFailure(dst.BackendName(), "database move", operation, err)
 	}
-	if err := reader.Close(); err != nil {
-		_ = writer.Close()
+	if err := closeReader(); err != nil {
 		raisePersistenceFailure(dst.BackendName(), "database move", operation+".read.close", err)
 	}
 	if err := writer.Close(); err != nil {

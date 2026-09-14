@@ -223,9 +223,7 @@ func (s *OverlayBlob) SetSchema(db *database) {
 	for hash, data := range s.values {
 		hexHash := fmt.Sprintf("%x", hash[:])
 		db.IncrBlobRefcount(hexHash)
-		w := db.persistence.WriteBlob(hexHash)
-		io.WriteString(w, data)
-		w.Close()
+		writeBlobContents(db.persistence, hexHash, data)
 		s.refs[hexHash] = true
 	}
 	s.values = nil
@@ -483,9 +481,7 @@ func (s *OverlayBlob) build(i uint32, value scm.Scmer) {
 						s.schema.IncrBlobRefcount(hexHash)
 						s.refs[hexHash] = true
 					}
-					w := s.schema.persistence.WriteBlob(hexHash)
-					io.WriteString(w, gzipped)
-					w.Close()
+					writeBlobContents(s.schema.persistence, hexHash, gzipped)
 				}
 			}
 		} else {
