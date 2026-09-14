@@ -2675,7 +2675,7 @@ func Init(en scm.Env) {
 				}
 				// otherwise: no partition schema yet: find out the best number of partitions
 				// normally, we put ~60,000 items per shard, but to parallelize grouping, we should do less?
-				numPartitions = int(1 + ((2 * t.Count()) / Settings.ShardSize))
+				numPartitions = repartitionShardTarget(t.Count(), false)
 			}
 			// calculate them anew
 			return scm.NewSlice(t.NewShardDimension(scm.String(a[1]), numPartitions).Pivots)
