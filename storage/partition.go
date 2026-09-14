@@ -29,6 +29,88 @@ import "github.com/launix-de/memcp/scm"
 
 const repartitionDrainTimeout = 30 * time.Second
 
+// Bound newly created topology metadata and per-shard build work. Existing
+// persisted topologies remain readable; only new repartitions use this limit.
+const maxRepartitionShards = 4096
+
+func checkedRepartitionShardCount(dimensions []shardDimension, limit int) (int, bool) {
+	count := 1
+	for _, dimension := range dimensions {
+		if dimension.NumPartitions < 1 || dimension.NumPartitions > limit/count {
+			return 0, false
+		}
+		count *= dimension.NumPartitions
+	}
+	return count, true
+}
+
+func repartitionShardTarget(rows uint, parallel bool) int {
+	size := Settings.ShardSize
+	if size == 0 {
+		panic("ShardSize must be greater than zero for repartition")
+	}
+	quotient, remainder := rows/size, rows%size
+	desired := maxRepartitionShards
+	if quotient < uint(maxRepartitionShards/2) {
+		desired = 1 + 2*int(quotient)
+		if remainder >= size-remainder {
+			desired++
+		}
+	}
+	if parallel && rows > size {
+		desired = max(desired, min(maxRepartitionShards, 2*runtime.NumCPU()))
+	}
+	return min(desired, maxRepartitionShards)
+}
+
+func scaledRepartitionCount(score int, scale float64) int {
+	value := float64(score) * scale
+	if value >= maxRepartitionShards {
+		return maxRepartitionShards
+	}
+	if value < 1 {
+		return 1
+	}
+	return int(value)
+}
+
+func repartitionScale(candidates []shardDimension, target int) float64 {
+	// Scale zero is always a safe one-shard fallback, including scores near
+	// MaxInt. Counts never truncate to zero and products never overflow.
+	best, bestScale := target-1, 0.0
+	scale := 0.01
+	for _, candidate := range candidates {
+		scale = min(scale, float64(target)/float64(candidate.NumPartitions))
+	}
+	for iter := 2; iter < 300; iter++ {
+		count, valid := 1, true
+		for _, candidate := range candidates {
+			n := scaledRepartitionCount(candidate.NumPartitions, scale)
+			if n > maxRepartitionShards/count {
+				valid = false
+				break
+			}
+			count *= n
+		}
+		deviation := count - target
+		if valid {
+			error := deviation
+			if error < 0 {
+				error = -error
+			}
+			if error < best {
+				best, bestScale = error, scale
+			}
+		}
+		if valid && deviation < 0 {
+			scale *= 1.0 + 1.0/float64(iter)
+		} else {
+			scale *= 1.0 - 1.0/float64(iter)
+		}
+	}
+	return bestScale
+}
+
 type shardDimension struct {
 	Column        string
 	NumPartitions int
@@ -384,6 +466,9 @@ func (t *table) NewShardDimension(col string, n int) (result shardDimension) {
 	if n < 1 {
 		return // empty dimension
 	}
+	if n > maxRepartitionShards {
+		panic(fmt.Sprintf("new partition dimension exceeds %d shard limit", maxRepartitionShards))
+	}
 	result.Pivots = make([]scm.Scmer, 0, n-1)
 
 	// validate column exists in schema; if corrupted, abort loudly rather than proceeding
@@ -542,7 +627,7 @@ func (t *table) proposerepartition(maincount uint) (shardCandidates []shardDimen
 			shardCandidates = append(shardCandidates, shardDimension{c.Name, c.PartitioningScore, nil})
 		}
 	}
-	if len(shardCandidates) == 0 || Settings.PartitionMaxDimensions == 0 {
+	if len(shardCandidates) == 0 || Settings.PartitionMaxDimensions <= 0 {
 		return nil, true
 	}
 
@@ -555,32 +640,9 @@ func (t *table) proposerepartition(maincount uint) (shardCandidates []shardDimen
 		shardCandidates = shardCandidates[:Settings.PartitionMaxDimensions]
 	}
 	// algorithm from the paper
-	sf := 0.01 // scale factor
-	best := 100000000
-	bestSf := sf
-	desiredNumberOfShards := (2*maincount)/Settings.ShardSize + 1 // TODO: find a balancing mechanism
-	for iter := 2; iter < 300; iter++ {                           // find perfect scale factor such that we get the best number of shards
-		deviation := 1
-		for _, sc := range shardCandidates {
-			deviation *= int(float64(sc.NumPartitions) * sf)
-		}
-		deviation -= int(desiredNumberOfShards)
-		if deviation < 0 {
-			if -deviation < best {
-				best, bestSf = deviation, sf
-			}
-			// too few shards: increase sf
-			sf = sf * (1.0 + 1.0/float64(iter))
-		} else {
-			if deviation < best {
-				best, bestSf = deviation, sf
-			}
-			// too much shards: decrease sf
-			sf = sf * (1.0 - 1.0/float64(iter))
-		}
-	}
+	bestSf := repartitionScale(shardCandidates, repartitionShardTarget(maincount, false))
 	for i, sc := range shardCandidates {
-		shardCandidates[i] = t.NewShardDimension(sc.Column, int(float64(sc.NumPartitions)*bestSf))
+		shardCandidates[i] = t.NewShardDimension(sc.Column, scaledRepartitionCount(sc.NumPartitions, bestSf))
 	}
 	// remove empty dimensions
 	for len(shardCandidates) > 0 && shardCandidates[len(shardCandidates)-1].NumPartitions <= 1 {
@@ -594,18 +656,18 @@ func (t *table) proposerepartition(maincount uint) (shardCandidates []shardDimen
 	if len(shardCandidates) != len(t.PDimensions) {
 		shouldChange = true
 	} else {
-		totalShards1 := 1
-		totalShards2 := 1
+		totalShards1, _ := checkedRepartitionShardCount(shardCandidates, maxRepartitionShards)
+		totalShards2, oldBounded := checkedRepartitionShardCount(t.PDimensions, 2*maxRepartitionShards)
+		if !oldBounded {
+			shouldChange = true
+		}
 		for i, sc := range shardCandidates {
 			if sc.Column != t.PDimensions[i].Column {
 				shouldChange = true
-			} else {
-				totalShards1 *= sc.NumPartitions
-				totalShards2 *= t.PDimensions[i].NumPartitions
 			}
 		}
 		// deviation of >50% of shardsize
-		if 2*totalShards1 > 3*totalShards2 || 2*totalShards2 > 3*totalShards1 {
+		if oldBounded && (2*totalShards1 > 3*totalShards2 || 2*totalShards2 > 3*totalShards1) {
 			shouldChange = true
 		}
 	}
@@ -644,6 +706,18 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension, maint
 	if t.maintenanceKind == 2 && t.PShards != nil {
 		return
 	}
+	preflightComplete := false
+	defer func() {
+		if !preflightComplete {
+			if failure := recover(); failure != nil {
+				t.mu.Lock()
+				t.maintenanceKind = 0
+				t.mu.Unlock()
+				t.maintenanceMu.Unlock()
+				panic(failure)
+			}
+		}
+	}()
 
 	// If no shard candidates, fall back to parallel sharding based on data size
 	if len(shardCandidates) == 0 {
@@ -654,20 +728,22 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension, maint
 				totalRows += uint(s.Count())
 			}
 		}
-		desiredShards := int(1 + (2*totalRows)/Settings.ShardSize)
-		minShards := 2 * runtime.NumCPU()
-		if desiredShards < minShards && totalRows > Settings.ShardSize {
-			desiredShards = minShards
-		}
+		desiredShards := repartitionShardTarget(totalRows, true)
 		if desiredShards > 1 && len(t.Columns) > 0 {
 			shardCandidates = []shardDimension{t.NewShardDimension(t.Columns[0].Name, desiredShards)}
 		}
 	}
 
-	totalShards := 1
+	totalShards, valid := checkedRepartitionShardCount(shardCandidates, maxRepartitionShards)
 	for _, sc := range shardCandidates {
-		totalShards *= sc.NumPartitions
+		valid = valid && len(sc.Pivots) == sc.NumPartitions-1
 	}
+	if !valid {
+		// Reject before loading columns, allocating shard arrays or enabling
+		// dual-write. The caller transferred its maintenance claim to us.
+		panic(fmt.Sprintf("new repartition topology is invalid or exceeds %d shards", maxRepartitionShards))
+	}
+	preflightComplete = true
 
 	fmt.Println("repartitioning", t.Name, "by", shardCandidates, "into", totalShards, "shards")
 	start := time.Now()

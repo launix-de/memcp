@@ -22,9 +22,11 @@ from __future__ import annotations
 from pathlib import Path
 import shutil
 import json
+import os
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from check_sql_time_limit import GuardFailure
 from check_sql_time_limit import check_base_regressions
@@ -218,6 +220,14 @@ class BaseComparisonTest(unittest.TestCase):
 
 class NonYamlFixtureDiffTest(unittest.TestCase):
     def check_diff(self, before: dict[str, str], after: dict[str, str]) -> None:
+        # Git hooks export repository paths. Temporary fixture repositories
+        # must not inherit those paths and mutate the calling worktree.
+        environment = {key: value for key, value in os.environ.items()
+                       if not key.startswith("GIT_")}
+        with patch.dict(os.environ, environment, clear=True):
+            self.check_diff_isolated(before, after)
+
+    def check_diff_isolated(self, before: dict[str, str], after: dict[str, str]) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
 
