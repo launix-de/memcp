@@ -2866,7 +2866,42 @@ checks a number of datasets for unique collisions.
 For each block of datasets that pass, success is called.
 For each single unique collision that fails, failure is called.
 */
+func (t *table) nextUniqueConstraint(columns []string, idx int) int {
+	for ; idx < len(t.Unique); idx++ {
+		autoAssigned := false
+		for _, keyCol := range t.Unique[idx].Cols {
+			provided := false
+			for _, col := range columns {
+				if col == keyCol {
+					provided = true
+					break
+				}
+			}
+			if provided {
+				continue
+			}
+			for _, col := range t.Columns {
+				if col.Name == keyCol && (col.AutoIncrement || col.hasDefault()) {
+					autoAssigned = true
+					break
+				}
+			}
+			if autoAssigned {
+				break
+			}
+		}
+		if !autoAssigned {
+			break
+		}
+	}
+	return idx
+}
+
 func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, mergeNull bool, success func([][]scm.Scmer), onCollisionCols []string, failure func(string, []scm.Scmer), idx int, currentTx *TxContext) {
+	// An omitted generated key skips only its own constraint. Keep the outer
+	// invocation's lock ownership when the first checked key is a later UNIQUE.
+	outermost := idx == 0
+	idx = t.nextUniqueConstraint(columns, idx)
 	// check for duplicates
 	if idx >= len(t.Unique) {
 		success(values) // we finally made it, these values have passed all unique checks
@@ -2878,30 +2913,13 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 	{
 		key := make([]scm.Scmer, len(uniq.Cols))
 		keyIdx := make([]int, len(uniq.Cols))
-		skipConstraint := false // true if a key col is auto-assigned (auto-increment/default) and not in columns
 		for i, col := range uniq.Cols {
-			found := false
+			keyIdx[i] = -1 // omitted nullable columns contribute NULL, not row[0]
 			for j, col2 := range columns {
 				if col == col2 {
 					keyIdx[i] = j
-					found = true
 				}
 			}
-			if !found {
-				// Column not provided by the caller — check if it's auto-assigned.
-				// If so, the auto-increment/default mechanism guarantees a unique value,
-				// so there is no point checking (and no safe value to check against).
-				for _, tc := range t.Columns {
-					if tc.Name == col && (tc.AutoIncrement || tc.hasDefault()) {
-						skipConstraint = true
-						break
-					}
-				}
-			}
-		}
-		if skipConstraint {
-			success(values)
-			return
 		}
 
 		shardlist := t.ActiveShards()
@@ -2947,7 +2965,7 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 				panic(r) // re-panic after releasing lock
 			}
 		}()
-		if (!allowPruning || len(t.Unique) > 1) && idx == 0 {
+		if (!allowPruning || len(t.Unique) > 1) && outermost {
 			lock.Lock()
 			uniquelockHeld = true
 		}
@@ -2957,7 +2975,11 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 			shardlist2 := shardlist
 			skipUniqueCheck := false
 			for i, colidx := range keyIdx {
-				key[i] = row[colidx]
+				if colidx < 0 {
+					key[i] = scm.NewNil()
+				} else {
+					key[i] = row[colidx]
+				}
 				if !mergeNull && key[i].IsNil() {
 					skipUniqueCheck = true
 				}
@@ -2967,7 +2989,7 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 			}
 			if allowPruning {
 				for j, xidx := range pruningMap {
-					pruningVals[j] = row[keyIdx[xidx]]
+					pruningVals[j] = key[xidx]
 				}
 				// only one shard to visit for unique check
 				shardlist2 = []*storageShard{shardlist[computeShardIndex(t.PDimensions, pruningVals)]} // (TODO: array pruning)
@@ -2995,7 +3017,7 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 						if flushPanic != nil {
 							// Only deeper unique-check levels (idx+1 < len(t.Unique)) can
 							// have released our lock. The success callback level does not.
-							if idx+1 < len(t.Unique) {
+							if t.nextUniqueConstraint(columns, idx+1) < len(t.Unique) {
 								uniquelockHeld = false
 							}
 							panic(flushPanic)
@@ -3040,7 +3062,7 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 						defer func() {
 							if r := recover(); r != nil {
 								// Re-lock before re-panicking so the outer
-								// defer at idx==0 can safely release it.
+								// outermost defer can safely release it.
 								lock.Lock()
 								uniquelockHeld = true
 								panic(r)
@@ -3073,13 +3095,13 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 			if flushPanic != nil {
 				// Same rationale as above: only inner unique-check levels may have
 				// unlocked our lock before panicking.
-				if idx+1 < len(t.Unique) {
+				if t.nextUniqueConstraint(columns, idx+1) < len(t.Unique) {
 					uniquelockHeld = false
 				}
 				panic(flushPanic)
 			}
 		}
-		if (!allowPruning || len(t.Unique) > 1) && idx == 0 {
+		if (!allowPruning || len(t.Unique) > 1) && outermost {
 			lock.Unlock()
 		}
 	}

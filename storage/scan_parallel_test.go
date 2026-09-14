@@ -140,6 +140,40 @@ func setupScanParallelTestTable(t *testing.T, dbName string) *table {
 	return tbl
 }
 
+func TestGeneratedUniqueKeySkipReleasesOuterLockOnPanic(t *testing.T) {
+	for _, generatedFirst := range []bool{true, false} {
+		name := "generated_first"
+		if !generatedFirst {
+			name = "generated_last"
+		}
+		t.Run(name, func(t *testing.T) {
+			tbl := setupScanParallelTestTable(t, "tuniqueskiplock")
+			tbl.CreateColumn("name", "TEXT", nil, nil)
+			tbl.mu.Lock()
+			tbl.Columns[0].AutoIncrement = true
+			keys := []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}, {Id: "name", Cols: []string{"name"}}}
+			if !generatedFirst {
+				keys[0], keys[1] = keys[1], keys[0]
+			}
+			tbl.Unique = keys
+			tbl.mu.Unlock()
+			var caught any
+			func() {
+				defer func() { caught = recover() }()
+				tbl.ProcessUniqueCollision([]string{"name"}, [][]scm.Scmer{{scm.NewString("new")}}, false,
+					func([][]scm.Scmer) { panic("insert callback failed") }, nil, nil, 0, nil)
+			}()
+			if caught != "insert callback failed" {
+				t.Fatalf("expected callback panic, got %v", caught)
+			}
+			if !tbl.uniquelock.TryLock() {
+				t.Fatal("skipping a generated unique key retained the outer unique lock")
+			}
+			tbl.uniquelock.Unlock()
+		})
+	}
+}
+
 func TestIterateShardsParallelMarksFreeSingleShardSolo(t *testing.T) {
 	tbl := setupScanParallelTestTable(t, "tscanparfree")
 
