@@ -1221,3 +1221,90 @@ func TestSnapshotDropsLegacySortedMatcherMetadata(t *testing.T) {
 		t.Fatalf("snapshot retained sorted matcher metadata: %#v", snapshot[0].ColMatchers)
 	}
 }
+
+// Exact probes must preserve BIGINT identity even when adjacent values have
+// the same float64 representation, and must not mutate the bound value list.
+func TestInIndexCandidatesPrecisionAndImmutableBinding(t *testing.T) {
+	if InMatcher.IsSorted() || InMatcher.IsPointLike() {
+		t.Fatal("multi-value membership must not imply one constant ordered key")
+	}
+	values := []scm.Scmer{scm.NewInt(9007199254740993), scm.NewNil(), scm.NewInt(2), scm.NewInt(9007199254740992), scm.NewInt(2)}
+	reader := ColumnReaderFunc(func(id uint32) scm.Scmer { return values[id] })
+	hook := InMatcher.Deploy(IndexDeployContext{MainCount: uint32(len(values)), Column: reader}, true)
+	source, ok := hook.(IndexCandidateSource)
+	if !ok {
+		t.Fatal("integer column did not deploy a candidate source")
+	}
+	bound := []scm.Scmer{scm.NewInt(9007199254740993), scm.NewInt(2), scm.NewInt(9007199254740992), scm.NewInt(2), scm.NewNil()}
+	original := append([]scm.Scmer(nil), bound...)
+	iterator := source.BindCandidates(scm.NewSlice(bound), reader, 10000)
+	if iterator == nil {
+		t.Fatal("small IN list declined candidate enumeration")
+	}
+	var ids []uint32
+	buf := make([]uint32, 2)
+	for {
+		count := iterator(buf)
+		if count == 0 {
+			break
+		}
+		ids = append(ids, buf[:count]...)
+	}
+	if len(ids) != 4 {
+		t.Fatalf("candidate IDs = %v, want four distinct matching rows", ids)
+	}
+	seen := make(map[uint32]bool)
+	for _, id := range ids {
+		if seen[id] || id == 1 {
+			t.Fatalf("duplicate or NULL candidate in %v", ids)
+		}
+		seen[id] = true
+	}
+	for i := range bound {
+		if bound[i] != original[i] {
+			t.Fatalf("binding was modified at %d", i)
+		}
+	}
+	// A stopped consumer simply does not pull again; a fresh cursor gives one
+	// requested row without materializing the complete candidate result.
+	one := make([]uint32, 1)
+	if source.BindCandidates(scm.NewSlice(bound), reader, 10000)(one) != 1 || one[0] != 0 {
+		t.Fatalf("first pull = %v, want original first bound value's row", one)
+	}
+	if source.BindCandidates(scm.NewSlice([]scm.Scmer{scm.NewString("2")}), reader, 10000) != nil {
+		t.Fatal("string SQL coercion must decline exact integer probes")
+	}
+	if source.BindCandidates(scm.NewSlice(bound), reader, 1) != nil {
+		t.Fatal("probe work did not respect small index span")
+	}
+}
+
+func TestInIndexCandidatesExactIntegralFloats(t *testing.T) {
+	reader := ColumnReaderFunc(func(id uint32) scm.Scmer { return scm.NewFloat(float64(id)) })
+	hook := InMatcher.Deploy(IndexDeployContext{MainCount: 1024, Column: reader}, true)
+	source, ok := hook.(IndexCandidateSource)
+	if !ok {
+		t.Fatal("StorageSeq-style integral floats declined deployment")
+	}
+	iterator := source.BindCandidates(scm.NewSlice([]scm.Scmer{scm.NewFloat(900), scm.NewInt(2), scm.NewFloat(2)}), reader, 1024)
+	if iterator == nil {
+		t.Fatal("exact mixed integer representations declined probes")
+	}
+	var ids []uint32
+	buf := make([]uint32, 4)
+	for {
+		count := iterator(buf)
+		if count == 0 {
+			break
+		}
+		ids = append(ids, buf[:count]...)
+	}
+	if len(ids) != 2 || ids[0] != 900 || ids[1] != 2 {
+		t.Fatalf("candidates = %v", ids)
+	}
+	for _, value := range []scm.Scmer{scm.NewFloat(2.5), scm.NewFloat(9007199254740992)} {
+		if source.BindCandidates(scm.NewSlice([]scm.Scmer{value}), reader, 1024) != nil {
+			t.Fatalf("unsafe integer representation admitted: %v", value)
+		}
+	}
+}

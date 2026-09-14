@@ -140,6 +140,13 @@ callbacks. Local operator optimizer hooks may subsequently transform the plan. *
 			'(column map_columns mapper) (if (nil? mapper)
 				(scan_plan_boundary "equal" (list column map_columns mapper) nil nil true true true true "" true) nil)
 			_ nil)
+		((quote sql_in) values probe)
+		(match (scan_expression_column probe params columns)
+			'(column map_columns mapper)
+			(if (or (not (nil? mapper)) (scan_plan_uses values params)) nil
+				(scan_plan_boundary "in" (list column map_columns mapper)
+					(scan_plan_lift values) (scan_plan_lift values) true true true true "" false))
+			_ nil)
 		(cons (quote strlike) args)
 		(if (or (equal? (count args) 2) (and (equal? (count args) 3) (string? (nth args 2))))
 			(match (scan_expression_column (car args) params columns)
@@ -161,7 +168,7 @@ callbacks. Local operator optimizer hooks may subsequently transform the plan. *
 	(if (nil? boundary) bounds
 		(begin
 			(define existing (filter bounds (lambda (item) (equal? (item "column") (boundary "column")))))
-			(if (equal? existing '()) (merge bounds (list boundary))
+			(if (or (equal? existing '()) (equal? (boundary "kind") "in")) (merge bounds (list boundary))
 				(begin
 					(define have (car existing))
 					(if (and (equal? (have "kind") "range") (equal? (boundary "kind") "range"))

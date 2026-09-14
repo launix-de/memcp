@@ -258,6 +258,14 @@ func singleRelevantShard(schema []shardDimension, access scanAccess, shards []*s
 	return first, count == 1
 }
 
+// Only ordered scalar boundaries define a partition interval. IN lists, LIKE
+// patterns and other hook bindings need conservative topology selection even
+// when the shard-level hook declines access.
+func partitionBoundaryIsInterval(access scanAccess, i int) bool {
+	analyzer := access.boundaryAnalyzer(i)
+	return analyzer == nil || analyzer.IsSorted()
+}
+
 func countRelevantShards(schema []shardDimension, access scanAccess, shards []*storageShard, first **storageShard, count *int) {
 	if *count > 1 {
 		return
@@ -282,6 +290,9 @@ func countRelevantShards(schema []shardDimension, access scanAccess, shards []*s
 		blockdim *= schema[i].NumPartitions
 	}
 	for boundaryIndex := 0; boundaryIndex < access.len(); boundaryIndex++ {
+		if !partitionBoundaryIsInterval(access, boundaryIndex) {
+			continue
+		}
 		if access.boundaryColumn(boundaryIndex) != schema[0].Column {
 			continue
 		}
@@ -417,6 +428,9 @@ func collectRelevantShardsIndex(schema []shardDimension, access scanAccess, shar
 	}
 
 	for boundaryIndex := 0; boundaryIndex < access.len(); boundaryIndex++ {
+		if !partitionBoundaryIsInterval(access, boundaryIndex) {
+			continue
+		}
 		if access.boundaryColumn(boundaryIndex) == schema[0].Column {
 			lower := access.boundValue(boundaryIndex, false)
 			upper := access.boundValue(boundaryIndex, true)

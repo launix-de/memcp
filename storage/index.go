@@ -1943,6 +1943,59 @@ start_scan:
 			return inRange || beyond
 		})
 	}
+	// Exact unordered candidate hooks may jump between index positions in the
+	// caller's original value order. Sorted scans keep their ordinary merge.
+	if options == nil && !hasRecSetBoundary {
+		for i, hook := range snapIndexHooks {
+			source, ok := hook.(IndexCandidateSource)
+			if !ok || i >= bounds.len() || i >= len(cols) ||
+				!indexMatcherCompatible(bounds.boundaryAnalyzer(i), s.ColMatchers[i]) {
+				continue
+			}
+			iterator := source.BindCandidates(bounds.boundValue(i, false), cols[i].raw, mainEnd-mainIdx)
+			if iterator == nil {
+				continue
+			}
+			if exactMain != nil {
+				*exactMain = false
+			}
+			// Probes bypass the ordinary interval iterator, so apply its complete
+			// bounds as well as every independent candidate hook to each batch.
+			matchers := s.bindColdRangeMatcher(tx, bounds, indexBounds, upperInclusive, cols)
+			matchers = append(matchers, s.bindRowMatchers(tx, bounds, indexBounds, upperInclusive, cols, snapIndexHooks, true, exactMain)...)
+			if candidateSpan != nil {
+				*candidateSpan = 0
+			}
+			emit := func(ids []uint32) bool {
+				if candidateSpan != nil {
+					*candidateSpan += int64(len(ids))
+				}
+				return emitRowMatchers(matchers, ids, callback)
+			}
+			for {
+				count := iterator(buf)
+				if count == 0 {
+					break
+				}
+				if !emit(buf[:count]) {
+					return
+				}
+			}
+			// Main index permutations exclude inserts; residual SQL/visibility
+			// checks handle the delta tail exactly as in the ordinary scan.
+			for start := 0; start < maxInsertIndex; {
+				count := min(len(buf), maxInsertIndex-start)
+				for j := 0; j < count; j++ {
+					buf[j] = s.t.main_count + uint32(start+j)
+				}
+				if !emit(buf[:count]) {
+					return
+				}
+				start += count
+			}
+			return
+		}
+	}
 	mainStart := mainIdx
 	indexSpanRows = int64(mainEnd-mainStart) + int64(maxInsertIndex)
 	if candidateSpan != nil {

@@ -94,6 +94,23 @@ func TestCollectRelevantShardsUsesPartitionBounds(t *testing.T) {
 			},
 			wantShards: []int{0, 1},
 		},
+		{
+			name: "unordered IN binding is not a scalar partition interval",
+			boundary: analyzedBoundary{
+				col: "id", matcher: InMatcher,
+				lower: scm.NewSlice([]scm.Scmer{scm.NewInt(35), scm.NewInt(5)}), lowerInclusive: true,
+				upper: scm.NewSlice([]scm.Scmer{scm.NewInt(35), scm.NewInt(5)}), upperInclusive: true,
+			},
+			wantShards: []int{0, 1, 2, 3, 4},
+		},
+		{
+			name: "LIKE binding is not a scalar partition interval",
+			boundary: analyzedBoundary{
+				col: "id", matcher: LikeMatcher,
+				lower: scm.NewString("%3%"), upper: scm.NewString("%3%"),
+			},
+			wantShards: []int{0, 1, 2, 3, 4},
+		},
 	}
 
 	for _, tt := range tests {
@@ -106,6 +123,10 @@ func TestCollectRelevantShardsUsesPartitionBounds(t *testing.T) {
 				if got[i] != shards[wantIndex] {
 					t.Fatalf("collectRelevantShards shard %d = %p, want shard[%d] %p", i, got[i], wantIndex, shards[wantIndex])
 				}
+			}
+			one, single := singleRelevantShard(schema, runtimeScanAccess(analyzedBoundaries{tt.boundary}), shards)
+			if single != (len(tt.wantShards) == 1) || (single && one != shards[tt.wantShards[0]]) {
+				t.Fatalf("singleRelevantShard returned %p single=%v for expected shards %v", one, single, tt.wantShards)
 			}
 		})
 	}
