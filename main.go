@@ -924,6 +924,22 @@ func setupIO(wd string) {
 		},
 	})
 	scm.Declare(&IOEnv, &scm.Declaration{
+		Name: "serveProxy",
+		Fn:   scm.HTTPProxy,
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "creates a reverse-proxy HTTP handler for use with serve or HTTP routing wrappers", HasSideEffects: true,
+			Params: []*scm.TypeDescriptor{
+				{Kind: "string", Label: "upstream", Description: "absolute http(s) URL; its base path and query are joined with each incoming request"},
+			},
+			Return: &scm.TypeDescriptor{Kind: "func", Label: "handler", Description: "HTTP handler forwarding requests and streaming upstream responses",
+				Params: []*scm.TypeDescriptor{
+					{Kind: "any", Label: "req", Description: "HTTP request object"},
+					{Kind: "any", Label: "res", Description: "HTTP response object"},
+				},
+				Return: &scm.TypeDescriptor{Kind: "any", Label: "result", Description: "nil after serving the response"},
+			},
+		},
+	})
+	scm.Declare(&IOEnv, &scm.Declaration{
 		Name: "serveStatic",
 
 		Fn: (func(...scm.Scmer) scm.Scmer)(scm.HTTPStaticGetter(wd)),
