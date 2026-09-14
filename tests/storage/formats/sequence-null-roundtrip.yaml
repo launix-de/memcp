@@ -1,0 +1,135 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+metadata:
+  version: '1.0'
+  description: Nullable sequence compression preserves values, source keys and outer COUNT groups
+  isolated: true
+setup:
+- sql: DROP TABLE IF EXISTS qa_customer
+- sql: DROP TABLE IF EXISTS qa_orders
+- sql: CREATE TABLE qa_customer(c_custkey INT) ENGINE=memory
+- sql: CREATE TABLE qa_orders(o_orderkey INT, o_custkey INT, o_comment VARCHAR(64)) ENGINE=memory
+- scm: |-
+    (begin
+     (insert (table "memcp-tests" "qa_customer") '("c_custkey") (map (produceN 512) (lambda (i) (list (+ i 1)))))
+     (insert (table "memcp-tests" "qa_orders") '("o_orderkey" "o_custkey" "o_comment")
+      (map (produceN 8192) (lambda (i) (list (if (equal? (mod i 17) 0) nil (+ i 1))
+       (if (equal? (mod i 19) 0) nil (+ 1 (mod i 600)))
+       (if (equal? (mod i 23) 0) nil (if (equal? (mod i 7) 0) "special pending requests" "ordinary"))))))
+     (insert (table "memcp-tests" "qa_customer") '("c_custkey") (list (list 1001) (list 1002))) true)
+- sql: DROP TABLE IF EXISTS seq_null_values
+- sql: CREATE TABLE seq_null_values(id INT, v INT) ENGINE=memory
+- sql: INSERT INTO seq_null_values VALUES(1,1),(2,NULL),(3,2),(4,3),(5,NULL),(6,4),(7,-5),(8,NULL),(9,-4),(10,-3)
+test_cases:
+- name: Nullable values match source before compression
+  sql: SELECT id,v FROM seq_null_values ORDER BY id
+  expect:
+    rows: 10
+    data:
+    - id: 1
+      v: 1
+    - id: 2
+      v: null
+    - id: 3
+      v: 2
+    - id: 4
+      v: 3
+    - id: 5
+      v: null
+    - id: 6
+      v: 4
+    - id: 7
+      v: -5
+    - id: 8
+      v: null
+    - id: 9
+      v: -4
+    - id: 10
+      v: -3
+- name: Source Q13 customer key before rebuild
+  sql: SELECT o_custkey FROM qa_orders WHERE o_orderkey=7203
+  expect:
+    rows: 1
+    data:
+    - o_custkey: 3
+- name: Rebuild all regression tables
+  scm: (begin (rebuild (table "memcp-tests" "seq_null_values") true false) (rebuild (table "memcp-tests"
+    "qa_customer") true false) (rebuild (table "memcp-tests" "qa_orders") true false) true)
+  expect:
+    data:
+    - true
+- name: Nullable values survive compression
+  sql: SELECT id,v FROM seq_null_values ORDER BY id
+  expect:
+    rows: 10
+    data:
+    - id: 1
+      v: 1
+    - id: 2
+      v: null
+    - id: 3
+      v: 2
+    - id: 4
+      v: 3
+    - id: 5
+      v: null
+    - id: 6
+      v: 4
+    - id: 7
+      v: -5
+    - id: 8
+      v: null
+    - id: 9
+      v: -4
+    - id: 10
+      v: -3
+- name: NULL positions survive compression
+  sql: SELECT id FROM seq_null_values WHERE v IS NULL ORDER BY id
+  expect:
+    rows: 3
+    data:
+    - id: 2
+    - id: 5
+    - id: 8
+- name: Count and sum preserve nullable source values
+  sql: SELECT COUNT(v) AS n,SUM(v) AS total FROM seq_null_values
+  expect:
+    rows: 1
+    data:
+    - n: 7
+      total: -2
+- name: Q13 customer key survives rebuild
+  sql: SELECT o_custkey FROM qa_orders WHERE o_orderkey=7203
+  expect:
+    rows: 1
+    data:
+    - o_custkey: 3
+- name: Q13 original left join grouping
+  sql: "select\n\tc_count,\n\tcount(*) as custdist\nfrom\n\t(\n\t\tselect\n\t\t\tc_custkey,\n\t\t\tcount(o_orderkey)\n\
+    \t\tfrom\n\t\t\tqa_customer left outer join qa_orders on\n\t\t\t\tc_custkey = o_custkey\n\t\t\t\t\
+    and o_comment not like '%special%requests%'\n\t\tgroup by\n\t\t\tc_custkey\n\t) as c_qa_orders (c_custkey,\
+    \ c_count)\ngroup by\n\tc_count\norder by\n\tcustdist desc,\n\tc_count desc;\n"
+  expect:
+    rows: 6
+    data:
+    - c_count: 10
+      custdist: 223
+    - c_count: 11
+      custdist: 134
+    - c_count: 9
+      custdist: 120
+    - c_count: 12
+      custdist: 20
+    - c_count: 8
+      custdist: 15
+    - c_count: 0
+      custdist: 2
+- name: Unknown nullable column fails explicitly
+  sql: SELECT missing_value FROM seq_null_values
+  expect:
+    error: true
+cleanup:
+- sql: DROP TABLE IF EXISTS seq_null_values
+- sql: DROP TABLE IF EXISTS qa_orders
+- sql: DROP TABLE IF EXISTS qa_customer
