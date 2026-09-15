@@ -831,3 +831,35 @@ func TestJITSafepointSnapshotsPreserveExactRoots(t *testing.T) {
 		}
 	}
 }
+
+func TestJITStackReleasePreservesOtherRoots(t *testing.T) {
+	ctx := JITContext{DynamicSP: 32, BPOffset: 16, StackRoots: make(map[jitStackRoot]struct{})}
+	for _, root := range []jitStackRoot{{base: jitStackRootFrameSP, offset: -32}, {base: jitStackRootFrameSP, offset: -25}, {base: jitStackRootFrameSP, offset: -16}, {base: jitStackRootFrameSP, offset: 0}, {base: jitStackRootFrameBP, offset: -32}} {
+		ctx.StackRoots[root] = struct{}{}
+	}
+	// FreeStack removes [-32,-16), including unaligned offsets, without
+	// dropping the adjacent dynamic frame or BP-based roots.
+	ctx.FreeStack(16)
+	if len(ctx.StackRoots) != 3 {
+		t.Fatalf("remaining roots: %v", ctx.StackRoots)
+	}
+	for _, root := range []jitStackRoot{{base: jitStackRootFrameSP, offset: -16}, {base: jitStackRootFrameSP, offset: 0}, {base: jitStackRootFrameBP, offset: -32}} {
+		if _, ok := ctx.StackRoots[root]; !ok {
+			t.Fatalf("lost live root %v", root)
+		}
+	}
+}
+
+func BenchmarkJITSmallStackRelease(b *testing.B) {
+	ctx := JITContext{StackRoots: make(map[jitStackRoot]struct{})}
+	for i := int32(0); i < 10000; i++ {
+		ctx.StackRoots[jitStackRoot{base: jitStackRootFrameBP, offset: -8 * (i + 1)}] = struct{}{}
+	}
+	root := jitStackRoot{base: jitStackRootFrameSP, offset: -16}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		ctx.DynamicSP, ctx.BPOffset = 16, 16
+		ctx.StackRoots[root] = struct{}{}
+		ctx.FreeStack(16)
+	}
+}
