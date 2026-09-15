@@ -213,6 +213,12 @@ arithmetic; leave expressions containing columns or functions untouched. */
 	(parser (define col sql_identifier) col)
 )))
 
+/* SET accepts unquoted names such as character_set_client=utf8mb4. */
+(define sql_set_value (lambda (value)
+	(match value
+		'('get_column nil _ name _) name
+		_ value)))
+
 (define parse_sql (lambda (schema s policy planning_session tx) (begin
 	(define parse_started_ns (nanotime))
 	/* mysqldump wraps CREATE TRIGGER in a versioned executable comment. MariaDB
@@ -2084,7 +2090,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		/* SHOW timezone — PostgreSQL syntax */
 		(parser '((atom "SHOW" true) (atom "timezone" true)) (list (quote resultrow) (list (quote list) "TimeZone" (list (quote session_globalvar) "time_zone"))))
 		/* SET GLOBAL time_zone */
-		(parser '((atom "SET" true) (atom "GLOBAL" true) (define key sql_identifier) "=" (define value sql_expression)) '((quote globalvars) (toLower key) value))
+		(parser '((atom "SET" true) (atom "GLOBAL" true) (define key sql_identifier) "=" (define value sql_expression)) '((quote globalvars) (toLower key) (sql_set_value value)))
 		(parser '((atom "SET" true) (atom "NAMES" true) (define charset sql_expression) (? (atom "COLLATE" true) (or sql_identifier sql_string))) (quote true)) /* ignore */
 
 
@@ -2108,7 +2114,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(parser '((atom "SET" true) (? (atom "SESSION" true)) (? "@") (define key sql_identifier)
 			(or "=" (atom ":=" true)) (atom "DEFAULT" true))
 			(list (quote session) (toLower key) nil))
-		(parser '((atom "SET" true) (? (atom "SESSION" true)) (define vars (* (parser '((? "@") (define key sql_identifier) (or "=" (atom ":=" true)) (define value sql_expression)) (list (quote session) (toLower key) value)) ","))) (cons '!begin vars))
+		(parser '((atom "SET" true) (? (atom "SESSION" true)) (define vars (* (parser '((? "@") (define key sql_identifier) (or "=" (atom ":=" true)) (define value sql_expression)) (list (quote session) (toLower key) (sql_set_value value))) ","))) (cons '!begin vars))
 
 		(parser '((atom "LOCK" true) (or (atom "TABLES" true) (atom "TABLE" true))
 			(define locks (+ (parser '((define tbl sql_identifier) (? (atom "AS" true) (define alias sql_identifier)) (define mode sql_lock_table_mode)) (list tbl (not (nil? mode)))) ",")))

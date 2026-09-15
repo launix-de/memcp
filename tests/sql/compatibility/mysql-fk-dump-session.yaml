@@ -5,6 +5,17 @@ metadata:
   description: Executable dump SET comments and session-local FK enforcement
   isolated: true
 test_cases:
+- name: Execute dump unquoted charset SET
+  session_id: fk-dump
+  sql: /*!50003 SET character_set_client = utf8mb4 */
+  expect: {}
+- name: Read unquoted charset value
+  session_id: fk-dump
+  sql: SELECT @@character_set_client AS charset
+  expect:
+    data:
+    - charset: utf8mb4
+    rows: 1
 - name: Create parent
   session_id: fk-dump
   sql: CREATE TABLE fk_dump_parent (id INT PRIMARY KEY)
