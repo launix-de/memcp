@@ -390,3 +390,37 @@ func TestTriggerUnlockTemporarilyWithdrawsWriteOwnership(t *testing.T) {
 	tx.ExitShardWrite(shard)
 	shard.mu.Unlock()
 }
+
+func TestForeignKeyExistenceIndexedComposite(t *testing.T) {
+	Init(scm.Globalenv)
+	const name = "fk_indexed_probe"
+	CreateDatabase(name, true)
+	defer databases.Remove(name)
+	parent, _ := CreateTable(name, "parent", Memory, true)
+	parent.CreateColumn("a", "INT", nil, nil)
+	parent.CreateColumn("b", "INT", nil, nil)
+	var rows [][]scm.Scmer
+	for i := 0; i < 1000; i++ {
+		rows = append(rows, []scm.Scmer{scm.NewInt(int64(i)), scm.NewInt(int64(i % 7))})
+	}
+	parent.Insert([]string{"a", "b"}, rows, nil, scm.NewNil(), false, nil)
+	for _, test := range []struct {
+		values []scm.Scmer
+		want   bool
+	}{
+		{[]scm.Scmer{scm.NewInt(999), scm.NewInt(5)}, true},
+		{[]scm.Scmer{scm.NewInt(999), scm.NewInt(4)}, false},
+		{[]scm.Scmer{scm.NewInt(1001), scm.NewInt(0)}, false},
+		{[]scm.Scmer{scm.NewInt(1001), scm.NewNil()}, true},
+	} {
+		if got := fkExistenceCheck(nil, parent, []string{"a", "b"}, test.values); got != test.want {
+			t.Fatalf("probe %v: got %v, want %v", test.values, got, test.want)
+		}
+	}
+	shard := parent.Shards[0]
+	shard.mu.RLock()
+	defer shard.mu.RUnlock()
+	if len(shard.Indexes) == 0 {
+		t.Fatal("foreign-key probes did not expose their equality bounds to the index engine")
+	}
+}
