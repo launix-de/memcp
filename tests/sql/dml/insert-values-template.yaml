@@ -1,0 +1,35 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: "1.0"
+  description: "Bulk VALUES templates preserve literals, current bindings and expression evaluation"
+setup:
+  - sql: "CREATE TABLE ivt_values (id INT, text_value TEXT, number_value INT)"
+test_cases:
+  - name: "Insert scalar literals including explicit NULL"
+    sql: "INSERT INTO ivt_values VALUES (1, 'first', NULL), (2, 'second', -4)"
+    expect:
+      affected_rows: 2
+  - name: "Reuse shape with different bindings"
+    sql: "INSERT INTO ivt_values VALUES (3, 'third', NULL), (4, 'fourth', -8)"
+    expect:
+      affected_rows: 2
+  - name: "Session lookup and computed expression retain their semantics"
+    session_id: "ivt-expression"
+    setup:
+      - sql: "SET @ivt_text = 'session'"
+    sql: "INSERT INTO ivt_values VALUES (5, @ivt_text, LENGTH('abc'))"
+    expect:
+      affected_rows: 1
+  - name: "Rows retain NULL and fresh values"
+    sql: "SELECT * FROM ivt_values ORDER BY id"
+    expect:
+      rows: 5
+      data:
+        - {id: 1, text_value: first, number_value: null}
+        - {id: 2, text_value: second, number_value: -4}
+        - {id: 3, text_value: third, number_value: null}
+        - {id: 4, text_value: fourth, number_value: -8}
+        - {id: 5, text_value: session, number_value: 3}
+cleanup:
+  - sql: "DROP TABLE ivt_values"

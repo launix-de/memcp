@@ -48,6 +48,30 @@ would collapse it with parser-level "no value" and optional-clause defaults. */
 (define sql_null_literal (lambda ()
 	(list (sql_builtins "SQL_NULL"))))
 
+/* Keep simple VALUES cells as data. Compiling one session lookup per cell
+makes the JIT allocator state grow with the complete bulk statement. */
+(define sql_bind_insert_values (lambda (session rows)
+	(map rows (lambda (row)
+		(map row (lambda (cell)
+			(if (car cell) (session (cadr cell)) (cadr cell))))))))
+
+(define sql_insert_value_template (lambda (value)
+	(match value
+		'('session name) (if (string? name) (list true name) nil)
+		_ (if (equal? value (sql_null_literal))
+			(list false nil)
+			(if (or (number? value) (string? value) (nil? value)
+				(equal?? value true) (equal?? value false))
+				(list false value) nil)))))
+
+(define sql_insert_values_expr (lambda (datasets)
+	(begin
+		(define template (map datasets (lambda (row) (map row sql_insert_value_template))))
+		(if (reduce template (lambda (valid row)
+			(and valid (reduce row (lambda (valid cell) (and valid (not (nil? cell)))) true))) true)
+			(list (quote sql_bind_insert_values) (quote session) (list (quote quote) template))
+			(cons list (map datasets (lambda (dataset) (cons list dataset))))))))
+
 /* JSON_ARRAYAGG keeps its growing state as a list of completed values. The
 finalizer emits one contiguous BSON array after the aggregate has seen every
 row, avoiding a copy of the complete prefix for each input value. */
@@ -1549,7 +1573,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 				(begin
 					(define inner (sql_values_to_select_query (coalesce schema2 schema) coldesc datasets))
 					(sql_insert_select_plan (coalesce schema2 schema) tbl coldesc inner ignoreexists updaterows updaterows2 updatecols))
-				'('insert '('table (coalesce schema2 schema) tbl) (cons list coldesc) (cons list (map datasets (lambda (dataset) (cons list dataset)))) (cons list updatecols)
+				'('insert '('table (coalesce schema2 schema) tbl) (cons list coldesc) (sql_insert_values_expr datasets) (cons list updatecols)
 					(if (and ignoreexists (nil? updaterows))
 						'((quote lambda) '() 0)
 						(if ignoreexists '('lambda '() true) (if (nil? updaterows) nil '('lambda (map updatecols (lambda (c) (symbol c))) '('$update (cons 'list (map_assoc updaterows2 (lambda (k v) (replace_stupid v)))))))))
