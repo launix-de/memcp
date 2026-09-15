@@ -5028,8 +5028,8 @@ source alias is the stable identity consumed by all later planner phases. */
 					(neumann_fail "bind_query_names" (concat "ambiguous unqualified column: " col)))))
 		_ nil)))
 
-/* Count SQL source aliases across scopes once. Visibility remains scoped;
-only repeated nested spellings need fresh identities for later flattening. */
+/* Count aliases only within one flattening region. UNION branches, scalar
+subqueries and operator stages keep separate namespaces and canonical names. */
 (define binding_collect_query_aliases (lambda (query catalog)
 	(begin
 		(define block (normalize_query_ast query))
@@ -5040,26 +5040,13 @@ only repeated nested spellings need fresh identities for later flattening. */
 					(begin
 						(define alias (source_alias src))
 						(set_assoc acc alias (+ 1 (get_assoc acc alias 0))))) catalog))
-				(define with_relations (reduce sources (lambda (acc src)
-					(binding_collect_query_aliases (source_relation src) acc)) with_sources))
-				(binding_collect_expr_aliases
-					(list (qb_fields block) (qb_where block) (qb_group block)
-						(qb_having block) (qb_order block) (qb_hidden block)
-						(map sources source_join_expr)) with_relations))
-			(if (union_block? block)
-				(reduce (union_branches block) (lambda (acc branch)
-					(binding_collect_query_aliases branch acc)) catalog)
-				catalog)))))
-
-(define binding_collect_expr_aliases (lambda (expr catalog)
-	(match expr
-		((symbol inner_select) query) (binding_collect_query_aliases query catalog)
-		((symbol inner_select_exists) query) (binding_collect_query_aliases query catalog)
-		((symbol inner_select_in) probe query)
-		(binding_collect_query_aliases query (binding_collect_expr_aliases probe catalog))
-		(cons head tail) (reduce tail (lambda (acc item)
-			(binding_collect_expr_aliases item acc)) (binding_collect_expr_aliases head catalog))
-		_ catalog)))
+				(reduce sources (lambda (acc src)
+					(begin
+						(define relation (normalize_query_ast (source_relation src)))
+						(if (and (query_block? relation) (not (derived_block_needs_operator? relation)))
+							(binding_collect_query_aliases relation acc)
+							acc))) with_sources))
+			catalog))))
 
 (define binding_path (lambda (parent kind index)
 	(concat parent (concat "/" (concat kind (concat ":" (string index)))))))
@@ -5077,9 +5064,6 @@ only repeated nested spellings need fresh identities for later flattening. */
 				(binding_collect_string_catalog item current))
 				(binding_collect_string_catalog head catalog))
 			_ catalog))))
-
-(define binding_fresh_query_alias (lambda (query candidate)
-	(binding_fresh_alias (binding_collect_string_catalog query '()) candidate)))
 
 (define bind_query_expr_tail (lambda (scopes items path all_strings index)
 	(match (coalesceNil items '())
@@ -5164,7 +5148,9 @@ only repeated nested spellings need fresh identities for later flattening. */
 				(source_with_relation src
 					(if (or (query_block? relation) (union_block? relation))
 						/* MariaDB FROM subqueries are non-lateral. */
-						(bind_query_names_at relation '() (binding_path path "derived" index) all_strings)
+						(if (and (query_block? relation) (not (derived_block_needs_operator? relation)))
+							(bind_query_block_names relation '() (binding_path path "derived" index) all_strings)
+							(bind_query_names_at relation '() (binding_path path "derived" index) all_strings))
 						relation))
 				(bind_query_source_relations rest path all_strings (+ index 1))))
 		_ '())))
@@ -5189,7 +5175,7 @@ only repeated nested spellings need fresh identities for later flattening. */
 	(reduce (coalesceNil scopes '()) (lambda (found entries)
 		(or found (binding_scope_has_alias? entries alias))) false)))
 
-(define binding_scope_entries (lambda (sources outer_scopes path all_strings index flattenable)
+(define binding_scope_entries (lambda (sources outer_scopes path all_strings index)
 	(match (coalesceNil sources '())
 		(cons src rest) (begin
 			(define sql_alias (source_alias src))
@@ -5197,8 +5183,8 @@ only repeated nested spellings need fresh identities for later flattening. */
 			Non-lateral derived blocks have no visible outer scope, but still
 			need distinct source identities before flattening. Operator barriers
 			keep their own scope and retain canonical names for stage reuse. */
-			(define internal_alias (if (or (and flattenable (and (not (equal? path "query"))
-				(> (get_assoc (nth all_strings 1) sql_alias 0) 1)))
+			(define internal_alias (if (or (and (not (equal? path (nth all_strings 2)))
+				(> (get_assoc (nth all_strings 1) sql_alias 0) 1))
 				(binding_scopes_have_alias? outer_scopes sql_alias))
 				(binding_fresh_alias (nth all_strings 0)
 					(concat "__binding:" (concat (binding_path path "source" index) (concat ":" sql_alias))))
@@ -5217,7 +5203,7 @@ only repeated nested spellings need fresh identities for later flattening. */
 						(or
 							(union_block? (normalize_query_ast (source_relation internal_source)))
 							(not (empty_list? columns))))))
-				(binding_scope_entries rest outer_scopes path all_strings (+ index 1) flattenable)))
+				(binding_scope_entries rest outer_scopes path all_strings (+ index 1))))
 		_ '())))
 
 (define duplicate_source_alias (lambda (sources)
@@ -5297,8 +5283,7 @@ only repeated nested spellings need fresh identities for later flattening. */
 		(if (nil? duplicate_alias)
 			true
 			(neumann_fail "bind_query_names" (concat "duplicate relation alias: " duplicate_alias)))
-		(define entries (binding_scope_entries relation_bound_sources outer_scopes path all_strings 0
-			(not (derived_block_needs_operator? block))))
+		(define entries (binding_scope_entries relation_bound_sources outer_scopes path all_strings 0))
 		(define sources (bind_query_source_joins entries outer_scopes '() path all_strings 0))
 		(define scopes (cons entries outer_scopes))
 		(define fields (bind_query_fields (qb_fields block) scopes path all_strings 0))
@@ -5329,11 +5314,14 @@ only repeated nested spellings need fresh identities for later flattening. */
 			(bind_query_branches rest outer_scopes path all_strings (+ index 1)))
 		_ '())))
 
+/* Binding context: collision-safe string catalog, region alias counts, root path.
+Only flattenable FROM relations share the latter two with their parent. */
 (define bind_query_names_at (lambda (query outer_scopes path all_strings)
 	(begin
 		(define normalized (normalize_query_ast query))
 		(if (query_block? normalized)
-			(bind_query_block_names normalized outer_scopes path all_strings)
+			(bind_query_block_names normalized outer_scopes path
+				(list (nth all_strings 0) (binding_collect_query_aliases normalized '()) path))
 			(if (union_block? normalized)
 				(begin
 					(define branches (bind_query_branches (union_branches normalized) outer_scopes path all_strings 0))
@@ -5352,8 +5340,7 @@ only repeated nested spellings need fresh identities for later flattening. */
 
 (define bind_query_names (lambda (query outer_scopes)
 	(bind_query_names_at query outer_scopes "query"
-		(list (binding_collect_string_catalog query '())
-			(binding_collect_query_aliases query '())))))
+		(list (binding_collect_string_catalog query '())))))
 
 (define derived_star_ref? (lambda (alias expr)
 	(match expr
