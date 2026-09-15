@@ -512,3 +512,40 @@ func BenchmarkEnumPerElem(b *testing.B) {
 		}
 	}
 }
+
+// A rANS state below the first symbol width repeats that symbol to chunk end.
+// Include chunk boundaries, nonzero symbols, and backwards/repeated probes.
+func TestEnumConstantSuffixRandomAccess(t *testing.T) {
+	const n = 150000
+	value := func(i int) scm.Scmer {
+		if i == 70001 || i == n-1 {
+			return scm.NewInt(9)
+		}
+		return scm.NewNil()
+	}
+	s := buildEnum(n, value)
+	reader := s.GetCachedReader()
+	for _, i := range []int{149998, 0, 65534, 65535, 70001, 70002, 70001, 149999, 70000, 1, 149998} {
+		for _, got := range []scm.Scmer{s.GetValue(uint32(i)), reader.GetValue(uint32(i))} {
+			if !scm.Equal(got, value(i)) {
+				t.Fatalf("row %d: got %v, want %v", i, got, value(i))
+			}
+		}
+	}
+}
+
+func BenchmarkEnumConstantSuffixRandomAccess(b *testing.B) {
+	s := buildEnum(60000, func(i int) scm.Scmer {
+		if i == 59999 {
+			return scm.NewInt(1)
+		}
+		return scm.NewInt(0)
+	})
+	reader := s.GetCachedReader()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if got := reader.GetValue(uint32((uint64(i) * 7919) % 59999)); !scm.Equal(got, scm.NewInt(0)) {
+			b.Fatal(got)
+		}
+	}
+}
