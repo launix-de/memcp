@@ -724,13 +724,72 @@ the shallow guard instead of walking the wide expression it is about to drop. */
 				expr))
 		_ expr)))
 
+/* Expose shared predicates to join planning, retaining the complete OR as a
+residual. SQL three-valued AND/OR are distributive, including UNKNOWN. Do not
+move arbitrary calls or subqueries across short-circuit guards. */
+(define factorable_predicate? (lambda (expr)
+	(match expr
+		((symbol get_column) _alias _case _column _colcase) true
+		((quote get_column) _alias _case _column _colcase) true
+		(cons head tail)
+		(and (contains? (list (quote and) (quote or) (quote equal?) (quote equal??)
+			(quote =) (quote <) (quote >) (quote <=) (quote >=) (quote sql_in) (quote list)) head)
+			(reduce tail (lambda (safe term) (and safe (factorable_predicate? term))) true))
+		_ (not (symbol? expr)))))
+
+(define predicate_boolean_terms (lambda (expr conjunction)
+	(match expr
+		(cons head tail)
+		(if (if conjunction (expr_head_and? head) (expr_head_or? head))
+			(merge (map tail (lambda (term) (predicate_boolean_terms term conjunction))))
+			(list expr))
+		_ (list expr))))
+
+(define factor_predicate_disjunction (lambda (expr)
+	(match expr
+		(cons head tail)
+		(if (expr_head_and? head)
+			(cons head (map tail factor_predicate_disjunction))
+			(if (and (expr_head_or? head) (factorable_predicate? expr))
+				(begin
+					(define branches (map (predicate_boolean_terms expr false)
+						(lambda (term) (predicate_boolean_terms term true))))
+					(define indexes (map branches (lambda (branch)
+						(make_structural_index branch (list expr)))))
+					(define aliases (query_expr_alias_set nil expr '()))
+					/* A single-relation OR already is a local filter. */
+					(define local_guards (filter (extract_assoc (if (> (count (extract_assoc aliases (lambda (alias _value) alias))) 1) aliases '())
+						(lambda (alias _present)
+							(begin
+								(define local_branches (map branches (lambda (branch)
+									(filter branch (lambda (term)
+										(equal? (extract_assoc (query_expr_alias_set nil term '())
+											(lambda (name _value) name)) (list alias)))))))
+								/* A branch with no local restriction permits every row. */
+								(if (reduce local_branches (lambda (missing terms)
+									(or missing (empty_list? terms))) false) nil
+									(cons (quote or) (map local_branches (lambda (terms)
+										(cons (quote and) terms))))))))
+						(lambda (guard) (not (nil? guard)))))
+					(define common (if (empty_list? branches) '()
+						(filter (car branches) (lambda (term)
+							(reduce (cdr indexes) (lambda (present index)
+								(and present (not (nil? (index term))))) true)))))
+					(if (and (empty_list? common) (empty_list? local_guards)) expr
+						(cons (quote and) (merge (list common local_guards (list expr))))))
+				expr))
+		_ expr)))
+
 (define fold_bound_query_truth_guards (lambda (query)
 	(begin
 		(define normalized (normalize_query_ast query))
 		(if (query_block? normalized)
 			(make_query_block
-				(qb_schema normalized) (qb_sources normalized) (qb_fields normalized)
-				(fold_bound_truth_guard (qb_where normalized))
+				(qb_schema normalized)
+				(map (qb_sources normalized) (lambda (src)
+					(source_with_join_expr src (factor_predicate_disjunction (source_join_expr src)))))
+				(qb_fields normalized)
+				(factor_predicate_disjunction (fold_bound_truth_guard (qb_where normalized)))
 				(qb_group normalized)
 				(if (nil? (qb_having normalized)) nil
 					(fold_bound_truth_guard (qb_having normalized)))
