@@ -444,6 +444,13 @@ func (emitter *jitParserEmitter) substringAtPosition() JITValueDesc {
 	emitter.ctx.EmitAddInt64(text.Reg, position.Reg)
 	emitter.ctx.EmitShrRegImm8(text.Reg2, 8)
 	emitter.ctx.EmitSubInt64(text.Reg2, position.Reg)
+	// The remaining input at EOF is empty; never publish its one-past-end
+	// address in the pointer word of a Scmer or a JIT stack map.
+	nonempty := emitter.ctx.ReserveLabel()
+	emitter.ctx.EmitCmpRegImm32(text.Reg2, 0)
+	emitter.ctx.EmitJump(CondNotEqual, nonempty)
+	emitter.ctx.EmitMovRegImm64(text.Reg, 0)
+	emitter.ctx.MarkLabel(nonempty)
 	emitter.ctx.EmitShlRegImm8(text.Reg2, 8)
 	emitter.ctx.EmitMovRegImm64(emitter.ctx.ScratchReg, uint64(tagString))
 	emitter.ctx.EmitOrInt64(text.Reg2, emitter.ctx.ScratchReg)
