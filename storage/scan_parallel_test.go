@@ -708,3 +708,23 @@ func BenchmarkTableStatisticsPublishedRead(b *testing.B) {
 		tableStatisticsBenchmarkSink = tbl.statistics()
 	}
 }
+
+func TestUniqueChecksWithMorePartitionDimensionsThanKeyColumns(t *testing.T) {
+	tbl := setupScanParallelTestTable(t, "tunique2dimensions")
+	tbl.CreateColumn("name", "TEXT", nil, nil)
+	tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}, {Id: "name", Cols: []string{"name"}}}
+	tbl.ShardMode = ShardModePartition
+	tbl.PDimensions = []shardDimension{
+		{Column: "id", NumPartitions: 2, Pivots: []scm.Scmer{scm.NewInt(10)}},
+		{Column: "name", NumPartitions: 2, Pivots: []scm.Scmer{scm.NewString("m")}},
+	}
+	tbl.PShards = []*storageShard{NewShard(tbl), NewShard(tbl), NewShard(tbl), NewShard(tbl)}
+	tbl.publishTopologyLocked()
+	accepted := 0
+	tbl.ProcessUniqueCollision([]string{"id", "name"}, [][]scm.Scmer{{scm.NewInt(15), scm.NewString("new")}}, false,
+		func(rows [][]scm.Scmer) { accepted += len(rows) }, nil,
+		func(key string, _ []scm.Scmer) { t.Fatalf("unexpected collision on %s", key) }, 0, nil)
+	if accepted != 1 {
+		t.Fatalf("accepted %d rows, want 1", accepted)
+	}
+}
