@@ -58,7 +58,7 @@ makes the JIT allocator state grow with the complete bulk statement. */
 (define sql_insert_value_template (lambda (value)
 	(match value
 		'('session name) (if (string? name) (list true name) nil)
-		_ (if (equal? value (sql_null_literal))
+		_ (if (and (list? value) (equal? value (sql_null_literal)))
 			(list false nil)
 			(if (or (number? value) (string? value) (nil? value)
 				(equal?? value true) (equal?? value false))
@@ -1547,7 +1547,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 	(define sql_insert_values_row (parser (or
 		(parser '("(" (define dataset (* sql_insert_literal_cell ",")) ")")
 			(map dataset (lambda (value)
-				(if (equal?? value (quote sql_insert_placeholder))
+				(if (and (symbol? value) (equal?? value (quote sql_insert_placeholder)))
 					(begin
 						(define n (placeholder_counter "n"))
 						(placeholder_counter "n" (+ n 1))

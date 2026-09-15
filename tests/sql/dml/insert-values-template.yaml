@@ -4,6 +4,7 @@ metadata:
   version: "1.0"
   description: "Bulk VALUES templates preserve literals, current bindings and expression evaluation"
 setup:
+  - sql: "CREATE TABLE ivt_booleans (id INT, flag BOOLEAN, note TEXT)"
   - sql: "CREATE TABLE ivt_values (id INT, text_value TEXT, number_value INT)"
 test_cases:
   - name: "Insert scalar literals including explicit NULL"
@@ -38,5 +39,21 @@ test_cases:
         - {id: 5, text_value: session, number_value: 3}
         - {id: 6, text_value: six, number_value: 12}
         - {id: 7, text_value: seven, number_value: 3}
+  - name: "Boolean literals do not consume placeholder positions"
+    sql: "INSERT INTO ivt_booleans VALUES (10, TRUE, 'sql_insert_placeholder'), (20, FALSE, 'tail')"
+    expect: {affected_rows: 2}
+  - name: "Boolean literals retain their values beside prepared parameters"
+    sql: "INSERT INTO ivt_booleans VALUES (?, TRUE, ?), (?, FALSE, ?)"
+    params: [30, third, 40, fourth]
+    expect: {affected_rows: 2}
+  - name: "Boolean literals and the marker-like string survive binding"
+    sql: "SELECT * FROM ivt_booleans ORDER BY id"
+    expect:
+      data:
+        - {id: 10, flag: true, note: sql_insert_placeholder}
+        - {id: 20, flag: false, note: tail}
+        - {id: 30, flag: true, note: third}
+        - {id: 40, flag: false, note: fourth}
 cleanup:
+  - sql: "DROP TABLE ivt_booleans"
   - sql: "DROP TABLE ivt_values"
