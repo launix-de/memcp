@@ -193,3 +193,65 @@ func TestFastDictNumericHashBoundaries(t *testing.T) {
 		t.Fatalf("negative floating zero did not find integer zero: %v, %v", value, ok)
 	}
 }
+
+func TestMergeAssocPreservesInputs(t *testing.T) {
+	merge := PrepareSerialProc(Globalenv.Vars["merge_assoc"])
+	for _, sliceSource := range []bool{false, true} {
+		left := benchmarkFastDict(32)
+		right := benchmarkFastDict(48)
+		if sliceSource {
+			right = NewSlice(append([]Scmer(nil), right.FastDict().Pairs...))
+		}
+		beforeLeft, beforeRight := SerializeToString(left, &Globalenv), SerializeToString(right, &Globalenv)
+		combine := NewFunc(func(args ...Scmer) Scmer { return NewInt(args[0].Int() + args[1].Int()) })
+		got := merge.Call([]Scmer{left, right, combine})
+		for i := 0; i < 48; i++ {
+			value, ok := got.FastDict().Get(NewString(fmt.Sprintf("key-%d", i)))
+			want := int64(i)
+			if i < 32 {
+				want *= 2
+			}
+			if !ok || value.Int() != want {
+				t.Fatalf("key %d: got %v, expected %d", i, value, want)
+			}
+		}
+		if SerializeToString(left, &Globalenv) != beforeLeft || SerializeToString(right, &Globalenv) != beforeRight {
+			t.Fatal("merge changed an input dictionary")
+		}
+		if merge.Call([]Scmer{left, NewSlice(nil)}) != left {
+			t.Fatal("empty merge did not preserve the original value")
+		}
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Error("merge callback error was swallowed")
+				}
+			}()
+			calls := 0
+			merge.Call([]Scmer{left, right, NewFunc(func(args ...Scmer) Scmer {
+				calls++
+				if calls == 5 {
+					panic("merge failed")
+				}
+				return NewInt(args[0].Int() + args[1].Int() + 100)
+			})})
+		}()
+		if SerializeToString(left, &Globalenv) != beforeLeft {
+			t.Fatal("failed merge changed its input")
+		}
+	}
+}
+
+func BenchmarkMergeAssocImmutable(b *testing.B) {
+	merge := PrepareSerialProc(Globalenv.Vars["merge_assoc"])
+	for _, size := range []int{64, 512, 4096} {
+		left, right := benchmarkFastDict(size), benchmarkFastDict(size)
+		args := []Scmer{left, right}
+		b.Run(fmt.Sprint(size), func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				assocBenchmarkSink = merge.Call(args)
+			}
+		})
+	}
+}
