@@ -5028,6 +5028,39 @@ source alias is the stable identity consumed by all later planner phases. */
 					(neumann_fail "bind_query_names" (concat "ambiguous unqualified column: " col)))))
 		_ nil)))
 
+/* Count SQL source aliases across scopes once. Visibility remains scoped;
+only repeated nested spellings need fresh identities for later flattening. */
+(define binding_collect_query_aliases (lambda (query catalog)
+	(begin
+		(define block (normalize_query_ast query))
+		(if (query_block? block)
+			(begin
+				(define sources (qb_sources block))
+				(define with_sources (reduce sources (lambda (acc src)
+					(begin
+						(define alias (source_alias src))
+						(set_assoc acc alias (+ 1 (get_assoc acc alias 0))))) catalog))
+				(define with_relations (reduce sources (lambda (acc src)
+					(binding_collect_query_aliases (source_relation src) acc)) with_sources))
+				(binding_collect_expr_aliases
+					(list (qb_fields block) (qb_where block) (qb_group block)
+						(qb_having block) (qb_order block) (qb_hidden block)
+						(map sources source_join_expr)) with_relations))
+			(if (union_block? block)
+				(reduce (union_branches block) (lambda (acc branch)
+					(binding_collect_query_aliases branch acc)) catalog)
+				catalog)))))
+
+(define binding_collect_expr_aliases (lambda (expr catalog)
+	(match expr
+		((symbol inner_select) query) (binding_collect_query_aliases query catalog)
+		((symbol inner_select_exists) query) (binding_collect_query_aliases query catalog)
+		((symbol inner_select_in) probe query)
+		(binding_collect_query_aliases query (binding_collect_expr_aliases probe catalog))
+		(cons head tail) (reduce tail (lambda (acc item)
+			(binding_collect_expr_aliases item acc)) (binding_collect_expr_aliases head catalog))
+		_ catalog)))
+
 (define binding_path (lambda (parent kind index)
 	(concat parent (concat "/" (concat kind (concat ":" (string index)))))))
 
@@ -5160,8 +5193,13 @@ source alias is the stable identity consumed by all later planner phases. */
 	(match (coalesceNil sources '())
 		(cons src rest) (begin
 			(define sql_alias (source_alias src))
-			(define internal_alias (if (binding_scopes_have_alias? outer_scopes sql_alias)
-				(binding_fresh_query_alias all_strings
+			/* Nested blocks can later merge into their parent or a sibling.
+			Non-lateral derived blocks have no visible outer scope, but still
+			need distinct source identities before flattening. */
+			(define internal_alias (if (or (and (not (equal? path "query"))
+				(> (get_assoc (nth all_strings 1) sql_alias 0) 1))
+				(binding_scopes_have_alias? outer_scopes sql_alias))
+				(binding_fresh_alias (nth all_strings 0)
 					(concat "__binding:" (concat (binding_path path "source" index) (concat ":" sql_alias))))
 				sql_alias))
 			(define internal_source (list
@@ -5311,7 +5349,9 @@ source alias is the stable identity consumed by all later planner phases. */
 				normalized)))))
 
 (define bind_query_names (lambda (query outer_scopes)
-	(bind_query_names_at query outer_scopes "query" query)))
+	(bind_query_names_at query outer_scopes "query"
+		(list (binding_collect_string_catalog query '())
+			(binding_collect_query_aliases query '())))))
 
 (define derived_star_ref? (lambda (alias expr)
 	(match expr
