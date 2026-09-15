@@ -421,6 +421,31 @@ def resolve_warmup_runs(test_case: Dict[str, Any], is_perf_test: bool) -> int:
     return raw
 
 
+def resolve_timing_aggregation(test_case: Dict[str, Any]) -> str:
+    """A total measures a fixed cold-plus-warm workload, without discarded runs."""
+    mode = test_case.get("timing_aggregation", "median")
+    if mode not in ("median", "total"):
+        raise ValueError("timing_aggregation must be median or total")
+    group = test_case.get("timing_group")
+    if group is not None and (not isinstance(group, str) or not group.strip() or mode != "total"):
+        raise ValueError("timing_group requires a non-empty name and total aggregation")
+    if mode == "total":
+        if not any(key in test_case for key in ("repetitions", "timing_samples")):
+            raise ValueError("total aggregation requires a fixed repetition count")
+        resolve_timing_samples(test_case, True)
+        if resolve_warmup_runs(test_case, True) != 0:
+            raise ValueError("total aggregation requires warmup: 0; every execution is measured")
+    return mode
+
+
+def performance_measurement_ns(samples_ns: List[int], aggregation: str) -> float:
+    if aggregation == "total":
+        if not samples_ns:
+            raise ValueError("performance measurement requires at least one sample")
+        return float(sum(samples_ns))
+    return performance_sample_ns(samples_ns)
+
+
 def performance_case_key(spec_file: str, name: str) -> str:
     normalized = Path(spec_file).as_posix()
     marker = "tests/"
@@ -483,7 +508,8 @@ def performance_case_fingerprint(
     """Protect the measured workload while allowing timing-policy changes."""
     protected = {
         key: value for key, value in test_case.items()
-        if key not in {"repetitions", "timing_samples", "warmup"}
+        if (test_case.get("timing_aggregation") == "total"
+            or key not in {"repetitions", "timing_samples", "warmup"})
     }
     payload = json.dumps(
         {"suite_setup": suite_setup or [], "suite_syntax": suite_syntax, "test": protected},
@@ -1173,6 +1199,9 @@ class SQLTestRunner:
                                   None, None, None, is_noncritical)
             return error is None
 
+        # Keep raw text available for configuration errors before substitution.
+        query = test_case.get("scm") or test_case.get("sql") or test_case.get("sparql")
+
         # Performance test handling
         yaml_threshold_ms = test_case.get("threshold_ms")
         is_perf_test = yaml_threshold_ms is not None
@@ -1213,6 +1242,7 @@ class SQLTestRunner:
         baseline = {}
         warmup_runs = 0
         repeat = 1
+        timing_aggregation = "median"
         max_regression_pct = PERF_DEFAULT_REGRESSION_PCT
         if is_perf_test:
             perf_key = performance_case_key(self.current_spec_file or "?", name)
@@ -1228,7 +1258,7 @@ class SQLTestRunner:
             )
             if isinstance(baseline, dict):
                 baseline_time = baseline.get(
-                    "time_per_repetition_ms", baseline.get("time_ms")
+                    "time_ms", baseline.get("time_per_repetition_ms")
                 )
                 baseline_rows = baseline.get(
                     "rows", declared_rows
@@ -1242,11 +1272,16 @@ class SQLTestRunner:
                 if (isinstance(baseline_rows, bool)
                         or not isinstance(baseline_rows, int) or baseline_rows < 1):
                     raise ValueError("performance_rows must be a positive integer")
+                timing_aggregation = resolve_timing_aggregation(test_case)
+                if test_case.get("timing_group") and PERF_AB_MODE == "compare":
+                    raise ValueError("timing groups require --perf-ab to compare complete fixtures")
                 repeat = resolve_timing_samples(test_case, True)
                 warmup_runs = resolve_warmup_runs(test_case, True)
                 max_regression_pct = performance_regression_pct(
                     test_case, self.suite_metadata
                 )
+                if timing_aggregation == "total" and max_regression_pct > 20:
+                    raise ValueError("total workloads permit at most 20 percent regression")
             except ValueError as exc:
                 return self._record_fail(name, str(exc), query, None, None, is_noncritical)
 
@@ -1808,17 +1843,19 @@ class SQLTestRunner:
                         break
 
                 total_ns = measured_total_ns
-                # A/B runs execute the base and candidate in separate processes.
-                # Use the median so one scheduler or background-rebuild outlier
-                # cannot turn otherwise identical binaries into a regression.
-                elapsed_ns = performance_sample_ns(samples_ns)
+                # Ordinary latency tests use a median. Cold/warm trade-offs
+                # retain every request, then compare complete workload totals
+                # across independent fixtures.
+                elapsed_ns = performance_measurement_ns(samples_ns, timing_aggregation)
                 elapsed_ms = elapsed_ns / 1_000_000
                 elapsed_sec = elapsed_ms / 1000
 
                 if self.log_times:
                     print(
                         f"QUERY_TIME total_ns={total_ns} n={len(samples_ns)} "
-                        f"time_per_repetition_ns={elapsed_ns:.0f} warmup={warmup_runs} name={name}"
+                        f"measurement_ns={elapsed_ns:.0f} aggregation={timing_aggregation} "
+                        f"time_per_repetition_ns={total_ns / len(samples_ns) if timing_aggregation == 'total' else elapsed_ns:.0f} "
+                        f"warmup={warmup_runs} name={name}"
                     )
 
                 end_cpu = get_process_cpu_times(memcp_pid) if memcp_pid else None
@@ -1854,7 +1891,7 @@ class SQLTestRunner:
             threshold_ms = performance_ab_threshold_ms(
                 float(baseline_time), max_regression_pct,
                 int(baseline.get("warmup", 2)), warmup_runs,
-                len(samples_ns), PERF_AB_JITTER_MS,
+                len(samples_ns), 0 if timing_aggregation == "total" else PERF_AB_JITTER_MS,
             )
             change_pct = (elapsed_ms / float(baseline_time) - 1.0) * 100.0
             print(
@@ -1899,7 +1936,9 @@ class SQLTestRunner:
                 self._record_success(name, is_noncritical, elapsed_ms, threshold_ms, perf_rows, heap_mb, cpu_pct)
                 result = {
                     "time_ms": elapsed_ms,
-                    "time_per_repetition_ms": elapsed_ms,
+                    "time_per_repetition_ms": elapsed_ms / len(samples_ns) if timing_aggregation == "total" else elapsed_ms,
+                    "timing_aggregation": timing_aggregation,
+                    "timing_group": test_case.get("timing_group"),
                     "total_ms": total_ns / 1_000_000,
                     "repetitions": len(samples_ns),
                     "warmup": warmup_runs,
@@ -2827,15 +2866,20 @@ def validate_performance_fixture(config: Dict[str, Any], spec_file: str) -> Dict
         for field in ("rows", "repetitions"):
             if type(value.get(field)) is not int or value[field] < 1:
                 raise ValueError(f"invalid fixture {field}: {key}")
-        duration = value["time_per_repetition_ms"]
+        aggregation = resolve_timing_aggregation(case)
+        if value.get("timing_aggregation", "median") != aggregation or value.get("timing_group") != case.get("timing_group"):
+            raise ValueError(f"fixture timing policy differs: {key}")
+        duration = value.get("time_ms", value["time_per_repetition_ms"] if aggregation == "median" else None)
         if (isinstance(duration, bool) or not isinstance(duration, (int, float))
                 or not math.isfinite(duration) or duration <= 0):
             raise ValueError(f"invalid fixture duration: {key}")
         samples = value.get("samples_ns")
         if (not isinstance(samples, list) or len(samples) != value["repetitions"]
                 or any(type(sample) is not int or sample <= 0 for sample in samples)
-                or performance_sample_ns(samples) / 1_000_000 != duration):
+                or performance_measurement_ns(samples, aggregation) / 1_000_000 != duration):
             raise ValueError(f"fixture raw samples differ: {key}")
+        if aggregation == "total" and value["time_per_repetition_ms"] != duration / len(samples):
+            raise ValueError(f"fixture average differs from total: {key}")
         expected_hash = performance_case_fingerprint(case, spec.get("setup"), spec.get("metadata", {}).get("syntax"))
         if value.get("workload_sha256") != expected_hash:
             raise ValueError(f"fixture workload fingerprint differs: {key}")
@@ -2855,6 +2899,30 @@ def validate_performance_fixture(config: Dict[str, Any], spec_file: str) -> Dict
     return measured
 
 
+def grouped_performance_measurements(measured: Dict[str, Any]) -> Dict[str, Any]:
+    result: Dict[str, Any] = {}
+    for key, value in measured.items():
+        group = value.get("timing_group")
+        if not group:
+            result[key] = value
+            continue
+        group_key = key.split("::", 1)[0] + "::timing group: " + group
+        if value.get("timing_aggregation") != "total" or value["warmup"] != 0:
+            raise ValueError("timing groups require totals without discarded warmup")
+        if group_key in measured:
+            raise ValueError("timing group collides with an individual case name")
+        if group_key not in result:
+            result[group_key] = dict(value, time_ms=0, repetitions=0, group_members={})
+        combined = result[group_key]
+        if value["max_regression_pct"] != combined["max_regression_pct"]:
+            raise ValueError("timing group regression limits differ")
+        combined["time_ms"] += value["time_ms"]
+        combined["repetitions"] += value["repetitions"]
+        combined["group_members"][key] = value["time_ms"]
+        combined["time_per_repetition_ms"] = combined["time_ms"] / combined["repetitions"]
+    return result
+
+
 def summarize_performance_fixtures(trials: List[Dict[str, Any]], count: int) -> Dict[str, Any]:
     if type(count) is not int or count not in (1, 7):
         raise ValueError("fixture count must be the initial pair or all seven trials")
@@ -2872,17 +2940,27 @@ def summarize_performance_fixtures(trials: List[Dict[str, Any]], count: int) -> 
                 for field in ("rows", "warmup", "workload_sha256", "max_regression_pct"):
                     if value[field] != first[key][field]:
                         raise ValueError(f"fixture {field} differs: {key}")
+                for field in ("timing_aggregation", "timing_group"):
+                    if value.get(field) != first[key].get(field):
+                        raise ValueError(f"fixture {field} differs: {key}")
+                if (value.get("timing_aggregation") == "total"
+                        and value["repetitions"] != first[key]["repetitions"]):
+                    raise ValueError(f"fixture total repetition count differs: {key}")
+    roles = {role: [grouped_performance_measurements(value) for value in values]
+             for role, values in roles.items()}
+    first = roles["A"][0]
     waivers = load_perf_regression_waivers()
     for key, reference in first.items():
-        a = [value[key]["time_per_repetition_ms"] for value in roles["A"]]
-        b = [value[key]["time_per_repetition_ms"] for value in roles["B"]]
+        a = [value[key]["time_ms"] for value in roles["A"]]
+        b = [value[key]["time_ms"] for value in roles["B"]]
         baseline, candidate = statistics.median(a), statistics.median(b)
         repetitions = sum(value[key]["repetitions"] for value in roles["B"])
         threshold = performance_ab_threshold_ms(baseline, reference["max_regression_pct"],
                                                reference["warmup"], reference["warmup"],
-                                               repetitions, PERF_AB_JITTER_MS)
+                                               repetitions, 0 if reference.get("timing_aggregation") == "total" else PERF_AB_JITTER_MS)
         waived = candidate > threshold and key in waivers
-        summary[key] = dict(reference, time_ms=baseline, time_per_repetition_ms=baseline,
+        summary[key] = dict(reference, time_ms=baseline,
+                            time_per_repetition_ms=baseline / reference["repetitions"] if reference.get("timing_aggregation") == "total" else baseline,
                             candidate_ms=candidate, fixture_trials=count, a_samples_ms=a,
                             candidate_total_repetitions=repetitions,
                             b_samples_ms=b, threshold_ms=threshold,

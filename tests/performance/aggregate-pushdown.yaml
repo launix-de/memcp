@@ -52,7 +52,10 @@ test_cases:
               '("id" "access_id") fact_rows)
             (rebuild)
             {rows})
-    warmup: false
+    # One cold request followed by ten warm requests is the A/B workload.
+    timing_group: fk-partition-count
+    timing_aggregation: total
+    warmup: 0
     timing_samples: 1
     sql: |
       SELECT COUNT(*) AS total
@@ -79,7 +82,10 @@ test_cases:
       rows: 1
 
   - name: "Perf: aggregate pushdown warm FK partition count"
-    timing_samples: 7
+    timing_group: fk-partition-count
+    timing_aggregation: total
+    warmup: 0
+    timing_samples: 10
     sql: |
       SELECT COUNT(*) AS total
       FROM ap_fact fact
