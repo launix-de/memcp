@@ -17,6 +17,7 @@ Copyright (C) 2024-2026  Carl-Philip Hänsch
 package storage
 
 import (
+	"bytes"
 	"math/rand"
 	"runtime"
 	"testing"
@@ -286,4 +287,59 @@ func BenchmarkStorageSeqGetValue(b *testing.B) {
 			jitSum()
 		}
 	})
+}
+
+func TestStorageSeqNullTransitionPreservesInput(t *testing.T) {
+	cases := [][]scm.Scmer{
+		{scm.NewInt(1), scm.NewNil(), scm.NewInt(2), scm.NewInt(3), scm.NewNil(), scm.NewInt(4)},
+		{scm.NewNil(), scm.NewNil(), scm.NewInt(-5), scm.NewInt(-4), scm.NewNil(), scm.NewInt(-3)},
+		{scm.NewInt(10), scm.NewInt(20), scm.NewNil(), scm.NewInt(30), scm.NewInt(40), scm.NewNil()},
+	}
+	for ci, values := range cases {
+		s := buildStorageSeq(values)
+		var serialized bytes.Buffer
+		s.Serialize(&serialized)
+		if magic, err := serialized.ReadByte(); err != nil || magic != 11 {
+			t.Fatalf("sequence magic = %d, err %v", magic, err)
+		}
+		var restored StorageSeq
+		if count := restored.Deserialize(&serialized); count != uint(len(values)) {
+			t.Fatalf("restored count = %d, want %d", count, len(values))
+		}
+		for i, want := range values {
+			if got := restored.GetValue(uint32(i)); !scmerEqual(got, want) {
+				t.Errorf("case %d restored row %d: got %v, want %v", ci, i, got, want)
+			}
+		}
+		got := make([]scm.Scmer, len(values))
+		s.GetValueRange(0, uint32(len(values)), got, 1)
+		for i, want := range values {
+			if scalar := s.GetValue(uint32(i)); !scmerEqual(scalar, want) {
+				t.Errorf("case %d scalar row %d: got %v, want %v", ci, i, scalar, want)
+			}
+			if !scmerEqual(got[i], want) {
+				t.Errorf("case %d range row %d: got %v, want %v", ci, i, got[i], want)
+			}
+		}
+		ids := []uint32{uint32(len(values) - 1), 0, 2, 1, 2}
+		multi := make([]scm.Scmer, len(ids)*2)
+		s.GetValueMulti(ids, multi, 2)
+		for i, id := range ids {
+			if !scmerEqual(multi[i*2], values[id]) {
+				t.Errorf("case %d multi row %d: got %v, want %v", ci, id, multi[i*2], values[id])
+			}
+		}
+	}
+}
+
+func TestStorageSeqJITNullTransitionsMatchInput(t *testing.T) {
+	values := []scm.Scmer{scm.NewInt(1), scm.NewNil(), scm.NewInt(2), scm.NewInt(3), scm.NewNil(), scm.NewInt(4)}
+	s := buildStorageSeq(values)
+	get, cleanup := jitBuildGetValueFunc(t, s, true)
+	defer cleanup()
+	for i, want := range values {
+		if got := get(int64(i)); !scmerEqual(got, want) {
+			t.Errorf("JIT row %d: got %v, want %v", i, got, want)
+		}
+	}
 }
