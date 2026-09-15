@@ -213,15 +213,23 @@ arithmetic; leave expressions containing columns or functions untouched. */
 	(parser (define col sql_identifier) col)
 )))
 
+/* SET accepts unquoted names such as character_set_client=utf8mb4. */
+(define sql_set_value (lambda (value)
+	(match value
+		'('get_column nil _ name _) name
+		_ value)))
+
 (define parse_sql (lambda (schema s policy planning_session tx) (begin
 	(define parse_started_ns (nanotime))
 	/* mysqldump wraps CREATE TRIGGER in a versioned executable comment. MariaDB
 	splits CREATE, DEFINER, and TRIGGER across three comments; discard the
-	account-specific DEFINER while reconstructing executable trigger DDL. Other
+	account-specific DEFINER while reconstructing executable trigger DDL. SET
+	comments carry session state such as FOREIGN_KEY_CHECKS during restores. Other
 	versioned comments remain compatibility no-ops unless their SQL form is
 	explicitly supported; trigger DDL must execute for a lossless restore. */
 	(set s (if (and (>= (strlen s) 3) (equal? (substr s 0 3) "/*!"))
 		(match s
+			(regex "^/\\*![0-9]+[\\r\\n\\t ]+((?is:SET[\\r\\n\\t ]+.*))[\\r\\n\\t ]*\\*/$" _ body) body
 			(regex "^/\\*![0-9]+[\\r\\n\\t ]+((?is:CREATE[\\r\\n\\t ]+TRIGGER.*))[\\r\\n\\t ]*\\*/$" _ body) body
 			(regex "^/\\*![0-9]+[\\r\\n\\t ]+CREATE[\\r\\n\\t ]*\\*/[\\r\\n\\t ]*/\\*![0-9]+[\\r\\n\\t ]+DEFINER=(?is:.*?)[\\r\\n\\t ]*\\*/[\\r\\n\\t ]*/\\*![0-9]+[\\r\\n\\t ]+((?is:TRIGGER.*))[\\r\\n\\t ]*\\*/$" _ body) (concat "CREATE " body)
 			s)
@@ -734,7 +742,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 	)))
 
 	(define sql_expression (parser (or
-		(parser '((atom "@" true) (define var sql_identifier_unquoted) (atom ":=" true) (define value sql_expression)) '((quote session) var value))
+		(parser '((atom "@" true) (define var sql_identifier_unquoted) (atom ":=" true) (define value sql_expression)) '((quote session) (toLower var) value))
 		(parser '((define a sql_expression1) (atom "OR" true) (define b (+ sql_expression1 (atom "OR" true)))) (cons (quote or) (cons a b)))
 		sql_expression1
 	)))
@@ -969,12 +977,12 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(parser (atom "FALSE" true) false)
 		(parser (atom "ON" true) true)
 		(parser (atom "OFF" true) false)
-		(parser '((atom "@" true) (define var sql_identifier_unquoted)) '('session var))
+		(parser '((atom "@" true) (define var sql_identifier_unquoted)) '('session (toLower var)))
 		/* MySQL system variables: @@var, @@GLOBAL.var, @@SESSION.var
 		@@GLOBAL.var reads globalvars directly; @@SESSION.var / @@var check session first */
-		(parser '((atom "@@" true) (atom "GLOBAL" true) (atom "." true) (define var sql_identifier_unquoted)) '('globalvars var))
-		(parser '((atom "@@" true) (? (atom "SESSION" true) (? (atom "." true))) (define var sql_identifier_unquoted)) '('session_globalvar var))
-		(parser '((atom "@@" true) (define var sql_identifier_unquoted)) '('session_globalvar var))
+		(parser '((atom "@@" true) (atom "GLOBAL" true) (atom "." true) (define var sql_identifier_unquoted)) '('globalvars (toLower var)))
+		(parser '((atom "@@" true) (? (atom "SESSION" true) (? (atom "." true))) (define var sql_identifier_unquoted)) '('session_globalvar (toLower var)))
+		(parser '((atom "@@" true) (define var sql_identifier_unquoted)) '('session_globalvar (toLower var)))
 		/* LEFT(str, n) -- special case because LEFT is a reserved keyword (LEFT JOIN) */
 		(parser '((atom "LEFT" true) "(" (define s sql_expression) "," (define n sql_expression) ")") '((quote sql_substr) s 1 n))
 		/* RIGHT(str, n) -- special case because RIGHT is a reserved keyword */
@@ -1697,7 +1705,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			(parser '((atom "PRIMARY" true) (atom "KEY" true) "(" (define cols (+ sql_identifier ",")) ")") '((quote list) "unique" "PRIMARY" (cons (quote list) cols)))
 			(parser '((atom "UNIQUE" true) (atom "KEY" true) (define id sql_identifier) "(" (define cols (+ (parser '((define col sql_identifier) (? "(" sql_int ")")) col) ",")) ")" (? (atom "USING" true) (atom "BTREE" true))) '((quote list) "unique" id (cons (quote list) cols)))
 			(parser '((atom "CONSTRAINT" true) (define id (? sql_identifier)) (atom "FOREIGN" true) (atom "KEY" true) "(" (define cols1 (+ sql_identifier ",")) ")" (atom "REFERENCES" true) (define tbl2 sql_identifier) "(" (define cols2 (+ sql_identifier ",")) ")" (? (atom "ON" true) (atom "DELETE" true) (define deletemode sql_foreign_key_mode)) (? (atom "ON" true) (atom "UPDATE" true) (define updatemode sql_foreign_key_mode))) '((quote list) "foreign" id (cons (quote list) cols1) tbl2 (cons (quote list) cols2) updatemode deletemode))
-			(parser '((atom "FOREIGN" true) (atom "KEY" true) (define id (? sql_identifier)) "(" (define cols1 (+ sql_identifier ",")) ")" (atom "REFERENCES" true) (define tbl2 sql_identifier) "(" (define cols2 (+ sql_identifier ",")) ")" (? (atom "ON" true) (atom "DELETE" true) (or (atom "RESTRICT" true) (atom "CASCADE" true) (atom "SET NULL" true))) (? (atom "ON" true) (atom "UPDATE" true) (or (atom "RESTRICT" true) (atom "CASCADE" true) (atom "SET NULL" true)))) '((quote list) "foreign" id (cons (quote list) cols1) tbl2 (cons (quote list) cols2)))
+			(parser '((atom "FOREIGN" true) (atom "KEY" true) (define id (? sql_identifier)) "(" (define cols1 (+ sql_identifier ",")) ")" (atom "REFERENCES" true) (define tbl2 sql_identifier) "(" (define cols2 (+ sql_identifier ",")) ")" (? (atom "ON" true) (atom "DELETE" true) (define deletemode sql_foreign_key_mode)) (? (atom "ON" true) (atom "UPDATE" true) (define updatemode sql_foreign_key_mode))) '((quote list) "foreign" id (cons (quote list) cols1) tbl2 (cons (quote list) cols2) updatemode deletemode))
 			(parser '((atom "KEY" true) sql_identifier "(" (+ (parser '((define col sql_identifier) (? "(" sql_int ")")) col) ",") ")" (? (atom "USING" true) (atom "BTREE" true))) '((quote list))) /* ignore index definitions */
 			(parser '(
 				(define col sql_identifier)
@@ -2082,7 +2090,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		/* SHOW timezone — PostgreSQL syntax */
 		(parser '((atom "SHOW" true) (atom "timezone" true)) (list (quote resultrow) (list (quote list) "TimeZone" (list (quote session_globalvar) "time_zone"))))
 		/* SET GLOBAL time_zone */
-		(parser '((atom "SET" true) (atom "GLOBAL" true) (define key sql_identifier) "=" (define value sql_expression)) '((quote globalvars) key value))
+		(parser '((atom "SET" true) (atom "GLOBAL" true) (define key sql_identifier) "=" (define value sql_expression)) '((quote globalvars) (toLower key) (sql_set_value value)))
 		(parser '((atom "SET" true) (atom "NAMES" true) (define charset sql_expression) (? (atom "COLLATE" true) (or sql_identifier sql_string))) (quote true)) /* ignore */
 
 
@@ -2105,8 +2113,8 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			(atom "ISOLATION" true) (atom "LEVEL" true) (atom "REPEATABLE" true) (atom "READ" true)) (quote true))
 		(parser '((atom "SET" true) (? (atom "SESSION" true)) (? "@") (define key sql_identifier)
 			(or "=" (atom ":=" true)) (atom "DEFAULT" true))
-			(list (quote session) key nil))
-		(parser '((atom "SET" true) (? (atom "SESSION" true)) (define vars (* (parser '((? "@") (define key sql_identifier) (or "=" (atom ":=" true)) (define value sql_expression)) (list (quote session) key value)) ","))) (cons '!begin vars))
+			(list (quote session) (toLower key) nil))
+		(parser '((atom "SET" true) (? (atom "SESSION" true)) (define vars (* (parser '((? "@") (define key sql_identifier) (or "=" (atom ":=" true)) (define value sql_expression)) (list (quote session) (toLower key) (sql_set_value value))) ","))) (cons '!begin vars))
 
 		(parser '((atom "LOCK" true) (or (atom "TABLES" true) (atom "TABLE" true))
 			(define locks (+ (parser '((define tbl sql_identifier) (? (atom "AS" true) (define alias sql_identifier)) (define mode sql_lock_table_mode)) (list tbl (not (nil? mode)))) ",")))
