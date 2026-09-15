@@ -4,6 +4,8 @@ metadata:
   version: "1.0"
   description: "Bulk VALUES templates preserve literals, current bindings and expression evaluation"
 setup:
+  - sql: "DROP TABLE IF EXISTS ivt_booleans"
+  - sql: "DROP TABLE IF EXISTS ivt_values"
   - sql: "CREATE TABLE ivt_booleans (id INT, flag BOOLEAN, note TEXT)"
   - sql: "CREATE TABLE ivt_values (id INT, text_value TEXT, number_value INT)"
 test_cases:
@@ -54,6 +56,38 @@ test_cases:
         - {id: 20, flag: false, note: tail}
         - {id: 30, flag: true, note: third}
         - {id: 40, flag: false, note: fourth}
+  - name: "Simple template reads the current session value"
+    session_id: "ivt-template-session"
+    setup:
+      - sql: "SET @ivt_note = 'before'"
+    sql: "INSERT INTO ivt_booleans VALUES (50, TRUE, @ivt_note)"
+    expect: {affected_rows: 1}
+  - name: "Reused template refreshes its session binding"
+    session_id: "ivt-template-session"
+    setup:
+      - sql: "SET @ivt_note = 'after'"
+    sql: "INSERT INTO ivt_booleans VALUES (60, TRUE, @ivt_note)"
+    expect: {affected_rows: 1}
+  - name: "Session values are read per execution"
+    sql: "SELECT id, note FROM ivt_booleans WHERE id >= 50 ORDER BY id"
+    expect:
+      data:
+        - {id: 50, note: before}
+        - {id: 60, note: after}
+  - name: "A short literal row is rejected"
+    sql: "INSERT INTO ivt_values VALUES (8, 'short')"
+    expect: {error: true}
+  - name: "An extra literal cell is rejected"
+    sql: "INSERT INTO ivt_values VALUES (8, 'extra', 1, 2)"
+    expect: {error: true}
+  - name: "Incomplete expression after speculative placeholders is rejected"
+    sql: "INSERT INTO ivt_values VALUES (?, ?, ? + )"
+    params: [8, invalid, 1]
+    expect: {error: true}
+  - name: "Rejected statements do not insert rows"
+    sql: "SELECT COUNT(*) AS n FROM ivt_values"
+    expect: {data: [{n: 7}]}
+
 cleanup:
   - sql: "DROP TABLE ivt_booleans"
   - sql: "DROP TABLE ivt_values"

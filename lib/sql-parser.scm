@@ -1582,6 +1582,12 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			(set updaterows2 (if (nil? updaterows) nil (merge updaterows)))
 			(set updatecols (if (nil? updaterows) '() (cons "$update" (merge_unique (extract_assoc updaterows2 (lambda (k v) (extract_stupid v)))))))
 			(define coldesc (coalesce coldesc (map (get_schema (coalesce schema2 schema) tbl) (lambda (col) (col "Field")))))
+			/* Validate the complete statement before evaluating or inserting rows.
+			Both literal templates and general expression rows obey SQL arity. */
+			(if (reduce datasets (lambda (valid row)
+				(and valid (equal? (count row) (count coldesc)))) true)
+				true
+				(error "INSERT column count does not match value count"))
 			(if (reduce datasets (lambda (a b) (or a (sql_dataset_contains_inner_select b))) false)
 				(begin
 					(define inner (sql_values_to_select_query (coalesce schema2 schema) coldesc datasets))
