@@ -4805,6 +4805,22 @@ per group instead of silently widening the group key. */
 			(if (nil? ag) requested_col
 				(aggregate_col_name_using (gs_input stage) ag))))))
 
+/* A scalar probe carries a complete lowering stage, including compile-session
+handles. Only its carrier, requested aggregate and correlation keys identify
+its value; physical annotations must never rename a persistent aggregate. */
+(define canonical_aggregate_recipe (lambda (expr)
+	(match expr
+		(cons head (cons stage (cons requested_col rest)))
+		(if (and (group_stage? stage) (contains? (list (quote scalar_first_probe)
+			(quote scalar_aggregate_probe) (quote scalar_cardinality_probe)) head))
+			(list head (canonical_aggregate_probe_reference stage requested_col)
+				(canonical_aggregate_recipe (gs_domain stage)))
+			(cons (canonical_aggregate_recipe head)
+				(map (cdr expr) canonical_aggregate_recipe)))
+		(cons head tail) (cons (canonical_aggregate_recipe head)
+			(map tail canonical_aggregate_recipe))
+		_ expr)))
+
 /* Aggregate descriptors still carry aliases because they must execute against
 the current logical input. Persistent keytable columns must not. Resolve every
 column to (source role, schema, base relation, physical column) for the name;
@@ -4817,6 +4833,7 @@ the enclosing carrier identity supplies the remaining query context. */
 	(if (equal? ag aggregate_count_descriptor)
 		(aggregate_col_name ag)
 		(begin
+			(define ag (canonical_aggregate_recipe ag))
 			(define local_aliases (source_aliases (canonical_helper_sources input)))
 			(define referenced_aliases (stage_semantic_expr_aliases ag))
 			(define outer_aliases (filter referenced_aliases (lambda (alias)
@@ -6314,21 +6331,22 @@ slot per syntactically repeated COUNT. */
 (define group_insert_batch_size 4096)
 
 (define group_insert_batches (lambda (target columns collision_cols collision_fn grouped)
-	((lambda (state)
-		(if (equal? (car state) 0)
+	((lambda (rows)
+		(if (empty_list? rows)
 			0
-			(insert target columns (cadr state) collision_cols collision_fn true)))
+			(insert target columns rows collision_cols collision_fn true)))
 		(reduce_assoc grouped
-			(lambda (state key payload)
+			(lambda (rows key payload)
 				(begin
-					(define count (car state))
-					(define rows (cons (merge (list key payload)) (cadr state)))
-					(if (>= (+ count 1) group_insert_batch_size)
+					/* A flat accumulator lets the ownership optimizer append in place.
+					Prepending copies all preceding rows on every batch iteration. */
+					(define batch (append rows (merge (list key payload))))
+					(if (>= (count batch) group_insert_batch_size)
 						(begin
-							(insert target columns rows collision_cols collision_fn true)
-							(list 0 (list)))
-						(list (+ count 1) rows))))
-			(list 0 (list))))))
+							(insert target columns batch collision_cols collision_fn true)
+							(list))
+						batch)))
+			(list)))))
 
 /* Bulk INSERT stores ordinary row values, whereas reads of computed columns
 use their proxy. Install the already reduced payload through the existing

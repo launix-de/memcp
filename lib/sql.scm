@@ -123,8 +123,9 @@ functional planner return value. */
 (define sql_queryplan_preparations_from_session (lambda (planning_session)
 	(begin
 		(define preparations (planning_session "__memcp_queryplan_preparations"))
-		(map (produceN (coalesceNil (preparations "count") 0))
-			(lambda (idx) (preparations (concat "preparation:" idx)))))))
+		(if (nil? preparations) '()
+			(map (produceN (coalesceNil (preparations "count") 0))
+				(lambda (idx) (preparations (concat "preparation:" idx))))))))
 
 (define sql_queryplan_bind_execution_session (lambda (expr)
 	(match expr
@@ -188,7 +189,7 @@ must remain in the guarded-plan path. */
 /* Guards execute outside the optimized query lambda. Rewrite the query AST's
 session pseudo-call to an explicit context lookup so raw eval observes the
 current request bindings. Quoted planner/catalog payloads remain data. */
-(define sql_queryplan_runtime_guard_expr (lambda (expr)
+(define sql_queryplan_runtime_guard_expr (lambda (expr observed_metrics)
 	(match expr
 		((symbol quote) _value) expr
 		((symbol session) key) (if (match key
@@ -201,9 +202,18 @@ current request bindings. Quoted planner/catalog payloads remain data. */
 			_ false)
 			(planner_queryplan_observation_current_read_expr key)
 			(list (quote session) key))
+		'(binding key) (if (and (not (nil? observed_metrics))
+			(and (string? key) (and (strlike key "__memcp_queryplan_observation_metric_%")
+				(and (equal? binding (planner_queryplan_observation_session_expr))
+					(not (contains? observed_metrics key))))))
+			/* Logical enumeration can mention a metric whose physical prefix was
+			not selected. Its guard must use the fallback without creating a session. */
+			nil
+			(list (sql_queryplan_runtime_guard_expr binding observed_metrics)
+				(sql_queryplan_runtime_guard_expr key observed_metrics)))
 		(cons head tail) (cons
-			(sql_queryplan_runtime_guard_expr head)
-			(map tail sql_queryplan_runtime_guard_expr))
+			(sql_queryplan_runtime_guard_expr head observed_metrics)
+			(map tail (lambda (part) (sql_queryplan_runtime_guard_expr part observed_metrics))))
 		_ expr)))
 
 (define sql_queryplan_guard_references_symbol? (lambda (expr target)
@@ -290,7 +300,9 @@ adding a raw value equality would needlessly partition the cache per user. */
 		cannot represent that dependency. The optimizer can inline these lets. */
 		(sql_queryplan_runtime_guard_expr
 			(reduce (reverse bindings) (lambda (body binding)
-				(list (list (quote lambda) (list (car binding)) body) (cadr binding))) complete_guard)))))
+				(list (list (quote lambda) (list (car binding)) body) (cadr binding))) complete_guard)
+			(map (sql_queryplan_preparations_from_session planning_session)
+				(lambda (preparation) (planner_queryplan_observation_metric_key (car preparation))))))))
 
 (define sql_invoke_parse_fn (lambda (parse_fn schema parse_query policy planning_session tx)
 	(if (list? parse_fn)
@@ -360,7 +372,7 @@ serialization still see the complete plan. */
 											(list (quote lambda) (list (symbol "__queryplan_observed_value")) metric_expr)
 											prepared_value))
 									true))
-							(sql_queryplan_runtime_guard_expr producer))
+							(sql_queryplan_runtime_guard_expr producer nil))
 						(list (quote tx_check) (quote tx))
 						true)))
 			(planner_queryplan_observation_session_expr))))))
@@ -527,7 +539,7 @@ user table merely to discard a newly constructed policy closure. */
 			Ordinary point and ordered scans retain the smaller exact cache path. */
 			(define guarded_query (or explain_query (and select_query
 				(match (toUpper parse_query)
-					(regex "\\b(?:LIKE|MATCH|JOIN|EXISTS)\\b" _) true
+					(regex "\\b(?:LIKE|MATCH|JOIN|EXISTS|IN)\\b|\\(\\s*SELECT\\b" _) true
 					_ false))))
 			(define compile_diagnostic (match (toUpper parse_query)
 				(regex "^\\s*EXPLAIN\\s+COMPILE\\b" _) true

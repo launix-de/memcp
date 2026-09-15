@@ -40,6 +40,67 @@ func serializedTestExpr(t testing.TB, env *Env, expr Scmer) string {
 	return out.String()
 }
 
+func TestLargeReducerOwnership(t *testing.T) {
+	condition := "(and " + strings.Repeat("(not (nil? value)) ", 90) + ")"
+	for _, borrowedReturn := range []bool{false, true} {
+		env := newOptimizerTestEnv()
+		borrowed, input := benchmarkFastDict(32), benchmarkFastDict(48)
+		env.Vars[Symbol("borrowed")] = borrowed
+		other := "acc"
+		if borrowedReturn {
+			other = "borrowed"
+		}
+		source := `(lambda (acc value)
+			(if ` + condition + ` (merge_assoc acc value (lambda (a b) (+ a b))) ` + other + `))`
+		ome := newOptimizerMetainfo()
+		oc := OptimizerContext{Env: env, Ome: &ome}
+		optimized, _ := oc.OptimizeReducerCallback(Read("large reducer", source),
+			&TypeDescriptor{Kind: "list", Length: 0, Transfer: true},
+			&TypeDescriptor{Kind: "any", Length: UnknownLength})
+		serialized := serializedTestExpr(t, env, optimized)
+		if strings.Contains(serialized, "merge_assoc_mut") == borrowedReturn {
+			t.Fatalf("incorrect ownership for borrowed return %v: %s", borrowedReturn, serialized)
+		}
+		beforeBorrowed, beforeInput := SerializeToString(borrowed, &Globalenv), SerializeToString(input, &Globalenv)
+		callback := Eval(optimized, env)
+		got := NewSlice(nil)
+		for _, value := range []Scmer{NewNil(), input, input} {
+			got = Apply(callback, got, value)
+		}
+		for i := 0; i < 48; i++ {
+			value, ok := got.FastDict().Get(NewString(fmt.Sprintf("key-%d", i)))
+			want := int64(i * 2)
+			if borrowedReturn && i < 32 {
+				want += int64(i)
+			}
+			if !ok || value.Int() != want {
+				t.Fatalf("borrowed %v key %d: got %v, expected %d", borrowedReturn, i, value, want)
+			}
+		}
+		if SerializeToString(borrowed, &Globalenv) != beforeBorrowed || SerializeToString(input, &Globalenv) != beforeInput {
+			t.Fatal("large reducer mutated a borrowed input")
+		}
+	}
+}
+
+func TestLargeReducerAnalysisDoesNotRecurse(t *testing.T) {
+	env := newOptimizerTestEnv()
+	ome := newOptimizerMetainfo()
+	ome.callbackAnalysisDepth = 1
+	// Lambda and begin scopes inside an analysis must retain its depth.
+	scope := ome.Copy()
+	scope = scope.CopySharedScope()
+	oc := OptimizerContext{Env: env, Ome: &scope}
+	source := `(lambda (acc value) (if (and ` + strings.Repeat("(not (nil? value)) ", 90) +
+		`) (merge_assoc acc value) acc))`
+	optimized, _ := oc.OptimizeReducerCallback(Read("nested reducer analysis", source),
+		&TypeDescriptor{Kind: "list", Length: 0, Transfer: true},
+		&TypeDescriptor{Kind: "any", Length: UnknownLength})
+	if ome.rewrite.callbackAnalyses != 0 || strings.Contains(serializedTestExpr(t, env, optimized), "merge_assoc_mut") {
+		t.Fatal("speculative analysis recursively analyzed a large reducer")
+	}
+}
+
 func TestSchemeHelperFreshReturnEnablesMutRewrite(t *testing.T) {
 	env := newOptimizerTestEnv()
 	EvalAll("optimizer return test", `(define fresh_pair (lambda (a b) (list a b)))`, env)

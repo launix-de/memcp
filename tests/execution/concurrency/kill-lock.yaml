@@ -314,11 +314,22 @@ test_cases:
         background: true
         expect:
           rows: 1
-      # one sync step lets the background request reach the lock wait
-      - session_id: "lock-state-writer"
-        sql: "SELECT 1"
-      - session_id: "lock-state-writer"
-        sql: "SELECT 1"
+      # Synchronize on the actual lock wait, not the relative speed of two HTTP requests.
+      - &wait_for_table_lock
+        scm: |
+          (begin
+            (define wait_for_lock (lambda (remaining)
+              (if (not (empty_list? (filter (show_processlist) (lambda (row)
+                    (and (equal? (get_assoc row "State") "Waiting for table lock")
+                      (equal? (get_assoc row "Info") "SELECT id FROM lock_test WHERE id = 1"))))))
+                true
+                (if (<= remaining 0) false
+                  (begin (sleep 0.01) (wait_for_lock (- remaining 1)))))))
+            (wait_for_lock 300))
+        timeout: 5
+        expect:
+          rows: 1
+          contains: "True"
       - session_id: "lock-state-writer"
         sql: "SHOW PROCESSLIST"
         expect:
@@ -343,8 +354,7 @@ test_cases:
         timeout: 5
         expect:
           error: true
-      - session_id: "lock-kill-owner"
-        sql: "SELECT 1"
+      - *wait_for_table_lock
       - session_id: "lock-kill-attacker"
         sql: "SELECT KILL_QUERY(id) AS killed FROM lock_kill_ctrl LIMIT 1"
         expect:

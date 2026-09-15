@@ -747,3 +747,28 @@ func TestOrderedOrRejectsWrongWinnerBelowMembershipRiskBudget(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestGroupInputCostsKeepBothSidesOfCrossover(t *testing.T) {
+	c := constants{scanRowNS: 2, mapColumnRowNS: 3, groupRelationStartupNS: 10,
+		groupRelationBuildRowNS: 100, groupCacheStartupNS: 1000, groupCacheBuildRowNS: 5}
+	width := 2.0
+	for _, n := range []float64{1, 1000} {
+		costs := make(map[string]float64)
+		for _, plan := range []string{"query_group", "base_group_cache"} {
+			features, err := rowFeatures(calibrationRow{Decision: "group_relation_input", Plan: plan, InputRows: &n, AggregateWidth: &width})
+			if err != nil {
+				t.Fatal(err)
+			}
+			costs[plan] = estimatedNS(observation{decision: "group_relation_input", plan: plan, x: features}, c)
+		}
+		if (costs["query_group"] < costs["base_group_cache"]) != (n == 1) {
+			t.Fatalf("rows=%g: crossover lost: %v", n, costs)
+		}
+	}
+	if _, err := rowFeatures(calibrationRow{Decision: "group_relation_input", Plan: "query_group"}); err == nil {
+		t.Fatal("unknown work quantities accepted")
+	}
+	if _, err := decisionAlternatives([]observation{{caseName: "incomplete", decision: "group_relation_input", plan: "query_group"}}); err == nil {
+		t.Fatal("single alternative accepted")
+	}
+}

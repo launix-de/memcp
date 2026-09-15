@@ -240,8 +240,10 @@ test_cases:
 
   - name: "cold ungrouped SUM scalar reduction"
     performance_rows: 1000000
+    # Keep compilation/cache setup and ten further executions in one total.
+    timing_aggregation: total
     warmup: 0
-    timing_samples: 1
+    timing_samples: 11
     threshold_ms: 10000
     timeout: 30
     setup:

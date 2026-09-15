@@ -62,6 +62,42 @@ test_cases:
             " count=" (results "count") " sum=" (results "sum")))))
     expect:
       data: ["ok"]
+  - name: "IN subquery without JOIN keyword recompiles after cardinality growth"
+    scm: |
+      (begin
+        (define cache (newcachemap))
+        (define sess (newsession))
+        (sess "username" "root")
+        (sess "schema" "memcp-tests")
+        (define results (newsession))
+        (results "count" 0)
+        (results "sum" 0)
+        (define resultrow (lambda (row) (begin
+          (results "count" (+ (results "count") 1))
+          (results "sum" (+ (results "sum") (cadr row))))))
+        (define query "SELECT id FROM cg_rows WHERE id IN (SELECT id FROM cg_rows WHERE label IN ('needle-a', 'needle-b')) ORDER BY id LIMIT 4")
+        (define first_formula (cached_parse cache (list parse_sql) "memcp-tests" query nil "root" sess true))
+        (sql_execute_formula sess nil first_formula resultrow (lambda (_fields) nil))
+        (define entry (car (cache (car (cache)))))
+        (define first_variants (count (entry "variants")))
+        (define first_guard (car (car (entry "variants"))))
+        (insert (table "memcp-tests" "cg_rows") '("id" "label")
+          (map (produceN 4096) (lambda (i) (list (+ i 10000) (concat "other-" i)))))
+        (rebuild (table "memcp-tests" "cg_rows") true false)
+        (define guard_after_growth
+          ((sql_queryplan_compile_formula first_guard)
+            sess nil (lambda (_row) nil) (lambda (_fields) nil)))
+        (define second_formula (cached_parse cache (list parse_sql) "memcp-tests" query nil "root" sess true))
+        (sql_execute_formula sess nil second_formula resultrow (lambda (_fields) nil))
+        (if (and (>= first_variants 1) (not guard_after_growth)
+          (> (count (entry "variants")) first_variants)
+          (equal? (results "count") 4) (equal? (results "sum") 6))
+          "ok"
+          (error (concat "cached growth mismatch: guard=" guard_after_growth
+            " variants=" (count (entry "variants"))
+            " count=" (results "count") " sum=" (results "sum")))))
+    expect:
+      data: ["ok"]
   - name: "Exact aggregate cache entries retain their literal identity"
     scm: |
       (begin
