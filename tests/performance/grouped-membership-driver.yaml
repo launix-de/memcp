@@ -1,0 +1,248 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: '1.0'
+  description: Grouped membership drives selective joins before outer aggregation
+  isolated: true
+  perf_ci: true
+  performance_rows: 8192
+  physical_calibration: true
+  cache_state: warm
+  compile_state: warm
+setup:
+- sql: DROP TABLE IF EXISTS gd_tiny
+- sql: CREATE TABLE gd_tiny (k INT, quantity INT) ENGINE=memory
+- sql: INSERT INTO gd_tiny VALUES (1,400),(2,10),(NULL,400)
+- scm: (rebuild (table "memcp-tests" "gd_tiny") true false)
+- sql: DROP TABLE IF EXISTS gd_customer
+- sql: DROP TABLE IF EXISTS gd_orders
+- sql: DROP TABLE IF EXISTS gd_lineitem
+- sql: CREATE TABLE gd_customer (c_custkey INT, c_name VARCHAR(32)) ENGINE=memory
+- sql: CREATE TABLE gd_orders (o_orderkey INT, o_custkey INT, o_totalprice INT) ENGINE=memory
+- sql: CREATE TABLE gd_lineitem (l_orderkey INT, l_quantity INT) ENGINE=memory
+- scm: "(begin\n (insert (table \"memcp-tests\" \"gd_customer\") '(\"c_custkey\" \"c_name\")\n  (map (produceN 128)\
+    \ (lambda (i) (list (+ 1 i) (concat \"customer\" (string (+ 1 i)))))))\n (insert (table \"memcp-tests\" \"gd_orders\"\
+    ) '(\"o_orderkey\" \"o_custkey\" \"o_totalprice\")\n  (map (produceN 1024) (lambda (i) (list (+ 1 i) (+ 1 (mod\
+    \ i 128)) (+ 1001 i)))))\n (insert (table \"memcp-tests\" \"gd_lineitem\") '(\"l_orderkey\" \"l_quantity\")\n\
+    \  (map (produceN 8192) (lambda (i) (list (+ 1 (mod i 1024)) (if (equal? (mod i 128) 0) 50 1)))))\n (rebuild\
+    \ (table \"memcp-tests\" \"gd_customer\") true false)\n (rebuild (table \"memcp-tests\" \"gd_orders\") true\
+    \ false)\n (rebuild (table \"memcp-tests\" \"gd_lineitem\") true false) true)"
+test_cases:
+- name: Grouped IN HAVING preserves outer aggregate
+  sql: "SELECT c.c_name, c.c_custkey, o.o_orderkey, o.o_totalprice, SUM(l.l_quantity) AS quantity\nFROM gd_customer\
+    \ c, gd_orders o, gd_lineitem l\nWHERE c.c_custkey=o.o_custkey AND o.o_orderkey=l.l_orderkey\n AND o.o_orderkey\
+    \ IN (SELECT l_orderkey FROM gd_lineitem GROUP BY l_orderkey HAVING SUM(l_quantity)>300)\nGROUP BY c.c_name,c.c_custkey,o.o_orderkey,o.o_totalprice\n\
+    ORDER BY o.o_totalprice DESC LIMIT 100"
+  expect: &id001
+    rows: 8
+    data:
+    - c_name: customer1
+      c_custkey: 1
+      o_orderkey: 897
+      o_totalprice: 1897
+      quantity: 400
+    - &id002
+      c_name: customer1
+      c_custkey: 1
+      o_orderkey: 769
+      o_totalprice: 1769
+      quantity: 400
+    - &id003
+      c_name: customer1
+      c_custkey: 1
+      o_orderkey: 641
+      o_totalprice: 1641
+      quantity: 400
+    - &id004
+      c_name: customer1
+      c_custkey: 1
+      o_orderkey: 513
+      o_totalprice: 1513
+      quantity: 400
+    - &id005
+      c_name: customer1
+      c_custkey: 1
+      o_orderkey: 385
+      o_totalprice: 1385
+      quantity: 400
+    - &id006
+      c_name: customer1
+      c_custkey: 1
+      o_orderkey: 257
+      o_totalprice: 1257
+      quantity: 400
+    - &id007
+      c_name: customer1
+      c_custkey: 1
+      o_orderkey: 129
+      o_totalprice: 1129
+      quantity: 400
+    - &id008
+      c_name: customer1
+      c_custkey: 1
+      o_orderkey: 1
+      o_totalprice: 1001
+      quantity: 400
+- name: 'Perf: selective grouped membership with outer aggregate'
+  sql: "SELECT c.c_name, c.c_custkey, o.o_orderkey, o.o_totalprice, SUM(l.l_quantity) AS quantity\nFROM gd_customer\
+    \ c, gd_orders o, gd_lineitem l\nWHERE c.c_custkey=o.o_custkey AND o.o_orderkey=l.l_orderkey\n AND o.o_orderkey\
+    \ IN (SELECT l_orderkey FROM gd_lineitem GROUP BY l_orderkey HAVING SUM(l_quantity)>300)\nGROUP BY c.c_name,c.c_custkey,o.o_orderkey,o.o_totalprice\n\
+    ORDER BY o.o_totalprice DESC LIMIT 100"
+  warmup: 2
+  timing_samples: 5
+  timeout: 60
+  threshold_ms: 60000
+  expect: *id001
+  physical_calibration: true
+  calibration_decision: group_relation_input
+- name: 'Perf: equivalent comma join uses the same group alternatives'
+  sql: "SELECT c.c_name, c.c_custkey, o.o_orderkey, o.o_totalprice, SUM(l.l_quantity) AS quantity\nFROM gd_customer\
+    \ c, gd_orders o, gd_lineitem l,\n (SELECT l_orderkey AS k FROM gd_lineitem GROUP BY l_orderkey HAVING SUM(l_quantity)>300)\
+    \ g\nWHERE c.c_custkey=o.o_custkey AND o.o_orderkey=l.l_orderkey AND o.o_orderkey=g.k\nGROUP BY c.c_name,c.c_custkey,o.o_orderkey,o.o_totalprice\n\
+    ORDER BY o.o_totalprice DESC LIMIT 100"
+  expect: *id001
+  warmup: 2
+  timing_samples: 5
+  threshold_ms: 60000
+- name: 'Perf: tiny grouped input retains cheap query builder'
+  sql: SELECT COUNT(*) AS n FROM gd_orders o, gd_lineitem l WHERE o.o_orderkey=l.l_orderkey AND o.o_orderkey IN
+    (SELECT k FROM gd_tiny GROUP BY k HAVING SUM(quantity)>300)
+  expect:
+    data:
+    - n: 8
+  warmup: 2
+  timing_samples: 5
+  threshold_ms: 1000
+  physical_calibration: true
+  calibration_decision: group_relation_input
+- name: Large group exposes maintained cache choice
+  scm: "(begin (define sess (newsession)) (define cache (newcachemap)) (define result (newsession))\n (with_autocommit\
+    \ sess nil 1 \"group operator costing\" (lambda (tx)\n  (sql_execute_formula sess tx (cached_parse cache (list\
+    \ parse_sql) \"memcp-tests\" \"EXPLAIN PHYSICAL SELECT c.c_name, c.c_custkey, o.o_orderkey, o.o_totalprice,\
+    \ SUM(l.l_quantity) AS quantity\\nFROM gd_customer c, gd_orders o, gd_lineitem l\\nWHERE c.c_custkey=o.o_custkey\
+    \ AND o.o_orderkey=l.l_orderkey\\n AND o.o_orderkey IN (SELECT l_orderkey FROM gd_lineitem GROUP BY l_orderkey\
+    \ HAVING SUM(l_quantity)>300)\\nGROUP BY c.c_name,c.c_custkey,o.o_orderkey,o.o_totalprice\\nORDER BY o.o_totalprice\
+    \ DESC LIMIT 100\" nil \"root\" sess true tx)\n   (lambda (row) (result \"physical\" (get_assoc row \"physical\"\
+    ))) (lambda (_fields) nil))))\n (if (and (strlike (result \"physical\") \"%decision group_relation_input%\"\
+    )\n   (strlike (result \"physical\") \"%normally_chosen base_group_cache%\")) true (error (result \"physical\"\
+    ))))"
+  expect:
+    data:
+    - true
+- name: Tiny group retains query builder choice
+  scm: "(begin (define sess (newsession)) (define cache (newcachemap)) (define result (newsession))\n (with_autocommit\
+    \ sess nil 1 \"group operator costing\" (lambda (tx)\n  (sql_execute_formula sess tx (cached_parse cache (list\
+    \ parse_sql) \"memcp-tests\" \"EXPLAIN PHYSICAL SELECT COUNT(*) AS n FROM gd_orders o, gd_lineitem l WHERE o.o_orderkey=l.l_orderkey\
+    \ AND o.o_orderkey IN (SELECT k FROM gd_tiny GROUP BY k HAVING SUM(quantity)>300)\" nil \"root\" sess true tx)\n\
+    \   (lambda (row) (result \"physical\" (get_assoc row \"physical\"))) (lambda (_fields) nil))))\n (if (and (strlike\
+    \ (result \"physical\") \"%decision group_relation_input%\")\n   (strlike (result \"physical\") \"%normally_chosen\
+    \ query_group%\")) true (error (result \"physical\"))))"
+  expect:
+    data:
+    - true
+- name: Empty HAVING result drives the complete joined aggregate
+  sql: "SELECT c.c_name, c.c_custkey, o.o_orderkey, o.o_totalprice, SUM(l.l_quantity) AS quantity\nFROM gd_customer\
+    \ c, gd_orders o, gd_lineitem l\nWHERE c.c_custkey=o.o_custkey AND o.o_orderkey=l.l_orderkey\n AND o.o_orderkey\
+    \ IN (SELECT l_orderkey FROM gd_lineitem GROUP BY l_orderkey HAVING SUM(l_quantity)>500)\nGROUP BY c.c_name,c.c_custkey,o.o_orderkey,o.o_totalprice\n\
+    ORDER BY o.o_totalprice DESC LIMIT 100"
+  expect:
+    rows: 0
+- name: Observation counts matching groups using bound aggregate columns
+  scm: "(begin\n (define sess (newsession)) (sess \"username\" \"root\") (sess \"schema\" \"memcp-tests\")\n (define\
+    \ cache (newcachemap))\n (with_autocommit sess nil 1 \"group cardinality observation\" (lambda (tx) (begin\n\
+    \  (define formula (cached_parse cache (list parse_sql) \"memcp-tests\" \"SELECT c.c_name, c.c_custkey, o.o_orderkey,\
+    \ o.o_totalprice, SUM(l.l_quantity) AS quantity\\nFROM gd_customer c, gd_orders o, gd_lineitem l\\nWHERE c.c_custkey=o.o_custkey\
+    \ AND o.o_orderkey=l.l_orderkey\\n AND o.o_orderkey IN (SELECT l_orderkey FROM gd_lineitem GROUP BY l_orderkey\
+    \ HAVING SUM(l_quantity)>300)\\nGROUP BY c.c_name,c.c_custkey,o.o_orderkey,o.o_totalprice\\nORDER BY o.o_totalprice\
+    \ DESC LIMIT 100\" nil \"root\" sess true tx))\n  (sql_execute_formula sess tx formula (lambda (_row) nil) (lambda\
+    \ (_fields) nil))\n  (define entry (car (cache (car (cache)))))\n  (define preparations (nth (car (entry \"\
+    variants\")) 2))\n  (define observation (find preparations (lambda (p) (strlike (car p) \"group_join_rows:%\"\
+    )) nil))\n  (define values (sess \"get_or_compute_scoped\" (tx_query tx) \"__memcp_queryplan_observations\"\
+    \ tx (lambda (tx) (newsession))))\n  (if (and (not (nil? observation)) (equal? (values (planner_queryplan_observation_metric_key\
+    \ (car observation))) 8))\n   true (error \"group observation did not count eight HAVING matches\"))))))"
+  expect:
+    data:
+    - true
+- name: Broad membership retains every order
+  sql: SELECT COUNT(*) AS n FROM gd_orders o WHERE o.o_orderkey IN (SELECT l_orderkey FROM gd_lineitem GROUP BY
+    l_orderkey HAVING SUM(l_quantity)>0)
+  expect:
+    data:
+    - n: 1024
+- name: Empty grouped membership emits no rows
+  sql: SELECT COUNT(*) AS n FROM gd_orders o WHERE o.o_orderkey IN (SELECT l_orderkey FROM gd_lineitem GROUP BY
+    l_orderkey HAVING SUM(l_quantity)>500)
+  expect:
+    data:
+    - n: 0
+- name: Delete a cached qualifying group
+  sql: DELETE FROM gd_lineitem WHERE l_orderkey=897
+- name: Cached grouped join reflects deletion
+  sql: "SELECT c.c_name, c.c_custkey, o.o_orderkey, o.o_totalprice, SUM(l.l_quantity) AS quantity\nFROM gd_customer\
+    \ c, gd_orders o, gd_lineitem l\nWHERE c.c_custkey=o.o_custkey AND o.o_orderkey=l.l_orderkey\n AND o.o_orderkey\
+    \ IN (SELECT l_orderkey FROM gd_lineitem GROUP BY l_orderkey HAVING SUM(l_quantity)>300)\nGROUP BY c.c_name,c.c_custkey,o.o_orderkey,o.o_totalprice\n\
+    ORDER BY o.o_totalprice DESC LIMIT 100"
+  expect:
+    rows: 7
+    data:
+    - *id002
+    - *id003
+    - *id004
+    - *id005
+    - *id006
+    - *id007
+    - *id008
+- name: Insert NULL membership key and NULL quantity
+  sql: INSERT INTO gd_lineitem VALUES (NULL,400),(897,NULL)
+- name: NULL groups do not create membership matches
+  sql: "SELECT c.c_name, c.c_custkey, o.o_orderkey, o.o_totalprice, SUM(l.l_quantity) AS quantity\nFROM gd_customer\
+    \ c, gd_orders o, gd_lineitem l\nWHERE c.c_custkey=o.o_custkey AND o.o_orderkey=l.l_orderkey\n AND o.o_orderkey\
+    \ IN (SELECT l_orderkey FROM gd_lineitem GROUP BY l_orderkey HAVING SUM(l_quantity)>300)\nGROUP BY c.c_name,c.c_custkey,o.o_orderkey,o.o_totalprice\n\
+    ORDER BY o.o_totalprice DESC LIMIT 100"
+  expect:
+    rows: 7
+    data:
+    - *id002
+    - *id003
+    - *id004
+    - *id005
+    - *id006
+    - *id007
+    - *id008
+- name: Restore deleted qualifying group with a new aggregate
+  sql: INSERT INTO gd_lineitem VALUES (897,400)
+- name: Cached grouped join sees newly qualifying group
+  sql: "SELECT c.c_name, c.c_custkey, o.o_orderkey, o.o_totalprice, SUM(l.l_quantity) AS quantity\nFROM gd_customer\
+    \ c, gd_orders o, gd_lineitem l\nWHERE c.c_custkey=o.o_custkey AND o.o_orderkey=l.l_orderkey\n AND o.o_orderkey\
+    \ IN (SELECT l_orderkey FROM gd_lineitem GROUP BY l_orderkey HAVING SUM(l_quantity)>300)\nGROUP BY c.c_name,c.c_custkey,o.o_orderkey,o.o_totalprice\n\
+    ORDER BY o.o_totalprice DESC LIMIT 100"
+  expect: *id001
+- name: Invalidate one aggregate through update
+  sql: UPDATE gd_lineitem SET l_quantity=1 WHERE l_orderkey=897
+- name: Cached grouped join reapplies HAVING after update
+  sql: "SELECT c.c_name, c.c_custkey, o.o_orderkey, o.o_totalprice, SUM(l.l_quantity) AS quantity\nFROM gd_customer\
+    \ c, gd_orders o, gd_lineitem l\nWHERE c.c_custkey=o.o_custkey AND o.o_orderkey=l.l_orderkey\n AND o.o_orderkey\
+    \ IN (SELECT l_orderkey FROM gd_lineitem GROUP BY l_orderkey HAVING SUM(l_quantity)>300)\nGROUP BY c.c_name,c.c_custkey,o.o_orderkey,o.o_totalprice\n\
+    ORDER BY o.o_totalprice DESC LIMIT 100"
+  expect:
+    rows: 7
+    data:
+    - *id002
+    - *id003
+    - *id004
+    - *id005
+    - *id006
+    - *id007
+    - *id008
+- name: Unknown grouped aggregate column fails
+  sql: "SELECT c.c_name, c.c_custkey, o.o_orderkey, o.o_totalprice, SUM(l.l_quantity) AS quantity\nFROM gd_customer\
+    \ c, gd_orders o, gd_lineitem l\nWHERE c.c_custkey=o.o_custkey AND o.o_orderkey=l.l_orderkey\n AND o.o_orderkey\
+    \ IN (SELECT l_orderkey FROM gd_lineitem GROUP BY l_orderkey HAVING SUM(missing_quantity)>300)\nGROUP BY c.c_name,c.c_custkey,o.o_orderkey,o.o_totalprice\n\
+    ORDER BY o.o_totalprice DESC LIMIT 100"
+  expect:
+    error: true
+cleanup:
+- sql: DROP TABLE IF EXISTS gd_lineitem
+- sql: DROP TABLE IF EXISTS gd_orders
+- sql: DROP TABLE IF EXISTS gd_customer
+- sql: DROP TABLE IF EXISTS gd_tiny

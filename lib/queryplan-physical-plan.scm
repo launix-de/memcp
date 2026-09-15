@@ -620,8 +620,112 @@ only partitioned FROM source would erase the block's row multiplicity
 			_ nil)
 		_ nil)))
 
+/* A closed single-table group can use either the query-local group builder
+or the existing maintained keytable. Keep this physical choice out of logical
+IR and make it before canonical cache identities are assigned to consumers. */
+(define group_relation_input_choice (lambda (stage block planning_session)
+	(begin
+		(define input (if (group_stage? stage) (direct_group_probe_input stage) nil))
+		(define src (if (nil? input) nil (car (qb_sources input))))
+		(define consumer (find (qb_sources block) (lambda (candidate)
+			(and (stage_output_relation? (source_relation candidate))
+				(equal? (stage_output_relation_id (source_relation candidate)) (gs_id stage)))) nil))
+		(if (or (nil? src) (or (nil? consumer) (or (source_outer? consumer)
+			(or (source_outer? src) (or (not (nil? (source_join_expr src)))
+				(or (empty_list? (gs_keys stage)) (or (not (empty_list? (gs_domain stage)))
+					(or (not (empty_list? (expr_probe_stages stage)))
+						(or (not (empty_list? (query_expr_session_reads stage)))
+							(not (expr_only_refs_alias? nil (source_alias src) input))))))))))) stage
+			(begin
+				(define rows (planner_source_row_count src))
+				(define width (count (gs_aggregates stage)))
+				(define candidate (make_group_stage (gs_id stage) src (gs_domain stage) (gs_keys stage)
+					(gs_aggregates stage) (gs_having stage) (gs_output stage) (gs_order stage) (gs_limit stage) (gs_offset stage)
+					(qassoc_set_without (gs_facts stage) (quote condition)
+						(combine_where (qassoc_get (gs_facts stage) (quote condition) true) (qb_where input)) (quote group_cache))))
+				(define work (* (coalesceNil rows 0) (+ planner_membership_scan_row_ns
+					(* width planner_membership_map_column_row_ns))))
+				(define query_ns (+ planner_group_relation_startup_ns work
+					(* (coalesceNil rows 0) planner_group_relation_build_row_ns)))
+				(define cache_ns (+ planner_membership_group_cache_startup_ns work
+					(* (coalesceNil rows 0) planner_membership_group_cache_build_row_ns)))
+				(define normal (if (and (number? rows) (< cache_ns query_ns)) "base_group_cache" "query_group"))
+				(define decision (concat "group_relation_input:" (gs_id stage)))
+				(define chosen (planner_physical_choice decision normal '("query_group" "base_group_cache") planning_session))
+				(planner_record_physical_decision (list
+					(list "decision" "group_relation_input") (list "decision_id" decision)
+					(list "chosen" chosen) (list "normally_chosen" normal)
+					(list "selection" (if (nil? (planner_physical_override decision planning_session)) "cost" "calibration_override"))
+					(list "cache_relation" (group_stage_cache_relation candidate))
+					(list "reason" "closed_group_lowest_build_cost")
+					(list "inputs" (list (list "input_rows" rows) (list "aggregate_width" width)))
+					(list "alternatives" (map (list (list "query_group" query_ns) (list "base_group_cache" cache_ns))
+						(lambda (entry) (list (list "plan" (car entry))
+							(list "cost" (planner_cost_explain (planner_cost (cadr entry) 0 0 0 0 0 0 0 0 0.5)))))))) planning_session)
+				(if (equal? chosen "base_group_cache") candidate stage))))))
+
+/* The grouped relation is already a required prefix of every carrier plan.
+Observe its filtered cardinality only when avoiding repeated probes can pay
+for that scan. The same prepared table is reused by every guarded variant. */
+(define group_join_observation_stage (lambda (stage block stages graph planning_session)
+	(begin
+		(define src (find (qb_sources block) (lambda (src)
+			(and (stage_output_relation? (source_relation src))
+				(equal? (stage_output_relation_id (source_relation src)) (gs_id stage)))) nil))
+		(define raw_input (if (group_stage? stage) (gs_input stage) nil))
+		(define input (if (and (not (nil? raw_input)) (source_is_base_table? raw_input))
+			(make_query_block (source_schema raw_input) (list raw_input) '() true '() nil '() nil nil '() '() '()) raw_input))
+		(define eligible (and (not (nil? src)) (and (group_stage? stage)
+			(and (empty_list? (gs_domain stage)) (and (not (empty_list? (gs_keys stage)))
+				(and (nil? (gs_limit stage)) (and (nil? (gs_offset stage))
+					(and (query_block? input) (and (single_source? (qb_sources input))
+						(and (source_is_base_table? (car (qb_sources input)))
+							(and (empty_list? (qb_stages input)) (empty_list? (expr_probe_stages input)))))))))))))
+		(if (not eligible) stage
+			(begin
+				(define predicates (join_optimizer_local_predicates graph (source_alias src)))
+				(define decision (join_group_observation_id stages src predicates))
+				(define input_rows (planner_stage_input_rows input))
+				(define probe_rows (direct_group_join_tree_invocations
+					(query_block_join_plan block (qb_sources block)) (source_alias src) (qb_sources block) stages 1))
+				/* A learned variant must keep producing its own observation even after
+				that observation has moved the group to the first leaf. Otherwise the
+				next request would lose the evidence on which its order depends. */
+				(define observed (and (not (nil? decision))
+					(number? (planner_queryplan_observed_metric decision planning_session))))
+				(define scan_ns (+ planner_membership_scan_invocation_ns
+					(* (coalesceNil input_rows 0) planner_membership_scan_row_ns)))
+				(define probe_ns (* (coalesceNil probe_rows 0) planner_group_relation_probe_ns))
+				(if (or (nil? decision) (or (empty_list? predicates)
+					(or (not (number? input_rows)) (and (not observed) (or (<= (coalesceNil probe_rows 0) 1)
+						(>= scan_ns probe_ns)))))) stage
+					(begin
+						(define carrier (list (source_alias src) (group_stage_cache_schema stage)
+							(group_stage_cache_relation stage) false nil))
+						(define condition (reduce predicates (lambda (condition entry)
+							(combine_where condition (qassoc_get entry (quote predicate) true))) true))
+						(define cols (extract_columns_for_alias carrier condition))
+						(define metric (compile_scan_plan (quote scan) (quote tx)
+							(quote __queryplan_observed_value) (list (quote quote) cols)
+							(list (quote lambda) (map cols (lambda (col) (symbol (concat (source_alias carrier) "." col))))
+								(lower_column_expr_for_alias carrier condition))
+							(list (quote quote) '())
+							(scan_mapreduce_expr '() (quote +) 1) 0 (quote +) false))
+						(define producer (list (quote !begin)
+							(lower_group_stage_prepare_using stages stages stage true nil)
+							(source_table_expr carrier)))
+						(define keys (planner_register_queryplan_observation decision producer metric planning_session))
+						(planner_record_physical_decision (list (list "decision" "group_join_observation")
+							(list "decision_id" decision) (list "chosen" "shared_group_cardinality")
+							(list "selection" "cost") (list "scan_ns" scan_ns) (list "probe_ns" probe_ns)
+							(list "reason" "required_group_prefix_reused_before_guard_dispatch")) planning_session)
+						(if (nil? keys) stage (group_stage_with_facts stage
+							(qassoc_set (gs_facts stage) (quote group_join_observation) (car keys)))))))))))
+
 (define query_block_with_full_stage_catalog_using (lambda (block stages)
 	(begin
+		(define planning_session (planner_context_session (qb_facts block)))
+		(define stages (map stages (lambda (stage) (group_relation_input_choice stage block planning_session))))
 		(define signatures (stage_semantic_signature_index stages))
 		/* Catalog lookups must return the same annotated immutable stage instances
 		that root lowering sees; otherwise nested probe copies derive old names. */
@@ -630,8 +734,10 @@ only partitioned FROM source would erase the block's row multiplicity
 		/* Attach the compile-only handle after semantic signatures and canonical
 		cache names are complete. Physical expression decisions nested in a stage
 		can then participate in EXPLAIN CALIBRATE without changing its identity. */
-		(define planning_session (planner_context_session (qb_facts block)))
-		(define signature_stages (map canonical_stages (lambda (stage)
+		(define graph (extract_join_hypergraph block))
+		(define observed_stages (map canonical_stages (lambda (stage)
+			(group_join_observation_stage stage block canonical_stages graph planning_session))))
+		(define signature_stages (map observed_stages (lambda (stage)
 			(if (scalar_cardinality_probe_stage? stage)
 				(group_stage_with_physical_planning_session stage planning_session)
 				stage))))
@@ -1262,6 +1368,7 @@ outer joins. */
 
 (define lower_group_stage_prepare_using (lambda (all_stages lookup_stages stage include_nested_prepares result_sink)
 	(begin
+		(define observed_key (qassoc_get (gs_facts stage) (quote group_join_observation) nil))
 		(define src (gs_input stage))
 		(define prepare_catalog (unique_stages_by_id (merge (list (list stage) all_stages))))
 		(define prepare_dependency_graph (stage_dependency_graph prepare_catalog))
@@ -1620,11 +1727,12 @@ outer joins. */
 		(define lowered_plan (if (empty_list? invariant_probe_bindings)
 			lookup_cached_plan
 			(cons (quote !begin) (merge (list invariant_probe_bindings (list lookup_cached_plan))))))
-		(if (nil? base_group_into_plan)
-			lowered_plan
-			(list
-				(list (quote lambda) (list base_group_fill) lowered_plan)
-				(list (quote lambda) (list (physical_query_tx_symbol)) base_group_into_plan))))))
+		(if (not (nil? observed_key)) (planner_queryplan_observation_read_expr observed_key)
+			(if (nil? base_group_into_plan)
+				lowered_plan
+				(list
+					(list (quote lambda) (list base_group_fill) lowered_plan)
+					(list (quote lambda) (list (physical_query_tx_symbol)) base_group_into_plan)))))))
 
 (define lower_orc_stage_prepare (lambda (stage)
 	(begin
@@ -10091,51 +10199,63 @@ RecSet node is written into logical IR. */
 					"candidate_keyset"
 					"driver_filter_join_probe"))))))
 
+(define physical_group_cache_initialized? (lambda (expr relation)
+	(match expr
+		(cons head tail) (or
+			(and (equal? head (quote initialize_cache_table))
+				(strlike (serialize tail) (concat "%" relation "%")))
+			(or (physical_group_cache_initialized? head relation)
+				(reduce tail (lambda (found item) (or found (physical_group_cache_initialized? item relation))) false)))
+		_ false)))
+
 (define physical_operator_family_for_decision (lambda (plan decision)
 	(begin
 		(define kind (qassoc_get decision "decision" nil))
-		(if (equal? kind "ordered_or")
-			(if (physical_expr_has_head? plan (quote scan_order_multi)) "scan_order_multi"
-				(if (physical_expr_has_head? plan (quote scan_order)) "scan_order" "unknown"))
-			(if (equal? kind "semijoin_carrier")
-				(if (semijoin_plan_has_operator? plan "recset_project_join")
-					(if (semijoin_plan_has_operator? plan "initialize_cache_table") "prejoin_recset" "projected_recset")
-					(if (semijoin_plan_has_operator? plan "createcolumn") "predicate_cache" "unknown"))
-				(if (equal? kind "membership_carrier")
-					(begin
-						(define chosen (qassoc_get decision "chosen" nil))
-						/* A compound query may contain key indexes and projected RecSets for
-						unrelated ACL stages. Validate the primitive required by this decision's
-						chosen alternative instead of assigning the whole plan to the first
-						operator family found globally. Falling back to the global classifier
-						still makes a genuinely unreachable forced alternative fail calibration. */
-						(if (or
-							(and (equal? chosen "ordered_batch_accept")
-								(physical_expr_has_head? plan (quote scan_order_batch_accept)))
-							(and (equal? chosen "prefiltered_candidate_keyset")
-								(physical_prefiltered_membership_expr? plan))
-							(and (equal? chosen "candidate_keyset")
-								(physical_expr_has_head? plan (quote recset_project_join)))
-							(and (equal? chosen "driver_order_membership_probe")
-								(physical_expr_has_head? plan (quote recset_key_index)))
-							(and (equal? chosen "driver_filter_join_probe")
-								(not (physical_expr_has_head? plan (quote scan_order_batch_accept)))))
-							chosen
-							(physical_membership_operator_family plan)))
-					(if (equal? kind "scan_join_order")
-						(if (physical_expr_has_head? plan (quote scan_join_order))
-							(if (equal? (qassoc_get decision "chosen" nil)
-								"scan_join_order_batched_probe")
-								"scan_join_order_batched_probe" "scan_join_order")
-							"legacy_join_tree")
-						(if (equal? kind "direct_group_join")
-							(if (physical_expr_has_group_relation? plan)
-								"group_carrier" "direct_group_join")
-							(if (equal? kind "scan_lookup")
-								(if (physical_expr_has_head? plan (quote scan_lookup))
-									"scan_lookup"
-									(if (physical_expr_has_head? plan (quote scan_order)) "scan_order" "unknown"))
-								"unknown")))))))))
+		(if (equal? kind "group_relation_input")
+			(if (physical_group_cache_initialized? plan (qassoc_get decision "cache_relation" nil))
+				"base_group_cache" "query_group")
+			(if (equal? kind "ordered_or")
+				(if (physical_expr_has_head? plan (quote scan_order_multi)) "scan_order_multi"
+					(if (physical_expr_has_head? plan (quote scan_order)) "scan_order" "unknown"))
+				(if (equal? kind "semijoin_carrier")
+					(if (semijoin_plan_has_operator? plan "recset_project_join")
+						(if (semijoin_plan_has_operator? plan "initialize_cache_table") "prejoin_recset" "projected_recset")
+						(if (semijoin_plan_has_operator? plan "createcolumn") "predicate_cache" "unknown"))
+					(if (equal? kind "membership_carrier")
+						(begin
+							(define chosen (qassoc_get decision "chosen" nil))
+							/* A compound query may contain key indexes and projected RecSets for
+							unrelated ACL stages. Validate the primitive required by this decision's
+							chosen alternative instead of assigning the whole plan to the first
+							operator family found globally. Falling back to the global classifier
+							still makes a genuinely unreachable forced alternative fail calibration. */
+							(if (or
+								(and (equal? chosen "ordered_batch_accept")
+									(physical_expr_has_head? plan (quote scan_order_batch_accept)))
+								(and (equal? chosen "prefiltered_candidate_keyset")
+									(physical_prefiltered_membership_expr? plan))
+								(and (equal? chosen "candidate_keyset")
+									(physical_expr_has_head? plan (quote recset_project_join)))
+								(and (equal? chosen "driver_order_membership_probe")
+									(physical_expr_has_head? plan (quote recset_key_index)))
+								(and (equal? chosen "driver_filter_join_probe")
+									(not (physical_expr_has_head? plan (quote scan_order_batch_accept)))))
+								chosen
+								(physical_membership_operator_family plan)))
+						(if (equal? kind "scan_join_order")
+							(if (physical_expr_has_head? plan (quote scan_join_order))
+								(if (equal? (qassoc_get decision "chosen" nil)
+									"scan_join_order_batched_probe")
+									"scan_join_order_batched_probe" "scan_join_order")
+								"legacy_join_tree")
+							(if (equal? kind "direct_group_join")
+								(if (physical_expr_has_group_relation? plan)
+									"group_carrier" "direct_group_join")
+								(if (equal? kind "scan_lookup")
+									(if (physical_expr_has_head? plan (quote scan_lookup))
+										"scan_lookup"
+										(if (physical_expr_has_head? plan (quote scan_order)) "scan_order" "unknown"))
+									"unknown"))))))))))
 
 (define physical_expr_has_group_relation? (lambda (expr)
 	(match expr
@@ -10265,7 +10385,7 @@ protocol callback receives only the calibration row. */
 		(define decision_kind (qassoc_get decision "decision" nil))
 		(define expected_family (if (or (equal? decision_kind "semijoin_carrier") (equal? decision_kind "membership_carrier")
 			(or (equal? decision_kind "scan_join_order")
-				(equal? decision_kind "direct_group_join")))
+				(or (equal? decision_kind "direct_group_join") (equal? decision_kind "group_relation_input"))))
 			variant operator_family))
 		(define consistent (equal? operator_family expected_family))
 		(define baseline_hash_key (concat "hash:" decision_id))

@@ -540,6 +540,13 @@ func (emitter *jitRegexEmitter) emitCaptureEnd(index int) {
 	emitter.ctx.EmitMovRegMem(start, emitter.ctx.StackReg, emitter.captureStarts[index])
 	emitter.ctx.EmitMovRegReg(aux, emitter.cursor)
 	emitter.ctx.EmitSubInt64(aux, start)
+	// Empty captures may start one byte past the backing allocation. Such
+	// an address is not a valid GC root, even when the string length is zero.
+	nonempty := emitter.ctx.ReserveLabel()
+	emitter.ctx.EmitCmpRegImm32(aux, 0)
+	emitter.ctx.EmitJump(CondNotEqual, nonempty)
+	emitter.ctx.EmitMovRegImm64(start, 0)
+	emitter.ctx.MarkLabel(nonempty)
 	emitter.ctx.EmitShlRegImm8(aux, 8)
 	emitter.ctx.EmitOrRegImm32(aux, int32(tagString))
 	emitter.ctx.EmitStoreRegMem(start, emitter.ctx.StackReg, target.StackOff)

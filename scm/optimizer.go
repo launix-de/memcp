@@ -133,6 +133,7 @@ type optimizerMetainfo struct {
 	nextSlot                  *int // pointer to lambda's slot counter; nil outside lambda
 	pendingCallbackParams     []*TypeDescriptor
 	pendingCallbackReturn     *TypeDescriptor // structured escape information for the next lambda result
+	callbackAnalysisDepth     int             // speculative callback analysis must not recursively clone large reducer trees
 	loopDepth                 int             // >0 inside scan/reduce callbacks; prevents hoisted defines from being inlined back into loops
 	lambdaDepth               int             // >0 while optimizing a lambda body; keeps local definitions out of Env hints
 	beginDepth                int             // >0 in lexical begin scopes; their definitions do not reach the caller Env
@@ -570,6 +571,7 @@ func (ome *optimizerMetainfo) Copy() (result optimizerMetainfo) {
 	}
 	result.setBlacklist = ome.setBlacklist
 	result.loopDepth = ome.loopDepth
+	result.callbackAnalysisDepth = ome.callbackAnalysisDepth
 	result.lambdaDepth = ome.lambdaDepth
 	result.beginDepth = ome.beginDepth
 	result.inlineDepth = ome.inlineDepth
@@ -605,6 +607,7 @@ func (ome *optimizerMetainfo) CopySharedScope() (result optimizerMetainfo) {
 	result.setBlacklist = ome.setBlacklist
 	result.nextSlot = ome.nextSlot // shared scope shares VarsNumbered
 	result.loopDepth = ome.loopDepth
+	result.callbackAnalysisDepth = ome.callbackAnalysisDepth
 	result.lambdaDepth = ome.lambdaDepth
 	result.beginDepth = ome.beginDepth
 	result.inlineDepth = ome.inlineDepth
@@ -2859,6 +2862,7 @@ func (oc *OptimizerContext) AnalyzeCallback(callback Scmer, params []*TypeDescri
 	analysisOme := newOptimizerMetainfo()
 	analysisOme.rewrite = oc.Ome.rewrite
 	analysisOme.loopDepth = oc.Ome.loopDepth
+	analysisOme.callbackAnalysisDepth = oc.Ome.callbackAnalysisDepth + 1
 	analysis := OptimizerContext{Env: oc.Env, Ome: &analysisOme}
 	analysis.SetCallbackParamTypes(params)
 	_, result := analysis.OptimizeSub(CloneOptimizerExpression(callback), true)
@@ -2878,14 +2882,22 @@ func (oc *OptimizerContext) OptimizeReducerCallback(callback Scmer, accumulator 
 		optimized, result := oc.OptimizeSub(callback, true)
 		return optimized, normalizeOptimizerType(result)
 	}
-	// Re-analyzing a large fused callback with progressively weakened ownership
-	// clones its complete AST on every fixed-point iteration. Stay conservative
-	// for these uncommon shapes so compile cost remains bounded.
+	// Large fused callbacks use a coarse ownership invariant instead of a
+	// fixed point over detailed element types. Starting at any-owned requires
+	// only one proof: every return path must also transfer its result. If that
+	// proof fails, emit the callback with a borrowed accumulator as before.
+	// Inside a speculative analysis retain the conservative answer, preventing
+	// nested large callbacks from causing exponentially many AST clones.
 	if optimizerNodeCount(callback) > 256 {
 		params[0] = &TypeDescriptor{Kind: "any", Length: UnknownLength}
+		if oc.Ome.callbackAnalysisDepth == 0 {
+			params[0].Transfer = true
+			result := normalizeOptimizerType(oc.AnalyzeCallback(callback, params))
+			params[0] = &TypeDescriptor{Kind: "any", Length: UnknownLength, Transfer: result.Transfer}
+		}
 		oc.SetCallbackParamTypes(params)
-		optimized, result := oc.OptimizeSub(callback, true)
-		return optimized, normalizeOptimizerType(result)
+		optimized, finalResult := oc.OptimizeSub(callback, true)
+		return optimized, normalizeOptimizerType(finalResult)
 	}
 	loopType := accumulator
 	for iteration := 0; iteration < 16; iteration++ {

@@ -1,3 +1,5 @@
+<!-- Copyright (C) 2026 Carl-Philip Hänsch -->
+
 # SQL Test Taxonomy
 
 SQL integration suites use descriptive lower kebab-case filenames without
@@ -35,3 +37,23 @@ Run a taxonomy section through the pre-commit selector:
 ```sh
 ./git-pre-commit 'tests/planner/subqueries/*.yaml'
 ```
+
+## Performance trade-offs between startup and repeated execution
+
+When a change trades cold-start cost against warm execution, gate the complete
+workload: one cold query plus a fixed number `n` of subsequent executions. The
+cold request includes SQL compilation and lazy query/cache preparation; fixture
+loading and server process startup remain outside the query measurement.
+
+Use `timing_aggregation: total`, `warmup: 0`, and `timing_samples: n + 1`.
+For a fixture that already separates cold and warm cases, give both the same
+`timing_group` name, measure the cold case once and the warm case `n` times.
+The `--perf-ab` runner compares the sum for that group, retaining each member's timing in the
+artifacts. There are no discarded warmups or adaptive repetition counts.
+
+Choose `n` before measuring, apply it identically to both revisions, and retain
+it across verification trials. The initial trade-off fixtures use `n = 10`.
+The total may be at most 20% slower; no warmup bonus or fixed jitter allowance
+extends that limit. Suspect totals receive the usual complete fresh-fixture
+ABBA verification, with medians taken across whole workload totals. Independent
+latency tests keep their existing median-per-request policy.

@@ -55393,10 +55393,21 @@ func init_list() {
 		Name: "merge_assoc",
 
 		Fn: func(a ...Scmer) Scmer {
-			setAssoc := PrepareSerialProc(Globalenv.Vars["set_assoc"])
+			setAssoc := PrepareSerialProc(Globalenv.Vars["set_assoc_mut"])
 			var setAssocArgs [4]Scmer
+			slice, fd := asAssoc(a[1], "merge_assoc")
+			if (fd == nil && len(slice) == 0) || (fd != nil && len(fd.Pairs) == 0) {
+				return a[0]
+			}
 			dst := a[0]
-			if slice, fd := asAssoc(a[1], "merge_assoc"); fd == nil {
+			// Preserve the caller's dictionary once, then update only our private
+			// copy. Calling immutable set_assoc for every incoming key copies the
+			// growing hash index repeatedly. Small slice associations are copied
+			// by set_assoc_mut before modification and promoted when they grow.
+			if dst.IsFastDict() {
+				dst = NewFastDict(dst.FastDict().Copy())
+			}
+			if fd == nil {
 				for i := 0; i < len(slice); i += 2 {
 					if len(a) > 2 {
 						setAssocArgs[0], setAssocArgs[1], setAssocArgs[2], setAssocArgs[3] = dst, slice[i], slice[i+1], a[2]

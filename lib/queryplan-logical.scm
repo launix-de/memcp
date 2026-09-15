@@ -896,7 +896,8 @@ move arbitrary calls or subqueries across short-circuit guards. */
 				false)))))
 
 (define physical_helper_relation? (lambda (relation)
-	(and (string? relation) (strlike relation ".grp:%"))))
+	(and (string? relation)
+		(or (strlike relation ".grp:%") (strlike relation ".prejoin:%")))))
 
 (define node_contains_physical_helper? (lambda (node)
 	(if (query_block? node)

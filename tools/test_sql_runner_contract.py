@@ -64,6 +64,8 @@ from run_sql_tests import (  # noqa: E402
     performance_case_key,
     performance_regression_pct,
     performance_sample_ns,
+    performance_measurement_ns,
+    resolve_timing_aggregation,
     performance_scale_from_samples,
     planner_time_limit_with_tolerance_ms,
     publish_performance_scale,
@@ -1467,6 +1469,101 @@ class PerformanceFixtureContractTests(unittest.TestCase):
             self.assertTrue(self.run_experiment())
         self.assertEqual(len(self.calls), 4)
         self.assertEqual(json.loads(self.output.read_text())[key]["waiver_reason"], "reviewed tradeoff")
+
+
+
+class ColdWarmTotalContractTests(unittest.TestCase):
+    def test_total_keeps_the_cold_request(self):
+        self.assertEqual(performance_measurement_ns([100] + [2] * 10, "total"), 120)
+        self.assertEqual(performance_measurement_ns([100] + [2] * 10, "median"), 2)
+
+    def test_total_requires_fixed_count_and_no_discarded_runs(self):
+        valid = {"timing_aggregation": "total", "timing_samples": 11, "warmup": 0}
+        self.assertEqual(resolve_timing_aggregation(valid), "total")
+        for bad in ({"timing_aggregation": "total", "warmup": 0},
+                    dict(valid, warmup=1), dict(valid, timing_samples=True),
+                    dict(valid, timing_aggregation="unknown"),
+                    {"timing_group": "count"}):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                resolve_timing_aggregation(bad)
+        self.assertNotEqual(performance_case_fingerprint(valid),
+                            performance_case_fingerprint(dict(valid, timing_samples=101)))
+
+    @staticmethod
+    def trial(role, cold, warm):
+        return {"role": role, "results": {
+            "tests/performance/a.yaml::" + name: {
+                "time_ms": duration, "time_per_repetition_ms": duration / n,
+                "timing_aggregation": "total", "timing_group": "count",
+                "repetitions": n, "warmup": 0, "rows": 1000,
+                "workload_sha256": name, "max_regression_pct": 20,
+            } for name, duration, n in (("cold", cold, 1), ("warm", warm, 10))}}
+
+    def test_gate_compares_whole_workload_in_both_tradeoff_directions(self):
+        for cold, warm, passed in ((200, 10, True), (10, 310, True),
+                                  (350, 10, True), (351, 10, False)):
+            with self.subTest(cold=cold, warm=warm), \
+                    mock.patch("run_sql_tests.PERF_AB_JITTER_MS", 5000), \
+                    mock.patch("run_sql_tests.load_perf_regression_waivers", return_value={}):
+                summary = summarize_performance_fixtures(
+                    [self.trial("A", 100, 200), self.trial("B", cold, warm)], 1)
+                self.assertEqual(len(summary), 1)
+                result = next(iter(summary.values()))
+                self.assertEqual(result["time_ms"], 300)
+                self.assertEqual(result["candidate_ms"], cold + warm)
+                self.assertEqual(result["threshold_ms"], 360)
+                self.assertEqual(result["passed"], passed)
+
+    def test_total_runner_records_sum_and_average_without_warmup(self):
+        runner = SQLTestRunner("http://localhost:1")
+        response = SimpleNamespace(status_code=200, text="true", headers={})
+        clock = iter([0, 100_000_000, 100_000_000, 101_000_000, 101_000_000, 102_000_000])
+        with mock.patch("run_sql_tests.PERF_TEST_ENABLED", True), \
+                mock.patch("run_sql_tests.PERF_AB_MODE", "record"), \
+                mock.patch("run_sql_tests.find_memcp_pid", return_value=None), \
+                mock.patch("run_sql_tests.time.monotonic_ns", side_effect=lambda: next(clock)), \
+                mock.patch("run_sql_tests.requests.post", return_value=response) as post, \
+                redirect_stdout(io.StringIO()):
+            passed = runner.run_test_case({
+                "name": "cold plus two", "scm": "true", "threshold_ms": 1000,
+                "timing_aggregation": "total", "timing_samples": 3,
+                "warmup": 0, "expect": {"rows": 1},
+            }, "memcp-tests")
+        self.assertTrue(passed)
+        self.assertEqual(post.call_count, 3)
+        result = next(iter(runner.perf_results.values()))
+        self.assertEqual(result["time_ms"], 102)
+        self.assertEqual(result["time_per_repetition_ms"], 34)
+
+    def test_legacy_compare_cannot_gate_group_phases_independently(self):
+        runner = SQLTestRunner("http://localhost:1")
+        with mock.patch("run_sql_tests.PERF_TEST_ENABLED", True), \
+                mock.patch("run_sql_tests.PERF_AB_MODE", "compare"), \
+                mock.patch("run_sql_tests.requests.post") as post, \
+                redirect_stdout(io.StringIO()):
+            passed = runner.run_test_case({
+                "name": "cold", "scm": "true", "threshold_ms": 1000,
+                "timing_group": "workload", "timing_aggregation": "total",
+                "timing_samples": 1, "warmup": 0, "expect": {"rows": 1},
+            }, "memcp-tests")
+        self.assertFalse(passed)
+        post.assert_not_called()
+
+    def test_different_execution_counts_cannot_be_compared(self):
+        candidate = self.trial("B", 100, 200)
+        candidate["results"]["tests/performance/a.yaml::warm"]["repetitions"] = 20
+        with self.assertRaisesRegex(ValueError, "repetition count differs"):
+            summarize_performance_fixtures([self.trial("A", 100, 200), candidate], 1)
+
+    def test_verification_takes_median_of_totals_not_individual_phases(self):
+        trials = [self.trial("A", 100, 200) for _ in range(7)]
+        trials += [self.trial("B", 200, 10) for _ in range(6)]
+        trials.append(self.trial("B", 10000, 10))
+        with mock.patch("run_sql_tests.load_perf_regression_waivers", return_value={}):
+            result = next(iter(summarize_performance_fixtures(trials, 7).values()))
+        self.assertEqual(result["candidate_ms"], 210)
+        self.assertEqual(len(result["b_samples_ms"]), 7)
+        self.assertTrue(result["passed"])
 
 
 if __name__ == "__main__":
