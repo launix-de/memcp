@@ -5,6 +5,11 @@ metadata:
   description: "Trigger body parsing compatibility tests (Bug 4a: backtick table names + BEGIN-less, Bug 4b: column notation)"
 
 setup:
+  - sql: "DROP TABLE IF EXISTS trigger_forward_src"
+  - sql: "DROP TABLE IF EXISTS trigger_forward_log"
+  - sql: "DROP TABLE IF EXISTS trigger_forward_lookup"
+  - sql: "CREATE TABLE trigger_forward_src (id INT PRIMARY KEY)"
+  - sql: "CREATE TABLE trigger_forward_log (id INT, val INT)"
   - sql: "DROP TABLE IF EXISTS trigger_do_src"
   - sql: "CREATE TABLE trigger_do_src (id INT PRIMARY KEY, val INT)"
   - sql: "DROP TABLE IF EXISTS derived_src"
@@ -67,6 +72,9 @@ setup:
   - sql: "CREATE TABLE trigger_literal_src (id INT PRIMARY KEY)"
 
 cleanup:
+  - sql: "DROP TABLE IF EXISTS trigger_forward_src"
+  - sql: "DROP TABLE IF EXISTS trigger_forward_log"
+  - sql: "DROP TABLE IF EXISTS trigger_forward_lookup"
   - sql: "DROP TABLE IF EXISTS trigger_do_src"
   - sql: "DROP TRIGGER IF EXISTS `derived_src.ai`"
   - sql: "DROP TRIGGER IF EXISTS `derived_src.au`"
@@ -477,6 +485,20 @@ test_cases:
     sql: "SELECT val FROM trigger_do_src WHERE id=1"
     expect: {data: [{val: 12}]}
 
+  - name: "Trigger may reference a table created later in the dump"
+    sql: |
+      CREATE TRIGGER trigger_forward_insert AFTER INSERT ON trigger_forward_src FOR EACH ROW
+      INSERT INTO trigger_forward_log (id,val) VALUES (NEW.id,
+        (SELECT value FROM trigger_forward_lookup WHERE id=NEW.id ORDER BY stamp DESC LIMIT 1))
+
+  - name: "Missing forward table remains an execution error"
+    sql: "INSERT INTO trigger_forward_src VALUES (1)"
+    expect: {error: true, contains: "table does not exist"}
+
+  - name: "Failed forward lookup did not write a log entry"
+    sql: "SELECT COUNT(*) AS n FROM trigger_forward_log"
+    expect: {data: [{n: 0}]}
+
   - name: "Restart with an unresolved trigger definition"
     sql: "SHUTDOWN"
     expect: {rows: 0}
@@ -488,3 +510,16 @@ test_cases:
   - name: "Restarted failed trigger preserves its row"
     sql: "SELECT val FROM trigger_do_src WHERE id=1"
     expect: {data: [{val: 12}]}
+
+  - name: "Create the later lookup table"
+    sql: "CREATE TABLE trigger_forward_lookup (id INT, stamp INT, value INT)"
+
+  - name: "Populate the later lookup table"
+    sql: "INSERT INTO trigger_forward_lookup VALUES (2,10,100),(2,20,200)"
+
+  - name: "Forward lookup trigger executes after its dependency exists"
+    sql: "INSERT INTO trigger_forward_src VALUES (2)"
+
+  - name: "Forward lookup applies its ordering and limit"
+    sql: "SELECT id,val FROM trigger_forward_log"
+    expect: {data: [{id: 2, val: 200}]}

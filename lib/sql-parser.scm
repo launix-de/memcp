@@ -2185,9 +2185,11 @@ arithmetic; leave expressions containing columns or functions untouched. */
 				(define compiled (try (lambda () (compile_trigger_body schema timing (car (cdr body))))
 					(lambda (err) (if (and
 						(not (and planning_session (planning_session "__compile_trigger_source")))
-						(match err (regex "^bind_query_names: (unknown relation alias:|Column does not exist:)" _ _) true _ false))
-						'('eval '('nth '('sql_trigger_source_compile (car body)
-							'('list "schema" schema "table" tbl "name" name "timing" timing)) 1))
+						(or (equal? err "table does not exist")
+							(match err (regex "^bind_query_names: (unknown relation alias:|Column does not exist:)" _ _) true _ false)))
+						/* The source compiler returns (quote (deferred_trigger plan)). */
+						'('eval '('nth '('nth '('sql_trigger_source_compile (car body)
+							'('list "schema" schema "table" tbl "name" name "timing" timing)) 1) 1))
 						(error err)))))
 				(list 'createtrigger (list 'table schema tbl) name timing (car body) "sql" (list 'quote (list 'deferred_trigger compiled)) true)
 		))
