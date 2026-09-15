@@ -311,6 +311,10 @@ func main() {
 			fatal(err)
 		}
 	}
+	groupInputObservations := filterDecisionObservations(observations, "group_relation_input")
+	if err := validateDecisionOrdering(groupInputObservations, currentConstants); err != nil {
+		fatal(fmt.Errorf("group_relation_input: %w", err))
+	}
 	orderedOrObservations := filterDecisionObservations(observations, "ordered_or")
 	if err := validateDecisionOrdering(orderedOrObservations, currentConstants); err != nil {
 		fatal(fmt.Errorf("ordered_or: %w", err))
@@ -381,6 +385,10 @@ func main() {
 		fatal(fmt.Errorf("ordered_or: %w", err))
 	}
 	printDecisionOrdering(orderedOrObservations, c)
+	if err := validateDecisionOrdering(groupInputObservations, c); err != nil {
+		fatal(fmt.Errorf("group_relation_input: %w", err))
+	}
+	printDecisionOrdering(groupInputObservations, c)
 	orderedJoinObservations := filterDecisionObservations(observations, "scan_join_order")
 	if len(orderedJoinObservations) > 0 {
 		// scan_join_order deliberately reuses the calibrated scan/map/expression
@@ -1123,6 +1131,10 @@ func validateRaceWinner(row calibrationRow, decisionID, plan string) error {
 			row.JoinLegacyProbeRows == nil {
 			return fmt.Errorf("ordered join variant has incomplete measurements: %+v", row)
 		}
+	} else if row.Decision == "group_relation_input" {
+		if _, err := rowFeatures(row); err != nil {
+			return err
+		}
 	} else if row.Decision == "direct_group_join" {
 		if row.ProbeInvocations == nil || row.InputRows == nil || row.GroupRows == nil ||
 			row.RowsPerProbe == nil || row.AggregateWidth == nil {
@@ -1296,6 +1308,23 @@ func medianRows(runs [][]calibrationRow) ([]calibrationRow, error) {
 }
 
 func rowFeatures(row calibrationRow) ([]float64, error) {
+	if row.Decision == "group_relation_input" {
+		if row.InputRows == nil || row.AggregateWidth == nil {
+			return nil, fmt.Errorf("group input work profile contains nil inputs: %+v", row)
+		}
+		features := make([]float64, 25)
+		features[1] = *row.InputRows
+		features[3] = *row.InputRows * *row.AggregateWidth
+		switch row.Plan {
+		case "query_group":
+			features[19], features[20] = 1, *row.InputRows
+		case "base_group_cache":
+			features[8], features[9] = 1, *row.InputRows
+		default:
+			return nil, fmt.Errorf("unsupported group input plan %q", row.Plan)
+		}
+		return features, nil
+	}
 	if row.Decision == "ordered_or" {
 		if row.Plan != "scan_order" && row.Plan != "scan_order_multi" {
 			return nil, fmt.Errorf("unsupported ordered OR plan %q", row.Plan)
@@ -2158,6 +2187,11 @@ func decisionAlternatives(rows []observation) (map[string]map[string]observation
 				return nil, fmt.Errorf("plan %q belongs to ordered_or, got decision %q", row.plan, row.decision)
 			}
 			groups[row.caseName][row.plan] = row
+		case "query_group", "base_group_cache":
+			if row.decision != "group_relation_input" {
+				return nil, fmt.Errorf("plan %q belongs to group_relation_input, got %q", row.plan, row.decision)
+			}
+			groups[row.caseName][row.plan] = row
 		case "group_carrier", "direct_group_join":
 			if row.decision != "direct_group_join" {
 				return nil, fmt.Errorf("plan %q belongs to direct_group_join, got decision %q", row.plan, row.decision)
@@ -2168,6 +2202,15 @@ func decisionAlternatives(rows []observation) (map[string]map[string]observation
 		}
 	}
 	for name, plans := range groups {
+		if decisions[name] == "group_relation_input" {
+			if _, ok := plans["query_group"]; !ok {
+				return nil, fmt.Errorf("incomplete group input alternatives for %q", name)
+			}
+			if _, ok := plans["base_group_cache"]; !ok {
+				return nil, fmt.Errorf("incomplete group input alternatives for %q", name)
+			}
+			continue
+		}
 		if decisions[name] == "ordered_or" {
 			if _, ok := plans["scan_order"]; !ok {
 				return nil, fmt.Errorf("incomplete ordered OR alternatives for %q", name)

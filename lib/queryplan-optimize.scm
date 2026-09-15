@@ -426,11 +426,26 @@ bounded scalar metadata; this lookup never scans, loads columns or builds indexe
 		(max 1 (* base_rows (if (nil? feedback) local_selectivity (qassoc_get feedback (quote value) local_selectivity)))))))
 
 (define join_optimizer_source_rows (lambda (stages sources default_alias graph src planning_session)
-	(join_optimizer_source_rows_from_base
-		(planner_estimate_planning_value
-			(planner_source_row_estimate_using_stages stages src) 1000000)
-		sources default_alias
-		(join_optimizer_local_predicates graph (source_alias src)) src planning_session)))
+	(begin
+		(define predicates (join_optimizer_local_predicates graph (source_alias src)))
+		(define decision (join_group_observation_id stages src predicates))
+		(define observed (if (nil? decision) nil (planner_queryplan_observed_metric decision planning_session)))
+		(if (number? observed) (max 1 observed)
+			(join_optimizer_source_rows_from_base
+				(planner_estimate_planning_value
+					(planner_source_row_estimate_using_stages stages src) 1000000)
+				sources default_alias predicates src planning_session)))))
+
+/* A logical stage identity plus its complete leaf predicate identifies an
+observed output cardinality. The physical producer stays outside logical IR. */
+(define join_group_observation_id (lambda (stages src predicates)
+	(if (or (source_outer? src) (not (stage_output_relation? (source_relation src)))) nil
+		(begin
+			(define stage (stage_for_output_relation stages (source_relation src)))
+			(if (and (group_stage? stage) (empty_list? (gs_domain stage)))
+				(concat "group_join_rows:" (gs_id stage) ":"
+					(stable_structural_hash (map predicates (lambda (entry) (qassoc_get entry (quote predicate) true))) true))
+				nil)))))
 
 (define planner_quoted_value (lambda (value)
 	(list (quote quote) value)))
@@ -458,13 +473,19 @@ bounded scalar metadata; this lookup never scans, loads columns or builds indexe
 						(list (quote planner_stage_input_rows)
 							(planner_quoted_value (gs_input stage))) nil)))
 			(list (quote planner_source_row_count) (planner_quoted_value src))))
-		(planner_guard_runtime_binding
+		(define decision (join_group_observation_id stages src local_predicates))
+		(define fallback_rows
 			(list (quote join_optimizer_source_rows_from_base)
 				source_rows_expr
 				(planner_quoted_value local_sources)
 				default_alias
 				(planner_quoted_value local_predicates)
-				(planner_quoted_value src) (quote session)) planning_session
+				(planner_quoted_value src) (quote session)))
+		(planner_guard_runtime_binding
+			(if (nil? decision) fallback_rows
+				(list (quote max) 1 (list (quote coalesceNil)
+					(planner_queryplan_observation_current_read_expr (planner_queryplan_observation_metric_key decision))
+					fallback_rows))) planning_session
 			(query_expr_session_reads (list local_predicates local_sources))))))
 
 (define join_optimizer_selectivity_expr (lambda (sources default_alias predicate planning_session)
