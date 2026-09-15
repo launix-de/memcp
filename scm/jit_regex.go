@@ -1359,15 +1359,14 @@ func jitEmitConstantRegexpTest(ctx *JITContext, pattern *regexp.Regexp, value JI
 	value = ctx.stabilizeForNested(value)
 	// Regex state competes with enclosing branch results and planned homes.
 	// Commit bool/nil to a pointer-free slot before restoring those registers.
-	var outer JITRegisterBoundary
 	// The matcher owns scratch registers until its control flow has joined.
 	// Keep the bool/nil result in a fixed slot so a spilled, not-yet-written
 	// register descriptor cannot redirect consumers to an obsolete value.
 	savedResult := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: ctx.AllocSpill(16), NoHeapPointer: true}
-	releaseOuter := bits.OnesCount64(ctx.FreeRegs&ctx.AllRegs&^ctx.ProtectedRegs) < 6
-	if releaseOuter {
-		outer = ctx.PreserveRegisters(JITRegisterBoundaryOptions{ReleaseHomes: true})
-	}
+	// Spills inside regex branches are path-dependent: a failed match or
+	// EOF can skip a spill instruction while later stack maps still mark
+	// that slot. Preserve outer values before entering the byte walker.
+	outer := ctx.PreserveRegisters(JITRegisterBoundaryOptions{ReleaseHomes: true})
 	success := ctx.ReserveLabel()
 	fail := ctx.ReserveLabel()
 	nilResult := ctx.ReserveLabel()
@@ -1385,9 +1384,7 @@ func jitEmitConstantRegexpTest(ctx *JITContext, pattern *regexp.Regexp, value JI
 	ctx.EmitStoreImm32Mem(ctx.FrameReg, savedResult.StackOff, 0)
 	ctx.EmitStoreImm32Mem(ctx.FrameReg, savedResult.StackOff+8, int32(makeAux(tagNil, 0)))
 	ctx.MarkLabel(done)
-	if releaseOuter {
-		outer.Restore(ctx)
-	}
+	outer.Restore(ctx)
 	return jitPlaceScmerIntoTarget(ctx, savedResult, result)
 }
 
