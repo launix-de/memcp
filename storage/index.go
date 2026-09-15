@@ -653,8 +653,10 @@ func (s *StorageIndex) compareMainAndDelta(state *storageIndexState, mainRecid u
 			continue
 		}
 		mainVal := mainGetters[i].get(mainRecid)
-		deltaVal := delta.data[i]
-		if !state.precomputedDelta {
+		var deltaVal scm.Scmer
+		if state.precomputedDelta {
+			deltaVal = delta.data[i]
+		} else {
 			deltaVal = s.getDeltaColValue(uint32(delta.itemid), delta.data, i)
 		}
 		if s.lessAt(i, mainVal, deltaVal) {

@@ -549,8 +549,9 @@ test_cases:
         (planning "__memcp_queryplan_observed_session_keys" (newsession))
         (define pattern (list (quote concat) "%" (list (quote session) "v1") "%"))
         (define compile_broad (planner_broad_like_expr? pattern planning))
-        (define guard (sql_queryplan_guard_from_session planning))
-        (if (and compile_broad (with_session planning (lambda () (eval guard))))
+        (define guard (sql_queryplan_compile_formula
+          (sql_queryplan_bind_execution_session (sql_queryplan_guard_from_session planning))))
+        (if (and compile_broad (guard planning nil (lambda (_row) nil) (lambda (_fields) nil)))
           "ok"
           (error (concat "variadic concat broad guard disagreed: " (string guard)))))
     expect:
@@ -605,13 +606,14 @@ test_cases:
               (list "right" (planning "right") (list (quote session) "right")))
             (list (list '("left" "right") 0.01 nil nil true nil 0.01))
             '() planning))))
-        (define guard (sql_queryplan_guard_from_session planning))
-        (define initially_valid (with_session planning (lambda () (eval guard))))
+        (define guard (sql_queryplan_compile_formula
+          (sql_queryplan_bind_execution_session (sql_queryplan_guard_from_session planning))))
+        (define initially_valid (guard planning nil (lambda (_row) nil) (lambda (_fields) nil)))
         (planning "left" 10)
         (planning "right" 1000)
         (if (and
           initially_valid
-          (not (with_session planning (lambda () (eval guard))))
+          (not (guard planning nil (lambda (_row) nil) (lambda (_fields) nil)))
           (equal? (qassoc_get result (quote strategy) nil) (quote dphyp)))
           "ok"
           (error (concat "join guard did not track cardinality crossover: " (string guard)))))

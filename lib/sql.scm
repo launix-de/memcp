@@ -123,8 +123,9 @@ functional planner return value. */
 (define sql_queryplan_preparations_from_session (lambda (planning_session)
 	(begin
 		(define preparations (planning_session "__memcp_queryplan_preparations"))
-		(map (produceN (coalesceNil (preparations "count") 0))
-			(lambda (idx) (preparations (concat "preparation:" idx)))))))
+		(if (nil? preparations) '()
+			(map (produceN (coalesceNil (preparations "count") 0))
+				(lambda (idx) (preparations (concat "preparation:" idx))))))))
 
 (define sql_queryplan_bind_execution_session (lambda (expr)
 	(match expr
