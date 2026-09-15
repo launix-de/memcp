@@ -1,0 +1,64 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+metadata:
+  version: '1.0'
+  description: 'Flat and nested partition specs preserve two-string pivot lists and all source rows'
+  isolated: true
+
+setup:
+  - sql: DROP TABLE IF EXISTS pp_flat
+  - sql: DROP TABLE IF EXISTS pp_nested
+  - sql: DROP TABLE IF EXISTS pp_numeric
+  - sql: CREATE TABLE pp_flat (flag CHAR(1), state CHAR(1), amount INT) ENGINE=MEMORY
+  - sql: CREATE TABLE pp_nested (flag CHAR(1), state CHAR(1), amount INT) ENGINE=MEMORY
+  - sql: CREATE TABLE pp_numeric (id INT) ENGINE=MEMORY
+  - sql: INSERT INTO pp_flat VALUES ('A','F',1),('N','O',2),('R','F',3),('Z','O',4)
+  - sql: INSERT INTO pp_nested VALUES ('A','F',1),('N','O',2),('R','F',3),('Z','O',4)
+  - sql: INSERT INTO pp_numeric VALUES (1),(2),(3)
+
+test_cases:
+  - name: Flat partition spec accepts exactly two string pivots
+    scm: |
+      (partitiontable (table "memcp-tests" "pp_flat")
+        (list "flag" (list "N" "R") "state" (list "F")))
+    expect: {data: [true]}
+
+  - name: Flat partition preserves grouped keys and totals
+    sql: SELECT flag, state, SUM(amount) AS total FROM pp_flat GROUP BY flag,state ORDER BY flag,state
+    expect:
+      rows: 4
+      data:
+        - {flag: A, state: F, total: 1}
+        - {flag: N, state: O, total: 2}
+        - {flag: R, state: F, total: 3}
+        - {flag: Z, state: O, total: 4}
+
+  - name: Nested partition spec still accepts two string pivots
+    scm: |
+      (partitiontable (table "memcp-tests" "pp_nested")
+        (list (list "flag" (list "N" "R")) (list "state" (list "F"))))
+    expect: {data: [true]}
+
+  - name: Nested partition preserves all source rows
+    sql: SELECT COUNT(*) AS n, SUM(amount) AS total FROM pp_nested
+    expect: {rows: 1, data: [{n: 4, total: 10}]}
+
+  - name: Flat partition spec accepts numeric pivots
+    scm: |
+      (partitiontable (table "memcp-tests" "pp_numeric") (list "id" (list 1 2)))
+    expect: {data: [true]}
+
+  - name: Numeric partitions preserve every row
+    sql: SELECT id FROM pp_numeric ORDER BY id
+    expect: {rows: 3, data: [{id: 1},{id: 2},{id: 3}]}
+
+  - name: Malformed nested partition pair fails explicitly
+    scm: |
+      (partitiontable (table "memcp-tests" "pp_numeric") (list (list "id")))
+    expect: {error: true}
+
+cleanup:
+  - sql: DROP TABLE IF EXISTS pp_numeric
+  - sql: DROP TABLE IF EXISTS pp_nested
+  - sql: DROP TABLE IF EXISTS pp_flat

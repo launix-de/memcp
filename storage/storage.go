@@ -180,18 +180,9 @@ func normalizePartitionDataset(arg scm.Scmer) dataset {
 	if len(raw) == 0 {
 		return dataset(raw)
 	}
-	flat := true
-	for _, item := range raw {
-		pair, ok := scmerSlice(item)
-		if !ok {
-			continue
-		}
-		if len(pair) == 2 && (pair[0].IsString() || pair[0].GetTag() == scm.TagSymbol) {
-			flat = false
-			break
-		}
-	}
-	if flat {
+	// The first item identifies the representation. Pivot values in the flat
+	// form can themselves be two strings; they are not column/value pairs.
+	if _, nested := scmerSlice(raw[0]); !nested {
 		return dataset(raw)
 	}
 	normalized := make(dataset, 0, len(raw)*2)

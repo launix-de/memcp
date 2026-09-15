@@ -465,11 +465,11 @@ func (t *table) scanLookupOne(currentTx *TxContext, access scanAccess, resultCol
 	if state.panicValue != nil {
 		panic(state.panicValue)
 	}
-	if state.matches > 1 {
-		panic(scalarSubselectOverflow)
-	}
 	if !returnValue {
 		return scm.NewBool(state.matches != 0)
+	}
+	if state.matches > 1 {
+		panic(scalarSubselectOverflow)
 	}
 	return state.result
 }
