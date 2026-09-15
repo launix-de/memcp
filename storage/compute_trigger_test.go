@@ -767,3 +767,29 @@ func TestORCDependencyTriggersUseRelevantColumnsAndInvalidateSuffix(t *testing.T
 		t.Fatalf("ORC trigger plan should ignore unrelated note column:\n%s", plan)
 	}
 }
+
+// Compression must consume one materialization: fresh list results have stable
+// contents but distinct identities, so rerunning the callback breaks dictionaries.
+func TestComputeProxyCompressionMaterializesOnce(t *testing.T) {
+	proxy, calls := newAdaptiveLookupProxyForTest(3)
+	proxy.main = nil
+	proxy.compressed = false
+	proxy.computor = scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+		*calls++
+		return scm.NewSlice([]scm.Scmer{args[0], scm.NewInt(42)})
+	})
+	proxy.Compress(nil)
+	if *calls != 3 {
+		t.Fatalf("computed %d times for three rows", *calls)
+	}
+	for i := uint32(0); i < 3; i++ {
+		got := proxy.main.GetValue(i).Slice()
+		if len(got) != 2 || got[0].Int() != int64(i) || got[1].Int() != 42 {
+			t.Fatalf("row %d: %v", i, got)
+		}
+	}
+	proxy.Compress(nil)
+	if *calls != 3 {
+		t.Fatalf("valid compressed values were recomputed: %d", *calls)
+	}
+}

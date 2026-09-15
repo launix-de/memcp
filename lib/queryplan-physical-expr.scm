@@ -6314,21 +6314,22 @@ slot per syntactically repeated COUNT. */
 (define group_insert_batch_size 4096)
 
 (define group_insert_batches (lambda (target columns collision_cols collision_fn grouped)
-	((lambda (state)
-		(if (equal? (car state) 0)
+	((lambda (rows)
+		(if (empty_list? rows)
 			0
-			(insert target columns (cadr state) collision_cols collision_fn true)))
+			(insert target columns rows collision_cols collision_fn true)))
 		(reduce_assoc grouped
-			(lambda (state key payload)
+			(lambda (rows key payload)
 				(begin
-					(define count (car state))
-					(define rows (cons (merge (list key payload)) (cadr state)))
-					(if (>= (+ count 1) group_insert_batch_size)
+					/* A flat accumulator lets the ownership optimizer append in place.
+					Prepending copies all preceding rows on every batch iteration. */
+					(define batch (append rows (merge (list key payload))))
+					(if (>= (count batch) group_insert_batch_size)
 						(begin
-							(insert target columns rows collision_cols collision_fn true)
-							(list 0 (list)))
-						(list (+ count 1) rows))))
-			(list 0 (list))))))
+							(insert target columns batch collision_cols collision_fn true)
+							(list))
+						batch)))
+			(list)))))
 
 /* Bulk INSERT stores ordinary row values, whereas reads of computed columns
 use their proxy. Install the already reduced payload through the existing

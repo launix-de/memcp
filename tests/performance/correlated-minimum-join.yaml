@@ -1,0 +1,224 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: '1.0'
+  description: Selective joins with correlated multi-table MIN with supplier-first ordering
+  isolated: true
+  perf_ci: true
+  performance_rows: 8192
+setup:
+- sql: DROP TABLE IF EXISTS cm_region
+- sql: CREATE TABLE cm_region (r_id INT, r_name TEXT) ENGINE=memory
+- sql: DROP TABLE IF EXISTS cm_nation
+- sql: CREATE TABLE cm_nation (n_id INT, n_region INT, n_name TEXT) ENGINE=memory
+- sql: DROP TABLE IF EXISTS cm_supplier
+- sql: CREATE TABLE cm_supplier (s_id INT, s_nation INT, s_name TEXT, s_acctbal INT) ENGINE=memory
+- sql: DROP TABLE IF EXISTS cm_part
+- sql: CREATE TABLE cm_part (p_id INT, p_size INT, p_type TEXT) ENGINE=memory
+- sql: DROP TABLE IF EXISTS cm_partsupp
+- sql: CREATE TABLE cm_partsupp (ps_part INT, ps_supplier INT, ps_cost INT) ENGINE=memory
+- sql: INSERT INTO cm_region VALUES (0,'EUROPE'),(1,'ASIA')
+- scm: "(begin\n (insert (table \"memcp-tests\" \"cm_nation\") '(\"n_id\" \"n_region\" \"n_name\")\n  (map (produceN\
+    \ 8) (lambda (i) (list i (mod i 2) (concat \"nation\" i)))))\n (insert (table \"memcp-tests\" \"cm_supplier\"\
+    ) '(\"s_id\" \"s_nation\" \"s_name\" \"s_acctbal\")\n  (map (produceN 64) (lambda (i) (list i (mod i 8) (concat\
+    \ \"supplier\" i) (mod i 16)))))\n (insert (table \"memcp-tests\" \"cm_part\") '(\"p_id\" \"p_size\" \"p_type\"\
+    )\n  (map (produceN 2048) (lambda (i) (list (+ 1 i) (if (equal? (mod i 16) 0) 15 10)\n   (if (equal? (mod i\
+    \ 3) 0) \"SMALL BRASS\" \"TIN\")))))\n (insert (table \"memcp-tests\" \"cm_partsupp\") '(\"ps_part\" \"ps_supplier\"\
+    \ \"ps_cost\")\n  (map (produceN 8192) (lambda (i) (begin\n   (define part (mod i 2048)) (define slot (floor\
+    \ (/ i 2048)))\n   (list (+ part 1) (mod (+ part (* slot 7)) 64) (+ 10 slot))))))\n (map '(\"region\" \"nation\"\
+    \ \"supplier\" \"part\" \"partsupp\") (lambda (name)\n  (rebuild (table \"memcp-tests\" (concat \"cm_\" name))\
+    \ true false))) true)"
+test_cases:
+- name: Correlated regional minimum preserves all selected parts
+  sql: "SELECT p.p_id, s.s_id, ps.ps_cost\nFROM cm_part p, cm_supplier s, cm_partsupp ps, cm_nation n, cm_region\
+    \ r\nWHERE p.p_id=ps.ps_part AND s.s_id=ps.ps_supplier\n AND p.p_size=15 AND p.p_type LIKE '%BRASS'\n AND s.s_nation=n.n_id\
+    \ AND n.n_region=r.r_id AND r.r_name='EUROPE'\n AND ps.ps_cost=(SELECT MIN(p2.ps_cost) FROM cm_partsupp p2,\
+    \ cm_supplier s2, cm_nation n2, cm_region r2\n  WHERE p.p_id=p2.ps_part AND s2.s_id=p2.ps_supplier AND s2.s_nation=n2.n_id\n\
+    \   AND n2.n_region=r2.r_id AND r2.r_name='EUROPE')\nORDER BY s.s_acctbal DESC,n.n_name,s.s_name,p.p_id LIMIT\
+    \ 100"
+  expect:
+    rows: 43
+    data: &id001
+    - p_id: 1
+      s_id: 0
+      ps_cost: 10
+    - p_id: 193
+      s_id: 0
+      ps_cost: 10
+    - p_id: 385
+      s_id: 0
+      ps_cost: 10
+    - p_id: 577
+      s_id: 0
+      ps_cost: 10
+    - p_id: 769
+      s_id: 0
+      ps_cost: 10
+    - p_id: 961
+      s_id: 0
+      ps_cost: 10
+    - p_id: 1153
+      s_id: 0
+      ps_cost: 10
+    - p_id: 1345
+      s_id: 0
+      ps_cost: 10
+    - p_id: 1537
+      s_id: 0
+      ps_cost: 10
+    - p_id: 1729
+      s_id: 0
+      ps_cost: 10
+    - p_id: 1921
+      s_id: 0
+      ps_cost: 10
+    - p_id: 145
+      s_id: 16
+      ps_cost: 10
+    - p_id: 337
+      s_id: 16
+      ps_cost: 10
+    - p_id: 529
+      s_id: 16
+      ps_cost: 10
+    - p_id: 721
+      s_id: 16
+      ps_cost: 10
+    - p_id: 913
+      s_id: 16
+      ps_cost: 10
+    - p_id: 1105
+      s_id: 16
+      ps_cost: 10
+    - p_id: 1297
+      s_id: 16
+      ps_cost: 10
+    - p_id: 1489
+      s_id: 16
+      ps_cost: 10
+    - p_id: 1681
+      s_id: 16
+      ps_cost: 10
+    - p_id: 1873
+      s_id: 16
+      ps_cost: 10
+    - p_id: 97
+      s_id: 32
+      ps_cost: 10
+    - p_id: 289
+      s_id: 32
+      ps_cost: 10
+    - p_id: 481
+      s_id: 32
+      ps_cost: 10
+    - p_id: 673
+      s_id: 32
+      ps_cost: 10
+    - p_id: 865
+      s_id: 32
+      ps_cost: 10
+    - p_id: 1057
+      s_id: 32
+      ps_cost: 10
+    - p_id: 1249
+      s_id: 32
+      ps_cost: 10
+    - p_id: 1441
+      s_id: 32
+      ps_cost: 10
+    - p_id: 1633
+      s_id: 32
+      ps_cost: 10
+    - p_id: 1825
+      s_id: 32
+      ps_cost: 10
+    - p_id: 2017
+      s_id: 32
+      ps_cost: 10
+    - p_id: 49
+      s_id: 48
+      ps_cost: 10
+    - p_id: 241
+      s_id: 48
+      ps_cost: 10
+    - p_id: 433
+      s_id: 48
+      ps_cost: 10
+    - p_id: 625
+      s_id: 48
+      ps_cost: 10
+    - p_id: 817
+      s_id: 48
+      ps_cost: 10
+    - p_id: 1009
+      s_id: 48
+      ps_cost: 10
+    - p_id: 1201
+      s_id: 48
+      ps_cost: 10
+    - p_id: 1393
+      s_id: 48
+      ps_cost: 10
+    - p_id: 1585
+      s_id: 48
+      ps_cost: 10
+    - p_id: 1777
+      s_id: 48
+      ps_cost: 10
+    - p_id: 1969
+      s_id: 48
+      ps_cost: 10
+- name: 'Perf: selective joined correlated minimum'
+  sql: "SELECT p.p_id, s.s_id, ps.ps_cost\nFROM cm_part p, cm_supplier s, cm_partsupp ps, cm_nation n, cm_region\
+    \ r\nWHERE p.p_id=ps.ps_part AND s.s_id=ps.ps_supplier\n AND p.p_size=15 AND p.p_type LIKE '%BRASS'\n AND s.s_nation=n.n_id\
+    \ AND n.n_region=r.r_id AND r.r_name='EUROPE'\n AND ps.ps_cost=(SELECT MIN(p2.ps_cost) FROM cm_partsupp p2,\
+    \ cm_supplier s2, cm_nation n2, cm_region r2\n  WHERE p.p_id=p2.ps_part AND s2.s_id=p2.ps_supplier AND s2.s_nation=n2.n_id\n\
+    \   AND n2.n_region=r2.r_id AND r2.r_name='EUROPE')\nORDER BY s.s_acctbal DESC,n.n_name,s.s_name,p.p_id LIMIT\
+    \ 100"
+  warmup: 2
+  timing_samples: 5
+  threshold_ms: 60000
+  timeout: 60
+  expect:
+    rows: 43
+    data: *id001
+- name: Introduce tied minimum, NULL costs and a missing regional domain
+  sql: INSERT INTO cm_partsupp VALUES (1,2,10),(1,4,NULL)
+- name: Remove the only minimum and keep remaining regional suppliers
+  sql: DELETE FROM cm_partsupp WHERE ps_part=49 AND ps_cost=10
+- name: Remove every regional supplier of another part
+  sql: DELETE FROM cm_partsupp WHERE ps_part=97 AND ps_supplier IN (32,46)
+- name: Ties survive and NULL or empty domains do not become minima
+  sql: "SELECT p.p_id, s.s_id, ps.ps_cost\nFROM cm_part p, cm_supplier s, cm_partsupp ps, cm_nation n, cm_region\
+    \ r\nWHERE p.p_id=ps.ps_part AND s.s_id=ps.ps_supplier\n AND p.p_size=15 AND p.p_type LIKE '%BRASS'\n AND s.s_nation=n.n_id\
+    \ AND n.n_region=r.r_id AND r.r_name='EUROPE'\n AND ps.ps_cost=(SELECT MIN(p2.ps_cost) FROM cm_partsupp p2,\
+    \ cm_supplier s2, cm_nation n2, cm_region r2\n  WHERE p.p_id=p2.ps_part AND s2.s_id=p2.ps_supplier AND s2.s_nation=n2.n_id\n\
+    \   AND n2.n_region=r2.r_id AND r2.r_name='EUROPE')\n AND p.p_id IN (1,49,97) ORDER BY s.s_acctbal DESC,n.n_name,s.s_name,p.p_id\
+    \ LIMIT 100"
+  expect:
+    rows: 3
+    data:
+    - p_id: 49
+      s_id: 62
+      ps_cost: 12
+    - p_id: 1
+      s_id: 2
+      ps_cost: 10
+    - p_id: 1
+      s_id: 0
+      ps_cost: 10
+- name: Invalid correlated column remains an error
+  sql: "SELECT p.p_id, s.s_id, ps.ps_cost\nFROM cm_part p, cm_supplier s, cm_partsupp ps, cm_nation n, cm_region\
+    \ r\nWHERE p.p_id=ps.ps_part AND s.s_id=ps.ps_supplier\n AND p.p_size=15 AND p.p_type LIKE '%BRASS'\n AND s.s_nation=n.n_id\
+    \ AND n.n_region=r.r_id AND r.r_name='EUROPE'\n AND ps.ps_cost=(SELECT MIN(p2.no_such_column) FROM cm_partsupp\
+    \ p2, cm_supplier s2, cm_nation n2, cm_region r2\n  WHERE p.p_id=p2.ps_part AND s2.s_id=p2.ps_supplier AND s2.s_nation=n2.n_id\n\
+    \   AND n2.n_region=r2.r_id AND r2.r_name='EUROPE')\nORDER BY s.s_acctbal DESC,n.n_name,s.s_name,p.p_id LIMIT\
+    \ 100"
+  expect:
+    error: true
+cleanup:
+- sql: DROP TABLE IF EXISTS cm_partsupp
+- sql: DROP TABLE IF EXISTS cm_part
+- sql: DROP TABLE IF EXISTS cm_supplier
+- sql: DROP TABLE IF EXISTS cm_nation
+- sql: DROP TABLE IF EXISTS cm_region

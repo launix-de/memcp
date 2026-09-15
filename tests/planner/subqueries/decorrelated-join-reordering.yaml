@@ -44,6 +44,37 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS djr_tenant"
 
 test_cases:
+  - name: Order delivery costs sorting and retains the prefix when sorting loses
+    scm: "(begin\n (define block (make_query_block \"memcp-tests\" '() '(\"id\" 1 \"name\" 2) true '() nil\
+      \ '(1 2) 100 0 '() '() '()))\n (define ordered (list (list 'cost 100000) (list 'cardinality 100)))\n\
+      \ (define cheap (list (list 'cost 1000) (list 'cardinality 100)))\n (define costly (list (list 'cost\
+      \ 99000) (list 'cardinality 100)))\n (define sorted (join_optimizer_order_delivery ordered cheap block))\n\
+      \ (define retained (join_optimizer_order_delivery ordered costly block))\n (and (equal? (qassoc_get\
+      \ (cadr sorted) \"chosen\" nil) \"join_then_sort\")\n  (> (qassoc_get (car sorted) 'cost 0) 1000)\n\
+      \  (equal? (qassoc_get (cadr retained) \"chosen\" nil) \"order_prefix\")\n  (equal? (car (join_optimizer_order_delivery\
+      \ ordered nil block)) ordered)))"
+    expect:
+      data:
+      - true
+
+  - name: Join cardinality ceiling preserves finite fanout and caps overflow
+    scm: "(and (equal? (join_order_cap_cardinality 25000) 25000)\n (equal? (join_order_cap_cardinality 0)\
+      \ 1)\n (> (join_order_cap_cardinality (simplify \"1e200\")) (simplify \"1e199\"))\n (equal? (join_order_cap_cardinality\
+      \ (simplify \"1e308\")) (simplify \"1e300\"))\n (> (join_order_ikkbz_rank (list (list \"a\") 1 0))\
+      \ (simplify \"1e200\")))"
+    expect:
+      data:
+      - true
+  - name: Join fanout and its runtime guard expression agree above one row
+    scm: "(begin\n (define left (join_order_leaf_plan (list \"a\" 100 100 'inner '())))\n (define right\
+      \ (join_order_leaf_plan (list \"b\" 50 50 'inner '())))\n (define predicates (list (list (list \"\
+      a\" \"b\") 0.1 'where nil true nil 0.1)))\n (and (equal? (join_order_join_cardinality predicates 'inner\
+      \ left right) 500)\n  (equal? (eval (join_order_join_cardinality_expr predicates 'inner left right))\
+      \ 500)\n  (equal? (join_order_join_cardinality '() 'inner left right) 5000)))"
+    expect:
+      data:
+      - true
+
   - name: "Decorrelated scalar keeps unmatched domain rows NULL"
     sql: |
       SELECT d.id,
