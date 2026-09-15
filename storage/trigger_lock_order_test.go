@@ -424,3 +424,31 @@ func TestForeignKeyExistenceIndexedComposite(t *testing.T) {
 		t.Fatal("foreign-key probes did not expose their equality bounds to the index engine")
 	}
 }
+
+func BenchmarkForeignKeyExistenceProbe(b *testing.B) {
+	Init(scm.Globalenv)
+	const name = "fk_probe_benchmark"
+	CreateDatabase(name, true)
+	defer databases.Remove(name)
+	parent, _ := CreateTable(name, "parent", Memory, true)
+	parent.CreateColumn("id", "INT", nil, nil)
+	rows := make([][]scm.Scmer, 10000)
+	for i := range rows {
+		rows[i] = []scm.Scmer{scm.NewInt(int64(i))}
+	}
+	parent.Insert([]string{"id"}, rows, nil, scm.NewNil(), false, nil)
+	parent.schema.rebuild(true, false, false, parent)
+	cols := []string{"id"}
+	vals := []scm.Scmer{scm.NewInt(9999)}
+	for i := 0; i < 10; i++ {
+		if !fkExistenceCheck(nil, parent, cols, vals) {
+			b.Fatal("existing parent not found")
+		}
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if !fkExistenceCheck(nil, parent, cols, vals) {
+			b.Fatal("existing parent not found")
+		}
+	}
+}
