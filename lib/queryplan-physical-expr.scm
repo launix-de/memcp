@@ -4846,9 +4846,10 @@ the enclosing carrier identity supplies the remaining query context. */
 	/* The readable label is not an identity. The hash covers the canonical input
 	graph, source-role-aware keys, and complete filter, so equivalent aliases
 	converge while self-join roles and different predicates remain separated.
-	Version 6 creates helper columns with source collation metadata. */
+	Version 7 retains source collation metadata and rebuilds caches whose
+	older numeric hashing could persist split int/float groups. */
 	(concat ".grp:" label ":" (stable_structural_hash (list
-		"canonical-group-keytable-v6" schema input_identity keys condition) true))))
+		"canonical-group-keytable-v7" schema input_identity keys condition) true))))
 
 /* Persistent helper objects must be named by the physical data they represent,
 not by disposable SQL aliases. Source position remains part of the identity so

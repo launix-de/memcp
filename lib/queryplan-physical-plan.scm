@@ -2404,7 +2404,11 @@ kinds inherit the global aggregate consumer without expression-specific code. */
 							(expr_contains_driver_membership? (qb_where probe_rewritten))))
 						(define final_stage_sources (physicalize_stage_output_sources stage_lookup
 							(filter (cdr sources) (lambda (src)
-								(source_needed_after_group? (source_alias driver_src) probe_rewritten src)))))
+								(source_needed_after_group? (source_alias driver_src) (qb_group probe_rewritten)
+									(merge (list (projection_exprs (qb_fields probe_rewritten))
+										(projection_exprs (qb_hidden probe_rewritten))
+										(list (coalesceNil (qb_having probe_rewritten) true))
+										(order_item_exprs (qb_order probe_rewritten)))) src)))))
 						(define grouped_input_block (make_query_block
 							(qb_schema probe_rewritten)
 							(cons driver_src stage_sources)

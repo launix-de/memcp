@@ -420,3 +420,51 @@ func BenchmarkResolveColumnNameCached(b *testing.B) {
 		_, _ = tbl.ResolveColumnName("column_255", false)
 	}
 }
+
+func TestShowColumnsBoundsIntegerDistinctByPublishedDomain(t *testing.T) {
+	cases := []struct {
+		name           string
+		typ            string
+		min, max       int64
+		nulls          uint64
+		estimate, want uint64
+	}{
+		{"repeated keys", "INT", 1, 32, 0, 8192, 32},
+		{"nullable negative keys", "BIGINT", -3, 3, 1, 8192, 8},
+		{"sparse domain", "INT", 1, 1000, 0, 17, 17},
+		{"full signed range", "BIGINT", -1 << 63, 1<<63 - 1, 0, 17, 17},
+		{"nullable almost full range", "BIGINT", -1 << 63, 1<<63 - 2, 1, 17, 17},
+		{"decimal domain is not integral", "DECIMAL", 1, 32, 0, 8192, 8192},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tbl := showColumnsTestTable(1)
+			col := tbl.Columns[0]
+			col.Typ = tc.typ
+			tbl.PlannerRowEstimate.value.Store(tc.estimate)
+			atomic.StoreUint64(&col.DistinctEstimate, tc.estimate)
+			col.PlannerStats.Store(&columnPlannerStatistics{
+				Confidence: 1, Source: "rebuild", NullCount: tc.nulls,
+				MinEstimate: scm.NewInt(tc.min), MaxEstimate: scm.NewInt(tc.max),
+			})
+			tbl.publishShowColumnsSnapshot()
+			if got := showColumnProperty(tbl.ShowColumns().Slice()[0], "DistinctEstimate").Int(); got != int64(tc.want) {
+				t.Fatalf("SHOW distinct = %d, want %d", got, tc.want)
+			}
+			columns, _ := tbl.PlannerStatistics().FastDict().Get(scm.NewString("columns"))
+			stats, _ := columns.FastDict().Get(scm.NewString(col.Name))
+			var got scm.Scmer
+			for _, pair := range stats.Slice() {
+				if pair.Slice()[0].String() == "distinct" {
+					got = pair.Slice()[1]
+				}
+			}
+			if got.Int() != int64(tc.want) {
+				t.Fatalf("planner distinct = %d, want %d", got.Int(), tc.want)
+			}
+			if got := col.distinctEstimateFor(tbl); uint64(got) != tc.want {
+				t.Fatalf("direct distinct = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}

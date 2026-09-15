@@ -18,6 +18,65 @@ metadata:
   description: "Group stage corner cases: limits in subqueries, DISTINCT+joins, nested staging"
 
 test_cases:
+  - name: A grouped scalar value does not require its source after aggregation
+    scm: |
+      (begin
+        (define value (list (quote coalesceNil) (list (quote get_column) "g" false "n" false) 0))
+        (define source (list "g" "memcp-tests" (list (quote stage-output) "counts") true
+          (list (quote equal??) (list (quote get_column) "g" false "k0" false)
+            (list (quote get_column) "c" false "id" false))))
+        (define stage (make_group_stage "distribution" nil '() (list value) '() nil
+          (list "n" value) '() nil nil '()))
+        (define uncovered (make_group_stage "distribution" nil '() (list value) '() nil
+          (list "other" (list (quote get_column) "g" false "other" false)) '() nil nil '()))
+        (if (and (not (source_needed_after_group_stage? "c" stage source))
+            (source_needed_after_group_stage? "c" uncovered source)) true
+          (error "group-key source liveness mismatch")))
+
+  - name: Grouped correlated counts retain their values when the carrier plan is selected
+    setup:
+      - sql: DROP TABLE IF EXISTS gs_count_customers
+      - sql: DROP TABLE IF EXISTS gs_count_orders
+      - sql: CREATE TABLE gs_count_customers (id INT) ENGINE=memory
+      - sql: CREATE TABLE gs_count_orders (id INT, customer_id INT) ENGINE=memory
+      - scm: |
+          (begin
+            (insert (table "memcp-tests" "gs_count_customers") '("id")
+              (map (produceN 15000) (lambda (i) (list (+ 1 i)))))
+            (insert (table "memcp-tests" "gs_count_orders") '("id" "customer_id")
+              (map (produceN 150000) (lambda (i) (list (+ 1 i) (+ 1 (mod i 10000))))))
+            (insert (table "memcp-tests" "gs_count_customers") '("id") (list (list -1) (list -1) (list nil)))
+            (insert (table "memcp-tests" "gs_count_orders") '("id" "customer_id")
+              (list (list nil 1) (list 150001 nil) (list 150002 -1)))
+            (rebuild true false) true)
+    sql: |
+      SELECT n, COUNT(*) AS customers FROM (
+        SELECT c.id, (SELECT COUNT(o.id) FROM gs_count_orders o WHERE o.customer_id=c.id) AS n
+        FROM gs_count_customers c
+      ) counts GROUP BY n ORDER BY n
+    expect:
+      rows: 3
+      data: [{n: 0, customers: 5001}, {n: 1, customers: 2}, {n: 15, customers: 10000}]
+
+  - name: Mixed compressed numeric keys merge across all shards
+    sql: |
+      SELECT customer_id, COUNT(*) AS rows_in_group, COUNT(id) AS ids
+      FROM gs_count_orders GROUP BY customer_id HAVING customer_id=1
+    expect:
+      rows: 1
+      data: [{customer_id: 1, rows_in_group: 16, ids: 15}]
+
+  - name: Grouped scalar count does not suppress invalid column binding
+    sql: |
+      SELECT n, COUNT(*) FROM (
+        SELECT c.id, (SELECT COUNT(o.missing) FROM gs_count_orders o WHERE o.customer_id=c.id) AS n
+        FROM gs_count_customers c
+      ) counts GROUP BY n
+    expect: {error: true}
+    cleanup:
+      - sql: DROP TABLE gs_count_orders
+      - sql: DROP TABLE gs_count_customers
+
   # --- Setup: two related tables ---
   - name: "Create orders table"
     sql: "CREATE TABLE gs_orders (id INT PRIMARY KEY, customer VARCHAR(50), amount INT, priority INT)"
