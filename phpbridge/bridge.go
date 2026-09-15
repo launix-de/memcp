@@ -17,6 +17,7 @@ import "unsafe"
 import "context"
 import "strconv"
 import "runtime/cgo"
+import "sync/atomic"
 import "github.com/dunglas/frankenphp"
 import "github.com/launix-de/memcp/scm"
 
@@ -245,6 +246,7 @@ func memcp_close(handle C.uintptr_t) {
 
 //export memcp_query
 func memcp_query(handle C.uintptr_t, sql *C.char, length C.size_t) (r *C.memcp_result) {
+	atomic.AddInt64(&scm.TotalHTTPRequests, 1)
 	r = result()
 	defer catch(r)
 	c := cgo.Handle(handle).Value().(*connection)

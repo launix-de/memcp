@@ -20,6 +20,6 @@ package scm
 // Incremented/decremented via ConnState callback — single atomic, no mutex.
 var ActiveHTTPConnections int64
 
-// TotalHTTPRequests is atomically incremented on each new HTTP request.
+// TotalHTTPRequests counts HTTP requests and SQL commands from MySQL and PHP.
 // The background sampler reads this to compute requests/sec without any hot-path mutex.
 var TotalHTTPRequests int64
