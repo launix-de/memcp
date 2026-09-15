@@ -390,3 +390,65 @@ func TestTriggerUnlockTemporarilyWithdrawsWriteOwnership(t *testing.T) {
 	tx.ExitShardWrite(shard)
 	shard.mu.Unlock()
 }
+
+func TestForeignKeyExistenceIndexedComposite(t *testing.T) {
+	Init(scm.Globalenv)
+	const name = "fk_indexed_probe"
+	CreateDatabase(name, true)
+	defer databases.Remove(name)
+	parent, _ := CreateTable(name, "parent", Memory, true)
+	parent.CreateColumn("a", "INT", nil, nil)
+	parent.CreateColumn("b", "INT", nil, nil)
+	var rows [][]scm.Scmer
+	for i := 0; i < 1000; i++ {
+		rows = append(rows, []scm.Scmer{scm.NewInt(int64(i)), scm.NewInt(int64(i % 7))})
+	}
+	parent.Insert([]string{"a", "b"}, rows, nil, scm.NewNil(), false, nil)
+	for _, test := range []struct {
+		values []scm.Scmer
+		want   bool
+	}{
+		{[]scm.Scmer{scm.NewInt(999), scm.NewInt(5)}, true},
+		{[]scm.Scmer{scm.NewInt(999), scm.NewInt(4)}, false},
+		{[]scm.Scmer{scm.NewInt(1001), scm.NewInt(0)}, false},
+		{[]scm.Scmer{scm.NewInt(1001), scm.NewNil()}, true},
+	} {
+		if got := fkExistenceCheck(nil, parent, []string{"a", "b"}, test.values); got != test.want {
+			t.Fatalf("probe %v: got %v, want %v", test.values, got, test.want)
+		}
+	}
+	shard := parent.Shards[0]
+	shard.mu.RLock()
+	defer shard.mu.RUnlock()
+	if len(shard.Indexes) == 0 {
+		t.Fatal("foreign-key probes did not expose their equality bounds to the index engine")
+	}
+}
+
+func BenchmarkForeignKeyExistenceProbe(b *testing.B) {
+	Init(scm.Globalenv)
+	const name = "fk_probe_benchmark"
+	CreateDatabase(name, true)
+	defer databases.Remove(name)
+	parent, _ := CreateTable(name, "parent", Memory, true)
+	parent.CreateColumn("id", "INT", nil, nil)
+	rows := make([][]scm.Scmer, 10000)
+	for i := range rows {
+		rows[i] = []scm.Scmer{scm.NewInt(int64(i))}
+	}
+	parent.Insert([]string{"id"}, rows, nil, scm.NewNil(), false, nil)
+	parent.schema.rebuild(true, false, false, parent)
+	cols := []string{"id"}
+	vals := []scm.Scmer{scm.NewInt(9999)}
+	for i := 0; i < 10; i++ {
+		if !fkExistenceCheck(nil, parent, cols, vals) {
+			b.Fatal("existing parent not found")
+		}
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if !fkExistenceCheck(nil, parent, cols, vals) {
+			b.Fatal("existing parent not found")
+		}
+	}
+}
