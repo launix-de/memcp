@@ -76,15 +76,17 @@ func HashKey(k Scmer) uint64 {
 			} else {
 				h.WriteByte(0)
 			}
-		case tagInt:
-			h.WriteByte(2)
-			var b [8]byte
-			binary.LittleEndian.PutUint64(b[:], uint64(v.Int()))
-			h.Write(b[:])
-		case tagFloat:
+		case tagInt, tagFloat:
+			// Compressed columns can expose the same numeric group key as an
+			// int or float. Hash both representations alike; Equal still
+			// distinguishes large int/int values sharing a rounded hash.
+			value := v.Float()
+			if value == 0 {
+				value = 0 // Normalize negative floating zero.
+			}
 			h.WriteByte(3)
 			var b [8]byte
-			binary.LittleEndian.PutUint64(b[:], math.Float64bits(v.Float()))
+			binary.LittleEndian.PutUint64(b[:], math.Float64bits(value))
 			h.Write(b[:])
 		case tagString:
 			h.WriteByte(4)

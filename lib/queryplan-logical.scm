@@ -1342,52 +1342,38 @@ instead of capturing whichever session populated the cache first. */
 				(btw2025_expr_accessing_aliases (coalesceNil (qb_having block) true) outer_aliases)
 				(btw2025_order_accessing_aliases (qb_order block) outer_aliases)))))))
 
-(define expr_refs_alias_after_group? (lambda (default_alias alias expr)
-	(match expr
-		((symbol aggregate) _agg_expr _agg_reduce _agg_neutral) false
-		((quote aggregate) _agg_expr _agg_reduce _agg_neutral) false
-		((symbol aggregate) _agg_expr _agg_reduce _agg_neutral _agg_finalize) false
-		((quote aggregate) _agg_expr _agg_reduce _agg_neutral _agg_finalize) false
-		((symbol count_distinct) _agg_expr) false
-		((quote count_distinct) _agg_expr) false
-		((symbol group_concat_distinct) _agg_expr _separator) false
-		((quote group_concat_distinct) _agg_expr _separator) false
-		((symbol get_column) tblvar _ _ _) (equal?? (resolve_column_alias tblvar default_alias) alias)
-		((quote get_column) tblvar _ _ _) (equal?? (resolve_column_alias tblvar default_alias) alias)
-		(cons _head tail) (reduce tail (lambda (found item) (or found (expr_refs_alias_after_group? default_alias alias item))) false)
-		_ false)))
+(define expr_refs_alias_after_group? (lambda (default_alias alias expr key_index)
+	(if (and (not (nil? key_index)) (not (nil? (key_index expr)))) false
+		(match expr
+			((symbol aggregate) _agg_expr _agg_reduce _agg_neutral) false
+			((quote aggregate) _agg_expr _agg_reduce _agg_neutral) false
+			((symbol aggregate) _agg_expr _agg_reduce _agg_neutral _agg_finalize) false
+			((quote aggregate) _agg_expr _agg_reduce _agg_neutral _agg_finalize) false
+			((symbol count_distinct) _agg_expr) false
+			((quote count_distinct) _agg_expr) false
+			((symbol group_concat_distinct) _agg_expr _separator) false
+			((quote group_concat_distinct) _agg_expr _separator) false
+			((symbol get_column) tblvar _ _ _) (equal?? (resolve_column_alias tblvar default_alias) alias)
+			((quote get_column) tblvar _ _ _) (equal?? (resolve_column_alias tblvar default_alias) alias)
+			(cons _head tail) (reduce tail (lambda (found item) (or found (expr_refs_alias_after_group? default_alias alias item key_index))) false)
+			_ false))))
 
-(define fields_ref_alias? (lambda (default_alias alias fields)
-	(reduce (extract_assoc (coalesceNil fields '()) (lambda (_title expr) expr))
-		(lambda (found expr)
-			(or found (expr_refs_alias_after_group? default_alias alias expr)))
-		false)))
-
-(define order_ref_alias? (lambda (default_alias alias order_items)
-	(reduce (coalesceNil order_items '()) (lambda (found item)
-		(or found
-			(match item
-				'(expr _dir) (expr_refs_alias_after_group? default_alias alias expr)
-				_ false)))
-		false)))
-
-(define source_needed_after_group? (lambda (default_alias block src)
+/* Complete group-key expressions are stored values after aggregation. Their
+source references must not retain a second lookup on a key that no longer exists.
+Canonicalize once: structural indexes borrow their exact expression roots. */
+(define source_needed_after_group? (lambda (default_alias keys expressions src)
 	(and (stage_output_relation? (source_relation src))
-		(or
-			(fields_ref_alias? default_alias (source_alias src) (qb_fields block))
-			(or
-				(fields_ref_alias? default_alias (source_alias src) (qb_hidden block))
-				(or
-					(expr_refs_alias_after_group? default_alias (source_alias src) (coalesceNil (qb_having block) true))
-					(order_ref_alias? default_alias (source_alias src) (qb_order block))))))))
+		(begin
+			(define canonical (lambda (expr) (canonical_column_expr_for_alias default_alias expr)))
+			(define roots (map expressions canonical))
+			(define key_index (make_structural_index (map keys canonical) roots))
+			(reduce roots (lambda (needed expr)
+				(or needed (expr_refs_alias_after_group? default_alias (source_alias src) expr key_index))) false)))))
 
 (define source_needed_after_group_stage? (lambda (default_alias stage src)
-	(and (stage_output_relation? (source_relation src))
-		(or
-			(fields_ref_alias? default_alias (source_alias src) (gs_output stage))
-			(or
-				(expr_refs_alias_after_group? default_alias (source_alias src) (coalesceNil (gs_having stage) true))
-				(order_ref_alias? default_alias (source_alias src) (gs_order stage)))))))
+	(source_needed_after_group? default_alias (gs_keys stage)
+		(merge (list (projection_exprs (gs_output stage))
+			(list (coalesceNil (gs_having stage) true)) (order_item_exprs (gs_order stage)))) src)))
 
 (define direct_column_ref? (lambda (expr)
 	(match expr
