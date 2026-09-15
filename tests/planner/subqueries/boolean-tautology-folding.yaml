@@ -44,6 +44,69 @@ setup:
       (1, 1)
 
 test_cases:
+  - name: Common OR predicates preserve all SQL truth combinations
+    setup:
+      - sql: DROP TABLE IF EXISTS taut_truth
+      - sql: CREATE TABLE taut_truth (id INT, v INT) ENGINE=memory
+      - sql: INSERT INTO taut_truth VALUES (0,0),(1,1),(2,NULL)
+    sql: |
+      SELECT COUNT(*) AS mismatches
+      FROM taut_truth a, taut_truth b, taut_truth c
+      WHERE COALESCE(((a.v=1 AND b.v=1) OR (a.v=1 AND c.v=1)), -1)
+        != COALESCE((a.v=1 AND (b.v=1 OR c.v=1)), -1)
+    expect:
+      data: [{mismatches: 0}]
+
+  - name: Direct OR predicate selects only TRUE from all 27 truth combinations
+    sql: |
+      SELECT a.id AS a, b.id AS b, c.id AS c
+      FROM taut_truth a, taut_truth b, taut_truth c
+      WHERE (a.v=1 AND b.v=1) OR (a.v=1 AND c.v=1)
+      ORDER BY a.id,b.id,c.id
+    expect:
+      data: [{a: 1, b: 0, c: 1}, {a: 1, b: 1, c: 0}, {a: 1, b: 1, c: 1},
+             {a: 1, b: 1, c: 2}, {a: 1, b: 2, c: 1}]
+
+  - name: An unrestricted OR branch must not acquire another tables local guard
+    sql: |
+      SELECT a.id AS a, b.id AS b FROM taut_truth a, taut_truth b
+      WHERE (a.v=1 AND b.v=0) OR a.v=0
+      ORDER BY a.id,b.id
+    expect:
+      data: [{a: 0, b: 0}, {a: 0, b: 1}, {a: 0, b: 2}, {a: 1, b: 0}]
+    cleanup:
+      - sql: DROP TABLE taut_truth
+
+  - name: Shared join in OR preserves duplicate matches and residual branches
+    setup:
+      - sql: DROP TABLE IF EXISTS taut_or_left
+      - sql: DROP TABLE IF EXISTS taut_or_right
+      - sql: CREATE TABLE taut_or_left (id INT, k INT, v INT) ENGINE=memory
+      - sql: CREATE TABLE taut_or_right (k INT, v INT) ENGINE=memory
+      - sql: INSERT INTO taut_or_left VALUES (1,1,1),(2,2,0),(3,NULL,1),(4,3,NULL)
+      - sql: INSERT INTO taut_or_right VALUES (1,0),(1,1),(2,1),(3,NULL),(NULL,1)
+    sql: |
+      SELECT l.id, COUNT(*) AS n FROM taut_or_left l, taut_or_right r
+      WHERE (l.k=r.k AND l.v=1) OR (l.k=r.k AND r.v=1)
+      GROUP BY l.id ORDER BY l.id
+    expect:
+      data: [{id: 1, n: 2}, {id: 2, n: 1}]
+
+  - name: Shared OR branch retains NULL extension in outer join
+    sql: |
+      SELECT l.id, r.v FROM taut_or_left l LEFT JOIN taut_or_right r
+      ON (l.k=r.k AND l.v=1) OR (l.k=r.k AND r.v=1)
+      ORDER BY l.id, r.v
+    expect:
+      data: [{id: 1, v: 0}, {id: 1, v: 1}, {id: 2, v: 1}, {id: 3, v: null}, {id: 4, v: null}]
+
+  - name: Factoring never suppresses invalid column binding
+    sql: SELECT l.id FROM taut_or_left l WHERE (l.missing=1 AND FALSE) OR (l.missing=1 AND TRUE)
+    expect: {error: true}
+    cleanup:
+      - sql: DROP TABLE taut_or_right
+      - sql: DROP TABLE taut_or_left
+
   - name: "(A OR NOT A) tautology keeps correct rows regardless of EXISTS"
     sql: |
       SELECT ID FROM taut_parent p

@@ -18,6 +18,7 @@ package scm
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 )
@@ -144,5 +145,51 @@ func BenchmarkFunctionalAssocBuild(b *testing.B) {
 				assocBenchmarkSink = build(input)
 			}
 		})
+	}
+}
+
+// StorageSeq and StorageInt can represent the same SQL key with float and int
+// tags in different shards. Their partial groups must merge into one bucket.
+func TestFastDictNumericRepresentation(t *testing.T) {
+	for _, reverse := range []bool{false, true} {
+		for _, tuple := range []bool{false, true} {
+			left, right := NewInt(1), NewFloat(1)
+			if reverse {
+				left, right = right, left
+			}
+			if tuple {
+				left, right = NewSlice([]Scmer{left}), NewSlice([]Scmer{right})
+			}
+			dict := NewFastDictValue(4)
+			dict.Set(left, NewInt(6), nil)
+			dict.Set(right, NewInt(9), func(a, b Scmer) Scmer { return NewInt(a.Int() + b.Int()) })
+			if len(dict.Pairs) != 2 {
+				t.Fatalf("reverse=%v tuple=%v: equal numeric keys occupy %d buckets", reverse, tuple, len(dict.Pairs)/2)
+			}
+			for _, key := range []Scmer{left, right} {
+				got, ok := dict.Get(key)
+				if !ok || got.Int() != 15 {
+					t.Fatalf("lookup = %v, %v; want 15", got, ok)
+				}
+			}
+		}
+	}
+}
+
+func TestFastDictNumericHashBoundaries(t *testing.T) {
+	dict := NewFastDictValue(8)
+	keys := []Scmer{NewInt(1 << 53), NewInt(1<<53 + 1), NewNil(), NewBool(false), NewInt(0)}
+	for i, key := range keys {
+		dict.Set(key, NewInt(int64(i)), nil)
+	}
+	for i, key := range keys {
+		value, ok := dict.Get(key)
+		if !ok || value.Int() != int64(i) {
+			t.Fatalf("key %d collided with a distinct value: %v, %v", i, value, ok)
+		}
+	}
+	value, ok := dict.Get(NewFloat(math.Copysign(0, -1)))
+	if !ok || value.Int() != 4 {
+		t.Fatalf("negative floating zero did not find integer zero: %v, %v", value, ok)
 	}
 }
