@@ -435,6 +435,23 @@ eviction registrations or planner snapshots as a substitute for resident RAM. */
 					)
 				)
 			)
+			/* Older open dashboards still request the root-level asset URLs. */
+			"/gauge.png" (begin
+				((res "header") "Content-Type" "image/png")
+				((res "print") (readfile "../assets/gauge.png"))
+			)
+			"/gauge-needle.png" (begin
+				((res "header") "Content-Type" "image/png")
+				((res "print") (readfile "../assets/gauge-needle.png"))
+			)
+			"/dashboard/gauge.png" (begin
+				((res "header") "Content-Type" "image/png")
+				((res "print") (readfile "../assets/gauge.png"))
+			)
+			"/dashboard/gauge-needle.png" (begin
+				((res "header") "Content-Type" "image/png")
+				((res "print") (readfile "../assets/gauge-needle.png"))
+			)
 			"/dashboard/logo.svg" (begin
 				((res "header") "Content-Type" "image/svg+xml")
 				((res "print") (readfile "../assets/memcp-logo.svg"))
