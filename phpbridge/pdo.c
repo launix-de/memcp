@@ -7,6 +7,7 @@
 #error "MemCP PHP quotas require PHP 8.5 or newer (max_memory_limit)"
 #endif
 #include <ext/pdo/php_pdo_driver.h>
+#include <ext/pdo/pdo_sql_parser.h>
 #include "bridge.h"
 #include "_cgo_export.h"
 
@@ -142,6 +143,48 @@ static const struct pdo_stmt_methods statement_methods = {
 	.describer = describe_column, .get_col = get_column, .cursor_closer = close_cursor
 };
 
+/* PDO's generic lexer does not recognize MySQL backtick identifiers. Keep
+ * quoted identifiers, literals and comments opaque to placeholder binding. */
+static bool parameter_char(unsigned char c) {
+ return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+        (c >= '0' && c <= '9') || c == '_';
+}
+static int scan_sql(pdo_scanner_t *s) {
+ const char *p = s->cur;
+ s->tok = p;
+ if (p >= s->end || !*p) return PDO_PARSER_EOI;
+ char c = *p++;
+ int token = PDO_PARSER_TEXT;
+ if (c == '`' || c == '\'' || c == '"') {
+  while (p < s->end && *p) {
+   if (*p == c) {
+    p++;
+    if (p < s->end && *p == c) { p++; continue; }
+    break;
+   }
+   if (c != '`' && *p == '\\' && p+1 < s->end) p++;
+   p++;
+  }
+ } else if (c == '#' || (c == '-' && p+1 < s->end && *p == '-' && (unsigned char)p[1] <= ' ')) {
+  while (p < s->end && *p && *p != '\n' && *p != '\r') p++;
+ } else if (c == '/' && p < s->end && *p == '*') {
+  p++;
+  while (p < s->end && *p) {
+   if (*p == '*' && p+1 < s->end && p[1] == '/') { p += 2; break; }
+   p++;
+  }
+ } else if ((c == ':' || c == '?') && p < s->end && *p == c) {
+  while (p < s->end && *p == c) p++;
+ } else if (c == ':' && p < s->end && parameter_char((unsigned char)*p)) {
+  while (p < s->end && parameter_char((unsigned char)*p)) p++;
+  token = PDO_PARSER_BIND;
+ } else if (c == '?') {
+  token = PDO_PARSER_BIND_POS;
+ }
+ s->cur = p;
+ return token;
+}
+
 static bool prepare(pdo_dbh_t *dbh, zend_string *sql, pdo_stmt_t *stmt, zval *options) {
 	if (pdo_attr_lval(options, PDO_ATTR_CURSOR, PDO_CURSOR_FWDONLY) != PDO_CURSOR_FWDONLY) {
 		pdo_raise_impl_error(dbh, stmt, "IM001", "MemCP supports forward-only cursors"); return false;
@@ -223,7 +266,7 @@ static const struct pdo_dbh_methods database_methods = {
 	.closer = close_db, .preparer = prepare, .doer = execute, .quoter = quote,
 	.begin = begin, .commit = commit, .rollback = rollback_db, .set_attribute = set_attribute,
 	.last_id = last_id, .fetch_err = fetch_error, .get_attribute = get_attribute,
-	.in_transaction = in_transaction
+	.in_transaction = in_transaction, .scanner = scan_sql
 };
 
 static int connect_db(pdo_dbh_t *dbh, zval *options) {
