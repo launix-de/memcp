@@ -5189,15 +5189,16 @@ only repeated nested spellings need fresh identities for later flattening. */
 	(reduce (coalesceNil scopes '()) (lambda (found entries)
 		(or found (binding_scope_has_alias? entries alias))) false)))
 
-(define binding_scope_entries (lambda (sources outer_scopes path all_strings index)
+(define binding_scope_entries (lambda (sources outer_scopes path all_strings index flattenable)
 	(match (coalesceNil sources '())
 		(cons src rest) (begin
 			(define sql_alias (source_alias src))
 			/* Nested blocks can later merge into their parent or a sibling.
 			Non-lateral derived blocks have no visible outer scope, but still
-			need distinct source identities before flattening. */
-			(define internal_alias (if (or (and (not (equal? path "query"))
-				(> (get_assoc (nth all_strings 1) sql_alias 0) 1))
+			need distinct source identities before flattening. Operator barriers
+			keep their own scope and retain canonical names for stage reuse. */
+			(define internal_alias (if (or (and flattenable (and (not (equal? path "query"))
+				(> (get_assoc (nth all_strings 1) sql_alias 0) 1)))
 				(binding_scopes_have_alias? outer_scopes sql_alias))
 				(binding_fresh_alias (nth all_strings 0)
 					(concat "__binding:" (concat (binding_path path "source" index) (concat ":" sql_alias))))
@@ -5216,7 +5217,7 @@ only repeated nested spellings need fresh identities for later flattening. */
 						(or
 							(union_block? (normalize_query_ast (source_relation internal_source)))
 							(not (empty_list? columns))))))
-				(binding_scope_entries rest outer_scopes path all_strings (+ index 1))))
+				(binding_scope_entries rest outer_scopes path all_strings (+ index 1) flattenable)))
 		_ '())))
 
 (define duplicate_source_alias (lambda (sources)
@@ -5296,7 +5297,8 @@ only repeated nested spellings need fresh identities for later flattening. */
 		(if (nil? duplicate_alias)
 			true
 			(neumann_fail "bind_query_names" (concat "duplicate relation alias: " duplicate_alias)))
-		(define entries (binding_scope_entries relation_bound_sources outer_scopes path all_strings 0))
+		(define entries (binding_scope_entries relation_bound_sources outer_scopes path all_strings 0
+			(not (derived_block_needs_operator? block))))
 		(define sources (bind_query_source_joins entries outer_scopes '() path all_strings 0))
 		(define scopes (cons entries outer_scopes))
 		(define fields (bind_query_fields (qb_fields block) scopes path all_strings 0))
