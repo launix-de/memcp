@@ -21,15 +21,22 @@ test_cases:
     sql: "INSERT INTO ivt_values VALUES (5, @ivt_text, LENGTH('abc'))"
     expect:
       affected_rows: 1
+  - name: "Literal-row speculation preserves placeholder order for expressions"
+    sql: "INSERT INTO ivt_values VALUES (?, ?, ? + ?), (?, ?, ?)"
+    params: [6, six, 10, 2, 7, seven, 3]
+    expect:
+      affected_rows: 2
   - name: "Rows retain NULL and fresh values"
     sql: "SELECT * FROM ivt_values ORDER BY id"
     expect:
-      rows: 5
+      rows: 7
       data:
         - {id: 1, text_value: first, number_value: null}
         - {id: 2, text_value: second, number_value: -4}
         - {id: 3, text_value: third, number_value: null}
         - {id: 4, text_value: fourth, number_value: -8}
         - {id: 5, text_value: session, number_value: 3}
+        - {id: 6, text_value: six, number_value: 12}
+        - {id: 7, text_value: seven, number_value: 3}
 cleanup:
   - sql: "DROP TABLE ivt_values"

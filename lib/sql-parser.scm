@@ -1538,6 +1538,23 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		))
 	)))
 
+	/* Parse complete literal rows before trying the full expression grammar.
+	Question marks stay inert until the row succeeds, so a later arithmetic
+	expression can backtrack without consuming placeholder numbers twice. */
+	(define sql_insert_literal_cell (parser (or
+		(parser "?" (quote sql_insert_placeholder))
+		sql_literal)))
+	(define sql_insert_values_row (parser (or
+		(parser '("(" (define dataset (* sql_insert_literal_cell ",")) ")")
+			(map dataset (lambda (value)
+				(if (equal?? value (quote sql_insert_placeholder))
+					(begin
+						(define n (placeholder_counter "n"))
+						(placeholder_counter "n" (+ n 1))
+						(list (quote session) (concat "v" (string (+ n 1)))))
+					value))))
+		(parser '("(" (define dataset (* sql_expression ",")) ")") dataset))))
+
 	(define sql_insert_into (parser '(
 		(atom "INSERT" true)
 		(define ignoreexists (? (atom "IGNORE" true true true)))
@@ -1550,11 +1567,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 				","))
 			")")
 		(atom "VALUES" true)
-		(define datasets (* (parser '(
-			"("
-			(define dataset (* sql_expression ","))
-			")"
-		) dataset) ","))
+		(define datasets (* sql_insert_values_row ","))
 		(define updaterows (? (parser '(
 			(atom "ON" true)
 			(atom "DUPLICATE" true)
