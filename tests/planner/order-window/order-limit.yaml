@@ -307,6 +307,19 @@ test_cases:
     expect:
       data: [true]
 
+  - name: "Bushy join remains incompatible with the left-deep ordered pipeline"
+    scm: |
+      (not (scan_join_order_tree_compatible?
+        (make_join_optimizer_node 'inner
+          (make_join_optimizer_node 'inner
+            (make_join_optimizer_leaf "a")
+            (make_join_optimizer_leaf "b") '())
+          (make_join_optimizer_node 'inner
+            (make_join_optimizer_leaf "c")
+            (make_join_optimizer_leaf "d") '()) '())))
+    expect:
+      data: [true]
+
   - name: "Bushy ordered join lowers without rebuilding its independent subtree"
     sql: |
       EXPLAIN SELECT a.id
@@ -319,12 +332,12 @@ test_cases:
     expect:
       rows: 1
       result_contains:
+        - "scan_join_order"
         - "ord_tree_a"
         - "ord_tree_b"
         - "ord_tree_c"
         - "ord_tree_d"
       result_not_contains:
-        - "scan_join_order"
         - "(sort rows"
         - "(slice sorted"
 
