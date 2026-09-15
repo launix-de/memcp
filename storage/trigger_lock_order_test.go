@@ -390,3 +390,40 @@ func TestTriggerUnlockTemporarilyWithdrawsWriteOwnership(t *testing.T) {
 	tx.ExitShardWrite(shard)
 	shard.mu.Unlock()
 }
+
+func TestBeforeUpdateReleasesLocallyAcquiredShardLock(t *testing.T) {
+	for _, alreadyLocked := range []bool{false, true} {
+		name := "local_lock"
+		if alreadyLocked {
+			name = "caller_lock"
+		}
+		t.Run(name, func(t *testing.T) {
+			tbl := setupScanParallelTestTable(t, "tbeforeupdatelock")
+			tbl.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(1)}}, nil, scm.NewNil(), false, nil)
+			shard := tbl.ActiveShards()[0]
+			called, unlocked := false, false
+			tbl.AddTrigger(TriggerDescription{
+				Name: "check_update_lock", Timing: BeforeUpdate,
+				Func: scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+					called = true
+					unlocked = shard.mu.TryLock()
+					if unlocked {
+						shard.mu.Unlock()
+					}
+					return args[1]
+				}),
+			})
+			release := shard.GetRead()
+			defer release()
+			if alreadyLocked {
+				shard.mu.Lock()
+				defer shard.mu.Unlock()
+			}
+			updated := shard.UpdateFunction(0, true, alreadyLocked, nil)(
+				scm.NewSlice([]scm.Scmer{scm.NewString("id"), scm.NewInt(2)}))
+			if !updated.Bool() || !called || !unlocked {
+				t.Fatalf("updated=%v, trigger called=%v, shard unlocked=%v", updated.Bool(), called, unlocked)
+			}
+		})
+	}
+}

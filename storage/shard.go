@@ -1319,13 +1319,12 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 				// Execute BEFORE UPDATE triggers (can modify d2)
 				if withTrigger && triggerOldRow != nil {
 					newSchemaRow := schemaRowFromDelta(d2)
-					if alreadyLocked {
-						t.runWithWriteLockReleased(currentTx, func() {
-							newSchemaRow = t.t.ExecuteBeforeUpdateTriggers(triggerOldRow, newSchemaRow, currentTx)
-						})
-					} else {
+					// Both paths hold shard.mu here: either the mapper supplied
+					// it or this callback acquired it above. Trigger lookup and
+					// execution must release it before taking any table locks.
+					t.runWithWriteLockReleased(currentTx, func() {
 						newSchemaRow = t.t.ExecuteBeforeUpdateTriggers(triggerOldRow, newSchemaRow, currentTx)
-					}
+					})
 					// Write trigger-mutated schema values back to delta row layout.
 					for i, colDesc := range t.t.Columns {
 						if colidx, ok := t.deltaColumns[colDesc.Name]; ok && colidx < len(d2) && i < len(newSchemaRow) {
