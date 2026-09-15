@@ -664,13 +664,19 @@ type jitStackRoot struct {
 	offset int32
 }
 
+// jitStackRootBitmap stores exact word locations relative to one frame base.
+type jitStackRootBitmap struct {
+	first int32 // byte offset represented by the first bit; may be negative
+	bits  []byte
+}
+
 // jitSafepoint is recorded while emitting a Go call. FrameSize is deliberately
 // absent: the one-pass emitter only knows the final static frame size after the
 // complete function has been written.
 type jitSafepoint struct {
 	pcOffset        int32
 	dynamicSP       int32
-	roots           []jitStackRoot
+	roots           [3]jitStackRootBitmap
 	entry           bool
 	entryFrameWords uintptr
 	entryPointerMap []byte
@@ -926,8 +932,11 @@ type JITContext struct {
 	// Unlike StackRoots it is shared by branch contexts and never removes slots,
 	// avoiding a second traversal over every safepoint after code generation.
 	FrameRoots map[jitStackRoot]struct{}
-	Safepoints []jitSafepoint
-	Coverage   JITCoverage
+	// SafepointRootScratch is reused while encoding snapshots; snapshots own
+	// their bitmap storage and never reference this temporary root list.
+	SafepointRootScratch []jitStackRoot
+	Safepoints           []jitSafepoint
+	Coverage             JITCoverage
 
 	// Stack frame: emitter locals use [RSP + offset], while register spills use
 	// [RBP - offset]. The two zones cannot overlap because the patched frame size

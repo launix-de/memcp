@@ -19,6 +19,7 @@ package scm
 import (
 	"fmt"
 	"math"
+	"math/bits"
 	"unsafe"
 )
 
@@ -2456,19 +2457,59 @@ func (ctx *JITContext) recordSafepoint(transientRoots []int32, callAreaBytes int
 	// Stack maps describe concrete machine locations. No logical register alias
 	// may cross this boundary without first becoming a real register value.
 	ctx.FlushRegisterMoves()
-	roots := make([]jitStackRoot, 0, len(ctx.StackRoots)+len(transientRoots))
-	for root := range ctx.StackRoots {
+	// A wide expression has many roots and call sites. Storing an eight-byte
+	// root record per live word at every call makes compilation metadata huge.
+	// Snapshot the same exact words as one bit each, independently per base;
+	// their final SP-relative positions still depend on the completed frame.
+	scratch := ctx.SafepointRootScratch[:0]
+	var roots [3]jitStackRootBitmap
+	var last [3]int32
+	var present [3]bool
+	include := func(root jitStackRoot) {
+		if root.base > jitStackRootCallSP || root.offset%8 != 0 {
+			panic("jit: invalid stack root")
+		}
 		if root.base == jitStackRootFrameSP && root.offset < -ctx.DynamicSP {
 			panic(fmt.Sprintf("jit: stale dynamic stack root raw=%d dynamic=%d", root.offset, ctx.DynamicSP))
 		}
-		roots = append(roots, root)
+		base := root.base
+		if !present[base] || root.offset < roots[base].first {
+			roots[base].first = root.offset
+		}
+		if !present[base] || root.offset > last[base] {
+			last[base] = root.offset
+		}
+		present[base] = true
+		scratch = append(scratch, root)
+	}
+	for root := range ctx.StackRoots {
+		include(root)
 	}
 	for _, offset := range transientRoots {
-		roots = append(roots, jitStackRoot{
-			base:   jitStackRootCallSP,
-			offset: callAreaBytes + offset,
-		})
+		include(jitStackRoot{base: jitStackRootCallSP, offset: callAreaBytes + offset})
 	}
+	var sizes [3]int
+	total := 0
+	for base := range roots {
+		if present[base] {
+			sizes[base] = int((int64(last[base])-int64(roots[base].first))/64 + 1)
+			total += sizes[base]
+		}
+	}
+	data := make([]byte, total)
+	for base := range roots {
+		roots[base].bits = data[:sizes[base]:sizes[base]]
+		data = data[sizes[base]:]
+	}
+	mark := func(root jitStackRoot) {
+		bitmap := &roots[root.base]
+		word := (int64(root.offset) - int64(bitmap.first)) / 8
+		bitmap.bits[word/8] |= 1 << (word % 8)
+	}
+	for _, root := range scratch {
+		mark(root)
+	}
+	ctx.SafepointRootScratch = scratch
 	ctx.Safepoints = append(ctx.Safepoints, jitSafepoint{
 		pcOffset:  int32(uintptr(ctx.Ptr) - uintptr(ctx.Start)),
 		dynamicSP: ctx.DynamicSP,
@@ -2495,16 +2536,21 @@ func (ctx *JITContext) finalizeStackMaps(frameSize int32, arenaOffset int) []jit
 			word := uintptr(offset / 8)
 			pointerMap[word/8] |= 1 << (word % 8)
 		}
-		for _, root := range safepoint.roots {
-			switch root.base {
-			case jitStackRootFrameSP:
-				mark(safepoint.dynamicSP+root.offset, root)
-			case jitStackRootFrameBP:
-				mark(safepoint.dynamicSP+frameSize+root.offset, root)
-			case jitStackRootCallSP:
-				mark(root.offset, root)
-			default:
-				panic("jit: invalid stack root base")
+		for base, bitmap := range safepoint.roots {
+			for index, value := range bitmap.bits {
+				for value != 0 {
+					bit := bits.TrailingZeros8(value)
+					root := jitStackRoot{base: jitStackRootBase(base), offset: bitmap.first + int32(index*64+bit*8)}
+					switch root.base {
+					case jitStackRootFrameSP:
+						mark(safepoint.dynamicSP+root.offset, root)
+					case jitStackRootFrameBP:
+						mark(safepoint.dynamicSP+frameSize+root.offset, root)
+					case jitStackRootCallSP:
+						mark(root.offset, root)
+					}
+					value &= value - 1
+				}
 			}
 		}
 		maps[i] = jitStackMap{
