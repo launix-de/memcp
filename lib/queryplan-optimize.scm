@@ -827,8 +827,12 @@ plan = (tree aliases cardinality cost size atomic driver-cardinality left right 
 		(cons _head _tail) (cons (quote *) items)
 		_ 1)))
 
+/* The Scheme reader splits exponent notation into separate tokens. Parse the
+ceiling explicitly; a literal 1e300 silently capped every join at one row. */
+(define planner_cardinality_ceiling (simplify "1e300"))
+
 (define join_order_cap_cardinality (lambda (value)
-	(max 1 (min 1e300 value))))
+	(max 1 (min planner_cardinality_ceiling value))))
 
 (define join_order_join_shape (lambda (left right)
 	/* This is the NULL-extension rule for every LEFT JOIN. A pending nullable
@@ -1342,7 +1346,7 @@ whole-pipeline cost with the unrestricted logical winner. */
 
 /* IKKBZ item = (node-aliases factor cost). */
 (define join_order_ikkbz_rank (lambda (item)
-	(if (equal? (nth item 2) 0) 1e300
+	(if (equal? (nth item 2) 0) planner_cardinality_ceiling
 		(/ (- (nth item 1) 1) (nth item 2)))))
 
 (define join_order_ikkbz_merge_items (lambda (left right)
@@ -2588,6 +2592,32 @@ the lowerer can cost it. */
 						(nth work 1) (nth work 2) (nth work 3)))))))
 			(list nil '())))))
 
+/* An ORDER BY prefix is a useful property, not a mandatory join driver.
+Compare its saved sort against an unrestricted join plus final materialization.
+Both searches already register the same bounded statistics/parameter guards. */
+(define join_optimizer_order_delivery (lambda (ordered unordered block)
+	(if (nil? unordered) (list ordered nil)
+		(begin
+			(define rows (qassoc_get unordered (quote cardinality) 1))
+			(define width (/ (count (qb_fields block)) 2))
+			(define sort_work (* (count (qb_order block)) (membership_ordered_recset_sort_work rows)))
+			(define sort_cost (planner_cost 0
+				(* rows width planner_membership_map_column_row_ns) 0 0 0
+				(* sort_work planner_membership_ordered_recset_sort_unit_ns)
+				(* rows width 8) 0 rows 0.5))
+			(define unordered_ns (+ (qassoc_get unordered (quote cost) 0)
+				(qassoc_get sort_cost (quote execution_ns) 0)))
+			(define ordered_ns (qassoc_get ordered (quote cost) 0))
+			(define use_sort (< unordered_ns ordered_ns))
+			(define selected (if use_sort
+				(qassoc_set (qassoc_set unordered (quote cost) unordered_ns) (quote cost_components)
+					(planner_cost_add (qassoc_get unordered (quote cost_components) '()) sort_cost rows 0.5)) ordered))
+			(list selected (list (list "chosen" (if use_sort "join_then_sort" "order_prefix"))
+				(list "selection" "cost") (list "ordered_join_ns" ordered_ns)
+				(list "unordered_join_ns" (qassoc_get unordered (quote cost) 0))
+				(list "sort_ns" (qassoc_get sort_cost (quote execution_ns) 0))
+				(list "sort_rows" rows) (list "sort_work" sort_work)))))))
+
 (define join_optimizer_reorder_sources (lambda (stage_catalog block graph planning_session tx)
 	(begin
 		(define sources (qb_sources block))
@@ -2613,9 +2643,9 @@ the lowerer can cost it. */
 						(coalesceNil (qb_where block) true)))))
 				source_alias)))
 		/* If no single scan can provide the complete ORDER expression, retain the
-		lexicographic source prefix as a required physical property. DP still costs
-		all valid trees; it merely stops discarding the best tree whose nested scan
-		order can produce the requested suffix without a sorting relation. */
+		lexicographic source prefix within the order-preserving search. Compare its
+		winning tree with an unrestricted search plus sorting below; a useful order
+		property must not forbid a cheaper selective join. */
 		(define raw_required_order_aliases (if (or (empty_list? join_order_items)
 			(not (empty_list? ordered_drivers)))
 			'()
@@ -2696,10 +2726,15 @@ the lowerer can cost it. */
 						planning_session tx) nil))
 				(define ordered_choice (if (nil? ordered_driver_plans) nil
 					(car ordered_driver_plans)))
-				(define planned (if (nil? ordered_choice)
+				(define ordered_planned (if (nil? ordered_choice)
 					(join_optimizer_plan_segment stage_catalog relation_units
 						sources segment default_alias graph required_order_property planning_session)
 					(car ordered_choice)))
+				(define unordered_planned (if (empty_list? required_order_aliases) nil
+					(join_optimizer_plan_segment stage_catalog relation_units
+						sources segment default_alias graph '() planning_session)))
+				(define delivery (join_optimizer_order_delivery ordered_planned unordered_planned block))
+				(define planned (car delivery))
 				(join_optimizer_reorder_result
 					(qassoc_get planned (quote tree) nil)
 					(qassoc_get planned (quote strategy) (quote fixed))
@@ -2708,6 +2743,7 @@ the lowerer can cost it. */
 					(qassoc_get planned (quote cardinality) nil)
 					(qassoc_get planned (quote cost_components) nil)
 					(list
+						(list (quote order_delivery) (cadr delivery))
 						(list (quote ordered_driver_candidates) ordered_drivers)
 						(list (quote selected_ordered_driver)
 							(if (nil? ordered_choice) nil (nth ordered_choice 2)))
