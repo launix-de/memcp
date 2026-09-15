@@ -624,8 +624,8 @@ body{display:flex;flex-direction:column}
 var base=(function(){var p=location.pathname;var i=p.indexOf("/dashboard");return i>0?p.substring(0,i):""})();
 /* fix asset URLs for proxy base */
 document.querySelector("header .logo").src=base+"/dashboard/logo.svg";
-document.documentElement.style.setProperty("--gauge-bg","url("+base+"/gauge.png)");
-document.documentElement.style.setProperty("--gauge-needle-bg","url("+base+"/gauge-needle.png)");
+document.documentElement.style.setProperty("--gauge-bg","url("+base+"/dashboard/gauge.png)");
+document.documentElement.style.setProperty("--gauge-needle-bg","url("+base+"/dashboard/gauge-needle.png)");
 function setGauge(id,t,valText,subText){
 if(t<0)t=0;if(t>1)t=1;
 var deg=t*270;
