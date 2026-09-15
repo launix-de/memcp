@@ -790,3 +790,44 @@ func TestJITRegisterHomesSkipFoldedTagLane(t *testing.T) {
 	}
 	ctx.ReleaseRegisterHomes(homes)
 }
+
+// Benchmark the metadata retained while compiling a wide SQL values expression.
+func BenchmarkJITSafepointSnapshots(b *testing.B) {
+	code := make([]byte, 16)
+	roots := make(map[jitStackRoot]struct{}, 2048)
+	for i := int32(0); i < 2048; i++ {
+		roots[jitStackRoot{base: jitStackRootFrameSP, offset: i * 16}] = struct{}{}
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		ctx := JITContext{Start: unsafe.Pointer(&code[0]), Ptr: unsafe.Pointer(&code[0]), StackRoots: roots}
+		for j := 0; j < 128; j++ {
+			ctx.recordSafepoint(nil, 0)
+		}
+		runtime.KeepAlive(ctx.Safepoints)
+	}
+}
+
+func TestJITSafepointSnapshotsPreserveExactRoots(t *testing.T) {
+	code := make([]byte, 16)
+	ctx := JITContext{Start: unsafe.Pointer(&code[0]), Ptr: unsafe.Pointer(&code[0]), DynamicSP: 32,
+		StackRoots: map[jitStackRoot]struct{}{
+			{base: jitStackRootFrameSP, offset: -16}: {},
+			{base: jitStackRootFrameSP, offset: 8}:   {},
+			{base: jitStackRootFrameBP, offset: -8}:  {},
+		},
+	}
+	ctx.recordSafepoint([]int32{0}, 8)
+	delete(ctx.StackRoots, jitStackRoot{base: jitStackRootFrameSP, offset: 8})
+	ctx.StackRoots[jitStackRoot{base: jitStackRootFrameBP, offset: -24}] = struct{}{}
+	ctx.recordSafepoint(nil, 0)
+	ctx.DynamicSP = 0
+	maps := ctx.finalizeStackMaps(64, 0)
+	for i, want := range [][]byte{{0x26, 0x08}, {0x04, 0x0a}} {
+		if !bytes.Equal(maps[i].pointerMap, want) {
+			b := maps[i].pointerMap
+			t.Fatalf("snapshot %d = %08b, want %08b", i, b, want)
+		}
+	}
+}
