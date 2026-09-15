@@ -623,11 +623,18 @@ func (p *StorageComputeProxy) Compress(_ *TxContext) {
 			return scm.Apply(p.computor, colvalues...)
 		}
 
+		// Compression analysis and encoding must see the same materialization.
+		// Re-evaluating collection-valued callbacks produces fresh identities
+		// that cannot be looked up in the dictionary chosen during analysis.
+		values := make([]scm.Scmer, p.count)
+		for i := range values {
+			values[i] = getValue(uint32(i))
+		}
 		var newcol ColumnStorage = new(StorageSCMER)
 		for {
 			newcol.prepare()
 			for i := uint32(0); i < p.count; i++ {
-				newcol.scan(i, getValue(i))
+				newcol.scan(i, values[i])
 			}
 			proposed := newcol.proposeCompression(p.count)
 			if proposed == nil {
@@ -637,7 +644,7 @@ func (p *StorageComputeProxy) Compress(_ *TxContext) {
 		}
 		newcol.init(p.count)
 		for i := uint32(0); i < p.count; i++ {
-			newcol.build(i, getValue(i))
+			newcol.build(i, values[i])
 		}
 		newcol.finish()
 
