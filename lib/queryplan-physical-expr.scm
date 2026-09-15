@@ -4805,6 +4805,22 @@ per group instead of silently widening the group key. */
 			(if (nil? ag) requested_col
 				(aggregate_col_name_using (gs_input stage) ag))))))
 
+/* A scalar probe carries a complete lowering stage, including compile-session
+handles. Only its carrier, requested aggregate and correlation keys identify
+its value; physical annotations must never rename a persistent aggregate. */
+(define canonical_aggregate_recipe (lambda (expr)
+	(match expr
+		(cons head (cons stage (cons requested_col rest)))
+		(if (and (group_stage? stage) (contains? (list (quote scalar_first_probe)
+			(quote scalar_aggregate_probe) (quote scalar_cardinality_probe)) head))
+			(list head (canonical_aggregate_probe_reference stage requested_col)
+				(canonical_aggregate_recipe (gs_domain stage)))
+			(cons (canonical_aggregate_recipe head)
+				(map (cdr expr) canonical_aggregate_recipe)))
+		(cons head tail) (cons (canonical_aggregate_recipe head)
+			(map tail canonical_aggregate_recipe))
+		_ expr)))
+
 /* Aggregate descriptors still carry aliases because they must execute against
 the current logical input. Persistent keytable columns must not. Resolve every
 column to (source role, schema, base relation, physical column) for the name;
@@ -4817,6 +4833,7 @@ the enclosing carrier identity supplies the remaining query context. */
 	(if (equal? ag aggregate_count_descriptor)
 		(aggregate_col_name ag)
 		(begin
+			(define ag (canonical_aggregate_recipe ag))
 			(define local_aliases (source_aliases (canonical_helper_sources input)))
 			(define referenced_aliases (stage_semantic_expr_aliases ag))
 			(define outer_aliases (filter referenced_aliases (lambda (alias)

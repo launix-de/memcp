@@ -2601,7 +2601,9 @@ Both searches already register the same bounded statistics/parameter guards. */
 			(define rows (qassoc_get unordered (quote cardinality) 1))
 			(define width (/ (count (qb_fields block)) 2))
 			(define sort_work (* (count (qb_order block)) (membership_ordered_recset_sort_work rows)))
-			(define sort_cost (planner_cost 0
+			/* Sorting introduces an additional ordered scan boundary. Charge its
+			calibrated startup as well as tuple projection and comparisons. */
+			(define sort_cost (planner_cost planner_membership_ordered_scan_invocation_ns
 				(* rows width planner_membership_map_column_row_ns) 0 0 0
 				(* sort_work planner_membership_ordered_recset_sort_unit_ns)
 				(* rows width 8) 0 rows 0.5))

@@ -46,9 +46,9 @@ cleanup:
 test_cases:
   - name: Order delivery costs sorting and retains the prefix when sorting loses
     scm: "(begin\n (define block (make_query_block \"memcp-tests\" '() '(\"id\" 1 \"name\" 2) true '() nil\
-      \ '(1 2) 100 0 '() '() '()))\n (define ordered (list (list 'cost 100000) (list 'cardinality 100)))\n\
+      \ '(1 2) 100 0 '() '() '()))\n (define ordered (list (list 'cost 10000000) (list 'cardinality 100)))\n\
       \ (define cheap (list (list 'cost 1000) (list 'cardinality 100)))\n (define costly (list (list 'cost\
-      \ 99000) (list 'cardinality 100)))\n (define sorted (join_optimizer_order_delivery ordered cheap block))\n\
+      \ 9999000) (list 'cardinality 100)))\n (define sorted (join_optimizer_order_delivery ordered cheap block))\n\
       \ (define retained (join_optimizer_order_delivery ordered costly block))\n (and (equal? (qassoc_get\
       \ (cadr sorted) \"chosen\" nil) \"join_then_sort\")\n  (> (qassoc_get (car sorted) 'cost 0) 1000)\n\
       \  (equal? (qassoc_get (cadr retained) \"chosen\" nil) \"order_prefix\")\n  (equal? (car (join_optimizer_order_delivery\
