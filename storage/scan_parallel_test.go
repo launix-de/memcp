@@ -708,3 +708,59 @@ func BenchmarkTableStatisticsPublishedRead(b *testing.B) {
 		tableStatisticsBenchmarkSink = tbl.statistics()
 	}
 }
+
+func TestUniqueChecksWithMorePartitionDimensionsThanKeyColumns(t *testing.T) {
+	tbl := setupScanParallelTestTable(t, "tunique2dimensions")
+	tbl.CreateColumn("name", "TEXT", nil, nil)
+	tbl.mu.Lock()
+	tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}, {Id: "name", Cols: []string{"name"}}}
+	tbl.ShardMode = ShardModePartition
+	tbl.PDimensions = []shardDimension{
+		{Column: "id", NumPartitions: 2, Pivots: []scm.Scmer{scm.NewInt(10)}},
+		{Column: "name", NumPartitions: 2, Pivots: []scm.Scmer{scm.NewString("m")}},
+	}
+	tbl.PShards = []*storageShard{NewShard(tbl), NewShard(tbl), NewShard(tbl), NewShard(tbl)}
+	tbl.publishTopologyLocked()
+	tbl.mu.Unlock()
+	accepted := 0
+	tbl.ProcessUniqueCollision([]string{"id", "name"}, [][]scm.Scmer{{scm.NewInt(15), scm.NewString("new")}}, false,
+		func(rows [][]scm.Scmer) { accepted += len(rows) }, nil,
+		func(key string, _ []scm.Scmer) { t.Fatalf("unexpected collision on %s", key) }, 0, nil)
+	if accepted != 1 {
+		t.Fatalf("accepted %d rows, want 1", accepted)
+	}
+}
+
+func TestUniqueChecksRejectCollisionsOutsideInsertPartition(t *testing.T) {
+	tbl := setupScanParallelTestTable(t, "tuniquecrosspartition")
+	tbl.CreateColumn("name", "TEXT", nil, nil)
+	tbl.mu.Lock()
+	tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}, {Id: "name", Cols: []string{"name"}}}
+	tbl.ShardMode = ShardModePartition
+	tbl.PDimensions = []shardDimension{
+		{Column: "id", NumPartitions: 2, Pivots: []scm.Scmer{scm.NewInt(10)}},
+		{Column: "name", NumPartitions: 2, Pivots: []scm.Scmer{scm.NewString("m")}},
+	}
+	tbl.PShards = []*storageShard{NewShard(tbl), NewShard(tbl), NewShard(tbl), NewShard(tbl)}
+	tbl.publishTopologyLocked()
+	tbl.mu.Unlock()
+	columns := []string{"id", "name"}
+	tbl.Insert(columns, [][]scm.Scmer{{scm.NewInt(5), scm.NewString("alpha")}}, nil, scm.NewNil(), false, nil)
+	for _, tc := range []struct {
+		key string
+		row []scm.Scmer
+	}{
+		{"PRIMARY", []scm.Scmer{scm.NewInt(5), scm.NewString("zulu")}},
+		{"name", []scm.Scmer{scm.NewInt(15), scm.NewString("alpha")}},
+	} {
+		t.Run(tc.key, func(t *testing.T) {
+			collision := ""
+			tbl.ProcessUniqueCollision(columns, [][]scm.Scmer{tc.row}, false,
+				func([][]scm.Scmer) { t.Error("accepted a duplicate from another partition") }, nil,
+				func(key string, _ []scm.Scmer) { collision = key }, 0, nil)
+			if collision != tc.key {
+				t.Fatalf("collision = %q, want %q", collision, tc.key)
+			}
+		})
+	}
+}
