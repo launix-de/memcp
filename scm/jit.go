@@ -1466,12 +1466,24 @@ func (ctx *JITContext) FreeStack(size int32) {
 	newOffset := ctx.BPOffset - size
 	physicalStart := newOffset - ctx.DynamicSP
 	physicalEnd := ctx.BPOffset - ctx.DynamicSP
+	ctx.clearStackRootRange(jitStackRootFrameSP, physicalStart, physicalEnd)
+	ctx.BPOffset -= size
+}
+
+// clearStackRootRange removes only released stack addresses. Small call-frame
+// releases must not scan every live root in a large enclosing expression.
+func (ctx *JITContext) clearStackRootRange(base jitStackRootBase, start, end int32) {
+	if int64(end)-int64(start) < int64(len(ctx.StackRoots)) {
+		for offset := start; offset < end; offset++ {
+			delete(ctx.StackRoots, jitStackRoot{base: base, offset: offset})
+		}
+		return
+	}
 	for root := range ctx.StackRoots {
-		if root.base == jitStackRootFrameSP && root.offset >= physicalStart && root.offset < physicalEnd {
+		if root.base == base && root.offset >= start && root.offset < end {
 			delete(ctx.StackRoots, root)
 		}
 	}
-	ctx.BPOffset -= size
 }
 
 func (ctx *JITContext) setStackPointer(base jitStackRootBase, offset int32, pointer bool) {
