@@ -6092,7 +6092,12 @@ state through an assoc and one-element payload lists adds no semantics. */
 			(begin
 				(define grouped_scan (build_base_group_scan_assoc_plan schema tbl alias source_expr keys effective_condition ags))
 				(define grouped_expr (if (or (equal? keys '(1))
-					(qassoc_get facts (quote preserve_empty_domain) false))
+					/* A correlated domain needs an input row to supply its keys.
+					Its missing groups are handled by the outer lookup, not by
+					inventing a key outside the scan. Session-only domains can
+					seed their global empty aggregate here. */
+					(and (qassoc_get facts (quote preserve_empty_domain) false)
+						(not (expr_contains_column_ref? keys))))
 					(list (quote if)
 						(list (quote equal?) (list (quote count) (quote grouped)) 0)
 						(list (quote set_assoc)

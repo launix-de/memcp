@@ -7,7 +7,10 @@ setup:
   - sql: "DROP TABLE IF EXISTS domain_sales"
   - sql: "CREATE TABLE domain_sales (category INT, amount INT, quantity INT)"
   - sql: "INSERT INTO domain_sales (category, amount, quantity) VALUES (1,10,2),(1,20,3),(2,40,4)"
+  - sql: "DROP TABLE IF EXISTS domain_empty"
+  - sql: "CREATE TABLE domain_empty (category INT, amount INT)"
 cleanup:
+  - sql: "DROP TABLE IF EXISTS domain_empty"
   - sql: "DROP TABLE IF EXISTS domain_sales"
 test_cases:
   - name: "Unset session key identifies the NULL aggregate partition"
@@ -88,3 +91,29 @@ test_cases:
       WHERE CASE WHEN @cutoff IS NULL THEN TRUE ELSE quantity > @cutoff END
     expect:
       data: [{total: 70}]
+  - name: "Empty correlated cache preserves outer rows without evaluating column markers"
+    session_id: "nullable_domain"
+    sql: |
+      SELECT category, (SELECT SUM(b.amount) + COUNT(*) FROM domain_empty b
+        WHERE b.category = a.category AND @cutoff IS NULL) AS total
+      FROM domain_sales a ORDER BY category
+    expect:
+      data: [{category: 1, total: null}, {category: 1, total: null}, {category: 2, total: null}]
+  - name: "Empty nested scalar cache preserves missing values"
+    session_id: "nullable_domain"
+    sql: |
+      SELECT category, (SELECT b.amount FROM domain_empty b
+        WHERE b.category = (SELECT c.category FROM domain_empty c
+          WHERE c.amount = a.amount LIMIT 1) LIMIT 1) AS value
+      FROM domain_sales a ORDER BY category
+    expect:
+      data: [{category: 1, value: null}, {category: 1, value: null}, {category: 2, value: null}]
+  - name: "Nested scalar physical plan contains no unresolved column markers"
+    session_id: "nullable_domain"
+    sql: |
+      EXPLAIN SELECT category, (SELECT b.amount FROM domain_empty b
+        WHERE b.category = (SELECT c.category FROM domain_empty c
+          WHERE c.amount = a.amount LIMIT 1) LIMIT 1) AS value
+      FROM domain_sales a ORDER BY category
+    expect:
+      not_contains: ["get_column"]
