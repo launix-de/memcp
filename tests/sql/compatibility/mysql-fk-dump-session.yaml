@@ -8,6 +8,10 @@ setup:
 - sql: DROP TABLE IF EXISTS fk_dump_child
 - sql: DROP TABLE IF EXISTS fk_dump_parent
 test_cases:
+- name: Execute mysqldump SQL mode assignment
+  session_id: fk-dump
+  sql: "/*!40100 SET @@SQL_MODE='' */"
+  expect: {}
 - name: Execute dump unquoted charset SET
   session_id: fk-dump
   sql: /*!50003 SET character_set_client = utf8mb4 */

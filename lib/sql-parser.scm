@@ -2111,10 +2111,10 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		/* mysqldump --single-transaction establishes this before START TRANSACTION. */
 		(parser '((atom "SET" true) (atom "SESSION" true) (atom "TRANSACTION" true)
 			(atom "ISOLATION" true) (atom "LEVEL" true) (atom "REPEATABLE" true) (atom "READ" true)) (quote true))
-		(parser '((atom "SET" true) (? (atom "SESSION" true)) (? "@") (define key sql_identifier)
+		(parser '((atom "SET" true) (? (atom "SESSION" true)) (or (atom "@@" true) (? "@")) (define key sql_identifier)
 			(or "=" (atom ":=" true)) (atom "DEFAULT" true))
 			(list (quote session) (toLower key) nil))
-		(parser '((atom "SET" true) (? (atom "SESSION" true)) (define vars (* (parser '((? "@") (define key sql_identifier) (or "=" (atom ":=" true)) (define value sql_expression)) (list (quote session) (toLower key) (sql_set_value value))) ","))) (cons '!begin vars))
+		(parser '((atom "SET" true) (? (atom "SESSION" true)) (define vars (* (parser '((or (atom "@@" true) (? "@")) (define key sql_identifier) (or "=" (atom ":=" true)) (define value sql_expression)) (list (quote session) (toLower key) (sql_set_value value))) ","))) (cons '!begin vars))
 
 		(parser '((atom "LOCK" true) (or (atom "TABLES" true) (atom "TABLE" true))
 			(define locks (+ (parser '((define tbl sql_identifier) (? (atom "AS" true) (define alias sql_identifier)) (define mode sql_lock_table_mode)) (list tbl (not (nil? mode)))) ",")))
