@@ -5686,7 +5686,7 @@ every group row and its canonical identity stays independent of bound values. */
 		(define keep_first (list (quote lambda) (list (quote old) (quote new)) (quote old)))
 		(list
 			(list (quote lambda) (list (quote grouped))
-				(group_insert_finish_expr schema grouptbl key_names agg_cols false))
+				(group_insert_finish_expr schema grouptbl key_names agg_cols true))
 			(compile_scan_plan (quote scan_order)
 				(physical_query_tx_symbol)
 				(list (quote table) schema tbl)

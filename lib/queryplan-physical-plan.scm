@@ -1572,15 +1572,22 @@ outer joins. */
 		(define create_cols (cons (quote list)
 			(cons (cons (quote list) (cons "unique" (cons "group" (list (cons (quote list) key_names)))))
 				key_columns)))
-		(define ensure_agg_columns (if (or query_input scalar_order_base_stage)
-			(map (produceN (count ags)) (lambda (i)
-				(list (quote createcolumn)
-					(list (quote table) schema grouptbl)
-					(nth aggregate_cols i)
-					"any"
-					(quoted_runtime_list '())
-					(list (quote list) "collate" (physical_column_collation_expr src (car (nth ags i)))))))
-			'()))
+		/* Ordered bulk fills and pointwise probes share the canonical cache.
+		Keep the same computed-column definition for both physical carriers;
+		bulk preparation seeds values through its computed setters. */
+		(define ensure_agg_columns (if scalar_order_base_stage
+			(map ags (lambda (ag)
+				(build_group_aggregate_column stage schema tbl alias grouptbl
+					keys key_names aggregate_condition ag)))
+			(if query_input
+				(map (produceN (count ags)) (lambda (i)
+					(list (quote createcolumn)
+						(list (quote table) schema grouptbl)
+						(nth aggregate_cols i)
+						"any"
+						(quoted_runtime_list '())
+						(list (quote list) "collate" (physical_column_collation_expr src (car (nth ags i)))))))
+				'())))
 		(define collect_plan (if (not query_input)
 			nil
 			(if (union_block? src)
