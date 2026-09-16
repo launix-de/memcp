@@ -3178,7 +3178,7 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 	switch expr.GetTag() {
 	case tagNil, tagBool, tagInt, tagFloat, tagDate, tagString, tagCString, tagBString, tagRegex, tagVector,
 		tagFunc, tagFuncEnv, tagJIT, tagParser, tagFastDict, tagAny,
-		tagClosure, tagPromise:
+		tagClosure, tagPromise, tagSpecialForm:
 		// Keep Eval's self-evaluating literal contract. Pointer-bearing constants
 		// are retained through the entry point's ConstRoots for the lifetime of
 		// the generated code.
