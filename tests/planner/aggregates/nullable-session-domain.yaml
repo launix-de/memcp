@@ -1,0 +1,90 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: "1.0"
+  description: "NULL session domains preserve cached and correlated aggregates"
+setup:
+  - sql: "DROP TABLE IF EXISTS domain_sales"
+  - sql: "CREATE TABLE domain_sales (category INT, amount INT, quantity INT)"
+  - sql: "INSERT INTO domain_sales (category, amount, quantity) VALUES (1,10,2),(1,20,3),(2,40,4)"
+cleanup:
+  - sql: "DROP TABLE IF EXISTS domain_sales"
+test_cases:
+  - name: "Unset session key identifies the NULL aggregate partition"
+    session_id: "nullable_domain"
+    sql: |
+      SELECT SUM(amount) AS total FROM domain_sales
+      WHERE CASE WHEN @cutoff IS NULL THEN TRUE ELSE quantity > @cutoff END
+    expect:
+      data: [{total: 70}]
+  - name: "NULL session key preserves correlated aggregate inputs"
+    session_id: "nullable_domain"
+    sql: |
+      SELECT category, (SELECT SUM(b.amount) FROM domain_sales b
+        WHERE b.category = a.category
+          AND CASE WHEN @cutoff IS NULL THEN TRUE ELSE b.quantity > @cutoff END
+        LIMIT 1) AS total
+      FROM domain_sales a ORDER BY category
+    expect:
+      data: [{category: 1, total: 30}, {category: 1, total: 30}, {category: 2, total: 40}]
+  - name: "NULL session domain supports window totals"
+    session_id: "nullable_domain"
+    sql: |
+      SELECT category, SUM(amount) AS subtotal, SUM(SUM(amount)) OVER () AS total
+      FROM domain_sales
+      WHERE CASE WHEN @cutoff IS NULL THEN TRUE ELSE quantity > @cutoff END
+      GROUP BY category ORDER BY category
+    expect:
+      data: [{category: 1, subtotal: 30, total: 70}, {category: 2, subtotal: 40, total: 70}]
+  - name: "Choose another session partition"
+    session_id: "nullable_domain"
+    sql: "SET @cutoff = 3"
+  - name: "Non-NULL partition remains distinct"
+    session_id: "nullable_domain"
+    sql: |
+      SELECT SUM(amount) AS total FROM domain_sales
+      WHERE CASE WHEN @cutoff IS NULL THEN TRUE ELSE quantity > @cutoff END
+    expect:
+      data: [{total: 40}]
+  - name: "Return to the NULL session partition"
+    session_id: "nullable_domain"
+    sql: "SET @cutoff = NULL"
+  - name: "Cached NULL partition can be read again"
+    session_id: "nullable_domain"
+    sql: |
+      SELECT SUM(amount) AS total FROM domain_sales
+      WHERE CASE WHEN @cutoff IS NULL THEN TRUE ELSE quantity > @cutoff END
+    expect:
+      data: [{total: 70}]
+  - name: "SQL equality with NULL still rejects rows"
+    session_id: "nullable_domain"
+    sql: "SELECT COUNT(*) AS total FROM domain_sales WHERE quantity = @cutoff"
+    expect:
+      data: [{total: 0}]
+  - name: "Explicit groups with no matching rows stay absent"
+    session_id: "nullable_domain"
+    sql: "SELECT category, COUNT(*) AS total FROM domain_sales WHERE quantity = @cutoff GROUP BY category"
+    expect:
+      rows: 0
+  - name: "Empty aggregate preserves SUM NULL and COUNT zero"
+    session_id: "nullable_domain"
+    sql: "SELECT SUM(amount) AS total, COUNT(*) AS cnt FROM domain_sales WHERE quantity = @cutoff"
+    expect:
+      data: [{total: null, cnt: 0}]
+  - name: "Second session selects a different domain"
+    session_id: "other_domain"
+    sql: "SET @cutoff = 3"
+  - name: "Second session reads its own aggregate"
+    session_id: "other_domain"
+    sql: |
+      SELECT SUM(amount) AS total FROM domain_sales
+      WHERE CASE WHEN @cutoff IS NULL THEN TRUE ELSE quantity > @cutoff END
+    expect:
+      data: [{total: 40}]
+  - name: "First session retains its NULL domain"
+    session_id: "nullable_domain"
+    sql: |
+      SELECT SUM(amount) AS total FROM domain_sales
+      WHERE CASE WHEN @cutoff IS NULL THEN TRUE ELSE quantity > @cutoff END
+    expect:
+      data: [{total: 70}]
