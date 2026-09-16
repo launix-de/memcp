@@ -631,6 +631,9 @@ func getLoad(path string) func(a ...scm.Scmer) scm.Scmer {
 			for {
 				str, err := splitter.ReadString(delimiter[0])
 				if err == io.EOF {
+					if len(str) > 0 {
+						scm.Apply(a[1], scm.NewString(str))
+					}
 					break // file is finished
 				}
 				if err != nil {
