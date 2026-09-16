@@ -175,6 +175,8 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 	}
 	selfSymbols := jitSelfSymbols(proc)
 	ctx := &JITContext{
+		CompileScope:     buf.compileScope,
+		CompileContext:   executionContextFrom(buf.compileScope),
 		Ptr:              buf.ptr,
 		Start:            buf.ptr,
 		End:              unsafe.Add(buf.ptr, buf.n),

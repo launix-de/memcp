@@ -31,7 +31,7 @@ test_cases:
         (define value (planner_guard_runtime_binding (quote (session "viewer")) planning nil))
         (define cost (planner_guard_runtime_binding (list (quote *) value 2) planning nil))
         (planner_guarded_choice (< (* input 2) 100) (list (quote <) cost 100) planning)
-        (define guard (sql_queryplan_compile_formula (sql_queryplan_guard_from_session planning)))
+        (define guard (sql_queryplan_compile_formula nil (sql_queryplan_guard_from_session planning)))
         (define original (guard sess nil nil nil))
         (sess "viewer" 20)
         (define same_region (guard sess nil nil nil))
@@ -87,7 +87,7 @@ test_cases:
         (define input (planner_literal_value (quote (session "viewer")) planning))
         (planner_record_guard_condition
           (quote (equal? (quote (session "viewer")) (quote (session "viewer")))) planning)
-        (define guard (sql_queryplan_compile_formula (sql_queryplan_guard_from_session planning)))
+        (define guard (sql_queryplan_compile_formula nil (sql_queryplan_guard_from_session planning)))
         (define original (guard sess nil nil nil))
         (sess "viewer" (+ input 1))
         (if (and original (not (guard sess nil nil nil))
@@ -106,7 +106,7 @@ test_cases:
         (define input (planner_literal_value (quote (session "viewer")) planning))
         (define unused (planner_guard_runtime_binding (quote (session "viewer")) planning nil))
         (define raw (sql_queryplan_guard_from_session planning))
-        (define guard (sql_queryplan_compile_formula raw))
+        (define guard (sql_queryplan_compile_formula nil raw))
         (define original (guard sess nil nil nil))
         (sess "viewer" (+ input 1))
         (if (and original (not (guard sess nil nil nil))
@@ -127,7 +127,7 @@ test_cases:
           (planner_literal_value (quote (session "enabled")) planning)
           (planner_literal_value (quote (session "missing")) planning)))
         (if (not (equal? values (list 999 false nil))) (error "planner read incorrect bindings") nil)
-        (define guard (sql_queryplan_compile_formula
+        (define guard (sql_queryplan_compile_formula nil
           (sql_queryplan_conjoin_guards (sql_queryplan_uncovered_binding_conditions planning))))
         (define original (guard sess nil nil nil))
         (sess "viewer" 998)

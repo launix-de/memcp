@@ -716,7 +716,7 @@ func jitEmitSpecialLambda(ctx *JITContext, args []Scmer, _ []JITValueDesc, resul
 					CaptureKeys:    jitLambdaCaptureKeys(argExprs[3:]),
 					CaptureSymbols: captureSymbols,
 				}
-				template = jitCompileModeDeferred(true, template)
+				template = jitCompileModeDeferred(true, template, ctx.CompileScope)
 				ctx.TrackImm(template)
 				return jitEmitBoundLambdaProc(ctx, template, argExprs[3:], ctx.SliceBase, result, result.StackFunc, false)
 			}
@@ -736,7 +736,7 @@ func jitEmitSpecialLambda(ctx *JITContext, args []Scmer, _ []JITValueDesc, resul
 				CaptureKeys:    jitLambdaCaptureKeys(captures),
 				CaptureSymbols: append(captureSymbols, ctx.DefiningSymbol),
 			}
-			template = jitCompileModeDeferred(true, template)
+			template = jitCompileModeDeferred(true, template, ctx.CompileScope)
 			ctx.TrackImm(template)
 			return jitEmitBoundLambdaProc(ctx, template, captures, ctx.SliceBase, result, result.StackFunc, true)
 		}
@@ -745,13 +745,13 @@ func jitEmitSpecialLambda(ctx *JITContext, args []Scmer, _ []JITValueDesc, resul
 		closure := jitBuildNamedLambdaClosure(
 			NewSymbol(string(ctx.DefiningSymbol)), params, body, NewInt(int64(numVars)),
 		)
-		compiled := jitCompileModeDeferred(true, closure)
+		compiled := jitCompileModeDeferred(true, closure, ctx.CompileScope)
 		ctx.TrackImm(compiled)
 		return jitPlaceScmerIntoTarget(ctx, JITValueDesc{Loc: LocImm, Type: tagProc, Imm: compiled}, result)
 	}
 	if ctx.RecursiveLambdas && ctx.DefiningSymbol == "" && len(argExprs) == 3 && !jitExpressionConsumesRuntimeEnv(body) {
 		closure := jitBuildLambdaClosure(params, body, NewInt(int64(numVars)))
-		compiled := jitCompileModeDeferred(true, closure)
+		compiled := jitCompileModeDeferred(true, closure, ctx.CompileScope)
 		ctx.TrackImm(compiled)
 		if result.StackFunc {
 			return jitEmitBoundLambdaProc(ctx, compiled, nil, ctx.SliceBase, result, true, false)
