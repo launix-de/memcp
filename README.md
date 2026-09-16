@@ -731,7 +731,9 @@ format (`-Fc`) is not supported. The loader skips `psql` meta-commands and
 `COPY … FROM stdin` and `COPY … FROM 'file'` data, retargets the dump's
 database/schema name onto the target database, and replays
 `pg_catalog.setval()` so auto-increment sequences resume correctly. Run it from
-the REPL or the `/scm` endpoint.
+the REPL or the `/scm` endpoint. For large dumps, use the REPL: HTTP requests
+have a five-minute write timeout, so `/scm` can lose its connection before a
+long import finishes. Check table counts before retrying an interrupted request.
 
 ## Use cases
 
