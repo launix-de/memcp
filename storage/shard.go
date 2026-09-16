@@ -1184,6 +1184,7 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 		result := false // result = true when update was possible; false if there was a RESTRICT
 		targetIdx := idx
 		var maintenanceNext *storageShard
+		var maintenanceUpdateChanges []scm.Scmer
 		var maintenanceExtraDeletes []uint32
 		if len(a) > 0 {
 			// update command
@@ -1509,6 +1510,12 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 					}
 				}
 				maintenanceNext = t.nextForMaintenanceLocked(&targetIdx)
+				if maintenanceNext != nil {
+					maintenanceUpdateChanges = make([]scm.Scmer, 0, 2*len(payloadCols))
+					for i, col := range payloadCols {
+						maintenanceUpdateChanges = append(maintenanceUpdateChanges, scm.NewString(col), payloadRow[i])
+					}
+				}
 			}()
 			// Dual-write: forward the new row to the secondary shard set
 			if result && dualWriteRow != nil {
@@ -1639,7 +1646,7 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 				// Propagate to the rebuild successor shard via the stable
 				// old→new recid translation published by rebuild().
 				if len(a) > 0 {
-					t.propagateUpdateToNext(maintenanceNext, targetIdx, currentTx, a...)
+					t.propagateUpdateToNext(maintenanceNext, targetIdx, currentTx, scm.NewSlice(maintenanceUpdateChanges))
 				} else {
 					t.propagateDeleteToNext(maintenanceNext, idx, currentTx)
 				}
