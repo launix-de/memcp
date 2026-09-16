@@ -417,6 +417,12 @@ func (s *StorageEnum) GetValue(i uint32) scm.Scmer {
 	posInChunk := idx - chunkStart
 	var result scm.Scmer
 	for j := 0; j <= posInChunk; j++ {
+		// States below the first width are fixed points: remaining symbols
+		// are values[0], so random access need not replay that suffix.
+		if buffer < s.widths[0] {
+			result = s.values[0]
+			break
+		}
 		result, buffer = s.decodeOne(buffer)
 	}
 	return result
@@ -438,6 +444,12 @@ func (s *StorageEnum) GetValueCached(i uint32, c *EnumDecodeCache) scm.Scmer {
 			var result scm.Scmer
 			target := idx - c.start
 			for j := c.pos; j <= target; j++ {
+				// States below the first width are fixed points: remaining symbols
+				// are values[0], so random access need not replay that suffix.
+				if buffer < s.widths[0] {
+					result = s.values[0]
+					break
+				}
 				result, buffer = s.decodeOne(buffer)
 			}
 			c.pos = target + 1
@@ -453,6 +465,12 @@ func (s *StorageEnum) GetValueCached(i uint32, c *EnumDecodeCache) scm.Scmer {
 				posInChunk := idx - chunkEnd
 				var result scm.Scmer
 				for j := 0; j <= posInChunk; j++ {
+					// States below the first width are fixed points: remaining symbols
+					// are values[0], so random access need not replay that suffix.
+					if buffer < s.widths[0] {
+						result = s.values[0]
+						break
+					}
 					result, buffer = s.decodeOne(buffer)
 				}
 				c.fwdChunk = nextFwd
@@ -481,6 +499,12 @@ func (s *StorageEnum) GetValueCached(i uint32, c *EnumDecodeCache) scm.Scmer {
 	posInChunk := idx - chunkStart
 	var result scm.Scmer
 	for j := 0; j <= posInChunk; j++ {
+		// States below the first width are fixed points: remaining symbols
+		// are values[0], so random access need not replay that suffix.
+		if buffer < s.widths[0] {
+			result = s.values[0]
+			break
+		}
 		result, buffer = s.decodeOne(buffer)
 	}
 
