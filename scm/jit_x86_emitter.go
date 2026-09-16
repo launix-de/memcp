@@ -2993,11 +2993,7 @@ func (ctx *JITContext) EmitAddRSP(n uint8) {
 	if ctx.DynamicSP < 0 {
 		panic("jit: unbalanced stack release")
 	}
-	for root := range ctx.StackRoots {
-		if root.base == jitStackRootFrameSP && root.offset >= -oldDynamicSP && root.offset < -ctx.DynamicSP {
-			delete(ctx.StackRoots, root)
-		}
-	}
+	ctx.clearStackRootRange(jitStackRootFrameSP, -oldDynamicSP, -ctx.DynamicSP)
 }
 
 // EmitSubRSP32Fixup emits SUB RSP, imm32 with a zero placeholder and returns
@@ -3083,11 +3079,7 @@ func (ctx *JITContext) EmitAddRSP32(val int32) {
 	if ctx.DynamicSP < 0 {
 		panic("jit: unbalanced stack release")
 	}
-	for root := range ctx.StackRoots {
-		if root.base == jitStackRootFrameSP && root.offset >= -oldDynamicSP && root.offset < -ctx.DynamicSP {
-			delete(ctx.StackRoots, root)
-		}
-	}
+	ctx.clearStackRootRange(jitStackRootFrameSP, -oldDynamicSP, -ctx.DynamicSP)
 }
 
 // EmitSubRSP32 emits SUB RSP, imm32.
