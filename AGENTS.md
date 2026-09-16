@@ -150,6 +150,10 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
   abandoned blob temporary files under `persistenceLifecycle` before database
   publication; runtime GC must not sweep temporary paths owned by live writers.
 
+- A shard rebuild with no delta rows or deletions and no forced rebuild keeps
+  the existing shard. Never publish another shard that shares its mutable column
+  map or index objects under a different mutex; old readers may still hold it.
+
 ### Scheme AST and Codegen Quoting (lib/queryplan.scm and lib/queryplan-*.scm)
 - Build AST as data: most builder blocks use a single leading quote `'(...)` so nested lists are data, not executed at construction.
 - Lambdas: embed as `'((quote lambda) (param-list) body)` where:
