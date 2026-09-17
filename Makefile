@@ -84,6 +84,11 @@ jit: check-php jit-toolchain
 		GOROOT="$(JIT_GOROOT)" GOEXPERIMENT=jit "$(JIT_GOROOT)/bin/go" \
 		build $(BUILD_FLAGS) -tags=$(PHP_TAGS) -ldflags="$(LDFLAGS)" -o memcp .
 
+jit-nophp: jit-toolchain
+	CGO_ENABLED=$(CGO_ENABLED) GOOS=$(GOOS) GOARCH=$(GOARCH) \
+		GOROOT="$(JIT_GOROOT)" GOEXPERIMENT=jit "$(JIT_GOROOT)/bin/go" \
+		build $(BUILD_FLAGS) -tags=nophp -ldflags="$(LDFLAGS)" -o memcp .
+
 jitgen:
 	@set -eu; \
 	jitgen_bin=$$(mktemp /tmp/memcp-jitgen.XXXXXX); \
