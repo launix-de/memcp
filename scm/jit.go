@@ -18,6 +18,7 @@ Copyright (C) 2024-2026  Carl-Philip Hänsch
 package scm
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"math/bits"
@@ -839,10 +840,14 @@ type JITStorageGetValueMultiEmitter func(*JITContext, JITValueDesc, JITValueDesc
 // W is a self-reference for backward compatibility with hand-written emitters
 // that use ctx.W.EmitXxx() (from the pre-consolidation JITWriter era).
 type JITContext struct {
-	W     *JITContext    // self-reference (backward compat for ctx.W.Emit calls)
-	Ptr   unsafe.Pointer // current write pointer (into mmap memory)
-	End   unsafe.Pointer // page end minus reserve
-	Start unsafe.Pointer // page start for position calculation
+	CompileScope        Scmer // request cancellation; compile-time only, never retained by native code
+	CompileContext      context.Context
+	lambdaTemplates     *[]Scmer // private to one parent compilation, shared by buffer retries
+	lambdaTemplateIndex int
+	W                   *JITContext    // self-reference (backward compat for ctx.W.Emit calls)
+	Ptr                 unsafe.Pointer // current write pointer (into mmap memory)
+	End                 unsafe.Pointer // page end minus reserve
+	Start               unsafe.Pointer // page start for position calculation
 
 	Labels []int32
 	Fixups []JITFixup
@@ -4883,6 +4888,7 @@ func init_jit() {
 		Type: &TypeDescriptor{Kind: "func", Description: "compiles a lambda to optimized native code when this build enables JIT",
 			Params: []*TypeDescriptor{
 				{Kind: "any", Label: "fn", Description: "the function to compile"},
+				{Kind: "any", Label: "scope", Optional: true, Description: "execution scope for compilation cancellation"},
 			},
 			Return:         &TypeDescriptor{Kind: "any"},
 			HasSideEffects: true,
@@ -9624,8 +9630,16 @@ func jitCompileProbe(a ...Scmer) Scmer {
 }
 
 func jitCompileModePublish(recursiveLambdas bool, waitForPublication, install bool, a ...Scmer) Scmer {
-	if len(a) != 1 {
-		panic("jit: expects exactly 1 argument")
+	if len(a) < 1 || len(a) > 2 {
+		panic("jit: expects a procedure and optional execution scope")
+	}
+	scope := NewNil()
+	if len(a) == 2 {
+		scope = a[1]
+	}
+	compileContext := executionContextFrom(scope)
+	if err := compileContext.Err(); err != nil {
+		panic(err)
 	}
 
 	v := a[0]
@@ -9670,10 +9684,14 @@ func jitCompileModePublish(recursiveLambdas bool, waitForPublication, install bo
 			}
 		}()
 		plan := proc.Compiled
+		var lambdaTemplates []Scmer
 		// Try increasing buffer sizes for overflow retry
 		for _, codeCap := range [...]int{16 * 1024, 64 * 1024, 256 * 1024, 1024 * 1024, 4 * 1024 * 1024, 16 * 1024 * 1024} {
+			if err := compileContext.Err(); err != nil {
+				panic(err)
+			}
 			ptr, arena, reservation := globalJITPool.Alloc(codeCap)
-			buf := &execBuf{ptr: ptr, n: codeCap, arena: arena, reservation: reservation}
+			buf := &execBuf{ptr: ptr, n: codeCap, arena: arena, reservation: reservation, compileScope: scope, lambdaTemplates: &lambdaTemplates}
 			codeLen, roots, dependencies, overflow, hiddenArgs, needsStableArgs, coverage := jitCompileProcToExec(proc, buf, recursiveLambdas)
 			if codeLen > 0 {
 				code := (*[1 << 30]byte)(ptr)[:codeLen:codeLen]
@@ -9744,6 +9762,9 @@ func jitCompileModePublish(recursiveLambdas bool, waitForPublication, install bo
 				arena.completeDeferred(reservation, buf.stackMaps, dependencies, nil)
 			}
 			globalJITPool.Free(arena)
+			if err := compileContext.Err(); err != nil {
+				panic(err)
+			}
 			if !overflow {
 				break
 			}
@@ -9761,13 +9782,15 @@ func jitCompileModePublish(recursiveLambdas bool, waitForPublication, install bo
 
 // execBuf is a small wrapper for writable memory (arena-backed or standalone)
 type execBuf struct {
-	ptr            unsafe.Pointer
-	n              int       // size
-	arena          *jitArena // owning arena (nil for standalone buffers)
-	reservation    *jitCodeReservation
-	stackMaps      []jitStackMap
-	dependencies   []*JITEntryPoint
-	stackFrameSize int32
+	lambdaTemplates *[]Scmer
+	compileScope    Scmer
+	ptr             unsafe.Pointer
+	n               int       // size
+	arena           *jitArena // owning arena (nil for standalone buffers)
+	reservation     *jitCodeReservation
+	stackMaps       []jitStackMap
+	dependencies    []*JITEntryPoint
+	stackFrameSize  int32
 }
 
 func maybeDumpJITCode(base unsafe.Pointer, code []byte) {

@@ -1,0 +1,53 @@
+# Copyright (C) 2026 MemCP Contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: '1.0'
+  description: Historical metrics with period and optional filter domains
+  isolated: true
+setup:
+- sql: DROP TABLE IF EXISTS metric_history
+- sql: DROP TABLE IF EXISTS metric_entity
+- sql: DROP TABLE IF EXISTS metric_catalog
+- sql: CREATE TABLE metric_entity (id INT PRIMARY KEY, category_id INT)
+- sql: CREATE TABLE metric_catalog (id INT PRIMARY KEY, kind INT)
+- sql: CREATE TABLE metric_history (parent_id INT, valid_at INT, amount INT, started_at INT)
+- sql: INSERT INTO metric_catalog VALUES (1,1),(2,2)
+- sql: INSERT INTO metric_entity VALUES (1,1),(2,2)
+- sql: INSERT INTO metric_history VALUES (1,10,2,10),(1,20,3,10),(2,10,5,12),(2,20,7,12)
+test_cases:
+- name: Historical metric aggregates preserve both period domains
+  sql: |-
+    SELECT periods.n, COALESCE((SELECT SUM((SELECT h.amount FROM metric_history h
+     WHERE h.parent_id=e.id AND h.valid_at<=periods.until_time
+     ORDER BY h.valid_at DESC LIMIT 1)) FROM metric_entity e
+     WHERE (SELECT h.started_at FROM metric_history h
+     WHERE h.parent_id=e.id AND h.valid_at<=periods.until_time
+     ORDER BY h.valid_at DESC LIMIT 1) BETWEEN periods.from_time AND periods.until_time
+     AND CASE WHEN params.kind IS NULL THEN TRUE ELSE
+     (SELECT c.kind FROM metric_catalog c WHERE c.id=e.category_id LIMIT 1)=params.kind END
+     LIMIT 1),0) AS new_total,
+     COALESCE((SELECT SUM((SELECT h.amount FROM metric_history h
+     WHERE h.parent_id=e.id AND h.valid_at<=periods.until_time
+     ORDER BY h.valid_at DESC LIMIT 1)) FROM metric_entity e
+     WHERE CASE WHEN params.kind IS NULL THEN TRUE ELSE
+     (SELECT c.kind FROM metric_catalog c WHERE c.id=e.category_id LIMIT 1)=params.kind END
+     LIMIT 1),0) AS active_total
+     FROM (SELECT 1 AS n,10 AS from_time,15 AS until_time
+     UNION ALL SELECT 2,20,25) periods
+     CROSS JOIN (SELECT NULL AS kind) params ORDER BY periods.n
+  expect:
+    data:
+    - n: 1
+      new_total: 7
+      active_total: 7
+    - n: 2
+      new_total: 0
+      active_total: 10
+  performance_rows: 4
+  warmup: 0
+  timing_samples: 1
+  threshold_ms: 5000
+cleanup:
+- sql: DROP TABLE IF EXISTS metric_history
+- sql: DROP TABLE IF EXISTS metric_entity
+- sql: DROP TABLE IF EXISTS metric_catalog

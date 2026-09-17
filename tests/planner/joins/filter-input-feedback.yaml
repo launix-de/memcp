@@ -109,7 +109,7 @@ test_cases:
         (define src (list "a" "memcp-tests" "fif_rows" false nil))
         (define predicate (list 'strlike (list 'get_column "a" false "label" false) "%absent%" "utf8mb4_general_ci"))
         (define expression (membership_runtime_source_rows_expr src predicate 1000))
-        (define compiled (sql_queryplan_compile_formula expression))
+        (define compiled (sql_queryplan_compile_formula nil expression))
         (if (equal? (compiled (newsession) nil nil nil) 0) true
           (error "guard replaced measured zero with a text prior")))
     expect:

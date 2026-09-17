@@ -2966,8 +2966,9 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 			shardlist = t.Shards
 		}
 		allowPruning := false // if we can prune the shardlist
-		pruningMap := make([]int, len(uniq.Cols))
-		pruningVals := make([]scm.Scmer, len(uniq.Cols))
+		// These arrays are indexed by partition dimension, not unique-key column.
+		pruningMap := make([]int, len(t.PDimensions))
+		pruningVals := make([]scm.Scmer, len(t.PDimensions))
 		if t.ShardMode == ShardModePartition && t.maintenanceKind != 2 {
 			// partitioning
 			allowPruning = true
