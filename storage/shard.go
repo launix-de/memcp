@@ -1184,6 +1184,7 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 		result := false // result = true when update was possible; false if there was a RESTRICT
 		targetIdx := idx
 		var maintenanceNext *storageShard
+		var maintenanceUpdateChanges []scm.Scmer
 		var maintenanceExtraDeletes []uint32
 		if len(a) > 0 {
 			// update command
@@ -1319,13 +1320,12 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 				// Execute BEFORE UPDATE triggers (can modify d2)
 				if withTrigger && triggerOldRow != nil {
 					newSchemaRow := schemaRowFromDelta(d2)
-					if alreadyLocked {
-						t.runWithWriteLockReleased(currentTx, func() {
-							newSchemaRow = t.t.ExecuteBeforeUpdateTriggers(triggerOldRow, newSchemaRow, currentTx)
-						})
-					} else {
+					// Both paths hold shard.mu here: either the mapper supplied
+					// it or this callback acquired it above. Trigger lookup and
+					// execution must release it before taking any table locks.
+					t.runWithWriteLockReleased(currentTx, func() {
 						newSchemaRow = t.t.ExecuteBeforeUpdateTriggers(triggerOldRow, newSchemaRow, currentTx)
-					}
+					})
 					// Write trigger-mutated schema values back to delta row layout.
 					for i, colDesc := range t.t.Columns {
 						if colidx, ok := t.deltaColumns[colDesc.Name]; ok && colidx < len(d2) && i < len(newSchemaRow) {
@@ -1510,6 +1510,12 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 					}
 				}
 				maintenanceNext = t.nextForMaintenanceLocked(&targetIdx)
+				if maintenanceNext != nil {
+					maintenanceUpdateChanges = make([]scm.Scmer, 0, 2*len(payloadCols))
+					for i, col := range payloadCols {
+						maintenanceUpdateChanges = append(maintenanceUpdateChanges, scm.NewString(col), payloadRow[i])
+					}
+				}
 			}()
 			// Dual-write: forward the new row to the secondary shard set
 			if result && dualWriteRow != nil {
@@ -1640,7 +1646,7 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 				// Propagate to the rebuild successor shard via the stable
 				// old→new recid translation published by rebuild().
 				if len(a) > 0 {
-					t.propagateUpdateToNext(maintenanceNext, targetIdx, currentTx, a...)
+					t.propagateUpdateToNext(maintenanceNext, targetIdx, currentTx, scm.NewSlice(maintenanceUpdateChanges))
 				} else {
 					t.propagateDeleteToNext(maintenanceNext, idx, currentTx)
 				}
@@ -3623,6 +3629,13 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 			maxInsertIndex = len(t.inserts)
 			deletions = t.deletions.Copy()
 			rollbackProtected = t.rollbackProtected.Copy()
+			if !all && maxInsertIndex == 0 && deletions.Count() == 0 {
+				// Keep one owner of the column map, indexes and lazy-loaded
+				// storages. A replacement sharing those objects would guard
+				// them with a different mutex while old readers are still live.
+				t.mu.Unlock()
+				return t
+			}
 			if all || maxInsertIndex > 0 || deletions.Count() > 0 {
 				// Materialize cold columns before publishing t.next. The initial
 				// snapshot and rebuild publication must become visible atomically;
@@ -4013,50 +4026,8 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 		t.tempColumnBytes = nil
 		t.nextReady.Store(true)
 		t.mu.Unlock()
-	} else {
-		// otherwise: table stays the same
-		result.uuid = t.uuid // copy uuid in case nothing changes
-		result.columns = t.columns
-		result.deltaColumns = t.deltaColumns
-		result.main_count = t.main_count
-		result.plannerMainRows.Store(t.main_count)
-		result.inserts = t.inserts
-		result.plannerDeltaRows.Store(uint64(len(t.inserts)))
-		result.deletions = deletions
-		result.Indexes = t.Indexes
-		if t.t.PersistencyMode == Safe || t.t.PersistencyMode == Logged {
-			if t.logfile != nil {
-				t.logfile.Close()
-			}
-			t.t.schema.persistence.RemoveLog(t.uuid.String())
-			result.logfile = result.t.schema.persistence.OpenLog(result.uuid.String())
-		}
-		t.logfile = nil
-		nextTranslation := make(map[uint32]uint32, int(result.main_count))
-		for recid := uint32(0); recid < result.main_count; recid++ {
-			nextTranslation[recid] = recid
-		}
-		t.setNextTranslation(nextTranslation)
-		// Update index parent pointers to reference the new shard
-		for _, idx := range result.Indexes {
-			idx.t = result
-		}
-		// Same publication boundary as the rebuilt-generation path above.
-		result.tempColumnBytes = t.tempColumnBytes
-		t.tempColumnBytes = nil
-		t.nextReady.Store(true)
-		t.mu.Unlock()
-		locked = false
-		// Deregister old shard — result replaces it
-		GlobalCache.Remove(t)
-		removedFromCache = true
 	}
-	// Unchanged generations may have only a subset of their columns loaded.
-	// Preserve their committed manifest; startup discovery handles old/missing
-	// manifests by inspecting every persisted column, never this partial map.
-	if result.uuid != t.uuid {
-		writeBlobManifest(result)
-	}
+	writeBlobManifest(result)
 	// Unlock result before registration (ComputeSize needs RLock)
 	result.mu.Unlock()
 	resultLocked = false

@@ -1056,7 +1056,7 @@ test_cases:
               (cached_parse cache (list parse_sql) "memcp-tests" query
                 (sql_policy "root") "root" session true tx)) sess nil))
             (define eval_guard (lambda (guard guard_session guard_tx)
-              ((sql_queryplan_compile_formula guard)
+              ((sql_queryplan_compile_formula nil guard)
                 guard_session guard_tx (lambda (_row) nil) (lambda (_fields) nil))))
             (define entry (car (cache (car (cache)))))
             (define guard (car (car (entry "variants"))))
