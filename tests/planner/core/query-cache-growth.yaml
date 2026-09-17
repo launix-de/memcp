@@ -49,7 +49,7 @@ test_cases:
           (map (produceN 4096) (lambda (i) (list (+ i 10) (concat "other-" i)))))
         (rebuild (table "memcp-tests" "cg_rows") true false)
         (define guard_after_growth
-          ((sql_queryplan_compile_formula first_guard)
+          ((sql_queryplan_compile_formula nil first_guard)
             sess nil (lambda (_row) nil) (lambda (_fields) nil)))
         (define second_formula (cached_parse cache (list parse_sql) "memcp-tests" query nil "root" sess true))
         (sql_execute_formula sess nil second_formula resultrow (lambda (_fields) nil))
@@ -85,7 +85,7 @@ test_cases:
           (map (produceN 4096) (lambda (i) (list (+ i 10000) (concat "other-" i)))))
         (rebuild (table "memcp-tests" "cg_rows") true false)
         (define guard_after_growth
-          ((sql_queryplan_compile_formula first_guard)
+          ((sql_queryplan_compile_formula nil first_guard)
             sess nil (lambda (_row) nil) (lambda (_fields) nil)))
         (define second_formula (cached_parse cache (list parse_sql) "memcp-tests" query nil "root" sess true))
         (sql_execute_formula sess nil second_formula resultrow (lambda (_fields) nil))
