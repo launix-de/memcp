@@ -352,7 +352,7 @@ test_cases:
       error: true
       error_type: "syntax_error"
 
-  - name: "Malformed INSERT (column count must match value count)"
+  - name: "Malformed INSERT (MemCP accepts partial values)"
     sql: "INSERT INTO test_table VALUES (3, 'test3')"
     expect:
       error: true
