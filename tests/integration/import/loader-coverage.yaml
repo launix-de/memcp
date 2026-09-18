@@ -11,6 +11,7 @@ setup:
   - sql: "DROP TABLE IF EXISTS loader_psql"
   - sql: "DROP TABLE IF EXISTS loader_psql_file"
   - sql: "DROP TABLE IF EXISTS loader_psql_partial"
+  - sql: "DROP TABLE IF EXISTS loader_psql_batches"
   - sql: "CREATE TABLE loader_psql (id INT PRIMARY KEY, flag BOOLEAN, note TEXT)"
 
 test_cases:
@@ -75,6 +76,30 @@ test_cases:
         - id: 1
           note: "from plain sql"
 
+  - name: "create table for streaming COPY batches"
+    sql: "CREATE TABLE loader_psql_batches (id INT PRIMARY KEY)"
+
+  - name: "streaming COPY keeps rows across a batch boundary"
+    scm: |
+      (psql_copy_insert_stream "memcp-tests" "loader_psql_batches" '("id")
+        (streamString
+          (reduce (produceN 1001) (lambda (text i)
+            (concat text (string i) "\n")) "")))
+
+  - name: "streaming COPY keeps the final row without a newline"
+    scm: |
+      (psql_copy_insert_stream "memcp-tests" "loader_psql_batches" '("id")
+        (streamString "1001"))
+
+  - name: "streaming COPY inserted all rows in order"
+    sql: "SELECT COUNT(*) AS cnt, MIN(id) AS min_id, MAX(id) AS max_id FROM loader_psql_batches"
+    expect:
+      rows: 1
+      data:
+        - cnt: 1002
+          min_id: 0
+          max_id: 1001
+
   - name: "create table for partial COPY enum rebuild"
     sql: "CREATE TABLE loader_psql_partial (id INT PRIMARY KEY, active BOOLEAN, note TEXT)"
 
@@ -97,13 +122,22 @@ test_cases:
           "\\.\n"))
         (sql_policy "root"))
 
+  - name: "load_psql accepts a COPY terminator without a newline"
+    scm: |
+      (load_psql "memcp-tests"
+        (streamString (concat
+          "COPY public.loader_psql_partial (id, note) FROM stdin;\n"
+          "103\tpartial-103\n"
+          "\\."))
+        (sql_policy "root"))
+
   - name: "rebuild partial COPY import"
     scm: "(rebuild)"
 
   - name: "omitted COPY columns remain null after rebuild"
     sql: "SELECT id, active, note FROM loader_psql_partial WHERE id >= 99 ORDER BY id"
     expect:
-      rows: 4
+      rows: 5
       data:
         - id: 99
           active: true
@@ -117,6 +151,9 @@ test_cases:
         - id: 102
           active: null
           note: "partial-102"
+        - id: 103
+          active: null
+          note: "partial-103"
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS loader_sql"

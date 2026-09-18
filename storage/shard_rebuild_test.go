@@ -2517,3 +2517,19 @@ func TestIndexComputedReadersRespectHeldShardLock(t *testing.T) {
 		})
 	}
 }
+
+// A no-op rebuild must not publish another shard with the same mutable maps
+// guarded by a different mutex. Existing readers can still hold the old shard.
+func TestUnchangedShardRebuildRetainsOwnership(t *testing.T) {
+	tbl := &table{Name: "unchanged", PersistencyMode: Memory}
+	shard := NewShard(tbl)
+	shard.columns["value"] = new(StorageSparse)
+	for i := 0; i < 3; i++ {
+		if got := shard.rebuild(false); got != shard {
+			t.Fatal("unchanged rebuild published a second owner of the shard's mutable state")
+		}
+		if shard.loadNext() != nil {
+			t.Fatal("unchanged rebuild installed an unnecessary forwarding generation")
+		}
+	}
+}
