@@ -82,6 +82,22 @@ PostgreSQL parsers should both lower to the same combined operators.
 					(if handle (show handle) (show schema tbl))))
 			(lambda (_e) '())))))
 
+/* Runtime-only helper columns (window-function row-number caches, correlated
+lookup carriers) share the naming conventions already used elsewhere to keep
+them out of filter feedback and plan serialization: a "." or "$" prefix, or
+the "__orc_" family. Implicit INSERT/UPSERT column lists must skip them too,
+since get_schema surfaces them alongside real columns. */
+(define internal_column_name? (lambda (name)
+	(and (string? name) (or
+		(orc_column_name? name)
+		(and (> (strlen name) 0) (or
+			(equal? (substr name 0 1) ".")
+			(equal? (substr name 0 1) "$")))))))
+
+(define table_insertable_columns (lambda (schema tbl)
+	(filter (map (get_schema schema tbl) (lambda (col) (col "Field")))
+		(lambda (name) (not (internal_column_name? name))))))
+
 (define qassoc_get (lambda (xs key default)
 	(get_assoc_pairlist (coalesceNil xs '()) key default)))
 
@@ -855,12 +871,13 @@ move arbitrary calls or subqueries across short-circuit guards. */
 		(cons _head tail) (reduce tail (lambda (a b) (or a (expr_contains_window? b))) false)
 		_ false)))
 
+(define orc_column_name? (lambda (col)
+	(and (string? col) (and (>= (strlen col) 6) (equal? (substr col 0 6) "__orc_")))))
+
 (define expr_contains_orc_column? (lambda (expr)
 	(match expr
-		((symbol get_column) _tblvar _ignorecase col _json_path)
-		(and (string? col) (and (>= (strlen col) 6) (equal? (substr col 0 6) "__orc_")))
-		((quote get_column) _tblvar _ignorecase col _json_path)
-		(and (string? col) (and (>= (strlen col) 6) (equal? (substr col 0 6) "__orc_")))
+		((symbol get_column) _tblvar _ignorecase col _json_path) (orc_column_name? col)
+		((quote get_column) _tblvar _ignorecase col _json_path) (orc_column_name? col)
 		(cons _head tail) (reduce tail (lambda (a b) (or a (expr_contains_orc_column? b))) false)
 		_ false)))
 

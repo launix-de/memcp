@@ -1,0 +1,26 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: "1.0"
+  description: "Cold compilation of a wide parameterized bulk INSERT"
+setup:
+  - sql: "CREATE TABLE bic_values (id INT, a TEXT, b INT, c TEXT, d INT, e TEXT, f INT, g TEXT)"
+test_cases:
+  - name: "Compile 1000 parameterized rows without emitting each cell as code"
+    max_time: 5
+    scm: |
+      (begin
+        (define rows (map (produceN 1000) (lambda (i)
+          (concat "(" i ",'hello'," (+ i 1) ",'world',NULL,'value'," (+ i 2) ",'tail')"))))
+        (define query (concat "INSERT INTO bic_values VALUES " (reduce rows
+          (lambda (a b) (concat a (if (equal? a "") "" ",") b)) "")))
+        (define session (newsession))
+        (session "username" "root")
+        (session "schema" "memcp-tests")
+        (cached_parse (newcachemap) (list parse_sql) "memcp-tests" query
+          (lambda (_schema _table _write) true) "root" session true nil)
+        "compiled")
+    expect:
+      data: ["compiled"]
+cleanup:
+  - sql: "DROP TABLE bic_values"
