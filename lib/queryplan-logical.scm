@@ -1620,6 +1620,21 @@ then matched without repeated deep comparisons. */
 	(map (coalesceNil sources '()) (lambda (src)
 		(source_without_outer_join_terms inner_default inner_sources outer_sources src)))))
 
+/* Eliminating D chooses one local representative per outer key. Other
+correlations to that same outer key remain equalities between local sources;
+dropping them would turn a dependent lookup into a Cartesian product. Keep
+these predicates at their original WHERE or source-ON boundary. */
+(define local_correlation_term (lambda (inner_default pairs pair term)
+	(if (nil? pair) term
+		(begin
+			(define representative (reduce pairs (lambda (found candidate)
+				(if (equal? (cadr candidate) (cadr pair)) (car candidate) found)) nil))
+			(if (or (nil? representative)
+				(equal? (canonical_column_expr_for_alias inner_default (car pair))
+					(canonical_column_expr_for_alias inner_default representative)))
+				nil
+				(decorrelate_expr_with_pairs inner_default pairs term))))))
+
 /* Compute the Neumann dependent-join inputs once. EXISTS, IN and scalar
 builders differ in result semantics, not in how they partition correlated and
 local predicates. Keeping this analysis central prevents the six builders from
@@ -1638,10 +1653,17 @@ drifting on source-join pairs or residual outer references. */
 			'()))
 		(define lookup_pairs (domain_correlation_pairs
 			(merge (list term_pairs source_pairs (coalesceNil extra_pairs '())))))
-		(define local_terms (filter terms (lambda (term)
-			(nil? (pair_fn inner_default inner_sources outer_sources term)))))
-		(define local_sources
-			(sources_without_outer_join_terms inner_default inner_sources outer_sources inner_sources))
+		(define local_terms (filter (map terms (lambda (term)
+			(local_correlation_term inner_default lookup_pairs
+				(pair_fn inner_default inner_sources outer_sources term) term)))
+			(lambda (term) (not (nil? term)))))
+		(define local_sources (map inner_sources (lambda (src)
+			(list (source_alias src) (source_schema src) (source_relation src) (source_outer? src)
+				(combine_where_terms
+					(filter (map (split_and_terms (coalesceNil (source_join_expr src) true)) (lambda (term)
+						(local_correlation_term inner_default lookup_pairs
+							(exists_correlation_pair inner_default inner_sources outer_sources term) term)))
+						(lambda (term) (not (nil? term)))) true)))))
 		(define residual_outer_refs (merge_unique (list
 			(btw2025_terms_outer_column_refs local_terms inner_sources outer_sources)
 			(btw2025_sources_outer_column_refs local_sources inner_sources outer_sources))))

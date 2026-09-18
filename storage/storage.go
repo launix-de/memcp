@@ -2377,10 +2377,20 @@ func Init(en scm.Env) {
 			db.saveLockedAndUnlock(mode)
 			unlockPersistenceLifecycle()
 			registerCreatedTable(newTable)
+			var thisCallPanic any
 			func() {
 				defer func() {
+					thisCallPanic = recover()
+					// A transient per-query cancellation ("query killed") is
+					// not a genuine initialization failure: caching it as
+					// creationPanic would permanently break this table for
+					// every future caller, even though a fresh attempt would
+					// very likely succeed. Only deterministic OnInit/trigger
+					// failures are cached and replayed to later callers.
+					if thisCallPanic != nil && thisCallPanic != "query killed" {
+						newTable.creationPanic = thisCallPanic
+					}
 					// Publish the shared outcome before releasing concurrent creators.
-					newTable.creationPanic = recover()
 					newTable.creationMu.Unlock()
 				}()
 				if !oninit.IsNil() {
@@ -2389,8 +2399,8 @@ func Init(en scm.Env) {
 				newTable.onInitComplete = true
 				executeRegisteredCreateTableTriggers(newTable, nil)
 			}()
-			if newTable.creationPanic != nil {
-				panic(newTable.creationPanic)
+			if thisCallPanic != nil {
+				panic(thisCallPanic)
 			}
 			return scm.NewBool(true)
 		},
@@ -4475,16 +4485,9 @@ func fkExistenceCheck(currentTx *TxContext, tbl *table, filterCols []string, val
 		}
 		return scm.NewBool(true)
 	})
-	mapReduceFn := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
-		if scm.ToBool(a[0]) {
-			return scm.NewBool(true)
-		}
-		return scm.NewBool(true)
-	})
-	combineFn := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
-		return scm.NewBool(scm.ToBool(a[0]) || scm.ToBool(a[1]))
-	})
-	return scm.ToBool(tbl.scan(currentTx, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, filterCols, condition, filterCols[:0], mapReduceFn, scm.NewBool(false), combineFn, false))
+	// Foreign-key probes are exact equality lookups. Expose those bounds to
+	// the shared scan engine and stop after the first visible matching row.
+	return tbl.scanExists(currentTx, scm.NewSlice(newExactScanAccessSchema(filterCols)), vals, filterCols, condition)
 }
 
 // fkCascadeDelete deletes rows in childTbl where cols match vals.
@@ -4557,6 +4560,18 @@ func fkCascadeUpdate(currentTx *TxContext, childTbl *table, cols []string, oldVa
 	childTbl.scan(currentTx, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, cols, condition, mapCols, mapReduceFn, scm.NewNil(), scm.NewNil(), false)
 }
 
+// foreignKeyChecksEnabled reads the executing session, never the session that
+// originally compiled the persisted trigger. Unset state preserves enforcement.
+func foreignKeyChecksEnabled(tx *TxContext) bool {
+	value := tx.SessionValue("foreign_key_checks")
+	if value.IsNil() {
+		if globals, ok := scm.Globalenv.Vars[scm.Symbol("globalvars")]; ok {
+			value = scm.Apply(globals, scm.NewString("foreign_key_checks"))
+		}
+	}
+	return value.IsNil() || scm.ToBool(value)
+}
+
 // initFKBuiltins declares the FK enforcement builtins used by trigger Procs.
 func initFKBuiltins(en scm.Env) {
 	scm.Declare(&en, &scm.Declaration{
@@ -4564,6 +4579,9 @@ func initFKBuiltins(en scm.Env) {
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			currentTx := scmerToTxContext(a[5])
+			if !foreignKeyChecksEnabled(currentTx) {
+				return scm.NewNil()
+			}
 			schema := scm.String(a[0])
 			parentTable := scm.String(a[1])
 			parentCols := scmerSliceToStrings(mustScmerSlice(a[2], "parent_cols"))
@@ -4607,6 +4625,9 @@ func initFKBuiltins(en scm.Env) {
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			currentTx := scmerToTxContext(a[6])
+			if !foreignKeyChecksEnabled(currentTx) {
+				return scm.NewNil()
+			}
 			schema := scm.String(a[0])
 			childTable := scm.String(a[1])
 			childCols := scmerSliceToStrings(mustScmerSlice(a[2], "child_cols"))
@@ -4654,6 +4675,9 @@ func initFKBuiltins(en scm.Env) {
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			currentTx := scmerToTxContext(a[7])
+			if !foreignKeyChecksEnabled(currentTx) {
+				return scm.NewNil()
+			}
 			schema := scm.String(a[0])
 			childTable := scm.String(a[1])
 			childCols := scmerSliceToStrings(mustScmerSlice(a[2], "child_cols"))
