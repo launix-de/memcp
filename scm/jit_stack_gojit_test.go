@@ -21,6 +21,7 @@ package scm
 
 import (
 	"bytes"
+	"context"
 	"runtime"
 	"testing"
 	"time"
@@ -861,5 +862,51 @@ func BenchmarkJITSmallStackRelease(b *testing.B) {
 		ctx.DynamicSP, ctx.BPOffset = 16, 16
 		ctx.StackRoots[root] = struct{}{}
 		ctx.FreeStack(16)
+	}
+}
+
+// A deterministic cancellation boundary inside emission avoids a timing-based
+// regression which might accidentally cancel only before compilation starts.
+type jitCancelDuringCompile struct {
+	context.Context
+	cancel    context.CancelFunc
+	remaining int
+}
+
+func (c *jitCancelDuringCompile) Err() error {
+	c.remaining--
+	if c.remaining == 0 {
+		c.cancel()
+	}
+	return c.Context.Err()
+}
+func TestJITCompileCancellationReleasesProcedure(t *testing.T) {
+	expression := Optimize(Read(t.Name(), `(lambda (x) (list (+ x 1) (+ x 2) (+ x 3) (+ x 4) (+ x 5) (+ x 6)))`), &Globalenv, nil)
+	proc := Eval(expression, &Globalenv)
+	base, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ctx := &jitCancelDuringCompile{Context: base, cancel: cancel, remaining: 8}
+	ss := &SessionState{}
+	seq := ss.BeginQuery("Query", "compile cancellation")
+	ss.SetQueryContext(seq, ctx)
+	defer ss.EndQuery(seq, "Sleep", "")
+	var caught any
+	func() {
+		defer func() { caught = recover() }()
+		jitCompile(proc, NewAny(&mutexTestTransaction{ss: ss, seq: seq}))
+	}()
+	if caught != context.Canceled {
+		t.Fatalf("compile error = %v, want cancellation", caught)
+	}
+	if proc.Proc().jitCompiling != 0 || proc.Proc().Compiled != nil {
+		t.Fatal("cancelled compiler retained or published procedure")
+	}
+	compiled := jitCompile(proc)
+	if compiled.Proc().Compiled == nil {
+		t.Fatal("procedure could not be compiled after cancellation")
+	}
+	result := Apply(compiled, NewInt(10)).Slice()
+	if len(result) != 6 || result[5].Int() != 16 {
+		t.Fatalf("retry result %v", result)
 	}
 }

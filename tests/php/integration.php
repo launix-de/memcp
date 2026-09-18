@@ -129,6 +129,11 @@ try {
             check($stmt->fetchColumn() === $value, 'Repeated execute and injection protection');
             $stmt->closeCursor();
         }
+        $row = $db->query('SELECT 7 AS `campaign:amount`, 8 AS `ref``:name`, 9 AS `question?`')->fetch(PDO::FETCH_ASSOC);
+        check($row['campaign:amount'] == 7 && $row['ref`:name'] == 8 && $row['question?'] == 9, 'Quoted identifiers are not placeholders');
+        $stmt = $db->prepare('SELECT :value AS `campaign:amount` /* :ignored ? */');
+        $stmt->execute(['value' => 42]);
+        check($stmt->fetchColumn() == 42, 'Bind real parameter beside quoted identifier and comment');
         fails(fn() => $db->prepare('SELECT ?')->execute([]), 'HY093');
         fails(fn() => $db->prepare('SELECT :missing')->execute(), 'HY093');
         fails(fn() => $db->prepare('SELECT :mixed, ?'));

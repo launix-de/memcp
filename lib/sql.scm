@@ -315,11 +315,11 @@ the parameter list: this prevents a cached plan from retaining the compiling
 request and makes the complete dispatcher eligible for native compilation.
 The Proc retains its optimized Scheme body, so cachemap memory accounting and
 serialization still see the complete plan. */
-(define sql_queryplan_compile_formula (lambda (formula)
+(define sql_queryplan_compile_formula (lambda (compile_tx formula)
 	(jit (close_procedure (eval (optimize (list
 		(quote lambda)
 		(list (quote session) (quote tx) (quote resultrow) (quote resultfields))
-		(source "SQL Query" 1 1 formula))))))))
+		(source "SQL Query" 1 1 formula))))) compile_tx)))
 
 (define sql_compile_queryplan_variant (lambda (parse_fn schema parse_query policy source_session tx)
 	(begin
@@ -337,7 +337,7 @@ serialization still see the complete plan. */
 		/* Parsing includes logical and physical planning. Never spend optimizer
 		work or install a variant after its requesting context was cancelled. */
 		(tx_check tx)
-		(define plan (sql_queryplan_compile_formula
+		(define plan (sql_queryplan_compile_formula tx
 			(sql_queryplan_bind_execution_session raw_plan)))
 		(tx_check tx)
 		/* Diagnostics must refresh their captured estimates when table statistics
@@ -422,7 +422,7 @@ otherwise side-effect-free guard. */
 		(sql_queryplan_formula_dispatch variants
 			(make_structural_catalog (quote ast)) miss_expr))))
 
-(define sql_queryplan_install_variants (lambda (queryplan_cache cache_key entry parse_fn schema parse_query policy variants)
+(define sql_queryplan_install_variants (lambda (queryplan_cache cache_key entry parse_fn schema parse_query policy variants tx)
 	(begin
 		(define recent_variants (sql_queryplan_recent_variants variants))
 		/* Optimize owns and rewrites the dispatcher AST in place. The registry is
@@ -432,7 +432,7 @@ otherwise side-effect-free guard. */
 			(clone_optimizer_expression (car variant))
 			(cadr variant)
 			(nth variant 2)))))
-		(entry "formula" (sql_queryplan_compile_formula
+		(entry "formula" (sql_queryplan_compile_formula tx
 			(sql_queryplan_formula queryplan_cache cache_key entry parse_fn schema parse_query policy recent_variants)))
 		(entry "formula"))))
 
@@ -441,7 +441,7 @@ otherwise side-effect-free guard. */
 		(define entry (newsession))
 		(entry "compile_lock" (mutex))
 		(define formula (sql_queryplan_install_variants queryplan_cache cache_key entry parse_fn schema parse_query policy
-			(list (sql_compile_queryplan_variant parse_fn schema parse_query policy source_session tx))))
+			(list (sql_compile_queryplan_variant parse_fn schema parse_query policy source_session tx)) tx))
 		(list entry formula))))
 
 (define sql_queryplan_matching_variant (lambda (variants session tx resultrow resultfields)
@@ -451,13 +451,13 @@ otherwise side-effect-free guard. */
 			variant under the compile lock. Prepare that newly visible variant before
 			rechecking its guard; preparation expressions are request-idempotent. */
 			(map (nth variant 2) (lambda (preparation)
-				((sql_queryplan_compile_formula
+				((sql_queryplan_compile_formula tx
 					(sql_queryplan_preparation_expr preparation))
 					session tx resultrow resultfields)))
 			/* Guards are code, not expressions in this helper's lexical scope. Compile
 			them against the same explicit request boundary as the cached dispatcher;
 			naked eval would couple their symbols/NthLocalVars to this helper's frame. */
-			(if ((sql_queryplan_compile_formula (clone_optimizer_expression (car variant)))
+			(if ((sql_queryplan_compile_formula tx (clone_optimizer_expression (car variant)))
 				session tx resultrow resultfields)
 				variant
 				(sql_queryplan_matching_variant rest session tx resultrow resultfields)))
@@ -483,14 +483,14 @@ the common guard-dispatch path. */
 					(begin
 						(define variant (sql_compile_queryplan_variant parse_fn schema parse_query policy session tx))
 						(define formula (sql_queryplan_install_variants queryplan_cache cache_key entry parse_fn schema parse_query policy
-							(cons variant current_variants)))
+							(cons variant current_variants) tx))
 						(queryplan_cache cache_key (list entry formula))
 						variant))))))
 		/* A miss can introduce preparations absent from every previous variant.
 		Run them before the new consumer, outside the compile lock. Preparations
 		already checked by matching_variant are request-idempotent. */
 		(map (nth chosen_variant 2) (lambda (preparation)
-			((sql_queryplan_compile_formula
+			((sql_queryplan_compile_formula tx
 				(sql_queryplan_preparation_expr preparation))
 				session tx resultrow resultfields)))
 		((cadr chosen_variant) session tx resultrow resultfields))))
@@ -554,7 +554,7 @@ user table merely to discard a newly constructed policy closure. */
 				(begin
 					(define resolved_policy (sql_policy_spec_resolve policy))
 					(define compile_policy (sql_compile_table_policy resolved_policy))
-					(sql_queryplan_compile_formula (sql_queryplan_bind_tx_calls
+					(sql_queryplan_compile_formula compile_tx (sql_queryplan_bind_tx_calls
 						(sql_queryplan_bind_execution_session
 							(with_session session (lambda ()
 								(sql_invoke_parse_fn parse_fn schema parse_query compile_policy session compile_tx)))))))))

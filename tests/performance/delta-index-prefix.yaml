@@ -1,0 +1,25 @@
+# Copyright (C) 2026 MemCP Contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: '1.0'
+  description: Equality prefix seeks with an upper-only historical range on delta rows
+  isolated: true
+setup:
+- sql: CREATE TABLE prefix_history (parent INT, version INT) ENGINE=memory
+- scm: |
+    (insert (table "memcp-tests" "prefix_history") '("parent" "version")
+      (map (produceN 16384) (lambda (i) (list (floor (/ i 4)) (mod i 4)))))
+test_cases:
+- name: Upper-only range retains the equality prefix
+  sql: SELECT version FROM prefix_history WHERE parent=4095 AND version<=2 ORDER BY version
+  expect:
+    data:
+    - version: 0
+    - version: 1
+    - version: 2
+  performance_rows: 16384
+  warmup: 10
+  timing_samples: 3
+  threshold_ms: 100
+cleanup:
+- sql: DROP TABLE prefix_history

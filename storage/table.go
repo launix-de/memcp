@@ -696,15 +696,25 @@ func (t *table) awaitCreationInitialization(tx scm.Scmer) {
 		t.onInitComplete = true
 		return
 	}
+	var thisCallPanic any
 	func() {
 		defer func() {
-			t.creationPanic = recover()
+			thisCallPanic = recover()
+			// A transient per-query cancellation ("query killed") is not a
+			// genuine initialization failure: caching it as creationPanic
+			// would permanently break this table for every future caller,
+			// even though a fresh attempt would very likely succeed. Only
+			// deterministic OnInit failures are cached and replayed to
+			// later callers; "query killed" always gets a fresh retry.
+			if thisCallPanic != nil && thisCallPanic != "query killed" {
+				t.creationPanic = thisCallPanic
+			}
 		}()
 		scm.Apply(*t.OnInit, tx)
 		t.onInitComplete = true
 	}()
-	if t.creationPanic != nil {
-		panic(t.creationPanic)
+	if thisCallPanic != nil {
+		panic(thisCallPanic)
 	}
 }
 

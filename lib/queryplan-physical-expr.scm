@@ -246,7 +246,9 @@ an unbound symbol in the callback when costing selects the probe alternative. */
 	(begin
 		(define alias (source_alias src))
 		(map (produceN (count keys)) (lambda (i)
-			(list (quote equal??)
+			((if (query_session_read? (nth keys i))
+				group_session_key_equal_expr
+				(lambda (key value) (list (quote equal??) key value)))
 				(lower_column_expr_for_alias src (nth keys i))
 				(mark_scalar_first_probe_outer_symbols sources
 					(lower_column_expr_for_join sources default_alias (nth lookup_keys i)))))))))
@@ -5113,13 +5115,21 @@ self-joins of the same base table still describe two distinct row roles. */
 					(replace_group_session_expr stage keys key_names item))))
 				expr)))))
 
+/* Session domain keys identify cached partitions, including the NULL
+partition. SQL equality alone cannot retrieve that partition because NULL =
+NULL is UNKNOWN. Keep SQL collation for non-NULL values. */
+(define group_session_key_equal_expr (lambda (key value)
+	(list (quote if) (list (quote nil?) value)
+		(list (quote nil?) key)
+		(list (quote equal??) key value))))
+
 (define group_stage_session_filter_expr (lambda (stage grouptbl keys key_names)
 	(begin
 		(define pairs (group_stage_session_key_pairs stage keys key_names))
 		(if (empty_list? pairs)
 			true
 			(combine_where_terms (map pairs (lambda (pair)
-				(list (quote equal??)
+				(group_session_key_equal_expr
 					(list (quote get_column) grouptbl false (nth pair 1) false)
 					(nth pair 0))))
 				true)))))
@@ -5144,7 +5154,7 @@ self-joins of the same base table still describe two distinct row roles. */
 						(list (quote lambda)
 							params
 							(combine_where_terms (map (produceN (count pairs)) (lambda (i)
-								(list (quote equal??) (nth params i) (nth (nth pairs i) 0))))
+								(group_session_key_equal_expr (nth params i) (nth (nth pairs i) 0))))
 								true)))))))))
 
 (define runtime_cons_list_expr (lambda (exprs)
@@ -5182,6 +5192,7 @@ self-joins of the same base table still describe two distinct row roles. */
 			(qb_offset block)
 			(list
 				(list (quote condition) (coalesceNil (qb_where block) true))
+				(list (quote preserve_empty_domain) (empty_list? (qb_group block)))
 				(list (quote domain) session_keys)
 				(list (quote lookup-keys) session_keys)
 				(list (quote physical_planning_session) (planner_context_session (qb_facts block)))
@@ -5227,6 +5238,7 @@ self-joins of the same base table still describe two distinct row roles. */
 			(qb_offset block)
 			(list
 				(list (quote condition) true)
+				(list (quote preserve_empty_domain) (empty_list? (qb_group block)))
 				(list (quote domain) session_keys)
 				(list (quote lookup-keys) session_keys)
 				(list (quote stage_catalog) (query_block_stage_catalog block)))))))
@@ -6079,7 +6091,13 @@ state through an assoc and one-element payload lists adds no semantics. */
 		(define plan (if (nil? scalar_parts)
 			(begin
 				(define grouped_scan (build_base_group_scan_assoc_plan schema tbl alias source_expr keys effective_condition ags))
-				(define grouped_expr (if (equal? keys '(1))
+				(define grouped_expr (if (or (equal? keys '(1))
+					/* A correlated domain needs an input row to supply its keys.
+					Its missing groups are handled by the outer lookup, not by
+					inventing a key outside the scan. Session-only domains can
+					seed their global empty aggregate here. */
+					(and (qassoc_get facts (quote preserve_empty_domain) false)
+						(not (expr_contains_column_ref? keys))))
 					(list (quote if)
 						(list (quote equal?) (list (quote count) (quote grouped)) 0)
 						(list (quote set_assoc)

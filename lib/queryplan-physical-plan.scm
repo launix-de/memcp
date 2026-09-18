@@ -1084,6 +1084,7 @@ from silently overriding the physical planner. */
 		semantics. Its ordered aggregates must remain one combined point recipe; a
 		synthetic presence column would split that recipe into per-column scans. */
 		(define needs_count_filter (and
+			(not (qassoc_get (gs_facts stage) (quote preserve_empty_domain) false))
 			(not (scalar_value_stage? stage))
 			(and (not (equal? keys '(1))) (not (equal? condition true)))))
 		(define ags (if needs_count_filter
@@ -1479,6 +1480,7 @@ outer joins. */
 			(rewrite_scalar_first_probe_expr stage_lookup presence_probe_sources_for_rewrite rewrite_default_alias (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
 			(coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true)))
 		(define needs_count_filter (and
+			(not (qassoc_get (gs_facts stage) (quote preserve_empty_domain) false))
 			(not (scalar_value_stage? stage))
 			(and (not (equal? keys '(1))) (not (equal? condition true)))))
 		(define ags (if needs_count_filter

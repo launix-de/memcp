@@ -973,7 +973,7 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension, maint
 							for _, item := range items {
 								val := reader(uint32(item))
 								newProxy.delta[newIdx] = val
-								newProxy.validMask.Set(uint(newIdx), true)
+								newProxy.validMask.AtomicSet(uint(newIdx), true)
 								newIdx++
 							}
 						} else {
