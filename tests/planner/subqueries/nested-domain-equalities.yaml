@@ -1,0 +1,58 @@
+# Copyright (C) 2026 MemCP Contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: '1.0'
+  description: Nested correlations preserve equality between local representatives
+  isolated: true
+setup:
+- sql: CREATE TABLE nested_metric_entity (id INT PRIMARY KEY)
+- sql: CREATE TABLE nested_metric_history (parent_id INT, valid_at INT, started_at INT, category_id INT,
+    amount INT)
+- sql: CREATE TABLE nested_metric_catalog (id INT PRIMARY KEY, kind INT)
+- sql: INSERT INTO nested_metric_catalog VALUES (1,1),(2,2)
+- scm: "(begin\n  (insert (table \"memcp-tests\" \"nested_metric_entity\") '(\"id\")\n    (map (produceN\
+    \ 2) (lambda (i) (list (+ i 1)))))\n  (insert (table \"memcp-tests\" \"nested_metric_history\") '(\"\
+    parent_id\" \"valid_at\" \"started_at\" \"category_id\" \"amount\")\n    (merge (map (produceN 2)\
+    \ (lambda (i) (list\n      (list (+ i 1) 10 (+ 10 (* 12 (mod i 2))) (+ 1 (mod i 2)) 1)\n      (list\
+    \ (+ i 1) 20 (+ 10 (* 12 (mod i 2))) 2 3)))))))\n"
+test_cases:
+- name: Nested upper bound keeps each entity's history domain
+  sql: "SELECT p.n, COALESCE((SELECT SUM((SELECT h.amount FROM nested_metric_history h\n  WHERE h.parent_id=e.id\
+    \ AND h.valid_at<=p.until_time ORDER BY h.valid_at DESC LIMIT 1))\n  FROM nested_metric_entity e WHERE\n\
+    \  (SELECT c.kind FROM nested_metric_catalog c WHERE c.id=(SELECT h.category_id\n    FROM nested_metric_history\
+    \ h WHERE h.parent_id=e.id AND h.valid_at<=LEAST(p.until_time,\n      (SELECT h2.started_at FROM nested_metric_history\
+    \ h2 WHERE h2.parent_id=e.id\n       AND h2.valid_at<=p.until_time ORDER BY h2.valid_at DESC LIMIT\
+    \ 1)+1)\n    ORDER BY h.valid_at DESC LIMIT 1) LIMIT 1)=1),0) AS total\n  FROM (SELECT 1 AS n,15 AS\
+    \ until_time UNION ALL SELECT 2,25) p ORDER BY p.n\n"
+  expect:
+    data:
+    - n: 1
+      total: 1
+    - n: 2
+      total: 3
+- name: Duplicate outer equality in WHERE remains a local join
+  sql: 'SELECT e.id, (SELECT COUNT(*) FROM nested_metric_history a CROSS JOIN nested_metric_history b
+
+    WHERE a.parent_id=e.id AND b.parent_id=e.id) AS total FROM nested_metric_entity e ORDER BY e.id'
+  expect:
+    data:
+    - id: 1
+      total: 4
+    - id: 2
+      total: 4
+- name: Duplicate outer equality stays on the nullable ON boundary
+  sql: 'SELECT e.id, (SELECT COUNT(b.valid_at) FROM nested_metric_history a
+
+    LEFT JOIN nested_metric_history b ON b.parent_id=e.id AND b.valid_at>15
+
+    WHERE a.parent_id=e.id) AS total FROM nested_metric_entity e ORDER BY e.id'
+  expect:
+    data:
+    - id: 1
+      total: 2
+    - id: 2
+      total: 2
+cleanup:
+- sql: DROP TABLE nested_metric_history
+- sql: DROP TABLE nested_metric_entity
+- sql: DROP TABLE nested_metric_catalog
