@@ -2285,27 +2285,29 @@ start_scan:
 			return !beyond && !stopped
 		}
 
-		// For computed or non-sorted matcher columns, AscendGreaterOrEqual cannot be
-		// used (computed col names have no entry in deltaColumns, matcher patterns
-		// don't map to sort order), so scan all. Prefix lookups remain seekable: the
-		// reference comparator stops at cmpCols, making the missing suffix unbounded.
-		hasUnsearchableInBounds := state.precomputedDelta
-		for i := 0; i < cmpCols; i++ {
-			if indexBounds.lower(bounds, i).IsNil() || (len(s.ColMapFn) > i && !s.ColMapFn[i].IsNil()) || (bounds.len() > i && !bounds.boundaryAnalyzer(i).IsSorted()) {
-				hasUnsearchableInBounds = true
-				break
+		// Seek the usable leading bounds even when a later bound is open or
+		// cannot participate in sort order. The reference comparator treats the
+		// omitted suffix as unbounded; rowWithinBounds still checks all bounds.
+		seekCols := 0
+		if !state.precomputedDelta {
+			for seekCols < cmpCols {
+				i := seekCols
+				if indexBounds.lower(bounds, i).IsNil() || (len(s.ColMapFn) > i && !s.ColMapFn[i].IsNil()) || (bounds.len() > i && !bounds.boundaryAnalyzer(i).IsSorted()) {
+					break
+				}
+				seekCols++
 			}
 		}
-		if hasUnsearchableInBounds {
+		if seekCols == 0 {
 			snapDeltaBtree.Ascend(iterFn)
 		} else {
 			// Reference pairs are marked with itemid -1 and interpreted in
 			// index-column order by the comparator, so lower is directly
 			// seekable without a per-probe reordered copy.
-			if bounds.exactAdjacent && cmpCols == 1 {
+			if bounds.exactAdjacent && seekCols == 1 {
 				snapDeltaBtree.AscendGreaterOrEqual(indexPair{itemid: -1, data: bounds.values[:1]}, iterFn)
 			} else {
-				getterScratch.indexBounds.compareCols = cmpCols
+				getterScratch.indexBounds.compareCols = seekCols
 				snapDeltaBtree.AscendGreaterOrEqual(indexPair{itemid: -1, reference: &getterScratch.indexBounds}, iterFn)
 			}
 		}
