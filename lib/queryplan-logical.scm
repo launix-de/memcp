@@ -1699,14 +1699,28 @@ drifting on source-join pairs or residual outer references. */
 (define stage_source_outer? (lambda (outer_sources)
 	(not (empty_list? outer_sources))))
 
+/* A session-variable domain component is not a per-row correlation: the
+decorrelated stage was built for exactly this session value (not a value that
+varies per outer row), so this equality is a tautology by construction and
+must hold even when the session value is nil. Every other domain component is
+a genuine per-row correlation, where SQL NULL semantics correctly reject a
+nil-to-nil match. equal?? already follows those SQL semantics ((equal? nil
+nil) is nil, not true), which is exactly why the tautological case needs its
+own null-safe check instead of silently failing whenever the session variable
+is unset. */
 (define make_exists_stage_join_condition (lambda (stage_alias key_names outer_domain)
 	(if (empty_list? outer_domain)
 		true
 		(combine_where_terms
 			(map (produceN (count outer_domain)) (lambda (i)
-				(list (quote equal??)
-					(list (quote get_column) stage_alias false (nth key_names i) false)
-					(nth outer_domain i))))
+				(begin
+					(define domain_value (nth outer_domain i))
+					(define key_expr (list (quote get_column) stage_alias false (nth key_names i) false))
+					(if (query_session_read? domain_value)
+						(list (quote or)
+							(list (quote equal??) key_expr domain_value)
+							(list (quote and) (list (quote nil?) key_expr) (list (quote nil?) domain_value)))
+						(list (quote equal??) key_expr domain_value)))))
 			true))))
 
 (define make_positive_in_join_condition (lambda (input stage_alias key_names lookup_keys probe match_ag)

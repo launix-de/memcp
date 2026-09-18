@@ -711,6 +711,52 @@ test_cases:
       data:
         - dname: "Empty"
 
+  # === Session-variable-correlated scalar subqueries ===
+  # A scalar subquery's ONLY correlation may be a session variable (e.g. an
+  # app-level @fop_time-style setting) instead of a real outer-row column.
+  # Decorrelation then ties the subquery's stage back to the outer query with
+  # a join condition that, after physical lowering, compares that session
+  # read to itself -- a tautology that must always hold. equal?? follows SQL
+  # NULL semantics ((equal? nil nil) is nil, not true), so when the session
+  # variable is legitimately unset this self-check incorrectly failed and the
+  # whole row vanished -- but only once two or more such subqueries appeared
+  # together; a single occurrence was unaffected.
+
+  - name: "Session-variable correlated scalar subquery alone stays NULL when unset"
+    sql: |
+      SELECT (SELECT MAX(e.salary) FROM sq_emp e WHERE e.did = 1 AND e.salary <= (@sq_asof)) AS top_salary
+    expect:
+      rows: 1
+      data:
+        - top_salary: null
+
+  - name: "Two sibling session-variable correlated scalar subqueries still return a row when unset"
+    sql: |
+      SELECT
+        (SELECT MAX(e.salary) FROM sq_emp e WHERE e.did = 1 AND e.salary <= (@sq_asof)) AS eng_top,
+        (SELECT MAX(e.salary) FROM sq_emp e WHERE e.did = 2 AND e.salary <= (@sq_asof)) AS mkt_top
+    expect:
+      rows: 1
+      data:
+        - eng_top: null
+          mkt_top: null
+
+  - name: "Two sibling session-variable correlated scalar subqueries compute correctly once set"
+    session_id: "sq_session_var_correlation"
+    setup:
+      - sql: "SET @sq_asof := 100000"
+    sql: |
+      SELECT
+        (SELECT MAX(e.salary) FROM sq_emp e WHERE e.did = 1 AND e.salary <= (@sq_asof)) AS eng_top,
+        (SELECT MAX(e.salary) FROM sq_emp e WHERE e.did = 2 AND e.salary <= (@sq_asof)) AS mkt_top
+    cleanup:
+      - sql: "SET @sq_asof := NULL"
+    expect:
+      rows: 1
+      data:
+        - eng_top: 95000
+          mkt_top: 75000
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS sq_invoice_line"
   - sql: "DROP TABLE IF EXISTS sq_invoice"
