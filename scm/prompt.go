@@ -152,18 +152,34 @@ var errorlog *log.Logger
 func init() {
 	errorlog = log.New(os.Stderr, "", 0)
 }
+// stackCarrier is implemented by error/panic values (e.g. storage's
+// scanError) that already captured debug.Stack() at their original panic
+// site, inside a per-shard goroutine that gets recovered and re-panicked by
+// its caller. Without this, PrintError's own debug.Stack() call only sees
+// the unwound outer call chain (Eval/Apply/... up to the request entry
+// point) -- the one place that actually shows where inside the shard scan
+// the panic happened is lost.
+type stackCarrier interface {
+	OriginalStack() string
+}
+
 func PrintError(r any) {
 	s := fmt.Sprint(r)
-	numlines := strings.Count(s, "\nin ")*4 + 9 // skip those stack trace lines that peel out of the error message
-	trace := string(debug.Stack())
-	for numlines > 0 {
-		if trace == "" {
-			break
+	var trace string
+	if sc, ok := r.(stackCarrier); ok {
+		trace = sc.OriginalStack()
+	} else {
+		numlines := strings.Count(s, "\nin ")*4 + 9 // skip those stack trace lines that peel out of the error message
+		trace = string(debug.Stack())
+		for numlines > 0 {
+			if trace == "" {
+				break
+			}
+			if trace[0] == '\n' {
+				numlines--
+			}
+			trace = trace[1:]
 		}
-		if trace[0] == '\n' {
-			numlines--
-		}
-		trace = trace[1:]
 	}
 	errorlog.Println(r, ": \n", trace)
 }
