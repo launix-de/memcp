@@ -1,0 +1,109 @@
+# Copyright (C) 2026 MemCP Contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: '1.0'
+  description: Ordered scalar caches share computed columns across preparation strategies
+  isolated: true
+setup:
+- sql: DROP TABLE IF EXISTS metric_history
+- sql: DROP TABLE IF EXISTS metric_entity
+- sql: DROP TABLE IF EXISTS metric_catalog
+- sql: CREATE TABLE metric_entity (id INT PRIMARY KEY, category_id INT)
+- sql: CREATE TABLE metric_catalog (id INT PRIMARY KEY, kind INT)
+- sql: CREATE TABLE metric_history (parent_id INT, valid_at INT, amount INT, started_at INT)
+- sql: INSERT INTO metric_catalog VALUES (1,1),(2,2)
+- sql: ALTER TABLE metric_history ADD COLUMN ended_at INT
+- sql: ALTER TABLE metric_history ADD COLUMN category_id INT
+- sql: INSERT INTO metric_entity VALUES (1,1),(2,2)
+- sql: INSERT INTO metric_history (parent_id,valid_at,amount,started_at,ended_at,category_id) VALUES (1,10,2,10,NULL,1),(1,20,3,10,NULL,1),(2,10,5,12,22,2),(2,20,7,12,22,2)
+test_cases:
+- name: Set historical snapshot
+  session_id: historical_metrics
+  sql: SET @clock=25
+- name: Warm historical category through a scalar lookup
+  sql: |-
+    SELECT periods.n, COALESCE((SELECT SUM((SELECT h.amount FROM metric_history h
+     WHERE h.parent_id=e.id AND h.valid_at<=periods.until_time
+     ORDER BY h.valid_at DESC LIMIT 1)) FROM metric_entity e
+     WHERE (SELECT h.started_at FROM metric_history h
+     WHERE h.parent_id=e.id AND h.valid_at<=periods.until_time
+     ORDER BY h.valid_at DESC LIMIT 1) BETWEEN periods.from_time AND periods.until_time
+     AND CASE WHEN params.kind IS NULL THEN TRUE ELSE
+     (SELECT c.kind FROM metric_catalog c WHERE c.id=(SELECT h.category_id FROM metric_history h WHERE h.parent_id=e.id AND h.valid_at<=@clock ORDER BY h.valid_at DESC LIMIT 1) LIMIT 1)=params.kind END
+     LIMIT 1),0) AS new_total,
+     COALESCE((SELECT SUM((SELECT h.amount FROM metric_history h
+     WHERE h.parent_id=e.id AND h.valid_at<=periods.until_time
+     ORDER BY h.valid_at DESC LIMIT 1)) FROM metric_entity e
+     WHERE CASE WHEN params.kind IS NULL THEN TRUE ELSE
+     (SELECT c.kind FROM metric_catalog c WHERE c.id=(SELECT h.category_id FROM metric_history h WHERE h.parent_id=e.id AND h.valid_at<=@clock ORDER BY h.valid_at DESC LIMIT 1) LIMIT 1)=params.kind END
+     LIMIT 1),0) AS active_total
+     FROM (SELECT 1 AS n,10 AS from_time,15 AS until_time
+     UNION ALL SELECT 2,20,25) periods
+     CROSS JOIN (SELECT 1 AS kind) params ORDER BY periods.n
+  expect:
+    data:
+    - n: 1
+      new_total: 2
+      active_total: 2
+    - n: 2
+      new_total: 0
+      active_total: 3
+  session_id: historical_metrics
+- name: Shared latest-value cache survives mixed preparation strategies
+  session_id: historical_metrics
+  sql: |-
+    SELECT periods.n, COALESCE((SELECT SUM(CASE WHEN
+     COALESCE((SELECT h.ended_at FROM metric_history h
+     WHERE h.parent_id=e.id AND h.valid_at<=@clock
+     ORDER BY h.valid_at DESC LIMIT 1),periods.until_time)>=periods.until_time
+     THEN (SELECT h.amount FROM metric_history h
+     WHERE h.parent_id=e.id AND h.valid_at<=periods.until_time
+     ORDER BY h.valid_at DESC LIMIT 1) ELSE 0 END)
+     FROM metric_entity e WHERE COALESCE((SELECT h.ended_at FROM metric_history h
+     WHERE h.parent_id=e.id AND h.valid_at<=@clock
+     ORDER BY h.valid_at DESC LIMIT 1),periods.until_time)>=periods.until_time
+     AND (params.kind IS NULL OR (SELECT c.kind FROM metric_catalog c
+     WHERE c.id=(SELECT h.category_id FROM metric_history h
+     WHERE h.parent_id=e.id AND h.valid_at<=@clock
+     ORDER BY h.valid_at DESC LIMIT 1) LIMIT 1)=params.kind)
+     LIMIT 1),0) AS active_total
+     FROM (SELECT 1 AS n,15 AS until_time UNION ALL SELECT 2,25) periods CROSS JOIN (SELECT NULL AS kind) params
+     ORDER BY periods.n
+  expect:
+    data:
+    - n: 1
+      active_total: 7
+    - n: 2
+      active_total: 3
+- name: Add a newer history version
+  sql: INSERT INTO metric_history (parent_id,valid_at,amount,started_at,ended_at,category_id) VALUES (1,23,4,10,NULL,2)
+- name: Shared latest-value cache repairs after source changes
+  session_id: historical_metrics
+  sql: |-
+    SELECT periods.n, COALESCE((SELECT SUM(CASE WHEN
+     COALESCE((SELECT h.ended_at FROM metric_history h
+     WHERE h.parent_id=e.id AND h.valid_at<=@clock
+     ORDER BY h.valid_at DESC LIMIT 1),periods.until_time)>=periods.until_time
+     THEN (SELECT h.amount FROM metric_history h
+     WHERE h.parent_id=e.id AND h.valid_at<=periods.until_time
+     ORDER BY h.valid_at DESC LIMIT 1) ELSE 0 END)
+     FROM metric_entity e WHERE COALESCE((SELECT h.ended_at FROM metric_history h
+     WHERE h.parent_id=e.id AND h.valid_at<=@clock
+     ORDER BY h.valid_at DESC LIMIT 1),periods.until_time)>=periods.until_time
+     AND (params.kind IS NULL OR (SELECT c.kind FROM metric_catalog c
+     WHERE c.id=(SELECT h.category_id FROM metric_history h
+     WHERE h.parent_id=e.id AND h.valid_at<=@clock
+     ORDER BY h.valid_at DESC LIMIT 1) LIMIT 1)=params.kind)
+     LIMIT 1),0) AS active_total
+     FROM (SELECT 1 AS n,15 AS until_time UNION ALL SELECT 2,25) periods CROSS JOIN (SELECT NULL AS kind) params
+     ORDER BY periods.n
+  expect:
+    data:
+    - n: 1
+      active_total: 7
+    - n: 2
+      active_total: 4
+cleanup:
+- sql: DROP TABLE IF EXISTS metric_history
+- sql: DROP TABLE IF EXISTS metric_entity
+- sql: DROP TABLE IF EXISTS metric_catalog
