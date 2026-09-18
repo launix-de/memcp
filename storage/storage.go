@@ -2377,10 +2377,20 @@ func Init(en scm.Env) {
 			db.saveLockedAndUnlock(mode)
 			unlockPersistenceLifecycle()
 			registerCreatedTable(newTable)
+			var thisCallPanic any
 			func() {
 				defer func() {
+					thisCallPanic = recover()
+					// A transient per-query cancellation ("query killed") is
+					// not a genuine initialization failure: caching it as
+					// creationPanic would permanently break this table for
+					// every future caller, even though a fresh attempt would
+					// very likely succeed. Only deterministic OnInit/trigger
+					// failures are cached and replayed to later callers.
+					if thisCallPanic != nil && thisCallPanic != "query killed" {
+						newTable.creationPanic = thisCallPanic
+					}
 					// Publish the shared outcome before releasing concurrent creators.
-					newTable.creationPanic = recover()
 					newTable.creationMu.Unlock()
 				}()
 				if !oninit.IsNil() {
@@ -2389,8 +2399,8 @@ func Init(en scm.Env) {
 				newTable.onInitComplete = true
 				executeRegisteredCreateTableTriggers(newTable, nil)
 			}()
-			if newTable.creationPanic != nil {
-				panic(newTable.creationPanic)
+			if thisCallPanic != nil {
+				panic(thisCallPanic)
 			}
 			return scm.NewBool(true)
 		},
