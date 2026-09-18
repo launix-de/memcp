@@ -426,14 +426,17 @@ func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard,
 		partCols = col.OrcSortCols[:partCount]
 		partKeys = make([]scm.Scmer, partCount)
 		for i, pc := range partCols {
+			// getDelta reads requestShard.inserts, which is only safe under the
+			// shard lock; the lock must stay held for that branch too, not just
+			// for the requestShard.columns lookup above it.
 			requestShard.mu.RLock()
 			cs := requestShard.columns[pc]
-			requestShard.mu.RUnlock()
 			if cs != nil && requestIdx < requestShard.main_count {
 				partKeys[i] = cs.GetValue(requestIdx)
 			} else if requestIdx >= requestShard.main_count {
 				partKeys[i] = requestShard.getDelta(int(requestIdx-requestShard.main_count), pc)
 			}
+			requestShard.mu.RUnlock()
 		}
 	}
 	condCols := make([]string, 0, len(partCols)+len(col.OrcFilterCols))
@@ -507,8 +510,8 @@ func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard,
 		// has been written, so it never starts a second domain rebuild.
 		for _, item := range proxies {
 			for idx := uint32(0); idx < item.limit; idx++ {
-				if !item.proxy.validMask.Get(uint(idx)) {
-					item.proxy.validMask.Set(uint(idx), true)
+				if !item.proxy.validMask.AtomicGet(uint(idx)) {
+					item.proxy.validMask.AtomicSet(uint(idx), true)
 				}
 			}
 		}
@@ -699,6 +702,12 @@ func (t *table) invalidateORCFromSortKey(colName string, sortKeys []scm.Scmer) {
 			s.ensureMainCount(false)
 			var buf [1024]uint32
 			rowVals := make([]scm.Scmer, nCols)
+			// iterateIndex, len(s.inserts), deletions.Get and getDelta all read
+			// shard-local state (inserts/deletions/deltaColumns) that is only
+			// safe to read while holding the shard lock; scan.go's equivalent
+			// batch loops hold t.mu.RLock() across the whole iterateIndex call
+			// for the same reason.
+			s.mu.RLock()
 			s.iterateIndex(nil, runtimeScanAccess(bounds), len(s.inserts), buf[:], 1, nil, func(batch []uint32) bool {
 				for _, idx := range batch {
 					if s.deletions.Get(uint(idx)) {
@@ -713,11 +722,12 @@ func (t *table) invalidateORCFromSortKey(colName string, sortKeys []scm.Scmer) {
 						}
 					}
 					if condFn(rowVals) {
-						proxy.validMask.Set(uint(idx), false)
+						proxy.validMask.AtomicSet(uint(idx), false)
 					}
 				}
 				return true // continue
 			})
+			s.mu.RUnlock()
 		}(s)
 	}
 	wg.Wait()

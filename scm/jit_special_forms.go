@@ -593,6 +593,49 @@ func jitEmitSpecialCoalesce(nilOnly bool) func(*JITContext, []Scmer, []JITValueD
 	}
 }
 
+// A code-buffer retry restarts its parent emitter, but already compiled bound
+// templates are still valid. Keep them alive only for that parent's compile.
+// Compare the complete body and capture layout: a traversal ordinal alone is
+// not a proof that two closures use the same lexical bindings.
+func jitCompileBoundLambdaTemplate(ctx *JITContext, template Scmer) Scmer {
+	index := ctx.lambdaTemplateIndex
+	ctx.lambdaTemplateIndex++
+	candidate := template.Proc()
+	if ctx.lambdaTemplates != nil && index < len(*ctx.lambdaTemplates) {
+		cached := (*ctx.lambdaTemplates)[index]
+		old := cached.Proc()
+		if old != nil && old.Compiled != nil && old.Compiled.CodePtr != nil &&
+			old.NumVars == candidate.NumVars &&
+			astStructuralEqual(old.Params, candidate.Params) &&
+			astStructuralEqual(old.Body, candidate.Body) &&
+			old.Compiled.CaptureBase == candidate.Compiled.CaptureBase &&
+			old.Compiled.CaptureCount == candidate.Compiled.CaptureCount &&
+			astStructuralEqual(NewSlice(old.Compiled.CaptureKeys), NewSlice(candidate.Compiled.CaptureKeys)) {
+			sameSymbols := len(old.Compiled.CaptureSymbols) == len(candidate.Compiled.CaptureSymbols)
+			if sameSymbols {
+				for i, symbol := range old.Compiled.CaptureSymbols {
+					if symbol != candidate.Compiled.CaptureSymbols[i] {
+						sameSymbols = false
+						break
+					}
+				}
+			}
+			if sameSymbols {
+				return cached
+			}
+		}
+	}
+	compiled := jitCompileModeDeferred(true, template, ctx.CompileScope)
+	if ctx.lambdaTemplates != nil {
+		if index == len(*ctx.lambdaTemplates) {
+			*ctx.lambdaTemplates = append(*ctx.lambdaTemplates, compiled)
+		} else {
+			(*ctx.lambdaTemplates)[index] = compiled
+		}
+	}
+	return compiled
+}
+
 func jitEmitSpecialLambda(ctx *JITContext, args []Scmer, _ []JITValueDesc, result JITValueDesc) JITValueDesc {
 	if len(args) < 2 {
 		panic("jit: lambda expects params and body")
@@ -716,7 +759,7 @@ func jitEmitSpecialLambda(ctx *JITContext, args []Scmer, _ []JITValueDesc, resul
 					CaptureKeys:    jitLambdaCaptureKeys(argExprs[3:]),
 					CaptureSymbols: captureSymbols,
 				}
-				template = jitCompileModeDeferred(true, template)
+				template = jitCompileBoundLambdaTemplate(ctx, template)
 				ctx.TrackImm(template)
 				return jitEmitBoundLambdaProc(ctx, template, argExprs[3:], ctx.SliceBase, result, result.StackFunc, false)
 			}
@@ -736,7 +779,7 @@ func jitEmitSpecialLambda(ctx *JITContext, args []Scmer, _ []JITValueDesc, resul
 				CaptureKeys:    jitLambdaCaptureKeys(captures),
 				CaptureSymbols: append(captureSymbols, ctx.DefiningSymbol),
 			}
-			template = jitCompileModeDeferred(true, template)
+			template = jitCompileModeDeferred(true, template, ctx.CompileScope)
 			ctx.TrackImm(template)
 			return jitEmitBoundLambdaProc(ctx, template, captures, ctx.SliceBase, result, result.StackFunc, true)
 		}
@@ -745,13 +788,13 @@ func jitEmitSpecialLambda(ctx *JITContext, args []Scmer, _ []JITValueDesc, resul
 		closure := jitBuildNamedLambdaClosure(
 			NewSymbol(string(ctx.DefiningSymbol)), params, body, NewInt(int64(numVars)),
 		)
-		compiled := jitCompileModeDeferred(true, closure)
+		compiled := jitCompileModeDeferred(true, closure, ctx.CompileScope)
 		ctx.TrackImm(compiled)
 		return jitPlaceScmerIntoTarget(ctx, JITValueDesc{Loc: LocImm, Type: tagProc, Imm: compiled}, result)
 	}
 	if ctx.RecursiveLambdas && ctx.DefiningSymbol == "" && len(argExprs) == 3 && !jitExpressionConsumesRuntimeEnv(body) {
 		closure := jitBuildLambdaClosure(params, body, NewInt(int64(numVars)))
-		compiled := jitCompileModeDeferred(true, closure)
+		compiled := jitCompileModeDeferred(true, closure, ctx.CompileScope)
 		ctx.TrackImm(compiled)
 		if result.StackFunc {
 			return jitEmitBoundLambdaProc(ctx, compiled, nil, ctx.SliceBase, result, true, false)

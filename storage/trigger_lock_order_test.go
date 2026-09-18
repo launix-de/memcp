@@ -452,3 +452,78 @@ func BenchmarkForeignKeyExistenceProbe(b *testing.B) {
 		}
 	}
 }
+
+func TestBeforeUpdateReleasesLocallyAcquiredShardLock(t *testing.T) {
+	for _, alreadyLocked := range []bool{false, true} {
+		name := "local_lock"
+		if alreadyLocked {
+			name = "caller_lock"
+		}
+		t.Run(name, func(t *testing.T) {
+			tbl := setupScanParallelTestTable(t, "tbeforeupdatelock")
+			tbl.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(1)}}, nil, scm.NewNil(), false, nil)
+			shard := tbl.ActiveShards()[0]
+			called, unlocked := false, false
+			tbl.AddTrigger(TriggerDescription{
+				Name: "check_update_lock", Timing: BeforeUpdate,
+				Func: scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+					called = true
+					unlocked = shard.mu.TryLock()
+					if unlocked {
+						shard.mu.Unlock()
+					}
+					return args[1]
+				}),
+			})
+			release := shard.GetRead()
+			defer release()
+			if alreadyLocked {
+				shard.mu.Lock()
+				defer shard.mu.Unlock()
+			}
+			updated := shard.UpdateFunction(0, true, alreadyLocked, nil)(
+				scm.NewSlice([]scm.Scmer{scm.NewString("id"), scm.NewInt(2)}))
+			if !updated.Bool() || !called || !unlocked {
+				t.Fatalf("updated=%v, trigger called=%v, shard unlocked=%v", updated.Bool(), called, unlocked)
+			}
+		})
+	}
+}
+
+func TestBeforeUpdateForwardsTriggerValuesAfterRebuildCompletion(t *testing.T) {
+	tbl := setupScanParallelTestTable(t, "tbeforeupdateforward")
+	tbl.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(1)}}, nil, scm.NewNil(), false, nil)
+	shard := tbl.ActiveShards()[0]
+	var rebuilt *storageShard
+	tbl.AddTrigger(TriggerDescription{
+		Name: "rebuild_during_update", Timing: BeforeUpdate,
+		Func: scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+			// Complete the successor while the source UPDATE is inside its
+			// unlocked trigger. Forwarding must use NEW after trigger rewriting.
+			rebuilt = shard.rebuild(true)
+			newRow := scm.NewFastDictValue(1)
+			newRow.Set(scm.NewString("id"), scm.NewInt(3), nil)
+			return scm.NewFastDict(newRow)
+		}),
+	})
+	release := shard.GetRead()
+	defer release()
+	updated := shard.UpdateFunction(0, true, false, nil)(
+		scm.NewSlice([]scm.Scmer{scm.NewString("id"), scm.NewInt(2)}))
+	if !updated.Bool() || rebuilt == nil {
+		t.Fatal("update did not finish across rebuild publication")
+	}
+	releaseNext := rebuilt.GetRead()
+	defer releaseNext()
+	rebuilt.mu.RLock()
+	defer rebuilt.mu.RUnlock()
+	var values []int
+	for id := uint32(0); id < rebuilt.main_count+uint32(len(rebuilt.inserts)); id++ {
+		if !rebuilt.deletions.Get(uint(id)) {
+			values = append(values, scm.ToInt(rebuilt.rowValueByRecidLocked(id, "id")))
+		}
+	}
+	if len(values) != 1 || values[0] != 3 {
+		t.Fatalf("successor values = %v, want trigger-rewritten [3]", values)
+	}
+}

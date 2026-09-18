@@ -253,7 +253,7 @@ func initMetricsDeclarations(en scm.Env) {
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			return scm.NewFloat(loadSnapshot().rps)
 		},
-		Type: &scm.TypeDescriptor{Kind: "func", Description: "Returns the average number of HTTP requests per second over the last 10 seconds",
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "Returns the average number of HTTP requests and MySQL/PHP SQL commands per second over the last 10 seconds",
 			Return: &scm.TypeDescriptor{Kind: "number"},
 		},
 	})
