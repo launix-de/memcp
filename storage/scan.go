@@ -2194,7 +2194,7 @@ func (t *storageShard) scan(access scanAccess, conditionCols []string, condition
 		t.mu.RUnlock()
 		for _, proxy := range orderedProxies {
 			for _, id := range recids {
-				if !proxy.validMask.Get(uint(id)) {
+				if !proxy.validMask.AtomicGet(uint(id)) {
 					proxy.GetValue(id)
 				}
 			}
@@ -2214,7 +2214,7 @@ func (t *storageShard) scan(access scanAccess, conditionCols []string, condition
 				continue
 			}
 			for _, proxy := range orderedProxies {
-				if !proxy.validMask.Get(uint(id)) {
+				if !proxy.validMask.AtomicGet(uint(id)) {
 					return false
 				}
 			}

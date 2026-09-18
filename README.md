@@ -89,7 +89,8 @@ Important HTTP endpoints:
   compression, and users
 
 `make` and `make jit` build `memcp` with PHP support. Use `make nophp` for a
-size-focused build without PHP. PHP remains an explicit feature: `--serve`
+size-focused build without PHP, or `make jit-nophp` for a JIT build without PHP.
+PHP remains an explicit feature: `--serve`
 mounts the app into the existing HTTP handler chain and does not create a
 second listener.
 
@@ -731,7 +732,9 @@ format (`-Fc`) is not supported. The loader skips `psql` meta-commands and
 `COPY … FROM stdin` and `COPY … FROM 'file'` data, retargets the dump's
 database/schema name onto the target database, and replays
 `pg_catalog.setval()` so auto-increment sequences resume correctly. Run it from
-the REPL or the `/scm` endpoint.
+the REPL or the `/scm` endpoint. For large dumps, use the REPL: HTTP requests
+have a five-minute write timeout, so `/scm` can lose its connection before a
+long import finishes. Check table counts before retrying an interrupted request.
 
 ## Use cases
 

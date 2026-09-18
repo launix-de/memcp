@@ -1,3 +1,4 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
 # Derived table containing EXISTS with scalar subselect.
 # After derived-table flattening, the EXISTS table alias must not
 # leak into the outer query as a column name.
@@ -65,6 +66,46 @@ test_cases:
       rows: 1
       data:
         - has_team: 2
+
+  - name: "Derived join preserves an alias reused by the outer block"
+    sql: |
+      SELECT i.ID, d.val FROM (
+        SELECT i.ID, i.val FROM dtef_items i, dtef_team tm
+        WHERE i.team_id = tm.list_id
+      ) d JOIN dtef_items i ON i.ID = d.ID ORDER BY i.ID
+    expect:
+      data:
+        - {ID: 1, val: 100}
+        - {ID: 2, val: 200}
+
+  - name: "Derived scalar filter preserves an alias reused by the outer block"
+    sql: |
+      SELECT i.ID, d.val FROM (
+        SELECT i.ID, i.val FROM dtef_items i
+        WHERE i.team_id = (SELECT tm.list_id FROM dtef_team tm WHERE tm.ID = i.ID LIMIT 1)
+      ) d JOIN dtef_items i ON i.ID = d.ID ORDER BY i.ID
+    expect:
+      data:
+        - {ID: 1, val: 100}
+        - {ID: 2, val: 200}
+
+  - name: "Sibling derived joins preserve their separate alias identities"
+    sql: |
+      SELECT x.ID, y.val FROM
+        (SELECT i.ID FROM dtef_items i, dtef_team tm WHERE i.team_id = tm.list_id) x,
+        (SELECT i.ID, i.val FROM dtef_items i, dtef_team tm WHERE i.team_id = tm.list_id) y
+      WHERE x.ID = y.ID ORDER BY x.ID
+    expect:
+      data:
+        - {ID: 1, val: 100}
+        - {ID: 2, val: 200}
+
+  - name: "Derived table remains non-lateral"
+    sql: |
+      SELECT i.ID FROM dtef_items i,
+        (SELECT tm.ID FROM dtef_team tm WHERE tm.list_id = i.team_id) d
+    expect:
+      error: true
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS dtef_items"
