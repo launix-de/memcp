@@ -1,0 +1,109 @@
+# Copyright (C) 2026 MemCP Contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: "1.0"
+  description: >
+    A correlated scalar subquery's own FROM alias must stay canonical when an
+    ancestor subquery happens to reuse the same table name, and two textually
+    identical correlated subqueries at different nesting depths must share one
+    materialized stage instead of rebuilding it per occurrence.
+  isolated: true
+
+setup:
+  - sql: "DROP TABLE IF EXISTS nsa_doc"
+  - sql: "DROP TABLE IF EXISTS nsa_doc_revision"
+  - sql: "DROP TABLE IF EXISTS nsa_fop_files"
+  - sql: "DROP TABLE IF EXISTS bz_obj"
+  - sql: "DROP TABLE IF EXISTS bz_dyn"
+  - sql: "CREATE TABLE nsa_doc (id INT PRIMARY KEY)"
+  - sql: "CREATE TABLE nsa_doc_revision (id INT PRIMARY KEY, nsa_doc INT, created INT, file INT)"
+  - sql: "CREATE TABLE nsa_fop_files (id INT PRIMARY KEY, filename VARCHAR(255))"
+  - sql: "INSERT INTO nsa_doc (id) VALUES (1), (2)"
+  - sql: "INSERT INTO nsa_fop_files (id, filename) VALUES (1, 'Basics.pdf'), (3, 'Angebot.pdf')"
+  - sql: "INSERT INTO nsa_doc_revision (id, nsa_doc, created, file) VALUES (1, 1, 1000, 1)"
+  - sql: "INSERT INTO nsa_doc_revision (id, nsa_doc, created, file) VALUES (2, 2, 2000, 3)"
+  - sql: "CREATE TABLE bz_obj (id INT)"
+  - sql: "CREATE TABLE bz_dyn (parent INT, ts INT, val INT)"
+  - sql: "INSERT INTO bz_obj VALUES (1),(2),(3),(4),(5)"
+  - sql: "INSERT INTO bz_dyn VALUES (1,50,5),(1,150,7),(2,250,3),(3,350,9),(4,450,1),(5,550,2)"
+
+test_cases:
+  # Regression: nsa_doc_revision's own column is named "nsa_doc" -- the same
+  # spelling as the outer table's own name/alias. binding_scope_entries must
+  # not rename nsa_doc_revision's canonical alias just because an ancestor
+  # scope happens to expose an alias of the same name; doing so previously
+  # corrupted correlation resolution and returned the outer id instead of the
+  # revision's own "file" column.
+  - name: "Single correlated scalar subquery resolves its own column, not the outer alias"
+    sql: |
+      SELECT id, (SELECT file FROM nsa_doc_revision
+        WHERE nsa_doc = nsa_doc.id ORDER BY created DESC LIMIT 1) AS file
+      FROM nsa_doc ORDER BY id
+    expect:
+      rows: 2
+      data:
+        - id: 1
+          file: 1
+        - id: 2
+          file: 3
+
+  # Same subquery referenced twice: once directly, once nested inside a
+  # sibling projection's own WHERE. Both occurrences must resolve correctly
+  # (correctness) and must compile to one shared stage, not two independently
+  # rebuilt ones (checked via max_plan_size below).
+  - name: "Same correlated scalar subquery nested inside a sibling resolves correctly"
+    sql: |
+      SELECT t.* FROM (
+        SELECT
+          id,
+          (SELECT file FROM nsa_doc_revision
+            WHERE nsa_doc = nsa_doc.id ORDER BY created DESC LIMIT 1) AS file,
+          (SELECT filename FROM nsa_fop_files
+            WHERE id = (
+              SELECT file FROM nsa_doc_revision
+              WHERE nsa_doc = nsa_doc.id ORDER BY created DESC LIMIT 1
+            )
+          ) AS filename
+        FROM nsa_doc
+      ) AS t
+      ORDER BY id
+    expect:
+      rows: 2
+      data:
+        - id: 1
+          file: 1
+          filename: "Basics.pdf"
+        - id: 2
+          file: 3
+          filename: "Angebot.pdf"
+
+  # The actual reduction of the fuchsbriefe production blowup: a correlated
+  # scalar subquery referencing a UNION-of-constant-rows derived table column
+  # ("drv.bound"), used once directly and once nested inside a sibling's own
+  # scalar subquery. Before the fix, the nested occurrence's own alias got a
+  # position-dependent rename (binding_scope_entries treated the sibling's
+  # own scope as a flattening collision risk it never actually is for a
+  # subquery-expression boundary), so the two textually-identical stages
+  # never compared equal for unique_stages_by_id and each rebuilt its own
+  # copy of the bz_dyn group-cache table. Plan size: ~210KB unfixed, ~164KB
+  # fixed. The gate sits between the two, so it trips on either a dedup
+  # regression or a genuinely new blow-up, on any hardware (plan size is
+  # hardware-independent).
+  - name: "Same-value correlated subquery nested inside a sibling shares one stage"
+    max_plan_size: 190000
+    sql: |
+      SELECT drv.idx,
+        (SELECT SUM(o.id) FROM bz_obj o WHERE
+          ((SELECT val FROM bz_dyn WHERE parent=o.id AND ts<=drv.bound ORDER BY ts DESC LIMIT 1)) BETWEEN 0 AND 100
+          AND ((SELECT val FROM bz_dyn WHERE parent=o.id AND ts <= ((SELECT val FROM bz_dyn WHERE parent=o.id AND ts<=drv.bound ORDER BY ts DESC LIMIT 1) + 1) ORDER BY ts DESC LIMIT 1)) = 5
+        ) AS total
+      FROM (SELECT 0 AS `idx`, 100 AS `bound` UNION SELECT 1 AS `idx`, 200 AS `bound` UNION SELECT 2 AS `idx`, 300 AS `bound` UNION SELECT 3 AS `idx`, 400 AS `bound` UNION SELECT 4 AS `idx`, 500 AS `bound` UNION SELECT 5 AS `idx`, 600 AS `bound` UNION SELECT 6 AS `idx`, 700 AS `bound` UNION SELECT 7 AS `idx`, 800 AS `bound`) AS drv
+    expect:
+      rows: 8
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS nsa_doc_revision"
+  - sql: "DROP TABLE IF EXISTS nsa_fop_files"
+  - sql: "DROP TABLE IF EXISTS nsa_doc"
+  - sql: "DROP TABLE IF EXISTS bz_obj"
+  - sql: "DROP TABLE IF EXISTS bz_dyn"

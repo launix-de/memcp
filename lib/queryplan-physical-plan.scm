@@ -9952,8 +9952,15 @@ ordering run. Storage artifacts begin in build_queryplan. */
 (define normalize_sql_syntax (lambda (ast)
 	(sanitize_temporal_outputs (sanitize_decimal_aggregate_outputs ast))))
 
-(define decorrelate_logical_query (lambda (ast)
-	(untangle_query_term (normalize_sql_syntax ast) nil)))
+/* Canonicalizing bind-placeholder identity by value (see
+canonicalize_session_placeholders) must happen before any decorrelation
+step reads the AST, so two structurally-identical correlated subqueries
+that reference the same bound value through different placeholder names
+compare equal for stage dedup. planning_session is nil for the read-only
+"EXPLAIN IR" diagnostic; canonicalization is then a no-op. */
+(define decorrelate_logical_query (lambda (ast planning_session)
+	(untangle_query_term (normalize_sql_syntax
+		(canonicalize_session_placeholders ast planning_session)) nil)))
 
 /* Aggregate partitioning is an equivalent logical alternative whose only
 benefit is reducing repeated stage evaluation. If the common physical
@@ -9999,7 +10006,7 @@ RecSet node is written into logical IR. */
 (define neumann_compile_pipeline (lambda (ast planning_session tx)
 	(begin
 		(tx_check tx)
-		(define ir (decorrelate_logical_query ast))
+		(define ir (decorrelate_logical_query ast planning_session))
 		(tx_check tx)
 		(define reordered (optimize_logical_query ir planning_session tx))
 		(tx_check tx)
@@ -10042,7 +10049,7 @@ RecSet node is written into logical IR. */
 			'() '()
 			(list (list (quote dml) true))))
 		(neumann_compile_ir_pipeline
-			(ir_with_return (decorrelate_logical_query query) (list (quote dml) schema tbl))
+			(ir_with_return (decorrelate_logical_query query planning_session) (list (quote dml) schema tbl))
 			planning_session tx))))
 
 (define build_multi_delete_plan (lambda (schema target_specs all_defs condition planning_session tx)
@@ -10055,7 +10062,7 @@ RecSet node is written into logical IR. */
 			'() nil '() nil nil '() '()
 			(list (list (quote dml) true))))
 		(neumann_compile_ir_pipeline
-			(ir_with_return (decorrelate_logical_query query)
+			(ir_with_return (decorrelate_logical_query query planning_session)
 				(list (quote dml-many) target_specs))
 			planning_session tx))))
 
@@ -10073,7 +10080,7 @@ RecSet node is written into logical IR. */
 
 (define explain_queryplan_ir (lambda (query)
 	(begin
-		(define ir (decorrelate_logical_query query))
+		(define ir (decorrelate_logical_query query nil))
 		(list (quote resultrow)
 			(list (quote list)
 				"ir"
@@ -10085,7 +10092,7 @@ RecSet node is written into logical IR. */
 	(begin
 		(planning_session "__memcp_explain_reorder_selectivities" true)
 		(define reordered (optimize_logical_query
-			(decorrelate_logical_query query) planning_session nil))
+			(decorrelate_logical_query query planning_session) planning_session nil))
 		(planning_session "__memcp_explain_reorder_selectivities" nil)
 		(list (quote resultrow)
 			(list (quote list)
@@ -10545,7 +10552,7 @@ protocol callback receives only the calibration row. */
 (define explain_queryplan_physical_calibrate_discover (lambda (query planning_session)
 	(begin
 		(define reordered (optimize_logical_query
-			(decorrelate_logical_query query) planning_session nil))
+			(decorrelate_logical_query query planning_session) planning_session nil))
 		(define compilation (compile_physical_explain_variant reordered nil planning_session))
 		(define decisions (filter (nth compilation 1) (lambda (decision)
 			(physical_decision_calibratable? decision))))
@@ -10566,7 +10573,7 @@ protocol callback receives only the calibration row. */
 (define explain_queryplan_physical_calibrate_variant (lambda (query decision_id variant planning_session)
 	(begin
 		(define reordered (optimize_logical_query
-			(decorrelate_logical_query query) planning_session nil))
+			(decorrelate_logical_query query planning_session) planning_session nil))
 		(define compilation (compile_physical_explain_variant reordered
 			(list (list decision_id variant)) planning_session))
 		(define decision (physical_decision_by_id (nth compilation 1) decision_id))
@@ -10591,7 +10598,7 @@ protocol callback receives only the calibration row. */
 (define explain_queryplan_physical_calibrate (lambda (query planning_session)
 	(begin
 		(define reordered (optimize_logical_query
-			(decorrelate_logical_query query) planning_session nil))
+			(decorrelate_logical_query query planning_session) planning_session nil))
 		(define default_compilation (compile_physical_explain_variant reordered nil planning_session))
 		(define uncalibratable (filter (nth default_compilation 1) (lambda (decision)
 			(and (equal? (qassoc_get decision "decision" nil) "membership_carrier")
@@ -10616,7 +10623,7 @@ protocol callback receives only the calibration row. */
 (define explain_queryplan_physical (lambda (query planning_session)
 	(begin
 		(define reordered (optimize_logical_query
-			(decorrelate_logical_query query) planning_session nil))
+			(decorrelate_logical_query query planning_session) planning_session nil))
 		(define compilation (compile_physical_explain_variant reordered nil planning_session))
 		(define optimized_plan (nth compilation 0))
 		(define decisions (nth compilation 1))
@@ -10686,7 +10693,7 @@ protocol callback receives only the calibration row. */
 						(+ total (static_scan_access_nodes item))) 0))
 				_ 0)))
 		(define started_ns (nanotime))
-		(define ir (decorrelate_logical_query query))
+		(define ir (decorrelate_logical_query query planning_session))
 		(define untangled_ns (nanotime))
 		(define reordered (optimize_logical_query ir planning_session nil))
 		(define reordered_ns (nanotime))

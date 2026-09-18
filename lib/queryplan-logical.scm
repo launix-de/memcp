@@ -1310,6 +1310,48 @@ instead of capturing whichever session populated the cache first. */
 (define query_session_read? (lambda (expr)
 	(not (nil? (query_session_read_expr expr)))))
 
+/* A bind-placeholder name ("v1", "v2", ...) is assigned purely by textual
+occurrence order (lib/sql-parser.scm's "?" rule and MySQL's own COM_STMT_
+EXECUTE bind-variable naming), with no regard for value. Two placeholders
+that happen to carry the identical bound value at compile time are, per
+Neumann's dependent-join domain D (a duplicate-eliminating set of
+correlation VALUES, not of positions), one and the same correlation value --
+but plan-level stage dedup (unique_stages_by_id / stable_structural_hash)
+compares the unevaluated expression tree, so two distinct names for an equal
+value silently defeat it. Canonicalize right where the raw parsed AST enters
+decorrelation, once per compile, by first-seen value -- deliberately kept
+out of lib/sql-parser.scm's parse_sql: that function's optimizer-sensitive
+local-variable numbering breaks in surprising, unrelated ways when new local
+definitions are added to it (confirmed empirically: adding an unrelated,
+never-invoked helper there corrupted results of queries containing no
+placeholder at all). */
+(define canonicalize_session_placeholder_key (lambda (key planning_session catalog)
+	(if (not (match key (regex "^v[0-9]+$" _) true false))
+		key
+		(begin
+			(define value (planning_session key))
+			(if (nil? value) key
+				(begin
+					(define value_key (stable_structural_hash value false))
+					(define existing (catalog value_key))
+					(if (nil? existing)
+						(begin (catalog value_key key) key)
+						existing)))))))
+
+(define canonicalize_session_placeholders_expr (lambda (expr planning_session catalog)
+	(match expr
+		((symbol session) "__memcp_tx") expr
+		((quote session) "__memcp_tx") expr
+		((symbol session) key) (list (quote session) (canonicalize_session_placeholder_key key planning_session catalog))
+		((quote session) key) (list (quote session) (canonicalize_session_placeholder_key key planning_session catalog))
+		(cons head tail) (cons (canonicalize_session_placeholders_expr head planning_session catalog)
+			(map tail (lambda (item) (canonicalize_session_placeholders_expr item planning_session catalog))))
+		_ expr)))
+
+(define canonicalize_session_placeholders (lambda (ast planning_session)
+	(if (nil? planning_session) ast
+		(canonicalize_session_placeholders_expr ast planning_session (newsession)))))
+
 (define session_domain_pairs (lambda (node)
 	(map (query_expr_session_reads node) (lambda (expr) (list expr expr)))))
 
@@ -5097,21 +5139,24 @@ subqueries and operator stages keep separate namespaces and canonical names. */
 (define bind_query_expr (lambda (scopes expr path all_strings)
 	(match expr
 		((symbol inner_select) subquery)
-		(list (quote inner_select) (bind_query_names_at subquery scopes (binding_path path "subquery" 0) all_strings))
+		/* A subquery expression is a flattening barrier: its own sources read
+		outer_scopes for correlation but never end up sharing one flat FROM
+		namespace with an ancestor, so outer_collision_relevant is false. */
+		(list (quote inner_select) (bind_query_names_at subquery scopes (binding_path path "subquery" 0) all_strings false))
 		((quote inner_select) subquery)
-		(list (quote inner_select) (bind_query_names_at subquery scopes (binding_path path "subquery" 0) all_strings))
+		(list (quote inner_select) (bind_query_names_at subquery scopes (binding_path path "subquery" 0) all_strings false))
 		((symbol inner_select_exists) subquery)
-		(list (quote inner_select_exists) (bind_query_names_at subquery scopes (binding_path path "exists" 0) all_strings))
+		(list (quote inner_select_exists) (bind_query_names_at subquery scopes (binding_path path "exists" 0) all_strings false))
 		((quote inner_select_exists) subquery)
-		(list (quote inner_select_exists) (bind_query_names_at subquery scopes (binding_path path "exists" 0) all_strings))
+		(list (quote inner_select_exists) (bind_query_names_at subquery scopes (binding_path path "exists" 0) all_strings false))
 		((symbol inner_select_in) probe subquery)
 		(list (quote inner_select_in)
 			(bind_query_expr scopes probe (binding_path path "probe" 0) all_strings)
-			(bind_query_names_at subquery scopes (binding_path path "in" 0) all_strings))
+			(bind_query_names_at subquery scopes (binding_path path "in" 0) all_strings false))
 		((quote inner_select_in) probe subquery)
 		(list (quote inner_select_in)
 			(bind_query_expr scopes probe (binding_path path "probe" 0) all_strings)
-			(bind_query_names_at subquery scopes (binding_path path "in" 0) all_strings))
+			(bind_query_names_at subquery scopes (binding_path path "in" 0) all_strings false))
 		((symbol get_column) tblvar tbl_ignorecase "*" col_ignorecase)
 		(if (nil? tblvar)
 			expr
@@ -5171,8 +5216,8 @@ subqueries and operator stages keep separate namespaces and canonical names. */
 					(if (or (query_block? relation) (union_block? relation))
 						/* MariaDB FROM subqueries are non-lateral. */
 						(if (and (query_block? relation) (not (derived_block_needs_operator? relation)))
-							(bind_query_block_names relation '() (binding_path path "derived" index) all_strings)
-							(bind_query_names_at relation '() (binding_path path "derived" index) all_strings))
+							(bind_query_block_names relation '() (binding_path path "derived" index) all_strings true)
+							(bind_query_names_at relation '() (binding_path path "derived" index) all_strings true))
 						relation))
 				(bind_query_source_relations rest path all_strings (+ index 1))))
 		_ '())))
@@ -5197,17 +5242,26 @@ subqueries and operator stages keep separate namespaces and canonical names. */
 	(reduce (coalesceNil scopes '()) (lambda (found entries)
 		(or found (binding_scope_has_alias? entries alias))) false)))
 
-(define binding_scope_entries (lambda (sources outer_scopes path all_strings index)
+(define binding_scope_entries (lambda (sources outer_scopes path all_strings index outer_collision_relevant)
 	(match (coalesceNil sources '())
 		(cons src rest) (begin
 			(define sql_alias (source_alias src))
 			/* Nested blocks can later merge into their parent or a sibling.
 			Non-lateral derived blocks have no visible outer scope, but still
 			need distinct source identities before flattening. Operator barriers
-			keep their own scope and retain canonical names for stage reuse. */
+			keep their own scope and retain canonical names for stage reuse.
+			outer_collision_relevant is false across a subquery-expression
+			boundary (EXISTS/IN/scalar): that block's own sources are correlated-
+			readable from outer_scopes but never flatten into any ancestor's FROM
+			list, so an alias merely repeating an ancestor subquery's own table
+			name is not a real collision -- checking it anyway renames the
+			source and bakes a position-dependent alias into the group-stage's
+			subquery AST, which defeats stable_structural_hash-based stage dedup
+			for two textually-identical correlated subqueries that happen to sit
+			at different nesting depths (one direct, one inside a sibling). */
 			(define internal_alias (if (or (and (not (equal? path (nth all_strings 2)))
 				(> (get_assoc (nth all_strings 1) sql_alias 0) 1))
-				(binding_scopes_have_alias? outer_scopes sql_alias))
+				(and outer_collision_relevant (binding_scopes_have_alias? outer_scopes sql_alias)))
 				(binding_fresh_alias (nth all_strings 0)
 					(concat "__binding:" (concat (binding_path path "source" index) (concat ":" sql_alias))))
 				sql_alias))
@@ -5225,7 +5279,7 @@ subqueries and operator stages keep separate namespaces and canonical names. */
 						(or
 							(union_block? (normalize_query_ast (source_relation internal_source)))
 							(not (empty_list? columns))))))
-				(binding_scope_entries rest outer_scopes path all_strings (+ index 1))))
+				(binding_scope_entries rest outer_scopes path all_strings (+ index 1) outer_collision_relevant)))
 		_ '())))
 
 (define duplicate_source_alias (lambda (sources)
@@ -5298,14 +5352,14 @@ subqueries and operator stages keep separate namespaces and canonical names. */
 				(list (bind_union_output_expr fields carrier_alias expr) dir))
 			_ (neumann_fail "bind_query_names" "malformed UNION ORDER BY item"))))))
 
-(define bind_query_block_names (lambda (block outer_scopes path all_strings)
+(define bind_query_block_names (lambda (block outer_scopes path all_strings outer_collision_relevant)
 	(begin
 		(define relation_bound_sources (bind_query_source_relations (qb_sources block) path all_strings 0))
 		(define duplicate_alias (duplicate_source_alias relation_bound_sources))
 		(if (nil? duplicate_alias)
 			true
 			(neumann_fail "bind_query_names" (concat "duplicate relation alias: " duplicate_alias)))
-		(define entries (binding_scope_entries relation_bound_sources outer_scopes path all_strings 0))
+		(define entries (binding_scope_entries relation_bound_sources outer_scopes path all_strings 0 outer_collision_relevant))
 		(define sources (bind_query_source_joins entries outer_scopes '() path all_strings 0))
 		(define scopes (cons entries outer_scopes))
 		(define fields (bind_query_fields (qb_fields block) scopes path all_strings 0))
@@ -5329,24 +5383,31 @@ subqueries and operator stages keep separate namespaces and canonical names. */
 			(qb_stages block)
 			(qb_facts block)))))
 
-(define bind_query_branches (lambda (branches outer_scopes path all_strings index)
+(define bind_query_branches (lambda (branches outer_scopes path all_strings index outer_collision_relevant)
 	(match (coalesceNil branches '())
 		(cons branch rest) (cons
-			(bind_query_names_at branch outer_scopes (binding_path path "branch" index) all_strings)
-			(bind_query_branches rest outer_scopes path all_strings (+ index 1)))
+			(bind_query_names_at branch outer_scopes (binding_path path "branch" index) all_strings outer_collision_relevant)
+			(bind_query_branches rest outer_scopes path all_strings (+ index 1) outer_collision_relevant))
 		_ '())))
 
 /* Binding context: collision-safe string catalog, region alias counts, root path.
-Only flattenable FROM relations share the latter two with their parent. */
-(define bind_query_names_at (lambda (query outer_scopes path all_strings)
+Only flattenable FROM relations share the latter two with their parent.
+outer_collision_relevant: whether outer_scopes can genuinely still end up
+sharing one flat namespace with this block's own sources (true for a
+FROM-clause derived table's ancestor chain and the top-level query) versus
+merely being visible for correlated column resolution across a subquery-
+expression boundary (EXISTS/IN/scalar subqueries, which never flatten with
+their enclosing query -- see binding_scope_entries). */
+(define bind_query_names_at (lambda (query outer_scopes path all_strings outer_collision_relevant)
 	(begin
 		(define normalized (normalize_query_ast query))
 		(if (query_block? normalized)
 			(bind_query_block_names normalized outer_scopes path
-				(list (nth all_strings 0) (binding_collect_query_aliases normalized '()) path))
+				(list (nth all_strings 0) (binding_collect_query_aliases normalized '()) path)
+				outer_collision_relevant)
 			(if (union_block? normalized)
 				(begin
-					(define branches (bind_query_branches (union_branches normalized) outer_scopes path all_strings 0))
+					(define branches (bind_query_branches (union_branches normalized) outer_scopes path all_strings 0 outer_collision_relevant))
 					(define fields (match branches
 						(cons branch _rest) (logical_relation_fields branch)
 						_ '()))
@@ -5362,7 +5423,8 @@ Only flattenable FROM relations share the latter two with their parent. */
 
 (define bind_query_names (lambda (query outer_scopes)
 	(bind_query_names_at query outer_scopes "query"
-		(list (binding_collect_string_catalog query '())))))
+		(list (binding_collect_string_catalog query '()))
+		true)))
 
 (define derived_star_ref? (lambda (alias expr)
 	(match expr
