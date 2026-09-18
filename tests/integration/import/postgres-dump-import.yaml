@@ -11,7 +11,11 @@ setup:
 test_cases:
   - name: "Import command eval has local resultrow callback"
     scm: |
-      (psql_eval_import_command "memcp-tests" "" nil "SELECT 1" (sql_policy "root"))
+      (psql_eval_import_command "memcp-tests" "" nil "SELECT 1" (sql_policy "root") nil (newsession))
+
+  - name: "Import command evaluates SET with its own session"
+    scm: |
+      (psql_eval_import_command "memcp-tests" "" nil "SET statement_timeout = 0" (sql_policy "root") nil (newsession))
 
   - name: "Import minimal pg_dump archive into target schema"
     scm: |

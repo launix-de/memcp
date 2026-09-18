@@ -2590,7 +2590,7 @@ func jitCompileSpecialThunk(ctx *JITContext, body Scmer, sliceBase Reg, result J
 		Body:    body,
 		En:      outer,
 		NumVars: len(params),
-	}))
+	}), ctx.CompileScope)
 	if callable.GetTag() != tagProc || callable.Proc() == nil || callable.Proc().Compiled == nil {
 		panic("jit: special-form child did not compile")
 	}
@@ -2605,7 +2605,7 @@ func jitStaticProcForExpr(ctx *JITContext, expr Scmer) (Scmer, *Proc, bool) {
 	if expr.GetTag() == tagProc {
 		proc := expr.Proc()
 		if proc != nil && proc.JITCode == 0 && atomic.LoadUint32(&proc.jitCompiling) == 0 {
-			expr = jitCompileModeDeferred(true, expr)
+			expr = jitCompileModeDeferred(true, expr, ctx.CompileScope)
 			proc = expr.Proc()
 		}
 		return expr, proc, proc != nil && proc.JITCode != 0 && proc.Compiled != nil && proc.Compiled.JITDirect != 0
@@ -2619,7 +2619,7 @@ func jitStaticProcForExpr(ctx *JITContext, expr Scmer) (Scmer, *Proc, bool) {
 			if value.Loc == LocImm && value.Imm.GetTag() == tagProc {
 				proc := value.Imm.Proc()
 				if proc != nil && proc.JITCode == 0 && atomic.LoadUint32(&proc.jitCompiling) == 0 {
-					value.Imm = jitCompileModeDeferred(true, value.Imm)
+					value.Imm = jitCompileModeDeferred(true, value.Imm, ctx.CompileScope)
 					proc = value.Imm.Proc()
 				}
 				return value.Imm, proc, proc != nil && proc.JITCode != 0 && proc.Compiled != nil && proc.Compiled.JITDirect != 0
@@ -2638,7 +2638,7 @@ func jitStaticProcForExpr(ctx *JITContext, expr Scmer) (Scmer, *Proc, bool) {
 	}
 	proc := value.Proc()
 	if proc != nil && proc.JITCode == 0 && atomic.LoadUint32(&proc.jitCompiling) == 0 {
-		value = jitCompileModeDeferred(true, value)
+		value = jitCompileModeDeferred(true, value, ctx.CompileScope)
 		proc = value.Proc()
 	}
 	return value, proc, proc != nil && proc.JITCode != 0 && proc.Compiled != nil && proc.Compiled.JITDirect != 0
@@ -3161,6 +3161,11 @@ func jitEmitCondJump(ctx *JITContext, expr Scmer, sliceBase Reg, trueLbl, falseL
 // result tells the emitter where to place the output.
 // Panics on unsupported expressions (caught by jitCompileExprBodyToExec).
 func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueDesc) JITValueDesc {
+	if ctx.CompileContext != nil {
+		if err := ctx.CompileContext.Err(); err != nil {
+			panic(err)
+		}
+	}
 	ctx.Coverage.Expressions++
 	if expr.GetTag() == tagSourceInfo {
 		si := expr.SourceInfo()
@@ -3186,7 +3191,7 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 		return JITValueDesc{Loc: LocImm, Type: expr.GetTag(), Imm: expr}
 	case tagProc:
 		if ctx.RecursiveLambdas && expr.Proc() != nil && expr.Proc().Compiled == nil {
-			compiled := jitCompileModeDeferred(true, expr)
+			compiled := jitCompileModeDeferred(true, expr, ctx.CompileScope)
 			if compiled.GetTag() != tagProc || compiled.Proc() == nil || compiled.Proc().Compiled == nil {
 				panic("jit: embedded procedure could not be compiled")
 			}
