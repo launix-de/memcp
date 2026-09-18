@@ -395,3 +395,94 @@ func TestUnfilteredComputeColumnReusesCompletePreparationUntilMutation(t *testin
 		t.Fatalf("repaired appended computed value = %d, want 80", got)
 	}
 }
+
+// TestOrderedComputeInvalidationReadsDeltaUnderShardLock races ordinary
+// concurrent INSERTs (which grow shard.inserts/deltaColumns under s.mu.Lock,
+// each also firing its own AFTER-INSERT invalidateorc trigger) against an
+// explicit, concurrent invalidateORCFromSortKey call — the same entry point
+// the invalidateorc SQL builtin uses, and thus something two overlapping
+// real INSERTs can legitimately trigger concurrently on the same shard.
+// invalidateORCFromSortKey previously read requestShard.columns/getDelta
+// after releasing s.mu.RLock, racing the concurrent INSERT's writes to the
+// same maps/slice. Run with -race to reproduce; it must also converge on the
+// correct running sum, since a lost or corrupted read would otherwise
+// silently produce a wrong aggregate instead of a detectable panic.
+func TestOrderedComputeInvalidationReadsDeltaUnderShardLock(t *testing.T) {
+	defer setupComputeConcurrencyTest(t)()
+
+	CreateDatabase("compconc", false)
+	tbl, _ := CreateTable("compconc", "orcrace", Memory, false)
+	tbl.CreateColumn("grp", "INT", nil, nil)
+	tbl.CreateColumn("amount", "INT", nil, nil)
+	tbl.CreateColumn("running", "INT", nil, nil)
+	tbl.Insert([]string{"grp", "amount"}, [][]scm.Scmer{
+		{scm.NewInt(1), scm.NewInt(10)},
+	}, nil, scm.NewNil(), false, nil)
+
+	mapReduceFn := scm.Eval(scm.Read("test", "(lambda (acc $set v) (begin (define new_acc (+ acc v)) ($set new_acc) new_acc))"), &scm.Globalenv)
+	options := scm.NewSlice([]scm.Scmer{
+		scm.NewString("sortcols"), scm.NewSlice([]scm.Scmer{scm.NewString("grp")}),
+		scm.NewString("sortdirs"), scm.NewSlice([]scm.Scmer{scm.NewBool(false)}),
+		scm.NewString("partitioncount"), scm.NewInt(1),
+		scm.NewString("mapcols"), scm.NewSlice([]scm.Scmer{scm.NewString("amount")}),
+		scm.NewString("mapreducefn"), mapReduceFn,
+		scm.NewString("reduceinit"), scm.NewInt(0),
+	})
+	createcolumn := scm.Globalenv.Vars[scm.Symbol("createcolumn")]
+	if !scm.Apply(
+		createcolumn,
+		NewTableScmer(tbl),
+		scm.NewString("running"),
+		scm.NewString("INT"),
+		scm.NewSlice(nil),
+		options,
+	).Bool() {
+		t.Fatal("createcolumn should upgrade running to a partitioned ORC column")
+	}
+
+	shard := tbl.Shards[0]
+	const rounds = 300
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// Writer: keeps extending shard.inserts/deltaColumns, exactly like an
+	// ordinary concurrent session issuing INSERTs on the same shard.
+	go func() {
+		defer wg.Done()
+		for i := 0; i < rounds; i++ {
+			tbl.Insert([]string{"grp", "amount"}, [][]scm.Scmer{
+				{scm.NewInt(1), scm.NewInt(1)},
+			}, nil, scm.NewNil(), false, nil)
+		}
+	}()
+
+	// Reader: repeatedly drives invalidateORCFromSortKey directly (the same
+	// entry point the invalidateorc SQL builtin uses from an AFTER-INSERT
+	// trigger), so the exact getDelta call fixed in compute.go runs
+	// concurrently with the writer's mutation of shard.inserts/deltaColumns
+	// above, and concurrently with the writer's own trigger-fired calls to
+	// the same function.
+	go func() {
+		defer wg.Done()
+		for i := 0; i < rounds; i++ {
+			tbl.invalidateORCFromSortKey("running", []scm.Scmer{scm.NewInt(1)})
+		}
+	}()
+
+	wg.Wait()
+
+	shard.mu.RLock()
+	proxy, ok := shard.columns["running"].(*StorageComputeProxy)
+	shard.mu.RUnlock()
+	if !ok {
+		t.Fatal("running column lost its ORC proxy after concurrent invalidation")
+	}
+	// running is a cumulative sum within the single "grp" partition, so only
+	// the last inserted row's value reflects every prior row's amount (row 0
+	// is always just its own amount, by definition of a running sum).
+	lastIdx := uint32(rounds)
+	want := int64(10 + rounds)
+	if got := proxy.GetValue(lastIdx).Int(); got != want {
+		t.Fatalf("running[%d] after %d concurrent inserts = %d, want %d", lastIdx, rounds, got, want)
+	}
+}

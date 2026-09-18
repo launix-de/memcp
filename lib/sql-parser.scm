@@ -1581,7 +1581,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			(if policy (policy (coalesce schema2 schema) tbl true) true)
 			(set updaterows2 (if (nil? updaterows) nil (merge updaterows)))
 			(set updatecols (if (nil? updaterows) '() (cons "$update" (merge_unique (extract_assoc updaterows2 (lambda (k v) (extract_stupid v)))))))
-			(define coldesc (coalesce coldesc (map (get_schema (coalesce schema2 schema) tbl) (lambda (col) (col "Field")))))
+			(define coldesc (coalesce coldesc (table_insertable_columns (coalesce schema2 schema) tbl)))
 			/* Validate the complete statement before evaluating or inserting rows.
 			Both literal templates and general expression rows obey SQL arity. */
 			(if (reduce datasets (lambda (valid row)
@@ -1613,7 +1613,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(define datasets (* (parser '("(" (define dataset (* sql_expression ",")) ")") dataset) ","))
 	) (begin
 			(if policy (policy (coalesce schema2 schema) tbl true) true)
-			(define coldesc (coalesce coldesc (map (get_schema (coalesce schema2 schema) tbl) (lambda (col) (col "Field")))))
+			(define coldesc (coalesce coldesc (table_insertable_columns (coalesce schema2 schema) tbl)))
 			(define updaterows2 (merge (map coldesc (lambda (col)
 				(list col (list (quote get_column) "VALUES" true col true))))))
 			(define updatecols (cons "$update" (map coldesc (lambda (col) (concat "NEW." col)))))
@@ -1649,7 +1649,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			(if policy (policy (coalesce schema2 schema) tbl true) true)
 			(set updaterows2 (if (nil? updaterows) nil (merge updaterows)))
 			(set updatecols (if (nil? updaterows) '() (cons "$update" (merge_unique (extract_assoc updaterows2 (lambda (k v) (extract_stupid v)))))))
-			(define coldesc (coalesce coldesc (map (get_schema (coalesce schema2 schema) tbl) (lambda (col) (col "Field")))))
+			(define coldesc (coalesce coldesc (table_insertable_columns (coalesce schema2 schema) tbl)))
 			(sql_insert_select_plan (coalesce schema2 schema) tbl coldesc inner ignoreexists updaterows updaterows2 updatecols)
 	)))
 
@@ -1683,7 +1683,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			(if policy (policy (coalesce schema2 schema) tbl true) true)
 			(set updaterows2 (if (nil? updaterows) nil (merge updaterows)))
 			(set updatecols (if (nil? updaterows) '() (cons "$update" (merge_unique (extract_assoc updaterows2 (lambda (k v) (extract_stupid v)))))))
-			(define coldesc (coalesce coldesc (map (get_schema (coalesce schema2 schema) tbl) (lambda (col) (col "Field")))))
+			(define coldesc (coalesce coldesc (table_insertable_columns (coalesce schema2 schema) tbl)))
 			(sql_insert_select_plan (coalesce schema2 schema) tbl coldesc inner ignoreexists updaterows updaterows2 updatecols)
 	)))
 

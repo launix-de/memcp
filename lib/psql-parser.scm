@@ -804,7 +804,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			(set updaterows3 (coalesce conflictupdates updaterows))
 			(set updaterows2 (if (nil? updaterows3) nil (merge updaterows3)))
 			(set updatecols (if (nil? updaterows3) '() (cons "$update" (merge_unique (extract_assoc updaterows2 (lambda (k v) (extract_stupid v)))))))
-			(define coldesc (coalesce coldesc (map (get_schema (coalesce schema2 schema) tbl) (lambda (col) (col "Field")))))
+			(define coldesc (coalesce coldesc (table_insertable_columns (coalesce schema2 schema) tbl)))
 			'('insert '('table (coalesce schema2 schema) tbl) (cons list coldesc) (cons list (map datasets (lambda (dataset) (cons list dataset)))) (cons list updatecols)
 				(if (or do_nothing (and ignoreexists (nil? updaterows3)))
 					'((quote lambda) '() 0)
@@ -842,7 +842,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			(if policy (policy (coalesce schema2 schema) tbl true) true)
 			(set updaterows2 (if (nil? updaterows) nil (merge updaterows)))
 			(set updatecols (if (nil? updaterows) '() (cons "$update" (merge_unique (extract_assoc updaterows2 (lambda (k v) (extract_stupid v)))))))
-			(define coldesc (coalesce coldesc (map (get_schema (coalesce schema2 schema) tbl) (lambda (col) (col "Field")))))
+			(define coldesc (coalesce coldesc (table_insertable_columns (coalesce schema2 schema) tbl)))
 			'('begin
 				'('set 'resultrow '('lambda '('item) '('insert '('table (coalesce schema2 schema) tbl) (cons list coldesc) (cons list '((cons list (map (produceN (count coldesc)) (lambda (i) '('nth 'item (+ (* i 2) 1))))))) (cons list updatecols) (if ignoreexists '('lambda '() true) (if (nil? updaterows) nil '('lambda (map updatecols (lambda (c) (symbol c))) '('$update (cons 'list (map_assoc updaterows2 (lambda (k v) (replace_stupid v)))))))) false '('lambda '('id) '('session "last_insert_id" 'id)))))
 				(build_queryplan_term (sql_expand_views inner policy) planning_session tx)
@@ -1373,8 +1373,9 @@ arithmetic; leave expressions containing columns or functions untouched. */
 	(if (empty_list? rows)
 		false
 		(begin
-			(insert (table schema tbl) columns rows)
+			(insert (table schema tbl) columns (reverse rows))
 			(state "copy_rows" '())
+			(state "copy_rows_count" 0)
 			true))
 )))
 
@@ -1382,7 +1383,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 	(define tbl (state "copy_tbl"))
 	(define columns (state "copy_cols"))
 	(define column_types (state "copy_types"))
-	(if (equal? line "\\.\n")
+	(if (equal? (psql_copy_line_payload line) "\\.")
 		(begin
 			(psql_copy_flush_rows schema tbl columns state)
 			(state "copy_tbl" nil)
@@ -1390,22 +1391,27 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			(state "copy_types" nil)
 			true)
 		(begin
-			(state "copy_rows" (merge
-				(state "copy_rows")
-				(list (psql_copy_decode_row (split (psql_copy_line_payload line) "\t") column_types))))
-			(if (>= (count (state "copy_rows")) 1000)
+			(state "copy_rows" (cons
+				(psql_copy_decode_row (split (psql_copy_line_payload line) "\t") column_types)
+				(state "copy_rows")))
+			(state "copy_rows_count" (+ (state "copy_rows_count") 1))
+			(if (>= (state "copy_rows_count") 1000)
 				(psql_copy_flush_rows schema tbl columns state)
 				false)))
 )))
 
 (define psql_copy_insert_stream (lambda (schema tbl columns source) (begin
-	(define column_types (psql_copy_column_types schema tbl columns))
-	(insert (table schema tbl) columns
-		(map
-			(filter (split (readfile source) "\n") (lambda (line)
-				(and (not (equal? line "")) (not (equal? line "\\."))))
-			)
-			(lambda (line) (psql_copy_decode_row (split line "\t") column_types))))
+	(define state (newsession))
+	(state "copy_tbl" tbl)
+	(state "copy_cols" columns)
+	(state "copy_types" (psql_copy_column_types schema tbl columns))
+	(state "copy_rows" '())
+	(state "copy_rows_count" 0)
+	(load source (lambda (line)
+		(if (equal? (psql_copy_line_payload line) "")
+			false
+			(psql_copy_stdin_line schema state line))) "\n")
+	(psql_copy_flush_rows schema tbl columns state)
 )))
 
 (define psql_skip_function_line (lambda (state psql_line line)
@@ -1477,7 +1483,7 @@ substring replace (which is the historical behaviour). */
 					raw_plan))))
 )))
 
-(define psql_eval_import_command (lambda (schema source_dir dump_schema command policy tx) (begin
+(define psql_eval_import_command (lambda (schema source_dir dump_schema command policy tx session) (begin
 	(define resultrow (lambda (row) true))
 	(match command
 		(regex "^[\\r\\n\\t ]*COPY (.*) FROM '([^']+)'\\z" _ def path)
@@ -1510,7 +1516,8 @@ substring replace (which is the historical behaviour). */
 					(state "copy_tbl" tbl)
 					(state "copy_cols" columns)
 					(state "copy_types" (psql_copy_column_types schema tbl columns))
-					(state "copy_rows" '())))
+					(state "copy_rows" '())
+					(state "copy_rows_count" 0)))
 				(concat "COPY " def " FROM '" path "';\n") (psql_handle_copy_path schema source_dir def path)
 				(concat start ";" rest) (begin
 					(state "dump_schema" (psql_eval_import_command
@@ -1518,7 +1525,7 @@ substring replace (which is the historical behaviour). */
 						source_dir
 						(state "dump_schema")
 						(psql_normalize_command (concat (state "sql") start))
-						policy nil))
+						policy nil session))
 					(state "sql" rest))
 				(state "sql" (concat (state "sql") line))))
 	)))
