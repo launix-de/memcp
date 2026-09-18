@@ -4485,16 +4485,9 @@ func fkExistenceCheck(currentTx *TxContext, tbl *table, filterCols []string, val
 		}
 		return scm.NewBool(true)
 	})
-	mapReduceFn := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
-		if scm.ToBool(a[0]) {
-			return scm.NewBool(true)
-		}
-		return scm.NewBool(true)
-	})
-	combineFn := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
-		return scm.NewBool(scm.ToBool(a[0]) || scm.ToBool(a[1]))
-	})
-	return scm.ToBool(tbl.scan(currentTx, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, filterCols, condition, filterCols[:0], mapReduceFn, scm.NewBool(false), combineFn, false))
+	// Foreign-key probes are exact equality lookups. Expose those bounds to
+	// the shared scan engine and stop after the first visible matching row.
+	return tbl.scanExists(currentTx, scm.NewSlice(newExactScanAccessSchema(filterCols)), vals, filterCols, condition)
 }
 
 // fkCascadeDelete deletes rows in childTbl where cols match vals.
