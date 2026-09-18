@@ -430,7 +430,7 @@ test_cases:
           (equal? (count (compiles)) 2)
           (equal? (count (entry "variants")) 2)
           (strlike (pretty_print latest_formula 120) "%(lambda (session tx resultrow resultfields)%")
-          ((sql_queryplan_compile_formula (car (car (entry "variants"))))
+          ((sql_queryplan_compile_formula nil (car (car (entry "variants"))))
             sess nil (lambda (_row) nil) (lambda (_fields) nil)))
           "ok"
           (error (concat "unexpected guarded cache state: " first_result "/" second_result "/" third_result
@@ -549,7 +549,7 @@ test_cases:
         (planning "__memcp_queryplan_observed_session_keys" (newsession))
         (define pattern (list (quote concat) "%" (list (quote session) "v1") "%"))
         (define compile_broad (planner_broad_like_expr? pattern planning))
-        (define guard (sql_queryplan_compile_formula
+        (define guard (sql_queryplan_compile_formula nil
           (sql_queryplan_bind_execution_session (sql_queryplan_guard_from_session planning))))
         (if (and compile_broad (guard planning nil (lambda (_row) nil) (lambda (_fields) nil)))
           "ok"
@@ -606,7 +606,7 @@ test_cases:
               (list "right" (planning "right") (list (quote session) "right")))
             (list (list '("left" "right") 0.01 nil nil true nil 0.01))
             '() planning))))
-        (define guard (sql_queryplan_compile_formula
+        (define guard (sql_queryplan_compile_formula nil
           (sql_queryplan_bind_execution_session (sql_queryplan_guard_from_session planning))))
         (define initially_valid (guard planning nil (lambda (_row) nil) (lambda (_fields) nil)))
         (planning "left" 10)

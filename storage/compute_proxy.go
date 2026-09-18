@@ -158,7 +158,7 @@ func appendComputeProxyRows(newProxy *StorageComputeProxy, oldProxy *StorageComp
 				newIdx++
 				continue
 			}
-			if !oldProxy.compressed && !oldProxy.validMask.Get(uint(oldIdx)) {
+			if !oldProxy.compressed && !oldProxy.validMask.AtomicGet(uint(oldIdx)) {
 				newIdx++
 				continue
 			}
@@ -169,7 +169,7 @@ func appendComputeProxyRows(newProxy *StorageComputeProxy, oldProxy *StorageComp
 			val = oldProxy.main.GetValue(oldIdx)
 		}
 		newProxy.delta[newIdx] = val
-		newProxy.validMask.Set(uint(newIdx), true)
+		newProxy.validMask.AtomicSet(uint(newIdx), true)
 		newIdx++
 	}
 	return newIdx
@@ -192,7 +192,7 @@ func (r *computeProxyReader) GetValue(idx uint32) scm.Scmer {
 	if p.compressed && idx < p.count && p.main != nil {
 		return p.main.GetValue(idx)
 	}
-	if p.validMask.Get(uint(idx)) && idx < p.count && p.main != nil {
+	if p.validMask.AtomicGet(uint(idx)) && idx < p.count && p.main != nil {
 		return p.main.GetValue(idx)
 	}
 
@@ -204,7 +204,7 @@ func (r *computeProxyReader) GetValue(idx uint32) scm.Scmer {
 	p.mu.Lock()
 	p.delta[idx] = val
 	p.mu.Unlock()
-	p.validMask.Set(uint(idx), true)
+	p.validMask.AtomicSet(uint(idx), true)
 	return val
 }
 
@@ -355,7 +355,7 @@ func (p *StorageComputeProxy) prewarmDeltaRows(_ *TxContext, filterCols []string
 			}
 		}
 		p.delta[recid] = value
-		p.validMask.Set(uint(recid), true)
+		p.validMask.AtomicSet(uint(recid), true)
 	}
 	p.mu.Unlock()
 }
@@ -400,11 +400,11 @@ func (p *StorageComputeProxy) GetValue(idx uint32) scm.Scmer {
 func (p *StorageComputeProxy) getValueTx(tx *TxContext, idx uint32) scm.Scmer {
 	// ORC path: validity tracked per-row via validMask.
 	if p.isOrdered {
-		if !p.validMask.Get(uint(idx)) {
+		if !p.validMask.AtomicGet(uint(idx)) {
 			// Invalid row → on-demand incremental recompute (or wait for the
 			// ongoing one to complete).
 			p.shard.t.orcMu.Lock()
-			if !p.validMask.Get(uint(idx)) {
+			if !p.validMask.AtomicGet(uint(idx)) {
 				p.shard.t.incrementalRecomputeORC(p.colName, p.shard, idx)
 			}
 			p.shard.t.orcMu.Unlock()
@@ -437,7 +437,7 @@ func (p *StorageComputeProxy) getValueTx(tx *TxContext, idx uint32) scm.Scmer {
 	}
 
 	// Fast path 2: valid bit set → value is cached in main storage for main rows.
-	if p.validMask.Get(uint(idx)) && idx < p.count && p.main != nil {
+	if p.validMask.AtomicGet(uint(idx)) && idx < p.count && p.main != nil {
 		return p.main.GetValue(idx)
 	}
 
@@ -453,7 +453,7 @@ func (p *StorageComputeProxy) getValueTx(tx *TxContext, idx uint32) scm.Scmer {
 	p.mu.Lock()
 	p.delta[idx] = val
 	p.mu.Unlock()
-	p.validMask.Set(uint(idx), true)
+	p.validMask.AtomicSet(uint(idx), true)
 
 	return val
 }
@@ -462,7 +462,7 @@ func (p *StorageComputeProxy) getValueTx(tx *TxContext, idx uint32) scm.Scmer {
 // repair. Recompute scans request it through the explicit $orc_stored pseudo
 // column; ordinary readers continue to wait for or initiate repair in getValueTx.
 func (p *StorageComputeProxy) storedORCValue(idx uint32) scm.Scmer {
-	if !p.validMask.Get(uint(idx)) {
+	if !p.validMask.AtomicGet(uint(idx)) {
 		return scm.NewNil()
 	}
 	p.mu.RLock()
@@ -489,7 +489,7 @@ func (p *StorageComputeProxy) getValueRLocked(_ *TxContext, idx uint32) scm.Scme
 	count := p.count
 	compressed := p.compressed
 	p.mu.RUnlock()
-	if idx < count && main != nil && (compressed || p.validMask.Get(uint(idx))) {
+	if idx < count && main != nil && (compressed || p.validMask.AtomicGet(uint(idx))) {
 		return main.GetValue(idx)
 	}
 
@@ -515,7 +515,7 @@ func (p *StorageComputeProxy) getValueRLocked(_ *TxContext, idx uint32) scm.Scme
 	p.mu.Lock()
 	p.delta[idx] = value
 	p.mu.Unlock()
-	p.validMask.Set(uint(idx), true)
+	p.validMask.AtomicSet(uint(idx), true)
 	return value
 }
 
@@ -614,7 +614,7 @@ func (p *StorageComputeProxy) Compress(_ *TxContext) {
 			if val, ok := p.delta[idx]; ok {
 				return val
 			}
-			if p.main != nil && p.validMask.Get(uint(idx)) {
+			if p.main != nil && p.validMask.AtomicGet(uint(idx)) {
 				return p.main.GetValue(idx)
 			}
 			for j := range readers {
@@ -702,7 +702,7 @@ func (p *StorageComputeProxy) CompressFiltered(_ *TxContext, filterCols []string
 					colvalues[j] = readers[j].GetValue(i)
 				}
 				p.delta[i] = scm.Apply(p.computor, colvalues...)
-				p.validMask.Set(uint(i), true)
+				p.validMask.AtomicSet(uint(i), true)
 			}
 		}
 	}()
@@ -726,7 +726,7 @@ func (p *StorageComputeProxy) InvalidateTx(tx *TxContext, idx uint32) {
 		alreadyLocked := tx != nil && tx.HasShardWrite(p.shard)
 		if scmer, ok := p.main.(*StorageSCMER); ok {
 			if idx >= p.count {
-				p.validMask.Set(uint(idx), false)
+				p.validMask.AtomicSet(uint(idx), false)
 				delete(p.delta, idx)
 				return
 			}
@@ -752,7 +752,7 @@ func (p *StorageComputeProxy) InvalidateTx(tx *TxContext, idx uint32) {
 			return
 		}
 	}
-	p.validMask.Set(uint(idx), false)
+	p.validMask.AtomicSet(uint(idx), false)
 	delete(p.delta, idx)
 }
 
@@ -819,7 +819,7 @@ func (p *StorageComputeProxy) IncrementalUpdate(idx uint32, delta scm.Scmer) {
 func (p *StorageComputeProxy) IncrementalUpdateTx(tx *TxContext, idx uint32, delta scm.Scmer) {
 	p.revision.Add(1)
 	p.mu.Lock()
-	if !p.compressed && !p.validMask.Get(uint(idx)) {
+	if !p.compressed && !p.validMask.AtomicGet(uint(idx)) {
 		p.mu.Unlock()
 		// Recompute the affected row from the already-mutated source state so the
 		// cache converges immediately even when this row had never been
@@ -856,7 +856,7 @@ func (p *StorageComputeProxy) IncrementalUpdateTx(tx *TxContext, idx uint32, del
 		// non-compressed, mark all rows as valid so IncrementalUpdate works for
 		// other indices too. Values not in delta will fall through to main.
 		for i := uint32(0); i < p.count; i++ {
-			p.validMask.Set(uint(i), true)
+			p.validMask.AtomicSet(uint(i), true)
 		}
 	}
 	p.mu.Unlock()
@@ -878,11 +878,11 @@ func (p *StorageComputeProxy) SetValue(idx uint32, val scm.Scmer) {
 		// so that GetValue falls through to main for rows not in delta.
 		p.compressed = false
 		for i := uint32(0); i < p.count; i++ {
-			p.validMask.Set(uint(i), true)
+			p.validMask.AtomicSet(uint(i), true)
 		}
 	}
 	p.delta[idx] = val
-	p.validMask.Set(uint(idx), true)
+	p.validMask.AtomicSet(uint(idx), true)
 }
 
 // InvalidateAll marks all rows as needing recomputation (resets validMask).
@@ -1051,12 +1051,12 @@ func (p *StorageComputeProxy) restoreValidMaskFromPayload() {
 	p.validMask = NonLockingReadMap.NonBlockingBitMap{}
 	if p.compressed && p.main != nil {
 		for idx := uint32(0); idx < p.count; idx++ {
-			p.validMask.Set(uint(idx), true)
+			p.validMask.AtomicSet(uint(idx), true)
 		}
 		return
 	}
 	for idx := range p.delta {
-		p.validMask.Set(uint(idx), true)
+		p.validMask.AtomicSet(uint(idx), true)
 	}
 }
 
@@ -1071,7 +1071,7 @@ func (p *StorageComputeProxy) readValidMaskV2(f io.Reader) error {
 		if err := binary.Read(f, binary.LittleEndian, &idx); err != nil {
 			return err
 		}
-		p.validMask.Set(uint(idx), true)
+		p.validMask.AtomicSet(uint(idx), true)
 	}
 	return nil
 }
