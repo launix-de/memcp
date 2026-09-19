@@ -355,7 +355,7 @@ test_cases:
   - name: "Malformed INSERT (MemCP accepts partial values)"
     sql: "INSERT INTO test_table VALUES (3, 'test3')"
     expect:
-      affected_rows: 1
+      error: true
 
   - name: "Invalid CREATE TABLE"
     sql: "CREATE TABLE (id INT, name VARCHAR)"

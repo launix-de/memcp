@@ -804,7 +804,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			(set updaterows3 (coalesce conflictupdates updaterows))
 			(set updaterows2 (if (nil? updaterows3) nil (merge updaterows3)))
 			(set updatecols (if (nil? updaterows3) '() (cons "$update" (merge_unique (extract_assoc updaterows2 (lambda (k v) (extract_stupid v)))))))
-			(define coldesc (coalesce coldesc (map (get_schema (coalesce schema2 schema) tbl) (lambda (col) (col "Field")))))
+			(define coldesc (coalesce coldesc (table_insertable_columns (coalesce schema2 schema) tbl)))
 			'('insert '('table (coalesce schema2 schema) tbl) (cons list coldesc) (cons list (map datasets (lambda (dataset) (cons list dataset)))) (cons list updatecols)
 				(if (or do_nothing (and ignoreexists (nil? updaterows3)))
 					'((quote lambda) '() 0)
@@ -842,7 +842,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			(if policy (policy (coalesce schema2 schema) tbl true) true)
 			(set updaterows2 (if (nil? updaterows) nil (merge updaterows)))
 			(set updatecols (if (nil? updaterows) '() (cons "$update" (merge_unique (extract_assoc updaterows2 (lambda (k v) (extract_stupid v)))))))
-			(define coldesc (coalesce coldesc (map (get_schema (coalesce schema2 schema) tbl) (lambda (col) (col "Field")))))
+			(define coldesc (coalesce coldesc (table_insertable_columns (coalesce schema2 schema) tbl)))
 			'('begin
 				'('set 'resultrow '('lambda '('item) '('insert '('table (coalesce schema2 schema) tbl) (cons list coldesc) (cons list '((cons list (map (produceN (count coldesc)) (lambda (i) '('nth 'item (+ (* i 2) 1))))))) (cons list updatecols) (if ignoreexists '('lambda '() true) (if (nil? updaterows) nil '('lambda (map updatecols (lambda (c) (symbol c))) '('$update (cons 'list (map_assoc updaterows2 (lambda (k v) (replace_stupid v)))))))) false '('lambda '('id) '('session "last_insert_id" 'id)))))
 				(build_queryplan_term (sql_expand_views inner policy) planning_session tx)

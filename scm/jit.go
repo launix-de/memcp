@@ -671,6 +671,12 @@ type jitStackRootBitmap struct {
 	bits  []byte
 }
 
+// jitTestPostEmitHook, when non-nil, receives the JITContext after body
+// emission completes (FrameRoots and Safepoints fully populated) but before
+// finalizeStackMaps discards it. Test-only introspection; production code
+// never sets this.
+var jitTestPostEmitHook func(ctx *JITContext)
+
 // jitSafepoint is recorded while emitting a Go call. FrameSize is deliberately
 // absent: the one-pass emitter only knows the final static frame size after the
 // complete function has been written.

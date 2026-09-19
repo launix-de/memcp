@@ -82,6 +82,22 @@ PostgreSQL parsers should both lower to the same combined operators.
 					(if handle (show handle) (show schema tbl))))
 			(lambda (_e) '())))))
 
+/* Runtime-only helper columns (window-function row-number caches, correlated
+lookup carriers) share the naming conventions already used elsewhere to keep
+them out of filter feedback and plan serialization: a "." or "$" prefix, or
+the "__orc_" family. Implicit INSERT/UPSERT column lists must skip them too,
+since get_schema surfaces them alongside real columns. */
+(define internal_column_name? (lambda (name)
+	(and (string? name) (or
+		(orc_column_name? name)
+		(and (> (strlen name) 0) (or
+			(equal? (substr name 0 1) ".")
+			(equal? (substr name 0 1) "$")))))))
+
+(define table_insertable_columns (lambda (schema tbl)
+	(filter (map (get_schema schema tbl) (lambda (col) (col "Field")))
+		(lambda (name) (not (internal_column_name? name))))))
+
 (define qassoc_get (lambda (xs key default)
 	(get_assoc_pairlist (coalesceNil xs '()) key default)))
 
@@ -408,6 +424,26 @@ query generation is the scope that releases them after execution. */
 (define table_function_columns (lambda (relation)
 	(match relation
 		((symbol table-function) _kind _args columns) columns
+		_ '())))
+/* A literal-rows relation is a FROM source built entirely from compile-time
+constants (a "SELECT <literal>, <literal> UNION SELECT <literal>, <literal>
+..." derived table, the common shape for a dashboard/KPI period table). Unlike
+a general union-block, it never needs decorrelating against concrete per-
+branch values -- there is nothing to decorrelate, the values already ARE
+concrete -- so it can be treated exactly like a base table: compiled once and
+scanned via the ordinary list-scan path (scan/scan_order already accept a
+plain list in place of a table), instead of the general union machinery
+recompiling the whole containing query once per branch. rows is already the
+flat-assoc row format scan's list branch expects: ("col1" val1 "col2" val2 ...)
+per row, so source_table_expr can hand it to scan/scan_order unchanged. */
+(define literal_rows_relation? (lambda (relation) (equal? (logical_op relation) (quote literal-rows))))
+(define literal_rows_columns (lambda (relation)
+	(match relation
+		((symbol literal-rows) columns _rows) columns
+		_ '())))
+(define literal_rows_data (lambda (relation)
+	(match relation
+		((symbol literal-rows) _columns rows) rows
 		_ '())))
 (define stage_output_relation_id (lambda (relation)
 	(match relation
@@ -855,12 +891,13 @@ move arbitrary calls or subqueries across short-circuit guards. */
 		(cons _head tail) (reduce tail (lambda (a b) (or a (expr_contains_window? b))) false)
 		_ false)))
 
+(define orc_column_name? (lambda (col)
+	(and (string? col) (and (>= (strlen col) 6) (equal? (substr col 0 6) "__orc_")))))
+
 (define expr_contains_orc_column? (lambda (expr)
 	(match expr
-		((symbol get_column) _tblvar _ignorecase col _json_path)
-		(and (string? col) (and (>= (strlen col) 6) (equal? (substr col 0 6) "__orc_")))
-		((quote get_column) _tblvar _ignorecase col _json_path)
-		(and (string? col) (and (>= (strlen col) 6) (equal? (substr col 0 6) "__orc_")))
+		((symbol get_column) _tblvar _ignorecase col _json_path) (orc_column_name? col)
+		((quote get_column) _tblvar _ignorecase col _json_path) (orc_column_name? col)
 		(cons _head tail) (reduce tail (lambda (a b) (or a (expr_contains_orc_column? b))) false)
 		_ false)))
 
@@ -4991,7 +5028,9 @@ source alias is the stable identity consumed by all later planner phases. */
 			(map (get_schema (source_schema src) relation) (lambda (column) (column "Field")))
 			(if (table_function_relation? relation)
 				(table_function_columns relation)
-				(binding_field_titles (logical_relation_fields relation)))))))
+				(if (literal_rows_relation? relation)
+					(literal_rows_columns relation)
+					(binding_field_titles (logical_relation_fields relation))))))))
 
 (define binding_column_name (lambda (columns col col_ignorecase)
 	(reduce (coalesceNil columns '()) (lambda (found candidate)
@@ -5592,16 +5631,23 @@ that actually owns the title consumes the reference. */
 		(begin
 			(define src (car sources))
 			(define rest (cdr sources))
-			(define relation (normalize_query_ast (source_relation src)))
+			(define raw_relation (normalize_query_ast (source_relation src)))
+			/* A literal-only union (see single_union_source/first_embedded_union_source
+			above) never reaches here as a plain union-block: convert it to a
+			literal-rows relation right here and let it fall through the same path
+			as a base table -- compiled once, no per-branch recompilation. */
+			(define relation (if (literal_only_union_block? raw_relation)
+				(literal_union_relation raw_relation) raw_relation))
 			(define tail (flatten_source_list rest ctx))
 			(define tail_sources (nth tail 0))
 			(define tail_rewrites (nth tail 1))
 			(define tail_wheres (nth tail 2))
 			(define tail_stages (nth tail 3))
-			(if (or (string? relation) (table_function_relation? relation))
+			(if (or (string? relation) (or (table_function_relation? relation) (literal_rows_relation? relation)))
 				(begin
 					(list
-						(cons (untangle_flattened_base_source src ctx) tail_sources)
+						(cons (list (source_alias src) (source_schema src) relation (source_outer? src) (source_join_expr src))
+							tail_sources)
 						tail_rewrites
 						tail_wheres
 						tail_stages))
@@ -5768,13 +5814,126 @@ that actually owns the title consumes the reference. */
 		_ (list '() '() '() '()))))
 
 /* ------------------------------------------------------------------------- */
+/* Literal-only UNION-as-FROM-source: compile once, scan a plain list         */
+
+/* A non-empty list/cons is always a compound expression in this AST (a
+get_column reference, a function call, an operator, a subquery marker); a
+plain literal (number, string, bool, nil) is never represented as one. NULL
+literals fold in here too (nil is the empty list), which is correct: a NULL
+constant is exactly the value we want baked into the row.
+
+NOTE: (session "vN") bind-placeholders (real prepared-statement parameters,
+or PR #883's own constant-projection-row literal parameterizer) are
+deliberately NOT accepted here. Tried accepting them: it compiles and quotes
+cleanly (see git history for the source_table_expr counterpart), but produces
+WRONG results for correlated-subquery shapes, because source_is_base_table?
+(= (string? (source_relation src))) gates group-stage/domain scoping
+decisions at ~70 call sites across queryplan-logical.scm,
+queryplan-optimize.scm and queryplan-physical-plan.scm, and a literal-rows
+relation (a list, not a string) fails all of them. Concretely: a correlated
+aggregate that depends on drv.bound gets computed as a single ungrouped
+constant (k0=1) instead of being scoped inside the per-drv-row loop, once drv
+is a literal-rows source instead of being pre-split by the old distribute
+mechanism -- silently returning NULL, not erroring. This is NOT a narrow
+extension; it needs the same domain-scoping treatment as a real joined table
+would get, project-wide. Until that is designed and reviewed, this predicate
+stays literal-only, so the optimization only fires for
+EXPLAIN/literal-text queries, not real cached/parameterized production
+traffic -- known, tracked gap, not an oversight. */
+(define plain_literal_expr? (lambda (expr)
+	(not (and (list? expr) (not (empty_list? expr))))))
+
+(define literal_only_fields? (lambda (fields)
+	(match fields
+		(cons _title (cons expr rest)) (and (plain_literal_expr? expr) (literal_only_fields? rest))
+		_ true)))
+
+/* No FROM, no filtering/grouping/ordering of its own, every projected value a
+plain literal -- this is exactly one "SELECT <lit> AS a, <lit> AS b" branch of
+a constant-row UNION, the shape PR #883's lexical parameterizer already
+recognizes at the SQL-text level (const_row_ok in lib/sql-parameters.scm).
+Checked here at the AST level instead, once per branch. */
+(define literal_only_query_block? (lambda (block)
+	(and
+		(empty_list? (qb_sources block))
+		(equal? (coalesceNil (qb_where block) true) true)
+		(empty_list? (qb_group block))
+		(nil? (qb_having block))
+		(empty_list? (qb_order block))
+		(nil? (qb_limit block))
+		(nil? (qb_offset block))
+		(empty_list? (qb_hidden block))
+		(literal_only_fields? (qb_fields block)))))
+
+(define literal_only_union_block? (lambda (relation)
+	(and (union_block? relation)
+		(reduce (coalesceNil (union_branches relation) '()) (lambda (all_literal branch)
+			(and all_literal (begin
+				(define normalized (normalize_query_ast branch))
+				(and (query_block? normalized) (literal_only_query_block? normalized)))))
+			true))))
+
+(define union_branch_field_names (lambda (fields)
+	(match fields
+		(cons title (cons _expr rest)) (cons title (union_branch_field_names rest))
+		_ '())))
+
+(define union_branch_field_values (lambda (fields)
+	(match fields
+		(cons _title (cons expr rest)) (cons expr (union_branch_field_values rest))
+		_ '())))
+
+/* scan's list branch reads each row through Go's `dataset`, a flat
+key/value-interleaved slice (storage/table.go: dataset.GetI walks it two at a
+time), not a positional tuple -- so each row must carry its own column names. */
+(define literal_rows_assoc_row (lambda (columns values)
+	(match columns
+		(cons col rest_cols) (match values
+			(cons val rest_vals) (cons col (cons val (literal_rows_assoc_row rest_cols rest_vals)))
+			_ '())
+		_ '())))
+
+/* merge_unique concatenates its argument lists into ONE flat list and dedupes
+the flattened ELEMENTS -- it is for merging several independently-produced
+lists of items, not for deduping a list of ROWS while keeping each row intact
+(that flattens (0 100) and (1 200) into (0 100 1 200), destroying the row
+boundaries). A plain recursive contains?-based fold, comparing whole rows,
+is what UNION DISTINCT actually needs here. contains? requires its first
+argument to be a genuine list value, not nil -- (list) rather than '() as
+the base case. */
+(define literal_union_dedupe_rows (lambda (rows)
+	(match rows
+		(cons row rest) (begin
+			(define deduped_rest (literal_union_dedupe_rows rest))
+			(if (contains? deduped_rest row) deduped_rest (cons row deduped_rest)))
+		_ (list))))
+
+(define literal_union_relation (lambda (relation)
+	(begin
+		(define branches (union_branches relation))
+		(define first_fields (qb_fields (normalize_query_ast (car branches))))
+		(define columns (union_branch_field_names first_fields))
+		(define value_rows (map branches (lambda (branch)
+			(union_branch_field_values (qb_fields (normalize_query_ast branch))))))
+		/* All values are already known literals, so UNION (as opposed to UNION
+		ALL) can dedupe right here at compile time instead of needing any
+		runtime distinct machinery. */
+		(define deduped_rows (if (equal? (union_mode relation) (quote distinct))
+			(literal_union_dedupe_rows value_rows) value_rows))
+		(list (quote literal-rows) columns
+			(map deduped_rows (lambda (values) (literal_rows_assoc_row columns values)))))))
+
+/* ------------------------------------------------------------------------- */
 /* Top-down untangle                                                          */
 
 (define single_union_source (lambda (block)
 	(match (coalesceNil (qb_sources block) '())
 		'(src) (begin
 			(define relation (normalize_query_ast (source_relation src)))
-			(if (union_block? relation)
+			/* A literal-only union skips the distribute-and-recompile-per-branch
+			rewrite entirely: flatten_source_list below turns it straight into a
+			literal-rows relation, compiled once. */
+			(if (and (union_block? relation) (not (literal_only_union_block? relation)))
 				(if (or (source_outer? src) (not (nil? (source_join_expr src))))
 					nil
 					src)
@@ -5787,7 +5946,7 @@ that actually owns the title consumes the reference. */
 			found
 			(begin
 				(define relation (normalize_query_ast (source_relation src)))
-				(if (and (union_block? relation)
+				(if (and (union_block? relation) (not (literal_only_union_block? relation))
 					(and (not (source_outer? src)) (nil? (source_join_expr src))))
 					src
 					nil))))

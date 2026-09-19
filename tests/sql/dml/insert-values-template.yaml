@@ -1,0 +1,93 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: "1.0"
+  description: "Bulk VALUES templates preserve literals, current bindings and expression evaluation"
+setup:
+  - sql: "DROP TABLE IF EXISTS ivt_booleans"
+  - sql: "DROP TABLE IF EXISTS ivt_values"
+  - sql: "CREATE TABLE ivt_booleans (id INT, flag BOOLEAN, note TEXT)"
+  - sql: "CREATE TABLE ivt_values (id INT, text_value TEXT, number_value INT)"
+test_cases:
+  - name: "Insert scalar literals including explicit NULL"
+    sql: "INSERT INTO ivt_values VALUES (1, 'first', NULL), (2, 'second', -4)"
+    expect:
+      affected_rows: 2
+  - name: "Reuse shape with different bindings"
+    sql: "INSERT INTO ivt_values VALUES (3, 'third', NULL), (4, 'fourth', -8)"
+    expect:
+      affected_rows: 2
+  - name: "Session lookup and computed expression retain their semantics"
+    session_id: "ivt-expression"
+    setup:
+      - sql: "SET @ivt_text = 'session'"
+    sql: "INSERT INTO ivt_values VALUES (5, @ivt_text, LENGTH('abc'))"
+    expect:
+      affected_rows: 1
+  - name: "Literal-row speculation preserves placeholder order for expressions"
+    sql: "INSERT INTO ivt_values VALUES (?, ?, ? + ?), (?, ?, ?)"
+    params: [6, six, 10, 2, 7, seven, 3]
+    expect:
+      affected_rows: 2
+  - name: "Rows retain NULL and fresh values"
+    sql: "SELECT * FROM ivt_values ORDER BY id"
+    expect:
+      rows: 7
+      data:
+        - {id: 1, text_value: first, number_value: null}
+        - {id: 2, text_value: second, number_value: -4}
+        - {id: 3, text_value: third, number_value: null}
+        - {id: 4, text_value: fourth, number_value: -8}
+        - {id: 5, text_value: session, number_value: 3}
+        - {id: 6, text_value: six, number_value: 12}
+        - {id: 7, text_value: seven, number_value: 3}
+  - name: "Boolean literals do not consume placeholder positions"
+    sql: "INSERT INTO ivt_booleans VALUES (10, TRUE, 'sql_insert_placeholder'), (20, FALSE, 'tail')"
+    expect: {affected_rows: 2}
+  - name: "Boolean literals retain their values beside prepared parameters"
+    sql: "INSERT INTO ivt_booleans VALUES (?, TRUE, ?), (?, FALSE, ?)"
+    params: [30, third, 40, fourth]
+    expect: {affected_rows: 2}
+  - name: "Boolean literals and the marker-like string survive binding"
+    sql: "SELECT * FROM ivt_booleans ORDER BY id"
+    expect:
+      data:
+        - {id: 10, flag: true, note: sql_insert_placeholder}
+        - {id: 20, flag: false, note: tail}
+        - {id: 30, flag: true, note: third}
+        - {id: 40, flag: false, note: fourth}
+  - name: "Simple template reads the current session value"
+    session_id: "ivt-template-session"
+    setup:
+      - sql: "SET @ivt_note = 'before'"
+    sql: "INSERT INTO ivt_booleans VALUES (50, TRUE, @ivt_note)"
+    expect: {affected_rows: 1}
+  - name: "Reused template refreshes its session binding"
+    session_id: "ivt-template-session"
+    setup:
+      - sql: "SET @ivt_note = 'after'"
+    sql: "INSERT INTO ivt_booleans VALUES (60, TRUE, @ivt_note)"
+    expect: {affected_rows: 1}
+  - name: "Session values are read per execution"
+    sql: "SELECT id, note FROM ivt_booleans WHERE id >= 50 ORDER BY id"
+    expect:
+      data:
+        - {id: 50, note: before}
+        - {id: 60, note: after}
+  - name: "A short literal row is rejected"
+    sql: "INSERT INTO ivt_values VALUES (8, 'short')"
+    expect: {error: true}
+  - name: "An extra literal cell is rejected"
+    sql: "INSERT INTO ivt_values VALUES (8, 'extra', 1, 2)"
+    expect: {error: true}
+  - name: "Incomplete expression after speculative placeholders is rejected"
+    sql: "INSERT INTO ivt_values VALUES (?, ?, ? + )"
+    params: [8, invalid, 1]
+    expect: {error: true}
+  - name: "Rejected statements do not insert rows"
+    sql: "SELECT COUNT(*) AS n FROM ivt_values"
+    expect: {data: [{n: 7}]}
+
+cleanup:
+  - sql: "DROP TABLE ivt_booleans"
+  - sql: "DROP TABLE ivt_values"

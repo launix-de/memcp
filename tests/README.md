@@ -57,3 +57,6 @@ The total may be at most 20% slower; no warmup bonus or fixed jitter allowance
 extends that limit. Suspect totals receive the usual complete fresh-fixture
 ABBA verification, with medians taken across whole workload totals. Independent
 latency tests keep their existing median-per-request policy.
+
+- `sql/dml/insert-values-template.yaml`: Bulk INSERT literals, session bindings and computed cells.
+- `performance/bulk-insert-compile.yaml`: Cold compilation of parameterized bulk INSERT rows.

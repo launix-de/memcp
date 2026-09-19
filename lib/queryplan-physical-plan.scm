@@ -3236,10 +3236,22 @@ tools/costgen; this lowering adds no hand-tuned crossover. */
 		(and (string? relation)
 			(equal?? schema "information_schema")))))
 
+/* A literal-rows source (see lib/queryplan-logical.scm) is compiled once and
+scanned via the plain-list branch scan/scan_order already support -- no
+per-branch recompilation, no temporary storage table. Its rows are already
+in scan's expected flat-assoc row format, so this just quotes them. */
+/* literal-rows values are, for now, always raw compile-time literals (see
+plain_literal_expr? in lib/queryplan-logical.scm), so quoting the whole
+row-list as static data is correct and cheap. Session-var placeholder values
+are not yet accepted into a literal-rows relation at all -- see the NOTE on
+plain_literal_expr? for why (group-stage/domain scoping gap, not a narrow
+fix). */
 (define source_table_expr (lambda (src)
-	(if (information_schema_source? (source_schema src) (source_relation src))
-		(list (quote information_schema_rows) (source_schema src) (source_relation src))
-		(list (quote table) (source_schema src) (source_relation src)))))
+	(if (literal_rows_relation? (source_relation src))
+		(list (quote quote) (literal_rows_data (source_relation src)))
+		(if (information_schema_source? (source_schema src) (source_relation src))
+			(list (quote information_schema_rows) (source_schema src) (source_relation src))
+			(list (quote table) (source_schema src) (source_relation src))))))
 
 (define source_table_expr_using (lambda (stages src)
 	(begin
@@ -4405,7 +4417,7 @@ scalar comparison work rather than an uncalibrated multiplier. */
 		(define src (car (qb_sources block)))
 		(define fields (expand_query_block_fields (qb_sources block) (qb_fields block)))
 		(define grouped_block (expand_grouped_query_block block))
-		(if (not (source_is_base_table? src))
+		(if (not (or (source_is_base_table? src) (literal_rows_relation? (source_relation src))))
 			(neumann_fail "build_queryplan" "single-source query-block lowering only supports base tables")
 			true)
 		(if (not (empty_list? (qb_stages block)))
@@ -7264,7 +7276,7 @@ carrier remains on the measured direct path and is never built eagerly. */
 				stages result_mode probe_context scalar_plan continuation outer_scan direct_group_stage facts)
 			(begin
 				(define future_sources (join_optimizer_sources_for_order all_sources future_aliases))
-				(if (not (source_is_base_table? src))
+				(if (not (or (source_is_base_table? src) (literal_rows_relation? (source_relation src))))
 					(neumann_fail "build_queryplan" "multi-source query-block lowering only supports base tables after untangle")
 					true)
 				(define alias (source_alias src))
