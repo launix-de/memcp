@@ -1,0 +1,44 @@
+# Copyright (C) 2026 MemCP Contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: "1.0"
+  description: >
+    Two structurally identical correlated scalar subqueries, each with its
+    own distinct SQL-surface alias (the shape a query builder that assigns
+    fresh per-occurrence aliases actually produces), must still share one
+    materialized stage. stage_id hashing canonicalizes by structural role
+    (table/position), not by the disposable alias spelling.
+  isolated: true
+
+setup:
+  - sql: "DROP TABLE IF EXISTS csh_obj"
+  - sql: "CREATE TABLE csh_obj (id INT)"
+  - sql: "INSERT INTO csh_obj VALUES (1),(2),(3),(4),(5)"
+
+test_cases:
+  # Before this fix, stage_id hashed the raw bound subquery AST directly --
+  # including the "alpha"/"beta" alias spelling -- so these two otherwise
+  # identical correlated subqueries never compared equal for
+  # unique_stages_by_id and each built its own copy of the csh_obj
+  # group-cache table. The gate sits just above the fixed plan size so it
+  # trips if a future change reintroduces the duplication.
+  - name: "Two correlated scalar subqueries with different own aliases share one stage"
+    max_plan_size: 9000
+    sql: |
+      SELECT drv.idx,
+        (SELECT SUM(alpha.id) FROM csh_obj alpha WHERE alpha.id > drv.bound) AS total_a,
+        (SELECT SUM(beta.id) FROM csh_obj beta WHERE beta.id > drv.bound) AS total_b
+      FROM (SELECT 0 AS `idx`, 1 AS `bound` UNION SELECT 1 AS `idx`, 2 AS `bound`) AS drv
+      ORDER BY drv.idx
+    expect:
+      rows: 2
+      data:
+        - idx: 0
+          total_a: 14
+          total_b: 14
+        - idx: 1
+          total_a: 12
+          total_b: 12
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS csh_obj"
