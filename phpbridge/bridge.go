@@ -65,6 +65,11 @@ type connection struct {
 	stateValue   scm.Scmer
 	buffer       resultBuffer
 	fields, rows scm.Scmer
+	// timeout is 0 (no per-query deadline) unless PHP explicitly requests one
+	// via PDO::ATTR_TIMEOUT ($pdo->setAttribute(PDO::ATTR_TIMEOUT, seconds)).
+	// A query still remains cancellable (e.g. by an admin "kill query") even
+	// with no timeout set -- see memcp_query's use of context.WithCancel.
+	timeout time.Duration
 }
 
 // Only the connection owner resets/releases buffers, after the synchronous
@@ -227,6 +232,19 @@ func memcp_open(db, username, password *C.char) (r *C.memcp_result) {
 	return r
 }
 
+//export memcp_set_query_timeout
+func memcp_set_query_timeout(handle C.uintptr_t, seconds C.int64_t) {
+	defer func() {
+		if v := recover(); v != nil {
+			scm.PrintError(v)
+		}
+	}()
+	c := cgo.Handle(handle).Value().(*connection)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.timeout = time.Duration(seconds) * time.Second
+}
+
 //export memcp_close
 func memcp_close(handle C.uintptr_t) {
 	defer func() {
@@ -253,7 +271,16 @@ func memcp_query(handle C.uintptr_t, sql *C.char, length C.size_t) (r *C.memcp_r
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	statement := C.GoStringN(sql, C.int(length))
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// No deadline unless PHP explicitly requested one via PDO::ATTR_TIMEOUT --
+	// see memcp_set_query_timeout. The query is still cancellable regardless
+	// (state.SetCancel below), just not on an automatic clock.
+	var ctx context.Context
+	var cancel context.CancelFunc
+	if c.timeout > 0 {
+		ctx, cancel = context.WithTimeout(context.Background(), c.timeout)
+	} else {
+		ctx, cancel = context.WithCancel(context.Background())
+	}
 	defer cancel()
 	seq := c.state.BeginQuery("Query", statement)
 	c.state.SetCancel(seq, cancel)
