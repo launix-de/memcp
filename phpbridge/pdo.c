@@ -242,6 +242,11 @@ static zend_string *last_id(pdo_dbh_t *dbh, const zend_string *name) {
 }
 static bool set_attribute(pdo_dbh_t *dbh, zend_long attribute, zval *value) {
 	if (attribute == PDO_ATTR_EMULATE_PREPARES && zend_is_true(value)) return true;
+	if (attribute == PDO_ATTR_TIMEOUT) {
+		memcp_db *db = dbh->driver_data;
+		memcp_set_query_timeout(db->handle, zval_get_long(value));
+		return true;
+	}
 	pdo_raise_impl_error(dbh, NULL, "IM001", "Unsupported MemCP PDO attribute"); return false;
 }
 static int get_attribute(pdo_dbh_t *dbh, zend_long attribute, zval *value) {
