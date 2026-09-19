@@ -86,7 +86,9 @@ test_cases:
               (map (produceN 100) (lambda (i) (list i (if (< i 5) "needle" "ordinary") "ordinary"))))
             (insert (table "memcp-tests" "mcw_acl") '("id" "allowed")
               (map (produceN 8) (lambda (i) (list i 1))))
-            (rebuild))
+            (rebuild (table "memcp-tests" "mcw_docs"))
+            (rebuild (table "memcp-tests" "mcw_files"))
+            (rebuild (table "memcp-tests" "mcw_acl")))
     scm: |
       (begin
         (define planning (newsession))
