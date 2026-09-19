@@ -631,6 +631,98 @@ prepare stage creates. */
 		_ src)))
 
 /* ------------------------------------------------------------------------- */
+/* Canonical structural signature for stage-hash identity                    */
+
+/* stage_id (stable_structural_hash of a subquery/keys/condition/aggregates
+tuple) must converge for two structurally identical correlated subqueries
+regardless of which SQL-surface alias spelling each occurrence happens to
+use -- Neumann's dependent-join domain D is a set of correlation VALUES, not
+of syntax, so two occurrences that only differ in alias spelling ARE the
+same stage. The physical group-cache table name (group_table_name in
+queryplan-physical-expr.scm) already gets this right via
+canonical_helper_sources: named by the physical data a source represents
+(schema/table/position), never by its disposable SQL alias. This is the same
+idea, reused one layer earlier at logical stage-id time, so both layers
+agree on identity and no per-scenario alias-preservation flag (like the
+former binding-time flattenable/outer_collision_relevant gates) is needed to
+approximate it -- a bound alias may still be renamed freely for collision
+safety during flattening without ever affecting stage dedup again. */
+
+(define canonical_signature_of_relation (lambda (relation)
+	(if (query_block? relation)
+		(canonical_signature_query_block relation)
+		(if (union_block? relation)
+			(list (quote canon-union) (union_mode relation)
+				(map (coalesceNil (union_branches relation) '()) canonical_signature_of_relation)
+				(canonical_signature_expr (union_order relation) '())
+				(union_limit relation) (union_offset relation))
+			relation))))
+
+(define canonical_signature_of_source (lambda (src)
+	(if (source_is_base_table? src)
+		(list (quote canon-base) (source_schema src) (source_relation src))
+		(list (quote canon-derived) (canonical_signature_of_relation (source_relation src))))))
+
+(define canonical_alias_map_from (lambda (sources pos acc)
+	(match (coalesceNil sources '())
+		(cons src rest)
+		(canonical_alias_map_from rest (+ pos 1)
+			(set_assoc acc (source_alias src) (list (canonical_signature_of_source src) pos)))
+		_ acc)))
+
+/* Position disambiguates self-joins of the same base table, exactly like
+canonical_helper_source_role_from does for the physical layer. */
+(define canonical_alias_map (lambda (sources) (canonical_alias_map_from sources 0 '())))
+
+/* Builds the alias map straight from any bound query fragment's own FROM
+list, so keys/condition/aggregates derived from that fragment's single
+default alias (or its several joined aliases) canonicalize consistently with
+the fragment's own signature below. */
+(define canonical_alias_map_for (lambda (query_like)
+	(canonical_alias_map (qb_sources (normalize_query_ast query_like)))))
+
+(define canonical_tblvar (lambda (tblvar alias_map)
+	(begin
+		(define tag (get_assoc alias_map tblvar nil))
+		(if (nil? tag) tblvar tag))))
+
+(define canonical_signature_expr (lambda (node alias_map)
+	(match node
+		((symbol inner_select) query)
+		(list (quote inner_select) (canonical_signature_of_relation (normalize_query_ast query)))
+		((symbol inner_select_exists) query)
+		(list (quote inner_select_exists) (canonical_signature_of_relation (normalize_query_ast query)))
+		((symbol inner_select_in) probe query)
+		(list (quote inner_select_in) (canonical_signature_expr probe alias_map)
+			(canonical_signature_of_relation (normalize_query_ast query)))
+		((symbol get_column) tblvar tbl_ignorecase col col_ignorecase)
+		(list (quote get_column) (canonical_tblvar tblvar alias_map) tbl_ignorecase col col_ignorecase)
+		((quote get_column) tblvar tbl_ignorecase col col_ignorecase)
+		(list (quote get_column) (canonical_tblvar tblvar alias_map) tbl_ignorecase col col_ignorecase)
+		(cons head tail) (cons (canonical_signature_expr head alias_map)
+			(map tail (lambda (item) (canonical_signature_expr item alias_map))))
+		_ node)))
+
+(define canonical_signature_query_block (lambda (block)
+	(begin
+		(define sources (qb_sources block))
+		(define alias_map (canonical_alias_map sources))
+		(list (quote canon-qb)
+			(map sources canonical_signature_of_source)
+			(canonical_signature_expr (qb_fields block) alias_map)
+			(canonical_signature_expr (qb_where block) alias_map)
+			(canonical_signature_expr (qb_group block) alias_map)
+			(canonical_signature_expr (qb_having block) alias_map)
+			(canonical_signature_expr (qb_order block) alias_map)
+			(qb_limit block)
+			(qb_offset block)
+			(canonical_signature_expr (qb_hidden block) alias_map)))))
+
+/* Canonicalizes a raw or bound query fragment (query-block or union-block,
+typically a stage-builder's own "subquery"/"inner" argument) for hashing. */
+(define canonical_signature (lambda (node) (canonical_signature_of_relation (normalize_query_ast node))))
+
+/* ------------------------------------------------------------------------- */
 /* IR envelope                                                                */
 
 (define make_uctx (lambda (parent attrs)
@@ -1640,6 +1732,14 @@ then matched without repeated deep comparisons. */
 (define btw2025_info_ancestors (lambda (info) (nth info 3)))
 (define btw2025_info_accessing (lambda (info) (nth info 6)))
 (define btw2025_info_accessing_after_simple (lambda (info) (nth info 7)))
+/* The '(1) constant-key fallback is only correct for a stage with NO
+correlation at all (no correlation-pair key, no explicit GROUP BY key, and no
+residual/non-equality correlation). Folding residual_outer_refs in here,
+at the source, keeps that guard in one place instead of duplicated at every
+caller that also carries a residual correlation -- merging '(1) with
+residual keys afterward would otherwise prepend a spurious, always-identical
+key column and silently misalign key_names against a lookup built from
+residual_outer_refs alone. */
 (define group_keys_for_correlations (lambda (inner_default pairs explicit_group_keys)
 	(begin
 		(define corr_keys (correlation_inner_keys inner_default pairs))
@@ -2496,7 +2596,12 @@ general recursive boolean proof above. */
 			(canonical_column_expr_for_alias inner_default expr))))
 		(define keys (merge (list explicit_keys (filter session_keys (lambda (expr)
 			(not (contains? explicit_keys expr)))))))
-		(define stage_id (concat "scalar-group-top:" (stable_structural_hash (list subquery keys ags (qb_order inner)) true)))
+		(define hash_alias_map (canonical_alias_map_for inner))
+		(define stage_id (concat "scalar-group-top:" (stable_structural_hash (list
+			(canonical_signature subquery)
+			(canonical_signature_expr keys hash_alias_map)
+			(canonical_signature_expr ags hash_alias_map)
+			(canonical_signature_expr (qb_order inner) hash_alias_map)) true)))
 		(define stage (make_group_stage
 			stage_id
 			inner_src
@@ -2561,7 +2666,12 @@ general recursive boolean proof above. */
 				(qb_stages inner)
 				(qb_facts inner))))
 		(define stage_condition (if (query_block? stage_input) true condition))
-		(define stage_id (concat "exists:" (stable_structural_hash (list subquery keys outer_domain condition) false)))
+		(define hash_alias_map (canonical_alias_map_for inner))
+		(define stage_id (concat "exists:" (stable_structural_hash (list
+			(canonical_signature subquery)
+			(canonical_signature_expr keys hash_alias_map)
+			(canonical_signature_expr outer_domain hash_alias_map)
+			(canonical_signature_expr condition hash_alias_map)) false)))
 		(define stage (make_group_stage
 			stage_id
 			stage_input
@@ -2637,8 +2747,13 @@ general recursive boolean proof above. */
 			'()
 			(qb_stages inner)
 			(qb_facts inner)))
-		(define stage_id (concat "exists-group:" (stable_structural_hash
-			(list subquery keys outer_domain condition (qb_having inner)) false)))
+		(define hash_alias_map (canonical_alias_map_for inner))
+		(define stage_id (concat "exists-group:" (stable_structural_hash (list
+			(canonical_signature subquery)
+			(canonical_signature_expr keys hash_alias_map)
+			(canonical_signature_expr outer_domain hash_alias_map)
+			(canonical_signature_expr condition hash_alias_map)
+			(canonical_signature_expr (qb_having inner) hash_alias_map)) false)))
 		(define stage (make_group_stage
 			stage_id
 			stage_input
@@ -2948,7 +3063,8 @@ without separately proving two-valued semantics. */
 		(define where_mode (if (>= (count args) 4) (nth args 3) false))
 		(define truth_membership (string? where_mode))
 		(define semijoin_where (and (not truth_membership) where_mode))
-		(define candidate_alias (concat "__in_candidate_" (stable_structural_hash (list probe inner) false)))
+		(define canon_inner (canonical_signature inner))
+		(define candidate_alias (concat "__in_candidate_" (stable_structural_hash (list probe canon_inner) false)))
 		(define union_input (make_union_block
 			(union_mode inner)
 			(map (union_branches inner) make_in_union_candidate_branch)
@@ -2958,8 +3074,8 @@ without separately proving two-valued semantics. */
 				(list (quote alias) candidate_alias))))
 		(define candidate_key (list (quote get_column) candidate_alias false "v" false))
 		(define keys (list candidate_key))
-		(define stage_id (concat "in-candidate:" (stable_structural_hash (list probe inner) false)))
-		(define null_stage_id (concat "in-candidate-null:" (stable_structural_hash inner false)))
+		(define stage_id (concat "in-candidate:" (stable_structural_hash (list probe canon_inner) false)))
+		(define null_stage_id (concat "in-candidate-null:" (stable_structural_hash canon_inner false)))
 		(define null_ag (in_rhs_state_descriptor candidate_key))
 		(define stage (make_group_stage
 			stage_id
@@ -3083,9 +3199,16 @@ without separately proving two-valued semantics. */
 				(qb_stages membership_inner)
 				(qb_facts membership_inner))))
 		(define stage_condition (if (query_block? stage_input) true condition))
-		(define stage_id (concat "in:" (stable_structural_hash (list probe keys lookup_keys condition) false)))
+		(define hash_alias_map (canonical_alias_map_for membership_inner))
+		(define stage_id (concat "in:" (stable_structural_hash (list probe
+			(canonical_signature_expr keys hash_alias_map)
+			(canonical_signature_expr lookup_keys hash_alias_map)
+			(canonical_signature_expr condition hash_alias_map)) false)))
 		(define null_ag (in_rhs_state_descriptor rhs_expr))
-		(define null_stage_id (concat "in-null:" (stable_structural_hash (list outer_domain condition rhs_expr) false)))
+		(define null_stage_id (concat "in-null:" (stable_structural_hash (list
+			(canonical_signature_expr outer_domain hash_alias_map)
+			(canonical_signature_expr condition hash_alias_map)
+			(canonical_signature_expr rhs_expr hash_alias_map)) false)))
 		(define stage (make_group_stage
 			stage_id
 			stage_input
@@ -3277,7 +3400,13 @@ without separately proving two-valued semantics. */
 				(qb_stages inner)
 				(qb_facts inner))))
 		(define stage_condition (if (query_block? stage_input) true condition))
-		(define stage_id (concat "scalar-agg:" (stable_structural_hash (list subquery keys outer_domain condition ags) false)))
+		(define hash_alias_map (canonical_alias_map_for inner))
+		(define stage_id (concat "scalar-agg:" (stable_structural_hash (list
+			(canonical_signature subquery)
+			(canonical_signature_expr keys hash_alias_map)
+			(canonical_signature_expr outer_domain hash_alias_map)
+			(canonical_signature_expr condition hash_alias_map)
+			(canonical_signature_expr ags hash_alias_map)) false)))
 		(define stage (make_group_stage
 			stage_id
 			stage_input
@@ -3365,7 +3494,13 @@ without separately proving two-valued semantics. */
 				(qb_stages inner)
 				(qb_facts inner))))
 		(define stage_condition (if (query_block? stage_input) true condition))
-		(define stage_id (concat "scalar-once:" (stable_structural_hash (list subquery keys outer_domain condition ags) false)))
+		(define hash_alias_map (canonical_alias_map_for inner))
+		(define stage_id (concat "scalar-once:" (stable_structural_hash (list
+			(canonical_signature subquery)
+			(canonical_signature_expr keys hash_alias_map)
+			(canonical_signature_expr outer_domain hash_alias_map)
+			(canonical_signature_expr condition hash_alias_map)
+			(canonical_signature_expr ags hash_alias_map)) false)))
 		(define stage (make_group_stage
 			stage_id
 			stage_input
@@ -3766,7 +3901,13 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 				(qb_stages inner)
 				(qb_facts inner))))
 		(define stage_condition (if (query_block? stage_input) true condition))
-		(define stage_id (concat "scalar-single:" (stable_structural_hash (list subquery keys outer_domain condition ags) false)))
+		(define hash_alias_map (canonical_alias_map_for inner))
+		(define stage_id (concat "scalar-single:" (stable_structural_hash (list
+			(canonical_signature subquery)
+			(canonical_signature_expr keys hash_alias_map)
+			(canonical_signature_expr outer_domain hash_alias_map)
+			(canonical_signature_expr condition hash_alias_map)
+			(canonical_signature_expr ags hash_alias_map)) false)))
 		(define stage (make_group_stage
 			stage_id
 			stage_input
