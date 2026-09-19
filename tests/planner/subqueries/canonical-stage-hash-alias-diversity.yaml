@@ -14,6 +14,9 @@ setup:
   - sql: "DROP TABLE IF EXISTS csh_obj"
   - sql: "CREATE TABLE csh_obj (id INT)"
   - sql: "INSERT INTO csh_obj VALUES (1),(2),(3),(4),(5)"
+  - sql: "DROP TABLE IF EXISTS csh_grp"
+  - sql: "CREATE TABLE csh_grp (id INT PRIMARY KEY, grp INT, val INT)"
+  - sql: "INSERT INTO csh_grp VALUES (1,1,10),(2,1,20),(3,2,30),(4,2,40),(5,2,50)"
 
 test_cases:
   # Before this fix, stage_id hashed the raw bound subquery AST directly --
@@ -40,5 +43,45 @@ test_cases:
           total_a: 12
           total_b: 12
 
+  # scalar-agg/scalar-single stage_id deliberately excludes which aggregate
+  # columns a consumer requests (see make_scalar_aggregate_stage_rewrite):
+  # two metrics that only differ in aggregate function over the exact same
+  # correlated row selection share one materialized carrier, with
+  # merge_same_id_stage_variants unioning their aggregate columns onto it
+  # instead of each rebuilding its own copy.
+  - name: "SUM and COUNT over the identical correlated condition share one stage"
+    max_plan_size: 6000
+    sql: |
+      SELECT drv.idx,
+        (SELECT SUM(val) FROM csh_grp WHERE grp = drv.idx) AS total,
+        (SELECT COUNT(*) FROM csh_grp WHERE grp = drv.idx) AS cnt
+      FROM (SELECT 1 AS `idx` UNION SELECT 2 AS `idx`) AS drv
+      ORDER BY drv.idx
+    expect:
+      rows: 2
+      data:
+        - idx: 1
+          total: 30
+          cnt: 2
+        - idx: 2
+          total: 120
+          cnt: 3
+
+  # A different HAVING makes it a genuinely different carrier (different row
+  # groups survive), so the two must NOT merge despite matching subquery
+  # shape, keys, domain and condition -- same_group_carrier_backbone? is the
+  # real safety net once the aggregate list itself is excluded from the hash.
+  - name: "Same condition with different HAVING stays distinct, not merged"
+    sql: |
+      SELECT
+        (SELECT SUM(val) FROM csh_grp WHERE grp = 1 GROUP BY grp HAVING SUM(val) > 0) AS a,
+        (SELECT SUM(val) FROM csh_grp WHERE grp = 1 GROUP BY grp HAVING SUM(val) > 1000) AS b
+    expect:
+      rows: 1
+      data:
+        - a: 30
+          b: null
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS csh_obj"
+  - sql: "DROP TABLE IF EXISTS csh_grp"

@@ -468,10 +468,6 @@ per row, so source_table_expr can hand it to scan/scan_order unchanged. */
 	(reduce (merge (coalesceNil parts '())) (lambda (items item)
 		(logical_append_unique items item)) '())))
 
-(define logical_contains_all? (lambda (items required)
-	(reduce (coalesceNil required '()) (lambda (contains_all item)
-		(and contains_all (contains? (coalesceNil items '()) item))) true)))
-
 (define same_group_carrier_backbone? (lambda (left right)
 	(and (equal? (gs_input left) (gs_input right))
 		(equal? (gs_domain left) (gs_domain right))
@@ -485,30 +481,50 @@ per row, so source_table_expr can hand it to scan/scan_order unchanged. */
 	(equal? (qassoc_get (gs_facts stage) (quote merge-aggregate-extensions) false) true)))
 
 /* A shared group-stage ID denotes one logical carrier which may be discovered
-through several consumers. Later consumers can extend that carrier with more
-aggregate columns. Preserve the first stage's domain and output contract and add
-only aggregates from a compatible superset variant which explicitly declares
-this extension contract. Same-ID scalar carriers remain independent. Dropping
-true extensions leaves physical readers pointing at columns which no retained
-prepare stage creates. */
+through several consumers requesting different aggregate columns over the
+exact same row selection (same input/domain/keys/having/order/limit/offset --
+same_group_carrier_backbone? is the real safety net here, not the aggregate
+list itself). Two consumers this way -- e.g. one metric's COUNT and another's
+SUM over an identical correlated condition -- union their aggregate columns
+onto one shared carrier instead of each rebuilding its own copy, which is
+exactly what removing aggregates from stage_id hashing (scalar-agg/-once/
+-single) is for. Neither side may lose a column it asked for: the union
+covers both, regardless of which stage was discovered first or whether one
+side's aggregate list happens to be a superset of the other's. Only stages
+that explicitly declare this extension contract via merge-aggregate-
+extensions participate; same-ID scalar carriers that don't remain
+independent. Dropping a requested aggregate would leave physical readers
+pointing at columns which no retained prepare stage creates. */
 (define merge_same_id_stage_variants (lambda (retained candidate)
 	(if (and (group_stage? retained) (group_stage? candidate)
 		(group_stage_merges_aggregate_extensions? retained)
 		(group_stage_merges_aggregate_extensions? candidate)
-		(same_group_carrier_backbone? retained candidate)
-		(logical_contains_all? (gs_aggregates candidate) (gs_aggregates retained)))
-		(make_group_stage
-			(gs_id retained)
-			(gs_input retained)
-			(gs_domain retained)
-			(gs_keys retained)
-			(logical_merge_unique (list (gs_aggregates retained) (gs_aggregates candidate)))
-			(gs_having retained)
-			(gs_output retained)
-			(gs_order retained)
-			(gs_limit retained)
-			(gs_offset retained)
-			(gs_facts retained))
+		(same_group_carrier_backbone? retained candidate))
+		(begin
+			(define merged_aggregates (logical_merge_unique (list (gs_aggregates retained) (gs_aggregates candidate))))
+			/* preserve_empty_domain reflects whether ANY merged aggregate is a
+			list-based (COUNT DISTINCT-style) accumulator, whose empty-group row
+			the physical group cache does not emit -- recomputed from the union
+			rather than trusting whichever side's fact happened to be retained,
+			since a candidate merged in may be the one contributing that
+			accumulator. */
+			(define merged_facts (if (has_assoc? (gs_facts retained) (quote preserve_empty_domain))
+				(qassoc_set (gs_facts retained) (quote preserve_empty_domain)
+					(not (reduce merged_aggregates (lambda (found ag)
+						(or found (count_distinct_descriptor? ag))) false)))
+				(gs_facts retained)))
+			(make_group_stage
+				(gs_id retained)
+				(gs_input retained)
+				(gs_domain retained)
+				(gs_keys retained)
+				merged_aggregates
+				(gs_having retained)
+				(gs_output retained)
+				(gs_order retained)
+				(gs_limit retained)
+				(gs_offset retained)
+				merged_facts))
 		retained)))
 
 (define collect_stage_variants_by_id (lambda (stages variants)
@@ -3401,12 +3417,19 @@ without separately proving two-valued semantics. */
 				(qb_facts inner))))
 		(define stage_condition (if (query_block? stage_input) true condition))
 		(define hash_alias_map (canonical_alias_map_for inner))
+		/* ags deliberately excluded: stage identity is the row-selection carrier
+		(subquery/keys/domain/condition/having), not which aggregate columns a
+		given consumer happens to request over it. Two metrics that only differ
+		in aggregate function (e.g. one wants COUNT, another SUM) over the exact
+		same correlated condition then share one materialized carrier instead of
+		each rebuilding their own -- merge-aggregate-extensions below unions
+		their aggregate columns onto it via merge_same_id_stage_variants. */
 		(define stage_id (concat "scalar-agg:" (stable_structural_hash (list
 			(canonical_signature subquery)
 			(canonical_signature_expr keys hash_alias_map)
 			(canonical_signature_expr outer_domain hash_alias_map)
 			(canonical_signature_expr condition hash_alias_map)
-			(canonical_signature_expr ags hash_alias_map)) false)))
+			(canonical_signature_expr local_having hash_alias_map)) false)))
 		(define stage (make_group_stage
 			stage_id
 			stage_input
@@ -3425,7 +3448,8 @@ without separately proving two-valued semantics. */
 					(list (quote preserve_empty_domain) (not ags_have_list_accumulator))
 					(list (quote null_semantics) (quote aggregate))
 					(list (quote partition_by) keys)
-					(list (quote result_max_rows_per_partition) 1))
+					(list (quote result_max_rows_per_partition) 1)
+					(list (quote merge-aggregate-extensions) true))
 				(btw2025_stage_facts inner outer_sources all_corr_pairs '() pending_info)))))
 		(define stage_alias (exists_stage_alias stage_id))
 		(define key_names (group_key_cols keys))
@@ -3495,6 +3519,13 @@ without separately proving two-valued semantics. */
 				(qb_facts inner))))
 		(define stage_condition (if (query_block? stage_input) true condition))
 		(define hash_alias_map (canonical_alias_map_for inner))
+		/* ags stays in the hash here (unlike scalar-agg/scalar-single): its
+		ORDER BY direction/OFFSET (baked into each descriptor's own
+		scalar_order_value form) determines WHICH row's value the carrier
+		picks per key, not just which columns get read off an already-agreed
+		row selection -- two occurrences differing only in sort direction are
+		genuinely different carriers, not extension candidates, so they must
+		not share a stage_id or opt into merge-aggregate-extensions. */
 		(define stage_id (concat "scalar-once:" (stable_structural_hash (list
 			(canonical_signature subquery)
 			(canonical_signature_expr keys hash_alias_map)
@@ -3902,12 +3933,15 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 				(qb_facts inner))))
 		(define stage_condition (if (query_block? stage_input) true condition))
 		(define hash_alias_map (canonical_alias_map_for inner))
+		/* ags deliberately excluded (see make_scalar_aggregate_stage_rewrite) --
+		no ORDER BY/OFFSET concern here (scalar_single_aggregates always builds
+		with empty order/nil offset), so unlike scalar-once nothing else needs
+		to take its place. */
 		(define stage_id (concat "scalar-single:" (stable_structural_hash (list
 			(canonical_signature subquery)
 			(canonical_signature_expr keys hash_alias_map)
 			(canonical_signature_expr outer_domain hash_alias_map)
-			(canonical_signature_expr condition hash_alias_map)
-			(canonical_signature_expr ags hash_alias_map)) false)))
+			(canonical_signature_expr condition hash_alias_map)) false)))
 		(define stage (make_group_stage
 			stage_id
 			stage_input
@@ -3928,7 +3962,8 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 					(list (quote partition_by) outer_domain)
 					(list (quote partition_limit) 2)
 					(list (quote result_max_rows_per_partition) 1)
-					(list (quote on_overflow) (quote error)))
+					(list (quote on_overflow) (quote error))
+					(list (quote merge-aggregate-extensions) true))
 				(btw2025_stage_facts inner outer_sources lookup_pairs '() pending_info)))))
 		(define stage_alias (exists_stage_alias stage_id))
 		(define key_names (group_key_cols keys))
@@ -6377,7 +6412,7 @@ names in projections, predicates, and correlated subqueries. */
 									(qb_limit block)
 									(qb_offset block)
 									(nth hidden_result 0)
-									(merge_unique (list source_stages (qb_stages block) (nth source_join_result 1) (nth where_result 1) (nth field_result 1) (nth group_result 1) (nth having_result 1) (nth order_result 1) (nth hidden_result 1)))
+									(unique_stages_by_id (merge (list source_stages (qb_stages block) (nth source_join_result 1) (nth where_result 1) (nth field_result 1) (nth group_result 1) (nth having_result 1) (nth order_result 1) (nth hidden_result 1))))
 									(qassoc_set (qb_facts block)
 										(quote join_relation_units) (nth source_join_result 3))))
 								(btw2025_decorrelate_query_block delayed_block

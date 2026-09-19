@@ -5369,7 +5369,7 @@ the logical lookup still carries an alias which no longer exists. */
 		(cons stage rest) (begin
 			(define head (normalize_stage_dependencies_stage stage))
 			(define tail (normalize_stage_dependencies_stages rest))
-			(merge_unique (list (nth head 1) (list (nth head 0)) tail)))
+			(unique_stages_by_id (merge (list (nth head 1) (list (nth head 0)) tail))))
 		_ '())))
 
 (define normalize_stage_dependencies_query_block (lambda (block)
@@ -5403,7 +5403,7 @@ the logical lookup still carries an alias which no longer exists. */
 				(union_limit block)
 				(union_offset block)
 				(union_facts block))
-			(merge_unique (map branch_results (lambda (item) (nth item 1))))))))
+			(unique_stages_by_id (merge (map branch_results (lambda (item) (nth item 1)))))))))
 
 /* Aggregate column names are derived from their expressions. A decorrelation
 rewrite may therefore rename a single-column stage output after a consumer was
