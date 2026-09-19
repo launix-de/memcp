@@ -1387,6 +1387,48 @@ instead of capturing whichever session populated the cache first. */
 (define query_session_read? (lambda (expr)
 	(not (nil? (query_session_read_expr expr)))))
 
+/* A bind-placeholder name ("v1", "v2", ...) is assigned purely by textual
+occurrence order (lib/sql-parser.scm's "?" rule and MySQL's own COM_STMT_
+EXECUTE bind-variable naming), with no regard for value. Two placeholders
+that happen to carry the identical bound value at compile time are, per
+Neumann's dependent-join domain D (a duplicate-eliminating set of
+correlation VALUES, not of positions), one and the same correlation value --
+but plan-level stage dedup (unique_stages_by_id / stable_structural_hash)
+compares the unevaluated expression tree, so two distinct names for an equal
+value silently defeat it. Canonicalize right where the raw parsed AST enters
+decorrelation, once per compile, by first-seen value -- deliberately kept
+out of lib/sql-parser.scm's parse_sql: that function's optimizer-sensitive
+local-variable numbering breaks in surprising, unrelated ways when new local
+definitions are added to it (confirmed empirically: adding an unrelated,
+never-invoked helper there corrupted results of queries containing no
+placeholder at all). */
+(define canonicalize_session_placeholder_key (lambda (key planning_session catalog)
+	(if (not (match key (regex "^v[0-9]+$" _) true false))
+		key
+		(begin
+			(define value (planning_session key))
+			(if (nil? value) key
+				(begin
+					(define value_key (stable_structural_hash value false))
+					(define existing (catalog value_key))
+					(if (nil? existing)
+						(begin (catalog value_key key) key)
+						existing)))))))
+
+(define canonicalize_session_placeholders_expr (lambda (expr planning_session catalog)
+	(match expr
+		((symbol session) "__memcp_tx") expr
+		((quote session) "__memcp_tx") expr
+		((symbol session) key) (list (quote session) (canonicalize_session_placeholder_key key planning_session catalog))
+		((quote session) key) (list (quote session) (canonicalize_session_placeholder_key key planning_session catalog))
+		(cons head tail) (cons (canonicalize_session_placeholders_expr head planning_session catalog)
+			(map tail (lambda (item) (canonicalize_session_placeholders_expr item planning_session catalog))))
+		_ expr)))
+
+(define canonicalize_session_placeholders (lambda (ast planning_session)
+	(if (nil? planning_session) ast
+		(canonicalize_session_placeholders_expr ast planning_session (newsession)))))
+
 (define session_domain_pairs (lambda (node)
 	(map (query_expr_session_reads node) (lambda (expr) (list expr expr)))))
 
