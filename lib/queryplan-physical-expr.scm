@@ -5153,8 +5153,26 @@ parent=o.id pair) is also part of gs_domain, but never appears literally
 inside condition/value expressions any more (decorrelate_expr_with_pairs
 already rewrote it to its local representative), so including it here is a
 safe no-op. */
+/* gs_domain can legitimately hold values that are not keys of THIS stage:
+e.g. an outer query's own GROUP BY key, carried into domain for an unrelated
+invariant/probe-binding reason, while the stage's actual correlation back to
+its source uses a different key entirely (a scalar-once subquery correlated
+via P.id inside an outer query grouped by C.parent_id -- C.parent_id never
+needs to resolve to one of THIS stage's keys). group_stage_key_pairs_for's
+strict "every domain entry must be a key" check is right for the narrower
+session/residual probes (group_stage_session_or_residual_key_pairs), which
+only ever see entries this stage genuinely owns, but wrong for the full
+domain: replace_group_domain_expr only needs pairs for whichever entries
+it actually encounters while walking an expression, so entries that don't
+resolve to a key are simply not useful substitutions here, not errors. */
 (define group_stage_domain_key_pairs (lambda (stage keys key_names)
-	(group_stage_key_pairs_for stage keys key_names (gs_domain stage) "domain")))
+	(group_stage_key_pairs_for stage keys key_names
+		(filter (gs_domain stage) (lambda (expr)
+			(or (not (nil? (group_key_expr_index keys expr)))
+				(not (nil? (group_key_expr_index
+					(coalesceNil (qassoc_get (gs_facts stage) (quote lookup-keys) '()) '())
+					expr))))))
+		"domain")))
 
 /* Narrower than group_stage_domain_key_pairs's full gs_domain: only the
 entries a "does a row for THIS value already exist" probe should ever check
