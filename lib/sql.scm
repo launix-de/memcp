@@ -273,9 +273,9 @@ adding a raw value equality would needlessly partition the cache per user. */
 		(define condition_accumulator (planning_session "__memcp_queryplan_guard_conditions"))
 		(define condition_catalog (planning_session "__memcp_queryplan_guard_condition_catalog"))
 		(define conditions (if (nil? condition_catalog)
-				(map (condition_accumulator) (lambda (key) (condition_accumulator key)))
-				(map (produceN (coalesceNil (condition_accumulator "count") 0))
-					(lambda (idx) (condition_accumulator (concat "condition:" idx))))))
+			(map (condition_accumulator) (lambda (key) (condition_accumulator key)))
+			(map (produceN (coalesceNil (condition_accumulator "count") 0))
+				(lambda (idx) (condition_accumulator (concat "condition:" idx))))))
 		(define statistics_guard (sql_queryplan_statistics_guard_from_session planning_session))
 		(define raw_guard (sql_queryplan_conjoin_guards
 			(merge (list conditions (list statistics_guard)))))
@@ -295,12 +295,16 @@ adding a raw value equality would needlessly partition the cache per user. */
 				(covered (if (nil? condition_catalog) (string expr) expr) true)) nil)) nil)
 		(define complete_guard (sql_queryplan_conjoin_guards
 			(cons raw_guard (sql_queryplan_uncovered_binding_conditions planning_session))))
-		/* Nested lexical bindings let a cost formula consume an earlier shared
-		statistic. One flat lambda evaluates all arguments in the outer scope and
-		cannot represent that dependency. The optimizer can inline these lets. */
+		/* Bind producers in dependency order inside one lexical scope. A lambda
+		per binding duplicates the remaining guard through nested compilation;
+		sequential definitions preserve dependencies without that nesting. */
 		(sql_queryplan_runtime_guard_expr
-			(reduce (reverse bindings) (lambda (body binding)
-				(list (list (quote lambda) (list (car binding)) body) (cadr binding))) complete_guard)
+			(if (empty_list? bindings) complete_guard
+				(list (list (quote lambda) '()
+					(cons (quote !begin) (merge (list
+						(map bindings (lambda (binding)
+							(list (quote define) (car binding) (cadr binding))))
+						(list complete_guard)))))))
 			(map (sql_queryplan_preparations_from_session planning_session)
 				(lambda (preparation) (planner_queryplan_observation_metric_key (car preparation))))))))
 

@@ -631,8 +631,8 @@ test_cases:
             (planner_record_guard_condition (list (quote equal?) used 2) planning)
             (sql_queryplan_guard_from_session planning)))))
         (match guard
-          (cons (cons (symbol lambda) (cons parameters (cons _body '()))) arguments)
-            (if (and (equal? (count parameters) 1) (equal? (count arguments) 1)) true
+          (cons (cons (symbol lambda) (cons '() (cons (cons (symbol !begin) body) '()))) '())
+            (if (equal? (count body) 2) true
               (error "guard retained discarded bindings"))
           _ (error "guard omitted its required binding")))
     expect:
