@@ -51,6 +51,19 @@ partner. */
 (define resolve_column_alias (lambda (alias default_alias)
 	(if (nil? alias) default_alias alias)))
 
+/* A domain value that came from a residual outer ref (see
+group_stage_domain_key_pairs) is a raw, explicitly-qualified get_column node
+-- it must be lowered to its physical symbol form before being embedded
+directly into compiled code (e.g. as a runtime comparison value or session
+key fragment), the same way any other column reference is. Since it's always
+explicitly qualified (that's what makes it "residual" rather than a plain
+local column), resolve_column_alias always keeps its own tblvar regardless
+of which src is passed, so a placeholder src with no real table is safe --
+this never needs a base-table column lookup. A session read (or anything
+else already physical) passes through unchanged. */
+(define lower_domain_value_expr (lambda (expr)
+	(lower_column_expr_for_alias (list "" nil nil false nil) expr)))
+
 (define source_alias_matches? (lambda (src default_alias tblvar tbl_ignorecase)
 	(begin
 		(define ref_alias (resolve_column_alias tblvar default_alias))
@@ -5087,8 +5100,12 @@ self-joins of the same base table still describe two distinct row roles. */
 (define group_key_expr_index (lambda (keys expr)
 	((make_structural_index keys (list expr)) expr)))
 
-(define group_stage_session_key_pairs (lambda (stage keys key_names)
-	(map (group_stage_session_domain_keys stage) (lambda (expr)
+/* Shared by every "which key column does this domain expression map to"
+lookup below (session-only, session+residual, or the full domain) -- they
+differ only in WHICH expressions count as domain_keys, not in how a match
+gets resolved to its (expr key_name) pair. */
+(define group_stage_key_pairs_for (lambda (stage keys key_names domain_keys context_label)
+	(map domain_keys (lambda (expr)
 		(begin
 			(define direct_idx (group_key_expr_index keys expr))
 			(define lookup_idx (group_key_expr_index
@@ -5096,12 +5113,15 @@ self-joins of the same base table still describe two distinct row roles. */
 				expr))
 			(define idx (if (not (nil? direct_idx)) direct_idx lookup_idx))
 			(if (nil? idx)
-				(neumann_fail "build_queryplan" (concat "session domain expression is not a group key: "
+				(neumann_fail "build_queryplan" (concat context_label " expression is not a group key: "
 					(serialize expr) " in " (serialize keys)))
 				(if (>= idx (count key_names))
-					(neumann_fail "build_queryplan" (concat "session lookup key has no matching group key: "
+					(neumann_fail "build_queryplan" (concat context_label " lookup key has no matching group key: "
 						(serialize expr) " in " (serialize keys)))
 					(list expr (nth key_names idx)))))))))
+
+(define group_stage_session_key_pairs (lambda (stage keys key_names)
+	(group_stage_key_pairs_for stage keys key_names (group_stage_session_domain_keys stage) "session domain")))
 
 (define replace_group_session_expr (lambda (stage keys key_names expr)
 	(begin
@@ -5113,6 +5133,72 @@ self-joins of the same base table still describe two distinct row roles. */
 			(if (and (list? expr) (not (empty_list? expr)))
 				(cons (car expr) (map (cdr expr) (lambda (item)
 					(replace_group_session_expr stage keys key_names item))))
+				expr)))))
+
+/* Like group_stage_session_key_pairs/replace_group_session_expr, but sourced
+from the stage's whole domain (gs_domain), not just its session-read subset.
+gs_domain already folds in residual outer refs -- correlated dependencies
+that couldn't be captured as a simple equality pair (e.g. an inequality like
+ts<=drv.bound) and were instead added directly as a group key so the cache
+is correctly scoped per distinct outer value (see correlation_domain_with_
+residual / merge_residual_into_keys in lib/queryplan-logical.scm). Once such
+a key exists, any raw occurrence of that outer expression left inside
+condition or an aggregate's value expression must be replaced with a
+reference to its own key parameter, exactly like a session read: otherwise
+the compute-proxy column-init lambda keeps referencing the enclosing
+closure's outer capture instead of the specific cached row's own key value,
+which is wrong for every row except (by accident) the first ever computed.
+A proper correlation pair's own outer/lookup value (e.g. o.id for a
+parent=o.id pair) is also part of gs_domain, but never appears literally
+inside condition/value expressions any more (decorrelate_expr_with_pairs
+already rewrote it to its local representative), so including it here is a
+safe no-op. */
+/* gs_domain can legitimately hold values that are not keys of THIS stage:
+e.g. an outer query's own GROUP BY key, carried into domain for an unrelated
+invariant/probe-binding reason, while the stage's actual correlation back to
+its source uses a different key entirely (a scalar-once subquery correlated
+via P.id inside an outer query grouped by C.parent_id -- C.parent_id never
+needs to resolve to one of THIS stage's keys). group_stage_key_pairs_for's
+strict "every domain entry must be a key" check is right for the narrower
+session/residual probes (group_stage_session_or_residual_key_pairs), which
+only ever see entries this stage genuinely owns, but wrong for the full
+domain: replace_group_domain_expr only needs pairs for whichever entries
+it actually encounters while walking an expression, so entries that don't
+resolve to a key are simply not useful substitutions here, not errors. */
+(define group_stage_domain_key_pairs (lambda (stage keys key_names)
+	(group_stage_key_pairs_for stage keys key_names
+		(filter (gs_domain stage) (lambda (expr)
+			(or (not (nil? (group_key_expr_index keys expr)))
+				(not (nil? (group_key_expr_index
+					(coalesceNil (qassoc_get (gs_facts stage) (quote lookup-keys) '()) '())
+					expr))))))
+		"domain")))
+
+/* Narrower than group_stage_domain_key_pairs's full gs_domain: only the
+entries a "does a row for THIS value already exist" probe should ever check
+-- session reads and residual outer refs. A PROPER correlation-pair's own
+domain value (e.g. o.id for a parent=o.id key) must be excluded: it's
+covered exhaustively by the one bulk population pass that already ran when
+the table was created, and at the point this probe is embedded (next to
+createtable, before any outer-row loop for that pair's own source has even
+started) the pair's outer expression isn't in scope yet anyway. */
+(define group_stage_session_or_residual_key_pairs (lambda (stage keys key_names)
+	(group_stage_key_pairs_for stage keys key_names
+		(merge_unique (list
+			(group_stage_session_domain_keys stage)
+			(coalesceNil (qassoc_get (gs_facts stage) (quote residual_outer_refs) '()) '())))
+		"session/residual domain")))
+
+(define replace_group_domain_expr (lambda (stage keys key_names expr)
+	(begin
+		(define normalized_expr (coalesceNil (query_session_read_expr expr) expr))
+		(define pairs (group_stage_domain_key_pairs stage keys key_names))
+		(define pair_idx (group_key_expr_index (map pairs (lambda (pair) (nth pair 0))) normalized_expr))
+		(if (not (nil? pair_idx))
+			(list (quote outer) 1 (symbol (nth (nth pairs pair_idx) 1)))
+			(if (and (list? expr) (not (empty_list? expr)))
+				(cons (car expr) (map (cdr expr) (lambda (item)
+					(replace_group_domain_expr stage keys key_names item))))
 				expr)))))
 
 /* Session domain keys identify cached partitions, including the NULL
@@ -5134,14 +5220,26 @@ NULL is UNKNOWN. Keep SQL collation for non-NULL values. */
 					(nth pair 0))))
 				true)))))
 
+/* A cache table's schema/creation is a one-time (if-not-exists) event, but a
+stage keyed by a session read OR a residual outer ref (see
+group_stage_domain_key_pairs) needs a fresh group INSERTED for every distinct
+value it sees, even into an already-existing table -- unlike a plain
+correlation-pair key, that value was never exhaustively covered by the one
+bulk population pass that ran when the table was first created. Probing for
+"does a row for THIS query's current domain values already exist" and
+re-running the fill when it doesn't is what makes that safe: re-populating an
+already-covered value is an idempotent no-op (the same scan, same upsert),
+and a genuinely new value gets its own additional group inserted alongside
+whatever's already there. */
 (define group_stage_session_binding_missing_expr (lambda (stage schema grouptbl keys key_names)
 	(begin
-		(define pairs (group_stage_session_key_pairs stage keys key_names))
+		(define pairs (group_stage_session_or_residual_key_pairs stage keys key_names))
 		(if (empty_list? pairs)
 			/* createtable waits for the table-local oninit barrier, including
 			legacy or freshly reloaded empty CACHE tables. Once that call returns,
-			an empty session-independent group is a valid cached result rather than
-			an initialization signal. Only session-keyed caches need a row probe. */
+			an empty domain-independent group is a valid cached result rather than
+			an initialization signal. Only session- or residual-keyed caches need
+			a row probe. */
 			false
 			(begin
 				(define cols (map pairs (lambda (pair) (nth pair 1))))
@@ -5154,7 +5252,7 @@ NULL is UNKNOWN. Keep SQL collation for non-NULL values. */
 						(list (quote lambda)
 							params
 							(combine_where_terms (map (produceN (count pairs)) (lambda (i)
-								(group_session_key_equal_expr (nth params i) (nth (nth pairs i) 0))))
+								(group_session_key_equal_expr (nth params i) (lower_domain_value_expr (nth (nth pairs i) 0)))))
 								true)))))))))
 
 (define runtime_cons_list_expr (lambda (exprs)
@@ -5535,11 +5633,22 @@ ever-larger subtrees. */
 				(map cols (lambda (col) (symbol col)))
 				(lower_group_computed_order_expr expr))))))
 
+/* A key that isn't a genuine local column of this scan's own alias -- a
+session read, or a residual outer reference (e.g. an inequality-driven
+filter parameter like ts<=drv.bound, folded into keys so the stage is
+correctly scoped per outer value instead of wrongly hoisted/shared) -- has no
+column to compare row-by-row. Its dependency is already correctly threaded
+as a raw outer-closure capture inside condition/the aggregate expression
+itself; building an (equal? <key-expr> (outer 1 kN)) term for it here would
+compare that same outer value against itself and is at best redundant, at
+worst (when the expression isn't even alias-local, e.g. a foreign
+get_column) nonsensically wrong. Skip it the same way as a session read. */
 (define group_key_equality_terms (lambda (alias key_names keys)
 	(begin
 		(define src (list alias nil nil false nil))
 		(map (produceN (count keys)) (lambda (i)
-			(if (query_session_read? (nth keys i))
+			(if (or (query_session_read? (nth keys i))
+				(not (expr_only_refs_alias? alias alias (nth keys i))))
 				true
 				(list (quote equal?)
 					(lower_column_expr_for_alias src (nth keys i))
@@ -5788,7 +5897,7 @@ every group row and its canonical identity stays independent of bound values. */
 					(scan_mapreduce_expr
 						(map aggcols (lambda (col) (symbol (concat alias "." col))))
 						agg_reduce
-						(replace_group_session_expr stage keys key_names
+						(replace_group_domain_expr stage keys key_names
 							(aggregate_map_value_expr ag (lower_column_expr_for_alias src agg_expr))))
 					agg_neutral
 					(aggregate_shard_combine ag)

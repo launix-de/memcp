@@ -1497,7 +1497,7 @@ outer joins. */
 				rewrite_default_alias ags)
 			lowering_ags))
 		(define key_names (group_key_cols keys))
-		(define aggregate_condition (replace_group_session_expr stage keys key_names condition))
+		(define aggregate_condition (replace_group_domain_expr stage keys key_names condition))
 		(define aggregate_probe_bindings
 			(coalesceNil (qassoc_get (gs_facts stage) (quote aggregate_probe_bindings) '()) '()))
 		(define grouptbl (group_cache_relation cache))
@@ -2706,19 +2706,31 @@ column expressions, without creating a temporary storage table. */
 				stage (qb_stages block) sources default_alias (qb_limit block) (qb_where block)
 				(planner_context_session (qb_facts block))))))))
 
+/* A stage with residual_outer_refs (a correlation only expressible as a
+non-equality/inequality condition, e.g. ts>=drv.bound, with no clean
+lookup-pair key) varies per outer row by construction -- its population can
+only ever be valid for the single residual value in scope when it runs (see
+the comment at stage_prepare_key). Direct/eager preparation runs once, at the
+top of the query, before any outer row is bound, so such a stage must never
+be treated as a direct-prepare candidate regardless of what the other
+probe-shape predicates below say -- it must go through the lazy per-row
+prepare path instead, where its dynamic residual-folded key can gate a fresh
+population for each distinct outer value. */
 (define stage_direct_prepare_semantic_candidate? (lambda (consumed_probe_ids consumed_source_probe_ids stage_output_ids stage)
 	(and
-		(nil? (qassoc_get (gs_facts stage) (quote btw2025_parent) nil))
+		(not (stage_has_residual_outer_refs? stage))
 		(and
-			(not (contains? consumed_probe_ids (gs_id stage)))
-			(and (not (contains? consumed_source_probe_ids (gs_id stage)))
-				(and
-					(not (scalar_first_inline_only_stage? stage))
+			(nil? (qassoc_get (gs_facts stage) (quote btw2025_parent) nil))
+			(and
+				(not (contains? consumed_probe_ids (gs_id stage)))
+				(and (not (contains? consumed_source_probe_ids (gs_id stage)))
 					(and
-						(not (scalar_first_probe_stage? stage))
-						(or
-							(not (scalar_aggregate_probe_stage? stage))
-							(contains? stage_output_ids (gs_id stage))))))))))
+						(not (scalar_first_inline_only_stage? stage))
+						(and
+							(not (scalar_first_probe_stage? stage))
+							(or
+								(not (scalar_aggregate_probe_stage? stage))
+								(contains? stage_output_ids (gs_id stage)))))))))))
 
 /* A physical membership marker is the exclusive owner of its carrier. Stop at
 the marker instead of walking into the embedded logical stage; cache-backed
@@ -3266,29 +3278,97 @@ fix). */
 				(stage_prepare_call_expr group_cache_stage)
 				table_expr)))))
 
+/* A stage's session-scoped (session KEY (once (lambda () BODY))) preparation
+must run again for every distinct value of a residual outer ref it depends
+on (e.g. ts<=drv.bound inside a nested correlated aggregate) -- unlike a
+proper correlation-pair key, that dependency isn't a real column of the
+stage's own scanned table, so one bulk population pass can only ever cover
+the single residual value captured when it ran. A plain compile-time STRING
+key makes `once` freeze the FIRST outer row's population forever, silently
+returning stale/empty results for every later, different outer row. Folding
+the stage's residual_outer_refs values into the key -- as a runtime concat
+expression instead of a literal string -- gives each distinct combination of
+residual values its own independent once-gate, without needing to touch
+every call site that embeds this key as a runtime (session KEY ...)
+argument: equal?-based compile-time dedup bookkeeping (has_assoc?/set_assoc
+against emitted-key sets) works identically on a structurally-comparable
+expression as it does on a string, so those callers need no changes. */
 (define stage_prepare_key (lambda (stage)
-	(concat "__prepare_stage_" (fnv_hash (gs_id stage)))))
+	(begin
+		(define static_key (concat "__prepare_stage_" (fnv_hash (gs_id stage))))
+		(define residual_outer_refs (coalesceNil (qassoc_get (gs_facts stage) (quote residual_outer_refs) '()) '()))
+		(if (empty_list? residual_outer_refs)
+			static_key
+			(cons (quote concat) (cons static_key (map residual_outer_refs (lambda (expr)
+				(list (quote string) (lower_domain_value_expr expr))))))))))
+
+(define stage_prepare_residual_params (lambda (stage)
+	(map (coalesceNil (qassoc_get (gs_facts stage) (quote residual_outer_refs) '()) '())
+		lower_domain_value_expr)))
+
+/* A residual-keyed stage's dynamic session key (stage_prepare_key above)
+references the outer row's residual columns directly -- fine at an apply
+call site sitting inside the driving scan, where those columns are actually
+bound, but not at a (session KEY (once (lambda () BODY))) DEFINE site: that
+triple is embedded exactly once, in the query's shared top-level prelude,
+entirely outside any per-row scope, so the residual column symbols in KEY
+and in BODY are simply unbound there ("Unknown function: nil"). once's own
+result-caching also only helps across repeated calls to the SAME wrapper
+instance -- reconstructing a fresh (once ...) per row would silently lose
+the memoization instead of erroring, an easy trap to fall into when trying
+to "fix" this by moving the whole triple inline to the call site instead.
+The correct fix gives the stage a genuine named function, parameterized on
+its residual columns (so they're properly bound wherever the function is
+actually called from), with get_or_compute_scoped doing the
+per-distinct-residual-value memoization inside its body instead of
+once/session's 2-arg overwrite -- exactly the established pattern
+scalar_query_probe_recipe_binding already uses for the same reason. */
+(define stage_prepare_fn_symbol (lambda (stage)
+	(symbol (concat "__prepare_fn_" (fnv_hash (gs_id stage))))))
 
 (define stage_prepare_call_expr (lambda (stage)
-	(list (quote apply)
-		(list (physical_query_session_symbol) (stage_prepare_key stage))
-		(quoted_runtime_list '()))))
+	(begin
+		(define residual_params (stage_prepare_residual_params stage))
+		(if (empty_list? residual_params)
+			(list (quote apply)
+				(list (physical_query_session_symbol) (stage_prepare_key stage))
+				(quoted_runtime_list '()))
+			(cons (stage_prepare_fn_symbol stage) residual_params)))))
 
 (define lazy_stage_prepare_binding (lambda (dependency_graph stage stage_catalog)
 	(begin
 		(define dependencies (stage_dependency_closure_using_graph dependency_graph stage))
 		(define direct_dependencies
 			(coalesceNil (get_assoc dependency_graph (logical_stage_key stage)) '()))
-		(list
-			(physical_query_session_symbol)
-			(stage_prepare_key stage)
-			(list (quote once)
-				(list (quote lambda)
-					'()
-					(list (quote !begin)
-						(cons (quote !begin) (map direct_dependencies stage_prepare_call_expr))
-						(lower_stage_prepare_using dependencies stage_catalog stage true)
-						true)))))))
+		/* (!begin) with zero operands is malformed -- the interpreter's !begin
+		case always evaluates operands[:len-1] before returning the last one,
+		which panics (slice bounds out of range) on an empty operand list. A
+		stage with no direct stage dependencies (a leaf that only needs its own
+		base-table scan prepared) is a normal, reachable case, not a leftover
+		unused branch; skip the wrapper entirely instead of feeding cons an
+		empty map result, matching the same empty-list guard nested_prepare_expr
+		already uses a few lines above for the identical shape. */
+		(define direct_dependency_prepare_expr (if (empty_list? direct_dependencies)
+			true
+			(cons (quote !begin) (map direct_dependencies stage_prepare_call_expr))))
+		(define populate_expr (list (quote !begin)
+			direct_dependency_prepare_expr
+			(lower_stage_prepare_using dependencies stage_catalog stage true)
+			true))
+		(define residual_params (stage_prepare_residual_params stage))
+		(if (empty_list? residual_params)
+			(list
+				(physical_query_session_symbol)
+				(stage_prepare_key stage)
+				(list (quote once)
+					(list (quote lambda) '() populate_expr)))
+			(list (quote define) (stage_prepare_fn_symbol stage)
+				(list (quote lambda) residual_params
+					(list (physical_query_session_symbol) "get_or_compute_scoped"
+						(physical_query_scope_symbol)
+						(stage_prepare_key stage)
+						(quote tx)
+						(list (quote lambda) (list (quote tx)) populate_expr))))))))
 
 (define lazy_stage_prepare_bindings (lambda (stages selected)
 	(begin
@@ -9771,8 +9851,25 @@ recipe in one zero-argument helper. */
 								(not (stage_has_residual_outer_refs? dependency)))))
 					true))))))
 
+/* Same fix as stage_prepare_key, same reason: a stage shared by multiple
+consumers (e.g. two separate aggregate probes against the same nested
+correlated subquery, as in COUNT(x)+SUM(y) both referencing one MAX(...)
+subquery) gets ONE shared "carrier" owner binding instead of each consumer
+independently preparing it -- but that owner's own once-gate must ALSO vary
+per distinct residual outer value, or it freezes on the first outer row's
+population forever, exactly like the plain (non-shared) case fix at
+stage_prepare_key. Missing this was the actual remaining cause of the
+COUNT(*)*SUM(...) case still failing after stage_prepare_key alone was
+fixed: that key stayed dynamic, but its body just delegates to this
+(then-static) owner key, so the fix never took effect for the shared path. */
 (define shared_prepare_owner_key (lambda (stage)
-	(concat "__prepare_carrier_" (fnv_hash (stage_prepare_backbone_signature stage)))))
+	(begin
+		(define static_key (concat "__prepare_carrier_" (fnv_hash (stage_prepare_backbone_signature stage))))
+		(define residual_outer_refs (coalesceNil (qassoc_get (gs_facts stage) (quote residual_outer_refs) '()) '()))
+		(if (empty_list? residual_outer_refs)
+			static_key
+			(cons (quote concat) (cons static_key (map residual_outer_refs (lambda (expr)
+				(list (quote string) (lower_domain_value_expr expr))))))))))
 
 (define shared_prepare_owner_binding (lambda (dependency_graph catalog stage)
 	(list

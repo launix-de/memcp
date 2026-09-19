@@ -1549,6 +1549,32 @@ Canonicalize once: structural indexes borrow their exact expression roots. */
 (define correlation_domain (lambda (pairs)
 	(merge_unique (list (correlation_lookup_keys pairs)))))
 
+/* A correlated reference can be buried below an already-decorrelated nested
+stage (e.g. a scalar subquery two levels deep, whose own dependent join was
+already pushed down and now only surfaces as that stage's join/lookup
+expression, not as a direct get_column in this block's own WHERE terms).
+analyze_query_correlations's residual_outer_refs already finds these -- via
+the local sources' own join expressions, walked recursively -- but several
+stage builders historically only folded in direct correlation pairs and
+dropped residual_outer_refs on the floor, silently losing that dependency:
+the built stage ends up as a single ungrouped constant instead of being
+scoped per distinct outer value. Per Neumann NK15 3.2's group-by push-down
+rule (D correlated-join Gamma_{A;a:f}(T) == Gamma_{A union A(D);a:f}(D
+correlated-join T)), any residual outer domain must be unioned into the
+stage's own keys/domain/lookup-keys, same as a direct correlation pair. */
+(define correlation_domain_with_residual (lambda (pairs residual_outer_refs)
+	(merge_unique (list (correlation_domain pairs) residual_outer_refs))))
+
+(define correlation_lookup_keys_with_residual (lambda (pairs residual_outer_refs)
+	(merge_unique (list (correlation_lookup_keys pairs) residual_outer_refs))))
+
+(define merge_residual_into_keys (lambda (keys residual_outer_refs)
+	(if (empty_list? residual_outer_refs)
+		keys
+		(if (equal? keys '(1))
+			residual_outer_refs
+			(merge_unique (list keys residual_outer_refs))))))
+
 /* Equality decorrelation makes each outer lookup expression equivalent to its
 inner key. Rewrite later scalar expressions to that local representative before
 they enter a group-stage, so physical lowering never receives a free outer
@@ -1750,7 +1776,8 @@ drifting on source-join pairs or residual outer references. */
 			(list (quote btw2025_info) info)
 			(list (quote btw2025_lookup_keys) (merge_unique (list
 				(correlation_lookup_keys lookup_pairs)
-				residual_outer_refs)))))))
+				residual_outer_refs)))
+			(list (quote residual_outer_refs) residual_outer_refs)))))
 
 (define exists_stage_alias (lambda (stage_id)
 	(concat "__exists_" (fnv_hash stage_id))))
@@ -2565,11 +2592,14 @@ general recursive boolean proof above. */
 		(define lookup_pairs (qassoc_get analysis (quote lookup_pairs) '()))
 		(define local_terms (qassoc_get analysis (quote local_terms) '()))
 		(define local_sources (qassoc_get analysis (quote local_sources) '()))
+		(define residual_outer_refs (qassoc_get analysis (quote residual_outer_refs) '()))
 		(define explicit_keys (map (qb_group inner) (lambda (expr)
 			(canonical_column_expr_for_alias inner_default expr))))
-		(define keys (group_keys_for_correlations inner_default lookup_pairs explicit_keys))
-		(define outer_domain (correlation_domain lookup_pairs))
-		(define lookup_keys (correlation_lookup_keys lookup_pairs))
+		(define keys (merge_residual_into_keys
+			(group_keys_for_correlations inner_default lookup_pairs explicit_keys)
+			residual_outer_refs))
+		(define outer_domain (correlation_domain_with_residual lookup_pairs residual_outer_refs))
+		(define lookup_keys (correlation_lookup_keys_with_residual lookup_pairs residual_outer_refs))
 		(define condition (combine_where_terms local_terms true))
 		(define ags (dedupe_aggregates_by_col (merge
 			(list (extract_aggregates (coalesceNil (qb_having inner) true))
@@ -2609,7 +2639,7 @@ general recursive boolean proof above. */
 					(list (quote lookup-keys) lookup_keys)
 					(list (quote preserve_empty_domain) (not (empty_list? outer_domain)))
 					(list (quote null_semantics) (quote exists)))
-				(btw2025_stage_facts inner outer_sources lookup_pairs '() pending_info)))))
+				(btw2025_stage_facts inner outer_sources lookup_pairs residual_outer_refs pending_info)))))
 		(define stage_alias (exists_stage_alias stage_id))
 		(define key_names (group_key_cols keys))
 		(define having_expr (replace_group_expr
@@ -3000,14 +3030,17 @@ without separately proving two-valued semantics. */
 		(define lookup_pairs (qassoc_get analysis (quote lookup_pairs) '()))
 		(define local_terms (qassoc_get analysis (quote local_terms) '()))
 		(define local_sources (qassoc_get analysis (quote local_sources) '()))
+		(define residual_outer_refs (qassoc_get analysis (quote residual_outer_refs) '()))
 		(define rhs_expr (canonical_column_expr_for_alias inner_default (query_block_first_expr membership_inner)))
 		(define keys (cons rhs_expr
-			(correlation_inner_keys inner_default lookup_pairs)))
-		(define outer_domain (correlation_domain lookup_pairs))
-		(define null_keys (if (empty_list? (correlation_inner_keys inner_default lookup_pairs))
-			'(1)
-			(correlation_inner_keys inner_default lookup_pairs)))
-		(define domain_lookup_keys (correlation_lookup_keys lookup_pairs))
+			(merge_unique (list (correlation_inner_keys inner_default lookup_pairs) residual_outer_refs))))
+		(define outer_domain (correlation_domain_with_residual lookup_pairs residual_outer_refs))
+		(define null_keys (merge_residual_into_keys
+			(if (empty_list? (correlation_inner_keys inner_default lookup_pairs))
+				'(1)
+				(correlation_inner_keys inner_default lookup_pairs))
+			residual_outer_refs))
+		(define domain_lookup_keys (correlation_lookup_keys_with_residual lookup_pairs residual_outer_refs))
 		(define lookup_keys (cons probe domain_lookup_keys))
 		(define condition (combine_where_terms local_terms true))
 		(define stage_input (if (and (equal? (count inner_sources) 1)
@@ -3052,7 +3085,7 @@ without separately proving two-valued semantics. */
 					(list (quote null_semantics) (quote in))
 					(list (quote partition_by) keys)
 					(list (quote result_max_rows_per_partition) 1))
-				(btw2025_stage_facts membership_inner outer_sources lookup_pairs '() pending_info)))))
+				(btw2025_stage_facts membership_inner outer_sources lookup_pairs residual_outer_refs pending_info)))))
 		(define null_stage (make_group_stage
 			null_stage_id
 			stage_input
@@ -3073,7 +3106,7 @@ without separately proving two-valued semantics. */
 					(list (quote null_semantics) (quote in))
 					(list (quote partition_by) null_keys)
 					(list (quote result_max_rows_per_partition) 1))
-				(btw2025_stage_facts membership_inner outer_sources lookup_pairs '() pending_info)))))
+				(btw2025_stage_facts membership_inner outer_sources lookup_pairs residual_outer_refs pending_info)))))
 		(define stage_alias (exists_stage_alias stage_id))
 		(define null_stage_alias (exists_stage_alias null_stage_id))
 		(define key_names (group_key_cols keys))
@@ -3182,6 +3215,7 @@ without separately proving two-valued semantics. */
 		(define where_corr_pairs (qassoc_get analysis (quote lookup_pairs) '()))
 		(define local_terms (qassoc_get analysis (quote local_terms) '()))
 		(define local_sources (qassoc_get analysis (quote local_sources) '()))
+		(define residual_outer_refs (qassoc_get analysis (quote residual_outer_refs) '()))
 		(define having_terms (split_and_terms (coalesceNil (qb_having inner) true)))
 		(define having_corr_pairs (filter (map having_terms (lambda (term)
 			(exists_correlation_pair inner_default inner_sources outer_sources term)))
@@ -3205,9 +3239,11 @@ without separately proving two-valued semantics. */
 			true)
 		(define explicit_group_keys (map (coalesceNil (qb_group inner) '()) (lambda (expr)
 			(canonical_column_expr_for_alias inner_default expr))))
-		(define keys (group_keys_for_correlations inner_default all_corr_pairs explicit_group_keys))
-		(define outer_domain (correlation_domain all_corr_pairs))
-		(define lookup_keys (correlation_lookup_keys all_corr_pairs))
+		(define keys (merge_residual_into_keys
+			(group_keys_for_correlations inner_default all_corr_pairs explicit_group_keys)
+			residual_outer_refs))
+		(define outer_domain (correlation_domain_with_residual all_corr_pairs residual_outer_refs))
+		(define lookup_keys (correlation_lookup_keys_with_residual all_corr_pairs residual_outer_refs))
 		(define condition (combine_where_terms local_terms true))
 		(define local_having (decorrelate_expr_with_pairs inner_default all_corr_pairs
 			(combine_where_terms local_having_terms true)))
@@ -3243,7 +3279,7 @@ without separately proving two-valued semantics. */
 					(list (quote null_semantics) (quote aggregate))
 					(list (quote partition_by) keys)
 					(list (quote result_max_rows_per_partition) 1))
-				(btw2025_stage_facts inner outer_sources all_corr_pairs '() pending_info)))))
+				(btw2025_stage_facts inner outer_sources all_corr_pairs residual_outer_refs pending_info)))))
 		(define stage_alias (exists_stage_alias stage_id))
 		(define key_names (group_key_cols keys))
 		(define post_condition (replace_group_expr stage_input inner_default stage_alias keys key_names ags local_having))
@@ -3285,11 +3321,14 @@ without separately proving two-valued semantics. */
 		(define lookup_pairs (qassoc_get analysis (quote lookup_pairs) '()))
 		(define local_terms (qassoc_get analysis (quote local_terms) '()))
 		(define local_sources (qassoc_get analysis (quote local_sources) '()))
-		(define keys (if (empty_list? lookup_pairs)
-			'(1)
-			(scalar_stage_inner_keys_for_correlations inner_default (qb_stages inner) (qb_sources inner) lookup_pairs)))
-		(define outer_domain (correlation_domain lookup_pairs))
-		(define lookup_keys (correlation_lookup_keys lookup_pairs))
+		(define residual_outer_refs (qassoc_get analysis (quote residual_outer_refs) '()))
+		(define keys (merge_residual_into_keys
+			(if (empty_list? lookup_pairs)
+				'(1)
+				(scalar_stage_inner_keys_for_correlations inner_default (qb_stages inner) (qb_sources inner) lookup_pairs))
+			residual_outer_refs))
+		(define outer_domain (correlation_domain_with_residual lookup_pairs residual_outer_refs))
+		(define lookup_keys (correlation_lookup_keys_with_residual lookup_pairs residual_outer_refs))
 		(define condition (combine_where_terms local_terms true))
 		(define values_for_inner (map value_exprs (lambda (value_expr)
 			(canonical_column_expr_for_alias inner_default
@@ -3333,7 +3372,7 @@ without separately proving two-valued semantics. */
 					(list (quote partition_limit) 1)
 					(list (quote result_max_rows_per_partition) 1)
 					(list (quote on_overflow) (quote ignore)))
-				(btw2025_stage_facts inner outer_sources lookup_pairs '() pending_info)))))
+				(btw2025_stage_facts inner outer_sources lookup_pairs residual_outer_refs pending_info)))))
 		(define stage_alias (exists_stage_alias stage_id))
 		(define key_names (group_key_cols keys))
 		(define source (list
@@ -3681,11 +3720,14 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 		(define lookup_pairs (qassoc_get analysis (quote lookup_pairs) '()))
 		(define local_terms (qassoc_get analysis (quote local_terms) '()))
 		(define local_sources (qassoc_get analysis (quote local_sources) '()))
-		(define keys (if (empty_list? lookup_pairs)
-			'(1)
-			(correlation_inner_keys inner_default lookup_pairs)))
-		(define outer_domain (correlation_domain lookup_pairs))
-		(define lookup_keys (correlation_lookup_keys lookup_pairs))
+		(define residual_outer_refs (qassoc_get analysis (quote residual_outer_refs) '()))
+		(define keys (merge_residual_into_keys
+			(if (empty_list? lookup_pairs)
+				'(1)
+				(correlation_inner_keys inner_default lookup_pairs))
+			residual_outer_refs))
+		(define outer_domain (correlation_domain_with_residual lookup_pairs residual_outer_refs))
+		(define lookup_keys (correlation_lookup_keys_with_residual lookup_pairs residual_outer_refs))
 		(define condition (combine_where_terms local_terms true))
 		(define values_for_inner (map value_exprs (lambda (value_expr)
 			(canonical_column_expr_for_alias inner_default
@@ -3734,7 +3776,7 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 					(list (quote partition_limit) 2)
 					(list (quote result_max_rows_per_partition) 1)
 					(list (quote on_overflow) (quote error)))
-				(btw2025_stage_facts inner outer_sources lookup_pairs '() pending_info)))))
+				(btw2025_stage_facts inner outer_sources lookup_pairs residual_outer_refs pending_info)))))
 		(define stage_alias (exists_stage_alias stage_id))
 		(define key_names (group_key_cols keys))
 		(define source (list
