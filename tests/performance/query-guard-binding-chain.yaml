@@ -1,0 +1,30 @@
+# Copyright (C) 2026 MemCP Contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: '1.0'
+  description: Compile dependent query guard bindings and preserve their execution order
+  isolated: true
+test_cases:
+- name: Dependent guard bindings compile once and retain session semantics
+  scm: |
+    (begin
+      (define session (newsession))
+      (session "step" 1)
+      (define planning (sql_queryplan_compile_session session nil))
+      (define last_value (reduce (produceN 256) (lambda (previous i)
+        (planner_guard_runtime_binding
+          (list (quote +) previous (list (quote session) "step")) planning '())) 0))
+      (planner_record_guard_condition (list (quote equal?) last_value 256) planning)
+      (define guard (sql_queryplan_guard_from_session planning))
+      (define compiled (sql_queryplan_compile_formula nil guard))
+      (if (equal? (jit? compiled) (jit-enabled?)) true (error "guard fell back from JIT"))
+      (define first (compiled session nil nil nil))
+      (session "step" 2)
+      (define second (compiled session nil nil nil))
+      (if (and first (not second)) true (error "guard lost binding dependencies")))
+  expect:
+    data: [true]
+  performance_rows: 256
+  warmup: 0
+  timing_samples: 1
+  threshold_ms: 5000
