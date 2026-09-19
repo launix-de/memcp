@@ -1107,16 +1107,56 @@ membership path until their nullability is represented in logical metadata. */
 			nil)
 		_ (direct_column_name_for_alias src expr))))
 
-(define unique_left_join_key_term? (lambda (default_alias src key_col term)
+/* make_exists_stage_join_condition wraps a session-variable domain equality as
+(or (equal?? A B) (and (nil? A) (nil? B))) so it stays true when the session
+value is legitimately unset. That null-safe form proves exactly the same
+key-to-value tie as a plain equality -- the extra nil-nil branch is mutually
+exclusive with it and adds no multiplicity -- so it must be recognized here
+too, or every unique-lookup/ordered-driver proof involving such a domain
+silently stops seeing the join as a keyed lookup at all. */
+(define equality_term_operands (lambda (term)
 	(match term
 		'(op left right) (if (or (equal? op (quote equal?)) (equal? op (quote equal??)))
-			(or
-				(and (equal? (unique_lookup_column_name src left) key_col)
-					(not (expr_refs_alias? default_alias (source_alias src) right)))
-				(and (equal? (unique_lookup_column_name src right) key_col)
-					(not (expr_refs_alias? default_alias (source_alias src) left))))
-			false)
-		_ false)))
+			(list left right)
+			nil)
+		_ nil)))
+
+(define null_check_operand (lambda (expr)
+	(match expr
+		'(op arg) (if (equal? op (quote nil?)) arg nil)
+		_ nil)))
+
+(define null_safe_equality_operands (lambda (term)
+	(match term
+		'(op a b) (if (equal? op (quote or))
+			(begin
+				(define eq_operands (equality_term_operands a))
+				(define nil_operands (match b
+					'(bop bl br) (if (equal? bop (quote and))
+						(list (null_check_operand bl) (null_check_operand br))
+						nil)
+					_ nil))
+				(if (and (not (nil? eq_operands)) (not (nil? nil_operands))
+						(equal? (nth nil_operands 0) (nth eq_operands 0))
+						(equal? (nth nil_operands 1) (nth eq_operands 1)))
+					eq_operands
+					nil))
+			nil)
+		_ nil)))
+
+(define unique_left_join_key_term? (lambda (default_alias src key_col term)
+	(begin
+		(define operands (coalesceNil (equality_term_operands term) (null_safe_equality_operands term)))
+		(if (nil? operands)
+			false
+			(begin
+				(define left (nth operands 0))
+				(define right (nth operands 1))
+				(or
+					(and (equal? (unique_lookup_column_name src left) key_col)
+						(not (expr_refs_alias? default_alias (source_alias src) right)))
+					(and (equal? (unique_lookup_column_name src right) key_col)
+						(not (expr_refs_alias? default_alias (source_alias src) left)))))))))
 
 (define unused_unique_left_join? (lambda (default_alias referenced_aliases src)
 	(begin
