@@ -48,6 +48,30 @@ would collapse it with parser-level "no value" and optional-clause defaults. */
 (define sql_null_literal (lambda ()
 	(list (sql_builtins "SQL_NULL"))))
 
+/* Keep simple VALUES cells as data. Compiling one session lookup per cell
+makes the JIT allocator state grow with the complete bulk statement. */
+(define sql_bind_insert_values (lambda (session rows)
+	(map rows (lambda (row)
+		(map row (lambda (cell)
+			(if (car cell) (session (cadr cell)) (cadr cell))))))))
+
+(define sql_insert_value_template (lambda (value)
+	(match value
+		'('session name) (if (string? name) (list true name) nil)
+		_ (if (and (list? value) (equal? value (sql_null_literal)))
+			(list false nil)
+			(if (or (number? value) (string? value) (nil? value)
+				(equal?? value true) (equal?? value false))
+				(list false value) nil)))))
+
+(define sql_insert_values_expr (lambda (datasets)
+	(begin
+		(define template (map datasets (lambda (row) (map row sql_insert_value_template))))
+		(if (reduce template (lambda (valid row)
+			(and valid (reduce row (lambda (valid cell) (and valid (not (nil? cell)))) true))) true)
+			(list (quote sql_bind_insert_values) (quote session) (list (quote quote) template))
+			(cons list (map datasets (lambda (dataset) (cons list dataset))))))))
+
 /* JSON_ARRAYAGG keeps its growing state as a list of completed values. The
 finalizer emits one contiguous BSON array after the aggregate has seen every
 row, avoiding a copy of the complete prefix for each input value. */
@@ -213,15 +237,23 @@ arithmetic; leave expressions containing columns or functions untouched. */
 	(parser (define col sql_identifier) col)
 )))
 
+/* SET accepts unquoted names such as character_set_client=utf8mb4. */
+(define sql_set_value (lambda (value)
+	(match value
+		'('get_column nil _ name _) name
+		_ value)))
+
 (define parse_sql (lambda (schema s policy planning_session tx) (begin
 	(define parse_started_ns (nanotime))
 	/* mysqldump wraps CREATE TRIGGER in a versioned executable comment. MariaDB
 	splits CREATE, DEFINER, and TRIGGER across three comments; discard the
-	account-specific DEFINER while reconstructing executable trigger DDL. Other
+	account-specific DEFINER while reconstructing executable trigger DDL. SET
+	comments carry session state such as FOREIGN_KEY_CHECKS during restores. Other
 	versioned comments remain compatibility no-ops unless their SQL form is
 	explicitly supported; trigger DDL must execute for a lossless restore. */
 	(set s (if (and (>= (strlen s) 3) (equal? (substr s 0 3) "/*!"))
 		(match s
+			(regex "^/\\*![0-9]+[\\r\\n\\t ]+((?is:SET[\\r\\n\\t ]+.*))[\\r\\n\\t ]*\\*/$" _ body) body
 			(regex "^/\\*![0-9]+[\\r\\n\\t ]+((?is:CREATE[\\r\\n\\t ]+TRIGGER.*))[\\r\\n\\t ]*\\*/$" _ body) body
 			(regex "^/\\*![0-9]+[\\r\\n\\t ]+CREATE[\\r\\n\\t ]*\\*/[\\r\\n\\t ]*/\\*![0-9]+[\\r\\n\\t ]+DEFINER=(?is:.*?)[\\r\\n\\t ]*\\*/[\\r\\n\\t ]*/\\*![0-9]+[\\r\\n\\t ]+((?is:TRIGGER.*))[\\r\\n\\t ]*\\*/$" _ body) (concat "CREATE " body)
 			s)
@@ -734,7 +766,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 	)))
 
 	(define sql_expression (parser (or
-		(parser '((atom "@" true) (define var sql_identifier_unquoted) (atom ":=" true) (define value sql_expression)) '((quote session) var value))
+		(parser '((atom "@" true) (define var sql_identifier_unquoted) (atom ":=" true) (define value sql_expression)) '((quote session) (toLower var) value))
 		(parser '((define a sql_expression1) (atom "OR" true) (define b (+ sql_expression1 (atom "OR" true)))) (cons (quote or) (cons a b)))
 		sql_expression1
 	)))
@@ -969,12 +1001,12 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(parser (atom "FALSE" true) false)
 		(parser (atom "ON" true) true)
 		(parser (atom "OFF" true) false)
-		(parser '((atom "@" true) (define var sql_identifier_unquoted)) '('session var))
+		(parser '((atom "@" true) (define var sql_identifier_unquoted)) '('session (toLower var)))
 		/* MySQL system variables: @@var, @@GLOBAL.var, @@SESSION.var
 		@@GLOBAL.var reads globalvars directly; @@SESSION.var / @@var check session first */
-		(parser '((atom "@@" true) (atom "GLOBAL" true) (atom "." true) (define var sql_identifier_unquoted)) '('globalvars var))
-		(parser '((atom "@@" true) (? (atom "SESSION" true) (? (atom "." true))) (define var sql_identifier_unquoted)) '('session_globalvar var))
-		(parser '((atom "@@" true) (define var sql_identifier_unquoted)) '('session_globalvar var))
+		(parser '((atom "@@" true) (atom "GLOBAL" true) (atom "." true) (define var sql_identifier_unquoted)) '('globalvars (toLower var)))
+		(parser '((atom "@@" true) (? (atom "SESSION" true) (? (atom "." true))) (define var sql_identifier_unquoted)) '('session_globalvar (toLower var)))
+		(parser '((atom "@@" true) (define var sql_identifier_unquoted)) '('session_globalvar (toLower var)))
 		/* LEFT(str, n) -- special case because LEFT is a reserved keyword (LEFT JOIN) */
 		(parser '((atom "LEFT" true) "(" (define s sql_expression) "," (define n sql_expression) ")") '((quote sql_substr) s 1 n))
 		/* RIGHT(str, n) -- special case because RIGHT is a reserved keyword */
@@ -1514,6 +1546,23 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		))
 	)))
 
+	/* Parse complete literal rows before trying the full expression grammar.
+	Question marks stay inert until the row succeeds, so a later arithmetic
+	expression can backtrack without consuming placeholder numbers twice. */
+	(define sql_insert_literal_cell (parser (or
+		(parser "?" (quote sql_insert_placeholder))
+		sql_literal)))
+	(define sql_insert_values_row (parser (or
+		(parser '("(" (define dataset (* sql_insert_literal_cell ",")) ")")
+			(map dataset (lambda (value)
+				(if (and (symbol? value) (equal?? value (quote sql_insert_placeholder)))
+					(begin
+						(define n (placeholder_counter "n"))
+						(placeholder_counter "n" (+ n 1))
+						(list (quote session) (concat "v" (string (+ n 1)))))
+					value))))
+		(parser '("(" (define dataset (* sql_expression ",")) ")") dataset))))
+
 	(define sql_insert_into (parser '(
 		(atom "INSERT" true)
 		(define ignoreexists (? (atom "IGNORE" true true true)))
@@ -1526,11 +1575,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 				","))
 			")")
 		(atom "VALUES" true)
-		(define datasets (* (parser '(
-			"("
-			(define dataset (* sql_expression ","))
-			")"
-		) dataset) ","))
+		(define datasets (* sql_insert_values_row ","))
 		(define updaterows (? (parser '(
 			(atom "ON" true)
 			(atom "DUPLICATE" true)
@@ -1544,12 +1589,18 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			(if policy (policy (coalesce schema2 schema) tbl true) true)
 			(set updaterows2 (if (nil? updaterows) nil (merge updaterows)))
 			(set updatecols (if (nil? updaterows) '() (cons "$update" (merge_unique (extract_assoc updaterows2 (lambda (k v) (extract_stupid v)))))))
-			(define coldesc (coalesce coldesc (map (get_schema (coalesce schema2 schema) tbl) (lambda (col) (col "Field")))))
+			(define coldesc (coalesce coldesc (table_insertable_columns (coalesce schema2 schema) tbl)))
+			/* Validate the complete statement before evaluating or inserting rows.
+			Both literal templates and general expression rows obey SQL arity. */
+			(if (reduce datasets (lambda (valid row)
+				(and valid (equal? (count row) (count coldesc)))) true)
+				true
+				(error "INSERT column count does not match value count"))
 			(if (reduce datasets (lambda (a b) (or a (sql_dataset_contains_inner_select b))) false)
 				(begin
 					(define inner (sql_values_to_select_query (coalesce schema2 schema) coldesc datasets))
 					(sql_insert_select_plan (coalesce schema2 schema) tbl coldesc inner ignoreexists updaterows updaterows2 updatecols))
-				'('insert '('table (coalesce schema2 schema) tbl) (cons list coldesc) (cons list (map datasets (lambda (dataset) (cons list dataset)))) (cons list updatecols)
+				'('insert '('table (coalesce schema2 schema) tbl) (cons list coldesc) (sql_insert_values_expr datasets) (cons list updatecols)
 					(if (and ignoreexists (nil? updaterows))
 						'((quote lambda) '() 0)
 						(if ignoreexists '('lambda '() true) (if (nil? updaterows) nil '('lambda (map updatecols (lambda (c) (symbol c))) '('$update (cons 'list (map_assoc updaterows2 (lambda (k v) (replace_stupid v)))))))))
@@ -1570,7 +1621,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(define datasets (* (parser '("(" (define dataset (* sql_expression ",")) ")") dataset) ","))
 	) (begin
 			(if policy (policy (coalesce schema2 schema) tbl true) true)
-			(define coldesc (coalesce coldesc (map (get_schema (coalesce schema2 schema) tbl) (lambda (col) (col "Field")))))
+			(define coldesc (coalesce coldesc (table_insertable_columns (coalesce schema2 schema) tbl)))
 			(define updaterows2 (merge (map coldesc (lambda (col)
 				(list col (list (quote get_column) "VALUES" true col true))))))
 			(define updatecols (cons "$update" (map coldesc (lambda (col) (concat "NEW." col)))))
@@ -1606,7 +1657,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			(if policy (policy (coalesce schema2 schema) tbl true) true)
 			(set updaterows2 (if (nil? updaterows) nil (merge updaterows)))
 			(set updatecols (if (nil? updaterows) '() (cons "$update" (merge_unique (extract_assoc updaterows2 (lambda (k v) (extract_stupid v)))))))
-			(define coldesc (coalesce coldesc (map (get_schema (coalesce schema2 schema) tbl) (lambda (col) (col "Field")))))
+			(define coldesc (coalesce coldesc (table_insertable_columns (coalesce schema2 schema) tbl)))
 			(sql_insert_select_plan (coalesce schema2 schema) tbl coldesc inner ignoreexists updaterows updaterows2 updatecols)
 	)))
 
@@ -1640,7 +1691,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			(if policy (policy (coalesce schema2 schema) tbl true) true)
 			(set updaterows2 (if (nil? updaterows) nil (merge updaterows)))
 			(set updatecols (if (nil? updaterows) '() (cons "$update" (merge_unique (extract_assoc updaterows2 (lambda (k v) (extract_stupid v)))))))
-			(define coldesc (coalesce coldesc (map (get_schema (coalesce schema2 schema) tbl) (lambda (col) (col "Field")))))
+			(define coldesc (coalesce coldesc (table_insertable_columns (coalesce schema2 schema) tbl)))
 			(sql_insert_select_plan (coalesce schema2 schema) tbl coldesc inner ignoreexists updaterows updaterows2 updatecols)
 	)))
 
@@ -1697,7 +1748,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			(parser '((atom "PRIMARY" true) (atom "KEY" true) "(" (define cols (+ sql_identifier ",")) ")") '((quote list) "unique" "PRIMARY" (cons (quote list) cols)))
 			(parser '((atom "UNIQUE" true) (atom "KEY" true) (define id sql_identifier) "(" (define cols (+ (parser '((define col sql_identifier) (? "(" sql_int ")")) col) ",")) ")" (? (atom "USING" true) (atom "BTREE" true))) '((quote list) "unique" id (cons (quote list) cols)))
 			(parser '((atom "CONSTRAINT" true) (define id (? sql_identifier)) (atom "FOREIGN" true) (atom "KEY" true) "(" (define cols1 (+ sql_identifier ",")) ")" (atom "REFERENCES" true) (define tbl2 sql_identifier) "(" (define cols2 (+ sql_identifier ",")) ")" (? (atom "ON" true) (atom "DELETE" true) (define deletemode sql_foreign_key_mode)) (? (atom "ON" true) (atom "UPDATE" true) (define updatemode sql_foreign_key_mode))) '((quote list) "foreign" id (cons (quote list) cols1) tbl2 (cons (quote list) cols2) updatemode deletemode))
-			(parser '((atom "FOREIGN" true) (atom "KEY" true) (define id (? sql_identifier)) "(" (define cols1 (+ sql_identifier ",")) ")" (atom "REFERENCES" true) (define tbl2 sql_identifier) "(" (define cols2 (+ sql_identifier ",")) ")" (? (atom "ON" true) (atom "DELETE" true) (or (atom "RESTRICT" true) (atom "CASCADE" true) (atom "SET NULL" true))) (? (atom "ON" true) (atom "UPDATE" true) (or (atom "RESTRICT" true) (atom "CASCADE" true) (atom "SET NULL" true)))) '((quote list) "foreign" id (cons (quote list) cols1) tbl2 (cons (quote list) cols2)))
+			(parser '((atom "FOREIGN" true) (atom "KEY" true) (define id (? sql_identifier)) "(" (define cols1 (+ sql_identifier ",")) ")" (atom "REFERENCES" true) (define tbl2 sql_identifier) "(" (define cols2 (+ sql_identifier ",")) ")" (? (atom "ON" true) (atom "DELETE" true) (define deletemode sql_foreign_key_mode)) (? (atom "ON" true) (atom "UPDATE" true) (define updatemode sql_foreign_key_mode))) '((quote list) "foreign" id (cons (quote list) cols1) tbl2 (cons (quote list) cols2) updatemode deletemode))
 			(parser '((atom "KEY" true) sql_identifier "(" (+ (parser '((define col sql_identifier) (? "(" sql_int ")")) col) ",") ")" (? (atom "USING" true) (atom "BTREE" true))) '((quote list))) /* ignore index definitions */
 			(parser '(
 				(define col sql_identifier)
@@ -2082,7 +2133,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		/* SHOW timezone — PostgreSQL syntax */
 		(parser '((atom "SHOW" true) (atom "timezone" true)) (list (quote resultrow) (list (quote list) "TimeZone" (list (quote session_globalvar) "time_zone"))))
 		/* SET GLOBAL time_zone */
-		(parser '((atom "SET" true) (atom "GLOBAL" true) (define key sql_identifier) "=" (define value sql_expression)) '((quote globalvars) key value))
+		(parser '((atom "SET" true) (atom "GLOBAL" true) (define key sql_identifier) "=" (define value sql_expression)) '((quote globalvars) (toLower key) (sql_set_value value)))
 		(parser '((atom "SET" true) (atom "NAMES" true) (define charset sql_expression) (? (atom "COLLATE" true) (or sql_identifier sql_string))) (quote true)) /* ignore */
 
 
@@ -2103,10 +2154,10 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		/* mysqldump --single-transaction establishes this before START TRANSACTION. */
 		(parser '((atom "SET" true) (atom "SESSION" true) (atom "TRANSACTION" true)
 			(atom "ISOLATION" true) (atom "LEVEL" true) (atom "REPEATABLE" true) (atom "READ" true)) (quote true))
-		(parser '((atom "SET" true) (? (atom "SESSION" true)) (? "@") (define key sql_identifier)
+		(parser '((atom "SET" true) (? (atom "SESSION" true)) (or (atom "@@" true) (? "@")) (define key sql_identifier)
 			(or "=" (atom ":=" true)) (atom "DEFAULT" true))
-			(list (quote session) key nil))
-		(parser '((atom "SET" true) (? (atom "SESSION" true)) (define vars (* (parser '((? "@") (define key sql_identifier) (or "=" (atom ":=" true)) (define value sql_expression)) (list (quote session) key value)) ","))) (cons '!begin vars))
+			(list (quote session) (toLower key) nil))
+		(parser '((atom "SET" true) (? (atom "SESSION" true)) (define vars (* (parser '((or (atom "@@" true) (? "@")) (define key sql_identifier) (or "=" (atom ":=" true)) (define value sql_expression)) (list (quote session) (toLower key) (sql_set_value value))) ","))) (cons '!begin vars))
 
 		(parser '((atom "LOCK" true) (or (atom "TABLES" true) (atom "TABLE" true))
 			(define locks (+ (parser '((define tbl sql_identifier) (? (atom "AS" true) (define alias sql_identifier)) (define mode sql_lock_table_mode)) (list tbl (not (nil? mode)))) ",")))

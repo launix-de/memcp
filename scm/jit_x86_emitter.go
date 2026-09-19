@@ -475,6 +475,9 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 		ctx.EmitMovRegMem(RegRCX, RegRSP, 24)
 		ctx.EmitJmp(stackRetryLabel)
 	}
+	if jitTestPostEmitHook != nil {
+		jitTestPostEmitHook(ctx)
+	}
 	buf.stackMaps = ctx.finalizeStackMaps(frameSize, arenaOffset)
 
 	ctx.ResolveFixupsFinal()

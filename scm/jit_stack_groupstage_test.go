@@ -1,0 +1,105 @@
+//go:build goexperiment.jit && amd64
+
+/*
+Copyright (C) 2026  MemCP Contributors
+
+	This program is free software: you can redistribute it and/or modify
+	it under the terms of the GNU General Public License as published by
+	the Free Software Foundation, either version 3 of the License, or
+	(at your option) any later version.
+
+	This program is distributed in the hope that it will be useful,
+	but WITHOUT ANY WARRANTY; without even the implied warranty of
+	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+	GNU General Public License for more details.
+
+	You should have received a copy of the GNU General Public License
+	along with this program.  If not, see <https://www.gnu.org/licenses/>.
+*/
+
+package scm
+
+import (
+	"math/bits"
+	"testing"
+)
+
+// jitDecodeSafepointRoots expands one safepoint's per-base bitmaps back into
+// concrete (base, offset) roots, mirroring the decoding finalizeStackMaps
+// performs when converting them into the runtime pointer map.
+func jitDecodeSafepointRoots(sp jitSafepoint) []jitStackRoot {
+	var out []jitStackRoot
+	for base, bitmap := range sp.roots {
+		for index, value := range bitmap.bits {
+			for value != 0 {
+				bit := bits.TrailingZeros8(value)
+				out = append(out, jitStackRoot{
+					base:   jitStackRootBase(base),
+					offset: bitmap.first + int32(index*64+bit*8),
+				})
+				value &= value - 1
+			}
+		}
+	}
+	return out
+}
+
+// TestJITGroupStageReducerFrameRootsCoverEverySafepoint guards against issue
+// #949 (a suspected recurrence of #745's "found pointer to free object" class
+// of bug) by mechanically checking an invariant instead of waiting for a GC
+// to catch a stale pointer by chance. The shape below mirrors the real
+// group-stage SUM reducer compiled for TPC-H Q10's ".grp:query:" keytable, as
+// closely as a standalone expression can: a fused filter+reduce pipeline
+// whose reduce step allocates (merge_assoc_mut with a freshly compiled
+// closure argument) only when the filter predicate admits the element -- the
+// same "trivial skip path beside an allocating path" shape as the real
+// reducer's __join_scan_reduce_skip branch.
+//
+// jitCompileExprBodyToExec's prologue only zero-initializes the frame
+// (jitSortedFrameRoots(ctx.FrameRoots)) for permanent frame words: BP-relative
+// roots and non-negative-offset SP-relative roots. Every root any safepoint
+// actually marks as live must be a member of that same set, or a call that
+// takes the trivial branch will scan an uninitialized (possibly stale, from a
+// prior invocation on the same reused goroutine stack) word as a pointer.
+//
+// As of this writing this fixture passes: the gap #949 is tracking has not
+// been narrowed down to a standalone-expression repro yet (see the issue for
+// what was ruled out). Keep this test as a regression guard for the shape
+// that was checked, and extend it (or add siblings) once a failing shape is
+// found.
+func TestJITGroupStageReducerFrameRootsCoverEverySafepoint(t *testing.T) {
+	var captured *JITContext
+	jitTestPostEmitHook = func(ctx *JITContext) { captured = ctx }
+	defer func() { jitTestPostEmitHook = nil }()
+
+	compileJITExpressionTestProc(t, `(lambda (values)
+		(reduce (filter values (lambda (value) (> value 1)))
+			(lambda (acc value) (merge_assoc_mut acc (list value value) (lambda (old new) new)))
+			'()))`)
+
+	if captured == nil {
+		t.Fatal("post-emit hook did not observe a compiled context")
+	}
+	if len(captured.Safepoints) == 0 {
+		t.Fatal("fixture recorded no safepoints; it no longer exercises a Go call boundary")
+	}
+
+	for spIndex, sp := range captured.Safepoints {
+		for _, root := range jitDecodeSafepointRoots(sp) {
+			permanent := root.base == jitStackRootFrameBP ||
+				(root.base == jitStackRootFrameSP && root.offset >= 0)
+			if !permanent {
+				// Dynamic call-area roots (jitStackRootCallSP, or negative-offset
+				// FrameSP slots below the stable stack pointer) are initialized at
+				// their call site, not by the frame-entry zeroing loop.
+				continue
+			}
+			if _, ok := captured.FrameRoots[root]; !ok {
+				t.Fatalf("safepoint %d marks %v as a live GC root, but it is absent from "+
+					"FrameRoots and will not be zero-initialized at function entry -- a call "+
+					"that skips the path setting it will scan stale stack data as a pointer",
+					spIndex, root)
+			}
+		}
+	}
+}
