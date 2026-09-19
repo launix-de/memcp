@@ -757,6 +757,48 @@ test_cases:
         - eng_top: 95000
           mkt_top: 75000
 
+  # A genuine per-row correlation must keep rejecting a NULL-to-NULL match
+  # even though session reads are now null-safe. query_session_read? only
+  # recognizes literal (session key) reads, so a get_column correlation can
+  # never take the null-safe branch -- but that boundary deserves its own
+  # proof, not just an inline comment claim. svc_neg_inner also carries a
+  # NULL ref row specifically so a leaked null-safety would find a (wrong)
+  # match instead of just failing to find any row at all.
+  - name: "Genuine per-row NULL correlation still rejects a NULL-to-NULL match"
+    setup:
+      - sql: "DROP TABLE IF EXISTS svc_neg_outer"
+      - sql: "DROP TABLE IF EXISTS svc_neg_inner"
+      - sql: "CREATE TABLE svc_neg_outer (id INT, ref INT)"
+      - sql: "INSERT INTO svc_neg_outer VALUES (1, 10), (2, NULL)"
+      - sql: "CREATE TABLE svc_neg_inner (ref INT, val VARCHAR(20))"
+      - sql: "INSERT INTO svc_neg_inner VALUES (10, 'ten'), (NULL, 'null-row')"
+    sql: |
+      SELECT id, (SELECT val FROM svc_neg_inner i WHERE i.ref = o.ref) AS matched
+      FROM svc_neg_outer o ORDER BY id
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS svc_neg_outer"
+      - sql: "DROP TABLE IF EXISTS svc_neg_inner"
+    expect:
+      rows: 2
+      data:
+        - id: 1
+          matched: "ten"
+        - id: 2
+          matched: null
+
+  # make_exists_stage_join_condition also builds the rejoin for EXISTS
+  # stages, not just plain scalar ones -- cover that call site too.
+  - name: "Two sibling session-variable correlated EXISTS subqueries stay false, not vanished, when unset"
+    sql: |
+      SELECT
+        EXISTS(SELECT 1 FROM sq_emp e WHERE e.did = 1 AND e.salary <= (@sq_asof)) AS eng_any,
+        EXISTS(SELECT 1 FROM sq_emp e WHERE e.did = 2 AND e.salary <= (@sq_asof)) AS mkt_any
+    expect:
+      rows: 1
+      data:
+        - eng_any: false
+          mkt_any: false
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS sq_invoice_line"
   - sql: "DROP TABLE IF EXISTS sq_invoice"
