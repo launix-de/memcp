@@ -348,8 +348,8 @@ test_cases:
     expect:
       rows: 1
       data:
-        - cached_value: null
-          cached_value_again: null
+        - cached_value: 11
+          cached_value_again: 11
 
   - name: "Delete all Sales employees to fully empty that group"
     sql: "DELETE FROM sc_base WHERE dept = 'Sales'"

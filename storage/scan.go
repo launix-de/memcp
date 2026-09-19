@@ -30,6 +30,14 @@ type scanError struct {
 	stack string
 }
 
+// OriginalStack implements scm.stackCarrier so PrintError logs where inside
+// the per-shard scan goroutine the panic actually happened, instead of only
+// the outer call chain visible after this error has been recovered and
+// re-panicked one or more times by its caller.
+func (s scanError) OriginalStack() string {
+	return s.stack
+}
+
 const scanAccessSchemaHeaderSize = 1
 const scanAccessBoundaryStride = 1
 
