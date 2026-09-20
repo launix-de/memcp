@@ -68,6 +68,29 @@ test_cases:
     expect:
       rows: 0
 
+  # High-cardinality text group caches use the same live UNIQUE delta-index
+  # path. Unicode comparison state must be prepared once per inserted value,
+  # rather than once per B-tree level and uniqueness probe.
+  - name: "Perf: Unicode UNIQUE delta inserts"
+    performance_rows: 30000
+    setup:
+      - sql: "DROP TABLE IF EXISTS `perf_unique_text`"
+      - sql: "DROP TABLE IF EXISTS `perf_source_text`"
+      - scm: "(rebuild)"
+      - sql: "CREATE TABLE `perf_source_text` (id INT PRIMARY KEY, code VARCHAR(32) COLLATE utf8mb4_unicode_ci)"
+      - sql: "CREATE TABLE `perf_unique_text` (id INT PRIMARY KEY, code VARCHAR(32) COLLATE utf8mb4_unicode_ci UNIQUE)"
+      - scm: |
+          (begin
+            (set rows (map (produceN {rows})
+              (lambda (i) (list i (concat "group-" i)))))
+            (insert (table "{database}" "perf_source_text") '("id" "code") rows)
+            (rebuild))
+    sql: "INSERT INTO perf_unique_text (id, code) SELECT id, code FROM perf_source_text"
+    warmup: false
+    threshold_ms: 5000
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS perf_unique"
   - sql: "DROP TABLE IF EXISTS perf_source"
+  - sql: "DROP TABLE IF EXISTS perf_unique_text"
+  - sql: "DROP TABLE IF EXISTS perf_source_text"
