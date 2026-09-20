@@ -23,6 +23,9 @@ metadata:
   description: "Doubly-nested correlated scalar subquery returns NULL instead of value"
 
 cleanup:
+  - sql: "DROP TABLE IF EXISTS nc_join_outer"
+  - sql: "DROP TABLE IF EXISTS nc_join_history"
+  - sql: "DROP TABLE IF EXISTS nc_join_value"
   - sql: "DROP TABLE IF EXISTS nc_multi_outer"
   - sql: "DROP TABLE IF EXISTS nc_multi_history"
   - sql: "DROP TABLE IF EXISTS nc_multi_value"
@@ -41,6 +44,12 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS nc_config"
 
 setup:
+  - sql: "CREATE TABLE nc_join_outer (ID INT PRIMARY KEY)"
+  - sql: "CREATE TABLE nc_join_history (ID INT PRIMARY KEY, outer_id INT, value_id INT, created INT)"
+  - sql: "CREATE TABLE nc_join_value (ID INT PRIMARY KEY, label VARCHAR(40))"
+  - sql: "INSERT INTO nc_join_outer VALUES (1), (2)"
+  - sql: "INSERT INTO nc_join_history VALUES (1, 1, 10, 100), (2, 1, 20, 200), (3, 2, 10, 300)"
+  - sql: "INSERT INTO nc_join_value VALUES (10, 'older'), (20, 'newer')"
   - sql: "CREATE TABLE nc_multi_outer (ID INT PRIMARY KEY)"
   - sql: "CREATE TABLE nc_multi_history (ID INT PRIMARY KEY, outer_id INT, value_id INT, created INT)"
   - sql: "CREATE TABLE nc_multi_value (ID INT PRIMARY KEY, label VARCHAR(40))"
@@ -75,6 +84,62 @@ setup:
   - sql: "INSERT INTO nc_config VALUES (1, 99)"
 
 test_cases:
+  - name: "Correlated joined LIMIT keeps its order above the join group"
+    sql: |
+      SELECT o.ID, (
+        SELECT v.label
+        FROM nc_join_history h
+        JOIN nc_join_value v ON v.ID = h.value_id
+        WHERE h.outer_id = o.ID
+        ORDER BY h.created DESC
+        LIMIT 1
+      ) AS latest
+      FROM nc_join_outer o
+      ORDER BY o.ID
+    expect:
+      rows: 2
+      data:
+        - {ID: 1, latest: "newer"}
+        - {ID: 2, latest: "older"}
+
+  - name: "Joined scalar window has local partition keys in IR"
+    sql: |
+      EXPLAIN IR SELECT o.ID, (
+        SELECT v.label
+        FROM nc_join_history h
+        JOIN nc_join_value v ON v.ID = h.value_id
+        WHERE h.outer_id = o.ID
+        ORDER BY h.created DESC
+        LIMIT 1
+      ) AS latest
+      FROM nc_join_outer o
+    expect:
+      result_contains:
+        - "partition_by"
+        - "partition_order"
+        - "partition_offset"
+        - "partition_limit"
+        - "outer_id"
+        - "created"
+
+  - name: "Joined scalar LIMIT lowers through scan_join_order"
+    sql: |
+      EXPLAIN SELECT o.ID, (
+        SELECT v.label
+        FROM nc_join_history h
+        JOIN nc_join_value v ON v.ID = h.value_id
+        WHERE h.outer_id = o.ID
+        ORDER BY h.created DESC
+        LIMIT 1
+      ) AS latest
+      FROM nc_join_outer o
+      ORDER BY o.ID
+    expect:
+      result_contains:
+        - "scan_join_order"
+        - "nc_join_history"
+        - "nc_join_value"
+
   - name: "Nested scalar key preserves every outer domain row"
     sql: |
       SELECT o.ID,
