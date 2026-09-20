@@ -483,6 +483,12 @@ class HookDiagnosticsContractTest(unittest.TestCase):
                 self.assertEqual(artifact["if"], "always()")
                 self.assertEqual(artifact["with"]["path"].rstrip("/"), run["env"]["MEMCP_TEST_LOGDIR"])
 
+    def test_make_test_leaves_default_store_ownership_to_hook(self):
+        makefile = (self.root / "Makefile").read_text(encoding="utf-8")
+        test_recipe = makefile.split("\ntest:\n", 1)[1].split("\n\n", 1)[0]
+        self.assertNotIn("MEMCP_TEST_DATA_DIR=", test_recipe)
+        self.assertIn("./git-pre-commit", test_recipe)
+
 
 class PerformanceScaleContractTest(unittest.TestCase):
     def test_performance_discovery_honors_independent_ci_opt_in(self) -> None:
