@@ -47,6 +47,20 @@ var collateRegistry sync.Map // map[uintptr]struct{Collation string; Reverse boo
 // single source of ordering semantics.
 var collateLessRegistry sync.Map // map[uintptr]func(Scmer, Scmer) bool
 
+type CollationKeyFunc func(Scmer) (string, bool)
+
+type collationKeyDescriptor struct {
+	Key     CollationKeyFunc
+	Reverse bool
+}
+
+// collateKeyRegistry exposes reusable Unicode sort keys to storage index
+// builders. It uses the same stable metadata as persisted indexes, because an
+// index may outlive the callback closure that originally supplied its order.
+// Sorting compares each value O(log N) times; producing its key once avoids
+// repeating the collator's temporary allocations in every comparison.
+var collateKeyRegistry sync.Map // map[string]collationKeyDescriptor
+
 // FunctionIdentity returns the runtime identity of a function value, including
 // its closure context. reflect.Value.Pointer only returns the shared code entry
 // and therefore aliases distinct collation closures.
@@ -160,6 +174,20 @@ func OrderRelationLess(fn func(...Scmer) Scmer) func(Scmer, Scmer) bool {
 		return fast.(func(Scmer, Scmer) bool)
 	}
 	return func(a, b Scmer) bool { return ToBool(fn(a, b)) }
+}
+
+// LookupCollationKey returns a key producer for canonical Unicode collation
+// metadata. Binary and custom general collations already compare without
+// allocating and intentionally stay on their direct comparator paths.
+func LookupCollationKey(meta string) (CollationKeyFunc, bool, bool) {
+	if meta == "" {
+		return nil, false, false
+	}
+	if value, ok := collateKeyRegistry.Load(meta); ok {
+		descriptor := value.(collationKeyDescriptor)
+		return descriptor.Key, descriptor.Reverse, true
+	}
+	return nil, false, false
 }
 
 // binaryCollationLess keeps boolean/text keys in the same textual order in
@@ -28551,6 +28579,7 @@ func init_strings() {
 				canonical, _ := collateCache.LoadOrStore(key, result)
 				return canonical.(Scmer)
 			}
+			var collationKey CollationKeyFunc
 			raw := func() Scmer {
 				collation := String(a[0])
 				// Bare charset names carry no language/case ordering. SQL columns use
@@ -28689,16 +28718,41 @@ func init_strings() {
 							tag = language.Danish // default to danish for general-like collations (aa -> å semantics)
 						}
 					}
+					newCollator := func() *collate.Collator {
+						if ci {
+							return collate.New(tag, collate.Numeric, collate.IgnoreCase)
+						}
+						return collate.New(tag, collate.Numeric)
+					}
 					var c *collate.Collator
 					// the following options are available:
 					// IgnoreCase -> when string ends with _ci
 					// IgnoreDiacritics -> o == ö
 					// IgnoreWidth: half width == width
 					// Numeric -> sort numbers correctly
-					if ci {
-						c = collate.New(tag, collate.Numeric, collate.IgnoreCase)
-					} else {
-						c = collate.New(tag, collate.Numeric)
+					c = newCollator()
+					type keyWorker struct {
+						collator *collate.Collator
+						buffer   collate.Buffer
+					}
+					var keyPool sync.Pool
+					keyPool.New = func() any { return &keyWorker{collator: newCollator()} }
+					collationKey = func(value Scmer) (string, bool) {
+						if value.IsNil() {
+							return "", true
+						}
+						// The relation stringifies every non-numeric pair before handing it
+						// to x/text. Do the same here, including source-info wrapped values
+						// emitted by query plans. Numeric pairs retain their native ordering
+						// and therefore stay on the comparator fallback.
+						if value.IsInt() || value.IsFloat() {
+							return "", false
+						}
+						worker := keyPool.Get().(*keyWorker)
+						worker.buffer.Reset()
+						key := string(worker.collator.KeyFromString(&worker.buffer, String(value)))
+						keyPool.Put(worker)
+						return key, true
 					}
 
 					// return a LESS function specialized to that language and register for serialization
@@ -28741,6 +28795,14 @@ func init_strings() {
 				}
 			}()
 			rawFn := raw.Func()
+			/* Calling a variadic Scheme callback with two scalar arguments makes
+			the argument array escape at every comparison. Index construction may
+			perform millions of comparisons, so retain one frame per concurrent
+			caller instead of feeding the garbage collector one tiny object each
+			time. The callback itself is immutable; only the argument frame needs
+			worker-local ownership. */
+			var rawArgsPool sync.Pool
+			rawArgsPool.New = func() any { return new([2]Scmer) }
 			less := func(left, right Scmer) bool {
 				leftNil := left.IsNil()
 				rightNil := right.IsNil()
@@ -28753,7 +28815,12 @@ func init_strings() {
 					}
 					return leftNil && !rightNil
 				}
-				return ToBool(rawFn(left, right))
+				args := rawArgsPool.Get().(*[2]Scmer)
+				args[0], args[1] = left, right
+				result := ToBool(rawFn(args[:]...))
+				args[0], args[1] = NewNil(), NewNil()
+				rawArgsPool.Put(args)
+				return result
 			}
 			fn := func(args ...Scmer) Scmer {
 				return NewBool(less(args[0], args[1]))
@@ -28765,7 +28832,16 @@ func init_strings() {
 			}{Collation: collationName, Reverse: reverse})
 			collateLessRegistry.Store(FunctionIdentity(fn), less)
 			canonical, _ := collateCache.LoadOrStore(key, result)
-			return canonical.(Scmer)
+			canonicalValue := canonical.(Scmer)
+			if collationKey != nil {
+				order := ":asc"
+				if reverse {
+					order = ":desc"
+				}
+				collateKeyRegistry.LoadOrStore(collationName+order,
+					collationKeyDescriptor{Key: collationKey, Reverse: reverse})
+			}
+			return canonicalValue
 		},
 		Type: &TypeDescriptor{Kind: "func", Description: "returns a canonical order relation for a collation and direction. MemCP allows natural sorting of numeric literals.",
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", Label: "collation", Description: "collation string of the form LANG or LANG_cs or LANG_ci where LANG is a BCP 47 code, for compatibility to MySQL, a CHARSET_ prefix is allowed and ignored as well as the aliases bin, danish, general, german1, german2, spanish and swedish are allowed for language codes"}, &TypeDescriptor{Kind: "bool", Label: "reverse", Description: "whether to reverse the order like in ORDER BY DESC", Optional: true}},
