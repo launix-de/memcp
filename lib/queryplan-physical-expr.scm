@@ -518,12 +518,19 @@ an unbound symbol in the callback when costing selects the probe alternative. */
 			(qb_where prepared_input)
 			(qb_group prepared_input)
 			(qb_having prepared_input)
-			(qb_order prepared_input)
+			(stage_partition_order stage)
 			partition_limit
-			0
+			(stage_partition_offset stage)
 			(qb_hidden prepared_input)
 			(qb_stages prepared_input)
-			(qb_facts prepared_input)))
+			(begin
+				(define bounded_facts (qassoc_set
+					(qassoc_set (qb_facts prepared_input)
+						(quote join_order_planning_offset) (stage_partition_offset stage))
+					(quote join_order_planning_limit) partition_limit))
+				(if (> (count (filter (qb_sources prepared_input) source_is_base_table?)) 1)
+					(qassoc_set bounded_facts (quote joined_limit_semantic) true)
+					bounded_facts))))
 		(define direct_probe (if (empty_list? effective_prepare_stages)
 			(lower_direct_scalar_query_probe prepared_input effective_probe_value_expr partition_limit
 				(qassoc_get (gs_facts stage) (quote on_overflow) nil))

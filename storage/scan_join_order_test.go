@@ -148,6 +148,55 @@ func TestScanJoinOrderFiltersJoinsAndBrakesInDriverOrder(t *testing.T) {
 	}
 }
 
+func TestScanJoinOrderAppliesLimitPerJoinedPartition(t *testing.T) {
+	database := "tscanjoinorderpartlimit"
+	databases.Remove(database)
+	t.Cleanup(func() { databases.Remove(database) })
+	CreateDatabase(database, true)
+
+	orders := setupScanJoinOrderTable(t, database, "orders", []string{"id", "customer_id"}, [][]scm.Scmer{
+		{scm.NewInt(1), scm.NewInt(10)},
+		{scm.NewInt(2), scm.NewInt(20)},
+		{scm.NewInt(3), scm.NewInt(10)},
+		{scm.NewInt(4), scm.NewInt(30)},
+		{scm.NewInt(5), scm.NewInt(10)},
+	})
+	customers := setupScanJoinOrderTable(t, database, "customers", []string{"id"}, [][]scm.Scmer{
+		{scm.NewInt(10)}, {scm.NewInt(20)}, {scm.NewInt(30)},
+	})
+	_, ascending := integerOrder(false)
+	_, descending := integerOrder(true)
+	run := func(offset, limit int) []int64 {
+		got := make([]int64, 0, 3)
+		scanJoinOrder(nil, scanJoinOrderSpec{
+			inputs: []scanJoinOrderInput{
+				{table: orders, accessSchema: newScanAccessSchema(scanAccessConsumerScan, nil, -1)},
+				{table: customers, accessSchema: newScanAccessSchema(scanAccessConsumerScan, nil, -1),
+					sourceKeyCols: []scanJoinOrderColumn{{table: 0, column: "customer_id"}}, targetKeyCols: []string{"id"}},
+			},
+			orderCols:          []scanJoinOrderColumn{{table: 0, column: "customer_id"}, {table: 0, column: "id"}},
+			orderDirs:          []func(...scm.Scmer) scm.Scmer{ascending, descending},
+			limitPartitionCols: 1,
+			offset:             offset,
+			limit:              limit,
+			mapCols:            []scanJoinOrderColumn{{table: 0, column: "id"}},
+			mapReduceFn: scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
+				got = append(got, values[1].Int())
+				return values[0]
+			}),
+			neutral: scm.NewNil(),
+		})
+		return got
+	}
+
+	if got, want := run(0, 1), []int64{5, 2, 4}; !equalInt64s(got, want) {
+		t.Fatalf("partition-local joined Top-K = %v, want %v", got, want)
+	}
+	if got, want := run(1, 1), []int64{3}; !equalInt64s(got, want) {
+		t.Fatalf("partition-local joined OFFSET/LIMIT = %v, want %v", got, want)
+	}
+}
+
 func TestScanJoinOrderDoesNotJoinNullKeys(t *testing.T) {
 	database := "tscanjoinordernull"
 	databases.Remove(database)

@@ -269,8 +269,8 @@ func prepareScanJoinOrderSpec(spec *scanJoinOrderSpec) {
 	if spec.offset < 0 || spec.limit < -1 {
 		panic("scan_join_order: invalid offset or limit")
 	}
-	if spec.limitPartitionCols != 0 {
-		panic("scan_join_order: partitioned limits are not supported")
+	if spec.limitPartitionCols < 0 || spec.limitPartitionCols > len(spec.orderCols) {
+		panic("scan_join_order: invalid partition column count")
 	}
 	if !spec.combineFn.IsNil() && (spec.offset != 0 || spec.limit != -1) {
 		panic("scan_join_order: combine requires an unlimited scan without offset")
@@ -1478,8 +1478,42 @@ func collectTopKScanJoinOrderTuples(spec *scanJoinOrderSpec, runnerResults [][]*
 	return runnerResults[0]
 }
 
+func sameScanJoinOrderPartition(spec *scanJoinOrderSpec, left, right *scanJoinOrderTuple) bool {
+	leftValues := scanJoinOrderTupleValues(spec, left, spec.orderCols[:spec.limitPartitionCols], nil)
+	rightValues := scanJoinOrderTupleValues(spec, right, spec.orderCols[:spec.limitPartitionCols], nil)
+	for i := range leftValues {
+		if !scm.Equal(leftValues[i], rightValues[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// applyScanJoinOrderPartitionWindow consumes a stream ordered by the partition
+// columns followed by the local order columns. OFFSET/LIMIT therefore reset at
+// each partition boundary without materializing a second grouping structure.
+func applyScanJoinOrderPartitionWindow(spec *scanJoinOrderSpec, tuples []*scanJoinOrderTuple) []*scanJoinOrderTuple {
+	if spec.limitPartitionCols == 0 || len(tuples) == 0 {
+		return tuples
+	}
+	result := tuples[:0]
+	partitionRow := 0
+	var previous *scanJoinOrderTuple
+	for _, tuple := range tuples {
+		if previous == nil || !sameScanJoinOrderPartition(spec, previous, tuple) {
+			partitionRow = 0
+		}
+		if partitionRow >= spec.offset && (spec.limit < 0 || partitionRow-spec.offset < spec.limit) {
+			result = append(result, tuple)
+		}
+		partitionRow++
+		previous = tuple
+	}
+	return result
+}
+
 func scanJoinOrder(currentTx *TxContext, spec scanJoinOrderSpec) scm.Scmer {
-	if spec.limit >= 0 && scanJoinOrderUsesDriverOrder(&spec) {
+	if spec.limitPartitionCols == 0 && spec.limit >= 0 && scanJoinOrderUsesDriverOrder(&spec) {
 		if spec.batchedProbe {
 			return scanJoinOrderBatchedProbe(currentTx, spec)
 		}
@@ -1490,7 +1524,7 @@ func scanJoinOrder(currentTx *TxContext, spec scanJoinOrderSpec) scm.Scmer {
 		return spec.notFoundValue
 	}
 	keep := -1
-	if spec.limit >= 0 {
+	if spec.limitPartitionCols == 0 && spec.limit >= 0 {
 		if spec.offset > int(^uint(0)>>1)-spec.limit {
 			panic("scan_join_order: offset plus limit overflows")
 		}
@@ -1562,13 +1596,17 @@ func scanJoinOrder(currentTx *TxContext, spec scanJoinOrderSpec) scm.Scmer {
 		<-done
 	}
 	joined := collectTopKScanJoinOrderTuples(&spec, runnerResults, keep)
-	if spec.offset > len(joined) {
-		joined = nil
+	if spec.limitPartitionCols > 0 {
+		joined = applyScanJoinOrderPartitionWindow(&spec, joined)
 	} else {
-		joined = joined[spec.offset:]
-	}
-	if spec.limit >= 0 && len(joined) > spec.limit {
-		joined = joined[:spec.limit]
+		if spec.offset > len(joined) {
+			joined = nil
+		} else {
+			joined = joined[spec.offset:]
+		}
+		if spec.limit >= 0 && len(joined) > spec.limit {
+			joined = joined[:spec.limit]
+		}
 	}
 	if len(joined) == 0 {
 		if spec.isOuter {
@@ -1688,7 +1726,7 @@ func declareScanJoinOrder(en *scm.Env) {
 		},
 		Type: &scm.TypeDescriptor{
 			Kind:           "func",
-			Description:    "scans a left-deep equi-join in final ORDER BY order, executes each inner table through equality-filter plus join-key ordered access, and applies OFFSET/LIMIT only to joined rows",
+			Description:    "scans a left-deep equi-join in final ORDER BY order, executes each inner table through equality-filter plus join-key ordered access, and applies global or partition-local OFFSET/LIMIT only to joined rows",
 			HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
 				{Kind: "any", Label: "tx", Description: "transaction context"},
@@ -1702,7 +1740,7 @@ func declareScanJoinOrder(en *scm.Env) {
 				{Kind: "func|nil", Label: "joinFilter", Description: "residual predicate over the complete joined tuple, or nil"},
 				{Kind: "list", Label: "orderColumns", Description: "joined column references used by final ORDER BY", Element: joinedColumn},
 				{Kind: "list", Label: "sortDirections", Description: "one ordering relation per order column"},
-				{Kind: "int", Label: "limitPartitionCols", Description: "reserved for scan_order compatibility; currently must be 0"},
+				{Kind: "int", Label: "limitPartitionCols", Description: "number of leading order columns forming the partition key; 0 means one global partition"},
 				{Kind: "int", Label: "offset", Description: "joined rows skipped in final order"},
 				{Kind: "int", Label: "limit", Description: "joined rows emitted in final order; -1 is unlimited"},
 				{Kind: "list", Label: "mapReduceColumns", Description: "joined columns supplied after the accumulator", Element: joinedColumn},
