@@ -653,6 +653,14 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		"keytable cost check refuses the carrier when probe_work_rows is a non-numeric sentinel")
 	(assert (scalar_first_probe_keytable_cost_preferred? cost_probe_stage "72") false
 		"keytable cost check refuses the carrier when probe_work_rows is a non-numeric string")
+	(assert (planner_cost_better?
+		(planner_direct_presence_probe_cost (* 1880 2))
+		(scalar_first_probe_keytable_cost 80000 1880 2)) true
+		"bounded scalar probes beat materializing a large query-local keytable")
+	(assert (planner_cost_better?
+		(scalar_first_probe_keytable_cost 2000 200000 10)
+		(planner_direct_presence_probe_cost (* 200000 10))) true
+		"a reused wide scalar keytable still beats repeated per-column direct probes")
 	(assert (planner_estimated_matching_rows
 		(list
 			(list (quote rows) 512)
