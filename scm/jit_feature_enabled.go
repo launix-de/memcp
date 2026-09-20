@@ -1,4 +1,4 @@
-//go:build goexperiment.jit && amd64
+//go:build goexperiment.jit && (amd64 || arm64 || riscv64)
 
 /*
 Copyright (C) 2024-2026  Carl-Philip Hänsch

@@ -181,7 +181,7 @@ func CalibrateJITCosts() JITCostCalibration {
 	jitCalibrationOnce.Do(func() {
 		started := time.Now()
 		calibration := JITCostCalibration{}
-		if jitEnabled {
+		if jitEnabled && jitSupportsCalibration {
 			observations := func() []jitCalibrationObservation {
 				runtime.LockOSThread()
 				defer runtime.UnlockOSThread()
