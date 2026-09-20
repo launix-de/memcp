@@ -3181,7 +3181,7 @@ func init_vector() {
 							scratch = ctx.AllocRegExcept(d13.Reg)
 						}
 						ctx.EmitMovRegReg(scratch, d13.Reg)
-						ctx.EmitAddRegImm32(scratch, int32(1))
+						ctx.EmitIntBinaryImm(JITIntAdd, 64, scratch, 1)
 						d283 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: scratch}
 						ctx.BindReg(scratch, &d283)
 					}
@@ -6431,7 +6431,7 @@ func init_vector() {
 							scratch = ctx.AllocRegExcept(d15.Reg)
 						}
 						ctx.EmitMovRegReg(scratch, d15.Reg)
-						ctx.EmitAddRegImm32(scratch, int32(1))
+						ctx.EmitIntBinaryImm(JITIntAdd, 64, scratch, 1)
 						d660 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: scratch}
 						ctx.BindReg(scratch, &d660)
 					}

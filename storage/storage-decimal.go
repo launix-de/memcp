@@ -433,26 +433,25 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resu
 		if d0.Loc == scm.LocImm && d2.Loc == scm.LocImm {
 			d4 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(d0.Imm.Int() * d2.Imm.Int())}
 		} else if d0.Loc == scm.LocImm {
+			ctx.EnsureDesc(&d2)
 			scratch := ctx.AllocRegExcept(d2.Reg)
-			ctx.EmitMovRegImm64(scratch, uint64(d0.Imm.Int()))
-			ctx.EmitImulInt64(scratch, d2.Reg)
+			ctx.EmitMovRegReg(scratch, d2.Reg)
+			ctx.EmitIntBinaryImm(scm.JITIntMul, 64, scratch, d0.Imm.Int())
 			d4 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: scratch}
 			ctx.BindReg(scratch, &d4)
 		} else if d2.Loc == scm.LocImm {
+			ctx.EnsureDesc(&d0)
 			scratch := ctx.AllocRegExcept(d0.Reg)
 			ctx.EmitMovRegReg(scratch, d0.Reg)
-			if d2.Imm.Int() >= -2147483648 && d2.Imm.Int() <= 2147483647 {
-				ctx.EmitImulRegImm32(scratch, int32(d2.Imm.Int()))
-			} else {
-				ctx.EmitMovRegImm64(scm.RegR11, uint64(d2.Imm.Int()))
-				ctx.EmitImulInt64(scratch, scm.RegR11)
-			}
+			ctx.EmitIntBinaryImm(scm.JITIntMul, 64, scratch, d2.Imm.Int())
 			d4 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: scratch}
 			ctx.BindReg(scratch, &d4)
 		} else {
+			ctx.EnsureDesc(&d0)
+			ctx.SyncDesc(&d2)
 			r2 := ctx.AllocRegExcept(d0.Reg, d2.Reg)
 			ctx.EmitMovRegReg(r2, d0.Reg)
-			ctx.EmitImulInt64(r2, d2.Reg)
+			ctx.EmitIntBinary(scm.JITIntMul, 64, r2, &d2)
 			d4 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: r2}
 			ctx.BindReg(r2, &d4)
 		}
@@ -572,7 +571,7 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resu
 		} else {
 			scratch := ctx.AllocRegExcept(d5.Reg)
 			ctx.EmitMovRegReg(scratch, d5.Reg)
-			ctx.EmitAddRegImm32(scratch, int32(1))
+			ctx.EmitIntBinaryImm(scm.JITIntAdd, 64, scratch, 1)
 			d10 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: scratch}
 			ctx.BindReg(scratch, &d10)
 		}
@@ -594,31 +593,31 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resu
 		if d12.Loc == scm.LocImm && d6.Loc == scm.LocImm {
 			d13 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(d12.Imm.Int() - d6.Imm.Int())}
 		} else if d6.Loc == scm.LocImm && d6.Imm.Int() == 0 {
+			ctx.EnsureDesc(&d12)
 			r10 := ctx.AllocRegExcept(d12.Reg)
 			ctx.EmitMovRegReg(r10, d12.Reg)
 			d13 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: r10}
 			ctx.BindReg(r10, &d13)
 		} else if d12.Loc == scm.LocImm {
+			ctx.EnsureDesc(&d6)
 			scratch := ctx.AllocRegExcept(d6.Reg)
 			ctx.EmitMovRegImm64(scratch, uint64(d12.Imm.Int()))
-			ctx.EmitSubInt64(scratch, d6.Reg)
+			ctx.EmitIntBinary(scm.JITIntSub, 64, scratch, &d6)
 			d13 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: scratch}
 			ctx.BindReg(scratch, &d13)
 		} else if d6.Loc == scm.LocImm {
+			ctx.EnsureDesc(&d12)
 			scratch := ctx.AllocRegExcept(d12.Reg)
 			ctx.EmitMovRegReg(scratch, d12.Reg)
-			if d6.Imm.Int() >= -2147483648 && d6.Imm.Int() <= 2147483647 {
-				ctx.EmitSubRegImm32(scratch, int32(d6.Imm.Int()))
-			} else {
-				ctx.EmitMovRegImm64(scm.RegR11, uint64(d6.Imm.Int()))
-				ctx.EmitSubInt64(scratch, scm.RegR11)
-			}
+			ctx.EmitIntBinaryImm(scm.JITIntSub, 64, scratch, d6.Imm.Int())
 			d13 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: scratch}
 			ctx.BindReg(scratch, &d13)
 		} else {
+			ctx.EnsureDesc(&d12)
+			ctx.SyncDesc(&d6)
 			r11 := ctx.AllocRegExcept(d12.Reg, d6.Reg)
 			ctx.EmitMovRegReg(r11, d12.Reg)
-			ctx.EmitSubInt64(r11, d6.Reg)
+			ctx.EmitIntBinary(scm.JITIntSub, 64, r11, &d6)
 			d13 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: r11}
 			ctx.BindReg(r11, &d13)
 		}
@@ -719,31 +718,31 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resu
 		if d16.Loc == scm.LocImm && d2.Loc == scm.LocImm {
 			d17 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(d16.Imm.Int() - d2.Imm.Int())}
 		} else if d2.Loc == scm.LocImm && d2.Imm.Int() == 0 {
+			ctx.EnsureDesc(&d16)
 			r17 := ctx.AllocRegExcept(d16.Reg)
 			ctx.EmitMovRegReg(r17, d16.Reg)
 			d17 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: r17}
 			ctx.BindReg(r17, &d17)
 		} else if d16.Loc == scm.LocImm {
+			ctx.EnsureDesc(&d2)
 			scratch := ctx.AllocRegExcept(d2.Reg)
 			ctx.EmitMovRegImm64(scratch, uint64(d16.Imm.Int()))
-			ctx.EmitSubInt64(scratch, d2.Reg)
+			ctx.EmitIntBinary(scm.JITIntSub, 64, scratch, &d2)
 			d17 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: scratch}
 			ctx.BindReg(scratch, &d17)
 		} else if d2.Loc == scm.LocImm {
+			ctx.EnsureDesc(&d16)
 			scratch := ctx.AllocRegExcept(d16.Reg)
 			ctx.EmitMovRegReg(scratch, d16.Reg)
-			if d2.Imm.Int() >= -2147483648 && d2.Imm.Int() <= 2147483647 {
-				ctx.EmitSubRegImm32(scratch, int32(d2.Imm.Int()))
-			} else {
-				ctx.EmitMovRegImm64(scm.RegR11, uint64(d2.Imm.Int()))
-				ctx.EmitSubInt64(scratch, scm.RegR11)
-			}
+			ctx.EmitIntBinaryImm(scm.JITIntSub, 64, scratch, d2.Imm.Int())
 			d17 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: scratch}
 			ctx.BindReg(scratch, &d17)
 		} else {
+			ctx.EnsureDesc(&d16)
+			ctx.SyncDesc(&d2)
 			r18 := ctx.AllocRegExcept(d16.Reg, d2.Reg)
 			ctx.EmitMovRegReg(r18, d16.Reg)
-			ctx.EmitSubInt64(r18, d2.Reg)
+			ctx.EmitIntBinary(scm.JITIntSub, 64, r18, &d2)
 			d17 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: r18}
 			ctx.BindReg(r18, &d17)
 		}
@@ -1270,34 +1269,35 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resu
 		if d71.Loc == scm.LocImm && d72.Loc == scm.LocImm {
 			d73 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(d71.Imm.Int() + d72.Imm.Int())}
 		} else if d72.Loc == scm.LocImm && d72.Imm.Int() == 0 {
+			ctx.EnsureDesc(&d71)
 			r24 := ctx.AllocRegExcept(d71.Reg)
 			ctx.EmitMovRegReg(r24, d71.Reg)
 			d73 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: r24}
 			ctx.BindReg(r24, &d73)
 		} else if d71.Loc == scm.LocImm && d71.Imm.Int() == 0 {
+			ctx.EnsureDesc(&d72)
 			d73 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: d72.Reg}
 			ctx.BindReg(d72.Reg, &d73)
 		} else if d71.Loc == scm.LocImm {
+			ctx.EnsureDesc(&d72)
 			scratch := ctx.AllocRegExcept(d72.Reg)
-			ctx.EmitMovRegImm64(scratch, uint64(d71.Imm.Int()))
-			ctx.EmitAddInt64(scratch, d72.Reg)
+			ctx.EmitMovRegReg(scratch, d72.Reg)
+			ctx.EmitIntBinaryImm(scm.JITIntAdd, 64, scratch, d71.Imm.Int())
 			d73 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: scratch}
 			ctx.BindReg(scratch, &d73)
 		} else if d72.Loc == scm.LocImm {
+			ctx.EnsureDesc(&d71)
 			scratch := ctx.AllocRegExcept(d71.Reg)
 			ctx.EmitMovRegReg(scratch, d71.Reg)
-			if d72.Imm.Int() >= -2147483648 && d72.Imm.Int() <= 2147483647 {
-				ctx.EmitAddRegImm32(scratch, int32(d72.Imm.Int()))
-			} else {
-				ctx.EmitMovRegImm64(scm.RegR11, uint64(d72.Imm.Int()))
-				ctx.EmitAddInt64(scratch, scm.RegR11)
-			}
+			ctx.EmitIntBinaryImm(scm.JITIntAdd, 64, scratch, d72.Imm.Int())
 			d73 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: scratch}
 			ctx.BindReg(scratch, &d73)
 		} else {
+			ctx.EnsureDesc(&d71)
+			ctx.SyncDesc(&d72)
 			r25 := ctx.AllocRegExcept(d71.Reg, d72.Reg)
 			ctx.EmitMovRegReg(r25, d71.Reg)
-			ctx.EmitAddInt64(r25, d72.Reg)
+			ctx.EmitIntBinary(scm.JITIntAdd, 64, r25, &d72)
 			d73 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: r25}
 			ctx.BindReg(r25, &d73)
 		}
@@ -2277,6 +2277,7 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resu
 		if d73.Loc == scm.LocImm && d215.Loc == scm.LocImm {
 			d217 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(d73.Imm.Int() * d215.Imm.Int())}
 		} else if d73.Loc == scm.LocImm {
+			ctx.EnsureDesc(&d215)
 			var scratch scm.Reg
 			if result.Loc == scm.LocRegPair && result.Reg2 != d215.Reg {
 				scratch = result.Reg2
@@ -2284,11 +2285,12 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resu
 			} else {
 				scratch = ctx.AllocRegExcept(d215.Reg)
 			}
-			ctx.EmitMovRegImm64(scratch, uint64(d73.Imm.Int()))
-			ctx.EmitImulInt64(scratch, d215.Reg)
+			ctx.EmitMovRegReg(scratch, d215.Reg)
+			ctx.EmitIntBinaryImm(scm.JITIntMul, 64, scratch, d73.Imm.Int())
 			d217 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: scratch}
 			ctx.BindReg(scratch, &d217)
 		} else if d215.Loc == scm.LocImm {
+			ctx.EnsureDesc(&d73)
 			var scratch scm.Reg
 			if result.Loc == scm.LocRegPair && result.Reg2 != d73.Reg {
 				scratch = result.Reg2
@@ -2297,15 +2299,12 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resu
 				scratch = ctx.AllocRegExcept(d73.Reg)
 			}
 			ctx.EmitMovRegReg(scratch, d73.Reg)
-			if d215.Imm.Int() >= -2147483648 && d215.Imm.Int() <= 2147483647 {
-				ctx.EmitImulRegImm32(scratch, int32(d215.Imm.Int()))
-			} else {
-				ctx.EmitMovRegImm64(scm.RegR11, uint64(d215.Imm.Int()))
-				ctx.EmitImulInt64(scratch, scm.RegR11)
-			}
+			ctx.EmitIntBinaryImm(scm.JITIntMul, 64, scratch, d215.Imm.Int())
 			d217 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: scratch}
 			ctx.BindReg(scratch, &d217)
 		} else {
+			ctx.EnsureDesc(&d73)
+			ctx.SyncDesc(&d215)
 			var r36 scm.Reg
 			if result.Loc == scm.LocRegPair && result.Reg2 != d73.Reg && result.Reg2 != d215.Reg {
 				r36 = result.Reg2
@@ -2314,7 +2313,7 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resu
 				r36 = ctx.AllocRegExcept(d73.Reg, d215.Reg)
 			}
 			ctx.EmitMovRegReg(r36, d73.Reg)
-			ctx.EmitImulInt64(r36, d215.Reg)
+			ctx.EmitIntBinary(scm.JITIntMul, 64, r36, &d215)
 			d217 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: r36}
 			ctx.BindReg(r36, &d217)
 		}
@@ -2512,7 +2511,7 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resu
 		} else {
 			scratch := ctx.AllocRegExcept(d221.Reg)
 			ctx.EmitMovRegReg(scratch, d221.Reg)
-			ctx.EmitAddRegImm32(scratch, int32(15))
+			ctx.EmitIntBinaryImm(scm.JITIntAdd, 64, scratch, 15)
 			d222 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: scratch}
 			ctx.BindReg(scratch, &d222)
 		}

@@ -18,6 +18,37 @@ package scm
 
 import "unsafe"
 
+// JITIntOp is a semantic integer operation. Backends receive the operation
+// together with its still-unmaterialized right operand and choose the shortest
+// target instruction sequence in the one-pass emitter.
+type JITIntOp uint8
+
+const (
+	JITIntAdd JITIntOp = iota
+	JITIntSub
+	JITIntMul
+	JITIntAnd
+	JITIntOr
+	JITIntXor
+)
+
+type jitIntOperandKind uint8
+
+const (
+	jitIntOperandReg jitIntOperandKind = iota
+	jitIntOperandImm
+	jitIntOperandMem
+)
+
+// jitIntOperand is short-lived emitter state, not another optimization IR.
+type jitIntOperand struct {
+	kind jitIntOperandKind
+	reg  Reg
+	base Reg
+	disp int32
+	imm  int64
+}
+
 func jitCapturedEnv(en *Env) *JITEnv {
 	if en == nil || en == &Globalenv {
 		return nil
@@ -167,6 +198,75 @@ func (ctx *JITContext) EmitImulInt64(dst, src Reg) {
 	ctx.beginRegisterInstruction(jitRegisterMask(dst, src), jitRegisterMask(dst))
 	defer ctx.endRegisterInstruction()
 	jitArchEmitMulInt64(ctx, dst, src)
+}
+
+// EmitIntBinary consumes right in its current location. Stack operands remain
+// stack operands until this call: amd64 can fold them into the ALU instruction,
+// while load/store architectures materialize them into the reserved scratch
+// register immediately before use. No optimization pass follows.
+func (ctx *JITContext) EmitIntBinary(op JITIntOp, width uint8, dst Reg, right *JITValueDesc) {
+	operand := jitIntOperand{}
+	switch right.Loc {
+	case LocReg:
+		operand.kind = jitIntOperandReg
+		operand.reg = right.Reg
+	case LocImm:
+		operand.kind = jitIntOperandImm
+		operand.imm = right.Imm.Int()
+	case LocStack:
+		operand.kind = jitIntOperandMem
+		operand.base = ctx.StackReg
+		if right.StackOff < 0 {
+			operand.base = ctx.FrameReg
+		}
+		operand.disp = right.StackOff
+	default:
+		panic("jit: integer operand is not scalar")
+	}
+	ctx.emitIntBinaryOperand(op, width, dst, operand)
+}
+
+// EmitIntBinaryImm preserves constants until architecture-specific selection.
+func (ctx *JITContext) EmitIntBinaryImm(op JITIntOp, width uint8, dst Reg, imm int64) {
+	ctx.emitIntBinaryOperand(op, width, dst, jitIntOperand{kind: jitIntOperandImm, imm: imm})
+}
+
+func (ctx *JITContext) emitIntBinaryOperand(op JITIntOp, width uint8, dst Reg, right jitIntOperand) {
+	if width != 32 && width != 64 {
+		panic("jit: integer binary width must be 32 or 64")
+	}
+	if right.kind == jitIntOperandImm && width == 64 {
+		switch op {
+		case JITIntAdd, JITIntSub, JITIntOr, JITIntXor:
+			if right.imm == 0 {
+				ctx.emitIntBinaryIdentity(dst)
+				return
+			}
+		case JITIntMul:
+			if right.imm == 1 {
+				ctx.emitIntBinaryIdentity(dst)
+				return
+			}
+			if right.imm == 0 {
+				ctx.beginRegisterInstruction(0, jitRegisterMask(dst))
+				defer ctx.endRegisterInstruction()
+				jitArchEmitZeroReg(ctx, dst)
+				return
+			}
+		case JITIntAnd:
+			if right.imm == -1 {
+				ctx.emitIntBinaryIdentity(dst)
+				return
+			}
+		}
+	}
+	jitArchEmitIntBinary(ctx, op, width, dst, right, ctx.ScratchReg)
+}
+
+func (ctx *JITContext) emitIntBinaryIdentity(dst Reg) {
+	mask := jitRegisterMask(dst)
+	ctx.beginRegisterInstruction(mask, mask)
+	ctx.endRegisterInstruction()
 }
 
 func (ctx *JITContext) emitMovRegMem(dst, base Reg, disp int32) {
