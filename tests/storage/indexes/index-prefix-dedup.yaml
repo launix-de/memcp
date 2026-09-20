@@ -407,6 +407,18 @@ test_cases:
         - id: 4
           label: "Banana"
 
+  - name: "Explicit binary collation builds a separate physical order"
+    sql: "SELECT id, label FROM idx_order_relation WHERE tenant = 1 ORDER BY label COLLATE bin ASC LIMIT 3"
+    expect:
+      rows: 3
+      data:
+        - id: 2
+          label: null
+        - id: 4
+          label: "Banana"
+        - id: 1
+          label: "Zulu"
+
   - name: "Delta rows merge through the stored DESC relation"
     setup:
       - sql: |
@@ -460,7 +472,7 @@ test_cases:
         - id: 6
           label: "cherry"
 
-  - name: "ASC and DESC auto indexes retain distinct order metadata"
+  - name: "Every collation and direction retains distinct order metadata"
     scm: |
       (begin
         (define indexes ((show "memcp-tests" "idx_order_relation" 0 true) "indexes"))
@@ -476,9 +488,15 @@ test_cases:
             (if (and (>= (count orders) 2)
                 (equal? (nth orders 0) "utf8mb4:asc")
                 (equal? (nth orders 1) "utf8mb4_unicode_ci:desc")) (+ n 1) n))) 0))
-        (if (and (> asc_count 0) (> desc_count 0))
+        (define binary_count (reduce indexes (lambda (n index)
+          (begin
+            (define orders (get_assoc index "orders"))
+            (if (and (>= (count orders) 2)
+                (equal? (nth orders 0) "utf8mb4:asc")
+                (equal? (nth orders 1) "bin:asc")) (+ n 1) n))) 0))
+        (if (and (> asc_count 0) (> desc_count 0) (> binary_count 0))
           "ok"
-          (error (concat "expected separate ASC/DESC relation indexes, got " (serialize indexes)))))
+          (error (concat "expected separate collation/direction indexes, got " (serialize indexes)))))
 
   - name: "Rebuild preserves ordered relation identity"
     setup:

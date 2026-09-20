@@ -3091,10 +3091,11 @@ func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer, onF
 			// add to delta indexes
 			index.mu.Lock()
 			if index.baseState.deltaBtree != nil {
-				index.baseState.deltaBtree.ReplaceOrInsert(indexPair{itemid: int(recid), data: newrow})
+				pair := index.prepareCollationKeys(&index.baseState, indexPair{itemid: int(recid), data: newrow})
+				index.baseState.deltaBtree.ReplaceOrInsert(pair)
 				// The row payload belongs to the shard. The index owns only its
 				// B-tree entry/node overhead until rebuild produces compact arrays.
-				indexDeltaBytes[index] += 32
+				indexDeltaBytes[index] += 32 + int64(indexPairCollationKeyBytes(pair))
 			}
 			index.mu.Unlock()
 		}
@@ -3141,7 +3142,8 @@ func (t *storageShard) insertDatasetFromLog(columns []string, values [][]scm.Scm
 		for _, index := range t.Indexes {
 			index.mu.Lock()
 			if index.baseState.deltaBtree != nil {
-				index.baseState.deltaBtree.ReplaceOrInsert(indexPair{itemid: int(recid), data: newrow})
+				pair := index.prepareCollationKeys(&index.baseState, indexPair{itemid: int(recid), data: newrow})
+				index.baseState.deltaBtree.ReplaceOrInsert(pair)
 			}
 			index.mu.Unlock()
 		}
