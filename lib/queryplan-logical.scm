@@ -1578,6 +1578,21 @@ type-aware successor operation can prove an exact half-open rewrite. */
 (define range_bound_cut_kind (lambda (bound) (nth bound 4)))
 (define range_bound_term (lambda (bound) (nth bound 5)))
 
+/* A range boundary may be a session/constant expression or a column of a real
+driver table. Stage-output/derived boundaries need to remain ordinary dependent
+join keys until physical range preparation can scan that derived relation. */
+(define range_bound_has_preparable_outer_source? (lambda (bound inner_sources outer_sources)
+	(reduce (btw2025_expr_outer_column_refs
+		(range_bound_outer bound) inner_sources outer_sources) (lambda (supported ref)
+			(and supported
+				(begin
+					(define src (source_for_alias outer_sources nil (nth ref 1) (nth ref 2)))
+					(and (not (nil? src)) (source_is_base_table? src))))) true)))
+
+(define range_outer_context_preparable? (lambda (outer_sources)
+	(reduce (coalesceNil outer_sources '()) (lambda (supported src)
+		(and supported (source_is_base_table? src))) true)))
+
 (define range_correlation_domains (lambda (bounds)
 	(begin
 		(define axes (merge_unique (list (map bounds range_bound_inner))))
@@ -1816,20 +1831,24 @@ drifting on source-join pairs or residual outer references. */
 			'()))
 		(define range_bounds (filter (map terms (lambda (term)
 			(range_correlation_bound_using inner_default inner_sources outer_sources term)))
-			(lambda (bound) (not (nil? bound)))))
+			(lambda (bound) (and (not (nil? bound))
+				(range_bound_has_preparable_outer_source?
+					bound inner_sources outer_sources)))))
 		(define range_domains (range_correlation_domains range_bounds))
 		(define raw_lookup_pairs (domain_correlation_pairs
 			(merge (list term_pairs source_pairs (coalesceNil extra_pairs '())))))
-		/* A session or outer value that already cuts a range axis is not also a
-		point key. Keeping both would partition the cache by the very boundary it
-		is intended to share. */
-		(define lookup_pairs (filter raw_lookup_pairs (lambda (pair)
-			(not (reduce range_domains (lambda (matched domain)
-				(or matched
-					(and (not (range_domain_unbounded_from? domain))
-						(equal? (cadr pair) (range_domain_from domain)))
-					(and (not (range_domain_unbounded_to? domain))
-						(equal? (cadr pair) (range_domain_to domain))))) false)))))
+		/* A synthetic session-domain pair whose value already cuts a range axis
+		is not also a point key. Keep real equality correlations even when they
+		happen to reuse that outer expression for another inner column. */
+		(define range_lookup_pairs (filter raw_lookup_pairs (lambda (pair)
+			(not (and (equal? (car pair) (cadr pair))
+				(reduce range_domains (lambda (matched domain)
+					(or matched
+						(and (not (range_domain_unbounded_from? domain))
+							(equal? (cadr pair) (range_domain_from domain)))
+						(and (not (range_domain_unbounded_to? domain))
+							(equal? (cadr pair) (range_domain_to domain))))) false))))))
+		(define lookup_pairs raw_lookup_pairs)
 		(define local_terms (filter (map terms (lambda (term)
 			(local_correlation_term inner_default lookup_pairs
 				(pair_fn inner_default inner_sources outer_sources term) term)))
@@ -1855,6 +1874,7 @@ drifting on source-join pairs or residual outer references. */
 			(list (quote inner_sources) inner_sources)
 			(list (quote inner_default) inner_default)
 			(list (quote lookup_pairs) lookup_pairs)
+			(list (quote range_lookup_pairs) range_lookup_pairs)
 			(list (quote local_terms) local_terms)
 			(list (quote local_sources) local_sources)
 			(list (quote residual_outer_refs) residual_outer_refs)
@@ -2302,17 +2322,20 @@ row containing NULL must remain distinguishable for non-strict functions. */
 			(or found (expr_refs_stage_output_alias? key)))
 			false))))
 
-(define scalar_first_probe_stage? (lambda (stage)
+(define scalar_first_probe_stage_with_accessing? (lambda (stage accessing_key)
 	(if (not (group_stage? stage))
 		false
 		(begin
 			(define facts (gs_facts stage))
 			(define lookup_keys (qassoc_get facts (quote lookup-keys) '()))
+			(define residual_accessing
+				(qassoc_get facts accessing_key
+					(qassoc_get facts (quote btw2025_accessing_after_simple) '())))
 			(and (scalar_value_stage? stage)
 				(and (equal? (qassoc_get facts (quote partition_limit) nil) 1)
 					(and (equal? (qassoc_get facts (quote on_overflow) nil) (quote ignore))
 						(and (not (empty_list? lookup_keys))
-							(and (empty_list? (qassoc_get facts (quote btw2025_accessing_after_simple) '()))
+							(and (empty_list? residual_accessing)
 								(and (not (reduce lookup_keys (lambda (found key)
 									(or found (expr_refs_stage_output_alias? key))) false))
 									(or
@@ -2324,6 +2347,16 @@ row containing NULL must remain distinguishable for non-strict functions. */
 										(and (equal? (count (gs_aggregates stage)) 1)
 											(and (equal? (nth (car (gs_aggregates stage)) 1) (scalar_once_reduce_first))
 												(not (scalar_once_ordered_payload? (car (gs_aggregates stage)))))))))))))))))
+
+(define scalar_first_probe_stage? (lambda (stage)
+	(scalar_first_probe_stage_with_accessing? stage (quote btw2025_accessing_after_simple))))
+
+(define scalar_first_range_probe_stage? (lambda (stage)
+	(and (not (empty_list? (qassoc_get (gs_facts stage) (quote range-domains) '())))
+		(scalar_first_probe_stage_with_accessing? stage (quote range-accessing-after-simple)))))
+
+(define scalar_first_physical_probe_stage? (lambda (stage)
+	(or (scalar_first_probe_stage? stage) (scalar_first_range_probe_stage? stage))))
 
 (define scalar_aggregate_probe_stage? (lambda (stage)
 	(if (not (group_stage? stage))
@@ -3365,10 +3398,17 @@ without separately proving two-valued semantics. */
 		(define inner_src (qassoc_get analysis (quote inner_src) nil))
 		(define inner_sources (qassoc_get analysis (quote inner_sources) '()))
 		(define inner_default (qassoc_get analysis (quote inner_default) nil))
-		(define where_corr_pairs (qassoc_get analysis (quote lookup_pairs) '()))
+		(define raw_where_corr_pairs (qassoc_get analysis (quote lookup_pairs) '()))
+		(define candidate_range_where_corr_pairs
+			(qassoc_get analysis (quote range_lookup_pairs) raw_where_corr_pairs))
 		(define local_terms (qassoc_get analysis (quote local_terms) '()))
 		(define local_sources (qassoc_get analysis (quote local_sources) '()))
-		(define range_domains (qassoc_get analysis (quote range_domains) '()))
+		(define range_enabled (range_outer_context_preparable? outer_sources))
+		(define range_domains (if range_enabled
+			(qassoc_get analysis (quote range_domains) '()) '()))
+		(define where_corr_pairs raw_where_corr_pairs)
+		(define range_where_corr_pairs (if (empty_list? range_domains)
+			raw_where_corr_pairs candidate_range_where_corr_pairs))
 		(define range_invariant_terms
 			(qassoc_get analysis (quote range_invariant_terms) local_terms))
 		(define outer_aliases (source_aliases outer_sources))
@@ -3399,8 +3439,12 @@ without separately proving two-valued semantics. */
 		(define explicit_group_keys (map (coalesceNil (qb_group inner) '()) (lambda (expr)
 			(canonical_column_expr_for_alias inner_default expr))))
 		(define keys (group_keys_for_correlations inner_default all_corr_pairs explicit_group_keys))
+		(define range_keys (group_keys_for_correlations
+			inner_default range_where_corr_pairs explicit_group_keys))
 		(define outer_domain (correlation_domain all_corr_pairs))
 		(define lookup_keys (correlation_lookup_keys all_corr_pairs))
+		(define range_outer_domain (correlation_domain range_where_corr_pairs))
+		(define range_lookup_keys (correlation_lookup_keys range_where_corr_pairs))
 		(define condition (combine_where_terms local_terms true))
 		(define local_having (decorrelate_expr_with_pairs inner_default all_corr_pairs
 			(combine_where_terms local_having_terms true)))
@@ -3431,16 +3475,19 @@ without separately proving two-valued semantics. */
 				(list
 					(list (quote condition) stage_condition)
 					(list (quote range-domains) range_domains)
+					(list (quote range-point-keys) range_keys)
+					(list (quote range-point-domain) range_outer_domain)
+					(list (quote range-lookup-keys) range_lookup_keys)
 					(list (quote domain-keys) (if (or (empty_list? range_domains)
-						(not (equal? (count keys) (count lookup_keys))))
+						(not (equal? (count range_keys) (count range_lookup_keys))))
 						'()
 						(merge (list
-							(map (zip keys lookup_keys) (lambda (binding)
+							(map (zip range_keys range_lookup_keys) (lambda (binding)
 								(list (quote point) (car binding) (cadr binding))))
 							range_domains))))
 					(list (quote range-invariant-condition)
 						(combine_where_terms range_invariant_terms true))
-					(list (quote btw2025_accessing_after_simple) range_residual_accessing)
+					(list (quote range-accessing-after-simple) range_residual_accessing)
 					(list (quote domain) outer_domain)
 					(list (quote lookup-keys) lookup_keys)
 					(list (quote preserve_empty_domain) (not ags_have_list_accumulator))
@@ -3486,10 +3533,17 @@ without separately proving two-valued semantics. */
 			(neumann_fail "untangle_query" "scalar once_limit stage requires a base inner source after FROM flattening")
 			true)
 		(define inner_default (qassoc_get analysis (quote inner_default) nil))
-		(define lookup_pairs (qassoc_get analysis (quote lookup_pairs) '()))
+		(define raw_lookup_pairs (qassoc_get analysis (quote lookup_pairs) '()))
+		(define candidate_range_lookup_pairs
+			(qassoc_get analysis (quote range_lookup_pairs) raw_lookup_pairs))
 		(define local_terms (qassoc_get analysis (quote local_terms) '()))
 		(define local_sources (qassoc_get analysis (quote local_sources) '()))
-		(define range_domains (qassoc_get analysis (quote range_domains) '()))
+		(define range_enabled (range_outer_context_preparable? outer_sources))
+		(define range_domains (if range_enabled
+			(qassoc_get analysis (quote range_domains) '()) '()))
+		(define lookup_pairs raw_lookup_pairs)
+		(define range_lookup_pairs (if (empty_list? range_domains)
+			raw_lookup_pairs candidate_range_lookup_pairs))
 		(define range_invariant_terms
 			(qassoc_get analysis (quote range_invariant_terms) local_terms))
 		(define outer_aliases (source_aliases outer_sources))
@@ -3499,8 +3553,14 @@ without separately proving two-valued semantics. */
 		(define keys (if (empty_list? lookup_pairs)
 			'(1)
 			(scalar_stage_inner_keys_for_correlations inner_default (qb_stages inner) (qb_sources inner) lookup_pairs)))
+		(define range_keys (if (empty_list? range_lookup_pairs)
+			'(1)
+			(scalar_stage_inner_keys_for_correlations inner_default
+				(qb_stages inner) (qb_sources inner) range_lookup_pairs)))
 		(define outer_domain (correlation_domain lookup_pairs))
 		(define lookup_keys (correlation_lookup_keys lookup_pairs))
+		(define range_outer_domain (correlation_domain range_lookup_pairs))
+		(define range_lookup_keys (correlation_lookup_keys range_lookup_pairs))
 		(define condition (combine_where_terms local_terms true))
 		(define values_for_inner (map value_exprs (lambda (value_expr)
 			(canonical_column_expr_for_alias inner_default
@@ -3537,16 +3597,19 @@ without separately proving two-valued semantics. */
 				(list
 					(list (quote condition) stage_condition)
 					(list (quote range-domains) range_domains)
+					(list (quote range-point-keys) range_keys)
+					(list (quote range-point-domain) range_outer_domain)
+					(list (quote range-lookup-keys) range_lookup_keys)
 					(list (quote domain-keys) (if (or (empty_list? range_domains)
-						(not (equal? (count keys) (count lookup_keys))))
+						(not (equal? (count range_keys) (count range_lookup_keys))))
 						'()
 						(merge (list
-							(map (zip keys lookup_keys) (lambda (binding)
+							(map (zip range_keys range_lookup_keys) (lambda (binding)
 								(list (quote point) (car binding) (cadr binding))))
 							range_domains))))
 					(list (quote range-invariant-condition)
 						(combine_where_terms range_invariant_terms true))
-					(list (quote btw2025_accessing_after_simple) range_residual_accessing)
+					(list (quote range-accessing-after-simple) range_residual_accessing)
 					(list (quote domain) outer_domain)
 					(list (quote lookup-keys) lookup_keys)
 					(list (quote preserve_empty_domain) true)

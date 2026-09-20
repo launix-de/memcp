@@ -210,9 +210,21 @@ context gates because bare EXISTS also has a separate membership lowerer. */
 			(define stage (stage_by_id stages (stage_output_relation_id (source_relation src))))
 			(define probe_sources (filter sources (lambda (candidate)
 				(not (equal? (source_alias candidate) (source_alias src))))))
-			(and (not (stage_consumed_by_presence_stage? stages stage))
-				(and (stage_probe_dependencies_resolve_in_catalog? stages stage)
-					(stage_lookup_keys_resolve_in_sources? stage probe_sources default_alias))))
+			(and
+				(or
+					(empty_list? (range_stage_domains stage))
+					(and
+						(range_stage_has_cacheable_aggregate? stage)
+						(single_source? (filter probe_sources source_is_base_table?))
+						(equal? (car (range_group_cache_selection
+							(filter probe_sources source_is_base_table?) stage))
+							"range_group_cache")))
+				(not (stage_consumed_by_presence_stage? stages stage))
+				(stage_probe_dependencies_resolve_in_catalog? stages stage)
+				(if (empty_list? (range_stage_domains stage))
+					(stage_lookup_keys_resolve_in_sources? stage probe_sources default_alias)
+					(range_stage_inputs_resolve_in_sources? stage
+						(filter probe_sources source_is_base_table?) default_alias))))
 		(if (not (presence_stage_output_source? stages src))
 			false
 			(begin
@@ -820,14 +832,23 @@ for that scan. The same prepared table is reused by every guarded variant. */
 		(define prelimit_aliases (map prelimit_sources source_alias))
 		(define dml_block (qassoc_get (qb_facts block) (quote dml) false))
 		(define planning_session (planner_context_session (qb_facts block)))
+		(define range_driver_sources (filter sources source_is_base_table?))
 		(define range_probe_sources (filter sources (lambda (src)
-			(and (stage_output_relation? (source_relation src))
+			(and
+				(stage_output_relation? (source_relation src))
 				(begin
 					(define stage (stage_by_id stages
 						(stage_output_relation_id (source_relation src))))
-					(and (or (scalar_aggregate_probe_stage? stage)
-						(scalar_first_probe_stage? stage))
-						(not (empty_list? (range_stage_domains stage)))))))))
+					(and
+						(or (scalar_aggregate_probe_stage? stage)
+							(scalar_first_range_probe_stage? stage))
+						(not (empty_list? (range_stage_domains stage)))
+						(range_stage_has_cacheable_aggregate? stage)
+						(single_source? range_driver_sources)
+						(range_stage_inputs_resolve_in_sources?
+							stage range_driver_sources default_alias)
+						(equal? (car (range_group_cache_selection
+							range_driver_sources stage)) "range_group_cache")))))))
 		(define eligible_probe_sources (lambda (limit_value)
 			(filter (merge_unique (list
 				(probe_output_sources_for_block
@@ -1096,10 +1117,10 @@ from silently overriding the physical planner. */
 			(if (empty_list? sources) nil (source_alias (car sources)))))
 		(map (filter stage_list (lambda (stage)
 			(and (or (scalar_aggregate_probe_stage? stage)
-				(scalar_first_probe_stage? stage))
+				(scalar_first_range_probe_stage? stage))
 				(and (not (empty_list? (range_stage_domains stage)))
 					(and (single_source? sources)
-						(and (stage_lookup_keys_resolve_in_sources? stage sources default_alias)
+						(and (range_stage_inputs_resolve_in_sources? stage sources default_alias)
 							(equal? (car (range_group_cache_selection sources stage))
 								"range_group_cache")))))))
 			(lambda (stage)
@@ -1152,8 +1173,9 @@ cache scan for every output row. */
 			(define ag (scalar_first_probe_aggregate stage requested_col))
 			(if (or (not (single_source? sources))
 				(or (empty_list? domains) (or (nil? ag)
-					(not (equal? (car (range_group_cache_selection sources stage))
-						"range_group_cache")))))
+					(or (not (range_cache_aggregate_supported? ag))
+						(not (equal? (car (range_group_cache_selection sources stage))
+							"range_group_cache"))))))
 				nil
 				(begin
 					(define target (car sources))
@@ -2860,7 +2882,7 @@ column expressions, without creating a temporary storage table. */
 
 (define scalar_first_inline_only_stage? (lambda (stage)
 	(and
-		(scalar_first_probe_stage? stage)
+		(scalar_first_physical_probe_stage? stage)
 		(not (query_block? (gs_input stage))))))
 
 (define stages_consumed_by_sources_with_closure_using_graph (lambda (dependency_graph stages sources)
@@ -2937,7 +2959,7 @@ column expressions, without creating a temporary storage table. */
 				(and
 					(not (scalar_first_inline_only_stage? stage))
 					(and
-						(not (scalar_first_probe_stage? stage))
+						(not (scalar_first_physical_probe_stage? stage))
 						(or
 							(not (scalar_aggregate_probe_stage? stage))
 							(contains? stage_output_ids (gs_id stage))))))))))

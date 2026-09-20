@@ -306,6 +306,60 @@ test_cases:
     expect:
       result_contains: ["range_group_cache", "agg_range_state_"]
 
+  - name: "range boundary reused by a point key keeps both correlations"
+    sql: |
+      SELECT w.id,
+        (SELECT e.id FROM grc_events e
+          WHERE e.tenant_id = w.tenant_id
+            AND e.happened_at <= w.tenant_id
+          ORDER BY e.happened_at DESC
+          LIMIT 1) AS latest_event_id
+      FROM grc_windows w
+      WHERE w.id < 5
+      ORDER BY w.id
+    expect:
+      rows: 4
+      data:
+        - {id: 1, latest_event_id: 2}
+        - {id: 2, latest_event_id: 2}
+        - {id: 3, latest_event_id: 1}
+        - {id: 4, latest_event_id: 1}
+
+  - name: "ordered scalar probe uses a session value as its range boundary"
+    session_id: "grc_session_range"
+    setup:
+      - sql: "SET @grc_cutoff = 1200"
+    sql: |
+      SELECT w.id,
+        (SELECT e.id FROM grc_events e
+          WHERE e.tenant_id = w.tenant_id
+            AND e.happened_at <= @grc_cutoff
+          ORDER BY e.happened_at DESC
+          LIMIT 1) AS latest_event_id
+      FROM grc_windows w
+      WHERE w.id < 5
+      ORDER BY w.id
+    expect:
+      rows: 4
+      data:
+        - {id: 1, latest_event_id: 1200}
+        - {id: 2, latest_event_id: 1200}
+        - {id: 3, latest_event_id: 1201}
+        - {id: 4, latest_event_id: 1201}
+
+  - name: "session-bound ordered scalar probe lowers to the range cache"
+    session_id: "grc_session_range"
+    sql: |
+      EXPLAIN PHYSICAL SELECT w.id,
+        (SELECT e.id FROM grc_events e
+          WHERE e.tenant_id = w.tenant_id
+            AND e.happened_at <= @grc_cutoff
+          ORDER BY e.happened_at DESC
+          LIMIT 1) AS latest_event_id
+      FROM grc_windows w
+    expect:
+      result_contains: ["range_group_cache", "agg_range_state_"]
+
   - name: "two range axes form disjoint multidimensional cells"
     setup:
       - sql: "DROP TABLE IF EXISTS grc_2d_windows"

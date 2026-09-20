@@ -2007,7 +2007,8 @@ would still have to project that value over the segment. */
 			(lower_column_expr_for_join sources default_alias key))))
 		(define operator (scalar_first_probe_physical_operator
 			probe_stages graph stage src keys effective_probe_work_rows effective_probe_work_rows requested_col probe_semantics nil))
-		(define range_selection (if (empty_list? (range_stage_domains stage)) nil
+		(define range_selection (if (or (empty_list? (range_stage_domains stage))
+			(not (range_cache_aggregate_supported? ag))) nil
 			(range_group_cache_selection sources stage)))
 		(define lowered (if (and (not (nil? range_selection))
 			(equal? (car range_selection) "range_group_cache"))
@@ -2016,54 +2017,54 @@ would still have to project that value over the segment. */
 					(range_stage_for_base_cache stage) ag (physical_query_tx_symbol))
 				(neumann_fail "build_queryplan" "range group cache requires a base-table input"))
 			(match operator
-			(symbol union-probe)
-			(list (quote if)
-				(lower_exists_union_probe_expr
-					sources default_alias (union_branches src)
-					(car lookup_keys) probe_stages)
-				1
-				nil)
-			(symbol recset) (begin
-				(define carrier_src (scalar_first_probe_carrier_source src))
-				(define key_index (scalar_first_probe_keytable_key_index stage carrier_src keys))
-				(lower_recset_scalar_first_probe_expr
-					probe_stages stage requested_col
-					(lower_column_expr_for_join sources default_alias
-						(nth lookup_keys key_index))))
-			(symbol keytable) (begin
-				(define carrier_src (scalar_first_probe_carrier_source src))
-				(define key_index (scalar_first_probe_keytable_key_index stage carrier_src keys))
-				(lower_keytable_scalar_first_probe_expr
+				(symbol union-probe)
+				(list (quote if)
+					(lower_exists_union_probe_expr
+						sources default_alias (union_branches src)
+						(car lookup_keys) probe_stages)
+					1
+					nil)
+				(symbol recset) (begin
+					(define carrier_src (scalar_first_probe_carrier_source src))
+					(define key_index (scalar_first_probe_keytable_key_index stage carrier_src keys))
+					(lower_recset_scalar_first_probe_expr
+						probe_stages stage requested_col
+						(lower_column_expr_for_join sources default_alias
+							(nth lookup_keys key_index))))
+				(symbol keytable) (begin
+					(define carrier_src (scalar_first_probe_carrier_source src))
+					(define key_index (scalar_first_probe_keytable_key_index stage carrier_src keys))
+					(lower_keytable_scalar_first_probe_expr
+						probe_stages
+						stage
+						requested_col
+						(lower_column_expr_for_join sources default_alias
+							(nth lookup_keys key_index))
+						partition_limit))
+				(symbol query-scan)
+				(lower_scalar_first_query_probe_expr
 					probe_stages
 					stage
-					requested_col
-					(lower_column_expr_for_join sources default_alias
-						(nth lookup_keys key_index))
-					partition_limit))
-			(symbol query-scan)
-			(lower_scalar_first_query_probe_expr
-				probe_stages
-				stage
-				value_expr
-				keys
-				lowered_lookup_keys
-				probe_work_rows
-				effective_probe_work_rows)
-			(symbol table-scan)
-			(if (presence_probe_stage? stage)
-				/* EXISTS is a 0:1 relational fact. Its table-scan implementation can
-				stop at the stage's partition limit without materializing an aggregate
-				row; retain the scalar marker's historical 1/nil value contract for
-				value-producing parents. */
-				(list (quote if)
-					(lower_driver_membership_probe_expr
-						sources default_alias stage
-						(if (empty_list? lookup_keys) nil (car lookup_keys)))
-					1 nil)
-				(lower_table_scalar_first_probe_expr
-					sources default_alias src stage value_expr keys lookup_keys
-					order_exprs dirs offset_value partition_limit (physical_query_tx_symbol)))
-			_ (neumann_fail "build_queryplan" "scalar-first probe has no physical operator"))))
+					value_expr
+					keys
+					lowered_lookup_keys
+					probe_work_rows
+					effective_probe_work_rows)
+				(symbol table-scan)
+				(if (presence_probe_stage? stage)
+					/* EXISTS is a 0:1 relational fact. Its table-scan implementation can
+					stop at the stage's partition limit without materializing an aggregate
+					row; retain the scalar marker's historical 1/nil value contract for
+					value-producing parents. */
+					(list (quote if)
+						(lower_driver_membership_probe_expr
+							sources default_alias stage
+							(if (empty_list? lookup_keys) nil (car lookup_keys)))
+						1 nil)
+					(lower_table_scalar_first_probe_expr
+						sources default_alias src stage value_expr keys lookup_keys
+						order_exprs dirs offset_value partition_limit (physical_query_tx_symbol)))
+				_ (neumann_fail "build_queryplan" "scalar-first probe has no physical operator"))))
 		(define memoized_lowered (if
 			(qassoc_get (gs_facts stage) (quote segment_invariant_scalar_probe) false)
 			(list
@@ -2150,17 +2151,29 @@ generated recipes remain ordinary Scheme. */
 (define range_stage_invariant_condition (lambda (stage)
 	(qassoc_get (gs_facts stage) (quote range-invariant-condition) true)))
 
+(define range_stage_point_keys (lambda (stage)
+	(qassoc_get (gs_facts stage) (quote range-point-keys) (gs_keys stage))))
+
+(define range_stage_point_domain (lambda (stage)
+	(qassoc_get (gs_facts stage) (quote range-point-domain) (gs_domain stage))))
+
+(define range_stage_lookup_keys (lambda (stage)
+	(qassoc_get (gs_facts stage) (quote range-lookup-keys)
+		(qassoc_get (gs_facts stage) (quote lookup-keys) '()))))
+
 (define range_stage_for_base_cache (lambda (stage)
 	(begin
 		(define src (range_stage_base_source stage))
 		(define facts (qassoc_set
 			(qassoc_set
-				(qassoc_set (gs_facts stage) (quote condition)
-					(range_stage_raw_condition stage))
+				(qassoc_set
+					(qassoc_set (gs_facts stage) (quote condition)
+						(range_stage_raw_condition stage))
+					(quote lookup-keys) (range_stage_lookup_keys stage))
 				(quote range-domains) (range_stage_domains stage))
 			(quote range-invariant-condition) (range_stage_invariant_condition stage)))
 		(make_group_stage
-			(gs_id stage) src (gs_domain stage) (gs_keys stage)
+			(gs_id stage) src (range_stage_point_domain stage) (range_stage_point_keys stage)
 			(gs_aggregates stage) (gs_having stage) (gs_output stage)
 			(gs_order stage) (gs_limit stage) (gs_offset stage) facts))))
 
@@ -2196,6 +2209,15 @@ generated recipes remain ordinary Scheme. */
 		"canonical-range-group-state-v1"
 		(aggregate_col_name_using (gs_input stage) ag)) true))))
 
+(define range_cache_aggregate_supported? (lambda (ag)
+	(begin
+		(define parts (scalar_order_aggregate_parts ag))
+		(or (nil? parts) (equal? (nth parts 3) 0)))))
+
+(define range_stage_has_cacheable_aggregate? (lambda (stage)
+	(reduce (gs_aggregates stage) (lambda (supported ag)
+		(and supported (range_cache_aggregate_supported? ag))) true)))
+
 /* Compare one direct correlated scan per driver row with one partitioning scan
 plus cheap cell probes. Unknown cardinalities deliberately retain the direct
 plan; calibration overrides use the same stable decision id as other physical
@@ -2207,6 +2229,7 @@ choices. */
 		(define driver_rows (probe_context_row_count sources))
 		(define axes (count (range_stage_domains base_stage)))
 		(define known (and (number? input_rows) (number? driver_rows)))
+		(define cache_supported (range_stage_has_cacheable_aggregate? stage))
 		(define direct_cost (planner_cost
 			(if known (* driver_rows planner_membership_scan_invocation_ns) 0)
 			(if known (* driver_rows input_rows planner_membership_scan_row_ns) 0)
@@ -2216,12 +2239,15 @@ choices. */
 			(if known (* input_rows planner_membership_scan_row_ns) 0)
 			(if known (* driver_rows (max 1 axes) planner_membership_map_column_row_ns) 0)
 			0 0 0 0 0 (if known (+ input_rows (* driver_rows (max 1 axes))) 0) 0.5))
-		(define normal (if (and known (planner_cost_better? cache_cost direct_cost))
+		(define normal (if (and cache_supported
+			(and known (planner_cost_better? cache_cost direct_cost)))
 			"range_group_cache" "direct_range_aggregate"))
 		(define planning_session (qassoc_get (gs_facts stage) (quote physical_planning_session) nil))
 		(define decision_id (concat "range_group_cache:" (gs_id stage)))
-		(define chosen (planner_physical_choice decision_id normal
-			'("direct_range_aggregate" "range_group_cache") planning_session))
+		(define chosen (if cache_supported
+			(planner_physical_choice decision_id normal
+				'("direct_range_aggregate" "range_group_cache") planning_session)
+			"direct_range_aggregate"))
 		(list chosen normal decision_id direct_cost cache_cost input_rows driver_rows axes planning_session))))
 
 (define range_cache_bound_equal_expr (lambda (left right)
@@ -2715,8 +2741,13 @@ one request cannot invalidate one another while the outer scan is running. */
 					(direct_column_name_for_alias outer_src (range_domain_from domain)))
 				(if (range_domain_unbounded_to? domain) nil
 					(direct_column_name_for_alias outer_src (range_domain_to domain)))))))
-		(define finite_bound_cols (merge (map bound_cols (lambda (pair)
-			(filter pair (lambda (col) (not (nil? col))))))))
+		(define finite_bound_cols (merge (map (zip domains bound_cols) (lambda (binding)
+			(begin
+				(define domain (car binding))
+				(define pair (cadr binding))
+				(merge (list
+					(if (range_domain_unbounded_from? domain) '() (list (nth pair 0)))
+					(if (range_domain_unbounded_to? domain) '() (list (nth pair 1))))))))))
 		(define batch_supported (and (not (empty_list? key_names))
 			(and (not (contains? outer_key_cols nil))
 				(not (contains? finite_bound_cols nil)))))
@@ -5930,9 +5961,9 @@ self-joins of the same base table still describe two distinct row roles. */
 		(define input (gs_input stage))
 		(define label (if (source_is_base_table? input) (source_relation input)
 			(if (union_block? input) "union" "query")))
+		(define range_domains (range_stage_domains stage))
 		(define keys (if (empty_list? (gs_keys stage)) '(1) (gs_keys stage)))
 		(define condition (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
-		(define range_domains (range_stage_domains stage))
 		(define alias_map (canonical_group_stage_alias_map stage))
 		(define input_identity (canonical_group_input_identity alias_map signatures input))
 		(define canonical_keys (stage_semantic_rewrite_expr alias_map signatures keys))
@@ -8349,7 +8380,8 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 					(scalar_aggregate_probe_stage? original))
 					original
 					(coalesceNil direct original)))
-				(if (or (scalar_or_presence_probe_stage? stage)
+				(if (or (scalar_first_physical_probe_stage? stage)
+					(presence_probe_stage? stage)
 					(or (scalar_aggregate_probe_stage? stage)
 						(scalar_cardinality_probe_stage? stage)))
 					(list src stage)
@@ -8545,6 +8577,15 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 	(reduce (qassoc_get (gs_facts stage) (quote lookup-keys) '()) (lambda (ok key)
 		(and ok (stage_lookup_expr_resolves_in_sources? sources default_alias key)))
 		true)))
+
+(define range_stage_inputs_resolve_in_sources? (lambda (stage sources default_alias)
+	(begin
+		(define boundary_exprs (merge (map (range_stage_domains stage) (lambda (domain)
+			(merge (list
+				(if (range_domain_unbounded_from? domain) '() (list (range_domain_from domain)))
+				(if (range_domain_unbounded_to? domain) '() (list (range_domain_to domain))))))))))
+	(reduce (merge (list (range_stage_lookup_keys stage) boundary_exprs)) (lambda (ok expr)
+		(and ok (stage_lookup_expr_resolves_in_sources? sources default_alias expr))) true))))
 
 (define probe_context_row_count (lambda (sources)
 	(planner_add_estimates (map (coalesceNil sources '()) planner_source_row_count))))
