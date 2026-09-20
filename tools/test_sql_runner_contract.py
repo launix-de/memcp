@@ -386,7 +386,10 @@ class HookDiagnosticsContractTest(unittest.TestCase):
 
     def test_failure_and_signal_keep_partial_suite_and_server_logs(self):
         import subprocess
-        traps = self.hook[self.hook.index("trap 'cleanup"):self.hook.index("\nif ! start_supervisor;")]
+        traps = self.hook[
+            self.hook.index("trap 'cleanup"):
+            self.hook.index("\nif ! prepare_test_data_dir;")
+        ]
         for action, expected in (("exit 1", 1), ("kill -TERM $$", 143), ("kill -INT $$", 130)):
             with self.subTest(action=action), tempfile.TemporaryDirectory() as tmp:
                 logs = Path(tmp) / "logs"
@@ -402,6 +405,43 @@ class HookDiagnosticsContractTest(unittest.TestCase):
                 self.assertEqual((logs / "suite.out").read_bytes(), b"partial test output\n")
                 self.assertEqual((logs / "memcp.log").read_bytes(), b"server diagnostics\n")
                 self.assertEqual((logs / "stop-signal").read_text(), "USR2")
+
+    def test_cleanup_removes_only_hook_owned_data_directory(self):
+        import subprocess
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            owned = root / "owned-data"
+            owned.mkdir()
+            (owned / "schema.json").write_text("{}", encoding="utf-8")
+            logs = root / "logs"
+            logs.mkdir()
+            code = self.function("cleanup")
+            code += "\nstop_supervisor() { :; }\n"
+            code += "did_cleanup=0\nactive_pids=()\ncleanup 0\n"
+            result = subprocess.run(
+                ["bash", "-c", code], capture_output=True, timeout=4,
+                env=dict(os.environ, tmpdir=str(logs), memcp_log=str(logs / "memcp.log"),
+                         test_data_dir=str(owned), test_data_dir_owned="1"),
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(owned.exists())
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            configured = root / "configured-data"
+            configured.mkdir()
+            logs = root / "logs"
+            logs.mkdir()
+            code = self.function("cleanup")
+            code += "\nstop_supervisor() { :; }\n"
+            code += "did_cleanup=0\nactive_pids=()\ncleanup 0\n"
+            result = subprocess.run(
+                ["bash", "-c", code], capture_output=True, timeout=4,
+                env=dict(os.environ, tmpdir=str(logs), memcp_log=str(logs / "memcp.log"),
+                         test_data_dir=str(configured), test_data_dir_owned="0"),
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(configured.exists())
 
     def test_supervisor_dumps_only_owned_child_and_does_not_restart(self):
         import subprocess
