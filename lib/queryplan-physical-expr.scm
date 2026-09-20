@@ -2101,8 +2101,8 @@ generated recipes remain ordinary Scheme. */
 		(define init_key (list (quote concat)
 			(concat "__range_group_cache_init:" cache_name ":"
 				(range_group_state_col_name stage ag) ":")
-				(list (quote table_planner_statistics_token)
-					(source_table_expr (gs_input stage)) false)))
+			(list (quote table_planner_statistics_token)
+				(source_table_expr (gs_input stage)) false)))
 		(range_cache_once_expr cache_name init_key
 			(list (quote !begin)
 				(range_cache_create_columns_expr stage cache_name)
