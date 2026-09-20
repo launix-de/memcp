@@ -2225,6 +2225,14 @@ choices. */
 (define range_group_cache_selection (lambda (sources stage)
 	(begin
 		(define base_stage (range_stage_for_base_cache stage))
+		/* Cached cell state is shared across sessions. Point keys and range cuts
+		carry their session values explicitly, but session reads inside the
+		aggregate or residual invariant would freeze the first caller's value in
+		the computed state column. Those stages must remain direct probes. */
+		(define reusable (and
+			(not (expr_contains_session_dependency? (gs_aggregates base_stage)))
+			(not (expr_contains_session_dependency?
+				(range_stage_invariant_condition base_stage)))))
 		(define input_rows (planner_source_row_count (gs_input base_stage)))
 		(define driver_rows (probe_context_row_count sources))
 		(define axes (count (range_stage_domains base_stage)))
@@ -2239,12 +2247,13 @@ choices. */
 			(if known (* input_rows planner_membership_scan_row_ns) 0)
 			(if known (* driver_rows (max 1 axes) planner_membership_map_column_row_ns) 0)
 			0 0 0 0 0 (if known (+ input_rows (* driver_rows (max 1 axes))) 0) 0.5))
-		(define normal (if (and cache_supported
+		(define reusable_cache (and cache_supported reusable))
+		(define normal (if (and reusable_cache
 			(and known (planner_cost_better? cache_cost direct_cost)))
 			"range_group_cache" "direct_range_aggregate"))
 		(define planning_session (qassoc_get (gs_facts stage) (quote physical_planning_session) nil))
 		(define decision_id (concat "range_group_cache:" (gs_id stage)))
-		(define chosen (if cache_supported
+		(define chosen (if reusable_cache
 			(planner_physical_choice decision_id normal
 				'("direct_range_aggregate" "range_group_cache") planning_session)
 			"direct_range_aggregate"))
@@ -2741,10 +2750,13 @@ one request cannot invalidate one another while the outer scan is running. */
 					(direct_column_name_for_alias outer_src (range_domain_from domain)))
 				(if (range_domain_unbounded_to? domain) nil
 					(direct_column_name_for_alias outer_src (range_domain_to domain)))))))
-		(define finite_bound_cols (merge (map (zip domains bound_cols) (lambda (binding)
+		/* An unbounded side needs no driver column, but a finite session or
+		computed bound cannot be supplied to the batch join as a column. Preserve
+		the latter nil so the generic per-row preparation remains selected. */
+		(define finite_bound_cols (merge (map (zip domains bound_cols) (lambda (entry)
 			(begin
-				(define domain (car binding))
-				(define pair (cadr binding))
+				(define domain (car entry))
+				(define pair (cadr entry))
 				(merge (list
 					(if (range_domain_unbounded_from? domain) '() (list (nth pair 0)))
 					(if (range_domain_unbounded_to? domain) '() (list (nth pair 1))))))))))
@@ -5972,7 +5984,7 @@ self-joins of the same base table still describe two distinct row roles. */
 				(stage_semantic_rewrite_expr alias_map signatures condition))
 			(range_group_table_name schema label input_identity canonical_keys
 				(stage_semantic_rewrite_expr alias_map signatures
-					(map range_domains range_domain_inner))
+					range_domains)
 				(stage_semantic_rewrite_expr alias_map signatures
 					(range_stage_invariant_condition stage))))))))
 
