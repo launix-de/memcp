@@ -56,6 +56,17 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS sq_plz"
 
 test_cases:
+  - name: "Correlated scalar lookup with inner literal and outer primary-key filter"
+    sql: |
+      SELECT ID,
+        (SELECT ID FROM sq_rev WHERE doc = sq_doc.ID AND created = '2025-02-01') AS selected_id
+      FROM sq_doc WHERE ID = '2'
+    expect:
+      rows: 1
+      data:
+        - ID: 2
+          selected_id: 3
+
   # Pattern 1: Scalar subselects in SELECT list (12s in prod)
   # Repeated scalar subselect on same correlation in SELECT list
   - name: "Scalar subselect in SELECT list - repeated type lookup"

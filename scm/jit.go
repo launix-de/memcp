@@ -359,7 +359,8 @@ func jitBindProcContext(prepared unsafe.Pointer, template *Proc, captures *Scmer
 	}
 	copy(target, unsafe.Slice(captures, copyCount))
 	if bindSelf && count != 0 {
-		target[count-1] = NewProc(bound)
+		// NewProc copies only the header; self must retain this inline context.
+		target[count-1] = Scmer{(*byte)(unsafe.Pointer(bound)), makeAux(tagProc, 0)}
 	}
 	return bound
 }
