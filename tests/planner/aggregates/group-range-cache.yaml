@@ -160,6 +160,42 @@ test_cases:
         - ".range-lookup:"
         - "scan_join_order"
 
+  - name: "derived window and parameter drivers use row-local range preparation"
+    sql: |
+      SELECT history.idx, params.tenant_id,
+        (SELECT COUNT(*) FROM grc_events e
+          WHERE e.tenant_id = params.tenant_id
+            AND e.happened_at >= history.range_from
+            AND e.happened_at < history.range_to) AS event_count
+      FROM (
+        SELECT 1 AS idx, 0 AS range_from, 1000 AS range_to
+        UNION ALL
+        SELECT 2 AS idx, 1000 AS range_from, 2000 AS range_to
+      ) history
+      CROSS JOIN (SELECT 2 AS tenant_id) params
+      ORDER BY history.idx
+    expect:
+      rows: 2
+      data:
+        - {idx: 1, tenant_id: 2, event_count: 500}
+        - {idx: 2, tenant_id: 2, event_count: 500}
+
+  - name: "derived range drivers lower to the shared cache"
+    sql: |
+      EXPLAIN PHYSICAL SELECT history.idx,
+        (SELECT COUNT(*) FROM grc_events e
+          WHERE e.tenant_id = params.tenant_id
+            AND e.happened_at >= history.range_from
+            AND e.happened_at < history.range_to) AS event_count
+      FROM (
+        SELECT 1 AS idx, 0 AS range_from, 1000 AS range_to
+        UNION ALL
+        SELECT 2 AS idx, 1000 AS range_from, 2000 AS range_to
+      ) history
+      CROSS JOIN (SELECT 2 AS tenant_id) params
+    expect:
+      result_contains: ["range_group_cache", "agg_range_state_"]
+
   - name: "cost model keeps a singleton range aggregate direct"
     setup:
       - sql: "DROP TABLE IF EXISTS grc_single_window"
@@ -387,6 +423,60 @@ test_cases:
           WHERE e.happened_at < @grc_cutoff) AS event_count
       FROM grc_windows w
       WHERE w.id < 5
+    expect:
+      result_contains: ["range_group_cache", "agg_range_state_"]
+
+  - name: "session value inside range aggregate is an explicit cache key"
+    session_id: "grc_session_aggregate"
+    setup:
+      - sql: "SET @grc_bias = 1"
+    sql: |
+      SELECT w.id,
+        (SELECT SUM(e.amount + @grc_bias) FROM grc_events e
+          WHERE e.tenant_id = w.tenant_id
+            AND e.happened_at >= w.range_from
+            AND e.happened_at < w.range_to) AS amount_sum
+      FROM grc_windows w
+      WHERE w.id < 5
+      ORDER BY w.id
+    expect:
+      rows: 4
+      data:
+        - {id: 1, amount_sum: 1500}
+        - {id: 2, amount_sum: 1505}
+        - {id: 3, amount_sum: 3000}
+        - {id: 4, amount_sum: 4500}
+
+  - name: "changed aggregate session value uses a separate range partition"
+    session_id: "grc_session_aggregate"
+    setup:
+      - sql: "SET @grc_bias = 2"
+    sql: |
+      SELECT w.id,
+        (SELECT SUM(e.amount + @grc_bias) FROM grc_events e
+          WHERE e.tenant_id = w.tenant_id
+            AND e.happened_at >= w.range_from
+            AND e.happened_at < w.range_to) AS amount_sum
+      FROM grc_windows w
+      WHERE w.id < 5
+      ORDER BY w.id
+    expect:
+      rows: 4
+      data:
+        - {id: 1, amount_sum: 2000}
+        - {id: 2, amount_sum: 2006}
+        - {id: 3, amount_sum: 4000}
+        - {id: 4, amount_sum: 6000}
+
+  - name: "session-keyed range aggregate lowers to the range cache"
+    session_id: "grc_session_aggregate"
+    sql: |
+      EXPLAIN PHYSICAL SELECT w.id,
+        (SELECT SUM(e.amount + @grc_bias) FROM grc_events e
+          WHERE e.tenant_id = w.tenant_id
+            AND e.happened_at >= w.range_from
+            AND e.happened_at < w.range_to) AS amount_sum
+      FROM grc_windows w
     expect:
       result_contains: ["range_group_cache", "agg_range_state_"]
 

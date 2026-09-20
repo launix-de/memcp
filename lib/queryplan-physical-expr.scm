@@ -2218,6 +2218,18 @@ generated recipes remain ordinary Scheme. */
 	(reduce (gs_aggregates stage) (lambda (supported ag)
 		(and supported (range_cache_aggregate_supported? ag))) true)))
 
+/* Session values that occur in an aggregate or invariant may still be shared
+across requests when the logical range stage made them explicit point keys.
+The generated state column then receives the binding as an argument instead of
+capturing the session that happened to populate the cache first. */
+(define range_stage_session_dependencies_covered? (lambda (stage)
+	(begin
+		(define dependencies (query_expr_session_reads
+			(list (gs_aggregates stage) (range_stage_invariant_condition stage))))
+		(define point_domain (range_stage_point_domain stage))
+		(reduce dependencies (lambda (covered dependency)
+			(and covered (contains? point_domain dependency))) true))))
+
 /* Compare one direct correlated scan per driver row with one partitioning scan
 plus cheap cell probes. Unknown cardinalities deliberately retain the direct
 plan; calibration overrides use the same stable decision id as other physical
@@ -2225,14 +2237,10 @@ choices. */
 (define range_group_cache_selection (lambda (sources stage)
 	(begin
 		(define base_stage (range_stage_for_base_cache stage))
-		/* Cached cell state is shared across sessions. Point keys and range cuts
-		carry their session values explicitly, but session reads inside the
-		aggregate or residual invariant would freeze the first caller's value in
-		the computed state column. Those stages must remain direct probes. */
-		(define reusable (and
-			(not (expr_contains_session_dependency? (gs_aggregates base_stage)))
-			(not (expr_contains_session_dependency?
-				(range_stage_invariant_condition base_stage)))))
+		/* Cached cell state is shared across sessions. Session reads are safe only
+		when the logical stage exposed them as point keys; the state column then
+		receives the binding explicitly instead of capturing its first caller. */
+		(define reusable (range_stage_session_dependencies_covered? base_stage))
 		(define input_rows (planner_source_row_count (gs_input base_stage)))
 		(define driver_rows (probe_context_row_count sources))
 		(define axes (count (range_stage_domains base_stage)))
@@ -2361,7 +2369,8 @@ choices. */
 		(define range_exprs (map domains range_domain_inner))
 		(define boundary_names (range_cache_boundary_names domains))
 		(define boundary_symbols (map boundary_names symbol))
-		(define invariant_condition (range_stage_invariant_condition stage))
+		(define invariant_condition (replace_group_session_expr stage
+			(gs_keys stage) key_names (range_stage_invariant_condition stage)))
 		(define key_cols (merge_unique (map (gs_keys stage) (lambda (expr)
 			(extract_columns_for_alias src expr)))))
 		(define condition_cols (extract_columns_for_alias src invariant_condition))
@@ -2369,7 +2378,8 @@ choices. */
 			(extract_columns_for_alias src expr)))))
 		(define filtercols (merge_unique (list key_cols condition_cols range_cols)))
 		(define runtime_ag (range_cache_runtime_aggregate ag))
-		(define agg_expr (nth runtime_ag 0))
+		(define agg_expr (replace_group_session_expr stage
+			(gs_keys stage) key_names (nth runtime_ag 0)))
 		(define valuecols (extract_columns_for_alias src agg_expr))
 		(define key_terms (if (empty_list? key_names)
 			'()

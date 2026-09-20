@@ -1578,20 +1578,19 @@ type-aware successor operation can prove an exact half-open rewrite. */
 (define range_bound_cut_kind (lambda (bound) (nth bound 4)))
 (define range_bound_term (lambda (bound) (nth bound 5)))
 
-/* A range boundary may be a session/constant expression or a column of a real
-driver table. Stage-output/derived boundaries need to remain ordinary dependent
-join keys until physical range preparation can scan that derived relation. */
+/* A range boundary may be a session/constant expression or a column of any
+outer driver. Base-table drivers can batch-prepare all cuts; derived and stage
+drivers use the same cache through the row-local preparation fallback. */
 (define range_bound_has_preparable_outer_source? (lambda (bound inner_sources outer_sources)
 	(reduce (btw2025_expr_outer_column_refs
 		(range_bound_outer bound) inner_sources outer_sources) (lambda (supported ref)
 			(and supported
 				(begin
 					(define src (source_for_alias outer_sources nil (nth ref 1) (nth ref 2)))
-					(and (not (nil? src)) (source_is_base_table? src))))) true)))
+					(not (nil? src))))) true)))
 
 (define range_outer_context_preparable? (lambda (outer_sources)
-	(reduce (coalesceNil outer_sources '()) (lambda (supported src)
-		(and supported (source_is_base_table? src))) true)))
+	(not (empty_list? (coalesceNil outer_sources '())))))
 
 (define range_correlation_domains (lambda (bounds)
 	(begin

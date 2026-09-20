@@ -204,27 +204,31 @@ separate route can represent arbitrary dependency shapes safely. */
 /* Scalar-first stages enter the generic cost-based carrier chain whenever
 their lookup is valid. Presence stages retain their established bounded/small
 context gates because bare EXISTS also has a separate membership lowerer. */
+(define range_probe_driver_sources (lambda (sources)
+	(filter (coalesceNil sources '()) (lambda (src)
+		(not (stage_output_relation? (source_relation src)))))))
+
 (define probeable_stage_output_source_for_block? (lambda (stages sources default_alias limit_value driver_condition src planning_session)
 	(if (scalar_first_stage_output_source? stages src)
 		(begin
 			(define stage (stage_by_id stages (stage_output_relation_id (source_relation src))))
 			(define probe_sources (filter sources (lambda (candidate)
 				(not (equal? (source_alias candidate) (source_alias src))))))
+			(define range_driver_sources (range_probe_driver_sources probe_sources))
 			(and
 				(or
 					(empty_list? (range_stage_domains stage))
 					(and
 						(range_stage_has_cacheable_aggregate? stage)
-						(single_source? (filter probe_sources source_is_base_table?))
 						(equal? (car (range_group_cache_selection
-							(filter probe_sources source_is_base_table?) stage))
+							range_driver_sources stage))
 							"range_group_cache")))
 				(not (stage_consumed_by_presence_stage? stages stage))
 				(stage_probe_dependencies_resolve_in_catalog? stages stage)
 				(if (empty_list? (range_stage_domains stage))
 					(stage_lookup_keys_resolve_in_sources? stage probe_sources default_alias)
 					(range_stage_inputs_resolve_in_sources? stage
-						(filter probe_sources source_is_base_table?) default_alias))))
+						range_driver_sources default_alias))))
 		(if (not (presence_stage_output_source? stages src))
 			false
 			(begin
@@ -832,7 +836,7 @@ for that scan. The same prepared table is reused by every guarded variant. */
 		(define prelimit_aliases (map prelimit_sources source_alias))
 		(define dml_block (qassoc_get (qb_facts block) (quote dml) false))
 		(define planning_session (planner_context_session (qb_facts block)))
-		(define range_driver_sources (filter sources source_is_base_table?))
+		(define range_driver_sources (range_probe_driver_sources sources))
 		(define range_probe_sources (filter sources (lambda (src)
 			(and
 				(stage_output_relation? (source_relation src))
@@ -844,7 +848,6 @@ for that scan. The same prepared table is reused by every guarded variant. */
 							(scalar_first_range_probe_stage? stage))
 						(not (empty_list? (range_stage_domains stage)))
 						(range_stage_has_cacheable_aggregate? stage)
-						(single_source? range_driver_sources)
 						(range_stage_inputs_resolve_in_sources?
 							stage range_driver_sources default_alias)
 						(equal? (car (range_group_cache_selection
