@@ -837,8 +837,8 @@ func jitLambdaCaptureKeys(captureArgs []Scmer) []Scmer {
 }
 
 // jitEmitBoundLambdaProc emits the complete Proc binder. Captures are evaluated
-// into rooted frame slots before an escaping allocation, so the single
-// mallocgc call is followed only by non-safepoint header/context stores.
+// into rooted frame slots. Escaping closures are initialized by one Go helper
+// so pointer stores participate in concurrent GC marking.
 func jitEmitBoundLambdaProc(ctx *JITContext, template Scmer, captureArgs []Scmer, sliceBase Reg, result JITValueDesc, stack, bindSelf bool) JITValueDesc {
 	proc := template.Proc()
 	if proc == nil || proc.Compiled == nil || proc.JITCode == 0 {
@@ -873,41 +873,49 @@ func jitEmitBoundLambdaProc(ctx *JITContext, template Scmer, captureArgs []Scmer
 	} else {
 		typ := jitProcContextAllocation(captureCount)
 		ctx.TrackPointer(typ)
-		object = ctx.EmitGoCallScalar(GoFuncAddr(jitRuntimeAllocTyped), []JITValueDesc{
+		capturePointer := JITValueDesc{Loc: LocReg, Type: tagInt, Reg: ctx.AllocReg(), Rooted: true, RelocatablePointer: true}
+		ctx.EmitLeaRegMem(capturePointer.Reg, ctx.StackReg, capturesOff)
+		ctx.BindReg(capturePointer.Reg, &capturePointer)
+		object = ctx.EmitGoCallScalar(GoFuncAddr(jitBindProcContext), []JITValueDesc{
 			{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(uintptr(typ))), NoHeapPointer: true},
+			{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(uintptr(unsafe.Pointer(proc)))), NoHeapPointer: true},
+			capturePointer,
+			{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(captureCount)), NoHeapPointer: true},
+			{Loc: LocImm, Type: tagBool, Imm: NewBool(bindSelf), NoHeapPointer: true},
 		}, 1)
+		ctx.FreeDesc(&capturePointer)
 		object.Type = tagInt
 		object.Rooted = true
 		object.RelocatablePointer = true
+		ctx.BindReg(object.Reg, &object)
 	}
+
 	ctx.ProtectReg(object.Reg)
-	source := ctx.AllocReg()
-	ctx.ProtectReg(source)
-	ctx.EmitMovRegImm64(source, uint64(uintptr(unsafe.Pointer(proc))))
-	for offset := int32(0); offset < int32(unsafe.Sizeof(Proc{})); offset += 8 {
-		ctx.EmitMovRegMem(ctx.ScratchReg, source, offset)
-		ctx.EmitStoreRegMem(ctx.ScratchReg, object.Reg, offset)
-	}
-	ctx.UnprotectReg(source)
-	ctx.FreeReg(source)
 	if stack {
+		source := ctx.AllocReg()
+		ctx.ProtectReg(source)
+		ctx.EmitMovRegImm64(source, uint64(uintptr(unsafe.Pointer(proc))))
+		for offset := int32(0); offset < int32(unsafe.Sizeof(Proc{})); offset += 8 {
+			ctx.EmitMovRegMem(ctx.ScratchReg, source, offset)
+			ctx.EmitStoreRegMem(ctx.ScratchReg, object.Reg, offset)
+		}
+		ctx.UnprotectReg(source)
+		ctx.FreeReg(source)
 		for _, offset := range jitProcStackPointerOffsets {
 			ctx.setStackPointer(jitStackRootFrameSP, objectOff+offset, true)
 		}
-	}
-	for index := 0; index < captureCount; index++ {
-		contextAt := contextOffset + int32(index*16)
-		if bindSelf && index == captureCount-1 {
-			ctx.EmitStoreRegMem(object.Reg, object.Reg, contextAt)
-			ctx.EmitMovRegImm64(ctx.ScratchReg, makeAux(tagProc, 0))
-			ctx.EmitStoreRegMem(ctx.ScratchReg, object.Reg, contextAt+8)
-		} else {
-			ctx.EmitMovRegMem(ctx.ScratchReg, ctx.StackReg, capturesOff+int32(index*16))
-			ctx.EmitStoreRegMem(ctx.ScratchReg, object.Reg, contextAt)
-			ctx.EmitMovRegMem(ctx.ScratchReg, ctx.StackReg, capturesOff+int32(index*16)+8)
-			ctx.EmitStoreRegMem(ctx.ScratchReg, object.Reg, contextAt+8)
-		}
-		if stack {
+		for index := 0; index < captureCount; index++ {
+			contextAt := contextOffset + int32(index*16)
+			if bindSelf && index == captureCount-1 {
+				ctx.EmitStoreRegMem(object.Reg, object.Reg, contextAt)
+				ctx.EmitMovRegImm64(ctx.ScratchReg, makeAux(tagProc, 0))
+				ctx.EmitStoreRegMem(ctx.ScratchReg, object.Reg, contextAt+8)
+			} else {
+				ctx.EmitMovRegMem(ctx.ScratchReg, ctx.StackReg, capturesOff+int32(index*16))
+				ctx.EmitStoreRegMem(ctx.ScratchReg, object.Reg, contextAt)
+				ctx.EmitMovRegMem(ctx.ScratchReg, ctx.StackReg, capturesOff+int32(index*16)+8)
+				ctx.EmitStoreRegMem(ctx.ScratchReg, object.Reg, contextAt+8)
+			}
 			ctx.setStackPointer(jitStackRootFrameSP, objectOff+contextAt, true)
 		}
 	}

@@ -20,8 +20,12 @@ Copyright (C) 2026  MemCP Contributors
 package scm
 
 import (
+	"fmt"
 	"math/bits"
+	"runtime"
+	"strings"
 	"testing"
+	"unsafe"
 )
 
 // jitDecodeSafepointRoots expands one safepoint's per-base bitmaps back into
@@ -101,5 +105,70 @@ func TestJITGroupStageReducerFrameRootsCoverEverySafepoint(t *testing.T) {
 					spIndex, root)
 			}
 		}
+	}
+}
+
+// Escaping closures must publish captured heap pointers through write barriers,
+// including when the closure allocation is black during concurrent marking.
+func TestJITCapturedPairSurvivesGC(t *testing.T) {
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				runtime.GC()
+			}
+		}
+	}()
+	defer func() { close(stop); <-done }()
+
+	compiled := compileJITExpressionTestProc(t, `(lambda (a b) (lambda (value) (list a b value)))`)
+	for round := 0; round < 100; round++ {
+		closures := make([]Scmer, 10000)
+		for i := range closures {
+			closures[i] = Apply(compiled, NewString(strings.Repeat("a", 64)), NewString(strings.Repeat("b", 64)))
+		}
+		runtime.GC()
+		for _, closure := range closures {
+			got := Apply(closure, NewInt(7))
+			if !got.IsSlice() || len(got.Slice()) != 3 || !Equal(got.Slice()[0], NewString(strings.Repeat("a", 64))) || !Equal(got.Slice()[1], NewString(strings.Repeat("b", 64))) || !Equal(got.Slice()[2], NewInt(7)) {
+				t.Fatal("corrupted closure")
+			}
+		}
+	}
+}
+
+func TestJITWideEscapingClosures(t *testing.T) {
+	for n := 1; n <= 40; n++ {
+		t.Run(fmt.Sprint(n), func(t *testing.T) {
+			names := make([]string, n)
+			args := make([]Scmer, n)
+			for i := range names {
+				names[i] = fmt.Sprintf("a%d", i)
+				args[i] = NewString(fmt.Sprintf("value-%d", i))
+			}
+			compiled := compileJITExpressionTestProc(t, "(lambda ("+strings.Join(names, " ")+") (lambda () (list "+strings.Join(names, " ")+")))")
+			result := Apply(Apply(compiled, args...))
+			if !Equal(result, NewSlice(args)) {
+				t.Fatalf("got %s", String(result))
+			}
+		})
+	}
+}
+
+func TestJITRecursiveClosureRetainsInlineContext(t *testing.T) {
+	template := compileJITExpressionTestProc(t, `(lambda (value) value)`).Proc()
+	captures := []Scmer{NewString("captured"), NewNil()}
+	bound := jitBindProcContext(jitProcContextAllocation(2), template, &captures[0], 2, true)
+	context := unsafe.Slice((*Scmer)(unsafe.Add(unsafe.Pointer(bound), unsafe.Offsetof(ProcJIT{}.Context))), 2)
+	if context[1].Proc() != bound {
+		t.Fatal("recursive binding copied the header without its inline captures")
+	}
+	if !Equal(context[0], captures[0]) {
+		t.Fatal("capture was lost")
 	}
 }
