@@ -28,6 +28,12 @@ setup:
   - sql: "DROP TABLE IF EXISTS usol_file_multi"
   - sql: "DROP TABLE IF EXISTS usol_text_outer"
   - sql: "DROP TABLE IF EXISTS usol_text_inner"
+  - sql: "DROP TABLE IF EXISTS usol_dataview_product"
+  - sql: "DROP TABLE IF EXISTS usol_dataview_selling"
+  - sql: "DROP TABLE IF EXISTS usol_dataview_conversion"
+  - sql: "DROP TABLE IF EXISTS usol_dataview_import_user"
+  - sql: "DROP TABLE IF EXISTS usol_dataview_customer"
+  - sql: "DROP TABLE IF EXISTS usol_dataview_abo"
   - sql: "CREATE TABLE usol_item (id INT PRIMARY KEY, parent_id INT, file_id INT)"
   - sql: "CREATE TABLE usol_file (id INT, uploaded_at INT)"
   - sql: "CREATE TABLE usol_parent (id INT PRIMARY KEY, owner_id INT, team_id INT)"
@@ -37,6 +43,12 @@ setup:
   - sql: "CREATE TABLE usol_file_multi (bucket INT, id INT, uploaded_at INT)"
   - sql: "CREATE TABLE usol_text_outer (id INT PRIMARY KEY, lookup_key TEXT COLLATE utf8mb4_general_ci)"
   - sql: "CREATE TABLE usol_text_inner (lookup_key TEXT COLLATE utf8mb4_general_ci, value INT)"
+  - sql: "CREATE TABLE usol_dataview_product (id INT PRIMARY KEY, selling_id INT, abo_type INT) ENGINE=memory"
+  - sql: "CREATE TABLE usol_dataview_selling (id INT PRIMARY KEY, old_key INT, sold_at INT, total INT, UNIQUE KEY usol_dataview_selling_old (old_key)) ENGINE=memory"
+  - sql: "CREATE TABLE usol_dataview_conversion (id INT PRIMARY KEY, selling_id INT, user_id INT, UNIQUE KEY usol_dataview_conversion_selling (selling_id)) ENGINE=memory"
+  - sql: "CREATE TABLE usol_dataview_import_user (id INT PRIMARY KEY, vu_id INT, customer_id INT, UNIQUE KEY usol_dataview_import_vu (vu_id)) ENGINE=memory"
+  - sql: "CREATE TABLE usol_dataview_customer (id INT PRIMARY KEY, description TEXT) ENGINE=memory"
+  - sql: "CREATE TABLE usol_dataview_abo (id INT PRIMARY KEY, user_id INT, beneficiary INT, abo_type INT, KEY usol_dataview_abo_user (abo_type, user_id), KEY usol_dataview_abo_beneficiary (abo_type, beneficiary)) ENGINE=memory"
   - sql: "INSERT INTO usol_parent VALUES (1, 7, 10), (2, 8, 20)"
   - sql: "INSERT INTO usol_assignment VALUES (1, 10, 7), (2, 20, 8)"
   - sql: "INSERT INTO usol_item_multi VALUES (1, 1, 1), (2, 2, 1), (3, 1, 2), (4, 2, 2), (5, 3, 1)"
@@ -56,6 +68,19 @@ setup:
               (define bucket (+ (- i (* 2 (floor (/ i 2)))) 1))
               (define id (+ (floor (/ i 2)) 1))
               (list bucket id (+ (* id 10) (if (equal? bucket 2) 5 0)))))))
+        (insert (table "memcp-tests" "usol_dataview_product") '("id" "selling_id" "abo_type")
+          (map (produceN 1880) (lambda (i) (list (+ i 1) (+ i 1) (+ (mod i 4) 1)))))
+        (insert (table "memcp-tests" "usol_dataview_selling") '("id" "old_key" "sold_at" "total")
+          (map (produceN 1880) (lambda (i) (list (+ i 1) (+ i 1) (+ i 1) (* (+ i 1) 10)))))
+        (insert (table "memcp-tests" "usol_dataview_conversion") '("id" "selling_id" "user_id")
+          (map (produceN 1880) (lambda (i) (list (+ i 1) (+ i 1) (+ i 1)))))
+        (insert (table "memcp-tests" "usol_dataview_import_user") '("id" "vu_id" "customer_id")
+          (map (produceN 1880) (lambda (i) (list (+ i 1) (+ i 1) (+ i 1)))))
+        (insert (table "memcp-tests" "usol_dataview_customer") '("id" "description")
+          (map (produceN 20000) (lambda (i) (list (+ i 1) (concat "Customer " i)))))
+        (insert (table "memcp-tests" "usol_dataview_abo") '("id" "user_id" "beneficiary" "abo_type")
+          (map (produceN 20000) (lambda (i)
+            (list (+ i 1) (+ i 1) (+ i 1) (+ (mod i 4) 1)))))
         (rebuild)
         10000)
 
@@ -315,6 +340,114 @@ test_cases:
         - id: 4
         - id: 3
 
+  - name: "Nested non-normalized foreign keys stay bounded after scalar ordering"
+    sql: |
+      SELECT product.id,
+        (SELECT imported.customer_id FROM usol_dataview_import_user imported
+         WHERE imported.vu_id = (
+           SELECT conversion.user_id FROM usol_dataview_conversion conversion
+           WHERE conversion.selling_id = product.selling_id LIMIT 1
+         ) LIMIT 1) AS customer
+      FROM usol_dataview_product product
+      ORDER BY (
+        SELECT selling.sold_at FROM usol_dataview_selling selling
+        WHERE selling.old_key = product.selling_id LIMIT 1
+      ) DESC
+      LIMIT 72
+    expect:
+      rows: 72
+
+  - name: "Projected nested foreign key keeps OR lookup bounded"
+    sql: |
+      SELECT product.id,
+        CASE WHEN product.abo_type IS NOT NULL THEN (
+          SELECT abo.id FROM usol_dataview_abo abo
+          WHERE (abo.user_id = (
+            SELECT imported.customer_id FROM usol_dataview_import_user imported
+            WHERE imported.vu_id = (
+              SELECT conversion.user_id FROM usol_dataview_conversion conversion
+              WHERE conversion.selling_id = product.selling_id LIMIT 1
+            ) LIMIT 1
+          ) OR abo.beneficiary = (
+            SELECT imported.customer_id FROM usol_dataview_import_user imported
+            WHERE imported.vu_id = (
+              SELECT conversion.user_id FROM usol_dataview_conversion conversion
+              WHERE conversion.selling_id = product.selling_id LIMIT 1
+            ) LIMIT 1
+          )) AND abo.abo_type = product.abo_type LIMIT 1
+        ) ELSE NULL END AS abo
+      FROM usol_dataview_product product
+      ORDER BY (
+        SELECT selling.sold_at FROM usol_dataview_selling selling
+        WHERE selling.old_key = product.selling_id LIMIT 1
+      ) DESC
+      LIMIT 72
+    expect:
+      rows: 72
+
+  - name: "DataView reuses projected non-normalized foreign keys before scalar ordering"
+    max_time: 8
+    timeout: 90
+    warmup: 0
+    timing_samples: 1
+    performance_rows: 1880
+    threshold_ms: 5000
+    sql: |
+      SELECT t.*
+      FROM (
+        SELECT product.id, product.selling_id, product.abo_type,
+          (SELECT selling.id FROM usol_dataview_selling selling
+           WHERE selling.old_key = product.selling_id LIMIT 1) AS selling,
+          (SELECT imported.customer_id FROM usol_dataview_import_user imported
+           WHERE imported.vu_id = (
+             SELECT conversion.user_id FROM usol_dataview_conversion conversion
+             WHERE conversion.selling_id = (
+               SELECT selling.old_key FROM usol_dataview_selling selling
+               WHERE selling.old_key = product.selling_id LIMIT 1
+             ) LIMIT 1
+           ) LIMIT 1) AS customer,
+          CASE WHEN product.abo_type IS NOT NULL THEN (
+            SELECT abo.id FROM usol_dataview_abo abo
+            WHERE (abo.user_id = (
+              SELECT imported.customer_id FROM usol_dataview_import_user imported
+              WHERE imported.vu_id = (
+                SELECT conversion.user_id FROM usol_dataview_conversion conversion
+                WHERE conversion.selling_id = product.selling_id LIMIT 1
+              ) LIMIT 1
+            ) OR abo.beneficiary = (
+              SELECT imported.customer_id FROM usol_dataview_import_user imported
+              WHERE imported.vu_id = (
+                SELECT conversion.user_id FROM usol_dataview_conversion conversion
+                WHERE conversion.selling_id = product.selling_id LIMIT 1
+              ) LIMIT 1
+            )) AND abo.abo_type = product.abo_type LIMIT 1
+          ) ELSE NULL END AS abo,
+          ref_selling.total,
+          ref_customer.description
+        FROM usol_dataview_product product
+        LEFT JOIN usol_dataview_selling ref_selling ON ref_selling.id = (
+          SELECT selling.id FROM usol_dataview_selling selling
+          WHERE selling.old_key = product.selling_id LIMIT 1
+        )
+        LEFT JOIN usol_dataview_customer ref_customer ON ref_customer.id = (
+          SELECT imported.customer_id FROM usol_dataview_import_user imported
+          WHERE imported.vu_id = (
+            SELECT conversion.user_id FROM usol_dataview_conversion conversion
+            WHERE conversion.selling_id = product.selling_id LIMIT 1
+          ) LIMIT 1
+        )
+      ) t
+      LEFT JOIN usol_dataview_selling sorter_selling ON sorter_selling.id = t.selling
+      LEFT JOIN usol_dataview_abo sorter_abo ON sorter_abo.id = t.abo
+      LEFT JOIN usol_dataview_customer sorter_customer ON sorter_customer.id = t.customer
+      ORDER BY (
+        SELECT selling.sold_at FROM usol_dataview_selling selling
+        WHERE selling.old_key = t.selling_id LIMIT 1
+      ) DESC
+      LIMIT 72 OFFSET 0
+    expect:
+      rows: 72
+
   - name: "Scalar ORDER keeps ties stable and missing LEFT values last"
     setup:
       - "UPDATE usol_file_multi SET uploaded_at = 25 WHERE bucket = 1 AND id = 2"
@@ -351,3 +484,9 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS usol_file_multi"
   - sql: "DROP TABLE IF EXISTS usol_text_outer"
   - sql: "DROP TABLE IF EXISTS usol_text_inner"
+  - sql: "DROP TABLE IF EXISTS usol_dataview_product"
+  - sql: "DROP TABLE IF EXISTS usol_dataview_selling"
+  - sql: "DROP TABLE IF EXISTS usol_dataview_conversion"
+  - sql: "DROP TABLE IF EXISTS usol_dataview_import_user"
+  - sql: "DROP TABLE IF EXISTS usol_dataview_customer"
+  - sql: "DROP TABLE IF EXISTS usol_dataview_abo"

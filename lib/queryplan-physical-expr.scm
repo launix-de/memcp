@@ -328,6 +328,72 @@ an unbound symbol in the callback when costing selects the probe alternative. */
 		(merge (map direct_stages (lambda (nested_stage)
 			(get_assoc closure_index (logical_stage_key nested_stage))))))))))
 
+(define scalar_access_probe_entry_add (lambda (expr state)
+	(begin
+		(define key (stable_structural_hash expr true))
+		(if (has_assoc? (cadr state) key) state
+			(list (append (car state) (list expr
+				(symbol (concat "__scalar_access_key_" (count (car state))))))
+				(set_assoc (cadr state) key true))))))
+
+(define scalar_access_probe_entries_acc (lambda (src expr state)
+	(match expr
+		((symbol equal??) left right) (begin
+			(define left_col (direct_column_name_for_alias src left))
+			(define right_col (direct_column_name_for_alias src right))
+			(define candidate (if (and (not (nil? left_col))
+				(and (nil? right_col) (empty_list? (extract_columns_for_alias src right)))) right
+				(if (and (not (nil? right_col))
+					(and (nil? left_col) (empty_list? (extract_columns_for_alias src left)))) left nil)))
+			(if (list? candidate)
+				(scalar_access_probe_entry_add candidate state)
+				(reduce (list left right) (lambda (acc item)
+					(scalar_access_probe_entries_acc src item acc)) state)))
+		((quote equal??) left right)
+		(scalar_access_probe_entries_acc src (list (symbol "equal??") left right) state)
+		((symbol scalar_first_probe) stage requested_col) (begin
+			(define lookup_keys (qassoc_get (gs_facts stage) (quote lookup-keys) '()))
+			(define local (reduce lookup_keys (lambda (found key)
+				(or found (not (empty_list? (extract_columns_for_alias src key))))) false))
+			(if local state (scalar_access_probe_entry_add expr state)))
+		((quote scalar_first_probe) stage requested_col)
+		(scalar_access_probe_entries_acc src
+			(list (symbol "scalar_first_probe") stage requested_col) state)
+		((symbol scalar_first_probe) stage requested_col _dependencies)
+		(scalar_access_probe_entries_acc src
+			(list (symbol "scalar_first_probe") stage requested_col) state)
+		((quote scalar_first_probe) stage requested_col _dependencies)
+		(scalar_access_probe_entries_acc src
+			(list (symbol "scalar_first_probe") stage requested_col) state)
+		(cons _head tail) (reduce tail (lambda (acc item)
+			(scalar_access_probe_entries_acc src item acc)) state)
+		_ state)))
+
+(define scalar_access_probe_entries (lambda (src expr)
+	(car (scalar_access_probe_entries_acc src expr (list '() '())))))
+
+(define replace_scalar_access_probe_entries (lambda (entries expr)
+	(begin
+		(define replacement (reduce entries (lambda (found entry)
+			(if (not (nil? found)) found
+				(if (equal? expr (car entry)) (cadr entry) nil))) nil))
+		(if (not (nil? replacement)) replacement
+			(match expr
+				(cons head tail) (cons head (map tail (lambda (item)
+					(replace_scalar_access_probe_entries entries item))))
+				_ expr)))))
+
+(define bind_scalar_access_probes (lambda (sources default_alias entries expr)
+	(reduce (reverse entries) (lambda (body entry)
+		(list
+			(list (quote lambda) (list (cadr entry)) body)
+			(lower_column_expr_for_join_in_context
+				sources default_alias (car entry) 1))) expr)))
+
+/* A nested scalar which depends only on the outer probe invocation is an
+access parameter, not a row predicate. Bind it before compiling this scan so
+OR/range analysis can retain the local indexes instead of evaluating the
+complete nested probe inside every candidate-row callback. */
 (define lower_direct_scalar_query_probe (lambda (input value_expr partition_limit on_overflow)
 	(begin
 		(define sources (qb_sources input))
@@ -350,8 +416,11 @@ an unbound symbol in the callback when costing selects the probe alternative. */
 				(begin
 					(define src (car sources))
 					(define condition (combine_where (source_join_expr src) (coalesceNil (qb_where input) true)))
-					(define filtercols (extract_columns_for_alias src condition))
-					(define mapcols (extract_columns_for_alias src value_expr))
+					(define access_probes (scalar_access_probe_entries src condition))
+					(define effective_condition (replace_scalar_access_probe_entries access_probes condition))
+					(define effective_value_expr (replace_scalar_access_probe_entries access_probes value_expr))
+					(define filtercols (extract_columns_for_alias src effective_condition))
+					(define mapcols (extract_columns_for_alias src effective_value_expr))
 					(define check_cardinality (equal? on_overflow (quote error)))
 					(define raw_probe (compile_scan_plan (quote scan_order)
 						(physical_query_tx_symbol)
@@ -359,7 +428,7 @@ an unbound symbol in the callback when costing selects the probe alternative. */
 						(cons (quote list) filtercols)
 						(list (quote lambda)
 							(map filtercols (lambda (col) (symbol (concat (source_alias src) "." col))))
-							(lower_column_expr_for_alias src condition))
+							(lower_column_expr_for_alias src effective_condition))
 						(quoted_runtime_list '())
 						(quoted_runtime_list '())
 						0
@@ -371,12 +440,12 @@ an unbound symbol in the callback when costing selects the probe alternative. */
 							(if check_cardinality
 								(scalar_query_probe_reduce_cardinality)
 								(scalar_once_reduce_first))
-							(lower_column_expr_for_alias src value_expr))
+							(lower_column_expr_for_alias src effective_value_expr))
 						(if check_cardinality
 							(list (quote quote) scalar_query_probe_empty)
 							nil)
 						false))
-					(if check_cardinality
+					(bind_scalar_access_probes sources (source_alias src) access_probes (if check_cardinality
 						(list
 							(list (quote lambda) (list (quote __scalar_probe_result))
 								(list (quote if)
@@ -387,7 +456,7 @@ an unbound symbol in the callback when costing selects the probe alternative. */
 									nil
 									(quote __scalar_probe_result)))
 							raw_probe)
-						raw_probe))
+						raw_probe)))
 				nil)))))
 
 (define physical_expr_refs_unconsumed_stage_output_alias? (lambda (expr)
