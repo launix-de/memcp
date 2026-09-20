@@ -443,6 +443,23 @@ class HookDiagnosticsContractTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertTrue(configured.exists())
 
+    def test_prepared_store_is_exported_to_connect_only_workers(self):
+        import subprocess
+        with tempfile.TemporaryDirectory() as tmp:
+            expected = Path(tmp) / "owned-data"
+            code = self.function("prepare_test_data_dir")
+            code += '\ntest_port=4321\ntest_data_dir=""\ntest_data_dir_owned=0\n'
+            code += f'mktemp() {{ mkdir -p "{expected}"; printf "%s\\n" "{expected}"; }}\n'
+            code += 'prepare_test_data_dir\nprintf "%s|%s|%s" "$test_data_dir" '
+            code += '"$test_data_dir_owned" "$MEMCP_TEST_DATA_DIR"\n'
+            result = subprocess.run(
+                ["bash", "-c", code], capture_output=True, text=True, timeout=4,
+                env={key: value for key, value in os.environ.items()
+                     if key != "MEMCP_TEST_DATA_DIR"},
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, f"{expected}|1|{expected}")
+
     def test_supervisor_dumps_only_owned_child_and_does_not_restart(self):
         import subprocess
         with tempfile.TemporaryDirectory() as tmp:

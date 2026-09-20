@@ -3255,6 +3255,9 @@ def main():
     owned_data_dir = None
     if not connect_only:
         data_dir, owned_data_dir = prepare_memcp_data_dir(port)
+        # Restart helpers and filesystem-observation test steps resolve the
+        # active store through the same environment contract as child workers.
+        os.environ["MEMCP_TEST_DATA_DIR"] = data_dir
     try:
         if connect_only:
             if not wait_for_sql_ready(base_url, timeout=10):
