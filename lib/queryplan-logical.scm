@@ -3439,8 +3439,14 @@ without separately proving two-valued semantics. */
 		(define explicit_group_keys (map (coalesceNil (qb_group inner) '()) (lambda (expr)
 			(canonical_column_expr_for_alias inner_default expr))))
 		(define keys (group_keys_for_correlations inner_default all_corr_pairs explicit_group_keys))
-		(define range_keys (group_keys_for_correlations
-			inner_default range_where_corr_pairs explicit_group_keys))
+		/* The ordinary aggregate stage needs the synthetic (1) key for a
+		global aggregate. A range cache does not: its boundary columns already
+		identify cells, and an empty point domain must stay genuinely empty. */
+		(define range_keys (if (and (empty_list? range_where_corr_pairs)
+			(empty_list? explicit_group_keys))
+			'()
+			(group_keys_for_correlations
+				inner_default range_where_corr_pairs explicit_group_keys)))
 		(define outer_domain (correlation_domain all_corr_pairs))
 		(define lookup_keys (correlation_lookup_keys all_corr_pairs))
 		(define range_outer_domain (correlation_domain range_where_corr_pairs))
@@ -3554,7 +3560,7 @@ without separately proving two-valued semantics. */
 			'(1)
 			(scalar_stage_inner_keys_for_correlations inner_default (qb_stages inner) (qb_sources inner) lookup_pairs)))
 		(define range_keys (if (empty_list? range_lookup_pairs)
-			'(1)
+			'()
 			(scalar_stage_inner_keys_for_correlations inner_default
 				(qb_stages inner) (qb_sources inner) range_lookup_pairs)))
 		(define outer_domain (correlation_domain lookup_pairs))

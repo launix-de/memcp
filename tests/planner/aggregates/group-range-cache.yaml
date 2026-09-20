@@ -360,6 +360,36 @@ test_cases:
     expect:
       result_contains: ["range_group_cache", "agg_range_state_"]
 
+  - name: "session range aggregate without point keys uses boundary-only cells"
+    session_id: "grc_boundary_only"
+    setup:
+      - sql: "SET @grc_cutoff = 1200"
+    sql: |
+      SELECT w.id,
+        (SELECT COUNT(*) FROM grc_events e
+          WHERE e.happened_at < @grc_cutoff) AS event_count
+      FROM grc_windows w
+      WHERE w.id < 5
+      ORDER BY w.id
+    expect:
+      rows: 4
+      data:
+        - {id: 1, event_count: 1200}
+        - {id: 2, event_count: 1200}
+        - {id: 3, event_count: 1200}
+        - {id: 4, event_count: 1200}
+
+  - name: "boundary-only aggregate lowers to the range cache"
+    session_id: "grc_boundary_only"
+    sql: |
+      EXPLAIN PHYSICAL SELECT w.id,
+        (SELECT COUNT(*) FROM grc_events e
+          WHERE e.happened_at < @grc_cutoff) AS event_count
+      FROM grc_windows w
+      WHERE w.id < 5
+    expect:
+      result_contains: ["range_group_cache", "agg_range_state_"]
+
   - name: "two range axes form disjoint multidimensional cells"
     setup:
       - sql: "DROP TABLE IF EXISTS grc_2d_windows"

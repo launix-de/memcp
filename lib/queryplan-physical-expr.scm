@@ -2101,8 +2101,8 @@ generated recipes remain ordinary Scheme. */
 		(define init_key (list (quote concat)
 			(concat "__range_group_cache_init:" cache_name ":"
 				(range_group_state_col_name stage ag) ":")
-			(list (quote table_planner_statistics_token)
-				(source_table_expr (gs_input stage)) false)))
+				(list (quote table_planner_statistics_token)
+					(source_table_expr (gs_input stage)) false)))
 		(range_cache_once_expr cache_name init_key
 			(list (quote !begin)
 				(range_cache_create_columns_expr stage cache_name)
@@ -2300,8 +2300,10 @@ choices. */
 				(list (quote <=) value to_value))))))
 
 (define range_cache_point_terms (lambda (key_symbols point_values)
-	(map (produceN (count key_symbols)) (lambda (i)
-		(list (quote equal??) (nth key_symbols i) (nth point_values i))))))
+	(if (empty_list? key_symbols)
+		'()
+		(map (produceN (count key_symbols)) (lambda (i)
+			(list (quote equal??) (nth key_symbols i) (nth point_values i)))))))
 
 (define range_cache_create_columns_expr (lambda (stage cache_name)
 	(begin
@@ -2369,10 +2371,12 @@ choices. */
 		(define runtime_ag (range_cache_runtime_aggregate ag))
 		(define agg_expr (nth runtime_ag 0))
 		(define valuecols (extract_columns_for_alias src agg_expr))
-		(define key_terms (map (produceN (count key_names)) (lambda (i)
-			(list (quote equal??)
-				(lower_column_expr_for_alias src (nth (gs_keys stage) i))
-				(list (quote outer) 1 (symbol (nth key_names i)))))))
+		(define key_terms (if (empty_list? key_names)
+			'()
+			(map (produceN (count key_names)) (lambda (i)
+				(list (quote equal??)
+					(lower_column_expr_for_alias src (nth (gs_keys stage) i))
+					(list (quote outer) 1 (symbol (nth key_names i))))))))
 		(define range_terms (map (produceN (count domains)) (lambda (axis)
 			(begin
 				(define offset (* axis 4))
