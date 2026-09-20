@@ -1362,9 +1362,28 @@ never checked either, and a keytable over the whole source can be far more
 expensive than any number of direct probes. Only activate this path when we
 actually have a probe-count estimate to compare against; otherwise keep the
 existing, already-safe direct probe. */
+(define scalar_first_probe_keytable_cost (lambda (input_rows probe_rows aggregate_width)
+	(planner_cost
+		planner_group_relation_startup_ns
+		(* input_rows (+ planner_membership_scan_row_ns
+			(* aggregate_width planner_membership_map_column_row_ns)))
+		(* probe_rows planner_group_relation_probe_ns)
+		0 0
+		(* input_rows planner_group_relation_build_row_ns)
+		(* input_rows (+ 8 (* aggregate_width 8)))
+		0 input_rows 0.7)))
+
 (define scalar_first_probe_keytable_cost_preferred? (lambda (stage probe_work_rows)
-	(and (number? (planner_literal_value probe_work_rows))
-		(not (stage_direct_probe_cost_preferred? stage probe_work_rows)))))
+	(begin
+		(define probe_rows (planner_literal_value probe_work_rows))
+		(define input_rows (planner_stage_input_rows (gs_input stage)))
+		(define aggregate_width (max 1 (count (gs_aggregates stage))))
+		(and (number? probe_rows)
+			(and (> probe_rows 0)
+				(and (number? input_rows)
+					(planner_cost_better?
+						(scalar_first_probe_keytable_cost input_rows probe_rows aggregate_width)
+						(planner_direct_presence_probe_cost (* probe_rows aggregate_width)))))))))
 
 (define scalar_first_probe_keytable_eligible? (lambda (stage src keys probe_work_rows)
 	/* Unlike lower_direct_scalar_query_probe, this path builds the keytable via
