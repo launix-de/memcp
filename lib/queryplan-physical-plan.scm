@@ -2953,9 +2953,9 @@ tools/costgen; this lowering adds no hand-tuned crossover. */
 					(list (quote planner_source_row_count) (list (quote quote) target))))
 				"canonical_computed_column" "direct_scalar_lookup"))
 			(define decision_id (concat "scalar_order_lookup_cache:" (gs_id stage)))
-			(define alternatives (list "canonical_computed_column" "direct_scalar_lookup"))
-			(define chosen (planner_physical_choice decision_id normal_choice alternatives))
-			(define forced (planner_physical_override decision_id))
+			(define alternative_names (list "canonical_computed_column" "direct_scalar_lookup"))
+			(define chosen (planner_physical_choice decision_id normal_choice alternative_names planning_session))
+			(define forced (planner_physical_override decision_id planning_session))
 			(planner_record_physical_decision (list
 				(list "decision_id" decision_id)
 				(list "decision" "scalar_order_lookup_carrier")
@@ -2968,7 +2968,13 @@ tools/costgen; this lowering adds no hand-tuned crossover. */
 				(list "inputs" (list
 					(list "driver_rows" driver_rows)
 					(list "risk_budget_ns" planner_adaptive_observation_budget_ns)))
-				(list "alternatives" alternatives)) planning_session)
+				(list "alternatives" (list
+					(list (list "plan" "canonical_computed_column")
+						(list "cost" (planner_cost_explain (planner_cost
+							planner_adaptive_observation_budget_ns 0 0 0 0 0 0 0 driver_rows 0.5))))
+					(list (list "plan" "direct_scalar_lookup")
+						(list "cost" (planner_cost_explain
+							(planner_direct_presence_probe_cost driver_rows))))))) planning_session)
 			(if (equal? chosen "canonical_computed_column") candidate nil)))))
 
 (define scalar_order_lookup_cache_candidate (lambda (stages block)
