@@ -939,7 +939,7 @@ type JITContext struct {
 	SelfLoopLabel            JITLabel
 	HasSelfLoop              bool
 	SelfParamCount           int
-	RegOwners                [32]*JITValueDesc // register → owner descriptor (nil = untracked)
+	RegOwners                [64]*JITValueDesc // register → owner descriptor (nil = untracked)
 	// DeferredRegMoves is the physical half of descriptor-level lazy placement.
 	// A public register move changes the logical location immediately, but its
 	// bytes are held until a non-move instruction, control-flow boundary, or
@@ -977,9 +977,9 @@ type JITContext struct {
 	MaxSpillOffset int32 // spill-zone high-water mark
 
 	ProtectedRegs       uint64  // bitmask of registers that must not be spilled
-	ProtectedRegCounts  [32]int // per-register protection refcount (supports nested protection)
-	RegisterHomeCost    [32]uint16
-	RegisterHomeID      [32]uint16
+	ProtectedRegCounts  [64]int // per-register protection refcount (supports nested protection)
+	RegisterHomeCost    [64]uint16
+	RegisterHomeID      [64]uint16
 	PinnedRegisterHomes uint64
 	nextRegisterHomeID  uint16
 	nextDescID          uint32
@@ -1166,7 +1166,7 @@ func (ctx *JITContext) AllocRegisterHomes(plan JITRegisterPlan) JITRegisterHomes
 }
 
 func (ctx *JITContext) ReleaseRegisterHomes(homes JITRegisterHomes) {
-	for reg := Reg(0); reg <= RegX15; reg++ {
+	for reg := Reg(0); reg < jitRegisterCount; reg++ {
 		bit := uint64(1) << uint(reg)
 		if homes.OwnedRegs&bit == 0 {
 			continue
@@ -1326,11 +1326,11 @@ type jitAllocStateSnapshot struct {
 	freeRegs            uint64
 	freeFPRegs          uint64
 	protectedRegs       uint64
-	protectedRegCounts  [32]int
-	registerHomeCost    [32]uint16
-	registerHomeID      [32]uint16
+	protectedRegCounts  [64]int
+	registerHomeCost    [64]uint16
+	registerHomeID      [64]uint16
 	pinnedRegisterHomes uint64
-	regOwnerIDs         [32]uint32
+	regOwnerIDs         [64]uint32
 	ownerValues         []jitOwnerSnapshot
 	firstNewDescID      uint32
 	spillOffset         int32
@@ -1374,7 +1374,7 @@ func (ctx *JITContext) SnapshotAllocState() jitAllocStateSnapshot {
 			s.ownerValues = append(s.ownerValues, jitOwnerSnapshot{id: id, value: *owner})
 		}
 	}
-	for r := Reg(0); r <= RegX15; r++ {
+	for r := Reg(0); r < jitRegisterCount; r++ {
 		if owner := ctx.RegOwners[r]; owner != nil {
 			s.regOwnerIDs[r] = owner.ID
 		}
@@ -1420,7 +1420,7 @@ func (ctx *JITContext) RestoreAllocState(s jitAllocStateSnapshot) {
 		}
 		*owner = saved.value
 	}
-	for r := Reg(0); r <= RegX15; r++ {
+	for r := Reg(0); r < jitRegisterCount; r++ {
 		id := s.regOwnerIDs[r]
 		if id == 0 {
 			ctx.RegOwners[r] = nil
@@ -1631,7 +1631,7 @@ func (ctx *JITContext) UnprotectReg(r Reg) {
 // tracked owner descriptor. This is used at BB boundaries in closure emitters
 // to prevent stale temporary allocations from exhausting the allocator.
 func (ctx *JITContext) ReclaimUntrackedRegs() {
-	for rr := Reg(0); rr <= RegX15; rr++ {
+	for rr := Reg(0); rr < jitRegisterCount; rr++ {
 		bit := uint64(1 << uint(rr))
 		all := ctx.AllRegs
 		if rr >= RegX0 {
@@ -1647,7 +1647,7 @@ func (ctx *JITContext) ReclaimUntrackedRegs() {
 		// destination still aliases its physical contents. Reclamation must honor
 		// that reservation; releaseUnusedDeferredSources returns it after the last
 		// alias has been materialized.
-		if ctx.DeferredRegMoves.held&uint32(bit) != 0 {
+		if ctx.DeferredRegMoves.held&bit != 0 {
 			continue
 		}
 		owner := ctx.RegOwners[rr]
@@ -1689,8 +1689,8 @@ func (ctx *JITContext) ReclaimUntrackedRegs() {
 // freedom on the register bank.
 type JITRegisterBoundary struct {
 	alloc jitAllocStateSnapshot
-	regs  [32]Reg
-	offs  [32]int32
+	regs  [64]Reg
+	offs  [64]int32
 	count uint8
 }
 
@@ -1730,7 +1730,7 @@ func (ctx *JITContext) PreserveRegisters(options JITRegisterBoundaryOptions) JIT
 	for _, r := range options.ResultRegs {
 		resultMask |= 1 << uint(r)
 	}
-	for r := Reg(0); r <= RegX15; r++ {
+	for r := Reg(0); r < jitRegisterCount; r++ {
 		all, free := ctx.AllRegs, ctx.FreeRegs
 		if r >= RegX0 {
 			all, free = ctx.AllFPRegs, ctx.FreeFPRegs
@@ -1775,7 +1775,7 @@ func (ctx *JITContext) PreserveRegisters(options JITRegisterBoundaryOptions) JIT
 		}
 	}
 	homeMask := uint64(0)
-	for r := Reg(0); r <= RegX15; r++ {
+	for r := Reg(0); r < jitRegisterCount; r++ {
 		if !options.ReleaseHomes && ctx.RegisterHomeID[r] != 0 {
 			homeMask |= 1 << uint(r)
 		}
@@ -1784,7 +1784,7 @@ func (ctx *JITContext) PreserveRegisters(options JITRegisterBoundaryOptions) JIT
 	// legitimately use those physical registers until this boundary is restored.
 	ctx.PinnedRegisterHomes &= homeMask | resultMask
 	ctx.ProtectedRegs &= resultMask | homeMask
-	for r := Reg(0); r <= RegX15; r++ {
+	for r := Reg(0); r < jitRegisterCount; r++ {
 		if (resultMask|homeMask)&(1<<uint(r)) == 0 {
 			ctx.ProtectedRegCounts[r] = 0
 		}
@@ -1816,7 +1816,7 @@ func (p JITRegisterBoundary) Restore(ctx *JITContext) {
 func (ctx *JITContext) AllocReg() Reg {
 	// Sanitize stale owner links: if an owner descriptor no longer claims this
 	// hardware register, drop the stale owner edge and mark the register free.
-	for rr := Reg(0); rr <= RegR15; rr++ {
+	for rr := Reg(0); rr <= jitLastGPReg; rr++ {
 		if (ctx.AllRegs & (1 << uint(rr))) == 0 {
 			continue
 		}
@@ -1859,7 +1859,7 @@ func (ctx *JITContext) AllocReg() Reg {
 	pairSpill := false
 	tripleSpill := false
 	var spillR1, spillR2, spillR3 Reg
-	for bit := int(RegR15); bit >= 0; bit-- {
+	for bit := int(jitLastGPReg); bit >= 0; bit-- {
 		rbit := Reg(bit)
 		if spillable&(1<<uint(rbit)) == 0 {
 			continue
@@ -1912,7 +1912,7 @@ func (ctx *JITContext) AllocReg() Reg {
 	if r == 0xFF {
 		ownerMask := uint64(0)
 		ownerDump := ""
-		for rr := Reg(0); rr <= RegR15; rr++ {
+		for rr := Reg(0); rr <= jitLastGPReg; rr++ {
 			if ctx.RegOwners[rr] != nil {
 				ownerMask |= 1 << uint(rr)
 				o := ctx.RegOwners[rr]
@@ -2043,7 +2043,7 @@ func (ctx *JITContext) AllocFPReg() Reg {
 		return Reg(bits.TrailingZeros64(bit))
 	}
 	spillable := ctx.AllFPRegs &^ ctx.FreeFPRegs &^ ctx.ProtectedRegs
-	for bitIndex := int(RegX15); bitIndex >= int(RegX0); bitIndex-- {
+	for bitIndex := int(jitLastFPReg); bitIndex >= int(jitFirstFPReg); bitIndex-- {
 		bit := uint64(1) << uint(bitIndex)
 		if spillable&bit == 0 {
 			continue
@@ -2229,7 +2229,7 @@ func (ctx *JITContext) FreeReg(r Reg) {
 				if other == r {
 					other = owner.Reg2
 				}
-				if other <= RegR15 {
+				if other <= jitLastGPReg {
 					ctx.RegOwners[other] = nil
 				}
 				owner.Loc = LocNone
@@ -2239,7 +2239,7 @@ func (ctx *JITContext) FreeReg(r Reg) {
 		case LocRegTriple:
 			if owner.Reg == r || owner.Reg2 == r || owner.Reg3 == r {
 				for _, other := range [...]Reg{owner.Reg, owner.Reg2, owner.Reg3} {
-					if other != r && other <= RegR15 {
+					if other != r && other <= jitLastGPReg {
 						ctx.RegOwners[other] = nil
 					}
 				}
@@ -2481,7 +2481,7 @@ func (ctx *JITContext) FreeDesc(desc *JITValueDesc) {
 	ctx.SyncDesc(desc)
 	switch desc.Loc {
 	case LocReg:
-		if desc.Reg <= RegR15 {
+		if desc.Reg <= jitLastGPReg {
 			owner := ctx.RegOwners[desc.Reg]
 			if owner == nil || owner == desc || (desc.ID != 0 && owner.ID == desc.ID) {
 				ctx.FreeReg(desc.Reg)
@@ -2493,13 +2493,13 @@ func (ctx *JITContext) FreeDesc(desc *JITValueDesc) {
 			ctx.FreeReg(desc.Reg)
 		}
 	case LocRegPair:
-		if desc.Reg <= RegR15 {
+		if desc.Reg <= jitLastGPReg {
 			owner := ctx.RegOwners[desc.Reg]
 			if owner == nil || owner == desc || (desc.ID != 0 && owner.ID == desc.ID) {
 				ctx.FreeReg(desc.Reg)
 			}
 		}
-		if desc.Reg2 <= RegR15 {
+		if desc.Reg2 <= jitLastGPReg {
 			owner := ctx.RegOwners[desc.Reg2]
 			if owner == nil || owner == desc || (desc.ID != 0 && owner.ID == desc.ID) {
 				ctx.FreeReg(desc.Reg2)
@@ -2507,7 +2507,7 @@ func (ctx *JITContext) FreeDesc(desc *JITValueDesc) {
 		}
 	case LocRegTriple:
 		for _, r := range [...]Reg{desc.Reg, desc.Reg2, desc.Reg3} {
-			if r > RegR15 {
+			if r > jitLastGPReg {
 				continue
 			}
 			owner := ctx.RegOwners[r]
@@ -2516,7 +2516,7 @@ func (ctx *JITContext) FreeDesc(desc *JITValueDesc) {
 			}
 		}
 	case LocFlags:
-		if desc.Reg <= RegR15 {
+		if desc.Reg <= jitLastGPReg {
 			owner := ctx.RegOwners[desc.Reg]
 			if owner == nil || owner == desc || (desc.ID != 0 && owner.ID == desc.ID) {
 				ctx.FreeReg(desc.Reg)
@@ -3568,14 +3568,14 @@ func (ctx *JITContext) collectLiveRegsForCall(buf *[16]Reg) []Reg {
 	// moved to a spill slot). Calls must preserve that contract as well as normal
 	// allocator ownership.
 	allocatedMask := (ctx.AllRegs &^ ctx.FreeRegs) | (ctx.ProtectedRegs & ctx.AllRegs)
-	for r := Reg(0); r <= RegR15; r++ {
+	for r := Reg(0); r <= jitLastGPReg; r++ {
 		if ctx.RegOwners[r] != nil && (ctx.FreeRegs&(1<<uint(r))) != 0 && (ctx.ProtectedRegs&(1<<uint(r))) == 0 {
 			panic("jit: internal reg state mismatch (owner set but register marked free)")
 		}
 	}
 	liveCount := 0
 	unknownCount := 0
-	for r := Reg(0); r <= RegR15; r++ {
+	for r := Reg(0); r <= jitLastGPReg; r++ {
 		if r == RegRSP || r == RegRBP || r == RegR11 || r == RegR14 {
 			continue
 		}
@@ -3594,7 +3594,7 @@ func (ctx *JITContext) collectLiveRegsForCall(buf *[16]Reg) []Reg {
 	// old semantics and treat all allocated registers as live.
 	if unknownCount > 0 {
 		liveCount = 0
-		for r := Reg(0); r <= RegR15; r++ {
+		for r := Reg(0); r <= jitLastGPReg; r++ {
 			if r == RegRSP || r == RegRBP || r == RegR11 || r == RegR14 {
 				continue
 			}
@@ -3611,7 +3611,7 @@ func (ctx *JITContext) collectLiveRegsForCall(buf *[16]Reg) []Reg {
 func (ctx *JITContext) collectLiveFPRegsForCall(buf *[16]Reg) []Reg {
 	liveMask := (ctx.AllFPRegs &^ ctx.FreeFPRegs) | (ctx.ProtectedRegs & ctx.AllFPRegs)
 	count := 0
-	for reg := RegX0; reg <= RegX15; reg++ {
+	for reg := jitFirstFPReg; reg <= jitLastFPReg; reg++ {
 		if liveMask&(uint64(1)<<uint(reg)) == 0 {
 			continue
 		}
@@ -3657,18 +3657,18 @@ type jitParallelRegMoveBatch struct {
 // architecture identifiers supplied by the backend; the scheduler itself does
 // not know whether they spell RAX, X0, or a future RISC-V register.
 type jitDeferredRegMoves struct {
-	sources [32]Reg
-	active  uint32
+	sources [64]Reg
+	active  uint64
 	// held marks physical source registers whose descriptor lifetime ended while
 	// a deferred destination still aliases their contents. Such registers remain
 	// unavailable to AllocReg until the final alias is emitted or discarded.
-	held     uint32
+	held     uint64
 	flushing bool
 }
 
 func (moves *jitDeferredRegMoves) source(reg Reg) Reg {
 	for depth := 0; depth < len(moves.sources); depth++ {
-		if moves.active&(uint32(1)<<uint(reg)) == 0 {
+		if moves.active&(uint64(1)<<uint(reg)) == 0 {
 			return reg
 		}
 		reg = moves.sources[reg]
@@ -3680,16 +3680,16 @@ func (moves *jitDeferredRegMoves) source(reg Reg) Reg {
 // logical value. If dst's old physical contents still feed another alias, that
 // dependent value must be materialized before dst can be redefined.
 func (ctx *JITContext) deferRegMove(dst, src Reg) {
-	if dst >= 32 || src >= 32 {
+	if dst >= jitRegisterCount || src >= jitRegisterCount {
 		panic("jit: deferred move register outside scheduler range")
 	}
 	if dst == src {
 		return
 	}
-	var dependents uint32
+	var dependents uint64
 	for pending := ctx.DeferredRegMoves.active; pending != 0; pending &= pending - 1 {
-		candidate := Reg(bits.TrailingZeros32(pending))
-		bit := uint32(1) << uint(candidate)
+		candidate := Reg(bits.TrailingZeros64(pending))
+		bit := uint64(1) << uint(candidate)
 		if candidate != dst && ctx.DeferredRegMoves.source(candidate) == dst {
 			dependents |= bit
 		}
@@ -3697,26 +3697,26 @@ func (ctx *JITContext) deferRegMove(dst, src Reg) {
 	ctx.flushDeferredRegMoves(dependents)
 	source := ctx.DeferredRegMoves.source(src)
 	if source == dst {
-		ctx.DeferredRegMoves.active &^= uint32(1) << uint(dst)
+		ctx.DeferredRegMoves.active &^= uint64(1) << uint(dst)
 		return
 	}
 	ctx.DeferredRegMoves.sources[dst] = source
-	ctx.DeferredRegMoves.active |= uint32(1) << uint(dst)
+	ctx.DeferredRegMoves.active |= uint64(1) << uint(dst)
 }
 
 // releaseDeferredReg drops a dead logical destination. Any other pending value
 // which still names the register's old physical contents is emitted first,
 // because the allocator may hand the register to a destructive producer next.
 func (ctx *JITContext) releaseDeferredReg(reg Reg) bool {
-	if reg >= 32 {
+	if reg >= jitRegisterCount {
 		return false
 	}
-	regBit := uint32(1) << uint(reg)
+	regBit := uint64(1) << uint(reg)
 	if ctx.DeferredRegMoves.active&regBit != 0 {
 		source := ctx.DeferredRegMoves.source(reg)
 		representedElsewhere := false
 		for pending := ctx.DeferredRegMoves.active; pending != 0; pending &= pending - 1 {
-			candidate := Reg(bits.TrailingZeros32(pending))
+			candidate := Reg(bits.TrailingZeros64(pending))
 			if candidate != reg && ctx.DeferredRegMoves.source(candidate) == source {
 				representedElsewhere = true
 				break
@@ -3732,7 +3732,7 @@ func (ctx *JITContext) releaseDeferredReg(reg Reg) bool {
 	}
 	hasDependents := false
 	for pending := ctx.DeferredRegMoves.active; pending != 0; pending &= pending - 1 {
-		candidate := Reg(bits.TrailingZeros32(pending))
+		candidate := Reg(bits.TrailingZeros64(pending))
 		if candidate != reg && ctx.DeferredRegMoves.source(candidate) == reg {
 			hasDependents = true
 			break
@@ -3740,7 +3740,7 @@ func (ctx *JITContext) releaseDeferredReg(reg Reg) bool {
 	}
 	ctx.DeferredRegMoves.active &^= regBit
 	if hasDependents {
-		ctx.DeferredRegMoves.held |= uint32(1) << uint(reg)
+		ctx.DeferredRegMoves.held |= uint64(1) << uint(reg)
 		return true
 	}
 	ctx.releaseUnusedDeferredSources()
@@ -3750,11 +3750,11 @@ func (ctx *JITContext) releaseDeferredReg(reg Reg) bool {
 func (ctx *JITContext) releaseUnusedDeferredSources() {
 	moves := &ctx.DeferredRegMoves
 	for held := moves.held; held != 0; held &= held - 1 {
-		source := Reg(bits.TrailingZeros32(held))
-		bit := uint32(1) << uint(source)
+		source := Reg(bits.TrailingZeros64(held))
+		bit := uint64(1) << uint(source)
 		used := false
 		for pending := moves.active; pending != 0; pending &= pending - 1 {
-			candidate := Reg(bits.TrailingZeros32(pending))
+			candidate := Reg(bits.TrailingZeros64(pending))
 			if moves.source(candidate) == source {
 				used = true
 				break
@@ -3765,11 +3765,11 @@ func (ctx *JITContext) releaseUnusedDeferredSources() {
 		}
 		moves.held &^= bit
 		if source >= RegX0 {
-			if ctx.AllFPRegs&uint64(bit) != 0 {
-				ctx.FreeFPRegs |= uint64(bit)
+			if ctx.AllFPRegs&bit != 0 {
+				ctx.FreeFPRegs |= bit
 			}
-		} else if ctx.AllRegs&uint64(bit) != 0 {
-			ctx.FreeRegs |= uint64(bit)
+		} else if ctx.AllRegs&bit != 0 {
+			ctx.FreeRegs |= bit
 		}
 	}
 }
@@ -3778,7 +3778,7 @@ func (ctx *JITContext) releaseUnusedDeferredSources() {
 // canonical sources are physical registers because deferRegMove flattens every
 // alias chain. The parallel solver retains correct old-source semantics when
 // several destinations are materialized together.
-func (ctx *JITContext) flushDeferredRegMoves(mask uint32) {
+func (ctx *JITContext) flushDeferredRegMoves(mask uint64) {
 	moves := &ctx.DeferredRegMoves
 	mask &= moves.active
 	if mask == 0 || moves.flushing {
@@ -3788,7 +3788,7 @@ func (ctx *JITContext) flushDeferredRegMoves(mask uint32) {
 	defer func() { moves.flushing = false }()
 	var batch jitParallelRegMoveBatch
 	for pending := mask; pending != 0; pending &= pending - 1 {
-		dst := Reg(bits.TrailingZeros32(pending))
+		dst := Reg(bits.TrailingZeros64(pending))
 		batch.add(dst, moves.source(dst))
 	}
 	ctx.emitParallelRegMoveBatch(&batch)
@@ -3802,13 +3802,13 @@ func (ctx *JITContext) FlushRegisterMoves() {
 	ctx.flushDeferredRegMoves(ctx.DeferredRegMoves.active)
 }
 
-func jitRegisterMask(regs ...Reg) uint32 {
-	var mask uint32
+func jitRegisterMask(regs ...Reg) uint64 {
+	var mask uint64
 	for _, reg := range regs {
-		if reg >= 32 {
+		if reg >= jitRegisterCount {
 			panic("jit: register outside use/def mask")
 		}
-		mask |= uint32(1) << uint(reg)
+		mask |= uint64(1) << uint(reg)
 	}
 	return mask
 }
@@ -3817,7 +3817,7 @@ func jitRegisterMask(regs ...Reg) uint32 {
 // Reads materialize only their requested logical values. Before a write, old
 // physical values still referenced by another alias are preserved; the written
 // destinations themselves become concrete outputs of this instruction.
-func (ctx *JITContext) beginRegisterInstruction(reads, writes uint32) {
+func (ctx *JITContext) beginRegisterInstruction(reads, writes uint64) {
 	if ctx.DeferredRegMoves.active == 0 {
 		ctx.registerInstructionDepth++
 		return
@@ -3826,14 +3826,14 @@ func (ctx *JITContext) beginRegisterInstruction(reads, writes uint32) {
 	ctx.registerInstructionDepth++
 }
 
-func (ctx *JITContext) prepareDeferredRegisterInstruction(reads, writes uint32) {
+func (ctx *JITContext) prepareDeferredRegisterInstruction(reads, writes uint64) {
 	ctx.flushDeferredRegMoves(reads)
-	var oldValueDependents uint32
+	var oldValueDependents uint64
 	for pending := ctx.DeferredRegMoves.active &^ writes; pending != 0; pending &= pending - 1 {
-		candidate := Reg(bits.TrailingZeros32(pending))
-		bit := uint32(1) << uint(candidate)
+		candidate := Reg(bits.TrailingZeros64(pending))
+		bit := uint64(1) << uint(candidate)
 		source := ctx.DeferredRegMoves.source(candidate)
-		if writes&(uint32(1)<<uint(source)) != 0 {
+		if writes&(uint64(1)<<uint(source)) != 0 {
 			oldValueDependents |= bit
 		}
 	}
