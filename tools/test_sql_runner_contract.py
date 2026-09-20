@@ -47,6 +47,7 @@ from run_sql_tests import (  # noqa: E402
     SQLTestRunner,
     _load_runner_config,
     adaptive_measurement_complete,
+    cleanup_memcp_artifacts,
     discover_performance_ci_suites,
     is_error_response,
     initialize_performance_recording,
@@ -65,6 +66,7 @@ from run_sql_tests import (  # noqa: E402
     performance_regression_pct,
     performance_sample_ns,
     performance_measurement_ns,
+    prepare_memcp_data_dir,
     resolve_timing_aggregation,
     performance_scale_from_samples,
     planner_time_limit_with_tolerance_ms,
@@ -77,10 +79,67 @@ from run_sql_tests import (  # noqa: E402
     scaled_compile_time_limit_ms,
     scaled_wall_clock_limit_ms,
     sql_request_is_retry_safe,
+    start_memcp_process,
     suite_execution_mode,
     wait_for_shared_supervisor_generation,
 )
 from tools.check_test_table_names import mutable_table_collisions  # noqa: E402
+
+
+class ManagedDataDirectoryContractTest(unittest.TestCase):
+    def test_default_directory_and_log_are_removed(self):
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            owned = root_path / "memcp-sql-tests-4321-random"
+
+            def make_owned_dir(**_kwargs):
+                owned.mkdir()
+                return str(owned)
+
+            with mock.patch.dict(os.environ, {}, clear=False), \
+                    mock.patch("run_sql_tests.tempfile.mkdtemp", side_effect=make_owned_dir):
+                os.environ.pop("MEMCP_TEST_DATA_DIR", None)
+                data_dir, owned_data_dir = prepare_memcp_data_dir(4321)
+
+            self.assertEqual(data_dir, str(owned))
+            self.assertEqual(owned_data_dir, owned)
+            (owned / "schema.json").write_text("{}", encoding="utf-8")
+            log = root_path / "memcp-test-4321.log"
+            log.write_text("test log", encoding="utf-8")
+
+            with mock.patch("run_sql_tests._memcp_log_file", str(log)):
+                cleanup_memcp_artifacts(owned_data_dir)
+
+            self.assertFalse(owned.exists())
+            self.assertFalse(log.exists())
+
+    def test_configured_directory_remains_user_owned(self):
+        with tempfile.TemporaryDirectory() as root:
+            configured = Path(root) / "persistent-test-data"
+            configured.mkdir()
+            with mock.patch.dict(
+                os.environ, {"MEMCP_TEST_DATA_DIR": str(configured)}, clear=False,
+            ):
+                data_dir, owned_data_dir = prepare_memcp_data_dir(4321)
+                cleanup_memcp_artifacts(owned_data_dir)
+
+            self.assertEqual(data_dir, str(configured))
+            self.assertIsNone(owned_data_dir)
+            self.assertTrue(configured.exists())
+
+    def test_failed_start_stops_process_and_closes_log(self):
+        proc = mock.Mock()
+        logfile = mock.mock_open()
+        with mock.patch("run_sql_tests.open", logfile), \
+                mock.patch("run_sql_tests.subprocess.Popen", return_value=proc), \
+                mock.patch("run_sql_tests.wait_for_memcp", return_value=False), \
+                mock.patch("run_sql_tests.print_memcp_log"), \
+                mock.patch("run_sql_tests.stop_memcp_process") as stop:
+            started = start_memcp_process(4321, data_dir="/owned/test-data")
+
+        self.assertIsNone(started)
+        stop.assert_called_once_with(proc)
+        logfile().close.assert_called_once_with()
 
 
 class UpgradeSnapshotContractTest(unittest.TestCase):
