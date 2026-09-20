@@ -1095,9 +1095,11 @@ from silently overriding the physical planner. */
 			(if (empty_list? sources) nil (source_alias (car sources)))))
 		(map (filter stage_list (lambda (stage)
 			(and (scalar_aggregate_probe_stage? stage)
-				(and (equal? (count (range_stage_domains stage)) 1)
+				(and (not (empty_list? (range_stage_domains stage)))
 					(and (single_source? sources)
-						(stage_lookup_keys_resolve_in_sources? stage sources default_alias))))))
+						(and (stage_lookup_keys_resolve_in_sources? stage sources default_alias)
+							(equal? (car (range_group_cache_selection sources stage))
+								"range_group_cache")))))))
 			(lambda (stage)
 				(lower_range_cache_prepare_all_expr sources default_alias stage
 					(physical_query_tx_symbol)))))))
@@ -1147,17 +1149,19 @@ cache scan for every output row. */
 			(define domains (range_stage_domains stage))
 			(define ag (scalar_first_probe_aggregate stage requested_col))
 			(if (or (not (single_source? sources))
-				(or (not (equal? (count domains) 1)) (nil? ag)))
+				(or (empty_list? domains) (or (nil? ag)
+					(not (equal? (car (range_group_cache_selection sources stage))
+						"range_group_cache")))))
 				nil
 				(begin
 					(define target (car sources))
 					(define lookup_keys (qassoc_get (gs_facts stage) (quote lookup-keys) '()))
-					(define domain (car domains))
-					(define input_exprs (merge (list lookup_keys
-						(if (range_domain_unbounded_from? domain) '()
-							(list (range_domain_from domain)))
-						(if (range_domain_unbounded_to? domain) '()
-							(list (range_domain_to domain))))))
+					(define input_exprs (merge (list lookup_keys (merge (map domains (lambda (domain)
+						(merge (list
+							(if (range_domain_unbounded_from? domain) '()
+								(list (range_domain_from domain)))
+							(if (range_domain_unbounded_to? domain) '()
+								(list (range_domain_to domain)))))))))))
 					(define raw_input_cols (map input_exprs (lambda (expr)
 						(direct_column_name_for_alias target expr))))
 					(define input_cols (merge_unique (list raw_input_cols)))
@@ -1169,26 +1173,29 @@ cache scan for every output row. */
 							(define cache_name (range_group_cache_name stage))
 							(define point_values (map lookup_keys (lambda (expr)
 								(lower_column_expr_for_join sources default_alias expr))))
-							(define from_kind (range_domain_from_kind domain))
-							(define to_kind (range_domain_to_kind domain))
-							(define from_value (if (range_domain_unbounded_from? domain) nil
-								(lower_column_expr_for_join sources default_alias
-									(range_domain_from domain))))
-							(define to_value (if (range_domain_unbounded_to? domain) nil
-								(lower_column_expr_for_join sources default_alias
-									(range_domain_to domain))))
-							(define value_expr (list (quote if)
-								(list (quote or)
-									(if (range_domain_unbounded_from? domain) false
-										(list (quote nil?) from_value))
+							(define bounds (map domains (lambda (domain)
+								(list
+									(range_domain_from_kind domain)
+									(if (range_domain_unbounded_from? domain) nil
+										(lower_column_expr_for_join sources default_alias (range_domain_from domain)))
+									(range_domain_to_kind domain)
+									(if (range_domain_unbounded_to? domain) nil
+										(lower_column_expr_for_join sources default_alias (range_domain_to domain)))))))
+							(define invalid_terms (map (produceN (count domains)) (lambda (axis)
+								(begin
+									(define domain (nth domains axis))
+									(define bound (nth bounds axis))
 									(list (quote or)
-										(if (range_domain_unbounded_to? domain) false
-											(list (quote nil?) to_value))
-										(list (quote not) (range_cache_cut_less_expr
-											from_kind from_value to_kind to_value))))
+										(if (range_domain_unbounded_from? domain) false (list (quote nil?) (nth bound 1)))
+										(list (quote or)
+											(if (range_domain_unbounded_to? domain) false (list (quote nil?) (nth bound 3)))
+											(list (quote not) (range_cache_cut_less_expr
+												(nth bound 0) (nth bound 1) (nth bound 2) (nth bound 3)))))))))
+							(define value_expr (list (quote if)
+								(cons (quote or) invalid_terms)
 								(aggregate_finalize_expr ag (nth ag 2))
 								(range_cache_merge_expr stage cache_name ag point_values
-									from_kind from_value to_kind to_value nil)))
+									bounds nil)))
 							(define column_name (concat ".range-lookup:"
 								(stable_structural_hash (list cache_name requested_col input_cols) true)))
 							(define column_init_key (list (quote concat)
