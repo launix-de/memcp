@@ -386,7 +386,7 @@ test_cases:
       rows: 72
 
   - name: "DataView reuses projected non-normalized foreign keys before scalar ordering"
-    max_time: 8
+    max_time: 5
     timeout: 90
     warmup: 0
     timing_samples: 1
