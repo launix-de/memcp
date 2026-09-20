@@ -749,34 +749,35 @@ func (s *StorageSparse) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resul
 		if d1.Loc == scm.LocImm && d2.Loc == scm.LocImm {
 			d49 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(d1.Imm.Int() + d2.Imm.Int())}
 		} else if d2.Loc == scm.LocImm && d2.Imm.Int() == 0 {
+			ctx.EnsureDesc(&d1)
 			r5 := ctx.AllocRegExcept(d1.Reg)
 			ctx.EmitMovRegReg(r5, d1.Reg)
 			d49 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: r5}
 			ctx.BindReg(r5, &d49)
 		} else if d1.Loc == scm.LocImm && d1.Imm.Int() == 0 {
+			ctx.EnsureDesc(&d2)
 			d49 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: d2.Reg}
 			ctx.BindReg(d2.Reg, &d49)
 		} else if d1.Loc == scm.LocImm {
+			ctx.EnsureDesc(&d2)
 			scratch := ctx.AllocRegExcept(d2.Reg)
-			ctx.EmitMovRegImm64(scratch, uint64(d1.Imm.Int()))
-			ctx.EmitAddInt32(scratch, d2.Reg)
+			ctx.EmitMovRegReg(scratch, d2.Reg)
+			ctx.EmitIntBinaryImm(scm.JITIntAdd, 32, scratch, d1.Imm.Int())
 			d49 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: scratch}
 			ctx.BindReg(scratch, &d49)
 		} else if d2.Loc == scm.LocImm {
+			ctx.EnsureDesc(&d1)
 			scratch := ctx.AllocRegExcept(d1.Reg)
 			ctx.EmitMovRegReg(scratch, d1.Reg)
-			if d2.Imm.Int() >= -2147483648 && d2.Imm.Int() <= 2147483647 {
-				ctx.EmitAddRegImm32Low(scratch, int32(d2.Imm.Int()))
-			} else {
-				ctx.EmitMovRegImm64(scm.RegR11, uint64(d2.Imm.Int()))
-				ctx.EmitAddInt32(scratch, scm.RegR11)
-			}
+			ctx.EmitIntBinaryImm(scm.JITIntAdd, 32, scratch, d2.Imm.Int())
 			d49 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: scratch}
 			ctx.BindReg(scratch, &d49)
 		} else {
+			ctx.EnsureDesc(&d1)
+			ctx.SyncDesc(&d2)
 			r6 := ctx.AllocRegExcept(d1.Reg, d2.Reg)
 			ctx.EmitMovRegReg(r6, d1.Reg)
-			ctx.EmitAddInt32(r6, d2.Reg)
+			ctx.EmitIntBinary(scm.JITIntAdd, 32, r6, &d2)
 			d49 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: r6}
 			ctx.BindReg(r6, &d49)
 		}
@@ -870,26 +871,25 @@ func (s *StorageSparse) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resul
 		if d54.Loc == scm.LocImm && d53.Loc == scm.LocImm {
 			d55 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(d54.Imm.Int() * d53.Imm.Int())}
 		} else if d54.Loc == scm.LocImm {
+			ctx.EnsureDesc(&d53)
 			scratch := ctx.AllocRegExcept(d53.Reg)
-			ctx.EmitMovRegImm64(scratch, uint64(d54.Imm.Int()))
-			ctx.EmitImulInt64(scratch, d53.Reg)
+			ctx.EmitMovRegReg(scratch, d53.Reg)
+			ctx.EmitIntBinaryImm(scm.JITIntMul, 64, scratch, d54.Imm.Int())
 			d55 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: scratch}
 			ctx.BindReg(scratch, &d55)
 		} else if d53.Loc == scm.LocImm {
+			ctx.EnsureDesc(&d54)
 			scratch := ctx.AllocRegExcept(d54.Reg)
 			ctx.EmitMovRegReg(scratch, d54.Reg)
-			if d53.Imm.Int() >= -2147483648 && d53.Imm.Int() <= 2147483647 {
-				ctx.EmitImulRegImm32(scratch, int32(d53.Imm.Int()))
-			} else {
-				ctx.EmitMovRegImm64(scm.RegR11, uint64(d53.Imm.Int()))
-				ctx.EmitImulInt64(scratch, scm.RegR11)
-			}
+			ctx.EmitIntBinaryImm(scm.JITIntMul, 64, scratch, d53.Imm.Int())
 			d55 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: scratch}
 			ctx.BindReg(scratch, &d55)
 		} else {
+			ctx.EnsureDesc(&d54)
+			ctx.SyncDesc(&d53)
 			r11 := ctx.AllocRegExcept(d54.Reg, d53.Reg)
 			ctx.EmitMovRegReg(r11, d54.Reg)
-			ctx.EmitImulInt64(r11, d53.Reg)
+			ctx.EmitIntBinary(scm.JITIntMul, 64, r11, &d53)
 			d55 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: r11}
 			ctx.BindReg(r11, &d55)
 		}
@@ -1010,7 +1010,7 @@ func (s *StorageSparse) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resul
 		} else {
 			scratch := ctx.AllocRegExcept(d56.Reg)
 			ctx.EmitMovRegReg(scratch, d56.Reg)
-			ctx.EmitAddRegImm32(scratch, int32(1))
+			ctx.EmitIntBinaryImm(scm.JITIntAdd, 64, scratch, 1)
 			d61 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: scratch}
 			ctx.BindReg(scratch, &d61)
 		}
@@ -1032,31 +1032,31 @@ func (s *StorageSparse) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resul
 		if d63.Loc == scm.LocImm && d57.Loc == scm.LocImm {
 			d64 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(d63.Imm.Int() - d57.Imm.Int())}
 		} else if d57.Loc == scm.LocImm && d57.Imm.Int() == 0 {
+			ctx.EnsureDesc(&d63)
 			r19 := ctx.AllocRegExcept(d63.Reg)
 			ctx.EmitMovRegReg(r19, d63.Reg)
 			d64 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: r19}
 			ctx.BindReg(r19, &d64)
 		} else if d63.Loc == scm.LocImm {
+			ctx.EnsureDesc(&d57)
 			scratch := ctx.AllocRegExcept(d57.Reg)
 			ctx.EmitMovRegImm64(scratch, uint64(d63.Imm.Int()))
-			ctx.EmitSubInt64(scratch, d57.Reg)
+			ctx.EmitIntBinary(scm.JITIntSub, 64, scratch, &d57)
 			d64 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: scratch}
 			ctx.BindReg(scratch, &d64)
 		} else if d57.Loc == scm.LocImm {
+			ctx.EnsureDesc(&d63)
 			scratch := ctx.AllocRegExcept(d63.Reg)
 			ctx.EmitMovRegReg(scratch, d63.Reg)
-			if d57.Imm.Int() >= -2147483648 && d57.Imm.Int() <= 2147483647 {
-				ctx.EmitSubRegImm32(scratch, int32(d57.Imm.Int()))
-			} else {
-				ctx.EmitMovRegImm64(scm.RegR11, uint64(d57.Imm.Int()))
-				ctx.EmitSubInt64(scratch, scm.RegR11)
-			}
+			ctx.EmitIntBinaryImm(scm.JITIntSub, 64, scratch, d57.Imm.Int())
 			d64 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: scratch}
 			ctx.BindReg(scratch, &d64)
 		} else {
+			ctx.EnsureDesc(&d63)
+			ctx.SyncDesc(&d57)
 			r20 := ctx.AllocRegExcept(d63.Reg, d57.Reg)
 			ctx.EmitMovRegReg(r20, d63.Reg)
-			ctx.EmitSubInt64(r20, d57.Reg)
+			ctx.EmitIntBinary(scm.JITIntSub, 64, r20, &d57)
 			d64 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: r20}
 			ctx.BindReg(r20, &d64)
 		}
@@ -1157,31 +1157,31 @@ func (s *StorageSparse) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resul
 		if d67.Loc == scm.LocImm && d53.Loc == scm.LocImm {
 			d68 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(d67.Imm.Int() - d53.Imm.Int())}
 		} else if d53.Loc == scm.LocImm && d53.Imm.Int() == 0 {
+			ctx.EnsureDesc(&d67)
 			r26 := ctx.AllocRegExcept(d67.Reg)
 			ctx.EmitMovRegReg(r26, d67.Reg)
 			d68 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: r26}
 			ctx.BindReg(r26, &d68)
 		} else if d67.Loc == scm.LocImm {
+			ctx.EnsureDesc(&d53)
 			scratch := ctx.AllocRegExcept(d53.Reg)
 			ctx.EmitMovRegImm64(scratch, uint64(d67.Imm.Int()))
-			ctx.EmitSubInt64(scratch, d53.Reg)
+			ctx.EmitIntBinary(scm.JITIntSub, 64, scratch, &d53)
 			d68 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: scratch}
 			ctx.BindReg(scratch, &d68)
 		} else if d53.Loc == scm.LocImm {
+			ctx.EnsureDesc(&d67)
 			scratch := ctx.AllocRegExcept(d67.Reg)
 			ctx.EmitMovRegReg(scratch, d67.Reg)
-			if d53.Imm.Int() >= -2147483648 && d53.Imm.Int() <= 2147483647 {
-				ctx.EmitSubRegImm32(scratch, int32(d53.Imm.Int()))
-			} else {
-				ctx.EmitMovRegImm64(scm.RegR11, uint64(d53.Imm.Int()))
-				ctx.EmitSubInt64(scratch, scm.RegR11)
-			}
+			ctx.EmitIntBinaryImm(scm.JITIntSub, 64, scratch, d53.Imm.Int())
 			d68 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: scratch}
 			ctx.BindReg(scratch, &d68)
 		} else {
+			ctx.EnsureDesc(&d67)
+			ctx.SyncDesc(&d53)
 			r27 := ctx.AllocRegExcept(d67.Reg, d53.Reg)
 			ctx.EmitMovRegReg(r27, d67.Reg)
-			ctx.EmitSubInt64(r27, d53.Reg)
+			ctx.EmitIntBinary(scm.JITIntSub, 64, r27, &d53)
 			d68 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: r27}
 			ctx.BindReg(r27, &d68)
 		}
@@ -1263,34 +1263,35 @@ func (s *StorageSparse) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resul
 		if d69.Loc == scm.LocImm && d71.Loc == scm.LocImm {
 			d72 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(d69.Imm.Int() + d71.Imm.Int())}
 		} else if d71.Loc == scm.LocImm && d71.Imm.Int() == 0 {
+			ctx.EnsureDesc(&d69)
 			r32 := ctx.AllocRegExcept(d69.Reg)
 			ctx.EmitMovRegReg(r32, d69.Reg)
 			d72 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: r32}
 			ctx.BindReg(r32, &d72)
 		} else if d69.Loc == scm.LocImm && d69.Imm.Int() == 0 {
+			ctx.EnsureDesc(&d71)
 			d72 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: d71.Reg}
 			ctx.BindReg(d71.Reg, &d72)
 		} else if d69.Loc == scm.LocImm {
+			ctx.EnsureDesc(&d71)
 			scratch := ctx.AllocRegExcept(d71.Reg)
-			ctx.EmitMovRegImm64(scratch, uint64(d69.Imm.Int()))
-			ctx.EmitAddInt64(scratch, d71.Reg)
+			ctx.EmitMovRegReg(scratch, d71.Reg)
+			ctx.EmitIntBinaryImm(scm.JITIntAdd, 64, scratch, d69.Imm.Int())
 			d72 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: scratch}
 			ctx.BindReg(scratch, &d72)
 		} else if d71.Loc == scm.LocImm {
+			ctx.EnsureDesc(&d69)
 			scratch := ctx.AllocRegExcept(d69.Reg)
 			ctx.EmitMovRegReg(scratch, d69.Reg)
-			if d71.Imm.Int() >= -2147483648 && d71.Imm.Int() <= 2147483647 {
-				ctx.EmitAddRegImm32(scratch, int32(d71.Imm.Int()))
-			} else {
-				ctx.EmitMovRegImm64(scm.RegR11, uint64(d71.Imm.Int()))
-				ctx.EmitAddInt64(scratch, scm.RegR11)
-			}
+			ctx.EmitIntBinaryImm(scm.JITIntAdd, 64, scratch, d71.Imm.Int())
 			d72 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: scratch}
 			ctx.BindReg(scratch, &d72)
 		} else {
+			ctx.EnsureDesc(&d69)
+			ctx.SyncDesc(&d71)
 			r33 := ctx.AllocRegExcept(d69.Reg, d71.Reg)
 			ctx.EmitMovRegReg(r33, d69.Reg)
-			ctx.EmitAddInt64(r33, d71.Reg)
+			ctx.EmitIntBinary(scm.JITIntAdd, 64, r33, &d71)
 			d72 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: r33}
 			ctx.BindReg(r33, &d72)
 		}
@@ -2813,7 +2814,7 @@ func (s *StorageSparse) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, resul
 		} else {
 			scratch := ctx.AllocRegExcept(d50.Reg)
 			ctx.EmitMovRegReg(scratch, d50.Reg)
-			ctx.EmitAddRegImm32Low(scratch, int32(1))
+			ctx.EmitIntBinaryImm(scm.JITIntAdd, 32, scratch, 1)
 			d277 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: scratch}
 			ctx.BindReg(scratch, &d277)
 		}

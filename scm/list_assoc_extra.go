@@ -630,7 +630,7 @@ func init_list_assoc_extra() {
 				} else {
 					scratch := ctx.AllocRegExcept(d42.Reg)
 					ctx.EmitMovRegReg(scratch, d42.Reg)
-					ctx.EmitSubRegImm32(scratch, int32(1))
+					ctx.EmitIntBinaryImm(JITIntSub, 64, scratch, 1)
 					d43 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: scratch}
 					ctx.BindReg(scratch, &d43)
 				}
@@ -1139,7 +1139,7 @@ func init_list_assoc_extra() {
 				} else {
 					scratch := ctx.AllocRegExcept(d73.Reg)
 					ctx.EmitMovRegReg(scratch, d73.Reg)
-					ctx.EmitSubRegImm32(scratch, int32(1))
+					ctx.EmitIntBinaryImm(JITIntSub, 64, scratch, 1)
 					d74 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: scratch}
 					ctx.BindReg(scratch, &d74)
 				}
@@ -1443,7 +1443,7 @@ func init_list_assoc_extra() {
 				} else {
 					scratch := ctx.AllocRegExcept(d77.Reg)
 					ctx.EmitMovRegReg(scratch, d77.Reg)
-					ctx.EmitSubRegImm32(scratch, int32(1))
+					ctx.EmitIntBinaryImm(JITIntSub, 64, scratch, 1)
 					d95 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: scratch}
 					ctx.BindReg(scratch, &d95)
 				}
@@ -1852,7 +1852,7 @@ func init_list_assoc_extra() {
 				} else {
 					scratch := ctx.AllocRegExcept(d115.Reg)
 					ctx.EmitMovRegReg(scratch, d115.Reg)
-					ctx.EmitAddRegImm32(scratch, int32(1))
+					ctx.EmitIntBinaryImm(JITIntAdd, 64, scratch, 1)
 					d116 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: scratch}
 					ctx.BindReg(scratch, &d116)
 				}
@@ -2660,7 +2660,7 @@ func init_list_assoc_extra() {
 				} else {
 					scratch := ctx.AllocRegExcept(d30.Reg)
 					ctx.EmitMovRegReg(scratch, d30.Reg)
-					ctx.EmitSubRegImm32(scratch, int32(1))
+					ctx.EmitIntBinaryImm(JITIntSub, 64, scratch, 1)
 					d31 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: scratch}
 					ctx.BindReg(scratch, &d31)
 				}
@@ -3123,7 +3123,7 @@ func init_list_assoc_extra() {
 				} else {
 					scratch := ctx.AllocRegExcept(d59.Reg)
 					ctx.EmitMovRegReg(scratch, d59.Reg)
-					ctx.EmitSubRegImm32(scratch, int32(1))
+					ctx.EmitIntBinaryImm(JITIntSub, 64, scratch, 1)
 					d60 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: scratch}
 					ctx.BindReg(scratch, &d60)
 				}
@@ -3389,7 +3389,7 @@ func init_list_assoc_extra() {
 				} else {
 					scratch := ctx.AllocRegExcept(d63.Reg)
 					ctx.EmitMovRegReg(scratch, d63.Reg)
-					ctx.EmitSubRegImm32(scratch, int32(1))
+					ctx.EmitIntBinaryImm(JITIntSub, 64, scratch, 1)
 					d81 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: scratch}
 					ctx.BindReg(scratch, &d81)
 				}
@@ -3894,7 +3894,7 @@ func init_list_assoc_extra() {
 				} else {
 					scratch := ctx.AllocRegExcept(d107.Reg)
 					ctx.EmitMovRegReg(scratch, d107.Reg)
-					ctx.EmitAddRegImm32(scratch, int32(1))
+					ctx.EmitIntBinaryImm(JITIntAdd, 64, scratch, 1)
 					d108 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: scratch}
 					ctx.BindReg(scratch, &d108)
 				}
@@ -4656,7 +4656,7 @@ func init_list_assoc_extra() {
 					} else {
 						scratch := ctx.AllocRegExcept(d1.Reg)
 						ctx.EmitMovRegReg(scratch, d1.Reg)
-						ctx.EmitAddRegImm32(scratch, int32(1))
+						ctx.EmitIntBinaryImm(JITIntAdd, 64, scratch, 1)
 						d23 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: scratch}
 						ctx.BindReg(scratch, &d23)
 					}
@@ -5787,7 +5787,7 @@ func init_list_assoc_extra() {
 					} else {
 						scratch := ctx.AllocRegExcept(d1.Reg)
 						ctx.EmitMovRegReg(scratch, d1.Reg)
-						ctx.EmitAddRegImm32(scratch, int32(1))
+						ctx.EmitIntBinaryImm(JITIntAdd, 64, scratch, 1)
 						d23 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: scratch}
 						ctx.BindReg(scratch, &d23)
 					}
@@ -6948,7 +6948,7 @@ func init_list_assoc_extra() {
 					} else {
 						scratch := ctx.AllocRegExcept(d1.Reg)
 						ctx.EmitMovRegReg(scratch, d1.Reg)
-						ctx.EmitAddRegImm32(scratch, int32(1))
+						ctx.EmitIntBinaryImm(JITIntAdd, 64, scratch, 1)
 						d23 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: scratch}
 						ctx.BindReg(scratch, &d23)
 					}
@@ -8144,7 +8144,7 @@ func init_list_assoc_extra() {
 					} else {
 						scratch := ctx.AllocRegExcept(d1.Reg)
 						ctx.EmitMovRegReg(scratch, d1.Reg)
-						ctx.EmitAddRegImm32(scratch, int32(1))
+						ctx.EmitIntBinaryImm(JITIntAdd, 64, scratch, 1)
 						d19 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: scratch}
 						ctx.BindReg(scratch, &d19)
 					}
@@ -9168,7 +9168,7 @@ func init_list_assoc_extra() {
 					} else {
 						scratch := ctx.AllocRegExcept(d1.Reg)
 						ctx.EmitMovRegReg(scratch, d1.Reg)
-						ctx.EmitAddRegImm32(scratch, int32(1))
+						ctx.EmitIntBinaryImm(JITIntAdd, 64, scratch, 1)
 						d19 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: scratch}
 						ctx.BindReg(scratch, &d19)
 					}

@@ -25,7 +25,7 @@ import (
 // when the body provably cannot swallow the continuation's leading delimiter
 // byte (the backslash-escaped quoted-string / block-comment token shapes),
 // emitComplexTailRepeat commits without a stack; a doubled-delimiter escape
-// ('', ``) needs emitBacktrackingRepeat's real position-backtracking stack
+// (”, “) needs emitBacktrackingRepeat's real position-backtracking stack
 // (exercised against actual JIT-compiled code, not just this classification,
 // by TestJITRegexBacktrackingRepeat).
 func TestJITRegexVariableWidthRepeat(t *testing.T) {

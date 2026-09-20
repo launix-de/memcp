@@ -1173,7 +1173,7 @@ func init_processlist() {
 					} else {
 						scratch := ctx.AllocRegExcept(d2.Reg)
 						ctx.EmitMovRegReg(scratch, d2.Reg)
-						ctx.EmitAddRegImm32(scratch, int32(1))
+						ctx.EmitIntBinaryImm(JITIntAdd, 64, scratch, 1)
 						d45 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: scratch}
 						ctx.BindReg(scratch, &d45)
 					}

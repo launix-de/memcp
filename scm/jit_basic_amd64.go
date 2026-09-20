@@ -158,3 +158,140 @@ func jitArchEmitMulInt64(ctx *JITContext, dst, src Reg) {
 	}
 	ctx.emitBytes(rex, 0x0F, 0xAF, 0xC0|(byte(dst&7)<<3)|byte(src&7))
 }
+
+func jitArchEmitIntBinary(ctx *JITContext, op JITIntOp, width uint8, dst Reg, right jitIntOperand, scratch Reg) {
+	switch right.kind {
+	case jitIntOperandReg:
+		ctx.beginRegisterInstruction(jitRegisterMask(dst, right.reg), jitRegisterMask(dst))
+		defer ctx.endRegisterInstruction()
+		amd64EmitIntBinaryReg(ctx, op, width, dst, right.reg)
+	case jitIntOperandMem:
+		ctx.beginRegisterInstruction(jitRegisterMask(dst, right.base), jitRegisterMask(dst))
+		defer ctx.endRegisterInstruction()
+		amd64EmitIntBinaryMem(ctx, op, width, dst, right.base, right.disp)
+	case jitIntOperandImm:
+		if right.imm >= -1<<31 && right.imm <= 1<<31-1 {
+			ctx.beginRegisterInstruction(jitRegisterMask(dst), jitRegisterMask(dst))
+			defer ctx.endRegisterInstruction()
+			amd64EmitIntBinaryImm(ctx, op, width, dst, int32(right.imm))
+			return
+		}
+		if scratch == dst {
+			panic("jit: amd64 large integer immediate requires a distinct scratch register")
+		}
+		ctx.beginRegisterInstruction(jitRegisterMask(dst), jitRegisterMask(dst, scratch))
+		defer ctx.endRegisterInstruction()
+		jitArchEmitMovRegImm64(ctx, scratch, uint64(right.imm))
+		amd64EmitIntBinaryReg(ctx, op, width, dst, scratch)
+	default:
+		panic("jit: invalid amd64 integer operand")
+	}
+}
+
+func amd64EmitIntBinaryReg(ctx *JITContext, op JITIntOp, width uint8, dst, src Reg) {
+	if op == JITIntMul {
+		if width != 64 {
+			panic("jit: amd64 32-bit multiply selection is not implemented")
+		}
+		jitArchEmitMulInt64(ctx, dst, src)
+		return
+	}
+	var opcode byte
+	switch op {
+	case JITIntAdd:
+		opcode = 0x01
+	case JITIntSub:
+		opcode = 0x29
+	case JITIntAnd:
+		opcode = 0x21
+	case JITIntOr:
+		opcode = 0x09
+	case JITIntXor:
+		opcode = 0x31
+	default:
+		panic("jit: invalid amd64 integer operation")
+	}
+	ctx.emitAluRegRegWidth(opcode, dst, src, width == 64)
+}
+
+func amd64EmitIntBinaryMem(ctx *JITContext, op JITIntOp, width uint8, dst, base Reg, disp int32) {
+	if op == JITIntMul {
+		if width != 64 {
+			panic("jit: amd64 32-bit multiply selection is not implemented")
+		}
+		ctx.emitRegMemOp2(0x0F, 0xAF, dst, base, disp)
+		return
+	}
+	var opcode byte
+	switch op {
+	case JITIntAdd:
+		opcode = 0x03
+	case JITIntSub:
+		opcode = 0x2B
+	case JITIntAnd:
+		opcode = 0x23
+	case JITIntOr:
+		opcode = 0x0B
+	case JITIntXor:
+		opcode = 0x33
+	default:
+		panic("jit: invalid amd64 integer operation")
+	}
+	if width == 64 {
+		ctx.emitRegMemOp(opcode, dst, base, disp)
+	} else {
+		ctx.emitRegMemOp32(opcode, dst, base, disp)
+	}
+}
+
+func amd64EmitIntBinaryImm(ctx *JITContext, op JITIntOp, width uint8, dst Reg, imm int32) {
+	rex := byte(0x40)
+	if width == 64 {
+		rex |= 0x08
+	}
+	if dst >= 8 {
+		rex |= 0x01
+	}
+	dstEnc := byte(dst & 7)
+	if op == JITIntMul {
+		if dst >= 8 {
+			rex |= 0x04
+		}
+		opcode := byte(0x69)
+		if imm >= -128 && imm <= 127 {
+			opcode = 0x6B
+		}
+		ctx.emitBytes(rex, opcode, 0xC0|(dstEnc<<3)|dstEnc)
+		if opcode == 0x6B {
+			ctx.emitByte(byte(int8(imm)))
+		} else {
+			ctx.emitU32(uint32(imm))
+		}
+		return
+	}
+	var group byte
+	switch op {
+	case JITIntAdd:
+		group = 0
+	case JITIntOr:
+		group = 1
+	case JITIntAnd:
+		group = 4
+	case JITIntSub:
+		group = 5
+	case JITIntXor:
+		group = 6
+	default:
+		panic("jit: invalid amd64 immediate operation")
+	}
+	opcode := byte(0x81)
+	if imm >= -128 && imm <= 127 {
+		opcode = 0x83
+	}
+	ctx.emitBytes(rex, opcode, 0xC0|group<<3|dstEnc)
+	if opcode == 0x83 {
+		ctx.emitByte(byte(int8(imm)))
+	} else {
+		ctx.emitU32(uint32(imm))
+	}
+}
