@@ -1,0 +1,123 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+metadata:
+  version: "1.0"
+  description: "Manual full-size DataView scalar access-key benchmark"
+  isolated: true
+  ci: false
+
+setup:
+  - sql: "DROP TABLE IF EXISTS dataview_product"
+  - sql: "DROP TABLE IF EXISTS dataview_selling"
+  - sql: "DROP TABLE IF EXISTS dataview_conversion"
+  - sql: "DROP TABLE IF EXISTS dataview_import_user"
+  - sql: "DROP TABLE IF EXISTS dataview_customer"
+  - sql: "DROP TABLE IF EXISTS dataview_abo"
+  - sql: "CREATE TABLE dataview_product (id INT PRIMARY KEY, selling_id INT, abo_type INT) ENGINE=memory"
+  - sql: "CREATE TABLE dataview_selling (id INT PRIMARY KEY, old_key INT, sold_at INT, total INT, UNIQUE KEY dataview_selling_old (old_key)) ENGINE=memory"
+  - sql: "CREATE TABLE dataview_conversion (id INT PRIMARY KEY, selling_id INT, user_id INT, UNIQUE KEY dataview_conversion_selling (selling_id)) ENGINE=memory"
+  - sql: "CREATE TABLE dataview_import_user (id INT PRIMARY KEY, vu_id INT, customer_id INT, UNIQUE KEY dataview_import_vu (vu_id)) ENGINE=memory"
+  - sql: "CREATE TABLE dataview_customer (id INT PRIMARY KEY, description TEXT) ENGINE=memory"
+  - sql: "CREATE TABLE dataview_abo (id INT PRIMARY KEY, user_id INT, beneficiary INT, abo_type INT, KEY dataview_abo_user (abo_type, user_id), KEY dataview_abo_beneficiary (abo_type, beneficiary)) ENGINE=memory"
+  - scm: |
+      (begin
+        (insert (table "memcp-tests" "dataview_product") '("id" "selling_id" "abo_type")
+          (map (produceN 1880) (lambda (i) (list (+ i 1) (+ i 1) (+ (mod i 4) 1)))))
+        (insert (table "memcp-tests" "dataview_selling") '("id" "old_key" "sold_at" "total")
+          (map (produceN 1880) (lambda (i) (list (+ i 1) (+ i 1) (+ i 1) (* (+ i 1) 10)))))
+        (insert (table "memcp-tests" "dataview_conversion") '("id" "selling_id" "user_id")
+          (map (produceN 1880) (lambda (i) (list (+ i 1) (+ i 1) (+ i 1)))))
+        (insert (table "memcp-tests" "dataview_import_user") '("id" "vu_id" "customer_id")
+          (map (produceN 1880) (lambda (i) (list (+ i 1) (+ i 1) (+ i 1)))))
+        (insert (table "memcp-tests" "dataview_customer") '("id" "description")
+          (map (produceN 20000) (lambda (i) (list (+ i 1) (concat "Customer " i)))))
+        (insert (table "memcp-tests" "dataview_abo") '("id" "user_id" "beneficiary" "abo_type")
+          (map (produceN 20000) (lambda (i)
+            (list (+ i 1) (+ i 1) (+ i 1) (+ (mod i 4) 1)))))
+        (rebuild)
+        1880)
+
+test_cases:
+  - name: "Manual full-size DataView projected scalar access keys"
+    max_time: 5
+    timeout: 90
+    warmup: 0
+    timing_samples: 1
+    performance_rows: 1880
+    threshold_ms: 5000
+    sql: |
+      SELECT t.*
+      FROM (
+        SELECT product.id, product.selling_id, product.abo_type,
+          (SELECT selling.id FROM dataview_selling selling
+           WHERE selling.old_key = product.selling_id LIMIT 1) AS selling,
+          (SELECT imported.customer_id FROM dataview_import_user imported
+           WHERE imported.vu_id = (
+             SELECT conversion.user_id FROM dataview_conversion conversion
+             WHERE conversion.selling_id = (
+               SELECT selling.old_key FROM dataview_selling selling
+               WHERE selling.old_key = product.selling_id LIMIT 1
+             ) LIMIT 1
+           ) LIMIT 1) AS customer,
+          CASE WHEN product.abo_type IS NOT NULL THEN (
+            SELECT abo.id FROM dataview_abo abo
+            WHERE (abo.user_id = (
+              SELECT imported.customer_id FROM dataview_import_user imported
+              WHERE imported.vu_id = (
+                SELECT conversion.user_id FROM dataview_conversion conversion
+                WHERE conversion.selling_id = product.selling_id LIMIT 1
+              ) LIMIT 1
+            ) OR abo.beneficiary = (
+              SELECT imported.customer_id FROM dataview_import_user imported
+              WHERE imported.vu_id = (
+                SELECT conversion.user_id FROM dataview_conversion conversion
+                WHERE conversion.selling_id = product.selling_id LIMIT 1
+              ) LIMIT 1
+            )) AND abo.abo_type = product.abo_type LIMIT 1
+          ) ELSE NULL END AS abo,
+          ref_selling.total,
+          ref_customer.description
+        FROM dataview_product product
+        LEFT JOIN dataview_selling ref_selling ON ref_selling.id = (
+          SELECT selling.id FROM dataview_selling selling
+          WHERE selling.old_key = product.selling_id LIMIT 1
+        )
+        LEFT JOIN dataview_customer ref_customer ON ref_customer.id = (
+          SELECT imported.customer_id FROM dataview_import_user imported
+          WHERE imported.vu_id = (
+            SELECT conversion.user_id FROM dataview_conversion conversion
+            WHERE conversion.selling_id = product.selling_id LIMIT 1
+          ) LIMIT 1
+        )
+      ) t
+      LEFT JOIN dataview_selling sorter_selling ON sorter_selling.id = t.selling
+      LEFT JOIN dataview_abo sorter_abo ON sorter_abo.id = t.abo
+      LEFT JOIN dataview_customer sorter_customer ON sorter_customer.id = t.customer
+      ORDER BY (
+        SELECT selling.sold_at FROM dataview_selling selling
+        WHERE selling.old_key = t.selling_id LIMIT 1
+      ) DESC
+      LIMIT 72 OFFSET 0
+    expect:
+      rows: 72
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS dataview_product"
+  - sql: "DROP TABLE IF EXISTS dataview_selling"
+  - sql: "DROP TABLE IF EXISTS dataview_conversion"
+  - sql: "DROP TABLE IF EXISTS dataview_import_user"
+  - sql: "DROP TABLE IF EXISTS dataview_customer"
+  - sql: "DROP TABLE IF EXISTS dataview_abo"

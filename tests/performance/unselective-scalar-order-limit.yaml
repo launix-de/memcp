@@ -69,17 +69,17 @@ setup:
               (define id (+ (floor (/ i 2)) 1))
               (list bucket id (+ (* id 10) (if (equal? bucket 2) 5 0)))))))
         (insert (table "memcp-tests" "usol_dataview_product") '("id" "selling_id" "abo_type")
-          (map (produceN 1880) (lambda (i) (list (+ i 1) (+ i 1) (+ (mod i 4) 1)))))
+          (map (produceN 256) (lambda (i) (list (+ i 1) (+ i 1) (+ (mod i 4) 1)))))
         (insert (table "memcp-tests" "usol_dataview_selling") '("id" "old_key" "sold_at" "total")
-          (map (produceN 1880) (lambda (i) (list (+ i 1) (+ i 1) (+ i 1) (* (+ i 1) 10)))))
+          (map (produceN 256) (lambda (i) (list (+ i 1) (+ i 1) (+ i 1) (* (+ i 1) 10)))))
         (insert (table "memcp-tests" "usol_dataview_conversion") '("id" "selling_id" "user_id")
-          (map (produceN 1880) (lambda (i) (list (+ i 1) (+ i 1) (+ i 1)))))
+          (map (produceN 256) (lambda (i) (list (+ i 1) (+ i 1) (+ i 1)))))
         (insert (table "memcp-tests" "usol_dataview_import_user") '("id" "vu_id" "customer_id")
-          (map (produceN 1880) (lambda (i) (list (+ i 1) (+ i 1) (+ i 1)))))
+          (map (produceN 256) (lambda (i) (list (+ i 1) (+ i 1) (+ i 1)))))
         (insert (table "memcp-tests" "usol_dataview_customer") '("id" "description")
-          (map (produceN 20000) (lambda (i) (list (+ i 1) (concat "Customer " i)))))
+          (map (produceN 4096) (lambda (i) (list (+ i 1) (concat "Customer " i)))))
         (insert (table "memcp-tests" "usol_dataview_abo") '("id" "user_id" "beneficiary" "abo_type")
-          (map (produceN 20000) (lambda (i)
+          (map (produceN 4096) (lambda (i)
             (list (+ i 1) (+ i 1) (+ i 1) (+ (mod i 4) 1)))))
         (rebuild)
         10000)
@@ -357,6 +357,20 @@ test_cases:
     expect:
       rows: 72
 
+  - name: "Volatile equality keys stay inside the scan callback"
+    sql: |
+      EXPLAIN
+      SELECT product.id, (
+        SELECT selling.id FROM usol_dataview_selling selling
+        WHERE selling.id = FLOOR(RAND() * 256) + 1 LIMIT 1
+      ) AS random_selling
+      FROM usol_dataview_product product
+      LIMIT 1
+    expect:
+      rows: 1
+      result_not_contains:
+        - "__scalar_access_key_"
+
   - name: "Projected nested foreign key keeps OR lookup bounded"
     sql: |
       SELECT product.id,
@@ -390,7 +404,7 @@ test_cases:
     timeout: 90
     warmup: 0
     timing_samples: 1
-    performance_rows: 1880
+    performance_rows: 256
     threshold_ms: 5000
     sql: |
       SELECT t.*

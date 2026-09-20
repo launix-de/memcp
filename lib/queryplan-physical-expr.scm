@@ -336,6 +336,39 @@ an unbound symbol in the callback when costing selects the probe alternative. */
 				(symbol (concat "__scalar_access_key_" (count (car state))))))
 				(set_assoc (cadr state) key true))))))
 
+(define scalar_access_probe_expr_contains_independent? (lambda (src expr)
+	(match expr
+		((symbol scalar_first_probe) stage _requested_col) (begin
+			(define lookup_keys (qassoc_get (gs_facts stage) (quote lookup-keys) '()))
+			(not (reduce lookup_keys (lambda (found key)
+				(or found (not (empty_list? (extract_columns_for_alias src key))))) false)))
+		((quote scalar_first_probe) stage requested_col)
+		(scalar_access_probe_expr_contains_independent? src
+			(list (symbol "scalar_first_probe") stage requested_col))
+		((symbol scalar_first_probe) stage requested_col _dependencies)
+		(scalar_access_probe_expr_contains_independent? src
+			(list (symbol "scalar_first_probe") stage requested_col))
+		((quote scalar_first_probe) stage requested_col _dependencies)
+		(scalar_access_probe_expr_contains_independent? src
+			(list (symbol "scalar_first_probe") stage requested_col))
+		(cons _head tail) (reduce tail (lambda (found item)
+			(or found (scalar_access_probe_expr_contains_independent? src item))) false)
+		_ false)))
+
+(define scalar_access_probe_expr_volatile? (lambda (expr)
+	(match expr
+		(cons head tail) (or (contains?
+			(list (symbol "sql_rand") (symbol "randomBytes") (symbol "uuid")) head)
+			(reduce tail (lambda (found item)
+				(or found (scalar_access_probe_expr_volatile? item))) false))
+		_ false)))
+
+(define scalar_access_probe_entry_add_if_independent (lambda (src expr state)
+	(if (and (scalar_access_probe_expr_contains_independent? src expr)
+		(not (scalar_access_probe_expr_volatile? expr)))
+		(scalar_access_probe_entry_add expr state)
+		state)))
+
 (define scalar_access_probe_entries_acc (lambda (src expr state)
 	(match expr
 		((symbol equal??) left right) (begin
@@ -345,28 +378,14 @@ an unbound symbol in the callback when costing selects the probe alternative. */
 				(and (nil? right_col) (empty_list? (extract_columns_for_alias src right)))) right
 				(if (and (not (nil? right_col))
 					(and (nil? left_col) (empty_list? (extract_columns_for_alias src left)))) left nil)))
-			(if (list? candidate)
-				(scalar_access_probe_entry_add candidate state)
-				(reduce (list left right) (lambda (acc item)
-					(scalar_access_probe_entries_acc src item acc)) state)))
+			(if (nil? candidate) state
+				(scalar_access_probe_entry_add_if_independent src candidate state)))
 		((quote equal??) left right)
 		(scalar_access_probe_entries_acc src (list (symbol "equal??") left right) state)
-		((symbol scalar_first_probe) stage requested_col) (begin
-			(define lookup_keys (qassoc_get (gs_facts stage) (quote lookup-keys) '()))
-			(define local (reduce lookup_keys (lambda (found key)
-				(or found (not (empty_list? (extract_columns_for_alias src key))))) false))
-			(if local state (scalar_access_probe_entry_add expr state)))
-		((quote scalar_first_probe) stage requested_col)
-		(scalar_access_probe_entries_acc src
-			(list (symbol "scalar_first_probe") stage requested_col) state)
-		((symbol scalar_first_probe) stage requested_col _dependencies)
-		(scalar_access_probe_entries_acc src
-			(list (symbol "scalar_first_probe") stage requested_col) state)
-		((quote scalar_first_probe) stage requested_col _dependencies)
-		(scalar_access_probe_entries_acc src
-			(list (symbol "scalar_first_probe") stage requested_col) state)
-		(cons _head tail) (reduce tail (lambda (acc item)
-			(scalar_access_probe_entries_acc src item acc)) state)
+		(cons head tail) (if (or (equal? head (symbol "if"))
+			(equal? head (quote if))) state
+			(reduce tail (lambda (acc item)
+				(scalar_access_probe_entries_acc src item acc)) state))
 		_ state)))
 
 (define scalar_access_probe_entries (lambda (src expr)
