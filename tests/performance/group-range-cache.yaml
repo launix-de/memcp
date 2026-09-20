@@ -1,0 +1,64 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+
+metadata:
+  version: "1.0"
+  description: "Cold construction plus repeated overlapping group range-cache probes"
+  isolated: true
+  ci: false
+  perf_ci: true
+  performance_rows: 500000
+
+setup:
+  - sql: "DROP TABLE IF EXISTS grc_perf_windows"
+  - sql: "DROP TABLE IF EXISTS grc_perf_events"
+  - sql: "CREATE TABLE grc_perf_events (id INT PRIMARY KEY, tenant_id INT, happened_at INT, amount INT) ENGINE=memory"
+  - sql: "CREATE TABLE grc_perf_windows (id INT PRIMARY KEY, tenant_id INT, range_from INT, range_to INT) ENGINE=memory"
+  - scm: |
+      (begin
+        (insert (table "memcp-tests" "grc_perf_events")
+          '("id" "tenant_id" "happened_at" "amount")
+          (map (produceN {rows}) (lambda (i)
+            (list (+ i 1) 1
+              (mod (* i 7919) {rows}) (+ 1 (mod i 17))))))
+        (insert (table "memcp-tests" "grc_perf_windows")
+          '("id" "tenant_id" "range_from" "range_to")
+          (merge (map (produceN 45) (lambda (from_index)
+            (map (produceN (- 45 from_index)) (lambda (offset)
+              (list
+                (+ 1 (+ (* from_index 45)
+                  (- offset (/ (* from_index (- from_index 1)) 2))))
+                1
+                (* from_index 10000)
+                (* (+ from_index offset 1) 10000))))))))
+        (rebuild)
+        true)
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS grc_perf_windows"
+  - sql: "DROP TABLE IF EXISTS grc_perf_events"
+
+test_cases:
+  - name: "cold build plus 75 warm overlapping range KPI requests"
+    # The total deliberately includes cache construction. Seventy-five further
+    # executions reuse the same overlapping KPI interval without hiding setup.
+    timing_group: group-range-cache-total
+    timing_aggregation: total
+    warmup: 0
+    timing_samples: 76
+    threshold_ms: 5000
+    timeout: 30
+    sql: |
+      SELECT w.id,
+        (SELECT SUM(SQRT(e.amount * e.amount + e.id)) FROM grc_perf_events e
+          WHERE e.tenant_id = w.tenant_id
+            AND e.happened_at >= w.range_from
+            AND e.happened_at < w.range_to) AS weighted_amount_sum
+      FROM grc_perf_windows w
+      ORDER BY w.id
+    expect:
+      rows: 1035

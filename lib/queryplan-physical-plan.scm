@@ -234,19 +234,23 @@ context gates because bare EXISTS also has a separate membership lowerer. */
 		(begin
 			(define stage (stage_by_id stages (stage_output_relation_id (source_relation src))))
 			(define probe_sources (filter sources (lambda (candidate) (not (equal? (source_alias candidate) (source_alias src))))))
-			(and
-				(not (scalar_probe_input_overlaps_sources? stage probe_sources))
+			(if (not (empty_list? (range_stage_domains stage)))
 				(and
-					(scalar_aggregate_probe_stage_safe? stage)
+					(not (scalar_probe_input_overlaps_sources? stage probe_sources))
+					(stage_lookup_keys_resolve_in_sources? stage probe_sources default_alias))
+				(and
+					(not (scalar_probe_input_overlaps_sources? stage probe_sources))
 					(and
-						(if (empty_list? (qassoc_get (gs_facts stage) (quote lookup-keys) '()))
-							(constant_scalar_aggregate_probe_sources? stages sources)
-							(or
-								(stage_has_residual_outer_refs? stage)
+						(scalar_aggregate_probe_stage_safe? stage)
+						(and
+							(if (empty_list? (qassoc_get (gs_facts stage) (quote lookup-keys) '()))
+								(constant_scalar_aggregate_probe_sources? stages sources)
 								(or
-									(stage_direct_probe_cost_preferred_for_limit? stage limit_value planning_session)
-									(probe_context_small_enough? probe_sources))))
-						(stage_lookup_keys_resolve_in_sources? stage probe_sources default_alias))))))))
+									(stage_has_residual_outer_refs? stage)
+									(or
+										(stage_direct_probe_cost_preferred_for_limit? stage limit_value planning_session)
+										(probe_context_small_enough? probe_sources))))
+							(stage_lookup_keys_resolve_in_sources? stage probe_sources default_alias)))))))))
 
 (define scalar_cardinality_probe_output_source_for_block? (lambda (stages sources default_alias limit_value driver_condition src planning_session)
 	(if (not (scalar_cardinality_probe_stage_output_source? stages src))
@@ -816,9 +820,18 @@ for that scan. The same prepared table is reused by every guarded variant. */
 		(define prelimit_aliases (map prelimit_sources source_alias))
 		(define dml_block (qassoc_get (qb_facts block) (quote dml) false))
 		(define planning_session (planner_context_session (qb_facts block)))
+		(define range_probe_sources (filter sources (lambda (src)
+			(and (stage_output_relation? (source_relation src))
+				(begin
+					(define stage (stage_by_id stages
+						(stage_output_relation_id (source_relation src))))
+					(and (scalar_aggregate_probe_stage? stage)
+						(not (empty_list? (range_stage_domains stage)))))))))
 		(define eligible_probe_sources (lambda (limit_value)
-			(filter (probe_output_sources_for_block
-				stages sources default_alias limit_value (qb_where block) consumers planning_session)
+			(filter (merge_unique (list
+				(probe_output_sources_for_block
+					stages sources default_alias limit_value (qb_where block) consumers planning_session)
+				range_probe_sources))
 				(lambda (src)
 					(or (not dml_block)
 						(not (scalar_first_stage_output_source? stages src)))))))
@@ -1073,6 +1086,183 @@ from silently overriding the physical planner. */
 (define query_block_with_prepared_sources_using (lambda (stages block)
 	(query_block_with_prepared_sources_using_graph
 		stages (stage_dependency_graph stages) block)))
+
+(define range_cache_prepare_exprs_for_block (lambda (stages block)
+	(begin
+		(define stage_list (lowering_catalog_stages stages))
+		(define sources (filter (qb_sources block) source_is_base_table?))
+		(define default_alias (qassoc_get (qb_facts block) (quote default_alias)
+			(if (empty_list? sources) nil (source_alias (car sources)))))
+		(map (filter stage_list (lambda (stage)
+			(and (scalar_aggregate_probe_stage? stage)
+				(and (equal? (count (range_stage_domains stage)) 1)
+					(and (single_source? sources)
+						(stage_lookup_keys_resolve_in_sources? stage sources default_alias))))))
+			(lambda (stage)
+				(lower_range_cache_prepare_all_expr sources default_alias stage
+					(physical_query_tx_symbol)))))))
+
+/* A row-local range aggregate is a pure function of the driver's point keys
+and boundaries. Store that function as a canonical temporary column on the
+driver: the storage dependency graph then invalidates it after base DML or a
+cache split, while repeated KPI queries read one column instead of invoking a
+cache scan for every output row. */
+(define range_lookup_probe_entry_add (lambda (state stage requested_col)
+	(begin
+		(define key (concat (gs_id stage) ":" requested_col))
+		(if (or (empty_list? (range_stage_domains stage))
+			(has_assoc? (nth state 1) key))
+			state
+			(list (cons (list stage requested_col) (nth state 0))
+				(set_assoc (nth state 1) key true))))))
+
+(define collect_range_lookup_probe_entries_acc (lambda (expr state)
+	(match expr
+		((symbol scalar_first_probe) stage requested_col)
+		(range_lookup_probe_entry_add state stage requested_col)
+		((quote scalar_first_probe) stage requested_col)
+		(range_lookup_probe_entry_add state stage requested_col)
+		((symbol scalar_first_probe) stage requested_col _dependencies)
+		(range_lookup_probe_entry_add state stage requested_col)
+		((quote scalar_first_probe) stage requested_col _dependencies)
+		(range_lookup_probe_entry_add state stage requested_col)
+		((symbol scalar_aggregate_probe) stage requested_col)
+		(range_lookup_probe_entry_add state stage requested_col)
+		((quote scalar_aggregate_probe) stage requested_col)
+		(range_lookup_probe_entry_add state stage requested_col)
+		(cons _head tail) (reduce tail (lambda (acc item)
+			(collect_range_lookup_probe_entries_acc item acc)) state)
+		_ state)))
+
+(define query_block_range_lookup_probe_entries (lambda (block)
+	(nth (collect_range_lookup_probe_entries_acc
+		(list (qb_sources block) (qb_fields block) (qb_where block)
+			(qb_group block) (qb_having block) (qb_order block) (qb_hidden block))
+		(list '() '())) 0)))
+
+(define range_lookup_cache_candidate (lambda (block entry)
+	(match entry
+		'(stage requested_col) (begin
+			(define sources (filter (qb_sources block) source_is_base_table?))
+			(define domains (range_stage_domains stage))
+			(define ag (scalar_first_probe_aggregate stage requested_col))
+			(if (or (not (single_source? sources))
+				(or (not (equal? (count domains) 1)) (nil? ag)))
+				nil
+				(begin
+					(define target (car sources))
+					(define lookup_keys (qassoc_get (gs_facts stage) (quote lookup-keys) '()))
+					(define domain (car domains))
+					(define input_exprs (merge (list lookup_keys
+						(if (range_domain_unbounded_from? domain) '()
+							(list (range_domain_from domain)))
+						(if (range_domain_unbounded_to? domain) '()
+							(list (range_domain_to domain))))))
+					(define raw_input_cols (map input_exprs (lambda (expr)
+						(direct_column_name_for_alias target expr))))
+					(define input_cols (merge_unique (list raw_input_cols)))
+					(if (contains? raw_input_cols nil)
+						nil
+						(begin
+							(define default_alias (qassoc_get (qb_facts block)
+								(quote default_alias) (source_alias target)))
+							(define cache_name (range_group_cache_name stage))
+							(define point_values (map lookup_keys (lambda (expr)
+								(lower_column_expr_for_join sources default_alias expr))))
+							(define from_kind (range_domain_from_kind domain))
+							(define to_kind (range_domain_to_kind domain))
+							(define from_value (if (range_domain_unbounded_from? domain) nil
+								(lower_column_expr_for_join sources default_alias
+									(range_domain_from domain))))
+							(define to_value (if (range_domain_unbounded_to? domain) nil
+								(lower_column_expr_for_join sources default_alias
+									(range_domain_to domain))))
+							(define value_expr (list (quote if)
+								(list (quote or)
+									(if (range_domain_unbounded_from? domain) false
+										(list (quote nil?) from_value))
+									(list (quote or)
+										(if (range_domain_unbounded_to? domain) false
+											(list (quote nil?) to_value))
+										(list (quote not) (range_cache_cut_less_expr
+											from_kind from_value to_kind to_value))))
+								(aggregate_finalize_expr ag (nth ag 2))
+								(range_cache_merge_expr stage cache_name ag point_values
+									from_kind from_value to_kind to_value nil)))
+							(define column_name (concat ".range-lookup:"
+								(stable_structural_hash (list cache_name requested_col input_cols) true)))
+							(define column_init_key (list (quote concat)
+								(concat "__range_lookup_init:" (source_schema target) ":"
+									(source_relation target) ":" column_name ":")
+								(list (quote table_planner_statistics_token)
+									(source_table_expr target) false)))
+							(list target stage requested_col column_name
+								(list (quote !begin)
+									(range_cache_state_init_expr stage ag)
+									(range_cache_once_expr cache_name column_init_key
+										(list (quote createcolumn) (source_table_expr target)
+											column_name "any" (quoted_runtime_list '())
+											(quoted_runtime_list '("temp" true))
+											(cons (quote list) input_cols)
+											(list (quote lambda)
+												(map input_cols (lambda (col)
+													(symbol (concat (source_alias target) "." col))))
+												value_expr))))))))))
+		_ nil)))
+
+(define range_lookup_cache_candidates (lambda (block)
+	(filter (map (query_block_range_lookup_probe_entries block) (lambda (entry)
+		(range_lookup_cache_candidate block entry))) (lambda (candidate)
+			(not (nil? candidate))))))
+
+(define replace_range_lookup_with_cache (lambda (candidates expr)
+	(match expr
+		((symbol scalar_first_probe) stage requested_col) (begin
+			(define candidate (reduce candidates (lambda (found item)
+				(if (not (nil? found)) found
+					(if (and (equal? (gs_id stage) (gs_id (nth item 1)))
+						(equal? requested_col (nth item 2))) item nil))) nil))
+			(if (nil? candidate) expr
+				(list (quote get_column) (source_alias (nth candidate 0)) false
+					(nth candidate 3) false)))
+		((quote scalar_first_probe) stage requested_col)
+		(replace_range_lookup_with_cache candidates
+			(list (symbol "scalar_first_probe") stage requested_col))
+		((symbol scalar_first_probe) stage requested_col _dependencies)
+		(replace_range_lookup_with_cache candidates
+			(list (symbol "scalar_first_probe") stage requested_col))
+		((quote scalar_first_probe) stage requested_col _dependencies)
+		(replace_range_lookup_with_cache candidates
+			(list (symbol "scalar_first_probe") stage requested_col))
+		((symbol scalar_aggregate_probe) stage requested_col)
+		(replace_range_lookup_with_cache candidates
+			(list (symbol "scalar_first_probe") stage requested_col))
+		((quote scalar_aggregate_probe) stage requested_col)
+		(replace_range_lookup_with_cache candidates
+			(list (symbol "scalar_first_probe") stage requested_col))
+		(cons head tail) (cons head (map tail (lambda (item)
+			(replace_range_lookup_with_cache candidates item))))
+		_ expr)))
+
+(define query_block_with_range_lookup_caches (lambda (block candidates)
+	(if (empty_list? candidates) block
+		(make_query_block
+			(qb_schema block)
+			(map (qb_sources block) (lambda (src)
+				(list (source_alias src) (source_schema src) (source_relation src)
+					(source_outer? src)
+					(replace_range_lookup_with_cache candidates (source_join_expr src)))))
+			(replace_range_lookup_with_cache candidates (qb_fields block))
+			(replace_range_lookup_with_cache candidates (qb_where block))
+			(replace_range_lookup_with_cache candidates (qb_group block))
+			(replace_range_lookup_with_cache candidates (qb_having block))
+			(map (qb_order block) (lambda (item)
+				(match item '(expr dir)
+					(list (replace_range_lookup_with_cache candidates expr) dir)
+					_ item)))
+			(qb_limit block) (qb_offset block)
+			(replace_range_lookup_with_cache candidates (qb_hidden block))
+			(qb_stages block) (qb_facts block)))))
 
 (define group_stage_final_block (lambda (stage extra_sources)
 	(begin
@@ -3076,14 +3266,17 @@ tools/costgen; this lowering adds no hand-tuned crossover. */
 					(equal? requested_col (nth candidate 2))))
 				_ true))))))
 
-(define prepare_simple_query_block_physical_core_chosen (lambda (block)
+(define prepare_simple_query_block_physical_core_chosen (lambda (raw_block)
 	(begin
-		(define raw_stage_lookup (query_block_stage_lookup block))
+		(define raw_stage_lookup (query_block_stage_lookup raw_block))
 		(define invariant_probe_entries
 			(query_invariant_probe_entries_for_stages raw_stage_lookup))
 		(define stage_lookup
 			(stage_lookup_with_query_invariant_probe_bindings
 				raw_stage_lookup invariant_probe_entries))
+		(define range_cache_prepares
+			(range_cache_prepare_exprs_for_block stage_lookup raw_block))
+		(define block raw_block)
 		(define invariant_probe_bindings
 			(query_invariant_probe_bindings invariant_probe_entries))
 		(if (empty_list? (qb_stages block))
@@ -3104,6 +3297,7 @@ tools/costgen; this lowering adds no hand-tuned crossover. */
 				(list
 					(merge (list
 						invariant_probe_bindings
+						range_cache_prepares
 						probe_recipe_prepares
 						probe_recipe_bindings))
 					recipe_block
@@ -3122,10 +3316,15 @@ tools/costgen; this lowering adds no hand-tuned crossover. */
 				(define raw_prepared_block (if (single_source? (qb_sources cache_input_block))
 					(query_block_without_stages_after_prepare_using stage_lookup cache_input_block)
 					(query_block_with_prepared_sources_using stage_lookup cache_input_block)))
+				(define range_lookup_caches (range_lookup_cache_candidates raw_prepared_block))
+				(define range_lookup_prepares (map range_lookup_caches (lambda (candidate)
+					(nth candidate 4))))
+				(define range_cached_block
+					(query_block_with_range_lookup_caches raw_prepared_block range_lookup_caches))
 				(define raw_probe_recipe_entries
-					(query_block_scalar_query_probe_recipe_entries raw_prepared_block))
+					(query_block_scalar_query_probe_recipe_entries range_cached_block))
 				(define carrier_block
-					(query_block_with_scalar_order_lookup_cache raw_prepared_block scalar_order_cache))
+					(query_block_with_scalar_order_lookup_cache range_cached_block scalar_order_cache))
 				(define carrier_probe_recipe_entries
 					(scalar_probe_entries_without_lookup_cache raw_probe_recipe_entries scalar_order_cache))
 				(define probe_recipe_entries
@@ -3190,6 +3389,8 @@ tools/costgen; this lowering adds no hand-tuned crossover. */
 				(list
 					(merge (list
 						invariant_probe_bindings
+						range_cache_prepares
+						range_lookup_prepares
 						(if (empty_list? direct_group_join_stages) '()
 							(list (list (quote define) (quote __direct_group_usage)
 								(list (quote newsession)))))
@@ -6947,28 +7148,33 @@ only the structural work counts are specific to this operator. */
 			(aggregate_payload_merge_expr ags 0)))
 		(define neutral_payload
 			(runtime_cons_list_expr (map ags (lambda (ag) (nth ag 2)))))
-		(if (single_source? ags)
-			(runtime_cons_list_expr (list
+		(if (not (empty_list? (range_stage_domains stage)))
+			(runtime_cons_list_expr (map ags (lambda (ag)
 				(lower_scalar_aggregate_probe_expr all_sources default_alias stage
-					(aggregate_col_name_using src (car ags))
-					(physical_query_tx_at_depth tx_depth))))
-			(compile_scan_plan (quote scan)
-				(physical_query_tx_at_depth tx_depth)
-				(source_table_expr src)
-				(cons (quote list) filtercols)
-				(list (quote lambda)
-					(map filtercols (lambda (col)
-						(symbol (concat (source_alias src) "." col))))
-					(cons (quote and)
-						(cons (lower_column_expr_for_alias src condition) key_terms)))
-				(cons (quote list) value_cols)
-				(scan_mapreduce_expr
-					(map value_cols (lambda (col)
-						(symbol (concat (source_alias src) "." col))))
-					merge_payload payload_expr)
-				neutral_payload
-				merge_payload
-				false)))))
+					(aggregate_col_name_using src ag)
+					(physical_query_tx_at_depth tx_depth)))))
+			(if (single_source? ags)
+				(runtime_cons_list_expr (list
+					(lower_scalar_aggregate_probe_expr all_sources default_alias stage
+						(aggregate_col_name_using src (car ags))
+						(physical_query_tx_at_depth tx_depth))))
+				(compile_scan_plan (quote scan)
+					(physical_query_tx_at_depth tx_depth)
+					(source_table_expr src)
+					(cons (quote list) filtercols)
+					(list (quote lambda)
+						(map filtercols (lambda (col)
+							(symbol (concat (source_alias src) "." col))))
+						(cons (quote and)
+							(cons (lower_column_expr_for_alias src condition) key_terms)))
+					(cons (quote list) value_cols)
+					(scan_mapreduce_expr
+						(map value_cols (lambda (col)
+							(symbol (concat (source_alias src) "." col))))
+						merge_payload payload_expr)
+					neutral_payload
+					merge_payload
+					false))))))
 
 (define direct_group_join_cache_scan_expr (lambda (all_sources default_alias stage table_expr tx_depth)
 	(begin

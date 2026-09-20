@@ -2073,6 +2073,537 @@ would still have to project that value over the segment. */
 			memoized_lowered)))
 )
 
+(define range_group_cache_mutexes (newcachemap))
+(define range_group_cache_preparations (newcachemap))
+(define range_group_cache_initializations (newcachemap))
+
+(define range_group_cache_mutex (lambda (name)
+	(range_group_cache_mutexes "get_or_compute" name (lambda () (mutex)))))
+
+/* Named runtime boundaries keep EXPLAIN and profiles legible while the
+generated recipes remain ordinary Scheme. */
+(define range_group_cache (lambda (thunk) (thunk)))
+(define range_cache_prepare (lambda (cache_mutex thunk) (cache_mutex thunk)))
+(define range_cache_merge (lambda (thunk) (thunk)))
+
+(define range_cache_state_init_expr (lambda (stage ag)
+	(begin
+		(define cache_name (range_group_cache_name stage))
+		(define init_key (list (quote concat)
+			(concat "__range_group_cache_init:" cache_name ":"
+				(range_group_state_col_name stage ag) ":")
+			(list (quote table_planner_statistics_token)
+				(source_table_expr (gs_input stage)) false)))
+		(range_cache_once_expr cache_name init_key
+			(list (quote !begin)
+				(range_cache_create_columns_expr stage cache_name)
+				(build_range_group_state_column stage cache_name ag))))))
+
+(define range_cache_once_expr (lambda (cache_name key body)
+	(list (quote if) (list (quote range_group_cache_initializations) key)
+		true
+		(list (quote range_cache_prepare)
+			(list (quote range_group_cache_mutex) cache_name)
+			(list (quote lambda) '()
+				(list (quote if) (list (quote range_group_cache_initializations) key)
+					true
+					(list (quote !begin) body
+						(list (quote range_group_cache_initializations) key true)
+						true)))))))
+
+(define range_stage_base_source (lambda (stage)
+	(begin
+		(define input (gs_input stage))
+		(if (source_is_base_table? input)
+			input
+			(if (and (query_block? input)
+				(and (single_source? (qb_sources input))
+					(source_is_base_table? (car (qb_sources input)))))
+				(car (qb_sources input))
+				nil)))))
+
+(define range_stage_raw_condition (lambda (stage)
+	(begin
+		(define input (gs_input stage))
+		(define stage_condition (coalesceNil
+			(qassoc_get (gs_facts stage) (quote condition) true) true))
+		(if (query_block? input)
+			(combine_where_terms (list
+				stage_condition
+				(coalesceNil (qb_where input) true)
+				(if (single_source? (qb_sources input))
+					(coalesceNil (source_join_expr (car (qb_sources input))) true)
+					true)) true)
+			stage_condition))))
+
+(define range_stage_domains (lambda (stage)
+	(qassoc_get (gs_facts stage) (quote range-domains) '())))
+
+(define range_stage_invariant_condition (lambda (stage)
+	(qassoc_get (gs_facts stage) (quote range-invariant-condition) true)))
+
+(define range_stage_for_base_cache (lambda (stage)
+	(begin
+		(define src (range_stage_base_source stage))
+		(define facts (qassoc_set
+			(qassoc_set
+				(qassoc_set (gs_facts stage) (quote condition)
+					(range_stage_raw_condition stage))
+				(quote range-domains) (range_stage_domains stage))
+			(quote range-invariant-condition) (range_stage_invariant_condition stage)))
+		(make_group_stage
+			(gs_id stage) src (gs_domain stage) (gs_keys stage)
+			(gs_aggregates stage) (gs_having stage) (gs_output stage)
+			(gs_order stage) (gs_limit stage) (gs_offset stage) facts))))
+
+(define range_domain_inner (lambda (domain) (nth domain 1)))
+(define range_domain_from (lambda (domain) (nth domain 2)))
+(define range_domain_from_kind (lambda (domain) (nth domain 3)))
+(define range_domain_to (lambda (domain) (nth domain 4)))
+(define range_domain_to_kind (lambda (domain) (nth domain 5)))
+
+(define range_domain_unbounded_from? (lambda (domain)
+	(equal? (range_domain_from_kind domain) -1)))
+
+(define range_domain_unbounded_to? (lambda (domain)
+	(equal? (range_domain_to_kind domain) 2)))
+
+(define range_cache_boundary_names (lambda ()
+	(list "range_from_kind" "range_from" "range_to_kind" "range_to")))
+
+(define range_group_cache_name (lambda (stage)
+	(group_stage_cache_relation stage)))
+
+(define range_group_state_col_name (lambda (stage ag)
+	(concat "agg_range_state_" (stable_structural_hash (list
+		"canonical-range-group-state-v1"
+		(aggregate_col_name_using (gs_input stage) ag)) true))))
+
+(define range_cache_bound_equal_expr (lambda (left right)
+	(list (quote if) (list (quote nil?) right)
+		(list (quote nil?) left)
+		(list (quote equal??) left right))))
+
+(define range_cache_cut_equal_expr (lambda (left_kind left_value right_kind right_value)
+	(list (quote and) (list (quote equal?) left_kind right_kind)
+		(list (quote if)
+			(list (quote or) (list (quote equal?) left_kind -1)
+				(list (quote equal?) left_kind 2))
+			true
+			(range_cache_bound_equal_expr left_value right_value)))))
+
+(define range_cache_cut_less_expr (lambda (left_kind left_value right_kind right_value)
+	(list (quote if) (list (quote equal?) left_kind -1)
+		(list (quote not) (list (quote equal?) right_kind -1))
+		(list (quote if) (list (quote equal?) right_kind 2)
+			(list (quote not) (list (quote equal?) left_kind 2))
+			(list (quote if) (list (quote equal?) left_kind 2)
+				false
+				(list (quote or) (list (quote <) left_value right_value)
+					(list (quote and) (list (quote equal??) left_value right_value)
+						(list (quote <) left_kind right_kind))))))))
+
+(define range_cache_cut_leq_expr (lambda (left_kind left_value right_kind right_value)
+	(list (quote or)
+		(range_cache_cut_equal_expr left_kind left_value right_kind right_value)
+		(range_cache_cut_less_expr left_kind left_value right_kind right_value))))
+
+(define range_cache_value_inside_expr (lambda (value from_kind from_value to_kind to_value)
+	(list (quote and)
+		(list (quote if) (list (quote equal?) from_kind -1) true
+			(list (quote if) (list (quote equal?) from_kind 0)
+				(list (quote <=) from_value value)
+				(list (quote <) from_value value)))
+		(list (quote if) (list (quote equal?) to_kind 2) true
+			(list (quote if) (list (quote equal?) to_kind 0)
+				(list (quote <) value to_value)
+				(list (quote <=) value to_value))))))
+
+(define range_cache_point_terms (lambda (key_symbols point_values)
+	(map (produceN (count key_symbols)) (lambda (i)
+		(list (quote equal??) (nth key_symbols i) (nth point_values i))))))
+
+(define range_cache_create_columns_expr (lambda (stage cache_name)
+	(begin
+		(define src (gs_input stage))
+		(define key_names (group_key_cols (gs_keys stage)))
+		(define key_columns (map (zip key_names (gs_keys stage)) (lambda (binding)
+			(list (quote list) "column" (car binding) "any" (quoted_runtime_list '())
+				(list (quote list) "collate"
+					(physical_column_collation_expr src (cadr binding)))))))
+		(define range_columns (list
+			(list (quote list) "column" "range_from_kind" "int"
+				(quoted_runtime_list '()) (quoted_runtime_list '()))
+			(list (quote list) "column" "range_from" "any" (quoted_runtime_list '())
+				(list (quote list) "collate"
+					(physical_column_collation_expr src
+						(range_domain_inner (car (range_stage_domains stage))))))
+			(list (quote list) "column" "range_to_kind" "int"
+				(quoted_runtime_list '()) (quoted_runtime_list '()))
+			(list (quote list) "column" "range_to" "any" (quoted_runtime_list '())
+				(list (quote list) "collate"
+					(physical_column_collation_expr src
+						(range_domain_inner (car (range_stage_domains stage))))))))
+		(define all_names (merge (list key_names (range_cache_boundary_names))))
+		(list (quote createtable)
+			(source_schema src)
+			cache_name
+			(cons (quote list) (cons
+				(cons (quote list) (cons "unique" (cons "group" (list (cons (quote list) all_names)))))
+				(merge (list key_columns range_columns))))
+			(quoted_runtime_list '("engine" "cache"))
+			true
+			(quote tx)))))
+
+(define build_range_group_state_column (lambda (stage cache_name ag)
+	(begin
+		(define src (gs_input stage))
+		(define schema (source_schema src))
+		(define key_names (group_key_cols (gs_keys stage)))
+		(define range_domain (car (range_stage_domains stage)))
+		(define range_expr (range_domain_inner range_domain))
+		(define invariant_condition (range_stage_invariant_condition stage))
+		(define key_cols (merge_unique (map (gs_keys stage) (lambda (expr)
+			(extract_columns_for_alias src expr)))))
+		(define condition_cols (extract_columns_for_alias src invariant_condition))
+		(define range_cols (extract_columns_for_alias src range_expr))
+		(define filtercols (merge_unique (list key_cols condition_cols range_cols)))
+		(define agg_expr (nth ag 0))
+		(define valuecols (extract_columns_for_alias src agg_expr))
+		(define key_terms (map (produceN (count key_names)) (lambda (i)
+			(list (quote equal??)
+				(lower_column_expr_for_alias src (nth (gs_keys stage) i))
+				(list (quote outer) 1 (symbol (nth key_names i)))))))
+		(define lowered_range (lower_column_expr_for_alias src range_expr))
+		(define range_from_kind (symbol "range_from_kind"))
+		(define range_from (symbol "range_from"))
+		(define range_to_kind (symbol "range_to_kind"))
+		(define range_to (symbol "range_to"))
+		(define state_expr (compile_scan_plan (quote scan)
+			nil
+			(source_table_expr src)
+			(cons (quote list) filtercols)
+			(list (quote lambda)
+				(map filtercols (lambda (col) (symbol (concat (source_alias src) "." col))))
+				(combine_where_terms (merge (list
+					(list (lower_column_expr_for_alias src invariant_condition))
+					key_terms
+					(list (range_cache_value_inside_expr lowered_range
+						range_from_kind range_from range_to_kind range_to)))) true))
+			(cons (quote list) valuecols)
+			(scan_mapreduce_expr
+				(map valuecols (lambda (col) (symbol (concat (source_alias src) "." col))))
+				(nth ag 1)
+				(aggregate_map_value_expr ag
+					(lower_column_expr_for_alias src agg_expr)))
+			(nth ag 2)
+			(aggregate_shard_combine ag)
+			false))
+		(list (quote createcolumn)
+			(list (quote table) schema cache_name)
+			(range_group_state_col_name stage ag)
+			"any"
+			(quoted_runtime_list '())
+			(quoted_runtime_list '("temp" true))
+			(cons (quote list) (merge (list key_names (range_cache_boundary_names))))
+			(list (quote lambda)
+				(merge (list (map key_names symbol)
+					(list range_from_kind range_from range_to_kind range_to)))
+				state_expr)))))
+
+(define range_cache_insert_expr (lambda (schema cache_name columns row tx_expr)
+	(list (quote insert)
+		(list (quote table) schema cache_name)
+		(cons (quote list) columns)
+		(list (quote list) (cons (quote list) row))
+		(quoted_runtime_list '())
+		(list (quote lambda) '() true)
+		true nil tx_expr)))
+
+(define range_cache_delete_cell_expr (lambda (schema cache_name key_names point_values
+	from_kind from_value to_kind to_value tx_expr)
+	(begin
+		(define columns (merge (list key_names (range_cache_boundary_names))))
+		(define params (map columns symbol))
+		(define key_symbols (map key_names symbol))
+		(define from_kind_symbol (symbol "range_from_kind"))
+		(define from_symbol (symbol "range_from"))
+		(define to_kind_symbol (symbol "range_to_kind"))
+		(define to_symbol (symbol "range_to"))
+		(compile_scan_plan (quote scan)
+			tx_expr
+			(list (quote table) schema cache_name)
+			(cons (quote list) columns)
+			(list (quote lambda) params
+				(combine_where_terms (merge (list
+					(range_cache_point_terms key_symbols point_values)
+					(list
+						(range_cache_cut_equal_expr from_kind_symbol from_symbol from_kind from_value)
+						(range_cache_cut_equal_expr to_kind_symbol to_symbol to_kind to_value)))) true))
+			(quoted_runtime_list (list "$update"))
+			(list (quote lambda) (list (quote __deleted) (symbol "$update"))
+				(list (quote +) (quote __deleted)
+					(list (quote if) (list (symbol "$update")) 1 0)))
+			0 (quote +) false))))
+
+(define range_cache_find_cell_expr (lambda (schema cache_name key_names point_values marker_kind marker tx_expr)
+	(begin
+		(define columns (merge (list key_names (range_cache_boundary_names))))
+		(define params (map columns symbol))
+		(define key_symbols (map key_names symbol))
+		(define from_kind_symbol (symbol "range_from_kind"))
+		(define from_symbol (symbol "range_from"))
+		(define to_kind_symbol (symbol "range_to_kind"))
+		(define to_symbol (symbol "range_to"))
+		(compile_scan_plan (quote scan)
+			tx_expr
+			(list (quote table) schema cache_name)
+			(cons (quote list) columns)
+			(list (quote lambda) params
+				(combine_where_terms (merge (list
+					(range_cache_point_terms key_symbols point_values)
+					(list
+						(range_cache_cut_less_expr from_kind_symbol from_symbol marker_kind marker)
+						(range_cache_cut_less_expr marker_kind marker to_kind_symbol to_symbol)))) true))
+			(quoted_runtime_list (range_cache_boundary_names))
+			(list (quote lambda)
+				(list (quote __cell) from_kind_symbol from_symbol to_kind_symbol to_symbol)
+				(list (quote list) from_kind_symbol from_symbol to_kind_symbol to_symbol))
+			nil
+			(list (quote lambda) (list (quote old) (quote new))
+				(list (quote coalesceNil) (quote old) (quote new)))
+			false))))
+
+(define range_cache_domain_exists_expr (lambda (schema cache_name key_names point_values tx_expr)
+	(compile_scan_plan (quote scan_exists)
+		tx_expr
+		(list (quote table) schema cache_name)
+		(cons (quote list) key_names)
+		(list (quote lambda) (map key_names symbol)
+			(combine_where_terms
+				(range_cache_point_terms (map key_names symbol) point_values)
+				true)))))
+
+(define range_cache_split_expr (lambda (schema cache_name key_names point_values marker_kind marker tx_expr)
+	(begin
+		(define columns (merge (list key_names (range_cache_boundary_names))))
+		(define cell (symbol "__range_cell"))
+		(define old_from_kind (list (quote nth) cell 0))
+		(define old_from (list (quote nth) cell 1))
+		(define old_to_kind (list (quote nth) cell 2))
+		(define old_to (list (quote nth) cell 3))
+		(list
+			(list (quote lambda) (list cell)
+				(list (quote if) (list (quote nil?) cell) true
+					(list (quote !begin)
+						(range_cache_delete_cell_expr schema cache_name key_names point_values
+							old_from_kind old_from old_to_kind old_to tx_expr)
+						(range_cache_insert_expr schema cache_name columns
+							(merge (list point_values
+								(list old_from_kind old_from marker_kind marker))) tx_expr)
+						(range_cache_insert_expr schema cache_name columns
+							(merge (list point_values
+								(list marker_kind marker old_to_kind old_to))) tx_expr)
+						true)))
+			(range_cache_find_cell_expr schema cache_name key_names point_values marker_kind marker tx_expr)))))
+
+(define range_cache_prepare_expr (lambda (stage cache_name point_values
+	from_kind from_value to_kind to_value tx_expr)
+	(begin
+		(define schema (source_schema (gs_input stage)))
+		(define key_names (group_key_cols (gs_keys stage)))
+		(define columns (merge (list key_names (range_cache_boundary_names))))
+		(define preparation_key (list (quote concat)
+			(concat cache_name ":")
+			(list (quote table_cache_generation)
+				(list (quote table) schema cache_name))
+			":"
+			(list (quote serialize)
+				(cons (quote list) (merge (list point_values
+					(list from_kind from_value to_kind to_value)))))))
+		(list (quote range_cache_prepare)
+			(list (quote range_group_cache_mutex) cache_name)
+			(list (quote lambda) '()
+				(list (quote if) (list (quote range_group_cache_preparations) preparation_key)
+					true
+					(list (quote !begin)
+						(list (quote if)
+							(range_cache_domain_exists_expr schema cache_name key_names point_values tx_expr)
+							true
+							(range_cache_insert_expr schema cache_name columns
+								(merge (list point_values (list -1 nil 2 nil))) tx_expr))
+						(list (quote if) (list (quote equal?) from_kind -1) true
+							(range_cache_split_expr schema cache_name key_names point_values
+								from_kind from_value tx_expr))
+						(list (quote if) (list (quote equal?) to_kind 2) true
+							(range_cache_split_expr schema cache_name key_names point_values
+								to_kind to_value tx_expr))
+						(list (quote range_group_cache_preparations) preparation_key true)
+						true)))))))
+
+/* Split every boundary from the driving relation before any aggregate state
+column is installed. This is the preparation phase of the range cache: later
+aggregate probes only read stable, disjoint cells, so several aggregates in
+one request cannot invalidate one another while the outer scan is running. */
+(define lower_range_cache_prepare_all_expr (lambda (sources default_alias stage tx_expr)
+	(begin
+		(define base_stage (range_stage_for_base_cache stage))
+		(define outer_sources (filter sources source_is_base_table?))
+		(if (not (single_source? outer_sources))
+			(neumann_fail "build_queryplan" "range cache preparation requires one relational driver")
+			true)
+		(define outer_src (car outer_sources))
+		(define range_domain (car (range_stage_domains base_stage)))
+		(define lookup_keys (qassoc_get (gs_facts base_stage) (quote lookup-keys) '()))
+		(define from_expr (range_domain_from range_domain))
+		(define from_kind (range_domain_from_kind range_domain))
+		(define to_expr (range_domain_to range_domain))
+		(define to_kind (range_domain_to_kind range_domain))
+		(define value_exprs (merge (list lookup_keys
+			(if (range_domain_unbounded_from? range_domain) '() (list from_expr))
+			(if (range_domain_unbounded_to? range_domain) '() (list to_expr)))))
+		(define value_cols (merge_unique (map value_exprs (lambda (expr)
+			(extract_columns_for_alias outer_src expr)))))
+		(define value_params (map value_cols (lambda (col)
+			(symbol (concat (source_alias outer_src) "." col)))))
+		(define point_values (map lookup_keys (lambda (expr)
+			(lower_column_expr_for_alias outer_src expr))))
+		(define from_value (if (range_domain_unbounded_from? range_domain) nil
+			(lower_column_expr_for_alias outer_src from_expr)))
+		(define to_value (if (range_domain_unbounded_to? range_domain) nil
+			(lower_column_expr_for_alias outer_src to_expr)))
+		(define cache_name (range_group_cache_name base_stage))
+		(define init_key (list (quote concat)
+			(concat "__range_group_cache_table_init:" cache_name ":")
+			(list (quote table_planner_statistics_token)
+				(source_table_expr (gs_input base_stage)) false)))
+		(define init_expr (range_cache_once_expr cache_name init_key
+			(range_cache_create_columns_expr base_stage cache_name)))
+		(define prepare_one (list (quote if)
+			(list (quote or)
+				(if (range_domain_unbounded_from? range_domain) false
+					(list (quote nil?) from_value))
+				(list (quote or)
+					(if (range_domain_unbounded_to? range_domain) false
+						(list (quote nil?) to_value))
+					(list (quote not)
+						(range_cache_cut_less_expr from_kind from_value to_kind to_value))))
+			true
+			(range_cache_prepare_expr base_stage cache_name point_values
+				from_kind from_value to_kind to_value tx_expr)))
+		(list (quote !begin)
+			init_expr
+			(compile_scan_plan (quote scan)
+				tx_expr
+				(source_table_expr outer_src)
+				(quoted_runtime_list '())
+				(list (quote lambda) '() true)
+				(cons (quote list) value_cols)
+				(list (quote lambda)
+					(cons (quote __prepared) value_params)
+					(list (quote !begin) prepare_one
+						(list (quote +) (quote __prepared) 1)))
+				0 (quote +) false)
+			true))))
+
+(define range_cache_merge_expr (lambda (stage cache_name ag point_values
+	from_kind from_value to_kind to_value tx_expr)
+	(begin
+		(define schema (source_schema (gs_input stage)))
+		(define key_names (group_key_cols (gs_keys stage)))
+		(define point_symbols (map key_names symbol))
+		(define state_col (range_group_state_col_name stage ag))
+		(define filter_columns (merge (list key_names (range_cache_boundary_names))))
+		(define filter_params (map filter_columns symbol))
+		(define from_kind_symbol (symbol "range_from_kind"))
+		(define from_symbol (symbol "range_from"))
+		(define to_kind_symbol (symbol "range_to_kind"))
+		(define to_symbol (symbol "range_to"))
+		(define table_expr (list (quote table) schema cache_name))
+		(define merged_state (compile_scan_plan (quote scan)
+			tx_expr table_expr
+			(cons (quote list) filter_columns)
+			(list (quote lambda) filter_params
+				(combine_where_terms (merge (list
+					(range_cache_point_terms point_symbols point_values)
+					(list
+						(range_cache_cut_leq_expr from_kind from_value
+							from_kind_symbol from_symbol)
+						(range_cache_cut_leq_expr to_kind_symbol to_symbol
+							to_kind to_value)))) true))
+			(quoted_runtime_list (list state_col))
+			(scan_mapreduce_expr (list (symbol state_col))
+				(aggregate_shard_combine ag) (symbol state_col))
+			(nth ag 2)
+			(aggregate_shard_combine ag)
+			false))
+		(define exact_state (compile_scan_plan (quote scan)
+			tx_expr table_expr
+			(cons (quote list) filter_columns)
+			(list (quote lambda) filter_params
+				(combine_where_terms (merge (list
+					(range_cache_point_terms point_symbols point_values)
+					(list
+						(range_cache_cut_equal_expr from_kind_symbol from_symbol
+							from_kind from_value)
+						(range_cache_cut_equal_expr to_kind_symbol to_symbol
+							to_kind to_value)))) true))
+			(quoted_runtime_list (list state_col))
+			(list (quote lambda) (list (quote __exact) (symbol state_col))
+				(list (quote list) (symbol state_col)))
+			nil
+			(list (quote lambda) (list (quote old) (quote new))
+				(list (quote coalesceNil) (quote old) (quote new)))
+			false))
+		(define exact_symbol (symbol "__range_exact_state"))
+		(list (quote range_cache_merge)
+			(list (quote lambda) '()
+				(list
+					(list (quote lambda) (list exact_symbol)
+						(aggregate_finalize_expr ag
+							(list (quote if) (list (quote nil?) exact_symbol)
+								merged_state (list (quote car) exact_symbol))))
+					exact_state))))))
+
+(define lower_scalar_range_aggregate_probe_expr (lambda (sources default_alias stage ag tx_expr)
+	(begin
+		(define src (gs_input stage))
+		(define range_domain (car (range_stage_domains stage)))
+		(define point_values (map (qassoc_get (gs_facts stage) (quote lookup-keys) '())
+			(lambda (expr) (lower_column_expr_for_join sources default_alias expr))))
+		(define from_kind (range_domain_from_kind range_domain))
+		(define to_kind (range_domain_to_kind range_domain))
+		(define from_value (if (range_domain_unbounded_from? range_domain) nil
+			(lower_column_expr_for_join sources default_alias
+				(range_domain_from range_domain))))
+		(define to_value (if (range_domain_unbounded_to? range_domain) nil
+			(lower_column_expr_for_join sources default_alias
+				(range_domain_to range_domain))))
+		(define cache_name (range_group_cache_name stage))
+		(define init_expr (range_cache_state_init_expr stage ag))
+		(planner_record_physical_decision (list
+			(list "decision" "range_group_cache")
+			(list "chosen" "range_cache_prepare+range_cache_merge")
+			(list "inputs" (list
+				(list "point_keys" (count (gs_keys stage)))
+				(list "range_axes" (count (range_stage_domains stage)))))))
+		(list (quote if)
+			(list (quote or)
+				(if (range_domain_unbounded_from? range_domain) false
+					(list (quote nil?) from_value))
+				(list (quote or)
+					(if (range_domain_unbounded_to? range_domain) false
+						(list (quote nil?) to_value))
+					(list (quote not)
+						(range_cache_cut_less_expr from_kind from_value to_kind to_value))))
+			(aggregate_finalize_expr ag (nth ag 2))
+			(list (quote range_group_cache)
+				(list (quote lambda) '()
+					(list (quote !begin)
+						init_expr
+						(range_cache_merge_expr stage cache_name ag point_values
+							from_kind from_value to_kind to_value tx_expr))))))))
+
 (define lower_scalar_aggregate_probe_expr (lambda (sources default_alias stage requested_col tx_expr)
 	(begin
 		(if (not (scalar_aggregate_probe_stage? stage))
@@ -2093,42 +2624,48 @@ would still have to project that value over the segment. */
 		(define value_expr (nth ag 0))
 		(define reduce_expr (nth ag 1))
 		(define neutral_expr (nth ag 2))
-		(aggregate_finalize_expr ag (if (query_block? src)
-			(lower_scalar_aggregate_query_probe_expr
-				(stage_catalog_with_nested (merge_stage_catalogs (list
-					(qassoc_get (gs_facts stage) (quote probe_catalog) '())
-					(if (lowering_catalog? (group_stage_lowering_catalog stage))
-						(lowering_catalog_stages (group_stage_lowering_catalog stage))
-						'())
-					(list stage))))
-				stage
-				value_expr
-				keys
-				(map lookup_keys (lambda (key)
-					(lower_column_expr_for_join sources default_alias key)))
-				reduce_expr
-				neutral_expr)
-			(begin
-				(define condition_cols (extract_columns_for_alias src condition))
-				(define key_cols (merge_unique (map keys (lambda (expr) (extract_columns_for_alias src expr)))))
-				(define value_cols (extract_columns_for_alias src value_expr))
-				(define filtercols (merge_unique (list condition_cols key_cols)))
-				(compile_scan_plan (quote scan)
-					tx_expr
-					(source_table_expr src)
-					(cons (quote list) filtercols)
-					(list (quote lambda)
-						(map filtercols (lambda (col) (symbol (concat (source_alias src) "." col))))
-						(cons (quote and)
-							(cons (lower_column_expr_for_alias src condition) key_terms)))
-					(cons (quote list) value_cols)
-					(scan_mapreduce_expr
-						(map value_cols (lambda (col) (symbol (concat (source_alias src) "." col))))
-						reduce_expr
-						(lower_column_expr_for_alias src value_expr))
-					neutral_expr
+		(if (not (empty_list? (range_stage_domains stage)))
+			(if (and (not (nil? (range_stage_base_source stage)))
+				(equal? (count (range_stage_domains stage)) 1))
+				(lower_scalar_range_aggregate_probe_expr sources default_alias
+					(range_stage_for_base_cache stage) ag tx_expr)
+				(neumann_fail "build_queryplan" "range group cache currently requires one base-table range axis"))
+			(aggregate_finalize_expr ag (if (query_block? src)
+				(lower_scalar_aggregate_query_probe_expr
+					(stage_catalog_with_nested (merge_stage_catalogs (list
+						(qassoc_get (gs_facts stage) (quote probe_catalog) '())
+						(if (lowering_catalog? (group_stage_lowering_catalog stage))
+							(lowering_catalog_stages (group_stage_lowering_catalog stage))
+							'())
+						(list stage))))
+					stage
+					value_expr
+					keys
+					(map lookup_keys (lambda (key)
+						(lower_column_expr_for_join sources default_alias key)))
 					reduce_expr
-					false)))))))
+					neutral_expr)
+				(begin
+					(define condition_cols (extract_columns_for_alias src condition))
+					(define key_cols (merge_unique (map keys (lambda (expr) (extract_columns_for_alias src expr)))))
+					(define value_cols (extract_columns_for_alias src value_expr))
+					(define filtercols (merge_unique (list condition_cols key_cols)))
+					(compile_scan_plan (quote scan)
+						tx_expr
+						(source_table_expr src)
+						(cons (quote list) filtercols)
+						(list (quote lambda)
+							(map filtercols (lambda (col) (symbol (concat (source_alias src) "." col))))
+							(cons (quote and)
+								(cons (lower_column_expr_for_alias src condition) key_terms)))
+						(cons (quote list) value_cols)
+						(scan_mapreduce_expr
+							(map value_cols (lambda (col) (symbol (concat (source_alias src) "." col))))
+							reduce_expr
+							(lower_column_expr_for_alias src value_expr))
+						neutral_expr
+						reduce_expr
+						false))))))))
 
 (define direct_exact_scan_lookup_parts (lambda (sources default_alias src condition keys lookup_keys)
 	(begin
@@ -4889,6 +5426,12 @@ the enclosing carrier identity supplies the remaining query context. */
 	(concat ".grp:" label ":" (stable_structural_hash (list
 		"canonical-group-keytable-v7" schema input_identity keys condition) true))))
 
+(define range_group_table_name (lambda (schema label input_identity point_keys range_keys condition)
+	(concat ".grp:" label ":" (stable_structural_hash (list
+		"canonical-range-group-keytable-v2"
+		schema input_identity point_keys range_keys condition
+		"ordered-cut-boundaries-v1") true))))
+
 /* Persistent helper objects must be named by the physical data they represent,
 not by disposable SQL aliases. Source position remains part of the identity so
 self-joins of the same base table still describe two distinct row roles. */
@@ -5076,13 +5619,18 @@ self-joins of the same base table still describe two distinct row roles. */
 			(if (union_block? input) "union" "query")))
 		(define keys (if (empty_list? (gs_keys stage)) '(1) (gs_keys stage)))
 		(define condition (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
+		(define range_domains (range_stage_domains stage))
 		(define alias_map (canonical_group_stage_alias_map stage))
-		(make_group_keytable_cache schema (group_table_name
-			schema
-			label
-			(canonical_group_input_identity alias_map signatures input)
-			(stage_semantic_rewrite_expr alias_map signatures keys)
-			(stage_semantic_rewrite_expr alias_map signatures condition))))))
+		(define input_identity (canonical_group_input_identity alias_map signatures input))
+		(define canonical_keys (stage_semantic_rewrite_expr alias_map signatures keys))
+		(make_group_keytable_cache schema (if (empty_list? range_domains)
+			(group_table_name schema label input_identity canonical_keys
+				(stage_semantic_rewrite_expr alias_map signatures condition))
+			(range_group_table_name schema label input_identity canonical_keys
+				(stage_semantic_rewrite_expr alias_map signatures
+					(map range_domains range_domain_inner))
+				(stage_semantic_rewrite_expr alias_map signatures
+					(range_stage_invariant_condition stage))))))))
 
 (define group_stage_cache (lambda (stage)
 	(begin

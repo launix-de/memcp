@@ -1137,8 +1137,8 @@ silently stops seeing the join as a keyed lookup at all. */
 						nil)
 					_ nil))
 				(if (and (not (nil? eq_operands)) (not (nil? nil_operands))
-						(equal? (nth nil_operands 0) (nth eq_operands 0))
-						(equal? (nth nil_operands 1) (nth eq_operands 1)))
+					(equal? (nth nil_operands 0) (nth eq_operands 0))
+					(equal? (nth nil_operands 1) (nth eq_operands 1)))
 					eq_operands
 					nil))
 			nil)
@@ -1515,6 +1515,109 @@ Canonicalize once: structural indexes borrow their exact expression roots. */
 (define presence_correlation_pair (lambda (inner_default inner_sources outer_sources term)
 	(correlation_pair_using inner_default inner_sources outer_sources term true)))
 
+/* Range domains are deliberately narrower than arbitrary inequality
+correlation. A reusable cell axis needs one inclusive lower and one exclusive
+upper bound over the same ordered inner expression. Reversed spellings are
+accepted, but inclusive upper / exclusive lower bounds stay residual until a
+type-aware successor operation can prove an exact half-open rewrite. */
+(define range_correlation_bound_sides (lambda (inner_default inner_sources outer_sources inner outer kind cut_kind term)
+	(begin
+		(define inner_refs (expr_refs_sources? inner_default inner_sources inner))
+		(define outer_inner_refs (expr_refs_sources? inner_default inner_sources outer))
+		(define outer_refs (and (not outer_inner_refs) (or
+			(expr_refs_sources? nil outer_sources outer)
+			(and (not (empty_list? outer_sources))
+				(session_dependency_expr? outer)))))
+		(if (and inner_refs outer_refs)
+			(list (quote range-bound)
+				(canonical_column_expr_for_alias inner_default inner)
+				outer kind cut_kind term)
+			nil))))
+
+(define range_correlation_bound_or (lambda (inner_default inner_sources outer_sources
+	left right left_kind left_cut right_kind right_cut term)
+	(begin
+		(define direct (range_correlation_bound_sides inner_default inner_sources
+			outer_sources left right left_kind left_cut term))
+		(if (nil? direct)
+			(range_correlation_bound_sides inner_default inner_sources
+				outer_sources right left right_kind right_cut term)
+			direct))))
+
+(define range_comparison_head? (lambda (head name quoted)
+	(or (equal? (string head) name)
+		(or (equal? head quoted)
+			(or (equal? head (symbol name))
+				(or (equal? head (list (quote quote) quoted))
+					(equal? head (list (quote symbol) name))))))))
+
+(define range_correlation_bound_using (lambda (inner_default inner_sources outer_sources term)
+	(if (and (list? term) (equal? (count term) 3))
+		(begin
+			(define head (nth term 0))
+			(define left (nth term 1))
+			(define right (nth term 2))
+			(if (range_comparison_head? head ">=" (quote >=))
+				(range_correlation_bound_or inner_default inner_sources outer_sources
+					left right (quote from) 0 (quote to) 1 term)
+				(if (range_comparison_head? head "<=" (quote <=))
+					(range_correlation_bound_or inner_default inner_sources outer_sources
+						left right (quote to) 1 (quote from) 0 term)
+					(if (range_comparison_head? head "<" (quote <))
+						(range_correlation_bound_or inner_default inner_sources outer_sources
+							left right (quote to) 0 (quote from) 1 term)
+						(if (range_comparison_head? head ">" (quote >))
+							(range_correlation_bound_or inner_default inner_sources outer_sources
+								left right (quote from) 1 (quote to) 0 term)
+							nil)))))
+		nil)))
+
+(define range_bound_inner (lambda (bound) (nth bound 1)))
+(define range_bound_outer (lambda (bound) (nth bound 2)))
+(define range_bound_kind (lambda (bound) (nth bound 3)))
+(define range_bound_cut_kind (lambda (bound) (nth bound 4)))
+(define range_bound_term (lambda (bound) (nth bound 5)))
+
+(define range_correlation_domains (lambda (bounds)
+	(begin
+		(define axes (merge_unique (list (map bounds range_bound_inner))))
+		(define domains (filter (map axes (lambda (axis)
+			(begin
+				(define axis_hash (stable_structural_hash axis true))
+				(define froms (filter bounds (lambda (bound)
+					(and (equal? (string (range_bound_kind bound)) "from")
+						(equal? (stable_structural_hash (range_bound_inner bound) true)
+							axis_hash)))))
+				(define tos (filter bounds (lambda (bound)
+					(and (equal? (string (range_bound_kind bound)) "to")
+						(equal? (stable_structural_hash (range_bound_inner bound) true)
+							axis_hash)))))
+				(if (and (<= (count froms) 1) (<= (count tos) 1))
+					(list (quote range-domain) axis
+						(if (empty_list? froms) (quote range-unbounded-from)
+							(range_bound_outer (car froms)))
+						(if (empty_list? froms) -1 (range_bound_cut_kind (car froms)))
+						(if (empty_list? tos) (quote range-unbounded-to)
+							(range_bound_outer (car tos)))
+						(if (empty_list? tos) 2 (range_bound_cut_kind (car tos))))
+					nil))))
+			(lambda (domain) (not (nil? domain)))))
+		(merge_unique (list domains)))))
+
+(define range_domain_consumes_bound? (lambda (domains bound)
+	(reduce domains (lambda (found domain)
+		(or found (match domain
+			'(tag inner from from_kind to to_kind)
+			(and (or (equal? tag (quote range-domain))
+				(equal? tag (symbol "range-domain")))
+				(and (equal? inner (range_bound_inner bound))
+					(if (equal? (string (range_bound_kind bound)) "from")
+						(and (equal? from (range_bound_outer bound))
+							(equal? from_kind (range_bound_cut_kind bound)))
+						(and (equal? to (range_bound_outer bound))
+							(equal? to_kind (range_bound_cut_kind bound))))))
+			_ false))) false)))
+
 (define unique_correlation_pairs (lambda (pairs)
 	(reduce (coalesceNil pairs '()) (lambda (acc pair)
 		(if (contains? acc pair)
@@ -1711,6 +1814,10 @@ drifting on source-join pairs or residual outer references. */
 		(define source_pairs (if include_source_pairs
 			(source_join_correlation_pairs inner_default inner_sources outer_sources inner_sources)
 			'()))
+		(define range_bounds (filter (map terms (lambda (term)
+			(range_correlation_bound_using inner_default inner_sources outer_sources term)))
+			(lambda (bound) (not (nil? bound)))))
+		(define range_domains (range_correlation_domains range_bounds))
 		(define lookup_pairs (domain_correlation_pairs
 			(merge (list term_pairs source_pairs (coalesceNil extra_pairs '())))))
 		(define local_terms (filter (map terms (lambda (term)
@@ -1727,6 +1834,12 @@ drifting on source-join pairs or residual outer references. */
 		(define residual_outer_refs (merge_unique (list
 			(btw2025_terms_outer_column_refs local_terms inner_sources outer_sources)
 			(btw2025_sources_outer_column_refs local_sources inner_sources outer_sources))))
+		(define range_invariant_terms (filter local_terms (lambda (term)
+			(begin
+				(define bound (range_correlation_bound_using
+					inner_default inner_sources outer_sources term))
+				(or (nil? bound)
+					(not (range_domain_consumes_bound? range_domains bound)))))))
 		(list
 			(list (quote inner_src) inner_src)
 			(list (quote inner_sources) inner_sources)
@@ -1734,7 +1847,9 @@ drifting on source-join pairs or residual outer references. */
 			(list (quote lookup_pairs) lookup_pairs)
 			(list (quote local_terms) local_terms)
 			(list (quote local_sources) local_sources)
-			(list (quote residual_outer_refs) residual_outer_refs)))))
+			(list (quote residual_outer_refs) residual_outer_refs)
+			(list (quote range_domains) range_domains)
+			(list (quote range_invariant_terms) range_invariant_terms)))))
 
 (define btw2025_local_where_terms_after_simple (lambda (inner_default inner_sources outer_sources block)
 	(filter
@@ -2205,17 +2320,24 @@ row containing NULL must remain distinguishable for non-strict functions. */
 		false
 		(begin
 			(define lookup_keys (qassoc_get (gs_facts stage) (quote lookup-keys) '()))
+			(define range_domains (qassoc_get (gs_facts stage) (quote range-domains) '()))
 			(define keys (if (empty_list? lookup_keys) '() (gs_keys stage)))
-			(and (equal? (qassoc_get (gs_facts stage) (quote null_semantics) nil) (quote aggregate))
-				(and (equal? (stage_result_max_rows_per_partition stage) 1)
-					(and (equal? (count keys) (count lookup_keys))
-						(and (or
-							(not (empty_list? lookup_keys))
-							(and (empty_list? (gs_domain stage))
-								(not (stage_has_residual_outer_refs? stage))))
+			(if (not (empty_list? range_domains))
+				(and (equal? (qassoc_get (gs_facts stage) (quote null_semantics) nil) (quote aggregate))
+					(and (equal? (stage_result_max_rows_per_partition stage) 1)
+						(and (equal? (count keys) (count lookup_keys))
 							(and (equal? (coalesceNil (gs_having stage) true) true)
-								(or (source_is_base_table? (gs_input stage))
-									(query_block? (gs_input stage))))))))))))
+								(source_is_base_table? (gs_input stage))))))
+				(and (equal? (qassoc_get (gs_facts stage) (quote null_semantics) nil) (quote aggregate))
+					(and (equal? (stage_result_max_rows_per_partition stage) 1)
+						(and (equal? (count keys) (count lookup_keys))
+							(and (or
+								(not (empty_list? lookup_keys))
+								(and (empty_list? (gs_domain stage))
+									(not (stage_has_residual_outer_refs? stage))))
+								(and (equal? (coalesceNil (gs_having stage) true) true)
+									(or (source_is_base_table? (gs_input stage))
+										(query_block? (gs_input stage)))))))))))))
 
 (define scalar_cardinality_probe_stage? (lambda (stage)
 	(if (not (group_stage? stage))
@@ -3236,6 +3358,13 @@ without separately proving two-valued semantics. */
 		(define where_corr_pairs (qassoc_get analysis (quote lookup_pairs) '()))
 		(define local_terms (qassoc_get analysis (quote local_terms) '()))
 		(define local_sources (qassoc_get analysis (quote local_sources) '()))
+		(define range_domains (qassoc_get analysis (quote range_domains) '()))
+		(define range_invariant_terms
+			(qassoc_get analysis (quote range_invariant_terms) local_terms))
+		(define outer_aliases (source_aliases outer_sources))
+		(define range_residual_accessing (merge_unique (list
+			(btw2025_sources_accessing_aliases local_sources outer_aliases)
+			(btw2025_terms_accessing_aliases range_invariant_terms outer_aliases))))
 		(define having_terms (split_and_terms (coalesceNil (qb_having inner) true)))
 		(define having_corr_pairs (filter (map having_terms (lambda (term)
 			(exists_correlation_pair inner_default inner_sources outer_sources term)))
@@ -3291,6 +3420,17 @@ without separately proving two-valued semantics. */
 			(merge (list
 				(list
 					(list (quote condition) stage_condition)
+					(list (quote range-domains) range_domains)
+					(list (quote domain-keys) (if (or (empty_list? range_domains)
+						(not (equal? (count keys) (count lookup_keys))))
+						'()
+						(merge (list
+							(map (zip keys lookup_keys) (lambda (binding)
+								(list (quote point) (car binding) (cadr binding))))
+							range_domains))))
+					(list (quote range-invariant-condition)
+						(combine_where_terms range_invariant_terms true))
+					(list (quote btw2025_accessing_after_simple) range_residual_accessing)
 					(list (quote domain) outer_domain)
 					(list (quote lookup-keys) lookup_keys)
 					(list (quote preserve_empty_domain) (not ags_have_list_accumulator))
