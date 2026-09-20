@@ -346,6 +346,24 @@ func jitAllocateProcContext(proc *Proc, captureCount int) *Proc {
 	return bound
 }
 
+// jitBindProcContext initializes escaping closures with Go write barriers.
+// Allocation can return a black object while its captured values are still
+// white. Raw JIT stores would hide those edges from concurrent marking.
+func jitBindProcContext(prepared unsafe.Pointer, template *Proc, captures *Scmer, count int, bindSelf bool) *Proc {
+	bound := (*Proc)(jitRuntimeAllocTyped(prepared))
+	*bound = *template
+	target := unsafe.Slice((*Scmer)(unsafe.Add(unsafe.Pointer(bound), unsafe.Offsetof(ProcJIT{}.Context))), count)
+	copyCount := count
+	if bindSelf && copyCount != 0 {
+		copyCount--
+	}
+	copy(target, unsafe.Slice(captures, copyCount))
+	if bindSelf && count != 0 {
+		target[count-1] = NewProc(bound)
+	}
+	return bound
+}
+
 // JITProcForFunction recovers the original Scheme procedure from a native JIT
 // funcval in O(1). A code-range check precedes the sentinel read so ordinary Go
 // function values are never interpreted as MemCP closure objects.

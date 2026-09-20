@@ -21,6 +21,8 @@ package scm
 
 import (
 	"math/bits"
+	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -99,6 +101,40 @@ func TestJITGroupStageReducerFrameRootsCoverEverySafepoint(t *testing.T) {
 					"FrameRoots and will not be zero-initialized at function entry -- a call "+
 					"that skips the path setting it will scan stale stack data as a pointer",
 					spIndex, root)
+			}
+		}
+	}
+}
+
+// Escaping closures must publish captured heap pointers through write barriers,
+// including when the closure allocation is black during concurrent marking.
+func TestJITCapturedPairSurvivesGC(t *testing.T) {
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				runtime.GC()
+			}
+		}
+	}()
+	defer func() { close(stop); <-done }()
+
+	compiled := compileJITExpressionTestProc(t, `(lambda (a b) (lambda (value) (list a b value)))`)
+	for round := 0; round < 100; round++ {
+		closures := make([]Scmer, 10000)
+		for i := range closures {
+			closures[i] = Apply(compiled, NewString(strings.Repeat("a", 64)), NewString(strings.Repeat("b", 64)))
+		}
+		runtime.GC()
+		for _, closure := range closures {
+			got := Apply(closure, NewInt(7))
+			if !got.IsSlice() || len(got.Slice()) != 3 || !Equal(got.Slice()[0], NewString(strings.Repeat("a", 64))) || !Equal(got.Slice()[1], NewString(strings.Repeat("b", 64))) || !Equal(got.Slice()[2], NewInt(7)) {
+				t.Fatal("corrupted closure")
 			}
 		}
 	}
