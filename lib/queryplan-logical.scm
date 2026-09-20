@@ -1818,8 +1818,18 @@ drifting on source-join pairs or residual outer references. */
 			(range_correlation_bound_using inner_default inner_sources outer_sources term)))
 			(lambda (bound) (not (nil? bound)))))
 		(define range_domains (range_correlation_domains range_bounds))
-		(define lookup_pairs (domain_correlation_pairs
+		(define raw_lookup_pairs (domain_correlation_pairs
 			(merge (list term_pairs source_pairs (coalesceNil extra_pairs '())))))
+		/* A session or outer value that already cuts a range axis is not also a
+		point key. Keeping both would partition the cache by the very boundary it
+		is intended to share. */
+		(define lookup_pairs (filter raw_lookup_pairs (lambda (pair)
+			(not (reduce range_domains (lambda (matched domain)
+				(or matched
+					(and (not (range_domain_unbounded_from? domain))
+						(equal? (cadr pair) (range_domain_from domain)))
+					(and (not (range_domain_unbounded_to? domain))
+						(equal? (cadr pair) (range_domain_to domain))))) false)))))
 		(define local_terms (filter (map terms (lambda (term)
 			(local_correlation_term inner_default lookup_pairs
 				(pair_fn inner_default inner_sources outer_sources term) term)))
@@ -3479,6 +3489,13 @@ without separately proving two-valued semantics. */
 		(define lookup_pairs (qassoc_get analysis (quote lookup_pairs) '()))
 		(define local_terms (qassoc_get analysis (quote local_terms) '()))
 		(define local_sources (qassoc_get analysis (quote local_sources) '()))
+		(define range_domains (qassoc_get analysis (quote range_domains) '()))
+		(define range_invariant_terms
+			(qassoc_get analysis (quote range_invariant_terms) local_terms))
+		(define outer_aliases (source_aliases outer_sources))
+		(define range_residual_accessing (merge_unique (list
+			(btw2025_sources_accessing_aliases local_sources outer_aliases)
+			(btw2025_terms_accessing_aliases range_invariant_terms outer_aliases))))
 		(define keys (if (empty_list? lookup_pairs)
 			'(1)
 			(scalar_stage_inner_keys_for_correlations inner_default (qb_stages inner) (qb_sources inner) lookup_pairs)))
@@ -3519,6 +3536,17 @@ without separately proving two-valued semantics. */
 			(merge (list
 				(list
 					(list (quote condition) stage_condition)
+					(list (quote range-domains) range_domains)
+					(list (quote domain-keys) (if (or (empty_list? range_domains)
+						(not (equal? (count keys) (count lookup_keys))))
+						'()
+						(merge (list
+							(map (zip keys lookup_keys) (lambda (binding)
+								(list (quote point) (car binding) (cadr binding))))
+							range_domains))))
+					(list (quote range-invariant-condition)
+						(combine_where_terms range_invariant_terms true))
+					(list (quote btw2025_accessing_after_simple) range_residual_accessing)
 					(list (quote domain) outer_domain)
 					(list (quote lookup-keys) lookup_keys)
 					(list (quote preserve_empty_domain) true)

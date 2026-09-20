@@ -2007,7 +2007,15 @@ would still have to project that value over the segment. */
 			(lower_column_expr_for_join sources default_alias key))))
 		(define operator (scalar_first_probe_physical_operator
 			probe_stages graph stage src keys effective_probe_work_rows effective_probe_work_rows requested_col probe_semantics nil))
-		(define lowered (match operator
+		(define range_selection (if (empty_list? (range_stage_domains stage)) nil
+			(range_group_cache_selection sources stage)))
+		(define lowered (if (and (not (nil? range_selection))
+			(equal? (car range_selection) "range_group_cache"))
+			(if (not (nil? (range_stage_base_source stage)))
+				(lower_scalar_range_probe_expr sources default_alias
+					(range_stage_for_base_cache stage) ag (physical_query_tx_symbol))
+				(neumann_fail "build_queryplan" "range group cache requires a base-table input"))
+			(match operator
 			(symbol union-probe)
 			(list (quote if)
 				(lower_exists_union_probe_expr
@@ -2055,7 +2063,7 @@ would still have to project that value over the segment. */
 				(lower_table_scalar_first_probe_expr
 					sources default_alias src stage value_expr keys lookup_keys
 					order_exprs dirs offset_value partition_limit (physical_query_tx_symbol)))
-			_ (neumann_fail "build_queryplan" "scalar-first probe has no physical operator")))
+			_ (neumann_fail "build_queryplan" "scalar-first probe has no physical operator"))))
 		(define memoized_lowered (if
 			(qassoc_get (gs_facts stage) (quote segment_invariant_scalar_probe) false)
 			(list
@@ -2295,6 +2303,18 @@ choices. */
 			true
 			(quote tx)))))
 
+(define range_cache_runtime_aggregate (lambda (ag)
+	(query_group_aggregate_descriptor ag)))
+
+(define range_cache_finalize_state_expr (lambda (ag state)
+	(begin
+		(define parts (scalar_order_aggregate_parts ag))
+		(define value (if (nil? parts)
+			state
+			(list (quote if) (list (quote nil?) state) nil
+				(list (quote nth) state (count (nth parts 1))))))
+		(aggregate_finalize_expr ag value))))
+
 (define build_range_group_state_column (lambda (stage cache_name ag)
 	(begin
 		(define src (gs_input stage))
@@ -2311,7 +2331,8 @@ choices. */
 		(define range_cols (merge_unique (map range_exprs (lambda (expr)
 			(extract_columns_for_alias src expr)))))
 		(define filtercols (merge_unique (list key_cols condition_cols range_cols)))
-		(define agg_expr (nth ag 0))
+		(define runtime_ag (range_cache_runtime_aggregate ag))
+		(define agg_expr (nth runtime_ag 0))
 		(define valuecols (extract_columns_for_alias src agg_expr))
 		(define key_terms (map (produceN (count key_names)) (lambda (i)
 			(list (quote equal??)
@@ -2338,11 +2359,11 @@ choices. */
 			(cons (quote list) valuecols)
 			(scan_mapreduce_expr
 				(map valuecols (lambda (col) (symbol (concat (source_alias src) "." col))))
-				(nth ag 1)
-				(aggregate_map_value_expr ag
+				(nth runtime_ag 1)
+				(aggregate_map_value_expr runtime_ag
 					(lower_column_expr_for_alias src agg_expr)))
-			(nth ag 2)
-			(aggregate_shard_combine ag)
+			(nth runtime_ag 2)
+			(aggregate_shard_combine runtime_ag)
 			false))
 		(list (quote createcolumn)
 			(list (quote table) schema cache_name)
@@ -2779,6 +2800,7 @@ one request cannot invalidate one another while the outer scan is running. */
 
 (define range_cache_merge_expr (lambda (stage cache_name ag point_values bounds tx_expr)
 	(begin
+		(define runtime_ag (range_cache_runtime_aggregate ag))
 		(define schema (source_schema (gs_input stage)))
 		(define key_names (group_key_cols (gs_keys stage)))
 		(define point_symbols (map key_names symbol))
@@ -2809,9 +2831,9 @@ one request cannot invalidate one another while the outer scan is running. */
 					contained_terms)) true))
 			(quoted_runtime_list (list state_col))
 			(scan_mapreduce_expr (list (symbol state_col))
-				(aggregate_shard_combine ag) (symbol state_col))
-			(nth ag 2)
-			(aggregate_shard_combine ag)
+				(aggregate_shard_combine runtime_ag) (symbol state_col))
+			(nth runtime_ag 2)
+			(aggregate_shard_combine runtime_ag)
 			false))
 		(define exact_state (compile_scan_plan (quote scan)
 			tx_expr table_expr
@@ -2832,12 +2854,12 @@ one request cannot invalidate one another while the outer scan is running. */
 			(list (quote lambda) '()
 				(list
 					(list (quote lambda) (list exact_symbol)
-						(aggregate_finalize_expr ag
+						(range_cache_finalize_state_expr ag
 							(list (quote if) (list (quote nil?) exact_symbol)
 								merged_state (list (quote car) exact_symbol))))
 					exact_state))))))
 
-(define lower_scalar_range_aggregate_probe_expr (lambda (sources default_alias stage ag tx_expr)
+(define lower_scalar_range_probe_expr (lambda (sources default_alias stage ag tx_expr)
 	(begin
 		(define src (gs_input stage))
 		(define domains (range_stage_domains stage))
@@ -2865,11 +2887,13 @@ one request cannot invalidate one another while the outer scan is running. */
 		(define init_expr (range_cache_state_init_expr stage ag))
 		(list (quote if)
 			(cons (quote or) invalid_terms)
-			(aggregate_finalize_expr ag (nth ag 2))
+			(range_cache_finalize_state_expr ag
+				(nth (range_cache_runtime_aggregate ag) 2))
 			(list (quote range_group_cache)
 				(list (quote lambda) '()
 					(list (quote !begin)
 						init_expr
+						(range_cache_prepare_expr stage cache_name point_values bounds tx_expr)
 						(range_cache_merge_expr stage cache_name ag point_values bounds tx_expr))))))))
 
 (define lower_scalar_aggregate_probe_expr (lambda (sources default_alias stage requested_col tx_expr)
@@ -2916,7 +2940,7 @@ one request cannot invalidate one another while the outer scan is running. */
 		(if (and (not (empty_list? (range_stage_domains stage)))
 			(equal? (car range_selection) "range_group_cache"))
 			(if (not (nil? (range_stage_base_source stage)))
-				(lower_scalar_range_aggregate_probe_expr sources default_alias
+				(lower_scalar_range_probe_expr sources default_alias
 					(range_stage_for_base_cache stage) ag tx_expr)
 				(neumann_fail "build_queryplan" "range group cache requires a base-table input"))
 			(aggregate_finalize_expr ag (if (query_block? src)

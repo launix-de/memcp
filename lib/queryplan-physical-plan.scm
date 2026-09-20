@@ -825,7 +825,8 @@ for that scan. The same prepared table is reused by every guarded variant. */
 				(begin
 					(define stage (stage_by_id stages
 						(stage_output_relation_id (source_relation src))))
-					(and (scalar_aggregate_probe_stage? stage)
+					(and (or (scalar_aggregate_probe_stage? stage)
+						(scalar_first_probe_stage? stage))
 						(not (empty_list? (range_stage_domains stage)))))))))
 		(define eligible_probe_sources (lambda (limit_value)
 			(filter (merge_unique (list
@@ -1094,7 +1095,8 @@ from silently overriding the physical planner. */
 		(define default_alias (qassoc_get (qb_facts block) (quote default_alias)
 			(if (empty_list? sources) nil (source_alias (car sources)))))
 		(map (filter stage_list (lambda (stage)
-			(and (scalar_aggregate_probe_stage? stage)
+			(and (or (scalar_aggregate_probe_stage? stage)
+				(scalar_first_probe_stage? stage))
 				(and (not (empty_list? (range_stage_domains stage)))
 					(and (single_source? sources)
 						(and (stage_lookup_keys_resolve_in_sources? stage sources default_alias)
@@ -1241,12 +1243,17 @@ cache scan for every output row. */
 		((quote scalar_first_probe) stage requested_col _dependencies)
 		(replace_range_lookup_with_cache candidates
 			(list (symbol "scalar_first_probe") stage requested_col))
-		((symbol scalar_aggregate_probe) stage requested_col)
-		(replace_range_lookup_with_cache candidates
-			(list (symbol "scalar_first_probe") stage requested_col))
+		((symbol scalar_aggregate_probe) stage requested_col) (begin
+			(define candidate (reduce candidates (lambda (found item)
+				(if (not (nil? found)) found
+					(if (and (equal? (gs_id stage) (gs_id (nth item 1)))
+						(equal? requested_col (nth item 2))) item nil))) nil))
+			(if (nil? candidate) expr
+				(list (quote get_column) (source_alias (nth candidate 0)) false
+					(nth candidate 3) false)))
 		((quote scalar_aggregate_probe) stage requested_col)
 		(replace_range_lookup_with_cache candidates
-			(list (symbol "scalar_first_probe") stage requested_col))
+			(list (symbol "scalar_aggregate_probe") stage requested_col))
 		(cons head tail) (cons head (map tail (lambda (item)
 			(replace_range_lookup_with_cache candidates item))))
 		_ expr)))

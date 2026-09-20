@@ -275,6 +275,37 @@ test_cases:
       WHERE w.id = 3
     expect: {rows: 1, data: [{event_count: 2499}]}
 
+  - name: "ordered scalar probes reuse one-sided range states"
+    sql: |
+      SELECT w.id,
+        (SELECT e.id FROM grc_events e
+          WHERE e.tenant_id = w.tenant_id
+            AND e.happened_at <= w.range_to
+          ORDER BY e.happened_at DESC
+          LIMIT 1) AS latest_event_id
+      FROM grc_windows w
+      WHERE w.id < 5
+      ORDER BY w.id
+    expect:
+      rows: 4
+      data:
+        - {id: 1, latest_event_id: 1000}
+        - {id: 2, latest_event_id: 1500}
+        - {id: 3, latest_event_id: 3001}
+        - {id: 4, latest_event_id: 3001}
+
+  - name: "ordered scalar range probe lowers to the range cache"
+    sql: |
+      EXPLAIN PHYSICAL SELECT w.id,
+        (SELECT e.id FROM grc_events e
+          WHERE e.tenant_id = w.tenant_id
+            AND e.happened_at <= w.range_to
+          ORDER BY e.happened_at DESC
+          LIMIT 1) AS latest_event_id
+      FROM grc_windows w
+    expect:
+      result_contains: ["range_group_cache", "agg_range_state_"]
+
   - name: "two range axes form disjoint multidimensional cells"
     setup:
       - sql: "DROP TABLE IF EXISTS grc_2d_windows"
