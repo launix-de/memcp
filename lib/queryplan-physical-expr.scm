@@ -5983,8 +5983,11 @@ self-joins of the same base table still describe two distinct row roles. */
 			(group_table_name schema label input_identity canonical_keys
 				(stage_semantic_rewrite_expr alias_map signatures condition))
 			(range_group_table_name schema label input_identity canonical_keys
+				/* Outer cuts are cell values, not cache identity. Keeping only the
+				inner axes lets differently named month/week/day drivers share and
+				split the same disjoint partition. Cut kinds remain stored per cell. */
 				(stage_semantic_rewrite_expr alias_map signatures
-					range_domains)
+					(map range_domains range_domain_inner))
 				(stage_semantic_rewrite_expr alias_map signatures
 					(range_stage_invariant_condition stage))))))))
 
