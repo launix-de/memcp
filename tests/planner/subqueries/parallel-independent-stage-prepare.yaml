@@ -1,0 +1,54 @@
+# Copyright (C) 2026 MemCP Contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: "1.0"
+  description: >
+    Several structurally independent correlated scalar/group subqueries over
+    different source tables in one SELECT list are eagerly prepared via
+    parallel_stage_prepare_exprs (a worker-pool fan-out) instead of one
+    !begin operand per stage. This guards result correctness across that
+    concurrent preparation path -- a broken fan-out (races on the session
+    cache, partial writes, wrong stage picking up another's result) would
+    show up here as wrong aggregates, not just as a slowdown.
+  isolated: true
+
+setup:
+  - sql: "DROP TABLE IF EXISTS psp_a"
+  - sql: "CREATE TABLE psp_a (id INT, grp INT, val INT)"
+  - sql: "INSERT INTO psp_a VALUES (1,1,10),(2,1,20),(3,2,30),(4,2,40),(5,2,50)"
+  - sql: "DROP TABLE IF EXISTS psp_b"
+  - sql: "CREATE TABLE psp_b (id INT, grp INT, val INT)"
+  - sql: "INSERT INTO psp_b VALUES (1,1,100),(2,2,200),(3,2,300)"
+  - sql: "DROP TABLE IF EXISTS psp_c"
+  - sql: "CREATE TABLE psp_c (id INT, grp INT, val INT)"
+  - sql: "INSERT INTO psp_c VALUES (1,1,1000),(2,1,2000),(3,2,3000),(4,2,4000)"
+  - sql: "DROP TABLE IF EXISTS psp_drv"
+  - sql: "CREATE TABLE psp_drv (grp INT)"
+  - sql: "INSERT INTO psp_drv VALUES (1),(2)"
+
+test_cases:
+  - name: "Three independent group-cache-backed correlated subqueries over different tables stay correct"
+    sql: |
+      SELECT psp_drv.grp,
+        (SELECT SUM(val) FROM psp_a WHERE grp = psp_drv.grp) AS sum_a,
+        (SELECT SUM(val) FROM psp_b WHERE grp = psp_drv.grp) AS sum_b,
+        (SELECT SUM(val) FROM psp_c WHERE grp = psp_drv.grp) AS sum_c
+      FROM psp_drv
+      ORDER BY psp_drv.grp
+    expect:
+      rows: 2
+      data:
+        - grp: 1
+          sum_a: 30
+          sum_b: 100
+          sum_c: 3000
+        - grp: 2
+          sum_a: 120
+          sum_b: 500
+          sum_c: 7000
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS psp_a"
+  - sql: "DROP TABLE IF EXISTS psp_b"
+  - sql: "DROP TABLE IF EXISTS psp_c"
+  - sql: "DROP TABLE IF EXISTS psp_drv"

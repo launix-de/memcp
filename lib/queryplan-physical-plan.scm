@@ -1285,6 +1285,24 @@ key-fill recipe per carrier. */
 			stage
 			true)))))
 
+/* lower_unique_stage_prepares_acc dedupes eager stage prepares by identity,
+and include_nested_prepares (true, above) embeds each stage's own dependency
+chain inline into its own expression -- so the resulting list has no data
+dependency between its elements (e.g. one materialized group-cache per KPI
+metric, each keyed by its own literal time window over the same source
+table). Splicing them as N separate !begin operands runs them strictly
+sequentially. newsession is documented thread-safe, CreateTable serializes
+catalog mutation under db.schemalock while the actual per-table population
+work runs outside that lock, so folding independent stage preparations into
+one parallel_map call is safe and turns per-metric group-cache rebuilds into
+a worker-pool fan-out bounded by NumCPU instead of one metric at a time. */
+(define parallel_stage_prepare_exprs (lambda (exprs)
+	(if (or (empty_list? exprs) (equal? (count exprs) 1))
+		exprs
+		(list (list (quote parallel_map)
+			(cons (quote list) (map exprs (lambda (expr) (list (quote lambda) '() expr))))
+			(list (quote lambda) (list (quote __prepare_thunk)) (list (quote __prepare_thunk))))))))
+
 (define lower_presence_stage_prepares_with_graph (lambda (dependency_graph stage_lookup stages)
 	(begin
 		/* Pure presence chains have complete logical dependency edges. Emit their
@@ -3182,9 +3200,10 @@ tools/costgen; this lowering adds no hand-tuned crossover. */
 						probe_recipe_bindings
 						(lazy_stage_prepare_bindings stage_lookup lazy_stages)
 						(prepared_stage_bindings eager_stages)
-						(lower_unique_stage_prepares_with_graph eager_dependency_graph
-							(lowering_catalog_with_planning_session eager_stage_lookup
-								(planner_context_session (qb_facts block))) eager_stages)
+						(parallel_stage_prepare_exprs
+							(lower_unique_stage_prepares_with_graph eager_dependency_graph
+								(lowering_catalog_with_planning_session eager_stage_lookup
+									(planner_context_session (qb_facts block))) eager_stages))
 						(lower_stage_materialize_all eager_stages)))
 					core_block
 					(direct_group_join_usage_flush_exprs direct_group_join_stages)))))))
