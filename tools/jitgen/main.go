@@ -5370,6 +5370,46 @@ func (g *codeGen) emitAllocResultAwareReg(dstVar, targetVar, indent string, dire
 	g.emit("%s}", indent)
 }
 
+// emitAllocResultAwareRegLazyOperand keeps right in its current location. A
+// preferred fixed result must not overwrite a register operand. The ordinary
+// allocator also protects a register operand, while an existing stack operand
+// stays unmaterialized for the final instruction selector.
+func (g *codeGen) emitAllocResultAwareRegLazyOperand(dstVar, targetVar, indent string, direct bool, planned plannedRegisterTarget, right string, excludes ...string) {
+	if !direct && planned.reg == "" {
+		g.emit("%s%s := ctx.AllocRegExceptOperand(&%s, %s)", indent, dstVar, right, strings.Join(excludes, ", "))
+		return
+	}
+	g.emit("%svar %s %s", indent, dstVar, g.regTypeName())
+	if planned.reg != "" {
+		condition := planned.available + " && (" + right + ".Loc != LocReg || " + planned.reg + " != " + right + ".Reg)"
+		for _, exclude := range excludes {
+			if !planned.aliases[exclude] {
+				condition += " && " + planned.reg + " != " + exclude
+			}
+		}
+		g.emit("%sif %s {", indent, condition)
+		g.emit("%s\t%s = %s", indent, dstVar, planned.reg)
+	}
+	if direct {
+		condition := "result.Loc == LocRegPair && (" + right + ".Loc != LocReg || result.Reg2 != " + right + ".Reg)"
+		for _, exclude := range excludes {
+			condition += " && result.Reg2 != " + exclude
+		}
+		if planned.reg != "" {
+			g.emit("%s} else if %s {", indent, condition)
+		} else {
+			g.emit("%sif %s {", indent, condition)
+		}
+		g.emit("%s\t%s = result.Reg2", indent, dstVar)
+		g.emit("%s\t%s = true", indent, targetVar)
+		g.emit("%s} else {", indent)
+	} else {
+		g.emit("%s} else {", indent)
+	}
+	g.emit("%s\t%s = ctx.AllocRegExceptOperand(&%s, %s)", indent, dstVar, right, strings.Join(excludes, ", "))
+	g.emit("%s}", indent)
+}
+
 func (g *codeGen) emitAllocBooleanResultReg(dstVar, targetVar, indent, directMarker string, excludes ...string) {
 	if directMarker == "" {
 		g.emit("%s%s := ctx.AllocRegExcept(%s)", indent, dstVar, strings.Join(excludes, ", "))
@@ -8385,22 +8425,16 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				marker = "_flags"
 			}
 			g.vals[name] = genVal{goVar: dv, isDesc: true, marker: marker, resultTargetVar: resultTargetVar}
-		} else if aluOp := aluEmitFunc(v.Op); aluOp != "" {
+		} else if aluEmitFunc(v.Op) != "" {
 			// Arithmetic BinOp: ADD, SUB, MUL
 			dv := g.allocDesc()
 			directIntResult := directResultMarker == "_newint"
-			addImmediate := "EmitAddRegImm32"
-			subImmediate := "EmitSubRegImm32"
 			canonicalALU32 := narrowUnsigned && resBits == 32 && (v.Op == token.ADD || v.Op == token.SUB)
+			intWidth := 64
 			if canonicalALU32 {
-				addImmediate = "EmitAddRegImm32Low"
-				subImmediate = "EmitSubRegImm32Low"
-				if v.Op == token.ADD {
-					aluOp = "EmitAddInt32"
-				} else {
-					aluOp = "EmitSubInt32"
-				}
+				intWidth = 32
 			}
+			intOp := g.intAluEnum(v.Op)
 			if c, ok := v.Y.(*ssa.Const); ok {
 				cmpVal, ok := constInt64Value(c.Value)
 				if !ok {
@@ -8419,51 +8453,31 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 						// SUB is non-commutative: copy x, then subtract const
 						g.emitAllocResultAwareReg("scratch", resultTargetVar, "\t", directIntResult, plannedTarget, xVal.goVar+".Reg")
 						g.emit("\tctx.EmitMovRegReg(scratch, %s.Reg)", xVal.goVar)
-						if fitsInt32(cmpVal) {
-							g.emit("\tctx.%s(scratch, int32(%d))", subImmediate, cmpVal)
-						} else {
-							g.emit("\tctx.EmitMovRegImm64(RegR11, 0x%x)", uint64(cmpVal))
-							g.emit("\tctx.EmitSubInt64(scratch, RegR11)")
-						}
+						g.emit("\tctx.EmitIntBinaryImm(%s, %d, scratch, %d)", intOp, intWidth, cmpVal)
 						g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: scratch}", dv)
 					} else {
 						// ADD/MUL: commutative, order doesn't matter
 						g.emitAllocResultAwareReg("scratch", resultTargetVar, "\t", directIntResult, plannedTarget, xVal.goVar+".Reg")
 						g.emit("\tctx.EmitMovRegReg(scratch, %s.Reg)", xVal.goVar)
-						if v.Op == token.MUL {
-							g.emitMulConstOnReg("scratch", cmpVal, "\t")
-						} else if fitsInt32(cmpVal) {
-							g.emit("\tctx.%s(scratch, int32(%d))", addImmediate, cmpVal)
-						} else {
-							g.emit("\tctx.EmitMovRegImm64(RegR11, 0x%x)", uint64(cmpVal))
-							g.emit("\tctx.%s(scratch, RegR11)", aluOp)
-						}
+						g.emit("\tctx.EmitIntBinaryImm(%s, %d, scratch, %d)", intOp, intWidth, cmpVal)
 						g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: scratch}", dv)
 					}
 				} else {
 					// x is consumed; prefer immediate-form ALU to avoid materializing constants in a temp register.
-					if v.Op == token.MUL {
-						g.emitMulConstOnReg(fmt.Sprintf("%s.Reg", xVal.goVar), cmpVal, "\t")
-					} else if fitsInt32(cmpVal) {
-						switch v.Op {
-						case token.ADD:
-							g.emit("\tctx.%s(%s.Reg, int32(%d))", addImmediate, xVal.goVar, cmpVal)
-						case token.SUB:
-							g.emit("\tctx.%s(%s.Reg, int32(%d))", subImmediate, xVal.goVar, cmpVal)
-						default:
-							g.emit("\tctx.EmitMovRegImm64(RegR11, 0x%x)", uint64(cmpVal))
-							g.emit("\tctx.%s(%s.Reg, RegR11)", aluOp, xVal.goVar)
-						}
-					} else {
-						g.emit("\tctx.EmitMovRegImm64(RegR11, 0x%x)", uint64(cmpVal))
-						g.emit("\tctx.%s(%s.Reg, RegR11)", aluOp, xVal.goVar)
-					}
+					g.emit("\tctx.EmitIntBinaryImm(%s, %d, %s.Reg, %d)", intOp, intWidth, xVal.goVar, cmpVal)
 					g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s.Reg}", dv, xVal.goVar)
 				}
 				g.emit("}")
 			} else {
 				yVal := g.resolveValue(v.Y)
-				g.emit("ctx.EnsureDescsTogether(&%s, &%s)", xVal.goVar, yVal.goVar)
+				if g.storageMode {
+					// Storage emitters retain their established simultaneous-materialization
+					// contract until their cross-block register homes are represented lazily.
+					g.emit("ctx.EnsureDescsTogether(&%s, &%s)", xVal.goVar, yVal.goVar)
+				} else {
+					g.emit("ctx.SyncDesc(&%s)", xVal.goVar)
+					g.emit("ctx.SyncDesc(&%s)", yVal.goVar)
+				}
 				g.emit("var %s JITValueDesc", dv)
 				g.emit("if %s {", bothImmCond(xVal.goVar, yVal.goVar))
 				g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(%s.Imm.Int() %s %s.Imm.Int())}", dv, xVal.goVar, goOpStr(v.Op), yVal.goVar)
@@ -8471,6 +8485,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				if v.Op == token.ADD || v.Op == token.SUB {
 					// y is LocImm 0 → x + 0 = x, x - 0 = x
 					g.emit("} else if %s.Loc == LocImm && %s.Imm.Int() == 0 {", yVal.goVar, yVal.goVar)
+					g.emit("\tctx.EnsureDesc(&%s)", xVal.goVar)
 					if xMultiUse {
 						copyReg := g.allocReg()
 						g.emitAllocResultAwareReg(copyReg, resultTargetVar, "\t", directIntResult, plannedTarget, xVal.goVar+".Reg")
@@ -8483,75 +8498,47 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				if v.Op == token.ADD {
 					// x is LocImm 0 → 0 + y = y (commutative)
 					g.emit("} else if %s.Loc == LocImm && %s.Imm.Int() == 0 {", xVal.goVar, xVal.goVar)
+					g.emit("\tctx.EnsureDesc(&%s)", yVal.goVar)
 					g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s.Reg}", dv, yVal.goVar)
 				}
 				g.emit("} else if %s.Loc == LocImm {", xVal.goVar)
-				// x is const, y is reg → materialize x into scratch, ALU (result in scratch)
+				g.emit("\tctx.EnsureDesc(&%s)", yVal.goVar)
 				g.emitAllocResultAwareReg("scratch", resultTargetVar, "\t", directIntResult, plannedTarget, yVal.goVar+".Reg")
-				g.emit("\tctx.EmitMovRegImm64(scratch, uint64(%s.Imm.Int()))", xVal.goVar)
-				g.emit("\tctx.%s(scratch, %s.Reg)", aluOp, yVal.goVar)
+				if v.Op == token.ADD || v.Op == token.MUL {
+					// Commutative operations can retain x as an immediate operand.
+					g.emit("\tctx.EmitMovRegReg(scratch, %s.Reg)", yVal.goVar)
+					g.emit("\tctx.EmitIntBinaryImm(%s, %d, scratch, %s.Imm.Int())", intOp, intWidth, xVal.goVar)
+				} else {
+					g.emit("\tctx.EmitMovRegImm64(scratch, uint64(%s.Imm.Int()))", xVal.goVar)
+					g.emit("\tctx.EmitIntBinary(%s, %d, scratch, &%s)", intOp, intWidth, yVal.goVar)
+				}
 				g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: scratch}", dv)
 				g.emit("} else if %s.Loc == LocImm {", yVal.goVar)
-				// y is const, x is reg → use R11 for constant (result in x.Reg or scratch)
+				g.emit("\tctx.EnsureDesc(&%s)", xVal.goVar)
 				if xMultiUse {
-					if v.Op == token.SUB {
-						// SUB is non-commutative: copy x, then subtract y
-						g.emitAllocResultAwareReg("scratch", resultTargetVar, "\t", directIntResult, plannedTarget, xVal.goVar+".Reg")
-						g.emit("\tctx.EmitMovRegReg(scratch, %s.Reg)", xVal.goVar)
-						g.emit("\tif %s.Imm.Int() >= -2147483648 && %s.Imm.Int() <= 2147483647 {", yVal.goVar, yVal.goVar)
-						g.emit("\t\tctx.%s(scratch, int32(%s.Imm.Int()))", subImmediate, yVal.goVar)
-						g.emit("\t} else {")
-						g.emit("\t\tctx.EmitMovRegImm64(RegR11, uint64(%s.Imm.Int()))", yVal.goVar)
-						g.emit("\t\tctx.EmitSubInt64(scratch, RegR11)")
-						g.emit("\t}")
-						g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: scratch}", dv)
-					} else {
-						// ADD/MUL: commutative, order doesn't matter
-						g.emitAllocResultAwareReg("scratch", resultTargetVar, "\t", directIntResult, plannedTarget, xVal.goVar+".Reg")
-						g.emit("\tctx.EmitMovRegReg(scratch, %s.Reg)", xVal.goVar)
-						g.emit("\tif %s.Imm.Int() >= -2147483648 && %s.Imm.Int() <= 2147483647 {", yVal.goVar, yVal.goVar)
-						if v.Op == token.ADD {
-							g.emit("\t\tctx.%s(scratch, int32(%s.Imm.Int()))", addImmediate, yVal.goVar)
-						} else if v.Op == token.MUL {
-							g.emit("\t\tctx.EmitImulRegImm32(scratch, int32(%s.Imm.Int()))", yVal.goVar)
-						} else {
-							g.emit("\t\tctx.EmitMovRegImm64(RegR11, uint64(%s.Imm.Int()))", yVal.goVar)
-							g.emit("\t\tctx.%s(scratch, RegR11)", aluOp)
-						}
-						g.emit("\t} else {")
-						g.emit("\t\tctx.EmitMovRegImm64(RegR11, uint64(%s.Imm.Int()))", yVal.goVar)
-						g.emit("\t\tctx.%s(scratch, RegR11)", aluOp)
-						g.emit("\t}")
-						g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: scratch}", dv)
-					}
+					g.emitAllocResultAwareReg("scratch", resultTargetVar, "\t", directIntResult, plannedTarget, xVal.goVar+".Reg")
+					g.emit("\tctx.EmitMovRegReg(scratch, %s.Reg)", xVal.goVar)
+					g.emit("\tctx.EmitIntBinaryImm(%s, %d, scratch, %s.Imm.Int())", intOp, intWidth, yVal.goVar)
+					g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: scratch}", dv)
 				} else {
-					// x consumed, y constant: immediate-form ALU when possible.
-					g.emit("\tif %s.Imm.Int() >= -2147483648 && %s.Imm.Int() <= 2147483647 {", yVal.goVar, yVal.goVar)
-					if v.Op == token.ADD {
-						g.emit("\t\tctx.%s(%s.Reg, int32(%s.Imm.Int()))", addImmediate, xVal.goVar, yVal.goVar)
-					} else if v.Op == token.SUB {
-						g.emit("\t\tctx.%s(%s.Reg, int32(%s.Imm.Int()))", subImmediate, xVal.goVar, yVal.goVar)
-					} else if v.Op == token.MUL {
-						g.emit("\t\tctx.EmitImulRegImm32(%s.Reg, int32(%s.Imm.Int()))", xVal.goVar, yVal.goVar)
-					} else {
-						g.emit("\t\tctx.EmitMovRegImm64(RegR11, uint64(%s.Imm.Int()))", yVal.goVar)
-						g.emit("\t\tctx.%s(%s.Reg, RegR11)", aluOp, xVal.goVar)
-					}
-					g.emit("\t} else {")
-					g.emit("\tctx.EmitMovRegImm64(RegR11, uint64(%s.Imm.Int()))", yVal.goVar)
-					g.emit("\tctx.%s(%s.Reg, RegR11)", aluOp, xVal.goVar)
-					g.emit("\t}")
+					g.emit("\tctx.EmitIntBinaryImm(%s, %d, %s.Reg, %s.Imm.Int())", intOp, intWidth, xVal.goVar, yVal.goVar)
 					g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s.Reg}", dv, xVal.goVar)
 				}
 				g.emit("} else {")
+				g.emit("\tctx.EnsureDesc(&%s)", xVal.goVar)
+				g.emit("\tctx.SyncDesc(&%s)", yVal.goVar)
 				if xMultiUse {
 					copyReg := g.allocReg()
-					g.emitAllocResultAwareReg(copyReg, resultTargetVar, "\t", directIntResult, plannedTarget, xVal.goVar+".Reg", yVal.goVar+".Reg")
+					if g.storageMode {
+						g.emitAllocResultAwareReg(copyReg, resultTargetVar, "\t", directIntResult, plannedTarget, xVal.goVar+".Reg", yVal.goVar+".Reg")
+					} else {
+						g.emitAllocResultAwareRegLazyOperand(copyReg, resultTargetVar, "\t", directIntResult, plannedTarget, yVal.goVar, xVal.goVar+".Reg")
+					}
 					g.emit("\tctx.EmitMovRegReg(%s, %s.Reg)", copyReg, xVal.goVar)
-					g.emit("\tctx.%s(%s, %s.Reg)", aluOp, copyReg, yVal.goVar)
+					g.emit("\tctx.EmitIntBinary(%s, %d, %s, &%s)", intOp, intWidth, copyReg, yVal.goVar)
 					g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s}", dv, copyReg)
 				} else {
-					g.emit("\tctx.%s(%s.Reg, %s.Reg)", aluOp, xVal.goVar, yVal.goVar)
+					g.emit("\tctx.EmitIntBinary(%s, %d, %s.Reg, &%s)", intOp, intWidth, xVal.goVar, yVal.goVar)
 					g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s.Reg}", dv, xVal.goVar)
 				}
 				g.emit("}")
@@ -10762,6 +10749,23 @@ func aluEmitFunc(op token.Token) string {
 		return "EmitImulInt64"
 	default:
 		return ""
+	}
+}
+
+func (g *codeGen) intAluEnum(op token.Token) string {
+	prefix := ""
+	if g.storageMode {
+		prefix = "scm."
+	}
+	switch op {
+	case token.ADD:
+		return prefix + "JITIntAdd"
+	case token.SUB:
+		return prefix + "JITIntSub"
+	case token.MUL:
+		return prefix + "JITIntMul"
+	default:
+		panic("unsupported integer ALU operation")
 	}
 }
 

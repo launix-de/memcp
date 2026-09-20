@@ -156,3 +156,109 @@ func jitArchEmitMulInt64(ctx *JITContext, dst, src Reg) {
 	rd := arm64GPR(dst)
 	emitARM64(ctx, 0x9B007C00|arm64GPR(src)<<16|rd<<5|rd) // MUL alias of MADD
 }
+
+func jitArchEmitIntBinary(ctx *JITContext, op JITIntOp, width uint8, dst Reg, right jitIntOperand, scratch Reg) {
+	switch right.kind {
+	case jitIntOperandReg:
+		ctx.beginRegisterInstruction(jitRegisterMask(dst, right.reg), jitRegisterMask(dst))
+		defer ctx.endRegisterInstruction()
+		arm64EmitIntBinaryReg(ctx, op, width, dst, right.reg)
+	case jitIntOperandMem:
+		ctx.beginRegisterInstruction(jitRegisterMask(dst, right.base), jitRegisterMask(dst, scratch))
+		defer ctx.endRegisterInstruction()
+		jitArchEmitLoad64(ctx, scratch, right.base, right.disp)
+		arm64EmitIntBinaryReg(ctx, op, width, dst, scratch)
+	case jitIntOperandImm:
+		if arm64IntBinaryImmEncodable(op, right.imm) {
+			ctx.beginRegisterInstruction(jitRegisterMask(dst), jitRegisterMask(dst))
+			defer ctx.endRegisterInstruction()
+			arm64EmitIntBinaryImm(ctx, op, width, dst, right.imm)
+			return
+		}
+		if scratch == dst {
+			panic("jit: arm64 integer immediate requires a distinct scratch register")
+		}
+		ctx.beginRegisterInstruction(jitRegisterMask(dst), jitRegisterMask(dst, scratch))
+		defer ctx.endRegisterInstruction()
+		jitArchEmitMovRegImm64(ctx, scratch, uint64(right.imm))
+		arm64EmitIntBinaryReg(ctx, op, width, dst, scratch)
+	default:
+		panic("jit: invalid arm64 integer operand")
+	}
+}
+
+func arm64IntBinaryImmEncodable(op JITIntOp, imm int64) bool {
+	if op != JITIntAdd && op != JITIntSub {
+		return false
+	}
+	magnitude := uint64(imm)
+	if imm < 0 {
+		magnitude = uint64(-(imm + 1)) + 1
+	}
+	return magnitude <= 4095 || magnitude&4095 == 0 && magnitude>>12 <= 4095
+}
+
+func arm64EmitIntBinaryReg(ctx *JITContext, op JITIntOp, width uint8, dst, src Reg) {
+	if width == 32 {
+		switch op {
+		case JITIntAdd:
+			jitArchEmitAddInt32(ctx, dst, src)
+		case JITIntSub:
+			jitArchEmitSubInt32(ctx, dst, src)
+		default:
+			panic("jit: arm64 32-bit operation is not implemented")
+		}
+		return
+	}
+	switch op {
+	case JITIntAdd:
+		jitArchEmitAddInt64(ctx, dst, src)
+	case JITIntSub:
+		jitArchEmitSubInt64(ctx, dst, src)
+	case JITIntMul:
+		jitArchEmitMulInt64(ctx, dst, src)
+	case JITIntAnd:
+		jitArchEmitAndInt64(ctx, dst, src)
+	case JITIntOr:
+		jitArchEmitOrInt64(ctx, dst, src)
+	case JITIntXor:
+		jitArchEmitXorInt64(ctx, dst, src)
+	default:
+		panic("jit: invalid arm64 integer operation")
+	}
+}
+
+func arm64EmitIntBinaryImm(ctx *JITContext, op JITIntOp, width uint8, dst Reg, imm int64) bool {
+	if op != JITIntAdd && op != JITIntSub {
+		return false
+	}
+	negative := imm < 0
+	magnitude := uint64(imm)
+	if negative {
+		magnitude = uint64(-(imm + 1)) + 1
+		if op == JITIntAdd {
+			op = JITIntSub
+		} else {
+			op = JITIntAdd
+		}
+	}
+	shift := uint32(0)
+	encoded := magnitude
+	if encoded > 4095 && encoded&4095 == 0 {
+		encoded >>= 12
+		shift = 1
+	}
+	if encoded > 4095 {
+		return false
+	}
+	base := uint32(0x91000000)
+	if width == 32 {
+		base = 0x11000000
+	}
+	if op == JITIntSub {
+		base |= 0x40000000
+	}
+	rd := arm64GPR(dst)
+	emitARM64(ctx, base|shift<<22|uint32(encoded)<<10|rd<<5|rd)
+	return true
+}

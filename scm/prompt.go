@@ -152,6 +152,7 @@ var errorlog *log.Logger
 func init() {
 	errorlog = log.New(os.Stderr, "", 0)
 }
+
 // stackCarrier is implemented by error/panic values (e.g. storage's
 // scanError) that already captured debug.Stack() at their original panic
 // site, inside a per-shard goroutine that gets recovered and re-panicked by

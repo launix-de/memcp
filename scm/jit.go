@@ -2322,6 +2322,23 @@ func (ctx *JITContext) AllocRegExcept(excluded ...Reg) Reg {
 	return r
 }
 
+// AllocRegExceptOperand preserves a lazy right operand in its current
+// location. Register operands stay registered; stack operands remain eligible
+// for direct memory folding without reserving an otherwise unrelated register.
+func (ctx *JITContext) AllocRegExceptOperand(right *JITValueDesc, excluded ...Reg) Reg {
+	ctx.SyncDesc(right)
+	protected := false
+	if right.Loc == LocReg {
+		ctx.ProtectReg(right.Reg)
+		protected = true
+	}
+	r := ctx.AllocRegExcept(excluded...)
+	if protected {
+		ctx.UnprotectReg(right.Reg)
+	}
+	return r
+}
+
 // EnsureReg checks if a descriptor was spilled and restores it.
 // If the value is still in a register, this is a no-op.
 // If spilled, allocates a new register, emits a load, and updates the desc.

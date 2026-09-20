@@ -31,7 +31,7 @@ func schemePatternLiteral(pat string) string {
 	return `"` + strings.ReplaceAll(pat, `\`, `\\`) + `"`
 }
 
-// A doubled-delimiter escape ('', ``) now lowers natively via
+// A doubled-delimiter escape (”, “) now lowers natively via
 // emitBacktrackingRepeat instead of falling back to a Go regexp call - this
 // exercises the real JIT-compiled machine code (jitCompileRegexProgramOrGo,
 // checked by TestJITRegexVariableWidthRepeat, only classifies the pattern

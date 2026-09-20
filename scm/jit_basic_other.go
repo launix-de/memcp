@@ -37,3 +37,6 @@ func jitArchEmitSubInt64(*JITContext, Reg, Reg)       { jitUnsupportedArchitectu
 func jitArchEmitAddInt32(*JITContext, Reg, Reg)       { jitUnsupportedArchitecture() }
 func jitArchEmitSubInt32(*JITContext, Reg, Reg)       { jitUnsupportedArchitecture() }
 func jitArchEmitMulInt64(*JITContext, Reg, Reg)       { jitUnsupportedArchitecture() }
+func jitArchEmitIntBinary(*JITContext, JITIntOp, uint8, Reg, jitIntOperand, Reg) {
+	jitUnsupportedArchitecture()
+}
