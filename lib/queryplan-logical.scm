@@ -6646,7 +6646,7 @@ names in projections, predicates, and correlated subqueries. */
 									(list (quote outer-sources) expr_outer_sources)
 									(list (quote outer-resolution-sources) nested_outer_resolution_sources)
 									(list (quote local-sources) sources)
-									(list (quote derived-rewrites) carried_literal_rewrites))))
+									(list (quote derived-rewrites) active_rewrites))))
 								(define source_join_result (untangle_source_join_exprs_with_stages sources expr_outer_sources expr_ctx))
 								(define untangled_sources (nth source_join_result 0))
 								(define source_join_stage_sources (nth source_join_result 2))
@@ -6655,7 +6655,7 @@ names in projections, predicates, and correlated subqueries. */
 									(list (quote outer-sources) joined_expr_outer_sources)
 									(list (quote outer-resolution-sources) nested_outer_resolution_sources)
 									(list (quote local-sources) (merge_unique (list untangled_sources source_join_stage_sources)))
-									(list (quote derived-rewrites) carried_literal_rewrites))))
+									(list (quote derived-rewrites) active_rewrites))))
 								/* SQL name ownership ends in bind_query_names. Derived flattening
 								only rewrites references carrying an explicit bound alias. */
 								(if (expr_contains_window? rewritten_where)
@@ -6697,7 +6697,7 @@ names in projections, predicates, and correlated subqueries. */
 								(btw2025_decorrelate_query_block delayed_block
 									(make_uctx child_ctx (list
 										(list (quote outer-resolution-sources) nested_outer_resolution_sources)
-										(list (quote derived-rewrites) carried_literal_rewrites)))))))))))))
+										(list (quote derived-rewrites) active_rewrites)))))))))))))
 
 (define canonical_union_mode (lambda (mode)
 	(if (equal? mode (quote distinct)) (quote union_distinct) mode)))
