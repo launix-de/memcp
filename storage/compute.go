@@ -1028,27 +1028,21 @@ func compiledScanOuterColumn(expr scm.Scmer, computorParams []scm.Scmer) (string
 		expr = stripSourceInfo(inner)
 	}
 	if expr.IsSymbol() {
-		for _, param := range computorParams {
-			param = stripSourceInfo(param)
-			if param.IsSymbol() && param.String() == expr.String() {
-				return expr.String(), true
-			}
-		}
-		return "", false
+		return computorInputColumn(expr.String(), computorParams)
 	}
 	if expr.IsNthLocalVar() {
 		idx := int(expr.NthLocalVar())
 		if idx >= 0 && idx < len(computorParams) {
 			param := stripSourceInfo(computorParams[idx])
 			if param.IsSymbol() {
-				return param.String(), true
+				return computorInputColumn(param.String(), computorParams)
 			}
 		}
 	}
 	if expr.IsSlice() {
 		items := expr.Slice()
 		if len(items) >= 4 && callHeadIs(items[0], "get_column") {
-			return scm.String(items[3]), true
+			return computorInputColumn(scm.String(items[3]), computorParams)
 		}
 	}
 	return "", false
