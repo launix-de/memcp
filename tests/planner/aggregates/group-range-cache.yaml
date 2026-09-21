@@ -1,0 +1,570 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+
+metadata:
+  version: "1.0"
+  description: "Segmented reusable group caches for overlapping range aggregates"
+  isolated: true
+
+setup:
+  - sql: "DROP TABLE IF EXISTS grc_windows"
+  - sql: "DROP TABLE IF EXISTS grc_events"
+  - sql: "CREATE TABLE grc_events (id INT PRIMARY KEY, tenant_id INT, happened_at INT, amount INT) ENGINE=memory"
+  - sql: "CREATE TABLE grc_windows (id INT PRIMARY KEY, tenant_id INT, range_from INT, range_to INT) ENGINE=memory"
+  - scm: |
+      (begin
+        (insert (table "memcp-tests" "grc_events")
+          '("id" "tenant_id" "happened_at" "amount")
+          (map (produceN 6000) (lambda (i)
+            (list (+ i 1) (+ 1 (mod i 2)) i 2))))
+        (insert (table "memcp-tests" "grc_windows")
+          '("id" "tenant_id" "range_from" "range_to")
+          (list (list 1 2 0 1000) (list 2 2 500 1500)
+            (list 3 1 1000 3000) (list 4 1 0 3000)))
+        (rebuild)
+        true)
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS grc_windows"
+  - sql: "DROP TABLE IF EXISTS grc_events"
+
+test_cases:
+  - name: "overlapping ranges compose count sum and average from disjoint cells"
+    sql: |
+      SELECT w.id,
+        (SELECT COUNT(*) FROM grc_events e
+          WHERE e.tenant_id = w.tenant_id
+            AND e.happened_at >= w.range_from
+            AND e.happened_at < w.range_to) AS event_count
+      FROM grc_windows w
+      ORDER BY w.id
+    expect:
+      rows: 4
+      data:
+        - {id: 1, event_count: 500}
+        - {id: 2, event_count: 500}
+        - {id: 3, event_count: 1000}
+        - {id: 4, event_count: 1500}
+
+  - name: "sum composes from the same disjoint cells"
+    sql: |
+      SELECT w.id,
+        (SELECT SUM(e.amount) FROM grc_events e
+          WHERE e.tenant_id = w.tenant_id
+            AND e.happened_at >= w.range_from
+            AND e.happened_at < w.range_to) AS amount_sum
+      FROM grc_windows w
+      ORDER BY w.id
+    expect:
+      rows: 4
+      data:
+        - {id: 1, amount_sum: 1000}
+        - {id: 2, amount_sum: 1000}
+        - {id: 3, amount_sum: 2000}
+        - {id: 4, amount_sum: 3000}
+
+  - name: "average composes from cached sum and count states"
+    sql: |
+      SELECT w.id,
+        (SELECT AVG(e.amount) FROM grc_events e
+          WHERE e.tenant_id = w.tenant_id
+            AND e.happened_at >= w.range_from
+            AND e.happened_at < w.range_to) AS amount_average
+      FROM grc_windows w
+      ORDER BY w.id
+    expect:
+      rows: 4
+      data:
+        - {id: 1, amount_average: 2}
+        - {id: 2, amount_average: 2}
+        - {id: 3, amount_average: 2}
+        - {id: 4, amount_average: 2}
+
+  - name: "one request shares range cells across count sum and average"
+    setup:
+      - sql: "DROP TABLE IF EXISTS grc_multi_windows"
+      - sql: "DROP TABLE IF EXISTS grc_multi_events"
+      - sql: "CREATE TABLE grc_multi_events (id INT PRIMARY KEY, tenant_id INT, happened_at INT, amount INT) ENGINE=memory"
+      - sql: "CREATE TABLE grc_multi_windows (id INT PRIMARY KEY, tenant_id INT, range_from INT, range_to INT) ENGINE=memory"
+      - scm: |
+          (begin
+            (insert (table "memcp-tests" "grc_multi_events")
+              '("id" "tenant_id" "happened_at" "amount")
+              (map (produceN 6000) (lambda (i)
+                (list (+ i 1) (+ 1 (mod i 2)) i 2))))
+            (insert (table "memcp-tests" "grc_multi_windows")
+              '("id" "tenant_id" "range_from" "range_to")
+              (list (list 1 2 0 1000) (list 2 2 500 1500)
+                (list 3 1 1000 3000) (list 4 1 0 3000)))
+            (rebuild)
+            true)
+    sql: |
+      SELECT w.id,
+        (SELECT COUNT(*) FROM grc_multi_events e
+          WHERE e.tenant_id = w.tenant_id
+            AND e.happened_at >= w.range_from
+            AND e.happened_at < w.range_to) AS event_count,
+        (SELECT SUM(e.amount) FROM grc_multi_events e
+          WHERE e.tenant_id = w.tenant_id
+            AND e.happened_at >= w.range_from
+            AND e.happened_at < w.range_to) AS amount_sum,
+        (SELECT AVG(e.amount) FROM grc_multi_events e
+          WHERE e.tenant_id = w.tenant_id
+            AND e.happened_at >= w.range_from
+            AND e.happened_at < w.range_to) AS amount_average
+      FROM grc_multi_windows w
+      ORDER BY w.id
+    expect:
+      rows: 4
+      data:
+        - {id: 1, event_count: 500, amount_sum: 1000, amount_average: 2}
+        - {id: 2, event_count: 500, amount_sum: 1000, amount_average: 2}
+        - {id: 3, event_count: 1000, amount_sum: 2000, amount_average: 2}
+        - {id: 4, event_count: 1500, amount_sum: 3000, amount_average: 2}
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS grc_multi_windows"
+      - sql: "DROP TABLE IF EXISTS grc_multi_events"
+
+  - name: "range inequalities become one point axis and one range axis"
+    sql: |
+      EXPLAIN IR SELECT w.id,
+        (SELECT COUNT(*) FROM grc_events e
+          WHERE e.tenant_id = w.tenant_id
+            AND e.happened_at >= w.range_from
+            AND e.happened_at < w.range_to) AS event_count
+      FROM grc_windows w
+      ORDER BY w.id
+    expect:
+      result_contains:
+        - "range-domains ((range-domain"
+        - "point"
+        - "range"
+
+  - name: "physical range cache prepares boundaries and merges cells"
+    sql: |
+      EXPLAIN PHYSICAL SELECT w.id,
+        (SELECT COUNT(*) FROM grc_events e
+          WHERE e.tenant_id = w.tenant_id
+            AND e.happened_at >= w.range_from
+            AND e.happened_at < w.range_to) AS event_count
+      FROM grc_windows w
+      ORDER BY w.id
+    expect:
+      result_contains:
+        - ".grp:grc_events:"
+        - "agg_range_state_"
+        - ".range-lookup:"
+        - "scan_join_order"
+
+  - name: "derived window and parameter drivers use row-local range preparation"
+    sql: |
+      SELECT history.idx, params.tenant_id,
+        (SELECT COUNT(*) FROM grc_events e
+          WHERE e.tenant_id = params.tenant_id
+            AND e.happened_at >= history.range_from
+            AND e.happened_at < history.range_to) AS event_count
+      FROM (
+        SELECT 1 AS idx, 0 AS range_from, 1000 AS range_to
+        UNION ALL
+        SELECT 2 AS idx, 1000 AS range_from, 2000 AS range_to
+      ) history
+      CROSS JOIN (SELECT 2 AS tenant_id) params
+      ORDER BY history.idx
+    expect:
+      rows: 2
+      data:
+        - {idx: 1, tenant_id: 2, event_count: 500}
+        - {idx: 2, tenant_id: 2, event_count: 500}
+
+  - name: "derived range drivers lower to the shared cache"
+    sql: |
+      EXPLAIN PHYSICAL SELECT history.idx,
+        (SELECT COUNT(*) FROM grc_events e
+          WHERE e.tenant_id = params.tenant_id
+            AND e.happened_at >= history.range_from
+            AND e.happened_at < history.range_to) AS event_count
+      FROM (
+        SELECT 1 AS idx, 0 AS range_from, 1000 AS range_to
+        UNION ALL
+        SELECT 2 AS idx, 1000 AS range_from, 2000 AS range_to
+      ) history
+      CROSS JOIN (SELECT 2 AS tenant_id) params
+    expect:
+      result_contains: ["range_group_cache", "agg_range_state_"]
+
+  - name: "range cache layout upgrades ignore stale helper tables"
+    setup:
+      - sql: "DROP TABLE IF EXISTS grc_upgrade_windows"
+      - sql: "DROP TABLE IF EXISTS grc_upgrade_events"
+      - sql: "DROP TABLE IF EXISTS `.grp:grc_upgrade_events:8e0d546935223602`"
+      - sql: "CREATE TABLE grc_upgrade_events (id INT PRIMARY KEY, tenant_id INT, happened_at INT) ENGINE=memory"
+      - sql: "CREATE TABLE grc_upgrade_windows (id INT PRIMARY KEY, tenant_id INT, range_from INT, range_to INT) ENGINE=memory"
+      - scm: |
+          (begin
+            (insert (table "memcp-tests" "grc_upgrade_events")
+              '("id" "tenant_id" "happened_at")
+              (map (produceN 6000) (lambda (i)
+                (list (+ i 1) (+ 1 (mod i 2)) i))))
+            (insert (table "memcp-tests" "grc_upgrade_windows")
+              '("id" "tenant_id" "range_from" "range_to")
+              (list (list 1 2 0 1000) (list 2 2 500 1500)
+                (list 3 1 1000 3000) (list 4 1 0 3000)))
+            (createtable "memcp-tests" ".grp:grc_upgrade_events:8e0d546935223602"
+              (list
+                (list "column" "k0" "int" (list) (list))
+                (list "column" "range_from" "int" (list) (list))
+                (list "column" "range_to" "int" (list) (list)))
+              (list "engine" "cache") true nil)
+            true)
+    sql: |
+      SELECT w.id,
+        (SELECT COUNT(*) FROM grc_upgrade_events e
+          WHERE e.tenant_id = w.tenant_id
+            AND e.happened_at >= w.range_from
+            AND e.happened_at < w.range_to) AS event_count
+      FROM grc_upgrade_windows w
+      ORDER BY w.id
+    expect:
+      rows: 4
+      data:
+        - {id: 1, event_count: 500}
+        - {id: 2, event_count: 500}
+        - {id: 3, event_count: 1000}
+        - {id: 4, event_count: 1500}
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS `.grp:grc_upgrade_events:8e0d546935223602`"
+      - sql: "DROP TABLE IF EXISTS grc_upgrade_windows"
+      - sql: "DROP TABLE IF EXISTS grc_upgrade_events"
+
+  - name: "cost model keeps a singleton range aggregate direct"
+    setup:
+      - sql: "DROP TABLE IF EXISTS grc_single_window"
+      - sql: "CREATE TABLE grc_single_window (id INT PRIMARY KEY, tenant_id INT, range_from INT, range_to INT) ENGINE=memory"
+      - sql: "INSERT INTO grc_single_window VALUES (1, 1, 1000, 3000)"
+    sql: |
+      EXPLAIN PHYSICAL SELECT w.id,
+        (SELECT COUNT(*) FROM grc_events e
+          WHERE e.tenant_id = w.tenant_id
+            AND e.happened_at >= w.range_from
+            AND e.happened_at < w.range_to) AS event_count
+      FROM grc_single_window w
+    expect:
+      result_contains: ["grc_events"]
+      result_not_contains: ["range_group_cache", ".range-lookup:"]
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS grc_single_window"
+
+  - name: "later overlapping request splits already aggregated cells"
+    setup:
+      - sql: "INSERT INTO grc_windows VALUES (6, 2, 250, 1250)"
+    sql: |
+      SELECT
+        (SELECT COUNT(*) FROM grc_events e
+          WHERE e.tenant_id = w.tenant_id
+            AND e.happened_at >= w.range_from
+            AND e.happened_at < w.range_to) AS event_count,
+        (SELECT SUM(e.amount) FROM grc_events e
+          WHERE e.tenant_id = w.tenant_id
+            AND e.happened_at >= w.range_from
+            AND e.happened_at < w.range_to) AS amount_sum
+      FROM grc_windows w
+      WHERE w.id = 6
+    expect:
+      rows: 1
+      data: [{event_count: 500, amount_sum: 1000}]
+
+  - name: "insert incrementally maintains both overlapping cached ranges"
+    setup:
+      - sql: "DELETE FROM grc_windows WHERE id = 6"
+      - sql: "INSERT INTO grc_events VALUES (6001, 2, 750, 2)"
+    sql: |
+      SELECT w.id,
+        (SELECT COUNT(*) FROM grc_events e
+          WHERE e.tenant_id = w.tenant_id
+            AND e.happened_at >= w.range_from
+            AND e.happened_at < w.range_to) AS event_count,
+        (SELECT SUM(e.amount) FROM grc_events e
+          WHERE e.tenant_id = w.tenant_id
+            AND e.happened_at >= w.range_from
+            AND e.happened_at < w.range_to) AS amount_sum
+      FROM grc_windows w
+      ORDER BY w.id
+    expect:
+      rows: 4
+      data:
+        - {id: 1, event_count: 501, amount_sum: 1002}
+        - {id: 2, event_count: 501, amount_sum: 1002}
+        - {id: 3, event_count: 1000, amount_sum: 2000}
+        - {id: 4, event_count: 1500, amount_sum: 3000}
+
+  - name: "changed range value moves maintenance between cells"
+    setup:
+      - sql: "UPDATE grc_events SET happened_at = 1250, amount = 4 WHERE id = 6001"
+    sql: |
+      SELECT w.id,
+        (SELECT COUNT(*) FROM grc_events e
+          WHERE e.tenant_id = w.tenant_id
+            AND e.happened_at >= w.range_from
+            AND e.happened_at < w.range_to) AS event_count,
+        (SELECT SUM(e.amount) FROM grc_events e
+          WHERE e.tenant_id = w.tenant_id
+            AND e.happened_at >= w.range_from
+            AND e.happened_at < w.range_to) AS amount_sum
+      FROM grc_windows w
+      ORDER BY w.id
+    expect:
+      rows: 4
+      data:
+        - {id: 1, event_count: 500, amount_sum: 1000}
+        - {id: 2, event_count: 501, amount_sum: 1004}
+        - {id: 3, event_count: 1000, amount_sum: 2000}
+        - {id: 4, event_count: 1500, amount_sum: 3000}
+
+  - name: "invalid empty range does not create a cache segment"
+    setup:
+      - sql: "INSERT INTO grc_windows VALUES (5, 1, 2000, 2000)"
+    sql: |
+      SELECT (SELECT COUNT(*) FROM grc_events e
+        WHERE e.tenant_id = w.tenant_id
+          AND e.happened_at >= w.range_from
+          AND e.happened_at < w.range_to) AS event_count
+      FROM grc_windows w WHERE w.id = 5
+    expect: {rows: 1, data: [{event_count: 0}]}
+
+  - name: "one-sided upper bound uses the same range cache"
+    sql: |
+      EXPLAIN PHYSICAL SELECT w.id,
+        (SELECT COUNT(*) FROM grc_events e
+          WHERE e.tenant_id = w.tenant_id
+            AND e.happened_at < w.range_to) AS event_count
+      FROM grc_windows w
+    expect:
+      result_contains: ["range_group_cache"]
+
+  - name: "strict unbounded lower range excludes the boundary value"
+    sql: |
+      SELECT
+        (SELECT COUNT(*) FROM grc_events e
+          WHERE e.tenant_id = w.tenant_id
+            AND e.happened_at > w.range_from) AS event_count
+      FROM grc_windows w
+      WHERE w.id = 3
+    expect: {rows: 1, data: [{event_count: 2499}]}
+
+  - name: "ordered scalar probes reuse one-sided range states"
+    sql: |
+      SELECT w.id,
+        (SELECT e.id FROM grc_events e
+          WHERE e.tenant_id = w.tenant_id
+            AND e.happened_at <= w.range_to
+          ORDER BY e.happened_at DESC
+          LIMIT 1) AS latest_event_id
+      FROM grc_windows w
+      WHERE w.id < 5
+      ORDER BY w.id
+    expect:
+      rows: 4
+      data:
+        - {id: 1, latest_event_id: 1000}
+        - {id: 2, latest_event_id: 1500}
+        - {id: 3, latest_event_id: 3001}
+        - {id: 4, latest_event_id: 3001}
+
+  - name: "ordered scalar range probe lowers to the range cache"
+    sql: |
+      EXPLAIN PHYSICAL SELECT w.id,
+        (SELECT e.id FROM grc_events e
+          WHERE e.tenant_id = w.tenant_id
+            AND e.happened_at <= w.range_to
+          ORDER BY e.happened_at DESC
+          LIMIT 1) AS latest_event_id
+      FROM grc_windows w
+    expect:
+      result_contains: ["range_group_cache", "agg_range_state_"]
+
+  - name: "range boundary reused by a point key keeps both correlations"
+    sql: |
+      SELECT w.id,
+        (SELECT e.id FROM grc_events e
+          WHERE e.tenant_id = w.tenant_id
+            AND e.happened_at <= w.tenant_id
+          ORDER BY e.happened_at DESC
+          LIMIT 1) AS latest_event_id
+      FROM grc_windows w
+      WHERE w.id < 5
+      ORDER BY w.id
+    expect:
+      rows: 4
+      data:
+        - {id: 1, latest_event_id: 2}
+        - {id: 2, latest_event_id: 2}
+        - {id: 3, latest_event_id: 1}
+        - {id: 4, latest_event_id: 1}
+
+  - name: "ordered scalar probe uses a session value as its range boundary"
+    session_id: "grc_session_range"
+    setup:
+      - sql: "SET @grc_cutoff = 1200"
+    sql: |
+      SELECT w.id,
+        (SELECT e.id FROM grc_events e
+          WHERE e.tenant_id = w.tenant_id
+            AND e.happened_at <= @grc_cutoff
+          ORDER BY e.happened_at DESC
+          LIMIT 1) AS latest_event_id
+      FROM grc_windows w
+      WHERE w.id < 5
+      ORDER BY w.id
+    expect:
+      rows: 4
+      data:
+        - {id: 1, latest_event_id: 1200}
+        - {id: 2, latest_event_id: 1200}
+        - {id: 3, latest_event_id: 1201}
+        - {id: 4, latest_event_id: 1201}
+
+  - name: "session-bound ordered scalar probe lowers to the range cache"
+    session_id: "grc_session_range"
+    sql: |
+      EXPLAIN PHYSICAL SELECT w.id,
+        (SELECT e.id FROM grc_events e
+          WHERE e.tenant_id = w.tenant_id
+            AND e.happened_at <= @grc_cutoff
+          ORDER BY e.happened_at DESC
+          LIMIT 1) AS latest_event_id
+      FROM grc_windows w
+    expect:
+      result_contains: ["range_group_cache", "agg_range_state_"]
+
+  - name: "session range aggregate without point keys uses boundary-only cells"
+    session_id: "grc_boundary_only"
+    setup:
+      - sql: "SET @grc_cutoff = 1200"
+    sql: |
+      SELECT w.id,
+        (SELECT COUNT(*) FROM grc_events e
+          WHERE e.happened_at < @grc_cutoff) AS event_count
+      FROM grc_windows w
+      WHERE w.id < 5
+      ORDER BY w.id
+    expect:
+      rows: 4
+      data:
+        - {id: 1, event_count: 1200}
+        - {id: 2, event_count: 1200}
+        - {id: 3, event_count: 1200}
+        - {id: 4, event_count: 1200}
+
+  - name: "boundary-only aggregate lowers to the range cache"
+    session_id: "grc_boundary_only"
+    sql: |
+      EXPLAIN PHYSICAL SELECT w.id,
+        (SELECT COUNT(*) FROM grc_events e
+          WHERE e.happened_at < @grc_cutoff) AS event_count
+      FROM grc_windows w
+      WHERE w.id < 5
+    expect:
+      result_contains: ["range_group_cache", "agg_range_state_"]
+
+  - name: "session value inside range aggregate is an explicit cache key"
+    session_id: "grc_session_aggregate"
+    setup:
+      - sql: "SET @grc_bias = 1"
+    sql: |
+      SELECT w.id,
+        (SELECT SUM(e.amount + @grc_bias) FROM grc_events e
+          WHERE e.tenant_id = w.tenant_id
+            AND e.happened_at >= w.range_from
+            AND e.happened_at < w.range_to) AS amount_sum
+      FROM grc_windows w
+      WHERE w.id < 5
+      ORDER BY w.id
+    expect:
+      rows: 4
+      data:
+        - {id: 1, amount_sum: 1500}
+        - {id: 2, amount_sum: 1505}
+        - {id: 3, amount_sum: 3000}
+        - {id: 4, amount_sum: 4500}
+
+  - name: "changed aggregate session value uses a separate range partition"
+    session_id: "grc_session_aggregate"
+    setup:
+      - sql: "SET @grc_bias = 2"
+    sql: |
+      SELECT w.id,
+        (SELECT SUM(e.amount + @grc_bias) FROM grc_events e
+          WHERE e.tenant_id = w.tenant_id
+            AND e.happened_at >= w.range_from
+            AND e.happened_at < w.range_to) AS amount_sum
+      FROM grc_windows w
+      WHERE w.id < 5
+      ORDER BY w.id
+    expect:
+      rows: 4
+      data:
+        - {id: 1, amount_sum: 2000}
+        - {id: 2, amount_sum: 2006}
+        - {id: 3, amount_sum: 4000}
+        - {id: 4, amount_sum: 6000}
+
+  - name: "session-keyed range aggregate lowers to the range cache"
+    session_id: "grc_session_aggregate"
+    sql: |
+      EXPLAIN PHYSICAL SELECT w.id,
+        (SELECT SUM(e.amount + @grc_bias) FROM grc_events e
+          WHERE e.tenant_id = w.tenant_id
+            AND e.happened_at >= w.range_from
+            AND e.happened_at < w.range_to) AS amount_sum
+      FROM grc_windows w
+    expect:
+      result_contains: ["range_group_cache", "agg_range_state_"]
+
+  - name: "two range axes form disjoint multidimensional cells"
+    setup:
+      - sql: "DROP TABLE IF EXISTS grc_2d_windows"
+      - sql: "DROP TABLE IF EXISTS grc_2d_events"
+      - sql: "CREATE TABLE grc_2d_events (id INT PRIMARY KEY, tenant_id INT, happened_at INT, score INT, amount INT) ENGINE=memory"
+      - sql: "CREATE TABLE grc_2d_windows (id INT PRIMARY KEY, tenant_id INT, time_from INT, time_to INT, score_from INT, score_to INT) ENGINE=memory"
+      - scm: |
+          (begin
+            (insert (table "memcp-tests" "grc_2d_events")
+              '("id" "tenant_id" "happened_at" "score" "amount")
+              (map (produceN 6000) (lambda (i)
+                (list (+ i 1) (+ 1 (mod i 2)) i (mod i 10) 2))))
+            (insert (table "memcp-tests" "grc_2d_windows")
+              '("id" "tenant_id" "time_from" "time_to" "score_from" "score_to")
+              (list (list 1 1 1000 3000 2 5)
+                (list 2 1 1500 3500 4 9)
+                (list 3 2 500 2500 1 4)))
+            (rebuild)
+            true)
+    sql: |
+      SELECT w.id,
+        (SELECT COUNT(*) FROM grc_2d_events e
+          WHERE e.tenant_id = w.tenant_id
+            AND e.happened_at >= w.time_from
+            AND e.happened_at < w.time_to
+            AND e.score >= w.score_from
+            AND e.score < w.score_to) AS event_count,
+        (SELECT SUM(e.amount) FROM grc_2d_events e
+          WHERE e.tenant_id = w.tenant_id
+            AND e.happened_at >= w.time_from
+            AND e.happened_at < w.time_to
+            AND e.score >= w.score_from
+            AND e.score < w.score_to) AS amount_sum
+      FROM grc_2d_windows w
+      ORDER BY w.id
+    expect:
+      rows: 3
+      data:
+        - {id: 1, event_count: 400, amount_sum: 800}
+        - {id: 2, event_count: 600, amount_sum: 1200}
+        - {id: 3, event_count: 400, amount_sum: 800}
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS grc_2d_windows"
+      - sql: "DROP TABLE IF EXISTS grc_2d_events"

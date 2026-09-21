@@ -1049,6 +1049,7 @@ func cacheShardCleanup(ptr any, freedByType *[numEvictableTypes]int64) bool {
 	for col := range s.columns {
 		s.columns[col] = nil
 	}
+	s.t.cacheGeneration.Add(1)
 	// COLD: on next access ensureLoaded re-initialises as empty and re-registers
 	s.srState = COLD
 	s.mu.Unlock()

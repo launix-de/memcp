@@ -3057,7 +3057,9 @@ floor avoids pretending that an unseen word is impossible. */
 (define planner_source_row_count (lambda (src)
 	(if (source_is_base_table? src)
 		(planner_table_row_count (source_schema src) (source_relation src))
-		nil)))
+		(if (literal_rows_relation? (source_relation src))
+			(count (literal_rows_data (source_relation src)))
+			nil))))
 
 /* A driving source's own row count, scaled by how selective the residual
 condition is against it. Used wherever a nested probe's call count needs a

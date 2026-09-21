@@ -994,6 +994,20 @@ func Init(en scm.Env) {
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
+		Name: "table_cache_generation",
+
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			if a[0].IsNil() {
+				return scm.NewNil()
+			}
+			return scm.NewInt(int64(TableFromScmer(a[0]).cacheGeneration.Load()))
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "return the Cache-engine data generation used to invalidate external preparation markers",
+			Params: []*scm.TypeDescriptor{{Kind: "table", Label: "table"}},
+			Return: &scm.TypeDescriptor{Kind: "int"},
+		},
+	})
+	scm.Declare(&en, &scm.Declaration{
 		Name: "table_planner_statistics_fingerprint",
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
