@@ -3182,9 +3182,9 @@ tools/costgen; this lowering adds no hand-tuned crossover. */
 					(list (quote planner_source_row_count) (list (quote quote) target))))
 				"canonical_computed_column" "direct_scalar_lookup"))
 			(define decision_id (concat "scalar_order_lookup_cache:" (gs_id stage)))
-			(define alternatives (list "canonical_computed_column" "direct_scalar_lookup"))
-			(define chosen (planner_physical_choice decision_id normal_choice alternatives))
-			(define forced (planner_physical_override decision_id))
+			(define alternative_names (list "canonical_computed_column" "direct_scalar_lookup"))
+			(define chosen (planner_physical_choice decision_id normal_choice alternative_names planning_session))
+			(define forced (planner_physical_override decision_id planning_session))
 			(planner_record_physical_decision (list
 				(list "decision_id" decision_id)
 				(list "decision" "scalar_order_lookup_carrier")
@@ -3197,7 +3197,13 @@ tools/costgen; this lowering adds no hand-tuned crossover. */
 				(list "inputs" (list
 					(list "driver_rows" driver_rows)
 					(list "risk_budget_ns" planner_adaptive_observation_budget_ns)))
-				(list "alternatives" alternatives)) planning_session)
+				(list "alternatives" (list
+					(list (list "plan" "canonical_computed_column")
+						(list "cost" (planner_cost_explain (planner_cost
+							planner_adaptive_observation_budget_ns 0 0 0 0 0 0 0 driver_rows 0.5))))
+					(list (list "plan" "direct_scalar_lookup")
+						(list "cost" (planner_cost_explain
+							(planner_direct_presence_probe_cost driver_rows))))))) planning_session)
 			(if (equal? chosen "canonical_computed_column") candidate nil)))))
 
 (define scalar_order_lookup_cache_candidate (lambda (stages block)
@@ -5742,6 +5748,8 @@ until the caller has selected this physical alternative. */
 		(define limit (coalesceNil
 			(qassoc_get facts (quote join_order_planning_limit) nil)
 			(coalesceNil (planner_literal_value limit_value) -1)))
+		(define limit_partition_columns
+			(qassoc_get facts (quote limit_partition_columns) 0))
 		(define terms (scan_join_order_terms sources plan final_condition))
 		(define joins (map (produceN (- (count sources) 1)) (lambda (raw_index)
 			(begin
@@ -5818,14 +5826,18 @@ until the caller has selected this physical alternative. */
 		(define scan_invocations (physical_join_tree_scan_invocations plan all_sources 1))
 		(define probe_rows (if (number? scan_invocations)
 			(max 0 (- scan_invocations 1)) nil))
-		(define output_rows (if (and (number? limit) (>= limit 0))
+		(define output_rows (if (and (equal? limit_partition_columns 0)
+			(and (number? limit) (>= limit 0)))
 			(min (coalesceNil joined_rows limit) (+ offset limit)) joined_rows))
 		/* Local filters, join keys and order expressions are consumed inside
 		scan_join_order. Keep only values read by the downstream mapper live in its
 		tuples; carrying the complete scan recipe defeats late materialization. */
 		(define map_width (count (scan_join_order_refs_for_exprs
 			sources default_alias consumer_exprs)))
-		(define window_supported ordered_window)
+		(define window_supported (and ordered_window
+			(and (number? limit_partition_columns)
+				(and (>= limit_partition_columns 0)
+					(<= limit_partition_columns (count order_entries))))))
 		(define reduce_supported (and unordered_reduce
 			(and (equal? offset 0) (and (equal? limit -1) (empty_list? order_items)))))
 		(define supported (and (scan_join_order_tree_compatible? plan)
@@ -5864,6 +5876,7 @@ until the caller has selected this physical alternative. */
 				(list (quote table_count) (count sources))
 				(list (quote offset) offset)
 				(list (quote limit) limit)
+				(list (quote limit_partition_columns) limit_partition_columns)
 				(list (quote cost) (planner_scan_join_order_cost
 					input_rows probe_rows joined_rows (count sources)
 					output_rows map_width))
@@ -6167,7 +6180,7 @@ until the caller has selected this physical alternative. */
 			join_filter
 			(quoted_runtime_list (map order_entries car))
 			(cons (quote list) (map order_entries cadr))
-			0
+			(qassoc_get spec (quote limit_partition_columns) 0)
 			(qassoc_get spec (quote offset) 0)
 			(qassoc_get spec (quote limit) -1)
 			(quoted_runtime_list map_refs)
@@ -6364,6 +6377,24 @@ ordered operator's Costgen-owned scan, map and expression coefficients. */
 					(scan_join_order_emit_plan spec default_alias value_builder
 						reduce_expr neutral_expr shard_reduce_expr stages false)
 					legacy_plan))))))
+
+/* A partition-local window is semantic, not a cost alternative: replacing it
+with the legacy global LIMIT path changes the result. Its logical query-block
+keeps the complete join reorderable, while scan_join_order consumes the leading
+partition order columns as one fused physical operator. */
+(define join_partitioned_order_reduce_plan (lambda (all_sources plan default_alias
+	consumer_exprs final_condition order_items offset_value limit_value stages facts
+	value_builder reduce_expr neutral_expr fallback_builder)
+	(begin
+		(define spec (scan_join_order_spec all_sources plan default_alias consumer_exprs
+			final_condition order_items offset_value limit_value stages facts false))
+		(if (nil? spec)
+			(if (nil? fallback_builder)
+				(neumann_fail "build_queryplan"
+					"partition-local joined LIMIT has no scan_join_order implementation")
+				(fallback_builder))
+			(scan_join_order_emit_plan spec default_alias value_builder
+				reduce_expr neutral_expr nil stages false)))))
 
 (define without_col (lambda (cols col)
 	(filter (coalesceNil cols '()) (lambda (item) (not (equal? item col))))))
@@ -8758,17 +8789,54 @@ physical decision and preserve its runtime recompile gate. */
 							(coalesceNil (qb_limit block) -1)
 							true projection_probe_work_rows nil (query_block_stage_catalog block)
 							reduce_expr neutral_expr shard_reduce_expr scalar_plan (qb_facts block)))
-						(if (and (empty_list? order_items)
-							(and (equal? (coalesceNil (qb_offset block) 0) 0)
-								(equal? (coalesceNil (qb_limit block) -1) -1)))
-							(join_unordered_reduce_plan
+						(define partition_columns
+							(qassoc_get (qb_facts block) (quote limit_partition_columns) 0))
+						(define joined_limit_semantic
+							(qassoc_get (qb_facts block) (quote joined_limit_semantic) false))
+						(if (or joined_limit_semantic (> partition_columns 0))
+							(join_partitioned_order_reduce_plan
 								scan_sources scan_plan first_alias effective_field_exprs
-								effective_condition (query_block_stage_catalog block) (qb_facts block)
+								effective_condition order_items (qb_offset block) (qb_limit block)
+								(query_block_stage_catalog block) (qb_facts block)
 								(lambda (_probe_work_rows _scalar_probe) row_expr)
-								reduce_expr neutral_expr shard_reduce_expr legacy_reduce_plan)
-							legacy_reduce_plan))
-					(if hierarchical_order
-						(join_ordered_streaming_limit_plan
+								reduce_expr neutral_expr
+								(if (> partition_columns 0) nil (lambda () legacy_reduce_plan)))
+							(begin
+								(if (and (empty_list? order_items)
+									(and (equal? (coalesceNil (qb_offset block) 0) 0)
+										(equal? (coalesceNil (qb_limit block) -1) -1)))
+									(join_unordered_reduce_plan
+										scan_sources scan_plan first_alias effective_field_exprs
+										effective_condition (query_block_stage_catalog block) (qb_facts block)
+										(lambda (_probe_work_rows _scalar_probe) row_expr)
+										reduce_expr neutral_expr shard_reduce_expr legacy_reduce_plan)
+									legacy_reduce_plan))))
+					(if (qassoc_get (qb_facts block) (quote joined_limit_semantic) false)
+						(join_partitioned_order_reduce_plan
+							scan_sources scan_plan first_alias field_exprs final_condition
+							order_items (qb_offset block) (qb_limit block)
+							(query_block_stage_catalog block) (qb_facts block)
+							(lambda (probe_work_rows _scalar_probe)
+								(cons row_mapper (map field_exprs (lambda (expr)
+									(lower_column_expr_for_join_in_context
+										scan_sources first_alias expr probe_work_rows)))))
+							reduce_expr neutral_expr
+							(lambda ()
+								(if hierarchical_order
+									(join_ordered_streaming_limit_plan
+										(qb_schema block) scan_sources scan_plan first_alias field_exprs needed_exprs final_condition
+										order_items (qb_offset block) (qb_limit block) (query_block_stage_catalog block)
+										(qb_facts block)
+										(lambda (probe_work_rows scalar_probe)
+											(cons row_mapper (map (if (nil? scalar_probe) field_exprs
+												(rewrite_physical_scalar_probe_as_true scalar_probe field_exprs)) (lambda (expr)
+												(lower_column_expr_for_join_in_context
+													scan_sources first_alias expr probe_work_rows)))))
+										reduce_expr neutral_expr)
+									(neumann_fail "build_queryplan"
+										"ordered dataset reduction has no streamable join-tree order"))))
+						(if hierarchical_order
+							(join_ordered_streaming_limit_plan
 							(qb_schema block) scan_sources scan_plan first_alias field_exprs needed_exprs final_condition
 							order_items (qb_offset block) (qb_limit block) (query_block_stage_catalog block)
 							(qb_facts block)
@@ -8777,9 +8845,9 @@ physical decision and preserve its runtime recompile gate. */
 									(rewrite_physical_scalar_probe_as_true scalar_probe field_exprs)) (lambda (expr)
 										(lower_column_expr_for_join_in_context
 											scan_sources first_alias expr probe_work_rows)))))
-							reduce_expr neutral_expr)
-						(neumann_fail "build_queryplan"
-							"ordered dataset reduction has no streamable join-tree order"))))))))
+								reduce_expr neutral_expr)
+							(neumann_fail "build_queryplan"
+								"ordered dataset reduction has no streamable join-tree order")))))))))
 
 (define scalar_order_lookup_input_keys (lambda (stage)
 	(begin

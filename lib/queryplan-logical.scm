@@ -1028,6 +1028,16 @@ move arbitrary calls or subqueries across short-circuit guards. */
 	(reduce (coalesceNil aliases '()) (lambda (found alias)
 		(or found (expr_refs_alias? default_alias alias expr))) false)))
 
+/* Window aggregates over flattened derived expressions can read a scalar
+stage output while their row domain is still carried by one base table. Keep
+those stage outputs as explicit relational inputs: the physical dependency
+graph can then prepare and join them before evaluating the window aggregate. */
+(define window_stage_dependency_sources (lambda (sources default_alias exprs)
+	(filter (coalesceNil sources '()) (lambda (src)
+		(and (stage_output_relation? (source_relation src))
+			(reduce (coalesceNil exprs '()) (lambda (found expr)
+				(or found (expr_refs_alias? default_alias (source_alias src) expr))) false))))))
+
 /* Collect bound source aliases once. Join pruning must not rescan a wide
 projection for every source; that turns read-model queries into O(N^2) planner
 work before decorrelation has even started. */
@@ -2402,14 +2412,30 @@ row containing NULL must remain distinguishable for non-strict functions. */
 /* Scalar row bounds belong to the decorrelated LEFT JOIN helper. Physical
 lowering consumes this contract instead of reconstructing scalar semantics from
 the original SQL shape after join reorder and stage rewrites. */
+(define stage_partition_by (lambda (stage)
+	(qassoc_get (gs_facts stage) (quote partition_by) '())))
+
+(define stage_partition_order (lambda (stage)
+	(qassoc_get (gs_facts stage) (quote partition_order) '())))
+
+(define stage_partition_offset (lambda (stage)
+	(qassoc_get (gs_facts stage) (quote partition_offset) 0)))
+
 (define stage_partition_limit (lambda (stage)
 	(begin
 		(define facts (gs_facts stage))
+		(define partition_by (stage_partition_by stage))
+		(define partition_order (stage_partition_order stage))
+		(define partition_offset (stage_partition_offset stage))
 		(define max_rows (qassoc_get facts (quote partition_limit) nil))
 		(define on_overflow (qassoc_get facts (quote on_overflow) nil))
-		(if (and (number? max_rows)
-			(and (> max_rows 0)
-				(or (equal? on_overflow (quote ignore)) (equal? on_overflow (quote error)))))
+		(if (and (list? partition_by)
+			(and (list? partition_order)
+				(and (number? partition_offset)
+					(and (>= partition_offset 0)
+						(and (number? max_rows)
+							(and (> max_rows 0)
+								(or (equal? on_overflow (quote ignore)) (equal? on_overflow (quote error)))))))))
 			max_rows
 			(neumann_fail "build_queryplan" "bounded relation is missing a valid partition limit contract")))))
 
@@ -2425,8 +2451,11 @@ the original SQL shape after join reorder and stage rewrites. */
 	(not (empty_list? (qassoc_get (gs_facts stage) (quote btw2025_accessing_after_simple) '())))))
 
 /* Cardinality is a relational property, independent of why a stage was
-introduced. A value of one means every partition identified by partition_by
-contributes at most one output tuple. */
+introduced. partition_by and partition_order describe a window over the
+stage's local input relation. domain and lookup-keys describe the later join
+edge to the outer relation; outer expressions must never become partition
+columns. A value of one means every local partition contributes at most one
+output tuple. */
 (define stage_result_max_rows_per_partition (lambda (stage)
 	(if (group_stage? stage)
 		(qassoc_get (gs_facts stage) (quote result_max_rows_per_partition) nil)
@@ -2745,6 +2774,8 @@ general recursive boolean proof above. */
 					(list (quote partition_limit) 1)
 					(list (quote on_overflow) (quote ignore))
 					(list (quote partition_by) outer_domain)
+					(list (quote partition_order) '())
+					(list (quote partition_offset) 0)
 					(list (quote result_max_rows_per_partition) 1)
 					(list (quote domain) outer_domain)
 					(list (quote lookup-keys) lookup_keys)
@@ -2822,6 +2853,8 @@ general recursive boolean proof above. */
 					(list (quote partition_limit) 1)
 					(list (quote on_overflow) (quote ignore))
 					(list (quote partition_by) outer_domain)
+					(list (quote partition_order) '())
+					(list (quote partition_offset) 0)
 					(list (quote result_max_rows_per_partition) 1)
 					(list (quote domain) outer_domain)
 					(list (quote lookup-keys) lookup_keys)
@@ -2970,6 +3003,8 @@ general recursive boolean proof above. */
 				(list (quote partition_limit) 1)
 				(list (quote on_overflow) (quote ignore))
 				(list (quote partition_by) outer_domain)
+				(list (quote partition_order) '())
+				(list (quote partition_offset) 0)
 				(list (quote result_max_rows_per_partition) 1)
 				(list (quote domain) outer_domain)
 				(list (quote lookup-keys) lookup_keys)
@@ -3619,7 +3654,9 @@ without separately proving two-valued semantics. */
 					(list (quote lookup-keys) lookup_keys)
 					(list (quote preserve_empty_domain) true)
 					(list (quote null_semantics) (quote scalar))
-					(list (quote partition_by) outer_domain)
+					(list (quote partition_by) keys)
+					(list (quote partition_order) order_for_inner)
+					(list (quote partition_offset) (coalesceNil (qb_offset inner) 0))
 					(list (quote partition_limit) 1)
 					(list (quote result_max_rows_per_partition) 1)
 					(list (quote on_overflow) (quote ignore)))
@@ -3688,6 +3725,8 @@ without separately proving two-valued semantics. */
 				(list (quote preserve_empty_domain) true)
 				(list (quote null_semantics) (quote scalar))
 				(list (quote partition_by) '())
+				(list (quote partition_order) (qb_order inner))
+				(list (quote partition_offset) (coalesceNil (qb_offset inner) 0))
 				(list (quote partition_limit) 1)
 				(list (quote result_max_rows_per_partition) 1)
 				(list (quote on_overflow) (quote ignore)))))
@@ -4020,7 +4059,9 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 					(list (quote lookup-keys) lookup_keys)
 					(list (quote preserve_empty_domain) true)
 					(list (quote null_semantics) (quote scalar))
-					(list (quote partition_by) outer_domain)
+					(list (quote partition_by) keys)
+					(list (quote partition_order) '())
+					(list (quote partition_offset) 0)
 					(list (quote partition_limit) 2)
 					(list (quote result_max_rows_per_partition) 1)
 					(list (quote on_overflow) (quote error)))
@@ -4453,6 +4494,18 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 				(rewrite_window_derived_ref_chain derived_rewrites expr))))
 		(define partition_exprs (map (nth over 0) rewrite_window_expr))
 		(define canonical_args (map (coalesceNil args '()) rewrite_window_expr))
+		(define dependency_exprs (merge (list partition_exprs canonical_args)))
+		(define dependency_sources (window_stage_dependency_sources
+			outer_sources alias dependency_exprs))
+		(define dependency_hidden (merge (map (zip (produceN (count dependency_exprs)) dependency_exprs)
+			(lambda (entry) (list (concat "__window_dependency_" (car entry)) (cadr entry))))))
+		(define stage_input (if (empty_list? dependency_sources)
+			src
+			(make_query_block
+				(source_schema src)
+				(cons src dependency_sources)
+				'() true '() nil '() nil nil dependency_hidden '()
+				(list (list (quote default_alias) alias)))))
 		(define ags (dedupe_aggregates_by_col (window_aggregate_descriptor fn canonical_args)))
 		(define keys (if (empty_list? partition_exprs)
 			'(1)
@@ -4463,7 +4516,7 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 		(define stage_id (concat "window-agg:" (stable_structural_hash (list fn canonical_args keys) false)))
 		(define stage (make_group_stage
 			stage_id
-			src
+			stage_input
 			outer_domain
 			keys
 			ags

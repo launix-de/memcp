@@ -6017,6 +6017,8 @@ so generated aliases and dependency IDs do not hide equivalent stage graphs. */
 		(quote preserve_empty_domain)
 		(quote null_semantics)
 		(quote partition_by)
+		(quote partition_order)
+		(quote partition_offset)
 		(quote partition_limit)
 		(quote result_max_rows_per_partition)
 		(quote on_overflow))
