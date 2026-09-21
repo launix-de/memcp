@@ -586,6 +586,32 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (equal?
 		(rewrite_scalar_query_probe_params probe_param_index probe_logical_column)
 		probe_param) true "scalar query probe binds pre-derived logical aliases")
+	(define memo_probe_stage (make_group_stage
+		"memo-probe-stage"
+		(list "mp" "memcp-tests" "memo_probe_source" false nil)
+		'() '(1) (list (list 1 (quote +) 0)) nil '() '() nil nil '()))
+	(define memo_probe_expr (memoize_scalar_query_probe
+		memo_probe_stage (list probe_param) (list (quote probe-body) probe_param)))
+	(define memo_probe_key_expr (nth memo_probe_expr 3))
+	(define memo_probe_producer (nth memo_probe_expr 5))
+	(assert (and (equal? (nth memo_probe_expr 0) (physical_query_session_symbol))
+		(and (equal? (nth memo_probe_expr 1) "get_or_compute_scoped")
+			(and (equal? (nth memo_probe_expr 2) (physical_query_scope_symbol))
+				(and (equal? (car memo_probe_key_expr) (quote concat))
+					(and (strlike (nth memo_probe_key_expr 1) "__scalar_nested_probe_%:")
+						(and (equal? (nth memo_probe_expr 4) (quote tx))
+							(and (equal? (car memo_probe_producer) (quote lambda))
+								(equal? (nth memo_probe_producer 2)
+									(list (quote probe-body) probe_param))))))))) true
+		"nested scalar probes memoize by correlation key in query scope")
+	(assert (memoize_scalar_query_probe memo_probe_stage '() 17) 17
+		"uncorrelated scalar probes do not allocate a keyed memo")
+	(assert (equal?
+		(nth (nth (memoize_scalar_query_probe
+			memo_probe_stage (list probe_param) (list (quote probe-body) probe_param)) 3) 1)
+		(nth (nth (memoize_scalar_query_probe
+			memo_probe_stage (list probe_param) (list (quote other-probe-body) probe_param)) 3) 1))
+		false "nested scalar memo keys isolate different stage projections")
 	(define canonical_group_sum (list (list (quote get_column) "g" false "amount" false) (quote +) 0))
 	(define canonical_group_count (list 1 (quote +) 0))
 	(define canonical_group_source (list "g" "memcp-tests" "group_values" false nil))
