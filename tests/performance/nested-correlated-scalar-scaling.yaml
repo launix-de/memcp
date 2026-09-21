@@ -53,3 +53,24 @@ test_cases:
       rows: 1
       data:
         - reminderOpos: 50
+
+  - name: "repeated nested scalar correlation keys reuse one query-scoped probe"
+    sql: |
+      SELECT SUM((
+        SELECT (
+          SELECT a.typ
+          FROM ncs_acc a
+          WHERE a.nummer = j.fyear - 2023
+          LIMIT 1)
+        FROM ncs_jrn j
+        WHERE j.id = e.jrn
+        LIMIT 1)) AS nested_total
+      FROM ncs_ent e
+    expect:
+      rows: 1
+      data:
+        - nested_total: 800
+    performance_rows: 200
+    warmup: 1
+    timing_samples: 5
+    threshold_ms: 1000

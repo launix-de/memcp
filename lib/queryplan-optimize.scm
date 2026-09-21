@@ -1673,8 +1673,12 @@ particular star shape. */
 	(begin
 		(define adjacency (join_order_arm_adjacency aliases regular_edges))
 		(define root (join_order_arm_root nodes aliases adjacency required_drivers))
+		/* The articulation root is the common driver of all independently planned
+		arms. Keep it as a driver property while orienting child joins; otherwise a
+		cheaper child can reverse the root choice after decomposition. */
+		(define rooted_drivers (append required_drivers root))
 		(car (join_order_arm_plan_from
-			nodes aliases predicates adjacency root '() required_drivers)))))
+			nodes aliases predicates adjacency root '() rooted_drivers)))))
 
 (define join_order_plan_with_atomic (lambda (plan atomic)
 	(list
@@ -3057,7 +3061,9 @@ floor avoids pretending that an unseen word is impossible. */
 (define planner_source_row_count (lambda (src)
 	(if (source_is_base_table? src)
 		(planner_table_row_count (source_schema src) (source_relation src))
-		nil)))
+		(if (literal_rows_relation? (source_relation src))
+			(count (literal_rows_data (source_relation src)))
+			nil))))
 
 /* A driving source's own row count, scaled by how selective the residual
 condition is against it. Used wherever a nested probe's call count needs a

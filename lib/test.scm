@@ -586,6 +586,32 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (equal?
 		(rewrite_scalar_query_probe_params probe_param_index probe_logical_column)
 		probe_param) true "scalar query probe binds pre-derived logical aliases")
+	(define memo_probe_stage (make_group_stage
+		"memo-probe-stage"
+		(list "mp" "memcp-tests" "memo_probe_source" false nil)
+		'() '(1) (list (list 1 (quote +) 0)) nil '() '() nil nil '()))
+	(define memo_probe_expr (memoize_scalar_query_probe
+		memo_probe_stage (list probe_param) (list (quote probe-body) probe_param)))
+	(define memo_probe_key_expr (nth memo_probe_expr 3))
+	(define memo_probe_producer (nth memo_probe_expr 5))
+	(assert (and (equal? (nth memo_probe_expr 0) (physical_query_session_symbol))
+		(and (equal? (nth memo_probe_expr 1) "get_or_compute_scoped")
+			(and (equal? (nth memo_probe_expr 2) (physical_query_scope_symbol))
+				(and (equal? (car memo_probe_key_expr) (quote concat))
+					(and (strlike (nth memo_probe_key_expr 1) "__scalar_nested_probe_%:")
+						(and (equal? (nth memo_probe_expr 4) (quote tx))
+							(and (equal? (car memo_probe_producer) (quote lambda))
+								(equal? (nth memo_probe_producer 2)
+									(list (quote probe-body) probe_param))))))))) true
+		"nested scalar probes memoize by correlation key in query scope")
+	(assert (memoize_scalar_query_probe memo_probe_stage '() 17) 17
+		"uncorrelated scalar probes do not allocate a keyed memo")
+	(assert (equal?
+		(nth (nth (memoize_scalar_query_probe
+			memo_probe_stage (list probe_param) (list (quote probe-body) probe_param)) 3) 1)
+		(nth (nth (memoize_scalar_query_probe
+			memo_probe_stage (list probe_param) (list (quote other-probe-body) probe_param)) 3) 1))
+		false "nested scalar memo keys isolate different stage projections")
 	(define canonical_group_sum (list (list (quote get_column) "g" false "amount" false) (quote +) 0))
 	(define canonical_group_count (list 1 (quote +) 0))
 	(define canonical_group_source (list "g" "memcp-tests" "group_values" false nil))
@@ -845,6 +871,22 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		"query_invariant_probe_entries_for_stages finds the eligible stage")
 	(assert (not (empty_list? (query_invariant_probe_bindings invariant_entries))) true
 		"a non-empty entry list produces a once-bound define lower_group_stage_prepare_using can emit")
+	/* Repeated lazy prepare recipes must share the helper's callable identity,
+	not only its AST. A plain lambda would construct and install a fresh inner
+	once-wrapper at every projected-field call site, rebuilding the same stage. */
+	(define repeated_prepare_binding (list
+		(quote session)
+		"__prepare_stage_unit"
+		(list (quote once) (list (quote lambda) '() 7))))
+	(define deduplicated_prepare_plan (deduplicate_lazy_prepare_recipes
+		(list (quote !begin) repeated_prepare_binding repeated_prepare_binding)))
+	(assert (match deduplicated_prepare_plan
+		((symbol !begin)
+			((symbol define) _helper ((symbol once) ((symbol lambda) params _body)))
+			_rewritten)
+		(empty_list? params)
+		_ false)
+		true "deduplicated prepare recipe helper is itself stable across call sites")
 	(define correlated_probe_stage (make_group_stage
 		"correlated-probe-stage"
 		(list "cp2" "memcp-tests" "correlated_probe_source" false nil)
