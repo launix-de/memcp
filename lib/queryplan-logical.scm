@@ -565,6 +565,21 @@ domains (for example dashboard time windows). */
 		(source_outer? src)
 		(fold_single_literal_expr bindings (source_join_expr src)))))
 
+/* Preserve the original expression shape when this query block has no
+single-row literal source. Besides avoiding needless work, this keeps planner
+cost/cache keys stable for unrelated AND/OR predicates. */
+(define apply_single_literal_expr (lambda (bindings expr)
+	(if (empty_list? bindings) expr (fold_single_literal_expr bindings expr))))
+
+(define apply_single_literal_fields (lambda (bindings fields)
+	(if (empty_list? bindings) fields (fold_single_literal_fields bindings fields))))
+
+(define apply_single_literal_order (lambda (bindings order_items)
+	(if (empty_list? bindings) order_items (fold_single_literal_order bindings order_items))))
+
+(define apply_single_literal_source_join (lambda (bindings src)
+	(if (empty_list? bindings) src (fold_single_literal_source_join bindings src))))
+
 (define literal_projection? (lambda (projection)
 	(reduce (map_assoc projection (lambda (_title expr)
 		(logical_literal_value? (fold_single_literal_expr '() expr))))
@@ -6607,7 +6622,7 @@ names in projections, predicates, and correlated subqueries. */
 										(filter raw_flattened_source_list (lambda (src)
 											(not (single_literal_cross_source? src))))
 										raw_flattened_source_list)
-									(lambda (src) (fold_single_literal_source_join literal_bindings src))))
+									(lambda (src) (apply_single_literal_source_join literal_bindings src))))
 								(define rewrites (nth flattened_sources 1))
 								(define inherited_literal_rewrites (filter
 									(uctx_get child_ctx (quote derived-rewrites) '())
@@ -6620,19 +6635,19 @@ names in projections, predicates, and correlated subqueries. */
 								/* Derived references are already bound. Rewrite them once, then
 								prune unused row-preserving lookups before their join expressions
 								can create decorrelation stages. */
-								(define rewritten_where (fold_single_literal_expr literal_bindings
+								(define rewritten_where (apply_single_literal_expr literal_bindings
 									(combine_where_terms source_where_terms
 										(rewrite_derived_ref_chain active_rewrites (qb_where block)))))
-								(define rewritten_fields (fold_single_literal_fields literal_bindings
+								(define rewritten_fields (apply_single_literal_fields literal_bindings
 									(rewrite_derived_fields_chain active_rewrites (qb_fields block))))
 								(define rewritten_group (map (coalesceNil (qb_group block) '()) (lambda (item)
-									(fold_single_literal_expr literal_bindings
+									(apply_single_literal_expr literal_bindings
 										(rewrite_derived_ref_chain active_rewrites item)))))
-								(define rewritten_having (fold_single_literal_expr literal_bindings
+								(define rewritten_having (apply_single_literal_expr literal_bindings
 									(rewrite_derived_ref_chain active_rewrites (qb_having block))))
-								(define rewritten_order (fold_single_literal_order literal_bindings
+								(define rewritten_order (apply_single_literal_order literal_bindings
 									(rewrite_derived_order_chain active_rewrites (qb_order block))))
-								(define rewritten_hidden (fold_single_literal_fields literal_bindings
+								(define rewritten_hidden (apply_single_literal_fields literal_bindings
 									(rewrite_derived_fields_chain active_rewrites (qb_hidden block))))
 								(define default_alias (qassoc_get (qb_facts block) (quote default_alias)
 									(if (empty_list? flattened_source_list) nil (source_alias (car flattened_source_list)))))
