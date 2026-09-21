@@ -700,6 +700,24 @@ complete nested probe inside every candidate-row callback. */
 							(and (group_stage? candidate)
 								(equal? signature (get_assoc semantic_signatures (gs_id candidate))))))) 1)))))))))
 
+/* A nested scalar probe can be reached from several projection and join
+callbacks for the same correlation key. Keep that exact value in the query
+scope so only the first callback executes the relational probe. The scope is
+cancelled with the owning query and the transaction is passed to the producer,
+so visibility and cancellation semantics remain unchanged. */
+(define memoize_scalar_query_probe (lambda (stage lookup_keys lowered)
+	(if (empty_list? lookup_keys)
+		lowered
+		(list
+			(physical_query_session_symbol)
+			"get_or_compute_scoped"
+			(physical_query_scope_symbol)
+			(list (quote concat)
+				(concat "__scalar_nested_probe_" (fnv_hash (gs_id stage)) ":")
+				(list (quote serialize) (cons (quote list) lookup_keys)))
+			(quote tx)
+			(list (quote lambda) (list (quote tx)) lowered)))))
+
 (define lower_scalar_first_query_probe_expr (lambda (all_stages stage value_expr keys lookup_keys probe_work_rows fallback_probe_work_rows)
 	(begin
 		(define direct_stages (scalar_first_query_probe_direct_nested_stages all_stages stage))
@@ -740,7 +758,7 @@ complete nested probe inside every candidate-row callback. */
 		(define inline_ids (stage_id_set inline_owned_stages))
 		(define prepare_stages (filter nested_stages (lambda (nested_stage)
 			(not (has_assoc? inline_ids (gs_id nested_stage))))))
-		(lower_scalar_first_query_probe_expr_using
+		(define lowered (lower_scalar_first_query_probe_expr_using
 			stage
 			value_expr
 			keys
@@ -749,7 +767,8 @@ complete nested probe inside every candidate-row callback. */
 			prepare_stages
 			inline_presence_stages
 			(stage_partition_limit stage)
-			false))))
+			false))
+		(memoize_scalar_query_probe stage lookup_keys lowered))))
 
 (define lower_scalar_aggregate_query_probe_expr (lambda (all_stages stage value_expr keys lookup_keys reduce_expr neutral_expr)
 	(begin
