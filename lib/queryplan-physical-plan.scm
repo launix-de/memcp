@@ -3484,13 +3484,23 @@ projected value back to the original scan row without a per-row nested probe. */
 	(symbol (concat "__nested_scalar_recmap_"
 		(fnv_hash (concat (gs_id (nth candidate 1)) "\n" (nth candidate 2)))))))
 
-(define nested_scalar_recmap_costs (lambda (candidate)
+(define nested_scalar_recmap_row_counts (lambda (candidate)
 	(begin
-		(define driver_rows (planner_source_row_count (nth candidate 0)))
+		(define driver (nth candidate 0))
+		(define middle (nth candidate 3))
+		(define target (nth candidate 6))
+		(define driver_rows (coalesceNil (planner_source_row_count driver)
+			(scan_estimate (table (source_schema driver) (source_relation driver)))))
 		(define middle_rows (min driver_rows
-			(planner_source_row_count (nth candidate 3))))
+			(coalesceNil (planner_source_row_count middle)
+				(scan_estimate (table (source_schema middle) (source_relation middle))))))
 		(define target_rows (min middle_rows
-			(planner_source_row_count (nth candidate 6))))
+			(coalesceNil (planner_source_row_count target)
+				(scan_estimate (table (source_schema target) (source_relation target))))))
+		(list driver_rows middle_rows target_rows))))
+
+(define nested_scalar_recmap_costs_for_rows (lambda (driver_rows middle_rows target_rows)
+	(begin
 		/* Both projections, the intermediate image, composition, and the final
 		row-bound read are query-local. Keep this work explicit so Costgen can
 		calibrate the carrier without pretending it is a persistent column. */
@@ -3501,6 +3511,21 @@ projected value back to the original scan row without a per-row nested probe. */
 			(planner_nested_scalar_recmap_cost 2 recmap_work_rows)
 			driver_rows middle_rows target_rows recmap_work_rows))))
 
+(define nested_scalar_recmap_runtime_wins? (lambda (driver middle target)
+	(begin
+		(define driver_rows (scan_estimate driver))
+		(define middle_rows (min driver_rows (scan_estimate middle)))
+		(define target_rows (min middle_rows (scan_estimate target)))
+		(define costs (nested_scalar_recmap_costs_for_rows
+			driver_rows middle_rows target_rows))
+		(planner_cost_better? (nth costs 1) (nth costs 0)))))
+
+(define nested_scalar_recmap_costs (lambda (candidate)
+	(begin
+		(define rows (nested_scalar_recmap_row_counts candidate))
+		(nested_scalar_recmap_costs_for_rows
+			(nth rows 0) (nth rows 1) (nth rows 2)))))
+
 (define select_nested_scalar_recmap_candidate (lambda (candidate planning_session)
 	(if (nil? candidate)
 		nil
@@ -3510,7 +3535,13 @@ projected value back to the original scan row without a per-row nested probe. */
 			(define recmap_cost (nth costs 1))
 			(define decision_id (concat "nested_scalar_recmap:"
 				(gs_id (nth candidate 1))))
-			(define normal_choice (if (planner_cost_better? recmap_cost direct_cost)
+			(define normal_choice (if (planner_guarded_choice
+				(planner_cost_better? recmap_cost direct_cost)
+				(list (quote nested_scalar_recmap_runtime_wins?)
+					(source_table_expr (nth candidate 0))
+					(source_table_expr (nth candidate 3))
+					(source_table_expr (nth candidate 6)))
+				planning_session)
 				"query_recmap" "direct_scalar_chain"))
 			(define alternatives '("direct_scalar_chain" "query_recmap"))
 			(define chosen (planner_physical_choice decision_id normal_choice
