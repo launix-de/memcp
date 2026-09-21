@@ -906,9 +906,11 @@ func extractScanJoinInfoBody(expr scm.Scmer, outerParams []scm.Scmer) []scanJoin
 	if expr.IsProc() {
 		proc := expr.Proc()
 		params := outerParams
-		paramExpr := stripSourceInfo(proc.Params)
-		if paramExpr.IsSlice() {
-			params = paramExpr.Slice()
+		if params == nil {
+			paramExpr := stripSourceInfo(proc.Params)
+			if paramExpr.IsSlice() {
+				params = paramExpr.Slice()
+			}
 		}
 		return extractScanJoinInfoBody(proc.Body, params)
 	}
@@ -917,10 +919,14 @@ func extractScanJoinInfoBody(expr scm.Scmer, outerParams []scm.Scmer) []scanJoin
 	}
 	items := expr.Slice()
 	if len(items) >= 3 && callHeadIs(items[0], "lambda") {
-		paramExpr := stripSourceInfo(items[1])
-		if paramExpr.IsSlice() {
-			return extractScanJoinInfoBody(items[2], paramExpr.Slice())
+		params := outerParams
+		if params == nil {
+			paramExpr := stripSourceInfo(items[1])
+			if paramExpr.IsSlice() {
+				params = paramExpr.Slice()
+			}
 		}
+		return extractScanJoinInfoBody(items[2], params)
 	}
 	if len(items) >= 7 && callHeadIs(items[0], "scan", "scan_order", "scalar_scan", "scalar_scan_order") {
 		tableIdx := 2
@@ -1195,7 +1201,9 @@ func matchJoinEquality(a, b scm.Scmer, paramIdx map[string]int, paramCount int, 
 		if depth, value, ok := scanOuterReference(b); ok && depth == 1 {
 			inner := stripSourceInfo(value)
 			if inner.IsSymbol() {
-				return idx, inner.String()
+				if inputCol, found := computorInputColumn(inner.String(), computorParams); found {
+					return idx, inputCol
+				}
 			}
 			if inner.IsNthLocalVar() && computorParams != nil {
 				outerIdx := int(inner.NthLocalVar())
@@ -1207,14 +1215,18 @@ func matchJoinEquality(a, b scm.Scmer, paramIdx map[string]int, paramCount int, 
 				if outerIdx >= 0 && outerIdx < len(computorParams) {
 					param := stripSourceInfo(computorParams[outerIdx])
 					if param.IsSymbol() {
-						return idx, param.String()
+						if inputCol, found := computorInputColumn(param.String(), computorParams); found {
+							return idx, inputCol
+						}
 					}
 				}
 			}
 			if inner.IsSlice() {
 				gcItems := inner.Slice()
 				if len(gcItems) >= 4 && callHeadIs(gcItems[0], "get_column") {
-					return idx, scm.String(gcItems[3])
+					if inputCol, found := computorInputColumn(scm.String(gcItems[3]), computorParams); found {
+						return idx, inputCol
+					}
 				}
 			}
 		}
@@ -1225,11 +1237,31 @@ func matchJoinEquality(a, b scm.Scmer, paramIdx map[string]int, paramCount int, 
 		if cIdx >= 0 && cIdx < len(computorParams) {
 			p := stripSourceInfo(computorParams[cIdx])
 			if p.IsSymbol() {
-				return idx, p.String()
+				if inputCol, found := computorInputColumn(p.String(), computorParams); found {
+					return idx, inputCol
+				}
 			}
 		}
 	}
 	return -1, ""
+}
+
+func computorInputColumn(name string, computorParams []scm.Scmer) (string, bool) {
+	for _, param := range computorParams {
+		param = stripSourceInfo(param)
+		if !param.IsSymbol() {
+			continue
+		}
+		paramName := param.String()
+		columnName := paramName
+		if dot := strings.LastIndex(paramName, "."); dot >= 0 {
+			columnName = paramName[dot+1:]
+		}
+		if name == paramName || name == columnName {
+			return columnName, true
+		}
+	}
+	return "", false
 }
 
 // findScanNode walks a computor expression and returns the scan AST node

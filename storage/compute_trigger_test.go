@@ -416,6 +416,18 @@ func TestLegacyScanAccessDoesNotClaimCompleteReadDependencies(t *testing.T) {
 	}
 }
 
+func TestNestedComputorLambdaDoesNotReplaceTargetInputs(t *testing.T) {
+	nested := lambdaAst([]string{"group_key"}, nestedScanAst("nested_dependency", "src", "group_key"))
+	computor := lambdaAst([]string{"ref_id"}, nested)
+	refs := extractScanJoinInfo(computor)
+	if len(refs) != 1 {
+		t.Fatalf("expected one nested source dependency, got %#v", refs)
+	}
+	if len(refs[0].srcCols) != 0 || len(refs[0].inputCols) != 0 {
+		t.Fatalf("nested cache parameters were mistaken for target-table inputs: %#v", refs[0])
+	}
+}
+
 // A schema written by an older binary can contain generated guards that omit
 // compiled-only predicates. Rebinding their target must also replace that code.
 func TestRestoredComputeDependencyTriggersRefreshGuards(t *testing.T) {
