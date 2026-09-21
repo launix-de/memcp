@@ -713,7 +713,8 @@ so visibility and cancellation semantics remain unchanged. */
 			"get_or_compute_scoped"
 			(physical_query_scope_symbol)
 			(list (quote concat)
-				(concat "__scalar_nested_probe_" (fnv_hash (gs_id stage)) ":")
+				(concat "__scalar_nested_probe_"
+					(fnv_hash (serialize (list (gs_id stage) lowered))) ":")
 				(list (quote serialize) (cons (quote list) lookup_keys)))
 			(quote tx)
 			(list (quote lambda) (list (quote tx)) lowered)))))

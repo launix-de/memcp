@@ -606,6 +606,12 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		"nested scalar probes memoize by correlation key in query scope")
 	(assert (memoize_scalar_query_probe memo_probe_stage '() 17) 17
 		"uncorrelated scalar probes do not allocate a keyed memo")
+	(assert (equal?
+		(nth (nth (memoize_scalar_query_probe
+			memo_probe_stage (list probe_param) (list (quote probe-body) probe_param)) 3) 1)
+		(nth (nth (memoize_scalar_query_probe
+			memo_probe_stage (list probe_param) (list (quote other-probe-body) probe_param)) 3) 1))
+		false "nested scalar memo keys isolate different stage projections")
 	(define canonical_group_sum (list (list (quote get_column) "g" false "amount" false) (quote +) 0))
 	(define canonical_group_count (list 1 (quote +) 0))
 	(define canonical_group_source (list "g" "memcp-tests" "group_values" false nil))
