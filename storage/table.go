@@ -568,6 +568,10 @@ type table struct {
 	showColumnsSnapshot atomic.Pointer[tableShowColumnsSnapshot]
 	columnNamesSnapshot atomic.Pointer[tableColumnNamesSnapshot]
 	plannerStatsToken   atomic.Uint64 // process-unique dependency token for cached cost plans
+	// cacheGeneration changes whenever a reconstructible Cache-engine shard is
+	// emptied. Range-cache preparation markers include it so an evicted domain
+	// partition can never be mistaken for a still-populated one.
+	cacheGeneration atomic.Uint64
 	// plannerRowEstimate is deliberately approximate. Rebuild/statistics
 	// publication replaces it atomically; query compilation must never load a
 	// cold shard or take a shard read lock merely to obtain a row estimate.

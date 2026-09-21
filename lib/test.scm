@@ -845,6 +845,22 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		"query_invariant_probe_entries_for_stages finds the eligible stage")
 	(assert (not (empty_list? (query_invariant_probe_bindings invariant_entries))) true
 		"a non-empty entry list produces a once-bound define lower_group_stage_prepare_using can emit")
+	/* Repeated lazy prepare recipes must share the helper's callable identity,
+	not only its AST. A plain lambda would construct and install a fresh inner
+	once-wrapper at every projected-field call site, rebuilding the same stage. */
+	(define repeated_prepare_binding (list
+		(quote session)
+		"__prepare_stage_unit"
+		(list (quote once) (list (quote lambda) '() 7))))
+	(define deduplicated_prepare_plan (deduplicate_lazy_prepare_recipes
+		(list (quote !begin) repeated_prepare_binding repeated_prepare_binding)))
+	(assert (match deduplicated_prepare_plan
+		((symbol !begin)
+			((symbol define) _helper ((symbol once) ((symbol lambda) params _body)))
+			_rewritten)
+		(empty_list? params)
+		_ false)
+		true "deduplicated prepare recipe helper is itself stable across call sites")
 	(define correlated_probe_stage (make_group_stage
 		"correlated-probe-stage"
 		(list "cp2" "memcp-tests" "correlated_probe_source" false nil)
