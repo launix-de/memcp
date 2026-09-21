@@ -1673,8 +1673,12 @@ particular star shape. */
 	(begin
 		(define adjacency (join_order_arm_adjacency aliases regular_edges))
 		(define root (join_order_arm_root nodes aliases adjacency required_drivers))
+		/* The articulation root is the common driver of all independently planned
+		arms. Keep it as a driver property while orienting child joins; otherwise a
+		cheaper child can reverse the root choice after decomposition. */
+		(define rooted_drivers (append required_drivers root))
 		(car (join_order_arm_plan_from
-			nodes aliases predicates adjacency root '() required_drivers)))))
+			nodes aliases predicates adjacency root '() rooted_drivers)))))
 
 (define join_order_plan_with_atomic (lambda (plan atomic)
 	(list
