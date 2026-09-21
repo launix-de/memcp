@@ -870,6 +870,9 @@ func Init(en scm.Env) {
 	scm.CustomStringer[TagRecSet] = func(ptr unsafe.Pointer) string {
 		return (*recSet)(ptr).String()
 	}
+	scm.CustomStringer[TagRecMap] = func(ptr unsafe.Pointer) string {
+		return (*recMap)(ptr).String()
+	}
 	registerScanBoundaryFormats()
 
 	scm.Declare(&en, &scm.Declaration{
@@ -1350,6 +1353,55 @@ func Init(en scm.Env) {
 			Return: &scm.TypeDescriptor{Kind: "func", Label: "lookup", Description: "tests whether the recset contains a row with the supplied composite key", Params: []*scm.TypeDescriptor{
 				{Kind: "any", Label: "key", Description: "one value for each source key column, in the same order", Variadic: true},
 			}, Return: &scm.TypeDescriptor{Kind: "bool", Label: "present", Description: "whether the composite key occurs in the recset"}},
+		},
+	})
+	scm.Declare(&en, &scm.Declaration{
+		Name: "recmap_project_join",
+
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			currentTx := scmerToTxContext(a[0])
+			source := RecSetFromScmer(a[1])
+			sourceKeyCols := scmerSliceToStrings(mustScmerSlice(a[2], "recmap source key columns"))
+			target := TableFromScmer(a[4])
+			targetKeyCols := scmerSliceToStrings(mustScmerSlice(a[5], "recmap target key columns"))
+			return NewRecMapScmer(projectRecMap(currentTx, source, sourceKeyCols, a[3], target, targetKeyCols))
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "builds an immutable query-local source-row to optional target-row mapping over exactly the supplied source RecSet",
+			HasSideEffects: true,
+			Params: []*scm.TypeDescriptor{
+				{Kind: "any", Label: "tx", Description: "transaction context used for source and target visibility"},
+				{Kind: "recset", Label: "source_recset", Description: "exact pruned source-row domain"},
+				{Kind: "list", Label: "source_key_columns"},
+				{Kind: "func|nil", Label: "source_key_mapper", Description: "optional function mapping source column values to the target key tuple"},
+				{Kind: "table", Label: "target_table"},
+				{Kind: "list", Label: "target_key_columns"},
+			},
+			Return: &scm.TypeDescriptor{Kind: "recmap"},
+		},
+	})
+	scm.Declare(&en, &scm.Declaration{
+		Name: "recmap_image",
+
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			return NewRecSetScmer(RecMapFromScmer(a[0]).image())
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "returns the distinct non-NULL target rows reached by a query-local RecMap",
+			Params: []*scm.TypeDescriptor{{Kind: "recmap", Label: "recmap"}},
+			Return: &scm.TypeDescriptor{Kind: "recset"},
+		},
+	})
+	scm.Declare(&en, &scm.Declaration{
+		Name: "recmap_compose",
+
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			return NewRecMapScmer(composeRecMaps(RecMapFromScmer(a[0]), RecMapFromScmer(a[1])))
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "composes two compatible query-local RecMaps while preserving the first map's source domain",
+			Params: []*scm.TypeDescriptor{
+				{Kind: "recmap", Label: "source_to_intermediate"},
+				{Kind: "recmap", Label: "intermediate_to_target"},
+			},
+			Return: &scm.TypeDescriptor{Kind: "recmap"},
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
