@@ -604,7 +604,7 @@ func (s *StorageIndex) rowWithinBounds(bounds scanAccess, indexBounds *scanIndex
 		}
 		if i == lastSorted {
 			upperLast := indexBounds.upperLast()
-			if !upperLast.IsNil() {
+			if scanAccessBoundaryHasUpperBound(bounds, i) {
 				if upperInclusive {
 					if s.compareAt(i, upperLast, v) < 0 {
 						return false, true
@@ -613,7 +613,7 @@ func (s *StorageIndex) rowWithinBounds(bounds scanAccess, indexBounds *scanIndex
 					return false, true
 				}
 			}
-			if indexBounds.len() > i && !indexBounds.lower(bounds, i).IsNil() {
+			if indexBounds.len() > i && scanAccessBoundaryHasLowerBound(bounds, i) {
 				comparison := s.compareAt(i, v, indexBounds.lower(bounds, i))
 				if comparison < 0 || (comparison == 0 && !lowerInclusive) {
 					return false, false
@@ -2113,7 +2113,7 @@ start_scan:
 	// LIKE columns cannot participate in binary search (pattern doesn't map to sort order).
 	searchLo := 0
 	searchN := int(s.t.main_count)
-	if hint := int(s.lastHit.Load()); hint > 0 && hint < searchN && firstSorted >= 0 && !indexBounds.lower(bounds, firstSorted).IsNil() {
+	if hint := int(s.lastHit.Load()); hint > 0 && hint < searchN && firstSorted >= 0 && scanAccessBoundaryHasLowerBound(bounds, firstSorted) {
 		hintVal := cols[firstSorted].get(getRecid(hint))
 		if !hintVal.IsNil() {
 			if s.compareAt(firstSorted, hintVal, indexBounds.lower(bounds, firstSorted)) < 0 {
@@ -2125,8 +2125,8 @@ start_scan:
 		}
 	}
 	mainIdx := 0
-	if firstSorted >= 0 && !indexBounds.lower(bounds, firstSorted).IsNil() {
-		if s.usesNaturalAscendingOrder(firstSorted) {
+	if firstSorted >= 0 && scanAccessBoundaryHasLowerBound(bounds, firstSorted) {
+		if s.usesNaturalAscendingOrder(firstSorted) && !indexBounds.lower(bounds, firstSorted).IsNil() {
 			less := scm.Less
 			if firstSorted < len(s.ColOrder) && s.ColOrder[firstSorted] != nil {
 				less = s.ColOrder[firstSorted]
@@ -2150,7 +2150,7 @@ start_scan:
 	s.lastHit.Store(uint32(mainIdx))
 	// skip past equal values when lower bound is exclusive (col > 5)
 	// LIKE columns don't have lower/upper semantics, so skip this optimization.
-	if !lowerInclusive && lastSorted >= 0 && !indexBounds.lower(bounds, lastSorted).IsNil() {
+	if !lowerInclusive && lastSorted >= 0 && scanAccessBoundaryHasLowerBound(bounds, lastSorted) {
 		for uint32(mainIdx) < s.t.main_count {
 			recid := getRecid(mainIdx)
 			if s.compareAt(lastSorted, cols[lastSorted].get(recid), indexBounds.lower(bounds, lastSorted)) != 0 {
@@ -2168,7 +2168,7 @@ start_scan:
 	// An unbounded trailing ORDER BY key does not remove the upper end of
 	// an earlier equality prefix. Resolve that end before treating the main
 	// interval as exact or using its size to choose a RecSet traversal.
-	hasUpperBound := lastSorted >= 0 && !indexBounds.upperLast().IsNil()
+	hasUpperBound := lastSorted >= 0 && scanAccessBoundaryHasUpperBound(bounds, lastSorted)
 	for i := 0; i < lastSorted && !hasUpperBound; i++ {
 		if s.columnIsSorted(i) {
 			hasUpperBound = scanAccessBoundaryIsPoint(bounds, i) ||
@@ -2199,7 +2199,8 @@ start_scan:
 			trailingOrder = true
 			continue
 		}
-		if trailingOrder || !scanAccessBoundaryIsPoint(bounds, i) || bounds.boundValue(i, false).IsNil() {
+		if trailingOrder || !scanAccessBoundaryIsPoint(bounds, i) ||
+			(bounds.boundValue(i, false).IsNil() && !scanAccessBoundaryIsNullPoint(bounds, i)) {
 			completePointPrefix = false
 			break
 		}
@@ -2424,7 +2425,7 @@ start_scan:
 		if !state.precomputedDelta {
 			for seekCols < cmpCols {
 				i := seekCols
-				if indexBounds.lower(bounds, i).IsNil() || (len(s.ColMapFn) > i && !s.ColMapFn[i].IsNil()) || (bounds.len() > i && !bounds.boundaryAnalyzer(i).IsSorted()) {
+				if !scanAccessBoundaryHasLowerBound(bounds, i) || (len(s.ColMapFn) > i && !s.ColMapFn[i].IsNil()) || (bounds.len() > i && !bounds.boundaryAnalyzer(i).IsSorted()) {
 					break
 				}
 				seekCols++
