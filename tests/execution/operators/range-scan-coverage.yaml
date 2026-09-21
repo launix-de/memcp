@@ -27,6 +27,7 @@ setup:
   - sql: "DROP TABLE IF EXISTS pushdown_lookup"
   - sql: "DROP TABLE IF EXISTS stats_contract_child"
   - sql: "DROP TABLE IF EXISTS stats_contract_parent"
+  - sql: "DROP TABLE IF EXISTS null_point_index"
 
 test_cases:
 
@@ -118,6 +119,57 @@ test_cases:
           outputCount: 1
     cleanup:
       - scm: '(settings "ScanDebugging" false)'
+
+  - name: "Create nullable point-index fixture"
+    setup:
+      - sql: "CREATE TABLE null_point_index (id INT PRIMARY KEY, nullable_key INT) ENGINE=memory"
+      - scm: |
+          (insert (table "memcp-tests" "null_point_index") '("id" "nullable_key")
+            (map (produceN 200) (lambda (i)
+              (list i (if (equal? i 137) nil i)))))
+    sql: "SELECT COUNT(*) AS cnt FROM null_point_index"
+    expect:
+      rows: 1
+      data:
+        - cnt: 200
+
+  - name: "NULL-safe point lookup uses its index interval"
+    setup:
+      - sql: "SELECT id FROM null_point_index WHERE nullable_key IS NULL"
+      - sql: "SELECT id FROM null_point_index WHERE nullable_key IS NULL"
+      - scm: '(sleep 0.1)'
+      - sql: "DELETE FROM `system_statistic`.`scans` WHERE `schema` = 'memcp-tests' AND `table` = 'null_point_index'"
+      - scm: '(settings "ScanDebugging" true)'
+    sql: "SELECT id FROM null_point_index WHERE nullable_key IS NULL"
+    expect:
+      rows: 1
+      data:
+        - id: 137
+    cleanup:
+      - scm: '(sleep 0.1)'
+      - scm: '(settings "ScanDebugging" false)'
+
+  - name: "Performance: NULL-safe point lookup"
+    threshold_ms: 1000
+    timing_samples: 3
+    warmup: 1
+    sql: "SELECT id FROM null_point_index WHERE nullable_key IS NULL"
+    expect:
+      rows: 1
+      data:
+        - id: 137
+
+  - name: "NULL-safe point lookup examines only its NULL candidate"
+    sql: |
+      SELECT MAX(inputCount) AS inputs, MAX(candidateCount) AS candidates, MAX(outputCount) AS outputs
+      FROM `system_statistic`.`scans`
+      WHERE `schema` = 'memcp-tests' AND `table` = 'null_point_index'
+    expect:
+      rows: 1
+      data:
+        - inputs: 200
+          candidates: 1
+          outputs: 1
 
   - name: "Unordered range scan distinguishes candidates from output rows"
     setup:
@@ -1161,3 +1213,4 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS pushdown_lookup"
   - sql: "DROP TABLE IF EXISTS stats_contract_child"
   - sql: "DROP TABLE IF EXISTS stats_contract_parent"
+  - sql: "DROP TABLE IF EXISTS null_point_index"

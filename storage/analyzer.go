@@ -344,6 +344,17 @@ func (a scanAccess) boundaryCollation(index int) string {
 	return spec.collation
 }
 
+func (a scanAccess) boundaryNullSafe(index int) bool {
+	if a.exactAdjacent {
+		return false
+	}
+	if a.runtime == nil {
+		return a.compiledBoundary(index).nullSafe
+	}
+	spec, _ := a.boundaryParts(index)
+	return spec.nullSafe
+}
+
 func (a scanAccess) boundaryOrder(index int) (func(...scm.Scmer) scm.Scmer, string) {
 	if a.exactAdjacent {
 		return nil, ""
@@ -705,6 +716,19 @@ func boundaryIsUnboundedRange(b analyzedBoundary) bool {
 
 func scanAccessBoundaryIsPoint(access scanAccess, index int) bool {
 	return access.boundaryAnalyzer(index).IsPointLike()
+}
+
+func scanAccessBoundaryIsNullPoint(access scanAccess, index int) bool {
+	return scanAccessBoundaryIsPoint(access, index) && access.boundaryNullSafe(index) &&
+		access.boundValue(index, false).IsNil() && access.boundValue(index, true).IsNil()
+}
+
+func scanAccessBoundaryHasLowerBound(access scanAccess, index int) bool {
+	return !access.boundValue(index, false).IsNil() || scanAccessBoundaryIsNullPoint(access, index)
+}
+
+func scanAccessBoundaryHasUpperBound(access scanAccess, index int) bool {
+	return !access.boundValue(index, true).IsNil() || scanAccessBoundaryIsNullPoint(access, index)
 }
 
 func scanAccessBoundaryIsUnboundedOrder(access scanAccess, index int) bool {
