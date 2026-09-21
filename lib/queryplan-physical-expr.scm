@@ -5797,8 +5797,11 @@ the enclosing carrier identity supplies the remaining query context. */
 		"canonical-group-keytable-v7" schema input_identity keys condition) true))))
 
 (define range_group_table_name (lambda (schema label input_identity point_keys range_keys condition)
+	/* Version 3 separates the ordered-cut schema from range caches created before
+	boundary-kind columns existed. Cache tables are disposable helpers, so a new
+	canonical identity is the upgrade boundary instead of mutating stale layouts. */
 	(concat ".grp:" label ":" (stable_structural_hash (list
-		"canonical-range-group-keytable-v2"
+		"canonical-range-group-keytable-v3"
 		schema input_identity point_keys range_keys condition
 		"ordered-cut-boundaries-v1") true))))
 

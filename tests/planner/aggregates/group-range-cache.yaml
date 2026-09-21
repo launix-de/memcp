@@ -196,6 +196,50 @@ test_cases:
     expect:
       result_contains: ["range_group_cache", "agg_range_state_"]
 
+  - name: "range cache layout upgrades ignore stale helper tables"
+    setup:
+      - sql: "DROP TABLE IF EXISTS grc_upgrade_windows"
+      - sql: "DROP TABLE IF EXISTS grc_upgrade_events"
+      - sql: "DROP TABLE IF EXISTS `.grp:grc_upgrade_events:8e0d546935223602`"
+      - sql: "CREATE TABLE grc_upgrade_events (id INT PRIMARY KEY, tenant_id INT, happened_at INT) ENGINE=memory"
+      - sql: "CREATE TABLE grc_upgrade_windows (id INT PRIMARY KEY, tenant_id INT, range_from INT, range_to INT) ENGINE=memory"
+      - scm: |
+          (begin
+            (insert (table "memcp-tests" "grc_upgrade_events")
+              '("id" "tenant_id" "happened_at")
+              (map (produceN 6000) (lambda (i)
+                (list (+ i 1) (+ 1 (mod i 2)) i))))
+            (insert (table "memcp-tests" "grc_upgrade_windows")
+              '("id" "tenant_id" "range_from" "range_to")
+              (list (list 1 2 0 1000) (list 2 2 500 1500)
+                (list 3 1 1000 3000) (list 4 1 0 3000)))
+            (createtable "memcp-tests" ".grp:grc_upgrade_events:8e0d546935223602"
+              (list
+                (list "column" "k0" "int" (list) (list))
+                (list "column" "range_from" "int" (list) (list))
+                (list "column" "range_to" "int" (list) (list)))
+              (list "engine" "cache") true nil)
+            true)
+    sql: |
+      SELECT w.id,
+        (SELECT COUNT(*) FROM grc_upgrade_events e
+          WHERE e.tenant_id = w.tenant_id
+            AND e.happened_at >= w.range_from
+            AND e.happened_at < w.range_to) AS event_count
+      FROM grc_upgrade_windows w
+      ORDER BY w.id
+    expect:
+      rows: 4
+      data:
+        - {id: 1, event_count: 500}
+        - {id: 2, event_count: 500}
+        - {id: 3, event_count: 1000}
+        - {id: 4, event_count: 1500}
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS `.grp:grc_upgrade_events:8e0d546935223602`"
+      - sql: "DROP TABLE IF EXISTS grc_upgrade_windows"
+      - sql: "DROP TABLE IF EXISTS grc_upgrade_events"
+
   - name: "cost model keeps a singleton range aggregate direct"
     setup:
       - sql: "DROP TABLE IF EXISTS grc_single_window"
