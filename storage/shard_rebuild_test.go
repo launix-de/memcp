@@ -2533,3 +2533,15 @@ func TestUnchangedShardRebuildRetainsOwnership(t *testing.T) {
 		}
 	}
 }
+
+func TestCacheShardCleanupAdvancesDataGeneration(t *testing.T) {
+	tbl := &table{Name: ".grp-range:test", PersistencyMode: Cache}
+	shard := NewShard(tbl)
+	before := tbl.cacheGeneration.Load()
+	if !cacheShardCleanup(shard, nil) {
+		t.Fatal("cache shard cleanup unexpectedly failed")
+	}
+	if got := tbl.cacheGeneration.Load(); got != before+1 {
+		t.Fatalf("cache generation = %d, want %d", got, before+1)
+	}
+}
