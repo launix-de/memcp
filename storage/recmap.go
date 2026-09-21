@@ -32,6 +32,7 @@ const TagRecMap = 104
 type recMapTarget struct {
 	shard *storageShard
 	recid uint32
+	value scm.Scmer
 }
 
 // recMapShard stores only rows in the input RecSet. sourceRecIDs is sorted, so
@@ -89,13 +90,50 @@ func (r *recMap) lookup(shard *storageShard, recid uint32) (recMapTarget, bool) 
 	return recMapTarget{}, false
 }
 
+func recMapCallClosure(shard *storageShard) *func(uint32, ...scm.Scmer) scm.Scmer {
+	var cachedMap *recMap
+	var cachedPart *recMapShard
+	fn := func(recid uint32, args ...scm.Scmer) scm.Scmer {
+		if len(args) != 1 || !args[0].IsCustom(TagRecMap) {
+			return scm.NewNil()
+		}
+		rm := RecMapFromScmer(args[0])
+		if rm != cachedMap {
+			cachedMap = rm
+			cachedPart = nil
+			for i := range rm.shards {
+				if rm.shards[i].sourceShard == shard {
+					cachedPart = &rm.shards[i]
+					break
+				}
+			}
+		}
+		if cachedPart == nil {
+			return scm.NewNil()
+		}
+		position := sort.Search(len(cachedPart.sourceRecIDs), func(i int) bool {
+			return cachedPart.sourceRecIDs[i] >= recid
+		})
+		if position == len(cachedPart.sourceRecIDs) || cachedPart.sourceRecIDs[position] != recid {
+			return scm.NewNil()
+		}
+		return cachedPart.targets[position].value
+	}
+	return &fn
+}
+
 type recMapSourceRow struct {
 	shard *storageShard
 	recid uint32
 	key   []scm.Scmer
+	value []scm.Scmer
 }
 
 func (r *recSet) collectRecMapSourceRows(currentTx *TxContext, sourceKeyCols []string) []recMapSourceRow {
+	return r.collectRecMapRows(currentTx, sourceKeyCols, nil)
+}
+
+func (r *recSet) collectRecMapRows(currentTx *TxContext, sourceKeyCols []string, valueCols []string) []recMapSourceRow {
 	if r == nil || r.table == nil || r.count == 0 {
 		return nil
 	}
@@ -117,8 +155,9 @@ func (r *recSet) collectRecMapSourceRows(currentTx *TxContext, sourceKeyCols []s
 			shard.ensureLoaded()
 			skipShardReadLock := shard.hasWriteOwnerForTx(currentTx)
 			shard.ensureMainCount(skipShardReadLock)
-			columns := make([]ColumnStorage, len(sourceKeyCols))
-			for i, column := range sourceKeyCols {
+			allCols := append(append([]string(nil), sourceKeyCols...), valueCols...)
+			columns := make([]ColumnStorage, len(allCols))
+			for i, column := range allCols {
 				columns[i] = shard.getColumnStorageOrPanic(column, skipShardReadLock, currentTx)
 			}
 			if !skipShardReadLock {
@@ -144,16 +183,23 @@ func (r *recSet) collectRecMapSourceRows(currentTx *TxContext, sourceKeyCols []s
 					return true
 				}
 				key := make([]scm.Scmer, len(sourceKeyCols))
-				for i, column := range sourceKeyCols {
+				value := make([]scm.Scmer, len(valueCols))
+				for i, column := range allCols {
+					var item scm.Scmer
 					if recid < shard.main_count {
-						key[i] = columns[i].GetValue(recid)
+						item = columns[i].GetValue(recid)
 					} else if _, proxy := columns[i].(*StorageComputeProxy); proxy {
-						key[i] = columns[i].GetValue(recid)
+						item = columns[i].GetValue(recid)
 					} else {
-						key[i] = shard.getDelta(int(recid-shard.main_count), column)
+						item = shard.getDelta(int(recid-shard.main_count), column)
+					}
+					if i < len(sourceKeyCols) {
+						key[i] = item
+					} else {
+						value[i-len(sourceKeyCols)] = item
 					}
 				}
-				rows = append(rows, recMapSourceRow{shard: shard, recid: recid, key: key})
+				rows = append(rows, recMapSourceRow{shard: shard, recid: recid, key: key, value: value})
 				return true
 			})
 		}()
@@ -175,7 +221,7 @@ func recMapKeyHasNull(key []scm.Scmer) bool {
 // The first matching target implements scalar-first/LEFT semantics; callers
 // requiring an ordered first row must provide an access path with that policy
 // in a later, richer probe descriptor.
-func projectRecMap(currentTx *TxContext, sourceDomain *recSet, sourceKeyCols []string, sourceKeyFn scm.Scmer, target *table, targetKeyCols []string) *recMap {
+func projectRecMap(currentTx *TxContext, sourceDomain *recSet, sourceKeyCols []string, sourceKeyFn scm.Scmer, target *table, targetKeyCols []string, targetValueCols []string, targetValueFn scm.Scmer) *recMap {
 	if sourceDomain == nil || sourceDomain.table == nil {
 		return &recMap{target: target}
 	}
@@ -215,10 +261,14 @@ func projectRecMap(currentTx *TxContext, sourceDomain *recSet, sourceKeyCols []s
 		uniqueKeys.values = append(uniqueKeys.values, key...)
 	}
 	targetRows := target.projectJoinKeysToRecSet(
-		currentTx, targetKeyCols, uniqueKeys, SessionStateFromTx(currentTx)).collectRecMapSourceRows(currentTx, targetKeyCols)
+		currentTx, targetKeyCols, uniqueKeys, SessionStateFromTx(currentTx)).collectRecMapRows(currentTx, targetKeyCols, targetValueCols)
 	sort.SliceStable(targetRows, func(i, j int) bool {
 		return compareProjectKey(targetRows[i].key, targetRows[j].key) < 0
 	})
+	var targetMapper scm.SerialProc
+	if !targetValueFn.IsNil() {
+		targetMapper = scm.PrepareSerialProc(targetValueFn)
+	}
 
 	targets := make([]recMapTarget, len(rows))
 	for targetIndex := range targetRows {
@@ -229,7 +279,15 @@ func projectRecMap(currentTx *TxContext, sourceDomain *recSet, sourceKeyCols []s
 		if position == len(order) || compareProjectKey(rows[order[position]].key, targetRow.key) != 0 {
 			continue
 		}
-		targetRef := recMapTarget{shard: targetRow.shard, recid: targetRow.recid}
+		mappedValue := scm.NewNil()
+		if !targetValueFn.IsNil() {
+			mappedValue = targetMapper.Call(targetRow.value)
+		} else if len(targetRow.value) == 1 {
+			mappedValue = targetRow.value[0]
+		} else if len(targetRow.value) > 1 {
+			mappedValue = scm.NewSlice(append([]scm.Scmer(nil), targetRow.value...))
+		}
+		targetRef := recMapTarget{shard: targetRow.shard, recid: targetRow.recid, value: mappedValue}
 		for position < len(order) && compareProjectKey(rows[order[position]].key, targetRow.key) == 0 {
 			// The first row for a duplicate target key implements scalar-first.
 			if targets[order[position]].shard == nil {

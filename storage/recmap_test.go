@@ -81,7 +81,7 @@ func TestRecMapPrunedDomainImageAndComposition(t *testing.T) {
 		[]string{"id"}, scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
 			return scm.NewBool(values[0].Int() <= 4)
 		}))
-	first := projectRecMap(nil, domain, []string{"mid_id"}, scm.NewNil(), middle, []string{"id"})
+	first := projectRecMap(nil, domain, []string{"mid_id"}, scm.NewNil(), middle, []string{"id"}, nil, scm.NewNil())
 	if first.count != 4 {
 		t.Fatalf("first RecMap domain rows = %d, want 4", first.count)
 	}
@@ -93,7 +93,7 @@ func TestRecMapPrunedDomainImageAndComposition(t *testing.T) {
 	operatorMap := scm.Apply(scm.Globalenv.Vars[scm.Symbol("recmap_project_join")],
 		scm.NewNil(), NewRecSetScmer(domain),
 		scm.NewSlice([]scm.Scmer{scm.NewString("mid_id")}), scm.NewNil(), NewTableScmer(middle),
-		scm.NewSlice([]scm.Scmer{scm.NewString("id")}))
+		scm.NewSlice([]scm.Scmer{scm.NewString("id")}), scm.NewSlice(nil), scm.NewNil())
 	if !operatorMap.IsCustom(TagRecMap) {
 		t.Fatalf("recmap_project_join returned %s, want RecMap", scm.String(operatorMap))
 	}
@@ -103,8 +103,37 @@ func TestRecMapPrunedDomainImageAndComposition(t *testing.T) {
 	}
 	second := projectRecMap(nil, middleDomain, []string{"fyear"}, scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
 		return scm.NewSlice([]scm.Scmer{scm.NewInt(values[0].Int() - 2000)})
-	}), target, []string{"id"})
+	}), target, []string{"id"}, []string{"value"}, scm.NewNil())
 	composed := composeRecMaps(first, second)
+	if len(composed.shards) == 0 || len(composed.shards[0].targets) == 0 || composed.shards[0].targets[0].value.IsNil() {
+		t.Fatal("composed RecMap lost its projected target value")
+	}
+	activeSourceShards := source.ActiveShards()
+	if len(activeSourceShards) != 1 || activeSourceShards[0] != composed.shards[0].sourceShard {
+		t.Fatal("composed RecMap does not reference the active source shard")
+	}
+	mappedValue := NewRecMapScmer(composed)
+	directCall := recMapCallClosure(composed.shards[0].sourceShard)
+	if got := (*directCall)(composed.shards[0].sourceRecIDs[0], mappedValue); got.IsNil() {
+		t.Fatal("row-bound RecMap call did not resolve its source identity")
+	}
+	if got := scm.Apply(scm.NewClosure(directCall, composed.shards[0].sourceRecIDs[0]), mappedValue); got.IsNil() {
+		t.Fatal("Scmer RecMap closure did not resolve its source identity")
+	}
+	sum := source.scan(nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil,
+		nil, scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewBool(true) }),
+		[]string{"$recmap_call"}, scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
+			value := scm.Apply(values[1], mappedValue)
+			if value.IsNil() {
+				return values[0]
+			}
+			return scm.NewInt(values[0].Int() + value.Int())
+		}), scm.NewInt(0), scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
+			return scm.NewInt(values[0].Int() + values[1].Int())
+		}), false)
+	if sum.Int() != 23 {
+		t.Fatalf("$recmap_call projected sum = %d, want 23", sum.Int())
+	}
 
 	want := map[int64]scm.Scmer{
 		1: scm.NewInt(7),
@@ -195,7 +224,7 @@ func BenchmarkWindowRecMapAgainstRepeatedProbe(b *testing.B) {
 	b.Run("window_recmap", func(b *testing.B) {
 		b.ReportAllocs()
 		for i := 0; i < b.N; i++ {
-			mapped := projectRecMap(nil, domain, []string{"target_id"}, scm.NewNil(), target, []string{"id"})
+			mapped := projectRecMap(nil, domain, []string{"target_id"}, scm.NewNil(), target, []string{"id"}, nil, scm.NewNil())
 			if mapped.count != windowRows {
 				b.Fatalf("mapped rows = %d, want %d", mapped.count, windowRows)
 			}

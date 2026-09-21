@@ -501,7 +501,7 @@ func parseBatchPseudoColName(name string) (int, bool) {
 }
 
 func isScanPseudoColName(name string) bool {
-	if name == "$recset_contains" {
+	if name == "$recset_contains" || name == "$recmap_call" {
 		return true
 	}
 	_, isBatch := parseBatchPseudoColName(name)
@@ -736,8 +736,8 @@ func invalidateComputedRows(proxy *StorageComputeProxy, recids map[uint32]struct
 }
 
 func Init(en scm.Env) {
-	const scanFilterColumnsDesc = "physical columns passed to filter before mapreduce; $recset_contains supplies a row-bound RecSet membership closure"
-	const scanMapColumnsDesc = "physical columns passed to map after filtering; pseudo columns are $update (update/delete current row), $recset_contains (row-bound RecSet membership), $set:<column>, $increment:<column>, and $invalidate:<column> (computed-column maintenance), plus NEW.<column> in trigger plans"
+	const scanFilterColumnsDesc = "physical columns passed to filter before mapreduce; $recset_contains supplies a row-bound RecSet membership closure and $recmap_call reads a preprojected RecMap value"
+	const scanMapColumnsDesc = "physical columns passed to map after filtering; pseudo columns are $update (update/delete current row), $recset_contains (row-bound RecSet membership), $recmap_call (row-bound RecMap value), $set:<column>, $increment:<column>, and $invalidate:<column> (computed-column maintenance), plus NEW.<column> in trigger plans"
 	const scanOrderMapColumnsDesc = scanMapColumnsDesc + "; $break is reserved for internal ORC convergence and must not implement SQL OFFSET/LIMIT, which belong in the native offset and limit arguments"
 	columnList := func(label, description string) *scm.TypeDescriptor {
 		return &scm.TypeDescriptor{
@@ -1364,7 +1364,8 @@ func Init(en scm.Env) {
 			sourceKeyCols := scmerSliceToStrings(mustScmerSlice(a[2], "recmap source key columns"))
 			target := TableFromScmer(a[4])
 			targetKeyCols := scmerSliceToStrings(mustScmerSlice(a[5], "recmap target key columns"))
-			return NewRecMapScmer(projectRecMap(currentTx, source, sourceKeyCols, a[3], target, targetKeyCols))
+			targetValueCols := scmerSliceToStrings(mustScmerSlice(a[6], "recmap target value columns"))
+			return NewRecMapScmer(projectRecMap(currentTx, source, sourceKeyCols, a[3], target, targetKeyCols, targetValueCols, a[7]))
 		},
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "builds an immutable query-local source-row to optional target-row mapping over exactly the supplied source RecSet",
 			HasSideEffects: true,
@@ -1375,6 +1376,8 @@ func Init(en scm.Env) {
 				{Kind: "func|nil", Label: "source_key_mapper", Description: "optional function mapping source column values to the target key tuple"},
 				{Kind: "table", Label: "target_table"},
 				{Kind: "list", Label: "target_key_columns"},
+				{Kind: "list", Label: "target_value_columns", Description: "target columns read once while constructing the mapping"},
+				{Kind: "func|nil", Label: "target_value_mapper", Description: "optional function projecting target column values into the row-local mapped value"},
 			},
 			Return: &scm.TypeDescriptor{Kind: "recmap"},
 		},
