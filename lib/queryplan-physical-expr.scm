@@ -2876,17 +2876,22 @@ one request cannot invalidate one another while the outer scan is running. */
 			(cons (quote or) invalid_terms)
 			true
 			(range_cache_prepare_expr base_stage cache_name point_values bounds tx_expr)))
-		(define legacy_prepare (compile_scan_plan (quote scan)
-			tx_expr
-			(source_table_expr outer_src)
-			(quoted_runtime_list '())
-			(list (quote lambda) '() true)
-			(cons (quote list) value_cols)
-			(list (quote lambda)
-				(cons (quote __prepared) value_params)
-				(list (quote !begin) prepare_one
-					(list (quote +) (quote __prepared) 1)))
-			0 (quote +) false))
+		/* Session/constant-only boundaries do not depend on a driver row. Preparing
+		them once avoids a redundant driver scan and keeps the cache producer out
+		of a nested scan callback. */
+		(define legacy_prepare (if (empty_list? value_cols)
+			prepare_one
+			(compile_scan_plan (quote scan)
+				tx_expr
+				(source_table_expr outer_src)
+				(quoted_runtime_list '())
+				(list (quote lambda) '() true)
+				(cons (quote list) value_cols)
+				(list (quote lambda)
+					(cons (quote __prepared) value_params)
+					(list (quote !begin) prepare_one
+						(list (quote +) (quote __prepared) 1)))
+				0 (quote +) false)))
 		(define init_domain_one (list (quote if)
 			(cons (quote or) invalid_terms)
 			true
