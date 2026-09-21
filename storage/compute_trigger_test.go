@@ -25,6 +25,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/launix-de/memcp/scm"
 )
@@ -791,5 +792,43 @@ func TestComputeProxyCompressionMaterializesOnce(t *testing.T) {
 	proxy.Compress(nil)
 	if *calls != 3 {
 		t.Fatalf("valid compressed values were recomputed: %d", *calls)
+	}
+}
+
+func TestComputeProxyCompressionAllowsDependencyInvalidation(t *testing.T) {
+	proxy, _ := newAdaptiveLookupProxyForTest(3)
+	proxy.main = nil
+	proxy.compressed = false
+	invalidate := true
+	proxy.computor = scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+		if invalidate {
+			invalidate = false
+			proxy.InvalidateAll()
+		}
+		return args[0]
+	})
+
+	done := make(chan struct{})
+	go func() {
+		proxy.Compress(nil)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("computed-column dependency invalidation deadlocked compression")
+	}
+	if proxy.compressed {
+		t.Fatal("compression published values from an invalidated revision")
+	}
+
+	proxy.Compress(nil)
+	if !proxy.compressed {
+		t.Fatal("stable retry did not publish compressed values")
+	}
+	for i := uint32(0); i < 3; i++ {
+		if got := proxy.GetValue(i).Int(); got != int64(i) {
+			t.Fatalf("row %d = %d, want %d", i, got, i)
+		}
 	}
 }
