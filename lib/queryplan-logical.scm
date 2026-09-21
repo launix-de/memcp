@@ -445,6 +445,135 @@ per row, so source_table_expr can hand it to scan/scan_order unchanged. */
 	(match relation
 		((symbol literal-rows) _columns rows) rows
 		_ '())))
+
+/* A one-row literal CROSS JOIN is a compile-time binding, not a relational
+cardinality choice. Substitute its qualified columns before decorrelation so
+dead CASE/OR branches do not manufacture scalar stages that can never run.
+Keep multi-row literal relations intact: their values are genuine per-row
+domains (for example dashboard time windows). */
+(define single_literal_cross_source? (lambda (src)
+	(and (literal_rows_relation? (source_relation src))
+		(and (equal? (count (literal_rows_data (source_relation src))) 1)
+			(and (not (source_outer? src))
+				(or (nil? (source_join_expr src)) (equal? (source_join_expr src) true)))))))
+
+(define single_literal_source_binding (lambda (src)
+	(list (source_alias src) (car (literal_rows_data (source_relation src))))))
+
+(define literal_binding_value (lambda (bindings alias column fallback)
+	(reduce bindings (lambda (found binding)
+		(if (not (equal? found fallback)) found
+			(if (and (equal?? alias (car binding)) (has_assoc? (cadr binding) column))
+				(get_assoc (cadr binding) column)
+				fallback))) fallback)))
+
+(define logical_literal_value? (lambda (expr)
+	(not (and (list? expr) (not (empty_list? expr))))))
+
+(define logical_sql_null_literal? (lambda (expr)
+	(and (list? expr)
+		(and (equal? (count expr) 1)
+			(equal? (car expr) (sql_builtins "SQL_NULL"))))))
+
+(define fold_literal_and (lambda (items)
+	(match items
+		(cons item rest) (begin
+			(define folded_item (fold_single_literal_expr '() item))
+			(define folded_rest (fold_literal_and rest))
+			(if (or (equal? folded_item false) (equal? folded_rest false)) false
+				(if (equal? folded_item true) folded_rest
+					(if (equal? folded_rest true) folded_item
+						(list (quote and) folded_item folded_rest)))))
+		_ true)))
+
+(define fold_literal_or (lambda (items)
+	(match items
+		(cons item rest) (begin
+			(define folded_item (fold_single_literal_expr '() item))
+			(define folded_rest (fold_literal_or rest))
+			(if (or (equal? folded_item true) (equal? folded_rest true)) true
+				(if (equal? folded_item false) folded_rest
+					(if (equal? folded_rest false) folded_item
+						(list (quote or) folded_item folded_rest)))))
+		_ false)))
+
+(define fold_single_literal_expr (lambda (bindings expr)
+	/* SQL NULL is represented by a zero-argument thunk so ordinary Scheme
+	code cannot confuse it with an absent optional argument. Once the thunk
+	is the projected value of a flattened constant row, it is safe to recover
+	the literal before simplifying its consumers. */
+	(if (logical_sql_null_literal? expr)
+		nil
+	(match expr
+		((symbol get_column) alias _alias_ic column _column_ic)
+		(literal_binding_value bindings alias column expr)
+		((quote get_column) alias alias_ic column column_ic)
+		(fold_single_literal_expr bindings
+			(list (symbol "get_column") alias alias_ic column column_ic))
+		((symbol if) condition then_expr else_expr) (begin
+			(define folded_condition (fold_single_literal_expr bindings condition))
+			(if (logical_literal_value? folded_condition)
+				(fold_single_literal_expr bindings
+					(if folded_condition then_expr else_expr))
+				(list (quote if) folded_condition
+					(fold_single_literal_expr bindings then_expr)
+					(fold_single_literal_expr bindings else_expr))))
+		((quote if) condition then_expr else_expr)
+		(fold_single_literal_expr bindings (list (symbol "if") condition then_expr else_expr))
+		((symbol nil?) value) (begin
+			(define folded (fold_single_literal_expr bindings value))
+			(if (logical_literal_value? folded) (nil? folded)
+				(list (quote nil?) folded)))
+		((quote nil?) value)
+		(fold_single_literal_expr bindings (list (symbol "nil?") value))
+		((symbol equal??) left right) (begin
+			(define folded_left (fold_single_literal_expr bindings left))
+			(define folded_right (fold_single_literal_expr bindings right))
+			(if (and (logical_literal_value? folded_left) (logical_literal_value? folded_right))
+				(equal?? folded_left folded_right)
+				(list (quote equal??) folded_left folded_right)))
+		((quote equal??) left right)
+		(fold_single_literal_expr bindings (list (symbol "equal??") left right))
+		((symbol hex2bin) value) (if (string? value) (hex2bin value) expr)
+		((quote hex2bin) value) (if (string? value) (hex2bin value) expr)
+		(cons head tail) (begin
+			(define folded_tail (map tail (lambda (item)
+				(fold_single_literal_expr bindings item))))
+			(if (or (equal? head (quote and)) (equal? head (symbol "and")))
+				(fold_literal_and folded_tail)
+				(if (or (equal? head (quote or)) (equal? head (symbol "or")))
+					(fold_literal_or folded_tail)
+					(cons head folded_tail))))
+		_ expr))))
+
+(define fold_single_literal_fields (lambda (bindings fields)
+	(map_assoc fields (lambda (_title expr)
+		/* Keep NULL projected as its explicit parser node. A raw nil in an
+		assoc projection means "missing" to field_expr_by_title and therefore
+		cannot be propagated into correlated consumers. */
+		(if (logical_sql_null_literal? expr) expr
+			(fold_single_literal_expr bindings expr))))))
+
+(define fold_single_literal_order (lambda (bindings order_items)
+	(map order_items (lambda (item)
+		(match item
+			'(expr dir) (list (fold_single_literal_expr bindings expr) dir)
+			_ item)))))
+
+(define fold_single_literal_source_join (lambda (bindings src)
+	(list (source_alias src) (source_schema src) (source_relation src)
+		(source_outer? src)
+		(fold_single_literal_expr bindings (source_join_expr src)))))
+
+(define literal_projection? (lambda (projection)
+	(reduce (map_assoc projection (lambda (_title expr)
+		(logical_literal_value? (fold_single_literal_expr '() expr))))
+		(lambda (all_literal item) (and all_literal item)) true)))
+
+(define literal_derived_rewrite? (lambda (rewrite)
+	(match rewrite
+		'(_alias projection) (literal_projection? projection)
+		_ false)))
 (define stage_output_relation_id (lambda (relation)
 	(match relation
 		'(_ stage_id) stage_id
@@ -4571,31 +4700,43 @@ membership_truth rather than adding another physical lowering path. */
 		_ (combine_stage_rewrite_results head
 			(map args (lambda (item) (untangle_expr_with_stages item outer_sources ctx)))))))
 
+(define rewrite_context_literals (lambda (expr ctx)
+	(rewrite_derived_ref_chain
+		(uctx_get ctx (quote derived-rewrites) '()) expr)))
+
 (define untangle_expr_with_stages (lambda (expr outer_sources ctx)
 	(match expr
 		((symbol inner_select) subquery)
 		(if (btw2025_defer_subquery_rewrite? subquery outer_sources ctx)
-			(list (make_dependent_subquery_marker (quote scalar) nil subquery outer_sources) '() '())
+			(list (make_dependent_subquery_marker (quote scalar) nil
+				(rewrite_context_literals subquery ctx) outer_sources) '() '())
 			(untangle_scalar_subquery_with_stages subquery outer_sources ctx 0))
 		((quote inner_select) subquery)
 		(if (btw2025_defer_subquery_rewrite? subquery outer_sources ctx)
-			(list (make_dependent_subquery_marker (quote scalar) nil subquery outer_sources) '() '())
+			(list (make_dependent_subquery_marker (quote scalar) nil
+				(rewrite_context_literals subquery ctx) outer_sources) '() '())
 			(untangle_scalar_subquery_with_stages subquery outer_sources ctx 0))
 		((symbol inner_select_exists) subquery)
 		(if (btw2025_defer_subquery_rewrite? subquery outer_sources ctx)
-			(list (make_dependent_subquery_marker (quote exists) nil subquery outer_sources) '() '())
+			(list (make_dependent_subquery_marker (quote exists) nil
+				(rewrite_context_literals subquery ctx) outer_sources) '() '())
 			(untangle_exists_subquery_with_stages subquery outer_sources ctx))
 		((quote inner_select_exists) subquery)
 		(if (btw2025_defer_subquery_rewrite? subquery outer_sources ctx)
-			(list (make_dependent_subquery_marker (quote exists) nil subquery outer_sources) '() '())
+			(list (make_dependent_subquery_marker (quote exists) nil
+				(rewrite_context_literals subquery ctx) outer_sources) '() '())
 			(untangle_exists_subquery_with_stages subquery outer_sources ctx))
 		((symbol inner_select_in) probe subquery)
 		(if (btw2025_defer_subquery_rewrite? subquery outer_sources ctx)
-			(list (make_dependent_subquery_marker (quote in) probe subquery outer_sources) '() '())
+			(list (make_dependent_subquery_marker (quote in)
+				(rewrite_context_literals probe ctx)
+				(rewrite_context_literals subquery ctx) outer_sources) '() '())
 			(untangle_in_subquery_with_stages probe subquery outer_sources ctx))
 		((quote inner_select_in) probe subquery)
 		(if (btw2025_defer_subquery_rewrite? subquery outer_sources ctx)
-			(list (make_dependent_subquery_marker (quote in) probe subquery outer_sources) '() '())
+			(list (make_dependent_subquery_marker (quote in)
+				(rewrite_context_literals probe ctx)
+				(rewrite_context_literals subquery ctx) outer_sources) '() '())
 			(untangle_in_subquery_with_stages probe subquery outer_sources ctx))
 		((symbol not) ((symbol inner_select_exists) subquery))
 		(untangle_not_exists_subquery_with_stages subquery outer_sources ctx)
@@ -6217,21 +6358,46 @@ names in projections, predicates, and correlated subqueries. */
 								(define prepruned_sources (prune_unreferenced_derived_fields
 									(qb_sources block) outer_direct_consumers))
 								(define flattened_sources (flatten_source_list prepruned_sources child_ctx))
-								(define flattened_source_list (nth flattened_sources 0))
+								(define raw_flattened_source_list (nth flattened_sources 0))
+								/* Existing logical stages may already retain the source as a
+								correlation domain. Only eliminate bindings before any stages
+								have been introduced. */
+								(define literal_sources (if (empty_list? (qb_stages block))
+									(filter raw_flattened_source_list single_literal_cross_source?)
+									'()))
+								(define literal_bindings (map literal_sources single_literal_source_binding))
+								(define flattened_source_list (map
+									(if (empty_list? (qb_stages block))
+										(filter raw_flattened_source_list (lambda (src)
+											(not (single_literal_cross_source? src))))
+										raw_flattened_source_list)
+									(lambda (src) (fold_single_literal_source_join literal_bindings src))))
 								(define rewrites (nth flattened_sources 1))
+								(define inherited_literal_rewrites (filter
+									(uctx_get child_ctx (quote derived-rewrites) '())
+									literal_derived_rewrite?))
+								(define carried_literal_rewrites (merge (list
+									(filter rewrites literal_derived_rewrite?) inherited_literal_rewrites)))
+								(define active_rewrites (merge (list rewrites inherited_literal_rewrites)))
 								(define source_where_terms (nth flattened_sources 2))
 								(define source_stages (nth flattened_sources 3))
 								/* Derived references are already bound. Rewrite them once, then
 								prune unused row-preserving lookups before their join expressions
 								can create decorrelation stages. */
-								(define rewritten_where (combine_where_terms source_where_terms
-									(rewrite_derived_ref_chain rewrites (qb_where block))))
-								(define rewritten_fields (rewrite_derived_fields_chain rewrites (qb_fields block)))
+								(define rewritten_where (fold_single_literal_expr literal_bindings
+									(combine_where_terms source_where_terms
+										(rewrite_derived_ref_chain active_rewrites (qb_where block)))))
+								(define rewritten_fields (fold_single_literal_fields literal_bindings
+									(rewrite_derived_fields_chain active_rewrites (qb_fields block))))
 								(define rewritten_group (map (coalesceNil (qb_group block) '()) (lambda (item)
-									(rewrite_derived_ref_chain rewrites item))))
-								(define rewritten_having (rewrite_derived_ref_chain rewrites (qb_having block)))
-								(define rewritten_order (rewrite_derived_order_chain rewrites (qb_order block)))
-								(define rewritten_hidden (rewrite_derived_fields_chain rewrites (qb_hidden block)))
+									(fold_single_literal_expr literal_bindings
+										(rewrite_derived_ref_chain active_rewrites item)))))
+								(define rewritten_having (fold_single_literal_expr literal_bindings
+									(rewrite_derived_ref_chain active_rewrites (qb_having block))))
+								(define rewritten_order (fold_single_literal_order literal_bindings
+									(rewrite_derived_order_chain active_rewrites (qb_order block))))
+								(define rewritten_hidden (fold_single_literal_fields literal_bindings
+									(rewrite_derived_fields_chain active_rewrites (qb_hidden block))))
 								(define default_alias (qassoc_get (qb_facts block) (quote default_alias)
 									(if (empty_list? flattened_source_list) nil (source_alias (car flattened_source_list)))))
 								(define sources (prune_unused_unique_left_joins flattened_source_list default_alias
@@ -6244,7 +6410,7 @@ names in projections, predicates, and correlated subqueries. */
 									(list (quote outer-sources) expr_outer_sources)
 									(list (quote outer-resolution-sources) nested_outer_resolution_sources)
 									(list (quote local-sources) sources)
-									(list (quote derived-rewrites) rewrites))))
+									(list (quote derived-rewrites) carried_literal_rewrites))))
 								(define source_join_result (untangle_source_join_exprs_with_stages sources expr_outer_sources expr_ctx))
 								(define untangled_sources (nth source_join_result 0))
 								(define source_join_stage_sources (nth source_join_result 2))
@@ -6253,7 +6419,7 @@ names in projections, predicates, and correlated subqueries. */
 									(list (quote outer-sources) joined_expr_outer_sources)
 									(list (quote outer-resolution-sources) nested_outer_resolution_sources)
 									(list (quote local-sources) (merge_unique (list untangled_sources source_join_stage_sources)))
-									(list (quote derived-rewrites) rewrites))))
+									(list (quote derived-rewrites) carried_literal_rewrites))))
 								/* SQL name ownership ends in bind_query_names. Derived flattening
 								only rewrites references carrying an explicit bound alias. */
 								(if (expr_contains_window? rewritten_where)
@@ -6294,7 +6460,8 @@ names in projections, predicates, and correlated subqueries. */
 										(quote join_relation_units) (nth source_join_result 3))))
 								(btw2025_decorrelate_query_block delayed_block
 									(make_uctx child_ctx (list
-										(list (quote outer-resolution-sources) nested_outer_resolution_sources)))))))))))))
+										(list (quote outer-resolution-sources) nested_outer_resolution_sources)
+										(list (quote derived-rewrites) carried_literal_rewrites)))))))))))))
 
 (define canonical_union_mode (lambda (mode)
 	(if (equal? mode (quote distinct)) (quote union_distinct) mode)))
