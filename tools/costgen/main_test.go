@@ -772,3 +772,32 @@ func TestGroupInputCostsKeepBothSidesOfCrossover(t *testing.T) {
 		t.Fatal("single alternative accepted")
 	}
 }
+
+func TestRecMapCostFeaturesAndFit(t *testing.T) {
+	startups, smallWork, largeWork := 2.0, 100.0, 1000.0
+	small, err := rowFeatures(calibrationRow{Decision: "nested_scalar_recmap", Plan: "query_recmap",
+		RecMapStartups: &startups, RecMapWorkRows: &smallWork})
+	if err != nil {
+		t.Fatal(err)
+	}
+	large, err := rowFeatures(calibrationRow{Decision: "nested_scalar_recmap", Plan: "query_recmap",
+		RecMapStartups: &startups, RecMapWorkRows: &largeWork})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := []observation{
+		{caseName: "small", decision: "nested_scalar_recmap", plan: "query_recmap", y: 12000, x: small},
+		{caseName: "large", decision: "nested_scalar_recmap", plan: "query_recmap", y: 102000, x: large},
+	}
+	startup, workRow, err := fitRecMap(rows, constants{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if startup != 1000 || workRow != 100 {
+		t.Fatalf("fit = (%d, %d), want (1000, 100)", startup, workRow)
+	}
+	direct, err := rowFeatures(calibrationRow{Decision: "nested_scalar_recmap", Plan: "direct_scalar_chain"})
+	if err != nil || len(direct) != 27 {
+		t.Fatalf("direct RecMap alternative: features=%v err=%v", direct, err)
+	}
+}

@@ -110,7 +110,13 @@ an unbound symbol in the callback when costing selects the probe alternative. */
 		(extract_columns_for_alias src expr))))))
 
 (define extract_columns_for_alias (lambda (src expr)
-	(match expr
+	(if (and (list? expr)
+		(and (equal? (count expr) 2)
+			(equal? (car expr) (symbol "__recmap_call"))))
+		(list "$recmap_call")
+		(match expr
+		((symbol __recmap_call) _recmap) (list "$recmap_call")
+		((quote __recmap_call) _recmap) (list "$recmap_call")
 		((symbol driver_membership_probe) stage probe)
 		(extract_membership_columns_for_alias src stage probe)
 		((quote driver_membership_probe) stage probe)
@@ -145,8 +151,8 @@ an unbound symbol in the callback when costing selects the probe alternative. */
 		(extract_columns_for_alias src (list (quote scalar_cardinality_probe) stage requested_col))
 		((symbol get_column) tblvar tbl_ignorecase col col_ignorecase) (if (source_alias_matches? src (source_alias src) tblvar tbl_ignorecase) (list (resolve_physical_column_name src col col_ignorecase)) '())
 		((quote get_column) tblvar tbl_ignorecase col col_ignorecase) (if (source_alias_matches? src (source_alias src) tblvar tbl_ignorecase) (list (resolve_physical_column_name src col col_ignorecase)) '())
-		(cons head tail) (merge_unique (map tail (lambda (item) (extract_columns_for_alias src item))))
-		_ '())))
+			(cons head tail) (merge_unique (map tail (lambda (item) (extract_columns_for_alias src item))))
+			_ '()))))
 
 (define lower_column_expr_for_alias_in_context (lambda (src expr probe_work_rows)
 	(match expr
@@ -3371,7 +3377,15 @@ probe. */
 					(merge_unique (list (qassoc_get columns_by_alias alias '()) (list physical_col)))))))))
 
 (define collect_join_columns_acc (lambda (sources default_alias target_alias expr columns_by_alias)
-	(match expr
+	(if (and (list? expr)
+		(and (equal? (count expr) 2)
+			(equal? (car expr) (symbol "__recmap_call"))))
+		(begin
+			(define alias (coalesceNil target_alias default_alias))
+			(qassoc_set columns_by_alias alias
+				(merge_unique (list (qassoc_get columns_by_alias alias '())
+					(list "$recmap_call")))))
+		(match expr
 		((symbol driver_membership_probe) stage probe)
 		(reduce (membership_probe_outer_exprs stage probe) (lambda (acc expr)
 			(collect_join_columns_acc sources default_alias target_alias expr acc)) columns_by_alias)
@@ -3410,9 +3424,9 @@ probe. */
 		(collect_join_get_column_acc sources default_alias target_alias tblvar tbl_ignorecase col col_ignorecase columns_by_alias)
 		((quote get_column) tblvar tbl_ignorecase col col_ignorecase)
 		(collect_join_get_column_acc sources default_alias target_alias tblvar tbl_ignorecase col col_ignorecase columns_by_alias)
-		(cons _head tail) (reduce tail (lambda (acc item)
-			(collect_join_columns_acc sources default_alias target_alias item acc)) columns_by_alias)
-		_ columns_by_alias)))
+			(cons _head tail) (reduce tail (lambda (acc item)
+				(collect_join_columns_acc sources default_alias target_alias item acc)) columns_by_alias)
+			_ columns_by_alias))))
 
 (define extract_columns_for_join_alias (lambda (sources default_alias alias expr)
 	(qassoc_get (collect_join_columns_acc sources default_alias alias expr '()) alias '())))
@@ -7036,11 +7050,11 @@ otherwise unnecessary one-entry associative group. */
 			table_expr
 			(cons (quote list) filtercols)
 			(list (quote lambda)
-				(map filtercols (lambda (col) (symbol (concat alias "." col))))
+				(map filtercols (lambda (col) (scan_callback_symbol_for_alias alias col)))
 				(lower_column_expr_for_alias src condition))
 			(cons (quote list) mapcols)
 			(list (quote lambda)
-				(cons (quote acc) (map mapcols (lambda (col) (symbol (concat alias "." col)))))
+				(cons (quote acc) (map mapcols (lambda (col) (scan_callback_symbol_for_alias alias col))))
 				(list (quote set_assoc)
 					(quote acc)
 					key_expr
@@ -7066,11 +7080,11 @@ otherwise unnecessary one-entry associative group. */
 				table_expr
 				(cons (quote list) filtercols)
 				(list (quote lambda)
-					(map filtercols (lambda (col) (symbol (concat alias "." col))))
+					(map filtercols (lambda (col) (scan_callback_symbol_for_alias alias col)))
 					(lower_column_expr_for_alias src condition))
 				(cons (quote list) mapcols)
 				(scan_mapreduce_expr
-					(map mapcols (lambda (col) (symbol (concat alias "." col))))
+					(map mapcols (lambda (col) (scan_callback_symbol_for_alias alias col)))
 					agg_reduce
 					mapped_expr)
 				agg_neutral
@@ -8804,6 +8818,11 @@ EXPLAIN PHYSICAL CALIBRATE alternative with result and operator validation. */
 (define planner_scan_join_order_startup_ns 296538)
 (define planner_scan_join_order_build_row_ns 24)
 (define planner_scan_join_order_probe_row_ns 1)
+(define planner_recmap_startup_ns 72933)
+(define planner_recmap_work_row_ns 249)
+(define planner_nested_scalar_recmap_cost (lambda (startups work_rows)
+	(planner_cost (* startups planner_recmap_startup_ns) 0 0 0 0
+		(* work_rows planner_recmap_work_row_ns) 0 0 work_rows 0.65)))
 /* END GENERATED COST CONSTANTS */
 
 /* scan_join_order reuses the calibrated scan/filter/map work units. The

@@ -54,7 +54,7 @@ test_cases:
       data:
         - reminderOpos: 50
 
-  - name: "repeated nested scalar correlation keys reuse one query-scoped probe"
+  - name: "query-local RecMap decorrelates a nested scalar chain"
     sql: |
       SELECT SUM((
         SELECT (

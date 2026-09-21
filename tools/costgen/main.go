@@ -186,6 +186,8 @@ type calibrationRow struct {
 	GroupRows                        *float64 `json:"group_rows"`
 	RowsPerProbe                     *float64 `json:"rows_per_probe"`
 	AggregateWidth                   *float64 `json:"aggregate_width"`
+	RecMapStartups                   *float64 `json:"recmap_startups"`
+	RecMapWorkRows                   *float64 `json:"recmap_work_rows"`
 	ResultEqual                      bool     `json:"result_equal"`
 	Rows                             int64    `json:"rows"`
 	ResultHash                       string   `json:"result_hash"`
@@ -240,6 +242,8 @@ type constants struct {
 	downstreamProbeRowNS       int64
 	scalarPresenceProbeRowNS   int64
 	membershipDirectProbeRowNS int64
+	recMapStartupNS            int64
+	recMapWorkRowNS            int64
 }
 
 func main() {
@@ -247,8 +251,15 @@ func main() {
 	jsonl := flag.String("jsonl", "", "write raw measurements as JSONL")
 	suiteFilter := flag.String("suite", "", "restrict workload paths to this substring")
 	validateOnly := flag.Bool("validate-only", false, "execute and validate forced alternatives without refitting coefficients")
+	recMapOnly := flag.Bool("recmap-only", false, "fit only query-local RecMap coefficients from its dedicated workload")
 	flag.Parse()
-	if *suiteFilter != "" && !*validateOnly {
+	if *recMapOnly {
+		if *suiteFilter != "" {
+			fatal(errors.New("--recmap-only selects its dedicated suite; do not combine it with --suite"))
+		}
+		*suiteFilter = "recmap-cost-calibration"
+	}
+	if *suiteFilter != "" && !*validateOnly && !*recMapOnly {
 		fatal(errors.New("--suite requires --validate-only; coefficient fitting needs the complete workload set"))
 	}
 
@@ -323,6 +334,28 @@ func main() {
 		fmt.Printf("Validated %d forced-plan observations across %d suites; coefficients unchanged.\n", len(observations), len(suites))
 		return
 	}
+	if *recMapOnly {
+		recMapObservations := filterDecisionObservations(observations, "nested_scalar_recmap")
+		startup, workRow, fitErr := fitRecMap(recMapObservations, currentConstants)
+		if fitErr != nil {
+			fatal(fmt.Errorf("nested_scalar_recmap: %w", fitErr))
+		}
+		currentConstants.recMapStartupNS = startup
+		currentConstants.recMapWorkRowNS = workRow
+		if err := validateDecisionOrdering(recMapObservations, currentConstants); err != nil {
+			fatal(fmt.Errorf("nested_scalar_recmap: %w", err))
+		}
+		printModelComparison("nested_scalar_recmap", recMapObservations, currentConstants)
+		printDecisionOrdering(recMapObservations, currentConstants)
+		fmt.Printf("RecMap startup: %d ns/startup\nRecMap work row: %d ns/row\n", startup, workRow)
+		if *patch {
+			if err := patchQueryplan(queryplanPath, currentConstants); err != nil {
+				fatal(err)
+			}
+			fmt.Println("patched", queryplanPath)
+		}
+		return
+	}
 	// Coefficient fitting remains scoped to the membership-carrier family. Other
 	// calibrated decision families are executed and result-checked above, but
 	// must not be mistaken for additional equations of this coefficient model.
@@ -358,6 +391,20 @@ func main() {
 		if err := validateScanLookupDominance(scanLookupObservations, "scan_lookup"); err != nil {
 			fatal(fmt.Errorf("scan_lookup: %w", err))
 		}
+	}
+	recMapObservations := filterDecisionObservations(observations, "nested_scalar_recmap")
+	if len(recMapObservations) > 0 {
+		startup, workRow, fitErr := fitRecMap(recMapObservations, c)
+		if fitErr != nil {
+			fatal(fmt.Errorf("nested_scalar_recmap: %w", fitErr))
+		}
+		c.recMapStartupNS = startup
+		c.recMapWorkRowNS = workRow
+		if err := validateDecisionOrdering(recMapObservations, c); err != nil {
+			fatal(fmt.Errorf("nested_scalar_recmap: %w", err))
+		}
+		printModelComparison("nested_scalar_recmap", recMapObservations, c)
+		printDecisionOrdering(recMapObservations, c)
 	}
 	logStep("selected downstream probe coefficient=%d ns/probe", c.downstreamProbeRowNS)
 	if err := validateDecisionOrdering(training, c); err != nil {
@@ -414,6 +461,28 @@ func main() {
 		}
 		fmt.Println("patched", queryplanPath)
 	}
+}
+
+func fitRecMap(rows []observation, c constants) (int64, int64, error) {
+	x, y := make([][]float64, 0), make([]float64, 0)
+	without := c
+	without.recMapStartupNS = 0
+	without.recMapWorkRowNS = 0
+	for _, row := range rows {
+		if row.censored || row.plan != "query_recmap" || len(row.x) <= 26 || row.x[25] <= 0 {
+			continue
+		}
+		x = append(x, []float64{row.x[25], row.x[26]})
+		y = append(y, math.Max(1, row.y-estimatedNS(row, without)))
+	}
+	if len(x) < 2 {
+		return 0, 0, fmt.Errorf("need at least two exact query_recmap observations, got %d", len(x))
+	}
+	beta, err := fitNonnegative(x, y)
+	if err != nil {
+		return 0, 0, err
+	}
+	return int64(math.Round(beta[0])), int64(math.Round(beta[1])), nil
 }
 
 func fitScanJoinOrder(rows []observation, c constants) (int64, int64, int64, error) {
@@ -1135,6 +1204,10 @@ func validateRaceWinner(row calibrationRow, decisionID, plan string) error {
 		if _, err := rowFeatures(row); err != nil {
 			return err
 		}
+	} else if row.Decision == "nested_scalar_recmap" {
+		if _, err := rowFeatures(row); err != nil {
+			return err
+		}
 	} else if row.Decision == "direct_group_join" {
 		if row.ProbeInvocations == nil || row.InputRows == nil || row.GroupRows == nil ||
 			row.RowsPerProbe == nil || row.AggregateWidth == nil {
@@ -1308,6 +1381,22 @@ func medianRows(runs [][]calibrationRow) ([]calibrationRow, error) {
 }
 
 func rowFeatures(row calibrationRow) ([]float64, error) {
+	if row.Decision == "nested_scalar_recmap" {
+		features := make([]float64, 27)
+		switch row.Plan {
+		case "direct_scalar_chain":
+			return features, nil
+		case "query_recmap":
+			if row.RecMapStartups == nil || row.RecMapWorkRows == nil {
+				return nil, fmt.Errorf("RecMap work profile contains nil inputs: %+v", row)
+			}
+			features[25] = *row.RecMapStartups
+			features[26] = *row.RecMapWorkRows
+			return features, nil
+		default:
+			return nil, fmt.Errorf("unsupported nested scalar RecMap plan %q", row.Plan)
+		}
+	}
 	if row.Decision == "group_relation_input" {
 		if row.InputRows == nil || row.AggregateWidth == nil {
 			return nil, fmt.Errorf("group input work profile contains nil inputs: %+v", row)
@@ -1707,6 +1796,10 @@ func solveEquationSystem(rows []observation) (constants, error) {
 // lower_bound_ns.
 func solve(exactRows, allRows []observation, baseline constants) (constants, error) {
 	fitted, err := solveEquationSystem(exactRows)
+	if err == nil {
+		fitted.recMapStartupNS = baseline.recMapStartupNS
+		fitted.recMapWorkRowNS = baseline.recMapWorkRowNS
+	}
 	if err != nil && !errors.Is(err, errInsufficientCalibrationObservations) {
 		return constants{}, err
 	}
@@ -2047,6 +2140,9 @@ func fitNonnegative(x [][]float64, y []float64) ([]float64, error) {
 }
 
 func estimatedNS(row observation, c constants) float64 {
+	if row.decision == "nested_scalar_recmap" && row.plan == "direct_scalar_chain" {
+		return row.currentEstimate
+	}
 	if row.decision == "scan_join_order" && row.plan == "legacy_join_tree" {
 		// The legacy alternative is an already costed composite join tree. Its
 		// planner-reported estimate is the authoritative baseline; rowFeatures
@@ -2079,6 +2175,8 @@ func estimatedNS(row observation, c constants) float64 {
 		float64(c.scanJoinOrderStartupNS),
 		float64(c.scanJoinOrderBuildRowNS),
 		float64(c.scanJoinOrderProbeRowNS),
+		float64(c.recMapStartupNS),
+		float64(c.recMapWorkRowNS),
 	}
 	total := 0.0
 	for i, value := range row.x {
@@ -2197,6 +2295,11 @@ func decisionAlternatives(rows []observation) (map[string]map[string]observation
 				return nil, fmt.Errorf("plan %q belongs to direct_group_join, got decision %q", row.plan, row.decision)
 			}
 			groups[row.caseName][row.plan] = row
+		case "direct_scalar_chain", "query_recmap":
+			if row.decision != "nested_scalar_recmap" {
+				return nil, fmt.Errorf("plan %q belongs to nested_scalar_recmap, got decision %q", row.plan, row.decision)
+			}
+			groups[row.caseName][row.plan] = row
 		default:
 			return nil, fmt.Errorf("unsupported plan %q", row.plan)
 		}
@@ -2208,6 +2311,15 @@ func decisionAlternatives(rows []observation) (map[string]map[string]observation
 			}
 			if _, ok := plans["base_group_cache"]; !ok {
 				return nil, fmt.Errorf("incomplete group input alternatives for %q", name)
+			}
+			continue
+		}
+		if decisions[name] == "nested_scalar_recmap" {
+			if _, ok := plans["direct_scalar_chain"]; !ok {
+				return nil, fmt.Errorf("incomplete RecMap alternatives for %q", name)
+			}
+			if _, ok := plans["query_recmap"]; !ok {
+				return nil, fmt.Errorf("incomplete RecMap alternatives for %q", name)
 			}
 			continue
 		}
@@ -2494,6 +2606,8 @@ func readCurrentConstants(path string) (constants, error) {
 		"planner_scan_join_order_startup_ns",
 		"planner_scan_join_order_build_row_ns",
 		"planner_scan_join_order_probe_row_ns",
+		"planner_recmap_startup_ns",
+		"planner_recmap_work_row_ns",
 	}
 	values := make([]int64, len(names))
 	content := string(data)
@@ -2510,6 +2624,8 @@ func readCurrentConstants(path string) (constants, error) {
 				name == "planner_scan_join_order_startup_ns" ||
 				name == "planner_scan_join_order_build_row_ns" ||
 				name == "planner_scan_join_order_probe_row_ns" ||
+				name == "planner_recmap_startup_ns" ||
+				name == "planner_recmap_work_row_ns" ||
 				name == "planner_membership_ordered_scan_invocation_ns" ||
 				name == "planner_membership_ordered_recset_sort_unit_ns" ||
 				name == "planner_membership_downstream_probe_row_ns" {
@@ -2550,6 +2666,8 @@ func readCurrentConstants(path string) (constants, error) {
 		scanJoinOrderStartupNS:     values[23],
 		scanJoinOrderBuildRowNS:    values[24],
 		scanJoinOrderProbeRowNS:    values[25],
+		recMapStartupNS:            values[26],
+		recMapWorkRowNS:            values[27],
 	}, nil
 }
 
@@ -2612,6 +2730,11 @@ EXPLAIN PHYSICAL CALIBRATE alternative with result and operator validation. */
 (define planner_scan_join_order_startup_ns %d)
 (define planner_scan_join_order_build_row_ns %d)
 (define planner_scan_join_order_probe_row_ns %d)
+(define planner_recmap_startup_ns %d)
+(define planner_recmap_work_row_ns %d)
+(define planner_nested_scalar_recmap_cost (lambda (startups work_rows)
+	(planner_cost (* startups planner_recmap_startup_ns) 0 0 0 0
+		(* work_rows planner_recmap_work_row_ns) 0 0 work_rows 0.65)))
 /* END GENERATED COST CONSTANTS */`, c.scalarPresenceProbeRowNS, c.membershipDirectProbeRowNS,
 		c.downstreamProbeRowNS,
 		c.scanInvocationNS, c.scanRowNS,
@@ -2622,6 +2745,6 @@ EXPLAIN PHYSICAL CALIBRATE alternative with result and operator validation. */
 		c.orderedRecsetSortUnitNS, c.groupRelationStartupNS,
 		c.groupRelationBuildRowNS, c.groupRelationProbeNS,
 		c.scanJoinOrderStartupNS, c.scanJoinOrderBuildRowNS,
-		c.scanJoinOrderProbeRowNS)
+		c.scanJoinOrderProbeRowNS, c.recMapStartupNS, c.recMapWorkRowNS)
 	return os.WriteFile(path, []byte(content[:begin]+block+content[end:]), 0o644)
 }
