@@ -1028,6 +1028,16 @@ move arbitrary calls or subqueries across short-circuit guards. */
 	(reduce (coalesceNil aliases '()) (lambda (found alias)
 		(or found (expr_refs_alias? default_alias alias expr))) false)))
 
+/* Window aggregates over flattened derived expressions can read a scalar
+stage output while their row domain is still carried by one base table. Keep
+those stage outputs as explicit relational inputs: the physical dependency
+graph can then prepare and join them before evaluating the window aggregate. */
+(define window_stage_dependency_sources (lambda (sources default_alias exprs)
+	(filter (coalesceNil sources '()) (lambda (src)
+		(and (stage_output_relation? (source_relation src))
+			(reduce (coalesceNil exprs '()) (lambda (found expr)
+				(or found (expr_refs_alias? default_alias (source_alias src) expr))) false))))))
+
 /* Collect bound source aliases once. Join pruning must not rescan a wide
 projection for every source; that turns read-model queries into O(N^2) planner
 work before decorrelation has even started. */
@@ -4248,6 +4258,18 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 				(rewrite_window_derived_ref_chain derived_rewrites expr))))
 		(define partition_exprs (map (nth over 0) rewrite_window_expr))
 		(define canonical_args (map (coalesceNil args '()) rewrite_window_expr))
+		(define dependency_exprs (merge (list partition_exprs canonical_args)))
+		(define dependency_sources (window_stage_dependency_sources
+			outer_sources alias dependency_exprs))
+		(define dependency_hidden (merge (map (zip (produceN (count dependency_exprs)) dependency_exprs)
+			(lambda (entry) (list (concat "__window_dependency_" (car entry)) (cadr entry))))))
+		(define stage_input (if (empty_list? dependency_sources)
+			src
+			(make_query_block
+				(source_schema src)
+				(cons src dependency_sources)
+				'() true '() nil '() nil nil dependency_hidden '()
+				(list (list (quote default_alias) alias)))))
 		(define ags (dedupe_aggregates_by_col (window_aggregate_descriptor fn canonical_args)))
 		(define keys (if (empty_list? partition_exprs)
 			'(1)
@@ -4258,7 +4280,7 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 		(define stage_id (concat "window-agg:" (stable_structural_hash (list fn canonical_args keys) false)))
 		(define stage (make_group_stage
 			stage_id
-			src
+			stage_input
 			outer_domain
 			keys
 			ags

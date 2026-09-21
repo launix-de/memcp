@@ -192,3 +192,57 @@ test_cases:
           _year_date: 1735689600
           differenz: 7
           differenz_percent: 58.333333333333336
+
+  - name: "window total retains ordered scalar dependency"
+    sql: |
+      SELECT category,
+        SUM(score) AS subtotal,
+        SUM(SUM(score)) OVER () AS total
+      FROM (
+        SELECT m.val AS category,
+          COALESCE((
+            SELECT h.amount
+            FROM vac_reg_aux h
+            WHERE h.mid = m.ID
+            ORDER BY h.ts DESC
+            LIMIT 1
+          ), 0) AS score
+        FROM vac_reg_main m
+      ) rows_with_score
+      GROUP BY category
+      ORDER BY category
+    expect:
+      data:
+        - category: 10
+          subtotal: 5
+          total: 12
+        - category: 20
+          subtotal: 7
+          total: 12
+        - category: 30
+          subtotal: 0
+          total: 12
+
+  - name: "window total retains scalar aggregate dependency"
+    sql: |
+      SELECT category,
+        SUM(score) AS subtotal,
+        SUM(SUM(score)) OVER () AS total
+      FROM (
+        SELECT m.val AS category,
+          (SELECT SUM(h.amount) FROM vac_reg_aux h WHERE h.mid = m.ID LIMIT 1) AS score
+        FROM vac_reg_main m
+      ) rows_with_score
+      GROUP BY category
+      ORDER BY category
+    expect:
+      data:
+        - category: 10
+          subtotal: 5
+          total: 12
+        - category: 20
+          subtotal: 7
+          total: 12
+        - category: 30
+          subtotal: null
+          total: 12
