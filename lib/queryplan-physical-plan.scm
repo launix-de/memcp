@@ -9856,9 +9856,10 @@ recipe in one zero-argument helper. */
 					(map repeated (lambda (entry)
 						(list (quote define)
 							(prepare_recipe_helper_symbol (car entry))
-							(list (quote lambda) '()
-								(rewrite_repeated_prepare_bindings
-									(cadr entry) repeated_keys (car entry))))))
+							(list (quote once)
+								(list (quote lambda) '()
+									(rewrite_repeated_prepare_bindings
+										(cadr entry) repeated_keys (car entry)))))))
 					(list (rewrite_repeated_prepare_bindings plan repeated_keys nil))))))))))
 
 (define physical_string_set (lambda (expr strings)
