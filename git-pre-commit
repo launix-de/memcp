@@ -237,7 +237,17 @@ printf '%s\n' "${test_files_arr[@]}"
 echo ""
 
 test_port=${MEMCP_TEST_PORT:-$(( (RANDOM % 10000) + 20000 ))}
-test_data_dir="${MEMCP_TEST_DATA_DIR:-/tmp/memcp-sql-tests-$test_port}"
+test_data_dir="${MEMCP_TEST_DATA_DIR:-}"
+test_data_dir_owned=0
+prepare_test_data_dir() {
+  if [ -n "$test_data_dir" ]; then
+    export MEMCP_TEST_DATA_DIR="$test_data_dir"
+    return 0
+  fi
+  test_data_dir=$(mktemp -d "/tmp/memcp-sql-tests-$test_port.XXXXXX") || return 1
+  test_data_dir_owned=1
+  export MEMCP_TEST_DATA_DIR="$test_data_dir"
+}
 # A dedicated run directory survives errors and cancellation. CI pins the parent
 # directory so its always() artifact step can also collect successful runs.
 if [ -n "${MEMCP_TEST_LOGDIR:-}" ]; then
@@ -270,7 +280,8 @@ done
 # - All suites use one shared data directory so restart/persistence tests see
 #   the same state. The default is a port-scoped temporary store; callers may
 #   set MEMCP_TEST_DATA_DIR to pin a specific test store.
-# - The selected data directory must never be deleted by this hook.
+# - The hook deletes only its own default temporary store. A directory selected
+#   through MEMCP_TEST_DATA_DIR remains caller-owned and is never deleted.
 # - "isolated" means exclusive scheduling on the shared database; it never
 #   creates a suite-local process or data directory.
 # - restart/SHUTDOWN suites run exclusively. The supervisor starts MemCP again
@@ -392,6 +403,9 @@ cleanup() {
   for pid in $(jobs -p 2>/dev/null); do
     kill "$pid" 2>/dev/null || true
   done
+  if [ "${test_data_dir_owned:-0}" -eq 1 ] && [ -n "${test_data_dir:-}" ]; then
+    rm -rf -- "$test_data_dir" 2>/dev/null || true
+  fi
   if [ -n "$tmpdir" ] && [ -d "$tmpdir" ]; then
     if [ "$memcp_log" != "$tmpdir/memcp.log" ] && [ -f "$memcp_log" ]; then
       cp "$memcp_log" "$tmpdir/memcp.log" || true
@@ -409,6 +423,11 @@ trap 'cleanup "$?"' EXIT
 trap 'echo; echo "✋ Interrupted"; cleanup 130; exit 130' INT
 trap 'echo; echo "✋ Terminated"; cleanup 143; exit 143' TERM
 trap 'cleanup 129; exit 129' HUP
+
+if ! prepare_test_data_dir; then
+  echo "❌ Could not create temporary MemCP test data directory"
+  exit 1
+fi
 
 if ! start_supervisor; then
   exit 1
