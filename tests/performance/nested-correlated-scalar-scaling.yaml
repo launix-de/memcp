@@ -157,10 +157,7 @@ test_cases:
 
   - name: "description join through scalar output retains RecMap"
     sql: |
-      EXPLAIN PHYSICAL SELECT d.id,
-        (SELECT f.id FROM ncs_rm_final f
-         WHERE f.id = d.middle_id LIMIT 1) AS target_id,
-        description.value
+      EXPLAIN PHYSICAL SELECT d.id, description.value
       FROM ncs_rm_driver d
       LEFT JOIN ncs_rm_target description ON description.id = (
         SELECT f.id FROM ncs_rm_final f
