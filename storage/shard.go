@@ -1049,6 +1049,7 @@ func cacheShardCleanup(ptr any, freedByType *[numEvictableTypes]int64) bool {
 	for col := range s.columns {
 		s.columns[col] = nil
 	}
+	s.t.cacheGeneration.Add(1)
 	// COLD: on next access ensureLoaded re-initialises as empty and re-registers
 	s.srState = COLD
 	s.mu.Unlock()
@@ -1833,7 +1834,7 @@ func mapReducerCanUseReadWorkspace(cols []string) bool {
 		if _, ok := parseBatchPseudoColName(col); ok {
 			return false
 		}
-		if col == "$recset_contains" || col == "$update" || col == "$break" ||
+		if col == "$recset_contains" || col == "$recmap_call" || col == "$record_ref" || col == "$update" || col == "$break" ||
 			len(col) > 12 && col[:12] == "$orc_stored:" ||
 			len(col) >= 4 && col[:4] == "NEW." ||
 			len(col) > 12 && col[:12] == "$invalidate:" ||
@@ -2012,6 +2013,23 @@ func (t *storageShard) initMapReducer(mr *ShardMapReducer, cols []string, mapRed
 			fnptr := recSetContainsClosure(t)
 			getter := func(id uint32, batchid uint32) scm.Scmer {
 				return scm.NewClosure(fnptr, id)
+			}
+			mr.mainGetters[i] = getter
+			mr.deltaGetters[i] = getter
+			continue
+		}
+		if col == "$recmap_call" {
+			fnptr := recMapCallClosure(t, currentTx)
+			getter := func(id uint32, batchid uint32) scm.Scmer {
+				return scm.NewClosure(fnptr, id)
+			}
+			mr.mainGetters[i] = getter
+			mr.deltaGetters[i] = getter
+			continue
+		}
+		if col == "$record_ref" {
+			getter := func(id uint32, _ uint32) scm.Scmer {
+				return newRecordRef(t, id)
 			}
 			mr.mainGetters[i] = getter
 			mr.deltaGetters[i] = getter
@@ -3091,10 +3109,11 @@ func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer, onF
 			// add to delta indexes
 			index.mu.Lock()
 			if index.baseState.deltaBtree != nil {
-				index.baseState.deltaBtree.ReplaceOrInsert(indexPair{itemid: int(recid), data: newrow})
+				pair := index.prepareCollationKeys(&index.baseState, indexPair{itemid: int(recid), data: newrow})
+				index.baseState.deltaBtree.ReplaceOrInsert(pair)
 				// The row payload belongs to the shard. The index owns only its
 				// B-tree entry/node overhead until rebuild produces compact arrays.
-				indexDeltaBytes[index] += 32
+				indexDeltaBytes[index] += 32 + int64(indexPairCollationKeyBytes(pair))
 			}
 			index.mu.Unlock()
 		}
@@ -3141,7 +3160,8 @@ func (t *storageShard) insertDatasetFromLog(columns []string, values [][]scm.Scm
 		for _, index := range t.Indexes {
 			index.mu.Lock()
 			if index.baseState.deltaBtree != nil {
-				index.baseState.deltaBtree.ReplaceOrInsert(indexPair{itemid: int(recid), data: newrow})
+				pair := index.prepareCollationKeys(&index.baseState, indexPair{itemid: int(recid), data: newrow})
+				index.baseState.deltaBtree.ReplaceOrInsert(pair)
 			}
 			index.mu.Unlock()
 		}

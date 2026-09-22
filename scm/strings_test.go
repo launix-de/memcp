@@ -16,7 +16,10 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 package scm
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestRegexpMatches(t *testing.T) {
 	fn := Globalenv.Vars[Symbol("regexp_matches")]
@@ -93,6 +96,25 @@ func TestBinaryCollationPreservesNumericAndExpressionComparisons(t *testing.T) {
 				t.Fatalf("numeric/text compatibility changed for %v and %v", a, b)
 			}
 		}
+	}
+}
+
+func TestUnicodeIndexCollationProvidesStableSortKeys(t *testing.T) {
+	factory := Apply(Globalenv.Vars[Symbol("collate")],
+		NewString("utf8mb4_unicode_ci"), NewBool(false))
+	less := OrderRelationLess(factory.Func())
+	left, right := NewString("alpha-9"), NewString("alpha-10")
+	if !less(left, right) {
+		t.Fatal("unicode collation order changed")
+	}
+	keyFn, reverse, ok := LookupCollationKey("utf8mb4_unicode_ci:asc")
+	if !ok || reverse {
+		t.Fatalf("unicode collation key lookup = (_, %t, %t), want (_, false, true)", reverse, ok)
+	}
+	leftKey, leftOK := keyFn(left)
+	rightKey, rightOK := keyFn(right)
+	if !leftOK || !rightOK || strings.Compare(leftKey, rightKey) >= 0 {
+		t.Fatal("unicode collation keys do not preserve numeric ordering")
 	}
 }
 

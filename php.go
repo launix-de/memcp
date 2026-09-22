@@ -27,6 +27,7 @@ type phpConfig struct {
 	threads       int
 	memoryLimit   int64
 	maxWait       time.Duration
+	maxExecution  int64
 	outputBuffer  int
 	opcacheMemory int
 }
@@ -63,18 +64,20 @@ func configurePackagedPHP() error {
 
 func loadPHPConfig() (phpConfig, error) {
 	values := storage.PHPStartupSettings()
-	c := phpConfig{values.IMAPBinary, int(values.Threads), values.MemoryLimit, time.Duration(values.MaxWaitMilliseconds) * time.Millisecond, int(values.OutputBuffer), int((values.OpcacheMemory + (1 << 20) - 1) >> 20)}
+	c := phpConfig{values.IMAPBinary, int(values.Threads), values.MemoryLimit, time.Duration(values.MaxWaitMilliseconds) * time.Millisecond, values.MaxExecutionSeconds, int(values.OutputBuffer), int((values.OpcacheMemory + (1 << 20) - 1) >> 20)}
 	if values.Threads < 1 ||
 		values.Threads > 1024 ||
 		values.MemoryLimit < 8<<20 ||
 		values.MemoryLimit > 9007199254740991 ||
 		values.MaxWaitMilliseconds < 0 ||
 		values.MaxWaitMilliseconds > 86400000 ||
+		values.MaxExecutionSeconds < 0 ||
+		values.MaxExecutionSeconds > 86400 ||
 		values.OutputBuffer < 0 ||
 		values.OutputBuffer > 2147483647 ||
 		values.OpcacheMemory < 32<<20 ||
 		values.OpcacheMemory > 1<<40 {
-		return c, fmt.Errorf("invalid PHP settings: check PHPThreads, PHPMemoryLimit, PHPMaxWaitMilliseconds, PHPOutputBuffer and PHPOpcacheMemory")
+		return c, fmt.Errorf("invalid PHP settings: check PHPThreads, PHPMemoryLimit, PHPMaxWaitMilliseconds, PHPMaxExecutionSeconds, PHPOutputBuffer and PHPOpcacheMemory")
 	}
 	return c, nil
 }
@@ -84,7 +87,8 @@ func (c phpConfig) ini() map[string]string {
 	ini := map[string]string{
 		"expose_php": "0", "display_errors": "0", "log_errors": "1",
 		"memory_limit": limit, "max_memory_limit": limit,
-		"output_buffering": strconv.Itoa(c.outputBuffer), "implicit_flush": "0",
+		"max_execution_time": strconv.FormatInt(c.maxExecution, 10),
+		"output_buffering":   strconv.Itoa(c.outputBuffer), "implicit_flush": "0",
 		"opcache.enable": "1", "opcache.memory_consumption": strconv.Itoa(c.opcacheMemory),
 		"opcache.interned_strings_buffer": "16", "opcache.max_accelerated_files": "20000",
 		"opcache.validate_timestamps": "1", "opcache.revalidate_freq": "0", "opcache.jit": "disable",

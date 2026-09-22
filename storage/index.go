@@ -32,9 +32,11 @@ import "github.com/carli2/hybridsort"
 import "github.com/launix-de/memcp/scm"
 
 type indexPair struct {
-	itemid    int // -1 for reference items
-	data      []scm.Scmer
-	reference *scanIndexBounds
+	itemid          int // -1 for reference items
+	data            []scm.Scmer
+	reference       *scanIndexBounds
+	collationKeys   []string
+	collationKeySet uint64
 }
 
 type storageIndexState struct {
@@ -43,16 +45,18 @@ type storageIndexState struct {
 	// record ID -> position in this index. It is built only when a sparse RecSet
 	// repeatedly dominates an ordered scan and belongs to the same cache/variant
 	// lifecycle as the forward permutation.
-	mainIndexPositions StorageInt
-	deltaBtree         *btree.BTreeG[indexPair]
-	active             bool
-	savings            float64
-	minVals            []scm.Scmer
-	maxVals            []scm.Scmer
-	indexHooks         []IndexHook
-	indexHookBytes     atomic.Int64
-	precomputedDelta   bool
-	computedRevisions  []computedRevision
+	mainIndexPositions  StorageInt
+	deltaBtree          *btree.BTreeG[indexPair]
+	active              bool
+	savings             float64
+	minVals             []scm.Scmer
+	maxVals             []scm.Scmer
+	indexHooks          []IndexHook
+	indexHookBytes      atomic.Int64
+	precomputedDelta    bool
+	computedRevisions   []computedRevision
+	collationKeyFns     []scm.CollationKeyFunc
+	collationKeyReverse []bool
 }
 
 type indexIterationOptions struct {
@@ -436,6 +440,8 @@ func (idx *StorageIndex) computeSizeLocked() uint {
 	sz += uint(cap(state.minVals)+cap(state.maxVals)) * uint(unsafe.Sizeof(scm.Scmer{}))
 	sz += uint(cap(state.indexHooks)) * uint(unsafe.Sizeof((*IndexHook)(nil))) * 2
 	sz += uint(cap(state.computedRevisions)) * uint(unsafe.Sizeof(computedRevision{}))
+	sz += uint(cap(state.collationKeyFns)) * uint(unsafe.Sizeof((scm.CollationKeyFunc)(nil)))
+	sz += uint(cap(state.collationKeyReverse)) * uint(unsafe.Sizeof(false))
 	sz += uint(state.indexHookBytes.Load())
 	sz += idx.computeDeltaBtreeSize(state)
 	return sz
@@ -472,8 +478,17 @@ func (idx *StorageIndex) computeDeltaBtreeSize(state *storageIndexState) uint {
 		} else {
 			sz += 24
 		}
+		sz += indexPairCollationKeyBytes(item)
 		return true
 	})
+	return sz
+}
+
+func indexPairCollationKeyBytes(item indexPair) uint {
+	sz := uint(cap(item.collationKeys)) * uint(unsafe.Sizeof(""))
+	for _, key := range item.collationKeys {
+		sz += uint(len(key))
+	}
 	return sz
 }
 
@@ -589,7 +604,7 @@ func (s *StorageIndex) rowWithinBounds(bounds scanAccess, indexBounds *scanIndex
 		}
 		if i == lastSorted {
 			upperLast := indexBounds.upperLast()
-			if !upperLast.IsNil() {
+			if scanAccessBoundaryHasUpperBound(bounds, i) {
 				if upperInclusive {
 					if s.compareAt(i, upperLast, v) < 0 {
 						return false, true
@@ -598,7 +613,7 @@ func (s *StorageIndex) rowWithinBounds(bounds scanAccess, indexBounds *scanIndex
 					return false, true
 				}
 			}
-			if indexBounds.len() > i && !indexBounds.lower(bounds, i).IsNil() {
+			if indexBounds.len() > i && scanAccessBoundaryHasLowerBound(bounds, i) {
 				comparison := s.compareAt(i, v, indexBounds.lower(bounds, i))
 				if comparison < 0 || (comparison == 0 && !lowerInclusive) {
 					return false, false
@@ -674,6 +689,49 @@ func (s *StorageIndex) compareMainAndDelta(state *storageIndexState, mainRecid u
 		return 1
 	}
 	return 0
+}
+
+// prepareCollationKeys equips a stored delta row or transient B-tree seek item
+// with the Unicode keys belonging to this exact index relation. Unique checks
+// issue one seek per inserted group row; without this, every tree level
+// recreates x/text's allocating comparison state for unchanged values.
+func (s *StorageIndex) prepareCollationKeys(state *storageIndexState, pair indexPair) indexPair {
+	compareCols := len(s.Cols)
+	if pair.itemid == -1 && pair.reference == nil && len(pair.data) < compareCols {
+		compareCols = len(pair.data)
+	} else if pair.reference != nil && pair.reference.compareCols > 0 && pair.reference.compareCols < compareCols {
+		compareCols = pair.reference.compareCols
+	}
+	for colIdx := 0; colIdx < compareCols && colIdx < 64; colIdx++ {
+		if !s.columnIsSorted(colIdx) || colIdx >= len(state.collationKeyFns) {
+			continue
+		}
+		keyFn := state.collationKeyFns[colIdx]
+		if keyFn == nil {
+			continue
+		}
+		var value scm.Scmer
+		if pair.itemid >= 0 {
+			value = s.getDeltaColValue(uint32(pair.itemid), pair.data, colIdx)
+		} else if pair.reference == nil {
+			value = pair.data[colIdx]
+		} else {
+			value = pair.reference.referenceLower(colIdx)
+		}
+		if value.IsNil() {
+			continue
+		}
+		key, supported := keyFn(value)
+		if !supported {
+			continue
+		}
+		if pair.collationKeys == nil {
+			pair.collationKeys = make([]string, len(s.Cols))
+		}
+		pair.collationKeys[colIdx] = key
+		pair.collationKeySet |= uint64(1) << uint(colIdx)
+	}
+	return pair
 }
 
 // iterates over items using a caller-provided buffer for batching.
@@ -1209,6 +1267,17 @@ func (s *StorageIndex) buildIndex(state *storageIndexState, cols []colGetter, tx
 			state.computedRevisions = nil
 		}
 	}()
+	state.collationKeyFns = make([]scm.CollationKeyFunc, len(s.Cols))
+	state.collationKeyReverse = make([]bool, len(s.Cols))
+	for colIdx := range s.Cols {
+		if colIdx >= 64 || !s.columnIsSorted(colIdx) || colIdx >= len(s.ColOrderMeta) {
+			continue
+		}
+		if keyFn, reverse, ok := scm.LookupCollationKey(s.ColOrderMeta[colIdx]); ok {
+			state.collationKeyFns[colIdx] = keyFn
+			state.collationKeyReverse[colIdx] = reverse
+		}
+	}
 	startRevisions := s.computedRevisionsRLocked()
 	if !s.Native {
 		// main storage: build sort-order index
@@ -1242,6 +1311,11 @@ func (s *StorageIndex) buildIndex(state *storageIndexState, cols []colGetter, tx
 		mainCount := uint(s.t.main_count)
 		materialized := make([]scm.Scmer, mainCount*uint(numCols))
 		hasSortCol := make([]bool, numCols)
+		type materializedCollationKeys struct {
+			values  []string
+			reverse bool
+		}
+		collationKeys := make([]*materializedCollationKeys, numCols)
 		for colIdx, g := range cols {
 			if !s.columnIsSorted(colIdx) {
 				continue // query-level overlay column: never read by the comparator below
@@ -1249,6 +1323,27 @@ func (s *StorageIndex) buildIndex(state *storageIndexState, cols []colGetter, tx
 			hasSortCol[colIdx] = true
 			for i := uint32(0); i < s.t.main_count; i++ {
 				materialized[uint(i)*uint(numCols)+uint(colIdx)] = g.get(i)
+			}
+			if colIdx < len(state.collationKeyFns) {
+				if keyFn := state.collationKeyFns[colIdx]; keyFn != nil {
+					keys := make([]string, mainCount)
+					complete := true
+					for i := uint32(0); i < s.t.main_count; i++ {
+						value := materialized[uint(i)*uint(numCols)+uint(colIdx)]
+						if value.IsNil() {
+							continue
+						}
+						key, supported := keyFn(value)
+						if !supported {
+							complete = false
+							break
+						}
+						keys[i] = key
+					}
+					if complete {
+						collationKeys[colIdx] = &materializedCollationKeys{values: keys, reverse: state.collationKeyReverse[colIdx]}
+					}
+				}
 			}
 		}
 		// sort indexes; skip non-sorted matcher columns (they don't affect
@@ -1262,6 +1357,25 @@ func (s *StorageIndex) buildIndex(state *storageIndexState, cols []colGetter, tx
 				}
 				va := materialized[rowA+uint(colIdx)]
 				vb := materialized[rowB+uint(colIdx)]
+				if keys := collationKeys[colIdx]; keys != nil {
+					if va.IsNil() || vb.IsNil() {
+						if va.IsNil() != vb.IsNil() {
+							if keys.reverse {
+								return !va.IsNil()
+							}
+							return va.IsNil()
+						}
+						continue
+					}
+					comparison := strings.Compare(keys.values[a], keys.values[b])
+					if comparison != 0 {
+						if keys.reverse {
+							return comparison > 0
+						}
+						return comparison < 0
+					}
+					continue
+				}
 				if relations[colIdx](va, vb) {
 					return true // less
 				} else if relations[colIdx](vb, va) {
@@ -1342,8 +1456,12 @@ func (s *StorageIndex) buildIndex(state *storageIndexState, cols []colGetter, tx
 	state.indexHookBytes.Store(indexHookBytes)
 	// (previously: else: Native index comment)
 
-	// delta storage — comparator uses getDeltaColValue so computed columns work;
-	// skip non-sorted matcher columns (they don't participate in sort order)
+	// Delta storage is inserted one row at a time. Cache Unicode collation keys
+	// on each B-tree item so its O(log N) insertion comparisons do not recreate
+	// an allocating x/text collator frame for the same value. Seek probes receive
+	// keys from this same index state, so another collation can never be mixed in.
+	// Comparator uses getDeltaColValue so computed columns work; skip non-sorted
+	// matcher columns because they do not participate in sort order.
 	state.deltaBtree = btree.NewG[indexPair](8, func(a, b indexPair) bool {
 		compareCols := len(s.Cols)
 		if a.itemid == -1 && a.reference == nil && len(a.data) < compareCols {
@@ -1383,6 +1501,19 @@ func (s *StorageIndex) buildIndex(state *storageIndexState, cols []colGetter, tx
 			} else {
 				bv = s.getDeltaColValue(uint32(b.itemid), b.data, colIdx)
 			}
+			if colIdx < 64 && state.collationKeyFns[colIdx] != nil {
+				keyBit := uint64(1) << uint(colIdx)
+				if a.collationKeySet&keyBit != 0 && b.collationKeySet&keyBit != 0 && !av.IsNil() && !bv.IsNil() {
+					comparison := strings.Compare(a.collationKeys[colIdx], b.collationKeys[colIdx])
+					if comparison != 0 {
+						if state.collationKeyReverse[colIdx] {
+							return comparison > 0
+						}
+						return comparison < 0
+					}
+					continue
+				}
+			}
 			if s.lessAt(colIdx, av, bv) {
 				return true // less
 			} else if s.lessAt(colIdx, bv, av) {
@@ -1397,7 +1528,8 @@ func (s *StorageIndex) buildIndex(state *storageIndexState, cols []colGetter, tx
 	// fill deltaBtree with global record IDs
 	for i, data := range s.t.inserts {
 		recid := s.t.main_count + uint32(i)
-		state.deltaBtree.ReplaceOrInsert(indexPair{itemid: int(recid), data: data})
+		pair := s.prepareCollationKeys(state, indexPair{itemid: int(recid), data: data})
+		state.deltaBtree.ReplaceOrInsert(pair)
 	}
 
 	endRevisions := s.computedRevisionsRLocked()
@@ -1981,7 +2113,7 @@ start_scan:
 	// LIKE columns cannot participate in binary search (pattern doesn't map to sort order).
 	searchLo := 0
 	searchN := int(s.t.main_count)
-	if hint := int(s.lastHit.Load()); hint > 0 && hint < searchN && firstSorted >= 0 && !indexBounds.lower(bounds, firstSorted).IsNil() {
+	if hint := int(s.lastHit.Load()); hint > 0 && hint < searchN && firstSorted >= 0 && scanAccessBoundaryHasLowerBound(bounds, firstSorted) {
 		hintVal := cols[firstSorted].get(getRecid(hint))
 		if !hintVal.IsNil() {
 			if s.compareAt(firstSorted, hintVal, indexBounds.lower(bounds, firstSorted)) < 0 {
@@ -1993,8 +2125,8 @@ start_scan:
 		}
 	}
 	mainIdx := 0
-	if firstSorted >= 0 && !indexBounds.lower(bounds, firstSorted).IsNil() {
-		if s.usesNaturalAscendingOrder(firstSorted) {
+	if firstSorted >= 0 && scanAccessBoundaryHasLowerBound(bounds, firstSorted) {
+		if s.usesNaturalAscendingOrder(firstSorted) && !indexBounds.lower(bounds, firstSorted).IsNil() {
 			less := scm.Less
 			if firstSorted < len(s.ColOrder) && s.ColOrder[firstSorted] != nil {
 				less = s.ColOrder[firstSorted]
@@ -2018,7 +2150,7 @@ start_scan:
 	s.lastHit.Store(uint32(mainIdx))
 	// skip past equal values when lower bound is exclusive (col > 5)
 	// LIKE columns don't have lower/upper semantics, so skip this optimization.
-	if !lowerInclusive && lastSorted >= 0 && !indexBounds.lower(bounds, lastSorted).IsNil() {
+	if !lowerInclusive && lastSorted >= 0 && scanAccessBoundaryHasLowerBound(bounds, lastSorted) {
 		for uint32(mainIdx) < s.t.main_count {
 			recid := getRecid(mainIdx)
 			if s.compareAt(lastSorted, cols[lastSorted].get(recid), indexBounds.lower(bounds, lastSorted)) != 0 {
@@ -2036,7 +2168,7 @@ start_scan:
 	// An unbounded trailing ORDER BY key does not remove the upper end of
 	// an earlier equality prefix. Resolve that end before treating the main
 	// interval as exact or using its size to choose a RecSet traversal.
-	hasUpperBound := lastSorted >= 0 && !indexBounds.upperLast().IsNil()
+	hasUpperBound := lastSorted >= 0 && scanAccessBoundaryHasUpperBound(bounds, lastSorted)
 	for i := 0; i < lastSorted && !hasUpperBound; i++ {
 		if s.columnIsSorted(i) {
 			hasUpperBound = scanAccessBoundaryIsPoint(bounds, i) ||
@@ -2067,7 +2199,8 @@ start_scan:
 			trailingOrder = true
 			continue
 		}
-		if trailingOrder || !scanAccessBoundaryIsPoint(bounds, i) || bounds.boundValue(i, false).IsNil() {
+		if trailingOrder || !scanAccessBoundaryIsPoint(bounds, i) ||
+			(bounds.boundValue(i, false).IsNil() && !scanAccessBoundaryIsNullPoint(bounds, i)) {
 			completePointPrefix = false
 			break
 		}
@@ -2292,7 +2425,7 @@ start_scan:
 		if !state.precomputedDelta {
 			for seekCols < cmpCols {
 				i := seekCols
-				if indexBounds.lower(bounds, i).IsNil() || (len(s.ColMapFn) > i && !s.ColMapFn[i].IsNil()) || (bounds.len() > i && !bounds.boundaryAnalyzer(i).IsSorted()) {
+				if !scanAccessBoundaryHasLowerBound(bounds, i) || (len(s.ColMapFn) > i && !s.ColMapFn[i].IsNil()) || (bounds.len() > i && !bounds.boundaryAnalyzer(i).IsSorted()) {
 					break
 				}
 				seekCols++
@@ -2305,10 +2438,12 @@ start_scan:
 			// index-column order by the comparator, so lower is directly
 			// seekable without a per-probe reordered copy.
 			if bounds.exactAdjacent && seekCols == 1 {
-				snapDeltaBtree.AscendGreaterOrEqual(indexPair{itemid: -1, data: bounds.values[:1]}, iterFn)
+				probe := s.prepareCollationKeys(state, indexPair{itemid: -1, data: bounds.values[:1]})
+				snapDeltaBtree.AscendGreaterOrEqual(probe, iterFn)
 			} else {
 				getterScratch.indexBounds.compareCols = seekCols
-				snapDeltaBtree.AscendGreaterOrEqual(indexPair{itemid: -1, reference: &getterScratch.indexBounds}, iterFn)
+				probe := s.prepareCollationKeys(state, indexPair{itemid: -1, reference: &getterScratch.indexBounds})
+				snapDeltaBtree.AscendGreaterOrEqual(probe, iterFn)
 			}
 		}
 	}

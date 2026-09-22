@@ -445,6 +445,150 @@ per row, so source_table_expr can hand it to scan/scan_order unchanged. */
 	(match relation
 		((symbol literal-rows) _columns rows) rows
 		_ '())))
+
+/* A one-row literal CROSS JOIN is a compile-time binding, not a relational
+cardinality choice. Substitute its qualified columns before decorrelation so
+dead CASE/OR branches do not manufacture scalar stages that can never run.
+Keep multi-row literal relations intact: their values are genuine per-row
+domains (for example dashboard time windows). */
+(define single_literal_cross_source? (lambda (src)
+	(and (literal_rows_relation? (source_relation src))
+		(and (equal? (count (literal_rows_data (source_relation src))) 1)
+			(and (not (source_outer? src))
+				(or (nil? (source_join_expr src)) (equal? (source_join_expr src) true)))))))
+
+(define single_literal_source_binding (lambda (src)
+	(list (source_alias src) (car (literal_rows_data (source_relation src))))))
+
+(define literal_binding_value (lambda (bindings alias column fallback)
+	(reduce bindings (lambda (found binding)
+		(if (not (equal? found fallback)) found
+			(if (and (equal?? alias (car binding)) (has_assoc? (cadr binding) column))
+				(get_assoc (cadr binding) column)
+				fallback))) fallback)))
+
+(define logical_literal_value? (lambda (expr)
+	(not (and (list? expr) (not (empty_list? expr))))))
+
+(define logical_sql_null_literal? (lambda (expr)
+	(and (list? expr)
+		(and (equal? (count expr) 1)
+			(equal? (car expr) (sql_builtins "SQL_NULL"))))))
+
+(define fold_literal_and (lambda (items)
+	(match items
+		(cons item rest) (begin
+			(define folded_item (fold_single_literal_expr '() item))
+			(define folded_rest (fold_literal_and rest))
+			(if (or (equal? folded_item false) (equal? folded_rest false)) false
+				(if (equal? folded_item true) folded_rest
+					(if (equal? folded_rest true) folded_item
+						(list (quote and) folded_item folded_rest)))))
+		_ true)))
+
+(define fold_literal_or (lambda (items)
+	(match items
+		(cons item rest) (begin
+			(define folded_item (fold_single_literal_expr '() item))
+			(define folded_rest (fold_literal_or rest))
+			(if (or (equal? folded_item true) (equal? folded_rest true)) true
+				(if (equal? folded_item false) folded_rest
+					(if (equal? folded_rest false) folded_item
+						(list (quote or) folded_item folded_rest)))))
+		_ false)))
+
+(define fold_single_literal_expr (lambda (bindings expr)
+	/* SQL NULL is represented by a zero-argument thunk so ordinary Scheme
+	code cannot confuse it with an absent optional argument. Once the thunk
+	is the projected value of a flattened constant row, it is safe to recover
+	the literal before simplifying its consumers. */
+	(if (logical_sql_null_literal? expr)
+		nil
+	(match expr
+		((symbol get_column) alias _alias_ic column _column_ic)
+		(literal_binding_value bindings alias column expr)
+		((quote get_column) alias alias_ic column column_ic)
+		(fold_single_literal_expr bindings
+			(list (symbol "get_column") alias alias_ic column column_ic))
+		((symbol if) condition then_expr else_expr) (begin
+			(define folded_condition (fold_single_literal_expr bindings condition))
+			(if (logical_literal_value? folded_condition)
+				(fold_single_literal_expr bindings
+					(if folded_condition then_expr else_expr))
+				(list (quote if) folded_condition
+					(fold_single_literal_expr bindings then_expr)
+					(fold_single_literal_expr bindings else_expr))))
+		((quote if) condition then_expr else_expr)
+		(fold_single_literal_expr bindings (list (symbol "if") condition then_expr else_expr))
+		((symbol nil?) value) (begin
+			(define folded (fold_single_literal_expr bindings value))
+			(if (logical_literal_value? folded) (nil? folded)
+				(list (quote nil?) folded)))
+		((quote nil?) value)
+		(fold_single_literal_expr bindings (list (symbol "nil?") value))
+		((symbol equal??) left right) (begin
+			(define folded_left (fold_single_literal_expr bindings left))
+			(define folded_right (fold_single_literal_expr bindings right))
+			(if (and (logical_literal_value? folded_left) (logical_literal_value? folded_right))
+				(equal?? folded_left folded_right)
+				(list (quote equal??) folded_left folded_right)))
+		((quote equal??) left right)
+		(fold_single_literal_expr bindings (list (symbol "equal??") left right))
+		((symbol hex2bin) value) (if (string? value) (hex2bin value) expr)
+		((quote hex2bin) value) (if (string? value) (hex2bin value) expr)
+		(cons head tail) (begin
+			(define folded_tail (map tail (lambda (item)
+				(fold_single_literal_expr bindings item))))
+			(if (or (equal? head (quote and)) (equal? head (symbol "and")))
+				(fold_literal_and folded_tail)
+				(if (or (equal? head (quote or)) (equal? head (symbol "or")))
+					(fold_literal_or folded_tail)
+					(cons head folded_tail))))
+		_ expr))))
+
+(define fold_single_literal_fields (lambda (bindings fields)
+	(map_assoc fields (lambda (_title expr)
+		/* Keep NULL projected as its explicit parser node. A raw nil in an
+		assoc projection means "missing" to field_expr_by_title and therefore
+		cannot be propagated into correlated consumers. */
+		(if (logical_sql_null_literal? expr) expr
+			(fold_single_literal_expr bindings expr))))))
+
+(define fold_single_literal_order (lambda (bindings order_items)
+	(map order_items (lambda (item)
+		(match item
+			'(expr dir) (list (fold_single_literal_expr bindings expr) dir)
+			_ item)))))
+
+(define fold_single_literal_source_join (lambda (bindings src)
+	(list (source_alias src) (source_schema src) (source_relation src)
+		(source_outer? src)
+		(fold_single_literal_expr bindings (source_join_expr src)))))
+
+/* Preserve the original expression shape when this query block has no
+single-row literal source. Besides avoiding needless work, this keeps planner
+cost/cache keys stable for unrelated AND/OR predicates. */
+(define apply_single_literal_expr (lambda (bindings expr)
+	(if (empty_list? bindings) expr (fold_single_literal_expr bindings expr))))
+
+(define apply_single_literal_fields (lambda (bindings fields)
+	(if (empty_list? bindings) fields (fold_single_literal_fields bindings fields))))
+
+(define apply_single_literal_order (lambda (bindings order_items)
+	(if (empty_list? bindings) order_items (fold_single_literal_order bindings order_items))))
+
+(define apply_single_literal_source_join (lambda (bindings src)
+	(if (empty_list? bindings) src (fold_single_literal_source_join bindings src))))
+
+(define literal_projection? (lambda (projection)
+	(reduce (map_assoc projection (lambda (_title expr)
+		(logical_literal_value? (fold_single_literal_expr '() expr))))
+		(lambda (all_literal item) (and all_literal item)) true)))
+
+(define literal_derived_rewrite? (lambda (rewrite)
+	(match rewrite
+		'(_alias projection) (literal_projection? projection)
+		_ false)))
 (define stage_output_relation_id (lambda (relation)
 	(match relation
 		'(_ stage_id) stage_id
@@ -1028,6 +1172,16 @@ move arbitrary calls or subqueries across short-circuit guards. */
 	(reduce (coalesceNil aliases '()) (lambda (found alias)
 		(or found (expr_refs_alias? default_alias alias expr))) false)))
 
+/* Window aggregates over flattened derived expressions can read a scalar
+stage output while their row domain is still carried by one base table. Keep
+those stage outputs as explicit relational inputs: the physical dependency
+graph can then prepare and join them before evaluating the window aggregate. */
+(define window_stage_dependency_sources (lambda (sources default_alias exprs)
+	(filter (coalesceNil sources '()) (lambda (src)
+		(and (stage_output_relation? (source_relation src))
+			(reduce (coalesceNil exprs '()) (lambda (found expr)
+				(or found (expr_refs_alias? default_alias (source_alias src) expr))) false))))))
+
 /* Collect bound source aliases once. Join pruning must not rescan a wide
 projection for every source; that turns read-model queries into O(N^2) planner
 work before decorrelation has even started. */
@@ -1137,8 +1291,8 @@ silently stops seeing the join as a keyed lookup at all. */
 						nil)
 					_ nil))
 				(if (and (not (nil? eq_operands)) (not (nil? nil_operands))
-						(equal? (nth nil_operands 0) (nth eq_operands 0))
-						(equal? (nth nil_operands 1) (nth eq_operands 1)))
+					(equal? (nth nil_operands 0) (nth eq_operands 0))
+					(equal? (nth nil_operands 1) (nth eq_operands 1)))
 					eq_operands
 					nil))
 			nil)
@@ -1515,6 +1669,123 @@ Canonicalize once: structural indexes borrow their exact expression roots. */
 (define presence_correlation_pair (lambda (inner_default inner_sources outer_sources term)
 	(correlation_pair_using inner_default inner_sources outer_sources term true)))
 
+/* Range domains are deliberately narrower than arbitrary inequality
+correlation. A reusable cell axis needs one inclusive lower and one exclusive
+upper bound over the same ordered inner expression. Reversed spellings are
+accepted, but inclusive upper / exclusive lower bounds stay residual until a
+type-aware successor operation can prove an exact half-open rewrite. */
+(define range_correlation_bound_sides (lambda (inner_default inner_sources outer_sources inner outer kind cut_kind term)
+	(begin
+		(define inner_refs (expr_refs_sources? inner_default inner_sources inner))
+		(define outer_inner_refs (expr_refs_sources? inner_default inner_sources outer))
+		(define outer_refs (and (not outer_inner_refs) (or
+			(expr_refs_sources? nil outer_sources outer)
+			(and (not (empty_list? outer_sources))
+				(session_dependency_expr? outer)))))
+		(if (and inner_refs outer_refs)
+			(list (quote range-bound)
+				(canonical_column_expr_for_alias inner_default inner)
+				outer kind cut_kind term)
+			nil))))
+
+(define range_correlation_bound_or (lambda (inner_default inner_sources outer_sources
+	left right left_kind left_cut right_kind right_cut term)
+	(begin
+		(define direct (range_correlation_bound_sides inner_default inner_sources
+			outer_sources left right left_kind left_cut term))
+		(if (nil? direct)
+			(range_correlation_bound_sides inner_default inner_sources
+				outer_sources right left right_kind right_cut term)
+			direct))))
+
+(define range_comparison_head? (lambda (head name quoted)
+	(or (equal? (string head) name)
+		(or (equal? head quoted)
+			(or (equal? head (symbol name))
+				(or (equal? head (list (quote quote) quoted))
+					(equal? head (list (quote symbol) name))))))))
+
+(define range_correlation_bound_using (lambda (inner_default inner_sources outer_sources term)
+	(if (and (list? term) (equal? (count term) 3))
+		(begin
+			(define head (nth term 0))
+			(define left (nth term 1))
+			(define right (nth term 2))
+			(if (range_comparison_head? head ">=" (quote >=))
+				(range_correlation_bound_or inner_default inner_sources outer_sources
+					left right (quote from) 0 (quote to) 1 term)
+				(if (range_comparison_head? head "<=" (quote <=))
+					(range_correlation_bound_or inner_default inner_sources outer_sources
+						left right (quote to) 1 (quote from) 0 term)
+					(if (range_comparison_head? head "<" (quote <))
+						(range_correlation_bound_or inner_default inner_sources outer_sources
+							left right (quote to) 0 (quote from) 1 term)
+						(if (range_comparison_head? head ">" (quote >))
+							(range_correlation_bound_or inner_default inner_sources outer_sources
+								left right (quote from) 1 (quote to) 0 term)
+							nil)))))
+		nil)))
+
+(define range_bound_inner (lambda (bound) (nth bound 1)))
+(define range_bound_outer (lambda (bound) (nth bound 2)))
+(define range_bound_kind (lambda (bound) (nth bound 3)))
+(define range_bound_cut_kind (lambda (bound) (nth bound 4)))
+(define range_bound_term (lambda (bound) (nth bound 5)))
+
+/* A range boundary may be a session/constant expression or a column of any
+outer driver. Base-table drivers can batch-prepare all cuts; derived and stage
+drivers use the same cache through the row-local preparation fallback. */
+(define range_bound_has_preparable_outer_source? (lambda (bound inner_sources outer_sources)
+	(reduce (btw2025_expr_outer_column_refs
+		(range_bound_outer bound) inner_sources outer_sources) (lambda (supported ref)
+			(and supported
+				(begin
+					(define src (source_for_alias outer_sources nil (nth ref 1) (nth ref 2)))
+					(not (nil? src))))) true)))
+
+(define range_outer_context_preparable? (lambda (outer_sources)
+	(not (empty_list? (coalesceNil outer_sources '())))))
+
+(define range_correlation_domains (lambda (bounds)
+	(begin
+		(define axes (merge_unique (list (map bounds range_bound_inner))))
+		(define domains (filter (map axes (lambda (axis)
+			(begin
+				(define axis_hash (stable_structural_hash axis true))
+				(define froms (filter bounds (lambda (bound)
+					(and (equal? (string (range_bound_kind bound)) "from")
+						(equal? (stable_structural_hash (range_bound_inner bound) true)
+							axis_hash)))))
+				(define tos (filter bounds (lambda (bound)
+					(and (equal? (string (range_bound_kind bound)) "to")
+						(equal? (stable_structural_hash (range_bound_inner bound) true)
+							axis_hash)))))
+				(if (and (<= (count froms) 1) (<= (count tos) 1))
+					(list (quote range-domain) axis
+						(if (empty_list? froms) (quote range-unbounded-from)
+							(range_bound_outer (car froms)))
+						(if (empty_list? froms) -1 (range_bound_cut_kind (car froms)))
+						(if (empty_list? tos) (quote range-unbounded-to)
+							(range_bound_outer (car tos)))
+						(if (empty_list? tos) 2 (range_bound_cut_kind (car tos))))
+					nil))))
+			(lambda (domain) (not (nil? domain)))))
+		(merge_unique (list domains)))))
+
+(define range_domain_consumes_bound? (lambda (domains bound)
+	(reduce domains (lambda (found domain)
+		(or found (match domain
+			'(tag inner from from_kind to to_kind)
+			(and (or (equal? tag (quote range-domain))
+				(equal? tag (symbol "range-domain")))
+				(and (equal? inner (range_bound_inner bound))
+					(if (equal? (string (range_bound_kind bound)) "from")
+						(and (equal? from (range_bound_outer bound))
+							(equal? from_kind (range_bound_cut_kind bound)))
+						(and (equal? to (range_bound_outer bound))
+							(equal? to_kind (range_bound_cut_kind bound))))))
+			_ false))) false)))
+
 (define unique_correlation_pairs (lambda (pairs)
 	(reduce (coalesceNil pairs '()) (lambda (acc pair)
 		(if (contains? acc pair)
@@ -1711,8 +1982,26 @@ drifting on source-join pairs or residual outer references. */
 		(define source_pairs (if include_source_pairs
 			(source_join_correlation_pairs inner_default inner_sources outer_sources inner_sources)
 			'()))
-		(define lookup_pairs (domain_correlation_pairs
+		(define range_bounds (filter (map terms (lambda (term)
+			(range_correlation_bound_using inner_default inner_sources outer_sources term)))
+			(lambda (bound) (and (not (nil? bound))
+				(range_bound_has_preparable_outer_source?
+					bound inner_sources outer_sources)))))
+		(define range_domains (range_correlation_domains range_bounds))
+		(define raw_lookup_pairs (domain_correlation_pairs
 			(merge (list term_pairs source_pairs (coalesceNil extra_pairs '())))))
+		/* A synthetic session-domain pair whose value already cuts a range axis
+		is not also a point key. Keep real equality correlations even when they
+		happen to reuse that outer expression for another inner column. */
+		(define range_lookup_pairs (filter raw_lookup_pairs (lambda (pair)
+			(not (and (equal? (car pair) (cadr pair))
+				(reduce range_domains (lambda (matched domain)
+					(or matched
+						(and (not (range_domain_unbounded_from? domain))
+							(equal? (cadr pair) (range_domain_from domain)))
+						(and (not (range_domain_unbounded_to? domain))
+							(equal? (cadr pair) (range_domain_to domain))))) false))))))
+		(define lookup_pairs raw_lookup_pairs)
 		(define local_terms (filter (map terms (lambda (term)
 			(local_correlation_term inner_default lookup_pairs
 				(pair_fn inner_default inner_sources outer_sources term) term)))
@@ -1727,14 +2016,23 @@ drifting on source-join pairs or residual outer references. */
 		(define residual_outer_refs (merge_unique (list
 			(btw2025_terms_outer_column_refs local_terms inner_sources outer_sources)
 			(btw2025_sources_outer_column_refs local_sources inner_sources outer_sources))))
+		(define range_invariant_terms (filter local_terms (lambda (term)
+			(begin
+				(define bound (range_correlation_bound_using
+					inner_default inner_sources outer_sources term))
+				(or (nil? bound)
+					(not (range_domain_consumes_bound? range_domains bound)))))))
 		(list
 			(list (quote inner_src) inner_src)
 			(list (quote inner_sources) inner_sources)
 			(list (quote inner_default) inner_default)
 			(list (quote lookup_pairs) lookup_pairs)
+			(list (quote range_lookup_pairs) range_lookup_pairs)
 			(list (quote local_terms) local_terms)
 			(list (quote local_sources) local_sources)
-			(list (quote residual_outer_refs) residual_outer_refs)))))
+			(list (quote residual_outer_refs) residual_outer_refs)
+			(list (quote range_domains) range_domains)
+			(list (quote range_invariant_terms) range_invariant_terms)))))
 
 (define btw2025_local_where_terms_after_simple (lambda (inner_default inner_sources outer_sources block)
 	(filter
@@ -2177,17 +2475,20 @@ row containing NULL must remain distinguishable for non-strict functions. */
 			(or found (expr_refs_stage_output_alias? key)))
 			false))))
 
-(define scalar_first_probe_stage? (lambda (stage)
+(define scalar_first_probe_stage_with_accessing? (lambda (stage accessing_key)
 	(if (not (group_stage? stage))
 		false
 		(begin
 			(define facts (gs_facts stage))
 			(define lookup_keys (qassoc_get facts (quote lookup-keys) '()))
+			(define residual_accessing
+				(qassoc_get facts accessing_key
+					(qassoc_get facts (quote btw2025_accessing_after_simple) '())))
 			(and (scalar_value_stage? stage)
 				(and (equal? (qassoc_get facts (quote partition_limit) nil) 1)
 					(and (equal? (qassoc_get facts (quote on_overflow) nil) (quote ignore))
 						(and (not (empty_list? lookup_keys))
-							(and (empty_list? (qassoc_get facts (quote btw2025_accessing_after_simple) '()))
+							(and (empty_list? residual_accessing)
 								(and (not (reduce lookup_keys (lambda (found key)
 									(or found (expr_refs_stage_output_alias? key))) false))
 									(or
@@ -2200,22 +2501,39 @@ row containing NULL must remain distinguishable for non-strict functions. */
 											(and (equal? (nth (car (gs_aggregates stage)) 1) (scalar_once_reduce_first))
 												(not (scalar_once_ordered_payload? (car (gs_aggregates stage)))))))))))))))))
 
+(define scalar_first_probe_stage? (lambda (stage)
+	(scalar_first_probe_stage_with_accessing? stage (quote btw2025_accessing_after_simple))))
+
+(define scalar_first_range_probe_stage? (lambda (stage)
+	(and (not (empty_list? (qassoc_get (gs_facts stage) (quote range-domains) '())))
+		(scalar_first_probe_stage_with_accessing? stage (quote range-accessing-after-simple)))))
+
+(define scalar_first_physical_probe_stage? (lambda (stage)
+	(or (scalar_first_probe_stage? stage) (scalar_first_range_probe_stage? stage))))
+
 (define scalar_aggregate_probe_stage? (lambda (stage)
 	(if (not (group_stage? stage))
 		false
 		(begin
 			(define lookup_keys (qassoc_get (gs_facts stage) (quote lookup-keys) '()))
+			(define range_domains (qassoc_get (gs_facts stage) (quote range-domains) '()))
 			(define keys (if (empty_list? lookup_keys) '() (gs_keys stage)))
-			(and (equal? (qassoc_get (gs_facts stage) (quote null_semantics) nil) (quote aggregate))
-				(and (equal? (stage_result_max_rows_per_partition stage) 1)
-					(and (equal? (count keys) (count lookup_keys))
-						(and (or
-							(not (empty_list? lookup_keys))
-							(and (empty_list? (gs_domain stage))
-								(not (stage_has_residual_outer_refs? stage))))
+			(if (not (empty_list? range_domains))
+				(and (equal? (qassoc_get (gs_facts stage) (quote null_semantics) nil) (quote aggregate))
+					(and (equal? (stage_result_max_rows_per_partition stage) 1)
+						(and (equal? (count keys) (count lookup_keys))
 							(and (equal? (coalesceNil (gs_having stage) true) true)
-								(or (source_is_base_table? (gs_input stage))
-									(query_block? (gs_input stage))))))))))))
+								(source_is_base_table? (gs_input stage))))))
+				(and (equal? (qassoc_get (gs_facts stage) (quote null_semantics) nil) (quote aggregate))
+					(and (equal? (stage_result_max_rows_per_partition stage) 1)
+						(and (equal? (count keys) (count lookup_keys))
+							(and (or
+								(not (empty_list? lookup_keys))
+								(and (empty_list? (gs_domain stage))
+									(not (stage_has_residual_outer_refs? stage))))
+								(and (equal? (coalesceNil (gs_having stage) true) true)
+									(or (source_is_base_table? (gs_input stage))
+										(query_block? (gs_input stage)))))))))))))
 
 (define scalar_cardinality_probe_stage? (lambda (stage)
 	(if (not (group_stage? stage))
@@ -2238,14 +2556,30 @@ row containing NULL must remain distinguishable for non-strict functions. */
 /* Scalar row bounds belong to the decorrelated LEFT JOIN helper. Physical
 lowering consumes this contract instead of reconstructing scalar semantics from
 the original SQL shape after join reorder and stage rewrites. */
+(define stage_partition_by (lambda (stage)
+	(qassoc_get (gs_facts stage) (quote partition_by) '())))
+
+(define stage_partition_order (lambda (stage)
+	(qassoc_get (gs_facts stage) (quote partition_order) '())))
+
+(define stage_partition_offset (lambda (stage)
+	(qassoc_get (gs_facts stage) (quote partition_offset) 0)))
+
 (define stage_partition_limit (lambda (stage)
 	(begin
 		(define facts (gs_facts stage))
+		(define partition_by (stage_partition_by stage))
+		(define partition_order (stage_partition_order stage))
+		(define partition_offset (stage_partition_offset stage))
 		(define max_rows (qassoc_get facts (quote partition_limit) nil))
 		(define on_overflow (qassoc_get facts (quote on_overflow) nil))
-		(if (and (number? max_rows)
-			(and (> max_rows 0)
-				(or (equal? on_overflow (quote ignore)) (equal? on_overflow (quote error)))))
+		(if (and (list? partition_by)
+			(and (list? partition_order)
+				(and (number? partition_offset)
+					(and (>= partition_offset 0)
+						(and (number? max_rows)
+							(and (> max_rows 0)
+								(or (equal? on_overflow (quote ignore)) (equal? on_overflow (quote error)))))))))
 			max_rows
 			(neumann_fail "build_queryplan" "bounded relation is missing a valid partition limit contract")))))
 
@@ -2261,8 +2595,11 @@ the original SQL shape after join reorder and stage rewrites. */
 	(not (empty_list? (qassoc_get (gs_facts stage) (quote btw2025_accessing_after_simple) '())))))
 
 /* Cardinality is a relational property, independent of why a stage was
-introduced. A value of one means every partition identified by partition_by
-contributes at most one output tuple. */
+introduced. partition_by and partition_order describe a window over the
+stage's local input relation. domain and lookup-keys describe the later join
+edge to the outer relation; outer expressions must never become partition
+columns. A value of one means every local partition contributes at most one
+output tuple. */
 (define stage_result_max_rows_per_partition (lambda (stage)
 	(if (group_stage? stage)
 		(qassoc_get (gs_facts stage) (quote result_max_rows_per_partition) nil)
@@ -2581,6 +2918,8 @@ general recursive boolean proof above. */
 					(list (quote partition_limit) 1)
 					(list (quote on_overflow) (quote ignore))
 					(list (quote partition_by) outer_domain)
+					(list (quote partition_order) '())
+					(list (quote partition_offset) 0)
 					(list (quote result_max_rows_per_partition) 1)
 					(list (quote domain) outer_domain)
 					(list (quote lookup-keys) lookup_keys)
@@ -2658,6 +2997,8 @@ general recursive boolean proof above. */
 					(list (quote partition_limit) 1)
 					(list (quote on_overflow) (quote ignore))
 					(list (quote partition_by) outer_domain)
+					(list (quote partition_order) '())
+					(list (quote partition_offset) 0)
 					(list (quote result_max_rows_per_partition) 1)
 					(list (quote domain) outer_domain)
 					(list (quote lookup-keys) lookup_keys)
@@ -2806,6 +3147,8 @@ general recursive boolean proof above. */
 				(list (quote partition_limit) 1)
 				(list (quote on_overflow) (quote ignore))
 				(list (quote partition_by) outer_domain)
+				(list (quote partition_order) '())
+				(list (quote partition_offset) 0)
 				(list (quote result_max_rows_per_partition) 1)
 				(list (quote domain) outer_domain)
 				(list (quote lookup-keys) lookup_keys)
@@ -3233,9 +3576,23 @@ without separately proving two-valued semantics. */
 		(define inner_src (qassoc_get analysis (quote inner_src) nil))
 		(define inner_sources (qassoc_get analysis (quote inner_sources) '()))
 		(define inner_default (qassoc_get analysis (quote inner_default) nil))
-		(define where_corr_pairs (qassoc_get analysis (quote lookup_pairs) '()))
+		(define raw_where_corr_pairs (qassoc_get analysis (quote lookup_pairs) '()))
+		(define candidate_range_where_corr_pairs
+			(qassoc_get analysis (quote range_lookup_pairs) raw_where_corr_pairs))
 		(define local_terms (qassoc_get analysis (quote local_terms) '()))
 		(define local_sources (qassoc_get analysis (quote local_sources) '()))
+		(define range_enabled (range_outer_context_preparable? outer_sources))
+		(define range_domains (if range_enabled
+			(qassoc_get analysis (quote range_domains) '()) '()))
+		(define where_corr_pairs raw_where_corr_pairs)
+		(define range_where_corr_pairs (if (empty_list? range_domains)
+			raw_where_corr_pairs candidate_range_where_corr_pairs))
+		(define range_invariant_terms
+			(qassoc_get analysis (quote range_invariant_terms) local_terms))
+		(define outer_aliases (source_aliases outer_sources))
+		(define range_residual_accessing (merge_unique (list
+			(btw2025_sources_accessing_aliases local_sources outer_aliases)
+			(btw2025_terms_accessing_aliases range_invariant_terms outer_aliases))))
 		(define having_terms (split_and_terms (coalesceNil (qb_having inner) true)))
 		(define having_corr_pairs (filter (map having_terms (lambda (term)
 			(exists_correlation_pair inner_default inner_sources outer_sources term)))
@@ -3260,8 +3617,18 @@ without separately proving two-valued semantics. */
 		(define explicit_group_keys (map (coalesceNil (qb_group inner) '()) (lambda (expr)
 			(canonical_column_expr_for_alias inner_default expr))))
 		(define keys (group_keys_for_correlations inner_default all_corr_pairs explicit_group_keys))
+		/* The ordinary aggregate stage needs the synthetic (1) key for a
+		global aggregate. A range cache does not: its boundary columns already
+		identify cells, and an empty point domain must stay genuinely empty. */
+		(define range_keys (if (and (empty_list? range_where_corr_pairs)
+			(empty_list? explicit_group_keys))
+			'()
+			(group_keys_for_correlations
+				inner_default range_where_corr_pairs explicit_group_keys)))
 		(define outer_domain (correlation_domain all_corr_pairs))
 		(define lookup_keys (correlation_lookup_keys all_corr_pairs))
+		(define range_outer_domain (correlation_domain range_where_corr_pairs))
+		(define range_lookup_keys (correlation_lookup_keys range_where_corr_pairs))
 		(define condition (combine_where_terms local_terms true))
 		(define local_having (decorrelate_expr_with_pairs inner_default all_corr_pairs
 			(combine_where_terms local_having_terms true)))
@@ -3291,6 +3658,20 @@ without separately proving two-valued semantics. */
 			(merge (list
 				(list
 					(list (quote condition) stage_condition)
+					(list (quote range-domains) range_domains)
+					(list (quote range-point-keys) range_keys)
+					(list (quote range-point-domain) range_outer_domain)
+					(list (quote range-lookup-keys) range_lookup_keys)
+					(list (quote domain-keys) (if (or (empty_list? range_domains)
+						(not (equal? (count range_keys) (count range_lookup_keys))))
+						'()
+						(merge (list
+							(map (zip range_keys range_lookup_keys) (lambda (binding)
+								(list (quote point) (car binding) (cadr binding))))
+							range_domains))))
+					(list (quote range-invariant-condition)
+						(combine_where_terms range_invariant_terms true))
+					(list (quote range-accessing-after-simple) range_residual_accessing)
 					(list (quote domain) outer_domain)
 					(list (quote lookup-keys) lookup_keys)
 					(list (quote preserve_empty_domain) (not ags_have_list_accumulator))
@@ -3336,14 +3717,34 @@ without separately proving two-valued semantics. */
 			(neumann_fail "untangle_query" "scalar once_limit stage requires a base inner source after FROM flattening")
 			true)
 		(define inner_default (qassoc_get analysis (quote inner_default) nil))
-		(define lookup_pairs (qassoc_get analysis (quote lookup_pairs) '()))
+		(define raw_lookup_pairs (qassoc_get analysis (quote lookup_pairs) '()))
+		(define candidate_range_lookup_pairs
+			(qassoc_get analysis (quote range_lookup_pairs) raw_lookup_pairs))
 		(define local_terms (qassoc_get analysis (quote local_terms) '()))
 		(define local_sources (qassoc_get analysis (quote local_sources) '()))
+		(define range_enabled (range_outer_context_preparable? outer_sources))
+		(define range_domains (if range_enabled
+			(qassoc_get analysis (quote range_domains) '()) '()))
+		(define lookup_pairs raw_lookup_pairs)
+		(define range_lookup_pairs (if (empty_list? range_domains)
+			raw_lookup_pairs candidate_range_lookup_pairs))
+		(define range_invariant_terms
+			(qassoc_get analysis (quote range_invariant_terms) local_terms))
+		(define outer_aliases (source_aliases outer_sources))
+		(define range_residual_accessing (merge_unique (list
+			(btw2025_sources_accessing_aliases local_sources outer_aliases)
+			(btw2025_terms_accessing_aliases range_invariant_terms outer_aliases))))
 		(define keys (if (empty_list? lookup_pairs)
 			'(1)
 			(scalar_stage_inner_keys_for_correlations inner_default (qb_stages inner) (qb_sources inner) lookup_pairs)))
+		(define range_keys (if (empty_list? range_lookup_pairs)
+			'()
+			(scalar_stage_inner_keys_for_correlations inner_default
+				(qb_stages inner) (qb_sources inner) range_lookup_pairs)))
 		(define outer_domain (correlation_domain lookup_pairs))
 		(define lookup_keys (correlation_lookup_keys lookup_pairs))
+		(define range_outer_domain (correlation_domain range_lookup_pairs))
+		(define range_lookup_keys (correlation_lookup_keys range_lookup_pairs))
 		(define condition (combine_where_terms local_terms true))
 		(define values_for_inner (map value_exprs (lambda (value_expr)
 			(canonical_column_expr_for_alias inner_default
@@ -3379,11 +3780,27 @@ without separately proving two-valued semantics. */
 			(merge (list
 				(list
 					(list (quote condition) stage_condition)
+					(list (quote range-domains) range_domains)
+					(list (quote range-point-keys) range_keys)
+					(list (quote range-point-domain) range_outer_domain)
+					(list (quote range-lookup-keys) range_lookup_keys)
+					(list (quote domain-keys) (if (or (empty_list? range_domains)
+						(not (equal? (count range_keys) (count range_lookup_keys))))
+						'()
+						(merge (list
+							(map (zip range_keys range_lookup_keys) (lambda (binding)
+								(list (quote point) (car binding) (cadr binding))))
+							range_domains))))
+					(list (quote range-invariant-condition)
+						(combine_where_terms range_invariant_terms true))
+					(list (quote range-accessing-after-simple) range_residual_accessing)
 					(list (quote domain) outer_domain)
 					(list (quote lookup-keys) lookup_keys)
 					(list (quote preserve_empty_domain) true)
 					(list (quote null_semantics) (quote scalar))
-					(list (quote partition_by) outer_domain)
+					(list (quote partition_by) keys)
+					(list (quote partition_order) order_for_inner)
+					(list (quote partition_offset) (coalesceNil (qb_offset inner) 0))
 					(list (quote partition_limit) 1)
 					(list (quote result_max_rows_per_partition) 1)
 					(list (quote on_overflow) (quote ignore)))
@@ -3452,6 +3869,8 @@ without separately proving two-valued semantics. */
 				(list (quote preserve_empty_domain) true)
 				(list (quote null_semantics) (quote scalar))
 				(list (quote partition_by) '())
+				(list (quote partition_order) (qb_order inner))
+				(list (quote partition_offset) (coalesceNil (qb_offset inner) 0))
 				(list (quote partition_limit) 1)
 				(list (quote result_max_rows_per_partition) 1)
 				(list (quote on_overflow) (quote ignore)))))
@@ -3784,7 +4203,9 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 					(list (quote lookup-keys) lookup_keys)
 					(list (quote preserve_empty_domain) true)
 					(list (quote null_semantics) (quote scalar))
-					(list (quote partition_by) outer_domain)
+					(list (quote partition_by) keys)
+					(list (quote partition_order) '())
+					(list (quote partition_offset) 0)
 					(list (quote partition_limit) 2)
 					(list (quote result_max_rows_per_partition) 1)
 					(list (quote on_overflow) (quote error)))
@@ -4217,6 +4638,18 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 				(rewrite_window_derived_ref_chain derived_rewrites expr))))
 		(define partition_exprs (map (nth over 0) rewrite_window_expr))
 		(define canonical_args (map (coalesceNil args '()) rewrite_window_expr))
+		(define dependency_exprs (merge (list partition_exprs canonical_args)))
+		(define dependency_sources (window_stage_dependency_sources
+			outer_sources alias dependency_exprs))
+		(define dependency_hidden (merge (map (zip (produceN (count dependency_exprs)) dependency_exprs)
+			(lambda (entry) (list (concat "__window_dependency_" (car entry)) (cadr entry))))))
+		(define stage_input (if (empty_list? dependency_sources)
+			src
+			(make_query_block
+				(source_schema src)
+				(cons src dependency_sources)
+				'() true '() nil '() nil nil dependency_hidden '()
+				(list (list (quote default_alias) alias)))))
 		(define ags (dedupe_aggregates_by_col (window_aggregate_descriptor fn canonical_args)))
 		(define keys (if (empty_list? partition_exprs)
 			'(1)
@@ -4227,7 +4660,7 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 		(define stage_id (concat "window-agg:" (stable_structural_hash (list fn canonical_args keys) false)))
 		(define stage (make_group_stage
 			stage_id
-			src
+			stage_input
 			outer_domain
 			keys
 			ags
@@ -4518,31 +4951,43 @@ membership_truth rather than adding another physical lowering path. */
 		_ (combine_stage_rewrite_results head
 			(map args (lambda (item) (untangle_expr_with_stages item outer_sources ctx)))))))
 
+(define rewrite_context_literals (lambda (expr ctx)
+	(rewrite_derived_ref_chain
+		(uctx_get ctx (quote derived-rewrites) '()) expr)))
+
 (define untangle_expr_with_stages (lambda (expr outer_sources ctx)
 	(match expr
 		((symbol inner_select) subquery)
 		(if (btw2025_defer_subquery_rewrite? subquery outer_sources ctx)
-			(list (make_dependent_subquery_marker (quote scalar) nil subquery outer_sources) '() '())
+			(list (make_dependent_subquery_marker (quote scalar) nil
+				(rewrite_context_literals subquery ctx) outer_sources) '() '())
 			(untangle_scalar_subquery_with_stages subquery outer_sources ctx 0))
 		((quote inner_select) subquery)
 		(if (btw2025_defer_subquery_rewrite? subquery outer_sources ctx)
-			(list (make_dependent_subquery_marker (quote scalar) nil subquery outer_sources) '() '())
+			(list (make_dependent_subquery_marker (quote scalar) nil
+				(rewrite_context_literals subquery ctx) outer_sources) '() '())
 			(untangle_scalar_subquery_with_stages subquery outer_sources ctx 0))
 		((symbol inner_select_exists) subquery)
 		(if (btw2025_defer_subquery_rewrite? subquery outer_sources ctx)
-			(list (make_dependent_subquery_marker (quote exists) nil subquery outer_sources) '() '())
+			(list (make_dependent_subquery_marker (quote exists) nil
+				(rewrite_context_literals subquery ctx) outer_sources) '() '())
 			(untangle_exists_subquery_with_stages subquery outer_sources ctx))
 		((quote inner_select_exists) subquery)
 		(if (btw2025_defer_subquery_rewrite? subquery outer_sources ctx)
-			(list (make_dependent_subquery_marker (quote exists) nil subquery outer_sources) '() '())
+			(list (make_dependent_subquery_marker (quote exists) nil
+				(rewrite_context_literals subquery ctx) outer_sources) '() '())
 			(untangle_exists_subquery_with_stages subquery outer_sources ctx))
 		((symbol inner_select_in) probe subquery)
 		(if (btw2025_defer_subquery_rewrite? subquery outer_sources ctx)
-			(list (make_dependent_subquery_marker (quote in) probe subquery outer_sources) '() '())
+			(list (make_dependent_subquery_marker (quote in)
+				(rewrite_context_literals probe ctx)
+				(rewrite_context_literals subquery ctx) outer_sources) '() '())
 			(untangle_in_subquery_with_stages probe subquery outer_sources ctx))
 		((quote inner_select_in) probe subquery)
 		(if (btw2025_defer_subquery_rewrite? subquery outer_sources ctx)
-			(list (make_dependent_subquery_marker (quote in) probe subquery outer_sources) '() '())
+			(list (make_dependent_subquery_marker (quote in)
+				(rewrite_context_literals probe ctx)
+				(rewrite_context_literals subquery ctx) outer_sources) '() '())
 			(untangle_in_subquery_with_stages probe subquery outer_sources ctx))
 		((symbol not) ((symbol inner_select_exists) subquery))
 		(untangle_not_exists_subquery_with_stages subquery outer_sources ctx)
@@ -6164,21 +6609,46 @@ names in projections, predicates, and correlated subqueries. */
 								(define prepruned_sources (prune_unreferenced_derived_fields
 									(qb_sources block) outer_direct_consumers))
 								(define flattened_sources (flatten_source_list prepruned_sources child_ctx))
-								(define flattened_source_list (nth flattened_sources 0))
+								(define raw_flattened_source_list (nth flattened_sources 0))
+								/* Existing logical stages may already retain the source as a
+								correlation domain. Only eliminate bindings before any stages
+								have been introduced. */
+								(define literal_sources (if (empty_list? (qb_stages block))
+									(filter raw_flattened_source_list single_literal_cross_source?)
+									'()))
+								(define literal_bindings (map literal_sources single_literal_source_binding))
+								(define flattened_source_list (map
+									(if (empty_list? (qb_stages block))
+										(filter raw_flattened_source_list (lambda (src)
+											(not (single_literal_cross_source? src))))
+										raw_flattened_source_list)
+									(lambda (src) (apply_single_literal_source_join literal_bindings src))))
 								(define rewrites (nth flattened_sources 1))
+								(define inherited_literal_rewrites (filter
+									(uctx_get child_ctx (quote derived-rewrites) '())
+									literal_derived_rewrite?))
+								(define carried_literal_rewrites (merge (list
+									(filter rewrites literal_derived_rewrite?) inherited_literal_rewrites)))
+								(define active_rewrites (merge (list rewrites inherited_literal_rewrites)))
 								(define source_where_terms (nth flattened_sources 2))
 								(define source_stages (nth flattened_sources 3))
 								/* Derived references are already bound. Rewrite them once, then
 								prune unused row-preserving lookups before their join expressions
 								can create decorrelation stages. */
-								(define rewritten_where (combine_where_terms source_where_terms
-									(rewrite_derived_ref_chain rewrites (qb_where block))))
-								(define rewritten_fields (rewrite_derived_fields_chain rewrites (qb_fields block)))
+								(define rewritten_where (apply_single_literal_expr literal_bindings
+									(combine_where_terms source_where_terms
+										(rewrite_derived_ref_chain active_rewrites (qb_where block)))))
+								(define rewritten_fields (apply_single_literal_fields literal_bindings
+									(rewrite_derived_fields_chain active_rewrites (qb_fields block))))
 								(define rewritten_group (map (coalesceNil (qb_group block) '()) (lambda (item)
-									(rewrite_derived_ref_chain rewrites item))))
-								(define rewritten_having (rewrite_derived_ref_chain rewrites (qb_having block)))
-								(define rewritten_order (rewrite_derived_order_chain rewrites (qb_order block)))
-								(define rewritten_hidden (rewrite_derived_fields_chain rewrites (qb_hidden block)))
+									(apply_single_literal_expr literal_bindings
+										(rewrite_derived_ref_chain active_rewrites item)))))
+								(define rewritten_having (apply_single_literal_expr literal_bindings
+									(rewrite_derived_ref_chain active_rewrites (qb_having block))))
+								(define rewritten_order (apply_single_literal_order literal_bindings
+									(rewrite_derived_order_chain active_rewrites (qb_order block))))
+								(define rewritten_hidden (apply_single_literal_fields literal_bindings
+									(rewrite_derived_fields_chain active_rewrites (qb_hidden block))))
 								(define default_alias (qassoc_get (qb_facts block) (quote default_alias)
 									(if (empty_list? flattened_source_list) nil (source_alias (car flattened_source_list)))))
 								(define sources (prune_unused_unique_left_joins flattened_source_list default_alias
@@ -6191,7 +6661,7 @@ names in projections, predicates, and correlated subqueries. */
 									(list (quote outer-sources) expr_outer_sources)
 									(list (quote outer-resolution-sources) nested_outer_resolution_sources)
 									(list (quote local-sources) sources)
-									(list (quote derived-rewrites) rewrites))))
+									(list (quote derived-rewrites) active_rewrites))))
 								(define source_join_result (untangle_source_join_exprs_with_stages sources expr_outer_sources expr_ctx))
 								(define untangled_sources (nth source_join_result 0))
 								(define source_join_stage_sources (nth source_join_result 2))
@@ -6200,7 +6670,7 @@ names in projections, predicates, and correlated subqueries. */
 									(list (quote outer-sources) joined_expr_outer_sources)
 									(list (quote outer-resolution-sources) nested_outer_resolution_sources)
 									(list (quote local-sources) (merge_unique (list untangled_sources source_join_stage_sources)))
-									(list (quote derived-rewrites) rewrites))))
+									(list (quote derived-rewrites) active_rewrites))))
 								/* SQL name ownership ends in bind_query_names. Derived flattening
 								only rewrites references carrying an explicit bound alias. */
 								(if (expr_contains_window? rewritten_where)
@@ -6241,7 +6711,8 @@ names in projections, predicates, and correlated subqueries. */
 										(quote join_relation_units) (nth source_join_result 3))))
 								(btw2025_decorrelate_query_block delayed_block
 									(make_uctx child_ctx (list
-										(list (quote outer-resolution-sources) nested_outer_resolution_sources)))))))))))))
+										(list (quote outer-resolution-sources) nested_outer_resolution_sources)
+										(list (quote derived-rewrites) active_rewrites)))))))))))))
 
 (define canonical_union_mode (lambda (mode)
 	(if (equal? mode (quote distinct)) (quote union_distinct) mode)))

@@ -57,3 +57,24 @@ func TestJITARM64UniversalMoveAndArithmeticEmitters(t *testing.T) {
 		t.Fatalf("unexpected arm64 code:\n got %#x\nwant %#x", got, want)
 	}
 }
+
+func TestJITARM64SelectsImmediateAndLateLoadOperands(t *testing.T) {
+	buffer := make([]byte, 64)
+	ctx := &JITContext{
+		Start: unsafe.Pointer(&buffer[0]), Ptr: unsafe.Pointer(&buffer[0]), End: unsafe.Pointer(&buffer[len(buffer)-1]),
+		ScratchReg: RegR11, StackReg: RegRSP, FrameReg: RegRBP,
+	}
+	ctx.EmitIntBinaryImm(JITIntAdd, 64, RegRAX, 7)
+	ctx.EmitIntBinaryImm(JITIntSub, 64, RegRAX, -4096)
+	stack := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: 8}
+	ctx.EmitIntBinary(JITIntAdd, 64, RegRAX, &stack)
+
+	want := []uint32{0x91001C00, 0x91400400, 0xF94007F0, 0x8B100000}
+	got := make([]uint32, len(want))
+	for index := range got {
+		got[index] = binary.LittleEndian.Uint32(buffer[index*4:])
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("unexpected arm64 selection:\n got %#x\nwant %#x", got, want)
+	}
+}

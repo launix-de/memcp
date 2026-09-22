@@ -60,6 +60,7 @@ import time
 import multiprocessing
 import re
 import random
+import shutil
 import tempfile
 import ctypes
 import select
@@ -2429,13 +2430,39 @@ def wait_for_shared_supervisor_generation(previous: str, timeout: int) -> bool:
 
 _memcp_log_file: str = ""
 
-def start_memcp_process(port: int, enable_mysql: bool = False) -> subprocess.Popen | None:
+def prepare_memcp_data_dir(port: int) -> Tuple[str, Optional[Path]]:
+    """Return the runner data directory and the path it owns, if any."""
+    configured = os.environ.get("MEMCP_TEST_DATA_DIR")
+    if configured:
+        return configured, None
+    owned = Path(tempfile.mkdtemp(prefix=f"memcp-sql-tests-{port}-"))
+    return str(owned), owned
+
+
+def cleanup_memcp_artifacts(owned_data_dir: Optional[Path]) -> None:
+    """Remove only temporary files and directories created by this runner."""
+    if owned_data_dir is not None:
+        shutil.rmtree(owned_data_dir, ignore_errors=True)
+    if _memcp_log_file:
+        try:
+            Path(_memcp_log_file).unlink()
+        except FileNotFoundError:
+            pass
+
+
+def start_memcp_process(
+    port: int, enable_mysql: bool = False, data_dir: Optional[str] = None,
+) -> subprocess.Popen | None:
     global _memcp_log_file
+    proc = None
+    logfile = None
     try:
         # Test-runner contract: every managed runner owns one data directory for
         # all suites in this process, so restart/shutdown scenarios keep state
         # without depending on a developer's persistent ./data credentials.
-        datadir = os.environ.get("MEMCP_TEST_DATA_DIR", f"/tmp/memcp-sql-tests-{port}")
+        datadir = data_dir or os.environ.get(
+            "MEMCP_TEST_DATA_DIR", f"/tmp/memcp-sql-tests-{port}"
+        )
         _memcp_log_file = f"/tmp/memcp-test-{port}.log"
         env = os.environ.copy()
         memcp_bin = os.environ.get("MEMCP_BINARY", "./memcp")
@@ -2454,10 +2481,16 @@ def start_memcp_process(port: int, enable_mysql: bool = False) -> subprocess.Pop
            env=env, stdin=subprocess.PIPE, stdout=logfile, stderr=logfile, text=True)
         if not wait_for_memcp(port, timeout=MEMCP_START_TIMEOUT):
             print_memcp_log(tail=50)
+            stop_memcp_process(proc)
             return None
         return proc
     except Exception:
+        if proc is not None:
+            stop_memcp_process(proc)
         return None
+    finally:
+        if logfile is not None:
+            logfile.close()
 
 def print_memcp_log(tail: int = 100) -> None:
     if not _memcp_log_file:
@@ -3218,35 +3251,46 @@ def main():
     enable_mysql = any(load_suite_metadata(spec_file).get("requires_mysql") for spec_file in spec_files)
 
     memcp_process = None
-    if connect_only:
-        if not wait_for_sql_ready(base_url, timeout=10):
-            print(f"❌ Cannot connect to MemCP on port {port}")
-            sys.exit(1)
-    else:
-        try:
-            requests.get(base_url, timeout=2)
-        except:
-            memcp_process = start_memcp_process(port, enable_mysql=enable_mysql)
-            if not memcp_process:
-                print("❌ Failed to start MemCP")
-                sys.exit(1)
-
-    runner = SQLTestRunner(
-        base_url,
-        log_times=log_times,
-        fail_fast=fail_fast,
-        performance_calibration=performance_calibration,
-    )
+    data_dir = None
+    owned_data_dir = None
     if not connect_only:
-        def restart_handler() -> bool:
-            nonlocal memcp_process
-            if memcp_process:
-                stop_memcp_process(memcp_process)
-                memcp_process = None
-            memcp_process = start_memcp_process(port, enable_mysql=enable_mysql)
-            return memcp_process is not None
-        runner.set_restart_handler(restart_handler)
+        data_dir, owned_data_dir = prepare_memcp_data_dir(port)
+        # Restart helpers and filesystem-observation test steps resolve the
+        # active store through the same environment contract as child workers.
+        os.environ["MEMCP_TEST_DATA_DIR"] = data_dir
     try:
+        if connect_only:
+            if not wait_for_sql_ready(base_url, timeout=10):
+                print(f"❌ Cannot connect to MemCP on port {port}")
+                sys.exit(1)
+        else:
+            try:
+                requests.get(base_url, timeout=2)
+            except Exception:
+                memcp_process = start_memcp_process(
+                    port, enable_mysql=enable_mysql, data_dir=data_dir,
+                )
+                if not memcp_process:
+                    print("❌ Failed to start MemCP")
+                    sys.exit(1)
+
+        runner = SQLTestRunner(
+            base_url,
+            log_times=log_times,
+            fail_fast=fail_fast,
+            performance_calibration=performance_calibration,
+        )
+        if not connect_only:
+            def restart_handler() -> bool:
+                nonlocal memcp_process
+                if memcp_process:
+                    stop_memcp_process(memcp_process)
+                    memcp_process = None
+                memcp_process = start_memcp_process(
+                    port, enable_mysql=enable_mysql, data_dir=data_dir,
+                )
+                return memcp_process is not None
+            runner.set_restart_handler(restart_handler)
         if len(spec_files) == 1:
             success = runner.run_test_spec(spec_files[0])
         else:
@@ -3254,6 +3298,8 @@ def main():
     finally:
         if not connect_only and memcp_process:
             stop_memcp_process(memcp_process)
+        if not connect_only:
+            cleanup_memcp_artifacts(owned_data_dir)
 
     sys.exit(0 if success else 1)
 

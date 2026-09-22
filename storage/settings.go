@@ -33,6 +33,7 @@ type SettingsT struct {
 	PHPThreads             int64  // Global PHP startup setting; changes require a restart.
 	PHPMemoryLimit         int64  // Global PHP startup setting; changes require a restart.
 	PHPMaxWaitMilliseconds int64  // Global PHP startup setting; changes require a restart.
+	PHPMaxExecutionSeconds int64  // Global PHP request limit; 0 disables it. Changes require a restart.
 	PHPOutputBuffer        int64  // Global PHP startup setting; changes require a restart.
 	PHPOpcacheMemory       int64  // Global PHP startup setting; changes require a restart.
 
@@ -138,6 +139,7 @@ var Settings = SettingsT{
 	PHPThreads:             4,
 	PHPMemoryLimit:         1073741824,
 	PHPMaxWaitMilliseconds: 30000,
+	PHPMaxExecutionSeconds: 900,
 	PHPOutputBuffer:        4096,
 	PHPOpcacheMemory:       536870912,
 
@@ -155,14 +157,14 @@ var settingsMu sync.Mutex
 
 // PHPConfig holds one consistent snapshot for initializing the shared PHP runtime.
 type PHPConfig struct {
-	IMAPBinary                                                             string
-	Threads, MemoryLimit, MaxWaitMilliseconds, OutputBuffer, OpcacheMemory int64
+	IMAPBinary                                                                                  string
+	Threads, MemoryLimit, MaxWaitMilliseconds, MaxExecutionSeconds, OutputBuffer, OpcacheMemory int64
 }
 
 func PHPStartupSettings() PHPConfig {
 	settingsMu.Lock()
 	defer settingsMu.Unlock()
-	return PHPConfig{Settings.PHPIMAPBinary, Settings.PHPThreads, Settings.PHPMemoryLimit, Settings.PHPMaxWaitMilliseconds, Settings.PHPOutputBuffer, Settings.PHPOpcacheMemory}
+	return PHPConfig{Settings.PHPIMAPBinary, Settings.PHPThreads, Settings.PHPMemoryLimit, Settings.PHPMaxWaitMilliseconds, Settings.PHPMaxExecutionSeconds, Settings.PHPOutputBuffer, Settings.PHPOpcacheMemory}
 }
 
 func validatePHPSetting(key string, value scm.Scmer, minimum, maximum int64) int64 {
@@ -235,6 +237,7 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 			scm.NewString("PHPThreads"), scm.NewInt(Settings.PHPThreads),
 			scm.NewString("PHPMemoryLimit"), scm.NewInt(Settings.PHPMemoryLimit),
 			scm.NewString("PHPMaxWaitMilliseconds"), scm.NewInt(Settings.PHPMaxWaitMilliseconds),
+			scm.NewString("PHPMaxExecutionSeconds"), scm.NewInt(Settings.PHPMaxExecutionSeconds),
 			scm.NewString("PHPOutputBuffer"), scm.NewInt(Settings.PHPOutputBuffer),
 			scm.NewString("PHPOpcacheMemory"), scm.NewInt(Settings.PHPOpcacheMemory),
 
@@ -275,6 +278,8 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 			return scm.NewInt(Settings.PHPMemoryLimit)
 		case "PHPMaxWaitMilliseconds":
 			return scm.NewInt(Settings.PHPMaxWaitMilliseconds)
+		case "PHPMaxExecutionSeconds":
+			return scm.NewInt(Settings.PHPMaxExecutionSeconds)
 		case "PHPOutputBuffer":
 			return scm.NewInt(Settings.PHPOutputBuffer)
 		case "PHPOpcacheMemory":
@@ -347,6 +352,8 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 			Settings.PHPMemoryLimit = validatePHPSetting("PHPMemoryLimit", a[1], 8388608, 9007199254740991)
 		case "PHPMaxWaitMilliseconds":
 			Settings.PHPMaxWaitMilliseconds = validatePHPSetting("PHPMaxWaitMilliseconds", a[1], 0, 86400000)
+		case "PHPMaxExecutionSeconds":
+			Settings.PHPMaxExecutionSeconds = validatePHPSetting("PHPMaxExecutionSeconds", a[1], 0, 86400)
 		case "PHPOutputBuffer":
 			Settings.PHPOutputBuffer = validatePHPSetting("PHPOutputBuffer", a[1], 0, 2147483647)
 		case "PHPOpcacheMemory":

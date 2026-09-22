@@ -8,20 +8,20 @@ import "encoding/json"
 import "github.com/launix-de/memcp/scm"
 
 func TestPHPSettings(t *testing.T) {
-	keys := []string{"PHPThreads", "PHPMemoryLimit", "PHPMaxWaitMilliseconds", "PHPOutputBuffer", "PHPOpcacheMemory"}
+	keys := []string{"PHPThreads", "PHPMemoryLimit", "PHPMaxWaitMilliseconds", "PHPMaxExecutionSeconds", "PHPOutputBuffer", "PHPOpcacheMemory"}
 	snapshot := PHPStartupSettings()
 	defer ChangeSettings(scm.NewString("PHPIMAPBinary"), scm.NewString(snapshot.IMAPBinary))
 	ChangeSettings(scm.NewString("PHPIMAPBinary"), scm.NewString("/usr/bin/php"))
 	if PHPStartupSettings().IMAPBinary != "/usr/bin/php" {
 		t.Fatal("IMAP startup snapshot lost")
 	}
-	original := []int64{snapshot.Threads, snapshot.MemoryLimit, snapshot.MaxWaitMilliseconds, snapshot.OutputBuffer, snapshot.OpcacheMemory}
+	original := []int64{snapshot.Threads, snapshot.MemoryLimit, snapshot.MaxWaitMilliseconds, snapshot.MaxExecutionSeconds, snapshot.OutputBuffer, snapshot.OpcacheMemory}
 	defer func() {
 		for i, key := range keys {
 			ChangeSettings(scm.NewString(key), scm.NewInt(original[i]))
 		}
 	}()
-	values := []int64{2, 1024 << 20, 100, 0, 512 << 20}
+	values := []int64{2, 1024 << 20, 100, 123, 0, 512 << 20}
 	for i, key := range keys {
 		ChangeSettings(scm.NewString(key), scm.NewInt(values[i]))
 		if got := ChangeSettings(scm.NewString(key)).Int(); got != values[i] {
@@ -39,7 +39,7 @@ func TestPHPSettings(t *testing.T) {
 	if restored.PHPIMAPBinary != "/usr/bin/php" {
 		t.Fatal("IMAP setting lost during persistence")
 	}
-	if restored.PHPMemoryLimit != 1024<<20 || restored.PHPOpcacheMemory != 512<<20 || restored.PHPThreads != 2 || restored.PHPMaxWaitMilliseconds != 100 || restored.PHPOutputBuffer != 0 {
+	if restored.PHPMemoryLimit != 1024<<20 || restored.PHPOpcacheMemory != 512<<20 || restored.PHPThreads != 2 || restored.PHPMaxWaitMilliseconds != 100 || restored.PHPMaxExecutionSeconds != 123 || restored.PHPOutputBuffer != 0 {
 		t.Fatal("PHP settings lost during persistence")
 	}
 	for _, tc := range []struct {
@@ -50,6 +50,7 @@ func TestPHPSettings(t *testing.T) {
 		{"PHPThreads", scm.NewInt(0)}, {"PHPThreads", scm.NewFloat(1.5)},
 		{"PHPThreads", scm.NewString("4junk")}, {"PHPMemoryLimit", scm.NewInt(-1)},
 		{"PHPMemoryLimit", scm.NewInt(1 << 20)}, {"PHPMaxWaitMilliseconds", scm.NewInt(-1)},
+		{"PHPMaxExecutionSeconds", scm.NewInt(-1)}, {"PHPMaxExecutionSeconds", scm.NewInt(86401)},
 		{"PHPOutputBuffer", scm.NewInt(-1)}, {"PHPOpcacheMemory", scm.NewInt(1 << 20)},
 	} {
 		before := ChangeSettings(scm.NewString(tc.key))

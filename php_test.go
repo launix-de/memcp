@@ -178,7 +178,7 @@ func testPHPIntegration(t *testing.T, front, cli string, queueTimeout bool) {
 			t.Fatal(err)
 		}
 	}
-	cmd := exec.Command(binary, "--no-repl", apiFlag, "--mysql-port="+mysqlPort, "--mysql-socket="+socketPath, "-data", filepath.Join(dir, "data"), "-c", `(createdatabase "memcp-tests" true)`, "-c", `(settings "PHPMemoryLimit" 33554432)`, "-c", `(settings "PHPMaxWaitMilliseconds" 5000)`, "lib/main.scm", mountFile)
+	cmd := exec.Command(binary, "--no-repl", apiFlag, "--mysql-port="+mysqlPort, "--mysql-socket="+socketPath, "-data", filepath.Join(dir, "data"), "-c", `(createdatabase "memcp-tests" true)`, "-c", `(settings "PHPMemoryLimit" 33554432)`, "-c", `(settings "PHPMaxWaitMilliseconds" 5000)`, "-c", `(settings "PHPMaxExecutionSeconds" 123)`, "lib/main.scm", mountFile)
 	if helper := os.Getenv("MEMCP_TEST_IMAP_BINARY"); helper != "" {
 		cmd.Args = append(cmd.Args, "-c", `(settings "PHPIMAPBinary" `+strconv.Quote(helper)+`)`)
 	}

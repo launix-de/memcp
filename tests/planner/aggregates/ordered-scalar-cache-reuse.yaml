@@ -17,6 +17,22 @@ setup:
 - sql: INSERT INTO metric_entity VALUES (1,1),(2,2)
 - sql: INSERT INTO metric_history (parent_id,valid_at,amount,started_at,ended_at,category_id) VALUES (1,10,2,10,NULL,1),(1,20,3,10,NULL,1),(2,10,5,12,22,2),(2,20,7,12,22,2)
 test_cases:
+- name: Literal optional filter is folded before subquery decorrelation
+  sql: |-
+    EXPLAIN IR SELECT periods.n,
+     COALESCE((SELECT SUM(e.id) FROM metric_entity e
+     WHERE params.kind IS NULL OR (SELECT c.kind FROM metric_catalog c
+     WHERE c.id=e.category_id LIMIT 1)=params.kind),0) AS total
+     FROM (SELECT 1 AS n UNION ALL SELECT 2) periods
+     CROSS JOIN (SELECT NULL AS kind) params ORDER BY periods.n
+  expect:
+    rows: 1
+    contains:
+    - metric_entity
+    not_contains:
+    - metric_catalog
+    - params
+    - dependent-subquery
 - name: Set historical snapshot
   session_id: historical_metrics
   sql: SET @clock=25

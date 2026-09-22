@@ -187,6 +187,7 @@ PHP tuning CLI flags are no longer supported.
 | `PHPThreads` | `4` | Maximum simultaneous PHP executions; excess requests wait. |
 | `PHPMemoryLimit` | `1073741824` (1 GiB) | Per-request allocation ceiling including retained PDO results; minimum 8 MiB. |
 | `PHPMaxWaitMilliseconds` | `30000` | Queue timeout before HTTP 503; `0` waits indefinitely. |
+| `PHPMaxExecutionSeconds` | `900` | PHP execution limit per request; `0` disables the limit. |
 | `PHPOutputBuffer` | `4096` | Output buffer bytes; `0` disables buffering. |
 | `PHPOpcacheMemory` | `536870912` (512 MiB) | Shared opcode cache bytes; minimum 32 MiB, rounded up to whole MiB. |
 
@@ -203,6 +204,10 @@ the ceiling or disable it with `ini_set()`. These host settings override the
 corresponding external `php.ini` values. Zend's allocator must remain enabled;
 `USE_ZEND_ALLOC` must be unset or `1`; other values, including an empty value,
 are rejected.
+
+MemCP also sets `max_execution_time` explicitly for the embedded FrankenPHP
+SAPI. The PHP CLI reports an independent unlimited value and must not be used
+to diagnose the HTTP request limit.
 
 The quota includes unfetched PDO statement buffers, not just strings returned
 by `fetch()`. Results transfer to the PHP request heap after the Go call returns;

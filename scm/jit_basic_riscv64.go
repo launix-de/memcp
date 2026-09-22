@@ -156,3 +156,102 @@ func jitArchEmitSubInt32(ctx *JITContext, dst, src Reg) {
 func jitArchEmitMulInt64(ctx *JITContext, dst, src Reg) {
 	emitRISCV64(ctx, riscvR(0x33, 0, 1, dst, dst, src))
 }
+
+func jitArchEmitIntBinary(ctx *JITContext, op JITIntOp, width uint8, dst Reg, right jitIntOperand, scratch Reg) {
+	switch right.kind {
+	case jitIntOperandReg:
+		ctx.beginRegisterInstruction(jitRegisterMask(dst, right.reg), jitRegisterMask(dst))
+		defer ctx.endRegisterInstruction()
+		riscv64EmitIntBinaryReg(ctx, op, width, dst, right.reg)
+	case jitIntOperandMem:
+		ctx.beginRegisterInstruction(jitRegisterMask(dst, right.base), jitRegisterMask(dst, scratch))
+		defer ctx.endRegisterInstruction()
+		jitArchEmitLoad64(ctx, scratch, right.base, right.disp)
+		riscv64EmitIntBinaryReg(ctx, op, width, dst, scratch)
+	case jitIntOperandImm:
+		if riscv64IntBinaryImmEncodable(op, right.imm) {
+			ctx.beginRegisterInstruction(jitRegisterMask(dst), jitRegisterMask(dst))
+			defer ctx.endRegisterInstruction()
+			riscv64EmitIntBinaryImm(ctx, op, width, dst, right.imm)
+			return
+		}
+		if scratch == dst {
+			panic("jit: riscv64 integer immediate requires a distinct scratch register")
+		}
+		ctx.beginRegisterInstruction(jitRegisterMask(dst), jitRegisterMask(dst, scratch))
+		defer ctx.endRegisterInstruction()
+		jitArchEmitMovRegImm64(ctx, scratch, uint64(right.imm))
+		riscv64EmitIntBinaryReg(ctx, op, width, dst, scratch)
+	default:
+		panic("jit: invalid riscv64 integer operand")
+	}
+}
+
+func riscv64IntBinaryImmEncodable(op JITIntOp, imm int64) bool {
+	if op == JITIntSub {
+		return imm >= -2047 && imm <= 2048
+	}
+	if op != JITIntAdd && op != JITIntAnd && op != JITIntOr && op != JITIntXor {
+		return false
+	}
+	return imm >= -2048 && imm <= 2047
+}
+
+func riscv64EmitIntBinaryReg(ctx *JITContext, op JITIntOp, width uint8, dst, src Reg) {
+	if width == 32 {
+		switch op {
+		case JITIntAdd:
+			jitArchEmitAddInt32(ctx, dst, src)
+		case JITIntSub:
+			jitArchEmitSubInt32(ctx, dst, src)
+		default:
+			panic("jit: riscv64 32-bit operation is not implemented")
+		}
+		return
+	}
+	switch op {
+	case JITIntAdd:
+		jitArchEmitAddInt64(ctx, dst, src)
+	case JITIntSub:
+		jitArchEmitSubInt64(ctx, dst, src)
+	case JITIntMul:
+		jitArchEmitMulInt64(ctx, dst, src)
+	case JITIntAnd:
+		jitArchEmitAndInt64(ctx, dst, src)
+	case JITIntOr:
+		jitArchEmitOrInt64(ctx, dst, src)
+	case JITIntXor:
+		jitArchEmitXorInt64(ctx, dst, src)
+	default:
+		panic("jit: invalid riscv64 integer operation")
+	}
+}
+
+func riscv64EmitIntBinaryImm(ctx *JITContext, op JITIntOp, width uint8, dst Reg, imm int64) bool {
+	encoded := imm
+	funct3 := uint32(0)
+	switch op {
+	case JITIntAdd:
+	case JITIntSub:
+		if imm < -2047 || imm > 2048 {
+			return false
+		}
+		encoded = -imm
+	case JITIntAnd:
+		funct3 = 7
+	case JITIntOr:
+		funct3 = 6
+	case JITIntXor:
+		funct3 = 4
+	default:
+		return false
+	}
+	if encoded < -2048 || encoded > 2047 {
+		return false
+	}
+	emitRISCV64(ctx, riscvI(0x13, funct3, dst, dst, int32(encoded)))
+	if width == 32 {
+		riscvZeroExtendWord(ctx, dst)
+	}
+	return true
+}

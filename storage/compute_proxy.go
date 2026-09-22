@@ -592,72 +592,102 @@ func (p *StorageComputeProxy) Compress(_ *TxContext) {
 	compressStart := time.Now()
 	startRevision := p.revision.Load()
 	startDeltaRows := p.shard.plannerDeltaRows.Load()
-	compressedNow := false
 	readers := make([]ColumnReader, len(p.inputCols))
 	for i, col := range p.inputCols {
 		readers[i] = newCachedColumnReaderTx(p.shard.getColumnStorageOrPanic(col, false, nil), nil, false)
 	}
-	func() {
+
+	// Computors may populate a dependency cache. Its maintenance triggers are
+	// allowed to invalidate this proxy, so never execute user-generated code
+	// while holding p.mu: the invalidation path needs the same lock. Snapshot
+	// existing values first and publish only if no logical revision changed.
+	p.mu.RLock()
+	if p.compressed {
+		p.mu.RUnlock()
+		p.prewarmDeltaRows(nil, nil, scm.NewNil(), true)
+		if p.revision.Load() == startRevision && p.shard.plannerDeltaRows.Load() == startDeltaRows {
+			p.preparedRevision.Store(startRevision)
+			p.preparedDeltaRows.Store(startDeltaRows)
+		}
+		return
+	}
+	count := p.count
+	main := p.main
+	delta := make(map[uint32]scm.Scmer, len(p.delta))
+	for recid, value := range p.delta {
+		delta[recid] = value
+	}
+	p.mu.RUnlock()
+	if count == 0 {
 		p.mu.Lock()
-		defer p.mu.Unlock()
-		if p.compressed {
-			return
-		}
-		if p.count == 0 {
+		compressedNow := p.revision.Load() == startRevision
+		if compressedNow {
 			p.compressed = true
-			compressedNow = true
-			return
 		}
+		p.mu.Unlock()
+		p.prewarmDeltaRows(nil, nil, scm.NewNil(), true)
+		if p.revision.Load() == startRevision && p.shard.plannerDeltaRows.Load() == startDeltaRows {
+			p.preparedRevision.Store(startRevision)
+			p.preparedDeltaRows.Store(startDeltaRows)
+		}
+		if compressedNow {
+			p.ResetInvalidationTelemetry(time.Since(compressStart).Nanoseconds())
+		}
+		return
+	}
 
-		colvalues := make([]scm.Scmer, len(p.inputCols))
-		getValue := func(idx uint32) scm.Scmer {
-			if val, ok := p.delta[idx]; ok {
-				return val
-			}
-			if p.main != nil && p.validMask.AtomicGet(uint(idx)) {
-				return p.main.GetValue(idx)
-			}
-			for j := range readers {
-				colvalues[j] = readers[j].GetValue(idx)
-			}
-			return scm.Apply(p.computor, colvalues...)
+	colvalues := make([]scm.Scmer, len(p.inputCols))
+	getValue := func(idx uint32) scm.Scmer {
+		if val, ok := delta[idx]; ok {
+			return val
 		}
+		if main != nil && p.validMask.AtomicGet(uint(idx)) {
+			return main.GetValue(idx)
+		}
+		for j := range readers {
+			colvalues[j] = readers[j].GetValue(idx)
+		}
+		return scm.Apply(p.computor, colvalues...)
+	}
 
-		// Compression analysis and encoding must see the same materialization.
-		// Re-evaluating collection-valued callbacks produces fresh identities
-		// that cannot be looked up in the dictionary chosen during analysis.
-		values := make([]scm.Scmer, p.count)
-		for i := range values {
-			values[i] = getValue(uint32(i))
+	// Compression analysis and encoding must see the same materialization.
+	// Re-evaluating collection-valued callbacks produces fresh identities
+	// that cannot be looked up in the dictionary chosen during analysis.
+	values := make([]scm.Scmer, count)
+	for i := range values {
+		values[i] = getValue(uint32(i))
+	}
+	var newcol ColumnStorage = new(StorageSCMER)
+	for {
+		newcol.prepare()
+		for i := uint32(0); i < count; i++ {
+			newcol.scan(i, values[i])
 		}
-		var newcol ColumnStorage = new(StorageSCMER)
-		for {
-			newcol.prepare()
-			for i := uint32(0); i < p.count; i++ {
-				newcol.scan(i, values[i])
-			}
-			proposed := newcol.proposeCompression(p.count)
-			if proposed == nil {
-				break
-			}
-			newcol = proposed
+		proposed := newcol.proposeCompression(count)
+		if proposed == nil {
+			break
 		}
-		newcol.init(p.count)
-		for i := uint32(0); i < p.count; i++ {
-			newcol.build(i, values[i])
-		}
-		newcol.finish()
+		newcol = proposed
+	}
+	newcol.init(count)
+	for i := uint32(0); i < count; i++ {
+		newcol.build(i, values[i])
+	}
+	newcol.finish()
 
+	p.mu.Lock()
+	compressedNow := p.revision.Load() == startRevision
+	if compressedNow {
 		p.main = newcol
 		for recid := range p.delta {
-			if recid < p.count {
+			if recid < count {
 				delete(p.delta, recid)
 			}
 		}
 		p.validMask.Reset()
 		p.compressed = true
-		compressedNow = true
-	}()
+	}
+	p.mu.Unlock()
 	p.prewarmDeltaRows(nil, nil, scm.NewNil(), true)
 	// Invalidation advances revision before publishing a hole. Store only the
 	// generation observed before materialization: a concurrent mutation then

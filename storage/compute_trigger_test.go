@@ -25,6 +25,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/launix-de/memcp/scm"
 )
@@ -459,6 +460,18 @@ func TestLegacyScanAccessDoesNotClaimCompleteReadDependencies(t *testing.T) {
 	}
 }
 
+func TestNestedComputorLambdaDoesNotReplaceTargetInputs(t *testing.T) {
+	nested := lambdaAst([]string{"group_key"}, nestedScanAst("nested_dependency", "src", "group_key"))
+	computor := lambdaAst([]string{"ref_id"}, nested)
+	refs := extractScanJoinInfo(computor)
+	if len(refs) != 1 {
+		t.Fatalf("expected one nested source dependency, got %#v", refs)
+	}
+	if len(refs[0].srcCols) != 0 || len(refs[0].inputCols) != 0 {
+		t.Fatalf("nested cache parameters were mistaken for target-table inputs: %#v", refs[0])
+	}
+}
+
 // A schema written by an older binary can contain generated guards that omit
 // compiled-only predicates. Rebinding their target must also replace that code.
 func TestRestoredComputeDependencyTriggersRefreshGuards(t *testing.T) {
@@ -834,5 +847,43 @@ func TestComputeProxyCompressionMaterializesOnce(t *testing.T) {
 	proxy.Compress(nil)
 	if *calls != 3 {
 		t.Fatalf("valid compressed values were recomputed: %d", *calls)
+	}
+}
+
+func TestComputeProxyCompressionAllowsDependencyInvalidation(t *testing.T) {
+	proxy, _ := newAdaptiveLookupProxyForTest(3)
+	proxy.main = nil
+	proxy.compressed = false
+	invalidate := true
+	proxy.computor = scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+		if invalidate {
+			invalidate = false
+			proxy.InvalidateAll()
+		}
+		return args[0]
+	})
+
+	done := make(chan struct{})
+	go func() {
+		proxy.Compress(nil)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("computed-column dependency invalidation deadlocked compression")
+	}
+	if proxy.compressed {
+		t.Fatal("compression published values from an invalidated revision")
+	}
+
+	proxy.Compress(nil)
+	if !proxy.compressed {
+		t.Fatal("stable retry did not publish compressed values")
+	}
+	for i := uint32(0); i < 3; i++ {
+		if got := proxy.GetValue(i).Int(); got != int64(i) {
+			t.Fatalf("row %d = %d, want %d", i, got, i)
+		}
 	}
 }

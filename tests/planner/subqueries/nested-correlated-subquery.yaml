@@ -23,6 +23,9 @@ metadata:
   description: "Doubly-nested correlated scalar subquery returns NULL instead of value"
 
 cleanup:
+  - sql: "DROP TABLE IF EXISTS nc_join_outer"
+  - sql: "DROP TABLE IF EXISTS nc_join_history"
+  - sql: "DROP TABLE IF EXISTS nc_join_value"
   - sql: "DROP TABLE IF EXISTS nc_multi_outer"
   - sql: "DROP TABLE IF EXISTS nc_multi_history"
   - sql: "DROP TABLE IF EXISTS nc_multi_value"
@@ -41,6 +44,12 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS nc_config"
 
 setup:
+  - sql: "CREATE TABLE nc_join_outer (ID INT PRIMARY KEY)"
+  - sql: "CREATE TABLE nc_join_history (ID INT PRIMARY KEY, outer_id INT, value_id INT, created INT)"
+  - sql: "CREATE TABLE nc_join_value (ID INT PRIMARY KEY, label VARCHAR(40))"
+  - sql: "INSERT INTO nc_join_outer VALUES (1), (2)"
+  - sql: "INSERT INTO nc_join_history VALUES (1, 1, 10, 100), (2, 1, 20, 200), (3, 2, 10, 300)"
+  - sql: "INSERT INTO nc_join_value VALUES (10, 'older'), (20, 'newer')"
   - sql: "CREATE TABLE nc_multi_outer (ID INT PRIMARY KEY)"
   - sql: "CREATE TABLE nc_multi_history (ID INT PRIMARY KEY, outer_id INT, value_id INT, created INT)"
   - sql: "CREATE TABLE nc_multi_value (ID INT PRIMARY KEY, label VARCHAR(40))"
@@ -75,6 +84,62 @@ setup:
   - sql: "INSERT INTO nc_config VALUES (1, 99)"
 
 test_cases:
+  - name: "Correlated joined LIMIT keeps its order above the join group"
+    sql: |
+      SELECT o.ID, (
+        SELECT v.label
+        FROM nc_join_history h
+        JOIN nc_join_value v ON v.ID = h.value_id
+        WHERE h.outer_id = o.ID
+        ORDER BY h.created DESC
+        LIMIT 1
+      ) AS latest
+      FROM nc_join_outer o
+      ORDER BY o.ID
+    expect:
+      rows: 2
+      data:
+        - {ID: 1, latest: "newer"}
+        - {ID: 2, latest: "older"}
+
+  - name: "Joined scalar window has local partition keys in IR"
+    sql: |
+      EXPLAIN IR SELECT o.ID, (
+        SELECT v.label
+        FROM nc_join_history h
+        JOIN nc_join_value v ON v.ID = h.value_id
+        WHERE h.outer_id = o.ID
+        ORDER BY h.created DESC
+        LIMIT 1
+      ) AS latest
+      FROM nc_join_outer o
+    expect:
+      result_contains:
+        - "partition_by"
+        - "partition_order"
+        - "partition_offset"
+        - "partition_limit"
+        - "outer_id"
+        - "created"
+
+  - name: "Joined scalar LIMIT lowers through scan_join_order"
+    sql: |
+      EXPLAIN SELECT o.ID, (
+        SELECT v.label
+        FROM nc_join_history h
+        JOIN nc_join_value v ON v.ID = h.value_id
+        WHERE h.outer_id = o.ID
+        ORDER BY h.created DESC
+        LIMIT 1
+      ) AS latest
+      FROM nc_join_outer o
+      ORDER BY o.ID
+    expect:
+      result_contains:
+        - "scan_join_order"
+        - "nc_join_history"
+        - "nc_join_value"
+
   - name: "Nested scalar key preserves every outer domain row"
     sql: |
       SELECT o.ID,
@@ -216,3 +281,61 @@ test_cases:
       rows: 1
       data:
         - {ID: 1}
+
+  - name: "Nested scalar lookup uses only the selected ordered RecMap window"
+    setup: &recmap_window_setup
+      - sql: "DROP TABLE IF EXISTS nc_recmap_driver"
+      - sql: "DROP TABLE IF EXISTS nc_recmap_middle"
+      - sql: "DROP TABLE IF EXISTS nc_recmap_target"
+      - sql: "CREATE TABLE nc_recmap_driver (id INT, middle_id INT)"
+      - sql: "CREATE TABLE nc_recmap_middle (id INT, target_id INT)"
+      - sql: "CREATE TABLE nc_recmap_target (id INT, value INT)"
+      - scm: |
+          (begin
+            (insert (table "memcp-tests" "nc_recmap_driver") '("id" "middle_id")
+              (map (produceN 200) (lambda (i) (list i (mod i 50)))))
+            (insert (table "memcp-tests" "nc_recmap_middle") '("id" "target_id")
+              (map (produceN 50) (lambda (i) (list i i))))
+            (insert (table "memcp-tests" "nc_recmap_target") '("id" "value")
+              (map (produceN 50) (lambda (i) (list i 4))))
+            (rebuild))
+    sql: |
+      EXPLAIN PHYSICAL SELECT d.id, (
+        SELECT (
+          SELECT t.value FROM nc_recmap_target t
+          WHERE t.id = m.target_id LIMIT 1)
+        FROM nc_recmap_middle m
+        WHERE m.id = d.middle_id LIMIT 1) AS value
+      FROM nc_recmap_driver d
+      ORDER BY d.id DESC LIMIT 5
+    expect:
+      result_contains:
+        - "scan_order_recset"
+        - "scan_recmap"
+        - "recmap_compose"
+        - "$recmap_call"
+    cleanup: &recmap_window_cleanup
+      - sql: "DROP TABLE IF EXISTS nc_recmap_driver"
+      - sql: "DROP TABLE IF EXISTS nc_recmap_middle"
+      - sql: "DROP TABLE IF EXISTS nc_recmap_target"
+
+  - name: "Ordered RecMap window applies OFFSET only once"
+    setup: *recmap_window_setup
+    sql: |
+      SELECT d.id, (
+        SELECT (
+          SELECT t.value FROM nc_recmap_target t
+          WHERE t.id = m.target_id LIMIT 1)
+        FROM nc_recmap_middle m
+        WHERE m.id = d.middle_id LIMIT 1) AS value
+      FROM nc_recmap_driver d
+      ORDER BY d.id DESC LIMIT 5 OFFSET 2
+    expect:
+      rows: 5
+      data:
+        - {id: 197, value: 4}
+        - {id: 196, value: 4}
+        - {id: 195, value: 4}
+        - {id: 194, value: 4}
+        - {id: 193, value: 4}
+    cleanup: *recmap_window_cleanup

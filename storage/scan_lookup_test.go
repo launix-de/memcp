@@ -33,6 +33,41 @@ func testLookupAccess(columns []string, values []scm.Scmer) scanAccess {
 	return exactScanAccess(schema, values)
 }
 
+func testNullSafeLookupAccess(column string) scanAccess {
+	schema := []scm.Scmer{
+		newScanAccessHeader(1, "value", 0, -1),
+		newScanBoundarySpec(column, EqualMatcher, 0, 0, true, true, "", true, -1, nil, nil, "", false),
+	}
+	access, valid := scanAccessFromScheme(scm.NewSlice(schema), []scm.Scmer{scm.NewNil()}, nil)
+	if !valid {
+		panic("invalid test scan access")
+	}
+	return access
+}
+
+func TestNullSafePointIndexDoesNotScanNonNullRows(t *testing.T) {
+	tbl := setupScanLookupTable(t, "test_scan_lookup_null_point", [][]scm.Scmer{
+		{scm.NewInt(1), scm.NewString("one")},
+		{scm.NewNil(), scm.NewString("null-key")},
+		{scm.NewInt(2), scm.NewString("two")},
+	})
+	shard := tbl.Shards[0]
+	access := testNullSafeLookupAccess("key")
+	var buf [8]uint32
+	var candidates []uint32
+	release := shard.GetRead()
+	defer release()
+	shard.mu.RLock()
+	defer shard.mu.RUnlock()
+	shard.iterateIndexForce(nil, access, len(shard.inserts), buf[:], false, func(batch []uint32) bool {
+		candidates = append(candidates, batch...)
+		return true
+	})
+	if len(candidates) != 1 || candidates[0] != 1 {
+		t.Fatalf("NULL point candidates = %v, want [1]", candidates)
+	}
+}
+
 func setupScanLookupTable(tb testing.TB, database string, rows [][]scm.Scmer) *table {
 	tb.Helper()
 	databases.Remove(database)

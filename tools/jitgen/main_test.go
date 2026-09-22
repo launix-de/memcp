@@ -149,13 +149,17 @@ func add(a ...Scmer) Scmer { return NewInt(a[0].Int() + a[1].Int()) }
 		`declaration := declarations["add"]`,
 		"jitGeneratedEmitterInline(ctx, declaration, args)",
 		"= result.Reg2",
-		"ctx.EmitAddInt64",
+		"ctx.EmitIntBinary(JITIntAdd",
+		"ctx.EmitIntBinaryImm(JITIntAdd",
 		"ctx.EmitMakeInt(result",
 		"if !resultTarget",
 	} {
 		if !strings.Contains(code, want) {
 			t.Fatalf("generated arithmetic emitter does not contain %q:\n%s", want, code)
 		}
+	}
+	if strings.Contains(code, "EnsureDescsTogether") {
+		t.Fatalf("generated arithmetic emitter materializes both operands eagerly:\n%s", code)
 	}
 }
 

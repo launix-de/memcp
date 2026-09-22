@@ -47,6 +47,7 @@ from run_sql_tests import (  # noqa: E402
     SQLTestRunner,
     _load_runner_config,
     adaptive_measurement_complete,
+    cleanup_memcp_artifacts,
     discover_performance_ci_suites,
     is_error_response,
     initialize_performance_recording,
@@ -65,6 +66,7 @@ from run_sql_tests import (  # noqa: E402
     performance_regression_pct,
     performance_sample_ns,
     performance_measurement_ns,
+    prepare_memcp_data_dir,
     resolve_timing_aggregation,
     performance_scale_from_samples,
     planner_time_limit_with_tolerance_ms,
@@ -77,10 +79,67 @@ from run_sql_tests import (  # noqa: E402
     scaled_compile_time_limit_ms,
     scaled_wall_clock_limit_ms,
     sql_request_is_retry_safe,
+    start_memcp_process,
     suite_execution_mode,
     wait_for_shared_supervisor_generation,
 )
 from tools.check_test_table_names import mutable_table_collisions  # noqa: E402
+
+
+class ManagedDataDirectoryContractTest(unittest.TestCase):
+    def test_default_directory_and_log_are_removed(self):
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            owned = root_path / "memcp-sql-tests-4321-random"
+
+            def make_owned_dir(**_kwargs):
+                owned.mkdir()
+                return str(owned)
+
+            with mock.patch.dict(os.environ, {}, clear=False), \
+                    mock.patch("run_sql_tests.tempfile.mkdtemp", side_effect=make_owned_dir):
+                os.environ.pop("MEMCP_TEST_DATA_DIR", None)
+                data_dir, owned_data_dir = prepare_memcp_data_dir(4321)
+
+            self.assertEqual(data_dir, str(owned))
+            self.assertEqual(owned_data_dir, owned)
+            (owned / "schema.json").write_text("{}", encoding="utf-8")
+            log = root_path / "memcp-test-4321.log"
+            log.write_text("test log", encoding="utf-8")
+
+            with mock.patch("run_sql_tests._memcp_log_file", str(log)):
+                cleanup_memcp_artifacts(owned_data_dir)
+
+            self.assertFalse(owned.exists())
+            self.assertFalse(log.exists())
+
+    def test_configured_directory_remains_user_owned(self):
+        with tempfile.TemporaryDirectory() as root:
+            configured = Path(root) / "persistent-test-data"
+            configured.mkdir()
+            with mock.patch.dict(
+                os.environ, {"MEMCP_TEST_DATA_DIR": str(configured)}, clear=False,
+            ):
+                data_dir, owned_data_dir = prepare_memcp_data_dir(4321)
+                cleanup_memcp_artifacts(owned_data_dir)
+
+            self.assertEqual(data_dir, str(configured))
+            self.assertIsNone(owned_data_dir)
+            self.assertTrue(configured.exists())
+
+    def test_failed_start_stops_process_and_closes_log(self):
+        proc = mock.Mock()
+        logfile = mock.mock_open()
+        with mock.patch("run_sql_tests.open", logfile), \
+                mock.patch("run_sql_tests.subprocess.Popen", return_value=proc), \
+                mock.patch("run_sql_tests.wait_for_memcp", return_value=False), \
+                mock.patch("run_sql_tests.print_memcp_log"), \
+                mock.patch("run_sql_tests.stop_memcp_process") as stop:
+            started = start_memcp_process(4321, data_dir="/owned/test-data")
+
+        self.assertIsNone(started)
+        stop.assert_called_once_with(proc)
+        logfile().close.assert_called_once_with()
 
 
 class UpgradeSnapshotContractTest(unittest.TestCase):
@@ -327,7 +386,10 @@ class HookDiagnosticsContractTest(unittest.TestCase):
 
     def test_failure_and_signal_keep_partial_suite_and_server_logs(self):
         import subprocess
-        traps = self.hook[self.hook.index("trap 'cleanup"):self.hook.index("\nif ! start_supervisor;")]
+        traps = self.hook[
+            self.hook.index("trap 'cleanup"):
+            self.hook.index("\nif ! prepare_test_data_dir;")
+        ]
         for action, expected in (("exit 1", 1), ("kill -TERM $$", 143), ("kill -INT $$", 130)):
             with self.subTest(action=action), tempfile.TemporaryDirectory() as tmp:
                 logs = Path(tmp) / "logs"
@@ -343,6 +405,60 @@ class HookDiagnosticsContractTest(unittest.TestCase):
                 self.assertEqual((logs / "suite.out").read_bytes(), b"partial test output\n")
                 self.assertEqual((logs / "memcp.log").read_bytes(), b"server diagnostics\n")
                 self.assertEqual((logs / "stop-signal").read_text(), "USR2")
+
+    def test_cleanup_removes_only_hook_owned_data_directory(self):
+        import subprocess
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            owned = root / "owned-data"
+            owned.mkdir()
+            (owned / "schema.json").write_text("{}", encoding="utf-8")
+            logs = root / "logs"
+            logs.mkdir()
+            code = self.function("cleanup")
+            code += "\nstop_supervisor() { :; }\n"
+            code += "did_cleanup=0\nactive_pids=()\ncleanup 0\n"
+            result = subprocess.run(
+                ["bash", "-c", code], capture_output=True, timeout=4,
+                env=dict(os.environ, tmpdir=str(logs), memcp_log=str(logs / "memcp.log"),
+                         test_data_dir=str(owned), test_data_dir_owned="1"),
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(owned.exists())
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            configured = root / "configured-data"
+            configured.mkdir()
+            logs = root / "logs"
+            logs.mkdir()
+            code = self.function("cleanup")
+            code += "\nstop_supervisor() { :; }\n"
+            code += "did_cleanup=0\nactive_pids=()\ncleanup 0\n"
+            result = subprocess.run(
+                ["bash", "-c", code], capture_output=True, timeout=4,
+                env=dict(os.environ, tmpdir=str(logs), memcp_log=str(logs / "memcp.log"),
+                         test_data_dir=str(configured), test_data_dir_owned="0"),
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(configured.exists())
+
+    def test_prepared_store_is_exported_to_connect_only_workers(self):
+        import subprocess
+        with tempfile.TemporaryDirectory() as tmp:
+            expected = Path(tmp) / "owned-data"
+            code = self.function("prepare_test_data_dir")
+            code += '\ntest_port=4321\ntest_data_dir=""\ntest_data_dir_owned=0\n'
+            code += f'mktemp() {{ mkdir -p "{expected}"; printf "%s\\n" "{expected}"; }}\n'
+            code += 'prepare_test_data_dir\nprintf "%s|%s|%s" "$test_data_dir" '
+            code += '"$test_data_dir_owned" "$MEMCP_TEST_DATA_DIR"\n'
+            result = subprocess.run(
+                ["bash", "-c", code], capture_output=True, text=True, timeout=4,
+                env={key: value for key, value in os.environ.items()
+                     if key != "MEMCP_TEST_DATA_DIR"},
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, f"{expected}|1|{expected}")
 
     def test_supervisor_dumps_only_owned_child_and_does_not_restart(self):
         import subprocess
@@ -383,6 +499,12 @@ class HookDiagnosticsContractTest(unittest.TestCase):
                 self.assertGreater(spec["timeout-minutes"], run["timeout-minutes"])
                 self.assertEqual(artifact["if"], "always()")
                 self.assertEqual(artifact["with"]["path"].rstrip("/"), run["env"]["MEMCP_TEST_LOGDIR"])
+
+    def test_make_test_leaves_default_store_ownership_to_hook(self):
+        makefile = (self.root / "Makefile").read_text(encoding="utf-8")
+        test_recipe = makefile.split("\ntest:\n", 1)[1].split("\n\n", 1)[0]
+        self.assertNotIn("MEMCP_TEST_DATA_DIR=", test_recipe)
+        self.assertIn("./git-pre-commit", test_recipe)
 
 
 class PerformanceScaleContractTest(unittest.TestCase):
