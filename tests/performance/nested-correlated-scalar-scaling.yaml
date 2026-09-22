@@ -155,6 +155,24 @@ test_cases:
         - "recmap_compose"
         - "$recmap_call"
 
+  - name: "description join through scalar output retains RecMap"
+    sql: |
+      EXPLAIN PHYSICAL SELECT d.id,
+        (SELECT f.id FROM ncs_rm_final f
+         WHERE f.id = d.middle_id LIMIT 1) AS target_id,
+        description.value
+      FROM ncs_rm_driver d
+      LEFT JOIN ncs_rm_target description ON description.id = (
+        SELECT f.id FROM ncs_rm_final f
+        WHERE f.id = d.middle_id LIMIT 1)
+      ORDER BY (SELECT sorter.id FROM ncs_rm_middle sorter
+                WHERE sorter.id = d.middle_id LIMIT 1) DESC
+      LIMIT 72
+    expect:
+      result_contains:
+        - "scan_recmap"
+        - "$recmap_call"
+
   - name: "three-stage scalar FK chain retains the selected row value"
     sql: |
       SELECT d.id, (

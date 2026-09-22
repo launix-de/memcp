@@ -3870,20 +3870,24 @@ stage requested-column. The recursive result is ordered driver -> final. */
 						(define first_edge (if (nil? edges) nil (car edges)))
 						(define output_join (relational_recmap_join_columns driver output
 							(source_join_expr output)))
-						/* Sibling scalar outputs (for example an independent ORDER BY
-						carrier) do not change this projection chain. Reject only a source
-						whose join actually consumes the output that RecMap removes. */
-						(define dependent_sibling (reduce sources (lambda (dependent src)
-							(or dependent (and (not (equal? (source_alias src) (source_alias output)))
-								(not (empty_list? (extract_columns_for_alias output
-									(source_join_expr src))))))) false))
+						/* The replacement applies to fields, ORDER expressions, and retained
+						sibling joins. A dataview commonly projects a scalar FK and also joins
+						a description source through that same value. Such a sibling is a
+						consumer, not a reason to abandon RecMap. Only another output column
+						would remain unresolved after removing the scalar stage source. */
+						(define sibling_uses (merge_unique (map sources (lambda (src)
+							(if (equal? (source_alias src) (source_alias output)) '()
+								(extract_columns_for_alias output (source_join_expr src)))))))
+						(define unsupported_use (reduce
+							(merge_unique (list other_uses sibling_uses))
+							(lambda (unsupported col)
+								(or unsupported (not (equal? col requested)))) false))
 						(if (or (nil? first_edge)
 							(or (nil? output_join)
-								(or dependent_sibling
-									(or (not (empty_list? other_uses))
-										(or (not (equal? (nth output_join 1) "k0"))
-											(or (not (contains? (nth first_edge 1) (car output_join)))
-												(not (equal? (count (nth first_edge 1)) 1))))))))
+								(or unsupported_use
+									(or (not (equal? (nth output_join 1) "k0"))
+										(or (not (contains? (nth first_edge 1) (car output_join)))
+											(not (equal? (count (nth first_edge 1)) 1)))))))
 							nil
 							(list driver output requested edges))))) nil)))))
 
