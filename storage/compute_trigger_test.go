@@ -335,7 +335,7 @@ func TestQualifiedLookupComputeTriggerUsesPhysicalTargetColumn(t *testing.T) {
 			'("ref_id") (lambda (source_ref_id) (equal? source_ref_id (outer 1 base.ref_id)))
 			'("val") (lambda (acc val) val)
 			0 (lambda (old value) value) false))`
-	computor := scm.Eval(scm.Read(t.Name(), computorSource), &scm.Globalenv)
+	computor := scm.Read(t.Name(), computorSource)
 	refs := extractScanJoinInfo(computor)
 	if len(refs) != 1 || len(refs[0].inputCols) != 1 || refs[0].inputCols[0] != "base.ref_id" {
 		t.Fatalf("qualified lookup key not extracted: %#v", refs)
