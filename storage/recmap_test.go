@@ -18,7 +18,10 @@ package storage
 
 import (
 	"fmt"
+	"runtime"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/launix-de/memcp/scm"
 )
@@ -256,6 +259,65 @@ func TestScanRecMapFiltersBatchMappingAndMissingTarget(t *testing.T) {
 	if got := (*recMapCallClosure(customMap.shards[0].sourceShard, nil))(1,
 		NewRecMapScmer(customMap), columns, valueMapper, ifNull); got.Int() != 8 {
 		t.Fatalf("custom row mapping = %s, want 8", scm.String(got))
+	}
+	moreRows := make([][]scm.Scmer, recMapMapperBatchSize+1)
+	for i := range moreRows {
+		moreRows[i] = []scm.Scmer{scm.NewInt(int64(i + 100)), scm.NewInt(10)}
+	}
+	source.Insert([]string{"id", "target_id"}, moreRows, nil, scm.NewNil(), false, nil)
+	boundedCalls := 0
+	bounded := scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+		boundedCalls++
+		if n := len(args[0].Slice()); n > recMapMapperBatchSize {
+			t.Fatalf("mapper received %d tuples, limit %d", n, recMapMapperBatchSize)
+		}
+		return scm.NewSlice(make([]scm.Scmer, len(args[0].Slice())))
+	})
+	all := scanRecMap(nil, NewTableScmer(source), access, nil, nil,
+		scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewBool(true) }),
+		[]string{"id"}, bounded, target)
+	if all.count != int64(4+len(moreRows)) || boundedCalls != 2 {
+		t.Fatalf("bounded mapper: %d rows in %d calls, want %d rows in 2 calls",
+			all.count, boundedCalls, 4+len(moreRows))
+	}
+}
+
+func TestScanRecMapShardParallelMapping(t *testing.T) {
+	database := "trecmap_parallel"
+	databases.Remove(database)
+	t.Cleanup(func() { databases.Remove(database) })
+	CreateDatabase(database, true)
+	source, _ := CreateTable(database, "source", Memory, true)
+	source.CreateColumn("id", "INT", nil, nil)
+	source.ShardMode = ShardModePartition
+	source.PDimensions = []shardDimension{{Column: "id", NumPartitions: 2, Pivots: []scm.Scmer{scm.NewInt(10)}}}
+	source.PShards = []*storageShard{NewShard(source), NewShard(source)}
+	source.publishTopologyLocked()
+	source.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(1)}, {scm.NewInt(11)}}, nil, scm.NewNil(), false, nil)
+	target := recMapTestTable(t, database, "target", []string{"id"}, [][]scm.Scmer{{scm.NewInt(1)}})
+	oldProcs := runtime.GOMAXPROCS(4)
+	t.Cleanup(func() { runtime.GOMAXPROCS(oldProcs) })
+	var inFlight, peak atomic.Int32
+	mapper := scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+		active := inFlight.Add(1)
+		for {
+			old := peak.Load()
+			if active <= old || peak.CompareAndSwap(old, active) {
+				break
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+		inFlight.Add(-1)
+		return scm.NewSlice(make([]scm.Scmer, len(args[0].Slice())))
+	})
+	mapped := scanRecMap(nil, NewTableScmer(source), newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil,
+		nil, scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewBool(true) }),
+		[]string{"id"}, mapper, target)
+	if mapped.count != 2 || len(mapped.shards) != 2 {
+		t.Fatalf("mapped %d records across %d shards, want 2 across 2", mapped.count, len(mapped.shards))
+	}
+	if peak.Load() < 2 {
+		t.Fatalf("peak concurrent shard mappers = %d, want at least 2", peak.Load())
 	}
 }
 

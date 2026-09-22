@@ -1376,7 +1376,7 @@ func Init(en scm.Env) {
 				columnList("filterColumns", scanFilterColumnsDesc),
 				scanCallback("filter", "lambda deciding whether a source row enters the RecMap domain", "bool", "true when the source row belongs in the RecMap"),
 				columnList("mapColumns", "source columns passed to mapFn after filtering"),
-				{Kind: "func", Label: "mapFn", Description: "batch mapper: list of accepted source-column tuples to a parallel list of target record-refs or nil"},
+				{Kind: "func", Label: "mapFn", Description: "called on bounded batches of accepted source tuples, concurrently across source shards; returns a parallel list of target record-refs or nil"},
 				{Kind: "table", Label: "targetTable", Description: "target relation owning every non-nil record-ref and defining an empty RecMap image"},
 			},
 			Return: &scm.TypeDescriptor{Kind: "recmap"},

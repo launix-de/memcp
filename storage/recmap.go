@@ -35,6 +35,11 @@ const TagRecordRef = 105
 
 const TagRecMapBuild = 106
 
+// Mapper calls cross into Scheme only with a bounded tuple batch. The Go
+// source buffers and final RecMap may grow with the selected domain, but no
+// Scheme list is used as a relation-sized intermediate.
+const recMapMapperBatchSize = 1024
+
 // recMapTarget is a physical row identity valid for the query which built it.
 // A nil shard denotes the SQL-NULL result of an outer/scalar-first lookup.
 type recMapTarget struct {
@@ -172,22 +177,26 @@ func recMapCallClosure(shard *storageShard, currentTx *TxContext) *func(uint32, 
 	return &fn
 }
 
+// recMapBuildRows is owned by one serial shard scan. The table-level combine
+// collects completed builders on its serial consumer; no row-loop lock is
+// needed, and the later mapper owns each builder on one fanout worker.
 type recMapBuildRows struct {
-	mu   sync.Mutex
 	rows []recMapSourceRow
 }
 
-// newRecMapEquiFirstMapper resolves the entire accepted source batch in one
-// target projection. The callback's input and output are parallel lists; a
-// scalar subscan per source record is intentionally not supported.
+// newRecMapEquiFirstMapper resolves each bounded source-shard batch in one
+// target projection. Source shards invoke the mapper concurrently; a scalar
+// subscan per source record is intentionally not supported.
 func newRecMapEquiFirstMapper(currentTx *TxContext, target *table, targetKeyCols []string, sourceKeyFn scm.Scmer) scm.Scmer {
-	var mapper scm.SerialProc
-	if !sourceKeyFn.IsNil() {
-		mapper = scm.PrepareSerialProc(sourceKeyFn)
-	}
 	return scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
 		if len(args) != 1 || !args[0].IsSlice() {
 			panic("recmap equi mapper expects a batch of source tuples")
+		}
+		// General Scheme callbacks own mutable call frames. Prepare one per
+		// shard worker; the target projection itself can then run in parallel.
+		var mapper scm.SerialProc
+		if !sourceKeyFn.IsNil() {
+			mapper = scm.PrepareSerialProc(sourceKeyFn)
 		}
 		batch := args[0].Slice()
 		keys := make([][]scm.Scmer, len(batch))
@@ -263,68 +272,94 @@ func scanRecMap(currentTx *TxContext, source scm.Scmer, accessSchema scm.Scmer, 
 		return result
 	}
 
-	build := &recMapBuildRows{}
-	buildValue := scm.NewCustom(TagRecMapBuild, unsafe.Pointer(build))
+	parts := make([]*recMapBuildRows, 0)
 	callbackCols := append([]string{"$record_ref"}, mapCols...)
 	reduce := scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
-		if len(args) != len(callbackCols)+1 || !args[0].IsCustom(TagRecMapBuild) {
+		if len(args) != len(callbackCols)+1 {
 			panic("scan_recmap received an invalid map-reducer frame")
 		}
+		var build *recMapBuildRows
+		if args[0].IsNil() {
+			build = &recMapBuildRows{}
+		} else if args[0].IsCustom(TagRecMapBuild) {
+			build = (*recMapBuildRows)(args[0].Custom(TagRecMapBuild))
+		} else {
+			panic("scan_recmap received an invalid shard accumulator")
+		}
 		sourceRef := recordRefFromScmer(args[1])
-		build.mu.Lock()
 		build.rows = append(build.rows, recMapSourceRow{shard: sourceRef.shard, recid: sourceRef.recid,
 			key: append([]scm.Scmer(nil), args[2:]...)})
-		build.mu.Unlock()
+		return scm.NewCustom(TagRecMapBuild, unsafe.Pointer(build))
+	})
+	combine := scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+		if len(args) != 2 || !args[1].IsCustom(TagRecMapBuild) {
+			panic("scan_recmap received an invalid shard result")
+		}
+		parts = append(parts, (*recMapBuildRows)(args[1].Custom(TagRecMapBuild)))
 		return args[0]
 	})
-	combine := scm.NewFunc(func(args ...scm.Scmer) scm.Scmer { return args[0] })
 	if sourceRecSet != nil {
 		sourceRecSet.scan(currentTx, accessSchema, accessValues, filterCols, filterFn,
-			callbackCols, reduce, buildValue, combine, false)
+			callbackCols, reduce, scm.NewNil(), combine, false)
 	} else {
 		sourceTable.scan(currentTx, accessSchema, accessValues, filterCols, filterFn,
-			callbackCols, reduce, buildValue, combine, false)
+			callbackCols, reduce, scm.NewNil(), combine, false)
 	}
-	build.mu.Lock()
-	rows := append([]recMapSourceRow(nil), build.rows...)
-	build.mu.Unlock()
-	if len(rows) == 0 {
+	if len(parts) == 0 {
 		return result
 	}
-	inputs := make([]scm.Scmer, len(rows))
-	for i := range rows {
-		inputs[i] = scm.NewSlice(rows[i].key)
-	}
-	mapped := scm.Apply(mapFn, scm.NewSlice(inputs))
-	if !mapped.IsSlice() || len(mapped.Slice()) != len(rows) {
-		panic("scan_recmap mapper must return one target record-ref or nil per accepted source row")
-	}
-	for i, ref := range mapped.Slice() {
-		if ref.IsNil() {
-			continue
+	result.shards = make([]recMapShard, len(parts))
+	var firstPanic any
+	var panicMu sync.Mutex
+	done := runFanoutTasks(currentTx, len(parts), func(index int, _ bool) {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				panicMu.Lock()
+				if firstPanic == nil {
+					firstPanic = recovered
+				}
+				panicMu.Unlock()
+			}
+		}()
+		rows := parts[index].rows
+		sort.Slice(rows, func(i, j int) bool { return rows[i].recid < rows[j].recid })
+		part := recMapShard{sourceShard: rows[0].shard, sourceRecIDs: make([]uint32, len(rows)), targets: make([]recMapTarget, len(rows))}
+		for i := range rows {
+			part.sourceRecIDs[i] = rows[i].recid
 		}
-		rows[i].target = recordRefFromScmer(ref)
-		if rows[i].target.shard == nil || rows[i].target.shard.t != target {
-			panic("scan_recmap mapper returned a record-ref from another target table")
+		for start := 0; start < len(rows); start += recMapMapperBatchSize {
+			end := start + recMapMapperBatchSize
+			if end > len(rows) {
+				end = len(rows)
+			}
+			inputs := make([]scm.Scmer, end-start)
+			for i := start; i < end; i++ {
+				inputs[i-start] = scm.NewSlice(rows[i].key)
+			}
+			mapped := scm.Apply(mapFn, scm.NewSlice(inputs))
+			if !mapped.IsSlice() || len(mapped.Slice()) != len(inputs) {
+				panic("scan_recmap mapper must return one target record-ref or nil per accepted source row")
+			}
+			for i, ref := range mapped.Slice() {
+				if ref.IsNil() {
+					continue
+				}
+				part.targets[start+i] = recordRefFromScmer(ref)
+				if part.targets[start+i].shard == nil || part.targets[start+i].shard.t != target {
+					panic("scan_recmap mapper returned a record-ref from another target table")
+				}
+			}
 		}
+		result.shards[index] = part
+	})
+	if done != nil {
+		<-done
 	}
-	byShard := make(map[*storageShard][]recMapSourceRow)
-	for _, row := range rows {
-		byShard[row.shard] = append(byShard[row.shard], row)
+	if firstPanic != nil {
+		panic(firstPanic)
 	}
-	for _, shard := range sourceTable.ActiveShards() {
-		shardRows := byShard[shard]
-		if len(shardRows) == 0 {
-			continue
-		}
-		sort.Slice(shardRows, func(i, j int) bool { return shardRows[i].recid < shardRows[j].recid })
-		part := recMapShard{sourceShard: shard, sourceRecIDs: make([]uint32, len(shardRows)), targets: make([]recMapTarget, len(shardRows))}
-		for i, row := range shardRows {
-			part.sourceRecIDs[i] = row.recid
-			part.targets[i] = row.target
-		}
-		result.shards = append(result.shards, part)
-		result.count += int64(len(shardRows))
+	for _, part := range result.shards {
+		result.count += int64(len(part.sourceRecIDs))
 	}
 	return result
 }

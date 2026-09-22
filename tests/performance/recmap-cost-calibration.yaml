@@ -14,12 +14,18 @@ setup:
   - sql: "DROP TABLE IF EXISTS rc_driver_small"
   - sql: "DROP TABLE IF EXISTS rc_middle_small"
   - sql: "DROP TABLE IF EXISTS rc_target_small"
+  - sql: "DROP TABLE IF EXISTS rc_driver_medium"
+  - sql: "DROP TABLE IF EXISTS rc_middle_medium"
+  - sql: "DROP TABLE IF EXISTS rc_target_medium"
   - sql: "DROP TABLE IF EXISTS rc_driver_large"
   - sql: "DROP TABLE IF EXISTS rc_middle_large"
   - sql: "DROP TABLE IF EXISTS rc_target_large"
   - sql: "CREATE TABLE rc_driver_small (id INT, middle_id INT)"
   - sql: "CREATE TABLE rc_middle_small (id INT, target_id INT)"
   - sql: "CREATE TABLE rc_target_small (id INT, value INT)"
+  - sql: "CREATE TABLE rc_driver_medium (id INT, middle_id INT)"
+  - sql: "CREATE TABLE rc_middle_medium (id INT, target_id INT)"
+  - sql: "CREATE TABLE rc_target_medium (id INT, value INT)"
   - sql: "CREATE TABLE rc_driver_large (id INT, middle_id INT)"
   - sql: "CREATE TABLE rc_middle_large (id INT, target_id INT)"
   - sql: "CREATE TABLE rc_target_large (id INT, value INT)"
@@ -37,6 +43,12 @@ setup:
           (make_middle 50))
         (insert (table "memcp-tests" "rc_target_small") '("id" "value")
           (make_target 50))
+        (insert (table "memcp-tests" "rc_driver_medium") '("id" "middle_id")
+          (make_driver 1000 250))
+        (insert (table "memcp-tests" "rc_middle_medium") '("id" "target_id")
+          (make_middle 250))
+        (insert (table "memcp-tests" "rc_target_medium") '("id" "value")
+          (make_target 250))
         (insert (table "memcp-tests" "rc_driver_large") '("id" "middle_id")
           (make_driver 4000 1000))
         (insert (table "memcp-tests" "rc_middle_large") '("id" "target_id")
@@ -49,6 +61,9 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS rc_driver_small"
   - sql: "DROP TABLE IF EXISTS rc_middle_small"
   - sql: "DROP TABLE IF EXISTS rc_target_small"
+  - sql: "DROP TABLE IF EXISTS rc_driver_medium"
+  - sql: "DROP TABLE IF EXISTS rc_middle_medium"
+  - sql: "DROP TABLE IF EXISTS rc_target_medium"
   - sql: "DROP TABLE IF EXISTS rc_driver_large"
   - sql: "DROP TABLE IF EXISTS rc_middle_large"
   - sql: "DROP TABLE IF EXISTS rc_target_large"
@@ -81,3 +96,17 @@ test_cases:
         FROM rc_middle_large m
         WHERE m.id = d.middle_id LIMIT 1)) AS total
       FROM rc_driver_large d
+
+  - name: "medium query-local RecMap scalar chain"
+    physical_calibration: true
+    calibration_decision: "nested_scalar_recmap"
+    warmup: 1
+    repetitions: 7
+    sql: |
+      SELECT SUM((
+        SELECT (
+          SELECT t.value FROM rc_target_medium t
+          WHERE t.id = m.target_id LIMIT 1)
+        FROM rc_middle_medium m
+        WHERE m.id = d.middle_id LIMIT 1)) AS total
+      FROM rc_driver_medium d

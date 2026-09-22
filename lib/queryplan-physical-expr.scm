@@ -8819,7 +8819,7 @@ EXPLAIN PHYSICAL CALIBRATE alternative with result and operator validation. */
 (define planner_scan_join_order_build_row_ns 24)
 (define planner_scan_join_order_probe_row_ns 1)
 (define planner_recmap_startup_ns 17268)
-(define planner_recmap_work_row_ns 210)
+(define planner_recmap_work_row_ns 215)
 (define planner_nested_scalar_recmap_cost (lambda (startups work_rows)
 	(planner_cost (* startups planner_recmap_startup_ns) 0 0 0 0
 		(* work_rows planner_recmap_work_row_ns) 0 0 work_rows 0.65)))
