@@ -3408,7 +3408,7 @@ per-row nested probe. */
 			(if (nil? relational_marker) nil
 				(list (nth relational_marker 0) (nth relational_marker 1)))))))
 
-(define nested_scalar_recmap_candidate (lambda (stages block)
+(define nested_scalar_recmap_candidate_eligible (lambda (stages block)
 	(begin
 		(define marker (nested_scalar_recmap_marker stages block))
 		(define driver_sources (filter (qb_sources block) source_is_base_table?))
@@ -3483,6 +3483,19 @@ per-row nested probe. */
 								(car driver_parts) (cadr driver_parts) outer_target_cols
 								(car middle_parts) (cadr middle_parts) inner_target_cols
 								(car value_parts) (cadr value_parts))))))))))
+
+/* Reject ineligible blocks before walking their (possibly huge) expression
+trees for nested scalar markers. Large SELECT lists can otherwise repeat that
+recursive walk at every physical recipe boundary. */
+(define nested_scalar_recmap_candidate (lambda (stages block)
+	(begin
+		(define driver_sources (filter (qb_sources block) source_is_base_table?))
+		(if (or (not (single_source? driver_sources))
+			(or (not (equal? (qb_where block) true))
+				(or (not (empty_list? (qb_order block)))
+					(query_limit_active? (qb_offset block) (qb_limit block)))))
+			nil
+			(nested_scalar_recmap_candidate_eligible stages block)))))
 
 (define nested_scalar_recmap_var (lambda (candidate)
 	(symbol (concat "__nested_scalar_recmap_"
