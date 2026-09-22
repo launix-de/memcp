@@ -112,6 +112,10 @@ an unbound symbol in the callback when costing selects the probe alternative. */
 (define extract_columns_for_alias (lambda (src expr)
 	(if (and (list? expr)
 		(and (not (empty_list? expr))
+			(equal? (car expr) (symbol "__recmap_call_for_alias"))))
+		(if (equal? (source_alias src) (nth expr 1)) (list "$recmap_call") '())
+	(if (and (list? expr)
+		(and (not (empty_list? expr))
 			(equal? (car expr) (symbol "__recmap_call"))))
 		(list "$recmap_call")
 		(match expr
@@ -152,10 +156,12 @@ an unbound symbol in the callback when costing selects the probe alternative. */
 		((symbol get_column) tblvar tbl_ignorecase col col_ignorecase) (if (source_alias_matches? src (source_alias src) tblvar tbl_ignorecase) (list (resolve_physical_column_name src col col_ignorecase)) '())
 		((quote get_column) tblvar tbl_ignorecase col col_ignorecase) (if (source_alias_matches? src (source_alias src) tblvar tbl_ignorecase) (list (resolve_physical_column_name src col col_ignorecase)) '())
 			(cons head tail) (merge_unique (map tail (lambda (item) (extract_columns_for_alias src item))))
-			_ '()))))
+			_ '())))))
 
 (define lower_column_expr_for_alias_in_context (lambda (src expr probe_work_rows)
 	(match expr
+		((symbol __recmap_call_for_alias) _alias recmap cols mapper if_null)
+		(list (symbol "__recmap_call") recmap cols mapper if_null)
 		((symbol driver_membership_probe) stage probe)
 		(lower_driver_membership_probe_expr (list src) (source_alias src) stage probe)
 		((quote driver_membership_probe) stage probe)
@@ -3379,6 +3385,16 @@ probe. */
 (define collect_join_columns_acc (lambda (sources default_alias target_alias expr columns_by_alias)
 	(if (and (list? expr)
 		(and (not (empty_list? expr))
+			(equal? (car expr) (symbol "__recmap_call_for_alias"))))
+		(begin
+			(define alias (nth expr 1))
+			(if (and (not (nil? target_alias)) (not (equal? alias target_alias)))
+				columns_by_alias
+				(qassoc_set columns_by_alias alias
+					(merge_unique (list (qassoc_get columns_by_alias alias '())
+						(list "$recmap_call"))))))
+	(if (and (list? expr)
+		(and (not (empty_list? expr))
 			(equal? (car expr) (symbol "__recmap_call"))))
 		(begin
 			(define alias (coalesceNil target_alias default_alias))
@@ -3426,13 +3442,15 @@ probe. */
 		(collect_join_get_column_acc sources default_alias target_alias tblvar tbl_ignorecase col col_ignorecase columns_by_alias)
 			(cons _head tail) (reduce tail (lambda (acc item)
 				(collect_join_columns_acc sources default_alias target_alias item acc)) columns_by_alias)
-			_ columns_by_alias))))
+		_ columns_by_alias)))))
 
 (define extract_columns_for_join_alias (lambda (sources default_alias alias expr)
 	(qassoc_get (collect_join_columns_acc sources default_alias alias expr '()) alias '())))
 
 (define lower_column_expr_for_join_in_context (lambda (sources default_alias expr probe_work_rows)
 	(match expr
+		((symbol __recmap_call_for_alias) _alias recmap cols mapper if_null)
+		(list (symbol "__recmap_call") recmap cols mapper if_null)
 		((symbol driver_membership_probe) stage probe)
 		(lower_driver_membership_probe_expr sources default_alias stage probe)
 		((quote driver_membership_probe) stage probe)
