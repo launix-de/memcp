@@ -380,7 +380,7 @@ that will read the executing request later. */
 									(match (scan_plan_compile_multi static filters 0) '(schemas values residual_columns residuals)
 										(cons operator (merge (list tx source (list (quote quote) schemas) (scan_plan_values values)
 											(cons (quote list) residual_columns) (cons (quote list) residuals)) rest)))))
-							(if (not (has? (list (quote scan) (quote scan_order) (quote scan_recset) (quote scan_exists)
+							(if (not (has? (list (quote scan) (quote scan_order) (quote scan_recset) (quote scan_recmap) (quote scan_exists)
 								(quote scan_selectivity_estimate)) operator))
 								(error "compile_scan_plan received unsupported operator " operator)
 								(match (scan_plan_compile_filter columns filter) '(schema values residual_columns residual)

@@ -83,6 +83,19 @@ func collectOrderedCandidateBatch(currentTx *TxContext, source scanOrderTableSpe
 	return records, batch
 }
 
+// scanOrderRecSet selects one exact ordered window without projecting rows.
+// RecSet carries membership only; a later scan_order restores output order.
+func scanOrderRecSet(currentTx *TxContext, source scanOrderTableSpec, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, offset, limit int) *recSet {
+	if source.backingTable() == nil || offset < 0 || limit < 0 || len(sortcols) != len(sortdirs) {
+		panic("scan_order_recset: invalid source, bounds, or sort directions")
+	}
+	if limit == 0 {
+		return &recSet{table: source.backingTable()}
+	}
+	_, selected := collectOrderedCandidateBatch(currentTx, source, sortcols, sortdirs, offset, limit)
+	return selected
+}
+
 // collectPartitionOrderedCandidateBatch exploits a one-dimensional range
 // partition on the leading ORDER BY column. Those shards are disjoint ordered
 // runs, so OFFSET/LIMIT can stop after the last contributing shard instead of

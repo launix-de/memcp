@@ -139,6 +139,12 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
   existing shard lock and concurrency rights; they never modify/sort/copy the
   list. The scan owns delta enumeration, visibility, bounds, and residual checks.
 
+- `recMap` is an immutable query-local mapping between physical source and
+  target row identities. Construction and image extraction acquire the same
+  shard rights and locks as RecSet operations. A RecMap retains no transaction,
+  session, cancellation, or mutable shard containers and must never survive its
+  query or be persisted: shard rebuilds may replace every referenced identity.
+
 - `OverlayBlob.ram` belongs to one immutable column generation. Its `blobRAMCache.mu`
   protects admission metadata, decoded strings, and byte/benefit accounting;
   `lastUsed` is atomic and updated once per read batch. Cache callbacks use

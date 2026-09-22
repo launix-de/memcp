@@ -501,7 +501,7 @@ func parseBatchPseudoColName(name string) (int, bool) {
 }
 
 func isScanPseudoColName(name string) bool {
-	if name == "$recset_contains" {
+	if name == "$recset_contains" || name == "$recmap_call" || name == "$record_ref" {
 		return true
 	}
 	_, isBatch := parseBatchPseudoColName(name)
@@ -737,7 +737,7 @@ func invalidateComputedRows(proxy *StorageComputeProxy, recids map[uint32]struct
 
 func Init(en scm.Env) {
 	const scanFilterColumnsDesc = "physical columns passed to filter before mapreduce; $recset_contains supplies a row-bound RecSet membership closure"
-	const scanMapColumnsDesc = "physical columns passed to map after filtering; pseudo columns are $update (update/delete current row), $recset_contains (row-bound RecSet membership), $set:<column>, $increment:<column>, and $invalidate:<column> (computed-column maintenance), plus NEW.<column> in trigger plans"
+	const scanMapColumnsDesc = "physical columns passed to map after filtering; pseudo columns are $update (update/delete current row), $record_ref (query-local physical row identity), $recset_contains (row-bound RecSet membership), $recmap_call (row-bound RecMap accessor), $set:<column>, $increment:<column>, and $invalidate:<column> (computed-column maintenance), plus NEW.<column> in trigger plans"
 	const scanOrderMapColumnsDesc = scanMapColumnsDesc + "; $break is reserved for internal ORC convergence and must not implement SQL OFFSET/LIMIT, which belong in the native offset and limit arguments"
 	columnList := func(label, description string) *scm.TypeDescriptor {
 		return &scm.TypeDescriptor{
@@ -869,6 +869,9 @@ func Init(en scm.Env) {
 	}
 	scm.CustomStringer[TagRecSet] = func(ptr unsafe.Pointer) string {
 		return (*recSet)(ptr).String()
+	}
+	scm.CustomStringer[TagRecMap] = func(ptr unsafe.Pointer) string {
+		return (*recMap)(ptr).String()
 	}
 	registerScanBoundaryFormats()
 
@@ -1353,6 +1356,75 @@ func Init(en scm.Env) {
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
+		Name: "scan_recmap",
+
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			currentTx := scmerToTxContext(a[0])
+			accessValues := mustScmerSlice(a[3], "scan_recmap access values")
+			filterCols := scmerSliceToStrings(mustScmerSlice(a[4], "scan_recmap filter columns"))
+			mapCols := scmerSliceToStrings(mustScmerSlice(a[6], "scan_recmap map columns"))
+			target := TableFromScmer(a[8])
+			return NewRecMapScmer(scanRecMap(currentTx, a[1], a[2], accessValues, filterCols, a[5], mapCols, a[7], target))
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "scans a table or existing RecSet and builds an immutable query-local mapping from each accepted source record to the optional target record returned by mapFn",
+			HasSideEffects: true,
+			Params: []*scm.TypeDescriptor{
+				{Kind: "any", Label: "tx", Description: "transaction context used for source and target visibility"},
+				{Kind: "table|recset", Label: "source", Description: "table or exact pruned source domain"},
+				{Kind: "list", Label: "accessSchema", Description: "optimizer-compiled static source access schema", NoEscape: true, CrossGoroutine: true},
+				{Kind: "list", Label: "accessValues", Description: "flat runtime values referenced by accessSchema", NoEscape: true, CrossGoroutine: true},
+				columnList("filterColumns", scanFilterColumnsDesc),
+				scanCallback("filter", "lambda deciding whether a source row enters the RecMap domain", "bool", "true when the source row belongs in the RecMap"),
+				columnList("mapColumns", "source columns passed to mapFn after filtering"),
+				{Kind: "func", Label: "mapFn", NoEscape: true, CrossGoroutine: true, Description: "called on bounded batches of accepted source tuples, concurrently across source shards; returns a parallel list of target record-refs or nil"},
+				{Kind: "table", Label: "targetTable", Description: "target relation owning every non-nil record-ref and defining an empty RecMap image"},
+			},
+			Return: &scm.TypeDescriptor{Kind: "recmap"},
+		},
+	})
+	scm.Declare(&en, &scm.Declaration{
+		Name: "recmap_equi_first_mapper",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			return newRecMapEquiFirstMapper(scmerToTxContext(a[0]), TableFromScmer(a[1]),
+				scmerSliceToStrings(mustScmerSlice(a[2], "recmap target key columns")), a[3])
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "creates a query-local batch mapper for equality-correlated 0..1 target lookups; distinct source keys share one target projection",
+			HasSideEffects: true,
+			Params: []*scm.TypeDescriptor{
+				{Kind: "any", Label: "tx"},
+				{Kind: "table", Label: "targetTable"},
+				{Kind: "list", Label: "targetKeyColumns"},
+				{Kind: "func|nil", Label: "sourceKeyMapper"},
+			},
+			Return: &scm.TypeDescriptor{Kind: "func", Label: "mapFn"},
+		},
+	})
+	scm.Declare(&en, &scm.Declaration{
+		Name: "recmap_image",
+
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			return NewRecSetScmer(RecMapFromScmer(a[0]).image())
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "returns the distinct non-NULL target rows reached by a query-local RecMap",
+			Params: []*scm.TypeDescriptor{{Kind: "recmap", Label: "recmap"}},
+			Return: &scm.TypeDescriptor{Kind: "recset"},
+		},
+	})
+	scm.Declare(&en, &scm.Declaration{
+		Name: "recmap_compose",
+
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			return NewRecMapScmer(composeRecMaps(RecMapFromScmer(a[0]), RecMapFromScmer(a[1])))
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "composes two compatible query-local RecMaps while preserving the first map's source domain",
+			Params: []*scm.TypeDescriptor{
+				{Kind: "recmap", Label: "source_to_intermediate"},
+				{Kind: "recmap", Label: "intermediate_to_target"},
+			},
+			Return: &scm.TypeDescriptor{Kind: "recmap"},
+		},
+	})
+	scm.Declare(&en, &scm.Declaration{
 		Name: "recset_union",
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
@@ -1720,6 +1792,38 @@ func Init(en scm.Env) {
 			Return: &scm.TypeDescriptor{Kind: "any"},
 		},
 		Optimize: optimizeScanBatch,
+	})
+	scm.Declare(&en, &scm.Declaration{
+		Name: "scan_order_recset",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			currentTx := scmerToTxContext(a[0])
+			source := scanOrderTableSpec{}
+			if a[1].IsCustom(TagRecSet) {
+				source.recset = RecSetFromScmer(a[1])
+			} else {
+				source.table = TableFromScmer(a[1])
+			}
+			source.accessSchema = a[2]
+			source.accessValues = mustScmerSlice(a[3], "scan_order_recset access values")
+			sortcols := mustScmerSlice(a[4], "scan_order_recset sort columns")
+			sortdirs := scanSortDirections(mustScmerSlice(a[5], "scan_order_recset sort directions"))
+			return NewRecSetScmer(scanOrderRecSet(currentTx, source, sortcols, sortdirs,
+				scm.ToInt(a[6]), scm.ToInt(a[7])))
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "selects an exact query-local ordered OFFSET/LIMIT window as an unordered RecSet, without projecting result columns; a later scan_order can restore the same sort order",
+			HasSideEffects: true,
+			Params: []*scm.TypeDescriptor{
+				{Kind: "any", Label: "tx", Description: "query transaction"},
+				{Kind: "table|recset", Label: "table_or_recset", Description: "visible source domain"},
+				{Kind: "list", Label: "accessSchema", Description: "static scan access schema", NoEscape: true, CrossGoroutine: true},
+				{Kind: "list", Label: "accessValues", Description: "runtime scan access values", NoEscape: true, CrossGoroutine: true},
+				sortColumnList("sortcols", "direct source columns defining the ordered window"),
+				sortDirectionList("sortdirs", "one direction per sort column"),
+				{Kind: "number", Label: "offset", Description: "first selected row"},
+				{Kind: "number", Label: "limit", Description: "finite maximum number of selected rows"},
+			},
+			Return: &scm.TypeDescriptor{Kind: "recset"},
+		},
 	})
 	scm.Declare(&en, &scm.Declaration{
 		Name: "scan_order_batch_accept",

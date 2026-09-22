@@ -1,0 +1,112 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+# Costgen input for query-local RecMap startup and row work.
+
+metadata:
+  version: "1.0"
+  description: "Query-local RecMap physical cost calibration"
+  isolated: true
+  ci: false
+  physical_calibration: true
+  cache_state: "warm_operator_state"
+  compile_state: "cached_plan_execution_only"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS rc_driver_small"
+  - sql: "DROP TABLE IF EXISTS rc_middle_small"
+  - sql: "DROP TABLE IF EXISTS rc_target_small"
+  - sql: "DROP TABLE IF EXISTS rc_driver_medium"
+  - sql: "DROP TABLE IF EXISTS rc_middle_medium"
+  - sql: "DROP TABLE IF EXISTS rc_target_medium"
+  - sql: "DROP TABLE IF EXISTS rc_driver_large"
+  - sql: "DROP TABLE IF EXISTS rc_middle_large"
+  - sql: "DROP TABLE IF EXISTS rc_target_large"
+  - sql: "CREATE TABLE rc_driver_small (id INT, middle_id INT)"
+  - sql: "CREATE TABLE rc_middle_small (id INT, target_id INT)"
+  - sql: "CREATE TABLE rc_target_small (id INT, value INT)"
+  - sql: "CREATE TABLE rc_driver_medium (id INT, middle_id INT)"
+  - sql: "CREATE TABLE rc_middle_medium (id INT, target_id INT)"
+  - sql: "CREATE TABLE rc_target_medium (id INT, value INT)"
+  - sql: "CREATE TABLE rc_driver_large (id INT, middle_id INT)"
+  - sql: "CREATE TABLE rc_middle_large (id INT, target_id INT)"
+  - sql: "CREATE TABLE rc_target_large (id INT, value INT)"
+  - scm: |
+      (begin
+        (define make_driver (lambda (n width)
+          (map (produceN n) (lambda (i) (list i (mod i width))))))
+        (define make_middle (lambda (n)
+          (map (produceN n) (lambda (i) (list i i)))))
+        (define make_target (lambda (n)
+          (map (produceN n) (lambda (i) (list i 4)))))
+        (insert (table "memcp-tests" "rc_driver_small") '("id" "middle_id")
+          (make_driver 200 50))
+        (insert (table "memcp-tests" "rc_middle_small") '("id" "target_id")
+          (make_middle 50))
+        (insert (table "memcp-tests" "rc_target_small") '("id" "value")
+          (make_target 50))
+        (insert (table "memcp-tests" "rc_driver_medium") '("id" "middle_id")
+          (make_driver 1000 250))
+        (insert (table "memcp-tests" "rc_middle_medium") '("id" "target_id")
+          (make_middle 250))
+        (insert (table "memcp-tests" "rc_target_medium") '("id" "value")
+          (make_target 250))
+        (insert (table "memcp-tests" "rc_driver_large") '("id" "middle_id")
+          (make_driver 4000 1000))
+        (insert (table "memcp-tests" "rc_middle_large") '("id" "target_id")
+          (make_middle 1000))
+        (insert (table "memcp-tests" "rc_target_large") '("id" "value")
+          (make_target 1000)))
+  - scm: "(rebuild)"
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS rc_driver_small"
+  - sql: "DROP TABLE IF EXISTS rc_middle_small"
+  - sql: "DROP TABLE IF EXISTS rc_target_small"
+  - sql: "DROP TABLE IF EXISTS rc_driver_medium"
+  - sql: "DROP TABLE IF EXISTS rc_middle_medium"
+  - sql: "DROP TABLE IF EXISTS rc_target_medium"
+  - sql: "DROP TABLE IF EXISTS rc_driver_large"
+  - sql: "DROP TABLE IF EXISTS rc_middle_large"
+  - sql: "DROP TABLE IF EXISTS rc_target_large"
+
+test_cases:
+  - name: "small query-local RecMap scalar chain"
+    physical_calibration: true
+    calibration_decision: "nested_scalar_recmap"
+    warmup: 2
+    repetitions: 7
+    sql: |
+      SELECT SUM((
+        SELECT (
+          SELECT t.value FROM rc_target_small t
+          WHERE t.id = m.target_id LIMIT 1)
+        FROM rc_middle_small m
+        WHERE m.id = d.middle_id LIMIT 1)) AS total
+      FROM rc_driver_small d
+
+  - name: "large query-local RecMap scalar chain"
+    physical_calibration: true
+    calibration_decision: "nested_scalar_recmap"
+    warmup: 1
+    repetitions: 5
+    sql: |
+      SELECT SUM((
+        SELECT (
+          SELECT t.value FROM rc_target_large t
+          WHERE t.id = m.target_id LIMIT 1)
+        FROM rc_middle_large m
+        WHERE m.id = d.middle_id LIMIT 1)) AS total
+      FROM rc_driver_large d
+
+  - name: "medium query-local RecMap scalar chain"
+    physical_calibration: true
+    calibration_decision: "nested_scalar_recmap"
+    warmup: 1
+    repetitions: 7
+    sql: |
+      SELECT SUM((
+        SELECT (
+          SELECT t.value FROM rc_target_medium t
+          WHERE t.id = m.target_id LIMIT 1)
+        FROM rc_middle_medium m
+        WHERE m.id = d.middle_id LIMIT 1)) AS total
+      FROM rc_driver_medium d
