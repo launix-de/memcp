@@ -14,6 +14,7 @@
 # Usage: upgrade-validate.sh <mysql-port> snapshot|compare <snapshot.json>
 #        upgrade-validate.sh <mysql-port> mutate <old.json> <post-dml.json>
 #        upgrade-validate.sh <mysql-port> checks  # legacy focused DML checks
+#        upgrade-validate.sh <mysql-port> group-checks
 #        upgrade-validate.sh <mysql-port> zero-policy-checks
 set -uo pipefail
 
@@ -22,7 +23,7 @@ PORT="${1:?usage: upgrade-validate.sh <mysql-port>}"
 # Full comparison is read-only; mutate derives its oracle from the OLD snapshot,
 # never from candidate output. The workflow compares it again after a restart.
 MODE="${2:-checks}"
-if [ "$MODE" != checks ]; then
+if [ "$MODE" != checks ] && [ "$MODE" != group-checks ]; then
   python3 - "$0" "$PORT" "$MODE" "${3:-}" "${4:-}" <<'PYTHON'
 import base64
 import contextlib
@@ -93,6 +94,11 @@ def capture():
                 raise ValueError("unexpected column metadata width for " + name)
             schema = dict(zip(header, fields))
             column = schema["Field"].decode("ascii")
+            # Planner-owned temporary projections are cache artifacts attached
+            # to durable tables. They are validated by group-checks and the
+            # cache ABI, not part of the old-writer application-data oracle.
+            if column.startswith("."):
+                continue
             sql_type = schema["Type"].decode("ascii")
             codec = encoding(sql_type)
             columns.append({"name": column, "encoding": codec,
@@ -327,6 +333,41 @@ check() {
 exec_sql() {
   check "DML statement succeeds" "$1" ""
 }
+
+check_contains() {
+  local desc="$1" query="$2" needle="$3" actual stderr_out status=0
+  CHECKS=$((CHECKS + 1))
+  actual=$("${MYSQL_BASE[@]}" -e "$query" 2>/tmp/upgrade-validate-stderr.$$) || status=$?
+  stderr_out=$(cat /tmp/upgrade-validate-stderr.$$ 2>/dev/null)
+  rm -f /tmp/upgrade-validate-stderr.$$
+  if [ "$status" -ne 0 ] || [[ "$actual" != *"$needle"* ]]; then
+    echo "MISMATCH: $desc"
+    echo "  query:    $query"
+    echo "  mysql exit status: $status"
+    printf '  expected output containing: %q\n' "$needle"
+    printf '  actual:   %q\n' "$actual"
+    if [ -n "$stderr_out" ]; then
+      printf '  stderr:   %q\n' "$stderr_out"
+    fi
+    FAILURES=$((FAILURES + 1))
+  fi
+}
+
+if [ "$MODE" = group-checks ]; then
+  check "Group cache survives upgrade" \
+    "SELECT tenant_id, COUNT(*) FROM up_group_events GROUP BY tenant_id ORDER BY tenant_id" \
+    "$(printf '1\t3000\n2\t3000')"
+  range_query="SELECT w.id, (SELECT e.id FROM up_group_events e WHERE e.tenant_id = w.tenant_id AND e.happened_at <= w.range_to ORDER BY e.happened_at DESC LIMIT 1) FROM up_group_windows w ORDER BY w.id"
+  check "Range group cache survives upgrade" "$range_query" \
+    "$(printf '1\t1000\n2\t1500\n3\t3001\n4\t3001')"
+  check_contains "Range query still selects the range cache operator" \
+    "EXPLAIN PHYSICAL $range_query" "range_group_cache"
+  echo "upgrade group-cache validation: $((CHECKS - FAILURES))/$CHECKS checks passed"
+  if [ "$FAILURES" -ne 0 ]; then
+    exit 1
+  fi
+  exit 0
+fi
 
 # ==========================================================================
 # 1. StorageFloat
