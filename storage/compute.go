@@ -893,6 +893,29 @@ type scanJoinInfo struct {
 	mapCols      []string // source table columns read by the scan mapper
 }
 
+// resolveComputeInputCols maps planner lambda parameter names to physical
+// target columns. Scalar lookup plans can qualify parameters with a table alias.
+// Prefer exact names because quoted SQL column names may themselves contain dots.
+func (t *table) resolveComputeInputCols(inputCols []string) ([]string, bool) {
+	resolved := make([]string, len(inputCols))
+	for i, name := range inputCols {
+		if col, ok := t.ResolveColumnName(name, false); ok {
+			resolved[i] = col
+			continue
+		}
+		dot := strings.LastIndexByte(name, '.')
+		if dot < 0 {
+			return nil, false
+		}
+		col, ok := t.ResolveColumnName(name[dot+1:], false)
+		if !ok {
+			return nil, false
+		}
+		resolved[i] = col
+	}
+	return resolved, true
+}
+
 // extractScanJoinInfo walks a computor lambda and returns one scanJoinInfo per
 // scan call found, together with the equality join pairs extracted from the
 // filter lambda. If the filter cannot be analyzed, the info is returned with
@@ -1952,8 +1975,14 @@ func (t *table) registerComputeTriggers(name string, computor scm.Scmer) {
 			continue
 		}
 
+		// Resolve qualified lambda parameters before using them as physical
+		// target-table scan columns. Unknown inputs require full invalidation.
+		inputCols, validInputCols := t.resolveComputeInputCols(ref.inputCols)
+		if validInputCols {
+			ref.inputCols = inputCols
+		}
 		// Determine trigger bodies: selective if join pairs are available
-		selective := len(ref.srcCols) > 0 && len(ref.srcCols) == len(ref.inputCols)
+		selective := validInputCols && len(ref.srcCols) > 0 && len(ref.srcCols) == len(ref.inputCols)
 		relevantCols := scanRelevantSourceCols(ref, srcTable)
 
 		// Check if this scan is an additive aggregate eligible for incremental update.
@@ -2104,7 +2133,11 @@ func (t *table) registerORCDependencyTriggers(name string, col *column, refs []s
 		if srcTable == nil {
 			continue
 		}
-		selective := len(ref.srcCols) > 0 && len(ref.srcCols) == len(ref.inputCols)
+		inputCols, validInputCols := t.resolveComputeInputCols(ref.inputCols)
+		if validInputCols {
+			ref.inputCols = inputCols
+		}
+		selective := validInputCols && len(ref.srcCols) > 0 && len(ref.srcCols) == len(ref.inputCols)
 		relevantCols := scanRelevantSourceCols(ref, srcTable)
 		for _, timing := range []TriggerTiming{AfterInsert, AfterUpdate, AfterDelete} {
 			triggerName := ".orcdep:" + t.Name + ":" + name + "|scan" + strconv.Itoa(refIdx) + "|" + srcTable.Name + "|" + timing.String()
