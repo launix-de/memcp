@@ -501,7 +501,7 @@ func parseBatchPseudoColName(name string) (int, bool) {
 }
 
 func isScanPseudoColName(name string) bool {
-	if name == "$recset_contains" || name == "$recmap_call" {
+	if name == "$recset_contains" || name == "$recmap_call" || name == "$record_ref" {
 		return true
 	}
 	_, isBatch := parseBatchPseudoColName(name)
@@ -736,8 +736,8 @@ func invalidateComputedRows(proxy *StorageComputeProxy, recids map[uint32]struct
 }
 
 func Init(en scm.Env) {
-	const scanFilterColumnsDesc = "physical columns passed to filter before mapreduce; $recset_contains supplies a row-bound RecSet membership closure and $recmap_call reads a preprojected RecMap value"
-	const scanMapColumnsDesc = "physical columns passed to map after filtering; pseudo columns are $update (update/delete current row), $recset_contains (row-bound RecSet membership), $recmap_call (row-bound RecMap value), $set:<column>, $increment:<column>, and $invalidate:<column> (computed-column maintenance), plus NEW.<column> in trigger plans"
+	const scanFilterColumnsDesc = "physical columns passed to filter before mapreduce; $recset_contains supplies a row-bound RecSet membership closure"
+	const scanMapColumnsDesc = "physical columns passed to map after filtering; pseudo columns are $update (update/delete current row), $record_ref (query-local physical row identity), $recset_contains (row-bound RecSet membership), $recmap_call (row-bound RecMap accessor), $set:<column>, $increment:<column>, and $invalidate:<column> (computed-column maintenance), plus NEW.<column> in trigger plans"
 	const scanOrderMapColumnsDesc = scanMapColumnsDesc + "; $break is reserved for internal ORC convergence and must not implement SQL OFFSET/LIMIT, which belong in the native offset and limit arguments"
 	columnList := func(label, description string) *scm.TypeDescriptor {
 		return &scm.TypeDescriptor{
@@ -1356,30 +1356,47 @@ func Init(en scm.Env) {
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
-		Name: "recmap_project_join",
+		Name: "scan_recmap",
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			currentTx := scmerToTxContext(a[0])
-			source := RecSetFromScmer(a[1])
-			sourceKeyCols := scmerSliceToStrings(mustScmerSlice(a[2], "recmap source key columns"))
-			target := TableFromScmer(a[4])
-			targetKeyCols := scmerSliceToStrings(mustScmerSlice(a[5], "recmap target key columns"))
-			targetValueCols := scmerSliceToStrings(mustScmerSlice(a[6], "recmap target value columns"))
-			return NewRecMapScmer(projectRecMap(currentTx, source, sourceKeyCols, a[3], target, targetKeyCols, targetValueCols, a[7]))
+			accessValues := mustScmerSlice(a[3], "scan_recmap access values")
+			filterCols := scmerSliceToStrings(mustScmerSlice(a[4], "scan_recmap filter columns"))
+			mapCols := scmerSliceToStrings(mustScmerSlice(a[6], "scan_recmap map columns"))
+			target := TableFromScmer(a[8])
+			return NewRecMapScmer(scanRecMap(currentTx, a[1], a[2], accessValues, filterCols, a[5], mapCols, a[7], target))
 		},
-		Type: &scm.TypeDescriptor{Kind: "func", Description: "builds an immutable query-local source-row to optional target-row mapping over exactly the supplied source RecSet",
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "scans a table or existing RecSet and builds an immutable query-local mapping from each accepted source record to the optional target record returned by mapFn",
 			HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
 				{Kind: "any", Label: "tx", Description: "transaction context used for source and target visibility"},
-				{Kind: "recset", Label: "source_recset", Description: "exact pruned source-row domain"},
-				{Kind: "list", Label: "source_key_columns"},
-				{Kind: "func|nil", Label: "source_key_mapper", Description: "optional function mapping source column values to the target key tuple"},
-				{Kind: "table", Label: "target_table"},
-				{Kind: "list", Label: "target_key_columns"},
-				{Kind: "list", Label: "target_value_columns", Description: "target columns read once while constructing the mapping"},
-				{Kind: "func|nil", Label: "target_value_mapper", Description: "optional function projecting target column values into the row-local mapped value"},
+				{Kind: "table|recset", Label: "source", Description: "table or exact pruned source domain"},
+				{Kind: "list", Label: "accessSchema", Description: "optimizer-compiled static source access schema", NoEscape: true, CrossGoroutine: true},
+				{Kind: "list", Label: "accessValues", Description: "flat runtime values referenced by accessSchema", NoEscape: true, CrossGoroutine: true},
+				columnList("filterColumns", scanFilterColumnsDesc),
+				scanCallback("filter", "lambda deciding whether a source row enters the RecMap domain", "bool", "true when the source row belongs in the RecMap"),
+				columnList("mapColumns", "source columns passed to mapFn after filtering"),
+				{Kind: "func", Label: "mapFn", Description: "batch mapper: list of accepted source-column tuples to a parallel list of target record-refs or nil"},
+				{Kind: "table", Label: "targetTable", Description: "target relation owning every non-nil record-ref and defining an empty RecMap image"},
 			},
 			Return: &scm.TypeDescriptor{Kind: "recmap"},
+		},
+	})
+	scm.Declare(&en, &scm.Declaration{
+		Name: "recmap_equi_first_mapper",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			return newRecMapEquiFirstMapper(scmerToTxContext(a[0]), TableFromScmer(a[1]),
+				scmerSliceToStrings(mustScmerSlice(a[2], "recmap target key columns")), a[3])
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "creates a query-local batch mapper for equality-correlated 0..1 target lookups; distinct source keys share one target projection",
+			HasSideEffects: true,
+			Params: []*scm.TypeDescriptor{
+				{Kind: "any", Label: "tx"},
+				{Kind: "table", Label: "targetTable"},
+				{Kind: "list", Label: "targetKeyColumns"},
+				{Kind: "func|nil", Label: "sourceKeyMapper"},
+			},
+			Return: &scm.TypeDescriptor{Kind: "func", Label: "mapFn"},
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{

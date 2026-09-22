@@ -19,6 +19,8 @@ package storage
 import (
 	"fmt"
 	"sort"
+	"sync"
+	"sync/atomic"
 	"unsafe"
 
 	"github.com/launix-de/memcp/scm"
@@ -27,16 +29,32 @@ import (
 // TagRecMap is the custom Scmer tag for query-local functional row mappings.
 const TagRecMap = 104
 
+// TagRecordRef identifies one query-local physical row. The pointer is the
+// owning shard and the compact custom ID is its record ID.
+const TagRecordRef = 105
+
+const TagRecMapBuild = 106
+
 // recMapTarget is a physical row identity valid for the query which built it.
 // A nil shard denotes the SQL-NULL result of an outer/scalar-first lookup.
 type recMapTarget struct {
 	shard *storageShard
 	recid uint32
-	value scm.Scmer
 }
 
-// recMapShard stores only rows in the input RecSet. sourceRecIDs is sorted, so
-// a narrow scan window costs O(window rows), not O(source table rows).
+func newRecordRef(shard *storageShard, recid uint32) scm.Scmer {
+	return scm.NewCustomID(TagRecordRef, unsafe.Pointer(shard), recid)
+}
+
+func recordRefFromScmer(value scm.Scmer) recMapTarget {
+	if !value.IsCustom(TagRecordRef) {
+		panic("expected a record-ref, got " + scm.String(value))
+	}
+	return recMapTarget{shard: (*storageShard)(value.Custom(TagRecordRef)), recid: value.CustomID(TagRecordRef)}
+}
+
+// recMapShard stores only accepted source rows. sourceRecIDs is sorted, so a
+// caller supplying a narrow RecSet window retains only that window.
 type recMapShard struct {
 	sourceShard  *storageShard
 	sourceRecIDs []uint32
@@ -90,43 +108,225 @@ func (r *recMap) lookup(shard *storageShard, recid uint32) (recMapTarget, bool) 
 	return recMapTarget{}, false
 }
 
-func recMapCallClosure(shard *storageShard) *func(uint32, ...scm.Scmer) scm.Scmer {
-	var cachedMap *recMap
-	var cachedPart *recMapShard
+func recMapCallClosure(shard *storageShard, currentTx *TxContext) *func(uint32, ...scm.Scmer) scm.Scmer {
+	type cachedLookup struct {
+		mapping *recMap
+		part    *recMapShard
+	}
+	var cached atomic.Pointer[cachedLookup]
 	fn := func(recid uint32, args ...scm.Scmer) scm.Scmer {
-		if len(args) != 1 || !args[0].IsCustom(TagRecMap) {
-			return scm.NewNil()
+		if len(args) != 4 || !args[0].IsCustom(TagRecMap) {
+			panic("$recmap_call expects recmap, columns, mapperFn, and ifNullFn")
 		}
 		rm := RecMapFromScmer(args[0])
-		if rm != cachedMap {
-			cachedMap = rm
-			cachedPart = nil
+		lookup := cached.Load()
+		if lookup == nil || lookup.mapping != rm {
+			lookup = &cachedLookup{mapping: rm}
 			for i := range rm.shards {
 				if rm.shards[i].sourceShard == shard {
-					cachedPart = &rm.shards[i]
+					lookup.part = &rm.shards[i]
 					break
 				}
 			}
+			cached.Store(lookup)
 		}
-		if cachedPart == nil {
-			return scm.NewNil()
+		if lookup.part == nil {
+			return scm.Apply(args[3])
 		}
-		position := sort.Search(len(cachedPart.sourceRecIDs), func(i int) bool {
-			return cachedPart.sourceRecIDs[i] >= recid
+		position := sort.Search(len(lookup.part.sourceRecIDs), func(i int) bool {
+			return lookup.part.sourceRecIDs[i] >= recid
 		})
-		if position == len(cachedPart.sourceRecIDs) || cachedPart.sourceRecIDs[position] != recid {
-			return scm.NewNil()
+		if position == len(lookup.part.sourceRecIDs) || lookup.part.sourceRecIDs[position] != recid {
+			return scm.Apply(args[3])
 		}
-		return cachedPart.targets[position].value
+		target := lookup.part.targets[position]
+		if target.shard == nil {
+			return scm.Apply(args[3])
+		}
+		columns := scmerSliceToStrings(mustScmerSlice(args[1], "$recmap_call columns"))
+		release := target.shard.acquireReadForScan(currentTx)
+		defer release()
+		target.shard.ensureLoaded()
+		skipShardReadLock := target.shard.hasWriteOwnerForTx(currentTx)
+		target.shard.ensureMainCount(skipShardReadLock)
+		storages := make([]ColumnStorage, len(columns))
+		for i, column := range columns {
+			storages[i] = target.shard.getColumnStorageOrPanic(column, skipShardReadLock, currentTx)
+		}
+		if !skipShardReadLock {
+			target.shard.mu.RLock()
+			defer target.shard.mu.RUnlock()
+		}
+		values := make([]scm.Scmer, len(columns))
+		for i, column := range columns {
+			if target.recid < target.shard.main_count {
+				values[i] = storages[i].GetValue(target.recid)
+			} else if _, proxy := storages[i].(*StorageComputeProxy); proxy {
+				values[i] = storages[i].GetValue(target.recid)
+			} else {
+				values[i] = target.shard.getDelta(int(target.recid-target.shard.main_count), column)
+			}
+		}
+		return scm.Apply(args[2], values...)
 	}
 	return &fn
 }
 
+type recMapBuildRows struct {
+	mu   sync.Mutex
+	rows []recMapSourceRow
+}
+
+// newRecMapEquiFirstMapper resolves the entire accepted source batch in one
+// target projection. The callback's input and output are parallel lists; a
+// scalar subscan per source record is intentionally not supported.
+func newRecMapEquiFirstMapper(currentTx *TxContext, target *table, targetKeyCols []string, sourceKeyFn scm.Scmer) scm.Scmer {
+	var mapper scm.SerialProc
+	if !sourceKeyFn.IsNil() {
+		mapper = scm.PrepareSerialProc(sourceKeyFn)
+	}
+	return scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+		if len(args) != 1 || !args[0].IsSlice() {
+			panic("recmap equi mapper expects a batch of source tuples")
+		}
+		batch := args[0].Slice()
+		keys := make([][]scm.Scmer, len(batch))
+		order := make([]int, 0, len(batch))
+		for i, input := range batch {
+			if !input.IsSlice() {
+				panic("recmap equi mapper expects source column tuples")
+			}
+			key := input.Slice()
+			if !sourceKeyFn.IsNil() {
+				mapped := mapper.Call(key)
+				if !mapped.IsSlice() {
+					panic("recmap equi mapper must return a target-key tuple")
+				}
+				key = mapped.Slice()
+			}
+			if len(key) != len(targetKeyCols) {
+				panic("recmap equi mapper returned the wrong target-key width")
+			}
+			keys[i] = key
+			if !recMapKeyHasNull(key) {
+				order = append(order, i)
+			}
+		}
+		sort.Slice(order, func(i, j int) bool { return compareProjectKey(keys[order[i]], keys[order[j]]) < 0 })
+		unique := recSetProjectKeys{width: len(targetKeyCols), values: make([]scm.Scmer, 0, len(order)*len(targetKeyCols))}
+		for i, index := range order {
+			if i == 0 || compareProjectKey(keys[order[i-1]], keys[index]) != 0 {
+				unique.values = append(unique.values, keys[index]...)
+			}
+		}
+		output := make([]scm.Scmer, len(batch))
+		if unique.count() == 0 {
+			return scm.NewSlice(output)
+		}
+		targetRows := target.projectJoinKeysToRecSet(currentTx, targetKeyCols, unique, SessionStateFromTx(currentTx)).collectRecMapRows(currentTx, targetKeyCols, nil)
+		sort.SliceStable(targetRows, func(i, j int) bool { return compareProjectKey(targetRows[i].key, targetRows[j].key) < 0 })
+		for _, row := range targetRows {
+			position := sort.Search(len(order), func(i int) bool { return compareProjectKey(keys[order[i]], row.key) >= 0 })
+			for position < len(order) && compareProjectKey(keys[order[position]], row.key) == 0 {
+				if output[order[position]].IsNil() {
+					output[order[position]] = newRecordRef(row.shard, row.recid)
+				}
+				position++
+			}
+		}
+		return scm.NewSlice(output)
+	})
+}
+
 type recMapSourceRow struct {
-	shard *storageShard
-	recid uint32
-	key   []scm.Scmer
-	value []scm.Scmer
+	shard  *storageShard
+	recid  uint32
+	key    []scm.Scmer
+	value  []scm.Scmer
+	target recMapTarget
+}
+
+func scanRecMap(currentTx *TxContext, source scm.Scmer, accessSchema scm.Scmer, accessValues []scm.Scmer,
+	filterCols []string, filterFn scm.Scmer, mapCols []string, mapFn scm.Scmer, target *table) *recMap {
+	var sourceTable *table
+	var sourceRecSet *recSet
+	if source.IsCustom(TagRecSet) {
+		sourceRecSet = RecSetFromScmer(source)
+		if sourceRecSet != nil {
+			sourceTable = sourceRecSet.table
+		}
+	} else {
+		sourceTable = TableFromScmer(source)
+	}
+	result := &recMap{source: sourceTable, target: target}
+	if sourceTable == nil {
+		return result
+	}
+
+	build := &recMapBuildRows{}
+	buildValue := scm.NewCustom(TagRecMapBuild, unsafe.Pointer(build))
+	callbackCols := append([]string{"$record_ref"}, mapCols...)
+	reduce := scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+		if len(args) != len(callbackCols)+1 || !args[0].IsCustom(TagRecMapBuild) {
+			panic("scan_recmap received an invalid map-reducer frame")
+		}
+		sourceRef := recordRefFromScmer(args[1])
+		build.mu.Lock()
+		build.rows = append(build.rows, recMapSourceRow{shard: sourceRef.shard, recid: sourceRef.recid,
+			key: append([]scm.Scmer(nil), args[2:]...)})
+		build.mu.Unlock()
+		return args[0]
+	})
+	combine := scm.NewFunc(func(args ...scm.Scmer) scm.Scmer { return args[0] })
+	if sourceRecSet != nil {
+		sourceRecSet.scan(currentTx, accessSchema, accessValues, filterCols, filterFn,
+			callbackCols, reduce, buildValue, combine, false)
+	} else {
+		sourceTable.scan(currentTx, accessSchema, accessValues, filterCols, filterFn,
+			callbackCols, reduce, buildValue, combine, false)
+	}
+	build.mu.Lock()
+	rows := append([]recMapSourceRow(nil), build.rows...)
+	build.mu.Unlock()
+	if len(rows) == 0 {
+		return result
+	}
+	inputs := make([]scm.Scmer, len(rows))
+	for i := range rows {
+		inputs[i] = scm.NewSlice(rows[i].key)
+	}
+	mapped := scm.Apply(mapFn, scm.NewSlice(inputs))
+	if !mapped.IsSlice() || len(mapped.Slice()) != len(rows) {
+		panic("scan_recmap mapper must return one target record-ref or nil per accepted source row")
+	}
+	for i, ref := range mapped.Slice() {
+		if ref.IsNil() {
+			continue
+		}
+		rows[i].target = recordRefFromScmer(ref)
+		if rows[i].target.shard == nil || rows[i].target.shard.t != target {
+			panic("scan_recmap mapper returned a record-ref from another target table")
+		}
+	}
+	byShard := make(map[*storageShard][]recMapSourceRow)
+	for _, row := range rows {
+		byShard[row.shard] = append(byShard[row.shard], row)
+	}
+	for _, shard := range sourceTable.ActiveShards() {
+		shardRows := byShard[shard]
+		if len(shardRows) == 0 {
+			continue
+		}
+		sort.Slice(shardRows, func(i, j int) bool { return shardRows[i].recid < shardRows[j].recid })
+		part := recMapShard{sourceShard: shard, sourceRecIDs: make([]uint32, len(shardRows)), targets: make([]recMapTarget, len(shardRows))}
+		for i, row := range shardRows {
+			part.sourceRecIDs[i] = row.recid
+			part.targets[i] = row.target
+		}
+		result.shards = append(result.shards, part)
+		result.count += int64(len(shardRows))
+	}
+	return result
 }
 
 func (r *recSet) collectRecMapSourceRows(currentTx *TxContext, sourceKeyCols []string) []recMapSourceRow {
@@ -214,107 +414,6 @@ func recMapKeyHasNull(key []scm.Scmer) bool {
 		}
 	}
 	return false
-}
-
-// projectRecMap builds only mappings for sourceDomain. Equal correlation keys
-// share one batched target probe, retaining source multiplicity in the map.
-// The first matching target implements scalar-first/LEFT semantics; callers
-// requiring an ordered first row must provide an access path with that policy
-// in a later, richer probe descriptor.
-func projectRecMap(currentTx *TxContext, sourceDomain *recSet, sourceKeyCols []string, sourceKeyFn scm.Scmer, target *table, targetKeyCols []string, targetValueCols []string, targetValueFn scm.Scmer) *recMap {
-	if sourceDomain == nil || sourceDomain.table == nil {
-		return &recMap{target: target}
-	}
-	if target == nil || len(sourceKeyCols) == 0 || len(targetKeyCols) == 0 ||
-		sourceKeyFn.IsNil() && len(sourceKeyCols) != len(targetKeyCols) {
-		panic("recmap_project_join: source and target keys must be non-empty and need equal widths without a key mapper")
-	}
-	rows := sourceDomain.collectRecMapSourceRows(currentTx, sourceKeyCols)
-	if !sourceKeyFn.IsNil() {
-		mapper := scm.PrepareSerialProc(sourceKeyFn)
-		for i := range rows {
-			mapped := mapper.Call(rows[i].key)
-			if !mapped.IsSlice() || len(mapped.Slice()) != len(targetKeyCols) {
-				panic("recmap_project_join: source key mapper must return one value per target key column")
-			}
-			rows[i].key = append([]scm.Scmer(nil), mapped.Slice()...)
-		}
-	}
-	result := &recMap{source: sourceDomain.table, target: target, count: int64(len(rows))}
-	if len(rows) == 0 {
-		return result
-	}
-
-	order := make([]int, len(rows))
-	for i := range order {
-		order[i] = i
-	}
-	sort.SliceStable(order, func(i, j int) bool {
-		return compareProjectKey(rows[order[i]].key, rows[order[j]].key) < 0
-	})
-	uniqueKeys := recSetProjectKeys{width: len(targetKeyCols), values: make([]scm.Scmer, 0, len(rows)*len(targetKeyCols))}
-	for i, rowIndex := range order {
-		key := rows[rowIndex].key
-		if recMapKeyHasNull(key) || (i > 0 && compareProjectKey(rows[order[i-1]].key, key) == 0) {
-			continue
-		}
-		uniqueKeys.values = append(uniqueKeys.values, key...)
-	}
-	targetRows := target.projectJoinKeysToRecSet(
-		currentTx, targetKeyCols, uniqueKeys, SessionStateFromTx(currentTx)).collectRecMapRows(currentTx, targetKeyCols, targetValueCols)
-	sort.SliceStable(targetRows, func(i, j int) bool {
-		return compareProjectKey(targetRows[i].key, targetRows[j].key) < 0
-	})
-	var targetMapper scm.SerialProc
-	if !targetValueFn.IsNil() {
-		targetMapper = scm.PrepareSerialProc(targetValueFn)
-	}
-
-	targets := make([]recMapTarget, len(rows))
-	for targetIndex := range targetRows {
-		targetRow := &targetRows[targetIndex]
-		position := sort.Search(len(order), func(i int) bool {
-			return compareProjectKey(rows[order[i]].key, targetRow.key) >= 0
-		})
-		if position == len(order) || compareProjectKey(rows[order[position]].key, targetRow.key) != 0 {
-			continue
-		}
-		mappedValue := scm.NewNil()
-		if !targetValueFn.IsNil() {
-			mappedValue = targetMapper.Call(targetRow.value)
-		} else if len(targetRow.value) == 1 {
-			mappedValue = targetRow.value[0]
-		} else if len(targetRow.value) > 1 {
-			mappedValue = scm.NewSlice(append([]scm.Scmer(nil), targetRow.value...))
-		}
-		targetRef := recMapTarget{shard: targetRow.shard, recid: targetRow.recid, value: mappedValue}
-		for position < len(order) && compareProjectKey(rows[order[position]].key, targetRow.key) == 0 {
-			// The first row for a duplicate target key implements scalar-first.
-			if targets[order[position]].shard == nil {
-				targets[order[position]] = targetRef
-			}
-			position++
-		}
-	}
-
-	for begin := 0; begin < len(rows); {
-		end := begin + 1
-		for end < len(rows) && rows[end].shard == rows[begin].shard {
-			end++
-		}
-		part := recMapShard{
-			sourceShard:  rows[begin].shard,
-			sourceRecIDs: make([]uint32, end-begin),
-			targets:      make([]recMapTarget, end-begin),
-		}
-		for i := begin; i < end; i++ {
-			part.sourceRecIDs[i-begin] = rows[i].recid
-			part.targets[i-begin] = targets[i]
-		}
-		result.shards = append(result.shards, part)
-		begin = end
-	}
-	return result
 }
 
 func (r *recMap) image() *recSet {

@@ -3346,11 +3346,12 @@ cached plan is recompiled when data growth crosses the carrier boundary. */
 logical group stages unchanged through join reorder, then recognize only the
 closed two-edge shape which can be represented as row identities:
 
-	driver row -> intermediate row -> projected scalar value
+	driver row -> intermediate row -> target row
 
-The first map is built over an exact driver RecSet. Its image is therefore the
-complete and only domain of the second map; composing both maps brings the
-projected value back to the original scan row without a per-row nested probe. */
+scan_recmap applies the ordinary source access/filter interface directly. Its
+image is the complete and only domain of the second map; composing both maps
+brings the selected target identity back to the original scan row without a
+per-row nested probe. */
 (define recmap_projection_parts (lambda (src exprs)
 	(begin
 		(define cols (merge_unique (map exprs (lambda (expr)
@@ -3371,15 +3372,18 @@ projected value back to the original scan row without a per-row nested probe. */
 (define recmap_value_projection_parts (lambda (src expr)
 	(begin
 		(define cols (extract_columns_for_alias src expr))
-		(define direct_col (direct_column_name_for_alias src expr))
 		(list cols
-			(if (and (not (nil? direct_col))
-				(and (equal? (count cols) 1) (equal? (car cols) direct_col)))
-				nil
-				(list (quote lambda)
-					(map cols (lambda (col)
-						(scan_callback_symbol_for_alias (source_alias src) col)))
-					(lower_column_expr_for_alias src expr)))))))
+			(list (quote lambda)
+				(map cols (lambda (col)
+					(scan_callback_symbol_for_alias (source_alias src) col)))
+				(lower_column_expr_for_alias src expr))))))
+
+(define nested_scalar_recmap_call_expr (lambda (candidate)
+	(list recmap_call_callback_symbol
+		(nested_scalar_recmap_var candidate)
+		(quoted_runtime_list (nth candidate 13))
+		(nth candidate 14)
+		(list (quote lambda) '() nil))))
 
 (define nested_scalar_recmap_scalar_marker (lambda (expr)
 	(if (not (list? expr))
@@ -3599,12 +3603,12 @@ projected value back to the original scan row without a per-row nested probe. */
 					(and (equal? (string (car expr)) "scalar_first_probe")
 						(and (equal? (gs_id (nth expr 1)) (gs_id (nth candidate 1)))
 							(equal? (nth expr 2) (nth candidate 2)))))))
-			(recmap_call_expr (nested_scalar_recmap_var candidate))
+			(nested_scalar_recmap_call_expr candidate)
 			(match expr
 			((symbol scalar_first_probe) stage requested_col)
 			(if (and (equal? (gs_id stage) (gs_id (nth candidate 1)))
 				(equal? requested_col (nth candidate 2)))
-				(recmap_call_expr (nested_scalar_recmap_var candidate)) expr)
+				(nested_scalar_recmap_call_expr candidate) expr)
 			((quote scalar_first_probe) stage requested_col)
 			(rewrite_nested_scalar_recmap_expr candidate
 				(list (symbol "scalar_first_probe") stage requested_col))
@@ -3639,29 +3643,28 @@ projected value back to the original scan row without a per-row nested probe. */
 		(define driver (nth candidate 0))
 		(define middle (nth candidate 3))
 		(define target (nth candidate 6))
-		(define domain_var (symbol "__recmap_domain"))
 		(define left_var (symbol "__recmap_left"))
-		(define domain_expr (compile_scan_plan (quote scan_recset)
+		(define left_expr (compile_scan_plan (quote scan_recmap)
 			(physical_query_tx_symbol) (source_table_expr driver)
-			(quoted_runtime_list '()) (list (quote lambda) '() true)))
-		(define left_expr (list (quote recmap_project_join)
-			(physical_query_tx_symbol) domain_var
-			(quoted_runtime_list (nth candidate 7)) (nth candidate 8)
-			(source_table_expr middle) (quoted_runtime_list (nth candidate 9))
-			(quoted_runtime_list '()) nil))
-		(define right_expr (list (quote recmap_project_join)
+			(quoted_runtime_list '()) (list (quote lambda) '() true)
+			(quoted_runtime_list (nth candidate 7))
+			(list (quote recmap_equi_first_mapper)
+				(physical_query_tx_symbol) (source_table_expr middle)
+				(quoted_runtime_list (nth candidate 9)) (nth candidate 8))
+			(source_table_expr middle)))
+		(define right_expr (compile_scan_plan (quote scan_recmap)
 			(physical_query_tx_symbol) (list (quote recmap_image) left_var)
-			(quoted_runtime_list (nth candidate 10)) (nth candidate 11)
-			(source_table_expr target) (quoted_runtime_list (nth candidate 12))
-			(quoted_runtime_list (nth candidate 13)) (nth candidate 14)))
+			(quoted_runtime_list '()) (list (quote lambda) '() true)
+			(quoted_runtime_list (nth candidate 10))
+			(list (quote recmap_equi_first_mapper)
+				(physical_query_tx_symbol) (source_table_expr target)
+				(quoted_runtime_list (nth candidate 12)) (nth candidate 11))
+			(source_table_expr target)))
 		(list (quote define) (nested_scalar_recmap_var candidate)
 			(list
-				(list (quote lambda) (list domain_var)
-					(list
-						(list (quote lambda) (list left_var)
-							(list (quote recmap_compose) left_var right_expr))
-						left_expr))
-				domain_expr)))))
+				(list (quote lambda) (list left_var)
+					(list (quote recmap_compose) left_var right_expr))
+				left_expr)))))
 
 (define scalar_probe_entries_without_lookup_cache (lambda (entries candidate)
 	(if (nil? candidate)
@@ -5657,9 +5660,6 @@ either bound a real row or supplied the synthetic NULL row. */
 
 (define recset_contains_call_expr (lambda (recset_expr)
 	(list recset_contains_callback_symbol recset_expr)))
-
-(define recmap_call_expr (lambda (recmap_expr)
-	(list recmap_call_callback_symbol recmap_expr)))
 
 /* A carrier selected for one conjunct changes the work seen by every later
 conjunct. Exact query-local observations are the strongest fact; otherwise the
@@ -10979,7 +10979,7 @@ RecSet node is written into logical IR. */
 	(begin
 		(define kind (qassoc_get decision "decision" nil))
 		(if (equal? kind "nested_scalar_recmap")
-			(if (physical_expr_has_head? plan (quote recmap_project_join))
+			(if (physical_expr_has_head? plan (quote scan_recmap))
 				"query_recmap" "direct_scalar_chain")
 			(if (equal? kind "group_relation_input")
 				(if (physical_group_cache_initialized? plan (qassoc_get decision "cache_relation" nil))

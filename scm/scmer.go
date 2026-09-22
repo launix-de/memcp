@@ -504,6 +504,16 @@ func NewCustom(tag uint8, ptr unsafe.Pointer) Scmer {
 	return Scmer{(*byte)(ptr), makeAux(tag, 0)}
 }
 
+// NewCustomID creates a pointer-like custom value carrying a compact uint32
+// identity. It is intended for query-local handles whose owner pointer is
+// stable for the lifetime of the value, such as a storage shard plus record ID.
+func NewCustomID(tag uint8, ptr unsafe.Pointer, id uint32) Scmer {
+	if tag < 100 {
+		panic("custom tags should be >= 100 to avoid conflicts")
+	}
+	return Scmer{(*byte)(ptr), makeAux(tag, uint64(id))}
+}
+
 func (s Scmer) IsCustom(tag uint8) bool {
 	if s.ptr == &scmerIntSentinel {
 		return tag == tagInt
@@ -519,6 +529,14 @@ func (s Scmer) Custom(tag uint8) unsafe.Pointer {
 		panic(fmt.Sprintf("wrong custom tag: expected %d, got %d (value: %s)", tag, s.GetTag(), s.String()))
 	}
 	return unsafe.Pointer(s.ptr)
+}
+
+// CustomID returns the compact identity carried by NewCustomID.
+func (s Scmer) CustomID(tag uint8) uint32 {
+	if s.GetTag() != tag {
+		panic(fmt.Sprintf("wrong custom tag: expected %d, got %d (value: %s)", tag, s.GetTag(), s.String()))
+	}
+	return uint32(auxVal(s.aux))
 }
 
 //

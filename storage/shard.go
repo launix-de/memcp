@@ -1834,7 +1834,7 @@ func mapReducerCanUseReadWorkspace(cols []string) bool {
 		if _, ok := parseBatchPseudoColName(col); ok {
 			return false
 		}
-		if col == "$recset_contains" || col == "$recmap_call" || col == "$update" || col == "$break" ||
+		if col == "$recset_contains" || col == "$recmap_call" || col == "$record_ref" || col == "$update" || col == "$break" ||
 			len(col) > 12 && col[:12] == "$orc_stored:" ||
 			len(col) >= 4 && col[:4] == "NEW." ||
 			len(col) > 12 && col[:12] == "$invalidate:" ||
@@ -2019,9 +2019,17 @@ func (t *storageShard) initMapReducer(mr *ShardMapReducer, cols []string, mapRed
 			continue
 		}
 		if col == "$recmap_call" {
-			fnptr := recMapCallClosure(t)
+			fnptr := recMapCallClosure(t, currentTx)
 			getter := func(id uint32, batchid uint32) scm.Scmer {
 				return scm.NewClosure(fnptr, id)
+			}
+			mr.mainGetters[i] = getter
+			mr.deltaGetters[i] = getter
+			continue
+		}
+		if col == "$record_ref" {
+			getter := func(id uint32, _ uint32) scm.Scmer {
+				return newRecordRef(t, id)
 			}
 			mr.mainGetters[i] = getter
 			mr.deltaGetters[i] = getter

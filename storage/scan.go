@@ -2454,7 +2454,7 @@ func (t *storageShard) scan(access scanAccess, conditionCols []string, condition
 // projected columns.
 func (t *storageShard) appendOrderedScanProxies(result []*StorageComputeProxy, cols []string, currentTx *TxContext) []*StorageComputeProxy {
 	for _, col := range cols {
-		if col == "$recset_contains" || col == "$recmap_call" || col == "$update" || col == "$break" ||
+		if col == "$recset_contains" || col == "$recmap_call" || col == "$record_ref" || col == "$update" || col == "$break" ||
 			strings.HasPrefix(col, "NEW.") || strings.HasPrefix(col, "$invalidate:") ||
 			strings.HasPrefix(col, "$increment:") || strings.HasPrefix(col, "$set:") {
 			continue
@@ -2489,7 +2489,7 @@ func (t *storageShard) hasOrderedScanProxy(cols []string, currentTx *TxContext) 
 		return false
 	}
 	for _, col := range cols {
-		if col == "$recset_contains" || col == "$recmap_call" || col == "$update" || col == "$break" ||
+		if col == "$recset_contains" || col == "$recmap_call" || col == "$record_ref" || col == "$update" || col == "$break" ||
 			strings.HasPrefix(col, "NEW.") || strings.HasPrefix(col, "$invalidate:") ||
 			strings.HasPrefix(col, "$increment:") || strings.HasPrefix(col, "$set:") {
 			continue

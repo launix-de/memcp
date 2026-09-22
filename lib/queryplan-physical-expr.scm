@@ -111,7 +111,7 @@ an unbound symbol in the callback when costing selects the probe alternative. */
 
 (define extract_columns_for_alias (lambda (src expr)
 	(if (and (list? expr)
-		(and (equal? (count expr) 2)
+		(and (not (empty_list? expr))
 			(equal? (car expr) (symbol "__recmap_call"))))
 		(list "$recmap_call")
 		(match expr
@@ -3378,7 +3378,7 @@ probe. */
 
 (define collect_join_columns_acc (lambda (sources default_alias target_alias expr columns_by_alias)
 	(if (and (list? expr)
-		(and (equal? (count expr) 2)
+		(and (not (empty_list? expr))
 			(equal? (car expr) (symbol "__recmap_call"))))
 		(begin
 			(define alias (coalesceNil target_alias default_alias))
@@ -8818,8 +8818,8 @@ EXPLAIN PHYSICAL CALIBRATE alternative with result and operator validation. */
 (define planner_scan_join_order_startup_ns 296538)
 (define planner_scan_join_order_build_row_ns 24)
 (define planner_scan_join_order_probe_row_ns 1)
-(define planner_recmap_startup_ns 10473)
-(define planner_recmap_work_row_ns 298)
+(define planner_recmap_startup_ns 17268)
+(define planner_recmap_work_row_ns 210)
 (define planner_nested_scalar_recmap_cost (lambda (startups work_rows)
 	(planner_cost (* startups planner_recmap_startup_ns) 0 0 0 0
 		(* work_rows planner_recmap_work_row_ns) 0 0 work_rows 0.65)))
