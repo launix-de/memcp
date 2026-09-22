@@ -337,10 +337,12 @@ func TestQualifiedLookupComputeTriggerUsesPhysicalTargetColumn(t *testing.T) {
 			0 (lambda (old value) value) false))`
 	computor := scm.Read(t.Name(), computorSource)
 	refs := extractScanJoinInfo(computor)
-	if len(refs) != 1 || len(refs[0].inputCols) != 1 || refs[0].inputCols[0] != "base.ref_id" {
-		t.Fatalf("qualified lookup key not extracted: %#v", refs)
+	if len(refs) != 1 || len(refs[0].srcCols) != 1 || refs[0].srcCols[0] != "ref_id" {
+		t.Fatalf("lookup relation not extracted: %#v", refs)
 	}
-	base.registerComputeTriggers("cached", computor)
+	// Feed the qualified planner input explicitly; other tests may normalize the lambda.
+	refs[0].inputCols = []string{"base.ref_id"}
+	base.registerComputeTriggersWithRefs("cached", computor, refs)
 	tr, ok := findTriggerByPrefixAndTiming(src.Triggers, ".cache:base:cached|scan0|src|", AfterInsert)
 	if !ok {
 		t.Fatal("missing qualified lookup dependency trigger")

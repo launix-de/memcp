@@ -1943,7 +1943,10 @@ func (t *table) installComputeDependencyTrigger(trigger TriggerDescription) {
 // AfterInvalidate edges propagate changes through nested computed caches. It also
 // installs AfterDropTable so that dropping a source table cascades to the target.
 func (t *table) registerComputeTriggers(name string, computor scm.Scmer) {
-	refs := extractScanJoinInfo(computor)
+	t.registerComputeTriggersWithRefs(name, computor, extractScanJoinInfo(computor))
+}
+
+func (t *table) registerComputeTriggersWithRefs(name string, computor scm.Scmer, refs []scanJoinInfo) {
 	targetSchema := t.schema.Name
 	var targetColumn *column
 	for _, col := range t.Columns {
