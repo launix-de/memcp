@@ -313,6 +313,49 @@ func TestLookupComputeTriggersInvalidateMatchingRows(t *testing.T) {
 	}
 }
 
+func TestQualifiedLookupComputeTriggerUsesPhysicalTargetColumn(t *testing.T) {
+	oldBasepath := Basepath
+	Basepath = t.TempDir()
+	defer func() { Basepath = oldBasepath }()
+	Init(scm.Globalenv)
+	LoadDatabases()
+	const schemaName = "tqualifiedlookuptrigger"
+	defer databases.Remove(schemaName)
+	CreateDatabase(schemaName, false)
+	base, _ := CreateTable(schemaName, "base", Safe, false)
+	src, _ := CreateTable(schemaName, "src", Safe, false)
+	base.CreateColumn("ref_id", "INT", nil, nil)
+	base.CreateColumn("cached", "INT", nil, nil)
+	src.CreateColumn("ref_id", "INT", nil, nil)
+	src.CreateColumn("val", "INT", nil, nil)
+	base.Insert([]string{"ref_id", "cached"}, [][]scm.Scmer{{scm.NewInt(7), scm.NewInt(0)}}, nil, scm.NewNil(), false, nil)
+
+	computorSource := `(lambda (base.ref_id)
+		(scan nil (table "tqualifiedlookuptrigger" "src")
+			'(369435906932736) '()
+			'("ref_id") (lambda (source_ref_id) (equal? source_ref_id (outer 1 base.ref_id)))
+			'("val") (lambda (acc val) val)
+			0 (lambda (old value) value) false))`
+	computor := scm.Read(t.Name(), computorSource)
+	refs := extractScanJoinInfo(computor)
+	if len(refs) != 1 || len(refs[0].srcCols) != 1 || refs[0].srcCols[0] != "ref_id" {
+		t.Fatalf("lookup relation not extracted: %#v", refs)
+	}
+	// Feed the qualified planner input explicitly; other tests may normalize the lambda.
+	refs[0].inputCols = []string{"base.ref_id"}
+	base.registerComputeTriggersWithRefs("cached", computor, refs)
+	tr, ok := findTriggerByPrefixAndTiming(src.Triggers, ".cache:base:cached|scan0|src|", AfterInsert)
+	if !ok {
+		t.Fatal("missing qualified lookup dependency trigger")
+	}
+	// A new source row must not abort its INSERT while the cache is invalidated.
+	src.Insert([]string{"ref_id", "val"}, [][]scm.Scmer{{scm.NewInt(7), scm.NewInt(11)}}, nil, scm.NewNil(), false, nil)
+	plan := triggerPlanStringForTest(tr)
+	if !strings.Contains(plan, `"ref_id"`) || strings.Contains(plan, `"base.ref_id"`) {
+		t.Fatalf("dependency trigger scans a nonphysical target column:\n%s", plan)
+	}
+}
+
 func TestExtractScanJoinInfoUsesCompiledAccessWhenResidualIsEmpty(t *testing.T) {
 	source := `(lambda (ref_id)
 		(scan nil (table "tcompileddependency" "src")
