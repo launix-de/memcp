@@ -3165,11 +3165,11 @@ strictly cheaper. */
 						(and (not (empty_list? input_cols))
 							(and (equal? (count input_cols) 1)
 								(and (not (reduce input_cols (lambda (missing col)
-								(or missing (nil? col))) false))
-								(and (equal? (qassoc_get (gs_facts stage) (quote condition) true) true)
-									(and (empty_list? (query_expr_session_reads stage))
-										(and (not (nil? parts))
-											(empty_list? (nth parts 1)))))))))))))))
+									(or missing (nil? col))) false))
+									(and (equal? (qassoc_get (gs_facts stage) (quote condition) true) true)
+										(and (empty_list? (query_expr_session_reads stage))
+											(and (not (nil? parts))
+												(empty_list? (nth parts 1)))))))))))))))
 
 (define scalar_order_lookup_carrier_cost (lambda (stage driver_rows)
 	(begin
@@ -3346,7 +3346,7 @@ cached plan is recompiled when data growth crosses the carrier boundary. */
 logical group stages unchanged through join reorder, then recognize only the
 closed two-edge shape which can be represented as row identities:
 
-	driver row -> intermediate row -> target row
+driver row -> intermediate row -> target row
 
 scan_recmap applies the ordinary source access/filter interface directly. Its
 image is the complete and only domain of the second map; composing both maps
@@ -3488,6 +3488,68 @@ per-row nested probe. */
 	(symbol (concat "__nested_scalar_recmap_"
 		(fnv_hash (concat (gs_id (nth candidate 1)) "\n" (nth candidate 2)))))))
 
+/* A direct source ORDER/LIMIT can first select an exact physical window.
+The candidate's extra slot is private to physical lowering, never logical IR. */
+(define nested_scalar_recmap_window (lambda (candidate)
+	(if (> (count candidate) 15) (nth candidate 15) nil)))
+
+(define nested_scalar_recmap_window_candidate (lambda (stages block)
+	(begin
+		(define sources (qb_sources block))
+		(define src (if (single_source? sources) (car sources) nil))
+		(define order_items (coalesceNil (qb_order block) '()))
+		(define limit_rows (if (or (nil? src) (empty_list? order_items)) nil
+			(probe_limit_work_rows (qb_limit block)
+				(planner_context_session (qb_facts block)))))
+		(if (or (nil? limit_rows)
+			(or (not (source_is_base_table? src))
+				(or (not (empty_list? (qb_group block)))
+					(or (not (nil? (qb_having block)))
+						(or (not (equal? (qb_where block) true))
+							(or (not (equal? (coalesceNil (source_join_expr src) true) true))
+								(or (not (order_items_belong_to_source? src order_items))
+									(query_block_has_aggregates? block))))))))
+			nil
+			(begin
+				(define sortcols (scan_order_sort_columns_for_alias src order_items))
+				(define unbounded (make_query_block
+					(qb_schema block) sources (qb_fields block) (qb_where block)
+					(qb_group block) (qb_having block) '() nil nil
+					(qb_hidden block) (qb_stages block) (qb_facts block)))
+				(define candidate (if (reduce sortcols
+					(lambda (bad col) (or bad (not (string? col)))) false)
+					nil (nested_scalar_recmap_candidate stages unbounded)))
+				(if (nil? candidate) nil
+					(merge (list candidate (list (list sortcols
+						(order_relations_for_source src order_items)
+						(coalesceNil (qb_offset block) 0) (qb_limit block)
+						limit_rows))))))))))
+
+(define nested_scalar_recmap_window_source_expr (lambda (candidate)
+	(begin
+		(define window (nested_scalar_recmap_window candidate))
+		(list (quote scan_order_recset)
+			(physical_query_tx_symbol)
+			(source_table_expr (nth candidate 0))
+			(list (quote quote) (list 369435906932736))
+			(list (quote list))
+			(cons (quote list) (nth window 0))
+			(cons (quote list) (nth window 1))
+			(nth window 2) (nth window 3)))))
+
+(define query_block_without_window_limit (lambda (block)
+	(make_query_block
+		(qb_schema block) (qb_sources block) (qb_fields block) (qb_where block)
+		(qb_group block) (qb_having block) (qb_order block) nil nil
+		(qb_hidden block) (qb_stages block) (qb_facts block))))
+
+(define query_block_with_recmap_source_domain (lambda (block domain_var)
+	(make_query_block
+		(qb_schema block) (qb_sources block) (qb_fields block) (qb_where block)
+		(qb_group block) (qb_having block) (qb_order block)
+		(qb_limit block) (qb_offset block) (qb_hidden block) (qb_stages block)
+		(cons (list (quote recmap_source_domain) domain_var) (qb_facts block)))))
+
 (define nested_scalar_recmap_row_counts (lambda (candidate)
 	(begin
 		(define driver (nth candidate 0))
@@ -3495,40 +3557,47 @@ per-row nested probe. */
 		(define target (nth candidate 6))
 		(define driver_rows (coalesceNil (planner_source_row_count driver)
 			(scan_estimate (table (source_schema driver) (source_relation driver)))))
-		(define middle_rows (min driver_rows
+		(define window (nested_scalar_recmap_window candidate))
+		(define selected_rows (if (nil? window) driver_rows
+			(min driver_rows (nth window 4))))
+		(define middle_rows (min selected_rows
 			(coalesceNil (planner_source_row_count middle)
 				(scan_estimate (table (source_schema middle) (source_relation middle))))))
 		(define target_rows (min middle_rows
 			(coalesceNil (planner_source_row_count target)
 				(scan_estimate (table (source_schema target) (source_relation target))))))
-		(list driver_rows middle_rows target_rows))))
+		(list selected_rows middle_rows target_rows))))
 
-(define nested_scalar_recmap_costs_for_rows (lambda (driver_rows middle_rows target_rows)
+(define nested_scalar_recmap_costs_for_rows (lambda (driver_rows middle_rows target_rows windowed)
 	(begin
 		/* Both projections, the intermediate image, composition, and the final
-		row-bound read are query-local. Keep this work explicit so Costgen can
-		calibrate the carrier without pretending it is a persistent column. */
-		(define recmap_work_rows (+ (* driver_rows 4)
+		row-bound read are query-local. A window adds one startup and one bounded
+		rescan; price both with Costgen's calibrated RecMap coefficients. The
+		initial full-table Top-K is common to direct probes and RecMap. */
+		(define startups (if windowed 3 2))
+		(define recmap_work_rows (+ (* driver_rows (if windowed 5 4))
 			(* middle_rows 2) target_rows))
 		(list
 			(planner_direct_presence_probe_cost (* driver_rows 2))
-			(planner_nested_scalar_recmap_cost 2 recmap_work_rows)
-			driver_rows middle_rows target_rows recmap_work_rows))))
+			(planner_nested_scalar_recmap_cost startups recmap_work_rows)
+			driver_rows middle_rows target_rows recmap_work_rows startups))))
 
-(define nested_scalar_recmap_runtime_wins? (lambda (driver middle target)
+(define nested_scalar_recmap_runtime_wins? (lambda (driver middle target limit_rows)
 	(begin
-		(define driver_rows (scan_estimate driver))
+		(define driver_rows (if (nil? limit_rows) (scan_estimate driver)
+			(min limit_rows (scan_estimate driver))))
 		(define middle_rows (min driver_rows (scan_estimate middle)))
 		(define target_rows (min middle_rows (scan_estimate target)))
 		(define costs (nested_scalar_recmap_costs_for_rows
-			driver_rows middle_rows target_rows))
+			driver_rows middle_rows target_rows (not (nil? limit_rows))))
 		(planner_cost_better? (nth costs 1) (nth costs 0)))))
 
 (define nested_scalar_recmap_costs (lambda (candidate)
 	(begin
 		(define rows (nested_scalar_recmap_row_counts candidate))
 		(nested_scalar_recmap_costs_for_rows
-			(nth rows 0) (nth rows 1) (nth rows 2)))))
+			(nth rows 0) (nth rows 1) (nth rows 2)
+			(not (nil? (nested_scalar_recmap_window candidate)))))))
 
 (define select_nested_scalar_recmap_candidate (lambda (candidate planning_session)
 	(if (nil? candidate)
@@ -3544,7 +3613,9 @@ per-row nested probe. */
 				(list (quote nested_scalar_recmap_runtime_wins?)
 					(source_table_expr (nth candidate 0))
 					(source_table_expr (nth candidate 3))
-					(source_table_expr (nth candidate 6)))
+					(source_table_expr (nth candidate 6))
+					(if (nil? (nested_scalar_recmap_window candidate)) nil
+						(nth (nested_scalar_recmap_window candidate) 4)))
 				planning_session)
 				"query_recmap" "direct_scalar_chain"))
 			(define alternatives '("direct_scalar_chain" "query_recmap"))
@@ -3562,7 +3633,7 @@ per-row nested probe. */
 					(list "driver_rows" (nth costs 2))
 					(list "recmap_intermediate_rows" (nth costs 3))
 					(list "recmap_target_rows" (nth costs 4))
-					(list "recmap_startups" 2)
+					(list "recmap_startups" (nth costs 6))
 					(list "recmap_work_rows" (nth costs 5))))
 				(list "alternatives" (list
 					(list (list "plan" "direct_scalar_chain")
@@ -3605,24 +3676,24 @@ per-row nested probe. */
 							(equal? (nth expr 2) (nth candidate 2)))))))
 			(nested_scalar_recmap_call_expr candidate)
 			(match expr
-			((symbol scalar_first_probe) stage requested_col)
-			(if (and (equal? (gs_id stage) (gs_id (nth candidate 1)))
-				(equal? requested_col (nth candidate 2)))
-				(nested_scalar_recmap_call_expr candidate) expr)
-			((quote scalar_first_probe) stage requested_col)
-			(rewrite_nested_scalar_recmap_expr candidate
-				(list (symbol "scalar_first_probe") stage requested_col))
-			((symbol scalar_first_probe) stage requested_col _dependencies)
-			(rewrite_nested_scalar_recmap_expr candidate
-				(list (symbol "scalar_first_probe") stage requested_col))
-			((quote scalar_first_probe) stage requested_col _dependencies)
-			(rewrite_nested_scalar_recmap_expr candidate
-				(list (symbol "scalar_first_probe") stage requested_col))
-			(cons head tail) (cons
-				(rewrite_nested_scalar_recmap_expr candidate head)
-				(map tail (lambda (item)
-					(rewrite_nested_scalar_recmap_expr candidate item))))
-			_ expr)))))
+				((symbol scalar_first_probe) stage requested_col)
+				(if (and (equal? (gs_id stage) (gs_id (nth candidate 1)))
+					(equal? requested_col (nth candidate 2)))
+					(nested_scalar_recmap_call_expr candidate) expr)
+				((quote scalar_first_probe) stage requested_col)
+				(rewrite_nested_scalar_recmap_expr candidate
+					(list (symbol "scalar_first_probe") stage requested_col))
+				((symbol scalar_first_probe) stage requested_col _dependencies)
+				(rewrite_nested_scalar_recmap_expr candidate
+					(list (symbol "scalar_first_probe") stage requested_col))
+				((quote scalar_first_probe) stage requested_col _dependencies)
+				(rewrite_nested_scalar_recmap_expr candidate
+					(list (symbol "scalar_first_probe") stage requested_col))
+				(cons head tail) (cons
+					(rewrite_nested_scalar_recmap_expr candidate head)
+					(map tail (lambda (item)
+						(rewrite_nested_scalar_recmap_expr candidate item))))
+				_ expr)))))
 
 (define query_block_with_nested_scalar_recmap (lambda (block candidate)
 	(if (nil? candidate)
@@ -3638,14 +3709,14 @@ per-row nested probe. */
 			(rewrite_nested_scalar_recmap_expr candidate (qb_hidden block))
 			(qb_stages block) (qb_facts block)))))
 
-(define nested_scalar_recmap_binding (lambda (candidate)
+(define nested_scalar_recmap_binding (lambda (candidate source_domain)
 	(begin
 		(define driver (nth candidate 0))
 		(define middle (nth candidate 3))
 		(define target (nth candidate 6))
 		(define left_var (symbol "__recmap_left"))
 		(define left_expr (compile_scan_plan (quote scan_recmap)
-			(physical_query_tx_symbol) (source_table_expr driver)
+			(physical_query_tx_symbol) (coalesceNil source_domain (source_table_expr driver))
 			(quoted_runtime_list '()) (list (quote lambda) '() true)
 			(quoted_runtime_list (nth candidate 7))
 			(list (quote recmap_equi_first_mapper)
@@ -3745,8 +3816,13 @@ per-row nested probe. */
 					(query_block_scalar_query_probe_recipe_entries range_cached_block))
 				(define recmap_candidate
 					(select_nested_scalar_recmap_candidate
-						(nested_scalar_recmap_candidate stage_lookup range_cached_block)
+						(coalesceNil
+							(nested_scalar_recmap_window_candidate stage_lookup range_cached_block)
+							(nested_scalar_recmap_candidate stage_lookup range_cached_block))
 						(planner_context_session (qb_facts block))))
+				(define recmap_window (if (nil? recmap_candidate) nil
+					(nested_scalar_recmap_window recmap_candidate)))
+				(define recmap_domain_var (symbol "__recmap_source_window"))
 				(define carrier_block
 					(query_block_with_nested_scalar_recmap
 						(query_block_with_scalar_order_lookup_cache range_cached_block scalar_order_cache)
@@ -3812,7 +3888,12 @@ per-row nested probe. */
 					(stages_without_prepare_backbones stage_catalog eager_stages)
 					direct_group_join_stage_ids))
 				(define core_block (query_block_without_stages
-					(query_block_with_stage_catalog prepared_block physical_stage_catalog)))
+					(query_block_with_stage_catalog
+						(if (nil? recmap_window) prepared_block
+							(query_block_with_recmap_source_domain
+								(query_block_without_window_limit prepared_block)
+								recmap_domain_var))
+						physical_stage_catalog)))
 				(define lazy_stages (group_cache_stages_from_sources lazy_catalog (qb_sources core_block)))
 				(list
 					(merge (list
@@ -3825,8 +3906,12 @@ per-row nested probe. */
 						(direct_group_join_prepare_recipe_exprs direct_group_join_stages)
 						(direct_group_join_warm_prepare_exprs direct_group_join_stages)
 						(if (nil? scalar_order_cache) '() (list (nth scalar_order_cache 4)))
+						(if (nil? recmap_window) '()
+							(list (list (quote define) recmap_domain_var
+								(nested_scalar_recmap_window_source_expr recmap_candidate))))
 						(if (nil? recmap_candidate) '()
-							(list (nested_scalar_recmap_binding recmap_candidate)))
+							(list (nested_scalar_recmap_binding recmap_candidate
+								(if (nil? recmap_window) nil recmap_domain_var))))
 						probe_recipe_prepares
 						probe_recipe_bindings
 						(lazy_stage_prepare_bindings stage_lookup lazy_stages)
@@ -5062,7 +5147,7 @@ scalar comparison work rather than an uncalibrated multiplier. */
 				(if (equal? chosen "scan_order_multi") (ordered_or_multi_plan block branches)
 					(lower_single_source_scan_plan block)))))))
 
-(define lower_single_source_scan_plan_core (lambda (block)
+(define lower_single_source_scan_plan_core (lambda (block source_domain)
 	(begin
 		(define src (car (qb_sources block)))
 		(define fields (expand_query_block_fields (qb_sources block) (qb_fields block)))
@@ -5098,7 +5183,8 @@ scalar comparison work rather than an uncalibrated multiplier. */
 						(planner_context_session (qb_facts block)))
 						(probe_context_row_count (list src)))
 					(probe_context_row_count (list src))))
-				(define source_table (source_table_expr_using (query_block_stage_catalog block) src))
+				(define source_table (coalesceNil source_domain
+					(source_table_expr_using (query_block_stage_catalog block) src)))
 				(define memberships (driver_memberships_for_source src raw_condition))
 				(define implied_membership (driver_membership_for_source src raw_condition))
 				/* Select the outer membership topology before attaching an independent
@@ -5410,16 +5496,32 @@ scalar comparison work rather than an uncalibrated multiplier. */
 
 (define lower_single_source_scan_plan (lambda (block)
 	(begin
+		(define window_candidate (nested_scalar_recmap_window_candidate
+			(query_block_stage_catalog block) block))
 		(define candidate (select_nested_scalar_recmap_candidate
-			(nested_scalar_recmap_candidate
-				(query_block_stage_catalog block) block)
+			(coalesceNil window_candidate
+				(nested_scalar_recmap_candidate
+					(query_block_stage_catalog block) block))
 			(planner_context_session (qb_facts block))))
+		(define window (if (nil? candidate) nil
+			(nested_scalar_recmap_window candidate)))
+		(define source_domain_var (symbol "__recmap_source_window"))
+		(define source_domain_expr (if (nil? window) nil
+			(nested_scalar_recmap_window_source_expr candidate)))
+		(define scan_block (if (nil? window) block
+			(query_block_without_window_limit block)))
+		(define inherited_domain (qassoc_get (qb_facts block)
+			(quote recmap_source_domain) nil))
 		(define plan (lower_single_source_scan_plan_core
-			(query_block_with_nested_scalar_recmap block candidate)))
+			(query_block_with_nested_scalar_recmap scan_block candidate)
+			(if (nil? window) inherited_domain source_domain_var)))
 		(if (nil? candidate)
 			plan
 			(list (quote !begin)
-				(nested_scalar_recmap_binding candidate)
+				(if (nil? window) true
+					(list (quote define) source_domain_var source_domain_expr))
+				(nested_scalar_recmap_binding candidate
+					(if (nil? window) nil source_domain_var))
 				plan)))))
 
 (define order_exprs (lambda (order_items)
@@ -9243,21 +9345,21 @@ physical decision and preserve its runtime recompile gate. */
 										(lambda (probe_work_rows scalar_probe)
 											(cons row_mapper (map (if (nil? scalar_probe) field_exprs
 												(rewrite_physical_scalar_probe_as_true scalar_probe field_exprs)) (lambda (expr)
-												(lower_column_expr_for_join_in_context
-													scan_sources first_alias expr probe_work_rows)))))
+													(lower_column_expr_for_join_in_context
+														scan_sources first_alias expr probe_work_rows)))))
 										reduce_expr neutral_expr)
 									(neumann_fail "build_queryplan"
 										"ordered dataset reduction has no streamable join-tree order"))))
 						(if hierarchical_order
 							(join_ordered_streaming_limit_plan
-							(qb_schema block) scan_sources scan_plan first_alias field_exprs needed_exprs final_condition
-							order_items (qb_offset block) (qb_limit block) (query_block_stage_catalog block)
-							(qb_facts block)
-							(lambda (probe_work_rows scalar_probe)
-								(cons row_mapper (map (if (nil? scalar_probe) field_exprs
-									(rewrite_physical_scalar_probe_as_true scalar_probe field_exprs)) (lambda (expr)
-										(lower_column_expr_for_join_in_context
-											scan_sources first_alias expr probe_work_rows)))))
+								(qb_schema block) scan_sources scan_plan first_alias field_exprs needed_exprs final_condition
+								order_items (qb_offset block) (qb_limit block) (query_block_stage_catalog block)
+								(qb_facts block)
+								(lambda (probe_work_rows scalar_probe)
+									(cons row_mapper (map (if (nil? scalar_probe) field_exprs
+										(rewrite_physical_scalar_probe_as_true scalar_probe field_exprs)) (lambda (expr)
+											(lower_column_expr_for_join_in_context
+												scan_sources first_alias expr probe_work_rows)))))
 								reduce_expr neutral_expr)
 							(neumann_fail "build_queryplan"
 								"ordered dataset reduction has no streamable join-tree order")))))))))
@@ -10985,49 +11087,49 @@ RecSet node is written into logical IR. */
 				(if (physical_group_cache_initialized? plan (qassoc_get decision "cache_relation" nil))
 					"base_group_cache" "query_group")
 				(if (equal? kind "ordered_or")
-				(if (physical_expr_has_head? plan (quote scan_order_multi)) "scan_order_multi"
-					(if (physical_expr_has_head? plan (quote scan_order)) "scan_order" "unknown"))
-				(if (equal? kind "semijoin_carrier")
-					(if (semijoin_plan_has_operator? plan "recset_project_join")
-						(if (semijoin_plan_has_operator? plan "initialize_cache_table") "prejoin_recset" "projected_recset")
-						(if (semijoin_plan_has_operator? plan "createcolumn") "predicate_cache" "unknown"))
-					(if (equal? kind "membership_carrier")
-						(begin
-							(define chosen (qassoc_get decision "chosen" nil))
-							/* A compound query may contain key indexes and projected RecSets for
-							unrelated ACL stages. Validate the primitive required by this decision's
-							chosen alternative instead of assigning the whole plan to the first
-							operator family found globally. Falling back to the global classifier
-							still makes a genuinely unreachable forced alternative fail calibration. */
-							(if (or
-								(and (equal? chosen "ordered_batch_accept")
-									(physical_expr_has_head? plan (quote scan_order_batch_accept)))
-								(and (equal? chosen "prefiltered_candidate_keyset")
-									(physical_prefiltered_membership_expr? plan))
-								(and (equal? chosen "candidate_keyset")
-									(physical_expr_has_head? plan (quote recset_project_join)))
-								(and (equal? chosen "driver_order_membership_probe")
-									(physical_expr_has_head? plan (quote recset_key_index)))
-								(and (equal? chosen "driver_filter_join_probe")
-									(not (physical_expr_has_head? plan (quote scan_order_batch_accept)))))
-								chosen
-								(physical_membership_operator_family plan)))
-						(if (equal? kind "scan_join_order")
-							(if (equal? (qassoc_get decision "chosen" nil) "legacy_join_tree")
-								"legacy_join_tree"
-								(if (physical_expr_has_head? plan (quote scan_join_order))
-								(if (equal? (qassoc_get decision "chosen" nil)
-									"scan_join_order_batched_probe")
-									"scan_join_order_batched_probe" "scan_join_order")
-								"legacy_join_tree"))
-							(if (equal? kind "direct_group_join")
-								(if (physical_expr_has_group_relation? plan)
-									"group_carrier" "direct_group_join")
-								(if (equal? kind "scan_lookup")
-									(if (physical_expr_has_head? plan (quote scan_lookup))
-										"scan_lookup"
-										(if (physical_expr_has_head? plan (quote scan_order)) "scan_order" "unknown"))
-					"unknown")))))))))))
+					(if (physical_expr_has_head? plan (quote scan_order_multi)) "scan_order_multi"
+						(if (physical_expr_has_head? plan (quote scan_order)) "scan_order" "unknown"))
+					(if (equal? kind "semijoin_carrier")
+						(if (semijoin_plan_has_operator? plan "recset_project_join")
+							(if (semijoin_plan_has_operator? plan "initialize_cache_table") "prejoin_recset" "projected_recset")
+							(if (semijoin_plan_has_operator? plan "createcolumn") "predicate_cache" "unknown"))
+						(if (equal? kind "membership_carrier")
+							(begin
+								(define chosen (qassoc_get decision "chosen" nil))
+								/* A compound query may contain key indexes and projected RecSets for
+								unrelated ACL stages. Validate the primitive required by this decision's
+								chosen alternative instead of assigning the whole plan to the first
+								operator family found globally. Falling back to the global classifier
+								still makes a genuinely unreachable forced alternative fail calibration. */
+								(if (or
+									(and (equal? chosen "ordered_batch_accept")
+										(physical_expr_has_head? plan (quote scan_order_batch_accept)))
+									(and (equal? chosen "prefiltered_candidate_keyset")
+										(physical_prefiltered_membership_expr? plan))
+									(and (equal? chosen "candidate_keyset")
+										(physical_expr_has_head? plan (quote recset_project_join)))
+									(and (equal? chosen "driver_order_membership_probe")
+										(physical_expr_has_head? plan (quote recset_key_index)))
+									(and (equal? chosen "driver_filter_join_probe")
+										(not (physical_expr_has_head? plan (quote scan_order_batch_accept)))))
+									chosen
+									(physical_membership_operator_family plan)))
+							(if (equal? kind "scan_join_order")
+								(if (equal? (qassoc_get decision "chosen" nil) "legacy_join_tree")
+									"legacy_join_tree"
+									(if (physical_expr_has_head? plan (quote scan_join_order))
+										(if (equal? (qassoc_get decision "chosen" nil)
+											"scan_join_order_batched_probe")
+											"scan_join_order_batched_probe" "scan_join_order")
+										"legacy_join_tree"))
+								(if (equal? kind "direct_group_join")
+									(if (physical_expr_has_group_relation? plan)
+										"group_carrier" "direct_group_join")
+									(if (equal? kind "scan_lookup")
+										(if (physical_expr_has_head? plan (quote scan_lookup))
+											"scan_lookup"
+											(if (physical_expr_has_head? plan (quote scan_order)) "scan_order" "unknown"))
+										"unknown")))))))))))
 
 (define physical_expr_has_group_relation? (lambda (expr)
 	(match expr

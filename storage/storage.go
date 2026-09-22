@@ -1794,6 +1794,38 @@ func Init(en scm.Env) {
 		Optimize: optimizeScanBatch,
 	})
 	scm.Declare(&en, &scm.Declaration{
+		Name: "scan_order_recset",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			currentTx := scmerToTxContext(a[0])
+			source := scanOrderTableSpec{}
+			if a[1].IsCustom(TagRecSet) {
+				source.recset = RecSetFromScmer(a[1])
+			} else {
+				source.table = TableFromScmer(a[1])
+			}
+			source.accessSchema = a[2]
+			source.accessValues = mustScmerSlice(a[3], "scan_order_recset access values")
+			sortcols := mustScmerSlice(a[4], "scan_order_recset sort columns")
+			sortdirs := scanSortDirections(mustScmerSlice(a[5], "scan_order_recset sort directions"))
+			return NewRecSetScmer(scanOrderRecSet(currentTx, source, sortcols, sortdirs,
+				scm.ToInt(a[6]), scm.ToInt(a[7])))
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "selects an exact query-local ordered OFFSET/LIMIT window as an unordered RecSet, without projecting result columns; a later scan_order can restore the same sort order",
+			HasSideEffects: true,
+			Params: []*scm.TypeDescriptor{
+				{Kind: "any", Label: "tx", Description: "query transaction"},
+				{Kind: "table|recset", Label: "table_or_recset", Description: "visible source domain"},
+				{Kind: "list", Label: "accessSchema", Description: "static scan access schema", NoEscape: true, CrossGoroutine: true},
+				{Kind: "list", Label: "accessValues", Description: "runtime scan access values", NoEscape: true, CrossGoroutine: true},
+				sortColumnList("sortcols", "direct source columns defining the ordered window"),
+				sortDirectionList("sortdirs", "one direction per sort column"),
+				{Kind: "number", Label: "offset", Description: "first selected row"},
+				{Kind: "number", Label: "limit", Description: "finite maximum number of selected rows"},
+			},
+			Return: &scm.TypeDescriptor{Kind: "recset"},
+		},
+	})
+	scm.Declare(&en, &scm.Declaration{
 		Name: "scan_order_batch_accept",
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {

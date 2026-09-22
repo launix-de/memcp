@@ -148,6 +148,26 @@ func TestScanOrderBatchAcceptSupportsRecSetInput(t *testing.T) {
 	}
 }
 
+func TestScanOrderRecSetSelectsExactWindow(t *testing.T) {
+	table := setupBatchAcceptTable(t, "torderrecsetwindow", 20)
+	_, descending := integerOrder(true)
+	source := scanOrderTableSpec{table: table, accessSchema: newScanAccessSchema(scanAccessConsumerScan, nil, -1)}
+	window := scanOrderRecSet(nil, source, []scm.Scmer{scm.NewString("id")},
+		[]func(...scm.Scmer) scm.Scmer{descending}, 2, 3)
+	if window.count != 3 {
+		t.Fatalf("ordered window has %d rows, want 3", window.count)
+	}
+	var ignored []int64
+	got := runBatchAcceptIDs(table, window, recSetModuloFilter(&ignored, 1, 0),
+		[]scm.Scmer{scm.NewString("id")}, []func(...scm.Scmer) scm.Scmer{descending}, 0, 3)
+	if want := []int64{17, 16, 15}; !equalInt64s(got, want) {
+		t.Fatalf("ordered window rows = %v, want %v", got, want)
+	}
+	if empty := scanOrderRecSet(nil, source, nil, nil, 0, 0); empty.count != 0 || empty.table != table {
+		t.Fatalf("zero-limit window = %v, want empty RecSet of source table", empty)
+	}
+}
+
 func TestScanOrderBatchAcceptGreedyWithoutOrder(t *testing.T) {
 	table := setupBatchAcceptTable(t, "tbatchacceptgreedy", 12)
 	batchSizes := make([]int64, 0)

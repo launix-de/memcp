@@ -282,8 +282,8 @@ test_cases:
       data:
         - {ID: 1}
 
-  - name: "Repeated nested scalar keys lower to query-local RecMap scans"
-    setup:
+  - name: "Nested scalar lookup uses only the selected ordered RecMap window"
+    setup: &recmap_window_setup
       - sql: "DROP TABLE IF EXISTS nc_recmap_driver"
       - sql: "DROP TABLE IF EXISTS nc_recmap_middle"
       - sql: "DROP TABLE IF EXISTS nc_recmap_target"
@@ -300,19 +300,42 @@ test_cases:
               (map (produceN 50) (lambda (i) (list i 4))))
             (rebuild))
     sql: |
-      EXPLAIN PHYSICAL SELECT SUM((
+      EXPLAIN PHYSICAL SELECT d.id, (
         SELECT (
           SELECT t.value FROM nc_recmap_target t
           WHERE t.id = m.target_id LIMIT 1)
         FROM nc_recmap_middle m
-        WHERE m.id = d.middle_id LIMIT 1)) AS total
+        WHERE m.id = d.middle_id LIMIT 1) AS value
       FROM nc_recmap_driver d
+      ORDER BY d.id DESC LIMIT 5
     expect:
       result_contains:
+        - "scan_order_recset"
         - "scan_recmap"
         - "recmap_compose"
         - "$recmap_call"
-    cleanup:
+    cleanup: &recmap_window_cleanup
       - sql: "DROP TABLE IF EXISTS nc_recmap_driver"
       - sql: "DROP TABLE IF EXISTS nc_recmap_middle"
       - sql: "DROP TABLE IF EXISTS nc_recmap_target"
+
+  - name: "Ordered RecMap window applies OFFSET only once"
+    setup: *recmap_window_setup
+    sql: |
+      SELECT d.id, (
+        SELECT (
+          SELECT t.value FROM nc_recmap_target t
+          WHERE t.id = m.target_id LIMIT 1)
+        FROM nc_recmap_middle m
+        WHERE m.id = d.middle_id LIMIT 1) AS value
+      FROM nc_recmap_driver d
+      ORDER BY d.id DESC LIMIT 5 OFFSET 2
+    expect:
+      rows: 5
+      data:
+        - {id: 197, value: 4}
+        - {id: 196, value: 4}
+        - {id: 195, value: 4}
+        - {id: 194, value: 4}
+        - {id: 193, value: 4}
+    cleanup: *recmap_window_cleanup
