@@ -22,14 +22,63 @@ setup:
   - sql: "DROP TABLE IF EXISTS lookup_cache_document"
   - sql: "DROP TABLE IF EXISTS lookup_cache_file"
   - sql: "DROP TABLE IF EXISTS lookup_cache_folder"
+  - sql: "DROP TABLE IF EXISTS lookup_order_driver"
+  - sql: "DROP TABLE IF EXISTS lookup_order_source"
   - sql: "CREATE TABLE lookup_cache_folder (id INT PRIMARY KEY, stamp INT, label_code INT)"
   - sql: "CREATE TABLE lookup_cache_file (id INT PRIMARY KEY, folder_id INT)"
   - sql: "CREATE TABLE lookup_cache_document (id INT PRIMARY KEY, file_id INT)"
   - sql: "INSERT INTO lookup_cache_folder VALUES (1, 100, 7), (2, 200, 9)"
   - sql: "INSERT INTO lookup_cache_file VALUES (10, 1), (20, 2)"
   - sql: "INSERT INTO lookup_cache_document VALUES (1000, 10), (2000, 20)"
+  - sql: "CREATE TABLE lookup_order_source (id INT PRIMARY KEY, val INT)"
+  - sql: "CREATE TABLE lookup_order_driver (id INT PRIMARY KEY, source_id INT)"
+  - sql: "INSERT INTO lookup_order_source VALUES (10, 100), (20, 200)"
+  - scm: |
+      (begin
+        (insert (table "memcp-tests" "lookup_order_driver") '("id" "source_id")
+          (append
+            (map (produceN 4000) (lambda (i)
+              (list (+ i 1) (if (equal? (mod i 2) 0) 10 20))))
+            (list (list 5001 30)))
+          '() (lambda () true) false)
+        (rebuild)
+        true)
 
 test_cases:
+  - name: "Planner chooses a canonical computed lookup for scalar ordering"
+    sql: |
+      EXPLAIN PHYSICAL
+      SELECT d.id
+      FROM lookup_order_driver d
+      ORDER BY (SELECT s.val FROM lookup_order_source s
+                WHERE s.id = d.source_id LIMIT 1) DESC,
+               d.id
+      LIMIT 3
+    expect:
+      result_contains:
+        - "canonical_computed_column"
+        - "createcolumn"
+
+  - name: "Planner materializes the scalar-order lookup cache"
+    sql: |
+      SELECT d.id
+      FROM lookup_order_driver d
+      ORDER BY (SELECT s.val FROM lookup_order_source s
+                WHERE s.id = d.source_id LIMIT 1) DESC,
+               d.id
+      LIMIT 3
+    expect:
+      rows: 3
+      data:
+        - {id: 2}
+        - {id: 4}
+        - {id: 6}
+
+  - name: "Insert into lookup source executes planner-generated dependency trigger"
+    sql: "INSERT INTO lookup_order_source VALUES (30, 300)"
+    expect:
+      affected_rows: 1
+
   - name: "Create the first canonical lookup cache"
     scm: |
       (createcolumn
@@ -250,6 +299,8 @@ test_cases:
           pair_value: 350
 
 cleanup:
+  - sql: "DROP TABLE IF EXISTS lookup_order_driver"
+  - sql: "DROP TABLE IF EXISTS lookup_order_source"
   - sql: "DROP TABLE IF EXISTS lookup_cache_document"
   - sql: "DROP TABLE IF EXISTS lookup_cache_file"
   - sql: "DROP TABLE IF EXISTS lookup_cache_folder"

@@ -341,19 +341,141 @@ func TestQualifiedLookupComputeTriggerUsesPhysicalTargetColumn(t *testing.T) {
 	if len(refs) != 1 || len(refs[0].srcCols) != 1 || refs[0].srcCols[0] != "ref_id" {
 		t.Fatalf("lookup relation not extracted: %#v", refs)
 	}
-	// Feed the qualified planner input explicitly; other tests may normalize the lambda.
+	// Persisted plans from older planner versions can retain this qualified
+	// parameter spelling even though the current extractor canonicalizes it.
 	refs[0].inputCols = []string{"base.ref_id"}
+	for _, tc := range []struct {
+		name   string
+		prefix string
+		setup  func()
+	}{
+		{
+			name:   "computed cache",
+			prefix: ".cache:base:cached|scan0|src|",
+			setup:  func() { base.registerComputeTriggersWithRefs("cached", computor, refs) },
+		},
+		{
+			name:   "ordered computed cache",
+			prefix: ".orcdep:base:cached|scan0|src|",
+			setup: func() {
+				base.Columns[1].OrcSortCols = []string{"ref_id"}
+				base.registerORCDependencyTriggers("cached", base.Columns[1], refs)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.setup()
+			tr, ok := findTriggerByPrefixAndTiming(src.Triggers, tc.prefix, AfterInsert)
+			if !ok {
+				t.Fatal("missing qualified lookup dependency trigger")
+			}
+			plan := triggerPlanStringForTest(tr)
+			if !strings.Contains(plan, `"ref_id"`) || strings.Contains(plan, `"base.ref_id"`) {
+				t.Fatalf("dependency trigger scans a nonphysical target column:\n%s", plan)
+			}
+		})
+	}
+	// A new source row executes both generated trigger families and must succeed.
+	src.Insert([]string{"ref_id", "val"}, [][]scm.Scmer{{scm.NewInt(7), scm.NewInt(11)}}, nil, scm.NewNil(), false, nil)
+}
+
+func TestRestoredQualifiedLookupTriggerIsRegenerated(t *testing.T) {
+	oldBasepath := Basepath
+	Basepath = t.TempDir()
+	defer func() { Basepath = oldBasepath }()
+	Init(scm.Globalenv)
+	LoadDatabases()
+	const schemaName = "trestoredqualifiedtrigger"
+	defer databases.Remove(schemaName)
+	CreateDatabase(schemaName, false)
+	base, _ := CreateTable(schemaName, "base", Safe, false)
+	src, _ := CreateTable(schemaName, "src", Safe, false)
+	base.CreateColumn("ref_id", "INT", nil, nil)
+	base.CreateColumn("cached", "INT", nil, nil)
+	src.CreateColumn("ref_id", "INT", nil, nil)
+	src.CreateColumn("val", "INT", nil, nil)
+	base.Insert([]string{"ref_id", "cached"}, [][]scm.Scmer{{scm.NewInt(7), scm.NewInt(0)}}, nil, scm.NewNil(), false, nil)
+
+	computor := scm.Read(t.Name(), `(lambda (ref_id)
+		(scan nil (table "trestoredqualifiedtrigger" "src")
+			'(369435906932736) '()
+			'("ref_id") (lambda (source_ref_id) (equal? source_ref_id (outer 1 ref_id)))
+			'("val") (lambda (acc val) val)
+			0 (lambda (old value) value) false))`)
+	refs := extractScanJoinInfo(computor)
+	if len(refs) != 1 {
+		t.Fatalf("lookup relation not extracted: %#v", refs)
+	}
+	refs[0].inputCols = []string{"base.ref_id"}
+	triggerName := ".cache:base:cached|scan0|src|" + AfterInsert.String()
+	oldBody := buildSelectiveInvalidationBody(schemaName, "base", "cached", refs[0].srcCols, refs[0].inputCols, AfterInsert)
+	src.installComputeDependencyTrigger(TriggerDescription{
+		Name:     triggerName,
+		Timing:   AfterInsert,
+		IsSystem: true,
+		Priority: 100,
+		Func:     buildFKProc(oldBody),
+	})
+	oldTrigger, ok := findTriggerByPrefixAndTiming(src.Triggers, triggerName, AfterInsert)
+	if !ok || !strings.Contains(triggerPlanStringForTest(oldTrigger), `"base.ref_id"`) {
+		t.Fatal("fixture did not contain the historical qualified target column")
+	}
+
+	encoded, err := json.Marshal(src.Triggers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var restored []TriggerDescription
+	if err := json.Unmarshal(encoded, &restored); err != nil {
+		t.Fatal(err)
+	}
+	src.mu.Lock()
+	src.Triggers = restored
+	src.mu.Unlock()
+
 	base.registerComputeTriggersWithRefs("cached", computor, refs)
+	regenerated, ok := findTriggerByPrefixAndTiming(src.Triggers, triggerName, AfterInsert)
+	if !ok {
+		t.Fatal("regenerated dependency trigger missing")
+	}
+	plan := triggerPlanStringForTest(regenerated)
+	if strings.Contains(plan, `"base.ref_id"`) || !strings.Contains(plan, `"ref_id"`) {
+		t.Fatalf("restored dependency trigger kept its historical target column:\n%s", plan)
+	}
+	src.Insert([]string{"ref_id", "val"}, [][]scm.Scmer{{scm.NewInt(7), scm.NewInt(11)}}, nil, scm.NewNil(), false, nil)
+}
+
+func TestUnresolvedLookupComputeInputFallsBackToFullInvalidation(t *testing.T) {
+	oldBasepath := Basepath
+	Basepath = t.TempDir()
+	defer func() { Basepath = oldBasepath }()
+	Init(scm.Globalenv)
+	LoadDatabases()
+	const schemaName = "tunresolvedlookuptrigger"
+	defer databases.Remove(schemaName)
+	CreateDatabase(schemaName, false)
+	base, _ := CreateTable(schemaName, "base", Safe, false)
+	src, _ := CreateTable(schemaName, "src", Safe, false)
+	base.CreateColumn("ref_id", "INT", nil, nil)
+	base.CreateColumn("cached", "INT", nil, nil)
+	src.CreateColumn("ref_id", "INT", nil, nil)
+
+	computor := scm.Read(t.Name(), `(lambda (base.missing)
+		(scan nil (table "tunresolvedlookuptrigger" "src")
+			'(369435906932736) '()
+			'("ref_id") (lambda (source_ref_id) (equal? source_ref_id (outer 1 base.missing)))
+			'("ref_id") (lambda (acc value) value)
+			0 (lambda (old value) value) false))`)
+	base.registerComputeTriggers("cached", computor)
 	tr, ok := findTriggerByPrefixAndTiming(src.Triggers, ".cache:base:cached|scan0|src|", AfterInsert)
 	if !ok {
-		t.Fatal("missing qualified lookup dependency trigger")
+		t.Fatal("missing lookup dependency trigger")
 	}
-	// A new source row must not abort its INSERT while the cache is invalidated.
-	src.Insert([]string{"ref_id", "val"}, [][]scm.Scmer{{scm.NewInt(7), scm.NewInt(11)}}, nil, scm.NewNil(), false, nil)
 	plan := triggerPlanStringForTest(tr)
-	if !strings.Contains(plan, `"ref_id"`) || strings.Contains(plan, `"base.ref_id"`) {
-		t.Fatalf("dependency trigger scans a nonphysical target column:\n%s", plan)
+	if !strings.Contains(plan, `(invalidatecolumn`) || strings.Contains(plan, `"base.missing"`) {
+		t.Fatalf("unresolved target input did not use full invalidation:\n%s", plan)
 	}
+	src.Insert([]string{"ref_id"}, [][]scm.Scmer{{scm.NewInt(7)}}, nil, scm.NewNil(), false, nil)
 }
 
 func TestExtractScanJoinInfoUsesCompiledAccessWhenResidualIsEmpty(t *testing.T) {
