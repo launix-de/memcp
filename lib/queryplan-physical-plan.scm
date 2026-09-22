@@ -3863,29 +3863,31 @@ stage requested-column. The recursive result is ordered driver -> final. */
 						(define other_uses (merge_unique (map
 							(list (qb_order block) (qb_hidden block))
 							(lambda (expr) (extract_columns_for_alias output expr)))))
-						/* The replacement applies to fields, ORDER expressions, and retained
-						sibling joins. A dataview commonly projects a scalar FK and also joins
-						a description source through that same value without projecting the
-						key itself. Derive the requested value from every consumer; exactly one
-						column means the scalar stage source can be removed completely. */
-						(define sibling_uses (merge_unique (map sources (lambda (src)
-							(if (equal? (source_alias src) (source_alias output)) '()
-								(extract_columns_for_alias output (source_join_expr src)))))))
-						(define requested_cols
-							(merge_unique (list used_cols other_uses sibling_uses)))
-						(define requested (if (single_source? requested_cols)
-							(car requested_cols) nil))
 						(define stage (stage_for_output_relation stages (source_relation output)))
+						(define requested (if (single_source? used_cols) (car used_cols) nil))
 						(define edges (if (or (nil? stage) (nil? requested)) nil
 							(relational_recmap_stage_edges stages stage requested driver)))
 						(define first_edge (if (nil? edges) nil (car edges)))
 						(define output_join (relational_recmap_join_columns driver output
 							(source_join_expr output)))
+						/* The replacement applies to fields, ORDER expressions, and retained
+						sibling joins. A dataview commonly projects a scalar FK and also joins
+						a description source through that same value. Such a sibling is a
+						consumer, not a reason to abandon RecMap. Only another output column
+						would remain unresolved after removing the scalar stage source. */
+						(define sibling_uses (merge_unique (map sources (lambda (src)
+							(if (equal? (source_alias src) (source_alias output)) '()
+								(extract_columns_for_alias output (source_join_expr src)))))))
+						(define unsupported_use (reduce
+							(merge_unique (list other_uses sibling_uses))
+							(lambda (unsupported col)
+								(or unsupported (not (equal? col requested)))) false))
 						(if (or (nil? first_edge)
 							(or (nil? output_join)
-								(or (not (equal? (nth output_join 1) "k0"))
-									(or (not (contains? (nth first_edge 1) (car output_join)))
-										(not (equal? (count (nth first_edge 1)) 1))))))
+								(or unsupported_use
+									(or (not (equal? (nth output_join 1) "k0"))
+										(or (not (contains? (nth first_edge 1) (car output_join)))
+											(not (equal? (count (nth first_edge 1)) 1)))))))
 							nil
 							(list driver output requested edges))))) nil)))))
 
