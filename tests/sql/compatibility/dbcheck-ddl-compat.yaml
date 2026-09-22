@@ -197,6 +197,25 @@ test_cases:
     sql: "ALTER TABLE dbc_t DROP PRIMARY KEY"
   - name: "ALTER TABLE MODIFY with PRIMARY KEY AUTO_INCREMENT"
     sql: "ALTER TABLE dbc_t MODIFY id INT NOT NULL PRIMARY KEY AUTO_INCREMENT"
+  - name: "CREATE TABLE for MODIFY primary-key regression"
+    sql: "CREATE TABLE dbc_modify_primary (id INT NOT NULL AUTO_INCREMENT, value INT, UNIQUE KEY idx_primary (id))"
+  - name: "DROP old ID index before MODIFY"
+    sql: "DROP INDEX idx_primary ON dbc_modify_primary"
+  - name: "MODIFY restores the primary key"
+    sql: "ALTER TABLE dbc_modify_primary MODIFY id INT NOT NULL PRIMARY KEY AUTO_INCREMENT"
+  - name: "MODIFY restored an indexed primary key"
+    sql: "SHOW INDEXES FROM dbc_modify_primary WHERE Key_name = 'PRIMARY'"
+    expect:
+      rows: 1
+      data:
+        - Key_name: "PRIMARY"
+          Column_name: "id"
+  - name: "Insert first ID after MODIFY"
+    sql: "INSERT INTO dbc_modify_primary (id, value) VALUES (1, 1)"
+  - name: "MODIFY primary key rejects duplicate IDs"
+    sql: "INSERT INTO dbc_modify_primary (id, value) VALUES (1, 2)"
+    expect:
+      error: true
 
   # --- Foreign Keys ---
   - name: "CREATE child table for FK test"
