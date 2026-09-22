@@ -84,8 +84,9 @@ try {
     if ($action === 'setup') {
         $db->exec('CREATE TABLE php_test (id INT PRIMARY KEY AUTO_INCREMENT, value TEXT)');
         $db->exec("CREATE USER php_reader IDENTIFIED BY 'reader-password'");
-     } elseif ($action === 'quota') {
+    } elseif ($action === 'quota') {
         check((int)ini_get('max_memory_limit') === 32*1024*1024, 'Host memory ceiling');
+        check((int)ini_get('max_execution_time') === 123, 'Host execution time limit');
         @ini_set('max_memory_limit', '-1');
         @ini_set('memory_limit', '-1');
         check((int)ini_get('memory_limit') === 32*1024*1024, 'Unlimited memory bypass');
