@@ -281,3 +281,38 @@ test_cases:
       rows: 1
       data:
         - {ID: 1}
+
+  - name: "Repeated nested scalar keys lower to query-local RecMap scans"
+    setup:
+      - sql: "DROP TABLE IF EXISTS nc_recmap_driver"
+      - sql: "DROP TABLE IF EXISTS nc_recmap_middle"
+      - sql: "DROP TABLE IF EXISTS nc_recmap_target"
+      - sql: "CREATE TABLE nc_recmap_driver (id INT, middle_id INT)"
+      - sql: "CREATE TABLE nc_recmap_middle (id INT, target_id INT)"
+      - sql: "CREATE TABLE nc_recmap_target (id INT, value INT)"
+      - scm: |
+          (begin
+            (insert (table "memcp-tests" "nc_recmap_driver") '("id" "middle_id")
+              (map (produceN 200) (lambda (i) (list i (mod i 50)))))
+            (insert (table "memcp-tests" "nc_recmap_middle") '("id" "target_id")
+              (map (produceN 50) (lambda (i) (list i i))))
+            (insert (table "memcp-tests" "nc_recmap_target") '("id" "value")
+              (map (produceN 50) (lambda (i) (list i 4))))
+            (rebuild))
+    sql: |
+      EXPLAIN PHYSICAL SELECT SUM((
+        SELECT (
+          SELECT t.value FROM nc_recmap_target t
+          WHERE t.id = m.target_id LIMIT 1)
+        FROM nc_recmap_middle m
+        WHERE m.id = d.middle_id LIMIT 1)) AS total
+      FROM nc_recmap_driver d
+    expect:
+      result_contains:
+        - "scan_recmap"
+        - "recmap_compose"
+        - "$recmap_call"
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS nc_recmap_driver"
+      - sql: "DROP TABLE IF EXISTS nc_recmap_middle"
+      - sql: "DROP TABLE IF EXISTS nc_recmap_target"
