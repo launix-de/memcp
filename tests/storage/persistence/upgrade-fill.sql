@@ -24,6 +24,8 @@ DROP TABLE IF EXISTS up_enum;
 DROP TABLE IF EXISTS up_json;
 DROP TABLE IF EXISTS up_blob;
 DROP TABLE IF EXISTS up_compute;
+DROP TABLE IF EXISTS up_qualified_trigger_base;
+DROP TABLE IF EXISTS up_qualified_trigger_src;
 
 -- 1. StorageFloat: non-aligned floating point values
 CREATE TABLE up_float (id INT, val DOUBLE);
@@ -996,3 +998,9 @@ INSERT INTO up_blob VALUES (5, 'short');
 CREATE TABLE up_compute (id INT, val INT);
 INSERT INTO up_compute (id, val) VALUES
   (1, 5), (2, 10), (3, -3), (4, 0), (5, 42);
+
+-- Persisted computed-cache triggers are generated separately by the workflow.
+-- The candidate must replace their historical generated code after loading.
+CREATE TABLE up_qualified_trigger_base (id INT PRIMARY KEY, ref_id INT);
+CREATE TABLE up_qualified_trigger_src (ref_id INT PRIMARY KEY, val INT);
+INSERT INTO up_qualified_trigger_base (id, ref_id) VALUES (1, 7);

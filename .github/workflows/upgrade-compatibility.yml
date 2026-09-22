@@ -140,6 +140,25 @@ jobs:
             MEMCP_PID=
           }
 
+          register_qualified_lookup() {
+            curl -fsS "http://127.0.0.1:$API_PORT/scm" -u root:admin -d '
+              (createcolumn
+                (table "memcp-tests" "up_qualified_trigger_base")
+                "cached" "INT" (quote ()) (quote ())
+                (quote ("ref_id"))
+                (lambda (up_qualified_trigger_base.ref_id)
+                  (scan nil (table "memcp-tests" "up_qualified_trigger_src")
+                    (list 369436175368192
+                      (scan_boundary "equal" "ref_id" 0 0 true true "" false))
+                    (list up_qualified_trigger_base.ref_id)
+                    (quote ("ref_id"))
+                    (lambda (source_ref_id)
+                      (equal? source_ref_id (outer 1 up_qualified_trigger_base.ref_id)))
+                    (quote ("val")) (lambda (acc val) val)
+                    0 (lambda (old value) value) false)))
+            '
+          }
+
           # Only the old binary supplies the original reference. It is stored
           # outside data-dir and never replaced by a candidate's observed data.
           start_server base base-fill
@@ -148,6 +167,20 @@ jobs:
           curl -fsS "http://127.0.0.1:$API_PORT/scm" -u root:admin -d '
             (createcolumn (table "memcp-tests" "up_compute") "doubled" "INT" (quote ()) (quote ())
               (quote ("val")) (lambda (val) (* val 2)))
+          '
+          register_qualified_lookup
+          # Emulate generated trigger code persisted by a historical planner.
+          # Its internal name makes the candidate treat it as regenerable. If
+          # registration fails to replace it after reload, the source INSERT
+          # below aborts and the upgrade job fails.
+          curl -fsS "http://127.0.0.1:$API_PORT/scm" -u root:admin -d '
+            (createtrigger
+              (table "memcp-tests" "up_qualified_trigger_src")
+              ".cache:up_qualified_trigger_base:cached|scan0|up_qualified_trigger_src|AFTER INSERT"
+              "after_insert" "" ""
+              (lambda (OLD NEW session tx)
+                (error "historical qualified target column up_qualified_trigger_base.ref_id"))
+              false)
           '
           bash "$VALIDATOR" "$MYSQL_PORT" snapshot "$ORACLES/before.json"
           stop_server
@@ -158,6 +191,8 @@ jobs:
           stop_server
 
           start_server candidate candidate-upgrade
+          register_qualified_lookup
+          bash "$VALIDATOR" "$MYSQL_PORT" qualified-trigger-checks
           bash "$VALIDATOR" "$MYSQL_PORT" zero-policy-checks
           bash "$VALIDATOR" "$MYSQL_PORT" compare "$ORACLES/before.json"
           bash "$VALIDATOR" "$MYSQL_PORT" mutate "$ORACLES/before.json" "$ORACLES/after-dml.json"

@@ -14,6 +14,7 @@
 # Usage: upgrade-validate.sh <mysql-port> snapshot|compare <snapshot.json>
 #        upgrade-validate.sh <mysql-port> mutate <old.json> <post-dml.json>
 #        upgrade-validate.sh <mysql-port> checks  # legacy focused DML checks
+#        upgrade-validate.sh <mysql-port> qualified-trigger-checks
 #        upgrade-validate.sh <mysql-port> zero-policy-checks
 set -uo pipefail
 
@@ -22,7 +23,7 @@ PORT="${1:?usage: upgrade-validate.sh <mysql-port>}"
 # Full comparison is read-only; mutate derives its oracle from the OLD snapshot,
 # never from candidate output. The workflow compares it again after a restart.
 MODE="${2:-checks}"
-if [ "$MODE" != checks ]; then
+if [ "$MODE" != checks ] && [ "$MODE" != qualified-trigger-checks ]; then
   python3 - "$0" "$PORT" "$MODE" "${3:-}" "${4:-}" <<'PYTHON'
 import base64
 import contextlib
@@ -327,6 +328,18 @@ check() {
 exec_sql() {
   check "DML statement succeeds" "$1" ""
 }
+
+if [ "$MODE" = qualified-trigger-checks ]; then
+  exec_sql "INSERT INTO up_qualified_trigger_src (ref_id, val) VALUES (7, 70)"
+  check "Regenerated qualified lookup trigger keeps source INSERT usable" \
+    "SELECT ref_id, val FROM up_qualified_trigger_src" "$(printf '7\t70')"
+  exec_sql "DELETE FROM up_qualified_trigger_src WHERE ref_id = 7"
+  echo "upgrade qualified-trigger validation: $((CHECKS - FAILURES))/$CHECKS checks passed"
+  if [ "$FAILURES" -ne 0 ]; then
+    exit 1
+  fi
+  exit 0
+fi
 
 # ==========================================================================
 # 1. StorageFloat
