@@ -1,0 +1,112 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: "1.0"
+  description: "Multiple UNIQUE checks release their lock after FK errors"
+  isolated: true
+
+setup:
+  - sql: "DROP TABLE IF EXISTS unique_fk_child"
+  - sql: "DROP TABLE IF EXISTS unique_fk_parent"
+  - sql: "CREATE TABLE unique_fk_parent (id INT PRIMARY KEY)"
+  - sql: "CREATE TABLE unique_fk_child (id INT PRIMARY KEY, parent_id INT, code TEXT UNIQUE, FOREIGN KEY (parent_id) REFERENCES unique_fk_parent(id))"
+  - sql: "INSERT INTO unique_fk_parent VALUES (1)"
+  - sql: "INSERT INTO unique_fk_child VALUES (1,1,'seed')"
+
+test_cases:
+  - name: "delta: FK error after both unique keys passed"
+    sql: "INSERT INTO unique_fk_child VALUES (2,999,'candidate-2')"
+    timeout: 3
+    expect:
+      error: true
+      contains: "foreign key constraint"
+
+  - name: "delta: rejected insert leaves no row"
+    sql: "SELECT COUNT(*) AS n FROM unique_fk_child WHERE id=2"
+    timeout: 3
+    expect:
+      data: [{n: 0}]
+
+  # Reuse BOTH unique values from the rejected row. This must complete and
+  # proves that neither the lock nor a phantom unique-key reservation survived.
+  - name: "delta: valid insert after FK error must not hang"
+    sql: "INSERT INTO unique_fk_child VALUES (2,1,'candidate-2')"
+    timeout: 3
+    expect:
+      affected_rows: 1
+
+  - name: "delta: recovered insert is visible with exact values"
+    sql: "SELECT id,parent_id,code FROM unique_fk_child WHERE id=2"
+    timeout: 3
+    expect:
+      data: [{id: 2, parent_id: 1, code: 'candidate-2'}]
+
+  - name: "delta: second unique constraint still rejects duplicates"
+    sql: "INSERT INTO unique_fk_child VALUES (12,1,'candidate-2')"
+    timeout: 3
+    expect:
+      error: true
+
+  - name: "delta: valid insert also succeeds after unique rejection"
+    sql: "INSERT INTO unique_fk_child VALUES (12,1,'recovered-2')"
+    timeout: 3
+    expect:
+      affected_rows: 1
+
+  - name: "delta: exact row count excludes rejected inserts"
+    sql: "SELECT COUNT(*) AS n FROM unique_fk_child"
+    timeout: 3
+    expect:
+      data: [{n: 3}]
+
+  - name: "Compress both tables before repeating the error path"
+    scm: '(begin (rebuild (table "memcp-tests" "unique_fk_parent") true false) (rebuild (table "memcp-tests" "unique_fk_child") true false))'
+
+  - name: "rebuilt: FK error after both unique keys passed"
+    sql: "INSERT INTO unique_fk_child VALUES (3,999,'candidate-3')"
+    timeout: 3
+    expect:
+      error: true
+      contains: "foreign key constraint"
+
+  - name: "rebuilt: rejected insert leaves no row"
+    sql: "SELECT COUNT(*) AS n FROM unique_fk_child WHERE id=3"
+    timeout: 3
+    expect:
+      data: [{n: 0}]
+
+  # Reuse BOTH unique values from the rejected row. This must complete and
+  # proves that neither the lock nor a phantom unique-key reservation survived.
+  - name: "rebuilt: valid insert after FK error must not hang"
+    sql: "INSERT INTO unique_fk_child VALUES (3,1,'candidate-3')"
+    timeout: 3
+    expect:
+      affected_rows: 1
+
+  - name: "rebuilt: recovered insert is visible with exact values"
+    sql: "SELECT id,parent_id,code FROM unique_fk_child WHERE id=3"
+    timeout: 3
+    expect:
+      data: [{id: 3, parent_id: 1, code: 'candidate-3'}]
+
+  - name: "rebuilt: second unique constraint still rejects duplicates"
+    sql: "INSERT INTO unique_fk_child VALUES (13,1,'candidate-3')"
+    timeout: 3
+    expect:
+      error: true
+
+  - name: "rebuilt: valid insert also succeeds after unique rejection"
+    sql: "INSERT INTO unique_fk_child VALUES (13,1,'recovered-3')"
+    timeout: 3
+    expect:
+      affected_rows: 1
+
+  - name: "rebuilt: exact row count excludes rejected inserts"
+    sql: "SELECT COUNT(*) AS n FROM unique_fk_child"
+    timeout: 3
+    expect:
+      data: [{n: 5}]
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS unique_fk_child"
+  - sql: "DROP TABLE IF EXISTS unique_fk_parent"
