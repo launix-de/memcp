@@ -136,8 +136,8 @@ func TestShardMemoryExcludesSeparatelyOwnedTempColumn(t *testing.T) {
 		t:            table,
 		columns:      map[string]ColumnStorage{"base": &StorageConst{value: scm.NewInt(1), count: 1}, "cached": nil},
 		deltaColumns: make(map[string]int),
-		srState:      SHARED,
 	}
+	shard.setState(SHARED)
 	before := shard.exclusiveSize()
 	shard.columns["cached"] = &StorageConst{value: scm.NewString("separately-owned"), count: 1}
 	after := shard.exclusiveSize()
@@ -154,8 +154,8 @@ func TestShardMemoryExcludesMaterializedCompressedDictionary(t *testing.T) {
 	shard := &storageShard{
 		columns:      map[string]ColumnStorage{"value": strings},
 		deltaColumns: make(map[string]int),
-		srState:      SHARED,
 	}
+	shard.setState(SHARED)
 	before := shard.exclusiveSize()
 	strings.dictionary = "materialized-dictionary"
 	if after := shard.exclusiveSize(); after != before {
@@ -187,9 +187,9 @@ func TestShardMemoryExcludesSeparatelyOwnedIndex(t *testing.T) {
 	shard := &storageShard{
 		columns:      make(map[string]ColumnStorage),
 		deltaColumns: make(map[string]int),
-		srState:      SHARED,
 		Indexes:      make([]*StorageIndex, 1), // reserve the parent-owned pointer slot
 	}
+	shard.setState(SHARED)
 	before := shard.exclusiveSize()
 	idx := &StorageIndex{}
 	idx.baseState.mainIndexes.initValuesUInt32(1024, 0, 1023)
@@ -237,7 +237,8 @@ func TestScmerCustomHandleDoesNotClaimOwnedPayload(t *testing.T) {
 
 func TestShardInclusiveSizeAndBusyChildEviction(t *testing.T) {
 	defer setupGCTest(t)()
-	shard := &storageShard{columns: make(map[string]ColumnStorage), srState: SHARED}
+	shard := &storageShard{columns: make(map[string]ColumnStorage)}
+	shard.setState(SHARED)
 	index := &StorageIndex{}
 	index.baseState.mainIndexes.initValuesUInt32(1024, 0, 1023)
 	shard.Indexes = []*StorageIndex{index}
@@ -261,7 +262,8 @@ func TestShardInclusiveSizeAndBusyChildEviction(t *testing.T) {
 
 func TestShardFullOfferAndReleaseCountChildrenExactlyOnce(t *testing.T) {
 	defer setupGCTest(t)()
-	shard := &storageShard{columns: make(map[string]ColumnStorage), srState: SHARED}
+	shard := &storageShard{columns: make(map[string]ColumnStorage)}
+	shard.setState(SHARED)
 	index := &StorageIndex{}
 	index.baseState.mainIndexes.initValuesUInt32(1024, 0, 1023)
 	shard.Indexes = []*StorageIndex{index}

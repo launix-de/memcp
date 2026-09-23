@@ -344,7 +344,7 @@ func TestFilterFeedbackColdDatabaseRestart(t *testing.T) {
 		t.Fatalf("restart %v %s %v", value, source, known)
 	}
 	for _, shard := range restored.ActiveShards() {
-		if shard.srState != COLD {
+		if shard.state() != COLD {
 			t.Fatal("feedback lookup loaded shard")
 		}
 		if shard.filterFeedback[filterFeedbackSlot(key.key)].Load() != nil {

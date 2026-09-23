@@ -1539,7 +1539,7 @@ func runDirectSingleShardScan(currentTx *TxContext, topology *tableShardTopology
 			result.res, result.outCount, result.candidateCount = shard.scan(access, conditionCols, condition, callbackCols, mapReduce, neutral, stride, batchdata, currentTx, ss)
 		})
 	}
-	result.inputCount = int64(shard.Count())
+	result.inputCount = int64(shard.main_count) + int64(shard.plannerDeltaRows.Load())
 	return result
 }
 
@@ -1656,7 +1656,8 @@ func (t *table) scanWithBatchFrom(currentTx *TxContext, source *recSet, accessSc
 				panic("query killed")
 			}
 			res, shardOutCount, shardCandidateCount := s.scan(executionAccess, conditionCols, condition, callbackCols, mapReduce, neutral, stride, batchdata, currentTx, ss)
-			values.send(solo, scanResult{res: res, outCount: shardOutCount, inputCount: int64(s.Count()), candidateCount: shardCandidateCount})
+			inputCount := int64(s.main_count) + int64(s.plannerDeltaRows.Load())
+			values.send(solo, scanResult{res: res, outCount: shardOutCount, inputCount: inputCount, candidateCount: shardCandidateCount})
 		})
 		values.finish(done)
 

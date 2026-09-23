@@ -820,7 +820,13 @@ func (t *storageShard) iterateIndexEx(tx *TxContext, cols scanAccess, maxInsertI
 		// find an index that has at least the columns in that order we're searching for
 		// if the index is inactive, use the other one
 	retry_indexscan:
+		// Concurrent read-side scans may both discover a missing index. The
+		// shard read lock permits that concurrency, so indexMutex owns publication
+		// of the slice header independently of shard mutation state.
+		t.indexMutex.Lock()
 		old_indexes := t.Indexes
+		oldIndexCount := len(old_indexes)
+		t.indexMutex.Unlock()
 		for _, index := range old_indexes {
 			// naive index search algo; TODO: improve
 			if len(index.Cols) >= indexCols {
@@ -850,7 +856,7 @@ func (t *storageShard) iterateIndexEx(tx *TxContext, cols scanAccess, maxInsertI
 
 		// otherwise: create new index (but first check for prefix coverage)
 		t.indexMutex.Lock()
-		if len(old_indexes) != len(t.Indexes) {
+		if oldIndexCount != len(t.Indexes) {
 			t.indexMutex.Unlock()
 			goto retry_indexscan // someone has added a index in the meantime: recheck
 		}

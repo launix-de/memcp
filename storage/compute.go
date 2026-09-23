@@ -188,7 +188,7 @@ func (s *storageShard) ComputeColumn(name string, inputCols []string, computor s
 	// guards on COLD state; setting WRITE first would skip the load entirely).
 	s.ensureLoaded()
 	// We are going to mutate this shard's columns: mark shard as WRITE (not COLD)
-	s.srState = WRITE
+	s.setState(WRITE)
 	// Ensure main_count and input storages are initialized before compute
 	s.ensureMainCount(false)
 
@@ -201,11 +201,10 @@ func (s *storageShard) ComputeColumn(name string, inputCols []string, computor s
 	//   same canonical temp column. Reissuing createcolumn may repair the eager
 	//   subset for that filter, but it must not silently swap to a different
 	//   throwaway computation path.
-	s.mu.RLock()
+	s.mu.Lock()
 	existing := s.columns[name]
-	s.mu.RUnlock()
 	if proxy, ok := existing.(*StorageComputeProxy); ok {
-		proxy.computor = computor // update lambda
+		s.mu.Unlock()
 		// skip recompute if proxy is still valid (no invalidation since last compute)
 		if !proxy.needsUnfilteredPreparation() {
 			if filter.IsNil() {
@@ -234,8 +233,6 @@ func (s *storageShard) ComputeColumn(name string, inputCols []string, computor s
 		colName:   name,
 		count:     s.main_count,
 	}
-
-	s.mu.Lock()
 	s.columns[name] = proxy
 	s.mu.Unlock()
 
