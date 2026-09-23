@@ -50,26 +50,6 @@ stop_server() {
   MEMCP_PID=
 }
 
-# Planner-generated compute helpers are registered again when their query is
-# compiled after a restart. Keep this upgrade fixture independent of the plan
-# selected for that query while exercising the same persisted helper lifecycle.
-register_lookup_helper() {
-  curl --max-time 30 -fsS "http://127.0.0.1:$API_PORT/scm" -u root:admin -d '
-    (createcolumn
-      (table "memcp-tests" "up_helper_driver")
-      ".lookup:upgrade_file_stamp" "INT" (quote ()) (quote ("temp" true))
-      (quote ("file_id"))
-      (lambda (file_id)
-        (scan nil (table "memcp-tests" "up_helper_file")
-          (list 369436175368192
-            (scan_boundary "equal" "id" 0 0 true true "" false))
-          (list file_id)
-          (quote ("id")) (lambda (id) (equal? id (outer 1 file_id)))
-          (quote ("stamp")) (lambda (acc stamp) stamp)
-          0 (lambda (old value) value) false)))
-  '
-}
-
 # Only the old binary supplies the original reference. It is stored
 # outside data-dir and never replaced by a candidate's observed data.
 start_server base base-fill
@@ -94,39 +74,29 @@ curl --max-time 30 -fsS "http://127.0.0.1:$API_PORT/scm" -u root:admin -d '
     (rebuild)
     true)
 '
-register_lookup_helper
-bash "$VALIDATOR" "$MYSQL_PORT" group-checks
-python3 "$HELPERS" check "$MYSQL_PORT"
+python3 "$HELPERS" record "$MYSQL_PORT" "$ORACLES/queries.json"
 bash "$VALIDATOR" "$MYSQL_PORT" snapshot "$ORACLES/before.json"
 stop_server
 
-python3 "$HELPERS" inventory "$MYSQL_PORT" "$DATA_DIR" "$ORACLES/helpers.json"
-
 # Distinguish old-writer/restart defects from candidate reader defects.
 start_server base base-restart
-register_lookup_helper
-bash "$VALIDATOR" "$MYSQL_PORT" group-checks
-python3 "$HELPERS" check "$MYSQL_PORT"
+python3 "$HELPERS" check "$MYSQL_PORT" "$ORACLES/queries.json"
 bash "$VALIDATOR" "$MYSQL_PORT" compare "$ORACLES/before.json"
 stop_server
 
 start_server candidate candidate-upgrade
-register_lookup_helper
-python3 "$HELPERS" cold-mutate "$MYSQL_PORT"
+python3 "$HELPERS" cold-mutate "$MYSQL_PORT" "$ORACLES/queries.json"
 bash "$VALIDATOR" "$MYSQL_PORT" zero-policy-checks
-bash "$VALIDATOR" "$MYSQL_PORT" group-checks
-python3 "$HELPERS" check "$MYSQL_PORT"
+python3 "$HELPERS" check "$MYSQL_PORT" "$ORACLES/queries.json"
 bash "$VALIDATOR" "$MYSQL_PORT" compare "$ORACLES/before.json"
-python3 "$HELPERS" mutate "$MYSQL_PORT"
+python3 "$HELPERS" mutate "$MYSQL_PORT" "$ORACLES/queries.json"
 bash "$VALIDATOR" "$MYSQL_PORT" mutate "$ORACLES/before.json" "$ORACLES/after-dml.json"
 stop_server
 
 # The post-DML oracle is derived from the old reference plus specified
 # mutations. Reopening must preserve that entire expected state.
 start_server candidate candidate-restart
-register_lookup_helper
-python3 "$HELPERS" cold-mutate "$MYSQL_PORT"
-bash "$VALIDATOR" "$MYSQL_PORT" group-checks
-python3 "$HELPERS" check "$MYSQL_PORT"
+python3 "$HELPERS" cold-mutate "$MYSQL_PORT" "$ORACLES/queries.json"
+python3 "$HELPERS" check "$MYSQL_PORT" "$ORACLES/queries.json"
 bash "$VALIDATOR" "$MYSQL_PORT" compare "$ORACLES/after-dml.json"
 stop_server

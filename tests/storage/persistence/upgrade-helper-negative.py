@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Copyright (C) 2026 Carl-Philip Hänsch
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Validate the upgrade gate against unversioned range and group layouts.
+"""Prove the public upgrade workload detects incompatible cache layouts.
 
 Usage: upgrade-helper-negative.py BUILT_CANDIDATE OUTPUT_DIRECTORY
 Runs the same lifecycle script as CI. The altered algorithm must work on a
@@ -80,13 +80,14 @@ for family in ('range', 'group'):
         if must_pass and status != 0:
             raise AssertionError(f'{name} failed: {workspace / "run.log"}\n{output[-4000:]}')
         if not must_pass:
-            # A failed setup or unrelated error is not evidence of a working gate.
-            expected = ('MISMATCH: Range group cache survives upgrade' if family == 'range'
-                        else 'checking helper: group aggregate')
+            # A setup failure is not evidence of a working gate. The unchanged
+            # cache identity must fail while running the affected public query
+            # on the candidate; no internal schema or operator is asserted.
+            expected = ('checking query: correlated range and order' if family == 'range'
+                        else 'checking query: group aggregate')
             candidate_output = output.split('upgrade phase: candidate-upgrade', 1)
             if (status == 0 or len(candidate_output) != 2
                     or expected not in candidate_output[1]
-                    or 'Column does not exist:' not in candidate_output[1]
-                    or ('range_next_from_kind' if family == 'range' else 'key_next_0') not in candidate_output[1]):
+                    or 'RuntimeError:' not in candidate_output[1]):
                 raise AssertionError(f'missing expected {family} upgrade failure: {output[-4000:]}')
         print(f'{name}: expected {"PASS" if must_pass else "FAIL"}, exit={status}', flush=True)

@@ -345,7 +345,7 @@ To optimize memcp for a query you must consider the following steps:
  - every performance optimization PR must include in its description the manual A/B measurements performed during development for the query being optimized. These measurements must exist before the PR is created and compare the development baseline with the proposed change using the same fixture/setup, warmup, and sample configuration. State both latencies and the absolute or relative change. CI results are not a substitute for these hand measurements.
  - do not run the fulltest alone - always commit no-verify after the needle testcases work and look sane, push PR and watch the CI's results
 
-## Release Process
+## RELEASE: Complete Release Process
 
 ### Version Numbering
 - Scheme: `MAJOR.MINOR` — no dates in the version string.
@@ -363,19 +363,49 @@ The first line of `CHANGELOG.md` must be the bare version number followed by an 
 The Makefile reads `VERSION` from the first word of that line (`awk '{print $1}'`).
 
 ### Release Steps
-1. Add a new entry at the top of `CHANGELOG.md` with the new version and date.
-2. Commit the changelog update to `master` (via PR as usual).
+1. Add a new entry at the top of `CHANGELOG.md` with the new version, release
+   date and user-visible changes. Open and merge this through the normal PR
+   process; never prepare a release directly on `master`.
+2. Wait for all required checks on the resulting `master` commit, including
+   Upgrade Compatibility, packaging, JIT and the complete test suite. Fetch the
+   reviewed commit and verify that the changelog and Makefile agree:
+   ```
+   git fetch origin master --tags
+   git switch master
+   git pull --ff-only origin master
+   make -s version
+   ```
 3. Ensure the `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` GitHub Actions secrets
-   are configured. Tag the reviewed release commit:
+   are configured. Create two immutable annotated tags on that exact commit:
+   the public version tag starts the release build, while the upgrade tag pins
+   this writer forever in the data-format compatibility matrix.
    ```
    git tag -a v0.2 -m "Release 0.2"
+   git tag -a upgrade-release-0.2 -m "Upgrade compatibility pin for 0.2"
+   git push origin upgrade-release-0.2
    git push origin v0.2
    ```
-4. The tag workflow performs the release. It verifies tag/version/master,
-   rebuilds and checks the DEB, RPM, SRPM, and static binary, creates checksums
-   and provenance attestations, publishes amd64/arm64 container images, and only
-   then creates the GitHub release. Do not upload locally built replacements.
-5. For a local packaging dry run without publishing or Docker:
+   Never move, reuse or delete an `upgrade-release-*` tag. See
+   `tests/storage/persistence/UPGRADE.md` for the compatibility contract.
+4. The `v*` tag workflow verifies that the tag's version equals the first
+   `CHANGELOG.md` token and that the commit belongs to `master`. It then:
+   - builds and tests the RPM and source RPM on Fedora;
+   - builds the DEB and static Linux amd64 binary;
+   - checks package contents with `package-check`, `lintian` and `rpm -K`;
+   - writes SHA-256 checksums and provenance attestations;
+   - builds and pushes `linux/amd64` and `linux/arm64` Docker images as both the
+     version and `latest`, including provenance and SBOM metadata;
+   - creates the GitHub release with the DEB, RPM, source RPM, static binary and
+     checksums only after all preceding work succeeded.
+5. Watch the complete Release workflow. A failed job means the release is not
+   complete; fix it through a new PR and issue a new version rather than
+   replacing artifacts or moving either tag. Do not upload locally built
+   replacements.
+6. Verify the published GitHub assets and checksums, both Docker tags and the
+   multi-architecture image manifest. Also verify that a subsequent Upgrade
+   Compatibility run includes `upgrade-release-0.2` as its own matrix job.
+7. For a local packaging dry run before tagging, without publishing Docker
+   images or GitHub assets:
    ```
    make memcp.deb
    make memcp.rpm
