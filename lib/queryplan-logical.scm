@@ -467,8 +467,10 @@ domains (for example dashboard time windows). */
 				(get_assoc (cadr binding) column)
 				fallback))) fallback)))
 
+/* Bare symbols may be lambda parameters in generated aggregate reducers. */
 (define logical_literal_value? (lambda (expr)
-	(not (and (list? expr) (not (empty_list? expr))))))
+	(and (not (symbol? expr))
+		(not (and (list? expr) (not (empty_list? expr)))))))
 
 (define logical_sql_null_literal? (lambda (expr)
 	(and (list? expr)
