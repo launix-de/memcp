@@ -50,7 +50,7 @@ def checks(changed=False):
          'SELECT id, LAG(value) OVER (PARTITION BY bucket ORDER BY id) FROM up_helper ORDER BY id',
          '1\tNULL\n2\t10\n3\tNULL\n4\t30' if not changed else '1\tNULL\n2\t15\n3\tNULL\n4\t30'),
         ('canonical lookup column',
-         'SELECT d.id FROM up_helper_driver d ORDER BY (SELECT f.stamp FROM up_helper_file f WHERE f.id=d.file_id LIMIT 1) DESC, d.id DESC LIMIT 3',
+         'SELECT id FROM up_helper_driver ORDER BY `.lookup:upgrade_file_stamp` DESC, id DESC LIMIT 3',
          '4000\n3999\n3998' if not changed else '1\n4000\n3999'),
     ]
     for name, sql, expected in cases:
