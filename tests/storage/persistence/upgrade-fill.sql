@@ -26,6 +26,10 @@ DROP TABLE IF EXISTS up_blob;
 DROP TABLE IF EXISTS up_compute;
 DROP TABLE IF EXISTS up_group_events;
 DROP TABLE IF EXISTS up_group_windows;
+DROP TABLE IF EXISTS up_contract_child;
+DROP TABLE IF EXISTS up_contract_parent;
+DROP TABLE IF EXISTS up_trigger_source;
+DROP TABLE IF EXISTS up_trigger_log;
 
 -- 1. StorageFloat: non-aligned floating point values
 CREATE TABLE up_float (id INT, val DOUBLE);
@@ -1013,3 +1017,40 @@ CREATE TABLE up_group_windows (
   tenant_id INT,
   range_to INT
 );
+
+-- Schema objects carry executable behavior that a value-only snapshot cannot
+-- observe. The workflow exercises these contracts before and after every
+-- restart without leaving any transient rows behind.
+CREATE TABLE up_contract_parent (
+  id INT PRIMARY KEY,
+  external_id INT UNIQUE,
+  label VARCHAR(40) DEFAULT 'parent-default'
+);
+CREATE TABLE up_contract_child (
+  id INT PRIMARY KEY,
+  parent_id INT,
+  code VARCHAR(40) UNIQUE,
+  state VARCHAR(20) DEFAULT 'new',
+  CONSTRAINT up_contract_parent_fk FOREIGN KEY (parent_id)
+    REFERENCES up_contract_parent(id) ON DELETE CASCADE ON UPDATE CASCADE
+);
+INSERT INTO up_contract_parent (id, external_id, label)
+  VALUES (1, 101, 'persisted-parent');
+INSERT INTO up_contract_child (id, parent_id, code, state)
+  VALUES (10, 1, 'persisted-child', 'stored');
+
+CREATE TABLE up_trigger_log (
+  source_id INT PRIMARY KEY,
+  observed_value INT
+);
+CREATE TABLE up_trigger_source (
+  id INT PRIMARY KEY,
+  value INT
+);
+DELIMITER //
+CREATE TRIGGER up_trigger_source_ai AFTER INSERT ON up_trigger_source FOR EACH ROW
+BEGIN
+  INSERT INTO up_trigger_log (source_id, observed_value)
+    VALUES (NEW.id, NEW.value);
+END//
+DELIMITER ;

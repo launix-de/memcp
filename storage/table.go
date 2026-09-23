@@ -2947,9 +2947,12 @@ func (t *table) nextUniqueConstraint(columns []string, idx int) int {
 }
 
 func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, mergeNull bool, success func([][]scm.Scmer), onCollisionCols []string, failure func(string, []scm.Scmer), idx int, currentTx *TxContext) {
+	t.processUniqueCollision(columns, values, mergeNull, success, onCollisionCols, failure, idx, currentTx, true, nil)
+}
+
+func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, mergeNull bool, success func([][]scm.Scmer), onCollisionCols []string, failure func(string, []scm.Scmer), idx int, currentTx *TxContext, root bool, sharedLockHeld *bool) {
 	// An omitted generated key skips only its own constraint. Keep the outer
 	// invocation's lock ownership when the first checked key is a later UNIQUE.
-	outermost := idx == 0
 	idx = t.nextUniqueConstraint(columns, idx)
 	// check for duplicates
 	if idx >= len(t.Unique) {
@@ -3004,20 +3007,28 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 
 		var lock *sync.Mutex
 		lock = &t.uniquelock
-		uniquelockHeld := false
-		// Always register panic recovery so both outer (t.uniquelock) and inner
-		// (shard.uniquelock) lock releases are handled on panic.
+		localLockHeld := false
+		lockHeld := &localLockHeld
+		ownsLock := false
+		if sharedLockHeld != nil {
+			lockHeld = sharedLockHeld
+		}
+		// Only the frame that acquired the lock releases it while unwinding.
+		// Recursive unique checks share lockHeld because collision callbacks may
+		// temporarily release the outer table-wide lock.
 		defer func() {
 			if r := recover(); r != nil {
-				if uniquelockHeld {
+				if ownsLock && *lockHeld {
 					lock.Unlock()
+					*lockHeld = false
 				}
 				panic(r) // re-panic after releasing lock
 			}
 		}()
-		if (!allowPruning || len(t.Unique) > 1) && outermost {
+		if (!allowPruning || len(t.Unique) > 1) && root {
 			lock.Lock()
-			uniquelockHeld = true
+			*lockHeld = true
+			ownsLock = true
 		}
 
 		last_j := 0
@@ -3046,7 +3057,8 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 				if len(t.Unique) == 1 {
 					lock = &shardlist2[0].uniquelock
 					lock.Lock()
-					uniquelockHeld = true
+					*lockHeld = true
+					ownsLock = true
 				}
 			}
 			for _, s := range shardlist2 {
@@ -3056,26 +3068,11 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 				if present {
 					// found a unique collision
 					if j != last_j {
-						// If the inner check panics (unique violation in a later constraint),
-						// it will have released our lock via its own defer chain. Clear
-						// uniquelockHeld so our outer defer does not double-unlock.
-						var flushPanic interface{}
-						func() {
-							defer func() { flushPanic = recover() }()
-							t.ProcessUniqueCollision(columns, values[last_j:j], mergeNull, success, onCollisionCols, failure, idx+1, currentTx) // flush
-						}()
-						if flushPanic != nil {
-							// Only deeper unique-check levels (idx+1 < len(t.Unique)) can
-							// have released our lock. The success callback level does not.
-							if t.nextUniqueConstraint(columns, idx+1) < len(t.Unique) {
-								uniquelockHeld = false
-							}
-							panic(flushPanic)
-						}
+						t.processUniqueCollision(columns, values[last_j:j], mergeNull, success, onCollisionCols, failure, idx+1, currentTx, false, lockHeld) // flush
 					}
 					last_j = j + 1
 					lock.Unlock()
-					uniquelockHeld = false
+					*lockHeld = false
 					params := make([]scm.Scmer, len(onCollisionCols))
 					for i, p := range onCollisionCols {
 						if p == "$update" {
@@ -3111,17 +3108,13 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 					func() {
 						defer func() {
 							if r := recover(); r != nil {
-								// Re-lock before re-panicking so the outer
-								// outermost defer can safely release it.
-								lock.Lock()
-								uniquelockHeld = true
 								panic(r)
 							}
 						}()
 						failure(uniq.Id, params) // notify about failure
 					}()
 					lock.Lock()
-					uniquelockHeld = true
+					*lockHeld = true
 					r()
 					goto nextrow
 				}
@@ -3130,29 +3123,17 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 		nextrow:
 			if allowPruning {
 				if len(t.Unique) == 1 && !skipUniqueCheck {
-					uniquelockHeld = false
+					*lockHeld = false
 					lock.Unlock()
 				}
 			}
 		}
 		if len(values) != last_j {
-			// Same as above: clear uniquelockHeld if inner call releases the lock via panic.
-			var flushPanic interface{}
-			func() {
-				defer func() { flushPanic = recover() }()
-				t.ProcessUniqueCollision(columns, values[last_j:], mergeNull, success, onCollisionCols, failure, idx+1, currentTx) // flush the rest
-			}()
-			if flushPanic != nil {
-				// Same rationale as above: only inner unique-check levels may have
-				// unlocked our lock before panicking.
-				if t.nextUniqueConstraint(columns, idx+1) < len(t.Unique) {
-					uniquelockHeld = false
-				}
-				panic(flushPanic)
-			}
+			t.processUniqueCollision(columns, values[last_j:], mergeNull, success, onCollisionCols, failure, idx+1, currentTx, false, lockHeld) // flush the rest
 		}
-		if (!allowPruning || len(t.Unique) > 1) && outermost {
+		if ownsLock && *lockHeld {
 			lock.Unlock()
+			*lockHeld = false
 		}
 	}
 }

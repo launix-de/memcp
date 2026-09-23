@@ -160,18 +160,22 @@ jobs:
               true)
           '
           bash "$VALIDATOR" "$MYSQL_PORT" group-checks
+          bash "$VALIDATOR" "$MYSQL_PORT" contract-checks
           bash "$VALIDATOR" "$MYSQL_PORT" snapshot "$ORACLES/before.json"
           stop_server
 
           # Distinguish old-writer/restart defects from candidate reader defects.
           start_server base base-restart
           bash "$VALIDATOR" "$MYSQL_PORT" group-checks
+          bash "$VALIDATOR" "$MYSQL_PORT" contract-checks
           bash "$VALIDATOR" "$MYSQL_PORT" compare "$ORACLES/before.json"
           stop_server
 
           start_server candidate candidate-upgrade
           bash "$VALIDATOR" "$MYSQL_PORT" zero-policy-checks
           bash "$VALIDATOR" "$MYSQL_PORT" group-checks
+          bash "$VALIDATOR" "$MYSQL_PORT" contract-checks
+          bash "$VALIDATOR" "$MYSQL_PORT" failure-checks
           bash "$VALIDATOR" "$MYSQL_PORT" compare "$ORACLES/before.json"
           bash "$VALIDATOR" "$MYSQL_PORT" mutate "$ORACLES/before.json" "$ORACLES/after-dml.json"
           stop_server
@@ -180,6 +184,8 @@ jobs:
           # mutations. Reopening must preserve that entire expected state.
           start_server candidate candidate-restart
           bash "$VALIDATOR" "$MYSQL_PORT" group-checks
+          bash "$VALIDATOR" "$MYSQL_PORT" contract-checks
+          bash "$VALIDATOR" "$MYSQL_PORT" failure-checks
           bash "$VALIDATOR" "$MYSQL_PORT" compare "$ORACLES/after-dml.json"
           stop_server
 

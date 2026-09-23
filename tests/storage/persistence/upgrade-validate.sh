@@ -15,6 +15,8 @@
 #        upgrade-validate.sh <mysql-port> mutate <old.json> <post-dml.json>
 #        upgrade-validate.sh <mysql-port> checks  # legacy focused DML checks
 #        upgrade-validate.sh <mysql-port> group-checks
+#        upgrade-validate.sh <mysql-port> contract-checks
+#        upgrade-validate.sh <mysql-port> failure-checks
 #        upgrade-validate.sh <mysql-port> zero-policy-checks
 set -uo pipefail
 
@@ -23,7 +25,7 @@ PORT="${1:?usage: upgrade-validate.sh <mysql-port>}"
 # Full comparison is read-only; mutate derives its oracle from the OLD snapshot,
 # never from candidate output. The workflow compares it again after a restart.
 MODE="${2:-checks}"
-if [ "$MODE" != checks ] && [ "$MODE" != group-checks ]; then
+if [ "$MODE" != checks ] && [ "$MODE" != group-checks ] && [ "$MODE" != contract-checks ] && [ "$MODE" != failure-checks ]; then
   python3 - "$0" "$PORT" "$MODE" "${3:-}" "${4:-}" <<'PYTHON'
 import base64
 import contextlib
@@ -300,6 +302,7 @@ PYTHON
 fi
 
 MYSQL_BASE=(mysql -h 127.0.0.1 -P "$PORT" -u root -padmin -N -B memcp-tests)
+MYSQL_TIMEOUT_SECONDS="${UPGRADE_QUERY_TIMEOUT_SECONDS:-30}"
 
 CHECKS=0
 FAILURES=0
@@ -314,7 +317,8 @@ check() {
   # MariaDB's) prints "[Warning] Using a password on the command line
   # interface can be insecure." to stderr on every invocation, which would
   # corrupt every comparison if merged into the compared value.
-  actual=$("${MYSQL_BASE[@]}" -e "$query" 2>/tmp/upgrade-validate-stderr.$$) || status=$?
+  actual=$(timeout --foreground --kill-after=5s "$MYSQL_TIMEOUT_SECONDS" \
+    "${MYSQL_BASE[@]}" -e "$query" 2>/tmp/upgrade-validate-stderr.$$) || status=$?
   stderr_out=$(cat /tmp/upgrade-validate-stderr.$$ 2>/dev/null)
   rm -f /tmp/upgrade-validate-stderr.$$
   if [ "$status" -ne 0 ] || [ "$actual" != "$expected" ]; then
@@ -334,10 +338,36 @@ exec_sql() {
   check "DML statement succeeds" "$1" ""
 }
 
+expect_error() {
+  local desc="$1" query="$2" stdout_file stderr_file status=0
+  CHECKS=$((CHECKS + 1))
+  stdout_file=$(mktemp)
+  stderr_file=$(mktemp)
+  timeout --foreground --kill-after=5s "$MYSQL_TIMEOUT_SECONDS" \
+    "${MYSQL_BASE[@]}" -e "$query" >"$stdout_file" 2>"$stderr_file" || status=$?
+  if [ "$status" -eq 0 ] || [ "$status" -eq 124 ]; then
+    echo "MISMATCH: $desc"
+    if [ "$status" -eq 0 ]; then
+      echo "  query unexpectedly succeeded: $query"
+    else
+      echo "  query timed out instead of returning an error: $query"
+    fi
+    if [ -s "$stdout_file" ]; then
+      printf '  stdout:  %q\n' "$(cat "$stdout_file")"
+    fi
+    if [ -s "$stderr_file" ]; then
+      printf '  stderr:  %q\n' "$(cat "$stderr_file")"
+    fi
+    FAILURES=$((FAILURES + 1))
+  fi
+  rm -f "$stdout_file" "$stderr_file"
+}
+
 check_contains() {
   local desc="$1" query="$2" needle="$3" actual stderr_out status=0
   CHECKS=$((CHECKS + 1))
-  actual=$("${MYSQL_BASE[@]}" -e "$query" 2>/tmp/upgrade-validate-stderr.$$) || status=$?
+  actual=$(timeout --foreground --kill-after=5s "$MYSQL_TIMEOUT_SECONDS" \
+    "${MYSQL_BASE[@]}" -e "$query" 2>/tmp/upgrade-validate-stderr.$$) || status=$?
   stderr_out=$(cat /tmp/upgrade-validate-stderr.$$ 2>/dev/null)
   rm -f /tmp/upgrade-validate-stderr.$$
   if [ "$status" -ne 0 ] || [[ "$actual" != *"$needle"* ]]; then
@@ -363,6 +393,90 @@ if [ "$MODE" = group-checks ]; then
   check_contains "Range query still selects the range cache operator" \
     "EXPLAIN PHYSICAL $range_query" "range_group_cache"
   echo "upgrade group-cache validation: $((CHECKS - FAILURES))/$CHECKS checks passed"
+  if [ "$FAILURES" -ne 0 ]; then
+    exit 1
+  fi
+  exit 0
+fi
+
+if [ "$MODE" = contract-checks ]; then
+  # Metadata can survive while its runtime callbacks do not, and vice versa.
+  # Check both the declared schema and its behavior on every process boundary.
+  check_contains "UNIQUE contract remains visible" \
+    "SHOW CREATE TABLE up_contract_child" "UNIQUE KEY"
+  check_contains "FK contract remains visible" \
+    "SHOW CREATE TABLE up_contract_child" "CONSTRAINT"
+  check_contains "Column default remains visible" \
+    "SHOW CREATE TABLE up_contract_child" "DEFAULT 'new'"
+  check_contains "User trigger remains visible" \
+    "SHOW TRIGGERS LIKE 'up_trigger_source_ai'" "up_trigger_source_ai"
+
+  exec_sql "START TRANSACTION; INSERT INTO up_contract_parent (id, external_id) VALUES (97, 197); ROLLBACK"
+  check "Rollback leaves upgraded storage unchanged" \
+    "SELECT COUNT(*) FROM up_contract_parent WHERE id = 97" "0"
+
+  exec_sql "INSERT INTO up_contract_parent (id, external_id) VALUES (98, 198)"
+  check "Restored DEFAULT applies to new rows" \
+    "SELECT label FROM up_contract_parent WHERE id = 98" "parent-default"
+  exec_sql "DELETE FROM up_contract_parent WHERE id = 98"
+
+  exec_sql "INSERT INTO up_contract_parent (id, external_id) VALUES (99, 199)"
+  exec_sql "INSERT INTO up_contract_child (id, parent_id, code) VALUES (99, 99, 'cascade-child')"
+  exec_sql "DELETE FROM up_contract_parent WHERE id = 99"
+  check "Restored FK cascade removes dependent rows" \
+    "SELECT COUNT(*) FROM up_contract_child WHERE id = 99" "0"
+
+  exec_sql "INSERT INTO up_trigger_source (id, value) VALUES (99, 1234)"
+  check "Restored user trigger executes its persisted body" \
+    "SELECT observed_value FROM up_trigger_log WHERE source_id = 99" "1234"
+  exec_sql "DELETE FROM up_trigger_log WHERE source_id = 99"
+  exec_sql "DELETE FROM up_trigger_source WHERE id = 99"
+
+  check "Contract checks restore the original parent rows" \
+    "SELECT id, external_id, label FROM up_contract_parent ORDER BY id" \
+    "$(printf '1\t101\tpersisted-parent')"
+  check "Contract checks restore the original child rows" \
+    "SELECT id, parent_id, code, state FROM up_contract_child ORDER BY id" \
+    "$(printf '10\t1\tpersisted-child\tstored')"
+  check "Contract checks leave trigger source empty" \
+    "SELECT COUNT(*) FROM up_trigger_source" "0"
+  check "Contract checks leave trigger log empty" \
+    "SELECT COUNT(*) FROM up_trigger_log" "0"
+
+  echo "upgrade schema-contract validation: $((CHECKS - FAILURES))/$CHECKS checks passed"
+  if [ "$FAILURES" -ne 0 ]; then
+    exit 1
+  fi
+  exit 0
+fi
+
+if [ "$MODE" = failure-checks ]; then
+  # Run rejection paths only with the candidate. Requiring a predecessor to
+  # pass a newly added failure-path assertion would make the suite incapable
+  # of validating the candidate that fixes that predecessor defect.
+  expect_error "Duplicate UNIQUE value remains rejected" \
+    "INSERT INTO up_contract_child (id, parent_id, code) VALUES (11, 1, 'persisted-child')"
+  check "Rejected UNIQUE insert is atomic" \
+    "SELECT COUNT(*) FROM up_contract_child WHERE id = 11" "0"
+  exec_sql "INSERT INTO up_contract_child (id, parent_id, code) VALUES (11, 1, 'after-unique-error')"
+  check "Valid insert succeeds after UNIQUE rejection" \
+    "SELECT parent_id FROM up_contract_child WHERE id = 11" "1"
+  exec_sql "DELETE FROM up_contract_child WHERE id = 11"
+
+  expect_error "Missing FK parent remains rejected" \
+    "INSERT INTO up_contract_child (id, parent_id, code) VALUES (12, 999, 'orphan')"
+  check "Rejected FK insert is atomic" \
+    "SELECT COUNT(*) FROM up_contract_child WHERE id = 12" "0"
+  exec_sql "INSERT INTO up_contract_parent (id, external_id) VALUES (96, 196)"
+  exec_sql "INSERT INTO up_contract_child (id, parent_id, code) VALUES (12, 96, 'after-fk-error')"
+  check "Valid insert succeeds after FK rejection" \
+    "SELECT parent_id FROM up_contract_child WHERE id = 12" "96"
+  exec_sql "DELETE FROM up_contract_parent WHERE id = 96"
+  check "Failure checks restore child rows" \
+    "SELECT id, parent_id, code, state FROM up_contract_child ORDER BY id" \
+    "$(printf '10\t1\tpersisted-child\tstored')"
+
+  echo "upgrade failure-path validation: $((CHECKS - FAILURES))/$CHECKS checks passed"
   if [ "$FAILURES" -ne 0 ]; then
     exit 1
   fi
