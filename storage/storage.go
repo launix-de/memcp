@@ -1826,6 +1826,30 @@ func Init(en scm.Env) {
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
+		Name: "recmap_order_recset",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			mapping := RecMapFromScmer(a[1])
+			sides := scmerSliceToStrings(mustScmerSlice(a[2], "recmap_order_recset sort sides"))
+			columns := scmerSliceToStrings(mustScmerSlice(a[3], "recmap_order_recset sort columns"))
+			directions := scanSortDirections(mustScmerSlice(a[4], "recmap_order_recset sort directions"))
+			return NewRecSetScmer(mapping.orderRecSet(scmerToTxContext(a[0]), sides, columns,
+				directions, scm.ToInt(a[5]), scm.ToInt(a[6])))
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "selects an exact query-local source window ordered by source or RecMap-target columns",
+			HasSideEffects: true,
+			Params: []*scm.TypeDescriptor{
+				{Kind: "any", Label: "tx", Description: "query transaction"},
+				{Kind: "recmap", Label: "mapping", Description: "query-local source-to-target mapping"},
+				{Kind: "list", Label: "sortSides", Description: "source or target for every ORDER term"},
+				columnList("sortColumns", "physical source or target columns defining the window"),
+				sortDirectionList("sortdirs", "one direction per sort column"),
+				{Kind: "number", Label: "offset", Description: "first selected source row"},
+				{Kind: "number", Label: "limit", Description: "finite maximum number of selected source rows"},
+			},
+			Return: &scm.TypeDescriptor{Kind: "recset"},
+		},
+	})
+	scm.Declare(&en, &scm.Declaration{
 		Name: "scan_order_batch_accept",
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {

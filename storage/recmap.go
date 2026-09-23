@@ -255,6 +255,134 @@ type recMapSourceRow struct {
 	target recMapTarget
 }
 
+type recMapOrderRow struct {
+	sourceShard *storageShard
+	sourceRecID uint32
+	target      recMapTarget
+	values      []scm.Scmer
+}
+
+// orderRecSet selects an exact source-row window by values reached through the
+// mapping. sortSides contains "source" or "target" for every column. This is
+// deliberately query-local: the returned RecSet and all physical row IDs have
+// the same lifetime as the RecMap which produced them.
+func (r *recMap) orderRecSet(currentTx *TxContext, sortSides, sortColumns []string,
+	sortDirections []func(...scm.Scmer) scm.Scmer, offset, limit int) *recSet {
+	if r == nil || r.source == nil || r.target == nil || offset < 0 || limit < 0 ||
+		len(sortSides) != len(sortColumns) || len(sortColumns) != len(sortDirections) {
+		panic("recmap_order_recset: invalid mapping, sort specification, offset, or limit")
+	}
+	result := &recSet{table: r.source}
+	if limit == 0 || r.count == 0 {
+		return result
+	}
+	rows := make([]recMapOrderRow, 0, r.count)
+	for partIndex := range r.shards {
+		part := &r.shards[partIndex]
+		for rowIndex, recid := range part.sourceRecIDs {
+			rows = append(rows, recMapOrderRow{sourceShard: part.sourceShard,
+				sourceRecID: recid, target: part.targets[rowIndex], values: make([]scm.Scmer, len(sortColumns))})
+		}
+	}
+	fillRecMapOrderValues(currentTx, rows, sortSides, sortColumns)
+	less := make([]func(scm.Scmer, scm.Scmer) bool, len(sortDirections))
+	for i, relation := range sortDirections {
+		less[i] = scm.OrderRelationLess(relation)
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		for column := range less {
+			if less[column](rows[i].values[column], rows[j].values[column]) {
+				return true
+			}
+			if less[column](rows[j].values[column], rows[i].values[column]) {
+				return false
+			}
+		}
+		for k := range rows[i].sourceShard.uuid {
+			if rows[i].sourceShard.uuid[k] != rows[j].sourceShard.uuid[k] {
+				return rows[i].sourceShard.uuid[k] < rows[j].sourceShard.uuid[k]
+			}
+		}
+		return rows[i].sourceRecID < rows[j].sourceRecID
+	})
+	if offset >= len(rows) {
+		return result
+	}
+	end := len(rows)
+	if limit < len(rows)-offset {
+		end = offset + limit
+	}
+	result.order = &recSetOrder{ranks: make(map[*storageShard]map[uint32]int64)}
+	for rank, row := range rows[offset:end] {
+		shardRanks := result.order.ranks[row.sourceShard]
+		if shardRanks == nil {
+			shardRanks = make(map[uint32]int64)
+			result.order.ranks[row.sourceShard] = shardRanks
+		}
+		shardRanks[row.sourceRecID] = int64(rank)
+	}
+	byShard := make(map[*storageShard][]uint32)
+	for _, row := range rows[offset:end] {
+		byShard[row.sourceShard] = append(byShard[row.sourceShard], row.sourceRecID)
+	}
+	for shard, ids := range byShard {
+		sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+		release := shard.GetRead()
+		shard.mu.RLock()
+		universe := shard.main_count + uint32(len(shard.inserts))
+		shard.mu.RUnlock()
+		release()
+		part := newRecSetShardFromSortedIDs(shard, universe, ids)
+		result.count += part.count
+		result.shards = append(result.shards, part)
+	}
+	return result
+}
+
+func fillRecMapOrderValues(currentTx *TxContext, rows []recMapOrderRow, sides, columns []string) {
+	for column, side := range sides {
+		groups := make(map[*storageShard][]int)
+		for rowIndex := range rows {
+			shard := rows[rowIndex].sourceShard
+			if side == "target" {
+				shard = rows[rowIndex].target.shard
+			} else if side != "source" {
+				panic("recmap_order_recset: sort side must be source or target")
+			}
+			if shard != nil {
+				groups[shard] = append(groups[shard], rowIndex)
+			}
+		}
+		for shard, indexes := range groups {
+			release := shard.acquireReadForScan(currentTx)
+			func() {
+				defer release()
+				shard.ensureLoaded()
+				skipLock := shard.hasWriteOwnerForTx(currentTx)
+				shard.ensureMainCount(skipLock)
+				storage := shard.getColumnStorageOrPanic(columns[column], skipLock, currentTx)
+				if !skipLock {
+					shard.mu.RLock()
+					defer shard.mu.RUnlock()
+				}
+				for _, rowIndex := range indexes {
+					recid := rows[rowIndex].sourceRecID
+					if side == "target" {
+						recid = rows[rowIndex].target.recid
+					}
+					if recid < shard.main_count {
+						rows[rowIndex].values[column] = storage.GetValue(recid)
+					} else if _, proxy := storage.(*StorageComputeProxy); proxy {
+						rows[rowIndex].values[column] = storage.GetValue(recid)
+					} else {
+						rows[rowIndex].values[column] = shard.getDelta(int(recid-shard.main_count), columns[column])
+					}
+				}
+			}()
+		}
+	}
+}
+
 func scanRecMap(currentTx *TxContext, source scm.Scmer, accessSchema scm.Scmer, accessValues []scm.Scmer,
 	filterCols []string, filterFn scm.Scmer, mapCols []string, mapFn scm.Scmer, target *table) *recMap {
 	var sourceTable *table

@@ -122,6 +122,37 @@ func TestRecMapPrunedDomainImageAndComposition(t *testing.T) {
 	if len(activeSourceShards) != 1 || activeSourceShards[0] != composed.shards[0].sourceShard {
 		t.Fatal("composed RecMap does not reference the active source shard")
 	}
+	descending := scm.Apply(scm.Globalenv.Vars[scm.Symbol("collate")],
+		scm.NewString("bin"), scm.NewBool(true)).Func()
+	window := composed.orderRecSet(nil, []string{"target"}, []string{"value"},
+		[]func(...scm.Scmer) scm.Scmer{descending}, 0, 2)
+	if window.count != 2 || !window.contains(composed.shards[0].sourceShard, 0) ||
+		!window.contains(composed.shards[0].sourceShard, 1) {
+		t.Fatalf("target-ordered RecMap window did not retain the expected first two source rows")
+	}
+	orderedIDs := make([]int64, 0, 2)
+	window.scan_order(nil, allRows, nil, nil, trueFilter,
+		[]scm.Scmer{scm.NewString("id")}, []func(...scm.Scmer) scm.Scmer{descending},
+		0, 0, -1, []string{"id"}, scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
+			orderedIDs = append(orderedIDs, values[1].Int())
+			return values[0]
+		}), scm.NewNil(), false, scm.NewNil(), nil, scm.NewNil())
+	if len(orderedIDs) != 2 || orderedIDs[0] != 2 || orderedIDs[1] != 1 {
+		t.Fatalf("ordered RecMap window scan = %v, want [2 1]", orderedIDs)
+	}
+	mixedWindow := composed.orderRecSet(nil,
+		[]string{"target", "source"}, []string{"value", "id"},
+		[]func(...scm.Scmer) scm.Scmer{descending, descending}, 1, 2)
+	mixedIDs := make([]int64, 0, 2)
+	mixedWindow.scan_order(nil, allRows, nil, nil, trueFilter,
+		[]scm.Scmer{scm.NewString("id")}, []func(...scm.Scmer) scm.Scmer{descending},
+		0, 0, -1, []string{"id"}, scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
+			mixedIDs = append(mixedIDs, values[1].Int())
+			return values[0]
+		}), scm.NewNil(), false, scm.NewNil(), nil, scm.NewNil())
+	if len(mixedIDs) != 2 || mixedIDs[0] != 3 || mixedIDs[1] != 1 {
+		t.Fatalf("mixed target/source RecMap window scan = %v, want [3 1]", mixedIDs)
+	}
 	mappedValue := NewRecMapScmer(composed)
 	directCall := recMapCallClosure(composed.shards[0].sourceShard, nil)
 	columns := scm.NewSlice([]scm.Scmer{scm.NewString("value")})

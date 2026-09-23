@@ -102,6 +102,7 @@ test_cases:
       rows: 1
       result_contains:
         - "scan_order"
+        - "recmap_order_recset"
       result_not_contains:
         - "scan_order_point"
         - "__scalar_order_lookup"
@@ -398,6 +399,64 @@ test_cases:
       LIMIT 72
     expect:
       rows: 72
+
+  - name: "RecMap window plans projected scalar order before joined row expansion"
+    sql: |
+      EXPLAIN
+      SELECT product.id, referenced.total,
+        (SELECT FALSE FROM usol_dataview_selling inner_selling
+         WHERE inner_selling.id = (
+           SELECT selling.id FROM usol_dataview_selling selling
+           WHERE selling.old_key = product.selling_id LIMIT 1
+         ) LIMIT 1) AS can_edit
+      FROM usol_dataview_product product
+      LEFT JOIN usol_dataview_selling referenced ON referenced.id = (
+        SELECT selling.id FROM usol_dataview_selling selling
+        WHERE selling.old_key = product.selling_id LIMIT 1
+      )
+      ORDER BY (
+        SELECT selling.sold_at FROM usol_dataview_selling selling
+        WHERE selling.old_key = product.selling_id LIMIT 1
+      ) DESC
+      LIMIT 3
+    expect:
+      rows: 1
+      result_contains:
+        - "recmap_order_recset"
+        - "__relational_recmap_source_window"
+      result_not_contains:
+        - "(quote (nil))"
+
+  - name: "RecMap window preserves scalar target order and non-column values"
+    sql: |
+      SELECT product.id, referenced.total,
+        (SELECT FALSE FROM usol_dataview_selling inner_selling
+         WHERE inner_selling.id = (
+           SELECT selling.id FROM usol_dataview_selling selling
+           WHERE selling.old_key = product.selling_id LIMIT 1
+         ) LIMIT 1) AS can_edit
+      FROM usol_dataview_product product
+      LEFT JOIN usol_dataview_selling referenced ON referenced.id = (
+        SELECT selling.id FROM usol_dataview_selling selling
+        WHERE selling.old_key = product.selling_id LIMIT 1
+      )
+      ORDER BY (
+        SELECT selling.sold_at FROM usol_dataview_selling selling
+        WHERE selling.old_key = product.selling_id LIMIT 1
+      ) DESC
+      LIMIT 3
+    expect:
+      rows: 3
+      data:
+        - id: 256
+          total: 2560
+          can_edit: false
+        - id: 255
+          total: 2550
+          can_edit: false
+        - id: 254
+          total: 2540
+          can_edit: false
 
   - name: "DataView reuses projected non-normalized foreign keys before scalar ordering"
     max_time: 5
