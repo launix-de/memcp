@@ -3364,33 +3364,6 @@ scan_recmap applies the ordinary source access/filter interface directly. Its
 image is the complete and only domain of the second map; composing both maps
 brings the selected target identity back to the original scan row without a
 per-row nested probe. */
-(define recmap_bounded_probe_expr (lambda (src expr)
-	(match expr
-		((symbol get_column) _tblvar _tbl_ignorecase _col _col_ignorecase)
-		(lower_column_expr_for_alias src expr)
-		((quote get_column) _tblvar _tbl_ignorecase _col _col_ignorecase)
-		(lower_column_expr_for_alias src expr)
-		((symbol scalar_first_probe) stage requested_col dependencies) (begin
-			(define lookup_keys (qassoc_get (gs_facts stage) (quote lookup-keys) '()))
-			(define keys (if (empty_list? lookup_keys) '() (gs_keys stage)))
-			(define ag (scalar_first_probe_aggregate stage requested_col))
-			(define parts (if (nil? ag) nil (scalar_first_probe_parts ag)))
-			(define catalog (stage_catalog_with_nested
-				(merge_stage_catalogs (list dependencies (list stage)))))
-			(define nested (scalar_first_query_probe_direct_nested_stages catalog stage))
-			(if (nil? parts) expr
-				(lower_scalar_first_query_probe_expr_using
-					stage (car parts) keys
-					(map lookup_keys (lambda (key)
-						(lower_column_expr_for_alias src key)))
-					nested '() nested (stage_partition_limit stage) true)))
-		((quote scalar_first_probe) stage requested_col dependencies)
-		(recmap_bounded_probe_expr src
-			(list (symbol "scalar_first_probe") stage requested_col dependencies))
-		(cons head tail) (cons head (map tail (lambda (item)
-			(recmap_bounded_probe_expr src item))))
-		_ expr)))
-
 (define recmap_projection_parts_in_context (lambda (src exprs probe_work_rows)
 	(begin
 		(define cols (merge_unique (map exprs (lambda (expr)
@@ -3406,10 +3379,8 @@ per-row nested probe. */
 			(if direct nil
 				(list (quote lambda) params
 					(cons (quote list) (map exprs (lambda (expr)
-						(if (and (number? probe_work_rows) (<= probe_work_rows 1))
-							(recmap_bounded_probe_expr src expr)
-							(lower_column_expr_for_alias_in_context
-								src expr probe_work_rows)))))))))))
+						(lower_column_expr_for_alias_in_context
+							src expr probe_work_rows))))))))))
 
 (define recmap_projection_parts (lambda (src exprs)
 	(recmap_projection_parts_in_context src exprs nil)))
@@ -4163,7 +4134,7 @@ batch. This is intentionally separate from the direct-column fast path above. */
 				(car previous_parts) (gs_keys marker_stage)
 				(list (scan_callback_symbol_for_alias
 					(source_alias driver) previous_source_col))
-				direct_previous_stages '() direct_previous_stages
+				previous_closure '() previous_closure
 				(stage_partition_limit marker_stage) true)))
 		(define source_key_fn (if (nil? bounded_previous_value) nil
 			(list (quote lambda) source_params
@@ -4589,7 +4560,7 @@ stage requested-column. The recursive result is ordered driver -> final. */
 			(map (filter candidates (lambda (candidate)
 				(not (equal? candidate window_candidate))))
 				(lambda (candidate) (relational_recmap_binding candidate domain_var
-					1))))))))
+					nil))))))))
 
 (define scalar_probe_entries_without_lookup_cache (lambda (entries candidate)
 	(if (nil? candidate)
