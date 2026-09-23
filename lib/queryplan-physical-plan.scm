@@ -3125,10 +3125,19 @@ ordinary costed probe path. */
 		((quote get_column) tblvar tbl_ignorecase col col_ignorecase)
 		(scalar_order_relational_cache_marker stages sources
 			(list (symbol "get_column") tblvar tbl_ignorecase col col_ignorecase))
-		(cons _head tail) (reduce tail (lambda (found item)
-			(if (not (nil? found)) found
-				(scalar_order_relational_cache_marker stages sources item))) nil)
 		_ nil)))
+
+/* ORDER expressions may wrap a relational value in direction/null handling or
+scalar functions. Keep recursive discovery local to ORDER planning: recursively
+searching general value expressions can cross CASE/EXISTS stage boundaries. */
+(define scalar_order_relational_cache_marker_nested (lambda (stages sources expr)
+	(if (not (list? expr)) nil
+		(begin
+			(define direct (scalar_order_relational_cache_marker stages sources expr))
+			(if (not (nil? direct)) direct
+				(reduce expr (lambda (found item)
+					(if (not (nil? found)) found
+						(scalar_order_relational_cache_marker_nested stages sources item))) nil))))))
 
 (define scalar_order_lookup_cache_target (lambda (block stage)
 	(begin
@@ -3145,22 +3154,24 @@ ordinary costed probe path. */
 remaining predicates consume the ordered carrier, but it cannot make a
 callback-sorted lookup capable of braking before all outer rows were visited.
 The canonical temp column memoizes exactly those same row-local lookups and is
-shared by every equivalent query until the cache manager evicts it. An
-unordered scalar LIMIT 1 does not require a unique source key: both the direct
-probe and the carrier select the first visible equality match. */
-(define scalar_order_lookup_cache_first_input? (lambda (stage)
+shared by every equivalent query until the cache manager evicts it. A complete
+unique source key is part of the proof: without it, the scalar LIMIT may inspect
+or order several source rows and the ordinary late-projection path can be
+strictly cheaper. */
+(define scalar_order_lookup_cache_unique_input? (lambda (stage)
 	(begin
 		(define input (gs_input stage))
 		(define key_cols (map (gs_keys stage) (lambda (key)
 			(direct_column_name_for_alias input key))))
 		(and (not (empty_list? key_cols))
-			(not (reduce key_cols (lambda (missing col)
-				(or missing (nil? col))) false))))))
+			(and (not (reduce key_cols (lambda (missing col)
+				(or missing (nil? col))) false))
+				(contains? (source_unique_key_sets input) key_cols))))))
 
 (define scalar_order_lookup_cache_eligible? (lambda (stage target input_cols parts)
 	(and (scalar_value_stage? stage)
 		(and (source_is_base_table? (gs_input stage))
-			(and (scalar_order_lookup_cache_first_input? stage)
+			(and (scalar_order_lookup_cache_unique_input? stage)
 				(and (not (nil? target))
 					(and (source_is_base_table? target)
 						(and (not (empty_list? input_cols))
@@ -3252,7 +3263,7 @@ cached plan is recompiled when data growth crosses the carrier boundary. */
 			(begin
 				(define sources (qb_sources block))
 				(define relational (if (empty_list? (qb_order block)) nil
-					(scalar_order_relational_cache_marker
+					(scalar_order_relational_cache_marker_nested
 						stages sources (car (order_exprs (qb_order block))))))
 				(define marker (if (not (nil? relational))
 					relational
@@ -3849,6 +3860,10 @@ stage requested-column. The recursive result is ordered driver -> final. */
 		(define driver (if (empty_list? sources) nil (car sources)))
 		(define outputs (filter sources (lambda (src)
 			(stage_output_relation? (source_relation src)))))
+		(define order_marker (if (empty_list? (qb_order block)) nil
+			(scalar_order_relational_cache_marker_nested stages sources
+				(car (order_exprs (qb_order block))))))
+		(define order_source (if (nil? order_marker) nil (nth order_marker 2)))
 		(if (or (nil? driver)
 			(or (not (source_is_base_table? driver))
 				(or (not (equal? (qb_where block) true))
@@ -3870,20 +3885,28 @@ stage requested-column. The recursive result is ordered driver -> final. */
 						(define first_edge (if (nil? edges) nil (car edges)))
 						(define output_join (relational_recmap_join_columns driver output
 							(source_join_expr output)))
-						/* Sibling scalar outputs (for example an independent ORDER BY
-						carrier) do not change this projection chain. Reject only a source
-						whose join actually consumes the output that RecMap removes. */
+						/* A single independent scalar ORDER BY carrier does not change this
+						projection chain. Keep the exception exact: other short chains with
+						additional stage outputs may carry value-producing dependencies. */
+						(define independent_order_carrier (and (equal? (count sources) 3)
+							(and (not (nil? order_source))
+								(and (not (equal? (source_alias order_source) (source_alias driver)))
+									(not (equal? (source_alias order_source) (source_alias output)))))))
+						(define ambiguous_short_chain (and (not (nil? edges))
+							(and (> (count sources) 2)
+								(and (< (count edges) 3) (not independent_order_carrier)))))
 						(define dependent_sibling (reduce sources (lambda (dependent src)
 							(or dependent (and (not (equal? (source_alias src) (source_alias output)))
 								(not (empty_list? (extract_columns_for_alias output
 									(source_join_expr src))))))) false))
 						(if (or (nil? first_edge)
 							(or (nil? output_join)
-								(or dependent_sibling
-									(or (not (empty_list? other_uses))
-										(or (not (equal? (nth output_join 1) "k0"))
-											(or (not (contains? (nth first_edge 1) (car output_join)))
-												(not (equal? (count (nth first_edge 1)) 1))))))))
+								(or ambiguous_short_chain
+									(or dependent_sibling
+										(or (not (empty_list? other_uses))
+											(or (not (equal? (nth output_join 1) "k0"))
+												(or (not (contains? (nth first_edge 1) (car output_join)))
+													(not (equal? (count (nth first_edge 1)) 1)))))))))
 							nil
 							(list driver output requested edges))))) nil)))))
 
