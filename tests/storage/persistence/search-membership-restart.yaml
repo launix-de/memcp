@@ -1,0 +1,243 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: '1.0'
+  description: EXISTS and UNION LIKE membership with scalar ordering across DML and restart
+  isolated: true
+setup:
+  - sql: DROP TABLE IF EXISTS sm_item
+  - sql: DROP TABLE IF EXISTS sm_member
+  - sql: DROP TABLE IF EXISTS sm_ref
+  - sql: CREATE TABLE sm_ref (id INT PRIMARY KEY, stamp INT, body TEXT, label TEXT) ENGINE=safe
+  - sql: CREATE TABLE sm_item (id INT PRIMARY KEY, ref_id INT, scope_key INT) ENGINE=safe
+  - sql: CREATE TABLE sm_member (actor INT, scope_key INT) ENGINE=safe
+  - sql: INSERT INTO sm_ref VALUES (1,10,'needle','plain'),(2,40,'plain','needle'),(3,30,'needle','needle'),(4,40,'needle','plain'),(5,50,'needle','plain'),(6,60,NULL,NULL)
+  - sql: INSERT INTO sm_item VALUES (101,1,1),(102,2,1),(103,3,1),(104,4,2),(105,5,2),(106,6,1),(107,3,1)
+  - sql: INSERT INTO sm_member VALUES (7,1),(9,2)
+  - scm: (begin (rebuild (table "memcp-tests" "sm_ref") true false) (rebuild (table "memcp-tests" "sm_item")
+      true false))
+test_cases:
+  - name: Initial exact ordered window
+    sql: &ordered_window |-
+      SELECT i.id FROM sm_item i WHERE EXISTS
+      (SELECT 1 FROM sm_member m WHERE m.actor=7 AND m.scope_key=i.scope_key)
+      AND i.ref_id IN (SELECT id FROM sm_ref WHERE body LIKE '%needle%'
+      UNION SELECT id FROM sm_ref WHERE label LIKE '%needle%') ORDER BY (SELECT r.stamp FROM sm_ref r WHERE r.id=i.ref_id LIMIT 1) DESC, i.id DESC LIMIT 3
+    expect:
+      rows: 3
+      data:
+        - id: 102
+        - id: 107
+        - id: 103
+  - name: Initial exact membership count
+    sql: &membership_count |-
+      SELECT COUNT(*) AS n FROM sm_item i WHERE EXISTS
+      (SELECT 1 FROM sm_member m WHERE m.actor=7 AND m.scope_key=i.scope_key)
+      AND i.ref_id IN (SELECT id FROM sm_ref WHERE body LIKE '%needle%'
+      UNION SELECT id FROM sm_ref WHERE label LIKE '%needle%')
+    expect:
+      rows: 1
+      data:
+        - n: 4
+  - name: Repeated exact ordered window
+    sql: *ordered_window
+    expect:
+      rows: 3
+      data:
+        - id: 102
+        - id: 107
+        - id: 103
+  - name: Repeated exact membership count
+    sql: *membership_count
+    expect:
+      rows: 1
+      data:
+        - n: 4
+  - name: Add matching membership
+    sql: INSERT INTO sm_member VALUES (7,2)
+  - name: Added membership exact ordered window
+    sql: *ordered_window
+    expect:
+      rows: 3
+      data:
+        - id: 105
+        - id: 104
+        - id: 102
+  - name: Added membership exact membership count
+    sql: *membership_count
+    expect:
+      rows: 1
+      data:
+        - n: 6
+  - name: Delete original membership
+    sql: DELETE FROM sm_member WHERE actor=7 AND scope_key=1
+  - name: Removed membership exact ordered window
+    sql: *ordered_window
+    expect:
+      rows: 2
+      data:
+        - id: 105
+        - id: 104
+  - name: Removed membership exact membership count
+    sql: *membership_count
+    expect:
+      rows: 1
+      data:
+        - n: 2
+  - name: Retarget remaining membership
+    sql: UPDATE sm_member SET scope_key=1 WHERE actor=7 AND scope_key=2
+  - name: Retargeted membership exact ordered window
+    sql: *ordered_window
+    expect:
+      rows: 3
+      data:
+        - id: 102
+        - id: 107
+        - id: 103
+  - name: Retargeted membership exact membership count
+    sql: *membership_count
+    expect:
+      rows: 1
+      data:
+        - n: 4
+  - name: Remove hit from one UNION branch
+    sql: UPDATE sm_ref SET label='plain' WHERE id=2
+  - name: Removed label hit exact ordered window
+    sql: *ordered_window
+    expect:
+      rows: 3
+      data:
+        - id: 107
+        - id: 103
+        - id: 101
+  - name: Removed label hit exact membership count
+    sql: *membership_count
+    expect:
+      rows: 1
+      data:
+        - n: 3
+  - name: NULL one of two matching branches
+    sql: UPDATE sm_ref SET body=NULL WHERE id=3
+  - name: Other branch retains both references exact ordered window
+    sql: *ordered_window
+    expect:
+      rows: 3
+      data:
+        - id: 107
+        - id: 103
+        - id: 101
+  - name: Other branch retains both references exact membership count
+    sql: *membership_count
+    expect:
+      rows: 1
+      data:
+        - n: 3
+  - name: NULL the remaining matching branch
+    sql: UPDATE sm_ref SET label=NULL WHERE id=3
+  - name: Both branches removed exact ordered window
+    sql: *ordered_window
+    expect:
+      rows: 1
+      data:
+        - id: 101
+  - name: Both branches removed exact membership count
+    sql: *membership_count
+    expect:
+      rows: 1
+      data:
+        - n: 1
+  - name: Insert matching delta reference
+    sql: INSERT INTO sm_ref VALUES (7,70,'needle','plain')
+  - name: Insert delta item
+    sql: INSERT INTO sm_item VALUES (108,7,1)
+  - name: Delta hit exact ordered window
+    sql: *ordered_window
+    expect:
+      rows: 2
+      data:
+        - id: 108
+        - id: 101
+  - name: Delta hit exact membership count
+    sql: *membership_count
+    expect:
+      rows: 1
+      data:
+        - n: 2
+  - name: Delete matching source row
+    sql: DELETE FROM sm_ref WHERE id=7
+  - name: Dangling reference excluded exact ordered window
+    sql: *ordered_window
+    expect:
+      rows: 1
+      data:
+        - id: 101
+  - name: Dangling reference excluded exact membership count
+    sql: *membership_count
+    expect:
+      rows: 1
+      data:
+        - n: 1
+  - name: Persist populated helper state
+    sql: SHUTDOWN
+  - name: Change membership before the first post-restart read
+    sql: UPDATE sm_member SET scope_key=2 WHERE actor=7
+  - name: Cold membership mutation exact ordered window
+    sql: *ordered_window
+    expect:
+      rows: 2
+      data:
+        - id: 105
+        - id: 104
+  - name: Cold membership mutation exact membership count
+    sql: *membership_count
+    expect:
+      rows: 1
+      data:
+        - n: 2
+  - name: Change sort value after reload
+    sql: UPDATE sm_ref SET stamp=80 WHERE id=4
+  - name: Changed sort key exact ordered window
+    sql: *ordered_window
+    expect:
+      rows: 2
+      data:
+        - id: 104
+        - id: 105
+  - name: Changed sort key exact membership count
+    sql: *membership_count
+    expect:
+      rows: 1
+      data:
+        - n: 2
+  - name: Change indexed text after reload
+    sql: UPDATE sm_ref SET body='plain' WHERE id=4
+  - name: Changed text after reload exact ordered window
+    sql: *ordered_window
+    expect:
+      rows: 1
+      data:
+        - id: 105
+  - name: Changed text after reload exact membership count
+    sql: *membership_count
+    expect:
+      rows: 1
+      data:
+        - n: 1
+  - name: Persist changed search sources
+    sql: SHUTDOWN
+  - name: Second restart exact ordered window
+    sql: *ordered_window
+    expect:
+      rows: 1
+      data:
+        - id: 105
+  - name: Second restart exact membership count
+    sql: *membership_count
+    expect:
+      rows: 1
+      data:
+        - n: 1
+cleanup:
+  - sql: DROP TABLE IF EXISTS sm_item
+  - sql: DROP TABLE IF EXISTS sm_member
+  - sql: DROP TABLE IF EXISTS sm_ref

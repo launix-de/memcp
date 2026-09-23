@@ -1,0 +1,144 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: '1.0'
+  description: Binary payloads and FK-trigger DML across persisted trigger and constraint replacement
+  isolated: true
+setup:
+  - sql: DROP TABLE IF EXISTS bt_child
+  - sql: DROP TABLE IF EXISTS bt_audit
+  - sql: DROP TABLE IF EXISTS bt_parent
+  - sql: CREATE TABLE bt_parent (id INT PRIMARY KEY) ENGINE=safe
+  - sql: CREATE TABLE bt_child (id INT PRIMARY KEY, parent_id INT, payload LONGBLOB, marker INT, CONSTRAINT
+      bt_fk FOREIGN KEY (parent_id) REFERENCES bt_parent(id) ON DELETE RESTRICT ON UPDATE CASCADE) ENGINE=safe
+  - sql: CREATE TABLE bt_audit (id INT, marker INT) ENGINE=safe
+  - sql: INSERT INTO bt_parent VALUES (1)
+  - sql: CREATE TRIGGER bt_bi BEFORE INSERT ON bt_child FOR EACH ROW SET NEW.marker=10
+  - sql: CREATE TRIGGER bt_ai AFTER INSERT ON bt_child FOR EACH ROW INSERT INTO bt_audit (id,marker) VALUES
+      (NEW.id,NEW.marker)
+test_cases:
+  - name: Create initial binary row
+    sql: INSERT INTO bt_child (id,parent_id,payload) VALUES (1,1,0x00FF410042)
+  - name: Initial bytes and trigger result
+    sql: SELECT id,TO_BASE64(payload) AS bytes,marker FROM bt_child ORDER BY id
+    expect:
+      rows: 1
+      data:
+        - id: 1
+          bytes: AP9BAEI=
+          marker: 10
+  - name: Persist FK and trigger definitions
+    sql: SHUTDOWN
+  - name: Cold insert executes restored FK and triggers
+    sql: INSERT INTO bt_child (id,parent_id,payload) VALUES (2,1,0xFE0043)
+  - name: Restored binary rows exact
+    sql: SELECT id,TO_BASE64(payload) AS bytes,marker FROM bt_child ORDER BY id
+    expect:
+      rows: 2
+      data:
+        - id: 1
+          bytes: AP9BAEI=
+          marker: 10
+        - id: 2
+          bytes: /gBD
+          marker: 10
+  - name: Remove old trigger 1
+    sql: DROP TRIGGER IF EXISTS bt_bi
+  - name: Install replacement trigger 1
+    sql: CREATE TRIGGER bt_bi BEFORE INSERT ON bt_child FOR EACH ROW SET NEW.marker=20
+  - name: Remove old trigger 2
+    sql: DROP TRIGGER IF EXISTS bt_bi
+  - name: Install replacement trigger 2
+    sql: CREATE TRIGGER bt_bi BEFORE INSERT ON bt_child FOR EACH ROW SET NEW.marker=20
+  - name: Replace restrictive FK
+    sql: ALTER TABLE bt_child DROP FOREIGN KEY bt_fk
+  - name: Install cascading FK
+    sql: ALTER TABLE bt_child ADD CONSTRAINT bt_fk FOREIGN KEY (parent_id) REFERENCES bt_parent(id) ON
+      UPDATE CASCADE ON DELETE CASCADE
+  - name: Persist replaced definitions
+    sql: SHUTDOWN
+  - name: Replaced FK rejects missing parent
+    sql: INSERT INTO bt_child (id,parent_id,payload) VALUES (3,99,0x0001)
+    expect:
+      error: true
+      contains: foreign key constraint
+  - name: Rejected insert has no trigger side effect
+    sql: SELECT id,marker FROM bt_audit ORDER BY id
+    expect:
+      rows: 2
+      data:
+        - id: 1
+          marker: 10
+        - id: 2
+          marker: 10
+  - name: Valid insert reuses rejected key and executes replacement
+    sql: INSERT INTO bt_child (id,parent_id,payload) VALUES (3,1,0x0001)
+  - name: Replacement changes new rows only
+    sql: SELECT id,TO_BASE64(payload) AS bytes,marker FROM bt_child ORDER BY id
+    expect:
+      rows: 3
+      data:
+        - id: 1
+          bytes: AP9BAEI=
+          marker: 10
+        - id: 2
+          bytes: /gBD
+          marker: 10
+        - id: 3
+          bytes: AAE=
+          marker: 20
+  - name: Exactly one audit per accepted insert
+    sql: SELECT id,marker FROM bt_audit ORDER BY id
+    expect:
+      rows: 3
+      data:
+        - id: 1
+          marker: 10
+        - id: 2
+          marker: 10
+        - id: 3
+          marker: 20
+  - name: Restored replacement cascades parent key
+    sql: UPDATE bt_parent SET id=2 WHERE id=1
+  - name: Every child follows the key update
+    sql: SELECT id,parent_id FROM bt_child ORDER BY id
+    expect:
+      rows: 3
+      data:
+        - id: 1
+          parent_id: 2
+        - id: 2
+          parent_id: 2
+        - id: 3
+          parent_id: 2
+  - name: Restored replacement cascades deletion
+    sql: DELETE FROM bt_parent WHERE id=2
+  - name: All dependent rows deleted
+    sql: SELECT COUNT(*) AS n FROM bt_child
+    expect:
+      rows: 1
+      data:
+        - n: 0
+  - name: Persist cascade result
+    sql: SHUTDOWN
+  - name: Deleted blobs do not resurrect rows
+    sql: SELECT COUNT(*) AS n FROM bt_child
+    expect:
+      rows: 1
+      data:
+        - n: 0
+  - name: Audit rows survive independently
+    sql: SELECT id,marker FROM bt_audit ORDER BY id
+    expect:
+      rows: 3
+      data:
+        - id: 1
+          marker: 10
+        - id: 2
+          marker: 10
+        - id: 3
+          marker: 20
+cleanup:
+  - sql: DROP TABLE IF EXISTS bt_child
+  - sql: DROP TABLE IF EXISTS bt_audit
+  - sql: DROP TABLE IF EXISTS bt_parent
