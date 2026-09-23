@@ -2329,7 +2329,10 @@ generated recipes remain ordinary Scheme. */
 	(merge (map (produceN (count domains)) range_cache_axis_boundary_names))))
 
 (define range_group_cache_name (lambda (stage)
-	(group_stage_cache_relation stage)))
+	/* A range partition has boundary columns and different row semantics from
+	the stage's ordinary group keytable. Never let the two physical operators
+	reuse one relation merely because they originate from the same logical stage. */
+	(concat (group_stage_cache_relation stage) ":range-v1")))
 
 (define range_group_state_col_name (lambda (stage ag)
 	(concat "agg_range_state_" (stable_structural_hash (list
