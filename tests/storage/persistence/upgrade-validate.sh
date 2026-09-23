@@ -95,9 +95,9 @@ def capture():
             schema = dict(zip(header, fields))
             column = schema["Field"].decode("ascii")
             # Planner-owned temporary projections are cache artifacts attached
-            # to durable tables. They are validated by group-checks and the
+            # to durable tables. They are validated by group-checks, upgrade-helpers.py and the
             # cache ABI, not part of the old-writer application-data oracle.
-            if column.startswith("."):
+            if column.startswith((".", "__orc_")):
                 continue
             sql_type = schema["Type"].decode("ascii")
             codec = encoding(sql_type)
@@ -299,7 +299,7 @@ PYTHON
   exit "$?"
 fi
 
-MYSQL_BASE=(mysql -h 127.0.0.1 -P "$PORT" -u root -padmin -N -B memcp-tests)
+MYSQL_BASE=(timeout --foreground --kill-after=5s 30 mysql -h 127.0.0.1 -P "$PORT" -u root -padmin -N -B memcp-tests)
 
 CHECKS=0
 FAILURES=0
