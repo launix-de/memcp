@@ -2011,7 +2011,14 @@ func (t *table) registerComputeTriggersWithRefs(name string, computor scm.Scmer,
 			ref.inputCols = inputCols
 		}
 		// Determine trigger bodies: selective if join pairs are available
-		selective := validInputCols && len(ref.srcCols) > 0 && len(ref.srcCols) == len(ref.inputCols)
+		// Computed-index boundaries may name expressions absent from OLD/NEW.
+		// Such keys cannot drive selective invalidation; invalidate the entire
+		// target column while retaining the physical source readset.
+		sourceCols, validSourceCols := srcTable.resolveComputeInputCols(ref.srcCols)
+		if validSourceCols {
+			ref.srcCols = sourceCols
+		}
+		selective := validInputCols && validSourceCols && len(ref.srcCols) > 0 && len(ref.srcCols) == len(ref.inputCols)
 		relevantCols := scanRelevantSourceCols(ref, srcTable)
 
 		// Check if this scan is an additive aggregate eligible for incremental update.
@@ -2166,7 +2173,14 @@ func (t *table) registerORCDependencyTriggers(name string, col *column, refs []s
 		if validInputCols {
 			ref.inputCols = inputCols
 		}
-		selective := validInputCols && len(ref.srcCols) > 0 && len(ref.srcCols) == len(ref.inputCols)
+		// Computed-index boundaries may name expressions absent from OLD/NEW.
+		// Such keys cannot drive selective invalidation; invalidate the entire
+		// target column while retaining the physical source readset.
+		sourceCols, validSourceCols := srcTable.resolveComputeInputCols(ref.srcCols)
+		if validSourceCols {
+			ref.srcCols = sourceCols
+		}
+		selective := validInputCols && validSourceCols && len(ref.srcCols) > 0 && len(ref.srcCols) == len(ref.inputCols)
 		relevantCols := scanRelevantSourceCols(ref, srcTable)
 		for _, timing := range []TriggerTiming{AfterInsert, AfterUpdate, AfterDelete} {
 			triggerName := ".orcdep:" + t.Name + ":" + name + "|scan" + strconv.Itoa(refIdx) + "|" + srcTable.Name + "|" + timing.String()
