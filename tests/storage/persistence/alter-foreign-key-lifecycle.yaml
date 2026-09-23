@@ -1,0 +1,99 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: '1.0'
+  description: ALTER foreign-key enforcement and selective removal on both endpoints across restart
+  isolated: true
+setup:
+  - sql: CREATE TABLE af_parent (id INT PRIMARY KEY) ENGINE=safe
+  - sql: CREATE TABLE af_other (id INT PRIMARY KEY) ENGINE=safe
+  - sql: CREATE TABLE af_child (id INT PRIMARY KEY, p INT, q INT) ENGINE=safe
+  - sql: INSERT INTO af_parent VALUES (1)
+  - sql: INSERT INTO af_other VALUES (1)
+test_cases:
+  - name: Add named foreign key
+    sql: ALTER TABLE af_child ADD FOREIGN KEY af_first (p) REFERENCES af_parent(id) ON UPDATE CASCADE
+  - name: Add independent second foreign key
+    sql: ALTER TABLE af_child ADD CONSTRAINT af_second FOREIGN KEY (q) REFERENCES af_other(id)
+  - name: Added FK rejects orphan insert
+    sql: INSERT INTO af_child VALUES (1,99,1)
+    expect:
+      error: true
+      contains: foreign key constraint
+  - name: Insert valid reference
+    sql: INSERT INTO af_child VALUES (1,1,1)
+  - name: Added FK rejects orphan update
+    sql: UPDATE af_child SET p=99 WHERE id=1
+    expect:
+      error: true
+      contains: foreign key constraint
+  - name: Added FK restricts parent deletion
+    sql: DELETE FROM af_parent WHERE id=1
+    expect:
+      error: true
+      contains: foreign key constraint
+  - name: Drop first FK using case-insensitive identifier
+    sql: ALTER TABLE af_child DROP FOREIGN KEY AF_FIRST
+  - name: Drop removes child update check immediately
+    sql: UPDATE af_child SET p=99 WHERE id=1
+  - name: Restore reference for parent-side removal checks
+    sql: UPDATE af_child SET p=1 WHERE id=1
+  - name: Persist selective removal
+    sql: SHUTDOWN
+  - name: Dropped FK permits orphan insert after restart
+    sql: INSERT INTO af_child VALUES (2,99,1)
+  - name: Second FK still rejects orphan insert
+    sql: INSERT INTO af_child VALUES (3,99,99)
+    expect:
+      error: true
+      contains: foreign key constraint
+  - name: Second FK still restricts its parent
+    sql: DELETE FROM af_other WHERE id=1
+    expect:
+      error: true
+      contains: foreign key constraint
+  - name: Dropped cascade no longer changes child values
+    sql: UPDATE af_parent SET id=2 WHERE id=1
+  - name: Exact child values after dropped parent update
+    sql: SELECT id,p,q FROM af_child ORDER BY id
+    expect:
+      data:
+        - {id: 1, p: 1, q: 1}
+        - {id: 2, p: 99, q: 1}
+  - name: Restore parent key
+    sql: UPDATE af_parent SET id=1 WHERE id=2
+  - name: Dropped parent delete restriction stays removed
+    sql: DELETE FROM af_parent WHERE id=1
+  - name: Drop second FK through constraint syntax
+    sql: ALTER TABLE af_child DROP CONSTRAINT af_second
+  - name: Second parent is now deletable
+    sql: DELETE FROM af_other WHERE id=1
+  - name: Create self-reference table
+    sql: CREATE TABLE af_self (id INT PRIMARY KEY, p INT) ENGINE=safe
+  - name: Add unnamed self-reference
+    sql: ALTER TABLE af_self ADD FOREIGN KEY (p) REFERENCES af_self(id)
+  - name: Self-reference rejects missing target
+    sql: INSERT INTO af_self VALUES (1,99)
+    expect:
+      error: true
+      contains: foreign key constraint
+  - name: Drop self-reference using generated name
+    sql: ALTER TABLE af_self DROP FOREIGN KEY af_self_p_fk
+  - name: Persist all removals
+    sql: SHUTDOWN
+  - name: Self-reference does not resurrect from duplicated endpoint metadata
+    sql: INSERT INTO af_self VALUES (1,99)
+  - name: Both child checks remain removed
+    sql: INSERT INTO af_child VALUES (3,99,99)
+  - name: Remaining child data is unchanged by drops
+    sql: SELECT id,p,q FROM af_child ORDER BY id
+    expect:
+      data:
+        - {id: 1, p: 1, q: 1}
+        - {id: 2, p: 99, q: 1}
+        - {id: 3, p: 99, q: 99}
+cleanup:
+  - sql: DROP TABLE IF EXISTS af_child
+  - sql: DROP TABLE IF EXISTS af_parent
+  - sql: DROP TABLE IF EXISTS af_other
+  - sql: DROP TABLE IF EXISTS af_self
