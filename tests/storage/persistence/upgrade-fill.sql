@@ -24,6 +24,8 @@ DROP TABLE IF EXISTS up_enum;
 DROP TABLE IF EXISTS up_json;
 DROP TABLE IF EXISTS up_blob;
 DROP TABLE IF EXISTS up_compute;
+DROP TABLE IF EXISTS up_group_events;
+DROP TABLE IF EXISTS up_group_windows;
 
 -- 1. StorageFloat: non-aligned floating point values
 CREATE TABLE up_float (id INT, val DOUBLE);
@@ -996,3 +998,18 @@ INSERT INTO up_blob VALUES (5, 'short');
 CREATE TABLE up_compute (id INT, val INT);
 INSERT INTO up_compute (id, val) VALUES
   (1, 5), (2, 10), (3, -3), (4, 0), (5, 42);
+
+-- Planner-owned group caches are deliberately materialized by the workflow
+-- before the old binary shuts down. Their rows are reconstructible, but their
+-- physical schemas must never break queries after a binary upgrade.
+CREATE TABLE up_group_events (
+  id INT PRIMARY KEY,
+  tenant_id INT,
+  happened_at INT,
+  amount INT
+);
+CREATE TABLE up_group_windows (
+  id INT PRIMARY KEY,
+  tenant_id INT,
+  range_to INT
+);

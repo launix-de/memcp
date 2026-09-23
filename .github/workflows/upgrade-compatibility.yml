@@ -146,19 +146,32 @@ jobs:
           "${mysql_args[@]}" -e 'CREATE DATABASE IF NOT EXISTS `memcp-tests`'
           "${mysql_args[@]}" -D memcp-tests < candidate/tests/storage/persistence/upgrade-fill.sql
           curl -fsS "http://127.0.0.1:$API_PORT/scm" -u root:admin -d '
-            (createcolumn (table "memcp-tests" "up_compute") "doubled" "INT" (quote ()) (quote ())
-              (quote ("val")) (lambda (val) (* val 2)))
+            (begin
+              (createcolumn (table "memcp-tests" "up_compute") "doubled" "INT" (quote ()) (quote ())
+                (quote ("val")) (lambda (val) (* val 2)))
+              (insert (table "memcp-tests" "up_group_events")
+                (quote ("id" "tenant_id" "happened_at" "amount"))
+                (map (produceN 6000) (lambda (i)
+                  (list (+ i 1) (+ 1 (mod i 2)) i (+ 1 (mod i 17))))))
+              (insert (table "memcp-tests" "up_group_windows")
+                (quote ("id" "tenant_id" "range_to"))
+                (list (list 1 2 1000) (list 2 2 1500)
+                  (list 3 1 3000) (list 4 1 3000)))
+              true)
           '
+          bash "$VALIDATOR" "$MYSQL_PORT" group-checks
           bash "$VALIDATOR" "$MYSQL_PORT" snapshot "$ORACLES/before.json"
           stop_server
 
           # Distinguish old-writer/restart defects from candidate reader defects.
           start_server base base-restart
+          bash "$VALIDATOR" "$MYSQL_PORT" group-checks
           bash "$VALIDATOR" "$MYSQL_PORT" compare "$ORACLES/before.json"
           stop_server
 
           start_server candidate candidate-upgrade
           bash "$VALIDATOR" "$MYSQL_PORT" zero-policy-checks
+          bash "$VALIDATOR" "$MYSQL_PORT" group-checks
           bash "$VALIDATOR" "$MYSQL_PORT" compare "$ORACLES/before.json"
           bash "$VALIDATOR" "$MYSQL_PORT" mutate "$ORACLES/before.json" "$ORACLES/after-dml.json"
           stop_server
@@ -166,6 +179,7 @@ jobs:
           # The post-DML oracle is derived from the old reference plus specified
           # mutations. Reopening must preserve that entire expected state.
           start_server candidate candidate-restart
+          bash "$VALIDATOR" "$MYSQL_PORT" group-checks
           bash "$VALIDATOR" "$MYSQL_PORT" compare "$ORACLES/after-dml.json"
           stop_server
 
