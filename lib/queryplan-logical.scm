@@ -478,6 +478,14 @@ domains (for example dashboard time windows). */
 			(or (equal? (car expr) (sql_builtins "SQL_NULL"))
 				(equal? (serialize (car expr)) "(lambda () nil)"))))))
 
+(define logical_expr_contains_null_literal? (lambda (expr)
+	(or (logical_sql_null_literal? expr)
+		(match expr
+			(cons head tail) (or (logical_expr_contains_null_literal? head)
+				(reduce tail (lambda (found item)
+					(or found (logical_expr_contains_null_literal? item))) false))
+			_ false))))
+
 (define fold_literal_and (lambda (items)
 	(match items
 		(cons item rest) (begin
