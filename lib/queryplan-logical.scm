@@ -475,7 +475,8 @@ domains (for example dashboard time windows). */
 (define logical_sql_null_literal? (lambda (expr)
 	(and (list? expr)
 		(and (equal? (count expr) 1)
-			(equal? (car expr) (sql_builtins "SQL_NULL"))))))
+			(or (equal? (car expr) (sql_builtins "SQL_NULL"))
+				(equal? (serialize (car expr)) "(lambda () nil)"))))))
 
 (define fold_literal_and (lambda (items)
 	(match items
@@ -506,47 +507,47 @@ domains (for example dashboard time windows). */
 	the literal before simplifying its consumers. */
 	(if (logical_sql_null_literal? expr)
 		nil
-	(match expr
-		((symbol get_column) alias _alias_ic column _column_ic)
-		(literal_binding_value bindings alias column expr)
-		((quote get_column) alias alias_ic column column_ic)
-		(fold_single_literal_expr bindings
-			(list (symbol "get_column") alias alias_ic column column_ic))
-		((symbol if) condition then_expr else_expr) (begin
-			(define folded_condition (fold_single_literal_expr bindings condition))
-			(if (logical_literal_value? folded_condition)
-				(fold_single_literal_expr bindings
-					(if folded_condition then_expr else_expr))
-				(list (quote if) folded_condition
-					(fold_single_literal_expr bindings then_expr)
-					(fold_single_literal_expr bindings else_expr))))
-		((quote if) condition then_expr else_expr)
-		(fold_single_literal_expr bindings (list (symbol "if") condition then_expr else_expr))
-		((symbol nil?) value) (begin
-			(define folded (fold_single_literal_expr bindings value))
-			(if (logical_literal_value? folded) (nil? folded)
-				(list (quote nil?) folded)))
-		((quote nil?) value)
-		(fold_single_literal_expr bindings (list (symbol "nil?") value))
-		((symbol equal??) left right) (begin
-			(define folded_left (fold_single_literal_expr bindings left))
-			(define folded_right (fold_single_literal_expr bindings right))
-			(if (and (logical_literal_value? folded_left) (logical_literal_value? folded_right))
-				(equal?? folded_left folded_right)
-				(list (quote equal??) folded_left folded_right)))
-		((quote equal??) left right)
-		(fold_single_literal_expr bindings (list (symbol "equal??") left right))
-		((symbol hex2bin) value) (if (string? value) (hex2bin value) expr)
-		((quote hex2bin) value) (if (string? value) (hex2bin value) expr)
-		(cons head tail) (begin
-			(define folded_tail (map tail (lambda (item)
-				(fold_single_literal_expr bindings item))))
-			(if (or (equal? head (quote and)) (equal? head (symbol "and")))
-				(fold_literal_and folded_tail)
-				(if (or (equal? head (quote or)) (equal? head (symbol "or")))
-					(fold_literal_or folded_tail)
-					(cons head folded_tail))))
-		_ expr))))
+		(match expr
+			((symbol get_column) alias _alias_ic column _column_ic)
+			(literal_binding_value bindings alias column expr)
+			((quote get_column) alias alias_ic column column_ic)
+			(fold_single_literal_expr bindings
+				(list (symbol "get_column") alias alias_ic column column_ic))
+			((symbol if) condition then_expr else_expr) (begin
+				(define folded_condition (fold_single_literal_expr bindings condition))
+				(if (logical_literal_value? folded_condition)
+					(fold_single_literal_expr bindings
+						(if folded_condition then_expr else_expr))
+					(list (quote if) folded_condition
+						(fold_single_literal_expr bindings then_expr)
+						(fold_single_literal_expr bindings else_expr))))
+			((quote if) condition then_expr else_expr)
+			(fold_single_literal_expr bindings (list (symbol "if") condition then_expr else_expr))
+			((symbol nil?) value) (begin
+				(define folded (fold_single_literal_expr bindings value))
+				(if (logical_literal_value? folded) (nil? folded)
+					(list (quote nil?) folded)))
+			((quote nil?) value)
+			(fold_single_literal_expr bindings (list (symbol "nil?") value))
+			((symbol equal??) left right) (begin
+				(define folded_left (fold_single_literal_expr bindings left))
+				(define folded_right (fold_single_literal_expr bindings right))
+				(if (and (logical_literal_value? folded_left) (logical_literal_value? folded_right))
+					(equal?? folded_left folded_right)
+					(list (quote equal??) folded_left folded_right)))
+			((quote equal??) left right)
+			(fold_single_literal_expr bindings (list (symbol "equal??") left right))
+			((symbol hex2bin) value) (if (string? value) (hex2bin value) expr)
+			((quote hex2bin) value) (if (string? value) (hex2bin value) expr)
+			(cons head tail) (begin
+				(define folded_tail (map tail (lambda (item)
+					(fold_single_literal_expr bindings item))))
+				(if (or (equal? head (quote and)) (equal? head (symbol "and")))
+					(fold_literal_and folded_tail)
+					(if (or (equal? head (quote or)) (equal? head (symbol "or")))
+						(fold_literal_or folded_tail)
+						(cons head folded_tail))))
+			_ expr))))
 
 (define fold_single_literal_fields (lambda (bindings fields)
 	(map_assoc fields (lambda (_title expr)

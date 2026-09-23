@@ -2004,6 +2004,12 @@ func (t *storageShard) scanFirstRecord(access scanAccess, conditionCols []string
 		cNeedsCachedReader = make([]bool, len(conditionCols))
 		conditionGetters = make([]mapArgGetter, len(conditionCols))
 		for i, k := range conditionCols {
+			if k == "$record_ref" {
+				conditionGetters[i] = func(id uint32, _ uint32) scm.Scmer {
+					return newRecordRef(t, id)
+				}
+				continue
+			}
 			if k == "$recset_contains" {
 				fnptr := recSetContainsClosure(t)
 				if recsetBoundaryCoversCondition {
@@ -2266,6 +2272,12 @@ func (t *storageShard) scan(access scanAccess, conditionCols []string, condition
 		cReaders = make([]ColumnReader, len(conditionCols))
 		conditionGetters = make([]mapArgGetter, len(conditionCols))
 		for i, k := range conditionCols {
+			if k == "$record_ref" {
+				conditionGetters[i] = func(id uint32, _ uint32) scm.Scmer {
+					return newRecordRef(t, id)
+				}
+				continue
+			}
 			if k == "$recset_contains" {
 				fnptr := recSetContainsClosure(t)
 				if recsetBoundaryCoversCondition {
@@ -2561,6 +2573,12 @@ func (t *storageShard) scanBatch(access scanAccess, conditionCols []string, cond
 		conditionBatchSubidx = make([]int, len(conditionCols))
 		conditionGetters = make([]mapArgGetter, len(conditionCols))
 		for i, k := range conditionCols {
+			if k == "$record_ref" {
+				conditionGetters[i] = func(id uint32, _ uint32) scm.Scmer {
+					return newRecordRef(t, id)
+				}
+				continue
+			}
 			if k == "$recset_contains" {
 				fnptr := recSetContainsClosure(t)
 				if recsetBoundaryCoversCondition {
