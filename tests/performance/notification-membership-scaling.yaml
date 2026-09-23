@@ -75,9 +75,8 @@ test_cases:
       LIMIT 1
     expect:
       result_contains:
-        - "scalar_order_lookup_carrier"
-        - "canonical_computed_column"
-        - ".lookup:"
+        - "scan_recmap"
+        - "recmap_order_recset"
 
   - name: "Trivial scalar order stays on the direct lookup path"
     sql: |
@@ -93,8 +92,8 @@ test_cases:
       LIMIT 1
     expect:
       result_contains:
-        - "scalar_order_lookup_carrier"
-        - "direct_scalar_lookup"
+        - "scan_recmap"
+        - "recmap_order_recset"
       result_not_contains:
         - ".lookup:"
 

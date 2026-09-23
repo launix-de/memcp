@@ -1400,6 +1400,104 @@ func Init(en scm.Env) {
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
+		Name: "recmap_equi_first_of_mapper",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			rawAlternatives := mustScmerSlice(a[2], "recmap target key alternatives")
+			alternatives := make([][]string, len(rawAlternatives))
+			for i, raw := range rawAlternatives {
+				alternatives[i] = scmerSliceToStrings(mustScmerSlice(raw, "recmap target key alternative"))
+			}
+			return newRecMapEquiFirstOfMapper(scmerToTxContext(a[0]), TableFromScmer(a[1]), alternatives, a[3])
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "creates a query-local batch mapper for equality-correlated 0..1 lookups with alternative target key layouts",
+			HasSideEffects: true,
+			Params: []*scm.TypeDescriptor{
+				{Kind: "any", Label: "tx"},
+				{Kind: "table", Label: "targetTable"},
+				{Kind: "list", Label: "targetKeyAlternatives"},
+				{Kind: "func|nil", Label: "sourceKeyMapper"},
+			},
+			Return: &scm.TypeDescriptor{Kind: "func", Label: "mapFn"},
+		},
+	})
+	scm.Declare(&en, &scm.Declaration{
+		Name: "recmap_hash_first_of_mapper",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			return newRecMapHashFirstOfMapper(scmerToTxContext(a[0]), TableFromScmer(a[1]),
+				scmerSliceToStrings(mustScmerSlice(a[2], "recmap target callback columns")), a[3], a[4])
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "creates a query-local batch mapper by evaluating computed target-key alternatives once per target row",
+			HasSideEffects: true,
+			Params: []*scm.TypeDescriptor{
+				{Kind: "any", Label: "tx"},
+				{Kind: "table", Label: "targetTable"},
+				{Kind: "list", Label: "targetCallbackColumns"},
+				{Kind: "func", Label: "targetKeyMapper", NoEscape: true},
+				{Kind: "func|nil", Label: "sourceKeyMapper"},
+			},
+			Return: &scm.TypeDescriptor{Kind: "func", Label: "mapFn"},
+		},
+	})
+	scm.Declare(&en, &scm.Declaration{
+		Name: "recmap_range_first_mapper",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			return newRecMapRangeFirstMapper(scmerToTxContext(a[0]), TableFromScmer(a[1]),
+				scmerSliceToStrings(mustScmerSlice(a[2], "recmap target point columns")),
+				scm.String(a[3]), scm.String(a[4]), a[5])
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "creates a query-local batch mapper for an ordered range lookup within equality point-key partitions",
+			HasSideEffects: true,
+			Params: []*scm.TypeDescriptor{
+				{Kind: "any", Label: "tx"},
+				{Kind: "table", Label: "targetTable"},
+				{Kind: "list", Label: "targetPointColumns"},
+				{Kind: "string", Label: "targetRangeColumn"},
+				{Kind: "string", Label: "relation"},
+				{Kind: "func|nil", Label: "sourceKeyMapper"},
+			},
+			Return: &scm.TypeDescriptor{Kind: "func", Label: "mapFn"},
+		},
+	})
+	scm.Declare(&en, &scm.Declaration{
+		Name: "recmap_value_mapper",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			return newRecMapValueMapper(scmerToTxContext(a[0]), RecMapFromScmer(a[1]),
+				scmerSliceToStrings(mustScmerSlice(a[2], "recmap value columns")), a[3], a[4])
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "materializes values reached through an immutable query-local RecMap in shard batches and returns a lock-free source-record lookup",
+			HasSideEffects: true,
+			Params: []*scm.TypeDescriptor{
+				{Kind: "any", Label: "tx"},
+				{Kind: "recmap", Label: "mapping"},
+				{Kind: "list", Label: "targetColumns"},
+				{Kind: "func", Label: "mapper", NoEscape: true},
+				{Kind: "func", Label: "ifNull", NoEscape: true},
+			},
+			Return: &scm.TypeDescriptor{Kind: "func", Label: "lookup"},
+		},
+	})
+	scm.Declare(&en, &scm.Declaration{
+		Name: "recmap_extend",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			return NewRecMapScmer(extendRecMap(scmerToTxContext(a[0]), RecMapFromScmer(a[1]),
+				scmerSliceToStrings(mustScmerSlice(a[2], "recmap source columns")),
+				scmerSliceToStrings(mustScmerSlice(a[3], "recmap previous target columns")),
+				a[4], TableFromScmer(a[5])))
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "immutably extends a query-local mapping using original-source and previously reached target columns",
+			HasSideEffects: true,
+			Params: []*scm.TypeDescriptor{
+				{Kind: "any", Label: "tx"},
+				{Kind: "recmap", Label: "previousMapping"},
+				{Kind: "list", Label: "sourceColumns"},
+				{Kind: "list", Label: "previousTargetColumns"},
+				{Kind: "func", Label: "mapFn", NoEscape: true},
+				{Kind: "table", Label: "targetTable"},
+			},
+			Return: &scm.TypeDescriptor{Kind: "recmap"},
+		},
+	})
+	scm.Declare(&en, &scm.Declaration{
 		Name: "recmap_image",
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
@@ -1821,6 +1919,30 @@ func Init(en scm.Env) {
 				sortDirectionList("sortdirs", "one direction per sort column"),
 				{Kind: "number", Label: "offset", Description: "first selected row"},
 				{Kind: "number", Label: "limit", Description: "finite maximum number of selected rows"},
+			},
+			Return: &scm.TypeDescriptor{Kind: "recset"},
+		},
+	})
+	scm.Declare(&en, &scm.Declaration{
+		Name: "recmap_order_recset",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			mapping := RecMapFromScmer(a[1])
+			sides := scmerSliceToStrings(mustScmerSlice(a[2], "recmap_order_recset sort sides"))
+			columns := scmerSliceToStrings(mustScmerSlice(a[3], "recmap_order_recset sort columns"))
+			directions := scanSortDirections(mustScmerSlice(a[4], "recmap_order_recset sort directions"))
+			return NewRecSetScmer(mapping.orderRecSet(scmerToTxContext(a[0]), sides, columns,
+				directions, scm.ToInt(a[5]), scm.ToInt(a[6])))
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "selects an exact query-local source window ordered by source or RecMap-target columns",
+			HasSideEffects: true,
+			Params: []*scm.TypeDescriptor{
+				{Kind: "any", Label: "tx", Description: "query transaction"},
+				{Kind: "recmap", Label: "mapping", Description: "query-local source-to-target mapping"},
+				{Kind: "list", Label: "sortSides", Description: "source or target for every ORDER term"},
+				columnList("sortColumns", "physical source or target columns defining the window"),
+				sortDirectionList("sortdirs", "one direction per sort column"),
+				{Kind: "number", Label: "offset", Description: "first selected source row"},
+				{Kind: "number", Label: "limit", Description: "finite maximum number of selected source rows"},
 			},
 			Return: &scm.TypeDescriptor{Kind: "recset"},
 		},

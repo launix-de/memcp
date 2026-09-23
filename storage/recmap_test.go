@@ -122,6 +122,37 @@ func TestRecMapPrunedDomainImageAndComposition(t *testing.T) {
 	if len(activeSourceShards) != 1 || activeSourceShards[0] != composed.shards[0].sourceShard {
 		t.Fatal("composed RecMap does not reference the active source shard")
 	}
+	descending := scm.Apply(scm.Globalenv.Vars[scm.Symbol("collate")],
+		scm.NewString("bin"), scm.NewBool(true)).Func()
+	window := composed.orderRecSet(nil, []string{"target"}, []string{"value"},
+		[]func(...scm.Scmer) scm.Scmer{descending}, 0, 2)
+	if window.count != 2 || !window.contains(composed.shards[0].sourceShard, 0) ||
+		!window.contains(composed.shards[0].sourceShard, 1) {
+		t.Fatalf("target-ordered RecMap window did not retain the expected first two source rows")
+	}
+	orderedIDs := make([]int64, 0, 2)
+	window.scan_order(nil, allRows, nil, nil, trueFilter,
+		[]scm.Scmer{scm.NewString("id")}, []func(...scm.Scmer) scm.Scmer{descending},
+		0, 0, -1, []string{"id"}, scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
+			orderedIDs = append(orderedIDs, values[1].Int())
+			return values[0]
+		}), scm.NewNil(), false, scm.NewNil(), nil, scm.NewNil())
+	if len(orderedIDs) != 2 || orderedIDs[0] != 2 || orderedIDs[1] != 1 {
+		t.Fatalf("ordered RecMap window scan = %v, want [2 1]", orderedIDs)
+	}
+	mixedWindow := composed.orderRecSet(nil,
+		[]string{"target", "source"}, []string{"value", "id"},
+		[]func(...scm.Scmer) scm.Scmer{descending, descending}, 1, 2)
+	mixedIDs := make([]int64, 0, 2)
+	mixedWindow.scan_order(nil, allRows, nil, nil, trueFilter,
+		[]scm.Scmer{scm.NewString("id")}, []func(...scm.Scmer) scm.Scmer{descending},
+		0, 0, -1, []string{"id"}, scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
+			mixedIDs = append(mixedIDs, values[1].Int())
+			return values[0]
+		}), scm.NewNil(), false, scm.NewNil(), nil, scm.NewNil())
+	if len(mixedIDs) != 2 || mixedIDs[0] != 3 || mixedIDs[1] != 1 {
+		t.Fatalf("mixed target/source RecMap window scan = %v, want [3 1]", mixedIDs)
+	}
 	mappedValue := NewRecMapScmer(composed)
 	directCall := recMapCallClosure(composed.shards[0].sourceShard, nil)
 	columns := scm.NewSlice([]scm.Scmer{scm.NewString("value")})
@@ -279,6 +310,159 @@ func TestScanRecMapFiltersBatchMappingAndMissingTarget(t *testing.T) {
 	if all.count != int64(4+len(moreRows)) || boundedCalls != 2 {
 		t.Fatalf("bounded mapper: %d rows in %d calls, want %d rows in 2 calls",
 			all.count, boundedCalls, 4+len(moreRows))
+	}
+}
+
+func TestRecMapExtendCombinesSourceAndMappedTargetColumns(t *testing.T) {
+	database := "trecmap_extend"
+	databases.Remove(database)
+	t.Cleanup(func() { databases.Remove(database) })
+	CreateDatabase(database, true)
+	source := recMapTestTable(t, database, "source", []string{"id", "kind", "middle_id"}, [][]scm.Scmer{
+		{scm.NewInt(1), scm.NewInt(1), scm.NewInt(10)},
+		{scm.NewInt(2), scm.NewInt(2), scm.NewInt(20)},
+		{scm.NewInt(3), scm.NewInt(1), scm.NewInt(20)},
+		{scm.NewInt(4), scm.NewInt(1), scm.NewInt(99)},
+	})
+	middle := recMapTestTable(t, database, "middle", []string{"id", "customer"}, [][]scm.Scmer{
+		{scm.NewInt(10), scm.NewInt(7)},
+		{scm.NewInt(20), scm.NewInt(8)},
+	})
+	target := recMapTestTable(t, database, "target", []string{"id", "kind", "owner", "beneficiary"}, [][]scm.Scmer{
+		{scm.NewInt(100), scm.NewInt(1), scm.NewInt(7), scm.NewInt(70)},
+		{scm.NewInt(200), scm.NewInt(2), scm.NewInt(80), scm.NewInt(8)},
+	})
+	if result := GetDatabase(database).rebuild(true, false, true); len(result.errors) > 0 {
+		t.Fatalf("rebuild errors: %v", result.errors)
+	}
+	access := newScanAccessSchema(scanAccessConsumerScan, nil, -1)
+	previous := scanRecMap(nil, NewTableScmer(source), access, nil, nil,
+		scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewBool(true) }),
+		[]string{"middle_id"}, newRecMapEquiFirstMapper(nil, middle, []string{"id"}, scm.NewNil()), middle)
+	extended := extendRecMap(nil, previous, []string{"kind"}, []string{"customer"},
+		newRecMapEquiFirstOfMapper(nil, target,
+			[][]string{{"kind", "owner"}, {"kind", "beneficiary"}}, scm.NewNil()), target)
+	if extended.count != 4 || previous.target != middle || extended.target != target {
+		t.Fatalf("immutable extension has count=%d, previous target=%v, new target=%v",
+			extended.count, previous.target, extended.target)
+	}
+	want := map[int64]int64{1: 100, 2: 200, 3: 0, 4: 0}
+	for _, part := range extended.shards {
+		for i, recid := range part.sourceRecIDs {
+			id := recMapTargetValue(recMapTarget{shard: part.sourceShard, recid: recid}, "id").Int()
+			got := recMapTargetValue(part.targets[i], "id")
+			if want[id] == 0 {
+				if !got.IsNil() {
+					t.Fatalf("source %d unexpectedly mapped to %s", id, scm.String(got))
+				}
+			} else if got.Int() != want[id] {
+				t.Fatalf("source %d mapped to %s, want %d", id, scm.String(got), want[id])
+			}
+		}
+	}
+}
+
+func TestRecMapValueMapperMaterializesReachedValues(t *testing.T) {
+	database := "trecmap_values"
+	databases.Remove(database)
+	t.Cleanup(func() { databases.Remove(database) })
+	CreateDatabase(database, true)
+	source := recMapTestTable(t, database, "source", []string{"id", "middle_id"}, [][]scm.Scmer{
+		{scm.NewInt(1), scm.NewInt(10)},
+		{scm.NewInt(2), scm.NewInt(20)},
+		{scm.NewInt(3), scm.NewInt(99)},
+	})
+	target := recMapTestTable(t, database, "target", []string{"id", "customer"}, [][]scm.Scmer{
+		{scm.NewInt(10), scm.NewInt(70)},
+		{scm.NewInt(20), scm.NewInt(80)},
+	})
+	if result := GetDatabase(database).rebuild(true, false, true); len(result.errors) > 0 {
+		t.Fatalf("rebuild errors: %v", result.errors)
+	}
+	access := newScanAccessSchema(scanAccessConsumerScan, nil, -1)
+	mapping := scanRecMap(nil, NewTableScmer(source), access, nil, nil,
+		scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewBool(true) }),
+		[]string{"middle_id"}, newRecMapEquiFirstMapper(nil, target, []string{"id"}, scm.NewNil()), target)
+	lookup := newRecMapValueMapper(nil, mapping, []string{"customer"},
+		scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[0] }),
+		scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewInt(-1) }))
+	want := map[int64]int64{1: 70, 2: 80, 3: -1}
+	for _, part := range mapping.shards {
+		for _, recid := range part.sourceRecIDs {
+			id := recMapTargetValue(recMapTarget{shard: part.sourceShard, recid: recid}, "id").Int()
+			got := scm.Apply(lookup, newRecordRef(part.sourceShard, recid)).Int()
+			if got != want[id] {
+				t.Fatalf("source %d materialized %d, want %d", id, got, want[id])
+			}
+		}
+	}
+}
+
+func TestRecMapHashFirstOfMapperComputesTargetKeysOnce(t *testing.T) {
+	database := "trecmap_hash_first_of"
+	databases.Remove(database)
+	t.Cleanup(func() { databases.Remove(database) })
+	CreateDatabase(database, true)
+	target := recMapTestTable(t, database, "target", []string{"id", "kind", "owner", "beneficiary"}, [][]scm.Scmer{
+		{scm.NewInt(100), scm.NewInt(1), scm.NewInt(7), scm.NewInt(70)},
+		{scm.NewInt(200), scm.NewInt(2), scm.NewInt(80), scm.NewInt(8)},
+	})
+	if result := GetDatabase(database).rebuild(true, false, true); len(result.errors) > 0 {
+		t.Fatalf("rebuild errors: %v", result.errors)
+	}
+	var targetCalls atomic.Int32
+	targetKeyFn := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
+		targetCalls.Add(1)
+		return scm.NewSlice([]scm.Scmer{
+			scm.NewSlice([]scm.Scmer{values[0], values[1]}),
+			scm.NewSlice([]scm.Scmer{values[0], scm.NewInt(values[2].Int() / 10)}),
+		})
+	})
+	mapper := newRecMapHashFirstOfMapper(nil, target,
+		[]string{"kind", "owner", "beneficiary"}, targetKeyFn, scm.NewNil())
+	first := scm.Apply(mapper, scm.NewSlice([]scm.Scmer{
+		scm.NewSlice([]scm.Scmer{scm.NewInt(1), scm.NewInt(7)}),
+		scm.NewSlice([]scm.Scmer{scm.NewInt(2), scm.NewInt(0)}),
+	})).Slice()
+	second := scm.Apply(mapper, scm.NewSlice([]scm.Scmer{
+		scm.NewSlice([]scm.Scmer{scm.NewInt(1), scm.NewInt(70)}),
+	})).Slice()
+	if len(first) != 2 || first[0].IsNil() || first[1].IsNil() || len(second) != 1 || !second[0].IsNil() {
+		t.Fatalf("computed target alternatives returned first=%v second=%v", first, second)
+	}
+	if targetCalls.Load() != 2 {
+		t.Fatalf("target key mapper ran %d times across two source batches, want once per target row", targetCalls.Load())
+	}
+}
+
+func TestRecMapRangeFirstMapperSelectsNearestOrderedRow(t *testing.T) {
+	database := "trecmap_range_first"
+	databases.Remove(database)
+	t.Cleanup(func() { databases.Remove(database) })
+	CreateDatabase(database, true)
+	target := recMapTestTable(t, database, "target", []string{"id", "parent", "valid_at", "value"}, [][]scm.Scmer{
+		{scm.NewInt(100), scm.NewInt(1), scm.NewInt(10), scm.NewInt(110)},
+		{scm.NewInt(101), scm.NewInt(1), scm.NewInt(20), scm.NewInt(120)},
+		{scm.NewInt(102), scm.NewInt(1), scm.NewInt(30), scm.NewInt(130)},
+		{scm.NewInt(200), scm.NewInt(2), scm.NewInt(15), scm.NewInt(215)},
+	})
+	if result := GetDatabase(database).rebuild(true, false, true); len(result.errors) > 0 {
+		t.Fatalf("rebuild errors: %v", result.errors)
+	}
+	mapper := newRecMapRangeFirstMapper(nil, target, []string{"parent"}, "valid_at", "<=", scm.NewNil())
+	got := scm.Apply(mapper, scm.NewSlice([]scm.Scmer{
+		scm.NewSlice([]scm.Scmer{scm.NewInt(1), scm.NewInt(25)}),
+		scm.NewSlice([]scm.Scmer{scm.NewInt(2), scm.NewInt(15)}),
+		scm.NewSlice([]scm.Scmer{scm.NewInt(2), scm.NewInt(10)}),
+	})).Slice()
+	if value := recMapTargetValue(recordRefFromScmer(got[0]), "value"); value.Int() != 120 {
+		t.Fatalf("range value = %s, want 120", scm.String(value))
+	}
+	if value := recMapTargetValue(recordRefFromScmer(got[1]), "value"); value.Int() != 215 {
+		t.Fatalf("inclusive range value = %s, want 215", scm.String(value))
+	}
+	if !got[2].IsNil() {
+		t.Fatalf("range miss = %s, want nil", scm.String(got[2]))
 	}
 }
 

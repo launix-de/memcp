@@ -25,6 +25,7 @@ import "time"
 import "strings"
 import "runtime/debug"
 import "container/heap"
+import "unsafe"
 import "github.com/launix-de/memcp/scm"
 
 func optimizeScanOrderMulti(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) (scm.Scmer, *scm.TypeDescriptor) {
@@ -1777,6 +1778,11 @@ func (t *table) scanOrderFirst(currentTx *TxContext, accessSchema scm.Scmer, acc
 }
 
 func (r *recSet) scan_order(currentTx *TxContext, accessSchema scm.Scmer, accessValues []scm.Scmer, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, isOuter bool, notFoundValue scm.Scmer, postOrderCols []string, postOrderFilter scm.Scmer) scm.Scmer {
+	if r.order != nil {
+		sortcols = []scm.Scmer{scm.NewCustom(TagRecSetOrder, unsafe.Pointer(r.order))}
+		sortdirs = []func(...scm.Scmer) scm.Scmer{scm.Globalenv.Vars[scm.Symbol("<")].Func()}
+		limitPartitionCols = 0
+	}
 	return scanOrderMulti(currentTx, []scanOrderTableSpec{{
 		recset:          r,
 		conditionCols:   conditionCols,
@@ -1845,6 +1851,17 @@ func (t *storageShard) scan_order(access scanAccess, conditionCols []string, con
 	// prepare sort criteria so they can be queried easily
 	result.scols = make([]func(uint32) scm.Scmer, len(sortcols))
 	for i, scol := range sortcols {
+		if scol.IsCustom(TagRecSetOrder) {
+			order := (*recSetOrder)(scol.Custom(TagRecSetOrder))
+			result.scols[i] = func(idx uint32) scm.Scmer {
+				rank, ok := order.rank(t, idx)
+				if !ok {
+					return scm.NewInt(math.MaxInt64)
+				}
+				return scm.NewInt(rank)
+			}
+			continue
+		}
 		if scol.IsString() {
 			colname := scol.String()
 			result.scols[i] = t.ColumnReaderTx(currentTx, colname, false)

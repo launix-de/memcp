@@ -136,6 +136,25 @@ test_cases:
     timing_samples: 5
     threshold_ms: 1000
 
+  - name: "independent scalar order carrier retains projection RecMap"
+    sql: |
+      EXPLAIN PHYSICAL SELECT d.id, (
+        SELECT (
+          SELECT t.value FROM ncs_rm_target t
+          WHERE t.id = m.target_id LIMIT 1)
+        FROM ncs_rm_middle m
+        WHERE m.id = d.middle_id LIMIT 1) AS value
+      FROM ncs_rm_driver d
+      ORDER BY (SELECT sorter.id FROM ncs_rm_middle sorter
+                WHERE sorter.id = d.middle_id LIMIT 1) DESC
+      LIMIT 72
+    expect:
+      result_contains:
+        - "recmap_order_recset"
+        - "scan_recmap"
+        - "recmap_compose"
+        - "$recmap_call"
+
   - name: "three-stage scalar FK chain retains the selected row value"
     sql: |
       SELECT d.id, (

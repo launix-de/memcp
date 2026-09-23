@@ -30,6 +30,23 @@ import "github.com/launix-de/memcp/scm"
 // TagRecSet is the custom Scmer tag for query-local RecSet handles.
 const TagRecSet = 102
 
+// TagRecSetOrder is an internal, query-local scan criterion. It exposes the
+// exact order selected by operators such as recmap_order_recset without
+// turning physical row IDs into persistent values or public SQL columns.
+const TagRecSetOrder = 107
+
+type recSetOrder struct {
+	ranks map[*storageShard]map[uint32]int64
+}
+
+func (o *recSetOrder) rank(shard *storageShard, recid uint32) (int64, bool) {
+	if o == nil {
+		return 0, false
+	}
+	rank, ok := o.ranks[shard][recid]
+	return rank, ok
+}
+
 // recSetShard is one shard's contribution to a query-local RecSet, in one of
 // three kinds (see recSetRepresentation in recset_representation.go).
 //
@@ -145,6 +162,10 @@ type recSet struct {
 	table  *table
 	shards []recSetShard
 	count  int64
+	// order is immutable query-local metadata for an exact ordered window.
+	// Ordinary RecSet constructors and set algebra leave it nil: membership
+	// operations are sets and must not accidentally promise an output order.
+	order *recSetOrder
 }
 
 func NewRecSetScmer(rs *recSet) scm.Scmer {
@@ -271,9 +292,13 @@ func recSetUnion(currentTx *TxContext, items []*recSet) *recSet {
 
 func recSetIntersect(currentTx *TxContext, items []*recSet) *recSet {
 	var base *table
+	var order *recSetOrder
 	for _, rs := range items {
 		if rs == nil || rs.table == nil {
 			continue
+		}
+		if order == nil {
+			order = rs.order
 		}
 		if base == nil {
 			base = rs.table
@@ -281,7 +306,10 @@ func recSetIntersect(currentTx *TxContext, items []*recSet) *recSet {
 			panic("recset_intersect: all recsets must belong to the same table")
 		}
 	}
-	result := &recSet{table: base}
+	// An intersection is a subset of every operand, so ranks from one ordered
+	// operand remain valid for every retained row. Unions and differences do
+	// not inherit order because they can add rows without a defined rank.
+	result := &recSet{table: base, order: order}
 	if base == nil || len(items) == 0 {
 		return result
 	}
