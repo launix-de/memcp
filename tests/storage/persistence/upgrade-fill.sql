@@ -1013,3 +1013,12 @@ CREATE TABLE up_group_windows (
   tenant_id INT,
   range_to INT
 );
+
+-- Real SQL planner helper producers; upgrade-helpers.py validates both results
+-- and the physical schemas persisted by the predecessor after shutdown.
+CREATE TABLE up_helper (id INT PRIMARY KEY, bucket INT, value INT);
+INSERT INTO up_helper VALUES (1,1,10),(2,1,20),(3,2,30),(4,2,40);
+CREATE TABLE up_helper_parent (id INT PRIMARY KEY);
+INSERT INTO up_helper_parent VALUES (1),(2);
+CREATE TABLE up_helper_file (id INT PRIMARY KEY, stamp INT NOT NULL);
+CREATE TABLE up_helper_driver (id INT PRIMARY KEY, file_id INT);

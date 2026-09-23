@@ -18,7 +18,7 @@ belongs with SQL scopes and literal syntax. The ordinary parser still validates
 the complete statement. Tokenization uses the runtime's generic regex engine. */
 (define sql_parameter_tokens (lambda (query)
 	(regexp_matches query
-		"[ \\t\\r\\n]+|--[^\\n]*|#[^\\n]*|/\\*(?s:.*?)\\*/|`(?:\\\\.|``|[^`\\\\])*`|'(?:\\\\.|''|[^'\\\\])*'|\"(?:\\\\.|\"\"|[^\"\\\\])*\"|[a-zA-Z_$][a-zA-Z0-9_$]*|[0-9]+(?:\\.[0-9]*)?(?:[eE][+-]?[0-9]+)?|(?s:.)")))
+		"[ \\t\\r\\n]+|--[^\\n]*|#[^\\n]*|/\\*(?s:.*?)\\*/|`(?:\\\\.|``|[^`\\\\])*`|'(?:\\\\.|''|[^'\\\\])*'|\"(?:\\\\.|\"\"|[^\"\\\\])*\"|[a-zA-Z_$][a-zA-Z0-9_$]*|0[xX][a-zA-Z0-9_$]*|[0-9]+(?:\\.[0-9]*)?(?:[eE][+-]?[0-9]+)?|(?s:.)")))
 
 (define sql_parameter_prefix (lambda (query)
 	(begin
@@ -164,7 +164,7 @@ sessions and token buffers belong to this one lexical compilation only. */
 											(if (regexp_test token "^`")
 												(begin (pieces piece_count token) (list (+ idx 1) depth type_depth previous_word "identifier" scopes (equal? (strlen token) 1) candidate_count (+ piece_count 1)))
 												(if (and (equal? token "-") (< (+ idx 1) (count tokens))
-													(regexp_test (nth tokens (+ idx 1)) "^[0-9]") (sql_parameter_unary previous_token)
+													(regexp_test (nth tokens (+ idx 1)) "^[0-9]") (not (regexp_test (nth tokens (+ idx 1)) "^0[xX]")) (sql_parameter_unary previous_token)
 													(sql_parameter_scope_allows scope))
 													(begin
 														(define number (nth tokens (+ idx 1)))
@@ -172,10 +172,12 @@ sessions and token buffers belong to this one lexical compilation only. */
 															(begin (pieces piece_count token) (list (+ idx 1) depth type_depth previous_word token scopes false candidate_count (+ piece_count 1))) (begin (candidates candidate_count (list piece_count scope false (simplify (concat "-" number)))) (begin (pieces piece_count (concat "-" number)) (list (+ idx 2) depth type_depth previous_word "literal" scopes false (+ candidate_count 1) (+ piece_count 1))))))
 													(if (regexp_test token "^[0-9]")
 														(if (or (>= type_depth 0)
+															(and (regexp_test token "^0[xX]") (not (regexp_test token "^0[xX](?:[0-9A-Fa-f]{2})+$")))
+															(and (regexp_test token "^0[xX]") (equal? previous_token "-"))
 															(and (not (sql_parameter_scope_allows scope)) (not (sql_parameter_select_const_item const_row_ok scope depth previous_token idx tokens)))
 															(and (not (nil? scope)) (equal? (scope "order_depth") depth) (or (equal? previous_word "BY") (equal? previous_token ",")))
 															(and (< (+ idx 1) (count tokens)) (regexp_test (nth tokens (+ idx 1)) "^[a-zA-Z0-9_$]")))
-															(begin (pieces piece_count token) (list (+ idx 1) depth type_depth previous_word "literal" scopes false candidate_count (+ piece_count 1))) (begin (candidates candidate_count (list piece_count scope (sql_parameter_select_const_item const_row_ok scope depth previous_token idx tokens) (simplify token))) (begin (pieces piece_count token) (list (+ idx 1) depth type_depth previous_word "literal" scopes false (+ candidate_count 1) (+ piece_count 1)))))
+															(begin (pieces piece_count token) (list (+ idx 1) depth type_depth previous_word "literal" scopes false candidate_count (+ piece_count 1))) (begin (candidates candidate_count (list piece_count scope (sql_parameter_select_const_item const_row_ok scope depth previous_token idx tokens) (if (regexp_test token "^0[xX]") (hex2bin (substr token 2)) (simplify token)))) (begin (pieces piece_count token) (list (+ idx 1) depth type_depth previous_word "literal" scopes false (+ candidate_count 1) (+ piece_count 1)))))
 														(begin (pieces piece_count token) (list (+ idx 1) depth type_depth previous_word token scopes (or (equal? token "?") (and (equal? token "/") (< (+ idx 1) (count tokens)) (equal? (nth tokens (+ idx 1)) "*"))) candidate_count (+ piece_count 1)))))))))))))))
 			(match result '(_idx _depth _type _word _token scopes invalid candidate_count piece_count)
 				/* Unchanged from the pre-existing master logic: an unsafe OUTER query
@@ -295,4 +297,3 @@ literals, DDL/DML and already-parameterized statements keep exact cache keys. */
 				(if (or invalid (equal? bindings '()))
 					(list query '())
 					(list (apply concat (map (produceN out_count) (lambda (idx) (out idx)))) bindings))))))))
-

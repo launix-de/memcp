@@ -213,6 +213,69 @@ test_cases:
         "ok" (error "const-row shape hash still varies with the literal"))
     expect:
       data: ["ok"]
+  - name: "Hex literals in KPI parameter rows share a shape"
+    scm: |
+      (begin
+        (define first (parameterize_sql_select_literals "SELECT h.i FROM (SELECT 0x32 AS i, 1704067200 AS s UNION SELECT 0x30 AS i, 1672531200 AS s) h"))
+        (define second (parameterize_sql_select_literals "SELECT h.i FROM (SELECT 0x33 AS i, 1704067200 AS s UNION SELECT 0x31 AS i, 1672531200 AS s) h"))
+        (if (and
+          (equal? (car first) "SELECT h.i FROM (SELECT ? AS i, ? AS s UNION SELECT ? AS i, ? AS s) h")
+          (equal? (car first) (car second))
+          (equal? (nth first 2) (nth second 2))
+          (equal? (cadr first) (list "2" 1704067200 "0" 1672531200))
+          (equal? (cadr second) (list "3" 1704067200 "1" 1672531200)))
+          "ok" (error "hex constant rows did not share a plan shape")))
+    expect:
+      data: ["ok"]
+  - name: "Incomplete hex literals retain exact cache keys"
+    scm: |
+      (begin
+        (map (list "SELECT id FROM items WHERE id = 0x3" "SELECT id FROM items WHERE id = 0xZZ" "SELECT id FROM items WHERE id = -0x32") (lambda (query)
+          (match (parameterize_sql_select_literals query) '(normalized bindings shape_hash)
+            (if (and (equal? normalized query) (equal? bindings '()) (equal? shape_hash (fnv_hash query)))
+              true (error (concat "invalid hex was parameterized: " query))))))
+        "ok")
+    expect:
+      data: ["ok"]
+  - name: "Hex literal variants execute from one cached plan"
+    scm: |
+      (begin
+        (define cache (newcachemap))
+        (define sess (newsession))
+        (sess "username" "root")
+        (sess "schema" "memcp-tests")
+        (define results (newsession))
+        (results "value" "")
+        (map (list "0x32" "0x33") (lambda (hex)
+          (sql_execute_formula sess nil
+            (cached_parse cache (list parse_sql) "memcp-tests"
+              (concat "SELECT h.i FROM (SELECT " hex " AS i) h WHERE h.i = " hex)
+              nil "root" sess true)
+            (lambda (row) (results "value" (concat (results "value") (cadr row))))
+            (lambda (_fields) nil))))
+        (if (and (equal? (count (cache)) 1) (equal? (results "value") "23"))
+          "ok" (error (concat "hex cached execution: entries=" (count (cache)) " value=" (results "value")))))
+    expect:
+      data: ["ok"]
+  - name: "KPI-style hex variants compile through one cached plan"
+    warmup: 0
+    timing_samples: 5
+    threshold_ms: 1000
+    scm: |
+      (begin
+        (define cache (newcachemap))
+        (define sess (newsession))
+        (sess "username" "root")
+        (sess "schema" "memcp-tests")
+        (map (list "30" "31" "32" "33" "34" "35" "36" "37" "38" "39"
+          "41" "42" "43" "44" "45" "46" "47" "48" "49" "4a")
+          (lambda (hex)
+            (cached_parse cache (list parse_sql) "memcp-tests"
+              (concat "SELECT h.i FROM (SELECT 0x" hex " AS i, 1704067200 AS s UNION SELECT 0x30 AS i, 1672531200 AS s) h WHERE h.i = 0x" hex)
+              nil "root" sess true)))
+        "ok")
+    expect:
+      data: ["ok"]
   - name: "Mixed projection keeps a lone carrier literal exact"
     scm: |
       (begin
