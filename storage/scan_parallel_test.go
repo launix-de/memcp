@@ -195,6 +195,54 @@ func TestGeneratedUniqueKeySkipReleasesOuterLockOnPanic(t *testing.T) {
 	}
 }
 
+func TestMultipleUniqueKeysReleaseOuterLockOnCallbackPanic(t *testing.T) {
+	tbl := setupScanParallelTestTable(t, "tmultipleuniquepanic")
+	tbl.CreateColumn("name", "TEXT", nil, nil)
+	tbl.mu.Lock()
+	tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}, {Id: "name", Cols: []string{"name"}}}
+	tbl.mu.Unlock()
+
+	var caught any
+	func() {
+		defer func() { caught = recover() }()
+		tbl.ProcessUniqueCollision([]string{"id", "name"},
+			[][]scm.Scmer{{scm.NewInt(1), scm.NewString("new")}}, false,
+			func([][]scm.Scmer) { panic("insert callback failed") }, nil, nil, 0, nil)
+	}()
+	if caught != "insert callback failed" {
+		t.Fatalf("expected callback panic, got %v", caught)
+	}
+	if !tbl.uniquelock.TryLock() {
+		t.Fatal("callback panic after multiple unique checks retained the outer unique lock")
+	}
+	tbl.uniquelock.Unlock()
+}
+
+func TestMultipleUniqueKeysReleaseOuterLockOnCollisionPanic(t *testing.T) {
+	tbl := setupScanParallelTestTable(t, "tmultipleuniquecollisionpanic")
+	tbl.CreateColumn("name", "TEXT", nil, nil)
+	tbl.mu.Lock()
+	tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}, {Id: "name", Cols: []string{"name"}}}
+	tbl.mu.Unlock()
+	tbl.Insert([]string{"id", "name"}, [][]scm.Scmer{{scm.NewInt(1), scm.NewString("taken")}}, nil, scm.NewNil(), false, nil)
+
+	var caught any
+	func() {
+		defer func() { caught = recover() }()
+		tbl.ProcessUniqueCollision([]string{"id", "name"},
+			[][]scm.Scmer{{scm.NewInt(2), scm.NewString("taken")}}, false,
+			func([][]scm.Scmer) { t.Fatal("duplicate row reached success callback") }, nil,
+			func(string, []scm.Scmer) { panic("collision callback failed") }, 0, nil)
+	}()
+	if caught != "collision callback failed" {
+		t.Fatalf("expected collision callback panic, got %v", caught)
+	}
+	if !tbl.uniquelock.TryLock() {
+		t.Fatal("collision callback panic after multiple unique checks retained the outer unique lock")
+	}
+	tbl.uniquelock.Unlock()
+}
+
 func TestIterateShardsParallelMarksFreeSingleShardSolo(t *testing.T) {
 	tbl := setupScanParallelTestTable(t, "tscanparfree")
 
