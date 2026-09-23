@@ -1,0 +1,244 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
+# Performance coverage for a bounded read-model page whose permission predicate
+# is a correlated scalar lookup and whose projected labels are nullable joins.
+# The grouped boolean carrier must be selected before the native ORDER BY window
+# instead of repeating the correlated permission probe for candidate rows.
+
+metadata:
+  version: "1.0"
+  description: "Bounded ordered ACL read-model pages retain grouped boolean carriers"
+  isolated: true
+  ci: false
+  perf_ci: true
+  performance_rows: 800000
+  max_regression_pct: 20
+
+fixture_setup: &ordered_acl_fixture
+  - sql: "DROP TABLE IF EXISTS oap_assignment"
+  - sql: "DROP TABLE IF EXISTS oap_document"
+  - sql: "DROP TABLE IF EXISTS oap_site"
+  - sql: "DROP TABLE IF EXISTS oap_tenant"
+  - sql: "DROP TABLE IF EXISTS oap_year"
+  - sql: "DROP TABLE IF EXISTS oap_department"
+  - sql: "DROP TABLE IF EXISTS oap_audit"
+  - sql: "CREATE TABLE oap_tenant (id INT PRIMARY KEY, direct_flag INT) ENGINE=sloppy"
+  # Imported read models may have a generated identifier without a declared
+  # UNIQUE constraint. The scalar stage still groups that key before its
+  # boolean result is projected back onto the ordered driver.
+  - sql: "CREATE TABLE oap_site (id INT, tenant_id INT, name VARCHAR(64), direct_flag INT) ENGINE=sloppy"
+  - sql: "CREATE TABLE oap_year (id INT PRIMARY KEY, name VARCHAR(64)) ENGINE=sloppy"
+  - sql: "CREATE TABLE oap_department (id INT PRIMARY KEY, name VARCHAR(64)) ENGINE=sloppy"
+  - sql: "CREATE TABLE oap_audit (id INT PRIMARY KEY, name VARCHAR(64)) ENGINE=sloppy"
+  - sql: "CREATE TABLE oap_assignment (id INT PRIMARY KEY, site_id INT, tenant_id INT, actor_id INT, allowed BOOL) ENGINE=sloppy"
+  - sql: "SET @oap_actor = 7"
+  - sql: |
+      CREATE TABLE oap_document (
+        id INT PRIMARY KEY,
+        year_id INT,
+        site_id INT,
+        department_id INT,
+        audit_id INT,
+        payload VARCHAR(64)
+      ) ENGINE=sloppy
+  - scm: |
+      (begin
+        (insert (table "memcp-tests" "oap_tenant") '("id" "direct_flag")
+          (map (produceN 128) (lambda (i)
+            (list (+ i 1) (if (equal? (mod i 8) 0) 1 0)))))
+        (insert (table "memcp-tests" "oap_site") '("id" "tenant_id" "name" "direct_flag")
+          (map (produceN 1024) (lambda (i)
+            (list (+ i 1) (+ (mod i 128) 1) (concat "site-" (string i))
+              (if (equal? (mod i 16) 0) 1 0)))))
+        (insert (table "memcp-tests" "oap_year") '("id" "name")
+          (map (produceN 32) (lambda (i)
+            (list (+ i 1) (concat "year-" (string i))))))
+        (insert (table "memcp-tests" "oap_department") '("id" "name")
+          (map (produceN 256) (lambda (i)
+            (list (+ i 1) (concat "department-" (string i))))))
+        (insert (table "memcp-tests" "oap_audit") '("id" "name")
+          (map (produceN 512) (lambda (i)
+            (list (+ i 1) (concat "audit-" (string i))))))
+        (insert (table "memcp-tests" "oap_assignment")
+          '("id" "site_id" "tenant_id" "actor_id" "allowed")
+          (map (produceN 640) (lambda (i)
+            (if (< i 512)
+              (list (+ i 1) (+ (* i 2) 1) nil 7 true)
+              (list (+ i 1) 0 (+ (- i 512) 1) 7 true)))))
+        (insert (table "memcp-tests" "oap_document")
+          '("id" "year_id" "site_id" "department_id" "audit_id" "payload")
+          (map (produceN {rows}) (lambda (i)
+            (list (+ i 1) (+ (mod i 32) 1) (+ (mod i 1024) 1)
+              (+ (mod i 256) 1) (+ (mod i 512) 1)
+              (concat "payload-" (string i))))))
+        (rebuild))
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS oap_assignment"
+  - sql: "DROP TABLE IF EXISTS oap_document"
+  - sql: "DROP TABLE IF EXISTS oap_site"
+  - sql: "DROP TABLE IF EXISTS oap_tenant"
+  - sql: "DROP TABLE IF EXISTS oap_year"
+  - sql: "DROP TABLE IF EXISTS oap_department"
+  - sql: "DROP TABLE IF EXISTS oap_audit"
+
+test_cases:
+  - name: "ordered ACL page keeps its grouped boolean carrier"
+    setup: *ordered_acl_fixture
+    threshold_ms: 15000
+    timeout: 30
+    # Include the initial carrier build and nine further page requests. This
+    # keeps the cold/warm trade-off explicit instead of discarding startup.
+    warmup: 0
+    timing_samples: 10
+    timing_aggregation: total
+    sql: |
+      SELECT page.*
+      FROM (
+        SELECT document.id, document.year_id, document.site_id,
+          document.department_id, document.audit_id, document.payload,
+          projected_site.name AS site_name,
+          projected_site.can_view AS projected_site_can_view,
+          projected_year.name AS year_name,
+          projected_department.name AS department_name,
+          projected_audit.name AS audit_name,
+          (
+            (EXISTS (
+              SELECT TRUE FROM oap_assignment global_assignment
+              WHERE global_assignment.actor_id = @oap_actor
+                AND global_assignment.site_id IS NULL
+              LIMIT 1
+            ) OR NOT EXISTS (
+              SELECT TRUE FROM oap_assignment global_assignment
+              WHERE global_assignment.actor_id = @oap_actor
+                AND global_assignment.site_id IS NULL
+              LIMIT 1
+            ))
+            AND COALESCE((
+              SELECT
+                (EXISTS (
+                  SELECT TRUE FROM oap_assignment global_assignment
+                  WHERE global_assignment.actor_id = @oap_actor
+                    AND global_assignment.site_id IS NULL
+                  LIMIT 1
+                ) OR NOT EXISTS (
+                  SELECT TRUE FROM oap_assignment global_assignment
+                  WHERE global_assignment.actor_id = @oap_actor
+                    AND global_assignment.site_id IS NULL
+                  LIMIT 1
+                ))
+                AND CASE
+                  WHEN permission_site.direct_flag = 1 THEN TRUE
+                  ELSE EXISTS (
+                    SELECT TRUE
+                    FROM oap_assignment assignment
+                    WHERE COALESCE(assignment.site_id, permission_site.id) = permission_site.id
+                      AND assignment.actor_id = @oap_actor
+                      AND assignment.allowed = TRUE
+                    LIMIT 1
+                  )
+                END
+                AND COALESCE((
+                  SELECT CASE
+                    WHEN permission_tenant.direct_flag = 1 THEN TRUE
+                    ELSE EXISTS (
+                      SELECT TRUE
+                      FROM oap_assignment tenant_assignment
+                      WHERE tenant_assignment.tenant_id = permission_tenant.id
+                        AND tenant_assignment.actor_id = @oap_actor
+                        AND tenant_assignment.allowed = TRUE
+                      LIMIT 1
+                    )
+                  END
+                  FROM oap_tenant permission_tenant
+                  WHERE permission_tenant.id = permission_site.tenant_id
+                  LIMIT 1
+                ), FALSE)
+              FROM oap_site permission_site
+              WHERE permission_site.id = document.site_id
+              LIMIT 1
+            ), FALSE)
+          ) AS can_view,
+          COALESCE((
+            SELECT (permission_site.direct_flag = 1 OR EXISTS (
+              SELECT TRUE FROM oap_assignment assignment
+              WHERE COALESCE(assignment.site_id, permission_site.id) = permission_site.id
+                AND assignment.actor_id = @oap_actor
+                AND assignment.allowed = TRUE
+              LIMIT 1
+            )) AND COALESCE((
+              SELECT permission_tenant.direct_flag = 1 OR EXISTS (
+                SELECT TRUE FROM oap_assignment tenant_assignment
+                WHERE tenant_assignment.tenant_id = permission_tenant.id
+                  AND tenant_assignment.actor_id = @oap_actor
+                  AND tenant_assignment.allowed = TRUE
+                LIMIT 1
+              )
+              FROM oap_tenant permission_tenant
+              WHERE permission_tenant.id = permission_site.tenant_id
+              LIMIT 1
+            ), FALSE)
+            FROM oap_site permission_site
+            WHERE permission_site.id = document.site_id
+            LIMIT 1
+          ), FALSE) AS can_edit,
+          COALESCE((
+            SELECT (permission_site.direct_flag = 1 OR EXISTS (
+              SELECT TRUE FROM oap_assignment assignment
+              WHERE COALESCE(assignment.site_id, permission_site.id) = permission_site.id
+                AND assignment.actor_id = @oap_actor
+                AND assignment.allowed = TRUE
+              LIMIT 1
+            )) AND COALESCE((
+              SELECT permission_tenant.direct_flag = 1 OR EXISTS (
+                SELECT TRUE FROM oap_assignment tenant_assignment
+                WHERE tenant_assignment.tenant_id = permission_tenant.id
+                  AND tenant_assignment.actor_id = @oap_actor
+                  AND tenant_assignment.allowed = TRUE
+                LIMIT 1
+              )
+              FROM oap_tenant permission_tenant
+              WHERE permission_tenant.id = permission_site.tenant_id
+              LIMIT 1
+            ), FALSE)
+            FROM oap_site permission_site
+            WHERE permission_site.id = document.site_id
+            LIMIT 1
+          ), FALSE) AS can_delete
+        FROM oap_document document
+        LEFT JOIN (
+          SELECT site.id, site.name,
+            COALESCE((
+              SELECT CASE
+                WHEN checked_site.direct_flag = 1 THEN TRUE
+                ELSE EXISTS (
+                  SELECT TRUE
+                  FROM oap_assignment assignment
+                  WHERE COALESCE(assignment.site_id, checked_site.id) = checked_site.id
+                    AND assignment.actor_id = @oap_actor
+                    AND assignment.allowed = TRUE
+                  LIMIT 1
+                )
+              END
+              FROM oap_site checked_site
+              WHERE checked_site.id = site.id
+              LIMIT 1
+            ), FALSE) AS can_view
+          FROM oap_site site
+        ) projected_site ON projected_site.id = document.site_id
+        LEFT JOIN oap_year projected_year ON projected_year.id = document.year_id
+        LEFT JOIN oap_department projected_department
+          ON projected_department.id = document.department_id
+        LEFT JOIN oap_audit projected_audit ON projected_audit.id = document.audit_id
+      ) page
+      LEFT JOIN oap_site sorter_site ON sorter_site.id = page.site_id
+      LEFT JOIN oap_year sorter_year ON sorter_year.id = page.year_id
+      LEFT JOIN oap_department sorter_department
+        ON sorter_department.id = page.department_id
+      LEFT JOIN oap_audit sorter_audit ON sorter_audit.id = page.audit_id
+      WHERE page.can_view
+      ORDER BY page.year_id DESC, page.site_id ASC,
+        page.department_id ASC, page.audit_id ASC
+      LIMIT 72 OFFSET 0
+    expect:
+      rows: 72

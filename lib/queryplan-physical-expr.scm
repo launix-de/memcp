@@ -1436,8 +1436,10 @@ are constant for the whole query execution and are not part of what makes a
 row-to-row carrier worth building; group_stage_session_domain_keys already
 identifies them for other group-stage lowering, so the same rows/columns
 carrier semantics apply here. */
-/* Locate the remaining, single non-session source key once; reusable scalar
-and RecSet carriers additionally verify its uniqueness below. */
+/* Locate the remaining, single non-session source key once. A point-lookup
+carrier additionally verifies uniqueness below. A RecSet carrier does not need
+that proof: it consumes the stage's already grouped key domain, then projects
+those unique result keys onto every matching driver row. */
 (define scalar_first_probe_row_key_index (lambda (stage src keys)
 	(begin
 		(define session_indices (filter
@@ -1632,14 +1634,14 @@ membership set. */
 				(and (nil? (qb_having src))
 					(and (empty_list? (qb_order src))
 						(and (nil? (qb_limit src)) (nil? (qb_offset src))
-							(and (not (nil? (scalar_first_probe_keytable_key_index stage (single_real_source (qb_sources src)) keys)))
+							(and (not (nil? (scalar_first_probe_row_key_index stage (single_real_source (qb_sources src)) keys)))
 								(and (stage_boolean_shaped? graph stage requested_col)
 									(and (direct_boolean_recset_input_ownership_closed? stages stage)
 										(scalar_first_probe_recset_cost_preferred?
 											stage probe_work_rows carrier_work_rows planning_session))))))))))))
 
 (define scalar_first_probe_recset_eligible_base? (lambda (graph stage src keys probe_work_rows carrier_work_rows requested_col planning_session)
-	(and (not (nil? (scalar_first_probe_keytable_key_index stage src keys)))
+	(and (not (nil? (scalar_first_probe_row_key_index stage src keys)))
 		(and (stage_boolean_shaped? graph stage requested_col)
 			(scalar_first_probe_recset_cost_preferred? stage probe_work_rows carrier_work_rows planning_session)))))
 
