@@ -21,6 +21,7 @@ import "fmt"
 import "io"
 import "math/rand"
 import "sort"
+import "slices"
 import "unsafe"
 import "github.com/carli2/hybridsort"
 import "sync"
@@ -2854,6 +2855,50 @@ func Init(en scm.Env) {
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
+		Name: "dropforeignkey",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			t := TableFromScmer(a[0])
+			name := scm.String(a[1])
+			requireTableMaintenance(t.schema.Name, t.Name, maintenanceAlter)
+			t.ddlMu.Lock()
+			defer t.ddlMu.Unlock()
+			db := t.schema
+			db.schemalock.Lock()
+			for _, fk := range t.Foreign {
+				// Parent-side copies do not belong to this table's constraints.
+				if fk.Tbl1 != t.Name || !strings.EqualFold(fk.Id, name) {
+					continue
+				}
+				parent := db.tables.Get(fk.Tbl2)
+				removeFKTriggers(t, parent, fk)
+				removeMetadata := func(tbl *table) {
+					kept := tbl.Foreign[:0]
+					for _, other := range tbl.Foreign {
+						if other.Tbl1 != fk.Tbl1 || other.Tbl2 != fk.Tbl2 || other.Id != fk.Id {
+							kept = append(kept, other)
+						}
+					}
+					tbl.Foreign = kept
+				}
+				removeMetadata(t)
+				if parent != nil && parent != t {
+					removeMetadata(parent)
+				}
+				db.saveLockedAndUnlock(schemaSaveModeForDurability(t.PersistencyMode == Safe || (parent != nil && parent.PersistencyMode == Safe)))
+				return scm.NewBool(true)
+			}
+			db.schemalock.Unlock()
+			return scm.NewBool(false)
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "drops a foreign key and its enforcement triggers", HasSideEffects: true,
+			Params: []*scm.TypeDescriptor{
+				{Kind: "table", Label: "table"},
+				{Kind: "string", Label: "keyname"},
+			},
+			Return: &scm.TypeDescriptor{Kind: "bool"},
+		},
+	})
+	scm.Declare(&en, &scm.Declaration{
 		Name: "createforeignkey",
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
@@ -2863,6 +2908,9 @@ func Init(en scm.Env) {
 			t2 := TableFromScmer(a[3])
 			cols2 := scmerSliceToStrings(mustScmerSlice(a[4], "foreign cols2"))
 
+			requireTableMaintenance(t1.schema.Name, t1.Name, maintenanceAlter)
+			t1.ddlMu.Lock()
+			defer t1.ddlMu.Unlock()
 			db := t1.schema
 			db.schemalock.Lock()
 			for _, u := range t1.Foreign {
@@ -5114,6 +5162,28 @@ func installFKTriggers(db *database, t1, t2 *table, fk foreignKey) {
 			scm.NewSymbol("NEW"),
 		})),
 	})
+}
+
+// removeFKTriggers removes only the generated programs belonging to this FK.
+func removeFKTriggers(child, parent *table, fk foreignKey) {
+	prefix := "__fk_" + fk.Id + "_"
+	remove := func(t *table, names ...string) {
+		if t == nil {
+			return
+		}
+		t.mu.Lock()
+		defer t.mu.Unlock()
+		kept := t.Triggers[:0]
+		for _, tr := range t.Triggers {
+			if tr.IsSystem && slices.Contains(names, tr.Name) {
+				continue
+			}
+			kept = append(kept, tr)
+		}
+		t.Triggers = kept
+	}
+	remove(child, prefix+"child_insert", prefix+"child_update")
+	remove(parent, prefix+"parent_delete", prefix+"parent_update")
 }
 
 // rebuildFKTriggersAfterLoad replaces persisted FK implementation details with

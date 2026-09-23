@@ -208,6 +208,9 @@ test_cases:
   - name: "ALTER TABLE DROP FOREIGN KEY"
     sql: "ALTER TABLE dbc_child DROP FOREIGN KEY fk_parent"
 
+  - name: "Drop remaining FK before independent insert-select cases"
+    sql: "ALTER TABLE dbc_child DROP CONSTRAINT fk_parent2"
+
   # --- INSERT IGNORE ---
   - name: "Insert seed data"
     sql: "INSERT INTO dbc_t (id, name, email, status, active) VALUES (1, 'Alice', 'alice@test.com', 'active', true)"
