@@ -666,8 +666,8 @@ func TestTableStatisticsReadsPublishedSnapshotWithoutShardLock(t *testing.T) {
 		main_count:  1,
 		columns:     map[string]ColumnStorage{"value": &StorageConst{value: scm.NewInt(7), count: 1}},
 		writeOwners: make(map[uint64]uint32),
-		srState:     WRITE,
 	}
+	shard.setState(WRITE)
 	tbl := &table{schema: &database{Name: "table-statistics-test"}, Shards: []*storageShard{shard}}
 	shard.t = tbl
 	tbl.PlannerRowEstimate.value.Store(1)
@@ -722,9 +722,9 @@ func benchmarkStatisticsTable() *table {
 			main_count:   1000,
 			columns:      make(map[string]ColumnStorage, 4),
 			writeOwners:  make(map[uint64]uint32),
-			srState:      WRITE,
 			deltaColumns: make(map[string]int),
 		}
+		shard.setState(WRITE)
 		for col := 0; col < 4; col++ {
 			shard.columns[string(rune('a'+col))] = &StorageConst{value: scm.NewInt(int64(col)), count: 1000}
 		}

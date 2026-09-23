@@ -786,7 +786,7 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension, maint
 	newshards := make([]*storageShard, totalShards)
 	for i := range newshards {
 		newshards[i] = NewShard(t)
-		newshards[i].srState = WRITE // live shard, not cold
+		newshards[i].setState(WRITE) // live shard, not cold
 		if t.PersistencyMode == Safe || t.PersistencyMode == Logged {
 			newshards[i].logfile = t.schema.persistence.OpenLog(newshards[i].uuid.String())
 		}
@@ -966,17 +966,20 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension, maint
 						oldShard := oldshards[s2id]
 						oldShard.mu.RLock()
 						oldProxy, isProxy := oldShard.columns[col.Name].(*StorageComputeProxy)
-						oldShard.mu.RUnlock()
 						if !isProxy {
 							// Old shard has plain storage for this column — read values directly
-							reader := oldShard.ColumnReaderTx(nil, col.Name, false)
-							for _, item := range items {
-								val := reader(uint32(item))
-								newProxy.delta[newIdx] = val
-								newProxy.validMask.AtomicSet(uint(newIdx), true)
-								newIdx++
-							}
+							func() {
+								defer oldShard.mu.RUnlock()
+								reader := oldShard.ColumnReaderTx(nil, col.Name, true)
+								for _, item := range items {
+									val := reader(uint32(item))
+									newProxy.delta[newIdx] = val
+									newProxy.validMask.AtomicSet(uint(newIdx), true)
+									newIdx++
+								}
+							}()
 						} else {
+							oldShard.mu.RUnlock()
 							oldRowIDs := make([]uint32, len(items))
 							for i, item := range items {
 								oldRowIDs[i] = uint32(item)
@@ -990,11 +993,16 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension, maint
 					// Normal column: read values and compress
 					var i uint32
 					for s2id, items := range datasetids[si] {
-						reader := oldshards[s2id].ColumnReaderTx(nil, col.Name, false)
-						for _, item := range items {
-							values[i] = reader(uint32(item))
-							i++
-						}
+						oldShard := oldshards[s2id]
+						func() {
+							oldShard.mu.RLock()
+							defer oldShard.mu.RUnlock()
+							reader := oldShard.ColumnReaderTx(nil, col.Name, true)
+							for _, item := range items {
+								values[i] = reader(uint32(item))
+								i++
+							}
+						}()
 					}
 					// Compress into optimal storage format
 					var newcol ColumnStorage = new(StorageSCMER)

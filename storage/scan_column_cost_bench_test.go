@@ -180,8 +180,8 @@ func TestScanSelectivityEstimateLoadsColdPersistentShard(t *testing.T) {
 		t.Fatal("reloaded database has no items table")
 	}
 	coldShard := coldTable.ActiveShards()[0]
-	if coldShard.srState != COLD {
-		t.Fatalf("reloaded shard state = %v, want COLD", coldShard.srState)
+	if coldShard.state() != COLD {
+		t.Fatalf("reloaded shard state = %v, want COLD", coldShard.state())
 	}
 
 	condition := scm.NewProcStruct(scm.Proc{

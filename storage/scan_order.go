@@ -1148,7 +1148,8 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 				res.callbackCols = callbackCols
 				res.callback = callback
 				res.tableIdx = tableIdx
-				q_ <- scanOrderResult{res: res, inputCount: int64(s.Count()), candidateCount: res.candidateCount, outputCount: int64(len(res.items))}
+				inputCount := int64(s.main_count) + int64(s.plannerDeltaRows.Load())
+				q_ <- scanOrderResult{res: res, inputCount: inputCount, candidateCount: res.candidateCount, outputCount: int64(len(res.items))}
 			})
 			if done != nil {
 				doneChannels = append(doneChannels, done)
@@ -1619,7 +1620,7 @@ func runDirectSingleShardOrder(currentTx *TxContext, topology *tableShardTopolog
 				queue = shard.scan_order(bounds, spec.conditionCols, spec.condition, spec.acceptCols, spec.accept, spec.sortcols, sortdirs, limitPartitionCols, offset, shardLimit, spec.callbackCols, currentTx, ss)
 			})
 		}
-		inputCount = int64(shard.Count())
+		inputCount = int64(shard.main_count) + int64(shard.plannerDeltaRows.Load())
 	}()
 	shard.activeScanners.Add(-1)
 	topology.releaseOperation()

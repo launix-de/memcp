@@ -141,7 +141,8 @@ func TestCountEstimateFallsBackToSingleShardDeltaWithoutLocking(t *testing.T) {
 
 func TestCountEstimateDoesNotTreatPersistedRowsAsDeltaOnly(t *testing.T) {
 	tbl := showColumnsTestTable(1)
-	shard := &storageShard{t: tbl, main_count: 9, srState: WRITE}
+	shard := &storageShard{t: tbl, main_count: 9}
+	shard.setState(WRITE)
 	shard.plannerMainRows.Store(9)
 	shard.plannerDeltaRows.Store(3)
 	tbl.Shards = []*storageShard{shard}
@@ -160,7 +161,8 @@ func TestLegacyPlannerRowEstimateIsInitializedFromShards(t *testing.T) {
 	// The first release containing planner_row_estimate could persist a zero
 	// for an existing table before its lazy shards had been counted.
 	tbl.PlannerRowEstimate.present.Store(true)
-	shard := &storageShard{t: tbl, main_count: 9, srState: WRITE}
+	shard := &storageShard{t: tbl, main_count: 9}
+	shard.setState(WRITE)
 	tbl.Shards = []*storageShard{shard}
 	tbl.publishTopologyLocked()
 

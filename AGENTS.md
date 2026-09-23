@@ -132,6 +132,10 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
   with scan execution. Access-header filter readsets are immutable plan data;
   only cache registration reads them, not row or batch processing.
 
+- `storageShard.srState` is an atomic lifecycle publication. Read it through
+  `state()` and publish transitions through `setState()`; shard read hot paths
+  must not acquire a shard lock merely to inspect the lifecycle state.
+
 - `inIndexHook.positions` is an immutable compressed main-generation row-ID
   permutation owned by its parent index hook. It retains no shard/catalog,
   reader, transaction, or invocation binding. Candidate iterators borrow the

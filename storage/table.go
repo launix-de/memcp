@@ -2591,7 +2591,8 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 					return nil
 				}
 				shard := topology.shards[len(topology.shards)-1]
-				if uint(shard.Count())+n <= Settings.ShardSize || t.maintenanceKind != 0 {
+				physicalRows := uint(shard.plannerMainRows.Load()) + uint(shard.plannerDeltaRows.Load())
+				if physicalRows+n <= Settings.ShardSize || t.maintenanceKind != 0 {
 					t.mu.Unlock()
 					return shard
 				}
@@ -2633,7 +2634,7 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 			// check unique constraints in a thread safe manner
 			if len(t.Unique) > 0 {
 				t.ProcessUniqueCollision(columns, chunk, mergeNull, func(chunk [][]scm.Scmer) {
-					shard.Insert(columns, chunk, false, onFirstInsertId, isIgnore, currentTx)
+					shard.Insert(columns, chunk, false, true, onFirstInsertId, isIgnore, currentTx)
 					result += len(chunk)
 					inserted += len(chunk)
 				}, onCollisionCols, func(errmsg string, data []scm.Scmer) {
@@ -2663,7 +2664,7 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 				}, 0, currentTx)
 			} else {
 				// physically insert (no unique constraints)
-				shard.Insert(columns, chunk, false, onFirstInsertId, isIgnore, currentTx)
+				shard.Insert(columns, chunk, false, true, onFirstInsertId, isIgnore, currentTx)
 				result += len(chunk)
 				inserted += len(chunk)
 			}
@@ -2717,7 +2718,7 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 				// this function will do the locking for us
 				t.ProcessUniqueCollision(columns, values, mergeNull, func(values [][]scm.Scmer) {
 					// physically insert
-					s.Insert(columns, values, false, onFirstInsertId, isIgnore, currentTx)
+					s.Insert(columns, values, false, true, onFirstInsertId, isIgnore, currentTx)
 					result += len(values)
 					inserted += len(values)
 				}, onCollisionCols, func(errmsg string, data []scm.Scmer) {
@@ -2744,7 +2745,7 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 				}, 0, currentTx)
 			} else {
 				// physically insert (parallel)
-				s.Insert(columns, values, false, onFirstInsertId, isIgnore, currentTx)
+				s.Insert(columns, values, false, true, onFirstInsertId, isIgnore, currentTx)
 				result += len(values)
 				inserted += len(values)
 			}
@@ -2782,28 +2783,50 @@ insertDone:
 }
 
 func (t *table) sanitizeInsertRows(columns []string, values [][]scm.Scmer, isIgnore bool) [][]scm.Scmer {
+	type sanitizerAt struct {
+		index         int
+		autoIncrement bool
+		apply         func(scm.Scmer) scm.Scmer
+	}
+	sanitizers := make([]sanitizerAt, 0, len(columns))
+	for i, col := range columns {
+		for _, colDesc := range t.Columns {
+			if col == colDesc.Name && colDesc.sanitizer != nil {
+				sanitizers = append(sanitizers, sanitizerAt{
+					index: i, autoIncrement: colDesc.AutoIncrement, apply: colDesc.sanitizer,
+				})
+				break
+			}
+		}
+	}
+	if len(sanitizers) == 0 {
+		return values
+	}
+
+	// Insert accepts caller-owned rows. Sanitization must not rewrite those
+	// slices: callers may reuse a prepared row in concurrent inserts.
+	sanitize := func(input []scm.Scmer) []scm.Scmer {
+		row := append([]scm.Scmer(nil), input...)
+		for _, sanitizer := range sanitizers {
+			if sanitizer.index >= len(row) || sanitizer.autoIncrement && row[sanitizer.index].IsNil() {
+				continue
+			}
+			row[sanitizer.index] = sanitizer.apply(row[sanitizer.index])
+		}
+		return row
+	}
 	if isIgnore {
-		filtered := values[:0]
-		for _, row := range values {
+		filtered := make([][]scm.Scmer, 0, len(values))
+		for _, input := range values {
 			ok := true
+			var row []scm.Scmer
 			func() {
 				defer func() {
 					if r := recover(); r != nil {
 						ok = false
 					}
 				}()
-				for i, col := range columns {
-					for _, colDesc := range t.Columns {
-						if col == colDesc.Name && colDesc.sanitizer != nil {
-							if i < len(row) {
-								if colDesc.AutoIncrement && row[i].IsNil() {
-									continue
-								}
-								row[i] = colDesc.sanitizer(row[i])
-							}
-						}
-					}
-				}
+				row = sanitize(input)
 			}()
 			if ok {
 				filtered = append(filtered, row)
@@ -2812,21 +2835,11 @@ func (t *table) sanitizeInsertRows(columns []string, values [][]scm.Scmer, isIgn
 		return filtered
 	}
 
-	for i, col := range columns {
-		for _, colDesc := range t.Columns {
-			if col == colDesc.Name && colDesc.sanitizer != nil {
-				for _, row := range values {
-					if i < len(row) {
-						if colDesc.AutoIncrement && row[i].IsNil() {
-							continue
-						}
-						row[i] = colDesc.sanitizer(row[i])
-					}
-				}
-			}
-		}
+	sanitized := make([][]scm.Scmer, len(values))
+	for i, row := range values {
+		sanitized[i] = sanitize(row)
 	}
-	return values
+	return sanitized
 }
 
 func (t *table) isRepartitionSource(shard *storageShard) bool {

@@ -287,7 +287,7 @@ func TestNonForcedDatabaseRebuildKeepsTransactionLogForColdShards(t *testing.T) 
 	}
 	for _, shard := range loaded.ActiveShards() {
 		shard.mu.RLock()
-		cold := shard.srState == COLD
+		cold := shard.state() == COLD
 		shard.mu.RUnlock()
 		if !cold {
 			t.Fatal("fixture unexpectedly materialized a cold shard")
@@ -618,7 +618,7 @@ func TestShardRebuildForwardsConcurrentInsertsViaNext(t *testing.T) {
 			scm.NewString(fmt.Sprintf("%032x", 20001+i)),
 		})
 	}
-	shard.Insert([]string{"id", "payload"}, extraRows, false, nil, false, nil)
+	shard.Insert([]string{"id", "payload"}, extraRows, false, false, nil, false, nil)
 
 	rebuilt := <-rebuiltCh
 	if rebuilt == nil {
@@ -640,7 +640,7 @@ func TestShardRebuildForwardsInsertAcrossSuccessorChain(t *testing.T) {
 	firstSuccessor.storeNext(latestSuccessor)
 	firstSuccessor.nextReady.Store(true)
 
-	source.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(42)}}, false, nil, false, nil)
+	source.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(42)}}, false, false, nil, false, nil)
 
 	if got := source.Count(); got != 1 {
 		t.Fatalf("source count = %d, want 1", got)
@@ -863,7 +863,7 @@ func TestManualRepartitionInsertDeleteUsesTranslationMap(t *testing.T) {
 	oldShard.Insert([]string{"id", "payload"}, [][]scm.Scmer{{
 		scm.NewInt(30001),
 		scm.NewString("transient"),
-	}}, false, nil, false, nil)
+	}}, false, false, nil, false, nil)
 	oldShard.UpdateFunction(oldRecid, false, false, nil)()
 
 	<-done
@@ -1888,7 +1888,8 @@ func TestRepartitionInheritsWeightedIndexesFromEverySource(t *testing.T) {
 func TestRepartitionIndexDefinitionsBoundedAndRecounted(t *testing.T) {
 	var shards []*storageShard
 	for source := 0; source < 32; source++ {
-		shard := &storageShard{t: &table{}, srState: SHARED}
+		shard := &storageShard{t: &table{}}
+		shard.setState(SHARED)
 		for column := 0; column < 6; column++ {
 			name, weight := "hot", 10.0
 			if column > 0 {
@@ -1930,7 +1931,8 @@ func TestRepartitionIndexWarmBudgetAndThreshold(t *testing.T) {
 		{"threshold", []float64{2, 1.99, .5}, 1},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			shard := &storageShard{t: &table{}, srState: SHARED, main_count: 4, columns: map[string]ColumnStorage{}}
+			shard := &storageShard{t: &table{}, main_count: 4, columns: map[string]ColumnStorage{}}
+			shard.setState(SHARED)
 			var definitions []*StorageIndex
 			for i, weight := range test.weights {
 				name := fmt.Sprintf("col%d", i)
@@ -2240,7 +2242,10 @@ func TestRepartitionPostFlipUpdateDoesNotDuplicateRow(t *testing.T) {
 	}()
 	var target *storageShard
 	for _, shard := range topology.shards {
-		if shard.Count() > 0 {
+		// Schema persistence deliberately keeps the freshly published shards
+		// locked. Use their lock-free published population here: the operation
+		// under test must queue behind that lock before touching row storage.
+		if shard.plannerMainRows.Load()+uint32(shard.plannerDeltaRows.Load()) > 0 {
 			target = shard
 			break
 		}
@@ -2476,10 +2481,11 @@ func TestCursorRollbackOfMainDeleteSurvivesRestart(t *testing.T) {
 func TestIndexComputedReadersRespectHeldShardLock(t *testing.T) {
 	for _, mapped := range []bool{false, true} {
 		t.Run(fmt.Sprintf("mapped=%t", mapped), func(t *testing.T) {
-			shard := &storageShard{t: &table{}, srState: SHARED, main_count: 1,
+			shard := &storageShard{t: &table{}, main_count: 1,
 				columns: map[string]ColumnStorage{
 					"raw": &StorageSCMER{values: []scm.Scmer{scm.NewInt(7)}},
 				}}
+			shard.setState(SHARED)
 			release := shard.GetExclusive()
 			defer release()
 			shard.mu.Lock()

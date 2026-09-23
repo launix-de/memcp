@@ -292,6 +292,25 @@ func TestGlobalAggregateComputeAndInsertDoNotDeadlock(t *testing.T) {
 	}
 }
 
+func TestInsertSanitizationDoesNotMutateCallerRows(t *testing.T) {
+	defer setupComputeConcurrencyTest(t)()
+
+	CreateDatabase("compconc", false)
+	tbl, _ := CreateTable("compconc", "caller_rows", Memory, false)
+	tbl.CreateColumn("value", "INT", nil, nil)
+	row := []scm.Scmer{scm.NewString("7")}
+	values := [][]scm.Scmer{row}
+
+	tbl.Insert([]string{"value"}, values, nil, scm.NewNil(), false, nil)
+
+	if !row[0].IsString() || row[0].String() != "7" {
+		t.Fatalf("insert rewrote caller-owned row to %v", row[0])
+	}
+	if len(values) != 1 || len(values[0]) != 1 || !values[0][0].IsString() {
+		t.Fatalf("insert rewrote caller-owned values slice: %v", values)
+	}
+}
+
 func TestFilteredComputeColumnConservativelyRecomputesRepeatedFilter(t *testing.T) {
 	defer setupComputeConcurrencyTest(t)()
 
@@ -337,15 +356,31 @@ func TestFilteredComputeColumnConservativelyRecomputesRepeatedFilter(t *testing.
 	if got := computeCalls.Load(); got != 2 {
 		t.Fatalf("first filtered compute invoked computor %d times, want 2", got)
 	}
+	shard := tbl.Shards[0]
+	shard.mu.RLock()
+	canonicalProxy := shard.columns["cached"]
+	shard.mu.RUnlock()
 
 	tbl.ComputeColumn("cached", []string{"val"}, computor, []string{"val"}, filterGT2)
 	if got := computeCalls.Load(); got != 4 {
 		t.Fatalf("repeated filtered compute invoked computor %d times, want 4 total", got)
 	}
+	shard.mu.RLock()
+	repeatedProxy := shard.columns["cached"]
+	shard.mu.RUnlock()
+	if repeatedProxy != canonicalProxy {
+		t.Fatal("repeated filtered compute replaced the canonical compute proxy")
+	}
 
 	tbl.ComputeColumn("cached", []string{"val"}, computor, []string{"val"}, filterGT1)
 	if got := computeCalls.Load(); got != 7 {
 		t.Fatalf("changing filtered materialization invoked computor %d times, want 7 total", got)
+	}
+	shard.mu.RLock()
+	changedFilterProxy := shard.columns["cached"]
+	shard.mu.RUnlock()
+	if changedFilterProxy != canonicalProxy {
+		t.Fatal("changed filter replaced the canonical compute proxy")
 	}
 }
 

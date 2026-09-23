@@ -88,7 +88,7 @@ type storageShard struct {
 	indexMutex sync.Mutex
 
 	// lazy-loading/shared-resource state
-	srState      SharedState
+	srState      atomic.Uint32
 	lastAccessed uint64 // UnixNano, atomic; updated on GetRead/GetExclusive for LRU eviction
 
 	// Repartition generation tracking. Counters are atomic; generation points to
@@ -299,7 +299,7 @@ func (s *storageShard) exclusiveSizeLocked() uint {
 	// Fixed layout is exact; Go map bucket overhead remains an estimate.
 	result := uint(unsafe.Sizeof(*s)) + 64*uint(len(s.columns)+len(s.deltaColumns)+len(s.tempColumnBytes))
 	result += uint(cap(s.Indexes)) * uint(unsafe.Sizeof((*StorageIndex)(nil)))
-	if s.srState != COLD {
+	if s.state() != COLD {
 		for name, c := range s.columns {
 			if c != nil && s.ownsColumnMemory(name) {
 				result += ownedColumnMemory(c)
@@ -469,7 +469,7 @@ func (s *storageShard) statsSnapshotRLocked() shardStatsSnapshot {
 		mainCount: s.main_count,
 		delta:     len(s.inserts),
 		deletions: s.deletions.Count(),
-		state:     s.srState,
+		state:     s.state(),
 		size:      s.exclusiveSizeLocked(),
 	}
 }
@@ -494,7 +494,7 @@ func (u *storageShard) UnmarshalJSON(data []byte) error {
 	u.columns = make(map[string]ColumnStorage)
 	u.deltaColumns = make(map[string]int)
 	u.deletions.Reset()
-	u.srState = COLD
+	u.setState(COLD)
 	// the rest of the unmarshalling is done in the caller because u.t is nil in the moment
 	return nil
 }
@@ -846,33 +846,38 @@ func (u *storageShard) ensureMainCount(alreadyLocked bool) {
 }
 
 // SharedResource impl for shard with lazy load
-func (s *storageShard) GetState() SharedState { return s.srState }
+func (s *storageShard) GetState() SharedState { return s.state() }
+
+func (s *storageShard) state() SharedState { return SharedState(s.srState.Load()) }
+
+func (s *storageShard) setState(state SharedState) { s.srState.Store(uint32(state)) }
+
 func (s *storageShard) GetRead() func() {
 	s.ensureLoaded()
 	// Ensure main_count is initialized by loading at least one column
 	s.ensureMainCount(false)
-	if s.srState == COLD {
-		s.srState = SHARED
+	if s.state() == COLD {
+		s.setState(SHARED)
 	}
 	atomic.StoreUint64(&s.lastAccessed, uint64(time.Now().UnixNano()))
 	return func() {}
 }
 func (s *storageShard) GetExclusive() func() {
 	s.ensureLoaded()
-	s.srState = WRITE
+	s.setState(WRITE)
 	atomic.StoreUint64(&s.lastAccessed, uint64(time.Now().UnixNano()))
 	return func() {}
 }
 
 func (s *storageShard) ensureLoaded() {
-	if s.srState != COLD {
+	if s.state() != COLD {
 		return
 	}
 	// pre-free memory before loading shard from disk
 	GlobalCache.CheckPressure(int64(len(s.t.Columns)) * int64(Settings.ShardSize) * 16)
 	// double-check under lock to prevent concurrent map writes in load()
 	s.mu.Lock()
-	if s.srState != COLD {
+	if s.state() != COLD {
 		s.mu.Unlock()
 		return
 	}
@@ -880,9 +885,9 @@ func (s *storageShard) ensureLoaded() {
 	s.load(s.t)
 	// memory engine shards stay WRITE to bypass LRU later
 	if s.t.PersistencyMode == Memory {
-		s.srState = WRITE
+		s.setState(WRITE)
 	} else {
-		s.srState = SHARED
+		s.setState(SHARED)
 	}
 	s.mu.Unlock()
 	atomic.StoreUint64(&s.lastAccessed, uint64(time.Now().UnixNano()))
@@ -924,7 +929,7 @@ func shardCleanup(ptr any, freedByType *[numEvictableTypes]int64) bool {
 	for col := range s.columns {
 		s.columns[col] = nil
 	}
-	s.srState = COLD
+	s.setState(COLD)
 	s.mu.Unlock()
 	return true
 }
@@ -1051,7 +1056,7 @@ func cacheShardCleanup(ptr any, freedByType *[numEvictableTypes]int64) bool {
 	}
 	s.t.cacheGeneration.Add(1)
 	// COLD: on next access ensureLoaded re-initialises as empty and re-registers
-	s.srState = COLD
+	s.setState(COLD)
 	s.mu.Unlock()
 	return true
 }
@@ -1070,7 +1075,7 @@ func NewShard(t *table) *storageShard {
 		result.logfile = result.t.schema.persistence.OpenLog(result.uuid.String())
 	}
 	// Newly created shards are live/writable, not cold
-	result.srState = WRITE
+	result.setState(WRITE)
 	return result
 }
 
@@ -2797,7 +2802,7 @@ func (m *ShardMapReducer) FlushSideEffects() {
 	}
 }
 
-func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLocked bool, onFirstInsertId func(int64), isIgnore bool, currentTx *TxContext) uint32 {
+func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLocked bool, inputSanitized bool, onFirstInsertId func(int64), isIgnore bool, currentTx *TxContext) uint32 {
 	ss := SessionStateFromTx(currentTx)
 	// Check table-level user lock (LOCK TABLES): writes block under any lock.
 	// Always call waitTableLock — it handles other-session blocking and
@@ -2842,10 +2847,11 @@ func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLoc
 		return firstNewRecid
 	}
 
-	// Re-apply sanitizers after trigger-free INSERT input preparation.
-	values = t.t.sanitizeInsertRows(columns, values, isIgnore)
-	if len(values) == 0 {
-		return 0 // all rows skipped by sanitizer in INSERT IGNORE mode
+	if !inputSanitized {
+		values = t.t.sanitizeInsertRows(columns, values, isIgnore)
+		if len(values) == 0 {
+			return 0 // all rows skipped by sanitizer in INSERT IGNORE mode
+		}
 	}
 
 	if !alreadyLocked {
@@ -3536,10 +3542,10 @@ func transitionShardEngine(s *storageShard, oldMode, newMode PersistencyMode) {
 		GlobalCache.Remove(s)
 		s.removePersistence()
 		if newMode == Cache && !s.t.isEphemeralQueryTable() {
-			s.srState = SHARED
+			s.setState(SHARED)
 			GlobalCache.AddItem(s, int64(s.exclusiveSizeLocked()), TypeCacheEntry, cacheShardCleanup, shardLastUsed, nil)
 		} else {
-			s.srState = WRITE
+			s.setState(WRITE)
 		}
 
 	case !oldPersisted && newPersisted:
@@ -3564,14 +3570,14 @@ func transitionShardEngine(s *storageShard, oldMode, newMode PersistencyMode) {
 		if newMode == Safe || newMode == Logged {
 			s.logfile = s.t.schema.persistence.OpenLog(s.uuid.String())
 		}
-		s.srState = SHARED
+		s.setState(SHARED)
 		if !s.t.isEphemeralQueryTable() {
 			GlobalCache.AddItem(s, int64(s.exclusiveSizeLocked()), TypeShard, shardCleanup, shardLastUsed, nil)
 		}
 
 	case oldMode == Memory && newMode == Cache:
 		// Memory → Cache: register with CacheManager as TypeCacheEntry
-		s.srState = SHARED
+		s.setState(SHARED)
 		if !s.t.isEphemeralQueryTable() {
 			GlobalCache.AddItem(s, int64(s.exclusiveSizeLocked()), TypeCacheEntry, cacheShardCleanup, shardLastUsed, nil)
 		}
@@ -3579,7 +3585,7 @@ func transitionShardEngine(s *storageShard, oldMode, newMode PersistencyMode) {
 	case oldMode == Cache && newMode == Memory:
 		// Cache → Memory: deregister from CacheManager
 		GlobalCache.Remove(s)
-		s.srState = WRITE
+		s.setState(WRITE)
 
 	case oldMode == Sloppy && (newMode == Safe || newMode == Logged):
 		// Sloppy → Safe/Logged: open logfile
@@ -3637,7 +3643,7 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 	var rollbackProtected NonLockingReadMap.NonBlockingBitMap
 	for {
 		t.mu.Lock()
-		if t.srState != COLD {
+		if t.state() != COLD {
 			if next := t.loadNext(); next != nil {
 				t.mu.Unlock()
 				// lock+unlock the next shard so we don't return too early (sync hazards)
@@ -3705,7 +3711,7 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 	}()
 	result := new(storageShard)
 	result.t = t.t
-	result.srState = WRITE // mark as live so ensureLoaded() won't reset columns
+	result.setState(WRITE) // mark as live so ensureLoaded() won't reset columns
 	result.mu.Lock()       // interlock so no one will rebuild the shard twice
 	// Publish only after result.mu is held. A mutator that observes next can
 	// therefore buffer on the source shard without touching partial state.
