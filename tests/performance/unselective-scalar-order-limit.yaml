@@ -372,6 +372,41 @@ test_cases:
       result_not_contains:
         - "__scalar_access_key_"
 
+  - name: "Projected nested OR lookup uses a batch RecMap extension"
+    sql: |
+      EXPLAIN PHYSICAL
+      SELECT product.id,
+        CASE WHEN product.abo_type IS NOT NULL THEN (
+          SELECT abo.id FROM usol_dataview_abo abo
+          WHERE (abo.user_id = (
+            SELECT imported.customer_id FROM usol_dataview_import_user imported
+            WHERE imported.vu_id = (
+              SELECT conversion.user_id FROM usol_dataview_conversion conversion
+              WHERE conversion.selling_id = product.selling_id LIMIT 1
+            ) LIMIT 1
+          ) OR abo.beneficiary = (
+            SELECT imported.customer_id FROM usol_dataview_import_user imported
+            WHERE imported.vu_id = (
+              SELECT conversion.user_id FROM usol_dataview_conversion conversion
+              WHERE conversion.selling_id = product.selling_id LIMIT 1
+            ) LIMIT 1
+          )) AND abo.abo_type = product.abo_type LIMIT 1
+        ) ELSE NULL END AS abo
+      FROM usol_dataview_product product
+      ORDER BY (
+        SELECT selling.sold_at FROM usol_dataview_selling selling
+        WHERE selling.old_key = product.selling_id LIMIT 1
+      ) DESC
+      LIMIT 72
+    expect:
+      result_contains:
+        - "recmap_order_recset"
+        - "recmap_extend"
+        - "recmap_equi_first_of_mapper"
+        - "$recmap_call"
+      result_not_contains:
+        - "get_or_compute_scoped"
+
   - name: "Projected nested foreign key keeps OR lookup bounded"
     sql: |
       SELECT product.id,

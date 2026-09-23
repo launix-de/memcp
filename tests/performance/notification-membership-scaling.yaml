@@ -61,7 +61,7 @@ setup:
         4000)
 
 test_cases:
-  - name: "Scalar notification order uses a canonical lookup carrier"
+  - name: "Scalar notification order uses a query-local RecMap window"
     sql: |
       EXPLAIN PHYSICAL
       SELECT document.id
@@ -75,11 +75,10 @@ test_cases:
       LIMIT 1
     expect:
       result_contains:
-        - "scalar_order_lookup_carrier"
-        - "canonical_computed_column"
-        - ".lookup:"
+        - "scan_recmap"
+        - "recmap_order_recset"
 
-  - name: "Trivial scalar order stays on the direct lookup path"
+  - name: "Trivial scalar order uses the bounded RecMap path"
     sql: |
       EXPLAIN PHYSICAL
       SELECT document.id
@@ -93,8 +92,8 @@ test_cases:
       LIMIT 1
     expect:
       result_contains:
-        - "scalar_order_lookup_carrier"
-        - "direct_scalar_lookup"
+        - "scan_recmap"
+        - "recmap_order_recset"
       result_not_contains:
         - ".lookup:"
 

@@ -150,7 +150,7 @@ test_cases:
       LIMIT 72
     expect:
       result_contains:
-        - "scan_order_recset"
+        - "recmap_order_recset"
         - "scan_recmap"
         - "recmap_compose"
         - "$recmap_call"
