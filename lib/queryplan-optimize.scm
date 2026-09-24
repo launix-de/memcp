@@ -7136,7 +7136,11 @@ constant projections cannot become ambiguous through duplicate membership. */
 										(define fixed_inputs (filter (merge_unique (map expressions (lambda (expr)
 											(contribution_outer_inputs expr aliases))))
 											(lambda (expr) (not (expression_equal? expr axis)))))
+										/* A nested value can reference an axis missing from the enclosing
+										point/range domain. Do not specialize that incomplete domain:
+										later carrier preparation could treat the aggregate as constant. */
 										(define safe (and (not (nil? cover))
+											(contribution_expr_contains? axis (list (gs_domain stage) (range_stage_domains stage)))
 											(reduce expressions (lambda (ok expr) (and ok (contribution_pure_expr? expr))) true)
 											(empty_list? (qb_group block)) (nil? (qb_limit block)) (nil? (qb_offset block))
 											(not (contribution_expr_contains? axis (list (gs_keys stage)

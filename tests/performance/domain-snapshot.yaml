@@ -208,6 +208,23 @@ test_cases:
       CROSS JOIN (SELECT NULL AS category, 0x32 AS mode UNION SELECT 0, 0x32 UNION SELECT 1, 0x32) p
     expect: *domain_snapshot_results
 
+  - name: "A coordinate used only inside the aggregate payload keeps its outer domain"
+    sql: &nested_coordinate_query |
+      SELECT d.n, COALESCE((SELECT SUM((SELECT h.quantity FROM ds_history h
+        WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1))
+        FROM ds_entity e),0) AS total
+      FROM (SELECT 0 AS n,10 AS x UNION SELECT 1,20 UNION SELECT 2,60) d
+    expect: &nested_coordinate_results
+      rows: 3
+      result_contains:
+        - '{"n": 0, "total": 4000}'
+        - '{"n": 1, "total": 4400}'
+        - '{"n": 2, "total": 4400}'
+  - name: "Repeated nested-coordinate aggregate retains per-row binding"
+    sql: *nested_coordinate_query
+    expect: *nested_coordinate_results
+
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS ds_history"
   - sql: "DROP TABLE IF EXISTS ds_entity"
