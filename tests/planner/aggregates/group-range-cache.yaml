@@ -33,6 +33,89 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS grc_events"
 
 test_cases:
+  - name: "computed upper cuts retain the driver binding inside ordered range caches"
+    sql: |
+      SELECT w.id,
+        (SELECT e.happened_at FROM grc_events e
+          WHERE e.tenant_id = w.tenant_id
+            AND e.happened_at <= LEAST(1200, w.range_to)
+          ORDER BY e.happened_at DESC LIMIT 1) AS latest
+      FROM grc_windows w ORDER BY w.id
+    expect:
+      data:
+        - {id: 1, latest: 999}
+        - {id: 2, latest: 1199}
+        - {id: 3, latest: 1200}
+        - {id: 4, latest: 1200}
+
+  - name: "ordered probes read a direct cut that is not projected"
+    sql: |
+      SELECT w.id,
+        (SELECT e.happened_at FROM grc_events e
+          WHERE e.tenant_id = w.tenant_id AND e.happened_at <= w.range_to
+          ORDER BY e.happened_at DESC LIMIT 1) AS latest
+      FROM grc_windows w ORDER BY w.id
+    expect:
+      data:
+        - {id: 1, latest: 999}
+        - {id: 2, latest: 1499}
+        - {id: 3, latest: 3000}
+        - {id: 4, latest: 3000}
+
+  - name: "ordered probe cuts collect dependencies from another joined source"
+    sql: |
+      SELECT w.id,
+        (SELECT e.happened_at FROM grc_events e
+          WHERE e.tenant_id = w.tenant_id
+            AND e.happened_at <= LEAST(1200, bounds.range_to)
+          ORDER BY e.happened_at DESC LIMIT 1) AS latest
+      FROM grc_windows w JOIN grc_windows bounds ON bounds.id = w.id
+      ORDER BY w.id
+    expect:
+      data:
+        - {id: 1, latest: 999}
+        - {id: 2, latest: 1199}
+        - {id: 3, latest: 1200}
+        - {id: 4, latest: 1200}
+
+  - name: "computed cuts preserve both bounds across aggregate callbacks"
+    sql: |
+      SELECT w.id,
+        (SELECT COUNT(*) FROM grc_events e
+          WHERE e.tenant_id = w.tenant_id
+            AND e.happened_at >= GREATEST(500, w.range_from)
+            AND e.happened_at <= LEAST(2400, w.range_to)) AS event_count
+      FROM grc_windows w ORDER BY w.id
+    expect:
+      data:
+        - {id: 1, event_count: 250}
+        - {id: 2, event_count: 500}
+        - {id: 3, event_count: 701}
+        - {id: 4, event_count: 951}
+
+  - name: "null computed cuts preserve an empty sum"
+    sql: |
+      SELECT w.id,
+        (SELECT SUM(e.amount) FROM grc_events e
+          WHERE e.tenant_id = w.tenant_id
+            AND e.happened_at <= NULLIF(w.range_to, 1000) + 0) AS total
+      FROM grc_windows w ORDER BY w.id
+    expect:
+      data:
+        - {id: 1, total: null}
+        - {id: 2, total: 1500}
+        - {id: 3, total: 3002}
+        - {id: 4, total: 3002}
+
+  - name: "computed cuts reject an unknown driver column"
+    sql: |
+      SELECT (SELECT COUNT(*) FROM grc_events e
+        WHERE e.tenant_id = w.tenant_id
+          AND e.happened_at <= w.missing_cut + 1)
+      FROM grc_windows w
+    expect:
+      error: true
+
   - name: "overlapping ranges compose count sum and average from disjoint cells"
     sql: |
       SELECT w.id,
