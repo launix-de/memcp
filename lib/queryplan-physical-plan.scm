@@ -9950,7 +9950,7 @@ physical decision and preserve its runtime recompile gate. */
 					(scalar_first_probe_physical_operator
 						probe_stages
 						(stage_dependency_graph probe_stages)
-						raw_stage src keys effective_probe_work_rows carrier_work_rows requested_col (quote truth) planning_session)))
+						raw_stage src keys effective_probe_work_rows carrier_work_rows requested_col (quote truth) true planning_session)))
 				(if (and (not (equal? operator (quote recset))) (nil? bound_stage))
 					nil
 					(list
