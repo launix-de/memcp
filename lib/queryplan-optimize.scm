@@ -4259,7 +4259,9 @@ owned by the membership-carrier guard; do not create another consumer guard. */
 					cost_work)
 				(membership_candidate_match_cost candidate_input_rows work)
 				candidate_input_rows 0.55)
-			(planner_cost planner_membership_recset_startup_ns 0 0
+			/* The candidate scan owns its key RecSet; FK projection creates a
+			second, independently allocated driver RecSet. */
+			(planner_cost (* 2 planner_membership_recset_startup_ns) 0 0
 				0 0 (* (+ candidate_rows projected_rows) planner_membership_recset_build_row_ns)
 				(* (+ candidate_rows projected_rows) 8) 0 projection_rows 0.65)
 			projection_rows 0.65)
@@ -4314,7 +4316,7 @@ calibrated components used by the other membership carriers. */
 			candidate_work_rows
 			candidate_match_rows))
 		(planner_cost_add (planner_cost
-			(+ planner_membership_recset_startup_ns
+			(+ (* 2 planner_membership_recset_startup_ns)
 				(* (+
 					(membership_work_value work (quote membership_driver_scan_invocations) 1)
 					(membership_work_value work (quote membership_candidate_scan_invocations) branches))

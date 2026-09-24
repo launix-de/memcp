@@ -8841,7 +8841,7 @@ EXPLAIN PHYSICAL CALIBRATE alternative with result and operator validation. */
 (define planner_membership_expression_operation_row_ns 220)
 (define planner_membership_broad_text_match_row_ns 1)
 (define planner_membership_broad_text_match_byte_ns 3)
-(define planner_membership_recset_startup_ns 1)
+(define planner_membership_recset_startup_ns 10000)
 (define planner_membership_recset_build_row_ns 1)
 (define planner_membership_recset_probe_row_ns 1)
 (define planner_membership_recset_aggregate_row_ns 129)

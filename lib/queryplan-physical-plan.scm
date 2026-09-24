@@ -5689,7 +5689,8 @@ RecSet; membership edges retain their own physical operators. */
 			(qassoc_get facts (quote membership_candidate_broad_text_match_bytes) 0)
 			candidate_repeat_fraction))
 		(planner_cost_add (planner_cost
-			(+ (* (+ driver_scan_invocations (* batches candidate_scan_invocations))
+			(+ (* 2 planner_membership_recset_startup_ns)
+				(* (+ driver_scan_invocations (* batches candidate_scan_invocations))
 				planner_membership_scan_invocation_ns)
 				(* batches driver_scan_invocations
 					planner_membership_ordered_scan_invocation_ns))

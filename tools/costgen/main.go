@@ -1602,7 +1602,7 @@ func rowFeatures(row calibrationRow) ([]float64, error) {
 		}
 		return []float64{
 			scanInvocations, scanRows, filterValues, mapValues, expressionOperations,
-			1, *row.CandidateRows + *row.ProjectedDriverRows, adaptiveProbeRows,
+			2, *row.CandidateRows + *row.ProjectedDriverRows, adaptiveProbeRows,
 			cacheStartup, cacheBuildRows, 0,
 			aggregateDriverRows, 0, *row.CandidateBroadTextMatchRows,
 			*row.CandidateBroadTextMatchBytes, orderedScanInvocations, 0,
@@ -1654,7 +1654,7 @@ func rowFeatures(row calibrationRow) ([]float64, error) {
 			candidateWorkRows * *row.CandidateFilterColumns,
 			0,
 			candidateWorkRows * *row.CandidateExpressionOperations,
-			0,
+			2,
 			projectionRows,
 			0, 0, 0, 0, 0, orderedDriverWork,
 			*row.CandidateBroadTextMatchRows * repeatFraction,
@@ -1687,7 +1687,7 @@ func rowFeatures(row calibrationRow) ([]float64, error) {
 			*row.DriverInputRows**row.DriverFilterColumns + candidateWorkRows**row.CandidateFilterColumns,
 			projectionRows,
 			*row.DriverInputRows**row.DriverExpressionOperations + candidateWorkRows**row.CandidateExpressionOperations,
-			1, projectionRows, 0, 0, 0, 0, 0, 0,
+			2, projectionRows, 0, 0, 0, 0, 0, 0,
 			*row.CandidateBroadTextMatchRows * candidateFraction,
 			*row.CandidateBroadTextMatchBytes * candidateFraction,
 			orderedScanInvocations, 0, 0,
@@ -1869,6 +1869,11 @@ func solve(exactRows, allRows []observation, baseline constants) (constants, err
 		trial.orderedRecsetSortUnitNS = value
 		selected = acceptDecisionImprovingRefinement(allRows, selected, trial)
 	}
+	if value, ok := fitRecsetStartup(allRows, selected); ok {
+		trial := selected
+		trial.recsetStartupNS = value
+		selected = acceptDecisionImprovingRefinement(allRows, selected, trial)
+	}
 	if value, ok := fitDownstreamProbeRow(allRows, selected); ok {
 		trial := selected
 		trial.downstreamProbeRowNS = value
@@ -1914,6 +1919,38 @@ func acceptDecisionImprovingRefinement(rows []observation, current, trial consta
 		return trial
 	}
 	return current
+}
+
+func fitRecsetStartup(rows []observation, c constants) (int64, bool) {
+	byCase := make(map[string][]observation)
+	for _, row := range rows {
+		if !row.censored && row.component == "" && len(row.x) > 5 {
+			byCase[row.caseName] = append(byCase[row.caseName], row)
+		}
+	}
+	values := make([]float64, 0)
+	without := c
+	without.recsetStartupNS = 0
+	for _, alternatives := range byCase {
+		for leftIndex, left := range alternatives {
+			for _, right := range alternatives[leftIndex+1:] {
+				deltaWork := left.x[5] - right.x[5]
+				if deltaWork == 0 {
+					continue
+				}
+				value := ((left.y - right.y) -
+					(estimatedNS(left, without) - estimatedNS(right, without))) / deltaWork
+				if value >= 1 && !math.IsInf(value, 0) && !math.IsNaN(value) {
+					values = append(values, value)
+				}
+			}
+		}
+	}
+	if len(values) == 0 {
+		return 0, false
+	}
+	sort.Float64s(values)
+	return int64(math.Round(values[len(values)/2])), true
 }
 
 func fitBroadTextResidualPerByte(rows []observation, c constants) (int64, bool) {

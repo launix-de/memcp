@@ -1152,7 +1152,9 @@ test_cases:
           LIMIT 2
         expect:
           contains:
-            - "recset_project_join"
+            # Twelve broad candidate keys against four driver rows make the
+            # measured key-index fallback cheaper than target projection.
+            - "recset_key_index"
             - "recset_union"
             - "scan_order"
             - "in_dv_doc"
@@ -1177,7 +1179,7 @@ test_cases:
             - "candidate_keyset"
             - "driver_order_membership_probe"
             - "ordered_batch_accept"
-            - "recset_project_join"
+            - "recset_key_index"
             - "recset_union"
             - "scan_order"
             - "chosen"
