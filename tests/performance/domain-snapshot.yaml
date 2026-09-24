@@ -224,6 +224,72 @@ test_cases:
     sql: *nested_coordinate_query
     expect: *nested_coordinate_results
 
+  - name: "First-event intervals combine with dynamic state predicates"
+    setup:
+      - sql: "DROP TABLE IF EXISTS ds_conversion_history"
+      - sql: "CREATE TABLE ds_conversion_history (id INT PRIMARY KEY, entity_id INT, coordinate INT, quantity INT, kind VARCHAR(10), UNIQUE KEY entity_coordinate (entity_id, coordinate)) ENGINE=memory"
+      - scm: |
+          (begin
+            (insert (table "memcp-tests" "ds_conversion_history") '("id" "entity_id" "coordinate" "quantity" "kind")
+              (map (produceN 4000) (lambda (i)
+                (list (+ i 1) (+ i 1) 0 1 (if (equal? (mod i 4) 0) "T" "F")))))
+            (insert (table "memcp-tests" "ds_conversion_history") '("id" "entity_id" "coordinate" "quantity" "kind")
+              (map (produceN 4000) (lambda (i)
+                (list (+ i 4001) (+ i 1) (+ i 10) (+ 2 (mod i 3)) "P"))))
+            (insert (table "memcp-tests" "ds_conversion_history") '("id" "entity_id" "coordinate" "quantity" "kind")
+              (map (produceN 1000) (lambda (j) (begin
+                (define i (+ 1 (* j 4)))
+                (list (+ i 8001) (+ i 1) (+ i 12) 5 "T")))))
+            (rebuild (table "memcp-tests" "ds_conversion_history")) true)
+    sql: |
+      SELECT w.window_id,p.category,COALESCE((SELECT SUM((SELECT h.quantity
+        FROM ds_conversion_history h WHERE h.entity_id=e.id AND h.coordinate<=w.hi
+        ORDER BY h.coordinate DESC LIMIT 1))
+        FROM ds_entity e
+        WHERE (p.category IS NULL OR e.category=p.category)
+          AND (SELECT h.coordinate FROM ds_conversion_history h WHERE h.entity_id=e.id
+            AND (SELECT k.active FROM ds_kind k WHERE k.name=h.kind LIMIT 1)=1
+            ORDER BY h.coordinate ASC LIMIT 1) BETWEEN w.lo AND w.hi
+          AND ((SELECT k.active FROM ds_kind k WHERE k.name=(SELECT h.kind
+            FROM ds_conversion_history h WHERE h.entity_id=e.id AND h.coordinate<=w.lo
+            ORDER BY h.coordinate DESC LIMIT 1) LIMIT 1)=0
+            OR EXISTS(SELECT 1 FROM ds_conversion_history h WHERE h.entity_id=e.id
+              AND h.coordinate BETWEEN w.lo AND w.hi
+              AND (SELECT k.active FROM ds_kind k WHERE k.name=h.kind LIMIT 1)=0 LIMIT 1))
+          AND EXISTS(SELECT 1 FROM ds_conversion_history h WHERE h.entity_id=e.id
+            AND h.coordinate<=w.hi
+            AND (SELECT k.active FROM ds_kind k WHERE k.name=h.kind LIMIT 1)=1 LIMIT 1)),0) AS total
+      FROM (SELECT 0 AS window_id,0 AS lo,15 AS hi UNION SELECT 1,500,550
+        UNION SELECT 2,1000,1030 UNION SELECT 3,10,10 UNION SELECT 4,4010,4100
+        UNION SELECT 5,0,15) w
+      CROSS JOIN (SELECT NULL AS category UNION SELECT 0 UNION SELECT 1) p
+    expect:
+      rows: 18
+      result_contains:
+        - "{\"window_id\": 0, \"category\": null, \"total\": 10}"
+        - "{\"window_id\": 0, \"category\": 0, \"total\": 5}"
+        - "{\"window_id\": 0, \"category\": 1, \"total\": 5}"
+        - "{\"window_id\": 1, \"category\": null, \"total\": 98}"
+        - "{\"window_id\": 1, \"category\": 0, \"total\": 60}"
+        - "{\"window_id\": 1, \"category\": 1, \"total\": 38}"
+        - "{\"window_id\": 2, \"category\": null, \"total\": 59}"
+        - "{\"window_id\": 2, \"category\": 0, \"total\": 35}"
+        - "{\"window_id\": 2, \"category\": 1, \"total\": 24}"
+        - "{\"window_id\": 3, \"category\": null, \"total\": 0}"
+        - "{\"window_id\": 3, \"category\": 0, \"total\": 0}"
+        - "{\"window_id\": 3, \"category\": 1, \"total\": 0}"
+        - "{\"window_id\": 4, \"category\": null, \"total\": 0}"
+        - "{\"window_id\": 4, \"category\": 0, \"total\": 0}"
+        - "{\"window_id\": 4, \"category\": 1, \"total\": 0}"
+        - "{\"window_id\": 5, \"category\": null, \"total\": 10}"
+        - "{\"window_id\": 5, \"category\": 0, \"total\": 5}"
+        - "{\"window_id\": 5, \"category\": 1, \"total\": 5}"
+    timing_aggregation: total
+    warmup: 0
+    timing_samples: 2
+    threshold_ms: 20000
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS ds_conversion_history"
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS ds_history"
