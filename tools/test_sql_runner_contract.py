@@ -310,28 +310,65 @@ class UpgradeWorkflowContractTest(unittest.TestCase):
 
     def select_refs(self, requested, base=""):
         import subprocess
-        step = self.jobs["versions"]["steps"][0]
+        step = next(step for step in self.jobs["versions"]["steps"]
+                    if step.get("id") == "refs")
         with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            subprocess.run(["git", "init", "-b", "master"], cwd=repo,
+                           check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "upgrade@example.invalid"],
+                           cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.name", "Upgrade Test"], cwd=repo,
+                           check=True)
+            commits = []
+            for number in range(3):
+                (repo / "revision").write_text(str(number))
+                subprocess.run(["git", "add", "revision"], cwd=repo, check=True)
+                subprocess.run(["git", "commit", "-m", "revision " + str(number)],
+                               cwd=repo, check=True, capture_output=True)
+                commits.append(subprocess.run(
+                    ["git", "rev-parse", "HEAD"], cwd=repo, check=True,
+                    capture_output=True, text=True).stdout.strip())
+            subprocess.run(["git", "tag", "upgrade-release-0.1", commits[0]],
+                           cwd=repo, check=True)
+            subprocess.run(["git", "tag", "upgrade-release-0.2", commits[1]],
+                           cwd=repo, check=True)
+            subprocess.run(["git", "tag", "unrelated-release", commits[0]],
+                           cwd=repo, check=True)
+            subprocess.run(["git", "update-ref", "refs/remotes/origin/master", commits[2]],
+                           cwd=repo, check=True)
             output = Path(tmp) / "output"
             env = dict(os.environ, REQUESTED_REFS=requested, PR_BASE_REF=base,
                        GITHUB_OUTPUT=str(output))
-            result = subprocess.run(["bash", "-c", step["run"]], env=env, capture_output=True)
+            result = subprocess.run(["bash", "-c", step["run"]], cwd=repo,
+                                    env=env, capture_output=True)
             refs = None
             if output.exists():
-                refs = json.loads(output.read_text().removeprefix("refs="))
-            return result.returncode, refs
+                refs = json.loads(output.read_text().removeprefix("predecessors="))
+            return result.returncode, refs, commits
 
-    def test_predecessor_defaults_and_deduplication(self):
-        self.assertEqual(self.select_refs("[]", "abc123"), (0, ["abc123"]))
-        self.assertEqual(self.select_refs("[]"), (0, ["master"]))
-        self.assertEqual(self.select_refs('["v0.1", "master", "v0.1"]'), (0, ["v0.1", "master"]))
-        self.assertEqual(self.select_refs(json.dumps(["master"] * 17)), (0, ["master"]))
+    def test_previous_master_and_every_release_pin_are_selected(self):
+        status, refs, commits = self.select_refs("[]")
+        self.assertEqual(status, 0)
+        self.assertEqual(refs, [
+            {"ref": commits[2], "label": "previous-master"},
+            {"ref": commits[0], "label": "upgrade-release-0.1"},
+            {"ref": commits[1], "label": "upgrade-release-0.2"},
+        ])
+
+    def test_requested_refs_are_additive_and_commits_are_deduplicated(self):
+        status, refs, commits = self.select_refs(
+            '["upgrade-release-0.1", "master", "upgrade-release-0.1"]', "master")
+        self.assertEqual(status, 0)
+        self.assertEqual([entry["ref"] for entry in refs],
+                         [commits[2], commits[0], commits[1]])
+        self.assertEqual(refs[0]["label"], "previous-master")
 
     def test_predecessor_invalid_input_does_not_publish_matrix(self):
         for value in ("invalid JSON", '"master"', "null", "{}", "[1]", '[""]', '["  "]',
                       json.dumps(["ref" + str(i) for i in range(17)])):
             with self.subTest(value=value):
-                status, refs = self.select_refs(value)
+                status, refs, _commits = self.select_refs(value)
                 self.assertNotEqual(status, 0)
                 self.assertIsNone(refs)
 
