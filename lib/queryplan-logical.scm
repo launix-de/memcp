@@ -6700,12 +6700,20 @@ names in projections, predicates, and correlated subqueries. */
 									(neumann_fail "untangle_query" "window function is not allowed in WHERE")
 									true)
 								(define where_result (untangle_where_with_stages rewritten_where joined_expr_outer_sources joined_expr_ctx))
-								(define window_expr_ctx (make_uctx joined_expr_ctx (list
+								/* Queries without window expressions do not need the additional
+								row-domain context or its stage/source unions. */
+								(define has_window_expr (or
+									(expr_contains_window? rewritten_fields)
+									(reduce rewritten_order (lambda (found item)
+										(or found (expr_contains_window? (car item)))) false)
+									(expr_contains_window? rewritten_hidden)))
+								(define window_expr_ctx (if has_window_expr (make_uctx joined_expr_ctx (list
 									(list (quote window-row-condition) (nth where_result 0))
 									(list (quote window-row-stages) (merge_unique (list
 										source_stages (qb_stages block) (nth source_join_result 1) (nth where_result 1))))
 									(list (quote local-sources) (merge_unique (list
-										untangled_sources source_join_stage_sources (nth where_result 2)))))))
+										untangled_sources source_join_stage_sources (nth where_result 2))))))
+									joined_expr_ctx))
 								(define field_result (untangle_fields_with_stages
 									rewritten_fields
 									joined_expr_outer_sources window_expr_ctx))

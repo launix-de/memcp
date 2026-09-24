@@ -153,5 +153,12 @@ test_cases:
     expect:
       error: true
 
+  - name: "Window appearing only in ORDER BY retains the filtered partition"
+    sql: |
+      SELECT id FROM wgb_data WHERE id <> 6 AND id <> 5
+      ORDER BY SUM(amount) OVER (PARTITION BY week_date) DESC, id
+    expect:
+      data: [{id: 1}, {id: 2}, {id: 3}, {id: 4}]
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS wgb_data"
