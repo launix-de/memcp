@@ -1775,10 +1775,11 @@ outer joins. */
 		(define scalar_order_base_stage (and (not query_input)
 			(compatible_scalar_order_aggregates? ags)))
 		/* Aggregate column names belong to the immutable logical stage. Prepared
-		input and rewritten descriptors below affect execution only. Base aggregate
+		input and RecMap rewrites below affect execution only: removing a scalar
+		alias must not rename aggregate columns read by the stage output. Base aggregate
 		columns use their direct physical builder and need no canonical list here. */
 		(define aggregate_cols (if (or query_input scalar_order_base_stage)
-			(map ags (lambda (ag) (aggregate_col_name_using src ag)))
+			(map ags (lambda (ag) (aggregate_col_name_using logical_src ag)))
 			'()))
 		(define scalar_aggregate_stage (scalar_aggregate_probe_stage? stage))
 		(define prepared_src (if (query_block? optimized_src)
