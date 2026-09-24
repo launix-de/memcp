@@ -265,6 +265,19 @@ test_cases:
   - name: Scalar and two array bindings execute in source order
     sql: "SELECT id FROM cg_rows WHERE id > 0 AND id IN (1,2,3) AND label NOT IN ('x','y') ORDER BY id LIMIT 4"
     expect: {data: [{id: 1}, {id: 2}, {id: 3}]}
+  - name: Reused computed IN index formula reads each current array
+    scm: |
+      (begin
+        (define cache (newcachemap)) (define sess (newsession))
+        (define result (newsession)) (result "sum" 0)
+        (map '("1,2" "3,4" "2,4" "4,4,NULL" "1") (lambda (rhs)
+          (sql_execute_formula sess nil
+            (cached_parse cache (list parse_sql) "memcp-tests"
+              (concat "SELECT id FROM cg_rows WHERE (id IN (" rhs "))+1 = 2") nil "root" sess true)
+            (lambda (row) (result "sum" (+ (result "sum") (cadr row)))) (lambda (_fields) nil))))
+        (if (and (equal? (result "sum") 21) (equal? (count (cache)) 1)) "ok"
+          (error "computed IN formula retained an earlier array")))
+    expect: {data: ["ok"]}
   - name: "Literal parameterizer compiles natively"
     scm: |
       (if (equal? (jit? (jit parameterize_sql_select_literals)) (jit-enabled?))
