@@ -6345,7 +6345,8 @@ RecSet; membership edges retain their own physical operators. */
 			(qassoc_get facts (quote membership_candidate_broad_text_match_bytes) 0)
 			candidate_repeat_fraction))
 		(planner_cost_add (planner_cost
-			(+ (* (+ driver_scan_invocations (* batches candidate_scan_invocations))
+			(+ (* 2 planner_membership_recset_startup_ns)
+				(* (+ driver_scan_invocations (* batches candidate_scan_invocations))
 				planner_membership_scan_invocation_ns)
 				(* batches driver_scan_invocations
 					planner_membership_ordered_scan_invocation_ns))
@@ -6729,6 +6730,7 @@ scalar comparison work rather than an uncalibrated multiplier. */
 								(membership_downstream_sources (qb_sources block) src membership)
 								alias raw_condition))
 								(count (expr_probe_stages raw_condition)))
+							(count (expr_probe_stages raw_condition))
 							(not row_number_membership_consumer)
 							source_order_partitioning
 							(quote single_source)
@@ -7977,6 +7979,7 @@ until the caller has selected this physical alternative. */
 				(+ (count (acceptance_required_sources
 					remaining_sources default_alias final_condition))
 					(count (expr_probe_stages final_condition)))
+				(count (expr_probe_stages final_condition))
 				true
 				driver_order_partitioning
 				(quote ordered_join_stream) planning_session (planner_context_tx facts))))
@@ -9662,6 +9665,9 @@ carrier remains on the measured direct path and is never built eagerly. */
 							(count (merge_unique (list
 								(expr_probe_stages final_condition)
 								(physical_scalar_truth_plan_stages scalar_plan)))))
+						(count (merge_unique (list
+							(expr_probe_stages final_condition)
+							(physical_scalar_truth_plan_stages scalar_plan))))
 						(not row_number_membership_consumer)
 						current_order_partitioning
 						(quote join_leaf) planning_session planning_tx)))

@@ -5029,7 +5029,7 @@ candidate RecSet. */
 /* Cost one physical tree edge once and return (strategy RecSet-expression).
 Consumers decide whether that RecSet is their scan carrier or a membership
 filter; they must not reconstruct the choice from enclosing block facts. */
-(define recset_project_join_plan_for_membership_using (lambda (src membership consumer driver_rows_override allow_ordered_batch batch_prepares_candidate prefiltered_driver_expr downstream_probe_branches allow_driver_probe driver_order_partitioning decision_scope planning_session tx)
+(define recset_project_join_plan_for_membership_using (lambda (src membership consumer driver_rows_override allow_ordered_batch batch_prepares_candidate prefiltered_driver_expr downstream_probe_branches downstream_full_preparation_branches allow_driver_probe driver_order_partitioning decision_scope planning_session tx)
 	(begin
 		(define stage (nth membership 0))
 		(define driver_order_partitioned (if (nil? driver_order_partitioning)
@@ -5069,7 +5069,12 @@ filter; they must not reconstruct the choice from enclosing block facts. */
 			cost formula owns the number of rows that actually reach those branches. */
 			(max (coalesceNil downstream_probe_branches 0)
 				(qassoc_get facts (quote membership_downstream_probe_branches) 0))))
-		(define cost_facts (qassoc_set consumer_facts
+		(define preparation_facts (qassoc_set consumer_facts
+			(quote membership_downstream_full_preparation_branches)
+			(min (qassoc_get consumer_facts (quote membership_downstream_probe_branches) 0)
+				(max (coalesceNil downstream_full_preparation_branches 0)
+					(qassoc_get facts (quote membership_downstream_full_preparation_branches) 0)))))
+		(define cost_facts (qassoc_set preparation_facts
 			(quote membership_driver_order_partitioned) driver_order_partitioned))
 		(define driver_probe_supported (and allow_driver_probe
 			(membership_driver_subscan_supported? stage)))
@@ -5433,7 +5438,8 @@ filter; they must not reconstruct the choice from enclosing block facts. */
 							(list "estimate_population" (string estimate_population))
 							(list "estimate_coverage" (string estimate_coverage))
 							(list "probe_branches" (qassoc_get facts (quote membership_candidate_probe_branches) 1))
-							(list "downstream_probe_branches" (qassoc_get facts (quote membership_downstream_probe_branches) 0))
+							(list "downstream_probe_branches" (qassoc_get cost_facts (quote membership_downstream_probe_branches) 0))
+							(list "downstream_full_preparation_branches" (qassoc_get cost_facts (quote membership_downstream_full_preparation_branches) 0))
 							(list "selectivity_class" (string (qassoc_get facts (quote membership_selectivity_class) (quote unknown))))
 							(list "candidate_scan_invocations" (qassoc_get facts (quote membership_candidate_scan_invocations) 1))
 							(list "candidate_filter_columns" (qassoc_get facts (quote membership_candidate_filter_columns) 0))
@@ -5492,7 +5498,7 @@ candidate-keyset choice replaces the marker with a projected RecSet carrier. */
 (define recset_project_join_expr_for_membership_using (lambda (src membership consumer driver_rows_override allow_ordered_batch)
 	(begin
 		(define plan (recset_project_join_plan_for_membership_using
-			src membership consumer driver_rows_override allow_ordered_batch false nil 0 true nil
+			src membership consumer driver_rows_override allow_ordered_batch false nil 0 0 true nil
 			(quote expression) nil nil))
 		(if (and (not (nil? plan)) (equal? (car plan) "candidate_keyset"))
 			(cadr plan)
@@ -7198,7 +7204,7 @@ state through an assoc and one-element payload lists adds no semantics. */
 						/* This marker runs in the group fill's input filter, before
 						the residual predicates. The output LIMIT does not bound its
 						probes: every input row can reach this call. */
-						src term (quote aggregate) (planner_source_row_count src) false false nil 0 true nil
+						src term (quote aggregate) (planner_source_row_count src) false false nil 0 0 true nil
 						(quote group_fill) (planner_context_session facts) (planner_context_tx facts)))
 					(if (and (not (nil? plan)) (equal? (car plan) "candidate_keyset"))
 						(list term (membership_recset_var src term) (cadr plan)) nil))))
@@ -7211,7 +7217,7 @@ state through an assoc and one-element payload lists adds no semantics. */
 				nil
 				(begin
 					(define plan (recset_project_join_plan_for_membership_using
-						src membership (quote aggregate) (planner_source_row_count src) false false nil 0 true nil
+						src membership (quote aggregate) (planner_source_row_count src) false false nil 0 0 true nil
 						(quote group_fill) (planner_context_session facts) (planner_context_tx facts)))
 					(if (and (not (nil? plan)) (equal? (car plan) "candidate_keyset"))
 						(cadr plan) nil)))
@@ -8866,7 +8872,7 @@ EXPLAIN PHYSICAL CALIBRATE alternative with result and operator validation. */
 (define planner_membership_expression_operation_row_ns 220)
 (define planner_membership_broad_text_match_row_ns 1)
 (define planner_membership_broad_text_match_byte_ns 3)
-(define planner_membership_recset_startup_ns 1)
+(define planner_membership_recset_startup_ns 10000)
 (define planner_membership_recset_build_row_ns 1)
 (define planner_membership_recset_probe_row_ns 1)
 (define planner_membership_recset_aggregate_row_ns 129)

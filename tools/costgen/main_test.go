@@ -110,6 +110,15 @@ func TestRowFeaturesKeepsBroadTextRowsAndBytesSeparate(t *testing.T) {
 	if features[13] != 100 || features[14] != 819200 {
 		t.Fatalf("broad text features = (%v, %v), want (100, 819200)", features[13], features[14])
 	}
+	row.Plan = "driver_order_membership_probe"
+	driverFeatures, err := rowFeatures(row)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if driverFeatures[13] != 100 || driverFeatures[14] != 819200 {
+		t.Fatalf("driver broad text features = (%v, %v), want (100, 819200)",
+			driverFeatures[13], driverFeatures[14])
+	}
 }
 
 func TestRowFeaturesModelsOrderedJoinAlternatives(t *testing.T) {
@@ -232,7 +241,7 @@ func TestRowFeaturesModelsAdaptiveOrderedBatchWork(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if features[0] != 9 || features[1] != 1740 || features[2] != 800 ||
+	if features[0] != 9 || features[1] != 1740 || features[2] != 800 || features[5] != 2 ||
 		features[4] != 1200 || features[6] != 1240 {
 		t.Fatalf("adaptive features = %v", features)
 	}
@@ -299,8 +308,19 @@ func TestRowFeaturesChargesOrderedProjectedRecsetSortWork(t *testing.T) {
 	if features[17] != 125 {
 		t.Fatalf("ordered RecSet sort work = %v, want 125", features[17])
 	}
-	if features[18] != 50 {
-		t.Fatalf("downstream probe rows = %v, want 50", features[18])
+	if features[5] != 2 {
+		t.Fatalf("projected RecSet startups = %v, want 2", features[5])
+	}
+	if features[18] != 6 {
+		t.Fatalf("downstream probe rows = %v, want 6", features[18])
+	}
+	row.DownstreamFullPreparationBranches = value(1)
+	features, err = rowFeatures(row)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if features[18] != 28 {
+		t.Fatalf("split downstream probe rows = %v, want 28", features[18])
 	}
 }
 
@@ -378,6 +398,19 @@ func TestFitDownstreamProbeRowUsesDecisionOrdering(t *testing.T) {
 	}
 }
 
+func TestFitRecsetStartupUsesPairedCarrierOverhead(t *testing.T) {
+	candidate, driver := make([]float64, 19), make([]float64, 19)
+	candidate[5], driver[5] = 2, 1
+	rows := []observation{
+		{caseName: "small", plan: "candidate_keyset", y: 19_000, x: candidate},
+		{caseName: "small", plan: "driver_order_membership_probe", y: 10_000, x: driver},
+	}
+	value, ok := fitRecsetStartup(rows, constants{})
+	if !ok || value != 9_000 {
+		t.Fatalf("recset startup = (%d, %v), want (9000, true)", value, ok)
+	}
+}
+
 func TestFitOrderedScanInvocationUsesExactBatchObservations(t *testing.T) {
 	features := make([]float64, 19)
 	features[15] = 4
@@ -408,7 +441,7 @@ func TestRowFeaturesModelsPrefilteredCandidateWork(t *testing.T) {
 		t.Fatal(err)
 	}
 	// candidate work=200, matches=20, projection=420.
-	if features[0] != 3 || features[1] != 10620 || features[2] != 10200 || features[5] != 1 ||
+	if features[0] != 3 || features[1] != 10620 || features[2] != 10200 || features[5] != 2 ||
 		features[3] != 420 || features[4] != 20200 || features[6] != 420 ||
 		features[13] != 200 || features[14] != 1600 {
 		t.Fatalf("prefiltered features = %v", features)

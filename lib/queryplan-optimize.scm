@@ -4147,9 +4147,13 @@ physical alternative. */
 		(define filter_value_rows (+
 			(membership_candidate_filter_value_rows candidate_input_rows work)
 			(* driver_rows (membership_work_value work (quote membership_driver_filter_columns) 0))))
+		(define driver_map_rows (membership_work_value work
+			(quote membership_driver_map_rows)
+			(membership_projected_driver_rows
+				candidate_input_rows candidate_rows driver_rows work)))
 		(define map_value_rows (+
 			(* candidate_rows candidate_map_columns)
-			(* (membership_projected_driver_rows candidate_input_rows candidate_rows driver_rows work)
+			(* driver_map_rows
 				(membership_work_value work (quote membership_driver_map_columns) 0))))
 		(define expression_operation_rows (+
 			(membership_candidate_expression_operation_rows candidate_input_rows work)
@@ -4205,6 +4209,15 @@ owned by the membership-carrier guard; do not create another consumer guard. */
 				(list projected_rows sort_work 0 (quote ordered_inverse_recset))
 				(list visited_rows 0 visited_rows (quote ordered_base_membership)))))))
 
+(define membership_candidate_match_cost (lambda (candidate_input_rows work)
+	(planner_cost 0
+		(+
+			(* (membership_work_value work (quote membership_candidate_broad_text_match_rows) 0)
+				planner_membership_broad_text_match_row_ns)
+			(* (membership_work_value work (quote membership_candidate_broad_text_match_bytes) 0)
+				planner_membership_broad_text_match_byte_ns))
+		0 0 0 0 0 0 candidate_input_rows 0.55)))
+
 (define membership_projection_cost (lambda (candidate_input_rows candidate_rows driver_rows work)
 	(begin
 		/* FK projection must visit the target relation even when the downstream
@@ -4227,33 +4240,45 @@ owned by the membership-carrier guard; do not create another consumer guard. */
 			(* consumer_sort_work planner_membership_ordered_recset_sort_unit_ns)
 			(* consumer_probe_rows planner_membership_recset_probe_row_ns)
 			0 0 0 0 0 consumer_work_rows 0.75))
+		/* An ordered candidate carrier performs its scan/sort over the complete
+		projected RecSet, but late materialization invokes the wide mapper only for
+		the bounded result window. Independently prepared downstream structures
+		opt out explicitly because their population is not controlled by LIMIT. */
+		(define bounded_output_rows (if
+			(membership_work_value work (quote membership_order_limit_driver) false)
+			(min driver_rows projected_rows)
+			projected_rows))
+		(define cost_work (qassoc_set work
+			(quote membership_driver_map_rows) bounded_output_rows))
 		(define base_cost (planner_cost_add (planner_cost_add
 			(planner_cost_add
 				(membership_common_scan_cost candidate_input_rows candidate_rows consumer_work_rows
 					(membership_work_value work (quote membership_candidate_map_columns) 1)
 					(membership_work_value work (quote membership_ordered_scan_invocations)
 						(if (membership_work_value work (quote membership_order_limit_driver) false) 1 0))
-					work)
-				(planner_cost 0
-					(+
-						(* (membership_work_value work (quote membership_candidate_broad_text_match_rows) 0)
-							planner_membership_broad_text_match_row_ns)
-						(* (membership_work_value work (quote membership_candidate_broad_text_match_bytes) 0)
-							planner_membership_broad_text_match_byte_ns))
-					0 0 0 0 0 0 candidate_input_rows 0.55)
+					cost_work)
+				(membership_candidate_match_cost candidate_input_rows work)
 				candidate_input_rows 0.55)
-			(planner_cost planner_membership_recset_startup_ns 0 0
+			/* The candidate scan owns its key RecSet; FK projection creates a
+			second, independently allocated driver RecSet. */
+			(planner_cost (* 2 planner_membership_recset_startup_ns) 0 0
 				0 0 (* (+ candidate_rows projected_rows) planner_membership_recset_build_row_ns)
 				(* (+ candidate_rows projected_rows) 8) 0 projection_rows 0.65)
 			projection_rows 0.65)
 			candidate_cache_cost projection_rows 0.65))
-		/* LIMIT brakes the final scan, not an independently prepared scalar
-		truth carrier. Do not discount downstream work until the physical
-		consumer explicitly represents bounded probes instead of full preparation.
-		Keep this population in sync with tools/costgen's candidate feature. */
+		/* Per-row continuation probes sit behind the ordered consumer and therefore
+		share its bounded output population. Scalar truth carriers are prepared
+		independently and retain the complete projected population. Keep the split in
+		sync with tools/costgen's candidate feature. */
+		(define downstream_branches
+			(membership_work_value work (quote membership_downstream_probe_branches) 0))
+		(define full_preparation_branches (min downstream_branches
+			(membership_work_value work
+				(quote membership_downstream_full_preparation_branches) 0)))
+		(define bounded_branches (- downstream_branches full_preparation_branches))
 		(define downstream_cost (planner_membership_downstream_probe_cost
-			(* projected_rows
-				(membership_work_value work (quote membership_downstream_probe_branches) 0))))
+			(+ (* bounded_output_rows bounded_branches)
+				(* projected_rows full_preparation_branches))))
 		(define carrier_cost (planner_cost_add
 			(planner_cost_add base_cost adaptive_consumer_cost projected_rows 0.65)
 			downstream_cost projected_rows 0.65))
@@ -4291,7 +4316,7 @@ calibrated components used by the other membership carriers. */
 			candidate_work_rows
 			candidate_match_rows))
 		(planner_cost_add (planner_cost
-			(+ planner_membership_recset_startup_ns
+			(+ (* 2 planner_membership_recset_startup_ns)
 				(* (+
 					(membership_work_value work (quote membership_driver_scan_invocations) 1)
 					(membership_work_value work (quote membership_candidate_scan_invocations) branches))
@@ -4363,7 +4388,7 @@ calibrated components used by the other membership carriers. */
 		(define driver_input_rows (membership_driver_input_rows driver_rows work))
 		(define cache_backed
 			(membership_work_value work (quote membership_candidate_cache_backed) false))
-		(define base_cost (planner_cost_add
+		(define scan_cost (planner_cost_add
 			(membership_common_scan_cost candidate_input_rows candidate_rows visited_rows
 				(membership_work_value work
 					(if cache_backed (quote membership_candidate_cache_map_columns)
@@ -4371,6 +4396,11 @@ calibrated components used by the other membership carriers. */
 					(if cache_backed 2 1))
 				(if (membership_work_value work (quote membership_order_limit_driver) false) 1 0)
 				work)
+			(if cache_backed
+				(planner_zero_cost candidate_input_rows 0.65)
+				(membership_candidate_match_cost candidate_input_rows work))
+			visited_rows 0.65))
+		(define base_cost (planner_cost_add scan_cost
 			(if cache_backed
 				(planner_cost planner_membership_group_cache_startup_ns 0
 					(* visited_rows planner_membership_group_cache_probe_row_ns)

@@ -125,72 +125,73 @@ type suite struct {
 type calibrationRow struct {
 	OrderedOrWork []float64 `json:"ordered_or_work"`
 
-	CaseName                         string   `json:"case_name"`
-	Error                            string   `json:"error"`
-	CacheState                       string   `json:"cache_state"`
-	CompileState                     string   `json:"compile_state"`
-	DecisionID                       string   `json:"decision_id"`
-	Decision                         string   `json:"decision"`
-	DecisionSite                     string   `json:"decision_site"`
-	Consumer                         string   `json:"consumer"`
-	Plan                             string   `json:"plan"`
-	OperatorFamily                   string   `json:"operator_family"`
-	OperatorConsistent               bool     `json:"operator_consistent"`
-	EstimatedNS                      *float64 `json:"estimated_ns"`
-	WholeQueryExecutionNS            float64  `json:"whole_query_execution_ns"`
-	OperatorNS                       *float64 `json:"operator_ns"`
-	TimedOut                         bool     `json:"timed_out"`
-	LowerBoundNS                     float64  `json:"lower_bound_ns"`
-	CandidateInputRows               *float64 `json:"candidate_input_rows"`
-	CandidateRows                    *float64 `json:"candidate_rows"`
-	CarrierRows                      *float64 `json:"carrier_rows"`
-	CandidateDensity                 *float64 `json:"candidate_density"`
-	ProjectedDriverRows              *float64 `json:"projected_driver_rows"`
-	DriverInputRows                  *float64 `json:"driver_input_rows"`
-	DriverOrderPartitioned           bool     `json:"driver_order_partitioned"`
-	DriverRows                       *float64 `json:"driver_rows"`
-	PrefilteredDriverRows            *float64 `json:"prefiltered_driver_rows"`
-	ExpectedDriverRowsVisited        *float64 `json:"expected_driver_rows_visited"`
-	Limit                            *float64 `json:"limit"`
-	Offset                           *float64 `json:"offset"`
-	ProbeBranches                    *float64 `json:"probe_branches"`
-	DownstreamProbeBranches          *float64 `json:"downstream_probe_branches"`
-	CandidateScanInvocations         *float64 `json:"candidate_scan_invocations"`
-	CandidateFilterColumns           *float64 `json:"candidate_filter_columns"`
-	CandidateMapColumns              *float64 `json:"candidate_map_columns"`
-	CandidateCacheMapColumns         *float64 `json:"candidate_cache_map_columns"`
-	CandidateCacheBacked             bool     `json:"candidate_cache_backed"`
-	CandidateExpressionOperations    *float64 `json:"candidate_expression_operations"`
-	CandidateExpressionDepth         *float64 `json:"candidate_expression_depth"`
-	CandidateIndexFilterRows         *float64 `json:"candidate_index_filter_rows"`
-	CandidateBroadTextMatchRows      *float64 `json:"candidate_broad_text_match_rows"`
-	CandidateBroadTextMatchBytes     *float64 `json:"candidate_broad_text_match_bytes"`
-	CandidateFilterValueRows         *float64 `json:"candidate_filter_value_rows"`
-	CandidateExpressionOperationRows *float64 `json:"candidate_expression_operation_rows"`
-	DriverScanInvocations            *float64 `json:"driver_scan_invocations"`
-	DriverFilterColumns              *float64 `json:"driver_filter_columns"`
-	DriverMapColumns                 *float64 `json:"driver_map_columns"`
-	DriverExpressionOperations       *float64 `json:"driver_expression_operations"`
-	DriverExpressionDepth            *float64 `json:"driver_expression_depth"`
-	JoinInputRows                    *float64 `json:"join_input_rows"`
-	JoinDriverRows                   *float64 `json:"join_driver_rows"`
-	JoinInnerRows                    *float64 `json:"join_inner_rows"`
-	JoinProbeRows                    *float64 `json:"join_probe_rows"`
-	JoinEstimatedRows                *float64 `json:"join_estimated_rows"`
-	JoinOutputRows                   *float64 `json:"join_output_rows"`
-	JoinMapWidth                     *float64 `json:"join_map_width"`
-	JoinTableCount                   *float64 `json:"join_table_count"`
-	JoinLegacyProbeRows              *float64 `json:"join_legacy_probe_rows"`
-	ProbeInvocations                 *float64 `json:"probe_invocations"`
-	InputRows                        *float64 `json:"input_rows"`
-	GroupRows                        *float64 `json:"group_rows"`
-	RowsPerProbe                     *float64 `json:"rows_per_probe"`
-	AggregateWidth                   *float64 `json:"aggregate_width"`
-	RecMapStartups                   *float64 `json:"recmap_startups"`
-	RecMapWorkRows                   *float64 `json:"recmap_work_rows"`
-	ResultEqual                      bool     `json:"result_equal"`
-	Rows                             int64    `json:"rows"`
-	ResultHash                       string   `json:"result_hash"`
+	CaseName                          string   `json:"case_name"`
+	Error                             string   `json:"error"`
+	CacheState                        string   `json:"cache_state"`
+	CompileState                      string   `json:"compile_state"`
+	DecisionID                        string   `json:"decision_id"`
+	Decision                          string   `json:"decision"`
+	DecisionSite                      string   `json:"decision_site"`
+	Consumer                          string   `json:"consumer"`
+	Plan                              string   `json:"plan"`
+	OperatorFamily                    string   `json:"operator_family"`
+	OperatorConsistent                bool     `json:"operator_consistent"`
+	EstimatedNS                       *float64 `json:"estimated_ns"`
+	WholeQueryExecutionNS             float64  `json:"whole_query_execution_ns"`
+	OperatorNS                        *float64 `json:"operator_ns"`
+	TimedOut                          bool     `json:"timed_out"`
+	LowerBoundNS                      float64  `json:"lower_bound_ns"`
+	CandidateInputRows                *float64 `json:"candidate_input_rows"`
+	CandidateRows                     *float64 `json:"candidate_rows"`
+	CarrierRows                       *float64 `json:"carrier_rows"`
+	CandidateDensity                  *float64 `json:"candidate_density"`
+	ProjectedDriverRows               *float64 `json:"projected_driver_rows"`
+	DriverInputRows                   *float64 `json:"driver_input_rows"`
+	DriverOrderPartitioned            bool     `json:"driver_order_partitioned"`
+	DriverRows                        *float64 `json:"driver_rows"`
+	PrefilteredDriverRows             *float64 `json:"prefiltered_driver_rows"`
+	ExpectedDriverRowsVisited         *float64 `json:"expected_driver_rows_visited"`
+	Limit                             *float64 `json:"limit"`
+	Offset                            *float64 `json:"offset"`
+	ProbeBranches                     *float64 `json:"probe_branches"`
+	DownstreamProbeBranches           *float64 `json:"downstream_probe_branches"`
+	DownstreamFullPreparationBranches *float64 `json:"downstream_full_preparation_branches"`
+	CandidateScanInvocations          *float64 `json:"candidate_scan_invocations"`
+	CandidateFilterColumns            *float64 `json:"candidate_filter_columns"`
+	CandidateMapColumns               *float64 `json:"candidate_map_columns"`
+	CandidateCacheMapColumns          *float64 `json:"candidate_cache_map_columns"`
+	CandidateCacheBacked              bool     `json:"candidate_cache_backed"`
+	CandidateExpressionOperations     *float64 `json:"candidate_expression_operations"`
+	CandidateExpressionDepth          *float64 `json:"candidate_expression_depth"`
+	CandidateIndexFilterRows          *float64 `json:"candidate_index_filter_rows"`
+	CandidateBroadTextMatchRows       *float64 `json:"candidate_broad_text_match_rows"`
+	CandidateBroadTextMatchBytes      *float64 `json:"candidate_broad_text_match_bytes"`
+	CandidateFilterValueRows          *float64 `json:"candidate_filter_value_rows"`
+	CandidateExpressionOperationRows  *float64 `json:"candidate_expression_operation_rows"`
+	DriverScanInvocations             *float64 `json:"driver_scan_invocations"`
+	DriverFilterColumns               *float64 `json:"driver_filter_columns"`
+	DriverMapColumns                  *float64 `json:"driver_map_columns"`
+	DriverExpressionOperations        *float64 `json:"driver_expression_operations"`
+	DriverExpressionDepth             *float64 `json:"driver_expression_depth"`
+	JoinInputRows                     *float64 `json:"join_input_rows"`
+	JoinDriverRows                    *float64 `json:"join_driver_rows"`
+	JoinInnerRows                     *float64 `json:"join_inner_rows"`
+	JoinProbeRows                     *float64 `json:"join_probe_rows"`
+	JoinEstimatedRows                 *float64 `json:"join_estimated_rows"`
+	JoinOutputRows                    *float64 `json:"join_output_rows"`
+	JoinMapWidth                      *float64 `json:"join_map_width"`
+	JoinTableCount                    *float64 `json:"join_table_count"`
+	JoinLegacyProbeRows               *float64 `json:"join_legacy_probe_rows"`
+	ProbeInvocations                  *float64 `json:"probe_invocations"`
+	InputRows                         *float64 `json:"input_rows"`
+	GroupRows                         *float64 `json:"group_rows"`
+	RowsPerProbe                      *float64 `json:"rows_per_probe"`
+	AggregateWidth                    *float64 `json:"aggregate_width"`
+	RecMapStartups                    *float64 `json:"recmap_startups"`
+	RecMapWorkRows                    *float64 `json:"recmap_work_rows"`
+	ResultEqual                       bool     `json:"result_equal"`
+	Rows                              int64    `json:"rows"`
+	ResultHash                        string   `json:"result_hash"`
 }
 
 type calibrationDiscovery struct {
@@ -1555,6 +1556,9 @@ func rowFeatures(row calibrationRow) ([]float64, error) {
 		}
 	}
 	driverMapRows := *row.ProjectedDriverRows
+	if row.Plan == "candidate_keyset" && row.Consumer == "order_limit" {
+		driverMapRows = math.Min(*row.DriverRows, *row.ProjectedDriverRows)
+	}
 	if row.Plan == "driver_order_membership_probe" || row.Plan == "scan_order" {
 		driverMapRows = *row.DriverRows
 	}
@@ -1569,6 +1573,12 @@ func rowFeatures(row calibrationRow) ([]float64, error) {
 	if row.DownstreamProbeBranches != nil {
 		downstreamProbeBranches = *row.DownstreamProbeBranches
 	}
+	downstreamFullPreparationBranches := 0.0
+	if row.DownstreamFullPreparationBranches != nil {
+		downstreamFullPreparationBranches = math.Min(downstreamProbeBranches,
+			math.Max(0, *row.DownstreamFullPreparationBranches))
+	}
+	downstreamBoundedBranches := downstreamProbeBranches - downstreamFullPreparationBranches
 	candidateDensity := 0.0
 	candidateProbeBranches := 1.0
 	if row.ProbeBranches != nil {
@@ -1592,12 +1602,13 @@ func rowFeatures(row calibrationRow) ([]float64, error) {
 		}
 		return []float64{
 			scanInvocations, scanRows, filterValues, mapValues, expressionOperations,
-			1, *row.CandidateRows + *row.ProjectedDriverRows, adaptiveProbeRows,
+			2, *row.CandidateRows + *row.ProjectedDriverRows, adaptiveProbeRows,
 			cacheStartup, cacheBuildRows, 0,
 			aggregateDriverRows, 0, *row.CandidateBroadTextMatchRows,
 			*row.CandidateBroadTextMatchBytes, orderedScanInvocations, 0,
 			adaptiveSortWork,
-			*row.ProjectedDriverRows * downstreamProbeBranches,
+			driverMapRows*downstreamBoundedBranches +
+				*row.ProjectedDriverRows*downstreamFullPreparationBranches,
 		}, nil
 	case "driver_order_membership_probe", "scan_order":
 		recsetStartup, recsetBuildRows, recsetProbeRows := 1.0, *row.CandidateRows, *row.ExpectedDriverRowsVisited
@@ -1610,8 +1621,8 @@ func rowFeatures(row calibrationRow) ([]float64, error) {
 			scanInvocations, scanRows, filterValues, mapValues, expressionOperations,
 			recsetStartup, recsetBuildRows, recsetProbeRows,
 			cacheStartup, cacheBuildRows, cacheProbeRows,
-			0, orderedDriverInputRows, 0,
-			0, orderedScanInvocations, 0, 0,
+			0, orderedDriverInputRows, *row.CandidateBroadTextMatchRows,
+			*row.CandidateBroadTextMatchBytes, orderedScanInvocations, 0, 0,
 			*row.ExpectedDriverRowsVisited * downstreamProbeBranches,
 		}, nil
 	case "ordered_batch_accept":
@@ -1643,7 +1654,7 @@ func rowFeatures(row calibrationRow) ([]float64, error) {
 			candidateWorkRows * *row.CandidateFilterColumns,
 			0,
 			candidateWorkRows * *row.CandidateExpressionOperations,
-			0,
+			2,
 			projectionRows,
 			0, 0, 0, 0, 0, orderedDriverWork,
 			*row.CandidateBroadTextMatchRows * repeatFraction,
@@ -1676,7 +1687,7 @@ func rowFeatures(row calibrationRow) ([]float64, error) {
 			*row.DriverInputRows**row.DriverFilterColumns + candidateWorkRows**row.CandidateFilterColumns,
 			projectionRows,
 			*row.DriverInputRows**row.DriverExpressionOperations + candidateWorkRows**row.CandidateExpressionOperations,
-			1, projectionRows, 0, 0, 0, 0, 0, 0,
+			2, projectionRows, 0, 0, 0, 0, 0, 0,
 			*row.CandidateBroadTextMatchRows * candidateFraction,
 			*row.CandidateBroadTextMatchBytes * candidateFraction,
 			orderedScanInvocations, 0, 0,
@@ -1858,6 +1869,11 @@ func solve(exactRows, allRows []observation, baseline constants) (constants, err
 		trial.orderedRecsetSortUnitNS = value
 		selected = acceptDecisionImprovingRefinement(allRows, selected, trial)
 	}
+	if value, ok := fitRecsetStartup(allRows, selected); ok {
+		trial := selected
+		trial.recsetStartupNS = value
+		selected = acceptDecisionImprovingRefinement(allRows, selected, trial)
+	}
 	if value, ok := fitDownstreamProbeRow(allRows, selected); ok {
 		trial := selected
 		trial.downstreamProbeRowNS = value
@@ -1903,6 +1919,38 @@ func acceptDecisionImprovingRefinement(rows []observation, current, trial consta
 		return trial
 	}
 	return current
+}
+
+func fitRecsetStartup(rows []observation, c constants) (int64, bool) {
+	byCase := make(map[string][]observation)
+	for _, row := range rows {
+		if !row.censored && row.component == "" && len(row.x) > 5 {
+			byCase[row.caseName] = append(byCase[row.caseName], row)
+		}
+	}
+	values := make([]float64, 0)
+	without := c
+	without.recsetStartupNS = 0
+	for _, alternatives := range byCase {
+		for leftIndex, left := range alternatives {
+			for _, right := range alternatives[leftIndex+1:] {
+				deltaWork := left.x[5] - right.x[5]
+				if deltaWork == 0 {
+					continue
+				}
+				value := ((left.y - right.y) -
+					(estimatedNS(left, without) - estimatedNS(right, without))) / deltaWork
+				if value >= 1 && !math.IsInf(value, 0) && !math.IsNaN(value) {
+					values = append(values, value)
+				}
+			}
+		}
+	}
+	if len(values) == 0 {
+		return 0, false
+	}
+	sort.Float64s(values)
+	return int64(math.Round(values[len(values)/2])), true
 }
 
 func fitBroadTextResidualPerByte(rows []observation, c constants) (int64, bool) {
