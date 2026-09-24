@@ -7189,7 +7189,7 @@ constant projections cannot become ambiguous through duplicate membership. */
 /* Bind a constant parameter row before domain distribution. The exact-value
 checks are part of the cached-plan guard; a changed row must compile a new
 literal domain. General expressions and session variables stay relational. */
-(define bind_parameter_row_domains (lambda (query planning_session)
+(define bind_parameter_row_domains (lambda (query planning_session record_guards)
 	(begin
 		(define binding (newsession))
 		/* One recursive visitor keeps query/expression transitions bound under
@@ -7218,8 +7218,9 @@ literal domain. General expressions and session variables stay relational. */
 							(define bound_fields (if constant_row
 								(begin
 									(binding "changed" true)
-									(planner_record_session_value_guards fields planning_session)
-									(map_assoc fields (lambda (_ expr) (planner_literal_value expr planning_session))))
+									(if record_guards (planner_record_session_value_guards fields planning_session) nil)
+									(map_assoc fields (lambda (_ expr)
+										(match expr ((symbol session) key) (planning_session key) _ expr))))
 								fields))
 							(make_query_block (qb_schema block)
 								(map (qb_sources block) (lambda (src)

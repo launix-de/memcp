@@ -12405,15 +12405,22 @@ RecSet node is written into logical IR. */
 (define neumann_compile_pipeline (lambda (ast planning_session tx)
 	(begin
 		(tx_check tx)
-		(define domain_ast (bind_parameter_row_domains ast planning_session))
+		/* Domain eligibility is structural. Do not reorder or record guards for
+		a specialization which will be discarded: those guards otherwise make
+		the ordinary plan depend on every changing literal from the trial. */
+		(define domain_ast (bind_parameter_row_domains ast planning_session false))
 		(define ir (decorrelate_logical_query domain_ast))
 		(tx_check tx)
-		(define candidate (optimize_logical_query ir planning_session tx))
-		/* Parameter-domain specialization is currently owned by contribution
-		planning. Unsupported families keep the established distribution path. */
-		(define reordered (if (or (expression_equal? ast domain_ast)
-			(and (ir_has_contribution_domain? candidate) (not (ir_has_unproved_query_aggregate? candidate)))) candidate
-			(optimize_logical_query (decorrelate_logical_query ast) planning_session tx)))
+		(define changed (not (expression_equal? ast domain_ast)))
+		(define eligible (if changed
+			(begin
+				(define candidate (annotate_contribution_domains (sql_type_annotate_ir ir)))
+				(and (ir_has_contribution_domain? candidate)
+					(not (ir_has_unproved_query_aggregate? candidate)))) true))
+		(if (and changed eligible)
+			(bind_parameter_row_domains ast planning_session true) nil)
+		(define reordered (optimize_logical_query
+			(if eligible ir (decorrelate_logical_query ast)) planning_session tx))
 		(tx_check tx)
 		(define prepared (prepare_physical_queryplan reordered planning_session tx))
 		(tx_check tx)
