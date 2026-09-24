@@ -1,0 +1,129 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# Correlated latest-row lookups across several reporting periods.
+
+metadata:
+  version: "1.0"
+  description: "Range-first scalar values inside a period aggregate"
+  isolated: true
+  perf_ci: true
+  ci: false
+
+setup:
+  - sql: "DROP TABLE IF EXISTS rfa_account"
+  - sql: "DROP TABLE IF EXISTS rfa_event"
+  - sql: "DROP TABLE IF EXISTS rfa_type"
+  - sql: "CREATE TABLE rfa_account (id INT PRIMARY KEY) ENGINE=memory"
+  - sql: "CREATE TABLE rfa_event (id INT PRIMARY KEY, account_id INT, changed_at INT, quantity INT, category_name VARCHAR(10)) ENGINE=memory"
+  - sql: "CREATE TABLE rfa_type (name VARCHAR(10) PRIMARY KEY, active BOOL) ENGINE=memory"
+  - scm: |
+      (begin
+        (insert (table "memcp-tests" "rfa_account") '("id")
+          (map (produceN 10000) (lambda (i) (list (+ i 1)))))
+        (insert (table "memcp-tests" "rfa_event") '("id" "account_id" "changed_at" "quantity" "category_name")
+          (map (produceN 20000) (lambda (i)
+            (list (+ i 1) (+ (floor (/ i 2)) 1)
+              (if (equal? (mod i 2) 0) 70 90)
+              (if (equal? (mod i 2) 0) 1 2)
+              (if (equal? (mod i 2) 0) "A" "B")))))
+        (insert (table "memcp-tests" "rfa_type") '("name" "active")
+          (list (list "A" true) (list "B" true)))
+        (rebuild)
+        20000)
+
+test_cases:
+  - name: "Eight period aggregates reuse range-first row identities"
+    sql: |
+      SELECT periods.period_id,
+        (SELECT SUM((SELECT e.quantity FROM rfa_event e
+          WHERE e.account_id = a.id AND e.changed_at <= periods.end_time
+          ORDER BY e.changed_at DESC LIMIT 1))
+         FROM rfa_account a) AS total
+      FROM (SELECT 1 AS period_id, 75 AS end_time
+        UNION SELECT 2 AS period_id, 95 AS end_time
+        UNION SELECT 3 AS period_id, 75 AS end_time
+        UNION SELECT 4 AS period_id, 95 AS end_time
+        UNION SELECT 5 AS period_id, 75 AS end_time
+        UNION SELECT 6 AS period_id, 95 AS end_time
+        UNION SELECT 7 AS period_id, 75 AS end_time
+        UNION SELECT 8 AS period_id, 95 AS end_time) periods
+      ORDER BY periods.period_id
+    expect:
+      rows: 8
+      data:
+        - {period_id: 1, total: 10000}
+        - {period_id: 2, total: 20000}
+        - {period_id: 3, total: 10000}
+        - {period_id: 4, total: 20000}
+        - {period_id: 5, total: 10000}
+        - {period_id: 6, total: 20000}
+        - {period_id: 7, total: 10000}
+        - {period_id: 8, total: 20000}
+    timing_aggregation: total
+    warmup: 0
+    timing_samples: 3
+    threshold_ms: 10000
+
+  - name: "Aggregate with several dependent scalar lookups"
+    sql: |
+      SELECT periods.period_id,
+        (SELECT SUM((SELECT e.quantity FROM rfa_event e
+          WHERE e.account_id = a.id AND e.changed_at <= periods.end_time
+          ORDER BY e.changed_at DESC LIMIT 1))
+         FROM rfa_account a
+         WHERE (SELECT e.changed_at FROM rfa_event e
+           WHERE e.account_id = a.id AND e.changed_at <= periods.end_time
+           ORDER BY e.changed_at DESC LIMIT 1) BETWEEN periods.start_time AND periods.end_time
+           AND (SELECT t.active FROM rfa_type t
+             WHERE t.name = (SELECT e.category_name FROM rfa_event e
+               WHERE e.account_id = a.id AND e.changed_at <= periods.end_time
+               ORDER BY e.changed_at DESC LIMIT 1)
+             LIMIT 1) = true) AS total
+      FROM (SELECT 1 AS period_id, 0 AS start_time, 75 AS end_time
+        UNION SELECT 2 AS period_id, 80 AS start_time, 95 AS end_time) periods
+      ORDER BY periods.period_id
+    expect:
+      rows: 2
+      data:
+        - {period_id: 1, total: 10000}
+        - {period_id: 2, total: 20000}
+    timing_aggregation: total
+    warmup: 0
+    timing_samples: 3
+    threshold_ms: 10000
+
+  - name: "Dependent second range lookup reuses first row values"
+    sql: |
+      SELECT periods.period_id,
+        (SELECT SUM((SELECT e.quantity FROM rfa_event e
+          WHERE e.account_id = a.id AND e.changed_at <= periods.end_time
+          ORDER BY e.changed_at DESC LIMIT 1))
+         FROM rfa_account a
+         WHERE (SELECT e.changed_at FROM rfa_event e
+           WHERE e.account_id = a.id AND e.changed_at <= periods.end_time
+           ORDER BY e.changed_at DESC LIMIT 1) BETWEEN periods.start_time AND periods.end_time
+           AND (SELECT t.active FROM rfa_type t
+             WHERE t.name = (SELECT e.category_name FROM rfa_event e
+               WHERE e.account_id = a.id
+                 AND e.changed_at <= LEAST(periods.end_time,
+                   (SELECT e2.quantity FROM rfa_event e2
+                     WHERE e2.account_id = a.id AND e2.changed_at <= periods.end_time
+                     ORDER BY e2.changed_at DESC LIMIT 1) + 75)
+               ORDER BY e.changed_at DESC LIMIT 1)
+             LIMIT 1) = true) AS total
+      FROM (SELECT 1 AS period_id, 0 AS start_time, 75 AS end_time
+        UNION SELECT 2 AS period_id, 80 AS start_time, 95 AS end_time) periods
+      ORDER BY periods.period_id
+    expect:
+      rows: 2
+      data:
+        - {period_id: 1, total: 10000}
+        - {period_id: 2, total: 20000}
+    timing_aggregation: total
+    warmup: 0
+    timing_samples: 3
+    threshold_ms: 10000
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS rfa_account"
+  - sql: "DROP TABLE IF EXISTS rfa_event"
+  - sql: "DROP TABLE IF EXISTS rfa_type"

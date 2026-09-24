@@ -339,3 +339,65 @@ test_cases:
         - {id: 194, value: 4}
         - {id: 193, value: 4}
     cleanup: *recmap_window_cleanup
+
+  - name: "Period aggregate reuses latest row maps with a null optional filter"
+    setup: &period_range_setup
+      - sql: "DROP TABLE IF EXISTS nc_range_account"
+      - sql: "DROP TABLE IF EXISTS nc_range_event"
+      - sql: "DROP TABLE IF EXISTS nc_range_category"
+      - sql: "CREATE TABLE nc_range_account (id INT PRIMARY KEY, category_id INT)"
+      - sql: "CREATE TABLE nc_range_event (id INT PRIMARY KEY, account_id INT, changed_at INT, quantity INT)"
+      - sql: "CREATE TABLE nc_range_category (id INT PRIMARY KEY, tag INT)"
+      - sql: "INSERT INTO nc_range_account VALUES (1, 1), (2, 2), (3, 1)"
+      - sql: "INSERT INTO nc_range_event VALUES (1, 1, 10, 1), (2, 1, 20, 2), (3, 2, 10, 3), (4, 2, 20, 4), (5, 3, 20, 5)"
+      - sql: "INSERT INTO nc_range_category VALUES (1, 1), (2, 2)"
+    sql: |
+      SELECT periods.period_id,
+        COALESCE((SELECT SUM((SELECT e.quantity FROM nc_range_event e
+          WHERE e.account_id = a.id AND e.changed_at <= periods.end_time
+          ORDER BY e.changed_at DESC LIMIT 1))
+         FROM nc_range_account a
+         WHERE (SELECT e.changed_at FROM nc_range_event e
+           WHERE e.account_id = a.id AND e.changed_at <= periods.end_time
+           ORDER BY e.changed_at DESC LIMIT 1) BETWEEN periods.start_time AND periods.end_time
+           AND (params.tag IS NULL OR
+             (SELECT c.tag FROM nc_range_category c WHERE c.id = a.category_id LIMIT 1) = params.tag)
+         LIMIT 1), 0) AS total
+      FROM (SELECT 1 AS period_id, 0 AS start_time, 15 AS end_time
+        UNION SELECT 2 AS period_id, 16 AS start_time, 25 AS end_time) periods
+      CROSS JOIN (SELECT NULL AS tag) params
+      ORDER BY periods.period_id
+    expect:
+      rows: 2
+      data:
+        - {period_id: 1, total: 4}
+        - {period_id: 2, total: 11}
+    cleanup: &period_range_cleanup
+      - sql: "DROP TABLE IF EXISTS nc_range_account"
+      - sql: "DROP TABLE IF EXISTS nc_range_event"
+      - sql: "DROP TABLE IF EXISTS nc_range_category"
+
+  - name: "Period aggregate honors a changed optional filter binding"
+    setup: *period_range_setup
+    sql: |
+      SELECT periods.period_id,
+        COALESCE((SELECT SUM((SELECT e.quantity FROM nc_range_event e
+          WHERE e.account_id = a.id AND e.changed_at <= periods.end_time
+          ORDER BY e.changed_at DESC LIMIT 1))
+         FROM nc_range_account a
+         WHERE (SELECT e.changed_at FROM nc_range_event e
+           WHERE e.account_id = a.id AND e.changed_at <= periods.end_time
+           ORDER BY e.changed_at DESC LIMIT 1) BETWEEN periods.start_time AND periods.end_time
+           AND (params.tag IS NULL OR
+             (SELECT c.tag FROM nc_range_category c WHERE c.id = a.category_id LIMIT 1) = params.tag)
+         LIMIT 1), 0) AS total
+      FROM (SELECT 1 AS period_id, 0 AS start_time, 15 AS end_time
+        UNION SELECT 2 AS period_id, 16 AS start_time, 25 AS end_time) periods
+      CROSS JOIN (SELECT 1 AS tag) params
+      ORDER BY periods.period_id
+    expect:
+      rows: 2
+      data:
+        - {period_id: 1, total: 1}
+        - {period_id: 2, total: 7}
+    cleanup: *period_range_cleanup
