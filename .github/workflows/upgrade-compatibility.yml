@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       base_refs:
-        description: 'JSON list of old refs to test; empty uses master. Release discovery is intentionally separate.'
+        description: 'JSON list of extra old refs; previous master and every upgrade-release-* tag are always tested.'
         required: false
         default: '[]'
         type: string
@@ -30,8 +30,14 @@ jobs:
     if: ${{ needs.changes.outputs.relevant == 'true' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     outputs:
-      refs: ${{ steps.refs.outputs.refs }}
+      predecessors: ${{ steps.refs.outputs.predecessors }}
     steps:
+      - name: Check out refs and release pins
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
       - id: refs
         name: Select predecessor revisions
         env:
@@ -41,26 +47,54 @@ jobs:
           python3 - <<'PY'
           import json
           import os
+          import subprocess
+
+          def git(*args):
+              return subprocess.run(
+                  ['git', *args], check=True, capture_output=True,
+                  text=True).stdout.strip()
+
+          def commit(ref):
+              return git('rev-parse', '--verify', ref + '^{commit}')
+
           refs = json.loads(os.environ['REQUESTED_REFS'])
           if not isinstance(refs, list) or any(not isinstance(ref, str) or not ref.strip() for ref in refs):
               raise ValueError('base_refs must be a JSON list of nonempty Git refs')
-          refs = refs or [os.environ.get('PR_BASE_REF') or 'master']
-          refs = list(dict.fromkeys(refs))
           if len(refs) > 16:
-              raise ValueError('at most 16 predecessor refs per run')
+              raise ValueError('at most 16 additional predecessor refs per run')
+
+          base = os.environ.get('PR_BASE_REF') or 'origin/master'
+          selected = [(base, 'previous-master')]
+          tags = git('tag', '--list', 'upgrade-release-*').splitlines()
+          selected.extend((tag, tag) for tag in sorted(tags))
+          selected.extend((ref, 'requested:' + ref) for ref in refs)
+
+          predecessors = []
+          seen = set()
+          for ref, label in selected:
+              sha = commit(ref)
+              if sha in seen:
+                  continue
+              seen.add(sha)
+              predecessors.append({
+                  'ref': sha,
+                  'label': label,
+              })
+          if len(predecessors) > 256:
+              raise ValueError('GitHub matrix supports at most 256 pinned predecessors')
           with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
-              output.write('refs=' + json.dumps(refs) + '\n')
+              output.write('predecessors=' + json.dumps(predecessors, separators=(',', ':')) + '\n')
           PY
 
   check-upgrade:
-    name: upgrade (${{ matrix.base_ref }})
+    name: upgrade (${{ matrix.predecessor.label }})
     needs: versions
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        base_ref: ${{ fromJSON(needs.versions.outputs.refs) }}
+        predecessor: ${{ fromJSON(needs.versions.outputs.predecessors) }}
     steps:
       - name: Check out merge candidate
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -71,7 +105,7 @@ jobs:
       - name: Check out predecessor revision
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ matrix.base_ref }}
+          ref: ${{ matrix.predecessor.ref }}
           path: base
 
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
@@ -95,7 +129,8 @@ jobs:
         shell: bash
         run: bash candidate/tests/storage/persistence/upgrade-run.sh
 
-      - name: Verify that an unversioned helper layout is rejected
+      - name: Prove the public upgrade workload detects incompatible cache layouts
+        if: ${{ matrix.predecessor.label == 'previous-master' }}
         run: python3 candidate/tests/storage/persistence/upgrade-helper-negative.py candidate upgrade-negative-controls
 
       - name: Upload references and server logs
