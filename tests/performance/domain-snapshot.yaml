@@ -21,7 +21,9 @@ setup:
           (map (produceN 4000) (lambda (i) (list (+ i 1) (+ i 1) 0 1 nil "P"))))
         (insert (table "memcp-tests" "ds_history") '("id" "entity_id" "coordinate" "quantity" "end_value" "kind")
           (map (produceN 200) (lambda (i) (list (+ i 4001) (* (+ i 1) 20) 20 3 50 "P"))))
-        (rebuild)
+        (rebuild (table "memcp-tests" "ds_entity"))
+        (rebuild (table "memcp-tests" "ds_history"))
+        (rebuild (table "memcp-tests" "ds_kind"))
         true)
 test_cases:
   - name: "Ordered domain shares quantity, classification and independent predicate state"
