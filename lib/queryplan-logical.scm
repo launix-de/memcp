@@ -2212,7 +2212,10 @@ physical membership probe. */
 (define scalar_aggregate_probe_outer_exprs (lambda (stage)
 	(merge (list
 		(qassoc_get (gs_facts stage) (quote lookup-keys) '())
-		(list (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))))))
+		(list (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
+		(if (nil? (qassoc_get (gs_facts stage) (quote contribution-domain) nil)) '()
+			(cons (nth (qassoc_get (gs_facts stage) (quote contribution-domain) nil) 2)
+				(nth (qassoc_get (gs_facts stage) (quote contribution-domain) nil) 4)))))))
 
 (define make_stage_lookup_condition (lambda (stage_alias key_names outer_domain post_condition)
 	(combine_where
@@ -2540,7 +2543,8 @@ row containing NULL must remain distinguishable for non-strict functions. */
 					(and (equal? (stage_result_max_rows_per_partition stage) 1)
 						(and (equal? (count keys) (count lookup_keys))
 							(and (equal? (coalesceNil (gs_having stage) true) true)
-								(source_is_base_table? (gs_input stage))))))
+								(or (source_is_base_table? (gs_input stage))
+									(not (nil? (qassoc_get (gs_facts stage) (quote contribution-domain) nil))))))))
 				(and (equal? (qassoc_get (gs_facts stage) (quote null_semantics) nil) (quote aggregate))
 					(and (equal? (stage_result_max_rows_per_partition stage) 1)
 						(and (equal? (count keys) (count lookup_keys))

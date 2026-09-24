@@ -758,9 +758,13 @@ for that scan. The same prepared table is reused by every guarded variant. */
 		(define observed_stages (map canonical_stages (lambda (stage)
 			(group_join_observation_stage stage block canonical_stages graph planning_session))))
 		(define signature_stages (map observed_stages (lambda (stage)
-			(if (scalar_cardinality_probe_stage? stage)
-				(group_stage_with_physical_planning_session stage planning_session)
-				stage))))
+			(begin
+				(define prepared (if (or (scalar_cardinality_probe_stage? stage)
+					(not (nil? (qassoc_get (gs_facts stage) (quote contribution-domain) nil))))
+					(group_stage_with_physical_planning_session stage planning_session) stage))
+				(if (nil? (qassoc_get (gs_facts stage) (quote contribution-domain) nil)) prepared
+					(group_stage_with_facts prepared (qassoc_set (gs_facts prepared)
+						(quote contribution_context_sources) (qb_sources block))))))))
 		(define catalog (make_lowering_catalog signature_stages))
 		(define cataloged_stages (map (qb_stages block) (lambda (stage)
 			(begin
@@ -4528,6 +4532,9 @@ session read is never evaluated while building the plan. */
 					dimension_expr))
 			category_expr))))
 
+/* Contribution candidates add a mode and, for full maps, a source-version
+expression. A delta map is built once per correction invocation. Full maps may
+share through the query cache only with the same bounds and source versions. */
 (define group_range_recmap_binding (lambda (candidate)
 	(begin
 		(define specs (nth candidate 2))
@@ -4554,7 +4561,7 @@ session read is never evaluated while building the plan. */
 						(physical_query_tx_symbol)
 						(list (quote lambda) (list (physical_query_tx_symbol))
 							(group_range_recmap_dimension_probe spec param))))))))
-		(define map_expr (if (nil? outer_bound) (nth candidate 3)
+		(define map_expr (if (or (nil? outer_bound) (and (> (count candidate) 4) (equal? (nth candidate 4) (quote delta)))) (nth candidate 3)
 			(group_range_recmap_replace_symbol
 				(nth candidate 3) outer_bound bound_param)))
 		(define value_mapper (if (and (single_source? specs)
@@ -4571,16 +4578,20 @@ session read is never evaluated while building the plan. */
 				map_expr)))
 		(list (quote define) (group_range_recmap_var candidate)
 			(if (nil? outer_bound) value_mapper
-				(list (quote lambda) (list bound_param ref_param)
-					(list (list (physical_query_session_symbol)
-						"get_or_compute_scoped" (physical_query_scope_symbol)
-						(list (quote concat) (concat "__group_range_recmap_"
-							(fnv_hash (serialize (nth candidate 3))) ":")
-							(list (quote serialize) bound_param))
-						(physical_query_tx_symbol)
-						(list (quote lambda) (list (physical_query_tx_symbol))
-							value_mapper))
-						ref_param)))))))
+				(if (and (> (count candidate) 4) (equal? (nth candidate 4) (quote delta)))
+					(list (list (quote lambda) (list map_var)
+						(list (quote lambda) (list bound_param ref_param) (list map_var ref_param))) value_mapper)
+					(list (quote lambda) (list bound_param ref_param)
+						(list (list (physical_query_session_symbol)
+							"get_or_compute_scoped" (physical_query_scope_symbol)
+							(list (quote concat) (concat "__group_range_recmap_"
+								(fnv_hash (serialize (nth candidate 3))) ":")
+								(list (quote serialize) (if (> (count candidate) 5)
+									(list (quote list) bound_param (nth candidate 5)) bound_param)))
+							(physical_query_tx_symbol)
+							(list (quote lambda) (list (physical_query_tx_symbol))
+								value_mapper))
+							ref_param))))))))
 
 (define rewrite_group_range_recmap_expr (lambda (candidate expr)
 	(if (nil? candidate) expr
@@ -12383,18 +12394,24 @@ RecSet node is written into logical IR. */
 		types/collations as a query-block fact, and resolves the collation of
 		computed text ORDER keys. */
 		(define typed_ir (sql_type_annotate_ir ir))
-		(join_reorder
+		(annotate_contribution_domains (join_reorder
 			(if (aggregate_pushdown_exact_access_dominates? typed_ir planning_session tx)
 				typed_ir
 				(aggregate_pushdown_logical typed_ir planning_session tx))
-			planning_session tx))))
+			planning_session tx)))))
 
 (define neumann_compile_pipeline (lambda (ast planning_session tx)
 	(begin
 		(tx_check tx)
-		(define ir (decorrelate_logical_query ast))
+		(define domain_ast (bind_parameter_row_domains ast planning_session))
+		(define ir (decorrelate_logical_query domain_ast))
 		(tx_check tx)
-		(define reordered (optimize_logical_query ir planning_session tx))
+		(define candidate (optimize_logical_query ir planning_session tx))
+		/* Parameter-domain specialization is currently owned by contribution
+		planning. Unsupported families keep the established distribution path. */
+		(define reordered (if (or (expression_equal? ast domain_ast)
+			(and (ir_has_contribution_domain? candidate) (not (ir_has_unproved_query_aggregate? candidate)))) candidate
+			(optimize_logical_query (decorrelate_logical_query ast) planning_session tx)))
 		(tx_check tx)
 		(define prepared (prepare_physical_queryplan reordered planning_session tx))
 		(tx_check tx)

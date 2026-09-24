@@ -6972,3 +6972,287 @@ The whitelist is deliberately conservative (COALESCE/IS NULL are not strict). */
 					(lambda (found term) (or found (join_null_propagating? src term))) false)))) source_alias))
 		(if (empty_list? rejected) block
 			(query_block_with_reorder_facts block (list (list (quote null_rejected_aliases) rejected)))))))
+
+/* Closed scalar whitelist: volatile/UDF evaluation is not a reusable
+contribution. More expression families require an explicit purity contract. */
+(define contribution_pure_expr? (lambda (expr)
+	(match expr
+		((symbol get_column) _alias _ci _column _cci) true
+		((symbol session) key) (string? key)
+		(cons head tail) (and (symbol? head)
+			(contains? '("and" "or" "not" "equal?" "equal??" "<" "<=" ">" ">="
+				"coalesceNil" "if" "nil?" "+" "-" "*" "/" "min" "max" "sql_in" "list") (string head))
+			(reduce tail (lambda (ok item) (and ok (contribution_pure_expr? item))) true))
+		_ (or (nil? expr) (number? expr) (string? expr) (expression_equal? expr true) (expression_equal? expr false)))))
+
+(define contribution_stage_sources (lambda (stage)
+	(if (query_block? (gs_input stage)) (qb_sources (gs_input stage)) (list (gs_input stage)))))
+
+(define contribution_stage_exprs (lambda (stage)
+	(merge (list
+		(gs_domain stage) (gs_keys stage)
+		(list (qassoc_get (gs_facts stage) (quote condition) true))
+		(merge (map (gs_aggregates stage) (lambda (ag)
+			(begin (define parts (scalar_first_probe_parts ag))
+				(cons (car parts) (cadr parts))))))
+		(if (query_block? (gs_input stage))
+			(cons (qb_where (gs_input stage)) (map (qb_sources (gs_input stage)) source_join_expr)) '())))))
+
+(define contribution_outer_inputs (lambda (expr local_aliases)
+	(match expr
+		((symbol get_column) alias _ci _column _cci)
+		(if (contains? local_aliases alias) '() (list expr))
+		((symbol session) _key) (list expr)
+		(cons _head tail) (merge_unique (map tail (lambda (item) (contribution_outer_inputs item local_aliases))))
+		_ '())))
+
+/* A contribution-domain proof is logical: it describes keys whose value can
+change when one ordered input moves. No physical cache or row identity occurs
+here. The first supported family is a unique entity with scalar dependencies,
+unique ordered selections, and comparisons against selected scalar values.
+Proof fields: driver source, logical identity column, moving input, affected-key
+covers, fixed inputs, source dependencies, and ordered-selection descriptors. */
+(define contribution_expr_contains? (lambda (needle expr)
+	(or (expression_equal? needle expr)
+		(match expr (cons head tail)
+			(or (contribution_expr_contains? needle head)
+				(reduce tail (lambda (found item)
+					(or found (contribution_expr_contains? needle item))) false))
+			_ false))))
+
+(define contribution_ordered_selection (lambda (stage driver key)
+	(begin
+		(define target (range_stage_base_source stage))
+		(define boundary (match (range_stage_raw_condition stage)
+			((symbol <=) column bound) (list column bound)
+			_ nil))
+		(define pairs (if (equal? (count (range_stage_point_keys stage)) (count (range_stage_point_domain stage)))
+			(range_recmap_point_pairs stage) '()))
+		(if (or (nil? target) (or (nil? boundary) (not (single_source? pairs)))) nil
+			(begin
+				(define parent (direct_column_name_for_alias target (car (car pairs))))
+				(define coordinate (direct_column_name_for_alias target (car boundary)))
+				(if (and (not (nil? parent)) (not (nil? coordinate))
+					(equal? key (direct_column_name_for_alias driver (cadr (car pairs))))
+					(equal? (qassoc_get (gs_facts stage) (quote partition_limit) nil) 1)
+					(planner_columns_unique? target (list parent coordinate))
+					(reduce (gs_aggregates stage) (lambda (ok ag)
+						(and ok (match (car ag)
+							((symbol scalar_order_value) _value order dirs offset)
+							(and (equal? offset 0) (equal? dirs (list >))
+								(equal? order (list (car boundary))))
+							_ false))) true))
+					(list target parent coordinate (cadr boundary)) nil))))))
+
+(define contribution_unwrap_null_default (lambda (expr)
+	(match expr
+		((symbol coalesceNil) value nil) (contribution_unwrap_null_default value)
+		_ expr)))
+
+(define contribution_selected_value (lambda (catalog block driver key expr)
+	(match (contribution_unwrap_null_default expr)
+		((symbol get_column) alias ignorecase column _ci)
+		(begin
+			(define source (source_for_alias (qb_sources block) nil alias ignorecase))
+			(define stage (if (or (nil? source) (not (stage_output_relation? (source_relation source)))) nil
+				(stage_for_output_relation catalog (source_relation source))))
+			(define selection (if (nil? stage) nil (contribution_ordered_selection stage driver key)))
+			(define ag (if (nil? stage) nil (scalar_first_probe_aggregate stage column)))
+			(if (or (nil? selection) (nil? ag)) nil
+				(match (car ag)
+					((symbol scalar_order_value) value order dirs offset)
+					(begin
+						(define col (direct_column_name_for_alias (car selection) value))
+						(if (and (not (nil? col)) (equal? offset 0)
+							(equal? order (list (list (quote get_column) (source_alias (car selection)) false (nth selection 2) false)))
+							(equal? dirs (list >)))
+							(list selection col) nil))
+					_ nil)))
+		_ nil)))
+
+(define contribution_predicate_cover (lambda (catalog block driver key axis expr)
+	(if (not (contribution_expr_contains? axis expr)) '()
+		(match expr
+			(cons (symbol and) terms)
+			(begin
+				(define covers (map terms (lambda (term)
+					(contribution_predicate_cover catalog block driver key axis term))))
+				(if (reduce covers (lambda (bad cover) (or bad (nil? cover))) false) nil
+					(merge covers)))
+			((symbol >=) left right)
+			(if (not (equal? axis right)) nil
+				(begin
+					(define value (match left
+						((symbol coalesceNil) value fallback) (if (equal? fallback axis) value nil)
+						_ left))
+					(define selected (contribution_selected_value catalog block driver key value))
+					(if (or (nil? selected) (contribution_expr_contains? axis (nth (car selected) 3))) nil
+						/* Inclusive endpoints form a conservative cover in either direction. */
+						(list (list (car (car selected)) (cadr (car selected)) (cadr selected))))))
+			_ nil))))
+
+/* Unordered LIMIT 1 is allowed to select any matching row. Reusing that
+choice within an unchanged source view preserves its scalar multiplicity.
+Ordered selections need the unique ordered-key proof above; presence and
+constant projections cannot become ambiguous through duplicate membership. */
+(define contribution_fixed_selection_safe? (lambda (stage)
+	(or (presence_probe_stage? stage)
+		(and (scalar_value_stage? stage) (equal? (qassoc_get (gs_facts stage) (quote partition_limit) nil) 1)
+			(equal? (qassoc_get (gs_facts stage) (quote partition_offset) 0) 0)
+			(empty_list? (qassoc_get (gs_facts stage) (quote partition_order) '()))))))
+
+(define contribution_domain_proof (lambda (catalog graph stage)
+	(begin
+		(define block (gs_input stage))
+		(if (not (query_block? block)) nil
+			(begin
+				(define bases (filter (qb_sources block) source_is_base_table?))
+				(define dependencies (filter (stage_dependency_closure_using_graph graph stage)
+					(lambda (dependency) (not (equal? (gs_id dependency) (gs_id stage))))))
+				(if (or (not (single_source? bases))
+					(not (reduce dependencies (lambda (ok item) (and ok (group_stage? item))) true))) nil
+					(begin
+						(define driver (car bases))
+						(define keys (source_primary_key_columns driver))
+						(if (not (single_source? keys)) nil
+							(begin
+								(define key (car keys))
+								(define selections (map dependencies (lambda (dependency)
+									(if (group_stage? dependency)
+										(contribution_ordered_selection dependency driver key) nil))))
+								(define axes (merge_unique (map (filter selections (lambda (selection)
+									(not (nil? selection)))) (lambda (selection)
+										(match (nth selection 3)
+											((symbol get_column) alias _ci _col _cci)
+											(if (equal? alias (source_alias driver)) '() (list (nth selection 3)))
+											_ '())))))
+								(if (not (single_source? axes)) nil
+									(begin
+										(define axis (car axes))
+										(define cover (contribution_predicate_cover catalog block driver key axis (qb_where block)))
+										(define expressions (merge (map (cons stage dependencies) contribution_stage_exprs)))
+										(define aliases (merge_unique (map (cons stage dependencies) (lambda (item)
+											(map (contribution_stage_sources item) source_alias)))))
+										(define fixed_inputs (filter (merge_unique (map expressions (lambda (expr)
+											(contribution_outer_inputs expr aliases))))
+											(lambda (expr) (not (expression_equal? expr axis)))))
+										(define safe (and (not (nil? cover))
+											(reduce expressions (lambda (ok expr) (and ok (contribution_pure_expr? expr))) true)
+											(empty_list? (qb_group block)) (nil? (qb_limit block)) (nil? (qb_offset block))
+											(not (contribution_expr_contains? axis (list (gs_keys stage)
+												(qassoc_get (gs_facts stage) (quote condition) true)
+												(map (qb_sources block) source_join_expr) (gs_aggregates stage))))
+											(reduce (zip dependencies selections) (lambda (ok pair)
+												(begin
+													(define dependency (car pair))
+													(define selection (cadr pair))
+													(define input (gs_input dependency))
+													(and ok (or (scalar_value_stage? dependency) (presence_probe_stage? dependency))
+														(not (contribution_expr_contains? axis (gs_aggregates dependency)))
+														(if (not (nil? selection)) true
+															(and (contribution_fixed_selection_safe? dependency)
+																(not (contribution_expr_contains? axis
+																	(list (range_stage_raw_condition dependency)
+																		(if (query_block? input) (map (qb_sources input) source_join_expr) '()))))))))) true)))
+										(if (not safe) nil
+											(list driver key axis (merge_unique (list cover
+												(map (filter selections (lambda (selection)
+													(and (not (nil? selection)) (equal? axis (nth selection 3)))))
+													(lambda (selection) (list (car selection) (cadr selection) (nth selection 2)))))) fixed_inputs
+												(merge_unique (map (cons stage dependencies) (lambda (item)
+													(filter (contribution_stage_sources item) source_is_base_table?))))
+												(map (zip dependencies selections) (lambda (pair) (list (gs_id (car pair)) (cadr pair))))))))))))))
+
+)))
+(define annotate_contribution_domains (lambda (ir)
+	(begin
+		(define catalog (stage_catalog_with_nested (ir_stages ir)))
+		(define graph (stage_dependency_graph catalog))
+		(define visit (lambda (node)
+			(match node
+				(cons head tail)
+				(begin
+					(define mapped (cons (visit head) (map tail visit)))
+					(if (not (and (symbol? head) (equal? head (quote group-stage)))) mapped
+						(begin
+							(define proof (contribution_domain_proof catalog graph mapped))
+							(if (nil? proof) mapped
+								(group_stage_with_facts mapped (qassoc_set (gs_facts mapped)
+									(quote contribution-domain) proof))))))
+				_ node)))
+		(visit ir))))
+
+/* Bind a constant parameter row before domain distribution. The exact-value
+checks are part of the cached-plan guard; a changed row must compile a new
+literal domain. General expressions and session variables stay relational. */
+(define bind_parameter_row_domains (lambda (query planning_session)
+	(begin
+		(define binding (newsession))
+		(define visit_expr (lambda (expr)
+			(match expr
+				((symbol inner_select) inner) (list (quote inner_select) (visit_query inner))
+				((symbol inner_select_exists) inner) (list (quote inner_select_exists) (visit_query inner))
+				((symbol inner_select_in) value inner) (list (quote inner_select_in) (visit_expr value) (visit_query inner))
+				(cons head tail) (cons head (map tail visit_expr))
+				_ expr)))
+		(define visit_query (lambda (raw)
+			(begin
+				(define block (normalize_query_ast raw))
+				(if (union_block? block)
+					(if (or (not (empty_list? (union_order block))) (not (nil? (union_limit block))) (not (nil? (union_offset block)))) raw
+						(make_union_block (union_mode block) (map (union_branches block) visit_query)
+							(union_order block) (union_limit block) (union_offset block) (union_facts block)))
+					(if (or (not (query_block? block)) (not (empty_list? (qb_order block)))
+						(not (nil? (qb_limit block))) (not (nil? (qb_offset block)))) raw
+						(begin
+							(define fields (map_assoc (qb_fields block) (lambda (title expr)
+								(visit_expr expr))))
+							(define constant_row (and (empty_list? (qb_sources block))
+								(not (nil? planning_session))
+								(reduce (map_assoc fields (lambda (_ expr)
+									(or (plain_literal_expr? expr)
+										(match expr ((symbol session) key)
+											(and (string? key) (regexp_test key "^v[0-9]+$")) _ false))))
+									(lambda (ok value) (and ok value)) true)))
+							(define bound_fields (if constant_row
+								(begin
+									(binding "changed" true)
+									(planner_record_session_value_guards fields planning_session)
+									(map_assoc fields (lambda (_ expr) (planner_literal_value expr planning_session))))
+								fields))
+							(make_query_block (qb_schema block)
+								(map (qb_sources block) (lambda (src)
+									(list (source_alias src) (source_schema src)
+										(if (list? (source_relation src)) (visit_query (source_relation src)) (source_relation src))
+										(source_outer? src) (visit_expr (source_join_expr src)))))
+								bound_fields (visit_expr (qb_where block)) (visit_expr (qb_group block))
+								(visit_expr (qb_having block)) (visit_expr (qb_order block))
+								(qb_limit block) (qb_offset block) (qb_hidden block) (qb_stages block) (qb_facts block))))))))
+		/* Distribution currently owns ORDER/LIMIT in the containing query.
+		Keep its established path until ordered parameter domains carry that
+		barrier explicitly. */
+		(define root (normalize_query_ast query))
+		(if (and (query_block? root) (not (empty_list? (qb_sources root))) (empty_list? (qb_order root))
+			(nil? (qb_limit root)) (nil? (qb_offset root)))
+			(begin (define result (visit_query query)) (if (binding "changed") result query)) query))))
+
+(define ir_has_contribution_domain? (lambda (ir)
+	(match ir
+		(cons head tail) (or
+			(and (symbol? head) (equal? head (quote group-stage))
+				(not (nil? (qassoc_get (gs_facts ir) (quote contribution-domain) nil))))
+			(ir_has_contribution_domain? head)
+			(reduce tail (lambda (found item) (or found (ir_has_contribution_domain? item))) false))
+		_ false)))
+
+/* Specialization must preserve sibling aggregate families too. A mixed
+projection with an unproved query-input aggregate keeps its original domains. */
+(define ir_has_unproved_query_aggregate? (lambda (ir)
+	(match ir
+		(cons head tail) (or
+			(and (symbol? head) (equal? head (quote group-stage)) (query_block? (gs_input ir))
+				(equal? (qassoc_get (gs_facts ir) (quote null_semantics) nil) (quote aggregate))
+				(nil? (qassoc_get (gs_facts ir) (quote contribution-domain) nil)))
+			(ir_has_unproved_query_aggregate? head)
+			(reduce tail (lambda (found item) (or found (ir_has_unproved_query_aggregate? item))) false))
+		_ false)))

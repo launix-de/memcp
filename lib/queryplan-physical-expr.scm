@@ -762,8 +762,8 @@ so visibility and cancellation semantics remain unchanged. */
 		(define residual_presence_stages (filter nested_stages (lambda (nested_stage)
 			(and (presence_probe_stage? nested_stage)
 				(stage_has_residual_outer_refs? nested_stage)))))
-		(define inline_presence_stages (unique_stages_by_id
-			(merge (list cost_selected_presence_stages residual_presence_stages))))
+		(define inline_presence_stages (if (qassoc_get (gs_facts stage) (quote contribution_probe) false) direct_stages (unique_stages_by_id
+			(merge (list cost_selected_presence_stages residual_presence_stages)))))
 		/* Once a parent is selected for direct probing, its complete dependency
 		closure is owned by that probe. Preparing children separately would pay
 		the carrier build cost in addition to the selected direct path. */
@@ -782,68 +782,104 @@ so visibility and cancellation semantics remain unchanged. */
 			prepare_stages
 			inline_presence_stages
 			(stage_partition_limit stage)
-			false))
-		(memoize_scalar_query_probe stage lookup_keys lowered))))
+			(qassoc_get (gs_facts stage) (quote contribution_probe) false)))
+		(if (qassoc_get (gs_facts stage) (quote contribution_probe) false) lowered
+			(memoize_scalar_query_probe stage lookup_keys lowered)))))
 
-(define lower_scalar_aggregate_query_probe_expr (lambda (all_stages stage value_expr keys lookup_keys reduce_expr neutral_expr)
-	(begin
-		(define input (gs_input stage))
-		(define keyed_terms (map (produceN (count keys)) (lambda (i)
-			(list (query_key_term_alias (qb_sources input) (nth keys i))
-				(list (quote equal??) (nth keys i) (nth lookup_keys i))))))
-		(define where_key_terms (map
-			(filter keyed_terms (lambda (term) (not (nil? (nth term 0)))))
-			(lambda (term) (nth term 1))))
-		(define keyed_input (make_query_block
-			(qb_schema input)
-			(query_sources_with_key_terms (qb_sources input) keyed_terms)
-			(qb_fields input)
-			(combine_where_terms
-				(cons (qb_where input) where_key_terms)
-				true)
-			(qb_group input)
-			(qb_having input)
-			(qb_order input)
-			(qb_limit input)
-			(qb_offset input)
-			(qb_hidden input)
-			(qb_stages input)
-			(qb_facts input)))
-		(define planning_session (qassoc_get (gs_facts stage) (quote physical_planning_session) nil))
-		(define simplified_input (group_input_without_dead_scalar_sources
-			stage keyed_input planning_session))
-		(define range_candidates (select_group_range_recmap_candidate
-			all_stages stage simplified_input planning_session))
-		(define mapped_input (reduce range_candidates
-			(lambda (block candidate) (query_block_with_group_range_recmap block candidate))
-			simplified_input))
-		(define mapped_value (rewrite_group_range_recmaps_expr range_candidates value_expr))
-		(define consumed_stages (qassoc_get (qb_facts mapped_input)
-			(quote consumed_probe_stage_ids) '()))
-		(define nested_stages (filter
-			(scalar_first_query_probe_direct_nested_stages all_stages stage)
-			(lambda (candidate) (not (contains? consumed_stages (gs_id candidate))))))
-		(define prepared_input
-			(query_block_without_stages_after_eager_prepare_using nested_stages mapped_input))
-		(define probe_expr (lower_query_block_as_dataset_reduce
-			prepared_input
-			(list "__value" mapped_value)
-			(list (quote lambda) (list (quote __value)) (quote __value))
-			reduce_expr
-			neutral_expr
-			nil))
-		(if (and (empty_list? nested_stages) (empty_list? range_candidates))
-			probe_expr
-			(cons (quote !begin)
-				(merge (list
-					(map range_candidates group_range_recmap_binding)
-					(lazy_stage_prepare_bindings nested_stages (filter nested_stages group_stage?))
-					(map nested_stages (lambda (nested_stage)
-						(if (group_stage? nested_stage)
-							(stage_prepare_call_expr nested_stage)
-							(lower_stage_prepare_using nested_stages nested_stages nested_stage true))))
-					(lower_stage_materialize_all nested_stages)
-					(list probe_expr))))))))
+(define lower_scalar_aggregate_query_probe_expr (lambda (all_stages stage value_expr keys lookup_keys reduce_expr neutral_expr contribution_mode)
+	(if (and (nil? contribution_mode) (equal? reduce_expr (quote sql_sum_reduce))
+		(not (nil? (qassoc_get (gs_facts stage) (quote contribution-domain) nil))))
+		(if (contribution_snapshot_selected? stage)
+			(lower_contribution_snapshot_probe all_stages stage value_expr keys lookup_keys reduce_expr neutral_expr)
+			(lower_scalar_aggregate_query_probe_expr all_stages stage value_expr keys lookup_keys reduce_expr neutral_expr (quote fresh)))
+		(begin
+			(define all_stages (if (nil? contribution_mode) all_stages
+				(contribution_physical_catalog all_stages stage)))
+			(define input (gs_input stage))
+			(define keyed_terms (map (produceN (count keys)) (lambda (i)
+				(list (query_key_term_alias (qb_sources input) (nth keys i))
+					(list (quote equal??) (nth keys i) (nth lookup_keys i))))))
+			(define where_key_terms (map
+				(filter keyed_terms (lambda (term) (not (nil? (nth term 0)))))
+				(lambda (term) (nth term 1))))
+			(define keyed_input (make_query_block
+				(qb_schema input)
+				(query_sources_with_key_terms (qb_sources input) keyed_terms)
+				(qb_fields input)
+				(combine_where_terms
+					(cons (if (equal? contribution_mode (quote delta))
+						(list (quote and) (qb_where input)
+							(list (quote sql_in) (quote __contribution_keys)
+								(list (quote get_column)
+									(source_alias (car (qassoc_get (gs_facts stage) (quote contribution-domain) nil))) false
+									(nth (qassoc_get (gs_facts stage) (quote contribution-domain) nil) 1) false)))
+						(qb_where input)) where_key_terms)
+					true)
+				(qb_group input)
+				(qb_having input)
+				(qb_order input)
+				(qb_limit input)
+				(qb_offset input)
+				(qb_hidden input)
+				(qb_stages input)
+				(qb_facts input)))
+			(define planning_session (qassoc_get (gs_facts stage) (quote physical_planning_session) nil))
+			(define simplified_input (group_input_without_dead_scalar_sources
+				stage keyed_input planning_session))
+			(define range_candidates (if (or (equal? contribution_mode (quote full)) (equal? contribution_mode (quote delta)))
+				(map (group_range_recmap_candidate all_stages stage simplified_input)
+					(lambda (candidate) (if (equal? contribution_mode (quote delta))
+						(contribution_bounded_recmap candidate (cadr (qassoc_get (gs_facts stage) (quote contribution-domain) nil)))
+						(merge (list candidate (list (quote full)
+							(cons (quote list) (map (nth (qassoc_get (gs_facts stage) (quote contribution-domain) nil) 5)
+								(lambda (source) (list (quote table_read_version) (source_table_expr source)))))))))))
+				(if (equal? contribution_mode (quote fresh)) '()
+					(select_group_range_recmap_candidate all_stages stage simplified_input planning_session))))
+			(define recmap_input (reduce range_candidates
+				(lambda (block candidate) (query_block_with_group_range_recmap block candidate))
+				simplified_input))
+			(define probe_catalog (map all_stages (lambda (candidate)
+				(if (group_stage? candidate) (group_stage_with_facts candidate
+					(qassoc_set (gs_facts candidate) (quote contribution_probe) true)) candidate))))
+			(define delta_sources (if (or (equal? contribution_mode (quote delta)) (equal? contribution_mode (quote fresh)))
+				(filter (qb_sources recmap_input) source_is_stage_output?) '()))
+			(define mapped_input (if (empty_list? delta_sources) recmap_input
+				(query_block_with_selected_probe_sources_using probe_catalog delta_sources recmap_input)))
+			(define recmap_value (rewrite_group_range_recmaps_expr range_candidates value_expr))
+			(define mapped_value (if (empty_list? delta_sources) recmap_value
+				(rewrite_scalar_first_probe_expr probe_catalog delta_sources nil recmap_value)))
+			(define consumed_stages (qassoc_get (qb_facts mapped_input)
+				(quote consumed_probe_stage_ids) '()))
+			(define nested_stages (filter
+				(scalar_first_query_probe_direct_nested_stages all_stages stage)
+				(lambda (candidate) (not (contains? consumed_stages (gs_id candidate))))))
+			(define prepared_input
+				(query_block_without_stages_after_eager_prepare_using nested_stages mapped_input))
+			(define contribution_result (or (equal? contribution_mode (quote full)) (equal? contribution_mode (quote delta))))
+			(define proof (qassoc_get (gs_facts stage) (quote contribution-domain) nil))
+			(define probe_expr (if contribution_result
+				(lower_query_block_as_dataset_reduce prepared_input
+					(list "__key" (list (quote get_column) (source_alias (car proof)) false (nth proof 1) false) "__value" mapped_value)
+					(scheme "(lambda (__key __value) (list __key __value))")
+					(scheme "(lambda (acc row) (set_assoc acc (car row) (cadr row)))")
+					(scheme "(list)")
+					(scheme "(lambda (a b) (merge_assoc a b (lambda (old new) new)))"))
+				(lower_query_block_as_dataset_reduce prepared_input
+					(list "__value" mapped_value)
+					(list (quote lambda) (list (quote __value)) (quote __value))
+					reduce_expr neutral_expr nil)))
+			(if (and (empty_list? nested_stages) (empty_list? range_candidates))
+				probe_expr
+				(cons (quote !begin)
+					(merge (list
+						(map range_candidates group_range_recmap_binding)
+						(lazy_stage_prepare_bindings nested_stages (filter nested_stages group_stage?))
+						(map nested_stages (lambda (nested_stage)
+							(if (group_stage? nested_stage)
+								(stage_prepare_call_expr nested_stage)
+								(lower_stage_prepare_using nested_stages nested_stages nested_stage true))))
+						(lower_stage_materialize_all nested_stages)
+						(list probe_expr)))))))))
 
 /* Query-input scalar probes can occur in many projected fields after their
 logical stages have merged. Emit the physical probe recipe once per block and
@@ -3137,7 +3173,7 @@ one request cannot invalidate one another while the outer scan is running. */
 		(define value_expr (nth ag 0))
 		(define reduce_expr (nth ag 1))
 		(define neutral_expr (nth ag 2))
-		(define range_selection (if (empty_list? (range_stage_domains stage)) nil
+		(define range_selection (if (or (empty_list? (range_stage_domains stage)) (query_block? src)) nil
 			(range_group_cache_selection sources stage)))
 		(if (nil? range_selection) true
 			(planner_record_physical_decision (list
@@ -3158,7 +3194,7 @@ one request cannot invalidate one another while the outer scan is running. */
 					(list (list "plan" "range_group_cache")
 						(list "cost" (planner_cost_explain (nth range_selection 4)))))))
 				(nth range_selection 8)))
-		(if (and (not (empty_list? (range_stage_domains stage)))
+		(if (and (not (nil? range_selection))
 			(equal? (car range_selection) "range_group_cache"))
 			(if (not (nil? (range_stage_base_source stage)))
 				(lower_scalar_range_probe_expr sources default_alias
@@ -3178,7 +3214,7 @@ one request cannot invalidate one another while the outer scan is running. */
 					(map lookup_keys (lambda (key)
 						(lower_column_expr_for_join sources default_alias key)))
 					reduce_expr
-					neutral_expr)
+					neutral_expr nil)
 				(begin
 					(define condition_cols (extract_columns_for_alias src condition))
 					(define key_cols (merge_unique (map keys (lambda (expr) (extract_columns_for_alias src expr)))))
@@ -8989,3 +9025,214 @@ remain the inputs already chosen by the planner. */
 				(combine_where_terms (map
 					(sort scored (lambda (a b) (if (equal? (cadr a) (cadr b))
 						(< (nth a 2) (nth b 2)) (< (cadr a) (cadr b))))) car) true))))))
+
+/* Cost the known parameter workload, not hypothetical future requests.
+The affected-row estimate is an explicitly low-confidence uniform-domain prior;
+dense actual corrections rebuild the base instead. Coefficients are shared
+with existing bulk ordered lookup and scan costs. */
+(define contribution_snapshot_costs (lambda (rows history points width covers)
+	(begin
+		(define affected (min rows (/ history (max 1 points))))
+		(define direct (* points rows width 14000))
+		(define prepared (+ (* covers 2 planner_recmap_startup_ns)
+			(* rows (+ 16000 (* width 500))) (* history 1000)))
+		(define corrected (* (max 0 (- points 1))
+			(+ (* covers planner_membership_scan_invocation_ns)
+				(* affected (+ 16000 (* width 500))) (* history planner_membership_scan_row_ns))))
+		(list (planner_cost 0 direct 0 0 0 0 0 0 (* points rows) 0.5)
+			(planner_cost prepared corrected 0 0 0 0 (* rows 128) 0 rows 0.35) affected))))
+
+(define contribution_snapshot_runtime_wins? (lambda (driver covers points width)
+	(begin
+		(define rows (scan_estimate driver))
+		(define history (reduce covers (lambda (total source) (+ total (scan_estimate source))) 0))
+		(define costs (contribution_snapshot_costs rows history points width (count covers)))
+		(and (> points 1) (> rows 0) (<= (* rows 2) contribution_snapshot_key_budget) (planner_cost_clear_winner? (cadr costs) (car costs))))))
+
+(define contribution_snapshot_selected? (lambda (stage)
+	(begin
+		(define proof (qassoc_get (gs_facts stage) (quote contribution-domain) nil))
+		(define context (qassoc_get (gs_facts stage) (quote contribution_context_sources) '()))
+		(define axis_source (source_for_alias context nil (cadr (nth proof 2)) false))
+		/* Correlated fixed keys from the same relation can have one point per
+		group. Without distinct statistics there is no assured reuse estimate. */
+		(define varying_fixed (reduce (nth proof 4) (lambda (found expr)
+			(or found (match expr ((symbol get_column) alias _ci _col _cci)
+				(equal? alias (cadr (nth proof 2))) _ false))) false))
+		(define points (if (or (nil? axis_source) varying_fixed) 1
+			(coalesceNil (planner_source_row_count axis_source) 1)))
+		(define rows (planner_source_row_count (car proof)))
+		(define history (reduce (nth proof 3) (lambda (total cover)
+			(+ total (coalesceNil (planner_source_row_count (car cover)) 0))) 0))
+		(define width (max 1 (count (nth proof 6))))
+		(define costs (contribution_snapshot_costs (coalesceNil rows 0) history points width (count (nth proof 3))))
+		(define planning_session (qassoc_get (gs_facts stage) (quote physical_planning_session) nil))
+		(define wins (and (> points 1) (number? rows) (> rows 0)
+			(<= (* rows 2) contribution_snapshot_key_budget)
+			(planner_cost_clear_winner? (cadr costs) (car costs))))
+		(define runtime_points (if (and (not (nil? axis_source)) (not varying_fixed) (source_is_base_table? axis_source))
+			(list (quote scan_estimate) (source_table_expr axis_source)) points))
+		(define normal (if (planner_guarded_choice wins
+			(list (quote contribution_snapshot_runtime_wins?) (source_table_expr (car proof))
+				(cons (quote list) (map (nth proof 3) (lambda (cover) (source_table_expr (car cover)))))
+				runtime_points width) planning_session) "domain_snapshot" "direct_aggregate"))
+		(define decision_id (concat "contribution_domain:" (gs_id stage)))
+		(define chosen (planner_physical_choice decision_id normal
+			'("direct_aggregate" "domain_snapshot") planning_session))
+		(planner_record_physical_decision (list
+			(list "decision_id" decision_id) (list "decision" "contribution_domain")
+			(list "chosen" chosen) (list "normally_chosen" normal)
+			(list "reason" (if (<= points 1) "reuse_not_established" "estimated_complete_workload"))
+			(list "inputs" (list (list "driver_rows" rows) (list "cover_rows" history)
+				(list "points_per_fixed_group" points) (list "scalar_dependencies" width)
+				(list "affected_rows_per_transition" (nth costs 2))
+				(list "affected_estimate" "uniform_domain_prior")))
+			(list "alternatives" (list
+				(list (list "plan" "direct_aggregate") (list "cost" (planner_cost_explain (car costs))))
+				(list (list "plan" "domain_snapshot") (list "cost" (planner_cost_explain (cadr costs))))))) planning_session)
+		(equal? chosen "domain_snapshot"))))
+
+/* Query-local retractable SUM state. Integral floats and integers have exact
+addition/subtraction while the absolute-value budget stays below 2^52. Other
+payloads retain the ordinary SQL reducer, including its rounding semantics. */
+(define contribution_magnitude (lambda (value)
+	(max (coalesceNil value 0) (- 0 (coalesceNil value 0)))))
+(define contribution_integral? (lambda (value)
+	(or (nil? value) (and (number? value)
+		(<= (contribution_magnitude value) 4503599627370496)
+		(equal? value (floor value))))))
+/* Admission bounds retained logical keys across all fixed groups in a query.
+This is transient query working memory, not a persistent cache registration. */
+(define contribution_snapshot_key_budget 262144)
+(define make_contribution_admission (lambda ()
+	(begin
+		(define state (newsession))
+		(define lock (mutex))
+		(lambda (tx keys)
+			(lock tx (lambda ()
+				(begin
+					(define total (+ (coalesceNil (state "keys") 0) keys))
+					(if (> total contribution_snapshot_key_budget) false
+						(begin (state "keys" total) true)))))))))
+
+(define make_contribution_snapshot (lambda (admit population)
+	(begin
+		(define state (newsession))
+		(define lock (mutex))
+		(lambda (tx axis read_view full changed evaluate fallback)
+			(lock tx (lambda ()
+				(begin
+					(define view (read_view))
+					(define cached (state "base"))
+					(define valid_view (and (reduce view (lambda (ok stamp) (and ok (not (nil? stamp)))) true)
+						(or (nil? cached) (expression_equal? (nth cached 5) view))))
+					(if (not valid_view) (begin (state "base" nil) (state "disabled" true)) true)
+					(if (and (nil? cached) (not (nil? admit)) (not (state "admitted")))
+						(if (admit tx (* 2 (max 1 (population))))
+							(state "admitted" true) (state "disabled" true)) true)
+					(if (or (state "disabled") (not (number? axis))) (fallback)
+						(begin
+							(define old (state "base"))
+							(define candidates (if (or (nil? old) (equal? (car old) axis)) '() (changed (min (car old) axis) (max (car old) axis))))
+							(define rebuild (or (nil? old) (> (count candidates) (nth old 4))))
+							(define admitted (or (nil? admit) (admit tx (count candidates))))
+							(define values (if (not admitted) '() (if rebuild (full) (if (empty_list? candidates) '() (evaluate candidates)))))
+							(define admitted (and admitted (or (nil? admit)
+								(admit tx (count (extract_assoc values (lambda (key value) key)))))))
+							(define integral (reduce_assoc values (lambda (ok key value)
+								(and ok (contribution_integral? value))) true))
+							(if (or (not admitted) (not integral) (not (expression_equal? view (read_view))))
+								(begin (state "disabled" true) (state "base" nil) (fallback))
+								(begin
+									/* A failed callback/cancellation must not publish partial corrections. */
+									(state "base" nil)
+									(define overlay (if rebuild (newsession) (nth old 3)))
+									(define delta (if rebuild
+										(reduce_assoc values (lambda (acc key value)
+											(list (+ (car acc) (coalesceNil value 0)) (+ (cadr acc) (if (nil? value) 0 1))
+												(+ (nth acc 2) (contribution_magnitude value)))) '(0 0 0))
+										(reduce candidates (lambda (acc key)
+											(begin
+												(define prior (overlay key))
+												(define before (if (nil? prior) (get_assoc (nth old 1) key) (car prior)))
+												(define after (get_assoc values key))
+												(if (or (not (nil? before)) (not (nil? after))) (overlay key (list after)) true)
+												(list (+ (car acc) (- (coalesceNil after 0) (coalesceNil before 0)))
+													(+ (cadr acc) (- (if (nil? after) 0 1) (if (nil? before) 0 1)))
+													(+ (nth acc 2) (- (contribution_magnitude after) (contribution_magnitude before))))))
+											(nth old 2))))
+									(if (> (nth delta 2) 4503599627370496)
+										(begin (state "disabled" true) (fallback))
+										(begin
+											(state "base" (list axis (if rebuild values (nth old 1)) delta overlay
+												(if rebuild (count (extract_assoc values (lambda (key value) key))) (nth old 4)) view))
+											(if (equal? (cadr delta) 0) nil (car delta)))))))))))))
+
+))
+
+(define lower_contribution_snapshot_probe (lambda (all_stages stage value_expr keys lookup_keys reduce_expr neutral_expr)
+	(begin
+		(define proof (qassoc_get (gs_facts stage) (quote contribution-domain) nil))
+		(define driver (car proof))
+		(define axis (lower_column_expr_for_alias driver (nth proof 2)))
+		(define cache_key (list (quote concat) (concat "__contribution_snapshot:" (gs_id stage) ":")
+			(list (quote serialize) (cons (quote list) (map (nth proof 4)
+				(lambda (expr) (lower_column_expr_for_alias driver expr)))))))
+		(define admission (list (physical_query_session_symbol) "get_or_compute_scoped"
+			(physical_query_scope_symbol) "__contribution_admission" (physical_query_tx_symbol)
+			(list (quote lambda) (list (physical_query_tx_symbol)) (list (quote make_contribution_admission)))))
+		(define snapshot (list (physical_query_session_symbol) "get_or_compute_scoped"
+			(physical_query_scope_symbol) cache_key (physical_query_tx_symbol)
+			(list (quote lambda) (list (physical_query_tx_symbol))
+				(list (quote make_contribution_snapshot) admission
+					(list (quote lambda) '() (list (quote scan_estimate) (source_table_expr driver)))))))
+		(define covers (map (nth proof 3) (lambda (cover)
+			(compile_scan_plan (quote scan) (physical_query_tx_symbol) (source_table_expr (car cover))
+				(quoted_runtime_list (list (nth cover 2)))
+				(scheme "(lambda (value) (and (>= value __contribution_lo) (<= value __contribution_hi)))")
+				(quoted_runtime_list (list (nth cover 1)))
+				(scheme "(lambda (acc key) (set_assoc acc key true))")
+				(scheme "(list)") (scheme "(lambda (a b) (merge_assoc a b (lambda (old new) true)))") false))))
+		(define changes (list (quote lambda) (list (quote __contribution_lo) (quote __contribution_hi))
+			(list (quote extract_assoc)
+				(reduce covers (lambda (acc cover) (list (quote merge_assoc) acc cover
+					(scheme "(lambda (old new) true)"))) (scheme "(list)"))
+				(scheme "(lambda (key present) key)"))))
+		(list snapshot (physical_query_tx_symbol) axis
+			(list (quote lambda) '() (cons (quote list)
+				(map (nth proof 5) (lambda (source) (list (quote table_read_version) (source_table_expr source))))))
+			(list (quote lambda) '() (lower_scalar_aggregate_query_probe_expr
+				all_stages stage value_expr keys lookup_keys reduce_expr neutral_expr (quote full)))
+			changes
+			(list (quote lambda) (list (quote __contribution_keys)) (lower_scalar_aggregate_query_probe_expr
+				all_stages stage value_expr keys lookup_keys reduce_expr neutral_expr (quote delta)))
+			(list (quote lambda) '() (lower_scalar_aggregate_query_probe_expr
+				all_stages stage value_expr keys lookup_keys reduce_expr neutral_expr (quote fresh)))))))
+
+/* Fixed ordered bounds select the same kind of state projection as moving
+bounds. Expose that access geometry to the common RecMap candidate builder. */
+(define contribution_physical_catalog (lambda (stages parent)
+	(begin
+		(define proof (qassoc_get (gs_facts parent) (quote contribution-domain) nil))
+		(if (nil? proof) stages
+			(map stages (lambda (stage)
+				(begin
+					(define selection (if (group_stage? stage)
+						(qassoc_get (nth proof 6) (gs_id stage) nil) nil))
+					(if (or (nil? selection) (not (empty_list? (range_stage_domains stage)))) stage
+						(group_stage_with_facts stage
+							(qassoc_set (qassoc_set (qassoc_set (gs_facts stage)
+								(quote range-domains) (list (list (quote range-domain)
+									(list (quote get_column) (source_alias (car selection)) false (nth selection 2) false)
+									(quote range-unbounded-from) -1 (nth selection 3) 1)))
+								(quote range-invariant-condition) true)
+								(quote range-accessing-after-simple) '()))))))))))
+
+(define contribution_bounded_recmap (lambda (candidate key)
+	(begin
+		(define old (nth candidate 3))
+		(define bounded (compile_scan_plan (quote scan_recmap)
+			(nth old 1) (nth old 2) (quoted_runtime_list (list key))
+			(scheme "(lambda (__key) (sql_in __contribution_keys __key))")
+			(nth old 7) (nth old 8) (nth old 9)))
+		(list (car candidate) (cadr candidate) (nth candidate 2) bounded (quote delta)))))

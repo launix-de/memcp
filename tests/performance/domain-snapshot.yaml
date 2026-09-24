@@ -1,0 +1,145 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: "1.0"
+  description: "Shared state aggregates across ordered parameter domains"
+  isolated: true
+  perf_ci: true
+setup:
+  - sql: "DROP TABLE IF EXISTS ds_entity"
+  - sql: "DROP TABLE IF EXISTS ds_history"
+  - sql: "DROP TABLE IF EXISTS ds_kind"
+  - sql: "CREATE TABLE ds_entity (id INT PRIMARY KEY, category INT) ENGINE=memory"
+  - sql: "CREATE TABLE ds_history (id INT PRIMARY KEY, entity_id INT, coordinate INT, quantity INT, end_value INT, kind VARCHAR(10), UNIQUE KEY entity_coordinate (entity_id, coordinate)) ENGINE=memory"
+  - sql: "CREATE TABLE ds_kind (name VARCHAR(10) PRIMARY KEY, active INT) ENGINE=memory"
+  - sql: "INSERT INTO ds_kind VALUES ('P',1),('T',0)"
+  - scm: |
+      (begin
+        (insert (table "memcp-tests" "ds_entity") '("id" "category")
+          (map (produceN 4000) (lambda (i) (list (+ i 1) (mod (+ i 1) 2)))))
+        (insert (table "memcp-tests" "ds_history") '("id" "entity_id" "coordinate" "quantity" "end_value" "kind")
+          (map (produceN 4000) (lambda (i) (list (+ i 1) (+ i 1) 0 1 nil "P"))))
+        (insert (table "memcp-tests" "ds_history") '("id" "entity_id" "coordinate" "quantity" "end_value" "kind")
+          (map (produceN 200) (lambda (i) (list (+ i 4001) (* (+ i 1) 20) 20 3 50 "P"))))
+        (rebuild)
+        true)
+test_cases:
+  - name: "Ordered domain shares quantity, classification and independent predicate state"
+    sql: |
+      SELECT d.x, p.category,
+        COALESCE((SELECT SUM((SELECT h.quantity FROM ds_history h
+          WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1))
+          FROM ds_entity e
+          WHERE (p.category IS NULL OR e.category=p.category)
+            AND (SELECT k.active FROM ds_kind k WHERE k.name=(SELECT h.kind FROM ds_history h
+              WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1) LIMIT 1)=1
+            AND COALESCE((SELECT h.end_value FROM ds_history h
+              WHERE h.entity_id=e.id AND h.coordinate<=60 ORDER BY h.coordinate DESC LIMIT 1),d.x)>=d.x),0) AS total
+      FROM (SELECT 10 AS x UNION SELECT 20 UNION SELECT 30 UNION SELECT 50 UNION SELECT 51 UNION SELECT 60) d
+      CROSS JOIN (SELECT NULL AS category UNION SELECT 0 UNION SELECT 1) p
+    expect:
+      rows: 18
+      result_contains:
+        - "{\"x\": 10, \"category\": null, \"total\": 4000}"
+        - "{\"x\": 10, \"category\": 0, \"total\": 2000}"
+        - "{\"x\": 10, \"category\": 1, \"total\": 2000}"
+        - "{\"x\": 20, \"category\": null, \"total\": 4400}"
+        - "{\"x\": 20, \"category\": 0, \"total\": 2400}"
+        - "{\"x\": 20, \"category\": 1, \"total\": 2000}"
+        - "{\"x\": 30, \"category\": null, \"total\": 4400}"
+        - "{\"x\": 30, \"category\": 0, \"total\": 2400}"
+        - "{\"x\": 30, \"category\": 1, \"total\": 2000}"
+        - "{\"x\": 50, \"category\": null, \"total\": 4400}"
+        - "{\"x\": 50, \"category\": 0, \"total\": 2400}"
+        - "{\"x\": 50, \"category\": 1, \"total\": 2000}"
+        - "{\"x\": 51, \"category\": null, \"total\": 3800}"
+        - "{\"x\": 51, \"category\": 0, \"total\": 1800}"
+        - "{\"x\": 51, \"category\": 1, \"total\": 2000}"
+        - "{\"x\": 60, \"category\": null, \"total\": 3800}"
+        - "{\"x\": 60, \"category\": 0, \"total\": 1800}"
+        - "{\"x\": 60, \"category\": 1, \"total\": 2000}"
+    timing_aggregation: total
+    warmup: 0
+    timing_samples: 2
+    threshold_ms: 20000
+  - name: "Physical plan exposes contribution-domain cost alternatives"
+    sql: |
+      EXPLAIN PHYSICAL
+      SELECT d.x, p.category,
+        COALESCE((SELECT SUM((SELECT h.quantity FROM ds_history h
+          WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1))
+          FROM ds_entity e
+          WHERE (p.category IS NULL OR e.category=p.category)
+            AND (SELECT k.active FROM ds_kind k WHERE k.name=(SELECT h.kind FROM ds_history h
+              WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1) LIMIT 1)=1
+            AND COALESCE((SELECT h.end_value FROM ds_history h
+              WHERE h.entity_id=e.id AND h.coordinate<=60 ORDER BY h.coordinate DESC LIMIT 1),d.x)>=d.x),0) AS total
+      FROM (SELECT 10 AS x UNION SELECT 20 UNION SELECT 30 UNION SELECT 50 UNION SELECT 51 UNION SELECT 60) d
+      CROSS JOIN (SELECT NULL AS category UNION SELECT 0 UNION SELECT 1) p
+    expect:
+      result_contains: ["contribution_domain", "domain_snapshot", "direct_aggregate", "affected_rows_per_transition"]
+  - name: "Snapshot domain also traverses decreasing coordinates"
+    sql: |
+      SELECT d.x, p.category,
+        COALESCE((SELECT SUM((SELECT h.quantity FROM ds_history h
+          WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1))
+          FROM ds_entity e
+          WHERE (p.category IS NULL OR e.category=p.category)
+            AND (SELECT k.active FROM ds_kind k WHERE k.name=(SELECT h.kind FROM ds_history h
+              WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1) LIMIT 1)=1
+            AND COALESCE((SELECT h.end_value FROM ds_history h
+              WHERE h.entity_id=e.id AND h.coordinate<=60 ORDER BY h.coordinate DESC LIMIT 1),d.x)>=d.x),0) AS total
+      FROM (SELECT 60 AS x UNION SELECT 51 UNION SELECT 50 UNION SELECT 30 UNION SELECT 20 UNION SELECT 10) d
+      CROSS JOIN (SELECT NULL AS category UNION SELECT 0 UNION SELECT 1) p
+    expect:
+      rows: 18
+      result_contains:
+        - "{\"x\": 10, \"category\": null, \"total\": 4000}"
+        - "{\"x\": 10, \"category\": 0, \"total\": 2000}"
+        - "{\"x\": 10, \"category\": 1, \"total\": 2000}"
+        - "{\"x\": 20, \"category\": null, \"total\": 4400}"
+        - "{\"x\": 20, \"category\": 0, \"total\": 2400}"
+        - "{\"x\": 20, \"category\": 1, \"total\": 2000}"
+        - "{\"x\": 30, \"category\": null, \"total\": 4400}"
+        - "{\"x\": 30, \"category\": 0, \"total\": 2400}"
+        - "{\"x\": 30, \"category\": 1, \"total\": 2000}"
+        - "{\"x\": 50, \"category\": null, \"total\": 4400}"
+        - "{\"x\": 50, \"category\": 0, \"total\": 2400}"
+        - "{\"x\": 50, \"category\": 1, \"total\": 2000}"
+        - "{\"x\": 51, \"category\": null, \"total\": 3800}"
+        - "{\"x\": 51, \"category\": 0, \"total\": 1800}"
+        - "{\"x\": 51, \"category\": 1, \"total\": 2000}"
+        - "{\"x\": 60, \"category\": null, \"total\": 3800}"
+        - "{\"x\": 60, \"category\": 0, \"total\": 1800}"
+        - "{\"x\": 60, \"category\": 1, \"total\": 2000}"
+  - name: "Mixed unsupported contributions preserve the original aggregate plan"
+    sql: |
+      SELECT d.x, p.category,
+        COALESCE((SELECT SUM((SELECT h.quantity FROM ds_history h
+          WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1))
+          FROM ds_entity e
+          WHERE (p.category IS NULL OR e.category=p.category)
+            AND (SELECT k.active FROM ds_kind k WHERE k.name=(SELECT h.kind FROM ds_history h
+              WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1) LIMIT 1)=1
+            AND COALESCE((SELECT h.end_value FROM ds_history h
+              WHERE h.entity_id=e.id AND h.coordinate<=60 ORDER BY h.coordinate DESC LIMIT 1),d.x)>=d.x),0) AS total, COALESCE((SELECT SUM(d.x * (SELECT h.quantity FROM ds_history h
+          WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1))
+          FROM ds_entity e
+          WHERE (p.category IS NULL OR e.category=p.category)
+            AND (SELECT k.active FROM ds_kind k WHERE k.name=(SELECT h.kind FROM ds_history h
+              WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1) LIMIT 1)=1
+            AND COALESCE((SELECT h.end_value FROM ds_history h
+              WHERE h.entity_id=e.id AND h.coordinate<=60 ORDER BY h.coordinate DESC LIMIT 1),d.x)>=d.x),0) AS scaled
+      FROM (SELECT 10 AS x UNION SELECT 60) d
+      CROSS JOIN (SELECT NULL AS category UNION SELECT 0) p
+    expect:
+      rows: 4
+      result_contains:
+        - "{\"x\": 10, \"category\": null, \"total\": 4000, \"scaled\": 40000}"
+        - "{\"x\": 10, \"category\": 0, \"total\": 2000, \"scaled\": 20000}"
+        - "{\"x\": 60, \"category\": null, \"total\": 3800, \"scaled\": 228000}"
+        - "{\"x\": 60, \"category\": 0, \"total\": 1800, \"scaled\": 108000}"
+cleanup:
+  - sql: "DROP TABLE IF EXISTS ds_history"
+  - sql: "DROP TABLE IF EXISTS ds_entity"
+  - sql: "DROP TABLE IF EXISTS ds_kind"

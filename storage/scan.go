@@ -1554,6 +1554,8 @@ func (t *table) scanWithBatchFrom(currentTx *TxContext, source *recSet, accessSc
 		}
 	}
 	if hasMutationCallback {
+		t.beginContributionMutation()
+		defer t.endContributionMutation()
 		t.mutationMu.Lock()
 		defer t.mutationMu.Unlock()
 	}

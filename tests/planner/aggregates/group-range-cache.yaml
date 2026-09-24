@@ -651,3 +651,157 @@ test_cases:
     cleanup:
       - sql: "DROP TABLE IF EXISTS grc_2d_windows"
       - sql: "DROP TABLE IF EXISTS grc_2d_events"
+
+  - name: "snapshot state follows a numeric domain backwards and preserves NULL SUM"
+    setup:
+      - sql: "DROP TABLE IF EXISTS grc_state_points"
+      - sql: "DROP TABLE IF EXISTS grc_state_history"
+      - sql: "DROP TABLE IF EXISTS grc_state_entity"
+      - sql: "CREATE TABLE grc_state_entity (id INT PRIMARY KEY, category INT) ENGINE=memory"
+      - sql: "CREATE TABLE grc_state_history (id INT PRIMARY KEY, entity_id INT, coordinate INT, quantity INT, end_value INT, UNIQUE KEY version_key (entity_id,coordinate)) ENGINE=memory"
+      - sql: "CREATE TABLE grc_state_points (id INT PRIMARY KEY, x INT, category INT) ENGINE=memory"
+      - sql: "INSERT INTO grc_state_entity VALUES (1,1),(2,2),(3,1),(4,2),(5,1)"
+      - sql: "INSERT INTO grc_state_history VALUES (1,1,1,2,4),(2,1,3,7,4),(3,2,2,NULL,NULL),(4,2,4,-3,NULL),(5,3,1,0,NULL),(6,4,2,5,2)"
+      - sql: "INSERT INTO grc_state_points VALUES (1,0,1),(2,1,1),(3,2,2),(4,4,1),(5,5,1),(6,4,2),(7,2,1),(8,8,2),(9,8,2),(10,1,2)"
+    sql: |
+      SELECT d.id, (SELECT SUM((SELECT h.quantity FROM grc_state_history h
+        WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1))
+        FROM grc_state_entity e WHERE e.category=d.category
+          AND COALESCE((SELECT h.end_value FROM grc_state_history h
+            WHERE h.entity_id=e.id AND h.coordinate<=10 ORDER BY h.coordinate DESC LIMIT 1),d.x)>=d.x) AS total
+      FROM grc_state_points d ORDER BY d.id
+    expect:
+      rows: 10
+      data:
+        - {id: 1, total: null}
+        - {id: 2, total: 2}
+        - {id: 3, total: 5}
+        - {id: 4, total: 7}
+        - {id: 5, total: 0}
+        - {id: 6, total: -3}
+        - {id: 7, total: 2}
+        - {id: 8, total: -3}
+        - {id: 9, total: -3}
+        - {id: 10, total: null}
+
+  - name: "snapshot eligibility rejects a non-unique ordered coordinate"
+    sql: |
+      EXPLAIN SELECT d.id, (SELECT SUM((SELECT h.quantity FROM grc_state_history h
+        WHERE h.entity_id=e.id AND h.id<=d.x ORDER BY h.id DESC LIMIT 1))
+        FROM grc_state_entity e WHERE COALESCE((SELECT h.end_value FROM grc_state_history h
+          WHERE h.entity_id=e.id AND h.coordinate<=10 ORDER BY h.coordinate DESC LIMIT 1),d.x)>=d.x) AS total
+      FROM grc_state_points d
+    expect:
+      result_not_contains: ["make_contribution_snapshot"]
+
+  - name: "snapshot eligibility rejects volatile aggregate contributions"
+    sql: |
+      EXPLAIN SELECT d.id, (SELECT SUM(RAND()+(SELECT h.quantity FROM grc_state_history h
+        WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1))
+        FROM grc_state_entity e WHERE COALESCE((SELECT h.end_value FROM grc_state_history h
+          WHERE h.entity_id=e.id AND h.coordinate<=10 ORDER BY h.coordinate DESC LIMIT 1),d.x)>=d.x) AS total
+      FROM grc_state_points d
+    expect:
+      result_not_contains: ["make_contribution_snapshot"]
+
+  - name: "snapshot proof retains unsupported axis-dependent arithmetic as an ordinary plan"
+    sql: |
+      EXPLAIN SELECT d.id, (SELECT SUM(d.x+(SELECT h.quantity FROM grc_state_history h
+        WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1))
+        FROM grc_state_entity e WHERE COALESCE((SELECT h.end_value FROM grc_state_history h
+          WHERE h.entity_id=e.id AND h.coordinate<=10 ORDER BY h.coordinate DESC LIMIT 1),d.x)>=d.x) AS total
+      FROM grc_state_points d
+    expect:
+      result_not_contains: ["make_contribution_snapshot"]
+
+  - name: "snapshot SUM falls back for fractional payloads"
+    setup:
+      - sql: "ALTER TABLE grc_state_history MODIFY COLUMN quantity DOUBLE"
+      - sql: "UPDATE grc_state_history SET quantity=0.125 WHERE id=2"
+    sql: |
+      SELECT d.id, (SELECT SUM((SELECT h.quantity FROM grc_state_history h
+        WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1))
+        FROM grc_state_entity e WHERE e.category=d.category
+          AND COALESCE((SELECT h.end_value FROM grc_state_history h
+            WHERE h.entity_id=e.id AND h.coordinate<=10 ORDER BY h.coordinate DESC LIMIT 1),d.x)>=d.x) AS total
+      FROM grc_state_points d WHERE d.id IN (2,4,7) ORDER BY d.id
+    expect:
+      rows: 3
+      data:
+        - {id: 2, total: 2}
+        - {id: 4, total: 0.125}
+        - {id: 7, total: 2}
+
+  - name: "snapshot execution invalidates before subtracting across source changes"
+    scm: |
+      (begin
+        (define source (table "memcp-tests" "grc_state_entity"))
+        (define snapshot (make_contribution_snapshot nil nil))
+        (define view (lambda () (list (table_read_version source))))
+        (define initial (lambda () (list 1 10)))
+        (define changed (lambda (lo hi) (list)))
+        (define values (lambda (keys) (list)))
+        (define direct (lambda () 99))
+        (define first (snapshot nil 1 view initial changed values direct))
+        (insert source '("id" "category") (list (list 6 1)))
+        (list first (snapshot nil 2 view initial changed values direct)))
+    expect:
+      data: [[10, 99]]
+
+  - name: "snapshot corrections preserve old values and skip repeated coordinates"
+    scm: |
+      (begin
+        (define snapshot (make_contribution_snapshot nil nil))
+        (define view (lambda () (list 1)))
+        (define full (lambda () (list 1 4 2 nil)))
+        (define candidates (lambda (lo hi) (list 1 2)))
+        (define changed (lambda (keys) (list 1 nil 2 -3)))
+        (define invalid (lambda () (error "unexpected full scan")))
+        (define first (snapshot nil 0 view full candidates changed invalid))
+        (define next (snapshot nil 1 view invalid candidates changed invalid))
+        (define repeat (snapshot nil 1 view invalid (lambda (a b) (error "repeated point scanned")) changed invalid))
+        (list first next repeat (snapshot nil 0 view invalid candidates (lambda (keys) (list 1 4 2 nil)) invalid)))
+    expect:
+      data: [[4, -3, -3, 4]]
+
+  - name: "snapshot rejects a source change during preparation"
+    scm: |
+      (begin
+        (define version (newsession))
+        (version "v" 1)
+        (define snapshot (make_contribution_snapshot nil nil))
+        (snapshot nil 1 (lambda () (list (version "v")))
+          (lambda () (begin (version "v" 2) (list 1 7)))
+          (lambda (a b) (list)) (lambda (keys) (list)) (lambda () 19)))
+    expect:
+      data: [19]
+
+  - name: "snapshot admission rejects preparation before allocating its state"
+    scm: |
+      (begin
+        (define admit (make_contribution_admission))
+        (define snapshot (make_contribution_snapshot admit (lambda () contribution_snapshot_key_budget)))
+        (snapshot nil 1 (lambda () (list 1)) (lambda () (error "unadmitted full scan"))
+          (lambda (a b) (list)) (lambda (keys) (list)) (lambda () 23)))
+    expect:
+      data: [23]
+
+  - name: "snapshot excludes unordered row-dependent expressions from the moving selection"
+    sql: |
+      EXPLAIN SELECT d.id, (SELECT SUM((SELECT h.quantity FROM grc_state_history h
+        WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.quantity DESC LIMIT 1))
+        FROM grc_state_entity e) AS total FROM grc_state_points d
+    expect:
+      result_not_contains: ["make_contribution_snapshot"]
+
+  - name: "snapshot formulas still reject unknown columns"
+    sql: |
+      SELECT d.id, (SELECT SUM((SELECT h.missing_quantity FROM grc_state_history h
+        WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1))
+        FROM grc_state_entity e) AS total FROM grc_state_points d
+    expect:
+      error: true
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS grc_state_points"
+      - sql: "DROP TABLE IF EXISTS grc_state_history"
+      - sql: "DROP TABLE IF EXISTS grc_state_entity"
