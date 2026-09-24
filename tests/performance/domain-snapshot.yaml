@@ -139,6 +139,29 @@ test_cases:
         - "{\"x\": 10, \"category\": 0, \"total\": 2000, \"scaled\": 20000}"
         - "{\"x\": 60, \"category\": null, \"total\": 3800, \"scaled\": 228000}"
         - "{\"x\": 60, \"category\": 0, \"total\": 1800, \"scaled\": 108000}"
+  - name: "Several SUM payloads in one scalar aggregate keep independent snapshots"
+    sql: |
+      SELECT d.x, p.category,
+        COALESCE((SELECT SUM((SELECT h.quantity FROM ds_history h
+          WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1)) + SUM(2 * (SELECT h.quantity FROM ds_history h
+          WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1))
+          FROM ds_entity e
+          WHERE (p.category IS NULL OR e.category=p.category)
+            AND (SELECT k.active FROM ds_kind k WHERE k.name=(SELECT h.kind FROM ds_history h
+              WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1) LIMIT 1)=1
+            AND COALESCE((SELECT h.end_value FROM ds_history h
+              WHERE h.entity_id=e.id AND h.coordinate<=60 ORDER BY h.coordinate DESC LIMIT 1),d.x)>=d.x),0) AS total
+      FROM (SELECT 10 AS x UNION SELECT 20 UNION SELECT 30 UNION SELECT 50 UNION SELECT 51 UNION SELECT 60) d
+      CROSS JOIN (SELECT NULL AS category) p
+    expect:
+      rows: 6
+      result_contains:
+        - "{\"x\": 10, \"category\": null, \"total\": 12000}"
+        - "{\"x\": 20, \"category\": null, \"total\": 13200}"
+        - "{\"x\": 30, \"category\": null, \"total\": 13200}"
+        - "{\"x\": 50, \"category\": null, \"total\": 13200}"
+        - "{\"x\": 51, \"category\": null, \"total\": 11400}"
+        - "{\"x\": 60, \"category\": null, \"total\": 11400}"
 cleanup:
   - sql: "DROP TABLE IF EXISTS ds_history"
   - sql: "DROP TABLE IF EXISTS ds_entity"

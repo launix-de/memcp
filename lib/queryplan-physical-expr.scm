@@ -9175,7 +9175,10 @@ This is transient query working memory, not a persistent cache registration. */
 		(define proof (qassoc_get (gs_facts stage) (quote contribution-domain) nil))
 		(define driver (car proof))
 		(define axis (lower_column_expr_for_alias driver (nth proof 2)))
-		(define cache_key (list (quote concat) (concat "__contribution_snapshot:" (gs_id stage) ":")
+		/* One logical group can expose several SUM payloads. Their old-value
+		states must remain distinct even when their domains and sources match. */
+		(define cache_key (list (quote concat) (concat "__contribution_snapshot:" (gs_id stage) ":"
+			(fnv_hash (serialize (list value_expr reduce_expr neutral_expr))) ":")
 			(list (quote serialize) (cons (quote list) (map (nth proof 4)
 				(lambda (expr) (lower_column_expr_for_alias driver expr)))))))
 		(define admission (list (physical_query_session_symbol) "get_or_compute_scoped"
