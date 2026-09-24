@@ -1308,3 +1308,31 @@ func TestInIndexCandidatesExactIntegralFloats(t *testing.T) {
 		}
 	}
 }
+
+func TestComputedBoundaryMaterializesArrayAsData(t *testing.T) {
+	for _, values := range [][]scm.Scmer{
+		{scm.NewInt(1), scm.NewInt(3)},
+		{scm.NewInt(2), scm.NewInt(4), scm.NewNil()},
+	} {
+		dictionary := scm.NewFastDictValue(1)
+		dictionary.Set(scm.NewString("values"), scm.NewSlice(values), nil)
+		outerEnv := &scm.Env{VarsNumbered: []scm.Scmer{scm.NewFastDict(dictionary)}, Outer: &scm.Globalenv}
+		lookup := scm.NewSlice([]scm.Scmer{
+			scm.NewSlice([]scm.Scmer{scm.NewSymbol("outer"), scm.NewInt(1), scm.NewNthLocalVar(0)}),
+			scm.NewString("values"),
+		})
+		mapper := scm.NewProcStruct(scm.Proc{
+			Params: scm.NewSlice([]scm.Scmer{scm.NewSymbol("id")}),
+			Body:   scm.NewSlice([]scm.Scmer{scm.NewSymbol("sql_in"), lookup, scm.NewSymbol("id")}),
+			En:     outerEnv,
+		})
+		compiled := compileComputedScanIndex(mapper, []string{"id"}).Slice()
+		for _, id := range []int64{1, 2, 3, 4, 5} {
+			got := scm.Apply(compiled[1], scm.NewInt(id))
+			want := scm.Apply(scm.Globalenv.Vars[scm.Symbol("sql_in")], scm.NewSlice(values), scm.NewInt(id))
+			if !scm.Equal(got, want) {
+				t.Fatalf("computed IN(%v, %d) = %s, want %s", values, id, scm.String(got), scm.String(want))
+			}
+		}
+	}
+}

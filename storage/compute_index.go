@@ -165,6 +165,10 @@ func isRawDataset(params []scm.Scmer, expr scm.Scmer) bool {
 		if len(items) == 0 {
 			return true
 		}
+		// Quoted values are inert data, including literal-array bindings.
+		if len(items) == 2 && items[0].SymbolEquals("quote") {
+			return true
+		}
 		// calling a param as function is not safe
 		if items[0].IsNthLocalVar() {
 			return false
@@ -266,7 +270,7 @@ func hasExplicitOuterReference(expr scm.Scmer) bool {
 }
 
 // evalIndependentScmer evaluates an expression that doesn't depend on row params.
-// Returns (value, true) when evaluation succeeds with a scalar result.
+// Returns (value, true) when evaluation succeeds with a scalar or literal-list result.
 func evalIndependentScmer(expr scm.Scmer, env *scm.Env) (result scm.Scmer, ok bool) {
 	// fast path: literal
 	if expr.IsInt() || expr.IsFloat() || expr.IsString() {
@@ -285,7 +289,7 @@ func evalIndependentScmer(expr scm.Scmer, env *scm.Env) (result scm.Scmer, ok bo
 		e := env.FindRead(scm.Symbol(expr.String()))
 		if e != nil {
 			if val, exists := e.Vars[scm.Symbol(expr.String())]; exists {
-				if val.IsInt() || val.IsFloat() || val.IsString() || val.IsBool() {
+				if val.IsInt() || val.IsFloat() || val.IsString() || val.IsBool() || val.IsSlice() {
 					return val, true
 				}
 			}
@@ -309,7 +313,7 @@ func evalIndependentScmer(expr scm.Scmer, env *scm.Env) (result scm.Scmer, ok bo
 			e := env.FindRead(sym)
 			if e != nil {
 				if val, exists := e.Vars[sym]; exists {
-					if val.IsInt() || val.IsFloat() || val.IsString() || val.IsBool() {
+					if val.IsInt() || val.IsFloat() || val.IsString() || val.IsBool() || val.IsSlice() {
 						return val, true
 					}
 				}
@@ -342,7 +346,7 @@ func evalIndependentScmer(expr scm.Scmer, env *scm.Env) (result scm.Scmer, ok bo
 		}
 	}()
 	res := scm.Eval(expr, env)
-	if res.IsInt() || res.IsFloat() || res.IsString() || res.IsBool() || res.IsNil() {
+	if res.IsInt() || res.IsFloat() || res.IsString() || res.IsBool() || res.IsNil() || res.IsSlice() {
 		return res, true
 	}
 	return scm.NewNil(), false

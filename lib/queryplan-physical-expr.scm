@@ -3570,32 +3570,48 @@ coercion and collations do not have the same ordering proof. */
 
 (define physical_numeric_in_interval (lambda (src terms term planning_session)
 	(match term
-		((symbol sql_in) (cons constructor values) probe) (begin
+		((symbol sql_in) rhs probe) (begin
+			(define array_binding (match rhs
+				((symbol session) key) (string? key)
+				((quote session) key) (string? key)
+				_ false))
+			(define values (match rhs
+				(cons constructor values)
+				(if (or (equal? constructor list) (equal? constructor (quote list))) values nil)
+				_ nil))
 			(define col (direct_column_name_for_alias src probe))
 			(define info (if (or (nil? col) (not (source_is_base_table? src))) nil
 				(find (get_schema (source_schema src) (source_relation src))
 					(lambda (candidate) (equal?? (candidate "Field") col)) nil)))
-			(define eligible (and (or (equal? constructor list) (equal? constructor (quote list)))
-				(not (nil? info)) (not (empty_list? values))
+			(define eligible (and (or array_binding
+				(and (not (nil? values)) (not (empty_list? values))
+					(reduce values (lambda (ok value) (and ok (physical_in_binding? value))) true)))
+				(not (nil? info))
 				(contains? '("int" "integer" "bigint" "smallint" "tinyint" "mediumint" "float" "double" "decimal")
 					(toLower (coalesceNil (info "RawType") "")))
-				(reduce values (lambda (ok value) (and ok (physical_in_binding? value))) true)
 				(not (reduce terms (lambda (conflict other)
 					(or conflict (and (not (equal? other term))
 						(contains? (extract_columns_for_alias src other) col)))) false))))
 			(if (not eligible) term (begin
 				(define numeric (lambda (value) (and (number? value) (<= value value))))
-				(define supported (reduce values (lambda (ok value)
-					(and ok (numeric (planner_literal_value value planning_session)))) true))
-				(define guard (cons (quote and) (map values (lambda (value)
-					(list (quote and) (list (quote number?) value) (list (quote <=) value value))))))
+				(define bound_values (if array_binding (planner_literal_value rhs planning_session)
+					(map values (lambda (value) (planner_literal_value value planning_session)))))
+				(define supported (and (not (empty_list? bound_values))
+					(reduce bound_values (lambda (ok value) (and ok (numeric value))) true)))
+				/* Guard the numeric regime, not array length or contents. Each execution
+				computes its bounds from the complete current list before scanning. */
+				(define guard (list (quote and) (list (quote not) (list (quote empty_list?) rhs))
+					(list (quote reduce) rhs
+						(list (quote lambda) (list (quote ok) (quote value))
+							(list (quote and) (quote ok) (list (quote number?) (quote value))
+								(list (quote <=) (quote value) (quote value)))) true)))
 				(planner_record_guard_condition (if supported guard (list (quote not) guard)) planning_session)
 				(if (not supported) term (begin
 					(define bound (lambda (op)
-						(list (quote reduce) (cons (quote list) values)
+						(list (quote reduce) rhs
 							(list (quote lambda) (list (quote lo) (quote value))
 								(list (quote if) (list op (quote value) (quote lo)) (quote value) (quote lo)))
-							(car values))))
+							(list (quote car) rhs))))
 					(list (quote and) (list (quote >=) probe (bound (quote <)))
 						(list (quote <=) probe (bound (quote >))) term))))))
 		_ term)))
