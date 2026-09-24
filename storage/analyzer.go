@@ -613,19 +613,19 @@ func (c *indexAnalyzeContext) ExtractConstant(v scm.Scmer) (scm.Scmer, bool) {
 	}
 	if v.IsSymbol() {
 		if value, ok := c.proc.En.Vars[scm.Symbol(v.String())]; ok {
-			if value.IsInt() || value.IsFloat() || value.IsString() || value.IsCustom(TagRecSet) {
+			if value.IsInt() || value.IsFloat() || value.IsString() || value.IsCustom(TagRecSet) || value.IsSlice() {
 				return value, true
 			}
 		}
 	}
 	if value, ok := c.resolveOuterReference(v); ok {
-		if value.IsInt() || value.IsFloat() || value.IsString() || value.IsCustom(TagRecSet) {
+		if value.IsInt() || value.IsFloat() || value.IsString() || value.IsCustom(TagRecSet) || value.IsSlice() {
 			return value, true
 		}
 	}
 	if isIndependent(c.params, v) {
 		if value, ok := evalIndependentProcBodyScmer(v, c.proc); ok {
-			if value.IsInt() || value.IsFloat() || value.IsString() || value.IsBool() || value.IsNil() || value.IsCustom(TagRecSet) {
+			if value.IsInt() || value.IsFloat() || value.IsString() || value.IsBool() || value.IsNil() || value.IsCustom(TagRecSet) || value.IsSlice() {
 				return value, true
 			}
 		}
@@ -658,6 +658,11 @@ func (c *indexAnalyzeContext) materializeComputedExprParts(expr scm.Scmer) scm.S
 	expr = expr.WithoutSourceInfo()
 	if isIndependent(c.params, expr) {
 		if value, ok := c.ExtractConstant(expr); ok {
+			// List bindings are data, not calls. Preserve that distinction when
+			// embedding an immutable invocation value into the computed AST.
+			if value.IsSlice() {
+				return scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), value})
+			}
 			return value
 		}
 	}

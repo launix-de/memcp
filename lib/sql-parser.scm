@@ -72,6 +72,14 @@ makes the JIT allocator state grow with the complete bulk statement. */
 			(list (quote sql_bind_insert_values) (quote session) (list (quote quote) template))
 			(cons list (map datasets (lambda (dataset) (cons list dataset))))))))
 
+/* Internal literal-array placeholder emitted by the query-cache lexer. It
+is distinct from IN (?), whose parameter remains a single scalar SQL value. */
+(define sql_in_array_parameter (lambda (counter)
+	(begin
+		(define n (counter "n"))
+		(counter "n" (+ n 1))
+		(list (quote session) (concat "v" (+ n 1))))))
+
 /* JSON_ARRAYAGG keeps its growing state as a list of completed values. The
 finalizer emits one contiguous BSON array after the aggregate has seen every
 row, avoiding a copy of the complete prefix for each input value. */
@@ -775,6 +783,10 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		sql_expression2
 	)))
 
+	(define sql_in_values (parser (or
+		(parser '("(" "?*" ")") (sql_in_array_parameter placeholder_counter))
+		(parser '("(" (define values (+ sql_expression ",")) ")") (cons list values)))))
+
 	(define sql_expression2 (parser (or
 		/* Prefix NOT binds less tightly than comparison predicates but more tightly
 		than AND/OR. Parsing its operand at this level makes `NOT value LIKE ...`
@@ -814,8 +826,8 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(parser '((define a sql_expression3) (atom "RLIKE" true) (define b sql_expression2)) '('regexp_test a b))
 		(parser '((define a sql_expression3) (atom "NOT" true) (atom "REGEXP" true) (define b sql_expression2)) '('sql_not '('regexp_test a b)))
 		(parser '((define a sql_expression3) (atom "NOT" true) (atom "RLIKE" true) (define b sql_expression2)) '('sql_not '('regexp_test a b)))
-		(parser '((define a sql_expression3) (atom "IN" true) "(" (define b (+ sql_expression ",")) ")") '('sql_in (cons list b) a))
-		(parser '((define a sql_expression3) (atom "NOT" true) (atom "IN" true) "(" (define b (+ sql_expression ",")) ")") (list (quote sql_not) (cons (quote sql_in) (cons (cons (quote list) b) (list a)))))
+		(parser '((define a sql_expression3) (atom "IN" true) (define b sql_in_values)) '('sql_in b a))
+		(parser '((define a sql_expression3) (atom "NOT" true) (atom "IN" true) (define b sql_in_values)) (list (quote sql_not) (list (quote sql_in) b a)))
 		/* BETWEEN operator: expr BETWEEN low AND high -> a >= low AND a <= high */
 		(parser '((define a sql_expression3) (atom "BETWEEN" true) (define low sql_expression3) (atom "AND" true) (define high sql_expression3)) (list (quote and) (list (quote >=) a low) (list (quote <=) a high)))
 		(parser '((define a sql_expression3) (atom "NOT" true) (atom "BETWEEN" true) (define low sql_expression3) (atom "AND" true) (define high sql_expression3)) (list (quote sql_not) (list (quote and) (list (quote >=) a low) (list (quote <=) a high))))

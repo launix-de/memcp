@@ -200,6 +200,10 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		psql_expression2
 	)))
 
+	(define psql_in_values (parser (or
+		(parser '("(" "?*" ")") (sql_in_array_parameter placeholder_counter))
+		(parser '("(" (define values (+ psql_expression ",")) ")") (cons list values)))))
+
 	(define psql_expression2 (parser (or
 		/* SQL prefix NOT binds below comparison predicates and above AND/OR. */
 		(parser '((atom "NOT" true) (atom "EXISTS" true) "(" (define sub psql_select) ")") (list (quote not) (list (quote inner_select_exists) sub)))
@@ -239,8 +243,8 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(parser '((define a psql_expression3) (atom "RLIKE" true) (define b psql_expression2)) '('regexp_test a b))
 		(parser '((define a psql_expression3) (atom "NOT" true) (atom "REGEXP" true) (define b psql_expression2)) '('sql_not '('regexp_test a b)))
 		(parser '((define a psql_expression3) (atom "NOT" true) (atom "RLIKE" true) (define b psql_expression2)) '('sql_not '('regexp_test a b)))
-		(parser '((define a psql_expression3) (atom "IN" true) "(" (define b (+ psql_expression ",")) ")") '('sql_in (cons list b) a))
-		(parser '((define a psql_expression3) (atom "NOT" true) (atom "IN" true) "(" (define b (+ psql_expression ",")) ")") '('sql_not '('sql_in (cons list b) a)))
+		(parser '((define a psql_expression3) (atom "IN" true) (define b psql_in_values)) '('sql_in b a))
+		(parser '((define a psql_expression3) (atom "NOT" true) (atom "IN" true) (define b psql_in_values)) '('sql_not '('sql_in b a)))
 		/* BETWEEN operator: expr BETWEEN low AND high -> a >= low AND a <= high */
 		(parser '((define a psql_expression3) (atom "BETWEEN" true) (define low psql_expression3) (atom "AND" true) (define high psql_expression3)) (list (quote and) (list (quote >=) a low) (list (quote <=) a high)))
 		(parser '((define a psql_expression3) (atom "NOT" true) (atom "BETWEEN" true) (define low psql_expression3) (atom "AND" true) (define high psql_expression3)) (list (quote sql_not) (list (quote and) (list (quote >=) a low) (list (quote <=) a high))))

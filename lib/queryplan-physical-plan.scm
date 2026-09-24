@@ -1617,8 +1617,14 @@ outer joins. */
 (define lower_group_stage_prepare_using (lambda (all_stages lookup_stages stage include_nested_prepares result_sink)
 	(begin
 		(define observed_key (qassoc_get (gs_facts stage) (quote group_join_observation) nil))
-		(define src (gs_input stage))
+		(define logical_src (gs_input stage))
 		(define prepare_catalog (unique_stages_by_id (merge (list (list stage) all_stages))))
+		(define range_recmap_candidates (if (query_block? logical_src)
+			(select_group_range_recmap_candidate prepare_catalog stage logical_src
+				(lowering_catalog_planning_session lookup_stages)) '()))
+		(define src (reduce range_recmap_candidates
+			(lambda (block candidate) (query_block_with_group_range_recmap block candidate))
+			logical_src))
 		(define prepare_dependency_graph (stage_dependency_graph prepare_catalog))
 		(define prepare_dependencies
 			(stage_dependency_closure_using_graph prepare_dependency_graph stage))
@@ -1656,10 +1662,10 @@ outer joins. */
 				raw_stage_lookup invariant_probe_entries)))
 		(define invariant_probe_bindings (if closed_boolean_sink '()
 			(query_invariant_probe_bindings invariant_probe_entries)))
-		(define recmap_candidate
+		(define recmap_candidate (if (empty_list? range_recmap_candidates)
 			(select_nested_scalar_recmap_candidate
 				(group_stage_nested_scalar_recmap_candidate stage_lookup stage)
-				(lowering_catalog_planning_session lookup_stages)))
+				(lowering_catalog_planning_session lookup_stages)) nil))
 		(if (and (not (union_block? src)) (and (not (query_block? src)) (not (source_is_base_table? src))))
 			(neumann_fail "build_queryplan" "group-stage lowering expects a base table, query-block, or union-block input")
 			true)
@@ -1721,14 +1727,17 @@ outer joins. */
 			'(1)
 			(if (query_block? src)
 				(map (gs_keys stage) (lambda (key)
-					(rewrite_scalar_first_probe_expr stage_lookup presence_probe_sources_for_rewrite rewrite_default_alias key)))
+					(rewrite_scalar_first_probe_expr stage_lookup presence_probe_sources_for_rewrite rewrite_default_alias
+						(rewrite_group_range_recmaps_expr range_recmap_candidates key))))
 				(gs_keys stage))))
 		(define prepare_order_items (coalesceNil (gs_order stage) '()))
 		(define prepare_resolved_order_exprs (map prepare_order_items (lambda (item)
 			(match item '(expr _dir) (canonical_column_expr_for_alias alias expr)))))
 		(define key_index (make_group_key_index keys prepare_resolved_order_exprs))
 		(define condition (if (query_block? src)
-			(rewrite_scalar_first_probe_expr stage_lookup presence_probe_sources_for_rewrite rewrite_default_alias (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
+			(rewrite_scalar_first_probe_expr stage_lookup presence_probe_sources_for_rewrite rewrite_default_alias
+				(rewrite_group_range_recmaps_expr range_recmap_candidates
+					(coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true)))
 			(coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true)))
 		(define needs_count_filter (and
 			(not (qassoc_get (gs_facts stage) (quote preserve_empty_domain) false))
@@ -1738,7 +1747,8 @@ outer joins. */
 			(dedupe_aggregates_by_col (merge (list (gs_aggregates stage) (list aggregate_count_descriptor))))
 			(gs_aggregates stage)))
 		(define recmap_ags
-			(rewrite_nested_scalar_recmap_expr recmap_candidate ags))
+			(rewrite_group_range_recmaps_expr range_recmap_candidates
+				(rewrite_nested_scalar_recmap_expr recmap_candidate ags)))
 		(define lowering_ags (if (query_block? src)
 			(rewrite_scalar_first_probe_aggregates stage_lookup presence_probe_sources_for_rewrite rewrite_default_alias recmap_ags)
 			recmap_ags))
@@ -1983,11 +1993,14 @@ outer joins. */
 		raw_stage_lookup above) is bound exactly once here, ahead of whatever
 		this stage's own prepare plan does, so every rewritten reference below
 		reads that one binding instead of re-probing per row. */
-		(define recmap_plan (if (nil? recmap_candidate)
-			lowered_plan_core
-			(list (quote !begin)
-				(nested_scalar_recmap_binding recmap_candidate)
-				lowered_plan_core)))
+		(define recmap_plan (if (and (empty_list? range_recmap_candidates)
+			(nil? recmap_candidate)) lowered_plan_core
+			(cons (quote !begin)
+				(merge (list
+					(map range_recmap_candidates group_range_recmap_binding)
+					(if (nil? recmap_candidate) '()
+						(list (nested_scalar_recmap_binding recmap_candidate)))
+					(list lowered_plan_core))))))
 		(define lookup_cached_plan (if (nil? scalar_order_cache)
 			recmap_plan
 			(list (quote !begin) (nth scalar_order_cache 4) recmap_plan)))
@@ -3824,8 +3837,8 @@ logical stage graph and its nullable joins remain unchanged until here. */
 			(begin
 				(define pairs (map terms (lambda (term)
 					(relational_recmap_join_columns target previous term))))
-			(define first_pair (if (empty_list? pairs) nil (car pairs)))
-			(define first_previous (if (nil? first_pair) nil (nth first_pair 1)))
+				(define first_pair (if (empty_list? pairs) nil (car pairs)))
+				(define first_previous (if (nil? first_pair) nil (nth first_pair 1)))
 				(if (or (nil? first_previous)
 					(reduce pairs (lambda (invalid pair)
 						(or invalid (or (nil? pair)
@@ -3969,33 +3982,51 @@ physical recipe is being emitted. */
 /* An ordered range dependency on the hash target must be built as one RecMap,
 not as one range-cache cell per target row. Return
 (stage binding-symbol binding-expression replacement-expression). */
-(define relational_recmap_range_dependency (lambda (target rewritten_values)
+(define range_recmap_point_pairs (lambda (stage)
+	(filter (zip (range_stage_point_keys stage) (range_stage_point_domain stage))
+		(lambda (pair) (not (equal? (car pair) (cadr pair)))))))
+
+(define range_recmap_base_source (lambda (stage)
+	(begin
+		(define input (gs_input stage))
+		(if (query_block? input)
+			(begin
+				(define bases (filter (qb_sources input) source_is_base_table?))
+				(if (single_source? bases) (car bases) nil))
+			(range_stage_base_source stage)))))
+
+(define relational_recmap_range_dependency (lambda (target rewritten_values range_target_override bound_override)
 	(begin
 		(define markers (filter (map rewritten_values nested_scalar_recmap_scalar_marker)
 			(lambda (marker) (not (nil? marker)))))
 		(define range_markers (filter markers (lambda (marker)
 			(and (equal? (count (range_stage_domains (car marker))) 1)
-				(not (nil? (range_stage_base_source (car marker))))))))
+				(not (nil? (if (nil? range_target_override)
+					(range_stage_base_source (car marker)) range_target_override)))))))
 		(define marker (if (single_source? range_markers) (car range_markers) nil))
 		(if (nil? marker) nil
 			(begin
 				(define stage (car marker))
 				(define requested_col (cadr marker))
-				(define range_target (range_stage_base_source stage))
+				(define range_target (if (nil? range_target_override)
+					(range_stage_base_source stage) range_target_override))
 				(define domain (car (range_stage_domains stage)))
 				(define upper (range_domain_unbounded_from? domain))
 				(define bounded (if upper
 					(not (range_domain_unbounded_to? domain))
 					(range_domain_unbounded_to? domain)))
-				(define bound (if upper (range_domain_to domain) (range_domain_from domain)))
+				(define bound (if (nil? bound_override)
+					(if upper (range_domain_to domain) (range_domain_from domain))
+					bound_override))
 				(define bound_kind (if upper (range_domain_to_kind domain) (range_domain_from_kind domain)))
 				(define relation (if upper
 					(if (equal? bound_kind 1) "<=" "<")
 					(if (equal? bound_kind 0) ">=" ">")))
-				(define source_exprs (merge (list (range_stage_point_domain stage) (list bound))))
+				(define point_pairs (range_recmap_point_pairs stage))
+				(define source_exprs (merge (list (map point_pairs cadr) (list bound))))
 				(define source_projection (recmap_projection_parts target source_exprs))
-				(define target_point_cols (map (range_stage_point_keys stage) (lambda (expr)
-					(direct_column_name_for_alias range_target expr))))
+				(define target_point_cols (map point_pairs (lambda (pair)
+					(direct_column_name_for_alias range_target (car pair)))))
 				(define target_range_col
 					(direct_column_name_for_alias range_target (range_domain_inner domain)))
 				(define ag (scalar_first_probe_aggregate stage requested_col))
@@ -4035,6 +4066,631 @@ not as one range-cache cell per target row. Return
 							map_expr))
 						(define replacement (list binding record_ref))
 						(list stage binding value_mapper_expr replacement))))))))
+
+/* A grouped query can consume a scalar range stage once per driving row. Keep
+the logical stage intact and compare its direct probe with a physical RecMap
+that projects the selected value back by the driver's record identity. */
+(define group_literal_nil_thunk? (lambda (expr)
+	(and (list? expr) (equal? (count expr) 1)
+		(or (equal? (serialize (car expr)) "(lambda () nil)")
+			(and (list? (car expr)) (equal? (count (car expr)) 3)
+				(and (equal? (car (car expr)) (symbol "lambda"))
+					(and (empty_list? (cadr (car expr)))
+						(nil? (nth (car expr) 2)))))))))
+
+(define group_literal_value? (lambda (expr)
+	(and (not (list? expr)) (not (symbol? expr)))))
+
+/* Fold only pure literal boolean expressions. In particular, a column or
+session read is never evaluated while building the plan. */
+(define group_simplify_literal_expr (lambda (expr)
+	(if (group_literal_nil_thunk? expr) nil
+		(if (not (list? expr)) expr
+			(begin
+				(define rewritten (map expr group_simplify_literal_expr))
+				(match rewritten
+					((symbol if) condition then_expr else_expr)
+					(if (equal? condition true) then_expr
+						(if (equal? condition false) else_expr rewritten))
+					((symbol equal??) left right)
+					(if (and (group_literal_value? left) (group_literal_value? right))
+						(equal?? left right) rewritten)
+					((symbol equal?) left right)
+					(if (and (group_literal_value? left) (group_literal_value? right))
+						(equal? left right) rewritten)
+					((symbol nil?) value)
+					(if (group_literal_value? value) (nil? value) rewritten)
+					((symbol not) value)
+					(if (or (equal? value true) (equal? value false)) (not value) rewritten)
+					(cons (symbol and) terms)
+					(if (contains? terms false) false
+						(begin
+							(define kept (filter terms (lambda (item) (not (equal? item true)))))
+							(if (empty_list? kept) true
+								(if (single_source? kept) (car kept) (cons (symbol "and") kept)))))
+					(cons (symbol or) terms)
+					(if (contains? terms true) true
+						(begin
+							(define kept (filter terms (lambda (item) (not (equal? item false)))))
+							(if (empty_list? kept) false
+								(if (single_source? kept) (car kept) (cons (symbol "or") kept)))))
+					_ rewritten))))))
+
+(define group_input_without_dead_scalar_sources (lambda (stage block planning_session)
+	(if (empty_list? (filter (qb_sources block) (lambda (src)
+		(stage_output_relation? (source_relation src))))) block
+		(begin
+			(define observed_where (planner_bind_session_values (qb_where block) planning_session))
+			(define simplified_where (group_simplify_literal_expr observed_where))
+			(if (equal? simplified_where (qb_where block)) nil
+				(planner_record_session_value_guards (qb_where block) planning_session))
+			(define sources (qb_sources block))
+			(define referenced (list (qb_fields block) simplified_where
+				(qb_group block) (qb_having block) (qb_order block) (qb_hidden block)
+				(gs_keys stage) (gs_aggregates stage)
+				(qassoc_get (gs_facts stage) (quote condition) true)))
+			(define unused (filter sources (lambda (src)
+				(and (stage_output_relation? (source_relation src))
+					(empty_list? (group_range_recmap_columns (source_alias src)
+						(list referenced
+							(map (filter sources (lambda (other)
+								(not (equal? (source_alias other) (source_alias src)))))
+								source_join_expr))))))))
+			(define aliases (map unused source_alias))
+			(make_query_block (qb_schema block)
+				(filter sources (lambda (src)
+					(not (contains? aliases (source_alias src)))))
+				(qb_fields block) simplified_where (qb_group block) (qb_having block)
+				(qb_order block) (qb_limit block) (qb_offset block)
+				(qb_hidden block) (qb_stages block)
+				(join_optimizer_facts_without_aliases
+					(qassoc_set (qb_facts block) (quote consumed_probe_stage_ids)
+						(merge_unique (list (map unused (lambda (src)
+							(stage_output_relation_id (source_relation src))))
+							(qassoc_get (qb_facts block) (quote consumed_probe_stage_ids) '()))))
+					aliases))))))
+
+(define group_range_recmap_columns (lambda (alias expr)
+	(match expr
+		((symbol get_column) tblvar _ignorecase col _col_ignorecase)
+		(if (equal?? alias tblvar) (list col) '())
+		((quote get_column) tblvar _ignorecase col _col_ignorecase)
+		(if (equal?? alias tblvar) (list col) '())
+		(cons head tail) (merge_unique (list
+			(group_range_recmap_columns alias head)
+			(merge_unique (map tail (lambda (item)
+				(group_range_recmap_columns alias item))))))
+		_ '())))
+
+(define group_range_recmap_stage_value (lambda (stage requested target domain)
+	(begin
+		(define ag (scalar_first_probe_aggregate stage requested))
+		(define parts (if (nil? ag) nil (scalar_first_probe_parts ag)))
+		(define wanted_dir (if (range_domain_unbounded_from? domain) > <))
+		(if (nil? parts) nil
+			(if (and (equal? (nth parts 3) 0)
+				(and (equal? (nth parts 1) (list (range_domain_inner domain)))
+					(equal? (nth parts 2) (list wanted_dir))))
+				(direct_column_name_for_alias target (nth parts 0)) nil)))))
+
+(define group_range_recmap_candidate_for_column (lambda (stages stage block driver output requested)
+	(begin
+		(define range_stage (stage_for_output_relation stages (source_relation output)))
+		(define target (if (nil? range_stage) nil (range_stage_base_source range_stage)))
+		(define domains (if (nil? range_stage) '() (range_stage_domains range_stage)))
+		(define domain (if (single_source? domains) (car domains) nil))
+		(if (or (nil? requested) (or (nil? target) (nil? domain))) nil
+			(begin
+				(define point_pairs (range_recmap_point_pairs range_stage))
+				(define point_keys (map point_pairs car))
+				(define point_exprs (map point_pairs cadr))
+				(define upper (range_domain_unbounded_from? domain))
+				(define bounded (if upper (not (range_domain_unbounded_to? domain))
+					(range_domain_unbounded_to? domain)))
+				(define bound (if upper (range_domain_to domain) (range_domain_from domain)))
+				(define kind (if upper (range_domain_to_kind domain) (range_domain_from_kind domain)))
+				(define relation (if upper
+					(if (equal? kind 1) "<=" "<")
+					(if (equal? kind 0) ">=" ">")))
+				(define point_col (if (single_source? point_keys)
+					(direct_column_name_for_alias target (car point_keys)) nil))
+				(define driver_col (if (single_source? point_exprs)
+					(direct_column_name_for_alias driver (car point_exprs)) nil))
+				(define value_col (group_range_recmap_stage_value
+					range_stage requested target domain))
+				(define joins (relational_recmap_output_join_column_pairs
+					range_stage driver output (source_join_expr output)))
+				(define valid (and bounded
+					(and (single_source? point_keys) (single_source? point_exprs))
+					(and (not (nil? point_col)) (not (nil? driver_col)))
+					(and (recmap_direct_key_column? target point_col)
+						(not (nil? (find joins (lambda (pair)
+							(equal? (car pair) driver_col)) nil))))
+					(and (not (nil? value_col)) (scalar_value_stage? range_stage))
+					(and (equal? (stage_partition_limit range_stage) 1)
+						(equal? (range_stage_invariant_condition range_stage) true))
+					(equal? (range_stage_raw_condition range_stage)
+						(list (symbol relation) (range_domain_inner domain) bound))))
+				(if (not valid) nil
+					(begin
+						(define recipe (relational_recmap_range_dependency driver
+							(list (list (quote scalar_first_probe) range_stage requested)) nil nil))
+						(if (nil? recipe) nil
+							(list driver output range_stage target requested recipe)))))))))
+
+(define group_range_recmap_range_signature_expr (lambda (target expr)
+	(match expr
+		((symbol get_column) alias _ignorecase col _col_ignorecase)
+		(if (equal? alias (source_alias target))
+			(list (quote get_column) "__range_target" false col false) expr)
+		((quote get_column) alias ignorecase col col_ignorecase)
+		(group_range_recmap_range_signature_expr target
+			(list (symbol "get_column") alias ignorecase col col_ignorecase))
+		(cons head tail) (cons (group_range_recmap_range_signature_expr target head)
+			(map tail (lambda (item)
+				(group_range_recmap_range_signature_expr target item))))
+		_ expr)))
+
+(define group_range_recmap_shared_bound_candidate (lambda (prior_specs bound_stage requested driver)
+	(begin
+		(define bound_target (range_stage_base_source bound_stage))
+		(define bound_domains (range_stage_domains bound_stage))
+		(define bound_value (if (or (nil? bound_target) (not (single_source? bound_domains))) nil
+			(group_range_recmap_stage_value bound_stage requested bound_target (car bound_domains))))
+		(define matches (filter prior_specs (lambda (spec)
+			(and (not (nil? bound_value))
+				(and (equal? (source_table_expr (nth spec 3)) (source_table_expr bound_target))
+					(and (equal? (group_range_recmap_range_signature_expr (nth spec 3)
+						(range_stage_raw_condition (nth spec 2)))
+						(group_range_recmap_range_signature_expr bound_target
+							(range_stage_raw_condition bound_stage)))
+						(and (equal? (group_range_recmap_range_signature_expr (nth spec 3)
+							(range_recmap_point_pairs (nth spec 2)))
+							(group_range_recmap_range_signature_expr bound_target
+								(range_recmap_point_pairs bound_stage)))
+							(equal? (group_range_recmap_stage_value (nth spec 2)
+								(nth spec 4) (nth spec 3) (car (range_stage_domains (nth spec 2))))
+								bound_value))))))))
+		(if (not (single_source? matches)) nil
+			(begin
+				(define matched (car matches))
+				(define map_expr (cadr (nth (nth matched 5) 2)))
+				(define specs (filter prior_specs (lambda (spec)
+					(equal? map_expr (cadr (nth (nth spec 5) 2))))))
+				(list (list driver (nth matched 3) specs map_expr)
+					(list_index_of specs matched)))))))
+
+(define group_range_recmap_invariant_join? (lambda (stage driver output expr)
+	(match expr
+		(cons op terms) (if (equal? op (quote and))
+			(reduce terms (lambda (valid term)
+				(and valid (relational_recmap_output_invariant_join_term?
+					stage driver output term))) true)
+			(relational_recmap_output_invariant_join_term? stage driver output expr))
+		_ (relational_recmap_output_invariant_join_term?
+			stage driver output expr))))
+
+(define group_range_recmap_chain_candidate (lambda (stages stage block driver output requested prior_specs)
+	(begin
+		(define dimension_stage (stage_for_output_relation stages (source_relation output)))
+		(define input (if (nil? dimension_stage) nil (gs_input dimension_stage)))
+		(define inputs (if (query_block? input) (qb_sources input) '()))
+		(define dimensions (filter inputs source_is_base_table?))
+		(define previous_outputs (filter inputs (lambda (src)
+			(stage_output_relation? (source_relation src)))))
+		(if (or (not (single_source? dimensions))
+			(or (not (single_source? previous_outputs)) (not (equal? (count inputs) 2)))) nil
+			(begin
+				(define dimension (car dimensions))
+				(define previous (car previous_outputs))
+				(define range_stage (stage_for_output_relation stages (source_relation previous)))
+				(define target (if (nil? range_stage) nil (range_recmap_base_source range_stage)))
+				(define domains (if (nil? range_stage) '() (range_stage_domains range_stage)))
+				(define domain (if (single_source? domains) (car domains) nil))
+				(define previous_cols (group_range_recmap_columns
+					(source_alias previous) (qb_where input)))
+				(define previous_col (if (single_source? previous_cols) (car previous_cols) nil))
+				(define dimension_value (relational_recmap_stage_value
+					dimension_stage requested dimension))
+				(define dimension_join (relational_recmap_join_columns
+					dimension previous (qb_where input)))
+				(if (or (nil? domain) (or (nil? target) (nil? previous_col))) nil
+					(begin
+						(define point_pairs (range_recmap_point_pairs range_stage))
+						(define point_keys (map point_pairs car))
+						(define point_exprs (map point_pairs cadr))
+						(define upper (range_domain_unbounded_from? domain))
+						(define bounded (if upper (not (range_domain_unbounded_to? domain))
+							(range_domain_unbounded_to? domain)))
+						(define bound (if upper (range_domain_to domain) (range_domain_from domain)))
+						(define kind (if upper (range_domain_to_kind domain) (range_domain_from_kind domain)))
+						(define relation (if upper
+							(if (equal? kind 1) "<=" "<")
+							(if (equal? kind 0) ">=" ">")))
+						(define point_col (if (single_source? point_keys)
+							(direct_column_name_for_alias target (car point_keys)) nil))
+						(define driver_col (if (single_source? point_exprs)
+							(direct_column_name_for_alias driver (car point_exprs)) nil))
+						(define range_value (group_range_recmap_stage_value
+							range_stage previous_col target domain))
+						(define joins (relational_recmap_output_join_column_pairs
+							dimension_stage driver output (source_join_expr output)))
+						(define bound_join_pairs (relational_recmap_output_join_column_pairs
+							range_stage target previous (source_join_expr previous)))
+						(define valid (and bounded
+							(and (single_source? point_keys) (single_source? point_exprs))
+							(and (not (nil? point_col)) (not (nil? driver_col)))
+							(and (recmap_direct_key_column? target point_col)
+								(not (nil? (find joins (lambda (pair)
+									(equal? (car pair) driver_col)) nil))))
+							(and (not (nil? range_value)) (not (nil? dimension_value)))
+							(and (scalar_value_stage? range_stage) (scalar_value_stage? dimension_stage))
+							(and (equal? (stage_partition_limit range_stage) 1)
+								(equal? (stage_partition_limit dimension_stage) 1))
+							(and (equal? (range_stage_invariant_condition range_stage) true)
+								(equal? (qassoc_get (gs_facts dimension_stage) (quote condition) true) true))
+							(and (or (equal? (coalesceNil (source_join_expr previous) true) true)
+								(group_range_recmap_invariant_join?
+									dimension_stage driver previous (source_join_expr previous))
+								(not (nil? (find bound_join_pairs (lambda (pair)
+									(equal? (car pair) point_col)) nil))))
+								(equal? (coalesceNil (source_join_expr dimension) true) true))
+							(equal? (range_stage_raw_condition range_stage)
+								(list (symbol relation) (range_domain_inner domain) bound))))
+						(if (not valid) nil
+							(begin
+								(define bound_sources (if (query_block? (gs_input range_stage))
+									(filter (qb_sources (gs_input range_stage))
+										(lambda (src)
+											(and (stage_output_relation? (source_relation src))
+												(not (empty_list? (group_range_recmap_columns
+													(source_alias src) bound))))))
+									'()))
+								(define bound_source (if (single_source? bound_sources) (car bound_sources) nil))
+								(define bound_cols (if (nil? bound_source) '()
+									(group_range_recmap_columns (source_alias bound_source) bound)))
+								(define bound_stage (if (or (nil? bound_source)
+									(not (single_source? bound_cols))) nil
+									(stage_for_output_relation stages (source_relation bound_source))))
+								(define shared (if (nil? bound_stage) nil
+									(group_range_recmap_shared_bound_candidate prior_specs bound_stage
+										(car bound_cols) driver)))
+								(define rewritten_bound (relational_recmap_rewrite_stage_expr
+									stages (stage_dependency_graph stages)
+									(if (query_block? (gs_input range_stage))
+										(qb_sources (gs_input range_stage)) (list target))
+									(source_alias target) bound))
+								(define shared_bound (if (nil? shared) rewritten_bound
+									(begin
+										(define candidate (car shared))
+										(define record_ref (list (quote get_column)
+											(source_alias driver) false "$record_ref" false))
+										(define outer_bound (group_range_recmap_outer_bound candidate))
+										(define value (list (quote nth)
+											(if (nil? outer_bound)
+												(list (group_range_recmap_var candidate) record_ref)
+												(list (group_range_recmap_var candidate) outer_bound record_ref))
+											(cadr shared)))
+										(relational_recmap_replace_scalar_stage rewritten_bound bound_stage value))))
+								(define recipe (relational_recmap_range_dependency driver
+									(list (list (quote scalar_first_probe) range_stage previous_col))
+									target shared_bound))
+								(if (nil? recipe) nil
+									(list driver output range_stage target requested recipe previous_col
+										dimension_stage dimension previous
+										(if (nil? shared) nil (car shared))
+										(if (nil? dimension_join) nil (car dimension_join)))))))))))))
+
+(define group_range_recmap_replace_column (lambda (alias col replacement expr)
+	(match expr
+		((symbol get_column) tblvar _ignorecase requested _col_ignorecase)
+		(if (and (equal?? alias tblvar) (equal? col requested)) replacement expr)
+		((quote get_column) tblvar ignorecase requested col_ignorecase)
+		(group_range_recmap_replace_column alias col replacement
+			(list (symbol "get_column") tblvar ignorecase requested col_ignorecase))
+		(cons head tail) (cons head (map tail (lambda (item)
+			(group_range_recmap_replace_column alias col replacement item))))
+		_ expr)))
+
+(define group_range_recmap_dimension_probe (lambda (spec value_expr)
+	(begin
+		(define dimension (nth spec 8))
+		(define previous (nth spec 9))
+		(define condition (group_range_recmap_replace_column
+			(source_alias previous) (nth spec 6) value_expr
+			(qb_where (gs_input (nth spec 7)))))
+		(define cols (extract_columns_for_alias dimension condition))
+		(define value_col (relational_recmap_stage_value (nth spec 7)
+			(nth spec 4) dimension))
+		(compile_scan_plan (quote scan_order)
+			(physical_query_tx_symbol) (source_table_expr dimension)
+			(cons (quote list) cols)
+			(list (quote lambda)
+				(map cols (lambda (col)
+					(scan_callback_symbol_for_alias (source_alias dimension) col)))
+				(lower_column_expr_for_alias dimension condition))
+			(quoted_runtime_list '()) (quoted_runtime_list '())
+			0 0 1 (quoted_runtime_list (list value_col))
+			(scan_mapreduce_expr
+				(list (scan_callback_symbol_for_alias (source_alias dimension) value_col))
+				(scalar_once_reduce_first)
+				(scan_callback_symbol_for_alias (source_alias dimension) value_col))
+			nil false))))
+
+(define group_range_recmap_candidates_for_output (lambda (stages stage block driver output prior_specs)
+	(begin
+		(define cols (group_range_recmap_columns (source_alias output)
+			(list (qb_fields block) (qb_where block) (qb_hidden block)
+				(gs_keys stage) (gs_aggregates stage)
+				(qassoc_get (gs_facts stage) (quote condition) true)
+				(map (filter (qb_sources block) (lambda (src)
+					(not (equal? (source_alias src) (source_alias output)))))
+					source_join_expr))))
+		(define candidates (map cols (lambda (requested)
+			(group_range_recmap_candidate_for_column stages stage block driver output requested))))
+		(if (reduce candidates (lambda (invalid item) (or invalid (nil? item))) false)
+			(if (single_source? cols)
+				(begin
+					(define chain (group_range_recmap_chain_candidate
+						stages stage block driver output (car cols) prior_specs))
+					(if (nil? chain) '() (list chain)))
+				'())
+			candidates))))
+
+(define group_range_recmap_candidate (lambda (stages stage block)
+	(begin
+		(define drivers (filter (qb_sources block) source_is_base_table?))
+		(if (not (single_source? drivers)) '()
+			(begin
+				(define candidates (reduce (filter (qb_sources block) (lambda (src)
+					(stage_output_relation? (source_relation src)))) (lambda (found output)
+						(merge (list found (group_range_recmap_candidates_for_output
+							stages stage block (car drivers) output found)))) '()))
+				(define map_exprs (reduce candidates (lambda (found item)
+					(begin
+						(define expr (cadr (nth (nth item 5) 2)))
+						(if (nil? (find found (lambda (prior) (equal? prior expr)) nil))
+							(merge (list found (list expr))) found))) '()))
+				(map map_exprs (lambda (map_expr)
+					(begin
+						(define compatible (filter candidates (lambda (item)
+							(equal? map_expr (cadr (nth (nth item 5) 2))))))
+						(list (car drivers) (nth (car compatible) 3) compatible map_expr)))))))))
+
+(define group_range_recmap_var (lambda (candidate)
+	(symbol (concat "__group_range_recmap_"
+		(fnv_hash (serialize (map (nth candidate 2) (lambda (item)
+			(gs_id (nth item 2))))))))))
+
+(define group_range_recmap_replace_symbol (lambda (expr old replacement)
+	(if (and (symbol? expr) (equal? expr old)) replacement
+		(match expr
+			(cons head tail) (cons (group_range_recmap_replace_symbol head old replacement)
+				(map tail (lambda (item)
+					(group_range_recmap_replace_symbol item old replacement))))
+			_ expr))))
+
+(define group_range_recmap_outer_bound (lambda (candidate)
+	(begin
+		(define stage (nth (car (nth candidate 2)) 2))
+		(define domain (car (range_stage_domains stage)))
+		(define bound (if (range_domain_unbounded_from? domain)
+			(range_domain_to domain) (range_domain_from domain)))
+		(match bound
+			((symbol get_column) alias _ignorecase _col _col_ignorecase)
+			(if (equal?? alias (source_alias (nth candidate 0))) nil
+				(lower_column_expr_for_alias (nth candidate 0) bound))
+			((quote get_column) alias _ignorecase _col _col_ignorecase)
+			(if (equal?? alias (source_alias (nth candidate 0))) nil
+				(lower_column_expr_for_alias (nth candidate 0) bound))
+			_ nil))))
+
+(define group_range_recmap_batch_dimension_value_mapper (lambda (candidate range_map_expr)
+	(begin
+		(define spec (car (nth candidate 2)))
+		(define driver (nth candidate 0))
+		(define dimension (nth spec 8))
+		(define category_col (group_range_recmap_stage_value
+			(nth spec 2) (nth spec 6) (nth spec 3)
+			(car (range_stage_domains (nth spec 2)))))
+		(define value_col (relational_recmap_stage_value
+			(nth spec 7) (nth spec 4) dimension))
+		(define category_lookup (symbol "__range_category_lookup"))
+		(define dimension_map (symbol "__range_dimension_map"))
+		(define source_ref (symbol "__range_source_ref"))
+		(define target_value (symbol "__range_dimension_value"))
+		(define category_expr (list (quote recmap_value_mapper)
+			(physical_query_tx_symbol) range_map_expr
+			(quoted_runtime_list (list category_col))
+			(list (quote lambda) (list (symbol "__range_category"))
+				(symbol "__range_category"))
+			(list (quote lambda) '() nil)))
+		(define dimension_expr (compile_scan_plan (quote scan_recmap)
+			(physical_query_tx_symbol) (source_table_expr driver)
+			(quoted_runtime_list '()) (list (quote lambda) '() true)
+			(quoted_runtime_list '("$record_ref"))
+			(list (quote recmap_equi_first_mapper)
+				(physical_query_tx_symbol) (source_table_expr dimension)
+				(quoted_runtime_list (list (nth spec 11)))
+				(list (quote lambda) (list source_ref)
+					(list (quote list) (list category_lookup source_ref))))
+			(source_table_expr dimension)))
+		(list
+			(list (quote lambda) (list category_lookup)
+				(list
+					(list (quote lambda) (list dimension_map)
+						(list (quote recmap_value_mapper)
+							(physical_query_tx_symbol) dimension_map
+							(quoted_runtime_list (list value_col))
+							(list (quote lambda) (list target_value)
+								(list (quote list) target_value))
+							(list (quote lambda) '() (list (quote list) nil))))
+					dimension_expr))
+			category_expr))))
+
+(define group_range_recmap_binding (lambda (candidate)
+	(begin
+		(define specs (nth candidate 2))
+		(define map_var (symbol "__group_range_recmap_map"))
+		(define outer_bound (group_range_recmap_outer_bound candidate))
+		(define bound_param (symbol "__group_range_bound"))
+		(define ref_param (symbol "__group_range_ref"))
+		(define params (map (produceN (count specs)) (lambda (i)
+			(symbol (concat "__range_value_" i)))))
+		(define value_cols (map specs (lambda (item)
+			(group_range_recmap_stage_value (nth item 2)
+				(if (> (count item) 6) (nth item 6) (nth item 4))
+				(nth item 3) (car (range_stage_domains (nth item 2)))))))
+		(define value_exprs (map (zip specs params) (lambda (pair)
+			(begin
+				(define spec (car pair))
+				(define param (cadr pair))
+				(if (<= (count spec) 6) param
+					(list (physical_query_session_symbol)
+						"get_or_compute_scoped" (physical_query_scope_symbol)
+						(list (quote concat)
+							(concat "__group_range_dimension_" (gs_id (nth spec 7)) ":")
+							(list (quote serialize) param))
+						(physical_query_tx_symbol)
+						(list (quote lambda) (list (physical_query_tx_symbol))
+							(group_range_recmap_dimension_probe spec param))))))))
+		(define map_expr (if (nil? outer_bound) (nth candidate 3)
+			(group_range_recmap_replace_symbol
+				(nth candidate 3) outer_bound bound_param)))
+		(define value_mapper (if (and (single_source? specs)
+			(and (> (count (car specs)) 11) (not (nil? (nth (car specs) 11)))))
+			(group_range_recmap_batch_dimension_value_mapper candidate map_expr)
+			(list
+				(list (quote lambda) (list map_var)
+					(list (quote recmap_value_mapper)
+						(physical_query_tx_symbol) map_var
+						(quoted_runtime_list value_cols)
+						(list (quote lambda) params (cons (quote list) value_exprs))
+						(list (quote lambda) '()
+							(cons (quote list) (map specs (lambda (_item) nil))))))
+				map_expr)))
+		(list (quote define) (group_range_recmap_var candidate)
+			(if (nil? outer_bound) value_mapper
+				(list (quote lambda) (list bound_param ref_param)
+					(list (list (physical_query_session_symbol)
+						"get_or_compute_scoped" (physical_query_scope_symbol)
+						(list (quote concat) (concat "__group_range_recmap_"
+							(fnv_hash (serialize (nth candidate 3))) ":")
+							(list (quote serialize) bound_param))
+						(physical_query_tx_symbol)
+						(list (quote lambda) (list (physical_query_tx_symbol))
+							value_mapper))
+						ref_param)))))))
+
+(define rewrite_group_range_recmap_expr (lambda (candidate expr)
+	(if (nil? candidate) expr
+		(match expr
+			((symbol get_column) tblvar _ignorecase col _col_ignorecase)
+			(begin
+				(define specs (nth candidate 2))
+				(define indices (filter (produceN (count specs)) (lambda (i)
+					(and (equal?? tblvar (source_alias (nth (nth specs i) 1)))
+						(equal? col (nth (nth specs i) 4))))))
+				(if (empty_list? indices) expr
+					(list (quote nth)
+						(if (nil? (group_range_recmap_outer_bound candidate))
+							(list (group_range_recmap_var candidate)
+								(list (quote get_column) (source_alias (nth candidate 0))
+									false "$record_ref" false))
+							(list (group_range_recmap_var candidate)
+								(group_range_recmap_outer_bound candidate)
+								(list (quote get_column) (source_alias (nth candidate 0))
+									false "$record_ref" false)))
+						(car indices))))
+			((quote get_column) tblvar ignorecase col col_ignorecase)
+			(rewrite_group_range_recmap_expr candidate
+				(list (symbol "get_column") tblvar ignorecase col col_ignorecase))
+			(cons head tail) (cons (rewrite_group_range_recmap_expr candidate head)
+				(map tail (lambda (item)
+					(rewrite_group_range_recmap_expr candidate item))))
+			_ expr))))
+
+(define rewrite_group_range_recmaps_expr (lambda (candidates expr)
+	(reduce candidates (lambda (rewritten candidate)
+		(rewrite_group_range_recmap_expr candidate rewritten)) expr)))
+
+(define query_block_with_group_range_recmap (lambda (block candidate)
+	(begin
+		(define specs (nth candidate 2))
+		(define aliases (map specs (lambda (item) (source_alias (nth item 1)))))
+		/* The chained value mapper owns the dimension lookup as well as its
+		range input. Neither scalar stage needs a separate eager preparation. */
+		(define consumed_stages (merge_unique (list
+			(map specs (lambda (item) (gs_id (nth item 2))))
+			(map (filter specs (lambda (item) (> (count item) 7)))
+				(lambda (item) (gs_id (nth item 7)))))))
+		(define retained (filter (qb_sources block) (lambda (src)
+			(not (contains? aliases (source_alias src))))))
+		(make_query_block (qb_schema block) retained
+			(rewrite_group_range_recmap_expr candidate (qb_fields block))
+			(rewrite_group_range_recmap_expr candidate (qb_where block))
+			(rewrite_group_range_recmap_expr candidate (qb_group block))
+			(rewrite_group_range_recmap_expr candidate (qb_having block))
+			(rewrite_group_range_recmap_expr candidate (qb_order block))
+			(qb_limit block) (qb_offset block)
+			(rewrite_group_range_recmap_expr candidate (qb_hidden block))
+			(qb_stages block)
+			(join_optimizer_facts_without_aliases
+				(qassoc_set (qb_facts block) (quote consumed_probe_stage_ids)
+					(merge_unique (list consumed_stages
+						(qassoc_get (qb_facts block) (quote consumed_probe_stage_ids) '()))))
+				aliases)))))
+
+(define group_range_recmap_costs (lambda (driver_rows target_rows lookup_count)
+	(list
+		(planner_cost 0 0 (* driver_rows lookup_count 14000) 0 0 0 0 0 driver_rows 0.7)
+		(planner_cost (* 2 planner_recmap_startup_ns) 0 0 0 0
+			(+ (* driver_rows 16000) (* target_rows 1000)
+				(* driver_rows lookup_count 500))
+			(* driver_rows lookup_count 40) 0 driver_rows 0.75))))
+
+(define group_range_recmap_runtime_wins? (lambda (driver target lookup_count)
+	(begin
+		(define costs (group_range_recmap_costs
+			(scan_estimate driver) (scan_estimate target) lookup_count))
+		(planner_cost_clear_winner? (cadr costs) (car costs)))))
+
+(define select_group_range_recmap_one (lambda (candidate stage planning_session)
+	(begin
+		(define driver_rows (planner_source_row_count (nth candidate 0)))
+		(define target_rows (planner_source_row_count (nth candidate 1)))
+		(define lookup_count (reduce (nth candidate 2) (lambda (total item)
+			(+ total (if (> (count item) 6) 2 1))) 0))
+		(define costs (group_range_recmap_costs driver_rows target_rows lookup_count))
+		(define decision_id (concat "group_range_recmap:" (gs_id stage) ":"
+			(fnv_hash (serialize (nth candidate 3)))))
+		(define normal (if (planner_guarded_choice
+			(planner_cost_clear_winner? (cadr costs) (car costs))
+			(list (quote group_range_recmap_runtime_wins?)
+				(source_table_expr (nth candidate 0))
+				(source_table_expr (nth candidate 1)) lookup_count)
+			planning_session) "range_recmap" "scalar_probe"))
+		(define chosen (planner_physical_choice decision_id normal
+			'("scalar_probe" "range_recmap") planning_session))
+		(planner_record_physical_decision (list
+			(list "decision_id" decision_id)
+			(list "decision" "group_range_recmap")
+			(list "chosen" chosen) (list "normally_chosen" normal)
+			(list "inputs" (list (list "driver_rows" driver_rows)
+				(list "target_rows" target_rows) (list "lookups" lookup_count)))
+			(list "alternatives" (list
+				(list (list "plan" "scalar_probe")
+					(list "cost" (planner_cost_explain (car costs))))
+				(list (list "plan" "range_recmap")
+					(list "cost" (planner_cost_explain (cadr costs)))))))
+			planning_session)
+		(if (equal? chosen "range_recmap") candidate nil))))
+
+(define select_group_range_recmap_candidate (lambda (stages stage block planning_session)
+	(filter (map (group_range_recmap_candidate stages stage block)
+		(lambda (candidate)
+			(select_group_range_recmap_one candidate stage planning_session)))
+		(lambda (candidate) (not (nil? candidate))))))
 
 /* An extended edge retains columns from the original driver while adding a
 value reached through the previous RecMap. This represents composite keys such
@@ -4146,7 +4802,7 @@ batch. This is intentionally separate from the direct-column fast path above. */
 		(define rewritten_values (map alternatives (lambda (pair)
 			(relational_recmap_rewrite_stage_expr stage_list dependency_graph input_sources
 				(source_alias target) (car pair)))))
-		(define range_dependency (relational_recmap_range_dependency target rewritten_values))
+		(define range_dependency (relational_recmap_range_dependency target rewritten_values nil nil))
 		(define batched_values (if (nil? range_dependency) rewritten_values
 			(map rewritten_values (lambda (expr)
 				(relational_recmap_replace_scalar_stage expr
@@ -4165,7 +4821,7 @@ batch. This is intentionally separate from the direct-column fast path above. */
 			(or (nil? previous_parts)
 				(or (empty_list? source_cols)
 					(or (not (equal? (coalesceNil (source_join_expr previous) true) true))
-					(not (equal? (coalesceNil (source_join_expr target) true) true)))))) nil
+						(not (equal? (coalesceNil (source_join_expr target) true) true)))))) nil
 			(list (list target source_cols source_key_fn '()
 				value_col stage requested_col "hash" '() target_callback_cols target_key_fn
 				(if (nil? range_dependency) nil (nth range_dependency 2))
@@ -4284,40 +4940,40 @@ stage requested-column. The recursive result is ordered driver -> final. */
 						stages stage requested_col driver target previous_sources
 						input_sources value_col input))
 					(if (not (nil? hash_extended)) hash_extended
-				(if (or (not (query_block? input))
-					(or (not (single_source? previous_sources))
-					(or (not (equal? (count input_sources) 2))
-							(or (not (empty_list? (qb_group input)))
-								(or (not (nil? (qb_having input)))
-									(or (not (empty_list? (qb_order input)))
-										(query_limit_active? (qb_offset input) (qb_limit input))))))))
-				nil
-					(begin
-						(define extended (relational_recmap_extended_stage_edges
-							stages stage requested_col driver target previous_sources
-							input_sources value_col input))
-						(if (not (nil? extended)) extended
-						(begin
-						(define previous (car previous_sources))
-						(define join_cols (relational_recmap_join_columns target previous (qb_where input)))
-						(define previous_stage (stage_for_output_relation stages (source_relation previous)))
-						(define previous_col (if (nil? join_cols) nil (nth join_cols 1)))
-						(define earlier (if (or (nil? previous_stage) (nil? previous_col)) nil
-							(relational_recmap_stage_edges stages previous_stage previous_col driver)))
-						(define previous_edge (if (nil? earlier) nil
-							(nth earlier (- (count earlier) 1))))
-						(define previous_target (if (nil? previous_edge) nil (nth previous_edge 0)))
-						(define previous_value (if (nil? previous_edge) nil (nth previous_edge 4)))
-						(define target_cols (if (nil? join_cols) '() (list (car join_cols))))
-						(if (or (nil? previous_value)
-							(or (not (equal? (nth previous_edge 6) previous_col))
-								(or (reduce target_cols (lambda (unsupported col)
-									(or unsupported (not (recmap_direct_key_column? target col)))) false)
-									(or (not (equal? (coalesceNil (source_join_expr previous) true) true))
-										(not (equal? (coalesceNil (source_join_expr target) true) true))))))
+						(if (or (not (query_block? input))
+							(or (not (single_source? previous_sources))
+								(or (not (equal? (count input_sources) 2))
+									(or (not (empty_list? (qb_group input)))
+										(or (not (nil? (qb_having input)))
+											(or (not (empty_list? (qb_order input)))
+												(query_limit_active? (qb_offset input) (qb_limit input))))))))
 							nil
-							(merge (list earlier (list (list target (list previous_value) nil
-								target_cols value_col stage requested_col)))))))))))))))))
+							(begin
+								(define extended (relational_recmap_extended_stage_edges
+									stages stage requested_col driver target previous_sources
+									input_sources value_col input))
+								(if (not (nil? extended)) extended
+									(begin
+										(define previous (car previous_sources))
+										(define join_cols (relational_recmap_join_columns target previous (qb_where input)))
+										(define previous_stage (stage_for_output_relation stages (source_relation previous)))
+										(define previous_col (if (nil? join_cols) nil (nth join_cols 1)))
+										(define earlier (if (or (nil? previous_stage) (nil? previous_col)) nil
+											(relational_recmap_stage_edges stages previous_stage previous_col driver)))
+										(define previous_edge (if (nil? earlier) nil
+											(nth earlier (- (count earlier) 1))))
+										(define previous_target (if (nil? previous_edge) nil (nth previous_edge 0)))
+										(define previous_value (if (nil? previous_edge) nil (nth previous_edge 4)))
+										(define target_cols (if (nil? join_cols) '() (list (car join_cols))))
+										(if (or (nil? previous_value)
+											(or (not (equal? (nth previous_edge 6) previous_col))
+												(or (reduce target_cols (lambda (unsupported col)
+													(or unsupported (not (recmap_direct_key_column? target col)))) false)
+													(or (not (equal? (coalesceNil (source_join_expr previous) true) true))
+														(not (equal? (coalesceNil (source_join_expr target) true) true))))))
+											nil
+											(merge (list earlier (list (list target (list previous_value) nil
+												target_cols value_col stage requested_col)))))))))))))))))
 
 (define relational_recmap_candidates (lambda (stages block)
 	(begin
@@ -4500,7 +5156,7 @@ stage requested-column. The recursive result is ordered driver -> final. */
 								(list (quote recmap_equi_first_mapper) (physical_query_tx_symbol)
 									(source_table_expr (nth edge 0))
 									(quoted_runtime_list (nth edge 3)) (nth edge 2))
-									(source_table_expr (nth edge 0)))))) previous))) first_with_dependencies))
+								(source_table_expr (nth edge 0)))))) previous))) first_with_dependencies))
 		(list (quote define) (relational_recmap_var candidate) composed))))
 
 (define relational_recmap_order_entry (lambda (candidate item)
