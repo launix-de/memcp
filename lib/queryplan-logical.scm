@@ -467,8 +467,10 @@ domains (for example dashboard time windows). */
 				(get_assoc (cadr binding) column)
 				fallback))) fallback)))
 
+/* Bare symbols may be lambda parameters in generated aggregate reducers. */
 (define logical_literal_value? (lambda (expr)
-	(not (and (list? expr) (not (empty_list? expr))))))
+	(and (not (symbol? expr))
+		(not (and (list? expr) (not (empty_list? expr)))))))
 
 (define logical_sql_null_literal? (lambda (expr)
 	(and (list? expr)
@@ -565,29 +567,32 @@ domains (for example dashboard time windows). */
 		(source_outer? src)
 		(fold_single_literal_expr bindings (source_join_expr src)))))
 
-/* Preserve the original expression shape when this query block has no
-single-row literal source. Besides avoiding needless work, this keeps planner
-cost/cache keys stable for unrelated AND/OR predicates. */
-(define apply_single_literal_expr (lambda (bindings expr)
-	(if (empty_list? bindings) expr (fold_single_literal_expr bindings expr))))
+/* A derived projection can mix a literal guard with bound session values.
+Fold after rewriting its references even when the other projected fields are
+dynamic. Leave unrelated query blocks alone so their plan keys stay stable. */
+(define apply_single_literal_expr (lambda (bindings literal_rewrite expr)
+	(if (and (empty_list? bindings) (not literal_rewrite)) expr
+		(fold_single_literal_expr bindings expr))))
 
-(define apply_single_literal_fields (lambda (bindings fields)
-	(if (empty_list? bindings) fields (fold_single_literal_fields bindings fields))))
+(define apply_single_literal_fields (lambda (bindings literal_rewrite fields)
+	(if (and (empty_list? bindings) (not literal_rewrite)) fields
+		(fold_single_literal_fields bindings fields))))
 
-(define apply_single_literal_order (lambda (bindings order_items)
-	(if (empty_list? bindings) order_items (fold_single_literal_order bindings order_items))))
+(define apply_single_literal_order (lambda (bindings literal_rewrite order_items)
+	(if (and (empty_list? bindings) (not literal_rewrite)) order_items
+		(fold_single_literal_order bindings order_items))))
 
 (define apply_single_literal_source_join (lambda (bindings src)
 	(if (empty_list? bindings) src (fold_single_literal_source_join bindings src))))
 
-(define literal_projection? (lambda (projection)
+(define projection_has_literal_field? (lambda (projection)
 	(reduce (map_assoc projection (lambda (_title expr)
 		(logical_literal_value? (fold_single_literal_expr '() expr))))
-		(lambda (all_literal item) (and all_literal item)) true)))
+		(lambda (has_literal item) (or has_literal item)) false)))
 
 (define literal_derived_rewrite? (lambda (rewrite)
 	(match rewrite
-		'(_alias projection) (literal_projection? projection)
+		'(_alias projection) (projection_has_literal_field? projection)
 		_ false)))
 (define stage_output_relation_id (lambda (relation)
 	(match relation
@@ -6629,25 +6634,26 @@ names in projections, predicates, and correlated subqueries. */
 									literal_derived_rewrite?))
 								(define carried_literal_rewrites (merge (list
 									(filter rewrites literal_derived_rewrite?) inherited_literal_rewrites)))
+								(define fold_literal_rewrites (not (empty_list? carried_literal_rewrites)))
 								(define active_rewrites (merge (list rewrites inherited_literal_rewrites)))
 								(define source_where_terms (nth flattened_sources 2))
 								(define source_stages (nth flattened_sources 3))
 								/* Derived references are already bound. Rewrite them once, then
 								prune unused row-preserving lookups before their join expressions
 								can create decorrelation stages. */
-								(define rewritten_where (apply_single_literal_expr literal_bindings
+								(define rewritten_where (apply_single_literal_expr literal_bindings fold_literal_rewrites
 									(combine_where_terms source_where_terms
 										(rewrite_derived_ref_chain active_rewrites (qb_where block)))))
-								(define rewritten_fields (apply_single_literal_fields literal_bindings
+								(define rewritten_fields (apply_single_literal_fields literal_bindings fold_literal_rewrites
 									(rewrite_derived_fields_chain active_rewrites (qb_fields block))))
 								(define rewritten_group (map (coalesceNil (qb_group block) '()) (lambda (item)
-									(apply_single_literal_expr literal_bindings
+									(apply_single_literal_expr literal_bindings fold_literal_rewrites
 										(rewrite_derived_ref_chain active_rewrites item)))))
-								(define rewritten_having (apply_single_literal_expr literal_bindings
+								(define rewritten_having (apply_single_literal_expr literal_bindings fold_literal_rewrites
 									(rewrite_derived_ref_chain active_rewrites (qb_having block))))
-								(define rewritten_order (apply_single_literal_order literal_bindings
+								(define rewritten_order (apply_single_literal_order literal_bindings fold_literal_rewrites
 									(rewrite_derived_order_chain active_rewrites (qb_order block))))
-								(define rewritten_hidden (apply_single_literal_fields literal_bindings
+								(define rewritten_hidden (apply_single_literal_fields literal_bindings fold_literal_rewrites
 									(rewrite_derived_fields_chain active_rewrites (qb_hidden block))))
 								(define default_alias (qassoc_get (qb_facts block) (quote default_alias)
 									(if (empty_list? flattened_source_list) nil (source_alias (car flattened_source_list)))))
