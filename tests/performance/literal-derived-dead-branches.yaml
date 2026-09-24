@@ -1,0 +1,101 @@
+# Copyright (C) 2026 Carl-Philip Haensch
+# One-row literal parameters must remove dead scalar-subquery branches before
+# decorrelation constructs work for them.
+
+metadata:
+  version: "1.0"
+  description: "Literal parameter branches avoid unused correlated work"
+  isolated: true
+  perf_ci: true
+
+setup:
+  - sql: "DROP TABLE IF EXISTS ldb_event"
+  - sql: "DROP TABLE IF EXISTS ldb_lookup"
+  - sql: "CREATE TABLE ldb_event (id INT PRIMARY KEY, amount INT) ENGINE=memory"
+  - sql: "CREATE TABLE ldb_lookup (id INT PRIMARY KEY, event_id INT) ENGINE=memory"
+  - scm: |
+      (begin
+        (insert (table "memcp-tests" "ldb_event") '("id" "amount")
+          (map (produceN 10000) (lambda (i) (list (+ i 1) 1))))
+        (insert (table "memcp-tests" "ldb_lookup") '("id" "event_id")
+          (map (produceN 10000) (lambda (i) (list (+ i 1) (+ i 1)))))
+        10000)
+
+test_cases:
+  - name: "Dead CASE and OR scalar branches do not run"
+    sql: |
+      SELECT history.`index` AS hindex, params.`index` AS pindex, COALESCE((
+        SELECT COUNT(1) FROM ldb_event event
+        WHERE event.amount = 1
+          AND event.id BETWEEN history.start_id AND history.end_id
+          AND CASE WHEN params.mode = 2 THEN TRUE ELSE
+            (SELECT lookup.id FROM ldb_lookup lookup
+             WHERE lookup.event_id = event.id LIMIT 1) = 1 END
+          AND (params.category IS NULL OR
+            (SELECT lookup.id FROM ldb_lookup lookup
+             WHERE lookup.event_id = event.id LIMIT 1) = params.category)
+      ), 0) AS total
+      FROM (SELECT 0 AS `index`, 1 AS start_id, 5000 AS end_id
+            UNION SELECT 1 AS `index`, 5001 AS start_id, 10000 AS end_id) history
+      CROSS JOIN (SELECT 0 AS `index`, '2' AS mode, NULL AS category) params
+      ORDER BY history.`index`
+    expect:
+      rows: 2
+      data:
+        - {hindex: 0, pindex: 0, total: 5000}
+        - {hindex: 1, pindex: 0, total: 5000}
+    timing_aggregation: total
+    warmup: 0
+    timing_samples: 3
+    threshold_ms: 200
+
+  - name: "Cached period literals retain their values"
+    sql: |
+      SELECT history.`index` AS hindex, params.`index` AS pindex, COALESCE((
+        SELECT COUNT(1) FROM ldb_event event
+        WHERE event.amount = 1
+          AND event.id BETWEEN history.start_id AND history.end_id
+          AND CASE WHEN params.mode = 2 THEN TRUE ELSE
+            (SELECT lookup.id FROM ldb_lookup lookup
+             WHERE lookup.event_id = event.id LIMIT 1) = 1 END
+          AND (params.category IS NULL OR
+            (SELECT lookup.id FROM ldb_lookup lookup
+             WHERE lookup.event_id = event.id LIMIT 1) = params.category)
+      ), 0) AS total
+      FROM (SELECT 0 AS `index`, 1 AS start_id, 4000 AS end_id
+            UNION SELECT 1 AS `index`, 4001 AS start_id, 10000 AS end_id) history
+      CROSS JOIN (SELECT 0 AS `index`, '2' AS mode, NULL AS category) params
+      ORDER BY history.`index`
+    expect:
+      rows: 2
+      data:
+        - {hindex: 0, pindex: 0, total: 4000}
+        - {hindex: 1, pindex: 0, total: 6000}
+
+  - name: "Live CASE and OR scalar branches retain their result"
+    sql: |
+      SELECT COUNT(1) AS total FROM ldb_event event
+      CROSS JOIN (SELECT '1' AS mode, 1 AS category) params
+      WHERE event.id <= 2
+        AND CASE WHEN params.mode = 2 THEN TRUE ELSE
+          (SELECT lookup.id FROM ldb_lookup lookup
+           WHERE lookup.event_id = event.id LIMIT 1) = 1 END
+        AND (params.category IS NULL OR
+          (SELECT lookup.id FROM ldb_lookup lookup
+           WHERE lookup.event_id = event.id LIMIT 1) = params.category)
+    expect:
+      rows: 1
+      data:
+        - total: 1
+
+  - name: "Unknown column in dead branch still fails binding"
+    sql: |
+      SELECT CASE WHEN params.mode = 2 THEN TRUE ELSE
+        (SELECT lookup.missing_column FROM ldb_lookup lookup LIMIT 1) END AS value
+      FROM (SELECT '2' AS mode) params
+    expect:
+      error: true
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS ldb_event"
+  - sql: "DROP TABLE IF EXISTS ldb_lookup"
