@@ -4534,7 +4534,9 @@ session read is never evaluated while building the plan. */
 
 /* Contribution candidates add a mode and, for full maps, a source-version
 expression. A delta map is built once per correction invocation. Full maps may
-share through the query cache only with the same bounds and source versions. */
+share through the query cache only with the same output projection, bounds
+and source versions. A shared row-identity recipe alone does not identify its
+value mapper. */
 (define group_range_recmap_binding (lambda (candidate)
 	(begin
 		(define specs (nth candidate 2))
@@ -4585,7 +4587,7 @@ share through the query cache only with the same bounds and source versions. */
 						(list (list (physical_query_session_symbol)
 							"get_or_compute_scoped" (physical_query_scope_symbol)
 							(list (quote concat) (concat "__group_range_recmap_"
-								(fnv_hash (serialize (nth candidate 3))) ":")
+								(fnv_hash (serialize (list (nth candidate 3) value_cols value_exprs))) ":")
 								(list (quote serialize) (if (> (count candidate) 5)
 									(list (quote list) bound_param (nth candidate 5)) bound_param)))
 							(physical_query_tx_symbol)
