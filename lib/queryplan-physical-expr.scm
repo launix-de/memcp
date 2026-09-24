@@ -2119,7 +2119,8 @@ would still have to project that value over the segment. */
 
 (define lower_scalar_first_probe_expr (lambda (sources default_alias stage requested_col all_stages probe_work_rows probe_semantics)
 	(begin
-		(if (not (scalar_or_presence_probe_stage? stage))
+		(if (not (or (scalar_first_physical_probe_stage? stage)
+			(presence_probe_stage? stage)))
 			(neumann_fail "build_queryplan" "stage probe requires scalar_single first or presence stage")
 			true)
 		(define src (gs_input stage))

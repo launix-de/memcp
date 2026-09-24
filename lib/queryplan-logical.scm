@@ -1691,9 +1691,12 @@ type-aware successor operation can prove an exact half-open rewrite. */
 (define range_correlation_bound_sides (lambda (inner_default inner_sources outer_sources inner outer kind cut_kind term)
 	(begin
 		(define inner_refs (expr_refs_sources? inner_default inner_sources inner))
-		(define outer_inner_refs (expr_refs_sources? inner_default inner_sources outer))
+		(define outer_inner_refs (expr_refs_sources? inner_default
+			(filter inner_sources source_is_base_table?) outer))
 		(define outer_refs (and (not outer_inner_refs) (or
 			(expr_refs_sources? nil outer_sources outer)
+			(expr_refs_sources? nil (filter inner_sources (lambda (source)
+				(stage_output_relation? (source_relation source)))) outer)
 			(and (not (empty_list? outer_sources))
 				(session_dependency_expr? outer)))))
 		(if (and inner_refs outer_refs)
