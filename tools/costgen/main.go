@@ -1555,6 +1555,9 @@ func rowFeatures(row calibrationRow) ([]float64, error) {
 		}
 	}
 	driverMapRows := *row.ProjectedDriverRows
+	if row.Plan == "candidate_keyset" && row.Consumer == "order_limit" {
+		driverMapRows = math.Min(*row.DriverRows, *row.ProjectedDriverRows)
+	}
 	if row.Plan == "driver_order_membership_probe" || row.Plan == "scan_order" {
 		driverMapRows = *row.DriverRows
 	}
@@ -1597,7 +1600,7 @@ func rowFeatures(row calibrationRow) ([]float64, error) {
 			aggregateDriverRows, 0, *row.CandidateBroadTextMatchRows,
 			*row.CandidateBroadTextMatchBytes, orderedScanInvocations, 0,
 			adaptiveSortWork,
-			*row.ProjectedDriverRows * downstreamProbeBranches,
+			driverMapRows * downstreamProbeBranches,
 		}, nil
 	case "driver_order_membership_probe", "scan_order":
 		recsetStartup, recsetBuildRows, recsetProbeRows := 1.0, *row.CandidateRows, *row.ExpectedDriverRowsVisited
@@ -1610,8 +1613,8 @@ func rowFeatures(row calibrationRow) ([]float64, error) {
 			scanInvocations, scanRows, filterValues, mapValues, expressionOperations,
 			recsetStartup, recsetBuildRows, recsetProbeRows,
 			cacheStartup, cacheBuildRows, cacheProbeRows,
-			0, orderedDriverInputRows, 0,
-			0, orderedScanInvocations, 0, 0,
+			0, orderedDriverInputRows, *row.CandidateBroadTextMatchRows,
+			*row.CandidateBroadTextMatchBytes, orderedScanInvocations, 0, 0,
 			*row.ExpectedDriverRowsVisited * downstreamProbeBranches,
 		}, nil
 	case "ordered_batch_accept":

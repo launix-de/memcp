@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 metadata:
   version: "1.0"
-  description: "Membership statistics survive lowering and LIMIT does not discount full preparation"
+  description: "Membership statistics preserve distinct preparation and late-materialization populations"
 
 setup: []
 cleanup:
@@ -31,6 +31,7 @@ test_cases:
         (define facts (list
           (list 'membership_driver_input_rows 100000)
           (list 'membership_order_limit_driver true)
+          (list 'membership_downstream_full_preparation true)
           (list 'membership_order_limit 72)
           (list 'membership_order_offset 8)))
         (define without (membership_projection_cost 100000 50000 72 facts))
@@ -48,6 +49,7 @@ test_cases:
           (list 'membership_driver_input_rows 100000)
           (list 'membership_local_filter_rows 10000)
           (list 'membership_order_limit_driver true)
+          (list 'membership_downstream_full_preparation true)
           (list 'membership_order_limit 72)
           (list 'membership_order_offset 8)))
         (define without (membership_projection_cost 100000 50000 72 facts))
@@ -57,6 +59,64 @@ test_cases:
         (define expected (qassoc_get (planner_membership_downstream_probe_cost 50000) 'total_ns 0))
         (if (< (sql_abs (- extra expected)) 1) true
           (error "residual selectivity incorrectly discounted full preparation")))
+
+  - name: "Ordered late materialization costs only the bounded result mapper"
+    scm: |
+      (begin
+        (define facts (list
+          (list 'membership_driver_input_rows 100000)
+          (list 'membership_order_limit_driver true)
+          (list 'membership_order_limit 72)
+          (list 'membership_order_offset 8)))
+        (define without (membership_projection_cost 100000 50000 72 facts))
+        (define with (membership_projection_cost 100000 50000 72
+          (qassoc_set facts 'membership_downstream_probe_branches 1)))
+        (define extra (- (qassoc_get with 'total_ns 0) (qassoc_get without 'total_ns 0)))
+        (define expected (qassoc_get (planner_membership_downstream_probe_cost 72) 'total_ns 0))
+        (if (< (sql_abs (- extra expected)) 1) true
+          (error "late materialization ignored the bounded output population")))
+
+  - name: "Ordered alternatives both pay shared candidate text work"
+    scm: |
+      (begin
+        (define base (list
+          (list 'membership_driver_input_rows 1000)
+          (list 'membership_order_limit_driver true)))
+        (define text_work (merge (list base (list
+          (list 'membership_candidate_broad_text_match_rows 100)
+          (list 'membership_candidate_broad_text_match_bytes 819200)))))
+        (define candidate_base (membership_projection_cost 100 10 5 base))
+        (define candidate_text (membership_projection_cost 100 10 5 text_work))
+        (define driver_base (membership_ordered_driver_probe_cost 100 10 5 base))
+        (define driver_text (membership_ordered_driver_probe_cost 100 10 5 text_work))
+        (define candidate_extra (- (qassoc_get candidate_text 'total_ns 0)
+          (qassoc_get candidate_base 'total_ns 0)))
+        (define driver_extra (- (qassoc_get driver_text 'total_ns 0)
+          (qassoc_get driver_base 'total_ns 0)))
+        (if (and (> candidate_extra 0) (< (sql_abs (- candidate_extra driver_extra)) 1))
+          true (error "shared text work biased the carrier alternatives")))
+
+  - name: "Bounded wide text pages prefer late candidate materialization"
+    scm: |
+      (begin
+        (define facts (list
+          (list 'membership_driver_input_rows 100000)
+          (list 'membership_local_filter_rows 100000)
+          (list 'membership_order_limit_driver true)
+          (list 'membership_order_limit 5)
+          (list 'membership_order_offset 2)
+          (list 'membership_candidate_probe_branches 2)
+          (list 'membership_candidate_scan_invocations 2)
+          (list 'membership_candidate_map_columns 1)
+          (list 'membership_driver_scan_invocations 1)
+          (list 'membership_driver_map_columns 20)
+          (list 'membership_downstream_probe_branches 9)
+          (list 'membership_candidate_broad_text_match_rows 50000)
+          (list 'membership_candidate_broad_text_match_bytes 204800000)))
+        (define candidate (membership_projection_cost 100000 5000 5 facts))
+        (define driver (membership_ordered_driver_probe_cost 100000 5000 5 facts))
+        (if (planner_cost_better? candidate driver)
+          true (error "wide bounded page regressed to the ordered driver probe")))
 
   - name: "Unbounded candidate consumers retain complete residual work"
     scm: |

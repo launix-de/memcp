@@ -110,6 +110,15 @@ func TestRowFeaturesKeepsBroadTextRowsAndBytesSeparate(t *testing.T) {
 	if features[13] != 100 || features[14] != 819200 {
 		t.Fatalf("broad text features = (%v, %v), want (100, 819200)", features[13], features[14])
 	}
+	row.Plan = "driver_order_membership_probe"
+	driverFeatures, err := rowFeatures(row)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if driverFeatures[13] != 100 || driverFeatures[14] != 819200 {
+		t.Fatalf("driver broad text features = (%v, %v), want (100, 819200)",
+			driverFeatures[13], driverFeatures[14])
+	}
 }
 
 func TestRowFeaturesModelsOrderedJoinAlternatives(t *testing.T) {
@@ -299,8 +308,8 @@ func TestRowFeaturesChargesOrderedProjectedRecsetSortWork(t *testing.T) {
 	if features[17] != 125 {
 		t.Fatalf("ordered RecSet sort work = %v, want 125", features[17])
 	}
-	if features[18] != 50 {
-		t.Fatalf("downstream probe rows = %v, want 50", features[18])
+	if features[18] != 6 {
+		t.Fatalf("downstream probe rows = %v, want 6", features[18])
 	}
 }
 
