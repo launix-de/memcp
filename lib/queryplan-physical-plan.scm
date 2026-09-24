@@ -9932,7 +9932,7 @@ physical decision and preserve its runtime recompile gate. */
 				(define key_index (if (or (nil? carrier_src)
 					(not (equal? (count keys) (count raw_lookup_keys))))
 					nil
-					(scalar_first_probe_keytable_key_index raw_stage carrier_src keys)))
+					(scalar_first_probe_row_key_index raw_stage carrier_src keys)))
 				(define target_col (if (nil? key_index) nil
 					(direct_column_name_for_alias driver_src (nth raw_lookup_keys key_index))))
 				(define probe_stages (stage_catalog_with_nested
@@ -9950,7 +9950,7 @@ physical decision and preserve its runtime recompile gate. */
 					(scalar_first_probe_physical_operator
 						probe_stages
 						(stage_dependency_graph probe_stages)
-						raw_stage src keys effective_probe_work_rows carrier_work_rows requested_col (quote truth) planning_session)))
+						raw_stage src keys effective_probe_work_rows carrier_work_rows requested_col (quote truth) true planning_session)))
 				(if (and (not (equal? operator (quote recset))) (nil? bound_stage))
 					nil
 					(list

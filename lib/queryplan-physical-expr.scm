@@ -1436,8 +1436,10 @@ are constant for the whole query execution and are not part of what makes a
 row-to-row carrier worth building; group_stage_session_domain_keys already
 identifies them for other group-stage lowering, so the same rows/columns
 carrier semantics apply here. */
-/* Locate the remaining, single non-session source key once; reusable scalar
-and RecSet carriers additionally verify its uniqueness below. */
+/* Locate the remaining, single non-session source key once. A point-lookup
+carrier additionally verifies uniqueness below. A RecSet carrier does not need
+that proof: it consumes the stage's already grouped key domain, then projects
+those unique result keys onto every matching driver row. */
 (define scalar_first_probe_row_key_index (lambda (stage src keys)
 	(begin
 		(define session_indices (filter
@@ -1467,6 +1469,14 @@ and RecSet carriers additionally verify its uniqueness below. */
 					false)
 					idx
 					nil))))))
+
+/* Only a RecSet projected onto its complete driver relation consumes the
+already-grouped key domain. A row-local scalar projection still lacks that
+consumer boundary and must retain the unique-key proof used by direct probes. */
+(define scalar_first_probe_recset_key_index (lambda (stage src keys allow_grouped_domain_projection)
+	(if allow_grouped_domain_projection
+		(scalar_first_probe_row_key_index stage src keys)
+		(scalar_first_probe_keytable_key_index stage src keys))))
 
 /* A request-local carrier has already bound session-domain expressions while
 building its rows. Only the remaining row-varying key belongs to a RecSet key
@@ -1625,21 +1635,23 @@ membership set. */
 							(planner_cost_better? recset_cost (planner_direct_presence_probe_cost probe_rows))
 							(planner_cost_better? recset_cost (planner_presence_carrier_cost input_rows probe_rows))))))))))
 
-(define scalar_first_probe_recset_eligible? (lambda (stages graph stage src keys probe_work_rows carrier_work_rows requested_col planning_session)
+(define scalar_first_probe_recset_eligible? (lambda (stages graph stage src keys probe_work_rows carrier_work_rows requested_col allow_grouped_domain_projection planning_session)
 	(and (single_real_source? (qb_sources src))
 		(and (source_is_base_table? (single_real_source (qb_sources src)))
 			(and (empty_list? (qb_group src))
 				(and (nil? (qb_having src))
 					(and (empty_list? (qb_order src))
 						(and (nil? (qb_limit src)) (nil? (qb_offset src))
-							(and (not (nil? (scalar_first_probe_keytable_key_index stage (single_real_source (qb_sources src)) keys)))
+							(and (not (nil? (scalar_first_probe_recset_key_index
+								stage (single_real_source (qb_sources src)) keys allow_grouped_domain_projection)))
 								(and (stage_boolean_shaped? graph stage requested_col)
 									(and (direct_boolean_recset_input_ownership_closed? stages stage)
 										(scalar_first_probe_recset_cost_preferred?
 											stage probe_work_rows carrier_work_rows planning_session))))))))))))
 
-(define scalar_first_probe_recset_eligible_base? (lambda (graph stage src keys probe_work_rows carrier_work_rows requested_col planning_session)
-	(and (not (nil? (scalar_first_probe_keytable_key_index stage src keys)))
+(define scalar_first_probe_recset_eligible_base? (lambda (graph stage src keys probe_work_rows carrier_work_rows requested_col allow_grouped_domain_projection planning_session)
+	(and (not (nil? (scalar_first_probe_recset_key_index
+		stage src keys allow_grouped_domain_projection)))
 		(and (stage_boolean_shaped? graph stage requested_col)
 			(scalar_first_probe_recset_cost_preferred? stage probe_work_rows carrier_work_rows planning_session)))))
 
@@ -2010,7 +2022,7 @@ growth belongs in the calibrated comparison above and must retain the planner's
 recompile gate. A segment-invariant scalar is the proof case here: one cached
 scalar value replaces the same value for every segment row, while a carrier
 would still have to project that value over the segment. */
-(define scalar_first_probe_physical_operator (lambda (stages graph stage src keys probe_work_rows carrier_work_rows requested_col probe_semantics planning_session)
+(define scalar_first_probe_physical_operator (lambda (stages graph stage src keys probe_work_rows carrier_work_rows requested_col probe_semantics allow_grouped_domain_projection planning_session)
 	(if (union_block? src)
 		(quote union-probe)
 		(if (query_block? src)
@@ -2018,7 +2030,7 @@ would still have to project that value over the segment. */
 				(quote query-scan)
 				(if (and (equal? probe_semantics (quote truth))
 					(scalar_first_probe_recset_eligible?
-						stages graph stage src keys probe_work_rows carrier_work_rows requested_col planning_session))
+						stages graph stage src keys probe_work_rows carrier_work_rows requested_col allow_grouped_domain_projection planning_session))
 					(quote recset)
 					(if (scalar_first_probe_keytable_eligible? stage src keys probe_work_rows)
 						(quote keytable)
@@ -2028,7 +2040,7 @@ would still have to project that value over the segment. */
 					(quote table-scan)
 					(if (and (equal? probe_semantics (quote truth))
 						(scalar_first_probe_recset_eligible_base?
-							graph stage src keys probe_work_rows carrier_work_rows requested_col planning_session))
+							graph stage src keys probe_work_rows carrier_work_rows requested_col allow_grouped_domain_projection planning_session))
 						(quote recset)
 						(if (scalar_first_probe_keytable_eligible_base? stage src keys probe_work_rows)
 							(quote keytable)
@@ -2133,7 +2145,7 @@ would still have to project that value over the segment. */
 		(define lowered_lookup_keys (map lookup_keys (lambda (key)
 			(lower_column_expr_for_join sources default_alias key))))
 		(define operator (scalar_first_probe_physical_operator
-			probe_stages graph stage src keys effective_probe_work_rows effective_probe_work_rows requested_col probe_semantics nil))
+			probe_stages graph stage src keys effective_probe_work_rows effective_probe_work_rows requested_col probe_semantics false nil))
 		(define range_selection (if (or (empty_list? (range_stage_domains stage))
 			(not (range_cache_aggregate_supported? ag))) nil
 			(range_group_cache_selection sources stage)))
