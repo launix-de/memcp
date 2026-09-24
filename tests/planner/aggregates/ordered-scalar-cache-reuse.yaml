@@ -36,6 +36,11 @@ setup:
 - sql: DROP TABLE IF EXISTS ds_invoice
 - sql: CREATE TABLE ds_invoice (entity_id INT, amount INT, coordinate INT) ENGINE=memory
 - sql: INSERT INTO ds_invoice VALUES (20,10,10),(20,20,20),(1,40,10)
+- sql: DROP TABLE IF EXISTS ds_list
+- sql: CREATE TABLE ds_list (entity_id INT) ENGINE=memory
+- scm: |
+    (insert (table "memcp-tests" "ds_list") '("entity_id")
+      (map (produceN 831) (lambda (i) (list (+ i 1)))))
 test_cases:
 - name: Literal optional filter is folded before subquery decorrelation
   sql: |-
@@ -177,6 +182,45 @@ test_cases:
       category: 1
       amount: 40
       all_amount: 70
+- name: EXISTS-filtered correlated groups retain filtered window totals
+  session_id: grouped_ordered_values
+  setup:
+  - sql: SET @cut=60
+  - sql: SET @low=NULL
+  sql: |-
+    SELECT t.* FROM (SELECT COUNT(*) AS entities, SUM(t.quantity) AS quantity, AVG(t.duration) AS duration,
+    SUM(SUM(t.quantity)) OVER () AS all_quantity, t.category,
+    SUM(t.amount) AS amount, SUM(SUM(t.amount)) OVER () AS all_amount
+    FROM (SELECT e.id,e.category,
+      (COALESCE((SELECT h.end_value FROM ds_history h
+        WHERE h.entity_id=e.id AND h.coordinate<=@cut
+        ORDER BY h.coordinate DESC LIMIT 1),@cut) -
+      (SELECT h.coordinate FROM ds_history h
+        WHERE h.entity_id=e.id AND h.coordinate<=@cut
+        ORDER BY h.coordinate DESC LIMIT 1)) AS duration,
+      COALESCE((SELECT h.quantity FROM ds_history h
+    WHERE h.entity_id=e.id AND h.coordinate<=@cut ORDER BY h.coordinate DESC LIMIT 1),0) AS quantity,
+    (SELECT SUM(i.amount) FROM ds_invoice i WHERE i.entity_id=e.id
+    AND CASE WHEN @low IS NULL THEN TRUE ELSE i.coordinate BETWEEN @low AND @cut END LIMIT 1) AS amount
+    FROM ds_entity e) t
+    WHERE EXISTS (SELECT 1 FROM ds_list l WHERE l.entity_id=t.id)
+    GROUP BY t.category) t ORDER BY category LIMIT 72 OFFSET 0
+  expect:
+    data:
+    - entities: 415
+      quantity: 497
+      duration: 57.036144578313255
+      all_quantity: 913
+      category: 0
+      amount: 30
+      all_amount: 70
+    - entities: 416
+      quantity: 416
+      duration: 60
+      all_quantity: 913
+      category: 1
+      amount: 40
+      all_amount: 70
 cleanup:
 - sql: DROP TABLE IF EXISTS metric_history
 - sql: DROP TABLE IF EXISTS metric_entity
@@ -184,3 +228,4 @@ cleanup:
 - sql: DROP TABLE IF EXISTS ds_history
 - sql: DROP TABLE IF EXISTS ds_entity
 - sql: DROP TABLE IF EXISTS ds_invoice
+- sql: DROP TABLE IF EXISTS ds_list
