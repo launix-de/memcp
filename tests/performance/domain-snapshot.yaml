@@ -39,7 +39,7 @@ test_cases:
               WHERE h.entity_id=e.id AND h.coordinate<=60 ORDER BY h.coordinate DESC LIMIT 1),d.x)>=d.x),0) AS total
       FROM (SELECT 10 AS x UNION SELECT 20 UNION SELECT 30 UNION SELECT 50 UNION SELECT 51 UNION SELECT 60) d
       CROSS JOIN (SELECT NULL AS category UNION SELECT 0 UNION SELECT 1) p
-    expect:
+    expect: &domain_snapshot_results
       rows: 18
       result_contains:
         - "{\"x\": 10, \"category\": null, \"total\": 4000}"
@@ -193,6 +193,21 @@ test_cases:
         - "{\"x\": 50, \"category\": null, \"total\": 4400, \"scaled\": 8420100}"
         - "{\"x\": 51, \"category\": null, \"total\": 3800, \"scaled\": 7600000}"
         - "{\"x\": 60, \"category\": null, \"total\": 3800, \"scaled\": 7600000}"
+  - name: "Snapshot reducers retain row bindings across shared dependency preparation"
+    sql: |
+      SELECT d.x, p.category,
+        COALESCE((SELECT SUM((SELECT h.quantity FROM ds_history h
+          WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1))
+          FROM ds_entity e
+          WHERE (CASE WHEN p.mode=2 THEN TRUE ELSE (SELECT k.active FROM ds_kind k WHERE k.active=e.category LIMIT 1)=p.mode END) AND (p.category IS NULL OR e.category=p.category)
+            AND (SELECT k.active FROM ds_kind k WHERE k.name=(SELECT h.kind FROM ds_history h
+              WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1) LIMIT 1)=1
+            AND COALESCE((SELECT h.end_value FROM ds_history h
+              WHERE h.entity_id=e.id AND h.coordinate<=60 ORDER BY h.coordinate DESC LIMIT 1),d.x)>=d.x),0) AS total
+      FROM (SELECT 10 AS x UNION SELECT 20 UNION SELECT 30 UNION SELECT 50 UNION SELECT 51 UNION SELECT 60) d
+      CROSS JOIN (SELECT NULL AS category, 0x32 AS mode UNION SELECT 0, 0x32 UNION SELECT 1, 0x32) p
+    expect: *domain_snapshot_results
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS ds_history"
   - sql: "DROP TABLE IF EXISTS ds_entity"

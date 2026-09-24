@@ -855,15 +855,17 @@ so visibility and cancellation semantics remain unchanged. */
 				(lambda (candidate) (not (contains? consumed_stages (gs_id candidate))))))
 			(define prepared_input
 				(query_block_without_stages_after_eager_prepare_using nested_stages mapped_input))
+			/* Build callback ASTs as data. Parsed SourceInfo nodes can otherwise
+			be rebound while later preparation-recipe walkers inspect the plan. */
 			(define contribution_result (or (equal? contribution_mode (quote full)) (equal? contribution_mode (quote delta))))
 			(define proof (qassoc_get (gs_facts stage) (quote contribution-domain) nil))
 			(define probe_expr (if contribution_result
 				(lower_query_block_as_dataset_reduce prepared_input
 					(list "__key" (list (quote get_column) (source_alias (car proof)) false (nth proof 1) false) "__value" mapped_value)
-					(scheme "(lambda (__key __value) (list __key __value))")
-					(scheme "(lambda (acc row) (set_assoc acc (car row) (cadr row)))")
-					(scheme "(list)")
-					(scheme "(lambda (a b) (merge_assoc a b (lambda (old new) new)))"))
+					'('lambda '('__key '__value) '('list '__key '__value))
+					'('lambda '('acc 'row) '('set_assoc 'acc '('car 'row) '('cadr 'row)))
+					'('list)
+					'('lambda '('a 'b) '('merge_assoc 'a 'b '('lambda '('old 'new) 'new))))
 				(lower_query_block_as_dataset_reduce prepared_input
 					(list "__value" mapped_value)
 					(list (quote lambda) (list (quote __value)) (quote __value))
@@ -9192,15 +9194,15 @@ This is transient query working memory, not a persistent cache registration. */
 		(define covers (map (nth proof 3) (lambda (cover)
 			(compile_scan_plan (quote scan) (physical_query_tx_symbol) (source_table_expr (car cover))
 				(quoted_runtime_list (list (nth cover 2)))
-				(scheme "(lambda (value) (and (>= value __contribution_lo) (<= value __contribution_hi)))")
+				'('lambda '('value) '('and '('>= 'value '__contribution_lo) '('<= 'value '__contribution_hi)))
 				(quoted_runtime_list (list (nth cover 1)))
-				(scheme "(lambda (acc key) (set_assoc acc key true))")
-				(scheme "(list)") (scheme "(lambda (a b) (merge_assoc a b (lambda (old new) true)))") false))))
+				'('lambda '('acc 'key) '('set_assoc 'acc 'key true))
+				'('list) '('lambda '('a 'b) '('merge_assoc 'a 'b '('lambda '('old 'new) true))) false))))
 		(define changes (list (quote lambda) (list (quote __contribution_lo) (quote __contribution_hi))
 			(list (quote extract_assoc)
 				(reduce covers (lambda (acc cover) (list (quote merge_assoc) acc cover
-					(scheme "(lambda (old new) true)"))) (scheme "(list)"))
-				(scheme "(lambda (key present) key)"))))
+					'('lambda '('old 'new) true))) '('list))
+				'('lambda '('key 'present) 'key))))
 		(list snapshot (physical_query_tx_symbol) axis
 			(list (quote lambda) '() (cons (quote list)
 				(map (nth proof 5) (lambda (source) (list (quote table_read_version) (source_table_expr source))))))
@@ -9236,6 +9238,6 @@ bounds. Expose that access geometry to the common RecMap candidate builder. */
 		(define old (nth candidate 3))
 		(define bounded (compile_scan_plan (quote scan_recmap)
 			(nth old 1) (nth old 2) (quoted_runtime_list (list key))
-			(scheme "(lambda (__key) (sql_in __contribution_keys __key))")
+			'('lambda '('__key) '('sql_in '__contribution_keys '__key))
 			(nth old 7) (nth old 8) (nth old 9)))
 		(list (car candidate) (cadr candidate) (nth candidate 2) bounded (quote delta)))))
