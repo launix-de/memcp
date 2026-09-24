@@ -7188,25 +7188,22 @@ literal domain. General expressions and session variables stay relational. */
 (define bind_parameter_row_domains (lambda (query planning_session)
 	(begin
 		(define binding (newsession))
-		(define visit_expr (lambda (expr)
-			(match expr
-				((symbol inner_select) inner) (list (quote inner_select) (visit_query inner))
-				((symbol inner_select_exists) inner) (list (quote inner_select_exists) (visit_query inner))
-				((symbol inner_select_in) value inner) (list (quote inner_select_in) (visit_expr value) (visit_query inner))
-				(cons head tail) (cons head (map tail visit_expr))
-				_ expr)))
-		(define visit_query (lambda (raw)
-			(begin
+		/* One recursive visitor keeps query/expression transitions bound under
+		JIT compilation too; mutually recursive local closures capture an
+		uninitialized forward reference. */
+		(define visit (lambda (node query_mode)
+			(if query_mode (begin
+				(define raw node)
 				(define block (normalize_query_ast raw))
 				(if (union_block? block)
 					(if (or (not (empty_list? (union_order block))) (not (nil? (union_limit block))) (not (nil? (union_offset block)))) raw
-						(make_union_block (union_mode block) (map (union_branches block) visit_query)
+						(make_union_block (union_mode block) (map (union_branches block) (lambda (branch) (visit branch true)))
 							(union_order block) (union_limit block) (union_offset block) (union_facts block)))
 					(if (or (not (query_block? block)) (not (empty_list? (qb_order block)))
 						(not (nil? (qb_limit block))) (not (nil? (qb_offset block)))) raw
 						(begin
 							(define fields (map_assoc (qb_fields block) (lambda (title expr)
-								(visit_expr expr))))
+								(visit expr false))))
 							(define constant_row (and (empty_list? (qb_sources block))
 								(not (nil? planning_session))
 								(reduce (map_assoc fields (lambda (_ expr)
@@ -7223,18 +7220,24 @@ literal domain. General expressions and session variables stay relational. */
 							(make_query_block (qb_schema block)
 								(map (qb_sources block) (lambda (src)
 									(list (source_alias src) (source_schema src)
-										(if (list? (source_relation src)) (visit_query (source_relation src)) (source_relation src))
-										(source_outer? src) (visit_expr (source_join_expr src)))))
-								bound_fields (visit_expr (qb_where block)) (visit_expr (qb_group block))
-								(visit_expr (qb_having block)) (visit_expr (qb_order block))
-								(qb_limit block) (qb_offset block) (qb_hidden block) (qb_stages block) (qb_facts block))))))))
+										(if (list? (source_relation src)) (visit (source_relation src) true) (source_relation src))
+										(source_outer? src) (visit (source_join_expr src) false))))
+								bound_fields (visit (qb_where block) false) (visit (qb_group block) false)
+								(visit (qb_having block) false) (visit (qb_order block) false)
+								(qb_limit block) (qb_offset block) (qb_hidden block) (qb_stages block) (qb_facts block))))))
+				(begin (define expr node) (match expr
+					((symbol inner_select) inner) (list (quote inner_select) (visit inner true))
+					((symbol inner_select_exists) inner) (list (quote inner_select_exists) (visit inner true))
+					((symbol inner_select_in) value inner) (list (quote inner_select_in) (visit value false) (visit inner true))
+					(cons head tail) (cons head (map tail (lambda (item) (visit item false))))
+					_ expr)))))
 		/* Distribution currently owns ORDER/LIMIT in the containing query.
 		Keep its established path until ordered parameter domains carry that
 		barrier explicitly. */
 		(define root (normalize_query_ast query))
 		(if (and (query_block? root) (not (empty_list? (qb_sources root))) (empty_list? (qb_order root))
 			(nil? (qb_limit root)) (nil? (qb_offset root)))
-			(begin (define result (visit_query query)) (if (binding "changed") result query)) query))))
+			(begin (define result (visit query true)) (if (binding "changed") result query)) query))))
 
 (define ir_has_contribution_domain? (lambda (ir)
 	(match ir
