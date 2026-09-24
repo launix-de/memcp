@@ -31,7 +31,7 @@ test_cases:
         (define facts (list
           (list 'membership_driver_input_rows 100000)
           (list 'membership_order_limit_driver true)
-          (list 'membership_downstream_full_preparation true)
+          (list 'membership_downstream_full_preparation_branches 1)
           (list 'membership_order_limit 72)
           (list 'membership_order_offset 8)))
         (define without (membership_projection_cost 100000 50000 72 facts))
@@ -49,7 +49,7 @@ test_cases:
           (list 'membership_driver_input_rows 100000)
           (list 'membership_local_filter_rows 10000)
           (list 'membership_order_limit_driver true)
-          (list 'membership_downstream_full_preparation true)
+          (list 'membership_downstream_full_preparation_branches 1)
           (list 'membership_order_limit 72)
           (list 'membership_order_offset 8)))
         (define without (membership_projection_cost 100000 50000 72 facts))

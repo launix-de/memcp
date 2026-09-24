@@ -125,72 +125,73 @@ type suite struct {
 type calibrationRow struct {
 	OrderedOrWork []float64 `json:"ordered_or_work"`
 
-	CaseName                         string   `json:"case_name"`
-	Error                            string   `json:"error"`
-	CacheState                       string   `json:"cache_state"`
-	CompileState                     string   `json:"compile_state"`
-	DecisionID                       string   `json:"decision_id"`
-	Decision                         string   `json:"decision"`
-	DecisionSite                     string   `json:"decision_site"`
-	Consumer                         string   `json:"consumer"`
-	Plan                             string   `json:"plan"`
-	OperatorFamily                   string   `json:"operator_family"`
-	OperatorConsistent               bool     `json:"operator_consistent"`
-	EstimatedNS                      *float64 `json:"estimated_ns"`
-	WholeQueryExecutionNS            float64  `json:"whole_query_execution_ns"`
-	OperatorNS                       *float64 `json:"operator_ns"`
-	TimedOut                         bool     `json:"timed_out"`
-	LowerBoundNS                     float64  `json:"lower_bound_ns"`
-	CandidateInputRows               *float64 `json:"candidate_input_rows"`
-	CandidateRows                    *float64 `json:"candidate_rows"`
-	CarrierRows                      *float64 `json:"carrier_rows"`
-	CandidateDensity                 *float64 `json:"candidate_density"`
-	ProjectedDriverRows              *float64 `json:"projected_driver_rows"`
-	DriverInputRows                  *float64 `json:"driver_input_rows"`
-	DriverOrderPartitioned           bool     `json:"driver_order_partitioned"`
-	DriverRows                       *float64 `json:"driver_rows"`
-	PrefilteredDriverRows            *float64 `json:"prefiltered_driver_rows"`
-	ExpectedDriverRowsVisited        *float64 `json:"expected_driver_rows_visited"`
-	Limit                            *float64 `json:"limit"`
-	Offset                           *float64 `json:"offset"`
-	ProbeBranches                    *float64 `json:"probe_branches"`
-	DownstreamProbeBranches          *float64 `json:"downstream_probe_branches"`
-	CandidateScanInvocations         *float64 `json:"candidate_scan_invocations"`
-	CandidateFilterColumns           *float64 `json:"candidate_filter_columns"`
-	CandidateMapColumns              *float64 `json:"candidate_map_columns"`
-	CandidateCacheMapColumns         *float64 `json:"candidate_cache_map_columns"`
-	CandidateCacheBacked             bool     `json:"candidate_cache_backed"`
-	CandidateExpressionOperations    *float64 `json:"candidate_expression_operations"`
-	CandidateExpressionDepth         *float64 `json:"candidate_expression_depth"`
-	CandidateIndexFilterRows         *float64 `json:"candidate_index_filter_rows"`
-	CandidateBroadTextMatchRows      *float64 `json:"candidate_broad_text_match_rows"`
-	CandidateBroadTextMatchBytes     *float64 `json:"candidate_broad_text_match_bytes"`
-	CandidateFilterValueRows         *float64 `json:"candidate_filter_value_rows"`
-	CandidateExpressionOperationRows *float64 `json:"candidate_expression_operation_rows"`
-	DriverScanInvocations            *float64 `json:"driver_scan_invocations"`
-	DriverFilterColumns              *float64 `json:"driver_filter_columns"`
-	DriverMapColumns                 *float64 `json:"driver_map_columns"`
-	DriverExpressionOperations       *float64 `json:"driver_expression_operations"`
-	DriverExpressionDepth            *float64 `json:"driver_expression_depth"`
-	JoinInputRows                    *float64 `json:"join_input_rows"`
-	JoinDriverRows                   *float64 `json:"join_driver_rows"`
-	JoinInnerRows                    *float64 `json:"join_inner_rows"`
-	JoinProbeRows                    *float64 `json:"join_probe_rows"`
-	JoinEstimatedRows                *float64 `json:"join_estimated_rows"`
-	JoinOutputRows                   *float64 `json:"join_output_rows"`
-	JoinMapWidth                     *float64 `json:"join_map_width"`
-	JoinTableCount                   *float64 `json:"join_table_count"`
-	JoinLegacyProbeRows              *float64 `json:"join_legacy_probe_rows"`
-	ProbeInvocations                 *float64 `json:"probe_invocations"`
-	InputRows                        *float64 `json:"input_rows"`
-	GroupRows                        *float64 `json:"group_rows"`
-	RowsPerProbe                     *float64 `json:"rows_per_probe"`
-	AggregateWidth                   *float64 `json:"aggregate_width"`
-	RecMapStartups                   *float64 `json:"recmap_startups"`
-	RecMapWorkRows                   *float64 `json:"recmap_work_rows"`
-	ResultEqual                      bool     `json:"result_equal"`
-	Rows                             int64    `json:"rows"`
-	ResultHash                       string   `json:"result_hash"`
+	CaseName                          string   `json:"case_name"`
+	Error                             string   `json:"error"`
+	CacheState                        string   `json:"cache_state"`
+	CompileState                      string   `json:"compile_state"`
+	DecisionID                        string   `json:"decision_id"`
+	Decision                          string   `json:"decision"`
+	DecisionSite                      string   `json:"decision_site"`
+	Consumer                          string   `json:"consumer"`
+	Plan                              string   `json:"plan"`
+	OperatorFamily                    string   `json:"operator_family"`
+	OperatorConsistent                bool     `json:"operator_consistent"`
+	EstimatedNS                       *float64 `json:"estimated_ns"`
+	WholeQueryExecutionNS             float64  `json:"whole_query_execution_ns"`
+	OperatorNS                        *float64 `json:"operator_ns"`
+	TimedOut                          bool     `json:"timed_out"`
+	LowerBoundNS                      float64  `json:"lower_bound_ns"`
+	CandidateInputRows                *float64 `json:"candidate_input_rows"`
+	CandidateRows                     *float64 `json:"candidate_rows"`
+	CarrierRows                       *float64 `json:"carrier_rows"`
+	CandidateDensity                  *float64 `json:"candidate_density"`
+	ProjectedDriverRows               *float64 `json:"projected_driver_rows"`
+	DriverInputRows                   *float64 `json:"driver_input_rows"`
+	DriverOrderPartitioned            bool     `json:"driver_order_partitioned"`
+	DriverRows                        *float64 `json:"driver_rows"`
+	PrefilteredDriverRows             *float64 `json:"prefiltered_driver_rows"`
+	ExpectedDriverRowsVisited         *float64 `json:"expected_driver_rows_visited"`
+	Limit                             *float64 `json:"limit"`
+	Offset                            *float64 `json:"offset"`
+	ProbeBranches                     *float64 `json:"probe_branches"`
+	DownstreamProbeBranches           *float64 `json:"downstream_probe_branches"`
+	DownstreamFullPreparationBranches *float64 `json:"downstream_full_preparation_branches"`
+	CandidateScanInvocations          *float64 `json:"candidate_scan_invocations"`
+	CandidateFilterColumns            *float64 `json:"candidate_filter_columns"`
+	CandidateMapColumns               *float64 `json:"candidate_map_columns"`
+	CandidateCacheMapColumns          *float64 `json:"candidate_cache_map_columns"`
+	CandidateCacheBacked              bool     `json:"candidate_cache_backed"`
+	CandidateExpressionOperations     *float64 `json:"candidate_expression_operations"`
+	CandidateExpressionDepth          *float64 `json:"candidate_expression_depth"`
+	CandidateIndexFilterRows          *float64 `json:"candidate_index_filter_rows"`
+	CandidateBroadTextMatchRows       *float64 `json:"candidate_broad_text_match_rows"`
+	CandidateBroadTextMatchBytes      *float64 `json:"candidate_broad_text_match_bytes"`
+	CandidateFilterValueRows          *float64 `json:"candidate_filter_value_rows"`
+	CandidateExpressionOperationRows  *float64 `json:"candidate_expression_operation_rows"`
+	DriverScanInvocations             *float64 `json:"driver_scan_invocations"`
+	DriverFilterColumns               *float64 `json:"driver_filter_columns"`
+	DriverMapColumns                  *float64 `json:"driver_map_columns"`
+	DriverExpressionOperations        *float64 `json:"driver_expression_operations"`
+	DriverExpressionDepth             *float64 `json:"driver_expression_depth"`
+	JoinInputRows                     *float64 `json:"join_input_rows"`
+	JoinDriverRows                    *float64 `json:"join_driver_rows"`
+	JoinInnerRows                     *float64 `json:"join_inner_rows"`
+	JoinProbeRows                     *float64 `json:"join_probe_rows"`
+	JoinEstimatedRows                 *float64 `json:"join_estimated_rows"`
+	JoinOutputRows                    *float64 `json:"join_output_rows"`
+	JoinMapWidth                      *float64 `json:"join_map_width"`
+	JoinTableCount                    *float64 `json:"join_table_count"`
+	JoinLegacyProbeRows               *float64 `json:"join_legacy_probe_rows"`
+	ProbeInvocations                  *float64 `json:"probe_invocations"`
+	InputRows                         *float64 `json:"input_rows"`
+	GroupRows                         *float64 `json:"group_rows"`
+	RowsPerProbe                      *float64 `json:"rows_per_probe"`
+	AggregateWidth                    *float64 `json:"aggregate_width"`
+	RecMapStartups                    *float64 `json:"recmap_startups"`
+	RecMapWorkRows                    *float64 `json:"recmap_work_rows"`
+	ResultEqual                       bool     `json:"result_equal"`
+	Rows                              int64    `json:"rows"`
+	ResultHash                        string   `json:"result_hash"`
 }
 
 type calibrationDiscovery struct {
@@ -1572,6 +1573,12 @@ func rowFeatures(row calibrationRow) ([]float64, error) {
 	if row.DownstreamProbeBranches != nil {
 		downstreamProbeBranches = *row.DownstreamProbeBranches
 	}
+	downstreamFullPreparationBranches := 0.0
+	if row.DownstreamFullPreparationBranches != nil {
+		downstreamFullPreparationBranches = math.Min(downstreamProbeBranches,
+			math.Max(0, *row.DownstreamFullPreparationBranches))
+	}
+	downstreamBoundedBranches := downstreamProbeBranches - downstreamFullPreparationBranches
 	candidateDensity := 0.0
 	candidateProbeBranches := 1.0
 	if row.ProbeBranches != nil {
@@ -1600,7 +1607,8 @@ func rowFeatures(row calibrationRow) ([]float64, error) {
 			aggregateDriverRows, 0, *row.CandidateBroadTextMatchRows,
 			*row.CandidateBroadTextMatchBytes, orderedScanInvocations, 0,
 			adaptiveSortWork,
-			driverMapRows * downstreamProbeBranches,
+			driverMapRows*downstreamBoundedBranches +
+				*row.ProjectedDriverRows*downstreamFullPreparationBranches,
 		}, nil
 	case "driver_order_membership_probe", "scan_order":
 		recsetStartup, recsetBuildRows, recsetProbeRows := 1.0, *row.CandidateRows, *row.ExpectedDriverRowsVisited

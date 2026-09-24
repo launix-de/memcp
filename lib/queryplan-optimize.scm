@@ -4265,16 +4265,18 @@ owned by the membership-carrier guard; do not create another consumer guard. */
 			projection_rows 0.65)
 			candidate_cache_cost projection_rows 0.65))
 		/* Per-row continuation probes sit behind the ordered consumer and therefore
-		share its bounded output population. A separately prepared truth carrier is
-		charged over its complete population by setting
-		membership_downstream_full_preparation. Keep this population in sync with
-		tools/costgen's candidate feature. */
-		(define downstream_rows (if
-			(membership_work_value work (quote membership_downstream_full_preparation) false)
-			projected_rows bounded_output_rows))
+		share its bounded output population. Scalar truth carriers are prepared
+		independently and retain the complete projected population. Keep the split in
+		sync with tools/costgen's candidate feature. */
+		(define downstream_branches
+			(membership_work_value work (quote membership_downstream_probe_branches) 0))
+		(define full_preparation_branches (min downstream_branches
+			(membership_work_value work
+				(quote membership_downstream_full_preparation_branches) 0)))
+		(define bounded_branches (- downstream_branches full_preparation_branches))
 		(define downstream_cost (planner_membership_downstream_probe_cost
-			(* downstream_rows
-				(membership_work_value work (quote membership_downstream_probe_branches) 0))))
+			(+ (* bounded_output_rows bounded_branches)
+				(* projected_rows full_preparation_branches))))
 		(define carrier_cost (planner_cost_add
 			(planner_cost_add base_cost adaptive_consumer_cost projected_rows 0.65)
 			downstream_cost projected_rows 0.65))

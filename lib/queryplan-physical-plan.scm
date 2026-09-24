@@ -6073,6 +6073,7 @@ scalar comparison work rather than an uncalibrated multiplier. */
 								(membership_downstream_sources (qb_sources block) src membership)
 								alias raw_condition))
 								(count (expr_probe_stages raw_condition)))
+							(count (expr_probe_stages raw_condition))
 							(not row_number_membership_consumer)
 							source_order_partitioning
 							(quote single_source)
@@ -7321,6 +7322,7 @@ until the caller has selected this physical alternative. */
 				(+ (count (acceptance_required_sources
 					remaining_sources default_alias final_condition))
 					(count (expr_probe_stages final_condition)))
+				(count (expr_probe_stages final_condition))
 				true
 				driver_order_partitioning
 				(quote ordered_join_stream) planning_session (planner_context_tx facts))))
@@ -9006,6 +9008,9 @@ carrier remains on the measured direct path and is never built eagerly. */
 							(count (merge_unique (list
 								(expr_probe_stages final_condition)
 								(physical_scalar_truth_plan_stages scalar_plan)))))
+						(count (merge_unique (list
+							(expr_probe_stages final_condition)
+							(physical_scalar_truth_plan_stages scalar_plan))))
 						(not row_number_membership_consumer)
 						current_order_partitioning
 						(quote join_leaf) planning_session planning_tx)))

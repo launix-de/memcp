@@ -311,6 +311,14 @@ func TestRowFeaturesChargesOrderedProjectedRecsetSortWork(t *testing.T) {
 	if features[18] != 6 {
 		t.Fatalf("downstream probe rows = %v, want 6", features[18])
 	}
+	row.DownstreamFullPreparationBranches = value(1)
+	features, err = rowFeatures(row)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if features[18] != 28 {
+		t.Fatalf("split downstream probe rows = %v, want 28", features[18])
+	}
 }
 
 func TestRowFeaturesModelsAdaptiveOrderedRecsetConsumer(t *testing.T) {
