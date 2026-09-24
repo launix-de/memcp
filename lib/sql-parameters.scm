@@ -20,11 +20,79 @@ the complete statement. Tokenization uses the runtime's generic regex engine. */
 	(regexp_matches query
 		"[ \\t\\r\\n]+|--[^\\n]*|#[^\\n]*|/\\*(?s:.*?)\\*/|`(?:\\\\.|``|[^`\\\\])*`|'(?:\\\\.|''|[^'\\\\])*'|\"(?:\\\\.|\"\"|[^\"\\\\])*\"|[a-zA-Z_$][a-zA-Z0-9_$]*|0[xX][a-zA-Z0-9_$]*|[0-9]+(?:\\.[0-9]*)?(?:[eE][+-]?[0-9]+)?|(?s:.)")))
 
+/* Speculate only at the IN keyword. A literal must be followed by a comma
+or the closing parenthesis; an operator, function, column or nested expression
+rejects the complete candidate. No expression is evaluated by this pass. */
+(define sql_parameter_in_literal (lambda (tokens idx)
+	(begin
+		(define token (nth tokens idx))
+		(define number_idx (if (equal? token "-") (+ idx 1) idx))
+		(define decimal_point (equal? (nth tokens number_idx) "."))
+		(define end (+ number_idx (if decimal_point 2 1)))
+		(define number (if (or (equal? token "-") decimal_point)
+			(concat (if (equal? token "-") "-" "")
+				(if decimal_point "." "") (nth tokens (- end 1))) token))
+		(match number
+			(regex "^-?(?:[0-9]+\\.?[0-9]*|\\.[0-9]+)(?:[eE]-?[0-9]+)?$" _)
+			(list end (simplify number))
+			_ (match token
+				(regex "^0[xX](?:[0-9a-fA-F]{2})+$" _) (list (+ idx 1) (hex2bin (substr token 2)))
+				(regex "^(?:'(?:\\\\.|''|[^'\\\\])*'|\"(?:\\\\.|\"\"|[^\"\\\\])*\")$" _)
+				(list (+ idx 1) (sql_string token))
+				_ (match (toUpper token)
+					"NULL" (list (+ idx 1) nil)
+					"TRUE" (list (+ idx 1) true)
+					"FALSE" (list (+ idx 1) false)
+					_ nil))))))
+
+(define sql_parameter_in_candidate (lambda (tokens start)
+	(begin
+		/* Reject an expression suffix on the first cell before allocating the
+		candidate buffer or decoding values. This is the common nonliteral case. */
+		(define opening (sql_parameter_next_significant_index tokens start))
+		(define first (sql_parameter_next_significant_index tokens (+ opening 1)))
+		(define first_token (nth tokens first))
+		(define number_start (if (equal? first_token "-") (+ first 1) first))
+		(define first_end (+ number_start (if (equal? (nth tokens number_start) ".") 2 1)))
+		(if (not (and (equal? (nth tokens opening) "(")
+			(has? '("," ")") (sql_parameter_next_significant tokens first_end)))) nil
+			(begin
+				(define values (newsession))
+				/* phase: 1 literal, 2 delimiter, 3 done; -1 rejects the candidate. */
+				(define result (for (list first 1 0)
+					(lambda (idx phase n) (and (>= phase 0) (< phase 3) (< idx (count tokens))))
+					(lambda (idx phase n) (begin
+						(define token (nth tokens idx))
+						(if (regexp_test token "^(?:[ \\t\\r\\n]|--|#|/\\*)")
+							(list (+ idx 1) phase n)
+							(if (equal? phase 1)
+								(match (sql_parameter_in_literal tokens idx)
+									'(next value) (begin (values n value) (list next 2 (+ n 1)))
+									_ (list idx -1 n))
+								(list (+ idx 1) (match token "," 1 ")" 3 _ -1) n)))))))
+				(match result '(next phase n)
+					(if (equal? phase 3)
+						(list next (map (produceN n) (lambda (i) (values i)))) nil)))))))
+
+/* Keep the ordinary per-token path unchanged apart from dispatch at IN. */
+(define sql_parameter_in_step (lambda (tokens idx depth type_depth scope scopes candidates candidate_count pieces piece_count)
+	(begin
+		(define candidate (if (sql_parameter_scope_allows scope)
+			(sql_parameter_in_candidate tokens (+ idx 1)) nil))
+		(if candidate (begin
+			(candidates candidate_count (list piece_count scope false (cadr candidate)))
+			(pieces piece_count (apply concat (map (produceN (- (car candidate) idx))
+				(lambda (i) (nth tokens (+ idx i))))))
+			(list (car candidate) depth type_depth "IN" ")" scopes false (+ candidate_count 1) (+ piece_count 1)))
+			(begin
+				(pieces piece_count (nth tokens idx))
+				(list (+ idx 1) depth type_depth "IN" "IN" scopes false candidate_count (+ piece_count 1)))))))
+
 (define sql_parameter_prefix (lambda (query)
 	(begin
 		(define upper (toUpper (strtrim query)))
 		(and (regexp_test upper
-				"^(?:SELECT[ \\t\\n]|EXPLAIN +(?:IR +)?(?:REORDER +)?SELECT(?:[ \\t\\n]|$)|DELETE[ \\t\\n]+FROM[ \\t\\n]|UPDATE[ \\t\\n]|INSERT[ \\t\\n]+INTO[ \\t\\n])")
+			"^(?:SELECT[ \\t\\n]|EXPLAIN +(?:IR +)?(?:REORDER +)?SELECT(?:[ \\t\\n]|$)|DELETE[ \\t\\n]+FROM[ \\t\\n]|UPDATE[ \\t\\n]|INSERT[ \\t\\n]+INTO[ \\t\\n])")
 			/* DML with a subquery ANYWHERE (a derived table, EXISTS/IN-subquery, or
 			INSERT ... SELECT) is excluded from folding entirely: routing such a
 			statement through ?-bound prepared execution can hit a pre-existing hang
@@ -75,7 +143,7 @@ the safe-scope check that already applies to every candidate here matters. */
 			(if (and (equal? word "BY") (equal? previous_word "ORDER"))
 				(scope "order_depth" depth)
 				(if (has? '("LIMIT" "FOR") word) (scope "order_depth" -1)))
-			/* SET (UPDATE ... SET a=1, b=2 ...) and VALUES (INSERT ... VALUES (1,2), (3,4))
+		/* SET (UPDATE ... SET a=1, b=2 ...) and VALUES (INSERT ... VALUES (1,2), (3,4))
 			enter the same allow-listed-clause tracking as WHERE/HAVING -- see
 			sql_parameter_scope_allows. ON DUPLICATE KEY UPDATE reuses the existing
 			ON->WHERE mapping below: its assignment list is exactly as safe to fold as
@@ -84,11 +152,13 @@ the safe-scope check that already applies to every candidate here matters. */
 			(if (has? '("FROM" "WHERE" "HAVING" "LIMIT" "OFFSET" "GROUP" "ORDER" "UNION" "ON" "SET" "VALUES") word)
 				(scope "clause" (if (equal? word "ON") "WHERE" word)))))))
 
-(define sql_parameter_next_significant (lambda (tokens i)
-	(if (>= i (count tokens)) nil
+(define sql_parameter_next_significant_index (lambda (tokens i)
+	(if (>= i (count tokens)) i
 		(if (regexp_test (nth tokens i) "^(?:[ \\t\\r\\n]|--|#|/\\*)")
-			(sql_parameter_next_significant tokens (+ i 1))
-			(nth tokens i)))))
+			(sql_parameter_next_significant_index tokens (+ i 1)) i))))
+
+(define sql_parameter_next_significant (lambda (tokens i)
+	(nth tokens (sql_parameter_next_significant_index tokens i))))
 
 /* One item of an all-constant projection row, e.g. each literal in
 `SELECT 0 AS i, 1704067200 AS s, 1789037871 AS e` (the shape a generated query
@@ -135,20 +205,23 @@ sessions and token buffers belong to this one lexical compilation only. */
 							(if (regexp_test token "^[a-zA-Z_$]")
 								(begin
 									(define word (toUpper token))
-									/* SELECT re-enters the same scope at the same depth (a UNION branch or
-									the SELECT half of INSERT ... SELECT); a nested SELECT at a deeper depth
-									gets its own scope, same as before. DELETE/UPDATE/INSERT only ever open
-									the outermost scope, once, as literally the first token sql_parameter_prefix
-									already required -- scopes is still empty at that point. */
-									(define next_scopes (if (equal? word "SELECT")
-										(if (and (not (nil? scope)) (equal? (scope "depth") depth))
-											(begin (scope "clause" "SELECT") (scope "order_depth" -1) scopes)
-											(cons (sql_parameter_new_scope depth previous_word word) scopes))
-										(if (and (equal? scopes '()) (equal? depth 0) (has? '("DELETE" "UPDATE" "INSERT") word))
-											(cons (sql_parameter_new_scope depth previous_word word) scopes)
-											scopes)))
-									(sql_parameter_scope_word (if (equal? next_scopes '()) nil (car next_scopes)) word previous_word depth)
-									(begin (pieces piece_count token) (list (+ idx 1) depth type_depth word word next_scopes (equal? word "OVER") candidate_count (+ piece_count 1))))
+									(if (equal? word "IN")
+										(sql_parameter_in_step tokens idx depth type_depth scope scopes candidates candidate_count pieces piece_count)
+										(begin
+											/* SELECT re-enters the same scope at the same depth (a UNION branch or
+											the SELECT half of INSERT ... SELECT); a nested SELECT at a deeper depth
+											gets its own scope, same as before. DELETE/UPDATE/INSERT only ever open
+											the outermost scope, once, as literally the first token sql_parameter_prefix
+											already required -- scopes is still empty at that point. */
+											(define next_scopes (if (equal? word "SELECT")
+												(if (and (not (nil? scope)) (equal? (scope "depth") depth))
+													(begin (scope "clause" "SELECT") (scope "order_depth" -1) scopes)
+													(cons (sql_parameter_new_scope depth previous_word word) scopes))
+												(if (and (equal? scopes '()) (equal? depth 0) (has? '("DELETE" "UPDATE" "INSERT") word))
+													(cons (sql_parameter_new_scope depth previous_word word) scopes)
+													scopes)))
+											(sql_parameter_scope_word (if (equal? next_scopes '()) nil (car next_scopes)) word previous_word depth)
+											(begin (pieces piece_count token) (list (+ idx 1) depth type_depth word word next_scopes (equal? word "OVER") candidate_count (+ piece_count 1))))))
 								(if (equal? token "(")
 									(begin (pieces piece_count token) (list (+ idx 1) (+ depth 1) (if (has? '("DECIMAL" "VARCHAR") previous_word) (+ depth 1) type_depth) previous_word token scopes false candidate_count (+ piece_count 1)))
 									(if (equal? token ")")
@@ -198,9 +271,12 @@ sessions and token buffers belong to this one lexical compilation only. */
 						(if (equal? accepted '())
 							(list query '() (fnv_hash query))
 							(begin
-								(reduce accepted (lambda (_ candidate) (pieces (car candidate) "?")) nil)
+								(define bindings (map accepted (lambda (candidate) (begin
+									(define value (nth candidate 3))
+									(pieces (car candidate) (if (list? value) "IN (?*)" "?"))
+									value))))
 								(define normalized (apply concat (map (produceN piece_count) (lambda (idx) (pieces idx)))))
-								(list normalized (map accepted (lambda (candidate) (nth candidate 3))) (fnv_hash normalized)))))))))))
+								(list normalized bindings (fnv_hash normalized)))))))))))
 
 /* Keep exact SQL variants out of the parser while sharing their compiled plan.
 Only parameterized results enter the small front cache; exact-only statements

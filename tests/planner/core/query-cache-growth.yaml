@@ -22,6 +22,249 @@ setup:
   - sql: "INSERT INTO cg_rows VALUES (1, 'needle-a'), (2, 'needle-b'), (3, 'other-a'), (4, 'other-b')"
   - scm: "(rebuild (table \"memcp-tests\" \"cg_rows\") true false)"
 test_cases:
+  - name: Literal IN arrays share one shape across lengths and whitespace
+    scm: |-
+      (begin
+        (define queries (list "SELECT id FROM cg_rows WHERE id IN (1)" "SELECT id FROM cg_rows WHERE id IN(1, 2,3)" "SELECT id FROM cg_rows WHERE id in (4,3,2,1)"))
+        (map queries (lambda (query)
+          (match (parameterize_sql_select_literals query) '(normalized bindings shape_hash)
+            (if (and (equal? normalized "SELECT id FROM cg_rows WHERE id IN (?*)")
+              (equal? (count bindings) 1) (list? (car bindings)) (equal? shape_hash (fnv_hash normalized)))
+              true (error (concat "not an array template: " normalized " / " bindings))))))
+        "ok")
+    expect:
+      data:
+      - ok
+  - name: Array and scalar parameters retain left-to-right binding order
+    scm: |-
+      (match (parameterize_sql_select_literals "SELECT id FROM cg_rows WHERE id > 0 AND id IN (1,2,3) AND label NOT IN ('x','y') LIMIT 4") '(normalized bindings shape_hash)
+        (if (and (equal? normalized "SELECT id FROM cg_rows WHERE id > ? AND id IN (?*) AND label NOT IN (?*) LIMIT ?")
+          (equal? bindings (list 0 (list 1 2 3) (list "x" "y") 4)))
+          "ok" (error (concat normalized " / " bindings))))
+    expect:
+      data:
+      - ok
+  - name: IN literal decoding preserves NULL booleans hex decimals and escaped strings
+    scm: |-
+      (match (parameterize_sql_select_literals "SELECT id FROM cg_rows WHERE id IN (NULL,TRUE,FALSE,0x4142,-2,.5,1e-2,'it''s','a,b)','line\\n')") '(normalized bindings shape_hash)
+        (if (and (equal? normalized "SELECT id FROM cg_rows WHERE id IN (?*)")
+          (equal? bindings (list (list nil true false "AB" -2 0.5 (sql_number "1e-2") "it's" "a,b)" "line\n"))))
+          "ok" (error (concat normalized " / " bindings))))
+    expect:
+      data:
+      - ok
+  - name: IN extraction never swallows calculations references subqueries or malformed lists
+    scm: |-
+      (begin
+        (map (list "1+2,4" "1,2+3" "1,2*3" "1,2 /* separator */ + 3" "1,2,3+4" "1,- -2" "1,2/3" "1,2-3" "1,2%3" "1,ABS(-2)" "1,COALESCE(NULL,2)" "1,id+2" "1,@x" "1,(2+3)" "1,CASE WHEN id=1 THEN 2 ELSE 3 END" "1,CAST(2 AS DECIMAL(10,2))" "1,'a' COLLATE utf8mb4_general_ci" "SELECT id FROM cg_rows" "1,?" "1,2," "1,,2" "1,2 +" "1,0x123" "1,12abc" "1,+2" "1,--2" "(1,2),(3,4)") (lambda (rhs)
+          (match (parameterize_sql_select_literals (concat "SELECT id FROM cg_rows WHERE id IN (" rhs ")")) '(normalized bindings shape_hash)
+            (if (or (regexp_test normalized "IN \\(\\?\\*\\)")
+              (reduce bindings (lambda (found value) (or found (list? value))) false))
+              (error (concat "expression swallowed: " rhs " -> " normalized)) true))))
+        "ok")
+    expect:
+      data:
+      - ok
+  - name: Arithmetic operators remain present after scalar parameter extraction
+    scm: |-
+      (match (parameterize_sql_select_literals "SELECT id FROM cg_rows WHERE id IN (1+2, 8/2, id-1, ABS(-4)) AND id IN (3,4)") '(normalized bindings shape_hash)
+        (if (and (equal? normalized "SELECT id FROM cg_rows WHERE id IN (?+?, ?/?, id-?, ABS(?)) AND id IN (?*)")
+          (equal? bindings (list 1 2 8 2 1 -4 (list 3 4))))
+          "ok" (error (concat normalized " / " bindings))))
+    expect:
+      data:
+      - ok
+  - name: Quoted IN text and comments never become array parameters
+    scm: |-
+      (match (parameterize_sql_select_literals "SELECT `IN(1,2)` FROM cg_rows /* IN(3,4) */ WHERE label = 'IN(5,6)' AND id IN (1, /* 9+9 */ 2)") '(normalized bindings shape_hash)
+        (if (and (equal? normalized "SELECT `IN(1,2)` FROM cg_rows /* IN(3,4) */ WHERE label = ? AND id IN (?*)")
+          (equal? bindings (list "IN(5,6)" (list 1 2))))
+          "ok" (error (concat normalized " / " bindings))))
+    expect:
+      data:
+      - ok
+  - name: Cached IN template executes current arrays across lengths and numeric regimes
+    scm: |-
+      (begin
+        (define cache (newcachemap))
+        (define sess (newsession))
+        (map (list (list "1" 1) (list "1,2,3" 6) (list "4,4,NULL" 4) (list "2,4" 6) (list "'3','4'" 7) (list "NULL" 0))
+          (lambda (fixture) (begin
+            (define result (newsession)) (result "sum" 0)
+            (sql_execute_formula sess nil
+              (cached_parse cache (list parse_sql) "memcp-tests"
+                (concat "SELECT id FROM cg_rows WHERE id IN (" (car fixture) ")") nil "root" sess true)
+              (lambda (row) (result "sum" (+ (result "sum") (cadr row)))) (lambda (_fields) nil))
+            (if (equal? (result "sum") (cadr fixture)) true (error (concat "stale array: " fixture))))))
+        (if (equal? (count (cache)) 1) "ok" (error "IN lengths made distinct cache entries")))
+    expect:
+      data:
+      - ok
+  - name: Literal IN matches
+    sql: SELECT id FROM cg_rows WHERE id IN (1,2,3) ORDER BY id
+    expect:
+      rows: 3
+      data:
+      - id: 1
+      - id: 2
+      - id: 3
+  - name: Longer literal IN matches
+    sql: SELECT id FROM cg_rows WHERE id IN (1,2,3,4) ORDER BY id
+    expect:
+      rows: 4
+      data:
+      - id: 1
+      - id: 2
+      - id: 3
+      - id: 4
+  - name: Arithmetic first item executes
+    sql: SELECT id FROM cg_rows WHERE id IN (1+2,4) ORDER BY id
+    expect:
+      rows: 2
+      data:
+      - id: 3
+      - id: 4
+  - name: Arithmetic last item executes
+    sql: SELECT id FROM cg_rows WHERE id IN (1,2+2) ORDER BY id
+    expect:
+      rows: 2
+      data:
+      - id: 1
+      - id: 4
+  - name: Multiplication and division execute
+    sql: SELECT id FROM cg_rows WHERE id IN (1*2,8/2) ORDER BY id
+    expect:
+      rows: 2
+      data:
+      - id: 2
+      - id: 4
+  - name: Function and column expressions execute
+    sql: SELECT id FROM cg_rows WHERE id IN (ABS(-3),id+1) ORDER BY id
+    expect:
+      rows: 1
+      data:
+      - id: 3
+  - name: Parenthesized arithmetic executes
+    sql: SELECT id FROM cg_rows WHERE id IN ((1+2),4) ORDER BY id
+    expect:
+      rows: 2
+      data:
+      - id: 3
+      - id: 4
+  - name: CASE expression executes
+    sql: SELECT id FROM cg_rows WHERE id IN (CASE WHEN id=2 THEN 2 ELSE 0 END,4) ORDER BY id
+    expect:
+      rows: 2
+      data:
+      - id: 2
+      - id: 4
+  - name: NULL list member preserves positive matches
+    sql: SELECT id FROM cg_rows WHERE id IN (NULL,2,2) ORDER BY id
+    expect:
+      rows: 1
+      data:
+      - id: 2
+  - name: NOT IN retains UNKNOWN with NULL
+    sql: SELECT id FROM cg_rows WHERE id NOT IN (NULL,2) ORDER BY id
+    expect:
+      rows: 0
+      data: []
+  - name: NOT IN without NULL matches
+    sql: SELECT id FROM cg_rows WHERE id NOT IN (1,2) ORDER BY id
+    expect:
+      rows: 2
+      data:
+      - id: 3
+      - id: 4
+  - name: NULL probe stays UNKNOWN
+    sql: SELECT id FROM cg_rows WHERE NULL IN (1,2,3) ORDER BY id
+    expect:
+      rows: 0
+      data: []
+  - name: Computed probe survives extraction
+    sql: SELECT id FROM cg_rows WHERE id+1 IN (2,4) ORDER BY id
+    expect:
+      rows: 2
+      data:
+      - id: 1
+      - id: 3
+  - name: Computation after IN survives extraction
+    sql: SELECT id FROM cg_rows WHERE (id IN (1,2))+1 = 2 ORDER BY id
+    expect:
+      rows: 2
+      data:
+      - id: 1
+      - id: 2
+  - name: 'Malformed IN is rejected: 1,2 +'
+    sql: SELECT id FROM cg_rows WHERE id IN (1,2 +)
+    expect:
+      error: true
+  - name: 'Malformed IN is rejected: 1,2,'
+    sql: SELECT id FROM cg_rows WHERE id IN (1,2,)
+    expect:
+      error: true
+  - name: 'Malformed IN is rejected: 1,,2'
+    sql: SELECT id FROM cg_rows WHERE id IN (1,,2)
+    expect:
+      error: true
+  - name: 'Malformed IN is rejected: 1,ABS('
+    sql: SELECT id FROM cg_rows WHERE id IN (1,ABS()
+    expect:
+      error: true
+  - name: 'Malformed IN is rejected: 1,2 /* unterminated'
+    sql: SELECT id FROM cg_rows WHERE id IN (1,2 /* unterminated)
+    expect:
+      error: true
+  - name: Prepared scalar IN placeholders retain arithmetic and parameter order
+    sql: SELECT id FROM cg_rows WHERE id IN (? * ?, ?) ORDER BY id
+    params:
+    - 1
+    - 2
+    - 4
+    expect:
+      data:
+      - id: 2
+      - id: 4
+  - name: Numeric IN lengths reuse the guarded physical variant
+    scm: |-
+      (begin
+        (define cache (newcachemap)) (define sess (newsession))
+        (map (list "1,2,3" "1,2,3,4" "2,3" "4") (lambda (rhs)
+          (begin
+            (define formula (cached_parse cache (list parse_sql) "memcp-tests"
+              (concat "SELECT id FROM cg_rows WHERE id IN (" rhs ")") nil "root" sess true))
+            (sql_execute_formula sess nil formula (lambda (_row) nil) (lambda (_fields) nil)))))
+        (define entry (car (cache (car (cache)))))
+        (if (equal? (count (entry "variants")) 1) "ok"
+          (error (concat "length specialized variants=" (count (entry "variants"))))))
+    expect:
+      data:
+      - ok
+  - name: PostgreSQL frontend consumes the same literal-array template
+    scm: |-
+      (begin
+        (define cache (newcachemap)) (define sess (newsession))
+        (define result (newsession)) (result "sum" 0)
+        (map '("1,2" "3,4,4") (lambda (rhs)
+          (sql_execute_formula sess nil
+            (cached_parse cache (list parse_psql) "memcp-tests"
+              (concat "SELECT id FROM cg_rows WHERE id IN (" rhs ")") nil "root" sess true)
+            (lambda (row) (result "sum" (+ (result "sum") (cadr row)))) (lambda (_fields) nil))))
+        (if (and (equal? (result "sum") 10) (equal? (count (cache)) 1)) "ok"
+          (error "PostgreSQL array binding mismatch")))
+    expect:
+      data:
+      - ok
+  - name: Empty literal IN remains a syntax error
+    sql: SELECT id FROM cg_rows WHERE id IN ()
+    expect:
+      error: true
+  - name: Mixed array and calculation lists retain every current binding
+    sql: "SELECT id FROM cg_rows WHERE id IN (1+2,4) AND id IN (3,4) AND id > 0 ORDER BY id LIMIT 3"
+    expect: {data: [{id: 3}, {id: 4}]}
+  - name: Scalar and two array bindings execute in source order
+    sql: "SELECT id FROM cg_rows WHERE id > 0 AND id IN (1,2,3) AND label NOT IN ('x','y') ORDER BY id LIMIT 4"
+    expect: {data: [{id: 1}, {id: 2}, {id: 3}]}
   - name: "Literal parameterizer compiles natively"
     scm: |
       (if (equal? (jit? (jit parameterize_sql_select_literals)) (jit-enabled?))
