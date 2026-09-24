@@ -1993,12 +1993,14 @@ outer joins. */
 		raw_stage_lookup above) is bound exactly once here, ahead of whatever
 		this stage's own prepare plan does, so every rewritten reference below
 		reads that one binding instead of re-probing per row. */
-		(define recmap_plan (cons (quote !begin)
-			(merge (list
-				(map range_recmap_candidates group_range_recmap_binding)
-				(if (nil? recmap_candidate) '()
-					(list (nested_scalar_recmap_binding recmap_candidate)))
-				(list lowered_plan_core)))))
+		(define recmap_plan (if (and (empty_list? range_recmap_candidates)
+			(nil? recmap_candidate)) lowered_plan_core
+			(cons (quote !begin)
+				(merge (list
+					(map range_recmap_candidates group_range_recmap_binding)
+					(if (nil? recmap_candidate) '()
+						(list (nested_scalar_recmap_binding recmap_candidate)))
+					(list lowered_plan_core))))))
 		(define lookup_cached_plan (if (nil? scalar_order_cache)
 			recmap_plan
 			(list (quote !begin) (nth scalar_order_cache 4) recmap_plan)))
@@ -4115,36 +4117,38 @@ session read is never evaluated while building the plan. */
 					_ rewritten))))))
 
 (define group_input_without_dead_scalar_sources (lambda (stage block planning_session)
-	(begin
-		(define observed_where (planner_bind_session_values (qb_where block) planning_session))
-		(define simplified_where (group_simplify_literal_expr observed_where))
-		(if (equal? simplified_where (qb_where block)) nil
-			(planner_record_session_value_guards (qb_where block) planning_session))
-		(define sources (qb_sources block))
-		(define referenced (list (qb_fields block) simplified_where
-			(qb_group block) (qb_having block) (qb_order block) (qb_hidden block)
-			(gs_keys stage) (gs_aggregates stage)
-			(qassoc_get (gs_facts stage) (quote condition) true)))
-		(define unused (filter sources (lambda (src)
-			(and (stage_output_relation? (source_relation src))
-				(empty_list? (group_range_recmap_columns (source_alias src)
-					(list referenced
-						(map (filter sources (lambda (other)
-							(not (equal? (source_alias other) (source_alias src)))))
-							source_join_expr))))))))
-		(define aliases (map unused source_alias))
-		(make_query_block (qb_schema block)
-			(filter sources (lambda (src)
-				(not (contains? aliases (source_alias src)))))
-			(qb_fields block) simplified_where (qb_group block) (qb_having block)
-			(qb_order block) (qb_limit block) (qb_offset block)
-			(qb_hidden block) (qb_stages block)
-			(join_optimizer_facts_without_aliases
-				(qassoc_set (qb_facts block) (quote consumed_probe_stage_ids)
-					(merge_unique (list (map unused (lambda (src)
-						(stage_output_relation_id (source_relation src))))
-						(qassoc_get (qb_facts block) (quote consumed_probe_stage_ids) '()))))
-				aliases)))))
+	(if (empty_list? (filter (qb_sources block) (lambda (src)
+		(stage_output_relation? (source_relation src))))) block
+		(begin
+			(define observed_where (planner_bind_session_values (qb_where block) planning_session))
+			(define simplified_where (group_simplify_literal_expr observed_where))
+			(if (equal? simplified_where (qb_where block)) nil
+				(planner_record_session_value_guards (qb_where block) planning_session))
+			(define sources (qb_sources block))
+			(define referenced (list (qb_fields block) simplified_where
+				(qb_group block) (qb_having block) (qb_order block) (qb_hidden block)
+				(gs_keys stage) (gs_aggregates stage)
+				(qassoc_get (gs_facts stage) (quote condition) true)))
+			(define unused (filter sources (lambda (src)
+				(and (stage_output_relation? (source_relation src))
+					(empty_list? (group_range_recmap_columns (source_alias src)
+						(list referenced
+							(map (filter sources (lambda (other)
+								(not (equal? (source_alias other) (source_alias src)))))
+								source_join_expr))))))))
+			(define aliases (map unused source_alias))
+			(make_query_block (qb_schema block)
+				(filter sources (lambda (src)
+					(not (contains? aliases (source_alias src)))))
+				(qb_fields block) simplified_where (qb_group block) (qb_having block)
+				(qb_order block) (qb_limit block) (qb_offset block)
+				(qb_hidden block) (qb_stages block)
+				(join_optimizer_facts_without_aliases
+					(qassoc_set (qb_facts block) (quote consumed_probe_stage_ids)
+						(merge_unique (list (map unused (lambda (src)
+							(stage_output_relation_id (source_relation src))))
+							(qassoc_get (qb_facts block) (quote consumed_probe_stage_ids) '()))))
+					aliases))))))
 
 (define group_range_recmap_columns (lambda (alias expr)
 	(match expr
