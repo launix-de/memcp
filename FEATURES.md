@@ -20,9 +20,11 @@ features. For installation and examples, start with the [README](README.md).
 - [Query planning and execution](#query-planning-and-execution)
 - [Storage backends and durability](#storage-backends-and-durability)
 - [Internal storage representation](#internal-storage-representation)
+- [Column storage types and compression](#column-storage-types-and-compression)
 - [Internal storage operators](#internal-storage-operators)
 - [Scheme runtime and JIT](#scheme-runtime-and-jit)
 - [Operations, security, and data movement](#operations-security-and-data-movement)
+- [Packaging and distribution](#packaging-and-distribution)
 - [Validation and development tools](#validation-and-development-tools)
 
 ## Language frontends and application interfaces
@@ -147,9 +149,8 @@ See [persistence interfaces](storage/persistence.go),
 
 - **Main/delta layout:** compressed stable columns plus recent mutations;
   rebuild folds changes into a new column generation.
-- **Column encodings:** constant, integer/bit-packed, sequence/range, decimal,
-  floating-point, dictionary/enum, string/prefix, sparse and general Scheme
-  value representations. Choice depends on data, not the SQL type name alone.
+- **Adaptive column encodings:** choose representations from the data, not
+  the SQL type name alone; see [column storage types](#column-storage-types-and-compression).
 - **Batch readers:** storage readers expose batches for scans and generated
   native consumers; compressed data need not become full row objects first.
 - **Adaptive shards and indexes:** partitioning, index construction and
@@ -167,6 +168,65 @@ Sources: [storage formats and registration](storage/storage.go),
 [storage implementation](storage/), [format tests](tests/storage/formats/),
 [index tests](tests/storage/indexes/),
 [upgrade compatibility](tests/storage/persistence/UPGRADE.md).
+
+## Column storage types and compression
+
+Compression depends on value range, repetition, NULL density, string alphabet
+and row order. The following are **encoding-derived payload estimates**, not
+benchmark measurements or whole-database size promises. A ratio of **8×** means
+one eighth of the reference size (87.5% saved). Numeric examples compare with
+8-byte integers/floats; string examples compare with the original text bytes.
+Generic-value examples use 16-byte `Scmer` slots on 64-bit systems, excluding
+separately allocated objects. Headers, allocation rounding, indexes, mutable
+deltas and decoded caches add space; RAM, serialized size and process RSS are
+different quantities.
+
+### Numeric, constant and sparse columns
+
+| Type | Suitable data and representation | Attainable compression / size model |
+| --- | --- | --- |
+| [`StorageConst`](storage/storage-const.go) | Every row has the same value, including an all-NULL column. Stores one value and the row count. | No per-row value payload. For `n` repeated fixed-size values, the value-payload reduction is **n×**; total storage is one value plus fixed metadata. Small columns therefore achieve less than this payload ratio. |
+| [`StorageInt`](storage/storage-int.go) | Integers with a narrow minimum-to-maximum range, even when the absolute values are large. Stores an offset and bit-packed differences; NULL reserves another code. | **64/b×**, where `b` is the required bit width, at least 1. Widths of 1, 3, 5, 8, 16 and 32 bits give **64×, 21.3×, 12.8×, 8×, 4× and 2×** respectively. A full-width 64-bit range gives **1×** before overhead. Outliers or an extra NULL code can increase the width for the whole column. |
+| [`StorageSeq`](storage/storage-seq.go) | Long arithmetic sequences, such as consecutive IDs, regularly spaced timestamps, constant runs or NULL runs. Each segment stores its starting row, starting value and stride in three bit-packed integer columns. | Space grows with segment count `r`, rather than row count `n`. Counting three full 8-byte fields per segment gives **n/(3r)×** before metadata; 100 rows per segment give **33.3×**, with further savings possible from bitpacking those fields. One uninterrupted sequence needs only one segment; irregular row order can eliminate the benefit. |
+| [`StorageDecimal`](storage/storage-decimal.go) | Numbers represented by a shared power-of-ten scale, such as prices in cents or integers sharing trailing decimal zeroes. Stores scaled integers through `StorageInt` plus one exponent. | **64/b×** for the scaled integer payload. Values from 0.00 to 99.99 in cent steps need 14 bits, giving about **4.6×** versus float64. Wide scaled ranges reduce the gain. This is a storage encoding, not an arbitrary-precision SQL decimal implementation. |
+| [`StorageFloat`](storage/storage-float.go) | Floating-point data without a suitable scaled-integer representation. Stores float64 values, using NaN for NULL. | **8 bytes/row: 1×** versus a float64 array, or **2×** versus generic 16-byte value slots. No additional floating-point payload compression. |
+| [`StorageSparse`](storage/storage-sparse.go) | Mostly NULL columns. Stores only non-NULL values as `Scmer` slots, with bit-packed row IDs. | For non-NULL fraction `p` and `b` bits per row ID, RAM payload is approximately `p × (16 + b/8)` bytes per logical row, plus referenced objects. At 1% non-NULL and 20-bit row IDs this gives about **86×** versus dense 16-byte slots. The disk format uses JSON row-ID/value pairs, so this RAM ratio does not describe the serialized size. |
+| [`StorageSCMER`](storage/storage-scmer.go) | General or mixed Scheme values for which a specialized representation is unsuitable. Keeps typed values directly. | **1×** versus generic value slots: 16 bytes per slot plus referenced payloads. This is the fallback, not a compressing codec; JSON serialization has a separate, data-dependent size. |
+
+### Low-cardinality and string columns
+
+| Type | Suitable data and representation | Attainable compression / size model |
+| --- | --- | --- |
+| [`StorageEnum`](storage/storage-enum.go) | Up to eight distinct values, including NULL, with skewed frequencies: for example, a status flag that is almost always false. Uses rANS entropy coding and a two-level jump index. | Can use **less than one bit/row**. A 99:1 binary distribution has an entropy floor of about **0.081 bits/row**, but actual storage also includes quantized probabilities, chunk boundaries, indexes and the symbol table. For `C` encoded chunks and `G` jump-index groups, the payload plus jump index is `10C + 4G` bytes; the ratio against 8-byte values is **8n/(10C + 4G)×**, before the symbol table and fixed metadata. The entropy floor alone is not an achieved compression ratio. |
+| [`StorageString`](storage/storage-string.go) | Repeated text uses a dictionary and bit-packed row IDs. High-cardinality text can use a direct byte buffer with packed starts and lengths. Compatible alphabets receive additional format encoding (below); dictionary bytes can also be LZ4-compressed. | With `n` rows, `k` distinct strings averaging `L` bytes and `b` bits per dictionary ID, the basic payload ratio is **nL/(kL + nb/8)×**, before starts/lengths. For 100,000 rows repeating 100 strings of 20 bytes and 7-bit IDs, this is about **22.3×**. Unique raw text has approximately **1×** text payload plus offset/length overhead; LZ4 gains depend on repeated byte patterns. |
+| [`StoragePrefix`](storage/storage-prefix.go) — experimental, automatic selection disabled | Splits common prefixes from suffixes and stores prefix IDs separately. Intended for paths, URLs and similarly structured text. `StorageString.proposeCompression` disables selection pending proper prefix serialization/deserialization. | **No production compression rate claimed.** The model is original text bytes divided by prefix-dictionary bytes, packed prefix IDs and encoded suffix storage. Long shared prefixes offer savings; short or unrelated prefixes do not. This registered implementation is not currently an automatically selected persistent format. |
+
+`StorageString` can preserve the original spelling while reducing the text
+payload. Format selection requires compatibility across the column's non-NULL
+values; these rates exclude row IDs, offsets and lengths:
+
+| String data | Encoded payload | Compression versus original text |
+| --- | --- | --- |
+| Lowercase or uppercase hexadecimal; supported numeric, phone/DTMF and date/time alphabets | Four bits per character, densely packed | Approximately **2×** (50% saved), with final-byte rounding. |
+| Canonical 36-character UUIDs with consistent lowercase or uppercase spelling | 16 bytes per UUID | **2.25×** (55.6% saved). |
+| Supported standard or URL-safe Base64, padded or unpadded | Decoded bytes; the format records how to reconstruct the text | Approximately **1.33×** (25% saved); exact short-string ratios depend on padding and length. |
+| Other text, including incompatible mixtures of otherwise compressible alphabets | Raw bytes, potentially shared through the dictionary and compressed with LZ4 | **1×** from alphabet encoding alone; repetition determines any additional savings. |
+
+These are representation changes, not date parsing or case normalization.
+See [exact string formats](storage/base64-string-formats.md) and
+[compressed-string comparisons](storage/cstring-comparisons.md).
+
+### Blob and computed-column storage
+
+| Type | Suitable data and representation | Attainable compression / size model |
+| --- | --- | --- |
+| [`OverlayBlob`](storage/overlay-blob.go) | Large strings/binary payloads. Replaces inline contents with content-addressed references, deduplicates identical blobs and gzip-compresses blob contents. The reference column has its own underlying encoding. | For `n` equal blobs of `L` bytes, stored blob size `Z` and encoded reference-column size `R`, the payload ratio is **nL/(Z + R)×**. Repeated, compressible documents can save substantially; unique already-compressed or encrypted bytes are near **1×** and can grow with gzip/reference overhead. Externalizing a blob alone is not compression. |
+| [`StorageComputeProxy`](storage/compute_proxy.go) | Derived columns with lazy computation, cached values and dependency invalidation; ordered computations may need to recompute a dependency range. | **No independent codec ratio.** Savings come from avoiding unnecessary materialization and from the representation of cached results. Cache and invalidation metadata cost additional memory; fully materializing a proxy need not be smaller than a plain value column. |
+
+The [format registry](storage/storage.go) lists these implementations;
+[format tests](tests/storage/formats/) exercise their behavior. Encodings can
+compose, but their quoted ratios cannot simply be multiplied: dictionary and
+blob compression act on shared payloads, while row references remain separate.
 
 ## Internal storage operators
 
@@ -325,6 +385,44 @@ See [build gating](scm/jit_feature_enabled.go),
 | File imports | SQL dumps, supported PostgreSQL dump/archive inputs, CSV, JSONL and RDF/Turtle. [Import tests](tests/integration/import/), [storage loaders](storage/storage.go). |
 | Backup and recovery validation | Dump/restore checks, crash/restart tests, fault injection and multi-shard transaction recovery drills. A tested backup/restore procedure is still required for an actual deployment. [Persistence suites](tests/storage/persistence/), [drill guide](tools/reliability-drill.md). |
 | Distribution | Source builds, PHP/no-PHP and JIT variants, DEB/RPM packaging, containers and release artifact checks. [Build targets](Makefile), [deployment guide](README.md#installation-packages). |
+
+## Packaging and distribution
+
+The release workflow builds native Linux packages, a standalone binary and
+container images. Package and container builds have different runtime contents:
+
+| Distribution | Capabilities and contents | Build / source |
+| --- | --- | --- |
+| **DEB** — Debian/Ubuntu | Release artifact for **amd64**. Includes embedded PHP with its matching ZTS runtime, PHP configuration and Imagick module, plus a dedicated service account and systemd service. | `make memcp.deb`; [Debian packaging](debian/). |
+| **RPM and source RPM** | Release artifacts for **x86_64**, built and tested on Fedora. Includes the same embedded-PHP runtime and service integration as the DEB. The source RPM is independently rebuilt in CI using the declared external PHP SDK. | `make memcp.rpm`; [RPM spec](memcp.spec), [native RPM workflow](.github/workflows/rpm.yml). |
+| **Docker / OCI image** | `carli2/memcp` with version and `latest` tags, supporting **linux/amd64 and linux/arm64**. Uses a minimal Alpine runtime and a static Go build without embedded PHP. Includes Scheme modules, assets, an HTTP health check and a persistent `/data` volume. Runs as unprivileged UID/GID **10001:10001**. | [Dockerfile](Dockerfile), [entrypoint](packaging/docker-entrypoint.sh); release builds use Docker Buildx. |
+| **Standalone Linux binary** | Static **amd64** release artifact, built explicitly with `nophp`; no embedded PHP runtime. | [Release workflow](.github/workflows/release.yml). |
+
+Native packages use `/etc/memcp/memcp.conf` for configuration,
+`/var/lib/memcp` for data and `/run/memcp/memcp.sock` for the local MySQL socket.
+First installation creates a root-only initial-password file at
+`/etc/memcp/initial-root-password`. Upgrades stop the service gracefully and
+restart it after replacement; removal preserves database data. The systemd
+service restricts writable paths to the data and runtime directories.
+
+Containers accept the initial password through
+`MEMCP_ROOT_PASSWORD_FILE` (default `/run/secrets/memcp_root_password`) or
+`ROOT_PASSWORD`. Initialization applies only to a fresh data directory;
+subsequent starts retain stored credentials. Docker Compose deployments can
+combine the data volume with a mounted secret. See the
+[installation and deployment examples](README.md#installation-packages).
+
+Local DEB/RPM builds write artifacts to `dist/`; `make package-check` inspects
+package contents. Release validation also runs Lintian and RPM integrity
+checks, and the native RPM workflow exercises installation, upgrade, removal
+and the packaged PHP runtime. Tagged releases publish **SHA-256 checksums and
+build-provenance attestations** for release artifacts, and **provenance and an
+SBOM** for container images. The workflow verifies that the `vMAJOR.MINOR` tag
+matches `CHANGELOG.md` and belongs to `master` before publishing.
+
+Sources: [build and packaging targets](Makefile),
+[package checks](tools/test_packaging.py),
+[release workflow](.github/workflows/release.yml).
 
 ## Validation and development tools
 
