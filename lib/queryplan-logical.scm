@@ -1335,16 +1335,18 @@ silently stops seeing the join as a keyed lookup at all. */
 					(and (equal? (unique_lookup_column_name src right) key_col)
 						(not (expr_refs_alias? default_alias (source_alias src) left)))))))))
 
-(define unused_unique_left_join? (lambda (default_alias referenced_aliases src)
-	(begin
-		(define primary_key (source_primary_key_columns src))
-		(define unique_keys (merge_unique (list
-			(source_unique_key_sets src)
-			(if (empty_list? primary_key) '() (list primary_key)))))
-		(define terms (split_and_terms (coalesceNil (source_join_expr src) true)))
-		(and (source_outer? src)
-			(and (source_is_base_table? src)
-				(and (not (has_assoc? referenced_aliases (source_alias src)))
+(define unused_left_join? (lambda (default_alias referenced_aliases src duplicate_insensitive)
+	(and (source_outer? src)
+		(and (source_is_base_table? src)
+			(and (not (has_assoc? referenced_aliases (source_alias src)))
+				(or duplicate_insensitive (begin
+					/* Only a retained bag multiplicity needs a uniqueness proof.
+					Do not read key metadata for drivers or referenced sources. */
+					(define primary_key (source_primary_key_columns src))
+					(define unique_keys (merge_unique (list
+						(source_unique_key_sets src)
+						(if (empty_list? primary_key) '() (list primary_key)))))
+					(define terms (split_and_terms (coalesceNil (source_join_expr src) true)))
 					(reduce unique_keys (lambda (found key_cols)
 						(or found
 							(and (not (empty_list? key_cols))
@@ -1353,15 +1355,11 @@ silently stops seeing the join as a keyed lookup at all. */
 										(or matched (unique_left_join_key_term?
 											default_alias src key_col term))) false)))
 									true))))
-						false)))))))
+						false))))))))
 
 (define prune_unused_left_joins_reversed (lambda (reversed_sources default_alias referenced_aliases duplicate_insensitive)
 	(match (coalesceNil reversed_sources '())
-		(cons src rest) (if (or (unused_unique_left_join? default_alias referenced_aliases src)
-			(and duplicate_insensitive
-				(and (source_outer? src)
-					(and (source_is_base_table? src)
-						(not (has_assoc? referenced_aliases (source_alias src)))))))
+		(cons src rest) (if (unused_left_join? default_alias referenced_aliases src duplicate_insensitive)
 			(prune_unused_left_joins_reversed rest default_alias referenced_aliases duplicate_insensitive)
 			(begin
 				(define tail (prune_unused_left_joins_reversed rest default_alias
