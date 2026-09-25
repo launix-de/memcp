@@ -1185,6 +1185,80 @@ class FailFastParallelContractTest(unittest.TestCase):
 
 
 class SuiteIsolationContractTest(unittest.TestCase):
+    def test_case_cleanup_runs_after_success_and_failure(self) -> None:
+        for status in (200, 500):
+            with self.subTest(status=status):
+                runner = SQLTestRunner("http://localhost:1")
+                response = SimpleNamespace(status_code=status, text="true", headers={})
+                cleanup_response = SimpleNamespace(status_code=200, text="true", headers={})
+                with mock.patch("run_sql_tests.requests.post", side_effect=[response, cleanup_response]) as post:
+                    result = runner.run_test_case({
+                        "name": "reset tracing", "scm": "true",
+                        "cleanup": [{"scm": '(settings "ScanDebugging" false)'}],
+                    }, "memcp-tests")
+                self.assertEqual(bool(result), status == 200)
+                self.assertEqual(post.call_count, 2)
+                self.assertEqual(post.call_args.kwargs["data"], '(settings "ScanDebugging" false)')
+
+    def test_case_cleanup_runs_after_partial_setup(self) -> None:
+        runner = SQLTestRunner("http://localhost:1")
+        failed = SimpleNamespace(status_code=500, text="SCM Error: setup", headers={})
+        ok = SimpleNamespace(status_code=200, text="true", headers={})
+        with mock.patch("run_sql_tests.requests.post", side_effect=[failed, ok]) as post:
+            result = runner.run_test_case({
+                "name": "failed setup", "setup": [{"scm": '(settings "ScanDebugging" true)'}],
+                "scm": "true", "cleanup": [{"scm": '(settings "ScanDebugging" false)'}],
+            }, "memcp-tests")
+        self.assertFalse(result)
+        self.assertEqual(post.call_count, 2)
+
+    def test_skipped_cases_do_not_run_cleanup(self) -> None:
+        for skip in ({"disabled": True}, {"threshold_ms": 1000}):
+            runner = SQLTestRunner("http://localhost:1")
+            with mock.patch("run_sql_tests.PERF_TEST_ENABLED", False), \
+                    mock.patch("run_sql_tests.requests.post") as post:
+                self.assertTrue(runner.run_test_case({
+                    "name": "skipped", "scm": "true", **skip,
+                    "cleanup": [{"scm": '(settings "ScanDebugging" false)'}],
+                }, "memcp-tests"))
+            post.assert_not_called()
+
+    def test_cleanup_failure_is_reported_and_remaining_steps_run(self) -> None:
+        runner = SQLTestRunner("http://localhost:1")
+        ok = SimpleNamespace(status_code=200, text="true", headers={})
+        failed = SimpleNamespace(status_code=500, text="SCM Error: cleanup", headers={})
+        with mock.patch("run_sql_tests.requests.post", side_effect=[ok, failed, ok]) as post:
+            result = runner.run_test_case({
+                "name": "failed cleanup", "scm": "true",
+                "cleanup": [{"scm": "first"}, {"scm": "second"}],
+            }, "memcp-tests")
+        self.assertFalse(result)
+        self.assertEqual(runner.failed_critical, 1)
+        self.assertEqual(post.call_count, 3)
+
+    def test_cleanup_keeps_sql_and_scm_session_bindings(self) -> None:
+        runner = SQLTestRunner("http://localhost:1")
+        ok = SimpleNamespace(status_code=200, text="true", headers={})
+        with mock.patch.object(runner, "execute_sql", return_value=ok) as sql, \
+                mock.patch("run_sql_tests.requests.post", return_value=ok) as scm:
+            self.assertTrue(runner.run_cleanup([
+                {"sql": "ROLLBACK"}, {"scm": '(session "key" nil)'},
+            ], "memcp-tests", session_id="cleanup-session"))
+        self.assertEqual(sql.call_args.kwargs["session_id"], "cleanup-session")
+        self.assertEqual(scm.call_args.kwargs["headers"]["X-Session-Id"], "cleanup-session")
+
+    def test_cleanup_runs_when_execution_raises(self) -> None:
+        runner = SQLTestRunner("http://localhost:1")
+        ok = SimpleNamespace(status_code=200, text="true", headers={})
+        with mock.patch.object(runner, "execute_sql", side_effect=RuntimeError("execution failed")), \
+                mock.patch("run_sql_tests.requests.post", return_value=ok) as post:
+            with self.assertRaisesRegex(RuntimeError, "execution failed"):
+                runner.run_test_case({
+                    "name": "exception", "sql": "SELECT 1",
+                    "cleanup": [{"scm": '(settings "ScanDebugging" false)'}],
+                }, "memcp-tests")
+        self.assertEqual(post.call_count, 1)
+
     def test_exclusive_suites_may_share_fixture_names(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
