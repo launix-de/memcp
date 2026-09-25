@@ -2839,6 +2839,82 @@ test_cases:
             - ID: 19909
             - ID: 19910
 
+  - name: "Membership prunes unused nonunique LEFT JOINs without changing NULLs or barriers"
+    setup:
+      - sql: "DROP TABLE IF EXISTS in_prune_rhs"
+      - sql: "DROP TABLE IF EXISTS in_prune_lookup"
+      - sql: "CREATE TABLE in_prune_rhs (k INT)"
+      - sql: "CREATE TABLE in_prune_lookup (k INT, label INT)"
+      - sql: "INSERT INTO in_prune_rhs VALUES (1), (2), (NULL)"
+      - sql: "INSERT INTO in_prune_lookup VALUES (1, 10), (1, 20), (3, 30)"
+    steps:
+      - sql: |
+          EXPLAIN IR SELECT ID FROM in_fop_files
+          WHERE ID IN (SELECT r.k FROM in_prune_rhs r
+            LEFT JOIN in_prune_lookup unused ON unused.k = r.k
+            LEFT JOIN in_prune_lookup unused_chain ON unused_chain.label = unused.label)
+        expect:
+          contains: [in_prune_rhs]
+          not_contains: [in_prune_lookup]
+      - sql: |
+          SELECT ID, ID IN (SELECT r.k FROM in_prune_rhs r
+            LEFT JOIN in_prune_lookup unused ON unused.k = r.k) AS member,
+            ID NOT IN (SELECT r.k FROM in_prune_rhs r
+            LEFT JOIN in_prune_lookup unused ON unused.k = r.k) AS nonmember
+          FROM in_fop_files ORDER BY ID
+        expect:
+          rows: 5
+          data:
+            - {ID: 1, member: true, nonmember: false}
+            - {ID: 2, member: true, nonmember: false}
+            - {ID: 3, member: null, nonmember: null}
+            - {ID: 4, member: null, nonmember: null}
+            - {ID: 5, member: null, nonmember: null}
+      - sql: |
+          SELECT ID FROM in_fop_files WHERE ID IN (
+            SELECT r.k FROM in_prune_rhs r
+            LEFT JOIN in_prune_lookup used ON used.k = r.k
+            WHERE used.label = 20) ORDER BY ID
+        expect: {rows: 1, data: [{ID: 1}]}
+      - sql: |
+          EXPLAIN IR SELECT ID FROM in_fop_files WHERE ID IN (
+            SELECT r.k FROM in_prune_rhs r
+            LEFT JOIN in_prune_lookup used ON used.k = r.k
+            WHERE EXISTS (SELECT TRUE FROM in_renderjob job WHERE job.result = used.k))
+          ORDER BY ID
+        expect:
+          contains: [in_prune_lookup, in_renderjob]
+      - sql: |
+          SELECT ID FROM in_fop_files WHERE ID IN (
+            SELECT r.k FROM in_prune_rhs r
+            LEFT JOIN in_prune_lookup unused ON unused.k = r.k
+            WHERE r.k IS NOT NULL ORDER BY r.k LIMIT 2) ORDER BY ID
+        expect: {rows: 1, data: [{ID: 1}]}
+      - sql: |
+          SELECT ID FROM in_fop_files WHERE ID IN (
+            SELECT r.k FROM in_prune_rhs r
+            LEFT JOIN in_prune_lookup unused ON unused.k = r.k
+            WHERE r.k IS NOT NULL ORDER BY r.k LIMIT 1 OFFSET 1) ORDER BY ID
+        expect: {rows: 1, data: [{ID: 1}]}
+      - sql: |
+          SELECT ID FROM in_fop_files WHERE ID IN (
+            SELECT r.k FROM in_prune_rhs r
+            LEFT JOIN in_prune_lookup unused ON unused.k = r.k
+            GROUP BY r.k HAVING COUNT(*) = 2) ORDER BY ID
+        expect: {rows: 1, data: [{ID: 1}]}
+      - sql: |
+          SELECT COUNT(*) AS n FROM in_prune_rhs r
+          LEFT JOIN in_prune_lookup unused ON unused.k = r.k
+        expect: {rows: 1, data: [{n: 4}]}
+      - sql: |
+          SELECT ID FROM in_fop_files WHERE ID IN (
+            SELECT r.k FROM in_prune_rhs r
+            LEFT JOIN in_prune_lookup unused ON unused.missing_column = r.k)
+        expect: {error: true}
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS in_prune_lookup"
+      - sql: "DROP TABLE IF EXISTS in_prune_rhs"
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS in_prefilter_doc"
   - sql: "DROP TABLE IF EXISTS in_prefilter_file"
