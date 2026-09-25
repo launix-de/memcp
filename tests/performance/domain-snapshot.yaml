@@ -1,0 +1,766 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: "1.0"
+  description: "Shared state aggregates across ordered parameter domains"
+  isolated: true
+  perf_ci: true
+setup:
+  - sql: "DROP TABLE IF EXISTS ds_entity"
+  - sql: "DROP TABLE IF EXISTS ds_history"
+  - sql: "DROP TABLE IF EXISTS ds_kind"
+  - sql: "CREATE TABLE ds_entity (id INT PRIMARY KEY, category INT) ENGINE=memory"
+  - sql: "CREATE TABLE ds_history (id INT PRIMARY KEY, entity_id INT, coordinate INT, quantity INT, end_value INT, kind VARCHAR(10), UNIQUE KEY entity_coordinate (entity_id, coordinate)) ENGINE=memory"
+  - sql: "CREATE TABLE ds_kind (name VARCHAR(10) PRIMARY KEY, active INT) ENGINE=memory"
+  - sql: "INSERT INTO ds_kind VALUES ('P',1),('T',0)"
+  - scm: |
+      (begin
+        (insert (table "memcp-tests" "ds_entity") '("id" "category")
+          (map (produceN 4000) (lambda (i) (list (+ i 1) (mod (+ i 1) 2)))))
+        (insert (table "memcp-tests" "ds_history") '("id" "entity_id" "coordinate" "quantity" "end_value" "kind")
+          (map (produceN 4000) (lambda (i) (list (+ i 1) (+ i 1) 0 1 nil "P"))))
+        (insert (table "memcp-tests" "ds_history") '("id" "entity_id" "coordinate" "quantity" "end_value" "kind")
+          (map (produceN 200) (lambda (i) (list (+ i 4001) (* (+ i 1) 20) 20 3 50 "P"))))
+        (rebuild (table "memcp-tests" "ds_entity"))
+        (rebuild (table "memcp-tests" "ds_history"))
+        (rebuild (table "memcp-tests" "ds_kind"))
+        true)
+  - sql: "DROP TABLE IF EXISTS ds_conversion_history"
+  - sql: "CREATE TABLE ds_conversion_history (id INT PRIMARY KEY, entity_id INT, coordinate INT, quantity INT, end_value INT, kind VARCHAR(10), UNIQUE KEY entity_coordinate (entity_id, coordinate)) ENGINE=memory"
+  - scm: |
+      (begin
+        (insert (table "memcp-tests" "ds_conversion_history") '("id" "entity_id" "coordinate" "quantity" "kind")
+          (map (produceN 4000) (lambda (i)
+            (list (+ i 1) (+ i 1) 0 1 (if (equal? (mod i 4) 0) "T" "F")))))
+        (insert (table "memcp-tests" "ds_conversion_history") '("id" "entity_id" "coordinate" "quantity" "kind")
+          (map (produceN 4000) (lambda (i)
+            (list (+ i 4001) (+ i 1) (+ i 10) (+ 2 (mod i 3)) "P"))))
+        (insert (table "memcp-tests" "ds_conversion_history") '("id" "entity_id" "coordinate" "quantity" "kind")
+          (map (produceN 1000) (lambda (j) (begin
+            (define i (+ 1 (* j 4)))
+            (list (+ i 8001) (+ i 1) (+ i 12) 5 "T")))))
+        (rebuild (table "memcp-tests" "ds_conversion_history")) true)
+test_cases:
+  - name: "Ordered domain shares quantity, classification and independent predicate state"
+    sql: &snapshot_state_query |
+      SELECT d.x, p.category,
+        COALESCE((SELECT SUM((SELECT h.quantity FROM ds_history h
+          WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1))
+          FROM ds_entity e
+          WHERE (p.category IS NULL OR e.category=p.category)
+            AND (SELECT k.active FROM ds_kind k WHERE k.name=(SELECT h.kind FROM ds_history h
+              WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1) LIMIT 1)=1
+            AND COALESCE((SELECT h.end_value FROM ds_history h
+              WHERE h.entity_id=e.id AND h.coordinate<=60 ORDER BY h.coordinate DESC LIMIT 1),d.x)>=d.x),0) AS total
+      FROM (SELECT 10 AS x UNION SELECT 20 UNION SELECT 30 UNION SELECT 50 UNION SELECT 51 UNION SELECT 60) d
+      CROSS JOIN (SELECT NULL AS category UNION SELECT 0 UNION SELECT 1) p
+    expect: &domain_snapshot_results
+      rows: 18
+      result_contains:
+        - "{\"x\": 10, \"category\": null, \"total\": 4000}"
+        - "{\"x\": 10, \"category\": 0, \"total\": 2000}"
+        - "{\"x\": 10, \"category\": 1, \"total\": 2000}"
+        - "{\"x\": 20, \"category\": null, \"total\": 4400}"
+        - "{\"x\": 20, \"category\": 0, \"total\": 2400}"
+        - "{\"x\": 20, \"category\": 1, \"total\": 2000}"
+        - "{\"x\": 30, \"category\": null, \"total\": 4400}"
+        - "{\"x\": 30, \"category\": 0, \"total\": 2400}"
+        - "{\"x\": 30, \"category\": 1, \"total\": 2000}"
+        - "{\"x\": 50, \"category\": null, \"total\": 4400}"
+        - "{\"x\": 50, \"category\": 0, \"total\": 2400}"
+        - "{\"x\": 50, \"category\": 1, \"total\": 2000}"
+        - "{\"x\": 51, \"category\": null, \"total\": 3800}"
+        - "{\"x\": 51, \"category\": 0, \"total\": 1800}"
+        - "{\"x\": 51, \"category\": 1, \"total\": 2000}"
+        - "{\"x\": 60, \"category\": null, \"total\": 3800}"
+        - "{\"x\": 60, \"category\": 0, \"total\": 1800}"
+        - "{\"x\": 60, \"category\": 1, \"total\": 2000}"
+    timing_aggregation: total
+    warmup: 0
+    timing_samples: 2
+    threshold_ms: 20000
+  - name: "Physical plan exposes contribution-domain cost alternatives"
+    sql: |
+      EXPLAIN PHYSICAL
+      SELECT d.x, p.category,
+        COALESCE((SELECT SUM((SELECT h.quantity FROM ds_history h
+          WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1))
+          FROM ds_entity e
+          WHERE (p.category IS NULL OR e.category=p.category)
+            AND (SELECT k.active FROM ds_kind k WHERE k.name=(SELECT h.kind FROM ds_history h
+              WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1) LIMIT 1)=1
+            AND COALESCE((SELECT h.end_value FROM ds_history h
+              WHERE h.entity_id=e.id AND h.coordinate<=60 ORDER BY h.coordinate DESC LIMIT 1),d.x)>=d.x),0) AS total
+      FROM (SELECT 10 AS x UNION SELECT 20 UNION SELECT 30 UNION SELECT 50 UNION SELECT 51 UNION SELECT 60) d
+      CROSS JOIN (SELECT NULL AS category UNION SELECT 0 UNION SELECT 1) p
+    expect:
+      result_contains: ["contribution_domain", "domain_snapshot", "direct_aggregate", "affected_rows_per_transition"]
+  - name: "An inner alias cannot hide an outer snapshot partition binding"
+    sql: |
+      SELECT p.id, d.x,
+        (SELECT SUM((SELECT p.quantity FROM ds_history p
+          WHERE p.entity_id=e.id AND p.coordinate<=d.x ORDER BY p.coordinate DESC LIMIT 1))
+         FROM ds_entity e WHERE e.category=p.category
+           AND COALESCE((SELECT p.end_value FROM ds_history p
+             WHERE p.entity_id=e.id AND p.coordinate<=60 ORDER BY p.coordinate DESC LIMIT 1),d.x)>=d.x) AS total
+      FROM ds_entity p CROSS JOIN
+        (SELECT 10 AS x UNION SELECT 20 UNION SELECT 30 UNION SELECT 50 UNION SELECT 51 UNION SELECT 60) d
+      WHERE p.id<=2 ORDER BY d.x,p.id
+    expect:
+      data:
+        - {id: 1, x: 10, total: 2000}
+        - {id: 2, x: 10, total: 2000}
+        - {id: 1, x: 20, total: 2000}
+        - {id: 2, x: 20, total: 2400}
+        - {id: 1, x: 30, total: 2000}
+        - {id: 2, x: 30, total: 2400}
+        - {id: 1, x: 50, total: 2000}
+        - {id: 2, x: 50, total: 2400}
+        - {id: 1, x: 51, total: 2000}
+        - {id: 2, x: 51, total: 1800}
+        - {id: 1, x: 60, total: 2000}
+        - {id: 2, x: 60, total: 1800}
+
+  - name: "Snapshot domain also traverses decreasing coordinates"
+    sql: |
+      SELECT d.x, p.category,
+        COALESCE((SELECT SUM((SELECT h.quantity FROM ds_history h
+          WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1))
+          FROM ds_entity e
+          WHERE (p.category IS NULL OR e.category=p.category)
+            AND (SELECT k.active FROM ds_kind k WHERE k.name=(SELECT h.kind FROM ds_history h
+              WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1) LIMIT 1)=1
+            AND COALESCE((SELECT h.end_value FROM ds_history h
+              WHERE h.entity_id=e.id AND h.coordinate<=60 ORDER BY h.coordinate DESC LIMIT 1),d.x)>=d.x),0) AS total
+      FROM (SELECT 60 AS x UNION SELECT 51 UNION SELECT 50 UNION SELECT 30 UNION SELECT 20 UNION SELECT 10) d
+      CROSS JOIN (SELECT NULL AS category UNION SELECT 0 UNION SELECT 1) p
+    expect:
+      rows: 18
+      result_contains:
+        - "{\"x\": 10, \"category\": null, \"total\": 4000}"
+        - "{\"x\": 10, \"category\": 0, \"total\": 2000}"
+        - "{\"x\": 10, \"category\": 1, \"total\": 2000}"
+        - "{\"x\": 20, \"category\": null, \"total\": 4400}"
+        - "{\"x\": 20, \"category\": 0, \"total\": 2400}"
+        - "{\"x\": 20, \"category\": 1, \"total\": 2000}"
+        - "{\"x\": 30, \"category\": null, \"total\": 4400}"
+        - "{\"x\": 30, \"category\": 0, \"total\": 2400}"
+        - "{\"x\": 30, \"category\": 1, \"total\": 2000}"
+        - "{\"x\": 50, \"category\": null, \"total\": 4400}"
+        - "{\"x\": 50, \"category\": 0, \"total\": 2400}"
+        - "{\"x\": 50, \"category\": 1, \"total\": 2000}"
+        - "{\"x\": 51, \"category\": null, \"total\": 3800}"
+        - "{\"x\": 51, \"category\": 0, \"total\": 1800}"
+        - "{\"x\": 51, \"category\": 1, \"total\": 2000}"
+        - "{\"x\": 60, \"category\": null, \"total\": 3800}"
+        - "{\"x\": 60, \"category\": 0, \"total\": 1800}"
+        - "{\"x\": 60, \"category\": 1, \"total\": 2000}"
+  - name: "Mixed unsupported contributions preserve the original aggregate plan"
+    sql: |
+      SELECT d.x, p.category,
+        COALESCE((SELECT SUM((SELECT h.quantity FROM ds_history h
+          WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1))
+          FROM ds_entity e
+          WHERE (p.category IS NULL OR e.category=p.category)
+            AND (SELECT k.active FROM ds_kind k WHERE k.name=(SELECT h.kind FROM ds_history h
+              WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1) LIMIT 1)=1
+            AND COALESCE((SELECT h.end_value FROM ds_history h
+              WHERE h.entity_id=e.id AND h.coordinate<=60 ORDER BY h.coordinate DESC LIMIT 1),d.x)>=d.x),0) AS total, COALESCE((SELECT SUM(d.x * (SELECT h.quantity FROM ds_history h
+          WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1))
+          FROM ds_entity e
+          WHERE (p.category IS NULL OR e.category=p.category)
+            AND (SELECT k.active FROM ds_kind k WHERE k.name=(SELECT h.kind FROM ds_history h
+              WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1) LIMIT 1)=1
+            AND COALESCE((SELECT h.end_value FROM ds_history h
+              WHERE h.entity_id=e.id AND h.coordinate<=60 ORDER BY h.coordinate DESC LIMIT 1),d.x)>=d.x),0) AS scaled
+      FROM (SELECT 10 AS x UNION SELECT 60) d
+      CROSS JOIN (SELECT NULL AS category UNION SELECT 0) p
+    expect:
+      rows: 4
+      result_contains:
+        - "{\"x\": 10, \"category\": null, \"total\": 4000, \"scaled\": 40000}"
+        - "{\"x\": 10, \"category\": 0, \"total\": 2000, \"scaled\": 20000}"
+        - "{\"x\": 60, \"category\": null, \"total\": 3800, \"scaled\": 228000}"
+        - "{\"x\": 60, \"category\": 0, \"total\": 1800, \"scaled\": 108000}"
+  - name: "Several SUM payloads in one scalar aggregate keep independent snapshots"
+    sql: |
+      SELECT d.x, p.category,
+        COALESCE((SELECT SUM((SELECT h.quantity FROM ds_history h
+          WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1)) + SUM(2 * (SELECT h.quantity FROM ds_history h
+          WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1))
+          FROM ds_entity e
+          WHERE (p.category IS NULL OR e.category=p.category)
+            AND (SELECT k.active FROM ds_kind k WHERE k.name=(SELECT h.kind FROM ds_history h
+              WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1) LIMIT 1)=1
+            AND COALESCE((SELECT h.end_value FROM ds_history h
+              WHERE h.entity_id=e.id AND h.coordinate<=60 ORDER BY h.coordinate DESC LIMIT 1),d.x)>=d.x),0) AS total
+      FROM (SELECT 10 AS x UNION SELECT 20 UNION SELECT 30 UNION SELECT 50 UNION SELECT 51 UNION SELECT 60) d
+      CROSS JOIN (SELECT NULL AS category) p
+    expect:
+      rows: 6
+      result_contains:
+        - "{\"x\": 10, \"category\": null, \"total\": 12000}"
+        - "{\"x\": 20, \"category\": null, \"total\": 13200}"
+        - "{\"x\": 30, \"category\": null, \"total\": 13200}"
+        - "{\"x\": 50, \"category\": null, \"total\": 13200}"
+        - "{\"x\": 51, \"category\": null, \"total\": 11400}"
+        - "{\"x\": 60, \"category\": null, \"total\": 11400}"
+  - name: "Shared ordered row identities retain each aggregate's value projection"
+    sql: |
+      SELECT d.x, p.category,
+        COALESCE((SELECT SUM((SELECT h.quantity FROM ds_history h
+          WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1))
+          FROM ds_entity e
+          WHERE (p.category IS NULL OR e.category=p.category)
+            AND (SELECT k.active FROM ds_kind k WHERE k.name=(SELECT h.kind FROM ds_history h
+              WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1) LIMIT 1)=1
+            AND COALESCE((SELECT h.end_value FROM ds_history h
+              WHERE h.entity_id=e.id AND h.coordinate<=60 ORDER BY h.coordinate DESC LIMIT 1),d.x)>=d.x),0) AS total, COALESCE((SELECT SUM((SELECT h.id FROM ds_history h
+          WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1))
+          FROM ds_entity e
+          WHERE (p.category IS NULL OR e.category=p.category)
+            AND (SELECT k.active FROM ds_kind k WHERE k.name=(SELECT h.kind FROM ds_history h
+              WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1) LIMIT 1)=1
+            AND COALESCE((SELECT h.end_value FROM ds_history h
+              WHERE h.entity_id=e.id AND h.coordinate<=60 ORDER BY h.coordinate DESC LIMIT 1),d.x)>=d.x),0) AS scaled
+      FROM (SELECT 10 AS x UNION SELECT 20 UNION SELECT 30 UNION SELECT 50 UNION SELECT 51 UNION SELECT 60) d
+      CROSS JOIN (SELECT NULL AS category) p
+    expect:
+      rows: 6
+      result_contains:
+        - "{\"x\": 10, \"category\": null, \"total\": 4000, \"scaled\": 8002000}"
+        - "{\"x\": 20, \"category\": null, \"total\": 4400, \"scaled\": 8420100}"
+        - "{\"x\": 30, \"category\": null, \"total\": 4400, \"scaled\": 8420100}"
+        - "{\"x\": 50, \"category\": null, \"total\": 4400, \"scaled\": 8420100}"
+        - "{\"x\": 51, \"category\": null, \"total\": 3800, \"scaled\": 7600000}"
+        - "{\"x\": 60, \"category\": null, \"total\": 3800, \"scaled\": 7600000}"
+  - name: "Snapshot reducers retain row bindings across shared dependency preparation"
+    sql: |
+      SELECT d.x, p.category,
+        COALESCE((SELECT SUM((SELECT h.quantity FROM ds_history h
+          WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1))
+          FROM ds_entity e
+          WHERE (CASE WHEN p.mode=2 THEN TRUE ELSE (SELECT k.active FROM ds_kind k WHERE k.active=e.category LIMIT 1)=p.mode END) AND (p.category IS NULL OR e.category=p.category)
+            AND (SELECT k.active FROM ds_kind k WHERE k.name=(SELECT h.kind FROM ds_history h
+              WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1) LIMIT 1)=1
+            AND COALESCE((SELECT h.end_value FROM ds_history h
+              WHERE h.entity_id=e.id AND h.coordinate<=60 ORDER BY h.coordinate DESC LIMIT 1),d.x)>=d.x),0) AS total
+      FROM (SELECT 10 AS x UNION SELECT 20 UNION SELECT 30 UNION SELECT 50 UNION SELECT 51 UNION SELECT 60) d
+      CROSS JOIN (SELECT NULL AS category, 0x32 AS mode UNION SELECT 0, 0x32 UNION SELECT 1, 0x32) p
+    expect: *domain_snapshot_results
+
+  - name: "A coordinate used only inside the aggregate payload keeps its outer domain"
+    sql: &nested_coordinate_query |
+      SELECT d.n, COALESCE((SELECT SUM((SELECT h.quantity FROM ds_history h
+        WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1))
+        FROM ds_entity e),0) AS total
+      FROM (SELECT 0 AS n,10 AS x UNION SELECT 1,20 UNION SELECT 2,60) d
+    expect: &nested_coordinate_results
+      rows: 3
+      result_contains:
+        - '{"n": 0, "total": 4000}'
+        - '{"n": 1, "total": 4400}'
+        - '{"n": 2, "total": 4400}'
+  - name: "Repeated nested-coordinate aggregate retains per-row binding"
+    sql: *nested_coordinate_query
+    expect: *nested_coordinate_results
+
+  - name: "Repeated SQL requests read retained snapshot points"
+    sql: *snapshot_state_query
+    expect: *domain_snapshot_results
+
+  - name: "Ordered session bounds establish a reusable source cut"
+    session_id: "ds-cut-domain"
+    setup:
+      - sql: "SET @ds_cut=20"
+    sql: &snapshot_cut_query |
+      SELECT d.x,
+        (SELECT SUM((SELECT h.quantity FROM ds_history h
+          WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1))
+         FROM ds_entity e
+         WHERE COALESCE((SELECT h.end_value FROM ds_history h
+           WHERE h.entity_id=e.id AND h.coordinate<=@ds_cut ORDER BY h.coordinate DESC LIMIT 1),d.x)>=d.x) AS total
+      FROM (SELECT 10 AS x UNION SELECT 30 UNION SELECT 60) d ORDER BY d.x
+    expect: &snapshot_cut_result
+      data: [{x: 10, total: 4000}, {x: 30, total: 4400}, {x: 60, total: 3800}]
+
+  - name: "A different bound in the same cut retains the exact snapshot points"
+    session_id: "ds-cut-domain"
+    setup:
+      - scm: '(begin (globalvars "__test_ds_snapshot-cut-keys" (snapshot_group_points)) (globalvars "__test_ds_snapshot-cut-count" (count (snapshot_group_points))))'
+      - sql: "SET @ds_cut=21"
+    sql: *snapshot_cut_query
+    expect: *snapshot_cut_result
+
+  - name: "Equivalent source cuts did not add aggregate point entries"
+    session_id: "ds-cut-domain"
+    scm: |
+      (begin
+        (define __snapshot_test_actual
+          (and (> (globalvars "__test_ds_snapshot-cut-count") 0) (equal? (globalvars "__test_ds_snapshot-cut-count") (count (snapshot_group_points))) (reduce (globalvars "__test_ds_snapshot-cut-keys") (lambda (ok key) (and ok (not (nil? (snapshot_group_points key))))) true))
+        )
+        (globalvars "__test_ds_snapshot-cut-count" nil)
+        (globalvars "__test_ds_snapshot-cut-keys" nil)
+        (if (equal? (json_encode __snapshot_test_actual) (json_encode true))
+          __snapshot_test_actual
+          (error (concat "Equivalent source cuts did not add aggregate point entries: unexpected value " (serialize __snapshot_test_actual)))))
+    expect:
+      data: [true]
+
+  - name: "Crossing a source cut changes the aggregate partition"
+    session_id: "ds-cut-domain"
+    setup:
+      - sql: "SET @ds_cut=19"
+    sql: *snapshot_cut_query
+    expect:
+      data: [{x: 10, total: 4000}, {x: 30, total: 4400}, {x: 60, total: 4400}]
+
+  - name: "Returning to a retained source cut restores its snapshot values"
+    session_id: "ds-cut-domain"
+    setup:
+      - sql: "SET @ds_cut=22"
+    sql: *snapshot_cut_query
+    expect: *snapshot_cut_result
+
+  - name: "Ordered cut witnesses survive copied session domain keys"
+    scm: |
+      (begin
+        (define __snapshot_test_actual
+          (begin
+            (define driver '("e" "memcp-tests" "ds_entity" false nil))
+            (define source '("h" "memcp-tests" "ds_history" false nil))
+            (define axis '('session "bound"))
+            (define parent '('get_column "e" false "id" false))
+            (define foreign '('get_column "h" false "entity_id" false))
+            (define coordinate '('get_column "h" false "coordinate" false))
+            (define value '('get_column "h" false "quantity" false))
+            (define stage (make_group_stage "copied-cut" source
+              (list parent axis) (list foreign axis)
+              (list (list (list 'scalar_order_value value (list coordinate) (list >) 0) coalesceNil nil))
+              nil '() '() 1 nil
+              (list (list 'condition (list '<= coordinate axis)) (list 'partition_limit 1)
+                (list 'range-point-keys (list foreign)) (list 'range-point-domain (list parent))
+                (list 'lookup-keys (list parent axis)))))
+            (define output (list "selected" "memcp-tests" (make_stage_output_relation (gs_id stage)) true
+              (make_exists_stage_join_condition "selected" (group_key_cols (gs_keys stage)) (gs_domain stage))))
+            (define raw_stage (make_group_stage "raw-cut" source (gs_domain stage)
+              (list foreign coordinate) (gs_aggregates stage) nil '() '() 1 nil (gs_facts stage)))
+            (define raw_output (list "selected" "memcp-tests" (make_stage_output_relation (gs_id raw_stage)) true
+              (make_exists_stage_join_condition "selected" (group_key_cols (gs_keys raw_stage)) (gs_domain raw_stage))))
+            (define proofs (ordered_binding_cuts (list stage) driver (list axis)))
+            (define binding (lower_group_cache_binding driver axis proofs))
+            (define read ((eval (list 'lambda (list 'tx 'session)
+              (list 'lambda '() binding))) nil (lambda (key) 20)))
+            (define at (lambda (bound)
+              ((eval (list 'lambda (list 'tx 'session) binding)) nil (lambda (key) bound))))
+            (list (not (empty_list? proofs))
+              (not (ordered_binding_occurs? axis (ordered_binding_semantic_join axis (list stage) output)))
+              (ordered_binding_occurs? axis (ordered_binding_semantic_join axis (list raw_stage) raw_output))
+              (read) (at 21) (at 19) (at nil)))
+        )
+        (if (equal? (json_encode __snapshot_test_actual) (json_encode (list true true true (list 20) (list 20) (list 0) (list nil))))
+          __snapshot_test_actual
+          (error (concat "Ordered cut witnesses survive copied session domain keys: unexpected value " (serialize __snapshot_test_actual)))))
+    expect:
+      data: [[true, true, true, [20], [20], [0], [null]]]
+
+  - name: "Copied session domain keys retain ordered-cut equivalence"
+    session_id: "ds-copied-cut"
+    setup:
+      - sql: "SET @ds_copied_cut=20"
+    sql: &copied_cut_query |
+      SELECT d.x,
+        (SELECT SUM((SELECT h.quantity FROM ds_history h
+          WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1))
+         FROM ds_entity e
+         WHERE COALESCE(COALESCE((SELECT h.end_value FROM ds_history h
+           WHERE h.entity_id=e.id AND h.coordinate<=@ds_copied_cut
+           ORDER BY h.coordinate DESC LIMIT 1),NULL),d.x)>=d.x LIMIT 1) AS total
+      FROM (SELECT 10 AS x UNION SELECT 30 UNION SELECT 60) d ORDER BY d.x
+    expect: *snapshot_cut_result
+
+  - name: "Changing a copied session key within one cut reuses snapshots"
+    session_id: "ds-copied-cut"
+    setup:
+      - scm: '(globalvars "__test_ds_copied-cut-before" (count (snapshot_group_points)))'
+      - sql: "SET @ds_copied_cut=21"
+    sql: *copied_cut_query
+    expect: *snapshot_cut_result
+
+  - name: "Copied domain-key joins do not create new aggregate points"
+    session_id: "ds-copied-cut"
+    scm: |
+      (begin
+        (define __snapshot_test_actual
+          (equal? (globalvars "__test_ds_copied-cut-before") (count (snapshot_group_points)))
+        )
+        (globalvars "__test_ds_copied-cut-before" nil)
+        (if (equal? (json_encode __snapshot_test_actual) (json_encode true))
+          __snapshot_test_actual
+          (error (concat "Copied domain-key joins do not create new aggregate points: unexpected value " (serialize __snapshot_test_actual)))))
+    expect:
+      data: [true]
+
+  - name: "A real source filter remains an exact session binding"
+    session_id: "ds-real-cut-filter"
+    setup:
+      - sql: "SET @ds_real_key=20"
+    sql: &real_cut_filter_query |
+      SELECT d.x,(SELECT SUM((SELECT h.quantity FROM ds_history h
+          WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1))
+        FROM ds_entity e WHERE e.id=@ds_real_key
+          AND COALESCE((SELECT h.end_value FROM ds_history h
+            WHERE h.entity_id=e.id AND h.coordinate<=@ds_real_key
+            ORDER BY h.coordinate DESC LIMIT 1),d.x)>=d.x) AS total
+      FROM (SELECT 10 AS x UNION SELECT 30) d ORDER BY d.x
+    expect:
+      data: [{x: 10, total: 1}, {x: 30, total: 3}]
+
+  - name: "A source filter changes results inside an otherwise equivalent cut"
+    session_id: "ds-real-cut-filter"
+    setup:
+      - sql: "SET @ds_real_key=21"
+    sql: *real_cut_filter_query
+    expect:
+      data: [{x: 10, total: 1}, {x: 30, total: 1}]
+
+  - name: "Exact aggregates also normalize pure ordered selection bindings"
+    session_id: "ds-point-cut-domain"
+    setup:
+      - scm: '(globalvars "__test_ds_point-cut-before" (count (group_value_cache)))'
+      - sql: "SET @ds_cut=20"
+    sql: &point_cut_query |
+      SELECT p.category, (SELECT SUM((SELECT h.quantity FROM ds_history h
+          WHERE h.entity_id=e.id AND h.coordinate<=@ds_cut ORDER BY h.coordinate DESC LIMIT 1))
+        FROM ds_entity e WHERE e.category=p.category) AS total
+      FROM (SELECT 0 AS category UNION SELECT 1) p ORDER BY p.category
+    expect: &point_cut_result
+      data: [{category: 0, total: 2400}, {category: 1, total: 2000}]
+
+  - name: "Exact aggregates reuse a changed binding inside the same source cut"
+    session_id: "ds-point-cut-domain"
+    setup:
+      - scm: '(globalvars "__test_ds_point-cut-count" (count (group_value_cache)))'
+      - sql: "SET @ds_cut=21"
+    sql: *point_cut_query
+    expect: *point_cut_result
+
+  - name: "Equivalent cuts do not allocate new exact aggregate entries"
+    session_id: "ds-point-cut-domain"
+    scm: |
+      (begin
+        (define __snapshot_test_actual
+          (and (> (globalvars "__test_ds_point-cut-count") (globalvars "__test_ds_point-cut-before")) (equal? (globalvars "__test_ds_point-cut-count") (count (group_value_cache))))
+        )
+        (globalvars "__test_ds_point-cut-before" nil)
+        (globalvars "__test_ds_point-cut-count" nil)
+        (if (equal? (json_encode __snapshot_test_actual) (json_encode true))
+          __snapshot_test_actual
+          (error (concat "Equivalent cuts do not allocate new exact aggregate entries: unexpected value " (serialize __snapshot_test_actual)))))
+    expect:
+      data: [true]
+
+  - name: "Exact aggregates distinguish a different selected source cut"
+    session_id: "ds-point-cut-domain"
+    setup:
+      - sql: "SET @ds_cut=19"
+    sql: *point_cut_query
+    expect:
+      data: [{category: 0, total: 2000}, {category: 1, total: 2000}]
+
+  - name: "A raw bound in a payload must remain an exact binding"
+    session_id: "ds-raw-cut-domain"
+    setup:
+      - sql: "SET @ds_cut=20"
+    sql: &raw_cut_query |
+      SELECT p.category, (SELECT SUM(@ds_cut+(SELECT h.quantity FROM ds_history h
+          WHERE h.entity_id=e.id AND h.coordinate<=@ds_cut ORDER BY h.coordinate DESC LIMIT 1))
+        FROM ds_entity e WHERE e.category=p.category) AS total
+      FROM (SELECT 0 AS category UNION SELECT 1) p ORDER BY p.category
+    expect:
+      data: [{category: 0, total: 42400}, {category: 1, total: 42000}]
+
+  - name: "A raw payload binding changes results even within one source cut"
+    session_id: "ds-raw-cut-domain"
+    setup:
+      - sql: "SET @ds_cut=21"
+    sql: *raw_cut_query
+    expect:
+      data: [{category: 0, total: 44400}, {category: 1, total: 44000}]
+
+  - name: "Nested scalar sums retain the complete aggregate domain"
+    session_id: "ds-nested-sum"
+    sql: &nested_sum_query |
+      SELECT w.lo,w.hi,(SELECT SUM((SELECT h.quantity FROM ds_history h
+          WHERE h.entity_id=e.id AND h.coordinate<=w.hi ORDER BY h.coordinate DESC LIMIT 1))
+        FROM ds_entity e
+        WHERE (SELECT SUM(1) FROM ds_history c WHERE c.entity_id=e.id)>1
+          AND (SELECT h.coordinate FROM ds_history h WHERE h.entity_id=e.id
+            AND h.coordinate<=w.hi ORDER BY h.coordinate DESC LIMIT 1) BETWEEN w.lo AND w.hi) AS total
+      FROM (SELECT 0 AS lo,10 AS hi UNION ALL SELECT 15,30) w
+    expect:
+      rows: 2
+      result_contains: ['"total": 200', '"total": 600']
+    timing_aggregation: total
+    warmup: 0
+    timing_samples: 2
+    threshold_ms: 20000
+
+  - name: "Nested scalar sums with a changed ordered bound preserve values"
+    session_id: "ds-nested-sum"
+    sql: |
+      SELECT w.lo,w.hi,(SELECT SUM((SELECT h.quantity FROM ds_history h
+          WHERE h.entity_id=e.id AND h.coordinate<=w.hi ORDER BY h.coordinate DESC LIMIT 1))
+        FROM ds_entity e
+        WHERE (SELECT SUM(1) FROM ds_history c WHERE c.entity_id=e.id)>1
+          AND (SELECT h.coordinate FROM ds_history h WHERE h.entity_id=e.id
+            AND h.coordinate<=w.hi ORDER BY h.coordinate DESC LIMIT 1) BETWEEN w.lo AND w.hi) AS total
+      FROM (SELECT 0 AS lo,10 AS hi UNION ALL SELECT 15,31) w
+    expect:
+      rows: 2
+      result_contains: ['"total": 200', '"total": 600']
+
+  - name: "Joined classification updates invalidate retained snapshots"
+    setup:
+      - sql: "UPDATE ds_kind SET active=0 WHERE name='P'"
+    sql: *snapshot_state_query
+    expect:
+      rows: 18
+      result_contains:
+        - "{\"x\": 10, \"category\": null, \"total\": 0}"
+        - "{\"x\": 10, \"category\": 0, \"total\": 0}"
+        - "{\"x\": 10, \"category\": 1, \"total\": 0}"
+        - "{\"x\": 20, \"category\": null, \"total\": 0}"
+        - "{\"x\": 20, \"category\": 0, \"total\": 0}"
+        - "{\"x\": 20, \"category\": 1, \"total\": 0}"
+        - "{\"x\": 30, \"category\": null, \"total\": 0}"
+        - "{\"x\": 30, \"category\": 0, \"total\": 0}"
+        - "{\"x\": 30, \"category\": 1, \"total\": 0}"
+        - "{\"x\": 50, \"category\": null, \"total\": 0}"
+        - "{\"x\": 50, \"category\": 0, \"total\": 0}"
+        - "{\"x\": 50, \"category\": 1, \"total\": 0}"
+        - "{\"x\": 51, \"category\": null, \"total\": 0}"
+        - "{\"x\": 51, \"category\": 0, \"total\": 0}"
+        - "{\"x\": 51, \"category\": 1, \"total\": 0}"
+        - "{\"x\": 60, \"category\": null, \"total\": 0}"
+        - "{\"x\": 60, \"category\": 0, \"total\": 0}"
+        - "{\"x\": 60, \"category\": 1, \"total\": 0}"
+
+  - name: "Restored classification rebuilds rather than reusing a changed view"
+    setup:
+      - sql: "UPDATE ds_kind SET active=1 WHERE name='P'"
+    sql: *snapshot_state_query
+    expect: *domain_snapshot_results
+
+  - name: "First-event intervals combine with dynamic state predicates"
+    sql: &first_event_state_query |
+      SELECT w.window_id,p.category,COALESCE((SELECT SUM((SELECT h.quantity
+        FROM ds_conversion_history h WHERE h.entity_id=e.id AND h.coordinate<=w.hi
+        ORDER BY h.coordinate DESC LIMIT 1))
+        FROM ds_entity e
+        WHERE (p.category IS NULL OR e.category=p.category)
+          AND (SELECT h.coordinate FROM ds_conversion_history h WHERE h.entity_id=e.id
+            AND (SELECT k.active FROM ds_kind k WHERE k.name=h.kind LIMIT 1)=1
+            ORDER BY h.coordinate ASC LIMIT 1) BETWEEN w.lo AND w.hi
+          AND ((SELECT k.active FROM ds_kind k WHERE k.name=(SELECT h.kind
+            FROM ds_conversion_history h WHERE h.entity_id=e.id AND h.coordinate<=w.lo
+            ORDER BY h.coordinate DESC LIMIT 1) LIMIT 1)=0
+            OR EXISTS(SELECT 1 FROM ds_conversion_history h WHERE h.entity_id=e.id
+              AND h.coordinate BETWEEN w.lo AND w.hi
+              AND (SELECT k.active FROM ds_kind k WHERE k.name=h.kind LIMIT 1)=0 LIMIT 1))
+          AND EXISTS(SELECT 1 FROM ds_conversion_history h WHERE h.entity_id=e.id
+            AND h.coordinate<=w.hi
+            AND (SELECT k.active FROM ds_kind k WHERE k.name=h.kind LIMIT 1)=1 LIMIT 1)),0) AS total
+      FROM (SELECT 0 AS window_id,0 AS lo,15 AS hi UNION SELECT 1,500,550
+        UNION SELECT 2,1000,1030 UNION SELECT 3,10,10 UNION SELECT 4,4010,4100
+        UNION SELECT 5,0,15) w
+      CROSS JOIN (SELECT NULL AS category UNION SELECT 0 UNION SELECT 1) p
+    expect: &first_event_state_results
+      rows: 18
+      result_contains:
+        - "{\"window_id\": 0, \"category\": null, \"total\": 10}"
+        - "{\"window_id\": 0, \"category\": 0, \"total\": 5}"
+        - "{\"window_id\": 0, \"category\": 1, \"total\": 5}"
+        - "{\"window_id\": 1, \"category\": null, \"total\": 98}"
+        - "{\"window_id\": 1, \"category\": 0, \"total\": 60}"
+        - "{\"window_id\": 1, \"category\": 1, \"total\": 38}"
+        - "{\"window_id\": 2, \"category\": null, \"total\": 59}"
+        - "{\"window_id\": 2, \"category\": 0, \"total\": 35}"
+        - "{\"window_id\": 2, \"category\": 1, \"total\": 24}"
+        - "{\"window_id\": 3, \"category\": null, \"total\": 0}"
+        - "{\"window_id\": 3, \"category\": 0, \"total\": 0}"
+        - "{\"window_id\": 3, \"category\": 1, \"total\": 0}"
+        - "{\"window_id\": 4, \"category\": null, \"total\": 0}"
+        - "{\"window_id\": 4, \"category\": 0, \"total\": 0}"
+        - "{\"window_id\": 4, \"category\": 1, \"total\": 0}"
+        - "{\"window_id\": 5, \"category\": null, \"total\": 10}"
+        - "{\"window_id\": 5, \"category\": 0, \"total\": 5}"
+        - "{\"window_id\": 5, \"category\": 1, \"total\": 5}"
+    timing_aggregation: total
+    warmup: 0
+    timing_samples: 2
+    threshold_ms: 20000
+
+  - name: "Mixed snapshot and first-event families retain independent domains"
+    sql: &mixed_snapshot_first_event |
+      SELECT w.window_id,p.category,COALESCE((SELECT SUM((SELECT h.quantity FROM ds_conversion_history h
+          WHERE h.entity_id=e.id AND h.coordinate<=w.hi ORDER BY h.coordinate DESC LIMIT 1))
+          FROM ds_entity e
+          WHERE (p.category IS NULL OR e.category=p.category)
+            AND (SELECT k.active FROM ds_kind k WHERE k.name=(SELECT h.kind FROM ds_conversion_history h
+              WHERE h.entity_id=e.id AND h.coordinate<=w.hi ORDER BY h.coordinate DESC LIMIT 1) LIMIT 1)=1
+            AND COALESCE((SELECT h.end_value FROM ds_conversion_history h
+              WHERE h.entity_id=e.id AND h.coordinate<=60 ORDER BY h.coordinate DESC LIMIT 1),w.hi)>=w.hi),0) AS state_total,COALESCE((SELECT SUM((SELECT h.quantity
+        FROM ds_conversion_history h WHERE h.entity_id=e.id AND h.coordinate<=w.hi
+        ORDER BY h.coordinate DESC LIMIT 1))
+        FROM ds_entity e
+        WHERE (p.category IS NULL OR e.category=p.category)
+          AND (SELECT h.coordinate FROM ds_conversion_history h WHERE h.entity_id=e.id
+            AND (SELECT k.active FROM ds_kind k WHERE k.name=h.kind LIMIT 1)=1
+            ORDER BY h.coordinate ASC LIMIT 1) BETWEEN w.lo AND w.hi
+          AND ((SELECT k.active FROM ds_kind k WHERE k.name=(SELECT h.kind
+            FROM ds_conversion_history h WHERE h.entity_id=e.id AND h.coordinate<=w.lo
+            ORDER BY h.coordinate DESC LIMIT 1) LIMIT 1)=0
+            OR EXISTS(SELECT 1 FROM ds_conversion_history h WHERE h.entity_id=e.id
+              AND h.coordinate BETWEEN w.lo AND w.hi
+              AND (SELECT k.active FROM ds_kind k WHERE k.name=h.kind LIMIT 1)=0 LIMIT 1))
+          AND EXISTS(SELECT 1 FROM ds_conversion_history h WHERE h.entity_id=e.id
+            AND h.coordinate<=w.hi
+            AND (SELECT k.active FROM ds_kind k WHERE k.name=h.kind LIMIT 1)=1 LIMIT 1)),0) AS total
+      FROM (SELECT 0 AS window_id,0 AS lo,15 AS hi UNION SELECT 1,500,550
+        ) w
+      CROSS JOIN (SELECT NULL AS category) p
+    expect: &mixed_snapshot_first_event_results
+      rows: 2
+      result_contains:
+        - "{\"window_id\": 0, \"category\": null, \"state_total\": 15, \"total\": 10}"
+        - "{\"window_id\": 1, \"category\": null, \"state_total\": 1217, \"total\": 98}"
+
+  - name: "Mixed snapshot and first-event families remain correct on repeat"
+    sql: *mixed_snapshot_first_event
+    expect: *mixed_snapshot_first_event_results
+
+  - name: "First-event property remains correct across older and repeated intervals"
+    sql: |
+      SELECT w.window_id,p.category,COALESCE((SELECT SUM((SELECT h.quantity
+        FROM ds_conversion_history h WHERE h.entity_id=e.id AND h.coordinate<=w.hi
+        ORDER BY h.coordinate DESC LIMIT 1))
+        FROM ds_entity e
+        WHERE (p.category IS NULL OR e.category=p.category)
+          AND (SELECT h.coordinate FROM ds_conversion_history h WHERE h.entity_id=e.id
+            AND (SELECT k.active FROM ds_kind k WHERE k.name=h.kind LIMIT 1)=1
+            ORDER BY h.coordinate ASC LIMIT 1) BETWEEN w.lo AND w.hi
+          AND ((SELECT k.active FROM ds_kind k WHERE k.name=(SELECT h.kind
+            FROM ds_conversion_history h WHERE h.entity_id=e.id AND h.coordinate<=w.lo
+            ORDER BY h.coordinate DESC LIMIT 1) LIMIT 1)=0
+            OR EXISTS(SELECT 1 FROM ds_conversion_history h WHERE h.entity_id=e.id
+              AND h.coordinate BETWEEN w.lo AND w.hi
+              AND (SELECT k.active FROM ds_kind k WHERE k.name=h.kind LIMIT 1)=0 LIMIT 1))
+          AND EXISTS(SELECT 1 FROM ds_conversion_history h WHERE h.entity_id=e.id
+            AND h.coordinate<=w.hi
+            AND (SELECT k.active FROM ds_kind k WHERE k.name=h.kind LIMIT 1)=1 LIMIT 1)),0) AS total
+      FROM (SELECT 0 AS window_id,3500 AS lo,4010 AS hi UNION ALL SELECT 1,3000,3499 UNION ALL SELECT 2,2500,2999 UNION ALL SELECT 3,2000,2499 UNION ALL SELECT 4,1500,1999 UNION ALL SELECT 5,1000,1499 UNION ALL SELECT 6,500,999 UNION ALL SELECT 7,0,499 UNION ALL SELECT 8,0,0 UNION ALL SELECT 9,1000,1100 UNION ALL SELECT 10,50,100 UNION ALL SELECT 11,100,150 UNION ALL SELECT 12,3000,3100 UNION ALL SELECT 13,0,15 UNION ALL SELECT 14,4000,4010 UNION ALL SELECT 15,10,10) w
+      CROSS JOIN (SELECT NULL AS category) p
+    expect:
+      rows: 16
+      result_contains:
+        - "{\"window_id\": 0, \"category\": null, \"total\": 1015}"
+        - "{\"window_id\": 1, \"category\": null, \"total\": 996}"
+        - "{\"window_id\": 2, \"category\": null, \"total\": 995}"
+        - "{\"window_id\": 3, \"category\": null, \"total\": 994}"
+        - "{\"window_id\": 4, \"category\": null, \"total\": 996}"
+        - "{\"window_id\": 5, \"category\": null, \"total\": 995}"
+        - "{\"window_id\": 6, \"category\": null, \"total\": 994}"
+        - "{\"window_id\": 7, \"category\": null, \"total\": 979}"
+        - "{\"window_id\": 8, \"category\": null, \"total\": 0}"
+        - "{\"window_id\": 9, \"category\": null, \"total\": 196}"
+        - "{\"window_id\": 10, \"category\": null, \"total\": 96}"
+        - "{\"window_id\": 11, \"category\": null, \"total\": 100}"
+        - "{\"window_id\": 12, \"category\": null, \"total\": 195}"
+        - "{\"window_id\": 13, \"category\": null, \"total\": 10}"
+        - "{\"window_id\": 14, \"category\": null, \"total\": 16}"
+        - "{\"window_id\": 15, \"category\": null, \"total\": 0}"
+
+  - name: "Classification DML invalidates property values and aggregate points"
+    setup:
+      - sql: "UPDATE ds_kind SET active=0 WHERE name='P'"
+    sql: *first_event_state_query
+    expect: &first_event_zero_results
+      rows: 18
+      result_contains:
+        - "{\"window_id\": 0, \"category\": null, \"total\": 0}"
+        - "{\"window_id\": 0, \"category\": 0, \"total\": 0}"
+        - "{\"window_id\": 0, \"category\": 1, \"total\": 0}"
+        - "{\"window_id\": 1, \"category\": null, \"total\": 0}"
+        - "{\"window_id\": 1, \"category\": 0, \"total\": 0}"
+        - "{\"window_id\": 1, \"category\": 1, \"total\": 0}"
+        - "{\"window_id\": 2, \"category\": null, \"total\": 0}"
+        - "{\"window_id\": 2, \"category\": 0, \"total\": 0}"
+        - "{\"window_id\": 2, \"category\": 1, \"total\": 0}"
+        - "{\"window_id\": 3, \"category\": null, \"total\": 0}"
+        - "{\"window_id\": 3, \"category\": 0, \"total\": 0}"
+        - "{\"window_id\": 3, \"category\": 1, \"total\": 0}"
+        - "{\"window_id\": 4, \"category\": null, \"total\": 0}"
+        - "{\"window_id\": 4, \"category\": 0, \"total\": 0}"
+        - "{\"window_id\": 4, \"category\": 1, \"total\": 0}"
+        - "{\"window_id\": 5, \"category\": null, \"total\": 0}"
+        - "{\"window_id\": 5, \"category\": 0, \"total\": 0}"
+        - "{\"window_id\": 5, \"category\": 1, \"total\": 0}"
+
+  - name: "Restored classification recomputes cached first-event aggregates"
+    setup:
+      - sql: "UPDATE ds_kind SET active=1 WHERE name='P'"
+    sql: *first_event_state_query
+    expect: *first_event_state_results
+
+  - name: "History inserts invalidate retained coordinates and old contributions"
+    setup:
+      - sql: "INSERT INTO ds_history VALUES (90001,1,15,8,NULL,'P')"
+    sql: *snapshot_state_query
+    expect:
+      rows: 18
+      result_contains:
+        - "{\"x\": 10, \"category\": null, \"total\": 4000}"
+        - "{\"x\": 10, \"category\": 0, \"total\": 2000}"
+        - "{\"x\": 10, \"category\": 1, \"total\": 2000}"
+        - "{\"x\": 20, \"category\": null, \"total\": 4407}"
+        - "{\"x\": 20, \"category\": 0, \"total\": 2400}"
+        - "{\"x\": 20, \"category\": 1, \"total\": 2007}"
+        - "{\"x\": 30, \"category\": null, \"total\": 4407}"
+        - "{\"x\": 30, \"category\": 0, \"total\": 2400}"
+        - "{\"x\": 30, \"category\": 1, \"total\": 2007}"
+        - "{\"x\": 50, \"category\": null, \"total\": 4407}"
+        - "{\"x\": 50, \"category\": 0, \"total\": 2400}"
+        - "{\"x\": 50, \"category\": 1, \"total\": 2007}"
+        - "{\"x\": 51, \"category\": null, \"total\": 3807}"
+        - "{\"x\": 51, \"category\": 0, \"total\": 1800}"
+        - "{\"x\": 51, \"category\": 1, \"total\": 2007}"
+        - "{\"x\": 60, \"category\": null, \"total\": 3807}"
+        - "{\"x\": 60, \"category\": 0, \"total\": 1800}"
+        - "{\"x\": 60, \"category\": 1, \"total\": 2007}"
+
+  - name: "History deletes restore the aggregate through a fresh source view"
+    setup:
+      - sql: "DELETE FROM ds_history WHERE id=90001"
+    sql: *snapshot_state_query
+    expect: *domain_snapshot_results
+
+  - name: "Replacing a joined table cannot reuse its old aggregate points"
+    setup:
+      - sql: "DROP TABLE ds_kind"
+      - sql: "CREATE TABLE ds_kind (name VARCHAR(10) PRIMARY KEY, active INT) ENGINE=memory"
+      - sql: "INSERT INTO ds_kind VALUES ('P',0),('T',0)"
+    sql: *first_event_state_query
+    expect: *first_event_zero_results
+
+  - name: "Recreated joined tables keep correct dependency invalidation"
+    setup:
+      - sql: "UPDATE ds_kind SET active=1 WHERE name='P'"
+    sql: *first_event_state_query
+    expect: *first_event_state_results
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS ds_conversion_history"
+  - sql: "DROP TABLE IF EXISTS ds_history"
+  - sql: "DROP TABLE IF EXISTS ds_entity"
+  - sql: "DROP TABLE IF EXISTS ds_kind"

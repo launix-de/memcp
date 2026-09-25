@@ -468,6 +468,13 @@ foreign keys:
 	delete: I am tbl2 -> check all cols2 (old values): do the values exist in tbl1.cols1? if so -> CASCADE a delete in tbl1, SET NULL in tbl1 or RESTRICT
 */
 type table struct {
+	// Query-local contribution reuse checks these atomics outside row loops.
+	// Writers bracket complete DML/visibility/topology batches. Identity is
+	// assigned once; revision and active-writer count need no catalog locks.
+	contributionIdentity atomic.Uint64
+	contributionRevision atomic.Uint64
+	contributionWriters  atomic.Int64
+
 	// Immutable, bounded filter observations, published after complete scans.
 	filterFeedback  atomic.Pointer[tableFilterFeedback]
 	schema          *database
@@ -745,6 +752,8 @@ func (t *table) getColFreq(col string) int64 {
 // publishTopologyLocked publishes an immutable authoritative topology. The
 // caller holds t.mu or otherwise has exclusive ownership before publication.
 func (t *table) publishTopologyLocked() *tableShardTopology {
+	t.beginContributionMutation()
+	defer t.endContributionMutation()
 	mode := t.ShardMode
 	shards := t.Shards
 	if mode == ShardModePartition {
@@ -839,6 +848,47 @@ func (t *table) MarshalJSON() ([]byte, error) {
 		PShards:            partitionedShards,
 		PDimensions:        topology.dimensions,
 	})
+}
+
+// contributionTableID distinguishes replacement tables with the same SQL name.
+var contributionTableID atomic.Uint64
+
+// beginContributionMutation brackets a whole mutation batch, never a row loop.
+// Overlapping writers keep read stamps unavailable until the last writer exits.
+func (t *table) beginContributionMutation() {
+	t.contributionWriters.Add(1)
+	t.contributionRevision.Add(1)
+}
+
+func (t *table) endContributionMutation() {
+	t.contributionRevision.Add(1)
+	t.contributionWriters.Add(-1)
+}
+
+func (t *table) contributionReadVersion() scm.Scmer {
+	if t.contributionWriters.Load() != 0 {
+		return scm.NewNil()
+	}
+	identity := t.contributionIdentity.Load()
+	if identity == 0 {
+		t.contributionIdentity.CompareAndSwap(0, contributionTableID.Add(1))
+		identity = t.contributionIdentity.Load()
+	}
+	revision := t.contributionRevision.Load()
+	schema := t.PlannerStatsToken(false)
+	if t.contributionWriters.Load() != 0 || revision != t.contributionRevision.Load() {
+		return scm.NewNil()
+	}
+	return scm.NewSlice([]scm.Scmer{scm.NewInt(int64(identity)), scm.NewInt(int64(revision)), scm.NewInt(int64(schema))})
+}
+
+func contributionMutationColumns(columns []string) bool {
+	for _, column := range columns {
+		if column == "$update" || strings.HasPrefix(column, "$increment:") {
+			return true
+		}
+	}
+	return false
 }
 
 func (t *table) pinActiveTopology() *tableShardTopology {
@@ -2552,6 +2602,9 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 			}
 		}
 	}
+
+	t.beginContributionMutation()
+	defer t.endContributionMutation()
 
 	// sanitize values (per-row recovery for INSERT IGNORE)
 	values = t.sanitizeInsertRows(columns, values, isIgnore)

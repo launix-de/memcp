@@ -571,6 +571,9 @@ func (tx *TxContext) trackedShardSetLocked() map[*storageShard]struct{} {
 
 // RollbackToSavepoint undoes all changes made since the savepoint was created.
 func (tx *TxContext) RollbackToSavepoint(sp Savepoint) {
+	for _, table := range tx.contributionMutationTables() {
+		defer table.endContributionMutation()
+	}
 	tx.mu.Lock()
 	defer tx.mu.Unlock()
 	tx.Depth = sp.Depth
@@ -645,6 +648,9 @@ func (tx *TxContext) RollbackToSavepoint(sp Savepoint) {
 
 // Commit finalizes the transaction.
 func (tx *TxContext) Commit() error {
+	for _, table := range tx.contributionMutationTables() {
+		defer table.endContributionMutation()
+	}
 	switch tx.Mode {
 	case TxCursorStability:
 		tx.mu.Lock()
@@ -846,6 +852,9 @@ func (tx *TxContext) finishCursorStabilityCommit() {
 
 // Rollback undoes the transaction.
 func (tx *TxContext) Rollback() {
+	for _, table := range tx.contributionMutationTables() {
+		defer table.endContributionMutation()
+	}
 	switch tx.Mode {
 	case TxCursorStability:
 		tx.rollbackCursorStability(true)
@@ -1205,4 +1214,21 @@ func initTransaction(en scm.Env) {
 			Return: &scm.TypeDescriptor{Kind: "any"},
 		},
 	})
+}
+
+// Visibility publication/undo is another mutation, independent of when DML
+// staged its rows. Collect tables once per transaction boundary.
+func (tx *TxContext) contributionMutationTables() []*table {
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	seen := make(map[*table]bool)
+	var tables []*table
+	for shard := range tx.shards {
+		if !seen[shard.t] {
+			seen[shard.t] = true
+			shard.t.beginContributionMutation()
+			tables = append(tables, shard.t)
+		}
+	}
+	return tables
 }

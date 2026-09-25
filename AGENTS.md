@@ -108,6 +108,12 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
 - When changing function signatures, update all call sites in the repository in one pass; do not leave temporary wrappers.
 
 ### Concurrency Rules (Storage Engine)
+
+- `table.contributionIdentity`, `contributionRevision`, and `contributionWriters`
+  are atomic query-local reuse guards. DML, visibility changes, and topology
+  publication bracket whole batches; stamps are unavailable while any writer
+  is active. Readers never inspect shard containers to obtain a stamp. These
+  tokens are process-local and are not persisted.
 - Never access shard internals without the shard lock:
   - `storageShard.columns`, `deltaColumns`, `inserts`, `deletions`, and `Indexes` must only be read/written while holding `t.mu`.
   - Use `RLock` for read-only snapshots and `Lock` for mutations. Do not read Go maps without a lock.

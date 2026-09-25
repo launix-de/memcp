@@ -22,6 +22,17 @@ metadata:
 
 setup: []
 
+# These fixtures are verified by subsequent cases in this suite.
+cleanup:
+  - sql: "DROP TABLE IF EXISTS ux_invoice"
+  - sql: "DROP TABLE IF EXISTS ux_order"
+  - sql: "DROP TABLE IF EXISTS ux_purchase"
+  - sql: "DROP TABLE IF EXISTS ux_customer"
+  - sql: "DROP TABLE IF EXISTS ux_invoice2"
+  - sql: "DROP TABLE IF EXISTS ux_customer2"
+  - sql: "DROP TABLE IF EXISTS dx_invoice"
+  - sql: "DROP TABLE IF EXISTS dx_customer"
+
 test_cases:
   - name: "UPDATE with OR EXISTS keeps prejoin helper delete callback bound"
     setup:
@@ -37,11 +48,6 @@ test_cases:
       - sql: "INSERT INTO ux_purchase (ID, customer) VALUES (1, 1), (2, 2)"
       - sql: "INSERT INTO ux_order (ID, purchase) VALUES (1, 1)"
       - sql: "INSERT INTO ux_invoice (ID, customer) VALUES (1, 1)"
-    cleanup:
-      - sql: "DROP TABLE IF EXISTS ux_invoice"
-      - sql: "DROP TABLE IF EXISTS ux_order"
-      - sql: "DROP TABLE IF EXISTS ux_purchase"
-      - sql: "DROP TABLE IF EXISTS ux_customer"
     sql: >
       UPDATE ux_customer
       SET typ = 1
@@ -107,9 +113,6 @@ test_cases:
       - sql: "CREATE TABLE ux_invoice2 (ID INT PRIMARY KEY, customer INT)"
       - sql: "INSERT INTO ux_customer2 (ID, typ) VALUES (1, NULL), (2, NULL), (3, NULL)"
       - sql: "INSERT INTO ux_invoice2 (ID, customer) VALUES (1, 1), (2, 2)"
-    cleanup:
-      - sql: "DROP TABLE IF EXISTS ux_invoice2"
-      - sql: "DROP TABLE IF EXISTS ux_customer2"
     sql: >
       UPDATE ux_customer2
       SET typ = 7
@@ -137,9 +140,6 @@ test_cases:
       - sql: "CREATE TABLE dx_invoice (ID INT PRIMARY KEY, customer INT)"
       - sql: "INSERT INTO dx_customer (ID, typ) VALUES (1, 10), (2, 20)"
       - sql: "INSERT INTO dx_invoice (ID, customer) VALUES (1, 1)"
-    cleanup:
-      - sql: "DROP TABLE IF EXISTS dx_invoice"
-      - sql: "DROP TABLE IF EXISTS dx_customer"
     sql: >
       DELETE FROM dx_customer
       WHERE EXISTS (SELECT * FROM dx_invoice WHERE dx_invoice.customer = dx_customer.`ID`)
