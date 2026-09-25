@@ -9714,6 +9714,16 @@ func jitCompileModePublish(recursiveLambdas bool, waitForPublication, install bo
 		// Lambda/procedure — compile into a pool arena
 		proc := v.Proc()
 		if proc != nil && proc.Compiled != nil && proc.Compiled.CodePtr != nil {
+			// Deferred compilation returns private native code before its maps
+			// are published. Reuse must honor the same execution boundary as a
+			// fresh compilation, including transitive callee dependencies.
+			if waitForPublication && proc.Compiled.reservation != nil {
+				jitPublication.Lock()
+				for !proc.Compiled.reservation.ready {
+					jitPublication.cond.Wait()
+				}
+				jitPublication.Unlock()
+			}
 			return v
 		}
 		if proc == nil || !atomic.CompareAndSwapUint32(&proc.jitCompiling, 0, 1) {
