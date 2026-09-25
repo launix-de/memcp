@@ -9,6 +9,7 @@ metadata:
   version: "1.0"
   description: "Segmented reusable group caches for overlapping range aggregates"
   isolated: true
+  perf_ci: true
 
 setup:
   - sql: "DROP TABLE IF EXISTS grc_windows"
@@ -33,6 +34,94 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS grc_events"
 
 test_cases:
+  - name: "constant parameter filters remove unused scalar lookup sources"
+    scm: |
+      (begin
+        (define request (newsession))
+        (define shaped (sql_parameterize_select_literals
+          "SELECT d.lo,(SELECT COUNT(*) FROM grc_events e WHERE e.happened_at>=d.lo AND e.happened_at<d.hi AND (CASE WHEN p.mode=2 THEN TRUE ELSE (SELECT w.tenant_id FROM grc_windows w WHERE w.id=(SELECT x.tenant_id FROM grc_events x WHERE x.id=e.id LIMIT 1) LIMIT 1)=p.mode END) AND (p.tenant IS NULL OR e.tenant_id=p.tenant)) AS total FROM (SELECT 0 AS lo,1000 AS hi UNION ALL SELECT 500,1500) d CROSS JOIN (SELECT NULL AS tenant,0x32 AS mode) p ORDER BY d.lo" true))
+        (mapIndex (cadr shaped) (lambda (i value) (request (concat "v" (+ i 1)) value)))
+        (define plan (with_session request (lambda ()
+          (parse_sql "memcp-tests" (car shaped) nil request nil))))
+        (if (regexp_test (serialize plan) "grc_windows")
+          (error "An unused optional scalar lookup survived constant domain propagation") true))
+    expect:
+      data: [true]
+
+  - name: "constant parameter range aggregate retains both windows"
+    session_id: "grc-constant-parameters"
+    sql: |
+      SELECT d.lo,(SELECT COUNT(*) FROM grc_events e
+        WHERE e.happened_at>=d.lo AND e.happened_at<d.hi
+          AND (CASE WHEN p.mode=2 THEN TRUE ELSE (SELECT w.tenant_id FROM grc_windows w WHERE w.id=(SELECT x.tenant_id FROM grc_events x WHERE x.id=e.id LIMIT 1) LIMIT 1)=p.mode END) AND (p.tenant IS NULL OR e.tenant_id=p.tenant)) AS total
+      FROM (SELECT 0 AS lo,1000 AS hi UNION ALL SELECT 500,1500) d
+      CROSS JOIN (SELECT NULL AS tenant,0x32 AS mode) p ORDER BY d.lo
+    expect:
+      data: [{lo: 0, total: 1000}, {lo: 500, total: 1000}]
+    timing_aggregation: total
+    warmup: 0
+    timing_samples: 2
+    threshold_ms: 5000
+    performance_rows: 6000
+
+  - name: "changed tenant parameter filters the retained range"
+    session_id: "grc-constant-parameters"
+    sql: |
+      SELECT d.lo,(SELECT COUNT(*) FROM grc_events e
+        WHERE e.happened_at>=d.lo AND e.happened_at<d.hi
+          AND (CASE WHEN p.mode=2 THEN TRUE ELSE (SELECT w.tenant_id FROM grc_windows w WHERE w.id=(SELECT x.tenant_id FROM grc_events x WHERE x.id=e.id LIMIT 1) LIMIT 1)=p.mode END) AND (p.tenant IS NULL OR e.tenant_id=p.tenant)) AS total
+      FROM (SELECT 0 AS lo,1000 AS hi UNION ALL SELECT 500,1500) d
+      CROSS JOIN (SELECT 1 AS tenant,0x32 AS mode) p ORDER BY d.lo
+    expect:
+      data: [{lo: 0, total: 500}, {lo: 500, total: 500}]
+
+  - name: "another tenant parameter retains its own qualifying counts"
+    session_id: "grc-constant-parameters"
+    sql: |
+      SELECT d.lo,(SELECT COUNT(*) FROM grc_events e
+        WHERE e.happened_at>=d.lo AND e.happened_at<d.hi
+          AND (CASE WHEN p.mode=2 THEN TRUE ELSE (SELECT w.tenant_id FROM grc_windows w WHERE w.id=(SELECT x.tenant_id FROM grc_events x WHERE x.id=e.id LIMIT 1) LIMIT 1)=p.mode END) AND (p.tenant IS NULL OR e.tenant_id=p.tenant)) AS total
+      FROM (SELECT 0 AS lo,1000 AS hi UNION ALL SELECT 500,1500) d
+      CROSS JOIN (SELECT 2 AS tenant,0x32 AS mode) p ORDER BY d.lo
+    expect:
+      data: [{lo: 0, total: 500}, {lo: 500, total: 500}]
+
+  - name: "changed optional selector evaluates its scalar branch"
+    session_id: "grc-constant-parameters"
+    sql: |
+      SELECT d.lo,(SELECT COUNT(*) FROM grc_events e
+        WHERE e.happened_at>=d.lo AND e.happened_at<d.hi
+          AND (CASE WHEN p.mode=2 THEN TRUE ELSE (SELECT w.tenant_id FROM grc_windows w WHERE w.id=(SELECT x.tenant_id FROM grc_events x WHERE x.id=e.id LIMIT 1) LIMIT 1)=p.mode END)
+          AND (p.tenant IS NULL OR e.tenant_id=p.tenant)) AS total
+      FROM (SELECT 0 AS lo,1000 AS hi UNION ALL SELECT 500,1500) d
+      CROSS JOIN (SELECT NULL AS tenant,1 AS mode) p ORDER BY d.lo
+    expect:
+      data: [{lo: 0, total: 0}, {lo: 500, total: 0}]
+
+  - name: "NULL optional selector preserves unknown comparison"
+    session_id: "grc-constant-parameters"
+    sql: |
+      SELECT d.lo,(SELECT COUNT(*) FROM grc_events e
+        WHERE e.happened_at>=d.lo AND e.happened_at<d.hi
+          AND (CASE WHEN p.mode=2 THEN TRUE ELSE (SELECT w.tenant_id FROM grc_windows w WHERE w.id=(SELECT x.tenant_id FROM grc_events x WHERE x.id=e.id LIMIT 1) LIMIT 1)=p.mode END)
+          AND (p.tenant IS NULL OR e.tenant_id=p.tenant)) AS total
+      FROM (SELECT 0 AS lo,1000 AS hi UNION ALL SELECT 500,1500) d
+      CROSS JOIN (SELECT NULL AS tenant,NULL AS mode) p ORDER BY d.lo
+    expect:
+      data: [{lo: 0, total: 0}, {lo: 500, total: 0}]
+
+  - name: "restored optional selector drops its scalar branch again"
+    session_id: "grc-constant-parameters"
+    sql: |
+      SELECT d.lo,(SELECT COUNT(*) FROM grc_events e
+        WHERE e.happened_at>=d.lo AND e.happened_at<d.hi
+          AND (CASE WHEN p.mode=2 THEN TRUE ELSE (SELECT w.tenant_id FROM grc_windows w WHERE w.id=(SELECT x.tenant_id FROM grc_events x WHERE x.id=e.id LIMIT 1) LIMIT 1)=p.mode END)
+          AND (p.tenant IS NULL OR e.tenant_id=p.tenant)) AS total
+      FROM (SELECT 0 AS lo,1000 AS hi UNION ALL SELECT 500,1500) d
+      CROSS JOIN (SELECT NULL AS tenant,0x32 AS mode) p ORDER BY d.lo
+    expect:
+      data: [{lo: 0, total: 1000}, {lo: 500, total: 1000}]
+
   - name: "nested scalar COUNT contributes complete reusable aggregate dependencies"
     session_id: "grc-nested-count"
     setup:

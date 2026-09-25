@@ -12407,6 +12407,11 @@ RecSet node is written into logical IR. */
 (define neumann_compile_pipeline (lambda (ast planning_session tx)
 	(begin
 		(tx_check tx)
+		/* Constant columns are a relational equivalence, independent of the
+		aggregate carrier chosen below. Propagate them before decorrelation so
+		unused scalar branches cannot become eager dependency stages. Keep the
+		parameter relation itself, and guard every substituted binding. */
+		(define ast (bind_constant_domain_columns ast planning_session true))
 		/* Domain eligibility is structural. Do not reorder or record guards for
 		a specialization which will be discarded: those guards otherwise make
 		the ordinary plan depend on every changing literal from the trial. */
@@ -12421,14 +12426,8 @@ RecSet node is written into logical IR. */
 					(not (ir_has_unproved_query_aggregate? candidate)))) true))
 		(if (and changed eligible)
 			(bind_parameter_row_domains ast planning_session true) nil)
-		(define constant_ast (if eligible ast (bind_constant_domain_columns ast planning_session false)))
-		(define constant_changed (not (expression_equal? constant_ast ast)))
-		(define constant_ir (if constant_changed (decorrelate_logical_query constant_ast) nil))
-		(define constant_eligible (and constant_changed
-			(ir_has_contribution_domain? (annotate_contribution_domains (sql_type_annotate_ir constant_ir)))))
-		(if constant_eligible (bind_constant_domain_columns ast planning_session true) nil)
 		(define reordered (optimize_logical_query
-			(if eligible ir (if constant_eligible constant_ir (decorrelate_logical_query ast))) planning_session tx))
+			(if eligible ir (decorrelate_logical_query ast)) planning_session tx))
 		(tx_check tx)
 		(define prepared (prepare_physical_queryplan reordered planning_session tx))
 		(tx_check tx)
