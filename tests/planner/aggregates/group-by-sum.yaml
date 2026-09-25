@@ -1,3 +1,4 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
 # GROUP BY SUM Test Suite
 
 metadata:
@@ -40,7 +41,7 @@ test_cases:
     expect:
       rows: 1
       result_contains:
-        - "touch_keytable"
+        - "group_cache_create"
         - ".grp:"
         - "group_insert_batches"
         - "scan_order"
