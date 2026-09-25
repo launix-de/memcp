@@ -100,6 +100,32 @@ test_cases:
     expect:
       data:
       - ok
+  - name: Exact cache hits bind current point values before dispatch
+    scm: |-
+      (begin
+        (define cache (newcachemap))
+        (define sess (newsession))
+        (map (list 1 4 2) (lambda (id) (begin
+          (define result (newsession))
+          (sql_execute_formula sess nil
+            (cached_parse cache (list parse_sql) "memcp-tests"
+              (concat "SELECT id FROM cg_rows WHERE id = " id) nil "root" sess true)
+            (lambda (row) (result "id" (cadr row))) (lambda (_fields) nil))
+          (if (equal? (result "id") id) true (error "stale point binding")))))
+        (if (equal? (count (cache)) 1) "ok" (error "point template was not reused")))
+    expect:
+      data: ["ok"]
+  - name: Compile diagnostics bypass both cache lookup and insertion
+    scm: |-
+      (begin
+        (define cache (newcachemap))
+        (define sess (newsession))
+        (map (produceN 2) (lambda (_)
+          (cached_parse cache (list parse_sql) "memcp-tests"
+            "EXPLAIN COMPILE SELECT id FROM cg_rows WHERE id IN (1,2,3)" nil "root" sess true)))
+        (if (equal? (count (cache)) 0) "ok" (error "compile diagnostic entered query cache")))
+    expect:
+      data: ["ok"]
   - name: Literal IN matches
     sql: SELECT id FROM cg_rows WHERE id IN (1,2,3) ORDER BY id
     expect:
