@@ -1358,7 +1358,7 @@ test_cases:
     scm: |
       (begin
         (define __snapshot_test_actual
-          (group_cache_value "grc-point-cache" (lambda () '(7 11)) nil (lambda () '(17)) (lambda () 43))
+          (group_cache_value group_value_cache "grc-point-cache" (lambda () '(7 11)) nil (lambda () '(17)) (lambda () 43))
         )
         (if (equal? (json_encode __snapshot_test_actual) (json_encode 43))
           __snapshot_test_actual
@@ -1370,7 +1370,7 @@ test_cases:
     scm: |
       (begin
         (define __snapshot_test_actual
-          (group_cache_value "grc-point-cache" (lambda () '(7 11)) nil (lambda () '(17))
+          (group_cache_value group_value_cache "grc-point-cache" (lambda () '(7 11)) nil (lambda () '(17))
             (lambda () (error "retained aggregate was recomputed")))
         )
         (if (equal? (json_encode __snapshot_test_actual) (json_encode 43))
@@ -1384,9 +1384,9 @@ test_cases:
       (begin
         (define __snapshot_test_actual
           (list
-            (group_cache_value "grc-point-cache" (lambda () '(7 12)) nil (lambda () '(17)) (lambda () 47))
-            (group_cache_value "grc-point-cache" (lambda () '(7 11)) nil (lambda () '(18)) (lambda () nil))
-            (group_cache_value "grc-point-cache" (lambda () '(7 11)) nil (lambda () '(18))
+            (group_cache_value group_value_cache "grc-point-cache" (lambda () '(7 12)) nil (lambda () '(17)) (lambda () 47))
+            (group_cache_value group_value_cache "grc-point-cache" (lambda () '(7 11)) nil (lambda () '(18)) (lambda () nil))
+            (group_cache_value group_value_cache "grc-point-cache" (lambda () '(7 11)) nil (lambda () '(18))
               (lambda () (error "cached NULL was recomputed"))))
         )
         (if (equal? (json_encode __snapshot_test_actual) (json_encode (list 47 nil nil)))
@@ -1402,10 +1402,10 @@ test_cases:
           (begin
             (define revision (newsession))
             (revision "value" 71)
-            (define first (group_cache_value "grc-point-changing-view" (lambda () '(1)) nil
+            (define first (group_cache_value group_value_cache "grc-point-changing-view" (lambda () '(1)) nil
               (lambda () (list (revision "value")))
               (lambda () (begin (revision "value" 73) 79))))
-            (define second (group_cache_value "grc-point-changing-view" (lambda () '(1)) nil
+            (define second (group_cache_value group_value_cache "grc-point-changing-view" (lambda () '(1)) nil
               (lambda () '(71)) (lambda () 83)))
             (list first second))
         )
@@ -1422,10 +1422,10 @@ test_cases:
           (begin
             (define version (newsession))
             (version "value" 17)
-            (define first (group_cache_value "grc-point-cache"
+            (define first (group_cache_value group_value_cache "grc-point-cache"
               (lambda () (begin (version "value" 19) '(7 11))) nil
               (lambda () (list (version "value"))) (lambda () 89)))
-            (define old (group_cache_value "grc-point-cache" (lambda () '(7 11)) nil
+            (define old (group_cache_value group_value_cache "grc-point-cache" (lambda () '(7 11)) nil
               (lambda () '(17)) (lambda () (error "old immutable point was lost"))))
             (list first old))
         )
@@ -1443,7 +1443,7 @@ test_cases:
             (begin
               (define session (newsession))
               (start session)
-              (define point (group_cache_value "grc-point-cache" (lambda () '(7 11)) (session "__memcp_tx")
+              (define point (group_cache_value group_value_cache "grc-point-cache" (lambda () '(7 11)) (session "__memcp_tx")
                 (lambda () '(17)) (lambda () 59)))
               (tx_rollback session)
               point)))
@@ -1480,9 +1480,9 @@ test_cases:
         (define __snapshot_test_actual
           (begin
             (define failed (try (lambda ()
-              (group_cache_value "grc-failed-point" (lambda () '(1)) nil (lambda () '(101))
+              (group_cache_value group_value_cache "grc-failed-point" (lambda () '(1)) nil (lambda () '(101))
                 (lambda () (error "stopped preparation")))) (lambda (err) "stopped")))
-            (define next (group_cache_value "grc-failed-point" (lambda () '(1)) nil
+            (define next (group_cache_value group_value_cache "grc-failed-point" (lambda () '(1)) nil
               (lambda () '(101)) (lambda () 103)))
             (list failed next))
         )

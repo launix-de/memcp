@@ -926,7 +926,10 @@ column has selectivity feedback, retain an explicit half-domain prior. */
 
 /* Evaluate cut witnesses after taking the cache source view. A bound inside
 one unchanged ordered cut selects the same scalar rows; its spelling/value need
-not create another exact group partition. This is not a delta proof across cuts. */
+not create another exact group partition. This is not a delta proof across cuts.
+The witness is itself a versioned scalar point cache, shared by every consumer
+of the same source column and bound. Do not repeat the ordered scan for every
+output coordinate or aggregate. Explicit transactions still use the producer. */
 (define lower_group_cache_binding (lambda (driver expr proofs)
 	(begin
 		(define proof (reduce proofs (lambda (found item)
@@ -934,13 +937,21 @@ not create another exact group partition. This is not a delta proof across cuts.
 		(if (nil? proof) (lower_column_expr_for_alias driver expr)
 			(list (list (quote lambda) (list (quote __cache_bound))
 				(cons (quote list) (map (cadr proof) (lambda (cut)
-					(compile_scan_plan (quote scan_order) (physical_query_tx_symbol)
-						(source_table_expr (car cut)) (quoted_runtime_list (list (cadr cut)))
-						'('lambda '('__value) '('and '('not '('nil? '__value)) '('not '('nil? '__cache_bound))
-							'('<= '__value '__cache_bound)))
-						(quoted_runtime_list (list (cadr cut))) (list (quote list) (quote >)) 0 0 1
-						(quoted_runtime_list (list (cadr cut)))
-						'('lambda '('__acc '__value) '__value) nil false)))))
+					(list (quote group_cache_value) (quote group_cut_cache)
+						(concat "ordered-cut-v1:" (serialize (list
+							(source_schema (car cut)) (source_relation (car cut)) (cadr cut))))
+						'('lambda '() '('list '__cache_bound))
+						(physical_query_tx_symbol)
+						(list (quote lambda) '() (list (quote list)
+							(list (quote table_read_version) (source_table_expr (car cut)))))
+						(list (quote lambda) '()
+							(compile_scan_plan (quote scan_order) (physical_query_tx_symbol)
+								(source_table_expr (car cut)) (quoted_runtime_list (list (cadr cut)))
+								'('lambda '('__value) '('and '('not '('nil? '__value)) '('not '('nil? '__cache_bound))
+									'('<= '__value '__cache_bound)))
+								(quoted_runtime_list (list (cadr cut))) (list (quote list) (quote >)) 0 0 1
+								(quoted_runtime_list (list (cadr cut)))
+								'('lambda '('__acc '__value) '__value) nil false)))))))
 				(lower_column_expr_for_alias driver expr))))))
 
 (define lower_group_value_cache_probe (lambda (all_stages stage value_expr keys lookup_keys reduce_expr neutral_expr)
@@ -948,7 +959,7 @@ not create another exact group partition. This is not a delta proof across cuts.
 		(define proof (qassoc_get (gs_facts stage) (quote stable-aggregate-domain) nil))
 		(define name (concat (group_stage_cache_relation stage) ":point-v1:"
 			(aggregate_col_name_using (gs_input stage) (list value_expr reduce_expr neutral_expr))))
-		(list (quote group_cache_value) name
+		(list (quote group_cache_value) (quote group_value_cache) name
 			(list (quote lambda) '() (cons (quote list) (map (nth proof 1)
 				(lambda (expr) (lower_group_cache_binding (car proof) expr (coalesceNil (nth proof 3) '()))))))
 			(physical_query_tx_symbol)
@@ -9392,21 +9403,25 @@ Concurrent builders may publish equivalent immutable states independently. */
 corrections and range filters may borrow its immutable values; they must not
 retain a mutable helper join or any producer closure across requests. */
 (define group_value_cache (newcachemap))
+/* Cut witnesses retain only boxed scalar values under source/column/bound and
+logical-data-version keys. Keep their eviction/accounting separate from payload
+points: a changed spelling of the bound can reuse the same aggregate point. */
+(define group_cut_cache (newcachemap))
 
-(define group_cache_value (lambda (name point_values tx read_view producer)
+(define group_cache_value (lambda (cache name point_values tx read_view producer)
 	(begin
 		(tx_check tx)
 		(define view (read_view))
 		(define shareable (and (not (tx_requires_query_local_cache tx))
 			(reduce view (lambda (ok stamp) (and ok (not (nil? stamp)))) true)))
 		(define key (if shareable (concat name ":" (serialize (list (point_values) view))) nil))
-		(define hit (if shareable (group_value_cache key) nil))
+		(define hit (if shareable (cache key) nil))
 		(if (and (not (nil? hit)) (expression_equal? view (read_view))) (car hit)
 			(begin
 				(define value (producer))
 				(tx_check tx)
 				(if (and shareable (expression_equal? view (read_view)))
-					(group_value_cache key (list value)) true)
+					(cache key (list value)) true)
 				value)))))
 
 (define snapshot_group_bases (newcachemap))
