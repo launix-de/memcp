@@ -7518,7 +7518,11 @@ intact: they own the outer domain of sibling aggregates. */
 										(list (source_alias source) (source_schema source)
 											(if (list? (source_relation source)) (visit (source_relation source) true scope) (source_relation source))
 											(source_outer? source) (visit (source_join_expr source) false visible))))
-									(map_assoc (qb_fields block) (lambda (name expr) (visit expr false visible)))
+									/* Forwarded columns need no value specialization: keep their
+									bindings live when only the output value changes. */
+									(map_assoc (qb_fields block) (lambda (name expr)
+										(if (and (list? expr) (equal? (car expr) (quote get_column)))
+											expr (visit expr false visible))))
 									(visit (qb_where block) false visible) (visit (qb_group block) false visible)
 									(visit (qb_having block) false visible) (visit (qb_order block) false visible)
 									(qb_limit block) (qb_offset block) (qb_hidden block) (qb_stages block) (qb_facts block))))))
