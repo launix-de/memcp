@@ -346,6 +346,36 @@ func TestJITDeferredCompilationReturnsPrivateProc(t *testing.T) {
 	}
 }
 
+// Reusing a private, deferred Proc must still honor the public compilation
+// boundary: native code is executable only after its stack maps are visible.
+func TestJITCompileExistingProcWaitsForPublication(t *testing.T) {
+	_, arena, blocker := globalJITPool.Alloc(16 * 1024)
+	defer globalJITPool.Free(arena)
+	defer arena.complete(blocker, nil, nil)
+	template := Eval(Read(t.Name(), `(lambda (value) value)`), &Globalenv)
+	compiled := jitCompileModeDeferred(true, template)
+	entry := compiled.Proc().Compiled
+	if entry == nil || entry.Arena != arena || entry.reservation.ready {
+		t.Fatal("fixture did not defer the compiled Proc behind the blocker")
+	}
+	done := make(chan Scmer, 1)
+	go func() { done <- CompileJIT(compiled, true) }()
+	select {
+	case <-done:
+		t.Fatal("public compilation returned native code before its stack maps were published")
+	case <-time.After(20 * time.Millisecond):
+	}
+	arena.complete(blocker, nil, nil)
+	select {
+	case value := <-done:
+		if !entry.reservation.ready || !Equal(Apply(value, NewInt(42)), NewInt(42)) {
+			t.Fatal("published procedure did not execute correctly")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("compilation did not return after stack-map publication")
+	}
+}
+
 func TestJITArenaDefersCallbackUntilStackMapPublication(t *testing.T) {
 	first := &jitCodeReservation{}
 	second := &jitCodeReservation{}

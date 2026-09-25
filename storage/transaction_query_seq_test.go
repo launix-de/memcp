@@ -103,3 +103,77 @@ func TestTransactionChoosesQueryLocalCacheWhenSharedRecipesAreUnsafe(t *testing.
 		t.Fatal("table-lock owner reused a shared cache")
 	}
 }
+
+func TestContributionReadVersionRejectsOverlappingWriters(t *testing.T) {
+	tbl := &table{}
+	before := tbl.contributionReadVersion().Slice()
+	entered, finish, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	go func() {
+		tbl.beginContributionMutation()
+		close(entered)
+		<-finish
+		tbl.endContributionMutation()
+		close(done)
+	}()
+	<-entered
+	tbl.beginContributionMutation()
+	if !tbl.contributionReadVersion().IsNil() {
+		t.Error("active writers published a reusable read version")
+	}
+	close(finish)
+	<-done
+	if !tbl.contributionReadVersion().IsNil() {
+		t.Error("one completed writer hid another active writer")
+	}
+	tbl.endContributionMutation()
+	after := tbl.contributionReadVersion().Slice()
+	if before[0].Int() != after[0].Int() || before[1].Int() == after[1].Int() {
+		t.Fatal("completed mutations must retain identity and advance revision")
+	}
+	replacement := (&table{}).contributionReadVersion().Slice()
+	if replacement[0].Int() == after[0].Int() {
+		t.Fatal("replacement table reused a prior identity")
+	}
+}
+
+func TestContributionReadVersionTracksDMLAndVisibility(t *testing.T) {
+	tbl := setupScanParallelTestTable(t, "tcontributionview")
+	stamp := func() int64 {
+		value := tbl.contributionReadVersion()
+		if value.IsNil() {
+			t.Fatal("completed operation left an active writer")
+		}
+		return value.Slice()[1].Int()
+	}
+	changed := func(before int64, operation string) {
+		if stamp() == before {
+			t.Fatalf("%s retained an obsolete read version", operation)
+		}
+	}
+	before := stamp()
+	tbl.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(1)}}, nil, scm.NewNil(), false, nil)
+	changed(before, "insert")
+	for _, commit := range []bool{false, true} {
+		tx := NewTxContext(TxACID)
+		sp := tx.CreateSavepoint()
+		tbl.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(2)}}, nil, scm.NewNil(), false, nil, tx)
+		before = stamp()
+		tx.RollbackToSavepoint(sp)
+		changed(before, "savepoint rollback")
+		tbl.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(3)}}, nil, scm.NewNil(), false, nil, tx)
+		before = stamp()
+		if commit {
+			if err := tx.Commit(); err != nil {
+				t.Fatal(err)
+			}
+		} else {
+			tx.Rollback()
+		}
+		changed(before, "transaction visibility publication")
+	}
+	before = stamp()
+	tbl.mu.Lock()
+	tbl.publishTopologyLocked()
+	tbl.mu.Unlock()
+	changed(before, "topology publication")
+}

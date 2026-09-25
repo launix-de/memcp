@@ -2217,7 +2217,16 @@ physical membership probe. */
 (define scalar_aggregate_probe_outer_exprs (lambda (stage)
 	(merge (list
 		(qassoc_get (gs_facts stage) (quote lookup-keys) '())
-		(list (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))))))
+		/* Query-input aggregates retain range cuts outside their point lookup
+		keys. Scan callbacks must bind those columns even if not projected. */
+		(merge (map (qassoc_get (gs_facts stage) (quote range-domains) '())
+			(lambda (domain) (list (nth domain 2) (nth domain 4)))))
+		(if (nil? (qassoc_get (gs_facts stage) (quote stable-aggregate-domain) nil)) '()
+			(nth (qassoc_get (gs_facts stage) (quote stable-aggregate-domain) nil) 1))
+		(list (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
+		(if (nil? (qassoc_get (gs_facts stage) (quote contribution-domain) nil)) '()
+			(cons (nth (qassoc_get (gs_facts stage) (quote contribution-domain) nil) 2)
+				(nth (qassoc_get (gs_facts stage) (quote contribution-domain) nil) 4)))))))
 
 (define make_stage_lookup_condition (lambda (stage_alias key_names outer_domain post_condition)
 	(combine_where
@@ -2570,7 +2579,11 @@ row containing NULL must remain distinguishable for non-strict functions. */
 					(and (equal? (stage_result_max_rows_per_partition stage) 1)
 						(and (equal? (count keys) (count lookup_keys))
 							(and (equal? (coalesceNil (gs_having stage) true) true)
-								(source_is_base_table? (gs_input stage))))))
+								(or (source_is_base_table? (gs_input stage))
+									(not (nil? (qassoc_get (gs_facts stage) (quote contribution-domain) nil)))
+									(not (nil? (qassoc_get (gs_facts stage) (quote invariant-property-cover) nil)))
+									(and (not (qassoc_get (gs_facts stage) (quote aggregate-payload-dependency) false))
+										(not (nil? (qassoc_get (gs_facts stage) (quote stable-aggregate-domain) nil)))))))))
 				(and (equal? (qassoc_get (gs_facts stage) (quote null_semantics) nil) (quote aggregate))
 					(and (equal? (stage_result_max_rows_per_partition stage) 1)
 						(and (equal? (count keys) (count lookup_keys))
@@ -4685,18 +4698,23 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 				(rewrite_window_derived_ref_chain derived_rewrites expr))))
 		(define partition_exprs (map (nth over 0) rewrite_window_expr))
 		(define canonical_args (map (coalesceNil args '()) rewrite_window_expr))
-		(define dependency_exprs (merge (list partition_exprs canonical_args)))
+		/* The window reads the same filtered row domain as its query block.
+		Carry WHERE through logical decorrelation, including EXISTS/IN inputs;
+		filtering only the output scan would leave the window total unfiltered. */
+		(define condition (coalesceNil (uctx_get ctx (quote window-row-condition) true) true))
+		(define dependency_exprs (merge (list partition_exprs canonical_args (list condition))))
 		(define dependency_sources (window_stage_dependency_sources
 			outer_sources alias dependency_exprs))
 		(define dependency_hidden (merge (map (zip (produceN (count dependency_exprs)) dependency_exprs)
 			(lambda (entry) (list (concat "__window_dependency_" (car entry)) (cadr entry))))))
-		(define stage_input (if (empty_list? dependency_sources)
+		(define stage_input (if (and (empty_list? dependency_sources) (equal? condition true))
 			src
-			(make_query_block
+			(btw2025_decorrelate_query_block (make_query_block
 				(source_schema src)
 				(cons src dependency_sources)
-				'() true '() nil '() nil nil dependency_hidden '()
-				(list (list (quote default_alias) alias)))))
+				'() condition '() nil '() nil nil dependency_hidden
+				(uctx_get ctx (quote window-row-stages) '())
+				(list (list (quote default_alias) alias))) ctx)))
 		(define ags (dedupe_aggregates_by_col (window_aggregate_descriptor fn canonical_args)))
 		(define keys (if (empty_list? partition_exprs)
 			'(1)
@@ -4704,7 +4722,7 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 		(define outer_domain (if (empty_list? partition_exprs)
 			'()
 			partition_exprs))
-		(define stage_id (concat "window-agg:" (stable_structural_hash (list fn canonical_args keys) false)))
+		(define stage_id (concat "window-agg:" (stable_structural_hash (list fn canonical_args keys stage_input) false)))
 		(define stage (make_group_stage
 			stage_id
 			stage_input
@@ -4734,7 +4752,7 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 			true
 			(make_exists_stage_join_condition stage_alias key_names outer_domain)))
 		(list
-			(window_aggregate_value_expr src fn canonical_args ags stage_alias)
+			(window_aggregate_value_expr stage_input fn canonical_args ags stage_alias)
 			(list stage)
 			(list source)))))
 
@@ -6725,9 +6743,23 @@ names in projections, predicates, and correlated subqueries. */
 									(neumann_fail "untangle_query" "window function is not allowed in WHERE")
 									true)
 								(define where_result (untangle_where_with_stages rewritten_where joined_expr_outer_sources joined_expr_ctx))
+								/* Queries without window expressions do not need the additional
+								row-domain context or its stage/source unions. */
+								(define has_window_expr (or
+									(expr_contains_window? rewritten_fields)
+									(reduce rewritten_order (lambda (found item)
+										(or found (expr_contains_window? (car item)))) false)
+									(expr_contains_window? rewritten_hidden)))
+								(define window_expr_ctx (if has_window_expr (make_uctx joined_expr_ctx (list
+									(list (quote window-row-condition) (nth where_result 0))
+									(list (quote window-row-stages) (merge_unique (list
+										source_stages (qb_stages block) (nth source_join_result 1) (nth where_result 1))))
+									(list (quote local-sources) (merge_unique (list
+										untangled_sources source_join_stage_sources (nth where_result 2))))))
+									joined_expr_ctx))
 								(define field_result (untangle_fields_with_stages
 									rewritten_fields
-									joined_expr_outer_sources joined_expr_ctx))
+									joined_expr_outer_sources window_expr_ctx))
 								(define having_result (untangle_expr_with_stages
 									rewritten_having
 									joined_expr_outer_sources joined_expr_ctx))
@@ -6739,10 +6771,10 @@ names in projections, predicates, and correlated subqueries. */
 								(define order_result (untangle_order_with_stages
 									rewritten_order
 									joined_expr_outer_sources
-									joined_expr_ctx))
+									window_expr_ctx))
 								(define hidden_result (untangle_fields_with_stages
 									rewritten_hidden
-									joined_expr_outer_sources joined_expr_ctx))
+									joined_expr_outer_sources window_expr_ctx))
 								(define delayed_block (make_query_block
 									(qb_schema block)
 									(merge_unique (list untangled_sources source_join_stage_sources stage_sources (nth group_result 2) (nth order_result 2) (nth hidden_result 2)))

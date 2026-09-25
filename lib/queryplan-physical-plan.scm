@@ -262,7 +262,7 @@ context gates because bare EXISTS also has a separate membership lowerer. */
 							(if (empty_list? (qassoc_get (gs_facts stage) (quote lookup-keys) '()))
 								(constant_scalar_aggregate_probe_sources? stages sources)
 								(or
-									(stage_has_residual_outer_refs? stage)
+									(or (group_value_cache_selected? stage) (not (nil? (qassoc_get (gs_facts stage) (quote invariant-property-cover) nil))) (stage_has_residual_outer_refs? stage))
 									(or
 										(stage_direct_probe_cost_preferred_for_limit? stage limit_value planning_session)
 										(probe_context_small_enough? probe_sources))))
@@ -378,13 +378,11 @@ only partitioned FROM source would erase the block's row multiplicity
 					(define parent (lowering_catalog_parent stages))
 					(if (lowering_catalog? parent) (stage_for_group_cache_source parent src) nil))))
 		(reduce (coalesceNil stages '()) (lambda (found stage)
-			(if (not (nil? found))
-				found
-				(if (and (group_stage? stage)
-					(and (equal? (group_stage_cache_schema stage) (source_schema src))
-						(equal? (group_stage_cache_relation stage) (source_relation src))))
-					stage
-					nil)))
+			(if (and (group_stage? stage)
+				(and (equal? (group_stage_cache_schema stage) (source_schema src))
+					(equal? (group_stage_cache_relation stage) (source_relation src))))
+				(if (nil? found) stage (merge_group_prepare_stage found stage))
+				found))
 			nil))))
 
 (define group_cache_stages_from_sources (lambda (stages sources)
@@ -413,11 +411,15 @@ only partitioned FROM source would erase the block's row multiplicity
 		(reduce (coalesceNil stages '()) (lambda (index stage)
 			(if (not (group_stage? stage))
 				index
-				(set_assoc index
-					(stage_dependency_group_cache_key
+				(begin
+					(define key (stage_dependency_group_cache_key
 						(group_stage_cache_schema stage)
-						(group_stage_cache_relation stage))
-					stage))) '()))))
+						(group_stage_cache_relation stage)))
+					(define previous (get_assoc index key))
+					/* A physical source no longer names an individual logical
+					consumer. Its prepare must retain every aggregate extension. */
+					(set_assoc index key (if (nil? previous) stage
+						(merge_group_prepare_stage previous stage)))))) '()))))
 
 (define stage_dependencies_from_output_sources (lambda (id_index sources)
 	(unique_stages_by_id (filter (map (coalesceNil sources '()) (lambda (src)
@@ -758,9 +760,15 @@ for that scan. The same prepared table is reused by every guarded variant. */
 		(define observed_stages (map canonical_stages (lambda (stage)
 			(group_join_observation_stage stage block canonical_stages graph planning_session))))
 		(define signature_stages (map observed_stages (lambda (stage)
-			(if (scalar_cardinality_probe_stage? stage)
-				(group_stage_with_physical_planning_session stage planning_session)
-				stage))))
+			(begin
+				(define prepared (if (or (scalar_cardinality_probe_stage? stage)
+					(not (nil? (qassoc_get (gs_facts stage) (quote stable-aggregate-domain) nil)))
+					(not (nil? (qassoc_get (gs_facts stage) (quote invariant-property-cover) nil)))
+					(not (nil? (qassoc_get (gs_facts stage) (quote contribution-domain) nil))))
+					(group_stage_with_physical_planning_session stage planning_session) stage))
+				(if (nil? (qassoc_get (gs_facts stage) (quote contribution-domain) nil)) prepared
+					(group_stage_with_facts prepared (qassoc_set (gs_facts prepared)
+						(quote contribution_context_sources) (qb_sources block))))))))
 		(define catalog (make_lowering_catalog signature_stages))
 		(define cataloged_stages (map (qb_stages block) (lambda (stage)
 			(begin
@@ -1775,10 +1783,11 @@ outer joins. */
 		(define scalar_order_base_stage (and (not query_input)
 			(compatible_scalar_order_aggregates? ags)))
 		/* Aggregate column names belong to the immutable logical stage. Prepared
-		input and rewritten descriptors below affect execution only. Base aggregate
+		input and RecMap rewrites below affect execution only: removing a scalar
+		alias must not rename aggregate columns read by the stage output. Base aggregate
 		columns use their direct physical builder and need no canonical list here. */
 		(define aggregate_cols (if (or query_input scalar_order_base_stage)
-			(map ags (lambda (ag) (aggregate_col_name_using src ag)))
+			(map ags (lambda (ag) (aggregate_col_name_using logical_src ag)))
 			'()))
 		(define scalar_aggregate_stage (scalar_aggregate_probe_stage? stage))
 		(define prepared_src (if (query_block? optimized_src)
@@ -4528,6 +4537,11 @@ session read is never evaluated while building the plan. */
 					dimension_expr))
 			category_expr))))
 
+/* Contribution candidates add a mode and, for full maps, a source-version
+expression. A delta map is built once per correction invocation. Full maps may
+share through the query cache only with the same output projection, bounds
+and source versions. A shared row-identity recipe alone does not identify its
+value mapper. */
 (define group_range_recmap_binding (lambda (candidate)
 	(begin
 		(define specs (nth candidate 2))
@@ -4554,7 +4568,7 @@ session read is never evaluated while building the plan. */
 						(physical_query_tx_symbol)
 						(list (quote lambda) (list (physical_query_tx_symbol))
 							(group_range_recmap_dimension_probe spec param))))))))
-		(define map_expr (if (nil? outer_bound) (nth candidate 3)
+		(define map_expr (if (or (nil? outer_bound) (and (> (count candidate) 4) (equal? (nth candidate 4) (quote delta)))) (nth candidate 3)
 			(group_range_recmap_replace_symbol
 				(nth candidate 3) outer_bound bound_param)))
 		(define value_mapper (if (and (single_source? specs)
@@ -4571,16 +4585,20 @@ session read is never evaluated while building the plan. */
 				map_expr)))
 		(list (quote define) (group_range_recmap_var candidate)
 			(if (nil? outer_bound) value_mapper
-				(list (quote lambda) (list bound_param ref_param)
-					(list (list (physical_query_session_symbol)
-						"get_or_compute_scoped" (physical_query_scope_symbol)
-						(list (quote concat) (concat "__group_range_recmap_"
-							(fnv_hash (serialize (nth candidate 3))) ":")
-							(list (quote serialize) bound_param))
-						(physical_query_tx_symbol)
-						(list (quote lambda) (list (physical_query_tx_symbol))
-							value_mapper))
-						ref_param)))))))
+				(if (and (> (count candidate) 4) (equal? (nth candidate 4) (quote delta)))
+					(list (list (quote lambda) (list map_var)
+						(list (quote lambda) (list bound_param ref_param) (list map_var ref_param))) value_mapper)
+					(list (quote lambda) (list bound_param ref_param)
+						(list (list (physical_query_session_symbol)
+							"get_or_compute_scoped" (physical_query_scope_symbol)
+							(list (quote concat) (concat "__group_range_recmap_"
+								(fnv_hash (serialize (list (nth candidate 3) value_cols value_exprs))) ":")
+								(list (quote serialize) (if (> (count candidate) 5)
+									(list (quote list) bound_param (nth candidate 5)) bound_param)))
+							(physical_query_tx_symbol)
+							(list (quote lambda) (list (physical_query_tx_symbol))
+								value_mapper))
+							ref_param))))))))
 
 (define rewrite_group_range_recmap_expr (lambda (candidate expr)
 	(if (nil? candidate) expr
@@ -6347,7 +6365,7 @@ RecSet; membership edges retain their own physical operators. */
 		(planner_cost_add (planner_cost
 			(+ (* 2 planner_membership_recset_startup_ns)
 				(* (+ driver_scan_invocations (* batches candidate_scan_invocations))
-				planner_membership_scan_invocation_ns)
+					planner_membership_scan_invocation_ns)
 				(* batches driver_scan_invocations
 					planner_membership_ordered_scan_invocation_ns))
 			(+
@@ -12383,18 +12401,36 @@ RecSet node is written into logical IR. */
 		types/collations as a query-block fact, and resolves the collation of
 		computed text ORDER keys. */
 		(define typed_ir (sql_type_annotate_ir ir))
-		(join_reorder
+		(annotate_contribution_domains (join_reorder
 			(if (aggregate_pushdown_exact_access_dominates? typed_ir planning_session tx)
 				typed_ir
 				(aggregate_pushdown_logical typed_ir planning_session tx))
-			planning_session tx))))
+			planning_session tx)))))
 
 (define neumann_compile_pipeline (lambda (ast planning_session tx)
 	(begin
 		(tx_check tx)
-		(define ir (decorrelate_logical_query ast))
+		/* Constant columns are a relational equivalence, independent of the
+		aggregate carrier chosen below. Propagate them before decorrelation so
+		unused scalar branches cannot become eager dependency stages. Keep the
+		parameter relation itself, and guard every substituted binding. */
+		(define ast (bind_constant_domain_columns ast planning_session true))
+		/* Domain eligibility is structural. Do not reorder or record guards for
+		a specialization which will be discarded: those guards otherwise make
+		the ordinary plan depend on every changing literal from the trial. */
+		(define domain_ast (bind_parameter_row_domains ast planning_session false))
+		(define ir (decorrelate_logical_query domain_ast))
 		(tx_check tx)
-		(define reordered (optimize_logical_query ir planning_session tx))
+		(define changed (not (expression_equal? ast domain_ast)))
+		(define eligible (if changed
+			(begin
+				(define candidate (annotate_contribution_domains (sql_type_annotate_ir ir)))
+				(and (or (ir_has_contribution_domain? candidate) (ir_has_invariant_property_cover? candidate))
+					(not (ir_has_unproved_query_aggregate? candidate)))) true))
+		(if (and changed eligible)
+			(bind_parameter_row_domains ast planning_session true) nil)
+		(define reordered (optimize_logical_query
+			(if eligible ir (decorrelate_logical_query ast)) planning_session tx))
 		(tx_check tx)
 		(define prepared (prepare_physical_queryplan reordered planning_session tx))
 		(tx_check tx)

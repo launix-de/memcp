@@ -558,9 +558,9 @@ test_cases:
 
   - name: "Scalar ORDER keeps ties stable and missing LEFT values last"
     setup:
-      - "UPDATE usol_file_multi SET uploaded_at = 25 WHERE bucket = 1 AND id = 2"
+      - sql: "UPDATE usol_file_multi SET uploaded_at = 25 WHERE bucket = 1 AND id = 2"
     cleanup:
-      - "UPDATE usol_file_multi SET uploaded_at = 20 WHERE bucket = 1 AND id = 2"
+      - sql: "UPDATE usol_file_multi SET uploaded_at = 20 WHERE bucket = 1 AND id = 2"
     sql: |
       SELECT projected.id
       FROM (

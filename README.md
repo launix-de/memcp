@@ -25,6 +25,9 @@ included as well.
 
 MemCP is licensed under GPL-3.0-or-later.
 
+See the [feature catalog](FEATURES.md) for SQL and frontend support, storage
+backends and operators, planner capabilities, and the experimental JIT.
+
 Read the [MemCP 0.9 beta release overview](https://launix.de/launix/memcp-beta-release-0-9-one-database-for-transactions-search-and-analytics/)
 for the application story behind the current release.
 

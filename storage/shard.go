@@ -1164,7 +1164,12 @@ func (t *storageShard) resolveVisiblePrimaryRecidLocked(staleRecid uint32) (uint
 }
 
 func (t *storageShard) UpdateFunction(idx uint32, withTrigger bool, alreadyLocked bool, currentTx *TxContext) func(...scm.Scmer) scm.Scmer {
-	return t.UpdateFunctionBatch(idx, withTrigger, alreadyLocked, nil, nil, currentTx)
+	update := t.UpdateFunctionBatch(idx, withTrigger, alreadyLocked, nil, nil, currentTx)
+	return func(a ...scm.Scmer) scm.Scmer {
+		t.t.beginContributionMutation()
+		defer t.t.endContributionMutation()
+		return update(a...)
+	}
 }
 
 // sameUpdateValue keeps Scheme's useful numeric/coercive equality while
@@ -2803,6 +2808,8 @@ func (m *ShardMapReducer) FlushSideEffects() {
 }
 
 func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLocked bool, inputSanitized bool, onFirstInsertId func(int64), isIgnore bool, currentTx *TxContext) uint32 {
+	t.t.beginContributionMutation()
+	defer t.t.endContributionMutation()
 	ss := SessionStateFromTx(currentTx)
 	// Check table-level user lock (LOCK TABLES): writes block under any lock.
 	// Always call waitTableLock — it handles other-session blocking and
