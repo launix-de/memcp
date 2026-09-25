@@ -15,7 +15,7 @@
 
 # 36 months of fixtures: 360,000 offers and 1,800,000 line items.
 # Measure 12 months (2026) plus 3 complete years (2024-2026).
-# See perf-tests/kpi-periods/README.md for fixed-fixture A/B commands.
+# See tests/README.md for the shared performance runner and A/B protocol.
 metadata:
   version: '1.0'
   description: Twelve monthly and three yearly KPIs over large offer histories

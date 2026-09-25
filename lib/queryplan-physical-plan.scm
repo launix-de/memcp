@@ -4479,9 +4479,9 @@ session read is never evaluated while building the plan. */
 					(group_range_recmap_replace_symbol item old replacement))))
 			_ expr))))
 
-/* A row-independent expression is an outer bound just like a column. Keep
-it as a recipe argument so query-local mappings cannot capture the first row's
-coordinate when a derived parameter changes later in the driving relation. */
+/* An expression over outer-row columns is an outer bound just like a column.
+Keep it as a recipe argument so query-local mappings cannot capture the first
+row's coordinate when a derived parameter changes in the driving relation. */
 (define group_range_recmap_outer_bound (lambda (candidate)
 	(begin
 		(define stage (nth (car (nth candidate 2)) 2))
@@ -4490,8 +4490,16 @@ coordinate when a derived parameter changes later in the driving relation. */
 			(range_domain_to domain) (range_domain_from domain)))
 		(define driver (nth candidate 0))
 		(define inputs (contribution_outer_inputs bound '()))
-		(if (and (not (empty_list? inputs)) (contribution_pure_expr? bound)
-			(expression_equal? inputs (contribution_outer_inputs bound (list (source_alias driver)))))
+		/* Session-only bounds are already fixed for this query. A bound using
+		a local dependency output belongs inside the per-record mapping recipe,
+		not in a memo key rebuilt for every driver row. Only genuine outer-row
+		coordinates need the explicit argument that distinguishes sibling cuts. */
+		(define outer_columns (filter inputs (lambda (input)
+			(match input ((symbol get_column) _alias _ci _column _cci) true _ false))))
+		(define local_aliases (cons (source_alias driver)
+			(map (contribution_stage_sources stage) source_alias)))
+		(if (and (not (empty_list? outer_columns)) (contribution_pure_expr? bound)
+			(expression_equal? inputs (contribution_outer_inputs bound local_aliases)))
 			(lower_column_expr_for_alias driver bound) nil))))
 
 (define group_range_recmap_batch_dimension_value_mapper (lambda (candidate range_map_expr)
@@ -12413,6 +12421,14 @@ RecSet node is written into logical IR. */
 				(aggregate_pushdown_logical typed_ir planning_session tx))
 			planning_session tx)))))
 
+/* Keep the proof procedure compiled once. Constructing it inside every SQL
+compile repeats Scheme closure optimization even when no domain was changed. */
+(define parameter_domain_ir_eligible? (lambda (ir)
+	(begin
+		(define candidate (annotate_contribution_domains (sql_type_annotate_ir ir)))
+		(and (or (ir_has_contribution_domain? candidate) (ir_has_invariant_property_cover? candidate))
+			(not (ir_has_unproved_query_aggregate? candidate))))))
+
 (define neumann_compile_pipeline (lambda (ast planning_session tx)
 	(begin
 		(tx_check tx)
@@ -12428,12 +12444,7 @@ RecSet node is written into logical IR. */
 		(define ir (decorrelate_logical_query domain_ast))
 		(tx_check tx)
 		(define changed (not (expression_equal? ast domain_ast)))
-		(define eligible_ir? (lambda (ir)
-			(begin
-				(define candidate (annotate_contribution_domains (sql_type_annotate_ir ir)))
-				(and (or (ir_has_contribution_domain? candidate) (ir_has_invariant_property_cover? candidate))
-					(not (ir_has_unproved_query_aggregate? candidate))))))
-		(define eligible (or (not changed) (eligible_ir? ir)))
+		(define eligible (or (not changed) (parameter_domain_ir_eligible? ir)))
 		/* One unsupported categorical domain must not force every ordered
 		coordinate back through UNION distribution. Try individual root domains,
 		largest first, retaining the same complete proof gate. This bounded
@@ -12450,8 +12461,13 @@ RecSet node is written into logical IR. */
 					(if (not (nil? chosen)) chosen
 						(begin
 							(tx_check tx)
-							(define candidate (decorrelate_logical_query (bind_parameter_row_domains ast (list source))))
-							(if (eligible_ir? candidate) candidate nil)))) nil))
+							(define candidate_ast (bind_parameter_row_domains ast (list source)))
+							/* A single root domain often is the complete rejected trial.
+							Do not decorrelate and prove that identical alternative twice. */
+							(if (expression_equal? candidate_ast domain_ast) nil
+								(begin
+									(define candidate (decorrelate_logical_query candidate_ast))
+									(if (parameter_domain_ir_eligible? candidate) candidate nil)))))) nil))
 				(if (nil? partial) (decorrelate_logical_query ast) partial))))
 		(define reordered (optimize_logical_query selected_ir planning_session tx))
 		(tx_check tx)
