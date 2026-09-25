@@ -4713,8 +4713,17 @@ qb_where already contains the selected physical alternative. */
 		_ expr)))
 
 (define candidate_stage_without_source (lambda (stages stage_id)
-	(filter (coalesceNil stages '()) (lambda (stage)
-		(not (and (group_stage? stage) (equal? (gs_id stage) stage_id)))))))
+	(begin
+		(define remaining (filter (coalesceNil stages '()) (lambda (stage)
+			(not (and (group_stage? stage) (equal? (gs_id stage) stage_id))))))
+		/* Replacing this block's membership join does not remove consumers in
+		other stages, such as a window over the same filtered row domain. Keep
+		the shared definition until its last relational dependency disappears. */
+		(define graph (stage_dependency_graph stages))
+		(if (reduce remaining (lambda (needed stage)
+			(or needed (reduce (stage_direct_deps graph stage) (lambda (found dependency)
+				(or found (equal? (gs_id dependency) stage_id))) false))) false)
+			stages remaining))))
 
 (define candidate_stage_output_source? (lambda (stages src)
 	(and (stage_output_relation? (source_relation src))

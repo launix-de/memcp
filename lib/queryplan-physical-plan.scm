@@ -378,13 +378,11 @@ only partitioned FROM source would erase the block's row multiplicity
 					(define parent (lowering_catalog_parent stages))
 					(if (lowering_catalog? parent) (stage_for_group_cache_source parent src) nil))))
 		(reduce (coalesceNil stages '()) (lambda (found stage)
-			(if (not (nil? found))
-				found
-				(if (and (group_stage? stage)
-					(and (equal? (group_stage_cache_schema stage) (source_schema src))
-						(equal? (group_stage_cache_relation stage) (source_relation src))))
-					stage
-					nil)))
+			(if (and (group_stage? stage)
+				(and (equal? (group_stage_cache_schema stage) (source_schema src))
+					(equal? (group_stage_cache_relation stage) (source_relation src))))
+				(if (nil? found) stage (merge_group_prepare_stage found stage))
+				found))
 			nil))))
 
 (define group_cache_stages_from_sources (lambda (stages sources)
@@ -413,11 +411,15 @@ only partitioned FROM source would erase the block's row multiplicity
 		(reduce (coalesceNil stages '()) (lambda (index stage)
 			(if (not (group_stage? stage))
 				index
-				(set_assoc index
-					(stage_dependency_group_cache_key
+				(begin
+					(define key (stage_dependency_group_cache_key
 						(group_stage_cache_schema stage)
-						(group_stage_cache_relation stage))
-					stage))) '()))))
+						(group_stage_cache_relation stage)))
+					(define previous (get_assoc index key))
+					/* A physical source no longer names an individual logical
+					consumer. Its prepare must retain every aggregate extension. */
+					(set_assoc index key (if (nil? previous) stage
+						(merge_group_prepare_stage previous stage)))))) '()))))
 
 (define stage_dependencies_from_output_sources (lambda (id_index sources)
 	(unique_stages_by_id (filter (map (coalesceNil sources '()) (lambda (src)
@@ -1781,7 +1783,8 @@ outer joins. */
 		(define scalar_order_base_stage (and (not query_input)
 			(compatible_scalar_order_aggregates? ags)))
 		/* Aggregate column names belong to the immutable logical stage. Prepared
-		input and rewritten descriptors below affect execution only. Base aggregate
+		input and RecMap rewrites below affect execution only: removing a scalar
+		alias must not rename aggregate columns read by the stage output. Base aggregate
 		columns use their direct physical builder and need no canonical list here. */
 		(define aggregate_cols (if (or query_input scalar_order_base_stage)
 			(map ags (lambda (ag) (aggregate_col_name_using logical_src ag)))
@@ -6362,7 +6365,7 @@ RecSet; membership edges retain their own physical operators. */
 		(planner_cost_add (planner_cost
 			(+ (* 2 planner_membership_recset_startup_ns)
 				(* (+ driver_scan_invocations (* batches candidate_scan_invocations))
-				planner_membership_scan_invocation_ns)
+					planner_membership_scan_invocation_ns)
 				(* batches driver_scan_invocations
 					planner_membership_ordered_scan_invocation_ns))
 			(+
