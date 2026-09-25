@@ -371,8 +371,6 @@ test_cases:
 
   - name: "Nested scalar sums retain the complete aggregate domain"
     session_id: "ds-nested-sum"
-    setup:
-      - scm: '(session "nested-sum-before" (count (group_value_cache)))'
     sql: &nested_sum_query |
       SELECT w.lo,w.hi,(SELECT SUM((SELECT h.quantity FROM ds_history h
           WHERE h.entity_id=e.id AND h.coordinate<=w.hi ORDER BY h.coordinate DESC LIMIT 1))
