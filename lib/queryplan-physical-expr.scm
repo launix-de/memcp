@@ -974,15 +974,16 @@ output coordinate or aggregate. Explicit transactions still use the producer. */
 		(lower_group_value_cache_probe all_stages stage value_expr keys lookup_keys reduce_expr neutral_expr)
 		(if (and (nil? contribution_mode) (equal? reduce_expr (quote sql_sum_reduce))
 			(not (nil? (qassoc_get (gs_facts stage) (quote contribution-domain) nil))))
-			(if (contribution_snapshot_selected? stage)
+			(if (contribution_snapshot_selected? all_stages stage)
 				(lower_contribution_snapshot_probe all_stages stage value_expr keys lookup_keys reduce_expr neutral_expr)
 				(lower_scalar_aggregate_query_probe_expr all_stages stage value_expr keys lookup_keys reduce_expr neutral_expr (quote fresh)))
 			(begin
 				(define all_stages (if (nil? contribution_mode) all_stages
 					(contribution_physical_catalog all_stages stage)))
 				(define input (gs_input stage))
-				(define property_cover (if (or (nil? contribution_mode) (equal? contribution_mode (quote point-cached)))
-					(qassoc_get (gs_facts stage) (quote invariant-property-cover) nil) nil))
+				/* A fixed property remains reusable inside full and delta producers.
+				Its candidate keys restrict work; the original filter stays residual. */
+				(define property_cover (qassoc_get (gs_facts stage) (quote invariant-property-cover) nil))
 				(define property_cover (if (invariant_property_cover_selected? all_stages stage property_cover) property_cover nil))
 				(define keyed_terms (map (produceN (count keys)) (lambda (i)
 					(list (query_key_term_alias (qb_sources input) (nth keys i))
@@ -1023,8 +1024,12 @@ output coordinate or aggregate. Explicit transactions still use the producer. */
 						(lambda (candidate) (if (equal? contribution_mode (quote delta))
 							(contribution_bounded_recmap candidate (cadr (qassoc_get (gs_facts stage) (quote contribution-domain) nil)) (quote __contribution_keys))
 							(merge (list candidate (list (quote full)
-								(cons (quote list) (map (nth (qassoc_get (gs_facts stage) (quote contribution-domain) nil) 5)
-									(lambda (source) (list (quote table_read_version) (source_table_expr source)))))))))))
+								(list (quote list)
+									(cons (quote list) (map (nth (qassoc_get (gs_facts stage) (quote contribution-domain) nil) 5)
+										(lambda (source) (list (quote table_read_version) (source_table_expr source)))))
+									(cons (quote list) (map (nth (qassoc_get (gs_facts stage) (quote contribution-domain) nil) 4)
+										(lambda (binding) (lower_column_expr_for_alias
+											(car (qassoc_get (gs_facts stage) (quote contribution-domain) nil)) binding)))))))))))
 					(if (not (nil? property_cover))
 						(map (select_group_range_recmap_candidate all_stages stage simplified_input planning_session)
 							(lambda (candidate) (contribution_bounded_recmap candidate nil (quote __property_candidates))))
@@ -9247,8 +9252,9 @@ remain the inputs already chosen by the planner. */
 					(sort scored (lambda (a b) (if (equal? (cadr a) (cadr b))
 						(< (nth a 2) (nth b 2)) (< (cadr a) (cadr b))))) car) true))))))
 
-/* Cost the known parameter workload, not hypothetical future requests.
-The affected-row estimate is an explicitly low-confidence uniform-domain prior;
+/* Use the same one-cold-plus-one-reuse prior as persistent point caches when
+an invocation exposes only one coordinate per fixed group. Larger known domains
+provide their own reuse estimate. The affected-row estimate is an explicitly low-confidence uniform-domain prior;
 dense actual corrections rebuild the base instead. Coefficients are shared
 with existing bulk ordered lookup and scan costs. */
 (define contribution_snapshot_costs (lambda (rows history points width covers)
@@ -9263,36 +9269,42 @@ with existing bulk ordered lookup and scan costs. */
 		(list (planner_cost 0 direct 0 0 0 0 0 0 (* points rows) 0.5)
 			(planner_cost prepared corrected 0 0 0 0 (* rows 128) 0 rows 0.35) affected))))
 
+/* Correction work is capped by the full producer at execution time. Compare
+complete workload costs directly: the generic confidence surcharge would price
+an unbounded correction a second time and suppress the bounded alternative. */
 (define contribution_snapshot_runtime_wins? (lambda (driver covers points width)
 	(begin
 		(define rows (scan_estimate driver))
 		(define history (reduce covers (lambda (total source) (+ total (scan_estimate source))) 0))
 		(define costs (contribution_snapshot_costs rows history points width (count covers)))
-		(and (> points 1) (> rows 0) (<= (* rows 2) contribution_snapshot_key_budget) (planner_cost_clear_winner? (cadr costs) (car costs))))))
+		(and (> points 1) (> rows 0) (<= (* rows 2) contribution_snapshot_key_budget) (planner_cost_better? (cadr costs) (car costs))))))
 
-(define contribution_snapshot_selected? (lambda (stage)
+(define contribution_snapshot_selected? (lambda (all_stages stage)
 	(begin
 		(define proof (qassoc_get (gs_facts stage) (quote contribution-domain) nil))
 		(define context (qassoc_get (gs_facts stage) (quote contribution_context_sources) '()))
-		(define axis_source (source_for_alias context nil (cadr (nth proof 2)) false))
+		(define axis_source (source_for_alias context nil (contribution_axis_alias (nth proof 2)) false))
 		/* Correlated fixed keys from the same relation can have one point per
 		group. Without distinct statistics there is no assured reuse estimate. */
 		(define varying_fixed (reduce (nth proof 4) (lambda (found expr)
 			(or found (match expr ((symbol get_column) alias _ci _col _cci)
-				(equal? alias (cadr (nth proof 2))) _ false))) false))
-		(define points (if (or (nil? axis_source) varying_fixed) 1
-			(coalesceNil (planner_source_row_count axis_source) 1)))
+				(equal? alias (contribution_axis_alias (nth proof 2))) _ false))) false))
+		(define points (max 2 (if (or (nil? axis_source) varying_fixed) 1
+			(coalesceNil (planner_source_row_count axis_source) 1))))
 		(define rows (planner_source_row_count (car proof)))
 		(define history (reduce (nth proof 3) (lambda (total cover)
 			(+ total (coalesceNil (planner_source_row_count (car cover)) 0))) 0))
-		(define width (max 1 (count (nth proof 6))))
+		/* Separate payload probes can share a logical selection stage. Count
+		the payloads evaluated by direct lowering, not only fused stage nodes. */
+		(define width (max 1 (reduce (nth proof 6) (lambda (total entry)
+			(+ total (count (gs_aggregates (stage_by_id all_stages (car entry)))))) 0)))
 		(define costs (contribution_snapshot_costs (coalesceNil rows 0) history points width (count (nth proof 3))))
 		(define planning_session (qassoc_get (gs_facts stage) (quote physical_planning_session) nil))
 		(define wins (and (> points 1) (number? rows) (> rows 0)
 			(<= (* rows 2) contribution_snapshot_key_budget)
-			(planner_cost_clear_winner? (cadr costs) (car costs))))
+			(planner_cost_better? (cadr costs) (car costs))))
 		(define runtime_points (if (and (not (nil? axis_source)) (not varying_fixed) (source_is_base_table? axis_source))
-			(list (quote scan_estimate) (source_table_expr axis_source)) points))
+			(list (quote max) 2 (list (quote scan_estimate) (source_table_expr axis_source))) points))
 		(define normal (if (planner_guarded_choice wins
 			(list (quote contribution_snapshot_runtime_wins?) (source_table_expr (car proof))
 				(cons (quote list) (map (nth proof 3) (lambda (cover) (source_table_expr (car cover)))))
@@ -9303,9 +9315,10 @@ with existing bulk ordered lookup and scan costs. */
 		(planner_record_physical_decision (list
 			(list "decision_id" decision_id) (list "decision" "contribution_domain")
 			(list "chosen" chosen) (list "normally_chosen" normal)
-			(list "reason" (if (<= points 1) "reuse_not_established" "estimated_complete_workload"))
+			(list "reason" "estimated_complete_workload")
 			(list "inputs" (list (list "driver_rows" rows) (list "cover_rows" history)
 				(list "points_per_fixed_group" points) (list "scalar_dependencies" width)
+				(list "reuse_estimate" "known_domain_or_one_cold_plus_one_reuse_prior")
 				(list "affected_rows_per_transition" (nth costs 2))
 				(list "affected_estimate" "uniform_domain_prior")))
 			(list "alternatives" (list
@@ -9445,17 +9458,32 @@ points: a changed spelling of the bound can reuse the same aggregate point. */
 	(reduce_assoc values (lambda (valid key value)
 		(and valid (contribution_integral? value))) true)))
 
-(define snapshot_group_nearest (lambda (domain coordinate)
-	(reduce (coalesceNil (snapshot_group_anchors domain) '())
-		(lambda (best candidate)
-			(begin
-				(define anchor (snapshot_group_states
-					(snapshot_group_coordinate_key domain candidate)))
-				(define base (if (nil? anchor) nil (snapshot_group_bases (car anchor))))
-				(if (or (nil? base) (and (not (nil? best))
-					(<= (contribution_magnitude (- coordinate (car best)))
-						(contribution_magnitude (- coordinate candidate))))) best
-					(list candidate anchor base)))) nil)))
+/* On either side of the requested coordinate, the closest valid anchor has
+an interval contained in every farther anchor's interval. Only the two
+bracketing anchors can minimize the conservative affected-key cover. Compare
+that actual work, not numeric distance; reuse the winning cover for correction. */
+(define snapshot_group_anchor_for_work (lambda (domain coordinate changed)
+	(begin
+		(define neighbors (reduce (coalesceNil (snapshot_group_anchors domain) '())
+			(lambda (neighbors candidate)
+				(begin
+					(define anchor (snapshot_group_states (snapshot_group_coordinate_key domain candidate)))
+					(define base (if (nil? anchor) nil (snapshot_group_bases (car anchor))))
+					(define side (if (<= candidate coordinate) 0 1))
+					(define previous (nth neighbors side))
+					(if (or (nil? base) (and (not (nil? previous))
+						(if (equal? side 0) (>= (car previous) candidate) (<= (car previous) candidate)))) neighbors
+						(if (equal? side 0) (list (list candidate anchor base) (cadr neighbors))
+							(list (car neighbors) (list candidate anchor base)))))) '(nil nil)))
+		(reduce neighbors (lambda (best neighbor)
+			(if (nil? neighbor) best
+				(begin
+					(define keys (changed (min coordinate (car neighbor)) (max coordinate (car neighbor))))
+					(if (and (not (nil? best))
+						(or (< (count (nth best 3)) (count keys))
+							(and (equal? (count (nth best 3)) (count keys))
+								(<= (count (cadr (cadr best))) (count (cadr (cadr neighbor))))))) best
+						(merge (list neighbor (list keys))))))) nil))))
 
 (define snapshot_group_value (lambda (anchor base key)
 	(if (has_assoc? (cadr anchor) key) (get_assoc (cadr anchor) key) (get_assoc base key))))
@@ -9496,10 +9524,10 @@ points: a changed spelling of the bound can reuse the same aggregate point. */
 				(if (not (nil? hit))
 					(if (expression_equal? view (read_view)) (car hit) (fallback))
 					(begin
-						(define nearest (snapshot_group_nearest domain axis))
+						(define nearest (snapshot_group_anchor_for_work domain axis changed))
 						(define anchor (if (nil? nearest) nil (cadr nearest)))
 						(define candidates (if (nil? nearest) '()
-							(changed (min axis (car nearest)) (max axis (car nearest)))))
+							(nth nearest 3)))
 						/* Dense corrections cost more than constructing a closer anchor.
 						Use affected work, not distance in the ordered dimension. */
 						(define rebuild (or (nil? anchor)
@@ -9572,7 +9600,7 @@ bounds. Expose that access geometry to the common RecMap candidate builder. */
 				(begin
 					(define selection (if (group_stage? stage)
 						(qassoc_get (nth proof 6) (gs_id stage) nil) nil))
-					(if (or (nil? selection) (not (empty_list? (range_stage_domains stage)))) stage
+					(if (or (nil? selection) (nil? (nth selection 3)) (not (empty_list? (range_stage_domains stage)))) stage
 						(group_stage_with_facts stage
 							(qassoc_set (qassoc_set (qassoc_set (gs_facts stage)
 								(quote range-domains) (list (list (quote range-domain)

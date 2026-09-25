@@ -75,6 +75,18 @@ The logical planner is based on three combined operator shapes:
 `stage-output` is a logical relation descriptor produced by `group-stage` or
 `union-block`. It is not a fourth algebra operator.
 
+`parameter-rows` is a bounded logical VALUES relation for independent literal
+or parameter cells. Its size comes from query syntax, never scanned data.
+Cells remain request-bound through physical lowering, and UNION DISTINCT must
+deduplicate their runtime values, preserving NULL versus zero. Substituting a
+constant column still requires guards for every parameter used in that proof.
+The descriptor does not authorize dropping domain keys, nullable partitions,
+hidden columns, or ORDER/LIMIT barriers.
+If combining several parameter domains fails the complete contribution proof,
+the planner may try individual root domains, largest first. A failed combined
+candidate must not discard a separately proven domain. Every alternative still
+passes the same whole-query proof gate before costing or recording guards.
+
 This coarse model is intentional. MemCP should not split the logical layer into
 many textbook operators such as separate scan/select/project/join/order nodes.
 That creates artificial boundaries, expensive rewrite churn, and many later
@@ -430,6 +442,19 @@ ownership and lifetimes.
 Do not introduce a storage-level query cache, move group caches into transient
 planner state, or merge the two lifecycles merely to simplify physical
 lowering or lock management.
+
+A snapshot dimension denotes one ordered coordinate, not a disjoint partial
+sum interval. Reuse requires the same fixed inputs and complete source-version
+view. A logical contribution proof must cover both selected-row changes and
+predicate/payload changes; conditional payloads and bounded existence tests
+retain all original residual predicates. A derived outer coordinate remains
+an explicit argument of every shared physical selection recipe.
+
+For monotone interval covers, compare affected-key work at the nearest valid
+anchor on each side. Numerical coordinate distance alone is not a work estimate.
+Reuse the chosen key cover for correction; dense corrections may rebuild a full
+anchor. Fixed first/last properties may keep their own group cache inside both
+the full producer and the correction producer.
 
 ## Functional Plans, Optimizer-Owned Mutation
 

@@ -598,15 +598,17 @@ func (u *storageShard) schemaColumn(colName string) *column {
 }
 
 func (u *storageShard) makeComputedColumnProxy(colName string, col *column) ColumnStorage {
-	if col == nil || len(col.OrcSortCols) == 0 {
+	if col == nil || (len(col.OrcSortCols) == 0 && col.Computor.IsNil()) {
 		return nil
 	}
 	return &StorageComputeProxy{
 		delta:     make(map[uint32]scm.Scmer),
+		computor:  col.Computor,
+		inputCols: col.ComputorInputCols,
 		shard:     u,
 		colName:   colName,
 		count:     u.main_count,
-		isOrdered: true,
+		isOrdered: len(col.OrcSortCols) != 0,
 	}
 }
 
@@ -626,13 +628,15 @@ func (u *storageShard) attachColumnRuntime(colName string, columnstorage ColumnS
 		}
 		return proxy
 	}
-	// ORC columns are a runtime contract, not a best-effort cache. Older or
+	// Computed columns are a runtime contract, not a best-effort cache. Older or
 	// partially rebuilt shards may still have a plain placeholder storage on
 	// disk (`StorageSparse`, `const[nil]`, ...). Rehydrate those columns into an
-	// ordered proxy so readers/rebuilds never publish the placeholder as a real
+	// lazy proxy so readers/rebuilds never publish the placeholder as a real
 	// user-visible value column.
 	if proxy := u.makeComputedColumnProxy(colName, col); proxy != nil {
-		u.t.hasOrderedColumns.Store(true)
+		if len(col.OrcSortCols) != 0 {
+			u.t.hasOrderedColumns.Store(true)
+		}
 		return proxy
 	}
 	return columnstorage
@@ -1069,7 +1073,13 @@ func NewShard(t *table) *storageShard {
 	result.deltaColumns = make(map[string]int)
 	result.deletions.Reset()
 	for _, column := range t.Columns {
-		result.columns[column.Name] = new(StorageSparse)
+		// Computation belongs to the table definition, not to the shards that
+		// happened to exist when createcolumn first prepared its values.
+		if proxy := result.makeComputedColumnProxy(column.Name, column); proxy != nil {
+			result.columns[column.Name] = proxy
+		} else {
+			result.columns[column.Name] = new(StorageSparse)
+		}
 	}
 	if t.PersistencyMode == Safe || t.PersistencyMode == Logged {
 		result.logfile = result.t.schema.persistence.OpenLog(result.uuid.String())

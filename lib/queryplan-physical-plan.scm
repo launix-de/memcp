@@ -4472,27 +4472,27 @@ session read is never evaluated while building the plan. */
 			(gs_id (nth item 2))))))))))
 
 (define group_range_recmap_replace_symbol (lambda (expr old replacement)
-	(if (and (symbol? expr) (equal? expr old)) replacement
+	(if (expression_equal? expr old) replacement
 		(match expr
 			(cons head tail) (cons (group_range_recmap_replace_symbol head old replacement)
 				(map tail (lambda (item)
 					(group_range_recmap_replace_symbol item old replacement))))
 			_ expr))))
 
+/* A row-independent expression is an outer bound just like a column. Keep
+it as a recipe argument so query-local mappings cannot capture the first row's
+coordinate when a derived parameter changes later in the driving relation. */
 (define group_range_recmap_outer_bound (lambda (candidate)
 	(begin
 		(define stage (nth (car (nth candidate 2)) 2))
 		(define domain (car (range_stage_domains stage)))
 		(define bound (if (range_domain_unbounded_from? domain)
 			(range_domain_to domain) (range_domain_from domain)))
-		(match bound
-			((symbol get_column) alias _ignorecase _col _col_ignorecase)
-			(if (equal?? alias (source_alias (nth candidate 0))) nil
-				(lower_column_expr_for_alias (nth candidate 0) bound))
-			((quote get_column) alias _ignorecase _col _col_ignorecase)
-			(if (equal?? alias (source_alias (nth candidate 0))) nil
-				(lower_column_expr_for_alias (nth candidate 0) bound))
-			_ nil))))
+		(define driver (nth candidate 0))
+		(define inputs (contribution_outer_inputs bound '()))
+		(if (and (not (empty_list? inputs)) (contribution_pure_expr? bound)
+			(expression_equal? inputs (contribution_outer_inputs bound (list (source_alias driver)))))
+			(lower_column_expr_for_alias driver bound) nil))))
 
 (define group_range_recmap_batch_dimension_value_mapper (lambda (candidate range_map_expr)
 	(begin
@@ -5505,9 +5505,15 @@ fix). */
 (define source_table_expr (lambda (src)
 	(if (literal_rows_relation? (source_relation src))
 		(list (quote quote) (literal_rows_data (source_relation src)))
-		(if (information_schema_source? (source_schema src) (source_relation src))
-			(list (quote information_schema_rows) (source_schema src) (source_relation src))
-			(list (quote table) (source_schema src) (source_relation src))))))
+		(if (parameter_rows_relation? (source_relation src))
+			(begin
+				(define rows (cons (quote list) (map (row_domain_data (source_relation src))
+					(lambda (row) (cons (quote list) row)))))
+				(if (equal? (nth (source_relation src) 3) (quote distinct))
+					(list (quote literal_union_dedupe_rows) rows) rows))
+			(if (information_schema_source? (source_schema src) (source_relation src))
+				(list (quote information_schema_rows) (source_schema src) (source_relation src))
+				(list (quote table) (source_schema src) (source_relation src)))))))
 
 (define source_table_expr_using (lambda (stages src)
 	(begin
@@ -6674,7 +6680,7 @@ scalar comparison work rather than an uncalibrated multiplier. */
 		(define src (car (qb_sources block)))
 		(define fields (expand_query_block_fields (qb_sources block) (qb_fields block)))
 		(define grouped_block (expand_grouped_query_block block))
-		(if (not (or (source_is_base_table? src) (literal_rows_relation? (source_relation src))))
+		(if (not (or (source_is_base_table? src) (row_domain_relation? (source_relation src))))
 			(neumann_fail "build_queryplan" "single-source query-block lowering only supports base tables")
 			true)
 		(if (not (empty_list? (qb_stages block)))
@@ -9619,7 +9625,7 @@ carrier remains on the measured direct path and is never built eagerly. */
 				stages result_mode probe_context scalar_plan continuation outer_scan direct_group_stage facts)
 			(begin
 				(define future_sources (join_optimizer_sources_for_order all_sources future_aliases))
-				(if (not (or (source_is_base_table? src) (literal_rows_relation? (source_relation src))))
+				(if (not (or (source_is_base_table? src) (row_domain_relation? (source_relation src))))
 					(neumann_fail "build_queryplan" "multi-source query-block lowering only supports base tables after untangle")
 					true)
 				(define alias (source_alias src))
@@ -12418,19 +12424,36 @@ RecSet node is written into logical IR. */
 		/* Domain eligibility is structural. Do not reorder or record guards for
 		a specialization which will be discarded: those guards otherwise make
 		the ordinary plan depend on every changing literal from the trial. */
-		(define domain_ast (bind_parameter_row_domains ast planning_session false))
+		(define domain_ast (bind_parameter_row_domains ast nil))
 		(define ir (decorrelate_logical_query domain_ast))
 		(tx_check tx)
 		(define changed (not (expression_equal? ast domain_ast)))
-		(define eligible (if changed
+		(define eligible_ir? (lambda (ir)
 			(begin
 				(define candidate (annotate_contribution_domains (sql_type_annotate_ir ir)))
 				(and (or (ir_has_contribution_domain? candidate) (ir_has_invariant_property_cover? candidate))
-					(not (ir_has_unproved_query_aggregate? candidate)))) true))
-		(if (and changed eligible)
-			(bind_parameter_row_domains ast planning_session true) nil)
-		(define reordered (optimize_logical_query
-			(if eligible ir (decorrelate_logical_query ast)) planning_session tx))
+					(not (ir_has_unproved_query_aggregate? candidate))))))
+		(define eligible (or (not changed) (eligible_ir? ir)))
+		/* One unsupported categorical domain must not force every ordered
+		coordinate back through UNION distribution. Try individual root domains,
+		largest first, retaining the same complete proof gate. This bounded
+		logical search records no physical decisions or parameter-value guards. */
+		(define selected_ir (if eligible ir
+			(begin
+				(define root (normalize_query_ast ast))
+				(define alternatives (if (query_block? root)
+					(sort (filter (qb_sources root) (lambda (source)
+						(parameter_row_union? (source_relation source))))
+						(lambda (a b) (> (count (union_branches (normalize_query_ast (source_relation a))))
+							(count (union_branches (normalize_query_ast (source_relation b))))))) '()))
+				(define partial (reduce alternatives (lambda (chosen source)
+					(if (not (nil? chosen)) chosen
+						(begin
+							(tx_check tx)
+							(define candidate (decorrelate_logical_query (bind_parameter_row_domains ast (list source))))
+							(if (eligible_ir? candidate) candidate nil)))) nil))
+				(if (nil? partial) (decorrelate_logical_query ast) partial))))
+		(define reordered (optimize_logical_query selected_ir planning_session tx))
 		(tx_check tx)
 		(define prepared (prepare_physical_queryplan reordered planning_session tx))
 		(tx_check tx)
