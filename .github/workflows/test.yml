@@ -157,28 +157,39 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Build latest MinIO release from GitHub
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Resolve every run: new upstream releases must exercise our S3 contract.
+          # Build outside the checkout with MinIO's own go.mod and go.sum.
+          release=$(gh api repos/minio/minio/releases/latest --jq .tag_name)
+          test -n "$release" && test "$release" != null
+          echo "Testing MinIO $release" | tee "$RUNNER_TEMP/minio-version.txt"
+          mkdir -p "$RUNNER_TEMP/minio-source"
+          curl --fail --location --retry 3 \
+            "https://codeload.github.com/minio/minio/tar.gz/refs/tags/$release" \
+            --output "$RUNNER_TEMP/minio-source.tar.gz"
+          tar -xzf "$RUNNER_TEMP/minio-source.tar.gz" \
+            --strip-components=1 -C "$RUNNER_TEMP/minio-source"
+          cd "$RUNNER_TEMP/minio-source"
+          go build -buildvcs=false -trimpath -o "$RUNNER_TEMP/minio" .
+          sha256sum "$RUNNER_TEMP/minio" | tee -a "$RUNNER_TEMP/minio-version.txt"
+
       - name: Start S3-compatible storage
         run: |
-          # quay.io is MinIO's other official registry for this image. Docker
-          # Hub anonymous pulls are rate-limited per source IP, and that pool
-          # is shared across every GitHub-hosted runner worldwide -- pulling
-          # from quay.io instead avoids that shared-IP exhaustion (confirmed
-          # on master itself: docker.io/minio/minio:latest intermittently
-          # fails with "pull access denied" unrelated to any code change).
-          docker pull quay.io/minio/minio:latest
-          docker image inspect --format='Testing {{index .RepoDigests 0}}' quay.io/minio/minio:latest
-          docker run --detach --name memcp-minio \
-            --publish 9000:9000 \
-            --env MINIO_ROOT_USER \
-            --env MINIO_ROOT_PASSWORD \
-            quay.io/minio/minio:latest server /data
+          "$RUNNER_TEMP/minio" server --address 127.0.0.1:9000 \
+            --console-address 127.0.0.1:9001 "$RUNNER_TEMP/minio-data" \
+            >"$RUNNER_TEMP/minio.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/minio.pid"
           for attempt in $(seq 1 60); do
+            kill -0 "$(cat "$RUNNER_TEMP/minio.pid")" || break
             if curl --fail --silent http://127.0.0.1:9000/minio/health/ready >/dev/null; then
               exit 0
             fi
             sleep 1
           done
-          docker logs memcp-minio
+          cat "$RUNNER_TEMP/minio.log"
           exit 1
 
       - name: Stress the S3 persistence contract
@@ -200,13 +211,23 @@ jobs:
 
       - name: Print S3 server log after failure
         if: failure()
-        run: docker logs memcp-minio
+        run: cat "$RUNNER_TEMP/minio.log"
+
+      - name: Stop S3-compatible storage
+        if: always()
+        run: |
+          if test -f "$RUNNER_TEMP/minio.pid"; then
+            kill "$(cat "$RUNNER_TEMP/minio.pid")" || true
+          fi
 
       - name: Upload reliability evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: alternative-storage-reliability
-          path: /tmp/memcp-reliability-*/
+          path: |
+            /tmp/memcp-reliability-*/
+            ${{ runner.temp }}/minio.log
+            ${{ runner.temp }}/minio-version.txt
           if-no-files-found: warn
           retention-days: 7
