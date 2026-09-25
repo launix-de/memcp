@@ -55,11 +55,14 @@ python3 tools/reliability_drill.py --mode atomicity \
 ```
 
 The regular GitHub Actions test workflow runs this bounded S3 drill against the
-latest published MinIO image after the main test job, in parallel with
-packaging. The resolved image digest is printed in the job log so failures can
-be reproduced while normal CI runs continue to detect upstream compatibility
-changes. The job also exercises the complete persistence interface directly,
-including paginated blob listings and WAL replacement/replay.
+latest published MinIO release after the main test job, in parallel with
+packaging. Each run resolves GitHub's latest release and builds its source in
+the runner's temporary directory, avoiding container-registry access failures.
+There is no version pin or fallback to an older release: new releases exercise
+the S3 contract automatically. The release tag and binary checksum are retained
+with the server log in the reliability artifact. The job also exercises the
+complete persistence interface directly, including paginated blob listings
+and WAL replacement/replay.
 
 The server-side injector is enabled only when
 `MEMCP_IO_FAULT_PROBABILITY` is set. Tests can scope it with
