@@ -1940,12 +1940,8 @@ outer joins. */
 				"engine" "cache"
 				"oninit" (list (quote lambda) (list (quote tx)) initial_fill_expr))))
 		(define group_cache_created (symbol "__group_cache_created"))
-		(define keytable_init (list
-			(list (quote lambda) (list group_cache_created)
-				(list (quote !begin)
-					(list (quote touch_keytable) (list (quote table) schema grouptbl))
-					group_cache_created))
-			(list (quote createtable) schema grouptbl create_cols create_options true (quote tx))))
+		(define keytable_init
+			(list (quote group_cache_create) schema grouptbl create_cols create_options true (quote tx)))
 		(define boolean_row_keys (if (equal? result_sink (quote boolean-recset))
 			(scalar_first_probe_recset_row_keys stage
 				(scalar_first_probe_carrier_source prepared_src)) '()))
@@ -4040,14 +4036,14 @@ not as one range-cache cell per target row. Return
 					(direct_column_name_for_alias range_target (range_domain_inner domain)))
 				(define ag (scalar_first_probe_aggregate stage requested_col))
 				(define parts (if (nil? ag) nil (scalar_first_probe_parts ag)))
-				(define value_col (if (nil? parts) nil
-					(direct_column_name_for_alias range_target (car parts))))
+				(define value_expr (group_range_recmap_stage_projection stage requested_col range_target domain))
+				(define value_projection (if (nil? value_expr) nil (recmap_value_projection_parts range_target value_expr)))
 				(define binding (symbol (concat "__relational_recmap_range_"
 					(fnv_hash (serialize (list (gs_id stage) requested_col))))))
 				(if (or (not bounded)
 					(or (empty_list? (car source_projection))
 						(or (nil? target_range_col)
-							(or (nil? value_col)
+							(or (nil? value_projection)
 								(reduce target_point_cols (lambda (bad col)
 									(or bad (nil? col))) false)))))
 					nil
@@ -4068,9 +4064,8 @@ not as one range-cache cell per target row. Return
 							(list (quote lambda) (list range_map_var)
 								(list (quote recmap_value_mapper)
 									(physical_query_tx_symbol) range_map_var
-									(quoted_runtime_list (list value_col))
-									(list (quote lambda) (list (symbol "__recmap_value"))
-										(symbol "__recmap_value"))
+									(quoted_runtime_list (car value_projection))
+									(cadr value_projection)
 									(list (quote lambda) '() nil)))
 							map_expr))
 						(define replacement (list binding record_ref))
@@ -4171,16 +4166,25 @@ session read is never evaluated while building the plan. */
 				(group_range_recmap_columns alias item))))))
 		_ '())))
 
-(define group_range_recmap_stage_value (lambda (stage requested target domain)
+/* Row selection and value projection are independent. A pure expression over
+selected-row columns can use the same RecMap as a raw column; absent rows must
+still produce NULL without evaluating the projection. */
+(define group_range_recmap_stage_projection (lambda (stage requested target domain)
 	(begin
 		(define ag (scalar_first_probe_aggregate stage requested))
 		(define parts (if (nil? ag) nil (scalar_first_probe_parts ag)))
 		(define wanted_dir (if (range_domain_unbounded_from? domain) > <))
 		(if (nil? parts) nil
 			(if (and (equal? (nth parts 3) 0)
-				(and (equal? (nth parts 1) (list (range_domain_inner domain)))
-					(equal? (nth parts 2) (list wanted_dir))))
-				(direct_column_name_for_alias target (nth parts 0)) nil)))))
+				(equal? (nth parts 1) (list (range_domain_inner domain)))
+				(equal? (nth parts 2) (list wanted_dir))
+				(contribution_pure_expr? (car parts))
+				(empty_list? (contribution_outer_inputs (car parts) (list (source_alias target)))))
+				(car parts) nil)))))
+
+/* Dimension-lookup chains additionally need a direct key column. */
+(define group_range_recmap_stage_value (lambda (stage requested target domain)
+	(direct_column_name_for_alias target (group_range_recmap_stage_projection stage requested target domain))))
 
 (define group_range_recmap_candidate_for_column (lambda (stages stage block driver output requested)
 	(begin
@@ -4205,7 +4209,7 @@ session read is never evaluated while building the plan. */
 					(direct_column_name_for_alias target (car point_keys)) nil))
 				(define driver_col (if (single_source? point_exprs)
 					(direct_column_name_for_alias driver (car point_exprs)) nil))
-				(define value_col (group_range_recmap_stage_value
+				(define value_projection (group_range_recmap_stage_projection
 					range_stage requested target domain))
 				(define joins (relational_recmap_output_join_column_pairs
 					range_stage driver output (source_join_expr output)))
@@ -4215,7 +4219,7 @@ session read is never evaluated while building the plan. */
 					(and (recmap_direct_key_column? target point_col)
 						(not (nil? (find joins (lambda (pair)
 							(equal? (car pair) driver_col)) nil))))
-					(and (not (nil? value_col)) (scalar_value_stage? range_stage))
+					(and (not (nil? value_projection)) (scalar_value_stage? range_stage))
 					(and (equal? (stage_partition_limit range_stage) 1)
 						(equal? (range_stage_invariant_condition range_stage) true))
 					(equal? (range_stage_raw_condition range_stage)
@@ -4557,25 +4561,26 @@ value mapper. */
 		(define outer_bound (group_range_recmap_outer_bound candidate))
 		(define bound_param (symbol "__group_range_bound"))
 		(define ref_param (symbol "__group_range_ref"))
-		(define params (map (produceN (count specs)) (lambda (i)
-			(symbol (concat "__range_value_" i)))))
-		(define value_cols (map specs (lambda (item)
-			(group_range_recmap_stage_value (nth item 2)
-				(if (> (count item) 6) (nth item 6) (nth item 4))
-				(nth item 3) (car (range_stage_domains (nth item 2)))))))
-		(define value_exprs (map (zip specs params) (lambda (pair)
+		(define target (list "__range_target" (source_schema (nth candidate 1)) (source_relation (nth candidate 1)) false nil))
+		(define projections (map specs (lambda (item)
+			(group_range_recmap_range_signature_expr (nth item 3)
+				(group_range_recmap_stage_projection (nth item 2)
+					(if (> (count item) 6) (nth item 6) (nth item 4))
+					(nth item 3) (car (range_stage_domains (nth item 2))))))))
+		(define value_cols (merge_unique (map projections (lambda (expr) (extract_columns_for_alias target expr)))))
+		(define params (map value_cols (lambda (col) (scan_callback_symbol_for_alias (source_alias target) col))))
+		(define value_exprs (mapIndex specs (lambda (i spec)
 			(begin
-				(define spec (car pair))
-				(define param (cadr pair))
-				(if (<= (count spec) 6) param
+				(define value (lower_column_expr_for_alias target (nth projections i)))
+				(if (<= (count spec) 6) value
 					(list (physical_query_session_symbol)
 						"get_or_compute_scoped" (physical_query_scope_symbol)
 						(list (quote concat)
 							(concat "__group_range_dimension_" (gs_id (nth spec 7)) ":")
-							(list (quote serialize) param))
+							(list (quote serialize) value))
 						(physical_query_tx_symbol)
 						(list (quote lambda) (list (physical_query_tx_symbol))
-							(group_range_recmap_dimension_probe spec param))))))))
+							(group_range_recmap_dimension_probe spec value))))))))
 		(define map_expr (if (or (nil? outer_bound) (and (> (count candidate) 4) (equal? (nth candidate 4) (quote delta)))) (nth candidate 3)
 			(group_range_recmap_replace_symbol
 				(nth candidate 3) outer_bound bound_param)))
@@ -13532,7 +13537,7 @@ without freezing a statistics-dependent decision in the SQL plan cache. */
 						(list (quote and)
 							(list (quote semijoin_cache_wins?) (source_table_expr driver) (source_table_expr lookup)
 								(source_table_expr driver) true)
-							(list (quote semijoin_cache_work_paid?) (physical_query_tx_symbol) name budget))
+							(list (quote group_cache_work_paid?) (physical_query_tx_symbol) name budget))
 						warm_plan
 						(list (quote !begin)
 							(list (quote define) (quote __semijoin_started) (list (quote nanotime)))
@@ -13603,7 +13608,7 @@ this also avoids preparing a whole computed column for a small subset. */
 				(reduce tail (lambda (found item) (or found (semijoin_plan_has_operator? item name))) false)))
 		_ false)))
 
-(define semijoin_cache_work_paid? (lambda (tx name threshold_ns)
+(define group_cache_work_paid? (lambda (tx name threshold_ns)
 	(begin
 		(define candidates (table "system_statistic" "group_cache_candidates"))
 		(if (nil? candidates) false

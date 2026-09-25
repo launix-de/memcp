@@ -443,6 +443,26 @@ Do not introduce a storage-level query cache, move group caches into transient
 planner state, or merge the two lifecycles merely to simplify physical
 lowering or lock management.
 
+Point, additive-range and snapshot dimensions may coexist in one group-cache
+relation. Aggregate formulas own payload columns, not separate carriers. Cold
+scalar probes accumulate work in `system_statistic.group_cache_candidates`;
+building additional snapshot state spends that credit on a later invocation.
+An already computed scalar may be retained once its storage cost is covered,
+without evaluating its producer again. Cache rows
+must retain values and logical coordinates only, never request closures,
+transactions, sessions or physical row identities.
+
+When mixed dimensions refine a range partition, capture the disjoint cell
+bounds under the partition mutex and release it before evaluating aggregate
+payloads. Concurrent refinement may create smaller cells but must not change
+the cells being summed by an already running query.
+
+Selected-row identity and value projection are independent. A shared RecMap
+must apply the complete proven projection (including arithmetic and NULL
+handling) to the selected row. A missing selected row returns SQL NULL without
+evaluating that projection; `SELECT COALESCE(column, 7)` still returns NULL
+when its subquery has no row.
+
 A snapshot dimension denotes one ordered coordinate, not a disjoint partial
 sum interval. Reuse requires the same fixed inputs and complete source-version
 view. A logical contribution proof must cover both selected-row changes and

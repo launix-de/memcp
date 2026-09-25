@@ -40,6 +40,42 @@ setup:
             (define i (+ 1 (* j 4)))
             (list (+ i 8001) (+ i 1) (+ i 12) 5 "T")))))
         (rebuild (table "memcp-tests" "ds_conversion_history")) true)
+  - scm: |
+      (globalvars "__test_group_cache_cells" (lambda (query binding)
+        (begin
+          (define request (newsession))
+          (request (car binding) (cadr binding))
+          (define shape (sql_parameterize_select_literals query true))
+          (mapIndex (cadr shape) (lambda (i value) (request (concat "v" (+ i 1)) value)))
+          (define plan (with_session request (lambda () (parse_sql "memcp-tests" (car shape) nil request nil))))
+          (define collect (lambda (node)
+            (match node
+              ((symbol group_cache_execute) ((symbol quote) cache) _threshold _tx _direct _cached _retain) (list cache)
+              ((symbol group_cache_point) ((symbol quote) cache) _payload _threshold _point_values _tx _read_view _producer) (list cache)
+              (cons head tail) (merge (map node collect))
+              _ '())))
+          (define caches (merge_unique (list (collect plan))))
+          (sort (map caches (lambda (cache)
+            (list (group_cache_relation cache)
+              (if (nil? (table (group_cache_schema cache) (group_cache_relation cache))) 0
+                (scan_estimate (table (group_cache_schema cache) (group_cache_relation cache)))))))
+            (lambda (a b) (< (car a) (car b)))))))
+  - scm: |
+      (globalvars "__test_group_cache_warm" (lambda (query binding)
+        (begin
+          (define request (newsession))
+          (request (car binding) (cadr binding))
+          (define formula (cached_parse (newcachemap) (list parse_sql) "memcp-tests" query nil "root" request true nil))
+          (define warm (lambda (remaining)
+            (begin
+              (define cells ((globalvars "__test_group_cache_cells") query binding))
+              (if (and (not (empty_list? cells)) (reduce cells (lambda (ok cell) (and ok (> (cadr cell) 0))) true)) true
+                (if (<= remaining 0) (error (concat "group cache was not admitted: " (serialize cells)))
+                  (begin
+                    (with_autocommit request nil 0 query (lambda (tx)
+                      (sql_execute_formula request tx formula (lambda (row) true) (lambda (fields) true))))
+                    (warm (- remaining 1))))))))
+          (warm 256))))
 test_cases:
   - name: "Ordered domain shares quantity, classification and independent predicate state"
     sql: &snapshot_state_query |
@@ -143,16 +179,17 @@ test_cases:
     scm: |
       (begin
         (define name (concat "snapshot-work-choice:" (nanotime)))
-        (define domain (concat name ":" (serialize (list (list) (list 1)))))
+        (define cache (make_group_cache 'group-keytable "memcp-tests" (concat ".grp:" name) (list (list 'snapshot 0))))
+        (group_cache_ensure_cells cache "agg_sum" nil)
         (define observed (newsession))
         (define keys (map (produceN 10) (lambda (i) (+ i 1))))
-        (snapshot_group_publish domain 98
+        (snapshot_group_publish cache '() '(1) "agg_sum" nil 98
           (reduce keys (lambda (values key) (set_assoc values key 0)) (list))
           '(0 10 0) 20 nil (list))
-        (snapshot_group_publish domain 120
+        (snapshot_group_publish cache '() '(1) "agg_sum" nil 120
           (reduce keys (lambda (values key) (set_assoc values key 1)) (list))
           '(10 10 10) 20 nil (list))
-        (define result (snapshot_group_cache name (lambda () (list)) nil 100 20
+        (define result (snapshot_group_cache cache "agg_sum" (lambda () (list)) nil 100 20
           (lambda () (list 1))
           (lambda () (error "unexpected full snapshot"))
           (lambda (lo hi) (if (equal? lo 98) (slice keys 0 9) (list 10)))
@@ -558,6 +595,39 @@ test_cases:
         - "{\"x\": 50, \"category\": null, \"total\": 13200}"
         - "{\"x\": 51, \"category\": null, \"total\": 11400}"
         - "{\"x\": 60, \"category\": null, \"total\": 11400}"
+  - name: "Negated selected values preserve their projection in cold and retained snapshots"
+    sql: &negative_snapshot_query |
+      SELECT d.x, COALESCE((SELECT SUM((SELECT -h.quantity FROM ds_history h
+        WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1))
+        FROM ds_entity e WHERE (SELECT h.end_value FROM ds_history h
+          WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1) BETWEEN 10 AND d.x),0) AS total
+      FROM (SELECT 20 AS x UNION ALL SELECT 60 UNION ALL SELECT 61) d
+    expect: &negative_snapshot_result
+      data: [{x: 20, total: 0}, {x: 60, total: -600}, {x: 61, total: -600}]
+    timing_aggregation: total
+    warmup: 0
+    timing_samples: 2
+    threshold_ms: 20000
+  - name: "Retained negated selected values remain negative on repeat"
+    sql: *negative_snapshot_query
+    expect: *negative_snapshot_result
+  - name: "Selected-row projections preserve multiple columns constants and missing-row NULLs"
+    sql: |
+      SELECT d.x,
+        COALESCE((SELECT SUM((SELECT COALESCE(h.end_value,7) FROM ds_history h
+          WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1)) FROM ds_entity e),0) AS fallback_value,
+        COALESCE((SELECT SUM((SELECT -h.quantity FROM ds_history h
+          WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1)) FROM ds_entity e),0) AS negative_value,
+        COALESCE((SELECT SUM((SELECT h.quantity*COALESCE(h.end_value,2) FROM ds_history h
+          WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1)) FROM ds_entity e),0) AS product_value,
+        COALESCE((SELECT SUM((SELECT 1 FROM ds_history h
+          WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1)) FROM ds_entity e),0) AS presence_value
+      FROM (SELECT -1 AS x UNION ALL SELECT 20 UNION ALL SELECT 60) d
+    expect:
+      data:
+        - {x: -1, fallback_value: 0, negative_value: 0, product_value: 0, presence_value: 0}
+        - {x: 20, fallback_value: 36600, negative_value: -4400, product_value: 37600, presence_value: 4000}
+        - {x: 60, fallback_value: 36600, negative_value: -4400, product_value: 37600, presence_value: 4000}
   - name: "Shared ordered row identities retain each aggregate's value projection"
     sql: |
       SELECT d.x, p.category,
@@ -640,7 +710,8 @@ test_cases:
   - name: "A different bound in the same cut retains the exact snapshot points"
     session_id: "ds-cut-domain"
     setup:
-      - scm: '(begin (globalvars "__test_ds_snapshot-cut-keys" (snapshot_group_points)) (globalvars "__test_ds_snapshot-cut-count" (count (snapshot_group_points))))'
+      - scm: |
+          (globalvars "__test_ds_snapshot-cut-cells" ((globalvars "__test_group_cache_cells") "SELECT d.x,\n  (SELECT SUM((SELECT h.quantity FROM ds_history h\n    WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1))\n   FROM ds_entity e\n   WHERE COALESCE((SELECT h.end_value FROM ds_history h\n     WHERE h.entity_id=e.id AND h.coordinate<=@ds_cut ORDER BY h.coordinate DESC LIMIT 1),d.x)>=d.x) AS total\nFROM (SELECT 10 AS x UNION SELECT 30 UNION SELECT 60) d ORDER BY d.x\n" '("ds_cut" 20)))
       - sql: "SET @ds_cut=21"
     sql: *snapshot_cut_query
     expect: *snapshot_cut_result
@@ -649,14 +720,10 @@ test_cases:
     session_id: "ds-cut-domain"
     scm: |
       (begin
-        (define __snapshot_test_actual
-          (and (> (globalvars "__test_ds_snapshot-cut-count") 0) (equal? (globalvars "__test_ds_snapshot-cut-count") (count (snapshot_group_points))) (reduce (globalvars "__test_ds_snapshot-cut-keys") (lambda (ok key) (and ok (not (nil? (snapshot_group_points key))))) true))
-        )
-        (globalvars "__test_ds_snapshot-cut-count" nil)
-        (globalvars "__test_ds_snapshot-cut-keys" nil)
-        (if (equal? (json_encode __snapshot_test_actual) (json_encode true))
-          __snapshot_test_actual
-          (error (concat "Equivalent source cuts did not add aggregate point entries: unexpected value " (serialize __snapshot_test_actual)))))
+        (define before (globalvars "__test_ds_snapshot-cut-cells"))
+        (define after ((globalvars "__test_group_cache_cells") "SELECT d.x,\n  (SELECT SUM((SELECT h.quantity FROM ds_history h\n    WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1))\n   FROM ds_entity e\n   WHERE COALESCE((SELECT h.end_value FROM ds_history h\n     WHERE h.entity_id=e.id AND h.coordinate<=@ds_cut ORDER BY h.coordinate DESC LIMIT 1),d.x)>=d.x) AS total\nFROM (SELECT 10 AS x UNION SELECT 30 UNION SELECT 60) d ORDER BY d.x\n" '("ds_cut" 21)))
+        (and (not (empty_list? before)) (> (reduce before (lambda (n cell) (+ n (cadr cell))) 0) 0)
+          (equal? before after)))
     expect:
       data: [true]
 
@@ -735,7 +802,8 @@ test_cases:
   - name: "Changing a copied session key within one cut reuses snapshots"
     session_id: "ds-copied-cut"
     setup:
-      - scm: '(globalvars "__test_ds_copied-cut-before" (count (snapshot_group_points)))'
+      - scm: |
+          (globalvars "__test_ds_copied-cut-before" ((globalvars "__test_group_cache_cells") "SELECT d.x,\n  (SELECT SUM((SELECT h.quantity FROM ds_history h\n    WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1))\n   FROM ds_entity e\n   WHERE COALESCE(COALESCE((SELECT h.end_value FROM ds_history h\n     WHERE h.entity_id=e.id AND h.coordinate<=@ds_copied_cut\n     ORDER BY h.coordinate DESC LIMIT 1),NULL),d.x)>=d.x LIMIT 1) AS total\nFROM (SELECT 10 AS x UNION SELECT 30 UNION SELECT 60) d ORDER BY d.x\n" '("ds_copied_cut" 20)))
       - sql: "SET @ds_copied_cut=21"
     sql: *copied_cut_query
     expect: *snapshot_cut_result
@@ -745,7 +813,7 @@ test_cases:
     scm: |
       (begin
         (define __snapshot_test_actual
-          (equal? (globalvars "__test_ds_copied-cut-before") (count (snapshot_group_points)))
+          (equal? (globalvars "__test_ds_copied-cut-before") ((globalvars "__test_group_cache_cells") "SELECT d.x,\n  (SELECT SUM((SELECT h.quantity FROM ds_history h\n    WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1))\n   FROM ds_entity e\n   WHERE COALESCE(COALESCE((SELECT h.end_value FROM ds_history h\n     WHERE h.entity_id=e.id AND h.coordinate<=@ds_copied_cut\n     ORDER BY h.coordinate DESC LIMIT 1),NULL),d.x)>=d.x LIMIT 1) AS total\nFROM (SELECT 10 AS x UNION SELECT 30 UNION SELECT 60) d ORDER BY d.x\n" '("ds_copied_cut" 21)))
         )
         (globalvars "__test_ds_copied-cut-before" nil)
         (if (equal? (json_encode __snapshot_test_actual) (json_encode true))
@@ -780,7 +848,8 @@ test_cases:
   - name: "Exact aggregates also normalize pure ordered selection bindings"
     session_id: "ds-point-cut-domain"
     setup:
-      - scm: '(globalvars "__test_ds_point-cut-before" (count (group_value_cache)))'
+      - scm: |
+          (globalvars "__test_ds_point-cut-before" ((globalvars "__test_group_cache_cells") "SELECT p.category, (SELECT SUM((SELECT h.quantity FROM ds_history h\n    WHERE h.entity_id=e.id AND h.coordinate<=@ds_cut ORDER BY h.coordinate DESC LIMIT 1))\n  FROM ds_entity e WHERE e.category=p.category) AS total\nFROM (SELECT 0 AS category UNION SELECT 1) p ORDER BY p.category\n" '("ds_cut" 20)))
       - sql: "SET @ds_cut=20"
     sql: &point_cut_query |
       SELECT p.category, (SELECT SUM((SELECT h.quantity FROM ds_history h
@@ -793,7 +862,10 @@ test_cases:
   - name: "Exact aggregates reuse a changed binding inside the same source cut"
     session_id: "ds-point-cut-domain"
     setup:
-      - scm: '(globalvars "__test_ds_point-cut-count" (count (group_value_cache)))'
+      - scm: |
+          (begin
+            ((globalvars "__test_group_cache_warm") "SELECT p.category, (SELECT SUM((SELECT h.quantity FROM ds_history h\n    WHERE h.entity_id=e.id AND h.coordinate<=@ds_cut ORDER BY h.coordinate DESC LIMIT 1))\n  FROM ds_entity e WHERE e.category=p.category) AS total\nFROM (SELECT 0 AS category UNION SELECT 1) p ORDER BY p.category\n" '("ds_cut" 20))
+            (globalvars "__test_ds_point-cut-count" ((globalvars "__test_group_cache_cells") "SELECT p.category, (SELECT SUM((SELECT h.quantity FROM ds_history h\n    WHERE h.entity_id=e.id AND h.coordinate<=@ds_cut ORDER BY h.coordinate DESC LIMIT 1))\n  FROM ds_entity e WHERE e.category=p.category) AS total\nFROM (SELECT 0 AS category UNION SELECT 1) p ORDER BY p.category\n" '("ds_cut" 20))))
       - sql: "SET @ds_cut=21"
     sql: *point_cut_query
     expect: *point_cut_result
@@ -803,7 +875,7 @@ test_cases:
     scm: |
       (begin
         (define __snapshot_test_actual
-          (and (> (globalvars "__test_ds_point-cut-count") (globalvars "__test_ds_point-cut-before")) (equal? (globalvars "__test_ds_point-cut-count") (count (group_value_cache))))
+          (and (> (reduce (globalvars "__test_ds_point-cut-count") (lambda (n cell) (+ n (cadr cell))) 0) 0) (equal? (globalvars "__test_ds_point-cut-count") ((globalvars "__test_group_cache_cells") "SELECT p.category, (SELECT SUM((SELECT h.quantity FROM ds_history h\n    WHERE h.entity_id=e.id AND h.coordinate<=@ds_cut ORDER BY h.coordinate DESC LIMIT 1))\n  FROM ds_entity e WHERE e.category=p.category) AS total\nFROM (SELECT 0 AS category UNION SELECT 1) p ORDER BY p.category\n" '("ds_cut" 20))))
         )
         (globalvars "__test_ds_point-cut-before" nil)
         (globalvars "__test_ds_point-cut-count" nil)
