@@ -272,7 +272,6 @@ test_cases:
   - name: "Ordered session bounds establish a reusable source cut"
     session_id: "ds-cut-domain"
     setup:
-      - scm: '(session "snapshot-cut-before" (count (snapshot_group_points)))'
       - sql: "SET @ds_cut=20"
     sql: &snapshot_cut_query |
       SELECT d.x,
@@ -288,14 +287,23 @@ test_cases:
   - name: "A different bound in the same cut retains the exact snapshot points"
     session_id: "ds-cut-domain"
     setup:
-      - scm: '(session "snapshot-cut-count" (count (snapshot_group_points)))'
+      - scm: '(begin (globalvars "__test_ds_snapshot-cut-keys" (snapshot_group_points)) (globalvars "__test_ds_snapshot-cut-count" (count (snapshot_group_points))))'
       - sql: "SET @ds_cut=21"
     sql: *snapshot_cut_query
     expect: *snapshot_cut_result
 
   - name: "Equivalent source cuts did not add aggregate point entries"
     session_id: "ds-cut-domain"
-    scm: '(and (> (session "snapshot-cut-count") (session "snapshot-cut-before")) (equal? (session "snapshot-cut-count") (count (snapshot_group_points))))'
+    scm: |
+      (begin
+        (define __snapshot_test_actual
+          (and (> (globalvars "__test_ds_snapshot-cut-count") 0) (equal? (globalvars "__test_ds_snapshot-cut-count") (count (snapshot_group_points))) (reduce (globalvars "__test_ds_snapshot-cut-keys") (lambda (ok key) (and ok (not (nil? (snapshot_group_points key))))) true))
+        )
+        (globalvars "__test_ds_snapshot-cut-count" nil)
+        (globalvars "__test_ds_snapshot-cut-keys" nil)
+        (if (equal? (json_encode __snapshot_test_actual) (json_encode true))
+          __snapshot_test_actual
+          (error (concat "Equivalent source cuts did not add aggregate point entries: unexpected value " (serialize __snapshot_test_actual)))))
     expect:
       data: [true]
 
@@ -314,10 +322,112 @@ test_cases:
     sql: *snapshot_cut_query
     expect: *snapshot_cut_result
 
+  - name: "Ordered cut witnesses survive copied session domain keys"
+    scm: |
+      (begin
+        (define __snapshot_test_actual
+          (begin
+            (define driver '("e" "memcp-tests" "ds_entity" false nil))
+            (define source '("h" "memcp-tests" "ds_history" false nil))
+            (define axis '('session "bound"))
+            (define parent '('get_column "e" false "id" false))
+            (define foreign '('get_column "h" false "entity_id" false))
+            (define coordinate '('get_column "h" false "coordinate" false))
+            (define value '('get_column "h" false "quantity" false))
+            (define stage (make_group_stage "copied-cut" source
+              (list parent axis) (list foreign axis)
+              (list (list (list 'scalar_order_value value (list coordinate) (list >) 0) coalesceNil nil))
+              nil '() '() 1 nil
+              (list (list 'condition (list '<= coordinate axis)) (list 'partition_limit 1)
+                (list 'range-point-keys (list foreign)) (list 'range-point-domain (list parent))
+                (list 'lookup-keys (list parent axis)))))
+            (define output (list "selected" "memcp-tests" (make_stage_output_relation (gs_id stage)) true
+              (make_exists_stage_join_condition "selected" (group_key_cols (gs_keys stage)) (gs_domain stage))))
+            (define raw_stage (make_group_stage "raw-cut" source (gs_domain stage)
+              (list foreign coordinate) (gs_aggregates stage) nil '() '() 1 nil (gs_facts stage)))
+            (define raw_output (list "selected" "memcp-tests" (make_stage_output_relation (gs_id raw_stage)) true
+              (make_exists_stage_join_condition "selected" (group_key_cols (gs_keys raw_stage)) (gs_domain raw_stage))))
+            (define proofs (ordered_binding_cuts (list stage) driver (list axis)))
+            (define binding (lower_group_cache_binding driver axis proofs))
+            (define read ((eval (list 'lambda (list 'tx 'session)
+              (list 'lambda '() binding))) nil (lambda (key) 20)))
+            (define at (lambda (bound)
+              ((eval (list 'lambda (list 'tx 'session) binding)) nil (lambda (key) bound))))
+            (list (not (empty_list? proofs))
+              (not (ordered_binding_occurs? axis (ordered_binding_semantic_join axis (list stage) output)))
+              (ordered_binding_occurs? axis (ordered_binding_semantic_join axis (list raw_stage) raw_output))
+              (read) (at 21) (at 19) (at nil)))
+        )
+        (if (equal? (json_encode __snapshot_test_actual) (json_encode (list true true true (list 20) (list 20) (list 0) (list nil))))
+          __snapshot_test_actual
+          (error (concat "Ordered cut witnesses survive copied session domain keys: unexpected value " (serialize __snapshot_test_actual)))))
+    expect:
+      data: [[true, true, true, [20], [20], [0], [null]]]
+
+  - name: "Copied session domain keys retain ordered-cut equivalence"
+    session_id: "ds-copied-cut"
+    setup:
+      - sql: "SET @ds_copied_cut=20"
+    sql: &copied_cut_query |
+      SELECT d.x,
+        (SELECT SUM((SELECT h.quantity FROM ds_history h
+          WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1))
+         FROM ds_entity e
+         WHERE COALESCE(COALESCE((SELECT h.end_value FROM ds_history h
+           WHERE h.entity_id=e.id AND h.coordinate<=@ds_copied_cut
+           ORDER BY h.coordinate DESC LIMIT 1),NULL),d.x)>=d.x LIMIT 1) AS total
+      FROM (SELECT 10 AS x UNION SELECT 30 UNION SELECT 60) d ORDER BY d.x
+    expect: *snapshot_cut_result
+
+  - name: "Changing a copied session key within one cut reuses snapshots"
+    session_id: "ds-copied-cut"
+    setup:
+      - scm: '(globalvars "__test_ds_copied-cut-before" (count (snapshot_group_points)))'
+      - sql: "SET @ds_copied_cut=21"
+    sql: *copied_cut_query
+    expect: *snapshot_cut_result
+
+  - name: "Copied domain-key joins do not create new aggregate points"
+    session_id: "ds-copied-cut"
+    scm: |
+      (begin
+        (define __snapshot_test_actual
+          (equal? (globalvars "__test_ds_copied-cut-before") (count (snapshot_group_points)))
+        )
+        (globalvars "__test_ds_copied-cut-before" nil)
+        (if (equal? (json_encode __snapshot_test_actual) (json_encode true))
+          __snapshot_test_actual
+          (error (concat "Copied domain-key joins do not create new aggregate points: unexpected value " (serialize __snapshot_test_actual)))))
+    expect:
+      data: [true]
+
+  - name: "A real source filter remains an exact session binding"
+    session_id: "ds-real-cut-filter"
+    setup:
+      - sql: "SET @ds_real_key=20"
+    sql: &real_cut_filter_query |
+      SELECT d.x,(SELECT SUM((SELECT h.quantity FROM ds_history h
+          WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1))
+        FROM ds_entity e WHERE e.id=@ds_real_key
+          AND COALESCE((SELECT h.end_value FROM ds_history h
+            WHERE h.entity_id=e.id AND h.coordinate<=@ds_real_key
+            ORDER BY h.coordinate DESC LIMIT 1),d.x)>=d.x) AS total
+      FROM (SELECT 10 AS x UNION SELECT 30) d ORDER BY d.x
+    expect:
+      data: [{x: 10, total: 1}, {x: 30, total: 3}]
+
+  - name: "A source filter changes results inside an otherwise equivalent cut"
+    session_id: "ds-real-cut-filter"
+    setup:
+      - sql: "SET @ds_real_key=21"
+    sql: *real_cut_filter_query
+    expect:
+      data: [{x: 10, total: 1}, {x: 30, total: 1}]
+
   - name: "Exact aggregates also normalize pure ordered selection bindings"
     session_id: "ds-point-cut-domain"
     setup:
-      - scm: '(session "point-cut-before" (count (group_value_cache)))'
+      - scm: '(globalvars "__test_ds_point-cut-before" (count (group_value_cache)))'
       - sql: "SET @ds_cut=20"
     sql: &point_cut_query |
       SELECT p.category, (SELECT SUM((SELECT h.quantity FROM ds_history h
@@ -330,14 +440,23 @@ test_cases:
   - name: "Exact aggregates reuse a changed binding inside the same source cut"
     session_id: "ds-point-cut-domain"
     setup:
-      - scm: '(session "point-cut-count" (count (group_value_cache)))'
+      - scm: '(globalvars "__test_ds_point-cut-count" (count (group_value_cache)))'
       - sql: "SET @ds_cut=21"
     sql: *point_cut_query
     expect: *point_cut_result
 
   - name: "Equivalent cuts do not allocate new exact aggregate entries"
     session_id: "ds-point-cut-domain"
-    scm: '(and (> (session "point-cut-count") (session "point-cut-before")) (equal? (session "point-cut-count") (count (group_value_cache))))'
+    scm: |
+      (begin
+        (define __snapshot_test_actual
+          (and (> (globalvars "__test_ds_point-cut-count") (globalvars "__test_ds_point-cut-before")) (equal? (globalvars "__test_ds_point-cut-count") (count (group_value_cache))))
+        )
+        (globalvars "__test_ds_point-cut-before" nil)
+        (globalvars "__test_ds_point-cut-count" nil)
+        (if (equal? (json_encode __snapshot_test_actual) (json_encode true))
+          __snapshot_test_actual
+          (error (concat "Equivalent cuts do not allocate new exact aggregate entries: unexpected value " (serialize __snapshot_test_actual)))))
     expect:
       data: [true]
 

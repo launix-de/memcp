@@ -7241,6 +7241,37 @@ join predicates and arithmetic must not otherwise depend on its raw value. */
 				(reduce tail (lambda (found item) (or found (ordered_binding_occurs? axis item))) false))
 			_ false))))
 
+/* A session value copied into both sides of a decorrelation domain is
+constant for this invocation. Its generated null-safe domain join is a
+construction identity, unlike a base-column lookup against that value.
+Only remove these exact identities from the cut proof, never from the IR. */
+(define ordered_binding_key_copy? (lambda (axis stage index)
+	(and (query_session_read? axis)
+		(< index (count (gs_domain stage)))
+		(ordered_binding_same? axis (nth (gs_keys stage) index))
+		(ordered_binding_same? axis (nth (gs_domain stage) index)))))
+
+(define ordered_binding_semantic_keys (lambda (axis stage)
+	(mapIndex (gs_keys stage) (lambda (index key)
+		(if (ordered_binding_key_copy? axis stage index) nil key)))))
+
+(define ordered_binding_semantic_join (lambda (axis dependencies source)
+	(begin
+		(define stage (if (source_is_stage_output? source)
+			(stage_for_output_relation dependencies (source_relation source)) nil))
+		(if (or (nil? stage) (not (query_session_read? axis))) (source_join_expr source)
+			(begin
+				(define lookup (qassoc_get (gs_facts stage) (quote lookup-keys) (gs_domain stage)))
+				(define names (group_key_cols (gs_keys stage)))
+				(define identities (filter (mapIndex (gs_keys stage) (lambda (index key)
+					(if (and (ordered_binding_key_copy? axis stage index)
+						(< index (count lookup)) (ordered_binding_same? axis (nth lookup index)))
+						(make_exists_stage_join_condition (source_alias source) (list (nth names index)) (list axis))
+						nil))) (lambda (identity) (not (nil? identity)))))
+				(combine_where_terms (filter (split_and_terms (source_join_expr source)) (lambda (term)
+					(not (reduce identities (lambda (same identity)
+						(or same (expression_equal? term identity))) false)))) true))))))
+
 (define ordered_binding_cuts (lambda (dependencies driver bindings)
 	(begin
 		(define keys (source_primary_key_columns driver))
@@ -7257,15 +7288,16 @@ join predicates and arithmetic must not otherwise depend on its raw value. */
 							(define selection (cadr pair))
 							(define input (gs_input stage))
 							(and ok
-								(not (ordered_binding_occurs? axis (list (gs_keys stage) (gs_aggregates stage) (gs_having stage)
+								(not (ordered_binding_occurs? axis (list (ordered_binding_semantic_keys axis stage) (gs_aggregates stage) (gs_having stage)
 									(if (query_block? input) (list (qb_fields input) (qb_group input) (qb_having input)
 										(qb_order input) (qb_limit input) (qb_offset input) (qb_hidden input)
-										(map (qb_sources input) source_join_expr)) '()))))
+										(map (qb_sources input) (lambda (source)
+											(ordered_binding_semantic_join axis dependencies source)))) '()))))
 								(or (not (ordered_binding_occurs? axis (range_stage_raw_condition stage)))
 									(and (not (nil? selection)) (ordered_binding_same? axis (nth selection 3))))))) true))
 					(if (and safe (not (empty_list? cuts)))
-						(list axis (merge_unique (map cuts (lambda (selection)
-							(list (car selection) (nth selection 2)))))) nil))))
+						(list axis (merge_unique (list (map cuts (lambda (selection)
+							(list (car selection) (nth selection 2))))))) nil))))
 				(lambda (proof) (not (nil? proof))))))))
 
 /* Nested scalar SUM/COUNT dependencies have one deterministic value per
@@ -7330,6 +7362,17 @@ This proof grants no incremental correction or physical materialization. */
 									(filter (contribution_stage_sources item) source_is_base_table?))))
 								(ordered_binding_cuts dependencies (car bases) (merge_unique (list domain outer)))) nil))))))))
 
+/* Record whether a nested aggregate supplies this aggregate's payload.
+That dependency must remain available to the shared scalar projection choice;
+filter-only aggregate dependencies do not require such a value carrier. */
+(define aggregate_payload_dependency? (lambda (graph stage)
+	(reduce (extract_assoc (query_expr_alias_set nil (gs_aggregates stage) '())
+		(lambda (alias _) alias)) (lambda (found alias)
+			(or found (begin
+				(define dependency (stage_dependency_for_output_alias graph stage alias))
+				(and (not (nil? dependency))
+					(equal? (qassoc_get (gs_facts dependency) (quote null_semantics) nil) (quote aggregate)))))) false)))
+
 (define annotate_contribution_domains (lambda (ir)
 	(begin
 		(define catalog (stage_catalog_with_nested (ir_stages ir)))
@@ -7341,6 +7384,8 @@ This proof grants no incremental correction or physical materialization. */
 					(define mapped (cons (visit head) (map tail visit)))
 					(if (not (and (symbol? head) (equal? head (quote group-stage)))) mapped
 						(begin
+							(define mapped (if (aggregate_payload_dependency? graph mapped)
+								(group_stage_with_facts mapped (qassoc_set (gs_facts mapped) (quote aggregate-payload-dependency) true)) mapped))
 							(define stable (stable_aggregate_domain graph mapped))
 							(define mapped (if (nil? stable) mapped
 								(group_stage_with_facts mapped (qassoc_set (gs_facts mapped) (quote stable-aggregate-domain) stable))))

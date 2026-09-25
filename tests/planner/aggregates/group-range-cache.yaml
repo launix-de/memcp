@@ -36,9 +36,9 @@ test_cases:
   - name: "nested scalar COUNT contributes complete reusable aggregate dependencies"
     session_id: "grc-nested-count"
     setup:
-      - scm: '(session "count-before" (count (group_value_cache)))'
+      - scm: '(globalvars "__test_grc_count-before" (count (group_value_cache)))'
     sql: &nested_count_query |
-      SELECT p.cut,(SELECT SUM(e.amount) FROM grc_events e
+      SELECT p.cut,(SELECT SUM((SELECT x.amount FROM grc_events x WHERE x.id=e.id LIMIT 1)) FROM grc_events e
         WHERE (SELECT COUNT(*) FROM grc_windows c WHERE c.tenant_id=e.tenant_id)>p.cut) AS total
       FROM (SELECT 1 AS cut UNION ALL SELECT 2) p ORDER BY p.cut
     expect: &nested_count_result
@@ -47,13 +47,22 @@ test_cases:
   - name: "nested scalar COUNT reuses exact aggregate points"
     session_id: "grc-nested-count"
     setup:
-      - scm: '(session "count-after" (count (group_value_cache)))'
+      - scm: '(globalvars "__test_grc_count-after" (count (group_value_cache)))'
     sql: *nested_count_query
     expect: *nested_count_result
 
   - name: "nested aggregate cache entries survive query completion"
     session_id: "grc-nested-count"
-    scm: '(and (> (session "count-after") (session "count-before")) (equal? (session "count-after") (count (group_value_cache))))'
+    scm: |
+      (begin
+        (define __snapshot_test_actual
+          (and (> (globalvars "__test_grc_count-after") (globalvars "__test_grc_count-before")) (equal? (globalvars "__test_grc_count-after") (count (group_value_cache))))
+        )
+        (globalvars "__test_grc_count-before" nil)
+        (globalvars "__test_grc_count-after" nil)
+        (if (equal? (json_encode __snapshot_test_actual) (json_encode true))
+          __snapshot_test_actual
+          (error (concat "nested aggregate cache entries survive query completion: unexpected value " (serialize __snapshot_test_actual)))))
     expect:
       data: [true]
 
@@ -89,12 +98,18 @@ test_cases:
 
   - name: "cache and candidate setup costs keep empty and tiny domains direct"
     scm: |
-      (map (list group_value_cache_costs invariant_property_cover_costs)
-        (lambda (costs)
-          (map '(0 1 6000) (lambda (rows)
-            (begin
-              (define alternatives (costs rows 1))
-              (planner_cost_clear_winner? (cadr alternatives) (car alternatives)))))))
+      (begin
+        (define __snapshot_test_actual
+          (map (list group_value_cache_costs invariant_property_cover_costs)
+            (lambda (costs)
+              (map '(0 1 6000) (lambda (rows)
+                (begin
+                  (define alternatives (costs rows 1))
+                  (planner_cost_clear_winner? (cadr alternatives) (car alternatives)))))))
+        )
+        (if (equal? (json_encode __snapshot_test_actual) (json_encode (list (list false false true) (list false false true))))
+          __snapshot_test_actual
+          (error (concat "cache and candidate setup costs keep empty and tiny domains direct: unexpected value " (serialize __snapshot_test_actual)))))
     expect:
       data: [[[false, false, true], [false, false, true]]]
 
@@ -142,14 +157,20 @@ test_cases:
 
   - name: "aggregate purity distinguishes explicit conversion from clock reads"
     scm: |
-      (list
-        (contribution_pure_expr? '('unix_timestamp 0))
-        (contribution_pure_expr? (list + 1 2))
-        (contribution_pure_expr? '('unix_timestamp))
-        (contribution_pure_expr? '('sql_not '('equal?? 1 nil)))
-        (contribution_outer_inputs '('format_date 0 "%Y" '('session_globalvar "time_zone")) '()))
+      (begin
+        (define __snapshot_test_actual
+          (list
+            (contribution_pure_expr? '('unix_timestamp 0))
+            (contribution_pure_expr? (list + 1 2))
+            (contribution_pure_expr? '('unix_timestamp))
+            (contribution_pure_expr? '('sql_not '('equal?? 1 nil)))
+            (contribution_outer_inputs '('format_date 0 "%Y" '('session_globalvar "time_zone")) '()))
+        )
+        (if (equal? (json_encode __snapshot_test_actual) (json_encode (list true true false true (list (list (quote session_globalvar) "time_zone")))))
+          __snapshot_test_actual
+          (error (concat "aggregate purity distinguishes explicit conversion from clock reads: unexpected value " (serialize __snapshot_test_actual)))))
     expect:
-      data: [[true, true, false, true, [["session_globalvar", "time_zone"]]]]
+      data: [[true, true, false, true, [[{symbol: "session_globalvar"}, "time_zone"]]]]
 
   - name: "computed range bindings include the session timezone"
     session_id: "grc-point-timezone"
@@ -184,14 +205,20 @@ test_cases:
   - name: "property candidates lower to native RecSet scan boundaries"
     scm: |
       (begin
-        (define source '("e" "memcp-tests" "grc_events" false nil))
-        (define expression '('apply '('get_column "e" false "$recset_contains" false) '('list '__candidates)))
-        (define filter (lower_column_expr_for_alias source expression))
-        (define joined (lower_column_expr_for_join (list source) "e" expression))
-        (if (not (equal? filter joined)) (error "membership callback lowering differs") true)
-        (serialize (compile_scan_plan 'scan_recset nil '('table "memcp-tests" "grc_events")
-          '('quote '("$recset_contains"))
-          (list 'lambda (list recset_contains_callback_symbol) filter))))
+        (define __snapshot_test_actual
+          (begin
+            (define source '("e" "memcp-tests" "grc_events" false nil))
+            (define expression '('apply '('get_column "e" false "$recset_contains" false) '('list '__candidates)))
+            (define filter (lower_column_expr_for_alias source expression))
+            (define joined (lower_column_expr_for_join (list source) "e" expression))
+            (if (not (equal? filter joined)) (error "membership callback lowering differs") true)
+            (serialize (compile_scan_plan 'scan_recset nil '('table "memcp-tests" "grc_events")
+              '('quote '("$recset_contains"))
+              (list 'lambda (list recset_contains_callback_symbol) filter))))
+        )
+        (if (and (regexp_test __snapshot_test_actual "scan_boundary\\ \"recset\""))
+          __snapshot_test_actual
+          (error (concat "property candidates lower to native RecSet scan boundaries: unexpected value " (serialize __snapshot_test_actual)))))
     expect:
       result_contains: ['scan_boundary "recset"']
 
@@ -938,54 +965,78 @@ test_cases:
   - name: "snapshot execution invalidates before subtracting across source changes"
     scm: |
       (begin
-        (define source (table "memcp-tests" "grc_state_entity"))
-        (define snapshot (make_contribution_snapshot nil nil))
-        (define view (lambda () (list (table_read_version source))))
-        (define initial (lambda () (list 1 10)))
-        (define changed (lambda (lo hi) (list)))
-        (define values (lambda (keys) (list)))
-        (define direct (lambda () 99))
-        (define first (snapshot nil 1 view initial changed values direct))
-        (insert source '("id" "category") (list (list 6 1)))
-        (list first (snapshot nil 2 view initial changed values direct)))
+        (define __snapshot_test_actual
+          (begin
+            (define source (table "memcp-tests" "grc_state_entity"))
+            (define snapshot (make_contribution_snapshot nil nil))
+            (define view (lambda () (list (table_read_version source))))
+            (define initial (lambda () (list 1 10)))
+            (define changed (lambda (lo hi) (list)))
+            (define values (lambda (keys) (list)))
+            (define direct (lambda () 99))
+            (define first (snapshot nil 1 view initial changed values direct))
+            (insert source '("id" "category") (list (list 6 1)))
+            (list first (snapshot nil 2 view initial changed values direct)))
+        )
+        (if (equal? (json_encode __snapshot_test_actual) (json_encode (list 10 99)))
+          __snapshot_test_actual
+          (error (concat "snapshot execution invalidates before subtracting across source changes: unexpected value " (serialize __snapshot_test_actual)))))
     expect:
       data: [[10, 99]]
 
   - name: "snapshot corrections preserve old values and skip repeated coordinates"
     scm: |
       (begin
-        (define snapshot (make_contribution_snapshot nil nil))
-        (define view (lambda () (list 1)))
-        (define full (lambda () (list 1 4 2 nil)))
-        (define candidates (lambda (lo hi) (list 1 2)))
-        (define changed (lambda (keys) (list 1 nil 2 -3)))
-        (define invalid (lambda () (error "unexpected full scan")))
-        (define first (snapshot nil 0 view full candidates changed invalid))
-        (define next (snapshot nil 1 view invalid candidates changed invalid))
-        (define repeat (snapshot nil 1 view invalid (lambda (a b) (error "repeated point scanned")) changed invalid))
-        (list first next repeat (snapshot nil 0 view invalid candidates (lambda (keys) (list 1 4 2 nil)) invalid)))
+        (define __snapshot_test_actual
+          (begin
+            (define snapshot (make_contribution_snapshot nil nil))
+            (define view (lambda () (list 1)))
+            (define full (lambda () (list 1 4 2 nil)))
+            (define candidates (lambda (lo hi) (list 1 2)))
+            (define changed (lambda (keys) (list 1 nil 2 -3)))
+            (define invalid (lambda () (error "unexpected full scan")))
+            (define first (snapshot nil 0 view full candidates changed invalid))
+            (define next (snapshot nil 1 view invalid candidates changed invalid))
+            (define repeat (snapshot nil 1 view invalid (lambda (a b) (error "repeated point scanned")) changed invalid))
+            (list first next repeat (snapshot nil 0 view invalid candidates (lambda (keys) (list 1 4 2 nil)) invalid)))
+        )
+        (if (equal? (json_encode __snapshot_test_actual) (json_encode (list 4 -3 -3 4)))
+          __snapshot_test_actual
+          (error (concat "snapshot corrections preserve old values and skip repeated coordinates: unexpected value " (serialize __snapshot_test_actual)))))
     expect:
       data: [[4, -3, -3, 4]]
 
   - name: "snapshot rejects a source change during preparation"
     scm: |
       (begin
-        (define version (newsession))
-        (version "v" 1)
-        (define snapshot (make_contribution_snapshot nil nil))
-        (snapshot nil 1 (lambda () (list (version "v")))
-          (lambda () (begin (version "v" 2) (list 1 7)))
-          (lambda (a b) (list)) (lambda (keys) (list)) (lambda () 19)))
+        (define __snapshot_test_actual
+          (begin
+            (define version (newsession))
+            (version "v" 1)
+            (define snapshot (make_contribution_snapshot nil nil))
+            (snapshot nil 1 (lambda () (list (version "v")))
+              (lambda () (begin (version "v" 2) (list 1 7)))
+              (lambda (a b) (list)) (lambda (keys) (list)) (lambda () 19)))
+        )
+        (if (equal? (json_encode __snapshot_test_actual) (json_encode 19))
+          __snapshot_test_actual
+          (error (concat "snapshot rejects a source change during preparation: unexpected value " (serialize __snapshot_test_actual)))))
     expect:
       data: [19]
 
   - name: "snapshot admission rejects preparation before allocating its state"
     scm: |
       (begin
-        (define admit (make_contribution_admission))
-        (define snapshot (make_contribution_snapshot admit (lambda () contribution_snapshot_key_budget)))
-        (snapshot nil 1 (lambda () (list 1)) (lambda () (error "unadmitted full scan"))
-          (lambda (a b) (list)) (lambda (keys) (list)) (lambda () 23)))
+        (define __snapshot_test_actual
+          (begin
+            (define admit (make_contribution_admission))
+            (define snapshot (make_contribution_snapshot admit (lambda () contribution_snapshot_key_budget)))
+            (snapshot nil 1 (lambda () (list 1)) (lambda () (error "unadmitted full scan"))
+              (lambda (a b) (list)) (lambda (keys) (list)) (lambda () 23)))
+        )
+        (if (equal? (json_encode __snapshot_test_actual) (json_encode 23))
+          __snapshot_test_actual
+          (error (concat "snapshot admission rejects preparation before allocating its state: unexpected value " (serialize __snapshot_test_actual)))))
     expect:
       data: [23]
 
@@ -999,236 +1050,356 @@ test_cases:
 
   - name: "snapshot group cache creates an immutable anchor"
     scm: |
-      (snapshot_group_cache "grc-shared-snapshot" (lambda () '(1)) nil 0 4 (lambda () '(101))
-        (lambda () '(1 4 2 nil 3 0 4 0)) (lambda (a b) (error "unexpected cover"))
-        (lambda (keys) (error "unexpected delta")) (lambda () (error "unexpected fallback")))
+      (begin
+        (define __snapshot_test_actual
+          (snapshot_group_cache "grc-shared-snapshot" (lambda () '(1)) nil 0 4 (lambda () '(101))
+            (lambda () '(1 4 2 nil 3 0 4 0)) (lambda (a b) (error "unexpected cover"))
+            (lambda (keys) (error "unexpected delta")) (lambda () (error "unexpected fallback")))
+        )
+        (if (equal? (json_encode __snapshot_test_actual) (json_encode 4))
+          __snapshot_test_actual
+          (error (concat "snapshot group cache creates an immutable anchor: unexpected value " (serialize __snapshot_test_actual)))))
     expect:
       data: [4]
 
   - name: "a separate request reads the retained snapshot without scanning"
     scm: |
-      (snapshot_group_cache "grc-shared-snapshot" (lambda () '(1)) nil 0 4 (lambda () '(101))
-        (lambda () (error "repeated full scan")) (lambda (a b) (error "repeated cover"))
-        (lambda (keys) (error "repeated delta")) (lambda () (error "unexpected fallback")))
+      (begin
+        (define __snapshot_test_actual
+          (snapshot_group_cache "grc-shared-snapshot" (lambda () '(1)) nil 0 4 (lambda () '(101))
+            (lambda () (error "repeated full scan")) (lambda (a b) (error "repeated cover"))
+            (lambda (keys) (error "repeated delta")) (lambda () (error "unexpected fallback")))
+        )
+        (if (equal? (json_encode __snapshot_test_actual) (json_encode 4))
+          __snapshot_test_actual
+          (error (concat "a separate request reads the retained snapshot without scanning: unexpected value " (serialize __snapshot_test_actual)))))
     expect:
       data: [4]
 
   - name: "a separate request derives a new coordinate from a retained anchor"
     scm: |
-      (snapshot_group_cache "grc-shared-snapshot" (lambda () '(1)) nil 1 4 (lambda () '(101))
-        (lambda () (error "unnecessary full scan")) (lambda (a b) '(1 2))
-        (lambda (keys) '(1 nil 2 -3)) (lambda () (error "unexpected fallback")))
+      (begin
+        (define __snapshot_test_actual
+          (snapshot_group_cache "grc-shared-snapshot" (lambda () '(1)) nil 1 4 (lambda () '(101))
+            (lambda () (error "unnecessary full scan")) (lambda (a b) '(1 2))
+            (lambda (keys) '(1 nil 2 -3)) (lambda () (error "unexpected fallback")))
+        )
+        (if (equal? (json_encode __snapshot_test_actual) (json_encode -3))
+          __snapshot_test_actual
+          (error (concat "a separate request derives a new coordinate from a retained anchor: unexpected value " (serialize __snapshot_test_actual)))))
     expect:
       data: [-3]
 
   - name: "reverse requests reuse earlier points without replaying deltas"
     scm: |
-      (map '(1 0 1) (lambda (x)
-        (snapshot_group_cache "grc-shared-snapshot" (lambda () '(1)) nil x 4 (lambda () '(101))
-          (lambda () (error "repeated full scan")) (lambda (a b) (error "repeated cover"))
-          (lambda (keys) (error "repeated delta")) (lambda () (error "unexpected fallback")))))
+      (begin
+        (define __snapshot_test_actual
+          (map '(1 0 1) (lambda (x)
+            (snapshot_group_cache "grc-shared-snapshot" (lambda () '(1)) nil x 4 (lambda () '(101))
+              (lambda () (error "repeated full scan")) (lambda (a b) (error "repeated cover"))
+              (lambda (keys) (error "repeated delta")) (lambda () (error "unexpected fallback")))))
+        )
+        (if (equal? (json_encode __snapshot_test_actual) (json_encode (list -3 4 -3)))
+          __snapshot_test_actual
+          (error (concat "reverse requests reuse earlier points without replaying deltas: unexpected value " (serialize __snapshot_test_actual)))))
     expect:
       data: [[-3, 4, -3]]
 
   - name: "fixed domains and source revisions do not share stale snapshots"
     scm: |
-      (list
-        (snapshot_group_cache "grc-shared-snapshot" (lambda () '(2)) nil 0 4 (lambda () '(101))
-          (lambda () '(1 17)) (lambda (a b) (error "wrong fixed domain"))
-          (lambda (keys) (error "wrong fixed domain")) (lambda () 99))
-        (snapshot_group_cache "grc-shared-snapshot" (lambda () '(1)) nil 0 4 (lambda () '(102))
-          (lambda () '(1 23)) (lambda (a b) (error "stale revision"))
-          (lambda (keys) (error "stale revision")) (lambda () 99)))
+      (begin
+        (define __snapshot_test_actual
+          (list
+            (snapshot_group_cache "grc-shared-snapshot" (lambda () '(2)) nil 0 4 (lambda () '(101))
+              (lambda () '(1 17)) (lambda (a b) (error "wrong fixed domain"))
+              (lambda (keys) (error "wrong fixed domain")) (lambda () 99))
+            (snapshot_group_cache "grc-shared-snapshot" (lambda () '(1)) nil 0 4 (lambda () '(102))
+              (lambda () '(1 23)) (lambda (a b) (error "stale revision"))
+              (lambda (keys) (error "stale revision")) (lambda () 99)))
+        )
+        (if (equal? (json_encode __snapshot_test_actual) (json_encode (list 17 23)))
+          __snapshot_test_actual
+          (error (concat "fixed domains and source revisions do not share stale snapshots: unexpected value " (serialize __snapshot_test_actual)))))
     expect:
       data: [[17, 23]]
 
   - name: "SQL NULL is a retained snapshot result"
     scm: |
       (begin
-        (snapshot_group_cache "grc-null-snapshot" (lambda () '()) nil 0 4 (lambda () '(101))
-          (lambda () '(1 nil)) (lambda (a b) '()) (lambda (keys) '()) (lambda () 99))
-        (snapshot_group_cache "grc-null-snapshot" (lambda () '()) nil 0 4 (lambda () '(101))
-          (lambda () (error "NULL snapshot rebuilt")) (lambda (a b) (error "NULL snapshot rescanned"))
-          (lambda (keys) (error "NULL snapshot reevaluated")) (lambda () 99)))
+        (define __snapshot_test_actual
+          (begin
+            (snapshot_group_cache "grc-null-snapshot" (lambda () '()) nil 0 4 (lambda () '(101))
+              (lambda () '(1 nil)) (lambda (a b) '()) (lambda (keys) '()) (lambda () 99))
+            (snapshot_group_cache "grc-null-snapshot" (lambda () '()) nil 0 4 (lambda () '(101))
+              (lambda () (error "NULL snapshot rebuilt")) (lambda (a b) (error "NULL snapshot rescanned"))
+              (lambda (keys) (error "NULL snapshot reevaluated")) (lambda () 99)))
+        )
+        (if (equal? (json_encode __snapshot_test_actual) (json_encode nil))
+          __snapshot_test_actual
+          (error (concat "SQL NULL is a retained snapshot result: unexpected value " (serialize __snapshot_test_actual)))))
     expect:
       data: [null]
 
   - name: "snapshot overlays retain corrections across successive anchors"
     scm: |
       (begin
-        (define next (snapshot_group_cache "grc-shared-snapshot" (lambda () '(1)) nil 2 4 (lambda () '(101))
-          (lambda () (error "unexpected rebuild")) (lambda (a b) '(1))
-          (lambda (keys) '(1 6)) (lambda () 99)))
-        (define final (snapshot_group_cache "grc-shared-snapshot" (lambda () '(1)) nil 3 4 (lambda () '(101))
-          (lambda () (error "unexpected rebuild")) (lambda (a b) '(2))
-          (lambda (keys) '(2 nil)) (lambda () 99)))
-        (list next final))
+        (define __snapshot_test_actual
+          (begin
+            (define next (snapshot_group_cache "grc-shared-snapshot" (lambda () '(1)) nil 2 4 (lambda () '(101))
+              (lambda () (error "unexpected rebuild")) (lambda (a b) '(1))
+              (lambda (keys) '(1 6)) (lambda () 99)))
+            (define final (snapshot_group_cache "grc-shared-snapshot" (lambda () '(1)) nil 3 4 (lambda () '(101))
+              (lambda () (error "unexpected rebuild")) (lambda (a b) '(2))
+              (lambda (keys) '(2 nil)) (lambda () 99)))
+            (list next final))
+        )
+        (if (equal? (json_encode __snapshot_test_actual) (json_encode (list 3 6)))
+          __snapshot_test_actual
+          (error (concat "snapshot overlays retain corrections across successive anchors: unexpected value " (serialize __snapshot_test_actual)))))
     expect:
       data: [[3, 6]]
 
   - name: "an evicted full anchor rebuilds while exact points remain usable"
     scm: |
       (begin
-        (define domain (concat "grc-shared-snapshot:" (serialize (list '(1) '(101)))))
-        (snapshot_group_bases (snapshot_group_coordinate_key domain 0) nil)
-        (define old (snapshot_group_cache "grc-shared-snapshot" (lambda () '(1)) nil 3 4 (lambda () '(101))
-          (lambda () (error "exact point lost with base")) (lambda (a b) (error "point rescanned"))
-          (lambda (keys) (error "point reevaluated")) (lambda () 99)))
-        (define next (snapshot_group_cache "grc-shared-snapshot" (lambda () '(1)) nil 4 4 (lambda () '(101))
-          (lambda () '(1 7)) (lambda (a b) (error "evicted base used"))
-          (lambda (keys) (error "evicted base used")) (lambda () 99)))
-        (list old next))
+        (define __snapshot_test_actual
+          (begin
+            (define domain (concat "grc-shared-snapshot:" (serialize (list '(1) '(101)))))
+            (snapshot_group_bases (snapshot_group_coordinate_key domain 0) nil)
+            (define old (snapshot_group_cache "grc-shared-snapshot" (lambda () '(1)) nil 3 4 (lambda () '(101))
+              (lambda () (error "exact point lost with base")) (lambda (a b) (error "point rescanned"))
+              (lambda (keys) (error "point reevaluated")) (lambda () 99)))
+            (define next (snapshot_group_cache "grc-shared-snapshot" (lambda () '(1)) nil 4 4 (lambda () '(101))
+              (lambda () '(1 7)) (lambda (a b) (error "evicted base used"))
+              (lambda (keys) (error "evicted base used")) (lambda () 99)))
+            (list old next))
+        )
+        (if (equal? (json_encode __snapshot_test_actual) (json_encode (list 6 7)))
+          __snapshot_test_actual
+          (error (concat "an evicted full anchor rebuilds while exact points remain usable: unexpected value " (serialize __snapshot_test_actual)))))
     expect:
       data: [[6, 7]]
 
   - name: "concurrent snapshot builders publish equivalent immutable corrections"
     scm: |
       (begin
-        (define results (parallelN 32 (lambda (i)
+        (define __snapshot_test_actual
           (begin
-            (define coordinate (+ 1 (mod i 4)))
-            (snapshot_group_cache "grc-concurrent-snapshot" (lambda () '()) nil coordinate 4 (lambda () '(313))
-              (lambda () (list 1 (* 2 coordinate)))
-              (lambda (lo hi) '(1))
-              (lambda (keys) (list 1 (* 2 coordinate)))
-              (lambda () (error "unexpected concurrent fallback")))))))
-        (list
-          (equal? results (map (produceN 32) (lambda (i) (* 2 (+ 1 (mod i 4))))))
-          (snapshot_group_cache "grc-concurrent-snapshot" (lambda () '()) nil 3 4 (lambda () '(313))
-            (lambda () (error "concurrent point was lost"))
-            (lambda (lo hi) (error "concurrent point was lost"))
-            (lambda (keys) (error "concurrent point was lost"))
-            (lambda () 99))))
+            (define results (parallelN 32 (lambda (i)
+              (begin
+                (define coordinate (+ 1 (mod i 4)))
+                (snapshot_group_cache "grc-concurrent-snapshot" (lambda () '()) nil coordinate 4 (lambda () '(313))
+                  (lambda () (list 1 (* 2 coordinate)))
+                  (lambda (lo hi) '(1))
+                  (lambda (keys) (list 1 (* 2 coordinate)))
+                  (lambda () (error "unexpected concurrent fallback")))))))
+            (list
+              (equal? results (map (produceN 32) (lambda (i) (* 2 (+ 1 (mod i 4))))))
+              (snapshot_group_cache "grc-concurrent-snapshot" (lambda () '()) nil 3 4 (lambda () '(313))
+                (lambda () (error "concurrent point was lost"))
+                (lambda (lo hi) (error "concurrent point was lost"))
+                (lambda (keys) (error "concurrent point was lost"))
+                (lambda () 99))))
+        )
+        (if (equal? (json_encode __snapshot_test_actual) (json_encode (list true 6)))
+          __snapshot_test_actual
+          (error (concat "concurrent snapshot builders publish equivalent immutable corrections: unexpected value " (serialize __snapshot_test_actual)))))
     expect:
       data: [[true, 6]]
 
   - name: "large snapshot domains fall back before building state"
     scm: |
-      (snapshot_group_cache "grc-over-budget" (lambda () '()) nil 0 contribution_snapshot_key_budget (lambda () '(101))
-        (lambda () (error "unadmitted full scan")) (lambda (a b) (error "unadmitted cover"))
-        (lambda (keys) (error "unadmitted delta")) (lambda () 29))
+      (begin
+        (define __snapshot_test_actual
+          (snapshot_group_cache "grc-over-budget" (lambda () '()) nil 0 contribution_snapshot_key_budget (lambda () '(101))
+            (lambda () (error "unadmitted full scan")) (lambda (a b) (error "unadmitted cover"))
+            (lambda (keys) (error "unadmitted delta")) (lambda () 29))
+        )
+        (if (equal? (json_encode __snapshot_test_actual) (json_encode 29))
+          __snapshot_test_actual
+          (error (concat "large snapshot domains fall back before building state: unexpected value " (serialize __snapshot_test_actual)))))
     expect:
       data: [29]
 
   - name: "a changing source view never publishes a snapshot"
     scm: |
       (begin
-        (define revision (newsession))
-        (revision "version" 1)
-        (define first (snapshot_group_cache "grc-changing-view" (lambda () '()) nil 0 4
-          (lambda () (list (revision "version")))
-          (lambda () (begin (revision "version" 2) '(1 100)))
-          (lambda (a b) '()) (lambda (keys) '()) (lambda () 31)))
-        (define next (snapshot_group_cache "grc-changing-view" (lambda () '()) nil 0 4 (lambda () '(1))
-          (lambda () '(1 37)) (lambda (a b) (error "partial state retained"))
-          (lambda (keys) (error "partial state retained")) (lambda () 99)))
-        (list first next))
+        (define __snapshot_test_actual
+          (begin
+            (define revision (newsession))
+            (revision "version" 1)
+            (define first (snapshot_group_cache "grc-changing-view" (lambda () '()) nil 0 4
+              (lambda () (list (revision "version")))
+              (lambda () (begin (revision "version" 2) '(1 100)))
+              (lambda (a b) '()) (lambda (keys) '()) (lambda () 31)))
+            (define next (snapshot_group_cache "grc-changing-view" (lambda () '()) nil 0 4 (lambda () '(1))
+              (lambda () '(1 37)) (lambda (a b) (error "partial state retained"))
+              (lambda (keys) (error "partial state retained")) (lambda () 99)))
+            (list first next))
+        )
+        (if (equal? (json_encode __snapshot_test_actual) (json_encode (list 31 37)))
+          __snapshot_test_actual
+          (error (concat "a changing source view never publishes a snapshot: unexpected value " (serialize __snapshot_test_actual)))))
     expect:
       data: [[31, 37]]
 
   - name: "explicit transactions do not consume shared snapshot points"
     scm: |
-      (map (list tx_begin tx_begin_acid) (lambda (start)
-        (begin
-          (define session (newsession))
-          (start session)
-          (define value (snapshot_group_cache "grc-shared-snapshot" (lambda () '(1))
-            (session "__memcp_tx") 3 4 (lambda () '(101))
-            (lambda () (error "transaction published a shared anchor"))
-            (lambda (a b) (error "transaction used a shared cover"))
-            (lambda (keys) (error "transaction used a shared delta")) (lambda () 41)))
-          (tx_rollback session)
-          value)))
+      (begin
+        (define __snapshot_test_actual
+          (map (list tx_begin tx_begin_acid) (lambda (start)
+            (begin
+              (define session (newsession))
+              (start session)
+              (define value (snapshot_group_cache "grc-shared-snapshot" (lambda () '(1))
+                (session "__memcp_tx") 3 4 (lambda () '(101))
+                (lambda () (error "transaction published a shared anchor"))
+                (lambda (a b) (error "transaction used a shared cover"))
+                (lambda (keys) (error "transaction used a shared delta")) (lambda () 41)))
+              (tx_rollback session)
+              value)))
+        )
+        (if (equal? (json_encode __snapshot_test_actual) (json_encode (list 41 41)))
+          __snapshot_test_actual
+          (error (concat "explicit transactions do not consume shared snapshot points: unexpected value " (serialize __snapshot_test_actual)))))
     expect:
       data: [[41, 41]]
 
   - name: "point-domain aggregate cache reuses exact values across requests"
     scm: |
-      (group_cache_value "grc-point-cache" (lambda () '(7 11)) nil (lambda () '(17)) (lambda () 43))
+      (begin
+        (define __snapshot_test_actual
+          (group_cache_value "grc-point-cache" (lambda () '(7 11)) nil (lambda () '(17)) (lambda () 43))
+        )
+        (if (equal? (json_encode __snapshot_test_actual) (json_encode 43))
+          __snapshot_test_actual
+          (error (concat "point-domain aggregate cache reuses exact values across requests: unexpected value " (serialize __snapshot_test_actual)))))
     expect:
       data: [43]
 
   - name: "point-domain aggregate hit does not execute its producer"
     scm: |
-      (group_cache_value "grc-point-cache" (lambda () '(7 11)) nil (lambda () '(17))
-        (lambda () (error "retained aggregate was recomputed")))
+      (begin
+        (define __snapshot_test_actual
+          (group_cache_value "grc-point-cache" (lambda () '(7 11)) nil (lambda () '(17))
+            (lambda () (error "retained aggregate was recomputed")))
+        )
+        (if (equal? (json_encode __snapshot_test_actual) (json_encode 43))
+          __snapshot_test_actual
+          (error (concat "point-domain aggregate hit does not execute its producer: unexpected value " (serialize __snapshot_test_actual)))))
     expect:
       data: [43]
 
   - name: "point-domain aggregate cache separates bindings and revisions"
     scm: |
-      (list
-        (group_cache_value "grc-point-cache" (lambda () '(7 12)) nil (lambda () '(17)) (lambda () 47))
-        (group_cache_value "grc-point-cache" (lambda () '(7 11)) nil (lambda () '(18)) (lambda () nil))
-        (group_cache_value "grc-point-cache" (lambda () '(7 11)) nil (lambda () '(18))
-          (lambda () (error "cached NULL was recomputed"))))
+      (begin
+        (define __snapshot_test_actual
+          (list
+            (group_cache_value "grc-point-cache" (lambda () '(7 12)) nil (lambda () '(17)) (lambda () 47))
+            (group_cache_value "grc-point-cache" (lambda () '(7 11)) nil (lambda () '(18)) (lambda () nil))
+            (group_cache_value "grc-point-cache" (lambda () '(7 11)) nil (lambda () '(18))
+              (lambda () (error "cached NULL was recomputed"))))
+        )
+        (if (equal? (json_encode __snapshot_test_actual) (json_encode (list 47 nil nil)))
+          __snapshot_test_actual
+          (error (concat "point-domain aggregate cache separates bindings and revisions: unexpected value " (serialize __snapshot_test_actual)))))
     expect:
       data: [[47, null, null]]
 
   - name: "point-domain cache does not publish across source revision changes"
     scm: |
       (begin
-        (define revision (newsession))
-        (revision "value" 71)
-        (define first (group_cache_value "grc-point-changing-view" (lambda () '(1)) nil
-          (lambda () (list (revision "value")))
-          (lambda () (begin (revision "value" 73) 79))))
-        (define second (group_cache_value "grc-point-changing-view" (lambda () '(1)) nil
-          (lambda () '(71)) (lambda () 83)))
-        (list first second))
+        (define __snapshot_test_actual
+          (begin
+            (define revision (newsession))
+            (revision "value" 71)
+            (define first (group_cache_value "grc-point-changing-view" (lambda () '(1)) nil
+              (lambda () (list (revision "value")))
+              (lambda () (begin (revision "value" 73) 79))))
+            (define second (group_cache_value "grc-point-changing-view" (lambda () '(1)) nil
+              (lambda () '(71)) (lambda () 83)))
+            (list first second))
+        )
+        (if (equal? (json_encode __snapshot_test_actual) (json_encode (list 79 83)))
+          __snapshot_test_actual
+          (error (concat "point-domain cache does not publish across source revision changes: unexpected value " (serialize __snapshot_test_actual)))))
     expect:
       data: [[79, 83]]
 
   - name: "source changes during point binding cannot reuse or publish an old view"
     scm: |
       (begin
-        (define version (newsession))
-        (version "value" 17)
-        (define first (group_cache_value "grc-point-cache"
-          (lambda () (begin (version "value" 19) '(7 11))) nil
-          (lambda () (list (version "value"))) (lambda () 89)))
-        (define old (group_cache_value "grc-point-cache" (lambda () '(7 11)) nil
-          (lambda () '(17)) (lambda () (error "old immutable point was lost"))))
-        (list first old))
+        (define __snapshot_test_actual
+          (begin
+            (define version (newsession))
+            (version "value" 17)
+            (define first (group_cache_value "grc-point-cache"
+              (lambda () (begin (version "value" 19) '(7 11))) nil
+              (lambda () (list (version "value"))) (lambda () 89)))
+            (define old (group_cache_value "grc-point-cache" (lambda () '(7 11)) nil
+              (lambda () '(17)) (lambda () (error "old immutable point was lost"))))
+            (list first old))
+        )
+        (if (equal? (json_encode __snapshot_test_actual) (json_encode (list 89 43)))
+          __snapshot_test_actual
+          (error (concat "source changes during point binding cannot reuse or publish an old view: unexpected value " (serialize __snapshot_test_actual)))))
     expect:
       data: [[89, 43]]
 
   - name: "point-domain aggregate caches bypass explicit transactions"
     scm: |
-      (map (list tx_begin tx_begin_acid) (lambda (start)
-        (begin
-          (define session (newsession))
-          (start session)
-          (define point (group_cache_value "grc-point-cache" (lambda () '(7 11)) (session "__memcp_tx")
-            (lambda () '(17)) (lambda () 59)))
-          (tx_rollback session)
-          point)))
+      (begin
+        (define __snapshot_test_actual
+          (map (list tx_begin tx_begin_acid) (lambda (start)
+            (begin
+              (define session (newsession))
+              (start session)
+              (define point (group_cache_value "grc-point-cache" (lambda () '(7 11)) (session "__memcp_tx")
+                (lambda () '(17)) (lambda () 59)))
+              (tx_rollback session)
+              point)))
+        )
+        (if (equal? (json_encode __snapshot_test_actual) (json_encode (list 59 59)))
+          __snapshot_test_actual
+          (error (concat "point-domain aggregate caches bypass explicit transactions: unexpected value " (serialize __snapshot_test_actual)))))
     expect:
       data: [[59, 59]]
 
   - name: "failed snapshot preparation leaves no shared partial state"
     scm: |
       (begin
-        (define failed (try (lambda ()
-          (snapshot_group_cache "grc-failed-build" (lambda () '()) nil 5 4 (lambda () '(101))
-            (lambda () (error "stopped preparation")) (lambda (lo hi) '())
-            (lambda (keys) '()) (lambda () 99))) (lambda (err) "stopped")))
-        (define next (snapshot_group_cache "grc-failed-build" (lambda () '()) nil 5 4 (lambda () '(101))
-          (lambda () '(1 97)) (lambda (lo hi) (error "partial anchor survived"))
-          (lambda (keys) (error "partial anchor survived")) (lambda () 99)))
-        (list failed next))
+        (define __snapshot_test_actual
+          (begin
+            (define failed (try (lambda ()
+              (snapshot_group_cache "grc-failed-build" (lambda () '()) nil 5 4 (lambda () '(101))
+                (lambda () (error "stopped preparation")) (lambda (lo hi) '())
+                (lambda (keys) '()) (lambda () 99))) (lambda (err) "stopped")))
+            (define next (snapshot_group_cache "grc-failed-build" (lambda () '()) nil 5 4 (lambda () '(101))
+              (lambda () '(1 97)) (lambda (lo hi) (error "partial anchor survived"))
+              (lambda (keys) (error "partial anchor survived")) (lambda () 99)))
+            (list failed next))
+        )
+        (if (equal? (json_encode __snapshot_test_actual) (json_encode (list "stopped" 97)))
+          __snapshot_test_actual
+          (error (concat "failed snapshot preparation leaves no shared partial state: unexpected value " (serialize __snapshot_test_actual)))))
     expect:
       data: [["stopped", 97]]
 
   - name: "failed exact aggregate preparation is not cached"
     scm: |
       (begin
-        (define failed (try (lambda ()
-          (group_cache_value "grc-failed-point" (lambda () '(1)) nil (lambda () '(101))
-            (lambda () (error "stopped preparation")))) (lambda (err) "stopped")))
-        (define next (group_cache_value "grc-failed-point" (lambda () '(1)) nil
-          (lambda () '(101)) (lambda () 103)))
-        (list failed next))
+        (define __snapshot_test_actual
+          (begin
+            (define failed (try (lambda ()
+              (group_cache_value "grc-failed-point" (lambda () '(1)) nil (lambda () '(101))
+                (lambda () (error "stopped preparation")))) (lambda (err) "stopped")))
+            (define next (group_cache_value "grc-failed-point" (lambda () '(1)) nil
+              (lambda () '(101)) (lambda () 103)))
+            (list failed next))
+        )
+        (if (equal? (json_encode __snapshot_test_actual) (json_encode (list "stopped" 103)))
+          __snapshot_test_actual
+          (error (concat "failed exact aggregate preparation is not cached: unexpected value " (serialize __snapshot_test_actual)))))
     expect:
       data: [["stopped", 103]]
 
