@@ -855,7 +855,7 @@ test_cases:
     expect:
       rows: 1
       result_occurrences:
-        - text: "touch_keytable"
+        - text: "(group_cache_create"
           count: 2
 
 cleanup:

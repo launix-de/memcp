@@ -366,7 +366,7 @@ test_cases:
     expect:
       rows: 1
       result_contains:
-        - "touch_keytable"
+        - "group_cache_create"
         - ".grp:rs_data:"
       result_not_contains:
         - "assoc_keys_as_dataset_rows"

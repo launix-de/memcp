@@ -390,9 +390,9 @@ test_cases:
     expect:
       rows: 1
       result_contains:
-        - "touch_keytable"
+        - "group_cache_create"
       result_occurrences:
-        - text: "touch_keytable"
+        - text: "(group_cache_create"
           count: 2
   - name: "Physical preparation keeps distinct nested filter formulas"
     sql: |
@@ -402,7 +402,7 @@ test_cases:
     expect:
       rows: 1
       result_occurrences:
-        - text: "touch_keytable"
+        - text: "(group_cache_create"
           count: 2
   - name: "Shared physical carriers keep distinct nested filter results"
     sql: |

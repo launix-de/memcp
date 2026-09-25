@@ -937,7 +937,7 @@ output coordinate or aggregate. Explicit transactions still use the producer. */
 		(if (nil? proof) (lower_column_expr_for_alias driver expr)
 			(list (list (quote lambda) (list (quote __cache_bound))
 				(cons (quote list) (map (cadr proof) (lambda (cut)
-					(list (quote group_cache_value) (quote group_cut_cache)
+					(list (quote group_cut_value)
 						(concat "ordered-cut-v1:" (serialize (list
 							(source_schema (car cut)) (source_relation (car cut)) (cadr cut))))
 						'('lambda '() '('list '__cache_bound))
@@ -957,16 +957,19 @@ output coordinate or aggregate. Explicit transactions still use the producer. */
 (define lower_group_value_cache_probe (lambda (all_stages stage value_expr keys lookup_keys reduce_expr neutral_expr)
 	(begin
 		(define proof (qassoc_get (gs_facts stage) (quote stable-aggregate-domain) nil))
-		(define name (concat (group_stage_cache_relation stage) ":point-v1:"
-			(aggregate_col_name_using (gs_input stage) (list value_expr reduce_expr neutral_expr))))
-		(list (quote group_cache_value) (quote group_value_cache) name
-			(list (quote lambda) '() (cons (quote list) (map (nth proof 1)
-				(lambda (expr) (lower_group_cache_binding (car proof) expr (coalesceNil (nth proof 3) '()))))))
-			(physical_query_tx_symbol)
-			(list (quote lambda) '() (cons (quote list) (map (nth proof 2)
-				(lambda (source) (list (quote table_read_version) (source_table_expr source))))))
-			(list (quote lambda) '() (lower_scalar_aggregate_query_probe_expr all_stages stage value_expr
-				keys lookup_keys reduce_expr neutral_expr (quote point-cached)))))))
+		(define cache (group_stage_cell_cache stage (map (nth proof 1) (lambda (key) (list (quote point) key)))))
+		(define payload (aggregate_col_name_using (gs_input stage) (list value_expr reduce_expr neutral_expr)))
+		(define producer (list (quote lambda) '() (lower_scalar_aggregate_query_probe_expr all_stages stage value_expr
+			keys lookup_keys reduce_expr neutral_expr (quote point-cached))))
+		(define coordinates (cons (quote list) (map (nth proof 1)
+			(lambda (expr) (lower_group_cache_binding (car proof) expr (coalesceNil (nth proof 3) '()))))))
+		(define view (list (quote lambda) '() (cons (quote list) (map (nth proof 2)
+			(lambda (source) (list (quote table_read_version) (source_table_expr source)))))))
+		(list (quote group_cache_point) (list (quote quote) cache) payload
+			/* Only the additional scalar storage/setup cost needs amortization. */
+			(+ planner_membership_group_cache_startup_ns (* 2 planner_membership_scan_invocation_ns))
+			(list (quote lambda) '() coordinates) (physical_query_tx_symbol) view producer))))
+
 
 (define lower_scalar_aggregate_query_probe_expr (lambda (all_stages stage value_expr keys lookup_keys reduce_expr neutral_expr contribution_mode)
 	(if (and (nil? contribution_mode) (equal? reduce_expr (quote sql_sum_reduce))
@@ -974,15 +977,16 @@ output coordinate or aggregate. Explicit transactions still use the producer. */
 		(lower_group_value_cache_probe all_stages stage value_expr keys lookup_keys reduce_expr neutral_expr)
 		(if (and (nil? contribution_mode) (equal? reduce_expr (quote sql_sum_reduce))
 			(not (nil? (qassoc_get (gs_facts stage) (quote contribution-domain) nil))))
-			(if (contribution_snapshot_selected? stage)
+			(if (contribution_snapshot_selected? all_stages stage)
 				(lower_contribution_snapshot_probe all_stages stage value_expr keys lookup_keys reduce_expr neutral_expr)
 				(lower_scalar_aggregate_query_probe_expr all_stages stage value_expr keys lookup_keys reduce_expr neutral_expr (quote fresh)))
 			(begin
 				(define all_stages (if (nil? contribution_mode) all_stages
 					(contribution_physical_catalog all_stages stage)))
 				(define input (gs_input stage))
-				(define property_cover (if (or (nil? contribution_mode) (equal? contribution_mode (quote point-cached)))
-					(qassoc_get (gs_facts stage) (quote invariant-property-cover) nil) nil))
+				/* A fixed property remains reusable inside full and delta producers.
+				Its candidate keys restrict work; the original filter stays residual. */
+				(define property_cover (qassoc_get (gs_facts stage) (quote invariant-property-cover) nil))
 				(define property_cover (if (invariant_property_cover_selected? all_stages stage property_cover) property_cover nil))
 				(define keyed_terms (map (produceN (count keys)) (lambda (i)
 					(list (query_key_term_alias (qb_sources input) (nth keys i))
@@ -1018,13 +1022,17 @@ output coordinate or aggregate. Explicit transactions still use the producer. */
 				(define planning_session (qassoc_get (gs_facts stage) (quote physical_planning_session) nil))
 				(define simplified_input (group_input_without_dead_scalar_sources
 					stage keyed_input planning_session))
-				(define range_candidates (if (or (equal? contribution_mode (quote full)) (equal? contribution_mode (quote delta)))
+				(define range_candidates (if (or (equal? contribution_mode (quote full)) (equal? contribution_mode (quote delta)) (equal? contribution_mode (quote direct)))
 					(map (group_range_recmap_candidate all_stages stage simplified_input)
 						(lambda (candidate) (if (equal? contribution_mode (quote delta))
 							(contribution_bounded_recmap candidate (cadr (qassoc_get (gs_facts stage) (quote contribution-domain) nil)) (quote __contribution_keys))
 							(merge (list candidate (list (quote full)
-								(cons (quote list) (map (nth (qassoc_get (gs_facts stage) (quote contribution-domain) nil) 5)
-									(lambda (source) (list (quote table_read_version) (source_table_expr source)))))))))))
+								(list (quote list)
+									(cons (quote list) (map (nth (qassoc_get (gs_facts stage) (quote contribution-domain) nil) 5)
+										(lambda (source) (list (quote table_read_version) (source_table_expr source)))))
+									(cons (quote list) (map (nth (qassoc_get (gs_facts stage) (quote contribution-domain) nil) 4)
+										(lambda (binding) (lower_column_expr_for_alias
+											(car (qassoc_get (gs_facts stage) (quote contribution-domain) nil)) binding)))))))))))
 					(if (not (nil? property_cover))
 						(map (select_group_range_recmap_candidate all_stages stage simplified_input planning_session)
 							(lambda (candidate) (contribution_bounded_recmap candidate nil (quote __property_candidates))))
@@ -1036,14 +1044,14 @@ output coordinate or aggregate. Explicit transactions still use the producer. */
 				(define probe_catalog (map all_stages (lambda (candidate)
 					(if (group_stage? candidate) (group_stage_with_facts candidate
 						(qassoc_set (gs_facts candidate) (quote contribution_probe) true)) candidate))))
-				(define delta_sources (if (or (not (nil? property_cover)) (equal? contribution_mode (quote delta)) (equal? contribution_mode (quote fresh)))
+				(define remaining_sources (if (or (not (nil? property_cover)) (equal? contribution_mode (quote delta)) (equal? contribution_mode (quote fresh)))
 					(filter (qb_sources recmap_input) source_is_stage_output?) '()))
-				(define mapped_input (if (empty_list? delta_sources) recmap_input
-					(query_block_with_selected_probe_sources_using probe_catalog delta_sources recmap_input)))
+				(define mapped_input (if (empty_list? remaining_sources) recmap_input
+					(query_block_with_selected_probe_sources_using probe_catalog remaining_sources recmap_input)))
 				(define mapped_input (query_block_with_invariant_property_values mapped_input property_cover))
 				(define recmap_value (rewrite_group_range_recmaps_expr range_candidates value_expr))
-				(define mapped_value (if (empty_list? delta_sources) recmap_value
-					(rewrite_scalar_first_probe_expr probe_catalog delta_sources nil recmap_value)))
+				(define mapped_value (if (empty_list? remaining_sources) recmap_value
+					(rewrite_scalar_first_probe_expr probe_catalog remaining_sources nil recmap_value)))
 				(define mapped_value (rewrite_invariant_property_value property_cover mapped_value))
 				(define consumed_stages (qassoc_get (qb_facts mapped_input)
 					(quote consumed_probe_stage_ids) '()))
@@ -2707,11 +2715,11 @@ choices. */
 				(list (quote <) value to_value)
 				(list (quote <=) value to_value))))))
 
-(define range_cache_point_terms (lambda (key_symbols point_values)
+(define range_cache_point_terms (lambda (key_symbols point_values equality)
 	(if (empty_list? key_symbols)
 		'()
 		(map (produceN (count key_symbols)) (lambda (i)
-			(list (quote equal??) (nth key_symbols i) (nth point_values i)))))))
+			(list equality (nth key_symbols i) (nth point_values i)))))))
 
 (define range_cache_create_columns_expr (lambda (stage cache_name)
 	(begin
@@ -2738,7 +2746,7 @@ choices. */
 					(list (quote list) "column" (nth names 3) "any"
 						(quoted_runtime_list '()) collation)))))))
 		(define all_names (merge (list key_names (range_cache_boundary_names domains))))
-		(list (quote createtable)
+		(list (quote group_cache_create)
 			(source_schema src)
 			cache_name
 			(cons (quote list) (cons
@@ -2847,7 +2855,7 @@ choices. */
 					(nth boundary_values (+ offset 2)) (nth boundary_values (+ offset 3))))))))))
 
 (define range_cache_delete_cell_expr (lambda (schema cache_name key_names point_values
-	boundary_names boundary_values tx_expr)
+	boundary_names boundary_values tx_expr equality)
 	(begin
 		(define columns (merge (list key_names boundary_names)))
 		(define params (map columns symbol))
@@ -2859,7 +2867,7 @@ choices. */
 			(cons (quote list) columns)
 			(list (quote lambda) params
 				(combine_where_terms (merge (list
-					(range_cache_point_terms key_symbols point_values)
+					(range_cache_point_terms key_symbols point_values equality)
 					(range_cache_boundary_equal_terms boundary_symbols boundary_values))) true))
 			(quoted_runtime_list (list "$update"))
 			(list (quote lambda) (list (quote __deleted) (symbol "$update"))
@@ -2868,7 +2876,7 @@ choices. */
 			0 (quote +) false))))
 
 (define range_cache_find_cells_expr (lambda (schema cache_name key_names point_values
-	boundary_names axis marker_kind marker tx_expr)
+	boundary_names axis marker_kind marker tx_expr equality)
 	(begin
 		(define columns (merge (list key_names boundary_names)))
 		(define params (map columns symbol))
@@ -2885,7 +2893,7 @@ choices. */
 			(cons (quote list) columns)
 			(list (quote lambda) params
 				(combine_where_terms (merge (list
-					(range_cache_point_terms key_symbols point_values)
+					(range_cache_point_terms key_symbols point_values equality)
 					(list
 						(range_cache_cut_less_expr from_kind_symbol from_symbol marker_kind marker)
 						(range_cache_cut_less_expr marker_kind marker to_kind_symbol to_symbol)))) true))
@@ -2898,18 +2906,18 @@ choices. */
 				(list (quote merge) (list (quote list) (quote old) (quote new))))
 			false))))
 
-(define range_cache_domain_exists_expr (lambda (schema cache_name key_names point_values tx_expr)
+(define range_cache_domain_exists_expr (lambda (schema cache_name key_names point_values tx_expr equality)
 	(compile_scan_plan (quote scan_exists)
 		tx_expr
 		(list (quote table) schema cache_name)
 		(cons (quote list) key_names)
 		(list (quote lambda) (map key_names symbol)
 			(combine_where_terms
-				(range_cache_point_terms (map key_names symbol) point_values)
+				(range_cache_point_terms (map key_names symbol) point_values equality)
 				true)))))
 
 (define range_cache_split_expr (lambda (schema cache_name key_names point_values
-	boundary_names axis marker_kind marker tx_expr)
+	boundary_names axis marker_kind marker tx_expr equality)
 	(begin
 		(define columns (merge (list key_names boundary_names)))
 		(define boundary_count (count boundary_names))
@@ -2930,7 +2938,7 @@ choices. */
 					(list (quote lambda) (list (quote __split_count) cell)
 						(list (quote !begin)
 							(range_cache_delete_cell_expr schema cache_name key_names point_values
-								boundary_names old_values tx_expr)
+								boundary_names old_values tx_expr equality)
 							(range_cache_insert_expr schema cache_name columns
 								(merge (list point_values left_values)) tx_expr)
 							(range_cache_insert_expr schema cache_name columns
@@ -2938,7 +2946,7 @@ choices. */
 							(list (quote +) (quote __split_count) 1)))
 					0))
 			(range_cache_find_cells_expr schema cache_name key_names point_values
-				boundary_names axis marker_kind marker tx_expr)))))
+				boundary_names axis marker_kind marker tx_expr equality)))))
 
 (define range_cache_flatten_bounds (lambda (bounds)
 	(merge (map bounds (lambda (bound) bound)))))
@@ -3045,7 +3053,7 @@ choices. */
 									(list (quote __current_cut) (quote __range_marker_value))
 									(list (quote !begin)
 										(range_cache_delete_cell_expr schema cache_name key_names point_values
-											boundary_names current_values tx_expr)
+											boundary_names current_values tx_expr (quote equal??))
 										(range_cache_insert_expr schema cache_name
 											(merge (list key_names boundary_names))
 											(merge (list point_values left_values)) tx_expr)
@@ -3058,11 +3066,8 @@ choices. */
 							(list (quote +) (quote __split_cells) 1)))
 					(list (quote car) (quote __range_hit))))))))
 
-(define range_cache_prepare_expr (lambda (stage cache_name point_values bounds tx_expr)
+(define group_cache_prepare_ranges_expr (lambda (schema cache_name key_names point_values domains bounds tx_expr equality read_cells)
 	(begin
-		(define schema (source_schema (gs_input stage)))
-		(define key_names (group_key_cols (gs_keys stage)))
-		(define domains (range_stage_domains stage))
 		(define boundary_names (range_cache_boundary_names domains))
 		(define columns (merge (list key_names boundary_names)))
 		(define flat_bounds (range_cache_flatten_bounds bounds))
@@ -3074,10 +3079,10 @@ choices. */
 				(list (quote !begin)
 					(list (quote if) (list (quote equal?) (nth bound 0) -1) true
 						(range_cache_split_expr schema cache_name key_names point_values
-							boundary_names axis (nth bound 0) (nth bound 1) tx_expr))
+							boundary_names axis (nth bound 0) (nth bound 1) tx_expr equality))
 					(list (quote if) (list (quote equal?) (nth bound 2) 2) true
 						(range_cache_split_expr schema cache_name key_names point_values
-							boundary_names axis (nth bound 2) (nth bound 3) tx_expr)))))))
+							boundary_names axis (nth bound 2) (nth bound 3) tx_expr equality)))))))
 		(define preparation_key (list (quote concat)
 			(concat cache_name ":")
 			(list (quote table_cache_generation)
@@ -3088,16 +3093,22 @@ choices. */
 		(list (quote range_cache_prepare)
 			(list (quote range_group_cache_mutex) cache_name)
 			(list (quote lambda) '()
-				(list (quote if) (list (quote range_group_cache_preparations) preparation_key)
-					true
-					(cons (quote !begin) (merge (list
-						(list (list (quote if)
-							(range_cache_domain_exists_expr schema cache_name key_names point_values tx_expr)
-							true
-							(range_cache_insert_expr schema cache_name columns
-								(merge (list point_values universal_bounds)) tx_expr)))
-						split_exprs
-						(list (list (quote range_group_cache_preparations) preparation_key true) true))))))))))
+				(list (quote !begin)
+					(list (quote if) (list (quote range_group_cache_preparations) preparation_key)
+						true
+						(cons (quote !begin) (merge (list
+							(list (list (quote if)
+								(range_cache_domain_exists_expr schema cache_name key_names point_values tx_expr equality)
+								true
+								(range_cache_insert_expr schema cache_name columns
+									(merge (list point_values universal_bounds)) tx_expr)))
+							split_exprs
+							(list (list (quote range_group_cache_preparations) preparation_key true) true)))))
+					read_cells))))))
+
+(define range_cache_prepare_expr (lambda (stage cache_name point_values bounds tx_expr)
+	(group_cache_prepare_ranges_expr (source_schema (gs_input stage)) cache_name
+		(group_key_cols (gs_keys stage)) point_values (range_stage_domains stage) bounds tx_expr (quote equal??) true)))
 
 /* Split every boundary from the driving relation before any aggregate state
 column is installed. This is the preparation phase of the range cache: later
@@ -3202,7 +3213,7 @@ one request cannot invalidate one another while the outer scan is running. */
 			true
 			(list (quote if)
 				(range_cache_domain_exists_expr (source_schema (gs_input base_stage))
-					cache_name key_names point_values tx_expr)
+					cache_name key_names point_values tx_expr (quote equal??))
 				true
 				(range_cache_insert_expr (source_schema (gs_input base_stage)) cache_name
 					(merge (list key_names boundary_names))
@@ -3289,7 +3300,7 @@ one request cannot invalidate one another while the outer scan is running. */
 			(cons (quote list) filter_columns)
 			(list (quote lambda) filter_params
 				(combine_where_terms (merge (list
-					(range_cache_point_terms point_symbols point_values)
+					(range_cache_point_terms point_symbols point_values (quote equal??))
 					contained_terms)) true))
 			(quoted_runtime_list (list state_col))
 			(scan_mapreduce_expr (list (symbol state_col))
@@ -3302,7 +3313,7 @@ one request cannot invalidate one another while the outer scan is running. */
 			(cons (quote list) filter_columns)
 			(list (quote lambda) filter_params
 				(combine_where_terms (merge (list
-					(range_cache_point_terms point_symbols point_values)
+					(range_cache_point_terms point_symbols point_values (quote equal??))
 					exact_terms)) true))
 			(quoted_runtime_list (list state_col))
 			(list (quote lambda) (list (quote __exact) (symbol state_col))
@@ -6397,18 +6408,153 @@ self-joins of the same base table still describe two distinct row roles. */
 		payload) true))))
 
 /* Equality, additive-range and snapshot dimensions share the group-cache
-identity contract. The physical carrier may be a keytable or immutable anchors. */
+identity and table-ownership contract. Snapshot anchors are aggregate columns
+of the same dimensional cells, not a separate planner cache. */
 (define make_group_cache (lambda (kind schema relation dimensions)
 	(list kind schema relation dimensions)))
 
 (define group_cache_dimensions (lambda (cache)
 	(if (list? cache) (coalesceNil (nth cache 3) '()) '())))
 
-(define group_stage_snapshot_cache (lambda (stage aggregate)
-	(make_group_cache (quote group-snapshot) (group_stage_schema stage)
-		(concat (group_stage_cache_relation stage) ":snapshot-v1:"
-			(aggregate_col_name_using (gs_input stage) aggregate))
-		(qassoc_get (gs_facts stage) (quote snapshot-domains) '()))))
+/* Range cuts may leave the point domain only when their semantic uses are
+exactly the additive filter. A cut used in a payload or a scalar dependency
+remains a point input; splitting it would change the aggregate's function. */
+(define snapshot_group_range_terms (lambda (domain)
+	(merge (list
+		(if (range_domain_unbounded_from? domain) '()
+			(list (list (if (equal? (range_domain_from_kind domain) 0) (quote >=) (quote >))
+				(range_domain_inner domain) (range_domain_from domain))))
+		(if (range_domain_unbounded_to? domain) '()
+			(list (list (if (equal? (range_domain_to_kind domain) 0) (quote <) (quote <=))
+				(range_domain_inner domain) (range_domain_to domain))))))))
+
+(define snapshot_group_ranges (lambda (stage)
+	(begin
+		(define proof (qassoc_get (gs_facts stage) (quote contribution-domain) nil))
+		(define domains (range_stage_domains stage))
+		(define input (gs_input stage))
+		(if (or (nil? proof) (empty_list? domains) (not (query_block? input))) '()
+			(begin
+				(define terms (merge (map domains snapshot_group_range_terms)))
+				(define residual (filter (split_and_terms (qb_where input)) (lambda (term)
+					(not (contains? terms term)))))
+				(define semantic (list residual (gs_aggregates stage) (gs_keys stage)
+					(map (qb_sources input) source_join_expr)))
+				(filter domains (lambda (domain)
+					(and (not (nil? (direct_column_name_for_alias (car proof) (range_domain_inner domain))))
+						(reduce (list (range_domain_from domain) (range_domain_to domain)) (lambda (safe bound)
+							(and safe (or (symbol? bound)
+								(and (not (contribution_expr_contains? bound semantic))
+									(not (reduce (nth proof 6) (lambda (used selection)
+										(or used (contribution_expr_contains? bound (cadr selection)))) false)))))) true)))))))))
+
+(define snapshot_group_fixed_inputs (lambda (stage)
+	(begin
+		(define proof (qassoc_get (gs_facts stage) (quote contribution-domain) nil))
+		(define bounds (merge (map (snapshot_group_ranges stage) (lambda (domain)
+			(list (range_domain_from domain) (range_domain_to domain))))))
+		(filter (nth proof 4) (lambda (binding) (not (contains? bounds binding)))))))
+
+/* Add a cell restriction to the physical producer while retaining all SQL
+residuals. Requested disjoint cells are subsets of the original interval, so
+its original filter remains valid for both full builds and delta evaluation. */
+(define snapshot_group_cell_stage (lambda (stage)
+	(begin
+		(define domains (snapshot_group_ranges stage))
+		(define input (gs_input stage))
+		(if (empty_list? domains) stage
+			(begin
+				(define where (combine_where_terms (cons (qb_where input) (mapIndex domains (lambda (axis domain)
+					(begin
+						(define names (map (range_cache_axis_boundary_names axis) (lambda (name) (symbol (concat "__group_cell_" name)))))
+						(range_cache_value_inside_expr (range_domain_inner domain)
+							(nth names 0) (nth names 1) (nth names 2) (nth names 3)))))) true))
+				(define cell_input (make_query_block (qb_schema input) (qb_sources input) (qb_fields input) where
+					(qb_group input) (qb_having input) (qb_order input) (qb_limit input) (qb_offset input)
+					(qb_hidden input) (qb_stages input) (qb_facts input)))
+				(make_group_stage (gs_id stage) cell_input (gs_domain stage) (gs_keys stage) (gs_aggregates stage)
+					(gs_having stage) (gs_output stage) (gs_order stage) (gs_limit stage) (gs_offset stage) (gs_facts stage)))))))
+
+(define group_stage_cell_cache (lambda (stage dimensions)
+	(make_group_cache (quote group-keytable) (group_stage_schema stage)
+		(concat (group_stage_cache_relation stage) ":cells-v2:"
+			(stable_structural_hash (map dimensions car) true)) dimensions)))
+
+(define group_stage_snapshot_cache (lambda (stage)
+	(group_stage_cell_cache stage (merge (list
+		(map (snapshot_group_fixed_inputs stage) (lambda (key) (list (quote point) key)))
+		(snapshot_group_ranges stage)
+		(qassoc_get (gs_facts stage) (quote snapshot-domains) '()))))))
+
+/* All group-cache carriers use storage-engine tables and the same catalog,
+initialization and eviction ownership. Dimensions describe keys, never owners. */
+(define group_cache_create (lambda (schema name columns options ifnotexists tx)
+	(!begin
+		(define created (createtable schema name columns options ifnotexists tx))
+		(touch_keytable (table schema name))
+		created)))
+
+(define group_cache_dimension_names (lambda (cache)
+	(merge (map (produceN (count (group_cache_dimensions cache))) (lambda (i)
+		(!begin
+			(define dimensions (group_cache_dimensions cache))
+			(define kind (car (nth dimensions i)))
+			(define axis (count (filter (slice dimensions 0 i) (lambda (d) (equal? (car d) kind)))))
+			(match kind
+				(symbol point) (list (group_key_col_name axis))
+				(symbol range-domain) (range_cache_axis_boundary_names axis)
+				(symbol snapshot) (list (concat "snapshot_" axis))
+				_ (error "unknown group cache dimension"))))))))
+
+(define group_cache_ensure_cells (lambda (cache payload tx)
+	(!begin
+		(define names (group_cache_dimension_names cache))
+		(group_cache_create (group_cache_schema cache) (group_cache_relation cache)
+			(cons (list "unique" "group" (cons "__group_view" names))
+				(cons (list "column" "__group_view" "text" '() '())
+					(map names (lambda (name) (list "column" name "any" '() '("collate" "bin"))))))
+			'("engine" "cache") true tx)
+		(createcolumn (table (group_cache_schema cache) (group_cache_relation cache))
+			payload "any" '() '())
+		true)))
+
+(define group_cache_cell_access (lambda (names)
+	(cons (compiled_scan_access_header (count names) "" 0 -1)
+		(mapIndex names (lambda (i name) (scan_boundary "equal" name i i true true "bin" true))))))
+
+(define group_cache_read_cell (lambda (cache coordinates view payload tx)
+	(!begin
+		(define carrier (table (group_cache_schema cache) (group_cache_relation cache)))
+		(if (or (nil? carrier) (nil? (resolve_column_name (group_cache_schema cache) (group_cache_relation cache) payload false))) nil
+			(scan tx carrier (group_cache_cell_access (cons "__group_view" (group_cache_dimension_names cache)))
+				(cons (serialize view) coordinates) '() (lambda () true)
+				(list payload) (lambda (_ value) value) nil (lambda (a b) (coalesceNil a b)) false)))))
+
+(define group_cache_write_cell (lambda (cache coordinates view payload value tx)
+	(insert (table (group_cache_schema cache) (group_cache_relation cache))
+		(merge (list '("__group_view") (group_cache_dimension_names cache) (list payload)))
+		(list (merge (list (list (serialize view)) coordinates (list value))))
+		(list (concat "NEW." payload) "$update")
+		(lambda (new $update) (!begin ($update (list payload new)) true)) false nil tx)))
+
+/* Admission records actual work, never an assumed future request count. A
+producer may publish its already computed scalar after paying the extra storage
+cost. Building additional state (snapshot contributions) waits for a later call. */
+(define group_cache_execute (lambda (cache threshold tx direct cached retain)
+	(if (tx_requires_query_local_cache tx) (direct)
+		(if (or (not (nil? (table (group_cache_schema cache) (group_cache_relation cache))))
+			(group_cache_work_paid? tx (group_cache_relation cache) threshold))
+			(!begin
+				(define result (cached))
+				(group_cache_candidate_delete tx (group_cache_relation cache))
+				result)
+			(!begin
+				(define started (nanotime))
+				(define result (direct))
+				(group_cache_candidate_accumulate (group_cache_relation cache) (- (nanotime) started) nil)
+				(if (and (not (nil? retain)) (group_cache_work_paid? tx (group_cache_relation cache) threshold))
+					(if (retain result) (group_cache_candidate_delete tx (group_cache_relation cache)) false) false)
+				result)))))
 
 (define group_cache_kind (lambda (cache)
 	(if (list? cache) (nth cache 0) nil)))
@@ -8121,7 +8267,7 @@ canonical projection, using the existing cache-admission accounting. */
 							(list (quote and)
 								(list (quote scalar_group_projection_wins?) driver_table matching_rows (count columns) (count ags))
 								(list (quote or) ready_expr
-									(list (quote semijoin_cache_work_paid?) (physical_query_tx_symbol) name
+									(list (quote group_cache_work_paid?) (physical_query_tx_symbol) name
 										(list (quote *) (list (quote scan_estimate) driver_table) (count columns) planner_membership_direct_probe_row_ns))))
 							projected_plan cold_plan))))))))
 
@@ -9247,8 +9393,9 @@ remain the inputs already chosen by the planner. */
 					(sort scored (lambda (a b) (if (equal? (cadr a) (cadr b))
 						(< (nth a 2) (nth b 2)) (< (cadr a) (cadr b))))) car) true))))))
 
-/* Cost the known parameter workload, not hypothetical future requests.
-The affected-row estimate is an explicitly low-confidence uniform-domain prior;
+/* Use the same one-cold-plus-one-reuse prior as persistent point caches when
+an invocation exposes only one coordinate per fixed group. Larger known domains
+provide their own reuse estimate. The affected-row estimate is an explicitly low-confidence uniform-domain prior;
 dense actual corrections rebuild the base instead. Coefficients are shared
 with existing bulk ordered lookup and scan costs. */
 (define contribution_snapshot_costs (lambda (rows history points width covers)
@@ -9263,36 +9410,42 @@ with existing bulk ordered lookup and scan costs. */
 		(list (planner_cost 0 direct 0 0 0 0 0 0 (* points rows) 0.5)
 			(planner_cost prepared corrected 0 0 0 0 (* rows 128) 0 rows 0.35) affected))))
 
+/* Correction work is capped by the full producer at execution time. Compare
+complete workload costs directly: the generic confidence surcharge would price
+an unbounded correction a second time and suppress the bounded alternative. */
 (define contribution_snapshot_runtime_wins? (lambda (driver covers points width)
 	(begin
 		(define rows (scan_estimate driver))
 		(define history (reduce covers (lambda (total source) (+ total (scan_estimate source))) 0))
 		(define costs (contribution_snapshot_costs rows history points width (count covers)))
-		(and (> points 1) (> rows 0) (<= (* rows 2) contribution_snapshot_key_budget) (planner_cost_clear_winner? (cadr costs) (car costs))))))
+		(and (> points 1) (> rows 0) (<= (* rows 2) contribution_snapshot_key_budget) (planner_cost_better? (cadr costs) (car costs))))))
 
-(define contribution_snapshot_selected? (lambda (stage)
+(define contribution_snapshot_selected? (lambda (all_stages stage)
 	(begin
 		(define proof (qassoc_get (gs_facts stage) (quote contribution-domain) nil))
 		(define context (qassoc_get (gs_facts stage) (quote contribution_context_sources) '()))
-		(define axis_source (source_for_alias context nil (cadr (nth proof 2)) false))
+		(define axis_source (source_for_alias context nil (contribution_axis_alias (nth proof 2)) false))
 		/* Correlated fixed keys from the same relation can have one point per
 		group. Without distinct statistics there is no assured reuse estimate. */
 		(define varying_fixed (reduce (nth proof 4) (lambda (found expr)
 			(or found (match expr ((symbol get_column) alias _ci _col _cci)
-				(equal? alias (cadr (nth proof 2))) _ false))) false))
-		(define points (if (or (nil? axis_source) varying_fixed) 1
-			(coalesceNil (planner_source_row_count axis_source) 1)))
+				(equal? alias (contribution_axis_alias (nth proof 2))) _ false))) false))
+		(define points (max 2 (if (or (nil? axis_source) varying_fixed) 1
+			(coalesceNil (planner_source_row_count axis_source) 1))))
 		(define rows (planner_source_row_count (car proof)))
 		(define history (reduce (nth proof 3) (lambda (total cover)
 			(+ total (coalesceNil (planner_source_row_count (car cover)) 0))) 0))
-		(define width (max 1 (count (nth proof 6))))
+		/* Separate payload probes can share a logical selection stage. Count
+		the payloads evaluated by direct lowering, not only fused stage nodes. */
+		(define width (max 1 (reduce (nth proof 6) (lambda (total entry)
+			(+ total (count (gs_aggregates (stage_by_id all_stages (car entry)))))) 0)))
 		(define costs (contribution_snapshot_costs (coalesceNil rows 0) history points width (count (nth proof 3))))
 		(define planning_session (qassoc_get (gs_facts stage) (quote physical_planning_session) nil))
 		(define wins (and (> points 1) (number? rows) (> rows 0)
 			(<= (* rows 2) contribution_snapshot_key_budget)
-			(planner_cost_clear_winner? (cadr costs) (car costs))))
+			(planner_cost_better? (cadr costs) (car costs))))
 		(define runtime_points (if (and (not (nil? axis_source)) (not varying_fixed) (source_is_base_table? axis_source))
-			(list (quote scan_estimate) (source_table_expr axis_source)) points))
+			(list (quote max) 2 (list (quote scan_estimate) (source_table_expr axis_source))) points))
 		(define normal (if (planner_guarded_choice wins
 			(list (quote contribution_snapshot_runtime_wins?) (source_table_expr (car proof))
 				(cons (quote list) (map (nth proof 3) (lambda (cover) (source_table_expr (car cover)))))
@@ -9303,9 +9456,10 @@ with existing bulk ordered lookup and scan costs. */
 		(planner_record_physical_decision (list
 			(list "decision_id" decision_id) (list "decision" "contribution_domain")
 			(list "chosen" chosen) (list "normally_chosen" normal)
-			(list "reason" (if (<= points 1) "reuse_not_established" "estimated_complete_workload"))
+			(list "reason" "estimated_complete_workload")
 			(list "inputs" (list (list "driver_rows" rows) (list "cover_rows" history)
 				(list "points_per_fixed_group" points) (list "scalar_dependencies" width)
+				(list "reuse_estimate" "known_domain_or_one_cold_plus_one_reuse_prior")
 				(list "affected_rows_per_transition" (nth costs 2))
 				(list "affected_estimate" "uniform_domain_prior")))
 			(list "alternatives" (list
@@ -9392,46 +9546,66 @@ accounted and evicted through CacheManager-backed cachemaps. */
 
 ))
 
-/* Snapshot is a third group-cache dimension: immutable aggregate state at an
-anchor, not an additive interval. The existing CacheManager-backed cachemap
-owns every retained value. No producer closure, transaction, RecMap or request
-session is retained. Point results and full anchors have separate registrations;
-anchor directories contain coordinates only, never duplicate ownership of maps.
-Eviction or a missing directory is a cache miss, never a correctness dependency.
-Concurrent builders may publish equivalent immutable states independently. */
-/* A fixed point-domain property is a logical-key/value cache. Snapshot
-corrections and range filters may borrow its immutable values; they must not
-retain a mutable helper join or any producer closure across requests. */
-(define group_value_cache (newcachemap))
-/* Cut witnesses retain only boxed scalar values under source/column/bound and
-logical-data-version keys. Keep their eviction/accounting separate from payload
-points: a changed spelling of the bound can reuse the same aggregate point. */
+/* Ordered-cut witnesses are scalar normalization metadata, not aggregate
+payloads. Aggregate cells themselves are owned by storage-engine group tables. */
 (define group_cut_cache (newcachemap))
 
-(define group_cache_value (lambda (cache name point_values tx read_view producer)
+(define group_cut_value (lambda (name point_values tx read_view producer)
 	(begin
 		(tx_check tx)
 		(define view (read_view))
 		(define shareable (and (not (tx_requires_query_local_cache tx))
 			(reduce view (lambda (ok stamp) (and ok (not (nil? stamp)))) true)))
 		(define key (if shareable (concat name ":" (serialize (list (point_values) view))) nil))
-		(define hit (if shareable (cache key) nil))
+		(define hit (if shareable (group_cut_cache key) nil))
 		(if (and (not (nil? hit)) (expression_equal? view (read_view))) (car hit)
 			(begin
 				(define value (producer))
 				(tx_check tx)
 				(if (and shareable (expression_equal? view (read_view)))
-					(cache key (list value)) true)
+					(group_cut_cache key (list value)) true)
 				value)))))
 
-(define snapshot_group_bases (newcachemap))
-(define snapshot_group_states (newcachemap))
-(define snapshot_group_anchors (newcachemap))
-(define snapshot_group_points (newcachemap))
+/* Retention is optional: a changed/incomplete source view must never tag an
+already computed result with a newer revision or publish transaction-local data. */
+(define group_cache_retain_value (lambda (cache payload coordinates tx view read_view value)
+	(if (and (not (tx_requires_query_local_cache tx))
+		(reduce view (lambda (ok stamp) (and ok (not (nil? stamp)))) true)
+		(expression_equal? view (read_view)))
+		(!begin
+			(tx_check tx)
+			(group_cache_ensure_cells cache payload tx)
+			(group_cache_write_cell cache coordinates view payload (list value) tx)
+			true) false)))
 
-(define snapshot_group_coordinate_key (lambda (domain coordinate)
-	(concat domain ":" (serialize coordinate))))
+(define group_cache_value (lambda (cache payload point_values tx read_view producer)
+	(begin
+		(tx_check tx)
+		(define view (read_view))
+		(define shareable (and (not (tx_requires_query_local_cache tx))
+			(reduce view (lambda (ok stamp) (and ok (not (nil? stamp)))) true)))
+		(define coordinates (if shareable (point_values) '()))
+		(define hit (if shareable (group_cache_read_cell cache coordinates view payload tx) nil))
+		(if (and (not (nil? hit)) (expression_equal? view (read_view))) (car hit)
+			(begin
+				(define value (producer))
+				(tx_check tx)
+				(if shareable (group_cache_retain_value cache payload coordinates tx view read_view value) false)
+				value)))))
 
+/* Point admission can reuse the direct result; its producer already yielded
+all the state needed by a scalar cell. Capture the revision before bindings. */
+(define group_cache_point (lambda (cache payload threshold point_values tx read_view producer)
+	(!begin
+		(define view (read_view))
+		(define coordinates (point_values))
+		(group_cache_execute cache threshold tx producer
+			(lambda () (group_cache_value cache payload point_values tx read_view producer))
+			(lambda (value) (group_cache_retain_value cache payload coordinates tx view read_view value))))))
+
+/* Snapshot payloads are ordinary aggregate columns of a group-cache cell.
+A base is addressed by a logical coordinate in the same relation. Neither a
+query closure nor a physical row identity can survive in the stored payload. */
 (define snapshot_group_total (lambda (state)
 	(if (equal? (cadr state) 0) nil (car state))))
 
@@ -9445,41 +9619,61 @@ points: a changed spelling of the bound can reuse the same aggregate point. */
 	(reduce_assoc values (lambda (valid key value)
 		(and valid (contribution_integral? value))) true)))
 
-(define snapshot_group_nearest (lambda (domain coordinate)
-	(reduce (coalesceNil (snapshot_group_anchors domain) '())
-		(lambda (best candidate)
+(define group_cache_snapshot_neighbor (lambda (cache fixed view payload tx coordinate before)
+	(begin
+		(define names (cons "__group_view" (filter (group_cache_dimension_names cache)
+			(lambda (name) (not (equal? name "snapshot_0"))))))
+		(define slot (count names))
+		(define access (cons (compiled_scan_access_header (+ slot 1) "" 0 -1)
+			(merge (list (cdr (group_cache_cell_access names))
+				(list (scan_boundary "range" "snapshot_0" (if before -1 slot) (if before slot -1) true true "bin" false))))))
+		(scan_order tx (table (group_cache_schema cache) (group_cache_relation cache))
+			access (merge (list (list (serialize view)) fixed (list coordinate)))
+			(list payload) (lambda (state) (not (nil? state)))
+			'("snapshot_0") (list (collate "bin" before)) 0 0 1
+			(list "snapshot_0" payload) (lambda (_ axis state) (list axis state)) nil false))))
+
+/* The nearest valid coordinate on each side bounds all farther covers.
+Choose between those two using actual affected-key work, not distance. */
+(define snapshot_group_anchor_for_work (lambda (cache fixed view payload tx coordinate changed)
+	(begin
+		(define neighbors (map '(true false) (lambda (before)
 			(begin
-				(define anchor (snapshot_group_states
-					(snapshot_group_coordinate_key domain candidate)))
-				(define base (if (nil? anchor) nil (snapshot_group_bases (car anchor))))
-				(if (or (nil? base) (and (not (nil? best))
-					(<= (contribution_magnitude (- coordinate (car best)))
-						(contribution_magnitude (- coordinate candidate))))) best
-					(list candidate anchor base)))) nil)))
+				(define row (group_cache_snapshot_neighbor cache fixed view payload tx coordinate before))
+				(if (nil? row) nil
+					(begin
+						(define candidate (car row))
+						(define anchor (cadr row))
+						(define base_state (if (equal? candidate (car anchor)) anchor
+							(group_cache_read_cell cache (merge (list fixed (list (car anchor)))) view payload tx)))
+						(define base (if (nil? base_state) nil (nth base_state 4)))
+						(if (nil? base) nil (list candidate anchor base))))))))
+		(reduce neighbors (lambda (best neighbor)
+			(if (nil? neighbor) best
+				(begin
+					(define keys (changed (min coordinate (car neighbor)) (max coordinate (car neighbor))))
+					(if (and (not (nil? best))
+						(or (< (count (nth best 3)) (count keys))
+							(and (equal? (count (nth best 3)) (count keys))
+								(<= (count (cadr (cadr best))) (count (cadr (cadr neighbor))))))) best
+						(merge (list neighbor (list keys))))))) nil))))
 
 (define snapshot_group_value (lambda (anchor base key)
 	(if (has_assoc? (cadr anchor) key) (get_assoc (cadr anchor) key) (get_assoc base key))))
 
-(define snapshot_group_publish (lambda (domain axis values state population nearest candidates)
+(define snapshot_group_publish (lambda (cache fixed view payload tx axis values state population nearest candidates)
 	(begin
-		(define point_key (snapshot_group_coordinate_key domain axis))
-		(define base_key (if (nil? nearest) point_key (car (cadr nearest))))
+		(define base_axis (if (nil? nearest) axis (car (cadr nearest))))
 		(define overlay (if (nil? nearest) '()
 			(merge_assoc (cadr (cadr nearest))
 				(reduce candidates (lambda (updates key)
 					(set_assoc updates key (get_assoc values key))) '())
 				(lambda (old new) new))))
-		(if (nil? nearest) (snapshot_group_bases base_key values) true)
-		(snapshot_group_states point_key (list base_key overlay state population))
-		/* Directories and overlays never retain the separately charged full
-		base. An evicted base makes its derived anchors unusable, not stale. */
-		(define previous (coalesceNil (snapshot_group_anchors domain) '()))
-		(snapshot_group_anchors domain (cons axis
-			(slice (filter previous (lambda (coordinate)
-				(not (equal? coordinate axis)))) 0 7)))
+		(group_cache_write_cell cache (merge (list fixed (list axis))) view payload
+			(list base_axis overlay state population (if (nil? nearest) values nil)) tx)
 		true)))
 
-(define snapshot_group_cache (lambda (name fixed_values tx axis population read_view full changed evaluate fallback)
+(define snapshot_group_cache (lambda (cache payload fixed_values tx axis population read_view full changed evaluate fallback)
 	(begin
 		(tx_check tx)
 		(define view (read_view))
@@ -9489,42 +9683,96 @@ points: a changed spelling of the bound can reuse the same aggregate point. */
 			(reduce view (lambda (ok stamp) (and ok (not (nil? stamp)))) true)))
 		(if (not shareable) (fallback)
 			(begin
-				(define domain (concat name ":" (serialize (list (fixed_values) view))))
-				(define point_key (snapshot_group_coordinate_key domain axis))
-				/* Box NULL SUM too: absence and a cached SQL NULL are distinct. */
-				(define hit (snapshot_group_points point_key))
-				(if (not (nil? hit))
-					(if (expression_equal? view (read_view)) (car hit) (fallback))
-					(begin
-						(define nearest (snapshot_group_nearest domain axis))
-						(define anchor (if (nil? nearest) nil (cadr nearest)))
-						(define candidates (if (nil? nearest) '()
-							(changed (min axis (car nearest)) (max axis (car nearest)))))
-						/* Dense corrections cost more than constructing a closer anchor.
-						Use affected work, not distance in the ordered dimension. */
-						(define rebuild (or (nil? anchor)
-							(> (count candidates) (max 1 (/ population 2)))))
-						(define values (if rebuild (full) (if (empty_list? candidates) '() (evaluate candidates))))
-						(if (not (snapshot_group_valid_values? values)) (fallback)
-							(begin
-								(define state (if rebuild (snapshot_group_reduce_values values)
-									(reduce candidates (lambda (state key)
+				(define fixed (fixed_values))
+				(define lock (range_group_cache_mutex (concat (group_cache_schema cache) ":"
+					(group_cache_relation cache) ":" (serialize (list fixed view)))))
+				(lock (lambda () (begin
+					(group_cache_ensure_cells cache payload tx)
+					(define hit (group_cache_read_cell cache (merge (list fixed (list axis))) view payload tx))
+					(if (not (nil? hit))
+						(if (expression_equal? view (read_view)) (snapshot_group_total (nth hit 2)) (fallback))
+						(begin
+							(define nearest (snapshot_group_anchor_for_work cache fixed view payload tx axis changed))
+							(define anchor (if (nil? nearest) nil (cadr nearest)))
+							(define candidates (if (nil? nearest) '() (nth nearest 3)))
+							(define rebuild (or (nil? anchor) (> (count candidates) (max 1 (/ population 2)))))
+							(define values (if rebuild (full) (if (empty_list? candidates) '() (evaluate candidates))))
+							(if (not (snapshot_group_valid_values? values)) (fallback)
+								(begin
+									(define state (if rebuild (snapshot_group_reduce_values values)
+										(reduce candidates (lambda (state key)
+											(begin
+												(define before (snapshot_group_value anchor (nth nearest 2) key))
+												(define after (get_assoc values key))
+												(list (+ (car state) (- (coalesceNil after 0) (coalesceNil before 0)))
+													(+ (cadr state) (- (if (nil? after) 0 1) (if (nil? before) 0 1)))
+													(+ (nth state 2) (- (contribution_magnitude after) (contribution_magnitude before))))))
+											(nth anchor 2))))
+									(if (or (> (nth state 2) 4503599627370496)
+										(not (expression_equal? view (read_view)))) (fallback)
 										(begin
-											(define before (snapshot_group_value anchor (nth nearest 2) key))
-											(define after (get_assoc values key))
-											(list (+ (car state) (- (coalesceNil after 0) (coalesceNil before 0)))
-												(+ (cadr state) (- (if (nil? after) 0 1) (if (nil? before) 0 1)))
-												(+ (nth state 2) (- (contribution_magnitude after) (contribution_magnitude before))))))
-										(nth anchor 2))))
-								(if (or (> (nth state 2) 4503599627370496)
-									(not (expression_equal? view (read_view)))) (fallback)
-									(begin
-										(tx_check tx)
-										(snapshot_group_publish domain axis values state population
-											(if rebuild nil nearest) candidates)
-										(define result (snapshot_group_total state))
-										(snapshot_group_points point_key (list result))
-										result)))))))))))
+											(tx_check tx)
+											(snapshot_group_publish cache fixed view payload tx axis values state population
+												(if rebuild nil nearest) candidates)
+											(snapshot_group_total state)))))))))))))))
+
+/* Range partition rows use the same relation, with an internal partition marker.
+Actual aggregate rows carry an ordered coordinate. Refining a partition leaves
+old snapshot cells intact; only the new disjoint children need new state. */
+(define lower_snapshot_group_cells (lambda (stage cache payload fixed view probe)
+	(begin
+		(define domains (snapshot_group_ranges stage))
+		(if (empty_list? domains) probe
+			(begin
+				(define driver (car (qassoc_get (gs_facts stage) (quote contribution-domain) nil)))
+				(define schema (group_cache_schema cache))
+				(define name (group_cache_relation cache))
+				(define key_names (group_key_cols (snapshot_group_fixed_inputs stage)))
+				(define point_values (mapIndex key_names (lambda (i _) (list (quote nth) (quote __group_fixed) i))))
+				(define partition_names (merge (list key_names '("snapshot_0" "__group_view"))))
+				(define partition_values (merge (list point_values (list "__partition" (list (quote serialize) (quote __group_source_view))))))
+				(define boundary_names (range_cache_boundary_names domains))
+				(define boundary_symbols (map boundary_names (lambda (name) (symbol (concat "__group_cell_" name)))))
+				(define bounds (map domains (lambda (domain) (list
+					(range_domain_from_kind domain)
+					(if (range_domain_unbounded_from? domain) nil (lower_column_expr_for_alias driver (range_domain_from domain)))
+					(range_domain_to_kind domain)
+					(if (range_domain_unbounded_to? domain) nil (lower_column_expr_for_alias driver (range_domain_to domain)))))))
+				(define contained (merge (mapIndex bounds (lambda (i bound)
+					(list (range_cache_cut_leq_expr (nth bound 0) (nth bound 1)
+						(nth boundary_symbols (* i 4)) (nth boundary_symbols (+ (* i 4) 1)))
+						(range_cache_cut_leq_expr (nth boundary_symbols (+ (* i 4) 2)) (nth boundary_symbols (+ (* i 4) 3))
+							(nth bound 2) (nth bound 3)))))))
+				(define invalid (mapIndex domains (lambda (i domain)
+					(begin
+						(define bound (nth bounds i))
+						(list (quote or)
+							(if (range_domain_unbounded_from? domain) false (list (quote nil?) (nth bound 1)))
+							(if (range_domain_unbounded_to? domain) false (list (quote nil?) (nth bound 3)))
+							(list (quote not) (range_cache_cut_less_expr (nth bound 0) (nth bound 1) (nth bound 2) (nth bound 3))))))))
+				(define read_cells (compile_scan_plan (quote scan) (physical_query_tx_symbol)
+					(list (quote table) schema name)
+					(quoted_runtime_list (merge (list partition_names boundary_names)))
+					(list (quote lambda) (merge (list (map partition_names symbol) boundary_symbols))
+						(combine_where_terms (merge (list
+							(range_cache_point_terms (map partition_names symbol) partition_values (quote equal?)) contained)) true))
+					(quoted_runtime_list boundary_names)
+					(list (quote lambda) (cons (quote __group_cells) boundary_symbols)
+						(list (quote cons) (cons (quote list) boundary_symbols) (quote __group_cells)))
+					(quoted_runtime_list '()) 'merge false))
+				(define sum (list (quote reduce) (quote __group_cells)
+					(list (quote lambda) '('__group_total '__group_cell)
+						(list (quote sql_sum_reduce) (quote __group_total)
+							(cons (list (quote lambda) boundary_symbols probe)
+								(mapIndex boundary_symbols (lambda (i _) (list (quote nth) (quote __group_cell) i)))))) nil))
+				(list (quote if) (cons (quote or) invalid) nil
+					(list (quote !begin)
+						(list (quote define) (quote __group_fixed) (list fixed))
+						(list (quote define) (quote __group_source_view) (list view))
+						(list (quote group_cache_ensure_cells) (list (quote quote) cache) payload (physical_query_tx_symbol))
+						(list (quote define) (quote __group_cells)
+							(group_cache_prepare_ranges_expr schema name partition_names partition_values domains bounds (physical_query_tx_symbol) (quote equal?) read_cells))
+						sum)))))))
 
 (define lower_contribution_snapshot_probe (lambda (all_stages stage value_expr keys lookup_keys reduce_expr neutral_expr)
 	(begin
@@ -9533,9 +9781,9 @@ points: a changed spelling of the bound can reuse the same aggregate point. */
 		(define axis (lower_column_expr_for_alias driver (nth proof 2)))
 		/* One logical group can expose several SUM payloads. Their old-value
 		states must remain distinct even when their domains and sources match. */
-		(define cache (group_stage_snapshot_cache stage (list value_expr reduce_expr neutral_expr)))
+		(define cache (group_stage_snapshot_cache stage))
 		(define cache_name (group_cache_relation cache))
-		(define fixed (list (quote lambda) '() (cons (quote list) (map (nth proof 4)
+		(define fixed (list (quote lambda) '() (cons (quote list) (map (snapshot_group_fixed_inputs stage)
 			(lambda (expr) (lower_group_cache_binding driver expr
 				(qassoc_get (gs_facts stage) (quote snapshot-fixed-cuts) '())))))))
 		(define covers (map (nth proof 3) (lambda (cover)
@@ -9550,17 +9798,35 @@ points: a changed spelling of the bound can reuse the same aggregate point. */
 				(reduce covers (lambda (acc cover) (list (quote merge_assoc) acc cover
 					'('lambda '('old 'new) true))) '('list))
 				'('lambda '('key 'present) 'key))))
-		(list (quote snapshot_group_cache) cache_name fixed (physical_query_tx_symbol) axis
+		(define payload (aggregate_col_name_using (gs_input stage) (list value_expr reduce_expr neutral_expr)))
+		(define cell_stage (snapshot_group_cell_stage stage))
+		(define cell_fixed (if (empty_list? (snapshot_group_ranges stage)) fixed
+			(list (quote lambda) '() (list (quote merge) (list (quote list) (quote __group_fixed)
+				(cons (quote list) (map (range_cache_boundary_names (snapshot_group_ranges stage))
+					(lambda (name) (symbol (concat "__group_cell_" name))))))))))
+		(define view (list (quote lambda) '() (cons (quote list)
+			(map (nth proof 5) (lambda (source) (list (quote table_read_version) (source_table_expr source)))))))
+		(define probe (list (quote snapshot_group_cache) (list (quote quote) cache)
+			payload cell_fixed (physical_query_tx_symbol) axis
 			(list (quote scan_estimate) (source_table_expr driver))
-			(list (quote lambda) '() (cons (quote list)
-				(map (nth proof 5) (lambda (source) (list (quote table_read_version) (source_table_expr source))))))
+			view
 			(list (quote lambda) '() (lower_scalar_aggregate_query_probe_expr
-				all_stages stage value_expr keys lookup_keys reduce_expr neutral_expr (quote full)))
+				all_stages cell_stage value_expr keys lookup_keys reduce_expr neutral_expr (quote full)))
 			changes
 			(list (quote lambda) (list (quote __contribution_keys)) (lower_scalar_aggregate_query_probe_expr
-				all_stages stage value_expr keys lookup_keys reduce_expr neutral_expr (quote delta)))
+				all_stages cell_stage value_expr keys lookup_keys reduce_expr neutral_expr (quote delta)))
 			(list (quote lambda) '() (lower_scalar_aggregate_query_probe_expr
-				all_stages stage value_expr keys lookup_keys reduce_expr neutral_expr (quote fresh)))))))
+				all_stages cell_stage value_expr keys lookup_keys reduce_expr neutral_expr (quote direct)))))
+		(list (quote group_cache_execute) (list (quote quote) cache)
+			/* Direct and full lowering share relational evaluation. Admission
+			pays for the additional key/value state, not the same scans twice. */
+			(list (quote +) planner_membership_group_cache_startup_ns
+				(list (quote *) (list (quote scan_estimate) (source_table_expr driver))
+					(+ (* 2 planner_membership_map_column_row_ns) planner_membership_recset_aggregate_row_ns)))
+			(physical_query_tx_symbol)
+			(list (quote lambda) '() (lower_scalar_aggregate_query_probe_expr
+				all_stages stage value_expr keys lookup_keys reduce_expr neutral_expr (quote direct)))
+			(list (quote lambda) '() (lower_snapshot_group_cells stage cache payload fixed view probe)) nil)))))
 
 /* Fixed ordered bounds select the same kind of state projection as moving
 bounds. Expose that access geometry to the common RecMap candidate builder. */
@@ -9572,7 +9838,7 @@ bounds. Expose that access geometry to the common RecMap candidate builder. */
 				(begin
 					(define selection (if (group_stage? stage)
 						(qassoc_get (nth proof 6) (gs_id stage) nil) nil))
-					(if (or (nil? selection) (not (empty_list? (range_stage_domains stage)))) stage
+					(if (or (nil? selection) (nil? (nth selection 3)) (not (empty_list? (range_stage_domains stage)))) stage
 						(group_stage_with_facts stage
 							(qassoc_set (qassoc_set (qassoc_set (gs_facts stage)
 								(quote range-domains) (list (list (quote range-domain)

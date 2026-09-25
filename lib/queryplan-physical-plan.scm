@@ -1940,12 +1940,8 @@ outer joins. */
 				"engine" "cache"
 				"oninit" (list (quote lambda) (list (quote tx)) initial_fill_expr))))
 		(define group_cache_created (symbol "__group_cache_created"))
-		(define keytable_init (list
-			(list (quote lambda) (list group_cache_created)
-				(list (quote !begin)
-					(list (quote touch_keytable) (list (quote table) schema grouptbl))
-					group_cache_created))
-			(list (quote createtable) schema grouptbl create_cols create_options true (quote tx))))
+		(define keytable_init
+			(list (quote group_cache_create) schema grouptbl create_cols create_options true (quote tx)))
 		(define boolean_row_keys (if (equal? result_sink (quote boolean-recset))
 			(scalar_first_probe_recset_row_keys stage
 				(scalar_first_probe_carrier_source prepared_src)) '()))
@@ -4040,14 +4036,14 @@ not as one range-cache cell per target row. Return
 					(direct_column_name_for_alias range_target (range_domain_inner domain)))
 				(define ag (scalar_first_probe_aggregate stage requested_col))
 				(define parts (if (nil? ag) nil (scalar_first_probe_parts ag)))
-				(define value_col (if (nil? parts) nil
-					(direct_column_name_for_alias range_target (car parts))))
+				(define value_expr (group_range_recmap_stage_projection stage requested_col range_target domain))
+				(define value_projection (if (nil? value_expr) nil (recmap_value_projection_parts range_target value_expr)))
 				(define binding (symbol (concat "__relational_recmap_range_"
 					(fnv_hash (serialize (list (gs_id stage) requested_col))))))
 				(if (or (not bounded)
 					(or (empty_list? (car source_projection))
 						(or (nil? target_range_col)
-							(or (nil? value_col)
+							(or (nil? value_projection)
 								(reduce target_point_cols (lambda (bad col)
 									(or bad (nil? col))) false)))))
 					nil
@@ -4068,9 +4064,8 @@ not as one range-cache cell per target row. Return
 							(list (quote lambda) (list range_map_var)
 								(list (quote recmap_value_mapper)
 									(physical_query_tx_symbol) range_map_var
-									(quoted_runtime_list (list value_col))
-									(list (quote lambda) (list (symbol "__recmap_value"))
-										(symbol "__recmap_value"))
+									(quoted_runtime_list (car value_projection))
+									(cadr value_projection)
 									(list (quote lambda) '() nil)))
 							map_expr))
 						(define replacement (list binding record_ref))
@@ -4171,16 +4166,25 @@ session read is never evaluated while building the plan. */
 				(group_range_recmap_columns alias item))))))
 		_ '())))
 
-(define group_range_recmap_stage_value (lambda (stage requested target domain)
+/* Row selection and value projection are independent. A pure expression over
+selected-row columns can use the same RecMap as a raw column; absent rows must
+still produce NULL without evaluating the projection. */
+(define group_range_recmap_stage_projection (lambda (stage requested target domain)
 	(begin
 		(define ag (scalar_first_probe_aggregate stage requested))
 		(define parts (if (nil? ag) nil (scalar_first_probe_parts ag)))
 		(define wanted_dir (if (range_domain_unbounded_from? domain) > <))
 		(if (nil? parts) nil
 			(if (and (equal? (nth parts 3) 0)
-				(and (equal? (nth parts 1) (list (range_domain_inner domain)))
-					(equal? (nth parts 2) (list wanted_dir))))
-				(direct_column_name_for_alias target (nth parts 0)) nil)))))
+				(equal? (nth parts 1) (list (range_domain_inner domain)))
+				(equal? (nth parts 2) (list wanted_dir))
+				(contribution_pure_expr? (car parts))
+				(empty_list? (contribution_outer_inputs (car parts) (list (source_alias target)))))
+				(car parts) nil)))))
+
+/* Dimension-lookup chains additionally need a direct key column. */
+(define group_range_recmap_stage_value (lambda (stage requested target domain)
+	(direct_column_name_for_alias target (group_range_recmap_stage_projection stage requested target domain))))
 
 (define group_range_recmap_candidate_for_column (lambda (stages stage block driver output requested)
 	(begin
@@ -4205,7 +4209,7 @@ session read is never evaluated while building the plan. */
 					(direct_column_name_for_alias target (car point_keys)) nil))
 				(define driver_col (if (single_source? point_exprs)
 					(direct_column_name_for_alias driver (car point_exprs)) nil))
-				(define value_col (group_range_recmap_stage_value
+				(define value_projection (group_range_recmap_stage_projection
 					range_stage requested target domain))
 				(define joins (relational_recmap_output_join_column_pairs
 					range_stage driver output (source_join_expr output)))
@@ -4215,7 +4219,7 @@ session read is never evaluated while building the plan. */
 					(and (recmap_direct_key_column? target point_col)
 						(not (nil? (find joins (lambda (pair)
 							(equal? (car pair) driver_col)) nil))))
-					(and (not (nil? value_col)) (scalar_value_stage? range_stage))
+					(and (not (nil? value_projection)) (scalar_value_stage? range_stage))
 					(and (equal? (stage_partition_limit range_stage) 1)
 						(equal? (range_stage_invariant_condition range_stage) true))
 					(equal? (range_stage_raw_condition range_stage)
@@ -4472,27 +4476,35 @@ session read is never evaluated while building the plan. */
 			(gs_id (nth item 2))))))))))
 
 (define group_range_recmap_replace_symbol (lambda (expr old replacement)
-	(if (and (symbol? expr) (equal? expr old)) replacement
+	(if (expression_equal? expr old) replacement
 		(match expr
 			(cons head tail) (cons (group_range_recmap_replace_symbol head old replacement)
 				(map tail (lambda (item)
 					(group_range_recmap_replace_symbol item old replacement))))
 			_ expr))))
 
+/* An expression over outer-row columns is an outer bound just like a column.
+Keep it as a recipe argument so query-local mappings cannot capture the first
+row's coordinate when a derived parameter changes in the driving relation. */
 (define group_range_recmap_outer_bound (lambda (candidate)
 	(begin
 		(define stage (nth (car (nth candidate 2)) 2))
 		(define domain (car (range_stage_domains stage)))
 		(define bound (if (range_domain_unbounded_from? domain)
 			(range_domain_to domain) (range_domain_from domain)))
-		(match bound
-			((symbol get_column) alias _ignorecase _col _col_ignorecase)
-			(if (equal?? alias (source_alias (nth candidate 0))) nil
-				(lower_column_expr_for_alias (nth candidate 0) bound))
-			((quote get_column) alias _ignorecase _col _col_ignorecase)
-			(if (equal?? alias (source_alias (nth candidate 0))) nil
-				(lower_column_expr_for_alias (nth candidate 0) bound))
-			_ nil))))
+		(define driver (nth candidate 0))
+		(define inputs (contribution_outer_inputs bound '()))
+		/* Session-only bounds are already fixed for this query. A bound using
+		a local dependency output belongs inside the per-record mapping recipe,
+		not in a memo key rebuilt for every driver row. Only genuine outer-row
+		coordinates need the explicit argument that distinguishes sibling cuts. */
+		(define outer_columns (filter inputs (lambda (input)
+			(match input ((symbol get_column) _alias _ci _column _cci) true _ false))))
+		(define local_aliases (cons (source_alias driver)
+			(map (contribution_stage_sources stage) source_alias)))
+		(if (and (not (empty_list? outer_columns)) (contribution_pure_expr? bound)
+			(expression_equal? inputs (contribution_outer_inputs bound local_aliases)))
+			(lower_column_expr_for_alias driver bound) nil))))
 
 (define group_range_recmap_batch_dimension_value_mapper (lambda (candidate range_map_expr)
 	(begin
@@ -4549,25 +4561,26 @@ value mapper. */
 		(define outer_bound (group_range_recmap_outer_bound candidate))
 		(define bound_param (symbol "__group_range_bound"))
 		(define ref_param (symbol "__group_range_ref"))
-		(define params (map (produceN (count specs)) (lambda (i)
-			(symbol (concat "__range_value_" i)))))
-		(define value_cols (map specs (lambda (item)
-			(group_range_recmap_stage_value (nth item 2)
-				(if (> (count item) 6) (nth item 6) (nth item 4))
-				(nth item 3) (car (range_stage_domains (nth item 2)))))))
-		(define value_exprs (map (zip specs params) (lambda (pair)
+		(define target (list "__range_target" (source_schema (nth candidate 1)) (source_relation (nth candidate 1)) false nil))
+		(define projections (map specs (lambda (item)
+			(group_range_recmap_range_signature_expr (nth item 3)
+				(group_range_recmap_stage_projection (nth item 2)
+					(if (> (count item) 6) (nth item 6) (nth item 4))
+					(nth item 3) (car (range_stage_domains (nth item 2))))))))
+		(define value_cols (merge_unique (map projections (lambda (expr) (extract_columns_for_alias target expr)))))
+		(define params (map value_cols (lambda (col) (scan_callback_symbol_for_alias (source_alias target) col))))
+		(define value_exprs (mapIndex specs (lambda (i spec)
 			(begin
-				(define spec (car pair))
-				(define param (cadr pair))
-				(if (<= (count spec) 6) param
+				(define value (lower_column_expr_for_alias target (nth projections i)))
+				(if (<= (count spec) 6) value
 					(list (physical_query_session_symbol)
 						"get_or_compute_scoped" (physical_query_scope_symbol)
 						(list (quote concat)
 							(concat "__group_range_dimension_" (gs_id (nth spec 7)) ":")
-							(list (quote serialize) param))
+							(list (quote serialize) value))
 						(physical_query_tx_symbol)
 						(list (quote lambda) (list (physical_query_tx_symbol))
-							(group_range_recmap_dimension_probe spec param))))))))
+							(group_range_recmap_dimension_probe spec value))))))))
 		(define map_expr (if (or (nil? outer_bound) (and (> (count candidate) 4) (equal? (nth candidate 4) (quote delta)))) (nth candidate 3)
 			(group_range_recmap_replace_symbol
 				(nth candidate 3) outer_bound bound_param)))
@@ -5505,9 +5518,15 @@ fix). */
 (define source_table_expr (lambda (src)
 	(if (literal_rows_relation? (source_relation src))
 		(list (quote quote) (literal_rows_data (source_relation src)))
-		(if (information_schema_source? (source_schema src) (source_relation src))
-			(list (quote information_schema_rows) (source_schema src) (source_relation src))
-			(list (quote table) (source_schema src) (source_relation src))))))
+		(if (parameter_rows_relation? (source_relation src))
+			(begin
+				(define rows (cons (quote list) (map (row_domain_data (source_relation src))
+					(lambda (row) (cons (quote list) row)))))
+				(if (equal? (nth (source_relation src) 3) (quote distinct))
+					(list (quote literal_union_dedupe_rows) rows) rows))
+			(if (information_schema_source? (source_schema src) (source_relation src))
+				(list (quote information_schema_rows) (source_schema src) (source_relation src))
+				(list (quote table) (source_schema src) (source_relation src)))))))
 
 (define source_table_expr_using (lambda (stages src)
 	(begin
@@ -6674,7 +6693,7 @@ scalar comparison work rather than an uncalibrated multiplier. */
 		(define src (car (qb_sources block)))
 		(define fields (expand_query_block_fields (qb_sources block) (qb_fields block)))
 		(define grouped_block (expand_grouped_query_block block))
-		(if (not (or (source_is_base_table? src) (literal_rows_relation? (source_relation src))))
+		(if (not (or (source_is_base_table? src) (row_domain_relation? (source_relation src))))
 			(neumann_fail "build_queryplan" "single-source query-block lowering only supports base tables")
 			true)
 		(if (not (empty_list? (qb_stages block)))
@@ -9619,7 +9638,7 @@ carrier remains on the measured direct path and is never built eagerly. */
 				stages result_mode probe_context scalar_plan continuation outer_scan direct_group_stage facts)
 			(begin
 				(define future_sources (join_optimizer_sources_for_order all_sources future_aliases))
-				(if (not (or (source_is_base_table? src) (literal_rows_relation? (source_relation src))))
+				(if (not (or (source_is_base_table? src) (row_domain_relation? (source_relation src))))
 					(neumann_fail "build_queryplan" "multi-source query-block lowering only supports base tables after untangle")
 					true)
 				(define alias (source_alias src))
@@ -12407,6 +12426,14 @@ RecSet node is written into logical IR. */
 				(aggregate_pushdown_logical typed_ir planning_session tx))
 			planning_session tx)))))
 
+/* Keep the proof procedure compiled once. Constructing it inside every SQL
+compile repeats Scheme closure optimization even when no domain was changed. */
+(define parameter_domain_ir_eligible? (lambda (ir)
+	(begin
+		(define candidate (annotate_contribution_domains (sql_type_annotate_ir ir)))
+		(and (or (ir_has_contribution_domain? candidate) (ir_has_invariant_property_cover? candidate))
+			(not (ir_has_unproved_query_aggregate? candidate))))))
+
 (define neumann_compile_pipeline (lambda (ast planning_session tx)
 	(begin
 		(tx_check tx)
@@ -12418,19 +12445,36 @@ RecSet node is written into logical IR. */
 		/* Domain eligibility is structural. Do not reorder or record guards for
 		a specialization which will be discarded: those guards otherwise make
 		the ordinary plan depend on every changing literal from the trial. */
-		(define domain_ast (bind_parameter_row_domains ast planning_session false))
+		(define domain_ast (bind_parameter_row_domains ast nil))
 		(define ir (decorrelate_logical_query domain_ast))
 		(tx_check tx)
 		(define changed (not (expression_equal? ast domain_ast)))
-		(define eligible (if changed
+		(define eligible (or (not changed) (parameter_domain_ir_eligible? ir)))
+		/* One unsupported categorical domain must not force every ordered
+		coordinate back through UNION distribution. Try individual root domains,
+		largest first, retaining the same complete proof gate. This bounded
+		logical search records no physical decisions or parameter-value guards. */
+		(define selected_ir (if eligible ir
 			(begin
-				(define candidate (annotate_contribution_domains (sql_type_annotate_ir ir)))
-				(and (or (ir_has_contribution_domain? candidate) (ir_has_invariant_property_cover? candidate))
-					(not (ir_has_unproved_query_aggregate? candidate)))) true))
-		(if (and changed eligible)
-			(bind_parameter_row_domains ast planning_session true) nil)
-		(define reordered (optimize_logical_query
-			(if eligible ir (decorrelate_logical_query ast)) planning_session tx))
+				(define root (normalize_query_ast ast))
+				(define alternatives (if (query_block? root)
+					(sort (filter (qb_sources root) (lambda (source)
+						(parameter_row_union? (source_relation source))))
+						(lambda (a b) (> (count (union_branches (normalize_query_ast (source_relation a))))
+							(count (union_branches (normalize_query_ast (source_relation b))))))) '()))
+				(define partial (reduce alternatives (lambda (chosen source)
+					(if (not (nil? chosen)) chosen
+						(begin
+							(tx_check tx)
+							(define candidate_ast (bind_parameter_row_domains ast (list source)))
+							/* A single root domain often is the complete rejected trial.
+							Do not decorrelate and prove that identical alternative twice. */
+							(if (expression_equal? candidate_ast domain_ast) nil
+								(begin
+									(define candidate (decorrelate_logical_query candidate_ast))
+									(if (parameter_domain_ir_eligible? candidate) candidate nil)))))) nil))
+				(if (nil? partial) (decorrelate_logical_query ast) partial))))
+		(define reordered (optimize_logical_query selected_ir planning_session tx))
 		(tx_check tx)
 		(define prepared (prepare_physical_queryplan reordered planning_session tx))
 		(tx_check tx)
@@ -13493,7 +13537,7 @@ without freezing a statistics-dependent decision in the SQL plan cache. */
 						(list (quote and)
 							(list (quote semijoin_cache_wins?) (source_table_expr driver) (source_table_expr lookup)
 								(source_table_expr driver) true)
-							(list (quote semijoin_cache_work_paid?) (physical_query_tx_symbol) name budget))
+							(list (quote group_cache_work_paid?) (physical_query_tx_symbol) name budget))
 						warm_plan
 						(list (quote !begin)
 							(list (quote define) (quote __semijoin_started) (list (quote nanotime)))
@@ -13564,7 +13608,7 @@ this also avoids preparing a whole computed column for a small subset. */
 				(reduce tail (lambda (found item) (or found (semijoin_plan_has_operator? item name))) false)))
 		_ false)))
 
-(define semijoin_cache_work_paid? (lambda (tx name threshold_ns)
+(define group_cache_work_paid? (lambda (tx name threshold_ns)
 	(begin
 		(define candidates (table "system_statistic" "group_cache_candidates"))
 		(if (nil? candidates) false
