@@ -79,6 +79,28 @@ test_cases:
     warmup: 0
     timing_samples: 2
     threshold_ms: 20000
+  - name: "Many snapshot coordinates share one invariant ordered cut"
+    sql: |
+      SELECT d.x, p.category,
+        COALESCE((SELECT SUM((SELECT h.quantity FROM ds_history h
+          WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1))
+          FROM ds_entity e WHERE (p.category IS NULL OR e.category=p.category)
+            AND COALESCE((SELECT h.end_value FROM ds_history h
+              WHERE h.entity_id=e.id AND h.coordinate<=60 ORDER BY h.coordinate DESC LIMIT 1),d.x)>=d.x),0) AS total
+      FROM (SELECT 1 AS x UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4 UNION ALL SELECT 5 UNION ALL SELECT 6 UNION ALL SELECT 7 UNION ALL SELECT 8 UNION ALL SELECT 9 UNION ALL SELECT 10 UNION ALL SELECT 11 UNION ALL SELECT 12 UNION ALL SELECT 13 UNION ALL SELECT 14 UNION ALL SELECT 15 UNION ALL SELECT 16 UNION ALL SELECT 17 UNION ALL SELECT 18 UNION ALL SELECT 19 UNION ALL SELECT 20 UNION ALL SELECT 21 UNION ALL SELECT 22 UNION ALL SELECT 23 UNION ALL SELECT 24 UNION ALL SELECT 25 UNION ALL SELECT 26 UNION ALL SELECT 27 UNION ALL SELECT 28 UNION ALL SELECT 29 UNION ALL SELECT 30 UNION ALL SELECT 31 UNION ALL SELECT 32 UNION ALL SELECT 33 UNION ALL SELECT 34 UNION ALL SELECT 35 UNION ALL SELECT 36 UNION ALL SELECT 37 UNION ALL SELECT 38 UNION ALL SELECT 39 UNION ALL SELECT 40 UNION ALL SELECT 41 UNION ALL SELECT 42 UNION ALL SELECT 43 UNION ALL SELECT 44 UNION ALL SELECT 45 UNION ALL SELECT 46 UNION ALL SELECT 47 UNION ALL SELECT 48 UNION ALL SELECT 49 UNION ALL SELECT 50 UNION ALL SELECT 51 UNION ALL SELECT 52 UNION ALL SELECT 53 UNION ALL SELECT 54 UNION ALL SELECT 55 UNION ALL SELECT 56 UNION ALL SELECT 57 UNION ALL SELECT 58 UNION ALL SELECT 59 UNION ALL SELECT 60 UNION ALL SELECT 61 UNION ALL SELECT 62 UNION ALL SELECT 63 UNION ALL SELECT 64 UNION ALL SELECT 65 UNION ALL SELECT 66 UNION ALL SELECT 67 UNION ALL SELECT 68 UNION ALL SELECT 69 UNION ALL SELECT 70) d
+      CROSS JOIN (SELECT NULL AS category UNION ALL SELECT 0 UNION ALL SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3) p
+    expect:
+      rows: 350
+      result_contains:
+        - '{"x": 1, "category": null, "total": 4000}'
+        - '{"x": 20, "category": 0, "total": 2400}'
+        - '{"x": 51, "category": 0, "total": 1800}'
+        - '{"x": 70, "category": null, "total": 3800}'
+        - '{"x": 70, "category": 3, "total": 0}'
+    timing_aggregation: total
+    warmup: 0
+    timing_samples: 6
+    threshold_ms: 20000
   - name: "Physical plan exposes contribution-domain cost alternatives"
     sql: |
       EXPLAIN PHYSICAL
@@ -467,6 +489,22 @@ test_cases:
     sql: *point_cut_query
     expect:
       data: [{category: 0, total: 2000}, {category: 1, total: 2000}]
+
+  - name: "An inserted coordinate invalidates a shared cut witness"
+    session_id: "ds-point-cut-domain"
+    setup:
+      - sql: "SET @ds_cut=21"
+      - sql: "INSERT INTO ds_history VALUES (100001,20,21,7,NULL,'P')"
+    sql: *point_cut_query
+    expect:
+      data: [{category: 0, total: 2404}, {category: 1, total: 2000}]
+    cleanup:
+      - sql: "DELETE FROM ds_history WHERE id=100001"
+
+  - name: "Deleting the newest coordinate restores the earlier cut"
+    session_id: "ds-point-cut-domain"
+    sql: *point_cut_query
+    expect: *point_cut_result
 
   - name: "A raw bound in a payload must remain an exact binding"
     session_id: "ds-raw-cut-domain"
