@@ -21,6 +21,31 @@ setup:
           (map (produceN 1000) (lambda (i) (list i (if (< i 10) "needle" "ordinary")))))
         (rebuild (table "memcp-tests" "qfi_document") true false))
 test_cases:
+  - name: "Rejected parameter-domain specialization leaves the ordinary plan reusable"
+    scm: |
+      (begin
+        (define sess (newsession))
+        (sess "v1" 10)
+        (define planning (sql_queryplan_compile_session sess nil))
+        (define plan (parse_sql "memcp-tests" "SELECT d.x FROM (SELECT ? AS x) d"
+          (lambda (schema read write) true) planning nil))
+        (define guard (sql_queryplan_compile_formula nil
+          (sql_queryplan_guard_from_session planning)))
+        (define formula (sql_queryplan_compile_formula nil
+          (sql_queryplan_bind_execution_session plan)))
+        (define result (newsession))
+        (define run (lambda () (begin
+          (formula sess nil (lambda (row) (result "x" (cadr row))) (lambda (_fields) nil))
+          (result "x"))))
+        (define original (guard sess nil nil nil))
+        (define first (run))
+        (sess "v1" 20)
+        (if (and original (guard sess nil nil nil)
+          (equal? first 10) (equal? (run) 20)) true
+          (error "discarded parameter specialization changed the guard or runtime binding")))
+    expect:
+      rows: 1
+      result_contains: ["true"]
   - name: "A shared cost guard covers its runtime binding without an identity guard"
     scm: |
       (begin

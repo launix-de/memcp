@@ -2212,7 +2212,16 @@ physical membership probe. */
 (define scalar_aggregate_probe_outer_exprs (lambda (stage)
 	(merge (list
 		(qassoc_get (gs_facts stage) (quote lookup-keys) '())
-		(list (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))))))
+		/* Query-input aggregates retain range cuts outside their point lookup
+		keys. Scan callbacks must bind those columns even if not projected. */
+		(merge (map (qassoc_get (gs_facts stage) (quote range-domains) '())
+			(lambda (domain) (list (nth domain 2) (nth domain 4)))))
+		(if (nil? (qassoc_get (gs_facts stage) (quote stable-aggregate-domain) nil)) '()
+			(nth (qassoc_get (gs_facts stage) (quote stable-aggregate-domain) nil) 1))
+		(list (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
+		(if (nil? (qassoc_get (gs_facts stage) (quote contribution-domain) nil)) '()
+			(cons (nth (qassoc_get (gs_facts stage) (quote contribution-domain) nil) 2)
+				(nth (qassoc_get (gs_facts stage) (quote contribution-domain) nil) 4)))))))
 
 (define make_stage_lookup_condition (lambda (stage_alias key_names outer_domain post_condition)
 	(combine_where
@@ -2540,7 +2549,11 @@ row containing NULL must remain distinguishable for non-strict functions. */
 					(and (equal? (stage_result_max_rows_per_partition stage) 1)
 						(and (equal? (count keys) (count lookup_keys))
 							(and (equal? (coalesceNil (gs_having stage) true) true)
-								(source_is_base_table? (gs_input stage))))))
+								(or (source_is_base_table? (gs_input stage))
+									(not (nil? (qassoc_get (gs_facts stage) (quote contribution-domain) nil)))
+									(not (nil? (qassoc_get (gs_facts stage) (quote invariant-property-cover) nil)))
+									(and (not (qassoc_get (gs_facts stage) (quote aggregate-payload-dependency) false))
+										(not (nil? (qassoc_get (gs_facts stage) (quote stable-aggregate-domain) nil)))))))))
 				(and (equal? (qassoc_get (gs_facts stage) (quote null_semantics) nil) (quote aggregate))
 					(and (equal? (stage_result_max_rows_per_partition stage) 1)
 						(and (equal? (count keys) (count lookup_keys))

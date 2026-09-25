@@ -1145,6 +1145,23 @@ class SQLTestRunner:
     # Test execution
     # ----------------------
     def run_test_case(self, test_case: Dict, database: str) -> bool:
+        # The execution body arms cleanup only after skip decisions. Use the
+        # thread-local case context because parallel groups share this runner.
+        self._test_context.cleanup_steps = None
+        result = False
+        cleanup_ok = True
+        try:
+            result = self._execute_test_case(test_case, database)
+        finally:
+            cleanup_steps = self._test_context.cleanup_steps
+            self._test_context.cleanup_steps = None
+            if cleanup_steps:
+                cleanup_ok = self.run_cleanup(
+                    cleanup_steps, database, session_id=test_case.get("session_id"),
+                )
+        return bool(result) and cleanup_ok
+
+    def _execute_test_case(self, test_case: Dict, database: str) -> bool:
         name = test_case.get("name", f"Test {self.test_count + 1}")
         self._test_context.fail_comment = test_case.get("fail_comment")
         if test_case.get("disabled"):
@@ -1333,6 +1350,12 @@ class SQLTestRunner:
         # Per-test setup steps (SQL and/or Scheme, e.g. perf data generation)
         # Supports {rows} and {database} template placeholders for perf tests
         test_setup_steps = test_case.get("setup")
+        self._test_context.cleanup_steps = [
+            {key: (value.replace("{rows}", str(perf_rows)).replace("{database}", database)
+                   if is_perf_test and key in ("sql", "scm") else value)
+             for key, value in step.items()}
+            for step in test_case.get("cleanup", [])
+        ]
         heap_bytes = 0
 
         def fail_setup(reason, statement=None, response=None, expected=None):
@@ -2118,10 +2141,40 @@ class SQLTestRunner:
                 return False
         return True
 
-    def run_cleanup(self, cleanup_steps: List[Dict], database: str) -> None:
-        for step in cleanup_steps:
-            with performance_server_gate():
-                self.execute_sql(database, step['sql'], syntax=self.suite_syntax)
+    def run_cleanup(self, cleanup_steps: List[Dict], database: str,
+                    session_id: Optional[str] = None) -> bool:
+        success = True
+        for index, step in enumerate(cleanup_steps, start=1):
+            statement = step.get("sql", step.get("scm"))
+            response = None
+            reason = "Cleanup failed"
+            try:
+                with performance_server_gate():
+                    if "sql" in step:
+                        response = self.execute_sql(
+                            database, statement, syntax=self.suite_syntax,
+                            session_id=session_id, timeout=int(step.get("timeout", 30)),
+                        )
+                    elif "scm" in step:
+                        headers = dict(self.auth_header)
+                        if session_id:
+                            headers["X-Session-Id"] = session_id
+                        response = requests.post(
+                            f"{self.base_url}/scm", data=statement, headers=headers,
+                            timeout=int(step.get("timeout", 30)),
+                        )
+                    else:
+                        raise ValueError("expected sql or scm cleanup step")
+                if response is not None and not is_error_response(response):
+                    continue
+            except Exception as exc:
+                reason = f"Cleanup failed: {exc}"
+            # Cleanup failure is independently critical: leaked fixtures or
+            # global settings invalidate subsequent tests, even after a pass.
+            self.test_count += 1
+            self._record_fail(f"Cleanup step {index}", reason, statement, response, None)
+            success = False
+        return success
 
     def _step_expects_error(self, step: Any) -> bool:
         if not isinstance(step, dict):

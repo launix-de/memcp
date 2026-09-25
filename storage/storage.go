@@ -998,6 +998,17 @@ func Init(en scm.Env) {
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
+		Name: "table_read_version",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			if a[0].IsNil() {
+				return scm.NewNil()
+			}
+			return TableFromScmer(a[0]).contributionReadVersion()
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", HasSideEffects: true, Description: "read a conservative logical-data version, or nil while a mutation is active",
+			Params: []*scm.TypeDescriptor{{Kind: "table", Label: "table"}}, Return: &scm.TypeDescriptor{Kind: "any"}},
+	})
+	scm.Declare(&en, &scm.Declaration{
 		Name: "table_cache_generation",
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {

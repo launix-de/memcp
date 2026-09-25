@@ -1513,6 +1513,13 @@ func applyScanJoinOrderPartitionWindow(spec *scanJoinOrderSpec, tuples []*scanJo
 }
 
 func scanJoinOrder(currentTx *TxContext, spec scanJoinOrderSpec) scm.Scmer {
+	for _, ref := range spec.mapCols {
+		if contributionMutationColumns([]string{ref.column}) {
+			t := spec.inputs[ref.table].table
+			t.beginContributionMutation()
+			defer t.endContributionMutation()
+		}
+	}
 	if spec.limitPartitionCols == 0 && spec.limit >= 0 && scanJoinOrderUsesDriverOrder(&spec) {
 		if spec.batchedProbe {
 			return scanJoinOrderBatchedProbe(currentTx, spec)

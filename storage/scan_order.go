@@ -964,6 +964,13 @@ func recSetHooksCoverCondition(bounds scanAccess, backingTable *table, condition
 // Each table has its own filter, sort columns and fused map-reducer, while sort
 // directions, offset/limit and the neutral value are shared.
 func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, neutral scm.Scmer, isOuter bool, notFoundValue scm.Scmer) scm.Scmer {
+	for i := range tables {
+		if contributionMutationColumns(tables[i].callbackCols) {
+			t := tables[i].backingTable()
+			t.beginContributionMutation()
+			defer t.endContributionMutation()
+		}
+	}
 	execStart := time.Now()
 	ss := SessionStateFromTx(currentTx)
 
@@ -1630,6 +1637,10 @@ func runDirectSingleShardOrder(currentTx *TxContext, topology *tableShardTopolog
 }
 
 func (t *table) scanOrderSingle(currentTx *TxContext, spec scanOrderTableSpec, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols, offset, limit int, neutral scm.Scmer, isOuter bool, notFoundValue scm.Scmer) (scm.Scmer, bool) {
+	if contributionMutationColumns(spec.callbackCols) {
+		t.beginContributionMutation()
+		defer t.endContributionMutation()
+	}
 	execStart := time.Now()
 	ss := SessionStateFromTx(currentTx)
 	querySeq := querySeqFromTx(currentTx)
@@ -1709,6 +1720,10 @@ func (t *table) scan_order(currentTx *TxContext, accessSchema scm.Scmer, accessV
 // preserves the scan operator contract while avoiding the queues, channels,
 // and global merge needed by the general ordered multi-shard implementation.
 func (t *table) scanOrderFirst(currentTx *TxContext, accessSchema scm.Scmer, accessValues []scm.Scmer, conditionCols []string, condition scm.Scmer, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, notFoundValue scm.Scmer) scm.Scmer {
+	if contributionMutationColumns(callbackCols) {
+		t.beginContributionMutation()
+		defer t.endContributionMutation()
+	}
 	ss := SessionStateFromTx(currentTx)
 	querySeq := querySeqFromTx(currentTx)
 	bounds, compiled := scanAccessFromScheme(accessSchema, accessValues, nil)
