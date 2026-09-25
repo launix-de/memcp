@@ -1,3 +1,5 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
 # Window functions on aggregated values with GROUP BY
 # Pattern: SUM(COUNT(*)) OVER () alongside GROUP BY
 
@@ -42,6 +44,121 @@ test_cases:
           cnt: 1
           total_cnt: 6
 
+  - name: "WHERE restricts grouped window totals"
+    sql: |
+      SELECT week_date, COUNT(*) AS cnt, SUM(COUNT(*)) OVER () AS total_cnt,
+        SUM(amount) AS amount, SUM(SUM(amount)) OVER () AS total_amount
+      FROM wgb_data WHERE week_date <= 2
+      GROUP BY week_date ORDER BY week_date
+    expect:
+      data:
+        - {week_date: 1, cnt: 3, total_cnt: 5, amount: 60, total_amount: 150}
+        - {week_date: 2, cnt: 2, total_cnt: 5, amount: 90, total_amount: 150}
+
+  - name: "EXISTS remains an input to both grouped window totals"
+    sql: |
+      SELECT week_date, COUNT(*) AS cnt, SUM(COUNT(*)) OVER () AS total_cnt,
+        SUM(amount) AS amount, SUM(SUM(amount)) OVER () AS total_amount
+      FROM wgb_data d
+      WHERE EXISTS (SELECT 1 FROM wgb_data f WHERE f.id=d.id AND f.week_date<=2)
+      GROUP BY week_date ORDER BY week_date
+    expect:
+      data:
+        - {week_date: 1, cnt: 3, total_cnt: 5, amount: 60, total_amount: 150}
+        - {week_date: 2, cnt: 2, total_cnt: 5, amount: 90, total_amount: 150}
+
+  - name: "NOT EXISTS restricts grouped window totals"
+    sql: |
+      SELECT week_date, COUNT(*) AS cnt, SUM(COUNT(*)) OVER () AS total_cnt
+      FROM wgb_data d
+      WHERE NOT EXISTS (SELECT 1 FROM wgb_data f WHERE f.id=d.id AND f.week_date=1)
+      GROUP BY week_date ORDER BY week_date
+    expect:
+      data:
+        - {week_date: 2, cnt: 2, total_cnt: 3}
+        - {week_date: 3, cnt: 1, total_cnt: 3}
+
+  - name: "IN duplicates do not multiply the window input"
+    sql: |
+      SELECT week_date, COUNT(*) AS cnt, SUM(COUNT(*)) OVER () AS total_cnt
+      FROM wgb_data WHERE week_date IN (SELECT week_date FROM wgb_data WHERE amount<=40)
+      GROUP BY week_date ORDER BY week_date
+    expect:
+      data:
+        - {week_date: 1, cnt: 3, total_cnt: 5}
+        - {week_date: 2, cnt: 2, total_cnt: 5}
+
+  - name: "Filtered ungrouped windows retain partitions and SQL NULL filtering"
+    sql: |
+      SELECT id, SUM(amount) OVER (PARTITION BY week_date) AS total
+      FROM wgb_data WHERE amount>10 AND CASE WHEN id=5 THEN NULL ELSE TRUE END
+      ORDER BY id
+    expect:
+      data:
+        - {id: 2, total: 50}
+        - {id: 3, total: 50}
+        - {id: 4, total: 40}
+        - {id: 6, total: 60}
+
+  - name: "Set window membership boundary"
+    session_id: wgb_filter
+    sql: SET @wgb_max=2
+
+  - name: "Window totals use the current membership session"
+    session_id: wgb_filter
+    sql: |
+      SELECT week_date, SUM(COUNT(*)) OVER () AS total_cnt
+      FROM wgb_data d
+      WHERE EXISTS (SELECT 1 FROM wgb_data f WHERE f.id=d.id AND f.week_date<=@wgb_max)
+      GROUP BY week_date ORDER BY week_date
+    expect:
+      data:
+        - {week_date: 1, total_cnt: 5}
+        - {week_date: 2, total_cnt: 5}
+
+  - name: "Change window membership boundary"
+    session_id: wgb_filter
+    sql: SET @wgb_max=1
+
+  - name: "Cached window totals follow a changed session boundary"
+    session_id: wgb_filter
+    sql: |
+      SELECT week_date, SUM(COUNT(*)) OVER () AS total_cnt
+      FROM wgb_data d
+      WHERE EXISTS (SELECT 1 FROM wgb_data f WHERE f.id=d.id AND f.week_date<=@wgb_max)
+      GROUP BY week_date ORDER BY week_date
+    expect:
+      data:
+        - {week_date: 1, total_cnt: 3}
+
+  - name: "Outer filtering does not narrow an inner window domain"
+    sql: |
+      SELECT id, total FROM
+        (SELECT id, SUM(amount) OVER () AS total FROM wgb_data WHERE week_date<=2) t
+      WHERE id=1
+    expect:
+      data:
+        - {id: 1, total: 150}
+
+  - name: "Empty filtered group domain produces no window rows"
+    sql: |
+      SELECT week_date, SUM(COUNT(*)) OVER () AS total_cnt
+      FROM wgb_data d WHERE EXISTS (SELECT 1 FROM wgb_data f WHERE f.id=d.id AND f.week_date=99)
+      GROUP BY week_date
+    expect:
+      rows: 0
+
+  - name: "Window functions remain invalid in WHERE"
+    sql: SELECT id FROM wgb_data WHERE SUM(amount) OVER ()>0
+    expect:
+      error: true
+
+  - name: "Window appearing only in ORDER BY retains the filtered partition"
+    sql: |
+      SELECT id FROM wgb_data WHERE id <> 6 AND id <> 5
+      ORDER BY SUM(amount) OVER (PARTITION BY week_date) DESC, id
+    expect:
+      data: [{id: 1}, {id: 2}, {id: 3}, {id: 4}]
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS wgb_data"
