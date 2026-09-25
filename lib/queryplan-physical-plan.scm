@@ -262,7 +262,7 @@ context gates because bare EXISTS also has a separate membership lowerer. */
 							(if (empty_list? (qassoc_get (gs_facts stage) (quote lookup-keys) '()))
 								(constant_scalar_aggregate_probe_sources? stages sources)
 								(or
-									(stage_has_residual_outer_refs? stage)
+									(or (group_value_cache_selected? stage) (not (nil? (qassoc_get (gs_facts stage) (quote invariant-property-cover) nil))) (stage_has_residual_outer_refs? stage))
 									(or
 										(stage_direct_probe_cost_preferred_for_limit? stage limit_value planning_session)
 										(probe_context_small_enough? probe_sources))))
@@ -760,6 +760,8 @@ for that scan. The same prepared table is reused by every guarded variant. */
 		(define signature_stages (map observed_stages (lambda (stage)
 			(begin
 				(define prepared (if (or (scalar_cardinality_probe_stage? stage)
+					(not (nil? (qassoc_get (gs_facts stage) (quote stable-aggregate-domain) nil)))
+					(not (nil? (qassoc_get (gs_facts stage) (quote invariant-property-cover) nil)))
 					(not (nil? (qassoc_get (gs_facts stage) (quote contribution-domain) nil))))
 					(group_stage_with_physical_planning_session stage planning_session) stage))
 				(if (nil? (qassoc_get (gs_facts stage) (quote contribution-domain) nil)) prepared
@@ -1782,7 +1784,7 @@ outer joins. */
 		input and rewritten descriptors below affect execution only. Base aggregate
 		columns use their direct physical builder and need no canonical list here. */
 		(define aggregate_cols (if (or query_input scalar_order_base_stage)
-			(map ags (lambda (ag) (aggregate_col_name_using src ag)))
+			(map ags (lambda (ag) (aggregate_col_name_using logical_src ag)))
 			'()))
 		(define scalar_aggregate_stage (scalar_aggregate_probe_stage? stage))
 		(define prepared_src (if (query_block? optimized_src)
@@ -12415,12 +12417,18 @@ RecSet node is written into logical IR. */
 		(define eligible (if changed
 			(begin
 				(define candidate (annotate_contribution_domains (sql_type_annotate_ir ir)))
-				(and (ir_has_contribution_domain? candidate)
+				(and (or (ir_has_contribution_domain? candidate) (ir_has_invariant_property_cover? candidate))
 					(not (ir_has_unproved_query_aggregate? candidate)))) true))
 		(if (and changed eligible)
 			(bind_parameter_row_domains ast planning_session true) nil)
+		(define constant_ast (if eligible ast (bind_constant_domain_columns ast planning_session false)))
+		(define constant_changed (not (expression_equal? constant_ast ast)))
+		(define constant_ir (if constant_changed (decorrelate_logical_query constant_ast) nil))
+		(define constant_eligible (and constant_changed
+			(ir_has_contribution_domain? (annotate_contribution_domains (sql_type_annotate_ir constant_ir)))))
+		(if constant_eligible (bind_constant_domain_columns ast planning_session true) nil)
 		(define reordered (optimize_logical_query
-			(if eligible ir (decorrelate_logical_query ast)) planning_session tx))
+			(if eligible ir (if constant_eligible constant_ir (decorrelate_logical_query ast))) planning_session tx))
 		(tx_check tx)
 		(define prepared (prepare_physical_queryplan reordered planning_session tx))
 		(tx_check tx)

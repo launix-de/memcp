@@ -162,6 +162,10 @@ an unbound symbol in the callback when costing selects the probe alternative. */
 
 (define lower_column_expr_for_alias_in_context (lambda (src expr probe_work_rows)
 	(match expr
+		/* Emit the ordinary membership call so scan access extraction sees
+		the native RecSet boundary, rather than an opaque apply callback. */
+		((symbol apply) ((symbol get_column) _alias _ci "$recset_contains" _cci) ((symbol list) recset))
+		(recset_contains_call_expr (lower_column_expr_for_alias_in_context src recset probe_work_rows))
 		((symbol __recmap_call_for_alias) _alias recmap cols mapper if_null)
 		(list (symbol "__recmap_call") recmap cols mapper if_null)
 		((symbol driver_membership_probe) stage probe)
@@ -201,8 +205,8 @@ an unbound symbol in the callback when costing selects the probe alternative. */
 		((quote coalesceNil) inner default)
 		(lower_column_expr_for_join_in_context (list src) (source_alias src)
 			(list (symbol "coalesceNil") inner default) probe_work_rows)
-		((symbol get_column) tblvar tbl_ignorecase col col_ignorecase) (symbol (concat (resolve_column_alias tblvar (source_alias src)) "." (resolve_physical_column_name src col col_ignorecase)))
-		((quote get_column) tblvar tbl_ignorecase col col_ignorecase) (symbol (concat (resolve_column_alias tblvar (source_alias src)) "." (resolve_physical_column_name src col col_ignorecase)))
+		((symbol get_column) tblvar tbl_ignorecase col col_ignorecase) (scan_callback_symbol_for_alias (resolve_column_alias tblvar (source_alias src)) (resolve_physical_column_name src col col_ignorecase))
+		((quote get_column) tblvar tbl_ignorecase col col_ignorecase) (scan_callback_symbol_for_alias (resolve_column_alias tblvar (source_alias src)) (resolve_physical_column_name src col col_ignorecase))
 		(cons head tail) (cons head (map tail (lambda (item)
 			(lower_column_expr_for_alias_in_context src item probe_work_rows))))
 		_ expr)))
@@ -786,102 +790,290 @@ so visibility and cancellation semantics remain unchanged. */
 		(if (qassoc_get (gs_facts stage) (quote contribution_probe) false) lowered
 			(memoize_scalar_query_probe stage lookup_keys lowered)))))
 
+/* Keep the invariant property in its group keytable. Query-local RecSets
+project qualifying keys onto the entity scan; no duplicate Scheme relation is
+retained or joined. */
+(define invariant_property_cover_binding (lambda (all_stages proof)
+	(begin
+		(define property (stage_by_id all_stages (nth proof 2)))
+		(define output (nth proof 3))
+		(define condition (combine_where_terms (nth proof 4) true))
+		(define cache (group_stage_cache property))
+		(define carrier (list (quote table) (group_cache_schema cache) (group_cache_relation cache)))
+		(list (quote !begin)
+			(lower_group_stage_prepare_using all_stages all_stages property true nil)
+			(list (quote define) (quote __property_candidates)
+				(list (quote recset_project_join) (physical_query_tx_symbol)
+					(candidate_recset_filter_source output carrier condition)
+					(quoted_runtime_list (list "k0")) (source_table_expr (car proof))
+					(quoted_runtime_list (list (cadr proof)))))))))
+
+(define invariant_property_value_probe (lambda (proof stage column)
+	(begin
+		(define cache (group_stage_cache stage))
+		(define key (list (quote get_column) (source_alias (car proof)) false (cadr proof) false))
+		/* Bind the entity key before entering compiled scan callbacks. */
+		(list (list (quote lambda) (list (quote __property_key))
+			(compile_scan_plan (quote scan) (physical_query_tx_symbol)
+				(list (quote table) (group_cache_schema cache) (group_cache_relation cache))
+				(quoted_runtime_list (list "k0"))
+				'('lambda '('__key) '('equal?? '__key '__property_key))
+				(quoted_runtime_list (list column)) '('lambda '('acc 'value) 'value)
+				nil '('lambda '('a 'b) '('coalesceNil 'a 'b)) false)) key))))
+
+(define rewrite_invariant_property_value (lambda (proof expr)
+	(if (nil? proof) expr
+		(match expr
+			((symbol scalar_first_probe) stage column)
+			(if (and (equal? (gs_id stage) (nth proof 2)) (equal? column (nth proof 5)))
+				(invariant_property_value_probe proof stage column) expr)
+			((symbol scalar_first_probe) stage column _catalog)
+			(rewrite_invariant_property_value proof (list (quote scalar_first_probe) stage column))
+			(cons head tail) (cons head (map tail (lambda (item) (rewrite_invariant_property_value proof item))))
+			_ expr))))
+
+(define query_block_with_invariant_property_values (lambda (block proof)
+	(if (nil? proof) block
+		(begin
+			(define rewrite (lambda (expr) (rewrite_invariant_property_value proof expr)))
+			(make_query_block (qb_schema block)
+				(map (qb_sources block) (lambda (source)
+					(list (source_alias source) (source_schema source) (source_relation source)
+						(source_outer? source) (rewrite (source_join_expr source)))))
+				(map_assoc (qb_fields block) (lambda (name expr) (rewrite expr)))
+				(rewrite (qb_where block)) (qb_group block) (rewrite (qb_having block))
+				(rewrite (qb_order block)) (qb_limit block) (qb_offset block)
+				(rewrite (qb_hidden block)) (qb_stages block) (qb_facts block))))))
+
+/* Cache admission prices one cold evaluation and one reuse. This is an
+explicit low-confidence reuse prior, not a claim about future request counts.
+Use existing callback/scan costs, and guard every cardinality input. */
+(define group_value_cache_costs (lambda (rows width)
+	(begin
+		(define work (* rows width 14000))
+		(list (planner_cost 0 (* 2 work) 0 0 0 0 0 0 (* 2 rows) 0.75)
+			(planner_cost (* 2 planner_membership_scan_invocation_ns) work 0 0 0 0 0 0 rows 0.75)))))
+
+(define group_value_cache_runtime_wins? (lambda (source width)
+	(begin
+		(define costs (group_value_cache_costs (scan_estimate source) width))
+		(planner_cost_clear_winner? (cadr costs) (car costs)))))
+
+(define group_value_cache_selected? (lambda (stage)
+	(begin
+		(define proof (qassoc_get (gs_facts stage) (quote stable-aggregate-domain) nil))
+		(if (nil? proof) false
+			(begin
+				(define rows (coalesceNil (planner_source_row_count (car proof)) 0))
+				(define width (max 1 (count (nth proof 2))))
+				(define costs (group_value_cache_costs rows width))
+				(define planning_session (qassoc_get (gs_facts stage) (quote physical_planning_session) nil))
+				(define decision_id (concat "aggregate_point_cache:" (gs_id stage)))
+				(define normal (if (planner_guarded_choice
+					(planner_cost_clear_winner? (cadr costs) (car costs))
+					(list (quote group_value_cache_runtime_wins?) (source_table_expr (car proof)) width)
+					planning_session) "point_cache" "direct_aggregate"))
+				(define chosen (planner_physical_choice decision_id normal
+					'("direct_aggregate" "point_cache") planning_session))
+				(planner_record_physical_decision (list
+					(list "decision_id" decision_id) (list "decision" "aggregate_point_cache")
+					(list "chosen" chosen) (list "normally_chosen" normal)
+					(list "inputs" (list (list "driver_rows" rows) (list "source_dependencies" width)
+						(list "reuse_estimate" "one_cold_plus_one_reuse_prior")))
+					(list "alternatives" (list
+						(list (list "plan" "direct_aggregate") (list "cost" (planner_cost_explain (car costs))))
+						(list (list "plan" "point_cache") (list "cost" (planner_cost_explain (cadr costs))))))) planning_session)
+				(equal? chosen "point_cache"))))))
+
+/* Both alternatives need the invariant scalar property. The candidate carrier
+adds a property scan/key projection and removes downstream probes. Until its
+column has selectivity feedback, retain an explicit half-domain prior. */
+(define invariant_property_cover_costs (lambda (rows width)
+	(list (planner_cost 0 0 (* rows width 14000) 0 0 0 0 0 rows 0.75)
+		(planner_cost (* 2 planner_membership_recset_startup_ns)
+			(* 2 rows planner_membership_scan_row_ns) (* 0.5 rows width 14000)
+			0 0 0 (* rows 8) 0 (* rows 0.5) 0.75))))
+
+(define invariant_property_cover_runtime_wins? (lambda (source width)
+	(begin
+		(define costs (invariant_property_cover_costs (scan_estimate source) width))
+		(planner_cost_clear_winner? (cadr costs) (car costs)))))
+
+(define invariant_property_cover_selected? (lambda (stages stage proof)
+	(if (nil? proof) false
+		(begin
+			(define rows (coalesceNil (planner_source_row_count (car proof)) 0))
+			(define width (max 1 (- (count (stage_dependency_closure_using_graph
+				(stage_dependency_graph stages) stage)) 1)))
+			(define costs (invariant_property_cover_costs rows width))
+			(define planning_session (qassoc_get (gs_facts stage) (quote physical_planning_session) nil))
+			(define decision_id (concat "invariant_property_cover:" (gs_id stage)))
+			(define normal (if (planner_guarded_choice
+				(planner_cost_clear_winner? (cadr costs) (car costs))
+				(list (quote invariant_property_cover_runtime_wins?) (source_table_expr (car proof)) width)
+				planning_session) "property_candidates" "direct_aggregate"))
+			(define chosen (planner_physical_choice decision_id normal
+				'("direct_aggregate" "property_candidates") planning_session))
+			(planner_record_physical_decision (list
+				(list "decision_id" decision_id) (list "decision" "invariant_property_cover")
+				(list "chosen" chosen) (list "normally_chosen" normal)
+				(list "inputs" (list (list "driver_rows" rows) (list "scalar_dependencies" width)
+					(list "candidate_rows" (* rows 0.5)) (list "selectivity_estimate" "half_domain_prior")))
+				(list "alternatives" (list
+					(list (list "plan" "direct_aggregate") (list "cost" (planner_cost_explain (car costs))))
+					(list (list "plan" "property_candidates") (list "cost" (planner_cost_explain (cadr costs))))))) planning_session)
+			(equal? chosen "property_candidates")))))
+
+/* Evaluate cut witnesses after taking the cache source view. A bound inside
+one unchanged ordered cut selects the same scalar rows; its spelling/value need
+not create another exact group partition. This is not a delta proof across cuts. */
+(define lower_group_cache_binding (lambda (driver expr proofs)
+	(begin
+		(define proof (reduce proofs (lambda (found item)
+			(if (ordered_binding_same? expr (car item)) item found)) nil))
+		(if (nil? proof) (lower_column_expr_for_alias driver expr)
+			(list (list (quote lambda) (list (quote __cache_bound))
+				(cons (quote list) (map (cadr proof) (lambda (cut)
+					(compile_scan_plan (quote scan_order) (physical_query_tx_symbol)
+						(source_table_expr (car cut)) (quoted_runtime_list (list (cadr cut)))
+						'('lambda '('__value) '('and '('not '('nil? '__value)) '('not '('nil? '__cache_bound))
+							'('<= '__value '__cache_bound)))
+						(quoted_runtime_list (list (cadr cut))) (list (quote list) (quote >)) 0 0 1
+						(quoted_runtime_list (list (cadr cut)))
+						'('lambda '('__acc '__value) '__value) nil false)))))
+				(lower_column_expr_for_alias driver expr))))))
+
+(define lower_group_value_cache_probe (lambda (all_stages stage value_expr keys lookup_keys reduce_expr neutral_expr)
+	(begin
+		(define proof (qassoc_get (gs_facts stage) (quote stable-aggregate-domain) nil))
+		(define name (concat (group_stage_cache_relation stage) ":point-v1:"
+			(aggregate_col_name_using (gs_input stage) (list value_expr reduce_expr neutral_expr))))
+		(list (quote group_cache_value) name
+			(list (quote lambda) '() (cons (quote list) (map (nth proof 1)
+				(lambda (expr) (lower_group_cache_binding (car proof) expr (coalesceNil (nth proof 3) '()))))))
+			(physical_query_tx_symbol)
+			(list (quote lambda) '() (cons (quote list) (map (nth proof 2)
+				(lambda (source) (list (quote table_read_version) (source_table_expr source))))))
+			(list (quote lambda) '() (lower_scalar_aggregate_query_probe_expr all_stages stage value_expr
+				keys lookup_keys reduce_expr neutral_expr (quote point-cached)))))))
+
 (define lower_scalar_aggregate_query_probe_expr (lambda (all_stages stage value_expr keys lookup_keys reduce_expr neutral_expr contribution_mode)
 	(if (and (nil? contribution_mode) (equal? reduce_expr (quote sql_sum_reduce))
-		(not (nil? (qassoc_get (gs_facts stage) (quote contribution-domain) nil))))
-		(if (contribution_snapshot_selected? stage)
-			(lower_contribution_snapshot_probe all_stages stage value_expr keys lookup_keys reduce_expr neutral_expr)
-			(lower_scalar_aggregate_query_probe_expr all_stages stage value_expr keys lookup_keys reduce_expr neutral_expr (quote fresh)))
-		(begin
-			(define all_stages (if (nil? contribution_mode) all_stages
-				(contribution_physical_catalog all_stages stage)))
-			(define input (gs_input stage))
-			(define keyed_terms (map (produceN (count keys)) (lambda (i)
-				(list (query_key_term_alias (qb_sources input) (nth keys i))
-					(list (quote equal??) (nth keys i) (nth lookup_keys i))))))
-			(define where_key_terms (map
-				(filter keyed_terms (lambda (term) (not (nil? (nth term 0)))))
-				(lambda (term) (nth term 1))))
-			(define keyed_input (make_query_block
-				(qb_schema input)
-				(query_sources_with_key_terms (qb_sources input) keyed_terms)
-				(qb_fields input)
-				(combine_where_terms
-					(cons (if (equal? contribution_mode (quote delta))
-						(list (quote and) (qb_where input)
-							(list (quote sql_in) (quote __contribution_keys)
-								(list (quote get_column)
-									(source_alias (car (qassoc_get (gs_facts stage) (quote contribution-domain) nil))) false
-									(nth (qassoc_get (gs_facts stage) (quote contribution-domain) nil) 1) false)))
-						(qb_where input)) where_key_terms)
-					true)
-				(qb_group input)
-				(qb_having input)
-				(qb_order input)
-				(qb_limit input)
-				(qb_offset input)
-				(qb_hidden input)
-				(qb_stages input)
-				(qb_facts input)))
-			(define planning_session (qassoc_get (gs_facts stage) (quote physical_planning_session) nil))
-			(define simplified_input (group_input_without_dead_scalar_sources
-				stage keyed_input planning_session))
-			(define range_candidates (if (or (equal? contribution_mode (quote full)) (equal? contribution_mode (quote delta)))
-				(map (group_range_recmap_candidate all_stages stage simplified_input)
-					(lambda (candidate) (if (equal? contribution_mode (quote delta))
-						(contribution_bounded_recmap candidate (cadr (qassoc_get (gs_facts stage) (quote contribution-domain) nil)))
-						(merge (list candidate (list (quote full)
-							(cons (quote list) (map (nth (qassoc_get (gs_facts stage) (quote contribution-domain) nil) 5)
-								(lambda (source) (list (quote table_read_version) (source_table_expr source)))))))))))
-				(if (equal? contribution_mode (quote fresh)) '()
-					(select_group_range_recmap_candidate all_stages stage simplified_input planning_session))))
-			(define recmap_input (reduce range_candidates
-				(lambda (block candidate) (query_block_with_group_range_recmap block candidate))
-				simplified_input))
-			(define probe_catalog (map all_stages (lambda (candidate)
-				(if (group_stage? candidate) (group_stage_with_facts candidate
-					(qassoc_set (gs_facts candidate) (quote contribution_probe) true)) candidate))))
-			(define delta_sources (if (or (equal? contribution_mode (quote delta)) (equal? contribution_mode (quote fresh)))
-				(filter (qb_sources recmap_input) source_is_stage_output?) '()))
-			(define mapped_input (if (empty_list? delta_sources) recmap_input
-				(query_block_with_selected_probe_sources_using probe_catalog delta_sources recmap_input)))
-			(define recmap_value (rewrite_group_range_recmaps_expr range_candidates value_expr))
-			(define mapped_value (if (empty_list? delta_sources) recmap_value
-				(rewrite_scalar_first_probe_expr probe_catalog delta_sources nil recmap_value)))
-			(define consumed_stages (qassoc_get (qb_facts mapped_input)
-				(quote consumed_probe_stage_ids) '()))
-			(define nested_stages (filter
-				(scalar_first_query_probe_direct_nested_stages all_stages stage)
-				(lambda (candidate) (not (contains? consumed_stages (gs_id candidate))))))
-			(define prepared_input
-				(query_block_without_stages_after_eager_prepare_using nested_stages mapped_input))
-			/* Build callback ASTs as data. Parsed SourceInfo nodes can otherwise
-			be rebound while later preparation-recipe walkers inspect the plan. */
-			(define contribution_result (or (equal? contribution_mode (quote full)) (equal? contribution_mode (quote delta))))
-			(define proof (qassoc_get (gs_facts stage) (quote contribution-domain) nil))
-			(define probe_expr (if contribution_result
-				(lower_query_block_as_dataset_reduce prepared_input
-					(list "__key" (list (quote get_column) (source_alias (car proof)) false (nth proof 1) false) "__value" mapped_value)
-					'('lambda '('__key '__value) '('list '__key '__value))
-					'('lambda '('acc 'row) '('set_assoc 'acc '('car 'row) '('cadr 'row)))
-					'('list)
-					'('lambda '('a 'b) '('merge_assoc 'a 'b '('lambda '('old 'new) 'new))))
-				(lower_query_block_as_dataset_reduce prepared_input
-					(list "__value" mapped_value)
-					(list (quote lambda) (list (quote __value)) (quote __value))
-					reduce_expr neutral_expr nil)))
-			(if (and (empty_list? nested_stages) (empty_list? range_candidates))
-				probe_expr
-				(cons (quote !begin)
-					(merge (list
-						(map range_candidates group_range_recmap_binding)
-						(lazy_stage_prepare_bindings nested_stages (filter nested_stages group_stage?))
-						(map nested_stages (lambda (nested_stage)
-							(if (group_stage? nested_stage)
-								(stage_prepare_call_expr nested_stage)
-								(lower_stage_prepare_using nested_stages nested_stages nested_stage true))))
-						(lower_stage_materialize_all nested_stages)
-						(list probe_expr)))))))))
+		(nil? (qassoc_get (gs_facts stage) (quote contribution-domain) nil)) (group_value_cache_selected? stage))
+		(lower_group_value_cache_probe all_stages stage value_expr keys lookup_keys reduce_expr neutral_expr)
+		(if (and (nil? contribution_mode) (equal? reduce_expr (quote sql_sum_reduce))
+			(not (nil? (qassoc_get (gs_facts stage) (quote contribution-domain) nil))))
+			(if (contribution_snapshot_selected? stage)
+				(lower_contribution_snapshot_probe all_stages stage value_expr keys lookup_keys reduce_expr neutral_expr)
+				(lower_scalar_aggregate_query_probe_expr all_stages stage value_expr keys lookup_keys reduce_expr neutral_expr (quote fresh)))
+			(begin
+				(define all_stages (if (nil? contribution_mode) all_stages
+					(contribution_physical_catalog all_stages stage)))
+				(define input (gs_input stage))
+				(define property_cover (if (or (nil? contribution_mode) (equal? contribution_mode (quote point-cached)))
+					(qassoc_get (gs_facts stage) (quote invariant-property-cover) nil) nil))
+				(define property_cover (if (invariant_property_cover_selected? all_stages stage property_cover) property_cover nil))
+				(define keyed_terms (map (produceN (count keys)) (lambda (i)
+					(list (query_key_term_alias (qb_sources input) (nth keys i))
+						(list (quote equal??) (nth keys i) (nth lookup_keys i))))))
+				(define where_key_terms (map
+					(filter keyed_terms (lambda (term) (not (nil? (nth term 0)))))
+					(lambda (term) (nth term 1))))
+				(define keyed_input (make_query_block
+					(qb_schema input)
+					(query_sources_with_key_terms (qb_sources input) keyed_terms)
+					(qb_fields input)
+					(combine_where_terms
+						(cons (if (equal? contribution_mode (quote delta))
+							(list (quote and) (qb_where input)
+								(list (quote sql_in) (quote __contribution_keys)
+									(list (quote get_column)
+										(source_alias (car (qassoc_get (gs_facts stage) (quote contribution-domain) nil))) false
+										(nth (qassoc_get (gs_facts stage) (quote contribution-domain) nil) 1) false)))
+							(if (nil? property_cover) (qb_where input)
+								(list (quote and) (qb_where input)
+									(list (quote apply)
+										(list (quote get_column) (source_alias (car property_cover)) false "$recset_contains" false)
+										(list (quote list) (quote __property_candidates)))))) where_key_terms)
+						true)
+					(qb_group input)
+					(qb_having input)
+					(qb_order input)
+					(qb_limit input)
+					(qb_offset input)
+					(qb_hidden input)
+					(qb_stages input)
+					(qb_facts input)))
+				(define planning_session (qassoc_get (gs_facts stage) (quote physical_planning_session) nil))
+				(define simplified_input (group_input_without_dead_scalar_sources
+					stage keyed_input planning_session))
+				(define range_candidates (if (or (equal? contribution_mode (quote full)) (equal? contribution_mode (quote delta)))
+					(map (group_range_recmap_candidate all_stages stage simplified_input)
+						(lambda (candidate) (if (equal? contribution_mode (quote delta))
+							(contribution_bounded_recmap candidate (cadr (qassoc_get (gs_facts stage) (quote contribution-domain) nil)) (quote __contribution_keys))
+							(merge (list candidate (list (quote full)
+								(cons (quote list) (map (nth (qassoc_get (gs_facts stage) (quote contribution-domain) nil) 5)
+									(lambda (source) (list (quote table_read_version) (source_table_expr source)))))))))))
+					(if (not (nil? property_cover))
+						(map (select_group_range_recmap_candidate all_stages stage simplified_input planning_session)
+							(lambda (candidate) (contribution_bounded_recmap candidate nil (quote __property_candidates))))
+						(if (equal? contribution_mode (quote fresh)) '()
+							(select_group_range_recmap_candidate all_stages stage simplified_input planning_session)))))
+				(define recmap_input (reduce range_candidates
+					(lambda (block candidate) (query_block_with_group_range_recmap block candidate))
+					simplified_input))
+				(define probe_catalog (map all_stages (lambda (candidate)
+					(if (group_stage? candidate) (group_stage_with_facts candidate
+						(qassoc_set (gs_facts candidate) (quote contribution_probe) true)) candidate))))
+				(define delta_sources (if (or (not (nil? property_cover)) (equal? contribution_mode (quote delta)) (equal? contribution_mode (quote fresh)))
+					(filter (qb_sources recmap_input) source_is_stage_output?) '()))
+				(define mapped_input (if (empty_list? delta_sources) recmap_input
+					(query_block_with_selected_probe_sources_using probe_catalog delta_sources recmap_input)))
+				(define mapped_input (query_block_with_invariant_property_values mapped_input property_cover))
+				(define recmap_value (rewrite_group_range_recmaps_expr range_candidates value_expr))
+				(define mapped_value (if (empty_list? delta_sources) recmap_value
+					(rewrite_scalar_first_probe_expr probe_catalog delta_sources nil recmap_value)))
+				(define mapped_value (rewrite_invariant_property_value property_cover mapped_value))
+				(define consumed_stages (qassoc_get (qb_facts mapped_input)
+					(quote consumed_probe_stage_ids) '()))
+				(define nested_stages (filter
+					(scalar_first_query_probe_direct_nested_stages all_stages stage)
+					(lambda (candidate) (not (contains? consumed_stages (gs_id candidate))))))
+				(define prepared_input
+					(query_block_without_stages_after_eager_prepare_using nested_stages mapped_input))
+				(define property_prepared (if (nil? property_cover) '()
+					(map (stage_dependency_closure_using_graph (stage_dependency_graph all_stages)
+						(stage_by_id all_stages (nth property_cover 2))) gs_id)))
+				(define nested_stages (filter nested_stages (lambda (item)
+					(not (contains? property_prepared (gs_id item))))))
+				/* Build callback ASTs as data. Parsed SourceInfo nodes can otherwise
+				be rebound while later preparation-recipe walkers inspect the plan. */
+				(define contribution_result (or (equal? contribution_mode (quote full)) (equal? contribution_mode (quote delta))))
+				(define proof (qassoc_get (gs_facts stage) (quote contribution-domain) nil))
+				(define probe_expr (if contribution_result
+					(lower_query_block_as_dataset_reduce prepared_input
+						(list "__key" (list (quote get_column) (source_alias (car proof)) false (nth proof 1) false) "__value" mapped_value)
+						'('lambda '('__key '__value) '('list '__key '__value))
+						'('lambda '('acc 'row) '('set_assoc 'acc '('car 'row) '('cadr 'row)))
+						'('list)
+						'('lambda '('a 'b) '('merge_assoc 'a 'b '('lambda '('old 'new) 'new))))
+					(lower_query_block_as_dataset_reduce prepared_input
+						(list "__value" mapped_value)
+						(list (quote lambda) (list (quote __value)) (quote __value))
+						reduce_expr neutral_expr nil)))
+				(if (and (nil? property_cover) (empty_list? nested_stages) (empty_list? range_candidates))
+					probe_expr
+					(cons (quote !begin)
+						(merge (list
+							(if (nil? property_cover) '() (list (invariant_property_cover_binding all_stages property_cover)))
+							(map range_candidates group_range_recmap_binding)
+							(lazy_stage_prepare_bindings nested_stages (filter nested_stages group_stage?))
+							(map nested_stages (lambda (nested_stage)
+								(if (group_stage? nested_stage)
+									(stage_prepare_call_expr nested_stage)
+									(lower_stage_prepare_using nested_stages nested_stages nested_stage true))))
+							(lower_stage_materialize_all nested_stages)
+							(list probe_expr))))))))))
 
 /* Query-input scalar probes can occur in many projected fields after their
 logical stages have merged. Emit the physical probe recipe once per block and
@@ -3519,6 +3711,10 @@ probe. */
 
 (define lower_column_expr_for_join_in_context (lambda (sources default_alias expr probe_work_rows)
 	(match expr
+		/* Emit the ordinary membership call so scan access extraction sees
+		the native RecSet boundary, rather than an opaque apply callback. */
+		((symbol apply) ((symbol get_column) _alias _ci "$recset_contains" _cci) ((symbol list) recset))
+		(recset_contains_call_expr (lower_column_expr_for_join_in_context sources default_alias recset probe_work_rows))
 		((symbol __recmap_call_for_alias) _alias recmap cols mapper if_null)
 		(list (symbol "__recmap_call") recmap cols mapper if_null)
 		((symbol driver_membership_probe) stage probe)
@@ -3570,14 +3766,14 @@ probe. */
 				(source_for_alias sources default_alias tblvar tbl_ignorecase)))
 			(if (nil? src)
 				(symbol (concat (resolve_column_alias tblvar default_alias) "." col))
-				(symbol (concat (source_alias src) "." (resolve_physical_column_name src col col_ignorecase)))))
+				(scan_callback_symbol_for_alias (source_alias src) (resolve_physical_column_name src col col_ignorecase))))
 		((quote get_column) tblvar tbl_ignorecase col col_ignorecase) (begin
 			(define src (if (nil? tblvar)
 				(source_for_unqualified_column sources default_alias col col_ignorecase)
 				(source_for_alias sources default_alias tblvar tbl_ignorecase)))
 			(if (nil? src)
 				(symbol (concat (resolve_column_alias tblvar default_alias) "." col))
-				(symbol (concat (source_alias src) "." (resolve_physical_column_name src col col_ignorecase)))))
+				(scan_callback_symbol_for_alias (source_alias src) (resolve_physical_column_name src col col_ignorecase))))
 		(cons head tail) (cons head (map tail (lambda (item)
 			(lower_column_expr_for_join_in_context sources default_alias item probe_work_rows))))
 		_ expr)))
@@ -6189,8 +6385,19 @@ self-joins of the same base table still describe two distinct row roles. */
 		(list (source_schema src) (source_relation src))
 		payload) true))))
 
-(define make_group_keytable_cache (lambda (schema relation)
-	(list (quote group-keytable) schema relation)))
+/* Equality, additive-range and snapshot dimensions share the group-cache
+identity contract. The physical carrier may be a keytable or immutable anchors. */
+(define make_group_cache (lambda (kind schema relation dimensions)
+	(list kind schema relation dimensions)))
+
+(define group_cache_dimensions (lambda (cache)
+	(if (list? cache) (coalesceNil (nth cache 3) '()) '())))
+
+(define group_stage_snapshot_cache (lambda (stage aggregate)
+	(make_group_cache (quote group-snapshot) (group_stage_schema stage)
+		(concat (group_stage_cache_relation stage) ":snapshot-v1:"
+			(aggregate_col_name_using (gs_input stage) aggregate))
+		(qassoc_get (gs_facts stage) (quote snapshot-domains) '()))))
 
 (define group_cache_kind (lambda (cache)
 	(if (list? cache) (nth cache 0) nil)))
@@ -6240,7 +6447,7 @@ self-joins of the same base table still describe two distinct row roles. */
 		(define alias_map (canonical_group_stage_alias_map stage))
 		(define input_identity (canonical_group_input_identity alias_map signatures input))
 		(define canonical_keys (stage_semantic_rewrite_expr alias_map signatures keys))
-		(make_group_keytable_cache schema (if (empty_list? range_domains)
+		(make_group_cache (quote group-keytable) schema (if (empty_list? range_domains)
 			(group_table_name schema label input_identity canonical_keys
 				(stage_semantic_rewrite_expr alias_map signatures condition))
 			(range_group_table_name schema label input_identity canonical_keys
@@ -6250,7 +6457,8 @@ self-joins of the same base table still describe two distinct row roles. */
 				(stage_semantic_rewrite_expr alias_map signatures
 					(map range_domains range_domain_inner))
 				(stage_semantic_rewrite_expr alias_map signatures
-					(range_stage_invariant_condition stage))))))))
+					(range_stage_invariant_condition stage))))
+			(merge (list (map keys (lambda (key) (list (quote point) key))) range_domains))))))
 
 (define group_stage_cache (lambda (stage)
 	(begin
@@ -9103,8 +9311,9 @@ payloads retain the ordinary SQL reducer, including its rounding semantics. */
 	(or (nil? value) (and (number? value)
 		(<= (contribution_magnitude value) 4503599627370496)
 		(equal? value (floor value))))))
-/* Admission bounds retained logical keys across all fixed groups in a query.
-This is transient query working memory, not a persistent cache registration. */
+/* Bound logical-key state per admitted snapshot. The legacy query-local
+builder charges its whole query; shared bases and overlays are separately
+accounted and evicted through CacheManager-backed cachemaps. */
 (define contribution_snapshot_key_budget 262144)
 (define make_contribution_admission (lambda ()
 	(begin
@@ -9172,6 +9381,136 @@ This is transient query working memory, not a persistent cache registration. */
 
 ))
 
+/* Snapshot is a third group-cache dimension: immutable aggregate state at an
+anchor, not an additive interval. The existing CacheManager-backed cachemap
+owns every retained value. No producer closure, transaction, RecMap or request
+session is retained. Point results and full anchors have separate registrations;
+anchor directories contain coordinates only, never duplicate ownership of maps.
+Eviction or a missing directory is a cache miss, never a correctness dependency.
+Concurrent builders may publish equivalent immutable states independently. */
+/* A fixed point-domain property is a logical-key/value cache. Snapshot
+corrections and range filters may borrow its immutable values; they must not
+retain a mutable helper join or any producer closure across requests. */
+(define group_value_cache (newcachemap))
+
+(define group_cache_value (lambda (name point_values tx read_view producer)
+	(begin
+		(tx_check tx)
+		(define view (read_view))
+		(define shareable (and (not (tx_requires_query_local_cache tx))
+			(reduce view (lambda (ok stamp) (and ok (not (nil? stamp)))) true)))
+		(define key (if shareable (concat name ":" (serialize (list (point_values) view))) nil))
+		(define hit (if shareable (group_value_cache key) nil))
+		(if (and (not (nil? hit)) (expression_equal? view (read_view))) (car hit)
+			(begin
+				(define value (producer))
+				(tx_check tx)
+				(if (and shareable (expression_equal? view (read_view)))
+					(group_value_cache key (list value)) true)
+				value)))))
+
+(define snapshot_group_bases (newcachemap))
+(define snapshot_group_states (newcachemap))
+(define snapshot_group_anchors (newcachemap))
+(define snapshot_group_points (newcachemap))
+
+(define snapshot_group_coordinate_key (lambda (domain coordinate)
+	(concat domain ":" (serialize coordinate))))
+
+(define snapshot_group_total (lambda (state)
+	(if (equal? (cadr state) 0) nil (car state))))
+
+(define snapshot_group_reduce_values (lambda (values)
+	(reduce_assoc values (lambda (state key value)
+		(list (+ (car state) (coalesceNil value 0))
+			(+ (cadr state) (if (nil? value) 0 1))
+			(+ (nth state 2) (contribution_magnitude value)))) '(0 0 0))))
+
+(define snapshot_group_valid_values? (lambda (values)
+	(reduce_assoc values (lambda (valid key value)
+		(and valid (contribution_integral? value))) true)))
+
+(define snapshot_group_nearest (lambda (domain coordinate)
+	(reduce (coalesceNil (snapshot_group_anchors domain) '())
+		(lambda (best candidate)
+			(begin
+				(define anchor (snapshot_group_states
+					(snapshot_group_coordinate_key domain candidate)))
+				(define base (if (nil? anchor) nil (snapshot_group_bases (car anchor))))
+				(if (or (nil? base) (and (not (nil? best))
+					(<= (contribution_magnitude (- coordinate (car best)))
+						(contribution_magnitude (- coordinate candidate))))) best
+					(list candidate anchor base)))) nil)))
+
+(define snapshot_group_value (lambda (anchor base key)
+	(if (has_assoc? (cadr anchor) key) (get_assoc (cadr anchor) key) (get_assoc base key))))
+
+(define snapshot_group_publish (lambda (domain axis values state population nearest candidates)
+	(begin
+		(define point_key (snapshot_group_coordinate_key domain axis))
+		(define base_key (if (nil? nearest) point_key (car (cadr nearest))))
+		(define overlay (if (nil? nearest) '()
+			(merge_assoc (cadr (cadr nearest))
+				(reduce candidates (lambda (updates key)
+					(set_assoc updates key (get_assoc values key))) '())
+				(lambda (old new) new))))
+		(if (nil? nearest) (snapshot_group_bases base_key values) true)
+		(snapshot_group_states point_key (list base_key overlay state population))
+		/* Directories and overlays never retain the separately charged full
+		base. An evicted base makes its derived anchors unusable, not stale. */
+		(define previous (coalesceNil (snapshot_group_anchors domain) '()))
+		(snapshot_group_anchors domain (cons axis
+			(slice (filter previous (lambda (coordinate)
+				(not (equal? coordinate axis)))) 0 7)))
+		true)))
+
+(define snapshot_group_cache (lambda (name fixed_values tx axis population read_view full changed evaluate fallback)
+	(begin
+		(tx_check tx)
+		(define view (read_view))
+		(define shareable (and (not (tx_requires_query_local_cache tx))
+			(number? axis) (contribution_integral? axis)
+			(number? population) (<= (* 2 population) contribution_snapshot_key_budget)
+			(reduce view (lambda (ok stamp) (and ok (not (nil? stamp)))) true)))
+		(if (not shareable) (fallback)
+			(begin
+				(define domain (concat name ":" (serialize (list (fixed_values) view))))
+				(define point_key (snapshot_group_coordinate_key domain axis))
+				/* Box NULL SUM too: absence and a cached SQL NULL are distinct. */
+				(define hit (snapshot_group_points point_key))
+				(if (not (nil? hit))
+					(if (expression_equal? view (read_view)) (car hit) (fallback))
+					(begin
+						(define nearest (snapshot_group_nearest domain axis))
+						(define anchor (if (nil? nearest) nil (cadr nearest)))
+						(define candidates (if (nil? nearest) '()
+							(changed (min axis (car nearest)) (max axis (car nearest)))))
+						/* Dense corrections cost more than constructing a closer anchor.
+						Use affected work, not distance in the ordered dimension. */
+						(define rebuild (or (nil? anchor)
+							(> (count candidates) (max 1 (/ population 2)))))
+						(define values (if rebuild (full) (if (empty_list? candidates) '() (evaluate candidates))))
+						(if (not (snapshot_group_valid_values? values)) (fallback)
+							(begin
+								(define state (if rebuild (snapshot_group_reduce_values values)
+									(reduce candidates (lambda (state key)
+										(begin
+											(define before (snapshot_group_value anchor (nth nearest 2) key))
+											(define after (get_assoc values key))
+											(list (+ (car state) (- (coalesceNil after 0) (coalesceNil before 0)))
+												(+ (cadr state) (- (if (nil? after) 0 1) (if (nil? before) 0 1)))
+												(+ (nth state 2) (- (contribution_magnitude after) (contribution_magnitude before))))))
+										(nth anchor 2))))
+								(if (or (> (nth state 2) 4503599627370496)
+									(not (expression_equal? view (read_view)))) (fallback)
+									(begin
+										(tx_check tx)
+										(snapshot_group_publish domain axis values state population
+											(if rebuild nil nearest) candidates)
+										(define result (snapshot_group_total state))
+										(snapshot_group_points point_key (list result))
+										result)))))))))))
+
 (define lower_contribution_snapshot_probe (lambda (all_stages stage value_expr keys lookup_keys reduce_expr neutral_expr)
 	(begin
 		(define proof (qassoc_get (gs_facts stage) (quote contribution-domain) nil))
@@ -9179,18 +9518,11 @@ This is transient query working memory, not a persistent cache registration. */
 		(define axis (lower_column_expr_for_alias driver (nth proof 2)))
 		/* One logical group can expose several SUM payloads. Their old-value
 		states must remain distinct even when their domains and sources match. */
-		(define cache_key (list (quote concat) (concat "__contribution_snapshot:" (gs_id stage) ":"
-			(fnv_hash (serialize (list value_expr reduce_expr neutral_expr))) ":")
-			(list (quote serialize) (cons (quote list) (map (nth proof 4)
-				(lambda (expr) (lower_column_expr_for_alias driver expr)))))))
-		(define admission (list (physical_query_session_symbol) "get_or_compute_scoped"
-			(physical_query_scope_symbol) "__contribution_admission" (physical_query_tx_symbol)
-			(list (quote lambda) (list (physical_query_tx_symbol)) (list (quote make_contribution_admission)))))
-		(define snapshot (list (physical_query_session_symbol) "get_or_compute_scoped"
-			(physical_query_scope_symbol) cache_key (physical_query_tx_symbol)
-			(list (quote lambda) (list (physical_query_tx_symbol))
-				(list (quote make_contribution_snapshot) admission
-					(list (quote lambda) '() (list (quote scan_estimate) (source_table_expr driver)))))))
+		(define cache (group_stage_snapshot_cache stage (list value_expr reduce_expr neutral_expr)))
+		(define cache_name (group_cache_relation cache))
+		(define fixed (list (quote lambda) '() (cons (quote list) (map (nth proof 4)
+			(lambda (expr) (lower_group_cache_binding driver expr
+				(qassoc_get (gs_facts stage) (quote snapshot-fixed-cuts) '())))))))
 		(define covers (map (nth proof 3) (lambda (cover)
 			(compile_scan_plan (quote scan) (physical_query_tx_symbol) (source_table_expr (car cover))
 				(quoted_runtime_list (list (nth cover 2)))
@@ -9203,7 +9535,8 @@ This is transient query working memory, not a persistent cache registration. */
 				(reduce covers (lambda (acc cover) (list (quote merge_assoc) acc cover
 					'('lambda '('old 'new) true))) '('list))
 				'('lambda '('key 'present) 'key))))
-		(list snapshot (physical_query_tx_symbol) axis
+		(list (quote snapshot_group_cache) cache_name fixed (physical_query_tx_symbol) axis
+			(list (quote scan_estimate) (source_table_expr driver))
 			(list (quote lambda) '() (cons (quote list)
 				(map (nth proof 5) (lambda (source) (list (quote table_read_version) (source_table_expr source))))))
 			(list (quote lambda) '() (lower_scalar_aggregate_query_probe_expr
@@ -9233,11 +9566,13 @@ bounds. Expose that access geometry to the common RecMap candidate builder. */
 								(quote range-invariant-condition) true)
 								(quote range-accessing-after-simple) '()))))))))))
 
-(define contribution_bounded_recmap (lambda (candidate key)
+(define contribution_bounded_recmap (lambda (candidate key candidates)
 	(begin
 		(define old (nth candidate 3))
 		(define bounded (compile_scan_plan (quote scan_recmap)
-			(nth old 1) (nth old 2) (quoted_runtime_list (list key))
-			'('lambda '('__key) '('sql_in '__contribution_keys '__key))
+			(nth old 1) (nth old 2) (quoted_runtime_list (list (if (nil? key) "$recset_contains" key)))
+			(list (quote lambda) (list (quote __key))
+				(if (nil? key) (list (quote __key) candidates)
+					(list (quote sql_in) candidates (quote __key))))
 			(nth old 7) (nth old 8) (nth old 9)))
 		(list (car candidate) (cadr candidate) (nth candidate 2) bounded (quote delta)))))

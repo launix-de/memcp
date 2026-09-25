@@ -33,6 +33,155 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS grc_events"
 
 test_cases:
+  - name: "cache and candidate setup costs keep empty and tiny domains direct"
+    scm: |
+      (map (list group_value_cache_costs invariant_property_cover_costs)
+        (lambda (costs)
+          (map '(0 1 6000) (lambda (rows)
+            (begin
+              (define alternatives (costs rows 1))
+              (planner_cost_clear_winner? (cadr alternatives) (car alternatives)))))))
+    expect:
+      data: [[[false, false, true], [false, false, true]]]
+
+  - name: "Exact aggregate cache choices participate in physical calibration"
+    sql: |
+      EXPLAIN PHYSICAL CALIBRATE DISCOVER
+      SELECT w.id, (SELECT SUM((SELECT x.amount FROM grc_events x WHERE x.id=e.id LIMIT 1))
+        FROM grc_events e WHERE e.tenant_id=w.tenant_id AND e.happened_at>=w.range_from
+          AND e.happened_at<w.range_to) AS total
+      FROM grc_windows w ORDER BY w.id
+    expect:
+      result_contains: ['"decision": "aggregate_point_cache"', '"direct_aggregate"', '"point_cache"']
+      result_not_contains: ['"error"']
+
+  - name: "Forced exact aggregate cache alternatives preserve all results"
+    sql: |
+      EXPLAIN PHYSICAL CALIBRATE
+      SELECT w.id, (SELECT SUM((SELECT x.amount FROM grc_events x WHERE x.id=e.id LIMIT 1))
+        FROM grc_events e WHERE e.tenant_id=w.tenant_id AND e.happened_at>=w.range_from
+          AND e.happened_at<w.range_to) AS total
+      FROM grc_windows w ORDER BY w.id
+    expect:
+      result_contains: ['"decision": "aggregate_point_cache"', '"result_equal": true']
+      result_not_contains: ['"result_equal": false', '"error"']
+
+  - name: "Invariant property candidates expose their physical alternatives"
+    sql: |
+      EXPLAIN PHYSICAL CALIBRATE DISCOVER
+      SELECT w.id, (SELECT SUM(e.amount) FROM grc_events e
+        WHERE (SELECT x.happened_at FROM grc_events x WHERE x.id=e.id LIMIT 1)>=w.range_from) AS total
+      FROM grc_windows w ORDER BY w.id
+    expect:
+      result_contains: ['"decision": "invariant_property_cover"', '"property_candidates"', '"direct_aggregate"']
+      result_not_contains: ['"error"']
+
+  - name: "Forced property candidate plans preserve scalar predicate results"
+    sql: |
+      EXPLAIN PHYSICAL CALIBRATE
+      SELECT w.id, (SELECT SUM(e.amount) FROM grc_events e
+        WHERE (SELECT x.happened_at FROM grc_events x WHERE x.id=e.id LIMIT 1)>=w.range_from) AS total
+      FROM grc_windows w ORDER BY w.id
+    expect:
+      result_contains: ['"decision": "invariant_property_cover"', '"result_equal": true']
+      result_not_contains: ['"result_equal": false', '"error"']
+
+  - name: "aggregate purity distinguishes explicit conversion from clock reads"
+    scm: |
+      (list
+        (contribution_pure_expr? '('unix_timestamp 0))
+        (contribution_pure_expr? (list + 1 2))
+        (contribution_pure_expr? '('unix_timestamp))
+        (contribution_pure_expr? '('sql_not '('equal?? 1 nil)))
+        (contribution_outer_inputs '('format_date 0 "%Y" '('session_globalvar "time_zone")) '()))
+    expect:
+      data: [[true, true, false, true, [["session_globalvar", "time_zone"]]]]
+
+  - name: "computed range bindings include the session timezone"
+    session_id: "grc-point-timezone"
+    setup:
+      - sql: "SET time_zone='UTC'"
+    sql: &zone_range_point_query |
+      SELECT w.id,
+        (SELECT SUM((SELECT x.amount FROM grc_events x WHERE x.id=e.id LIMIT 1))
+         FROM grc_events e WHERE e.tenant_id=w.tenant_id AND e.happened_at>=w.range_from
+           AND e.happened_at<=UNIX_TIMESTAMP(STR_TO_DATE(
+             DATE_FORMAT(FROM_UNIXTIME(w.range_to),'%Y-%m-%d %H:%i:%s'),'%Y-%m-%d %H:%i:%s'))) AS total
+      FROM grc_windows w ORDER BY w.id
+    expect:
+      data: [{id: 1, total: 1000}, {id: 2, total: 1000}, {id: 3, total: 2002}, {id: 4, total: 3002}]
+
+  - name: "changing the timezone separates cached aggregate values"
+    session_id: "grc-point-timezone"
+    setup:
+      - sql: "SET time_zone='+01:00'"
+    sql: *zone_range_point_query
+    expect:
+      data: [{id: 1, total: 4600}, {id: 2, total: 4600}, {id: 3, total: 5000}, {id: 4, total: 6000}]
+
+  - name: "restoring the timezone restores the original aggregate values"
+    session_id: "grc-point-timezone"
+    setup:
+      - sql: "SET time_zone='UTC'"
+    sql: *zone_range_point_query
+    expect:
+      data: [{id: 1, total: 1000}, {id: 2, total: 1000}, {id: 3, total: 2002}, {id: 4, total: 3002}]
+
+  - name: "property candidates lower to native RecSet scan boundaries"
+    scm: |
+      (begin
+        (define source '("e" "memcp-tests" "grc_events" false nil))
+        (define expression '('apply '('get_column "e" false "$recset_contains" false) '('list '__candidates)))
+        (define filter (lower_column_expr_for_alias source expression))
+        (define joined (lower_column_expr_for_join (list source) "e" expression))
+        (if (not (equal? filter joined)) (error "membership callback lowering differs") true)
+        (serialize (compile_scan_plan 'scan_recset nil '('table "memcp-tests" "grc_events")
+          '('quote '("$recset_contains"))
+          (list 'lambda (list recset_contains_callback_symbol) filter))))
+    expect:
+      result_contains: ['scan_boundary "recset"']
+
+  - name: "nested range aggregates expose complete reusable point bindings"
+    sql: |
+      EXPLAIN REORDER SELECT w.id,
+        (SELECT SUM((SELECT x.amount FROM grc_events x WHERE x.id=e.id LIMIT 1))
+         FROM grc_events e WHERE e.tenant_id=w.tenant_id
+           AND e.happened_at>=w.range_from AND e.happened_at<=w.range_to) AS total
+      FROM grc_windows w ORDER BY w.id
+    expect:
+      result_contains: ["stable-aggregate-domain"]
+
+  - name: "nested range aggregate values retain both interval cuts"
+    sql: &nested_range_point_query |
+      SELECT w.id,
+        (SELECT SUM((SELECT x.amount FROM grc_events x WHERE x.id=e.id LIMIT 1))
+         FROM grc_events e WHERE e.tenant_id=w.tenant_id
+           AND e.happened_at>=w.range_from AND e.happened_at<=w.range_to) AS total
+      FROM grc_windows w ORDER BY w.id
+    expect:
+      data: [{id: 1, total: 1000}, {id: 2, total: 1000}, {id: 3, total: 2002}, {id: 4, total: 3002}]
+
+  - name: "nested range aggregate cache distinguishes a changed upper cut"
+    setup:
+      - sql: "UPDATE grc_windows SET range_to=10 WHERE id=1"
+    sql: *nested_range_point_query
+    expect:
+      data: [{id: 1, total: 10}, {id: 2, total: 1000}, {id: 3, total: 2002}, {id: 4, total: 3002}]
+
+  - name: "nested range aggregate cache distinguishes a changed lower cut"
+    setup:
+      - sql: "UPDATE grc_windows SET range_from=4 WHERE id=1"
+    sql: *nested_range_point_query
+    expect:
+      data: [{id: 1, total: 6}, {id: 2, total: 1000}, {id: 3, total: 2002}, {id: 4, total: 3002}]
+
+  - name: "nested range aggregate restores the original interval"
+    setup:
+      - sql: "UPDATE grc_windows SET range_from=0, range_to=1000 WHERE id=1"
+    sql: *nested_range_point_query
+    expect:
+      data: [{id: 1, total: 1000}, {id: 2, total: 1000}, {id: 3, total: 2002}, {id: 4, total: 3002}]
+
   - name: "computed upper cuts retain the driver binding inside ordered range caches"
     sql: |
       SELECT w.id,
@@ -692,7 +841,7 @@ test_cases:
           WHERE h.entity_id=e.id AND h.coordinate<=10 ORDER BY h.coordinate DESC LIMIT 1),d.x)>=d.x) AS total
       FROM grc_state_points d
     expect:
-      result_not_contains: ["make_contribution_snapshot"]
+      result_not_contains: ["make_contribution_snapshot", "snapshot_group_cache"]
 
   - name: "snapshot eligibility rejects volatile aggregate contributions"
     sql: |
@@ -702,7 +851,7 @@ test_cases:
           WHERE h.entity_id=e.id AND h.coordinate<=10 ORDER BY h.coordinate DESC LIMIT 1),d.x)>=d.x) AS total
       FROM grc_state_points d
     expect:
-      result_not_contains: ["make_contribution_snapshot"]
+      result_not_contains: ["make_contribution_snapshot", "snapshot_group_cache"]
 
   - name: "snapshot proof retains unsupported axis-dependent arithmetic as an ordinary plan"
     sql: |
@@ -712,7 +861,7 @@ test_cases:
           WHERE h.entity_id=e.id AND h.coordinate<=10 ORDER BY h.coordinate DESC LIMIT 1),d.x)>=d.x) AS total
       FROM grc_state_points d
     expect:
-      result_not_contains: ["make_contribution_snapshot"]
+      result_not_contains: ["make_contribution_snapshot", "snapshot_group_cache"]
 
   - name: "snapshot SUM falls back for fractional payloads"
     setup:
@@ -792,7 +941,242 @@ test_cases:
         WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.quantity DESC LIMIT 1))
         FROM grc_state_entity e) AS total FROM grc_state_points d
     expect:
-      result_not_contains: ["make_contribution_snapshot"]
+      result_not_contains: ["make_contribution_snapshot", "snapshot_group_cache"]
+
+  - name: "snapshot group cache creates an immutable anchor"
+    scm: |
+      (snapshot_group_cache "grc-shared-snapshot" (lambda () '(1)) nil 0 4 (lambda () '(101))
+        (lambda () '(1 4 2 nil 3 0 4 0)) (lambda (a b) (error "unexpected cover"))
+        (lambda (keys) (error "unexpected delta")) (lambda () (error "unexpected fallback")))
+    expect:
+      data: [4]
+
+  - name: "a separate request reads the retained snapshot without scanning"
+    scm: |
+      (snapshot_group_cache "grc-shared-snapshot" (lambda () '(1)) nil 0 4 (lambda () '(101))
+        (lambda () (error "repeated full scan")) (lambda (a b) (error "repeated cover"))
+        (lambda (keys) (error "repeated delta")) (lambda () (error "unexpected fallback")))
+    expect:
+      data: [4]
+
+  - name: "a separate request derives a new coordinate from a retained anchor"
+    scm: |
+      (snapshot_group_cache "grc-shared-snapshot" (lambda () '(1)) nil 1 4 (lambda () '(101))
+        (lambda () (error "unnecessary full scan")) (lambda (a b) '(1 2))
+        (lambda (keys) '(1 nil 2 -3)) (lambda () (error "unexpected fallback")))
+    expect:
+      data: [-3]
+
+  - name: "reverse requests reuse earlier points without replaying deltas"
+    scm: |
+      (map '(1 0 1) (lambda (x)
+        (snapshot_group_cache "grc-shared-snapshot" (lambda () '(1)) nil x 4 (lambda () '(101))
+          (lambda () (error "repeated full scan")) (lambda (a b) (error "repeated cover"))
+          (lambda (keys) (error "repeated delta")) (lambda () (error "unexpected fallback")))))
+    expect:
+      data: [[-3, 4, -3]]
+
+  - name: "fixed domains and source revisions do not share stale snapshots"
+    scm: |
+      (list
+        (snapshot_group_cache "grc-shared-snapshot" (lambda () '(2)) nil 0 4 (lambda () '(101))
+          (lambda () '(1 17)) (lambda (a b) (error "wrong fixed domain"))
+          (lambda (keys) (error "wrong fixed domain")) (lambda () 99))
+        (snapshot_group_cache "grc-shared-snapshot" (lambda () '(1)) nil 0 4 (lambda () '(102))
+          (lambda () '(1 23)) (lambda (a b) (error "stale revision"))
+          (lambda (keys) (error "stale revision")) (lambda () 99)))
+    expect:
+      data: [[17, 23]]
+
+  - name: "SQL NULL is a retained snapshot result"
+    scm: |
+      (begin
+        (snapshot_group_cache "grc-null-snapshot" (lambda () '()) nil 0 4 (lambda () '(101))
+          (lambda () '(1 nil)) (lambda (a b) '()) (lambda (keys) '()) (lambda () 99))
+        (snapshot_group_cache "grc-null-snapshot" (lambda () '()) nil 0 4 (lambda () '(101))
+          (lambda () (error "NULL snapshot rebuilt")) (lambda (a b) (error "NULL snapshot rescanned"))
+          (lambda (keys) (error "NULL snapshot reevaluated")) (lambda () 99)))
+    expect:
+      data: [null]
+
+  - name: "snapshot overlays retain corrections across successive anchors"
+    scm: |
+      (begin
+        (define next (snapshot_group_cache "grc-shared-snapshot" (lambda () '(1)) nil 2 4 (lambda () '(101))
+          (lambda () (error "unexpected rebuild")) (lambda (a b) '(1))
+          (lambda (keys) '(1 6)) (lambda () 99)))
+        (define final (snapshot_group_cache "grc-shared-snapshot" (lambda () '(1)) nil 3 4 (lambda () '(101))
+          (lambda () (error "unexpected rebuild")) (lambda (a b) '(2))
+          (lambda (keys) '(2 nil)) (lambda () 99)))
+        (list next final))
+    expect:
+      data: [[3, 6]]
+
+  - name: "an evicted full anchor rebuilds while exact points remain usable"
+    scm: |
+      (begin
+        (define domain (concat "grc-shared-snapshot:" (serialize (list '(1) '(101)))))
+        (snapshot_group_bases (snapshot_group_coordinate_key domain 0) nil)
+        (define old (snapshot_group_cache "grc-shared-snapshot" (lambda () '(1)) nil 3 4 (lambda () '(101))
+          (lambda () (error "exact point lost with base")) (lambda (a b) (error "point rescanned"))
+          (lambda (keys) (error "point reevaluated")) (lambda () 99)))
+        (define next (snapshot_group_cache "grc-shared-snapshot" (lambda () '(1)) nil 4 4 (lambda () '(101))
+          (lambda () '(1 7)) (lambda (a b) (error "evicted base used"))
+          (lambda (keys) (error "evicted base used")) (lambda () 99)))
+        (list old next))
+    expect:
+      data: [[6, 7]]
+
+  - name: "concurrent snapshot builders publish equivalent immutable corrections"
+    scm: |
+      (begin
+        (define results (parallelN 32 (lambda (i)
+          (begin
+            (define coordinate (+ 1 (mod i 4)))
+            (snapshot_group_cache "grc-concurrent-snapshot" (lambda () '()) nil coordinate 4 (lambda () '(313))
+              (lambda () (list 1 (* 2 coordinate)))
+              (lambda (lo hi) '(1))
+              (lambda (keys) (list 1 (* 2 coordinate)))
+              (lambda () (error "unexpected concurrent fallback")))))))
+        (list
+          (equal? results (map (produceN 32) (lambda (i) (* 2 (+ 1 (mod i 4))))))
+          (snapshot_group_cache "grc-concurrent-snapshot" (lambda () '()) nil 3 4 (lambda () '(313))
+            (lambda () (error "concurrent point was lost"))
+            (lambda (lo hi) (error "concurrent point was lost"))
+            (lambda (keys) (error "concurrent point was lost"))
+            (lambda () 99))))
+    expect:
+      data: [[true, 6]]
+
+  - name: "large snapshot domains fall back before building state"
+    scm: |
+      (snapshot_group_cache "grc-over-budget" (lambda () '()) nil 0 contribution_snapshot_key_budget (lambda () '(101))
+        (lambda () (error "unadmitted full scan")) (lambda (a b) (error "unadmitted cover"))
+        (lambda (keys) (error "unadmitted delta")) (lambda () 29))
+    expect:
+      data: [29]
+
+  - name: "a changing source view never publishes a snapshot"
+    scm: |
+      (begin
+        (define revision (newsession))
+        (revision "version" 1)
+        (define first (snapshot_group_cache "grc-changing-view" (lambda () '()) nil 0 4
+          (lambda () (list (revision "version")))
+          (lambda () (begin (revision "version" 2) '(1 100)))
+          (lambda (a b) '()) (lambda (keys) '()) (lambda () 31)))
+        (define next (snapshot_group_cache "grc-changing-view" (lambda () '()) nil 0 4 (lambda () '(1))
+          (lambda () '(1 37)) (lambda (a b) (error "partial state retained"))
+          (lambda (keys) (error "partial state retained")) (lambda () 99)))
+        (list first next))
+    expect:
+      data: [[31, 37]]
+
+  - name: "explicit transactions do not consume shared snapshot points"
+    scm: |
+      (map (list tx_begin tx_begin_acid) (lambda (start)
+        (begin
+          (define session (newsession))
+          (start session)
+          (define value (snapshot_group_cache "grc-shared-snapshot" (lambda () '(1))
+            (session "__memcp_tx") 3 4 (lambda () '(101))
+            (lambda () (error "transaction published a shared anchor"))
+            (lambda (a b) (error "transaction used a shared cover"))
+            (lambda (keys) (error "transaction used a shared delta")) (lambda () 41)))
+          (tx_rollback session)
+          value)))
+    expect:
+      data: [[41, 41]]
+
+  - name: "point-domain aggregate cache reuses exact values across requests"
+    scm: |
+      (group_cache_value "grc-point-cache" (lambda () '(7 11)) nil (lambda () '(17)) (lambda () 43))
+    expect:
+      data: [43]
+
+  - name: "point-domain aggregate hit does not execute its producer"
+    scm: |
+      (group_cache_value "grc-point-cache" (lambda () '(7 11)) nil (lambda () '(17))
+        (lambda () (error "retained aggregate was recomputed")))
+    expect:
+      data: [43]
+
+  - name: "point-domain aggregate cache separates bindings and revisions"
+    scm: |
+      (list
+        (group_cache_value "grc-point-cache" (lambda () '(7 12)) nil (lambda () '(17)) (lambda () 47))
+        (group_cache_value "grc-point-cache" (lambda () '(7 11)) nil (lambda () '(18)) (lambda () nil))
+        (group_cache_value "grc-point-cache" (lambda () '(7 11)) nil (lambda () '(18))
+          (lambda () (error "cached NULL was recomputed"))))
+    expect:
+      data: [[47, null, null]]
+
+  - name: "point-domain cache does not publish across source revision changes"
+    scm: |
+      (begin
+        (define revision (newsession))
+        (revision "value" 71)
+        (define first (group_cache_value "grc-point-changing-view" (lambda () '(1)) nil
+          (lambda () (list (revision "value")))
+          (lambda () (begin (revision "value" 73) 79))))
+        (define second (group_cache_value "grc-point-changing-view" (lambda () '(1)) nil
+          (lambda () '(71)) (lambda () 83)))
+        (list first second))
+    expect:
+      data: [[79, 83]]
+
+  - name: "source changes during point binding cannot reuse or publish an old view"
+    scm: |
+      (begin
+        (define version (newsession))
+        (version "value" 17)
+        (define first (group_cache_value "grc-point-cache"
+          (lambda () (begin (version "value" 19) '(7 11))) nil
+          (lambda () (list (version "value"))) (lambda () 89)))
+        (define old (group_cache_value "grc-point-cache" (lambda () '(7 11)) nil
+          (lambda () '(17)) (lambda () (error "old immutable point was lost"))))
+        (list first old))
+    expect:
+      data: [[89, 43]]
+
+  - name: "point-domain aggregate caches bypass explicit transactions"
+    scm: |
+      (map (list tx_begin tx_begin_acid) (lambda (start)
+        (begin
+          (define session (newsession))
+          (start session)
+          (define point (group_cache_value "grc-point-cache" (lambda () '(7 11)) (session "__memcp_tx")
+            (lambda () '(17)) (lambda () 59)))
+          (tx_rollback session)
+          point)))
+    expect:
+      data: [[59, 59]]
+
+  - name: "failed snapshot preparation leaves no shared partial state"
+    scm: |
+      (begin
+        (define failed (try (lambda ()
+          (snapshot_group_cache "grc-failed-build" (lambda () '()) nil 5 4 (lambda () '(101))
+            (lambda () (error "stopped preparation")) (lambda (lo hi) '())
+            (lambda (keys) '()) (lambda () 99))) (lambda (err) "stopped")))
+        (define next (snapshot_group_cache "grc-failed-build" (lambda () '()) nil 5 4 (lambda () '(101))
+          (lambda () '(1 97)) (lambda (lo hi) (error "partial anchor survived"))
+          (lambda (keys) (error "partial anchor survived")) (lambda () 99)))
+        (list failed next))
+    expect:
+      data: [["stopped", 97]]
+
+  - name: "failed exact aggregate preparation is not cached"
+    scm: |
+      (begin
+        (define failed (try (lambda ()
+          (group_cache_value "grc-failed-point" (lambda () '(1)) nil (lambda () '(101))
+            (lambda () (error "stopped preparation")))) (lambda (err) "stopped")))
+        (define next (group_cache_value "grc-failed-point" (lambda () '(1)) nil
+          (lambda () '(101)) (lambda () 103)))
+        (list failed next))
+    expect:
+      data: [["stopped", 103]]
 
   - name: "snapshot formulas still reject unknown columns"
     sql: |
