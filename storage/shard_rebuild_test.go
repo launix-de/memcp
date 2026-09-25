@@ -2551,3 +2551,34 @@ func TestCacheShardCleanupAdvancesDataGeneration(t *testing.T) {
 		t.Fatalf("cache generation = %d, want %d", got, before+1)
 	}
 }
+
+// A computed column is a table-wide definition, including shards created after
+// the first materialization. A fresh cache shard must compute its appended rows.
+func TestNewShardRetainsComputedColumnDefinition(t *testing.T) {
+	for _, engine := range []PersistencyMode{Memory, Cache} {
+		t.Run(fmt.Sprint(engine), func(t *testing.T) {
+			tbl := &table{Name: "computed_growth", PersistencyMode: engine,
+				Columns: []*column{
+					{Name: "input"},
+					{Name: "computed", ComputorInputCols: []string{"input"},
+						Computor: scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+							return scm.NewInt(int64(2 * scm.ToInt(args[0])))
+						})},
+				}}
+			shard := NewShard(tbl)
+			// Construction remains private until the reader acquires its rights.
+			shard.deltaColumns["input"] = 0
+			shard.inserts = [][]scm.Scmer{{scm.NewInt(7)}, {scm.NewInt(11)}}
+			release := shard.GetRead()
+			defer release()
+			reader := shard.ColumnReaderTx(nil, "computed", false)
+			shard.mu.RLock()
+			defer shard.mu.RUnlock()
+			for i, want := range []int{14, 22} {
+				if got := reader(uint32(i)); got.IsNil() || scm.ToInt(got) != want {
+					t.Fatalf("new shard computed row %d = %v, want %d", i, got, want)
+				}
+			}
+		})
+	}
+}

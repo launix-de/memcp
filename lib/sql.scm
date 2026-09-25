@@ -536,41 +536,52 @@ user table merely to discard a newly constructed policy closure. */
 					exact_shape (sql_parameterize_select_literals query true)))))
 		(match parameterized '(parse_query bindings shape_hash) (begin
 			(define cache_key (sql_queryplan_cache_key username schema parse_query shape_hash))
-			(define select_query (match (toUpper parse_query)
-				(regex "^\\s*SELECT\\b" _) true
-				_ false))
-			/* EXPLAIN captures planning statistics and needs their invalidation too.
-			Ordinary point and ordered scans retain the smaller exact cache path. */
-			(define guarded_query (or explain_query (and select_query
-				(match (toUpper parse_query)
-					(regex "\\b(?:LIKE|MATCH|JOIN|EXISTS|IN)\\b|\\(\\s*SELECT\\b" _) true
-					_ false))))
-			(define compile_diagnostic (match (toUpper parse_query)
+			(define compile_diagnostic (and explain_query (match (toUpper parse_query)
 				(regex "^\\s*EXPLAIN\\s+COMPILE\\b" _) true
-				_ false))
+				_ false)))
 			(if (not (equal? bindings '()))
 				(reduce (produceN (count bindings)) (lambda (_ idx)
 					(session (concat "v" (string (+ idx 1))) (nth bindings idx))) nil)
 				nil)
 			/* Compile diagnostics measure true misses and must not turn their own
 			previous result into a cache hit. The inspected query is never run. */
-			(define exact_compile (lambda (compile_tx)
+			/* A hit needs only the retained dispatcher. Construct miss producers
+			after this lookup; get_or_compute still serializes concurrent misses. */
+			(define cached_entry (if compile_diagnostic nil (queryplan_cache cache_key)))
+			(define formula (if (not (nil? cached_entry))
+				/* Guarded entries retain (entry dispatcher); exact entries are
+				compiled procedures. Their dispatchers still evaluate every guard. */
+				(if (list? cached_entry) (cadr cached_entry) cached_entry)
 				(begin
-					(define resolved_policy (sql_policy_spec_resolve policy))
-					(define compile_policy (sql_compile_table_policy resolved_policy))
-					(sql_queryplan_compile_formula compile_tx (sql_queryplan_bind_tx_calls
-						(sql_queryplan_bind_execution_session
-							(with_session session (lambda ()
-								(sql_invoke_parse_fn parse_fn schema parse_query compile_policy session compile_tx)))))))))
-			(define formula (if (or compile_diagnostic (not guarded_query))
-				(if compile_diagnostic
-					(exact_compile tx)
-					(queryplan_cache "get_or_compute" cache_key tx exact_compile))
-				(begin
-					(define cached_entry (queryplan_cache "get_or_compute" cache_key tx
-						(lambda (compile_tx) (sql_queryplan_new_entry queryplan_cache cache_key parse_fn schema parse_query
-							(sql_policy_spec_resolve policy) session compile_tx))))
-					(cadr cached_entry))))
+					(define select_query (match (toUpper parse_query)
+						(regex "^\\s*SELECT\\b" _) true
+						_ false))
+					/* EXPLAIN captures planning statistics and needs their invalidation too.
+					Ordinary point and ordered scans retain the smaller exact cache path. */
+					(define guarded_query (or explain_query (and select_query
+						(match (toUpper parse_query)
+							(regex "\\b(?:LIKE|MATCH|JOIN|EXISTS|IN)\\b|\\(\\s*SELECT\\b" _) true
+							_ false))))
+					(if (or compile_diagnostic (not guarded_query))
+						(begin
+							/* Build the exact-cache compiler only for its own branch. Guarded
+							cache hits must not repeatedly optimize an unused closure. */
+							(define exact_compile (lambda (compile_tx)
+								(begin
+									(define resolved_policy (sql_policy_spec_resolve policy))
+									(define compile_policy (sql_compile_table_policy resolved_policy))
+									(sql_queryplan_compile_formula compile_tx (sql_queryplan_bind_tx_calls
+										(sql_queryplan_bind_execution_session
+											(with_session session (lambda ()
+												(sql_invoke_parse_fn parse_fn schema parse_query compile_policy session compile_tx)))))))))
+							(if compile_diagnostic
+								(exact_compile tx)
+								(queryplan_cache "get_or_compute" cache_key tx exact_compile)))
+						(begin
+							(define cached_entry (queryplan_cache "get_or_compute" cache_key tx
+								(lambda (compile_tx) (sql_queryplan_new_entry queryplan_cache cache_key parse_fn schema parse_query
+									(sql_policy_spec_resolve policy) session compile_tx))))
+							(cadr cached_entry))))))
 			formula)))))
 
 (define sql_execute_formula (lambda (session tx formula resultrow resultfields)

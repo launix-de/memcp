@@ -338,9 +338,7 @@ test_cases:
     expect:
       rows: 1
       result_occurrences:
-        - text: "createtable"
-          count: 1
-        - text: "touch_keytable"
+        - text: "(group_cache_create"
           count: 1
       result_contains:
         - "item_count"
@@ -372,9 +370,7 @@ test_cases:
     expect:
       rows: 1
       result_occurrences:
-        - text: "createtable"
-          count: 1
-        - text: "touch_keytable"
+        - text: "(group_cache_create"
           count: 1
       result_contains:
         - "direct_access"
@@ -993,7 +989,7 @@ test_cases:
     expect:
       rows: 1
       result_contains:
-        - "touch_keytable"
+        - "group_cache_create"
         - ".grp:"
   - name: "Presence predicates remain before root limit"
     sql: |

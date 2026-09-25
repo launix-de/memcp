@@ -100,7 +100,7 @@ test_cases:
     expect:
       rows: 1
       contains:
-        - "touch_keytable"
+        - "group_cache_create"
         - "createcolumn"
         - ".grp:sc_base:"
 
@@ -109,7 +109,7 @@ test_cases:
     expect:
       rows: 1
       result_occurrences:
-        - text: "touch_keytable"
+        - text: "(group_cache_create "
           count: 1
       result_not_contains:
         - "(show"
@@ -201,7 +201,7 @@ test_cases:
     expect:
       rows: 1
       contains:
-        - "touch_keytable"
+        - "group_cache_create"
         - "createcolumn"
         - ".grp:sc_base:"
 
@@ -270,7 +270,7 @@ test_cases:
     expect:
       rows: 1
       contains:
-        - "touch_keytable"
+        - "group_cache_create"
         - "createcolumn"
         - ".grp:sc_base:"
 

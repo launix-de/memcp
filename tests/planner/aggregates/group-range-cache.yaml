@@ -29,11 +29,220 @@ setup:
         (rebuild)
         true)
 
+  - sql: "DROP TABLE IF EXISTS grc_mixed_entity"
+  - sql: "DROP TABLE IF EXISTS grc_mixed_history"
+  - sql: "CREATE TABLE grc_mixed_entity (id INT PRIMARY KEY, category INT, amount INT) ENGINE=memory"
+  - sql: "CREATE TABLE grc_mixed_history (id INT PRIMARY KEY, entity_id INT, coordinate INT, quantity INT, UNIQUE KEY entity_coordinate(entity_id,coordinate)) ENGINE=memory"
+  - sql: "INSERT INTO grc_mixed_entity VALUES (1,1,5),(2,1,15),(3,2,25)"
+  - sql: "INSERT INTO grc_mixed_history VALUES (1,1,0,10),(2,2,0,20),(3,3,0,30),(4,2,15,40)"
+  - scm: |
+      (begin
+        (insert (table "memcp-tests" "grc_mixed_entity") '("id" "category" "amount")
+          (map (produceN 4000) (lambda (i) (list (+ i 10) 1 (mod i 30)))))
+        (rebuild (table "memcp-tests" "grc_mixed_entity"))
+        (rebuild (table "memcp-tests" "grc_mixed_history")) true)
+
+  - scm: |
+      (globalvars "__test_group_cache_cells" (lambda (query binding)
+        (begin
+          (define request (newsession))
+          (request (car binding) (cadr binding))
+          (define shape (sql_parameterize_select_literals query true))
+          (mapIndex (cadr shape) (lambda (i value) (request (concat "v" (+ i 1)) value)))
+          (define plan (with_session request (lambda () (parse_sql "memcp-tests" (car shape) nil request nil))))
+          (define collect (lambda (node)
+            (match node
+              ((symbol group_cache_execute) ((symbol quote) cache) _threshold _tx _direct _cached _retain) (list cache)
+              ((symbol group_cache_point) ((symbol quote) cache) _payload _threshold _point_values _tx _read_view _producer) (list cache)
+              (cons head tail) (merge (map node collect))
+              _ '())))
+          (define caches (merge_unique (list (collect plan))))
+          (sort (map caches (lambda (cache)
+            (list (group_cache_relation cache)
+              (if (nil? (table (group_cache_schema cache) (group_cache_relation cache))) 0
+                (scan_estimate (table (group_cache_schema cache) (group_cache_relation cache)))))))
+            (lambda (a b) (< (car a) (car b)))))))
+  - scm: |
+      (globalvars "__test_group_cache_warm" (lambda (query binding)
+        (begin
+          (define request (newsession))
+          (request (car binding) (cadr binding))
+          (define formula (cached_parse (newcachemap) (list parse_sql) "memcp-tests" query nil "root" request true nil))
+          (define warm (lambda (remaining)
+            (begin
+              (define cells ((globalvars "__test_group_cache_cells") query binding))
+              (if (and (not (empty_list? cells)) (reduce cells (lambda (ok cell) (and ok (> (cadr cell) 0))) true)) true
+                (if (<= remaining 0) (error (concat "group cache was not admitted: " (serialize cells)))
+                  (begin
+                    (with_autocommit request nil 0 query (lambda (tx)
+                      (sql_execute_formula request tx formula (lambda (row) true) (lambda (fields) true))))
+                    (warm (- remaining 1))))))))
+          (warm 256))))
 cleanup:
+  - sql: "DROP TABLE IF EXISTS grc_mixed_history"
+  - sql: "DROP TABLE IF EXISTS grc_mixed_entity"
+
   - sql: "DROP TABLE IF EXISTS grc_windows"
   - sql: "DROP TABLE IF EXISTS grc_events"
 
 test_cases:
+  - name: "One group cache relation stores point range and snapshot coordinates"
+    scm: |
+      (begin
+        (define cache (make_group_cache 'group-keytable "memcp-tests" ".grp:mixed-dimensions"
+          (list (list 'point 'tenant) (list 'range-domain 'amount) (list 'snapshot 'revision))))
+        (group_cache_ensure_cells cache "agg_total" nil)
+        (group_cache_write_cell cache '(7 0 10 0 20 100) '(1) "agg_total" (list 100 (list) (list 30 2 30) 2 (list 1 10 2 20)) nil)
+        (group_cache_write_cell cache '(8 0 10 0 20 100) '(1) "agg_total" (list 100 (list) (list 90 1 90) 1 (list 3 90)) nil)
+        (and
+          (equal? (group_cache_dimension_names cache) '("k0" "range_from_kind" "range_from" "range_to_kind" "range_to" "snapshot_0"))
+          (equal? (group_cache_read_cell cache '(7 0 10 0 20 100) '(1) "agg_total" nil) (list 100 (list) (list 30 2 30) 2 (list 1 10 2 20)))
+          (nil? (group_cache_read_cell cache '(7 0 10 0 21 100) '(1) "agg_total" nil))
+          (nil? (group_cache_read_cell cache '(7 0 10 0 20 100) '(2) "agg_total" nil))))
+    expect:
+      result: true
+
+  - name: "Snapshot payloads are columns of the same multidimensional relation"
+    scm: |
+      (begin
+        (define cache (make_group_cache 'group-keytable "memcp-tests" ".grp:mixed-dimensions"
+          (list (list 'point 'tenant) (list 'range-domain 'amount) (list 'snapshot 'revision))))
+        (group_cache_ensure_cells cache "agg_other" nil)
+        (group_cache_write_cell cache '(7 0 10 0 20 100) '(1) "agg_other" (list 100 (list) (list 5 1 5) 1 (list 1 5)) nil)
+        (and
+          (equal? (nth (group_cache_read_cell cache '(7 0 10 0 20 100) '(1) "agg_total" nil) 2) '(30 2 30))
+          (equal? (nth (group_cache_read_cell cache '(7 0 10 0 20 100) '(1) "agg_other" nil) 2) '(5 1 5))))
+    expect:
+      result: true
+
+  - name: "Group cache candidates defer the first materialization"
+    scm: |
+      (begin
+        (define cache (make_group_cache 'group-keytable "memcp-tests" ".grp:admission-snapshot" (list (list 'snapshot 0))))
+        (define first (group_cache_execute cache 1 nil (lambda () 17) (lambda () (error "first use built a cache")) nil))
+        (and (equal? first 17)
+          (nil? (table "memcp-tests" ".grp:admission-snapshot"))
+          (group_cache_work_paid? nil ".grp:admission-snapshot" 1)))
+    expect:
+      result: true
+
+  - name: "Paid work materializes through the shared group cache path"
+    scm: |
+      (begin
+        (define cache (make_group_cache 'group-keytable "memcp-tests" ".grp:admission-snapshot" (list (list 'snapshot 0))))
+        (define value (group_cache_execute cache 1 nil (lambda () (error "paid work was ignored"))
+          (lambda () (begin
+            (group_cache_ensure_cells cache "agg_sum" nil)
+            (group_cache_write_cell cache '(0) '(1) "agg_sum" '(17) nil)
+            17))) nil))
+        (and (equal? value 17)
+          (equal? (group_cache_read_cell cache '(0) '(1) "agg_sum" nil) '(17))
+          (not (group_cache_work_paid? nil ".grp:admission-snapshot" 1))))
+    expect:
+      result: true
+
+  - name: "Paid scalar admission retains the direct result without evaluating it again"
+    scm: |
+      (begin
+        (define cache (make_group_cache 'group-keytable "memcp-tests" ".grp:admission-point" (list (list 'point 'k))))
+        (define calls (newsession))
+        (calls "count" 0)
+        (define value (group_cache_point cache "agg_value" 1 (lambda () '(7)) nil (lambda () '(1))
+          (lambda () (begin (calls "count" (+ (calls "count") 1)) 17))))
+        (and (equal? value 17) (equal? (calls "count") 1)
+          (equal? (group_cache_point cache "agg_value" 1 (lambda () '(7)) nil (lambda () '(1))
+            (lambda () (error "retained scalar was recomputed"))) 17)
+          (not (group_cache_work_paid? nil ".grp:admission-point" 1))))
+    expect:
+      result: true
+
+  - name: "Unpaid scalar work leaves only a group cache candidate"
+    scm: |
+      (begin
+        (define cache (make_group_cache 'group-keytable "memcp-tests" ".grp:unpaid-point" (list (list 'point 'k))))
+        (define value (group_cache_point cache "agg_value" 1000000000000 (lambda () '(7)) nil (lambda () '(1)) (lambda () 17)))
+        (and (equal? value 17) (nil? (table "memcp-tests" ".grp:unpaid-point"))
+          (group_cache_work_paid? nil ".grp:unpaid-point" 1)))
+    expect:
+      result: true
+
+  - name: "Paid scalar admission cannot publish a result under a changed source view"
+    scm: |
+      (begin
+        (define cache (make_group_cache 'group-keytable "memcp-tests" ".grp:changed-admission-point" (list (list 'point 'k))))
+        (define state (newsession))
+        (state "revision" 1)
+        (define value (group_cache_point cache "agg_value" 1 (lambda () '(7)) nil
+          (lambda () (list (state "revision")))
+          (lambda () (begin (state "revision" 2) 17))))
+        (and (equal? value 17) (nil? (table "memcp-tests" ".grp:changed-admission-point"))))
+    expect:
+      result: true
+
+  - name: "Mixed domains amortize one cold execution over five further executions"
+    sql: &mixed_domain_query |
+      SELECT p.category,d.lo,d.hi,d.x,
+        (SELECT SUM((SELECT h.quantity FROM grc_mixed_history h
+          WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1))
+         FROM grc_mixed_entity e WHERE e.category=p.category AND e.amount>=d.lo AND e.amount<d.hi) AS total
+      FROM (SELECT 1 AS category UNION ALL SELECT 2) p
+      CROSS JOIN (SELECT 0 AS lo,20 AS hi,10 AS x UNION ALL SELECT 10,30,20) d
+
+    expect: &mixed_domain_result
+      data: [{category: 1, lo: 0, hi: 20, x: 10, total: 30}, {category: 1, lo: 10, hi: 30, x: 20, total: 40}, {category: 2, lo: 0, hi: 20, x: 10, total: null}, {category: 2, lo: 10, hi: 30, x: 20, total: 30}]
+    timing_aggregation: total
+    warmup: 0
+    timing_samples: 6
+    threshold_ms: 10000
+
+  - name: "SQL combines equality range and selected-state snapshot domains"
+    sql: *mixed_domain_query
+    expect: *mixed_domain_result
+
+  - name: "Repeated mixed domains retain SQL results after admission"
+    setup:
+      - scm: |
+          ((globalvars "__test_group_cache_warm") "SELECT p.category,d.lo,d.hi,d.x,\n  (SELECT SUM((SELECT h.quantity FROM grc_mixed_history h\n    WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1))\n   FROM grc_mixed_entity e WHERE e.category=p.category AND e.amount>=d.lo AND e.amount<d.hi) AS total\nFROM (SELECT 1 AS category UNION ALL SELECT 2) p\nCROSS JOIN (SELECT 0 AS lo,20 AS hi,10 AS x UNION ALL SELECT 10,30,20) d\n" '("unused" 0))
+    sql: *mixed_domain_query
+    expect: *mixed_domain_result
+
+  - name: "SQL materializes all three dimensions in the same group table"
+    scm: |
+      (begin
+        (define cells ((globalvars "__test_group_cache_cells") "SELECT p.category,d.lo,d.hi,d.x,\n  (SELECT SUM((SELECT h.quantity FROM grc_mixed_history h\n    WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1))\n   FROM grc_mixed_entity e WHERE e.category=p.category AND e.amount>=d.lo AND e.amount<d.hi) AS total\nFROM (SELECT 1 AS category UNION ALL SELECT 2) p\nCROSS JOIN (SELECT 0 AS lo,20 AS hi,10 AS x UNION ALL SELECT 10,30,20) d\n" '("unused" 0)))
+        (and (not (empty_list? cells))
+          (reduce cells (lambda (found cell)
+            (or found (and (> (cadr cell) 0)
+              (not (nil? (resolve_column_name "memcp-tests" (car cell) "k0" false)))
+              (not (nil? (resolve_column_name "memcp-tests" (car cell) "range_from_kind" false)))
+              (not (nil? (resolve_column_name "memcp-tests" (car cell) "snapshot_0" false)))))) false)))
+    expect:
+      result: true
+
+  - name: "Mixed domain lowering includes the common cell partition and snapshot probe"
+    sql: *mixed_domain_query
+    explain: true
+    expect:
+      contains: [group_cache_execute, snapshot_group_cache, snapshot_0, range_from_kind]
+      not_contains: [snapshot_group_points, snapshot_group_bases]
+
+  - name: "Refined range cells combine at a later snapshot coordinate"
+    sql: |
+      SELECT p.category,d.x,(SELECT SUM((SELECT h.quantity FROM grc_mixed_history h
+        WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1))
+        FROM grc_mixed_entity e WHERE e.category=p.category AND e.amount>=d.lo AND e.amount<d.hi) AS total
+      FROM (SELECT 1 AS category UNION ALL SELECT 2) p
+      CROSS JOIN (SELECT 0 AS lo,30 AS hi,21 AS x UNION ALL SELECT 0,30,11) d
+    expect:
+      data: [{category: 1, x: 21, total: 50}, {category: 1, x: 11, total: 30}, {category: 2, x: 21, total: 30}, {category: 2, x: 11, total: 30}]
+
+  - name: "Changing a dependency invalidates every mixed-domain aggregate cell"
+    setup:
+      - sql: "UPDATE grc_mixed_history SET quantity=60 WHERE id=4"
+    sql: *mixed_domain_query
+    expect:
+      data: [{category: 1, lo: 0, hi: 20, x: 10, total: 30}, {category: 1, lo: 10, hi: 30, x: 20, total: 60}, {category: 2, lo: 0, hi: 20, x: 10, total: null}, {category: 2, lo: 10, hi: 30, x: 20, total: 30}]
+
   - name: "constant parameter filters remove unused scalar lookup sources"
     scm: |
       (begin
@@ -125,7 +334,8 @@ test_cases:
   - name: "nested scalar COUNT contributes complete reusable aggregate dependencies"
     session_id: "grc-nested-count"
     setup:
-      - scm: '(globalvars "__test_grc_count-before" (count (group_value_cache)))'
+      - scm: |
+          (globalvars "__test_grc_count-before" ((globalvars "__test_group_cache_cells") "SELECT p.cut,(SELECT SUM((SELECT x.amount FROM grc_events x WHERE x.id=e.id LIMIT 1)) FROM grc_events e\n  WHERE (SELECT COUNT(*) FROM grc_windows c WHERE c.tenant_id=e.tenant_id)>p.cut) AS total\nFROM (SELECT 1 AS cut UNION ALL SELECT 2) p ORDER BY p.cut\n" '("unused" 0)))
     sql: &nested_count_query |
       SELECT p.cut,(SELECT SUM((SELECT x.amount FROM grc_events x WHERE x.id=e.id LIMIT 1)) FROM grc_events e
         WHERE (SELECT COUNT(*) FROM grc_windows c WHERE c.tenant_id=e.tenant_id)>p.cut) AS total
@@ -136,7 +346,10 @@ test_cases:
   - name: "nested scalar COUNT reuses exact aggregate points"
     session_id: "grc-nested-count"
     setup:
-      - scm: '(globalvars "__test_grc_count-after" (count (group_value_cache)))'
+      - scm: |
+          (begin
+            ((globalvars "__test_group_cache_warm") "SELECT p.cut,(SELECT SUM((SELECT x.amount FROM grc_events x WHERE x.id=e.id LIMIT 1)) FROM grc_events e\n  WHERE (SELECT COUNT(*) FROM grc_windows c WHERE c.tenant_id=e.tenant_id)>p.cut) AS total\nFROM (SELECT 1 AS cut UNION ALL SELECT 2) p ORDER BY p.cut\n" '("unused" 0))
+            (globalvars "__test_grc_count-after" ((globalvars "__test_group_cache_cells") "SELECT p.cut,(SELECT SUM((SELECT x.amount FROM grc_events x WHERE x.id=e.id LIMIT 1)) FROM grc_events e\n  WHERE (SELECT COUNT(*) FROM grc_windows c WHERE c.tenant_id=e.tenant_id)>p.cut) AS total\nFROM (SELECT 1 AS cut UNION ALL SELECT 2) p ORDER BY p.cut\n" '("unused" 0))))
     sql: *nested_count_query
     expect: *nested_count_result
 
@@ -145,7 +358,7 @@ test_cases:
     scm: |
       (begin
         (define __snapshot_test_actual
-          (and (> (globalvars "__test_grc_count-after") (globalvars "__test_grc_count-before")) (equal? (globalvars "__test_grc_count-after") (count (group_value_cache))))
+          (and (> (reduce (globalvars "__test_grc_count-after") (lambda (n cell) (+ n (cadr cell))) 0) 0) (equal? (globalvars "__test_grc_count-after") ((globalvars "__test_group_cache_cells") "SELECT p.cut,(SELECT SUM((SELECT x.amount FROM grc_events x WHERE x.id=e.id LIMIT 1)) FROM grc_events e\n  WHERE (SELECT COUNT(*) FROM grc_windows c WHERE c.tenant_id=e.tenant_id)>p.cut) AS total\nFROM (SELECT 1 AS cut UNION ALL SELECT 2) p ORDER BY p.cut\n" '("unused" 0))))
         )
         (globalvars "__test_grc_count-before" nil)
         (globalvars "__test_grc_count-after" nil)
@@ -1141,7 +1354,7 @@ test_cases:
     scm: |
       (begin
         (define __snapshot_test_actual
-          (snapshot_group_cache "grc-shared-snapshot" (lambda () '(1)) nil 0 4 (lambda () '(101))
+          (snapshot_group_cache (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-shared-snapshot" (list (list 'point 0) (list 'snapshot 0))) "agg_sum" (lambda () '(1)) nil 0 4 (lambda () '(101))
             (lambda () '(1 4 2 nil 3 0 4 0)) (lambda (a b) (error "unexpected cover"))
             (lambda (keys) (error "unexpected delta")) (lambda () (error "unexpected fallback")))
         )
@@ -1155,7 +1368,7 @@ test_cases:
     scm: |
       (begin
         (define __snapshot_test_actual
-          (snapshot_group_cache "grc-shared-snapshot" (lambda () '(1)) nil 0 4 (lambda () '(101))
+          (snapshot_group_cache (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-shared-snapshot" (list (list 'point 0) (list 'snapshot 0))) "agg_sum" (lambda () '(1)) nil 0 4 (lambda () '(101))
             (lambda () (error "repeated full scan")) (lambda (a b) (error "repeated cover"))
             (lambda (keys) (error "repeated delta")) (lambda () (error "unexpected fallback")))
         )
@@ -1169,7 +1382,7 @@ test_cases:
     scm: |
       (begin
         (define __snapshot_test_actual
-          (snapshot_group_cache "grc-shared-snapshot" (lambda () '(1)) nil 1 4 (lambda () '(101))
+          (snapshot_group_cache (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-shared-snapshot" (list (list 'point 0) (list 'snapshot 0))) "agg_sum" (lambda () '(1)) nil 1 4 (lambda () '(101))
             (lambda () (error "unnecessary full scan")) (lambda (a b) '(1 2))
             (lambda (keys) '(1 nil 2 -3)) (lambda () (error "unexpected fallback")))
         )
@@ -1184,7 +1397,7 @@ test_cases:
       (begin
         (define __snapshot_test_actual
           (map '(1 0 1) (lambda (x)
-            (snapshot_group_cache "grc-shared-snapshot" (lambda () '(1)) nil x 4 (lambda () '(101))
+            (snapshot_group_cache (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-shared-snapshot" (list (list 'point 0) (list 'snapshot 0))) "agg_sum" (lambda () '(1)) nil x 4 (lambda () '(101))
               (lambda () (error "repeated full scan")) (lambda (a b) (error "repeated cover"))
               (lambda (keys) (error "repeated delta")) (lambda () (error "unexpected fallback")))))
         )
@@ -1199,10 +1412,10 @@ test_cases:
       (begin
         (define __snapshot_test_actual
           (list
-            (snapshot_group_cache "grc-shared-snapshot" (lambda () '(2)) nil 0 4 (lambda () '(101))
+            (snapshot_group_cache (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-shared-snapshot" (list (list 'point 0) (list 'snapshot 0))) "agg_sum" (lambda () '(2)) nil 0 4 (lambda () '(101))
               (lambda () '(1 17)) (lambda (a b) (error "wrong fixed domain"))
               (lambda (keys) (error "wrong fixed domain")) (lambda () 99))
-            (snapshot_group_cache "grc-shared-snapshot" (lambda () '(1)) nil 0 4 (lambda () '(102))
+            (snapshot_group_cache (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-shared-snapshot" (list (list 'point 0) (list 'snapshot 0))) "agg_sum" (lambda () '(1)) nil 0 4 (lambda () '(102))
               (lambda () '(1 23)) (lambda (a b) (error "stale revision"))
               (lambda (keys) (error "stale revision")) (lambda () 99)))
         )
@@ -1217,9 +1430,9 @@ test_cases:
       (begin
         (define __snapshot_test_actual
           (begin
-            (snapshot_group_cache "grc-null-snapshot" (lambda () '()) nil 0 4 (lambda () '(101))
+            (snapshot_group_cache (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-null-snapshot" (list (list 'snapshot 0))) "agg_sum" (lambda () '()) nil 0 4 (lambda () '(101))
               (lambda () '(1 nil)) (lambda (a b) '()) (lambda (keys) '()) (lambda () 99))
-            (snapshot_group_cache "grc-null-snapshot" (lambda () '()) nil 0 4 (lambda () '(101))
+            (snapshot_group_cache (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-null-snapshot" (list (list 'snapshot 0))) "agg_sum" (lambda () '()) nil 0 4 (lambda () '(101))
               (lambda () (error "NULL snapshot rebuilt")) (lambda (a b) (error "NULL snapshot rescanned"))
               (lambda (keys) (error "NULL snapshot reevaluated")) (lambda () 99)))
         )
@@ -1234,10 +1447,10 @@ test_cases:
       (begin
         (define __snapshot_test_actual
           (begin
-            (define next (snapshot_group_cache "grc-shared-snapshot" (lambda () '(1)) nil 2 4 (lambda () '(101))
+            (define next (snapshot_group_cache (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-shared-snapshot" (list (list 'point 0) (list 'snapshot 0))) "agg_sum" (lambda () '(1)) nil 2 4 (lambda () '(101))
               (lambda () (error "unexpected rebuild")) (lambda (a b) '(1))
               (lambda (keys) '(1 6)) (lambda () 99)))
-            (define final (snapshot_group_cache "grc-shared-snapshot" (lambda () '(1)) nil 3 4 (lambda () '(101))
+            (define final (snapshot_group_cache (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-shared-snapshot" (list (list 'point 0) (list 'snapshot 0))) "agg_sum" (lambda () '(1)) nil 3 4 (lambda () '(101))
               (lambda () (error "unexpected rebuild")) (lambda (a b) '(2))
               (lambda (keys) '(2 nil)) (lambda () 99)))
             (list next final))
@@ -1253,12 +1466,14 @@ test_cases:
       (begin
         (define __snapshot_test_actual
           (begin
-            (define domain (concat "grc-shared-snapshot:" (serialize (list '(1) '(101)))))
-            (snapshot_group_bases (snapshot_group_coordinate_key domain 0) nil)
-            (define old (snapshot_group_cache "grc-shared-snapshot" (lambda () '(1)) nil 3 4 (lambda () '(101))
+            (define cache (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-shared-snapshot" (list (list 'point 0) (list 'snapshot 0))))
+            (define base (group_cache_read_cell cache '(1 0) '(101) "agg_sum" nil))
+            (group_cache_write_cell cache '(1 0) '(101) "agg_sum"
+              (list (car base) (cadr base) (nth base 2) (nth base 3) nil) nil)
+            (define old (snapshot_group_cache (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-shared-snapshot" (list (list 'point 0) (list 'snapshot 0))) "agg_sum" (lambda () '(1)) nil 3 4 (lambda () '(101))
               (lambda () (error "exact point lost with base")) (lambda (a b) (error "point rescanned"))
               (lambda (keys) (error "point reevaluated")) (lambda () 99)))
-            (define next (snapshot_group_cache "grc-shared-snapshot" (lambda () '(1)) nil 4 4 (lambda () '(101))
+            (define next (snapshot_group_cache (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-shared-snapshot" (list (list 'point 0) (list 'snapshot 0))) "agg_sum" (lambda () '(1)) nil 4 4 (lambda () '(101))
               (lambda () '(1 7)) (lambda (a b) (error "evicted base used"))
               (lambda (keys) (error "evicted base used")) (lambda () 99)))
             (list old next))
@@ -1277,14 +1492,14 @@ test_cases:
             (define results (parallelN 32 (lambda (i)
               (begin
                 (define coordinate (+ 1 (mod i 4)))
-                (snapshot_group_cache "grc-concurrent-snapshot" (lambda () '()) nil coordinate 4 (lambda () '(313))
+                (snapshot_group_cache (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-concurrent-snapshot" (list (list 'snapshot 0))) "agg_sum" (lambda () '()) nil coordinate 4 (lambda () '(313))
                   (lambda () (list 1 (* 2 coordinate)))
                   (lambda (lo hi) '(1))
                   (lambda (keys) (list 1 (* 2 coordinate)))
                   (lambda () (error "unexpected concurrent fallback")))))))
             (list
               (equal? results (map (produceN 32) (lambda (i) (* 2 (+ 1 (mod i 4))))))
-              (snapshot_group_cache "grc-concurrent-snapshot" (lambda () '()) nil 3 4 (lambda () '(313))
+              (snapshot_group_cache (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-concurrent-snapshot" (list (list 'snapshot 0))) "agg_sum" (lambda () '()) nil 3 4 (lambda () '(313))
                 (lambda () (error "concurrent point was lost"))
                 (lambda (lo hi) (error "concurrent point was lost"))
                 (lambda (keys) (error "concurrent point was lost"))
@@ -1300,7 +1515,7 @@ test_cases:
     scm: |
       (begin
         (define __snapshot_test_actual
-          (snapshot_group_cache "grc-over-budget" (lambda () '()) nil 0 contribution_snapshot_key_budget (lambda () '(101))
+          (snapshot_group_cache (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-over-budget" (list (list 'snapshot 0))) "agg_sum" (lambda () '()) nil 0 contribution_snapshot_key_budget (lambda () '(101))
             (lambda () (error "unadmitted full scan")) (lambda (a b) (error "unadmitted cover"))
             (lambda (keys) (error "unadmitted delta")) (lambda () 29))
         )
@@ -1317,11 +1532,11 @@ test_cases:
           (begin
             (define revision (newsession))
             (revision "version" 1)
-            (define first (snapshot_group_cache "grc-changing-view" (lambda () '()) nil 0 4
+            (define first (snapshot_group_cache (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-changing-view" (list (list 'snapshot 0))) "agg_sum" (lambda () '()) nil 0 4
               (lambda () (list (revision "version")))
               (lambda () (begin (revision "version" 2) '(1 100)))
               (lambda (a b) '()) (lambda (keys) '()) (lambda () 31)))
-            (define next (snapshot_group_cache "grc-changing-view" (lambda () '()) nil 0 4 (lambda () '(1))
+            (define next (snapshot_group_cache (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-changing-view" (list (list 'snapshot 0))) "agg_sum" (lambda () '()) nil 0 4 (lambda () '(1))
               (lambda () '(1 37)) (lambda (a b) (error "partial state retained"))
               (lambda (keys) (error "partial state retained")) (lambda () 99)))
             (list first next))
@@ -1340,7 +1555,7 @@ test_cases:
             (begin
               (define session (newsession))
               (start session)
-              (define value (snapshot_group_cache "grc-shared-snapshot" (lambda () '(1))
+              (define value (snapshot_group_cache (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-shared-snapshot" (list (list 'point 0) (list 'snapshot 0))) "agg_sum" (lambda () '(1))
                 (session "__memcp_tx") 3 4 (lambda () '(101))
                 (lambda () (error "transaction published a shared anchor"))
                 (lambda (a b) (error "transaction used a shared cover"))
@@ -1358,7 +1573,7 @@ test_cases:
     scm: |
       (begin
         (define __snapshot_test_actual
-          (group_cache_value group_value_cache "grc-point-cache" (lambda () '(7 11)) nil (lambda () '(17)) (lambda () 43))
+          (group_cache_value (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-point-cache" (list (list 'point 0) (list 'point 1))) "agg_value" (lambda () '(7 11)) nil (lambda () '(17)) (lambda () 43))
         )
         (if (equal? (json_encode __snapshot_test_actual) (json_encode 43))
           __snapshot_test_actual
@@ -1370,7 +1585,7 @@ test_cases:
     scm: |
       (begin
         (define __snapshot_test_actual
-          (group_cache_value group_value_cache "grc-point-cache" (lambda () '(7 11)) nil (lambda () '(17))
+          (group_cache_value (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-point-cache" (list (list 'point 0) (list 'point 1))) "agg_value" (lambda () '(7 11)) nil (lambda () '(17))
             (lambda () (error "retained aggregate was recomputed")))
         )
         (if (equal? (json_encode __snapshot_test_actual) (json_encode 43))
@@ -1384,9 +1599,9 @@ test_cases:
       (begin
         (define __snapshot_test_actual
           (list
-            (group_cache_value group_value_cache "grc-point-cache" (lambda () '(7 12)) nil (lambda () '(17)) (lambda () 47))
-            (group_cache_value group_value_cache "grc-point-cache" (lambda () '(7 11)) nil (lambda () '(18)) (lambda () nil))
-            (group_cache_value group_value_cache "grc-point-cache" (lambda () '(7 11)) nil (lambda () '(18))
+            (group_cache_value (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-point-cache" (list (list 'point 0) (list 'point 1))) "agg_value" (lambda () '(7 12)) nil (lambda () '(17)) (lambda () 47))
+            (group_cache_value (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-point-cache" (list (list 'point 0) (list 'point 1))) "agg_value" (lambda () '(7 11)) nil (lambda () '(18)) (lambda () nil))
+            (group_cache_value (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-point-cache" (list (list 'point 0) (list 'point 1))) "agg_value" (lambda () '(7 11)) nil (lambda () '(18))
               (lambda () (error "cached NULL was recomputed"))))
         )
         (if (equal? (json_encode __snapshot_test_actual) (json_encode (list 47 nil nil)))
@@ -1402,10 +1617,10 @@ test_cases:
           (begin
             (define revision (newsession))
             (revision "value" 71)
-            (define first (group_cache_value group_value_cache "grc-point-changing-view" (lambda () '(1)) nil
+            (define first (group_cache_value (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-point-changing-view" (list (list 'point 0))) "agg_value" (lambda () '(1)) nil
               (lambda () (list (revision "value")))
               (lambda () (begin (revision "value" 73) 79))))
-            (define second (group_cache_value group_value_cache "grc-point-changing-view" (lambda () '(1)) nil
+            (define second (group_cache_value (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-point-changing-view" (list (list 'point 0))) "agg_value" (lambda () '(1)) nil
               (lambda () '(71)) (lambda () 83)))
             (list first second))
         )
@@ -1422,10 +1637,10 @@ test_cases:
           (begin
             (define version (newsession))
             (version "value" 17)
-            (define first (group_cache_value group_value_cache "grc-point-cache"
+            (define first (group_cache_value (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-point-cache" (list (list 'point 0) (list 'point 1))) "agg_value"
               (lambda () (begin (version "value" 19) '(7 11))) nil
               (lambda () (list (version "value"))) (lambda () 89)))
-            (define old (group_cache_value group_value_cache "grc-point-cache" (lambda () '(7 11)) nil
+            (define old (group_cache_value (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-point-cache" (list (list 'point 0) (list 'point 1))) "agg_value" (lambda () '(7 11)) nil
               (lambda () '(17)) (lambda () (error "old immutable point was lost"))))
             (list first old))
         )
@@ -1443,7 +1658,7 @@ test_cases:
             (begin
               (define session (newsession))
               (start session)
-              (define point (group_cache_value group_value_cache "grc-point-cache" (lambda () '(7 11)) (session "__memcp_tx")
+              (define point (group_cache_value (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-point-cache" (list (list 'point 0) (list 'point 1))) "agg_value" (lambda () '(7 11)) (session "__memcp_tx")
                 (lambda () '(17)) (lambda () 59)))
               (tx_rollback session)
               point)))
@@ -1460,10 +1675,10 @@ test_cases:
         (define __snapshot_test_actual
           (begin
             (define failed (try (lambda ()
-              (snapshot_group_cache "grc-failed-build" (lambda () '()) nil 5 4 (lambda () '(101))
+              (snapshot_group_cache (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-failed-build" (list (list 'snapshot 0))) "agg_sum" (lambda () '()) nil 5 4 (lambda () '(101))
                 (lambda () (error "stopped preparation")) (lambda (lo hi) '())
                 (lambda (keys) '()) (lambda () 99))) (lambda (err) "stopped")))
-            (define next (snapshot_group_cache "grc-failed-build" (lambda () '()) nil 5 4 (lambda () '(101))
+            (define next (snapshot_group_cache (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-failed-build" (list (list 'snapshot 0))) "agg_sum" (lambda () '()) nil 5 4 (lambda () '(101))
               (lambda () '(1 97)) (lambda (lo hi) (error "partial anchor survived"))
               (lambda (keys) (error "partial anchor survived")) (lambda () 99)))
             (list failed next))
@@ -1480,9 +1695,9 @@ test_cases:
         (define __snapshot_test_actual
           (begin
             (define failed (try (lambda ()
-              (group_cache_value group_value_cache "grc-failed-point" (lambda () '(1)) nil (lambda () '(101))
+              (group_cache_value (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-failed-point" (list (list 'point 0))) "agg_value" (lambda () '(1)) nil (lambda () '(101))
                 (lambda () (error "stopped preparation")))) (lambda (err) "stopped")))
-            (define next (group_cache_value group_value_cache "grc-failed-point" (lambda () '(1)) nil
+            (define next (group_cache_value (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-failed-point" (list (list 'point 0))) "agg_value" (lambda () '(1)) nil
               (lambda () '(101)) (lambda () 103)))
             (list failed next))
         )

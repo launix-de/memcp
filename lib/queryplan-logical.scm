@@ -446,6 +446,15 @@ per row, so source_table_expr can hand it to scan/scan_order unchanged. */
 		((symbol literal-rows) _columns rows) rows
 		_ '())))
 
+/* Parameter rows are a logical VALUES domain. Cells are row-independent
+literal parameters, resolved by physical lowering in the current request.
+Unlike literal rows, they must never be substituted as compile-time values. */
+(define parameter_rows_relation? (lambda (relation) (equal? (logical_op relation) (quote parameter-rows))))
+(define row_domain_relation? (lambda (relation)
+	(or (literal_rows_relation? relation) (parameter_rows_relation? relation))))
+(define row_domain_columns (lambda (relation) (nth relation 1)))
+(define row_domain_data (lambda (relation) (nth relation 2)))
+
 /* A one-row literal CROSS JOIN is a compile-time binding, not a relational
 cardinality choice. Substitute its qualified columns before decorrelation so
 dead CASE/OR branches do not manufacture scalar stages that can never run.
@@ -1440,9 +1449,8 @@ specific derived-table alias. The result is a flat assoc-list col_name->true. */
 outer_direct_consumers already includes all outer ON conditions. */
 (define prune_derived_src (lambda (src outer_direct_consumers)
 	(begin
-		(define relation (source_relation src))
-		(if (or (string? relation)
-			(or (table_function_relation? relation) (union_block? relation)))
+		(define relation (normalize_query_ast (source_relation src)))
+		(if (not (query_block? relation))
 			src
 			(begin
 				(define alias (source_alias src))
@@ -5520,8 +5528,8 @@ source alias is the stable identity consumed by all later planner phases. */
 			(map (get_schema (source_schema src) relation) (lambda (column) (column "Field")))
 			(if (table_function_relation? relation)
 				(table_function_columns relation)
-				(if (literal_rows_relation? relation)
-					(literal_rows_columns relation)
+				(if (row_domain_relation? relation)
+					(row_domain_columns relation)
 					(binding_field_titles (logical_relation_fields relation))))))))
 
 (define binding_column_name (lambda (columns col col_ignorecase)
@@ -6115,7 +6123,7 @@ that actually owns the title consumes the reference. */
 			(define tail_rewrites (nth tail 1))
 			(define tail_wheres (nth tail 2))
 			(define tail_stages (nth tail 3))
-			(if (or (string? relation) (or (table_function_relation? relation) (literal_rows_relation? relation)))
+			(if (or (string? relation) (or (table_function_relation? relation) (row_domain_relation? relation)))
 				(begin
 					(list
 						(cons (list (source_alias src) (source_schema src) relation (source_outer? src) (source_join_expr src))
@@ -6377,7 +6385,12 @@ the base case. */
 	(match rows
 		(cons row rest) (begin
 			(define deduped_rest (literal_union_dedupe_rows rest))
-			(if (contains? deduped_rest row) deduped_rest (cons row deduped_rest)))
+			/* Use the same row identity as the general UNION DISTINCT carrier.
+			Scheme equality coerces NULL and zero and cannot deduplicate SQL rows. */
+			(define key (serialize row))
+			(if (reduce deduped_rest (lambda (found candidate)
+				(or found (equal? key (serialize candidate)))) false)
+				deduped_rest (cons row deduped_rest)))
 		_ (list))))
 
 (define literal_union_relation (lambda (relation)
