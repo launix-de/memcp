@@ -1335,16 +1335,18 @@ silently stops seeing the join as a keyed lookup at all. */
 					(and (equal? (unique_lookup_column_name src right) key_col)
 						(not (expr_refs_alias? default_alias (source_alias src) left)))))))))
 
-(define unused_unique_left_join? (lambda (default_alias referenced_aliases src)
-	(begin
-		(define primary_key (source_primary_key_columns src))
-		(define unique_keys (merge_unique (list
-			(source_unique_key_sets src)
-			(if (empty_list? primary_key) '() (list primary_key)))))
-		(define terms (split_and_terms (coalesceNil (source_join_expr src) true)))
-		(and (source_outer? src)
-			(and (source_is_base_table? src)
-				(and (not (has_assoc? referenced_aliases (source_alias src)))
+(define unused_left_join? (lambda (default_alias referenced_aliases src duplicate_insensitive)
+	(and (source_outer? src)
+		(and (source_is_base_table? src)
+			(and (not (has_assoc? referenced_aliases (source_alias src)))
+				(or duplicate_insensitive (begin
+					/* Only a retained bag multiplicity needs a uniqueness proof.
+					Do not read key metadata for drivers or referenced sources. */
+					(define primary_key (source_primary_key_columns src))
+					(define unique_keys (merge_unique (list
+						(source_unique_key_sets src)
+						(if (empty_list? primary_key) '() (list primary_key)))))
+					(define terms (split_and_terms (coalesceNil (source_join_expr src) true)))
 					(reduce unique_keys (lambda (found key_cols)
 						(or found
 							(and (not (empty_list? key_cols))
@@ -1353,23 +1355,24 @@ silently stops seeing the join as a keyed lookup at all. */
 										(or matched (unique_left_join_key_term?
 											default_alias src key_col term))) false)))
 									true))))
-						false)))))))
+						false))))))))
 
-(define prune_unused_unique_left_joins_reversed (lambda (reversed_sources default_alias referenced_aliases)
+(define prune_unused_left_joins_reversed (lambda (reversed_sources default_alias referenced_aliases duplicate_insensitive)
 	(match (coalesceNil reversed_sources '())
-		(cons src rest) (if (unused_unique_left_join? default_alias referenced_aliases src)
-			(prune_unused_unique_left_joins_reversed rest default_alias referenced_aliases)
+		(cons src rest) (if (unused_left_join? default_alias referenced_aliases src duplicate_insensitive)
+			(prune_unused_left_joins_reversed rest default_alias referenced_aliases duplicate_insensitive)
 			(begin
-				(define tail (prune_unused_unique_left_joins_reversed rest default_alias
-					(query_expr_alias_set default_alias (source_join_expr src) referenced_aliases)))
+				(define tail (prune_unused_left_joins_reversed rest default_alias
+					(query_expr_alias_set default_alias (source_join_expr src) referenced_aliases) duplicate_insensitive))
 				(cons src tail)))
 		_ '())))
 
-(define prune_unused_unique_left_joins (lambda (sources default_alias consumers)
-	(reverse (prune_unused_unique_left_joins_reversed
+(define prune_unused_left_joins (lambda (sources default_alias consumers duplicate_insensitive)
+	(reverse (prune_unused_left_joins_reversed
 		(reverse (coalesceNil sources '()))
 		default_alias
-		(query_exprs_alias_set default_alias consumers)))))
+		(query_exprs_alias_set default_alias consumers)
+		duplicate_insensitive))))
 
 
 /* Walk an expression tree and collect every column name referenced from a
@@ -2265,6 +2268,31 @@ physical membership probe. */
 					(and (nil? (qb_limit inner))
 						(nil? (qb_offset inner)))))))))
 
+/* An unused LEFT JOIN changes only multiplicity: every left row survives at
+least once, even when the right key is not unique. IN and NOT IN observe the
+set of RHS values (including NULL), not their counts. This proof stops at any
+LIMIT/OFFSET, aggregate or window boundary. Include complete stage expressions
+as consumers so correlated helper domains cannot lose a referenced binding. */
+(define prune_membership_left_joins (lambda (inner)
+	(if (and (query_block? inner)
+		(and (empty_list? (qb_group inner))
+			(and (nil? (qb_having inner))
+				(and (nil? (qb_limit inner))
+					(and (nil? (qb_offset inner))
+						(and (not (query_block_has_local_aggregates? inner))
+							(not (expr_contains_window? (list (qb_fields inner) (qb_hidden inner))))))))))
+		(make_query_block
+			(qb_schema inner)
+			(prune_unused_left_joins (qb_sources inner)
+				(qassoc_get (qb_facts inner) (quote default_alias)
+					(source_alias (car (qb_sources inner))))
+				(list (qb_fields inner) (qb_where inner) (qb_hidden inner)
+					(qb_order inner) (qb_stages inner)) true)
+			(qb_fields inner) (qb_where inner) (qb_group inner) (qb_having inner)
+			(qb_order inner) (qb_limit inner) (qb_offset inner)
+			(qb_hidden inner) (qb_stages inner) (qb_facts inner))
+		inner)))
+
 (define normalize_membership_query_block (lambda (inner)
 	(begin
 		(define normalized_order (if (and (query_block? inner)
@@ -2286,7 +2314,7 @@ physical membership probe. */
 			inner))
 		/* Duplicate elimination does not change IN/NOT IN membership. Remove the
 		parser's DISTINCT group before choosing the plain membership lowering. */
-		(if (and (query_block? normalized_order)
+		(prune_membership_left_joins (if (and (query_block? normalized_order)
 			(qassoc_get (qb_facts normalized_order) (quote select_distinct) false))
 			(make_query_block
 				(qb_schema normalized_order)
@@ -2301,7 +2329,7 @@ physical membership probe. */
 				(qb_hidden normalized_order)
 				(qb_stages normalized_order)
 				(qb_facts normalized_order))
-			normalized_order))))
+			normalized_order)))))
 
 (define membership_inner_supported? (lambda (inner)
 	(and (query_block? inner)
@@ -6643,7 +6671,7 @@ names in projections, predicates, and correlated subqueries. */
 								referenced by this block's own fields/where/group/having/order
 								or by any outer source ON condition. The outer ON conditions
 								must be included so that join-key columns of non-pruneable
-								sources are never dropped. prune_unused_unique_left_joins
+								sources are never dropped. prune_unused_left_joins
 								handles removing sorter-style joins whose output is unused. */
 								(define outer_direct_consumers (reduce
 									(coalesceNil (qb_sources block) '())
@@ -6700,8 +6728,8 @@ names in projections, predicates, and correlated subqueries. */
 									(rewrite_derived_fields_chain active_rewrites (qb_hidden block))))
 								(define default_alias (qassoc_get (qb_facts block) (quote default_alias)
 									(if (empty_list? flattened_source_list) nil (source_alias (car flattened_source_list)))))
-								(define sources (prune_unused_unique_left_joins flattened_source_list default_alias
-									(list rewritten_fields rewritten_where rewritten_group rewritten_having rewritten_order rewritten_hidden)))
+								(define sources (prune_unused_left_joins flattened_source_list default_alias
+									(list rewritten_fields rewritten_where rewritten_group rewritten_having rewritten_order rewritten_hidden) false))
 								(define inherited_outer_sources (uctx_get child_ctx (quote outer-sources) '()))
 								(define inherited_outer_resolution_sources (uctx_get child_ctx (quote outer-resolution-sources) '()))
 								(define nested_outer_resolution_sources (merge (list inherited_outer_resolution_sources (qb_sources block))))
