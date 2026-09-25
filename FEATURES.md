@@ -132,7 +132,7 @@ the persistence/reconstruction contract of a table. They are different choices.
 |---|---|
 | `safe` (default) | WAL persistence at statement/transaction boundaries; committed writes are intended to survive process crashes and power loss when the backend honors its durability contract. Persistent data can be evicted from RAM. |
 | `logged` | WAL without the local fsync guarantee; process-crash recovery, but recent writes can be lost after power failure. |
-| `sloppy` | Persisted rebuilt columns, no WAL; deltas since the last rebuild are lost after an unclean shutdown. |
+| `sloppy` | Flash-friendly persistence: batches changes into compressed column files instead of writing a WAL for every mutation. The background rebuild saves changes on a 15-minute schedule. Deltas since the last completed rebuild are lost after an unclean shutdown. |
 | `memory` | Rows exist only in RAM, are not evictable and disappear on restart; schema and an optional reconstruction callback persist. |
 | `cache` | Reconstructible RAM data that may be cleared under memory pressure; supports an initializer and persistent schema. |
 
