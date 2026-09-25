@@ -33,6 +33,60 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS grc_events"
 
 test_cases:
+  - name: "nested scalar COUNT contributes complete reusable aggregate dependencies"
+    session_id: "grc-nested-count"
+    setup:
+      - scm: '(session "count-before" (count (group_value_cache)))'
+    sql: &nested_count_query |
+      SELECT p.cut,(SELECT SUM(e.amount) FROM grc_events e
+        WHERE (SELECT COUNT(*) FROM grc_windows c WHERE c.tenant_id=e.tenant_id)>p.cut) AS total
+      FROM (SELECT 1 AS cut UNION ALL SELECT 2) p ORDER BY p.cut
+    expect: &nested_count_result
+      data: [{cut: 1, total: 12000}, {cut: 2, total: null}]
+
+  - name: "nested scalar COUNT reuses exact aggregate points"
+    session_id: "grc-nested-count"
+    setup:
+      - scm: '(session "count-after" (count (group_value_cache)))'
+    sql: *nested_count_query
+    expect: *nested_count_result
+
+  - name: "nested aggregate cache entries survive query completion"
+    session_id: "grc-nested-count"
+    scm: '(and (> (session "count-after") (session "count-before")) (equal? (session "count-after") (count (group_value_cache))))'
+    expect:
+      data: [true]
+
+  - name: "inserting into a nested aggregate source invalidates the parent points"
+    setup:
+      - sql: "INSERT INTO grc_windows VALUES (5,1,0,1)"
+    sql: *nested_count_query
+    expect:
+      data: [{cut: 1, total: 12000}, {cut: 2, total: 6000}]
+
+  - name: "deleting from a nested aggregate source restores empty SUM semantics"
+    setup:
+      - sql: "DELETE FROM grc_windows WHERE id=5"
+    sql: *nested_count_query
+    expect: *nested_count_result
+
+  - name: "nested volatile aggregate values are excluded from exact reuse"
+    sql: |
+      EXPLAIN REORDER SELECT p.cut,(SELECT SUM(e.amount) FROM grc_events e
+        WHERE (SELECT SUM(RAND()) FROM grc_windows c WHERE c.tenant_id=e.tenant_id)>p.cut) AS total
+      FROM (SELECT 1 AS cut UNION ALL SELECT 2) p ORDER BY p.cut
+    expect:
+      result_not_contains: ["stable-aggregate-domain"]
+
+  - name: "nested HAVING retains the ordinary aggregate path"
+    sql: |
+      EXPLAIN REORDER SELECT p.cut,(SELECT SUM(e.amount) FROM grc_events e
+        WHERE (SELECT COUNT(*) FROM grc_windows c WHERE c.tenant_id=e.tenant_id
+          HAVING COUNT(*)>p.cut)>0) AS total
+      FROM (SELECT 1 AS cut UNION ALL SELECT 2) p ORDER BY p.cut
+    expect:
+      result_not_contains: ["stable-aggregate-domain"]
+
   - name: "cache and candidate setup costs keep empty and tiny domains direct"
     scm: |
       (map (list group_value_cache_costs invariant_property_cover_costs)

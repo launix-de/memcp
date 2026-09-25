@@ -369,6 +369,40 @@ test_cases:
     expect:
       data: [{category: 0, total: 44400}, {category: 1, total: 44000}]
 
+  - name: "Nested scalar sums retain the complete aggregate domain"
+    session_id: "ds-nested-sum"
+    setup:
+      - scm: '(session "nested-sum-before" (count (group_value_cache)))'
+    sql: &nested_sum_query |
+      SELECT w.lo,w.hi,(SELECT SUM((SELECT h.quantity FROM ds_history h
+          WHERE h.entity_id=e.id AND h.coordinate<=w.hi ORDER BY h.coordinate DESC LIMIT 1))
+        FROM ds_entity e
+        WHERE (SELECT SUM(1) FROM ds_history c WHERE c.entity_id=e.id)>1
+          AND (SELECT h.coordinate FROM ds_history h WHERE h.entity_id=e.id
+            AND h.coordinate<=w.hi ORDER BY h.coordinate DESC LIMIT 1) BETWEEN w.lo AND w.hi) AS total
+      FROM (SELECT 0 AS lo,10 AS hi UNION ALL SELECT 15,30) w
+    expect:
+      rows: 2
+      result_contains: ['"total": 200', '"total": 600']
+    timing_aggregation: total
+    warmup: 0
+    timing_samples: 2
+    threshold_ms: 20000
+
+  - name: "Nested scalar sums with a changed ordered bound preserve values"
+    session_id: "ds-nested-sum"
+    sql: |
+      SELECT w.lo,w.hi,(SELECT SUM((SELECT h.quantity FROM ds_history h
+          WHERE h.entity_id=e.id AND h.coordinate<=w.hi ORDER BY h.coordinate DESC LIMIT 1))
+        FROM ds_entity e
+        WHERE (SELECT SUM(1) FROM ds_history c WHERE c.entity_id=e.id)>1
+          AND (SELECT h.coordinate FROM ds_history h WHERE h.entity_id=e.id
+            AND h.coordinate<=w.hi ORDER BY h.coordinate DESC LIMIT 1) BETWEEN w.lo AND w.hi) AS total
+      FROM (SELECT 0 AS lo,10 AS hi UNION ALL SELECT 15,31) w
+    expect:
+      rows: 2
+      result_contains: ['"total": 200', '"total": 600']
+
   - name: "Joined classification updates invalidate retained snapshots"
     setup:
       - sql: "UPDATE ds_kind SET active=0 WHERE name='P'"

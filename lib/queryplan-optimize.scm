@@ -7268,6 +7268,28 @@ join predicates and arithmetic must not otherwise depend on its raw value. */
 							(list (car selection) (nth selection 2)))))) nil))))
 				(lambda (proof) (not (nil? proof))))))))
 
+/* Nested scalar SUM/COUNT dependencies have one deterministic value per
+complete outer domain. They are eligible for exact aggregate reuse, not for
+an incremental affected-key proof. Reject HAVING, grouping and row limits
+whose semantics are not represented by contribution_stage_exprs. */
+(define stable_scalar_aggregate_dependency? (lambda (stage)
+	(and (group_stage? stage)
+		(equal? (qassoc_get (gs_facts stage) (quote null_semantics) nil) (quote aggregate))
+		(equal? (stage_result_max_rows_per_partition stage) 1)
+		(equal? (coalesceNil (gs_having stage) true) true)
+		(or (source_is_base_table? (gs_input stage))
+			(and (query_block? (gs_input stage))
+				(empty_list? (qb_group (gs_input stage)))
+				(equal? (coalesceNil (qb_having (gs_input stage)) true) true)
+				(nil? (qb_limit (gs_input stage))) (nil? (qb_offset (gs_input stage)))))
+		(reduce (gs_aggregates stage) (lambda (ok aggregate)
+			(and ok (match aggregate '(value reducer neutral)
+				(or (and (or (equal? reducer (quote +)) (equal? reducer +))
+					(number? neutral) (equal? neutral 0))
+					(and (or (equal? reducer (quote sql_sum_reduce)) (equal? reducer sql_sum_reduce))
+						(nil? neutral)))
+				_ false))) true))))
+
 /* A deterministic aggregate can reuse an exact point-domain value when all
 outer inputs and all source revisions belong to its complete group interface.
 This proof grants no incremental correction or physical materialization. */
@@ -7283,7 +7305,8 @@ This proof grants no incremental correction or physical materialization. */
 				(define dependencies (stage_dependency_closure_using_graph graph stage))
 				(if (not (reduce dependencies (lambda (ok item)
 					(and ok (or (equal? (gs_id item) (gs_id stage))
-						(scalar_value_stage? item) (presence_probe_stage? item)))) true)) nil
+						(scalar_value_stage? item) (presence_probe_stage? item)
+						(stable_scalar_aggregate_dependency? item)))) true)) nil
 					(begin
 						(define aliases (merge_unique (map dependencies
 							(lambda (item) (map (contribution_stage_sources item) source_alias)))))
