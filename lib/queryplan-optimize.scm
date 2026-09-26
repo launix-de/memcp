@@ -5334,7 +5334,7 @@ the logical lookup still carries an alias which no longer exists. */
 
 (define join_reorder_node_using (lambda (stage_catalog node planning_session tx)
 	(if (query_block? node)
-		(reorder_query_block_with_candidate_strategy_using stage_catalog (join_null_rejection_facts node) planning_session tx)
+		(reorder_query_block_with_candidate_strategy_using stage_catalog (expose_null_rejected_join_edges node) planning_session tx)
 		(if (union_block? node)
 			(make_union_block
 				(union_mode node)
@@ -6973,14 +6973,41 @@ The whitelist is deliberately conservative (COALESCE/IS NULL are not strict). */
 					(or found (join_null_propagating? src item))) false)))
 		_ false)))
 
-(define join_null_rejection_facts (lambda (block)
+(define expose_null_rejected_join_edges (lambda (block)
 	(begin
 		(define rejected (map (filter (qb_sources block) (lambda (src)
 			(and (source_outer? src)
 				(reduce (split_and_terms (coalesceNil (qb_where block) true))
 					(lambda (found term) (or found (join_null_propagating? src term))) false)))) source_alias))
-		(if (empty_list? rejected) block
-			(query_block_with_reorder_facts block (list (list (quote null_rejected_aliases) rejected)))))))
+		(if (empty_list? rejected) block (begin
+			/* Only expose a new join edge here. Local filters already have costed
+			semijoin carriers; changing their join kind can lose aggregate reuse.
+			An equality to another local relation supplies an indexed lookup edge. */
+			(define alias_index (join_hypergraph_alias_index (source_aliases (qb_sources block))))
+			(define join_terms (filter (split_and_terms (coalesceNil (qb_where block) true)) (lambda (term)
+				(match term
+					((symbol equal??) _left _right)
+					(> (count (join_hypergraph_expr_aliases_using nil alias_index term)) 1)
+					_ false))))
+			(define promoted (map (filter (qb_sources block) (lambda (src)
+				(and (contains? rejected (source_alias src))
+					(reduce join_terms (lambda (found term)
+						(or found (join_null_propagating? src term))) false)))) source_alias))
+			/* WHERE discards every synthetic NULL row of these sources. Their
+			joins are therefore inner joins before join search; keeping an outer
+			barrier would force a base-table cross product with scalar helpers.
+			Retain ON and WHERE unchanged, including scalar cardinality checks. */
+			(query_block_with_reorder_facts
+				(make_query_block
+					(qb_schema block)
+					(map (qb_sources block) (lambda (src)
+						(if (contains? promoted (source_alias src))
+							(list (source_alias src) (source_schema src) (source_relation src) false (source_join_expr src))
+							src)))
+					(qb_fields block) (qb_where block) (qb_group block) (qb_having block)
+					(qb_order block) (qb_limit block) (qb_offset block) (qb_hidden block)
+					(qb_stages block) (qb_facts block))
+				(list (list (quote null_rejected_aliases) rejected))))))))
 
 /* Closed scalar whitelist: volatile/UDF evaluation is not a reusable
 contribution. More expression families require an explicit purity contract. */
