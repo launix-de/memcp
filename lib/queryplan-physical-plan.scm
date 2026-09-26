@@ -4283,6 +4283,16 @@ still produce NULL without evaluating the projection. */
 		_ (relational_recmap_output_invariant_join_term?
 			stage driver output expr))))
 
+/* Inner-join normalization can move a stage coordinate guard from ON into
+WHERE. It is still owned by the selected range lookup, not another value to
+fetch from its output. Apply the same coordinate proof at both locations so
+this candidate remains available to costing after null rejection. */
+(define group_range_recmap_dimension_condition (lambda (stage driver previous)
+	(reduce (split_and_terms (coalesceNil (qb_where (gs_input stage)) true))
+		(lambda (condition term)
+			(if (relational_recmap_output_invariant_join_term? stage driver previous term)
+				condition (combine_where condition term))) true)))
+
 (define group_range_recmap_chain_candidate (lambda (stages stage block driver output requested prior_specs)
 	(begin
 		(define dimension_stage (stage_for_output_relation stages (source_relation output)))
@@ -4300,13 +4310,15 @@ still produce NULL without evaluating the projection. */
 				(define target (if (nil? range_stage) nil (range_recmap_base_source range_stage)))
 				(define domains (if (nil? range_stage) '() (range_stage_domains range_stage)))
 				(define domain (if (single_source? domains) (car domains) nil))
+				(define dimension_condition (group_range_recmap_dimension_condition
+					dimension_stage driver previous))
 				(define previous_cols (group_range_recmap_columns
-					(source_alias previous) (qb_where input)))
+					(source_alias previous) dimension_condition))
 				(define previous_col (if (single_source? previous_cols) (car previous_cols) nil))
 				(define dimension_value (relational_recmap_stage_value
 					dimension_stage requested dimension))
 				(define dimension_join (relational_recmap_join_columns
-					dimension previous (qb_where input)))
+					dimension previous dimension_condition))
 				(if (or (nil? domain) (or (nil? target) (nil? previous_col))) nil
 					(begin
 						(define point_pairs (range_recmap_point_pairs range_stage))
@@ -4411,7 +4423,7 @@ still produce NULL without evaluating the projection. */
 		(define previous (nth spec 9))
 		(define condition (group_range_recmap_replace_column
 			(source_alias previous) (nth spec 6) value_expr
-			(qb_where (gs_input (nth spec 7)))))
+			(group_range_recmap_dimension_condition (nth spec 7) (nth spec 0) previous)))
 		(define cols (extract_columns_for_alias dimension condition))
 		(define value_col (relational_recmap_stage_value (nth spec 7)
 			(nth spec 4) dimension))
