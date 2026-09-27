@@ -1,3 +1,5 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
 # Tests for reversed comparison boundary extraction (constant on left side)
 # e.g. WHERE 5 < col, WHERE 10 >= col, WHERE 'foo' = col
 # Also tests IS NULL boundary extraction for index usage.
@@ -14,6 +16,14 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS rev_cmp"
 
 test_cases:
+  - name: "Integer order remains exact beyond float precision"
+    scm: |
+      (begin
+        (define compare (jit (lambda (a b) (list (< a b) (<= a b) (> a b) (>= a b)))))
+        (compare (json_decode_scmer "9007199254740992") (json_decode_scmer "9007199254740993")))
+    expect:
+      data: [true, true, false, false]
+
   - name: "Insert test data"
     setup:
       - scm: "(rebuild)"
