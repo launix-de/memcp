@@ -536,6 +536,9 @@ func (ctx *JITContext) EmitReturnBool(src JITValueDesc) {
 // EmitMakeBool constructs a Scmer bool into dst.Reg (ptr) and dst.Reg2 (aux).
 // src.Reg holds the 0/1 boolean value.
 func (ctx *JITContext) EmitMakeBool(dst JITValueDesc, src JITValueDesc) {
+	if src.Loc == LocFlags && src.FlagsID != 0 {
+		ctx.EnsureDesc(&src)
+	}
 	switch src.Loc {
 	case LocImm:
 		ctx.emitXorReg(dst.Reg)
@@ -944,6 +947,7 @@ func (ctx *JITContext) EmitCmpInt64(a, b Reg) {
 
 // EmitJump emits a conditional branch through the x86 rel32 encoding.
 func (ctx *JITContext) EmitJump(cc JITCondition, labelID JITLabel) {
+	ctx.branchSerial++
 	ctx.emitBytes(0x0F, 0x80|x86ConditionCode(cc)) // Jcc rel32
 	ctx.AddFixup(labelID, 4, true)
 	ctx.emitU32(0) // placeholder
@@ -956,6 +960,7 @@ func (ctx *JITContext) EmitJcc(cc JITCondition, labelID JITLabel) {
 
 // EmitJmp emits an unconditional JMP rel32.
 func (ctx *JITContext) EmitJmp(labelID JITLabel) {
+	ctx.branchSerial++
 	ctx.emitByte(0xE9) // JMP rel32
 	ctx.AddFixup(labelID, 4, true)
 	ctx.emitU32(0) // placeholder
@@ -2003,6 +2008,9 @@ func (ctx *JITContext) EmitBoolDesc(src *JITValueDesc, result JITValueDesc) JITV
 
 // EmitMovToReg moves a scalar into a same-class register home.
 func (ctx *JITContext) EmitMovToReg(dst Reg, src JITValueDesc) {
+	if src.Loc == LocFlags && src.FlagsID != 0 {
+		ctx.EnsureDesc(&src)
+	}
 	switch src.Loc {
 	case LocImm:
 		if dst >= RegX0 {

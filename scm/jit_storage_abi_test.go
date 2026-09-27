@@ -547,3 +547,96 @@ func TestJITLessHelperKnownLargeIntegers(t *testing.T) {
 		}
 	}
 }
+
+func TestJITComparisonReturnsFlagsThroughNewBool(t *testing.T) {
+	for _, op := range []string{"<", ">", "<=", ">="} {
+		t.Run(op, func(t *testing.T) {
+			fn := CompileJITStorageGetValue(func(ctx *JITContext, source, target JITValueDesc) JITValueDesc {
+				source.Type = tagInt
+				value := declarations[op].Type.JITEmit(ctx, nil, []JITValueDesc{source,
+					{Loc: LocImm, Type: tagInt, Imm: NewInt(511)}}, target)
+				if !ctx.hasBooleanFlags(value) {
+					t.Fatalf("%s materialized the returned comparison: %+v", op, value)
+				}
+				ctx.lazyFlags = jitBooleanFlags{}
+				yes, done := ctx.ReserveLabel(), ctx.ReserveLabel()
+				before := uintptr(ctx.Ptr)
+				ctx.EmitJump(value.Condition, yes)
+				code := unsafe.Slice((*byte)(unsafe.Pointer(before)), int(uintptr(ctx.Ptr)-before))
+				if len(code) != 6 || code[0] != 0x0f || code[1] != 0x80|x86ConditionCode(value.Condition) {
+					t.Fatalf("condition did not become a direct Jcc: %x", code)
+				}
+				ctx.FreeDesc(&value)
+				ctx.EmitMakeInt(target, JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(7)})
+				ctx.EmitJmp(done)
+				ctx.MarkLabel(yes)
+				ctx.EmitMakeInt(target, JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(9)})
+				ctx.MarkLabel(done)
+				return target
+			})
+			if fn == nil {
+				t.Fatal("comparison branch did not compile")
+			}
+			for _, n := range []uint32{510, 511, 512} {
+				want := int64(7)
+				if (op == "<" && n < 511) || (op == ">" && n > 511) || (op == "<=" && n <= 511) || (op == ">=" && n >= 511) {
+					want = 9
+				}
+				if got := fn(n).Int(); got != want {
+					t.Fatalf("%s %d: got %d, want %d", op, n, got, want)
+				}
+			}
+		})
+	}
+}
+
+// Benchmark the complete typed Scheme condition, including its generated
+// comparison wrapper. The fixture is also usable unchanged on the baseline.
+func BenchmarkJITIntegerBranch(b *testing.B) {
+	expr := NewSlice([]Scmer{NewSymbol("if"),
+		NewSlice([]Scmer{NewSymbol("<"), NewNthLocalVar(0), NewInt(511)}), NewInt(9), NewInt(7)})
+	fn := CompileJITStorageGetValue(func(ctx *JITContext, source, target JITValueDesc) JITValueDesc {
+		source.Type = tagInt
+		ctx.Env = &JITEnv{Numbered: []JITValueDesc{source}}
+		return jitCompileExpr(ctx, expr, ctx.SliceBase, target)
+	})
+	if fn == nil || fn(510).Int() != 9 || fn(511).Int() != 7 {
+		b.Fatal("typed integer branch failed to compile or execute")
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	var result int64
+	for i := 0; i < b.N; i++ {
+		result += fn(uint32(i & 1023)).Int()
+	}
+	b.StopTimer()
+	runtime.KeepAlive(fn)
+	if result == 0 {
+		b.Fatal("benchmark did not execute")
+	}
+}
+
+func TestJITDeferredComparisonSurvivesClobberAndSpill(t *testing.T) {
+	for _, spill := range []bool{false, true} {
+		fn := CompileJITStorageGetValue(func(ctx *JITContext, source, target JITValueDesc) JITValueDesc {
+			source.Type = tagInt
+			value := jitEmitLess(ctx, []JITValueDesc{source, {Loc: LocImm, Type: tagInt, Imm: NewInt(511)}}, JITValueDesc{Loc: LocAny})
+			if spill {
+				ctx.StabilizeDescForControlFlow(&value)
+			}
+			ctx.EmitMovRegImm64(RegR11, 0)
+			ctx.EmitAddRegImm32(RegR11, 1)
+			ctx.EnsureDesc(&value)
+			ctx.EmitMakeBool(target, value)
+			return target
+		})
+		if fn == nil {
+			t.Fatal("deferred comparison did not compile")
+		}
+		for _, n := range []uint32{510, 511, 512} {
+			if got := fn(n).Bool(); got != (n < 511) {
+				t.Fatalf("spill=%v n=%d: got %v", spill, n, got)
+			}
+		}
+	}
+}
