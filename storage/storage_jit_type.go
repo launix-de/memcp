@@ -63,7 +63,7 @@ func (s *StorageSeq) JITValueType() uint8 {
 	if s.start.hasNull {
 		return scm.JITTypeUnknown
 	}
-	return scm.TagFloat
+	return scm.TagInt
 }
 
 func (s *StorageEnum) JITValueType() uint8 {

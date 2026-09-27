@@ -165,6 +165,42 @@ try {
         check((int)$db->lastInsertId() > 0, 'Insert ID');
         $db->commit();
         check($db->query('SELECT COUNT(*) FROM php_test')->fetchColumn() == 1, 'Commit persists');
+    } elseif ($action === 'rowcount') {
+        // Rebuilt sequence columns used to turn INT IDs into PHP doubles.
+        // A strict session comparison then differed after JSON decoding even
+        // though its CAS UPDATE wrote identical bytes and affected zero rows.
+        $db->exec('DROP TABLE IF EXISTS php_session_count');
+        $db->exec('CREATE TABLE php_session_count (id INT PRIMARY KEY, payload TEXT)');
+        try {
+            check($db->exec('INSERT INTO php_session_count VALUES ' . implode(',', array_map(
+                fn($id) => "($id, 'old')", range(1, 100)))) === 100, 'Insert count');
+            $before = $db->query('SELECT id FROM php_session_count ORDER BY id')->fetchAll(PDO::FETCH_COLUMN);
+            $maintenance = new PDO('memcp:dbname=memcp-tests', 'root', 'admin', [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+            $maintenance->exec("SET syntax='scheme'");
+            $maintenance->query('(rebuild (table "memcp-tests" "php_session_count") true false)')->closeCursor();
+            $after = $db->query('SELECT id FROM php_session_count ORDER BY id')->fetchAll(PDO::FETCH_COLUMN);
+            check($before === $after, 'INT types must survive sequence compression');
+            $payload = ['first' => reset($after), 'last' => end($after)];
+            check(json_decode(json_encode($payload), true) === $payload, 'Session JSON must preserve integer IDs');
+            $cas = $db->prepare('UPDATE php_session_count SET payload = ? WHERE id = 1 AND payload = ?');
+            $json = json_encode($payload);
+            foreach ([[$json, 'old', 1], [$json, $json, 0], ['stale', 'old', 0]] as [$next, $old, $count]) {
+                $cas->execute([$next, $old]);
+                check($cas->rowCount() === $count, 'CAS affected row count');
+            }
+            check($db->query('SELECT payload FROM php_session_count WHERE id=1')->fetchColumn() === $json, 'CAS stored result');
+            check($db->exec("UPDATE php_session_count SET payload='changed'") === 100, 'UPDATE sums all changed rows');
+            check($db->exec("UPDATE php_session_count SET payload='changed'") === 0, 'Unchanged UPDATE count');
+            check($db->exec("UPDATE php_session_count SET payload='other' WHERE id <= 40") === 40, 'Partial UPDATE count');
+            check($db->exec("UPDATE php_session_count SET payload='changed'") === 40, 'Mixed changed and unchanged count');
+            check($db->exec("UPDATE php_session_count SET payload='absent' WHERE id=999") === 0, 'Missing UPDATE count');
+            fails(fn() => $db->exec('UPDATE php_session_count SET missing_column=1'));
+            check($db->exec('DELETE FROM php_session_count WHERE id <= 40') === 40, 'Partial DELETE count');
+            check($db->exec('DELETE FROM php_session_count') === 60, 'DELETE sums remaining rows');
+            check($db->exec('DELETE FROM php_session_count') === 0, 'Empty DELETE count');
+        } finally {
+            $db->exec('DROP TABLE php_session_count');
+        }
     } elseif ($action === 'wire') {
         $config = json_decode(file_get_contents(__DIR__ . '/wire.json'), true);
         $wire = new PDO('mysql:unix_socket=' . $config['socket'] . ';dbname=memcp-tests', 'root', 'admin', [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
