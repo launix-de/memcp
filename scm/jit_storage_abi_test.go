@@ -520,3 +520,30 @@ func TestJITStoreCustomScmerKeepsSpilledAddress(t *testing.T) {
 	}
 	runtime.KeepAlive(payload)
 }
+
+func TestJITLessHelperKnownLargeIntegers(t *testing.T) {
+	for _, base := range []int64{1 << 53, -1 << 63, 1<<63 - 3} {
+		fn := CompileJITStorageGetValue(func(ctx *JITContext, source, target JITValueDesc) JITValueDesc {
+			source.Type = tagInt
+			ctx.ProtectReg(source.Reg)
+			offset := ctx.AllocReg()
+			ctx.EmitMovRegImm64(offset, uint64(base))
+			ctx.EmitAddInt64(source.Reg, offset)
+			ctx.FreeReg(offset)
+			ctx.UnprotectReg(source.Reg)
+			comparison := jitEmitLess(ctx, []JITValueDesc{source,
+				{Loc: LocImm, Type: tagInt, Imm: NewInt(base + 1)},
+			}, JITValueDesc{Loc: LocReg, Type: tagBool, Reg: target.Reg2})
+			ctx.EmitMakeBool(target, comparison)
+			return target
+		})
+		if fn == nil {
+			t.Fatal("known int64 comparison did not compile")
+		}
+		for i := uint32(0); i < 3; i++ {
+			if got := fn(i).Bool(); got != (i < 1) {
+				t.Fatalf("Less(%d, %d) = %v", base+int64(i), base+1, got)
+			}
+		}
+	}
+}

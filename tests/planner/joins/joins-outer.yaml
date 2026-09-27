@@ -87,6 +87,76 @@ test_cases:
         - id: 3
           note: "hidden"
 
+  - name: "null rejecting WHERE permits inner join with unchanged ON filter"
+    sql: |
+      SELECT p.id, c.note
+      FROM parent p LEFT JOIN child c ON c.pid = p.id AND c.visible = 1
+      WHERE c.note = 'c2' ORDER BY p.id
+    expect:
+      data: [{id: 2, note: c2}]
+      rows: 1
+
+  - name: "COALESCE keeps unmatched outer rows"
+    sql: |
+      SELECT p.id FROM parent p LEFT JOIN child c ON c.pid = p.id
+      WHERE COALESCE(c.visible, 1) = 1 ORDER BY p.id
+    expect:
+      data: [{id: 1}, {id: 2}]
+      rows: 2
+
+  - name: "negated strict comparison rejects unmatched outer rows"
+    sql: |
+      SELECT p.id FROM parent p LEFT JOIN child c ON c.pid = p.id
+      WHERE NOT (c.note = 'hidden') ORDER BY p.id
+    expect:
+      data: [{id: 2}]
+      rows: 1
+
+  - name: "filtered scalar lookup keeps empty inner selection NULL"
+    sql: |
+      SELECT p.id, (SELECT l.name FROM outer_label l
+        WHERE l.id = (SELECT c.pid FROM child c
+          WHERE c.pid = p.id AND c.visible = 1 LIMIT 1) LIMIT 1) AS name
+      FROM parent p ORDER BY p.id
+    expect:
+      data: [{id: 1, name: null}, {id: 2, name: two}, {id: 3, name: null}]
+      rows: 3
+
+  - name: "filtered scalar lookup still rejects multiple scalar rows"
+    sql: |
+      SELECT p.id, (SELECT l.name FROM outer_label l
+        WHERE l.id = (SELECT c.pid FROM child c WHERE c.visible = 1 OR c.visible = 0)) AS name
+      FROM parent p ORDER BY p.id
+    expect:
+      error: true
+
+  - name: "null rejecting WHERE equality exposes an inner join edge"
+    sql: |
+      EXPLAIN REORDER SELECT p.id FROM parent p LEFT JOIN child c ON TRUE
+      WHERE c.pid = p.id
+    expect:
+      result_contains: ["join-node", "null_rejected_aliases"]
+      result_not_contains: ["left-outer"]
+
+  - name: "local null rejection preserves the semijoin carrier search space"
+    sql: |
+      EXPLAIN REORDER SELECT p.id FROM parent p LEFT JOIN child c ON p.id = c.pid
+      WHERE c.visible = 1
+    expect:
+      result_contains: ["left-outer", "null_rejected_aliases"]
+
+  - name: "insert duplicate and NULL keys after lookup plans were cached"
+    sql: INSERT INTO child VALUES (2, 'extra', 1), (NULL, 'null-key', 1)
+    expect: {}
+
+  - name: "promoted equality join preserves duplicates and rejects NULL keys"
+    sql: |
+      SELECT p.id, c.note FROM parent p LEFT JOIN child c ON TRUE
+      WHERE c.pid = p.id ORDER BY p.id, c.note
+    expect:
+      rows: 3
+      data: [{id: 2, note: c2}, {id: 2, note: extra}, {id: 3, note: hidden}]
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS outer_label"
   - sql: "DROP TABLE IF EXISTS child"
