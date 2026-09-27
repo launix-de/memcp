@@ -324,7 +324,7 @@ func testPHPIntegration(t *testing.T, front, cli string, queueTimeout bool) {
 		}
 		localeWG.Wait()
 	}
-	for _, action := range []string{"setup", "quota", "oom-php", "oom-pdo", "pdo", "wire", "route-dsn", "buffers", "latency", "abandon", "verify"} {
+	for _, action := range []string{"setup", "quota", "oom-php", "oom-pdo", "pdo", "rowcount", "wire", "route-dsn", "buffers", "latency", "abandon", "verify"} {
 		status, body, err := get("/app/probe.php?action=" + action)
 		want := 200
 		if action == "abandon" || strings.HasPrefix(action, "oom-") {

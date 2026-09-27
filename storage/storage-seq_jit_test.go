@@ -343,3 +343,57 @@ func TestStorageSeqJITNullTransitionsMatchInput(t *testing.T) {
 		}
 	}
 }
+
+// Compression must not change an integer's public type or round large IDs
+// through float64. PDO clients rely on stable types across JSON round trips.
+func TestStorageSeqIntegerRepresentation(t *testing.T) {
+	if tag := buildStorageSeq([]scm.Scmer{scm.NewInt(1), scm.NewInt(2)}).JITValueType(); tag != scm.TagInt {
+		t.Fatalf("non-null sequence JIT type = %d, want integer", tag)
+	}
+	values := []scm.Scmer{
+		scm.NewInt(1), scm.NewInt(2), scm.NewNil(),
+		scm.NewInt(9007199254740993), scm.NewInt(9007199254740994),
+		scm.NewInt(-9007199254740993), scm.NewInt(-9007199254740994),
+	}
+	s := buildStorageSeq(values)
+	var serialized bytes.Buffer
+	s.Serialize(&serialized)
+	serialized.ReadByte() // storage magic
+	var restored StorageSeq
+	restored.Deserialize(&serialized)
+	check := func(t *testing.T, got, want scm.Scmer) {
+		t.Helper()
+		if want.IsNil() {
+			if !got.IsNil() {
+				t.Fatalf("got %v, want NULL", got)
+			}
+		} else if !got.IsInt() || got.Int() != want.Int() {
+			t.Fatalf("got %v (integer=%v), want exact integer %d", got, got.IsInt(), want.Int())
+		}
+	}
+	for name, col := range map[string]*StorageSeq{"built": s, "restored": &restored} {
+		t.Run(name, func(t *testing.T) {
+			for _, reader := range []bulkReadable{col, col.GetCachedReader()} {
+				for i, want := range values {
+					check(t, reader.GetValue(uint32(i)), want)
+				}
+				out := make([]scm.Scmer, len(values)*2)
+				reader.GetValueRange(0, uint32(len(values)), out, 2)
+				for i, want := range values {
+					check(t, out[i*2], want)
+				}
+				for _, ids := range [][]uint32{{0, 2, 3, 4, 6}, {6, 3, 0, 2, 3}} {
+					reader.GetValueMulti(ids, out, 2)
+					for i, id := range ids {
+						check(t, out[i*2], values[id])
+					}
+				}
+			}
+			get, cleanup := jitBuildGetValueFunc(t, col, true)
+			defer cleanup()
+			for i, want := range values {
+				check(t, get(int64(i)), want)
+			}
+		})
+	}
+}

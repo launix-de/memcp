@@ -3246,10 +3246,44 @@ their tighter direct bound; this product is only an additional candidate. */
 				nil))
 			(if (nil? estimate) nil (min row_count estimate))))))
 
-(define aggregate_pushdown_direct_cost (lambda (driver_rows stage_count)
-	(planner_direct_presence_probe_cost (* driver_rows stage_count))))
+/* A stage count remains the conservative per-row probe estimate. When a
+boolean stage has a proven closed domain, retain that domain's input in the
+cost interface so both the compile-time choice and its guard can price the
+existing bulk carrier. This is costing metadata, never a physical IR node. */
+(define aggregate_pushdown_probe_inputs (lambda (stages block terms)
+	(begin
+		(define catalog (stage_catalog_with_nested stages))
+		(define graph (stage_dependency_graph catalog))
+		(define inputs (map (aggregate_pushdown_filtered_stage_sources block terms) (lambda (src)
+			(begin
+				(define stage (stage_by_id catalog (stage_output_relation_id (source_relation src))))
+				(define input (gs_input stage))
+				(if (and (query_block? input)
+					(single_real_source? (qb_sources input))
+					(source_is_base_table? (single_real_source (qb_sources input)))
+					(empty_list? (qb_group input)) (nil? (qb_having input))
+					(empty_list? (qb_order input))
+					(nil? (qb_limit input)) (nil? (qb_offset input))
+					(direct_boolean_recset_stage_eligible? catalog graph stage nil)
+					(not (nil? (scalar_first_probe_recset_key_index stage
+						(single_real_source (qb_sources input)) (gs_keys stage) true))))
+					input nil)))))
+		(if (empty_list? inputs) (list nil) inputs))))
 
-(define aggregate_pushdown_partition_cost (lambda (driver_rows group_rows stage_count)
+(define aggregate_pushdown_direct_cost (lambda (driver_rows probes)
+	(if (not (list? probes))
+		(planner_direct_presence_probe_cost (* driver_rows probes))
+		(reduce probes (lambda (total input)
+			(begin
+				(define direct (planner_direct_presence_probe_cost driver_rows))
+				(define domain_rows (if (nil? input) nil (planner_stage_input_rows input)))
+				(define carrier (if (number? domain_rows)
+					(planner_recset_carrier_cost domain_rows driver_rows) direct))
+				(planner_cost_add total
+					(if (planner_cost_better? carrier direct) carrier direct) driver_rows 0.6)))
+			(planner_direct_presence_probe_cost 0)))))
+
+(define aggregate_pushdown_partition_cost (lambda (driver_rows group_rows probes)
 	(planner_cost_add
 		(planner_cost
 			(+ planner_membership_group_cache_startup_ns
@@ -3258,21 +3292,23 @@ their tighter direct bound; this product is only an additional candidate. */
 			0 0 0
 			(* driver_rows planner_group_relation_build_row_ns)
 			(* group_rows 16) 0 group_rows 0.7)
-		(planner_direct_presence_probe_cost (* group_rows stage_count))
+		(aggregate_pushdown_direct_cost group_rows probes)
 		group_rows 0.7)))
 
 /* Aggregate partitioning and direct row evaluation execute the same residual
 base-table predicate, so that scan work cancels. Partitioning additionally
 builds a grouped relation but evaluates each filtered stage only once per
-distinct key. Keep this as an ordinary Costgen-owned crossover: equality of
+distinct key. Both alternatives include eligible bulk boolean carriers; a
+per-row-only baseline would overstate the work saved by partitioning. Keep this
+as an ordinary Costgen-owned crossover: equality of
 driver and group cardinality makes direct evaluation dominate, while a broad
 fact table with a small FK domain still selects the reusable partition. */
-(define aggregate_pushdown_cost_preferred? (lambda (driver_rows group_rows stage_count)
+(define aggregate_pushdown_cost_preferred? (lambda (driver_rows group_rows probes)
 	(and (number? driver_rows)
 		(and (number? group_rows)
 			(planner_cost_better?
-				(aggregate_pushdown_partition_cost driver_rows group_rows stage_count)
-				(aggregate_pushdown_direct_cost driver_rows stage_count))))))
+				(aggregate_pushdown_partition_cost driver_rows group_rows probes)
+				(aggregate_pushdown_direct_cost driver_rows probes))))))
 
 (define planner_aggregate_pushdown_driver_rows (lambda (src residual tx planning_session)
 	(begin
@@ -6902,14 +6938,13 @@ sampling guard for a choice that no cardinality change can reverse. */
 						ir)
 					(begin
 						(define residual (combine_where_terms residual_terms true))
-						(define stage_count (max 1 (count
-							(aggregate_pushdown_filtered_stage_sources block movable_terms))))
+						(define probes (aggregate_pushdown_probe_inputs (ir_stages ir) block movable_terms))
 						(define driver_rows (planner_aggregate_pushdown_driver_rows
 							driver residual tx planning_session))
 						(define keys (aggregate_pushdown_keys driver columns))
 						(define group_rows (planner_aggregate_pushdown_group_estimate driver keys driver_rows))
 						(define chosen (aggregate_pushdown_cost_preferred?
-							driver_rows group_rows stage_count))
+							driver_rows group_rows probes))
 						(define driver_rows_expr (planner_guard_runtime_binding
 							(aggregate_pushdown_runtime_driver_rows_expr driver residual)
 							planning_session nil))
@@ -6921,7 +6956,7 @@ sampling guard for a choice that no cardinality change can reverse. */
 							planning_session nil))
 						(if (planner_guarded_choice chosen
 							(list (quote aggregate_pushdown_cost_preferred?)
-								driver_rows_expr group_rows_expr stage_count)
+								driver_rows_expr group_rows_expr (planner_quoted_value probes))
 							planning_session)
 							(aggregate_pushdown_build_rewrite ir block driver movable_terms residual_terms
 								probe_bindings columns driver_rows group_rows)
