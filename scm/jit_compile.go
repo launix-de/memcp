@@ -840,8 +840,9 @@ func (ctx *JITContext) EmitSliceCapAfterLow(slice, low *JITValueDesc, excluded .
 	return result
 }
 
-// EmitSliceDataAfterLow computes slice.data + low*elementSize without assuming
-// that a control-flow-stabilized slice header still occupies registers.
+// EmitSliceDataAfterLow advances the data pointer, retaining the original
+// pointer when low exhausts the backing storage. A one-past-end pointer is not
+// a valid GC root, even in an empty header that is canonicalized later.
 func (ctx *JITContext) EmitSliceDataAfterLow(slice, low *JITValueDesc, elementSize int32, excluded ...Reg) Reg {
 	ctx.ReclaimUntrackedRegs()
 	ctx.SyncDesc(slice)
@@ -879,6 +880,49 @@ func (ctx *JITContext) EmitSliceDataAfterLow(slice, low *JITValueDesc, elementSi
 		ctx.EmitMovRegReg(result, slice.Reg)
 	}
 
+	if low.Loc == LocImm && low.Imm.Int() == 0 {
+		return result
+	}
+	end := ctx.ReserveLabel()
+	// Slices use capacity; strings use length. Read the bound from the current
+	// descriptor because allocating the result may have spilled the header.
+	bound := ctx.AllocRegExcept(append(excluded, result)...)
+	ctx.SyncDesc(slice)
+	switch slice.Loc {
+	case LocMem:
+		ctx.EmitMovRegImm64(bound, uint64(uint32(slice.KnownSliceCap)))
+	case LocStackPair, LocStackTriple:
+		base, offset := ctx.StackReg, slice.StackOff+8
+		if slice.StackOff < 0 {
+			base = ctx.FrameReg
+		}
+		if slice.Loc == LocStackTriple {
+			offset += 8
+		}
+		ctx.EmitMovRegMem(bound, base, offset)
+	case LocRegPair:
+		ctx.EmitMovRegReg(bound, slice.Reg2)
+	case LocRegTriple:
+		ctx.EmitMovRegReg(bound, slice.Reg3)
+	default:
+		panic("jit: slice data requires a header with a storage bound")
+	}
+	// Reserve multiplication scratch before branching: allocator spills must
+	// execute on both paths so their descriptor locations remain valid.
+	var factor Reg
+	needsFactor := low.Loc != LocImm && elementSize != 1 && elementSize != 2 && elementSize != 4 && elementSize != 8 && elementSize != 16
+	if needsFactor {
+		factor = ctx.AllocRegExcept(append(excluded, result, bound)...)
+	}
+	if low.Loc == LocImm {
+		ctx.EmitMovRegImm64(ctx.ScratchReg, uint64(low.Imm.Int()))
+		ctx.EmitCmpInt64(bound, ctx.ScratchReg)
+	} else {
+		ctx.EmitCmpInt64(bound, low.Reg)
+	}
+	ctx.FreeReg(bound)
+	ctx.EmitJcc(CcE, end)
+
 	if low.Loc == LocImm {
 		offset := low.Imm.Int() * int64(elementSize)
 		if offset >= -2147483648 && offset <= 2147483647 {
@@ -897,12 +941,14 @@ func (ctx *JITContext) EmitSliceDataAfterLow(slice, low *JITValueDesc, elementSi
 			ctx.EmitAddInt64(result, ctx.ScratchReg)
 		default:
 			ctx.EmitMovRegReg(ctx.ScratchReg, low.Reg)
-			factor := ctx.AllocRegExcept(append(excluded, result, low.Reg)...)
 			ctx.EmitMovRegImm64(factor, uint64(elementSize))
 			ctx.EmitImulInt64(ctx.ScratchReg, factor)
-			ctx.FreeReg(factor)
 			ctx.EmitAddInt64(result, ctx.ScratchReg)
 		}
+	}
+	ctx.MarkLabel(end)
+	if needsFactor {
+		ctx.FreeReg(factor)
 	}
 	return result
 }
