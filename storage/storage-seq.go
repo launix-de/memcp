@@ -469,8 +469,6 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result s
 	_ = d1198
 	var d1199 scm.JITValueDesc
 	_ = d1199
-	var d1200 scm.JITValueDesc
-	_ = d1200
 	var d1201 scm.JITValueDesc
 	_ = d1201
 	var d1202 scm.JITValueDesc
@@ -13736,68 +13734,83 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result s
 		ctx.FreeDesc(&d1198)
 		ctx.FreeDesc(&d1174)
 		ctx.EnsureDesc(&d1152)
+		resultTarget1200 := false
+		_ = resultTarget1200
 		ctx.EnsureDesc(&d1199)
 		ctx.EnsureDescsTogether(&d1152, &d1199)
-		var d1200 scm.JITValueDesc
+		var d1201 scm.JITValueDesc
 		if d1152.Loc == scm.LocImm && d1199.Loc == scm.LocImm {
-			d1200 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(d1152.Imm.Int() + d1199.Imm.Int())}
+			d1201 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(d1152.Imm.Int() + d1199.Imm.Int())}
 		} else if d1199.Loc == scm.LocImm && d1199.Imm.Int() == 0 {
 			ctx.EnsureDesc(&d1152)
-			r158 := ctx.AllocRegExcept(d1152.Reg)
+			var r158 scm.Reg
+			if result.Loc == scm.LocRegPair && result.Reg2 != d1152.Reg {
+				r158 = result.Reg2
+				resultTarget1200 = true
+			} else {
+				r158 = ctx.AllocRegExcept(d1152.Reg)
+			}
 			ctx.EmitMovRegReg(r158, d1152.Reg)
-			d1200 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: r158}
-			ctx.BindReg(r158, &d1200)
+			d1201 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: r158}
+			ctx.BindReg(r158, &d1201)
 		} else if d1152.Loc == scm.LocImm && d1152.Imm.Int() == 0 {
 			ctx.EnsureDesc(&d1199)
-			d1200 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: d1199.Reg}
-			ctx.BindReg(d1199.Reg, &d1200)
+			d1201 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: d1199.Reg}
+			ctx.BindReg(d1199.Reg, &d1201)
 		} else if d1152.Loc == scm.LocImm {
 			ctx.EnsureDesc(&d1199)
-			scratch := ctx.AllocRegExcept(d1199.Reg)
+			var scratch scm.Reg
+			if result.Loc == scm.LocRegPair && result.Reg2 != d1199.Reg {
+				scratch = result.Reg2
+				resultTarget1200 = true
+			} else {
+				scratch = ctx.AllocRegExcept(d1199.Reg)
+			}
 			ctx.EmitMovRegReg(scratch, d1199.Reg)
 			ctx.EmitIntBinaryImm(scm.JITIntAdd, 64, scratch, d1152.Imm.Int())
-			d1200 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: scratch}
-			ctx.BindReg(scratch, &d1200)
+			d1201 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: scratch}
+			ctx.BindReg(scratch, &d1201)
 		} else if d1199.Loc == scm.LocImm {
 			ctx.EnsureDesc(&d1152)
-			scratch := ctx.AllocRegExcept(d1152.Reg)
+			var scratch scm.Reg
+			if result.Loc == scm.LocRegPair && result.Reg2 != d1152.Reg {
+				scratch = result.Reg2
+				resultTarget1200 = true
+			} else {
+				scratch = ctx.AllocRegExcept(d1152.Reg)
+			}
 			ctx.EmitMovRegReg(scratch, d1152.Reg)
 			ctx.EmitIntBinaryImm(scm.JITIntAdd, 64, scratch, d1199.Imm.Int())
-			d1200 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: scratch}
-			ctx.BindReg(scratch, &d1200)
+			d1201 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: scratch}
+			ctx.BindReg(scratch, &d1201)
 		} else {
 			ctx.EnsureDesc(&d1152)
 			ctx.SyncDesc(&d1199)
-			r159 := ctx.AllocRegExcept(d1152.Reg, d1199.Reg)
+			var r159 scm.Reg
+			if result.Loc == scm.LocRegPair && result.Reg2 != d1152.Reg && result.Reg2 != d1199.Reg {
+				r159 = result.Reg2
+				resultTarget1200 = true
+			} else {
+				r159 = ctx.AllocRegExcept(d1152.Reg, d1199.Reg)
+			}
 			ctx.EmitMovRegReg(r159, d1152.Reg)
 			ctx.EmitIntBinary(scm.JITIntAdd, 64, r159, &d1199)
-			d1200 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: r159}
-			ctx.BindReg(r159, &d1200)
+			d1201 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: r159}
+			ctx.BindReg(r159, &d1201)
 		}
-		if d1200.Loc == scm.LocReg && d1152.Loc == scm.LocReg && d1200.Reg == d1152.Reg {
+		if d1201.Loc == scm.LocReg && d1152.Loc == scm.LocReg && d1201.Reg == d1152.Reg {
 			ctx.TransferReg(d1152.Reg)
 			d1152.Loc = scm.LocNone
 		}
+		if resultTarget1200 && d1201.Loc == scm.LocReg {
+			ctx.BindReg(result.Reg2, &result)
+		}
 		ctx.FreeDesc(&d1152)
 		ctx.FreeDesc(&d1199)
-		ctx.EnsureDesc(&d1200)
-		ctx.EnsureDesc(&d1200)
-		var d1201 scm.JITValueDesc
-		if d1200.Loc == scm.LocImm {
-			d1201 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagFloat, Imm: scm.NewFloat(float64(d1200.Imm.Int()))}
-		} else {
-			var r160 scm.Reg
-			r160 = d1200.Reg
-			d1200.Loc = scm.LocNone
-			ctx.EmitCvtInt64ToFloat64(scm.RegX0, r160)
-			d1201 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagFloat, Reg: r160}
-			ctx.BindReg(r160, &d1201)
-		}
-		ctx.FreeDesc(&d1200)
 		ctx.EnsureDesc(&d1201)
 		d1202 = result
 		ctx.EnsureDesc(&d1201)
-		ctx.EmitMakeFloat(d1202, d1201)
+		ctx.EmitMakeInt(d1202, d1201)
 		if d1201.Loc == scm.LocReg {
 			ctx.FreeReg(d1201.Reg)
 		}
@@ -14472,9 +14485,6 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result s
 		if len(ps.OverlayValues) > 1199 && ps.OverlayValues[1199].Loc != scm.LocNone {
 			d1199 = ps.OverlayValues[1199]
 		}
-		if len(ps.OverlayValues) > 1200 && ps.OverlayValues[1200].Loc != scm.LocNone {
-			d1200 = ps.OverlayValues[1200]
-		}
 		if len(ps.OverlayValues) > 1201 && ps.OverlayValues[1201].Loc != scm.LocNone {
 			d1201 = ps.OverlayValues[1201]
 		}
@@ -14489,10 +14499,10 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result s
 			d1203 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(int64(val))}
 		} else {
 			off := int32(unsafe.Offsetof((*StorageSeq)(nil).start) + 88)
-			r161 := ctx.AllocReg()
-			ctx.EmitMovRegMem(r161, thisptr.Reg, off)
-			d1203 = scm.JITValueDesc{Loc: scm.LocReg, Reg: r161}
-			ctx.BindReg(r161, &d1203)
+			r160 := ctx.AllocReg()
+			ctx.EmitMovRegMem(r160, thisptr.Reg, off)
+			d1203 = scm.JITValueDesc{Loc: scm.LocReg, Reg: r160}
+			ctx.BindReg(r160, &d1203)
 		}
 		ctx.EnsureDesc(&d179)
 		ctx.EnsureDesc(&d1203)
@@ -14501,26 +14511,26 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result s
 		if d179.Loc == scm.LocImm && d1203.Loc == scm.LocImm {
 			d1204 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagBool, Imm: scm.NewBool(uint64(d179.Imm.Int()) == uint64(d1203.Imm.Int()))}
 		} else if d1203.Loc == scm.LocImm {
-			r162 := ctx.AllocRegExcept(d179.Reg)
+			r161 := ctx.AllocRegExcept(d179.Reg)
 			if d1203.Imm.Int() >= -2147483648 && d1203.Imm.Int() <= 2147483647 {
 				ctx.EmitCmpRegImm32(d179.Reg, int32(d1203.Imm.Int()))
 			} else {
 				ctx.EmitMovRegImm64(scm.RegR11, uint64(d1203.Imm.Int()))
 				ctx.EmitCmpInt64(d179.Reg, scm.RegR11)
 			}
-			d1204 = scm.JITValueDesc{Loc: scm.LocFlags, Type: scm.TagBool, Reg: r162, Condition: scm.CondEqual}
-			ctx.BindReg(r162, &d1204)
+			d1204 = scm.JITValueDesc{Loc: scm.LocFlags, Type: scm.TagBool, Reg: r161, Condition: scm.CondEqual}
+			ctx.BindReg(r161, &d1204)
 		} else if d179.Loc == scm.LocImm {
-			r163 := ctx.AllocReg()
+			r162 := ctx.AllocReg()
 			ctx.EmitMovRegImm64(scm.RegR11, uint64(d179.Imm.Int()))
 			ctx.EmitCmpInt64(scm.RegR11, d1203.Reg)
+			d1204 = scm.JITValueDesc{Loc: scm.LocFlags, Type: scm.TagBool, Reg: r162, Condition: scm.CondEqual}
+			ctx.BindReg(r162, &d1204)
+		} else {
+			r163 := ctx.AllocRegExcept(d179.Reg)
+			ctx.EmitCmpInt64(d179.Reg, d1203.Reg)
 			d1204 = scm.JITValueDesc{Loc: scm.LocFlags, Type: scm.TagBool, Reg: r163, Condition: scm.CondEqual}
 			ctx.BindReg(r163, &d1204)
-		} else {
-			r164 := ctx.AllocRegExcept(d179.Reg)
-			ctx.EmitCmpInt64(d179.Reg, d1203.Reg)
-			d1204 = scm.JITValueDesc{Loc: scm.LocFlags, Type: scm.TagBool, Reg: r164, Condition: scm.CondEqual}
-			ctx.BindReg(r164, &d1204)
 		}
 		ctx.FreeDesc(&d1203)
 		d1205 = d1204
@@ -14743,7 +14753,6 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result s
 				ps1206.OverlayValues[1197] = d1197
 				ps1206.OverlayValues[1198] = d1198
 				ps1206.OverlayValues[1199] = d1199
-				ps1206.OverlayValues[1200] = d1200
 				ps1206.OverlayValues[1201] = d1201
 				ps1206.OverlayValues[1202] = d1202
 				ps1206.OverlayValues[1203] = d1203
@@ -14964,7 +14973,6 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result s
 			ps1207.OverlayValues[1197] = d1197
 			ps1207.OverlayValues[1198] = d1198
 			ps1207.OverlayValues[1199] = d1199
-			ps1207.OverlayValues[1200] = d1200
 			ps1207.OverlayValues[1201] = d1201
 			ps1207.OverlayValues[1202] = d1202
 			ps1207.OverlayValues[1203] = d1203
@@ -15190,14 +15198,13 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result s
 		snap1414 := d1197
 		snap1415 := d1198
 		snap1416 := d1199
-		snap1417 := d1200
-		snap1418 := d1201
-		snap1419 := d1202
-		snap1420 := d1203
-		snap1421 := d1204
-		snap1422 := d1205
-		alloc1423 := ctx.SnapshotAllocState()
-		ctx.RestoreAllocState(alloc1423)
+		snap1417 := d1201
+		snap1418 := d1202
+		snap1419 := d1203
+		snap1420 := d1204
+		snap1421 := d1205
+		alloc1422 := ctx.SnapshotAllocState()
+		ctx.RestoreAllocState(alloc1422)
 		d5 = snap1208
 		d6 = snap1209
 		d7 = snap1210
@@ -15407,13 +15414,12 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result s
 		d1197 = snap1414
 		d1198 = snap1415
 		d1199 = snap1416
-		d1200 = snap1417
-		d1201 = snap1418
-		d1202 = snap1419
-		d1203 = snap1420
-		d1204 = snap1421
-		d1205 = snap1422
-		ctx.RestoreAllocState(alloc1423)
+		d1201 = snap1417
+		d1202 = snap1418
+		d1203 = snap1419
+		d1204 = snap1420
+		d1205 = snap1421
+		ctx.RestoreAllocState(alloc1422)
 		d5 = snap1208
 		d6 = snap1209
 		d7 = snap1210
@@ -15623,12 +15629,227 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result s
 		d1197 = snap1414
 		d1198 = snap1415
 		d1199 = snap1416
-		d1200 = snap1417
-		d1201 = snap1418
-		d1202 = snap1419
-		d1203 = snap1420
-		d1204 = snap1421
-		d1205 = snap1422
+		d1201 = snap1417
+		d1202 = snap1418
+		d1203 = snap1419
+		d1204 = snap1420
+		d1205 = snap1421
+		ps1423 := scm.PhiState{General: true}
+		ps1423.OverlayValues = make([]scm.JITValueDesc, 1206)
+		ps1423.OverlayValues[5] = d5
+		ps1423.OverlayValues[6] = d6
+		ps1423.OverlayValues[7] = d7
+		ps1423.OverlayValues[8] = d8
+		ps1423.OverlayValues[9] = d9
+		ps1423.OverlayValues[10] = d10
+		ps1423.OverlayValues[11] = d11
+		ps1423.OverlayValues[12] = d12
+		ps1423.OverlayValues[13] = d13
+		ps1423.OverlayValues[14] = d14
+		ps1423.OverlayValues[15] = d15
+		ps1423.OverlayValues[16] = d16
+		ps1423.OverlayValues[17] = d17
+		ps1423.OverlayValues[18] = d18
+		ps1423.OverlayValues[19] = d19
+		ps1423.OverlayValues[21] = d21
+		ps1423.OverlayValues[22] = d22
+		ps1423.OverlayValues[23] = d23
+		ps1423.OverlayValues[24] = d24
+		ps1423.OverlayValues[25] = d25
+		ps1423.OverlayValues[26] = d26
+		ps1423.OverlayValues[27] = d27
+		ps1423.OverlayValues[28] = d28
+		ps1423.OverlayValues[29] = d29
+		ps1423.OverlayValues[30] = d30
+		ps1423.OverlayValues[31] = d31
+		ps1423.OverlayValues[32] = d32
+		ps1423.OverlayValues[33] = d33
+		ps1423.OverlayValues[34] = d34
+		ps1423.OverlayValues[35] = d35
+		ps1423.OverlayValues[36] = d36
+		ps1423.OverlayValues[37] = d37
+		ps1423.OverlayValues[38] = d38
+		ps1423.OverlayValues[39] = d39
+		ps1423.OverlayValues[40] = d40
+		ps1423.OverlayValues[41] = d41
+		ps1423.OverlayValues[42] = d42
+		ps1423.OverlayValues[43] = d43
+		ps1423.OverlayValues[44] = d44
+		ps1423.OverlayValues[45] = d45
+		ps1423.OverlayValues[46] = d46
+		ps1423.OverlayValues[47] = d47
+		ps1423.OverlayValues[48] = d48
+		ps1423.OverlayValues[49] = d49
+		ps1423.OverlayValues[50] = d50
+		ps1423.OverlayValues[51] = d51
+		ps1423.OverlayValues[54] = d54
+		ps1423.OverlayValues[55] = d55
+		ps1423.OverlayValues[56] = d56
+		ps1423.OverlayValues[159] = d159
+		ps1423.OverlayValues[160] = d160
+		ps1423.OverlayValues[161] = d161
+		ps1423.OverlayValues[162] = d162
+		ps1423.OverlayValues[163] = d163
+		ps1423.OverlayValues[164] = d164
+		ps1423.OverlayValues[165] = d165
+		ps1423.OverlayValues[166] = d166
+		ps1423.OverlayValues[167] = d167
+		ps1423.OverlayValues[168] = d168
+		ps1423.OverlayValues[169] = d169
+		ps1423.OverlayValues[170] = d170
+		ps1423.OverlayValues[171] = d171
+		ps1423.OverlayValues[172] = d172
+		ps1423.OverlayValues[173] = d173
+		ps1423.OverlayValues[174] = d174
+		ps1423.OverlayValues[175] = d175
+		ps1423.OverlayValues[176] = d176
+		ps1423.OverlayValues[177] = d177
+		ps1423.OverlayValues[178] = d178
+		ps1423.OverlayValues[179] = d179
+		ps1423.OverlayValues[180] = d180
+		ps1423.OverlayValues[181] = d181
+		ps1423.OverlayValues[184] = d184
+		ps1423.OverlayValues[335] = d335
+		ps1423.OverlayValues[336] = d336
+		ps1423.OverlayValues[337] = d337
+		ps1423.OverlayValues[338] = d338
+		ps1423.OverlayValues[340] = d340
+		ps1423.OverlayValues[341] = d341
+		ps1423.OverlayValues[342] = d342
+		ps1423.OverlayValues[343] = d343
+		ps1423.OverlayValues[344] = d344
+		ps1423.OverlayValues[345] = d345
+		ps1423.OverlayValues[346] = d346
+		ps1423.OverlayValues[347] = d347
+		ps1423.OverlayValues[349] = d349
+		ps1423.OverlayValues[351] = d351
+		ps1423.OverlayValues[352] = d352
+		ps1423.OverlayValues[353] = d353
+		ps1423.OverlayValues[444] = d444
+		ps1423.OverlayValues[445] = d445
+		ps1423.OverlayValues[448] = d448
+		ps1423.OverlayValues[542] = d542
+		ps1423.OverlayValues[543] = d543
+		ps1423.OverlayValues[544] = d544
+		ps1423.OverlayValues[545] = d545
+		ps1423.OverlayValues[546] = d546
+		ps1423.OverlayValues[548] = d548
+		ps1423.OverlayValues[549] = d549
+		ps1423.OverlayValues[550] = d550
+		ps1423.OverlayValues[551] = d551
+		ps1423.OverlayValues[552] = d552
+		ps1423.OverlayValues[553] = d553
+		ps1423.OverlayValues[554] = d554
+		ps1423.OverlayValues[555] = d555
+		ps1423.OverlayValues[556] = d556
+		ps1423.OverlayValues[557] = d557
+		ps1423.OverlayValues[558] = d558
+		ps1423.OverlayValues[559] = d559
+		ps1423.OverlayValues[560] = d560
+		ps1423.OverlayValues[561] = d561
+		ps1423.OverlayValues[562] = d562
+		ps1423.OverlayValues[563] = d563
+		ps1423.OverlayValues[564] = d564
+		ps1423.OverlayValues[565] = d565
+		ps1423.OverlayValues[566] = d566
+		ps1423.OverlayValues[567] = d567
+		ps1423.OverlayValues[568] = d568
+		ps1423.OverlayValues[569] = d569
+		ps1423.OverlayValues[570] = d570
+		ps1423.OverlayValues[571] = d571
+		ps1423.OverlayValues[572] = d572
+		ps1423.OverlayValues[573] = d573
+		ps1423.OverlayValues[574] = d574
+		ps1423.OverlayValues[829] = d829
+		ps1423.OverlayValues[830] = d830
+		ps1423.OverlayValues[831] = d831
+		ps1423.OverlayValues[833] = d833
+		ps1423.OverlayValues[834] = d834
+		ps1423.OverlayValues[835] = d835
+		ps1423.OverlayValues[836] = d836
+		ps1423.OverlayValues[837] = d837
+		ps1423.OverlayValues[838] = d838
+		ps1423.OverlayValues[839] = d839
+		ps1423.OverlayValues[841] = d841
+		ps1423.OverlayValues[843] = d843
+		ps1423.OverlayValues[844] = d844
+		ps1423.OverlayValues[983] = d983
+		ps1423.OverlayValues[984] = d984
+		ps1423.OverlayValues[987] = d987
+		ps1423.OverlayValues[1129] = d1129
+		ps1423.OverlayValues[1130] = d1130
+		ps1423.OverlayValues[1131] = d1131
+		ps1423.OverlayValues[1132] = d1132
+		ps1423.OverlayValues[1134] = d1134
+		ps1423.OverlayValues[1135] = d1135
+		ps1423.OverlayValues[1136] = d1136
+		ps1423.OverlayValues[1137] = d1137
+		ps1423.OverlayValues[1138] = d1138
+		ps1423.OverlayValues[1139] = d1139
+		ps1423.OverlayValues[1140] = d1140
+		ps1423.OverlayValues[1141] = d1141
+		ps1423.OverlayValues[1142] = d1142
+		ps1423.OverlayValues[1143] = d1143
+		ps1423.OverlayValues[1145] = d1145
+		ps1423.OverlayValues[1146] = d1146
+		ps1423.OverlayValues[1147] = d1147
+		ps1423.OverlayValues[1148] = d1148
+		ps1423.OverlayValues[1149] = d1149
+		ps1423.OverlayValues[1150] = d1150
+		ps1423.OverlayValues[1151] = d1151
+		ps1423.OverlayValues[1152] = d1152
+		ps1423.OverlayValues[1153] = d1153
+		ps1423.OverlayValues[1154] = d1154
+		ps1423.OverlayValues[1155] = d1155
+		ps1423.OverlayValues[1156] = d1156
+		ps1423.OverlayValues[1157] = d1157
+		ps1423.OverlayValues[1158] = d1158
+		ps1423.OverlayValues[1159] = d1159
+		ps1423.OverlayValues[1160] = d1160
+		ps1423.OverlayValues[1161] = d1161
+		ps1423.OverlayValues[1162] = d1162
+		ps1423.OverlayValues[1163] = d1163
+		ps1423.OverlayValues[1164] = d1164
+		ps1423.OverlayValues[1165] = d1165
+		ps1423.OverlayValues[1166] = d1166
+		ps1423.OverlayValues[1167] = d1167
+		ps1423.OverlayValues[1168] = d1168
+		ps1423.OverlayValues[1169] = d1169
+		ps1423.OverlayValues[1170] = d1170
+		ps1423.OverlayValues[1171] = d1171
+		ps1423.OverlayValues[1172] = d1172
+		ps1423.OverlayValues[1173] = d1173
+		ps1423.OverlayValues[1174] = d1174
+		ps1423.OverlayValues[1175] = d1175
+		ps1423.OverlayValues[1176] = d1176
+		ps1423.OverlayValues[1177] = d1177
+		ps1423.OverlayValues[1178] = d1178
+		ps1423.OverlayValues[1179] = d1179
+		ps1423.OverlayValues[1180] = d1180
+		ps1423.OverlayValues[1181] = d1181
+		ps1423.OverlayValues[1182] = d1182
+		ps1423.OverlayValues[1183] = d1183
+		ps1423.OverlayValues[1184] = d1184
+		ps1423.OverlayValues[1185] = d1185
+		ps1423.OverlayValues[1186] = d1186
+		ps1423.OverlayValues[1187] = d1187
+		ps1423.OverlayValues[1188] = d1188
+		ps1423.OverlayValues[1189] = d1189
+		ps1423.OverlayValues[1190] = d1190
+		ps1423.OverlayValues[1191] = d1191
+		ps1423.OverlayValues[1192] = d1192
+		ps1423.OverlayValues[1193] = d1193
+		ps1423.OverlayValues[1194] = d1194
+		ps1423.OverlayValues[1195] = d1195
+		ps1423.OverlayValues[1196] = d1196
+		ps1423.OverlayValues[1197] = d1197
+		ps1423.OverlayValues[1198] = d1198
+		ps1423.OverlayValues[1199] = d1199
+		ps1423.OverlayValues[1201] = d1201
+		ps1423.OverlayValues[1202] = d1202
+		ps1423.OverlayValues[1203] = d1203
+		ps1423.OverlayValues[1204] = d1204
+		ps1423.OverlayValues[1205] = d1205
 		ps1424 := scm.PhiState{General: true}
 		ps1424.OverlayValues = make([]scm.JITValueDesc, 1206)
 		ps1424.OverlayValues[5] = d5
@@ -15840,672 +16061,452 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result s
 		ps1424.OverlayValues[1197] = d1197
 		ps1424.OverlayValues[1198] = d1198
 		ps1424.OverlayValues[1199] = d1199
-		ps1424.OverlayValues[1200] = d1200
 		ps1424.OverlayValues[1201] = d1201
 		ps1424.OverlayValues[1202] = d1202
 		ps1424.OverlayValues[1203] = d1203
 		ps1424.OverlayValues[1204] = d1204
 		ps1424.OverlayValues[1205] = d1205
-		ps1425 := scm.PhiState{General: true}
-		ps1425.OverlayValues = make([]scm.JITValueDesc, 1206)
-		ps1425.OverlayValues[5] = d5
-		ps1425.OverlayValues[6] = d6
-		ps1425.OverlayValues[7] = d7
-		ps1425.OverlayValues[8] = d8
-		ps1425.OverlayValues[9] = d9
-		ps1425.OverlayValues[10] = d10
-		ps1425.OverlayValues[11] = d11
-		ps1425.OverlayValues[12] = d12
-		ps1425.OverlayValues[13] = d13
-		ps1425.OverlayValues[14] = d14
-		ps1425.OverlayValues[15] = d15
-		ps1425.OverlayValues[16] = d16
-		ps1425.OverlayValues[17] = d17
-		ps1425.OverlayValues[18] = d18
-		ps1425.OverlayValues[19] = d19
-		ps1425.OverlayValues[21] = d21
-		ps1425.OverlayValues[22] = d22
-		ps1425.OverlayValues[23] = d23
-		ps1425.OverlayValues[24] = d24
-		ps1425.OverlayValues[25] = d25
-		ps1425.OverlayValues[26] = d26
-		ps1425.OverlayValues[27] = d27
-		ps1425.OverlayValues[28] = d28
-		ps1425.OverlayValues[29] = d29
-		ps1425.OverlayValues[30] = d30
-		ps1425.OverlayValues[31] = d31
-		ps1425.OverlayValues[32] = d32
-		ps1425.OverlayValues[33] = d33
-		ps1425.OverlayValues[34] = d34
-		ps1425.OverlayValues[35] = d35
-		ps1425.OverlayValues[36] = d36
-		ps1425.OverlayValues[37] = d37
-		ps1425.OverlayValues[38] = d38
-		ps1425.OverlayValues[39] = d39
-		ps1425.OverlayValues[40] = d40
-		ps1425.OverlayValues[41] = d41
-		ps1425.OverlayValues[42] = d42
-		ps1425.OverlayValues[43] = d43
-		ps1425.OverlayValues[44] = d44
-		ps1425.OverlayValues[45] = d45
-		ps1425.OverlayValues[46] = d46
-		ps1425.OverlayValues[47] = d47
-		ps1425.OverlayValues[48] = d48
-		ps1425.OverlayValues[49] = d49
-		ps1425.OverlayValues[50] = d50
-		ps1425.OverlayValues[51] = d51
-		ps1425.OverlayValues[54] = d54
-		ps1425.OverlayValues[55] = d55
-		ps1425.OverlayValues[56] = d56
-		ps1425.OverlayValues[159] = d159
-		ps1425.OverlayValues[160] = d160
-		ps1425.OverlayValues[161] = d161
-		ps1425.OverlayValues[162] = d162
-		ps1425.OverlayValues[163] = d163
-		ps1425.OverlayValues[164] = d164
-		ps1425.OverlayValues[165] = d165
-		ps1425.OverlayValues[166] = d166
-		ps1425.OverlayValues[167] = d167
-		ps1425.OverlayValues[168] = d168
-		ps1425.OverlayValues[169] = d169
-		ps1425.OverlayValues[170] = d170
-		ps1425.OverlayValues[171] = d171
-		ps1425.OverlayValues[172] = d172
-		ps1425.OverlayValues[173] = d173
-		ps1425.OverlayValues[174] = d174
-		ps1425.OverlayValues[175] = d175
-		ps1425.OverlayValues[176] = d176
-		ps1425.OverlayValues[177] = d177
-		ps1425.OverlayValues[178] = d178
-		ps1425.OverlayValues[179] = d179
-		ps1425.OverlayValues[180] = d180
-		ps1425.OverlayValues[181] = d181
-		ps1425.OverlayValues[184] = d184
-		ps1425.OverlayValues[335] = d335
-		ps1425.OverlayValues[336] = d336
-		ps1425.OverlayValues[337] = d337
-		ps1425.OverlayValues[338] = d338
-		ps1425.OverlayValues[340] = d340
-		ps1425.OverlayValues[341] = d341
-		ps1425.OverlayValues[342] = d342
-		ps1425.OverlayValues[343] = d343
-		ps1425.OverlayValues[344] = d344
-		ps1425.OverlayValues[345] = d345
-		ps1425.OverlayValues[346] = d346
-		ps1425.OverlayValues[347] = d347
-		ps1425.OverlayValues[349] = d349
-		ps1425.OverlayValues[351] = d351
-		ps1425.OverlayValues[352] = d352
-		ps1425.OverlayValues[353] = d353
-		ps1425.OverlayValues[444] = d444
-		ps1425.OverlayValues[445] = d445
-		ps1425.OverlayValues[448] = d448
-		ps1425.OverlayValues[542] = d542
-		ps1425.OverlayValues[543] = d543
-		ps1425.OverlayValues[544] = d544
-		ps1425.OverlayValues[545] = d545
-		ps1425.OverlayValues[546] = d546
-		ps1425.OverlayValues[548] = d548
-		ps1425.OverlayValues[549] = d549
-		ps1425.OverlayValues[550] = d550
-		ps1425.OverlayValues[551] = d551
-		ps1425.OverlayValues[552] = d552
-		ps1425.OverlayValues[553] = d553
-		ps1425.OverlayValues[554] = d554
-		ps1425.OverlayValues[555] = d555
-		ps1425.OverlayValues[556] = d556
-		ps1425.OverlayValues[557] = d557
-		ps1425.OverlayValues[558] = d558
-		ps1425.OverlayValues[559] = d559
-		ps1425.OverlayValues[560] = d560
-		ps1425.OverlayValues[561] = d561
-		ps1425.OverlayValues[562] = d562
-		ps1425.OverlayValues[563] = d563
-		ps1425.OverlayValues[564] = d564
-		ps1425.OverlayValues[565] = d565
-		ps1425.OverlayValues[566] = d566
-		ps1425.OverlayValues[567] = d567
-		ps1425.OverlayValues[568] = d568
-		ps1425.OverlayValues[569] = d569
-		ps1425.OverlayValues[570] = d570
-		ps1425.OverlayValues[571] = d571
-		ps1425.OverlayValues[572] = d572
-		ps1425.OverlayValues[573] = d573
-		ps1425.OverlayValues[574] = d574
-		ps1425.OverlayValues[829] = d829
-		ps1425.OverlayValues[830] = d830
-		ps1425.OverlayValues[831] = d831
-		ps1425.OverlayValues[833] = d833
-		ps1425.OverlayValues[834] = d834
-		ps1425.OverlayValues[835] = d835
-		ps1425.OverlayValues[836] = d836
-		ps1425.OverlayValues[837] = d837
-		ps1425.OverlayValues[838] = d838
-		ps1425.OverlayValues[839] = d839
-		ps1425.OverlayValues[841] = d841
-		ps1425.OverlayValues[843] = d843
-		ps1425.OverlayValues[844] = d844
-		ps1425.OverlayValues[983] = d983
-		ps1425.OverlayValues[984] = d984
-		ps1425.OverlayValues[987] = d987
-		ps1425.OverlayValues[1129] = d1129
-		ps1425.OverlayValues[1130] = d1130
-		ps1425.OverlayValues[1131] = d1131
-		ps1425.OverlayValues[1132] = d1132
-		ps1425.OverlayValues[1134] = d1134
-		ps1425.OverlayValues[1135] = d1135
-		ps1425.OverlayValues[1136] = d1136
-		ps1425.OverlayValues[1137] = d1137
-		ps1425.OverlayValues[1138] = d1138
-		ps1425.OverlayValues[1139] = d1139
-		ps1425.OverlayValues[1140] = d1140
-		ps1425.OverlayValues[1141] = d1141
-		ps1425.OverlayValues[1142] = d1142
-		ps1425.OverlayValues[1143] = d1143
-		ps1425.OverlayValues[1145] = d1145
-		ps1425.OverlayValues[1146] = d1146
-		ps1425.OverlayValues[1147] = d1147
-		ps1425.OverlayValues[1148] = d1148
-		ps1425.OverlayValues[1149] = d1149
-		ps1425.OverlayValues[1150] = d1150
-		ps1425.OverlayValues[1151] = d1151
-		ps1425.OverlayValues[1152] = d1152
-		ps1425.OverlayValues[1153] = d1153
-		ps1425.OverlayValues[1154] = d1154
-		ps1425.OverlayValues[1155] = d1155
-		ps1425.OverlayValues[1156] = d1156
-		ps1425.OverlayValues[1157] = d1157
-		ps1425.OverlayValues[1158] = d1158
-		ps1425.OverlayValues[1159] = d1159
-		ps1425.OverlayValues[1160] = d1160
-		ps1425.OverlayValues[1161] = d1161
-		ps1425.OverlayValues[1162] = d1162
-		ps1425.OverlayValues[1163] = d1163
-		ps1425.OverlayValues[1164] = d1164
-		ps1425.OverlayValues[1165] = d1165
-		ps1425.OverlayValues[1166] = d1166
-		ps1425.OverlayValues[1167] = d1167
-		ps1425.OverlayValues[1168] = d1168
-		ps1425.OverlayValues[1169] = d1169
-		ps1425.OverlayValues[1170] = d1170
-		ps1425.OverlayValues[1171] = d1171
-		ps1425.OverlayValues[1172] = d1172
-		ps1425.OverlayValues[1173] = d1173
-		ps1425.OverlayValues[1174] = d1174
-		ps1425.OverlayValues[1175] = d1175
-		ps1425.OverlayValues[1176] = d1176
-		ps1425.OverlayValues[1177] = d1177
-		ps1425.OverlayValues[1178] = d1178
-		ps1425.OverlayValues[1179] = d1179
-		ps1425.OverlayValues[1180] = d1180
-		ps1425.OverlayValues[1181] = d1181
-		ps1425.OverlayValues[1182] = d1182
-		ps1425.OverlayValues[1183] = d1183
-		ps1425.OverlayValues[1184] = d1184
-		ps1425.OverlayValues[1185] = d1185
-		ps1425.OverlayValues[1186] = d1186
-		ps1425.OverlayValues[1187] = d1187
-		ps1425.OverlayValues[1188] = d1188
-		ps1425.OverlayValues[1189] = d1189
-		ps1425.OverlayValues[1190] = d1190
-		ps1425.OverlayValues[1191] = d1191
-		ps1425.OverlayValues[1192] = d1192
-		ps1425.OverlayValues[1193] = d1193
-		ps1425.OverlayValues[1194] = d1194
-		ps1425.OverlayValues[1195] = d1195
-		ps1425.OverlayValues[1196] = d1196
-		ps1425.OverlayValues[1197] = d1197
-		ps1425.OverlayValues[1198] = d1198
-		ps1425.OverlayValues[1199] = d1199
-		ps1425.OverlayValues[1200] = d1200
-		ps1425.OverlayValues[1201] = d1201
-		ps1425.OverlayValues[1202] = d1202
-		ps1425.OverlayValues[1203] = d1203
-		ps1425.OverlayValues[1204] = d1204
-		ps1425.OverlayValues[1205] = d1205
-		snap1426 := d5
-		snap1427 := d6
-		snap1428 := d7
-		snap1429 := d8
-		snap1430 := d9
-		snap1431 := d10
-		snap1432 := d11
-		snap1433 := d12
-		snap1434 := d13
-		snap1435 := d14
-		snap1436 := d15
-		snap1437 := d16
-		snap1438 := d17
-		snap1439 := d18
-		snap1440 := d19
-		snap1441 := d21
-		snap1442 := d22
-		snap1443 := d23
-		snap1444 := d24
-		snap1445 := d25
-		snap1446 := d26
-		snap1447 := d27
-		snap1448 := d28
-		snap1449 := d29
-		snap1450 := d30
-		snap1451 := d31
-		snap1452 := d32
-		snap1453 := d33
-		snap1454 := d34
-		snap1455 := d35
-		snap1456 := d36
-		snap1457 := d37
-		snap1458 := d38
-		snap1459 := d39
-		snap1460 := d40
-		snap1461 := d41
-		snap1462 := d42
-		snap1463 := d43
-		snap1464 := d44
-		snap1465 := d45
-		snap1466 := d46
-		snap1467 := d47
-		snap1468 := d48
-		snap1469 := d49
-		snap1470 := d50
-		snap1471 := d51
-		snap1472 := d54
-		snap1473 := d55
-		snap1474 := d56
-		snap1475 := d159
-		snap1476 := d160
-		snap1477 := d161
-		snap1478 := d162
-		snap1479 := d163
-		snap1480 := d164
-		snap1481 := d165
-		snap1482 := d166
-		snap1483 := d167
-		snap1484 := d168
-		snap1485 := d169
-		snap1486 := d170
-		snap1487 := d171
-		snap1488 := d172
-		snap1489 := d173
-		snap1490 := d174
-		snap1491 := d175
-		snap1492 := d176
-		snap1493 := d177
-		snap1494 := d178
-		snap1495 := d179
-		snap1496 := d180
-		snap1497 := d181
-		snap1498 := d184
-		snap1499 := d335
-		snap1500 := d336
-		snap1501 := d337
-		snap1502 := d338
-		snap1503 := d340
-		snap1504 := d341
-		snap1505 := d342
-		snap1506 := d343
-		snap1507 := d344
-		snap1508 := d345
-		snap1509 := d346
-		snap1510 := d347
-		snap1511 := d349
-		snap1512 := d351
-		snap1513 := d352
-		snap1514 := d353
-		snap1515 := d444
-		snap1516 := d445
-		snap1517 := d448
-		snap1518 := d542
-		snap1519 := d543
-		snap1520 := d544
-		snap1521 := d545
-		snap1522 := d546
-		snap1523 := d548
-		snap1524 := d549
-		snap1525 := d550
-		snap1526 := d551
-		snap1527 := d552
-		snap1528 := d553
-		snap1529 := d554
-		snap1530 := d555
-		snap1531 := d556
-		snap1532 := d557
-		snap1533 := d558
-		snap1534 := d559
-		snap1535 := d560
-		snap1536 := d561
-		snap1537 := d562
-		snap1538 := d563
-		snap1539 := d564
-		snap1540 := d565
-		snap1541 := d566
-		snap1542 := d567
-		snap1543 := d568
-		snap1544 := d569
-		snap1545 := d570
-		snap1546 := d571
-		snap1547 := d572
-		snap1548 := d573
-		snap1549 := d574
-		snap1550 := d829
-		snap1551 := d830
-		snap1552 := d831
-		snap1553 := d833
-		snap1554 := d834
-		snap1555 := d835
-		snap1556 := d836
-		snap1557 := d837
-		snap1558 := d838
-		snap1559 := d839
-		snap1560 := d841
-		snap1561 := d843
-		snap1562 := d844
-		snap1563 := d983
-		snap1564 := d984
-		snap1565 := d987
-		snap1566 := d1129
-		snap1567 := d1130
-		snap1568 := d1131
-		snap1569 := d1132
-		snap1570 := d1134
-		snap1571 := d1135
-		snap1572 := d1136
-		snap1573 := d1137
-		snap1574 := d1138
-		snap1575 := d1139
-		snap1576 := d1140
-		snap1577 := d1141
-		snap1578 := d1142
-		snap1579 := d1143
-		snap1580 := d1145
-		snap1581 := d1146
-		snap1582 := d1147
-		snap1583 := d1148
-		snap1584 := d1149
-		snap1585 := d1150
-		snap1586 := d1151
-		snap1587 := d1152
-		snap1588 := d1153
-		snap1589 := d1154
-		snap1590 := d1155
-		snap1591 := d1156
-		snap1592 := d1157
-		snap1593 := d1158
-		snap1594 := d1159
-		snap1595 := d1160
-		snap1596 := d1161
-		snap1597 := d1162
-		snap1598 := d1163
-		snap1599 := d1164
-		snap1600 := d1165
-		snap1601 := d1166
-		snap1602 := d1167
-		snap1603 := d1168
-		snap1604 := d1169
-		snap1605 := d1170
-		snap1606 := d1171
-		snap1607 := d1172
-		snap1608 := d1173
-		snap1609 := d1174
-		snap1610 := d1175
-		snap1611 := d1176
-		snap1612 := d1177
-		snap1613 := d1178
-		snap1614 := d1179
-		snap1615 := d1180
-		snap1616 := d1181
-		snap1617 := d1182
-		snap1618 := d1183
-		snap1619 := d1184
-		snap1620 := d1185
-		snap1621 := d1186
-		snap1622 := d1187
-		snap1623 := d1188
-		snap1624 := d1189
-		snap1625 := d1190
-		snap1626 := d1191
-		snap1627 := d1192
-		snap1628 := d1193
-		snap1629 := d1194
-		snap1630 := d1195
-		snap1631 := d1196
-		snap1632 := d1197
-		snap1633 := d1198
-		snap1634 := d1199
-		snap1635 := d1200
-		snap1636 := d1201
-		snap1637 := d1202
-		snap1638 := d1203
-		snap1639 := d1204
-		snap1640 := d1205
-		alloc1641 := ctx.SnapshotAllocState()
+		snap1425 := d5
+		snap1426 := d6
+		snap1427 := d7
+		snap1428 := d8
+		snap1429 := d9
+		snap1430 := d10
+		snap1431 := d11
+		snap1432 := d12
+		snap1433 := d13
+		snap1434 := d14
+		snap1435 := d15
+		snap1436 := d16
+		snap1437 := d17
+		snap1438 := d18
+		snap1439 := d19
+		snap1440 := d21
+		snap1441 := d22
+		snap1442 := d23
+		snap1443 := d24
+		snap1444 := d25
+		snap1445 := d26
+		snap1446 := d27
+		snap1447 := d28
+		snap1448 := d29
+		snap1449 := d30
+		snap1450 := d31
+		snap1451 := d32
+		snap1452 := d33
+		snap1453 := d34
+		snap1454 := d35
+		snap1455 := d36
+		snap1456 := d37
+		snap1457 := d38
+		snap1458 := d39
+		snap1459 := d40
+		snap1460 := d41
+		snap1461 := d42
+		snap1462 := d43
+		snap1463 := d44
+		snap1464 := d45
+		snap1465 := d46
+		snap1466 := d47
+		snap1467 := d48
+		snap1468 := d49
+		snap1469 := d50
+		snap1470 := d51
+		snap1471 := d54
+		snap1472 := d55
+		snap1473 := d56
+		snap1474 := d159
+		snap1475 := d160
+		snap1476 := d161
+		snap1477 := d162
+		snap1478 := d163
+		snap1479 := d164
+		snap1480 := d165
+		snap1481 := d166
+		snap1482 := d167
+		snap1483 := d168
+		snap1484 := d169
+		snap1485 := d170
+		snap1486 := d171
+		snap1487 := d172
+		snap1488 := d173
+		snap1489 := d174
+		snap1490 := d175
+		snap1491 := d176
+		snap1492 := d177
+		snap1493 := d178
+		snap1494 := d179
+		snap1495 := d180
+		snap1496 := d181
+		snap1497 := d184
+		snap1498 := d335
+		snap1499 := d336
+		snap1500 := d337
+		snap1501 := d338
+		snap1502 := d340
+		snap1503 := d341
+		snap1504 := d342
+		snap1505 := d343
+		snap1506 := d344
+		snap1507 := d345
+		snap1508 := d346
+		snap1509 := d347
+		snap1510 := d349
+		snap1511 := d351
+		snap1512 := d352
+		snap1513 := d353
+		snap1514 := d444
+		snap1515 := d445
+		snap1516 := d448
+		snap1517 := d542
+		snap1518 := d543
+		snap1519 := d544
+		snap1520 := d545
+		snap1521 := d546
+		snap1522 := d548
+		snap1523 := d549
+		snap1524 := d550
+		snap1525 := d551
+		snap1526 := d552
+		snap1527 := d553
+		snap1528 := d554
+		snap1529 := d555
+		snap1530 := d556
+		snap1531 := d557
+		snap1532 := d558
+		snap1533 := d559
+		snap1534 := d560
+		snap1535 := d561
+		snap1536 := d562
+		snap1537 := d563
+		snap1538 := d564
+		snap1539 := d565
+		snap1540 := d566
+		snap1541 := d567
+		snap1542 := d568
+		snap1543 := d569
+		snap1544 := d570
+		snap1545 := d571
+		snap1546 := d572
+		snap1547 := d573
+		snap1548 := d574
+		snap1549 := d829
+		snap1550 := d830
+		snap1551 := d831
+		snap1552 := d833
+		snap1553 := d834
+		snap1554 := d835
+		snap1555 := d836
+		snap1556 := d837
+		snap1557 := d838
+		snap1558 := d839
+		snap1559 := d841
+		snap1560 := d843
+		snap1561 := d844
+		snap1562 := d983
+		snap1563 := d984
+		snap1564 := d987
+		snap1565 := d1129
+		snap1566 := d1130
+		snap1567 := d1131
+		snap1568 := d1132
+		snap1569 := d1134
+		snap1570 := d1135
+		snap1571 := d1136
+		snap1572 := d1137
+		snap1573 := d1138
+		snap1574 := d1139
+		snap1575 := d1140
+		snap1576 := d1141
+		snap1577 := d1142
+		snap1578 := d1143
+		snap1579 := d1145
+		snap1580 := d1146
+		snap1581 := d1147
+		snap1582 := d1148
+		snap1583 := d1149
+		snap1584 := d1150
+		snap1585 := d1151
+		snap1586 := d1152
+		snap1587 := d1153
+		snap1588 := d1154
+		snap1589 := d1155
+		snap1590 := d1156
+		snap1591 := d1157
+		snap1592 := d1158
+		snap1593 := d1159
+		snap1594 := d1160
+		snap1595 := d1161
+		snap1596 := d1162
+		snap1597 := d1163
+		snap1598 := d1164
+		snap1599 := d1165
+		snap1600 := d1166
+		snap1601 := d1167
+		snap1602 := d1168
+		snap1603 := d1169
+		snap1604 := d1170
+		snap1605 := d1171
+		snap1606 := d1172
+		snap1607 := d1173
+		snap1608 := d1174
+		snap1609 := d1175
+		snap1610 := d1176
+		snap1611 := d1177
+		snap1612 := d1178
+		snap1613 := d1179
+		snap1614 := d1180
+		snap1615 := d1181
+		snap1616 := d1182
+		snap1617 := d1183
+		snap1618 := d1184
+		snap1619 := d1185
+		snap1620 := d1186
+		snap1621 := d1187
+		snap1622 := d1188
+		snap1623 := d1189
+		snap1624 := d1190
+		snap1625 := d1191
+		snap1626 := d1192
+		snap1627 := d1193
+		snap1628 := d1194
+		snap1629 := d1195
+		snap1630 := d1196
+		snap1631 := d1197
+		snap1632 := d1198
+		snap1633 := d1199
+		snap1634 := d1201
+		snap1635 := d1202
+		snap1636 := d1203
+		snap1637 := d1204
+		snap1638 := d1205
+		alloc1639 := ctx.SnapshotAllocState()
 		if !bbs[12].Rendered {
-			bbs[12].RenderPS(ps1425)
+			bbs[12].RenderPS(ps1424)
 		}
-		ctx.RestoreAllocState(alloc1641)
-		d5 = snap1426
-		d6 = snap1427
-		d7 = snap1428
-		d8 = snap1429
-		d9 = snap1430
-		d10 = snap1431
-		d11 = snap1432
-		d12 = snap1433
-		d13 = snap1434
-		d14 = snap1435
-		d15 = snap1436
-		d16 = snap1437
-		d17 = snap1438
-		d18 = snap1439
-		d19 = snap1440
-		d21 = snap1441
-		d22 = snap1442
-		d23 = snap1443
-		d24 = snap1444
-		d25 = snap1445
-		d26 = snap1446
-		d27 = snap1447
-		d28 = snap1448
-		d29 = snap1449
-		d30 = snap1450
-		d31 = snap1451
-		d32 = snap1452
-		d33 = snap1453
-		d34 = snap1454
-		d35 = snap1455
-		d36 = snap1456
-		d37 = snap1457
-		d38 = snap1458
-		d39 = snap1459
-		d40 = snap1460
-		d41 = snap1461
-		d42 = snap1462
-		d43 = snap1463
-		d44 = snap1464
-		d45 = snap1465
-		d46 = snap1466
-		d47 = snap1467
-		d48 = snap1468
-		d49 = snap1469
-		d50 = snap1470
-		d51 = snap1471
-		d54 = snap1472
-		d55 = snap1473
-		d56 = snap1474
-		d159 = snap1475
-		d160 = snap1476
-		d161 = snap1477
-		d162 = snap1478
-		d163 = snap1479
-		d164 = snap1480
-		d165 = snap1481
-		d166 = snap1482
-		d167 = snap1483
-		d168 = snap1484
-		d169 = snap1485
-		d170 = snap1486
-		d171 = snap1487
-		d172 = snap1488
-		d173 = snap1489
-		d174 = snap1490
-		d175 = snap1491
-		d176 = snap1492
-		d177 = snap1493
-		d178 = snap1494
-		d179 = snap1495
-		d180 = snap1496
-		d181 = snap1497
-		d184 = snap1498
-		d335 = snap1499
-		d336 = snap1500
-		d337 = snap1501
-		d338 = snap1502
-		d340 = snap1503
-		d341 = snap1504
-		d342 = snap1505
-		d343 = snap1506
-		d344 = snap1507
-		d345 = snap1508
-		d346 = snap1509
-		d347 = snap1510
-		d349 = snap1511
-		d351 = snap1512
-		d352 = snap1513
-		d353 = snap1514
-		d444 = snap1515
-		d445 = snap1516
-		d448 = snap1517
-		d542 = snap1518
-		d543 = snap1519
-		d544 = snap1520
-		d545 = snap1521
-		d546 = snap1522
-		d548 = snap1523
-		d549 = snap1524
-		d550 = snap1525
-		d551 = snap1526
-		d552 = snap1527
-		d553 = snap1528
-		d554 = snap1529
-		d555 = snap1530
-		d556 = snap1531
-		d557 = snap1532
-		d558 = snap1533
-		d559 = snap1534
-		d560 = snap1535
-		d561 = snap1536
-		d562 = snap1537
-		d563 = snap1538
-		d564 = snap1539
-		d565 = snap1540
-		d566 = snap1541
-		d567 = snap1542
-		d568 = snap1543
-		d569 = snap1544
-		d570 = snap1545
-		d571 = snap1546
-		d572 = snap1547
-		d573 = snap1548
-		d574 = snap1549
-		d829 = snap1550
-		d830 = snap1551
-		d831 = snap1552
-		d833 = snap1553
-		d834 = snap1554
-		d835 = snap1555
-		d836 = snap1556
-		d837 = snap1557
-		d838 = snap1558
-		d839 = snap1559
-		d841 = snap1560
-		d843 = snap1561
-		d844 = snap1562
-		d983 = snap1563
-		d984 = snap1564
-		d987 = snap1565
-		d1129 = snap1566
-		d1130 = snap1567
-		d1131 = snap1568
-		d1132 = snap1569
-		d1134 = snap1570
-		d1135 = snap1571
-		d1136 = snap1572
-		d1137 = snap1573
-		d1138 = snap1574
-		d1139 = snap1575
-		d1140 = snap1576
-		d1141 = snap1577
-		d1142 = snap1578
-		d1143 = snap1579
-		d1145 = snap1580
-		d1146 = snap1581
-		d1147 = snap1582
-		d1148 = snap1583
-		d1149 = snap1584
-		d1150 = snap1585
-		d1151 = snap1586
-		d1152 = snap1587
-		d1153 = snap1588
-		d1154 = snap1589
-		d1155 = snap1590
-		d1156 = snap1591
-		d1157 = snap1592
-		d1158 = snap1593
-		d1159 = snap1594
-		d1160 = snap1595
-		d1161 = snap1596
-		d1162 = snap1597
-		d1163 = snap1598
-		d1164 = snap1599
-		d1165 = snap1600
-		d1166 = snap1601
-		d1167 = snap1602
-		d1168 = snap1603
-		d1169 = snap1604
-		d1170 = snap1605
-		d1171 = snap1606
-		d1172 = snap1607
-		d1173 = snap1608
-		d1174 = snap1609
-		d1175 = snap1610
-		d1176 = snap1611
-		d1177 = snap1612
-		d1178 = snap1613
-		d1179 = snap1614
-		d1180 = snap1615
-		d1181 = snap1616
-		d1182 = snap1617
-		d1183 = snap1618
-		d1184 = snap1619
-		d1185 = snap1620
-		d1186 = snap1621
-		d1187 = snap1622
-		d1188 = snap1623
-		d1189 = snap1624
-		d1190 = snap1625
-		d1191 = snap1626
-		d1192 = snap1627
-		d1193 = snap1628
-		d1194 = snap1629
-		d1195 = snap1630
-		d1196 = snap1631
-		d1197 = snap1632
-		d1198 = snap1633
-		d1199 = snap1634
-		d1200 = snap1635
-		d1201 = snap1636
-		d1202 = snap1637
-		d1203 = snap1638
-		d1204 = snap1639
-		d1205 = snap1640
+		ctx.RestoreAllocState(alloc1639)
+		d5 = snap1425
+		d6 = snap1426
+		d7 = snap1427
+		d8 = snap1428
+		d9 = snap1429
+		d10 = snap1430
+		d11 = snap1431
+		d12 = snap1432
+		d13 = snap1433
+		d14 = snap1434
+		d15 = snap1435
+		d16 = snap1436
+		d17 = snap1437
+		d18 = snap1438
+		d19 = snap1439
+		d21 = snap1440
+		d22 = snap1441
+		d23 = snap1442
+		d24 = snap1443
+		d25 = snap1444
+		d26 = snap1445
+		d27 = snap1446
+		d28 = snap1447
+		d29 = snap1448
+		d30 = snap1449
+		d31 = snap1450
+		d32 = snap1451
+		d33 = snap1452
+		d34 = snap1453
+		d35 = snap1454
+		d36 = snap1455
+		d37 = snap1456
+		d38 = snap1457
+		d39 = snap1458
+		d40 = snap1459
+		d41 = snap1460
+		d42 = snap1461
+		d43 = snap1462
+		d44 = snap1463
+		d45 = snap1464
+		d46 = snap1465
+		d47 = snap1466
+		d48 = snap1467
+		d49 = snap1468
+		d50 = snap1469
+		d51 = snap1470
+		d54 = snap1471
+		d55 = snap1472
+		d56 = snap1473
+		d159 = snap1474
+		d160 = snap1475
+		d161 = snap1476
+		d162 = snap1477
+		d163 = snap1478
+		d164 = snap1479
+		d165 = snap1480
+		d166 = snap1481
+		d167 = snap1482
+		d168 = snap1483
+		d169 = snap1484
+		d170 = snap1485
+		d171 = snap1486
+		d172 = snap1487
+		d173 = snap1488
+		d174 = snap1489
+		d175 = snap1490
+		d176 = snap1491
+		d177 = snap1492
+		d178 = snap1493
+		d179 = snap1494
+		d180 = snap1495
+		d181 = snap1496
+		d184 = snap1497
+		d335 = snap1498
+		d336 = snap1499
+		d337 = snap1500
+		d338 = snap1501
+		d340 = snap1502
+		d341 = snap1503
+		d342 = snap1504
+		d343 = snap1505
+		d344 = snap1506
+		d345 = snap1507
+		d346 = snap1508
+		d347 = snap1509
+		d349 = snap1510
+		d351 = snap1511
+		d352 = snap1512
+		d353 = snap1513
+		d444 = snap1514
+		d445 = snap1515
+		d448 = snap1516
+		d542 = snap1517
+		d543 = snap1518
+		d544 = snap1519
+		d545 = snap1520
+		d546 = snap1521
+		d548 = snap1522
+		d549 = snap1523
+		d550 = snap1524
+		d551 = snap1525
+		d552 = snap1526
+		d553 = snap1527
+		d554 = snap1528
+		d555 = snap1529
+		d556 = snap1530
+		d557 = snap1531
+		d558 = snap1532
+		d559 = snap1533
+		d560 = snap1534
+		d561 = snap1535
+		d562 = snap1536
+		d563 = snap1537
+		d564 = snap1538
+		d565 = snap1539
+		d566 = snap1540
+		d567 = snap1541
+		d568 = snap1542
+		d569 = snap1543
+		d570 = snap1544
+		d571 = snap1545
+		d572 = snap1546
+		d573 = snap1547
+		d574 = snap1548
+		d829 = snap1549
+		d830 = snap1550
+		d831 = snap1551
+		d833 = snap1552
+		d834 = snap1553
+		d835 = snap1554
+		d836 = snap1555
+		d837 = snap1556
+		d838 = snap1557
+		d839 = snap1558
+		d841 = snap1559
+		d843 = snap1560
+		d844 = snap1561
+		d983 = snap1562
+		d984 = snap1563
+		d987 = snap1564
+		d1129 = snap1565
+		d1130 = snap1566
+		d1131 = snap1567
+		d1132 = snap1568
+		d1134 = snap1569
+		d1135 = snap1570
+		d1136 = snap1571
+		d1137 = snap1572
+		d1138 = snap1573
+		d1139 = snap1574
+		d1140 = snap1575
+		d1141 = snap1576
+		d1142 = snap1577
+		d1143 = snap1578
+		d1145 = snap1579
+		d1146 = snap1580
+		d1147 = snap1581
+		d1148 = snap1582
+		d1149 = snap1583
+		d1150 = snap1584
+		d1151 = snap1585
+		d1152 = snap1586
+		d1153 = snap1587
+		d1154 = snap1588
+		d1155 = snap1589
+		d1156 = snap1590
+		d1157 = snap1591
+		d1158 = snap1592
+		d1159 = snap1593
+		d1160 = snap1594
+		d1161 = snap1595
+		d1162 = snap1596
+		d1163 = snap1597
+		d1164 = snap1598
+		d1165 = snap1599
+		d1166 = snap1600
+		d1167 = snap1601
+		d1168 = snap1602
+		d1169 = snap1603
+		d1170 = snap1604
+		d1171 = snap1605
+		d1172 = snap1606
+		d1173 = snap1607
+		d1174 = snap1608
+		d1175 = snap1609
+		d1176 = snap1610
+		d1177 = snap1611
+		d1178 = snap1612
+		d1179 = snap1613
+		d1180 = snap1614
+		d1181 = snap1615
+		d1182 = snap1616
+		d1183 = snap1617
+		d1184 = snap1618
+		d1185 = snap1619
+		d1186 = snap1620
+		d1187 = snap1621
+		d1188 = snap1622
+		d1189 = snap1623
+		d1190 = snap1624
+		d1191 = snap1625
+		d1192 = snap1626
+		d1193 = snap1627
+		d1194 = snap1628
+		d1195 = snap1629
+		d1196 = snap1630
+		d1197 = snap1631
+		d1198 = snap1632
+		d1199 = snap1633
+		d1201 = snap1634
+		d1202 = snap1635
+		d1203 = snap1636
+		d1204 = snap1637
+		d1205 = snap1638
 		if !bbs[11].Rendered {
-			return bbs[11].RenderPS(ps1424)
+			return bbs[11].RenderPS(ps1423)
 		}
 		return result
 		return result
 	}
-	ps1642 := scm.PhiState{General: false}
-	_ = bbs[0].RenderPS(ps1642)
+	ps1640 := scm.PhiState{General: false}
+	_ = bbs[0].RenderPS(ps1640)
 	ctx.MarkLabel(lbl0)
 	ctx.ResolveFixups()
 	if resultRegsProtected {
@@ -16598,7 +16599,7 @@ func (s *StorageSeq) GetValue(i uint32) scm.Scmer {
 	value = int64(startRaw) + s.start.offset
 	stride = int64(s.stride.GetValueUInt(min)) + s.stride.offset
 	recid := int64(s.recordId.GetValueUInt(min)) + s.recordId.offset
-	return scm.NewFloat(float64(value + int64(int64(i)-recid)*stride))
+	return scm.NewInt(value + (int64(i)-recid)*stride)
 
 }
 
@@ -16674,7 +16675,7 @@ func (s *StorageSeq) GetValueRange(recid uint32, count uint32, target []scm.Scme
 		if isNil {
 			target[idx] = scm.NewNil()
 		} else {
-			target[idx] = scm.NewFloat(float64(curVal))
+			target[idx] = scm.NewInt(curVal)
 			curVal += segStride
 		}
 		idx += stride
@@ -16725,7 +16726,7 @@ func (s *StorageSeq) GetValueMulti(recids []uint32, target []scm.Scmer, stride i
 			if isNil {
 				target[idx] = scm.NewNil()
 			} else {
-				target[idx] = scm.NewFloat(float64(segStart + (i-segRecordId)*segStride))
+				target[idx] = scm.NewInt(segStart + (i-segRecordId)*segStride)
 			}
 			idx += stride
 		}
@@ -16739,7 +16740,7 @@ func (s *StorageSeq) GetValueMulti(recids []uint32, target []scm.Scmer, stride i
 		if isNil {
 			target[idx] = scm.NewNil()
 		} else {
-			target[idx] = scm.NewFloat(float64(segStart + (int64(recid)-segRecordId)*segStride))
+			target[idx] = scm.NewInt(segStart + (int64(recid)-segRecordId)*segStride)
 		}
 		idx += stride
 	}
