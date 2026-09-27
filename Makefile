@@ -12,12 +12,70 @@ GOARCH       ?= $(shell go env GOARCH)
 CGO_ENABLED  ?= 0
 BUILD_FLAGS  ?= -trimpath -buildvcs=false
 LDFLAGS      ?=
-PHP_CONFIG   ?= php-config
+# Native precompiled PHP 8.5 ZTS/embed packages, published by the package
+# provider documented at https://frankenphp.dev/docs/. No PHP source build,
+# sudo, or extension development libraries are needed. Keep version/checksum
+# pairs together. All downloaded files stay in the ignored .third_party cache.
+PHP_CACHE ?= $(CURDIR)/.third_party/php
+PHP_SDK_ROOT ?= $(PHP_CACHE)/8.5.11-$(GOARCH)
+override PHP_CACHE := $(abspath $(PHP_CACHE))
+override PHP_SDK_ROOT := $(abspath $(PHP_SDK_ROOT))
+PHP_PACKAGE_URL := https://pkg.henderkes.com/api/packages/85/debian/pool/php-zts/main
+PHP_PACKAGES_amd64 := \
+	php-zts-devel_8.5.11-1_amd64.deb:0b0e6b6a77879c66460393a1acbc510a551cb9e0093937c4bf75a9b13f68f08d \
+	php-zts-cli_8.5.11-1_amd64.deb:71230fcc152097a64b46b7feefc086b5ed7d900521d095b6517391eba9193dfb \
+	php-zts-embed_8.5.11-1_amd64.deb:e354af7e2a1d13a0962c8c15aefb3fd67fc53b216264361029ab962888c82092 \
+	php-zts-pdo_8.5.11-1_amd64.deb:d2805258ed22cef34f5fd8db9897284f9fb1d169d849531ac211b2bca88a6380 \
+	php-zts-mysqlnd_8.5.11-1_amd64.deb:709cbdbb129a4a132f4e39748ef2e61e889b609541432bd0ed41a427004143f4 \
+	php-zts-pdo-mysql_8.5.11-1_amd64.deb:794d9db5079fe5e2613e09d97033dab6c269cde407302528484948678972f85d \
+	php-zts-pdo-sqlite_8.5.11-1_amd64.deb:482ae8503f9322b492da4ee076a4baffc7b83dee7b003c97d86674a1e019c79c \
+	php-zts-mysqli_8.5.11-1_amd64.deb:6ea3da2c6139b576229ec76b7edc3eb6a9965334979a6d1f987effa3bda6340b \
+	php-zts-gmp_8.5.11-1_amd64.deb:690792d179857390177eba5dd35b0536e27d4fa4f74f3b038925d9a8600dce58 \
+	php-zts-gettext_8.5.11-1_amd64.deb:7414f6152e6018bec2d39de0bc333d30523e60bd4924a639cb0dad33551fdb9d \
+	php-zts-intl_8.5.11-1_amd64.deb:b8e4c34dbfd516b731e22f431291c314bc6a03c94a2974b85ae9e0a2b2570bd7 \
+	php-zts-gd_8.5.11-1_amd64.deb:c409e0078bf3a398fecd2f62b7bbdd5492d39646001317d0906f58697bd4bfe7 \
+	php-zts-zip_1.22.8+php85-2_amd64.deb:65a3a344506d151a165203017d78fd8046371fb66da30955d4f925012ed4ac47 \
+	php-zts-imagick_3.8.1+php85-9_amd64.deb:03df6d1d94f4bc0743097afd8f11fc5051e717b0137deb5122e3d3f131ecc30b
+PHP_PACKAGES_arm64 := \
+	php-zts-devel_8.5.11-1_arm64.deb:bb8a5d96beed29888064ca34428c98b89e9f4c11d606e3276f3d3c9f17d508d2 \
+	php-zts-cli_8.5.11-1_arm64.deb:cfda8a42c416319545689c643115e931801851b0212ae825aa826e5409c81ab9 \
+	php-zts-embed_8.5.11-1_arm64.deb:04f8616206cd7b44739c4430687f1a693cba8c6281530d43d6feef182eb3be14 \
+	php-zts-pdo_8.5.11-1_arm64.deb:927e08792b30d56a54cc7aa1495945420b69e45283d2a673b9dc5d5b40f4f07a \
+	php-zts-mysqlnd_8.5.11-1_arm64.deb:b5091ce23de84a1df91efaa3372654dcb71732529b4297d9ad38f8a04d5a5adf \
+	php-zts-pdo-mysql_8.5.11-1_arm64.deb:153768eeec6e3d89404eee23d5917589d981069267ce4ea94a483f369e2483aa \
+	php-zts-pdo-sqlite_8.5.11-1_arm64.deb:e93bcf64434df142560844d37e0220c474decd94494bbd0e33c09d39e41c62e9 \
+	php-zts-mysqli_8.5.11-1_arm64.deb:906bc005d666175e30b97024f39fc3ab06a4706dab5bea910b95fdc2d90c7aa7 \
+	php-zts-gmp_8.5.11-1_arm64.deb:07b311c780b25b0b9abd37d6b3f2a5e742301d66eb0511dc80af2dd7e14c14aa \
+	php-zts-gettext_8.5.11-1_arm64.deb:5229999d12a3f816353db2eb603a2e20181cac824653d48ca56483ff13b7a1f0 \
+	php-zts-intl_8.5.11-1_arm64.deb:cf8475896161a4219406e9105c2c803a57e233066e13456a52d5e1c972975a94 \
+	php-zts-gd_8.5.11-1_arm64.deb:5dae6e98ce25ff821cedf5937b8875c2b0b3f10a916df0fe50c58c1fbf63a203 \
+	php-zts-zip_1.22.8+php85-2_arm64.deb:d1b7b6964c00f27e16923fdd11609030879a0dee67639df76c26e7fb8ff2545f \
+	php-zts-imagick_3.8.1+php85-9_arm64.deb:1f577fa9cd6126381d992a95fe12197e52d611a258696d3f6e9ae936ff8b16f5
+# Explicit PHP_CONFIG wins. Reuse a complete installed ZTS SDK where present;
+# an ordinary NTS php-dev package cannot be used by the embedded host.
+ifeq ($(origin PHP_CONFIG), undefined)
+PHP_CONFIG := $(shell for pc in php-config "$(HOME)/.local/opt/memcp-php/bin/php-config"; do \
+ command -v "$$pc" >/dev/null 2>&1 || continue; \
+ test "$$($$pc --vernum 2>/dev/null)" -ge 80500 2>/dev/null || continue; \
+ "$$pc" --configure-options | grep -q -- --enable-zts || continue; \
+ test -f "$$($$pc --prefix)/lib/libphp.so" || continue; \
+ "$$($$pc --php-binary)" -r 'exit(PHP_ZTS && extension_loaded("pdo") && extension_loaded("imagick") && extension_loaded("gd") && extension_loaded("zip") ? 0 : 1);' >/dev/null 2>&1 || continue; \
+ command -v "$$pc"; break; done)
+ifeq ($(PHP_CONFIG),)
+PHP_CONFIG = $(PHP_SDK_ROOT)/bin/php-config
+endif
+endif
+PHP_CACHED = $(filter $(PHP_SDK_ROOT)/bin/php-config,$(abspath $(PHP_CONFIG)))
+PHP_PROVISION = $(if $(PHP_CACHED),php-toolchain)
+# Use the host's existing packaged-runtime layout for downloaded extensions.
+# The public binary names remain ./memcp and ./memcp-php (symlinks to ELF files).
+PHP_BINARY_DIR = $(if $(PHP_CACHED),$(CURDIR)/.build/php/bin,.)
+PHP_RUNTIME = $(if $(PHP_CACHED),php-runtime)
 PHP_TAGS     := php,nowatcher,nobrotli,nomercure
-PHP_RPATH    ?= $(shell $(PHP_CONFIG) --prefix)/lib
+PHP_RPATH    ?= $(shell $(PHP_CONFIG) --prefix)/lib:$(shell $(PHP_CONFIG) --extension-dir)
 PHP_ENV      = CGO_ENABLED=1 CGO_CFLAGS="$$($(PHP_CONFIG) --includes)" CGO_LDFLAGS="-L$$($(PHP_CONFIG) --prefix)/lib "'-Wl,-rpath,$(PHP_RPATH)'" $$($(PHP_CONFIG) --ldflags) $$($(PHP_CONFIG) --libs)"
 PHP_LICENSE_DIR ?= $(shell $(PHP_CONFIG) --prefix)/share/licenses/php
-PACKAGE_PHP_RPATH = '$$$$ORIGIN/../lib/memcp/php'
+PACKAGE_PHP_RPATH = '$$$$ORIGIN/../lib/memcp/php:$$$$ORIGIN/../lib/memcp/php/extensions'
 STRIP ?= strip
 PACKAGE_LDFLAGS ?= -s -w
 DIST_DIR     ?= dist
@@ -28,25 +86,88 @@ JIT_GO_REPOSITORY ?= https://github.com/launix-de/go.git
 JIT_GO_REF   ?= jit-foreign-frames-go1.27.0
 export SOURCE_DATE_EPOCH
 
-all: check-php
-	$(PHP_ENV) GOOS=$(GOOS) GOARCH=$(GOARCH) go build $(BUILD_FLAGS) -tags=$(PHP_TAGS) -ldflags="$(LDFLAGS)" -o memcp .
+all: check-php $(PHP_RUNTIME)
+	$(PHP_ENV) GOOS=$(GOOS) GOARCH=$(GOARCH) go build $(BUILD_FLAGS) -tags=$(PHP_TAGS) -ldflags="$(LDFLAGS)" -o $(PHP_BINARY_DIR)/memcp .
+	$(if $(PHP_CACHED),ln -sfn $(PHP_BINARY_DIR)/memcp memcp,@:)
 
 nophp:
 	CGO_ENABLED=$(CGO_ENABLED) GOOS=$(GOOS) GOARCH=$(GOARCH) go build $(BUILD_FLAGS) -tags=nophp -ldflags="$(LDFLAGS)" -o memcp .
 
 # Fail before compiling when php-config points at an NTS/FPM-only SDK.
 .PHONY: check-php
-check-php:
+check-php: $(PHP_PROVISION)
 	@test "$$($(PHP_CONFIG) --vernum)" -ge 80500 || { echo "PHP >= 8.5 ZTS SDK required" >&2; exit 1; }
 	@case "$$($(PHP_CONFIG) --configure-options)" in *--enable-zts*) ;; *) echo "PHP ZTS SDK required" >&2; exit 1 ;; esac
 	@test -f "$$($(PHP_CONFIG) --prefix)/lib/libphp.so" || { echo "PHP embed shared library required" >&2; exit 1; }
 
+# Fetch and verify released binaries; serialize concurrent make invocations.
+.PHONY: php-toolchain php-runtime
+php-toolchain:
+	@set -eu; \
+	case "$(GOOS):$(GOARCH):$$(uname -m)" in linux:amd64:x86_64|linux:arm64:aarch64) ;; \
+		*) echo "Use PHP_CONFIG for this platform/cross build (binary SDK: native Linux amd64/arm64)." >&2; exit 1 ;; esac; \
+	getconf GNU_LIBC_VERSION >/dev/null 2>&1 || { echo "Binary PHP SDK requires glibc." >&2; exit 1; }; \
+	mkdir -p "$(PHP_CACHE)"; \
+	exec 9>"$(PHP_CACHE)/.sdk.lock"; flock 9; \
+	expected=$$(printf '%s\n' '$(PHP_PACKAGES_$(GOARCH)):1' | sha256sum | cut -d' ' -f1); \
+	if [ -x "$(PHP_SDK_ROOT)/bin/php-config" ] && [ -f "$(PHP_SDK_ROOT)/usr/lib/libphp.so" ] \
+		&& [ "$$(cat "$(PHP_SDK_ROOT)/.complete" 2>/dev/null)" = "$$expected" ]; then \
+		echo "Using cached PHP SDK: $(PHP_SDK_ROOT)"; exit 0; \
+	fi; \
+	for tool in curl dpkg-deb; do command -v "$$tool" >/dev/null || { echo "Missing $$tool for binary SDK extraction" >&2; exit 1; }; done; \
+	test ! -e "$(PHP_SDK_ROOT)" || { echo "Incomplete/different SDK at $(PHP_SDK_ROOT); select a fresh PHP_SDK_ROOT." >&2; exit 1; }; \
+	stage=$$(mktemp -d "$(PHP_CACHE)/.sdk.XXXXXX"); \
+	trap 'rm -rf "$$stage"' EXIT HUP INT TERM; \
+	mkdir -p "$(PHP_CACHE)/downloads" "$$stage/bin"; \
+	for package in $(PHP_PACKAGES_$(GOARCH)); do \
+		name=$${package%:*}; checksum=$${package##*:}; archive="$(PHP_CACHE)/downloads/$$name"; \
+		if ! echo "$$checksum  $$archive" | sha256sum --check --status 2>/dev/null; then \
+			echo "Downloading $$name"; \
+			curl -fL --retry 3 "$(PHP_PACKAGE_URL)/$$name" -o "$$stage/download"; \
+			echo "$$checksum  $$stage/download" | sha256sum --check; \
+			mv "$$stage/download" "$$archive"; \
+		fi; \
+		dpkg-deb --extract "$$archive" "$$stage"; \
+	done; \
+	ln -s libphp-zts-85.so "$$stage/usr/lib/libphp.so"; \
+	ln -s imagick-zts-85.so "$$stage/usr/lib/php-zts/modules/imagick.so"; \
+	ln -s php-zts "$$stage/usr/share/licenses/php"; \
+	printf '%s\n' '#!/bin/sh' \
+		'# Copyright (C) 2026 Carl-Philip Haensch; SPDX-License-Identifier: GPL-3.0-or-later' \
+		'set -eu' 'prefix=$$(CDPATH= cd -- "$$(dirname -- "$$0")/../usr" && pwd)' \
+		'case "$${1:-}" in' '--prefix) echo "$$prefix" ;;' \
+		'--includes) for dir in "" /main /TSRM /Zend /ext /ext/date/lib; do printf -- "-I%s/include/php-zts%s " "$$prefix" "$$dir"; done; echo ;;' \
+		'--extension-dir) echo "$$prefix/lib/php-zts/modules" ;;' \
+		'--ldflags) echo "-L$$prefix/lib -L$$prefix/lib/php-zts/modules -lpthread" ;;' \
+		'--libs) echo "-l:pdo-zts-85.so" ;;' \
+		'--php-binary) echo "$$prefix/bin/php-zts" ;;' \
+		'*) exec "$$prefix/bin/php-config-zts" "$$@" ;;' 'esac' > "$$stage/bin/php-config"; \
+	chmod +x "$$stage/bin/php-config"; \
+	for module in pdo mysqlnd pdo_mysql pdo_sqlite mysqli gmp gettext intl gd zip; do \
+		printf 'extension=%s-zts-85.so\n' "$$module"; \
+	done > "$$stage/usr/lib/memcp-extensions.ini"; \
+	"$$stage/usr/bin/php-zts" -n -d "extension_dir=$$stage/usr/lib/php-zts/modules" \
+		-d extension=pdo-zts-85.so -d extension=imagick-zts-85.so -d extension=gd-zts-85.so -d extension=zip-zts-85.so \
+		-r 'exit(PHP_ZTS && extension_loaded("pdo") && extension_loaded("imagick") && extension_loaded("gd") && extension_loaded("zip") ? 0 : 1);'; \
+	printf '%s\n' "$$expected" > "$$stage/.complete"; \
+	mv "$$stage" "$(PHP_SDK_ROOT)"
+
+# The existing host discovers ../lib/memcp/php relative to its ELF executable.
+# Stage that private layout; no global PHPRC, system install, or host code edits.
+php-runtime: check-php
+	@mkdir -p "$(PHP_BINARY_DIR)" "$(CURDIR)/.build/php/lib/memcp/php/conf.d"
+	ln -sfn "$$($(PHP_CONFIG) --prefix)/lib/php-zts/modules" "$(CURDIR)/.build/php/lib/memcp/php/extensions"
+	cp packaging/php.ini "$(CURDIR)/.build/php/lib/memcp/php/php.ini"
+	cp "$$($(PHP_CONFIG) --prefix)/lib/memcp-extensions.ini" "$(CURDIR)/.build/php/lib/memcp/php/conf.d/00-sdk.ini"
+
 # libphp and its extensions are external dependencies. Use a matching ZTS
 # php-config; optional FrankenPHP services are excluded from this host.
-.PHONY: php test-php nophp
-php: check-php
+.PHONY: php memcp-php test-php nophp
+memcp-php: php
+php: check-php $(PHP_RUNTIME)
 	$(PHP_ENV) \
-		go build $(BUILD_FLAGS) -tags=$(PHP_TAGS) -ldflags="$(LDFLAGS)" -o memcp-php .
+		go build $(BUILD_FLAGS) -tags=$(PHP_TAGS) -ldflags="$(LDFLAGS)" -o $(PHP_BINARY_DIR)/memcp-php .
+	$(if $(PHP_CACHED),ln -sfn $(PHP_BINARY_DIR)/memcp-php memcp-php,@:)
 
 test-php: php
 	$(PHP_ENV) \
@@ -79,10 +200,11 @@ jit-toolchain:
 		printf '%s\n' "$$revision" > "$(JIT_GOROOT)/.memcp-built-revision"; \
 	fi
 
-jit: check-php jit-toolchain
+jit: check-php $(PHP_RUNTIME) jit-toolchain
 	$(PHP_ENV) GOOS=$(GOOS) GOARCH=$(GOARCH) \
 		GOROOT="$(JIT_GOROOT)" GOEXPERIMENT=jit "$(JIT_GOROOT)/bin/go" \
-		build $(BUILD_FLAGS) -tags=$(PHP_TAGS) -ldflags="$(LDFLAGS)" -o memcp .
+		build $(BUILD_FLAGS) -tags=$(PHP_TAGS) -ldflags="$(LDFLAGS)" -o $(PHP_BINARY_DIR)/memcp .
+	$(if $(PHP_CACHED),ln -sfn $(PHP_BINARY_DIR)/memcp memcp,@:)
 
 jit-nophp: jit-toolchain
 	CGO_ENABLED=$(CGO_ENABLED) GOOS=$(GOOS) GOARCH=$(GOARCH) \
@@ -122,8 +244,12 @@ install-php-runtime: check-php
 	install -m 644 "$$($(PHP_CONFIG) --extension-dir)"/*.so $(DESTDIR)$(PREFIX)/lib/memcp/php/extensions/
 	$(STRIP) --strip-unneeded $(DESTDIR)$(PREFIX)/lib/memcp/php/libphp.so $(DESTDIR)$(PREFIX)/lib/memcp/php/extensions/*.so
 	install -m 644 packaging/php.ini $(DESTDIR)$(PREFIX)/lib/memcp/php/php.ini
+	@if [ -f "$$($(PHP_CONFIG) --prefix)/lib/memcp-extensions.ini" ]; then \
+		ln -sf libphp.so $(DESTDIR)$(PREFIX)/lib/memcp/php/libphp-zts-85.so; \
+		install -m 644 "$$($(PHP_CONFIG) --prefix)/lib/memcp-extensions.ini" $(DESTDIR)$(PREFIX)/lib/memcp/php/conf.d/00-sdk.ini; \
+	fi
 	test -f "$(PHP_LICENSE_DIR)/LICENSE"
-	cd "$(PHP_LICENSE_DIR)" && find . -type f \( -name LICENSE -o -name 'LICENSE.*' -o -name COPYING -o -name 'COPYING.*' -o -name NOTICE \) \
+	cd "$(PHP_LICENSE_DIR)" && find . -type f \( -name LICENSE -o -name 'LICENSE.*' -o -name COPYING -o -name 'COPYING.*' -o -name NOTICE -o -name '*LICENSE*.txt' \) \
 		-exec install -D -m 644 '{}' '$(abspath $(DESTDIR)$(PREFIX)/share/doc/memcp/php)/{}' \;
 
 install-files:
