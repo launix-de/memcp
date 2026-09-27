@@ -3358,6 +3358,35 @@ func comparisonFeedsImmediateIf(v *ssa.BinOp) bool {
 	return valueFeedsImmediateIf(v)
 }
 
+// An immediate scalar return (optionally wrapped in NewBool) can carry flags
+// across an emitter boundary. Shared values and intervening instructions are
+// deliberately excluded; runtime CFG merges still materialize their arms.
+func valueFeedsImmediateReturn(v ssa.Value) bool {
+	instr, ok := v.(ssa.Instruction)
+	if !ok || v.Referrers() == nil || len(*v.Referrers()) != 1 {
+		return false
+	}
+	next := (*v.Referrers())[0]
+	if call, ok := next.(*ssa.Call); ok && call.Block() == instr.Block() {
+		callee := call.Call.StaticCallee()
+		if callee != nil && callee.Name() == "NewBool" && len(call.Call.Args) == 1 {
+			items := instr.Block().Instrs
+			for i := 0; i+1 < len(items); i++ {
+				if items[i] == instr && items[i+1] == call {
+					return valueFeedsImmediateReturn(call)
+				}
+			}
+		}
+		return false
+	}
+	ret, ok := next.(*ssa.Return)
+	if !ok || ret.Block() != instr.Block() || len(ret.Results) != 1 || ret.Results[0] != v {
+		return false
+	}
+	items := instr.Block().Instrs
+	return len(items) >= 2 && items[len(items)-2] == instr && items[len(items)-1] == ret
+}
+
 // valueFeedsImmediateIf proves that a value is consumed only by the block's
 // terminating branch. Intrinsics such as math.IsNaN can then return LocFlags
 // just like a directly written comparison, without materializing a Go bool.
@@ -4817,6 +4846,10 @@ func (g *codeGen) emitBody(cfg emitBodyConfig) {
 	}
 
 	// Multi-block path: full BB closure infrastructure.
+	if !g.storageMode {
+		g.emit("branchSerial := ctx.branchSerial")
+		g.emit("_ = branchSerial")
+	}
 	g.emit("var bbs [%d]%sBBDescriptor", len(g.fn.Blocks), cfg.bbsDeclPrefix)
 	g.emitBBPhiLayout()
 	g.emitStorageInputHomeDeclarations()
@@ -4863,7 +4896,21 @@ func (g *codeGen) emitBody(cfg emitBodyConfig) {
 	g.emitRecursiveBBRenderers()
 	entryPS := g.allocTemp("ps")
 	g.emit("%s := %sPhiState{General: %v}", entryPS, cfg.bbsDeclPrefix, cfg.entryGeneral)
-	g.emit("_ = bbs[0].RenderPS(%s)", entryPS)
+	if !g.storageMode {
+		g.emit("returned := bbs[0].RenderPS(%s)", entryPS)
+		g.emit("if ctx.hasBooleanFlags(returned) {")
+		g.emit("\tif resultRegsProtected {")
+		if !g.rawReturn {
+			g.emit("\t\tctx.UnprotectReg(result.Reg2)")
+		}
+		g.emit("\t\tctx.UnprotectReg(result.Reg)")
+		g.emit("\t}")
+		g.emitUnprotectIncomingArgRegs(pinnedArgRegs)
+		g.emit("\treturn returned")
+		g.emit("}")
+	} else {
+		g.emit("_ = bbs[0].RenderPS(%s)", entryPS)
+	}
 
 	// Epilogue
 	if g.multiBlock {
@@ -6250,7 +6297,17 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			g.emit("var %s JITValueDesc", dv)
 			g.emit("if %s.Loc == LocImm {", src.goVar)
 			g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(!%s.Imm.Bool())}", dv, src.goVar)
+			if !g.storageMode && g.ssaValueUsesRemaining(v.X.Name()) == 1 {
+				g.emit("} else if ctx.hasBooleanFlags(%s) {", src.goVar)
+				g.emit("\t%s = %s", dv, src.goVar)
+				g.emit("\t%s.ID = 0", dv)
+				g.emit("\t%s.Condition = InvertJITCondition(%s.Condition)", dv, dv)
+				g.emit("\tctx.lazyFlags.Condition = %s.Condition", dv)
+				g.emit("\tctx.BindReg(%s.Reg, &%s)", dv, dv)
+				g.emit("\t%s.Loc = LocNone", src.goVar)
+			}
 			g.emit("} else {")
+			g.emit("\tctx.EnsureDesc(&%s)", src.goVar)
 			g.emit("\tnegReg := ctx.AllocReg()")
 			g.emit("\tif %s.Loc == LocRegPair {", src.goVar)
 			g.emit("\t\tctx.EmitMovRegReg(negReg, %s.Reg2)", src.goVar)
@@ -8214,7 +8271,8 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		}
 		goOp := goOpStr(v.Op)
 		if cc != "" {
-			flagsOnly := comparisonFeedsImmediateIf(v)
+			lazyReturn := !g.storageMode && g.inlineEndLabel == "" && valueFeedsImmediateReturn(v)
+			flagsOnly := comparisonFeedsImmediateIf(v) || lazyReturn
 			dv := g.allocDesc()
 			if c, ok := v.Y.(*ssa.Const); ok && c.Value == nil && (v.Op == token.EQL || v.Op == token.NEQ) {
 				nilComparable := false
@@ -8342,7 +8400,11 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 					g.emit("\tctx.EmitCmpInt64(%s.Reg, RegR11)", xVal.goVar)
 				}
 				if flagsOnly {
-					g.emit("\t%s = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: %s, Condition: %s}", dv, flagsReg, cc)
+					if lazyReturn {
+						g.emit("\t%s = ctx.DeferBooleanFlags(%s, %s)", dv, flagsReg, cc)
+					} else {
+						g.emit("\t%s = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: %s, Condition: %s}", dv, flagsReg, cc)
+					}
 					g.emit("\tctx.BindReg(%s, &%s)", flagsReg, dv)
 				} else {
 					// CMP is non-destructive, but SETcc requires a fresh result register.
@@ -8375,7 +8437,11 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				g.emit("\t\tctx.EmitCmpInt64(%s.Reg, RegR11)", xVal.goVar)
 				g.emit("\t}")
 				if flagsOnly {
-					g.emit("\t%s = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: %s, Condition: %s}", dv, flagsRegY, cc)
+					if lazyReturn {
+						g.emit("\t%s = ctx.DeferBooleanFlags(%s, %s)", dv, flagsRegY, cc)
+					} else {
+						g.emit("\t%s = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: %s, Condition: %s}", dv, flagsRegY, cc)
+					}
 					g.emit("\tctx.BindReg(%s, &%s)", flagsRegY, dv)
 				} else {
 					rv := g.allocReg()
@@ -8393,7 +8459,11 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				g.emit("\tctx.EmitMovRegImm64(RegR11, uint64(%s.Imm.Int()))", xVal.goVar)
 				g.emit("\tctx.EmitCmpInt64(RegR11, %s.Reg)", yVal.goVar)
 				if flagsOnly {
-					g.emit("\t%s = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: %s, Condition: %s}", dv, flagsRegX, cc)
+					if lazyReturn {
+						g.emit("\t%s = ctx.DeferBooleanFlags(%s, %s)", dv, flagsRegX, cc)
+					} else {
+						g.emit("\t%s = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: %s, Condition: %s}", dv, flagsRegX, cc)
+					}
 					g.emit("\tctx.BindReg(%s, &%s)", flagsRegX, dv)
 				} else {
 					rv2 := g.allocReg()
@@ -8409,7 +8479,11 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				}
 				g.emit("\tctx.EmitCmpInt64(%s.Reg, %s.Reg)", xVal.goVar, yVal.goVar)
 				if flagsOnly {
-					g.emit("\t%s = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: %s, Condition: %s}", dv, flagsRegBoth, cc)
+					if lazyReturn {
+						g.emit("\t%s = ctx.DeferBooleanFlags(%s, %s)", dv, flagsRegBoth, cc)
+					} else {
+						g.emit("\t%s = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: %s, Condition: %s}", dv, flagsRegBoth, cc)
+					}
 					g.emit("\tctx.BindReg(%s, &%s)", flagsRegBoth, dv)
 				} else {
 					// Protect xVal.Reg when multi-use: SETcc must not clobber it.
@@ -10066,6 +10140,8 @@ func (g *codeGen) emitReturnSingleBlock(v *ssa.Return) {
 		if !res.isDesc {
 			panic(fmt.Sprintf("unsupported raw helper return for %s", v.Results[0]))
 		}
+		g.emit("if ctx.hasBooleanFlags(%s) { return %s }", res.goVar, res.goVar)
+		g.emit("ctx.EnsureDesc(&%s)", res.goVar)
 		g.emit("if result.Loc == LocAny { return %s }", res.goVar)
 		if res.resultTargetVar != "" {
 			// A scalar producer may already have selected result.Reg as its home.
@@ -10084,6 +10160,9 @@ func (g *codeGen) emitReturnSingleBlock(v *ssa.Return) {
 	case "_newargslice":
 		g.emit("return jitMaterializeVirtualSlice(ctx, %s, result)", res.goVar)
 	case "_newbool":
+		if !g.storageMode {
+			g.emit("if ctx.hasBooleanFlags(%s) { return %s }", res.goVar, res.goVar)
+		}
 		g.emit("if result.Loc == LocAny {")
 		g.emit("\tresult = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}")
 		g.emit("\tctx.BindReg(result.Reg, &result)")
@@ -10215,6 +10294,8 @@ func (g *codeGen) emitReturnMultiBlock(v *ssa.Return) {
 		if !res.isDesc {
 			panic(fmt.Sprintf("unsupported raw helper return for %s", v.Results[0]))
 		}
+		g.emit("if ctx.branchSerial == branchSerial && ctx.hasBooleanFlags(%s) { return %s }", res.goVar, res.goVar)
+		g.emit("ctx.EnsureDesc(&%s)", res.goVar)
 		g.emit("ctx.EmitMovToReg(result.Reg, %s)", res.goVar)
 		g.emit("result.Type = %s.Type", res.goVar)
 		g.emit("ctx.EmitJmp(%s)", g.endLabel)
@@ -10293,6 +10374,7 @@ func (g *codeGen) emitReturnMultiBlock(v *ssa.Return) {
 	res := g.vals[v.Results[0].Name()]
 	switch res.marker {
 	case "_newbool":
+		g.emit("if ctx.branchSerial == branchSerial && ctx.hasBooleanFlags(%s) { return %s }", res.goVar, res.goVar)
 		g.emitScalarReturnIntoResult(res, "Bool", "tagBool")
 		g.emit("result.Type = tagBool")
 	case "_newint":
@@ -10442,7 +10524,21 @@ func (g *codeGen) lookup(v ssa.Value) genVal {
 	v = g.rewriteSSAValue(v)
 	if gv, ok := g.vals[v.Name()]; ok {
 		if gv.isDesc {
-			g.emit("ctx.EnsureDesc(&%s)", gv.goVar)
+			lazyConsumer := false
+			switch consumer := g.currentInstr.(type) {
+			case *ssa.UnOp:
+				lazyConsumer = !g.storageMode && consumer.Op == token.NOT && g.ssaValueUsesRemaining(v.Name()) == 1
+			case *ssa.Return:
+				lazyConsumer = g.rawReturn
+			case *ssa.Call:
+				callee := consumer.Call.StaticCallee()
+				lazyConsumer = !g.storageMode && callee != nil && callee.Name() == "NewBool"
+			}
+			if lazyConsumer {
+				g.emit("ctx.SyncDesc(&%s)", gv.goVar)
+			} else {
+				g.emit("ctx.EnsureDesc(&%s)", gv.goVar)
+			}
 		}
 		return gv
 	}

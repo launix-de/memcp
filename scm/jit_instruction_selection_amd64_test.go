@@ -17,6 +17,44 @@ import (
 	"unsafe"
 )
 
+func TestJITBooleanFlagsMaterializeAtBarriers(t *testing.T) {
+	for _, barrier := range []string{"value", "instruction", "raw", "label", "snapshot"} {
+		t.Run(barrier, func(t *testing.T) {
+			buffer := make([]byte, 256)
+			ctx := &JITContext{Start: unsafe.Pointer(&buffer[0]), Ptr: unsafe.Pointer(&buffer[0]), End: unsafe.Pointer(&buffer[len(buffer)-1]),
+				ScratchReg: RegR11, StackReg: RegRSP, FrameReg: RegRBP}
+			ctx.EmitCmpInt64(RegRAX, RegRBX)
+			before := uintptr(ctx.Ptr)
+			value := ctx.DeferBooleanFlags(RegRCX, CondSignedLess)
+			if uintptr(ctx.Ptr) != before {
+				t.Fatal("recording boolean flags emitted machine code")
+			}
+			switch barrier {
+			case "value":
+				ctx.EnsureDesc(&value)
+			case "instruction":
+				ctx.EmitAddRegImm32(RegRAX, 1)
+			case "raw":
+				ctx.EmitByte(0x90)
+			case "label":
+				ctx.MarkLabel(ctx.ReserveLabel())
+			case "snapshot":
+				ctx.SnapshotAllocState()
+			}
+			ctx.EnsureDesc(&value)
+			if value.Loc != LocReg || ctx.lazyFlags.FlagsID != 0 {
+				t.Fatal("barrier left stale flags")
+			}
+			// SETL CL; MOVZX ECX, CL must precede the clobbering instruction.
+			got := buffer[before-uintptr(ctx.Start) : uintptr(ctx.Ptr)-uintptr(ctx.Start)]
+			want := []byte{0x0f, 0x9c, 0xc1, 0x0f, 0xb6, 0xc9}
+			if !bytes.HasPrefix(got, want) || bytes.Count(got, want) != 1 {
+				t.Fatalf("boolean not materialized exactly once before barrier: %x", got)
+			}
+		})
+	}
+}
+
 func TestJITAMD64SelectsDirectIntegerOperands(t *testing.T) {
 	buffer := make([]byte, 64)
 	ctx := &JITContext{
@@ -78,5 +116,35 @@ func TestJITAMD64IntegerSelectionPreservesDeferredMoves(t *testing.T) {
 	want = []byte{0x48, 0x89, 0xF8}
 	if !bytes.Equal(got, want) {
 		t.Fatalf("identity selection did not materialize its input:\n got %x\nwant %x", got, want)
+	}
+}
+
+func TestJITDeferredBooleanBookkeepingDoesNotAllocate(t *testing.T) {
+	buffer := make([]byte, 64)
+	ctx := &JITContext{Start: unsafe.Pointer(&buffer[0]), Ptr: unsafe.Pointer(&buffer[0]), End: unsafe.Pointer(&buffer[len(buffer)-1]),
+		ScratchReg: RegR11, StackReg: RegRSP, FrameReg: RegRBP}
+	allocations := testing.AllocsPerRun(100, func() {
+		ctx.Ptr = ctx.Start
+		ctx.EmitCmpInt64(RegRAX, RegRBX)
+		value := ctx.DeferBooleanFlags(RegRCX, CondSignedLess)
+		ctx.EnsureDesc(&value)
+	})
+	if allocations != 0 {
+		t.Fatalf("deferred boolean bookkeeping allocated %g objects", allocations)
+	}
+}
+
+func TestJITUnusedBooleanDoesNotMaterialize(t *testing.T) {
+	buffer := make([]byte, 64)
+	ctx := &JITContext{Start: unsafe.Pointer(&buffer[0]), Ptr: unsafe.Pointer(&buffer[0]), End: unsafe.Pointer(&buffer[len(buffer)-1]),
+		ScratchReg: RegR11, StackReg: RegRSP, FrameReg: RegRBP}
+	ctx.EmitCmpInt64(RegRAX, RegRBX)
+	before := ctx.Ptr
+	value := ctx.DeferBooleanFlags(RegRCX, CondSignedLess)
+	ctx.BindReg(value.Reg, &value)
+	ctx.FreeDesc(&value)
+	ctx.FlushRegisterMoves()
+	if ctx.Ptr != before || ctx.lazyFlags.FlagsID != 0 {
+		t.Fatal("unused boolean was materialized")
 	}
 }

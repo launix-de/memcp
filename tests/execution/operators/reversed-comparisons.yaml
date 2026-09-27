@@ -43,6 +43,19 @@ test_cases:
   # Reversed equality: constant = col
   # ==============================================================
 
+  - name: "Comparison booleans survive boxing and sibling arithmetic"
+    sql: "SELECT id, id < 100 AS lt, id <= 100 AS le, id > 100 AS gt, id >= 100 AS ge, id+7 AS shifted FROM rev_cmp WHERE id BETWEEN 99 AND 101 ORDER BY id"
+    expect:
+      data:
+        - {id: 99, lt: true, le: true, gt: false, ge: false, shifted: 106}
+        - {id: 100, lt: false, le: true, gt: false, ge: true, shifted: 107}
+        - {id: 101, lt: false, le: false, gt: true, ge: true, shifted: 108}
+
+  - name: "Integer flags in nested branches retain SQL null semantics"
+    sql: "SELECT SUM(CASE WHEN id < 100 THEN CASE WHEN id >= 50 THEN 2 ELSE 1 END ELSE CASE WHEN id <= 150 THEN 3 ELSE 4 END END) AS total, SUM(CASE WHEN name < 'item0' THEN 1 ELSE 0 END) AS none FROM rev_cmp"
+    expect:
+      data: [{total: 499, none: 0}]
+
   - name: "Reversed equality: 50 = id"
     sql: "SELECT id, val FROM rev_cmp WHERE 50 = id"
     expect:

@@ -201,6 +201,9 @@ func jitDescRegs(desc JITValueDesc) []Reg {
 }
 
 func jitPlaceIntoPair(ctx *JITContext, src *JITValueDesc, target JITValueDesc) JITValueDesc {
+	if src.Loc == LocFlags && src.FlagsID != 0 {
+		ctx.EnsureDesc(src)
+	}
 	if target.Loc != LocRegPair {
 		panic("jit: jitPlaceIntoPair requires LocRegPair target")
 	}
@@ -1309,6 +1312,9 @@ func (ctx *JITContext) EmitLoadScmerToStack(address *JITValueDesc, targetOff int
 }
 
 func (ctx *JITContext) stabilizeForNested(value JITValueDesc) JITValueDesc {
+	if value.Loc == LocFlags && value.FlagsID != 0 {
+		ctx.EnsureDesc(&value)
+	}
 	ctx.SyncDesc(&value)
 	originalID := value.ID
 	var words int32
@@ -1527,6 +1533,9 @@ func (ctx *JITContext) PreparePointerStackTarget(off int32, words int) {
 // cross-block contract merely by loading it: a register reload is a block-local
 // materialization, while predecessor edges continue to write this stack slot.
 func (ctx *JITContext) StabilizeDescForControlFlow(desc *JITValueDesc) {
+	if desc.Loc == LocFlags && desc.FlagsID != 0 {
+		ctx.EnsureDesc(desc)
+	}
 	ctx.SyncDesc(desc)
 	words := int32(0)
 	loc := desc.Loc
@@ -2094,7 +2103,25 @@ func jitMaterializeVirtualGoSlice(ctx *JITContext, elements []JITValueDesc) JITV
 }
 
 func jitCondToBool(ctx *JITContext, cond *JITValueDesc) JITValueDesc {
+	if ctx.hasBooleanFlags(*cond) {
+		value := *cond
+		*cond = JITValueDesc{}
+		return value
+	}
 	return ctx.EmitBoolDesc(cond, JITValueDesc{Loc: LocAny})
+}
+
+// emitBooleanFlagsJump consumes ownership only when flags are still live.
+// Ordinary truthiness/boxing callers retain EmitBoolDesc's materialized ABI.
+func (ctx *JITContext) emitBooleanFlagsJump(value *JITValueDesc, yes, no JITLabel) bool {
+	if !ctx.hasBooleanFlags(*value) {
+		return false
+	}
+	ctx.lazyFlags = jitBooleanFlags{}
+	ctx.EmitJump(value.Condition, yes)
+	ctx.EmitJmp(no)
+	ctx.FreeDesc(value)
+	return true
 }
 
 // jitCompileCondition gives an arbitrarily large child CFG a stable producer
@@ -3141,6 +3168,10 @@ func jitEmitCondJump(ctx *JITContext, expr Scmer, sliceBase Reg, trueLbl, falseL
 	// Reserving it here prevents a returned spill descriptor from becoming
 	// relative to a later nested emitter's stack frame.
 	b := jitCompileCondition(ctx, expr, sliceBase)
+	if ctx.emitBooleanFlagsJump(&b, trueLbl, falseLbl) {
+		ctx.ReclaimUntrackedRegs()
+		return
+	}
 	if b.Loc == LocImm {
 		if b.Imm.Bool() {
 			ctx.EmitJmp(trueLbl)
@@ -3468,7 +3499,7 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 			// registers. Rebind that placement at the declaration boundary so stale
 			// spill metadata cannot replace the freshly produced result.
 			switch out.Loc {
-			case LocReg:
+			case LocReg, LocFlags:
 				ctx.BindReg(out.Reg, &out)
 			case LocRegPair:
 				ctx.BindReg(out.Reg, &out)
@@ -3480,7 +3511,7 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 			}
 			outputRegs := uint64(0)
 			switch out.Loc {
-			case LocReg:
+			case LocReg, LocFlags:
 				outputRegs = 1 << uint(out.Reg)
 			case LocRegPair:
 				outputRegs = 1<<uint(out.Reg) | 1<<uint(out.Reg2)

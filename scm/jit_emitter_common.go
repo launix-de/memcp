@@ -101,7 +101,7 @@ func (ctx *JITContext) ensureSpace(n uintptr) {
 
 // emitByte appends a single byte to the writer.
 func (ctx *JITContext) emitByte(b byte) {
-	if ctx.registerInstructionDepth == 0 && ctx.DeferredRegMoves.active != 0 {
+	if ctx.registerInstructionDepth == 0 && (ctx.DeferredRegMoves.active != 0 || ctx.lazyFlags.FlagsID != 0) {
 		ctx.FlushRegisterMoves()
 	}
 	ctx.ensureSpace(1)
@@ -111,7 +111,7 @@ func (ctx *JITContext) emitByte(b byte) {
 
 // emitBytes appends raw bytes to the writer.
 func (ctx *JITContext) emitBytes(bs ...byte) {
-	if ctx.registerInstructionDepth == 0 && ctx.DeferredRegMoves.active != 0 {
+	if ctx.registerInstructionDepth == 0 && (ctx.DeferredRegMoves.active != 0 || ctx.lazyFlags.FlagsID != 0) {
 		ctx.FlushRegisterMoves()
 	}
 	ctx.ensureSpace(uintptr(len(bs)))
@@ -123,7 +123,7 @@ func (ctx *JITContext) emitBytes(bs ...byte) {
 
 // emitU32 appends a little-endian uint32.
 func (ctx *JITContext) emitU32(v uint32) {
-	if ctx.registerInstructionDepth == 0 && ctx.DeferredRegMoves.active != 0 {
+	if ctx.registerInstructionDepth == 0 && (ctx.DeferredRegMoves.active != 0 || ctx.lazyFlags.FlagsID != 0) {
 		ctx.FlushRegisterMoves()
 	}
 	ctx.ensureSpace(4)
@@ -133,7 +133,7 @@ func (ctx *JITContext) emitU32(v uint32) {
 
 // emitU64 appends a little-endian uint64.
 func (ctx *JITContext) emitU64(v uint64) {
-	if ctx.registerInstructionDepth == 0 && ctx.DeferredRegMoves.active != 0 {
+	if ctx.registerInstructionDepth == 0 && (ctx.DeferredRegMoves.active != 0 || ctx.lazyFlags.FlagsID != 0) {
 		ctx.FlushRegisterMoves()
 	}
 	ctx.ensureSpace(8)

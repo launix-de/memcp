@@ -88,6 +88,7 @@ func compare(a ...Scmer) Scmer {
 	if a[0].Int() == 0 { return NewBool(false) }
 	return NewBool(Less(a[0], a[1]))
 }
+
 `, "compare")
 	code, errMsg := generateClosure("compare", fn, nil)
 	if errMsg != "" {
@@ -720,5 +721,68 @@ func init() {
 	}
 	if ops := collectOperators(fset, file, "sample.go"); len(ops) != 0 {
 		t.Fatalf("collectOperators() found nested function type as an operator: %#v", ops)
+	}
+}
+
+func TestBooleanHelperDefersReturnedIntegerComparison(t *testing.T) {
+	fn := buildTestSSAFunction(t, `package sample
+type Scmer struct{}
+func (Scmer) Int() int64
+func less(a, b Scmer) bool { return a.Int() < b.Int() }
+`, "less")
+	code, errMsg := generateJITHelperBody(fn)
+	if errMsg != "" {
+		t.Fatal(errMsg)
+	}
+	for _, want := range []string{"ctx.DeferBooleanFlags(", "CondSignedLess", "ctx.hasBooleanFlags("} {
+		if !strings.Contains(code, want) {
+			t.Fatalf("boolean helper lacks %q:\n%s", want, code)
+		}
+	}
+	if strings.Contains(code, "ctx.EmitSetcc(") {
+		t.Fatalf("integer helper eagerly materialized its returned comparison:\n%s", code)
+	}
+}
+
+func TestBoxedBooleanReturnDefersOnlyAnExclusiveTailComparison(t *testing.T) {
+	for _, body := range []string{
+		`return NewBool(a[0].Int() < a[1].Int())`,
+		`c := a[0].Int() < a[1].Int(); if c { return NewBool(c) }; return NewBool(false)`,
+	} {
+		fn := buildTestSSAFunction(t, `package sample
+ type Scmer struct{}
+ func NewBool(bool) Scmer
+ func (Scmer) Int() int64
+ func compare(a ...Scmer) Scmer { `+body+` }
+ `, "compare")
+		code, errMsg := generateClosure("compare", fn, nil)
+		if errMsg != "" {
+			t.Fatal(errMsg)
+		}
+		wantLazy := strings.HasPrefix(body, "return")
+		if strings.Contains(code, "ctx.DeferBooleanFlags(") != wantLazy {
+			t.Fatalf("exclusive-tail proof failed for %s:\n%s", body, code)
+		}
+	}
+}
+
+func TestStorageBooleanReturnKeepsPublicMaterializedABI(t *testing.T) {
+	fn := buildTestSSAFunction(t, `package sample
+ type Scmer struct{}
+ type StorageTest struct{}
+ func NewBool(bool) Scmer
+ func GetValue(s *StorageTest, index uint32) Scmer { return NewBool(!(index < 2)) }
+ `, "GetValue")
+	code, errMsg := generateStorageBody("StorageTest", fn, nil, nil)
+	if errMsg != "" {
+		t.Fatal(errMsg)
+	}
+	for _, forbidden := range []string{"ctx.hasBooleanFlags", "ctx.lazyFlags", "ctx.branchSerial", "ctx.DeferBooleanFlags"} {
+		if strings.Contains(code, forbidden) {
+			t.Fatalf("storage getter leaked compiler-private flags protocol %q:\n%s", forbidden, code)
+		}
+	}
+	if !strings.Contains(code, "ctx.EmitMakeBool(") {
+		t.Fatalf("storage getter lost its materialized Scmer return:\n%s", code)
 	}
 }
