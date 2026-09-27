@@ -41,6 +41,9 @@ setup:
 - scm: |
     (insert (table "memcp-tests" "ds_list") '("entity_id")
       (map (produceN 831) (lambda (i) (list (+ i 1)))))
+- sql: DROP TABLE IF EXISTS ds_kind
+- sql: CREATE TABLE ds_kind (name VARCHAR(10) PRIMARY KEY, active BOOL) ENGINE=memory
+- sql: INSERT INTO ds_kind VALUES ('P',true)
 test_cases:
 - name: Literal optional filter is folded before subquery decorrelation
   sql: |-
@@ -221,7 +224,106 @@ test_cases:
       category: 1
       amount: 40
       all_amount: 70
+- name: Parameterized range chain remains available to physical costing
+  scm: |
+    (begin
+      (define request (newsession))
+      (define shape (sql_parameterize_select_literals "SELECT periods.period_id,\n  (SELECT SUM((SELECT h.quantity FROM ds_history h\n    WHERE h.entity_id=e.id AND h.coordinate<=periods.end_time\n    ORDER BY h.coordinate DESC LIMIT 1))\n   FROM ds_entity e\n   WHERE (SELECT h.coordinate FROM ds_history h\n     WHERE h.entity_id=e.id AND h.coordinate<=periods.end_time\n     ORDER BY h.coordinate DESC LIMIT 1) BETWEEN 0 AND periods.end_time\n     AND (SELECT k.active FROM ds_kind k\n       WHERE k.name=(SELECT h.kind FROM ds_history h\n         WHERE h.entity_id=e.id AND h.coordinate<=periods.end_time\n         ORDER BY h.coordinate DESC LIMIT 1) LIMIT 1)=true) AS total\nFROM (SELECT 1 AS period_id,10 AS end_time\n  UNION SELECT 2 AS period_id,25 AS end_time) periods\nORDER BY periods.period_id" true))
+      (mapIndex (cadr shape) (lambda (i value) (request (concat "v" (+ i 1)) value)))
+      (define resultrow (lambda (row) row))
+      (define explained (with_session request (lambda ()
+        (eval (parse_sql "memcp-tests" (concat "EXPLAIN PHYSICAL " (car shape))
+          nil (sql_queryplan_compile_session request nil) nil)))))
+      (define code (get_assoc explained "code"))
+      (if (and (strlike code "%__group_range_dimension_%")
+               (not (strlike code "%group_cache_create%"))) true
+        (error "range-to-dimension chain lost to eager group materialization")))
+  expect:
+    data: [true]
+- name: Parameterized latest-row dimension chain
+  sql: |
+    SELECT periods.period_id,
+      (SELECT SUM((SELECT h.quantity FROM ds_history h
+        WHERE h.entity_id=e.id AND h.coordinate<=periods.end_time
+        ORDER BY h.coordinate DESC LIMIT 1))
+       FROM ds_entity e
+       WHERE (SELECT h.coordinate FROM ds_history h
+         WHERE h.entity_id=e.id AND h.coordinate<=periods.end_time
+         ORDER BY h.coordinate DESC LIMIT 1) BETWEEN 0 AND periods.end_time
+         AND (SELECT k.active FROM ds_kind k
+           WHERE k.name=(SELECT h.kind FROM ds_history h
+             WHERE h.entity_id=e.id AND h.coordinate<=periods.end_time
+             ORDER BY h.coordinate DESC LIMIT 1) LIMIT 1)=true) AS total
+    FROM (SELECT 1 AS period_id,10 AS end_time
+      UNION SELECT 2 AS period_id,25 AS end_time) periods
+    ORDER BY periods.period_id
+  expect:
+    data: [{"period_id": 1, "total": 1000}, {"period_id": 2, "total": 1100}]
+- name: Set missing and NULL range dimension values
+  sql: |
+    UPDATE ds_history SET kind=CASE WHEN entity_id=1 THEN NULL ELSE 'missing' END WHERE entity_id IN (1,2)
+- name: Add an entity without history
+  sql: |
+    INSERT INTO ds_entity VALUES (1001,1)
+- name: Range chain preserves NULL and missing matches
+  sql: |
+    SELECT periods.period_id,
+      (SELECT SUM((SELECT h.quantity FROM ds_history h
+        WHERE h.entity_id=e.id AND h.coordinate<=periods.end_time
+        ORDER BY h.coordinate DESC LIMIT 1))
+       FROM ds_entity e
+       WHERE (SELECT h.coordinate FROM ds_history h
+         WHERE h.entity_id=e.id AND h.coordinate<=periods.end_time
+         ORDER BY h.coordinate DESC LIMIT 1) BETWEEN 0 AND periods.end_time
+         AND (SELECT k.active FROM ds_kind k
+           WHERE k.name=(SELECT h.kind FROM ds_history h
+             WHERE h.entity_id=e.id AND h.coordinate<=periods.end_time
+             ORDER BY h.coordinate DESC LIMIT 1) LIMIT 1)=true) AS total
+    FROM (SELECT 1 AS period_id,10 AS end_time
+      UNION SELECT 2 AS period_id,25 AS end_time) periods
+    ORDER BY periods.period_id
+  expect:
+    data: [{"period_id": 1, "total": 998}, {"period_id": 2, "total": 1098}]
+- name: Range chain preserves an empty coordinate domain
+  sql: |
+    SELECT periods.period_id,
+      (SELECT SUM((SELECT h.quantity FROM ds_history h
+        WHERE h.entity_id=e.id AND h.coordinate<=periods.end_time
+        ORDER BY h.coordinate DESC LIMIT 1))
+       FROM ds_entity e
+       WHERE (SELECT h.coordinate FROM ds_history h
+         WHERE h.entity_id=e.id AND h.coordinate<=periods.end_time
+         ORDER BY h.coordinate DESC LIMIT 1) BETWEEN 0 AND periods.end_time
+         AND (SELECT k.active FROM ds_kind k
+           WHERE k.name=(SELECT h.kind FROM ds_history h
+             WHERE h.entity_id=e.id AND h.coordinate<=periods.end_time
+             ORDER BY h.coordinate DESC LIMIT 1) LIMIT 1)=true) AS total
+    FROM (SELECT 1 AS period_id,NULL AS end_time
+      UNION SELECT 2 AS period_id,-1 AS end_time) periods
+    ORDER BY periods.period_id
+  expect:
+    data: [{"period_id": 1, "total": null}, {"period_id": 2, "total": null}]
+- name: Range chain rejects scalar cardinality overflow
+  sql: |
+    SELECT periods.period_id,
+      (SELECT SUM((SELECT h.quantity FROM ds_history h
+        WHERE h.entity_id=e.id AND h.coordinate<=periods.end_time
+        ORDER BY h.coordinate DESC))
+       FROM ds_entity e
+       WHERE (SELECT h.coordinate FROM ds_history h
+         WHERE h.entity_id=e.id AND h.coordinate<=periods.end_time
+         ORDER BY h.coordinate DESC LIMIT 1) BETWEEN 0 AND periods.end_time
+         AND (SELECT k.active FROM ds_kind k
+           WHERE k.name=(SELECT h.kind FROM ds_history h
+             WHERE h.entity_id=e.id AND h.coordinate<=periods.end_time
+             ORDER BY h.coordinate DESC LIMIT 1) LIMIT 1)=true) AS total
+    FROM (SELECT 1 AS period_id,10 AS end_time
+      UNION SELECT 2 AS period_id,25 AS end_time) periods
+    ORDER BY periods.period_id
+  expect:
+    error: true
 cleanup:
+- sql: DROP TABLE IF EXISTS ds_kind
 - sql: DROP TABLE IF EXISTS metric_history
 - sql: DROP TABLE IF EXISTS metric_entity
 - sql: DROP TABLE IF EXISTS metric_catalog

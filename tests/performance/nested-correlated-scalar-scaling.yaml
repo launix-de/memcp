@@ -2,8 +2,8 @@
 # Regression: a scalar subselect whose WHERE carries a correlated
 # aggregate that itself carries two correlated scalar subselects must
 # not blow up into a quadratic prejoin. This is the minimal reduction of
-# the ERPL dashboard "reminderFop_journal_year_accountOpos" badge query,
-# which was observed taking 3+ minutes for ~1600 rows. Per Neumann
+# a dashboard badge query observed taking minutes for a small input.
+# Per Neumann
 # unnesting every nesting level decorrelates to a domain join; the plan
 # must stay near-linear.
 
@@ -57,6 +57,37 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS ncs_rm_final"
 
 test_cases:
+  # First workload on fresh tables: one cold request plus ten further requests.
+  - name: "filtered scalar lookup chain serves range and category cells"
+    sql: |
+      SELECT bounds.lo, category.val, COALESCE((
+        SELECT COUNT(*) FROM ncs_rm_driver d
+        WHERE d.id BETWEEN bounds.lo AND bounds.lo + 1999 AND (
+          SELECT f.value FROM ncs_rm_final f
+          WHERE f.id = (
+            SELECT t.final_id FROM ncs_rm_target t
+            WHERE t.id = (
+              SELECT m.target_id FROM ncs_rm_middle m
+              WHERE m.id = d.middle_id LIMIT 1
+            ) LIMIT 1
+          ) LIMIT 1) = category.val
+      ), 0) AS matched
+      FROM (SELECT 0 AS lo UNION ALL SELECT 2000 AS lo) bounds
+      CROSS JOIN (SELECT 4 AS val UNION ALL SELECT 5 AS val) category
+      ORDER BY bounds.lo, category.val
+    expect:
+      rows: 4
+      data:
+        - {lo: 0, val: 4, matched: 2000}
+        - {lo: 0, val: 5, matched: 0}
+        - {lo: 2000, val: 4, matched: 2000}
+        - {lo: 2000, val: 5, matched: 0}
+    performance_rows: 4000
+    warmup: 0
+    timing_samples: 11
+    timing_aggregation: total
+    threshold_ms: 20000
+
   # The deterministic gate is max_plan_size, not wall-clock time: a correct
   # plan for this query serializes to ~8 KB; the cubic prejoin blow-up
   # observed on this branch is ~362 KB. Plan size is hardware-independent, so
@@ -197,3 +228,26 @@ test_cases:
     warmup: 1
     timing_samples: 5
     threshold_ms: 1000
+
+  - name: "filtered scalar lookup chain aggregates matching rows"
+    sql: |
+      SELECT COUNT(*) AS matched
+      FROM ncs_rm_driver d
+      WHERE d.id BETWEEN 0 AND 3999 AND (
+        SELECT f.value FROM ncs_rm_final f
+        WHERE f.id = (
+          SELECT t.final_id FROM ncs_rm_target t
+          WHERE t.id = (
+            SELECT m.target_id FROM ncs_rm_middle m
+            WHERE m.id = d.middle_id LIMIT 1
+          ) LIMIT 1
+        ) LIMIT 1) = 4
+    expect:
+      rows: 1
+      data:
+        - matched: 4000
+    performance_rows: 4000
+    warmup: 0
+    timing_samples: 11
+    timing_aggregation: total
+    threshold_ms: 20000

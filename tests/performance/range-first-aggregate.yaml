@@ -1,5 +1,6 @@
 # Copyright (C) 2026 Carl-Philip Hänsch
 # Correlated latest-row lookups across several reporting periods.
+# Workload: one cold request plus ten reuses, with no discarded warmup.
 
 metadata:
   version: "1.0"
@@ -60,7 +61,7 @@ test_cases:
         - {period_id: 8, total: 20000}
     timing_aggregation: total
     warmup: 0
-    timing_samples: 3
+    timing_samples: 11
     threshold_ms: 10000
 
   - name: "Aggregate with several dependent scalar lookups"
@@ -88,7 +89,7 @@ test_cases:
         - {period_id: 2, total: 20000}
     timing_aggregation: total
     warmup: 0
-    timing_samples: 3
+    timing_samples: 11
     threshold_ms: 10000
 
   - name: "Dependent second range lookup reuses first row values"
@@ -120,7 +121,7 @@ test_cases:
         - {period_id: 2, total: 20000}
     timing_aggregation: total
     warmup: 0
-    timing_samples: 3
+    timing_samples: 11
     threshold_ms: 10000
 
 cleanup:
