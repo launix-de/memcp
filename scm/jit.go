@@ -1834,7 +1834,7 @@ func (ctx *JITContext) AllocReg() Reg {
 		}
 		valid := false
 		switch owner.Loc {
-		case LocReg:
+		case LocReg, LocFlags:
 			valid = owner.Reg == rr
 		case LocRegPair:
 			valid = owner.Reg == rr || owner.Reg2 == rr

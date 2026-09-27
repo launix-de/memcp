@@ -148,3 +148,21 @@ func TestJITUnusedBooleanDoesNotMaterialize(t *testing.T) {
 		t.Fatal("unused boolean was materialized")
 	}
 }
+
+func TestJITAllocatorRetainsDeferredBooleanRegister(t *testing.T) {
+	buffer := make([]byte, 128)
+	ctx := &JITContext{Start: unsafe.Pointer(&buffer[0]), Ptr: unsafe.Pointer(&buffer[0]), End: unsafe.Pointer(&buffer[len(buffer)-1]),
+		ScratchReg: RegR11, StackReg: RegRSP, FrameReg: RegRBP,
+		AllRegs: 1<<RegRAX | 1<<RegRBX, FreeRegs: 1 << RegRBX}
+	ctx.EmitCmpInt64(RegRDI, RegRSI)
+	value := ctx.DeferBooleanFlags(RegRAX, CondSignedLess)
+	ctx.BindReg(RegRAX, &value)
+	got := ctx.AllocReg()
+	owner := ctx.RegOwners[RegRAX]
+	if got == RegRAX || owner == nil || owner.ID != value.ID || owner.FlagsID != value.FlagsID {
+		t.Fatal("allocator reclaimed the reserved register of a live deferred boolean")
+	}
+	if !ctx.hasBooleanFlags(value) {
+		t.Fatal("allocating a free register unnecessarily materialized the comparison")
+	}
+}
