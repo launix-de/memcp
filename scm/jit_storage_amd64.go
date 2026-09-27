@@ -260,19 +260,21 @@ func emitJITFilterBuffer(ctx *JITContext, proc *Proc, valueTypes []uint8, reader
 		ctx.FreeDesc(&address)
 	}
 	predicate := jitEmitStorageProc(ctx, proc, args)
-	boolean := ctx.EmitBoolDesc(&predicate, JITValueDesc{Loc: LocAny})
-	ctx.FreeDesc(&predicate)
-	if boolean.Loc == LocImm {
-		if boolean.Imm.Bool() {
-			ctx.EmitJmp(accepted)
+	if !ctx.emitBooleanFlagsJump(&predicate, accepted, next) {
+		boolean := ctx.EmitBoolDesc(&predicate, JITValueDesc{Loc: LocAny})
+		ctx.FreeDesc(&predicate)
+		if boolean.Loc == LocImm {
+			if boolean.Imm.Bool() {
+				ctx.EmitJmp(accepted)
+			} else {
+				ctx.EmitJmp(next)
+			}
 		} else {
+			ctx.EmitCmpRegImm32(boolean.Reg, 0)
+			ctx.FreeDesc(&boolean)
+			ctx.EmitJcc(CondNotEqual, accepted)
 			ctx.EmitJmp(next)
 		}
-	} else {
-		ctx.EmitCmpRegImm32(boolean.Reg, 0)
-		ctx.FreeDesc(&boolean)
-		ctx.EmitJcc(CondNotEqual, accepted)
-		ctx.EmitJmp(next)
 	}
 
 	ctx.MarkLabel(accepted)

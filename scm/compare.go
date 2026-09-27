@@ -778,6 +778,8 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 		return result
 	}
 	/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+	branchSerial := ctx.branchSerial
+	_ = branchSerial
 	var bbs [22]BBDescriptor
 	if result.Loc == LocAny {
 		result = JITValueDesc{Loc: LocReg, Type: JITTypeUnknown, Reg: ctx.AllocReg()}
@@ -1055,6 +1057,10 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 		}
 		ctx.ReclaimUntrackedRegs()
 		d24 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(false)}
+		if ctx.branchSerial == branchSerial && ctx.hasBooleanFlags(d24) {
+			return d24
+		}
+		ctx.EnsureDesc(&d24)
 		ctx.EmitMovToReg(result.Reg, d24)
 		result.Type = d24.Type
 		ctx.EmitJmp(lbl0)
@@ -1497,6 +1503,10 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 		}
 		ctx.ReclaimUntrackedRegs()
 		d81 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(true)}
+		if ctx.branchSerial == branchSerial && ctx.hasBooleanFlags(d81) {
+			return d81
+		}
+		ctx.EnsureDesc(&d81)
 		ctx.EmitMovToReg(result.Reg, d81)
 		result.Type = d81.Type
 		ctx.EmitJmp(lbl0)
@@ -1805,6 +1815,10 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 		}
 		ctx.ReclaimUntrackedRegs()
 		d118 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(false)}
+		if ctx.branchSerial == branchSerial && ctx.hasBooleanFlags(d118) {
+			return d118
+		}
+		ctx.EnsureDesc(&d118)
 		ctx.EmitMovToReg(result.Reg, d118)
 		result.Type = d118.Type
 		ctx.EmitJmp(lbl0)
@@ -3675,6 +3689,10 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 		}
 		ctx.FreeDesc(&d380)
 		ctx.FreeDesc(&d381)
+		ctx.SyncDesc(&d383)
+		if ctx.branchSerial == branchSerial && ctx.hasBooleanFlags(d383) {
+			return d383
+		}
 		ctx.EnsureDesc(&d383)
 		ctx.EmitMovToReg(result.Reg, d383)
 		result.Type = d383.Type
@@ -4307,49 +4325,32 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 		if d460.Loc == LocImm && d314.Loc == LocImm {
 			d462 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d460.Imm.Int() < d314.Imm.Int())}
 		} else if d314.Loc == LocImm {
+			r13 := ctx.AllocReg()
 			if d314.Imm.Int() >= -2147483648 && d314.Imm.Int() <= 2147483647 {
 				ctx.EmitCmpRegImm32(d460.Reg, int32(d314.Imm.Int()))
 			} else {
 				ctx.EmitMovRegImm64(RegR11, uint64(d314.Imm.Int()))
 				ctx.EmitCmpInt64(d460.Reg, RegR11)
 			}
-			var r13 Reg
-			if result.Loc == LocReg && result.Reg != d460.Reg {
-				r13 = result.Reg
-				resultTarget461 = true
-			} else {
-				r13 = ctx.AllocRegExcept(d460.Reg)
-			}
-			ctx.EmitSetcc(r13, CondSignedLess)
-			d462 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r13}
+			d462 = ctx.DeferBooleanFlags(r13, CondSignedLess)
 			ctx.BindReg(r13, &d462)
 		} else if d460.Loc == LocImm {
+			r14 := ctx.AllocReg()
 			ctx.EmitMovRegImm64(RegR11, uint64(d460.Imm.Int()))
 			ctx.EmitCmpInt64(RegR11, d314.Reg)
-			var r14 Reg
-			if result.Loc == LocReg && result.Reg != d314.Reg {
-				r14 = result.Reg
-				resultTarget461 = true
-			} else {
-				r14 = ctx.AllocRegExcept(d314.Reg)
-			}
-			ctx.EmitSetcc(r14, CondSignedLess)
-			d462 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r14}
+			d462 = ctx.DeferBooleanFlags(r14, CondSignedLess)
 			ctx.BindReg(r14, &d462)
 		} else {
+			r15 := ctx.AllocReg()
 			ctx.EmitCmpInt64(d460.Reg, d314.Reg)
-			var r15 Reg
-			if result.Loc == LocReg && result.Reg != d460.Reg && result.Reg != d314.Reg {
-				r15 = result.Reg
-				resultTarget461 = true
-			} else {
-				r15 = ctx.AllocRegExcept(d460.Reg, d314.Reg)
-			}
-			ctx.EmitSetcc(r15, CondSignedLess)
-			d462 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r15}
+			d462 = ctx.DeferBooleanFlags(r15, CondSignedLess)
 			ctx.BindReg(r15, &d462)
 		}
 		ctx.FreeDesc(&d460)
+		ctx.SyncDesc(&d462)
+		if ctx.branchSerial == branchSerial && ctx.hasBooleanFlags(d462) {
+			return d462
+		}
 		ctx.EnsureDesc(&d462)
 		ctx.EmitMovToReg(result.Reg, d462)
 		result.Type = d462.Type
@@ -4535,6 +4536,10 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 		}
 		ctx.FreeDesc(&d463)
 		ctx.FreeDesc(&d464)
+		ctx.SyncDesc(&d466)
+		if ctx.branchSerial == branchSerial && ctx.hasBooleanFlags(d466) {
+			return d466
+		}
 		ctx.EnsureDesc(&d466)
 		ctx.EmitMovToReg(result.Reg, d466)
 		result.Type = d466.Type
@@ -5287,50 +5292,33 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 		if d557.Loc == LocImm && d558.Loc == LocImm {
 			d560 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d557.Imm.Int() < d558.Imm.Int())}
 		} else if d558.Loc == LocImm {
+			r20 := ctx.AllocReg()
 			if d558.Imm.Int() >= -2147483648 && d558.Imm.Int() <= 2147483647 {
 				ctx.EmitCmpRegImm32(d557.Reg, int32(d558.Imm.Int()))
 			} else {
 				ctx.EmitMovRegImm64(RegR11, uint64(d558.Imm.Int()))
 				ctx.EmitCmpInt64(d557.Reg, RegR11)
 			}
-			var r20 Reg
-			if result.Loc == LocReg && result.Reg != d557.Reg {
-				r20 = result.Reg
-				resultTarget559 = true
-			} else {
-				r20 = ctx.AllocRegExcept(d557.Reg)
-			}
-			ctx.EmitSetcc(r20, CondSignedLess)
-			d560 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r20}
+			d560 = ctx.DeferBooleanFlags(r20, CondSignedLess)
 			ctx.BindReg(r20, &d560)
 		} else if d557.Loc == LocImm {
+			r21 := ctx.AllocReg()
 			ctx.EmitMovRegImm64(RegR11, uint64(d557.Imm.Int()))
 			ctx.EmitCmpInt64(RegR11, d558.Reg)
-			var r21 Reg
-			if result.Loc == LocReg && result.Reg != d558.Reg {
-				r21 = result.Reg
-				resultTarget559 = true
-			} else {
-				r21 = ctx.AllocRegExcept(d558.Reg)
-			}
-			ctx.EmitSetcc(r21, CondSignedLess)
-			d560 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r21}
+			d560 = ctx.DeferBooleanFlags(r21, CondSignedLess)
 			ctx.BindReg(r21, &d560)
 		} else {
+			r22 := ctx.AllocReg()
 			ctx.EmitCmpInt64(d557.Reg, d558.Reg)
-			var r22 Reg
-			if result.Loc == LocReg && result.Reg != d557.Reg && result.Reg != d558.Reg {
-				r22 = result.Reg
-				resultTarget559 = true
-			} else {
-				r22 = ctx.AllocRegExcept(d557.Reg, d558.Reg)
-			}
-			ctx.EmitSetcc(r22, CondSignedLess)
-			d560 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r22}
+			d560 = ctx.DeferBooleanFlags(r22, CondSignedLess)
 			ctx.BindReg(r22, &d560)
 		}
 		ctx.FreeDesc(&d557)
 		ctx.FreeDesc(&d558)
+		ctx.SyncDesc(&d560)
+		if ctx.branchSerial == branchSerial && ctx.hasBooleanFlags(d560) {
+			return d560
+		}
 		ctx.EnsureDesc(&d560)
 		ctx.EmitMovToReg(result.Reg, d560)
 		result.Type = d560.Type
@@ -5568,6 +5556,10 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 		}
 		ctx.FreeDesc(&d562)
 		ctx.FreeDesc(&d563)
+		ctx.SyncDesc(&d565)
+		if ctx.branchSerial == branchSerial && ctx.hasBooleanFlags(d565) {
+			return d565
+		}
 		ctx.EnsureDesc(&d565)
 		ctx.EmitMovToReg(result.Reg, d565)
 		result.Type = d565.Type
@@ -5778,50 +5770,33 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 		if d566.Loc == LocImm && d567.Loc == LocImm {
 			d569 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d566.Imm.Int() < d567.Imm.Int())}
 		} else if d567.Loc == LocImm {
+			r27 := ctx.AllocReg()
 			if d567.Imm.Int() >= -2147483648 && d567.Imm.Int() <= 2147483647 {
 				ctx.EmitCmpRegImm32(d566.Reg, int32(d567.Imm.Int()))
 			} else {
 				ctx.EmitMovRegImm64(RegR11, uint64(d567.Imm.Int()))
 				ctx.EmitCmpInt64(d566.Reg, RegR11)
 			}
-			var r27 Reg
-			if result.Loc == LocReg && result.Reg != d566.Reg {
-				r27 = result.Reg
-				resultTarget568 = true
-			} else {
-				r27 = ctx.AllocRegExcept(d566.Reg)
-			}
-			ctx.EmitSetcc(r27, CondSignedLess)
-			d569 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r27}
+			d569 = ctx.DeferBooleanFlags(r27, CondSignedLess)
 			ctx.BindReg(r27, &d569)
 		} else if d566.Loc == LocImm {
+			r28 := ctx.AllocReg()
 			ctx.EmitMovRegImm64(RegR11, uint64(d566.Imm.Int()))
 			ctx.EmitCmpInt64(RegR11, d567.Reg)
-			var r28 Reg
-			if result.Loc == LocReg && result.Reg != d567.Reg {
-				r28 = result.Reg
-				resultTarget568 = true
-			} else {
-				r28 = ctx.AllocRegExcept(d567.Reg)
-			}
-			ctx.EmitSetcc(r28, CondSignedLess)
-			d569 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r28}
+			d569 = ctx.DeferBooleanFlags(r28, CondSignedLess)
 			ctx.BindReg(r28, &d569)
 		} else {
+			r29 := ctx.AllocReg()
 			ctx.EmitCmpInt64(d566.Reg, d567.Reg)
-			var r29 Reg
-			if result.Loc == LocReg && result.Reg != d566.Reg && result.Reg != d567.Reg {
-				r29 = result.Reg
-				resultTarget568 = true
-			} else {
-				r29 = ctx.AllocRegExcept(d566.Reg, d567.Reg)
-			}
-			ctx.EmitSetcc(r29, CondSignedLess)
-			d569 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r29}
+			d569 = ctx.DeferBooleanFlags(r29, CondSignedLess)
 			ctx.BindReg(r29, &d569)
 		}
 		ctx.FreeDesc(&d566)
 		ctx.FreeDesc(&d567)
+		ctx.SyncDesc(&d569)
+		if ctx.branchSerial == branchSerial && ctx.hasBooleanFlags(d569) {
+			return d569
+		}
 		ctx.EnsureDesc(&d569)
 		ctx.EmitMovToReg(result.Reg, d569)
 		result.Type = d569.Type
@@ -6734,6 +6709,10 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 		ctx.BindReg(d684.Reg, &d684)
 		ctx.FreeDesc(&args[0])
 		ctx.FreeDesc(&args[1])
+		ctx.SyncDesc(&d684)
+		if ctx.branchSerial == branchSerial && ctx.hasBooleanFlags(d684) {
+			return d684
+		}
 		ctx.EnsureDesc(&d684)
 		ctx.EmitMovToReg(result.Reg, d684)
 		result.Type = d684.Type
@@ -6741,7 +6720,13 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 		return result
 	}
 	ps685 := PhiState{General: false}
-	_ = bbs[0].RenderPS(ps685)
+	returned := bbs[0].RenderPS(ps685)
+	if ctx.hasBooleanFlags(returned) {
+		if resultRegsProtected {
+			ctx.UnprotectReg(result.Reg)
+		}
+		return returned
+	}
 	ctx.MarkLabel(lbl0)
 	ctx.ResolveFixups()
 	if resultRegsProtected {

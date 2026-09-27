@@ -34432,6 +34432,8 @@ func init_alu() {
 				var d27 JITValueDesc
 				_ = d27
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+				branchSerial := ctx.branchSerial
+				_ = branchSerial
 				var bbs [4]BBDescriptor
 				for i := range args {
 					ctx.StabilizeDescForControlFlow(&args[i])
@@ -34679,11 +34681,19 @@ func init_alu() {
 					d21.Type = tagBool
 					ctx.FreeDesc(&d19)
 					ctx.FreeDesc(&d20)
-					ctx.EnsureDesc(&d21)
+					ctx.SyncDesc(&d21)
 					var d22 JITValueDesc
 					if d21.Loc == LocImm {
 						d22 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(!d21.Imm.Bool())}
+					} else if ctx.hasBooleanFlags(d21) {
+						d22 = d21
+						d22.ID = 0
+						d22.Condition = InvertJITCondition(d22.Condition)
+						ctx.lazyFlags.Condition = d22.Condition
+						ctx.BindReg(d22.Reg, &d22)
+						d21.Loc = LocNone
 					} else {
+						ctx.EnsureDesc(&d21)
 						negReg := ctx.AllocReg()
 						if d21.Loc == LocRegPair {
 							ctx.EmitMovRegReg(negReg, d21.Reg2)
@@ -34704,7 +34714,10 @@ func init_alu() {
 						}
 					}
 					ctx.FreeDesc(&d21)
-					ctx.EnsureDesc(&d22)
+					ctx.SyncDesc(&d22)
+					if ctx.branchSerial == branchSerial && ctx.hasBooleanFlags(d22) {
+						return d22
+					}
 					if d22.Loc == LocImm {
 						ctx.EmitMakeBool(result, d22)
 					} else {
@@ -34950,7 +34963,14 @@ func init_alu() {
 					return result
 				}
 				ps62 := PhiState{General: false}
-				_ = bbs[0].RenderPS(ps62)
+				returned := bbs[0].RenderPS(ps62)
+				if ctx.hasBooleanFlags(returned) {
+					if resultRegsProtected {
+						ctx.UnprotectReg(result.Reg2)
+						ctx.UnprotectReg(result.Reg)
+					}
+					return returned
+				}
 				ctx.MarkLabel(lbl0)
 				ctx.ResolveFixups()
 				if resultRegsProtected {
@@ -35014,6 +35034,8 @@ func init_alu() {
 				var d28 JITValueDesc
 				_ = d28
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+				branchSerial := ctx.branchSerial
+				_ = branchSerial
 				var bbs [4]BBDescriptor
 				for i := range args {
 					ctx.StabilizeDescForControlFlow(&args[i])
@@ -35266,7 +35288,10 @@ func init_alu() {
 					d21.Type = tagBool
 					ctx.FreeDesc(&d19)
 					ctx.FreeDesc(&d20)
-					ctx.EnsureDesc(&d21)
+					ctx.SyncDesc(&d21)
+					if ctx.branchSerial == branchSerial && ctx.hasBooleanFlags(d21) {
+						return d21
+					}
 					if d21.Loc == LocImm {
 						ctx.EmitMakeBool(result, d21)
 					} else {
@@ -35512,7 +35537,14 @@ func init_alu() {
 					return result
 				}
 				ps63 := PhiState{General: false}
-				_ = bbs[0].RenderPS(ps63)
+				returned := bbs[0].RenderPS(ps63)
+				if ctx.hasBooleanFlags(returned) {
+					if resultRegsProtected {
+						ctx.UnprotectReg(result.Reg2)
+						ctx.UnprotectReg(result.Reg)
+					}
+					return returned
+				}
 				ctx.MarkLabel(lbl0)
 				ctx.ResolveFixups()
 				if resultRegsProtected {
@@ -35576,6 +35608,8 @@ func init_alu() {
 				var d28 JITValueDesc
 				_ = d28
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+				branchSerial := ctx.branchSerial
+				_ = branchSerial
 				var bbs [4]BBDescriptor
 				for i := range args {
 					ctx.StabilizeDescForControlFlow(&args[i])
@@ -35828,7 +35862,10 @@ func init_alu() {
 					d21.Type = tagBool
 					ctx.FreeDesc(&d19)
 					ctx.FreeDesc(&d20)
-					ctx.EnsureDesc(&d21)
+					ctx.SyncDesc(&d21)
+					if ctx.branchSerial == branchSerial && ctx.hasBooleanFlags(d21) {
+						return d21
+					}
 					if d21.Loc == LocImm {
 						ctx.EmitMakeBool(result, d21)
 					} else {
@@ -36074,7 +36111,14 @@ func init_alu() {
 					return result
 				}
 				ps63 := PhiState{General: false}
-				_ = bbs[0].RenderPS(ps63)
+				returned := bbs[0].RenderPS(ps63)
+				if ctx.hasBooleanFlags(returned) {
+					if resultRegsProtected {
+						ctx.UnprotectReg(result.Reg2)
+						ctx.UnprotectReg(result.Reg)
+					}
+					return returned
+				}
 				ctx.MarkLabel(lbl0)
 				ctx.ResolveFixups()
 				if resultRegsProtected {
@@ -36138,6 +36182,8 @@ func init_alu() {
 				var d27 JITValueDesc
 				_ = d27
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+				branchSerial := ctx.branchSerial
+				_ = branchSerial
 				var bbs [4]BBDescriptor
 				for i := range args {
 					ctx.StabilizeDescForControlFlow(&args[i])
@@ -36385,11 +36431,19 @@ func init_alu() {
 					d21.Type = tagBool
 					ctx.FreeDesc(&d19)
 					ctx.FreeDesc(&d20)
-					ctx.EnsureDesc(&d21)
+					ctx.SyncDesc(&d21)
 					var d22 JITValueDesc
 					if d21.Loc == LocImm {
 						d22 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(!d21.Imm.Bool())}
+					} else if ctx.hasBooleanFlags(d21) {
+						d22 = d21
+						d22.ID = 0
+						d22.Condition = InvertJITCondition(d22.Condition)
+						ctx.lazyFlags.Condition = d22.Condition
+						ctx.BindReg(d22.Reg, &d22)
+						d21.Loc = LocNone
 					} else {
+						ctx.EnsureDesc(&d21)
 						negReg := ctx.AllocReg()
 						if d21.Loc == LocRegPair {
 							ctx.EmitMovRegReg(negReg, d21.Reg2)
@@ -36410,7 +36464,10 @@ func init_alu() {
 						}
 					}
 					ctx.FreeDesc(&d21)
-					ctx.EnsureDesc(&d22)
+					ctx.SyncDesc(&d22)
+					if ctx.branchSerial == branchSerial && ctx.hasBooleanFlags(d22) {
+						return d22
+					}
 					if d22.Loc == LocImm {
 						ctx.EmitMakeBool(result, d22)
 					} else {
@@ -36656,7 +36713,14 @@ func init_alu() {
 					return result
 				}
 				ps62 := PhiState{General: false}
-				_ = bbs[0].RenderPS(ps62)
+				returned := bbs[0].RenderPS(ps62)
+				if ctx.hasBooleanFlags(returned) {
+					if resultRegsProtected {
+						ctx.UnprotectReg(result.Reg2)
+						ctx.UnprotectReg(result.Reg)
+					}
+					return returned
+				}
 				ctx.MarkLabel(lbl0)
 				ctx.ResolveFixups()
 				if resultRegsProtected {

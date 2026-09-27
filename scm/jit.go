@@ -465,11 +465,14 @@ type JITValueDesc struct {
 	// StackFunc permits the outermost lambda produced for this exact result slot
 	// to use an invocation-local Go funcval. Nested expressions do not inherit it.
 	StackFunc bool
-	// Condition is valid only for LocFlags. LocFlags is an ephemeral result of
-	// a comparison that jitgen proved is consumed immediately by the terminating
-	// branch in the same basic block. No intervening machine instruction may
-	// clobber the architecture's condition state.
+	// Condition is valid only for LocFlags. FlagsID == 0 denotes a comparison
+	// consumed immediately by its block's terminating branch. Nonzero IDs may
+	// cross emitter returns; the context materializes them before instructions,
+	// register moves, spills, or control-flow boundaries can invalidate flags.
 	Condition JITCondition
+	// FlagsID identifies a lazily materialized boolean. Zero retains the
+	// existing immediate-branch-only flags contract used inside generated CFGs.
+	FlagsID uint32
 }
 
 // jitValueWordIsPointer reports whether word is a relocatable Go pointer in
@@ -946,6 +949,11 @@ type JITContext struct {
 	// safepoint needs the value. Keeping this state in JITContext lets nested
 	// inline emitters collapse each other's hand-off moves.
 	DeferredRegMoves jitDeferredRegMoves
+	// At most one comparison can own the architecture's flags. Its reserved
+	// register is written only when an instruction or value consumer needs it.
+	lazyFlags    jitBooleanFlags
+	flagsSerial  uint32
+	branchSerial uint64 // emitted branches, used to prove a return has no runtime merge
 	// registerInstructionDepth suppresses the conservative full barrier in the
 	// raw byte writer while an architecture emitter with an explicit use/def
 	// contract is encoding one instruction.
@@ -1661,7 +1669,7 @@ func (ctx *JITContext) ReclaimUntrackedRegs() {
 		}
 		valid := false
 		switch owner.Loc {
-		case LocReg, LocFPReg:
+		case LocReg, LocFPReg, LocFlags:
 			valid = owner.Reg == rr
 		case LocRegPair:
 			valid = owner.Reg == rr || owner.Reg2 == rr
@@ -1826,7 +1834,7 @@ func (ctx *JITContext) AllocReg() Reg {
 		}
 		valid := false
 		switch owner.Loc {
-		case LocReg:
+		case LocReg, LocFlags:
 			valid = owner.Reg == rr
 		case LocRegPair:
 			valid = owner.Reg == rr || owner.Reg2 == rr
@@ -1852,6 +1860,7 @@ func (ctx *JITContext) AllocReg() Reg {
 		return r
 	}
 	// Spill path: spill tracked descriptors (LocReg / LocRegPair).
+	ctx.materializeBooleanFlags()
 	// Note: completely untracked in-use registers must NOT be reused here,
 	// as they may still be referenced by emitted code paths.
 	spillable := ctx.AllRegs &^ ctx.FreeRegs &^ ctx.ProtectedRegs
@@ -2091,6 +2100,11 @@ func (ctx *JITContext) SyncDesc(desc *JITValueDesc) {
 }
 
 func (ctx *JITContext) EnsureDesc(desc *JITValueDesc) {
+	if desc.Loc == LocFlags && desc.FlagsID != 0 {
+		ctx.materializeBooleanFlags()
+		desc.Loc = LocReg
+		desc.FlagsID = 0
+	}
 	ctx.syncDescSpill(desc)
 	switch desc.Loc {
 	case LocInputPair:
@@ -2211,6 +2225,9 @@ func (ctx *JITContext) EnsureDescsTogether(descs ...*JITValueDesc) {
 
 // FreeReg returns a register to the free pool.
 func (ctx *JITContext) FreeReg(r Reg) {
+	if ctx.lazyFlags.FlagsID != 0 && ctx.lazyFlags.Reg == r {
+		ctx.materializeBooleanFlags()
+	}
 	heldAsDeferredSource := ctx.releaseDeferredReg(r)
 	owner := ctx.RegOwners[r]
 	if owner != nil {
@@ -2536,6 +2553,9 @@ func (ctx *JITContext) FreeDesc(desc *JITValueDesc) {
 		if desc.Reg <= jitLastGPReg {
 			owner := ctx.RegOwners[desc.Reg]
 			if owner == nil || owner == desc || (desc.ID != 0 && owner.ID == desc.ID) {
+				if ctx.hasBooleanFlags(*desc) {
+					ctx.lazyFlags = jitBooleanFlags{}
+				}
 				ctx.FreeReg(desc.Reg)
 			}
 		}
@@ -3697,6 +3717,7 @@ func (moves *jitDeferredRegMoves) source(reg Reg) Reg {
 // logical value. If dst's old physical contents still feed another alias, that
 // dependent value must be materialized before dst can be redefined.
 func (ctx *JITContext) deferRegMove(dst, src Reg) {
+	ctx.materializeBooleanFlags()
 	if dst >= jitRegisterCount || src >= jitRegisterCount {
 		panic("jit: deferred move register outside scheduler range")
 	}
@@ -3816,7 +3837,46 @@ func (ctx *JITContext) flushDeferredRegMoves(mask uint64) {
 // FlushRegisterMoves is a full materialization barrier for control-flow,
 // safepoint, stack-map, and raw-code-position boundaries.
 func (ctx *JITContext) FlushRegisterMoves() {
+	ctx.materializeBooleanFlags()
 	ctx.flushDeferredRegMoves(ctx.DeferredRegMoves.active)
+}
+
+type jitBooleanFlags struct {
+	FlagsID   uint32
+	Reg       Reg
+	Condition JITCondition
+}
+
+// DeferBooleanFlags records the result of the comparison just emitted. The
+// caller reserves reg before that comparison; recording flags emits no code.
+func (ctx *JITContext) DeferBooleanFlags(reg Reg, condition JITCondition) JITValueDesc {
+	if ctx.lazyFlags.FlagsID != 0 {
+		panic("jit: comparison overwrote an unmaterialized boolean")
+	}
+	ctx.flagsSerial++
+	if ctx.flagsSerial == 0 {
+		panic("jit: boolean flags identity overflow")
+	}
+	value := JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: reg, Condition: condition, FlagsID: ctx.flagsSerial}
+	ctx.lazyFlags = jitBooleanFlags{FlagsID: value.FlagsID, Reg: value.Reg, Condition: value.Condition}
+	return value
+}
+
+func (ctx *JITContext) hasBooleanFlags(value JITValueDesc) bool {
+	return value.Loc == LocFlags && value.FlagsID != 0 && value.FlagsID == ctx.lazyFlags.FlagsID
+}
+
+func (ctx *JITContext) materializeBooleanFlags() {
+	if ctx.lazyFlags.FlagsID == 0 {
+		return
+	}
+	value := ctx.lazyFlags
+	ctx.lazyFlags = jitBooleanFlags{}
+	ctx.EmitSetcc(value.Reg, value.Condition)
+	if owner := ctx.RegOwners[value.Reg]; owner != nil && owner.FlagsID == value.FlagsID {
+		owner.Loc = LocReg
+		owner.FlagsID = 0
+	}
 }
 
 func jitRegisterMask(regs ...Reg) uint64 {
@@ -3835,6 +3895,7 @@ func jitRegisterMask(regs ...Reg) uint64 {
 // physical values still referenced by another alias are preserved; the written
 // destinations themselves become concrete outputs of this instruction.
 func (ctx *JITContext) beginRegisterInstruction(reads, writes uint64) {
+	ctx.materializeBooleanFlags()
 	if ctx.DeferredRegMoves.active == 0 {
 		ctx.registerInstructionDepth++
 		return
