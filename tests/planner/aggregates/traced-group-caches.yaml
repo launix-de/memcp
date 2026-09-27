@@ -124,6 +124,17 @@ setup:
         (rebuild (table "memcp-tests" "trace_multi_tenant") true false))
 
 test_cases:
+  - name: "Aggregate partitioning compares the eligible bulk boolean carrier"
+    scm: |
+      (begin
+        (define domain (list "access" "memcp-tests" "trace_partition_access" false nil))
+        (and
+          (not (aggregate_pushdown_cost_preferred? 2000 3 (list domain)))
+          (aggregate_pushdown_cost_preferred? 2000 3 (list nil))
+          (not (aggregate_pushdown_cost_preferred? 1 1 (list domain)))))
+    expect:
+      data: [true]
+
   - name: "COUNT pushes a selective correlated stage above an FK partition"
     sql: |
       SELECT COUNT(*) AS total
