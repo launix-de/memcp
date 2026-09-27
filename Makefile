@@ -72,7 +72,9 @@ PHP_PROVISION = $(if $(PHP_CACHED),php-toolchain)
 PHP_BINARY_DIR = $(if $(PHP_CACHED),$(CURDIR)/.build/php/bin,.)
 PHP_RUNTIME = $(if $(PHP_CACHED),php-runtime)
 PHP_TAGS     := php,nowatcher,nobrotli,nomercure
-PHP_RPATH    ?= $(shell $(PHP_CONFIG) --prefix)/lib:$(shell $(PHP_CONFIG) --extension-dir)
+# Only the downloaded SDK needs its separately linked PDO module on RUNPATH.
+# Keep the existing installed-SDK build flags unchanged.
+PHP_RPATH    ?= $(shell $(PHP_CONFIG) --prefix)/lib$(if $(PHP_CACHED),:$(shell $(PHP_CONFIG) --extension-dir))
 PHP_ENV      = CGO_ENABLED=1 CGO_CFLAGS="$$($(PHP_CONFIG) --includes)" CGO_LDFLAGS="-L$$($(PHP_CONFIG) --prefix)/lib "'-Wl,-rpath,$(PHP_RPATH)'" $$($(PHP_CONFIG) --ldflags) $$($(PHP_CONFIG) --libs)"
 PHP_LICENSE_DIR ?= $(shell $(PHP_CONFIG) --prefix)/share/licenses/php
 PACKAGE_PHP_RPATH = '$$$$ORIGIN/../lib/memcp/php:$$$$ORIGIN/../lib/memcp/php/extensions'
