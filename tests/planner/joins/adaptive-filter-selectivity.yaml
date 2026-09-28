@@ -285,3 +285,29 @@ test_cases:
           true (error "physical diagnostics lost prepared input provenance or quoting"))))
     expect:
       data: [true]
+
+  - name: "EXPLAIN guards refresh concrete feedback without executing cost guards"
+    scm: |
+      (begin
+        (define src (list "a" "memcp-tests" "afs_check" false nil))
+        (define callback (list 'lambda (list 'x) (list '< 'x 321)))
+        (define parser (lambda (schema query policy planning tx) (begin
+          (planner_record_filter_feedback_guard src '("id") callback planning)
+          (planner_record_guard_condition (list 'error "diagnostic evaluated a cost guard") planning)
+          (define preparations (planning "__memcp_queryplan_preparations"))
+          (preparations "count" 1)
+          (preparations "preparation:0" (list "unused-diagnostic-input"
+            (list 'error "diagnostic prepared a candidate") 0))
+          (list 'quote true))))
+        (define variant (sql_compile_queryplan_variant (list parser) "memcp-tests"
+          "EXPLAIN SELECT id FROM afs_check WHERE id < 321" nil (newsession) nil))
+        (define guard (car variant))
+        (define before (eval guard))
+        (define access (eval (compile_scan_access '("id") callback)))
+        (define values (map (nth access 1) (lambda (value) (eval value))))
+        (define matches (scan nil (table "memcp-tests" "afs_check")
+          (nth access 0) values '("id") (eval callback) '() scan_count 0 + false))
+        (if (and before (equal? matches 321) (not (eval guard)) (empty_list? (nth variant 2)))
+          true (error (concat "diagnostic feedback guard failed: " (serialize (list before matches (eval guard) (nth variant 2) guard))))))
+    expect:
+      data: [true]
