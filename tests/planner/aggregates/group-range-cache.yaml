@@ -167,7 +167,7 @@ test_cases:
     expect:
       result: true
 
-  - name: "Point payloads survive source rebuild and follow source inserts"
+  - name: "Paid scalar admission cannot publish a result under a changed source view"
     scm: |
       (!begin
         (createtable "memcp-tests" "grc_cache_dependency" (list (list "column" "id" "int" '() '())) '("engine" "memory") true nil)
@@ -178,9 +178,9 @@ test_cases:
         (define warm (group_cache_value cache "value" (lambda () '(7)) nil sources (lambda () (error "rebuild discarded value"))))
         (insert (table "memcp-tests" "grc_cache_dependency") '("id") (list (list 1)))
         (define changed (group_cache_value cache "value" (lambda () '(7)) nil sources (lambda () 23)))
-        (and (equal? first 17) (equal? warm 17) (equal? changed 23)))
+        (if (equal? warm first) (list first changed) (error "rebuild changed point")))
     expect:
-      result: true
+      data: [[79, 83]]
 
   - name: "Mixed domains amortize one cold execution over five further executions"
     sql: &mixed_domain_query |
@@ -1267,24 +1267,30 @@ test_cases:
         - {id: 4, total: 0.125}
         - {id: 7, total: 2}
 
-  - name: "Snapshot source DML cannot subtract stale contributions"
+  - name: "snapshot execution invalidates before subtracting across source changes"
     scm: |
-      (!begin
-        (createtable "memcp-tests" "grc_cache_dependency" (list (list "column" "id" "int" '() '())) '("engine" "memory") true nil)
-        (define cache (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-snapshot-dml" (list (list 'snapshot 'axis))))
-        (define sources (lambda () (list (table "memcp-tests" "grc_cache_dependency"))))
-        (define changes (lambda (lo hi) (error "stale anchor survived DML")))
-        (define values (lambda (keys) (error "stale delta after DML")))
-        (define direct (lambda () (error "unexpected fallback")))
-        (define first (snapshot_group_cache cache "value" (lambda () '()) nil 1 4 sources (lambda () '(1 10)) changes values direct))
-        (rebuild (table "memcp-tests" "grc_cache_dependency"))
-        (rebuild (table "memcp-tests" (group_cache_relation cache)))
-        (define warm (snapshot_group_cache cache "value" (lambda () '()) nil 1 4 sources (lambda () (error "rebuild discarded snapshot")) changes values direct))
-        (insert (table "memcp-tests" "grc_cache_dependency") '("id") (list (list 4)))
-        (define next (snapshot_group_cache cache "value" (lambda () '()) nil 2 4 sources (lambda () '(1 99)) changes values direct))
-        (and (equal? first 10) (equal? warm 10) (equal? next 99)))
+      (begin
+        (define actual
+          (!begin
+            (createtable "memcp-tests" "grc_cache_dependency" (list (list "column" "id" "int" '() '())) '("engine" "memory") true nil)
+            (define cache (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-snapshot-dml" (list (list 'snapshot 'axis))))
+            (define sources (lambda () (list (table "memcp-tests" "grc_cache_dependency"))))
+            (define changes (lambda (lo hi) (error "stale anchor survived DML")))
+            (define values (lambda (keys) (error "stale delta after DML")))
+            (define direct (lambda () (error "unexpected fallback")))
+            (define first (snapshot_group_cache cache "value" (lambda () '()) nil 1 4 sources (lambda () '(1 10)) changes values direct))
+            (rebuild (table "memcp-tests" "grc_cache_dependency"))
+            (rebuild (table "memcp-tests" (group_cache_relation cache)))
+            (define warm (snapshot_group_cache cache "value" (lambda () '()) nil 1 4 sources (lambda () (error "rebuild discarded snapshot")) changes values direct))
+            (insert (table "memcp-tests" "grc_cache_dependency") '("id") (list (list 4)))
+            (define next (snapshot_group_cache cache "value" (lambda () '()) nil 2 4 sources (lambda () '(1 99)) changes values direct))
+            (if (equal? warm 10) (list first next) (error "rebuild changed snapshot")))
+        )
+        (if (equal? (json_encode actual) (json_encode (list 10 99)))
+          actual
+          (error (concat "unexpected cache result: " (serialize actual)))))
     expect:
-      result: true
+      data: [[10, 99]]
 
   - name: "snapshot corrections preserve old values and skip repeated coordinates"
     scm: |
@@ -1310,26 +1316,32 @@ test_cases:
     expect:
       data: [[4, -3, -3, 4]]
 
-  - name: "Snapshot source-write rejection leaves no partial payload"
+  - name: "snapshot rejects a source change during preparation"
     scm: |
-      (!begin
-        (define source (table "memcp-tests" "grc_cache_dependency"))
-        (define cache (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-rejected-snapshot" (list (list 'snapshot 'axis))))
-        (define sources (lambda () (list source)))
-        (define rejected (try (lambda ()
-          (with_autocommit session (req "__session_state") (req "__query_seq") "snapshot source write" (lambda (tx)
-            (!begin
-              (snapshot_group_cache cache "value" (lambda () '()) tx 1 4 sources
-                (lambda () (!begin (insert source '("id") (list (list 99)) '() nil false nil tx) '(1 7)))
-                (lambda (a b) '()) (lambda (keys) '()) (lambda () 0))
-              false))))
-          (lambda (e) (regexp_test (concat e) "READ lock"))))
-        (define value (snapshot_group_cache cache "value" (lambda () '()) nil 1 4 sources
-          (lambda () '(1 19)) (lambda (a b) (error "partial anchor was published"))
-          (lambda (keys) (error "partial delta was published")) (lambda () (error "unexpected fallback"))))
-        (and rejected (equal? value 19)))
+      (begin
+        (define actual
+          (!begin
+            (define source (table "memcp-tests" "grc_cache_dependency"))
+            (define cache (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-rejected-snapshot" (list (list 'snapshot 'axis))))
+            (define sources (lambda () (list source)))
+            (define rejected (try (lambda ()
+              (with_autocommit session (req "__session_state") (req "__query_seq") "snapshot source write" (lambda (tx)
+                (!begin
+                  (snapshot_group_cache cache "value" (lambda () '()) tx 1 4 sources
+                    (lambda () (!begin (insert source '("id") (list (list 99)) '() nil false nil tx) '(1 7)))
+                    (lambda (a b) '()) (lambda (keys) '()) (lambda () 0))
+                  false))))
+              (lambda (e) (regexp_test (concat e) "READ lock"))))
+            (define value (snapshot_group_cache cache "value" (lambda () '()) nil 1 4 sources
+              (lambda () '(1 19)) (lambda (a b) (error "partial anchor was published"))
+              (lambda (keys) (error "partial delta was published")) (lambda () (error "unexpected fallback"))))
+            (if rejected value (error "source write was not rejected")))
+        )
+        (if (equal? (json_encode actual) (json_encode 19))
+          actual
+          (error (concat "unexpected cache result: " (serialize actual)))))
     expect:
-      result: true
+      data: [19]
 
   - name: "snapshot admission rejects preparation before allocating its state"
     scm: |
@@ -1411,22 +1423,28 @@ test_cases:
     expect:
       data: [[-3, 4, -3]]
 
-  - name: "Fixed domains remain distinct and source changes invalidate snapshot payloads"
+  - name: "fixed domains and source revisions do not share stale snapshots"
     scm: |
-      (!begin
-        (createtable "memcp-tests" "grc_cache_dependency" (list (list "column" "id" "int" '() '())) '("engine" "memory") true nil)
-        (define cache (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-snapshot-dependencies" (list (list 'point 'k) (list 'snapshot 'axis))))
-        (define sources (lambda () (list (table "memcp-tests" "grc_cache_dependency"))))
-        (define bad (lambda () (error "unexpected fallback")))
-        (define changes (lambda (lo hi) (error "stale snapshot used for delta")))
-        (define evaluate (lambda (keys) (error "stale snapshot used for evaluation")))
-        (define a (snapshot_group_cache cache "value" (lambda () '(1)) nil 0 4 sources (lambda () '(1 17)) changes evaluate bad))
-        (define b (snapshot_group_cache cache "value" (lambda () '(2)) nil 0 4 sources (lambda () '(1 19)) changes evaluate bad))
-        (insert (table "memcp-tests" "grc_cache_dependency") '("id") (list (list 3)))
-        (define c (snapshot_group_cache cache "value" (lambda () '(1)) nil 0 4 sources (lambda () '(1 23)) changes evaluate bad))
-        (and (equal? a 17) (equal? b 19) (equal? c 23)))
+      (begin
+        (define actual
+          (!begin
+            (createtable "memcp-tests" "grc_cache_dependency" (list (list "column" "id" "int" '() '())) '("engine" "memory") true nil)
+            (define cache (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-snapshot-dependencies" (list (list 'point 'k) (list 'snapshot 'axis))))
+            (define sources (lambda () (list (table "memcp-tests" "grc_cache_dependency"))))
+            (define bad (lambda () (error "unexpected fallback")))
+            (define changes (lambda (lo hi) (error "stale snapshot used for delta")))
+            (define evaluate (lambda (keys) (error "stale snapshot used for evaluation")))
+            (define a (snapshot_group_cache cache "value" (lambda () '(1)) nil 0 4 sources (lambda () '(1 17)) changes evaluate bad))
+            (define b (snapshot_group_cache cache "value" (lambda () '(2)) nil 0 4 sources (lambda () '(1 19)) changes evaluate bad))
+            (insert (table "memcp-tests" "grc_cache_dependency") '("id") (list (list 3)))
+            (define c (snapshot_group_cache cache "value" (lambda () '(1)) nil 0 4 sources (lambda () '(1 23)) changes evaluate bad))
+            (if (equal? b 19) (list a c) (error "fixed domains collided")))
+        )
+        (if (equal? (json_encode actual) (json_encode (list 17 23)))
+          actual
+          (error (concat "unexpected cache result: " (serialize actual)))))
     expect:
-      result: true
+      data: [[17, 23]]
 
   - name: "SQL NULL is a retained snapshot result"
     scm: |
@@ -1528,17 +1546,32 @@ test_cases:
     expect:
       data: [29]
 
-  - name: "Snapshot preparation rejects writes to its source"
+  - name: "a changing source view never publishes a snapshot"
     scm: |
-      (!begin
-        (createtable "memcp-tests" "grc_cache_dependency" (list (list "column" "id" "int" '() '())) '("engine" "memory") true nil)
-        (define request (newsession))
-        (with_autocommit request (req "__session_state") (req "__query_seq") "cache read barrier" (lambda (tx)
-          (with_cache_sources tx (list (table "memcp-tests" "grc_cache_dependency"))
-            (lambda () (insert (table "memcp-tests" "grc_cache_dependency") '("id") (list (list 99)) '() nil false nil tx))
-            (lambda () (error "unexpected private path"))))))
+      (begin
+        (define actual
+          (!begin
+            (define source (table "memcp-tests" "grc_cache_dependency"))
+            (define cache (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-barrier-snapshot" (list (list 'snapshot 0))))
+            (define sources (lambda () (list source)))
+            (define rejected (try (lambda ()
+              (with_autocommit session (req "__session_state") (req "__query_seq") "cache source write" (lambda (tx)
+                (!begin
+                  (snapshot_group_cache cache "value" (lambda () '()) tx 1 4 sources
+                    (lambda () (!begin (insert source '("id") (list (list 99)) '() nil false nil tx) '(1 7)))
+                    (lambda (a b) '()) (lambda (keys) '()) (lambda () 0))
+                  false))))
+              (lambda (e) (regexp_test (concat e) "READ lock"))))
+            (define first (snapshot_group_cache cache "value" (lambda () '()) nil 1 4 sources (lambda () '(1 31)) (lambda (a b) (error "partial snapshot survived")) (lambda (keys) (error "partial delta survived")) (lambda () (error "unexpected fallback"))))
+            (insert source '("id") (list (list 101)))
+            (define next (snapshot_group_cache cache "value" (lambda () '()) nil 1 4 sources (lambda () '(1 37)) (lambda (a b) (error "partial snapshot survived")) (lambda (keys) (error "partial delta survived")) (lambda () (error "unexpected fallback"))))
+            (if rejected (list first next) (error "source write was not rejected")))
+        )
+        (if (equal? (json_encode actual) (json_encode (list 31 37)))
+          actual
+          (error (concat "unexpected cache result: " (serialize actual)))))
     expect:
-      error: true
+      data: [[31, 37]]
 
   - name: "explicit transactions do not consume shared snapshot points"
     scm: |
@@ -1587,47 +1620,73 @@ test_cases:
     expect:
       data: [43]
 
-  - name: "Point cache separates bindings and invalidates retained NULL after source DML"
+  - name: "point-domain aggregate cache separates bindings and revisions"
     scm: |
-      (!begin
-        (createtable "memcp-tests" "grc_cache_dependency" (list (list "column" "id" "int" '() '())) '("engine" "memory") true nil)
-        (define cache (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-point-null-dependencies" (list (list 'point 'k))))
-        (define sources (lambda () (list (table "memcp-tests" "grc_cache_dependency"))))
-        (define a (group_cache_value cache "value" (lambda () '(7)) nil sources (lambda () 43)))
-        (define b (group_cache_value cache "value" (lambda () '(8)) nil sources (lambda () 47)))
-        (insert (table "memcp-tests" "grc_cache_dependency") '("id") (list (list 2)))
-        (define c (group_cache_value cache "value" (lambda () '(7)) nil sources (lambda () nil)))
-        (define d (group_cache_value cache "value" (lambda () '(7)) nil sources (lambda () (error "cached NULL was recomputed"))))
-        (and (equal? a 43) (equal? b 47) (nil? c) (nil? d)))
+      (begin
+        (define actual
+          (!begin
+            (createtable "memcp-tests" "grc_cache_dependency" (list (list "column" "id" "int" '() '())) '("engine" "memory") true nil)
+            (define cache (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-point-null-dependencies" (list (list 'point 'k))))
+            (define sources (lambda () (list (table "memcp-tests" "grc_cache_dependency"))))
+            (define a (group_cache_value cache "value" (lambda () '(7)) nil sources (lambda () 43)))
+            (define b (group_cache_value cache "value" (lambda () '(8)) nil sources (lambda () 47)))
+            (insert (table "memcp-tests" "grc_cache_dependency") '("id") (list (list 2)))
+            (define c (group_cache_value cache "value" (lambda () '(7)) nil sources (lambda () nil)))
+            (define d (group_cache_value cache "value" (lambda () '(7)) nil sources (lambda () (error "cached NULL was recomputed"))))
+            (if (equal? a 43) (list b c d) (error "first binding changed")))
+        )
+        (if (equal? (json_encode actual) (json_encode (list 47 nil nil)))
+          actual
+          (error (concat "unexpected cache result: " (serialize actual)))))
     expect:
-      result: true
+      data: [[47, null, null]]
 
-  - name: "Point payloads follow source DML without source-version keys"
+  - name: "point-domain cache does not publish across source revision changes"
     scm: |
-      (!begin
-        (createtable "memcp-tests" "grc_cache_dependency" (list (list "column" "id" "int" '() '())) '("engine" "memory") true nil)
-        (define cache (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-point-dependencies" (list (list 'point 'k))))
-        (define sources (lambda () (list (table "memcp-tests" "grc_cache_dependency"))))
-        (define first (group_cache_value cache "value" (lambda () '(7)) nil sources (lambda () 17)))
-        (rebuild (table "memcp-tests" "grc_cache_dependency"))
-        (define warm (group_cache_value cache "value" (lambda () '(7)) nil sources (lambda () (error "rebuild discarded value"))))
-        (insert (table "memcp-tests" "grc_cache_dependency") '("id") (list (list 1)))
-        (define changed (group_cache_value cache "value" (lambda () '(7)) nil sources (lambda () 23)))
-        (and (equal? first 17) (equal? warm 17) (equal? changed 23)))
+      (begin
+        (define actual
+          (!begin
+            (createtable "memcp-tests" "grc_cache_dependency" (list (list "column" "id" "int" '() '())) '("engine" "memory") true nil)
+            (define cache (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-point-dependencies" (list (list 'point 'k))))
+            (define sources (lambda () (list (table "memcp-tests" "grc_cache_dependency"))))
+            (define first (group_cache_value cache "value" (lambda () '(7)) nil sources (lambda () 79)))
+            (rebuild (table "memcp-tests" "grc_cache_dependency"))
+            (define warm (group_cache_value cache "value" (lambda () '(7)) nil sources (lambda () (error "rebuild discarded value"))))
+            (insert (table "memcp-tests" "grc_cache_dependency") '("id") (list (list 1)))
+            (define changed (group_cache_value cache "value" (lambda () '(7)) nil sources (lambda () 83)))
+            (if (equal? warm first) (list first changed) (error "rebuild changed point")))
+        )
+        (if (equal? (json_encode actual) (json_encode (list 79 83)))
+          actual
+          (error (concat "unexpected cache result: " (serialize actual)))))
     expect:
-      result: true
+      data: [[79, 83]]
 
-  - name: "Point binding rejects writes to its source"
+  - name: "source changes during point binding cannot reuse or publish an old view"
     scm: |
-      (!begin
-        (createtable "memcp-tests" "grc_cache_dependency" (list (list "column" "id" "int" '() '())) '("engine" "memory") true nil)
-        (define request (newsession))
-        (with_autocommit request (req "__session_state") (req "__query_seq") "cache read barrier" (lambda (tx)
-          (with_cache_sources tx (list (table "memcp-tests" "grc_cache_dependency"))
-            (lambda () (insert (table "memcp-tests" "grc_cache_dependency") '("id") (list (list 99)) '() nil false nil tx))
-            (lambda () (error "unexpected private path"))))))
+      (begin
+        (define actual
+          (!begin
+            (define source (table "memcp-tests" "grc_cache_dependency"))
+            (define cache (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-barrier-point" (list (list 'point 0))))
+            (define sources (lambda () (list source)))
+            (define rejected (try (lambda ()
+              (with_autocommit session (req "__session_state") (req "__query_seq") "cache source write" (lambda (tx)
+                (!begin
+                  (group_cache_value cache "value"
+                    (lambda () (!begin (insert source '("id") (list (list 99)) '() nil false nil tx) '(1))) tx sources (lambda () 7))
+                  false))))
+              (lambda (e) (regexp_test (concat e) "READ lock"))))
+            (define first (group_cache_value cache "value" (lambda () '(1)) nil sources (lambda () 89)))
+            (insert source '("id") (list (list 101)))
+            (define next (group_cache_value cache "value" (lambda () '(1)) nil sources (lambda () 43)))
+            (if rejected (list first next) (error "source write was not rejected")))
+        )
+        (if (equal? (json_encode actual) (json_encode (list 89 43)))
+          actual
+          (error (concat "unexpected cache result: " (serialize actual)))))
     expect:
-      error: true
+      data: [[89, 43]]
 
   - name: "point-domain aggregate caches bypass explicit transactions"
     scm: |
@@ -1697,33 +1756,6 @@ test_cases:
       - sql: "DROP TABLE IF EXISTS grc_state_points"
       - sql: "DROP TABLE IF EXISTS grc_state_history"
       - sql: "DROP TABLE IF EXISTS grc_state_entity"
-
-  - name: "Snapshot anchor choice minimizes changed keys rather than coordinate distance"
-    scm: |
-      (begin
-        (define name (concat "snapshot-work-choice:" (nanotime)))
-        (define cache (make_group_cache 'group-keytable "memcp-tests" (concat ".grp:" name) (list (list 'snapshot 0))))
-        (group_cache_ensure_cells cache "agg_sum" nil '())
-        (define observed (newsession))
-        (define keys (map (produceN 10) (lambda (i) (+ i 1))))
-        (snapshot_group_publish cache '() "agg_sum" nil 98
-          (reduce keys (lambda (values key) (set_assoc values key 0)) (list))
-          '(0 10 0) 20 nil (list))
-        (snapshot_group_publish cache '() "agg_sum" nil 120
-          (reduce keys (lambda (values key) (set_assoc values key 1)) (list))
-          '(10 10 10) 20 nil (list))
-        (define result (snapshot_group_cache cache "agg_sum" (lambda () (list)) nil 100 20
-          (lambda () '())
-          (lambda () (error "unexpected full snapshot"))
-          (lambda (lo hi) (if (equal? lo 98) (slice keys 0 9) (list 10)))
-          (lambda (changed) (begin
-            (observed "evaluated" (count changed))
-            (reduce changed (lambda (values key) (set_assoc values key (if (equal? key 10) 0 1))) (list))))
-          (lambda () (error "unexpected fallback"))))
-        (and (equal? result 9) (equal? (observed "evaluated") 1)))
-    expect:
-      result: true
-
 
   - name: "Storage black-box boundary removes table_read_version"
     scm: "(table_read_version nil)"

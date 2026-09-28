@@ -176,6 +176,32 @@ test_cases:
       error: true
 
 
+  - name: "Snapshot anchor choice minimizes changed keys rather than coordinate distance"
+    scm: |
+      (begin
+        (define name (concat "snapshot-work-choice:" (nanotime)))
+        (define cache (make_group_cache 'group-keytable "memcp-tests" (concat ".grp:" name) (list (list 'snapshot 0))))
+        (group_cache_ensure_cells cache "agg_sum" nil '())
+        (define observed (newsession))
+        (define keys (map (produceN 10) (lambda (i) (+ i 1))))
+        (snapshot_group_publish cache '() "agg_sum" nil 98
+          (reduce keys (lambda (values key) (set_assoc values key 0)) (list))
+          '(0 10 0) 20 nil (list))
+        (snapshot_group_publish cache '() "agg_sum" nil 120
+          (reduce keys (lambda (values key) (set_assoc values key 1)) (list))
+          '(10 10 10) 20 nil (list))
+        (define result (snapshot_group_cache cache "agg_sum" (lambda () (list)) nil 100 20
+          (lambda () '())
+          (lambda () (error "unexpected full snapshot"))
+          (lambda (lo hi) (if (equal? lo 98) (slice keys 0 9) (list 10)))
+          (lambda (changed) (begin
+            (observed "evaluated" (count changed))
+            (reduce changed (lambda (values key) (set_assoc values key (if (equal? key 10) 0 1))) (list))))
+          (lambda () (error "unexpected fallback"))))
+        (and (equal? result 9) (equal? (observed "evaluated") 1)))
+    expect:
+      result: true
+
   - name: "Many snapshot coordinates share one invariant ordered cut"
     sql: |
       SELECT d.x, p.category,
