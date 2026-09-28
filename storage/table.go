@@ -489,6 +489,9 @@ type table struct {
 	PersistencyMode PersistencyMode      /* 0 = safe (default), 1 = sloppy, 2 = memory */
 	OnInit          *scm.Scmer           `json:"oninit,omitempty"` // closed callback that repopulates data-empty engines after restart
 	cacheUsers      int64                // atomic; -1 while/after CacheManager eviction, otherwise active trigger users
+	// Immutable reverse dependency list, published by registration with CAS.
+	// Eviction visits only these sources; it never scans the whole catalog.
+	cacheTriggerSources atomic.Pointer[cacheTriggerSource]
 	// LOCK ORDER CONTRACT:
 	//   1. db.schemalock
 	//   2. t.ddlMu
@@ -1500,13 +1503,16 @@ func (t *table) evict(mode evictionMode, currentSize int64, freedByType *[numEvi
 	if mode != evictFull || !t.isEphemeralQueryTable() {
 		return evictionResult{}
 	}
-	ok := keytableCleanup(t, t.schema.Name, freedByType)
+	ok := keytableCleanup(t, freedByType)
 	return evictionResult{success: ok, fullyEvicted: ok, freedBytes: currentSize}
 }
 
 // Schema metadata belongs to the table, never to every referencing shard.
 func (t *table) metadataMemory() uint {
 	size := uint(unsafe.Sizeof(*t)) + uint(len(t.Name))
+	for edge := t.cacheTriggerSources.Load(); edge != nil; edge = edge.next {
+		size += uint(unsafe.Sizeof(*edge))
+	}
 	size += uint(cap(t.Columns)) * uint(unsafe.Sizeof((*column)(nil)))
 	for _, c := range t.Columns {
 		size += uint(unsafe.Sizeof(*c)) + uint(len(c.Name))

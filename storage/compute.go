@@ -1903,7 +1903,7 @@ func registerInvalidationPropagationTrigger(prefix string, srcTable, targetTable
 	}
 	for _, tr := range srcTable.Triggers {
 		if tr.Name == triggerName {
-			srcTable.SetTriggerTarget(triggerName, propagationAcquire, release)
+			srcTable.SetTriggerTarget(triggerName, targetTable, propagationAcquire, release)
 			return triggerName
 		}
 	}
@@ -1922,8 +1922,9 @@ func registerInvalidationPropagationTrigger(prefix string, srcTable, targetTable
 			tblExpr,
 			scm.NewString(colName),
 		})),
-		Acquire: propagationAcquire,
-		Release: release,
+		cacheTarget: targetTable,
+		Acquire:     propagationAcquire,
+		Release:     release,
 	})
 	return triggerName
 }
@@ -1932,7 +1933,7 @@ func registerInvalidationPropagationTrigger(prefix string, srcTable, targetTable
 // compilation. Restored dependency guards may omit columns learned by a newer
 // analyzer, so they remain inert until installComputeDependencyTrigger replaces
 // the entire compiled description. Callers serialize registration with schemalock.
-func (t *table) reuseComputeDependencyTrigger(name string, acquire func(*TxContext) bool, release func()) bool {
+func (t *table) reuseComputeDependencyTrigger(name string, target *table, acquire func(*TxContext) bool, release func()) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	for i := range t.Triggers {
@@ -1941,6 +1942,8 @@ func (t *table) reuseComputeDependencyTrigger(name string, acquire func(*TxConte
 			if trigger.needsRegeneration {
 				return false
 			}
+			target.rememberCacheTriggerSource(t)
+			trigger.cacheTarget = target
 			trigger.Acquire = acquire
 			trigger.Release = release
 			return true
@@ -1959,6 +1962,7 @@ func (t *table) installComputeDependencyTrigger(trigger TriggerDescription) {
 		if t.Triggers[i].Name == trigger.Name {
 			// Generated dependency triggers keep their fixed priority and original
 			// slot; concurrent readers see either complete immutable description.
+			trigger.cacheTarget.rememberCacheTriggerSource(t)
 			t.Triggers[i] = trigger
 			return
 		}
@@ -2035,7 +2039,7 @@ func (t *table) registerComputeTriggersWithRefs(name string, computor scm.Scmer,
 
 		for _, timing := range []TriggerTiming{AfterInsert, AfterUpdate, AfterDelete} {
 			triggerName := ".cache:" + t.Name + ":" + name + "|scan" + strconv.Itoa(refIdx) + "|" + srcTable.Name + "|" + timing.String()
-			if !srcTable.reuseComputeDependencyTrigger(triggerName, acquireTarget, releaseTarget) {
+			if !srcTable.reuseComputeDependencyTrigger(triggerName, t, acquireTarget, releaseTarget) {
 				var body scm.Scmer
 				if incremental && timing != AfterInvalidate {
 					// scan layout: [fn, tx, table, accessSchema, accessValues,
@@ -2071,13 +2075,14 @@ func (t *table) registerComputeTriggersWithRefs(name string, computor scm.Scmer,
 					body = wrapUpdateBodyWithRelevantChangeGuard(body, relevantCols)
 				}
 				srcTable.installComputeDependencyTrigger(TriggerDescription{
-					Name:     triggerName,
-					Timing:   timing,
-					IsSystem: true,
-					Priority: 100,
-					Func:     buildFKProc(body),
-					Acquire:  acquireTarget,
-					Release:  releaseTarget,
+					Name:        triggerName,
+					Timing:      timing,
+					IsSystem:    true,
+					Priority:    100,
+					Func:        buildFKProc(body),
+					cacheTarget: t,
+					Acquire:     acquireTarget,
+					Release:     releaseTarget,
 				})
 			}
 			registeredNames = append(registeredNames, triggerRef{ref.schema, triggerName})
@@ -2111,11 +2116,12 @@ func (t *table) registerComputeTriggersWithRefs(name string, computor scm.Scmer,
 						scm.NewString(t.Name),
 						scm.NewBool(true),
 					})),
-					Acquire: acquireTarget,
-					Release: releaseTarget,
+					cacheTarget: t,
+					Acquire:     acquireTarget,
+					Release:     releaseTarget,
 				})
 			} else {
-				srcTable.SetTriggerTarget(dropTriggerName, acquireTarget, releaseTarget)
+				srcTable.SetTriggerTarget(dropTriggerName, t, acquireTarget, releaseTarget)
 			}
 			registeredNames = append(registeredNames, triggerRef{ref.schema, dropTriggerName})
 		}
@@ -2186,7 +2192,7 @@ func (t *table) registerORCDependencyTriggers(name string, col *column, refs []s
 		relevantCols := scanRelevantSourceCols(ref, srcTable)
 		for _, timing := range []TriggerTiming{AfterInsert, AfterUpdate, AfterDelete} {
 			triggerName := ".orcdep:" + t.Name + ":" + name + "|scan" + strconv.Itoa(refIdx) + "|" + srcTable.Name + "|" + timing.String()
-			if srcTable.reuseComputeDependencyTrigger(triggerName, acquireTarget, releaseTarget) {
+			if srcTable.reuseComputeDependencyTrigger(triggerName, t, acquireTarget, releaseTarget) {
 				continue
 			}
 			tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewString(t.Name)})
@@ -2202,13 +2208,14 @@ func (t *table) registerORCDependencyTriggers(name string, col *column, refs []s
 				body = wrapUpdateBodyWithRelevantChangeGuard(body, relevantCols)
 			}
 			srcTable.installComputeDependencyTrigger(TriggerDescription{
-				Name:     triggerName,
-				Timing:   timing,
-				IsSystem: true,
-				Priority: 100,
-				Func:     buildFKProc(body),
-				Acquire:  acquireTarget,
-				Release:  releaseTarget,
+				Name:        triggerName,
+				Timing:      timing,
+				IsSystem:    true,
+				Priority:    100,
+				Func:        buildFKProc(body),
+				cacheTarget: t,
+				Acquire:     acquireTarget,
+				Release:     releaseTarget,
 			})
 			if srcTable != t {
 				registeredNames = append(registeredNames, triggerRef{ref.schema, triggerName})
