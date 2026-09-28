@@ -109,7 +109,7 @@ test_cases:
     expect:
       rows: 1
       result_occurrences:
-        - text: "(group_cache_create "
+        - text: "(__group_cache_created)"
           count: 1
       result_not_contains:
         - "(show"

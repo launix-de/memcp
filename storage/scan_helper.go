@@ -203,6 +203,7 @@ func scanAccessIndexCols(access scanAccess) string {
 // a concurrent eviction from modifying t.Columns while the scan is in progress.
 func touchTempColumns(t *table, colSets ...[]string) {
 	now := time.Now().UnixNano()
+	atomic.StoreUint64(&t.lastAccessed, uint64(now))
 	for _, c := range t.Columns {
 		if c.IsTemp {
 			atomic.StoreInt64(&c.lastAccessed, now)

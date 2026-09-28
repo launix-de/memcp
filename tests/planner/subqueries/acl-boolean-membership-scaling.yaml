@@ -563,7 +563,7 @@ test_cases:
         - "aggregate_partition"
       not_contains:
         - "scan_recset"
-        - "touch_keytable"
+        - "group_cache_create"
 
   - name: "physical plan promotes the compound scalar to a bounded carrier"
     sql: |

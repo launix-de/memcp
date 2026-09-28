@@ -154,10 +154,9 @@ deduplicate immutable ASTs without serializing the growing expressions. */
 						(covered_bindings (if (nil? condition_catalog) (string expr) expr) true)) nil))
 				condition)))))
 
-/* Table statistics use a two-level cache guard: immutable generation tokens
-cover the hot path, while a coarse cost-class fingerprint keeps a statistically
-similar REBUILD generation on the cached plan without recompiling the query. */
-(define planner_record_statistics_dependency (lambda (table_expr token fingerprint planning_session include_feedback)
+/* Retain concrete cost inputs. Storage generations and hashes are not
+statistics and must never decide whether a physical plan remains applicable. */
+(define planner_record_statistics_dependency (lambda (table_expr statistics planning_session)
 	(begin
 		(define planning_session (planner_effective_session planning_session))
 		(define dependencies (if (nil? planning_session) nil
@@ -173,7 +172,7 @@ similar REBUILD generation on the cached plan without recompiling the query. */
 						(define count (coalesceNil (dependencies "count") 0))
 						(catalog table_expr true)
 						(dependencies (concat "dependency:" count)
-							(list table_expr token fingerprint include_feedback))
+							(list table_expr statistics))
 						(dependencies "count" (+ count 1)))))))))
 
 (define planner_guarded_choice (lambda (chosen condition planning_session)

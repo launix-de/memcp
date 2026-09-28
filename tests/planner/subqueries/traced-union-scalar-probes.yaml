@@ -280,7 +280,7 @@ test_cases:
         - text: "scan_exists"
           count: 4
       result_not_contains:
-        - "touch_keytable"
+        - "group_cache_create"
         - ".grp:"
 
   - name: "Selective nested UNION EXISTS keeps bounded physical probes"
@@ -352,7 +352,7 @@ test_cases:
         - "recset_union"
         - "recset_project_join"
       result_not_contains:
-        - "touch_keytable"
+        - "group_cache_create"
         - ".grp:"
 
   - name: "Repeated bounded probes retain the cheaper shared group cache"
@@ -382,7 +382,7 @@ test_cases:
         )
     expect:
       contains:
-        - "touch_keytable"
+        - "group_cache_create"
 
   - name: "Set actor for query-invariant nested presence probe"
     session_id: "trace-invariant-probe"

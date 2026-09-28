@@ -1233,23 +1233,17 @@ cache scan for every output row. */
 									bounds nil)))
 							(define column_name (concat ".range-lookup:"
 								(stable_structural_hash (list cache_name requested_col input_cols) true)))
-							(define column_init_key (list (quote concat)
-								(concat "__range_lookup_init:" (source_schema target) ":"
-									(source_relation target) ":" column_name ":")
-								(list (quote table_planner_statistics_token)
-									(source_table_expr target) false)))
 							(list target stage requested_col column_name
 								(list (quote !begin)
 									(range_cache_state_init_expr stage ag)
-									(range_cache_once_expr cache_name column_init_key
-										(list (quote createcolumn) (source_table_expr target)
+									(list (quote createcolumn) (source_table_expr target)
 											column_name "any" (quoted_runtime_list '())
 											(quoted_runtime_list '("temp" true))
 											(cons (quote list) input_cols)
 											(list (quote lambda)
 												(map input_cols (lambda (col)
 													(symbol (concat (source_alias target) "." col))))
-												value_expr))))))))))
+												value_expr)))))))))
 		_ nil)))
 
 (define range_lookup_cache_candidates (lambda (block)
@@ -6367,16 +6361,10 @@ RecSet; membership edges retain their own physical operators. */
 			(qassoc_get facts (quote membership_candidate_scan_invocations) probe_branches)))
 		(define driver_scan_invocations (max 1
 			(qassoc_get facts (quote membership_driver_scan_invocations) 1)))
-		/* A one-dimensional range partition on the leading ORDER BY column turns
-		each candidate window into a prefix of disjoint ordered shard runs. Batch
-		growth revisits earlier prefixes, but its geometric series is bounded by
-		twice the final visited prefix. Free or incompatible shards retain the
-		calibrated full ordered traversal per batch. */
-		(define order_partitioned (qassoc_get facts
-			(quote membership_driver_order_partitioned) false))
-		(define ordered_driver_work_units (if order_partitioned
-			(* 2 visited_rows)
-			(* batches (/ (* driver_input_rows driver_input_rows) 1000000))))
+		/* Cost the ordered access without consulting physical shard layout.
+		Storage may subsequently optimize the layout for this access pattern. */
+		(define ordered_driver_work_units
+			(* batches (/ (* driver_input_rows driver_input_rows) 1000000)))
 		(define candidate_fraction (if (and (number? driver_input_rows) (> driver_input_rows 0))
 			(min 1 (/ visited_rows driver_input_rows)) 1))
 		/* Disjoint driver batches may contain the same foreign-key value. In the
@@ -6751,8 +6739,6 @@ scalar comparison work rather than an uncalibrated multiplier. */
 					(and bounded
 						(or (empty_list? order_items)
 							(not (empty_list? (source_primary_key_columns src)))))))
-				(define source_order_partitioning
-					(planner_source_order_partitioning src order_items))
 				(define membership_plans (filter (map memberships (lambda (membership)
 					(begin
 						(define plan (recset_project_join_plan_for_membership_using
@@ -6781,7 +6767,6 @@ scalar comparison work rather than an uncalibrated multiplier. */
 								(count (expr_probe_stages raw_condition)))
 							(count (expr_probe_stages raw_condition))
 							(not row_number_membership_consumer)
-							source_order_partitioning
 							(quote single_source)
 							(planner_context_session (qb_facts block))
 							(planner_context_tx (qb_facts block))))
@@ -7415,24 +7400,6 @@ semantics and drops projection-only nullable lookups. */
 downstream lookup cannot multiply driver rows. This is a physical access-path
 candidate: logical join order remains unchanged, while the filtered lookup is
 projected back onto the ordered driver before scan_order applies Top-K. */
-(define planner_source_order_partitioning (lambda (src order_items)
-	/* Runtime-materialized group carriers are table-shaped physical sources, but
-	they do not exist while alternatives are enumerated and carry no catalog shard
-	partitioning guarantee. Only persistent catalog tables can contribute this
-	physical fact to costing and its matching runtime guard. */
-	(if (or (not (source_is_base_table? src))
-		(or (physical_helper_relation? (source_relation src))
-			(or (information_schema_source? (source_schema src) (source_relation src))
-				(empty_list? order_items))))
-		nil
-		(match (car order_items)
-			'(expr _direction) (begin
-				(define col (direct_column_name_for_alias src expr))
-				(if (nil? col) nil
-					(list col (table_order_partitioned?
-						(table (source_schema src) (source_relation src)) col))))
-			_ nil))))
-
 (define ordered_join_lookup_values_required? (lambda (remaining_sources default_alias output_exprs order_items)
 	(if (empty_list? remaining_sources)
 		false
@@ -7530,20 +7497,16 @@ carrier into thousands of fictional downstream probes. */
 						(list (quote membership_order_limit) (planner_literal_value limit planning_session))
 						(list (quote membership_order_offset) (coalesceNil (planner_literal_value offset planning_session) 0))
 						(list (quote membership_downstream_probe_branches) 0)))))
-					(define order_partitioning (planner_source_order_partitioning src order_items))
-					(define cost_work (if (nil? order_partitioning) work
-						(cons (list (quote membership_driver_order_partitioned)
-							(cadr order_partitioning)) work)))
 					/* membership_projection_cost owns scans and row work. This join
 					carrier additionally constructs a recset_project_join boundary;
 					charge its Costgen-calibrated fixed startup exactly once. */
 					(define candidate_cost (planner_cost_add
 						(membership_projection_cost
-							lookup_input_rows lookup_rows requested_rows cost_work)
+							lookup_input_rows lookup_rows requested_rows work)
 						(planner_recset_carrier_cost 0 0) requested_rows 0.65))
 					(define driver_cost (membership_ordered_driver_probe_cost
-						lookup_input_rows lookup_rows requested_rows cost_work))
-					(define batch_cost (ordered_batch_accept_cost cost_work))
+						lookup_input_rows lookup_rows requested_rows work))
+					(define batch_cost (ordered_batch_accept_cost work))
 					(define lookup_cols (extract_columns_for_alias lookup lookup_condition))
 					(define lookup_recset (compile_scan_plan (quote scan_recset)
 						(physical_query_tx_symbol)
@@ -7560,8 +7523,8 @@ carrier into thousands of fictional downstream probes. */
 						(quoted_runtime_list (cadr edge_columns))))
 					(list carrier candidate_cost driver_cost lookup_rows
 						(membership_projected_driver_rows lookup_input_rows lookup_rows
-							driver_input_rows cost_work)
-						lookup_condition lookup_estimate exact batch_cost order_partitioning)))))))
+							driver_input_rows work)
+						lookup_condition lookup_estimate exact batch_cost)))))))
 
 (define choose_ordered_join_projected_candidate (lambda (sources default_alias src remaining_sources condition order_items offset limit planning_session tx)
 	(begin
@@ -7616,9 +7579,7 @@ carrier into thousands of fictional downstream probes. */
 						(list "candidate_rows" (nth candidate 3))
 						(list "projected_driver_rows" (nth candidate 4))
 						(list "driver_input_rows" (planner_source_row_count src))
-						(list "carrier_exact" (nth candidate 7))
-						(list "driver_order_partitioned" (if (nil? (nth candidate 9))
-							false (cadr (nth candidate 9))))))
+						(list "carrier_exact" (nth candidate 7))))
 					(list "alternatives" (list
 						(list (list "plan" "projected_candidate_keyset")
 							(list "cost" (planner_cost_explain (nth candidate 1))))
@@ -7627,12 +7588,6 @@ carrier into thousands of fictional downstream probes. */
 						(list (list "plan" "ordered_batch_accept")
 							(list "cost" (planner_cost_explain (nth candidate 8)))))))
 					planning_session)
-				(if (nil? (nth candidate 9)) true
-					(planner_record_guard_condition (list (quote equal?)
-						(list (quote table_order_partitioned?)
-							(list (quote table) (source_schema src) (source_relation src))
-							(car (nth candidate 9)))
-						(cadr (nth candidate 9))) planning_session))
 				(if (equal? chosen "projected_candidate_keyset")
 					(list (car candidate) (nth candidate 7)) nil))))))
 
@@ -7780,28 +7735,24 @@ has selected a lowerer. */
 						(list (quote membership_order_limit) (planner_literal_value limit planning_session))
 						(list (quote membership_order_offset) (coalesceNil (planner_literal_value offset planning_session) 0))
 						(list (quote membership_downstream_probe_branches) 0)))))
-					(define order_partitioning (planner_source_order_partitioning src order_items))
-					(define cost_work (if (nil? order_partitioning) work
-						(cons (list (quote membership_driver_order_partitioned)
-							(cadr order_partitioning)) work)))
 					/* Match ordered_join_projected_candidate: the projected join owns
 					a physical RecSet-carrier startup beyond its scan and row work. */
 					(define candidate_cost (planner_cost_add
 						(membership_projection_cost
-							lookup_input_rows lookup_rows requested_rows cost_work)
+							lookup_input_rows lookup_rows requested_rows work)
 						(planner_recset_carrier_cost 0 0) requested_rows 0.65))
 					(define driver_cost (membership_ordered_driver_probe_cost
-						lookup_input_rows lookup_rows requested_rows cost_work))
-					(define batch_cost (ordered_batch_accept_cost cost_work))
+						lookup_input_rows lookup_rows requested_rows work))
+					(define batch_cost (ordered_batch_accept_cost work))
 					(define projected_rows (membership_projected_driver_rows
-						lookup_input_rows lookup_rows driver_input_rows cost_work))
+						lookup_input_rows lookup_rows driver_input_rows work))
 					/* Keep the probe cardinality aligned with the selected legacy carrier.
 					The projected candidate touches projected_rows driver records. The
 					ordered post-filter must instead visit enough driver rows to find the
 					requested hits; cross-table anti-correlation can make that the complete
 					driver even when the final join cardinality is tiny. */
 					(define ordered_visited_rows (membership_expected_driver_rows_visited
-						lookup_input_rows lookup_rows requested_rows cost_work))
+						lookup_input_rows lookup_rows requested_rows work))
 					(define best (reduce (list
 						(list batch_cost ordered_visited_rows)
 						(list driver_cost ordered_visited_rows))
@@ -7991,8 +7942,6 @@ until the caller has selected this physical alternative. */
 			ordered_sources default_alias src order_items stages final_condition '()))
 		(define driver_order_items (nth order_parts 0))
 		(define remaining_order_items (nth order_parts 1))
-		(define driver_order_partitioning
-			(planner_source_order_partitioning src driver_order_items))
 		(define projected_join_choice (if (and (>= target 0)
 			(downstream_sources_at_most_one_driver_row?
 				ordered_sources default_alias final_condition stages))
@@ -8030,7 +7979,6 @@ until the caller has selected this physical alternative. */
 					(count (expr_probe_stages final_condition)))
 				(count (expr_probe_stages final_condition))
 				true
-				driver_order_partitioning
 				(quote ordered_join_stream) planning_session (planner_context_tx facts))))
 		(define membership_strategy (if (nil? membership_plan) nil (car membership_plan)))
 		(define use_batch_accept (equal? membership_strategy "ordered_batch_accept"))
@@ -9688,8 +9636,6 @@ carrier remains on the measured direct path and is never built eagerly. */
 					(query_limit_active? offset_value limit_value)))
 				(define row_number_membership_consumer
 					(membership_row_number_consumer? membership direct_order_limit))
-				(define current_order_partitioning
-					(planner_source_order_partitioning src current_order_items))
 				/* A unique point condition already bounds the driver to one row. Building
 				a projected membership carrier cannot reduce that bound and would only add
 				a second scan of the joined source. */
@@ -9718,7 +9664,6 @@ carrier remains on the measured direct path and is never built eagerly. */
 							(expr_probe_stages final_condition)
 							(physical_scalar_truth_plan_stages scalar_plan))))
 						(not row_number_membership_consumer)
-						current_order_partitioning
 						(quote join_leaf) planning_session planning_tx)))
 				(define membership_strategy (if (nil? membership_plan) nil (car membership_plan)))
 				(define use_batch_accept (equal? membership_strategy "ordered_batch_accept"))
@@ -10431,17 +10376,19 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 		(define default_alias (qassoc_get (qb_facts block) (quote default_alias) (source_alias (car sources))))
 		(define table_name (prejoin_table_name block default_alias))
 		(define table_expr (list (quote table) (qb_schema block) table_name))
+		(define initialize (list (quote initialize_cache_table)
+			(physical_query_tx_symbol)
+			table_expr
+			(cons (quote list) (map sources source_table_expr))
+			(list (quote lambda) (list (physical_query_tx_symbol)) (cons (quote !begin) (prejoin_trigger_registration_plans block table_name)))
+			(list (quote lambda) (list (physical_query_tx_symbol)) (prejoin_initial_fill_plan block table_name))))
 		(define prepare_plan (list (quote !begin)
-			(list (quote createtable) (qb_schema block) table_name
-				(prejoin_create_columns sources) (quoted_runtime_list '("engine" "cache")) true)
-			(list (quote initialize_cache_table)
-				(physical_query_tx_symbol)
-				table_expr
-				(cons (quote list) (map sources source_table_expr))
-				(list (quote lambda) (list (physical_query_tx_symbol)) (cons (quote !begin) (prejoin_trigger_registration_plans block table_name)))
-				(list (quote lambda) (list (physical_query_tx_symbol)) (prejoin_initial_fill_plan block table_name)))
-			(cons (quote !begin) (prejoin_computed_column_plans block fields table_name))
-			(list (quote touch_keytable) table_expr)))
+			(list (quote group_cache_create) (qb_schema block) table_name
+				(prejoin_create_columns sources)
+				(list (quote list) "engine" "cache" "oninit"
+					(list (quote lambda) (list (physical_query_tx_symbol)) initialize))
+				true (physical_query_tx_symbol))
+			(cons (quote !begin) (prejoin_computed_column_plans block fields table_name))))
 		(list prepare_plan (prejoin_rewritten_block block fields table_name)))))
 
 (define lower_query_block_through_prejoin (lambda (block)
@@ -13203,7 +13150,7 @@ protocol callback receives only the calibration row. */
 		(define raw_plan_nodes (- (tree_count plan)
 			raw_scan_access_slots
 			(static_scan_access_nodes plan)))
-		(define raw_group_caches (plan_count plan (quote touch_keytable)))
+		(define raw_group_caches (plan_count plan (quote group_cache_create)))
 		(define serialized_ns (nanotime))
 		(define optimizer_telemetry (newsession))
 		(define optimized_plan (optimize plan (lambda (stats)
@@ -13522,7 +13469,7 @@ without freezing a statistics-dependent decision in the SQL plan cache. */
 				(define cache_table (if count_mode driver_table (table (qb_schema block) name)))
 				(define is_ready (if count_mode
 					(not (nil? (resolve_column_name (source_schema driver) (source_relation driver) name false)))
-					(cache_table_ready? cache_table)))
+					(not (nil? cache_table))))
 				(define cache_variant (if count_mode "predicate_cache" "prejoin_recset"))
 				(define projected_ns (+ (semijoin_scan_work_ns lookup_table 1)
 					(* (scan_estimate driver_table) planner_membership_recset_build_row_ns)))
@@ -13565,7 +13512,7 @@ without freezing a statistics-dependent decision in the SQL plan cache. */
 					(list (quote if) (list (quote tx_requires_query_local_cache) (physical_query_tx_symbol)) direct_plan
 						(list (quote if)
 							(list (quote and) (if count_mode (list (quote not) (list (quote nil?) ready))
-								(list (quote cache_table_ready?) ready))
+								(list (quote not) (list (quote nil?) ready)))
 								(list (quote semijoin_cache_wins?) (source_table_expr driver) (source_table_expr lookup)
 									(if count_mode (source_table_expr driver) ready) count_mode))
 							warm_plan cold_plan))))))))

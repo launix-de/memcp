@@ -247,14 +247,12 @@ semantics for multiple independent cache assumptions. */
 		(if (empty_list? dependencies)
 			true
 			(begin
-				/* Keep the guard as ordinary literal AST so it remains valid when tools
-				compile it independently from its query plan. The token comparison is the
-				normal hot path. After REBUILD, each dependency performs one cheap atomic
-				fingerprint read; no cost formula or mutable Scheme payload is rebuilt. */
+				/* Exact concrete inputs are the conservative fallback for decisions
+				without a derived crossover guard. An unchanged REBUILD is invisible. */
 				(define dependency_guards (map dependencies (lambda (dependency)
-					(list (quote table_planner_statistics_compatible?)
-						(cadr (car dependency)) (nth (car dependency) 2)
-						(cadr dependency) (nth dependency 2) (coalesceNil (nth dependency 3) false)))))
+					(list (quote equal?)
+						(list (quote table_planner_statistics) (car dependency))
+						(list (quote quote) (cadr dependency))))))
 				(sql_queryplan_conjoin_guards dependency_guards))))))
 
 /* Bindings are registered producer-first. Walk backwards from surviving

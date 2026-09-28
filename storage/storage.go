@@ -847,6 +847,7 @@ func Init(en scm.Env) {
 			"comment":            {Kind: "string", Label: "comment", Description: "user-visible column comment"},
 			"default":            {Kind: "any", Label: "default", Description: "literal value used when an insert omits the column"},
 			"default_expression": {Kind: "string", Label: "default_expression", Description: "expression evaluated when an insert omits the column"},
+			"dependencies":       {Kind: "list", Description: "logical source tables whose changes invalidate a computed payload"},
 			"filtercols":         columnList("filtercols", "columns supplied to filter before computing a value"),
 			"filter":             rowCallback("filter", "predicate limiting which rows are computed", "bool", "true when the row should be computed"),
 			"mapcols":            columnList("mapcols", "columns supplied to mapreducefn for ordered computation"),
@@ -971,6 +972,9 @@ func Init(en scm.Env) {
 		Name: "table_planner_statistics",
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
+			if a[0].IsNil() {
+				return scm.NewNil()
+			}
 			return TableFromScmer(a[0]).PlannerStatistics()
 		},
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "return the immutable O(1) planner-statistics snapshot for a table",
@@ -980,114 +984,59 @@ func Init(en scm.Env) {
 			Return: &scm.TypeDescriptor{Kind: "any"},
 		},
 	})
-	scm.Declare(&en, &scm.Declaration{
-		Name: "table_planner_statistics_token",
 
+	scm.Declare(&en, &scm.Declaration{
+		Name: "with_cache_sources",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
-			if a[0].IsNil() {
-				return scm.NewNil()
+			currentTx := scmerToTxContext(a[0])
+			if txRequiresQueryLocalCache(currentTx) {
+				return scm.Apply(a[3])
 			}
-			return scm.NewInt(int64(TableFromScmer(a[0]).PlannerStatsToken(len(a) < 2 || scm.ToBool(a[1]))))
+			ss := SessionStateFromTx(currentTx)
+			if ss == nil {
+				ss = &scm.SessionState{}
+			}
+			sources := mustScmerSlice(a[1], "cache source tables")
+			tables := make([]*table, len(sources))
+			for i, source := range sources {
+				tables[i] = TableFromScmer(source)
+			}
+			sort.Slice(tables, func(i, j int) bool {
+				return tables[i].schema.Name+"\x00"+tables[i].Name < tables[j].schema.Name+"\x00"+tables[j].Name
+			})
+			unlocks := make([]func(), 0, len(tables))
+			defer func() {
+				for i := len(unlocks) - 1; i >= 0; i-- {
+					unlocks[i]()
+				}
+			}()
+			for _, source := range tables {
+				unlocks = append(unlocks, acquireTableLock(source.schema.Name, source.Name, false, true, ss, querySeqFromTx(currentTx)))
+			}
+			return scm.Apply(a[2])
 		},
-		Type: &scm.TypeDescriptor{Kind: "func", Description: "return the process-unique dependency token of a table's immutable planner-statistics snapshot",
+		Type: &scm.TypeDescriptor{Kind: "func", HasSideEffects: true, Description: "run shared cache work under source read locks; transaction-local views use the direct callback",
 			Params: []*scm.TypeDescriptor{
-				{Kind: "table", Label: "table"},
-				{Kind: "bool", Label: "include_feedback", Optional: true, Description: "default true; false requires separate guards for every consumed filter estimate"},
-			},
-			Return: &scm.TypeDescriptor{Kind: "int"},
-		},
+				{Kind: "any", Label: "tx"}, {Kind: "list", Label: "sources"},
+				{Kind: "func", Label: "shared"}, {Kind: "func", Label: "direct"},
+			}, Return: &scm.TypeDescriptor{Kind: "any"}},
 	})
-	scm.Declare(&en, &scm.Declaration{
-		Name: "table_read_version",
-		Fn: func(a ...scm.Scmer) scm.Scmer {
-			if a[0].IsNil() {
-				return scm.NewNil()
-			}
-			return TableFromScmer(a[0]).contributionReadVersion()
-		},
-		Type: &scm.TypeDescriptor{Kind: "func", HasSideEffects: true, Description: "read a conservative logical-data version, or nil while a mutation is active",
-			Params: []*scm.TypeDescriptor{{Kind: "table", Label: "table"}}, Return: &scm.TypeDescriptor{Kind: "any"}},
-	})
-	scm.Declare(&en, &scm.Declaration{
-		Name: "table_cache_generation",
 
-		Fn: func(a ...scm.Scmer) scm.Scmer {
-			if a[0].IsNil() {
-				return scm.NewNil()
-			}
-			return scm.NewInt(int64(TableFromScmer(a[0]).cacheGeneration.Load()))
-		},
-		Type: &scm.TypeDescriptor{Kind: "func", Description: "return the Cache-engine data generation used to invalidate external preparation markers",
-			Params: []*scm.TypeDescriptor{{Kind: "table", Label: "table"}},
-			Return: &scm.TypeDescriptor{Kind: "int"},
-		},
-	})
 	scm.Declare(&en, &scm.Declaration{
-		Name: "table_planner_statistics_fingerprint",
-
+		Name: "prepare_cache",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
-			if a[0].IsNil() {
-				return scm.NewNil()
-			}
-			return scm.NewInt(int64(TableFromScmer(a[0]).PlannerStatisticsFingerprint(len(a) < 2 || scm.ToBool(a[1]))))
+			return TableFromScmer(a[0]).prepareCache(scm.String(a[1]),
+				mustScmerSlice(a[2], "preparation sources"), a[3])
 		},
-		Type: &scm.TypeDescriptor{Kind: "func", Description: "return the coarse cost-class fingerprint of a table's immutable planner-statistics snapshot",
+		Type: &scm.TypeDescriptor{Kind: "func", HasSideEffects: true,
+			Description: "synchronously prepare a logical cache domain; storage owns preparation lifetime and source-change tracking, returning the recipe result",
 			Params: []*scm.TypeDescriptor{
-				{Kind: "table", Label: "table"},
-				{Kind: "bool", Label: "include_feedback", Optional: true, Description: "default true; false requires separate guards for every consumed filter estimate"},
+				{Kind: "table", Label: "cache"},
+				{Kind: "string", Label: "domain"},
+				{Kind: "list", Label: "sources"},
+				{Kind: "func", Label: "prepare"},
 			},
-			Return: &scm.TypeDescriptor{Kind: "int"},
-		},
-	})
-	scm.Declare(&en, &scm.Declaration{
-		Name: "table_planner_statistics_compatible?",
-
-		Fn: func(a ...scm.Scmer) scm.Scmer {
-			db := GetDatabase(scm.String(a[0]))
-			if db == nil {
-				return scm.NewBool(false)
-			}
-			tbl := db.GetTable(scm.String(a[1]))
-			if tbl == nil {
-				return scm.NewBool(false)
-			}
-			compileToken := uint64(a[2].Int())
-			includeFeedback := len(a) < 5 || scm.ToBool(a[4])
-			if tbl.PlannerStatsToken(includeFeedback) == compileToken {
-				return scm.NewBool(true)
-			}
-			compileFingerprint := uint64(a[3].Int())
-			return scm.NewBool(tbl.PlannerStatisticsFingerprint(includeFeedback) == compileFingerprint)
-		},
-		Type: &scm.TypeDescriptor{Kind: "func", Description: "check whether cached-plan table statistics remain in the same cost class",
-			Params: []*scm.TypeDescriptor{
-				{Kind: "string", Label: "schema"},
-				{Kind: "string", Label: "table"},
-				{Kind: "int", Label: "compile_token"},
-				{Kind: "int", Label: "compile_fingerprint"},
-				{Kind: "bool", Label: "include_feedback", Optional: true, Description: "must match the scope of the supplied token and fingerprint"},
-			},
-			Return:         &scm.TypeDescriptor{Kind: "bool"},
-			HasSideEffects: true,
-		},
-	})
-
-	scm.Declare(&en, &scm.Declaration{
-		Name: "table_order_partitioned?",
-
-		Fn: func(a ...scm.Scmer) scm.Scmer {
-			t := TableFromScmer(a[0])
-			column := scm.String(a[1])
-			topology := t.activeTopology()
-			return scm.NewBool(topology.mode == ShardModePartition &&
-				len(topology.dimensions) == 1 && topology.dimensions[0].Column == column)
-		},
-		Type: &scm.TypeDescriptor{Kind: "func", Description: "reports whether a table has one range-partition dimension matching the leading ORDER BY column; this immutable-topology check lets physical costing account for ordered shard pruning",
-			Params: []*scm.TypeDescriptor{
-				{Kind: "table", Label: "table"},
-				{Kind: "string", Label: "column"},
-			},
-			Return: &scm.TypeDescriptor{Kind: "bool"},
+			Return: &scm.TypeDescriptor{Kind: "any"},
 		},
 	})
 
@@ -2748,15 +2697,21 @@ func Init(en scm.Env) {
 				// extract filter from options
 				var filterCols []string
 				var filter scm.Scmer
+				var dependencies []string
 				for i := 0; i < len(typeparams); i += 2 {
 					key := scm.String(typeparams[i])
 					if key == "filtercols" {
 						filterCols = scmerSliceToStrings(mustScmerSlice(typeparams[i+1], "filter column names"))
 					} else if key == "filter" {
 						filter = typeparams[i+1]
+					} else if key == "dependencies" {
+						for _, source := range mustScmerSlice(typeparams[i+1], "computed dependencies") {
+							src := TableFromScmer(source)
+							dependencies = append(dependencies, src.schema.Name, src.Name)
+						}
 					}
 				}
-				t.computeColumnDDLLocked(colname, paramNames, a[6], filterCols, filter)
+				t.computeColumnDDLLocked(colname, paramNames, a[6], filterCols, filter, dependencies)
 				return scm.NewBool(true)
 			}
 
@@ -3578,25 +3533,6 @@ func Init(en scm.Env) {
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
 	})
-	scm.Declare(&en, &scm.Declaration{
-		Name: "cache_table_ready?",
-		Fn: func(a ...scm.Scmer) scm.Scmer {
-			if a[0].IsNil() {
-				return scm.NewBool(false)
-			}
-			t := TableFromScmer(a[0])
-			if t == nil {
-				return scm.NewBool(false)
-			}
-			t.cacheInitMu.Lock()
-			defer t.cacheInitMu.Unlock()
-			return scm.NewBool(t.cacheInitialized)
-		},
-		Type: &scm.TypeDescriptor{Kind: "func", Description: "inspect canonical cache initialization without building or waiting for it",
-			Params: []*scm.TypeDescriptor{{Kind: "table", Label: "table"}},
-			Return: &scm.TypeDescriptor{Kind: "bool"},
-		},
-	})
 
 	scm.Declare(&en, &scm.Declaration{
 		Name: "initialize_cache_table",
@@ -3651,28 +3587,7 @@ func Init(en scm.Env) {
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
 	})
-	scm.Declare(&en, &scm.Declaration{
-		Name: "touch_keytable",
 
-		Fn: func(a ...scm.Scmer) scm.Scmer {
-			tbl := TableFromScmer(a[0])
-			now := time.Now()
-			nowNs := uint64(now.UnixNano())
-			atomic.StoreUint64(&tbl.lastAccessed, nowNs)
-			for _, c := range tbl.Columns {
-				if c.IsTemp {
-					atomic.StoreInt64(&c.lastAccessed, now.UnixNano())
-				}
-			}
-			return scm.NewBool(true)
-		},
-		Type: &scm.TypeDescriptor{Kind: "func", Description: "extends the lease on a keytable so CacheManager defers eviction",
-			Params: []*scm.TypeDescriptor{
-				{Kind: "table", Label: "table"},
-			},
-			Return: &scm.TypeDescriptor{Kind: "bool"},
-		},
-	})
 	scm.Declare(&en, &scm.Declaration{
 		Name: "locktables",
 
@@ -4748,6 +4663,11 @@ func (m *memoryOwnerSnapshot) add(other memoryOwnerSnapshot) {
 // holds the schema read lock so table topology and column ownership are stable.
 func (t *table) memoryOwnerSnapshotLocked() memoryOwnerSnapshot {
 	snapshot := memoryOwnerSnapshot{metadata: t.metadataMemory()}
+	if preparations := t.cachePreparations.Load(); preparations != nil {
+		// Memo entries are independently registered: include them only in the
+		// diagnostic resident total, never in the table's exclusive ledger size.
+		snapshot.metadata += uint(preparations.residentBytes.Load())
+	}
 	for _, shard := range t.ActiveShards() {
 		if shard == nil {
 			continue

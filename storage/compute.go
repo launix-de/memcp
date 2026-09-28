@@ -48,7 +48,7 @@ func newCachedColumnReaderTx(col ColumnStorage, tx *TxContext, alreadyLocked boo
 	return col.GetCachedReader()
 }
 
-func (t *table) computeColumnDDLLocked(name string, inputCols []string, computor scm.Scmer, filterCols []string, filter scm.Scmer) {
+func (t *table) computeColumnDDLLocked(name string, inputCols []string, computor scm.Scmer, filterCols []string, filter scm.Scmer, dependencies []string) {
 	requireStatelessComputedCallback("computed-column function", computor)
 	requireStatelessComputedCallback("computed-column preparation filter", filter)
 	// Ordinary computed-column DDL installs one complete logical column.
@@ -83,13 +83,18 @@ func (t *table) computeColumnDDLLocked(name string, inputCols []string, computor
 			//   signature changes
 			// - shard-level ComputeColumn still runs afterwards so dirty proxies can
 			//   repair themselves even on the DDL no-op path
-			metadataChanged := !computeColumnSignatureEqual(c, inputCols, computor, filterCols, filter)
+			metadataChanged := !computeColumnSignatureEqual(c, inputCols, computor, filterCols, filter) || !slicesEqual(c.ComputorDependencies, dependencies)
 			if metadataChanged {
 				t.Columns[i].Computor = computor // set formula so delta storages and rebuild algo know how to recompute
 				t.Columns[i].ComputorInputCols = inputCols
 				t.Columns[i].ComputorFilterCols = filterCols
 				t.Columns[i].ComputorFilter = filter
-				t.registerComputeTriggers(name, computor)
+				t.Columns[i].ComputorDependencies = append([]string(nil), dependencies...)
+				refs := extractScanJoinInfo(computor)
+				for i := 0; i+1 < len(dependencies); i += 2 {
+					refs = append(refs, scanJoinInfo{schema: dependencies[i], table: dependencies[i+1], unknownReads: true})
+				}
+				t.registerComputeTriggersWithRefs(name, computor, refs)
 			}
 			t.schema.schemalock.Unlock()
 			metadataLocked = false
@@ -180,7 +185,7 @@ func (t *table) updateTempColumnMemory(col *column, shards []*storageShard) {
 func (t *table) ComputeColumn(name string, inputCols []string, computor scm.Scmer, filterCols []string, filter scm.Scmer) {
 	t.ddlMu.Lock()
 	defer t.ddlMu.Unlock()
-	t.computeColumnDDLLocked(name, inputCols, computor, filterCols, filter)
+	t.computeColumnDDLLocked(name, inputCols, computor, filterCols, filter, nil)
 }
 
 func (s *storageShard) ComputeColumn(name string, inputCols []string, computor scm.Scmer, filterCols []string, filter scm.Scmer) {

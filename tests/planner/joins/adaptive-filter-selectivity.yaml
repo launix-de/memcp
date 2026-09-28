@@ -126,19 +126,19 @@ test_cases:
         (define tbl (table "memcp-tests" "afs_check"))
         (define src (list "a" "memcp-tests" "afs_check" false nil))
         (define expr (list '< (list 'get_column "a" false "id" false) 100))
-        (define before_token (table_planner_statistics_token tbl))
-        (define before_fingerprint (table_planner_statistics_fingerprint tbl))
         (define callback (list 'lambda (list 'x) (list '< 'x 100)))
         (define access (eval (compile_scan_access '("id") callback)))
         (define values (map (nth access 1) (lambda (value) (eval value))))
+        (define guards (sql_queryplan_compile_session (newsession) nil))
+        (planner_record_filter_feedback_guard src '("id") callback guards)
+        (define guard (sql_queryplan_guard_from_session guards))
         (define matches (scan nil tbl (nth access 0) values '("id") (eval callback)
           '() scan_count 0 + false))
         (define estimate (join_optimizer_expr_selectivity_estimate (list src) "a" expr nil))
         (and (equal? matches 100)
           (equal? (qassoc_get estimate 'source nil) 'scan_feedback)
           (equal? (qassoc_get estimate 'value nil) 0.1)
-          (not (table_planner_statistics_compatible? "memcp-tests" "afs_check"
-            before_token before_fingerprint))))
+          (not (eval guard))))
     expect:
       data: [true]
 
@@ -199,14 +199,16 @@ test_cases:
         (define callback (list 'lambda (list 'x) (list 'strlike 'x "%common%" "utf8mb4_general_ci")))
         (define access (eval (compile_scan_access '("label") callback)))
         (define values (map (nth access 1) (lambda (v) (eval v))))
-        (define before_token (table_planner_statistics_token tbl))
-        (define before_fingerprint (table_planner_statistics_fingerprint tbl))
+        (define src (list "a" "memcp-tests" "afs_check" false nil))
+        (define guards (sql_queryplan_compile_session (newsession) nil))
+        (planner_record_filter_feedback_guard src '("label") callback guards)
+        (define guard (sql_queryplan_guard_from_session guards))
         (define matches (recset_count (scan_recset nil tbl (nth access 0) values '("label") (eval callback))))
         (define estimate (scan_selectivity_estimate nil tbl (nth access 0) values '() (lambda () true) 0))
         (if (and (equal? matches 900)
           (equal? (qassoc_get estimate 'source nil) 'scan_feedback)
           (equal? (qassoc_get estimate 'value nil) 0.9)
-          (not (table_planner_statistics_compatible? "memcp-tests" "afs_check" before_token before_fingerprint)))
+          (not (eval guard)))
           true (error "complete RecSet feedback did not invalidate the planner guard"))))
     expect:
       data: [true]

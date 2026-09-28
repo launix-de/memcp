@@ -527,3 +527,34 @@ func TestBeforeUpdateForwardsTriggerValuesAfterRebuildCompletion(t *testing.T) {
 		t.Fatalf("successor values = %v, want trigger-rewritten [3]", values)
 	}
 }
+
+// A missing writer session is not the (also missing) WRITE-lock owner while
+// another session owns READ. Cache initialization and publication rely on this.
+func TestReadTableLockBlocksTransactionlessWriter(t *testing.T) {
+	owner := &scm.SessionState{}
+	tbl := &table{Name: "cache_source", tableLockReadOwners: map[*scm.SessionState]uint32{owner: 1}}
+	tbl.tableLockState.Store(1)
+	entered := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		close(entered)
+		tbl.waitTableLock(nil, 0, true)
+		close(done)
+	}()
+	<-entered
+	select {
+	case <-done:
+		t.Fatal("transactionless writer bypassed an existing READ lock")
+	case <-time.After(20 * time.Millisecond):
+	}
+	tbl.tableLockMu.Lock()
+	delete(tbl.tableLockReadOwners, owner)
+	tbl.tableLockState.Store(0)
+	tbl.getTableLockCond().Broadcast()
+	tbl.tableLockMu.Unlock()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("writer did not resume after releasing READ lock")
+	}
+}

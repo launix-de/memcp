@@ -411,7 +411,7 @@ test_cases:
       ORDER BY d.did
     expect:
       contains:
-        - "touch_keytable"
+        - "group_cache_create"
         - "createcolumn"
         - ".grp:sq_emp:"
       not_contains:
@@ -510,7 +510,7 @@ test_cases:
     expect:
       rows: 1
       result_occurrences:
-        - text: "touch_keytable"
+        - text: "group_cache_create"
           count: 0
 
   - name: "Broad nested aggregate scopes share one keytable initializer"
@@ -525,7 +525,7 @@ test_cases:
     expect:
       rows: 1
       result_occurrences:
-        - text: "(group_cache_create"
+        - text: "(__group_cache_created)"
           count: 1
 
   - name: "Nested aggregate scopes retain every aggregate column"

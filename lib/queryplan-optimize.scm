@@ -1862,13 +1862,8 @@ particular star shape. */
 			(define table_value (table (source_schema src) (source_relation src)))
 			(define table_expr
 				(list (quote table) (source_schema src) (source_relation src)))
-			(define include_feedback (and (not (nil? planning_session))
-				(planning_session "__memcp_queryplan_diagnostic_statistics")))
 			(planner_record_statistics_dependency
-				table_expr
-				(table_planner_statistics_token table_value include_feedback)
-				(table_planner_statistics_fingerprint table_value include_feedback)
-				planning_session include_feedback))) nil)))
+				table_expr (table_planner_statistics table_value) planning_session))) nil)))
 
 (define planner_table_statistics_aliases (lambda (sources)
 	(map (filter sources source_is_base_table?) source_alias)))

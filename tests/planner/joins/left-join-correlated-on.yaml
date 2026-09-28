@@ -58,7 +58,7 @@ test_cases:
       not_contains:
         - "__exists_"
         - ".grp:ljco_hist"
-        - "touch_keytable"
+        - "group_cache_create"
 
   - name: "derived table LEFT JOIN with correlated ON"
     sql: |

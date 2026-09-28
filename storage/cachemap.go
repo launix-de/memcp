@@ -37,9 +37,12 @@ type cacheMapEntry struct {
 }
 
 type cacheMap struct {
-	mu      sync.RWMutex
-	entries map[string]*cacheMapEntry
-	flights map[string]*cacheMapFlight
+	// residentBytes is published at entry replacement/eviction boundaries.
+	// Owning tables can include memo entries without taking the cache mutex.
+	residentBytes atomic.Int64
+	mu            sync.RWMutex
+	entries       map[string]*cacheMapEntry
+	flights       map[string]*cacheMapFlight
 }
 
 type cacheMapFlight struct {
@@ -143,6 +146,11 @@ func (cm *cacheMap) store(key string, value scm.Scmer) {
 	cm.mu.Lock()
 	old := cm.entries[key]
 	cm.entries[key] = entry
+	delta := entry.size
+	if old != nil {
+		delta -= old.size
+	}
+	cm.residentBytes.Add(delta)
 	cm.mu.Unlock()
 	if old != nil {
 		GlobalCache.Remove(old)
@@ -245,6 +253,11 @@ func (cm *cacheMap) runProducer(ctx context.Context, key string, producer scm.Sc
 	if entry != nil {
 		old = cm.entries[key]
 		cm.entries[key] = entry
+		delta := entry.size
+		if old != nil {
+			delta -= old.size
+		}
+		cm.residentBytes.Add(delta)
 	}
 	close(flight.done)
 	cm.mu.Unlock()
@@ -275,6 +288,7 @@ func cacheMapCleanup(pointer any, freedByType *[numEvictableTypes]int64) bool {
 	entry.cm.mu.Lock()
 	if entry.cm.entries[entry.key] == entry {
 		delete(entry.cm.entries, entry.key)
+		entry.cm.residentBytes.Add(-entry.size)
 	}
 	entry.cm.mu.Unlock()
 	return true

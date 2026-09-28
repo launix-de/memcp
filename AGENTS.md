@@ -444,3 +444,18 @@ The Makefile reads `VERSION` from the first word of that line (`awk '{print $1}'
 - Credentials: use a MySQL REPLICATION SLAVE user with minimal grants.
 - Failure modes: on apply error, quarantine table/GTID and alert; do not silently skip.
 - Observability: metrics for CDC lag, events/sec, apply errors, MemCP write latency; GTID watermark in logs and `system.cdc_state`.
+
+### Logical cache dependency ownership (2026)
+
+- `column.ComputorDependencies` stores logical schema/table pairs under the same
+  schema/DDL locks as the computed definition; it never contains shard identities.
+- `table.cacheDataRevision` is an atomic private marker for preparation reuse.
+  Logical mutation batches advance it; physical topology publication does not.
+- `table.cachePreparationMu` serializes idempotent domain preparation and owns
+  `cachePreparations`, atomically published for diagnostics. Its entries contain
+  scalar markers/results and use separate CacheManager registrations.
+  `cacheMap.residentBytes` publishes complete entry byte deltas under its mutex. No source table pointers or transaction closures are retained.
+- Shared payload computation holds ordered logical source read locks through
+  publication. Explicit transactions and manual table-lock owners use private
+  evaluation. Scheme must not inspect storage versions, cache readiness, LRU
+  touches, or physical partitioning to decide cache validity or plan choice.

@@ -192,7 +192,7 @@ test_cases:
         - "scan_order"
       result_not_contains:
         - "recset_project_join"
-        - "touch_keytable"
+        - "group_cache_create"
         - "scan_exists"
 
   - name: "Broad ordered search keeps file membership in a source key index"
@@ -732,28 +732,28 @@ test_cases:
         (sess "schema" "memcp-tests")
         (define resultrow (lambda (_row) nil))
         /* ORDER BY fixes the left driver here. Rebuilding the right table changes
-        its immutable statistics token, but cannot change the winning plan. */
+        its physical generation, but cannot change the winning plan. */
         (define query "SELECT l.id FROM ps_guard_left l JOIN ps_guard_right r ON r.id = l.rhs ORDER BY l.id")
         (define right_table (table "memcp-tests" "ps_guard_right"))
         (rebuild right_table true false)
-        (define first_token (table_planner_statistics_token right_table))
+        (define first_statistics (table_planner_statistics right_table))
         (sql_execute_formula sess nil
           (cached_parse cache (list parse_sql) "memcp-tests" query nil "root" sess true)
           resultrow (lambda (_fields) nil))
         (define entry (car (cache (car (cache)))))
         (rebuild right_table true false)
-        (define second_token (table_planner_statistics_token right_table))
+        (define second_statistics (table_planner_statistics right_table))
         (sql_execute_formula sess nil
           (cached_parse cache (list parse_sql) "memcp-tests" query nil "root" sess true)
           resultrow (lambda (_fields) nil))
-        /* Repeated token misses exercise the coarse fingerprint fallback; they
-        must not accumulate variants merely because REBUILD ran. */
+        /* Rebuilding unchanged rows must preserve concrete statistics and must
+        not accumulate plan variants. No generation or hash is consulted. */
         (rebuild right_table true false)
         (sql_execute_formula sess nil
           (cached_parse cache (list parse_sql) "memcp-tests" query nil "root" sess true)
           resultrow (lambda (_fields) nil))
         (if (and
-          (not (equal? first_token second_token))
+          (equal? first_statistics second_statistics)
           (equal? (count (entry "variants")) 1))
           "ok"
           (error (concat "unchanged cost choices recompiled: variants="
