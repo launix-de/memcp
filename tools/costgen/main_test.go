@@ -10,11 +10,13 @@ the Free Software Foundation, either version 3 of the License, or
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -255,14 +257,23 @@ func TestRowFeaturesModelsAdaptiveOrderedBatchWork(t *testing.T) {
 	if features[15] != 4 {
 		t.Fatalf("ordered scan invocations = %v, want 4", features[15])
 	}
-	row.DriverOrderPartitioned = true
-	partitionedFeatures, err := rowFeatures(row)
+	// Old calibration files may contain physical layout hints. They must not
+	// alter costs: storage adapts layout to the access plan, not vice versa.
+	encoded, err := json.Marshal(row)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if partitionedFeatures[12] != 200 {
-		t.Fatalf("partition-pruned ordered batch work = %v, want twice the 100-row prefix",
-			partitionedFeatures[12])
+	encoded = append(encoded[:len(encoded)-1], []byte(`,"driver_order_partitioned":true}`)...)
+	var legacy calibrationRow
+	if err := json.Unmarshal(encoded, &legacy); err != nil {
+		t.Fatal(err)
+	}
+	legacyFeatures, err := rowFeatures(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(legacyFeatures, features) {
+		t.Fatalf("physical layout changed logical cost inputs: %v != %v", legacyFeatures, features)
 	}
 }
 

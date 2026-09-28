@@ -805,10 +805,10 @@ lost; these are disposable planning hints and have no WAL/durability guarantee.
 No learned state changes row visibility, shard binary formats, or query results. Existing integer scan headers remain readable;
 new optional feedback metadata is ordinary serializable Scheme data.
 
-Execution plans guard structural table statistics separately from learned filter
-estimates. Table generation/fingerprint guards with `include_feedback=false`
-must be accompanied by guards for the bound filter metadata actually consumed
-by costing. Learning an unrelated predicate must not invalidate these plans.
+Execution plans guard concrete structural table statistics separately from
+learned filter estimates. Neither generations nor statistics fingerprints may
+invalidate a cached plan. Concrete table-input guards must be accompanied by
+guards for the bound filter metadata actually consumed by costing. Learning an unrelated predicate must not invalidate these plans.
 Session bindings must be passed explicitly through reorder and lowering; a
 missing session must not silently substitute another binding's observations.
 
@@ -818,8 +818,9 @@ index. An unknown estimate is also a dependency, so newly available feedback
 can cause replanning. Existing cost crossover guards remain active. Where a
 crossover has not been derived, an exact metadata-input guard is conservative;
 it must not be described as a derived operator crossover or removed unchecked.
-EXPLAIN diagnostics and the public default table-statistics API retain the
-table-wide feedback fingerprint so cached diagnostics refresh their estimates.
+EXPLAIN diagnostics use the concrete statistics and filter observations, just
+like ordinary cached plans. Storage may use private publication counters to
+maintain these observations, but does not expose them to Scheme.
 
 Performance coverage for these guards must include changing predicates between
 cached executions, not only repetitions of a single already-learned query.
@@ -912,3 +913,22 @@ Do not combine a large mechanical file move with a semantic planner fix. Move
 stable phase ranges in a dedicated refactoring PR so review can distinguish
 behavior changes from relocation and A/B compile-time measurements remain
 meaningful.
+
+### Storage is opaque to Scheme cache and plan policy
+
+Table handles identify logical relations. Shard identities, topology generations,
+cache eviction generations, readiness probes and usage touches are not planner
+inputs. Physical topology is visible through explicit `show` diagnostics only.
+`shardcolumn` / `partitiontable` remain declarative range-partitioning hints.
+Ordered plan selection must not depend on the current physical partition layout.
+
+Canonical cache access runs its idempotent `createtable`/`oninit` preparation
+before consuming rows. Storage owns usage tracking, preparation markers and
+dependency maintenance. Snapshot/point payload columns depend on logical source
+tables; source DML invalidates their values through computed-column triggers.
+Rebuild/repartition preserves valid payloads. Query-local transactions bypass
+shared payloads. Shared computation and publication hold source read locks;
+stored payloads never retain session/transaction closures or physical row IDs.
+Range aggregates keep their existing selective incremental maintenance; snapshot
+payloads conservatively rebuild after a source write until finer dependency
+maintenance is proved. Moving coordinates still use nearest-anchor corrections.

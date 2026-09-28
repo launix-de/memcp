@@ -662,7 +662,7 @@ test_cases:
     expect:
       rows: 1
       contains:
-        - "touch_keytable"
+        - "group_cache_create"
         - "(if __kt_created"
         - "compute-count"
         - "filtercols"

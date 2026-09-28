@@ -100,20 +100,22 @@ type column struct {
 	// canonical temp column signature is unchanged and skip schema/trigger work.
 	// filter cols are persisted because they are part of the canonical helper
 	// definition; the filter expression itself is runtime-only like Computor.
-	ComputorFilterCols []string  `json:",omitempty"`
-	ComputorFilter     scm.Scmer `json:"-"`
-	PartitioningScore  int       // count this up to increase the chance of partitioning for this column
-	AutoIncrement      bool
-	Default            scm.Scmer
-	DefaultExpression  string
-	OnUpdate           scm.Scmer
-	AllowNull          bool
-	IsTemp             bool // columns with IsTemp may be removed without consequences
-	Collation          string
-	Comment            string
-	sanitizer          func(scm.Scmer) scm.Scmer
-	lastAccessed       int64 // atomic; UnixNano timestamp for CacheManager LRU (lock-free via sync/atomic)
-	cacheUsers         int64 // atomic; -1 while/after CacheManager eviction, otherwise active trigger users
+	// ComputorDependencies contains logical schema/table pairs, never topology IDs.
+	ComputorDependencies []string  `json:",omitempty"`
+	ComputorFilterCols   []string  `json:",omitempty"`
+	ComputorFilter       scm.Scmer `json:"-"`
+	PartitioningScore    int       // count this up to increase the chance of partitioning for this column
+	AutoIncrement        bool
+	Default              scm.Scmer
+	DefaultExpression    string
+	OnUpdate             scm.Scmer
+	AllowNull            bool
+	IsTemp               bool // columns with IsTemp may be removed without consequences
+	Collation            string
+	Comment              string
+	sanitizer            func(scm.Scmer) scm.Scmer
+	lastAccessed         int64 // atomic; UnixNano timestamp for CacheManager LRU (lock-free via sync/atomic)
+	cacheUsers           int64 // atomic; -1 while/after CacheManager eviction, otherwise active trigger users
 
 	// Statistics — updated at rebuild time, O(1) access for query planning.
 	// DistinctEstimate is the sum of per-shard DistinctCount() (upper bound).
@@ -473,6 +475,7 @@ type table struct {
 	// assigned once; revision and active-writer count need no catalog locks.
 	contributionIdentity atomic.Uint64
 	contributionRevision atomic.Uint64
+	cacheDataRevision    atomic.Uint64 // logical mutation batches only; topology publication does not advance it
 	contributionWriters  atomic.Int64
 
 	// Immutable, bounded filter observations, published after complete scans.
@@ -562,6 +565,12 @@ type table struct {
 	cacheInitMu         sync.Mutex
 	cacheInitialized    bool
 	cacheInitializerRun *cacheInitializerRun
+
+	// cachePreparationMu serializes domain recipes. cachePreparations is atomically
+	// published for lock-free resident diagnostics; its entries use CacheManager
+	// accounting and contain no source pointers or query callbacks.
+	cachePreparationMu sync.Mutex
+	cachePreparations  atomic.Pointer[cacheMap]
 
 	// ddlMu is the table-local schema contract:
 	//   - Lock(): column/trigger/ORC metadata on this table may change
@@ -752,8 +761,13 @@ func (t *table) getColFreq(col string) int64 {
 // publishTopologyLocked publishes an immutable authoritative topology. The
 // caller holds t.mu or otherwise has exclusive ownership before publication.
 func (t *table) publishTopologyLocked() *tableShardTopology {
-	t.beginContributionMutation()
-	defer t.endContributionMutation()
+	// Physical row references change, logical range-domain preparations do not.
+	t.contributionWriters.Add(1)
+	t.contributionRevision.Add(1)
+	defer func() {
+		t.contributionRevision.Add(1)
+		t.contributionWriters.Add(-1)
+	}()
 	mode := t.ShardMode
 	shards := t.Shards
 	if mode == ShardModePartition {
@@ -857,10 +871,12 @@ var contributionTableID atomic.Uint64
 // Overlapping writers keep read stamps unavailable until the last writer exits.
 func (t *table) beginContributionMutation() {
 	t.contributionWriters.Add(1)
+	t.cacheDataRevision.Add(1)
 	t.contributionRevision.Add(1)
 }
 
 func (t *table) endContributionMutation() {
+	t.cacheDataRevision.Add(1)
 	t.contributionRevision.Add(1)
 	t.contributionWriters.Add(-1)
 }
@@ -1296,7 +1312,7 @@ func (t *table) waitTableLock(ss *scm.SessionState, querySeq uint64, isWrite boo
 			if state >= 0 || owner == ss {
 				break
 			}
-		} else if owner == ss {
+		} else if owner != nil && owner == ss {
 			break
 		} else if t.tableLockReadOwners[ss] != 0 {
 			errMsg = "Can't write to table '" + t.Name + "' while it has a READ lock"
@@ -2266,7 +2282,7 @@ func (t *table) createColumnLocked(name string, typ string, typdimensions []int,
 			c.Collation = scm.String(extrainfo[i+1])
 		case "temp":
 			c.IsTemp = scm.ToBool(extrainfo[i+1])
-		case "filtercols", "filter":
+		case "filtercols", "filter", "dependencies":
 			// handled by createcolumn builtin, not a column property
 		case "sortcols", "sortdirs", "partitioncount", "mapcols", "mapreducefn", "reduceinit":
 			// ORC params handled by createcolumn builtin after CreateColumn

@@ -160,7 +160,7 @@ test_cases:
       result_contains:
         - "scan_order"
       result_not_contains:
-        - "touch_keytable"
+        - "group_cache_create"
         - ".grp:query:"
         - ".grp:exists_point_acl:"
 
@@ -210,7 +210,7 @@ test_cases:
       result_contains:
         - "scan_order"
       result_not_contains:
-        - "touch_keytable"
+        - "group_cache_create"
         - ".grp:exists_point_child:"
         - ".grp:query:"
 
@@ -319,7 +319,7 @@ test_cases:
             - "inner_select"
             - ".grp:"
             - "__mat:_uncorr_cnt_"
-            - "touch_keytable"
+            - "group_cache_create"
 
   - name: "Correlated EXISTS with range filter keeps correct SQL result"
     sql: |
@@ -352,7 +352,7 @@ test_cases:
       not_contains:
         - "exists_probe"
         - "driver_membership_probe"
-        - "touch_keytable"
+        - "group_cache_create"
 
   - name: "EXPLAIN REORDER keeps EXISTS membership as a logical requirement"
     sql: |
@@ -599,7 +599,7 @@ test_cases:
             - "exists_probe"
             - ".grp:"
             - "__mat:_uncorr_cnt_"
-            - "touch_keytable"
+            - "group_cache_create"
             - "\"__cnt\""
 
   - name: "EXISTS with session-backed scalar predicate is true"
@@ -672,7 +672,7 @@ test_cases:
             - "exists_probe"
             - ".grp:"
             - "__mat:_uncorr_cnt_"
-            - "touch_keytable"
+            - "group_cache_create"
             - "\"__cnt\""
 
   - name: "Correlated NOT EXISTS access expression projects true"
@@ -855,7 +855,7 @@ test_cases:
     expect:
       rows: 1
       result_occurrences:
-        - text: "(group_cache_create"
+        - text: "(__group_cache_created)"
           count: 2
 
 cleanup:

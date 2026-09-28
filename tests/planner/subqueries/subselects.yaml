@@ -112,7 +112,7 @@ test_cases:
       rows: 1
       contains:
         - "createcolumn"
-        - "touch_keytable"
+        - "group_cache_create"
         - ".sub_orders:(1)"
 
 cleanup:

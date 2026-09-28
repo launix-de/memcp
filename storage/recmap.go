@@ -21,6 +21,7 @@ import (
 	"sort"
 	"sync"
 	"sync/atomic"
+	"time"
 	"unsafe"
 
 	"github.com/launix-de/memcp/scm"
@@ -1020,6 +1021,7 @@ func (r *recSet) collectRecMapRows(currentTx *TxContext, sourceKeyCols []string,
 	if r == nil || r.table == nil || r.count == 0 {
 		return nil
 	}
+	atomic.StoreUint64(&r.table.lastAccessed, uint64(time.Now().UnixNano()))
 	rows := make([]recMapSourceRow, 0, r.count)
 	ss := SessionStateFromTx(currentTx)
 	querySeq := querySeqFromTx(currentTx)

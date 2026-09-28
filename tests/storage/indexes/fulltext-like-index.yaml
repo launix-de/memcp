@@ -205,7 +205,7 @@ test_cases:
     sql: "EXPLAIN SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%'"
     expect:
       contains:
-        - "touch_keytable"
+        - "group_cache_create"
         - "createcolumn"
         - ".grp:ft_large:"
         - "strlike"
@@ -410,7 +410,7 @@ test_cases:
     sql: "EXPLAIN SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%' AND id > 15000"
     expect:
       contains:
-        - "touch_keytable"
+        - "group_cache_create"
         - "createcolumn"
         - ".grp:ft_large:"
         - "strlike"

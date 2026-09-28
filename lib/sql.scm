@@ -244,18 +244,17 @@ semantics for multiple independent cache assumptions. */
 		(define dependencies (if (nil? dependency_session) '() (map
 			(produceN (coalesceNil (dependency_session "count") 0))
 			(lambda (idx) (dependency_session (concat "dependency:" idx))))))
-		(if (empty_list? dependencies)
-			true
-			(begin
-				/* Keep the guard as ordinary literal AST so it remains valid when tools
-				compile it independently from its query plan. The token comparison is the
-				normal hot path. After REBUILD, each dependency performs one cheap atomic
-				fingerprint read; no cost formula or mutable Scheme payload is rebuilt. */
-				(define dependency_guards (map dependencies (lambda (dependency)
-					(list (quote table_planner_statistics_compatible?)
-						(cadr (car dependency)) (nth (car dependency) 2)
-						(cadr dependency) (nth dependency 2) (coalesceNil (nth dependency 3) false)))))
-				(sql_queryplan_conjoin_guards dependency_guards))))))
+		/* EXPLAIN retains displayed estimates, including predicate-local feedback.
+		Only metadata guards belong here; executable carrier preparations and cost
+		choice guards must never run just to refresh diagnostic output. */
+		(define feedback (planning_session "__memcp_queryplan_diagnostic_guards"))
+		(define feedback_guards (if (nil? feedback) '()
+			(map (feedback) (lambda (key) (feedback key)))))
+		(define dependency_guards (map dependencies (lambda (dependency)
+			(list (quote equal?)
+				(list (quote table_planner_statistics) (car dependency))
+				(list (quote quote) (cadr dependency))))))
+		(sql_queryplan_conjoin_guards (merge (list dependency_guards feedback_guards))))))
 
 /* Bindings are registered producer-first. Walk backwards from surviving
 decision guards to retain their complete dependency closure, not unused cost
@@ -335,6 +334,8 @@ serialization still see the complete plan. */
 		/* EXPLAIN reports metadata, not just a reusable execution decision. Keep
 		its table-wide refresh dependency without executing relational guards. */
 		(planning_session "__memcp_queryplan_diagnostic_statistics" statistics_diagnostic)
+		(if statistics_diagnostic
+			(planning_session "__memcp_queryplan_diagnostic_guards" (newsession)) nil)
 		(define compile_policy (sql_compile_table_policy policy))
 		(define raw_plan (with_session planning_session (lambda ()
 			(sql_invoke_parse_fn parse_fn schema parse_query compile_policy planning_session tx))))

@@ -19,6 +19,7 @@ package storage
 import "time"
 import "testing"
 import "container/heap"
+import "github.com/launix-de/memcp/scm"
 
 type testPartialCacheObject struct {
 	partialBytes int64
@@ -258,5 +259,76 @@ func TestEvictionExpandsTopKAfterRejectedOffer(t *testing.T) {
 	}
 	if _, ok := cm.itemMap[accepted]; ok {
 		t.Fatal("manager did not expand top-k after rejected offer")
+	}
+}
+
+func TestRangePreparationLifetimeFollowsLogicalData(t *testing.T) {
+	cache, source := &table{}, &table{}
+	calls := 0
+	prepare := scm.NewFunc(func(...scm.Scmer) scm.Scmer {
+		calls++
+		return scm.NewBool(true)
+	})
+	sources := []scm.Scmer{NewTableScmer(source)}
+	cache.prepareCache("range", sources, prepare)
+	source.publishTopologyLocked()
+	cache.prepareCache("range", sources, prepare)
+	if calls != 1 {
+		t.Fatalf("physical publication repeated logical preparation: %d", calls)
+	}
+	source.beginContributionMutation()
+	source.endContributionMutation()
+	cache.prepareCache("range", sources, prepare)
+	if calls != 2 {
+		t.Fatalf("source mutation did not refresh preparation: %d", calls)
+	}
+	cache.prepareCache("range", []scm.Scmer{NewTableScmer(&table{})}, prepare)
+	if calls != 3 {
+		t.Fatal("a replacement source reused the old preparation")
+	}
+}
+
+func TestRangePreparationFailureIsRetried(t *testing.T) {
+	cache := &table{}
+	calls := 0
+	prepare := scm.NewFunc(func(...scm.Scmer) scm.Scmer {
+		calls++
+		if calls == 1 {
+			panic("incomplete range preparation")
+		}
+		return scm.NewBool(true)
+	})
+	func() {
+		defer func() {
+			if recover() != "incomplete range preparation" {
+				t.Error("preparation failure was not propagated")
+			}
+		}()
+		cache.prepareCache("range", nil, prepare)
+	}()
+	cache.prepareCache("range", nil, prepare)
+	cache.prepareCache("range", nil, prepare)
+	if calls != 2 {
+		t.Fatalf("failed preparation was retained or successful retry was lost: %d", calls)
+	}
+}
+
+func TestCacheMapResidentBytesFollowReplacementAndEviction(t *testing.T) {
+	cache := &cacheMap{entries: make(map[string]*cacheMapEntry)}
+	cache.store("domain", scm.NewString("small"))
+	old := cache.entries["domain"]
+	if cache.residentBytes.Load() != old.size {
+		t.Fatal("memo resident bytes omit the initial entry")
+	}
+	cache.store("domain", scm.NewString("larger scalar result"))
+	next := cache.entries["domain"]
+	defer GlobalCache.Remove(next)
+	cacheMapCleanup(old, nil)
+	if cache.residentBytes.Load() != next.size {
+		t.Fatal("old entry cleanup subtracted its replacement")
+	}
+	cacheMapCleanup(next, nil)
+	if cache.residentBytes.Load() != 0 || len(cache.entries) != 0 {
+		t.Fatal("evicted memo entry remains resident")
 	}
 }

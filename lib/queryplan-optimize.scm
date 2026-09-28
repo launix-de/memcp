@@ -365,9 +365,12 @@ bounded scalar metadata; this lookup never scans, loads columns or builds indexe
 								(list (quote qassoc_get) (quote estimate) (list (quote quote) (quote value)) nil)
 								(list (quote qassoc_get) (quote estimate) (list (quote quote) (quote filter_input_selectivity)) nil)
 								(list (quote qassoc_get) (quote estimate) (list (quote quote) (quote source)) nil))) read_expr))
-						(planner_record_guard_condition
-							(list (quote equal?) value_expr (list (quote quote)
-								(eval (planner_bind_session_values value_expr planning_session)))) planning_session))))))))
+						(define condition (list (quote equal?) value_expr (list (quote quote)
+							(eval (planner_bind_session_values value_expr planning_session)))))
+						(if (planning_session "__memcp_queryplan_diagnostic_statistics")
+							((planning_session "__memcp_queryplan_diagnostic_guards")
+								(string condition) condition) nil)
+						(planner_record_guard_condition condition planning_session))))))))
 
 (define planner_filter_feedback (lambda (sources default_alias expr planning_session)
 	(begin
@@ -1862,13 +1865,8 @@ particular star shape. */
 			(define table_value (table (source_schema src) (source_relation src)))
 			(define table_expr
 				(list (quote table) (source_schema src) (source_relation src)))
-			(define include_feedback (and (not (nil? planning_session))
-				(planning_session "__memcp_queryplan_diagnostic_statistics")))
 			(planner_record_statistics_dependency
-				table_expr
-				(table_planner_statistics_token table_value include_feedback)
-				(table_planner_statistics_fingerprint table_value include_feedback)
-				planning_session include_feedback))) nil)))
+				table_expr (table_planner_statistics table_value) planning_session))) nil)))
 
 (define planner_table_statistics_aliases (lambda (sources)
 	(map (filter sources source_is_base_table?) source_alias)))

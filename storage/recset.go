@@ -20,6 +20,7 @@ package storage
 
 import "fmt"
 import "math"
+import "time"
 import "runtime/debug"
 import "sort"
 import "strings"
@@ -483,6 +484,7 @@ type recSetKeyResult struct {
 }
 
 func (t *table) scanRecSet(currentTx *TxContext, accessSchema scm.Scmer, accessValues []scm.Scmer, conditionCols []string, condition scm.Scmer) *recSet {
+	atomic.StoreUint64(&t.lastAccessed, uint64(time.Now().UnixNano()))
 	ss := SessionStateFromTx(currentTx)
 	querySeq := querySeqFromTx(currentTx)
 	access, compiled := scanAccessFromScheme(accessSchema, accessValues, nil)
@@ -847,6 +849,7 @@ func (p *projectKeyIndices) Swap(i, j int) {
 }
 
 func (r *recSet) collectProjectJoinKeys(currentTx *TxContext, sourceKeyCols []string, ss *scm.SessionState) recSetProjectKeys {
+	atomic.StoreUint64(&r.table.lastAccessed, uint64(time.Now().UnixNano()))
 	querySeq := querySeqFromTx(currentTx)
 	values := make(chan recSetKeyResult, len(r.shards))
 	width := len(sourceKeyCols)
@@ -1009,6 +1012,7 @@ func (t *storageShard) collectProjectJoinKeys(part *recSetShard, sourceKeyCols [
 }
 
 func (t *table) projectJoinKeysToRecSet(currentTx *TxContext, targetKeyCols []string, keys recSetProjectKeys, ss *scm.SessionState) *recSet {
+	atomic.StoreUint64(&t.lastAccessed, uint64(time.Now().UnixNano()))
 	result := &recSet{table: t}
 	if keys.count() == 0 {
 		return result
@@ -1622,6 +1626,7 @@ func (r *recSet) filterToRecSet(currentTx *TxContext, conditionCols []string, co
 	if r == nil {
 		return nil
 	}
+	atomic.StoreUint64(&r.table.lastAccessed, uint64(time.Now().UnixNano()))
 	ss := SessionStateFromTx(currentTx)
 	querySeq := querySeqFromTx(currentTx)
 	access := recSetScanAccess(r, accessSchema, accessValues)

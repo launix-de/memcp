@@ -145,7 +145,7 @@ test_cases:
         - "legacy_materialized"
         - ".mat:"
         - ".grp:"
-        - "touch_keytable"
+        - "group_cache_create"
 
   - name: "EXPLAIN IR flattens deeply nested EXISTS into stage joins"
     fail_comment: "deep nested EXISTS must stay in logical join/group-stage form without fetch or dependent-subquery markers"
@@ -190,7 +190,7 @@ test_cases:
         - "legacy_materialized"
         - ".mat:"
         - ".grp:"
-        - "touch_keytable"
+        - "group_cache_create"
 
   - name: "Depth 3: EXISTS buried inside 2 scalar levels"
     sql: |
@@ -244,7 +244,7 @@ test_cases:
         - "legacy_materialized"
         - ".mat:"
         - ".grp:"
-        - "touch_keytable"
+        - "group_cache_create"
 
   - name: "Depth 3: EXISTS references outermost table (skip 2 levels)"
     sql: |

@@ -94,7 +94,7 @@ test_cases:
         - "scan_order"
         - "scan_order_batch_accept"
       result_not_contains:
-        - "touch_keytable"
+        - "group_cache_create"
 
   - name: "Selective IN branches under OR preserve ordered results"
     sql: |
@@ -504,7 +504,7 @@ test_cases:
     expect:
       rows: 1
       contains:
-        - "touch_keytable"
+        - "group_cache_create"
         - "createcolumn"
         - "\"__cnt\""
         - ".in_renderjob:((get_column"
@@ -531,7 +531,7 @@ test_cases:
         - "inner_select"
         - "in_membership"
         - ".grp:"
-        - "touch_keytable"
+        - "group_cache_create"
 
   # === UNION ALL inside IN subselect ===
   # Can be compiled to (or (scan...) (scan...))
@@ -1046,7 +1046,7 @@ test_cases:
             - "tempcol_materialize_reusable"
             - "subscan_partition_limit"
             - ".grp:"
-            - "touch_keytable"
+            - "group_cache_create"
       - scm: |
           (begin
             (define cache (newcachemap))
@@ -1085,7 +1085,7 @@ test_cases:
             - "recset_key_index"
             - "scan_order"
           not_contains:
-            - "touch_keytable"
+            - "group_cache_create"
             - "__union_distinct_rows"
             - "__union_distinct_seen"
       - sql: |
@@ -1159,7 +1159,7 @@ test_cases:
             - "scan_order"
             - "in_dv_doc"
           not_contains:
-            - "touch_keytable"
+            - "group_cache_create"
             - "__union_distinct_rows"
             - "__union_distinct_seen"
       - sql: |
@@ -1245,7 +1245,7 @@ test_cases:
             - "driver_membership_probe"
             - "__union_distinct_rows"
             - "__union_distinct_seen"
-            - "touch_keytable"
+            - "group_cache_create"
             - ".grp:"
       - sql: |
           EXPLAIN
@@ -1270,7 +1270,7 @@ test_cases:
             - "in_dv_doc"
           not_contains:
             - ".grp:union"
-            - "touch_keytable"
+            - "group_cache_create"
       - sql: |
           SELECT t.ID
           FROM (
@@ -1355,7 +1355,7 @@ test_cases:
             - "tempcol_materialize_reusable"
             - "subscan_partition_limit"
             - ".grp:"
-            - "touch_keytable"
+            - "group_cache_create"
       - sql: |
           EXPLAIN PHYSICAL
           SELECT t.ID
@@ -1481,7 +1481,7 @@ test_cases:
           not_contains:
             - "$break"
             - ".grp:in_dv_file"
-            - "touch_keytable"
+            - "group_cache_create"
       - sql: |
           EXPLAIN PHYSICAL CALIBRATE
           SELECT t.ID
@@ -2338,7 +2338,7 @@ test_cases:
         - "inner_select"
         - "neumann_in"
         - ".grp:"
-        - "touch_keytable"
+        - "group_cache_create"
 
   - name: "IN UNION with nested reference EXISTS prepares query carriers"
     fail_comment: "bounded reference-style EXISTS projections must stay behind the ordered membership scan"

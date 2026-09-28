@@ -638,7 +638,7 @@ test_cases:
         - '"csa_assignment"'
         - "p.ref_id"
       not_contains:
-        - "touch_keytable"
+        - "group_cache_create"
         - ".grp:csa_assignment"
 
   - name: "Outer NULL key does not equal an inner NULL key"

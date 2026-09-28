@@ -610,7 +610,7 @@ test_cases:
       not_contains:
         - "scan_order"
         - "scan_recset"
-        - "touch_keytable"
+        - "group_cache_create"
         - ".grp:"
 
 

@@ -924,10 +924,10 @@ column has selectivity feedback, retain an explicit half-domain prior. */
 					(list (list "plan" "property_candidates") (list "cost" (planner_cost_explain (cadr costs))))))) planning_session)
 			(equal? chosen "property_candidates")))))
 
-/* Evaluate cut witnesses after taking the cache source view. A bound inside
+/* Evaluate cut witnesses under the logical source read scope. A bound inside
 one unchanged ordered cut selects the same scalar rows; its spelling/value need
 not create another exact group partition. This is not a delta proof across cuts.
-The witness is itself a versioned scalar point cache, shared by every consumer
+The witness is a storage-maintained scalar memo, shared by every consumer
 of the same source column and bound. Do not repeat the ordered scan for every
 output coordinate or aggregate. Explicit transactions still use the producer. */
 (define lower_group_cache_binding (lambda (driver expr proofs)
@@ -943,7 +943,7 @@ output coordinate or aggregate. Explicit transactions still use the producer. */
 						'('lambda '() '('list '__cache_bound))
 						(physical_query_tx_symbol)
 						(list (quote lambda) '() (list (quote list)
-							(list (quote table_read_version) (source_table_expr (car cut)))))
+							(source_table_expr (car cut))))
 						(list (quote lambda) '()
 							(compile_scan_plan (quote scan_order) (physical_query_tx_symbol)
 								(source_table_expr (car cut)) (quoted_runtime_list (list (cadr cut)))
@@ -963,12 +963,12 @@ output coordinate or aggregate. Explicit transactions still use the producer. */
 			keys lookup_keys reduce_expr neutral_expr (quote point-cached))))
 		(define coordinates (cons (quote list) (map (nth proof 1)
 			(lambda (expr) (lower_group_cache_binding (car proof) expr (coalesceNil (nth proof 3) '()))))))
-		(define view (list (quote lambda) '() (cons (quote list) (map (nth proof 2)
-			(lambda (source) (list (quote table_read_version) (source_table_expr source)))))))
+		(define sources (list (quote lambda) '() (cons (quote list) (map (nth proof 2)
+			(lambda (source) (source_table_expr source))))))
 		(list (quote group_cache_point) (list (quote quote) cache) payload
 			/* Only the additional scalar storage/setup cost needs amortization. */
 			(+ planner_membership_group_cache_startup_ns (* 2 planner_membership_scan_invocation_ns))
-			(list (quote lambda) '() coordinates) (physical_query_tx_symbol) view producer))))
+			(list (quote lambda) '() coordinates) (physical_query_tx_symbol) sources producer))))
 
 
 (define lower_scalar_aggregate_query_probe_expr (lambda (all_stages stage value_expr keys lookup_keys reduce_expr neutral_expr contribution_mode)
@@ -1029,7 +1029,7 @@ output coordinate or aggregate. Explicit transactions still use the producer. */
 							(merge (list candidate (list (quote full)
 								(list (quote list)
 									(cons (quote list) (map (nth (qassoc_get (gs_facts stage) (quote contribution-domain) nil) 5)
-										(lambda (source) (list (quote table_read_version) (source_table_expr source)))))
+										(lambda (source) (source_table_expr source))))
 									(cons (quote list) (map (nth (qassoc_get (gs_facts stage) (quote contribution-domain) nil) 4)
 										(lambda (binding) (lower_column_expr_for_alias
 											(car (qassoc_get (gs_facts stage) (quote contribution-domain) nil)) binding)))))))))))
@@ -2488,8 +2488,6 @@ would still have to project that value over the segment. */
 )
 
 (define range_group_cache_mutexes (newcachemap))
-(define range_group_cache_preparations (newcachemap))
-(define range_group_cache_initializations (newcachemap))
 
 (define range_group_cache_mutex (lambda (name)
 	(range_group_cache_mutexes "get_or_compute" name (lambda () (mutex)))))
@@ -2500,30 +2498,14 @@ generated recipes remain ordinary Scheme. */
 (define range_cache_prepare (lambda (cache_mutex thunk) (cache_mutex thunk)))
 (define range_cache_merge (lambda (thunk) (thunk)))
 
+/* Definition installation is idempotent in storage. A statistics token must
+never suppress repair of an evicted computed column or reloaded cache table. */
 (define range_cache_state_init_expr (lambda (stage ag)
 	(begin
 		(define cache_name (range_group_cache_name stage))
-		(define init_key (list (quote concat)
-			(concat "__range_group_cache_init:" cache_name ":"
-				(range_group_state_col_name stage ag) ":")
-			(list (quote table_planner_statistics_token)
-				(source_table_expr (gs_input stage)) false)))
-		(range_cache_once_expr cache_name init_key
-			(list (quote !begin)
-				(range_cache_create_columns_expr stage cache_name)
-				(build_range_group_state_column stage cache_name ag))))))
-
-(define range_cache_once_expr (lambda (cache_name key body)
-	(list (quote if) (list (quote range_group_cache_initializations) key)
-		true
-		(list (quote range_cache_prepare)
-			(list (quote range_group_cache_mutex) cache_name)
-			(list (quote lambda) '()
-				(list (quote if) (list (quote range_group_cache_initializations) key)
-					true
-					(list (quote !begin) body
-						(list (quote range_group_cache_initializations) key true)
-						true)))))))
+		(list (quote !begin)
+			(range_cache_create_columns_expr stage cache_name)
+			(build_range_group_state_column stage cache_name ag)))))
 
 (define range_stage_base_source (lambda (stage)
 	(begin
@@ -3083,27 +3065,22 @@ choices. */
 					(list (quote if) (list (quote equal?) (nth bound 2) 2) true
 						(range_cache_split_expr schema cache_name key_names point_values
 							boundary_names axis (nth bound 2) (nth bound 3) tx_expr equality)))))))
-		(define preparation_key (list (quote concat)
-			(concat cache_name ":")
-			(list (quote table_cache_generation)
-				(list (quote table) schema cache_name))
-			":"
-			(list (quote serialize)
-				(cons (quote list) (merge (list point_values flat_bounds))))))
+		(define preparation_key (list (quote serialize)
+			(cons (quote list) (merge (list point_values flat_bounds)))))
 		(list (quote range_cache_prepare)
 			(list (quote range_group_cache_mutex) cache_name)
 			(list (quote lambda) '()
 				(list (quote !begin)
-					(list (quote if) (list (quote range_group_cache_preparations) preparation_key)
-						true
-						(cons (quote !begin) (merge (list
-							(list (list (quote if)
-								(range_cache_domain_exists_expr schema cache_name key_names point_values tx_expr equality)
-								true
-								(range_cache_insert_expr schema cache_name columns
-									(merge (list point_values universal_bounds)) tx_expr)))
-							split_exprs
-							(list (list (quote range_group_cache_preparations) preparation_key true) true)))))
+					(list (quote prepare_cache) (list (quote table) schema cache_name)
+						preparation_key (quoted_runtime_list '())
+						(list (quote lambda) '()
+							(cons (quote !begin) (merge (list
+								(list (list (quote if)
+									(range_cache_domain_exists_expr schema cache_name key_names point_values tx_expr equality)
+									true
+									(range_cache_insert_expr schema cache_name columns
+										(merge (list point_values universal_bounds)) tx_expr)))
+								split_exprs (list true))))))
 					read_cells))))))
 
 (define range_cache_prepare_expr (lambda (stage cache_name point_values bounds tx_expr)
@@ -3145,12 +3122,7 @@ one request cannot invalidate one another while the outer scan is running. */
 				(if (range_domain_unbounded_to? domain) nil
 					(lower_column_expr_for_alias outer_src (range_domain_to domain)))))))
 		(define cache_name (range_group_cache_name base_stage))
-		(define init_key (list (quote concat)
-			(concat "__range_group_cache_table_init:" cache_name ":")
-			(list (quote table_planner_statistics_token)
-				(source_table_expr (gs_input base_stage)) false)))
-		(define init_expr (range_cache_once_expr cache_name init_key
-			(range_cache_create_columns_expr base_stage cache_name)))
+		(define init_expr (range_cache_create_columns_expr base_stage cache_name))
 		(define invalid_terms (map (produceN (count domains)) (lambda (axis)
 			(begin
 				(define domain (nth domains axis))
@@ -3247,27 +3219,19 @@ one request cannot invalidate one another while the outer scan is running. */
 							key_names outer_key_cols boundary_names axis
 							(range_domain_to_kind domain) (nth pair 1)
 							value_cols valid_expr tx_expr))))))))))
-		(define batch_preparation_key (list (quote concat)
-			(concat "__range_batch_prepare:" cache_name ":"
-				(stable_structural_hash domains true) ":")
-			(list (quote table_cache_generation)
-				(list (quote table) (source_schema (gs_input base_stage)) cache_name))
-			":"
-			(list (quote table_planner_statistics_token)
-				(source_table_expr outer_src) false)))
+		(define batch_preparation_key (concat "batch:" (stable_structural_hash domains true)))
 		(list (quote !begin)
 			init_expr
 			(if batch_supported
 				(list (quote range_cache_prepare)
 					(list (quote range_group_cache_mutex) cache_name)
 					(list (quote lambda) '()
-						(list (quote if)
-							(list (quote range_group_cache_preparations) batch_preparation_key)
-							true
-							(cons (quote !begin) (merge (list
-								(list init_domains) split_joins
-								(list (list (quote range_group_cache_preparations)
-									batch_preparation_key true) true)))))))
+						(list (quote prepare_cache)
+							(list (quote table) (source_schema (gs_input base_stage)) cache_name)
+							batch_preparation_key (list (quote list) (source_table_expr outer_src))
+							(list (quote lambda) '()
+								(cons (quote !begin) (merge (list
+									(list init_domains) split_joins (list true))))))))
 				legacy_prepare)
 			true))))
 
@@ -5287,17 +5251,9 @@ candidate RecSet. */
 /* Cost one physical tree edge once and return (strategy RecSet-expression).
 Consumers decide whether that RecSet is their scan carrier or a membership
 filter; they must not reconstruct the choice from enclosing block facts. */
-(define recset_project_join_plan_for_membership_using (lambda (src membership consumer driver_rows_override allow_ordered_batch batch_prepares_candidate prefiltered_driver_expr downstream_probe_branches downstream_full_preparation_branches allow_driver_probe driver_order_partitioning decision_scope planning_session tx)
+(define recset_project_join_plan_for_membership_using (lambda (src membership consumer driver_rows_override allow_ordered_batch batch_prepares_candidate prefiltered_driver_expr downstream_probe_branches downstream_full_preparation_branches allow_driver_probe decision_scope planning_session tx)
 	(begin
 		(define stage (nth membership 0))
-		(define driver_order_partitioned (if (nil? driver_order_partitioning)
-			false (cadr driver_order_partitioning)))
-		(if (nil? driver_order_partitioning) true
-			(planner_record_guard_condition (list (quote equal?)
-				(list (quote table_order_partitioned?)
-					(list (quote table) (source_schema src) (source_relation src))
-					(car driver_order_partitioning))
-				driver_order_partitioned) planning_session))
 		/* Some late RecSet consumers are introduced after reorder telemetry was
 		attached. Reconstruct only the candidate's scalar work from the existing
 		logical stage; this is one formula walk, never an alternative plan build. */
@@ -5332,8 +5288,6 @@ filter; they must not reconstruct the choice from enclosing block facts. */
 			(min (qassoc_get consumer_facts (quote membership_downstream_probe_branches) 0)
 				(max (coalesceNil downstream_full_preparation_branches 0)
 					(qassoc_get facts (quote membership_downstream_full_preparation_branches) 0)))))
-		(define cost_facts (qassoc_set preparation_facts
-			(quote membership_driver_order_partitioned) driver_order_partitioned))
 		(define driver_probe_supported (and allow_driver_probe
 			(membership_driver_subscan_supported? stage)))
 		(define raw_expr (recset_project_join_expr_for_membership_raw src membership))
@@ -5439,26 +5393,26 @@ filter; they must not reconstruct the choice from enclosing block facts. */
 					"driver_order_membership_probe"
 					"driver_filter_join_probe"))
 				(define candidate_cost (if known
-					(membership_projection_cost candidate_input_rows candidate_rows driver_rows cost_facts)
+					(membership_projection_cost candidate_input_rows candidate_rows driver_rows preparation_facts)
 					nil))
 				(define driver_cost (if (and known driver_probe_supported)
 					(if (equal? driver_strategy "driver_order_membership_probe")
 						(membership_ordered_driver_probe_cost
-							candidate_input_rows candidate_rows driver_rows cost_facts)
+							candidate_input_rows candidate_rows driver_rows preparation_facts)
 						(membership_driver_probe_cost driver_rows
 							(qassoc_get facts (quote membership_candidate_probe_branches) 1)
-							(qassoc_get cost_facts (quote membership_downstream_probe_branches) 0) cost_facts))
+							(qassoc_get preparation_facts (quote membership_downstream_probe_branches) 0) preparation_facts))
 					nil))
-				(define batch_cost_facts (if allow_ordered_batch
+				(define batch_preparation_facts (if allow_ordered_batch
 					(merge (list
 						(list
 							(list (quote membership_candidate_input_rows) candidate_input_rows)
 							(list (quote membership_candidate_estimated_rows) candidate_rows)
 							(list (quote membership_driver_rows) driver_rows)
 							(list (quote membership_driver_input_rows) source_rows))
-						cost_facts)) nil))
+						preparation_facts)) nil))
 				(define batch_cost (if (and allow_ordered_batch known)
-					(ordered_batch_accept_cost batch_cost_facts)
+					(ordered_batch_accept_cost batch_preparation_facts)
 					nil))
 				(define prefiltered_driver_rows
 					(qassoc_get facts (quote membership_driver_rows) nil))
@@ -5480,7 +5434,7 @@ filter; they must not reconstruct the choice from enclosing block facts. */
 						(number? source_rows))))
 				(define prefiltered_cost (if (and prefiltered_supported (number? candidate_rows))
 					(membership_prefiltered_candidate_cost
-						candidate_input_rows candidate_rows prefiltered_driver_rows cost_facts)
+						candidate_input_rows candidate_rows prefiltered_driver_rows preparation_facts)
 					nil))
 				(define cost_choices (filter (list
 					(if (nil? candidate_cost) nil (list "candidate_keyset" candidate_cost))
@@ -5515,11 +5469,11 @@ filter; they must not reconstruct the choice from enclosing block facts. */
 					(and known (and (number? source_rows) (> source_rows 0)))))
 				(define lower_costs (if observation_supported
 					(membership_observed_carrier_costs
-						candidate_input_rows 0 driver_rows batch_cost_facts)
+						candidate_input_rows 0 driver_rows batch_preparation_facts)
 					nil))
 				(define upper_costs (if observation_supported
 					(membership_observed_carrier_costs
-						candidate_input_rows source_rows driver_rows batch_cost_facts)
+						candidate_input_rows source_rows driver_rows batch_preparation_facts)
 					nil))
 				(define interval_crosses (and observation_supported
 					(and (planner_cost_better? (car lower_costs) (cadr lower_costs))
@@ -5561,7 +5515,7 @@ filter; they must not reconstruct the choice from enclosing block facts. */
 				(define crossover (if (not observe_projection)
 					nil
 					(membership_observed_crossover_search
-						candidate_input_rows driver_rows batch_cost_facts 0 source_rows 32)))
+						candidate_input_rows driver_rows batch_preparation_facts 0 source_rows 32)))
 				(define observed_rows (if (nil? observation_keys)
 					nil
 					(planner_queryplan_observed_metric decision_id planning_session)))
@@ -5623,7 +5577,7 @@ filter; they must not reconstruct the choice from enclosing block facts. */
 									(and (not (nil? runtime_candidate_rows_expr))
 										(not (nil? runtime_driver_rows_expr)))))))))
 				(define runtime_cost_args (if runtime_cost_guard_supported (list
-					candidate_input_rows candidate_rows driver_rows cost_facts
+					candidate_input_rows candidate_rows driver_rows preparation_facts
 					driver_probe_supported driver_strategy allow_ordered_batch
 					prefiltered_supported prefiltered_driver_rows) '()))
 				(define runtime_candidate_interval (if runtime_cost_guard_supported
@@ -5676,7 +5630,6 @@ filter; they must not reconstruct the choice from enclosing block facts. */
 									(membership_driver_input_rows driver_rows facts) facts))
 							(list "observed_projected_driver_rows" observed_rows)
 							(list "driver_input_rows" source_rows)
-							(list "driver_order_partitioned" driver_order_partitioned)
 							(list "driver_rows" driver_rows)
 							(list "prefiltered_driver_rows" prefiltered_driver_rows)
 							(list "projection_interval_lower_rows" (if observation_supported 0 nil))
@@ -5696,8 +5649,8 @@ filter; they must not reconstruct the choice from enclosing block facts. */
 							(list "estimate_population" (string estimate_population))
 							(list "estimate_coverage" (string estimate_coverage))
 							(list "probe_branches" (qassoc_get facts (quote membership_candidate_probe_branches) 1))
-							(list "downstream_probe_branches" (qassoc_get cost_facts (quote membership_downstream_probe_branches) 0))
-							(list "downstream_full_preparation_branches" (qassoc_get cost_facts (quote membership_downstream_full_preparation_branches) 0))
+							(list "downstream_probe_branches" (qassoc_get preparation_facts (quote membership_downstream_probe_branches) 0))
+							(list "downstream_full_preparation_branches" (qassoc_get preparation_facts (quote membership_downstream_full_preparation_branches) 0))
 							(list "selectivity_class" (string (qassoc_get facts (quote membership_selectivity_class) (quote unknown))))
 							(list "candidate_scan_invocations" (qassoc_get facts (quote membership_candidate_scan_invocations) 1))
 							(list "candidate_filter_columns" (qassoc_get facts (quote membership_candidate_filter_columns) 0))
@@ -5756,7 +5709,7 @@ candidate-keyset choice replaces the marker with a projected RecSet carrier. */
 (define recset_project_join_expr_for_membership_using (lambda (src membership consumer driver_rows_override allow_ordered_batch)
 	(begin
 		(define plan (recset_project_join_plan_for_membership_using
-			src membership consumer driver_rows_override allow_ordered_batch false nil 0 0 true nil
+			src membership consumer driver_rows_override allow_ordered_batch false nil 0 0 true
 			(quote expression) nil nil))
 		(if (and (not (nil? plan)) (equal? (car plan) "candidate_keyset"))
 			(cadr plan)
@@ -6477,7 +6430,7 @@ its original filter remains valid for both full builds and delta evaluation. */
 
 (define group_stage_cell_cache (lambda (stage dimensions)
 	(make_group_cache (quote group-keytable) (group_stage_schema stage)
-		(concat (group_stage_cache_relation stage) ":cells-v2:"
+		(concat (group_stage_cache_relation stage) ":cells-v3:"
 			(stable_structural_hash (map dimensions car) true)) dimensions)))
 
 (define group_stage_snapshot_cache (lambda (stage)
@@ -6489,10 +6442,7 @@ its original filter remains valid for both full builds and delta evaluation. */
 /* All group-cache carriers use storage-engine tables and the same catalog,
 initialization and eviction ownership. Dimensions describe keys, never owners. */
 (define group_cache_create (lambda (schema name columns options ifnotexists tx)
-	(!begin
-		(define created (createtable schema name columns options ifnotexists tx))
-		(touch_keytable (table schema name))
-		created)))
+	(createtable schema name columns options ifnotexists tx)))
 
 (define group_cache_dimension_names (lambda (cache)
 	(merge (map (produceN (count (group_cache_dimensions cache))) (lambda (i)
@@ -6506,36 +6456,41 @@ initialization and eviction ownership. Dimensions describe keys, never owners. *
 				(symbol snapshot) (list (concat "snapshot_" axis))
 				_ (error "unknown group cache dimension"))))))))
 
-(define group_cache_ensure_cells (lambda (cache payload tx)
+(define group_cache_ensure_cells (lambda (cache payload tx sources)
 	(!begin
 		(define names (group_cache_dimension_names cache))
 		(group_cache_create (group_cache_schema cache) (group_cache_relation cache)
-			(cons (list "unique" "group" (cons "__group_view" names))
-				(cons (list "column" "__group_view" "text" '() '())
-					(map names (lambda (name) (list "column" name "any" '() '("collate" "bin"))))))
+			(cons (list "unique" "group" names)
+				(map names (lambda (name) (list "column" name "any" '() '("collate" "bin")))))
 			'("engine" "cache") true tx)
+		/* A missing/invalid payload evaluates to nil. It is filled under source
+		read locks; native dependency triggers invalidate it on logical writes.
+		The callback is stateless and retains no request or normalized bindings. */
 		(createcolumn (table (group_cache_schema cache) (group_cache_relation cache))
-			payload "any" '() '())
+			payload "any" '() (list "temp" true "dependencies" sources
+				"filtercols" '() "filter" (lambda () false)) '() (lambda () nil))
 		true)))
 
 (define group_cache_cell_access (lambda (names)
 	(cons (compiled_scan_access_header (count names) "" 0 -1)
 		(mapIndex names (lambda (i name) (scan_boundary "equal" name i i true true "bin" true))))))
 
-(define group_cache_read_cell (lambda (cache coordinates view payload tx)
+(define group_cache_read_cell (lambda (cache coordinates payload tx)
 	(!begin
 		(define carrier (table (group_cache_schema cache) (group_cache_relation cache)))
 		(if (or (nil? carrier) (nil? (resolve_column_name (group_cache_schema cache) (group_cache_relation cache) payload false))) nil
-			(scan tx carrier (group_cache_cell_access (cons "__group_view" (group_cache_dimension_names cache)))
-				(cons (serialize view) coordinates) '() (lambda () true)
+			(scan tx carrier (group_cache_cell_access (group_cache_dimension_names cache))
+				coordinates '() (lambda () true)
 				(list payload) (lambda (_ value) value) nil (lambda (a b) (coalesceNil a b)) false)))))
 
-(define group_cache_write_cell (lambda (cache coordinates view payload value tx)
-	(insert (table (group_cache_schema cache) (group_cache_relation cache))
-		(merge (list '("__group_view") (group_cache_dimension_names cache) (list payload)))
-		(list (merge (list (list (serialize view)) coordinates (list value))))
-		(list (concat "NEW." payload) "$update")
-		(lambda (new $update) (!begin ($update (list payload new)) true)) false nil tx)))
+(define group_cache_write_cell (lambda (cache coordinates payload value tx)
+	(!begin
+		(define carrier (table (group_cache_schema cache) (group_cache_relation cache)))
+		(insert carrier (group_cache_dimension_names cache) (list coordinates)
+			'() (lambda () true) false nil tx)
+		(scan tx carrier (group_cache_cell_access (group_cache_dimension_names cache))
+			coordinates '() (lambda () true) (list (concat "$set:" payload))
+			(lambda (_ write) (write value)) nil nil false))))
 
 /* Admission records actual work, never an assumed future request count. A
 producer may publish its already computed scalar after paying the extra storage
@@ -7609,7 +7564,7 @@ state through an assoc and one-element payload lists adds no semantics. */
 						/* This marker runs in the group fill's input filter, before
 						the residual predicates. The output LIMIT does not bound its
 						probes: every input row can reach this call. */
-						src term (quote aggregate) (planner_source_row_count src) false false nil 0 0 true nil
+						src term (quote aggregate) (planner_source_row_count src) false false nil 0 0 true
 						(quote group_fill) (planner_context_session facts) (planner_context_tx facts)))
 					(if (and (not (nil? plan)) (equal? (car plan) "candidate_keyset"))
 						(list term (membership_recset_var src term) (cadr plan)) nil))))
@@ -7622,7 +7577,7 @@ state through an assoc and one-element payload lists adds no semantics. */
 				nil
 				(begin
 					(define plan (recset_project_join_plan_for_membership_using
-						src membership (quote aggregate) (planner_source_row_count src) false false nil 0 0 true nil
+						src membership (quote aggregate) (planner_source_row_count src) false false nil 0 0 true
 						(quote group_fill) (planner_context_session facts) (planner_context_tx facts)))
 					(if (and (not (nil? plan)) (equal? (car plan) "candidate_keyset"))
 						(cadr plan) nil)))
@@ -9480,128 +9435,42 @@ payloads retain the ordinary SQL reducer, including its rounding semantics. */
 builder charges its whole query; shared bases and overlays are separately
 accounted and evicted through CacheManager-backed cachemaps. */
 (define contribution_snapshot_key_budget 262144)
-(define make_contribution_admission (lambda ()
-	(begin
-		(define state (newsession))
-		(define lock (mutex))
-		(lambda (tx keys)
-			(lock tx (lambda ()
-				(begin
-					(define total (+ (coalesceNil (state "keys") 0) keys))
-					(if (> total contribution_snapshot_key_budget) false
-						(begin (state "keys" total) true)))))))))
+/* Ordered-cut witnesses are small normalization metadata. Storage memoizes
+these scalar results on the logical source; rebuilding its shards preserves
+that memo, while source writes refresh it. No validity token reaches Scheme. */
+(define group_cut_value (lambda (name point_values tx sources producer)
+	(with_cache_sources tx (sources)
+		(lambda () (prepare_cache (car (sources))
+			(concat name ":" (serialize (point_values))) (sources) producer))
+		producer)))
 
-(define make_contribution_snapshot (lambda (admit population)
-	(begin
-		(define state (newsession))
-		(define lock (mutex))
-		(lambda (tx axis read_view full changed evaluate fallback)
-			(lock tx (lambda ()
-				(begin
-					(define view (read_view))
-					(define cached (state "base"))
-					(define valid_view (and (reduce view (lambda (ok stamp) (and ok (not (nil? stamp)))) true)
-						(or (nil? cached) (expression_equal? (nth cached 5) view))))
-					(if (not valid_view) (begin (state "base" nil) (state "disabled" true)) true)
-					(if (and (nil? cached) (not (nil? admit)) (not (state "admitted")))
-						(if (admit tx (* 2 (max 1 (population))))
-							(state "admitted" true) (state "disabled" true)) true)
-					(if (or (state "disabled") (not (number? axis))) (fallback)
-						(begin
-							(define old (state "base"))
-							(define candidates (if (or (nil? old) (equal? (car old) axis)) '() (changed (min (car old) axis) (max (car old) axis))))
-							(define rebuild (or (nil? old) (> (count candidates) (nth old 4))))
-							(define admitted (or (nil? admit) (admit tx (count candidates))))
-							(define values (if (not admitted) '() (if rebuild (full) (if (empty_list? candidates) '() (evaluate candidates)))))
-							(define admitted (and admitted (or (nil? admit)
-								(admit tx (count (extract_assoc values (lambda (key value) key)))))))
-							(define integral (reduce_assoc values (lambda (ok key value)
-								(and ok (contribution_integral? value))) true))
-							(if (or (not admitted) (not integral) (not (expression_equal? view (read_view))))
-								(begin (state "disabled" true) (state "base" nil) (fallback))
-								(begin
-									/* A failed callback/cancellation must not publish partial corrections. */
-									(state "base" nil)
-									(define overlay (if rebuild (newsession) (nth old 3)))
-									(define delta (if rebuild
-										(reduce_assoc values (lambda (acc key value)
-											(list (+ (car acc) (coalesceNil value 0)) (+ (cadr acc) (if (nil? value) 0 1))
-												(+ (nth acc 2) (contribution_magnitude value)))) '(0 0 0))
-										(reduce candidates (lambda (acc key)
-											(begin
-												(define prior (overlay key))
-												(define before (if (nil? prior) (get_assoc (nth old 1) key) (car prior)))
-												(define after (get_assoc values key))
-												(if (or (not (nil? before)) (not (nil? after))) (overlay key (list after)) true)
-												(list (+ (car acc) (- (coalesceNil after 0) (coalesceNil before 0)))
-													(+ (cadr acc) (- (if (nil? after) 0 1) (if (nil? before) 0 1)))
-													(+ (nth acc 2) (- (contribution_magnitude after) (contribution_magnitude before))))))
-											(nth old 2))))
-									(if (> (nth delta 2) 4503599627370496)
-										(begin (state "disabled" true) (fallback))
-										(begin
-											(state "base" (list axis (if rebuild values (nth old 1)) delta overlay
-												(if rebuild (count (extract_assoc values (lambda (key value) key))) (nth old 4)) view))
-											(if (equal? (cadr delta) 0) nil (car delta)))))))))))))
-
-))
-
-/* Ordered-cut witnesses are scalar normalization metadata, not aggregate
-payloads. Aggregate cells themselves are owned by storage-engine group tables. */
-(define group_cut_cache (newcachemap))
-
-(define group_cut_value (lambda (name point_values tx read_view producer)
-	(begin
-		(tx_check tx)
-		(define view (read_view))
-		(define shareable (and (not (tx_requires_query_local_cache tx))
-			(reduce view (lambda (ok stamp) (and ok (not (nil? stamp)))) true)))
-		(define key (if shareable (concat name ":" (serialize (list (point_values) view))) nil))
-		(define hit (if shareable (group_cut_cache key) nil))
-		(if (and (not (nil? hit)) (expression_equal? view (read_view))) (car hit)
-			(begin
-				(define value (producer))
-				(tx_check tx)
-				(if (and shareable (expression_equal? view (read_view)))
-					(group_cut_cache key (list value)) true)
-				value)))))
-
-/* Retention is optional: a changed/incomplete source view must never tag an
-already computed result with a newer revision or publish transaction-local data. */
-(define group_cache_retain_value (lambda (cache payload coordinates tx view read_view value)
-	(if (and (not (tx_requires_query_local_cache tx))
-		(reduce view (lambda (ok stamp) (and ok (not (nil? stamp)))) true)
-		(expression_equal? view (read_view)))
-		(!begin
-			(tx_check tx)
-			(group_cache_ensure_cells cache payload tx)
-			(group_cache_write_cell cache coordinates view payload (list value) tx)
-			true) false)))
-
-(define group_cache_value (lambda (cache payload point_values tx read_view producer)
-	(begin
-		(tx_check tx)
-		(define view (read_view))
-		(define shareable (and (not (tx_requires_query_local_cache tx))
-			(reduce view (lambda (ok stamp) (and ok (not (nil? stamp)))) true)))
-		(define coordinates (if shareable (point_values) '()))
-		(define hit (if shareable (group_cache_read_cell cache coordinates view payload tx) nil))
-		(if (and (not (nil? hit)) (expression_equal? view (read_view))) (car hit)
-			(begin
-				(define value (producer))
-				(tx_check tx)
-				(if shareable (group_cache_retain_value cache payload coordinates tx view read_view value) false)
-				value)))))
-
-/* Point admission can reuse the direct result; its producer already yielded
-all the state needed by a scalar cell. Capture the revision before bindings. */
-(define group_cache_point (lambda (cache payload threshold point_values tx read_view producer)
+(define group_cache_retain_value (lambda (cache payload coordinates tx sources value)
 	(!begin
-		(define view (read_view))
-		(define coordinates (point_values))
-		(group_cache_execute cache threshold tx producer
-			(lambda () (group_cache_value cache payload point_values tx read_view producer))
-			(lambda (value) (group_cache_retain_value cache payload coordinates tx view read_view value))))))
+		(tx_check tx)
+		(group_cache_ensure_cells cache payload tx sources)
+		(group_cache_write_cell cache coordinates payload (list value) tx)
+		true)))
+
+(define group_cache_value (lambda (cache payload point_values tx sources producer)
+	(with_cache_sources tx (sources)
+		(lambda () (!begin
+			(define coordinates (point_values))
+			(define hit (group_cache_read_cell cache coordinates payload tx))
+			(if (not (nil? hit)) (car hit)
+				(!begin
+					(define value (producer))
+					(group_cache_retain_value cache payload coordinates tx (sources) value)
+					value)))) producer)))
+
+/* Admission and publication share source read locks. A transaction-local view
+uses the direct producer and never seeds a shared cell. */
+(define group_cache_point (lambda (cache payload threshold point_values tx sources producer)
+	(with_cache_sources tx (sources)
+		(lambda () (!begin
+			(define coordinates (point_values))
+			(group_cache_execute cache threshold tx producer
+				(lambda () (group_cache_value cache payload point_values tx sources producer))
+				(lambda (value) (group_cache_retain_value cache payload coordinates tx (sources) value))))) producer)))
 
 /* Snapshot payloads are ordinary aggregate columns of a group-cache cell.
 A base is addressed by a logical coordinate in the same relation. Neither a
@@ -9619,33 +9488,33 @@ query closure nor a physical row identity can survive in the stored payload. */
 	(reduce_assoc values (lambda (valid key value)
 		(and valid (contribution_integral? value))) true)))
 
-(define group_cache_snapshot_neighbor (lambda (cache fixed view payload tx coordinate before)
+(define group_cache_snapshot_neighbor (lambda (cache fixed payload tx coordinate before)
 	(begin
-		(define names (cons "__group_view" (filter (group_cache_dimension_names cache)
-			(lambda (name) (not (equal? name "snapshot_0"))))))
+		(define names (filter (group_cache_dimension_names cache)
+			(lambda (name) (not (equal? name "snapshot_0")))))
 		(define slot (count names))
 		(define access (cons (compiled_scan_access_header (+ slot 1) "" 0 -1)
 			(merge (list (cdr (group_cache_cell_access names))
 				(list (scan_boundary "range" "snapshot_0" (if before -1 slot) (if before slot -1) true true "bin" false))))))
 		(scan_order tx (table (group_cache_schema cache) (group_cache_relation cache))
-			access (merge (list (list (serialize view)) fixed (list coordinate)))
+			access (merge (list fixed (list coordinate)))
 			(list payload) (lambda (state) (not (nil? state)))
 			'("snapshot_0") (list (collate "bin" before)) 0 0 1
 			(list "snapshot_0" payload) (lambda (_ axis state) (list axis state)) nil false))))
 
 /* The nearest valid coordinate on each side bounds all farther covers.
 Choose between those two using actual affected-key work, not distance. */
-(define snapshot_group_anchor_for_work (lambda (cache fixed view payload tx coordinate changed)
+(define snapshot_group_anchor_for_work (lambda (cache fixed payload tx coordinate changed)
 	(begin
 		(define neighbors (map '(true false) (lambda (before)
 			(begin
-				(define row (group_cache_snapshot_neighbor cache fixed view payload tx coordinate before))
+				(define row (group_cache_snapshot_neighbor cache fixed payload tx coordinate before))
 				(if (nil? row) nil
 					(begin
 						(define candidate (car row))
 						(define anchor (cadr row))
 						(define base_state (if (equal? candidate (car anchor)) anchor
-							(group_cache_read_cell cache (merge (list fixed (list (car anchor)))) view payload tx)))
+							(group_cache_read_cell cache (merge (list fixed (list (car anchor)))) payload tx)))
 						(define base (if (nil? base_state) nil (nth base_state 4)))
 						(if (nil? base) nil (list candidate anchor base))))))))
 		(reduce neighbors (lambda (best neighbor)
@@ -9661,7 +9530,7 @@ Choose between those two using actual affected-key work, not distance. */
 (define snapshot_group_value (lambda (anchor base key)
 	(if (has_assoc? (cadr anchor) key) (get_assoc (cadr anchor) key) (get_assoc base key))))
 
-(define snapshot_group_publish (lambda (cache fixed view payload tx axis values state population nearest candidates)
+(define snapshot_group_publish (lambda (cache fixed payload tx axis values state population nearest candidates)
 	(begin
 		(define base_axis (if (nil? nearest) axis (car (cadr nearest))))
 		(define overlay (if (nil? nearest) '()
@@ -9669,30 +9538,28 @@ Choose between those two using actual affected-key work, not distance. */
 				(reduce candidates (lambda (updates key)
 					(set_assoc updates key (get_assoc values key))) '())
 				(lambda (old new) new))))
-		(group_cache_write_cell cache (merge (list fixed (list axis))) view payload
+		(group_cache_write_cell cache (merge (list fixed (list axis))) payload
 			(list base_axis overlay state population (if (nil? nearest) values nil)) tx)
 		true)))
 
-(define snapshot_group_cache (lambda (cache payload fixed_values tx axis population read_view full changed evaluate fallback)
-	(begin
+(define snapshot_group_cache (lambda (cache payload fixed_values tx axis population sources full changed evaluate fallback)
+	(with_cache_sources tx (sources) (lambda () (begin
 		(tx_check tx)
-		(define view (read_view))
 		(define shareable (and (not (tx_requires_query_local_cache tx))
 			(number? axis) (contribution_integral? axis)
-			(number? population) (<= (* 2 population) contribution_snapshot_key_budget)
-			(reduce view (lambda (ok stamp) (and ok (not (nil? stamp)))) true)))
+			(number? population) (<= (* 2 population) contribution_snapshot_key_budget)))
 		(if (not shareable) (fallback)
 			(begin
 				(define fixed (fixed_values))
 				(define lock (range_group_cache_mutex (concat (group_cache_schema cache) ":"
-					(group_cache_relation cache) ":" (serialize (list fixed view)))))
+					(group_cache_relation cache) ":" (serialize fixed))))
 				(lock (lambda () (begin
-					(group_cache_ensure_cells cache payload tx)
-					(define hit (group_cache_read_cell cache (merge (list fixed (list axis))) view payload tx))
+					(define hit (group_cache_read_cell cache (merge (list fixed (list axis))) payload tx))
 					(if (not (nil? hit))
-						(if (expression_equal? view (read_view)) (snapshot_group_total (nth hit 2)) (fallback))
+						(snapshot_group_total (nth hit 2))
 						(begin
-							(define nearest (snapshot_group_anchor_for_work cache fixed view payload tx axis changed))
+							(group_cache_ensure_cells cache payload tx (sources))
+							(define nearest (snapshot_group_anchor_for_work cache fixed payload tx axis changed))
 							(define anchor (if (nil? nearest) nil (cadr nearest)))
 							(define candidates (if (nil? nearest) '() (nth nearest 3)))
 							(define rebuild (or (nil? anchor) (> (count candidates) (max 1 (/ population 2)))))
@@ -9708,18 +9575,17 @@ Choose between those two using actual affected-key work, not distance. */
 													(+ (cadr state) (- (if (nil? after) 0 1) (if (nil? before) 0 1)))
 													(+ (nth state 2) (- (contribution_magnitude after) (contribution_magnitude before))))))
 											(nth anchor 2))))
-									(if (or (> (nth state 2) 4503599627370496)
-										(not (expression_equal? view (read_view)))) (fallback)
+									(if (> (nth state 2) 4503599627370496) (fallback)
 										(begin
 											(tx_check tx)
-											(snapshot_group_publish cache fixed view payload tx axis values state population
+											(snapshot_group_publish cache fixed payload tx axis values state population
 												(if rebuild nil nearest) candidates)
-											(snapshot_group_total state)))))))))))))))
+											(snapshot_group_total state)))))))))))))) fallback))))
 
 /* Range partition rows use the same relation, with an internal partition marker.
 Actual aggregate rows carry an ordered coordinate. Refining a partition leaves
 old snapshot cells intact; only the new disjoint children need new state. */
-(define lower_snapshot_group_cells (lambda (stage cache payload fixed view probe)
+(define lower_snapshot_group_cells (lambda (stage cache payload fixed sources probe)
 	(begin
 		(define domains (snapshot_group_ranges stage))
 		(if (empty_list? domains) probe
@@ -9729,8 +9595,8 @@ old snapshot cells intact; only the new disjoint children need new state. */
 				(define name (group_cache_relation cache))
 				(define key_names (group_key_cols (snapshot_group_fixed_inputs stage)))
 				(define point_values (mapIndex key_names (lambda (i _) (list (quote nth) (quote __group_fixed) i))))
-				(define partition_names (merge (list key_names '("snapshot_0" "__group_view"))))
-				(define partition_values (merge (list point_values (list "__partition" (list (quote serialize) (quote __group_source_view))))))
+				(define partition_names (merge (list key_names '("snapshot_0"))))
+				(define partition_values (merge (list point_values (list "__partition"))))
 				(define boundary_names (range_cache_boundary_names domains))
 				(define boundary_symbols (map boundary_names (lambda (name) (symbol (concat "__group_cell_" name)))))
 				(define bounds (map domains (lambda (domain) (list
@@ -9768,8 +9634,8 @@ old snapshot cells intact; only the new disjoint children need new state. */
 				(list (quote if) (cons (quote or) invalid) nil
 					(list (quote !begin)
 						(list (quote define) (quote __group_fixed) (list fixed))
-						(list (quote define) (quote __group_source_view) (list view))
-						(list (quote group_cache_ensure_cells) (list (quote quote) cache) payload (physical_query_tx_symbol))
+						(list (quote define) (quote __group_sources) (list sources))
+						(list (quote group_cache_ensure_cells) (list (quote quote) cache) payload (physical_query_tx_symbol) (quote __group_sources))
 						(list (quote define) (quote __group_cells)
 							(group_cache_prepare_ranges_expr schema name partition_names partition_values domains bounds (physical_query_tx_symbol) (quote equal?) read_cells))
 						sum)))))))
@@ -9804,12 +9670,12 @@ old snapshot cells intact; only the new disjoint children need new state. */
 			(list (quote lambda) '() (list (quote merge) (list (quote list) (quote __group_fixed)
 				(cons (quote list) (map (range_cache_boundary_names (snapshot_group_ranges stage))
 					(lambda (name) (symbol (concat "__group_cell_" name))))))))))
-		(define view (list (quote lambda) '() (cons (quote list)
-			(map (nth proof 5) (lambda (source) (list (quote table_read_version) (source_table_expr source)))))))
+		(define sources (list (quote lambda) '() (cons (quote list)
+			(map (nth proof 5) (lambda (source) (source_table_expr source))))))
 		(define probe (list (quote snapshot_group_cache) (list (quote quote) cache)
 			payload cell_fixed (physical_query_tx_symbol) axis
 			(list (quote scan_estimate) (source_table_expr driver))
-			view
+			sources
 			(list (quote lambda) '() (lower_scalar_aggregate_query_probe_expr
 				all_stages cell_stage value_expr keys lookup_keys reduce_expr neutral_expr (quote full)))
 			changes
@@ -9826,7 +9692,7 @@ old snapshot cells intact; only the new disjoint children need new state. */
 			(physical_query_tx_symbol)
 			(list (quote lambda) '() (lower_scalar_aggregate_query_probe_expr
 				all_stages stage value_expr keys lookup_keys reduce_expr neutral_expr (quote direct)))
-			(list (quote lambda) '() (lower_snapshot_group_cells stage cache payload fixed view probe)) nil)))))
+			(list (quote lambda) '() (lower_snapshot_group_cells stage cache payload fixed sources probe)) nil)))))
 
 /* Fixed ordered bounds select the same kind of state projection as moving
 bounds. Expose that access geometry to the common RecMap candidate builder. */

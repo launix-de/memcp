@@ -149,7 +149,7 @@ test_cases:
         - "taut_parent"
       result_not_contains:
         - "taut_child"
-        - "touch_keytable"
+        - "group_cache_create"
         - ".grp:"
         - "recset_project_join"
 
@@ -186,7 +186,7 @@ test_cases:
         - "taut_parent"
       result_not_contains:
         - "taut_child"
-        - "touch_keytable"
+        - "group_cache_create"
         - ".grp:"
         - "recset_project_join"
 
