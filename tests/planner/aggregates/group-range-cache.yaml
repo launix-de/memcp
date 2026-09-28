@@ -1796,3 +1796,54 @@ test_cases:
     scm: "(touch_keytable nil)"
     expect:
       error: true
+
+  - name: "Point and snapshot payloads survive delta rebuilds and source and cache repartitioning"
+    setup:
+      - sql: "DROP TABLE IF EXISTS grc_topology_source"
+      - sql: "CREATE TABLE grc_topology_source (id INT PRIMARY KEY) ENGINE=memory"
+      - scm: |
+          (!begin
+            (insert (table "memcp-tests" "grc_topology_source") '("id")
+              (map (produceN 64) (lambda (i) (list i))))
+            (rebuild (table "memcp-tests" "grc_topology_source") true false))
+      - sql: "DELETE FROM grc_topology_source WHERE id < 10"
+      - sql: "INSERT INTO grc_topology_source VALUES (100), (101)"
+    scm: |
+      (!begin
+        (define source (table "memcp-tests" "grc_topology_source"))
+        (define sources (lambda () (list source)))
+        (define snapshot (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-topology-snapshot"
+          (list (list 'snapshot 0))))
+        (define point (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-topology-point"
+          (list (list 'point 0))))
+        (define count_rows (lambda () (scan nil source '() '() '() (lambda () true) '() scan_count 0 + false)))
+        (define forbidden (lambda () (error "physical maintenance discarded a valid payload")))
+        (define probe (lambda (axis full)
+          (snapshot_group_cache snapshot "value" (lambda () '()) nil axis 100 sources full
+            (lambda (lo hi) '()) (lambda (keys) (error "unchanged selection reevaluated rows")) forbidden)))
+        (define initial (probe 10 (lambda () (list 1 (count_rows)))))
+        (define initial_point (group_cache_value point "value" (lambda () '(10)) nil sources count_rows))
+        (group_cache_value point "value" (lambda () '(20)) nil sources count_rows)
+        (probe 20 forbidden)
+        (define snapshot_table (table "memcp-tests" (group_cache_relation snapshot)))
+        (define point_table (table "memcp-tests" (group_cache_relation point)))
+        /* Source has real delta inserts and tombstones; cache rows are deltas too. */
+        (rebuild source true false)
+        (rebuild snapshot_table true false)
+        (rebuild point_table true false)
+        (define after_rebuild (probe 10 forbidden))
+        (define point_after_rebuild (group_cache_value point "value" (lambda () '(10)) nil sources forbidden))
+        (define source_partitioned (partitiontable source (list "id" '(16 32 48))))
+        (define snapshot_partitioned (partitiontable snapshot_table (list "snapshot_0" '(15))))
+        (define point_partitioned (partitiontable point_table (list "k0" '(15))))
+        (define after_partition (probe 10 forbidden))
+        (define delta_after_partition (probe 30 forbidden))
+        (define point_after_partition (group_cache_value point "value" (lambda () '(20)) nil sources forbidden))
+        (if (and source_partitioned snapshot_partitioned point_partitioned
+          (equal? (list initial initial_point after_rebuild point_after_rebuild after_partition delta_after_partition point_after_partition)
+            '(56 56 56 56 56 56 56)))
+          true (error "topology maintenance changed logical group cache state")))
+    expect:
+      result: true
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS grc_topology_source"
