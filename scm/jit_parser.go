@@ -835,11 +835,14 @@ type jitParserState struct {
 	positions   []int
 	memoOffsets []uint32
 	memoRules   []uint32
-	memoEntries []jitParserMemoEntry
-	memoFences  []jitParserMemoFence
-	heads       []*jitParserLeftRecursionHead
-	farthest    int
-	expected    []string
+	// One input position per allocated memoRules block, in allocation order.
+	// Speculative parsing can allocate beyond the committed input position.
+	memoBlockPositions []int
+	memoEntries        []jitParserMemoEntry
+	memoFences         []jitParserMemoFence
+	heads              []*jitParserLeftRecursionHead
+	farthest           int
+	expected           []string
 }
 
 func jitParserMemoEntryCapacity(inputLength int) int {
@@ -862,6 +865,7 @@ func (program *jitParserProgram) acquireState(inputLength int) *jitParserState {
 	state.checkpoints = state.checkpoints[:0]
 	state.marks = state.marks[:0]
 	state.memoFences = state.memoFences[:0]
+	state.memoBlockPositions = state.memoBlockPositions[:0]
 	state.positions = state.positions[:0]
 	memoCapacity := jitParserMemoEntryCapacity(inputLength)
 	if cap(state.memoEntries) < memoCapacity {
@@ -916,11 +920,13 @@ func (program *jitParserProgram) releaseState(state *jitParserState) {
 		state.memoEntries = nil
 		state.memoOffsets = nil
 		state.memoRules = nil
+		state.memoBlockPositions = nil
 	} else {
 		clear(state.memoEntries)
 		state.memoEntries = state.memoEntries[:0]
 		clear(state.memoRules)
 		state.memoRules = state.memoRules[:0]
+		state.memoBlockPositions = state.memoBlockPositions[:0]
 		clear(state.memoOffsets)
 	}
 	state.program = nil
@@ -962,6 +968,7 @@ func (state *jitParserState) memoSet(key jitParserMemoKey, entry jitParserMemoEn
 		clear(state.memoRules[base:])
 		offset = uint32(base + 1)
 		state.memoOffsets[key.position] = offset
+		state.memoBlockPositions = append(state.memoBlockPositions, key.position)
 	}
 	index := int(offset) - 1 + denseRule
 	if entryIndex := state.memoRules[index]; entryIndex != 0 {
@@ -1305,23 +1312,24 @@ func jitParserCommitProgressNative(state *jitParserState, position int64) bool {
 
 // jitParserMemoFence bounds the memo table around one iteration of a `*` node
 // that markFenceableRepeats proved is never rolled back. Once an iteration
-// commits its progress no (rule, position) it memoized strictly ahead of the
-// fence can be consulted again, so jitParserMemoCompactNative rewinds
-// memoEntries/memoRules to the fence and clears memoOffsets/heads for the
-// consumed span. dirtySlots holds memoRules indices in blocks that predate the
+// commits its progress, jitParserMemoCompactNative rewinds memoEntries/memoRules
+// to the fence. Every discarded block must lose its memoOffsets/head reference,
+// including lookahead at or beyond the committed position and backtracking
+// before the loop start. Allocation order, not the consumed input span, owns
+// those references. dirtySlots holds memoRules indices in blocks that predate the
 // fence which this iteration nonetheless wrote (the parse backtracked across
 // the loop start, e.g. inside a nested rule); the rewind strips the entry index
 // they point at, so they are zeroed first.
 type jitParserMemoFence struct {
 	entries    int
 	rules      int
-	pos        int
+	blocks     int
 	dirtySlots []int
 }
 
-func jitParserMemoFencePushNative(state *jitParserState, position int64) {
+func jitParserMemoFencePushNative(state *jitParserState) {
 	state.memoFences = append(state.memoFences, jitParserMemoFence{
-		entries: len(state.memoEntries), rules: len(state.memoRules), pos: int(position),
+		entries: len(state.memoEntries), rules: len(state.memoRules), blocks: len(state.memoBlockPositions),
 	})
 }
 
@@ -1344,7 +1352,7 @@ func jitParserMemoFencePopNative(state *jitParserState) {
 
 // jitParserMemoCompactNative discards the memo a committed fenceable iteration
 // produced.
-func jitParserMemoCompactNative(state *jitParserState, position int64) {
+func jitParserMemoCompactNative(state *jitParserState) {
 	n := len(state.memoFences)
 	if n == 0 {
 		return
@@ -1356,20 +1364,11 @@ func jitParserMemoCompactNative(state *jitParserState, position int64) {
 		}
 	}
 	fence.dirtySlots = fence.dirtySlots[:0]
-	end := int(position)
-	if end > len(state.memoOffsets) {
-		end = len(state.memoOffsets)
+	for _, pos := range state.memoBlockPositions[fence.blocks:] {
+		state.memoOffsets[pos] = 0
+		state.heads[pos] = nil
 	}
-	if fence.pos < end {
-		clear(state.memoOffsets[fence.pos:end])
-		hi := end
-		if hi > len(state.heads) {
-			hi = len(state.heads)
-		}
-		if fence.pos < hi {
-			clear(state.heads[fence.pos:hi])
-		}
-	}
+	state.memoBlockPositions = state.memoBlockPositions[:fence.blocks]
 	if fence.entries < len(state.memoEntries) {
 		clear(state.memoEntries[fence.entries:])
 		state.memoEntries = state.memoEntries[:fence.entries]
@@ -1377,7 +1376,6 @@ func jitParserMemoCompactNative(state *jitParserState, position int64) {
 	if fence.rules < len(state.memoRules) {
 		state.memoRules = state.memoRules[:fence.rules]
 	}
-	fence.pos = end
 }
 
 func jitParserPushPositionNative(state *jitParserState, position int64) {
