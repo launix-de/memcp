@@ -2508,6 +2508,7 @@ never suppress repair of an evicted computed column or reloaded cache table. */
 		(define cache_name (range_group_cache_name stage))
 		(list (quote !begin)
 			(range_cache_create_columns_expr stage cache_name)
+			(build_range_group_state_column stage cache_name aggregate_count_descriptor)
 			(build_range_group_state_column stage cache_name ag)))))
 
 (define range_stage_base_source (lambda (stage)
@@ -2903,8 +2904,91 @@ choices. */
 				(range_cache_point_terms (map key_names symbol) point_values equality)
 				true)))))
 
+/* Only COUNT(*) over the complete carrier input certifies an empty cell.
+The count is an ordinary computed aggregate: its existing source triggers keep
+this proof valid across INSERT/UPDATE/DELETE, rebuilds and repartitioning.
+Never substitute a nullable/filtered count, a zero sum or a row estimate here. */
+(define range_cache_cell_nonempty_expr (lambda (schema cache_name key_names point_values
+	boundary_names boundary_values tx_expr equality occupancy)
+	(if (nil? occupancy) true
+		(begin
+			(define columns (merge (list key_names boundary_names (list occupancy))))
+			(compile_scan_plan (quote scan_exists) tx_expr
+				(list (quote table) schema cache_name)
+				(cons (quote list) columns)
+				(list (quote lambda) (map columns symbol)
+					(combine_where_terms (merge (list
+						(range_cache_point_terms (map key_names symbol) point_values equality)
+						(range_cache_boundary_equal_terms (map boundary_names symbol) boundary_values)
+						(list (list (quote >) (symbol occupancy) 0)))) true)))))))
+
+/* Coalescing proven-empty neighbors has zero repair cost: every aggregate
+has its neutral state over their union. Keep all other axes identical and
+compare the complete cuts (value AND inclusive/exclusive kind). The row recipes
+remain installed; no table, aggregate definition or dependency trigger is lost. */
+(define range_cache_coalesce_empty_cells (lambda (cells axis less merge_cells)
+	(begin
+		(define offset (* axis 4))
+		(define groups (reduce cells (lambda (groups cell)
+			(begin
+				(define other_axes (filter (produceN (count cell)) (lambda (i)
+					(or (< i offset) (>= i (+ offset 4))))))
+				(define key (map other_axes (lambda (i) (nth cell i))))
+				(set_assoc groups key (cons cell (coalesceNil (get_assoc groups key) '()))))) '()))
+		(reduce_assoc groups (lambda (merged key rows)
+			(cadr (reduce (sort rows less) (lambda (state right)
+				(begin
+					(define left (car state))
+					(if (and (not (nil? left))
+						(and (equal? (nth left (+ offset 2)) (nth right offset))
+							(equal?? (nth left (+ offset 3)) (nth right (+ offset 1)))))
+						(list (merge_cells left right) (+ (cadr state) 1))
+						(list right (cadr state))))) (list nil merged)))) 0))))
+
+(define range_cache_coalesce_empty_expr (lambda (schema cache_name key_names point_values
+	boundary_names tx_expr equality occupancy)
+	(if (nil? occupancy) 0
+		(begin
+			(define columns (merge (list key_names boundary_names (list occupancy))))
+			(define boundary_symbols (map boundary_names symbol))
+			(define left (mapIndex boundary_names (lambda (i _) (list (quote nth) (quote __left) i))))
+			(define right (mapIndex boundary_names (lambda (i _) (list (quote nth) (quote __right) i))))
+			(define cells (compile_scan_plan (quote scan) tx_expr
+				(list (quote table) schema cache_name)
+				(cons (quote list) columns)
+				(list (quote lambda) (map columns symbol)
+					(combine_where_terms (merge (list
+						(range_cache_point_terms (map key_names symbol) point_values equality)
+						(list (list (quote equal?) (symbol occupancy) 0)))) true))
+				(cons (quote list) boundary_names)
+				(list (quote lambda) (cons (quote __cells) boundary_symbols)
+					(list (quote cons) (cons (quote list) boundary_symbols) (quote __cells)))
+				(quoted_runtime_list '())
+				(list (quote lambda) (list (quote old) (quote new))
+					(list (quote merge) (list (quote list) (quote old) (quote new)))) false))
+			(list (quote reduce) (cons (quote list) (map (produceN (/ (count boundary_names) 4)) (lambda (axis)
+				(begin
+					(define offset (* axis 4))
+					(define merged (mapIndex left (lambda (i value)
+						(if (or (equal? i (+ offset 2)) (equal? i (+ offset 3))) (nth right i) value))))
+					(list (quote lambda) '() (list (quote range_cache_coalesce_empty_cells) cells axis
+						(list (quote lambda) (list (quote __left) (quote __right))
+							(range_cache_cut_less_expr (nth left offset) (nth left (+ offset 1))
+								(nth right offset) (nth right (+ offset 1))))
+						(list (quote lambda) (list (quote __left) (quote __right))
+							(list (quote !begin)
+								(range_cache_delete_cell_expr schema cache_name key_names point_values
+									boundary_names left tx_expr equality)
+								(range_cache_delete_cell_expr schema cache_name key_names point_values
+									boundary_names right tx_expr equality)
+								(range_cache_insert_expr schema cache_name (merge (list key_names boundary_names))
+									(merge (list point_values merged)) tx_expr)
+								(cons (quote list) merged)))))))))
+				(list (quote lambda) (list (quote total) (quote merge_axis))
+					(list (quote +) (quote total) (list (quote merge_axis)))) 0)))))
+
 (define range_cache_split_expr (lambda (schema cache_name key_names point_values
-	boundary_names axis marker_kind marker tx_expr equality)
+	boundary_names axis marker_kind marker tx_expr equality occupancy)
 	(begin
 		(define columns (merge (list key_names boundary_names)))
 		(define boundary_count (count boundary_names))
@@ -2923,14 +3007,18 @@ choices. */
 			(list (quote lambda) (list cells)
 				(list (quote reduce) cells
 					(list (quote lambda) (list (quote __split_count) cell)
-						(list (quote !begin)
-							(range_cache_delete_cell_expr schema cache_name key_names point_values
-								boundary_names old_values tx_expr equality)
-							(range_cache_insert_expr schema cache_name columns
-								(merge (list point_values left_values)) tx_expr)
-							(range_cache_insert_expr schema cache_name columns
-								(merge (list point_values right_values)) tx_expr)
-							(list (quote +) (quote __split_count) 1)))
+						(list (quote if)
+							(range_cache_cell_nonempty_expr schema cache_name key_names point_values
+								boundary_names old_values tx_expr equality occupancy)
+							(list (quote !begin)
+								(range_cache_delete_cell_expr schema cache_name key_names point_values
+									boundary_names old_values tx_expr equality)
+								(range_cache_insert_expr schema cache_name columns
+									(merge (list point_values left_values)) tx_expr)
+								(range_cache_insert_expr schema cache_name columns
+									(merge (list point_values right_values)) tx_expr)
+								(list (quote +) (quote __split_count) 1))
+							(quote __split_count)))
 					0))
 			(range_cache_find_cells_expr schema cache_name key_names point_values
 				boundary_names axis marker_kind marker tx_expr equality)))))
@@ -2943,7 +3031,7 @@ choices. */
 		(range_cache_split_join_apply find_fn split_fn)
 		(reduce
 			(extract_assoc (find_fn) (lambda (cell markers) (list cell markers)))
-			split_fn 0))))
+			split_fn true))))
 
 (define range_cache_sort_markers (lambda (markers)
 	(if (empty_list? markers)
@@ -2952,7 +3040,7 @@ choices. */
 
 (define range_cache_join_split_expr (lambda (schema cache_name outer_src
 	key_names outer_key_cols boundary_names axis marker_kind marker_col
-	valid_cols valid_expr tx_expr)
+	valid_cols valid_expr tx_expr occupancy)
 	(begin
 		(define boundary_count (count boundary_names))
 		(define key_count (count key_names))
@@ -3029,31 +3117,33 @@ choices. */
 			(quoted_runtime_list '()) nil false (quoted_runtime_list '()) true))
 		(list (quote range_cache_split_join_apply)
 			(list (quote lambda) '() scan_expr)
-			(list (quote lambda) (list (quote __split_cells) (quote __range_hit))
+			(list (quote lambda) (list (quote __complete) (quote __range_hit))
 				(list
 					(list (quote lambda) (list (quote __range_cell))
-						(list (quote !begin)
-							(list (quote reduce)
-								(list (quote range_cache_sort_markers)
-									(list (quote cadr) (quote __range_hit)))
-								(list (quote lambda)
-									(list (quote __current_cut) (quote __range_marker_value))
-									(list (quote !begin)
-										(range_cache_delete_cell_expr schema cache_name key_names point_values
-											boundary_names current_values tx_expr (quote equal??))
-										(range_cache_insert_expr schema cache_name
-											(merge (list key_names boundary_names))
-											(merge (list point_values left_values)) tx_expr)
-										(range_cache_insert_expr schema cache_name
-											(merge (list key_names boundary_names))
-											(merge (list point_values right_values)) tx_expr)
-										(list (quote list) marker_kind (quote __range_marker_value))))
-								(list (quote list)
-									(nth old_values offset) (nth old_values (+ offset 1))))
-							(list (quote +) (quote __split_cells) 1)))
+						(list (quote and)
+							(list (quote nth)
+								(list (quote reduce)
+									(list (quote range_cache_sort_markers) (list (quote cadr) (quote __range_hit)))
+									(list (quote lambda) (list (quote __current_cut) (quote __range_marker_value))
+										(list (quote if)
+											(range_cache_cell_nonempty_expr schema cache_name key_names point_values
+												boundary_names current_values tx_expr (quote equal??) occupancy)
+											(list (quote !begin)
+												(range_cache_delete_cell_expr schema cache_name key_names point_values
+													boundary_names current_values tx_expr (quote equal??))
+												(range_cache_insert_expr schema cache_name (merge (list key_names boundary_names))
+													(merge (list point_values left_values)) tx_expr)
+												(range_cache_insert_expr schema cache_name (merge (list key_names boundary_names))
+													(merge (list point_values right_values)) tx_expr)
+												(list (quote list) marker_kind (quote __range_marker_value)
+													(list (quote nth) (quote __current_cut) 2)))
+											(list (quote list) (list (quote car) (quote __current_cut))
+												(list (quote cadr) (quote __current_cut)) false)))
+									(list (quote list) (nth old_values offset) (nth old_values (+ offset 1)) true)) 2)
+							(quote __complete)))
 					(list (quote car) (quote __range_hit))))))))
 
-(define group_cache_prepare_ranges_expr (lambda (schema cache_name key_names point_values domains bounds tx_expr equality read_cells)
+(define group_cache_prepare_ranges_expr (lambda (schema cache_name key_names point_values domains bounds tx_expr equality read_cells occupancy sources coalesce_empty)
 	(begin
 		(define boundary_names (range_cache_boundary_names domains))
 		(define columns (merge (list key_names boundary_names)))
@@ -3066,10 +3156,10 @@ choices. */
 				(list (quote !begin)
 					(list (quote if) (list (quote equal?) (nth bound 0) -1) true
 						(range_cache_split_expr schema cache_name key_names point_values
-							boundary_names axis (nth bound 0) (nth bound 1) tx_expr equality))
+							boundary_names axis (nth bound 0) (nth bound 1) tx_expr equality occupancy))
 					(list (quote if) (list (quote equal?) (nth bound 2) 2) true
 						(range_cache_split_expr schema cache_name key_names point_values
-							boundary_names axis (nth bound 2) (nth bound 3) tx_expr equality)))))))
+							boundary_names axis (nth bound 2) (nth bound 3) tx_expr equality occupancy)))))))
 		(define preparation_key (list (quote serialize)
 			(cons (quote list) (merge (list point_values flat_bounds)))))
 		(list (quote range_cache_prepare)
@@ -3077,25 +3167,33 @@ choices. */
 			(list (quote lambda) '()
 				(list (quote !begin)
 					(list (quote prepare_cache) (list (quote table) schema cache_name)
-						preparation_key (quoted_runtime_list '())
-						(list (quote lambda) '()
+						preparation_key sources (quoted_runtime_list '())
+						(list (quote lambda) (list (quote __previous))
 							(cons (quote !begin) (merge (list
 								(list (list (quote if)
 									(range_cache_domain_exists_expr schema cache_name key_names point_values tx_expr equality)
 									true
 									(range_cache_insert_expr schema cache_name columns
 										(merge (list point_values universal_bounds)) tx_expr)))
+								(list (if coalesce_empty
+									(range_cache_coalesce_empty_expr schema cache_name key_names point_values
+										boundary_names tx_expr equality occupancy) true))
 								split_exprs (list true))))))
 					read_cells))))))
 
-(define range_cache_prepare_expr (lambda (stage cache_name point_values bounds tx_expr)
+/* Eager preparation owns coalescing; scalar probes only refine missing cuts.
+Repeated probes must not repeatedly scan/coalesce the same point domain. */
+(define range_cache_prepare_expr (lambda (stage cache_name point_values bounds tx_expr coalesce_empty)
 	(group_cache_prepare_ranges_expr (source_schema (gs_input stage)) cache_name
-		(group_key_cols (gs_keys stage)) point_values (range_stage_domains stage) bounds tx_expr (quote equal??) true)))
+		(group_key_cols (gs_keys stage)) point_values (range_stage_domains stage) bounds tx_expr (quote equal??) true
+		(range_group_state_col_name stage aggregate_count_descriptor)
+		(list (quote list) (source_table_expr (gs_input stage))) coalesce_empty)))
 
-/* Split every boundary from the driving relation before any aggregate state
-column is installed. This is the preparation phase of the range cache: later
-aggregate probes only read stable, disjoint cells, so several aggregates in
-one request cannot invalidate one another while the outer scan is running. */
+/* Prepare the driving boundaries before installing result aggregates. The
+shared COUNT(*) occupancy witness is installed first so empty cells need no
+split. Later probes read stable disjoint cells; an empty coarse cell crossing
+a requested boundary contributes the neutral state. Source DML invalidates
+preparation reuse, ensuring newly occupied cells are refined before reading. */
 (define lower_range_cache_prepare_all_expr (lambda (sources default_alias stage tx_expr)
 	(begin
 		(define base_stage (range_stage_for_base_cache stage))
@@ -3127,7 +3225,10 @@ one request cannot invalidate one another while the outer scan is running. */
 				(if (range_domain_unbounded_to? domain) nil
 					(lower_column_expr_for_alias outer_src (range_domain_to domain)))))))
 		(define cache_name (range_group_cache_name base_stage))
-		(define init_expr (range_cache_create_columns_expr base_stage cache_name))
+		(define init_expr (list (quote !begin)
+			(range_cache_create_columns_expr base_stage cache_name)
+			(build_range_group_state_column base_stage cache_name aggregate_count_descriptor)))
+		(define occupancy (range_group_state_col_name base_stage aggregate_count_descriptor))
 		(define invalid_terms (map (produceN (count domains)) (lambda (axis)
 			(begin
 				(define domain (nth domains axis))
@@ -3168,7 +3269,7 @@ one request cannot invalidate one another while the outer scan is running. */
 		(define prepare_one (list (quote if)
 			(cons (quote or) invalid_terms)
 			true
-			(range_cache_prepare_expr base_stage cache_name point_values bounds tx_expr)))
+			(range_cache_prepare_expr base_stage cache_name point_values bounds tx_expr true)))
 		/* Session/constant-only boundaries do not depend on a driver row. Preparing
 		them once avoids a redundant driver scan and keeps the cache producer out
 		of a nested scan callback. */
@@ -3195,17 +3296,32 @@ one request cannot invalidate one another while the outer scan is running. */
 				(range_cache_insert_expr (source_schema (gs_input base_stage)) cache_name
 					(merge (list key_names boundary_names))
 					(merge (list point_values universal_bounds)) tx_expr))))
-		(define init_domains (compile_scan_plan (quote scan)
+		/* Collect valid point domains once per preparation. Repeated driver
+		intervals must not rescan/coalesce the same carrier on every row, especially
+		after source DML. This scratch dictionary dies with the preparation; it
+		introduces neither a persistent timestamp cache nor nested prepare_cache. */
+		(define distinct_domains (compile_scan_plan (quote scan)
 			tx_expr
 			(source_table_expr outer_src)
 			(quoted_runtime_list '())
 			(list (quote lambda) '() true)
 			(cons (quote list) value_cols)
-			(list (quote lambda)
-				(cons (quote __initialized) value_params)
-				(list (quote !begin) init_domain_one
-					(list (quote +) (quote __initialized) 1)))
-			0 (quote +) false))
+			(list (quote lambda) (cons (quote __domains) value_params)
+				(list (quote if) (cons (quote or) invalid_terms) (quote __domains)
+					(list (quote set_assoc) (quote __domains)
+						(cons (quote list) point_values) (cons (quote list) value_params))))
+			(quoted_runtime_list '())
+			(list (quote lambda) (list (quote old) (quote new))
+				(list (quote merge_assoc) (quote old) (quote new)
+					(list (quote lambda) (list (quote a) (quote b)) (quote b)))) false))
+		(define init_domains (list (quote reduce_assoc) distinct_domains
+			(list (quote lambda) (list (quote __initialized) (quote __point) (quote __values))
+				(list (quote +) (quote __initialized) (list (quote apply)
+					(list (quote lambda) value_params
+						(list (quote !begin) init_domain_one
+							(range_cache_coalesce_empty_expr (source_schema (gs_input base_stage)) cache_name
+								key_names point_values boundary_names tx_expr (quote equal??) occupancy)))
+					(quote __values)))) 0))
 		(define valid_expr (list (quote not) (cons (quote or) invalid_terms)))
 		(define split_joins (merge (map (produceN (count domains)) (lambda (axis)
 			(begin
@@ -3217,13 +3333,17 @@ one request cannot invalidate one another while the outer scan is running. */
 							(source_schema (gs_input base_stage)) cache_name outer_src
 							key_names outer_key_cols boundary_names axis
 							(range_domain_from_kind domain) (nth pair 0)
-							value_cols valid_expr tx_expr)))
+							value_cols valid_expr tx_expr occupancy)))
 					(if (range_domain_unbounded_to? domain) '()
 						(list (range_cache_join_split_expr
 							(source_schema (gs_input base_stage)) cache_name outer_src
 							key_names outer_key_cols boundary_names axis
 							(range_domain_to_kind domain) (nth pair 1)
-							value_cols valid_expr tx_expr))))))))))
+							value_cols valid_expr tx_expr occupancy))))))))))
+		/* The cached boolean is a logical proof that every requested cut exists.
+		Storage offers it again only for the same driver domain and carrier cells.
+		Source DML still runs coalescing; a merge or a previously skipped cut
+		requires refinement, while a value-only update avoids both split joins. */
 		(define batch_preparation_key (concat "batch:" (stable_structural_hash domains true)))
 		(list (quote !begin)
 			init_expr
@@ -3234,9 +3354,15 @@ one request cannot invalidate one another while the outer scan is running. */
 						(list (quote prepare_cache)
 							(list (quote table) (source_schema (gs_input base_stage)) cache_name)
 							batch_preparation_key (list (quote list) (source_table_expr outer_src))
-							(list (quote lambda) '()
-								(cons (quote !begin) (merge (list
-									(list init_domains) split_joins (list true))))))))
+							(list (quote list) (source_table_expr (gs_input base_stage)))
+							(list (quote lambda) (list (quote __complete))
+								(list (quote if)
+									(list (quote and) (list (quote equal?) init_domains 0) (quote __complete))
+									true
+									(list (quote reduce)
+										(cons (quote list) (map split_joins (lambda (expr) (list (quote lambda) '() expr))))
+										(list (quote lambda) (list (quote complete) (quote split_axis))
+											(list (quote and) (list (quote split_axis)) (quote complete))) true))))))
 				legacy_prepare)
 			true))))
 
@@ -3335,7 +3461,7 @@ one request cannot invalidate one another while the outer scan is running. */
 				(list (quote lambda) '()
 					(list (quote !begin)
 						init_expr
-						(range_cache_prepare_expr stage cache_name point_values bounds tx_expr)
+						(range_cache_prepare_expr stage cache_name point_values bounds tx_expr false)
 						(range_cache_merge_expr stage cache_name ag point_values bounds tx_expr))))))))
 
 (define lower_scalar_aggregate_probe_expr (lambda (sources default_alias stage requested_col tx_expr)
@@ -9567,7 +9693,8 @@ that memo, while source writes refresh it. No validity token reaches Scheme. */
 (define group_cut_value (lambda (name point_values tx sources producer)
 	(with_cache_sources tx (sources)
 		(lambda () (prepare_cache (car (sources))
-			(concat name ":" (serialize (point_values))) (sources) producer))
+			(concat name ":" (serialize (point_values))) (sources) '()
+			(lambda (previous) (producer))))
 		producer)))
 
 (define group_cache_retain_value (lambda (cache payload coordinates tx sources value)
@@ -9657,15 +9784,39 @@ Choose between those two using actual affected-key work, not distance. */
 	(if (has_assoc? (cadr anchor) key) (get_assoc (cadr anchor) key) (get_assoc base key))))
 
 (define snapshot_group_publish (lambda (cache fixed payload tx axis values state population nearest candidates)
-	(begin
+	(!begin
 		(define base_axis (if (nil? nearest) axis (car (cadr nearest))))
 		(define overlay (if (nil? nearest) '()
 			(merge_assoc (cadr (cadr nearest))
 				(reduce candidates (lambda (updates key)
 					(set_assoc updates key (get_assoc values key))) '())
 				(lambda (old new) new))))
+		/* Keep the last actual transition as well as the base. Repeated queries
+		at a transition and its following plateau then remain exact hits. Older
+		five-field payloads have no plateau witness: treat their own coordinate
+		as a transition, preserving upgrade compatibility without rebuilding. */
+		(define transition (if (or (nil? nearest) (not (empty_list? candidates))) axis
+			(coalesceNil (nth (cadr nearest) 5) (car nearest))))
 		(group_cache_write_cell cache (merge (list fixed (list axis))) payload
-			(list base_axis overlay state population (if (nil? nearest) values nil)) tx)
+			(list base_axis overlay state population (if (nil? nearest) values nil) transition
+				(tx_connection_id tx) (tx_query tx)) tx)
+		/* A moving cursor in an unchanged plateau adds no contribution coverage.
+		Discard its predecessor, keeping the transition and base anchor. All
+		overlays reference the base directly, never a discarded cursor. The native
+		operation preserves other payloads sharing the old coordinate. */
+		(if (and (not (nil? nearest)) (empty_list? candidates)
+			(not (equal? (car nearest) base_axis)) (not (equal? (car nearest) axis))
+			(not (equal? (car nearest) transition))
+			/* Preserve the complete working set of one SQL request. A board may
+			read many coordinates and reuse them all on its next execution. These
+			are scalar request-observation markers, never cache identity/validity
+			tokens; no transaction or session object is retained in the payload. */
+			(or (nil? tx) (not (and
+				(equal? (nth (cadr nearest) 6) (tx_connection_id tx))
+				(equal? (nth (cadr nearest) 7) (tx_query tx))))))
+			(discard_cache_value tx (table (group_cache_schema cache) (group_cache_relation cache))
+				(group_cache_dimension_names cache) (merge (list fixed (list (car nearest))))
+				payload (cadr nearest)) true)
 		true)))
 
 (define snapshot_group_cache (lambda (cache payload fixed_values tx axis population sources full changed evaluate fallback)
@@ -9763,7 +9914,7 @@ old snapshot cells intact; only the new disjoint children need new state. */
 						(list (quote define) (quote __group_sources) (list sources))
 						(list (quote group_cache_ensure_cells) (list (quote quote) cache) payload (physical_query_tx_symbol) (quote __group_sources))
 						(list (quote define) (quote __group_cells)
-							(group_cache_prepare_ranges_expr schema name partition_names partition_values domains bounds (physical_query_tx_symbol) (quote equal?) read_cells))
+							(group_cache_prepare_ranges_expr schema name partition_names partition_values domains bounds (physical_query_tx_symbol) (quote equal?) read_cells nil (quoted_runtime_list '()) false))
 						sum)))))))
 
 (define lower_contribution_snapshot_probe (lambda (all_stages stage value_expr keys lookup_keys reduce_expr neutral_expr)

@@ -932,3 +932,57 @@ stored payloads never retain session/transaction closures or physical row IDs.
 Range aggregates keep their existing selective incremental maintenance; snapshot
 payloads conservatively rebuild after a source write until finer dependency
 maintenance is proved. Moving coordinates still use nearest-anchor corrections.
+
+## Group-cache retention
+
+Retention changes materialization, never the logical input domain, aggregate
+recipe or source dependency graph. Snapshots are addressed by domain values;
+rebuild/repartition identities must not enter their keys or retention decisions.
+
+- A complete, trigger-maintained `COUNT(*) = 0` may certify that an additive
+  range cell needs no further split. A nullable/filtered count, zero sum, or
+  cardinality estimate is not such a proof. Preparation that skipped a cut must
+  be reconsidered on source DML before a newly occupied cell is read.
+- Range preparation returns a semantic coverage proof: all requested cuts exist,
+  or some were deliberately skipped in empty cells. On source writes it may
+  reuse complete coverage only while the driver domain and logical carrier cells
+  remain unchanged. Coalescing counts actual merges and forces refinement again.
+  The storage-owned memo passes only the recipe result back to Scheme, never a
+  version, hash or physical identity. This affects preparation work only; it does
+  not invalidate aggregate payloads. Batch preparation deduplicates point domains
+  before coalescing, and read probes do not coalesce the same cells again.
+- Adjacent empty cells can be coalesced only with identical point keys and
+  identical bounds on every other axis. Both boundary value and cut kind matter.
+  Their union has the neutral state for every payload on that carrier. Keep the
+  table, definitions and triggers; do not substitute DROP/recreate for a merge.
+- Snapshot overlays reference a retained base coordinate directly. On an
+  unchanged plateau, retain that base and the last actual contribution transition;
+  a superseded cursor can be retired without losing contribution coverage.
+  Preserve all coordinates produced by one active SQL request: a board with many
+  points must not evict its own next-request working set. Scalar connection/query
+  observations may protect that working set; they never identify a snapshot or
+  decide whether its aggregate is valid, and retain no transaction/session object.
+  Older payloads without the plateau witness conservatively retain their coordinate as
+  a transition. Exact retained snapshots and old data remain readable unchanged.
+- Retirement of one payload must preserve other payloads at the same coordinate.
+  Delete a cell row only after its last payload is gone, and only where missing
+  cells are repaired lazily. Source-derived key domains require separate coverage
+  maintenance; deleting their rows must never erase SQL groups.
+- `discard_cache_value` runs under the caller's semantic domain mutex, outside
+  CacheManager callbacks. It pins the carrier and columns, checks the expected
+  old payload, and uses ordinary storage mutation paths. Busy DDL or eviction
+  defers retirement. It retains no source table, shard, transaction or session
+  in a cache record and never removes persistent files.
+- Dropping payload references, deleting rows, compacting tombstones, and retiring
+  exclusively owned maintenance are distinct actions. Do not claim tombstone
+  bytes as reclaimed or shared triggers as removed merely because a cell was
+  deleted. Ledger credit requires actual successful release.
+
+General pressure-driven retention must compare expected read and DML CPU plus
+one-time transition cost and retained bytes priced at current memory pressure,
+using the best surviving cache and affected-key repair as the alternative.
+Shared anchors and triggers are charged once. Observations must be bounded and
+collected per operation/batch, never in source-row loops. Hysteresis must prevent
+merge/split churn. Empty-cell coalescing and redundant plateau-cursor retirement
+are semantic simplifications; they are not a replacement for this general cost
+policy, nonempty-range merging, or cold-anchor rebasing.

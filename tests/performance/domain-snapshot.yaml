@@ -77,6 +77,33 @@ setup:
                     (warm (- remaining 1))))))))
           (warm 256))))
 test_cases:
+  - name: Moving snapshot plateau one cold board and ten later boards
+    # A board has 64 distinct as-of coordinates, advanced on every request.
+    # Keep the workload identical for A/B and retain the first full build.
+    setup:
+      - scm: '(begin (globalvars "__retention_perf_cursor" (newsession)) true)'
+    scm: |
+      (!begin
+        (define counter (globalvars "__retention_perf_cursor"))
+        (define board (coalesceNil (counter "board") 0))
+        (counter "board" (+ board 1))
+        (define cache (make_group_cache 'group-keytable "memcp-tests" ".grp:retention-perf-snapshot"
+          (list (list 'snapshot 'time))))
+        (define total (reduce (produceN 64) (lambda (total i)
+          (+ total (snapshot_group_cache cache "total" (lambda () '()) nil (+ (* board 64) i) 4000
+            (lambda () '())
+            (lambda () (reduce (produceN 4000) (lambda (values key) (set_assoc values key 1)) '()))
+            (lambda (lo hi) '()) (lambda (keys) (error "unchanged plateau evaluated keys"))
+            (lambda () (error "unexpected snapshot fallback"))))) 0))
+        (if (equal? total 256000) true (error "moving snapshot plateau returned wrong totals")))
+    expect: {data: [true]}
+    timing_aggregation: total
+    warmup: 0
+    timing_samples: 11
+    threshold_ms: 10000
+    timeout: 60
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS `.grp:retention-perf-snapshot`"
   - name: One cold board and ten alias-renamed boards share snapshot cells
     setup:
     - scm: (begin (globalvars "__cache_identity_request" (newsession)) true)

@@ -1502,6 +1502,13 @@ class SQLTestRunner:
                 return self._record_fail(name, f"Expected error but got 200: {resp.text[:200]}", scm_code, None, None, is_noncritical)
             if resp.status_code != 200:
                 return self._record_fail(name, f"SCM error ({resp.status_code}): {resp.text[:200]}", scm_code, None, None, is_noncritical)
+            # SCM correctness cases must validate their declared results too.
+            # HTTP 200 only proves execution succeeded; accepting it alone hides
+            # a false predicate and silently weakens cache correctness tests.
+            results = self.parse_jsonl_response(resp)
+            if not self.validate_expectation(test_case, resp, results):
+                return self._record_fail(name, "SCM expectation mismatch", scm_code,
+                                         resp, expect, is_noncritical)
             self._record_success(name, is_noncritical)
             return True
 
@@ -2013,6 +2020,9 @@ class SQLTestRunner:
             result_text = response.text
             if results is not None:
                 result_text += "\n" + json.dumps(results, sort_keys=True, ensure_ascii=False)
+                # /scm may return a JSON string containing an EXPLAIN form.
+                # Match its decoded text, as with text inside SQL result rows.
+                result_text += "\n" + "\n".join(value for value in results if isinstance(value, str))
             if "result_contains" in expect:
                 needles = expect["result_contains"] if isinstance(expect["result_contains"], list) else [expect["result_contains"]]
                 for needle in needles:
@@ -2037,6 +2047,11 @@ class SQLTestRunner:
 
         if results is None:
             return False
+
+        if "result" in expect:
+            if (len(results) != 1 or type(results[0]) is not type(expect["result"])
+                    or results[0] != expect["result"]):
+                return False
 
         if expect.get("rows") is not None:
             if len(results) != expect["rows"]:

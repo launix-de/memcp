@@ -606,6 +606,17 @@ class PerformanceScaleContractTest(unittest.TestCase):
                     {"scm": "value", "expect": {"data": [expected]}},
                     response, [actual]), wanted)
 
+    def test_scm_correctness_cannot_bypass_expectations(self) -> None:
+        for expectation in ({"result": True}, {"data": [True]}):
+            for actual, wanted in (("true", True), ("false", False), ("1", False)):
+                with self.subTest(expectation=expectation, actual=actual):
+                    runner = SQLTestRunner("http://localhost:1")
+                    response = SimpleNamespace(status_code=200, text=actual, headers={})
+                    with mock.patch("run_sql_tests.requests.post", return_value=response):
+                        self.assertEqual(runner.run_test_case({
+                            "name": "SCM predicate", "scm": "predicate", "expect": expectation,
+                        }, "memcp-tests"), wanted)
+
     def test_ci_workload_seed_initializes_safe_rows(self) -> None:
         seed = Path(__file__).resolve().parents[1] / "tests/performance/ci-workloads.json"
         with tempfile.TemporaryDirectory() as tmp:
