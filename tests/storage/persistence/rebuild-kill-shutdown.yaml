@@ -12,7 +12,9 @@ setup:
   - sql: "DROP TABLE IF EXISTS rks_scan"
   - sql: "CREATE TABLE rks_rows (id INT PRIMARY KEY, payload TEXT) ENGINE=SAFE"
   - sql: "CREATE TABLE rks_kill_ids (id BIGINT) ENGINE=MEMORY"
-  - sql: "CREATE TABLE rks_scan (id INT PRIMARY KEY) ENGINE=MEMORY"
+  # The cancellation workload must survive the initial SHUTDOWN. An empty
+  # MEMORY table returns COUNT(*) = 0 before KILL_QUERY can cancel the scan.
+  - sql: "CREATE TABLE rks_scan (id INT PRIMARY KEY) ENGINE=SAFE"
   - scm: |
       (insert (table "memcp-tests" "rks_rows") '("id" "payload")
         (map (produceN 20000) (lambda (i)
