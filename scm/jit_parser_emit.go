@@ -1293,19 +1293,15 @@ func (emitter *jitParserEmitter) emitLexicalRuleRef(node *jitParserNode, success
 // dead the moment the iteration commits, so they are truncated back to that mark
 // instead of accumulating for the whole input.
 func (emitter *jitParserEmitter) emitMemoFencePush() {
-	position := emitter.loadPosition()
 	statePtr := emitter.statePointer()
-	emitter.emitVoid(jitParserMemoFencePushNative, statePtr, position)
+	emitter.emitVoid(jitParserMemoFencePushNative, statePtr)
 	emitter.ctx.FreeDesc(&statePtr)
-	emitter.ctx.FreeDesc(&position)
 }
 
 func (emitter *jitParserEmitter) emitMemoCompact() {
-	position := emitter.loadPosition()
 	statePtr := emitter.statePointer()
-	emitter.emitVoid(jitParserMemoCompactNative, statePtr, position)
+	emitter.emitVoid(jitParserMemoCompactNative, statePtr)
 	emitter.ctx.FreeDesc(&statePtr)
-	emitter.ctx.FreeDesc(&position)
 }
 
 func (emitter *jitParserEmitter) emitMemoFencePop() {
