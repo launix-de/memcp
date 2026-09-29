@@ -1237,13 +1237,13 @@ cache scan for every output row. */
 								(list (quote !begin)
 									(range_cache_state_init_expr stage ag)
 									(list (quote createcolumn) (source_table_expr target)
-											column_name "any" (quoted_runtime_list '())
-											(quoted_runtime_list '("temp" true))
-											(cons (quote list) input_cols)
-											(list (quote lambda)
-												(map input_cols (lambda (col)
-													(symbol (concat (source_alias target) "." col))))
-												value_expr)))))))))
+										column_name "any" (quoted_runtime_list '())
+										(quoted_runtime_list '("temp" true))
+										(cons (quote list) input_cols)
+										(list (quote lambda)
+											(map input_cols (lambda (col)
+												(symbol (concat (source_alias target) "." col))))
+											value_expr)))))))))
 		_ nil)))
 
 (define range_lookup_cache_candidates (lambda (block)
@@ -1709,11 +1709,15 @@ outer joins. */
 					stage_lookup rewritten_src scalar_order_cache)
 				scalar_order_cache)
 			rewritten_src))
-		/* Once ORDER has a native carrier, keep the remaining boolean stages as
-		value probes. The ordinary scalar truth cost model can then choose a complete
-		RecSet or batch-local probes and the ordered scan may count LIMIT only after
-		that acceptance predicate succeeds. */
-		(define optimized_src (if (and (not (nil? scalar_order_cache)) (query_block? carrier_src))
+		/* A bounded query input owns the same physical alternatives as a root block.
+		Run probe selection before preparing its dependencies even when ORDER uses
+		a scalar lookup rather than a native cached column. Otherwise that cache's
+		eligibility silently forces eager joins and hides driver-local predicates.
+		Keep the dependency-ordered presence-chain preparation above unchanged. */
+		(define optimized_src (if (and (query_block? carrier_src)
+			(or (not (nil? scalar_order_cache))
+				(and (not relational_presence_chain)
+					(query_limit_active? (qb_offset carrier_src) (qb_limit carrier_src)))))
 			(query_block_with_scalar_first_probes_using stage_lookup carrier_src)
 			carrier_src))
 		(define rewrite_catalog_src (if (nil? scalar_order_cache) membership_src optimized_src))
@@ -1721,25 +1725,40 @@ outer joins. */
 		(define rewrite_default_alias (if (query_block? src)
 			(qassoc_get (qb_facts rewrite_catalog_src) (quote default_alias) (if (empty_list? rewrite_sources) nil (source_alias (car rewrite_sources))))
 			nil))
-		(define presence_probe_sources_for_rewrite (if (query_block? src)
-			(presence_probe_output_sources stage_lookup rewrite_sources rewrite_default_alias
-				(equal? result_sink (quote boolean-recset)))
+		/* Keys and aggregate values are consumers outside the input query block.
+		Rewrite them through every probe selected above, not only presence probes;
+		otherwise removing a scalar source leaves its projected value unbound. */
+		(define retained_input_aliases (if (query_block? optimized_src)
+			(source_aliases (qb_sources optimized_src)) '()))
+		(define input_probe_sources (if (and (query_block? carrier_src) (query_block? optimized_src))
+			(filter (qb_sources carrier_src) (lambda (candidate)
+				(not (contains? retained_input_aliases (source_alias candidate)))))
+			'()))
+		(define input_probe_column_map (if (empty_list? input_probe_sources) '()
+			(stage_output_single_aggregate_columns
+				(stage_output_stage_index (lowering_catalog_stages stage_lookup)) input_probe_sources)))
+		(define stage_probe_sources_for_rewrite (if (query_block? src)
+			(merge_unique (list input_probe_sources
+				(presence_probe_output_sources stage_lookup rewrite_sources rewrite_default_alias
+					(equal? result_sink (quote boolean-recset)))))
 			'()))
 		(define keys (if (empty_list? (gs_keys stage))
 			'(1)
 			(if (query_block? src)
 				(map (gs_keys stage) (lambda (key)
-					(rewrite_scalar_first_probe_expr stage_lookup presence_probe_sources_for_rewrite rewrite_default_alias
-						(rewrite_group_range_recmaps_expr range_recmap_candidates key))))
+					(rewrite_scalar_first_probe_expr stage_lookup stage_probe_sources_for_rewrite rewrite_default_alias
+						(rewrite_stage_graph_expr input_probe_column_map '()
+							(rewrite_group_range_recmaps_expr range_recmap_candidates key)))))
 				(gs_keys stage))))
 		(define prepare_order_items (coalesceNil (gs_order stage) '()))
 		(define prepare_resolved_order_exprs (map prepare_order_items (lambda (item)
 			(match item '(expr _dir) (canonical_column_expr_for_alias alias expr)))))
 		(define key_index (make_group_key_index keys prepare_resolved_order_exprs))
 		(define condition (if (query_block? src)
-			(rewrite_scalar_first_probe_expr stage_lookup presence_probe_sources_for_rewrite rewrite_default_alias
+			(rewrite_scalar_first_probe_expr stage_lookup stage_probe_sources_for_rewrite rewrite_default_alias
 				(rewrite_group_range_recmaps_expr range_recmap_candidates
-					(coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true)))
+					(rewrite_stage_graph_expr input_probe_column_map '()
+						(coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))))
 			(coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true)))
 		(define needs_count_filter (and
 			(not (qassoc_get (gs_facts stage) (quote preserve_empty_domain) false))
@@ -1752,7 +1771,8 @@ outer joins. */
 			(rewrite_group_range_recmaps_expr range_recmap_candidates
 				(rewrite_nested_scalar_recmap_expr recmap_candidate ags)))
 		(define lowering_ags (if (query_block? src)
-			(rewrite_scalar_first_probe_aggregates stage_lookup presence_probe_sources_for_rewrite rewrite_default_alias recmap_ags)
+			(rewrite_scalar_first_probe_aggregates stage_lookup stage_probe_sources_for_rewrite rewrite_default_alias
+				(rewrite_stage_graph_expr input_probe_column_map '() recmap_ags))
 			recmap_ags))
 		(define result_sink_ags (if (and (equal? result_sink (quote boolean-recset))
 			(query_block? src))
