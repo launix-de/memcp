@@ -77,10 +77,12 @@ test_cases:
         - {id: 2, running: 300}
         - {id: 3, running: 400}
 
-  - name: "Source table gets three DML triggers plus invalidation propagation"
+  - name: "Source table gets three system triggers for analyzable nested ORC dependency"
     scm: |
       (begin
         (define info (show "memcp-tests" "orc_dep_src" true))
+        /* Keep the three DML dependencies distinct from the required
+        invalidation-propagation dependency; assert all four, not just a total. */
         (define triggers (filter (get_assoc info "triggers") (lambda (tr) (get_assoc tr "system"))))
         (define for_event (lambda (event) (count (filter triggers (lambda (tr)
           (strlike (get_assoc tr "name") (concat "%|AFTER " event)))))))
@@ -163,10 +165,12 @@ test_cases:
                           new_acc))
           "reduceinit" 0))
 
-  - name: "Fallback source table gets three DML triggers plus invalidation propagation"
+  - name: "Fallback source table still gets three system triggers"
     scm: |
       (begin
         (define info (show "memcp-tests" "orc_dep_fb_src" true))
+        /* Keep the three DML dependencies distinct from the required
+        invalidation-propagation dependency; assert all four, not just a total. */
         (define triggers (filter (get_assoc info "triggers") (lambda (tr) (get_assoc tr "system"))))
         (define for_event (lambda (event) (count (filter triggers (lambda (tr)
           (strlike (get_assoc tr "name") (concat "%|AFTER " event)))))))
