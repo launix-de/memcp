@@ -77,6 +77,33 @@ setup:
                     (warm (- remaining 1))))))))
           (warm 256))))
 test_cases:
+  - name: One cold board and ten alias-renamed boards share snapshot cells
+    setup:
+    - scm: (begin (globalvars "__cache_identity_request" (newsession)) true)
+    scm: |-
+      (begin
+        (define counter (globalvars "__cache_identity_request"))
+        (define n (coalesceNil (counter "next") 0))
+        (counter "next" (+ n 1))
+        (define query (regexp_replace "SELECT driver.x, (SELECT SUM((SELECT h.quantity FROM ds_history h WHERE h.entity_id=e.id AND h.coordinate<=driver.x ORDER BY h.coordinate DESC LIMIT 1)) FROM ds_entity e) AS total FROM (SELECT 10 AS x UNION ALL SELECT 20 UNION ALL SELECT 30) driver" "driver" (concat "period_" n)))
+        (define request (newsession))
+        (define rows (newsession))
+        (define formula (cached_parse (newcachemap) (list parse_sql)
+          "memcp-tests" query nil "root" request true nil))
+        (with_autocommit request nil 0 query (lambda (tx)
+          (sql_execute_formula request tx formula
+            (lambda (row) (rows (string (get_assoc row "x")) (get_assoc row "total")))
+            (lambda (fields) true))))
+        (if (and (equal? (count (rows)) 3)
+          (equal? (rows "10") 4000) (equal? (rows "20") 4400) (equal? (rows "30") 4400)) true
+          (error "cross-board snapshot workload returned incorrect totals")))
+    expect:
+      result: true
+    timing_aggregation: total
+    warmup: 0
+    timing_samples: 11
+    threshold_ms: 10000
+    timeout: 60
   - name: "Ordered domain shares quantity, classification and independent predicate state"
     sql: &snapshot_state_query |
       SELECT d.x, p.category,

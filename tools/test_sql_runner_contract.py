@@ -1799,5 +1799,29 @@ class ColdWarmTotalContractTests(unittest.TestCase):
         self.assertTrue(result["passed"])
 
 
+class RAMAbortOwnershipContractTest(unittest.TestCase):
+    def test_connect_only_abort_never_discovers_or_kills_a_process(self):
+        import run_sql_tests as runner
+        with mock.patch.object(runner, "_owned_memcp_process", None), \
+                mock.patch.object(runner, "ram_pressure_abort", threading.Event()), \
+                mock.patch.object(runner, "find_memcp_pid") as discover, \
+                mock.patch.object(runner.os, "kill") as kill, redirect_stdout(io.StringIO()):
+            runner.trip_ram_abort("test")
+            self.assertTrue(runner.ram_pressure_abort.is_set())
+            discover.assert_not_called()
+            kill.assert_not_called()
+
+    def test_abort_kills_only_the_owned_subprocess_once(self):
+        import run_sql_tests as runner
+        proc = mock.Mock(pid=12345)
+        with mock.patch.object(runner, "_owned_memcp_process", proc), \
+                mock.patch.object(runner, "ram_pressure_abort", threading.Event()), \
+                mock.patch.object(runner, "find_memcp_pid") as discover, redirect_stdout(io.StringIO()):
+            runner.trip_ram_abort("test")
+            runner.trip_ram_abort("repeated")
+            proc.kill.assert_called_once_with()
+            discover.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
