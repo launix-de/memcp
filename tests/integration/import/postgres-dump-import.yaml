@@ -1,3 +1,5 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
 # Minimal PostgreSQL pg_dump archive import coverage.
 
 metadata:
@@ -9,6 +11,33 @@ setup:
   - sql: "DROP TABLE IF EXISTS pgdump_people"
 
 test_cases:
+  - name: "Import plan parses quoted database encoding repeatedly"
+    scm: |
+      (map (produceN 3) (lambda (i)
+        (if
+          (equal? (psql_import_plan "memcp-tests" nil
+            "CREATE DATABASE dump_source WITH ENCODING = 'UTF8'"
+            (sql_policy "root") nil)
+            (list "dump_source" (list (quote createdatabase) "memcp-tests" true)))
+          true (error "quoted encoding changed the retargeted import plan"))))
+
+  - name: "Import plan parses multiple database options with lookahead"
+    scm: |
+      (if
+        (equal? (psql_import_plan "memcp-tests" nil
+          "CREATE DATABASE dump_source WITH TEMPLATE = template0 ENCODING = 'UTF8' LOCALE = 'de_DE.UTF-8'"
+          (sql_policy "root") nil)
+          (list "dump_source" (list (quote createdatabase) "memcp-tests" true)))
+        true (error "database options changed the retargeted import plan"))
+
+  - name: "Import plan rejects unterminated quoted database options"
+    scm: |
+      (psql_import_plan "memcp-tests" nil
+        "CREATE DATABASE dump_source WITH ENCODING = 'UTF8"
+        (sql_policy "root") nil)
+    expect:
+      error: true
+
   - name: "Import command eval has local resultrow callback"
     scm: |
       (psql_eval_import_command "memcp-tests" "" nil "SELECT 1" (sql_policy "root") nil (newsession))

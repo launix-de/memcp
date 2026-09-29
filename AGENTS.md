@@ -130,6 +130,17 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
 - `storageShard.filterFeedback` contains immutable observations published with one best-effort CAS after a complete shard scan. Readers may load these atomics without shard locks or concurrency rights; they must not inspect shard containers. `table.filterFeedback` publishes an immutable, bounded merged snapshot. Generation IDs are scalar planner-statistics tokens, never retained shard/topology pointers. No feedback synchronization or publication is permitted inside element or filter-batch loops. `tableShowColumnsSnapshot.filterSchema` is immutable column-semantics metadata published through the existing atomic snapshot. Optional `table.RestoredFilterFeedback` is touched only during schema loading before table publication and cleared after restoring historical aggregates; schema saves serialize an atomic table-feedback snapshot without accessing shard state.
 - When adding new storage fields, document the locking discipline and update this section.
 
+- `table.cacheTriggerSources` is an immutable reverse dependency list published
+  with atomic CAS during trigger registration. `TriggerDescription.cacheTarget`
+  is a runtime table identity protected by the source table mutex and omitted
+  from persistence. Cache eviction uses these identities to remove only its own
+  dependencies under existing schema/table TryLocks; it never acquires DDL locks,
+  runs lifecycle triggers, deletes disk files, or calls public CacheManager APIs.
+  A busy dependency defers eviction without removing any trigger. Live dependent
+  targets defer parent eviction until their invalidation edges have been removed.
+  Registration
+  retains the target's existing cache-use pin through metadata publication.
+
 - `TriggerDescription.needsRegeneration` is initialized during JSON loading before
   publication and protected by `table.mu` afterwards. Restored compute dependency
   triggers stay inert until registration atomically replaces their generated code
