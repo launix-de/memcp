@@ -598,7 +598,9 @@ only partitioned FROM source would erase the block's row multiplicity
 			(group_stage_with_facts stage
 				(qassoc_set (qassoc_set (gs_facts stage) (quote group_cache)
 					(get_assoc signatures (concat (gs_id stage) ":cache")))
-					(quote cache_identity_index) signatures)))))))
+					/* Keep compile-only dictionaries behind a handle: probes are also
+					immutable expression keys and must not embed mutable FastDicts. */
+					(quote cache_identity_index) (lambda () signatures))))))))
 
 (define stage_shared_prepare? (lambda (stage)
 	(and (group_stage? stage)

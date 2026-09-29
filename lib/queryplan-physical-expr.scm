@@ -960,7 +960,7 @@ output coordinate or aggregate. Explicit transactions still use the producer. */
 		(define cache (group_stage_cell_cache stage (map (nth proof 1) (lambda (key) (list (quote point) key)))))
 		(define payload (concat "agg_" (stable_structural_hash
 			(list "cache-payload-v1" ((group_cache_identity_rewriter stage
-				(qassoc_get (gs_facts stage) (quote cache_identity_index) '()))
+				((qassoc_get (gs_facts stage) (quote cache_identity_index) (lambda () '()))))
 				(canonical_aggregate_recipe (list value_expr reduce_expr neutral_expr)))) true)))
 		(define producer (list (quote lambda) '() (lower_scalar_aggregate_query_probe_expr all_stages stage value_expr
 			keys lookup_keys reduce_expr neutral_expr (quote point-cached))))
@@ -2563,7 +2563,7 @@ never suppress repair of an evicted computed column or reloaded cache table. */
 				(quote range-domains) (range_stage_domains stage))
 			(quote range-invariant-condition) (range_stage_invariant_condition stage)))
 		(define facts (qassoc_set_without facts (quote cache_identity_index)
-			(qassoc_get facts (quote cache_identity_index) '()) (quote group_cache)))
+			(qassoc_get facts (quote cache_identity_index) (lambda () '())) (quote group_cache)))
 		(make_group_stage
 			(gs_id stage) src (range_stage_point_domain stage) (range_stage_point_keys stage)
 			(gs_aggregates stage) (gs_having stage) (gs_output stage)
@@ -6343,6 +6343,52 @@ an unrelated aggregate cannot rename an embedded calculation. */
 			(get_assoc signatures (concat (nth (source_relation src) 1) ":columns")) nil))
 		(coalesceNil (get_assoc columns col) (if col_insensitive (toLower col) col)))))
 
+/* Keep recursive traversal in one named procedure. Repeatedly adapting a
+large local recursive callback makes serial map setup walk its body per node. */
+(define group_cache_rewrite_identity (lambda (context node)
+	(begin
+		/* A lowered scalar probe carries an entire annotated stage/catalog.
+		Only its source recipe and domain identify its value, never that planner
+		state. Compact it before traversing or hashing the surrounding filter. */
+		(define node (if (and (list? node) (>= (count node) 3)
+			(contains? (list (quote scalar_first_probe) (quote scalar_aggregate_probe)
+				(quote scalar_cardinality_probe)) (car node))
+			(group_stage? (cadr node))) (canonical_aggregate_recipe node) node))
+		(define sources (nth context 0))
+		(define signatures (nth context 1))
+		(define bindings (nth context 2))
+		(define source_recipes (nth context 3))
+		(define aliases (nth context 4))
+		(begin
+			(define binding (if (list? node) (bindings node) nil))
+			(if (not (nil? binding)) binding
+				(match node
+					((symbol outer-column) alias col)
+					(group_cache_rewrite_identity context (list (quote get_column) alias false col false))
+					((symbol get_column) alias insensitive col col_insensitive)
+					(begin
+						(define target (stage_merge_lookup aliases alias alias))
+						(list (quote get_column)
+							(if (list? target)
+								(list (car target) (nth target 1) (nth target 2) (group_cache_rewrite_identity context (nth target 3))) target)
+							false (group_cache_column_identity sources signatures alias insensitive col col_insensitive) false))
+					((quote get_column) alias insensitive col col_insensitive)
+					(group_cache_rewrite_identity context (list (symbol "get_column") alias insensitive col col_insensitive))
+					((symbol stage-output) id)
+					(begin
+						(define cached (source_recipes id))
+						(if (not (nil? cached)) cached
+							(source_recipes id (list (quote cache-application)
+								(coalesceNil (get_assoc signatures id) id)
+								(map (coalesceNil (get_assoc signatures (concat id ":bindings")) '()) (lambda (item) (group_cache_rewrite_identity context item)))))))
+					(cons head tail) (cons (group_cache_rewrite_identity context head) (map tail (lambda (item) (group_cache_rewrite_identity context item))))
+					_ (if (symbol? node)
+						(match (string node)
+							(concat alias "." col)
+							(group_cache_rewrite_identity context (list (quote get_column) alias false col false))
+							_ node)
+						node)))))))
+
 (define group_cache_identity_rewriter (lambda (stage signatures)
 	(begin
 		(define input (gs_input stage))
@@ -6364,37 +6410,8 @@ an unrelated aggregate cannot rename an embedded calculation. */
 				(list (quote cache-source) i (source_schema src)
 					(source_relation src)))))
 			(stage_semantic_alias_entries outer "__cache_input_"))))
-		(define rewrite (lambda (node)
-			(begin
-				(define binding (if (list? node) (bindings node) nil))
-				(if (not (nil? binding)) binding
-					(match node
-						((symbol outer-column) alias col)
-						(rewrite (list (quote get_column) alias false col false))
-						((symbol get_column) alias insensitive col col_insensitive)
-						(begin
-							(define target (stage_merge_lookup aliases alias alias))
-							(list (quote get_column)
-								(if (list? target)
-									(list (car target) (nth target 1) (nth target 2) (rewrite (nth target 3))) target)
-								false (group_cache_column_identity sources signatures alias insensitive col col_insensitive) false))
-						((quote get_column) alias insensitive col col_insensitive)
-						(rewrite (list (symbol "get_column") alias insensitive col col_insensitive))
-						((symbol stage-output) id)
-						(begin
-							(define cached (source_recipes id))
-							(if (not (nil? cached)) cached
-								(source_recipes id (list (quote cache-application)
-									(coalesceNil (get_assoc signatures id) id)
-									(map (coalesceNil (get_assoc signatures (concat id ":bindings")) '()) rewrite)))))
-						(cons head tail) (cons (rewrite head) (map tail rewrite))
-						_ (if (symbol? node)
-							(match (string node)
-								(concat alias "." col)
-								(rewrite (list (quote get_column) alias false col false))
-								_ node)
-							node))))))
-		rewrite)))
+		(define context (list sources signatures bindings source_recipes aliases))
+		(lambda (node) (group_cache_rewrite_identity context node)))))
 
 (define canonical_group_input_identity (lambda (stage rewrite)
 	(begin
@@ -6675,7 +6692,7 @@ cost. Building additional state (snapshot contributions) waits for a later call.
 		/* Analysis and cost probes have no semantic index yet and deliberately use
 		the cheap provisional identity. Physical preparation passes its shared index. */
 		(if (nil? cached) (group_stage_default_cache stage
-			(qassoc_get (gs_facts stage) (quote cache_identity_index) '())) cached))))
+			((qassoc_get (gs_facts stage) (quote cache_identity_index) (lambda () '())))) cached))))
 
 (define group_stage_cache_relation (lambda (stage)
 	(group_cache_relation (group_stage_cache stage))))
@@ -8793,10 +8810,14 @@ nested aggregate facts: those can participate in structural identities. */
 				(if (nil? stage)
 					(neumann_fail "build_queryplan" (concat "physicalize stage-output source references unknown stage " id))
 					true)
-				(source_with_schema_relation
-					src
-					(group_stage_cache_schema stage)
-					(group_stage_cache_relation stage)))))))
+				/* A shared carrier contains multiple session domains. A relational
+				consumer must select its own domain just like scalar probes do. */
+				(define keys (if (empty_list? (gs_keys stage)) '(1) (gs_keys stage)))
+				(source_with_join_expr
+					(source_with_schema_relation src
+						(group_stage_cache_schema stage) (group_stage_cache_relation stage))
+					(combine_where (source_join_expr src)
+						(group_stage_session_filter_expr stage (source_alias src) keys (group_key_cols keys)))))))))
 
 (define physicalize_stage_output_sources (lambda (stages sources)
 	(map (coalesceNil sources '()) (lambda (src)
@@ -9769,7 +9790,7 @@ old snapshot cells intact; only the new disjoint children need new state. */
 				'('lambda '('key 'present) 'key))))
 		(define payload (concat "agg_" (stable_structural_hash
 			(list "cache-payload-v1" ((group_cache_identity_rewriter stage
-				(qassoc_get (gs_facts stage) (quote cache_identity_index) '()))
+				((qassoc_get (gs_facts stage) (quote cache_identity_index) (lambda () '()))))
 				(canonical_aggregate_recipe (list value_expr reduce_expr neutral_expr)))) true)))
 		(define cell_stage (snapshot_group_cell_stage stage))
 		(define cell_fixed (if (empty_list? (snapshot_group_ranges stage)) fixed
