@@ -2549,6 +2549,11 @@ def print_memcp_log(tail: int = 100) -> None:
     if not _memcp_log_file:
         return
     try:
+        # A Go crash dump can be much longer than the console tail. Preserve
+        # its beginning (panic and faulting goroutine) before runner cleanup.
+        artifact = os.environ.get("MEMCP_FAILURE_LOG_ARTIFACT")
+        if artifact:
+            shutil.copyfile(_memcp_log_file, artifact)
         with open(_memcp_log_file, 'r') as f:
             lines = f.readlines()
         if not lines:
@@ -3128,6 +3133,7 @@ def run_performance_ab(base: Path, candidate: Path, spec_files: List[str]) -> bo
             env.update(PERF_AB_MODE="record", PERF_FIXTURE_TRIAL="1",
                        PERF_BASELINE_FILE=str(result_path), PERF_BASELINE_SEED=str(seed),
                        MEMCP_TEST_WORKTREE=str(tree), MEMCP_BINARY=str(tree / "memcp"),
+                       MEMCP_FAILURE_LOG_ARTIFACT=str(artifacts / (name + ".memcp.log")),
                        MEMCP_TEST_DATA_DIR=data)
             command = [sys.executable, "-u", str(runner), str(suite), "--log-times", "--fail-fast"]
             print(f"PERF_FIXTURE {name}: {tree}", flush=True)

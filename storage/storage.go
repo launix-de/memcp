@@ -3476,17 +3476,18 @@ func Init(en scm.Env) {
 					}
 				}
 				if exists {
-					baseTable.SetTriggerTarget(triggerName, ktTable.acquireCacheUseForTrigger, ktTable.releaseCacheUse)
+					baseTable.SetTriggerTarget(triggerName, ktTable, ktTable.acquireCacheUseForTrigger, ktTable.releaseCacheUse)
 					continue
 				}
 				baseTable.AddTrigger(TriggerDescription{
-					Name:     triggerName,
-					Timing:   td.timing,
-					IsSystem: true,
-					Priority: 90, // run before invalidatecolumn (100) so keys are current when values recompute
-					Func:     buildFKProc(td.body),
-					Acquire:  ktTable.acquireCacheUseForTrigger,
-					Release:  ktTable.releaseCacheUse,
+					Name:        triggerName,
+					Timing:      td.timing,
+					IsSystem:    true,
+					Priority:    90, // run before invalidatecolumn (100) so keys are current when values recompute
+					Func:        buildFKProc(td.body),
+					cacheTarget: ktTable,
+					Acquire:     ktTable.acquireCacheUseForTrigger,
+					Release:     ktTable.releaseCacheUse,
 				})
 			}
 			// Lifecycle cleanup: when the base table is dropped/shape-changed, the keytable
@@ -3508,17 +3509,18 @@ func Init(en scm.Env) {
 					}
 				}
 				if exists {
-					baseTable.SetTriggerTarget(triggerName, ktTable.acquireCacheUseForTrigger, ktTable.releaseCacheUse)
+					baseTable.SetTriggerTarget(triggerName, ktTable, ktTable.acquireCacheUseForTrigger, ktTable.releaseCacheUse)
 					continue
 				}
 				baseTable.AddTrigger(TriggerDescription{
-					Name:     triggerName,
-					Timing:   timing,
-					IsSystem: true,
-					Priority: 90,
-					Func:     buildFKProc(dropBody),
-					Acquire:  ktTable.acquireCacheUseForTrigger,
-					Release:  ktTable.releaseCacheUse,
+					Name:        triggerName,
+					Timing:      timing,
+					IsSystem:    true,
+					Priority:    90,
+					Func:        buildFKProc(dropBody),
+					cacheTarget: ktTable,
+					Acquire:     ktTable.acquireCacheUseForTrigger,
+					Release:     ktTable.releaseCacheUse,
 				})
 			}
 			return scm.NewBool(true)
