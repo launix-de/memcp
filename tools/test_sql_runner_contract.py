@@ -67,6 +67,7 @@ from run_sql_tests import (  # noqa: E402
     performance_sample_ns,
     performance_measurement_ns,
     prepare_memcp_data_dir,
+    print_memcp_log,
     resolve_timing_aggregation,
     performance_scale_from_samples,
     planner_time_limit_with_tolerance_ms,
@@ -87,6 +88,22 @@ from tools.check_test_table_names import mutable_table_collisions  # noqa: E402
 
 
 class ManagedDataDirectoryContractTest(unittest.TestCase):
+    def test_failure_artifact_keeps_crash_header_after_cleanup(self):
+        with tempfile.TemporaryDirectory() as root:
+            log = Path(root) / "server.log"
+            artifact = Path(root) / "trial.memcp.log"
+            contents = "fatal error: crash header\n" + "stack frame\n" * 150
+            log.write_text(contents)
+            output = io.StringIO()
+            with mock.patch("run_sql_tests._memcp_log_file", str(log)), \
+                    mock.patch.dict(os.environ, {"MEMCP_FAILURE_LOG_ARTIFACT": str(artifact)}), \
+                    redirect_stdout(output):
+                print_memcp_log(tail=100)
+                cleanup_memcp_artifacts(None)
+            self.assertFalse(log.exists())
+            self.assertNotIn("crash header", output.getvalue())
+            self.assertEqual(artifact.read_text(), contents)
+
     def test_default_directory_and_log_are_removed(self):
         with tempfile.TemporaryDirectory() as root:
             root_path = Path(root)

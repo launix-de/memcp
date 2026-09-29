@@ -163,7 +163,33 @@ type TriggerDescription struct {
 	Release    func()                `json:"-"`                   // Releases a successful Acquire
 	// Guarded by table.mu after publication. Generated dependency code restored
 	// from a previous binary must be regenerated before its target is rebound.
+	cacheTarget       *table // runtime identity, protected by the source table mutex
 	needsRegeneration bool
+}
+
+// cacheTriggerSource is an immutable reverse edge for a runtime cache target.
+// Trigger registration already runs outside row loops. Publishing an edge must
+// not lock the target while the source table mutex is held.
+type cacheTriggerSource struct {
+	table *table
+	next  *cacheTriggerSource
+}
+
+func (t *table) rememberCacheTriggerSource(source *table) {
+	if t == nil || !t.isEphemeralQueryTable() || source == t {
+		return
+	}
+	for {
+		head := t.cacheTriggerSources.Load()
+		for edge := head; edge != nil; edge = edge.next {
+			if edge.table == source {
+				return
+			}
+		}
+		if t.cacheTriggerSources.CompareAndSwap(head, &cacheTriggerSource{source, head}) {
+			return
+		}
+	}
 }
 
 func acquireCacheUse(users *int64) bool {
@@ -474,6 +500,7 @@ func (t *table) AddTrigger(trigger TriggerDescription) {
 
 // addTriggerLocked inserts a compiled trigger while the caller holds t.mu.
 func (t *table) addTriggerLocked(trigger TriggerDescription) {
+	trigger.cacheTarget.rememberCacheTriggerSource(t)
 	// Keep trigger list ordered by priority (lower = earlier). For equal
 	// priorities preserve registration order by inserting after existing ties.
 	insertAt := len(t.Triggers)
@@ -510,10 +537,9 @@ func (db *database) dropTrigger(name string) bool {
 	db.schemalock.RUnlock()
 
 	for _, t := range tables {
-		// Resolve ownership before taking a DDL lock. In particular, eviction
-		// invokes cache-cleanup triggers on the CacheManager goroutine while an
-		// unrelated group-table rebuild can hold ddlMu.RLock and wait for that
-		// same manager. Locking every catalog table here closes a wait cycle.
+		// Explicit DROP TRIGGER must not wait for unrelated table maintenance.
+		// Cache eviction uses runtime dependency identities instead of this DDL
+		// path, so no manager callback can wait on the owner's rebuild lock.
 		// Revalidate below under the usual DDL/schema locks; this snapshot only
 		// excludes non-owners and does not authorize removing a stale trigger.
 		t.mu.Lock()
@@ -564,11 +590,13 @@ func (db *database) dropTrigger(name string) bool {
 
 // SetTriggerTarget refreshes the runtime-only cache target pin on an
 // idempotently reused system trigger, including triggers restored from JSON.
-func (t *table) SetTriggerTarget(name string, acquire func(*TxContext) bool, release func()) bool {
+func (t *table) SetTriggerTarget(name string, target *table, acquire func(*TxContext) bool, release func()) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	for i := range t.Triggers {
 		if t.Triggers[i].Name == name {
+			target.rememberCacheTriggerSource(t)
+			t.Triggers[i].cacheTarget = target
 			t.Triggers[i].Acquire = acquire
 			t.Triggers[i].Release = release
 			return true
