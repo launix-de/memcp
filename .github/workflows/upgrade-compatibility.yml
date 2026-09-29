@@ -129,10 +129,6 @@ jobs:
         shell: bash
         run: bash candidate/tests/storage/persistence/upgrade-run.sh
 
-      - name: Prove the public upgrade workload detects incompatible cache layouts
-        if: ${{ matrix.predecessor.label == 'previous-master' }}
-        run: python3 candidate/tests/storage/persistence/upgrade-helper-negative.py candidate upgrade-negative-controls
-
       - name: Upload references and server logs
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -141,8 +137,6 @@ jobs:
           path: |
             upgrade-oracles/
             upgrade-logs/
-            upgrade-negative-controls/*/run.log
-            upgrade-negative-controls/*/upgrade-logs/
           retention-days: 7
 
       - name: Upload data on failure

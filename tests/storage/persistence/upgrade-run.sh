@@ -84,7 +84,15 @@ python3 "$HELPERS" check "$MYSQL_PORT" "$ORACLES/queries.json"
 bash "$VALIDATOR" "$MYSQL_PORT" compare "$ORACLES/before.json"
 stop_server
 
+# Read the predecessor's untouched persisted data before any candidate DML.
+# Compare only public results; cache names, versions and layouts are a black box.
 start_server candidate candidate-upgrade
+python3 "$HELPERS" check "$MYSQL_PORT" "$ORACLES/queries.json"
+bash "$VALIDATOR" "$MYSQL_PORT" compare "$ORACLES/before.json"
+stop_server
+
+# Use a separate cold process to retain coverage of mutations before first read.
+start_server candidate candidate-cold-dml
 python3 "$HELPERS" cold-mutate "$MYSQL_PORT" "$ORACLES/queries.json"
 bash "$VALIDATOR" "$MYSQL_PORT" zero-policy-checks
 python3 "$HELPERS" check "$MYSQL_PORT" "$ORACLES/queries.json"
