@@ -84,6 +84,34 @@ setup:
         (rebuild)
         10000)
 
+  # Imported keys need not have declared uniqueness. Exercise the scalar LIMIT
+  # contract with 100,000 items, selective permissions, and unrestricted access.
+  - sql: DROP TABLE IF EXISTS usol_notice_item
+  - sql: DROP TABLE IF EXISTS usol_notice_asset
+  - sql: DROP TABLE IF EXISTS usol_notice_site
+  - sql: DROP TABLE IF EXISTS usol_notice_tenant
+  - sql: DROP TABLE IF EXISTS usol_notice_grant
+  - sql: DROP TABLE IF EXISTS usol_notice_seen
+  - sql: CREATE TABLE usol_notice_item (ID INT, site_id INT, asset_id INT, year_id INT,
+      department_id INT, category_id INT) ENGINE=memory
+  - sql: CREATE TABLE usol_notice_asset (ID INT, uploaded_at INT) ENGINE=memory
+  - sql: CREATE TABLE usol_notice_site (ID INT, tenant_id INT) ENGINE=memory
+  - sql: CREATE TABLE usol_notice_tenant (ID INT) ENGINE=memory
+  - sql: CREATE TABLE usol_notice_grant (user INT, tenant_id INT, site_id INT) ENGINE=memory
+  - sql: CREATE TABLE usol_notice_seen (dv TEXT, user INT, id INT, channel TEXT) ENGINE=memory
+  - sql: INSERT INTO usol_notice_tenant VALUES (1)
+  - sql: INSERT INTO usol_notice_grant VALUES (1,1,1),(2,NULL,NULL)
+  - sql: INSERT INTO usol_notice_seen VALUES ('delivery',1,99901,'email')
+  - scm: |-
+      (begin
+       (insert (table "memcp-tests" "usol_notice_site") '("ID" "tenant_id") (map (produceN 100) (lambda (i) (list (+ i 1) 1))))
+       (insert (table "memcp-tests" "usol_notice_item") '("ID" "site_id" "asset_id" "year_id" "department_id" "category_id")
+        (map (produceN 100000) (lambda (i) (list (+ i 1) (+ (mod i 100) 1) (+ i 1) 1 1 1))))
+       (insert (table "memcp-tests" "usol_notice_asset") '("ID" "uploaded_at")
+        (map (produceN 100000) (lambda (i) (list (+ i 1) (+ i 1)))))
+       100000)
+  - sql: INSERT INTO usol_notice_seen VALUES ('delivery',1,99900,'email'),('delivery',1,NULL,'email'),('delivery',2,42,'email')
+
 test_cases:
   - name: "Scalar ORDER LIMIT stays inside ordered scan pipelines"
     sql: |
@@ -582,6 +610,135 @@ test_cases:
         - id: 1
         - id: 5
 
+  # Include preparation in each four-call workload instead of discarding it
+  # through warmup or median sampling.
+  - name: Limited notification selection unseen for selective permissions
+    sql: |-
+      SELECT picked.id FROM (SELECT r.ID AS id FROM usol_notice_item r
+       LEFT JOIN usol_notice_site unused ON unused.ID=r.site_id
+       WHERE (EXISTS (SELECT 1 FROM usol_notice_grant g WHERE g.user=1 AND g.tenant_id IS NULL LIMIT 1)
+         OR NOT (EXISTS (SELECT 1 FROM usol_notice_grant g WHERE g.user=1 AND g.tenant_id IS NULL LIMIT 1)))
+       AND COALESCE((SELECT (EXISTS (SELECT 1 FROM usol_notice_grant g WHERE g.user=1 AND g.tenant_id IS NULL LIMIT 1)
+         OR NOT (EXISTS (SELECT 1 FROM usol_notice_grant g WHERE g.user=1 AND g.tenant_id IS NULL LIMIT 1)))
+       AND (EXISTS (SELECT 1 FROM usol_notice_grant g WHERE g.user=1 AND g.tenant_id IS NULL)
+         OR EXISTS(SELECT 1 FROM usol_notice_grant g WHERE g.user=1 AND COALESCE(g.site_id,s.ID)=s.ID))
+
+       AND COALESCE((SELECT (EXISTS (SELECT 1 FROM usol_notice_grant g WHERE g.user=1 AND g.tenant_id IS NULL LIMIT 1)
+         OR NOT (EXISTS (SELECT 1 FROM usol_notice_grant g WHERE g.user=1 AND g.tenant_id IS NULL LIMIT 1)))
+       AND (EXISTS (SELECT 1 FROM usol_notice_grant g WHERE g.user=1 AND g.tenant_id IS NULL)
+         OR EXISTS(SELECT 1 FROM usol_notice_grant g WHERE g.user=1 AND g.tenant_id=t.ID))
+       FROM usol_notice_tenant t WHERE t.ID=s.tenant_id LIMIT 1),FALSE)
+       FROM usol_notice_site s WHERE s.ID=r.site_id LIMIT 1),FALSE)
+       ORDER BY (SELECT f.uploaded_at FROM usol_notice_asset f WHERE f.ID=r.asset_id LIMIT 1) DESC,
+       r.year_id DESC,r.site_id,r.department_id,r.category_id,r.ID DESC LIMIT 1) picked
+       WHERE NOT EXISTS(SELECT 1 FROM usol_notice_seen n WHERE n.dv='delivery' AND n.user=1 AND n.id=picked.id AND n.channel='email') LIMIT 10000
+    warmup: 0
+    timing_samples: 4
+    timing_aggregation: total
+    performance_rows: 100000
+    threshold_ms: 15000
+    expect:
+      rows: 0
+      data: []
+  - name: Limited notification selection obsolete for selective permissions
+    sql: |-
+      SELECT id FROM usol_notice_seen WHERE dv='delivery' AND user=1 AND channel='email' AND id NOT IN (SELECT r.ID AS id FROM usol_notice_item r
+       LEFT JOIN usol_notice_site unused ON unused.ID=r.site_id
+       WHERE (EXISTS (SELECT 1 FROM usol_notice_grant g WHERE g.user=1 AND g.tenant_id IS NULL LIMIT 1)
+         OR NOT (EXISTS (SELECT 1 FROM usol_notice_grant g WHERE g.user=1 AND g.tenant_id IS NULL LIMIT 1)))
+       AND COALESCE((SELECT (EXISTS (SELECT 1 FROM usol_notice_grant g WHERE g.user=1 AND g.tenant_id IS NULL LIMIT 1)
+         OR NOT (EXISTS (SELECT 1 FROM usol_notice_grant g WHERE g.user=1 AND g.tenant_id IS NULL LIMIT 1)))
+       AND (EXISTS (SELECT 1 FROM usol_notice_grant g WHERE g.user=1 AND g.tenant_id IS NULL)
+         OR EXISTS(SELECT 1 FROM usol_notice_grant g WHERE g.user=1 AND COALESCE(g.site_id,s.ID)=s.ID))
+
+       AND COALESCE((SELECT (EXISTS (SELECT 1 FROM usol_notice_grant g WHERE g.user=1 AND g.tenant_id IS NULL LIMIT 1)
+         OR NOT (EXISTS (SELECT 1 FROM usol_notice_grant g WHERE g.user=1 AND g.tenant_id IS NULL LIMIT 1)))
+       AND (EXISTS (SELECT 1 FROM usol_notice_grant g WHERE g.user=1 AND g.tenant_id IS NULL)
+         OR EXISTS(SELECT 1 FROM usol_notice_grant g WHERE g.user=1 AND g.tenant_id=t.ID))
+       FROM usol_notice_tenant t WHERE t.ID=s.tenant_id LIMIT 1),FALSE)
+       FROM usol_notice_site s WHERE s.ID=r.site_id LIMIT 1),FALSE)
+       ORDER BY (SELECT f.uploaded_at FROM usol_notice_asset f WHERE f.ID=r.asset_id LIMIT 1) DESC,
+       r.year_id DESC,r.site_id,r.department_id,r.category_id,r.ID DESC LIMIT 1) LIMIT 10000
+    warmup: 0
+    timing_samples: 4
+    timing_aggregation: total
+    performance_rows: 100000
+    threshold_ms: 15000
+    expect:
+      rows: 1
+      data:
+      - id: 99900
+  - name: Limited notification selection unseen for broad permissions
+    sql: |-
+      SELECT picked.id FROM (SELECT r.ID AS id FROM usol_notice_item r
+       LEFT JOIN usol_notice_site unused ON unused.ID=r.site_id
+       WHERE (EXISTS (SELECT 1 FROM usol_notice_grant g WHERE g.user=2 AND g.tenant_id IS NULL LIMIT 1)
+         OR NOT (EXISTS (SELECT 1 FROM usol_notice_grant g WHERE g.user=2 AND g.tenant_id IS NULL LIMIT 1)))
+       AND COALESCE((SELECT (EXISTS (SELECT 1 FROM usol_notice_grant g WHERE g.user=2 AND g.tenant_id IS NULL LIMIT 1)
+         OR NOT (EXISTS (SELECT 1 FROM usol_notice_grant g WHERE g.user=2 AND g.tenant_id IS NULL LIMIT 1)))
+       AND (EXISTS (SELECT 1 FROM usol_notice_grant g WHERE g.user=2 AND g.tenant_id IS NULL)
+         OR EXISTS(SELECT 1 FROM usol_notice_grant g WHERE g.user=2 AND COALESCE(g.site_id,s.ID)=s.ID))
+
+       AND COALESCE((SELECT (EXISTS (SELECT 1 FROM usol_notice_grant g WHERE g.user=2 AND g.tenant_id IS NULL LIMIT 1)
+         OR NOT (EXISTS (SELECT 1 FROM usol_notice_grant g WHERE g.user=2 AND g.tenant_id IS NULL LIMIT 1)))
+       AND (EXISTS (SELECT 1 FROM usol_notice_grant g WHERE g.user=2 AND g.tenant_id IS NULL)
+         OR EXISTS(SELECT 1 FROM usol_notice_grant g WHERE g.user=2 AND g.tenant_id=t.ID))
+       FROM usol_notice_tenant t WHERE t.ID=s.tenant_id LIMIT 1),FALSE)
+       FROM usol_notice_site s WHERE s.ID=r.site_id LIMIT 1),FALSE)
+       ORDER BY (SELECT f.uploaded_at FROM usol_notice_asset f WHERE f.ID=r.asset_id LIMIT 1) DESC,
+       r.year_id DESC,r.site_id,r.department_id,r.category_id,r.ID DESC LIMIT 1) picked
+       WHERE NOT EXISTS(SELECT 1 FROM usol_notice_seen n WHERE n.dv='delivery' AND n.user=2 AND n.id=picked.id AND n.channel='email') LIMIT 10000
+    warmup: 0
+    timing_samples: 4
+    timing_aggregation: total
+    performance_rows: 100000
+    threshold_ms: 15000
+    expect:
+      rows: 1
+      data:
+      - id: 100000
+  - name: Limited notification selection obsolete for broad permissions
+    sql: |-
+      SELECT id FROM usol_notice_seen WHERE dv='delivery' AND user=2 AND channel='email' AND id NOT IN (SELECT r.ID AS id FROM usol_notice_item r
+       LEFT JOIN usol_notice_site unused ON unused.ID=r.site_id
+       WHERE (EXISTS (SELECT 1 FROM usol_notice_grant g WHERE g.user=2 AND g.tenant_id IS NULL LIMIT 1)
+         OR NOT (EXISTS (SELECT 1 FROM usol_notice_grant g WHERE g.user=2 AND g.tenant_id IS NULL LIMIT 1)))
+       AND COALESCE((SELECT (EXISTS (SELECT 1 FROM usol_notice_grant g WHERE g.user=2 AND g.tenant_id IS NULL LIMIT 1)
+         OR NOT (EXISTS (SELECT 1 FROM usol_notice_grant g WHERE g.user=2 AND g.tenant_id IS NULL LIMIT 1)))
+       AND (EXISTS (SELECT 1 FROM usol_notice_grant g WHERE g.user=2 AND g.tenant_id IS NULL)
+         OR EXISTS(SELECT 1 FROM usol_notice_grant g WHERE g.user=2 AND COALESCE(g.site_id,s.ID)=s.ID))
+
+       AND COALESCE((SELECT (EXISTS (SELECT 1 FROM usol_notice_grant g WHERE g.user=2 AND g.tenant_id IS NULL LIMIT 1)
+         OR NOT (EXISTS (SELECT 1 FROM usol_notice_grant g WHERE g.user=2 AND g.tenant_id IS NULL LIMIT 1)))
+       AND (EXISTS (SELECT 1 FROM usol_notice_grant g WHERE g.user=2 AND g.tenant_id IS NULL)
+         OR EXISTS(SELECT 1 FROM usol_notice_grant g WHERE g.user=2 AND g.tenant_id=t.ID))
+       FROM usol_notice_tenant t WHERE t.ID=s.tenant_id LIMIT 1),FALSE)
+       FROM usol_notice_site s WHERE s.ID=r.site_id LIMIT 1),FALSE)
+       ORDER BY (SELECT f.uploaded_at FROM usol_notice_asset f WHERE f.ID=r.asset_id LIMIT 1) DESC,
+       r.year_id DESC,r.site_id,r.department_id,r.category_id,r.ID DESC LIMIT 1) LIMIT 10000
+    warmup: 0
+    timing_samples: 4
+    timing_aggregation: total
+    performance_rows: 100000
+    threshold_ms: 15000
+    expect:
+      rows: 1
+      data:
+      - id: 42
+  - name: Limited derived scalar projection keeps its selected value
+    sql: SELECT p.uploaded_at FROM (SELECT (SELECT a.uploaded_at FROM usol_notice_asset
+      a WHERE a.ID=i.asset_id LIMIT 1) AS uploaded_at FROM usol_notice_item i WHERE
+      i.ID=1 LIMIT 1) p
+    expect:
+      rows: 1
+      data:
+      - uploaded_at: 1
+  - name: Limited notification rejects an unresolved filter column
+    sql: SELECT p.ID FROM (SELECT i.ID FROM usol_notice_item i WHERE i.missing_permission=1
+      ORDER BY i.ID LIMIT 1) p
+    expect:
+      error: true
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS usol_item"
   - sql: "DROP TABLE IF EXISTS usol_file"
@@ -598,3 +755,10 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS usol_dataview_import_user"
   - sql: "DROP TABLE IF EXISTS usol_dataview_customer"
   - sql: "DROP TABLE IF EXISTS usol_dataview_abo"
+
+  - sql: DROP TABLE IF EXISTS usol_notice_item
+  - sql: DROP TABLE IF EXISTS usol_notice_asset
+  - sql: DROP TABLE IF EXISTS usol_notice_site
+  - sql: DROP TABLE IF EXISTS usol_notice_tenant
+  - sql: DROP TABLE IF EXISTS usol_notice_grant
+  - sql: DROP TABLE IF EXISTS usol_notice_seen
