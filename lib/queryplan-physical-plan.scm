@@ -367,23 +367,27 @@ only partitioned FROM source would erase the block's row multiplicity
 		(lambda (stage_id) (not (nil? stage_id))))))
 
 (define stage_for_group_cache_source (lambda (stages src)
-	(if (lowering_catalog? stages)
-		(begin
-			(define index (lowering_catalog_group_cache_index stages))
-			(define key (stage_dependency_group_cache_key (source_schema src) (source_relation src)))
-			(define local (get_assoc index key))
-			(if (not (nil? local))
-				local
-				(begin
-					(define parent (lowering_catalog_parent stages))
-					(if (lowering_catalog? parent) (stage_for_group_cache_source parent src) nil))))
-		(reduce (coalesceNil stages '()) (lambda (found stage)
-			(if (and (group_stage? stage)
-				(and (equal? (group_stage_cache_schema stage) (source_schema src))
-					(equal? (group_stage_cache_relation stage) (source_relation src))))
-				(if (nil? found) stage (merge_group_prepare_stage found stage))
-				found))
-			nil))))
+	/* Logical stage-output references and ordinary tables cannot name a
+	physical carrier. Reject them before deriving every stage's cache name:
+	this lookup is also used throughout logical analysis and join costing. */
+	(if (not (physical_helper_relation? (source_relation src))) nil
+		(if (lowering_catalog? stages)
+			(begin
+				(define index (lowering_catalog_group_cache_index stages))
+				(define key (stage_dependency_group_cache_key (source_schema src) (source_relation src)))
+				(define local (get_assoc index key))
+				(if (not (nil? local))
+					local
+					(begin
+						(define parent (lowering_catalog_parent stages))
+						(if (lowering_catalog? parent) (stage_for_group_cache_source parent src) nil))))
+			(reduce (coalesceNil stages '()) (lambda (found stage)
+				(if (and (group_stage? stage)
+					(and (equal? (group_stage_cache_schema stage) (source_schema src))
+						(equal? (group_stage_cache_relation stage) (source_relation src))))
+					(if (nil? found) stage (merge_group_prepare_stage found stage))
+					found))
+				nil)))))
 
 (define group_cache_stages_from_sources (lambda (stages sources)
 	(filter (map (coalesceNil sources '()) (lambda (src)
@@ -452,7 +456,14 @@ only partitioned FROM source would erase the block's row multiplicity
 	(begin
 		(define available_stages (unique_stages_by_id (lowering_catalog_stages stages)))
 		(define id_index (stage_dependency_id_index stages))
-		(define group_cache_index (stage_dependency_group_cache_index stages))
+		/* Logical dependencies use stage-output IDs. Physical carrier names
+		are relevant only after a stage input has actually been lowered. */
+		(define needs_group_cache_index (reduce available_stages (lambda (found stage)
+			(or found (and (group_stage? stage)
+				(source_is_base_table? (gs_input stage))
+				(physical_helper_relation? (source_relation (gs_input stage)))))) false))
+		(define group_cache_index (if needs_group_cache_index
+			(stage_dependency_group_cache_index stages) '()))
 		(reduce available_stages (lambda (graph stage)
 			(set_assoc graph (logical_stage_key stage)
 				(if (group_stage? stage)
@@ -590,29 +601,17 @@ only partitioned FROM source would erase the block's row multiplicity
 					(qassoc_set_without (gs_facts stage) (quote lowering_catalog) catalog (quote stage_catalog))
 					(qassoc_set (gs_facts stage) (quote stage_catalog) catalog)))))))
 
-(define stages_with_canonical_group_caches_acc (lambda (stages signatures cache_index)
-	(match (coalesceNil stages '())
-		(cons stage rest) (begin
-			(if (not (group_stage? stage))
-				(begin
-					(define tail (stages_with_canonical_group_caches_acc rest signatures cache_index))
-					(list (cons stage (nth tail 0)) (nth tail 1)))
-				(begin
-					(define signature (get_assoc signatures (gs_id stage)))
-					(define cache (if (has_assoc? cache_index signature)
-						(cache_index signature)
-						(group_stage_default_cache stage signatures)))
-					(define next_index (if (has_assoc? cache_index signature)
-						cache_index
-						(set_assoc cache_index signature cache)))
-					(define cached_stage (group_stage_with_facts stage
-						(qassoc_set (gs_facts stage) (quote group_cache) cache)))
-					(define tail (stages_with_canonical_group_caches_acc rest signatures next_index))
-					(list (cons cached_stage (nth tail 0)) (nth tail 1)))))
-		_ (list '() cache_index))))
-
 (define stages_with_canonical_group_caches (lambda (stages signatures)
-	(nth (stages_with_canonical_group_caches_acc stages signatures '()) 0)))
+	/* A shared physical name does not authorize sharing the descriptor's
+	query-local dimension expressions. Bind each use in its own source scope. */
+	(map stages (lambda (stage)
+		(if (not (group_stage? stage)) stage
+			(group_stage_with_facts stage
+				(qassoc_set (qassoc_set (gs_facts stage) (quote group_cache)
+					(get_assoc signatures (concat (gs_id stage) ":cache")))
+					/* Keep compile-only dictionaries behind a handle: probes are also
+					immutable expression keys and must not embed mutable FastDicts. */
+					(quote cache_identity_index) (lambda () signatures))))))))
 
 (define stage_shared_prepare? (lambda (stage)
 	(and (group_stage? stage)
@@ -748,7 +747,7 @@ for that scan. The same prepared table is reused by every guarded variant. */
 	(begin
 		(define planning_session (planner_context_session (qb_facts block)))
 		(define stages (map stages (lambda (stage) (group_relation_input_choice stage block planning_session))))
-		(define signatures (stage_semantic_signature_index stages))
+		(define signatures (group_cache_identity_index stages))
 		/* Catalog lookups must return the same annotated immutable stage instances
 		that root lowering sees; otherwise nested probe copies derive old names. */
 		(define canonical_stages (stages_with_shared_prepare_facts
@@ -1419,11 +1418,24 @@ key-fill recipe per carrier. */
 		(gs_offset stage)
 		(gs_facts stage))))
 
+(define group_prepare_variants (lambda (stage)
+	(qassoc_get (gs_facts stage) (quote keytable_prepare_variants) (list stage))))
+
 (define merge_group_prepare_stage (lambda (target stage)
-	(group_prepare_stage_with_aggregates target
-		(merge (list
-			(gs_aggregates target)
-			(stage_output_left_join_aligned_aggregates target stage))))))
+	(begin
+		(define merged (group_prepare_stage_with_aggregates target
+			(merge (list (gs_aggregates target)
+				(stage_output_left_join_aligned_aggregates target stage)))))
+		/* A physical carrier can be shared while its callers bind different
+		session-key values. Keep those invocations; merging only their aggregate
+		columns would populate the first key domain and silently lose the rest. */
+		(if (and (nil? (qassoc_get (gs_facts target) (quote keytable_prepare_variants) nil))
+			(nil? (qassoc_get (gs_facts stage) (quote keytable_prepare_variants) nil))
+			(equal? (filter (gs_domain target) query_session_read?)
+				(filter (gs_domain stage) query_session_read?))) merged
+			(group_stage_with_facts merged (qassoc_set (gs_facts merged)
+				(quote keytable_prepare_variants)
+				(unique_stages_by_id (merge (list (group_prepare_variants target) (group_prepare_variants stage))))))))))
 
 (define collect_stage_prepares (lambda (stages)
 	(begin
@@ -1464,6 +1476,7 @@ key-fill recipe per carrier. */
 				(quote group)
 				(group_cache_schema cache)
 				(group_cache_relation cache)
+				(filter (gs_domain stage) query_session_read?)
 				(map (gs_aggregates stage) (lambda (ag)
 					(aggregate_col_name_using (gs_input stage) ag)))
 				(map (gs_order stage) (lambda (item) (stable_structural_hash item true)))
@@ -1617,421 +1630,426 @@ outer joins. */
 				_ true))))))
 
 (define lower_group_stage_prepare_using (lambda (all_stages lookup_stages stage include_nested_prepares result_sink)
-	(begin
-		(define observed_key (qassoc_get (gs_facts stage) (quote group_join_observation) nil))
-		(define logical_src (gs_input stage))
-		(define prepare_catalog (unique_stages_by_id (merge (list (list stage) all_stages))))
-		(define range_recmap_candidates (if (query_block? logical_src)
-			(select_group_range_recmap_candidate prepare_catalog stage logical_src
-				(lowering_catalog_planning_session lookup_stages)) '()))
-		(define src (reduce range_recmap_candidates
-			(lambda (block candidate) (query_block_with_group_range_recmap block candidate))
-			logical_src))
-		(define prepare_dependency_graph (stage_dependency_graph prepare_catalog))
-		(define prepare_dependencies
-			(stage_dependency_closure_using_graph prepare_dependency_graph stage))
-		(define relational_presence_chain (and (> (count prepare_dependencies) 2)
-			(reduce prepare_dependencies (lambda (eligible dependency)
-				(and eligible (and (group_stage? dependency)
-					(presence_probe_stage? dependency)))) true)))
-		(define fact_lookup (group_stage_lowering_catalog stage))
-		(define raw_stage_lookup (if (lowering_catalog? lookup_stages)
-			lookup_stages
-			(if (lowering_catalog? fact_lookup)
-				fact_lookup
-				(unique_stages_by_id
-					(merge (list
-						prepare_catalog
-						lookup_stages
-						(qassoc_get (gs_facts stage) (quote stage_catalog) '())))))))
-		/* A presence/scalar-first-probe source whose lookup domain is invariant
-		for the whole query (only literals, parameters, or session values -- no
-		outer-row column) is evaluated exactly once regardless of how many rows
-		this stage's own input scan accepts. Bind it before rewriting so
-		rewrite_scalar_first_probe_expr_using_index (via query_invariant_probe_
-		binding_for_col) replaces every reference with that one bound value
-		instead of a fresh per-row probe. Mirrors
-		prepare_simple_query_block_physical_core_chosen. */
-		(define invariant_probe_entries (query_invariant_probe_entries_for_stages raw_stage_lookup))
-		/* A boolean RecSet producer is also executed by cardinality observations,
-		before the main query's lexical bindings exist. Keep invariant probes as
-		query-scoped markers inside that closed producer; its own lowering memoizes
-		them once. Other result sinks retain the established outer binding. */
-		(define closed_boolean_sink (equal? result_sink (quote boolean-recset)))
-		(define stage_lookup (if closed_boolean_sink
-			(stage_lookup_with_inline_query_invariant_probes raw_stage_lookup)
-			(stage_lookup_with_query_invariant_probe_bindings
-				raw_stage_lookup invariant_probe_entries)))
-		(define invariant_probe_bindings (if closed_boolean_sink '()
-			(query_invariant_probe_bindings invariant_probe_entries)))
-		(define recmap_candidate (if (empty_list? range_recmap_candidates)
-			(select_nested_scalar_recmap_candidate
-				(group_stage_nested_scalar_recmap_candidate stage_lookup stage)
-				(lowering_catalog_planning_session lookup_stages)) nil))
-		(if (and (not (union_block? src)) (and (not (query_block? src)) (not (source_is_base_table? src))))
-			(neumann_fail "build_queryplan" "group-stage lowering expects a base table, query-block, or union-block input")
-			true)
-		(define cache (group_stage_cache stage))
-		(if (not (equal? (group_cache_kind cache) (quote group-keytable)))
-			(neumann_fail "build_queryplan" "foreign-key-backed group caches are not lowered yet")
-			true)
-		(define schema (group_cache_schema cache))
-		(define tbl (group_stage_input_name stage))
-		(define alias (group_stage_input_alias stage))
-		(define query_input (or (query_block? src) (union_block? src)))
-		/* Aggregate stages own their input query block. Apply the physical
-		membership choice here too; otherwise the top-level preparation pass never
-		reaches this nested block and eagerly materializes the candidate cache. */
-		(define membership_requirement (if (query_block? src)
-			(qassoc_get (qb_facts src) (quote membership_requirement) nil)
-			nil))
-		(define membership_src (if (and (query_block? src)
-			(not (nil? membership_requirement)))
-			(query_block_with_physical_membership_using stage_lookup src)
-			src))
-		/* A nested presence chain represented as correlated scalar probes copies
-		the complete remaining probe suffix into every parent prepare. Its stage
-		caches are already dependency-ordered here, so consume those relational
-		outputs directly once the chain contains more than one dependency. */
-		(define rewritten_src (if (query_block? membership_src)
-			(if (equal? result_sink (quote boolean-recset))
-				(query_block_with_probe_markers_using_graph
-					stage_lookup prepare_dependency_graph membership_src true)
-				(if relational_presence_chain
-					membership_src
-					(query_block_with_presence_probes_using stage_lookup membership_src false)))
-			membership_src))
-		(define scalar_order_cache (if (query_block? rewritten_src)
-			(scalar_order_lookup_cache_candidate stage_lookup rewritten_src) nil))
-		(define carrier_src (if (query_block? rewritten_src)
-			(query_block_with_scalar_order_lookup_cache
-				(query_block_with_scalar_order_lookup_cache_input
-					stage_lookup rewritten_src scalar_order_cache)
-				scalar_order_cache)
-			rewritten_src))
-		/* A bounded query input owns the same physical alternatives as a root block.
-		Run probe selection before preparing its dependencies even when ORDER uses
-		a scalar lookup rather than a native cached column. Otherwise that cache's
-		eligibility silently forces eager joins and hides driver-local predicates.
-		Keep the dependency-ordered presence-chain preparation above unchanged. */
-		(define optimized_src (if (and (query_block? carrier_src)
-			(or (not (nil? scalar_order_cache))
-				(and (not relational_presence_chain)
-					(query_limit_active? (qb_offset carrier_src) (qb_limit carrier_src)))))
-			(query_block_with_scalar_first_probes_using stage_lookup carrier_src)
-			carrier_src))
-		(define rewrite_catalog_src (if (nil? scalar_order_cache) membership_src optimized_src))
-		(define rewrite_sources (if (query_block? rewrite_catalog_src) (qb_sources rewrite_catalog_src) '()))
-		(define rewrite_default_alias (if (query_block? src)
-			(qassoc_get (qb_facts rewrite_catalog_src) (quote default_alias) (if (empty_list? rewrite_sources) nil (source_alias (car rewrite_sources))))
-			nil))
-		/* Keys and aggregate values are consumers outside the input query block.
-		Rewrite them through every probe selected above, not only presence probes;
-		otherwise removing a scalar source leaves its projected value unbound. */
-		(define retained_input_aliases (if (query_block? optimized_src)
-			(source_aliases (qb_sources optimized_src)) '()))
-		(define input_probe_sources (if (and (query_block? carrier_src) (query_block? optimized_src))
-			(filter (qb_sources carrier_src) (lambda (candidate)
-				(not (contains? retained_input_aliases (source_alias candidate)))))
-			'()))
-		(define input_probe_column_map (if (empty_list? input_probe_sources) '()
-			(stage_output_single_aggregate_columns
-				(stage_output_stage_index (lowering_catalog_stages stage_lookup)) input_probe_sources)))
-		(define stage_probe_sources_for_rewrite (if (query_block? src)
-			(merge_unique (list input_probe_sources
-				(presence_probe_output_sources stage_lookup rewrite_sources rewrite_default_alias
-					(equal? result_sink (quote boolean-recset)))))
-			'()))
-		(define keys (if (empty_list? (gs_keys stage))
-			'(1)
-			(if (query_block? src)
-				(map (gs_keys stage) (lambda (key)
-					(rewrite_scalar_first_probe_expr stage_lookup stage_probe_sources_for_rewrite rewrite_default_alias
-						(rewrite_stage_graph_expr input_probe_column_map '()
-							(rewrite_group_range_recmaps_expr range_recmap_candidates key)))))
-				(gs_keys stage))))
-		(define prepare_order_items (coalesceNil (gs_order stage) '()))
-		(define prepare_resolved_order_exprs (map prepare_order_items (lambda (item)
-			(match item '(expr _dir) (canonical_column_expr_for_alias alias expr)))))
-		(define key_index (make_group_key_index keys prepare_resolved_order_exprs))
-		(define condition (if (query_block? src)
-			(rewrite_scalar_first_probe_expr stage_lookup stage_probe_sources_for_rewrite rewrite_default_alias
-				(rewrite_group_range_recmaps_expr range_recmap_candidates
-					(rewrite_stage_graph_expr input_probe_column_map '()
-						(coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))))
-			(coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true)))
-		(define needs_count_filter (and
-			(not (qassoc_get (gs_facts stage) (quote preserve_empty_domain) false))
-			(not (scalar_value_stage? stage))
-			(and (not (equal? keys '(1))) (not (equal? condition true)))))
-		(define ags (if needs_count_filter
-			(dedupe_aggregates_by_col (merge (list (gs_aggregates stage) (list aggregate_count_descriptor))))
-			(gs_aggregates stage)))
-		(define recmap_ags
-			(rewrite_group_range_recmaps_expr range_recmap_candidates
-				(rewrite_nested_scalar_recmap_expr recmap_candidate ags)))
-		(define lowering_ags (if (query_block? src)
-			(rewrite_scalar_first_probe_aggregates stage_lookup stage_probe_sources_for_rewrite rewrite_default_alias
-				(rewrite_stage_graph_expr input_probe_column_map '() recmap_ags))
-			recmap_ags))
-		(define result_sink_ags (if (and (equal? result_sink (quote boolean-recset))
-			(query_block? src))
-			(rewrite_scalar_first_probe_aggregates stage_lookup
-				(filter rewrite_sources (lambda (candidate)
-					(stage_output_relation? (source_relation candidate))))
-				rewrite_default_alias ags)
-			lowering_ags))
-		(define key_names (group_key_cols keys))
-		(define aggregate_condition (replace_group_session_expr stage keys key_names condition))
-		(define aggregate_probe_bindings
-			(coalesceNil (qassoc_get (gs_facts stage) (quote aggregate_probe_bindings) '()) '()))
-		(define grouptbl (group_cache_relation cache))
-		(define initializer_owner (qassoc_get (gs_facts stage) (quote keytable_initializer_owner) true))
-		(define scalar_single_stage (scalar_value_stage? stage))
-		(define scalar_query_stage (and (query_block? src)
-			(and scalar_single_stage
-				(and (equal? (qassoc_get (gs_facts stage) (quote partition_limit) nil) 2)
-					(and (equal? (qassoc_get (gs_facts stage) (quote on_overflow) nil) (quote error))
-						(and (equal? (count ags) 2)
-							(equal? (cadr ags) aggregate_count_descriptor)))))))
-		(define scalar_order_base_stage (and (not query_input)
-			(compatible_scalar_order_aggregates? ags)))
-		/* Aggregate column names belong to the immutable logical stage. Prepared
-		input and RecMap rewrites below affect execution only: removing a scalar
-		alias must not rename aggregate columns read by the stage output. Base aggregate
-		columns use their direct physical builder and need no canonical list here. */
-		(define aggregate_cols (if (or query_input scalar_order_base_stage)
-			(map ags (lambda (ag) (aggregate_col_name_using logical_src ag)))
-			'()))
-		(define scalar_aggregate_stage (scalar_aggregate_probe_stage? stage))
-		(define prepared_src (if (query_block? optimized_src)
-			(if (equal? result_sink (quote boolean-recset))
-				optimized_src
-				(if scalar_aggregate_stage
-					(begin
-						(define constant_reorder_stages (if (lowering_catalog? stage_lookup)
-							stage_lookup
-							(unique_stages_by_id (merge (list stage_lookup (qb_stages rewritten_src))))))
-						(if (not (empty_list? (filter (qb_sources optimized_src) (lambda (src)
-							(constant_scalar_or_presence_stage_output_source? constant_reorder_stages src)))))
-							(query_block_without_stages_after_eager_prepare_with_constant_scalars_first constant_reorder_stages optimized_src)
-							(query_block_without_stages_after_eager_prepare_using stage_lookup optimized_src)))
-					(query_block_without_stages_after_eager_prepare_using stage_lookup optimized_src)))
-			optimized_src))
-		(define direct_nested_stages (if (query_block? optimized_src)
-			(merge_unique (list
-				(query_block_stages_to_prepare_using stage_lookup optimized_src)
-				(available_stage_outputs_from_sources_using stage_lookup (qb_sources optimized_src))
-				(available_stage_outputs_from_sources_using stage_lookup (group_stage_final_extra_source_refs stage))
-				(group_cache_stages_from_sources stage_lookup (qb_sources optimized_src))
-				(group_cache_stages_from_sources stage_lookup (group_stage_final_extra_source_refs stage))
-				(query_block_probe_expr_stages optimized_src)))
-			'()))
-		(define owner_handle (qassoc_get (gs_facts stage) (quote btw2025_handle) nil))
-		(define owner_ancestors (qassoc_get (gs_facts stage) (quote btw2025_ancestors) '()))
-		(define nested_stages (if (nil? owner_handle)
-			direct_nested_stages
-			(filter direct_nested_stages (lambda (candidate)
-				(begin
-					(define candidate_handle (qassoc_get (gs_facts candidate) (quote btw2025_handle) nil))
-					(define candidate_parent (qassoc_get (gs_facts candidate) (quote btw2025_parent) nil))
-					(or
-						(nil? candidate_handle)
-						(equal? candidate_parent owner_handle)
-						(and
-							(nil? candidate_parent)
-							(and
-								(not (equal? candidate_handle owner_handle))
-								(not (contains? owner_ancestors candidate_handle))))))))))
-		(define nested_prepare (if (and include_nested_prepares (query_block? optimized_src))
-			(if relational_presence_chain
-				(lower_presence_stage_prepares_with_graph
-					prepare_dependency_graph stage_lookup nested_stages)
-				(lower_unique_stage_prepares_using prepare_catalog stage_lookup nested_stages))
-			'()))
-		(define nested_materialize (if (and include_nested_prepares (query_block? optimized_src))
-			(lower_stage_materialize_all nested_stages) '()))
-		(define nested_prepare_expr (if (empty_list? nested_prepare)
-			nil
-			(cons (quote !begin) (merge (list nested_prepare nested_materialize)))))
-		(define key_columns (map (zip key_names keys) (lambda (binding)
-			(list (quote list) "column" (car binding) "any" (quoted_runtime_list '())
-				(list (quote list) "collate" (physical_column_collation_expr src (cadr binding)))))))
-		(define create_cols (cons (quote list)
-			(cons (cons (quote list) (cons "unique" (cons "group" (list (cons (quote list) key_names)))))
-				key_columns)))
-		/* Ordered bulk fills and pointwise probes share the canonical cache.
-		Keep the same computed-column definition for both physical carriers;
-		bulk preparation seeds values through its computed setters. */
-		(define ensure_agg_columns (if scalar_order_base_stage
-			(map ags (lambda (ag)
-				(build_group_aggregate_column stage schema tbl alias grouptbl
-					keys key_names aggregate_condition ag)))
-			(if query_input
-				(map (produceN (count ags)) (lambda (i)
-					(list (quote createcolumn)
-						(list (quote table) schema grouptbl)
-						(nth aggregate_cols i)
-						"any"
-						(quoted_runtime_list '())
-						(list (quote list) "collate" (physical_column_collation_expr src (car (nth ags i)))))))
-				'())))
-		(define collect_plan (if (not query_input)
-			nil
-			(if (union_block? src)
-				(build_union_group_aggregates_insert_plan prepared_src src grouptbl keys key_names (list aggregate_count_descriptor))
-				(build_query_group_collect_plan prepared_src grouptbl keys key_names))))
-		/* A base-table bulk fill cannot evaluate a dependent stage value by
-		itself. Those conditions are realized by the per-aggregate physical
-		operator below (including projected RecSets), after nested stages have
-		been prepared. */
-		(define base_group_into_plan (if (or query_input
-			(or scalar_order_base_stage (expr_refs_stage_output_alias? condition)))
-			nil
-			(build_base_group_into_plan schema tbl alias src grouptbl keys key_names condition
-				/* Probe-bound partitions discover their complete key domain once, but
-				leave aggregate values to the filtered lazy computed columns. */
-				(if (empty_list? aggregate_probe_bindings)
-					(non_scalar_order_aggregates ags)
-					'()) (gs_facts stage))))
-		(define cleanup_plan (if (query_block? src)
-			nil
-			(build_group_keytable_cleanup schema tbl alias grouptbl keys key_names)))
-		(define agg_plans (if query_input
-			(if (empty_list? ags)
-				'()
-				(list (if (union_block? src)
-					(build_union_group_aggregates_insert_plan prepared_src src grouptbl keys key_names ags)
-					(build_query_group_aggregates_insert_plan prepared_src grouptbl keys key_names lowering_ags aggregate_cols
-						(lowering_catalog_planning_session raw_stage_lookup)))))
-			(if scalar_order_base_stage
-				(list (build_group_ordered_scalar_columns_insert_plan schema tbl alias grouptbl keys key_names condition ags))
-				(map ags (lambda (ag)
-					(build_group_aggregate_column
-						stage schema tbl alias grouptbl keys key_names aggregate_condition ag))))))
-		(define empty_aggregate_seed_plans (if (and query_input
-			(and initializer_owner
-				(and (not scalar_single_stage)
-					(not (empty_list? ags)))))
-			(if (equal? keys '(1))
-				(list (build_group_constant_key_insert_plan schema grouptbl))
-				(if (reduce keys (lambda (session_only key)
-					(and session_only (query_session_read? key))) true)
-					(list (build_group_session_key_insert_plan schema grouptbl key_names keys))
-					'()))
-			'()))
-		(define computed_order_exprs (merge_unique (map (produceN (count prepare_order_items)) (lambda (i)
-			(match (nth prepare_order_items i) '(expr _dir) (begin
-				(define replaced_order_expr (replace_group_order_expr_indexed
-					src alias grouptbl keys key_names ags key_index expr
-					(nth prepare_resolved_order_exprs i)))
-				(if (direct_group_order_expr? replaced_order_expr) '() (list replaced_order_expr))))))))
-		(define computed_order_plans (map computed_order_exprs (lambda (expr)
-			(build_group_computed_order_column schema grouptbl expr))))
-		(define ensure_agg_expr (if (empty_list? ensure_agg_columns)
-			nil
-			(cons (quote !begin) ensure_agg_columns)))
-		(define aggregate_prepare_expr (cons
-			(quote !begin)
-			(merge (list ensure_agg_columns agg_plans computed_order_plans))))
-		(define base_group_fill (symbol "__group_base_fill"))
-		(define base_group_fill_call (list base_group_fill (physical_query_tx_symbol)))
-		(define finalize_group_fill (list (quote rebuild) (list (quote table) schema grouptbl) true false))
-		(define partition_plan (group_cache_partition_plan schema tbl alias src grouptbl keys key_names))
-		(define initial_fill_expr (if (nil? base_group_into_plan)
-			nil
-			(list (quote initialize_cache_table)
-				(physical_query_tx_symbol)
-				(list (quote table) schema grouptbl)
-				(list (quote list) (source_table_expr src))
-				(list (quote lambda) (list (physical_query_tx_symbol))
-					(cons (quote !begin) (filter (list partition_plan aggregate_prepare_expr cleanup_plan) (lambda (expr) (not (nil? expr))))))
-				base_group_fill
-				(list (quote lambda) (list (symbol "__group_finalize_tx")) finalize_group_fill))))
-		(define create_options (if (nil? initial_fill_expr)
-			(quoted_runtime_list '("engine" "cache"))
-			(list (quote list)
-				"engine" "cache"
-				"oninit" (list (quote lambda) (list (quote tx)) initial_fill_expr))))
-		(define group_cache_created (symbol "__group_cache_created"))
-		(define keytable_init
-			(list (quote group_cache_create) schema grouptbl create_cols create_options true (quote tx)))
-		(define boolean_row_keys (if (equal? result_sink (quote boolean-recset))
-			(scalar_first_probe_recset_row_keys stage
-				(scalar_first_probe_carrier_source prepared_src)) '()))
-		(define boolean_domain_src (if (equal? result_sink (quote boolean-recset))
-			(boolean_recset_domain_source prepared_src boolean_row_keys) nil))
-		(define boolean_input (if (nil? boolean_domain_src) prepared_src
-			(query_block_with_inner_domain_source prepared_src boolean_domain_src)))
-		(if (and (equal? result_sink (quote boolean-recset)) (nil? boolean_domain_src))
-			(neumann_fail "build_queryplan" "boolean RecSet sink requires a unique base-table domain")
-			true)
-		(define lowered_plan_core (if (equal? result_sink (quote boolean-recset))
-			(build_query_boolean_recset_plan
-				stage_lookup boolean_input boolean_domain_src boolean_row_keys result_sink_ags)
-			(if scalar_query_stage
-				(list (quote !begin)
-					nested_prepare_expr
-					(if initializer_owner keytable_init nil)
-					ensure_agg_expr
-					(build_scalar_single_query_stage_fill_plan
-						prepared_src grouptbl keys key_names
-						(car lowering_ags) (cadr lowering_ags)
-						(car aggregate_cols) (cadr aggregate_cols)))
-				(if query_input
-					(cons (quote !begin)
+	(if (not (nil? (qassoc_get (gs_facts stage) (quote keytable_prepare_variants) nil)))
+		(cons (quote !begin) (map (group_prepare_variants stage) (lambda (variant)
+			(lower_group_stage_prepare_using all_stages lookup_stages variant include_nested_prepares result_sink))))
+		(begin
+			(define observed_key (qassoc_get (gs_facts stage) (quote group_join_observation) nil))
+			(define logical_src (gs_input stage))
+			(define prepare_catalog (unique_stages_by_id (merge (list (list stage) all_stages))))
+			(define range_recmap_candidates (if (query_block? logical_src)
+				(select_group_range_recmap_candidate prepare_catalog stage logical_src
+					(lowering_catalog_planning_session lookup_stages)) '()))
+			(define src (reduce range_recmap_candidates
+				(lambda (block candidate) (query_block_with_group_range_recmap block candidate))
+				logical_src))
+			(define prepare_dependency_graph (stage_dependency_graph prepare_catalog))
+			(define prepare_dependencies
+				(stage_dependency_closure_using_graph prepare_dependency_graph stage))
+			(define relational_presence_chain (and (> (count prepare_dependencies) 2)
+				(reduce prepare_dependencies (lambda (eligible dependency)
+					(and eligible (and (group_stage? dependency)
+						(presence_probe_stage? dependency)))) true)))
+			(define fact_lookup (group_stage_lowering_catalog stage))
+			(define raw_stage_lookup (if (lowering_catalog? lookup_stages)
+				lookup_stages
+				(if (lowering_catalog? fact_lookup)
+					fact_lookup
+					(unique_stages_by_id
 						(merge (list
-							nested_prepare
-							nested_materialize
-							(if initializer_owner (list keytable_init) '())
-							ensure_agg_columns
-							computed_order_plans
-							(if (and initializer_owner (empty_list? ags)) (list collect_plan) '())
-							agg_plans
-							empty_aggregate_seed_plans)))
-					(if scalar_order_base_stage
-						(list (quote !begin)
-							nested_prepare_expr
-							(if initializer_owner keytable_init nil)
-							aggregate_prepare_expr)
-						(list (quote !begin)
-							nested_prepare_expr
-							(if initializer_owner
-								(list
-									(list (quote lambda) (list group_cache_created)
-										(list (quote if) group_cache_created
-											nil
-											(list (quote if) (group_stage_session_binding_missing_expr stage schema grouptbl keys key_names)
-												(list (quote !begin)
-													aggregate_prepare_expr
-													base_group_fill_call)
-												aggregate_prepare_expr)))
-									keytable_init)
-								aggregate_prepare_expr)))))))
-		/* A query-invariant presence/scalar-first probe (see the comment at
-		raw_stage_lookup above) is bound exactly once here, ahead of whatever
-		this stage's own prepare plan does, so every rewritten reference below
-		reads that one binding instead of re-probing per row. */
-		(define recmap_plan (if (and (empty_list? range_recmap_candidates)
-			(nil? recmap_candidate)) lowered_plan_core
-			(cons (quote !begin)
-				(merge (list
-					(map range_recmap_candidates group_range_recmap_binding)
-					(if (nil? recmap_candidate) '()
-						(list (nested_scalar_recmap_binding recmap_candidate)))
-					(list lowered_plan_core))))))
-		(define lookup_cached_plan (if (nil? scalar_order_cache)
-			recmap_plan
-			(list (quote !begin) (nth scalar_order_cache 4) recmap_plan)))
-		(define lowered_plan (if (empty_list? invariant_probe_bindings)
-			lookup_cached_plan
-			(cons (quote !begin) (merge (list invariant_probe_bindings (list lookup_cached_plan))))))
-		(if (not (nil? observed_key)) (planner_queryplan_observation_read_expr observed_key)
-			(if (nil? base_group_into_plan)
-				lowered_plan
-				(list
-					(list (quote lambda) (list base_group_fill) lowered_plan)
-					(list (quote lambda) (list (physical_query_tx_symbol)) base_group_into_plan)))))))
+							prepare_catalog
+							lookup_stages
+							(qassoc_get (gs_facts stage) (quote stage_catalog) '())))))))
+			/* A presence/scalar-first-probe source whose lookup domain is invariant
+			for the whole query (only literals, parameters, or session values -- no
+			outer-row column) is evaluated exactly once regardless of how many rows
+			this stage's own input scan accepts. Bind it before rewriting so
+			rewrite_scalar_first_probe_expr_using_index (via query_invariant_probe_
+			binding_for_col) replaces every reference with that one bound value
+			instead of a fresh per-row probe. Mirrors
+			prepare_simple_query_block_physical_core_chosen. */
+			(define invariant_probe_entries (query_invariant_probe_entries_for_stages raw_stage_lookup))
+			/* A boolean RecSet producer is also executed by cardinality observations,
+			before the main query's lexical bindings exist. Keep invariant probes as
+			query-scoped markers inside that closed producer; its own lowering memoizes
+			them once. Other result sinks retain the established outer binding. */
+			(define closed_boolean_sink (equal? result_sink (quote boolean-recset)))
+			(define stage_lookup (if closed_boolean_sink
+				(stage_lookup_with_inline_query_invariant_probes raw_stage_lookup)
+				(stage_lookup_with_query_invariant_probe_bindings
+					raw_stage_lookup invariant_probe_entries)))
+			(define invariant_probe_bindings (if closed_boolean_sink '()
+				(query_invariant_probe_bindings invariant_probe_entries)))
+			(define recmap_candidate (if (empty_list? range_recmap_candidates)
+				(select_nested_scalar_recmap_candidate
+					(group_stage_nested_scalar_recmap_candidate stage_lookup stage)
+					(lowering_catalog_planning_session lookup_stages)) nil))
+			(if (and (not (union_block? src)) (and (not (query_block? src)) (not (source_is_base_table? src))))
+				(neumann_fail "build_queryplan" "group-stage lowering expects a base table, query-block, or union-block input")
+				true)
+			(define cache (group_stage_cache stage))
+			(if (not (equal? (group_cache_kind cache) (quote group-keytable)))
+				(neumann_fail "build_queryplan" "foreign-key-backed group caches are not lowered yet")
+				true)
+			(define schema (group_cache_schema cache))
+			(define tbl (group_stage_input_name stage))
+			(define alias (group_stage_input_alias stage))
+			(define query_input (or (query_block? src) (union_block? src)))
+			/* Aggregate stages own their input query block. Apply the physical
+			membership choice here too; otherwise the top-level preparation pass never
+			reaches this nested block and eagerly materializes the candidate cache. */
+			(define membership_requirement (if (query_block? src)
+				(qassoc_get (qb_facts src) (quote membership_requirement) nil)
+				nil))
+			(define membership_src (if (and (query_block? src)
+				(not (nil? membership_requirement)))
+				(query_block_with_physical_membership_using stage_lookup src)
+				src))
+			/* A nested presence chain represented as correlated scalar probes copies
+			the complete remaining probe suffix into every parent prepare. Its stage
+			caches are already dependency-ordered here, so consume those relational
+			outputs directly once the chain contains more than one dependency. */
+			(define rewritten_src (if (query_block? membership_src)
+				(if (equal? result_sink (quote boolean-recset))
+					(query_block_with_probe_markers_using_graph
+						stage_lookup prepare_dependency_graph membership_src true)
+					(if relational_presence_chain
+						membership_src
+						(query_block_with_presence_probes_using stage_lookup membership_src false)))
+				membership_src))
+			(define scalar_order_cache (if (query_block? rewritten_src)
+				(scalar_order_lookup_cache_candidate stage_lookup rewritten_src) nil))
+			(define carrier_src (if (query_block? rewritten_src)
+				(query_block_with_scalar_order_lookup_cache
+					(query_block_with_scalar_order_lookup_cache_input
+						stage_lookup rewritten_src scalar_order_cache)
+					scalar_order_cache)
+				rewritten_src))
+			/* A bounded query input owns the same physical alternatives as a root block.
+			Run probe selection before preparing its dependencies even when ORDER uses
+			a scalar lookup rather than a native cached column. Otherwise that cache's
+			eligibility silently forces eager joins and hides driver-local predicates.
+			Keep the dependency-ordered presence-chain preparation above unchanged. */
+			(define optimized_src (if (and (query_block? carrier_src)
+				(or (not (nil? scalar_order_cache))
+					(and (not relational_presence_chain)
+						(query_limit_active? (qb_offset carrier_src) (qb_limit carrier_src)))))
+				(query_block_with_scalar_first_probes_using stage_lookup carrier_src)
+				carrier_src))
+			(define rewrite_catalog_src (if (nil? scalar_order_cache) membership_src optimized_src))
+			(define rewrite_sources (if (query_block? rewrite_catalog_src) (qb_sources rewrite_catalog_src) '()))
+			(define rewrite_default_alias (if (query_block? src)
+				(qassoc_get (qb_facts rewrite_catalog_src) (quote default_alias) (if (empty_list? rewrite_sources) nil (source_alias (car rewrite_sources))))
+				nil))
+			/* Keys and aggregate values are consumers outside the input query block.
+			Rewrite them through every probe selected above, not only presence probes;
+			otherwise removing a scalar source leaves its projected value unbound. */
+			(define retained_input_aliases (if (query_block? optimized_src)
+				(source_aliases (qb_sources optimized_src)) '()))
+			(define input_probe_sources (if (and (query_block? carrier_src) (query_block? optimized_src))
+				(filter (qb_sources carrier_src) (lambda (candidate)
+					(not (contains? retained_input_aliases (source_alias candidate)))))
+				'()))
+			(define input_probe_column_map (if (empty_list? input_probe_sources) '()
+				(stage_output_single_aggregate_columns
+					(stage_output_stage_index (lowering_catalog_stages stage_lookup)) input_probe_sources)))
+			(define stage_probe_sources_for_rewrite (if (query_block? src)
+				(merge_unique (list input_probe_sources
+					(presence_probe_output_sources stage_lookup rewrite_sources rewrite_default_alias
+						(equal? result_sink (quote boolean-recset)))))
+				'()))
+			(define keys (if (empty_list? (gs_keys stage))
+				'(1)
+				(if (query_block? src)
+					(map (gs_keys stage) (lambda (key)
+						(rewrite_scalar_first_probe_expr stage_lookup stage_probe_sources_for_rewrite rewrite_default_alias
+							(rewrite_stage_graph_expr input_probe_column_map '()
+								(rewrite_group_range_recmaps_expr range_recmap_candidates key)))))
+					(gs_keys stage))))
+			(define prepare_order_items (coalesceNil (gs_order stage) '()))
+			(define prepare_resolved_order_exprs (map prepare_order_items (lambda (item)
+				(match item '(expr _dir) (canonical_column_expr_for_alias alias expr)))))
+			(define key_index (make_group_key_index keys prepare_resolved_order_exprs))
+			(define condition (if (query_block? src)
+				(rewrite_scalar_first_probe_expr stage_lookup stage_probe_sources_for_rewrite rewrite_default_alias
+					(rewrite_group_range_recmaps_expr range_recmap_candidates
+						(rewrite_stage_graph_expr input_probe_column_map '()
+							(coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))))
+				(coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true)))
+			(define needs_count_filter (and
+				(not (qassoc_get (gs_facts stage) (quote preserve_empty_domain) false))
+				(not (scalar_value_stage? stage))
+				(and (not (equal? keys '(1))) (not (equal? condition true)))))
+			(define ags (if needs_count_filter
+				(dedupe_aggregates_by_col (merge (list (gs_aggregates stage) (list aggregate_count_descriptor))))
+				(gs_aggregates stage)))
+			(define recmap_ags
+				(rewrite_group_range_recmaps_expr range_recmap_candidates
+					(rewrite_nested_scalar_recmap_expr recmap_candidate ags)))
+			(define lowering_ags (if (query_block? src)
+				(rewrite_scalar_first_probe_aggregates stage_lookup stage_probe_sources_for_rewrite rewrite_default_alias
+					(rewrite_stage_graph_expr input_probe_column_map '() recmap_ags))
+				recmap_ags))
+			(define result_sink_ags (if (and (equal? result_sink (quote boolean-recset))
+				(query_block? src))
+				(rewrite_scalar_first_probe_aggregates stage_lookup
+					(filter rewrite_sources (lambda (candidate)
+						(stage_output_relation? (source_relation candidate))))
+					rewrite_default_alias ags)
+				lowering_ags))
+			(define key_names (group_key_cols keys))
+			(define aggregate_condition (replace_group_session_expr stage keys key_names condition))
+			(define aggregate_probe_bindings
+				(coalesceNil (qassoc_get (gs_facts stage) (quote aggregate_probe_bindings) '()) '()))
+			(define grouptbl (group_cache_relation cache))
+			(define initializer_owner (qassoc_get (gs_facts stage) (quote keytable_initializer_owner) true))
+			(define scalar_single_stage (scalar_value_stage? stage))
+			(define scalar_query_stage (and (query_block? src)
+				(and scalar_single_stage
+					(and (equal? (qassoc_get (gs_facts stage) (quote partition_limit) nil) 2)
+						(and (equal? (qassoc_get (gs_facts stage) (quote on_overflow) nil) (quote error))
+							(and (equal? (count ags) 2)
+								(equal? (cadr ags) aggregate_count_descriptor)))))))
+			(define scalar_order_base_stage (and (not query_input)
+				(compatible_scalar_order_aggregates? ags)))
+			/* Aggregate column names belong to the immutable logical stage. Prepared
+			input and RecMap rewrites below affect execution only: removing a scalar
+			alias must not rename aggregate columns read by the stage output. Base aggregate
+			columns use their direct physical builder and need no canonical list here. */
+			(define aggregate_cols (if (or query_input scalar_order_base_stage)
+				(map ags (lambda (ag) (aggregate_col_name_using logical_src ag)))
+				'()))
+			(define scalar_aggregate_stage (scalar_aggregate_probe_stage? stage))
+			(define prepared_src (if (query_block? optimized_src)
+				(if (equal? result_sink (quote boolean-recset))
+					optimized_src
+					(if scalar_aggregate_stage
+						(begin
+							(define constant_reorder_stages (if (lowering_catalog? stage_lookup)
+								stage_lookup
+								(unique_stages_by_id (merge (list stage_lookup (qb_stages rewritten_src))))))
+							(if (not (empty_list? (filter (qb_sources optimized_src) (lambda (src)
+								(constant_scalar_or_presence_stage_output_source? constant_reorder_stages src)))))
+								(query_block_without_stages_after_eager_prepare_with_constant_scalars_first constant_reorder_stages optimized_src)
+								(query_block_without_stages_after_eager_prepare_using stage_lookup optimized_src)))
+						(query_block_without_stages_after_eager_prepare_using stage_lookup optimized_src)))
+				optimized_src))
+			(define direct_nested_stages (if (query_block? optimized_src)
+				(merge_unique (list
+					(query_block_stages_to_prepare_using stage_lookup optimized_src)
+					(available_stage_outputs_from_sources_using stage_lookup (qb_sources optimized_src))
+					(available_stage_outputs_from_sources_using stage_lookup (group_stage_final_extra_source_refs stage))
+					(group_cache_stages_from_sources stage_lookup (qb_sources optimized_src))
+					(group_cache_stages_from_sources stage_lookup (group_stage_final_extra_source_refs stage))
+					(query_block_probe_expr_stages optimized_src)))
+				'()))
+			(define owner_handle (qassoc_get (gs_facts stage) (quote btw2025_handle) nil))
+			(define owner_ancestors (qassoc_get (gs_facts stage) (quote btw2025_ancestors) '()))
+			(define nested_stages (if (nil? owner_handle)
+				direct_nested_stages
+				(filter direct_nested_stages (lambda (candidate)
+					(begin
+						(define candidate_handle (qassoc_get (gs_facts candidate) (quote btw2025_handle) nil))
+						(define candidate_parent (qassoc_get (gs_facts candidate) (quote btw2025_parent) nil))
+						(or
+							(nil? candidate_handle)
+							(equal? candidate_parent owner_handle)
+							(and
+								(nil? candidate_parent)
+								(and
+									(not (equal? candidate_handle owner_handle))
+									(not (contains? owner_ancestors candidate_handle))))))))))
+			(define nested_prepare (if (and include_nested_prepares (query_block? optimized_src))
+				(if relational_presence_chain
+					(lower_presence_stage_prepares_with_graph
+						prepare_dependency_graph stage_lookup nested_stages)
+					(lower_unique_stage_prepares_using prepare_catalog stage_lookup nested_stages))
+				'()))
+			(define nested_materialize (if (and include_nested_prepares (query_block? optimized_src))
+				(lower_stage_materialize_all nested_stages) '()))
+			(define nested_prepare_expr (if (empty_list? nested_prepare)
+				nil
+				(cons (quote !begin) (merge (list nested_prepare nested_materialize)))))
+			(define key_columns (map (zip key_names keys) (lambda (binding)
+				(list (quote list) "column" (car binding) "any" (quoted_runtime_list '())
+					(list (quote list) "collate" (physical_column_collation_expr src (cadr binding)))))))
+			(define create_cols (cons (quote list)
+				(cons (cons (quote list) (cons "unique" (cons "group" (list (cons (quote list) key_names)))))
+					key_columns)))
+			/* Ordered bulk fills and pointwise probes share the canonical cache.
+			Keep the same computed-column definition for both physical carriers;
+			bulk preparation seeds values through its computed setters. */
+			(define ensure_agg_columns (if scalar_order_base_stage
+				(map ags (lambda (ag)
+					(build_group_aggregate_column stage schema tbl alias grouptbl
+						keys key_names aggregate_condition ag)))
+				(if query_input
+					(map (produceN (count ags)) (lambda (i)
+						(list (quote createcolumn)
+							(list (quote table) schema grouptbl)
+							(nth aggregate_cols i)
+							"any"
+							(quoted_runtime_list '())
+							(list (quote list) "collate" (physical_column_collation_expr src (car (nth ags i)))))))
+					'())))
+			(define collect_plan (if (not query_input)
+				nil
+				(if (union_block? src)
+					(build_union_group_aggregates_insert_plan prepared_src src grouptbl keys key_names (list aggregate_count_descriptor))
+					(build_query_group_collect_plan prepared_src grouptbl keys key_names))))
+			/* A base-table bulk fill cannot evaluate a dependent stage value by
+			itself. Those conditions are realized by the per-aggregate physical
+			operator below (including projected RecSets), after nested stages have
+			been prepared. */
+			(define base_group_into_plan (if (or query_input
+				(or scalar_order_base_stage (expr_refs_stage_output_alias? condition)))
+				nil
+				(build_base_group_into_plan schema tbl alias src grouptbl keys key_names condition
+					/* Probe-bound partitions discover their complete key domain once, but
+					leave aggregate values to the filtered lazy computed columns. */
+					(if (empty_list? aggregate_probe_bindings)
+						(non_scalar_order_aggregates ags)
+						'()) (gs_facts stage))))
+			(define cleanup_plan (if (query_block? src)
+				nil
+				(build_group_keytable_cleanup schema tbl alias grouptbl keys key_names)))
+			(define agg_plans (if query_input
+				(if (empty_list? ags)
+					'()
+					(list (if (union_block? src)
+						(build_union_group_aggregates_insert_plan prepared_src src grouptbl keys key_names ags)
+						(build_query_group_aggregates_insert_plan prepared_src grouptbl keys key_names lowering_ags aggregate_cols
+							(lowering_catalog_planning_session raw_stage_lookup)))))
+				(if scalar_order_base_stage
+					(list (build_group_ordered_scalar_columns_insert_plan schema tbl alias grouptbl keys key_names condition ags))
+					(map ags (lambda (ag)
+						(build_group_aggregate_column
+							stage schema tbl alias grouptbl keys key_names aggregate_condition ag))))))
+			(define empty_aggregate_seed_plans (if (and query_input
+				(and initializer_owner
+					(and (not scalar_single_stage)
+						(not (empty_list? ags)))))
+				(if (equal? keys '(1))
+					(list (build_group_constant_key_insert_plan schema grouptbl))
+					(if (reduce keys (lambda (session_only key)
+						(and session_only (query_session_read? key))) true)
+						(list (build_group_session_key_insert_plan schema grouptbl key_names keys))
+						'()))
+				'()))
+			(define computed_order_exprs (merge_unique (map (produceN (count prepare_order_items)) (lambda (i)
+				(match (nth prepare_order_items i) '(expr _dir) (begin
+					(define replaced_order_expr (replace_group_order_expr_indexed
+						src alias grouptbl keys key_names ags key_index expr
+						(nth prepare_resolved_order_exprs i)))
+					(if (direct_group_order_expr? replaced_order_expr) '() (list replaced_order_expr))))))))
+			(define computed_order_plans (map computed_order_exprs (lambda (expr)
+				(build_group_computed_order_column schema grouptbl expr))))
+			(define ensure_agg_expr (if (empty_list? ensure_agg_columns)
+				nil
+				(cons (quote !begin) ensure_agg_columns)))
+			(define aggregate_prepare_expr (cons
+				(quote !begin)
+				(merge (list ensure_agg_columns agg_plans computed_order_plans))))
+			(define base_group_fill (symbol "__group_base_fill"))
+			(define base_group_fill_call (list base_group_fill (physical_query_tx_symbol)))
+			(define finalize_group_fill (list (quote rebuild) (list (quote table) schema grouptbl) true false))
+			(define partition_plan (group_cache_partition_plan schema tbl alias src grouptbl keys key_names))
+			(define initial_fill_expr (if (nil? base_group_into_plan)
+				nil
+				(list (quote initialize_cache_table)
+					(physical_query_tx_symbol)
+					(list (quote table) schema grouptbl)
+					(list (quote list) (source_table_expr src))
+					(list (quote lambda) (list (physical_query_tx_symbol))
+						(cons (quote !begin) (filter (list partition_plan aggregate_prepare_expr cleanup_plan) (lambda (expr) (not (nil? expr))))))
+					base_group_fill
+					(list (quote lambda) (list (symbol "__group_finalize_tx")) finalize_group_fill))))
+			(define create_options (if (nil? initial_fill_expr)
+				(quoted_runtime_list '("engine" "cache"))
+				(list (quote list)
+					"engine" "cache"
+					"oninit" (list (quote lambda) (list (quote tx)) initial_fill_expr))))
+			/* Every use must seed its own session-domain keys, even when another
+			stage owns creation of the shared physical carrier. */
+			(define prepare_bound_group (list (quote if)
+				(group_stage_session_binding_missing_expr stage schema grouptbl keys key_names)
+				(list (quote !begin) aggregate_prepare_expr base_group_fill_call)
+				aggregate_prepare_expr))
+			(define group_cache_created (symbol "__group_cache_created"))
+			(define keytable_init
+				(list (quote group_cache_create) schema grouptbl create_cols create_options true (quote tx)))
+			(define boolean_row_keys (if (equal? result_sink (quote boolean-recset))
+				(scalar_first_probe_recset_row_keys stage
+					(scalar_first_probe_carrier_source prepared_src)) '()))
+			(define boolean_domain_src (if (equal? result_sink (quote boolean-recset))
+				(boolean_recset_domain_source prepared_src boolean_row_keys) nil))
+			(define boolean_input (if (nil? boolean_domain_src) prepared_src
+				(query_block_with_inner_domain_source prepared_src boolean_domain_src)))
+			(if (and (equal? result_sink (quote boolean-recset)) (nil? boolean_domain_src))
+				(neumann_fail "build_queryplan" "boolean RecSet sink requires a unique base-table domain")
+				true)
+			(define lowered_plan_core (if (equal? result_sink (quote boolean-recset))
+				(build_query_boolean_recset_plan
+					stage_lookup boolean_input boolean_domain_src boolean_row_keys result_sink_ags)
+				(if scalar_query_stage
+					(list (quote !begin)
+						nested_prepare_expr
+						(if initializer_owner keytable_init nil)
+						ensure_agg_expr
+						(build_scalar_single_query_stage_fill_plan
+							prepared_src grouptbl keys key_names
+							(car lowering_ags) (cadr lowering_ags)
+							(car aggregate_cols) (cadr aggregate_cols)))
+					(if query_input
+						(cons (quote !begin)
+							(merge (list
+								nested_prepare
+								nested_materialize
+								(if initializer_owner (list keytable_init) '())
+								ensure_agg_columns
+								computed_order_plans
+								(if (and initializer_owner (empty_list? ags)) (list collect_plan) '())
+								agg_plans
+								empty_aggregate_seed_plans)))
+						(if scalar_order_base_stage
+							(list (quote !begin)
+								nested_prepare_expr
+								(if initializer_owner keytable_init nil)
+								aggregate_prepare_expr)
+							(list (quote !begin)
+								nested_prepare_expr
+								(if initializer_owner
+									(list
+										(list (quote lambda) (list group_cache_created)
+											(list (quote if) group_cache_created
+												nil
+												prepare_bound_group))
+										keytable_init)
+									prepare_bound_group)))))))
+			/* A query-invariant presence/scalar-first probe (see the comment at
+			raw_stage_lookup above) is bound exactly once here, ahead of whatever
+			this stage's own prepare plan does, so every rewritten reference below
+			reads that one binding instead of re-probing per row. */
+			(define recmap_plan (if (and (empty_list? range_recmap_candidates)
+				(nil? recmap_candidate)) lowered_plan_core
+				(cons (quote !begin)
+					(merge (list
+						(map range_recmap_candidates group_range_recmap_binding)
+						(if (nil? recmap_candidate) '()
+							(list (nested_scalar_recmap_binding recmap_candidate)))
+						(list lowered_plan_core))))))
+			(define lookup_cached_plan (if (nil? scalar_order_cache)
+				recmap_plan
+				(list (quote !begin) (nth scalar_order_cache 4) recmap_plan)))
+			(define lowered_plan (if (empty_list? invariant_probe_bindings)
+				lookup_cached_plan
+				(cons (quote !begin) (merge (list invariant_probe_bindings (list lookup_cached_plan))))))
+			(if (not (nil? observed_key)) (planner_queryplan_observation_read_expr observed_key)
+				(if (nil? base_group_into_plan)
+					lowered_plan
+					(list
+						(list (quote lambda) (list base_group_fill) lowered_plan)
+						(list (quote lambda) (list (physical_query_tx_symbol)) base_group_into_plan))))))))
 
 (define lower_orc_stage_prepare (lambda (stage)
 	(begin

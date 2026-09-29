@@ -48,11 +48,16 @@ names. Coverage comes from realistic query breadth and lifecycle depth; an
 implementation remains free to migrate, discard, rename or stop producing a
 cache as long as public results remain correct.
 
-The accompanying fault-injection control changes disposable candidate copies
-and runs this same lifecycle. A changed implementation must pass on fresh data,
-fail the affected public query when it reuses an incompatible old identity, and
-pass again after its identity is versioned. The control observes only lifecycle
-status and public-query execution; it does not assert any stored helper shape.
+Engine format versions, cache names and cache layouts are a black box to this
+test. It never edits the implementation to synthesize a layout change or checks
+for a particular version string. The candidate first executes the public queries
+on the predecessor's untouched persisted data, before any candidate DML. A
+separate cold process then tests mutations before the first query.
+
+A crash, query error or result mismatch fails the upgrade. Successful migration
+or reconstruction is judged by the same public results and complete public-data
+snapshot, not by the implementation mechanism. Coverage is limited to the
+workloads exercised here; add result-sensitive queries for new cache shapes.
 
 When a new persisted or partly persistent optimization is introduced, extend
 the public fixture and query workload with a result-sensitive shape that can

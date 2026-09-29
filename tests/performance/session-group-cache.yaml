@@ -325,6 +325,21 @@ test_cases:
       data:
         - total: 1
 
+  - name: "restore initial range binding"
+    session_id: "sgc_range"
+    sql: "SET @cutoff = 100"
+    expect:
+      rows_affected: 0
+
+  - name: "restored range binding reads only its existing cache cells"
+    session_id: "sgc_range"
+    sql: >-
+      SELECT (SELECT SUM(cnt) FROM (SELECT category, SUM(1) AS cnt FROM sgc_range_data WHERE val < @cutoff GROUP BY category) grouped_rows LIMIT 1) AS total
+    expect:
+      rows: 1
+      data:
+        - total: 2
+
   - name: "set ordered scalar cutoff"
     session_id: "sgc_scalar"
     sql: "SET @scalar_cutoff = 20"

@@ -958,7 +958,10 @@ output coordinate or aggregate. Explicit transactions still use the producer. */
 	(begin
 		(define proof (qassoc_get (gs_facts stage) (quote stable-aggregate-domain) nil))
 		(define cache (group_stage_cell_cache stage (map (nth proof 1) (lambda (key) (list (quote point) key)))))
-		(define payload (aggregate_col_name_using (gs_input stage) (list value_expr reduce_expr neutral_expr)))
+		(define payload (concat "agg_" (stable_structural_hash
+			(list "cache-payload-v1" ((group_cache_identity_rewriter stage
+				((qassoc_get (gs_facts stage) (quote cache_identity_index) (lambda () '()))))
+				(canonical_aggregate_recipe (list value_expr reduce_expr neutral_expr)))) true)))
 		(define producer (list (quote lambda) '() (lower_scalar_aggregate_query_probe_expr all_stages stage value_expr
 			keys lookup_keys reduce_expr neutral_expr (quote point-cached))))
 		(define coordinates (cons (quote list) (map (nth proof 1)
@@ -2559,6 +2562,8 @@ never suppress repair of an evicted computed column or reloaded cache table. */
 					(quote lookup-keys) (range_stage_lookup_keys stage))
 				(quote range-domains) (range_stage_domains stage))
 			(quote range-invariant-condition) (range_stage_invariant_condition stage)))
+		(define facts (qassoc_set_without facts (quote cache_identity_index)
+			(qassoc_get facts (quote cache_identity_index) (lambda () '())) (quote group_cache)))
 		(make_group_stage
 			(gs_id stage) src (range_stage_point_domain stage) (range_stage_point_keys stage)
 			(gs_aggregates stage) (gs_having stage) (gs_output stage)
@@ -6206,17 +6211,16 @@ the enclosing carrier identity supplies the remaining query context. */
 	/* The readable label is not an identity. The hash covers the canonical input
 	graph, source-role-aware keys, and complete filter, so equivalent aliases
 	converge while self-join roles and different predicates remain separated.
-	Version 7 retains source collation metadata and rebuilds caches whose
-	older numeric hashing could persist split int/float groups. */
+	Version 8 uses resolved source recipes and dimension bindings while retaining
+	collation and numeric semantics. */
 	(concat ".grp:" label ":" (stable_structural_hash (list
-		"canonical-group-keytable-v7" schema input_identity keys condition) true))))
+		"canonical-group-keytable-v8" schema input_identity keys condition) true))))
 
 (define range_group_table_name (lambda (schema label input_identity point_keys range_keys condition)
-	/* Version 3 separates the ordered-cut schema from range caches created before
-	boundary-kind columns existed. Cache tables are disposable helpers, so a new
+	/* Version 4 identifies source recipes and complete point/range interfaces. Cache tables are disposable helpers, so a new
 	canonical identity is the upgrade boundary instead of mutating stale layouts. */
 	(concat ".grp:" label ":" (stable_structural_hash (list
-		"canonical-range-group-keytable-v3"
+		"canonical-range-group-keytable-v4"
 		schema input_identity point_keys range_keys condition
 		"ordered-cut-boundaries-v1") true))))
 
@@ -6312,45 +6316,152 @@ self-joins of the same base table still describe two distinct row roles. */
 						node)))))
 		(rewrite expr))))
 
-(define canonical_group_stage_alias_map (lambda (stage)
+/* Cache recipes are functions of physical source columns and explicit domain
+inputs. SQL aliases (including the aliases of range/snapshot drivers) are not
+part of that function. Keep this identity separate from logical stage dedup. */
+(define group_cache_identity_bindings (lambda (stage)
+	(begin
+		(define point (mapIndex (range_stage_point_domain stage) (lambda (i expr)
+			(list expr (list (quote cache-point) i)))))
+		(define ranges (merge (mapIndex (range_stage_domains stage) (lambda (i domain)
+			(list
+				(list (range_domain_from domain) (list (quote cache-range-from) i))
+				(list (range_domain_to domain) (list (quote cache-range-to) i)))))))
+		(define snapshot (qassoc_get (gs_facts stage) (quote contribution-domain) nil))
+		(merge (list point ranges
+			(if (nil? snapshot) '()
+				(list (list (nth snapshot 2) (list (quote cache-snapshot) 0)))))))))
+
+/* Logical aggregate output labels are an interface, not a persistent column
+identity. Resolve each referenced output to its own physical recipe, so adding
+an unrelated aggregate cannot rename an embedded calculation. */
+(define group_cache_column_identity (lambda (sources signatures alias insensitive col col_insensitive)
+	(begin
+		(define src (source_for_alias sources
+			(if (empty_list? sources) nil (source_alias (car sources))) alias insensitive))
+		(define columns (if (and (not (nil? src)) (source_is_stage_output? src))
+			(get_assoc signatures (concat (nth (source_relation src) 1) ":columns")) nil))
+		(coalesceNil (get_assoc columns col) (if col_insensitive (toLower col) col)))))
+
+/* Keep recursive traversal in one named procedure. Repeatedly adapting a
+large local recursive callback makes serial map setup walk its body per node. */
+(define group_cache_rewrite_identity (lambda (context node)
+	(begin
+		/* A lowered scalar probe carries an entire annotated stage/catalog.
+		Only its source recipe and domain identify its value, never that planner
+		state. Compact it before traversing or hashing the surrounding filter. */
+		(define node (if (and (list? node) (>= (count node) 3)
+			(contains? (list (quote scalar_first_probe) (quote scalar_aggregate_probe)
+				(quote scalar_cardinality_probe)) (car node))
+			(group_stage? (cadr node))) (canonical_aggregate_recipe node) node))
+		(define sources (nth context 0))
+		(define signatures (nth context 1))
+		(define bindings (nth context 2))
+		(define source_recipes (nth context 3))
+		(define aliases (nth context 4))
+		(begin
+			(define binding (if (list? node) (bindings node) nil))
+			(if (not (nil? binding)) binding
+				(match node
+					((symbol outer-column) alias col)
+					(group_cache_rewrite_identity context (list (quote get_column) alias false col false))
+					((symbol get_column) alias insensitive col col_insensitive)
+					(begin
+						(define target (stage_merge_lookup aliases alias alias))
+						(list (quote get_column)
+							(if (list? target)
+								(list (car target) (nth target 1) (nth target 2) (group_cache_rewrite_identity context (nth target 3))) target)
+							false (group_cache_column_identity sources signatures alias insensitive col col_insensitive) false))
+					((quote get_column) alias insensitive col col_insensitive)
+					(group_cache_rewrite_identity context (list (symbol "get_column") alias insensitive col col_insensitive))
+					((symbol stage-output) id)
+					(begin
+						(define cached (source_recipes id))
+						(if (not (nil? cached)) cached
+							(source_recipes id (list (quote cache-application)
+								(coalesceNil (get_assoc signatures id) id)
+								(map (coalesceNil (get_assoc signatures (concat id ":bindings")) '()) (lambda (item) (group_cache_rewrite_identity context item)))))))
+					(cons head tail) (cons (group_cache_rewrite_identity context head) (map tail (lambda (item) (group_cache_rewrite_identity context item))))
+					_ (if (symbol? node)
+						(match (string node)
+							(concat alias "." col)
+							(group_cache_rewrite_identity context (list (quote get_column) alias false col false))
+							_ node)
+						node)))))))
+
+(define group_cache_identity_rewriter (lambda (stage signatures)
 	(begin
 		(define input (gs_input stage))
-		(define local_aliases (source_aliases (stage_semantic_input_sources input)))
-		/* Carrier identity deliberately excludes aggregates, output, HAVING, and
-		ORDER. Adding another aggregate column to the same keys and condition must
-		reuse the existing keytable rather than create a second carrier. Neumann's
-		domain is the complete ordered interface of outer references, so it also
-		avoids rescanning the full keys and condition for aliases here. */
-		(define outer_aliases (filter
-			(merge_unique (map (gs_domain stage) stage_semantic_expr_aliases))
-			(lambda (alias)
-				(not (contains? local_aliases alias)))))
-		(merge (list
-			(stage_semantic_alias_entries local_aliases "__carrier_local_")
-			(stage_semantic_alias_entries outer_aliases "__carrier_outer_"))))))
+		(define sources (canonical_helper_sources input))
+		(define bindings (make_structural_catalog))
+		(map (group_cache_identity_bindings stage) (lambda (entry)
+			(if (nil? (bindings (car entry))) (bindings (car entry) (cadr entry)) nil)))
+		(define source_recipes (make_structural_catalog))
+		(define outer (filter (merge_unique (list
+			(stage_semantic_expr_aliases (list (map sources source_join_expr)
+				(if (query_block? input)
+					(list (qb_where input) (qb_group input) (qb_having input) (qb_order input)) '())))
+			(stage_semantic_expr_aliases (gs_domain stage))
+			(stage_semantic_expr_aliases (gs_keys stage))
+			(stage_semantic_expr_aliases (qassoc_get (gs_facts stage) (quote condition) true))))
+			(lambda (alias) (not (contains? (source_aliases sources) alias)))))
+		(define aliases (merge (list
+			(mapIndex sources (lambda (i src) (list (source_alias src)
+				(list (quote cache-source) i (source_schema src)
+					(source_relation src)))))
+			(stage_semantic_alias_entries outer "__cache_input_"))))
+		(define context (list sources signatures bindings source_recipes aliases))
+		(lambda (node) (group_cache_rewrite_identity context node)))))
 
-(define canonical_group_input_identity (lambda (alias_map signatures input)
-	/* A carrier stores the input row domain, not its SELECT projection. Omitting
-	fields, hidden expressions, and the stage catalog prevents nested scalar
-	projection trees from being serialized again for every enclosing aggregate. */
-	(if (query_block? input)
-		(list
-			(quote query-domain)
-			(qb_schema input)
-			(map (qb_sources input) (lambda (src)
-				(stage_semantic_rewrite_source alias_map signatures src)))
-			(stage_semantic_rewrite_expr alias_map signatures (qb_where input))
-			(stage_semantic_rewrite_expr alias_map signatures (qb_group input))
-			(stage_semantic_rewrite_expr alias_map signatures (qb_having input))
-			/* ORDER only changes the represented row domain when a bound consumes it. */
-			(if (and (nil? (qb_limit input)) (nil? (qb_offset input)))
-				'()
-				(stage_semantic_rewrite_expr alias_map signatures (qb_order input)))
-			(qb_limit input)
-			(qb_offset input))
-		/* UNION projections define the rows exposed to the grouping input. Keep
-		the complete canonical union until it gets a dedicated domain form. */
-		(stage_semantic_canonical_node alias_map signatures input))))
+(define canonical_group_input_identity (lambda (stage rewrite)
+	(begin
+		(define input (gs_input stage))
+		(define sources (canonical_helper_sources input))
+		(define source_identity (lambda (src)
+			(list (source_schema src)
+				(rewrite (source_relation src))
+				(source_outer? src)
+				(rewrite (source_join_expr src)))))
+		(if (query_block? input)
+			(list (quote query-domain) (qb_schema input)
+				(map sources source_identity)
+				(rewrite (qb_where input))
+				(rewrite (qb_group input))
+				(rewrite (qb_having input))
+				(if (and (nil? (qb_limit input)) (nil? (qb_offset input))) '()
+					(rewrite (qb_order input)))
+				(qb_limit input) (qb_offset input))
+			(if (source_is_base_table? input) (source_identity input)
+				(rewrite input))))))
+
+/* Bottom-up source recipes, not logical stage IDs or SELECT output names,
+identify embedded calculations. Aggregates belong here only when they are an
+input relation of another carrier, never in that carrier's own row domain. */
+(define group_cache_identity_index (lambda (stages)
+	(reduce stages (lambda (index stage)
+		(if (not (group_stage? stage)) index
+			(begin
+				(define rewrite (group_cache_identity_rewriter stage index))
+				(define columns (reduce (gs_aggregates stage) (lambda (columns ag)
+					(set_assoc columns (aggregate_col_name_using (gs_input stage) ag)
+						(list (quote cache-aggregate) (stable_structural_hash
+							(rewrite ag) true)))) '()))
+				(define recipe (concat "cache-recipe-v1:" (stable_structural_hash (list
+					(canonical_group_input_identity stage rewrite)
+					(rewrite (range_stage_point_keys stage))
+					(rewrite (map (range_stage_domains stage) range_domain_inner))
+					(rewrite (qassoc_get (gs_facts stage) (quote condition) true))
+					(rewrite (gs_having stage))
+					(rewrite (gs_order stage))
+					(gs_limit stage) (gs_offset stage)
+					(rewrite
+						(stage_semantic_facts '() '() (gs_facts stage)))) true)))
+				(set_assoc (set_assoc (set_assoc (set_assoc index (gs_id stage) recipe)
+					(concat (gs_id stage) ":columns") columns)
+					(concat (gs_id stage) ":bindings") (map (group_cache_identity_bindings stage) car))
+					/* Reuse this stage's physical descriptor without repeating source
+					resolution. It still carries this invocation's own bindings. */
+					(concat (gs_id stage) ":cache") (canonical_group_stage_cache stage rewrite))))) '())))
 
 (define canonical_orc_column_name (lambda (kind src payload)
 	/* ORCs live on one base table. Their identity is the table plus the complete
@@ -6547,37 +6658,41 @@ cost. Building additional state (snapshot contributions) waits for a later call.
 				(concat "query:" (stable_structural_hash input false))
 				(source_relation input))))))
 
-(define group_stage_default_cache (lambda (stage signatures)
+(define canonical_group_stage_cache (lambda (stage rewrite)
 	(begin
 		(define schema (group_stage_schema stage))
 		(define input (gs_input stage))
 		(define label (if (source_is_base_table? input) (source_relation input)
 			(if (union_block? input) "union" "query")))
 		(define range_domains (range_stage_domains stage))
-		(define keys (if (empty_list? (gs_keys stage)) '(1) (gs_keys stage)))
+		(define raw_keys (gs_keys stage))
+		(define keys (if (empty_list? raw_keys) '(1) raw_keys))
 		(define condition (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
-		(define alias_map (canonical_group_stage_alias_map stage))
-		(define input_identity (canonical_group_input_identity alias_map signatures input))
-		(define canonical_keys (stage_semantic_rewrite_expr alias_map signatures keys))
+		(define input_identity (canonical_group_input_identity stage rewrite))
+		(define canonical_keys (rewrite keys))
 		(make_group_cache (quote group-keytable) schema (if (empty_list? range_domains)
 			(group_table_name schema label input_identity canonical_keys
-				(stage_semantic_rewrite_expr alias_map signatures condition))
+				(rewrite condition))
 			(range_group_table_name schema label input_identity canonical_keys
 				/* Outer cuts are cell values, not cache identity. Keeping only the
 				inner axes lets differently named month/week/day drivers share and
 				split the same disjoint partition. Cut kinds remain stored per cell. */
-				(stage_semantic_rewrite_expr alias_map signatures
+				(rewrite
 					(map range_domains range_domain_inner))
-				(stage_semantic_rewrite_expr alias_map signatures
+				(rewrite
 					(range_stage_invariant_condition stage))))
 			(merge (list (map keys (lambda (key) (list (quote point) key))) range_domains))))))
+
+(define group_stage_default_cache (lambda (stage signatures)
+	(canonical_group_stage_cache stage (group_cache_identity_rewriter stage signatures))))
 
 (define group_stage_cache (lambda (stage)
 	(begin
 		(define cached (qassoc_get (gs_facts stage) (quote group_cache) nil))
 		/* Analysis and cost probes have no semantic index yet and deliberately use
 		the cheap provisional identity. Physical preparation passes its shared index. */
-		(if (nil? cached) (group_stage_default_cache stage '()) cached))))
+		(if (nil? cached) (group_stage_default_cache stage
+			((qassoc_get (gs_facts stage) (quote cache_identity_index) (lambda () '())))) cached))))
 
 (define group_stage_cache_relation (lambda (stage)
 	(group_cache_relation (group_stage_cache stage))))
@@ -7205,7 +7320,7 @@ every group row and its canonical identity stays independent of bound values. */
 		(define keep_first (list (quote lambda) (list (quote old) (quote new)) (quote old)))
 		(list
 			(list (quote lambda) (list (quote grouped))
-				(group_insert_finish_expr schema grouptbl key_names agg_cols true))
+				(group_insert_finish_expr schema grouptbl keys key_names agg_cols true))
 			(compile_scan_plan (quote scan_order)
 				(physical_query_tx_symbol)
 				(list (quote table) schema tbl)
@@ -7617,7 +7732,7 @@ state through an assoc and one-element payload lists adds no semantics. */
 					(list (quote lambda) (list (quote grouped))
 						(list
 							(list (quote lambda) (list (quote grouped))
-								(group_insert_finish_expr schema grouptbl key_names
+								(group_insert_finish_expr schema grouptbl keys key_names
 									(map ags (lambda (ag) (aggregate_col_name_using src ag))) true))
 							(finalize_query_grouped_assoc_expr ags grouped_expr)))
 					grouped_scan))
@@ -7831,15 +7946,19 @@ slot per syntactically repeated COUNT. */
 						(merge (map (produceN (count value_cols)) (lambda (i)
 							(list (nth value_cols i) (nth new_params i)))))))))))))
 
-(define group_cleanup_missing_keys_plan (lambda (schema grouptbl key_names)
+(define group_cleanup_missing_keys_plan (lambda (schema grouptbl keys key_names)
 	(begin
 		(define key_symbols (map key_names (lambda (col) (symbol col))))
 		(define key_expr (runtime_cons_list_expr key_symbols))
+		(define bound_indices (filter (produceN (count keys))
+			(lambda (i) (query_session_read? (nth keys i)))))
 		(compile_scan_plan (quote scan)
 			(physical_query_tx_symbol)
 			(list (quote table) schema grouptbl)
-			(quoted_runtime_list '())
-			(list (quote lambda) '() true)
+			(quoted_runtime_list (map bound_indices (lambda (i) (nth key_names i))))
+			(list (quote lambda) (map bound_indices (lambda (i) (nth key_symbols i)))
+				(combine_where_terms (map bound_indices (lambda (i)
+					(group_session_key_equal_expr (nth key_symbols i) (nth keys i)))) true))
 			(cons (quote list) (cons "$update" key_names))
 			(list (quote lambda)
 				(cons (quote __scan_acc) (cons (quote $update) key_symbols))
@@ -7885,8 +8004,9 @@ consumer recomputes every group with a separate scan of the source. */
 		(compile_scan_plan (quote scan)
 			(physical_query_tx_symbol)
 			(list (quote table) schema grouptbl)
-			(quoted_runtime_list '())
-			(list (quote lambda) '() true)
+			(quoted_runtime_list key_names)
+			(list (quote lambda) key_symbols
+				(list (quote has_assoc?) grouped_expr (runtime_cons_list_expr key_symbols)))
 			(quoted_runtime_list (merge (list key_names
 				(map value_cols (lambda (col) (concat "$set:" col))))))
 			(list (quote lambda) (cons (quote __scan_acc) (merge (list key_symbols setters)))
@@ -7912,9 +8032,9 @@ consumer recomputes every group with a separate scan of the source. */
 				(group_seed_computed_values_plan schema grouptbl key_names value_cols grouped_expr))
 			insert_plan))))
 
-(define group_insert_finish_expr (lambda (schema grouptbl key_names value_cols computed_values)
+(define group_insert_finish_expr (lambda (schema grouptbl keys key_names value_cols computed_values)
 	(list (quote !begin)
-		(group_cleanup_missing_keys_plan schema grouptbl key_names)
+		(group_cleanup_missing_keys_plan schema grouptbl keys key_names)
 		(group_insert_batches_expr schema grouptbl key_names value_cols computed_values (quote grouped)))))
 
 /* Eager preparation may rewrite nested stage-output sources and aggregate
@@ -8236,7 +8356,7 @@ canonical projection, using the existing cache-admission accounting. */
 		(define direct_plan (if (nil? ungrouped_plan)
 			(list
 				(list (quote lambda) (list (quote grouped))
-					(group_insert_finish_expr (qb_schema input) grouptbl key_names aggregate_cols false))
+					(group_insert_finish_expr (qb_schema input) grouptbl keys key_names aggregate_cols false))
 				(build_query_grouped_assoc_plan input keys key_names ags false))
 			ungrouped_plan))
 		(build_scalar_group_projection_plan input grouptbl keys key_names ags aggregate_cols direct_plan planning_session))))
@@ -8489,7 +8609,7 @@ once and every base-only leaf remains a vectorized domain scan. */
 				(aggregate_map_value_expr (nth ags i) (nth value_symbols i)))))))
 		(define merge_payload (list (quote lambda) (list (quote old) (quote new))
 			(aggregate_payload_merge_expr ags 0)))
-		(define finish_expr (group_insert_finish_expr schema grouptbl key_names
+		(define finish_expr (group_insert_finish_expr schema grouptbl keys key_names
 			(map ags (lambda (ag) (aggregate_col_name_using naming_input ag))) false))
 		(define row_mapper (list (quote lambda)
 			(merge (list key_symbols value_symbols))
@@ -8535,7 +8655,7 @@ once and every base-only leaf remains a vectorized domain scan. */
 		(define combine_grouped (grouped_state_merge_expr merge_payload))
 		(define scan_plan (list
 			(list (quote lambda) (list (quote grouped))
-				(group_insert_finish_expr schema grouptbl key_names (list value_col count_col) false))
+				(group_insert_finish_expr schema grouptbl keys key_names (list value_col count_col) false))
 			(lower_query_block_as_dataset_reduce
 				prepared_input
 				row_fields
@@ -8608,7 +8728,7 @@ once and every base-only leaf remains a vectorized domain scan. */
 				local_stages)))))
 
 (define lowering_catalog_id_index (lambda (catalog) (nth catalog 2)))
-(define lowering_catalog_group_cache_index (lambda (catalog) (nth catalog 3)))
+(define lowering_catalog_group_cache_index (lambda (catalog) ((nth catalog 3))))
 (define lowering_catalog_parent (lambda (catalog) (nth catalog 4)))
 
 /* Diagnostics context belongs to the physical catalog handle, never to
@@ -8631,7 +8751,9 @@ nested aggregate facts: those can participate in structural identities. */
 		(quote lowering-catalog)
 		stages
 		(stage_dependency_id_index stages)
-		(stage_dependency_group_cache_index stages)
+		/* Most logical catalogs never resolve a physical carrier. Build this
+		index only on first physical lookup, once for this immutable catalog. */
+		(once (lambda () (stage_dependency_group_cache_index stages)))
 		parent)))
 
 (define make_lowering_catalog (lambda (stages)
@@ -8690,10 +8812,14 @@ nested aggregate facts: those can participate in structural identities. */
 				(if (nil? stage)
 					(neumann_fail "build_queryplan" (concat "physicalize stage-output source references unknown stage " id))
 					true)
-				(source_with_schema_relation
-					src
-					(group_stage_cache_schema stage)
-					(group_stage_cache_relation stage)))))))
+				/* A shared carrier contains multiple session domains. A relational
+				consumer must select its own domain just like scalar probes do. */
+				(define keys (if (empty_list? (gs_keys stage)) '(1) (gs_keys stage)))
+				(source_with_join_expr
+					(source_with_schema_relation src
+						(group_stage_cache_schema stage) (group_stage_cache_relation stage))
+					(combine_where (source_join_expr src)
+						(group_stage_session_filter_expr stage (source_alias src) keys (group_key_cols keys)))))))))
 
 (define physicalize_stage_output_sources (lambda (stages sources)
 	(map (coalesceNil sources '()) (lambda (src)
@@ -9664,7 +9790,10 @@ old snapshot cells intact; only the new disjoint children need new state. */
 				(reduce covers (lambda (acc cover) (list (quote merge_assoc) acc cover
 					'('lambda '('old 'new) true))) '('list))
 				'('lambda '('key 'present) 'key))))
-		(define payload (aggregate_col_name_using (gs_input stage) (list value_expr reduce_expr neutral_expr)))
+		(define payload (concat "agg_" (stable_structural_hash
+			(list "cache-payload-v1" ((group_cache_identity_rewriter stage
+				((qassoc_get (gs_facts stage) (quote cache_identity_index) (lambda () '()))))
+				(canonical_aggregate_recipe (list value_expr reduce_expr neutral_expr)))) true)))
 		(define cell_stage (snapshot_group_cell_stage stage))
 		(define cell_fixed (if (empty_list? (snapshot_group_ranges stage)) fixed
 			(list (quote lambda) '() (list (quote merge) (list (quote list) (quote __group_fixed)
