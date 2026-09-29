@@ -367,23 +367,27 @@ only partitioned FROM source would erase the block's row multiplicity
 		(lambda (stage_id) (not (nil? stage_id))))))
 
 (define stage_for_group_cache_source (lambda (stages src)
-	(if (lowering_catalog? stages)
-		(begin
-			(define index (lowering_catalog_group_cache_index stages))
-			(define key (stage_dependency_group_cache_key (source_schema src) (source_relation src)))
-			(define local (get_assoc index key))
-			(if (not (nil? local))
-				local
-				(begin
-					(define parent (lowering_catalog_parent stages))
-					(if (lowering_catalog? parent) (stage_for_group_cache_source parent src) nil))))
-		(reduce (coalesceNil stages '()) (lambda (found stage)
-			(if (and (group_stage? stage)
-				(and (equal? (group_stage_cache_schema stage) (source_schema src))
-					(equal? (group_stage_cache_relation stage) (source_relation src))))
-				(if (nil? found) stage (merge_group_prepare_stage found stage))
-				found))
-			nil))))
+	/* Logical stage-output references and ordinary tables cannot name a
+	physical carrier. Reject them before deriving every stage's cache name:
+	this lookup is also used throughout logical analysis and join costing. */
+	(if (not (physical_helper_relation? (source_relation src))) nil
+		(if (lowering_catalog? stages)
+			(begin
+				(define index (lowering_catalog_group_cache_index stages))
+				(define key (stage_dependency_group_cache_key (source_schema src) (source_relation src)))
+				(define local (get_assoc index key))
+				(if (not (nil? local))
+					local
+					(begin
+						(define parent (lowering_catalog_parent stages))
+						(if (lowering_catalog? parent) (stage_for_group_cache_source parent src) nil))))
+			(reduce (coalesceNil stages '()) (lambda (found stage)
+				(if (and (group_stage? stage)
+					(and (equal? (group_stage_cache_schema stage) (source_schema src))
+						(equal? (group_stage_cache_relation stage) (source_relation src))))
+					(if (nil? found) stage (merge_group_prepare_stage found stage))
+					found))
+				nil)))))
 
 (define group_cache_stages_from_sources (lambda (stages sources)
 	(filter (map (coalesceNil sources '()) (lambda (src)
@@ -452,7 +456,14 @@ only partitioned FROM source would erase the block's row multiplicity
 	(begin
 		(define available_stages (unique_stages_by_id (lowering_catalog_stages stages)))
 		(define id_index (stage_dependency_id_index stages))
-		(define group_cache_index (stage_dependency_group_cache_index stages))
+		/* Logical dependencies use stage-output IDs. Physical carrier names
+		are relevant only after a stage input has actually been lowered. */
+		(define needs_group_cache_index (reduce available_stages (lambda (found stage)
+			(or found (and (group_stage? stage)
+				(source_is_base_table? (gs_input stage))
+				(physical_helper_relation? (source_relation (gs_input stage)))))) false))
+		(define group_cache_index (if needs_group_cache_index
+			(stage_dependency_group_cache_index stages) '()))
 		(reduce available_stages (lambda (graph stage)
 			(set_assoc graph (logical_stage_key stage)
 				(if (group_stage? stage)

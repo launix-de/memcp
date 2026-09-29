@@ -8728,7 +8728,7 @@ once and every base-only leaf remains a vectorized domain scan. */
 				local_stages)))))
 
 (define lowering_catalog_id_index (lambda (catalog) (nth catalog 2)))
-(define lowering_catalog_group_cache_index (lambda (catalog) (nth catalog 3)))
+(define lowering_catalog_group_cache_index (lambda (catalog) ((nth catalog 3))))
 (define lowering_catalog_parent (lambda (catalog) (nth catalog 4)))
 
 /* Diagnostics context belongs to the physical catalog handle, never to
@@ -8751,7 +8751,9 @@ nested aggregate facts: those can participate in structural identities. */
 		(quote lowering-catalog)
 		stages
 		(stage_dependency_id_index stages)
-		(stage_dependency_group_cache_index stages)
+		/* Most logical catalogs never resolve a physical carrier. Build this
+		index only on first physical lookup, once for this immutable catalog. */
+		(once (lambda () (stage_dependency_group_cache_index stages)))
 		parent)))
 
 (define make_lowering_catalog (lambda (stages)
