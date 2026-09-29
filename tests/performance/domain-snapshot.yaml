@@ -297,11 +297,11 @@ test_cases:
               (define category (get_assoc row "category"))
               (define even (if (< coordinate 20) 2000 (if (<= coordinate 50) 2400 1800)))
               (and ok (equal? (get_assoc row "total")
-                (if (nil? category) (+ even 2000) (if (equal? category 0) even 2000)))))) true))))))
+                (if (nil? category) (+ even 2000) (if (equal? category 0) even 2000)))))) true)))))
         (define valid (reduce (produceN 6) (lambda (valid i) (and valid (run (+ i 48)))) true))
         (define variants (count ((car (cache (car (cache)))) "variants")))
         (if (and valid (<= variants 2)) true
-          (error (concat "moving coordinates changed values or recompiled: " valid "/" variants)))))
+          (error (concat "moving coordinates changed values or recompiled: " valid "/" variants))))
     expect:
       data: [true]
   - name: Selected property boundaries share the moving selection domain

@@ -617,6 +617,15 @@ class PerformanceScaleContractTest(unittest.TestCase):
                             "name": "SCM predicate", "scm": "predicate", "expect": expectation,
                         }, "memcp-tests"), wanted)
 
+    def test_query_fields_cannot_silently_skip_an_operation(self) -> None:
+        for fields in (("sql", "scm"), ("scm", "sparql"), ("sql", "sparql")):
+            with self.subTest(fields=fields):
+                runner = SQLTestRunner("http://localhost:1")
+                case = {"name": "ambiguous operation", **{key: "unused" for key in fields}}
+                with mock.patch("run_sql_tests.requests.post") as post:
+                    self.assertFalse(runner.run_test_case(case, "memcp-tests"))
+                    post.assert_not_called()
+
     def test_ci_workload_seed_initializes_safe_rows(self) -> None:
         seed = Path(__file__).resolve().parents[1] / "tests/performance/ci-workloads.json"
         with tempfile.TemporaryDirectory() as tmp:

@@ -1178,6 +1178,15 @@ class SQLTestRunner:
         if is_noncritical:
             self.noncritical_count += 1
 
+        # One case has one measured/asserted operation. Multiple query fields
+        # otherwise silently select the first dispatch branch and skip the rest.
+        operations = [key for key in ("sql", "scm", "sparql") if key in test_case]
+        if len(operations) > 1:
+            return self._record_fail(
+                name, "Use setup or steps instead of multiple query fields: " + ", ".join(operations),
+                None, None, None, is_noncritical,
+            )
+
         start_delay_ms = int(test_case.get("start_delay_ms", 0))
         if start_delay_ms > 0:
             time.sleep(start_delay_ms / 1000.0)

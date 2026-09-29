@@ -1,4 +1,5 @@
 # Copyright (C) 2026  Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
 #
 # Indexed membership costing regressions
 
@@ -63,8 +64,20 @@ test_cases:
           (parse_sql "memcp-tests"
             "SELECT SQL_CALC_FOUND_ROWS d.id FROM imc_domain d WHERE d.direct_flag = 0 AND NOT EXISTS (SELECT 1 FROM imc_assignment a WHERE a.actor_id = 99 AND a.domain_id = d.id) ORDER BY d.id DESC LIMIT 10"
             (lambda args true) planning nil)))
-        (not (strlike (serialize (sql_queryplan_guard_from_session planning))
-          "%scan_selectivity_estimate%")))
+        /* Zero-budget calls only read published feedback. Reject actual
+        sampling budgets, not the metadata operator's name. Positive-budget
+        sentinels ensure the assertion cannot silently become permissive. */
+        (define metadata_only (lambda (expr)
+          (match expr
+            ((symbol quote) value) true
+            ((symbol scan_selectivity_estimate) tx tbl access values columns filter budget)
+              (equal? budget 0)
+            (cons head tail) (reduce expr (lambda (ok part) (and ok (metadata_only part))) true)
+            _ true)))
+        (and (metadata_only (sql_queryplan_guard_from_session planning))
+          (metadata_only (list 'scan_selectivity_estimate nil nil nil nil nil nil 0))
+          (not (metadata_only (list 'scan_selectivity_estimate nil nil nil nil nil nil 1)))
+          (not (metadata_only (list 'scan_selectivity_estimate nil nil nil nil nil nil -1))))))
     expect:
       data: [true]
 
