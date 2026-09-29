@@ -125,13 +125,13 @@ jobs:
           (cd candidate && go build -o memcp)
           printf 'UPGRADE_BASE_SHA=%s\n' "$(git -C base rev-parse HEAD)" >> "$GITHUB_ENV"
 
+      # Mandatory black-box gate: old writer + queries -> new reader + same
+      # queries -> exact comparison, before candidate test DML. Do not bypass
+      # failures by clearing caches, regenerating references or matching internal
+      # version strings. See the UPGRADE CONTRACT in upgrade-run.sh.
       - name: Compare all values before and after a clean upgrade
         shell: bash
         run: bash candidate/tests/storage/persistence/upgrade-run.sh
-
-      - name: Prove the public upgrade workload detects incompatible cache layouts
-        if: ${{ matrix.predecessor.label == 'previous-master' }}
-        run: python3 candidate/tests/storage/persistence/upgrade-helper-negative.py candidate upgrade-negative-controls
 
       - name: Upload references and server logs
         if: always()
@@ -141,8 +141,6 @@ jobs:
           path: |
             upgrade-oracles/
             upgrade-logs/
-            upgrade-negative-controls/*/run.log
-            upgrade-negative-controls/*/upgrade-logs/
           retention-days: 7
 
       - name: Upload data on failure

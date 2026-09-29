@@ -78,6 +78,22 @@ setup:
                       (sql_execute_formula request tx formula (lambda (row) true) (lambda (fields) true))))
                     (warm (- remaining 1))))))))
           (warm 256))))
+  - scm: |
+      (globalvars "__test_group_cache_identity" (lambda (query)
+        (begin
+          (define request (newsession))
+          (define shape (sql_parameterize_select_literals query true))
+          (mapIndex (cadr shape) (lambda (i value) (request (concat "v" (+ i 1)) value)))
+          (define plan (with_session request (lambda () (parse_sql "memcp-tests" (car shape) nil request nil))))
+          (define collect (lambda (node)
+            (match node
+              (cons head (cons ((symbol quote) cache) (cons payload rest)))
+              (if (contains? (list (quote snapshot_group_cache) (quote group_cache_point)) head)
+                (cons (list (group_cache_relation cache) payload) (merge (map rest collect)))
+                (merge (map node collect)))
+              (cons head tail) (merge (map node collect))
+              _ '())))
+          (sort (merge_unique (list (collect plan))) (lambda (a b) (< (serialize a) (serialize b)))))))
 cleanup:
   - sql: "DROP TABLE IF EXISTS grc_cache_dependency"
   - sql: "DROP TABLE IF EXISTS grc_mixed_history"
@@ -181,6 +197,86 @@ test_cases:
         (if (equal? warm first) (list first changed) (error "rebuild changed point")))
     expect:
       data: [[79, 83]]
+
+  - name: Snapshot caches resolve renamed outer sources
+    scm: |-
+      (begin
+        (define a ((globalvars "__test_group_cache_identity") "SELECT p.category,d.lo,d.hi,d.x,\n  (SELECT SUM((SELECT h.quantity FROM grc_mixed_history h\n    WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1))\n   FROM grc_mixed_entity e WHERE e.category=p.category AND e.amount>=d.lo AND e.amount<d.hi) AS total\nFROM (SELECT 1 AS category UNION ALL SELECT 2) p\nCROSS JOIN (SELECT 0 AS lo,20 AS hi,10 AS x UNION ALL SELECT 10,30,20) d\n"))
+        (define b ((globalvars "__test_group_cache_identity") "SELECT p.category,periods.lo,periods.hi,periods.x,\n  (SELECT SUM((SELECT h.quantity FROM grc_mixed_history h\n    WHERE h.entity_id=e.id AND h.coordinate<=periods.x ORDER BY h.coordinate DESC LIMIT 1))\n   FROM grc_mixed_entity e WHERE e.category=p.category AND e.amount>=periods.lo AND e.amount<periods.hi) AS total\nFROM (SELECT 1 AS category UNION ALL SELECT 2) p\nCROSS JOIN (SELECT 0 AS lo,20 AS hi,10 AS x UNION ALL SELECT 10,30,20) periods\n"))
+        (if (and (not (empty_list? a)) (not (empty_list? b)) (equal? a b)) true
+          (error (concat "unexpected physical cache identities: " (serialize a) " / " (serialize b)))))
+    expect:
+      result: true
+  - name: Snapshot caches resolve renamed projected boundary columns
+    scm: |-
+      (begin
+        (define a ((globalvars "__test_group_cache_identity") "SELECT p.category,d.lo,d.hi,d.x,\n  (SELECT SUM((SELECT h.quantity FROM grc_mixed_history h\n    WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1))\n   FROM grc_mixed_entity e WHERE e.category=p.category AND e.amount>=d.lo AND e.amount<d.hi) AS total\nFROM (SELECT 1 AS category UNION ALL SELECT 2) p\nCROSS JOIN (SELECT 0 AS lo,20 AS hi,10 AS x UNION ALL SELECT 10,30,20) d\n"))
+        (define b ((globalvars "__test_group_cache_identity") "SELECT p.category,periods.lower_bound,periods.upper_bound,periods.as_of,\n  (SELECT SUM((SELECT h.quantity FROM grc_mixed_history h\n    WHERE h.entity_id=e.id AND h.coordinate<=periods.as_of ORDER BY h.coordinate DESC LIMIT 1))\n   FROM grc_mixed_entity e WHERE e.category=p.category AND e.amount>=periods.lower_bound AND e.amount<periods.upper_bound) AS total\nFROM (SELECT 1 AS category UNION ALL SELECT 2) p\nCROSS JOIN (SELECT 0 AS lower_bound,20 AS upper_bound,10 AS as_of UNION ALL SELECT 10,30,20) periods\n"))
+        (if (and (not (empty_list? a)) (not (empty_list? b)) (equal? a b)) true
+          (error (concat "unexpected physical cache identities: " (serialize a) " / " (serialize b)))))
+    expect:
+      result: true
+  - name: Snapshot caches resolve renamed embedded source aliases
+    scm: |-
+      (begin
+        (define a ((globalvars "__test_group_cache_identity") "SELECT p.category,d.lo,d.hi,d.x,\n  (SELECT SUM((SELECT h.quantity FROM grc_mixed_history h\n    WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1))\n   FROM grc_mixed_entity e WHERE e.category=p.category AND e.amount>=d.lo AND e.amount<d.hi) AS total\nFROM (SELECT 1 AS category UNION ALL SELECT 2) p\nCROSS JOIN (SELECT 0 AS lo,20 AS hi,10 AS x UNION ALL SELECT 10,30,20) d\n"))
+        (define b ((globalvars "__test_group_cache_identity") "SELECT p.category,d.lo,d.hi,d.x,\n  (SELECT SUM((SELECT versions.quantity FROM grc_mixed_history versions\n    WHERE versions.entity_id=items.id AND versions.coordinate<=d.x ORDER BY versions.coordinate DESC LIMIT 1))\n   FROM grc_mixed_entity items WHERE items.category=p.category AND items.amount>=d.lo AND items.amount<d.hi) AS total\nFROM (SELECT 1 AS category UNION ALL SELECT 2) p\nCROSS JOIN (SELECT 0 AS lo,20 AS hi,10 AS x UNION ALL SELECT 10,30,20) d\n"))
+        (if (and (not (empty_list? a)) (not (empty_list? b)) (equal? a b)) true
+          (error (concat "unexpected physical cache identities: " (serialize a) " / " (serialize b)))))
+    expect:
+      result: true
+  - name: Different physical range columns do not share snapshot carriers
+    scm: |-
+      (begin
+        (define a ((globalvars "__test_group_cache_identity") "SELECT p.category,d.lo,d.hi,d.x,\n  (SELECT SUM((SELECT h.quantity FROM grc_mixed_history h\n    WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1))\n   FROM grc_mixed_entity e WHERE e.category=p.category AND e.amount>=d.lo AND e.amount<d.hi) AS total\nFROM (SELECT 1 AS category UNION ALL SELECT 2) p\nCROSS JOIN (SELECT 0 AS lo,20 AS hi,10 AS x UNION ALL SELECT 10,30,20) d\n"))
+        (define b ((globalvars "__test_group_cache_identity") "SELECT p.category,d.lo,d.hi,d.x,\n  (SELECT SUM((SELECT h.quantity FROM grc_mixed_history h\n    WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1))\n   FROM grc_mixed_entity e WHERE e.category=p.category AND e.id>=d.lo AND e.id<d.hi) AS total\nFROM (SELECT 1 AS category UNION ALL SELECT 2) p\nCROSS JOIN (SELECT 0 AS lo,20 AS hi,10 AS x UNION ALL SELECT 10,30,20) d\n"))
+        (if (and (not (empty_list? a)) (not (empty_list? b)) (not (equal? a b))) true
+          (error (concat "unexpected physical cache identities: " (serialize a) " / " (serialize b)))))
+    expect:
+      result: true
+  - name: Different embedded aggregate columns do not share snapshot payloads
+    scm: |-
+      (begin
+        (define a ((globalvars "__test_group_cache_identity") "SELECT p.category,d.lo,d.hi,d.x,\n  (SELECT SUM((SELECT h.quantity FROM grc_mixed_history h\n    WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1))\n   FROM grc_mixed_entity e WHERE e.category=p.category AND e.amount>=d.lo AND e.amount<d.hi) AS total\nFROM (SELECT 1 AS category UNION ALL SELECT 2) p\nCROSS JOIN (SELECT 0 AS lo,20 AS hi,10 AS x UNION ALL SELECT 10,30,20) d\n"))
+        (define b ((globalvars "__test_group_cache_identity") "SELECT p.category,d.lo,d.hi,d.x,\n  (SELECT SUM((SELECT h.coordinate FROM grc_mixed_history h\n    WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1))\n   FROM grc_mixed_entity e WHERE e.category=p.category AND e.amount>=d.lo AND e.amount<d.hi) AS total\nFROM (SELECT 1 AS category UNION ALL SELECT 2) p\nCROSS JOIN (SELECT 0 AS lo,20 AS hi,10 AS x UNION ALL SELECT 10,30,20) d\n"))
+        (if (and (not (empty_list? a)) (not (empty_list? b)) (not (equal? a b))) true
+          (error (concat "unexpected physical cache identities: " (serialize a) " / " (serialize b)))))
+    expect:
+      result: true
+
+  - name: Shared physical carriers retain both session domains in one request
+    session_id: cache-identity-domains
+    setup:
+    - sql: SET @cache_left=10
+    - sql: SET @cache_right=20
+    sql: SELECT (SELECT SUM((SELECT h.quantity FROM grc_mixed_history h WHERE h.entity_id=e.id AND h.coordinate<=@cache_left
+      ORDER BY h.coordinate DESC LIMIT 1)) FROM grc_mixed_entity e) AS first_value, (SELECT SUM((SELECT h.quantity
+      FROM grc_mixed_history h WHERE h.entity_id=e.id AND h.coordinate<=@cache_right ORDER BY h.coordinate DESC LIMIT
+      1)) FROM grc_mixed_entity e) AS second_value
+    expect:
+      data:
+      - first_value: 60
+        second_value: 80
+  - name: Reversing session domains preserves the other cached values
+    session_id: cache-identity-domains
+    setup:
+    - sql: SET @cache_left=20
+    - sql: SET @cache_right=10
+    sql: SELECT (SELECT SUM((SELECT h.quantity FROM grc_mixed_history h WHERE h.entity_id=e.id AND h.coordinate<=@cache_left
+      ORDER BY h.coordinate DESC LIMIT 1)) FROM grc_mixed_entity e) AS first_value, (SELECT SUM((SELECT h.quantity
+      FROM grc_mixed_history h WHERE h.entity_id=e.id AND h.coordinate<=@cache_right ORDER BY h.coordinate DESC LIMIT
+      1)) FROM grc_mixed_entity e) AS second_value
+    expect:
+      data:
+      - first_value: 80
+        second_value: 60
+  - name: Unknown physical aggregate column cannot reuse an existing cache
+    sql: SELECT (SELECT SUM((SELECT h.missing_quantity FROM grc_mixed_history h WHERE h.entity_id=e.id AND h.coordinate<=@cache_left
+      ORDER BY h.coordinate DESC LIMIT 1)) FROM grc_mixed_entity e) AS first_value, (SELECT SUM((SELECT h.missing_quantity
+      FROM grc_mixed_history h WHERE h.entity_id=e.id AND h.coordinate<=@cache_right ORDER BY h.coordinate DESC LIMIT
+      1)) FROM grc_mixed_entity e) AS second_value
+    expect:
+      error: true
 
   - name: "Mixed domains amortize one cold execution over five further executions"
     sql: &mixed_domain_query |

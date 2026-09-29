@@ -713,19 +713,20 @@ def max_rows_for_ram(bytes_per_row: int = 1024) -> int:
 ram_pressure_abort = threading.Event()
 _ram_monitor_lock = threading.Lock()
 _ram_monitor_started = False
+_owned_memcp_process = None
 
 def trip_ram_abort(reason: str):
     """Record RAM abort, kill memcp so it releases RAM immediately, set the flag."""
     if ram_pressure_abort.is_set():
         return
     avail = mem_available_mb()
-    print(f"\n🛑 RAM PRESSURE: MemAvailable={avail}MB < floor={mem_abort_floor}MB ({reason}) — aborting + killing memcp", flush=True)
+    print(f"\n🛑 RAM PRESSURE: MemAvailable={avail}MB < floor={mem_abort_floor}MB ({reason}) — aborting tests", flush=True)
     ram_pressure_abort.set()
-    pid = find_memcp_pid()
-    if pid:
+    proc = _owned_memcp_process
+    if proc is not None:
         try:
-            os.kill(pid, 9)
-            print(f"   SIGKILL sent to memcp pid={pid}", flush=True)
+            proc.kill()
+            print(f"   SIGKILL sent to runner-owned memcp pid={proc.pid}", flush=True)
         except Exception as e:
             print(f"   SIGKILL failed: {e}", flush=True)
 
@@ -2506,7 +2507,7 @@ def cleanup_memcp_artifacts(owned_data_dir: Optional[Path]) -> None:
 def start_memcp_process(
     port: int, enable_mysql: bool = False, data_dir: Optional[str] = None,
 ) -> subprocess.Popen | None:
-    global _memcp_log_file
+    global _memcp_log_file, _owned_memcp_process
     proc = None
     logfile = None
     try:
@@ -2532,6 +2533,7 @@ def start_memcp_process(
         )
         proc = subprocess.Popen(cmd, cwd=worktree,
            env=env, stdin=subprocess.PIPE, stdout=logfile, stderr=logfile, text=True)
+        _owned_memcp_process = proc
         if not wait_for_memcp(port, timeout=MEMCP_START_TIMEOUT):
             print_memcp_log(tail=50)
             stop_memcp_process(proc)
@@ -2576,6 +2578,9 @@ def get_memcp_api_port(proc: subprocess.Popen) -> Optional[int]:
     return None
 
 def stop_memcp_process(proc: subprocess.Popen) -> None:
+    global _owned_memcp_process
+    if _owned_memcp_process is proc:
+        _owned_memcp_process = None
     port = get_memcp_api_port(proc)
     try:
         if proc.stdin is not None and not proc.stdin.closed:

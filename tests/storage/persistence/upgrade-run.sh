@@ -2,6 +2,21 @@
 # Copyright (C) 2026 Carl-Philip Hänsch
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Run from a workspace containing base/ and candidate/ (both built).
+#
+# UPGRADE CONTRACT -- DO NOT WEAKEN TO MAKE A FORMAT CHANGE PASS:
+# 1. The old version fills the fixture, executes the public queries repeatedly
+#    (cold/warm behaviour), and records the reference results outside data-dir.
+# 2. The new version opens that SAME persisted data and executes the SAME queries.
+# 3. Compare every result and the complete public-data snapshot with the old
+#    reference BEFORE any candidate-side test DML. Mutation tests follow later.
+# Cache names, internal format versions and layouts are BLACK BOXES to this test.
+# Never prepare the candidate data by deleting caches, rebuilding tables, changing
+# source data, patching engine code or rewriting the old reference. Such actions
+# can hide incompatible persisted caches. Migration/reconstruction must be handled
+# by the engine through its normal upgrade/read path, not by this test harness.
+# A crash, query error or result mismatch MUST fail CI. Do not skip predecessors,
+# queries or comparisons, reduce cache-exercising repetitions, or accept changed
+# expectations merely to make a failing upgrade green: fix the compatibility bug.
 set -euo pipefail
 DATA_DIR="$GITHUB_WORKSPACE/upgrade-test-data"
 ORACLES="$GITHUB_WORKSPACE/upgrade-oracles"
@@ -84,7 +99,15 @@ python3 "$HELPERS" check "$MYSQL_PORT" "$ORACLES/queries.json"
 bash "$VALIDATOR" "$MYSQL_PORT" compare "$ORACLES/before.json"
 stop_server
 
+# Read the predecessor's untouched persisted data before any candidate DML.
+# Compare only public results; cache names, versions and layouts are a black box.
 start_server candidate candidate-upgrade
+python3 "$HELPERS" check "$MYSQL_PORT" "$ORACLES/queries.json"
+bash "$VALIDATOR" "$MYSQL_PORT" compare "$ORACLES/before.json"
+stop_server
+
+# Use a separate cold process to retain coverage of mutations before first read.
+start_server candidate candidate-cold-dml
 python3 "$HELPERS" cold-mutate "$MYSQL_PORT" "$ORACLES/queries.json"
 bash "$VALIDATOR" "$MYSQL_PORT" zero-policy-checks
 python3 "$HELPERS" check "$MYSQL_PORT" "$ORACLES/queries.json"
