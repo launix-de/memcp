@@ -62,3 +62,97 @@ test_cases:
       ORDER BY w.id
     expect:
       rows: 1035
+
+  - name: "sparse moving boundaries one cold plus ten repeats"
+    # Distinct cuts in an empty tail must not create one maintained cell per cut.
+    # Fix the workload before measuring A/B; include the first construction.
+    timing_group: group-range-sparse-total
+    timing_aggregation: total
+    warmup: 0
+    timing_samples: 11
+    threshold_ms: 5000
+    timeout: 30
+    setup:
+      - sql: "DROP TABLE IF EXISTS grc_sparse_windows"
+      - sql: "CREATE TABLE grc_sparse_windows (id INT PRIMARY KEY, tenant_id INT, range_from INT, range_to INT) ENGINE=memory"
+      - scm: |
+          (!begin
+            (insert (table "memcp-tests" "grc_sparse_windows")
+              '("id" "tenant_id" "range_from" "range_to")
+              (map (produceN 128) (lambda (i)
+                (list (+ i 1) 1 (+ {rows} i) (+ {rows} i 1)))))
+            (rebuild (table "memcp-tests" "grc_sparse_windows")) true)
+    sql: |
+      SELECT w.id,
+        (SELECT COUNT(*) FROM grc_perf_events e
+          WHERE e.tenant_id = w.tenant_id
+            AND e.happened_at >= w.range_from
+            AND e.happened_at < w.range_to) AS event_count
+      FROM grc_sparse_windows w
+      ORDER BY w.id
+    expect:
+      rows: 128
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS grc_sparse_windows"
+
+  - name: "one cold range board plus ten source updates and reads"
+    # Include maintenance, not just warm reads. Each later request changes one
+    # source value while keeping the requested range geometry unchanged.
+    timing_aggregation: total
+    warmup: 0
+    timing_samples: 11
+    performance_rows: 6000
+    threshold_ms: 10000
+    timeout: 60
+    setup:
+      - sql: "DROP TABLE IF EXISTS grc_write_windows"
+      - sql: "DROP TABLE IF EXISTS grc_write_events"
+      - sql: "CREATE TABLE grc_write_events (id INT PRIMARY KEY, tenant_id INT, happened_at INT, amount INT) ENGINE=memory"
+      - sql: "CREATE TABLE grc_write_windows (id INT PRIMARY KEY, tenant_id INT, range_from INT, range_to INT) ENGINE=memory"
+      - scm: |
+          (!begin
+            (insert (table "memcp-tests" "grc_write_events")
+              '("id" "tenant_id" "happened_at" "amount")
+              (map (produceN 6000) (lambda (i) (list (+ i 1) 1 i 2))))
+            (insert (table "memcp-tests" "grc_write_windows")
+              '("id" "tenant_id" "range_from" "range_to")
+              (merge (map (produceN 45) (lambda (from_index)
+                (map (produceN (- 45 from_index)) (lambda (offset)
+                  (list (+ 1 (+ (* from_index 45) (- offset (/ (* from_index (- from_index 1)) 2))))
+                    1 (* from_index 100) (* (+ from_index offset 1) 100))))))))
+            (rebuild (table "memcp-tests" "grc_write_events"))
+            (rebuild (table "memcp-tests" "grc_write_windows"))
+            (define counter (newsession))
+            (counter "request" (newsession))
+            (counter "plans" (newcachemap))
+            (globalvars "__retention_write_counter" counter)
+            true)
+    scm: |
+      (!begin
+        (define counter (globalvars "__retention_write_counter"))
+        (define n (coalesceNil (counter "next") 0))
+        (counter "next" (+ n 1))
+        (define request (counter "request"))
+        (define execute (lambda (query receive)
+          (begin
+            (define formula (cached_parse (counter "plans") (list parse_sql)
+              "memcp-tests" query nil "root" request true nil))
+            (with_autocommit request nil 0 query (lambda (tx)
+              (sql_execute_formula request tx formula receive (lambda (fields) true)))))))
+        (if (> n 0) (execute (concat "UPDATE grc_write_events SET amount=3 WHERE id=" n)
+          (lambda (row) true)) true)
+        (define rows (newsession))
+        (execute "SELECT w.id,w.range_from,w.range_to,(SELECT SUM(e.amount) FROM grc_write_events e WHERE e.tenant_id=w.tenant_id AND e.happened_at>=w.range_from AND e.happened_at<w.range_to) AS total FROM grc_write_windows w ORDER BY w.id"
+          (lambda (row) (rows (string (get_assoc row "id")) row)))
+        (if (and (equal? (count (rows)) 1035)
+          (reduce (rows) (lambda (ok id)
+            (begin
+            (define row (rows id))
+            (and ok (equal? (get_assoc row "total")
+              (+ (* 2 (- (get_assoc row "range_to") (get_assoc row "range_from")))
+                (if (equal? (get_assoc row "range_from") 0) n 0)))))) true)) true
+          (error "range maintenance workload returned incorrect totals")))
+    expect: {data: [true]}
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS grc_write_windows"
+      - sql: "DROP TABLE IF EXISTS grc_write_events"

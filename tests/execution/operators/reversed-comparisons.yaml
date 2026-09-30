@@ -22,7 +22,8 @@ test_cases:
         (define compare (jit (lambda (a b) (list (< a b) (<= a b) (> a b) (>= a b)))))
         (compare (json_decode_scmer "9007199254740992") (json_decode_scmer "9007199254740993")))
     expect:
-      data: [true, true, false, false]
+      # One /scm response contains the complete list of comparison results.
+      data: [[true, true, false, false]]
 
   - name: "Insert test data"
     setup:
