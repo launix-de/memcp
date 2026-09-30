@@ -1903,19 +1903,23 @@ membership set. */
 							(planner_cost_better? recset_cost (planner_direct_presence_probe_cost probe_rows))
 							(planner_cost_better? recset_cost (planner_presence_carrier_cost input_rows probe_rows))))))))))
 
+/* Mixed invariant/correlated children rule out the direct boolean producer,
+not the grouped carrier. The latter prepares the ordinary stage and then
+projects its completed truth values; source_parts keeps the direct producer's
+separate ownership proof before choosing that faster implementation. */
 (define scalar_first_probe_recset_eligible? (lambda (stages graph stage src keys probe_work_rows carrier_work_rows requested_col allow_grouped_domain_projection planning_session)
 	(and (single_real_source? (qb_sources src))
-		(and (source_is_base_table? (single_real_source (qb_sources src)))
-			(and (empty_list? (qb_group src))
-				(and (nil? (qb_having src))
-					(and (empty_list? (qb_order src))
-						(and (nil? (qb_limit src)) (nil? (qb_offset src))
-							(and (not (nil? (scalar_first_probe_recset_key_index
-								stage (single_real_source (qb_sources src)) keys allow_grouped_domain_projection)))
-								(and (stage_boolean_shaped? graph stage requested_col)
-									(and (direct_boolean_recset_input_ownership_closed? stages stage)
-										(scalar_first_probe_recset_cost_preferred?
-											stage probe_work_rows carrier_work_rows planning_session))))))))))))
+		(source_is_base_table? (single_real_source (qb_sources src)))
+		(empty_list? (qb_group src))
+		(nil? (qb_having src))
+		(empty_list? (qb_order src))
+		(nil? (qb_limit src))
+		(nil? (qb_offset src))
+		(not (nil? (scalar_first_probe_recset_key_index
+			stage (single_real_source (qb_sources src)) keys allow_grouped_domain_projection)))
+		(stage_boolean_shaped? graph stage requested_col)
+		(scalar_first_probe_recset_cost_preferred?
+			stage probe_work_rows carrier_work_rows planning_session))))
 
 (define scalar_first_probe_recset_eligible_base? (lambda (graph stage src keys probe_work_rows carrier_work_rows requested_col allow_grouped_domain_projection planning_session)
 	(and (not (nil? (scalar_first_probe_recset_key_index
