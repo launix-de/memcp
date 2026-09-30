@@ -1,3 +1,6 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
 # Tests for StorageComputeProxy behavior during rebuild and repartitioning.
 # Covers: (rebuild × repartitioning) × ($update × $increment × $invalidate) × (data × proxy)
 #
@@ -113,10 +116,10 @@ test_cases:
   # ── Phase 3: rebuild, then verify proxy survives ──
 
   - name: "trigger rebuild"
+    setup:
+      - scm: "(rebuild)"
     sql: |
       SELECT 1 AS ok
-    scm: |
-      (rebuild)
     expect:
       data:
         - ok: 1
@@ -169,10 +172,10 @@ test_cases:
           item_total: 800
 
   - name: "second rebuild"
+    setup:
+      - scm: "(rebuild)"
     sql: |
       SELECT 1 AS ok
-    scm: |
-      (rebuild)
     expect:
       data:
         - ok: 1

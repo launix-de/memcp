@@ -1,4 +1,5 @@
 # Copyright (C) 2026  Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
 #
 # Coverage tests for range scans, scan statistics logging, EXPLAIN (printer.go),
 # ordered scans with OFFSET/LIMIT, and aggregates with filters.
@@ -982,9 +983,12 @@ test_cases:
       rows: 1
 
   - name: "Rebuild publishes confidence null fraction and min max"
+    setup:
+      - scm: '(rebuild (table "memcp-tests" "rs_data") true false)'
     scm: |
       (begin
         (define idcol (car (get_schema "memcp-tests" "rs_data")))
+        (define categorycol (nth (get_schema "memcp-tests" "rs_data") 2))
         (and
           (idcol "StatisticsKnown")
           (equal? (idcol "StatisticsConfidence") 1)
@@ -1014,6 +1018,9 @@ test_cases:
     sql: "SHUTDOWN"
 
   - name: "Planner statistics expose nullable distribution"
+    setup:
+      - scm: '(rebuild (table "memcp-tests" "stats_contract_parent") true false)'
+      - scm: '(rebuild (table "memcp-tests" "stats_contract_child") true false)'
     scm: |
       (begin
         (define nullablecol (nth (get_schema "memcp-tests" "stats_contract_child") 3))
@@ -1150,12 +1157,12 @@ test_cases:
   # 10. serialize() with complex data structures (printer.go deep paths)
   # ========================================================================
   - name: "serialize: deeply nested list"
-    scm: "(serialize '(if (> 'x 10) (+ 'x 1) (- 'x 1)))"
+    scm: "(serialize '('if '('> 'x 10) '('+ 'x 1) '('- 'x 1)))"
     expect:
       data: ["(if (> x 10) (+ x 1) (- x 1))"]
 
   - name: "serialize: empty inner list"
-    scm: "(serialize '(begin '() 42))"
+    scm: "(serialize (list 'begin (list 'list) 42))"
     expect:
       data: ["(begin '() 42)"]
 
