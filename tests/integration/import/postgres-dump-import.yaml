@@ -87,6 +87,36 @@ test_cases:
           name: "Cara"
 
   - name: "Imported primary key rejects duplicate rows"
-    sql: "INSERT INTO pgdump_people VALUES (1, 'Dupe', 'x')"
+    sql: "INSERT INTO pgdump_people (id, name, active, note) VALUES (1, 'Dupe', true, 'x')"
+    expect:
+      error: true
+
+  - name: "Imported primary key has canonical MySQL identity"
+    sql: 'SHOW INDEXES FROM pgdump_people WHERE Key_name = "PRIMARY" AND Non_unique = 0'
+    expect:
+      rows: 1
+
+  - name: "Imported primary key is excluded from removable unique indexes"
+    sql: 'SHOW INDEXES FROM pgdump_people WHERE Key_name != "PRIMARY" AND Non_unique = 0'
+    expect:
+      rows: 0
+
+  - name: "PostgreSQL unique index is applied"
+    scm: |
+      (psql_eval_import_command "memcp-tests" "" nil "CREATE UNIQUE INDEX imported_person_name ON public.pgdump_people USING btree (name)" (sql_policy "root") nil (newsession))
+
+  - name: "Imported unique index is visible"
+    sql: 'SHOW INDEXES FROM pgdump_people WHERE Key_name = "imported_person_name"'
+    expect:
+      rows: 1
+
+  - name: "Imported unique index rejects duplicate data"
+    sql: "INSERT INTO pgdump_people (id, name) VALUES (4, 'Alice')"
+    expect:
+      error: true
+
+  - name: "Unsupported partial unique index fails explicitly"
+    scm: |
+      (psql_eval_import_command "memcp-tests" "" nil "CREATE UNIQUE INDEX partial_note ON public.pgdump_people (note) WHERE active = true" (sql_policy "root") nil (newsession))
     expect:
       error: true
