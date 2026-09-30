@@ -1416,13 +1416,20 @@ func (emitter *jitParserEmitter) emitRepeatAccumulate(node *jitParserNode, rule 
 	accTarget := func() JITValueDesc {
 		return JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: accOff, Rooted: true}
 	}
+	clearAcc := func() {
+		ctx.EmitMovRegImm64(ctx.ScratchReg, 0)
+		ctx.EmitStoreRegMem(ctx.ScratchReg, ctx.StackReg, accOff)
+		ctx.EmitStoreRegMem(ctx.ScratchReg, ctx.StackReg, accOff+8)
+	}
 	callAcc := func(proc *Proc, args []JITValueDesc) {
 		ctx.ReclaimUntrackedRegs()
+		alloc := ctx.SnapshotAllocState()
 		v := JITEmitProcInline(ctx, proc, args, ctx.SliceBase, JITValueDesc{Loc: LocAny})
 		ctx.EnsureDesc(&v)
 		dst := accTarget()
 		ctx.EmitCopyScmerToDesc(&dst, &v)
 		ctx.FreeDesc(&v)
+		ctx.RestoreAllocState(alloc)
 	}
 	step := func() {
 		val := emitter.emitStateScalar(jitParserPopValueNative, 2)
@@ -1454,6 +1461,7 @@ func (emitter *jitParserEmitter) emitRepeatAccumulate(node *jitParserNode, rule 
 	emitter.restoreCheckpoint()
 	if node.kind == jitParserOneOrMore {
 		emitter.restoreCheckpoint()
+		clearAcc()
 		ctx.EmitJmp(failure)
 	} else {
 		ctx.EmitJmp(done)
@@ -1481,12 +1489,20 @@ func (emitter *jitParserEmitter) emitRepeatAccumulate(node *jitParserNode, rule 
 	ctx.MarkLabel(done)
 	ctx.ReclaimUntrackedRegs()
 	acc := accTarget()
+	finishAlloc := ctx.SnapshotAllocState()
 	res := JITEmitProcInline(ctx, node.accFinish, []JITValueDesc{acc}, ctx.SliceBase, JITValueDesc{Loc: LocAny})
 	ctx.EnsureDesc(&res)
-	res = jitRootScmer(ctx, res)
+	res = jitPlaceScmerIntoTarget(ctx, res, JITValueDesc{
+		Loc: LocStackPair, Type: JITTypeUnknown,
+		StackOff: emitter.generatorValueOff, Rooted: true,
+	})
+	ctx.setStackPointer(jitStackRootFrameBP, emitter.generatorValueOff, true)
+	ctx.RestoreAllocState(finishAlloc)
 	emitter.pushValue(res)
 	ctx.FreeDesc(&res)
 	emitter.commitCheckpoint()
+	clearAcc()
+	ctx.FreeStack(16)
 	ctx.EmitJmp(success)
 }
 
@@ -1653,7 +1669,9 @@ func jitEmitParserProgramCore(ctx *JITContext, program *jitParserProgram, input,
 	ctx.MarkLabel(invalidEntry)
 	ctx.EmitJmp(failed)
 
+	ruleAlloc := ctx.SnapshotAllocState()
 	for ruleID := range program.rules {
+		ctx.RestoreAllocState(ruleAlloc)
 		ctx.MarkLabel(emitter.ruleLabels[ruleID])
 		accepted, rejected := ctx.ReserveLabel(), ctx.ReserveLabel()
 		emitter.currentRule = ruleID
@@ -1664,6 +1682,7 @@ func jitEmitParserProgramCore(ctx *JITContext, program *jitParserProgram, input,
 		ctx.MarkLabel(rejected)
 		emitter.emitRuleReturn(ruleID, false)
 	}
+	ctx.RestoreAllocState(ruleAlloc)
 
 	emitter.emitMemoCheckBlock()
 
@@ -1786,12 +1805,23 @@ func (emitter *jitParserEmitter) emitRuleReturn(ruleID int, success bool) {
 				}
 			}
 			emitter.ctx.RestoreAllocState(generatorAlloc)
-			emitter.ctx.setStackPointer(jitStackRootFrameBP, emitter.generatorValueOff, !value.NoHeapPointer)
+			// This slot is shared by every rule and dispatch can jump to code
+			// emitted with an earlier root map. Keep its classification stable
+			// across the complete parser program.
+			emitter.ctx.setStackPointer(jitStackRootFrameBP, emitter.generatorValueOff, true)
 		}
 		if value.Loc == LocImm {
 			value = jitCopyScmerToPair(emitter.ctx, value)
 		}
-		value = jitRootScmer(emitter.ctx, value)
+		// Rule dispatch can jump backwards to code emitted before this rule.
+		// A new permanent root here would disappear from those earlier stack
+		// maps and later expose a collected value when this rule is revisited.
+		// Reuse the return slot registered before emitting any parser rule.
+		value = jitPlaceScmerIntoTarget(emitter.ctx, value, JITValueDesc{
+			Loc: LocStackPair, Type: JITTypeUnknown,
+			StackOff: emitter.generatorValueOff, Rooted: true,
+		})
+		emitter.ctx.setStackPointer(jitStackRootFrameBP, emitter.generatorValueOff, true)
 		sp := emitter.statePointer()
 		var argsBuf [16]goCallArgWord
 		args := emitter.ctx.flattenArgs([]JITValueDesc{sp, position, value}, &argsBuf)
