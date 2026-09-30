@@ -245,6 +245,14 @@ curl -u root:admin -X POST http://localhost:4321/scm \
 eligible, less-recently-used representations from RAM. Persistent data remains
 on disk and is transparently loaded when a later query needs it.
 
+`MinRamBytes` sets a lower bound on CacheManager-tracked memory (bytes, default
+`0` = disabled). Set it with `(settings "MinRamBytes" 1073741824)` to protect
+1 GiB from automatic eviction, including system RAM pressure, persisted/total
+budgets, proactive allocation pressure, and idle expiry. Indivisible eviction
+offers that would cross the floor are skipped. The minimum takes precedence
+over a smaller maximum budget. It does not reserve RAM or measure process RSS;
+explicit removal/invalidation and ordinary object lifetimes can reduce usage.
+
 **System-wide pressure awareness** — when the host runs low on available RAM,
 MemCP can release cache entries even if its configured budget has not yet been
 reached.
