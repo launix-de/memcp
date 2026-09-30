@@ -1,4 +1,5 @@
 # Copyright (C) 2026  Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
 
 metadata:
   version: "1.0"
@@ -80,7 +81,16 @@ test_cases:
     scm: |
       (begin
         (define info (show "memcp-tests" "orc_dep_src" true))
-        (count (filter (get_assoc info "triggers") (lambda (tr) (get_assoc tr "system")))))
+        /* Keep the three DML dependencies distinct from the required
+        invalidation-propagation dependency; assert all four, not just a total. */
+        (define triggers (filter (get_assoc info "triggers") (lambda (tr) (get_assoc tr "system"))))
+        (define for_event (lambda (event) (count (filter triggers (lambda (tr)
+          (strlike (get_assoc tr "name") (concat "%|AFTER " event)))))))
+        (if (and (equal? (count triggers) 4)
+          (equal? (for_event "INSERT") 1) (equal? (for_event "UPDATE") 1)
+          (equal? (for_event "DELETE") 1) (equal? (for_event "INVALIDATE") 1))
+          (+ (for_event "INSERT") (for_event "UPDATE") (for_event "DELETE"))
+          (error (concat "missing or duplicate ORC dependency triggers: " (serialize triggers)))))
     expect:
       data: [3]
 
@@ -159,7 +169,16 @@ test_cases:
     scm: |
       (begin
         (define info (show "memcp-tests" "orc_dep_fb_src" true))
-        (count (filter (get_assoc info "triggers") (lambda (tr) (get_assoc tr "system")))))
+        /* Keep the three DML dependencies distinct from the required
+        invalidation-propagation dependency; assert all four, not just a total. */
+        (define triggers (filter (get_assoc info "triggers") (lambda (tr) (get_assoc tr "system"))))
+        (define for_event (lambda (event) (count (filter triggers (lambda (tr)
+          (strlike (get_assoc tr "name") (concat "%|AFTER " event)))))))
+        (if (and (equal? (count triggers) 4)
+          (equal? (for_event "INSERT") 1) (equal? (for_event "UPDATE") 1)
+          (equal? (for_event "DELETE") 1) (equal? (for_event "INVALIDATE") 1))
+          (+ (for_event "INSERT") (for_event "UPDATE") (for_event "DELETE"))
+          (error (concat "missing or duplicate ORC dependency triggers: " (serialize triggers)))))
     expect:
       data: [3]
 

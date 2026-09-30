@@ -270,19 +270,19 @@ func TestRangePreparationLifetimeFollowsLogicalData(t *testing.T) {
 		return scm.NewBool(true)
 	})
 	sources := []scm.Scmer{NewTableScmer(source)}
-	cache.prepareCache("range", sources, prepare)
+	cache.prepareCache("range", sources, nil, prepare)
 	source.publishTopologyLocked()
-	cache.prepareCache("range", sources, prepare)
+	cache.prepareCache("range", sources, nil, prepare)
 	if calls != 1 {
 		t.Fatalf("physical publication repeated logical preparation: %d", calls)
 	}
 	source.beginContributionMutation()
 	source.endContributionMutation()
-	cache.prepareCache("range", sources, prepare)
+	cache.prepareCache("range", sources, nil, prepare)
 	if calls != 2 {
 		t.Fatalf("source mutation did not refresh preparation: %d", calls)
 	}
-	cache.prepareCache("range", []scm.Scmer{NewTableScmer(&table{})}, prepare)
+	cache.prepareCache("range", []scm.Scmer{NewTableScmer(&table{})}, nil, prepare)
 	if calls != 3 {
 		t.Fatal("a replacement source reused the old preparation")
 	}
@@ -304,10 +304,10 @@ func TestRangePreparationFailureIsRetried(t *testing.T) {
 				t.Error("preparation failure was not propagated")
 			}
 		}()
-		cache.prepareCache("range", nil, prepare)
+		cache.prepareCache("range", nil, nil, prepare)
 	}()
-	cache.prepareCache("range", nil, prepare)
-	cache.prepareCache("range", nil, prepare)
+	cache.prepareCache("range", nil, nil, prepare)
+	cache.prepareCache("range", nil, nil, prepare)
 	if calls != 2 {
 		t.Fatalf("failed preparation was retained or successful retry was lost: %d", calls)
 	}
@@ -400,5 +400,74 @@ func TestMinimumMemoryBudgetUpdate(t *testing.T) {
 	stat := cm.Stat()
 	if stat.MinimumMemory != 400 || stat.MemoryBudget != 2000 || stat.PersistedBudget != 800 {
 		t.Fatalf("budget update lost: %+v", stat)
+	}
+}
+
+// Retirement is opportunistic. DDL/eviction contention must leave both data and
+// lifetime pins intact and return promptly, never wait while owning schema state.
+func TestDiscardCacheValueDefersToDDLAndEviction(t *testing.T) {
+	tbl := &table{schema: &database{}, Name: ".grp:retention", PersistencyMode: Cache}
+	args := func() scm.Scmer {
+		return tbl.discardCacheValue(nil, []string{"axis"}, []scm.Scmer{scm.NewInt(1)}, "value", scm.NewInt(7))
+	}
+	tbl.ddlMu.Lock()
+	if result := args(); scm.ToInt(result) != 0 {
+		t.Fatal("retired a value while DDL owned the definition")
+	}
+	tbl.ddlMu.Unlock()
+	if tbl.cacheUsers != 0 {
+		t.Fatal("DDL contention leaked the table cache pin")
+	}
+	if !tbl.beginCacheEviction() {
+		t.Fatal("could not start eviction after retirement deferred")
+	}
+	if result := args(); scm.ToInt(result) != 0 {
+		t.Fatal("retired a value while cache eviction owned the table")
+	}
+	if tbl.cacheUsers != -1 {
+		t.Fatal("retirement changed an evicted table's lifetime state")
+	}
+}
+
+// Only semantic preparation results cross into the planner. Domain changes and
+// logical cell mutations discard that result; physical rebuilds never do.
+func TestRangePreparationReusesOnlyUnchangedDomainProof(t *testing.T) {
+	cache, driver, source := &table{}, &table{}, &table{}
+	var previous []scm.Scmer
+	prepare := scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+		previous = append(previous, args[0])
+		return scm.NewBool(true)
+	})
+	run := func() {
+		cache.prepareCache("range", []scm.Scmer{NewTableScmer(driver)}, []scm.Scmer{NewTableScmer(source)}, prepare)
+	}
+	mutate := func(tbl *table) { tbl.beginContributionMutation(); tbl.endContributionMutation() }
+	run()
+	mutate(source)
+	run()
+	if len(previous) != 2 || !previous[0].IsNil() || !scm.ToBool(previous[1]) {
+		t.Fatalf("source DML lost domain proof: %v", previous)
+	}
+	driver.publishTopologyLocked()
+	source.publishTopologyLocked()
+	cache.publishTopologyLocked()
+	run()
+	if len(previous) != 2 {
+		t.Fatal("topology change repeated preparation")
+	}
+	mutate(driver)
+	run()
+	if !previous[2].IsNil() {
+		t.Fatal("driver mutation reused stale proof")
+	}
+	mutate(cache)
+	run()
+	if !previous[3].IsNil() {
+		t.Fatal("another domain's merge reused stale proof")
+	}
+	cache.cacheGeneration.Add(1)
+	run()
+	if !previous[4].IsNil() {
+		t.Fatal("eviction reused stale proof")
 	}
 }

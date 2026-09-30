@@ -469,9 +469,19 @@ The Makefile reads `VERSION` from the first word of that line (`awk '{print $1}'
   Logical mutation batches advance it; physical topology publication does not.
 - `table.cachePreparationMu` serializes idempotent domain preparation and owns
   `cachePreparations`, atomically published for diagnostics. Its entries contain
-  scalar markers/results and use separate CacheManager registrations.
+  scalar markers/results and use separate CacheManager registrations. A recipe
+  receives its previous result only when its domain sources and the carrier
+  cells are unchanged; data-source changes alone may reuse that semantic proof.
+  Native target/source mutation stamps remain private and do not invalidate
+  aggregate values.
   `cacheMap.residentBytes` publishes complete entry byte deltas under its mutex. No source table pointers or transaction closures are retained.
 - Shared payload computation holds ordered logical source read locks through
   publication. Explicit transactions and manual table-lock owners use private
   evaluation. Scheme must not inspect storage versions, cache readiness, LRU
   touches, or physical partitioning to decide cache validity or plan choice.
+
+- `discardCacheValue` pins the carrier and every payload column while schema
+  metadata is read-locked. A nonblocking `ddlMu` read acquisition protects the
+  column set through mutation; the schema lock is released before scanning.
+  Every pin and lock has panic-safe cleanup. Retirement runs on a query or
+  maintenance caller, never the CacheManager owner goroutine.

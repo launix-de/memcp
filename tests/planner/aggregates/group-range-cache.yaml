@@ -151,7 +151,7 @@ test_cases:
           (lambda () (begin
             (group_cache_ensure_cells cache "agg_sum" nil '())
             (group_cache_write_cell cache '(0)  "agg_sum" '(17) nil)
-            17))) nil))
+            17)) nil))
         (and (equal? value 17)
           (equal? (group_cache_read_cell cache '(0)  "agg_sum" nil) '(17))
           (not (group_cache_work_paid? nil ".grp:admission-snapshot" 1))))
@@ -189,11 +189,11 @@ test_cases:
         (createtable "memcp-tests" "grc_cache_dependency" (list (list "column" "id" "int" '() '())) '("engine" "memory") true nil)
         (define cache (make_group_cache 'group-keytable "memcp-tests" ".grp:grc-admission-dependencies" (list (list 'point 'k))))
         (define sources (lambda () (list (table "memcp-tests" "grc_cache_dependency"))))
-        (define first (group_cache_value cache "value" (lambda () '(7)) nil sources (lambda () 17)))
+        (define first (group_cache_value cache "value" (lambda () '(7)) nil sources (lambda () 79)))
         (rebuild (table "memcp-tests" "grc_cache_dependency"))
         (define warm (group_cache_value cache "value" (lambda () '(7)) nil sources (lambda () (error "rebuild discarded value"))))
         (insert (table "memcp-tests" "grc_cache_dependency") '("id") (list (list 1)))
-        (define changed (group_cache_value cache "value" (lambda () '(7)) nil sources (lambda () 23)))
+        (define changed (group_cache_value cache "value" (lambda () '(7)) nil sources (lambda () 83)))
         (if (equal? warm first) (list first changed) (error "rebuild changed point")))
     expect:
       data: [[79, 83]]
@@ -1943,3 +1943,291 @@ test_cases:
       result: true
     cleanup:
       - sql: "DROP TABLE IF EXISTS grc_topology_source"
+
+  - name: "empty range tails do not multiply cells for distinct cuts"
+    setup:
+      - sql: "DROP TABLE IF EXISTS grc_retention_windows"
+      - sql: "DROP TABLE IF EXISTS grc_retention_events"
+      - sql: "CREATE TABLE grc_retention_events (id INT PRIMARY KEY, tenant_id INT, happened_at INT, amount INT) ENGINE=memory"
+      - sql: "CREATE TABLE grc_retention_windows (id INT PRIMARY KEY, tenant_id INT, range_from INT, range_to INT) ENGINE=memory"
+      - scm: |
+          (!begin
+            (insert (table "memcp-tests" "grc_retention_events")
+              '("id" "tenant_id" "happened_at" "amount")
+              (map (produceN 6000) (lambda (i) (list (+ i 1) 1 0 nil))))
+            (insert (table "memcp-tests" "grc_retention_windows")
+              '("id" "tenant_id" "range_from" "range_to")
+              (map (produceN 64) (lambda (i) (list (+ i 1) 1 (+ 10 i) (+ 11 i)))))
+            (rebuild) true)
+      - sql: |
+          SELECT w.id,
+            (SELECT COUNT(*) FROM grc_retention_events e
+             WHERE e.tenant_id=w.tenant_id AND e.happened_at>=w.range_from
+               AND e.happened_at<w.range_to) AS n
+          FROM grc_retention_windows w ORDER BY w.id
+    scm: |
+      (begin
+        (define query "SELECT w.id,(SELECT COUNT(*) FROM grc_retention_events e WHERE e.tenant_id=w.tenant_id AND e.happened_at>=w.range_from AND e.happened_at<w.range_to) AS n FROM grc_retention_windows w ORDER BY w.id")
+        (define collect (lambda (node)
+          (match node
+            (cons (symbol group_cache_create) (cons schema (cons name args)))
+              (if (strlike name ".grp:grc_retention_events:%") (list name) '())
+            (cons head tail) (merge (map node collect))
+            _ '())))
+        (define names (merge_unique (list (collect (parse_sql "memcp-tests" query nil (newsession) nil)))))
+        (globalvars "__test_retention_names" names)
+        (define sizes (map names (lambda (name)
+          (scan nil (table "memcp-tests" name) '() '() '() (lambda () true)
+            '() scan_count 0 + false))))
+        (if (and (not (empty_list? sizes))
+          (reduce sizes (lambda (ok n) (and ok (> n 0) (<= n 3))) true)) true
+          (error (concat "expected occupied carrier with at most three cells, got " (serialize (list names sizes))))))
+    expect:
+      data: [true]
+
+  - name: "inserting into a formerly empty range repairs preparation"
+    setup:
+      - sql: "INSERT INTO grc_retention_events VALUES (6001,1,42,7)"
+    sql: |
+      SELECT w.id,
+        (SELECT COUNT(*) FROM grc_retention_events e
+         WHERE e.tenant_id=w.tenant_id AND e.happened_at>=w.range_from
+           AND e.happened_at<w.range_to) AS n
+      FROM grc_retention_windows w WHERE w.id IN (32,33,34) ORDER BY w.id
+    expect:
+      rows: 3
+      data: [{id: 32, n: 0}, {id: 33, n: 1}, {id: 34, n: 0}]
+
+  - name: "updates move a row across previously empty cells"
+    setup:
+      - sql: "UPDATE grc_retention_events SET happened_at=43,amount=9 WHERE id=6001"
+    sql: |
+      SELECT w.id,
+        (SELECT COUNT(*) FROM grc_retention_events e
+         WHERE e.tenant_id=w.tenant_id AND e.happened_at>=w.range_from
+           AND e.happened_at<w.range_to) AS n,
+        (SELECT SUM(amount) FROM grc_retention_events e
+         WHERE e.tenant_id=w.tenant_id AND e.happened_at>=w.range_from
+           AND e.happened_at<w.range_to) AS total
+      FROM grc_retention_windows w WHERE w.id IN (33,34,35) ORDER BY w.id
+    expect:
+      rows: 3
+      data: [{id: 33, n: 0, total: null}, {id: 34, n: 1, total: 9}, {id: 35, n: 0, total: null}]
+
+  - name: "deleted rows restore empty aggregate semantics after rebuild"
+    setup:
+      - sql: "DELETE FROM grc_retention_events WHERE id=6001"
+      - scm: '(rebuild (table "memcp-tests" "grc_retention_events"))'
+    sql: |
+      SELECT w.id,
+        (SELECT COUNT(*) FROM grc_retention_events e
+         WHERE e.tenant_id=w.tenant_id AND e.happened_at>=w.range_from
+           AND e.happened_at<w.range_to) AS n,
+        (SELECT SUM(amount) FROM grc_retention_events e
+         WHERE e.tenant_id=w.tenant_id AND e.happened_at>=w.range_from
+           AND e.happened_at<w.range_to) AS total
+      FROM grc_retention_windows w WHERE w.id IN (33,34) ORDER BY w.id
+    expect:
+      rows: 2
+      data: [{id: 33, n: 0, total: null}, {id: 34, n: 0, total: null}]
+
+  - name: "adjacent cells emptied by deletion coalesce without dropping the carrier"
+    scm: |
+      (begin
+        (define sizes (map (globalvars "__test_retention_names") (lambda (name)
+          (scan nil (table "memcp-tests" name) '() '() '() (lambda () true)
+            '() scan_count 0 + false))))
+        (if (and (not (empty_list? sizes))
+          (reduce sizes (lambda (ok n) (and ok (equal? n 2))) true)) true
+          (error (concat "empty neighbors were not coalesced: " (serialize sizes)))))
+    expect: {data: [true]}
+
+  - name: "row-local preparation repairs a coarse empty interval after insert"
+    session_id: grc-retention-local
+    steps:
+      - sql: "SET @retention_cut=100"
+      - sql: |
+          SELECT (SELECT COUNT(*) FROM grc_retention_events e
+            WHERE e.tenant_id=w.tenant_id AND e.happened_at>=@retention_cut
+              AND e.happened_at<@retention_cut+1) AS n
+          FROM (SELECT 1 AS tenant_id) w
+        expect: {rows: 1, data: [{n: 0}]}
+      - sql: "INSERT INTO grc_retention_events VALUES (6002,1,100,11)"
+      - sql: |
+          SELECT (SELECT COUNT(*) FROM grc_retention_events e
+            WHERE e.tenant_id=w.tenant_id AND e.happened_at>=@retention_cut
+              AND e.happened_at<@retention_cut+1) AS n
+          FROM (SELECT 1 AS tenant_id) w
+        expect: {rows: 1, data: [{n: 1}]}
+      - sql: "SET @retention_cut=101"
+      - sql: |
+          SELECT (SELECT COUNT(*) FROM grc_retention_events e
+            WHERE e.tenant_id=w.tenant_id AND e.happened_at>=@retention_cut
+              AND e.happened_at<@retention_cut+1) AS n
+          FROM (SELECT 1 AS tenant_id) w
+        expect: {rows: 1, data: [{n: 0}]}
+
+  - name: "nullable counts cannot certify an empty source range"
+    sql: |
+      SELECT
+        (SELECT COUNT(amount) FROM grc_retention_events e
+         WHERE e.tenant_id=w.tenant_id AND e.happened_at>=w.range_from
+           AND e.happened_at<w.range_to) AS nullable_count,
+        (SELECT COUNT(*) FROM grc_retention_events e
+         WHERE e.tenant_id=w.tenant_id AND e.happened_at>=w.range_from
+           AND e.happened_at<w.range_to) AS row_count
+      FROM (SELECT 1 AS tenant_id,0 AS range_from,1 AS range_to) w
+    expect:
+      rows: 1
+      data: [{nullable_count: 0, row_count: 6000}]
+
+  - name: "first board establishes complete populated range coverage"
+    setup:
+      - scm: |
+          (insert (table "memcp-tests" "grc_retention_events")
+            '("id" "tenant_id" "happened_at" "amount")
+            (map (produceN 64) (lambda (i) (list (+ 7000 i) 1 (+ 10 i) 1))))
+    sql: |
+      SELECT w.id,(SELECT COUNT(*) FROM grc_retention_events e
+        WHERE e.tenant_id=w.tenant_id AND e.happened_at>=w.range_from
+          AND e.happened_at<w.range_to) AS n
+      FROM grc_retention_windows w WHERE w.id=33
+    expect: {rows: 1, data: [{id: 33, n: 1}]}
+
+  - name: "second board merges cells after their rows disappear"
+    setup:
+      - sql: "DELETE FROM grc_retention_events WHERE id>=7000"
+    sql: |
+      SELECT (SELECT COUNT(*) FROM grc_retention_events e
+        WHERE e.tenant_id=w.tenant_id AND e.happened_at>=w.range_from
+          AND e.happened_at<w.range_to) AS n
+      FROM (SELECT 1 AS tenant_id,10 AS range_from,74 AS range_to) w
+    expect: {rows: 1, data: [{n: 0}]}
+
+  - name: "first board repairs coverage removed by a different board after insert"
+    setup:
+      - sql: "INSERT INTO grc_retention_events VALUES (7000,1,42,19)"
+    sql: |
+      SELECT w.id,(SELECT COUNT(*) FROM grc_retention_events e
+        WHERE e.tenant_id=w.tenant_id AND e.happened_at>=w.range_from
+          AND e.happened_at<w.range_to) AS n
+      FROM grc_retention_windows w WHERE w.id=33
+    expect: {rows: 1, data: [{id: 33, n: 1}]}
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS grc_retention_windows"
+      - sql: "DROP TABLE IF EXISTS grc_retention_events"
+
+  - name: "moving snapshots discard redundant points while retaining the base anchor"
+    setup:
+      - sql: "DROP TABLE IF EXISTS `.grp:retention-snapshot`"
+    scm: |
+      (!begin
+        (define cache (make_group_cache 'group-keytable "memcp-tests" ".grp:retention-snapshot"
+          (list (list 'point 'tenant) (list 'snapshot 'time))))
+        (define calls (newsession))
+        (calls "full" 0)
+        (define values (reduce (produceN 64) (lambda (values axis)
+          (cons (snapshot_group_cache cache "total" (lambda () '(1)) nil axis 4 (lambda () '())
+            (lambda () (!begin (calls "full" (+ (calls "full") 1)) '(1 10 2 20)))
+            (lambda (lo hi) '()) (lambda (keys) (error "empty delta evaluated"))
+            (lambda () (error "unexpected fallback"))) values)) '()))
+        (define rows (scan nil (table "memcp-tests" ".grp:retention-snapshot")
+          '() '() '() (lambda () true) '() scan_count 0 + false))
+        (if (and (equal? (calls "full") 1) (equal? rows 2)
+          (reduce values (lambda (ok n) (and ok (equal? n 30))) true)
+          (not (nil? (group_cache_read_cell cache '(1 0) "total" nil)))
+          (not (nil? (group_cache_read_cell cache '(1 63) "total" nil)))) true
+          (error (concat "snapshot retention failed: " (serialize (list rows (calls "full") values))))))
+    expect: {data: [true]}
+
+  - name: "snapshot retirement preserves another payload at the same coordinate"
+    scm: |
+      (!begin
+        (define cache (make_group_cache 'group-keytable "memcp-tests" ".grp:retention-snapshot"
+          (list (list 'point 'tenant) (list 'snapshot 'time))))
+        (group_cache_ensure_cells cache "other" nil '())
+        (group_cache_write_cell cache '(1 63) "other" '(99) nil)
+        (define value (snapshot_group_cache cache "total" (lambda () '(1)) nil 64 4 (lambda () '())
+          (lambda () (error "anchor was evicted")) (lambda (lo hi) '())
+          (lambda (keys) (error "unexpected delta")) (lambda () (error "unexpected fallback"))))
+        (and (equal? value 30)
+          (nil? (group_cache_read_cell cache '(1 63) "total" nil))
+          (equal? (group_cache_read_cell cache '(1 63) "other" nil) '(99))
+          (equal? (discard_cache_value nil (table "memcp-tests" ".grp:retention-snapshot")
+            (group_cache_dimension_names cache) '(1 63) "other" '(98)) 0)
+          (equal? (group_cache_read_cell cache '(1 63) "other" nil) '(99)))))
+    expect: {data: [true]}
+
+  - name: "retiring the last payload removes its cell but retains other coordinates"
+    scm: |
+      (!begin
+        (define cache (make_group_cache 'group-keytable "memcp-tests" ".grp:retention-snapshot"
+          (list (list 'point 'tenant) (list 'snapshot 'time))))
+        (define retired (discard_cache_value nil (table "memcp-tests" ".grp:retention-snapshot")
+          (group_cache_dimension_names cache) '(1 63) "other" '(99)))
+        (and (equal? retired 1)
+          (equal? (scan nil (table "memcp-tests" ".grp:retention-snapshot")
+            '() '() '() (lambda () true) '() scan_count 0 + false) 2)
+          (not (nil? (group_cache_read_cell cache '(1 0) "total" nil)))
+          (not (nil? (group_cache_read_cell cache '(1 64) "total" nil))))))
+    expect: {data: [true]}
+
+  - name: "retained snapshot values survive physical compaction"
+    setup:
+      - scm: '(rebuild (table "memcp-tests" ".grp:retention-snapshot"))'
+    scm: |
+      (snapshot_group_cache (make_group_cache 'group-keytable "memcp-tests" ".grp:retention-snapshot"
+        (list (list 'point 'tenant) (list 'snapshot 'time))) "total" (lambda () '(1)) nil 64 4
+        (lambda () '()) (lambda () (error "compaction discarded full state"))
+        (lambda (lo hi) (error "compaction discarded exact point"))
+        (lambda (keys) (error "unexpected delta")) (lambda () (error "unexpected fallback")))
+    expect: {data: [30]}
+
+  - name: "cache retirement rejects application tables"
+    scm: |
+      (discard_cache_value nil (table "memcp-tests" "grc_events") '("id") '(1) "amount" 2)
+    expect: {error: true}
+
+  - name: "cache retirement rejects incomplete coordinates"
+    scm: |
+      (discard_cache_value nil (table "memcp-tests" ".grp:retention-snapshot") '("snapshot_0") '(64) "total" '(1))
+    expect: {error: true}
+
+  - name: "snapshot retention preserves all coordinates of the active SQL request"
+    setup:
+      - sql: "DROP TABLE IF EXISTS `.grp:retention-active-board`"
+    scm: |
+      (!begin
+        (define request (newsession))
+        (define cache (make_group_cache 'group-keytable "memcp-tests" ".grp:retention-active-board"
+          (list (list 'snapshot 'time))))
+        (with_autocommit request nil 0 "snapshot board" (lambda (tx)
+          (reduce (produceN 8) (lambda (_ axis)
+            (snapshot_group_cache cache "total" (lambda () '()) tx axis 4 (lambda () '())
+              (lambda () '(1 10)) (lambda (lo hi) '())
+              (lambda (keys) (error "unexpected delta"))
+              (lambda () (error "unexpected fallback")))) true)))
+        (reduce (produceN 8) (lambda (ok axis)
+          (and ok (not (nil? (group_cache_read_cell cache (list axis) "total" nil))))) true))
+    expect: {data: [true]}
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS `.grp:retention-active-board`"
+      - sql: "DROP TABLE IF EXISTS `.grp:retention-snapshot`"
+
+  - name: "empty range coalescing respects other axes and endpoint kinds"
+    scm: |
+      (!begin
+        (define merged (newsession))
+        (range_cache_coalesce_empty_cells
+          (list '(0 0 0 10 0 0 0 5) '(0 10 0 20 0 0 0 5)
+            '(0 20 0 30 0 0 0 6) '(1 20 0 40 0 0 0 5))
+          0 (lambda (left right) (< (nth left 1) (nth right 1)))
+          (lambda (left right)
+            (begin
+              (define cell (list (nth left 0) (nth left 1) (nth right 2) (nth right 3)
+                (nth left 4) (nth left 5) (nth left 6) (nth left 7)))
+              (merged (serialize cell) cell)
+              cell)))
+        (and (equal? (count (merged)) 1)
+          (equal? (merged (serialize '(0 0 0 20 0 0 0 5))) '(0 0 0 20 0 0 0 5))))
+    expect: {data: [true]}
