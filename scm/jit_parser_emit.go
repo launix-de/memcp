@@ -1704,10 +1704,11 @@ func jitEmitParserProgramCore(ctx *JITContext, program *jitParserProgram, input,
 	// be rooted.
 	resultOff := ctx.AllocSpill(16)
 	ctx.setStackPointer(jitStackRootFrameBP, resultOff, true)
+	resultSlot := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: resultOff, Rooted: true}
 	done := ctx.ReserveLabel()
 	out := emitter.emitStateScalar(jitParserFinish, 2)
 	out.Type = JITTypeUnknown
-	ctx.EmitStoreScmerToStack(out, resultOff)
+	ctx.EmitCopyScmerToDesc(&resultSlot, &out)
 	ctx.FreeDesc(&out)
 	ctx.EmitJmp(done)
 
@@ -1727,10 +1728,10 @@ func jitEmitParserProgramCore(ctx *JITContext, program *jitParserProgram, input,
 	ctx.MarkLabel(failed)
 	panicResult := emitter.emitStateScalar(jitParserPanic, 2, emitter.input)
 	panicResult.Type = JITTypeUnknown
-	ctx.EmitStoreScmerToStack(panicResult, resultOff)
+	ctx.EmitCopyScmerToDesc(&resultSlot, &panicResult)
 	ctx.FreeDesc(&panicResult)
 	ctx.MarkLabel(done)
-	return jitPlaceScmerIntoTarget(ctx, JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: resultOff, Rooted: true}, result)
+	return jitPlaceScmerIntoTarget(ctx, resultSlot, result)
 }
 
 func (emitter *jitParserEmitter) emitRuleReturn(ruleID int, success bool) {
