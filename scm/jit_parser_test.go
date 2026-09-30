@@ -18,9 +18,34 @@ Copyright (C) 2026  Carl-Philip Hänsch
 package scm
 
 import (
+	"runtime"
+	"strings"
 	"testing"
 	"unsafe"
 )
+
+func TestJITParserDiscardedRuleValuesSurviveGC(t *testing.T) {
+	if !jitEnabled {
+		t.Skip("requires GOEXPERIMENT=jit")
+	}
+	const collectName = "jit_test_parser_collect"
+	Globalenv.Vars[Symbol(collectName)] = NewFunc(func(...Scmer) Scmer {
+		runtime.GC()
+		return NewBool(true)
+	})
+	defer delete(Globalenv.Vars, Symbol(collectName))
+	compiled := compileJITExpressionTestProc(t, `(lambda (input) (begin
+		(define item (parser '("!" "@" "#" "%" "&")))
+		(define discard (parser '(item) true))
+		(define collect (parser empty (jit_test_parser_collect)))
+		((parser '((+ '(discard collect) "") $) true "") input)))`)
+	for round := 0; round < 10; round++ {
+		got := Apply(compiled, NewString(strings.Repeat("!@#%&", 20)))
+		if !got.Bool() {
+			t.Fatal("parser did not accept repeated items")
+		}
+	}
+}
 
 func TestJITParserMemoEntryStaysCacheCompact(t *testing.T) {
 	if unsafe.Sizeof(uintptr(0)) == 8 && unsafe.Sizeof(jitParserMemoEntry{}) != 32 {
