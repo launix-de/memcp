@@ -204,7 +204,7 @@ func TestPersistedKeytableTriggerWaitsForRuntimeTarget(t *testing.T) {
 	}
 
 	tbl := &table{Triggers: []TriggerDescription{restored}}
-	if !tbl.SetTriggerTarget(original.Name, func(*TxContext) bool { return true }, func() {}) {
+	if !tbl.SetTriggerTarget(original.Name, nil, func(*TxContext) bool { return true }, func() {}) {
 		t.Fatal("restored keytable trigger was not reusable")
 	}
 	if !tbl.Triggers[0].acquireTarget(nil) {
@@ -556,5 +556,163 @@ func TestReadTableLockBlocksTransactionlessWriter(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("writer did not resume after releasing READ lock")
+	}
+}
+
+// Cache eviction runs on the only CacheManager worker. A rebuild of the
+// dependency owner may hold ddlMu while waiting for that same worker.
+func TestKeytableEvictionDoesNotWaitForDependencyRebuild(t *testing.T) {
+	defer setupGCTest(t)()
+	CreateDatabase("gcdb", false)
+	db := GetDatabase("gcdb")
+	source, _ := CreateTable("gcdb", "source", Memory, false)
+	target, _ := CreateTable("gcdb", ".eviction_target", Cache, false)
+	source.CreateColumn("id", "int", nil, nil)
+	target.CreateColumn("cached", "int", nil, nil)
+	db.schemalock.Lock()
+	target.registerComputeTriggersWithRefs("cached", scm.NewNil(), []scanJoinInfo{{schema: "gcdb", table: "source"}})
+	db.schemalock.Unlock()
+	if len(source.Triggers) == 0 || len(target.GetTriggers(AfterDropTable)) == 0 {
+		t.Fatal("fixture has no dependency/self-cleanup triggers")
+	}
+	GlobalCache.Stop()
+	defer resumeOwnershipTestCache()
+	source.ddlMu.RLock()
+	done := make(chan bool, 1)
+	go func() { done <- keytableCleanup(target, nil) }()
+	select {
+	case ok := <-done:
+		source.ddlMu.RUnlock()
+		if !ok {
+			t.Fatal("idle cache could not be evicted during source rebuild")
+		}
+	case <-time.After(time.Second):
+		source.ddlMu.RUnlock()
+		<-done
+		t.Fatal("CacheManager eviction waits for dependency owner's rebuild DDL lock")
+	}
+	if db.GetTable(source.Name) != source || db.GetTable(target.Name) != nil {
+		t.Fatal("eviction removed a source table or retained its target")
+	}
+	if len(source.Triggers) != 0 {
+		t.Fatal("eviction retained dependency triggers")
+	}
+}
+
+func TestKeytableEvictionDefersBusyDependencyWithoutPartialCleanup(t *testing.T) {
+	defer setupGCTest(t)()
+	CreateDatabase("gcdb", false)
+	db := GetDatabase("gcdb")
+	first, _ := CreateTable("gcdb", "first", Memory, false)
+	second, _ := CreateTable("gcdb", "second", Memory, false)
+	target, _ := CreateTable("gcdb", ".busy_target", Cache, false)
+	for _, source := range []*table{first, second} {
+		source.AddTrigger(TriggerDescription{Name: "dependency", cacheTarget: target})
+	}
+	GlobalCache.Stop()
+	defer resumeOwnershipTestCache()
+	first.mu.Lock()
+	done := make(chan bool, 1)
+	go func() { done <- keytableCleanup(target, nil) }()
+	select {
+	case ok := <-done:
+		first.mu.Unlock()
+		if ok {
+			t.Fatal("busy dependency authorized eviction")
+		}
+	case <-time.After(time.Second):
+		first.mu.Unlock()
+		<-done
+		t.Fatal("cache cleanup blocked on a source mutex")
+	}
+	if db.GetTable(target.Name) != target || len(first.Triggers) != 1 || len(second.Triggers) != 1 {
+		t.Fatal("failed eviction partially removed the cache or its dependencies")
+	}
+	if !target.acquireCacheUse() {
+		t.Fatal("failed eviction left target retired")
+	}
+	target.releaseCacheUse()
+	if !keytableCleanup(target, nil) || len(first.Triggers) != 0 || len(second.Triggers) != 0 {
+		t.Fatal("retry did not release target and dependencies")
+	}
+}
+
+func TestKeytableEvictionPreservesReplacementAndDoesNotRunDDL(t *testing.T) {
+	defer setupGCTest(t)()
+	CreateDatabase("gcdb", false)
+	db := GetDatabase("gcdb")
+	source, _ := CreateTable("gcdb", "source", Memory, false)
+	old, _ := CreateTable("gcdb", ".rebound_target", Cache, false)
+	newTarget := &table{Name: old.Name, schema: db, PersistencyMode: Cache}
+	source.AddTrigger(TriggerDescription{Name: "rebound", cacheTarget: old})
+	source.SetTriggerTarget("rebound", newTarget, newTarget.acquireCacheUseForTrigger, newTarget.releaseCacheUse)
+	source.AddTrigger(TriggerDescription{Name: "old_only", cacheTarget: old})
+	called := false
+	old.AddTrigger(TriggerDescription{Name: "must_not_execute", Timing: AfterDropTable,
+		Func: scm.NewFunc(func(...scm.Scmer) scm.Scmer { called = true; return scm.NewNil() })})
+	GlobalCache.Stop()
+	defer resumeOwnershipTestCache()
+	if !keytableCleanup(old, nil) {
+		t.Fatal("old target was not evicted")
+	}
+	if called {
+		t.Fatal("eviction ran a lifecycle callback")
+	}
+	if len(source.Triggers) != 1 || source.Triggers[0].cacheTarget != newTarget {
+		t.Fatal("name-based cleanup removed the replacement target's dependency")
+	}
+	if !source.Triggers[0].acquireTarget(nil) {
+		t.Fatal("replacement target is not usable")
+	}
+	source.Triggers[0].releaseTarget()
+	if keytableCleanup(source, nil) || db.GetTable(source.Name) != source {
+		t.Fatal("eviction accepted a non-cache user table")
+	}
+}
+
+// Cache eviction must not route through persistence, even for an empty shard.
+type cacheEvictionPersistenceProbe struct {
+	PersistenceEngine
+	deletions int
+}
+
+func (p *cacheEvictionPersistenceProbe) RemoveColumn(string, string) { p.deletions++ }
+func (p *cacheEvictionPersistenceProbe) RemoveLog(string)            { p.deletions++ }
+
+func TestKeytableEvictionDoesNotDeleteDiskFiles(t *testing.T) {
+	defer setupGCTest(t)()
+	CreateDatabase("gcdb", false)
+	db := GetDatabase("gcdb")
+	target, _ := CreateTable("gcdb", ".no_disk_cleanup", Cache, false)
+	GlobalCache.Stop()
+	defer resumeOwnershipTestCache()
+	probe := &cacheEvictionPersistenceProbe{PersistenceEngine: db.persistence}
+	db.persistence = probe
+	defer func() { db.persistence = probe.PersistenceEngine }()
+	if !keytableCleanup(target, nil) {
+		t.Fatal("cache eviction failed")
+	}
+	if probe.deletions != 0 {
+		t.Fatalf("eviction issued %d disk deletions", probe.deletions)
+	}
+}
+
+func TestKeytableEvictionKeepsLiveDependentInvalidationPath(t *testing.T) {
+	defer setupGCTest(t)()
+	CreateDatabase("gcdb", false)
+	db := GetDatabase("gcdb")
+	intermediate, _ := CreateTable("gcdb", ".intermediate", Cache, false)
+	consumer, _ := CreateTable("gcdb", ".consumer", Cache, false)
+	intermediate.AddTrigger(TriggerDescription{Name: "invalidate_consumer", cacheTarget: consumer})
+	GlobalCache.Stop()
+	defer resumeOwnershipTestCache()
+	if keytableCleanup(intermediate, nil) {
+		t.Fatal("eviction disconnected a live dependent's invalidation path")
+	}
+	if db.GetTable(intermediate.Name) != intermediate || len(intermediate.Triggers) != 1 {
+		t.Fatal("rejected eviction modified the dependency graph")
+	}
+	if !keytableCleanup(consumer, nil) || !keytableCleanup(intermediate, nil) {
+		t.Fatal("cache dependency leaves could not be evicted in order")
 	}
 }

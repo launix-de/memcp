@@ -130,6 +130,17 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
 - `storageShard.filterFeedback` contains immutable observations published with one best-effort CAS after a complete shard scan. Readers may load these atomics without shard locks or concurrency rights; they must not inspect shard containers. `table.filterFeedback` publishes an immutable, bounded merged snapshot. Generation IDs are scalar planner-statistics tokens, never retained shard/topology pointers. No feedback synchronization or publication is permitted inside element or filter-batch loops. `tableShowColumnsSnapshot.filterSchema` is immutable column-semantics metadata published through the existing atomic snapshot. Optional `table.RestoredFilterFeedback` is touched only during schema loading before table publication and cleared after restoring historical aggregates; schema saves serialize an atomic table-feedback snapshot without accessing shard state.
 - When adding new storage fields, document the locking discipline and update this section.
 
+- `table.cacheTriggerSources` is an immutable reverse dependency list published
+  with atomic CAS during trigger registration. `TriggerDescription.cacheTarget`
+  is a runtime table identity protected by the source table mutex and omitted
+  from persistence. Cache eviction uses these identities to remove only its own
+  dependencies under existing schema/table TryLocks; it never acquires DDL locks,
+  runs lifecycle triggers, deletes disk files, or calls public CacheManager APIs.
+  A busy dependency defers eviction without removing any trigger. Live dependent
+  targets defer parent eviction until their invalidation edges have been removed.
+  Registration
+  retains the target's existing cache-use pin through metadata publication.
+
 - `TriggerDescription.needsRegeneration` is initialized during JSON loading before
   publication and protected by `table.mu` afterwards. Restored compute dependency
   triggers stay inert until registration atomically replaces their generated code
@@ -453,9 +464,19 @@ The Makefile reads `VERSION` from the first word of that line (`awk '{print $1}'
   Logical mutation batches advance it; physical topology publication does not.
 - `table.cachePreparationMu` serializes idempotent domain preparation and owns
   `cachePreparations`, atomically published for diagnostics. Its entries contain
-  scalar markers/results and use separate CacheManager registrations.
+  scalar markers/results and use separate CacheManager registrations. A recipe
+  receives its previous result only when its domain sources and the carrier
+  cells are unchanged; data-source changes alone may reuse that semantic proof.
+  Native target/source mutation stamps remain private and do not invalidate
+  aggregate values.
   `cacheMap.residentBytes` publishes complete entry byte deltas under its mutex. No source table pointers or transaction closures are retained.
 - Shared payload computation holds ordered logical source read locks through
   publication. Explicit transactions and manual table-lock owners use private
   evaluation. Scheme must not inspect storage versions, cache readiness, LRU
   touches, or physical partitioning to decide cache validity or plan choice.
+
+- `discardCacheValue` pins the carrier and every payload column while schema
+  metadata is read-locked. A nonblocking `ddlMu` read acquisition protects the
+  column set through mutation; the schema lock is released before scanning.
+  Every pin and lock has panic-safe cleanup. Retirement runs on a query or
+  maintenance caller, never the CacheManager owner goroutine.

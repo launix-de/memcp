@@ -146,9 +146,9 @@ test_cases:
         (list (car ast) (car (cadr (qb_fields ast)))))
     expect:
       rows: 1
+      # /scm returns one list value; symbols retain their JSON type tags.
       data:
-        - "query-block"
-        - "aggregate"
+        - [{symbol: "query-block"}, {symbol: "aggregate"}]
 
   - name: "JSON_ARRAYAGG has deterministic in-aggregate ordering"
     ttl_data: |

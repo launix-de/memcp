@@ -1817,9 +1817,8 @@ func registerCreatedTable(t *table) {
 	// register temp keytable with CacheManager AFTER releasing schemalock
 	// to avoid deadlock: AddItem → run() → evict → keytableCleanup → TryLock(schemalock)
 	if t.isEphemeralQueryTable() {
-		schemaName := t.schema.Name
 		GlobalCache.AddItem(t, int64(t.exclusiveSize()), TypeTempKeytable, func(ptr any, freedByType *[numEvictableTypes]int64) bool {
-			return keytableCleanup(ptr.(*table), schemaName, freedByType)
+			return keytableCleanup(ptr.(*table), freedByType)
 		}, keytableLastUsed, nil)
 	} else if t.PersistencyMode == Cache {
 		// Register the initial shard so eviction can reach it before the first rebuild.
@@ -1922,80 +1921,107 @@ func RenameTable(schema, oldname, newname string) {
 	db.saveLockedAndUnlock(t.schemaSaveMode())
 }
 
-// keytableCleanup is called by the CacheManager when evicting a temp keytable.
-// MUST NOT call public GlobalCache.Remove (deadlock: we're inside the CacheManager goroutine).
-// MUST NOT use Lock on schemalock (deadlock: CreateTable holds schemalock → AddItem → evict → here).
-// Returns false if the schemalock is busy (item pushed back for later retry).
-func keytableCleanup(tbl *table, schemaName string, freedByType *[numEvictableTypes]int64) bool {
-	persistenceLifecycleLocked := false
+// keytableCleanup retires a planner-owned in-memory cache on the manager
+// goroutine. It performs only nonblocking metadata operations: no DDL, schema
+// I/O, disk deletion, Scheme execution, or public CacheManager calls.
+func keytableCleanup(tbl *table, freedByType *[numEvictableTypes]int64) bool {
+	if !tbl.isEphemeralQueryTable() {
+		return false
+	}
+	// Registration publishes immutable reverse edges, so cleanup need not visit
+	// unrelated tables or execute name-based self-cleanup triggers. Rebinding a
+	// same-named cache is safe: only triggers carrying this exact target retire.
+	sources := []*table{tbl}
+	head := tbl.cacheTriggerSources.Load()
+	for edge := head; edge != nil; edge = edge.next {
+		sources = append(sources, edge.table)
+	}
+	var schemas []*database
+	var locked []*table
 	defer func() {
-		if persistenceLifecycleLocked {
-			tbl.schema.persistenceLifecycle.RUnlock()
+		for i := len(locked) - 1; i >= 0; i-- {
+			locked[i].mu.Unlock()
 		}
-		if r := recover(); r != nil {
-			fmt.Println("error: keytableCleanup panic for", schemaName+"."+tbl.Name, ":", r)
+		for i := len(schemas) - 1; i >= 0; i-- {
+			schemas[i].schemalock.Unlock()
 		}
 	}()
-	// drop the table directly (bypass DropTable to avoid deadlock on opChan)
-	db := GetDatabase(schemaName)
-	if db != nil {
-		if !db.persistenceLifecycle.TryRLock() {
-			return false // a storage generation is retaining this catalog member
+	// Schema serialization reads trigger metadata under schemalock. Acquire the
+	// existing locks without waiting, before changing anything; a busy source
+	// leaves the cache and all dependencies intact for the next eviction pass.
+	for _, source := range sources {
+		db := source.schema
+		seen := false
+		for _, held := range schemas {
+			if held == db {
+				seen = true
+				break
+			}
 		}
-		persistenceLifecycleLocked = true
-		if !db.schemalock.TryLock() {
-			return false // schemalock is held (e.g. by CreateTable); retry later
+		if !seen {
+			if !db.schemalock.TryLock() {
+				return false
+			}
+			schemas = append(schemas, db)
 		}
-		if db.tables.Get(tbl.Name) != tbl {
-			db.schemalock.Unlock()
-			return true
-		}
-		if !tbl.beginCacheEviction() {
-			db.schemalock.Unlock()
+	}
+	for _, source := range sources {
+		if !source.mu.TryLock() {
 			return false
 		}
-		// Release child caches while the catalog entry is still recoverable.
-		// A busy child must not leave a removed table with untracked indexes.
-		if !tbl.evictShardChildren(freedByType) {
-			atomic.StoreInt64(&tbl.cacheUsers, 0)
-			db.schemalock.Unlock()
+		locked = append(locked, source)
+	}
+	// Evict leaves first. Removing an intermediate cache would disconnect the
+	// invalidation path of its live consumers. Their own eviction removes the
+	// reverse edges and makes this table eligible without cascading DDL.
+	for _, trigger := range tbl.Triggers {
+		if target := trigger.cacheTarget; target != nil && target != tbl && atomic.LoadInt64(&target.cacheUsers) >= 0 {
 			return false
 		}
-		db.tables.Remove(tbl.Name)
-		db.saveLockedAndUnlock(tbl.schemaSaveMode())
-	} else if !tbl.beginCacheEviction() {
+	}
+	if !tbl.beginCacheEviction() {
 		return false
-	} else if !tbl.evictShardChildren(freedByType) {
+	}
+	// A registrant may have published another source before its last cache-use
+	// pin drained. Retry with the complete snapshot instead of missing an edge.
+	if tbl.cacheTriggerSources.Load() != head {
 		atomic.StoreInt64(&tbl.cacheUsers, 0)
 		return false
 	}
-	// remove all shard+index+temp column registrations for this table (recursive)
+	if !tbl.evictShardChildren(freedByType) {
+		atomic.StoreInt64(&tbl.cacheUsers, 0)
+		return false
+	}
+	for _, source := range sources[1:] {
+		kept := source.Triggers[:0]
+		for _, trigger := range source.Triggers {
+			if trigger.cacheTarget != tbl {
+				kept = append(kept, trigger)
+			}
+		}
+		if len(kept) != len(source.Triggers) {
+			clear(source.Triggers[len(kept):])
+			source.Triggers = kept
+			// These are reconstructible runtime dependencies, never user DDL.
+			source.schema.schemaDirty.Store(true)
+		}
+	}
+	tbl.cacheTriggerSources.Store(nil)
+	db := tbl.schema
+	if db.tables.Get(tbl.Name) == tbl {
+		db.tables.Remove(tbl.Name)
+		db.schemaDirty.Store(true)
+	}
 	for _, c := range tbl.Columns {
 		if c.IsTemp {
 			GlobalCache.removeInternal(c, freedByType)
 		}
 	}
-	for _, s := range tbl.Shards {
-		GlobalCache.removeInternal(s, freedByType)
+	for _, shard := range tbl.ActiveShards() {
+		if shard != nil {
+			GlobalCache.removeInternal(shard, freedByType)
+		}
 	}
-	for _, s := range tbl.PShards {
-		GlobalCache.removeInternal(s, freedByType)
-	}
-	for _, s := range tbl.Shards {
-		s.RemoveFromDisk()
-	}
-	for _, s := range tbl.PShards {
-		s.RemoveFromDisk()
-	}
-	if persistenceLifecycleLocked {
-		tbl.schema.persistenceLifecycle.RUnlock()
-		persistenceLifecycleLocked = false
-	}
-	// The table's self-cleanup hooks remove exactly the source-table triggers
-	// installed for its computed columns. Trigger target pins above make this
-	// safe even when a writer snapshotted a trigger concurrently. Run callbacks
-	// outside catalog locks because they may recursively perform DDL.
-	tbl.ExecuteTableLifecycleTriggers(AfterDropTable, nil)
 	return true
 }
 

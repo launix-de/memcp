@@ -1071,42 +1071,42 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 
 		if spec.recset != nil {
 			if len(sortcols) > 0 {
-				// Ordered RecSet parts intentionally form one sequential producer.
-				// The result channel is sized for every part, so a one-worker path
-				// can execute directly without a goroutine or waiter.
-				runFanoutTasks(currentTx, 1, func(_ int, _ bool) {
-					parts := spec.recset.shards
+				// Preserve the RecSet's shard order when merging equal sort keys,
+				// but compute each shard's sorted run within the query fanout budget.
+				// Results belong to distinct slots until the fanout has completed.
+				parts := spec.recset.shards
+				results := make([]scanOrderResult, len(parts))
+				done := runFanoutTasks(currentTx, len(parts), func(index int, _ bool) {
+					part := parts[index]
+					if part.count == 0 {
+						return
+					}
 					withTxSession(currentTx, func() scm.Scmer {
 						defer func() {
 							if r := recover(); r != nil {
-								q_ <- scanOrderResult{err: scanError{r, string(debug.Stack())}}
+								results[index] = scanOrderResult{err: scanError{r, string(debug.Stack())}}
 							}
 						}()
-						for _, part := range parts {
-							if part.count == 0 {
-								continue
-							}
-							// Cancellation contract: check only at the scheduling boundary, before entering
-							// the shard. Once entered, a shard runs atomically without cancellation checks.
-							if ss != nil && ss.IsKilledSeq(querySeq) {
-								panic("query killed")
-							}
-							func(part recSetShard) {
-								defer func() {
-									if r := recover(); r != nil {
-										q_ <- scanOrderResult{err: scanError{r, string(debug.Stack())}}
-									}
-								}()
-								res := part.shard.scan_order(tableBounds, conditionCols, condition, acceptCols, accept, sortcols, sortdirs, limitPartitionCols, offset, shardLimit, callbackCols, currentTx, ss)
-								res.callbackCols = callbackCols
-								res.callback = callback
-								res.tableIdx = tableIdx
-								q_ <- scanOrderResult{res: res, inputCount: part.count, candidateCount: part.count, outputCount: int64(len(res.items))}
-							}(part)
+						// Cancellation remains at the scheduling boundary, never inside a shard.
+						if ss != nil && ss.IsKilledSeq(querySeq) {
+							panic("query killed")
 						}
+						res := part.shard.scan_order(tableBounds, conditionCols, condition, acceptCols, accept, sortcols, sortdirs, limitPartitionCols, offset, shardLimit, callbackCols, currentTx, ss)
+						res.callbackCols = callbackCols
+						res.callback = callback
+						res.tableIdx = tableIdx
+						results[index] = scanOrderResult{res: res, inputCount: part.count, candidateCount: part.count, outputCount: int64(len(res.items))}
 						return scm.NewNil()
 					})
 				})
+				if done != nil {
+					<-done
+				}
+				for index, result := range results {
+					if parts[index].count > 0 {
+						q_ <- result
+					}
+				}
 			} else {
 				activeParts := make([]int, 0, len(spec.recset.shards))
 				for i := range spec.recset.shards {

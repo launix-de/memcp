@@ -57,8 +57,8 @@ test_cases:
           (not (scan_exists nil tbl (car (eval (compile_scan_access '("$recset_contains" "id") (scheme "(lambda (contains id) (and (contains before_delete) (or (equal? id 2) (equal? id 18))))")))) (cadr (eval (compile_scan_access '("$recset_contains" "id") (scheme "(lambda (contains id) (and (contains before_delete) (or (equal? id 2) (equal? id 18))))")))) '("$recset_contains" "id")
             (lambda (contains id) (and (contains before_delete) (or (equal? id 2) (equal? id 18))))))
           (equal? ordered (map (filter (produceN 18) (lambda (i)
-            (and (not (equal? i 1)) (not (equal? i 17))))) (lambda (i) (list (+ i 1))))))
-          (equal? base_ordered ordered)
+            (and (not (equal? i 1)) (not (equal? i 17))))) (lambda (i) (list (+ i 1)))))
+          (equal? base_ordered ordered))
           "ok"
           (error (concat "delete consumer mismatch: sum=" recset_first_sum
             " base=" base_index_first_count " count=" (recset_count narrowed)

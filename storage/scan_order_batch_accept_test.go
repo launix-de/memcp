@@ -16,6 +16,7 @@ Copyright (C) 2026  Carl-Philip Hänsch
 */
 package storage
 
+import "runtime"
 import "testing"
 import "github.com/launix-de/memcp/scm"
 
@@ -165,6 +166,50 @@ func TestScanOrderRecSetSelectsExactWindow(t *testing.T) {
 	}
 	if empty := scanOrderRecSet(nil, source, nil, nil, 0, 0); empty.count != 0 || empty.table != table {
 		t.Fatalf("zero-limit window = %v, want empty RecSet of source table", empty)
+	}
+}
+
+// Ordered RecSet scans may finish their shard runs in any order, but ties
+// must enter the merge heap in the same order as the serial scan.
+func TestScanOrderRecSetParallelRunsPreserveTiesAndWindow(t *testing.T) {
+	table := setupBatchAcceptTable(t, "torderrecsetparallel", 90)
+	RebuildTable(table, true, false)
+	if !table.beginManualRepartition() {
+		t.Fatal("manual repartition was not claimed")
+	}
+	table.repartition([]shardDimension{table.NewShardDimension("id", 3)})
+	input := table.scanRecSet(nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil,
+		[]string{"id"}, scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
+			return scm.NewBool(values[0].Int()%2 == 0)
+		}))
+	if len(input.shards) < 2 {
+		t.Fatal("test requires multiple RecSet shards")
+	}
+	_, ascending := integerOrder(false)
+	read := func() []int64 {
+		var ids []int64
+		input.scan_order(nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil,
+			nil, scm.NewBool(true), []scm.Scmer{scm.NewString("grp")},
+			[]func(...scm.Scmer) scm.Scmer{ascending}, 0, 4, 17, []string{"id"},
+			scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
+				ids = append(ids, values[1].Int())
+				return values[0]
+			}), scm.NewNil(), false, scm.NewNil(), nil, scm.NewNil())
+		return ids
+	}
+	previous := runtime.GOMAXPROCS(1)
+	defer runtime.GOMAXPROCS(previous)
+	// Build the same lazy order index before comparing scheduling modes.
+	read()
+	want := read()
+	if len(want) != 17 {
+		t.Fatalf("serial window returned %d rows, want 17", len(want))
+	}
+	runtime.GOMAXPROCS(4)
+	for repeat := 0; repeat < 10; repeat++ {
+		if got := read(); !equalInt64s(got, want) {
+			t.Fatalf("parallel tied window = %v, serial = %v", got, want)
+		}
 	}
 }
 

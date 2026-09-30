@@ -67,6 +67,7 @@ from run_sql_tests import (  # noqa: E402
     performance_sample_ns,
     performance_measurement_ns,
     prepare_memcp_data_dir,
+    print_memcp_log,
     resolve_timing_aggregation,
     performance_scale_from_samples,
     planner_time_limit_with_tolerance_ms,
@@ -87,6 +88,22 @@ from tools.check_test_table_names import mutable_table_collisions  # noqa: E402
 
 
 class ManagedDataDirectoryContractTest(unittest.TestCase):
+    def test_failure_artifact_keeps_crash_header_after_cleanup(self):
+        with tempfile.TemporaryDirectory() as root:
+            log = Path(root) / "server.log"
+            artifact = Path(root) / "trial.memcp.log"
+            contents = "fatal error: crash header\n" + "stack frame\n" * 150
+            log.write_text(contents)
+            output = io.StringIO()
+            with mock.patch("run_sql_tests._memcp_log_file", str(log)), \
+                    mock.patch.dict(os.environ, {"MEMCP_FAILURE_LOG_ARTIFACT": str(artifact)}), \
+                    redirect_stdout(output):
+                print_memcp_log(tail=100)
+                cleanup_memcp_artifacts(None)
+            self.assertFalse(log.exists())
+            self.assertNotIn("crash header", output.getvalue())
+            self.assertEqual(artifact.read_text(), contents)
+
     def test_default_directory_and_log_are_removed(self):
         with tempfile.TemporaryDirectory() as root:
             root_path = Path(root)
@@ -588,6 +605,26 @@ class PerformanceScaleContractTest(unittest.TestCase):
                 self.assertEqual(runner.validate_expectation(
                     {"scm": "value", "expect": {"data": [expected]}},
                     response, [actual]), wanted)
+
+    def test_scm_correctness_cannot_bypass_expectations(self) -> None:
+        for expectation in ({"result": True}, {"data": [True]}):
+            for actual, wanted in (("true", True), ("false", False), ("1", False)):
+                with self.subTest(expectation=expectation, actual=actual):
+                    runner = SQLTestRunner("http://localhost:1")
+                    response = SimpleNamespace(status_code=200, text=actual, headers={})
+                    with mock.patch("run_sql_tests.requests.post", return_value=response):
+                        self.assertEqual(runner.run_test_case({
+                            "name": "SCM predicate", "scm": "predicate", "expect": expectation,
+                        }, "memcp-tests"), wanted)
+
+    def test_query_fields_cannot_silently_skip_an_operation(self) -> None:
+        for fields in (("sql", "scm"), ("scm", "sparql"), ("sql", "sparql")):
+            with self.subTest(fields=fields):
+                runner = SQLTestRunner("http://localhost:1")
+                case = {"name": "ambiguous operation", **{key: "unused" for key in fields}}
+                with mock.patch("run_sql_tests.requests.post") as post:
+                    self.assertFalse(runner.run_test_case(case, "memcp-tests"))
+                    post.assert_not_called()
 
     def test_ci_workload_seed_initializes_safe_rows(self) -> None:
         seed = Path(__file__).resolve().parents[1] / "tests/performance/ci-workloads.json"
@@ -1797,6 +1834,30 @@ class ColdWarmTotalContractTests(unittest.TestCase):
         self.assertEqual(result["candidate_ms"], 210)
         self.assertEqual(len(result["b_samples_ms"]), 7)
         self.assertTrue(result["passed"])
+
+
+class RAMAbortOwnershipContractTest(unittest.TestCase):
+    def test_connect_only_abort_never_discovers_or_kills_a_process(self):
+        import run_sql_tests as runner
+        with mock.patch.object(runner, "_owned_memcp_process", None), \
+                mock.patch.object(runner, "ram_pressure_abort", threading.Event()), \
+                mock.patch.object(runner, "find_memcp_pid") as discover, \
+                mock.patch.object(runner.os, "kill") as kill, redirect_stdout(io.StringIO()):
+            runner.trip_ram_abort("test")
+            self.assertTrue(runner.ram_pressure_abort.is_set())
+            discover.assert_not_called()
+            kill.assert_not_called()
+
+    def test_abort_kills_only_the_owned_subprocess_once(self):
+        import run_sql_tests as runner
+        proc = mock.Mock(pid=12345)
+        with mock.patch.object(runner, "_owned_memcp_process", proc), \
+                mock.patch.object(runner, "ram_pressure_abort", threading.Event()), \
+                mock.patch.object(runner, "find_memcp_pid") as discover, redirect_stdout(io.StringIO()):
+            runner.trip_ram_abort("test")
+            runner.trip_ram_abort("repeated")
+            proc.kill.assert_called_once_with()
+            discover.assert_not_called()
 
 
 if __name__ == "__main__":

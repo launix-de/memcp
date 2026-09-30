@@ -1023,18 +1023,36 @@ func Init(en scm.Env) {
 	})
 
 	scm.Declare(&en, &scm.Declaration{
+		Name: "discard_cache_value",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			return TableFromScmer(a[1]).discardCacheValue(scmerToTxContext(a[0]),
+				scmerSliceToStrings(mustScmerSlice(a[2], "cache coordinate columns")),
+				mustScmerSlice(a[3], "cache coordinate values"), scm.String(a[4]), a[5])
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", HasSideEffects: true,
+			Description: "forget an expected group-cache payload by domain coordinate, preserving other aggregate payloads in the same cell",
+			Params: []*scm.TypeDescriptor{
+				{Kind: "any", Label: "tx"}, {Kind: "table", Label: "cache"},
+				{Kind: "list", Label: "columns"}, {Kind: "list", Label: "values"},
+				{Kind: "string", Label: "payload"}, {Kind: "any", Label: "expected"},
+			}, Return: &scm.TypeDescriptor{Kind: "int"}},
+	})
+
+	scm.Declare(&en, &scm.Declaration{
 		Name: "prepare_cache",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			return TableFromScmer(a[0]).prepareCache(scm.String(a[1]),
-				mustScmerSlice(a[2], "preparation sources"), a[3])
+				mustScmerSlice(a[2], "preparation domains"),
+				mustScmerSlice(a[3], "preparation data sources"), a[4])
 		},
 		Type: &scm.TypeDescriptor{Kind: "func", HasSideEffects: true,
 			Description: "synchronously prepare a logical cache domain; storage owns preparation lifetime and source-change tracking, returning the recipe result",
 			Params: []*scm.TypeDescriptor{
 				{Kind: "table", Label: "cache"},
 				{Kind: "string", Label: "domain"},
-				{Kind: "list", Label: "sources"},
-				{Kind: "func", Label: "prepare"},
+				{Kind: "list", Label: "domain_sources"},
+				{Kind: "list", Label: "data_sources"},
+				{Kind: "func", Label: "prepare", Params: []*scm.TypeDescriptor{{Kind: "any", Label: "previous"}}, Return: &scm.TypeDescriptor{Kind: "any"}},
 			},
 			Return: &scm.TypeDescriptor{Kind: "any"},
 		},
@@ -3476,17 +3494,18 @@ func Init(en scm.Env) {
 					}
 				}
 				if exists {
-					baseTable.SetTriggerTarget(triggerName, ktTable.acquireCacheUseForTrigger, ktTable.releaseCacheUse)
+					baseTable.SetTriggerTarget(triggerName, ktTable, ktTable.acquireCacheUseForTrigger, ktTable.releaseCacheUse)
 					continue
 				}
 				baseTable.AddTrigger(TriggerDescription{
-					Name:     triggerName,
-					Timing:   td.timing,
-					IsSystem: true,
-					Priority: 90, // run before invalidatecolumn (100) so keys are current when values recompute
-					Func:     buildFKProc(td.body),
-					Acquire:  ktTable.acquireCacheUseForTrigger,
-					Release:  ktTable.releaseCacheUse,
+					Name:        triggerName,
+					Timing:      td.timing,
+					IsSystem:    true,
+					Priority:    90, // run before invalidatecolumn (100) so keys are current when values recompute
+					Func:        buildFKProc(td.body),
+					cacheTarget: ktTable,
+					Acquire:     ktTable.acquireCacheUseForTrigger,
+					Release:     ktTable.releaseCacheUse,
 				})
 			}
 			// Lifecycle cleanup: when the base table is dropped/shape-changed, the keytable
@@ -3508,17 +3527,18 @@ func Init(en scm.Env) {
 					}
 				}
 				if exists {
-					baseTable.SetTriggerTarget(triggerName, ktTable.acquireCacheUseForTrigger, ktTable.releaseCacheUse)
+					baseTable.SetTriggerTarget(triggerName, ktTable, ktTable.acquireCacheUseForTrigger, ktTable.releaseCacheUse)
 					continue
 				}
 				baseTable.AddTrigger(TriggerDescription{
-					Name:     triggerName,
-					Timing:   timing,
-					IsSystem: true,
-					Priority: 90,
-					Func:     buildFKProc(dropBody),
-					Acquire:  ktTable.acquireCacheUseForTrigger,
-					Release:  ktTable.releaseCacheUse,
+					Name:        triggerName,
+					Timing:      timing,
+					IsSystem:    true,
+					Priority:    90,
+					Func:        buildFKProc(dropBody),
+					cacheTarget: ktTable,
+					Acquire:     ktTable.acquireCacheUseForTrigger,
+					Release:     ktTable.releaseCacheUse,
 				})
 			}
 			return scm.NewBool(true)

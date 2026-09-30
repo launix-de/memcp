@@ -263,7 +263,7 @@ test_cases:
 
   - name: "IN hook appears in compiled scan access"
     scm: |
-      (compile_scan_access '("id") (scheme "(lambda (id) (sql_in (list 49999 2 40000 0 25000 2 49999) id))"))
+      (serialize (compile_scan_access '("id") (scheme "(lambda (id) (sql_in (list 49999 2 40000 0 25000 2 49999) id))")))
     expect:
       result_contains: ['scan_boundary "in"']
 

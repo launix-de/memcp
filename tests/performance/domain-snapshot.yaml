@@ -77,6 +77,60 @@ setup:
                     (warm (- remaining 1))))))))
           (warm 256))))
 test_cases:
+  - name: Moving snapshot plateau one cold board and ten later boards
+    # A board has 64 distinct as-of coordinates, advanced on every request.
+    # Keep the workload identical for A/B and retain the first full build.
+    setup:
+      - scm: '(begin (globalvars "__retention_perf_cursor" (newsession)) true)'
+    scm: |
+      (!begin
+        (define counter (globalvars "__retention_perf_cursor"))
+        (define board (coalesceNil (counter "board") 0))
+        (counter "board" (+ board 1))
+        (define cache (make_group_cache 'group-keytable "memcp-tests" ".grp:retention-perf-snapshot"
+          (list (list 'snapshot 'time))))
+        (define total (reduce (produceN 64) (lambda (total i)
+          (+ total (snapshot_group_cache cache "total" (lambda () '()) nil (+ (* board 64) i) 4000
+            (lambda () '())
+            (lambda () (reduce (produceN 4000) (lambda (values key) (set_assoc values key 1)) '()))
+            (lambda (lo hi) '()) (lambda (keys) (error "unchanged plateau evaluated keys"))
+            (lambda () (error "unexpected snapshot fallback"))))) 0))
+        (if (equal? total 256000) true (error "moving snapshot plateau returned wrong totals")))
+    expect: {data: [true]}
+    timing_aggregation: total
+    warmup: 0
+    timing_samples: 11
+    threshold_ms: 10000
+    timeout: 60
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS `.grp:retention-perf-snapshot`"
+  - name: One cold board and ten alias-renamed boards share snapshot cells
+    setup:
+    - scm: (begin (globalvars "__cache_identity_request" (newsession)) true)
+    scm: |-
+      (begin
+        (define counter (globalvars "__cache_identity_request"))
+        (define n (coalesceNil (counter "next") 0))
+        (counter "next" (+ n 1))
+        (define query (regexp_replace "SELECT driver.x, (SELECT SUM((SELECT h.quantity FROM ds_history h WHERE h.entity_id=e.id AND h.coordinate<=driver.x ORDER BY h.coordinate DESC LIMIT 1)) FROM ds_entity e) AS total FROM (SELECT 10 AS x UNION ALL SELECT 20 UNION ALL SELECT 30) driver" "driver" (concat "period_" n)))
+        (define request (newsession))
+        (define rows (newsession))
+        (define formula (cached_parse (newcachemap) (list parse_sql)
+          "memcp-tests" query nil "root" request true nil))
+        (with_autocommit request nil 0 query (lambda (tx)
+          (sql_execute_formula request tx formula
+            (lambda (row) (rows (string (get_assoc row "x")) (get_assoc row "total")))
+            (lambda (fields) true))))
+        (if (and (equal? (count (rows)) 3)
+          (equal? (rows "10") 4000) (equal? (rows "20") 4400) (equal? (rows "30") 4400)) true
+          (error "cross-board snapshot workload returned incorrect totals")))
+    expect:
+      result: true
+    timing_aggregation: total
+    warmup: 0
+    timing_samples: 11
+    threshold_ms: 10000
+    timeout: 60
   - name: "Ordered domain shares quantity, classification and independent predicate state"
     sql: &snapshot_state_query |
       SELECT d.x, p.category,
@@ -243,11 +297,11 @@ test_cases:
               (define category (get_assoc row "category"))
               (define even (if (< coordinate 20) 2000 (if (<= coordinate 50) 2400 1800)))
               (and ok (equal? (get_assoc row "total")
-                (if (nil? category) (+ even 2000) (if (equal? category 0) even 2000)))))) true))))))
+                (if (nil? category) (+ even 2000) (if (equal? category 0) even 2000)))))) true)))))
         (define valid (reduce (produceN 6) (lambda (valid i) (and valid (run (+ i 48)))) true))
         (define variants (count ((car (cache (car (cache)))) "variants")))
         (if (and valid (<= variants 2)) true
-          (error (concat "moving coordinates changed values or recompiled: " valid "/" variants)))))
+          (error (concat "moving coordinates changed values or recompiled: " valid "/" variants))))
     expect:
       data: [true]
   - name: Selected property boundaries share the moving selection domain

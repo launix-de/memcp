@@ -713,19 +713,20 @@ def max_rows_for_ram(bytes_per_row: int = 1024) -> int:
 ram_pressure_abort = threading.Event()
 _ram_monitor_lock = threading.Lock()
 _ram_monitor_started = False
+_owned_memcp_process = None
 
 def trip_ram_abort(reason: str):
     """Record RAM abort, kill memcp so it releases RAM immediately, set the flag."""
     if ram_pressure_abort.is_set():
         return
     avail = mem_available_mb()
-    print(f"\n🛑 RAM PRESSURE: MemAvailable={avail}MB < floor={mem_abort_floor}MB ({reason}) — aborting + killing memcp", flush=True)
+    print(f"\n🛑 RAM PRESSURE: MemAvailable={avail}MB < floor={mem_abort_floor}MB ({reason}) — aborting tests", flush=True)
     ram_pressure_abort.set()
-    pid = find_memcp_pid()
-    if pid:
+    proc = _owned_memcp_process
+    if proc is not None:
         try:
-            os.kill(pid, 9)
-            print(f"   SIGKILL sent to memcp pid={pid}", flush=True)
+            proc.kill()
+            print(f"   SIGKILL sent to runner-owned memcp pid={proc.pid}", flush=True)
         except Exception as e:
             print(f"   SIGKILL failed: {e}", flush=True)
 
@@ -1177,6 +1178,15 @@ class SQLTestRunner:
         if is_noncritical:
             self.noncritical_count += 1
 
+        # One case has one measured/asserted operation. Multiple query fields
+        # otherwise silently select the first dispatch branch and skip the rest.
+        operations = [key for key in ("sql", "scm", "sparql") if key in test_case]
+        if len(operations) > 1:
+            return self._record_fail(
+                name, "Use setup or steps instead of multiple query fields: " + ", ".join(operations),
+                None, None, None, is_noncritical,
+            )
+
         start_delay_ms = int(test_case.get("start_delay_ms", 0))
         if start_delay_ms > 0:
             time.sleep(start_delay_ms / 1000.0)
@@ -1501,6 +1511,13 @@ class SQLTestRunner:
                 return self._record_fail(name, f"Expected error but got 200: {resp.text[:200]}", scm_code, None, None, is_noncritical)
             if resp.status_code != 200:
                 return self._record_fail(name, f"SCM error ({resp.status_code}): {resp.text[:200]}", scm_code, None, None, is_noncritical)
+            # SCM correctness cases must validate their declared results too.
+            # HTTP 200 only proves execution succeeded; accepting it alone hides
+            # a false predicate and silently weakens cache correctness tests.
+            results = self.parse_jsonl_response(resp)
+            if not self.validate_expectation(test_case, resp, results):
+                return self._record_fail(name, "SCM expectation mismatch", scm_code,
+                                         resp, expect, is_noncritical)
             self._record_success(name, is_noncritical)
             return True
 
@@ -2012,6 +2029,9 @@ class SQLTestRunner:
             result_text = response.text
             if results is not None:
                 result_text += "\n" + json.dumps(results, sort_keys=True, ensure_ascii=False)
+                # /scm may return a JSON string containing an EXPLAIN form.
+                # Match its decoded text, as with text inside SQL result rows.
+                result_text += "\n" + "\n".join(value for value in results if isinstance(value, str))
             if "result_contains" in expect:
                 needles = expect["result_contains"] if isinstance(expect["result_contains"], list) else [expect["result_contains"]]
                 for needle in needles:
@@ -2036,6 +2056,11 @@ class SQLTestRunner:
 
         if results is None:
             return False
+
+        if "result" in expect:
+            if (len(results) != 1 or type(results[0]) is not type(expect["result"])
+                    or results[0] != expect["result"]):
+                return False
 
         if expect.get("rows") is not None:
             if len(results) != expect["rows"]:
@@ -2506,7 +2531,7 @@ def cleanup_memcp_artifacts(owned_data_dir: Optional[Path]) -> None:
 def start_memcp_process(
     port: int, enable_mysql: bool = False, data_dir: Optional[str] = None,
 ) -> subprocess.Popen | None:
-    global _memcp_log_file
+    global _memcp_log_file, _owned_memcp_process
     proc = None
     logfile = None
     try:
@@ -2532,6 +2557,7 @@ def start_memcp_process(
         )
         proc = subprocess.Popen(cmd, cwd=worktree,
            env=env, stdin=subprocess.PIPE, stdout=logfile, stderr=logfile, text=True)
+        _owned_memcp_process = proc
         if not wait_for_memcp(port, timeout=MEMCP_START_TIMEOUT):
             print_memcp_log(tail=50)
             stop_memcp_process(proc)
@@ -2549,6 +2575,11 @@ def print_memcp_log(tail: int = 100) -> None:
     if not _memcp_log_file:
         return
     try:
+        # A Go crash dump can be much longer than the console tail. Preserve
+        # its beginning (panic and faulting goroutine) before runner cleanup.
+        artifact = os.environ.get("MEMCP_FAILURE_LOG_ARTIFACT")
+        if artifact:
+            shutil.copyfile(_memcp_log_file, artifact)
         with open(_memcp_log_file, 'r') as f:
             lines = f.readlines()
         if not lines:
@@ -2571,6 +2602,9 @@ def get_memcp_api_port(proc: subprocess.Popen) -> Optional[int]:
     return None
 
 def stop_memcp_process(proc: subprocess.Popen) -> None:
+    global _owned_memcp_process
+    if _owned_memcp_process is proc:
+        _owned_memcp_process = None
     port = get_memcp_api_port(proc)
     try:
         if proc.stdin is not None and not proc.stdin.closed:
@@ -3128,6 +3162,7 @@ def run_performance_ab(base: Path, candidate: Path, spec_files: List[str]) -> bo
             env.update(PERF_AB_MODE="record", PERF_FIXTURE_TRIAL="1",
                        PERF_BASELINE_FILE=str(result_path), PERF_BASELINE_SEED=str(seed),
                        MEMCP_TEST_WORKTREE=str(tree), MEMCP_BINARY=str(tree / "memcp"),
+                       MEMCP_FAILURE_LOG_ARTIFACT=str(artifacts / (name + ".memcp.log")),
                        MEMCP_TEST_DATA_DIR=data)
             command = [sys.executable, "-u", str(runner), str(suite), "--log-times", "--fail-fast"]
             print(f"PERF_FIXTURE {name}: {tree}", flush=True)

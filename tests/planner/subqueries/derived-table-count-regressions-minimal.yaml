@@ -94,10 +94,10 @@ test_cases:
       rows_affected: 1
 
   - name: "rebuild storage"
+    setup:
+      - scm: "(rebuild)"
     sql: |
       SELECT 1 AS ok
-    scm: |
-      (rebuild)
     expect:
       rows: 1
       data:

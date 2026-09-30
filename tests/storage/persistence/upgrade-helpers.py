@@ -48,6 +48,12 @@ def cases(changed=False):
          'FROM up_group_windows w ORDER BY w.id',
          '1\t1000\n2\t1500\n3\t3001\n4\t3001' if unchanged else
          '1\t998\n2\t1500\n3\t3001\n4\t3001'),
+        ('correlated range sum', 12,
+         'SELECT w.id, (SELECT SUM(e.amount) FROM up_group_events e '
+         'WHERE e.tenant_id=w.tenant_id AND e.happened_at<=w.range_to) '
+         'FROM up_group_windows w ORDER BY w.id',
+         '1\t4493\n2\t6738\n3\t13489\n4\t13489' if unchanged else
+         '1\t4479\n2\t6738\n3\t13589\n4\t13589'),
         ('ordered scalar aggregate', 6,
          'SELECT p.id, (SELECT h.value FROM up_helper h WHERE h.bucket=p.id '
          'ORDER BY h.id DESC LIMIT 1) FROM up_helper_parent p ORDER BY p.id',

@@ -101,16 +101,95 @@ func TestJITParserReleaseDropsOversizedMemoStorage(t *testing.T) {
 	program := &jitParserProgram{}
 	program.pool.New = func() any { return new(jitParserState) }
 	state := &jitParserState{
-		memoOffsets: []uint32{1},
-		memoRules:   []uint32{1},
-		memoEntries: make([]jitParserMemoEntry, 1, jitParserRetainedMemoEntryCapacity+1),
+		memoOffsets:        []uint32{1},
+		memoRules:          []uint32{1},
+		memoEntries:        make([]jitParserMemoEntry, 1, jitParserRetainedMemoEntryCapacity+1),
+		memoBlockPositions: []int{0},
 	}
 	state.memoEntries[0].value = NewString("captured")
 
 	program.releaseState(state)
-	if state.memoOffsets != nil || state.memoRules != nil || state.memoEntries != nil {
+	if state.memoOffsets != nil || state.memoRules != nil || state.memoEntries != nil || state.memoBlockPositions != nil {
 		t.Fatalf("oversized parser memo retained: offsets=%v rules=%v entry-capacity=%d", state.memoOffsets != nil, state.memoRules != nil, cap(state.memoEntries))
 	}
+}
+
+func TestJITParserMemoCompactionInvalidatesDiscardedBlocks(t *testing.T) {
+	program := &jitParserProgram{
+		rules: make([]jitParserRule, 2), memoRuleIndex: []int32{0, 1}, memoRuleCount: 2,
+	}
+	state := &jitParserState{
+		program: program, memoOffsets: make([]uint32, 16), heads: make([]*jitParserLeftRecursionHead, 16),
+	}
+	retained := jitParserMemoKey{rule: 0, position: 4}
+	value := jitParserMemoEntry{value: NewString("retained"), success: true}
+	state.memoSet(retained, value)
+	jitParserMemoFencePushNative(state)
+	// Include an existing block, backtracking before the fence, the committed
+	// endpoint, and lookahead beyond it. Input position is not allocation order.
+	discarded := []jitParserMemoKey{
+		{rule: 1, position: 4}, {rule: 0, position: 2},
+		{rule: 0, position: 7}, {rule: 0, position: 11},
+	}
+	for _, key := range discarded {
+		state.memoSet(key, jitParserMemoEntry{value: NewString("discarded"), success: true})
+	}
+	state.heads[11] = &jitParserLeftRecursionHead{}
+	jitParserMemoCompactNative(state)
+	if got, ok := state.memoGet(retained); !ok || !Equal(got.value, value.value) {
+		t.Fatal("compaction lost a memo block allocated before the fence")
+	}
+	for _, key := range discarded {
+		if _, ok := state.memoGet(key); ok {
+			t.Fatalf("discarded memo entry survived at %+v", key)
+		}
+		state.memoSet(key, value)
+		if got, ok := state.memoGet(key); !ok || !Equal(got.value, value.value) {
+			t.Fatalf("memo block could not be reused at %+v", key)
+		}
+	}
+	if state.heads[11] != nil {
+		t.Fatal("lookahead retained a discarded left-recursion head")
+	}
+	jitParserMemoCompactNative(state)
+	jitParserMemoFencePopNative(state)
+}
+
+func TestJITParserMemoCompactionNestedFences(t *testing.T) {
+	program := &jitParserProgram{
+		rules: make([]jitParserRule, 2), memoRuleIndex: []int32{0, 1}, memoRuleCount: 2,
+	}
+	state := &jitParserState{
+		program: program, memoOffsets: make([]uint32, 16), heads: make([]*jitParserLeftRecursionHead, 16),
+	}
+	value := jitParserMemoEntry{value: NewString("value"), success: true}
+	state.memoSet(jitParserMemoKey{rule: 0, position: 0}, value)
+	jitParserMemoFencePushNative(state)
+	state.memoSet(jitParserMemoKey{rule: 0, position: 2}, value)
+	jitParserMemoFencePushNative(state)
+	state.memoSet(jitParserMemoKey{rule: 0, position: 9}, value)
+	jitParserMemoCompactNative(state)
+	if _, ok := state.memoGet(jitParserMemoKey{rule: 0, position: 2}); !ok {
+		t.Fatal("inner fence discarded outer allocation")
+	}
+	// Popping a nested fence transfers any remaining allocations and writes
+	// into older blocks to the parent fence's cleanup responsibility.
+	state.memoSet(jitParserMemoKey{rule: 0, position: 10}, value)
+	state.memoSet(jitParserMemoKey{rule: 1, position: 0}, value)
+	jitParserMemoFencePopNative(state)
+	jitParserMemoCompactNative(state)
+	for _, key := range []jitParserMemoKey{
+		{rule: 0, position: 2}, {rule: 0, position: 9},
+		{rule: 0, position: 10}, {rule: 1, position: 0},
+	} {
+		if _, ok := state.memoGet(key); ok {
+			t.Fatalf("nested fence retained discarded key %+v", key)
+		}
+	}
+	if _, ok := state.memoGet(jitParserMemoKey{rule: 0, position: 0}); !ok {
+		t.Fatal("outer fence discarded pre-existing entry")
+	}
+	jitParserMemoFencePopNative(state)
 }
 
 func TestJITParserMemoCapacityHintIsBounded(t *testing.T) {
