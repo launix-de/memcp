@@ -1698,7 +1698,12 @@ func jitEmitParserProgramCore(ctx *JITContext, program *jitParserProgram, input,
 	ctx.FreeDesc(&endPosition)
 	ctx.FreeDesc(&text)
 	ctx.EmitJump(CondNotEqual, failed)
-	resultOff := ctx.AllocStack(16)
+	// The parser result can outlive this inlined program and cross another Go
+	// safepoint in its caller. Give it a stable, registered frame root instead
+	// of an unregistered temporary stack slot whose descriptor only claimed to
+	// be rooted.
+	resultOff := ctx.AllocSpill(16)
+	ctx.setStackPointer(jitStackRootFrameBP, resultOff, true)
 	done := ctx.ReserveLabel()
 	out := emitter.emitStateScalar(jitParserFinish, 2)
 	out.Type = JITTypeUnknown
