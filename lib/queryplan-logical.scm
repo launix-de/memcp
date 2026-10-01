@@ -1176,8 +1176,15 @@ move arbitrary calls or subqueries across short-circuit guards. */
 	(filter (coalesceNil sources '()) (lambda (src)
 		(and (not (source_outer? src)) (source_is_base_table? src))))))
 
+/* Canonical membership reads both its probe and the helper stage result. The
+helper alias is a named operand, not a get_column node; retain that dependency
+when classifying filters for join placement and base-table selectivity. */
 (define expr_refs_alias? (lambda (default_alias alias expr)
 	(match expr
+		((symbol membership_truth) probe stage_alias _count_col)
+		(or (equal?? stage_alias alias) (expr_refs_alias? default_alias alias probe))
+		((quote membership_truth) probe stage_alias _count_col)
+		(or (equal?? stage_alias alias) (expr_refs_alias? default_alias alias probe))
 		((symbol get_column) tblvar _ _ _) (equal?? (resolve_column_alias tblvar default_alias) alias)
 		((quote get_column) tblvar _ _ _) (equal?? (resolve_column_alias tblvar default_alias) alias)
 		(cons _head tail) (reduce tail (lambda (found item) (or found (expr_refs_alias? default_alias alias item))) false)
@@ -1185,6 +1192,10 @@ move arbitrary calls or subqueries across short-circuit guards. */
 
 (define expr_only_refs_alias? (lambda (default_alias alias expr)
 	(match expr
+		((symbol membership_truth) probe stage_alias _count_col)
+		(and (equal?? stage_alias alias) (expr_only_refs_alias? default_alias alias probe))
+		((quote membership_truth) probe stage_alias _count_col)
+		(and (equal?? stage_alias alias) (expr_only_refs_alias? default_alias alias probe))
 		((symbol get_column) tblvar _ _ _) (equal?? (resolve_column_alias tblvar default_alias) alias)
 		((quote get_column) tblvar _ _ _) (equal?? (resolve_column_alias tblvar default_alias) alias)
 		(cons _head tail) (reduce tail (lambda (ok item) (and ok (expr_only_refs_alias? default_alias alias item))) true)
@@ -1209,6 +1220,10 @@ projection for every source; that turns read-model queries into O(N^2) planner
 work before decorrelation has even started. */
 (define query_expr_alias_set (lambda (default_alias expr aliases)
 	(match expr
+		((symbol membership_truth) probe stage_alias _count_col)
+		(query_expr_alias_set default_alias probe (set_assoc aliases stage_alias true))
+		((quote membership_truth) probe stage_alias _count_col)
+		(query_expr_alias_set default_alias probe (set_assoc aliases stage_alias true))
 		((symbol get_column) tblvar _ _ _)
 		(set_assoc aliases (resolve_column_alias tblvar default_alias) true)
 		((quote get_column) tblvar _ _ _)
@@ -2523,6 +2538,10 @@ row containing NULL must remain distinguishable for non-strict functions. */
 
 (define expr_refs_one_of_aliases? (lambda (expr aliases)
 	(match expr
+		((symbol membership_truth) probe stage_alias _count_col)
+		(or (contains? aliases stage_alias) (expr_refs_one_of_aliases? probe aliases))
+		((quote membership_truth) probe stage_alias _count_col)
+		(or (contains? aliases stage_alias) (expr_refs_one_of_aliases? probe aliases))
 		((symbol get_column) tblvar _tbl_ignorecase _col _col_ignorecase) (contains? aliases tblvar)
 		((quote get_column) tblvar _tbl_ignorecase _col _col_ignorecase) (contains? aliases tblvar)
 		(cons _head tail) (reduce tail (lambda (found item)
