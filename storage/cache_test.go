@@ -333,6 +333,76 @@ func TestCacheMapResidentBytesFollowReplacementAndEviction(t *testing.T) {
 	}
 }
 
+func TestMinimumMemoryEvictionFloor(t *testing.T) {
+	for _, cause := range []string{"total", "persisted", "system", "allocation", "expiry"} {
+		t.Run(cause, func(t *testing.T) {
+			cm := &CacheManager{minimumMemory: 100, itemMap: make(map[any]*softItem)}
+			for i := 0; i < 3; i++ {
+				pointer := new(int)
+				item := newSoftItem(pointer, 50, TypeIndex,
+					func(any, *[numEvictableTypes]int64) bool { return true },
+					func(any) time.Time { return time.Time{} }, nil, 0, time.Nanosecond)
+				cm.addInternal(item)
+			}
+			time.Sleep(time.Millisecond)
+			switch cause {
+			case "total":
+				cm.memoryBudget = 1 // minimum wins even over a smaller maximum
+				cm.runEvictionChecks(0)
+			case "persisted":
+				cm.persistedBudget = 1
+				cm.runEvictionChecks(0)
+			case "system":
+				// Zero available system RAM can reduce the effective budget to zero.
+				cm.evict(cm.currentMemory, 0, 0, nil)
+			case "allocation":
+				cm.memoryBudget = 150
+				cm.runEvictionChecks(1000)
+			case "expiry":
+				cm.evictExpired()
+			}
+			if cm.currentMemory != 100 {
+				t.Fatalf("retained %d, want floor 100", cm.currentMemory)
+			}
+			cm.evict(cm.currentMemory, 0, 1000, nil)
+			cm.evictExpired()
+			if cm.currentMemory != 100 {
+				t.Fatalf("subsequent eviction crossed floor: %d", cm.currentMemory)
+			}
+		})
+	}
+}
+
+func TestMinimumMemorySkipsOversizedOffers(t *testing.T) {
+	cm := &CacheManager{minimumMemory: 100, itemMap: make(map[any]*softItem)}
+	object := &testPartialCacheObject{partialBytes: 30}
+	item := newSoftItem(object, 140, TypeShard, nil, func(any) time.Time { return time.Time{} }, nil, 0, 0)
+	cm.addInternal(item)
+	cm.evict(cm.currentMemory, 0, 0, nil)
+	if cm.currentMemory != 110 || len(object.modes) != 1 || object.modes[0] != evictPartial {
+		t.Fatalf("expected partial eviction only: memory=%d modes=%v", cm.currentMemory, object.modes)
+	}
+	cm.minimumMemory = 0
+	cm.evict(cm.currentMemory, 0, 0, nil)
+	if cm.currentMemory != 0 {
+		t.Fatalf("disabled floor retained %d bytes", cm.currentMemory)
+	}
+}
+
+func TestMinimumMemoryBudgetUpdate(t *testing.T) {
+	cm := &CacheManager{}
+	cm.Init(1000, 500, 100)
+	defer cm.Stop()
+	if got := cm.Stat().MinimumMemory; got != 100 {
+		t.Fatalf("initial minimum = %d", got)
+	}
+	cm.UpdateBudget(2000, 800, 400)
+	stat := cm.Stat()
+	if stat.MinimumMemory != 400 || stat.MemoryBudget != 2000 || stat.PersistedBudget != 800 {
+		t.Fatalf("budget update lost: %+v", stat)
+	}
+}
+
 // Retirement is opportunistic. DDL/eviction contention must leave both data and
 // lifetime pins intact and return promptly, never wait while owning schema state.
 func TestDiscardCacheValueDefersToDDLAndEviction(t *testing.T) {

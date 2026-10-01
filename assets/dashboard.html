@@ -1417,6 +1417,7 @@ var settingsGroups=[
 ]},
 {group:"Memory",items:[
 {key:"MaxRamPercent",label:"Total memory (% of RAM)",desc:"Total memory budget (% of system RAM, 0=50%)",type:"number"},
+{key:"MinRamBytes",label:"Minimum retained memory",desc:"Eviction floor for tracked cache memory, including system RAM pressure and idle expiry (0 disables)",type:"bytes",min:0},
 {key:"MaxRamBytes",label:"Total memory limit",desc:"Override total budget (0 uses the percentage)",type:"bytes",min:0},
 {key:"MaxPersistPercent",label:"Persisted data cache (% of RAM)",desc:"Persisted shard budget (% of RAM, 0=30%)",type:"number"},
 {key:"MaxPersistBytes",label:"Persisted data cache limit",desc:"Override persisted data budget (0 uses the percentage)",type:"bytes",min:0}
