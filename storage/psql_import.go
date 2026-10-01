@@ -461,6 +461,10 @@ ORDER BY tc.constraint_name, kcu.ordinal_position`, srcSchema, srcTable)
 		if err := rows.Scan(&cname, &ctype, &col, &pos); err != nil {
 			return err
 		}
+		// MySQL clients identify the primary key by its canonical index name.
+		if ctype == "PRIMARY KEY" {
+			cname = "PRIMARY"
+		}
 		k := key{name: cname, unique: true}
 		keys[k] = append(keys[k], struct {
 			seq int

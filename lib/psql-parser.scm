@@ -939,7 +939,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(define id (or (parser '(psql_identifier "." (define id psql_identifier)) id) psql_identifier))
 		(define alters (+ (or
 			/* TODO */
-			(parser '((atom "ADD" true) (atom "CONSTRAINT" true) (define id psql_identifier) (atom "PRIMARY" true) (atom "KEY" true) "(" (define cols (+ psql_identifier ",")) ")") (lambda (tbl) '('createkey '('table schema tbl) id true (cons (quote list) cols))))
+			(parser '((atom "ADD" true) (atom "CONSTRAINT" true) (define id psql_identifier) (atom "PRIMARY" true) (atom "KEY" true) "(" (define cols (+ psql_identifier ",")) ")") (lambda (tbl) '('createkey '('table schema tbl) "PRIMARY" true (cons (quote list) cols) '(session "__memcp_tx"))))
 			(parser '((atom "ADD" true) (atom "CONSTRAINT" true) (define id psql_identifier) (atom "FOREIGN" true) (atom "KEY" true) "(" (define cols1 (+ psql_identifier ",")) ")" (atom "REFERENCES" true) (define tbl2 (or (parser '(psql_identifier "." (define id psql_identifier)) id) psql_identifier)) "(" (define cols2 (+ psql_identifier ",")) ")" (? (atom "ON" true) (atom "UPDATE" true) (define updatemode psql_foreign_key_mode)) (? (atom "ON" true) (atom "DELETE" true) (define deletemode psql_foreign_key_mode))) (lambda (tbl) '('createforeignkey '('table schema tbl) id (cons (quote list) cols1) '('table schema tbl2) (cons (quote list) cols2) updatemode deletemode)))
 			/*
 			(parser '((atom "ADD" true) (atom "UNIQUE" true) (atom "KEY" true) (define id psql_identifier) "(" (define cols (+ psql_identifier ",")) ")" (? (atom "USING" true) (atom "BTREE" true))) '((quote list) "unique" id (cons (quote list) cols)))
@@ -1057,7 +1057,6 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(parser (regex "^[\\r\\n\\t ]*CREATE SEQUENCE (?s:.*)\\z") true)
 		(parser (regex "^[\\r\\n\\t ]*ALTER SEQUENCE (?s:.*)\\z") true)
 		(parser (regex "^[\\r\\n\\t ]*CREATE INDEX (?s:.*)\\z") true)
-		(parser (regex "^[\\r\\n\\t ]*CREATE UNIQUE INDEX (?s:.*)\\z") true)
 		(parser (regex "^[\\r\\n\\t ]*CREATE STATISTICS (?s:.*)\\z") true)
 		(parser (regex "^[\\r\\n\\t ]*ALTER STATISTICS (?s:.*)\\z") true)
 		(parser (regex "^[\\r\\n\\t ]*CREATE TRIGGER (?s:.*)\\z") true)
@@ -1188,7 +1187,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 					false
 		)))
 
-		(parser '((atom "CREATE" true) (define unique (? (atom "UNIQUE" true))) (atom "INDEX" true) (define id psql_identifier) (atom "ON" true) (define tbl (or (parser '(psql_identifier "." (define id psql_identifier)) id) psql_identifier)) (? (atom "USING" true) psql_identifier) "(" (define cols (+ psql_identifier ",")) ")") (if unique '('createkey '('table schema tbl) id unique (cons (quote list) cols)) true))
+		(parser '((atom "CREATE" true) (define unique (? (atom "UNIQUE" true))) (atom "INDEX" true) (define id psql_identifier) (atom "ON" true) (define tbl (or (parser '(psql_identifier "." (define id psql_identifier)) id) psql_identifier)) (? (atom "USING" true) psql_identifier) "(" (define cols (+ psql_identifier ",")) ")") (if unique '('createkey '('table schema tbl) id unique (cons (quote list) cols) '(session "__memcp_tx")) true))
 		(parser '((atom "DROP" true) (atom "INDEX" true) (define id psql_identifier)) true)
 
 		/* SHOW CREATE TABLE [schema.]table */

@@ -21,7 +21,7 @@ import "time"
 
 func BenchmarkCacheManagerAsyncSizeUpdate(b *testing.B) {
 	manager := new(CacheManager)
-	manager.Init(0, 0)
+	manager.Init(0, 0, 0)
 	pointer := new(int)
 	manager.AddItem(
 		pointer,
