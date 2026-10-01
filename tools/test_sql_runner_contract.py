@@ -1630,6 +1630,126 @@ class PerformanceFixtureContractTests(unittest.TestCase):
                 self.assertEqual(post.call_count, 1)
                 self.assertEqual(runner.failed_critical, 1)
 
+    def fail_baseline(self, result, index):
+        if self.calls[-1][1] != "A":
+            return
+        for value in result.values():
+            if not isinstance(value, dict):
+                continue
+            for field in ("time_ms", "time_per_repetition_ms", "samples_ns"):
+                value.pop(field)
+            value["baseline_failure"] = {"kind": "query_error", "phase": "measurement",
+                                         "timeout_seconds": 10, "detail": "unsupported operator"}
+
+    def test_baseline_query_error_requires_all_seven_candidate_fixtures(self):
+        self.mutate = self.fail_baseline
+        self.assertTrue(self.run_experiment())
+        self.assertEqual(len(self.calls), 28)
+        result = json.loads(self.output.read_text())[performance_case_key(self.suites[0], "cold")]
+        self.assertEqual(result["status"], "newly_supported")
+        self.assertIsNone(result["time_ms"])
+        self.assertEqual(len(result["baseline_failures"]), 7)
+        self.assertEqual(result["b_samples_ms"], [100] * 7)
+
+    def test_successful_baseline_trials_still_gate_regressions(self):
+        self.mutate = lambda result, index: self.fail_baseline(result, index) if index == 1 else None
+        self.durations = lambda suite, role, index: 200 if role == "B" else 100
+        self.assertFalse(self.run_experiment())
+        result = json.loads(self.output.read_text())[performance_case_key(self.suites[0], "cold")]
+        self.assertEqual(result["a_samples_ms"], [100] * 6)
+        self.assertEqual(result["status"], "compared")
+
+    def test_newly_supported_candidate_must_meet_absolute_budget_every_trial(self):
+        self.mutate = self.fail_baseline
+        self.durations = lambda suite, role, index: 1001 if index == 2 else 100
+        self.assertFalse(self.run_experiment())
+        result = json.loads(self.output.read_text())[performance_case_key(self.suites[0], "cold")]
+        self.assertTrue(result["recovery_budget_exceeded"])
+
+    def test_recovery_preserves_complete_timing_group_budget(self):
+        path = Path(self.suites[0])
+        spec = json.loads(path.read_text())
+        first = spec["test_cases"][0]
+        first.update(timing_aggregation="total", timing_group="cold and warm")
+        spec["test_cases"].append(dict(first, name="warm"))
+        path.write_text(json.dumps(spec))
+        def mutate(result, index):
+            self.fail_baseline(result, index)
+            for key, value in result.items():
+                if not isinstance(value, dict) or "cold.yaml" not in key:
+                    continue
+                value.update(timing_aggregation="total", timing_group="cold and warm")
+                if "baseline_failure" not in value:
+                    duration = 1500 if key.endswith("::cold") else 100
+                    value.update(time_ms=duration, time_per_repetition_ms=duration,
+                                 samples_ns=[duration * 1_000_000])
+        self.mutate = mutate
+        self.assertTrue(self.run_experiment())
+        result = json.loads(self.output.read_text())
+        group = next(value for key, value in result.items() if "timing group:" in key)
+        self.assertEqual(group["candidate_ms"], 1600)
+        self.assertEqual(group["recovery_budget_ms"], 2000)
+
+    def test_baseline_failure_artifact_requires_original_workload(self):
+        def mutate(result, index):
+            self.fail_baseline(result, index)
+            if index == 1:
+                next(value for value in result.values() if isinstance(value, dict))["workload_sha256"] = "tampered"
+        self.mutate = mutate
+        with self.assertRaisesRegex(ValueError, "baseline failure workload differs"):
+            self.run_experiment()
+
+    def test_baseline_setup_error_is_not_accepted(self):
+        runner = SQLTestRunner("http://localhost:1")
+        error = SimpleNamespace(status_code=500, text="Error: setup failed", headers={})
+        with mock.patch.dict(os.environ, {"PERF_FIXTURE_TRIAL": "1", "PERF_FIXTURE_ROLE": "A"}), \
+                mock.patch("run_sql_tests.PERF_TEST_ENABLED", True), \
+                mock.patch("run_sql_tests.PERF_AB_MODE", "record"), \
+                mock.patch.object(runner, "execute_sql", return_value=error), \
+                redirect_stdout(io.StringIO()):
+            result = runner.run_test_case({
+                "name": "setup", "sql": "SELECT 1", "threshold_ms": 1000,
+                "setup": [{"sql": "SET @actor=7"}], "expect": {"rows": 1},
+            }, "memcp-tests")
+        self.assertFalse(result)
+        self.assertEqual(runner.perf_results, {})
+
+    def test_candidate_cannot_report_baseline_failure(self):
+        def mutate(result, index):
+            if index == 2:
+                self.calls[-1] = ("cold", "A", self.calls[-1][2])
+                self.fail_baseline(result, index)
+        self.mutate = mutate
+        with self.assertRaisesRegex(ValueError, "invalid baseline failure"):
+            self.run_experiment()
+
+    def test_query_failure_recording_is_baseline_only_and_rejects_wrong_results(self):
+        good = SimpleNamespace(status_code=200, text="true", headers={})
+        error = SimpleNamespace(status_code=500, text="Error: unsupported", headers={})
+        wrong = SimpleNamespace(status_code=200, text="true\nfalse", headers={})
+        for role, response, accepted in (("A", error, True), ("B", error, False),
+                                         ("A", wrong, False), ("A", None, False),
+                                         ("A", requests.Timeout("timeout"), True),
+                                         ("B", requests.Timeout("timeout"), False)):
+            with self.subTest(role=role, response=response):
+                runner = SQLTestRunner("http://localhost:1")
+                with mock.patch.dict(os.environ, {"PERF_FIXTURE_TRIAL": "1", "PERF_FIXTURE_ROLE": role}), \
+                        mock.patch("run_sql_tests.PERF_TEST_ENABLED", True), \
+                        mock.patch("run_sql_tests.PERF_AB_MODE", "record"), \
+                        mock.patch("run_sql_tests.find_memcp_pid", return_value=None), \
+                        mock.patch("run_sql_tests.requests.post", side_effect=[response, good]) as post, \
+                        redirect_stdout(io.StringIO()):
+                    result = runner.run_test_case({
+                        "name": "baseline support", "scm": "true", "threshold_ms": 1000,
+                        "timing_samples": 2, "warmup": 0, "expect": {"rows": 1},
+                    }, "memcp-tests")
+                self.assertEqual(result, accepted)
+                self.assertEqual(post.call_count, 1)
+                if accepted:
+                    entry = next(iter(runner.perf_results.values()))
+                    self.assertIn("baseline_failure", entry)
+                    self.assertNotIn("time_ms", entry)
+
     def test_execution_failure_never_enters_verification(self):
         self.exit_code = 1
         with self.assertRaisesRegex(RuntimeError, "fixture failed"):
