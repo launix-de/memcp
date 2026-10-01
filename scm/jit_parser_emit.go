@@ -1618,12 +1618,17 @@ func jitEmitParserProgramCore(ctx *JITContext, program *jitParserProgram, input,
 	emitter.continuationOff = ctx.AllocStack(8)
 	emitter.generatorValueOff = ctx.AllocSpill(16)
 	ctx.setStackPointer(jitStackRootFrameBP, emitter.generatorValueOff, true)
-	// Reserve the merged result before emitting any rule. Rule emission restores
-	// allocator snapshots between control-flow arms, so a slot allocated after
-	// those arms could alias one of their temporaries at runtime.
-	resultOff := ctx.AllocSpill(16)
-	ctx.setStackPointer(jitStackRootFrameBP, resultOff, true)
-	resultSlot := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: resultOff, Rooted: true}
+	// Static parser callers already provide a stable rooted result slot. Reuse
+	// it so adding result lifetime protection does not perturb the parser's
+	// spill-frame layout. The generic emitter still needs its own merge slot
+	// when its caller accepts an unconstrained or register result.
+	resultSlot := result
+	resultInTarget := result.Loc == LocStackPair && result.StackOff < 0 && result.Rooted
+	if !resultInTarget {
+		resultOff := ctx.AllocSpill(16)
+		ctx.setStackPointer(jitStackRootFrameBP, resultOff, true)
+		resultSlot = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: resultOff, Rooted: true}
+	}
 	ctx.EmitMovRegImm64(ctx.ScratchReg, 0)
 	ctx.EmitStoreRegMem(ctx.ScratchReg, ctx.StackReg, emitter.positionOff)
 	emitter.ruleLabels = make([]JITLabel, len(program.rules))
@@ -1730,6 +1735,9 @@ func jitEmitParserProgramCore(ctx *JITContext, program *jitParserProgram, input,
 	ctx.EmitCopyScmerToDesc(&resultSlot, &panicResult)
 	ctx.FreeDesc(&panicResult)
 	ctx.MarkLabel(done)
+	if resultInTarget {
+		return resultSlot
+	}
 	return jitPlaceScmerIntoTarget(ctx, resultSlot, result)
 }
 
