@@ -1709,6 +1709,10 @@ func jitEmitParserProgramCore(ctx *JITContext, program *jitParserProgram, input,
 	ctx.FreeDesc(&endPosition)
 	ctx.FreeDesc(&text)
 	ctx.EmitJump(CondNotEqual, failed)
+	// Keep the established outgoing-frame shape for parser action calls. Their
+	// stack maps and accumulator slots were emitted against this allocation;
+	// only the result storage itself moves to the stable rooted target above.
+	_ = ctx.AllocStack(16)
 	done := ctx.ReserveLabel()
 	out := emitter.emitStateScalar(jitParserFinish, 2)
 	out.Type = JITTypeUnknown
