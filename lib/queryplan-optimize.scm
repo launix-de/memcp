@@ -5536,7 +5536,18 @@ created. Canonicalize that unambiguous interface before physical lowering. */
 	(begin
 		(define root (ir_root ir))
 		(if (not (query_block? root))
-			ir
+			(if (union_block? root)
+				(begin
+					(define branches (map (union_branches root) (lambda (branch)
+						(ir_root (canonicalize_stage_output_interfaces (make_ir (ir_kind ir) branch
+							(join_reorder_node_stage_catalog branch)
+							(ir_context_of ir) (ir_return ir)))))))
+					(make_ir (ir_kind ir)
+						(make_union_block (union_mode root) branches (union_order root)
+							(union_limit root) (union_offset root) (union_facts root))
+						(unique_stages_by_id (merge (map branches join_reorder_node_stage_catalog)))
+						(ir_context_of ir) (ir_return ir)))
+				ir)
 			(begin
 				(define canonical (canonicalize_stage_output_stages_acc
 					(qb_stages root) '() (stage_output_stage_index (qb_stages root))))
@@ -6429,8 +6440,23 @@ so generated aliases and dependency IDs do not hide equivalent stage graphs. */
 					(gs_input rewritten_stage)
 					(rewrite_stage_graph_expr alias_map id_map ag)))))))
 
+/* Source declarations must follow the same alias map as their column reads.
+Nested query blocks otherwise retain a removed helper alias after stage merging. */
 (define rewrite_stage_graph_expr (lambda (alias_map id_map expr)
 	(match expr
+		((symbol query-block) schema sources fields condition group having order limit offset hidden stages facts)
+		(make_query_block schema
+			(merge_unique (list (map sources (lambda (src)
+				(rewrite_stage_graph_source alias_map id_map src)))))
+			(rewrite_stage_graph_expr alias_map id_map fields)
+			(rewrite_stage_graph_expr alias_map id_map condition)
+			(rewrite_stage_graph_expr alias_map id_map group)
+			(rewrite_stage_graph_expr alias_map id_map having)
+			(rewrite_stage_graph_expr alias_map id_map order)
+			limit offset
+			(rewrite_stage_graph_expr alias_map id_map hidden)
+			(rewrite_stage_graph_stages alias_map id_map stages)
+			(rewrite_stage_graph_expr alias_map id_map facts))
 		((symbol scalar_first_probe) stage requested_col stages)
 		(list (quote scalar_first_probe)
 			(rewrite_stage_graph_stage alias_map id_map true stage)
