@@ -84,3 +84,30 @@ in the A/B artifacts. A candidate failure aborts rather than triggering retries.
 
 Session initialization required by a benchmark belongs in its `setup`.
 Standalone test cases without `threshold_ms` are not executed in A/B mode.
+
+## Document application SQL coverage
+
+Keep document-management application regressions in the existing suites below;
+reuse their synthetic fixtures rather than copying production dumps, customer
+identifiers, filenames, sessions or credentials. These suites are discovered by
+normal CI. No separate application server or session cookie is required for
+this SQL correctness coverage.
+
+| Application path | Existing suite |
+| --- | --- |
+| Search counts, hierarchy menu/folders, nested tenant/site permissions | `planner/subqueries/navigation-permission-probes.yaml` |
+| Per-user folder options from paired `NOT EXISTS OR EXISTS`, distinct flags and changed memberships | `planner/subqueries/navigation-permission-probes.yaml` |
+| Direct file access through DAV/document `EXISTS (UNION ALL)`, guest denial, grant/revoke and independent sessions | `planner/subqueries/navigation-permission-probes.yaml` |
+| Upload metadata, delayed text extraction, file rename, document removal and repeated search | `planner/subqueries/navigation-permission-probes.yaml` |
+| Selected/inverted document sets, composite selection identity, NULL items and 4,096-item selections | `planner/subqueries/navigation-permission-probes.yaml` |
+| Ordered current page, obsolete/unseen notifications and insert-select acknowledgement | `integration/query-shapes/notification-membership-workflow.yaml` |
+| Notification ordering/anti-joins across shards and lookup mutations | `performance/notification-membership-scaling.yaml` |
+| Session-dependent grouped reminder counts | `planner/aggregates/session-group-reminders.yaml` |
+| Tenant membership, LIKE search/count and ordered ACL pages at scale | `performance/tenant-document-membership.yaml`, `performance/like-acl-query-shapes.yaml`, `performance/ordered-acl-page-window.yaml` |
+| LIKE/index visibility after inserts and deleted selection/carrier rows | `storage/indexes/fulltext-like-index.yaml`, `integration/regressions/deleted-row-carrier-visibility.yaml` |
+
+The stateful tests intentionally execute identical SQL again after mutations or
+session changes, checking both newly granted access and revoked access. Run the
+performance suites with `PERF_TEST=1` to include their timed cases. HTTP upload,
+PDF rendering, ZIP contents, DAV protocol handling and mail delivery remain
+application-level checks; these SQL tests do not claim to exercise those layers.
