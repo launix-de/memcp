@@ -1618,6 +1618,17 @@ func jitEmitParserProgramCore(ctx *JITContext, program *jitParserProgram, input,
 	emitter.continuationOff = ctx.AllocStack(8)
 	emitter.generatorValueOff = ctx.AllocSpill(16)
 	ctx.setStackPointer(jitStackRootFrameBP, emitter.generatorValueOff, true)
+	// Static parser callers already provide a stable rooted result slot. Reuse
+	// it so adding result lifetime protection does not perturb the parser's
+	// spill-frame layout. The generic emitter still needs its own merge slot
+	// when its caller accepts an unconstrained or register result.
+	resultSlot := result
+	resultInTarget := result.Loc == LocStackPair && result.StackOff < 0 && result.Rooted
+	if !resultInTarget {
+		resultOff := ctx.AllocSpill(16)
+		ctx.setStackPointer(jitStackRootFrameBP, resultOff, true)
+		resultSlot = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: resultOff, Rooted: true}
+	}
 	ctx.EmitMovRegImm64(ctx.ScratchReg, 0)
 	ctx.EmitStoreRegMem(ctx.ScratchReg, ctx.StackReg, emitter.positionOff)
 	emitter.ruleLabels = make([]JITLabel, len(program.rules))
@@ -1698,11 +1709,14 @@ func jitEmitParserProgramCore(ctx *JITContext, program *jitParserProgram, input,
 	ctx.FreeDesc(&endPosition)
 	ctx.FreeDesc(&text)
 	ctx.EmitJump(CondNotEqual, failed)
-	resultOff := ctx.AllocStack(16)
+	// Keep the established outgoing-frame shape for parser action calls. Their
+	// stack maps and accumulator slots were emitted against this allocation;
+	// only the result storage itself moves to the stable rooted target above.
+	_ = ctx.AllocStack(16)
 	done := ctx.ReserveLabel()
 	out := emitter.emitStateScalar(jitParserFinish, 2)
 	out.Type = JITTypeUnknown
-	ctx.EmitStoreScmerToStack(out, resultOff)
+	ctx.EmitCopyScmerToDesc(&resultSlot, &out)
 	ctx.FreeDesc(&out)
 	ctx.EmitJmp(done)
 
@@ -1722,10 +1736,13 @@ func jitEmitParserProgramCore(ctx *JITContext, program *jitParserProgram, input,
 	ctx.MarkLabel(failed)
 	panicResult := emitter.emitStateScalar(jitParserPanic, 2, emitter.input)
 	panicResult.Type = JITTypeUnknown
-	ctx.EmitStoreScmerToStack(panicResult, resultOff)
+	ctx.EmitCopyScmerToDesc(&resultSlot, &panicResult)
 	ctx.FreeDesc(&panicResult)
 	ctx.MarkLabel(done)
-	return jitPlaceScmerIntoTarget(ctx, JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: resultOff, Rooted: true}, result)
+	if resultInTarget {
+		return resultSlot
+	}
+	return jitPlaceScmerIntoTarget(ctx, resultSlot, result)
 }
 
 func (emitter *jitParserEmitter) emitRuleReturn(ruleID int, success bool) {

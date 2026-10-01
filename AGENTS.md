@@ -183,6 +183,11 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
   the existing shard. Never publish another shard that shares its mutable column
   map or index objects under a different mutex; old readers may still hold it.
 
+- `CacheManager.minimumMemory` is owned by the manager's `run()` goroutine,
+  like its budgets and ledger. Settings publish updates through `cacheOp`;
+  diagnostics use `Stat()`. Every automatic eviction path, including expiry,
+  must honor this floor against tracked memory, not RSS or pending allocations.
+
 ### Scheme AST and Codegen Quoting (lib/queryplan.scm and lib/queryplan-*.scm)
 - Build AST as data: most builder blocks use a single leading quote `'(...)` so nested lists are data, not executed at construction.
 - Lambdas: embed as `'((quote lambda) (param-list) body)` where:
