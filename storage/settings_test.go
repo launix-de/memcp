@@ -67,3 +67,34 @@ func TestPHPSettings(t *testing.T) {
 		}
 	}
 }
+
+func TestMinRamSetting(t *testing.T) {
+	original := Settings.MinRamBytes
+	defer ChangeSettings(scm.NewString("MinRamBytes"), scm.NewInt(original))
+	ChangeSettings(scm.NewString("MinRamBytes"), scm.NewInt(1<<30))
+	if got := ChangeSettings(scm.NewString("MinRamBytes")).Int(); got != 1<<30 {
+		t.Fatalf("minimum = %d", got)
+	}
+	data, err := json.Marshal(Settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var restored SettingsT
+	if err := json.Unmarshal(data, &restored); err != nil {
+		t.Fatal(err)
+	}
+	if restored.MinRamBytes != 1<<30 {
+		t.Fatal("minimum lost during persistence")
+	}
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Error("negative minimum accepted")
+			}
+		}()
+		ChangeSettings(scm.NewString("MinRamBytes"), scm.NewInt(-1))
+	}()
+	if Settings.MinRamBytes != 1<<30 {
+		t.Fatal("invalid minimum modified settings")
+	}
+}

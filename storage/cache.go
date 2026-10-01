@@ -234,6 +234,7 @@ func systemMemInfo() (free, total int64) {
 type CacheManager struct {
 	// All metadata below is owned by run(). Query workers only publish lifecycle
 	// messages; cache-object children never become global registrations.
+	minimumMemory   int64 // eviction floor; owned by run(), like the budgets
 	memoryBudget    int64 // total budget (default 50% of RAM)
 	persistedBudget int64 // budget for persisted shards+indexes (default 30% of RAM)
 	currentMemory   int64
@@ -262,6 +263,7 @@ type cacheOp struct {
 	budgetUpdate       bool
 	budgetVal          int64
 	persistedBudgetVal int64
+	minimumMemoryVal   int64
 	pressureSize       int64
 	statResult         chan CacheStat
 	done               chan struct{}
@@ -273,16 +275,18 @@ type CacheStat struct {
 	CountByType     [numEvictableTypes]int64
 	CurrentMemory   int64
 	MemoryBudget    int64
+	MinimumMemory   int64
 	PersistedBudget int64
 	PersistedMemory int64
 }
 
 // Init initializes the CacheManager with the given budgets and starts the background goroutine.
 // Calling Init on an already-initialized CacheManager is a no-op.
-func (cm *CacheManager) Init(memoryBudget, persistedBudget int64) {
+func (cm *CacheManager) Init(memoryBudget, persistedBudget, minimumMemory int64) {
 	if cm.opChan != nil {
 		return // already initialized
 	}
+	cm.minimumMemory = max(0, minimumMemory)
 	cm.memoryBudget = memoryBudget
 	cm.persistedBudget = persistedBudget
 	cm.itemMap = make(map[any]*softItem)
@@ -420,8 +424,8 @@ func (cm *CacheManager) UpdateSizeAsync(pointer any, delta int64) {
 	cm.opChan <- cacheOp{updatePtr: pointer, updateDelta: delta}
 }
 
-// UpdateBudget changes both memory budgets (e.g. when MaxRamPercent or MaxPersistPercent changes).
-func (cm *CacheManager) UpdateBudget(totalBudget, persistedBudget int64) {
+// UpdateBudget changes the eviction floor and both memory budgets (e.g. when MaxRamPercent or MaxPersistPercent changes).
+func (cm *CacheManager) UpdateBudget(totalBudget, persistedBudget, minimumMemory int64) {
 	if cm.opChan == nil {
 		return
 	}
@@ -429,7 +433,7 @@ func (cm *CacheManager) UpdateBudget(totalBudget, persistedBudget int64) {
 		return
 	}
 	done := make(chan struct{})
-	cm.opChan <- cacheOp{budgetUpdate: true, budgetVal: totalBudget, persistedBudgetVal: persistedBudget, done: done}
+	cm.opChan <- cacheOp{budgetUpdate: true, budgetVal: totalBudget, persistedBudgetVal: persistedBudget, minimumMemoryVal: max(0, minimumMemory), done: done}
 	<-done
 }
 
@@ -467,6 +471,9 @@ func (cm *CacheManager) persistedMemory() int64 {
 
 // runEvictionChecks checks both persisted and total budgets and evicts as needed.
 func (cm *CacheManager) runEvictionChecks(additionalSize int64) {
+	if cm.minimumMemory > 0 && cm.currentMemory <= cm.minimumMemory {
+		return
+	}
 	// Tier 1: persisted budget (shards + indexes only)
 	if cm.persistedBudget > 0 {
 		cm.evict(cm.persistedMemory(), cm.persistedBudget, additionalSize, isPersistedType)
@@ -530,6 +537,7 @@ func (cm *CacheManager) run() {
 			} else if op.budgetUpdate {
 				cm.memoryBudget = op.budgetVal
 				cm.persistedBudget = op.persistedBudgetVal
+				cm.minimumMemory = op.minimumMemoryVal
 			} else if op.pressureSize > 0 {
 				cm.runEvictionChecks(op.pressureSize)
 			} else if op.statResult != nil {
@@ -538,6 +546,7 @@ func (cm *CacheManager) run() {
 					CountByType:     cm.countByType,
 					CurrentMemory:   cm.currentMemory,
 					MemoryBudget:    cm.memoryBudget,
+					MinimumMemory:   cm.minimumMemory,
 					PersistedBudget: cm.persistedBudget,
 					PersistedMemory: cm.persistedMemory(),
 				}
@@ -570,6 +579,11 @@ func (cm *CacheManager) evictExpired() {
 		actualExpiry := lastActive + item.maxIdleTime
 		if actualExpiry > nowNano {
 			item.estimatedExpiry = actualExpiry
+			heap.Push(&cm.expH, item)
+			continue
+		}
+		if cm.minimumMemory > 0 && !cm.canEvict(item.object.evictionOffer(item.size).fullBytes) {
+			item.estimatedExpiry = nowNano + int64(time.Minute)
 			heap.Push(&cm.expH, item)
 			continue
 		}
@@ -705,10 +719,28 @@ func (cm *CacheManager) usage(typeFilter func(EvictableType) bool) int64 {
 	return result
 }
 
+// canEvict protects the tracked-memory floor across all eviction causes.
+// Skip indivisible offers that would cross it; pending allocations are not
+// resident memory and cannot justify spending the protected portion.
+func (cm *CacheManager) canEvict(bytes int64) bool {
+	return cm.minimumMemory == 0 || (bytes > 0 && cm.currentMemory > cm.minimumMemory && bytes <= cm.currentMemory-cm.minimumMemory)
+}
+
 func (cm *CacheManager) applyEviction(candidate evictionCandidate, mode evictionMode, freedByType *[numEvictableTypes]int64) int64 {
 	item := candidate.item
 	if _, ok := cm.itemMap[item.pointer]; !ok {
 		return 0
+	}
+	if cm.minimumMemory > 0 {
+		// Refresh after earlier candidates may have shed overlapping children.
+		offer := item.object.evictionOffer(item.size)
+		bytes := offer.fullBytes
+		if mode == evictPartial {
+			bytes = offer.partialBytes
+		}
+		if !cm.canEvict(bytes) {
+			return 0
+		}
 	}
 	before := cm.currentMemory
 	result := item.object.evict(mode, item.size, freedByType)
@@ -743,7 +775,7 @@ func (cm *CacheManager) applyEviction(candidate evictionCandidate, mode eviction
 // offers, then applies partial alternatives greedily before full alternatives.
 // If actual reclamation is smaller than proposed, another top-k batch is read.
 func (cm *CacheManager) evict(currentUsage, budget, additionalSize int64, typeFilter func(EvictableType) bool) {
-	if currentUsage+additionalSize <= budget {
+	if (cm.minimumMemory > 0 && cm.currentMemory <= cm.minimumMemory) || currentUsage+additionalSize <= budget {
 		return
 	}
 	targetBudget := budget - additionalSize
