@@ -53,9 +53,6 @@ setup:
       (lambda (t) (rebuild (table "memcp-tests" t) true false)))
      true)
 test_cases:
-- name: bind_global_search_actor
-  sql: SET @nav_actor=7
-  session_id: search-workload
 - name: search_page_limit_1
   sql: |-
     SELECT t.* FROM (SELECT `ID` AS `ID`,
@@ -108,6 +105,8 @@ test_cases:
     WHERE (t.`inventory` COLLATE utf8mb4_unicode_ci LIKE '%1234%' OR t.`note` COLLATE utf8mb4_unicode_ci LIKE '%1234%' OR t.`customer_note` COLLATE utf8mb4_unicode_ci LIKE '%1234%' OR t.`file` IN (SELECT `ID` FROM nav_file WHERE filename COLLATE utf8mb4_unicode_ci LIKE '%1234%' UNION SELECT `ID` FROM nav_file WHERE MATCH (`search`) AGAINST ('1234' IN NATURAL LANGUAGE MODE))) AND
     TRUE ORDER BY `t`.`nav_year` DESC, `t`.`nav_site` ASC, `t`.`nav_department` ASC, `t`.`nav_check` ASC, t.`ID` ASC LIMIT 1
   session_id: search-workload
+  setup:
+  - sql: SET @nav_actor=7
   threshold_ms: 30000
   timeout: 120
   warmup: 0
@@ -167,6 +166,8 @@ test_cases:
     WHERE (t.`inventory` COLLATE utf8mb4_unicode_ci LIKE '%1234%' OR t.`note` COLLATE utf8mb4_unicode_ci LIKE '%1234%' OR t.`customer_note` COLLATE utf8mb4_unicode_ci LIKE '%1234%' OR t.`file` IN (SELECT `ID` FROM nav_file WHERE filename COLLATE utf8mb4_unicode_ci LIKE '%1234%' UNION SELECT `ID` FROM nav_file WHERE MATCH (`search`) AGAINST ('1234' IN NATURAL LANGUAGE MODE))) AND
     TRUE ORDER BY `t`.`nav_year` DESC, `t`.`nav_site` ASC, `t`.`nav_department` ASC, `t`.`nav_check` ASC, t.`ID` ASC LIMIT 72 OFFSET 0
   session_id: search-workload
+  setup:
+  - sql: SET @nav_actor=7
   threshold_ms: 30000
   timeout: 120
   warmup: 0
