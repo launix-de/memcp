@@ -47,6 +47,32 @@ func TestJITParserDiscardedRuleValuesSurviveGC(t *testing.T) {
 	}
 }
 
+func TestJITParserProgramResultSurvivesGC(t *testing.T) {
+	if !jitEnabled {
+		t.Skip("requires GOEXPERIMENT=jit")
+	}
+	const valueName = "jit_test_parser_fast_dict"
+	Globalenv.Vars[Symbol(valueName)] = NewFunc(func(...Scmer) Scmer {
+		dict := NewFastDictValue(1)
+		dict.Set(NewString("key"), NewString("value"), nil)
+		return NewFastDict(dict)
+	})
+	defer delete(Globalenv.Vars, Symbol(valueName))
+	collect := NewFunc(func(...Scmer) Scmer {
+		runtime.GC()
+		return NewNil()
+	})
+	compiled := compileJITExpressionTestProc(t, `(lambda (input collect) (begin
+		(define value ((parser '("x" $) (jit_test_parser_fast_dict) "") input))
+		(collect)
+		(get_assoc value "key")))`)
+	for round := 0; round < 100; round++ {
+		if got := Apply(compiled, NewString("x"), collect); got.String() != "value" {
+			t.Fatalf("parser result changed after GC: %s", String(got))
+		}
+	}
+}
+
 func TestJITParserMemoEntryStaysCacheCompact(t *testing.T) {
 	if unsafe.Sizeof(uintptr(0)) == 8 && unsafe.Sizeof(jitParserMemoEntry{}) != 32 {
 		t.Fatalf("parser memo entry grew to %d bytes, want 32", unsafe.Sizeof(jitParserMemoEntry{}))

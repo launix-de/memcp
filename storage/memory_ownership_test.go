@@ -203,7 +203,7 @@ func TestShardMemoryExcludesSeparatelyOwnedIndex(t *testing.T) {
 
 func TestCacheManagerSetSizeIsAbsolute(t *testing.T) {
 	manager := new(CacheManager)
-	manager.Init(0, 0)
+	manager.Init(0, 0, 0)
 	defer manager.Stop()
 
 	pointer := new(int)
