@@ -5074,7 +5074,9 @@ the auto-index chooses the concrete access path on both tables. */
 (define membership_cache_recset_project_join_expr (lambda (target_src stage target_col)
 	(if (or (not (equal? (count (gs_keys stage)) 1))
 		(not (equal? (count (qassoc_get (gs_facts stage) (quote lookup-keys) '())) 1)))
-		nil
+		/* Composite keys include invocation domains. The general projection
+		keeps those keys as cache filters while mapping driver columns. */
+		(exists_recset_project_join_expr target_src stage)
 		(begin
 			(define cache (group_stage_cache stage))
 			(list (quote recset_project_join)

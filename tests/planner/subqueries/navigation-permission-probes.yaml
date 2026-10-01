@@ -1430,6 +1430,114 @@ test_cases:
       multiStandort: true
       multiAbteilung: true
       multiPruefung: true
+- name: add_local_only_search_branches
+  sql: INSERT INTO nav_document (ID,file,inventory,note,customer_note) VALUES (4,NULL,'1234',NULL,NULL),(5,2,NULL,'1234',NULL),(6,2,NULL,NULL,'1234'),(7,1,NULL,NULL,NULL)
+- name: bind_first_search_term
+  sql: SET @nav_search='1234'
+  session_id: search-domain
+- name: nested_or_search_preserves_local_branches_and_join_duplicates
+  sql: |
+    SELECT d.ID, f.ID AS joined_id FROM nav_document d
+    LEFT JOIN nav_file f ON f.ID=d.file OR f.ID=2
+    WHERE d.inventory LIKE CONCAT('%',@nav_search,'%')
+     OR d.note LIKE CONCAT('%',@nav_search,'%')
+     OR d.customer_note LIKE CONCAT('%',@nav_search,'%')
+     OR d.file IN (SELECT ID FROM nav_file WHERE filename LIKE CONCAT('%',@nav_search,'%')
+                   UNION SELECT ID FROM nav_file WHERE search LIKE CONCAT('%',@nav_search,'%'))
+    ORDER BY d.ID, f.ID LIMIT 5
+  session_id: search-domain
+  expect:
+    rows: 5
+    data:
+    - ID: 1
+      joined_id: 1
+    - ID: 1
+      joined_id: 2
+    - ID: 3
+      joined_id: 2
+    - ID: 3
+      joined_id: 3
+    - ID: 4
+      joined_id: 2
+- name: ordered_search_with_unique_display_lookup
+  sql: |
+    SELECT d.ID, f.ID AS joined_id FROM nav_document d
+    LEFT JOIN nav_file f ON f.ID=d.file
+    WHERE d.inventory LIKE CONCAT('%',@nav_search,'%')
+       OR d.note LIKE CONCAT('%',@nav_search,'%')
+       OR d.customer_note LIKE CONCAT('%',@nav_search,'%')
+       OR d.file IN (SELECT ID FROM nav_file WHERE filename LIKE CONCAT('%',@nav_search,'%')
+                     UNION SELECT ID FROM nav_file WHERE search LIKE CONCAT('%',@nav_search,'%'))
+    ORDER BY d.ID LIMIT 5
+  session_id: search-domain
+  expect:
+    rows: 5
+    data:
+    - {ID: 1, joined_id: 1}
+    - {ID: 3, joined_id: 3}
+    - {ID: 4, joined_id: null}
+    - {ID: 5, joined_id: 2}
+    - {ID: 6, joined_id: 2}
+- name: ordered_search_carrier_alternatives_preserve_results
+  sql: |
+    EXPLAIN PHYSICAL CALIBRATE
+    SELECT d.ID, f.ID AS joined_id FROM nav_document d
+    LEFT JOIN nav_file f ON f.ID=d.file
+    WHERE d.inventory LIKE CONCAT('%',@nav_search,'%')
+       OR d.note LIKE CONCAT('%',@nav_search,'%')
+       OR d.customer_note LIKE CONCAT('%',@nav_search,'%')
+       OR d.file IN (SELECT ID FROM nav_file WHERE filename LIKE CONCAT('%',@nav_search,'%')
+                     UNION SELECT ID FROM nav_file WHERE search LIKE CONCAT('%',@nav_search,'%'))
+    ORDER BY d.ID LIMIT 5
+  session_id: search-domain
+  expect:
+    result_contains: [candidate_keyset, result_equal]
+    result_not_contains: ['"result_equal": false']
+- name: bind_changed_search_term
+  sql: SET @nav_search='abc'
+  session_id: search-domain
+- name: cached_search_respects_changed_domain_key
+  sql: |
+    SELECT d.ID, f.ID AS joined_id FROM nav_document d
+    LEFT JOIN nav_file f ON f.ID=d.file OR f.ID=2
+    WHERE d.inventory LIKE CONCAT('%',@nav_search,'%')
+     OR d.note LIKE CONCAT('%',@nav_search,'%')
+     OR d.customer_note LIKE CONCAT('%',@nav_search,'%')
+     OR d.file IN (SELECT ID FROM nav_file WHERE filename LIKE CONCAT('%',@nav_search,'%')
+                   UNION SELECT ID FROM nav_file WHERE search LIKE CONCAT('%',@nav_search,'%'))
+    ORDER BY d.ID, f.ID LIMIT 5
+  session_id: search-domain
+  expect:
+    rows: 3
+    data:
+    - ID: 2
+      joined_id: 2
+    - ID: 5
+      joined_id: 2
+    - ID: 6
+      joined_id: 2
+- name: bind_null_search_term
+  sql: SET @nav_search=NULL
+  session_id: search-domain
+- name: null_search_domain_has_no_matches
+  sql: |
+    SELECT d.ID, f.ID AS joined_id FROM nav_document d
+    LEFT JOIN nav_file f ON f.ID=d.file OR f.ID=2
+    WHERE d.inventory LIKE CONCAT('%',@nav_search,'%')
+     OR d.note LIKE CONCAT('%',@nav_search,'%')
+     OR d.customer_note LIKE CONCAT('%',@nav_search,'%')
+     OR d.file IN (SELECT ID FROM nav_file WHERE filename LIKE CONCAT('%',@nav_search,'%')
+                   UNION SELECT ID FROM nav_file WHERE search LIKE CONCAT('%',@nav_search,'%'))
+    ORDER BY d.ID, f.ID LIMIT 5
+  session_id: search-domain
+  expect:
+    rows: 0
+- name: search_rejects_unknown_join_column
+  sql: SELECT d.ID FROM nav_document d LEFT JOIN nav_file f ON f.ID=d.file WHERE d.missing_search_column
+    LIKE '%1234%' OR d.file IN (SELECT ID FROM nav_file)
+  expect:
+    error: true
+
 cleanup:
 - sql: DROP TABLE IF EXISTS nav_user
 - sql: DROP TABLE IF EXISTS nav_dav

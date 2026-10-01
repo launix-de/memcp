@@ -4557,7 +4557,7 @@ ordered batch is executable and what its actual driver workload is. */
 		(define candidate_rows (planner_estimated_matching_rows
 			candidate_estimate candidate_input_rows candidate_input_rows))
 		(define driver_input_rows (if (nil? driver) nil (planner_source_row_count driver)))
-		(define driver_condition (membership_driver_filter (qb_where block)))
+		(define driver_condition (if (nil? driver) true (membership_driver_local_filter driver block)))
 		(define driver_estimate (if (nil? driver) nil
 			(planner_source_filter_estimate driver
 				driver_condition 512 tx planning_session)))
@@ -4587,7 +4587,7 @@ ordered batch is executable and what its actual driver workload is. */
 				(list (quote membership_driver_rows) driver_rows))
 			(membership_candidate_work_facts stage planning_session))))))
 
-(define membership_truth_projection_preferred? (lambda (block stage _guarded_alternative)
+(define membership_truth_projection_preferred? (lambda (block stage probe _guarded_alternative)
 	(begin
 		(define input (gs_input stage))
 		(define base_sources (filter (qb_sources block) source_is_base_table?))
@@ -4595,8 +4595,14 @@ ordered batch is executable and what its actual driver workload is. */
 		physical consumer. It must not inspect cardinality or choose a carrier;
 		those facts are meaningful only at the consuming scan-tree edge. */
 		(and (source_is_base_table? input)
-			(and (single_source? base_sources)
-				(empty_list? (group_stage_session_domain_keys stage)))))))
+			(or (and (single_source? base_sources)
+				(empty_list? (group_stage_session_domain_keys stage)))
+				(and (not (empty_list? base_sources))
+					(and (not (nil? (direct_column_name_for_alias (car base_sources) probe)))
+						(not (nil? (cache_recset_projection_parts_acc
+							(group_key_cols (gs_keys stage))
+							(qassoc_get (gs_facts stage) (quote lookup-keys) '())
+							(car base_sources) '() '() '()))))))))))
 
 (define choose_membership_truth_items (lambda (block items guarded_alternative)
 	(match items
@@ -4619,7 +4625,7 @@ ordered batch is executable and what its actual driver workload is. */
 			(begin
 				(define stage (membership_truth_stage (qb_stages block) (qb_sources block) (nth parts 1)))
 				(if (and (not (nil? stage))
-					(membership_truth_projection_preferred? block stage guarded_alternative))
+					(membership_truth_projection_preferred? block stage (nth parts 0) guarded_alternative))
 					(begin
 						/* Cost facts travel with the abstract marker; carrier selection
 						remains deferred to its physical consumer. */

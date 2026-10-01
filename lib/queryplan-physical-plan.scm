@@ -6167,30 +6167,47 @@ lookup for each ordered driver candidate. */
 						(replace_driver_membership_keyset_markers item bindings))))
 					_ expr))))))
 
+/* An OR branch has no independent LIMIT: rejected driver rows can span the
+whole relation. Cost each executable projection at that consumer scope. */
+(define membership_or_recset_bindings (lambda (src condition planning_session planning_tx)
+	(if (nil? (membership_guard_or_expr condition)) '()
+		(filter (map (driver_memberships_for_source src condition) (lambda (item)
+			(begin
+				(define choice (recset_project_join_plan_for_membership_using src item
+					(quote filter) nil false false nil 0 0 true
+					(quote or_driver) planning_session planning_tx))
+				(if (and (not (nil? choice)) (equal? (car choice) "candidate_keyset"))
+					(list item (membership_recset_var src item) (cadr choice)) nil))))
+			(lambda (binding) (not (nil? binding)))))))
+
 (define membership_branch_candidate_recset (lambda (src source_table branch bindings)
 	(begin
-		(define markers (driver_memberships_for_source src branch))
-		(if (empty_list? markers)
+		(define marker (driver_membership_probe_term branch))
+		(if (not (nil? marker))
 			(begin
-				(define cols (extract_columns_for_alias src branch))
-				(compile_scan_plan (quote scan_recset)
-					(physical_query_tx_symbol)
-					source_table
-					(cons (quote list) cols)
-					(list (quote lambda)
-						(map cols (lambda (col) (scan_callback_symbol_for_alias (source_alias src) col)))
-						(lower_column_expr_for_alias src branch))))
-			(begin
-				(define branch_bindings (filter (map markers (lambda (marker)
-					(membership_binding_for_marker bindings marker)))
-					(lambda (binding) (not (nil? binding)))))
-				(if (not (equal? (count branch_bindings) (count markers)))
-					nil
-					(if (single_source? branch_bindings)
-						(nth (car branch_bindings) 1)
-						(list (quote recset_union)
-							(physical_query_tx_symbol)
-							(cons (quote list) (map branch_bindings (lambda (binding) (nth binding 1))))))))))))
+				(define binding (membership_binding_for_marker bindings marker))
+				(if (nil? binding) nil (nth binding 1)))
+			(if (not (expr_contains_driver_membership? branch))
+				(if (not (expr_only_refs_alias? (source_alias src) (source_alias src) branch)) nil
+					(begin
+						(define cols (extract_columns_for_alias src branch))
+						(compile_scan_plan (quote scan_recset)
+							(physical_query_tx_symbol) source_table (cons (quote list) cols)
+							(list (quote lambda)
+								(map cols (lambda (col) (scan_callback_symbol_for_alias (source_alias src) col)))
+								(lower_column_expr_for_alias src branch)))))
+				(match branch
+					(cons head terms) (if (or (equal? head (quote and)) (equal? head (quote or)))
+						(begin
+							(define candidates (map terms (lambda (term)
+								(membership_branch_candidate_recset src source_table term bindings))))
+							(define available (filter candidates (lambda (candidate) (not (nil? candidate)))))
+							(if (or (empty_list? available)
+								(and (equal? head (quote or)) (not (equal? (count candidates) (count available)))))
+								nil
+								(boolean_recset_combine (if (equal? head (quote or)) (quote recset_union) (quote recset_intersect)) available)))
+						nil)
+					_ nil))))))
 
 /* When every OR alternative has a target-table candidate RecSet, the general
 truth-set law T_R(p OR q) = T_R(p) union T_R(q) provides a safe scan boundary.
@@ -8168,10 +8185,19 @@ until the caller has selected this physical alternative. */
 			(order_relations_for_source src driver_order_items)
 			(map tiebreaker_cols (lambda (col)
 				(canonical_order_relation < (source_column_order_collation src col)))))))
-		(define table_expr (if (nil? scalar_carrier)
+		(define branch_bindings (if use_batch_accept '()
+			(membership_or_recset_bindings src condition planning_session (planner_context_tx facts))))
+		(define branch_candidates (if (empty_list? branch_bindings) nil
+			(membership_or_candidate_recset src (source_table_expr_using stages src)
+				condition branch_bindings)))
+		(define base_table_expr (if (nil? scalar_carrier)
 			(coalesceNil membership_table_expr
 				(coalesceNil projected_join_carrier (source_table_expr_using stages src)))
 			scalar_carrier))
+		(define table_expr (if (nil? branch_candidates) base_table_expr
+			(if (equal? base_table_expr (source_table_expr_using stages src)) branch_candidates
+				(list (quote recset_intersect) (physical_query_tx_symbol)
+					(cons (quote list) (list base_table_expr branch_candidates))))))
 		(define scan_expr (if use_batch_accept
 			(list (quote scan_order_batch_accept)
 				(physical_query_tx_symbol) table_expr
@@ -8195,9 +8221,11 @@ until the caller has selected this physical alternative. */
 			(if use_batch_accept 0 offset) (if use_batch_accept -1 limit)
 			reduce_expr neutral_expr
 			(list (quote lambda) (list emit_value) scan_expr)))
-		(if use_membership_keyset
-			(wrap_membership_keyset_bindings membership_keysets window_expr)
-			window_expr))))
+		(wrap_membership_recset_bindings
+			(if (nil? branch_candidates) '() branch_bindings)
+			(if use_membership_keyset
+				(wrap_membership_keyset_bindings membership_keysets window_expr)
+				window_expr)))))
 
 (define scan_join_order_emit_plan (lambda (spec default_alias value_builder reduce_expr neutral_expr shard_reduce_expr stages batched_probe)
 	(begin
@@ -9839,6 +9867,14 @@ carrier remains on the measured direct path and is never built eagerly. */
 					(join_cols_for_alias all_sources default_alias alias needed_exprs)
 					recipe_mapcols))
 				(define mapcols raw_mapcols)
+				/* OR memberships can restrict a driving join leaf before its display
+				joins. Reuse the same costed carriers and conservative candidate union
+				as the single-source consumer; retain the complete residual predicate. */
+				(define branch_bindings (if access_path_build_allowed
+					(membership_or_recset_bindings src condition planning_session planning_tx) '()))
+				(define branch_candidates (if (empty_list? branch_bindings) nil
+					(membership_or_candidate_recset src (source_table_expr_using stages src)
+						condition branch_bindings)))
 				(define raw_base_table_expr (if membership_driver membership_table_expr
 					(if (not access_path_selected)
 						(source_table_expr_using stages src)
@@ -9848,14 +9884,18 @@ carrier remains on the measured direct path and is never built eagerly. */
 				(define recmap_domain_driver (and (not (nil? inherited_recmap_domain))
 					(equal? alias (qassoc_get facts
 						(quote recmap_source_domain_alias) nil))))
+				(define candidate_base_table_expr (if (nil? branch_candidates) raw_base_table_expr
+					(if (equal? raw_base_table_expr (source_table_expr_using stages src)) branch_candidates
+						(list (quote recset_intersect) (physical_query_tx_symbol)
+							(cons (quote list) (list raw_base_table_expr branch_candidates))))))
 				(define base_table_expr (if (not recmap_domain_driver)
-					raw_base_table_expr
-					(if (equal? raw_base_table_expr (source_table_expr_using stages src))
+					candidate_base_table_expr
+					(if (equal? candidate_base_table_expr (source_table_expr_using stages src))
 						inherited_recmap_domain
 						(list (quote recset_intersect)
 							(physical_query_tx_symbol)
 							(cons (quote list) (list
-								inherited_recmap_domain raw_base_table_expr))))))
+								inherited_recmap_domain candidate_base_table_expr))))))
 				(define table_expr (if (or (not scalar_carrier_driver) scalar_membership_filter)
 					base_table_expr
 					(if (equal? base_table_expr (source_table_expr_using stages src))
@@ -9959,9 +9999,11 @@ carrier remains on the measured direct path and is never built eagerly. */
 						(list (quote lambda) (list scalar_membership_var) membership_bound_scan)
 						consumed_scalar_carrier)
 					membership_bound_scan))
-				(if use_membership_keyset
-					(wrap_membership_keyset_bindings membership_keysets scalar_bound_scan)
-					scalar_bound_scan))))))
+				(wrap_membership_recset_bindings
+					(if (nil? branch_candidates) '() branch_bindings)
+					(if use_membership_keyset
+						(wrap_membership_keyset_bindings membership_keysets scalar_bound_scan)
+						scalar_bound_scan)))))))
 
 /* Consume the logical join tree recursively. The right subtree is lowered as
 the continuation of the left subtree, so join-node boundaries and outer-join
