@@ -1059,7 +1059,8 @@ from silently overriding the physical planner. */
 		(define scalar_rewritten
 			(query_block_with_scalar_first_probes_using_graph stage_lookup dependency_graph block))
 		(define membership_rewritten
-			(query_block_with_physical_membership_using stage_lookup scalar_rewritten))
+			(query_block_with_physical_membership_choices
+				(query_block_with_physical_membership_using stage_lookup scalar_rewritten)))
 		(if (expr_contains_membership_truth? (qb_where membership_rewritten))
 			(neumann_fail "build_queryplan"
 				"logical membership marker survived physical choice") true)
@@ -1698,12 +1699,9 @@ outer joins. */
 			/* Aggregate stages own their input query block. Apply the physical
 			membership choice here too; otherwise the top-level preparation pass never
 			reaches this nested block and eagerly materializes the candidate cache. */
-			(define membership_requirement (if (query_block? src)
-				(qassoc_get (qb_facts src) (quote membership_requirement) nil)
-				nil))
-			(define membership_src (if (and (query_block? src)
-				(not (nil? membership_requirement)))
-				(query_block_with_physical_membership_using stage_lookup src)
+			(define membership_src (if (query_block? src)
+				(query_block_with_physical_membership_choices
+					(query_block_with_physical_membership_using stage_lookup src))
 				src))
 			/* A nested presence chain represented as correlated scalar probes copies
 			the complete remaining probe suffix into every parent prepare. Its stage
@@ -7131,15 +7129,19 @@ scalar comparison work rather than an uncalibrated multiplier. */
 /* Partition WHERE conjuncts without changing the logical join order. Terms
 that touch the current nullable source run in its map callback, after scan has
 either bound a real row or supplied the synthetic NULL row. */
+/* Physical probe domains can bind an alias in the head of a key tuple. Use
+the physical read set so a predicate never runs before that source is bound. */
 (define physical_partition_condition_terms (lambda (default_alias current_source future_sources terms scan_ready post_outer pending)
 	(match (coalesceNil terms '())
 		(cons term rest) (if (or
 			(expr_contains_orc_column? term)
-			(expr_refs_any_alias? default_alias (source_aliases future_sources) term))
+			(physical_expr_refs_any_alias? (cons current_source future_sources)
+				default_alias (source_aliases future_sources) term))
 			(physical_partition_condition_terms default_alias current_source future_sources rest scan_ready post_outer (cons term pending))
 			(if (and
 				(source_outer? current_source)
-				(expr_refs_alias? default_alias (source_alias current_source) term))
+				(physical_expr_refs_any_alias? (cons current_source future_sources)
+					default_alias (list (source_alias current_source)) term))
 				(physical_partition_condition_terms default_alias current_source future_sources rest scan_ready (cons term post_outer) pending)
 				(physical_partition_condition_terms default_alias current_source future_sources rest (cons term scan_ready) post_outer pending)))
 		_ (list
