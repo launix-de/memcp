@@ -44167,6 +44167,11 @@ func ComputeSize(v Scmer) uint {
 			return base
 		}
 		return base + goAllocOverhead + align8(ln)
+	case tagCString, tagBString:
+		// These values borrow dictionary/blob storage. Its owning column accounts
+		// for the backing allocation; this reference owns only its Scmer slot.
+		// Do not decode strings or charge the shared dictionary per reference.
+		return base
 	case tagBSON:
 		_, payload := bsonTypeAndBytes(v)
 		if len(payload) == 0 {

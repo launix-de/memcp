@@ -476,6 +476,12 @@ eviction registrations or planner snapshots as a substitute for resident RAM. */
 	(eval (parse_sql "system_statistic" "CREATE TABLE perf_metrics(time text, cpu float, mem_available bigint, mem_total bigint, shard_memory bigint, shard_budget bigint, connections int, max_connections int, rps float, eps float) ENGINE=SLOPPY" (lambda (schema tblname write) true)))
 ))
 
+/* Upgrade persisted metrics tables without dropping their history. */
+(define dashboard_migrate_perf_metrics (lambda (schema)
+	(if (not (has? (map (show schema "perf_metrics") (lambda (col) (get_assoc col "Field"))) "eps"))
+		(createcolumn (table schema "perf_metrics") "eps" "float" '() '()))))
+(dashboard_migrate_perf_metrics "system_statistic")
+
 /* self-scheduling tracing loop via setTimeout */
 (define metrics_trace_tick (lambda () (begin
 	(if (settings "MetricsTracing") (begin

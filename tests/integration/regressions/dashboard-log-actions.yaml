@@ -8,6 +8,7 @@ metadata:
     isolated log fixtures
   isolated: true
 setup:
+- sql: DROP TABLE IF EXISTS perf_metrics
 - sql: DROP TABLE IF EXISTS `errors`
 - sql: CREATE TABLE `errors` (message TEXT) ENGINE=SLOPPY
 - sql: INSERT INTO `errors` VALUES ('first'), ('second')
@@ -71,6 +72,35 @@ test_cases:
       (lambda (db tbl write) (error "access denied"))))
   expect:
     error: true
+- name: Create legacy metrics history without errors per second
+  sql: CREATE TABLE perf_metrics(time TEXT, rps FLOAT, cpu FLOAT, connections INT, mem_available BIGINT) ENGINE=SLOPPY
+- name: Populate legacy history
+  sql: INSERT INTO perf_metrics VALUES ('1', 3, 0.5, 2, 1024)
+- name: Metrics migration is idempotent
+  scm: |-
+    (begin
+      (dashboard_migrate_perf_metrics "memcp-tests")
+      (dashboard_migrate_perf_metrics "memcp-tests"))
+- name: Migrated history preserves old rows and exposes the new column
+  sql: SELECT time,rps,eps,cpu,connections,mem_available FROM perf_metrics ORDER BY time ASC LIMIT 2000
+  expect:
+    rows: 1
+    data:
+    - time: '1'
+      rps: 3
+      eps: null
+      cpu: 0.5
+      connections: 2
+      mem_available: 1024
+- name: New metrics can record errors per second
+  sql: INSERT INTO perf_metrics VALUES ('2', 4, 0.6, 3, 2048, 2)
+- name: New metrics retain error counts
+  sql: SELECT eps FROM perf_metrics WHERE time = '2'
+  expect:
+    rows: 1
+    data:
+    - eps: 2
 cleanup:
+- sql: DROP TABLE IF EXISTS perf_metrics
 - sql: DROP TABLE IF EXISTS `errors`
 - sql: DROP TABLE IF EXISTS `logs`
