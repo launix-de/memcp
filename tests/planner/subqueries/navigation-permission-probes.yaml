@@ -52,6 +52,13 @@ setup:
 - sql: |
     INSERT INTO nav_document (ID,nav_tenant,nav_site,nav_department,nav_year,nav_check,file,inventory) VALUES
     (1,1,10,100,1000,10000,1, '1234' ),(2,1,10,100,1000,10000,2, '5678' ),(3,2,20,200,2000,20000,3, '1234' )
+- sql: DROP TABLE IF EXISTS nav_dav
+- sql: CREATE TABLE nav_dav (ID INT PRIMARY KEY, content INT) ENGINE=memory
+- sql: DROP TABLE IF EXISTS nav_selection
+- sql: CREATE TABLE nav_selection (list INT, item INT, UNIQUE KEY selection_identity (list,item)) ENGINE=memory
+- sql: DROP TABLE IF EXISTS nav_user
+- sql: CREATE TABLE nav_user (ID INT PRIMARY KEY) ENGINE=memory
+- sql: INSERT INTO nav_user (ID) VALUES (7),(8),(9)
 test_cases:
 - name: select_global_administrator
   sql: SET @nav_actor=7
@@ -904,7 +911,529 @@ test_cases:
     FROM nav_year y) r ON r.ID=d.nav_year
   expect:
     error: true
+# Stateful file access, search ingestion and selection workflows.
+- name: file_union_global_admin
+  sql: &flow_query_1 |-
+    SELECT f.ID, EXISTS (
+     SELECT v.ID FROM nav_dav v WHERE v.content=f.ID AND @nav_logged_in
+     UNION ALL
+     SELECT d.ID FROM nav_document d WHERE d.file=f.ID AND COALESCE((SELECT
+     (EXISTS (SELECT 1 FROM nav_access a WHERE a.user=@nav_actor AND a.nav_tenant IS NULL)
+      OR EXISTS (SELECT 1 FROM nav_access a WHERE a.user=@nav_actor
+                 AND COALESCE(a.nav_site,s.ID)=s.ID))
+     AND COALESCE((SELECT
+       EXISTS (SELECT 1 FROM nav_access a WHERE a.user=@nav_actor AND a.nav_tenant IS NULL)
+       OR EXISTS (SELECT 1 FROM nav_access a WHERE a.user=@nav_actor AND a.nav_tenant=t.ID)
+       FROM nav_tenant t WHERE t.ID=s.nav_tenant LIMIT 1),FALSE)
+     FROM nav_site s WHERE s.ID=d.nav_site LIMIT 1),FALSE)
+    ) AS can_view FROM nav_file f WHERE f.ID=@nav_file_id
+  session_id: navigation-permissions
+  setup:
+  - sql: SET @nav_actor=7
+  - sql: SET @nav_file_id=3
+  - sql: SET @nav_logged_in=1
+  expect:
+    rows: 1
+    data:
+    - ID: 3
+      can_view: true
+- name: file_union_tenant_allowed
+  sql: *flow_query_1
+  session_id: navigation-permissions
+  setup:
+  - sql: SET @nav_actor=8
+  - sql: SET @nav_file_id=1
+  - sql: SET @nav_logged_in=1
+  expect:
+    rows: 1
+    data:
+    - ID: 1
+      can_view: true
+- name: file_union_tenant_denied
+  sql: *flow_query_1
+  session_id: navigation-permissions
+  setup:
+  - sql: SET @nav_actor=8
+  - sql: SET @nav_file_id=3
+  - sql: SET @nav_logged_in=1
+  expect:
+    rows: 1
+    data:
+    - ID: 3
+      can_view: false
+- name: file_union_no_access
+  sql: *flow_query_1
+  session_id: navigation-permissions
+  setup:
+  - sql: SET @nav_actor=9
+  - sql: SET @nav_file_id=1
+  - sql: SET @nav_logged_in=1
+  expect:
+    rows: 1
+    data:
+    - ID: 1
+      can_view: false
+- name: file_union_dav_duplicate_references
+  sql: INSERT INTO nav_dav VALUES (1,3),(2,3)
+  session_id: navigation-permissions
+- name: file_union_dav_branch_grants_logged_in_actor
+  sql: *flow_query_1
+  session_id: navigation-permissions
+  setup:
+  - sql: SET @nav_actor=9
+  - sql: SET @nav_file_id=3
+  - sql: SET @nav_logged_in=1
+  expect:
+    rows: 1
+    data:
+    - ID: 3
+      can_view: true
+- name: file_union_dav_branch_denies_guest
+  sql: *flow_query_1
+  session_id: navigation-permissions
+  setup:
+  - sql: SET @nav_actor=9
+  - sql: SET @nav_file_id=3
+  - sql: SET @nav_logged_in=0
+  expect:
+    rows: 1
+    data:
+    - ID: 3
+      can_view: false
+- name: file_union_dav_revocation
+  sql: DELETE FROM nav_dav WHERE content=3
+  session_id: navigation-permissions
+- name: file_union_dav_revocation_invalidates_cached_result
+  sql: *flow_query_1
+  session_id: navigation-permissions
+  setup:
+  - sql: SET @nav_actor=9
+  - sql: SET @nav_file_id=3
+  - sql: SET @nav_logged_in=1
+  expect:
+    rows: 1
+    data:
+    - ID: 3
+      can_view: false
+- name: permission_add_second_site
+  sql: INSERT INTO nav_site (ID,name,nav_tenant) VALUES (11,'Site A2',1)
+  session_id: navigation-permissions
+- name: permission_move_document_site
+  sql: UPDATE nav_document SET nav_site=11 WHERE ID=2
+  session_id: navigation-permissions
+- name: file_union_unrestricted_tenant_sees_second_site
+  sql: *flow_query_1
+  session_id: navigation-permissions
+  setup:
+  - sql: SET @nav_actor=8
+  - sql: SET @nav_file_id=2
+  - sql: SET @nav_logged_in=1
+  expect:
+    rows: 1
+    data:
+    - ID: 2
+      can_view: true
+- name: permission_restrict_site
+  sql: UPDATE nav_access SET nav_site=10 WHERE ID=2
+  session_id: navigation-permissions
+- name: file_union_site_restriction_invalidates_cached_result
+  sql: *flow_query_1
+  session_id: navigation-permissions
+  setup:
+  - sql: SET @nav_actor=8
+  - sql: SET @nav_file_id=2
+  - sql: SET @nav_logged_in=1
+  expect:
+    rows: 1
+    data:
+    - ID: 2
+      can_view: false
+- name: file_union_restricted_site_still_allowed
+  sql: *flow_query_1
+  session_id: navigation-permissions
+  setup:
+  - sql: SET @nav_actor=8
+  - sql: SET @nav_file_id=1
+  - sql: SET @nav_logged_in=1
+  expect:
+    rows: 1
+    data:
+    - ID: 1
+      can_view: true
+- name: permission_revoke_tenant
+  sql: DELETE FROM nav_access WHERE ID=2
+  session_id: navigation-permissions
+- name: file_union_tenant_revocation_invalidates_cached_result
+  sql: *flow_query_1
+  session_id: navigation-permissions
+  setup:
+  - sql: SET @nav_actor=8
+  - sql: SET @nav_file_id=1
+  - sql: SET @nav_logged_in=1
+  expect:
+    rows: 1
+    data:
+    - ID: 1
+      can_view: false
+- name: permission_restore_tenant
+  sql: INSERT INTO nav_access VALUES (2,8,1,NULL)
+  session_id: navigation-permissions
+- name: file_union_restored_grant_invalidates_cached_result
+  sql: *flow_query_1
+  session_id: navigation-permissions
+  setup:
+  - sql: SET @nav_actor=8
+  - sql: SET @nav_file_id=1
+  - sql: SET @nav_logged_in=1
+  expect:
+    rows: 1
+    data:
+    - ID: 1
+      can_view: true
+- name: upload_search_initially_empty
+  sql: &flow_query_2 |-
+    SELECT d.ID FROM nav_document d WHERE COALESCE((SELECT
+     (EXISTS (SELECT 1 FROM nav_access a WHERE a.user=@nav_actor AND a.nav_tenant IS NULL)
+      OR EXISTS (SELECT 1 FROM nav_access a WHERE a.user=@nav_actor
+                 AND COALESCE(a.nav_site,s.ID)=s.ID))
+     AND COALESCE((SELECT
+       EXISTS (SELECT 1 FROM nav_access a WHERE a.user=@nav_actor AND a.nav_tenant IS NULL)
+       OR EXISTS (SELECT 1 FROM nav_access a WHERE a.user=@nav_actor AND a.nav_tenant=t.ID)
+       FROM nav_tenant t WHERE t.ID=s.nav_tenant LIMIT 1),FALSE)
+     FROM nav_site s WHERE s.ID=d.nav_site LIMIT 1),FALSE)
+    AND (d.inventory LIKE '%needle%' OR d.note LIKE '%needle%' OR d.customer_note LIKE '%needle%'
+     OR d.file IN (SELECT ID FROM nav_file WHERE filename LIKE '%needle%'
+     UNION SELECT ID FROM nav_file WHERE MATCH(search) AGAINST ('needle' IN NATURAL LANGUAGE MODE)))
+    ORDER BY d.ID
+  session_id: navigation-permissions
+  setup:
+  - sql: SET @nav_actor=8
+  expect:
+    rows: 0
+    data: []
+- name: upload_create_file
+  sql: INSERT INTO nav_file (ID,filename,search,data) VALUES (4,'report.pdf',NULL,'synthetic payload')
+  session_id: navigation-permissions
+- name: upload_file_without_document_is_not_searchable
+  sql: *flow_query_2
+  session_id: navigation-permissions
+  expect:
+    rows: 0
+    data: []
+- name: upload_create_document
+  sql: INSERT INTO nav_document (ID,nav_tenant,nav_site,file,inventory) VALUES (4,1,10,4,'ordinary')
+  session_id: navigation-permissions
+- name: upload_new_document_grants_file_access
+  sql: *flow_query_1
+  session_id: navigation-permissions
+  setup:
+  - sql: SET @nav_actor=8
+  - sql: SET @nav_file_id=4
+  - sql: SET @nav_logged_in=1
+  expect:
+    rows: 1
+    data:
+    - ID: 4
+      can_view: true
+- name: upload_before_text_extraction
+  sql: *flow_query_2
+  session_id: navigation-permissions
+  expect:
+    rows: 0
+    data: []
+- name: upload_extract_text
+  sql: UPDATE nav_file SET search='needle in extracted text' WHERE ID=4
+  session_id: navigation-permissions
+- name: upload_extraction_invalidates_search_cache
+  sql: *flow_query_2
+  session_id: navigation-permissions
+  expect:
+    rows: 1
+    data:
+    - ID: 4
+- name: upload_replace_extracted_text
+  sql: UPDATE nav_file SET search='unrelated text' WHERE ID=4
+  session_id: navigation-permissions
+- name: upload_replaced_text_disappears_from_search
+  sql: *flow_query_2
+  session_id: navigation-permissions
+  expect:
+    rows: 0
+    data: []
+- name: upload_rename_file
+  sql: UPDATE nav_file SET filename='needle.pdf' WHERE ID=4
+  session_id: navigation-permissions
+- name: upload_filename_invalidates_search_cache
+  sql: *flow_query_2
+  session_id: navigation-permissions
+  expect:
+    rows: 1
+    data:
+    - ID: 4
+- name: upload_remove_document
+  sql: DELETE FROM nav_document WHERE ID=4
+  session_id: navigation-permissions
+- name: upload_removed_document_disappears_from_search
+  sql: *flow_query_2
+  session_id: navigation-permissions
+  expect:
+    rows: 0
+    data: []
+- name: upload_orphaned_file_loses_access
+  sql: *flow_query_1
+  session_id: navigation-permissions
+  setup:
+  - sql: SET @nav_actor=8
+  - sql: SET @nav_file_id=4
+  - sql: SET @nav_logged_in=1
+  expect:
+    rows: 1
+    data:
+    - ID: 4
+      can_view: false
+- name: selection_populate
+  sql: INSERT INTO nav_selection VALUES (5,1),(5,3),(6,2)
+  session_id: navigation-permissions
+- name: selection_permission_filters_foreign_document
+  sql: &flow_query_3 |-
+    SELECT d.ID FROM nav_document d WHERE COALESCE((SELECT
+     (EXISTS (SELECT 1 FROM nav_access a WHERE a.user=@nav_actor AND a.nav_tenant IS NULL)
+      OR EXISTS (SELECT 1 FROM nav_access a WHERE a.user=@nav_actor
+                 AND COALESCE(a.nav_site,s.ID)=s.ID))
+     AND COALESCE((SELECT
+       EXISTS (SELECT 1 FROM nav_access a WHERE a.user=@nav_actor AND a.nav_tenant IS NULL)
+       OR EXISTS (SELECT 1 FROM nav_access a WHERE a.user=@nav_actor AND a.nav_tenant=t.ID)
+       FROM nav_tenant t WHERE t.ID=s.nav_tenant LIMIT 1),FALSE)
+     FROM nav_site s WHERE s.ID=d.nav_site LIMIT 1),FALSE)
+     AND EXISTS (SELECT item FROM nav_selection WHERE list=@nav_list AND item=d.ID)
+     ORDER BY d.ID
+  session_id: navigation-permissions
+  setup:
+  - sql: SET @nav_actor=8
+  - sql: SET @nav_list=5
+  expect:
+    rows: 1
+    data:
+    - ID: 1
+- name: selection_inverted_filters_foreign_document
+  sql: &flow_query_4 |-
+    SELECT d.ID FROM nav_document d WHERE COALESCE((SELECT
+     (EXISTS (SELECT 1 FROM nav_access a WHERE a.user=@nav_actor AND a.nav_tenant IS NULL)
+      OR EXISTS (SELECT 1 FROM nav_access a WHERE a.user=@nav_actor
+                 AND COALESCE(a.nav_site,s.ID)=s.ID))
+     AND COALESCE((SELECT
+       EXISTS (SELECT 1 FROM nav_access a WHERE a.user=@nav_actor AND a.nav_tenant IS NULL)
+       OR EXISTS (SELECT 1 FROM nav_access a WHERE a.user=@nav_actor AND a.nav_tenant=t.ID)
+       FROM nav_tenant t WHERE t.ID=s.nav_tenant LIMIT 1),FALSE)
+     FROM nav_site s WHERE s.ID=d.nav_site LIMIT 1),FALSE)
+     AND NOT EXISTS (SELECT item FROM nav_selection WHERE list=@nav_list AND item=d.ID)
+     ORDER BY d.ID
+  session_id: navigation-permissions
+  expect:
+    rows: 1
+    data:
+    - ID: 2
+- name: selection_switch_list_keeps_session_scoping
+  sql: *flow_query_3
+  session_id: navigation-permissions
+  setup:
+  - sql: SET @nav_list=6
+  expect:
+    rows: 1
+    data:
+    - ID: 2
+- name: selection_remove_item
+  sql: DELETE FROM nav_selection WHERE list=6 AND item=2
+  session_id: navigation-permissions
+- name: selection_delete_invalidates_membership
+  sql: *flow_query_3
+  session_id: navigation-permissions
+  expect:
+    rows: 0
+    data: []
+- name: selection_insert_item
+  sql: INSERT INTO nav_selection VALUES (6,1)
+  session_id: navigation-permissions
+- name: selection_insert_invalidates_membership
+  sql: *flow_query_3
+  session_id: navigation-permissions
+  expect:
+    rows: 1
+    data:
+    - ID: 1
+- name: selection_composite_unique_rejects_duplicate
+  sql: INSERT INTO nav_selection VALUES (6,1)
+  session_id: navigation-permissions
+  expect:
+    error: true
+- name: selection_missing_column_must_error
+  sql: SELECT d.ID FROM nav_document d WHERE EXISTS (SELECT missing FROM nav_selection WHERE item=d.ID)
+  session_id: navigation-permissions
+  expect:
+    error: true
+- name: selection_large_list_preserves_exact_membership
+  session_id: navigation-permissions
+  setup:
+  - sql: SET @nav_actor=8
+  - sql: SET @nav_list=20
+  - scm: |
+      (insert (table "memcp-tests" "nav_selection") '("list" "item")
+        (map (produceN 4096) (lambda (i) (list 20 (+ i 1)))))
+  sql: *flow_query_3
+  expect:
+    rows: 2
+    data: [{ID: 1}, {ID: 2}]
+- name: selection_large_list_inverted_is_empty
+  session_id: navigation-permissions
+  sql: *flow_query_4
+  expect: {rows: 0}
+- name: selection_null_item_does_not_poison_inverted_exists
+  session_id: navigation-permissions
+  setup:
+  - sql: INSERT INTO nav_selection (list,item) VALUES (21,NULL)
+  - sql: SET @nav_list=21
+  sql: *flow_query_4
+  expect:
+    rows: 2
+    data: [{ID: 1}, {ID: 2}]
+- name: file_union_independent_admin_session
+  session_id: navigation-admin
+  setup:
+  - sql: SET @nav_actor=7
+  - sql: SET @nav_file_id=3
+  - sql: SET @nav_logged_in=1
+  sql: *flow_query_1
+  expect: {rows: 1, data: [{ID: 3, can_view: true}]}
+- name: file_union_independent_client_session
+  session_id: navigation-client
+  setup:
+  - sql: SET @nav_actor=8
+  - sql: SET @nav_file_id=3
+  - sql: SET @nav_logged_in=1
+  sql: *flow_query_1
+  expect: {rows: 1, data: [{ID: 3, can_view: false}]}
+- name: file_union_admin_session_remains_authorized
+  session_id: navigation-admin
+  sql: *flow_query_1
+  expect: {rows: 1, data: [{ID: 3, can_view: true}]}
+- name: file_union_client_session_remains_denied
+  session_id: navigation-client
+  sql: *flow_query_1
+  expect: {rows: 1, data: [{ID: 3, can_view: false}]}
+- name: folder_options_without_membership_default_true
+  setup:
+  - sql: UPDATE nav_tenant SET multiStandort=FALSE,multiAbteilung=NULL,multiPruefung=FALSE WHERE ID=1
+  sql: &folder_options_query |-
+    SELECT u.ID,
+    (NOT EXISTS (SELECT TRUE FROM nav_tenant t, nav_access a
+     WHERE t.ID=a.nav_tenant AND a.user=u.ID LIMIT 1)
+     OR EXISTS (SELECT TRUE FROM nav_tenant t, nav_access a
+     WHERE t.ID=a.nav_tenant AND a.user=u.ID AND t.multiStandort LIMIT 1)) AS multiStandort,
+    (NOT EXISTS (SELECT TRUE FROM nav_tenant t, nav_access a
+     WHERE t.ID=a.nav_tenant AND a.user=u.ID LIMIT 1)
+     OR EXISTS (SELECT TRUE FROM nav_tenant t, nav_access a
+     WHERE t.ID=a.nav_tenant AND a.user=u.ID AND t.multiAbteilung LIMIT 1)) AS multiAbteilung,
+    (NOT EXISTS (SELECT TRUE FROM nav_tenant t, nav_access a
+     WHERE t.ID=a.nav_tenant AND a.user=u.ID LIMIT 1)
+     OR EXISTS (SELECT TRUE FROM nav_tenant t, nav_access a
+     WHERE t.ID=a.nav_tenant AND a.user=u.ID AND t.multiPruefung LIMIT 1)) AS multiPruefung
+    FROM nav_user u ORDER BY u.ID
+  expect:
+    rows: 3
+    data:
+    - ID: 7
+      multiStandort: true
+      multiAbteilung: true
+      multiPruefung: true
+    - ID: 8
+      multiStandort: false
+      multiAbteilung: false
+      multiPruefung: false
+    - ID: 9
+      multiStandort: true
+      multiAbteilung: true
+      multiPruefung: true
+- name: folder_options_distinguish_each_correlated_boolean
+  setup:
+  - sql: UPDATE nav_tenant SET multiStandort=TRUE,multiAbteilung=FALSE,multiPruefung=TRUE WHERE ID=1
+  sql: *folder_options_query
+  expect:
+    rows: 3
+    data:
+    - ID: 7
+      multiStandort: true
+      multiAbteilung: true
+      multiPruefung: true
+    - ID: 8
+      multiStandort: true
+      multiAbteilung: false
+      multiPruefung: true
+    - ID: 9
+      multiStandort: true
+      multiAbteilung: true
+      multiPruefung: true
+- name: folder_options_new_membership_invalidates_default
+  setup:
+  - sql: UPDATE nav_tenant SET multiStandort=FALSE,multiAbteilung=TRUE,multiPruefung=FALSE WHERE ID=2
+  - sql: INSERT INTO nav_access (ID,user,nav_tenant,nav_site) VALUES (3,9,2,NULL)
+  sql: *folder_options_query
+  expect:
+    rows: 3
+    data:
+    - ID: 7
+      multiStandort: true
+      multiAbteilung: true
+      multiPruefung: true
+    - ID: 8
+      multiStandort: true
+      multiAbteilung: false
+      multiPruefung: true
+    - ID: 9
+      multiStandort: false
+      multiAbteilung: true
+      multiPruefung: false
+- name: folder_options_union_memberships_per_option
+  setup:
+  - sql: INSERT INTO nav_access (ID,user,nav_tenant,nav_site) VALUES (4,8,2,NULL)
+  sql: *folder_options_query
+  expect:
+    rows: 3
+    data:
+    - ID: 7
+      multiStandort: true
+      multiAbteilung: true
+      multiPruefung: true
+    - ID: 8
+      multiStandort: true
+      multiAbteilung: true
+      multiPruefung: true
+    - ID: 9
+      multiStandort: false
+      multiAbteilung: true
+      multiPruefung: false
+- name: folder_options_revocation_restores_default
+  setup:
+  - sql: DELETE FROM nav_access WHERE user=9
+  sql: *folder_options_query
+  expect:
+    rows: 3
+    data:
+    - ID: 7
+      multiStandort: true
+      multiAbteilung: true
+      multiPruefung: true
+    - ID: 8
+      multiStandort: true
+      multiAbteilung: true
+      multiPruefung: true
+    - ID: 9
+      multiStandort: true
+      multiAbteilung: true
+      multiPruefung: true
 cleanup:
+- sql: DROP TABLE IF EXISTS nav_user
+- sql: DROP TABLE IF EXISTS nav_dav
+- sql: DROP TABLE IF EXISTS nav_selection
 - sql: DROP TABLE IF EXISTS nav_document
 - sql: DROP TABLE IF EXISTS nav_tenant
 - sql: DROP TABLE IF EXISTS nav_site
