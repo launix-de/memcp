@@ -1620,15 +1620,10 @@ func jitEmitParserProgramCore(ctx *JITContext, program *jitParserProgram, input,
 	ctx.setStackPointer(jitStackRootFrameBP, emitter.generatorValueOff, true)
 	// Static parser callers already provide a stable rooted result slot. Reuse
 	// it so adding result lifetime protection does not perturb the parser's
-	// spill-frame layout. The generic emitter still needs its own merge slot
-	// when its caller accepts an unconstrained or register result.
+	// spill-frame layout. Generic callers receive a slot below at the original
+	// result allocation point, after all parser rule safepoints were emitted.
 	resultSlot := result
 	resultInTarget := result.Loc == LocStackPair && result.StackOff < 0 && result.Rooted
-	if !resultInTarget {
-		resultOff := ctx.AllocSpill(16)
-		ctx.setStackPointer(jitStackRootFrameBP, resultOff, true)
-		resultSlot = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: resultOff, Rooted: true}
-	}
 	ctx.EmitMovRegImm64(ctx.ScratchReg, 0)
 	ctx.EmitStoreRegMem(ctx.ScratchReg, ctx.StackReg, emitter.positionOff)
 	emitter.ruleLabels = make([]JITLabel, len(program.rules))
@@ -1710,9 +1705,12 @@ func jitEmitParserProgramCore(ctx *JITContext, program *jitParserProgram, input,
 	ctx.FreeDesc(&text)
 	ctx.EmitJump(CondNotEqual, failed)
 	// Keep the established outgoing-frame shape for parser action calls. Their
-	// stack maps and accumulator slots were emitted against this allocation;
-	// only the result storage itself moves to the stable rooted target above.
-	_ = ctx.AllocStack(16)
+	// stack maps and accumulator slots were emitted against this allocation.
+	resultOff := ctx.AllocStack(16)
+	if !resultInTarget {
+		ctx.setStackPointer(jitStackRootFrameSP, resultOff, true)
+		resultSlot = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: resultOff, Rooted: true}
+	}
 	done := ctx.ReserveLabel()
 	out := emitter.emitStateScalar(jitParserFinish, 2)
 	out.Type = JITTypeUnknown
