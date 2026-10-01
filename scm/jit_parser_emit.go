@@ -1618,6 +1618,12 @@ func jitEmitParserProgramCore(ctx *JITContext, program *jitParserProgram, input,
 	emitter.continuationOff = ctx.AllocStack(8)
 	emitter.generatorValueOff = ctx.AllocSpill(16)
 	ctx.setStackPointer(jitStackRootFrameBP, emitter.generatorValueOff, true)
+	// Reserve the merged result before emitting any rule. Rule emission restores
+	// allocator snapshots between control-flow arms, so a slot allocated after
+	// those arms could alias one of their temporaries at runtime.
+	resultOff := ctx.AllocSpill(16)
+	ctx.setStackPointer(jitStackRootFrameBP, resultOff, true)
+	resultSlot := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: resultOff, Rooted: true}
 	ctx.EmitMovRegImm64(ctx.ScratchReg, 0)
 	ctx.EmitStoreRegMem(ctx.ScratchReg, ctx.StackReg, emitter.positionOff)
 	emitter.ruleLabels = make([]JITLabel, len(program.rules))
@@ -1698,13 +1704,6 @@ func jitEmitParserProgramCore(ctx *JITContext, program *jitParserProgram, input,
 	ctx.FreeDesc(&endPosition)
 	ctx.FreeDesc(&text)
 	ctx.EmitJump(CondNotEqual, failed)
-	// The parser result can outlive this inlined program and cross another Go
-	// safepoint in its caller. Give it a stable, registered frame root instead
-	// of an unregistered temporary stack slot whose descriptor only claimed to
-	// be rooted.
-	resultOff := ctx.AllocSpill(16)
-	ctx.setStackPointer(jitStackRootFrameBP, resultOff, true)
-	resultSlot := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: resultOff, Rooted: true}
 	done := ctx.ReserveLabel()
 	out := emitter.emitStateScalar(jitParserFinish, 2)
 	out.Type = JITTypeUnknown
