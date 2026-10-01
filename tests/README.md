@@ -60,3 +60,27 @@ latency tests keep their existing median-per-request policy.
 
 - `sql/dml/insert-values-template.yaml`: Bulk INSERT literals, session bindings and computed cells.
 - `performance/bulk-insert-compile.yaml`: Cold compilation of parameterized bulk INSERT rows.
+
+## Baseline queries that cannot execute
+
+In `--perf-ab`, a baseline query error or request timeout is recorded as
+`baseline_failure`, with its phase, timeout and diagnostic. It is not a timing
+sample and does not imply a speedup. Only the orchestrator's A role can produce
+this outcome. Setup/cleanup failures, connection failures, malformed artifacts,
+wrong results and all candidate errors still fail the run.
+
+Such cases receive the same fixed verification as suspected regressions: the
+initial A/B pair plus six additional fresh fixtures per revision (`ABBA` three
+times). Every candidate sample must satisfy the result assertions. Every
+candidate fixture must also meet the declared `threshold_ms` budget; timing
+groups use the sum of member budgets and measured totals, preserving cold/warm
+trade-offs. Regression waivers cannot bypass this recovery budget.
+
+If any baseline fixture succeeds, all successful baseline timings remain in the
+normal regression comparison. If all seven baseline fixtures fail and the
+candidate passes every fixture, the report says `NEWLY_SUPPORTED`, with a null
+baseline time and no percentage speedup. Raw logs and failure diagnostics remain
+in the A/B artifacts. A candidate failure aborts rather than triggering retries.
+
+Session initialization required by a benchmark belongs in its `setup`.
+Standalone test cases without `threshold_ms` are not executed in A/B mode.

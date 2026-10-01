@@ -1049,6 +1049,7 @@ class SQLTestRunner:
             pass
 
     def execute_sql(self, database: str, query: str, auth_header: Optional[Dict[str, str]] = None, syntax: Optional[str] = None, session_id: Optional[str] = None, timeout: int = 10, params: Optional[list] = None, retry_on_connection_failure: Optional[bool] = None) -> Optional[requests.Response]:
+        self._test_context.request_timed_out = False
         # proactively ensure database exists (works for connect-only too)
         self.ensure_database(database)
         encoded_db = quote(database, safe='')
@@ -1073,7 +1074,8 @@ class SQLTestRunner:
         for attempt in range(attempts):
             try:
                 return requests.post(url, data=body, headers=headers, timeout=timeout)
-            except Exception:
+            except Exception as exc:
+                self._test_context.request_timed_out = isinstance(exc, requests.Timeout)
                 if not retry_on_connection_failure:
                     return None
                 # parse port from base_url
@@ -1095,6 +1097,7 @@ class SQLTestRunner:
         return syntax_lower
 
     def execute_sparql(self, database: str, query: str, auth_header: Optional[Dict[str, str]] = None, timeout: int = 10) -> Optional[requests.Response]:
+        self._test_context.request_timed_out = False
         try:
             encoded_db = quote(database, safe='')
             url = f"{self.base_url}/rdf/{encoded_db}"
@@ -1105,6 +1108,7 @@ class SQLTestRunner:
             body = query.encode("utf-8") if isinstance(query, str) else query
             return requests.post(url, data=body, headers=headers, timeout=timeout)
         except Exception as e:
+            self._test_context.request_timed_out = isinstance(e, requests.Timeout)
             print(f"Error executing SPARQL: {e}")
             return None
 
@@ -1652,11 +1656,13 @@ class SQLTestRunner:
         sql_params = test_case.get("params")
 
         def execute_sample():
+            self._test_context.request_timed_out = False
             if scm_code:
                 try:
                     return requests.post(f"{self.base_url}/scm", data=query,
                                          headers=auth_header, timeout=sql_timeout)
-                except requests.RequestException:
+                except requests.RequestException as exc:
+                    self._test_context.request_timed_out = isinstance(exc, requests.Timeout)
                     return None
             if is_sparql:
                 return self.execute_sparql(database, query, auth_header, timeout=sql_timeout)
@@ -1665,6 +1671,33 @@ class SQLTestRunner:
                 session_id=session_id, timeout=sql_timeout, params=sql_params,
                 retry_on_connection_failure=not fixture_trial and not self._expect_interrupted_ok(test_case.get("expect")),
             )
+
+        def record_baseline_query_failure(response, phase):
+            # Only the orchestrator's baseline role may lack an executable query.
+            # Setup, transport failures, wrong results and candidate errors still fail.
+            if not (fixture_trial and is_perf_test and PERF_AB_MODE == "record"
+                    and os.environ.get("PERF_FIXTURE_ROLE") == "A"):
+                return False
+            timed_out = getattr(self._test_context, "request_timed_out", False)
+            query_error = (response is not None and response.status_code in (200, 500)
+                           and is_error_response(response))
+            if not timed_out and not query_error:
+                return False
+            self.perf_results[perf_key] = {
+                "baseline_failure": {"kind": "timeout" if timed_out else "query_error",
+                                     "phase": phase, "timeout_seconds": sql_timeout,
+                                     "detail": response.text[:2000] if response is not None else "Request timed out"},
+                "timing_aggregation": timing_aggregation,
+                "timing_group": test_case.get("timing_group"),
+                "repetitions": repeat, "warmup": warmup_runs, "rows": perf_rows,
+                "max_regression_pct": max_regression_pct, "workload_sha256": fingerprint,
+            }
+            print(f"PERF_BASELINE_UNAVAILABLE {name}: {phase} "
+                  f"{self.perf_results[perf_key]['baseline_failure']['kind']}")
+            if response is not None:
+                print(response.text)
+            print_memcp_log(tail=100)
+            return True
 
         # TTL preload if SPARQL
         if is_sparql and "ttl_data" in test_case:
@@ -1839,6 +1872,8 @@ class SQLTestRunner:
                     if (is_error_response(warm_response) or (fixture_trial and warm_response is None)
                             or (fixture_trial and repeatable_query and not self.validate_expectation(
                                 test_case, warm_response, self.parse_jsonl_response(warm_response)))):
+                        if record_baseline_query_failure(warm_response, "warmup"):
+                            return True
                         return self._record_fail(name, "Warmup failed", query, warm_response,
                                                  test_case.get("expect"), is_noncritical)
 
@@ -1876,6 +1911,8 @@ class SQLTestRunner:
                     measured_total_ns += sample_ns
                     if fixture_trial and (response is None or not self.validate_expectation(
                             test_case, response, self.parse_jsonl_response(response))):
+                        if record_baseline_query_failure(response, "measurement"):
+                            return True
                         return self._record_fail(name, "Measured sample failed", query, response,
                                                  test_case.get("expect"), is_noncritical)
                     if response is None or response.status_code != 200:
@@ -2971,14 +3008,14 @@ def performance_fixture_cases(spec_file: str) -> Dict[str, Dict[str, Any]]:
     return cases
 
 
-def validate_performance_fixture(config: Dict[str, Any], spec_file: str) -> Dict[str, Any]:
+def validate_performance_fixture(config: Dict[str, Any], spec_file: str, *, allow_baseline_failure: bool = False) -> Dict[str, Any]:
     """A successful subprocess must have measured every declared case exactly once."""
     if config.get("schema_version") != 1:
         raise ValueError("fixture result has an unsupported schema")
     spec = yaml.safe_load(Path(spec_file).read_text())
     cases = performance_fixture_cases(spec_file)
     measured = {key: value for key, value in config.items()
-                if isinstance(value, dict) and "time_per_repetition_ms" in value}
+                if isinstance(value, dict) and ("time_per_repetition_ms" in value or "baseline_failure" in value)}
     if measured.keys() != cases.keys():
         raise ValueError("fixture result has missing or unexpected performance cases")
     for key, value in measured.items():
@@ -2989,6 +3026,24 @@ def validate_performance_fixture(config: Dict[str, Any], spec_file: str) -> Dict
         aggregation = resolve_timing_aggregation(case)
         if value.get("timing_aggregation", "median") != aggregation or value.get("timing_group") != case.get("timing_group"):
             raise ValueError(f"fixture timing policy differs: {key}")
+        failure = value.get("baseline_failure")
+        if failure is not None:
+            if (not allow_baseline_failure or not isinstance(failure, dict)
+                    or failure.get("kind") not in ("timeout", "query_error")
+                    or failure.get("phase") not in ("warmup", "measurement")
+                    or failure.get("timeout_seconds") != int(case.get("timeout", 10))
+                    or not isinstance(failure.get("detail"), str)
+                    or any(field in value for field in ("time_ms", "time_per_repetition_ms", "samples_ns"))):
+                raise ValueError(f"invalid baseline failure: {key}")
+            repeatable = bool(case.get("scm")) or (case.get("sql") or case.get("sparql") or "").lstrip().upper().startswith("SELECT")
+            if value["repetitions"] != (resolve_timing_samples(case, True) if repeatable else 1):
+                raise ValueError(f"baseline failure repetition policy differs: {key}")
+            expected_hash = performance_case_fingerprint(case, spec.get("setup"), spec.get("metadata", {}).get("syntax"))
+            if (value.get("workload_sha256") != expected_hash
+                    or value.get("warmup") != resolve_warmup_runs(case, True)
+                    or value.get("max_regression_pct") != performance_regression_pct(case, spec.get("metadata", {}))):
+                raise ValueError(f"baseline failure workload differs: {key}")
+            continue
         duration = value.get("time_ms", value["time_per_repetition_ms"] if aggregation == "median" else None)
         if (isinstance(duration, bool) or not isinstance(duration, (int, float))
                 or not math.isfinite(duration) or duration <= 0):
@@ -3036,9 +3091,11 @@ def grouped_performance_measurements(measured: Dict[str, Any]) -> Dict[str, Any]
         combined = result[group_key]
         if value["max_regression_pct"] != combined["max_regression_pct"]:
             raise ValueError("timing group regression limits differ")
-        combined["time_ms"] += value["time_ms"]
+        if "baseline_failure" in value:
+            combined["baseline_failure"] = value["baseline_failure"]
+        combined["time_ms"] += value.get("time_ms", 0)
         combined["repetitions"] += value["repetitions"]
-        combined["group_members"][key] = value["time_ms"]
+        combined["group_members"][key] = value.get("time_ms")
         combined["time_per_repetition_ms"] = combined["time_ms"] / combined["repetitions"]
     return result
 
@@ -3064,6 +3121,7 @@ def summarize_performance_fixtures(trials: List[Dict[str, Any]], count: int) -> 
                     if value.get(field) != first[key].get(field):
                         raise ValueError(f"fixture {field} differs: {key}")
                 if (value.get("timing_aggregation") == "total"
+                        and "baseline_failure" not in value and "baseline_failure" not in first[key]
                         and value["repetitions"] != first[key]["repetitions"]):
                     raise ValueError(f"fixture total repetition count differs: {key}")
     roles = {role: [grouped_performance_measurements(value) for value in values]
@@ -3071,15 +3129,27 @@ def summarize_performance_fixtures(trials: List[Dict[str, Any]], count: int) -> 
     first = roles["A"][0]
     waivers = load_perf_regression_waivers()
     for key, reference in first.items():
-        a = [value[key]["time_ms"] for value in roles["A"]]
+        if any("baseline_failure" in value[key] for value in roles["B"]):
+            raise ValueError(f"candidate failure cannot be accepted: {key}")
+        failures = [value[key]["baseline_failure"] for value in roles["A"] if "baseline_failure" in value[key]]
+        a = [value[key]["time_ms"] for value in roles["A"] if "baseline_failure" not in value[key]]
         b = [value[key]["time_ms"] for value in roles["B"]]
+        if not a:
+            summary[key] = dict(roles["B"][0][key], time_ms=None,
+                                time_per_repetition_ms=None, candidate_ms=statistics.median(b),
+                                fixture_trials=count, a_samples_ms=[], b_samples_ms=b,
+                                baseline_failures=failures, status="newly_supported",
+                                threshold_ms=None, waiver_reason=None, passed=count == 7)
+            summary[key].pop("samples_ns", None)
+            summary[key].pop("total_ms", None)
+            continue
         baseline, candidate = statistics.median(a), statistics.median(b)
         repetitions = sum(value[key]["repetitions"] for value in roles["B"])
         threshold = performance_ab_threshold_ms(baseline, reference["max_regression_pct"],
                                                reference["warmup"], reference["warmup"],
                                                repetitions, 0 if reference.get("timing_aggregation") == "total" else PERF_AB_JITTER_MS)
         waived = candidate > threshold and key in waivers
-        summary[key] = dict(reference, time_ms=baseline,
+        summary[key] = dict(reference, baseline_failures=failures, status="compared", time_ms=baseline,
                             time_per_repetition_ms=baseline / reference["repetitions"] if reference.get("timing_aggregation") == "total" else baseline,
                             candidate_ms=candidate, fixture_trials=count, a_samples_ms=a,
                             candidate_total_repetitions=repetitions,
@@ -3088,6 +3158,7 @@ def summarize_performance_fixtures(trials: List[Dict[str, Any]], count: int) -> 
                             passed=candidate <= threshold or waived)
         # Individual repetition samples and totals belong to their trial JSON;
         # they must not be mislabeled as samples of the cross-fixture median.
+        summary[key].pop("baseline_failure", None)
         summary[key].pop("samples_ns", None)
         summary[key].pop("total_ms", None)
     return summary
@@ -3159,7 +3230,7 @@ def run_performance_ab(base: Path, candidate: Path, spec_files: List[str]) -> bo
             for variable in ("PERF_REGRESSION_WAIVERS_FILE", "PERF_CALIBRATE",
                              "MEMCP_TEST_SUPERVISOR_PID", "MEMCP_TEST_SUPERVISOR_GENERATION_FILE"):
                 env.pop(variable, None)
-            env.update(PERF_AB_MODE="record", PERF_FIXTURE_TRIAL="1",
+            env.update(PERF_AB_MODE="record", PERF_FIXTURE_TRIAL="1", PERF_FIXTURE_ROLE=role,
                        PERF_BASELINE_FILE=str(result_path), PERF_BASELINE_SEED=str(seed),
                        MEMCP_TEST_WORKTREE=str(tree), MEMCP_BINARY=str(tree / "memcp"),
                        MEMCP_FAILURE_LOG_ARTIFACT=str(artifacts / (name + ".memcp.log")),
@@ -3171,7 +3242,8 @@ def run_performance_ab(base: Path, candidate: Path, spec_files: List[str]) -> bo
             print(log_path.read_text(), end="", flush=True)
             if result.returncode:
                 raise RuntimeError(f"fixture failed: {name}; see {log_path}")
-        measured = validate_performance_fixture(json.loads(result_path.read_text()), str(suite))
+        measured = validate_performance_fixture(json.loads(result_path.read_text()), str(suite),
+                                                allow_baseline_failure=role == "A")
         suite_spec = yaml.safe_load(suite.read_text())
         for key, case in performance_fixture_cases(str(suite)).items():
             rows = seed_rows.get(key, case.get("performance_rows", suite_spec.get("metadata", {}).get("performance_rows", default_rows)))
@@ -3184,10 +3256,36 @@ def run_performance_ab(base: Path, candidate: Path, spec_files: List[str]) -> bo
                         raise ValueError(f"fixture {field} differs: {key}")
         trials.append({"role": role, "results": measured, "log": str(log_path)})
 
+    def enforce_recovered_query_budgets(suite, trials, summary):
+        cases = performance_fixture_cases(str(suite))
+        failed_keys = {key for trial in trials if trial["role"] == "A"
+                       for key, value in trial["results"].items() if "baseline_failure" in value}
+        for key in failed_keys:
+            case = cases[key]
+            group = case.get("timing_group")
+            report_key = key.split("::", 1)[0] + "::timing group: " + group if group else key
+            # Keep grouped cold/warm workloads intact for the absolute budget,
+            # too: a slower phase may be paid for by another phase in the group.
+            members = [member for member, member_case in cases.items()
+                       if group and member_case.get("timing_group") == group] if group else [key]
+            budget = sum(cases[member]["threshold_ms"] for member in members)
+            if any(sum(trial["results"][member]["time_ms"] for member in members) > budget
+                   for trial in trials if trial["role"] == "B"):
+                summary[report_key]["passed"] = False
+                summary[report_key]["recovery_budget_exceeded"] = True
+            summary[report_key]["recovery_budget_ms"] = budget
+
     def report(summary, verification_pending=False):
         for key, value in summary.items():
             value["verification_pending"] = verification_pending
             status = "PASS" if value["passed"] else "VERIFICATION PENDING" if verification_pending else "FAIL"
+            if value.get("baseline_failures"):
+                print(f"PERF_AB BASELINE_UNAVAILABLE {key}: {json.dumps(value['baseline_failures'])}", flush=True)
+            if value["time_ms"] is None:
+                print(f"PERF_AB {status} NEWLY_SUPPORTED {key}: baseline unavailable -> "
+                      f"{value['candidate_ms']:.3f}ms; no speedup claimed; "
+                      f"{value['fixture_trials']} fresh fixtures", flush=True)
+                continue
             change = (value["candidate_ms"] / value["time_ms"] - 1) * 100
             print(f"PERF_AB {status} {key}: {value['time_ms']:.3f}ms -> {value['candidate_ms']:.3f}ms "
                   f"({change:+.1f}%, limit {value['threshold_ms']:.3f}ms, "
@@ -3198,13 +3296,15 @@ def run_performance_ab(base: Path, candidate: Path, spec_files: List[str]) -> bo
         output.write_text(json.dumps(complete, indent=2) + "\n")
 
     # Finish the entire initial pass before checking suspect timings again.
-    # Execution failures never reach this queue, only successful slow queries.
+    # Query-only baseline failures also receive the complete fixed verification.
+    # Setup, transport, assertion and candidate failures abort immediately.
     for suite_index, suite in enumerate(suite_paths):
         trials = []
         for role in "AB":
             measure(suite_index, suite, role, trials)
         summary = summarize_performance_fixtures(trials, 1)
-        suspect = any(not value["passed"] for value in summary.values())
+        enforce_recovered_query_budgets(suite, trials, summary)
+        suspect = any(not value["passed"] or value.get("baseline_failures") for value in summary.values())
         report(summary, verification_pending=suspect)
         if suspect:
             pending.append((suite_index, suite, trials))
@@ -3215,7 +3315,9 @@ def run_performance_ab(base: Path, candidate: Path, spec_files: List[str]) -> bo
             measure(suite_index, suite, role, trials)
         # Recheck every case in the suite, including initially successful ones.
         # There is no further retry, filtering, or early stop on a lucky sample.
-        report(summarize_performance_fixtures(trials, 7))
+        summary = summarize_performance_fixtures(trials, 7)
+        enforce_recovered_query_budgets(suite, trials, summary)
+        report(summary)
     return all(value["passed"] for key, value in complete.items() if key != "schema_version")
 
 
