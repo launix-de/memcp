@@ -17,6 +17,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 package scm
 
 import (
+	"io"
+	"os"
 	"strings"
 	"testing"
 )
@@ -237,5 +239,39 @@ func TestGeneralCIFoldCompare(t *testing.T) {
 	})
 	if allocations != 0 {
 		t.Fatalf("ASCII general_ci comparison allocated %.2f objects per call, want 0", allocations)
+	}
+}
+
+func TestComputeSizeBorrowedStrings(t *testing.T) {
+	original := os.Stdout
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	defer writer.Close()
+	os.Stdout = writer
+	defer func() { os.Stdout = original }()
+	data := []byte{0x12, 0x34}
+	values := []Scmer{
+		NewCString(&data[0], 11, 0, 4),
+		NewCString(&data[0], 11, 1, 3),
+		NewBString(&data[0], len(data), false, false),
+		NewBString(&data[0], len(data), true, true),
+		NewCString(nil, 0, 0, 0),
+		NewBString(nil, 0, false, false),
+	}
+	for _, value := range values {
+		if got := ComputeSize(value); got != scmerStructOverhead {
+			t.Errorf("borrowed string tag %d: size %d, want slot size %d", value.GetTag(), got, scmerStructOverhead)
+		}
+	}
+	writer.Close()
+	output, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(output) != 0 {
+		t.Fatalf("valid string tags produced diagnostics: %s", output)
 	}
 }
