@@ -111,6 +111,39 @@ func repartitionScale(candidates []shardDimension, target int) float64 {
 	return bestScale
 }
 
+// balancePartitionHints shares the source's row-count budget between all group
+// keys, using the same relative weighting as automatic repartitioning. Keep
+// sampled boundaries rather than resampling the still-empty group cache.
+func balancePartitionHints(dimensions []shardDimension, rows uint) []shardDimension {
+	if Settings.PartitionMaxDimensions <= 0 {
+		return nil
+	}
+	sort.SliceStable(dimensions, func(i, j int) bool {
+		return dimensions[i].NumPartitions > dimensions[j].NumPartitions
+	})
+	if len(dimensions) > Settings.PartitionMaxDimensions {
+		dimensions = dimensions[:Settings.PartitionMaxDimensions]
+	}
+	target := repartitionShardTarget(rows, false)
+	if _, fits := checkedRepartitionShardCount(dimensions, target); fits {
+		return dimensions
+	}
+	scale := repartitionScale(dimensions, target)
+	balanced := make([]shardDimension, 0, len(dimensions))
+	for _, dimension := range dimensions {
+		n := min(dimension.NumPartitions, scaledRepartitionCount(dimension.NumPartitions, scale))
+		if n <= 1 {
+			continue
+		}
+		pivots := make([]scm.Scmer, n-1)
+		for i := 1; i < n; i++ {
+			pivots[i-1] = dimension.Pivots[i*dimension.NumPartitions/n-1]
+		}
+		balanced = append(balanced, shardDimension{dimension.Column, n, pivots})
+	}
+	return balanced
+}
+
 type shardDimension struct {
 	Column        string
 	NumPartitions int

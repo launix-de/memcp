@@ -2582,3 +2582,52 @@ func TestNewShardRetainsComputedColumnDefinition(t *testing.T) {
 		})
 	}
 }
+
+func TestGroupPartitionHintsShareWeightedRowBudget(t *testing.T) {
+	oldSize, oldDimensions := Settings.ShardSize, Settings.PartitionMaxDimensions
+	t.Cleanup(func() { Settings.ShardSize, Settings.PartitionMaxDimensions = oldSize, oldDimensions })
+	Settings.ShardSize, Settings.PartitionMaxDimensions = 60000, 10
+	for _, tc := range []struct {
+		name   string
+		rows   uint
+		counts []int
+	}{
+		{"document groups", 840000, []int{29, 29, 25}},
+		{"skewed hints", 840000, []int{100, 10, 2}},
+		{"small source", 10, []int{29, 29, 25}},
+		{"large source", ^uint(0), []int{100, 100, 100}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dims := make([]shardDimension, len(tc.counts))
+			for i, n := range tc.counts {
+				pivots := make([]scm.Scmer, n-1)
+				for j := range pivots {
+					pivots[j] = scm.NewInt(int64(j))
+				}
+				dims[i] = shardDimension{fmt.Sprint(i), n, pivots}
+			}
+			balanced := balancePartitionHints(dims, tc.rows)
+			count, valid := checkedRepartitionShardCount(balanced, maxRepartitionShards)
+			target := repartitionShardTarget(tc.rows, false)
+			if !valid || count > 2*target {
+				t.Fatalf("target=%d count=%d valid=%v", target, count, valid)
+			}
+			for _, dim := range balanced {
+				if len(dim.Pivots) != dim.NumPartitions-1 {
+					t.Fatal("invalid pivot count")
+				}
+				for i := 1; i < len(dim.Pivots); i++ {
+					if !scm.Less(dim.Pivots[i-1], dim.Pivots[i]) {
+						t.Fatal("pivot ordering lost")
+					}
+				}
+			}
+			if tc.name == "document groups" && (count != 27 || len(balanced) != 3) {
+				t.Fatalf("lost balanced group locality: %#v", balanced)
+			}
+			if tc.name == "skewed hints" && (len(balanced) == 0 || balanced[0].Column != "0" || balanced[0].NumPartitions <= 2) {
+				t.Fatalf("relative weights lost: %#v", balanced)
+			}
+		})
+	}
+}

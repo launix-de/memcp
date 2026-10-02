@@ -1567,10 +1567,10 @@ a worker-pool fan-out bounded by NumCPU instead of one metric at a time. */
 planner (see df66a5831, "Queryplan: add table repartitioning hint in GROUP
 BY") and was dropped during the logical-operator rewrite. Real pivots are
 sampled from the live source column via the existing shardcolumn/
-partitiontable primitives -- no new core storage logic, just wiring them back
-up. shardcolumn's automatic partition count already scales off real row count
-(t.Count()/ShardSize), so small source tables naturally collapse to a single
-partition and partitiontable skips them; only direct column references to the
+partitiontable primitives. partitiontable receives the source table so all group keys share one
+row-count budget, weighted by their sampled partition counts. Independent
+per-key budgets would multiply into an oversized Cartesian topology.
+Small source tables naturally collapse to a single partition and partitiontable skips them; only direct column references to the
 scanned base table qualify, so session/constant-key groups (never plain
 get_column refs to the source) are excluded automatically too. */
 (define group_cache_partition_hint (lambda (schema tbl alias key col_name)
@@ -1589,7 +1589,8 @@ get_column refs to the source) are excluded automatically too. */
 			(group_cache_partition_hint schema tbl alias (nth keys i) (nth key_names i))))))
 		(if (or (not (source_is_base_table? src)) (empty_list? hints))
 			nil
-			(list (quote partitiontable) (list (quote table) schema grouptbl) (cons (quote list) hints))))))
+			(list (quote partitiontable) (list (quote table) schema grouptbl) (cons (quote list) hints)
+				(list (quote table) schema tbl))))))
 
 (define boolean_recset_domain_source (lambda (input keys)
 	(if (not (query_block? input))
