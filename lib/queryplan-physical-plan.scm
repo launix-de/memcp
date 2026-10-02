@@ -6000,7 +6000,12 @@ path. */
 		(define source_col (if (or (nil? input_src) (empty_list? keys))
 			nil
 			(direct_column_name_for_alias input_src (car keys))))
-		(if (or (nil? source_col) (not (source_is_base_table? input_src)))
+		/* A one-column key index or forward/reverse batch projection can consume
+		only a complete one-key domain. Additional decorrelated lookup keys still
+		constrain membership; reading car(keys) would silently drop them. Composite
+		domains retain the ordinary exact probe/cache projection alternatives. */
+		(if (or (not (equal? (count keys) 1))
+			(or (nil? source_col) (not (source_is_base_table? input_src))))
 			nil
 			(list input_src source_col condition)))))
 

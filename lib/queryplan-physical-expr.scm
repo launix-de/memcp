@@ -4901,40 +4901,57 @@ rows outside the current batch. */
 						(quoted_runtime_list (list target_col)))))))
 		_ nil)))
 
+/* A batch projection binds every decorrelated domain key. Driver columns
+travel through the forward/reverse join; keys owned by an enclosing scan or
+session remain exact filters on the candidate relation. A driver-dependent
+computed key cannot be evaluated on candidate rows and makes this alternative
+infeasible instead of silently dropping that key. */
 (define batch_membership_base_expr (lambda (target_src stage target_col batch_expr)
 	(begin
-		(define descriptor (membership_keyset_descriptor (list stage nil target_col nil)))
-		(if (nil? descriptor)
+		(define input (gs_input stage))
+		(define src (recset_domain_source input))
+		(define keys (gs_keys stage))
+		(define lookup (qassoc_get (gs_facts stage) (quote lookup-keys) '()))
+		(if (or (nil? src) (not (equal? (count keys) (count lookup))))
 			nil
 			(begin
-				(define src (nth descriptor 0))
-				(define source_col (nth descriptor 1))
-				(define condition (nth descriptor 2))
-				(define alias (source_alias src))
-				(define filtercols (extract_columns_for_alias src condition))
-				(define source_candidates (list (quote recset_project_join)
-					(physical_query_tx_symbol)
-					batch_expr
-					(quoted_runtime_list (list target_col))
-					(source_table_expr src)
-					(quoted_runtime_list (list source_col))))
-				(define source_matches (compile_scan_plan (quote scan_recset)
-					(physical_query_tx_symbol)
-					source_candidates
-					(cons (quote list) filtercols)
-					(list (quote lambda)
-						(map filtercols (lambda (col) (symbol (concat alias "." col))))
-						(lower_column_expr_for_alias src condition))))
-				(list (quote recset_intersect)
-					(physical_query_tx_symbol)
-					(cons (quote list) (list
-						batch_expr
-						(list (quote recset_project_join)
-							(physical_query_tx_symbol)
-							source_matches
-							(quoted_runtime_list (list source_col))
-							(source_table_expr target_src)
-							(quoted_runtime_list (list target_col)))))))))))
+				(define parts (map (produceN (count keys)) (lambda (idx)
+					(begin
+						(define source_col (direct_column_name_for_alias src (nth keys idx)))
+						(define driver_col (direct_column_name_for_alias target_src (nth lookup idx)))
+						(if (or (nil? source_col)
+							(and (nil? driver_col) (expr_refs_sources? nil (list target_src) (nth lookup idx))))
+							nil
+							(list source_col driver_col (if (nil? driver_col)
+								(list (quote equal??) (nth keys idx) (nth lookup idx)) true)))))))
+				(if (contains? parts nil)
+					nil
+					(begin
+						(define joins (filter parts (lambda (part) (not (nil? (cadr part))))))
+						(if (not (contains? (map joins cadr) target_col))
+							nil
+							(begin
+								(define condition (combine_where_terms (cons
+									(if (query_block? input)
+										(combine_where (qb_where input) (source_join_expr src))
+										(coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
+									(map parts (lambda (part) (nth part 2)))) true))
+								(define filtercols (extract_columns_for_alias src condition))
+								(define source_candidates (list (quote recset_project_join)
+									(physical_query_tx_symbol) batch_expr
+									(quoted_runtime_list (map joins cadr)) (source_table_expr src)
+									(quoted_runtime_list (map joins car))))
+								(define source_matches (compile_scan_plan (quote scan_recset)
+									(physical_query_tx_symbol) source_candidates
+									(cons (quote list) filtercols)
+									(list (quote lambda)
+										(map filtercols (lambda (col) (symbol (concat (source_alias src) "." col))))
+										(lower_column_expr_for_alias src condition))))
+								(list (quote recset_intersect) (physical_query_tx_symbol)
+									(cons (quote list) (list batch_expr
+										(list (quote recset_project_join) (physical_query_tx_symbol) source_matches
+											(quoted_runtime_list (map joins car)) (source_table_expr target_src)
+											(quoted_runtime_list (map joins cadr)))))))))))))))
 
 (define batch_membership_expr (lambda (target_src membership batch_expr)
 	(begin
