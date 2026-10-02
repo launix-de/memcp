@@ -859,6 +859,9 @@ test_cases:
       AND (SELECT flag FROM nav_lookup_broad WHERE ID = nav_department.nav_site) = 1
   expect:
     result_not_contains: ['chosen projected_recset']
+# The fixture's department tenant equals its site's tenant. Use the local
+# computed ACL key for A/B; the nested scalar form below independently covers
+# the correlation bug that makes the baseline return an incorrect count.
 - name: 'Perf: scalar predicate with a later filtered comparison relation'
   session_id: scalar-binder-perf
   setup:
@@ -868,7 +871,7 @@ test_cases:
     WHERE (SELECT nav_tenant FROM nav_site WHERE ID = nav_department.nav_site) = nav_future_binder.nav_tenant
       AND EXISTS (SELECT 1 FROM nav_access WHERE user = @nav_actor AND nav_tenant = nav_future_binder.nav_tenant)
       AND EXISTS (SELECT 1 FROM nav_access WHERE user = @nav_actor
-        AND nav_tenant = (SELECT nav_tenant FROM nav_site WHERE ID = nav_department.nav_site))
+        AND nav_tenant = (nav_department.nav_tenant + 0))
   expect: {rows: 1, data: [{n: 5000}]}
   warmup: 0
   timing_samples: 4
@@ -883,9 +886,20 @@ test_cases:
     WHERE (SELECT nav_tenant FROM nav_site WHERE ID = nav_department.nav_site) = nav_future_binder.nav_tenant
       AND EXISTS (SELECT 1 FROM nav_access WHERE user = @nav_actor AND nav_tenant = nav_future_binder.nav_tenant)
       AND EXISTS (SELECT 1 FROM nav_access WHERE user = @nav_actor
-        AND nav_tenant = (SELECT nav_tenant FROM nav_site WHERE ID = nav_department.nav_site))
+        AND nav_tenant = (nav_department.nav_tenant + 0))
   expect:
     result_contains: ['decision scalar_binder_semijoin', 'chosen projected_recset', 'get_or_compute_scoped']
+- name: 'Later-bound scalar equality preserves nested ACL correlations'
+  session_id: scalar-binder-perf
+  setup:
+  - sql: SET @nav_actor=8
+  sql: >
+    SELECT COUNT(*) AS n FROM nav_department CROSS JOIN nav_future_binder
+    WHERE (SELECT nav_tenant FROM nav_site WHERE ID = nav_department.nav_site) = nav_future_binder.nav_tenant
+      AND EXISTS (SELECT 1 FROM nav_access WHERE user = @nav_actor AND nav_tenant = nav_future_binder.nav_tenant)
+      AND EXISTS (SELECT 1 FROM nav_access WHERE user = @nav_actor
+        AND nav_tenant = (SELECT nav_tenant FROM nav_site WHERE ID = nav_department.nav_site))
+  expect: {rows: 1, data: [{n: 5000}]}
 - name: 'Projected unique lookup excludes missing rows and NULL values'
   setup:
   - sql: INSERT INTO nav_site (ID, name, nav_tenant) VALUES (1001, 'nullable', NULL)
