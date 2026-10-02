@@ -1,7 +1,7 @@
 # Copyright (C) 2026 Carl-Philip Hänsch
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Empty years must not inherit document membership from another year.
-# Measure one cold query plus three warm queries before the correctness case.
+# Each performance case measures one cold query plus three warm queries.
 metadata:
   description: Restricted tenant hierarchy with correlated document membership and counts; 800k documents, 100 tenants,
     5000 departments
@@ -9,9 +9,18 @@ metadata:
   performance_rows: 800000
 setup:
 - sql: DROP TABLE IF EXISTS nav_document
-- sql: |
-    CREATE TABLE `nav_document` ( `inventory` text, `note` text, `customer_note` text, `ID` int PRIMARY KEY,
+- sql: 'CREATE TABLE `nav_document` ( `inventory` text, `note` text, `customer_note` text, `ID` int PRIMARY KEY,
+
     `nav_department` int, `nav_year` int, `nav_tenant` int, `nav_check` int, `nav_site` int, `file` int) ENGINE=memory
+
+    '
+- sql: DROP TABLE IF EXISTS nav_document_full
+- sql: 'CREATE TABLE `nav_document_full` ( `inventory` text, `note` text, `customer_note` text, `ID` int PRIMARY
+    KEY,
+
+    `nav_department` int, `nav_year` int, `nav_tenant` int, `nav_check` int, `nav_site` int, `file` int) ENGINE=memory
+
+    '
 - sql: DROP TABLE IF EXISTS nav_tenant
 - sql: CREATE TABLE `nav_tenant` (`multiStandort` boolean,`multiAbteilung` boolean,`multiPruefung` boolean,`name`
     text,`ID` int PRIMARY KEY) ENGINE=memory
@@ -25,17 +34,30 @@ setup:
 - sql: CREATE TABLE `nav_check` (`name` text,`ID` int PRIMARY KEY,`nav_tenant` int) ENGINE=memory
 - sql: DROP TABLE IF EXISTS nav_access
 - sql: CREATE TABLE `nav_access` (`ID` int PRIMARY KEY,`user` int,`nav_tenant` int,`nav_site` int) ENGINE=memory
-- scm: |-
+- scm: "(begin\n (insert (table \"memcp-tests\" \"nav_tenant\") '(\"ID\" \"name\") (map (produceN 100) (lambda (i)\
+    \ (list (+ i 1) (concat \"tenant-\" (+ i 1))))))\n (insert (table \"memcp-tests\" \"nav_year\") '(\"ID\" \"\
+    name\" \"nav_tenant\") (map (produceN 1100) (lambda (i) (list (+ i 1) (concat \"year-\" (+ i 1)) (+ 1 (mod i\
+    \ 100))))))\n (insert (table \"memcp-tests\" \"nav_check\") '(\"ID\" \"name\" \"nav_tenant\") (map (produceN\
+    \ 100) (lambda (i) (list (+ i 1) (concat \"check-\" (+ i 1)) (+ i 1)))))\n (insert (table \"memcp-tests\" \"\
+    nav_site\") '(\"ID\" \"name\" \"nav_tenant\") (map (produceN 1000) (lambda (i) (list (+ i 1) (concat \"site-\"\
+    \ (+ i 1)) (+ 1 (mod i 100))))))\n (insert (table \"memcp-tests\" \"nav_department\") '(\"ID\" \"name\" \"nav_site\"\
+    \ \"nav_tenant\") (map (produceN 5000) (lambda (i) (list (+ i 1) (concat \"department-\" (+ i 1)) (+ 1 (mod\
+    \ i 1000)) (+ 1 (mod i 100))))))\n (insert (table \"memcp-tests\" \"nav_access\") '(\"ID\" \"user\" \"nav_tenant\"\
+    \ \"nav_site\") (list (list 1 7 nil nil) (list 2 8 1 nil)))\n (insert (table \"memcp-tests\" \"nav_document\"\
+    ) '(\"ID\" \"nav_tenant\" \"nav_year\" \"nav_site\" \"nav_department\" \"nav_check\") (map (produceN 800000)\
+    \ (lambda (i) (list (+ i 1) (+ 1 (mod i 100)) (+ 1 (mod i 100)) (+ 1 (mod i 1000)) (+ 1 (mod i 5000)) (+ 1 (mod\
+    \ i 100))))))\n (insert (table \"memcp-tests\" \"nav_document_full\") '(\"ID\" \"nav_tenant\" \"nav_year\" \"\
+    nav_site\" \"nav_department\" \"nav_check\") (map (produceN 800000) (lambda (i) (list (+ i 1) (+ 1 (mod i 100))\
+    \ (+ 1 (mod i 1100)) (+ 1 (mod i 1000)) (+ 1 (mod i 5000)) (+ 1 (mod i 100))))))\n (map '(\"nav_tenant\" \"\
+    nav_year\" \"nav_check\" \"nav_site\" \"nav_department\" \"nav_access\" \"nav_document\" \"nav_document_full\"\
+    ) (lambda (t) (rebuild (table \"memcp-tests\" t) true false)))\n true)"
+- sql: DROP TABLE IF EXISTS nav_lookup_broad
+- sql: CREATE TABLE nav_lookup_broad (ID INT PRIMARY KEY, flag INT) ENGINE=memory
+- scm: |
     (begin
-     (insert (table "memcp-tests" "nav_tenant") '("ID" "name") (map (produceN 100) (lambda (i) (list (+ i 1) (concat "tenant-" (+ i 1))))))
-     (insert (table "memcp-tests" "nav_year") '("ID" "name" "nav_tenant") (map (produceN 1100) (lambda (i) (list (+ i 1) (concat "year-" (+ i 1)) (+ 1 (mod i 100))))))
-     (insert (table "memcp-tests" "nav_check") '("ID" "name" "nav_tenant") (map (produceN 100) (lambda (i) (list (+ i 1) (concat "check-" (+ i 1)) (+ i 1)))))
-     (insert (table "memcp-tests" "nav_site") '("ID" "name" "nav_tenant") (map (produceN 1000) (lambda (i) (list (+ i 1) (concat "site-" (+ i 1)) (+ 1 (mod i 100))))))
-     (insert (table "memcp-tests" "nav_department") '("ID" "name" "nav_site" "nav_tenant") (map (produceN 5000) (lambda (i) (list (+ i 1) (concat "department-" (+ i 1)) (+ 1 (mod i 1000)) (+ 1 (mod i 100))))))
-     (insert (table "memcp-tests" "nav_access") '("ID" "user" "nav_tenant" "nav_site") (list (list 1 7 nil nil) (list 2 8 1 nil)))
-     (insert (table "memcp-tests" "nav_document") '("ID" "nav_tenant" "nav_year" "nav_site" "nav_department" "nav_check") (map (produceN 800000) (lambda (i) (list (+ i 1) (+ 1 (mod i 100)) (+ 1 (mod i 100)) (+ 1 (mod i 1000)) (+ 1 (mod i 5000)) (+ 1 (mod i 100))))))
-     (map '("nav_tenant" "nav_year" "nav_check" "nav_site" "nav_department" "nav_access" "nav_document") (lambda (t) (rebuild (table "memcp-tests" t) true false)))
-     true)
+      (insert (table "memcp-tests" "nav_lookup_broad") '("ID" "flag")
+        (map (produceN 1000) (lambda (i) (list (+ i 1) 1))))
+      (rebuild (table "memcp-tests" "nav_lookup_broad") true false))
 test_cases:
 - name: 'Perf: document navigation counts in a present year'
   sql: SELECT * FROM (SELECT nav_department.`ID` AS `nav_department`, (SELECT COUNT(*) FROM nav_document WHERE nav_year
@@ -662,7 +684,193 @@ test_cases:
   session_id: tenant-navigation
   setup:
   - sql: SET @nav_actor = 8
+- name: 'Perf: full tenant hierarchy across populated years'
+  sql: SELECT `nav_department` AS `nav_department`, `amount` AS `amount`, `indent` AS `indent`, `nav_year` AS `nav_year`,
+    `kind` AS `kind`, `name` AS `name`, `nav_check` AS `nav_check`, `nav_site` AS `nav_site`, 1 FROM (SELECT 0 AS
+    `nav_department`, 0 AS `amount`, 1 AS `indent`, `ID` AS `nav_year`, 'nav_year' AS `kind`, name AS `name`, 0
+    AS `nav_check`, 0 AS `nav_site`, 1 FROM `nav_year` `nav_year` WHERE (((('0') OR (EXISTS (SELECT (TRUE) FROM
+    `nav_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @nav_actor AND ((`hfjCDFco`.`nav_tenant`) IS NULL) LIMIT 1)))
+    OR ((NOT ('0')) AND (NOT ('0')) AND (NOT (EXISTS (SELECT (TRUE) FROM `nav_access` `SfzKFmFf` WHERE `SfzKFmFf`.`user`
+    = @nav_actor AND ((`SfzKFmFf`.`nav_tenant`) IS NULL) LIMIT 1))))) AND ((('0') OR (EXISTS (SELECT (TRUE) FROM
+    `nav_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @nav_actor AND ((`hfjCDFco`.`nav_tenant`) IS NULL) LIMIT 1)))
+    OR ((NOT ('0')) AND (NOT ('0')) AND (NOT (EXISTS (SELECT (TRUE) FROM `nav_access` `SfzKFmFf` WHERE `SfzKFmFf`.`user`
+    = @nav_actor AND ((`SfzKFmFf`.`nav_tenant`) IS NULL) LIMIT 1))))) AND (COALESCE((SELECT (((('0') OR (EXISTS
+    (SELECT (TRUE) FROM `nav_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @nav_actor AND ((`hfjCDFco`.`nav_tenant`)
+    IS NULL) LIMIT 1))) OR ((NOT ('0')) AND (NOT ('0')) AND (NOT (EXISTS (SELECT (TRUE) FROM `nav_access` `SfzKFmFf`
+    WHERE `SfzKFmFf`.`user` = @nav_actor AND ((`SfzKFmFf`.`nav_tenant`) IS NULL) LIMIT 1))))) AND (CASE WHEN (('0')
+    OR (EXISTS (SELECT (TRUE) FROM `nav_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @nav_actor AND ((`hfjCDFco`.`nav_tenant`)
+    IS NULL) LIMIT 1))) OR ('0') THEN TRUE ELSE EXISTS (SELECT (TRUE) FROM `nav_access` `dsZCbLkI` WHERE `dsZCbLkI`.`nav_tenant`
+    = `olakvKQI`.`ID` AND ((`dsZCbLkI`.`user`) = (@nav_actor)) LIMIT 1) END)) FROM `nav_tenant` `olakvKQI` WHERE
+    `olakvKQI`.`ID` = `nav_year`.`nav_tenant` LIMIT 1), FALSE))) UNION ALL SELECT 0 AS `nav_department`, 0 AS `amount`,
+    2 AS `indent`, nav_year.`ID` AS `nav_year`, 'nav_site' AS `kind`, nav_site.name AS `name`, 0 AS `nav_check`,
+    nav_site.`ID` AS `nav_site`, 1 FROM `nav_site` `nav_site` CROSS JOIN `nav_year` `nav_year` WHERE (TRUE AND EXISTS
+    (SELECT * FROM nav_document_full WHERE nav_site = nav_site.`ID` AND nav_year = nav_year.`ID`)) AND (((('0')
+    OR (EXISTS (SELECT (TRUE) FROM `nav_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @nav_actor AND ((`hfjCDFco`.`nav_tenant`)
+    IS NULL) LIMIT 1))) OR ((NOT ('0')) AND (NOT ('0')) AND (NOT (EXISTS (SELECT (TRUE) FROM `nav_access` `SfzKFmFf`
+    WHERE `SfzKFmFf`.`user` = @nav_actor AND ((`SfzKFmFf`.`nav_tenant`) IS NULL) LIMIT 1))))) AND ((('0') OR (EXISTS
+    (SELECT (TRUE) FROM `nav_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @nav_actor AND ((`hfjCDFco`.`nav_tenant`)
+    IS NULL) LIMIT 1))) OR ((NOT ('0')) AND (NOT ('0')) AND (NOT (EXISTS (SELECT (TRUE) FROM `nav_access` `SfzKFmFf`
+    WHERE `SfzKFmFf`.`user` = @nav_actor AND ((`SfzKFmFf`.`nav_tenant`) IS NULL) LIMIT 1))))) AND (COALESCE((SELECT
+    (((('0') OR (EXISTS (SELECT (TRUE) FROM `nav_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @nav_actor AND ((`hfjCDFco`.`nav_tenant`)
+    IS NULL) LIMIT 1))) OR ((NOT ('0')) AND (NOT ('0')) AND (NOT (EXISTS (SELECT (TRUE) FROM `nav_access` `SfzKFmFf`
+    WHERE `SfzKFmFf`.`user` = @nav_actor AND ((`SfzKFmFf`.`nav_tenant`) IS NULL) LIMIT 1))))) AND (CASE WHEN (('0')
+    OR (EXISTS (SELECT (TRUE) FROM `nav_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @nav_actor AND ((`hfjCDFco`.`nav_tenant`)
+    IS NULL) LIMIT 1))) OR ('0') THEN TRUE ELSE EXISTS (SELECT (TRUE) FROM `nav_access` `dsZCbLkI` WHERE `dsZCbLkI`.`nav_tenant`
+    = `olakvKQI`.`ID` AND ((`dsZCbLkI`.`user`) = (@nav_actor)) LIMIT 1) END)) FROM `nav_tenant` `olakvKQI` WHERE
+    `olakvKQI`.`ID` = `nav_year`.`nav_tenant` LIMIT 1), FALSE))) AND (((('0') OR (EXISTS (SELECT (TRUE) FROM `nav_access`
+    `hfjCDFco` WHERE `hfjCDFco`.`user` = @nav_actor AND ((`hfjCDFco`.`nav_tenant`) IS NULL) LIMIT 1))) OR ((NOT
+    ('0')) AND (NOT ('0')) AND (NOT (EXISTS (SELECT (TRUE) FROM `nav_access` `SfzKFmFf` WHERE `SfzKFmFf`.`user`
+    = @nav_actor AND ((`SfzKFmFf`.`nav_tenant`) IS NULL) LIMIT 1)))) OR ('0')) AND (CASE WHEN (('0') OR (EXISTS
+    (SELECT (TRUE) FROM `nav_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @nav_actor AND ((`hfjCDFco`.`nav_tenant`)
+    IS NULL) LIMIT 1))) OR ('0') THEN TRUE ELSE EXISTS (SELECT (TRUE) FROM `nav_access` `bItMW8cS` WHERE TRUE AND
+    (((COALESCE(`bItMW8cS`.`nav_site`, `nav_site`.`ID`)) = (`nav_site`.`ID`)) AND ((`bItMW8cS`.`user`) = (@nav_actor)))
+    LIMIT 1) END) AND ((('0') OR (EXISTS (SELECT (TRUE) FROM `nav_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @nav_actor
+    AND ((`hfjCDFco`.`nav_tenant`) IS NULL) LIMIT 1))) OR ((NOT ('0')) AND (NOT ('0')) AND (NOT (EXISTS (SELECT
+    (TRUE) FROM `nav_access` `SfzKFmFf` WHERE `SfzKFmFf`.`user` = @nav_actor AND ((`SfzKFmFf`.`nav_tenant`) IS NULL)
+    LIMIT 1))))) AND (COALESCE((SELECT (((('0') OR (EXISTS (SELECT (TRUE) FROM `nav_access` `hfjCDFco` WHERE `hfjCDFco`.`user`
+    = @nav_actor AND ((`hfjCDFco`.`nav_tenant`) IS NULL) LIMIT 1))) OR ((NOT ('0')) AND (NOT ('0')) AND (NOT (EXISTS
+    (SELECT (TRUE) FROM `nav_access` `SfzKFmFf` WHERE `SfzKFmFf`.`user` = @nav_actor AND ((`SfzKFmFf`.`nav_tenant`)
+    IS NULL) LIMIT 1))))) AND (CASE WHEN (('0') OR (EXISTS (SELECT (TRUE) FROM `nav_access` `hfjCDFco` WHERE `hfjCDFco`.`user`
+    = @nav_actor AND ((`hfjCDFco`.`nav_tenant`) IS NULL) LIMIT 1))) OR ('0') THEN TRUE ELSE EXISTS (SELECT (TRUE)
+    FROM `nav_access` `dsZCbLkI` WHERE `dsZCbLkI`.`nav_tenant` = `VMjurwnB`.`ID` AND ((`dsZCbLkI`.`user`) = (@nav_actor))
+    LIMIT 1) END)) FROM `nav_tenant` `VMjurwnB` WHERE `VMjurwnB`.`ID` = `nav_site`.`nav_tenant` LIMIT 1), FALSE)))
+    UNION ALL SELECT nav_department.`ID` AS `nav_department`, 0 AS `amount`, 3 AS `indent`, nav_year.`ID` AS `nav_year`,
+    'nav_department' AS `kind`, nav_department.name AS `name`, 0 AS `nav_check`, nav_department.nav_site AS `nav_site`,
+    1 FROM `nav_department` `nav_department` CROSS JOIN `nav_year` `nav_year` WHERE (EXISTS (SELECT * FROM nav_document_full
+    WHERE nav_department = nav_department.`ID` AND nav_year = nav_year.`ID`)) AND (((('0') OR (EXISTS (SELECT (TRUE)
+    FROM `nav_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @nav_actor AND ((`hfjCDFco`.`nav_tenant`) IS NULL) LIMIT
+    1))) OR ((NOT ('0')) AND (NOT ('0')) AND (NOT (EXISTS (SELECT (TRUE) FROM `nav_access` `SfzKFmFf` WHERE `SfzKFmFf`.`user`
+    = @nav_actor AND ((`SfzKFmFf`.`nav_tenant`) IS NULL) LIMIT 1))))) AND ((('0') OR (EXISTS (SELECT (TRUE) FROM
+    `nav_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @nav_actor AND ((`hfjCDFco`.`nav_tenant`) IS NULL) LIMIT 1)))
+    OR ((NOT ('0')) AND (NOT ('0')) AND (NOT (EXISTS (SELECT (TRUE) FROM `nav_access` `SfzKFmFf` WHERE `SfzKFmFf`.`user`
+    = @nav_actor AND ((`SfzKFmFf`.`nav_tenant`) IS NULL) LIMIT 1))))) AND (COALESCE((SELECT (((('0') OR (EXISTS
+    (SELECT (TRUE) FROM `nav_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @nav_actor AND ((`hfjCDFco`.`nav_tenant`)
+    IS NULL) LIMIT 1))) OR ((NOT ('0')) AND (NOT ('0')) AND (NOT (EXISTS (SELECT (TRUE) FROM `nav_access` `SfzKFmFf`
+    WHERE `SfzKFmFf`.`user` = @nav_actor AND ((`SfzKFmFf`.`nav_tenant`) IS NULL) LIMIT 1))))) AND (CASE WHEN (('0')
+    OR (EXISTS (SELECT (TRUE) FROM `nav_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @nav_actor AND ((`hfjCDFco`.`nav_tenant`)
+    IS NULL) LIMIT 1))) OR ('0') THEN TRUE ELSE EXISTS (SELECT (TRUE) FROM `nav_access` `dsZCbLkI` WHERE `dsZCbLkI`.`nav_tenant`
+    = `olakvKQI`.`ID` AND ((`dsZCbLkI`.`user`) = (@nav_actor)) LIMIT 1) END)) FROM `nav_tenant` `olakvKQI` WHERE
+    `olakvKQI`.`ID` = `nav_year`.`nav_tenant` LIMIT 1), FALSE))) AND (((('0') OR (EXISTS (SELECT (TRUE) FROM `nav_access`
+    `hfjCDFco` WHERE `hfjCDFco`.`user` = @nav_actor AND ((`hfjCDFco`.`nav_tenant`) IS NULL) LIMIT 1))) OR ((NOT
+    ('0')) AND (NOT ('0')) AND (NOT (EXISTS (SELECT (TRUE) FROM `nav_access` `SfzKFmFf` WHERE `SfzKFmFf`.`user`
+    = @nav_actor AND ((`SfzKFmFf`.`nav_tenant`) IS NULL) LIMIT 1))))) AND ('1') AND ((('0') OR (EXISTS (SELECT (TRUE)
+    FROM `nav_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @nav_actor AND ((`hfjCDFco`.`nav_tenant`) IS NULL) LIMIT
+    1))) OR ((NOT ('0')) AND (NOT ('0')) AND (NOT (EXISTS (SELECT (TRUE) FROM `nav_access` `SfzKFmFf` WHERE `SfzKFmFf`.`user`
+    = @nav_actor AND ((`SfzKFmFf`.`nav_tenant`) IS NULL) LIMIT 1))))) AND ((('0') OR (EXISTS (SELECT (TRUE) FROM
+    `nav_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @nav_actor AND ((`hfjCDFco`.`nav_tenant`) IS NULL) LIMIT 1)))
+    OR ((NOT ('0')) AND (NOT ('0')) AND (NOT (EXISTS (SELECT (TRUE) FROM `nav_access` `SfzKFmFf` WHERE `SfzKFmFf`.`user`
+    = @nav_actor AND ((`SfzKFmFf`.`nav_tenant`) IS NULL) LIMIT 1))))) AND (COALESCE((SELECT (((('0') OR (EXISTS
+    (SELECT (TRUE) FROM `nav_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @nav_actor AND ((`hfjCDFco`.`nav_tenant`)
+    IS NULL) LIMIT 1))) OR ((NOT ('0')) AND (NOT ('0')) AND (NOT (EXISTS (SELECT (TRUE) FROM `nav_access` `SfzKFmFf`
+    WHERE `SfzKFmFf`.`user` = @nav_actor AND ((`SfzKFmFf`.`nav_tenant`) IS NULL) LIMIT 1))))) AND (CASE WHEN FALSE
+    THEN TRUE ELSE EXISTS (SELECT (TRUE) FROM `nav_access` `bItMW8cS` WHERE TRUE AND (((COALESCE(`bItMW8cS`.`nav_site`,
+    `71mCJzJI`.`ID`)) = (`71mCJzJI`.`ID`)) AND ((`bItMW8cS`.`user`) = (@nav_actor))) LIMIT 1) END) AND ((('0') OR
+    (EXISTS (SELECT (TRUE) FROM `nav_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @nav_actor AND ((`hfjCDFco`.`nav_tenant`)
+    IS NULL) LIMIT 1))) OR ((NOT ('0')) AND (NOT ('0')) AND (NOT (EXISTS (SELECT (TRUE) FROM `nav_access` `SfzKFmFf`
+    WHERE `SfzKFmFf`.`user` = @nav_actor AND ((`SfzKFmFf`.`nav_tenant`) IS NULL) LIMIT 1))))) AND (COALESCE((SELECT
+    (((('0') OR (EXISTS (SELECT (TRUE) FROM `nav_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @nav_actor AND ((`hfjCDFco`.`nav_tenant`)
+    IS NULL) LIMIT 1))) OR ((NOT ('0')) AND (NOT ('0')) AND (NOT (EXISTS (SELECT (TRUE) FROM `nav_access` `SfzKFmFf`
+    WHERE `SfzKFmFf`.`user` = @nav_actor AND ((`SfzKFmFf`.`nav_tenant`) IS NULL) LIMIT 1))))) AND (CASE WHEN (('0')
+    OR (EXISTS (SELECT (TRUE) FROM `nav_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @nav_actor AND ((`hfjCDFco`.`nav_tenant`)
+    IS NULL) LIMIT 1))) OR ('0') THEN TRUE ELSE EXISTS (SELECT (TRUE) FROM `nav_access` `dsZCbLkI` WHERE `dsZCbLkI`.`nav_tenant`
+    = `gT9GkWAZ`.`ID` AND ((`dsZCbLkI`.`user`) = (@nav_actor)) LIMIT 1) END)) FROM `nav_tenant` `gT9GkWAZ` WHERE
+    `gT9GkWAZ`.`ID` = `71mCJzJI`.`nav_tenant` LIMIT 1), FALSE))) FROM `nav_site` `71mCJzJI` WHERE `71mCJzJI`.`ID`
+    = `nav_department`.`nav_site` LIMIT 1), FALSE))) UNION ALL SELECT nav_department.`ID` AS `nav_department`, (SELECT
+    COUNT(*) FROM nav_document_full WHERE nav_year = nav_year.`ID` AND nav_department = nav_department.`ID` AND
+    nav_check = nav_check.`ID`) AS `amount`, 4 AS `indent`, nav_year.`ID` AS `nav_year`, 'nav_check' AS `kind`,
+    nav_check.name AS `name`, nav_check.`ID` AS `nav_check`, nav_department.nav_site AS `nav_site`, 1 FROM `nav_check`
+    `nav_check` CROSS JOIN `nav_department` `nav_department` CROSS JOIN `nav_year` `nav_year` WHERE ((SELECT nav_tenant
+    FROM nav_site WHERE `ID` = nav_department.nav_site) = nav_check.nav_tenant) AND (EXISTS (SELECT * FROM nav_document_full
+    WHERE nav_department = nav_department.`ID` AND nav_check = nav_check.`ID` AND nav_year = nav_year.`ID`)) AND
+    (((('0') OR (EXISTS (SELECT (TRUE) FROM `nav_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @nav_actor AND ((`hfjCDFco`.`nav_tenant`)
+    IS NULL) LIMIT 1))) OR ((NOT ('0')) AND (NOT ('0')) AND (NOT (EXISTS (SELECT (TRUE) FROM `nav_access` `SfzKFmFf`
+    WHERE `SfzKFmFf`.`user` = @nav_actor AND ((`SfzKFmFf`.`nav_tenant`) IS NULL) LIMIT 1))))) AND ((('0') OR (EXISTS
+    (SELECT (TRUE) FROM `nav_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @nav_actor AND ((`hfjCDFco`.`nav_tenant`)
+    IS NULL) LIMIT 1))) OR ((NOT ('0')) AND (NOT ('0')) AND (NOT (EXISTS (SELECT (TRUE) FROM `nav_access` `SfzKFmFf`
+    WHERE `SfzKFmFf`.`user` = @nav_actor AND ((`SfzKFmFf`.`nav_tenant`) IS NULL) LIMIT 1))))) AND (COALESCE((SELECT
+    (((('0') OR (EXISTS (SELECT (TRUE) FROM `nav_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @nav_actor AND ((`hfjCDFco`.`nav_tenant`)
+    IS NULL) LIMIT 1))) OR ((NOT ('0')) AND (NOT ('0')) AND (NOT (EXISTS (SELECT (TRUE) FROM `nav_access` `SfzKFmFf`
+    WHERE `SfzKFmFf`.`user` = @nav_actor AND ((`SfzKFmFf`.`nav_tenant`) IS NULL) LIMIT 1))))) AND (CASE WHEN (('0')
+    OR (EXISTS (SELECT (TRUE) FROM `nav_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @nav_actor AND ((`hfjCDFco`.`nav_tenant`)
+    IS NULL) LIMIT 1))) OR ('0') THEN TRUE ELSE EXISTS (SELECT (TRUE) FROM `nav_access` `dsZCbLkI` WHERE `dsZCbLkI`.`nav_tenant`
+    = `olakvKQI`.`ID` AND ((`dsZCbLkI`.`user`) = (@nav_actor)) LIMIT 1) END)) FROM `nav_tenant` `olakvKQI` WHERE
+    `olakvKQI`.`ID` = `nav_year`.`nav_tenant` LIMIT 1), FALSE))) AND (((('0') OR (EXISTS (SELECT (TRUE) FROM `nav_access`
+    `hfjCDFco` WHERE `hfjCDFco`.`user` = @nav_actor AND ((`hfjCDFco`.`nav_tenant`) IS NULL) LIMIT 1))) OR ((NOT
+    ('0')) AND (NOT ('0')) AND (NOT (EXISTS (SELECT (TRUE) FROM `nav_access` `SfzKFmFf` WHERE `SfzKFmFf`.`user`
+    = @nav_actor AND ((`SfzKFmFf`.`nav_tenant`) IS NULL) LIMIT 1)))) OR ('0')) AND ('1') AND ((('0') OR (EXISTS
+    (SELECT (TRUE) FROM `nav_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @nav_actor AND ((`hfjCDFco`.`nav_tenant`)
+    IS NULL) LIMIT 1))) OR ((NOT ('0')) AND (NOT ('0')) AND (NOT (EXISTS (SELECT (TRUE) FROM `nav_access` `SfzKFmFf`
+    WHERE `SfzKFmFf`.`user` = @nav_actor AND ((`SfzKFmFf`.`nav_tenant`) IS NULL) LIMIT 1))))) AND (COALESCE((SELECT
+    (((('0') OR (EXISTS (SELECT (TRUE) FROM `nav_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @nav_actor AND ((`hfjCDFco`.`nav_tenant`)
+    IS NULL) LIMIT 1))) OR ((NOT ('0')) AND (NOT ('0')) AND (NOT (EXISTS (SELECT (TRUE) FROM `nav_access` `SfzKFmFf`
+    WHERE `SfzKFmFf`.`user` = @nav_actor AND ((`SfzKFmFf`.`nav_tenant`) IS NULL) LIMIT 1))))) AND (CASE WHEN (('0')
+    OR (EXISTS (SELECT (TRUE) FROM `nav_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @nav_actor AND ((`hfjCDFco`.`nav_tenant`)
+    IS NULL) LIMIT 1))) OR ('0') THEN TRUE ELSE EXISTS (SELECT (TRUE) FROM `nav_access` `dsZCbLkI` WHERE `dsZCbLkI`.`nav_tenant`
+    = `375V2drC`.`ID` AND ((`dsZCbLkI`.`user`) = (@nav_actor)) LIMIT 1) END)) FROM `nav_tenant` `375V2drC` WHERE
+    `375V2drC`.`ID` = `nav_check`.`nav_tenant` LIMIT 1), FALSE)))) `doctree` ORDER BY nav_year ASC, nav_site ASC,
+    nav_department ASC, nav_check ASC
+  expect:
+    rows: 1221
+  session_id: tenant-navigation-full-perf
+  setup:
+  - sql: SET @nav_actor=8
+  warmup: 0
+  timing_samples: 4
+  timing_aggregation: total
+  threshold_ms: 120000
+- name: 'Perf: selective point before unique scalar lookup'
+  sql: >
+    SELECT nav_department.ID FROM nav_department CROSS JOIN nav_check
+    WHERE nav_department.ID = 1 AND nav_check.ID = 1
+      AND (SELECT nav_tenant FROM nav_site WHERE ID = nav_department.nav_site) = nav_check.nav_tenant
+  expect: {rows: 1, data: [{ID: 1}]}
+  warmup: 0
+  timing_samples: 4
+  timing_aggregation: total
+  threshold_ms: 5000
+- name: 'Point lookup does not build a projected table carrier'
+  sql: >
+    EXPLAIN PHYSICAL SELECT nav_department.ID FROM nav_department CROSS JOIN nav_check
+    WHERE nav_department.ID = 1 AND nav_check.ID = 1
+      AND (SELECT nav_tenant FROM nav_site WHERE ID = nav_department.nav_site) = nav_check.nav_tenant
+  expect:
+    result_not_contains: ['chosen projected_recset']
+- name: 'Perf: broad unique scalar predicate keeps late lookup'
+  sql: >
+    SELECT COUNT(*) AS n FROM nav_department CROSS JOIN nav_check
+    WHERE nav_check.ID = 1
+      AND (SELECT flag FROM nav_lookup_broad WHERE ID = nav_department.nav_site) = 1
+  expect: {rows: 1, data: [{n: 5000}]}
+  warmup: 0
+  timing_samples: 4
+  timing_aggregation: total
+  threshold_ms: 5000
+- name: 'Broad lookup does not build a projected table carrier'
+  sql: >
+    EXPLAIN PHYSICAL SELECT COUNT(*) AS n FROM nav_department CROSS JOIN nav_check
+    WHERE nav_check.ID = 1
+      AND (SELECT flag FROM nav_lookup_broad WHERE ID = nav_department.nav_site) = 1
+  expect:
+    result_not_contains: ['chosen projected_recset']
+- name: 'Projected unique lookup excludes missing rows and NULL values'
+  setup:
+  - sql: INSERT INTO nav_site (ID, name, nav_tenant) VALUES (1001, 'nullable', NULL)
+  - sql: INSERT INTO nav_department (ID, name, nav_site) VALUES (5001, 'missing', 9999), (5002, 'null-key', NULL), (5003, 'null-value', 1001)
+  sql: >
+    SELECT COUNT(*) AS n FROM nav_department CROSS JOIN nav_check
+    WHERE nav_check.ID = 1
+      AND (SELECT nav_tenant FROM nav_site WHERE ID = nav_department.nav_site) = nav_check.nav_tenant
+  expect: {rows: 1, data: [{n: 50}]}
+- name: 'Selective unique lookup offers the projected carrier'
+  sql: >
+    EXPLAIN PHYSICAL SELECT COUNT(*) AS n FROM nav_department CROSS JOIN nav_check
+    WHERE nav_check.ID = 1
+      AND (SELECT nav_tenant FROM nav_site WHERE ID = nav_department.nav_site) = nav_check.nav_tenant
+  expect:
+    result_contains: ['decision unique_scalar_filter', 'chosen projected_recset', 'recset_project_join']
 cleanup:
+- sql: DROP TABLE IF EXISTS nav_lookup_broad
+- sql: DROP TABLE IF EXISTS nav_document_full
 - sql: DROP TABLE IF EXISTS nav_document
 - sql: DROP TABLE IF EXISTS nav_tenant
 - sql: DROP TABLE IF EXISTS nav_site

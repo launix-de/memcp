@@ -1538,6 +1538,33 @@ test_cases:
   expect:
     error: true
 
+- name: unique_scalar_filter_keeps_missing_lookup_and_null_semantics
+  setup:
+  - sql: INSERT INTO nav_department (ID,name,nav_site) VALUES (300,'missing',999),(400,'null',NULL)
+  - sql: INSERT INTO nav_site (ID,name,nav_tenant) VALUES (30,'null tenant',NULL)
+  - sql: INSERT INTO nav_department (ID,name,nav_site) VALUES (500,'null value',30)
+  sql: |
+    SELECT d.ID, c.ID AS check_id FROM nav_department d CROSS JOIN nav_check c
+    WHERE (SELECT s.nav_tenant FROM nav_site s WHERE s.ID=d.nav_site)=c.nav_tenant
+    ORDER BY d.ID,c.ID
+  expect:
+    rows: 2
+    data: [{ID: 100, check_id: 10000}, {ID: 200, check_id: 20000}]
+  cleanup:
+  - sql: DELETE FROM nav_department WHERE ID IN (300,400,500)
+  - sql: DELETE FROM nav_site WHERE ID=30
+- name: scalar_filter_rejects_multiple_lookup_rows
+  setup:
+  - sql: DROP TABLE IF EXISTS nav_nonunique_lookup
+  - sql: CREATE TABLE nav_nonunique_lookup (key_id int, value_id int) ENGINE=memory
+  - sql: INSERT INTO nav_nonunique_lookup VALUES (10,1),(10,1)
+  sql: |
+    SELECT d.ID FROM nav_department d
+    WHERE (SELECT n.value_id FROM nav_nonunique_lookup n WHERE n.key_id=d.nav_site)=1
+  expect: {error: true}
+  cleanup:
+  - sql: DROP TABLE IF EXISTS nav_nonunique_lookup
+
 cleanup:
 - sql: DROP TABLE IF EXISTS nav_user
 - sql: DROP TABLE IF EXISTS nav_dav
