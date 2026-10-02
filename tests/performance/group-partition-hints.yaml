@@ -1,0 +1,82 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+metadata:
+  version: '1.0'
+  description: 'Source-derived group partition initialization shares a Cartesian shard budget'
+  isolated: true
+
+setup:
+  - sql: DROP TABLE IF EXISTS partition_hint_source
+  - sql: DROP TABLE IF EXISTS partition_hint_diagonal
+  - sql: DROP TABLE IF EXISTS partition_hint_uniform
+  - sql: DROP TABLE IF EXISTS partition_hint_oversized
+  - sql: CREATE TABLE partition_hint_source (id INT, event_time INT, a INT, b INT, c INT) ENGINE=memory
+  - sql: CREATE TABLE partition_hint_diagonal (k0 INT, k1 INT) ENGINE=memory
+  - sql: CREATE TABLE partition_hint_uniform (k0 INT, k1 INT, k2 INT) ENGINE=memory
+  - sql: CREATE TABLE partition_hint_oversized (k0 INT, k1 INT, k2 INT) ENGINE=memory
+  - scm: |
+      (begin
+        (insert (table "memcp-tests" "partition_hint_source") '("id" "event_time" "a" "b" "c")
+          (map (produceN 60000) (lambda (i)
+            (list i (+ 1700000000 i) (mod i 40) (mod (floor (/ i 40)) 40) (floor (/ i 1600))))))
+        (rebuild (table "memcp-tests" "partition_hint_source")) true)
+
+test_cases:
+  - name: Correlated ID and time group initialization
+    # Measure fresh group-table initialization once; do not hide it in warmups.
+    performance_rows: 60000
+    warmup: 0
+    timing_samples: 1
+    threshold_ms: 3000
+    timeout: 30
+    setup:
+      - scm: '(settings "ShardSize" 12000)'
+    scm: |
+      (eval (group_cache_partition_plan "memcp-tests" "partition_hint_source" "s"
+        '("s" "memcp-tests" "partition_hint_source" false true)
+        "partition_hint_diagonal"
+        (list (list 'get_column "s" false "id" false) (list 'get_column "s" false "event_time" false))
+        '("k0" "k1")))
+    expect: {data: [true]}
+
+  - name: Independent three-dimensional group initialization
+    # Measure fresh group-table initialization once; do not hide it in warmups.
+    performance_rows: 60000
+    warmup: 0
+    timing_samples: 1
+    threshold_ms: 3000
+    timeout: 30
+    setup:
+      - scm: '(settings "ShardSize" 12000)'
+    scm: |
+      (eval (group_cache_partition_plan "memcp-tests" "partition_hint_source" "s"
+        '("s" "memcp-tests" "partition_hint_source" false true)
+        "partition_hint_uniform"
+        (list (list 'get_column "s" false "a" false) (list 'get_column "s" false "b" false) (list 'get_column "s" false "c" false))
+        '("k0" "k1" "k2")))
+    expect: {data: [true]}
+
+  - name: Oversized three-dimensional group initialization
+    # Measure fresh group-table initialization once; do not hide it in warmups.
+    performance_rows: 60000
+    warmup: 0
+    timing_samples: 1
+    threshold_ms: 3000
+    timeout: 30
+    setup:
+      - scm: '(settings "ShardSize" 4000)'
+    scm: |
+      (eval (group_cache_partition_plan "memcp-tests" "partition_hint_source" "s"
+        '("s" "memcp-tests" "partition_hint_source" false true)
+        "partition_hint_oversized"
+        (list (list 'get_column "s" false "a" false) (list 'get_column "s" false "b" false) (list 'get_column "s" false "c" false))
+        '("k0" "k1" "k2")))
+    expect: {data: [true]}
+
+cleanup:
+  - scm: '(settings "ShardSize" 60000)'
+  - sql: DROP TABLE IF EXISTS partition_hint_oversized
+  - sql: DROP TABLE IF EXISTS partition_hint_uniform
+  - sql: DROP TABLE IF EXISTS partition_hint_diagonal
+  - sql: DROP TABLE IF EXISTS partition_hint_source

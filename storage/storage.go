@@ -2990,6 +2990,9 @@ func Init(en scm.Env) {
 					}
 				}
 				ps = trimmed
+				if len(a) > 2 {
+					ps = balancePartitionHints(ps, TableFromScmer(a[2]).Count())
+				}
 				if len(ps) == 0 {
 					return scm.NewBool(false)
 				}
@@ -3031,10 +3034,11 @@ func Init(en scm.Env) {
 				return scm.NewBool(false)
 			}
 		},
-		Type: &scm.TypeDescriptor{Kind: "func", Description: "suggests a partition scheme for a table. If the table has no partition scheme yet, it will immediately apply that scheme and return true. If the table already has a partition scheme, it will alter the partitioning score such that the partitioning scheme is considered in the next repartitioning and return false.",
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "suggests a partition scheme for a table. If the table has no partition scheme yet, it will immediately apply that scheme and return true. An optional source table shares its row-count partition budget across the suggested dimensions. If the table already has a partition scheme, it will alter the partitioning score such that the partitioning scheme is considered in the next repartitioning and return false.",
 			Params: []*scm.TypeDescriptor{
 				{Kind: "table", Label: "table"},
 				{Kind: "list", Label: "columns", Description: "associative list of string -> list representing column name -> pivots. You can compute pivots by (shardcolumn ...)"},
+				{Kind: "table", Label: "source", Description: "optional source table for balancing group-cache dimensions against one shared row-count budget", Optional: true},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},

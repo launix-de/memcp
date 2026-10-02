@@ -9,6 +9,8 @@ metadata:
 setup:
   - sql: DROP TABLE IF EXISTS pp_flat
   - sql: DROP TABLE IF EXISTS pp_nested
+  - sql: DROP TABLE IF EXISTS pp_group_source
+  - sql: DROP TABLE IF EXISTS pp_budget
   - sql: DROP TABLE IF EXISTS pp_numeric
   - sql: CREATE TABLE pp_flat (flag CHAR(1), state CHAR(1), amount INT) ENGINE=MEMORY
   - sql: CREATE TABLE pp_nested (flag CHAR(1), state CHAR(1), amount INT) ENGINE=MEMORY
@@ -16,6 +18,14 @@ setup:
   - sql: INSERT INTO pp_flat VALUES ('A','F',1),('N','O',2),('R','F',3),('Z','O',4)
   - sql: INSERT INTO pp_nested VALUES ('A','F',1),('N','O',2),('R','F',3),('Z','O',4)
   - sql: INSERT INTO pp_numeric VALUES (1),(2),(3)
+
+  - sql: CREATE TABLE pp_budget (year_key INT, department_key INT, check_key INT) ENGINE=MEMORY
+  - sql: INSERT INTO pp_budget VALUES (1,2,3),(1,2,3),(28,28,24),(NULL,2,3)
+
+  - sql: CREATE TABLE pp_group_source (a INT, b INT, c INT) ENGINE=MEMORY
+  - scm: |
+      (insert (table "memcp-tests" "pp_group_source") '("a" "b" "c")
+        (map (produceN 100) (lambda (i) (list i i i))))
 
 test_cases:
   - name: Flat partition spec accepts exactly two string pivots
@@ -58,7 +68,91 @@ test_cases:
       (partitiontable (table "memcp-tests" "pp_numeric") (list (list "id")))
     expect: {error: true}
 
+  - name: Explicit oversized partition topology still fails without a source budget
+    scm: |
+      (partitiontable (table "memcp-tests" "pp_budget")
+        (list "year_key" (produceN 28)
+              "department_key" (produceN 28)
+              "check_key" (produceN 24)))
+    expect: {error: true}
+
+  - name: Group hints share one source row-count budget across all dimensions
+    setup:
+      - scm: '(settings "ShardSize" 4)'
+    scm: |
+      (partitiontable (table "memcp-tests" "pp_budget")
+        (list "year_key" (produceN 28)
+              "department_key" (produceN 28)
+              "check_key" (produceN 24))
+        (table "memcp-tests" "pp_group_source"))
+    expect: {data: [true]}
+
+  - name: Balanced hints retain multiple dimensions within the shared budget
+    scm: |
+      (list (table_shard_count (table "memcp-tests" "pp_budget"))
+        (map '("year_key" "department_key" "check_key")
+          (lambda (col) (+ 1 (count (shardcolumn (table "memcp-tests" "pp_budget") col))))))
+    expect: {data: [[48, [4, 4, 3]]]}
+
+  - name: Balanced Cartesian partition hint preserves grouped rows and NULL keys
+    sql: SELECT year_key, department_key, check_key, COUNT(*) AS n FROM pp_budget GROUP BY year_key, department_key, check_key ORDER BY year_key, department_key, check_key
+    expect:
+      rows: 3
+      data:
+        - {year_key: null, department_key: 2, check_key: 3, n: 1}
+        - {year_key: 1, department_key: 2, check_key: 3, n: 2}
+        - {year_key: 28, department_key: 28, check_key: 24, n: 1}
+
+  - name: SQL grouping preserves keys after source partitioning
+    setup:
+      - scm: |
+          (partitiontable (table "memcp-tests" "pp_group_source")
+            (list "a" (produceN 28)))
+      - scm: '(settings "ShardSize" 4)'
+    sql: SELECT COUNT(*) AS n FROM (SELECT a, b, c, COUNT(*) AS n FROM pp_group_source GROUP BY a,b,c) AS grouped
+    expect: {rows: 1, data: [{n: 100}]}
+
+  - name: Generated GROUP partition plan balances an empty cache using source cardinality
+    setup:
+      - sql: DROP TABLE IF EXISTS pp_plan_source
+      - sql: DROP TABLE IF EXISTS pp_plan_cache
+      - sql: CREATE TABLE pp_plan_source (a INT, b INT, c INT) ENGINE=memory
+      - sql: CREATE TABLE pp_plan_cache (k0 INT, k1 INT, k2 INT) ENGINE=memory
+      - scm: |
+          (begin
+            (settings "ShardSize" 60000)
+            (insert (table "memcp-tests" "pp_plan_source") '("a" "b" "c")
+              (map (produceN 5000) (lambda (i) (list i i i))))
+            (rebuild (table "memcp-tests" "pp_plan_source"))
+            (settings "ShardSize" 400))
+    scm: |
+      (eval (group_cache_partition_plan "memcp-tests" "pp_plan_source" "s"
+        '("s" "memcp-tests" "pp_plan_source" false true) "pp_plan_cache"
+        (list (list 'get_column "s" false "a" false)
+              (list 'get_column "s" false "b" false)
+              (list 'get_column "s" false "c" false))
+        '("k0" "k1" "k2")))
+    expect: {data: [true]}
+
+  - name: Empty cache keeps all three group key dimensions
+    scm: |
+      (map '("k0" "k1" "k2") (lambda (col)
+        (> (count (shardcolumn (table "memcp-tests" "pp_plan_cache") col)) 0)))
+    expect: {data: [[true, true, true]]}
+
+  - name: Insert into the newly partitioned group table retains NULL and boundary keys
+    setup:
+      - sql: INSERT INTO pp_plan_cache VALUES (NULL,1,1),(0,0,0),(4999,4999,4999)
+    sql: SELECT k0,k1,k2 FROM pp_plan_cache ORDER BY k0
+    expect:
+      data: [{k0: null, k1: 1, k2: 1}, {k0: 0, k1: 0, k2: 0}, {k0: 4999, k1: 4999, k2: 4999}]
+
 cleanup:
+  - sql: DROP TABLE IF EXISTS pp_plan_cache
+  - sql: DROP TABLE IF EXISTS pp_plan_source
+  - scm: '(settings "ShardSize" 60000)'
+  - sql: DROP TABLE IF EXISTS pp_group_source
+  - sql: DROP TABLE IF EXISTS pp_budget
   - sql: DROP TABLE IF EXISTS pp_numeric
   - sql: DROP TABLE IF EXISTS pp_nested
   - sql: DROP TABLE IF EXISTS pp_flat
