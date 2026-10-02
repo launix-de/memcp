@@ -3452,7 +3452,7 @@ ordinary probe path until RecMap carries explicit equality relations. */
 			(define meta (find (get_schema (source_schema src) (source_relation src))
 				(lambda (candidate) (equal?? (candidate "Field") col)) nil))
 			(define rawtype (if (nil? meta) nil (toLower (meta "RawType"))))
-			(contains? (list "tinyint" "smallint" "mediumint" "int" "bigint"
+			(contains? (list "tinyint" "smallint" "mediumint" "int" "integer" "bigint"
 				"decimal" "float" "double" "bool" "boolean" "date" "datetime"
 				"timestamp" "time" "year") rawtype)))))
 
@@ -9713,63 +9713,181 @@ its ordinary join continuation, including missing-row and NULL semantics. */
 							(direct_column_name_for_alias input (car (gs_keys stage))) nil))
 						(define value_col (if (source_is_base_table? input)
 							(relational_recmap_stage_value stage (cadr marker) input) nil))
+						(define cache_source (nth marker 2))
+						(define cache_has_count (contains? (map (gs_aggregates stage) aggregate_col_name)
+							(aggregate_col_name aggregate_count_descriptor)))
+						(define unique_input (scalar_order_lookup_cache_unique_input? stage))
+						(define cache_available (and (not (nil? cache_source))
+							(physical_helper_relation? (source_relation cache_source))))
 						(if (and (scalar_value_stage? stage)
 							(and (source_is_base_table? input)
-								(and (scalar_order_lookup_cache_unique_input? stage)
+								(and (or unique_input cache_available)
 									(and (not (nil? target_col)) (not (nil? source_col))
+										(recmap_direct_key_column? src target_col)
+										(recmap_direct_key_column? input source_col)
 										(not (nil? value_col))
 										(equal? (qassoc_get (gs_facts stage) (quote condition) true) true)
 										(not (physical_expr_refs_any_alias? sources (source_alias src)
 											(source_aliases (cons src future_sources)) other))))))
-							(list input source_col target_col
-								(list (quote equal??)
-									(list (quote get_column) (source_alias input) false value_col false) other))
+							(if unique_input
+								(list input source_col target_col
+									(list (quote equal??)
+										(list (quote get_column) (source_alias input) false value_col false) other)
+									(planner_source_row_count input) input
+									(list (quote equal??) (list (quote get_column) (source_alias input) false value_col false) other))
+								/* A materialized scalar stage has unique group keys even without
+								a declared base-table key. Keep overflowing groups as candidates:
+								only the original row-local guard may raise their scalar error. */
+								(list cache_source "k0" target_col
+									(list (quote or)
+										(if cache_has_count
+											(list (quote >)
+												(list (quote coalesceNil)
+													(list (quote get_column) (source_alias cache_source) false
+														(aggregate_col_name aggregate_count_descriptor) false) 0) 1) false)
+										(list (quote equal??)
+											(list (quote get_column) (source_alias cache_source) false (cadr marker) false) other))
+									(planner_source_row_count input) input
+									(list (quote equal??) (list (quote get_column) (source_alias input) false value_col false) other)))
 							nil)))))
 		_ nil)))
 
+/* A not-yet-bound comparison relation can supply a query-local semijoin
+population. This is a conservative candidate filter; the original scalar
+predicate and cardinality guard still own their ordinary row-local evaluation. */
+(define scalar_future_binder_carrier (lambda (stages sources src future_sources condition driver_condition planning_session)
+	(begin
+		(define descriptor (find (map (split_and_terms condition) (lambda (term)
+			(match term
+				'(op left right)
+				(if (not (equal? op (quote equal??))) nil
+					(begin
+						(define left_marker (unique_scalar_filter_value stages sources left))
+						(define marker (if (nil? left_marker) (unique_scalar_filter_value stages sources right) left_marker))
+						(define other (if (nil? left_marker) left right))
+						(define binder (find future_sources (lambda (source)
+							(and (source_is_base_table? source) (and (not (source_outer? source))
+								(not (nil? (direct_column_name_for_alias source other)))))) nil))
+						(if (or (nil? marker) (nil? binder)) nil
+							(begin
+								(define stage (car marker))
+								(define input (gs_input stage))
+								(define lookup (qassoc_get (gs_facts stage) (quote lookup-keys) '()))
+								(define target_col (if (equal? (count lookup) 1) (direct_column_name_for_alias src (car lookup)) nil))
+								(define key_col (if (equal? (count (gs_keys stage)) 1) (direct_column_name_for_alias input (car (gs_keys stage))) nil))
+								(define value_col (if (source_is_base_table? input) (relational_recmap_stage_value stage (cadr marker) input) nil))
+								(define cache_source (nth marker 2))
+								(define unique_input (scalar_order_lookup_cache_unique_input? stage))
+								(if (and (scalar_value_stage? stage) (and (not (nil? target_col)) (and (not (nil? key_col))
+									(and (not (nil? value_col)) (and (recmap_direct_key_column? src target_col)
+										(recmap_direct_key_column? input key_col)
+										(recmap_direct_key_column? input value_col)
+										(recmap_direct_key_column? binder (direct_column_name_for_alias binder other))
+										(equal? (qassoc_get (gs_facts stage) (quote condition) true) true)
+										(or unique_input (and (not (nil? cache_source)) (physical_helper_relation? (source_relation cache_source)))))))))
+									(list stage input key_col value_col target_col binder (direct_column_name_for_alias binder other) cache_source unique_input) nil)))))
+				_ nil))) (lambda (item) (not (nil? item))) nil))
+		(if (nil? descriptor) nil
+			(begin
+				(define input (nth descriptor 1))
+				(define binder (nth descriptor 5))
+				(define binder_condition (car (physical_partition_condition (source_alias binder) binder
+					(filter sources (lambda (source) (not (equal? (source_alias source) (source_alias binder))))) condition)))
+				(define binder_rows (planner_source_row_count binder))
+				(define selected_binder_rows (planner_row_count_after_selectivity binder sources (source_alias binder) binder_condition binder_rows planning_session))
+				(define input_rows (planner_source_row_count input))
+				(define driver_input_rows (planner_source_row_count src))
+				(define driver_rows (planner_row_count_after_selectivity src sources (source_alias src) driver_condition driver_input_rows planning_session))
+				(define selected_input_rows (* input_rows (div_null selected_binder_rows (max 1 binder_rows))))
+				(define matching_rows (* driver_rows (div_null selected_input_rows (max 1 input_rows))))
+				(define has_overflow (and (not (nth descriptor 8))
+					(contains? (map (gs_aggregates (car descriptor)) aggregate_col_name) (aggregate_col_name aggregate_count_descriptor))))
+				(define baseline_cost (planner_membership_direct_probe_cost driver_rows))
+				(define candidate_cost (planner_cost_add
+					(planner_cost_add (membership_projection_cost binder_rows selected_binder_rows input_rows '())
+						(membership_projection_cost input_rows selected_input_rows driver_input_rows '()) matching_rows 0.5)
+					(planner_cost_add (planner_membership_direct_probe_cost matching_rows)
+						(if has_overflow (planner_membership_direct_probe_cost input_rows) (planner_zero_cost 0 0.5)) matching_rows 0.5)
+					matching_rows 0.5))
+				(define id (concat "scalar_binder_semijoin:" (source_alias src) ":" (fnv_hash descriptor)))
+				(define choice (planner_physical_choice id (if (planner_cost_better? candidate_cost baseline_cost) "projected_recset" "late_lookup") '("projected_recset" "late_lookup") planning_session))
+				(planner_record_physical_decision (list (list "decision_id" id) (list "decision" "scalar_binder_semijoin") (list "chosen" choice)
+					(list "inputs" (list (list "binder_rows" binder_rows) (list "selected_binder_rows" selected_binder_rows) (list "driver_rows" driver_rows)))
+					(list "alternatives" (list (list "projected_recset" (planner_cost_explain candidate_cost)) (list "late_lookup" (planner_cost_explain baseline_cost))))) planning_session)
+				(if (not (equal? choice "projected_recset")) nil
+					(begin
+						(define cols (extract_columns_for_alias binder binder_condition))
+						(define binder_recset (compile_scan_plan (quote scan_recset) (physical_query_tx_symbol) (source_table_expr binder)
+							(cons (quote list) cols) (list (quote lambda) (map cols (lambda (col) (scan_callback_symbol_for_alias (source_alias binder) col)))
+								(lower_column_expr_for_join_truth_context sources (source_alias binder) binder_condition binder_rows))))
+						(define matching_input (list (quote recset_project_join) (physical_query_tx_symbol) binder_recset
+							(quoted_runtime_list (list (nth descriptor 6))) (source_table_expr input) (quoted_runtime_list (list (nth descriptor 3)))))
+						(define target (list (quote recset_project_join) (physical_query_tx_symbol) matching_input
+							(quoted_runtime_list (list (nth descriptor 2))) (source_table_expr src) (quoted_runtime_list (list (nth descriptor 4)))))
+						(define overflow_source (nth descriptor 7))
+						(define overflow_col (aggregate_col_name aggregate_count_descriptor))
+						(define overflow (if (not has_overflow) nil
+							(list (quote recset_project_join) (physical_query_tx_symbol)
+								(compile_scan_plan (quote scan_recset) (physical_query_tx_symbol) (source_table_expr overflow_source)
+									(quoted_runtime_list (list overflow_col))
+									(list (quote lambda) (list (quote __scalar_group_count))
+										(list (quote >) (list (quote coalesceNil) (quote __scalar_group_count) 0) 1)))
+								(quoted_runtime_list '("k0")) (source_table_expr src) (quoted_runtime_list (list (nth descriptor 4))))))
+						(define producer (if (nil? overflow) target
+							(list (quote recset_union) (physical_query_tx_symbol) (cons (quote list) (list target overflow)))))
+						(list (physical_query_session_symbol) "get_or_compute_scoped" (physical_query_scope_symbol) id
+							(physical_query_tx_symbol) (list (quote lambda) (list (physical_query_tx_symbol)) producer)))))))))
+
 (define unique_scalar_filter_carrier (lambda (stages sources src future_sources condition driver_condition planning_session)
 	(begin
-		(define candidate (find (map (split_and_terms (coalesceNil condition true)) (lambda (term)
-			(unique_scalar_filter_candidate stages sources src future_sources term)))
-			(lambda (item) (not (nil? item))) nil))
-		(if (nil? candidate) nil
+		(define driver_input_rows (planner_source_row_count src))
+		(define driver_rows (planner_row_count_after_selectivity src sources
+			(source_alias src) driver_condition driver_input_rows planning_session))
+		/* Even an empty projection pays its calibrated scan/RecSet startup. A
+		point probe below that lower bound cannot benefit from either carrier;
+		avoid discovering and estimating lookup populations for this case. */
+		(if (not (planner_cost_better? (membership_projection_cost 0 0 0 '())
+			(planner_membership_direct_probe_cost driver_rows))) nil
 			(begin
-				(define input (car candidate))
-				(define predicate (nth candidate 3))
-				(define input_rows (planner_source_row_count input))
-				/* Projection visits the complete target; late lookup only visits rows
-				accepted by this leaf, including its owned primary-key predicates. */
-				(define driver_input_rows (planner_source_row_count src))
-				(define driver_rows (planner_row_count_after_selectivity src sources
-					(source_alias src) driver_condition driver_input_rows planning_session))
-				(define selected_rows (planner_row_count_after_selectivity input (list input)
-					(source_alias input) predicate nil planning_session))
-				(define matching_rows (* driver_rows (div_null selected_rows (max 1 input_rows))))
-				(define base_cost (planner_membership_direct_probe_cost driver_rows))
-				(define projected_cost (planner_cost_add
-					(membership_projection_cost input_rows selected_rows driver_rows
-						(list (list (quote membership_driver_input_rows) driver_input_rows)))
-					(planner_membership_direct_probe_cost matching_rows) matching_rows 0.55))
-				(define id (concat "unique_scalar_filter:" (source_alias src) ":" (fnv_hash predicate)))
-				(define normal (if (planner_cost_better? projected_cost base_cost) "projected_recset" "late_lookup"))
-				(define chosen (planner_physical_choice id normal '("projected_recset" "late_lookup") planning_session))
-				(planner_record_physical_decision (list (list "decision_id" id)
-					(list "decision" "unique_scalar_filter") (list "chosen" chosen)
-					(list "inputs" (list (list "source_rows" input_rows) (list "driver_rows" driver_rows)
-						(list "selected_rows" selected_rows) (list "matching_rows" matching_rows)))
-					(list "alternatives" (list
-						(list (list "plan" "projected_recset") (list "cost" (planner_cost_explain projected_cost)))
-						(list (list "plan" "late_lookup") (list "cost" (planner_cost_explain base_cost)))))) planning_session)
-				(if (not (equal? chosen "projected_recset")) nil
+				(define candidate (find (map (split_and_terms (coalesceNil condition true)) (lambda (term)
+					(unique_scalar_filter_candidate stages sources src future_sources term)))
+					(lambda (item) (not (nil? item))) nil))
+				(if (nil? candidate) (scalar_future_binder_carrier stages sources src future_sources condition driver_condition planning_session)
 					(begin
-						(define cols (extract_columns_for_alias input predicate))
-						(list (quote recset_project_join) (physical_query_tx_symbol)
-							(compile_scan_plan (quote scan_recset) (physical_query_tx_symbol) (source_table_expr input)
-								(cons (quote list) cols)
-								(list (quote lambda) (map cols (lambda (col) (scan_callback_symbol_for_alias (source_alias input) col)))
-									(lower_column_expr_for_join sources (source_alias input) predicate)))
-							(quoted_runtime_list (list (nth candidate 1)))
-							(source_table_expr src) (quoted_runtime_list (list (nth candidate 2)))))))))))
+						(define input (car candidate))
+						(define predicate (nth candidate 3))
+						(define input_rows (nth candidate 4))
+						/* Projection visits the complete target; late lookup only visits rows
+						accepted by this leaf, including its owned primary-key predicates. */
+						(define estimate_input (nth candidate 5))
+						(define selected_rows (planner_row_count_after_selectivity estimate_input (list estimate_input)
+							(source_alias estimate_input) (nth candidate 6) input_rows planning_session))
+						(define matching_rows (* driver_rows (div_null selected_rows (max 1 input_rows))))
+						(define base_cost (planner_membership_direct_probe_cost driver_rows))
+						(define projected_cost (planner_cost_add
+							(membership_projection_cost input_rows selected_rows driver_rows
+								(list (list (quote membership_driver_input_rows) driver_input_rows)))
+							(planner_membership_direct_probe_cost matching_rows) matching_rows 0.55))
+						(define id (concat "unique_scalar_filter:" (source_alias src) ":" (fnv_hash predicate)))
+						(define normal (if (planner_cost_better? projected_cost base_cost) "projected_recset" "late_lookup"))
+						(define chosen (planner_physical_choice id normal '("projected_recset" "late_lookup") planning_session))
+						(planner_record_physical_decision (list (list "decision_id" id)
+							(list "decision" "unique_scalar_filter") (list "chosen" chosen)
+							(list "inputs" (list (list "source_rows" input_rows) (list "driver_rows" driver_rows)
+								(list "selected_rows" selected_rows) (list "matching_rows" matching_rows)))
+							(list "alternatives" (list
+								(list (list "plan" "projected_recset") (list "cost" (planner_cost_explain projected_cost)))
+								(list (list "plan" "late_lookup") (list "cost" (planner_cost_explain base_cost)))))) planning_session)
+						(if (not (equal? chosen "projected_recset")) nil
+							(begin
+								(define cols (extract_columns_for_alias input predicate))
+								(list (quote recset_project_join) (physical_query_tx_symbol)
+									(compile_scan_plan (quote scan_recset) (physical_query_tx_symbol) (source_table_expr input)
+										(cons (quote list) cols)
+										(list (quote lambda) (map cols (lambda (col) (scan_callback_symbol_for_alias (source_alias input) col)))
+											(lower_column_expr_for_join sources (source_alias input) predicate)))
+									(quoted_runtime_list (list (nth candidate 1)))
+									(source_table_expr src) (quoted_runtime_list (list (nth candidate 2)))))))))))))
 
 (define build_join_scan_leaf_using_recipe (lambda (schema all_sources leaf future_aliases default_alias needed_exprs final_condition row_expr order_items offset_value limit_value allow_membership_recset column_recipe stages result_mode probe_context scalar_plan continuation outer_scan facts)
 	(begin
@@ -9994,7 +10112,8 @@ its ordinary join continuation, including missing-row and NULL semantics. */
 				(define branch_candidates (if (empty_list? branch_bindings) nil
 					(membership_or_candidate_recset src (source_table_expr_using stages src)
 						condition branch_bindings)))
-				(define unique_scalar_carrier (if (or membership_driver (source_outer? src)) nil
+				(define unique_scalar_carrier (if (or membership_driver (source_outer? src)
+					(nil? (qassoc_get facts (quote scalar_filter_condition) nil))) nil
 					(unique_scalar_filter_carrier stages all_sources src future_sources
 						(qassoc_get facts (quote scalar_filter_condition) final_condition) condition planning_session)))
 				(define raw_base_table_expr (if membership_driver membership_table_expr
@@ -10181,7 +10300,10 @@ ownership remain available until the physical scans are emitted. */
 		(define tree (physical_join_plan_for_sources sources))
 		/* Carrier discovery needs the complete WHERE even after predicate ownership
 		assigns its ordinary evaluation to a later leaf. Do not move ON predicates. */
-		(define carrier_facts (qassoc_set facts (quote scalar_filter_condition) final_condition))
+		(define carrier_facts (if (or (nil? (find stages scalar_value_stage? nil))
+			(nil? (find (split_and_terms (coalesceNil final_condition true)) (lambda (term)
+				(match term '(op _left _right) (equal? op (quote equal??)) _ false)) nil))) facts
+			(qassoc_set facts (quote scalar_filter_condition) final_condition)))
 		(define probe_context (join_scan_probe_context tree all_sources probe_work_rows))
 		(define residual_condition (if (nil? tree) final_condition
 			(condition_without_join_tree_predicates final_condition tree)))

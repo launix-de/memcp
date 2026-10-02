@@ -25,7 +25,7 @@ setup:
 - sql: CREATE TABLE `nav_tenant` (`multiStandort` boolean,`multiAbteilung` boolean,`multiPruefung` boolean,`name`
     text,`ID` int PRIMARY KEY) ENGINE=memory
 - sql: DROP TABLE IF EXISTS nav_site
-- sql: CREATE TABLE `nav_site` (`name` text,`ID` int PRIMARY KEY,`nav_tenant` int) ENGINE=memory
+- sql: CREATE TABLE `nav_site` (`name` text,`ID` int,`nav_tenant` integer) ENGINE=memory
 - sql: DROP TABLE IF EXISTS nav_department
 - sql: CREATE TABLE `nav_department` (`name` text,`ID` int PRIMARY KEY,`nav_tenant` int,`nav_site` int) ENGINE=memory
 - sql: DROP TABLE IF EXISTS nav_year
@@ -58,6 +58,13 @@ setup:
       (insert (table "memcp-tests" "nav_lookup_broad") '("ID" "flag")
         (map (produceN 1000) (lambda (i) (list (+ i 1) 1))))
       (rebuild (table "memcp-tests" "nav_lookup_broad") true false))
+- sql: DROP TABLE IF EXISTS nav_future_binder
+- sql: CREATE TABLE nav_future_binder (ID INT PRIMARY KEY, nav_tenant INTEGER) ENGINE=memory
+- scm: |
+    (begin
+      (insert (table "memcp-tests" "nav_future_binder") '("ID" "nav_tenant")
+        (map (produceN 10000) (lambda (i) (list (+ i 1) (+ 1 (mod i 100))))))
+      (rebuild (table "memcp-tests" "nav_future_binder") true false))
 test_cases:
 - name: 'Perf: document navigation counts in a present year'
   sql: SELECT * FROM (SELECT nav_department.`ID` AS `nav_department`, (SELECT COUNT(*) FROM nav_document WHERE nav_year
@@ -852,6 +859,33 @@ test_cases:
       AND (SELECT flag FROM nav_lookup_broad WHERE ID = nav_department.nav_site) = 1
   expect:
     result_not_contains: ['chosen projected_recset']
+- name: 'Perf: scalar predicate with a later filtered comparison relation'
+  session_id: scalar-binder-perf
+  setup:
+  - sql: SET @nav_actor=8
+  sql: >
+    SELECT COUNT(*) AS n FROM nav_department CROSS JOIN nav_future_binder
+    WHERE (SELECT nav_tenant FROM nav_site WHERE ID = nav_department.nav_site) = nav_future_binder.nav_tenant
+      AND EXISTS (SELECT 1 FROM nav_access WHERE user = @nav_actor AND nav_tenant = nav_future_binder.nav_tenant)
+      AND EXISTS (SELECT 1 FROM nav_access WHERE user = @nav_actor
+        AND nav_tenant = (SELECT nav_tenant FROM nav_site WHERE ID = nav_department.nav_site))
+  expect: {rows: 1, data: [{n: 5000}]}
+  warmup: 0
+  timing_samples: 4
+  timing_aggregation: total
+  threshold_ms: 120000
+- name: 'A later filtered comparison relation offers a scalar semijoin'
+  session_id: scalar-binder-perf
+  setup:
+  - sql: SET @nav_actor=8
+  sql: >
+    EXPLAIN PHYSICAL SELECT COUNT(*) AS n FROM nav_department CROSS JOIN nav_future_binder
+    WHERE (SELECT nav_tenant FROM nav_site WHERE ID = nav_department.nav_site) = nav_future_binder.nav_tenant
+      AND EXISTS (SELECT 1 FROM nav_access WHERE user = @nav_actor AND nav_tenant = nav_future_binder.nav_tenant)
+      AND EXISTS (SELECT 1 FROM nav_access WHERE user = @nav_actor
+        AND nav_tenant = (SELECT nav_tenant FROM nav_site WHERE ID = nav_department.nav_site))
+  expect:
+    result_contains: ['decision scalar_binder_semijoin', 'chosen projected_recset', 'get_or_compute_scoped']
 - name: 'Projected unique lookup excludes missing rows and NULL values'
   setup:
   - sql: INSERT INTO nav_site (ID, name, nav_tenant) VALUES (1001, 'nullable', NULL)
@@ -868,7 +902,27 @@ test_cases:
       AND (SELECT nav_tenant FROM nav_site WHERE ID = nav_department.nav_site) = nav_check.nav_tenant
   expect:
     result_contains: ['decision unique_scalar_filter', 'chosen projected_recset', 'recset_project_join']
+- name: 'Projected scalar groups retain an overflow even when its value would reject it'
+  setup:
+  - sql: INSERT INTO nav_site (ID, name, nav_tenant) VALUES (1001, 'duplicate', 2)
+  sql: >
+    SELECT COUNT(*) AS n FROM nav_department CROSS JOIN nav_future_binder
+    WHERE (SELECT nav_tenant FROM nav_site WHERE ID = nav_department.nav_site) = nav_future_binder.nav_tenant
+      AND EXISTS (SELECT 1 FROM nav_access WHERE user = 8 AND nav_tenant = nav_future_binder.nav_tenant)
+      AND EXISTS (SELECT 1 FROM nav_access WHERE user = 8
+        AND nav_tenant = (SELECT nav_tenant FROM nav_site WHERE ID = nav_department.nav_site))
+  expect: {error: true}
+- name: 'Unreferenced overflowing groups do not raise a scalar error'
+  setup:
+  - sql: DELETE FROM nav_site WHERE ID = 1001 AND name = 'duplicate'
+  - sql: INSERT INTO nav_site (ID, name, nav_tenant) VALUES (9998, 'unreferenced-a', 2), (9998, 'unreferenced-b', 2)
+  sql: >
+    SELECT COUNT(*) AS n FROM nav_department CROSS JOIN nav_check
+    WHERE nav_check.ID = 1
+      AND (SELECT nav_tenant FROM nav_site WHERE ID = nav_department.nav_site) = nav_check.nav_tenant
+  expect: {rows: 1, data: [{n: 50}]}
 cleanup:
+- sql: DROP TABLE IF EXISTS nav_future_binder
 - sql: DROP TABLE IF EXISTS nav_lookup_broad
 - sql: DROP TABLE IF EXISTS nav_document_full
 - sql: DROP TABLE IF EXISTS nav_document
