@@ -2020,7 +2020,9 @@ func (s *StorageIndex) iterate(tx *TxContext, bounds scanAccess, indexBoundsValu
 				selected(s, false)
 			}
 			matchers := s.bindRowMatchers(tx, bounds, indexBounds, upperInclusive, cols, nil, false, exactMain)
-			s.fullScan(maxInsertIndex, buf, matchers, callback)
+			if !s.projectPrefixCandidates(tx, bounds, buf, callback) {
+				s.fullScan(maxInsertIndex, buf, matchers, callback)
+			}
 			return
 		} else {
 			// Rebuild index without blocking on index mutex contention.
@@ -2032,7 +2034,9 @@ func (s *StorageIndex) iterate(tx *TxContext, bounds scanAccess, indexBoundsValu
 					selected(s, false)
 				}
 				matchers := s.bindRowMatchers(tx, bounds, indexBounds, upperInclusive, cols, nil, false, exactMain)
-				s.fullScan(maxInsertIndex, buf, matchers, callback)
+				if !s.projectPrefixCandidates(tx, bounds, buf, callback) {
+					s.fullScan(maxInsertIndex, buf, matchers, callback)
+				}
 				return
 			}
 			if state.active {
@@ -2060,7 +2064,9 @@ start_scan:
 			selected(s, false)
 		}
 		matchers := s.bindRowMatchers(tx, bounds, indexBounds, upperInclusive, cols, nil, false, exactMain)
-		s.fullScan(maxInsertIndex, buf, matchers, callback)
+		if !s.projectPrefixCandidates(tx, bounds, buf, callback) {
+			s.fullScan(maxInsertIndex, buf, matchers, callback)
+		}
 		return
 	}
 	if !state.active {
@@ -2070,7 +2076,9 @@ start_scan:
 			selected(s, false)
 		}
 		matchers := s.bindRowMatchers(tx, bounds, indexBounds, upperInclusive, cols, nil, false, exactMain)
-		s.fullScan(maxInsertIndex, buf, matchers, callback)
+		if !s.projectPrefixCandidates(tx, bounds, buf, callback) {
+			s.fullScan(maxInsertIndex, buf, matchers, callback)
+		}
 		return
 	}
 	snapMainIndexes := state.mainIndexes
@@ -2081,6 +2089,24 @@ start_scan:
 	snapIndexHooks := state.indexHooks
 	isNative := s.Native
 	s.mu.Unlock()
+	if bounds.runtime != nil && bounds.runtime.prefixMerge != nil {
+		if len(s.Cols) == 0 || s.Cols[0] != bounds.runtime.prefixMerge.column ||
+			!indexCoversBoundaryOrder(s, true, bounds, indexBounds.len()) {
+			if selected != nil {
+				selected(s, false)
+			}
+			matchers := s.bindRowMatchers(tx, bounds, indexBounds, upperInclusive, cols, nil, false, exactMain)
+			if !s.projectPrefixCandidates(tx, bounds, buf, callback) {
+				s.fullScan(maxInsertIndex, buf, matchers, callback)
+			}
+			return
+		}
+		if selected != nil {
+			selected(s, true)
+		}
+		s.iteratePrefixMerge(tx, bounds.runtime.prefixMerge, cols, snapMainIndexes, snapDeltaBtree, isNative, maxInsertIndex, buf, callback)
+		return
+	}
 	if selected != nil {
 		selected(s, true)
 	}

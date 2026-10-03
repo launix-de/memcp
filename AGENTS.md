@@ -188,6 +188,11 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
   diagnostics use `Stat()`. Every automatic eviction path, including expiry,
   must honor this floor against tracked memory, not RSS or pending allocations.
 
+- `orderedPrefixAccess` is immutable invocation-owned key and ordering data.
+  Prefix cursors borrow index snapshots and column readers only under the
+  scan's shard read rights and lock. Cursor positions and bounded delta pages
+  are local to the iterator; no query binding is retained by an index.
+
 ### Scheme AST and Codegen Quoting (lib/queryplan.scm and lib/queryplan-*.scm)
 - Build AST as data: most builder blocks use a single leading quote `'(...)` so nested lists are data, not executed at construction.
 - Lambdas: embed as `'((quote lambda) (param-list) body)` where:

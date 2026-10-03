@@ -1985,7 +1985,7 @@ func Init(en scm.Env) {
 		},
 		Optimize: optimizeScanOrderBatchAccept,
 	})
-	scm.Declare(&en, &scm.Declaration{
+	scanOrderDeclaration := &scm.Declaration{
 		Name: "scan_order",
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
@@ -2165,7 +2165,9 @@ func Init(en scm.Env) {
 			Return: &scm.TypeDescriptor{Kind: "any"},
 		},
 		Optimize: optimizeScanOrder,
-	})
+	}
+	scm.Declare(&en, scanOrderDeclaration)
+	declareScanOrderKeys(&en, scanOrderDeclaration)
 	scm.Declare(&en, &scm.Declaration{
 		Name: "scan_order_multi",
 

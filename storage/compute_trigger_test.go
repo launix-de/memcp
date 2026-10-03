@@ -887,3 +887,27 @@ func TestComputeProxyCompressionAllowsDependencyInvalidation(t *testing.T) {
 		}
 	}
 }
+
+func TestOrderedKeysetScanRetainsTargetAndProducerDependencies(t *testing.T) {
+	source := nestedScanAst("keys", "grant", "ref_id")
+	target := nestedScanAst("keys", "items", "ref_id")
+	values := target.Slice()
+	values[0] = scm.NewSymbol("scan_order_keys")
+	values[2] = scm.NewSlice([]scm.Scmer{scm.NewSymbol("list"), values[2], source,
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("list"), scm.NewString("ref_id")}),
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("list"), scm.NewString("owner")})})
+	refs := extractScanJoinInfo(target)
+	if len(refs) != 2 || refs[0].table != "items" || refs[1].table != "grant" {
+		t.Fatalf("ordered keyset lost target or producer dependency: %#v", refs)
+	}
+	found := false
+	for _, col := range refs[0].condCols {
+		found = found || col == "owner"
+	}
+	if !found {
+		t.Fatalf("ordered keyset lost prefix dependency: %#v", refs[0])
+	}
+	if findScanNode(target, "keys", "items") == nil || !containsScan(target) {
+		t.Fatal("ordered keyset was not recognized as a scan")
+	}
+}
