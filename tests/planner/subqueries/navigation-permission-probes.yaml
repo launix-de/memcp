@@ -1353,10 +1353,49 @@ test_cases:
       multiStandort: true
       multiAbteilung: true
       multiPruefung: true
+- name: folder_options_original_sum_without_membership_default_true
+  sql: &folder_options_original_sum_query |
+    SELECT u.ID,
+    COALESCE((SELECT SUM(CASE WHEN t.multiStandort THEN 1 ELSE 0 END) FROM nav_tenant t, nav_access a WHERE t.ID=a.nav_tenant AND a.user=u.ID) > 0, TRUE) AS multiStandort,
+    COALESCE((SELECT SUM(CASE WHEN t.multiAbteilung THEN 1 ELSE 0 END) FROM nav_tenant t, nav_access a WHERE t.ID=a.nav_tenant AND a.user=u.ID) > 0, TRUE) AS multiAbteilung,
+    COALESCE((SELECT SUM(CASE WHEN t.multiPruefung THEN 1 ELSE 0 END) FROM nav_tenant t, nav_access a WHERE t.ID=a.nav_tenant AND a.user=u.ID) > 0, TRUE) AS multiPruefung
+    FROM nav_user u ORDER BY u.ID
+  expect:
+    rows: 3
+    data:
+    - ID: 7
+      multiStandort: true
+      multiAbteilung: true
+      multiPruefung: true
+    - ID: 8
+      multiStandort: false
+      multiAbteilung: false
+      multiPruefung: false
+    - ID: 9
+      multiStandort: true
+      multiAbteilung: true
+      multiPruefung: true
 - name: folder_options_distinguish_each_correlated_boolean
   setup:
   - sql: UPDATE nav_tenant SET multiStandort=TRUE,multiAbteilung=FALSE,multiPruefung=TRUE WHERE ID=1
   sql: *folder_options_query
+  expect:
+    rows: 3
+    data:
+    - ID: 7
+      multiStandort: true
+      multiAbteilung: true
+      multiPruefung: true
+    - ID: 8
+      multiStandort: true
+      multiAbteilung: false
+      multiPruefung: true
+    - ID: 9
+      multiStandort: true
+      multiAbteilung: true
+      multiPruefung: true
+- name: folder_options_original_sum_distinguish_each_correlated_boolean
+  sql: *folder_options_original_sum_query
   expect:
     rows: 3
     data:
@@ -1392,6 +1431,23 @@ test_cases:
       multiStandort: false
       multiAbteilung: true
       multiPruefung: false
+- name: folder_options_original_sum_new_membership_invalidates_default
+  sql: *folder_options_original_sum_query
+  expect:
+    rows: 3
+    data:
+    - ID: 7
+      multiStandort: true
+      multiAbteilung: true
+      multiPruefung: true
+    - ID: 8
+      multiStandort: true
+      multiAbteilung: false
+      multiPruefung: true
+    - ID: 9
+      multiStandort: false
+      multiAbteilung: true
+      multiPruefung: false
 - name: folder_options_union_memberships_per_option
   setup:
   - sql: INSERT INTO nav_access (ID,user,nav_tenant,nav_site) VALUES (4,8,2,NULL)
@@ -1411,10 +1467,44 @@ test_cases:
       multiStandort: false
       multiAbteilung: true
       multiPruefung: false
+- name: folder_options_original_sum_union_memberships_per_option
+  sql: *folder_options_original_sum_query
+  expect:
+    rows: 3
+    data:
+    - ID: 7
+      multiStandort: true
+      multiAbteilung: true
+      multiPruefung: true
+    - ID: 8
+      multiStandort: true
+      multiAbteilung: true
+      multiPruefung: true
+    - ID: 9
+      multiStandort: false
+      multiAbteilung: true
+      multiPruefung: false
 - name: folder_options_revocation_restores_default
   setup:
   - sql: DELETE FROM nav_access WHERE user=9
   sql: *folder_options_query
+  expect:
+    rows: 3
+    data:
+    - ID: 7
+      multiStandort: true
+      multiAbteilung: true
+      multiPruefung: true
+    - ID: 8
+      multiStandort: true
+      multiAbteilung: true
+      multiPruefung: true
+    - ID: 9
+      multiStandort: true
+      multiAbteilung: true
+      multiPruefung: true
+- name: folder_options_original_sum_revocation_restores_default
+  sql: *folder_options_original_sum_query
   expect:
     rows: 3
     data:
@@ -1564,6 +1654,22 @@ test_cases:
   expect: {error: true}
   cleanup:
   - sql: DROP TABLE IF EXISTS nav_nonunique_lookup
+- name: folder_options_original_sum_is_fully_decorrelated
+  sql: |
+    EXPLAIN IR SELECT u.ID,
+    COALESCE((SELECT SUM(CASE WHEN t.multiStandort THEN 1 ELSE 0 END) FROM nav_tenant t, nav_access a WHERE t.ID=a.nav_tenant AND a.user=u.ID) > 0, TRUE) AS multiStandort,
+    COALESCE((SELECT SUM(CASE WHEN t.multiAbteilung THEN 1 ELSE 0 END) FROM nav_tenant t, nav_access a WHERE t.ID=a.nav_tenant AND a.user=u.ID) > 0, TRUE) AS multiAbteilung,
+    COALESCE((SELECT SUM(CASE WHEN t.multiPruefung THEN 1 ELSE 0 END) FROM nav_tenant t, nav_access a WHERE t.ID=a.nav_tenant AND a.user=u.ID) > 0, TRUE) AS multiPruefung
+    FROM nav_user u ORDER BY u.ID
+  expect:
+    result_contains:
+    - 'scalar-agg:'
+    - sql_sum_reduce
+    - group-stage
+    result_not_contains:
+    - inner_select
+    - dependent-subquery
+
 
 cleanup:
 - sql: DROP TABLE IF EXISTS nav_user
