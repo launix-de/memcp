@@ -9843,19 +9843,32 @@ predicate and cardinality guard still own their ordinary row-local evaluation. *
 				(define binder_probe_branches (count (merge_unique (list
 					(map (expr_probe_stages binder_condition) gs_id)
 					(physical_membership_probe_stage_ids binder_condition)))))
-				(define baseline_cost (planner_membership_direct_probe_cost driver_rows))
+				/* The later relation is scanned once for every surviving driver row.
+				A scalar lookup alone misses these repeated scan startups. The
+				semijoin only removes driver rows: its residual scalar comparison,
+				binder predicate and cardinality guard still run normally. Charge
+				the same continuation startup to both alternatives, with each
+				alternative's estimated driver population. */
+				(define continuation_cost (lambda (rows)
+					(planner_cost (* rows planner_membership_scan_invocation_ns)
+						0 0 0 0 0 0 0 rows 0.65)))
+				(define baseline_cost (planner_cost_add
+					(planner_membership_direct_probe_cost driver_rows)
+					(continuation_cost driver_rows) driver_rows 0.65))
 				(define candidate_cost (planner_cost_add
 					(planner_cost_add (planner_cost_add
 						(membership_projection_cost binder_rows selected_binder_rows input_rows '())
 						(planner_membership_direct_probe_cost (* binder_rows binder_probe_branches)) selected_binder_rows 0.5)
 						(membership_projection_cost input_rows selected_input_rows driver_input_rows '()) matching_rows 0.5)
-					(planner_cost_add (planner_membership_direct_probe_cost matching_rows)
+					(planner_cost_add (planner_cost_add (planner_membership_direct_probe_cost matching_rows)
+						(continuation_cost matching_rows) matching_rows 0.65)
 						(if has_overflow (planner_membership_direct_probe_cost input_rows) (planner_zero_cost 0 0.5)) matching_rows 0.5)
 					matching_rows 0.5))
 				(define id (concat "scalar_binder_semijoin:" (source_alias src) ":" (fnv_hash descriptor)))
 				(define choice (planner_physical_choice id (if (planner_cost_better? candidate_cost baseline_cost) "projected_recset" "late_lookup") '("projected_recset" "late_lookup") planning_session))
 				(planner_record_physical_decision (list (list "decision_id" id) (list "decision" "scalar_binder_semijoin") (list "chosen" choice)
-					(list "inputs" (list (list "binder_rows" binder_rows) (list "selected_binder_rows" selected_binder_rows) (list "binder_probe_branches" binder_probe_branches) (list "driver_rows" driver_rows)))
+					(list "inputs" (list (list "binder_rows" binder_rows) (list "selected_binder_rows" selected_binder_rows) (list "binder_probe_branches" binder_probe_branches) (list "driver_rows" driver_rows) (list "binder_scan_invocations" driver_rows)
+						(list "retained_binder_scan_invocations" matching_rows)))
 					(list "alternatives" (list (list (list "plan" "projected_recset") (list "cost" (planner_cost_explain candidate_cost))) (list (list "plan" "late_lookup") (list "cost" (planner_cost_explain baseline_cost)))))) planning_session)
 				(if (not (equal? choice "projected_recset")) nil
 					(begin
