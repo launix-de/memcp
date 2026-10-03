@@ -1070,7 +1070,12 @@ func (t *table) projectJoinKeysToRecSet(currentTx *TxContext, targetKeyCols []st
 // exists; forcing one into existence for a single ad-hoc query can cost far
 // more than the linear scan it was meant to avoid.
 func (t *storageShard) hasEqualityIndexPrefix(currentTx *TxContext, cols []string) bool {
-	for _, index := range t.Indexes {
+	// Index publication is owned by indexMutex, independently of the shard
+	// read lock. Published entries are stable; snapshot only the slice header.
+	t.indexMutex.Lock()
+	indexes := t.Indexes
+	t.indexMutex.Unlock()
+	for _, index := range indexes {
 		if len(index.Cols) < len(cols) {
 			continue
 		}
