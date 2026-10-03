@@ -145,6 +145,22 @@ test_cases:
     LIMIT 1),FALSE) ORDER BY stamp DESC,owner_id ASC,id ASC LIMIT 0
   expect:
     rows: 0
+- name: native prefix cold and indexed paths retain residual filtering
+  scm: |
+    (begin
+      (define target (table "memcp-tests" "ordered_key_item"))
+      (define keys (scan_recset nil (table "memcp-tests" "ordered_key_grant")
+        '() '() '() (lambda () true)))
+      (map (produceN 4) (lambda (iteration)
+        (begin
+          (define result (scan_order_keys nil
+            (list target keys '("owner_id") '("owner_id") '(220 221 1 1 1))
+            '() '() '("stamp") (lambda (stamp) (>= stamp 80100))
+            '("stamp" "owner_id" "id")
+            (list (collate "bin" true) (collate "bin" false) (collate "bin" false))
+            0 3 5 '("id") (lambda (acc id) (+ acc id)) 0))
+          (if (equal? result 100610) true
+            (error "prefix access lost membership, order or residual acceptance"))))))
 - name: empty keyset preserves empty result
   sql: SELECT id FROM ordered_key_item WHERE COALESCE((SELECT TRUE FROM ordered_key_grant WHERE ordered_key_grant.owner_id=ordered_key_item.owner_id
     LIMIT 1),FALSE) ORDER BY stamp DESC,owner_id ASC,id ASC LIMIT 5

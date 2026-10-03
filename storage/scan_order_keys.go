@@ -154,6 +154,14 @@ func declareScanOrderKeys(en *scm.Env, ordinary *scm.Declaration) {
 		if orderedWork <= seekWork {
 			prefix = nil
 		}
+		conditionCols, condition := filterCols, filter
+		if prefix == nil {
+			conditionCols = append([]string{targetKeys[0]}, filterCols...)
+			condition = membership
+		}
+		// Prefix iterators and their native projection fallback emit only members.
+		// Preserve the original residual so each shard prepares it once, instead of
+		// calling scm.Apply through a membership wrapper for every accepted row.
 		if Settings.ScanDebugging {
 			fmt.Printf("[SCAN_ORDER_KEYS] keys=%d rows=%.0f distinct=%.0f merge=%v seek_ns=%.0f ordered_ns=%.0f projection_ns=%.0f\n", keys.count(), rows, distinct, prefix != nil, seekWork, orderedWork, projectionWork)
 		}
@@ -172,7 +180,7 @@ func declareScanOrderKeys(en *scm.Env, ordinary *scm.Declaration) {
 			postCols = scmerSliceToStrings(mustScmerSlice(a[16], "post-order columns"))
 			postFilter = a[17]
 		}
-		spec := scanOrderTableSpec{table: target, prefixMerge: prefix, conditionCols: append([]string{targetKeys[0]}, filterCols...), condition: membership, sortcols: sortValues, callbackCols: scmerSliceToStrings(mustScmerSlice(a[11], "map columns")), callback: a[12], postOrderCols: postCols, postOrderFilter: postFilter, accessSchema: a[2], accessValues: mustScmerSlice(a[3], "access values"), perTableLimit: -1}
+		spec := scanOrderTableSpec{table: target, prefixMerge: prefix, conditionCols: conditionCols, condition: condition, sortcols: sortValues, callbackCols: scmerSliceToStrings(mustScmerSlice(a[11], "map columns")), callback: a[12], postOrderCols: postCols, postOrderFilter: postFilter, accessSchema: a[2], accessValues: mustScmerSlice(a[3], "access values"), perTableLimit: -1}
 		scanStart := time.Now()
 		result := scanOrderMulti(tx, []scanOrderTableSpec{spec}, scanSortDirections(mustScmerSlice(a[7], "sort directions")), 0, scm.ToInt(a[9]), scm.ToInt(a[10]), neutral, outer, notFound)
 		if Settings.ScanDebugging {
