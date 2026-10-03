@@ -2401,9 +2401,11 @@ would still have to project that value over the segment. */
 		/* Callers with a more precise pre/post-limit estimate supply it directly.
 		Older lowering paths still provide a real fallback from their visible driver
 		sources instead of silently disabling every cost-based carrier with nil. */
-		(define effective_probe_work_rows (if (number? (planner_literal_value probe_work_rows))
-			probe_work_rows
-			(probe_context_row_count sources)))
+		(define effective_probe_work_rows (if (qassoc_get (gs_facts stage) (quote fixed_lookup_domain) false)
+			1
+			(if (number? (planner_literal_value probe_work_rows))
+				probe_work_rows
+				(probe_context_row_count sources))))
 		(define probe_catalog (qassoc_get (gs_facts stage) (quote probe_catalog) '()))
 		(define lowering_catalog (group_stage_lowering_catalog stage))
 		(define probe_stages (stage_catalog_with_nested
@@ -2460,7 +2462,7 @@ would still have to project that value over the segment. */
 					value_expr
 					keys
 					lowered_lookup_keys
-					probe_work_rows
+					(if (qassoc_get (gs_facts stage) (quote fixed_lookup_domain) false) 1 probe_work_rows)
 					effective_probe_work_rows)
 				(symbol table-scan)
 				(if (presence_probe_stage? stage)
@@ -2478,7 +2480,8 @@ would still have to project that value over the segment. */
 						order_exprs dirs offset_value partition_limit (physical_query_tx_symbol)))
 				_ (neumann_fail "build_queryplan" "scalar-first probe has no physical operator"))))
 		(define memoized_lowered (if
-			(qassoc_get (gs_facts stage) (quote segment_invariant_scalar_probe) false)
+			(or (qassoc_get (gs_facts stage) (quote segment_invariant_scalar_probe) false)
+				(qassoc_get (gs_facts stage) (quote fixed_lookup_domain) false))
 			(list
 				(physical_query_session_symbol)
 				"get_or_compute_scoped"
@@ -9233,7 +9236,7 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 		(if insensitive (quote insensitive) (quote exact))
 		(if (and insensitive (string? alias)) (toLower alias) alias))))
 
-(define probe_stage_alias_index_using_graph (lambda (stages dependency_graph sources consumers)
+(define probe_stage_alias_index_using_graph (lambda (stages dependency_graph sources consumers driver_sources default_alias driver_condition)
 	(begin
 		(define entries (filter (map (coalesceNil sources '()) (lambda (src)
 			(begin
@@ -9271,11 +9274,15 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 					quadratic in the number of scalar subqueries. */
 					(define probe_catalog
 						(cdr (get_assoc closures (logical_stage_key stage))))
+					(define fixed_stage (if (and (presence_probe_stage? stage)
+						(stage_fixed_lookup_domain? stages stage driver_sources default_alias driver_condition))
+						(group_stage_with_facts stage (qassoc_set (gs_facts stage) (quote fixed_lookup_domain) true))
+						stage))
 					(define marker_stage (if direct
 						stage
-						(group_stage_with_facts stage
+						(group_stage_with_facts fixed_stage
 							(qassoc_set
-								(qassoc_set (gs_facts stage) (quote probe_catalog) probe_catalog)
+								(qassoc_set (gs_facts fixed_stage) (quote probe_catalog) probe_catalog)
 								(quote promoted_probe) true))))
 					(define index_entry (list marker_stage (if direct
 						(list marker_stage)
@@ -9291,7 +9298,7 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 
 (define probe_stage_alias_index (lambda (stages sources consumers)
 	(probe_stage_alias_index_using_graph
-		stages (stage_dependency_graph stages) sources consumers)))
+		stages (stage_dependency_graph stages) sources consumers '() nil true)))
 
 (define probe_stage_entry_for_alias_using_index (lambda (index default_alias tblvar tbl_ignorecase)
 	(get_assoc index

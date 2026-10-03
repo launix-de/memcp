@@ -109,6 +109,38 @@ the source row; otherwise this is a join equality, not a query-local value. */
 				(stage_lookup_expr_resolves_in_sources? sources default_alias combined)
 				(source_unique_point_condition? src combined))))))
 
+/* Equality fixes a probe domain without proving that its driver row is unique.
+Keep the actual typed row keys: substituting a SQL literal here could change
+numeric coercion or the child's collation semantics. Text keys stay out because
+one collation equality can admit several byte-distinct values. The ordinary
+cost comparison still decides whether one memoized probe beats a carrier. */
+(define stage_fixed_lookup_domain? (lambda (stages stage sources default_alias condition)
+	(begin
+		(define drivers (range_probe_driver_sources sources))
+		(define lookups (qassoc_get (gs_facts stage) (quote lookup-keys) '()))
+		(define fixed (and (single_source? drivers)
+			(and (source_is_base_table? (car drivers))
+				(and (not (source_outer? (car drivers)))
+					(and (not (empty_list? lookups))
+						(reduce lookups (lambda (ok key)
+							(and ok
+								(if (not (expr_contains_column_ref? key))
+									(contribution_pure_expr? key)
+									(begin
+										(define driver (car drivers))
+										(define col (direct_column_name_for_alias driver key))
+										(define binding (if (nil? col) (list false nil)
+											(source_column_equality_binding driver col
+												(combine_where condition (source_join_expr driver)))))
+										(and (not (nil? col))
+											(and (recmap_direct_key_column? driver col)
+												(and (car binding) (contribution_pure_expr? (cadr binding)))))))))
+							true))))))
+		(and fixed
+			(reduce (stage_dependency_closure_using_graph (stage_dependency_graph stages) stage) (lambda (ok dependency)
+				(and ok (reduce (contribution_stage_exprs dependency)
+					(lambda (pure expr) (and pure (contribution_pure_expr? expr))) true))) true))))))
+
 (define scalar_aggregate_probe_aggregate_safe? (lambda (ag)
 	(or
 		(aggregate_count_like? ag)
@@ -241,8 +273,10 @@ context gates because bare EXISTS also has a separate membership lowerer. */
 					(and (stage_lookup_keys_resolve_in_sources? stage probe_sources default_alias)
 						(or (stage_direct_probe_cost_preferred_for_limit? stage limit_value planning_session)
 							(or (presence_stage_probe_allowed_in_context? stage probe_sources)
-								(probe_context_unique_point?
-									cardinality_sources default_alias driver_condition))))))))))
+								(or (probe_context_unique_point?
+									cardinality_sources default_alias driver_condition)
+									(and (stage_fixed_lookup_domain? stages stage cardinality_sources default_alias driver_condition)
+										(stage_direct_probe_cost_preferred? stage 1 planning_session))))))))))))
 
 (define scalar_aggregate_probe_output_source_for_block? (lambda (stages sources default_alias limit_value src planning_session)
 	(if (not (scalar_aggregate_probe_stage_output_source? stages src))
@@ -890,7 +924,7 @@ for that scan. The same prepared table is reused by every guarded variant. */
 					(partitioned_stage_output_sources stages selected_probe_sources)
 					'())))
 		(define probe_index (probe_stage_alias_index_using_graph
-			stages dependency_graph probe_sources consumers))
+			stages dependency_graph probe_sources consumers sources default_alias (qb_where block)))
 		(define rewritten_sources (rewrite_scalar_first_probe_sources_using_index stages sources probe_index default_alias))
 		(make_query_block
 			(qb_schema block)
