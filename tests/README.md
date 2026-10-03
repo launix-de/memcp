@@ -104,6 +104,8 @@ this SQL correctness coverage.
 | Notification ordering/anti-joins across shards and lookup mutations | `performance/notification-membership-scaling.yaml` |
 | Session-dependent grouped reminder counts | `planner/aggregates/session-group-reminders.yaml` |
 | Tenant membership, LIKE search/count and ordered ACL pages at scale | `performance/tenant-document-membership.yaml`, `performance/like-acl-query-shapes.yaml`, `performance/ordered-acl-page-window.yaml` |
+| 800k-document navigation, empty years and complete composite membership keys | `performance/tenant-document-navigation.yaml` |
+| 800k-reference point permissions without unique metadata, duplicate driver rows and scalar cardinality | `performance/correlated-union-file-acl.yaml` |
 | LIKE/index visibility after inserts and deleted selection/carrier rows | `storage/indexes/fulltext-like-index.yaml`, `integration/regressions/deleted-row-carrier-visibility.yaml` |
 
 The stateful tests intentionally execute identical SQL again after mutations or

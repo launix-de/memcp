@@ -1,0 +1,365 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Imported tables deliberately have no declared unique keys.
+metadata:
+  description: Point file permission through a union of direct and nested tenant ACL references
+  isolated: true
+  performance_rows: 800000
+setup:
+- sql: DROP TABLE IF EXISTS acl_file
+- sql: CREATE TABLE acl_file (ID INT) ENGINE=memory
+- sql: DROP TABLE IF EXISTS acl_dav
+- sql: CREATE TABLE acl_dav (ID INT, content INT) ENGINE=memory
+- sql: DROP TABLE IF EXISTS acl_tenant
+- sql: CREATE TABLE acl_tenant (ID INT) ENGINE=memory
+- sql: DROP TABLE IF EXISTS acl_site
+- sql: CREATE TABLE acl_site (ID INT, acl_tenant INTEGER) ENGINE=memory
+- sql: DROP TABLE IF EXISTS acl_access
+- sql: CREATE TABLE acl_access (ID INT, user INT, acl_tenant INT, acl_site INT) ENGINE=memory
+- sql: DROP TABLE IF EXISTS acl_document
+- sql: CREATE TABLE acl_document (ID INT, file INTEGER, acl_site INTEGER) ENGINE=memory
+- sql: INSERT INTO acl_dav (ID,content) VALUES (1,2)
+- sql: INSERT INTO acl_access (ID,user,acl_tenant,acl_site) VALUES (1,7,NULL,NULL),(2,8,1,NULL)
+- scm: |-
+    (begin
+      (insert (table "memcp-tests" "acl_file") '("ID")
+        (map (produceN 800001) (lambda (i) (list (+ i 1)))))
+      (insert (table "memcp-tests" "acl_tenant") '("ID")
+        (map (produceN 100) (lambda (i) (list (+ i 1)))))
+      (insert (table "memcp-tests" "acl_site") '("ID" "acl_tenant")
+        (map (produceN 1000) (lambda (i) (list (+ i 1) (+ 1 (mod i 100))))))
+      (insert (table "memcp-tests" "acl_document") '("ID" "file" "acl_site")
+        (map (produceN 800000) (lambda (i) (list (+ i 1) (+ i 1) (+ 1 (mod i 1000))))))
+      (map '("acl_document" "acl_site" "acl_tenant" "acl_file" "acl_dav" "acl_access")
+        (lambda (name) (rebuild (table "memcp-tests" name) true false))))
+- sql: DROP TABLE IF EXISTS acl_text_file
+- sql: CREATE TABLE acl_text_file (ID VARCHAR(30) COLLATE utf8mb4_general_ci, ordinal INT) ENGINE=memory
+- sql: DROP TABLE IF EXISTS acl_text_ref
+- sql: CREATE TABLE acl_text_ref (ID INT, file VARCHAR(30) COLLATE bin) ENGINE=memory
+- sql: INSERT INTO acl_text_file VALUES ('a',1),('A',2)
+- sql: INSERT INTO acl_text_ref VALUES (1,'a')
+test_cases:
+- name: 'Perf: point file permission through correlated UNION ALL'
+  session_id: file-acl-perf
+  setup:
+  - sql: SET @acl_actor=8
+  sql: "SELECT ID, EXISTS (\n\t\t\tSELECT `ID` FROM `acl_dav` WHERE `content` = acl_file.`ID` AND (true)\n\tUNION\
+    \ ALL \n\t\t\tSELECT `ID` FROM `acl_document` WHERE `file` = acl_file.`ID` AND (((('0') OR (EXISTS (SELECT (TRUE)\
+    \ FROM `acl_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @acl_actor AND ((`hfjCDFco`.`acl_tenant`) IS NULL)\
+    \ LIMIT 1))) OR ((NOT ('0')) AND (NOT ('0')) AND (NOT (EXISTS (SELECT (TRUE) FROM `acl_access` `SfzKFmFf` WHERE\
+    \ `SfzKFmFf`.`user` = @acl_actor AND ((`SfzKFmFf`.`acl_tenant`) IS NULL) LIMIT 1))))) AND ((('0') OR (EXISTS\
+    \ (SELECT (TRUE) FROM `acl_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @acl_actor AND ((`hfjCDFco`.`acl_tenant`)\
+    \ IS NULL) LIMIT 1))) OR ((NOT ('0')) AND (NOT ('0')) AND (NOT (EXISTS (SELECT (TRUE) FROM `acl_access` `SfzKFmFf`\
+    \ WHERE `SfzKFmFf`.`user` = @acl_actor AND ((`SfzKFmFf`.`acl_tenant`) IS NULL) LIMIT 1)))) OR ('0')) AND ((('0')\
+    \ OR (EXISTS (SELECT (TRUE) FROM `acl_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @acl_actor AND ((`hfjCDFco`.`acl_tenant`)\
+    \ IS NULL) LIMIT 1))) OR ((NOT ('0')) AND (NOT ('0')) AND (NOT (EXISTS (SELECT (TRUE) FROM `acl_access` `SfzKFmFf`\
+    \ WHERE `SfzKFmFf`.`user` = @acl_actor AND ((`SfzKFmFf`.`acl_tenant`) IS NULL) LIMIT 1))))) AND (COALESCE((SELECT\
+    \ (((('0') OR (EXISTS (SELECT (TRUE) FROM `acl_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @acl_actor AND ((`hfjCDFco`.`acl_tenant`)\
+    \ IS NULL) LIMIT 1))) OR ((NOT ('0')) AND (NOT ('0')) AND (NOT (EXISTS (SELECT (TRUE) FROM `acl_access` `SfzKFmFf`\
+    \ WHERE `SfzKFmFf`.`user` = @acl_actor AND ((`SfzKFmFf`.`acl_tenant`) IS NULL) LIMIT 1)))) OR ('0')) AND (CASE\
+    \ WHEN (('0') OR (EXISTS (SELECT (TRUE) FROM `acl_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @acl_actor AND\
+    \ ((`hfjCDFco`.`acl_tenant`) IS NULL) LIMIT 1))) OR ('0') THEN TRUE ELSE EXISTS (SELECT (TRUE) FROM `acl_access`\
+    \ `bItMW8cS` WHERE TRUE AND (((COALESCE(`bItMW8cS`.`acl_site`, `RBdbO6dd`.`ID`)) = (`RBdbO6dd`.`ID`)) AND ((`bItMW8cS`.`user`)\
+    \ = (@acl_actor))) LIMIT 1) END) AND ((('0') OR (EXISTS (SELECT (TRUE) FROM `acl_access` `hfjCDFco` WHERE `hfjCDFco`.`user`\
+    \ = @acl_actor AND ((`hfjCDFco`.`acl_tenant`) IS NULL) LIMIT 1))) OR ((NOT ('0')) AND (NOT ('0')) AND (NOT (EXISTS\
+    \ (SELECT (TRUE) FROM `acl_access` `SfzKFmFf` WHERE `SfzKFmFf`.`user` = @acl_actor AND ((`SfzKFmFf`.`acl_tenant`)\
+    \ IS NULL) LIMIT 1))))) AND (COALESCE((SELECT (((('0') OR (EXISTS (SELECT (TRUE) FROM `acl_access` `hfjCDFco`\
+    \ WHERE `hfjCDFco`.`user` = @acl_actor AND ((`hfjCDFco`.`acl_tenant`) IS NULL) LIMIT 1))) OR ((NOT ('0')) AND\
+    \ (NOT ('0')) AND (NOT (EXISTS (SELECT (TRUE) FROM `acl_access` `SfzKFmFf` WHERE `SfzKFmFf`.`user` = @acl_actor\
+    \ AND ((`SfzKFmFf`.`acl_tenant`) IS NULL) LIMIT 1))))) AND (CASE WHEN (('0') OR (EXISTS (SELECT (TRUE) FROM\
+    \ `acl_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @acl_actor AND ((`hfjCDFco`.`acl_tenant`) IS NULL) LIMIT\
+    \ 1))) OR ('0') THEN TRUE ELSE EXISTS (SELECT (TRUE) FROM `acl_access` `dsZCbLkI` WHERE `dsZCbLkI`.`acl_tenant`\
+    \ = `VMjurwnB`.`ID` AND ((`dsZCbLkI`.`user`) = (@acl_actor)) LIMIT 1) END)) FROM `acl_tenant` `VMjurwnB` WHERE\
+    \ `VMjurwnB`.`ID` = `RBdbO6dd`.`acl_tenant` LIMIT 1), FALSE))) FROM `acl_site` `RBdbO6dd` WHERE `RBdbO6dd`.`ID`\
+    \ = `acl_document`.`acl_site` LIMIT 1), FALSE)))) AS can_view FROM acl_file WHERE `ID` = '1'"
+  expect:
+    rows: 1
+    data:
+    - ID: 1
+      can_view: 1
+  warmup: 0
+  timing_samples: 4
+  timing_aggregation: total
+  threshold_ms: 120000
+- name: Point permission lowers to a query-local bound probe without unique metadata
+  session_id: file-acl-perf
+  sql: "EXPLAIN SELECT ID, EXISTS (\n\t\t\tSELECT `ID` FROM `acl_dav` WHERE `content` = acl_file.`ID` AND (true)\n\
+    \tUNION ALL \n\t\t\tSELECT `ID` FROM `acl_document` WHERE `file` = acl_file.`ID` AND (((('0') OR (EXISTS (SELECT\
+    \ (TRUE) FROM `acl_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @acl_actor AND ((`hfjCDFco`.`acl_tenant`) IS\
+    \ NULL) LIMIT 1))) OR ((NOT ('0')) AND (NOT ('0')) AND (NOT (EXISTS (SELECT (TRUE) FROM `acl_access` `SfzKFmFf`\
+    \ WHERE `SfzKFmFf`.`user` = @acl_actor AND ((`SfzKFmFf`.`acl_tenant`) IS NULL) LIMIT 1))))) AND ((('0') OR (EXISTS\
+    \ (SELECT (TRUE) FROM `acl_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @acl_actor AND ((`hfjCDFco`.`acl_tenant`)\
+    \ IS NULL) LIMIT 1))) OR ((NOT ('0')) AND (NOT ('0')) AND (NOT (EXISTS (SELECT (TRUE) FROM `acl_access` `SfzKFmFf`\
+    \ WHERE `SfzKFmFf`.`user` = @acl_actor AND ((`SfzKFmFf`.`acl_tenant`) IS NULL) LIMIT 1)))) OR ('0')) AND ((('0')\
+    \ OR (EXISTS (SELECT (TRUE) FROM `acl_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @acl_actor AND ((`hfjCDFco`.`acl_tenant`)\
+    \ IS NULL) LIMIT 1))) OR ((NOT ('0')) AND (NOT ('0')) AND (NOT (EXISTS (SELECT (TRUE) FROM `acl_access` `SfzKFmFf`\
+    \ WHERE `SfzKFmFf`.`user` = @acl_actor AND ((`SfzKFmFf`.`acl_tenant`) IS NULL) LIMIT 1))))) AND (COALESCE((SELECT\
+    \ (((('0') OR (EXISTS (SELECT (TRUE) FROM `acl_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @acl_actor AND ((`hfjCDFco`.`acl_tenant`)\
+    \ IS NULL) LIMIT 1))) OR ((NOT ('0')) AND (NOT ('0')) AND (NOT (EXISTS (SELECT (TRUE) FROM `acl_access` `SfzKFmFf`\
+    \ WHERE `SfzKFmFf`.`user` = @acl_actor AND ((`SfzKFmFf`.`acl_tenant`) IS NULL) LIMIT 1)))) OR ('0')) AND (CASE\
+    \ WHEN (('0') OR (EXISTS (SELECT (TRUE) FROM `acl_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @acl_actor AND\
+    \ ((`hfjCDFco`.`acl_tenant`) IS NULL) LIMIT 1))) OR ('0') THEN TRUE ELSE EXISTS (SELECT (TRUE) FROM `acl_access`\
+    \ `bItMW8cS` WHERE TRUE AND (((COALESCE(`bItMW8cS`.`acl_site`, `RBdbO6dd`.`ID`)) = (`RBdbO6dd`.`ID`)) AND ((`bItMW8cS`.`user`)\
+    \ = (@acl_actor))) LIMIT 1) END) AND ((('0') OR (EXISTS (SELECT (TRUE) FROM `acl_access` `hfjCDFco` WHERE `hfjCDFco`.`user`\
+    \ = @acl_actor AND ((`hfjCDFco`.`acl_tenant`) IS NULL) LIMIT 1))) OR ((NOT ('0')) AND (NOT ('0')) AND (NOT (EXISTS\
+    \ (SELECT (TRUE) FROM `acl_access` `SfzKFmFf` WHERE `SfzKFmFf`.`user` = @acl_actor AND ((`SfzKFmFf`.`acl_tenant`)\
+    \ IS NULL) LIMIT 1))))) AND (COALESCE((SELECT (((('0') OR (EXISTS (SELECT (TRUE) FROM `acl_access` `hfjCDFco`\
+    \ WHERE `hfjCDFco`.`user` = @acl_actor AND ((`hfjCDFco`.`acl_tenant`) IS NULL) LIMIT 1))) OR ((NOT ('0')) AND\
+    \ (NOT ('0')) AND (NOT (EXISTS (SELECT (TRUE) FROM `acl_access` `SfzKFmFf` WHERE `SfzKFmFf`.`user` = @acl_actor\
+    \ AND ((`SfzKFmFf`.`acl_tenant`) IS NULL) LIMIT 1))))) AND (CASE WHEN (('0') OR (EXISTS (SELECT (TRUE) FROM\
+    \ `acl_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @acl_actor AND ((`hfjCDFco`.`acl_tenant`) IS NULL) LIMIT\
+    \ 1))) OR ('0') THEN TRUE ELSE EXISTS (SELECT (TRUE) FROM `acl_access` `dsZCbLkI` WHERE `dsZCbLkI`.`acl_tenant`\
+    \ = `VMjurwnB`.`ID` AND ((`dsZCbLkI`.`user`) = (@acl_actor)) LIMIT 1) END)) FROM `acl_tenant` `VMjurwnB` WHERE\
+    \ `VMjurwnB`.`ID` = `RBdbO6dd`.`acl_tenant` LIMIT 1), FALSE))) FROM `acl_site` `RBdbO6dd` WHERE `RBdbO6dd`.`ID`\
+    \ = `acl_document`.`acl_site` LIMIT 1), FALSE)))) AS can_view FROM acl_file WHERE `ID` = '1'"
+  expect:
+    result_contains:
+    - get_or_compute_scoped
+    - ':bound:'
+- name: Collated point predicate preserves byte-distinct child lookup keys
+  sql: SELECT f.ID, EXISTS (SELECT ID FROM acl_text_ref WHERE file=f.ID UNION ALL SELECT ID FROM acl_text_ref WHERE
+    file=f.ID AND FALSE) AS can_view FROM acl_text_file f WHERE f.ID='a' ORDER BY f.ordinal
+  expect:
+    rows: 2
+    data:
+    - ID: a
+      can_view: 1
+    - ID: A
+      can_view: 0
+- name: Tenant cannot read another tenant file
+  session_id: file-acl-perf
+  setup:
+  - sql: SET @acl_actor=8
+  sql: "SELECT ID, EXISTS (\n\t\t\tSELECT `ID` FROM `acl_dav` WHERE `content` = acl_file.`ID` AND (true)\n\tUNION\
+    \ ALL \n\t\t\tSELECT `ID` FROM `acl_document` WHERE `file` = acl_file.`ID` AND (((('0') OR (EXISTS (SELECT (TRUE)\
+    \ FROM `acl_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @acl_actor AND ((`hfjCDFco`.`acl_tenant`) IS NULL)\
+    \ LIMIT 1))) OR ((NOT ('0')) AND (NOT ('0')) AND (NOT (EXISTS (SELECT (TRUE) FROM `acl_access` `SfzKFmFf` WHERE\
+    \ `SfzKFmFf`.`user` = @acl_actor AND ((`SfzKFmFf`.`acl_tenant`) IS NULL) LIMIT 1))))) AND ((('0') OR (EXISTS\
+    \ (SELECT (TRUE) FROM `acl_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @acl_actor AND ((`hfjCDFco`.`acl_tenant`)\
+    \ IS NULL) LIMIT 1))) OR ((NOT ('0')) AND (NOT ('0')) AND (NOT (EXISTS (SELECT (TRUE) FROM `acl_access` `SfzKFmFf`\
+    \ WHERE `SfzKFmFf`.`user` = @acl_actor AND ((`SfzKFmFf`.`acl_tenant`) IS NULL) LIMIT 1)))) OR ('0')) AND ((('0')\
+    \ OR (EXISTS (SELECT (TRUE) FROM `acl_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @acl_actor AND ((`hfjCDFco`.`acl_tenant`)\
+    \ IS NULL) LIMIT 1))) OR ((NOT ('0')) AND (NOT ('0')) AND (NOT (EXISTS (SELECT (TRUE) FROM `acl_access` `SfzKFmFf`\
+    \ WHERE `SfzKFmFf`.`user` = @acl_actor AND ((`SfzKFmFf`.`acl_tenant`) IS NULL) LIMIT 1))))) AND (COALESCE((SELECT\
+    \ (((('0') OR (EXISTS (SELECT (TRUE) FROM `acl_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @acl_actor AND ((`hfjCDFco`.`acl_tenant`)\
+    \ IS NULL) LIMIT 1))) OR ((NOT ('0')) AND (NOT ('0')) AND (NOT (EXISTS (SELECT (TRUE) FROM `acl_access` `SfzKFmFf`\
+    \ WHERE `SfzKFmFf`.`user` = @acl_actor AND ((`SfzKFmFf`.`acl_tenant`) IS NULL) LIMIT 1)))) OR ('0')) AND (CASE\
+    \ WHEN (('0') OR (EXISTS (SELECT (TRUE) FROM `acl_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @acl_actor AND\
+    \ ((`hfjCDFco`.`acl_tenant`) IS NULL) LIMIT 1))) OR ('0') THEN TRUE ELSE EXISTS (SELECT (TRUE) FROM `acl_access`\
+    \ `bItMW8cS` WHERE TRUE AND (((COALESCE(`bItMW8cS`.`acl_site`, `RBdbO6dd`.`ID`)) = (`RBdbO6dd`.`ID`)) AND ((`bItMW8cS`.`user`)\
+    \ = (@acl_actor))) LIMIT 1) END) AND ((('0') OR (EXISTS (SELECT (TRUE) FROM `acl_access` `hfjCDFco` WHERE `hfjCDFco`.`user`\
+    \ = @acl_actor AND ((`hfjCDFco`.`acl_tenant`) IS NULL) LIMIT 1))) OR ((NOT ('0')) AND (NOT ('0')) AND (NOT (EXISTS\
+    \ (SELECT (TRUE) FROM `acl_access` `SfzKFmFf` WHERE `SfzKFmFf`.`user` = @acl_actor AND ((`SfzKFmFf`.`acl_tenant`)\
+    \ IS NULL) LIMIT 1))))) AND (COALESCE((SELECT (((('0') OR (EXISTS (SELECT (TRUE) FROM `acl_access` `hfjCDFco`\
+    \ WHERE `hfjCDFco`.`user` = @acl_actor AND ((`hfjCDFco`.`acl_tenant`) IS NULL) LIMIT 1))) OR ((NOT ('0')) AND\
+    \ (NOT ('0')) AND (NOT (EXISTS (SELECT (TRUE) FROM `acl_access` `SfzKFmFf` WHERE `SfzKFmFf`.`user` = @acl_actor\
+    \ AND ((`SfzKFmFf`.`acl_tenant`) IS NULL) LIMIT 1))))) AND (CASE WHEN (('0') OR (EXISTS (SELECT (TRUE) FROM\
+    \ `acl_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @acl_actor AND ((`hfjCDFco`.`acl_tenant`) IS NULL) LIMIT\
+    \ 1))) OR ('0') THEN TRUE ELSE EXISTS (SELECT (TRUE) FROM `acl_access` `dsZCbLkI` WHERE `dsZCbLkI`.`acl_tenant`\
+    \ = `VMjurwnB`.`ID` AND ((`dsZCbLkI`.`user`) = (@acl_actor)) LIMIT 1) END)) FROM `acl_tenant` `VMjurwnB` WHERE\
+    \ `VMjurwnB`.`ID` = `RBdbO6dd`.`acl_tenant` LIMIT 1), FALSE))) FROM `acl_site` `RBdbO6dd` WHERE `RBdbO6dd`.`ID`\
+    \ = `acl_document`.`acl_site` LIMIT 1), FALSE)))) AS can_view FROM acl_file WHERE `ID` = '3'"
+  expect:
+    rows: 1
+    data:
+    - ID: 3
+      can_view: 0
+- name: DAV branch authorizes independent file
+  session_id: file-acl-perf
+  setup:
+  - sql: SET @acl_actor=8
+  sql: "SELECT ID, EXISTS (\n\t\t\tSELECT `ID` FROM `acl_dav` WHERE `content` = acl_file.`ID` AND (true)\n\tUNION\
+    \ ALL \n\t\t\tSELECT `ID` FROM `acl_document` WHERE `file` = acl_file.`ID` AND (((('0') OR (EXISTS (SELECT (TRUE)\
+    \ FROM `acl_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @acl_actor AND ((`hfjCDFco`.`acl_tenant`) IS NULL)\
+    \ LIMIT 1))) OR ((NOT ('0')) AND (NOT ('0')) AND (NOT (EXISTS (SELECT (TRUE) FROM `acl_access` `SfzKFmFf` WHERE\
+    \ `SfzKFmFf`.`user` = @acl_actor AND ((`SfzKFmFf`.`acl_tenant`) IS NULL) LIMIT 1))))) AND ((('0') OR (EXISTS\
+    \ (SELECT (TRUE) FROM `acl_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @acl_actor AND ((`hfjCDFco`.`acl_tenant`)\
+    \ IS NULL) LIMIT 1))) OR ((NOT ('0')) AND (NOT ('0')) AND (NOT (EXISTS (SELECT (TRUE) FROM `acl_access` `SfzKFmFf`\
+    \ WHERE `SfzKFmFf`.`user` = @acl_actor AND ((`SfzKFmFf`.`acl_tenant`) IS NULL) LIMIT 1)))) OR ('0')) AND ((('0')\
+    \ OR (EXISTS (SELECT (TRUE) FROM `acl_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @acl_actor AND ((`hfjCDFco`.`acl_tenant`)\
+    \ IS NULL) LIMIT 1))) OR ((NOT ('0')) AND (NOT ('0')) AND (NOT (EXISTS (SELECT (TRUE) FROM `acl_access` `SfzKFmFf`\
+    \ WHERE `SfzKFmFf`.`user` = @acl_actor AND ((`SfzKFmFf`.`acl_tenant`) IS NULL) LIMIT 1))))) AND (COALESCE((SELECT\
+    \ (((('0') OR (EXISTS (SELECT (TRUE) FROM `acl_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @acl_actor AND ((`hfjCDFco`.`acl_tenant`)\
+    \ IS NULL) LIMIT 1))) OR ((NOT ('0')) AND (NOT ('0')) AND (NOT (EXISTS (SELECT (TRUE) FROM `acl_access` `SfzKFmFf`\
+    \ WHERE `SfzKFmFf`.`user` = @acl_actor AND ((`SfzKFmFf`.`acl_tenant`) IS NULL) LIMIT 1)))) OR ('0')) AND (CASE\
+    \ WHEN (('0') OR (EXISTS (SELECT (TRUE) FROM `acl_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @acl_actor AND\
+    \ ((`hfjCDFco`.`acl_tenant`) IS NULL) LIMIT 1))) OR ('0') THEN TRUE ELSE EXISTS (SELECT (TRUE) FROM `acl_access`\
+    \ `bItMW8cS` WHERE TRUE AND (((COALESCE(`bItMW8cS`.`acl_site`, `RBdbO6dd`.`ID`)) = (`RBdbO6dd`.`ID`)) AND ((`bItMW8cS`.`user`)\
+    \ = (@acl_actor))) LIMIT 1) END) AND ((('0') OR (EXISTS (SELECT (TRUE) FROM `acl_access` `hfjCDFco` WHERE `hfjCDFco`.`user`\
+    \ = @acl_actor AND ((`hfjCDFco`.`acl_tenant`) IS NULL) LIMIT 1))) OR ((NOT ('0')) AND (NOT ('0')) AND (NOT (EXISTS\
+    \ (SELECT (TRUE) FROM `acl_access` `SfzKFmFf` WHERE `SfzKFmFf`.`user` = @acl_actor AND ((`SfzKFmFf`.`acl_tenant`)\
+    \ IS NULL) LIMIT 1))))) AND (COALESCE((SELECT (((('0') OR (EXISTS (SELECT (TRUE) FROM `acl_access` `hfjCDFco`\
+    \ WHERE `hfjCDFco`.`user` = @acl_actor AND ((`hfjCDFco`.`acl_tenant`) IS NULL) LIMIT 1))) OR ((NOT ('0')) AND\
+    \ (NOT ('0')) AND (NOT (EXISTS (SELECT (TRUE) FROM `acl_access` `SfzKFmFf` WHERE `SfzKFmFf`.`user` = @acl_actor\
+    \ AND ((`SfzKFmFf`.`acl_tenant`) IS NULL) LIMIT 1))))) AND (CASE WHEN (('0') OR (EXISTS (SELECT (TRUE) FROM\
+    \ `acl_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @acl_actor AND ((`hfjCDFco`.`acl_tenant`) IS NULL) LIMIT\
+    \ 1))) OR ('0') THEN TRUE ELSE EXISTS (SELECT (TRUE) FROM `acl_access` `dsZCbLkI` WHERE `dsZCbLkI`.`acl_tenant`\
+    \ = `VMjurwnB`.`ID` AND ((`dsZCbLkI`.`user`) = (@acl_actor)) LIMIT 1) END)) FROM `acl_tenant` `VMjurwnB` WHERE\
+    \ `VMjurwnB`.`ID` = `RBdbO6dd`.`acl_tenant` LIMIT 1), FALSE))) FROM `acl_site` `RBdbO6dd` WHERE `RBdbO6dd`.`ID`\
+    \ = `acl_document`.`acl_site` LIMIT 1), FALSE)))) AS can_view FROM acl_file WHERE `ID` = '2'"
+  expect:
+    rows: 1
+    data:
+    - ID: 2
+      can_view: 1
+- name: Missing document reference denies file
+  session_id: file-acl-perf
+  setup:
+  - sql: SET @acl_actor=8
+  sql: "SELECT ID, EXISTS (\n\t\t\tSELECT `ID` FROM `acl_dav` WHERE `content` = acl_file.`ID` AND (true)\n\tUNION\
+    \ ALL \n\t\t\tSELECT `ID` FROM `acl_document` WHERE `file` = acl_file.`ID` AND (((('0') OR (EXISTS (SELECT (TRUE)\
+    \ FROM `acl_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @acl_actor AND ((`hfjCDFco`.`acl_tenant`) IS NULL)\
+    \ LIMIT 1))) OR ((NOT ('0')) AND (NOT ('0')) AND (NOT (EXISTS (SELECT (TRUE) FROM `acl_access` `SfzKFmFf` WHERE\
+    \ `SfzKFmFf`.`user` = @acl_actor AND ((`SfzKFmFf`.`acl_tenant`) IS NULL) LIMIT 1))))) AND ((('0') OR (EXISTS\
+    \ (SELECT (TRUE) FROM `acl_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @acl_actor AND ((`hfjCDFco`.`acl_tenant`)\
+    \ IS NULL) LIMIT 1))) OR ((NOT ('0')) AND (NOT ('0')) AND (NOT (EXISTS (SELECT (TRUE) FROM `acl_access` `SfzKFmFf`\
+    \ WHERE `SfzKFmFf`.`user` = @acl_actor AND ((`SfzKFmFf`.`acl_tenant`) IS NULL) LIMIT 1)))) OR ('0')) AND ((('0')\
+    \ OR (EXISTS (SELECT (TRUE) FROM `acl_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @acl_actor AND ((`hfjCDFco`.`acl_tenant`)\
+    \ IS NULL) LIMIT 1))) OR ((NOT ('0')) AND (NOT ('0')) AND (NOT (EXISTS (SELECT (TRUE) FROM `acl_access` `SfzKFmFf`\
+    \ WHERE `SfzKFmFf`.`user` = @acl_actor AND ((`SfzKFmFf`.`acl_tenant`) IS NULL) LIMIT 1))))) AND (COALESCE((SELECT\
+    \ (((('0') OR (EXISTS (SELECT (TRUE) FROM `acl_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @acl_actor AND ((`hfjCDFco`.`acl_tenant`)\
+    \ IS NULL) LIMIT 1))) OR ((NOT ('0')) AND (NOT ('0')) AND (NOT (EXISTS (SELECT (TRUE) FROM `acl_access` `SfzKFmFf`\
+    \ WHERE `SfzKFmFf`.`user` = @acl_actor AND ((`SfzKFmFf`.`acl_tenant`) IS NULL) LIMIT 1)))) OR ('0')) AND (CASE\
+    \ WHEN (('0') OR (EXISTS (SELECT (TRUE) FROM `acl_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @acl_actor AND\
+    \ ((`hfjCDFco`.`acl_tenant`) IS NULL) LIMIT 1))) OR ('0') THEN TRUE ELSE EXISTS (SELECT (TRUE) FROM `acl_access`\
+    \ `bItMW8cS` WHERE TRUE AND (((COALESCE(`bItMW8cS`.`acl_site`, `RBdbO6dd`.`ID`)) = (`RBdbO6dd`.`ID`)) AND ((`bItMW8cS`.`user`)\
+    \ = (@acl_actor))) LIMIT 1) END) AND ((('0') OR (EXISTS (SELECT (TRUE) FROM `acl_access` `hfjCDFco` WHERE `hfjCDFco`.`user`\
+    \ = @acl_actor AND ((`hfjCDFco`.`acl_tenant`) IS NULL) LIMIT 1))) OR ((NOT ('0')) AND (NOT ('0')) AND (NOT (EXISTS\
+    \ (SELECT (TRUE) FROM `acl_access` `SfzKFmFf` WHERE `SfzKFmFf`.`user` = @acl_actor AND ((`SfzKFmFf`.`acl_tenant`)\
+    \ IS NULL) LIMIT 1))))) AND (COALESCE((SELECT (((('0') OR (EXISTS (SELECT (TRUE) FROM `acl_access` `hfjCDFco`\
+    \ WHERE `hfjCDFco`.`user` = @acl_actor AND ((`hfjCDFco`.`acl_tenant`) IS NULL) LIMIT 1))) OR ((NOT ('0')) AND\
+    \ (NOT ('0')) AND (NOT (EXISTS (SELECT (TRUE) FROM `acl_access` `SfzKFmFf` WHERE `SfzKFmFf`.`user` = @acl_actor\
+    \ AND ((`SfzKFmFf`.`acl_tenant`) IS NULL) LIMIT 1))))) AND (CASE WHEN (('0') OR (EXISTS (SELECT (TRUE) FROM\
+    \ `acl_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @acl_actor AND ((`hfjCDFco`.`acl_tenant`) IS NULL) LIMIT\
+    \ 1))) OR ('0') THEN TRUE ELSE EXISTS (SELECT (TRUE) FROM `acl_access` `dsZCbLkI` WHERE `dsZCbLkI`.`acl_tenant`\
+    \ = `VMjurwnB`.`ID` AND ((`dsZCbLkI`.`user`) = (@acl_actor)) LIMIT 1) END)) FROM `acl_tenant` `VMjurwnB` WHERE\
+    \ `VMjurwnB`.`ID` = `RBdbO6dd`.`acl_tenant` LIMIT 1), FALSE))) FROM `acl_site` `RBdbO6dd` WHERE `RBdbO6dd`.`ID`\
+    \ = `acl_document`.`acl_site` LIMIT 1), FALSE)))) AS can_view FROM acl_file WHERE `ID` = '800001'"
+  expect:
+    rows: 1
+    data:
+    - ID: 800001
+      can_view: 0
+- name: Administrator sees referenced file
+  session_id: file-acl-perf
+  setup:
+  - sql: SET @acl_actor=7
+  sql: "SELECT ID, EXISTS (\n\t\t\tSELECT `ID` FROM `acl_dav` WHERE `content` = acl_file.`ID` AND (true)\n\tUNION\
+    \ ALL \n\t\t\tSELECT `ID` FROM `acl_document` WHERE `file` = acl_file.`ID` AND (((('0') OR (EXISTS (SELECT (TRUE)\
+    \ FROM `acl_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @acl_actor AND ((`hfjCDFco`.`acl_tenant`) IS NULL)\
+    \ LIMIT 1))) OR ((NOT ('0')) AND (NOT ('0')) AND (NOT (EXISTS (SELECT (TRUE) FROM `acl_access` `SfzKFmFf` WHERE\
+    \ `SfzKFmFf`.`user` = @acl_actor AND ((`SfzKFmFf`.`acl_tenant`) IS NULL) LIMIT 1))))) AND ((('0') OR (EXISTS\
+    \ (SELECT (TRUE) FROM `acl_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @acl_actor AND ((`hfjCDFco`.`acl_tenant`)\
+    \ IS NULL) LIMIT 1))) OR ((NOT ('0')) AND (NOT ('0')) AND (NOT (EXISTS (SELECT (TRUE) FROM `acl_access` `SfzKFmFf`\
+    \ WHERE `SfzKFmFf`.`user` = @acl_actor AND ((`SfzKFmFf`.`acl_tenant`) IS NULL) LIMIT 1)))) OR ('0')) AND ((('0')\
+    \ OR (EXISTS (SELECT (TRUE) FROM `acl_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @acl_actor AND ((`hfjCDFco`.`acl_tenant`)\
+    \ IS NULL) LIMIT 1))) OR ((NOT ('0')) AND (NOT ('0')) AND (NOT (EXISTS (SELECT (TRUE) FROM `acl_access` `SfzKFmFf`\
+    \ WHERE `SfzKFmFf`.`user` = @acl_actor AND ((`SfzKFmFf`.`acl_tenant`) IS NULL) LIMIT 1))))) AND (COALESCE((SELECT\
+    \ (((('0') OR (EXISTS (SELECT (TRUE) FROM `acl_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @acl_actor AND ((`hfjCDFco`.`acl_tenant`)\
+    \ IS NULL) LIMIT 1))) OR ((NOT ('0')) AND (NOT ('0')) AND (NOT (EXISTS (SELECT (TRUE) FROM `acl_access` `SfzKFmFf`\
+    \ WHERE `SfzKFmFf`.`user` = @acl_actor AND ((`SfzKFmFf`.`acl_tenant`) IS NULL) LIMIT 1)))) OR ('0')) AND (CASE\
+    \ WHEN (('0') OR (EXISTS (SELECT (TRUE) FROM `acl_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @acl_actor AND\
+    \ ((`hfjCDFco`.`acl_tenant`) IS NULL) LIMIT 1))) OR ('0') THEN TRUE ELSE EXISTS (SELECT (TRUE) FROM `acl_access`\
+    \ `bItMW8cS` WHERE TRUE AND (((COALESCE(`bItMW8cS`.`acl_site`, `RBdbO6dd`.`ID`)) = (`RBdbO6dd`.`ID`)) AND ((`bItMW8cS`.`user`)\
+    \ = (@acl_actor))) LIMIT 1) END) AND ((('0') OR (EXISTS (SELECT (TRUE) FROM `acl_access` `hfjCDFco` WHERE `hfjCDFco`.`user`\
+    \ = @acl_actor AND ((`hfjCDFco`.`acl_tenant`) IS NULL) LIMIT 1))) OR ((NOT ('0')) AND (NOT ('0')) AND (NOT (EXISTS\
+    \ (SELECT (TRUE) FROM `acl_access` `SfzKFmFf` WHERE `SfzKFmFf`.`user` = @acl_actor AND ((`SfzKFmFf`.`acl_tenant`)\
+    \ IS NULL) LIMIT 1))))) AND (COALESCE((SELECT (((('0') OR (EXISTS (SELECT (TRUE) FROM `acl_access` `hfjCDFco`\
+    \ WHERE `hfjCDFco`.`user` = @acl_actor AND ((`hfjCDFco`.`acl_tenant`) IS NULL) LIMIT 1))) OR ((NOT ('0')) AND\
+    \ (NOT ('0')) AND (NOT (EXISTS (SELECT (TRUE) FROM `acl_access` `SfzKFmFf` WHERE `SfzKFmFf`.`user` = @acl_actor\
+    \ AND ((`SfzKFmFf`.`acl_tenant`) IS NULL) LIMIT 1))))) AND (CASE WHEN (('0') OR (EXISTS (SELECT (TRUE) FROM\
+    \ `acl_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @acl_actor AND ((`hfjCDFco`.`acl_tenant`) IS NULL) LIMIT\
+    \ 1))) OR ('0') THEN TRUE ELSE EXISTS (SELECT (TRUE) FROM `acl_access` `dsZCbLkI` WHERE `dsZCbLkI`.`acl_tenant`\
+    \ = `VMjurwnB`.`ID` AND ((`dsZCbLkI`.`user`) = (@acl_actor)) LIMIT 1) END)) FROM `acl_tenant` `VMjurwnB` WHERE\
+    \ `VMjurwnB`.`ID` = `RBdbO6dd`.`acl_tenant` LIMIT 1), FALSE))) FROM `acl_site` `RBdbO6dd` WHERE `RBdbO6dd`.`ID`\
+    \ = `acl_document`.`acl_site` LIMIT 1), FALSE)))) AS can_view FROM acl_file WHERE `ID` = '1'"
+  expect:
+    rows: 1
+    data:
+    - ID: 1
+      can_view: 1
+- name: Duplicate driver rows preserve point permission multiplicity
+  setup:
+  - sql: INSERT INTO acl_file (ID) VALUES (1)
+  - sql: SET @acl_actor=8
+  session_id: file-acl-perf
+  sql: "SELECT ID, EXISTS (\n\t\t\tSELECT `ID` FROM `acl_dav` WHERE `content` = acl_file.`ID` AND (true)\n\tUNION\
+    \ ALL \n\t\t\tSELECT `ID` FROM `acl_document` WHERE `file` = acl_file.`ID` AND (((('0') OR (EXISTS (SELECT (TRUE)\
+    \ FROM `acl_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @acl_actor AND ((`hfjCDFco`.`acl_tenant`) IS NULL)\
+    \ LIMIT 1))) OR ((NOT ('0')) AND (NOT ('0')) AND (NOT (EXISTS (SELECT (TRUE) FROM `acl_access` `SfzKFmFf` WHERE\
+    \ `SfzKFmFf`.`user` = @acl_actor AND ((`SfzKFmFf`.`acl_tenant`) IS NULL) LIMIT 1))))) AND ((('0') OR (EXISTS\
+    \ (SELECT (TRUE) FROM `acl_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @acl_actor AND ((`hfjCDFco`.`acl_tenant`)\
+    \ IS NULL) LIMIT 1))) OR ((NOT ('0')) AND (NOT ('0')) AND (NOT (EXISTS (SELECT (TRUE) FROM `acl_access` `SfzKFmFf`\
+    \ WHERE `SfzKFmFf`.`user` = @acl_actor AND ((`SfzKFmFf`.`acl_tenant`) IS NULL) LIMIT 1)))) OR ('0')) AND ((('0')\
+    \ OR (EXISTS (SELECT (TRUE) FROM `acl_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @acl_actor AND ((`hfjCDFco`.`acl_tenant`)\
+    \ IS NULL) LIMIT 1))) OR ((NOT ('0')) AND (NOT ('0')) AND (NOT (EXISTS (SELECT (TRUE) FROM `acl_access` `SfzKFmFf`\
+    \ WHERE `SfzKFmFf`.`user` = @acl_actor AND ((`SfzKFmFf`.`acl_tenant`) IS NULL) LIMIT 1))))) AND (COALESCE((SELECT\
+    \ (((('0') OR (EXISTS (SELECT (TRUE) FROM `acl_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @acl_actor AND ((`hfjCDFco`.`acl_tenant`)\
+    \ IS NULL) LIMIT 1))) OR ((NOT ('0')) AND (NOT ('0')) AND (NOT (EXISTS (SELECT (TRUE) FROM `acl_access` `SfzKFmFf`\
+    \ WHERE `SfzKFmFf`.`user` = @acl_actor AND ((`SfzKFmFf`.`acl_tenant`) IS NULL) LIMIT 1)))) OR ('0')) AND (CASE\
+    \ WHEN (('0') OR (EXISTS (SELECT (TRUE) FROM `acl_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @acl_actor AND\
+    \ ((`hfjCDFco`.`acl_tenant`) IS NULL) LIMIT 1))) OR ('0') THEN TRUE ELSE EXISTS (SELECT (TRUE) FROM `acl_access`\
+    \ `bItMW8cS` WHERE TRUE AND (((COALESCE(`bItMW8cS`.`acl_site`, `RBdbO6dd`.`ID`)) = (`RBdbO6dd`.`ID`)) AND ((`bItMW8cS`.`user`)\
+    \ = (@acl_actor))) LIMIT 1) END) AND ((('0') OR (EXISTS (SELECT (TRUE) FROM `acl_access` `hfjCDFco` WHERE `hfjCDFco`.`user`\
+    \ = @acl_actor AND ((`hfjCDFco`.`acl_tenant`) IS NULL) LIMIT 1))) OR ((NOT ('0')) AND (NOT ('0')) AND (NOT (EXISTS\
+    \ (SELECT (TRUE) FROM `acl_access` `SfzKFmFf` WHERE `SfzKFmFf`.`user` = @acl_actor AND ((`SfzKFmFf`.`acl_tenant`)\
+    \ IS NULL) LIMIT 1))))) AND (COALESCE((SELECT (((('0') OR (EXISTS (SELECT (TRUE) FROM `acl_access` `hfjCDFco`\
+    \ WHERE `hfjCDFco`.`user` = @acl_actor AND ((`hfjCDFco`.`acl_tenant`) IS NULL) LIMIT 1))) OR ((NOT ('0')) AND\
+    \ (NOT ('0')) AND (NOT (EXISTS (SELECT (TRUE) FROM `acl_access` `SfzKFmFf` WHERE `SfzKFmFf`.`user` = @acl_actor\
+    \ AND ((`SfzKFmFf`.`acl_tenant`) IS NULL) LIMIT 1))))) AND (CASE WHEN (('0') OR (EXISTS (SELECT (TRUE) FROM\
+    \ `acl_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @acl_actor AND ((`hfjCDFco`.`acl_tenant`) IS NULL) LIMIT\
+    \ 1))) OR ('0') THEN TRUE ELSE EXISTS (SELECT (TRUE) FROM `acl_access` `dsZCbLkI` WHERE `dsZCbLkI`.`acl_tenant`\
+    \ = `VMjurwnB`.`ID` AND ((`dsZCbLkI`.`user`) = (@acl_actor)) LIMIT 1) END)) FROM `acl_tenant` `VMjurwnB` WHERE\
+    \ `VMjurwnB`.`ID` = `RBdbO6dd`.`acl_tenant` LIMIT 1), FALSE))) FROM `acl_site` `RBdbO6dd` WHERE `RBdbO6dd`.`ID`\
+    \ = `acl_document`.`acl_site` LIMIT 1), FALSE)))) AS can_view FROM acl_file WHERE `ID` = '1'"
+  expect:
+    rows: 2
+    data:
+    - ID: 1
+      can_view: 1
+    - ID: 1
+      can_view: 1
+- name: Point permission preserves nested scalar cardinality errors
+  setup:
+  - sql: INSERT INTO acl_site (ID,acl_tenant) VALUES (1,2)
+  - sql: SET @acl_actor=8
+  session_id: file-acl-perf
+  sql: "SELECT ID, EXISTS (\n\t\t\tSELECT `ID` FROM `acl_dav` WHERE `content` = acl_file.`ID` AND (true)\n\tUNION\
+    \ ALL \n\t\t\tSELECT `ID` FROM `acl_document` WHERE `file` = acl_file.`ID` AND (((('0') OR (EXISTS (SELECT (TRUE)\
+    \ FROM `acl_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @acl_actor AND ((`hfjCDFco`.`acl_tenant`) IS NULL))))\
+    \ OR ((NOT ('0')) AND (NOT ('0')) AND (NOT (EXISTS (SELECT (TRUE) FROM `acl_access` `SfzKFmFf` WHERE `SfzKFmFf`.`user`\
+    \ = @acl_actor AND ((`SfzKFmFf`.`acl_tenant`) IS NULL)))))) AND ((('0') OR (EXISTS (SELECT (TRUE) FROM `acl_access`\
+    \ `hfjCDFco` WHERE `hfjCDFco`.`user` = @acl_actor AND ((`hfjCDFco`.`acl_tenant`) IS NULL)))) OR ((NOT ('0'))\
+    \ AND (NOT ('0')) AND (NOT (EXISTS (SELECT (TRUE) FROM `acl_access` `SfzKFmFf` WHERE `SfzKFmFf`.`user` = @acl_actor\
+    \ AND ((`SfzKFmFf`.`acl_tenant`) IS NULL))))) OR ('0')) AND ((('0') OR (EXISTS (SELECT (TRUE) FROM `acl_access`\
+    \ `hfjCDFco` WHERE `hfjCDFco`.`user` = @acl_actor AND ((`hfjCDFco`.`acl_tenant`) IS NULL)))) OR ((NOT ('0'))\
+    \ AND (NOT ('0')) AND (NOT (EXISTS (SELECT (TRUE) FROM `acl_access` `SfzKFmFf` WHERE `SfzKFmFf`.`user` = @acl_actor\
+    \ AND ((`SfzKFmFf`.`acl_tenant`) IS NULL)))))) AND (COALESCE((SELECT (((('0') OR (EXISTS (SELECT (TRUE) FROM\
+    \ `acl_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @acl_actor AND ((`hfjCDFco`.`acl_tenant`) IS NULL)))) OR\
+    \ ((NOT ('0')) AND (NOT ('0')) AND (NOT (EXISTS (SELECT (TRUE) FROM `acl_access` `SfzKFmFf` WHERE `SfzKFmFf`.`user`\
+    \ = @acl_actor AND ((`SfzKFmFf`.`acl_tenant`) IS NULL))))) OR ('0')) AND (CASE WHEN (('0') OR (EXISTS (SELECT\
+    \ (TRUE) FROM `acl_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @acl_actor AND ((`hfjCDFco`.`acl_tenant`) IS\
+    \ NULL)))) OR ('0') THEN TRUE ELSE EXISTS (SELECT (TRUE) FROM `acl_access` `bItMW8cS` WHERE TRUE AND (((COALESCE(`bItMW8cS`.`acl_site`,\
+    \ `RBdbO6dd`.`ID`)) = (`RBdbO6dd`.`ID`)) AND ((`bItMW8cS`.`user`) = (@acl_actor)))) END) AND ((('0') OR (EXISTS\
+    \ (SELECT (TRUE) FROM `acl_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @acl_actor AND ((`hfjCDFco`.`acl_tenant`)\
+    \ IS NULL)))) OR ((NOT ('0')) AND (NOT ('0')) AND (NOT (EXISTS (SELECT (TRUE) FROM `acl_access` `SfzKFmFf` WHERE\
+    \ `SfzKFmFf`.`user` = @acl_actor AND ((`SfzKFmFf`.`acl_tenant`) IS NULL)))))) AND (COALESCE((SELECT (((('0')\
+    \ OR (EXISTS (SELECT (TRUE) FROM `acl_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @acl_actor AND ((`hfjCDFco`.`acl_tenant`)\
+    \ IS NULL)))) OR ((NOT ('0')) AND (NOT ('0')) AND (NOT (EXISTS (SELECT (TRUE) FROM `acl_access` `SfzKFmFf` WHERE\
+    \ `SfzKFmFf`.`user` = @acl_actor AND ((`SfzKFmFf`.`acl_tenant`) IS NULL)))))) AND (CASE WHEN (('0') OR (EXISTS\
+    \ (SELECT (TRUE) FROM `acl_access` `hfjCDFco` WHERE `hfjCDFco`.`user` = @acl_actor AND ((`hfjCDFco`.`acl_tenant`)\
+    \ IS NULL)))) OR ('0') THEN TRUE ELSE EXISTS (SELECT (TRUE) FROM `acl_access` `dsZCbLkI` WHERE `dsZCbLkI`.`acl_tenant`\
+    \ = `VMjurwnB`.`ID` AND ((`dsZCbLkI`.`user`) = (@acl_actor))) END)) FROM `acl_tenant` `VMjurwnB` WHERE `VMjurwnB`.`ID`\
+    \ = `RBdbO6dd`.`acl_tenant`), FALSE))) FROM `acl_site` `RBdbO6dd` WHERE `RBdbO6dd`.`ID` = `acl_document`.`acl_site`),\
+    \ FALSE)))) AS can_view FROM acl_file WHERE `ID` = '1'"
+  expect:
+    error: true
+cleanup:
+- sql: DROP TABLE IF EXISTS acl_document
+- sql: DROP TABLE IF EXISTS acl_site
+- sql: DROP TABLE IF EXISTS acl_tenant
+- sql: DROP TABLE IF EXISTS acl_file
+- sql: DROP TABLE IF EXISTS acl_dav
+- sql: DROP TABLE IF EXISTS acl_access
+- sql: DROP TABLE IF EXISTS acl_text_ref
+- sql: DROP TABLE IF EXISTS acl_text_file
