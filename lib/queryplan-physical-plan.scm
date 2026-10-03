@@ -9836,9 +9836,18 @@ predicate and cardinality guard still own their ordinary row-local evaluation. *
 				(define matching_rows (* driver_rows (div_null selected_input_rows (max 1 input_rows))))
 				(define has_overflow (and (not (nth descriptor 8))
 					(contains? (map (gs_aggregates (car descriptor)) aggregate_col_name) (aggregate_col_name aggregate_count_descriptor))))
+				/* The binder RecSet evaluates its complete local predicate before
+				projection. Charge row-local membership/scalar probes over that
+				input population, including physical membership markers which no
+				longer appear in expr_probe_stages. */
+				(define binder_probe_branches (count (merge_unique (list
+					(map (expr_probe_stages binder_condition) gs_id)
+					(physical_membership_probe_stage_ids binder_condition)))))
 				(define baseline_cost (planner_membership_direct_probe_cost driver_rows))
 				(define candidate_cost (planner_cost_add
-					(planner_cost_add (membership_projection_cost binder_rows selected_binder_rows input_rows '())
+					(planner_cost_add (planner_cost_add
+						(membership_projection_cost binder_rows selected_binder_rows input_rows '())
+						(planner_membership_direct_probe_cost (* binder_rows binder_probe_branches)) selected_binder_rows 0.5)
 						(membership_projection_cost input_rows selected_input_rows driver_input_rows '()) matching_rows 0.5)
 					(planner_cost_add (planner_membership_direct_probe_cost matching_rows)
 						(if has_overflow (planner_membership_direct_probe_cost input_rows) (planner_zero_cost 0 0.5)) matching_rows 0.5)
@@ -9846,8 +9855,8 @@ predicate and cardinality guard still own their ordinary row-local evaluation. *
 				(define id (concat "scalar_binder_semijoin:" (source_alias src) ":" (fnv_hash descriptor)))
 				(define choice (planner_physical_choice id (if (planner_cost_better? candidate_cost baseline_cost) "projected_recset" "late_lookup") '("projected_recset" "late_lookup") planning_session))
 				(planner_record_physical_decision (list (list "decision_id" id) (list "decision" "scalar_binder_semijoin") (list "chosen" choice)
-					(list "inputs" (list (list "binder_rows" binder_rows) (list "selected_binder_rows" selected_binder_rows) (list "driver_rows" driver_rows)))
-					(list "alternatives" (list (list "projected_recset" (planner_cost_explain candidate_cost)) (list "late_lookup" (planner_cost_explain baseline_cost))))) planning_session)
+					(list "inputs" (list (list "binder_rows" binder_rows) (list "selected_binder_rows" selected_binder_rows) (list "binder_probe_branches" binder_probe_branches) (list "driver_rows" driver_rows)))
+					(list "alternatives" (list (list (list "plan" "projected_recset") (list "cost" (planner_cost_explain candidate_cost))) (list (list "plan" "late_lookup") (list "cost" (planner_cost_explain baseline_cost)))))) planning_session)
 				(if (not (equal? choice "projected_recset")) nil
 					(begin
 						(define cols (extract_columns_for_alias binder binder_condition))
