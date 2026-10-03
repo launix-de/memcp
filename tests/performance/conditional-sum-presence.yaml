@@ -1,0 +1,46 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: '1.0'
+  description: Conditional scalar SUM presence over 1000 user domains and 20000 memberships
+  isolated: true
+  performance_rows: 20000
+setup:
+- sql: DROP TABLE IF EXISTS csp_user
+- sql: CREATE TABLE csp_user (ID INT PRIMARY KEY) ENGINE=memory
+- sql: DROP TABLE IF EXISTS csp_tenant
+- sql: CREATE TABLE csp_tenant (ID INT PRIMARY KEY, multiStandort BOOLEAN, multiAbteilung BOOLEAN, multiPruefung
+    BOOLEAN) ENGINE=memory
+- sql: DROP TABLE IF EXISTS csp_access
+- sql: CREATE TABLE csp_access (user_id INT, tenant_id INT) ENGINE=memory
+- scm: |-
+    (begin
+     (insert (table "memcp-tests" "csp_user") '("ID")
+      (map (produceN 1000) (lambda (i) (list (+ i 1)))))
+     (insert (table "memcp-tests" "csp_tenant") '("ID" "multiStandort" "multiAbteilung" "multiPruefung")
+      (map (produceN 20) (lambda (i) (list (+ i 1) true true true))))
+     (insert (table "memcp-tests" "csp_access") '("user_id" "tenant_id")
+      (map (produceN 20000) (lambda (i) (list (+ (floor (/ i 20)) 1) (+ (mod i 20) 1))))))
+test_cases:
+- name: conditional_sum_presence_cold_plus_ten_reuses
+  sql: SELECT SUM(CASE WHEN multiStandort THEN 1 ELSE 0 END) AS multiStandort, SUM(CASE WHEN multiAbteilung THEN
+    1 ELSE 0 END) AS multiAbteilung, SUM(CASE WHEN multiPruefung THEN 1 ELSE 0 END) AS multiPruefung FROM (SELECT
+    u.ID, COALESCE((SELECT SUM(CASE WHEN t.multiStandort THEN 1 ELSE 0 END) FROM csp_tenant t, csp_access a WHERE
+    t.ID=a.tenant_id AND a.user_id=u.ID) > 0, TRUE) AS multiStandort, COALESCE((SELECT SUM(CASE WHEN t.multiAbteilung
+    THEN 1 ELSE 0 END) FROM csp_tenant t, csp_access a WHERE t.ID=a.tenant_id AND a.user_id=u.ID) > 0, TRUE) AS
+    multiAbteilung, COALESCE((SELECT SUM(CASE WHEN t.multiPruefung THEN 1 ELSE 0 END) FROM csp_tenant t, csp_access
+    a WHERE t.ID=a.tenant_id AND a.user_id=u.ID) > 0, TRUE) AS multiPruefung FROM csp_user u) options
+  threshold_ms: 5000
+  timing_aggregation: total
+  warmup: 0
+  timing_samples: 11
+  expect:
+    rows: 1
+    data:
+    - multiStandort: 1000
+      multiAbteilung: 1000
+      multiPruefung: 1000
+cleanup:
+- sql: DROP TABLE IF EXISTS csp_access
+- sql: DROP TABLE IF EXISTS csp_tenant
+- sql: DROP TABLE IF EXISTS csp_user

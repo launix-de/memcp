@@ -806,6 +806,103 @@ test_cases:
           allowed: false
 
 
+  - name: conditional_sum_presence_empty_and_null
+    sql: SELECT p.id, COALESCE((SELECT SUM(CASE WHEN i.state THEN 1 ELSE 0 END) FROM
+      csa_item i WHERE i.parent_id=p.id) > 0, TRUE) AS enabled FROM csa_parent p ORDER
+      BY p.id
+    expect:
+      rows: 5
+      data:
+      - id: 1
+        enabled: true
+      - id: 2
+        enabled: true
+      - id: 3
+        enabled: false
+      - id: 4
+        enabled: true
+      - id: 5
+        enabled: true
+  - name: conditional_sum_presence_false_default_stays_aggregate
+    sql: SELECT p.id, COALESCE((SELECT SUM(CASE WHEN i.state THEN 1 ELSE 0 END) FROM
+      csa_item i WHERE i.parent_id=p.id) > 0, FALSE) AS enabled FROM csa_parent p ORDER
+      BY p.id
+    expect:
+      rows: 5
+      data:
+      - id: 1
+        enabled: true
+      - id: 2
+        enabled: true
+      - id: 3
+        enabled: false
+      - id: 4
+        enabled: true
+      - id: 5
+        enabled: false
+  - name: conditional_sum_presence_nonzero_else_stays_aggregate
+    sql: SELECT p.id, COALESCE((SELECT SUM(CASE WHEN i.state THEN 1 ELSE 1 END) FROM
+      csa_item i WHERE i.parent_id=p.id) > 0, TRUE) AS enabled FROM csa_parent p ORDER
+      BY p.id
+    expect:
+      rows: 5
+      data:
+      - id: 1
+        enabled: true
+      - id: 2
+        enabled: true
+      - id: 3
+        enabled: true
+      - id: 4
+        enabled: true
+      - id: 5
+        enabled: true
+  - name: conditional_sum_presence_negative_payload_stays_aggregate
+    sql: SELECT p.id, COALESCE((SELECT SUM(CASE WHEN i.state THEN -1 ELSE 0 END) FROM
+      csa_item i WHERE i.parent_id=p.id) > 0, TRUE) AS enabled FROM csa_parent p ORDER
+      BY p.id
+    expect:
+      rows: 5
+      data:
+      - id: 1
+        enabled: false
+      - id: 2
+        enabled: false
+      - id: 3
+        enabled: false
+      - id: 4
+        enabled: false
+      - id: 5
+        enabled: true
+  - name: conditional_sum_presence_grouping_keeps_empty_scalar
+    sql: SELECT p.id, COALESCE((SELECT SUM(CASE WHEN i.state THEN 1 ELSE 0 END) FROM
+      csa_item i WHERE i.parent_id=p.id GROUP BY i.state HAVING i.state=0) > 0, TRUE)
+      AS enabled FROM csa_parent p ORDER BY p.id
+    expect:
+      rows: 5
+      data:
+      - id: 1
+        enabled: true
+      - id: 2
+        enabled: true
+      - id: 3
+        enabled: false
+      - id: 4
+        enabled: true
+      - id: 5
+        enabled: true
+  - name: conditional_sum_presence_offset_remains_explicitly_unsupported
+    sql: SELECT p.id, COALESCE((SELECT SUM(CASE WHEN i.state THEN 1 ELSE 0 END) FROM
+      csa_item i WHERE i.parent_id=p.id LIMIT 1 OFFSET 1) > 0, TRUE) AS enabled FROM
+      csa_parent p ORDER BY p.id
+    expect: {error: true}
+  - name: conditional_sum_presence_validates_missing_column
+    sql: SELECT p.id, COALESCE((SELECT SUM(CASE WHEN i.missing_flag THEN 1 ELSE 0 END)
+      FROM csa_item i WHERE i.parent_id=p.id) > 0, TRUE) AS enabled FROM csa_parent
+      p ORDER BY p.id
+    expect:
+      error: true
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS cq_large_parent"
   - sql: "DROP TABLE IF EXISTS cq_digit"
