@@ -588,6 +588,31 @@ test_cases:
         - id: 2
           allowed: false
 
+  - name: "Repeated nested scalar preparations reuse a guarded SQL variant"
+    scm: |
+      (begin
+        (define cache (newcachemap))
+        (define sess (newsession))
+        (sess "username" "root")
+        (sess "schema" "memcp-tests")
+        (define query "SELECT t.id, t.allowed\nFROM (\n  SELECT\n    a.id,\n    ref.allowed\n  FROM trace_asset a\n  LEFT JOIN (\n    SELECT\n      b.id,\n      COALESCE((\n        SELECT (\n          EXISTS (\n            SELECT TRUE\n            FROM trace_global_access global_access\n            WHERE global_access.actor_id = 7\n              AND global_access.scope_id IS NULL\n            LIMIT 1\n          )\n          AND EXISTS (\n            SELECT TRUE\n            FROM trace_share local_access\n            WHERE local_access.box_id = b.id\n              AND local_access.owner_id = 7\n            LIMIT 1\n          )\n        )\n        FROM trace_host h\n        WHERE h.id = b.host_id\n        LIMIT 1\n      ), FALSE) AS allowed\n    FROM trace_box b\n  ) ref ON ref.id = a.id * 100\n  WHERE a.id IN (1, 2)\n) t\nLEFT JOIN trace_box sorter ON sorter.id = t.id * 100\nORDER BY t.id\nLIMIT 72\n")
+        (define run (lambda () (begin
+          (define rows (newsession))
+          (sql_execute_formula sess nil
+            (cached_parse cache (list parse_sql) "memcp-tests" query nil "root" sess true)
+            (lambda (row) (rows "data" (cons row (coalesceNil (rows "data") '()))))
+            (lambda (_fields) nil))
+          (reverse (rows "data")))))
+        (define expected (run))
+        (run)
+        (define entry (car (cache (car (cache)))))
+        (define variants (count (entry "variants")))
+        (map (produceN 5) (lambda (_i)
+          (if (equal? (run) expected) true (error "cached scalar results changed"))))
+        (if (equal? (count (entry "variants")) variants) true
+          (error "unchanged scalar query recompiled its guarded plan")))
+    expect: {data: [true]}
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS trace_asset"
   - sql: "DROP TABLE IF EXISTS trace_ref_a"

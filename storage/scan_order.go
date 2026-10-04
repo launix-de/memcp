@@ -608,6 +608,7 @@ func topKByOrder(items []uint32, keep int, less func(a, b uint32) bool) []uint32
 
 // scanOrderTableSpec holds per-table parameters for scanOrderMulti.
 type scanOrderTableSpec struct {
+	prefixMerge     *orderedPrefixAccess
 	table           *table
 	recset          *recSet
 	conditionCols   []string
@@ -1039,6 +1040,9 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 		bounds, _ = extendScanAccessWithSortCols(bounds, spec.sortcols, sortdirs)
 		runtime := bounds.ensureRuntime()
 		runtime.extra = scanAccessSegmentFromAnalyzed(appendRecSetBoundary(nil, spec.recset))
+		if spec.prefixMerge != nil {
+			bounds = orderedPrefixBounds(bounds, spec.prefixMerge)
+		}
 		if Settings.ScanDebugging {
 			dbg := fmt.Sprintf("[SCAN_ORDER_MULTI] %s.%s", t.schema.Name, t.Name)
 			for i := 0; i < bounds.len(); i++ {

@@ -179,6 +179,9 @@ type scanAccessSegment struct {
 }
 
 type scanAccessRuntime struct {
+	// prefixMerge is immutable invocation-owned state, borrowed under the scan
+	// shard rights and lock. It retains no index or mutable shard container.
+	prefixMerge *orderedPrefixAccess
 	// computedMapCols is populated only for compiled computed-index probes.
 	computedMapCols []string
 	// inserted contains runtime-only sorted constraints. insertAt places order

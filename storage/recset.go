@@ -1036,7 +1036,7 @@ func (t *table) projectJoinKeysToRecSet(currentTx *TxContext, targetKeyCols []st
 			if ss != nil && ss.IsKilledSeq(querySeq) {
 				panic("query killed")
 			}
-			values <- targetPartResult{part: shard.projectJoinKeysPart(currentTx, targetKeyCols, keys, ss, numeric)}
+			values <- targetPartResult{part: shard.projectJoinKeysPart(currentTx, targetKeyCols, keys, ss, numeric, false)}
 			return scm.NewNil()
 		})
 	})
@@ -1070,7 +1070,12 @@ func (t *table) projectJoinKeysToRecSet(currentTx *TxContext, targetKeyCols []st
 // exists; forcing one into existence for a single ad-hoc query can cost far
 // more than the linear scan it was meant to avoid.
 func (t *storageShard) hasEqualityIndexPrefix(currentTx *TxContext, cols []string) bool {
-	for _, index := range t.Indexes {
+	// Index publication is owned by indexMutex, independently of the shard
+	// read lock. Published entries are stable; snapshot only the slice header.
+	t.indexMutex.Lock()
+	indexes := t.Indexes
+	t.indexMutex.Unlock()
+	for _, index := range indexes {
 		if len(index.Cols) < len(cols) {
 			continue
 		}
@@ -1103,13 +1108,24 @@ func (t *storageShard) hasEqualityIndexPrefix(currentTx *TxContext, cols []strin
 	return false
 }
 
-func (t *storageShard) projectJoinKeysPart(currentTx *TxContext, targetKeyCols []string, keys recSetProjectKeys, ss *scm.SessionState, numeric bool) recSetShard {
-	t.ensureLoaded()
-	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
-	t.ensureMainCount(skipShardReadLock)
+// With alreadyLocked, the caller owns shard concurrency rights and a read or
+// write lock and has loaded the key columns. No lazy load or lock wait is safe
+// inside that critical section.
+func (t *storageShard) projectJoinKeysPart(currentTx *TxContext, targetKeyCols []string, keys recSetProjectKeys, ss *scm.SessionState, numeric bool, alreadyLocked bool) recSetShard {
+	if !alreadyLocked {
+		t.ensureLoaded()
+	}
+	skipShardReadLock := alreadyLocked || t.hasWriteOwnerForTx(currentTx)
+	if !alreadyLocked {
+		t.ensureMainCount(skipShardReadLock)
+	}
 	targetCols := make([]ColumnStorage, len(targetKeyCols))
 	for i, col := range targetKeyCols {
-		targetCols[i] = t.getColumnStorageOrPanic(col, skipShardReadLock, currentTx)
+		if alreadyLocked {
+			targetCols[i] = t.getColumnStorageRLocked(col)
+		} else {
+			targetCols[i] = t.getColumnStorageOrPanic(col, skipShardReadLock, currentTx)
+		}
 	}
 
 	locked := false

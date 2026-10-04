@@ -1,0 +1,179 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: Dynamic ordered equality keysets preserve pages and mutation visibility
+  isolated: true
+setup:
+- sql: DROP TABLE IF EXISTS ordered_key_item
+- sql: DROP TABLE IF EXISTS ordered_key_grant
+- sql: CREATE TABLE ordered_key_item (id INT PRIMARY KEY, owner_id INT, stamp INT) ENGINE=memory
+- sql: CREATE TABLE ordered_key_grant (owner_id INT) ENGINE=memory
+- sql: INSERT INTO ordered_key_grant VALUES (1),(1),(2),(NULL)
+- scm: "(begin\n (insert (table \"memcp-tests\" \"ordered_key_item\") '(\"id\" \"owner_id\" \"stamp\")\n  (map (produceN\
+    \ 10000) (lambda (i) (list (+ i 1) (+ 1 (mod i 100)) i))))\n (rebuild))"
+test_cases:
+- name: cold ordered dynamic keys preserve duplicates and NULL semantics
+  sql: SELECT id FROM ordered_key_item WHERE COALESCE((SELECT TRUE FROM ordered_key_grant WHERE ordered_key_grant.owner_id=ordered_key_item.owner_id
+    LIMIT 1),FALSE) ORDER BY stamp DESC,owner_id ASC,id ASC LIMIT 5
+  expect:
+    data:
+    - id: 9902
+    - id: 9901
+    - id: 9802
+    - id: 9801
+    - id: 9702
+- name: warm ordered dynamic keys preserve duplicates and NULL semantics
+  sql: SELECT id FROM ordered_key_item WHERE COALESCE((SELECT TRUE FROM ordered_key_grant WHERE ordered_key_grant.owner_id=ordered_key_item.owner_id
+    LIMIT 1),FALSE) ORDER BY stamp DESC,owner_id ASC,id ASC LIMIT 5
+  expect:
+    data:
+    - id: 9902
+    - id: 9901
+    - id: 9802
+    - id: 9801
+    - id: 9702
+- name: indexed ordered dynamic keys preserve duplicates and NULL semantics
+  sql: SELECT id FROM ordered_key_item WHERE COALESCE((SELECT TRUE FROM ordered_key_grant WHERE ordered_key_grant.owner_id=ordered_key_item.owner_id
+    LIMIT 1),FALSE) ORDER BY stamp DESC,owner_id ASC,id ASC LIMIT 5
+  expect:
+    data:
+    - id: 9902
+    - id: 9901
+    - id: 9802
+    - id: 9801
+    - id: 9702
+- name: reused ordered dynamic keys preserve duplicates and NULL semantics
+  sql: SELECT id FROM ordered_key_item WHERE COALESCE((SELECT TRUE FROM ordered_key_grant WHERE ordered_key_grant.owner_id=ordered_key_item.owner_id
+    LIMIT 1),FALSE) ORDER BY stamp DESC,owner_id ASC,id ASC LIMIT 5
+  expect:
+    data:
+    - id: 9902
+    - id: 9901
+    - id: 9802
+    - id: 9801
+    - id: 9702
+- name: inserted delta rows merge with main runs
+  sql: SELECT id FROM ordered_key_item WHERE COALESCE((SELECT TRUE FROM ordered_key_grant WHERE ordered_key_grant.owner_id=ordered_key_item.owner_id
+    LIMIT 1),FALSE) ORDER BY stamp DESC,owner_id ASC,id ASC LIMIT 5
+  setup:
+  - sql: INSERT INTO ordered_key_item VALUES (10001,1,50000),(10002,2,50001),(10003,3,60000)
+  expect:
+    data:
+    - id: 10002
+    - id: 10001
+    - id: 9902
+    - id: 9901
+    - id: 9802
+- name: delete changes visible ordered page
+  sql: SELECT id FROM ordered_key_item WHERE COALESCE((SELECT TRUE FROM ordered_key_grant WHERE ordered_key_grant.owner_id=ordered_key_item.owner_id
+    LIMIT 1),FALSE) ORDER BY stamp DESC,owner_id ASC,id ASC LIMIT 5
+  setup:
+  - sql: DELETE FROM ordered_key_item WHERE id=10002
+  expect:
+    data:
+    - id: 10001
+    - id: 9902
+    - id: 9901
+    - id: 9802
+    - id: 9801
+- name: grant revocation invalidates grouped carrier
+  sql: SELECT id FROM ordered_key_item WHERE COALESCE((SELECT TRUE FROM ordered_key_grant WHERE ordered_key_grant.owner_id=ordered_key_item.owner_id
+    LIMIT 1),FALSE) ORDER BY stamp DESC,owner_id ASC,id ASC LIMIT 5
+  setup:
+  - sql: DELETE FROM ordered_key_grant WHERE owner_id=2
+  expect:
+    data:
+    - id: 10001
+    - id: 9901
+    - id: 9801
+    - id: 9701
+    - id: 9601
+- name: offset counts accepted globally merged rows
+  sql: SELECT id FROM ordered_key_item WHERE COALESCE((SELECT TRUE FROM ordered_key_grant WHERE ordered_key_grant.owner_id=ordered_key_item.owner_id
+    LIMIT 1),FALSE) ORDER BY stamp DESC,owner_id ASC,id ASC LIMIT 5 OFFSET 2
+  expect:
+    data:
+    - id: 9801
+    - id: 9701
+    - id: 9601
+    - id: 9501
+    - id: 9401
+- name: ascending order places nullable delta keys before main rows
+  setup:
+  - sql: INSERT INTO ordered_key_item VALUES (10004,1,NULL)
+  sql: SELECT id FROM ordered_key_item WHERE COALESCE((SELECT TRUE FROM ordered_key_grant WHERE ordered_key_grant.owner_id=ordered_key_item.owner_id
+    LIMIT 1),FALSE) ORDER BY stamp ASC,owner_id ASC,id ASC LIMIT 5
+  expect:
+    data:
+    - id: 10004
+    - id: 1
+    - id: 101
+    - id: 201
+    - id: 301
+- name: changing the order column updates ordered index visibility
+  setup:
+  - sql: UPDATE ordered_key_item SET stamp=70000 WHERE id=1
+  sql: SELECT id FROM ordered_key_item WHERE COALESCE((SELECT TRUE FROM ordered_key_grant WHERE ordered_key_grant.owner_id=ordered_key_item.owner_id
+    LIMIT 1),FALSE) ORDER BY stamp DESC,owner_id ASC,id ASC LIMIT 5
+  expect:
+    data:
+    - id: 1
+    - id: 10001
+    - id: 9901
+    - id: 9801
+    - id: 9701
+- name: a long delta prefix refills bounded cursor pages past OFFSET
+  setup:
+  - scm: (insert (table "memcp-tests" "ordered_key_item") '("id" "owner_id" "stamp") (map (produceN 128) (lambda
+      (i) (list (+ 20000 i) 1 (+ 80000 i)))))
+  sql: SELECT id FROM ordered_key_item WHERE COALESCE((SELECT TRUE FROM ordered_key_grant WHERE ordered_key_grant.owner_id=ordered_key_item.owner_id
+    LIMIT 1),FALSE) ORDER BY stamp DESC,owner_id ASC,id ASC LIMIT 5 OFFSET 64
+  expect:
+    data:
+    - id: 20063
+    - id: 20062
+    - id: 20061
+    - id: 20060
+    - id: 20059
+- name: unlimited ordered scans preserve the complete keyset result
+  sql: SELECT id FROM ordered_key_item WHERE COALESCE((SELECT TRUE FROM ordered_key_grant WHERE ordered_key_grant.owner_id=ordered_key_item.owner_id
+    LIMIT 1),FALSE) ORDER BY stamp DESC,owner_id ASC,id ASC
+  expect:
+    rows: 230
+- name: zero page size returns no rows
+  sql: SELECT id FROM ordered_key_item WHERE COALESCE((SELECT TRUE FROM ordered_key_grant WHERE ordered_key_grant.owner_id=ordered_key_item.owner_id
+    LIMIT 1),FALSE) ORDER BY stamp DESC,owner_id ASC,id ASC LIMIT 0
+  expect:
+    rows: 0
+- name: native prefix cold and indexed paths retain residual filtering
+  scm: |
+    (begin
+      (define target (table "memcp-tests" "ordered_key_item"))
+      (define keys (scan_recset nil (table "memcp-tests" "ordered_key_grant")
+        '() '() '() (lambda () true)))
+      (map (produceN 4) (lambda (iteration)
+        (begin
+          (define result (scan_order_keys nil
+            (list target keys '("owner_id") '("owner_id") '(220 221 1 1 1))
+            '() '() '("stamp") (lambda (stamp) (>= stamp 80100))
+            '("stamp" "owner_id" "id")
+            (list (collate "bin" true) (collate "bin" false) (collate "bin" false))
+            0 3 5 '("id") (lambda (acc id) (+ acc id)) 0))
+          (if (equal? result 100610) true
+            (error "prefix access lost membership, order or residual acceptance"))))))
+- name: empty keyset preserves empty result
+  sql: SELECT id FROM ordered_key_item WHERE COALESCE((SELECT TRUE FROM ordered_key_grant WHERE ordered_key_grant.owner_id=ordered_key_item.owner_id
+    LIMIT 1),FALSE) ORDER BY stamp DESC,owner_id ASC,id ASC LIMIT 5
+  setup:
+  - sql: DELETE FROM ordered_key_grant
+  expect:
+    rows: 0
+- name: invalid native key widths fail explicitly
+  scm: "(scan_order_keys nil (list (table \"memcp-tests\" \"ordered_key_item\")\n (scan_recset nil (table \"memcp-tests\"\
+    \ \"ordered_key_grant\") '() '() '() (lambda () true))\n '() '(\"owner_id\")) '() '() '() (lambda () true) '(\"\
+    stamp\") (list >) 0 0 5 '(\"id\") (lambda (acc id) (+ acc id)) 0)"
+  expect:
+    error: true
+cleanup:
+- sql: DROP TABLE IF EXISTS ordered_key_item
+- sql: DROP TABLE IF EXISTS ordered_key_grant

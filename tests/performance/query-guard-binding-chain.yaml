@@ -28,3 +28,29 @@ test_cases:
   warmup: 0
   timing_samples: 1
   threshold_ms: 5000
+- name: Quoted preparation metadata is opaque to sampling and cache guards
+  scm: |
+    (begin
+      (define session (newsession))
+      (session "value" 7)
+      (session "__prepare_stage_probe" (lambda () true))
+      (define planning (sql_queryplan_compile_session session nil))
+      (define payload (list (quote quote) (list (quote session) "__prepare_stage_probe")))
+      (define expression (list (quote list) payload (list (quote session) "value")))
+      (define bound (planner_bind_session_values expression planning))
+      (planner_literal_value (list (quote session) "__prepare_stage_probe") planning)
+      (planner_record_session_value_guards
+        (list (quote session) "__prepare_stage_probe") planning)
+      (if (equal? (cadr bound) payload) true (error "sampling rewrote quoted metadata"))
+      (define compiled (sql_queryplan_compile_formula nil (sql_queryplan_guard_from_session planning)))
+      (session "__prepare_stage_probe" (lambda () false))
+      (define unchanged (compiled session nil nil nil))
+      (session "value" 8)
+      (if (and unchanged (not (compiled session nil nil nil))) true
+        (error "cache guard confused metadata with executable session inputs")))
+  expect:
+    data: [true]
+  performance_rows: 1
+  warmup: 0
+  timing_samples: 1
+  threshold_ms: 5000

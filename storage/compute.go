@@ -926,6 +926,23 @@ func extractScanJoinInfo(computor scm.Scmer) []scanJoinInfo {
 	return extractScanJoinInfoBody(computor, nil)
 }
 
+// orderedKeysetSourceAST unwraps only physical sequencing and the operator's
+// explicit source tuple. It never evaluates a source while registering caches.
+func orderedKeysetSourceAST(expr scm.Scmer) ([]scm.Scmer, bool) {
+	expr = stripSourceInfo(expr)
+	if !expr.IsSlice() {
+		return nil, false
+	}
+	items := expr.Slice()
+	if len(items) > 1 && callHeadIs(items[0], "begin", "!begin") {
+		return orderedKeysetSourceAST(items[len(items)-1])
+	}
+	if len(items) >= 5 && callHeadIs(items[0], "list") {
+		return items, true
+	}
+	return nil, false
+}
+
 func extractScanJoinInfoBody(expr scm.Scmer, outerParams []scm.Scmer) []scanJoinInfo {
 	expr = stripSourceInfo(expr)
 	if expr.IsProc() {
@@ -953,14 +970,22 @@ func extractScanJoinInfoBody(expr scm.Scmer, outerParams []scm.Scmer) []scanJoin
 		}
 		return extractScanJoinInfoBody(items[2], params)
 	}
-	if len(items) >= 7 && callHeadIs(items[0], "scan", "scan_order", "scalar_scan", "scalar_scan_order") {
+	if len(items) >= 7 && callHeadIs(items[0], "scan", "scan_order", "scan_order_keys", "scalar_scan", "scalar_scan_order") {
 		tableIdx := 2
 		condColsIdx, filterIdx := 5, 6
 		if len(items) <= filterIdx {
 			return nil
 		}
 		var info scanJoinInfo
-		if ref, ok := scanTableReference(items[tableIdx]); ok {
+		tableExpr := items[tableIdx]
+		var prefixCols []string
+		if callHeadIs(items[0], "scan_order_keys") {
+			if source, ok := orderedKeysetSourceAST(tableExpr); ok {
+				tableExpr = source[1]
+				prefixCols = extractStringListFromAST(source[4])
+			}
+		}
+		if ref, ok := scanTableReference(tableExpr); ok {
 			info.schema, info.table = ref.schema, ref.table
 		}
 		condCols := extractStringListFromAST(items[condColsIdx])
@@ -982,6 +1007,16 @@ func extractScanJoinInfoBody(expr scm.Scmer, outerParams []scm.Scmer) []scanJoin
 			}
 		} else {
 			info.unknownReads = true
+		}
+		if callHeadIs(items[0], "scan_order_keys") {
+			info.condCols = append(info.condCols, prefixCols...)
+			info.condCols = append(info.condCols, extractStringListFromAST(items[7])...)
+			if len(items) > 12 {
+				info.mapCols = extractStringListFromAST(items[12])
+			}
+			if len(prefixCols) == 0 {
+				info.unknownReads = true
+			}
 		}
 		if len(info.srcCols) == 0 {
 			info.srcCols, info.inputCols = extractCompiledScanEqualityJoins(items[3], items[4], outerParams)
@@ -1296,8 +1331,14 @@ func findScanNode(expr scm.Scmer, schema, table string) []scm.Scmer {
 	items := expr.Slice()
 	if len(items) >= 4 {
 		tableIdx := 2
-		if callHeadIs(items[0], "scan", "scan_order", "scalar_scan", "scalar_scan_order") {
-			ref, ok := scanTableReference(items[tableIdx])
+		if callHeadIs(items[0], "scan", "scan_order", "scan_order_keys", "scalar_scan", "scalar_scan_order") {
+			tableExpr := items[tableIdx]
+			if callHeadIs(items[0], "scan_order_keys") {
+				if source, ok := orderedKeysetSourceAST(tableExpr); ok {
+					tableExpr = source[1]
+				}
+			}
+			ref, ok := scanTableReference(tableExpr)
 			if ok && ref.schema == schema && ref.table == table {
 				return items
 			}
@@ -1416,7 +1457,7 @@ func containsScan(expr scm.Scmer) bool {
 		return false
 	}
 	items := expr.Slice()
-	if len(items) >= 1 && callHeadIs(items[0], "scan", "scan_order", "scalar_scan", "scalar_scan_order") {
+	if len(items) >= 1 && callHeadIs(items[0], "scan", "scan_order", "scan_order_keys", "scalar_scan", "scalar_scan_order") {
 		return true
 	}
 	for _, item := range items {

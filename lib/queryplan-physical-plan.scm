@@ -12677,6 +12677,38 @@ row callback. */
 						expr)))
 				(list (rewrite_query_invariant_presence_memos plan)))))))))
 
+/* Fuse only after physical lowering. The carrier keeps its producer and
+prepare bindings; no key enumeration or storage artifact enters logical IR. */
+(define ordered_keyset_scan_source (lambda (source)
+	(match source
+		((symbol recset_project_join) tx carrier source_keys target target_keys)
+		(list (quote list) target carrier source_keys target_keys
+			(list (quote list)
+				planner_membership_expression_operation_row_ns
+				(+ planner_membership_scan_row_ns planner_membership_expression_operation_row_ns)
+				planner_membership_scan_row_ns
+				planner_membership_recset_build_row_ns
+				planner_membership_ordered_recset_sort_unit_ns))
+		(cons head tail) (if (or (equal? head (quote begin)) (equal? head (quote !begin)))
+			(begin
+				(define replacement (ordered_keyset_scan_source (nth tail (- (count tail) 1))))
+				(if (nil? replacement) nil
+					(append (slice source 0 (- (count source) 1)) replacement))) nil)
+		_ nil)))
+
+(define lower_ordered_keyset_scans (lambda (expr)
+	(match expr
+		(cons head tail) (if (equal? head (quote quote)) expr
+			(begin
+				(define children (map tail lower_ordered_keyset_scans))
+				(define source (if (and (equal? head (quote scan_order)) (>= (count children) 12))
+					(ordered_keyset_scan_source (nth children 1)) nil))
+				(if (nil? source) (cons head children)
+					(cons (quote scan_order_keys)
+						(map (produceN (count children)) (lambda (index)
+							(if (equal? index 1) source (nth children index))))))))
+		_ expr)))
+
 (define emit_physical_queryplan (lambda (ir)
 	(begin
 		(define candidate (if (equal? (ir_return ir) (quote rows)) (semijoin_carrier_spec (ir_root ir)) nil))
@@ -12711,7 +12743,18 @@ row callback. */
 		(define memoized_plan (if (empty_list? (ir_stages ir))
 			deduplicated_plan
 			(consolidate_query_invariant_presence_memos deduplicated_plan)))
-		(define checked (require_physical_scan_relations memoized_plan))
+		(define planning_session (if (query_block? (ir_root ir))
+			(planner_context_session (qb_facts (ir_root ir))) nil))
+		/* Forced costgen alternatives must keep their requested physical path. */
+		/* Single-source blocks without stages have no projected join keys. */
+		(define fused_plan (if (or
+			(and (not (nil? planning_session))
+				(not (nil? (planning_session "__memcp_physical_overrides"))))
+			(and (query_block? (ir_root ir))
+				(empty_list? (ir_stages ir))
+				(<= (count (qb_sources (ir_root ir))) 1)))
+			memoized_plan (lower_ordered_keyset_scans memoized_plan)))
+		(define checked (require_physical_scan_relations fused_plan))
 		(if (and (not (nil? carrier)) (and (not (nth carrier 5))
 			(qassoc_get (qb_facts (ir_root ir)) (quote sql_calc_found_rows) false)))
 			(list (quote found_rows_result) checked) checked))))
@@ -13105,7 +13148,13 @@ opaque implementation detail in EXPLAIN PHYSICAL. */
 (define physical_recset_project_join_decisions (lambda (expr)
 	(match expr
 		(cons head tail) (begin
-			(define own (if (equal? (string head) "recset_project_join")
+			(define own (if (equal? (string head) "scan_order_keys")
+				(list (list
+					(list "decision" "ordered_keyset_access")
+					(list "chosen" "runtime_cost_minimum")
+					(list "reason" "actual_key_count_target_distinct_estimate_and_page_window")
+					(list "alternatives" (list "prefix_cursor_merge" "ordered_membership_scan" "projected_recset_scan"))))
+				(if (equal? (string head) "recset_project_join")
 				(list (list
 					(list "decision" "recset_project_join_access")
 					(list "chosen" "runtime_cost_minimum")
@@ -13114,7 +13163,7 @@ opaque implementation detail in EXPLAIN PHYSICAL. */
 						"indexed_key_probes"
 						"dense_numeric_membership_scan"
 						"dense_generic_membership_scan"))))
-				'()))
+				'())))
 			(reduce tail (lambda (decisions item)
 				(merge (list decisions (physical_recset_project_join_decisions item)))) own))
 		_ '())))
@@ -13485,7 +13534,7 @@ protocol callback receives only the calibration row. */
 				_ 1)))
 		(define scan_access_head? (lambda (head)
 			(or (equal? head (quote scan))
-				(or (equal? head (quote scan_order))
+				(or (or (equal? head (quote scan_order)) (equal? head (quote scan_order_keys)))
 					(or (equal? head (quote scan_order_multi))
 						(or (equal? head (quote scan_batch))
 							(or (equal? head (quote scan_recset))
@@ -13525,6 +13574,7 @@ protocol callback receives only the calibration row. */
 		(define plan_text (pretty_print plan (settings "ExplainWidth")))
 		(define raw_scans (plan_count plan (quote scan)))
 		(define raw_ordered_scans (+
+			(plan_count plan (quote scan_order_keys))
 			(plan_count plan (quote scan_order))
 			(plan_count plan (quote scan_order_multi))))
 		(define raw_exists_scans (plan_count plan (quote scan_exists)))

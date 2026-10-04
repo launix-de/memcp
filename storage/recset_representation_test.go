@@ -997,3 +997,27 @@ func recSetIntersectPairwise(parts []*recSetShard) recSetShard {
 	}
 	return result
 }
+
+func TestProjectJoinIndexPrefixConcurrentPublication(t *testing.T) {
+	index := &StorageIndex{Cols: []string{"key"}}
+	index.baseState.active = true
+	shard := &storageShard{Indexes: []*StorageIndex{index}}
+	start, done := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		<-start
+		for i := 0; i < 2000; i++ {
+			shard.indexMutex.Lock()
+			shard.Indexes = append(shard.Indexes, &StorageIndex{Cols: []string{"other"}})
+			shard.indexMutex.Unlock()
+		}
+	}()
+	close(start)
+	for i := 0; i < 20000; i++ {
+		if !shard.hasEqualityIndexPrefix(nil, []string{"key"}) {
+			t.Error("published equality index disappeared")
+			break
+		}
+	}
+	<-done
+}

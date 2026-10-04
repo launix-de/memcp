@@ -44,7 +44,7 @@ test_cases:
     max_compile_phase_ms:
       reorder_ns: 500
       recipe_emit_ns: 700
-    sql: |
+    sql: &scalar_probe_scaling_query |
       SELECT
         (SELECT probe_1.kind FROM scale_host probe_1 WHERE probe_1.id = outer_row.host_id AND probe_1.kind = 1 LIMIT 1) AS value_1,
         (SELECT probe_2.kind FROM scale_host probe_2 WHERE probe_2.id = outer_row.host_id AND probe_2.kind = 2 LIMIT 1) AS value_2,
@@ -98,6 +98,67 @@ test_cases:
       LIMIT 1
     expect:
       rows: 1
+
+  # Keep the original hard compilation/plan gates above. This separate case
+  # measures the cold plus repeated SQL workload in CI's fresh A/B fixtures.
+  - name: "Cached scalar probe workload retains cold compilation in its total"
+    sql: *scalar_probe_scaling_query
+    expect:
+      rows: 1
+      data:
+        - value_1: 1
+          value_2: null
+          value_3: null
+          value_4: null
+          value_5: null
+          value_6: null
+          value_7: null
+          value_8: null
+          value_9: null
+          value_10: null
+          value_11: null
+          value_12: null
+          value_13: null
+          value_14: null
+          value_15: null
+          value_16: null
+          value_17: null
+          value_18: null
+          value_19: null
+          value_20: null
+          value_21: null
+          value_22: null
+          value_23: null
+          value_24: null
+          value_25: null
+          value_26: null
+          value_27: null
+          value_28: null
+          value_29: null
+          value_30: null
+          value_31: null
+          value_32: null
+          value_33: null
+          value_34: null
+          value_35: null
+          value_36: null
+          value_37: null
+          value_38: null
+          value_39: null
+          value_40: null
+          value_41: null
+          value_42: null
+          value_43: null
+          value_44: null
+          value_45: null
+          value_46: null
+          value_47: null
+          value_48: null
+    performance_rows: 1
+    warmup: 0
+    timing_samples: 20
+    timing_aggregation: total
+    threshold_ms: 5000
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS scale_box"
