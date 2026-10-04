@@ -1216,7 +1216,7 @@ func (s Scmer) MarshalJSON() ([]byte, error) {
 		case tagSymbol:
 			return map[string]any{"symbol": v.String()}
 		case tagSlice:
-			list := v.Slice()
+			list := lambdaSyntaxOperands(v.Slice())
 			out := make([]any, len(list))
 			for i, it := range list {
 				out[i] = toJSONable(it)

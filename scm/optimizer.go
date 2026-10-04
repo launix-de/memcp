@@ -81,6 +81,45 @@ func procCanUseNumberedOnly(params, body Scmer, numVars int) bool {
 	return !procBodyUsesNamedParam(body, named)
 }
 
+// Lambda binding proofs belong to the immutable optimized syntax, not to any
+// invocation environment. They preserve parameter names for introspection and
+// remove repeated body analysis when a scan constructs the same nested lambda.
+// Rewritten/cloned syntax must match the complete binding inputs or fall back
+// to ordinary analysis. Serialization intentionally discards this optional
+// process-local optimization; a restored lambda remains executable unchanged.
+type lambdaBindingProof struct {
+	params       Scmer
+	body         Scmer
+	numVars      int
+	numberedOnly bool
+}
+
+func (lambdaBindingProof) String() string { return "nil" }
+
+// Validation and persistence consume the ordinary lambda syntax. The binding
+// proof is private optimizer metadata, never another source-language operand.
+func lambdaSyntaxOperands(items []Scmer) []Scmer {
+	if len(items) == 5 && scmerIsSymbol(items[0], "lambda") && items[4].GetTag() == tagAny {
+		if _, ok := items[4].Any().(lambdaBindingProof); ok {
+			return items[:4]
+		}
+	}
+	return items
+}
+
+func prepareLambdaBindings(lambda []Scmer) []Scmer {
+	if len(lambda) < 4 {
+		return lambda
+	}
+	params := lambda[1]
+	if stripped, ok := scmerStripSourceInfo(params); ok {
+		params = stripped
+	}
+	numVars := int(ToInt(lambda[3]))
+	proof := lambdaBindingProof{params, lambda[2], numVars, procCanUseNumberedOnly(params, lambda[2], numVars)}
+	return append(lambda[:4:4], NewAny(proof))
+}
+
 // Optimize consumes val, preprocesses and optimizes it, and transfers ownership
 // to the returned value. It may therefore reuse val's storage. When
 // telemetryCallback is non-nil, it is called exactly once after the optimizer
@@ -552,6 +591,11 @@ func (ome *optimizerMetainfo) applyPendingCallbackParams(params Scmer, child *op
 			td = unknownOptimizerParameterType
 		}
 		child.variableTypes[sym] = td
+		// Anonymous callbacks retain their positional slots. Reoptimization and
+		// specialization must propagate argument types independently of names.
+		if sym == Symbol("_") && child.nextSlot != nil && i < *child.nextSlot {
+			child.numberedTypes[NthLocalVar(i)] = td
+		}
 		if replacement, ok := child.variableReplacement[sym]; ok && replacement.outerDepth == 0 && replacement.value.IsNthLocalVar() {
 			child.numberedTypes[replacement.value.NthLocalVar()] = td
 		}
@@ -2589,7 +2633,7 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 			if slotIndex != declaredNumVars {
 				v[3] = NewInt(int64(slotIndex))
 			}
-			return NewSlice(v), bodyType.WithoutConst()
+			return NewSlice(prepareLambdaBindings(v)), bodyType.WithoutConst()
 		}
 		// Auto-number parameters
 		ome2 := ome.Copy()
@@ -2625,7 +2669,7 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 		if slotIndex > 0 {
 			v = append(v[:len(v):len(v)], NewInt(int64(slotIndex)))
 		}
-		return NewSlice(v), bodyType.WithoutConst()
+		return NewSlice(prepareLambdaBindings(v)), bodyType.WithoutConst()
 	}
 
 	switch {
