@@ -1243,6 +1243,9 @@ type codeGen struct {
 	// Descriptor predeclarations used by recursive BB closure mode, so
 	// descriptors can flow across closure boundaries without scope breakage.
 	closureDescDecl map[string]bool
+	// Dense slots belong to this generated emitter, never to a runtime pass.
+	// Slot identities stay stable as later BBs declare additional descriptors.
+	overlaySlots map[string]int
 	// Register predeclarations for closure-mode fixup handles (EmitSubRSP32Fixup).
 	closureRegDecl map[string]bool
 	// Optional callback-based SSA node rewrite hook.
@@ -1301,6 +1304,7 @@ func (g *codeGen) clone() *codeGen {
 	clone.importedPkgAlias = cloneMap(g.importedPkgAlias)
 	clone.phiProtectedRegVars = append([]string(nil), g.phiProtectedRegVars...)
 	clone.closureDescDecl = cloneMap(g.closureDescDecl)
+	clone.overlaySlots = cloneMap(g.overlaySlots)
 	clone.closureRegDecl = cloneMap(g.closureRegDecl)
 	return &clone
 }
@@ -1414,6 +1418,20 @@ func (g *codeGen) allClosureDescVars() []string {
 	}
 	sortDescNames(names)
 	return names
+}
+
+// overlaySlot assigns one compact runtime-state slot per descriptor. SSA names
+// also number labels and temporaries, so their numeric suffix is not a size.
+func (g *codeGen) overlaySlot(name string) int {
+	if g.overlaySlots == nil {
+		g.overlaySlots = make(map[string]int)
+	}
+	if slot, ok := g.overlaySlots[name]; ok {
+		return slot
+	}
+	slot := len(g.overlaySlots)
+	g.overlaySlots[name] = slot
+	return slot
 }
 
 func sortDescNames(names []string) {
@@ -2924,23 +2942,16 @@ func (g *codeGen) emitConstDescForSSAConst(c *ssa.Const) genVal {
 func (g *codeGen) emitBuildPhiStateForEdge(psVar string, targetBBIdx int, succPos int, generalExpr string) {
 	g.emit("%s := PhiState{General: %s}", psVar, generalExpr)
 	if overlayVars := g.allClosureDescVars(); len(overlayVars) > 0 {
-		maxIdx := -1
+		maxSlot := 0
 		for _, ov := range overlayVars {
-			if idx, err := parseDescNum(ov); err == nil && idx > maxIdx {
-				maxIdx = idx
-			}
+			maxSlot = max(maxSlot, g.overlaySlot(ov))
 		}
-		if maxIdx >= 0 {
-			g.emit("%s.OverlayValues = make([]JITValueDesc, %d)", psVar, maxIdx+1)
-		}
+		g.emit("%s.OverlayValues = make([]JITValueDesc, %d)", psVar, maxSlot+1)
 		for _, ov := range overlayVars {
-			idx, err := parseDescNum(ov)
-			if err != nil {
-				continue
-			}
-			g.emit("%s.OverlayValues[%d] = %s", psVar, idx, ov)
+			g.emit("%s.OverlayValues[%d] = %s", psVar, g.overlaySlot(ov), ov)
 		}
 	}
+
 	phis := g.blockPhis(targetBBIdx)
 	if len(phis) == 0 {
 		return
@@ -5677,10 +5688,7 @@ func (g *codeGen) applyPhiStateOverlay(bbIdx int) {
 	}
 
 	for _, ov := range g.allClosureDescVars() {
-		idx, err := parseDescNum(ov)
-		if err != nil {
-			continue
-		}
+		idx := g.overlaySlot(ov)
 		if phiDescVars[ov] {
 			g.emit("if !ps.General && len(ps.OverlayValues) > %d && ps.OverlayValues[%d].Loc != LocNone {", idx, idx)
 		} else {

@@ -1,0 +1,45 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: Scan-local typed filter and reducer compilation over full column scans
+  isolated: true
+  performance_rows: 60000
+  max_regression_pct: 20
+setup:
+- sql: DROP TABLE IF EXISTS kernel_values
+- sql: CREATE TABLE kernel_values (value INT, weight INT) ENGINE=memory
+- scm: |
+    (begin
+      (insert (table "memcp-tests" "kernel_values") '("value" "weight")
+        (map (produceN 60000) (lambda (i) (list i (+ i 1)))))
+      (rebuild (table "memcp-tests" "kernel_values") true false))
+test_cases:
+- name: 'Perf: SQL range count and sum'
+  sql: SELECT COUNT(*) AS cnt, SUM(value) AS total FROM kernel_values WHERE value > 127
+  expect: {rows: 1, data: [{cnt: 59872, total: 1799961872}]}
+  warmup: 0
+  timing_samples: 4
+  timing_aggregation: total
+  threshold_ms: 5000
+- name: 'Perf: SQL arithmetic comparison and reducer'
+  sql: SELECT SUM(value + weight) AS total FROM kernel_values WHERE value + weight > 255
+  expect: {rows: 1, data: [{total: 3599983616}]}
+  warmup: 0
+  timing_samples: 4
+  timing_aggregation: total
+  threshold_ms: 5000
+- name: 'Perf: full scan compiles typed filter buffer'
+  scm: |
+    (scan nil (table "memcp-tests" "kernel_values") '() '()
+      '("value") (lambda (v) (> v 127))
+      '() (lambda (acc) (+ acc 1)) 0 + false)
+  expect: {result: 59872}
+  warmup: 0
+  timing_samples: 4
+  timing_aggregation: total
+  threshold_ms: 5000
+- name: Reject missing scan column
+  sql: SELECT SUM(missing_value) FROM kernel_values
+  expect: {error: true}
+cleanup:
+- sql: DROP TABLE kernel_values
