@@ -755,7 +755,7 @@ func Validate(val Scmer, require string) string {
 	case tagFunc:
 		return "func"
 	case tagSlice:
-		slice := val.Slice()
+		slice := lambdaSyntaxOperands(val.Slice())
 		if len(slice) == 0 {
 			return "list"
 		}

@@ -282,12 +282,22 @@ func specialLambda(code []Scmer, en *Env) Scmer {
 	if len(code) > 2 {
 		numVars = int(code[2].Int())
 	}
+	numberedOnly := false
+	proofValid := false
+	if len(code) > 3 && code[3].GetTag() == tagAny {
+		if proof, ok := code[3].Any().(lambdaBindingProof); ok && proof.params == params && proof.body == code[1] && proof.numVars == numVars {
+			numberedOnly, proofValid = proof.numberedOnly, true
+		}
+	}
+	if !proofValid {
+		numberedOnly = procCanUseNumberedOnly(params, code[1], numVars)
+	}
 	return NewProcStruct(Proc{
 		Params:       params,
 		Body:         code[1],
 		En:           en,
 		NumVars:      numVars,
-		NumberedOnly: procCanUseNumberedOnly(params, code[1], numVars),
+		NumberedOnly: numberedOnly,
 	})
 }
 
