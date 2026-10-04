@@ -206,6 +206,45 @@ func TestJITEmptyStringSurvivesGCInCallerFrame(t *testing.T) {
 	}
 }
 
+func jitReservedPairGCProbe(value Scmer) Scmer {
+	runtime.GC()
+	return NewBool(value.ptr == nil)
+}
+
+func TestJITReservedPairHasValidPointerBeforeProducer(t *testing.T) {
+	const name = "jit_test_reserved_pair_gc"
+	declaration := &Declaration{
+		Name: name,
+		Fn:   func(...Scmer) Scmer { return NewBool(true) },
+		Type: &TypeDescriptor{Kind: "func", Return: &TypeDescriptor{Kind: "bool"},
+			JITEmit: func(ctx *JITContext, _ []Scmer, _ []JITValueDesc, result JITValueDesc) JITValueDesc {
+				// A previous temporary leaves arbitrary bits in a free register.
+				reg := ctx.AllocReg()
+				ctx.EmitMovRegImm64(reg, 0x12345)
+				ctx.FreeReg(reg)
+				pending := jitAllocTrackedPair(ctx, JITTypeUnknown)
+				ctx.EmitMovRegImm64(pending.Reg2, 0)
+				// The result is not produced yet, but nested emission can already
+				// spill it and include its pointer word in a safepoint map.
+				ctx.StabilizeDescAcrossNestedCall(&pending)
+				got := ctx.EmitGoCallScalar(GoFuncAddr(jitReservedPairGCProbe), []JITValueDesc{pending}, 2)
+				ctx.FreeDesc(&pending)
+				return jitPlaceScmerIntoTarget(ctx, got, result)
+			},
+		},
+	}
+	Declare(&Globalenv, declaration)
+	defer func() {
+		delete(Globalenv.Vars, Symbol(name))
+		delete(declarations, name)
+		delete(declarationsByFunction, FunctionIdentity(declaration.Fn))
+	}()
+	compiled := compileJITExpressionTestProc(t, `(lambda () (jit_test_reserved_pair_gc))`)
+	if !Apply(compiled).Bool() {
+		t.Fatal("reserved result exposed a previous register value as a GC pointer")
+	}
+}
+
 func TestJITSQLParameterizationSurvivesGC(t *testing.T) {
 	environment := &Env{Vars: make(Vars), Outer: &Globalenv}
 	source, err := os.ReadFile("../lib/sql-parameters.scm")
