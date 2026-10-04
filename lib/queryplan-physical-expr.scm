@@ -5140,12 +5140,105 @@ Never drop a domain component or reconstruct a dependent/computed-key stage. */
 								(combine_where_terms (cons condition (map parts (lambda (part) (nth part 2)))) true))))))
 			nil))))
 
+/* A presence domain over one physical relation needs only its true rows.
+Dependent stage outputs remain logical until the closed predicate producer
+lowers them. Domain bindings that do not join to the target remain exact
+filters; membership does not require the source key to be unique. */
+(define direct_query_presence_projection_parts (lambda (target membership)
+	(begin
+		(define stage (car membership))
+		(define input (gs_input stage))
+		(define keys (gs_keys stage))
+		(define lookup (qassoc_get (gs_facts stage) (quote lookup-keys) '()))
+		(if (not (and (query_block? input)
+			(empty_list? (qb_group input)) (nil? (qb_having input))
+			(not (query_block_has_aggregates? input))
+			(nil? (qb_limit input)) (nil? (qb_offset input))
+			(equal? (qassoc_get (gs_facts stage) (quote purpose) nil) (quote in_membership))
+			(equal? (gs_aggregates stage) (list aggregate_count_descriptor))
+			(nil? (gs_having stage)) (empty_list? (gs_order stage))
+			(nil? (gs_limit stage)) (nil? (gs_offset stage))
+			(equal? (count keys) (count lookup)))) nil
+			(begin
+				(define bases (filter (qb_sources input) source_is_base_table?))
+				(if (not (single_source? bases)) nil
+					(begin
+						(define source (car bases))
+						(define catalog (coalesceNil (group_stage_lowering_catalog stage)
+							(stage_catalog_with_nested (merge_stage_catalogs (list
+								(qassoc_get (gs_facts stage) (quote stage_catalog) '())
+								(query_block_stage_catalog input) (list stage))))))
+						(define producer_catalog (make_indexed_lowering_catalog
+							(filter (stage_dependency_closure_using_graph (stage_dependency_graph catalog) stage)
+								(lambda (dependency) (not (equal? (gs_id dependency) (gs_id stage)))))
+							(lowering_catalog_planning_session catalog)))
+						(define parts (map (produceN (count keys)) (lambda (i)
+							(begin
+								(define lhs (direct_column_name_for_alias target (nth lookup i)))
+								(define rhs (direct_column_name_for_alias source (nth keys i)))
+								/* Byte-key dictionaries cannot implement text collation or coercion.
+								Keep those domains on the existing SQL membership paths. */
+								(if (not (nil? lhs))
+									(if (or (nil? rhs) (not (recmap_direct_key_column? source rhs))
+										(not (recmap_direct_key_column? target lhs))) nil (list rhs lhs true))
+									(if (or (not (empty_list? (query_expr_alias_set nil (nth lookup i) '())))
+										(not (empty_list? (query_expr_alias_set nil (nth keys i) '())))
+										(not (contribution_pure_expr? (nth lookup i)))
+										(not (contribution_pure_expr? (nth keys i)))) nil
+										(list nil nil (list (quote or)
+											(list (quote equal??) (nth keys i) (nth lookup i))
+											(list (quote and) (list (quote nil?) (nth keys i))
+												(list (quote nil?) (nth lookup i)))))))))))
+						(if (or (contains? parts nil)
+							(not (direct_boolean_recset_input_stages_supported? catalog stage))
+							(not (reduce (qb_sources input) (lambda (ok src)
+								(and ok (or (equal? src source) (stage_output_relation? (source_relation src))))) true))) nil
+							(begin
+								(define joins (filter parts (lambda (part) (not (nil? (car part))))))
+								(if (not (contains? (map joins cadr) (nth membership 2))) nil
+									(list source (map joins car) (map joins cadr)
+										(combine_where_terms (map parts (lambda (part) (nth part 2))) true) producer_catalog)))))))))))
+
+(define build_query_membership_recset_plan (lambda (catalog input source source_cols target target_cols domain_filter)
+	(begin
+		(define fields (merge (map source_cols (lambda (col)
+			(list col (list (symbol "get_column") (source_alias source) false col false))))))
+		(define block (make_query_block (qb_schema input) (qb_sources input) fields
+			(combine_where_terms (list (qb_where input) domain_filter) true)
+			'() nil '() nil nil '() (map (filter (qb_sources input) (lambda (src)
+				(stage_output_relation? (source_relation src)))) (lambda (src)
+					(stage_by_id catalog (stage_output_relation_id (source_relation src)))))
+			(query_block_facts_with_lowering_catalog input (lowering_catalog_stages catalog) catalog)))
+		(define prepared (prepare_simple_query_block_physical_core
+			(query_block_with_stage_catalog block (lowering_catalog_stages catalog))))
+		(define core (nth prepared 1))
+		(define keys (symbol "__presence_projection_keys"))
+		(define payload (lower_query_block_as_dataset_reduce core (qb_fields core)
+			(list (quote lambda) (map source_cols symbol)
+				(runtime_cons_list_expr (map source_cols symbol)))
+			(list (quote lambda) (list (quote acc) (quote row))
+				(list (quote set_assoc) (quote acc) (quote row) true))
+			(list (quote list)) (quote merge_assoc)))
+		(define scan (compile_scan_plan (quote scan_recset) (physical_query_tx_symbol)
+			(source_table_expr target) (cons (quote list) target_cols)
+			(list (quote lambda) (map target_cols (lambda (col)
+				(scan_callback_symbol_for_alias (source_alias target) col)))
+				(combine_where_terms (merge (list
+					(map target_cols (lambda (col) (list (quote not) (list (quote nil?)
+						(scan_callback_symbol_for_alias (source_alias target) col)))))
+					(list (list (quote has_assoc?) keys (runtime_cons_list_expr (map target_cols (lambda (col)
+						(scan_callback_symbol_for_alias (source_alias target) col)))))))) true))))
+		(list (list (quote lambda) '()
+			(cons (quote !begin) (merge (list (nth prepared 0)
+				(list (list (quote define) keys payload)) (nth prepared 2) (list scan)))))))))
+
 (define recset_project_join_expr_for_membership_raw (lambda (src membership)
 	(begin
 		(define stage (nth membership 0))
 		(define target_col (nth membership 2))
 		(define input (gs_input stage))
 		(define direct (direct_presence_projection_parts src membership))
+		(define query_direct (direct_query_presence_projection_parts src membership))
 		(if (not (nil? direct))
 			(list (quote recset_project_join)
 				(physical_query_tx_symbol)
@@ -5165,11 +5258,14 @@ Never drop a domain component or reconstruct a dependent/computed-key stage. */
 							(list (quote recset_union)
 								(physical_query_tx_symbol)
 								(cons (quote list) projected)))))
-				(if (equal? (qassoc_get (gs_facts stage) (quote purpose) nil) (quote in_membership))
-					(membership_cache_recset_project_join_expr src stage target_col)
-					(if (recset_probe_stage_shape? stage)
-						(exists_recset_project_join_expr src stage)
-						nil)))))))
+				(if (not (nil? query_direct))
+					(build_query_membership_recset_plan (nth query_direct 4) (gs_input stage)
+						(car query_direct) (nth query_direct 1) src (nth query_direct 2) (nth query_direct 3))
+					(if (equal? (qassoc_get (gs_facts stage) (quote purpose) nil) (quote in_membership))
+						(membership_cache_recset_project_join_expr src stage target_col)
+						(if (recset_probe_stage_shape? stage)
+							(exists_recset_project_join_expr src stage)
+							nil))))))))
 
 /* A source-local estimate cannot describe cardinality after an FK projection:
 matching most keys may still reach only a handful of driver rows. Translate an
@@ -5422,7 +5518,8 @@ filter; they must not reconstruct the choice from enclosing block facts. */
 			(membership_candidate_work_facts stage planning_session))))
 		/* Carrier-specific work belongs here, after the logical estimates. A
 		direct RHS projection neither prepares nor reads an aggregate cache. */
-		(define facts (if (nil? (direct_presence_projection_parts src membership))
+		(define facts (if (and (nil? (direct_presence_projection_parts src membership))
+			(nil? (direct_query_presence_projection_parts src membership)))
 			estimated_facts
 			(qassoc_set estimated_facts (quote membership_candidate_cache_backed) false)))
 		(define consumer_facts (qassoc_set

@@ -2088,7 +2088,10 @@ drifting on source-join pairs or residual outer references. */
 		(begin
 			(define inner_default (if (empty_list? (qb_sources block)) nil (source_alias (car (qb_sources block)))))
 			(define inner_sources (qb_sources block))
-			(define outer_aliases (source_aliases outer_sources))
+			/* An inner relation binds its alias locally, including reused generated
+			stage outputs. Such references are not residual outer-domain reads. */
+			(define outer_aliases (filter (source_aliases outer_sources) (lambda (alias)
+				(not (contains? (source_aliases inner_sources) alias)))))
 			(define local_terms (btw2025_local_where_terms_after_simple inner_default inner_sources outer_sources block))
 			(define local_sources (sources_without_outer_join_terms inner_default inner_sources outer_sources (qb_sources block)))
 			(merge_unique (list
@@ -2102,7 +2105,8 @@ drifting on source-join pairs or residual outer references. */
 (define btw2025_stage_facts (lambda (block outer_sources lookup_pairs residual_outer_refs pending_info)
 	(begin
 		(define inner_default (if (or (not (query_block? block)) (empty_list? (qb_sources block))) nil (source_alias (car (qb_sources block)))))
-		(define outer_aliases (source_aliases outer_sources))
+		(define outer_aliases (filter (source_aliases outer_sources) (lambda (alias)
+			(not (contains? (source_aliases (if (query_block? block) (qb_sources block) (quote ()))) alias)))))
 		(define accessing (btw2025_query_block_accessing_aliases block outer_sources))
 		(define accessing_after_simple (btw2025_accessing_after_simple block outer_sources))
 		(define domain (merge_unique (list
