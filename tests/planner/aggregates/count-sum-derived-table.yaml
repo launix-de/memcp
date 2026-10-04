@@ -111,6 +111,79 @@ test_cases:
         - "__mat:"
         - "(scan"
 
+  - name: "Joined COUNT preserves duplicate matches and outer NULL rows"
+    sql: |
+      SELECT COUNT(*) AS cnt FROM csd_main m
+      LEFT JOIN csd_detail d ON d.parent = m.ID
+      LEFT JOIN csd_detail e ON e.parent = m.ID
+    expect:
+      rows: 1
+      data: [{cnt: 6}]
+
+  - name: "Joined COUNT preserves filtered outer matches"
+    sql: |
+      SELECT COUNT(*) AS cnt FROM csd_main m
+      LEFT JOIN csd_detail d ON d.parent = m.ID AND d.val > 100
+    expect:
+      rows: 1
+      data: [{cnt: 3}]
+
+  - name: "Joined COUNT of nullable values keeps its own NULL semantics"
+    sql: |
+      SELECT COUNT(d.ID) AS cnt FROM csd_main m
+      LEFT JOIN csd_detail d ON d.parent = m.ID
+    expect:
+      rows: 1
+      data: [{cnt: 3}]
+
+  - name: "Session-domain joined COUNT preserves multiplicity"
+    session_id: joined-count-domain
+    setup:
+      - sql: SET @count_domain = 7
+    sql: |
+      SELECT @count_domain AS domain_key, COUNT(*) AS cnt
+      FROM csd_main m LEFT JOIN csd_detail d ON d.parent = m.ID
+      LEFT JOIN csd_detail e ON e.parent = m.ID
+      GROUP BY @count_domain
+    expect:
+      rows: 1
+      data: [{domain_key: 7, cnt: 6}]
+
+  - name: "Cached joined COUNT reads the current session domain"
+    session_id: joined-count-domain
+    setup:
+      - sql: SET @count_domain = 8
+    sql: |
+      SELECT @count_domain AS domain_key, COUNT(*) AS cnt
+      FROM csd_main m LEFT JOIN csd_detail d ON d.parent = m.ID
+      LEFT JOIN csd_detail e ON e.parent = m.ID
+      GROUP BY @count_domain
+    expect:
+      rows: 1
+      data: [{domain_key: 8, cnt: 6}]
+
+  - name: "Empty joined global COUNT retains its zero result"
+    sql: |
+      SELECT COUNT(*) AS cnt FROM csd_main m
+      LEFT JOIN csd_detail d ON d.parent = m.ID WHERE m.ID < 0
+    expect:
+      rows: 1
+      data: [{cnt: 0}]
+
+  - name: "HAVING remains after session-domain joined aggregation"
+    session_id: joined-count-domain
+    sql: |
+      SELECT @count_domain AS domain_key, COUNT(*) AS cnt
+      FROM csd_main m LEFT JOIN csd_detail d ON d.parent = m.ID
+      GROUP BY @count_domain HAVING COUNT(*) > 4
+    expect: {rows: 0}
+
+  - name: "Joined COUNT rejects ungrouped row-dependent output"
+    sql: |
+      SELECT m.name, COUNT(*) AS cnt FROM csd_main m
+      LEFT JOIN csd_detail d ON d.parent = m.ID
+    expect: {error: true}
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS csd_main"
   - sql: "DROP TABLE IF EXISTS csd_detail"

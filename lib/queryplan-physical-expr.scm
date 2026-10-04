@@ -8256,7 +8256,34 @@ on the same columns. */
 					(list (quote list))))
 			grouped_expr))))
 
+/* Literal and session-bound domains have one key per invocation. COUNT(*)
+can carry an integer through the complete join pipeline and construct its
+group payload once afterwards. Keep every join: duplicates and NULL-extension
+still contribute to the joined cardinality. An empty explicit domain must not
+invent a group; global aggregates retain the existing seed-empty contract. */
 (define build_query_grouped_assoc_plan (lambda (input keys key_names ags seed_empty)
+	(if (and (not (empty_list? ags))
+		(reduce keys (lambda (valid key)
+			(and valid (or (logical_literal_value? key) (query_session_read? key)))) true)
+		(reduce ags (lambda (valid ag)
+			(and valid (equal? ag aggregate_count_descriptor))) true))
+		(begin
+			(define cardinality (quote __group_cardinality))
+			(define count_plan (lower_query_block_as_dataset_reduce
+				input '() (list (quote lambda) '() 1) (quote +) 0 (quote +)))
+			(list
+				(list (quote lambda) (list cardinality)
+					(list (quote if)
+						(list (quote or) (list (quote >) cardinality 0)
+							(and seed_empty (equal? keys '(1))))
+						(runtime_cons_list_expr (list
+							(runtime_cons_list_expr keys)
+							(runtime_cons_list_expr (map ags (lambda (_ag) cardinality)))))
+						(list (quote list))))
+				count_plan))
+		(build_query_grouped_dictionary_plan input keys key_names ags seed_empty))))
+
+(define build_query_grouped_dictionary_plan (lambda (input keys key_names ags seed_empty)
 	(begin
 		(define runtime_ags (map ags query_group_aggregate_descriptor))
 		(define row_key_names (map key_names (lambda (col) (concat "__row_" col))))
