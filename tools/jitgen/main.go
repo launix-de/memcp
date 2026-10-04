@@ -4861,6 +4861,14 @@ func (g *codeGen) emitBody(cfg emitBodyConfig) {
 		g.emit("branchSerial := ctx.branchSerial")
 		g.emit("_ = branchSerial")
 	}
+	// Merge only return arms actually visited by the one-pass renderer. Typed
+	// inputs can eliminate the NULL arm; a declared return kind cannot prove
+	// that. The accumulator belongs to this emitter invocation, not its helpers.
+	if !g.storageMode && !g.rawReturn {
+		g.emit("returnType := uint8(JITTypeUnknown)")
+		g.emit("returnTypeSeen := false")
+		g.emit("mergeReturnType := func(t uint8) { if !returnTypeSeen { returnType, returnTypeSeen = t, true } else if returnType != t { returnType = JITTypeUnknown } }")
+	}
 	g.emit("var bbs [%d]%sBBDescriptor", len(g.fn.Blocks), cfg.bbsDeclPrefix)
 	g.emitBBPhiLayout()
 	g.emitStorageInputHomeDeclarations()
@@ -4946,6 +4954,10 @@ func (g *codeGen) emitBody(cfg emitBodyConfig) {
 	g.emitUnprotectIncomingArgRegs(pinnedArgRegs)
 	if g.storageMode && g.multiBlock {
 		g.emit("ctx.EndStandaloneFrame(standaloneFrame)")
+	}
+	if !g.storageMode && !g.rawReturn {
+		g.emit("result.Type = returnType")
+		g.emit("result.ReturnTypeMerged = returnTypeSeen")
 	}
 	g.emit("return result")
 }
@@ -10376,6 +10388,7 @@ func (g *codeGen) emitReturnMultiBlock(v *ssa.Return) {
 
 	if len(v.Results) == 0 {
 		g.emit("ctx.EmitMakeNil(result)")
+		g.emit("mergeReturnType(tagNil)")
 		g.emit("ctx.EmitJmp(%s)", g.endLabel)
 		return
 	}
@@ -10432,6 +10445,7 @@ func (g *codeGen) emitReturnMultiBlock(v *ssa.Return) {
 			panic(fmt.Sprintf("unsupported return type for %s", v.Results[0]))
 		}
 	}
+	g.emit("mergeReturnType(result.Type)")
 	g.emit("ctx.EmitJmp(%s)", g.endLabel)
 }
 func (g *codeGen) emitScalarReturnIntoResult(res genVal, constructor, tag string) {

@@ -38,6 +38,18 @@ test_cases:
   timing_samples: 4
   timing_aggregation: total
   threshold_ms: 5000
+- name: 'Perf: repeated materialized comparisons in typed scan'
+  scm: |
+    (scan nil (table "memcp-tests" "kernel_values") '() '()
+      '("value" "weight")
+      (lambda (v w) (and (> v -1) (< v 60000) (> w 0) (< w 60001)
+        (>= v 0) (<= v 59999) (>= w 1) (<= w 60000)))
+      '() (lambda (acc) (+ acc 1)) 0 + false)
+  expect: {result: 60000}
+  warmup: 0
+  timing_samples: 4
+  timing_aggregation: total
+  threshold_ms: 5000
 - name: Reject missing scan column
   sql: SELECT SUM(missing_value) FROM kernel_values
   expect: {error: true}
