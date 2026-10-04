@@ -182,6 +182,9 @@ func jitEnsureResultPair(ctx *JITContext, result JITValueDesc) JITValueDesc {
 func jitAllocTrackedPair(ctx *JITContext, valueType uint8) JITValueDesc {
 	reg := ctx.AllocReg()
 	desc := JITValueDesc{Loc: LocRegPair, Type: valueType, Reg: reg, Reg2: ctx.AllocRegExcept(reg)}
+	// Reserved results can be spilled or saved across a Go call before their
+	// producer writes them. Give the tracked pointer word a valid GC value.
+	ctx.EmitMovRegImm64(desc.Reg, 0)
 	ctx.BindReg(desc.Reg, &desc)
 	ctx.BindReg(desc.Reg2, &desc)
 	return desc
