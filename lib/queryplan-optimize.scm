@@ -4029,11 +4029,11 @@ consumer rebuild that relation once per driver row. */
 			(reduce (union_branches input) (lambda (supported branch)
 				(and supported
 					(and (query_block? branch)
-						(and (single_real_source? (qb_sources branch))
-							(source_is_base_table? (single_real_source (qb_sources branch))))))) true)
+						(and (single_source? (qb_sources branch))
+							(source_is_base_table? (car (qb_sources branch))))))) true)
 			(if (query_block? input)
-				(and (single_real_source? (qb_sources input))
-					(source_is_base_table? (single_real_source (qb_sources input))))
+				(and (single_source? (qb_sources input))
+					(source_is_base_table? (car (qb_sources input))))
 				(source_is_base_table? input))))))
 
 (define driver_membership_probe_expr_for_strategy (lambda (stage probe strategy)

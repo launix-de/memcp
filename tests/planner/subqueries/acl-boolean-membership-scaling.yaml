@@ -1216,6 +1216,119 @@ test_cases:
     cleanup:
       - scm: '(settings "ScanDebugging" false)'
 
+  - name: "Ordered membership intersects an independent scalar carrier"
+    session_id: "bqm_combined_carriers"
+    setup:
+      - sql: "SET @bqm_actor = 7"
+    sql: |
+      SELECT d.id FROM bqm_document d
+      WHERE d.id >= 39993 AND COALESCE((SELECT CASE WHEN s.direct_flag = 1 THEN TRUE ELSE EXISTS (SELECT 1 FROM bqm_projection_assignment a WHERE a.standort_id = s.id AND a.actor_id = @bqm_actor AND a.allowed = TRUE) END FROM bqm_standort s WHERE s.id = d.standort_id LIMIT 1), FALSE) AND d.file_id IN (SELECT f.id FROM bqm_file f WHERE f.id IN (19993, 19998) AND EXISTS (SELECT 1 FROM bqm_mandant_assignment g WHERE g.actor_id = @bqm_actor))
+      ORDER BY d.id DESC LIMIT 10
+    expect:
+      rows: 2
+      data:
+        - {id: 39998}
+        - {id: 39993}
+
+  - name: "OR membership keeps its alternative branch"
+    session_id: "bqm_combined_carriers"
+    setup:
+      - sql: "SET @bqm_actor = 7"
+    sql: |
+      SELECT d.id FROM bqm_document d
+      WHERE d.id >= 39993 AND COALESCE((SELECT CASE WHEN s.direct_flag = 1 THEN TRUE ELSE EXISTS (SELECT 1 FROM bqm_projection_assignment a WHERE a.standort_id = s.id AND a.actor_id = @bqm_actor AND a.allowed = TRUE) END FROM bqm_standort s WHERE s.id = d.standort_id LIMIT 1), FALSE) AND (d.file_id IN (SELECT f.id FROM bqm_file f WHERE f.id IN (19993, 19998) AND EXISTS (SELECT 1 FROM bqm_mandant_assignment g WHERE g.actor_id = @bqm_actor)) OR d.id = 39997)
+      ORDER BY d.id DESC LIMIT 10
+    expect:
+      rows: 3
+      data:
+        - {id: 39998}
+        - {id: 39997}
+        - {id: 39993}
+
+  - name: "NOT IN keeps residual membership filtering"
+    session_id: "bqm_combined_carriers"
+    setup:
+      - sql: "SET @bqm_actor = 7"
+    sql: |
+      SELECT d.id FROM bqm_document d
+      WHERE d.id >= 39993 AND COALESCE((SELECT CASE WHEN s.direct_flag = 1 THEN TRUE ELSE EXISTS (SELECT 1 FROM bqm_projection_assignment a WHERE a.standort_id = s.id AND a.actor_id = @bqm_actor AND a.allowed = TRUE) END FROM bqm_standort s WHERE s.id = d.standort_id LIMIT 1), FALSE) AND d.file_id NOT IN (SELECT f.id FROM bqm_file f WHERE f.id IN (19993,19998) AND EXISTS (SELECT 1 FROM bqm_mandant_assignment g WHERE g.actor_id = @bqm_actor))
+      ORDER BY d.id DESC LIMIT 10
+    expect:
+      rows: 2
+      data:
+        - {id: 39997}
+        - {id: 39994}
+
+  - name: "NULL session domains retain their producer rows"
+    session_id: "bqm_combined_carriers"
+    setup:
+      - sql: "SET @bqm_actor = 7"
+    sql: |
+      SELECT d.id FROM bqm_document d
+      WHERE d.id >= 39993 AND COALESCE((SELECT CASE WHEN s.direct_flag = 1 THEN TRUE ELSE EXISTS (SELECT 1 FROM bqm_projection_assignment a WHERE a.standort_id = s.id AND a.actor_id = @bqm_actor AND a.allowed = TRUE) END FROM bqm_standort s WHERE s.id = d.standort_id LIMIT 1), FALSE) AND d.file_id IN (SELECT f.id FROM bqm_file f WHERE f.id IN (19993,19998) AND (@unset_presence_domain IS NULL OR EXISTS (SELECT 1 FROM bqm_mandant_assignment g WHERE g.actor_id = @unset_presence_domain)))
+      ORDER BY d.id DESC LIMIT 10
+    expect:
+      rows: 2
+      data:
+        - {id: 39998}
+        - {id: 39993}
+
+  - name: "Limited membership producer retains its window"
+    session_id: "bqm_combined_carriers"
+    setup:
+      - sql: "SET @bqm_actor = 7"
+    sql: |
+      SELECT d.id FROM bqm_document d
+      WHERE d.id >= 39993 AND COALESCE((SELECT CASE WHEN s.direct_flag = 1 THEN TRUE ELSE EXISTS (SELECT 1 FROM bqm_projection_assignment a WHERE a.standort_id = s.id AND a.actor_id = @bqm_actor AND a.allowed = TRUE) END FROM bqm_standort s WHERE s.id = d.standort_id LIMIT 1), FALSE) AND d.file_id IN (SELECT limited.id FROM (SELECT f.id FROM bqm_file f WHERE f.id IN (19993,19998) ORDER BY f.id DESC LIMIT 1) limited WHERE EXISTS (SELECT 1 FROM bqm_mandant_assignment g WHERE g.actor_id = @bqm_actor))
+      ORDER BY d.id DESC LIMIT 10
+    expect:
+      rows: 1
+      data:
+        - {id: 39998}
+
+  - name: "Inner aliases shadow outer aliases in membership"
+    session_id: "bqm_combined_carriers"
+    setup:
+      - sql: "SET @bqm_actor = 7"
+    sql: |
+      SELECT d.id FROM bqm_document d
+      WHERE d.id >= 39993 AND COALESCE((SELECT CASE WHEN s.direct_flag = 1 THEN TRUE ELSE EXISTS (SELECT 1 FROM bqm_projection_assignment a WHERE a.standort_id = s.id AND a.actor_id = @bqm_actor AND a.allowed = TRUE) END FROM bqm_standort s WHERE s.id = d.standort_id LIMIT 1), FALSE) AND d.file_id IN (SELECT d.id FROM bqm_file d WHERE d.id IN (19993,19998) AND EXISTS (SELECT 1 FROM bqm_mandant_assignment d WHERE d.actor_id = @bqm_actor))
+      ORDER BY d.id DESC LIMIT 10
+    expect:
+      rows: 2
+      data:
+        - {id: 39998}
+        - {id: 39993}
+
+  - name: "Joined membership rejects unresolved source columns"
+    session_id: "bqm_combined_carriers"
+    setup:
+      - sql: "SET @bqm_actor = 7"
+    sql: |
+      SELECT d.id FROM bqm_document d
+      WHERE d.file_id IN (SELECT f.missing_key FROM bqm_file f
+        WHERE EXISTS (SELECT 1 FROM bqm_mandant_assignment g WHERE g.actor_id = @bqm_actor))
+      ORDER BY d.id DESC LIMIT 10
+    expect: {error: true}
+
+  - name: "Positive projected membership excludes NULL and ignores duplicate keys"
+    session_id: "bqm_nullable_carrier"
+    setup:
+      - sql: "SET @bqm_actor = 7"
+      - sql: "DROP TABLE IF EXISTS bqm_nullable_membership"
+      - sql: "CREATE TABLE bqm_nullable_membership (id INT, member_key INT) ENGINE=MEMORY"
+      - sql: "INSERT INTO bqm_nullable_membership VALUES (1,NULL), (2,2), (3,3), (4,2)"
+    sql: |
+      SELECT d.id FROM bqm_nullable_membership d
+      WHERE d.member_key IN (SELECT f.member_key FROM bqm_nullable_membership f
+        WHERE EXISTS (SELECT 1 FROM bqm_mandant_assignment g WHERE g.actor_id = @bqm_actor))
+      ORDER BY d.id DESC LIMIT 10
+    expect:
+      rows: 3
+      data: [{id: 4}, {id: 3}, {id: 2}]
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS bqm_nullable_membership"
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS bqm_file"
   - sql: "DROP TABLE IF EXISTS bqm_unused_lookup"

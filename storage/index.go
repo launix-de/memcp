@@ -1777,6 +1777,12 @@ func (s *StorageIndex) iterateRecSetFirst(tx *TxContext, state *storageIndexStat
 		}
 		return nil
 	}(), persistent, exactMain)
+	// Only the inverse-position path applied the persistent index interval
+	// above. Native indexes sort RecSet IDs directly, so their candidate list
+	// still needs the sorted range checks even though reusable hooks are hot.
+	if persistent && !usedInverse {
+		matchers = append(matchers, s.bindColdRangeMatcher(tx, bounds, indexBounds, upperInclusive, cols)...)
+	}
 	for len(items) > 0 {
 		count := len(items)
 		if count > len(buf) {

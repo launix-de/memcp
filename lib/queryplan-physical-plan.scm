@@ -5535,11 +5535,45 @@ stage requested-column. The recursive result is ordered driver -> final. */
 					core_block
 					(direct_group_join_usage_flush_exprs direct_group_join_stages)))))))
 
+/* A positive IN group contributes presence, never payload or multiplicity.
+After consuming its complete domain join, the ordinary membership cost search
+chooses the producer/driver implementation from canonical stage facts. */
+(define query_block_with_presence_projection_choices (lambda (block)
+	(reduce (qb_sources block) (lambda (current output)
+		(begin
+			(define catalog (query_block_stage_lookup current))
+			(define stage (if (stage_output_relation? (source_relation output))
+				(stage_by_id catalog (stage_output_relation_id (source_relation output))) nil))
+			(define lookup (if (nil? stage) '() (qassoc_get (gs_facts stage) (quote lookup-keys) '())))
+			(define probe (if (empty_list? lookup) nil (car lookup)))
+			(define target (find (filter (qb_sources current) source_is_base_table?) (lambda (source)
+				(not (nil? (direct_column_name_for_alias source probe)))) nil))
+			(define stamped (if (nil? stage) nil (group_stage_with_lowering_catalog stage catalog)))
+			(define membership (if (nil? target) nil
+				(list stamped probe (direct_column_name_for_alias target probe) true)))
+			(define parts (if (nil? membership) nil (direct_query_presence_projection_parts target membership)))
+			(if (or (nil? parts) (source_outer? output)) current
+				(begin
+					(define expected (split_and_terms (make_positive_in_join_condition
+						(gs_input stage) (source_alias output) (group_key_cols (gs_keys stage)) lookup probe aggregate_count_descriptor)))
+					(define terms (split_and_terms (qb_where current)))
+					(define remaining (filter terms (lambda (term) (not (contains? expected term)))))
+					(define other_sources (without_source_alias (qb_sources current) (source_alias output)))
+					(define other_exprs (list remaining (qb_fields current) (qb_group current) (qb_having current)
+						(qb_order current) (qb_hidden current) (map other_sources source_join_expr)))
+					(if (or (not (reduce expected (lambda (ok term) (and ok (contains? terms term))) true))
+						(expr_refs_alias? nil (source_alias output) other_exprs)) current
+						(make_query_block (qb_schema current) other_sources (qb_fields current)
+							(combine_where_terms (cons (driver_membership_probe_expr stamped probe) remaining) true)
+							(qb_group current) (qb_having current) (qb_order current) (qb_limit current) (qb_offset current)
+							(qb_hidden current) (qb_stages current)
+							(join_optimizer_facts_without_aliases (qb_facts current) (list (source_alias output))))))))) block)))
+
 (define prepare_simple_query_block_physical_core (lambda (block)
 	(prepare_simple_query_block_physical_core_chosen
 		(query_block_with_physical_membership_choices
 			(query_block_with_physical_membership_using
-				(query_block_stage_lookup block) block)))))
+				(query_block_stage_lookup block) (query_block_with_presence_projection_choices block))))))
 
 (define lower_simple_query_block_with_cataloged_stages (lambda (block)
 	(begin
@@ -8230,10 +8264,15 @@ until the caller has selected this physical alternative. */
 		(define branch_candidates (if (empty_list? branch_bindings) nil
 			(membership_or_candidate_recset src (source_table_expr_using stages src)
 				condition branch_bindings)))
-		(define base_table_expr (if (nil? scalar_carrier)
-			(coalesceNil membership_table_expr
-				(coalesceNil projected_join_carrier (source_table_expr_using stages src)))
-			scalar_carrier))
+		/* Every consumed predicate contributes its exact carrier. Choosing only
+		one would discard the other predicate after its marker was removed. */
+		(define exact_carriers (filter (list scalar_carrier membership_table_expr projected_join_carrier)
+			(lambda (carrier) (not (nil? carrier)))))
+		(define base_table_expr (if (empty_list? exact_carriers)
+			(source_table_expr_using stages src)
+			(if (single_source? exact_carriers) (car exact_carriers)
+				(list (quote recset_intersect) (physical_query_tx_symbol)
+					(cons (quote list) exact_carriers)))))
 		(define table_expr (if (nil? branch_candidates) base_table_expr
 			(if (equal? base_table_expr (source_table_expr_using stages src)) branch_candidates
 				(list (quote recset_intersect) (physical_query_tx_symbol)

@@ -317,3 +317,46 @@ func TestSparseRecSetFilterAppliesPrunedAccessBoundary(t *testing.T) {
 		})
 	}
 }
+
+func TestSparseOrderedRecSetAppliesNativeIndexRange(t *testing.T) {
+	tbl := setupAdaptiveRecSetOrderTable(t, "trecsetnativebounds", 20_000)
+	schema, values := testUpperScanAccess("id", scm.NewInt(10_003), true)
+	_, order := integerOrder(false)
+	shard := tbl.ActiveShards()[0]
+	access, _ := scanAccessFromScheme(schema, values, nil)
+	func() {
+		defer shard.GetRead()()
+		shard.mu.RLock()
+		defer shard.mu.RUnlock()
+		var buffer [8]uint32
+		shard.iterateIndexForce(nil, access, len(shard.inserts), buffer[:], false, func([]uint32) bool { return false })
+		for _, index := range shard.Indexes {
+			if len(index.Cols) == 1 && index.Cols[0] == "id" {
+				index.storeSavings(8)
+			}
+		}
+	}()
+	RebuildTable(tbl, true, false)
+	native := func() bool {
+		shard := tbl.ActiveShards()[0]
+		defer shard.GetRead()()
+		shard.mu.RLock()
+		defer shard.mu.RUnlock()
+		return shard.Indexes[0].Native
+	}()
+	if !native {
+		t.Fatal("fixture did not physically sort by the ID index")
+	}
+	source := recSetForIDs(tbl, map[int64]bool{3: true, 10_003: true, 15_003: true})
+	for attempt := range 4 {
+		got := make([]int64, 0, 3)
+		source.scan_order(nil, schema, values, nil, trueCondition(),
+			[]scm.Scmer{scm.NewString("id")}, []func(...scm.Scmer) scm.Scmer{order},
+			0, 0, 10, []string{"id"},
+			scm.NewFunc(func(row ...scm.Scmer) scm.Scmer { got = append(got, row[1].Int()); return row[0] }),
+			scm.NewNil(), false, scm.NewNil(), nil, scm.NewNil())
+		if want := []int64{3, 10_003}; !equalInt64s(got, want) {
+			t.Fatalf("attempt %d: sparse native-index range = %v, want %v", attempt, got, want)
+		}
+	}
+}
