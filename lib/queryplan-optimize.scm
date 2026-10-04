@@ -2832,7 +2832,8 @@ Both searches already register the same bounded statistics/parameter guards. */
 					(define direct (if (nil? planning_session) nil (planning_session key)))
 					(define value (if (not (nil? direct)) direct
 						(if (nil? compile_bindings) nil (compile_bindings key))))
-					(if (and (not (nil? compile_bindings)) (not (nil? observed)))
+					(if (and (not (nil? compile_bindings)) (not (nil? observed))
+						(not (planner_stage_preparation_read? expr)))
 						(begin
 							/* Snapshot the value actually consumed by costing, not just vN
 							literal parameters. The uncovered-binding guard reads this snapshot:
@@ -2859,6 +2860,10 @@ runtime guards keep the cached choice valid for those exact values. */
 	(if (nil? planning_session)
 		expr
 		(match expr
+			/* Quoted recipes are metadata, not executable session reads. Sampling
+			must leave them intact: observing an embedded preparation would put its
+			query-local closure into a cache guard and invalidate every later call. */
+			((symbol quote) _value) expr
 			((symbol session) _key)
 			(planner_quoted_value (planner_literal_value expr planning_session))
 			((quote session) _key)
@@ -2876,12 +2881,21 @@ runtime guards keep the cached choice valid for those exact values. */
 /* Physical selectivity decisions over session-dependent predicates must be
 guarded by the values observed while compiling the cached plan. */
 (define planner_record_session_value_guards (lambda (node planning_session)
-	(reduce (query_expr_session_reads node) (lambda (_ expr)
-		(begin
-			(define value (planner_literal_value expr planning_session))
-			(planner_record_guard_condition
-				(list (quote equal?) expr
-					(if (list? value) (list (quote quote) value) value)) planning_session))) nil)))
+	(reduce (filter (query_expr_session_reads node) (lambda (expr)
+		(not (planner_stage_preparation_read? expr)))) (lambda (_ expr)
+			(begin
+				(define value (planner_literal_value expr planning_session))
+				(planner_record_guard_condition
+					(list (quote equal?) expr
+						(if (list? value) (list (quote quote) value) value)) planning_session))) nil)))
+
+/* Physical stage preparations are generated query-local once closures, not
+request inputs. Sampling may invoke them, but their identity cannot guard a
+shared plan; the sampled cost decision and its scalar inputs are guarded. */
+(define planner_stage_preparation_read? (lambda (expr)
+	(match (query_session_read_expr expr)
+		'(_ key) (and (string? key) (regexp_test key "^__prepare_stage_"))
+		_ false)))
 
 (define planner_concat_expr_value (lambda (items planning_session)
 	(match items
