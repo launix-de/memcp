@@ -78,7 +78,8 @@ func TestOptimizeDoubleBangListAllocatesSlots(t *testing.T) {
 		NewSlice([]Scmer{NewSymbol("!!list"), NewInt(4)}),
 	})
 	optimized := Optimize(lambdaExpr, &Globalenv, nil)
-	items := optimized.Slice()
+	// Compiler metadata is not a semantic lambda operand.
+	items := lambdaSyntaxOperands(optimized.Slice())
 	if len(items) != 4 {
 		t.Fatalf("expected optimized lambda with NumVars, got %v", optimized)
 	}
@@ -272,7 +273,8 @@ func TestOptimizeExtendsExplicitNumVarsForLocalBinding(t *testing.T) {
 			(+ doubled doubled))
 		1)`)
 	optimized := Optimize(expr, &Globalenv, nil)
-	items := optimized.Slice()
+	// Compiler metadata is not a semantic lambda operand.
+	items := lambdaSyntaxOperands(optimized.Slice())
 	if len(items) != 4 || ToInt(items[3]) != 2 {
 		t.Fatalf("explicit frame was not extended for local binding: %s", serializeSliceAllocTestExpr(t, optimized))
 	}
