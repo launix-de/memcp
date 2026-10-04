@@ -8,7 +8,6 @@ import "fmt"
 import "math"
 import "sort"
 import "time"
-import "container/heap"
 import "github.com/google/btree"
 import "github.com/launix-de/memcp/scm"
 
@@ -219,21 +218,8 @@ type orderedPrefixCursor struct {
 	resume        indexPair
 	exhausted     bool
 	id            uint32
-}
-type orderedPrefixHeap struct {
-	cursors []*orderedPrefixCursor
-	less    func(*orderedPrefixCursor, *orderedPrefixCursor) bool
-}
-
-func (h orderedPrefixHeap) Len() int           { return len(h.cursors) }
-func (h orderedPrefixHeap) Less(i, j int) bool { return h.less(h.cursors[i], h.cursors[j]) }
-func (h orderedPrefixHeap) Swap(i, j int)      { h.cursors[i], h.cursors[j] = h.cursors[j], h.cursors[i] }
-func (h *orderedPrefixHeap) Push(v any)        { h.cursors = append(h.cursors, v.(*orderedPrefixCursor)) }
-func (h *orderedPrefixHeap) Pop() any {
-	n := len(h.cursors) - 1
-	v := h.cursors[n]
-	h.cursors = h.cursors[:n]
-	return v
+	head          []scm.Scmer
+	loaded        int
 }
 
 func (s *StorageIndex) iteratePrefixMerge(tx *TxContext, prefix *orderedPrefixAccess, cols []colGetter, main StorageInt, delta *btree.BTreeG[indexPair], native bool, maxInsert int, buf []uint32, callback func([]uint32) bool) {
@@ -244,6 +230,7 @@ func (s *StorageIndex) iteratePrefixMerge(tx *TxContext, prefix *orderedPrefixAc
 		return uint32(int64(main.GetValueUInt(uint32(position))) + main.offset)
 	}
 	advance := func(c *orderedPrefixCursor) bool {
+		c.loaded = 0
 		if !c.delta {
 			if c.position >= c.end {
 				return false
@@ -270,6 +257,9 @@ func (s *StorageIndex) iteratePrefixMerge(tx *TxContext, prefix *orderedPrefixAc
 				}
 				if id >= s.t.main_count+uint32(maxInsert) {
 					return true
+				}
+				if c.page == nil {
+					c.page = make([]indexPair, 0, 32)
 				}
 				c.page = append(c.page, pair)
 				if len(c.page) == 32 {
@@ -298,15 +288,23 @@ func (s *StorageIndex) iteratePrefixMerge(tx *TxContext, prefix *orderedPrefixAc
 			}
 		}
 	}
-	value := func(c *orderedPrefixCursor, col int) scm.Scmer {
-		if c.delta {
-			return s.getDeltaColValueTx(tx, c.id, c.page[c.next-1].data, col)
+	// Cache only the head columns actually compared. Later tie-break columns
+	// stay cold until needed, and advancing one stream invalidates only its head.
+	value := func(c *orderedPrefixCursor, orderCol int) scm.Scmer {
+		for c.loaded <= orderCol {
+			slot := orderSlots[c.loaded]
+			if c.delta {
+				c.head[c.loaded] = s.getDeltaColValueTx(tx, c.id, c.page[c.next-1].data, slot)
+			} else {
+				c.head[c.loaded] = cols[slot].get(c.id)
+			}
+			c.loaded++
 		}
-		return cols[col].get(c.id)
+		return c.head[orderCol]
 	}
-	h := orderedPrefixHeap{less: func(a, b *orderedPrefixCursor) bool {
-		for i, slot := range orderSlots {
-			av, bv := value(a, slot), value(b, slot)
+	less := func(a, b *orderedPrefixCursor) bool {
+		for i := range orderSlots {
+			av, bv := value(a, i), value(b, i)
 			if orderLess[i](av, bv) {
 				return true
 			}
@@ -315,36 +313,78 @@ func (s *StorageIndex) iteratePrefixMerge(tx *TxContext, prefix *orderedPrefixAc
 			}
 		}
 		return a.id < b.id
-	}}
-	for _, key := range prefix.keys.values {
+	}
+	// All cursor objects and head tuples share bounded invocation-local slabs;
+	// no per-head allocations or references to mutable shard containers escape.
+	cursorCount := len(prefix.keys.values)
+	hasDelta := delta != nil && delta.Len() != 0
+	if hasDelta {
+		cursorCount *= 2
+	}
+	cursors := make([]orderedPrefixCursor, cursorCount)
+	heads := make([]scm.Scmer, len(cursors)*len(orderSlots))
+	active := make([]*orderedPrefixCursor, 0, len(cursors))
+	for i := range cursors {
+		cursors[i].head = heads[i*len(orderSlots) : (i+1)*len(orderSlots)]
+	}
+	for ki, key := range prefix.keys.values {
 		start := sort.Search(int(s.t.main_count), func(i int) bool { return s.compareAt(0, cols[0].get(recid(i)), key) >= 0 })
 		end := start + sort.Search(int(s.t.main_count)-start, func(i int) bool { return s.compareAt(0, cols[0].get(recid(start+i)), key) > 0 })
-		c := &orderedPrefixCursor{key: key, position: start, end: end}
+		c := &cursors[ki]
+		c.key, c.position, c.end = key, start, end
 		if advance(c) {
-			h.cursors = append(h.cursors, c)
+			active = append(active, c)
 		}
-		if delta != nil {
-			d := &orderedPrefixCursor{key: key, delta: true, page: make([]indexPair, 0, 32), resume: indexPair{itemid: -1, data: []scm.Scmer{key}}}
+		if hasDelta {
+			d := &cursors[len(prefix.keys.values)+ki]
+			d.key, d.delta = key, true
+			d.resume = indexPair{itemid: -1, data: []scm.Scmer{key}}
 			if advance(d) {
-				h.cursors = append(h.cursors, d)
+				active = append(active, d)
 			}
 		}
 	}
-	heap.Init(&h)
+	// A winner tournament needs one comparison per level on replacement,
+	// rather than choosing a child and comparing the parent at every heap level.
+	leaves := 1
+	for leaves < len(active) {
+		leaves *= 2
+	}
+	winners := make([]int, leaves*2)
+	for i := range winners {
+		winners[i] = -1
+	}
+	for i := range active {
+		winners[leaves+i] = i
+	}
+	choose := func(a, b int) int {
+		if a < 0 {
+			return b
+		}
+		if b < 0 || less(active[a], active[b]) {
+			return a
+		}
+		return b
+	}
+	for i := leaves - 1; i > 0; i-- {
+		winners[i] = choose(winners[i*2], winners[i*2+1])
+	}
 	// Let LIMIT brake after its first window, rather than decoding a full batch.
 	width := len(buf)
 	if width > 32 {
 		width = 32
 	}
 	count := 0
-	for h.Len() > 0 {
-		c := h.cursors[0]
+	for winners[1] >= 0 {
+		winner := winners[1]
+		c := active[winner]
 		buf[count] = c.id
 		count++
 		if !advance(c) {
-			heap.Pop(&h)
-		} else {
-			heap.Fix(&h, 0)
+			winners[leaves+winner] = -1
+		}
+		for node := (leaves + winner) / 2; node > 0; node /= 2 {
+			winners[node] = choose(winners[node*2], winners[node*2+1])
 		}
 		if count == width {
 			if !callback(buf[:count]) {

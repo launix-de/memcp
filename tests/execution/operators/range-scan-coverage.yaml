@@ -514,7 +514,9 @@ test_cases:
         - 'ordered_join_carrier'
         - 'chosen projected_candidate_keyset'
         - 'carrier_exact true'
-        - 'recset_project_join'
+        - 'ordered_keyset_access'
+        - 'prefix_cursor_merge'
+        - 'projected_recset_scan'
         - 'chosen carrier_only'
 
   - name: "Parameterized ordered selective join keeps Top-K semantics"

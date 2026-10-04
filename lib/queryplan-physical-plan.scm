@@ -12746,8 +12746,13 @@ prepare bindings; no key enumeration or storage artifact enters logical IR. */
 		(define planning_session (if (query_block? (ir_root ir))
 			(planner_context_session (qb_facts (ir_root ir))) nil))
 		/* Forced costgen alternatives must keep their requested physical path. */
-		(define fused_plan (if (and (not (nil? planning_session))
-			(not (nil? (planning_session "__memcp_physical_overrides"))))
+		/* Single-source blocks without stages have no projected join keys. */
+		(define fused_plan (if (or
+			(and (not (nil? planning_session))
+				(not (nil? (planning_session "__memcp_physical_overrides"))))
+			(and (query_block? (ir_root ir))
+				(empty_list? (ir_stages ir))
+				(<= (count (qb_sources (ir_root ir))) 1)))
 			memoized_plan (lower_ordered_keyset_scans memoized_plan)))
 		(define checked (require_physical_scan_relations fused_plan))
 		(if (and (not (nil? carrier)) (and (not (nth carrier 5))

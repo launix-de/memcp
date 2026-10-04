@@ -124,8 +124,11 @@ test_cases:
       LIMIT 72
     expect:
       result_contains:
-        - "recset_project_join"
-        - "chosen adaptive_recset_boundary"
+        - "ordered_keyset_access"
+        - "chosen runtime_cost_minimum"
+        - "prefix_cursor_merge"
+        - "ordered_membership_scan"
+        - "projected_recset_scan"
 
   - &first_read
     name: "First request reads only its permitted row"

@@ -982,10 +982,12 @@ test_cases:
     expect:
       result_contains:
         - "boolean_stage_recset"
-        - "chosen adaptive_recset_boundary"
-        - "runtime_cardinality_and_index_span"
-        - "ordered_inverse_recset"
-        - "ordered_base_membership"
+        - "ordered_keyset_access"
+        - "chosen runtime_cost_minimum"
+        - "actual_key_count_target_distinct_estimate_and_page_window"
+        - "prefix_cursor_merge"
+        - "ordered_membership_scan"
+        - "projected_recset_scan"
       result_not_contains:
         - "ordered_recset_consumer"
         - "ordered_direct_recset"
@@ -1053,10 +1055,12 @@ test_cases:
     expect:
       result_contains:
         - "boolean_stage_recset"
-        - "chosen adaptive_recset_boundary"
-        - "runtime_cardinality_and_index_span"
-        - "ordered_inverse_recset"
-        - "ordered_base_membership"
+        - "ordered_keyset_access"
+        - "chosen runtime_cost_minimum"
+        - "actual_key_count_target_distinct_estimate_and_page_window"
+        - "prefix_cursor_merge"
+        - "ordered_membership_scan"
+        - "projected_recset_scan"
       result_not_contains:
         - "ordered_recset_consumer"
         - "ordered_direct_recset"
