@@ -1056,3 +1056,82 @@ func TestJITNestedExpressionSpillsProtectedOuterValues(t *testing.T) {
 		}
 	}
 }
+
+func TestJITOrderedFloatFilterTruthTables(t *testing.T) {
+	floats := []Scmer{NewFloat(math.NaN()), NewFloat(math.Inf(-1)), NewFloat(math.Inf(1)), NewFloat(math.Copysign(0, -1)), NewFloat(0), NewFloat(-1.5), NewFloat(1.5), NewFloat(1 << 53)}
+	for _, op := range []string{"<", "<=", ">", ">="} {
+		for _, conditional := range []bool{false, true} {
+			body := "(" + op + " a b)"
+			if conditional {
+				body = "(if " + body + " true false)"
+			}
+			proc := calibrationProcedure("(lambda (a b) " + body + ")")
+			kernel := CompileJITFilterBuffer(proc, []uint8{tagFloat, tagFloat})
+			if kernel == nil {
+				t.Fatal("float filter did not compile")
+			}
+			var ids, want []uint32
+			var values []Scmer
+			for _, a := range floats {
+				for _, b := range floats {
+					id := uint32(len(ids))
+					ids = append(ids, id)
+					values = append(values, a, b)
+					if declarations[op].Fn(a, b).Bool() {
+						want = append(want, id)
+					}
+				}
+			}
+			n := kernel(ids, values)
+			if n != len(want) {
+				t.Fatalf("%s conditional=%v selected %v, want %v", op, conditional, ids[:n], want)
+			}
+			for i, id := range want {
+				if ids[i] != id {
+					t.Fatalf("%s selected %v, want %v", op, ids[:n], want)
+				}
+			}
+		}
+	}
+}
+
+// Deferred booleans must be boxed when crossing the scalar storage ABI.
+func TestJITDeferredComparisonBoxedResult(t *testing.T) {
+	fn := CompileJITStorageGetValue(func(ctx *JITContext, source, target JITValueDesc) JITValueDesc {
+		resultReg := ctx.AllocRegExcept(source.Reg)
+		ctx.EmitCmpRegImm32(source.Reg, 511)
+		return ctx.DeferBooleanFlags(resultReg, CondSignedLess)
+	})
+	if fn == nil {
+		t.Fatal("deferred boolean did not compile at the value ABI")
+	}
+	for _, i := range []uint32{510, 511, 512} {
+		if got := fn(i); got.GetTag() != tagBool || got.Bool() != (i < 511) {
+			t.Fatalf("%d: got %v", i, got)
+		}
+	}
+}
+
+func BenchmarkJITFloatingFilterBatch(b *testing.B) {
+	proc := calibrationProcedure("(lambda (v w) (and (> v -0.5) (< v 60000.5) (> w 0.5) (< w 60001.5) (> v -1.5) (< v 60001.5) (> w -0.5) (< w 60002.5)))")
+	kernel := CompileJITFilterBuffer(proc, []uint8{tagFloat, tagFloat})
+	if kernel == nil {
+		b.Fatal("floating filter did not compile")
+	}
+	ids := make([]uint32, 512)
+	values := make([]Scmer, len(ids)*2)
+	for i := range ids {
+		ids[i] = uint32(i)
+		values[i*2], values[i*2+1] = NewFloat(float64(i)), NewFloat(float64(i+1))
+	}
+	if kernel(ids, values) != len(ids) {
+		b.Fatal("qualifying row rejected")
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if kernel(ids, values) != len(ids) {
+			b.Fatal("result changed")
+		}
+	}
+}

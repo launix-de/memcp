@@ -34381,7 +34381,8 @@ func init_alu() {
 		},
 	})
 	Declare(&Globalenv, &Declaration{
-		Name: "<=",
+		Name:     "<=",
+		Optimize: optimizeOrderedComparison,
 
 		Fn: func(a ...Scmer) Scmer {
 			if a[0].IsNil() || a[1].IsNil() {
@@ -34996,7 +34997,8 @@ func init_alu() {
 		},
 	})
 	Declare(&Globalenv, &Declaration{
-		Name: "<",
+		Name:     "<",
+		Optimize: optimizeOrderedComparison,
 
 		Fn: func(a ...Scmer) Scmer {
 			if a[0].IsNil() || a[1].IsNil() {
@@ -35583,7 +35585,8 @@ func init_alu() {
 		},
 	})
 	Declare(&Globalenv, &Declaration{
-		Name: ">",
+		Name:     ">",
+		Optimize: optimizeOrderedComparison,
 
 		Fn: func(a ...Scmer) Scmer {
 			if a[0].IsNil() || a[1].IsNil() {
@@ -36170,7 +36173,8 @@ func init_alu() {
 		},
 	})
 	Declare(&Globalenv, &Declaration{
-		Name: ">=",
+		Name:     ">=",
+		Optimize: optimizeOrderedComparison,
 
 		Fn: func(a ...Scmer) Scmer {
 			if a[0].IsNil() || a[1].IsNil() {

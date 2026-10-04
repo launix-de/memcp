@@ -818,3 +818,25 @@ func TestPhiOverlaySlotTrialsAreIsolated(t *testing.T) {
 		t.Fatalf("parent slot = %d", slot)
 	}
 }
+
+func TestFloatingComparisonBranchKeepsOrderedFlags(t *testing.T) {
+	fn := buildTestSSAFunction(t, `package sample
+type Scmer struct{}
+func (Scmer) Float() float64
+func minimum(a ...Scmer) Scmer {
+ if a[0].Float() < a[1].Float() { return a[0] }
+ return a[1]
+}`, "minimum")
+	code, errMsg := generateClosure("minimum", fn, nil)
+	if errMsg != "" {
+		t.Fatal(errMsg)
+	}
+	for _, want := range []string{"EmitCmpFloat64(", "Loc: LocFlags", "Condition: CondUnsignedAbove"} {
+		if !strings.Contains(code, want) {
+			t.Fatalf("missing %q in float branch:\n%s", want, code)
+		}
+	}
+	if strings.Contains(code, "EmitCmpFloat64Setcc(") {
+		t.Fatal("branch materializes float comparison")
+	}
+}
