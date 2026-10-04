@@ -538,6 +538,25 @@ func TestJITExpressionKeepsComputedListAcrossWideDirectProcCall(t *testing.T) {
 	}
 }
 
+func TestJITInterpretedVariadicProcOwnsArgumentList(t *testing.T) {
+	if !jitEnabled {
+		t.Skip("requires GOEXPERIMENT=jit")
+	}
+	callee := NewProcStruct(Proc{
+		Params: NewSymbol("args"), Body: NewNthLocalVar(0), En: &Globalenv,
+		NumVars: 1, NumberedOnly: true,
+	})
+	caller := compileJITExpressionTestProc(t, `(lambda (callee)
+		(list (callee "first" 1 2) (callee "second" 3 4)))`)
+	want := NewSlice([]Scmer{
+		NewSlice([]Scmer{NewString("first"), NewInt(1), NewInt(2)}),
+		NewSlice([]Scmer{NewString("second"), NewInt(3), NewInt(4)}),
+	})
+	if got := Apply(caller, callee); !Equal(got, want) {
+		t.Fatalf("retained variadic arguments = %s, want %s", String(got), String(want))
+	}
+}
+
 func TestJITExpressionDirectProcCallRelocatesArgsOnStackGrowth(t *testing.T) {
 	if !jitEnabled {
 		t.Skip("requires GOEXPERIMENT=jit")

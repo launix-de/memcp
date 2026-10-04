@@ -538,7 +538,10 @@ func prepareProcCallWithArgs(p *Proc, args []Scmer) (*Env, Scmer) {
 			}
 		}
 	case tagSymbol:
-		argsList := NewSlice(args)
+		// The variadic binding is a first-class list which can escape through
+		// the result or a closure. Callers may lend reusable or JIT-stack
+		// argument frames, so the interpreter must own this list's backing.
+		argsList := NewSlice(append([]Scmer(nil), args...))
 		if proc.NumVars > 0 {
 			env.VarsNumbered[0] = argsList
 			if !proc.NumberedOnly {
