@@ -875,3 +875,43 @@ func BenchmarkJITBooleanFilterBatch(b *testing.B) {
 		}
 	}
 }
+
+func TestJITClosureCaptureForwardingUnderRegisterPressure(t *testing.T) {
+	values := []Scmer{NewString("retained capture")}
+	closure := jitBindProcContext(jitProcContextAllocation(1), &Proc{}, &values[0], 1, false)
+	fn := CompileJITStorageGetValue(func(ctx *JITContext, _, target JITValueDesc) JITValueDesc {
+		ctx.TrackPointer(unsafe.Pointer(closure))
+		ctx.ClosureFuncOff = ctx.AllocStack(8)
+		ctx.EmitMovRegImm64(RegR11, uint64(uintptr(unsafe.Pointer(closure))))
+		ctx.EmitStoreRegMem(RegR11, ctx.StackReg, ctx.ClosureFuncOff)
+		ctx.setStackPointer(jitStackRootFrameSP, ctx.ClosureFuncOff-ctx.DynamicSP, true)
+		ctx.Env = &JITEnv{Numbered: []JITValueDesc{{Loc: LocClosurePair, Type: JITTypeUnknown, StackOff: 0, Rooted: true}}}
+		off := ctx.AllocStack(16)
+		var held [16]JITValueDesc
+		count := 0
+		for ctx.FreeRegs&^ctx.ProtectedRegs != 0 {
+			reg := ctx.AllocReg()
+			held[count] = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: reg, NoHeapPointer: true}
+			ctx.EmitMovRegImm64(reg, uint64(count))
+			ctx.BindReg(reg, &held[count])
+			ctx.ProtectReg(reg)
+			count++
+		}
+		forwarded := jitCompileRootedCallValueAt(ctx, NewNthLocalVar(0), ctx.SliceBase, off)
+		ctx.EmitGoCallVoid(GoFuncAddr(runtime.GC), nil)
+		for i := 0; i < count; i++ {
+			ctx.UnprotectReg(held[i].Reg)
+			ctx.FreeDesc(&held[i])
+		}
+		return jitPlaceIntoPair(ctx, &forwarded, target)
+	})
+	if fn == nil {
+		t.Fatal("capture forwarding required an allocator register")
+	}
+	for i := 0; i < 4; i++ {
+		if got := fn(uint32(i)); got.String() != "retained capture" {
+			t.Fatalf("capture corrupted: %v", got)
+		}
+	}
+	runtime.KeepAlive(closure)
+}

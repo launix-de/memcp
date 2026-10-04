@@ -2573,7 +2573,7 @@ func jitCompileRootedCallValueAtResult(ctx *JITContext, expr Scmer, sliceBase Re
 		value.Rooted = true
 	}
 	pair := value
-	if pair.Loc != LocImm && pair.Loc != LocRegPair && pair.Loc != LocStackPair && pair.Loc != LocInputPair {
+	if pair.Loc != LocImm && pair.Loc != LocRegPair && pair.Loc != LocStackPair && pair.Loc != LocInputPair && pair.Loc != LocClosurePair {
 		pair = jitAllocTrackedPair(ctx, JITTypeUnknown)
 		pair = jitPlaceIntoPair(ctx, &value, pair)
 	}
