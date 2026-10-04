@@ -44,6 +44,28 @@ func TestSerialProcUsesNumberedVariadicParam(t *testing.T) {
 	}
 }
 
+func TestApplyVariadicProcOwnsRetainedArguments(t *testing.T) {
+	for _, numbered := range []bool{false, true} {
+		body := NewSymbol("values")
+		numVars := 0
+		if numbered {
+			body = NewNthLocalVar(0)
+			numVars = 1
+		}
+		lambda := NewProcStruct(Proc{
+			Params: NewSymbol("values"), Body: body, En: &Globalenv,
+			NumVars: numVars, NumberedOnly: numbered,
+		})
+		args := []Scmer{NewString("original"), NewInt(42)}
+		got := Apply(lambda, args...)
+		args[0] = NewString("reused")
+		want := NewSlice([]Scmer{NewString("original"), NewInt(42)})
+		if !Equal(got, want) {
+			t.Fatalf("numbered=%t: returned arguments = %s, want %s", numbered, String(got), String(want))
+		}
+	}
+}
+
 func TestSerialProcExplicitNumVarsKeepsNamedParamBinding(t *testing.T) {
 	lambda := Eval(Read("test", "(lambda ($update) ($update) 1)"), &Globalenv)
 	called := false
