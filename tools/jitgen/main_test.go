@@ -786,3 +786,35 @@ func TestStorageBooleanReturnKeepsPublicMaterializedABI(t *testing.T) {
 		t.Fatalf("storage getter lost its materialized Scmer return:\n%s", code)
 	}
 }
+
+func TestPhiOverlaySlotsDoNotFollowSparseDescriptorNumbers(t *testing.T) {
+	g := &codeGen{fn: &ssa.Function{Blocks: []*ssa.BasicBlock{{}}}, closureDescDecl: map[string]bool{"d0": true, "d468": true}}
+	g.emitBuildPhiStateForEdge("state", 0, 0, "false")
+	code := g.w.String()
+	if !strings.Contains(code, "make([]JITValueDesc, 2)") || !strings.Contains(code, "state.OverlayValues[1] = d468") {
+		t.Fatalf("sparse descriptor identities inflated the runtime overlay:\n%s", code)
+	}
+	// Later descriptors may sort before an existing one. Already emitted edges
+	// must retain their slot assignment when later block renderers are produced.
+	g.closureDescDecl["d9"] = true
+	g.w.Reset()
+	g.emitBuildPhiStateForEdge("later", 0, 0, "false")
+	code = g.w.String()
+	if !strings.Contains(code, "make([]JITValueDesc, 3)") || !strings.Contains(code, "later.OverlayValues[1] = d468") || !strings.Contains(code, "later.OverlayValues[2] = d9") {
+		t.Fatalf("later descriptors changed existing runtime overlay slots:\n%s", code)
+	}
+}
+
+func TestPhiOverlaySlotTrialsAreIsolated(t *testing.T) {
+	g := &codeGen{overlaySlots: map[string]int{"d0": 0}}
+	trial := g.clone()
+	if slot := trial.overlaySlot("d468"); slot != 1 {
+		t.Fatalf("trial slot = %d", slot)
+	}
+	if len(g.overlaySlots) != 1 {
+		t.Fatal("failed generation trial mutated parent slots")
+	}
+	if slot := g.overlaySlot("d9"); slot != 1 {
+		t.Fatalf("parent slot = %d", slot)
+	}
+}

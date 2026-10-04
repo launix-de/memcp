@@ -60,6 +60,7 @@ latency tests keep their existing median-per-request policy.
 
 - `sql/dml/insert-values-template.yaml`: Bulk INSERT literals, session bindings and computed cells.
 - `performance/bulk-insert-compile.yaml`: Cold compilation of parameterized bulk INSERT rows.
+- `performance/jit-scan-kernel-compile.yaml`: Full column scans including per-invocation filter and reducer compilation; one cold request plus three repetitions.
 
 ## Baseline queries that cannot execute
 
