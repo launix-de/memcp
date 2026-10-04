@@ -46,6 +46,65 @@ test_cases:
     timing_samples: 1
     expect:
       data: [{total: 74211485358000}]
+  - name: "Perf: indexed range with typed residual filter"
+    scm: |
+      (begin
+        (define access (eval (compile_scan_access '("c0") (scheme "(lambda (c0) (< c0 30000))"))))
+        (scan nil (table "memcp-tests" "typed_filter_wide") (car access) (cadr access)
+          '("c0" "c1" "c2" "c3" "c4" "c5" "c6" "c7" "c8" "c9" "c10" "c11" "c12" "c13" "c14" "c15") (lambda (c0 c1 c2 c3 c4 c5 c6 c7 c8 c9 c10 c11 c12 c13 c14 c15) (and (< c0 c1) (< c2 c3) (< c4 c5) (< c6 c7) (< c8 c9) (< c10 c11) (< c12 c13) (< c14 c15)))
+          '() (lambda (acc) (+ acc 1)) 0 + false))
+    expect: {result: 29508}
+    performance_rows: 60000
+    warmup: 0
+    timing_samples: 4
+    timing_aggregation: total
+    threshold_ms: 1000
+  - name: "Perf: small indexed range keeps dynamic filtering"
+    scm: |
+      (begin
+        (define access (eval (compile_scan_access '("c0") (scheme "(lambda (c0) (< c0 1))"))))
+        (scan nil (table "memcp-tests" "typed_filter_wide") (car access) (cadr access)
+          '("c0" "c1" "c2" "c3" "c4" "c5" "c6" "c7" "c8" "c9" "c10" "c11" "c12" "c13" "c14" "c15") (lambda (c0 c1 c2 c3 c4 c5 c6 c7 c8 c9 c10 c11 c12 c13 c14 c15) (and (< c0 c1) (< c2 c3) (< c4 c5) (< c6 c7) (< c8 c9) (< c10 c11) (< c12 c13) (< c14 c15)))
+          '() (lambda (acc) (+ acc 1)) 0 + false))
+    expect: {result: 100}
+    performance_rows: 60000
+    warmup: 0
+    timing_samples: 4
+    timing_aggregation: total
+    threshold_ms: 1000
+  - name: "Perf: RecSet candidates with typed residual filter"
+    scm: |
+      (begin
+        (define access (eval (compile_scan_access '("c0") (scheme "(lambda (c0) (< c0 30000))"))))
+        (define selected (scan_recset nil (table "memcp-tests" "typed_filter_wide") (car access) (cadr access) '("c0") (lambda (c0) (< c0 30000))))
+        (scan nil selected '() '()
+          '("c0" "c1" "c2" "c3" "c4" "c5" "c6" "c7" "c8" "c9" "c10" "c11" "c12" "c13" "c14" "c15") (lambda (c0 c1 c2 c3 c4 c5 c6 c7 c8 c9 c10 c11 c12 c13 c14 c15) (and (< c0 c1) (< c2 c3) (< c4 c5) (< c6 c7) (< c8 c9) (< c10 c11) (< c12 c13) (< c14 c15)))
+          '() (lambda (acc) (+ acc 1)) 0 + false))
+    expect: {result: 29508}
+    performance_rows: 60000
+    warmup: 0
+    timing_samples: 4
+    timing_aggregation: total
+    threshold_ms: 1000
+  - name: "Perf: SQL indexed range with wide residual"
+    sql: "SELECT COUNT(*) AS n FROM typed_filter_wide WHERE c0<30000 AND c0<c1 AND c2<c3 AND c4<c5 AND c6<c7 AND c8<c9 AND c10<c11 AND c12<c13 AND c14<c15"
+    expect: {data: [{n: 29508}]}
+    performance_rows: 60000
+    warmup: 0
+    timing_samples: 4
+    timing_aggregation: total
+    threshold_ms: 1000
+  - name: "Perf: transactional SQL indexed range with wide residual"
+    session_id: "typed-filter-range-tx"
+    setup: [{sql: "BEGIN"}]
+    cleanup: [{sql: "ROLLBACK"}]
+    sql: "SELECT COUNT(*) AS n FROM typed_filter_wide WHERE c0<30000 AND c0<c1 AND c2<c3 AND c4<c5 AND c6<c7 AND c8<c9 AND c10<c11 AND c12<c13 AND c14<c15"
+    expect: {data: [{n: 29508}]}
+    performance_rows: 60000
+    warmup: 0
+    timing_samples: 4
+    timing_aggregation: total
+    threshold_ms: 1000
   - name: "Point aggregate stays correct"
     sql: "SELECT SUM(a+b*c) AS total FROM typed_filter_buffer WHERE a=42"
     timing_samples: 5
@@ -103,6 +162,21 @@ test_cases:
     sql: "SELECT COUNT(*) AS n, SUM(a+b*c) AS total FROM typed_filter_buffer WHERE a+0 >= 30000"
     expect:
       data: [{n: 30001, total: 1350225006}]
+  - name: "Indexed typed residual preserves a matching delta row"
+    setup:
+      - sql: "INSERT INTO typed_filter_wide (c0,c1,c2,c3,c4,c5,c6,c7,c8,c9,c10,c11,c12,c13,c14,c15) VALUES (1234,1236,1237,1238,1239,1240,1241,1242,1243,1244,1245,1246,1247,1248,1249,1250)"
+    sql: "SELECT COUNT(*) AS n FROM typed_filter_wide WHERE c0<30000 AND c0<c1 AND c2<c3 AND c4<c5 AND c6<c7 AND c8<c9 AND c10<c11 AND c12<c13 AND c14<c15"
+    expect: {data: [{n: 29509}]}
+  - name: "Indexed typed residual preserves NULL semantics in delta"
+    setup:
+      - sql: "INSERT INTO typed_filter_wide (c0,c1,c2,c3,c4,c5,c6,c7,c8,c9,c10,c11,c12,c13,c14,c15) VALUES (1234,NULL,1236,1237,1238,1239,1240,1241,1242,1243,1244,1245,1246,1247,1248,1249)"
+    sql: "SELECT COUNT(*) AS n FROM typed_filter_wide WHERE c0<30000 AND c0<c1 AND c2<c3 AND c4<c5 AND c6<c7 AND c8<c9 AND c10<c11 AND c12<c13 AND c14<c15"
+    expect: {data: [{n: 29509}]}
+  - name: "Indexed typed residual skips deleted main candidates"
+    setup:
+      - sql: "DELETE FROM typed_filter_wide WHERE c0=0"
+    sql: "SELECT COUNT(*) AS n FROM typed_filter_wide WHERE c0<30000 AND c0<c1 AND c2<c3 AND c4<c5 AND c6<c7 AND c8<c9 AND c10<c11 AND c12<c13 AND c14<c15"
+    expect: {data: [{n: 29409}]}
   - name: "Invalid filter binding fails"
     sql: "SELECT COUNT(*) FROM typed_filter_buffer WHERE missing_column > 0"
     expect: {error: true}

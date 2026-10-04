@@ -590,6 +590,136 @@ func TestJITComparisonReturnsFlagsThroughNewBool(t *testing.T) {
 	}
 }
 
+// Float comparisons materialize a Scmer pair rather than returning integer flags.
+// Their non-null return type must survive the full declaration call boundary.
+func TestJITComparisonMergedReturnType(t *testing.T) {
+	for _, op := range []string{"<", ">", "<=", ">="} {
+		t.Run(op, func(t *testing.T) {
+			expr := NewSlice([]Scmer{NewSymbol(op), NewNthLocalVar(0), NewFloat(511)})
+			fn := CompileJITStorageGetValue(func(ctx *JITContext, source, target JITValueDesc) JITValueDesc {
+				source.Type = tagInt
+				ctx.Env = &JITEnv{Numbered: []JITValueDesc{source}}
+				out := jitCompileExpr(ctx, expr, ctx.SliceBase, target)
+				if out.Type != tagBool {
+					t.Fatalf("comparison lost proven bool type: %+v", out)
+				}
+				return out
+			})
+			if fn == nil {
+				t.Fatal("comparison did not compile")
+			}
+			for _, n := range []uint32{510, 511, 512} {
+				want := (op == "<" && n < 511) || (op == ">" && n > 511) || (op == "<=" && n <= 511) || (op == ">=" && n >= 511)
+				if got := fn(n); got.GetTag() != tagBool || got.Bool() != want {
+					t.Fatalf("%s %d: %v", op, n, got)
+				}
+			}
+		})
+	}
+}
+
+func TestJITComparisonNullableReturnType(t *testing.T) {
+	nullable := NewSlice([]Scmer{NewSymbol("if"), NewSlice([]Scmer{NewSymbol("<"), NewNthLocalVar(0), NewInt(1)}), NewNil(), NewNthLocalVar(0)})
+	for _, op := range []string{"<", ">", "<=", ">="} {
+		t.Run(op, func(t *testing.T) {
+			expr := NewSlice([]Scmer{NewSymbol(op), nullable, NewFloat(511)})
+			fn := CompileJITStorageGetValue(func(ctx *JITContext, source, target JITValueDesc) JITValueDesc {
+				source.Type = tagInt
+				ctx.Env = &JITEnv{Numbered: []JITValueDesc{source}}
+				out := jitCompileExpr(ctx, expr, ctx.SliceBase, target)
+				if out.Type != JITTypeUnknown {
+					t.Fatalf("nullable comparison claimed exact type: %+v", out)
+				}
+				return out
+			})
+			if fn == nil {
+				t.Fatal("nullable comparison did not compile")
+			}
+			if got := fn(0); !got.IsNil() {
+				t.Fatalf("NULL comparison returned %v", got)
+			}
+			for _, n := range []uint32{510, 511, 512} {
+				want := (op == "<" && n < 511) || (op == ">" && n > 511) || (op == "<=" && n <= 511) || (op == ">=" && n >= 511)
+				if got := fn(n); got.GetTag() != tagBool || got.Bool() != want {
+					t.Fatalf("%s %d: %v", op, n, got)
+				}
+			}
+		})
+	}
+}
+
+// A location reused by another emitter must not retain the previous value's
+// proof. This deliberately unmerged emitter models the older generated CFGs.
+func TestJITUnmergedReturnRejectsInheritedProof(t *testing.T) {
+	const name = "jit_test_unmerged_return"
+	native := func(a ...Scmer) Scmer {
+		if a[0].Int() == 0 {
+			return NewNil()
+		}
+		return NewBool(true)
+	}
+	Declare(&Globalenv, &Declaration{Name: name, Fn: native,
+		Type: &TypeDescriptor{Kind: "func", Params: []*TypeDescriptor{{Kind: "int"}}, Return: &TypeDescriptor{Kind: "any"},
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				if result.ReturnTypeMerged {
+					t.Fatal("new emitter inherited an unrelated return proof")
+				}
+				ctx.EnsureDesc(&args[0])
+				yes, done := ctx.ReserveLabel(), ctx.ReserveLabel()
+				ctx.EmitCmpRegImm32(args[0].Reg, 0)
+				ctx.EmitJcc(CcNE, yes)
+				ctx.EmitMakeNil(result)
+				ctx.EmitJmp(done)
+				ctx.MarkLabel(yes)
+				ctx.EmitMakeBool(result, JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(true)})
+				ctx.MarkLabel(done)
+				result.Type = tagBool // Only the last arm; no valid merge proof.
+				return result
+			}}})
+	defer func() {
+		delete(Globalenv.Vars, Symbol(name))
+		delete(declarations, name)
+		delete(declarationsByFunction, FunctionIdentity(native))
+	}()
+	expr := NewSlice([]Scmer{NewSymbol(name), NewNthLocalVar(0)})
+	fn := CompileJITStorageGetValue(func(ctx *JITContext, source, target JITValueDesc) JITValueDesc {
+		source.Type = tagInt
+		ctx.Env = &JITEnv{Numbered: []JITValueDesc{source}}
+		target.ReturnTypeMerged = true
+		out := jitCompileExpr(ctx, expr, ctx.SliceBase, target)
+		if out.Type != JITTypeUnknown {
+			t.Fatalf("unmerged nullable result claimed exact type: %+v", out)
+		}
+		return out
+	})
+	if fn == nil || !fn(0).IsNil() || !fn(1).Bool() {
+		t.Fatal("unmerged result lost NULL/boolean semantics")
+	}
+}
+
+func BenchmarkJITFloatComparisonBranch(b *testing.B) {
+	expr := NewSlice([]Scmer{NewSymbol("if"), NewSlice([]Scmer{NewSymbol("<"), NewNthLocalVar(0), NewFloat(511)}), NewInt(9), NewInt(7)})
+	fn := CompileJITStorageGetValue(func(ctx *JITContext, source, target JITValueDesc) JITValueDesc {
+		source.Type = tagInt
+		ctx.Env = &JITEnv{Numbered: []JITValueDesc{source}}
+		return jitCompileExpr(ctx, expr, ctx.SliceBase, target)
+	})
+	if fn == nil || fn(510).Int() != 9 || fn(511).Int() != 7 {
+		b.Fatal("comparison branch failed")
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	var result int64
+	for i := 0; i < b.N; i++ {
+		result += fn(uint32(i & 1023)).Int()
+	}
+	b.StopTimer()
+	runtime.KeepAlive(fn)
+	if result == 0 {
+		b.Fatal("benchmark did not execute")
+	}
+}
+
 // Benchmark the complete typed Scheme condition, including its generated
 // comparison wrapper. The fixture is also usable unchanged on the baseline.
 func BenchmarkJITIntegerBranch(b *testing.B) {

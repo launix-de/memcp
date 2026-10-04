@@ -3463,12 +3463,13 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 					ctx.Coverage.InlinedCalls++
 				}
 				labelsBefore := len(ctx.Labels)
+				result.ReturnTypeMerged = false
 				out := decl.Type.JITEmit(ctx, list[1:], args, result)
 				// Virtual-argument emitters use the same generated control-flow
 				// machinery as eagerly compiled declarations. A descriptor's Type
 				// after rendering several paths belongs only to the path rendered
-				// last; consumers must inspect the emitted Scmer tag at runtime.
-				if len(ctx.Labels) != labelsBefore && out.Loc == LocRegPair {
+				// last unless all emitted return arms have been merged.
+				if len(ctx.Labels) != labelsBefore && out.Loc == LocRegPair && !out.ReturnTypeMerged {
 					out.Type = JITTypeUnknown
 				}
 				out.NoHeapPointer = jitReturnHasNoHeapPointer(decl.Type.Return)
@@ -3538,6 +3539,7 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 			if decl.Type.JITInlineCost == 0 {
 				ctx.Coverage.InlinedCalls++
 			}
+			result.ReturnTypeMerged = false
 			out := decl.Type.JITEmit(ctx, list[1:], args, result)
 			ctx.SyncDesc(&out)
 			// Generated control-flow emitters may spill their result placement while
@@ -3585,8 +3587,8 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 			// A generated emitter may render several runtime control-flow paths.
 			// Its mutable result descriptor then contains the type of whichever
 			// path happened to be rendered last, not a valid merged type. Keep the
-			// placement but discard that path-local type information.
-			if len(ctx.Labels) != labelsBefore && out.Loc == LocRegPair {
+			// placement but discard unproven path-local type information.
+			if len(ctx.Labels) != labelsBefore && out.Loc == LocRegPair && !out.ReturnTypeMerged {
 				out.Type = JITTypeUnknown
 			}
 			out.NoHeapPointer = jitReturnHasNoHeapPointer(decl.Type.Return)

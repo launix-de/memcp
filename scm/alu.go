@@ -34434,6 +34434,15 @@ func init_alu() {
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				branchSerial := ctx.branchSerial
 				_ = branchSerial
+				returnType := uint8(JITTypeUnknown)
+				returnTypeSeen := false
+				mergeReturnType := func(t uint8) {
+					if !returnTypeSeen {
+						returnType, returnTypeSeen = t, true
+					} else if returnType != t {
+						returnType = JITTypeUnknown
+					}
+				}
 				var bbs [4]BBDescriptor
 				for i := range args {
 					ctx.StabilizeDescForControlFlow(&args[i])
@@ -34632,6 +34641,7 @@ func init_alu() {
 							result.Type = d18.Type
 						}
 					}
+					mergeReturnType(result.Type)
 					ctx.EmitJmp(lbl0)
 					return result
 				}
@@ -34667,8 +34677,8 @@ func init_alu() {
 					if len(ps.OverlayValues) > 3 && ps.OverlayValues[3].Loc != LocNone {
 						d3 = ps.OverlayValues[3]
 					}
-					if len(ps.OverlayValues) > 18 && ps.OverlayValues[18].Loc != LocNone {
-						d18 = ps.OverlayValues[18]
+					if len(ps.OverlayValues) > 4 && ps.OverlayValues[4].Loc != LocNone {
+						d18 = ps.OverlayValues[4]
 					}
 					ctx.ReclaimUntrackedRegs()
 					d19 = args[1]
@@ -34729,6 +34739,7 @@ func init_alu() {
 						}
 					}
 					result.Type = tagBool
+					mergeReturnType(result.Type)
 					ctx.EmitJmp(lbl0)
 					return result
 				}
@@ -34764,23 +34775,23 @@ func init_alu() {
 					if len(ps.OverlayValues) > 3 && ps.OverlayValues[3].Loc != LocNone {
 						d3 = ps.OverlayValues[3]
 					}
-					if len(ps.OverlayValues) > 18 && ps.OverlayValues[18].Loc != LocNone {
-						d18 = ps.OverlayValues[18]
+					if len(ps.OverlayValues) > 4 && ps.OverlayValues[4].Loc != LocNone {
+						d18 = ps.OverlayValues[4]
 					}
-					if len(ps.OverlayValues) > 19 && ps.OverlayValues[19].Loc != LocNone {
-						d19 = ps.OverlayValues[19]
+					if len(ps.OverlayValues) > 5 && ps.OverlayValues[5].Loc != LocNone {
+						d19 = ps.OverlayValues[5]
 					}
-					if len(ps.OverlayValues) > 20 && ps.OverlayValues[20].Loc != LocNone {
-						d20 = ps.OverlayValues[20]
+					if len(ps.OverlayValues) > 6 && ps.OverlayValues[6].Loc != LocNone {
+						d20 = ps.OverlayValues[6]
 					}
-					if len(ps.OverlayValues) > 21 && ps.OverlayValues[21].Loc != LocNone {
-						d21 = ps.OverlayValues[21]
+					if len(ps.OverlayValues) > 7 && ps.OverlayValues[7].Loc != LocNone {
+						d21 = ps.OverlayValues[7]
 					}
-					if len(ps.OverlayValues) > 22 && ps.OverlayValues[22].Loc != LocNone {
-						d22 = ps.OverlayValues[22]
+					if len(ps.OverlayValues) > 8 && ps.OverlayValues[8].Loc != LocNone {
+						d22 = ps.OverlayValues[8]
 					}
-					if len(ps.OverlayValues) > 23 && ps.OverlayValues[23].Loc != LocNone {
-						d23 = ps.OverlayValues[23]
+					if len(ps.OverlayValues) > 9 && ps.OverlayValues[9].Loc != LocNone {
+						d23 = ps.OverlayValues[9]
 					}
 					ctx.ReclaimUntrackedRegs()
 					d24 = args[1]
@@ -34799,41 +34810,41 @@ func init_alu() {
 							if ps.General {
 							}
 							ps28 := PhiState{General: ps.General}
-							ps28.OverlayValues = make([]JITValueDesc, 28)
+							ps28.OverlayValues = make([]JITValueDesc, 14)
 							ps28.OverlayValues[0] = d0
 							ps28.OverlayValues[1] = d1
 							ps28.OverlayValues[2] = d2
 							ps28.OverlayValues[3] = d3
-							ps28.OverlayValues[18] = d18
-							ps28.OverlayValues[19] = d19
-							ps28.OverlayValues[20] = d20
-							ps28.OverlayValues[21] = d21
-							ps28.OverlayValues[22] = d22
-							ps28.OverlayValues[23] = d23
-							ps28.OverlayValues[24] = d24
-							ps28.OverlayValues[25] = d25
-							ps28.OverlayValues[26] = d26
-							ps28.OverlayValues[27] = d27
+							ps28.OverlayValues[4] = d18
+							ps28.OverlayValues[5] = d19
+							ps28.OverlayValues[6] = d20
+							ps28.OverlayValues[7] = d21
+							ps28.OverlayValues[8] = d22
+							ps28.OverlayValues[9] = d23
+							ps28.OverlayValues[10] = d24
+							ps28.OverlayValues[11] = d25
+							ps28.OverlayValues[12] = d26
+							ps28.OverlayValues[13] = d27
 							return bbs[1].RenderPS(ps28)
 						}
 						if ps.General {
 						}
 						ps29 := PhiState{General: ps.General}
-						ps29.OverlayValues = make([]JITValueDesc, 28)
+						ps29.OverlayValues = make([]JITValueDesc, 14)
 						ps29.OverlayValues[0] = d0
 						ps29.OverlayValues[1] = d1
 						ps29.OverlayValues[2] = d2
 						ps29.OverlayValues[3] = d3
-						ps29.OverlayValues[18] = d18
-						ps29.OverlayValues[19] = d19
-						ps29.OverlayValues[20] = d20
-						ps29.OverlayValues[21] = d21
-						ps29.OverlayValues[22] = d22
-						ps29.OverlayValues[23] = d23
-						ps29.OverlayValues[24] = d24
-						ps29.OverlayValues[25] = d25
-						ps29.OverlayValues[26] = d26
-						ps29.OverlayValues[27] = d27
+						ps29.OverlayValues[4] = d18
+						ps29.OverlayValues[5] = d19
+						ps29.OverlayValues[6] = d20
+						ps29.OverlayValues[7] = d21
+						ps29.OverlayValues[8] = d22
+						ps29.OverlayValues[9] = d23
+						ps29.OverlayValues[10] = d24
+						ps29.OverlayValues[11] = d25
+						ps29.OverlayValues[12] = d26
+						ps29.OverlayValues[13] = d27
 						return bbs[2].RenderPS(ps29)
 					}
 					if !ps.General {
@@ -34891,37 +34902,37 @@ func init_alu() {
 					d26 = snap42
 					d27 = snap43
 					ps45 := PhiState{General: true}
-					ps45.OverlayValues = make([]JITValueDesc, 28)
+					ps45.OverlayValues = make([]JITValueDesc, 14)
 					ps45.OverlayValues[0] = d0
 					ps45.OverlayValues[1] = d1
 					ps45.OverlayValues[2] = d2
 					ps45.OverlayValues[3] = d3
-					ps45.OverlayValues[18] = d18
-					ps45.OverlayValues[19] = d19
-					ps45.OverlayValues[20] = d20
-					ps45.OverlayValues[21] = d21
-					ps45.OverlayValues[22] = d22
-					ps45.OverlayValues[23] = d23
-					ps45.OverlayValues[24] = d24
-					ps45.OverlayValues[25] = d25
-					ps45.OverlayValues[26] = d26
-					ps45.OverlayValues[27] = d27
+					ps45.OverlayValues[4] = d18
+					ps45.OverlayValues[5] = d19
+					ps45.OverlayValues[6] = d20
+					ps45.OverlayValues[7] = d21
+					ps45.OverlayValues[8] = d22
+					ps45.OverlayValues[9] = d23
+					ps45.OverlayValues[10] = d24
+					ps45.OverlayValues[11] = d25
+					ps45.OverlayValues[12] = d26
+					ps45.OverlayValues[13] = d27
 					ps46 := PhiState{General: true}
-					ps46.OverlayValues = make([]JITValueDesc, 28)
+					ps46.OverlayValues = make([]JITValueDesc, 14)
 					ps46.OverlayValues[0] = d0
 					ps46.OverlayValues[1] = d1
 					ps46.OverlayValues[2] = d2
 					ps46.OverlayValues[3] = d3
-					ps46.OverlayValues[18] = d18
-					ps46.OverlayValues[19] = d19
-					ps46.OverlayValues[20] = d20
-					ps46.OverlayValues[21] = d21
-					ps46.OverlayValues[22] = d22
-					ps46.OverlayValues[23] = d23
-					ps46.OverlayValues[24] = d24
-					ps46.OverlayValues[25] = d25
-					ps46.OverlayValues[26] = d26
-					ps46.OverlayValues[27] = d27
+					ps46.OverlayValues[4] = d18
+					ps46.OverlayValues[5] = d19
+					ps46.OverlayValues[6] = d20
+					ps46.OverlayValues[7] = d21
+					ps46.OverlayValues[8] = d22
+					ps46.OverlayValues[9] = d23
+					ps46.OverlayValues[10] = d24
+					ps46.OverlayValues[11] = d25
+					ps46.OverlayValues[12] = d26
+					ps46.OverlayValues[13] = d27
 					snap47 := d0
 					snap48 := d1
 					snap49 := d2
@@ -34977,6 +34988,8 @@ func init_alu() {
 					ctx.UnprotectReg(result.Reg2)
 					ctx.UnprotectReg(result.Reg)
 				}
+				result.Type = returnType
+				result.ReturnTypeMerged = returnTypeSeen
 				return result
 			},
 			JITInlineCost: 18,
@@ -35036,6 +35049,15 @@ func init_alu() {
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				branchSerial := ctx.branchSerial
 				_ = branchSerial
+				returnType := uint8(JITTypeUnknown)
+				returnTypeSeen := false
+				mergeReturnType := func(t uint8) {
+					if !returnTypeSeen {
+						returnType, returnTypeSeen = t, true
+					} else if returnType != t {
+						returnType = JITTypeUnknown
+					}
+				}
 				var bbs [4]BBDescriptor
 				for i := range args {
 					ctx.StabilizeDescForControlFlow(&args[i])
@@ -35234,6 +35256,7 @@ func init_alu() {
 							result.Type = d18.Type
 						}
 					}
+					mergeReturnType(result.Type)
 					ctx.EmitJmp(lbl0)
 					return result
 				}
@@ -35269,8 +35292,8 @@ func init_alu() {
 					if len(ps.OverlayValues) > 3 && ps.OverlayValues[3].Loc != LocNone {
 						d3 = ps.OverlayValues[3]
 					}
-					if len(ps.OverlayValues) > 18 && ps.OverlayValues[18].Loc != LocNone {
-						d18 = ps.OverlayValues[18]
+					if len(ps.OverlayValues) > 4 && ps.OverlayValues[4].Loc != LocNone {
+						d18 = ps.OverlayValues[4]
 					}
 					ctx.ReclaimUntrackedRegs()
 					d19 = args[0]
@@ -35303,6 +35326,7 @@ func init_alu() {
 						}
 					}
 					result.Type = tagBool
+					mergeReturnType(result.Type)
 					ctx.EmitJmp(lbl0)
 					return result
 				}
@@ -35338,23 +35362,23 @@ func init_alu() {
 					if len(ps.OverlayValues) > 3 && ps.OverlayValues[3].Loc != LocNone {
 						d3 = ps.OverlayValues[3]
 					}
-					if len(ps.OverlayValues) > 18 && ps.OverlayValues[18].Loc != LocNone {
-						d18 = ps.OverlayValues[18]
+					if len(ps.OverlayValues) > 4 && ps.OverlayValues[4].Loc != LocNone {
+						d18 = ps.OverlayValues[4]
 					}
-					if len(ps.OverlayValues) > 19 && ps.OverlayValues[19].Loc != LocNone {
-						d19 = ps.OverlayValues[19]
+					if len(ps.OverlayValues) > 5 && ps.OverlayValues[5].Loc != LocNone {
+						d19 = ps.OverlayValues[5]
 					}
-					if len(ps.OverlayValues) > 20 && ps.OverlayValues[20].Loc != LocNone {
-						d20 = ps.OverlayValues[20]
+					if len(ps.OverlayValues) > 6 && ps.OverlayValues[6].Loc != LocNone {
+						d20 = ps.OverlayValues[6]
 					}
-					if len(ps.OverlayValues) > 21 && ps.OverlayValues[21].Loc != LocNone {
-						d21 = ps.OverlayValues[21]
+					if len(ps.OverlayValues) > 7 && ps.OverlayValues[7].Loc != LocNone {
+						d21 = ps.OverlayValues[7]
 					}
-					if len(ps.OverlayValues) > 22 && ps.OverlayValues[22].Loc != LocNone {
-						d22 = ps.OverlayValues[22]
+					if len(ps.OverlayValues) > 8 && ps.OverlayValues[8].Loc != LocNone {
+						d22 = ps.OverlayValues[8]
 					}
-					if len(ps.OverlayValues) > 24 && ps.OverlayValues[24].Loc != LocNone {
-						d24 = ps.OverlayValues[24]
+					if len(ps.OverlayValues) > 9 && ps.OverlayValues[9].Loc != LocNone {
+						d24 = ps.OverlayValues[9]
 					}
 					ctx.ReclaimUntrackedRegs()
 					d25 = args[1]
@@ -35373,41 +35397,41 @@ func init_alu() {
 							if ps.General {
 							}
 							ps29 := PhiState{General: ps.General}
-							ps29.OverlayValues = make([]JITValueDesc, 29)
+							ps29.OverlayValues = make([]JITValueDesc, 14)
 							ps29.OverlayValues[0] = d0
 							ps29.OverlayValues[1] = d1
 							ps29.OverlayValues[2] = d2
 							ps29.OverlayValues[3] = d3
-							ps29.OverlayValues[18] = d18
-							ps29.OverlayValues[19] = d19
-							ps29.OverlayValues[20] = d20
-							ps29.OverlayValues[21] = d21
-							ps29.OverlayValues[22] = d22
-							ps29.OverlayValues[24] = d24
-							ps29.OverlayValues[25] = d25
-							ps29.OverlayValues[26] = d26
-							ps29.OverlayValues[27] = d27
-							ps29.OverlayValues[28] = d28
+							ps29.OverlayValues[4] = d18
+							ps29.OverlayValues[5] = d19
+							ps29.OverlayValues[6] = d20
+							ps29.OverlayValues[7] = d21
+							ps29.OverlayValues[8] = d22
+							ps29.OverlayValues[9] = d24
+							ps29.OverlayValues[10] = d25
+							ps29.OverlayValues[11] = d26
+							ps29.OverlayValues[12] = d27
+							ps29.OverlayValues[13] = d28
 							return bbs[1].RenderPS(ps29)
 						}
 						if ps.General {
 						}
 						ps30 := PhiState{General: ps.General}
-						ps30.OverlayValues = make([]JITValueDesc, 29)
+						ps30.OverlayValues = make([]JITValueDesc, 14)
 						ps30.OverlayValues[0] = d0
 						ps30.OverlayValues[1] = d1
 						ps30.OverlayValues[2] = d2
 						ps30.OverlayValues[3] = d3
-						ps30.OverlayValues[18] = d18
-						ps30.OverlayValues[19] = d19
-						ps30.OverlayValues[20] = d20
-						ps30.OverlayValues[21] = d21
-						ps30.OverlayValues[22] = d22
-						ps30.OverlayValues[24] = d24
-						ps30.OverlayValues[25] = d25
-						ps30.OverlayValues[26] = d26
-						ps30.OverlayValues[27] = d27
-						ps30.OverlayValues[28] = d28
+						ps30.OverlayValues[4] = d18
+						ps30.OverlayValues[5] = d19
+						ps30.OverlayValues[6] = d20
+						ps30.OverlayValues[7] = d21
+						ps30.OverlayValues[8] = d22
+						ps30.OverlayValues[9] = d24
+						ps30.OverlayValues[10] = d25
+						ps30.OverlayValues[11] = d26
+						ps30.OverlayValues[12] = d27
+						ps30.OverlayValues[13] = d28
 						return bbs[2].RenderPS(ps30)
 					}
 					if !ps.General {
@@ -35465,37 +35489,37 @@ func init_alu() {
 					d27 = snap43
 					d28 = snap44
 					ps46 := PhiState{General: true}
-					ps46.OverlayValues = make([]JITValueDesc, 29)
+					ps46.OverlayValues = make([]JITValueDesc, 14)
 					ps46.OverlayValues[0] = d0
 					ps46.OverlayValues[1] = d1
 					ps46.OverlayValues[2] = d2
 					ps46.OverlayValues[3] = d3
-					ps46.OverlayValues[18] = d18
-					ps46.OverlayValues[19] = d19
-					ps46.OverlayValues[20] = d20
-					ps46.OverlayValues[21] = d21
-					ps46.OverlayValues[22] = d22
-					ps46.OverlayValues[24] = d24
-					ps46.OverlayValues[25] = d25
-					ps46.OverlayValues[26] = d26
-					ps46.OverlayValues[27] = d27
-					ps46.OverlayValues[28] = d28
+					ps46.OverlayValues[4] = d18
+					ps46.OverlayValues[5] = d19
+					ps46.OverlayValues[6] = d20
+					ps46.OverlayValues[7] = d21
+					ps46.OverlayValues[8] = d22
+					ps46.OverlayValues[9] = d24
+					ps46.OverlayValues[10] = d25
+					ps46.OverlayValues[11] = d26
+					ps46.OverlayValues[12] = d27
+					ps46.OverlayValues[13] = d28
 					ps47 := PhiState{General: true}
-					ps47.OverlayValues = make([]JITValueDesc, 29)
+					ps47.OverlayValues = make([]JITValueDesc, 14)
 					ps47.OverlayValues[0] = d0
 					ps47.OverlayValues[1] = d1
 					ps47.OverlayValues[2] = d2
 					ps47.OverlayValues[3] = d3
-					ps47.OverlayValues[18] = d18
-					ps47.OverlayValues[19] = d19
-					ps47.OverlayValues[20] = d20
-					ps47.OverlayValues[21] = d21
-					ps47.OverlayValues[22] = d22
-					ps47.OverlayValues[24] = d24
-					ps47.OverlayValues[25] = d25
-					ps47.OverlayValues[26] = d26
-					ps47.OverlayValues[27] = d27
-					ps47.OverlayValues[28] = d28
+					ps47.OverlayValues[4] = d18
+					ps47.OverlayValues[5] = d19
+					ps47.OverlayValues[6] = d20
+					ps47.OverlayValues[7] = d21
+					ps47.OverlayValues[8] = d22
+					ps47.OverlayValues[9] = d24
+					ps47.OverlayValues[10] = d25
+					ps47.OverlayValues[11] = d26
+					ps47.OverlayValues[12] = d27
+					ps47.OverlayValues[13] = d28
 					snap48 := d0
 					snap49 := d1
 					snap50 := d2
@@ -35551,6 +35575,8 @@ func init_alu() {
 					ctx.UnprotectReg(result.Reg2)
 					ctx.UnprotectReg(result.Reg)
 				}
+				result.Type = returnType
+				result.ReturnTypeMerged = returnTypeSeen
 				return result
 			},
 			JITInlineCost: 17,
@@ -35610,6 +35636,15 @@ func init_alu() {
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				branchSerial := ctx.branchSerial
 				_ = branchSerial
+				returnType := uint8(JITTypeUnknown)
+				returnTypeSeen := false
+				mergeReturnType := func(t uint8) {
+					if !returnTypeSeen {
+						returnType, returnTypeSeen = t, true
+					} else if returnType != t {
+						returnType = JITTypeUnknown
+					}
+				}
 				var bbs [4]BBDescriptor
 				for i := range args {
 					ctx.StabilizeDescForControlFlow(&args[i])
@@ -35808,6 +35843,7 @@ func init_alu() {
 							result.Type = d18.Type
 						}
 					}
+					mergeReturnType(result.Type)
 					ctx.EmitJmp(lbl0)
 					return result
 				}
@@ -35843,8 +35879,8 @@ func init_alu() {
 					if len(ps.OverlayValues) > 3 && ps.OverlayValues[3].Loc != LocNone {
 						d3 = ps.OverlayValues[3]
 					}
-					if len(ps.OverlayValues) > 18 && ps.OverlayValues[18].Loc != LocNone {
-						d18 = ps.OverlayValues[18]
+					if len(ps.OverlayValues) > 4 && ps.OverlayValues[4].Loc != LocNone {
+						d18 = ps.OverlayValues[4]
 					}
 					ctx.ReclaimUntrackedRegs()
 					d19 = args[1]
@@ -35877,6 +35913,7 @@ func init_alu() {
 						}
 					}
 					result.Type = tagBool
+					mergeReturnType(result.Type)
 					ctx.EmitJmp(lbl0)
 					return result
 				}
@@ -35912,23 +35949,23 @@ func init_alu() {
 					if len(ps.OverlayValues) > 3 && ps.OverlayValues[3].Loc != LocNone {
 						d3 = ps.OverlayValues[3]
 					}
-					if len(ps.OverlayValues) > 18 && ps.OverlayValues[18].Loc != LocNone {
-						d18 = ps.OverlayValues[18]
+					if len(ps.OverlayValues) > 4 && ps.OverlayValues[4].Loc != LocNone {
+						d18 = ps.OverlayValues[4]
 					}
-					if len(ps.OverlayValues) > 19 && ps.OverlayValues[19].Loc != LocNone {
-						d19 = ps.OverlayValues[19]
+					if len(ps.OverlayValues) > 5 && ps.OverlayValues[5].Loc != LocNone {
+						d19 = ps.OverlayValues[5]
 					}
-					if len(ps.OverlayValues) > 20 && ps.OverlayValues[20].Loc != LocNone {
-						d20 = ps.OverlayValues[20]
+					if len(ps.OverlayValues) > 6 && ps.OverlayValues[6].Loc != LocNone {
+						d20 = ps.OverlayValues[6]
 					}
-					if len(ps.OverlayValues) > 21 && ps.OverlayValues[21].Loc != LocNone {
-						d21 = ps.OverlayValues[21]
+					if len(ps.OverlayValues) > 7 && ps.OverlayValues[7].Loc != LocNone {
+						d21 = ps.OverlayValues[7]
 					}
-					if len(ps.OverlayValues) > 22 && ps.OverlayValues[22].Loc != LocNone {
-						d22 = ps.OverlayValues[22]
+					if len(ps.OverlayValues) > 8 && ps.OverlayValues[8].Loc != LocNone {
+						d22 = ps.OverlayValues[8]
 					}
-					if len(ps.OverlayValues) > 24 && ps.OverlayValues[24].Loc != LocNone {
-						d24 = ps.OverlayValues[24]
+					if len(ps.OverlayValues) > 9 && ps.OverlayValues[9].Loc != LocNone {
+						d24 = ps.OverlayValues[9]
 					}
 					ctx.ReclaimUntrackedRegs()
 					d25 = args[1]
@@ -35947,41 +35984,41 @@ func init_alu() {
 							if ps.General {
 							}
 							ps29 := PhiState{General: ps.General}
-							ps29.OverlayValues = make([]JITValueDesc, 29)
+							ps29.OverlayValues = make([]JITValueDesc, 14)
 							ps29.OverlayValues[0] = d0
 							ps29.OverlayValues[1] = d1
 							ps29.OverlayValues[2] = d2
 							ps29.OverlayValues[3] = d3
-							ps29.OverlayValues[18] = d18
-							ps29.OverlayValues[19] = d19
-							ps29.OverlayValues[20] = d20
-							ps29.OverlayValues[21] = d21
-							ps29.OverlayValues[22] = d22
-							ps29.OverlayValues[24] = d24
-							ps29.OverlayValues[25] = d25
-							ps29.OverlayValues[26] = d26
-							ps29.OverlayValues[27] = d27
-							ps29.OverlayValues[28] = d28
+							ps29.OverlayValues[4] = d18
+							ps29.OverlayValues[5] = d19
+							ps29.OverlayValues[6] = d20
+							ps29.OverlayValues[7] = d21
+							ps29.OverlayValues[8] = d22
+							ps29.OverlayValues[9] = d24
+							ps29.OverlayValues[10] = d25
+							ps29.OverlayValues[11] = d26
+							ps29.OverlayValues[12] = d27
+							ps29.OverlayValues[13] = d28
 							return bbs[1].RenderPS(ps29)
 						}
 						if ps.General {
 						}
 						ps30 := PhiState{General: ps.General}
-						ps30.OverlayValues = make([]JITValueDesc, 29)
+						ps30.OverlayValues = make([]JITValueDesc, 14)
 						ps30.OverlayValues[0] = d0
 						ps30.OverlayValues[1] = d1
 						ps30.OverlayValues[2] = d2
 						ps30.OverlayValues[3] = d3
-						ps30.OverlayValues[18] = d18
-						ps30.OverlayValues[19] = d19
-						ps30.OverlayValues[20] = d20
-						ps30.OverlayValues[21] = d21
-						ps30.OverlayValues[22] = d22
-						ps30.OverlayValues[24] = d24
-						ps30.OverlayValues[25] = d25
-						ps30.OverlayValues[26] = d26
-						ps30.OverlayValues[27] = d27
-						ps30.OverlayValues[28] = d28
+						ps30.OverlayValues[4] = d18
+						ps30.OverlayValues[5] = d19
+						ps30.OverlayValues[6] = d20
+						ps30.OverlayValues[7] = d21
+						ps30.OverlayValues[8] = d22
+						ps30.OverlayValues[9] = d24
+						ps30.OverlayValues[10] = d25
+						ps30.OverlayValues[11] = d26
+						ps30.OverlayValues[12] = d27
+						ps30.OverlayValues[13] = d28
 						return bbs[2].RenderPS(ps30)
 					}
 					if !ps.General {
@@ -36039,37 +36076,37 @@ func init_alu() {
 					d27 = snap43
 					d28 = snap44
 					ps46 := PhiState{General: true}
-					ps46.OverlayValues = make([]JITValueDesc, 29)
+					ps46.OverlayValues = make([]JITValueDesc, 14)
 					ps46.OverlayValues[0] = d0
 					ps46.OverlayValues[1] = d1
 					ps46.OverlayValues[2] = d2
 					ps46.OverlayValues[3] = d3
-					ps46.OverlayValues[18] = d18
-					ps46.OverlayValues[19] = d19
-					ps46.OverlayValues[20] = d20
-					ps46.OverlayValues[21] = d21
-					ps46.OverlayValues[22] = d22
-					ps46.OverlayValues[24] = d24
-					ps46.OverlayValues[25] = d25
-					ps46.OverlayValues[26] = d26
-					ps46.OverlayValues[27] = d27
-					ps46.OverlayValues[28] = d28
+					ps46.OverlayValues[4] = d18
+					ps46.OverlayValues[5] = d19
+					ps46.OverlayValues[6] = d20
+					ps46.OverlayValues[7] = d21
+					ps46.OverlayValues[8] = d22
+					ps46.OverlayValues[9] = d24
+					ps46.OverlayValues[10] = d25
+					ps46.OverlayValues[11] = d26
+					ps46.OverlayValues[12] = d27
+					ps46.OverlayValues[13] = d28
 					ps47 := PhiState{General: true}
-					ps47.OverlayValues = make([]JITValueDesc, 29)
+					ps47.OverlayValues = make([]JITValueDesc, 14)
 					ps47.OverlayValues[0] = d0
 					ps47.OverlayValues[1] = d1
 					ps47.OverlayValues[2] = d2
 					ps47.OverlayValues[3] = d3
-					ps47.OverlayValues[18] = d18
-					ps47.OverlayValues[19] = d19
-					ps47.OverlayValues[20] = d20
-					ps47.OverlayValues[21] = d21
-					ps47.OverlayValues[22] = d22
-					ps47.OverlayValues[24] = d24
-					ps47.OverlayValues[25] = d25
-					ps47.OverlayValues[26] = d26
-					ps47.OverlayValues[27] = d27
-					ps47.OverlayValues[28] = d28
+					ps47.OverlayValues[4] = d18
+					ps47.OverlayValues[5] = d19
+					ps47.OverlayValues[6] = d20
+					ps47.OverlayValues[7] = d21
+					ps47.OverlayValues[8] = d22
+					ps47.OverlayValues[9] = d24
+					ps47.OverlayValues[10] = d25
+					ps47.OverlayValues[11] = d26
+					ps47.OverlayValues[12] = d27
+					ps47.OverlayValues[13] = d28
 					snap48 := d0
 					snap49 := d1
 					snap50 := d2
@@ -36125,6 +36162,8 @@ func init_alu() {
 					ctx.UnprotectReg(result.Reg2)
 					ctx.UnprotectReg(result.Reg)
 				}
+				result.Type = returnType
+				result.ReturnTypeMerged = returnTypeSeen
 				return result
 			},
 			JITInlineCost: 17,
@@ -36184,6 +36223,15 @@ func init_alu() {
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				branchSerial := ctx.branchSerial
 				_ = branchSerial
+				returnType := uint8(JITTypeUnknown)
+				returnTypeSeen := false
+				mergeReturnType := func(t uint8) {
+					if !returnTypeSeen {
+						returnType, returnTypeSeen = t, true
+					} else if returnType != t {
+						returnType = JITTypeUnknown
+					}
+				}
 				var bbs [4]BBDescriptor
 				for i := range args {
 					ctx.StabilizeDescForControlFlow(&args[i])
@@ -36382,6 +36430,7 @@ func init_alu() {
 							result.Type = d18.Type
 						}
 					}
+					mergeReturnType(result.Type)
 					ctx.EmitJmp(lbl0)
 					return result
 				}
@@ -36417,8 +36466,8 @@ func init_alu() {
 					if len(ps.OverlayValues) > 3 && ps.OverlayValues[3].Loc != LocNone {
 						d3 = ps.OverlayValues[3]
 					}
-					if len(ps.OverlayValues) > 18 && ps.OverlayValues[18].Loc != LocNone {
-						d18 = ps.OverlayValues[18]
+					if len(ps.OverlayValues) > 4 && ps.OverlayValues[4].Loc != LocNone {
+						d18 = ps.OverlayValues[4]
 					}
 					ctx.ReclaimUntrackedRegs()
 					d19 = args[0]
@@ -36479,6 +36528,7 @@ func init_alu() {
 						}
 					}
 					result.Type = tagBool
+					mergeReturnType(result.Type)
 					ctx.EmitJmp(lbl0)
 					return result
 				}
@@ -36514,23 +36564,23 @@ func init_alu() {
 					if len(ps.OverlayValues) > 3 && ps.OverlayValues[3].Loc != LocNone {
 						d3 = ps.OverlayValues[3]
 					}
-					if len(ps.OverlayValues) > 18 && ps.OverlayValues[18].Loc != LocNone {
-						d18 = ps.OverlayValues[18]
+					if len(ps.OverlayValues) > 4 && ps.OverlayValues[4].Loc != LocNone {
+						d18 = ps.OverlayValues[4]
 					}
-					if len(ps.OverlayValues) > 19 && ps.OverlayValues[19].Loc != LocNone {
-						d19 = ps.OverlayValues[19]
+					if len(ps.OverlayValues) > 5 && ps.OverlayValues[5].Loc != LocNone {
+						d19 = ps.OverlayValues[5]
 					}
-					if len(ps.OverlayValues) > 20 && ps.OverlayValues[20].Loc != LocNone {
-						d20 = ps.OverlayValues[20]
+					if len(ps.OverlayValues) > 6 && ps.OverlayValues[6].Loc != LocNone {
+						d20 = ps.OverlayValues[6]
 					}
-					if len(ps.OverlayValues) > 21 && ps.OverlayValues[21].Loc != LocNone {
-						d21 = ps.OverlayValues[21]
+					if len(ps.OverlayValues) > 7 && ps.OverlayValues[7].Loc != LocNone {
+						d21 = ps.OverlayValues[7]
 					}
-					if len(ps.OverlayValues) > 22 && ps.OverlayValues[22].Loc != LocNone {
-						d22 = ps.OverlayValues[22]
+					if len(ps.OverlayValues) > 8 && ps.OverlayValues[8].Loc != LocNone {
+						d22 = ps.OverlayValues[8]
 					}
-					if len(ps.OverlayValues) > 23 && ps.OverlayValues[23].Loc != LocNone {
-						d23 = ps.OverlayValues[23]
+					if len(ps.OverlayValues) > 9 && ps.OverlayValues[9].Loc != LocNone {
+						d23 = ps.OverlayValues[9]
 					}
 					ctx.ReclaimUntrackedRegs()
 					d24 = args[1]
@@ -36549,41 +36599,41 @@ func init_alu() {
 							if ps.General {
 							}
 							ps28 := PhiState{General: ps.General}
-							ps28.OverlayValues = make([]JITValueDesc, 28)
+							ps28.OverlayValues = make([]JITValueDesc, 14)
 							ps28.OverlayValues[0] = d0
 							ps28.OverlayValues[1] = d1
 							ps28.OverlayValues[2] = d2
 							ps28.OverlayValues[3] = d3
-							ps28.OverlayValues[18] = d18
-							ps28.OverlayValues[19] = d19
-							ps28.OverlayValues[20] = d20
-							ps28.OverlayValues[21] = d21
-							ps28.OverlayValues[22] = d22
-							ps28.OverlayValues[23] = d23
-							ps28.OverlayValues[24] = d24
-							ps28.OverlayValues[25] = d25
-							ps28.OverlayValues[26] = d26
-							ps28.OverlayValues[27] = d27
+							ps28.OverlayValues[4] = d18
+							ps28.OverlayValues[5] = d19
+							ps28.OverlayValues[6] = d20
+							ps28.OverlayValues[7] = d21
+							ps28.OverlayValues[8] = d22
+							ps28.OverlayValues[9] = d23
+							ps28.OverlayValues[10] = d24
+							ps28.OverlayValues[11] = d25
+							ps28.OverlayValues[12] = d26
+							ps28.OverlayValues[13] = d27
 							return bbs[1].RenderPS(ps28)
 						}
 						if ps.General {
 						}
 						ps29 := PhiState{General: ps.General}
-						ps29.OverlayValues = make([]JITValueDesc, 28)
+						ps29.OverlayValues = make([]JITValueDesc, 14)
 						ps29.OverlayValues[0] = d0
 						ps29.OverlayValues[1] = d1
 						ps29.OverlayValues[2] = d2
 						ps29.OverlayValues[3] = d3
-						ps29.OverlayValues[18] = d18
-						ps29.OverlayValues[19] = d19
-						ps29.OverlayValues[20] = d20
-						ps29.OverlayValues[21] = d21
-						ps29.OverlayValues[22] = d22
-						ps29.OverlayValues[23] = d23
-						ps29.OverlayValues[24] = d24
-						ps29.OverlayValues[25] = d25
-						ps29.OverlayValues[26] = d26
-						ps29.OverlayValues[27] = d27
+						ps29.OverlayValues[4] = d18
+						ps29.OverlayValues[5] = d19
+						ps29.OverlayValues[6] = d20
+						ps29.OverlayValues[7] = d21
+						ps29.OverlayValues[8] = d22
+						ps29.OverlayValues[9] = d23
+						ps29.OverlayValues[10] = d24
+						ps29.OverlayValues[11] = d25
+						ps29.OverlayValues[12] = d26
+						ps29.OverlayValues[13] = d27
 						return bbs[2].RenderPS(ps29)
 					}
 					if !ps.General {
@@ -36641,37 +36691,37 @@ func init_alu() {
 					d26 = snap42
 					d27 = snap43
 					ps45 := PhiState{General: true}
-					ps45.OverlayValues = make([]JITValueDesc, 28)
+					ps45.OverlayValues = make([]JITValueDesc, 14)
 					ps45.OverlayValues[0] = d0
 					ps45.OverlayValues[1] = d1
 					ps45.OverlayValues[2] = d2
 					ps45.OverlayValues[3] = d3
-					ps45.OverlayValues[18] = d18
-					ps45.OverlayValues[19] = d19
-					ps45.OverlayValues[20] = d20
-					ps45.OverlayValues[21] = d21
-					ps45.OverlayValues[22] = d22
-					ps45.OverlayValues[23] = d23
-					ps45.OverlayValues[24] = d24
-					ps45.OverlayValues[25] = d25
-					ps45.OverlayValues[26] = d26
-					ps45.OverlayValues[27] = d27
+					ps45.OverlayValues[4] = d18
+					ps45.OverlayValues[5] = d19
+					ps45.OverlayValues[6] = d20
+					ps45.OverlayValues[7] = d21
+					ps45.OverlayValues[8] = d22
+					ps45.OverlayValues[9] = d23
+					ps45.OverlayValues[10] = d24
+					ps45.OverlayValues[11] = d25
+					ps45.OverlayValues[12] = d26
+					ps45.OverlayValues[13] = d27
 					ps46 := PhiState{General: true}
-					ps46.OverlayValues = make([]JITValueDesc, 28)
+					ps46.OverlayValues = make([]JITValueDesc, 14)
 					ps46.OverlayValues[0] = d0
 					ps46.OverlayValues[1] = d1
 					ps46.OverlayValues[2] = d2
 					ps46.OverlayValues[3] = d3
-					ps46.OverlayValues[18] = d18
-					ps46.OverlayValues[19] = d19
-					ps46.OverlayValues[20] = d20
-					ps46.OverlayValues[21] = d21
-					ps46.OverlayValues[22] = d22
-					ps46.OverlayValues[23] = d23
-					ps46.OverlayValues[24] = d24
-					ps46.OverlayValues[25] = d25
-					ps46.OverlayValues[26] = d26
-					ps46.OverlayValues[27] = d27
+					ps46.OverlayValues[4] = d18
+					ps46.OverlayValues[5] = d19
+					ps46.OverlayValues[6] = d20
+					ps46.OverlayValues[7] = d21
+					ps46.OverlayValues[8] = d22
+					ps46.OverlayValues[9] = d23
+					ps46.OverlayValues[10] = d24
+					ps46.OverlayValues[11] = d25
+					ps46.OverlayValues[12] = d26
+					ps46.OverlayValues[13] = d27
 					snap47 := d0
 					snap48 := d1
 					snap49 := d2
@@ -36727,6 +36777,8 @@ func init_alu() {
 					ctx.UnprotectReg(result.Reg2)
 					ctx.UnprotectReg(result.Reg)
 				}
+				result.Type = returnType
+				result.ReturnTypeMerged = returnTypeSeen
 				return result
 			},
 			JITInlineCost: 18,

@@ -442,6 +442,10 @@ type JITValueDesc struct {
 	// of Type so unions such as int|float|nil retain the fact without claiming an
 	// exact tag.
 	NoHeapPointer bool
+	// ReturnTypeMerged means Type describes every emitted return arm, rather
+	// than just the last rendered arm. It survives forwarding the same value;
+	// each new declaration emission clears the caller-selected target proof.
+	ReturnTypeMerged bool
 	// RelocatablePointer distinguishes an unboxed address from ordinary scalar
 	// integers. Such values need stack-map coverage while live across a Go call.
 	RelocatablePointer bool
