@@ -50,6 +50,18 @@ test_cases:
   timing_samples: 4
   timing_aggregation: total
   threshold_ms: 5000
+- name: 'Perf: nested boolean branches in typed scan'
+  scm: |
+    (scan nil (table "memcp-tests" "kernel_values") '() '()
+      '("value" "weight")
+      (lambda (v w) (or (and (< v 10000) (> w 0))
+        (and (>= v 30000) (< w 45001))))
+      '() (lambda (acc) (+ acc 1)) 0 + false)
+  expect: {result: 25000}
+  warmup: 0
+  timing_samples: 4
+  timing_aggregation: total
+  threshold_ms: 5000
 - name: Reject missing scan column
   sql: SELECT SUM(missing_value) FROM kernel_values
   expect: {error: true}

@@ -259,23 +259,7 @@ func emitJITFilterBuffer(ctx *JITContext, proc *Proc, valueTypes []uint8, reader
 		}
 		ctx.FreeDesc(&address)
 	}
-	predicate := jitEmitStorageProc(ctx, proc, args)
-	if !ctx.emitBooleanFlagsJump(&predicate, accepted, next) {
-		boolean := ctx.EmitBoolDesc(&predicate, JITValueDesc{Loc: LocAny})
-		ctx.FreeDesc(&predicate)
-		if boolean.Loc == LocImm {
-			if boolean.Imm.Bool() {
-				ctx.EmitJmp(accepted)
-			} else {
-				ctx.EmitJmp(next)
-			}
-		} else {
-			ctx.EmitCmpRegImm32(boolean.Reg, 0)
-			ctx.FreeDesc(&boolean)
-			ctx.EmitJcc(CondNotEqual, accepted)
-			ctx.EmitJmp(next)
-		}
-	}
+	jitEmitStorageProc(ctx, proc, args, &jitConditionTargets{accepted, next})
 
 	ctx.MarkLabel(accepted)
 	rowReg = ctx.AllocReg()
@@ -320,7 +304,7 @@ func emitJITFilterBuffer(ctx *JITContext, proc *Proc, valueTypes []uint8, reader
 // jitEmitStorageProc binds the concrete callback, not the storage emitter's
 // lexical frame. Compiled closures keep captured numbered locals in their
 // ProcJIT tail; treating those slots as fresh nil locals changes SQL filters.
-func jitEmitStorageProc(ctx *JITContext, proc *Proc, args []JITValueDesc) JITValueDesc {
+func jitEmitStorageProc(ctx *JITContext, proc *Proc, args []JITValueDesc, condition *jitConditionTargets) JITValueDesc {
 	base, captures := proc.JITCapturedLocals()
 	if len(captures) != 0 {
 		if base < len(args) {
@@ -343,6 +327,32 @@ func jitEmitStorageProc(ctx *JITContext, proc *Proc, args []JITValueDesc) JITVal
 	}
 	ctx.RuntimeEnv = NewAny(runtimeEnv)
 	ctx.TrackImm(ctx.RuntimeEnv)
+	if condition != nil {
+		oldEnv := ctx.Env
+		ctx.Env = jitProcInlineEnv(ctx, proc, jitCapturedEnv(proc.En), args)
+		defer func() { ctx.Env = oldEnv }()
+		if jitEmitSpecialCondition(ctx, proc.Body, condition.yes, condition.no) {
+			return JITValueDesc{}
+		}
+		predicate := jitCompileExpr(ctx, proc.Body, RegR12, JITValueDesc{Loc: LocAny})
+		if !ctx.emitBooleanFlagsJump(&predicate, condition.yes, condition.no) {
+			boolean := ctx.EmitBoolDesc(&predicate, JITValueDesc{Loc: LocAny})
+			ctx.FreeDesc(&predicate)
+			if boolean.Loc == LocImm {
+				if boolean.Imm.Bool() {
+					ctx.EmitJmp(condition.yes)
+				} else {
+					ctx.EmitJmp(condition.no)
+				}
+			} else {
+				ctx.EmitCmpRegImm32(boolean.Reg, 0)
+				ctx.FreeDesc(&boolean)
+				ctx.EmitJcc(CondNotEqual, condition.yes)
+				ctx.EmitJmp(condition.no)
+			}
+		}
+		return JITValueDesc{}
+	}
 	return JITEmitProcInlineWithOuter(ctx, proc, jitCapturedEnv(proc.En), args, RegR12, JITValueDesc{Loc: LocAny})
 }
 
@@ -397,7 +407,7 @@ func emitJITMapReduceBuffer(ctx *JITContext, proc *Proc, valueTypes []uint8) {
 		}
 		ctx.FreeDesc(&address)
 	}
-	newAccumulator := jitEmitStorageProc(ctx, proc, args)
+	newAccumulator := jitEmitStorageProc(ctx, proc, args, nil)
 	ctx.EmitStoreScmerToStack(newAccumulator, accumulator.StackOff)
 	ctx.FreeDesc(&newAccumulator)
 

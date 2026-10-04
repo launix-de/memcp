@@ -410,110 +410,155 @@ func jitEmitSpecialIfCond(ctx *JITContext, args []Scmer, trueLabel, falseLabel J
 	}
 }
 
+type jitConditionTargets struct{ yes, no JITLabel }
+
 func jitEmitSpecialBoolFoldCond(takeWhen bool) JITCondEmitter {
 	return func(ctx *JITContext, args []Scmer, trueLabel, falseLabel JITLabel) {
-		if len(args) == 0 {
-			if takeWhen {
-				ctx.EmitJmp(falseLabel)
-			} else {
-				ctx.EmitJmp(trueLabel)
-			}
-			return
-		}
-		for i := 0; i < len(args)-1; i++ {
-			nextLabel := ctx.ReserveLabel()
-			if takeWhen {
-				jitEmitCondJump(ctx, args[i], ctx.SliceBase, trueLabel, nextLabel)
-			} else {
-				jitEmitCondJump(ctx, args[i], ctx.SliceBase, nextLabel, falseLabel)
-			}
-			ctx.MarkLabel(nextLabel)
-		}
-		jitEmitCondJump(ctx, args[len(args)-1], ctx.SliceBase, trueLabel, falseLabel)
+		jitEmitBoolFold(ctx, args, JITValueDesc{Loc: LocAny}, takeWhen, &jitConditionTargets{trueLabel, falseLabel})
 	}
 }
 
 func jitEmitSpecialBoolFold(takeWhen bool) func(*JITContext, []Scmer, []JITValueDesc, JITValueDesc) JITValueDesc {
 	return func(ctx *JITContext, args []Scmer, _ []JITValueDesc, result JITValueDesc) JITValueDesc {
-		identity := !takeWhen
-		if len(args) == 0 {
-			imm := NewBool(identity)
-			ctx.TrackImm(imm)
-			return JITValueDesc{Loc: LocImm, Type: tagBool, Imm: imm}
-		}
-		unknownOff := ctx.AllocStack(8)
-		ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0), NoHeapPointer: true}, unknownOff)
-		decisiveLabel := ctx.ReserveLabel()
-		unknownLabel := ctx.ReserveLabel()
-		endLabel := ctx.ReserveLabel()
-		for _, expression := range args {
-			value := jitCompileExpr(ctx, expression, ctx.SliceBase, JITValueDesc{Loc: LocAny})
-			nilValue := jitIsNilBorrowed(ctx, &value)
-			if nilValue.Loc == LocImm && nilValue.Imm.Bool() {
-				ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(1), NoHeapPointer: true}, unknownOff)
-				ctx.FreeDesc(&value)
-				continue
-			}
+		return jitEmitBoolFold(ctx, args, result, takeWhen, nil)
+	}
+}
 
-			var nilLabel, nextLabel JITLabel
-			hasNilBranch := nilValue.Loc != LocImm
-			if hasNilBranch {
-				nilLabel = ctx.ReserveLabel()
-				nextLabel = ctx.ReserveLabel()
-				ctx.EmitCmpRegImm32(nilValue.Reg, 0)
-				ctx.EmitJcc(CcNE, nilLabel)
-				ctx.FreeDesc(&nilValue)
-			}
-
-			boolean := jitCondToBoolBorrowed(ctx, &value)
-			ctx.FreeDesc(&value)
-			if boolean.Loc == LocImm {
-				if boolean.Imm.Bool() == takeWhen {
-					ctx.EmitJmp(decisiveLabel)
-					break
-				}
-				if hasNilBranch {
-					ctx.EmitJmp(nextLabel)
-				}
+// Value and branch contexts share SQL-3VL evaluation and short-circuit rules.
+// Only decisive TRUE/FALSE may skip operands; UNKNOWN must keep evaluating.
+func jitEmitBoolFold(ctx *JITContext, args []Scmer, result JITValueDesc, takeWhen bool, condition *jitConditionTargets) JITValueDesc {
+	identity := !takeWhen
+	if len(args) == 0 {
+		imm := NewBool(identity)
+		ctx.TrackImm(imm)
+		if condition != nil {
+			if identity {
+				ctx.EmitJmp(condition.yes)
 			} else {
-				ctx.EmitCmpRegImm32(boolean.Reg, 0)
-				if takeWhen {
-					ctx.EmitJcc(CcNE, decisiveLabel)
-				} else {
-					ctx.EmitJcc(CcE, decisiveLabel)
-				}
-				ctx.FreeDesc(&boolean)
-				if hasNilBranch {
-					ctx.EmitJmp(nextLabel)
-				}
+				ctx.EmitJmp(condition.no)
 			}
+			return JITValueDesc{}
+		}
+		return JITValueDesc{Loc: LocImm, Type: tagBool, Imm: imm}
+	}
+	// Create the UNKNOWN home only when an emitted operand can be NULL.
+	// Initialization precedes that first operand's branch, so every path which
+	// reaches the final UNKNOWN test has passed the initialization.
+	unknownOff := int32(-1)
+	ensureUnknown := func() {
+		if unknownOff < 0 {
+			unknownOff = ctx.AllocStack(8)
+			ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0), NoHeapPointer: true}, unknownOff)
+		}
+	}
+	decisiveLabel := ctx.ReserveLabel()
+	unknownLabel := ctx.ReserveLabel()
+	endLabel := ctx.ReserveLabel()
+	for _, expression := range args {
+		value := jitCompileExpr(ctx, expression, ctx.SliceBase, JITValueDesc{Loc: LocAny})
+		nilValue := jitIsNilBorrowed(ctx, &value)
+		if nilValue.Loc == LocImm && nilValue.Imm.Bool() {
+			ensureUnknown()
+			ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(1), NoHeapPointer: true}, unknownOff)
+			ctx.FreeDesc(&value)
+			continue
+		}
+
+		var nilLabel, nextLabel JITLabel
+		hasNilBranch := nilValue.Loc != LocImm
+		if hasNilBranch {
+			ensureUnknown()
+			nilLabel = ctx.ReserveLabel()
+			nextLabel = ctx.ReserveLabel()
+			ctx.EmitCmpRegImm32(nilValue.Reg, 0)
+			ctx.EmitJcc(CcNE, nilLabel)
+			ctx.FreeDesc(&nilValue)
+		}
+
+		if ctx.hasBooleanFlags(value) {
+			ctx.lazyFlags = jitBooleanFlags{}
+			if takeWhen {
+				ctx.EmitJump(value.Condition, decisiveLabel)
+			} else {
+				ctx.EmitJump(InvertJITCondition(value.Condition), decisiveLabel)
+			}
+			ctx.FreeDesc(&value)
 			ctx.ReclaimUntrackedRegs()
+			continue
+		}
+		boolean := jitCondToBoolBorrowed(ctx, &value)
+		ctx.FreeDesc(&value)
+		if boolean.Loc == LocImm {
+			if boolean.Imm.Bool() == takeWhen {
+				ctx.EmitJmp(decisiveLabel)
+				break
+			}
 			if hasNilBranch {
-				ctx.MarkLabel(nilLabel)
-				ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(1), NoHeapPointer: true}, unknownOff)
-				ctx.MarkLabel(nextLabel)
+				ctx.EmitJmp(nextLabel)
+			}
+		} else {
+			ctx.EmitCmpRegImm32(boolean.Reg, 0)
+			if takeWhen {
+				ctx.EmitJcc(CcNE, decisiveLabel)
+			} else {
+				ctx.EmitJcc(CcE, decisiveLabel)
+			}
+			ctx.FreeDesc(&boolean)
+			if hasNilBranch {
+				ctx.EmitJmp(nextLabel)
 			}
 		}
+		ctx.ReclaimUntrackedRegs()
+		if hasNilBranch {
+			ctx.MarkLabel(nilLabel)
+			ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(1), NoHeapPointer: true}, unknownOff)
+			ctx.MarkLabel(nextLabel)
+		}
+	}
+	if unknownOff >= 0 {
 		unknown := ctx.AllocReg()
 		ctx.EmitLoadFromStack(unknown, unknownOff)
 		ctx.EmitCmpRegImm32(unknown, 0)
 		ctx.EmitJcc(CcNE, unknownLabel)
 		ctx.FreeReg(unknown)
-		target := jitEnsureResultPair(ctx, result)
-		identityValue := JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(identity)}
-		_ = jitPlaceIntoPair(ctx, &identityValue, target)
-		ctx.EmitJmp(endLabel)
-		ctx.MarkLabel(decisiveLabel)
-		decisiveValue := JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(takeWhen)}
-		_ = jitPlaceIntoPair(ctx, &decisiveValue, target)
-		ctx.EmitJmp(endLabel)
-		ctx.MarkLabel(unknownLabel)
-		ctx.EmitMakeNil(target)
-		ctx.MarkLabel(endLabel)
-		ctx.BindReg(target.Reg, &target)
-		ctx.BindReg(target.Reg2, &target)
-		return target
 	}
+	if condition != nil {
+		if identity {
+			ctx.EmitJmp(condition.yes)
+		} else {
+			ctx.EmitJmp(condition.no)
+		}
+		ctx.MarkLabel(decisiveLabel)
+		if takeWhen {
+			ctx.EmitJmp(condition.yes)
+		} else {
+			ctx.EmitJmp(condition.no)
+		}
+		ctx.MarkLabel(unknownLabel)
+		ctx.EmitJmp(condition.no)
+		return JITValueDesc{}
+	}
+	target := jitEnsureResultPair(ctx, result)
+	identityValue := JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(identity)}
+	_ = jitPlaceIntoPair(ctx, &identityValue, target)
+	ctx.EmitJmp(endLabel)
+	ctx.MarkLabel(decisiveLabel)
+	decisiveValue := JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(takeWhen)}
+	_ = jitPlaceIntoPair(ctx, &decisiveValue, target)
+	ctx.EmitJmp(endLabel)
+	ctx.MarkLabel(unknownLabel)
+	if unknownOff >= 0 {
+		ctx.EmitMakeNil(target)
+	}
+	ctx.MarkLabel(endLabel)
+	ctx.BindReg(target.Reg, &target)
+	ctx.BindReg(target.Reg2, &target)
+	if unknownOff < 0 {
+		target.Type = tagBool
+	} else {
+		target.Type = JITTypeUnknown
+	}
+	return target
 }
 
 func jitEmitSpecialCoalesce(nilOnly bool) func(*JITContext, []Scmer, []JITValueDesc, JITValueDesc) JITValueDesc {

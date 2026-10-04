@@ -3193,11 +3193,9 @@ func jitCompileRuntimeGlobalSymbol(ctx *JITContext, symbol Scmer, result JITValu
 	return out
 }
 
-// jitEmitCondJump emits branch code equivalent to Eval(...).Bool():
-// jumps to trueLbl when expr is truthy, otherwise to falseLbl.
-// It short-circuits nested (and ...)/(or ...)/(if ...) directly without
-// forcing intermediate boolean materialization.
-func jitEmitCondJump(ctx *JITContext, expr Scmer, sliceBase Reg, trueLbl, falseLbl JITLabel) {
+// jitEmitSpecialCondition uses a registered branch emitter without imposing
+// a result-register policy on the caller's ordinary value fallback.
+func jitEmitSpecialCondition(ctx *JITContext, expr Scmer, trueLbl, falseLbl JITLabel) bool {
 	if expr.GetTag() == tagSourceInfo {
 		expr = expr.SourceInfo().value
 	}
@@ -3207,9 +3205,21 @@ func jitEmitCondJump(ctx *JITContext, expr Scmer, sliceBase Reg, trueLbl, falseL
 			if declaration := DeclarationForValue(list[0]); declaration != nil &&
 				declaration.IsSpecialForm && declaration.Type != nil && declaration.Type.JITEmitCond != nil {
 				declaration.Type.JITEmitCond(ctx, list[1:], trueLbl, falseLbl)
-				return
+				return true
 			}
 		}
+	}
+
+	return false
+}
+
+// jitEmitCondJump emits branch code equivalent to Eval(...).Bool():
+// jumps to trueLbl when expr is truthy, otherwise to falseLbl.
+// It short-circuits nested (and ...)/(or ...)/(if ...) directly without
+// forcing intermediate boolean materialization.
+func jitEmitCondJump(ctx *JITContext, expr Scmer, sliceBase Reg, trueLbl, falseLbl JITLabel) {
+	if jitEmitSpecialCondition(ctx, expr, trueLbl, falseLbl) {
+		return
 	}
 
 	// Conditions are consumed immediately, but generated multi-block emitters
@@ -3629,6 +3639,11 @@ func JITEmitProcInline(ctx *JITContext, proc *Proc, args []JITValueDesc, sliceBa
 }
 
 func JITEmitProcInlineWithOuter(ctx *JITContext, proc *Proc, outer *JITEnv, args []JITValueDesc, sliceBase Reg, result JITValueDesc) JITValueDesc {
+	return JITEmitProcInlineWithEnv(ctx, proc, jitProcInlineEnv(ctx, proc, outer, args), sliceBase, result)
+}
+
+// Share lexical binding between value-producing and truth-filtering callbacks.
+func jitProcInlineEnv(ctx *JITContext, proc *Proc, outer *JITEnv, args []JITValueDesc) *JITEnv {
 	localCount := jitRequiredLocalSlots(proc.Body, proc.NumVars)
 	if localCount < len(args) {
 		localCount = len(args)
@@ -3666,12 +3681,7 @@ func JITEmitProcInlineWithOuter(ctx *JITContext, proc *Proc, outer *JITEnv, args
 	case tagSymbol:
 		bindParam(params, 0)
 	}
-	innerEnv := &JITEnv{
-		Vars:     vars,
-		Numbered: numbered,
-		Outer:    outer,
-	}
-	return JITEmitProcInlineWithEnv(ctx, proc, innerEnv, sliceBase, result)
+	return &JITEnv{Vars: vars, Numbered: numbered, Outer: outer}
 }
 
 // JITEmitProcInlineWithEnv emits a body in an already constructed lexical
