@@ -2306,7 +2306,7 @@ func (t *storageShard) scan(access scanAccess, conditionCols []string, condition
 			typedFilter = t.prepareTypedScanFilter(condition, ccols, cReaders, estimatedFilterRows)
 		}
 	}
-	defer typedFilter.close()
+	defer func() { typedFilter.close() }()
 
 	// MapReducer for the fused callback phase (builds column readers internally)
 	var mapperStorage ShardMapReducer
@@ -2367,46 +2367,77 @@ func (t *storageShard) scan(access scanAccess, conditionCols []string, condition
 	defer releaseScanIDBuffer(pooledFullBuf, pooledPointBuf)
 	hadValue := false
 
-	t.iterateIndex(currentTx, access, maxInsertIndex, buf, 1, nil, func(batch []uint32) bool {
-		candidateCount += int64(len(batch))
-		outN := t.filterVisibleScanBatch(batch, visibleUpper, hasMutationCallback, currentTx, mutationSeen)
-		feedbackCandidates += int64(outN)
-		if !conditionAlwaysTrue && outN > 0 {
-			if typedFilter != nil {
-				outN = typedFilter.filterBatch(batch[:outN], conditionCols, ccols, cReaders, conditionGetters, cdataset, &conditionProgram)
-			} else {
-				outN = t.filterScanBatchDynamic(batch[:outN], conditionCols, ccols, cReaders, conditionGetters, cdataset, &conditionProgram)
-			}
-		}
-		if outN > 0 {
-			if hasMutationCallback {
-				pendingRecids = append(pendingRecids, batch[:outN]...)
-				outCount += int64(outN)
-				hadValue = true
-			} else {
-				// release lock for the fused callback (UpdateFunction needs write lock)
-				if locked {
-					t.mu.RUnlock()
-					locked = false
+	// A lone sorted range has an exact active-index candidate span. A lone
+	// RecSet has its own cardinality. Do not infer a horizon from shard size
+	// for restricted scans, composite bounds, cold indexes or candidate hooks.
+	type typedFilterHorizon struct {
+		span      int64
+		active    bool
+		attempted bool
+	}
+	var filterHorizon *typedFilterHorizon
+	var candidateSpan *int64
+	var selectedIndex func(*StorageIndex, bool)
+	if !conditionAlwaysTrue && !hasMutationCallback && access.len() == 1 && scm.CurrentJITCosts().Enabled {
+		filterHorizon = &typedFilterHorizon{span: -1}
+		candidateSpan = &filterHorizon.span
+		selectedIndex = func(_ *StorageIndex, active bool) { filterHorizon.active = active }
+	}
+	t.iterateIndexEx(currentTx, access, maxInsertIndex, buf, 1, false, nil, nil, candidateSpan,
+		selectedIndex, func(batch []uint32) bool {
+			if filterHorizon != nil && !filterHorizon.attempted {
+				filterHorizon.attempted = true
+				horizon := int64(0)
+				if part, found := smallestRecSetBoundary(access, t); found {
+					if part != nil {
+						horizon = max(int64(0), part.count-int64(maxInsertIndex))
+					}
+				} else if filterHorizon.active && access.boundaryAnalyzer(0).IsSorted() {
+					horizon = max(int64(0), filterHorizon.span-int64(maxInsertIndex))
 				}
-				outCount += int64(outN)
-				if access.len() == 0 && candidateCount > 0 {
-					// Full scans have a known candidate horizon. Estimate accepted
-					// remaining rows from observed selectivity; index/RecSet scans
-					// must not use the population of the containing shard.
-					remaining := max(int64(0), int64(mapper.mainCount)-candidateCount)
-					mapper.bufferRemainingRows = outN + int(remaining*outCount/candidateCount)
-				}
-				akkumulator = mapper.Stream(akkumulator, batch[:outN], nil)
-				hadValue = true
-				if !skipShardReadLock {
-					t.mu.RLock()
-					locked = true
+				if horizon > defaultScanBufferSize {
+					typedFilter = t.prepareTypedScanFilter(condition, ccols, cReaders, int(horizon))
 				}
 			}
-		}
-		return true
-	})
+			candidateCount += int64(len(batch))
+			outN := t.filterVisibleScanBatch(batch, visibleUpper, hasMutationCallback, currentTx, mutationSeen)
+			feedbackCandidates += int64(outN)
+			if !conditionAlwaysTrue && outN > 0 {
+				if typedFilter != nil {
+					outN = typedFilter.filterBatch(batch[:outN], conditionCols, ccols, cReaders, conditionGetters, cdataset, &conditionProgram)
+				} else {
+					outN = t.filterScanBatchDynamic(batch[:outN], conditionCols, ccols, cReaders, conditionGetters, cdataset, &conditionProgram)
+				}
+			}
+			if outN > 0 {
+				if hasMutationCallback {
+					pendingRecids = append(pendingRecids, batch[:outN]...)
+					outCount += int64(outN)
+					hadValue = true
+				} else {
+					// release lock for the fused callback (UpdateFunction needs write lock)
+					if locked {
+						t.mu.RUnlock()
+						locked = false
+					}
+					outCount += int64(outN)
+					if access.len() == 0 && candidateCount > 0 {
+						// Full scans have a known candidate horizon. Estimate accepted
+						// remaining rows from observed selectivity; index/RecSet scans
+						// must not use the population of the containing shard.
+						remaining := max(int64(0), int64(mapper.mainCount)-candidateCount)
+						mapper.bufferRemainingRows = outN + int(remaining*outCount/candidateCount)
+					}
+					akkumulator = mapper.Stream(akkumulator, batch[:outN], nil)
+					hadValue = true
+					if !skipShardReadLock {
+						t.mu.RLock()
+						locked = true
+					}
+				}
+			}
+			return true
+		})
 
 	// finished reading
 	if locked {
