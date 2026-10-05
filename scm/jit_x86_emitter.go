@@ -1993,8 +1993,13 @@ func (ctx *JITContext) EmitBoolDesc(src *JITValueDesc, result JITValueDesc) JITV
 	// Unknown or complex known types (string/symbol/slice/vector/fastdict/default):
 	// materialize a Scmer pair and reuse the canonical runtime helper.
 	pair := *src
-	if pair.Loc != LocRegPair {
-		pair = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+	if pair.Loc == LocClosurePair {
+		off := ctx.AllocStack(16)
+		ctx.EmitStoreScmerToStack(pair, off)
+		pair = JITValueDesc{Loc: LocStackPair, Type: pair.Type, StackOff: off, NoHeapPointer: pair.NoHeapPointer, Rooted: true}
+	}
+	if pair.Loc != LocRegPair && pair.Loc != LocStackPair && pair.Loc != LocInputPair {
+		pair = jitAllocTrackedPair(ctx, JITTypeUnknown)
 		pair = jitPlaceIntoPair(ctx, src, pair)
 	}
 	out := ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Bool), []JITValueDesc{pair}, 1)

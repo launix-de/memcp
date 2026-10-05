@@ -22,6 +22,7 @@ package scm
 import (
 	"bytes"
 	"math"
+	"math/bits"
 	"runtime"
 	"testing"
 	"unsafe"
@@ -914,4 +915,144 @@ func TestJITClosureCaptureForwardingUnderRegisterPressure(t *testing.T) {
 		}
 	}
 	runtime.KeepAlive(closure)
+}
+
+// Truthiness can pass an already boxed capture from a rooted stack slot to
+// the native helper instead of reserving two intermediate register pairs.
+func TestJITClosureTruthinessUnderRegisterPressure(t *testing.T) {
+	for _, text := range []string{"", "retained capture"} {
+		t.Run(text, func(t *testing.T) {
+			values := []Scmer{NewString(text)}
+			closure := jitBindProcContext(jitProcContextAllocation(1), &Proc{}, &values[0], 1, false)
+			fn := CompileJITStorageGetValue(func(ctx *JITContext, _, target JITValueDesc) JITValueDesc {
+				ctx.TrackPointer(unsafe.Pointer(closure))
+				ctx.ClosureFuncOff = ctx.AllocStack(8)
+				ctx.EmitMovRegImm64(ctx.ScratchReg, uint64(uintptr(unsafe.Pointer(closure))))
+				ctx.EmitStoreRegMem(ctx.ScratchReg, ctx.StackReg, ctx.ClosureFuncOff)
+				ctx.setStackPointer(jitStackRootFrameSP, ctx.ClosureFuncOff-ctx.DynamicSP, true)
+				var held [16]Reg
+				count := 0
+				for bits.OnesCount64(ctx.FreeRegs&^ctx.ProtectedRegs) > 1 {
+					held[count] = ctx.AllocReg()
+					ctx.EmitMovRegImm64(held[count], 0)
+					ctx.ProtectReg(held[count])
+					count++
+				}
+				source := JITValueDesc{Loc: LocClosurePair, Type: JITTypeUnknown, StackOff: 0, Rooted: true}
+				out := ctx.EmitBoolDesc(&source, JITValueDesc{Loc: LocAny})
+				for i := 0; i < count; i++ {
+					ctx.UnprotectReg(held[i])
+					ctx.FreeReg(held[i])
+				}
+				return jitPlaceIntoPair(ctx, &out, target)
+			})
+			if fn == nil {
+				t.Fatal("closure truthiness exhausted registers instead of forwarding its boxed value")
+			}
+			if got := fn(0).Bool(); got != (text != "") {
+				t.Fatalf("capture truthiness changed: %v", got)
+			}
+		})
+	}
+}
+
+func TestJITNestedExpressionSpillsProtectedOuterValues(t *testing.T) {
+	for _, inlineCallback := range []bool{false, true} {
+		for _, tc := range []struct {
+			name, source string
+			want         int64
+			fp           bool
+		}{
+			{"arithmetic", "(lambda (value) (+ value (* value 3)))", 44, false},
+			{"callback", "(lambda (value) (+ value (reduce (list 1 2 3) (lambda (acc item) (+ acc item)) 0)))", 17, false},
+			{"floating-point local", "(lambda (value) (+ value (* value 3)))", 10, true},
+		} {
+			mode := "operand/"
+			if inlineCallback {
+				mode = "callback/"
+			}
+			t.Run(mode+tc.name, func(t *testing.T) {
+				proc := calibrationProcedure(tc.source)
+				registerCount := 0
+				fn := CompileJITStorageGetValue(func(ctx *JITContext, _, target JITValueDesc) JITValueDesc {
+					off := ctx.AllocStack(16)
+					sumOff := ctx.AllocStack(8)
+					localCount := jitRequiredLocalSlots(proc.Body, proc.NumVars)
+					locals := make([]JITValueDesc, localCount)
+					localsOff := ctx.AllocStack(int32(localCount * 16))
+					for i := range locals {
+						at := localsOff + int32(i*16)
+						ctx.PrepareScmerStackTarget(at)
+						locals[i] = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: at, Rooted: true}
+					}
+					var held [16]JITValueDesc
+					count := 0
+					for ctx.FreeRegs&^ctx.ProtectedRegs != 0 {
+						reg := ctx.AllocReg()
+						held[count] = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: reg, NoHeapPointer: true}
+						ctx.EmitMovRegImm64(reg, uint64(11+count))
+						ctx.BindReg(reg, &held[count])
+						ctx.ProtectReg(reg)
+						count++
+					}
+					registerCount = count
+					input := held[0]
+					if tc.fp {
+						// Storage getters normally use only GPR homes. Give this
+						// kernel the ordinary procedure emitter's FP bank as well.
+						ctx.FPRegisterBank = jitX86FPRegisterBank
+						for i := uint8(0); i < ctx.FPRegisterBank.Count; i++ {
+							ctx.AllFPRegs |= 1 << uint(ctx.FPRegisterBank.Registers[i])
+						}
+						ctx.FreeFPRegs = ctx.AllFPRegs
+						input = JITValueDesc{Loc: LocFPReg, Type: tagFloat, Reg: ctx.AllocFPReg(), NoHeapPointer: true}
+						ctx.EmitMovRegImm64(ctx.ScratchReg, math.Float64bits(2.5))
+						ctx.EmitMovGPRToFP(input.Reg, ctx.ScratchReg)
+						ctx.BindReg(input.Reg, &input)
+						ctx.ProtectReg(input.Reg)
+					}
+					locals[0] = input
+					ctx.Env = &JITEnv{Numbered: locals, Vars: map[Symbol]JITValueDesc{"value": input}}
+					var value JITValueDesc
+					if inlineCallback {
+						value = JITEmitProcInlineWithEnv(ctx, proc, ctx.Env, ctx.SliceBase, JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: off, Rooted: true})
+					} else {
+						value = jitCompileRootedCallValueAt(ctx, proc.Body, ctx.SliceBase, off)
+					}
+					// The outer machine code still reads its original physical registers.
+					// Include their sum so incorrect restoration cannot pass unnoticed.
+					for i := 1; i < count; i++ {
+						ctx.EmitAddInt64(held[0].Reg, held[i].Reg)
+					}
+					for i := 0; i < count; i++ {
+						ctx.UnprotectReg(held[i].Reg)
+					}
+					ctx.EmitStoreRegMem(held[0].Reg, ctx.StackReg, sumOff)
+					for i := 0; i < count; i++ {
+						ctx.FreeDesc(&held[i])
+					}
+					if tc.fp {
+						ctx.UnprotectReg(input.Reg)
+						ctx.FreeDesc(&input)
+					}
+					ctx.Env = nil
+					boxed := jitCopyScmerToPair(ctx, value)
+					out := ctx.EmitGoCallScalar(GoFuncAddr(ToInt), []JITValueDesc{boxed}, 1)
+					ctx.FreeDesc(&boxed)
+					out.Type, out.NoHeapPointer = tagInt, true
+					ctx.EmitMovRegMem(ctx.ScratchReg, ctx.StackReg, sumOff)
+					ctx.EmitAddInt64(out.Reg, ctx.ScratchReg)
+					return jitPlaceIntoPair(ctx, &out, target)
+				})
+				if fn == nil {
+					t.Fatal("nested expression abandoned native compilation with protected outer values")
+				}
+				count := registerCount
+				want := int64(count*11+count*(count-1)/2) + tc.want
+				if got := fn(0).Int(); got != want {
+					t.Fatalf("nested result or restored outer registers corrupted: got %d, want %d", got, want)
+				}
+			})
+		}
+	}
 }

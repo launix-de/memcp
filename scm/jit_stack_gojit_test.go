@@ -261,7 +261,7 @@ func TestJITUnboxedScalarStabilizationDoesNotCreateGCStackRoot(t *testing.T) {
 		value := JITValueDesc{Loc: LocReg, Type: tagInt, Reg: RegRAX}
 		ctx.BindReg(RegRAX, &value)
 
-		stable := ctx.StabilizeJITEnv(&JITEnv{Vars: map[Symbol]JITValueDesc{"value": value}})
+		stable := ctx.StabilizeJITEnv(&JITEnv{Vars: map[Symbol]JITValueDesc{"value": value}}, false)
 		if _, exists := ctx.StackRoots[jitStackRoot{base: jitStackRootFrameBP, offset: -8}]; exists {
 			t.Fatal("unboxed parser-environment scalar is marked as a GC pointer")
 		}
@@ -938,5 +938,119 @@ func TestJITCompileCancellationReleasesProcedure(t *testing.T) {
 	result := Apply(compiled, NewInt(10)).Slice()
 	if len(result) != 6 || result[5].Int() != 16 {
 		t.Fatalf("retry result %v", result)
+	}
+}
+
+// Scoped locals must not replace the self capture passed into a nested
+// callback. Direct recursion and callback recursion share the same closure.
+func TestJITRecursiveCaptureAcrossLexicalScopes(t *testing.T) {
+	source := `(lambda (enabled)
+		(begin
+			(define visit (lambda (n)
+				(if (equal? n 0) (if enabled 7 11)
+					(match n value
+						(begin
+							(define key (concat "local-" value))
+							(car (map (list (- value 1)) (lambda (child) (visit child)))))))))
+			(visit 3)))`
+	procedure := jitCompile(Eval(Optimize(Read(t.Name(), source), &Globalenv, nil), &Globalenv))
+	if procedure.Proc() == nil || procedure.Proc().JITCode == 0 {
+		t.Fatal("recursive closure did not compile natively")
+	}
+	for _, enabled := range []bool{true, false, true} {
+		want := int64(11)
+		if enabled {
+			want = 7
+		}
+		if got := Apply(procedure, NewBool(enabled)).Int(); got != want {
+			t.Fatalf("recursive capture returned %d, want %d", got, want)
+		}
+	}
+}
+
+// Deep recursive source rewriting combines captures, match scopes and a wide
+// tuple result. Native callback results must agree with interpreter execution.
+func TestJITRecursiveCaptureDeepSourceMapping(t *testing.T) {
+	source := `(lambda (query policy) (begin
+	(define visit (lambda (node stack)
+		(match node
+			((symbol query-block) query_schema sources fields condition group having order limit offset hidden stages facts)
+			(list (quote query-block)
+				query_schema
+				(map sources (lambda (source)
+					(match source
+						'(alias source_schema relation outer join_condition)
+						(begin
+							(define expanded_relation
+								(if (string? relation)
+									(begin
+										(if policy (policy source_schema relation false) true)
+										(if false
+											relation
+											(begin
+												(define view (list "tag" "source" 7))
+												(if (nil? view)
+													relation
+													(begin
+														(define key (concat source_schema "." relation))
+														(if (contains? stack key)
+															(error (concat "circular view reference: " key))
+															true)
+														(define stored_ir (nth view 2))
+														(if (nil? stored_ir)
+															(error (concat "view " key " has no parsed IR"))
+															(visit stored_ir (cons key stack))))))))
+									(visit relation stack)))
+							(list alias source_schema expanded_relation outer (visit join_condition stack)))
+						_ (error "invalid query source while expanding views"))))
+				(visit fields stack)
+				(visit condition stack)
+				(visit group stack)
+				(visit having stack)
+				(visit order stack)
+				limit offset
+				(visit hidden stack)
+				(visit stages stack)
+				(visit facts stack))
+			((symbol union-block) mode branches order limit offset facts)
+			(list (quote union-block) mode
+				(map branches (lambda (branch) (visit branch stack)))
+				(visit order stack) limit offset (visit facts stack))
+			(cons head tail)
+			(cons (visit head stack)
+				(map tail (lambda (item) (visit item stack))))
+			_ node)))
+	(if true
+		(visit query '())
+		query)))`
+	procedure := Eval(Optimize(Read(t.Name(), source), &Globalenv, nil), &Globalenv)
+	empty := NewSlice(nil)
+	input := NewSlice([]Scmer{NewSymbol("query-block"), NewString("s"), NewSlice([]Scmer{NewSlice([]Scmer{NewString("a"), NewString("s"), NewString("ref"), NewBool(false), NewBool(true)})}), empty, NewBool(true), empty, NewBool(true), empty, NewNil(), NewNil(), empty, empty, empty})
+	want := Apply(procedure, input, NewBool(false))
+
+	procedure = jitCompile(procedure)
+	if procedure.Proc().JITCode == 0 {
+		t.Fatal("source mapper did not compile natively")
+	}
+	got := Apply(procedure, input, NewBool(false))
+	if !Equal(got, want) {
+		t.Fatalf("native %s, interpreter %s", SerializeToString(got, &Globalenv), SerializeToString(want, &Globalenv))
+	}
+}
+
+// The inner begin shares its invocation's numbered locals, not the enclosing
+// procedure's hidden self capture. A local text value must not shadow that call.
+func TestJITRecursiveSelfBindingAcrossSharedNumberedScopes(t *testing.T) {
+	body := NewSlice([]Scmer{
+		NewSymbol("lambda"), NewSlice([]Scmer{NewSymbol("child")}),
+		NewSlice([]Scmer{NewSymbol("begin"),
+			NewSlice([]Scmer{NewSymbol("setN"), NewNthLocalVar(1), NewString("local text")}),
+			NewSlice([]Scmer{NewSymbol("visit"), NewNthLocalVar(0)}),
+		}), NewInt(2),
+	})
+	env := &Env{Outer: &Globalenv, VarsNumbered: []Scmer{NewNil(), NewFunc(func(args ...Scmer) Scmer { return NewInt(args[0].Int() + 1) })}}
+	callback := Eval(jitBindLambdaSelfValues(body, "visit", 1), env)
+	if got := Apply(callback, NewInt(7)).Int(); got != 8 {
+		t.Fatalf("self capture returned %d, want 8", got)
 	}
 }
