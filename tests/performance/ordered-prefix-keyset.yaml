@@ -51,6 +51,33 @@ test_cases:
   timing_samples: 10
   timing_aggregation: total
   threshold_ms: 15000
+- name: 'Perf: skewed hot equality prefix'
+  timeout: 30
+  setup: &frequency_fixture
+  - sql: DROP TABLE IF EXISTS frequency_event
+  - sql: CREATE TABLE frequency_event (id int PRIMARY KEY, owner_id int, stamp int) ENGINE=memory
+  - scm: |
+      (begin
+        (insert (table "memcp-tests" "frequency_event") '("id" "owner_id" "stamp")
+          (map (produceN 800000) (lambda (i)
+            (list (+ i 1) (if (< (mod i 20) 19) 1 (+ 2 (mod (floor (/ i 20)) 99))) i))))
+        (rebuild))
+  sql: SELECT id FROM frequency_event WHERE COALESCE((SELECT TRUE FROM prefix_grant WHERE prefix_grant.owner_id=frequency_event.owner_id AND actor_id=1 LIMIT 1),FALSE) ORDER BY stamp DESC, id ASC LIMIT 72
+  expect: {rows: 72}
+  warmup: 0
+  timing_samples: 10
+  timing_aggregation: total
+  threshold_ms: 15000
+- name: 'Perf: skewed rare equality prefix'
+  timeout: 30
+  setup: *frequency_fixture
+  sql: SELECT id FROM frequency_event WHERE COALESCE((SELECT TRUE FROM prefix_grant WHERE prefix_grant.owner_id=frequency_event.owner_id AND actor_id=2 LIMIT 1),FALSE) ORDER BY stamp DESC, id ASC LIMIT 72
+  expect: {rows: 72}
+  warmup: 0
+  timing_samples: 10
+  timing_aggregation: total
+  threshold_ms: 15000
 cleanup:
 - sql: DROP TABLE IF EXISTS prefix_event
 - sql: DROP TABLE IF EXISTS prefix_grant
+- sql: DROP TABLE IF EXISTS frequency_event

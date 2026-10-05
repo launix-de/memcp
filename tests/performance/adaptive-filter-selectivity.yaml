@@ -22,6 +22,8 @@ fixture_setup: &afs_fixture
   - sql: "SELECT COUNT(*) FROM afs_fact WHERE id < 100"
 
 cleanup:
+  - sql: "DROP TABLE IF EXISTS frequency_fact"
+  - sql: "DROP TABLE IF EXISTS frequency_dimension"
   - sql: "DROP TABLE IF EXISTS afs_fact"
   - sql: "DROP TABLE IF EXISTS afs_dimension"
 
@@ -45,10 +47,10 @@ test_cases:
     warmup: 3
     timing_samples: 9
     threshold_ms: 5000
-    sql: "SELECT COUNT(*) AS n FROM afs_fact WHERE MOD(id, 10) = 0"
+    sql: "SELECT COUNT(*) = FLOOR({rows}/10) AS correct FROM afs_fact WHERE MOD(id, 10) = 0"
     expect:
       rows: 1
-      data: [{n: 2000}]
+      data: [{correct: 1}]
 
   - name: "Broad text candidate membership with adaptive feedback"
     setup: *afs_fixture
@@ -65,3 +67,27 @@ test_cases:
     expect:
       rows: 1
       data: [{complete: 1}]
+
+  - name: "Skewed equality chooses the selective join driver"
+    setup:
+      - sql: "DROP TABLE IF EXISTS frequency_fact"
+      - sql: "DROP TABLE IF EXISTS frequency_dimension"
+      - sql: "CREATE TABLE frequency_dimension (id INT PRIMARY KEY, owner_id INT) ENGINE=memory"
+      - sql: "CREATE TABLE frequency_fact (id INT PRIMARY KEY, dimension_id INT, batch_id INT, amount INT) ENGINE=memory"
+      - scm: |
+          (begin
+            (insert (table "memcp-tests" "frequency_dimension") '("id" "owner_id")
+              (map (produceN 100000) (lambda (i)
+                (list i (if (< (mod i 20) 19) 1 (+ 2 (mod (floor (/ i 20)) 99)))))))
+            (insert (table "memcp-tests" "frequency_fact") '("id" "dimension_id" "batch_id" "amount")
+              (map (produceN 800000) (lambda (i) (list i (mod i 100000) (mod i 100) 1))))
+            (rebuild))
+    performance_rows: 800000
+    warmup: 0
+    timing_samples: 10
+    timing_aggregation: total
+    threshold_ms: 15000
+    sql: "SELECT SUM(f.amount) AS total FROM frequency_dimension d JOIN frequency_fact f ON f.dimension_id=d.id WHERE d.owner_id=1 AND f.batch_id=1"
+    expect:
+      rows: 1
+      data: [{total: 8000}]

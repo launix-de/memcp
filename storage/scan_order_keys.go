@@ -130,6 +130,9 @@ func declareScanOrderKeys(en *scm.Env, ordinary *scm.Declaration) {
 			window = rows
 		}
 		fraction := math.Min(1, float64(keys.count())/math.Max(1, distinct))
+		if statistics, ndv := target.keyFrequency(targetKeys[0]); statistics != nil {
+			fraction = statistics.keySetFraction(keys, ndv)
+		}
 		// Compare seek/heap work with ordered rejection work. These are candidate
 		// operations, not an unconditional key-count threshold: LIMIT, selectivity,
 		// relation cardinality, and the number of streams all affect the decision.
