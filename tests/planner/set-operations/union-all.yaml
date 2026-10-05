@@ -53,6 +53,22 @@ setup:
 
 test_cases:
 
+  - name: "Materialized grouped UNION orders ties and NULLs before slicing"
+    sql: |
+      SELECT result AS value, COUNT(*) AS amount FROM renderjob GROUP BY result
+      UNION ALL
+      SELECT NULL AS value, 2 AS amount
+      ORDER BY amount DESC, value ASC
+      LIMIT 2 OFFSET 1
+    expect:
+      rows: 2
+      data:
+        - value: 3
+          amount: 2
+        - value: 1
+          amount: 1
+
+
   # === Basic UNION ALL ===
 
   - name: "UNION ALL two tables"

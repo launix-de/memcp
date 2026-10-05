@@ -135,6 +135,65 @@ setup:
   - sql: "INSERT INTO trace_ref_dense SELECT id + 32, asset_id, enabled FROM trace_ref_dense"
 
 test_cases:
+  - name: Composite presence preserves outer duplicates and rejects NULL keys
+    setup:
+    - sql: DROP TABLE IF EXISTS composite_presence_left
+    - sql: DROP TABLE IF EXISTS composite_presence_right
+    - sql: DROP TABLE IF EXISTS composite_presence_fact
+    - sql: CREATE TABLE composite_presence_left (id INT)
+    - sql: CREATE TABLE composite_presence_right (id INT)
+    - sql: CREATE TABLE composite_presence_fact (left_id INT, right_id INT)
+    - sql: INSERT INTO composite_presence_left VALUES (1),(1),(2),(NULL)
+    - sql: INSERT INTO composite_presence_right VALUES (10),(20),(NULL)
+    - sql: INSERT INTO composite_presence_fact VALUES (1,10),(1,10),(2,20),(NULL,10),(1,NULL)
+    sql: SELECT a.id AS left_id, b.id AS right_id FROM composite_presence_left a CROSS
+      JOIN composite_presence_right b WHERE EXISTS (SELECT 1 FROM composite_presence_fact
+      f WHERE f.left_id=a.id AND f.right_id=b.id) ORDER BY left_id,right_id
+    expect:
+      rows: 3
+      data:
+      - left_id: 1
+        right_id: 10
+      - left_id: 1
+        right_id: 10
+      - left_id: 2
+        right_id: 20
+  - name: Negated composite presence retains absent and NULL domains
+    sql: SELECT COUNT(*) AS amount FROM composite_presence_left a CROSS JOIN composite_presence_right
+      b WHERE NOT EXISTS (SELECT 1 FROM composite_presence_fact f WHERE f.left_id=a.id
+      AND f.right_id=b.id)
+    expect:
+      data:
+      - amount: 9
+  - name: Composite presence below OR preserves other true branches
+    sql: SELECT COUNT(*) AS amount FROM composite_presence_left a CROSS JOIN composite_presence_right
+      b WHERE a.id IS NULL OR EXISTS (SELECT 1 FROM composite_presence_fact f WHERE
+      f.left_id=a.id AND f.right_id=b.id)
+    expect:
+      data:
+      - amount: 6
+  - name: Composite presence scalar count retains duplicate fact multiplicity
+    sql: SELECT a.id AS left_id, b.id AS right_id, (SELECT COUNT(*) FROM composite_presence_fact
+      f WHERE f.left_id=a.id AND f.right_id=b.id) AS amount FROM composite_presence_left
+      a CROSS JOIN composite_presence_right b WHERE EXISTS (SELECT 1 FROM composite_presence_fact
+      f WHERE f.left_id=a.id AND f.right_id=b.id) ORDER BY left_id,right_id
+    expect:
+      rows: 3
+      data:
+      - left_id: 1
+        right_id: 10
+        amount: 2
+      - left_id: 1
+        right_id: 10
+        amount: 2
+      - left_id: 2
+        right_id: 20
+        amount: 1
+    cleanup:
+    - sql: DROP TABLE composite_presence_left
+    - sql: DROP TABLE composite_presence_right
+    - sql: DROP TABLE composite_presence_fact
+
   - name: "ordered UNION scalar probes use the multi-scan carrier"
     sql: |
       EXPLAIN

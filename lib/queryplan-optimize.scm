@@ -4608,7 +4608,13 @@ ordered batch is executable and what its actual driver workload is. */
 		/* This predicate proves only that the abstract membership marker has a
 		physical consumer. It must not inspect cardinality or choose a carrier;
 		those facts are meaningful only at the consuming scan-tree edge. */
-		(and (source_is_base_table? input)
+		/* An exposed inner stage is a relational join candidate. Preserve its
+		complete key tuple so join search can drive from existing combinations. */
+		(define joined_inner (reduce (qb_sources block) (lambda (found src)
+			(or found (and (not (source_outer? src))
+				(and (stage_output_relation? (source_relation src))
+					(equal? (stage_output_relation_id (source_relation src)) (gs_id stage)))))) false))
+		(and (not joined_inner) (source_is_base_table? input)
 			(or (and (single_source? base_sources)
 				(empty_list? (group_stage_session_domain_keys stage)))
 				(and (not (empty_list? base_sources))
@@ -5271,7 +5277,7 @@ the logical lookup still carries an alias which no longer exists. */
 				(begin
 					(define requested_col
 						(exists_recset_probe_column (source_alias src) condition))
-					(if (and (not (nil? requested_col))
+					(if (and (source_outer? src) (not (nil? requested_col))
 						(recset_domain_stage_output_source? stages src requested_col))
 						(begin
 							(define stage (stage_by_id stages
@@ -7052,12 +7058,22 @@ The whitelist is deliberately conservative (COALESCE/IS NULL are not strict). */
 					(or found (join_null_propagating? src item))) false)))
 		_ false)))
 
+/* Presence may reject with FALSE. Keep this distinct from strict NULL
+propagation because NOT reverses FALSE. */
+(define join_null_rejecting? (lambda (src expr)
+	(match expr
+		((symbol >) ((symbol coalesceNil) value 0) 0)
+		(join_null_propagating? src value)
+		((symbol membership_truth) _probe alias _count_col)
+		(equal? alias (source_alias src))
+		_ (join_null_propagating? src expr))))
+
 (define expose_null_rejected_join_edges (lambda (block)
 	(begin
 		(define rejected (map (filter (qb_sources block) (lambda (src)
 			(and (source_outer? src)
 				(reduce (split_and_terms (coalesceNil (qb_where block) true))
-					(lambda (found term) (or found (join_null_propagating? src term))) false)))) source_alias))
+					(lambda (found term) (or found (join_null_rejecting? src term))) false)))) source_alias))
 		(if (empty_list? rejected) block (begin
 			/* Only expose a new join edge here. Local filters already have costed
 			semijoin carriers; changing their join kind can lose aggregate reuse.
@@ -7070,8 +7086,13 @@ The whitelist is deliberately conservative (COALESCE/IS NULL are not strict). */
 					_ false))))
 			(define promoted (map (filter (qb_sources block) (lambda (src)
 				(and (contains? rejected (source_alias src))
-					(reduce join_terms (lambda (found term)
-						(or found (join_null_propagating? src term))) false)))) source_alias))
+					(or (reduce join_terms (lambda (found term)
+						(or found (join_null_propagating? src term))) false)
+						(and (stage_output_relation? (source_relation src))
+							/* A composite presence edge connecting multiple outer relations
+							can replace their Cartesian enumeration with existing tuples. */
+							(> (count (join_hypergraph_expr_aliases_using nil alias_index
+								(coalesceNil (source_join_expr src) true))) 2)))))) source_alias))
 			/* WHERE discards every synthetic NULL row of these sources. Their
 			joins are therefore inner joins before join search; keeping an outer
 			barrier would force a base-table cross product with scalar helpers.
@@ -7087,9 +7108,9 @@ The whitelist is deliberately conservative (COALESCE/IS NULL are not strict). */
 					(qb_order block) (qb_limit block) (qb_offset block) (qb_hidden block)
 					(qb_stages block) (qb_facts block))
 				(list (list (quote null_rejected_aliases) rejected))))))))
-
 /* Closed scalar whitelist: volatile/UDF evaluation is not a reusable
 contribution. More expression families require an explicit purity contract. */
+
 (define contribution_pure_expr? (lambda (expr)
 	(if (query_session_read? expr)
 		(string? (cadr (query_session_read_expr expr)))

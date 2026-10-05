@@ -11148,12 +11148,12 @@ physical decision and preserve its runtime recompile gate. */
 			unordered
 			(list (quote set) (quote resultrow) emit)
 			(list (quote map)
-				(list (quote union_materialized_order_window)
+				(build_materialized_order_window
 					(list (quote map) (list (quote produceN) (list rows "count"))
 						(list (quote lambda) (list (quote __join_materialized_index))
 							(list rows (quote __join_materialized_index))))
-					(list (quote quote) order_positions)
-					(cons (quote list) (order_relations_default order_items))
+					order_positions
+					(order_relations_default order_items)
 					(coalesceNil offset_value 0) (coalesceNil limit_value -1))
 				(list (quote lambda) (list row)
 					(list emit (list (quote materialized_visible_row) row visible_width))))))
@@ -12160,37 +12160,52 @@ stars through the same catalog-aware path used by physical lowering. */
 			map_expr
 			membership_bindings))))
 
-(define union_materialized_row_less (lambda (left right positions relations)
-	(match positions
-		(cons position rest_positions)
-		(match relations
-			(cons relation rest_relations)
-			(begin
-				(define left_value (nth left (+ (* position 2) 1)))
-				(define right_value (nth right (+ (* position 2) 1)))
-				(if (relation left_value right_value) true
-					(if (relation right_value left_value) false
-						(union_materialized_row_less left right rest_positions rest_relations))))
-			_ false)
-		_ false)
-))
+/* ORDER positions are plan constants. Emit their lexicographic comparison
+once rather than walking position/relation lists on every comparison. */
+(define union_materialized_compare_body (lambda (positions relations)
+	(match (list positions relations)
+		'((cons position rest_positions) (cons relation rest_relations))
+		(begin
+			(define slot (+ (* position 2) 1))
+			(list (quote begin)
+				(list (quote define) (quote __union_left_value)
+					(list (quote nth) (quote __union_left) slot))
+				(list (quote define) (quote __union_right_value)
+					(list (quote nth) (quote __union_right) slot))
+				(list (quote if)
+					(list relation (quote __union_left_value) (quote __union_right_value)) true
+					(list (quote if)
+						(list relation (quote __union_right_value) (quote __union_left_value)) false
+						(union_materialized_compare_body rest_positions rest_relations)))))
+		_ false)))
 
-(define union_materialized_order_window (lambda (rows positions relations offset limit)
+(define union_materialized_order_window (lambda (rows compare offset limit)
 	(begin
-		(define ordered (sort rows (lambda (left right)
-			(union_materialized_row_less left right positions relations))))
+		(define ordered (sort rows compare))
 		(define start (coalesceNil offset 0))
 		(define requested (coalesceNil limit -1))
 		(define end (if (< requested 0) (count ordered)
 			(min (count ordered) (+ start requested))))
-		(slice ordered (min start (count ordered)) end))
-))
+		(slice ordered (min start (count ordered)) end))))
+
+(define build_materialized_order_window (lambda (rows positions relation_values offset limit)
+	(begin
+		(define relations (map (produceN (count positions)) (lambda (i)
+			(symbol (concat "__union_relation_" i)))))
+		(list (cons
+			(list (quote lambda) relations
+				(list (quote lambda) (list (quote __union_rows))
+					(list (quote union_materialized_order_window) (quote __union_rows)
+						(list (quote lambda) (list (quote __union_left) (quote __union_right))
+							(union_materialized_compare_body positions relations)) offset limit)))
+			relation_values) rows))))
 
 (define lower_union_all_ordered_materialized (lambda (block titles width order_positions)
 	(begin
 		(define id (concat "__union_materialized_" (fnv_hash (serialize block))))
 		(define rows (symbol (concat id "_rows")))
 		(define emit (symbol (concat id "_emit")))
+		(define collect_lock (symbol (concat id "_collect_lock")))
 		(define row (symbol (concat id "_row")))
 		(define unordered (make_union_block (quote all)
 			(map (union_branches block) (lambda (branch)
@@ -12198,22 +12213,26 @@ stars through the same catalog-aware path used by physical lowering. */
 			'() nil nil (union_facts block)))
 		(list (quote begin)
 			(list (quote define) rows (list (quote newsession)))
+			(list (quote define) collect_lock (list (quote mutex)))
 			(list rows "count" 0)
 			(list (quote define) emit (quote resultrow))
 			(list (quote set) (quote resultrow)
 				(list (quote lambda) (list row)
-					(list (quote begin)
-						(list rows (list rows "count") row)
-						(list rows "count" (list (quote +) (list rows "count") 1)))))
+					/* Parallel branch scans may emit simultaneously. Reserving the
+					row slot and advancing the count must be one critical section. */
+					(list collect_lock (quote tx)
+						(list (quote lambda) '()
+							(list (quote begin)
+								(list rows (list rows "count") row)
+								(list rows "count" (list (quote +) (list rows "count") 1)))))))
 			(lower_union_all_successive unordered)
 			(list (quote set) (quote resultrow) emit)
 			(list (quote map)
-				(list (quote union_materialized_order_window)
+				(build_materialized_order_window
 					(list (quote map) (list (quote produceN) (list rows "count"))
 						(list (quote lambda) (list (quote __union_materialized_index))
 							(list rows (quote __union_materialized_index))))
-					(list (quote quote) order_positions)
-					(cons (quote list) (union_order_relations (union_order block)))
+					order_positions (union_order_relations (union_order block))
 					(coalesceNil (union_offset block) 0)
 					(coalesceNil (union_limit block) -1))
 				emit)))
