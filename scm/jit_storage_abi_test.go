@@ -77,6 +77,85 @@ func TestJITInlineAdmissionDependsOnCallShape(t *testing.T) {
 	}
 }
 
+// Compare filter truth against the interpreter, including UNKNOWN beneath NOT.
+func TestJITFilterBooleanTruthTables(t *testing.T) {
+	atoms := []Scmer{NewNil(), NewBool(false), NewBool(true), NewInt(0), NewInt(1)}
+	for _, body := range []string{"(and a b)", "(or a b)", "(not (and a b))", "(not (or a b))", "(and (or a b) (not a))", "(or (and a b) (not b))", "(if a (or a b) (and a b))"} {
+		t.Run(body, func(t *testing.T) {
+			proc := calibrationProcedure("(lambda (a b) " + body + ")")
+			kernel := CompileJITFilterBuffer(proc, []uint8{JITTypeUnknown, JITTypeUnknown})
+			if kernel == nil {
+				t.Fatal("filter kernel did not compile")
+			}
+			var values []Scmer
+			var ids, want []uint32
+			for _, a := range atoms {
+				for _, b := range atoms {
+					id := uint32(len(ids))
+					ids = append(ids, id)
+					values = append(values, a, b)
+					env := &Env{Outer: &Globalenv, Vars: Vars{Symbol("a"): a, Symbol("b"): b}, VarsNumbered: []Scmer{a, b}}
+					if Eval(proc.Body, env).Bool() {
+						want = append(want, id)
+					}
+				}
+			}
+			n := kernel(ids, values)
+			if n != len(want) {
+				t.Fatalf("selected %v; interpreter selected %v", ids[:n], want)
+			}
+			for i, id := range want {
+				if ids[i] != id {
+					t.Fatalf("selected %v; interpreter selected %v", ids[:n], want)
+				}
+			}
+		})
+	}
+}
+
+func TestJITFilterUnknownPreservesEvaluation(t *testing.T) {
+	for _, op := range []string{"and", "or"} {
+		for _, conditional := range []bool{false, true} {
+			body := "(" + op + " a (if b true (error \"unknown-continued\")))"
+			if conditional {
+				body = "(if " + body + " true false)"
+			}
+			proc := calibrationProcedure("(lambda (a b) " + body + ")")
+			kernel := CompileJITFilterBuffer(proc, []uint8{JITTypeUnknown, tagBool})
+			if kernel == nil {
+				t.Fatal("filter did not compile")
+			}
+			func() {
+				defer func() {
+					switch err := recover().(type) {
+					case nil:
+						t.Errorf("%s conditional=%v skipped evaluation after UNKNOWN", op, conditional)
+					case Scmer:
+						if !Equal(err, NewString("unknown-continued")) {
+							t.Fatalf("unexpected panic: %v", err)
+						}
+					case string:
+						if err != "unknown-continued" {
+							t.Fatalf("unexpected panic: %v", err)
+						}
+					default:
+						t.Fatalf("unexpected panic: %v", err)
+					}
+				}()
+				kernel([]uint32{0}, []Scmer{NewNil(), NewBool(false)})
+			}()
+			decisive := NewBool(op == "or")
+			want := 0
+			if op == "or" {
+				want = 1
+			}
+			if got := kernel([]uint32{0}, []Scmer{decisive, NewBool(false)}); got != want {
+				t.Fatalf("%s did not short-circuit decisive value", op)
+			}
+		}
+	}
+}
+
 func TestJITBufferLoopsPreserveClosureCaptures(t *testing.T) {
 	values := []Scmer{NewInt(6), NewInt(9)}
 	for _, source := range []string{
@@ -767,6 +846,32 @@ func TestJITDeferredComparisonSurvivesClobberAndSpill(t *testing.T) {
 			if got := fn(n).Bool(); got != (n < 511) {
 				t.Fatalf("spill=%v n=%d: got %v", spill, n, got)
 			}
+		}
+	}
+}
+
+// Time an actual filter loop with eight typed comparisons. The batch survives
+// every invocation because all rows qualify, so no reset/copy enters timing.
+func BenchmarkJITBooleanFilterBatch(b *testing.B) {
+	proc := calibrationProcedure("(lambda (v w) (and (> v -1) (< v 60001) (> w -1) (< w 60002) (>= v 0) (<= v 60000) (>= w 1) (<= w 60001)))")
+	kernel := CompileJITFilterBuffer(proc, []uint8{tagInt, tagInt})
+	if kernel == nil {
+		b.Fatal("filter kernel did not compile")
+	}
+	ids := make([]uint32, 512)
+	values := make([]Scmer, len(ids)*2)
+	for i := range ids {
+		ids[i] = uint32(i)
+		values[i*2], values[i*2+1] = NewInt(int64(i)), NewInt(int64(i+1))
+	}
+	if kernel(ids, values) != len(ids) {
+		b.Fatal("filter discarded qualifying rows")
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if kernel(ids, values) != len(ids) {
+			b.Fatal("filter changed its result")
 		}
 	}
 }
