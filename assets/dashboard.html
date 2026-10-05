@@ -14,7 +14,7 @@ body{font-family:Lato,sans-serif;background:#1a1a2e;color:#e0e0e0;min-height:100
 header{background:#76b512;padding:12px 24px;display:flex;align-items:center;gap:16px;flex-wrap:wrap}
 header img{height:40px;width:auto;flex-shrink:0;cursor:pointer}
 header h1{font-size:1.3rem;color:#fff;font-weight:600;flex-shrink:0;cursor:pointer}
-header .links{margin-left:auto;display:flex;gap:16px}
+header .links{margin-left:auto;display:flex;gap:16px;flex-wrap:wrap}
 header a{color:#fff;text-decoration:none;font-size:.9rem;opacity:.9}
 header a:hover{opacity:1;text-decoration:underline}
 .gauge-row{display:flex;flex-wrap:wrap;justify-content:center;gap:24px;padding:20px 24px}
@@ -82,6 +82,9 @@ header a:hover{opacity:1;text-decoration:underline}
 .detail-section{margin-bottom:24px}
 .detail-section h3{font-size:.9rem;color:#aaa;margin-bottom:10px;font-weight:400;text-transform:uppercase;letter-spacing:.5px}
 .settings-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:16px}
+#view-settings .browse-wrap{width:100%;min-width:0}
+#tbl-services{table-layout:fixed;overflow-wrap:anywhere}
+@media(max-width:500px){#view-settings .settings-grid{grid-template-columns:minmax(0,1fr)}.ram-panel{padding:20px 16px}}
 .setting-card{background:#16213e;border:1px solid #2a2a4a;border-radius:6px;padding:16px 20px;display:flex;align-items:center;justify-content:space-between;gap:12px}
 .setting-card .info{flex:1;min-width:0}
 .setting-card .info .name{color:#fff;font-size:.85rem;font-weight:600}
@@ -98,6 +101,33 @@ header a:hover{opacity:1;text-decoration:underline}
 .settings-status{text-align:center;padding:8px;font-size:.8rem;color:#76b512;min-height:24px}
 .settings-group-header{grid-column:1/-1;font-size:.8rem;color:#888;text-transform:uppercase;letter-spacing:.5px;padding:12px 0 4px;border-bottom:1px solid #2a2a4a;margin-top:8px}
 .settings-group-header:first-child{margin-top:0}
+.ram-panel{background:#16213e;border:1px solid #2a2a4a;border-radius:8px;padding:24px;margin:20px 0}
+.ram-panel h3{color:#fff;font-size:1rem;margin-bottom:8px}
+.ram-panel p{color:#aaa;font-size:.8rem;line-height:1.6}
+.ram-summary{display:flex;gap:24px;flex-wrap:wrap;margin:20px 0;font-size:.85rem}
+.ram-summary strong{display:block;color:#fff;font-size:1.2rem;margin-top:4px}
+#ram-rss{color:#52b9ef}
+.ram-scale{position:relative;height:136px;margin:20px 12px 0;touch-action:pan-y}
+.ram-track{position:absolute;top:64px;height:24px;width:100%;background:#252b45;border-radius:5px;overflow:hidden}
+.ram-window{position:absolute;height:100%;background:rgba(118,181,18,.25)}
+.ram-process{position:absolute;height:100%;background:#52b9ef;min-width:2px;max-width:100%;transition:width .3s}
+.ram-process-label{position:absolute;top:0;color:#52b9ef;font-size:.85rem}
+.ram-marker{position:absolute;font-size:.75rem;white-space:nowrap;pointer-events:none}
+.ram-marker-min{top:34px;color:#9dd643}
+.ram-marker-max{top:104px;color:#f3b854}
+.ram-handle{position:absolute;top:52px;width:20px;height:24px;transform:translateX(-50%);border:2px solid #16213e;border-radius:5px;background:#9dd643;cursor:ew-resize;touch-action:none;z-index:2}
+.ram-handle::after{content:"";display:block;width:2px;height:14px;background:#16213e;margin:auto}
+.ram-handle:focus-visible{outline:3px solid #fff;outline-offset:3px;z-index:3}
+.ram-handle:disabled{opacity:.5;cursor:default}
+#ram-max{top:76px;background:#f3b854}
+.ram-axis{display:flex;justify-content:space-between;font-size:.75rem;color:#aaa;margin:8px 0 24px}
+.ram-actions{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:20px}
+.ram-actions button{padding:8px 14px;border:1px solid #46516b;border-radius:4px;background:#252b45;color:#fff;cursor:pointer}
+.ram-actions button:first-child{background:#76b512;border-color:#76b512}
+.ram-actions button:disabled{opacity:.5;cursor:default}
+.ram-advanced{grid-column:1/-1}
+.ram-advanced summary{cursor:pointer;color:#aaa;font-size:.85rem;padding:8px 0}
+.ram-advanced .settings-grid{margin-top:12px}
 .hook-list{display:grid;gap:14px}
 .hook-card{background:#16213e;border:1px solid #2a2a4a;border-radius:6px;padding:16px 20px}
 .hook-fields{display:grid;grid-template-columns:minmax(150px,1fr) minmax(180px,1fr) 130px auto;gap:12px;align-items:end;margin-bottom:12px}
@@ -551,6 +581,25 @@ body{display:flex;flex-direction:column}
 </div>
 <p class="desc">Memory sizes accept MB (decimal) and MiB (binary), for example 10MB or 1GiB. Press Enter or leave a field to apply it. Settings are written to disk when MemCP shuts down cleanly.</p>
 <div class="settings-status" id="settings-status" role="status"></div>
+<section class="ram-panel" aria-labelledby="ram-heading">
+<h3 id="ram-heading">Memory budget</h3>
+<p>Drag the green minimum and orange maximum handles on this scale. Blue shows current process RAM. Minimum must stay below maximum.</p>
+<div class="ram-summary">
+<div>Available RAM limit <strong id="ram-total">Loading…</strong></div>
+<div>Managed cache <strong id="ram-cache">Loading…</strong></div>
+</div>
+<div class="ram-scale" id="ram-scale" role="group" aria-label="Memory budget and current process RAM">
+<div class="ram-process-label">● Process RAM (RSS): <strong id="ram-rss">Loading…</strong></div>
+<div class="ram-track"><div class="ram-window" id="ram-window"></div><div class="ram-process" id="ram-process"></div></div>
+<span class="ram-marker ram-marker-min" id="ram-marker-min">Min: <output id="ram-min-value">—</output></span>
+<span class="ram-marker ram-marker-max" id="ram-marker-max">Max: <output id="ram-max-value">—</output></span>
+<button class="ram-handle" id="ram-min" role="slider" aria-label="Minimum retained cache" aria-orientation="horizontal" aria-valuemin="0" aria-valuemax="1000" aria-valuenow="0" aria-describedby="ram-explanation" disabled></button>
+<button class="ram-handle" id="ram-max" role="slider" aria-label="Maximum cache budget" aria-orientation="horizontal" aria-valuemin="1" aria-valuemax="1000" aria-valuenow="500" aria-describedby="ram-explanation" disabled></button>
+</div>
+<div class="ram-axis"><span>0 B</span><span id="ram-axis-end">Available RAM</span></div>
+<p id="ram-explanation">Minimum keeps managed cache in RAM, even under memory pressure. Maximum starts cache eviction. Process RAM also includes runtime and query memory and can exceed this budget. These values do not reserve RAM.</p>
+<div class="ram-actions"><button id="ram-apply" disabled>Apply</button><button id="ram-auto" disabled>Use defaults (min 0, max 50%)</button><span id="ram-status" role="status" style="font-size:.8rem;color:#aaa">Loading memory data…</span></div>
+</section>
 <div class="settings-grid" id="settings-grid"></div>
 <div class="detail-section" style="margin-top:28px">
 <h3>Storage Failure Hooks</h3>
@@ -947,6 +996,7 @@ disconnectDashboardSocket();
 }
 
 function syncDashboardPolling(){
+syncMemoryPolling();
 var pageVisible=!document.hidden;
 var errorsActive=pageVisible&&isViewActive("view-databases")&&_dbsTab==="errors";
 var logsActive=pageVisible&&isViewActive("view-databases")&&_dbsTab==="logs";
@@ -1416,11 +1466,11 @@ var settingsGroups=[
 {key:"PHPOutputBuffer",label:"Output buffer per request",desc:"0 disables buffering.",type:"bytes",min:0}
 ]},
 {group:"Memory",items:[
-{key:"MaxRamPercent",label:"Total memory (% of RAM)",desc:"Total memory budget (% of system RAM, 0=50%)",type:"number"},
+{key:"MaxRamPercent",label:"Automatic cache budget (% of RAM)",desc:"Percentage of the available RAM limit, used unless a custom maximum is applied above. 0 uses 50%.",type:"number"},
 {key:"MinRamBytes",label:"Minimum retained memory",desc:"Eviction floor for tracked cache memory, including system RAM pressure and idle expiry (0 disables)",type:"bytes",min:0},
 {key:"MaxRamBytes",label:"Total memory limit",desc:"Override total budget (0 uses the percentage)",type:"bytes",min:0},
-{key:"MaxPersistPercent",label:"Persisted data cache (% of RAM)",desc:"Persisted shard budget (% of RAM, 0=30%)",type:"number"},
-{key:"MaxPersistBytes",label:"Persisted data cache limit",desc:"Override persisted data budget (0 uses the percentage)",type:"bytes",min:0}
+{key:"MaxPersistPercent",label:"Data and index cache (% of RAM)",desc:"Budget for disk-reloadable data and indexes, within the overall cache budget. Percentage of available RAM, not of the maximum above. 0 uses 30%.",type:"number"},
+{key:"MaxPersistBytes",label:"Data and index cache budget",desc:"Custom RAM budget for cached data and indexes. Eviction keeps disk data intact. 0 uses the percentage.",type:"bytes",min:0}
 ]},
 {group:"Storage",items:[
 {key:"ShardSize",label:"Target rows per shard",desc:"Max rows per shard before splitting",type:"number"},
@@ -1954,14 +2004,157 @@ var units=[[1099511627776,"TiB"],[1073741824,"GiB"],[1048576,"MiB"],[1024,"KiB"]
 for(var i=0;i<units.length;i++)if(value>=units[i][0]&&value%units[i][0]===0)return (value/units[i][0])+" "+units[i][1];
 return value+" B";
 }
+
+/* The scale uses totalmem (including container limits); RSS is a separate
+   measurement from the cache ledger controlled by Min/MaxRamBytes. */
+var memorySettings=null,memoryTotal=0,memoryStats=null,memoryDraft=null;
+var memoryTimer=null,memoryLoading=false,memorySaving=false;
+function memorySize(value){
+if(value===0)return "0 B";
+var units=["B","KiB","MiB","GiB","TiB"],unit=0;
+while(value>=1024&&unit<units.length-1){value/=1024;unit++;}
+return value.toLocaleString(undefined,{maximumFractionDigits:2})+" "+units[unit];
+}
+function syncMemoryPolling(){
+var active=isAdmin&&!document.hidden&&isViewActive("view-settings");
+if(active&&!memoryTimer)memoryTimer=setInterval(loadMemoryStats,2000);
+if(!active&&memoryTimer){clearInterval(memoryTimer);memoryTimer=null;}
+}
+function loadMemoryStats(reset){
+if(!memorySettings||memoryLoading||memorySaving||!isViewActive("view-settings"))return;
+memoryLoading=true;
+fetch(base+"/scm",{method:"POST",credentials:"same-origin",body:'(json_encode_assoc (list "total" (totalmem) "stats" (stat)))'})
+.then(function(r){if(!r.ok)throw new Error("HTTP "+r.status);return r.json();})
+.then(function(data){
+if(typeof data==="string")data=JSON.parse(data);
+memoryTotal=Number(data.total);
+if(!Number.isSafeInteger(memoryTotal)||memoryTotal<=0)throw new Error("Available RAM could not be detected");
+memoryStats=data.stats;
+if(!memoryDraft||reset===true){
+var max=memorySettings.MaxRamBytes>0?Math.min(memoryTotal,memorySettings.MaxRamBytes):Math.floor(memoryTotal*(memorySettings.MaxRamPercent||50)/100);
+memoryDraft={min:Number(memorySettings.MinRamBytes)||0,max:max,dirty:false,automatic:!(memorySettings.MaxRamBytes>0)};
+document.getElementById("ram-status").textContent="Live · "+(memoryDraft.automatic?"automatic maximum":"custom maximum");
+if(memoryDraft.min>=memoryDraft.max||memoryDraft.max>memoryTotal)document.getElementById("ram-status").textContent="Existing bounds are outside this scale. Adjust the handles before applying.";
+}
+renderMemoryScale();
+}).catch(function(e){document.getElementById("ram-status").textContent="Memory data unavailable: "+e.message;})
+.finally(function(){memoryLoading=false;});
+}
+function renderMemoryScale(){
+if(!memoryDraft||!memoryStats)return;
+var rss=Number(memoryStats.process_memory)||0;
+document.getElementById("ram-rss").textContent=memorySize(rss);
+document.getElementById("ram-total").textContent=memorySize(memoryTotal);
+document.getElementById("ram-cache").textContent=memorySize(Number(memoryStats.shard_memory)||0);
+document.getElementById("ram-axis-end").textContent=memorySize(memoryTotal);
+document.getElementById("ram-process").style.width=Math.min(100,rss/memoryTotal*100)+"%";
+var min=Math.min(100,memoryDraft.min/memoryTotal*100),max=Math.min(100,memoryDraft.max/memoryTotal*100);
+document.getElementById("ram-window").style.left=min+"%";
+document.getElementById("ram-window").style.width=Math.max(0,max-min)+"%";
+document.getElementById("ram-min-value").textContent=memorySize(memoryDraft.min)+(memoryDraft.min===0?" · disabled":"");
+document.getElementById("ram-max-value").textContent=memorySize(memoryDraft.max)+(memoryDraft.automatic?" · automatic":"");
+var scaleWidth=document.getElementById("ram-scale").clientWidth;
+["min","max"].forEach(function(which){
+var marker=document.getElementById("ram-marker-"+which);
+marker.style.left=Math.max(0,Math.min(scaleWidth*memoryDraft[which]/memoryTotal,scaleWidth-marker.offsetWidth))+"px";
+});
+["min","max"].forEach(function(which){
+var el=document.getElementById("ram-"+which);
+el.disabled=memorySaving;
+el.style.left=Math.min(100,memoryDraft[which]/memoryTotal*100)+"%";
+el.setAttribute("aria-valuemin",which==="min"?0:Math.min(memoryTotal,memoryDraft.min+memoryStep()));
+el.setAttribute("aria-valuemax",which==="max"?memoryTotal:Math.max(0,memoryDraft.max-memoryStep()));
+el.setAttribute("aria-valuenow",memoryDraft[which]);
+el.setAttribute("aria-valuetext",memorySize(memoryDraft[which]));
+});
+document.getElementById("ram-auto").disabled=memorySaving;
+document.getElementById("ram-apply").disabled=memorySaving||!memoryDraft.dirty||memoryDraft.min>=memoryDraft.max||memoryDraft.max>memoryTotal;
+}
+window.addEventListener("resize",renderMemoryScale);
+function memoryStep(){return Math.max(1,Math.round(memoryTotal/1000));}
+function moveMemoryHandle(which,value){
+if(!memoryTotal||!memoryDraft||memorySaving)return;
+var gap=memoryStep();
+var lower=which==="min"?0:Math.min(memoryTotal,memoryDraft.min+gap);
+var upper=which==="max"?memoryTotal:Math.max(0,Math.min(memoryTotal-gap,memoryDraft.max-gap));
+memoryDraft[which]=Math.round(Math.max(lower,Math.min(upper,value)));
+memoryDraft.automatic=false;
+memoryDraft.dirty=true;
+document.getElementById("ram-status").textContent="Preview · click Apply to save";
+renderMemoryScale();
+}
+["min","max"].forEach(function(which){
+var handle=document.getElementById("ram-"+which);
+var dragging=null,offset=0;
+function drag(e){
+var rect=document.getElementById("ram-scale").getBoundingClientRect();
+moveMemoryHandle(which,(e.clientX-offset-rect.left)/rect.width*memoryTotal);
+}
+handle.addEventListener("pointerdown",function(e){
+if(e.button!==0||memorySaving||!memoryDraft)return;
+e.preventDefault();handle.focus();dragging=e.pointerId;
+var rect=handle.getBoundingClientRect();offset=e.clientX-(rect.left+rect.width/2);
+handle.setPointerCapture(e.pointerId);
+});
+handle.addEventListener("pointermove",function(e){if(dragging===e.pointerId)drag(e);});
+handle.addEventListener("pointerup",function(e){if(dragging===e.pointerId){drag(e);dragging=null;handle.releasePointerCapture(e.pointerId);}});
+handle.addEventListener("lostpointercapture",function(){dragging=null;});
+handle.addEventListener("keydown",function(e){
+if(!memoryDraft)return;
+var value=memoryDraft[which],step=memoryStep()*(e.shiftKey?10:1);
+if(e.key==="ArrowLeft"||e.key==="ArrowDown")value-=step;
+else if(e.key==="ArrowRight"||e.key==="ArrowUp")value+=step;
+else if(e.key==="PageDown")value-=memoryStep()*100;
+else if(e.key==="PageUp")value+=memoryStep()*100;
+else if(e.key==="Home")value=0;
+else if(e.key==="End")value=memoryTotal;
+else return;
+e.preventDefault();moveMemoryHandle(which,value);
+});
+});
+document.getElementById("ram-auto").addEventListener("click",function(){
+memoryDraft={min:0,max:Math.floor(memoryTotal/2),dirty:true,automatic:true};
+document.getElementById("ram-status").textContent="Default preview · click Apply to save";
+renderMemoryScale();
+});
+document.getElementById("ram-apply").addEventListener("click",function(){
+if(!memoryDraft||memorySaving||memoryDraft.min>=memoryDraft.max||memoryDraft.max>memoryTotal)return;
+memorySaving=true;
+renderMemoryScale();
+var min=memoryDraft.min,max=memoryDraft.automatic?0:memoryDraft.max;
+var percent=memoryDraft.automatic?50:memorySettings.MaxRamPercent;
+document.getElementById("ram-status").textContent="Applying…";
+/* Keep the intermediate minimum inside both budgets, in either direction. */
+var interim=Math.min(Number(memorySettings.MinRamBytes)||0,min,memoryDraft.max);
+var code='(begin (settings "MinRamBytes" '+interim+') (settings "MaxRamPercent" '+percent+') (settings "MaxRamBytes" '+max+') (settings "MinRamBytes" '+min+'))';
+fetch(base+"/scm",{method:"POST",credentials:"same-origin",body:code})
+.then(function(r){if(!r.ok)return r.text().then(function(t){throw new Error(t)});return r.text();})
+.then(function(){
+memorySettings.MinRamBytes=min;
+memorySettings.MaxRamBytes=max;
+memorySettings.MaxRamPercent=percent;
+memoryDraft.dirty=false;
+var percentInput=document.querySelector('[data-key="MaxRamPercent"]');
+if(percentInput)percentInput.value=percent;
+document.getElementById("ram-status").textContent="Applied · saved to disk on clean shutdown";
+}).catch(function(e){
+document.getElementById("ram-status").textContent="Could not apply: "+e.message;
+fetchSettings(function(data){memorySettings=data;memoryDraft=null;});
+}).finally(function(){memorySaving=false;renderMemoryScale();loadMemoryStats();});
+});
 function renderSettings(data){
+memoryDraft=null;
+memorySettings=data;
+loadMemoryStats();
 var grid=document.getElementById("settings-grid");
 var h="";
 for(var g=0;g<settingsGroups.length;g++){
 var grp=settingsGroups[g];
+if(grp.group==="Memory")h+="<details class='ram-advanced'><summary>Advanced memory settings — percentages and data cache</summary><div class='settings-grid'>";
 h+="<div class='settings-group-header'>"+esc(grp.group)+"</div>";
 for(var i=0;i<grp.items.length;i++){
 var s=grp.items[i];
+if(s.key==="MinRamBytes"||s.key==="MaxRamBytes")continue;
 var val=data[s.key];
 h+="<div class='setting-card'><div class='info'><div class='name'>"+esc(s.label||s.key.replace(/([a-z])([A-Z])/g,"$1 $2"))+"</div><div class='desc'>"+esc(s.desc)+"</div></div>";
 if(s.type==="bool"){
@@ -1981,6 +2174,7 @@ h+="<input type='number' step='1' min='"+(s.min||0)+"' data-key='"+esc(s.key)+"'
 }
 h+="</div>";
 }
+if(grp.group==="Memory")h+="</div></details>";
 }
 grid.innerHTML=h;
 /* helper to save a setting */
@@ -2004,6 +2198,8 @@ else value=el.value;
 var statusEl=document.getElementById("settings-status");
 statusEl.textContent="Saving "+key+"...";
 saveSetting(key,value,function(){
+memorySettings[key]=value;
+if(key.indexOf("MaxRam")===0||key.indexOf("MaxPersist")===0)loadMemoryStats(true);
 statusEl.textContent=key+" saved"+(key.indexOf("PHP")===0?" — restart MemCP to apply":"");
 if(el.dataset.type==="bytes")el.value=formatSettingBytes(value);
 setTimeout(function(){statusEl.textContent=""},2000);
