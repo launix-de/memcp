@@ -2206,6 +2206,18 @@ the emitter and failing after the ordinary carrier has been discarded. */
 					(if (nil? row_key_index)
 						(neumann_fail "build_queryplan" "scalar RecSet carrier has no row-domain key")
 						true)
+					/* A shared group cache retains several invocation domains. Its
+					preparation updates this domain, but does not remove other users'
+					groups. Restrict the session domain before extracting true rows. */
+					(define key_names (group_key_cols (gs_keys physical_stage)))
+					(define domain_pairs (group_stage_session_key_pairs physical_stage
+						(gs_keys physical_stage) key_names))
+					(define filtercols (cons requested_col (map domain_pairs cadr)))
+					(define value_condition (if (presence_probe_stage? physical_stage)
+						(list (quote >) (list (quote coalesceNil) (symbol requested_col) 0) 0)
+						(list (quote equal??) (symbol requested_col) true)))
+					(define domain_conditions (map domain_pairs (lambda (pair)
+						(group_session_key_equal_expr (symbol (cadr pair)) (car pair)))))
 					(list
 						(if share_result
 							(lower_recset_stage_prepare_once_expr stage_catalog physical_stage)
@@ -2214,12 +2226,9 @@ the emitter and failing after the ordinary carrier has been discarded. */
 						(compile_scan_plan (quote scan_recset)
 							(physical_query_tx_symbol)
 							(list (quote table) cache_schema cache_relation)
-							(quoted_runtime_list (list requested_col))
-							(list (quote lambda) (list (symbol requested_col))
-								(if (presence_probe_stage? physical_stage)
-									(list (quote >)
-										(list (quote coalesceNil) (symbol requested_col) 0) 0)
-									(list (quote equal??) (symbol requested_col) true))))
+							(quoted_runtime_list filtercols)
+							(list (quote lambda) (map filtercols symbol)
+								(combine_where_terms (cons value_condition domain_conditions) true)))
 						(list (nth (group_key_cols (gs_keys physical_stage)) row_key_index)))))))))
 
 (define lower_recset_scalar_first_probe_expr (lambda (all_stages stage requested_col resolved_lookup_key)

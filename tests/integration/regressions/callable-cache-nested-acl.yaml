@@ -123,7 +123,117 @@ test_cases:
   - <<: *deep_acl
     name: "Warm cached ACL query rebinds the unrestricted actor"
 
+  - name: "Prepare ordered ACL session alternation"
+    setup:
+      - sql: "DROP TABLE IF EXISTS ccp_access"
+      - sql: "DROP TABLE IF EXISTS ccp_document"
+      - sql: "DROP TABLE IF EXISTS ccp_site"
+      - sql: "DROP TABLE IF EXISTS ccp_tenant"
+      - sql: "DROP TABLE IF EXISTS ccp_file"
+      - sql: "CREATE TABLE ccp_access (id INT PRIMARY KEY, actor_id INT, tenant_id INT, site_id INT)"
+      - sql: "CREATE TABLE ccp_document (id INT PRIMARY KEY, site_id INT, file_id INT)"
+      - sql: "CREATE TABLE ccp_site (id INT, tenant_id INT)"
+      - sql: "CREATE TABLE ccp_tenant (id INT PRIMARY KEY)"
+      - sql: "CREATE TABLE ccp_file (id INT PRIMARY KEY, uploaded_at INT)"
+      - sql: "INSERT INTO ccp_tenant VALUES (1), (2)"
+      - sql: "INSERT INTO ccp_site VALUES (1, 1), (2, 2)"
+      - sql: "INSERT INTO ccp_access VALUES (1, 7, 1, NULL), (2, 9, NULL, NULL)"
+      - scm: |
+          (begin
+            (insert (table "memcp-tests" "ccp_site") '("id" "tenant_id")
+              (map (produceN 126) (lambda (i) (list (+ i 3) (+ (mod i 2) 1)))))
+            (insert (table "memcp-tests" "ccp_document") '("id" "site_id" "file_id")
+              (map (produceN 32000) (lambda (i) (list (+ i 1) (+ (mod i 128) 1) (+ i 1)))))
+            (insert (table "memcp-tests" "ccp_file") '("id" "uploaded_at")
+              (map (produceN 32000) (lambda (i) (list (+ i 1) (+ i 1)))))
+            (rebuild))
+    session_id: "ccp-limited"
+    sql: "SET @ccp_actor = 7"
+    expect: {rows_affected: 0}
+
+  - name: "Bind ordered ACL administrator"
+    session_id: "ccp-open"
+    sql: "SET @ccp_actor = 9"
+    expect: {rows_affected: 0}
+
+  - &ccp_page
+    name: "Cold ordered ACL limited page"
+    session_id: "ccp-limited"
+    sql: |
+      SELECT d.id FROM ccp_document d
+      WHERE (EXISTS (SELECT TRUE FROM ccp_access g WHERE g.actor_id = @ccp_actor AND g.tenant_id IS NULL LIMIT 1) OR NOT (EXISTS (SELECT TRUE FROM ccp_access g WHERE g.actor_id = @ccp_actor AND g.tenant_id IS NULL LIMIT 1)))
+      AND COALESCE((SELECT
+        (EXISTS (SELECT TRUE FROM ccp_access g WHERE g.actor_id = @ccp_actor AND g.tenant_id IS NULL LIMIT 1) OR NOT (EXISTS (SELECT TRUE FROM ccp_access g WHERE g.actor_id = @ccp_actor AND g.tenant_id IS NULL LIMIT 1)))
+        AND CASE WHEN EXISTS (SELECT TRUE FROM ccp_access g WHERE g.actor_id = @ccp_actor AND g.tenant_id IS NULL LIMIT 1) THEN TRUE ELSE EXISTS (
+          SELECT TRUE FROM ccp_access a
+          WHERE a.actor_id = @ccp_actor AND COALESCE(a.site_id, p.id) = p.id LIMIT 1
+        ) END
+        AND COALESCE((SELECT CASE WHEN EXISTS (SELECT TRUE FROM ccp_access g WHERE g.actor_id = @ccp_actor AND g.tenant_id IS NULL LIMIT 1) THEN TRUE ELSE EXISTS (
+          SELECT TRUE FROM ccp_access a
+          WHERE a.actor_id = @ccp_actor AND a.tenant_id = t.id LIMIT 1
+        ) END FROM ccp_tenant t WHERE t.id = p.tenant_id LIMIT 1), FALSE)
+        FROM ccp_site p WHERE p.id = d.site_id LIMIT 1), FALSE)
+      ORDER BY (SELECT f.uploaded_at FROM ccp_file f WHERE f.id = d.file_id LIMIT 1) DESC, d.id ASC
+      LIMIT 3
+    expect:
+      rows: 3
+      data: [{id: 31999}, {id: 31997}, {id: 31995}]
+
+  - <<: *ccp_page
+    name: "Warm ordered ACL limited page"
+
+  - <<: *ccp_page
+    name: "Ordered ACL administrator page"
+    session_id: "ccp-open"
+    expect:
+      rows: 3
+      data: [{id: 32000}, {id: 31999}, {id: 31998}]
+
+  - <<: *ccp_page
+    name: "Ordered ACL limited page after administrator"
+
+  - <<: *ccp_page
+    name: "Repeat limited page after administrator"
+
+  - name: "Switch the limited session to administrator"
+    session_id: "ccp-limited"
+    sql: "SET @ccp_actor = 9"
+    expect: {rows_affected: 0}
+
+  - <<: *ccp_page
+    name: "Ordered ACL page after same-session administrator switch"
+    expect:
+      rows: 3
+      data: [{id: 32000}, {id: 31999}, {id: 31998}]
+
+  - name: "Restore the same session to limited actor"
+    session_id: "ccp-limited"
+    sql: "SET @ccp_actor = 7"
+    expect: {rows_affected: 0}
+
+  - <<: *ccp_page
+    name: "Ordered ACL page restores same-session isolation"
+
+  - name: "Bind a NULL actor after populating shared domains"
+    session_id: "ccp-limited"
+    sql: "SET @ccp_actor = NULL"
+    expect: {rows_affected: 0}
+
+  - <<: *ccp_page
+    name: "NULL actor cannot inherit another cached domain"
+    expect: {rows: 0}
+
+  - name: "Reject an unresolved correlated permission column"
+    session_id: "ccp-limited"
+    sql: "SELECT d.id FROM ccp_document d WHERE EXISTS (SELECT a.missing_permission FROM ccp_access a WHERE a.actor_id = d.id)"
+    expect: {error: true}
+
 cleanup:
+  - sql: "DROP TABLE IF EXISTS ccp_access"
+  - sql: "DROP TABLE IF EXISTS ccp_document"
+  - sql: "DROP TABLE IF EXISTS ccp_site"
+  - sql: "DROP TABLE IF EXISTS ccp_tenant"
+  - sql: "DROP TABLE IF EXISTS ccp_file"
   - sql: "DROP TABLE IF EXISTS cca_access"
   - sql: "DROP TABLE IF EXISTS cca_item"
   - sql: "DROP TABLE IF EXISTS cca_domain"
