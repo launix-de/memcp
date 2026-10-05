@@ -2893,13 +2893,15 @@ func jitBindLambdaCaptures(expr Scmer, symbols map[Symbol]NthLocalVar, outerVars
 // closure, because the shared template's lexical environment has no per-
 // instance BoundArgs.
 func jitBindLambdaSelfValues(expr Scmer, self Symbol, param NthLocalVar) Scmer {
-	return jitBindLambdaSelfValuesAtDepth(expr, self, param, 0)
+	return jitBindLambdaSelfValuesAtDepth(expr, self, param, 0, 0)
 }
 
-func jitBindLambdaSelfValuesAtDepth(expr Scmer, self Symbol, param NthLocalVar, depth int) Scmer {
+// Lexical scopes affect outer references even when they share one invocation.
+// Only lambda boundaries decide whether a call can use native self recursion.
+func jitBindLambdaSelfValuesAtDepth(expr Scmer, self Symbol, param NthLocalVar, depth, lambdaDepth int) Scmer {
 	if expr.IsSourceInfo() {
 		source := *expr.SourceInfo()
-		source.value = jitBindLambdaSelfValuesAtDepth(source.value, self, param, depth)
+		source.value = jitBindLambdaSelfValuesAtDepth(source.value, self, param, depth, lambdaDepth)
 		return NewSourceInfo(source)
 	}
 	if expr.IsSymbol() {
@@ -2926,18 +2928,48 @@ func jitBindLambdaSelfValuesAtDepth(expr Scmer, self Symbol, param NthLocalVar, 
 			return expr
 		}
 		bound := append([]Scmer(nil), items...)
-		bound[2] = jitBindLambdaSelfValuesAtDepth(items[2], self, param, depth+1)
+		bound[2] = jitBindLambdaSelfValuesAtDepth(items[2], self, param, depth+1, lambdaDepth+1)
+		return NewSlice(bound)
+	}
+	if hasHead && (head == "begin" || head == "begin_mut") {
+		bound := append([]Scmer(nil), items...)
+		start := 1
+		if head == "begin_mut" {
+			start = 2
+		}
+		for index := start; index < len(items); index++ {
+			bound[index] = jitBindLambdaSelfValuesAtDepth(items[index], self, param, depth+1, lambdaDepth)
+		}
+		return NewSlice(bound)
+	}
+	if hasHead && (head == "match" || head == "match_mut") {
+		bound := append([]Scmer(nil), items...)
+		if len(items) > 1 {
+			bound[1] = jitBindLambdaSelfValuesAtDepth(items[1], self, param, depth, lambdaDepth)
+		}
+		for index := 3; index < len(items); index += 2 {
+			patternSymbols := make(map[Symbol]struct{})
+			jitAddMatchPatternBoundSymbols(items[index-1], patternSymbols)
+			if _, shadowed := patternSymbols[self]; !shadowed {
+				bound[index] = jitBindLambdaSelfValuesAtDepth(items[index], self, param, depth+1, lambdaDepth)
+			}
+		}
+		return NewSlice(bound)
+	}
+	if hasHead && (head == "define" || head == "set" || head == "setN") && len(items) == 3 {
+		bound := append([]Scmer(nil), items...)
+		bound[2] = jitBindLambdaSelfValuesAtDepth(items[2], self, param, depth, lambdaDepth)
 		return NewSlice(bound)
 	}
 	bound := make([]Scmer, len(items))
 	for index, item := range items {
 		// Only a direct call in the recursive procedure itself can use the
 		// native self-call lowering. Nested lambdas require the bound closure.
-		if index == 0 && depth == 0 && hasHead && head == self {
+		if index == 0 && lambdaDepth == 0 && hasHead && head == self {
 			bound[index] = item
 			continue
 		}
-		bound[index] = jitBindLambdaSelfValuesAtDepth(item, self, param, depth)
+		bound[index] = jitBindLambdaSelfValuesAtDepth(item, self, param, depth, lambdaDepth)
 	}
 	return NewSlice(bound)
 }

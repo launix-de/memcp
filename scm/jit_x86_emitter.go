@@ -1993,8 +1993,13 @@ func (ctx *JITContext) EmitBoolDesc(src *JITValueDesc, result JITValueDesc) JITV
 	// Unknown or complex known types (string/symbol/slice/vector/fastdict/default):
 	// materialize a Scmer pair and reuse the canonical runtime helper.
 	pair := *src
-	if pair.Loc != LocRegPair {
-		pair = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+	if pair.Loc == LocClosurePair {
+		off := ctx.AllocStack(16)
+		ctx.EmitStoreScmerToStack(pair, off)
+		pair = JITValueDesc{Loc: LocStackPair, Type: pair.Type, StackOff: off, NoHeapPointer: pair.NoHeapPointer, Rooted: true}
+	}
+	if pair.Loc != LocRegPair && pair.Loc != LocStackPair && pair.Loc != LocInputPair {
+		pair = jitAllocTrackedPair(ctx, JITTypeUnknown)
 		pair = jitPlaceIntoPair(ctx, src, pair)
 	}
 	out := ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Bool), []JITValueDesc{pair}, 1)
@@ -2827,11 +2832,27 @@ func (ctx *JITContext) EmitStoreScmerToStack(desc JITValueDesc, disp int32) {
 			ctx.FreeReg(base)
 		}
 	case LocClosurePair:
-		value := desc
-		ctx.EnsureDesc(&value)
-		ctx.EmitStoreRegMem(value.Reg, RegRSP, disp)
-		ctx.EmitStoreRegMem(value.Reg2, RegRSP, disp+8)
-		ctx.FreeDesc(&value)
+		// Forward a capture directly to its rooted argument slot. Reloading
+		// the closure base uses only the fixed scratch register, so nested
+		// native call setup does not require an extra allocator-register pair.
+		captureOffset := int32(unsafe.Offsetof(ProcJIT{}.Context)) + desc.StackOff*16
+		ctx.EmitMovRegMem(RegR11, ctx.StackReg, ctx.ClosureFuncOff)
+		if ctx.FreeRegs&^ctx.ProtectedRegs != 0 {
+			// A single already-free temporary keeps the ordinary five-move
+			// copy. This is an emission choice, never a runtime branch/spill.
+			temporary := ctx.AllocReg()
+			ctx.EmitMovRegMem(temporary, RegR11, captureOffset)
+			ctx.EmitStoreRegMem(temporary, RegRSP, disp)
+			ctx.EmitMovRegMem(temporary, RegR11, captureOffset+8)
+			ctx.EmitStoreRegMem(temporary, RegRSP, disp+8)
+			ctx.FreeReg(temporary)
+		} else {
+			ctx.EmitMovRegMem(RegR11, RegR11, captureOffset)
+			ctx.EmitStoreRegMem(RegR11, RegRSP, disp)
+			ctx.EmitMovRegMem(RegR11, ctx.StackReg, ctx.ClosureFuncOff)
+			ctx.EmitMovRegMem(RegR11, RegR11, captureOffset+8)
+			ctx.EmitStoreRegMem(RegR11, RegRSP, disp+8)
+		}
 	case LocStack:
 		if desc.Type == JITTypeUnknown {
 			panic("jit: an untyped scalar stack value cannot be boxed as Scmer")

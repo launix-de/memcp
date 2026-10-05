@@ -1762,7 +1762,7 @@ func (emitter *jitParserEmitter) emitRuleReturn(ruleID int, success bool) {
 			for lexicalRule := ruleID; lexicalRule >= 0; lexicalRule = emitter.program.rules[lexicalRule].lexicalParent {
 				lexicalRules = append(lexicalRules, lexicalRule)
 			}
-			bindingEnv := emitter.ctx.StabilizeJITEnv(rule.jitOuter)
+			bindingEnv := emitter.ctx.StabilizeJITEnv(rule.jitOuter, false)
 			allArgs := make([][]JITValueDesc, len(lexicalRules))
 			for depth := len(lexicalRules) - 1; depth >= 0; depth-- {
 				lexicalRuleID := lexicalRules[depth]

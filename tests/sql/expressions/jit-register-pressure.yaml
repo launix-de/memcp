@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 metadata:
   version: "1.0"
+  performance_rows: 1
   description: "SQL frontend stays native under nested JIT register pressure"
 setup:
   - sql: "DROP TABLE IF EXISTS jit_register_pressure"
@@ -48,11 +49,18 @@ test_cases:
         "memcp-tests" "jit_register_pressure" true)
     expect:
       error: true
-  - name: "Wide userconfig projection retains callback across three LEFT JOINs"
-    sql: "SELECT w.c0, w.c1, w.c2, w.c3, w.c4, w.c5, w.c6, w.c7, w.c8, w.c9, w.c10, w.c11, w.c12, w.c13, w.c14, w.c15, w.c16, w.c17, w.c18, w.c19, w.c20, w.c21, w.c22, w.c23, w.c24, w.c25, w.c26, w.c27, w.c28, w.c29, w.c30, w.c31, w.c32, w.c33, w.c34, w.c35, w.c36, w.c37, w.c38, w.c39, w.c40, w.c41, w.c42, w.c43, w.c44, w.c45, w.c46, w.c47, w.c48, w.c49, w.c50, w.c51, w.c52, w.c53, w.c54, w.c55, w.c56, w.c57, w.c58, w.c59, w.c60, w.c61, w.c62, w.c63, w.c64, w.c65, w.c66, w.c67, w.c68, w.c69, w.c70, w.c71, w.c72, w.c73, w.c74, w.c75, w.c76, w.c77, w.c78, w.c79, w.c80, w.c81, w.c82, w.c83, w.c84, w.c85, w.c86, w.c87, w.c88, w.c89, w.c90, w.c91, w.c92, w.c93, w.c94, w.c95, w.c96, w.c97, w.c98, w.c99, w.c100, w.c101, w.c102, w.c103, w.c104, w.c105, w.c106, w.c107, w.c108, w.c109, w.c110, w.c111, w.c112, w.c113, w.c114, w.c115, w.c116, w.c117, w.c118, w.c119, w.c120, w.c121, w.c122, w.c123, w.c124, w.c125, w.c126, w.c127, r0.id AS id0, r0.name AS name0, r0.canview AS canview0, r1.id AS id1, r1.name AS name1, r1.canview AS canview1, r2.id AS id2, r2.name AS name2, r2.canview AS canview2 FROM jit_wide_userconfig w  LEFT JOIN (SELECT id, name, TRUE AS canview FROM jit_userconfig_lookup) r0 ON r0.id=w.c0 LEFT JOIN (SELECT id, name, TRUE AS canview FROM jit_userconfig_lookup) r1 ON r1.id=w.c1 LEFT JOIN (SELECT id, name, TRUE AS canview FROM jit_userconfig_lookup) r2 ON r2.id=w.c2 WHERE w.id=0"
-    expect:
+  - name: "Perf: wide projection across three LEFT JOINs"
+    sql: &wide_pressure_query "SELECT w.c0, w.c1, w.c2, w.c3, w.c4, w.c5, w.c6, w.c7, w.c8, w.c9, w.c10, w.c11, w.c12, w.c13, w.c14, w.c15, w.c16, w.c17, w.c18, w.c19, w.c20, w.c21, w.c22, w.c23, w.c24, w.c25, w.c26, w.c27, w.c28, w.c29, w.c30, w.c31, w.c32, w.c33, w.c34, w.c35, w.c36, w.c37, w.c38, w.c39, w.c40, w.c41, w.c42, w.c43, w.c44, w.c45, w.c46, w.c47, w.c48, w.c49, w.c50, w.c51, w.c52, w.c53, w.c54, w.c55, w.c56, w.c57, w.c58, w.c59, w.c60, w.c61, w.c62, w.c63, w.c64, w.c65, w.c66, w.c67, w.c68, w.c69, w.c70, w.c71, w.c72, w.c73, w.c74, w.c75, w.c76, w.c77, w.c78, w.c79, w.c80, w.c81, w.c82, w.c83, w.c84, w.c85, w.c86, w.c87, w.c88, w.c89, w.c90, w.c91, w.c92, w.c93, w.c94, w.c95, w.c96, w.c97, w.c98, w.c99, w.c100, w.c101, w.c102, w.c103, w.c104, w.c105, w.c106, w.c107, w.c108, w.c109, w.c110, w.c111, w.c112, w.c113, w.c114, w.c115, w.c116, w.c117, w.c118, w.c119, w.c120, w.c121, w.c122, w.c123, w.c124, w.c125, w.c126, w.c127, r0.id AS id0, r0.name AS name0, r0.canview AS canview0, r1.id AS id1, r1.name AS name1, r1.canview AS canview1, r2.id AS id2, r2.name AS name2, r2.canview AS canview2 FROM jit_wide_userconfig w  LEFT JOIN (SELECT id, name, TRUE AS canview FROM jit_userconfig_lookup) r0 ON r0.id=w.c0 LEFT JOIN (SELECT id, name, TRUE AS canview FROM jit_userconfig_lookup) r1 ON r1.id=w.c1 LEFT JOIN (SELECT id, name, TRUE AS canview FROM jit_userconfig_lookup) r2 ON r2.id=w.c2 WHERE w.id=0"
+    expect: &wide_pressure_expected
       rows: 1
       data: [{"c0": 1, "c1": 2, "c2": 3, "c3": 4, "c4": 5, "c5": 6, "c6": 7, "c7": 8, "c8": 9, "c9": 10, "c10": 11, "c11": 12, "c12": 13, "c13": 14, "c14": 15, "c15": 16, "c16": 17, "c17": 18, "c18": 19, "c19": 20, "c20": 21, "c21": 22, "c22": 23, "c23": 24, "c24": 25, "c25": 26, "c26": 27, "c27": 28, "c28": 29, "c29": 30, "c30": 31, "c31": 32, "c32": 33, "c33": 34, "c34": 35, "c35": 36, "c36": 37, "c37": 38, "c38": 39, "c39": 40, "c40": 41, "c41": 42, "c42": 43, "c43": 44, "c44": 45, "c45": 46, "c46": 47, "c47": 48, "c48": 49, "c49": 50, "c50": 51, "c51": 52, "c52": 53, "c53": 54, "c54": 55, "c55": 56, "c56": 57, "c57": 58, "c58": 59, "c59": 60, "c60": 61, "c61": 62, "c62": 63, "c63": 64, "c64": 65, "c65": 66, "c66": 67, "c67": 68, "c68": 69, "c69": 70, "c70": 71, "c71": 72, "c72": 73, "c73": 74, "c74": 75, "c75": 76, "c76": 77, "c77": 78, "c78": 79, "c79": 80, "c80": 81, "c81": 82, "c82": 83, "c83": 84, "c84": 85, "c85": 86, "c86": 87, "c87": 88, "c88": 89, "c89": 90, "c90": 91, "c91": 92, "c92": 93, "c93": 94, "c94": 95, "c95": 96, "c96": 97, "c97": 98, "c98": 99, "c99": 100, "c100": 101, "c101": 102, "c102": 103, "c103": 104, "c104": 105, "c105": 106, "c106": 107, "c107": 108, "c108": 109, "c109": 110, "c110": 111, "c111": 112, "c112": 113, "c113": 114, "c114": 115, "c115": 116, "c116": 117, "c117": 118, "c118": 119, "c119": 120, "c120": 121, "c121": 122, "c122": 123, "c123": 124, "c124": 125, "c125": 126, "c126": 127, "c127": 128, "id0": 1, "name0": "match", "canview0": true, "id1": null, "name1": null, "canview1": null, "id2": null, "name2": null, "canview2": null}]
+    warmup: 0
+    timing_samples: 4
+    timing_aggregation: total
+    threshold_ms: 5000
+  - name: "Wide userconfig projection retains callback across three LEFT JOINs"
+    sql: *wide_pressure_query
+    expect: *wide_pressure_expected
 cleanup:
   - sql: "DROP TABLE IF EXISTS jit_wide_userconfig"
   - sql: "DROP TABLE IF EXISTS jit_userconfig_lookup"

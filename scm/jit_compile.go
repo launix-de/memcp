@@ -1463,7 +1463,7 @@ func (ctx *JITContext) EmitCopyDescWords(dst, src *JITValueDesc, words int) {
 		if src.StackOff < 0 {
 			srcBase = ctx.FrameReg
 		}
-		scratch := ctx.AllocReg()
+		scratch := ctx.ScratchReg
 		start, end, step := 0, words, 1
 		if srcBase == dstBase && dst.StackOff > src.StackOff && dst.StackOff < src.StackOff+int32(words*8) {
 			start, end, step = words-1, -1, -1
@@ -1473,7 +1473,10 @@ func (ctx *JITContext) EmitCopyDescWords(dst, src *JITValueDesc, words int) {
 			ctx.EmitMovRegMem(scratch, srcBase, src.StackOff+off)
 			ctx.EmitStoreRegMem(scratch, dstBase, dst.StackOff+off)
 		}
-		ctx.FreeReg(scratch)
+		return
+	}
+	if src.Loc == LocFPReg {
+		ctx.EmitStoreFPRegMem(src.Reg, dstBase, dst.StackOff)
 		return
 	}
 	ctx.EnsureDesc(src)
@@ -1756,12 +1759,11 @@ func (ctx *JITContext) StabilizeCallbackArgs(args []JITValueDesc) []JITValueDesc
 			continue
 		}
 		off := ctx.AllocSpill(16)
-		scratch := ctx.AllocReg()
+		scratch := ctx.ScratchReg
 		ctx.EmitMovRegMem(scratch, ctx.StackReg, arg.StackOff)
 		ctx.EmitStoreRegMem(scratch, ctx.FrameReg, off)
 		ctx.EmitMovRegMem(scratch, ctx.StackReg, arg.StackOff+8)
 		ctx.EmitStoreRegMem(scratch, ctx.FrameReg, off+8)
-		ctx.FreeReg(scratch)
 		ctx.setStackPointer(jitStackRootFrameBP, off, jitValueWordIsPointer(arg, 0))
 		stable[i] = JITValueDesc{Loc: LocStackPair, Type: arg.Type, StackOff: off, NoHeapPointer: arg.NoHeapPointer, Rooted: true}
 	}
@@ -1771,14 +1773,16 @@ func (ctx *JITContext) StabilizeCallbackArgs(args []JITValueDesc) []JITValueDesc
 // StabilizeJITEnv clones a lexical environment and gives every runtime value a
 // frame-pointer-relative home. Recursive emitters may then use the complete
 // register bank without invalidating captures described by their outer scope.
-func (ctx *JITContext) StabilizeJITEnv(env *JITEnv) *JITEnv {
+// A boundary within the same invocation preserves existing frame locations;
+// optimized NoEscape lists depend on their contiguous local-slot layout.
+func (ctx *JITContext) StabilizeJITEnv(env *JITEnv, preserveFrameSlots bool) *JITEnv {
 	if env == nil {
 		return nil
 	}
 	stable := &JITEnv{
 		Vars:      make(map[Symbol]JITValueDesc, len(env.Vars)),
 		Numbered:  make([]JITValueDesc, len(env.Numbered)),
-		Outer:     ctx.StabilizeJITEnv(env.Outer),
+		Outer:     ctx.StabilizeJITEnv(env.Outer, preserveFrameSlots),
 		StackBase: env.StackBase,
 	}
 	symbols := make([]Symbol, 0, len(env.Vars))
@@ -1787,20 +1791,23 @@ func (ctx *JITContext) StabilizeJITEnv(env *JITEnv) *JITEnv {
 	}
 	sort.Slice(symbols, func(left, right int) bool { return symbols[left] < symbols[right] })
 	for _, symbol := range symbols {
-		stable.Vars[symbol] = ctx.stabilizeJITEnvValue(env.Vars[symbol])
+		stable.Vars[symbol] = ctx.stabilizeJITEnvValue(env.Vars[symbol], preserveFrameSlots)
 	}
 	for index, value := range env.Numbered {
-		stable.Numbered[index] = ctx.stabilizeJITEnvValue(value)
+		stable.Numbered[index] = ctx.stabilizeJITEnvValue(value, preserveFrameSlots)
 	}
 	return stable
 }
 
-func (ctx *JITContext) stabilizeJITEnvValue(value JITValueDesc) JITValueDesc {
+func (ctx *JITContext) stabilizeJITEnvValue(value JITValueDesc, preserveFrameSlots bool) JITValueDesc {
 	ctx.SyncDesc(&value)
+	if preserveFrameSlots && value.Loc != LocReg && value.Loc != LocFPReg && value.Loc != LocRegPair && value.Loc != LocRegTriple {
+		return value
+	}
 	words := 0
 	stableLoc := LocNone
 	switch value.Loc {
-	case LocReg, LocStack:
+	case LocReg, LocFPReg, LocStack:
 		words, stableLoc = 1, LocStack
 	case LocRegPair, LocStackPair, LocInputPair:
 		words, stableLoc = 2, LocStackPair
@@ -2564,7 +2571,71 @@ func jitCompileRootedCallValueAt(ctx *JITContext, expr Scmer, sliceBase Reg, off
 	return jitCompileRootedCallValueAtResult(ctx, expr, sliceBase, off, JITValueDesc{Loc: LocAny})
 }
 
+// jitCanForwardCallValue recognizes leaf values whose existing representation
+// can be copied into an argument slot without allocator registers. Do not spill
+// an outer loop just to forward a literal or an already boxed capture.
+func jitCanForwardCallValue(ctx *JITContext, expr Scmer) bool {
+	for expr.IsSourceInfo() {
+		expr = expr.SourceInfo().value
+	}
+	var value JITValueDesc
+	switch expr.GetTag() {
+	case tagNthLocalVar:
+		index := int(expr.NthLocalVar())
+		if ctx.Env != nil && index < len(ctx.Env.Numbered) {
+			value = ctx.Env.Numbered[index]
+		} else {
+			return !ctx.SliceBaseTracksRSP || index < ctx.InputArgCount
+		}
+	case tagSymbol:
+		if ctx.Env == nil {
+			return false
+		}
+		var found bool
+		value, found = ctx.Env.Lookup(expr.Symbol())
+		if !found {
+			return false
+		}
+	case tagSlice:
+		return false
+	default:
+		return true
+	}
+	ctx.SyncDesc(&value)
+	switch value.Loc {
+	case LocImm, LocStackPair, LocClosurePair:
+		return true
+	case LocInputPair:
+		return !ctx.SliceBaseTracksRSP || int(value.StackOff) < ctx.InputArgCount
+	}
+	return false
+}
+
 func jitCompileRootedCallValueAtResult(ctx *JITContext, expr Scmer, sliceBase Reg, off int32, result JITValueDesc) JITValueDesc {
+	// A nested operand must not inherit an exhausted register bank from its
+	// caller. Keep lexical values addressable on the stack, then temporarily
+	// release even protected outer homes until the operand reaches its final
+	// argument slot. Restore the exact outer placements before returning.
+	if ctx.ProtectedRegs&ctx.AllRegs != 0 && bits.OnesCount64(ctx.FreeRegs&ctx.AllRegs&^ctx.ProtectedRegs) < 6 && !jitCanForwardCallValue(ctx, expr) {
+		ctx.materializeBooleanFlags()
+		ctx.PrepareScmerStackTarget(off)
+		outerEnv := ctx.Env
+		stableEnv := ctx.StabilizeJITEnv(outerEnv, true)
+		boundary := ctx.PreserveRegisters(JITRegisterBoundaryOptions{ReleaseHomes: true})
+		ctx.Env = stableEnv
+		defer func() { ctx.Env = outerEnv }()
+		value := jitCompileRootedCallValueAtResult(ctx, expr, sliceBase, off, result)
+		ctx.Env = outerEnv
+		boundary.Restore(ctx)
+		return value
+	}
+	// Match already supports stack phi destinations. Reuse the rooted operand
+	// slot rather than carrying an evictable register pair across its branches.
+	if form := expr.WithoutSourceInfo(); result.Loc == LocAny && form.IsSlice() && len(form.Slice()) > 0 && jitSyntaxKind(form.Slice()[0]) == SyntaxMatch {
+		result.Loc = LocStackPair
+		result.StackOff = off
+		ctx.PrepareScmerStackTarget(off)
+	}
 	value := jitCompileExpr(ctx, expr, sliceBase, result)
 	// Input values remain reachable through the caller's argument slice for the
 	// complete native invocation. The safepoint map relocates a saved input
@@ -2573,7 +2644,7 @@ func jitCompileRootedCallValueAtResult(ctx *JITContext, expr Scmer, sliceBase Re
 		value.Rooted = true
 	}
 	pair := value
-	if pair.Loc != LocImm && pair.Loc != LocRegPair && pair.Loc != LocStackPair && pair.Loc != LocInputPair {
+	if pair.Loc != LocImm && pair.Loc != LocRegPair && pair.Loc != LocStackPair && pair.Loc != LocInputPair && pair.Loc != LocClosurePair {
 		pair = jitAllocTrackedPair(ctx, JITTypeUnknown)
 		pair = jitPlaceIntoPair(ctx, &value, pair)
 	}
@@ -3697,9 +3768,20 @@ func JITEmitProcInlineWithEnv(ctx *JITContext, proc *Proc, env *JITEnv, sliceBas
 	if body.GetTag() == tagSourceInfo {
 		body = body.SourceInfo().value
 	}
+	if ctx.ProtectedRegs&ctx.AllRegs != 0 && bits.OnesCount64(ctx.FreeRegs&ctx.AllRegs&^ctx.ProtectedRegs) < 6 {
+		off := result.StackOff
+		if result.Loc != LocStackPair || off < 0 {
+			off = ctx.AllocStack(16)
+		}
+		out := jitCompileRootedCallValueAt(ctx, body, sliceBase, off)
+		return jitPlaceScmerIntoTarget(ctx, out, result)
+	}
 	compileTarget := result
 	if result.Loc == LocStackPair {
 		compileTarget = JITValueDesc{Loc: LocAny}
+		if body.IsSlice() && len(body.Slice()) > 0 && jitSyntaxKind(body.Slice()[0]) == SyntaxMatch {
+			compileTarget = result
+		}
 	}
 	out := jitCompileExpr(ctx, body, sliceBase, compileTarget)
 	if result.Loc == LocStackPair {
@@ -3832,6 +3914,9 @@ func jitCompileCallArgument(ctx *JITContext, decl *Declaration, index int, expr 
 				return JITValueDesc{Loc: LocInputPair, Type: JITTypeUnknown, StackOff: int32(idx)}
 			}
 		}
+	}
+	if ctx.ProtectedRegs&ctx.AllRegs != 0 && bits.OnesCount64(ctx.FreeRegs&ctx.AllRegs&^ctx.ProtectedRegs) < 6 {
+		return jitCompileRootedCallValue(ctx, expr, sliceBase)
 	}
 	return jitCompileExpr(ctx, expr, sliceBase, JITValueDesc{Loc: LocAny})
 }
