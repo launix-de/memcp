@@ -118,15 +118,18 @@ func TestJITMapReduceBufferBestOf(t *testing.T) {
 		t.Fatalf("fused native SQL sum = %s, want %d", scm.String(got), want)
 	}
 
+	// The simple reducer's calibrated shard size can also admit a complex
+	// probe. A fixed short shard tests rejection independently of timer noise.
+	shortShard := benchmarkMapReduceFusionShard(len(ids))
 	complex := benchmarkMapReduceFusionProc(t, "(lambda (acc amount) (+ acc (* amount 3)))")
-	complexMapper := shard.OpenMapReducer([]string{"amount"}, complex, false, 0, nil, nil)
+	complexMapper := shortShard.OpenMapReducer([]string{"amount"}, complex, false, 0, nil, nil)
 	defer complexMapper.Close()
 	if complexMapper.bufferReduceProc != nil {
-		t.Fatal("complex reducer entered the slower buffer-loop class")
+		t.Fatal("short expression reduction should not pay for adaptive compilation")
 	}
 
 	wide := benchmarkMapReduceFusionProc(t, "(lambda (acc amount quantity) (+ acc (* amount quantity)))")
-	wideMapper := shard.OpenMapReducer([]string{"amount", "quantity"}, wide, false, 0, nil, nil)
+	wideMapper := shortShard.OpenMapReducer([]string{"amount", "quantity"}, wide, false, 0, nil, nil)
 	defer wideMapper.Close()
 	if wideMapper.bufferReduceProc != nil {
 		t.Fatal("short wide reduction should not pay for adaptive compilation")

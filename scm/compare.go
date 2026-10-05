@@ -550,6 +550,43 @@ func equalCollatedValues(a, b Scmer, collation string) Scmer {
 	return EqualSQL(a, b)
 }
 
+// Normalize integral bounds once, outside evaluation loops. Mixed comparisons
+// retain their original float rounding at ±2^53 and their string fallback.
+func optimizeOrderedComparison(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
+	code, typeInfo := oc.ApplyDefaultOptimization(v, useResult)
+	items, ok := scmerSlice(code)
+	if !ok || len(items) != 3 {
+		return code, typeInfo
+	}
+	var rewritten []Scmer
+	for i := 1; i < 3; i++ {
+		if !items[i].IsFloat() {
+			continue
+		}
+		f := items[i].Float()
+		if !(f > -(1<<53) && f < 1<<53) {
+			continue
+		}
+		integer := int64(f)
+		if float64(integer) != f {
+			continue
+		}
+		bound := NewInt(integer)
+		// Non-numeric values may compare through their printed representation.
+		if items[i].String() != bound.String() {
+			continue
+		}
+		if rewritten == nil {
+			rewritten = append([]Scmer(nil), items...)
+		}
+		rewritten[i] = bound
+	}
+	if rewritten != nil {
+		return NewSlice(rewritten), typeInfo
+	}
+	return code, typeInfo
+}
+
 func LessScm(a ...Scmer) Scmer    { return NewBool(Less(a[0], a[1])) }
 func GreaterScm(a ...Scmer) Scmer { return NewBool(Less(a[1], a[0])) }
 
@@ -3659,8 +3696,8 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 			}
 			_, yBits := d381.Imm.RawWords()
 			ctx.EmitMovRegImm64(RegR11, yBits)
-			ctx.EmitCmpFloat64Setcc(r9, d380.Reg, RegR11, CondSignedLess)
-			d383 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r9}
+			ctx.EmitCmpFloat64(RegR11, d380.Reg)
+			d383 = ctx.DeferBooleanFlags(r9, CondUnsignedAbove)
 			ctx.BindReg(r9, &d383)
 		} else if d380.Loc == LocImm {
 			var r10 Reg
@@ -3672,8 +3709,8 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 			}
 			_, xBits := d380.Imm.RawWords()
 			ctx.EmitMovRegImm64(RegR11, xBits)
-			ctx.EmitCmpFloat64Setcc(r10, RegR11, d381.Reg, CondSignedLess)
-			d383 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r10}
+			ctx.EmitCmpFloat64(d381.Reg, RegR11)
+			d383 = ctx.DeferBooleanFlags(r10, CondUnsignedAbove)
 			ctx.BindReg(r10, &d383)
 		} else {
 			var r11 Reg
@@ -3683,8 +3720,8 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 			} else {
 				r11 = ctx.AllocRegExcept(d380.Reg, d381.Reg)
 			}
-			ctx.EmitCmpFloat64Setcc(r11, d380.Reg, d381.Reg, CondSignedLess)
-			d383 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r11}
+			ctx.EmitCmpFloat64(d381.Reg, d380.Reg)
+			d383 = ctx.DeferBooleanFlags(r11, CondUnsignedAbove)
 			ctx.BindReg(r11, &d383)
 		}
 		ctx.FreeDesc(&d380)
@@ -4506,8 +4543,8 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 			}
 			_, yBits := d464.Imm.RawWords()
 			ctx.EmitMovRegImm64(RegR11, yBits)
-			ctx.EmitCmpFloat64Setcc(r16, d463.Reg, RegR11, CondSignedLess)
-			d466 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r16}
+			ctx.EmitCmpFloat64(RegR11, d463.Reg)
+			d466 = ctx.DeferBooleanFlags(r16, CondUnsignedAbove)
 			ctx.BindReg(r16, &d466)
 		} else if d463.Loc == LocImm {
 			var r17 Reg
@@ -4519,8 +4556,8 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 			}
 			_, xBits := d463.Imm.RawWords()
 			ctx.EmitMovRegImm64(RegR11, xBits)
-			ctx.EmitCmpFloat64Setcc(r17, RegR11, d464.Reg, CondSignedLess)
-			d466 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r17}
+			ctx.EmitCmpFloat64(d464.Reg, RegR11)
+			d466 = ctx.DeferBooleanFlags(r17, CondUnsignedAbove)
 			ctx.BindReg(r17, &d466)
 		} else {
 			var r18 Reg
@@ -4530,8 +4567,8 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 			} else {
 				r18 = ctx.AllocRegExcept(d463.Reg, d464.Reg)
 			}
-			ctx.EmitCmpFloat64Setcc(r18, d463.Reg, d464.Reg, CondSignedLess)
-			d466 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r18}
+			ctx.EmitCmpFloat64(d464.Reg, d463.Reg)
+			d466 = ctx.DeferBooleanFlags(r18, CondUnsignedAbove)
 			ctx.BindReg(r18, &d466)
 		}
 		ctx.FreeDesc(&d463)
@@ -5526,8 +5563,8 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 			}
 			_, yBits := d563.Imm.RawWords()
 			ctx.EmitMovRegImm64(RegR11, yBits)
-			ctx.EmitCmpFloat64Setcc(r24, d562.Reg, RegR11, CondSignedLess)
-			d565 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r24}
+			ctx.EmitCmpFloat64(RegR11, d562.Reg)
+			d565 = ctx.DeferBooleanFlags(r24, CondUnsignedAbove)
 			ctx.BindReg(r24, &d565)
 		} else if d562.Loc == LocImm {
 			var r25 Reg
@@ -5539,8 +5576,8 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 			}
 			_, xBits := d562.Imm.RawWords()
 			ctx.EmitMovRegImm64(RegR11, xBits)
-			ctx.EmitCmpFloat64Setcc(r25, RegR11, d563.Reg, CondSignedLess)
-			d565 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r25}
+			ctx.EmitCmpFloat64(d563.Reg, RegR11)
+			d565 = ctx.DeferBooleanFlags(r25, CondUnsignedAbove)
 			ctx.BindReg(r25, &d565)
 		} else {
 			var r26 Reg
@@ -5550,8 +5587,8 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 			} else {
 				r26 = ctx.AllocRegExcept(d562.Reg, d563.Reg)
 			}
-			ctx.EmitCmpFloat64Setcc(r26, d562.Reg, d563.Reg, CondSignedLess)
-			d565 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r26}
+			ctx.EmitCmpFloat64(d563.Reg, d562.Reg)
+			d565 = ctx.DeferBooleanFlags(r26, CondUnsignedAbove)
 			ctx.BindReg(r26, &d565)
 		}
 		ctx.FreeDesc(&d562)

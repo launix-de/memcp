@@ -4497,6 +4497,10 @@ func (ctx *JITContext) EmitGoCallScalarInto(funcAddr uint64, args []JITValueDesc
 // Stack-backed producers load directly into their requested destination and do
 // not consume an intermediate register pair.
 func (ctx *JITContext) EmitMovPairToResult(src *JITValueDesc, dst *JITValueDesc) {
+	// Flags remain lazy inside a predicate, but a value ABI needs a bool payload.
+	if src.Loc == LocFlags {
+		ctx.EnsureDesc(src)
+	}
 	ctx.SyncDesc(src)
 	ctx.SyncDesc(dst)
 	if dst.Loc == LocStackPair {

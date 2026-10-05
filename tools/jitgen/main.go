@@ -8348,6 +8348,31 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 					g.vals[name] = genVal{goVar: dv, isDesc: true, resultTargetVar: resultTargetVar}
 					break
 				}
+				// Reversing LT/LE operands turns them into unsigned GT/GE flags.
+				// Those conditions already reject unordered (NaN), so one Jcc
+				// represents the result without SETcc/parity/boolean packaging.
+				flagsFloat := flagsOnly && (v.Op == token.LSS || v.Op == token.LEQ || v.Op == token.GTR || v.Op == token.GEQ)
+				emitComparison := func(dst, left, right string) {
+					if !flagsFloat {
+						g.emit("\tctx.EmitCmpFloat64Setcc(%s, %s, %s, %s)", dst, left, right, cc)
+						g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: %s}", dv, dst)
+						return
+					}
+					if v.Op == token.LSS || v.Op == token.LEQ {
+						left, right = right, left
+					}
+					condition := "CondUnsignedAbove"
+					if v.Op == token.LEQ || v.Op == token.GEQ {
+						condition = "CondUnsignedAboveOrEqual"
+					}
+					g.emit("\tctx.EmitCmpFloat64(%s, %s)", left, right)
+					if lazyReturn {
+						g.emit("\t%s = ctx.DeferBooleanFlags(%s, %s)", dv, dst, condition)
+					} else {
+						g.emit("\t%s = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: %s, Condition: %s}", dv, dst, condition)
+					}
+					g.emit("\tctx.BindReg(%s, &%s)", dst, dv)
+				}
 				if c, ok := v.Y.(*ssa.Const); ok {
 					cmpVal, ok := constFloat64Value(c.Value)
 					if !ok {
@@ -8361,8 +8386,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 					rv := g.allocReg()
 					g.emitAllocBooleanResultReg(rv, resultTargetVar, "\t", directResultMarker, xVal.goVar+".Reg")
 					g.emit("\tctx.EmitMovRegImm64(RegR11, uint64(%d))", bits)
-					g.emit("\tctx.EmitCmpFloat64Setcc(%s, %s.Reg, RegR11, %s)", rv, xVal.goVar, cc)
-					g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: %s}", dv, rv)
+					emitComparison(rv, xVal.goVar+".Reg", "RegR11")
 					g.emit("}")
 				} else {
 					yVal := g.resolveValue(v.Y)
@@ -8375,23 +8399,24 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 					g.emitAllocBooleanResultReg(rv, resultTargetVar, "\t", directResultMarker, xVal.goVar+".Reg")
 					g.emit("\t_, yBits := %s.Imm.RawWords()", yVal.goVar)
 					g.emit("\tctx.EmitMovRegImm64(RegR11, yBits)")
-					g.emit("\tctx.EmitCmpFloat64Setcc(%s, %s.Reg, RegR11, %s)", rv, xVal.goVar, cc)
-					g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: %s}", dv, rv)
+					emitComparison(rv, xVal.goVar+".Reg", "RegR11")
 					g.emit("} else if %s.Loc == LocImm {", xVal.goVar)
 					rv2 := g.allocReg()
 					g.emitAllocBooleanResultReg(rv2, resultTargetVar, "\t", directResultMarker, yVal.goVar+".Reg")
 					g.emit("\t_, xBits := %s.Imm.RawWords()", xVal.goVar)
 					g.emit("\tctx.EmitMovRegImm64(RegR11, xBits)")
-					g.emit("\tctx.EmitCmpFloat64Setcc(%s, RegR11, %s.Reg, %s)", rv2, yVal.goVar, cc)
-					g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: %s}", dv, rv2)
+					emitComparison(rv2, "RegR11", yVal.goVar+".Reg")
 					g.emit("} else {")
 					rv3 := g.allocReg()
 					g.emitAllocBooleanResultReg(rv3, resultTargetVar, "\t", directResultMarker, xVal.goVar+".Reg", yVal.goVar+".Reg")
-					g.emit("\tctx.EmitCmpFloat64Setcc(%s, %s.Reg, %s.Reg, %s)", rv3, xVal.goVar, yVal.goVar, cc)
-					g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: %s}", dv, rv3)
+					emitComparison(rv3, xVal.goVar+".Reg", yVal.goVar+".Reg")
 					g.emit("}")
 				}
-				g.vals[name] = genVal{goVar: dv, isDesc: true, resultTargetVar: resultTargetVar}
+				marker := ""
+				if flagsFloat {
+					marker = "_flags"
+				}
+				g.vals[name] = genVal{goVar: dv, isDesc: true, marker: marker, resultTargetVar: resultTargetVar}
 				break
 			}
 			if c, ok := v.Y.(*ssa.Const); ok {
