@@ -139045,10 +139045,20 @@ func init_list() {
 
 		Fn: func(a ...Scmer) Scmer {
 			input := asSlice(a[1], "cons_map")
-			mapper := PrepareSerialProc(a[2])
-			var mapperArgs [1]Scmer
 			result := make([]Scmer, len(input)+1)
 			result[0] = a[0]
+			// Empty AST tails never invoke their mapper. A single interpreted
+			// invocation cannot amortize a prepared program and reusable frame.
+			// Keep compiled callbacks on the authoritative prepared entry path.
+			if len(input) == 0 {
+				return NewSlice(result)
+			}
+			if len(input) == 1 && a[2].IsProc() && a[2].Proc().Compiled == nil {
+				result[1] = Apply(a[2], input[0])
+				return NewSlice(result)
+			}
+			mapper := PrepareSerialProc(a[2])
+			var mapperArgs [1]Scmer
 			for i, item := range input {
 				mapperArgs[0] = item
 				result[i+1] = mapper.Call(mapperArgs[:1])

@@ -806,6 +806,72 @@ func TestOptimizeKeepsDynamicReducerAfterMergeValidation(t *testing.T) {
 	}
 }
 
+func TestConsMapKeepsCallbackResultsAndOwnedFrames(t *testing.T) {
+	mapper := preparedTestProc(t, `(lambda (value) (lambda () (+ (* value 2) 1)))`)
+	consMap := Globalenv.Vars[Symbol("cons_map")].Func()
+	for _, size := range []int{0, 1, 3} {
+		input := make([]Scmer, size)
+		for i := range input {
+			input[i] = NewInt(int64(i + 1))
+		}
+		got := consMap(NewString("head"), NewSlice(input), mapper).Slice()
+		if len(got) != size+1 || got[0].String() != "head" {
+			t.Fatalf("size %d: invalid constructed list %s", size, String(NewSlice(got)))
+		}
+		for i := range input {
+			if value := Apply(got[i+1]); value.Int() != int64(2*(i+1)+1) {
+				t.Fatalf("size %d: callback %d retained another invocation's frame: %s", size, i, String(value))
+			}
+		}
+	}
+	if jitEnabled {
+		compiled := preparedTestProc(t, `(lambda (value) 7)`)
+		compiled.Proc().Compiled = &JITEntryPoint{Native: func(...Scmer) Scmer { return NewInt(99) }}
+		got := consMap(NewString("head"), NewSlice([]Scmer{NewInt(1)}), compiled).Slice()
+		if got[1].Int() != 99 {
+			t.Fatalf("compiled callback was replaced by its diagnostic body: %s", String(got[1]))
+		}
+	}
+}
+
+func TestConsMapDoesNotPrepareUnusedOrOneShotInterpretedCallback(t *testing.T) {
+	mapper := preparedTestProc(t, `(lambda (value) (+ (* value 2) 1))`)
+	consMap := Globalenv.Vars[Symbol("cons_map")].Func()
+	head := NewString("head")
+	for _, tc := range []struct {
+		input Scmer
+		limit float64
+	}{
+		{NewSlice(nil), 2},
+		{NewSlice([]Scmer{NewInt(3)}), 8},
+	} {
+		allocations := testing.AllocsPerRun(100, func() {
+			assocBenchmarkSink = consMap(head, tc.input, mapper)
+		})
+		if allocations > tc.limit {
+			t.Fatalf("tail length %d prepares a non-reused callback: %.0f allocations, limit %.0f", len(tc.input.Slice()), allocations, tc.limit)
+		}
+	}
+}
+
+func BenchmarkConsMapCallbackPreparation(b *testing.B) {
+	mapper := preparedTestProc(b, `(lambda (value) (+ (* value 2) 1))`)
+	consMap := Globalenv.Vars[Symbol("cons_map")].Func()
+	for _, size := range []int{0, 1, 2, 8} {
+		input := make([]Scmer, size)
+		for i := range input {
+			input[i] = NewInt(int64(i + 1))
+		}
+		values := NewSlice(input)
+		b.Run(fmt.Sprintf("%d", size), func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				assocBenchmarkSink = consMap(NewString("head"), values, mapper)
+			}
+		})
+	}
+}
+
 func BenchmarkPlannerReducerLowerings(b *testing.B) {
 	values := make([]Scmer, 128)
 	for i := range values {
