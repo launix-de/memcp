@@ -30,6 +30,38 @@ func optimizeListPipeline(t testing.TB, source string) (Scmer, *Env) {
 	return optimized, env
 }
 
+func TestParallelMapInputsStayOwnedAcrossWorkers(t *testing.T) {
+	for _, operator := range []string{"parallel_map", "parallel_map_mut"} {
+		t.Run(operator, func(t *testing.T) {
+			source := fmt.Sprintf(`(lambda (seed) (%s
+				(list (list seed 1) (list seed 2) (list seed 3))
+				(lambda (items) (list items seed))))`, operator)
+			optimized, env := optimizeListPipeline(t, source)
+			serialized := serializedTestExpr(t, env, optimized)
+			if strings.Contains(serialized, "!list") {
+				t.Fatalf("parallel workers were given invocation-stack list storage: %s", serialized)
+			}
+			callback := Eval(optimized, env)
+			var previous Scmer
+			for seed := int64(7); seed <= 9; seed++ {
+				got := Apply(callback, NewInt(seed))
+				want := NewSlice([]Scmer{
+					NewSlice([]Scmer{NewSlice([]Scmer{NewInt(seed), NewInt(1)}), NewInt(seed)}),
+					NewSlice([]Scmer{NewSlice([]Scmer{NewInt(seed), NewInt(2)}), NewInt(seed)}),
+					NewSlice([]Scmer{NewSlice([]Scmer{NewInt(seed), NewInt(3)}), NewInt(seed)}),
+				})
+				if !Equal(got, want) {
+					t.Fatalf("parallel result %s, want %s", String(got), String(want))
+				}
+				if !previous.IsNil() && previous.Slice()[0].Slice()[1].Int() != seed-1 {
+					t.Fatalf("next invocation changed retained nested output: %s", String(previous))
+				}
+				previous = got
+			}
+		})
+	}
+}
+
 func TestJITFusedListPipelinesInlineKnownCallbacks(t *testing.T) {
 	if !jitEnabled {
 		t.Skip("requires GOEXPERIMENT=jit")

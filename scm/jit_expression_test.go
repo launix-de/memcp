@@ -1793,3 +1793,44 @@ func TestJITMetadataCallbacksPreparePublicAndHiddenArguments(t *testing.T) {
 		})
 	}
 }
+
+func TestJITParallelMapKeepsNestedInputsAndCapturedCallbacks(t *testing.T) {
+	if !jitEnabled {
+		t.Skip("requires GOEXPERIMENT=jit")
+	}
+	const name = "jit_parallel_stack_identity"
+	identity := func(args ...Scmer) Scmer {
+		_ = growJITCallbackTestStack(256)
+		runtime.GC()
+		return args[0]
+	}
+	Declare(&Globalenv, &Declaration{Name: name, Fn: identity, Type: &TypeDescriptor{Kind: "func", Forbidden: true, Params: []*TypeDescriptor{{Kind: "any"}}, Return: &TypeDescriptor{Kind: "any"}}})
+	defer func() {
+		delete(Globalenv.Vars, Symbol(name))
+		delete(declarations, name)
+		delete(declarationsByFunction, FunctionIdentity(identity))
+	}()
+	for _, operator := range []string{"parallel_map", "parallel_map_mut"} {
+		t.Run(operator, func(t *testing.T) {
+			compiled := compileJITExpressionTestProc(t, fmt.Sprintf(`(lambda (seed)
+				(%s (list (list seed 1) (list seed 2) (list seed 3))
+					(lambda (items) (list (jit_parallel_stack_identity items) seed))))`, operator))
+			var retained Scmer
+			for seed := int64(7); seed <= 9; seed++ {
+				got := Apply(compiled, NewInt(seed))
+				want := NewSlice([]Scmer{
+					NewSlice([]Scmer{NewSlice([]Scmer{NewInt(seed), NewInt(1)}), NewInt(seed)}),
+					NewSlice([]Scmer{NewSlice([]Scmer{NewInt(seed), NewInt(2)}), NewInt(seed)}),
+					NewSlice([]Scmer{NewSlice([]Scmer{NewInt(seed), NewInt(3)}), NewInt(seed)}),
+				})
+				if !Equal(got, want) {
+					t.Fatalf("parallel callback after stack growth/GC returned %s, want %s", String(got), String(want))
+				}
+				if !retained.IsNil() && retained.Slice()[0].Slice()[1].Int() != seed-1 {
+					t.Fatalf("next parallel invocation changed retained nested output: %s", String(retained))
+				}
+				retained = got
+			}
+		})
+	}
+}

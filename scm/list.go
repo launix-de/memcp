@@ -31821,6 +31821,9 @@ func init_list() {
 				}
 				return NewSlice(result)
 			}
+			// The native boundary may lend its argument array from a movable JIT
+			// stack. Workers own the callback value, never the borrowed array.
+			callback := a[1]
 			results := make([]Scmer, len(list))
 			workers := runtime.NumCPU()
 			if workers > len(list) {
@@ -31833,7 +31836,7 @@ func init_list() {
 			for w := 0; w < workers; w++ {
 				go func() {
 					defer wg.Done()
-					fn := PrepareSerialProc(a[1])
+					fn := PrepareSerialProc(callback)
 					var fnArgs [1]Scmer
 					for i := range jobs {
 						if firstErr.Load() != nil {
@@ -31863,7 +31866,7 @@ func init_list() {
 		},
 		Type: &TypeDescriptor{Kind: "func", Description: "like map, but applies fn to each element in parallel using a worker pool limited to runtime.NumCPU()",
 			Params: []*TypeDescriptor{
-				{Kind: "list", Label: "list", Description: "list to map over in parallel", NoEscape: true},
+				{Kind: "list", Label: "list", Description: "list to map over in parallel", NoEscape: true, CrossGoroutine: true},
 				{Kind: "func", Label: "fn", Description: "function applied to each element", Params: []*TypeDescriptor{{Kind: "any", Label: "item"}}, Return: &TypeDescriptor{Kind: "any"}},
 			},
 			Return: FreshAlloc,
@@ -31896,6 +31899,9 @@ func init_list() {
 				}
 				return NewSlice(result)
 			}
+			// The native boundary may lend its argument array from a movable JIT
+			// stack. Workers own the callback value, never the borrowed array.
+			callback := a[1]
 			results := make([]Scmer, len(list))
 			workers := runtime.NumCPU()
 			if workers > len(list) {
@@ -31908,7 +31914,7 @@ func init_list() {
 			for w := 0; w < workers; w++ {
 				go func() {
 					defer wg.Done()
-					fn := PrepareSerialProc(a[1])
+					fn := PrepareSerialProc(callback)
 					var fnArgs [1]Scmer
 					for i := range jobs {
 						if firstErr.Load() != nil {
@@ -31938,7 +31944,7 @@ func init_list() {
 		},
 		Type: &TypeDescriptor{Kind: "func", Description: "like parallel_map, but signals the optimizer that fn may have side effects",
 			Params: []*TypeDescriptor{
-				{Kind: "list", Label: "list", Description: "list to map over in parallel", NoEscape: true},
+				{Kind: "list", Label: "list", Description: "list to map over in parallel", NoEscape: true, CrossGoroutine: true},
 				{Kind: "func", Label: "fn", Description: "function with side effects applied to each element", Params: []*TypeDescriptor{{Kind: "any", Label: "item"}}, Return: &TypeDescriptor{Kind: "any"}},
 			},
 			Return: FreshAlloc,
