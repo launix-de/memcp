@@ -845,30 +845,53 @@ func TestConsMapDoesNotPrepareUnusedOrOneShotInterpretedCallback(t *testing.T) {
 		{NewSlice(nil), 2},
 		{NewSlice([]Scmer{NewInt(3)}), 8},
 	} {
-		allocations := testing.AllocsPerRun(100, func() {
-			assocBenchmarkSink = consMap(head, tc.input, mapper)
+		t.Run(fmt.Sprintf("tail-%d", len(tc.input.Slice())), func(t *testing.T) {
+			allocations := testing.AllocsPerRun(100, func() {
+				assocBenchmarkSink = consMap(head, tc.input, mapper)
+			})
+			if allocations > tc.limit {
+				t.Fatalf("tail length %d prepares a non-reused callback: %.0f allocations, limit %.0f", len(tc.input.Slice()), allocations, tc.limit)
+			}
 		})
-		if allocations > tc.limit {
-			t.Fatalf("tail length %d prepares a non-reused callback: %.0f allocations, limit %.0f", len(tc.input.Slice()), allocations, tc.limit)
-		}
+	}
+}
+
+func TestConsMapDoesNotMutateAnnotatedTail(t *testing.T) {
+	value := NewSourceInfo(SourceInfo{value: NewInt(3)})
+	input := []Scmer{value}
+	mapper := preparedTestProc(t, `(lambda (value) (+ value))`)
+	result := Globalenv.Vars[Symbol("cons_map")].Func()(NewString("head"), NewSlice(input), mapper)
+	if input[0] != value || !input[0].IsSourceInfo() {
+		t.Fatal("singleton native-forward mapper changed the caller's tail")
+	}
+	if result.Slice()[1].Int() != 3 {
+		t.Fatalf("mapped tail = %s, want 3", String(result.Slice()[1]))
 	}
 }
 
 func BenchmarkConsMapCallbackPreparation(b *testing.B) {
-	mapper := preparedTestProc(b, `(lambda (value) (+ (* value 2) 1))`)
 	consMap := Globalenv.Vars[Symbol("cons_map")].Func()
-	for _, size := range []int{0, 1, 2, 8} {
-		input := make([]Scmer, size)
-		for i := range input {
-			input[i] = NewInt(int64(i + 1))
-		}
-		values := NewSlice(input)
-		b.Run(fmt.Sprintf("%d", size), func(b *testing.B) {
-			b.ReportAllocs()
-			for i := 0; i < b.N; i++ {
-				assocBenchmarkSink = consMap(NewString("head"), values, mapper)
+	for _, callback := range []struct{ name, source string }{
+		{"constant", `(lambda (value) 7)`},
+		{"identity", `(lambda (value) value)`},
+		{"forward", `(lambda (value) (nil? value))`},
+		{"bound", `(lambda (value) (+ value 1))`},
+		{"general", `(lambda (value) (+ (* value 2) 1))`},
+	} {
+		mapper := preparedTestProc(b, callback.source)
+		for _, size := range []int{0, 1, 2, 8} {
+			input := make([]Scmer, size)
+			for i := range input {
+				input[i] = NewInt(int64(i + 1))
 			}
-		})
+			values := NewSlice(input)
+			b.Run(fmt.Sprintf("%s/%d", callback.name, size), func(b *testing.B) {
+				b.ReportAllocs()
+				for i := 0; i < b.N; i++ {
+					assocBenchmarkSink = consMap(NewString("head"), values, mapper)
+				}
+			})
+		}
 	}
 }
 
