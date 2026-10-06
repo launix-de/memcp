@@ -3377,23 +3377,28 @@ cached plan is recompiled when data growth crosses the carrier boundary. */
 								(define params (map input_cols symbol))
 								(define cache_stage (group_stage_with_facts stage
 									(qassoc_set
-										(qassoc_set (gs_facts stage) (quote stage_catalog) '())
-										(quote probe_catalog) '())))
-								/* The stage's canonical keytable already projects the unique
-								lookup relation once. Read that carrier from the row-local ORDER
-								column instead of repeating a cross-shard base-table lookup for
-								every driver row. */
+										(qassoc_set
+											(qassoc_set (gs_facts stage) (quote stage_catalog) '())
+											(quote probe_catalog) '())
+										(quote query_cache_lease) true)))
+								/* The stage's canonical keytable projects each lookup key once.
+								Prepare that carrier before populating the row-local ORDER
+								column. Row callbacks only read the prepared keytable; repeating
+								preparation there re-enters DDL and scans ownership on every row. */
 								(define lookup_expr (lower_keytable_scalar_first_probe_expr
-									(list cache_stage) cache_stage requested_col (car params) 1))
+									(list cache_stage) cache_stage requested_col (car params) 1 true))
 								(select_scalar_order_lookup_cache_candidate
 									(list target stage requested_col column_name
-										(list (quote createcolumn)
-											(source_table_expr target)
-											column_name "any"
-											(quoted_runtime_list '())
-											(quoted_runtime_list '("temp" true))
-											(cons (quote list) input_cols)
-											(list (quote lambda) params lookup_expr))
+										(list (quote !begin)
+											(lower_group_stage_prepare_using (list cache_stage) (list cache_stage) cache_stage true nil)
+											(list (quote createcolumn)
+												(source_table_expr target)
+												column_name "any"
+												(quoted_runtime_list '())
+												(quoted_runtime_list '("temp" true))
+												(cons (quote list) input_cols)
+												(list (quote lambda) params lookup_expr)
+												(physical_query_tx_symbol)))
 										stage_source)
 									planning_session)))))))))))))
 

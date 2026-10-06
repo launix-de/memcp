@@ -2401,21 +2401,39 @@ func (t *table) registerTempColumn(cp *column) {
 	}, tempColumnLastUsed, nil)
 }
 
-func (t *table) createColumnDDLLocked(name string, typ string, typdimensions []int, extrainfo []scm.Scmer) bool {
-	// one early out without schemalock (especially for computed columns)
-	for _, c := range t.Columns {
-		if c.Name == name {
-			return false // column already exists
+func (t *table) createColumnDDLLocked(name string, typ string, typdimensions []int, extrainfo []scm.Scmer, queryTx *TxContext) bool {
+	// Ordinary DDL retains its existing fast path. Statement preparation must
+	// find and pin the current definition atomically with cache eviction.
+	if queryTx == nil {
+		for _, c := range t.Columns {
+			if c.Name == name {
+				return false
+			}
 		}
 	}
-
 	t.schema.schemalock.Lock()
+	for _, c := range t.Columns {
+		if c.Name == name {
+			if c.IsTemp {
+				if !queryTx.retainQueryColumn(t, c) {
+					t.schema.schemalock.Unlock()
+					panic("cannot prepare a column while its cache is being evicted")
+				}
+			}
+			t.schema.schemalock.Unlock()
+			return false
+		}
+	}
 	cp, ok := t.createColumnLocked(name, typ, typdimensions, extrainfo)
 	if !ok {
 		t.schema.schemalock.Unlock()
 		return false
 	}
 	if cp.IsTemp {
+		if !queryTx.retainQueryColumn(t, cp) {
+			t.schema.schemalock.Unlock()
+			panic("cannot prepare a column while its cache is being evicted")
+		}
 		t.invalidateShowColumnsSnapshot()
 	} else {
 		t.publishShowColumnsSnapshot()
@@ -2434,7 +2452,7 @@ func (t *table) createColumnDDLLocked(name string, typ string, typdimensions []i
 func (t *table) CreateColumn(name string, typ string, typdimensions []int, extrainfo []scm.Scmer) bool {
 	t.ddlMu.Lock()
 	defer t.ddlMu.Unlock()
-	return t.createColumnDDLLocked(name, typ, typdimensions, extrainfo)
+	return t.createColumnDDLLocked(name, typ, typdimensions, extrainfo, nil)
 }
 
 func (t *table) dropColumnDDLLocked(name string) bool {

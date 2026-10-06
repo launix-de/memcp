@@ -126,7 +126,8 @@ type TxContext struct {
 	querySeq      atomic.Uint64     // current statement generation; zero while parked
 	queryInfo     atomic.Pointer[string]
 	queryActive   atomic.Bool
-	queryMu       sync.Mutex // serializes statements which reuse this transaction object
+	queryMu       sync.Mutex         // serializes statements which reuse this transaction object
+	queryColumns  map[*column]*table // statement cache leases, protected by mu
 	walTxID       atomic.Pointer[string]
 	// fanoutLimit/fanoutInUse bound only additional multi-shard workers. A
 	// single relevant shard never reads or writes this cache line.
@@ -257,9 +258,38 @@ func (tx *TxContext) beginQuery(ss *scm.SessionState, seq uint64, info string) {
 	}
 }
 
+// retainQueryColumn runs during column publication under the schema lock.
+// The owning statement releases both the table and column pin, including when
+// execution panics. Persistent computors never capture this transaction.
+func (tx *TxContext) retainQueryColumn(t *table, c *column) bool {
+	if tx == nil {
+		return true
+	}
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	if !tx.queryActive.Load() || tx.queryColumns[c] != nil {
+		return true
+	}
+	if !t.acquireColumnCacheUse(c) {
+		return false
+	}
+	if tx.queryColumns == nil {
+		tx.queryColumns = make(map[*column]*table)
+	}
+	tx.queryColumns[c] = t
+	return true
+}
+
 func (tx *TxContext) endQuery(seq uint64) {
 	if tx.querySeq.CompareAndSwap(seq, 0) {
+		tx.mu.Lock()
 		tx.queryActive.Store(false)
+		columns := tx.queryColumns
+		tx.queryColumns = nil
+		tx.mu.Unlock()
+		for c, t := range columns {
+			t.releaseColumnCacheUse(c)
+		}
 		tx.queryInfo.Store(nil)
 		if tx.SessionState != nil {
 			tx.SessionState.FinishQueryExecution(seq)

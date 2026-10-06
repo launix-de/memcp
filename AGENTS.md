@@ -202,6 +202,12 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
   scan's shard read rights and lock. Cursor positions and bounded delta pages
   are local to the iterator; no query binding is retained by an index.
 
+- `TxContext.queryColumns` contains statement-local table/column cache pins.
+  It is protected by `TxContext.mu` and emptied by panic-safe `endQuery`, even
+  for explicit transactions. Preparation acquires pins under the schema lock
+  before cache registration; persistent computors retain no transaction. Cache
+  eviction continues to use existing atomic pins and TryLocks, without DDL locks.
+
 ### Scheme AST and Codegen Quoting (lib/queryplan.scm and lib/queryplan-*.scm)
 - Build AST as data: most builder blocks use a single leading quote `'(...)` so nested lists are data, not executed at construction.
 - Lambdas: embed as `'((quote lambda) (param-list) body)` where:

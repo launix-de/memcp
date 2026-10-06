@@ -44,6 +44,18 @@ setup:
 - sql: DROP TABLE IF EXISTS ds_kind
 - sql: CREATE TABLE ds_kind (name VARCHAR(10) PRIMARY KEY, active BOOL) ENGINE=memory
 - sql: INSERT INTO ds_kind VALUES ('P',true)
+- sql: DROP TABLE IF EXISTS cache_page_item
+- sql: DROP TABLE IF EXISTS cache_page_asset
+- sql: CREATE TABLE cache_page_asset (id INT PRIMARY KEY, uploaded_at INT) ENGINE=memory
+- sql: CREATE TABLE cache_page_item (id INT PRIMARY KEY, asset_id INT) ENGINE=memory
+- scm: |
+    (begin
+      (insert (table "memcp-tests" "cache_page_asset") '("id" "uploaded_at")
+        (map (produceN 4096) (lambda (i) (list (+ i 1) (if (equal? i 0) nil (+ i 1))))))
+      (insert (table "memcp-tests" "cache_page_item") '("id" "asset_id")
+        (map (produceN 4097) (lambda (i) (list (+ i 1) (if (equal? i 4096) 9000 (+ i 1))))))
+      (rebuild (table "memcp-tests" "cache_page_asset"))
+      (rebuild (table "memcp-tests" "cache_page_item")))
 test_cases:
 - name: Literal optional filter is folded before subquery decorrelation
   sql: |-
@@ -322,7 +334,51 @@ test_cases:
     ORDER BY periods.period_id
   expect:
     error: true
+- name: Ordered scalar cache builds before bounded page projection
+  sql: |
+    SELECT p.id FROM cache_page_item p
+    ORDER BY (SELECT f.uploaded_at FROM cache_page_asset f WHERE f.id=p.asset_id LIMIT 1) DESC, p.id DESC
+    LIMIT 3
+  expect:
+    data: [{id: 4096}, {id: 4095}, {id: 4094}]
+- name: Ordered scalar cache keeps NULL and absent values
+  sql: |
+    SELECT p.id, (SELECT f.uploaded_at FROM cache_page_asset f WHERE f.id=p.asset_id LIMIT 1) AS uploaded_at
+    FROM cache_page_item p WHERE p.id IN (1,4097)
+    ORDER BY (SELECT f.uploaded_at FROM cache_page_asset f WHERE f.id=p.asset_id LIMIT 1) DESC, p.id ASC LIMIT 2
+  expect:
+    data: [{id: 1, uploaded_at: null}, {id: 4097, uploaded_at: null}]
+- name: Update cached scalar source to NULL
+  sql: UPDATE cache_page_asset SET uploaded_at=NULL WHERE id=4096
+  expect:
+    affected_rows: 1
+- name: Prepared ordered cache repairs an updated source
+  sql: |
+    SELECT p.id FROM cache_page_item p
+    ORDER BY (SELECT f.uploaded_at FROM cache_page_asset f WHERE f.id=p.asset_id LIMIT 1) DESC, p.id DESC LIMIT 3
+  expect:
+    data: [{id: 4095}, {id: 4094}, {id: 4093}]
+- name: Delete cached scalar source
+  sql: DELETE FROM cache_page_asset WHERE id=4095
+  expect:
+    affected_rows: 1
+- name: Prepared ordered cache repairs a deleted source
+  sql: |
+    SELECT p.id FROM cache_page_item p
+    ORDER BY (SELECT f.uploaded_at FROM cache_page_asset f WHERE f.id=p.asset_id LIMIT 1) DESC, p.id DESC LIMIT 3
+  expect:
+    data: [{id: 4094}, {id: 4093}, {id: 4092}]
+- name: Fill the absent scalar source
+  sql: INSERT INTO cache_page_asset VALUES (9000,99999)
+- name: Prepared ordered cache repairs a newly matching source
+  sql: |
+    SELECT p.id FROM cache_page_item p
+    ORDER BY (SELECT f.uploaded_at FROM cache_page_asset f WHERE f.id=p.asset_id LIMIT 1) DESC, p.id DESC LIMIT 3
+  expect:
+    data: [{id: 4097}, {id: 4094}, {id: 4093}]
 cleanup:
+- sql: DROP TABLE IF EXISTS cache_page_item
+- sql: DROP TABLE IF EXISTS cache_page_asset
 - sql: DROP TABLE IF EXISTS ds_kind
 - sql: DROP TABLE IF EXISTS metric_history
 - sql: DROP TABLE IF EXISTS metric_entity
