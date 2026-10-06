@@ -1121,6 +1121,24 @@ func Init(en scm.Env) {
 			// Reorder and cheap guards may request metadata only. A miss is unknown,
 			// not zero selectivity, and must not initialize an index or load a shard.
 			if scm.ToInt(a[6]) == 0 {
+				if frequency, frequencySource, ok := t.keyFrequencySelectivity(mustScmerSlice(accessSchema, "frequency access schema"), accessValues); ok {
+					confidence := .6
+					if frequencySource == "historical_numeric_key_frequency" {
+						confidence = .35
+					}
+					return scm.NewSlice([]scm.Scmer{
+						scm.NewSlice([]scm.Scmer{scm.NewSymbol("value"), scm.NewFloat(frequency)}),
+						scm.NewSlice([]scm.Scmer{scm.NewSymbol("confidence"), scm.NewFloat(confidence)}),
+						scm.NewSlice([]scm.Scmer{scm.NewSymbol("source"), scm.NewSymbol(frequencySource)}),
+						scm.NewSlice([]scm.Scmer{scm.NewSymbol("known"), scm.NewBool(true)}),
+						scm.NewSlice([]scm.Scmer{scm.NewSymbol("rows"), scm.NewFloat(float64(input) * frequency)}),
+						scm.NewSlice([]scm.Scmer{scm.NewSymbol("input"), scm.NewInt(input)}),
+						scm.NewSlice([]scm.Scmer{scm.NewSymbol("sampled"), scm.NewInt(0)}),
+						scm.NewSlice([]scm.Scmer{scm.NewSymbol("capped"), scm.NewBool(false)}),
+						scm.NewSlice([]scm.Scmer{scm.NewSymbol("population"), scm.NewSymbol("table_rows")}),
+						scm.NewSlice([]scm.Scmer{scm.NewSymbol("coverage"), scm.NewSymbol("histogram_prior")}),
+					})
+				}
 				return scm.NewNil()
 			}
 			conditionCols := scmerSliceToStrings(mustScmerSlice(a[4], "condition columns"))

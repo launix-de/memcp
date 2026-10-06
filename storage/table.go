@@ -59,6 +59,7 @@ type dataset []scm.Scmer
 // columnPlannerStatistics is an immutable rebuild-generation snapshot. The
 // pointer is published atomically so query compilation never needs shard locks.
 type columnPlannerStatistics struct {
+	KeyFrequency      *keyFrequencyStatistics
 	Confidence        float64
 	Source            string
 	NullCount         uint64
@@ -640,6 +641,7 @@ type table struct {
 	repartitionPendingSourceDels []pendingSourceDelete
 
 	// Cold decode state, consumed before publication; keep out of hot field groups.
+	RestoredKeyFrequencies *persistedKeyFrequencies `json:"key_frequencies,omitempty"`
 	RestoredFilterFeedback *persistedFilterFeedback `json:"filter_feedback,omitempty"`
 }
 
@@ -840,6 +842,7 @@ func (t *table) MarshalJSON() ([]byte, error) {
 		Charset            string
 		Comment            string
 		PlannerRowEstimate uint64                   `json:"planner_row_estimate"`
+		KeyFrequencies     *persistedKeyFrequencies `json:"key_frequencies,omitempty"`
 		FilterFeedback     *persistedFilterFeedback `json:"filter_feedback,omitempty"`
 		ShardMode          ShardMode
 		Shards             []*storageShard
@@ -859,6 +862,7 @@ func (t *table) MarshalJSON() ([]byte, error) {
 		Charset:            t.Charset,
 		Comment:            t.Comment,
 		PlannerRowEstimate: t.PlannerRowEstimate.value.Load(),
+		KeyFrequencies:     t.persistKeyFrequencies(),
 		FilterFeedback:     t.persistFilterFeedback(),
 		ShardMode:          topology.mode,
 		Shards:             shards,
@@ -991,6 +995,7 @@ func collectRebuiltColumnPlannerStatistics(shards []*storageShard, columnName st
 		MinEstimate: scm.NewNil(),
 		MaxEstimate: scm.NewNil(),
 	}
+	var frequencies keyFrequencyCollector
 	var rowCount uint64
 	var valueBytes uint64
 	var hasValue bool
@@ -1000,6 +1005,8 @@ func collectRebuiltColumnPlannerStatistics(shards []*storageShard, columnName st
 			continue
 		}
 		func() {
+			done := shard.GetRead()
+			defer done()
 			shard.mu.RLock()
 			defer shard.mu.RUnlock()
 			columnStorage := shard.columns[columnName]
@@ -1013,6 +1020,7 @@ func collectRebuiltColumnPlannerStatistics(shards []*storageShard, columnName st
 			reader := columnStorage.GetCachedReader()
 			reader.GetValueRange(0, shard.main_count, buf, 1)
 			for _, value := range buf {
+				frequencies.observe(value)
 				rowCount++
 				if value.IsNil() {
 					stats.NullCount++
@@ -1039,6 +1047,9 @@ func collectRebuiltColumnPlannerStatistics(shards []*storageShard, columnName st
 	if rowCount > 0 {
 		stats.NullFraction = float64(stats.NullCount) / float64(rowCount)
 		stats.AverageValueBytes = float64(valueBytes) / float64(rowCount)
+	}
+	if rowCount >= keyFrequencyMinimumRows {
+		stats.KeyFrequency = frequencies.finish()
 	}
 	return stats
 }
@@ -1516,6 +1527,14 @@ func (t *table) metadataMemory() uint {
 	size += uint(cap(t.Columns)) * uint(unsafe.Sizeof((*column)(nil)))
 	for _, c := range t.Columns {
 		size += uint(unsafe.Sizeof(*c)) + uint(len(c.Name))
+		if stats := c.PlannerStats.Load(); stats != nil && stats.KeyFrequency != nil {
+			frequency := stats.KeyFrequency
+			size += uint(unsafe.Sizeof(*frequency)) + uint(cap(frequency.top))*uint(unsafe.Sizeof(keyFrequencyEntry{}))
+		}
+	}
+	if snapshot := t.showColumnsSnapshot.Load(); snapshot != nil && snapshot.metadata != nil && snapshot.metadata.columns != nil {
+		// Names borrow the column strings; charge only the new pointer array.
+		size += uint(cap(snapshot.metadata.columns.names)) * uint(unsafe.Sizeof(""))
 	}
 	return size
 }
@@ -1674,6 +1693,7 @@ func plannerStatisticsFingerprint(rowEstimate, columnsFingerprint uint64) uint64
 }
 
 type tableShowColumnsMetadata struct {
+	names             []string
 	distinctEstimates []uint64
 	plannerStatistics []*columnPlannerStatistics
 }
@@ -1707,11 +1727,13 @@ func (t *table) buildShowColumnsSnapshot(rowEstimate uint) *tableShowColumnsSnap
 	result := make([]scm.Scmer, len(t.Columns))
 	plannerColumns := scm.NewFastDictValue(len(t.Columns))
 	plannerColumnsFingerprint := uint64(0x6a09e667f3bcc909)
+	names := make([]string, len(t.Columns))
 	distinctEstimates := make([]uint64, len(t.Columns))
 	plannerStatistics := make([]*columnPlannerStatistics, len(t.Columns))
 	columnNames := t.buildColumnNamesSnapshot()
 	filterSchema := plannerFingerprintString(0x1d26d8e71, t.Collation)
 	for i, c := range t.Columns {
+		names[i] = c.Name
 		filterSchema = plannerFingerprintString(filterSchema, c.Name)
 		filterSchema = plannerFingerprintString(filterSchema, c.Typ)
 		filterSchema = plannerFingerprintString(filterSchema, c.Collation)
@@ -1761,6 +1783,7 @@ func (t *table) buildShowColumnsSnapshot(rowEstimate uint) *tableShowColumnsSnap
 		metadata: &tableShowColumnsSnapshotMetadata{
 			plannerColumnsFingerprint: plannerColumnsFingerprint,
 			columns: &tableShowColumnsMetadata{
+				names:             names,
 				distinctEstimates: distinctEstimates,
 				plannerStatistics: plannerStatistics,
 			},

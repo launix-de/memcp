@@ -430,3 +430,300 @@ func feedbackTestAccess(columnExpr, filterExpr scm.Scmer) (scm.Scmer, []scm.Scme
 	}
 	return scm.NewSlice([]scm.Scmer{scm.NewSlice([]scm.Scmer{newScanAccessHeader(0, scanAccessConsumerScan, 0, -1), spec})}), bindings
 }
+
+func TestNumericKeyFrequencySkewAndTail(t *testing.T) {
+	var collector keyFrequencyCollector
+	for i := 0; i < 10000; i++ {
+		key := int64(1)
+		if i%10 >= 6 {
+			key = 2 + int64((i/10)%99)
+		}
+		collector.observe(scm.NewInt(key))
+		if len(collector.counts) > keyFrequencySlots {
+			t.Fatal("unbounded counters")
+		}
+	}
+	stats := collector.finish()
+	hot, ok := stats.frequency(scm.NewInt(1), 100)
+	if !ok || math.Abs(hot-.6) > .02 {
+		t.Fatalf("hot estimate %g", hot)
+	}
+	tail, ok := stats.frequency(scm.NewInt(100), 100)
+	if !ok || tail <= 0 || tail > .01 {
+		t.Fatalf("tail estimate %g", tail)
+	}
+	if len(stats.top) > keyFrequencyTop {
+		t.Fatal("unbounded retained keys")
+	}
+}
+
+func TestNumericKeyFrequencyNullAndMixedDomain(t *testing.T) {
+	var collector keyFrequencyCollector
+	for _, v := range []scm.Scmer{scm.NewInt(1), scm.NewFloat(1), scm.NewInt(2), scm.NewNil()} {
+		collector.observe(v)
+	}
+	stats := collector.finish()
+	for _, tc := range []struct {
+		key  scm.Scmer
+		want float64
+	}{{scm.NewInt(1), .5}, {scm.NewFloat(1), .5}, {scm.NewInt(2), .25}, {scm.NewNil(), .25}, {scm.NewInt(3), 0}} {
+		got, ok := stats.frequency(tc.key, 100)
+		if !ok || got != tc.want {
+			t.Fatalf("%v: %g instead of %g", tc.key, got, tc.want)
+		}
+	}
+	if _, ok := stats.frequency(scm.NewString("1"), 100); ok {
+		t.Fatal("coerced string received numeric statistics")
+	}
+	collector.observe(scm.NewString("1"))
+	if collector.finish() != nil {
+		t.Fatal("mixed equality domain retained")
+	}
+}
+
+func TestNumericKeyFrequencyCompletePredicateOnly(t *testing.T) {
+	var collector keyFrequencyCollector
+	collector.observe(scm.NewInt(7))
+	collector.observe(scm.NewInt(7))
+	collector.observe(scm.NewInt(9))
+	tbl := &table{}
+	tbl.showColumnsSnapshot.Store(&tableShowColumnsSnapshot{metadata: &tableShowColumnsSnapshotMetadata{columns: &tableShowColumnsMetadata{
+		names: []string{"owner"}, distinctEstimates: []uint64{2}, plannerStatistics: []*columnPlannerStatistics{{KeyFrequency: collector.finish()}},
+	}}})
+	// Build real access metadata, including expression identity and value slots.
+	params := []scm.Scmer{scm.NewSymbol("owner")}
+	columns := []scm.Scmer{scm.NewString("owner")}
+	var values []scm.Scmer
+	body := scm.NewSlice([]scm.Scmer{scm.NewSymbol("equal?"), params[0], scm.NewInt(7)})
+	feedback := compileFilterFeedback(params, columns, body, &values)
+	schema := []scm.Scmer{scm.NewSlice([]scm.Scmer{scm.NewInt(0), feedback})}
+
+	got, _, ok := tbl.keyFrequencySelectivity(schema, values)
+	if !ok || math.Abs(got-2.0/3) > 1e-12 {
+		t.Fatalf("complete predicate = %g %v", got, ok)
+	}
+	values = nil
+	compound := scm.NewSlice([]scm.Scmer{scm.NewSymbol("and"), body, scm.NewSlice([]scm.Scmer{scm.NewSymbol(">"), params[0], scm.NewInt(0)})})
+	schema[0] = scm.NewSlice([]scm.Scmer{scm.NewInt(0), compileFilterFeedback(params, columns, compound, &values)})
+	if _, _, ok := tbl.keyFrequencySelectivity(schema, values); ok {
+		t.Fatal("conjunct frequency mistaken for full expression")
+	}
+}
+
+func TestNumericKeyFrequencySetSummation(t *testing.T) {
+	var collector keyFrequencyCollector
+	for i := 0; i < 10000; i++ {
+		collector.observe(scm.NewInt(int64(i % 100)))
+	}
+	stats := collector.finish()
+	keys := recSetProjectKeys{width: 1}
+	for i := 0; i < 100; i++ {
+		keys.values = append(keys.values, scm.NewInt(int64(i)))
+	}
+	if !keys.buildNumericLookup() {
+		t.Fatal("numeric keys rejected")
+	}
+	got := stats.keySetFraction(keys, 100)
+	var want float64
+	for _, key := range keys.values {
+		rate, _ := stats.frequency(key, 100)
+		want += rate
+	}
+	if math.Abs(got-want) > 1e-12 || math.Abs(got-1) > 1e-12 {
+		t.Fatalf("full domain %g expected %g", got, want)
+	}
+}
+
+func TestNumericKeyFrequencyMetadataAndFeedbackPriority(t *testing.T) {
+	Init(scm.Globalenv)
+	var collector keyFrequencyCollector
+	collector.observe(scm.NewInt(7))
+	collector.observe(scm.NewInt(7))
+	collector.observe(scm.NewInt(9))
+	tbl := feedbackTestTable(3)
+	tbl.PlannerRowEstimate.value.Store(3)
+	tbl.showColumnsSnapshot.Store(&tableShowColumnsSnapshot{metadata: &tableShowColumnsSnapshotMetadata{columns: &tableShowColumnsMetadata{
+		names: []string{"c0"}, distinctEstimates: []uint64{2}, plannerStatistics: []*columnPlannerStatistics{{KeyFrequency: collector.finish()}},
+	}}})
+	schema, values, _ := feedbackTestCompile(t, `(equal? x 7)`)
+	callback := scm.NewFunc(func(...scm.Scmer) scm.Scmer { t.Fatal("metadata read evaluated callback"); return scm.NewNil() })
+	args := []scm.Scmer{scm.NewNil(), NewTableScmer(tbl), schema, scm.NewSlice(values), scm.NewSlice([]scm.Scmer{scm.NewString("c0")}), callback, scm.NewInt(0)}
+	estimate := func() (float64, string) {
+		result := scm.Apply(scm.Globalenv.Vars[scm.Symbol("scan_selectivity_estimate")], args...)
+		value, source := math.NaN(), ""
+		for _, item := range result.Slice() {
+			pair := item.Slice()
+			switch scm.String(pair[0]) {
+			case "value":
+				value = pair[1].Float()
+			case "source":
+				source = scm.String(pair[1])
+			}
+		}
+		return value, source
+	}
+	value, source := estimate()
+	if math.Abs(value-2.0/3) > 1e-12 || source != "numeric_key_frequency" {
+		t.Fatalf("prior %g %s", value, source)
+	}
+	key := bindFilterFeedback(schema.Slice(), values)
+	key.generation = tbl.plannerStatsToken.Load()
+	tbl.topology.Load().shards[0].filterFeedback.observe(key, 3, 1, 3)
+	tbl.publishFilterFeedback(key)
+	value, source = estimate()
+	if math.Abs(value-1.0/3) > 1e-12 || source != "scan_feedback" {
+		t.Fatalf("feedback %g %s", value, source)
+	}
+}
+
+func TestNumericKeyFrequencyColdPersistence(t *testing.T) {
+	tbl, persistence := createDurabilityTestTable(t, "key_frequency_restart", 10000)
+	RebuildTable(tbl, true, false)
+	before, _ := tbl.keyFrequency("id")
+	if before == nil {
+		t.Fatal("rebuild did not publish frequency statistics")
+	}
+	baseline, ok := before.frequency(scm.NewInt(7), 10000)
+	if !ok {
+		t.Fatal("numeric estimate missing")
+	}
+	hints := tbl.persistKeyFrequencies()
+	if hints == nil {
+		t.Fatal("frequency statistics not persisted")
+	}
+	serialized, err := json.Marshal(hints)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(serialized) > 10000*8/16 {
+		t.Fatalf("hints too large: %d", len(serialized))
+	}
+	db := newDatabase()
+	db.Name = "key_frequency_restart"
+	db.persistence = persistence
+	db.srState = COLD
+	db.ensureLoaded()
+	restored := db.GetTable("items")
+	after, ndv := restored.keyFrequency("id")
+	if after == nil {
+		t.Fatal("frequency statistics not restored")
+	}
+	value, ok := after.frequency(scm.NewInt(7), ndv)
+	if !ok || value != baseline {
+		t.Fatalf("restored rate %g expected %g", value, baseline)
+	}
+	for _, shard := range restored.ActiveShards() {
+		if shard.state() != COLD {
+			t.Fatal("restoring/reading statistics loaded a shard")
+		}
+	}
+	for _, bad := range []string{`{"version":99}`, `{"version":1,"columns":"invalid"}`} {
+		var decoded persistedKeyFrequencies
+		if err := json.Unmarshal([]byte(bad), &decoded); err != nil || decoded.Version != 0 {
+			t.Fatalf("invalid optional hints rejected schema: %v %+v", err, decoded)
+		}
+	}
+}
+
+func TestNumericKeyFrequencySnapshotPublication(t *testing.T) {
+	var first, second keyFrequencyCollector
+	for i := 0; i < 100; i++ {
+		first.observe(scm.NewInt(1))
+		second.observe(scm.NewInt(int64(i % 2)))
+	}
+	snapshots := []*tableShowColumnsSnapshot{
+		{metadata: &tableShowColumnsSnapshotMetadata{columns: &tableShowColumnsMetadata{
+			names: []string{"owner"}, distinctEstimates: []uint64{1},
+			plannerStatistics: []*columnPlannerStatistics{{KeyFrequency: first.finish()}},
+		}}},
+		{metadata: &tableShowColumnsSnapshotMetadata{columns: &tableShowColumnsMetadata{
+			names: []string{"owner"}, distinctEstimates: []uint64{2},
+			plannerStatistics: []*columnPlannerStatistics{{KeyFrequency: second.finish()}},
+		}}},
+	}
+	tbl := &table{}
+	tbl.showColumnsSnapshot.Store(snapshots[0])
+	var readers sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		readers.Add(1)
+		go func() {
+			defer readers.Done()
+			for j := 0; j < 1000; j++ {
+				stats, ndv := tbl.keyFrequency("owner")
+				rate, known := stats.frequency(scm.NewInt(1), ndv)
+				if !known || (rate != 1 && rate != .5) {
+					t.Errorf("torn frequency snapshot: %g %v", rate, known)
+					return
+				}
+			}
+		}()
+	}
+	for i := 0; i < 1000; i++ {
+		tbl.showColumnsSnapshot.Store(snapshots[i%2])
+	}
+	readers.Wait()
+}
+
+func TestNumericKeyFrequencyUniqueTail(t *testing.T) {
+	var collector keyFrequencyCollector
+	for i := 0; i < 10000; i++ {
+		collector.observe(scm.NewInt(int64(i)))
+	}
+	stats := collector.finish()
+	if len(stats.top) != 0 {
+		t.Fatal("unique late-arriving values became false heavy keys")
+	}
+	for _, key := range []int64{0, 7, 9900, 9999} {
+		rate, known := stats.frequency(scm.NewInt(key), 10000)
+		if !known || math.Abs(rate-.0001) > 1e-12 {
+			t.Fatalf("unique key %d received a heavy-key prior: %g", key, rate)
+		}
+	}
+}
+
+func TestNumericKeyFrequencyPredicateNullSemantics(t *testing.T) {
+	var collector keyFrequencyCollector
+	for _, value := range []scm.Scmer{scm.NewInt(0), scm.NewInt(1), scm.NewInt(2), scm.NewNil()} {
+		collector.observe(value)
+	}
+	tbl := &table{}
+	tbl.showColumnsSnapshot.Store(&tableShowColumnsSnapshot{metadata: &tableShowColumnsSnapshotMetadata{columns: &tableShowColumnsMetadata{
+		names: []string{"owner"}, distinctEstimates: []uint64{4},
+		plannerStatistics: []*columnPlannerStatistics{{KeyFrequency: collector.finish()}},
+	}}})
+	for _, tc := range []struct {
+		operator string
+		value    scm.Scmer
+		want     float64
+	}{{"equal?", scm.NewNil(), .5}, {"equal?", scm.NewInt(0), .5},
+		{"equal??", scm.NewNil(), 0}, {"equal??", scm.NewInt(0), .25}} {
+		params := []scm.Scmer{scm.NewSymbol("x")}
+		var values []scm.Scmer
+		body := scm.NewSlice([]scm.Scmer{scm.NewSymbol(tc.operator), params[0], tc.value})
+		metadata := compileFilterFeedback(params, []scm.Scmer{scm.NewString("owner")}, body, &values)
+		schema := []scm.Scmer{scm.NewSlice([]scm.Scmer{scm.NewInt(0), metadata})}
+		rate, _, known := tbl.keyFrequencySelectivity(schema, values)
+		if !known || rate != tc.want {
+			t.Fatalf("%s %v: %g instead of %g (known %v)", tc.operator, tc.value, rate, tc.want, known)
+		}
+	}
+}
+
+func TestNumericKeyFrequencyRetainedMemory(t *testing.T) {
+	c := &column{Name: "owner"}
+	tbl := &table{Columns: []*column{c}}
+	before := tbl.metadataMemory()
+	var collector keyFrequencyCollector
+	for i := 0; i < 10000; i++ {
+		collector.observe(scm.NewInt(int64(i % 64)))
+	}
+	stats := collector.finish()
+	if cap(stats.top) > keyFrequencyTop {
+		t.Fatal("truncated top keys retain discarded backing storage")
+	}
+	c.PlannerStats.Store(&columnPlannerStatistics{KeyFrequency: stats})
+	after := tbl.metadataMemory()
+	if after <= before || after-before > 10000*8/16 {
+		t.Fatalf("retained frequency memory not charged or not compact: %d bytes", after-before)
+	}
+}

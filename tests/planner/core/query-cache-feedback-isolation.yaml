@@ -20,6 +20,13 @@ setup:
         (insert (table "memcp-tests" "qfi_document") '("id" "label")
           (map (produceN 1000) (lambda (i) (list i (if (< i 10) "needle" "ordinary")))))
         (rebuild (table "memcp-tests" "qfi_document") true false))
+  - sql: "DROP TABLE IF EXISTS qfi_frequency"
+  - sql: "CREATE TABLE qfi_frequency (owner_id INT) ENGINE=sloppy"
+  - scm: |
+      (begin
+        (insert (table "memcp-tests" "qfi_frequency") '("owner_id")
+          (map (produceN 6000) (lambda (i) (list (if (< i 4500) 1 2)))))
+        (rebuild (table "memcp-tests" "qfi_frequency") true false))
 test_cases:
   - name: "Rejected parameter-domain specialization leaves the ordinary plan reusable"
     scm: |
@@ -423,7 +430,32 @@ test_cases:
           (error "singleton plan survived growth without rechecking its assumptions")))
     expect:
       data: [true]
+  - name: "Numeric frequency guard reads the executing binding and rebuilt snapshot"
+    scm: |
+      (begin
+        (define sess (newsession))
+        (sess "owner" 1)
+        (define planning (sql_queryplan_compile_session sess nil))
+        (define src (list "f" "memcp-tests" "qfi_frequency" false nil))
+        (define pred (list 'lambda (list 'x) (list 'equal?? 'x (list 'session "owner"))))
+        (planner_record_filter_feedback_guard src '("owner_id") pred planning)
+        (define guard (sql_queryplan_compile_formula nil (sql_queryplan_guard_from_session planning)))
+        (define original (guard sess nil nil nil))
+        (sess "owner" 2)
+        (define other (guard sess nil nil nil))
+        (sess "owner" 1)
+        (define restored (guard sess nil nil nil))
+        (insert (table "memcp-tests" "qfi_frequency") '("owner_id")
+          (map (produceN 6000) (lambda (i) (list 3))))
+        (rebuild (table "memcp-tests" "qfi_frequency") true false)
+        (define changed (guard sess nil nil nil))
+        (if (and original (not other) restored (not changed)) true
+          (error (concat "frequency guard ignored binding or rebuild: "
+            (serialize (list original other restored changed))))))
+    expect:
+      data: [true]
 cleanup:
+  - sql: "DROP TABLE IF EXISTS qfi_frequency"
   - sql: "DROP TABLE IF EXISTS qfi_access"
   - sql: "DROP TABLE IF EXISTS qfi_single"
   - sql: "DROP TABLE IF EXISTS qfi_document"
