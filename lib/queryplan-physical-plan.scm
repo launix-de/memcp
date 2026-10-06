@@ -8758,27 +8758,38 @@ partition order columns as one fused physical operator. */
 tree. Right subtrees are continuations of every surviving left row, so their
 probe count must be scaled at that node rather than inherited from the root
 driver. This is physical costing metadata only; it never enters logical IR. */
-(define physical_join_tree_probe_work (lambda (tree sources)
+(define physical_join_tree_probe_work (lambda (tree sources stages)
 	(match tree
 		((symbol join-leaf) alias predicates) (begin
 			(define src (join_optimizer_source_by_alias sources alias))
-			(define source_rows (if (nil? src) nil (planner_source_row_count src)))
+			/* A cold canonical cache has no count, or only its allocated empty
+			count. Prefer an observed populated cache; otherwise recover the stage
+			input estimate instead of poisoning downstream probe work with nil.
+			Zero alone cannot prove initialization has completed. */
+			(define measured_rows (if (nil? src) nil (planner_source_row_count src)))
+			(define stage (if (nil? src) nil (stage_for_group_cache_source stages src)))
+			(define logical_src (if (nil? stage) src
+				(source_with_relation src (make_stage_output_relation (gs_id stage)))))
+			(define source_rows (if (or (nil? stage)
+				(and (number? measured_rows) (> measured_rows 0))) measured_rows
+				(planner_estimate_planning_value
+					(planner_source_row_estimate_using_stages stages logical_src) nil)))
 			(define rows (if (number? source_rows)
 				(max 1 (* source_rows (physical_probe_predicate_selectivity predicates)))
 				nil))
 			(list rows (list (list alias rows))))
 		((quote join-leaf) alias predicates)
 		(physical_join_tree_probe_work
-			(list (symbol "join-leaf") alias predicates) sources)
+			(list (symbol "join-leaf") alias predicates) sources stages)
 		((symbol join-leaf) alias)
 		(physical_join_tree_probe_work
-			(list (symbol "join-leaf") alias '()) sources)
+			(list (symbol "join-leaf") alias '()) sources stages)
 		((quote join-leaf) alias)
 		(physical_join_tree_probe_work
-			(list (symbol "join-leaf") alias '()) sources)
+			(list (symbol "join-leaf") alias '()) sources stages)
 		((symbol join-node) kind left right predicates) (begin
-			(define left_work (physical_join_tree_probe_work left sources))
-			(define right_work (physical_join_tree_probe_work right sources))
+			(define left_work (physical_join_tree_probe_work left sources stages))
+			(define right_work (physical_join_tree_probe_work right sources stages))
 			(define left_rows (car left_work))
 			(define right_rows (car right_work))
 			(define selectivity (physical_probe_predicate_selectivity predicates))
@@ -8796,7 +8807,7 @@ driver. This is physical costing metadata only; it never enters logical IR. */
 				(physical_probe_work_index_scaled (cadr right_work) right_invocations)))))
 		((quote join-node) kind left right predicates)
 		(physical_join_tree_probe_work
-			(list (symbol "join-node") kind left right predicates) sources)
+			(list (symbol "join-node") kind left right predicates) sources stages)
 		_ (list nil '()))))
 
 /* Count physical scan boundaries in the nested legacy tree. A right subtree is
@@ -8815,7 +8826,7 @@ controls matches, not whether the keyed lookup is attempted. */
 		(physical_join_tree_scan_invocations
 			(list (symbol "join-leaf") alias '()) sources multiplier)
 		((symbol join-node) _kind left right _predicates) (begin
-			(define left_work (physical_join_tree_probe_work left sources))
+			(define left_work (physical_join_tree_probe_work left sources nil))
 			(define left_rows (car left_work))
 			(define left_invocations
 				(physical_join_tree_scan_invocations left sources multiplier))
@@ -8830,10 +8841,28 @@ controls matches, not whether the keyed lookup is attempted. */
 			(list (symbol "join-node") kind left right predicates) sources multiplier)
 		_ nil)))
 
-(define join_scan_probe_context (lambda (tree sources default_rows)
+/* Record exactly the base cardinality inputs read by planner_stage_input_rows.
+Logical UNION inputs sum branch counts; query blocks read their own sources. */
+(define physical_probe_stage_input_statistics_guards (lambda (input planning_session)
+	(if (union_block? input)
+		(map (union_branches input) (lambda (branch)
+			(physical_probe_stage_input_statistics_guards branch planning_session)))
+		(planner_record_table_statistics_guards
+			(if (query_block? input) (qb_sources input) (list input)) planning_session))))
+
+(define join_scan_probe_context (lambda (tree sources default_rows stages planning_session)
 	(begin
+		(map sources (lambda (src)
+			(begin
+				(define stage (stage_for_group_cache_source stages src))
+				(if (nil? stage) nil
+					(begin
+						(define measured_rows (planner_source_row_count src))
+						(if (and (number? measured_rows) (> measured_rows 0))
+							(planner_record_table_statistics_guards (list src) planning_session)
+							(physical_probe_stage_input_statistics_guards (gs_input stage) planning_session)))))))
 		(define work (if (nil? tree) (list nil '())
-			(physical_join_tree_probe_work tree sources)))
+			(physical_join_tree_probe_work tree sources stages)))
 		(list
 			(list (quote probe_work_context) true)
 			(list (quote driver_alias) (if (nil? tree) nil
@@ -10076,10 +10105,10 @@ predicate and cardinality guard still own their ordinary row-local evaluation. *
 				runs the same lowerer with its own work estimate. */
 				(define effective_scalar_plan (if (not (nil? scalar_plan))
 					scalar_plan
-					/* Without a preceding membership carrier, retain the established
-					leaf-condition lowering. It owns nullable LEFT-JOIN cardinality and must
-					not be pre-empted by a driver-context estimate from another tree node. */
-					(if (or (nil? membership_plan) use_batch_accept) nil
+					/* Inner leaves own their positive local truth filters, including when
+					a preceding relational group drives them without a membership RecSet.
+					Nullable LEFT-JOIN leaves retain the established condition lowering. */
+					(if (or (and (nil? membership_plan) (or outer_scan (source_outer? src))) use_batch_accept) nil
 						(physical_scalar_truth_plan all_sources src default_alias condition
 							residual_probe_work_rows residual_probe_work_rows stages planning_session))))
 				(define effective_scalar_carrier
@@ -10399,7 +10428,8 @@ ownership remain available until the physical scans are emitted. */
 			(nil? (find (split_and_terms (coalesceNil final_condition true)) (lambda (term)
 				(match term '(op _left _right) (equal? op (quote equal??)) _ false)) nil))) facts
 			(qassoc_set facts (quote scalar_filter_condition) final_condition)))
-		(define probe_context (join_scan_probe_context tree all_sources probe_work_rows))
+		(define probe_context (join_scan_probe_context tree all_sources probe_work_rows stages
+			(planner_context_session facts)))
 		(define residual_condition (if (nil? tree) final_condition
 			(condition_without_join_tree_predicates final_condition tree)))
 		(define terminal (lambda (remaining_condition final_row_expr remaining_order_items)
@@ -13213,15 +13243,15 @@ opaque implementation detail in EXPLAIN PHYSICAL. */
 					(list "reason" "actual_key_count_target_distinct_estimate_and_page_window")
 					(list "alternatives" (list "prefix_cursor_merge" "ordered_membership_scan" "projected_recset_scan"))))
 				(if (equal? (string head) "recset_project_join")
-				(list (list
-					(list "decision" "recset_project_join_access")
-					(list "chosen" "runtime_cost_minimum")
-					(list "reason" "actual_key_and_target_shard_cardinality")
-					(list "alternatives" (list
-						"indexed_key_probes"
-						"dense_numeric_membership_scan"
-						"dense_generic_membership_scan"))))
-				'())))
+					(list (list
+						(list "decision" "recset_project_join_access")
+						(list "chosen" "runtime_cost_minimum")
+						(list "reason" "actual_key_and_target_shard_cardinality")
+						(list "alternatives" (list
+							"indexed_key_probes"
+							"dense_numeric_membership_scan"
+							"dense_generic_membership_scan"))))
+					'())))
 			(reduce tail (lambda (decisions item)
 				(merge (list decisions (physical_recset_project_join_decisions item)))) own))
 		_ '())))
