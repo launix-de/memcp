@@ -2706,7 +2706,11 @@ func Init(en scm.Env) {
 			}
 			t.ddlMu.Lock()
 			defer t.ddlMu.Unlock()
-			created := t.createColumnDDLLocked(colname, typename, dimensions, typeparams)
+			var queryTx *TxContext
+			if len(a) > 7 {
+				queryTx = scmerToTxContext(a[7])
+			}
+			created := t.createColumnDDLLocked(colname, typename, dimensions, typeparams, queryTx)
 
 			// Software contract:
 			// createcolumn is the table-local DDL entrypoint for both "create a new
@@ -2772,6 +2776,7 @@ func Init(en scm.Env) {
 					value.Optional = true
 					return value
 				}(),
+				{Kind: "any", Label: "queryTx", Optional: true, Description: "owning statement which retains a temporary column through query completion"},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},

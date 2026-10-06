@@ -92,7 +92,7 @@ type StorageComputeProxy struct {
 	inputCols  []string                            // column names the computor reads
 	shard      *storageShard                       // back-reference for reading input columns
 	colName    string                              // own column name (for cycle protection)
-	mu         sync.RWMutex                        // protects delta map + compressed flag
+	mu         sync.RWMutex                        // protects delta, main, compressed and retained byte counters
 	count      uint32                              // total row count at creation
 	// ORC support: when isOrdered=true, single-row lazy compute is disabled.
 	// Validity is tracked per-row via validMask (1=valid, 0=needs compute).
@@ -116,6 +116,12 @@ type StorageComputeProxy struct {
 	// the prepared length makes a later append invalidate the O(1) proof without
 	// rescanning the delta slice or its deletion bitmap.
 	preparedDeltaRows atomic.Uint64
+	// Incremental exclusive payload sizes, protected by mu. Main is measured
+	// once when its completed generation is installed; delta mutations account
+	// only the changed value. These runtime counters are reconstructed on load
+	// and never serialized. Cache publication must not traverse retained rows.
+	deltaBytes uint
+	mainBytes  uint
 }
 
 // cloneComputeProxyRows ports a compute/ORC proxy onto a rebuilt shard without
@@ -168,7 +174,7 @@ func appendComputeProxyRows(newProxy *StorageComputeProxy, oldProxy *StorageComp
 			}
 			val = oldProxy.main.GetValue(oldIdx)
 		}
-		newProxy.delta[newIdx] = val
+		newProxy.setDeltaValueLocked(newIdx, val)
 		newProxy.validMask.AtomicSet(uint(newIdx), true)
 		newIdx++
 	}
@@ -202,7 +208,7 @@ func (r *computeProxyReader) GetValue(idx uint32) scm.Scmer {
 	val := scm.Apply(p.computor, r.values...)
 
 	p.mu.Lock()
-	p.delta[idx] = val
+	p.setDeltaValueLocked(idx, val)
 	p.mu.Unlock()
 	p.validMask.AtomicSet(uint(idx), true)
 	return val
@@ -354,7 +360,7 @@ func (p *StorageComputeProxy) prewarmDeltaRows(_ *TxContext, filterCols []string
 				continue
 			}
 		}
-		p.delta[recid] = value
+		p.setDeltaValueLocked(recid, value)
 		p.validMask.AtomicSet(uint(recid), true)
 	}
 	p.mu.Unlock()
@@ -368,6 +374,42 @@ func (p *StorageComputeProxy) orcCol() *column {
 		}
 	}
 	return nil
+}
+
+// setDeltaValueLocked and deleteDeltaValueLocked require mu, or exclusive
+// ownership while constructing an unpublished generation. No CacheManager
+// synchronization is performed inside row loops.
+func (p *StorageComputeProxy) setDeltaValueLocked(idx uint32, value scm.Scmer) {
+	newBytes := scm.ComputeSize(value)
+	if old, present := p.delta[idx]; present {
+		p.deltaBytes -= scm.ComputeSize(old)
+	}
+	p.deltaBytes += newBytes
+	p.delta[idx] = value
+}
+
+func (p *StorageComputeProxy) deleteDeltaValueLocked(idx uint32) {
+	if old, present := p.delta[idx]; present {
+		p.deltaBytes -= scm.ComputeSize(old)
+		delete(p.delta, idx)
+	}
+}
+
+func (p *StorageComputeProxy) setMainValueLocked(main *StorageSCMER, idx uint32, value scm.Scmer) {
+	oldBytes := scm.ComputeSize(main.GetValue(idx))
+	newBytes := scm.ComputeSize(value)
+	main.SetValue(idx, value)
+	p.mainBytes = p.mainBytes - oldBytes + newBytes
+}
+
+// ownedMemory reads scalar accounting maintained at mutation/construction
+// boundaries. Bitmap sizing is an O(1) atomic slice-length snapshot. Unlike
+// diagnostic ComputeSize, this never walks the main column or the delta map.
+func (p *StorageComputeProxy) ownedMemory() uint {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return uint(unsafe.Sizeof(*p)) + p.validMask.ComputeSize() +
+		uint(len(p.delta))*32 + p.deltaBytes + p.mainBytes
 }
 
 func (p *StorageComputeProxy) ComputeSize() uint {
@@ -451,7 +493,7 @@ func (p *StorageComputeProxy) getValueTx(tx *TxContext, idx uint32) scm.Scmer {
 	val := scm.Apply(p.computor, colvalues...)
 
 	p.mu.Lock()
-	p.delta[idx] = val
+	p.setDeltaValueLocked(idx, val)
 	p.mu.Unlock()
 	p.validMask.AtomicSet(uint(idx), true)
 
@@ -513,7 +555,7 @@ func (p *StorageComputeProxy) getValueRLocked(_ *TxContext, idx uint32) scm.Scme
 	}
 	value := scm.Apply(p.computor, values...)
 	p.mu.Lock()
-	p.delta[idx] = value
+	p.setDeltaValueLocked(idx, value)
 	p.mu.Unlock()
 	p.validMask.AtomicSet(uint(idx), true)
 	return value
@@ -675,13 +717,15 @@ func (p *StorageComputeProxy) Compress(_ *TxContext) {
 	}
 	newcol.finish()
 
+	mainBytes := ownedColumnMemory(newcol)
 	p.mu.Lock()
 	compressedNow := p.revision.Load() == startRevision
 	if compressedNow {
 		p.main = newcol
+		p.mainBytes = mainBytes
 		for recid := range p.delta {
 			if recid < count {
-				delete(p.delta, recid)
+				p.deleteDeltaValueLocked(recid)
 			}
 		}
 		p.validMask.Reset()
@@ -731,7 +775,7 @@ func (p *StorageComputeProxy) CompressFiltered(_ *TxContext, filterCols []string
 				for j := range readers {
 					colvalues[j] = readers[j].GetValue(i)
 				}
-				p.delta[i] = scm.Apply(p.computor, colvalues...)
+				p.setDeltaValueLocked(i, scm.Apply(p.computor, colvalues...))
 				p.validMask.AtomicSet(uint(i), true)
 			}
 		}
@@ -757,7 +801,7 @@ func (p *StorageComputeProxy) InvalidateTx(tx *TxContext, idx uint32) {
 		if scmer, ok := p.main.(*StorageSCMER); ok {
 			if idx >= p.count {
 				p.validMask.AtomicSet(uint(idx), false)
-				delete(p.delta, idx)
+				p.deleteDeltaValueLocked(idx)
 				return
 			}
 			// recompute single value and write directly
@@ -766,7 +810,7 @@ func (p *StorageComputeProxy) InvalidateTx(tx *TxContext, idx uint32) {
 				colvalues[i] = p.shard.getColumnStorageOrPanic(col, alreadyLocked, tx).GetValue(idx)
 			}
 			val := scm.Apply(p.computor, colvalues...)
-			scmer.SetValue(idx, val)
+			p.setMainValueLocked(scmer, idx, val)
 			return // stay compressed, no bitmap change needed
 		}
 		// Compressed immutable storages cannot update in place. Keep the compact
@@ -778,12 +822,12 @@ func (p *StorageComputeProxy) InvalidateTx(tx *TxContext, idx uint32) {
 			for i, col := range p.inputCols {
 				colvalues[i] = p.shard.getColumnStorageOrPanic(col, alreadyLocked, tx).GetValue(idx)
 			}
-			p.delta[idx] = scm.Apply(p.computor, colvalues...)
+			p.setDeltaValueLocked(idx, scm.Apply(p.computor, colvalues...))
 			return
 		}
 	}
 	p.validMask.AtomicSet(uint(idx), false)
-	delete(p.delta, idx)
+	p.deleteDeltaValueLocked(idx)
 }
 
 // InvalidateRows chooses between exact point repair and complete lazy
@@ -879,7 +923,7 @@ func (p *StorageComputeProxy) IncrementalUpdateTx(tx *TxContext, idx uint32, del
 	} else {
 		newVal = scm.NewFloat(oldVal.Float() + delta.Float())
 	}
-	p.delta[idx] = newVal
+	p.setDeltaValueLocked(idx, newVal)
 	if p.compressed {
 		p.compressed = false
 		// All rows were valid while compressed (values in main). Now that we're
@@ -901,7 +945,7 @@ func (p *StorageComputeProxy) SetValue(idx uint32, val scm.Scmer) {
 	defer p.mu.Unlock()
 	if p.compressed && p.main != nil {
 		if scmer, ok := p.main.(*StorageSCMER); ok && idx < p.count {
-			scmer.SetValue(idx, val)
+			p.setMainValueLocked(scmer, idx, val)
 			return
 		}
 		// main is a compressed type → fall back to delta; mark all rows valid
@@ -911,7 +955,7 @@ func (p *StorageComputeProxy) SetValue(idx uint32, val scm.Scmer) {
 			p.validMask.AtomicSet(uint(i), true)
 		}
 	}
-	p.delta[idx] = val
+	p.setDeltaValueLocked(idx, val)
 	p.validMask.AtomicSet(uint(idx), true)
 }
 
@@ -923,6 +967,7 @@ func (p *StorageComputeProxy) InvalidateAll() {
 	p.compressed = false
 	p.validMask.Reset()
 	p.delta = make(map[uint32]scm.Scmer)
+	p.deltaBytes = 0
 }
 
 // ShouldSkipSelectiveInvalidation returns true when cumulative invalidation
@@ -1149,6 +1194,7 @@ func (p *StorageComputeProxy) deserializeComputeProxyV0(f io.Reader) uint {
 		main := reflect.New(storages[magicbyte]).Interface().(ColumnStorage)
 		main.Deserialize(f)
 		p.main = main
+		p.mainBytes = ownedColumnMemory(main)
 	} else {
 		var deltaLen uint32
 		binary.Read(f, binary.LittleEndian, &deltaLen)
@@ -1162,12 +1208,13 @@ func (p *StorageComputeProxy) deserializeComputeProxyV0(f io.Reader) uint {
 			io.ReadFull(f, valBuf)
 			var valRaw any
 			json.Unmarshal(valBuf, &valRaw)
-			p.delta[idx] = scm.TransformFromJSON(valRaw)
+			p.setDeltaValueLocked(idx, scm.TransformFromJSON(valRaw))
 		}
 	}
 
 	if p.delta == nil {
 		p.delta = make(map[uint32]scm.Scmer)
+		p.deltaBytes = 0
 	}
 	if err := p.readValidMaskV2(f); err != nil {
 		// Legacy proxy files before v2 wrote the bitmap payload incorrectly.

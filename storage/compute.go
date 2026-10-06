@@ -480,7 +480,9 @@ func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard,
 			// values before rebuilding; readers of invalid rows wait on orcMu.
 			proxy.mu.Lock()
 			proxy.main = nil
+			proxy.mainBytes = 0
 			proxy.delta = make(map[uint32]scm.Scmer)
+			proxy.deltaBytes = 0
 			proxy.compressed = false
 			proxy.validMask.Reset()
 			proxy.mu.Unlock()

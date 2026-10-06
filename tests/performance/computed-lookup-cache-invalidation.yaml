@@ -69,6 +69,39 @@ test_cases:
       data:
         - total: 33071990
 
+  - name: "Repeated canonical cache preparation does not recount retained delta values"
+    setup:
+      - sql: "DROP TABLE IF EXISTS lookup_accounting_driver"
+      - sql: "CREATE TABLE lookup_accounting_driver (id INT) ENGINE=memory"
+      # Leave appended rows in delta: prepared proxies still cache their values,
+      # and repeated preparation must not recount the complete retained map.
+      - scm: |
+          (insert (table "memcp-tests" "lookup_accounting_driver") '("id")
+            (map (produceN 8000) (lambda (i) (list (+ i 1)))))
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS lookup_accounting_driver"
+    threshold_ms: 5000
+    timeout: 20
+    warmup: 0
+    timing_samples: 4
+    timing_aggregation: total
+    max_regression_pct: 20
+    scm: |
+      (!begin
+        (define prepare (lambda ()
+          (createcolumn (table "memcp-tests" "lookup_accounting_driver")
+            ".account:value" "INT" '() '("temp" true)
+            '("id") (lambda (id) id))))
+        (reduce (produceN 64) (lambda (acc i) (!begin (prepare) true)) true)
+        (scan nil (table "memcp-tests" "lookup_accounting_driver")
+          (car (eval (cons (quote list) (slice (compile_scan_plan (quote scan) nil nil '() (scheme "(lambda () true)") '()) 3 5))))
+          (cadr (eval (cons (quote list) (slice (compile_scan_plan (quote scan) nil nil '() (scheme "(lambda () true)") '()) 3 5))))
+          '() (lambda () true)
+          '(".account:value") (lambda (acc value) (+ acc value))
+          0 + false))
+    expect:
+      data: [32004000]
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS lookup_invalidation_driver"
   - sql: "DROP TABLE IF EXISTS lookup_invalidation_source"

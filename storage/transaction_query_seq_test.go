@@ -17,6 +17,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 package storage
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/launix-de/memcp/scm"
@@ -48,6 +49,7 @@ func TestWithAutocommitReusesParkedTransactionAndClearsQueryState(t *testing.T) 
 	session := scm.NewSession()
 	ss := &scm.SessionState{}
 	var first, second *TxContext
+	tbl, col := &table{}, &column{IsTemp: true}
 
 	run := func(query string, dst **TxContext) {
 		seq := ss.BeginQuery("Query", query)
@@ -55,6 +57,9 @@ func TestWithAutocommitReusesParkedTransactionAndClearsQueryState(t *testing.T) 
 		WithAutocommit(session, ss, seq, query, scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
 			tx := scmerToTxContext(a[0])
 			*dst = tx
+			if !tx.retainQueryColumn(tbl, col) {
+				t.Fatal("could not retain the prepared statement dependency")
+			}
 			if !tx.queryActive.Load() {
 				t.Fatal("transaction is not marked active inside query")
 			}
@@ -63,6 +68,9 @@ func TestWithAutocommitReusesParkedTransactionAndClearsQueryState(t *testing.T) 
 			}
 			return scm.NewBool(true)
 		}))
+		if tbl.cacheUsers != 0 || col.cacheUsers != 0 || (*dst).queryColumns != nil {
+			t.Fatal("autocommit retained prepared cache columns after execution")
+		}
 		if (*dst).queryActive.Load() || (*dst).querySeq.Load() != 0 || (*dst).queryInfo.Load() != nil {
 			t.Fatal("parked transaction retained finished query state")
 		}
@@ -176,4 +184,47 @@ func TestContributionReadVersionTracksDMLAndVisibility(t *testing.T) {
 	tbl.publishTopologyLocked()
 	tbl.mu.Unlock()
 	changed(before, "topology publication")
+}
+
+// A prepared computed column must survive unrelated cache pressure until every
+// consumer in the statement finishes. Explicit transactions release per query.
+func TestPreparedQueryColumnSurvivesEvictionUntilStatementCompletes(t *testing.T) {
+	for _, panics := range []bool{false, true} {
+		t.Run(fmt.Sprint("panic=", panics), func(t *testing.T) {
+			tbl := &table{}
+			col := &column{IsTemp: true}
+			tx := NewTxContext(TxCursorStability)
+			tx.beginQuery(nil, 41, "prepared cache consumer")
+			func() {
+				defer func() { _ = recover() }()
+				defer tx.endQuery(41)
+				tx.retainQueryColumn(tbl, col)
+				tx.retainQueryColumn(tbl, col)
+				if tbl.cacheUsers != 1 || col.cacheUsers != 1 {
+					t.Fatalf("duplicate prepare changed pin counts: table=%d column=%d", tbl.cacheUsers, col.cacheUsers)
+				}
+				if tbl.beginCacheEviction() || col.beginCacheEviction() {
+					t.Fatal("cache pressure retired a prepared statement dependency")
+				}
+				if panics {
+					panic("consumer failure")
+				}
+			}()
+			if tbl.cacheUsers != 0 || col.cacheUsers != 0 || tx.queryColumns != nil {
+				t.Fatal("finished query retained cache pins")
+			}
+			if !tbl.beginCacheEviction() || !col.beginCacheEviction() {
+				t.Fatal("finished statement still blocks cache eviction")
+			}
+		})
+	}
+}
+
+func TestParkedTransactionDoesNotRetainQueryColumn(t *testing.T) {
+	tbl, col := &table{}, &column{IsTemp: true}
+	tx := NewTxContext(TxCursorStability)
+	tx.retainQueryColumn(tbl, col)
+	if tx.queryColumns != nil || tbl.cacheUsers != 0 || col.cacheUsers != 0 {
+		t.Fatal("parked transaction retained a statement dependency")
+	}
 }

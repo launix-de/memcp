@@ -1815,7 +1815,7 @@ through to reach the base table -- src already is it. */
 	(and (not (nil? (scalar_first_probe_keytable_key_index stage src keys)))
 		(scalar_first_probe_keytable_cost_preferred? stage probe_work_rows))))
 
-(define lower_keytable_scalar_first_probe_expr (lambda (all_stages stage requested_col resolved_lookup_key partition_limit)
+(define lower_keytable_scalar_first_probe_expr (lambda (all_stages stage requested_col resolved_lookup_key partition_limit prepared)
 	(begin
 		(define probe_catalog (qassoc_get (gs_facts stage) (quote probe_catalog) '()))
 		(define stage_catalog (stage_catalog_with_nested
@@ -1827,7 +1827,7 @@ through to reach the base table -- src already is it. */
 		(define cache_schema (group_cache_schema cache))
 		(define cache_relation (group_cache_relation cache))
 		(list (quote begin)
-			(lower_group_stage_prepare_using stage_catalog stage_catalog physical_stage true nil)
+			(if prepared nil (lower_group_stage_prepare_using stage_catalog stage_catalog physical_stage true nil))
 			(compile_scan_plan (quote scan_order)
 				(physical_query_tx_symbol)
 				(list (quote table) cache_schema cache_relation)
@@ -2478,7 +2478,7 @@ would still have to project that value over the segment. */
 						requested_col
 						(lower_column_expr_for_join sources default_alias
 							(nth lookup_keys key_index))
-						partition_limit))
+						partition_limit false))
 				(symbol query-scan)
 				(lower_scalar_first_query_probe_expr
 					probe_stages
@@ -7805,7 +7805,7 @@ every group row and its canonical identity stays independent of bound values. */
 					(aggregate_shard_combine ag)
 					false)))
 			(define aggregate_value_expr (aggregate_finalize_expr ag aggregate_state_expr))
-			(list (quote createcolumn)
+			(merge (list (list (quote createcolumn)
 				(list (quote table) schema grouptbl)
 				agg_col
 				"any"
@@ -7814,7 +7814,9 @@ every group row and its canonical identity stays independent of bound values. */
 				(cons (quote list) key_names)
 				(list (quote lambda)
 					(map key_names (lambda (col) (symbol col)))
-					aggregate_value_expr))))))
+					aggregate_value_expr))
+				(if (qassoc_get (gs_facts stage) (quote query_cache_lease) false)
+					(list (physical_query_tx_symbol)) '()))))))))
 
 (define direct_group_aggregate_read_expr (lambda (ag)
 	(begin
