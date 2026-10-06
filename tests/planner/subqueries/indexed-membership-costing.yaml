@@ -9,6 +9,12 @@ metadata:
   isolated: true
 
 setup:
+  - sql: "DROP TABLE IF EXISTS imc_projection_key"
+  - sql: "DROP TABLE IF EXISTS imc_projection_value"
+  - sql: "CREATE TABLE imc_projection_key (id INT PRIMARY KEY, k INT, enabled INT) ENGINE=memory"
+  - sql: "CREATE TABLE imc_projection_value (k INT, epoch INT, actor INT) ENGINE=memory"
+  - sql: "INSERT INTO imc_projection_key VALUES (1,10,1),(2,10,1),(3,20,1),(4,NULL,1),(5,30,1),(6,10,0)"
+  - sql: "INSERT INTO imc_projection_value VALUES (10,0,7),(10,0,7),(20,0,8),(30,1,7),(NULL,0,7),(99,0,7)"
   - sql: "DROP TABLE IF EXISTS imc_acl"
   - sql: "DROP TABLE IF EXISTS imc_assignment"
   - sql: "DROP TABLE IF EXISTS imc_domain"
@@ -48,6 +54,8 @@ setup:
   - sql: "SELECT id FROM imc_file WHERE search LIKE '%klaus%'"
 
 cleanup:
+  - sql: "DROP TABLE IF EXISTS imc_projection_key"
+  - sql: "DROP TABLE IF EXISTS imc_projection_value"
   - sql: "DROP TABLE IF EXISTS imc_acl"
   - sql: "DROP TABLE IF EXISTS imc_assignment"
   - sql: "DROP TABLE IF EXISTS imc_domain"
@@ -56,6 +64,76 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS imc_file"
 
 test_cases:
+  - name: "Both membership projection directions preserve every invocation key and duplicate target row"
+    scm: |
+      (begin
+        (define target '("d" "memcp-tests" "imc_projection_key" false nil))
+        (define rhs '("r" "memcp-tests" "imc_projection_value" false nil))
+        (define col (lambda (a c) (list 'get_column a false c false)))
+        (define stage (make_group_stage "projection-direction-domain" rhs '()
+          (list (col "r" "k") (col "r" "epoch") (col "r" "actor"))
+          (list (list 1 '+ 0)) nil '() '() nil nil
+          (list (list 'lookup-keys (list (col "d" "k") (list 'session "epoch") (list 'session "actor"))))))
+        (define batch (scan_recset nil (table "memcp-tests" "imc_projection_key")
+          '() '() '("enabled") (lambda (enabled) (equal? enabled 1))))
+        (define run (lambda (direction epoch actor) (begin
+          (define invocation (newsession))
+          (with_session invocation (lambda () (begin
+            (invocation "epoch" epoch)
+            (invocation "actor" actor)
+            (define code (batch_membership_base_expr target stage "k" '__batch direction))
+            (define selected (apply (eval (list 'lambda (list 'tx '__batch 'session) code)) (list nil batch invocation)))
+            (sort (scan nil selected '() '() '() (lambda () true) '("id")
+              (lambda (acc id) (append acc id)) '() (lambda (a b) (merge (list a b)))) <)))))))
+        (map '(false true) (lambda (direction)
+          (list (run direction 0 7) (run direction 0 8)
+            (run direction 1 7) (run direction 2 7) (run direction 0 99)))))
+    expect:
+      data: [[[[1, 2], [3], [5], [], []], [[1, 2], [3], [5], [], []]]]
+
+  - name: "Membership projection rejects computed driver correlations rather than dropping them"
+    scm: |
+      (begin
+        (define target '("d" "memcp-tests" "imc_projection_key" false nil))
+        (define rhs '("r" "memcp-tests" "imc_projection_value" false nil))
+        (define col (lambda (a c) (list 'get_column a false c false)))
+        (define stage (make_group_stage "projection-computed-domain" rhs '()
+          (list (col "r" "k") (col "r" "epoch"))
+          (list (list 1 '+ 0)) nil '() '() nil nil
+          (list (list 'lookup-keys (list (col "d" "k") (list '+ (col "d" "id") 1))))))
+        (and (nil? (batch_membership_base_expr target stage "k" '__batch true))
+          (nil? (batch_membership_base_expr target stage "k" '__batch false)))))
+    expect:
+      data: [true]
+
+  - name: "Projection direction costs retain the selective forward alternative"
+    scm: |
+      (begin
+        (define forward (lambda (rows)
+          (membership_prefiltered_candidate_cost 800000 800000 1
+            (list (list 'membership_prefiltered_candidate_rows rows)
+              (list 'membership_prefiltered_projection_read_rows 1)))))
+        (define reverse (lambda (rows)
+          (membership_prefiltered_candidate_cost 800000 800000 1
+            (list (list 'membership_prefiltered_candidate_rows rows)
+              (list 'membership_prefiltered_projection_read_rows 0)
+              (list 'membership_prefiltered_filter_first true)))))
+        (and (planner_cost_better? (forward 1) (reverse 800000))
+          (planner_cost_better? (reverse 1) (forward 800000)))))
+    expect:
+      data: [true]
+
+  - name: "Enclosing domains keep empty years and actor visibility separate"
+    sql: |
+      SELECT epochs.e, d.id FROM
+        (SELECT 0 AS e UNION ALL SELECT 1 UNION ALL SELECT 2) epochs
+        CROSS JOIN imc_projection_key d
+      WHERE d.enabled = 1 AND EXISTS (
+        SELECT 1 FROM imc_projection_value r
+        WHERE r.k = d.k AND r.epoch = epochs.e AND r.actor = 7
+      ) ORDER BY epochs.e, d.id
+    expect:
+      data: [{e: 0, id: 1}, {e: 0, id: 2}, {e: 1, id: 5}]
   - name: "Unique partition dominance needs no per-request selectivity scan"
     scm: |
       (begin

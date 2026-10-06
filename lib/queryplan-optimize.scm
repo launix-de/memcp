@@ -4367,16 +4367,20 @@ calibrated components used by the other membership carriers. */
 		(define branches (max 1
 			(membership_work_value work (quote membership_candidate_probe_branches) 1)))
 		(define candidate_domain_rows (/ candidate_input_rows branches))
-		(define projected_candidate_rows (min driver_rows candidate_domain_rows))
+		(define projected_candidate_rows (membership_work_value work
+			(quote membership_prefiltered_candidate_rows) (min driver_rows candidate_domain_rows)))
 		(define candidate_work_rows (* projected_candidate_rows branches))
 		(define candidate_density (membership_candidate_density
 			candidate_input_rows candidate_rows work))
 		(define candidate_match_rows (* candidate_work_rows candidate_density))
 		(define candidate_fraction (if (> candidate_input_rows 0)
 			(min 1 (/ candidate_work_rows candidate_input_rows)) 0))
+		(define projection_read_rows (+
+			(membership_work_value work (quote membership_prefiltered_projection_read_rows) 0)
+			(membership_work_value work (quote membership_prefiltered_projection_back_read_rows) 0)))
 		(define projection_rows (+
 			(* driver_rows 2)
-			candidate_work_rows
+			(if (membership_work_value work (quote membership_prefiltered_filter_first) false) 0 candidate_work_rows)
 			candidate_match_rows))
 		(planner_cost_add (planner_cost
 			(+ (* 2 planner_membership_recset_startup_ns)
@@ -4387,7 +4391,7 @@ calibrated components used by the other membership carriers. */
 				(if (membership_work_value work (quote membership_order_limit_driver) false)
 					planner_membership_ordered_scan_invocation_ns 0))
 			(+
-				(* (+ driver_input_rows candidate_work_rows projection_rows)
+				(* (+ driver_input_rows candidate_work_rows projection_read_rows)
 					planner_membership_scan_row_ns)
 				(* driver_input_rows
 					(membership_work_value work (quote membership_driver_filter_columns) 0)
@@ -4401,7 +4405,7 @@ calibrated components used by the other membership carriers. */
 				(* candidate_work_rows
 					(membership_work_value work (quote membership_candidate_expression_operations) 0)
 					planner_membership_expression_operation_row_ns)
-				(* projection_rows planner_membership_map_column_row_ns)
+				(* (+ projection_rows projection_read_rows) planner_membership_map_column_row_ns)
 				(* (membership_work_value work (quote membership_candidate_broad_text_match_rows) 0)
 					candidate_fraction planner_membership_broad_text_match_row_ns)
 				(* (membership_work_value work (quote membership_candidate_broad_text_match_bytes) 0)
