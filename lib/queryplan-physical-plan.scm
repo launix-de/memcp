@@ -8858,7 +8858,7 @@ Logical UNION inputs sum branch counts; query blocks read their own sources. */
 					(begin
 						(define measured_rows (planner_source_row_count src))
 						(if (and (number? measured_rows) (> measured_rows 0))
-							(planner_record_table_statistics_guards (list src) planning_session)
+							(planner_record_source_row_count_guard src measured_rows planning_session)
 							(physical_probe_stage_input_statistics_guards (gs_input stage) planning_session)))))))
 		(define work (if (nil? tree) (list nil '())
 			(physical_join_tree_probe_work tree sources stages)))
