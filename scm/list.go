@@ -30964,6 +30964,15 @@ func init_list() {
 		Fn: func(a ...Scmer) Scmer {
 			list := asSlice(a[0], "map")
 			result := make([]Scmer, len(list))
+			// A callback with no invocations needs no serial program. One
+			// interpreted call uses a fresh frame, retaining lexical captures.
+			if len(list) == 0 {
+				return NewSlice(result)
+			}
+			if len(list) == 1 {
+				result[0] = callSerialProcOnce(a[1], []Scmer{list[0]})
+				return NewSlice(result)
+			}
 			fn := PrepareSerialProc(a[1])
 			var fnArgs [1]Scmer
 			for i, v := range list {
@@ -32801,8 +32810,6 @@ func init_list() {
 
 		Fn: func(a ...Scmer) Scmer {
 			list := asSlice(a[0], "reduce")
-			fn := PrepareSerialProc(a[1])
-			var fnArgs [2]Scmer
 			result := NewNil()
 			i := 0
 			if len(a) > 2 {
@@ -32811,6 +32818,16 @@ func init_list() {
 				result = list[0]
 				i = 1
 			}
+			// The first item is the neutral when none was supplied. Count
+			// actual invocations before preparing a reusable callback frame.
+			if i == len(list) {
+				return result
+			}
+			if i+1 == len(list) {
+				return callSerialProcOnce(a[1], []Scmer{result, list[i]})
+			}
+			fn := PrepareSerialProc(a[1])
+			var fnArgs [2]Scmer
 			for i < len(list) {
 				fnArgs[0], fnArgs[1] = result, list[i]
 				result = fn.Call(fnArgs[:2])
