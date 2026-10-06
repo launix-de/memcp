@@ -15,7 +15,7 @@
 #
 # UNION ALL support
 # Combines file sources and joined branches with ordered delivery.
-# Implementation: (begin) block with two scans
+# Ordered branches use native multi-scan or bounded complete-row producer merging.
 
 metadata:
   version: "1.0"
@@ -34,7 +34,7 @@ setup:
       )
   - sql: |
       CREATE TABLE renderjob (
-        ID INT PRIMARY KEY,
+        ID INT NOT NULL PRIMARY KEY,
         result INT
       )
   - sql: |
@@ -62,6 +62,31 @@ setup:
           (rebuild (table "memcp-tests" "ua_parallel") true false)
           (settings "ShardSize" previous) true))
           (lambda (failure) (begin (settings "ShardSize" previous) (error failure)))))
+
+  - sql: "DROP TABLE IF EXISTS ua_period"
+  - sql: "DROP TABLE IF EXISTS ua_site"
+  - sql: "DROP TABLE IF EXISTS ua_tenant"
+  - sql: "DROP TABLE IF EXISTS ua_access"
+  - sql: "DROP TABLE IF EXISTS ua_fact"
+  - sql: "CREATE TABLE ua_period (id INT PRIMARY KEY, tenant_id INT) ENGINE=memory"
+  - sql: "CREATE TABLE ua_site (id INT PRIMARY KEY) ENGINE=memory"
+  - sql: "CREATE TABLE ua_tenant (id INT PRIMARY KEY) ENGINE=memory"
+  - sql: "CREATE TABLE ua_access (actor INT, tenant_id INT) ENGINE=memory"
+  - sql: "CREATE TABLE ua_fact (period_id INT, site_id INT) ENGINE=memory"
+  - sql: "INSERT INTO ua_access VALUES (7, 1), (8, NULL)"
+  - scm: |
+      (begin
+        (insert (table "memcp-tests" "ua_period") '("id" "tenant_id")
+          (map (produceN 128) (lambda (i) (list (+ i 1) (+ i 1)))))
+        (insert (table "memcp-tests" "ua_tenant") '("id")
+          (map (produceN 128) (lambda (i) (list (+ i 1)))))
+        (insert (table "memcp-tests" "ua_site") '("id")
+          (map (produceN 16) (lambda (i) (list (+ i 1)))))
+        (insert (table "memcp-tests" "ua_fact") '("period_id" "site_id")
+          (map (produceN 65536) (lambda (i)
+            (list (+ 1 (mod (floor (/ i 16)) 128)) (+ 1 (mod i 16))))))
+        (map '("ua_period" "ua_tenant" "ua_site" "ua_fact" "ua_access")
+          (lambda (name) (rebuild (table "memcp-tests" name) true false))))
 
 test_cases:
 
@@ -788,8 +813,8 @@ test_cases:
       UNION ALL SELECT 0 AS job, 'sentinel' AS value
       ORDER BY job ASC, value ASC
     expect:
-      contains: [scan_order_merge]
-      not_contains: [__union_materialized_, __join_materialized_]
+      result_contains: [scan_order_merge]
+      result_not_contains: [__union_materialized_, __join_materialized_]
 
   - name: "Computed lookup keys remain storage order carriers in UNION branches"
     sql: |
@@ -813,7 +838,7 @@ test_cases:
       UNION ALL SELECT 0, 'image2.png'
       ORDER BY name ASC, job DESC
     expect:
-      not_contains: [__union_materialized_, __join_materialized_, .prejoin:]
+      result_not_contains: [__union_materialized_, __join_materialized_, .prejoin:]
 
   - name: "Lookup order carrier may precede the driver in the source catalog"
     scm: |
@@ -870,7 +895,7 @@ test_cases:
       UNION ALL SELECT 'image2.png', 0
       ORDER BY name ASC, job DESC
     expect:
-      not_contains: [__union_materialized_, __join_materialized_]
+      result_not_contains: [__union_materialized_, __join_materialized_]
 
   - name: "Shared inner presence key keeps both nullable outer bindings"
     sql: |
@@ -908,7 +933,204 @@ test_cases:
         - {id: 1000, label: beta, rank: -1000}
         - {id: 999, label: beta, rank: -999}
 
+  - name: "Selective ordered hierarchy streams bound grouped probes"
+    session_id: ua-stream-hierarchy
+    setup:
+      - sql: "SET @ua_actor=7"
+    sql: |
+      SELECT p.id AS period_id, 0 AS site_id, 0 AS amount FROM ua_period p
+      WHERE COALESCE((SELECT CASE WHEN EXISTS
+          (SELECT 1 FROM ua_access a WHERE a.actor = @ua_actor AND a.tenant_id IS NULL)
+          THEN TRUE ELSE EXISTS (SELECT 1 FROM ua_access a
+            WHERE a.actor = @ua_actor AND a.tenant_id = t.id) END
+        FROM ua_tenant t WHERE t.id = p.tenant_id LIMIT 1), FALSE)
+      UNION ALL
+      SELECT p.id, s.id,
+        (SELECT COUNT(*) FROM ua_fact f WHERE f.period_id = p.id AND f.site_id = s.id)
+      FROM ua_site s CROSS JOIN ua_period p
+      WHERE EXISTS (SELECT 1 FROM ua_fact f WHERE f.period_id = p.id AND f.site_id = s.id)
+        AND COALESCE((SELECT CASE WHEN EXISTS
+          (SELECT 1 FROM ua_access a WHERE a.actor = @ua_actor AND a.tenant_id IS NULL)
+          THEN TRUE ELSE EXISTS (SELECT 1 FROM ua_access a
+            WHERE a.actor = @ua_actor AND a.tenant_id = t.id) END
+        FROM ua_tenant t WHERE t.id = p.tenant_id LIMIT 1), FALSE)
+      ORDER BY period_id ASC, site_id ASC
+    expect:
+      rows: 17
+      data:
+        - {period_id: 1, site_id: 0, amount: 0}
+        - {period_id: 1, site_id: 1, amount: 32}
+        - {period_id: 1, site_id: 2, amount: 32}
+    performance_rows: 65536
+    threshold_ms: 1000
+    timing_aggregation: total
+    warmup: 0
+    timing_samples: 4
+
+  - name: "Broad ordered hierarchy streams complete bag results"
+    session_id: ua-stream-hierarchy
+    setup:
+      - sql: "SET @ua_actor=8"
+    sql: |
+      SELECT p.id AS period_id, 0 AS site_id, 0 AS amount FROM ua_period p
+      WHERE COALESCE((SELECT CASE WHEN EXISTS
+          (SELECT 1 FROM ua_access a WHERE a.actor = @ua_actor AND a.tenant_id IS NULL)
+          THEN TRUE ELSE EXISTS (SELECT 1 FROM ua_access a
+            WHERE a.actor = @ua_actor AND a.tenant_id = t.id) END
+        FROM ua_tenant t WHERE t.id = p.tenant_id LIMIT 1), FALSE)
+      UNION ALL
+      SELECT p.id, s.id,
+        (SELECT COUNT(*) FROM ua_fact f WHERE f.period_id = p.id AND f.site_id = s.id)
+      FROM ua_site s CROSS JOIN ua_period p
+      WHERE EXISTS (SELECT 1 FROM ua_fact f WHERE f.period_id = p.id AND f.site_id = s.id)
+        AND COALESCE((SELECT CASE WHEN EXISTS
+          (SELECT 1 FROM ua_access a WHERE a.actor = @ua_actor AND a.tenant_id IS NULL)
+          THEN TRUE ELSE EXISTS (SELECT 1 FROM ua_access a
+            WHERE a.actor = @ua_actor AND a.tenant_id = t.id) END
+        FROM ua_tenant t WHERE t.id = p.tenant_id LIMIT 1), FALSE)
+      ORDER BY period_id ASC, site_id ASC
+    expect:
+      rows: 2176
+      data:
+        - {period_id: 1, site_id: 0, amount: 0}
+        - {period_id: 1, site_id: 1, amount: 32}
+        - {period_id: 1, site_id: 2, amount: 32}
+    performance_rows: 65536
+    threshold_ms: 1000
+    timing_aggregation: total
+    warmup: 0
+    timing_samples: 4
+
+  - name: "Grouped hierarchy has no JOIN or UNION row collector"
+    session_id: ua-stream-hierarchy
+    setup:
+      - sql: "SET @ua_actor=7"
+    sql: |
+      EXPLAIN SELECT p.id AS period_id, 0 AS site_id, 0 AS amount FROM ua_period p
+      WHERE COALESCE((SELECT CASE WHEN EXISTS
+          (SELECT 1 FROM ua_access a WHERE a.actor = @ua_actor AND a.tenant_id IS NULL)
+          THEN TRUE ELSE EXISTS (SELECT 1 FROM ua_access a
+            WHERE a.actor = @ua_actor AND a.tenant_id = t.id) END
+        FROM ua_tenant t WHERE t.id = p.tenant_id LIMIT 1), FALSE)
+      UNION ALL
+      SELECT p.id, s.id,
+        (SELECT COUNT(*) FROM ua_fact f WHERE f.period_id = p.id AND f.site_id = s.id)
+      FROM ua_site s CROSS JOIN ua_period p
+      WHERE EXISTS (SELECT 1 FROM ua_fact f WHERE f.period_id = p.id AND f.site_id = s.id)
+        AND COALESCE((SELECT CASE WHEN EXISTS
+          (SELECT 1 FROM ua_access a WHERE a.actor = @ua_actor AND a.tenant_id IS NULL)
+          THEN TRUE ELSE EXISTS (SELECT 1 FROM ua_access a
+            WHERE a.actor = @ua_actor AND a.tenant_id = t.id) END
+        FROM ua_tenant t WHERE t.id = p.tenant_id LIMIT 1), FALSE)
+      ORDER BY period_id ASC, site_id ASC
+    expect:
+      result_contains: [scan_order_merge]
+      result_not_contains: [__join_materialized_, __union_materialized_]
+
+  - name: "Streaming hierarchy follows changed ACL bindings"
+    session_id: ua-stream-hierarchy
+    setup:
+      - sql: "SET @ua_actor=7"
+      - sql: "UPDATE ua_access SET tenant_id = 2 WHERE actor = 7"
+    sql: |
+      SELECT p.id AS period_id, 0 AS site_id, 0 AS amount FROM ua_period p
+      WHERE COALESCE((SELECT CASE WHEN EXISTS
+          (SELECT 1 FROM ua_access a WHERE a.actor = @ua_actor AND a.tenant_id IS NULL)
+          THEN TRUE ELSE EXISTS (SELECT 1 FROM ua_access a
+            WHERE a.actor = @ua_actor AND a.tenant_id = t.id) END
+        FROM ua_tenant t WHERE t.id = p.tenant_id LIMIT 1), FALSE)
+      UNION ALL
+      SELECT p.id, s.id,
+        (SELECT COUNT(*) FROM ua_fact f WHERE f.period_id = p.id AND f.site_id = s.id)
+      FROM ua_site s CROSS JOIN ua_period p
+      WHERE EXISTS (SELECT 1 FROM ua_fact f WHERE f.period_id = p.id AND f.site_id = s.id)
+        AND COALESCE((SELECT CASE WHEN EXISTS
+          (SELECT 1 FROM ua_access a WHERE a.actor = @ua_actor AND a.tenant_id IS NULL)
+          THEN TRUE ELSE EXISTS (SELECT 1 FROM ua_access a
+            WHERE a.actor = @ua_actor AND a.tenant_id = t.id) END
+        FROM ua_tenant t WHERE t.id = p.tenant_id LIMIT 1), FALSE)
+      ORDER BY period_id ASC, site_id ASC
+    expect:
+      rows: 17
+      data:
+        - {period_id: 2, site_id: 0, amount: 0}
+        - {period_id: 2, site_id: 1, amount: 32}
+
+  - name: "Streaming hierarchy removes emptied presence groups"
+    session_id: ua-stream-hierarchy
+    setup:
+      - sql: "SET @ua_actor=7"
+      - sql: "DELETE FROM ua_fact WHERE period_id = 2 AND site_id = 1"
+    sql: |
+      SELECT p.id AS period_id, 0 AS site_id, 0 AS amount FROM ua_period p
+      WHERE COALESCE((SELECT CASE WHEN EXISTS
+          (SELECT 1 FROM ua_access a WHERE a.actor = @ua_actor AND a.tenant_id IS NULL)
+          THEN TRUE ELSE EXISTS (SELECT 1 FROM ua_access a
+            WHERE a.actor = @ua_actor AND a.tenant_id = t.id) END
+        FROM ua_tenant t WHERE t.id = p.tenant_id LIMIT 1), FALSE)
+      UNION ALL
+      SELECT p.id, s.id,
+        (SELECT COUNT(*) FROM ua_fact f WHERE f.period_id = p.id AND f.site_id = s.id)
+      FROM ua_site s CROSS JOIN ua_period p
+      WHERE EXISTS (SELECT 1 FROM ua_fact f WHERE f.period_id = p.id AND f.site_id = s.id)
+        AND COALESCE((SELECT CASE WHEN EXISTS
+          (SELECT 1 FROM ua_access a WHERE a.actor = @ua_actor AND a.tenant_id IS NULL)
+          THEN TRUE ELSE EXISTS (SELECT 1 FROM ua_access a
+            WHERE a.actor = @ua_actor AND a.tenant_id = t.id) END
+        FROM ua_tenant t WHERE t.id = p.tenant_id LIMIT 1), FALSE)
+      ORDER BY period_id ASC, site_id ASC
+    expect:
+      rows: 16
+      data:
+        - {period_id: 2, site_id: 0, amount: 0}
+        - {period_id: 2, site_id: 2, amount: 32}
+
+  - name: "Repeated outer ORDER prefixes do not restart the suffix"
+    setup:
+      - sql: "INSERT INTO ua_order_a VALUES (NULL)"
+    sql: |
+      SELECT a.value AS prefix, r.ID AS suffix FROM ua_order_a a CROSS JOIN renderjob r
+      UNION ALL SELECT NULL, 0
+      ORDER BY prefix, suffix
+    expect:
+      rows: 10
+      data:
+        - {prefix: null, suffix: 0}
+        - {prefix: null, suffix: 101}
+        - {prefix: null, suffix: 101}
+        - {prefix: null, suffix: 102}
+        - {prefix: null, suffix: 102}
+        - {prefix: null, suffix: 103}
+        - {prefix: null, suffix: 103}
+        - {prefix: beta, suffix: 101}
+        - {prefix: beta, suffix: 102}
+        - {prefix: beta, suffix: 103}
+
+  - name: "Nullable UNIQUE prefixes preserve repeated NULL rows"
+    setup:
+      - sql: "INSERT INTO ua_event VALUES (NULL, 1), (NULL, 2)"
+    sql: |
+      SELECT e.ID AS prefix, r.ID AS suffix FROM ua_event e CROSS JOIN renderjob r
+      WHERE e.ID IS NULL
+      UNION ALL SELECT NULL, 0
+      ORDER BY prefix, suffix
+    expect:
+      rows: 7
+      data:
+        - {prefix: null, suffix: 0}
+        - {prefix: null, suffix: 101}
+        - {prefix: null, suffix: 101}
+        - {prefix: null, suffix: 102}
+        - {prefix: null, suffix: 102}
+        - {prefix: null, suffix: 103}
+        - {prefix: null, suffix: 103}
+
 cleanup:
+  - sql: "DROP TABLE IF EXISTS ua_period"
+  - sql: "DROP TABLE IF EXISTS ua_site"
+  - sql: "DROP TABLE IF EXISTS ua_tenant"
+  - sql: "DROP TABLE IF EXISTS ua_access"
+  - sql: "DROP TABLE IF EXISTS ua_fact"
   - sql: "DROP TABLE IF EXISTS ua_parallel"
   - sql: "DROP TABLE IF EXISTS renderjob"
   - sql: "DROP TABLE IF EXISTS ua_fop_files"

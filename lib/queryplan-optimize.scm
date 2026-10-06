@@ -2600,6 +2600,147 @@ the lowerer can cost it. */
 						(nth work 1) (nth work 2) (nth work 3)))))))
 			(list nil '())))))
 
+/* Streaming delivery can start with a proper ORDER prefix, then continue with
+ordered keyed scans. A full-order driver is only one alternative. Re-estimate
+these left-deep pipelines with the actual bound-key multiplicity: a complete
+unique key yields at most one match; a partial key uses its published NDV.
+Do not change the general join memo's cardinality or cap an unbound relation. */
+(define join_optimizer_left_deep? (lambda (tree)
+	(match tree
+		'(join-leaf _alias _predicates) true
+		'(join-node _kind left '(join-leaf _alias _predicates) _predicates)
+		(join_optimizer_left_deep? left)
+		_ false)))
+
+(define join_optimizer_bound_key_distinct (lambda (stages sources default_alias src key_col probe_condition planning_session)
+	(begin
+		(define stage (join_optimizer_source_stage stages src))
+		(define input (if (group_stage? stage) (gs_input stage) src))
+		(define input_col (if (group_stage? stage)
+			(begin
+				(define position (projection_expr_position
+					(merge (map (group_key_cols (gs_keys stage)) (lambda (col) (list col col)))) key_col 0))
+				(if (nil? position) nil (direct_column_name_for_alias input (nth (gs_keys stage) position)))) key_col))
+		(planner_record_table_statistics_guards (list input) planning_session)
+		(define stats (planner_column_statistics input input_col))
+		(define prior (qassoc_get stats (quote distinct) nil))
+		/* This NDV is an actual decision input. Retain a scalar metadata guard;
+		never rerun the join search or inspect a shard from a cached-plan guard. */
+		(if (source_is_base_table? input)
+			(planner_record_guard_condition (list (quote equal?)
+				(list (quote planner_column_distinct_estimate) (planner_quoted_value input) input_col)
+				prior) planning_session) nil)
+		(coalesceNil prior
+			(reduce (split_and_terms probe_condition) (lambda (found term)
+				(coalesceNil found
+					(match term
+						'(op left right) (if (or (equal? op (quote equal?)) (equal? op (quote equal??)))
+							(begin
+								(define other (if (equal? (direct_column_name_for_alias src left) key_col) right
+									(if (equal? (direct_column_name_for_alias src right) key_col) left nil)))
+								(define binder (find sources (lambda (candidate)
+									(not (nil? (direct_column_name_for_alias candidate other)))) nil))
+								(if (nil? binder) nil
+									(begin
+										(planner_record_table_statistics_guards (list binder) planning_session)
+										/* A declared singleton key has the table's row count as NDV.
+										Do not manufacture this inference for a nonunique binding. */
+										(if (contains? (source_unique_key_sets binder)
+											(list (direct_column_name_for_alias binder other)))
+											(planner_source_row_count binder) nil)))) nil)
+						_ nil))) nil) 1))))
+
+(define join_optimizer_streaming_order_work (lambda (stages sources default_alias graph planned planning_session)
+	(begin
+		(define ordered (join_optimizer_sources_for_order sources
+			(join_optimizer_tree_aliases (qassoc_get planned (quote tree) nil))))
+		(define predicates (join_optimizer_costed_predicates graph))
+		(define condition (combine_where_terms (map predicates (lambda (entry)
+			(qassoc_get entry (quote predicate) true))) true))
+		(define state (reduce ordered (lambda (state src)
+			(begin
+				(define bound (nth state 0))
+				(define invocations (nth state 1))
+				(define base_rows (max 1 (planner_estimate_planning_value
+					(planner_source_row_estimate_using_stages stages src) 1000000)))
+				(define probe_condition (lookup_probe_condition_from_sources sources default_alias bound src condition))
+				(define key_sets (unique_lookup_key_sets src stages))
+				(define keys (if (empty_list? key_sets) '() (car key_sets)))
+				(define bound_keys (filter keys (lambda (col)
+					(reduce (split_and_terms probe_condition) (lambda (found term)
+						(or found (unique_lookup_join_term? default_alias src col term))) false))))
+				(define point (source_is_unique_lookup_from_sources? sources default_alias bound src stages condition))
+				(define per_invocation (if point 1
+					(/ base_rows (reduce bound_keys (lambda (distinct col)
+						/* Correlated key columns do not justify multiplying NDVs.
+						Use the strongest single-key bound until joint statistics exist. */
+						(max distinct (join_optimizer_bound_key_distinct stages sources default_alias
+							src col probe_condition planning_session))) 1))))
+				(define available (append (source_aliases bound) (source_alias src)))
+				(define filters (filter predicates (lambda (entry)
+					(begin
+						(define aliases (qassoc_get entry (quote aliases) '()))
+						(and (contains? aliases (source_alias src))
+							(and (join_order_set_subset? aliases available)
+								(not (reduce bound_keys (lambda (key_term col)
+									(or key_term (unique_lookup_join_term? default_alias src col
+										(qassoc_get entry (quote predicate) true)))) false))))))))
+				(define outer (source_outer? src))
+				(define post_filter? (lambda (entry)
+					(and outer (equal? (qassoc_get entry (quote origin) nil) (quote where)))))
+				(define match_selectivity (join_optimizer_product (map
+					(filter filters (lambda (entry) (not (post_filter? entry)))) (lambda (entry)
+						(join_optimizer_expr_selectivity sources default_alias
+							(qassoc_get entry (quote predicate) true) planning_session)))))
+				(define post_selectivity (join_optimizer_product (map
+					(filter filters post_filter?) (lambda (entry)
+						(join_optimizer_expr_selectivity sources default_alias
+							(qassoc_get entry (quote predicate) true) planning_session)))))
+				(define visited (* invocations (max 1 per_invocation)))
+				(define matched (* visited match_selectivity))
+				(define output (max 1 (* (if outer (max invocations matched) matched) post_selectivity)))
+				(list (append bound src) output
+					(+ (nth state 2)
+						(* invocations planner_membership_scan_invocation_ns)
+						(* visited (+ planner_membership_scan_row_ns planner_membership_direct_probe_row_ns))))))
+			(list '() 1 0)))
+		/* Preparation and compilation are paid once, not once per binding.
+		Do not reinterpret the DP memo's score as this delivery work estimate. */
+		(+ (nth state 2)
+			(qassoc_get (qassoc_get planned (quote cost_components) '()) (quote build_ns) 0)
+			(qassoc_get (qassoc_get planned (quote cost_components) '()) (quote compile_ns) 0)))))
+
+(define join_optimizer_prefix_order_alternative (lambda (stages relation_units sources default_alias graph block planned planning_session)
+	(if (or (empty_list? (qb_order block))
+		(or (not (nil? (qb_limit block)))
+			(not (reduce sources (lambda (found src)
+				(or found (group_stage? (join_optimizer_source_stage stages src)))) false)))) planned
+		(begin
+			(define candidates (filter sources (lambda (src)
+				(and (not (equal? (source_alias src)
+					(join_optimizer_tree_first_alias (qassoc_get planned (quote tree) nil))))
+					(and (join_optimizer_inner_source? stages src)
+						(order_expr_belongs_to_source? src (car (car (qb_order block)))))))))
+			(reduce candidates (lambda (best src)
+				(begin
+					(define candidate (join_optimizer_plan_segment stages relation_units sources sources
+						default_alias graph (list (source_alias src)) planning_session))
+					(define ordered (join_optimizer_sources_for_order sources
+						(join_optimizer_tree_aliases (qassoc_get candidate (quote tree) nil))))
+					(define eligible (and (join_optimizer_left_deep? (qassoc_get best (quote tree) nil))
+						(and (join_optimizer_left_deep? (qassoc_get candidate (quote tree) nil))
+							(order_items_follow_join_tree? ordered default_alias (qb_order block) stages
+								(coalesceNil (qb_where block) true)))))
+					(if (not eligible) best
+						(begin
+							(define candidate_work (join_optimizer_streaming_order_work stages sources default_alias graph candidate planning_session))
+							(define best_work (join_optimizer_streaming_order_work stages sources default_alias graph best planning_session))
+							(define selected (if (< candidate_work best_work) candidate best))
+							(qassoc_set selected (quote streaming_order_costs)
+								(append (qassoc_get best (quote streaming_order_costs) '())
+									(list (list (join_optimizer_tree_first_alias (qassoc_get best (quote tree) nil)) best_work)
+										(list (source_alias src) candidate_work)))))))) planned)))))
+
 /* An ORDER BY prefix is a useful property, not a mandatory join driver.
 Compare its saved sort against an unrestricted join plus final materialization.
 Both searches already register the same bounded statistics/parameter guards. */
@@ -2736,10 +2877,14 @@ Both searches already register the same bounded statistics/parameter guards. */
 						planning_session tx) nil))
 				(define ordered_choice (if (nil? ordered_driver_plans) nil
 					(car ordered_driver_plans)))
-				(define ordered_planned (if (nil? ordered_choice)
+				(define complete_order_planned (if (nil? ordered_choice)
 					(join_optimizer_plan_segment stage_catalog relation_units
 						sources segment default_alias graph required_order_property planning_session)
 					(car ordered_choice)))
+				(define ordered_planned (if (empty_list? required_order_aliases)
+					(join_optimizer_prefix_order_alternative stage_catalog relation_units
+						sources default_alias graph block complete_order_planned planning_session)
+					complete_order_planned))
 				(define unordered_planned (if (empty_list? required_order_aliases) nil
 					(join_optimizer_plan_segment stage_catalog relation_units
 						sources segment default_alias graph '() planning_session)))
@@ -2754,6 +2899,7 @@ Both searches already register the same bounded statistics/parameter guards. */
 					(qassoc_get planned (quote cost_components) nil)
 					(list
 						(list (quote order_delivery) (cadr delivery))
+						(list (quote streaming_order_costs) (qassoc_get ordered_planned (quote streaming_order_costs) '()))
 						(list (quote ordered_driver_candidates) ordered_drivers)
 						(list (quote selected_ordered_driver)
 							(if (nil? ordered_choice) nil (nth ordered_choice 2)))

@@ -4273,6 +4273,31 @@ coercion and collations do not have the same ordering proof. */
 			(list accepted order_items))
 		_ (list accepted '()))))
 
+/* Descending into another ordered scan is safe only when an outer prefix
+separates its rows (or the current binding produces at most one row). Otherwise
+repeated prefix values would restart the suffix and violate global ordering. */
+/* A truth-filtered ordinary equality rejects NULL on both sides. This is
+not the null-safe domain equality used for session and grouped bindings. */
+(define order_prefix_column_nonnull? (lambda (src col condition)
+	(or (source_column_guaranteed_nonnull? src col)
+		(reduce (split_and_terms condition) (lambda (found term)
+			(or found (match (equality_term_operands term)
+				'(left right) (or (equal? (direct_column_name_for_alias src left) col)
+					(equal? (direct_column_name_for_alias src right) col))
+				_ false))) false))))
+
+(define order_prefix_distinguishes_source_rows? (lambda (all_sources src default_alias items stages condition bound_sources)
+	(or (source_is_unique_lookup_from_sources? all_sources default_alias bound_sources src stages condition)
+		(reduce (unique_lookup_key_sets src stages) (lambda (unique keys)
+			(or unique (and (not (empty_list? keys))
+				(reduce keys (lambda (covered col)
+					(and covered (or
+						(join_optimizer_source_column_constant_bound? all_sources default_alias src col condition)
+						(and (or (not (source_is_base_table? src))
+							(order_prefix_column_nonnull? src col condition))
+							(reduce (order_exprs items) (lambda (found expr)
+								(or found (equal? (direct_column_name_for_alias src expr) col))) false))))) true)))) false))))
+
 (define order_items_follow_join_tree_acc? (lambda (all_sources sources default_alias order_items stages condition bound_sources)
 	(if (empty_list? order_items)
 		true
@@ -4293,8 +4318,11 @@ coercion and collations do not have the same ordering proof. */
 								all_sources default_alias bound_sources (car sources) stages condition)))
 						(order_items_follow_join_tree_acc? all_sources (cdr sources) default_alias order_items stages condition
 							(cons (car sources) bound_sources)))
-					(order_items_follow_join_tree_acc? all_sources (cdr sources) default_alias remaining stages condition
-						(cons (car sources) bound_sources))))))))
+					(and (or (empty_list? remaining)
+						(order_prefix_distinguishes_source_rows? all_sources (car sources) default_alias
+							current stages condition bound_sources))
+						(order_items_follow_join_tree_acc? all_sources (cdr sources) default_alias remaining stages condition
+							(cons (car sources) bound_sources)))))))))
 
 (define order_items_follow_join_tree? (lambda (sources default_alias order_items stages condition)
 	(order_items_follow_join_tree_acc? sources sources default_alias order_items stages condition '())))
