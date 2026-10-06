@@ -1680,3 +1680,116 @@ func TestJITRequiredLocalSlotsRespectInvocation(t *testing.T) {
 		})
 	}
 }
+
+func TestJITMetadataStackCallbackKeepsContextAcrossStackGrowth(t *testing.T) {
+	const consumerName = "jit_stack_metadata_consumer"
+	const contextName = "jit_metadata_context"
+	// Return this callback's context through a normal Scmer value. Hidden
+	// preallocation makes SerialProc use the metadata path rather than the
+	// direct fixed-arity path; a stack copy must retain its own identity.
+	contextFn := func(...Scmer) Scmer { panic("test requires native context emitter") }
+	Declare(&Globalenv, &Declaration{Name: contextName, Fn: contextFn, Type: &TypeDescriptor{Kind: "func", Forbidden: true, Params: []*TypeDescriptor{{Kind: "any"}}, Return: &TypeDescriptor{Kind: "any"}, JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+		ctx.RequestPreallocatedSlice(0)
+		target := jitEnsureResultPair(ctx, result)
+		ctx.EmitMovRegMem(target.Reg, ctx.StackReg, ctx.ClosureFuncOff)
+		ctx.EmitMovRegImm64(target.Reg2, makeAux(tagProc, 0))
+		target.Type = tagProc
+		target.Rooted = true
+		ctx.BindReg(target.Reg, &target)
+		ctx.BindReg(target.Reg2, &target)
+		return target
+	}}})
+	consumer := func(args ...Scmer) Scmer {
+		if len(args[0].Proc().Compiled.HiddenArgs) == 0 || args[0].Proc().Compiled.CaptureCount == 0 {
+			panic("test requires metadata capturing callback")
+		}
+		prepared := PrepareSerialProc(args[0])
+		before := Equal(prepared.Call(args[1:2]), args[0])
+		_ = growJITCallbackTestStack(2048)
+		after := Equal(prepared.Call(args[1:2]), args[0])
+		return NewSlice([]Scmer{NewBool(before), NewBool(after)})
+	}
+	Declare(&Globalenv, &Declaration{Name: consumerName, Fn: consumer, Type: &TypeDescriptor{Kind: "func", Forbidden: true, Params: []*TypeDescriptor{
+		{Kind: "func", NoEscape: true, SameGoroutine: true, Params: []*TypeDescriptor{{Kind: "any"}}, Return: &TypeDescriptor{Kind: "any"}},
+		{Kind: "any"}}, Return: &TypeDescriptor{Kind: "any"}}})
+	defer func() {
+		for _, name := range []string{consumerName, contextName} {
+			delete(Globalenv.Vars, Symbol(name))
+			delete(declarations, name)
+		}
+		delete(declarationsByFunction, FunctionIdentity(consumer))
+		delete(declarationsByFunction, FunctionIdentity(contextFn))
+	}()
+	compiled := compileJITExpressionTestProc(t, `(lambda (captured values) (jit_stack_metadata_consumer (lambda (items) (jit_metadata_context (list captured items))) values))`)
+	values := NewSlice([]Scmer{NewInt(7)})
+	result := make(chan Scmer, 1)
+	go func() { result <- Apply(compiled, NewInt(8), values) }()
+	got := <-result
+	if !Equal(got, NewSlice([]Scmer{NewBool(true), NewBool(true)})) {
+		t.Fatalf("callback context before/after stack growth %s", String(got))
+	}
+}
+
+func TestJITMetadataCallbacksPreparePublicAndHiddenArguments(t *testing.T) {
+	const name = "jit_test_metadata_arguments"
+	native := func(args ...Scmer) Scmer {
+		return NewSlice([]Scmer{args[0], NewInt(int64(len(args[1].Slice()))), args[2]})
+	}
+	fallback := func(...Scmer) Scmer { panic("test requires metadata emitter") }
+	Declare(&Globalenv, &Declaration{Name: name, Fn: fallback, Type: &TypeDescriptor{Kind: "func", Forbidden: true, Params: []*TypeDescriptor{{Kind: "any"}, {Kind: "any"}}, Return: &TypeDescriptor{Kind: "any"}, JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+		hidden := ctx.RequestPreallocatedSlice(0)
+		return jitEmitGoVariadicCallFromDescs(ctx, native, []JITValueDesc{args[0], hidden, args[1]}, result)
+	}}})
+	defer func() {
+		delete(Globalenv.Vars, Symbol(name))
+		delete(declarations, name)
+		delete(declarationsByFunction, FunctionIdentity(fallback))
+	}()
+	outer := compileJITExpressionTestProc(t, `(lambda (captured) (lambda (values marker) (jit_test_metadata_arguments marker captured)))`)
+	callback := Apply(outer, NewInt(9))
+	values := NewSlice([]Scmer{NewInt(3), NewInt(4)})
+	for _, tc := range []struct {
+		name   string
+		source Scmer
+	}{{"procedure", callback}, {"native wrapper", NewFunc(callback.Proc().jitFunction())}} {
+		t.Run(tc.name, func(t *testing.T) {
+			prepared := PrepareSerialProc(tc.source)
+			if prepared.Kind != SerialProcJITMetadata {
+				t.Fatalf("callback shape %d, want metadata dispatch", prepared.Kind)
+			}
+			if allocations := testing.AllocsPerRun(100, func() {
+				adapter := PrepareSerialProc(tc.source)
+				if adapter.Kind != SerialProcJITMetadata {
+					panic("metadata callback changed shape")
+				}
+			}); allocations != 0 {
+				t.Fatalf("metadata adapter setup allocated %.2f objects, want 0", allocations)
+			}
+			if got := prepared.Call([]Scmer{values, NewInt(5)}); !Equal(got, NewSlice([]Scmer{NewInt(5), NewInt(2), NewInt(9)})) {
+				t.Fatalf("complete frame %s", String(got))
+			}
+			want := NewSlice([]Scmer{NewNil(), NewInt(2), NewInt(9)})
+			if got := prepared.CallPrepared(prepared.PrepareCallFrame([]Scmer{values})); !Equal(got, want) {
+				t.Fatalf("missing argument frame %s", String(got))
+			}
+			if got := prepared.CallOwned([]Scmer{values}); !Equal(got, want) {
+				t.Fatalf("owned frame %s", String(got))
+			}
+			if got := callSerialProcOnce(tc.source, []Scmer{values}); !Equal(got, want) {
+				t.Fatalf("one-shot frame %s", String(got))
+			}
+			rejected := false
+			func() {
+				defer func() {
+					if message := recover(); message != nil {
+						rejected = strings.Contains(fmt.Sprint(message), "2 parameters")
+					}
+				}()
+				prepared.Call([]Scmer{values, NewInt(5), NewInt(6)})
+			}()
+			if !rejected {
+				t.Fatal("excess public arguments were not rejected")
+			}
+		})
+	}
+}
