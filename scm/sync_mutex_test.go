@@ -19,6 +19,7 @@ package scm
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -94,4 +95,175 @@ func TestMutexWaitStopsWhenContextIsCancelled(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("mutex holder did not finish")
 	}
+}
+
+// Each producer deliberately reuses its argument array. The merge must retain
+// independent rows across batches and apply the window to complete SQL rows.
+func TestOrderedProducerMergeOwnsRowsAndPreservesDuplicates(t *testing.T) {
+	producers := make([]Scmer, 3)
+	for stream := range producers {
+		producers[stream] = NewFunc(func(a ...Scmer) Scmer {
+			row := []Scmer{NewInt(0)}
+			for i := 0; i < 140; i++ {
+				row[0] = NewInt(int64(i))
+				Apply(a[0], NewSlice(row))
+			}
+			return NewNil()
+		})
+	}
+	var got []int64
+	consumer := NewFunc(func(a ...Scmer) Scmer {
+		got = append(got, asSlice(a[0], "row")[0].Int())
+		return NewNil()
+	})
+	scanOrderMerge(NewNil(), NewSlice(producers), NewSlice([]Scmer{NewInt(0)}),
+		NewSlice([]Scmer{NewFunc(LessScm)}), NewInt(2), NewInt(207), consumer)
+	if len(got) != 207 {
+		t.Fatalf("window length = %d", len(got))
+	}
+	for i, value := range got {
+		if value != int64((i+2)/3) {
+			t.Fatalf("row %d = %d", i, value)
+		}
+	}
+}
+
+func TestOrderedProducerMergeFailureJoinsEveryProducer(t *testing.T) {
+	var finished atomic.Int32
+	producer := NewFunc(func(a ...Scmer) Scmer {
+		defer finished.Add(1)
+		for i := 0; i < 300; i++ {
+			Apply(a[0], NewSlice([]Scmer{NewInt(int64(i))}))
+		}
+		return NewNil()
+	})
+	consumer := NewFunc(func(_ ...Scmer) Scmer { panic("consumer failure") })
+	func() {
+		defer func() {
+			if failure := recover(); failure != "consumer failure" {
+				t.Fatalf("failure = %v", failure)
+			}
+		}()
+		scanOrderMerge(NewNil(), NewSlice([]Scmer{producer, producer}),
+			NewSlice([]Scmer{NewInt(0)}), NewSlice([]Scmer{NewFunc(LessScm)}), NewInt(0), NewInt(-1), consumer)
+	}()
+	if finished.Load() != 2 {
+		t.Fatalf("unfinished producer: %d", finished.Load())
+	}
+}
+
+func TestOrderedProducerMergePropagatesProducerFailure(t *testing.T) {
+	defer func() {
+		if failure := recover(); failure != "producer failure" {
+			t.Fatalf("failure = %v", failure)
+		}
+	}()
+	producer := NewFunc(func(_ ...Scmer) Scmer { panic("producer failure") })
+	scanOrderMerge(NewNil(), NewSlice([]Scmer{producer}), NewSlice([]Scmer{NewInt(0)}),
+		NewSlice([]Scmer{NewFunc(LessScm)}), NewInt(0), NewInt(-1), NewFunc(func(_ ...Scmer) Scmer { return NewNil() }))
+}
+
+func TestOrderedProducerMergeRejectsInvalidInput(t *testing.T) {
+	for _, positions := range [][]Scmer{{NewInt(-1)}, {NewInt(1)}} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("invalid position accepted")
+				}
+			}()
+			producer := NewFunc(func(a ...Scmer) Scmer {
+				return Apply(a[0], NewSlice([]Scmer{NewInt(0)}))
+			})
+			scanOrderMerge(NewNil(), NewSlice([]Scmer{producer}), NewSlice(positions),
+				NewSlice([]Scmer{NewFunc(LessScm)}), NewInt(0), NewInt(-1),
+				NewFunc(func(_ ...Scmer) Scmer { return NewNil() }))
+		}()
+	}
+}
+
+func TestOrderedProducerMergeCancelledQueryJoinsWorkers(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	ss := &SessionState{}
+	seq := ss.BeginQuery("Query", "ordered merge cancellation")
+	ss.SetQueryContext(seq, ctx)
+	defer ss.EndQuery(seq, "Sleep", "")
+	var finished atomic.Bool
+	producer := NewFunc(func(a ...Scmer) Scmer {
+		defer finished.Store(true)
+		for i := 0; i < 1000; i++ {
+			if !ToBool(Apply(a[0], NewSlice([]Scmer{NewInt(int64(i))}))) {
+				break
+			}
+		}
+		return NewNil()
+	})
+	consumer := NewFunc(func(_ ...Scmer) Scmer { cancel(); return NewNil() })
+	func() {
+		defer func() {
+			if failure := recover(); failure != context.Canceled {
+				t.Fatalf("expected cancellation, got %v", failure)
+			}
+		}()
+		scanOrderMerge(NewAny(&mutexTestTransaction{ss: ss, seq: seq}),
+			NewSlice([]Scmer{producer}), NewSlice([]Scmer{NewInt(0)}),
+			NewSlice([]Scmer{NewFunc(LessScm)}), NewInt(0), NewInt(-1), consumer)
+	}()
+	if !finished.Load() {
+		t.Fatal("cancelled merge left its producer running")
+	}
+}
+
+func TestStreamWindowTopKOwnsBorrowedTuples(t *testing.T) {
+	borrowed := []Scmer{NewInt(0)}
+	producer := NewFunc(func(a ...Scmer) Scmer {
+		for _, v := range []int64{5, 3, 3, 1, 4, 2} {
+			borrowed[0] = NewInt(v)
+			Apply(a[0], NewSlice(borrowed))
+		}
+		borrowed[0] = NewInt(999)
+		return NewNil()
+	})
+	less := NewFunc(func(a ...Scmer) Scmer { return LessScm(a[0].Slice()[0], a[1].Slice()[0]) })
+	var got []int64
+	reduce := NewFunc(func(a ...Scmer) Scmer {
+		got = append(got, a[1].Slice()[0].Int())
+		return a[0]
+	})
+	Apply(Globalenv.Vars[Symbol("stream_window_reduce")], NewInt(1), NewInt(3), reduce, NewNil(), producer, less)
+	if len(got) != 3 || got[0] != 2 || got[1] != 3 || got[2] != 3 {
+		t.Fatalf("Top-K = %v", got)
+	}
+}
+
+func TestStreamWindowTopKSerializesParallelProducer(t *testing.T) {
+	producer := NewFunc(func(a ...Scmer) Scmer {
+		var wg sync.WaitGroup
+		for worker := 0; worker < 4; worker++ {
+			wg.Add(1)
+			go func(worker int) {
+				defer wg.Done()
+				for i := 0; i < 100; i++ {
+					Apply(a[0], NewInt(int64(worker*100+i)))
+				}
+			}(worker)
+		}
+		wg.Wait()
+		return NewNil()
+	})
+	var got []int64
+	reduce := NewFunc(func(a ...Scmer) Scmer { got = append(got, a[1].Int()); return a[0] })
+	Apply(Globalenv.Vars[Symbol("stream_window_reduce")], NewInt(397), NewInt(3), reduce, NewNil(), producer, NewFunc(GreaterScm))
+	if len(got) != 3 || got[0] != 2 || got[1] != 1 || got[2] != 0 {
+		t.Fatalf("parallel Top-K = %v", got)
+	}
+}
+
+func TestStreamWindowTopKRejectsUnboundedWindow(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("unbounded Top-K accepted")
+		}
+	}()
+	producer := NewFunc(func(_ ...Scmer) Scmer { t.Fatal("invalid producer ran"); return NewNil() })
+	Apply(Globalenv.Vars[Symbol("stream_window_reduce")], NewInt(0), NewInt(-1), NewFunc(LessScm), NewNil(), producer, NewFunc(LessScm))
 }

@@ -2332,6 +2332,7 @@ func (ctx *JITContext) EmitGoCallVariadic(f func(...Scmer) Scmer, argslice JITVa
 	}
 
 	ctx.ReclaimUntrackedRegs()
+	liveFP := ctx.preserveFPRegistersForCall()
 	var liveRegsArr [16]Reg
 	allLiveRegs := ctx.collectLiveRegsForCall(&liveRegsArr)
 	liveRegs := allLiveRegs[:0]
@@ -2433,6 +2434,7 @@ func (ctx *JITContext) EmitGoCallVariadic(f func(...Scmer) Scmer, argslice JITVa
 	if ctx.SliceBaseTracksRSP && ctx.SliceBase != RegRSP {
 		ctx.emitMovRegReg(ctx.SliceBase, RegRSP)
 	}
+	liveFP.restore()
 	return target
 }
 
@@ -2466,6 +2468,7 @@ func (ctx *JITContext) emitFuncValueCall(fn, argslice, result JITValueDesc, kind
 		panic("jit: invalid Proc.JIT call placement")
 	}
 
+	liveFP := ctx.preserveFPRegistersForCall()
 	var liveRegsBuf [16]Reg
 	liveRegs := ctx.collectLiveRegsForCall(&liveRegsBuf)
 	kept := liveRegs[:0]
@@ -2541,6 +2544,7 @@ func (ctx *JITContext) emitFuncValueCall(fn, argslice, result JITValueDesc, kind
 			ctx.EmitMovRegReg(ctx.SliceBase, ctx.StackReg)
 		}
 	}
+	liveFP.restore()
 	return result
 }
 

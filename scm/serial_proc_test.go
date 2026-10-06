@@ -260,3 +260,123 @@ func TestEqualProceduresUsesIdentity(t *testing.T) {
 		t.Fatal("distinct procedures must not compare equal through their printed representation")
 	}
 }
+
+func TestEmptyListOperatorsDoNotPrepareUnusedCallbacks(t *testing.T) {
+	callback := preparedTestProc(t, `(lambda (value item)
+		(begin (define scaled (* value 2)) (+ scaled item)))`)
+	callback.Proc().Compiled = nil
+	callback.Proc().JITCode = 0
+	for _, name := range []string{"map", "reduce"} {
+		t.Run(name, func(t *testing.T) {
+			fn := declarations[name].Fn
+			args := []Scmer{NewSlice(nil), callback}
+			if name == "reduce" {
+				args = append(args, NewInt(10))
+			}
+			allocations := testing.AllocsPerRun(100, func() { fn(args...) })
+			if allocations > 3 {
+				t.Fatalf("empty %s prepared its unused callback: %.1f allocations", name, allocations)
+			}
+		})
+	}
+}
+
+func TestSingletonListOperatorsPreserveCallbackSemantics(t *testing.T) {
+	mapper := preparedTestProc(t, `(lambda (value) (+ (* value 2) 1))`)
+	mapper.Proc().Compiled = nil
+	mapper.Proc().JITCode = 0
+	mapped := declarations["map"].Fn(NewSlice([]Scmer{NewInt(3)}), mapper)
+	if !mapped.IsSlice() || len(mapped.Slice()) != 1 || mapped.Slice()[0].Int() != 7 {
+		t.Fatalf("singleton map = %s, want (7)", mapped.String())
+	}
+	reducer := preparedTestProc(t, `(lambda (acc value) (- acc value))`)
+	reducer.Proc().Compiled = nil
+	reducer.Proc().JITCode = 0
+	if got := declarations["reduce"].Fn(NewSlice([]Scmer{NewInt(3)}), reducer, NewInt(10)); got.Int() != 7 {
+		t.Fatalf("singleton reduce = %s, want 7", got.String())
+	}
+	if got := declarations["reduce"].Fn(NewSlice([]Scmer{NewInt(3)}), reducer); got.Int() != 3 {
+		t.Fatalf("singleton reduce without neutral = %s, want 3", got.String())
+	}
+	if got := declarations["reduce"].Fn(NewSlice(nil), reducer); !got.IsNil() {
+		t.Fatalf("empty reduce without neutral = %s, want nil", got.String())
+	}
+	constant := declarations["map"].Fn(NewSlice([]Scmer{NewInt(3)}), NewBool(false))
+	if !constant.Slice()[0].IsBool() || constant.Slice()[0].Bool() {
+		t.Fatalf("constant mapper = %s, want (false)", constant.String())
+	}
+}
+
+func TestSingletonMapRetainsCallbackCapturesAndArguments(t *testing.T) {
+	mapper := preparedTestProc(t, `(lambda (value) (lambda () (+ value 1)))`)
+	mapper.Proc().Compiled = nil
+	mapper.Proc().JITCode = 0
+	first := declarations["map"].Fn(NewSlice([]Scmer{NewInt(3)}), mapper).Slice()[0]
+	second := declarations["map"].Fn(NewSlice([]Scmer{NewInt(8)}), mapper).Slice()[0]
+	if Apply(first).Int() != 4 || Apply(second).Int() != 9 || Apply(first).Int() != 4 {
+		t.Fatal("singleton map reused a captured invocation frame")
+	}
+	retaining := Globalenv.Vars[Symbol("list")]
+	firstArgs := declarations["map"].Fn(NewSlice([]Scmer{NewInt(3)}), retaining).Slice()[0]
+	declarations["map"].Fn(NewSlice([]Scmer{NewInt(8)}), retaining)
+	if len(firstArgs.Slice()) != 1 || firstArgs.Slice()[0].Int() != 3 {
+		t.Fatal("singleton map overwrote a native callback's retained arguments")
+	}
+}
+
+func TestSingletonListOperatorsKeepCompiledEntryAuthoritative(t *testing.T) {
+	if !jitEnabled {
+		t.Skip("compiled entry dispatch requires JIT")
+	}
+	callback := preparedTestProc(t, `(lambda (value item) 7)`)
+	callback.Proc().Compiled = &JITEntryPoint{Native: func(...Scmer) Scmer { return NewInt(99) }}
+	if got := declarations["map"].Fn(NewSlice([]Scmer{NewInt(3)}), callback).Slice()[0]; got.Int() != 99 {
+		t.Fatalf("singleton map used diagnostic body: %s", got.String())
+	}
+	if got := declarations["reduce"].Fn(NewSlice([]Scmer{NewInt(3)}), callback, NewInt(10)); got.Int() != 99 {
+		t.Fatalf("singleton reduce used diagnostic body: %s", got.String())
+	}
+}
+
+var singletonListBenchmarkSink Scmer
+
+func BenchmarkSingletonListOperators(b *testing.B) {
+	for _, shape := range []struct{ name, source string }{
+		{"constant", `(lambda (value) 7)`},
+		{"identity", `(lambda (value) value)`},
+		{"native", `(lambda (value) (+ value 1))`},
+		{"general", `(lambda (value) (+ (* value 2) 1))`},
+	} {
+		callback := preparedTestProc(b, shape.source)
+		callback.Proc().Compiled = nil
+		callback.Proc().JITCode = 0
+		for _, size := range []int{0, 1, 2, 8} {
+			input := make([]Scmer, size)
+			for i := range input {
+				input[i] = NewInt(int64(i + 1))
+			}
+			args := []Scmer{NewSlice(input), callback}
+			b.Run(shape.name+"/"+string(rune('0'+size)), func(b *testing.B) {
+				b.ReportAllocs()
+				for i := 0; i < b.N; i++ {
+					singletonListBenchmarkSink = declarations["map"].Fn(args...)
+				}
+			})
+		}
+	}
+}
+
+func TestSingletonMapDoesNotMutateAnnotatedInput(t *testing.T) {
+	value := NewSourceInfo(SourceInfo{value: NewInt(3)})
+	input := []Scmer{value}
+	mapper := preparedTestProc(t, `(lambda (value) (+ value))`)
+	mapper.Proc().Compiled = nil
+	mapper.Proc().JITCode = 0
+	result := declarations["map"].Fn(NewSlice(input), mapper)
+	if !input[0].IsSourceInfo() || input[0] != value {
+		t.Fatal("singleton native-forward mapper mutated the caller's input")
+	}
+	if result.Slice()[0].Int() != 3 {
+		t.Fatalf("singleton native-forward result = %s, want 3", result.String())
+	}
+}

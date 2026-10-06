@@ -454,6 +454,32 @@ test_cases:
             (serialize (list original other restored changed))))))
     expect:
       data: [true]
+  - name: "A cardinality-only guard ignores aggregate publication but rejects row changes"
+    setup:
+      - sql: "DROP TABLE IF EXISTS qfi_cardinality"
+      - sql: "CREATE TABLE qfi_cardinality (id INT PRIMARY KEY) ENGINE=memory"
+      - sql: "INSERT INTO qfi_cardinality VALUES (1),(2),(3)"
+    scm: |
+      (begin
+        (define sess (newsession))
+        (define planning (sql_queryplan_compile_session sess nil))
+        (define src '("cache" "memcp-tests" "qfi_cardinality" false true))
+        (planner_record_source_row_count_guard src (planner_source_row_count src) planning)
+        (define guard (sql_queryplan_compile_formula nil
+          (sql_queryplan_guard_from_session planning)))
+        (define original (guard sess nil nil nil))
+        (createcolumn (table "memcp-tests" "qfi_cardinality")
+          "extra_aggregate" "INT" '() '("temp" true) '("id") (lambda (id) (+ id 1)))
+        (define published (guard sess nil nil nil))
+        (insert (table "memcp-tests" "qfi_cardinality") '("id") (list (list 4)))
+        (define changed (guard sess nil nil nil))
+        (if (and original published (not changed)) true
+          (error (concat "cardinality guard followed unrelated schema or missed rows: "
+            (serialize (list original published changed))))))
+    expect:
+      data: [true]
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS qfi_cardinality"
 cleanup:
   - sql: "DROP TABLE IF EXISTS qfi_frequency"
   - sql: "DROP TABLE IF EXISTS qfi_access"

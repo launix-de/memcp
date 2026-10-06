@@ -23,7 +23,10 @@ jobs:
     needs: changes
     if: ${{ needs.changes.outputs.relevant == 'true' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # Retain all seven fresh A/B fixtures when the initial pair needs
+    # verification. The rare-prefix workload can take ~40s per side alone;
+    # let the fixed protocol finish without changing any query or gate budget.
+    timeout-minutes: 90
 
     steps:
       - name: Check out merge candidate

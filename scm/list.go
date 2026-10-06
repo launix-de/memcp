@@ -30964,6 +30964,15 @@ func init_list() {
 		Fn: func(a ...Scmer) Scmer {
 			list := asSlice(a[0], "map")
 			result := make([]Scmer, len(list))
+			// A callback with no invocations needs no serial program. One
+			// interpreted call uses a fresh frame, retaining lexical captures.
+			if len(list) == 0 {
+				return NewSlice(result)
+			}
+			if len(list) == 1 {
+				result[0] = callSerialProcOnce(a[1], []Scmer{list[0]})
+				return NewSlice(result)
+			}
 			fn := PrepareSerialProc(a[1])
 			var fnArgs [1]Scmer
 			for i, v := range list {
@@ -31812,6 +31821,9 @@ func init_list() {
 				}
 				return NewSlice(result)
 			}
+			// The native boundary may lend its argument array from a movable JIT
+			// stack. Workers own the callback value, never the borrowed array.
+			callback := a[1]
 			results := make([]Scmer, len(list))
 			workers := runtime.NumCPU()
 			if workers > len(list) {
@@ -31824,7 +31836,7 @@ func init_list() {
 			for w := 0; w < workers; w++ {
 				go func() {
 					defer wg.Done()
-					fn := PrepareSerialProc(a[1])
+					fn := PrepareSerialProc(callback)
 					var fnArgs [1]Scmer
 					for i := range jobs {
 						if firstErr.Load() != nil {
@@ -31854,7 +31866,7 @@ func init_list() {
 		},
 		Type: &TypeDescriptor{Kind: "func", Description: "like map, but applies fn to each element in parallel using a worker pool limited to runtime.NumCPU()",
 			Params: []*TypeDescriptor{
-				{Kind: "list", Label: "list", Description: "list to map over in parallel", NoEscape: true},
+				{Kind: "list", Label: "list", Description: "list to map over in parallel", NoEscape: true, CrossGoroutine: true},
 				{Kind: "func", Label: "fn", Description: "function applied to each element", Params: []*TypeDescriptor{{Kind: "any", Label: "item"}}, Return: &TypeDescriptor{Kind: "any"}},
 			},
 			Return: FreshAlloc,
@@ -31887,6 +31899,9 @@ func init_list() {
 				}
 				return NewSlice(result)
 			}
+			// The native boundary may lend its argument array from a movable JIT
+			// stack. Workers own the callback value, never the borrowed array.
+			callback := a[1]
 			results := make([]Scmer, len(list))
 			workers := runtime.NumCPU()
 			if workers > len(list) {
@@ -31899,7 +31914,7 @@ func init_list() {
 			for w := 0; w < workers; w++ {
 				go func() {
 					defer wg.Done()
-					fn := PrepareSerialProc(a[1])
+					fn := PrepareSerialProc(callback)
 					var fnArgs [1]Scmer
 					for i := range jobs {
 						if firstErr.Load() != nil {
@@ -31929,7 +31944,7 @@ func init_list() {
 		},
 		Type: &TypeDescriptor{Kind: "func", Description: "like parallel_map, but signals the optimizer that fn may have side effects",
 			Params: []*TypeDescriptor{
-				{Kind: "list", Label: "list", Description: "list to map over in parallel", NoEscape: true},
+				{Kind: "list", Label: "list", Description: "list to map over in parallel", NoEscape: true, CrossGoroutine: true},
 				{Kind: "func", Label: "fn", Description: "function with side effects applied to each element", Params: []*TypeDescriptor{{Kind: "any", Label: "item"}}, Return: &TypeDescriptor{Kind: "any"}},
 			},
 			Return: FreshAlloc,
@@ -32801,8 +32816,6 @@ func init_list() {
 
 		Fn: func(a ...Scmer) Scmer {
 			list := asSlice(a[0], "reduce")
-			fn := PrepareSerialProc(a[1])
-			var fnArgs [2]Scmer
 			result := NewNil()
 			i := 0
 			if len(a) > 2 {
@@ -32811,6 +32824,16 @@ func init_list() {
 				result = list[0]
 				i = 1
 			}
+			// The first item is the neutral when none was supplied. Count
+			// actual invocations before preparing a reusable callback frame.
+			if i == len(list) {
+				return result
+			}
+			if i+1 == len(list) {
+				return callSerialProcOnce(a[1], []Scmer{result, list[i]})
+			}
+			fn := PrepareSerialProc(a[1])
+			var fnArgs [2]Scmer
 			for i < len(list) {
 				fnArgs[0], fnArgs[1] = result, list[i]
 				result = fn.Call(fnArgs[:2])
@@ -55336,11 +55359,26 @@ func init_list() {
 		Fn: func(a ...Scmer) Scmer {
 			var mergeFn func(Scmer, Scmer) Scmer
 			if len(a) > 3 {
-				mfn := PrepareSerialProc(a[3])
-				var mfnArgs [2]Scmer
+				// An association update calls its merger at most once. Preparing a
+				// serial callback tree here cannot amortize its construction.
+				merge := a[3]
 				mergeFn = func(oldV, newV Scmer) Scmer {
-					mfnArgs[0], mfnArgs[1] = oldV, newV
-					return mfn.Call(mfnArgs[:2])
+					if merge.GetTag() == tagFunc || (merge.IsProc() && merge.Proc().Compiled != nil) {
+						// Keep native argument ownership and authoritative
+						// compiled entry dispatch unchanged.
+						prepared := PrepareSerialProc(merge)
+						return prepared.Call([]Scmer{oldV, newV})
+					}
+					if merge.IsProc() {
+						return Apply(merge, oldV, newV)
+					}
+					// Keep the serial adapter's constant-result compatibility.
+					if merge.GetTag() == tagAny {
+						if fn, ok := merge.Any().(func(...Scmer) Scmer); ok {
+							return fn(oldV, newV)
+						}
+					}
+					return merge
 				}
 			}
 			slice, fd := asAssoc(a[0], "set_assoc")
@@ -139030,10 +139068,20 @@ func init_list() {
 
 		Fn: func(a ...Scmer) Scmer {
 			input := asSlice(a[1], "cons_map")
-			mapper := PrepareSerialProc(a[2])
-			var mapperArgs [1]Scmer
 			result := make([]Scmer, len(input)+1)
 			result[0] = a[0]
+			// Empty AST tails never invoke their mapper. A single general
+			// invocation cannot amortize preparing an interpreter program;
+			// cheap callback shapes and compiled entries retain their dispatch.
+			if len(input) == 0 {
+				return NewSlice(result)
+			}
+			if len(input) == 1 {
+				result[1] = callSerialProcOnce(a[2], []Scmer{input[0]})
+				return NewSlice(result)
+			}
+			mapper := PrepareSerialProc(a[2])
+			var mapperArgs [1]Scmer
 			for i, item := range input {
 				mapperArgs[0] = item
 				result[i+1] = mapper.Call(mapperArgs[:1])
@@ -148500,11 +148548,26 @@ func init_list() {
 		Fn: func(a ...Scmer) Scmer {
 			var mergeFn func(Scmer, Scmer) Scmer
 			if len(a) > 3 {
-				mfn := PrepareSerialProc(a[3])
-				var mfnArgs [2]Scmer
+				// An association update calls its merger at most once. Preparing a
+				// serial callback tree here cannot amortize its construction.
+				merge := a[3]
 				mergeFn = func(oldV, newV Scmer) Scmer {
-					mfnArgs[0], mfnArgs[1] = oldV, newV
-					return mfn.Call(mfnArgs[:2])
+					if merge.GetTag() == tagFunc || (merge.IsProc() && merge.Proc().Compiled != nil) {
+						// Keep native argument ownership and authoritative
+						// compiled entry dispatch unchanged.
+						prepared := PrepareSerialProc(merge)
+						return prepared.Call([]Scmer{oldV, newV})
+					}
+					if merge.IsProc() {
+						return Apply(merge, oldV, newV)
+					}
+					// Keep the serial adapter's constant-result compatibility.
+					if merge.GetTag() == tagAny {
+						if fn, ok := merge.Any().(func(...Scmer) Scmer); ok {
+							return fn(oldV, newV)
+						}
+					}
+					return merge
 				}
 			}
 			slice, fd := asAssoc(a[0], "set_assoc_mut")

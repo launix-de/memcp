@@ -30,6 +30,38 @@ func optimizeListPipeline(t testing.TB, source string) (Scmer, *Env) {
 	return optimized, env
 }
 
+func TestParallelMapInputsStayOwnedAcrossWorkers(t *testing.T) {
+	for _, operator := range []string{"parallel_map", "parallel_map_mut"} {
+		t.Run(operator, func(t *testing.T) {
+			source := fmt.Sprintf(`(lambda (seed) (%s
+				(list (list seed 1) (list seed 2) (list seed 3))
+				(lambda (items) (list items seed))))`, operator)
+			optimized, env := optimizeListPipeline(t, source)
+			serialized := serializedTestExpr(t, env, optimized)
+			if strings.Contains(serialized, "!list") {
+				t.Fatalf("parallel workers were given invocation-stack list storage: %s", serialized)
+			}
+			callback := Eval(optimized, env)
+			var previous Scmer
+			for seed := int64(7); seed <= 9; seed++ {
+				got := Apply(callback, NewInt(seed))
+				want := NewSlice([]Scmer{
+					NewSlice([]Scmer{NewSlice([]Scmer{NewInt(seed), NewInt(1)}), NewInt(seed)}),
+					NewSlice([]Scmer{NewSlice([]Scmer{NewInt(seed), NewInt(2)}), NewInt(seed)}),
+					NewSlice([]Scmer{NewSlice([]Scmer{NewInt(seed), NewInt(3)}), NewInt(seed)}),
+				})
+				if !Equal(got, want) {
+					t.Fatalf("parallel result %s, want %s", String(got), String(want))
+				}
+				if !previous.IsNil() && previous.Slice()[0].Slice()[1].Int() != seed-1 {
+					t.Fatalf("next invocation changed retained nested output: %s", String(previous))
+				}
+				previous = got
+			}
+		})
+	}
+}
+
 func TestJITFusedListPipelinesInlineKnownCallbacks(t *testing.T) {
 	if !jitEnabled {
 		t.Skip("requires GOEXPERIMENT=jit")
@@ -142,6 +174,29 @@ func TestJITNativeFloatSumPreservesNumericAndNilSemantics(t *testing.T) {
 	}
 	if got := Apply(compiled, NewSlice([]Scmer{NewFloat(1.25), NewNil(), NewFloat(2)})); !got.IsNil() {
 		t.Fatalf("native float sum with nil = %s, want nil", String(got))
+	}
+}
+
+// A native mapper can use any XMM register; the fused running total must
+// survive both dynamic function dispatch and its boxed result conversion.
+func TestJITNativeFloatSumPreservesAcrossNativeMapperCalls(t *testing.T) {
+	if !jitEnabled {
+		t.Skip("requires GOEXPERIMENT=jit")
+	}
+	optimized, env := optimizeListPipeline(t, `(lambda (values mapper)
+		(sum_float_map values (lambda (unused value) (mapper value)) 0.0))`)
+	compiled := jitCompile(Eval(optimized, env))
+	if compiled.Proc() == nil || compiled.Proc().Compiled == nil {
+		t.Fatal("native callback float sum did not compile")
+	}
+	mapper := NewFunc(func(args ...Scmer) Scmer {
+		return declarations["*"].Fn(args[0], NewFloat(1.5))
+	})
+	if got := Apply(compiled, NewSlice([]Scmer{NewFloat(1.25), NewInt(2)}), mapper); !Equal(got, NewFloat(4.875)) {
+		t.Fatalf("native callback float sum = %s, want 4.875", String(got))
+	}
+	if got := Apply(compiled, NewSlice([]Scmer{NewFloat(1.25), NewNil(), NewInt(2)}), mapper); !got.IsNil() {
+		t.Fatalf("native callback float sum with nil = %s, want nil", String(got))
 	}
 }
 
@@ -780,6 +835,95 @@ func TestOptimizeKeepsDynamicReducerAfterMergeValidation(t *testing.T) {
 				t.Fatalf("dynamic reducer moved ahead of merge validation: %s", serialized)
 			}
 		})
+	}
+}
+
+func TestConsMapKeepsCallbackResultsAndOwnedFrames(t *testing.T) {
+	mapper := preparedTestProc(t, `(lambda (value) (lambda () (+ (* value 2) 1)))`)
+	consMap := Globalenv.Vars[Symbol("cons_map")].Func()
+	for _, size := range []int{0, 1, 3} {
+		input := make([]Scmer, size)
+		for i := range input {
+			input[i] = NewInt(int64(i + 1))
+		}
+		got := consMap(NewString("head"), NewSlice(input), mapper).Slice()
+		if len(got) != size+1 || got[0].String() != "head" {
+			t.Fatalf("size %d: invalid constructed list %s", size, String(NewSlice(got)))
+		}
+		for i := range input {
+			if value := Apply(got[i+1]); value.Int() != int64(2*(i+1)+1) {
+				t.Fatalf("size %d: callback %d retained another invocation's frame: %s", size, i, String(value))
+			}
+		}
+	}
+	if jitEnabled {
+		compiled := preparedTestProc(t, `(lambda (value) 7)`)
+		compiled.Proc().Compiled = &JITEntryPoint{Native: func(...Scmer) Scmer { return NewInt(99) }}
+		got := consMap(NewString("head"), NewSlice([]Scmer{NewInt(1)}), compiled).Slice()
+		if got[1].Int() != 99 {
+			t.Fatalf("compiled callback was replaced by its diagnostic body: %s", String(got[1]))
+		}
+	}
+}
+
+func TestConsMapDoesNotPrepareUnusedOrOneShotInterpretedCallback(t *testing.T) {
+	mapper := preparedTestProc(t, `(lambda (value) (+ (* value 2) 1))`)
+	consMap := Globalenv.Vars[Symbol("cons_map")].Func()
+	head := NewString("head")
+	for _, tc := range []struct {
+		input Scmer
+		limit float64
+	}{
+		{NewSlice(nil), 2},
+		{NewSlice([]Scmer{NewInt(3)}), 8},
+	} {
+		t.Run(fmt.Sprintf("tail-%d", len(tc.input.Slice())), func(t *testing.T) {
+			allocations := testing.AllocsPerRun(100, func() {
+				assocBenchmarkSink = consMap(head, tc.input, mapper)
+			})
+			if allocations > tc.limit {
+				t.Fatalf("tail length %d prepares a non-reused callback: %.0f allocations, limit %.0f", len(tc.input.Slice()), allocations, tc.limit)
+			}
+		})
+	}
+}
+
+func TestConsMapDoesNotMutateAnnotatedTail(t *testing.T) {
+	value := NewSourceInfo(SourceInfo{value: NewInt(3)})
+	input := []Scmer{value}
+	mapper := preparedTestProc(t, `(lambda (value) (+ value))`)
+	result := Globalenv.Vars[Symbol("cons_map")].Func()(NewString("head"), NewSlice(input), mapper)
+	if input[0] != value || !input[0].IsSourceInfo() {
+		t.Fatal("singleton native-forward mapper changed the caller's tail")
+	}
+	if result.Slice()[1].Int() != 3 {
+		t.Fatalf("mapped tail = %s, want 3", String(result.Slice()[1]))
+	}
+}
+
+func BenchmarkConsMapCallbackPreparation(b *testing.B) {
+	consMap := Globalenv.Vars[Symbol("cons_map")].Func()
+	for _, callback := range []struct{ name, source string }{
+		{"constant", `(lambda (value) 7)`},
+		{"identity", `(lambda (value) value)`},
+		{"forward", `(lambda (value) (nil? value))`},
+		{"bound", `(lambda (value) (+ value 1))`},
+		{"general", `(lambda (value) (+ (* value 2) 1))`},
+	} {
+		mapper := preparedTestProc(b, callback.source)
+		for _, size := range []int{0, 1, 2, 8} {
+			input := make([]Scmer, size)
+			for i := range input {
+				input[i] = NewInt(int64(i + 1))
+			}
+			values := NewSlice(input)
+			b.Run(fmt.Sprintf("%s/%d", callback.name, size), func(b *testing.B) {
+				b.ReportAllocs()
+				for i := 0; i < b.N; i++ {
+					assocBenchmarkSink = consMap(NewString("head"), values, mapper)
+				}
+			})
+		}
 	}
 }
 

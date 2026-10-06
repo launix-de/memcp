@@ -2964,13 +2964,16 @@ general recursive boolean proof above. */
 		(define residual_outer_refs (qassoc_get analysis (quote residual_outer_refs) '()))
 		(define keys (if (and (empty_list? lookup_pairs) (empty_list? residual_outer_refs))
 			'(1)
-			(merge_unique (list
+			(merge (list
 				(correlation_inner_keys inner_default lookup_pairs)
 				residual_outer_refs))))
 		(define outer_domain (merge_unique (list
 			(correlation_domain lookup_pairs)
 			residual_outer_refs)))
-		(define lookup_keys (merge_unique (list
+		/* Each correlation binding needs its own key slot, even when two
+		inner expressions or two outer expressions are equal. Independent
+		deduplication would lose an equality or misalign the probe vector. */
+		(define lookup_keys (merge (list
 			(correlation_lookup_keys lookup_pairs)
 			residual_outer_refs)))
 		(define condition (combine_where_terms local_terms true))

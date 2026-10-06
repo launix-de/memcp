@@ -1135,3 +1135,54 @@ func BenchmarkJITFloatingFilterBatch(b *testing.B) {
 		}
 	}
 }
+
+func TestJITMultiplyFloatingModeBeforeIntegerOverflow(t *testing.T) {
+	for _, first := range []bool{false, true} {
+		args := []Scmer{NewSymbol("*"), NewInt(1_000_000_000_000_000), NewNthLocalVar(0), NewFloat(1)}
+		if first {
+			args = []Scmer{NewSymbol("*"), NewFloat(1), NewInt(1_000_000_000_000_000), NewNthLocalVar(0)}
+		}
+		fn := CompileJITStorageGetValue(func(ctx *JITContext, source, target JITValueDesc) JITValueDesc {
+			source.Type = tagInt
+			ctx.Env = &JITEnv{Numbered: []JITValueDesc{source}}
+			return jitCompileExpr(ctx, NewSlice(args), ctx.SliceBase, target)
+		})
+		if fn == nil {
+			t.Fatal("floating multiplication did not compile")
+		}
+		if got := fn(20_000); !got.IsFloat() || got.Float() != 2e19 {
+			t.Fatalf("first=%v: floating product wrapped or lost its type: %v", first, got)
+		}
+	}
+}
+
+func TestJITMultiplyIntegralFloatResultTag(t *testing.T) {
+	fn := CompileJITStorageGetValue(func(ctx *JITContext, source, target JITValueDesc) JITValueDesc {
+		source.Type = tagInt
+		ctx.Env = &JITEnv{Numbered: []JITValueDesc{source}}
+		return jitCompileExpr(ctx, NewSlice([]Scmer{NewSymbol("*"), NewNthLocalVar(0), NewFloat(3), NewFloat(4), NewFloat(5)}), ctx.SliceBase, target)
+	})
+	if fn == nil {
+		t.Fatal("integral floating multiplication did not compile")
+	}
+	if got := fn(2); !got.IsInt() || got.Int() != 120 {
+		t.Fatalf("integral literal product changed its integer tag: %v", got)
+	}
+}
+
+func TestJITMultiplyMixedFloatPreservesExactWideIntegers(t *testing.T) {
+	for _, value := range []int64{1<<53 + 1, math.MaxInt64, math.MinInt64} {
+		fn := CompileJITStorageGetValue(func(ctx *JITContext, source, target JITValueDesc) JITValueDesc {
+			source.Type = tagInt
+			ctx.Env = &JITEnv{Numbered: []JITValueDesc{source}}
+			expr := NewSlice([]Scmer{NewSymbol("*"), NewInt(value), NewNthLocalVar(0), NewFloat(1)})
+			return jitCompileExpr(ctx, expr, ctx.SliceBase, target)
+		})
+		if fn == nil {
+			t.Fatal("wide mixed multiplication did not compile")
+		}
+		if got := fn(1); !got.IsInt() || got.Int() != value {
+			t.Fatalf("exact wide integer rounded: got %v, want %d", got, value)
+		}
+	}
+}

@@ -16,7 +16,10 @@ Copyright (C) 2026  Carl-Philip Hänsch
 */
 package scm
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
 func TestRoundSQLDecimalOutput(t *testing.T) {
 	tests := []struct {
@@ -36,5 +39,50 @@ func TestRoundSQLDecimalOutput(t *testing.T) {
 				t.Fatalf("roundSQLDecimalOutput(%v, %d) = %v, want %v", test.value, test.scale, got, test.want)
 			}
 		})
+	}
+}
+
+func TestMultiplyFloatingModeBeforeIntegerOverflow(t *testing.T) {
+	for _, args := range [][]Scmer{
+		{NewFloat(1), NewInt(1_000_000_000_000_000), NewInt(20_000)},
+		{NewInt(1_000_000_000_000_000), NewInt(20_000), NewFloat(1)},
+	} {
+		got := declarations["*"].Fn(args...)
+		if !got.IsFloat() || got.Float() != 2e19 {
+			t.Fatalf("floating product wrapped or lost its type: %v", got)
+		}
+	}
+	if got := declarations["*"].Fn(NewInt(3), NewInt(4)); !got.IsInt() || got.Int() != 12 {
+		t.Fatalf("integer product changed: %v", got)
+	}
+	if got := declarations["*"].Fn(NewFloat(1), NewNil()); !got.IsNil() {
+		t.Fatalf("NULL did not propagate: %v", got)
+	}
+}
+
+func TestMultiplyIntegralFloatResultTag(t *testing.T) {
+	mul := declarations["*"].Fn
+	if got := mul(NewFloat(2), NewFloat(3), NewFloat(4), NewFloat(5)); !got.IsInt() || got.Int() != 120 {
+		t.Fatalf("integral literal product changed its integer tag: %v", got)
+	}
+	if got := mul(NewFloat(0.5), NewInt(2)); !got.IsFloat() || got.Float() != 1 {
+		t.Fatalf("fractional operand lost floating result: %v", got)
+	}
+}
+
+func TestMultiplyMixedFloatPreservesExactWideIntegers(t *testing.T) {
+	for _, value := range []int64{1<<53 + 1, math.MaxInt64, math.MinInt64} {
+		for _, args := range [][]Scmer{
+			{NewInt(value), NewFloat(1)},
+			{NewFloat(1), NewInt(value)},
+		} {
+			got := declarations["*"].Fn(args...)
+			if !got.IsInt() || got.Int() != value {
+				t.Fatalf("exact wide integer rounded: got %v, want %d", got, value)
+			}
+		}
+	}
+	if got := declarations["*"].Fn(NewInt(math.MaxInt64), NewInt(2), NewFloat(0)); !got.IsInt() || got.Int() != 0 {
+		t.Fatalf("late zero lost integral result: %v", got)
 	}
 }

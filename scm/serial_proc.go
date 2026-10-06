@@ -31,6 +31,9 @@ const (
 	SerialProcNativeArgConstant
 	SerialProcJIT
 	SerialProcRetainingNative
+	// Metadata callbacks retain a relocatable funcval in the caller's descriptor,
+	// rather than a heap Go closure which can capture an interior stack Proc.
+	SerialProcJITMetadata
 )
 
 // SerialProc exposes trivial executable shapes to physical operators. Callers
@@ -313,6 +316,32 @@ func serialProcNativeArgConstant(proc *Proc, body Scmer) (native Scmer, argument
 // exact native-forwarding callback shapes. Compiled procedures dispatch to the
 // JIT; other bodies use the serial interpreter with explicit frame ownership.
 func PrepareSerialProc(source Scmer) SerialProc {
+	prepared := classifySerialProc(source)
+	if prepared.Kind == SerialProcGeneral {
+		prepared.borrowed = prepareSerialInterpreter(source)
+	}
+	return prepared
+}
+
+// callSerialProcOnce preserves the specialized and compiled callback dispatch,
+// but does not compile a general interpreted AST for one invocation. Apply
+// gives escaping closures their own lexical frame. Native callbacks keep the
+// same argument ownership as SerialProc.Call.
+func callSerialProcOnce(source Scmer, args []Scmer) Scmer {
+	prepared := classifySerialProc(source)
+	if prepared.Kind == SerialProcGeneral {
+		if source.Proc().Compiled == nil {
+			return Apply(source, args...)
+		}
+		prepared.borrowed = prepareSerialInterpreter(source)
+	}
+	return prepared.Call(args)
+}
+
+// classifySerialProc recognizes cheap executable shapes without preparing a
+// general interpreter program. The descriptor contains no reusable call frame
+// until its consumer actually needs repeated general invocations.
+func classifySerialProc(source Scmer) SerialProc {
 	prepared := SerialProc{Argument: -1}
 	if source.IsNil() {
 		prepared.Kind = SerialProcConstant
@@ -328,6 +357,12 @@ func PrepareSerialProc(source Scmer) SerialProc {
 				prepared.Function = function
 				prepared.jitEntry = proc.Compiled
 				prepared.jitArity = len(params)
+				return prepared
+			}
+			if jitEnabled {
+				prepared.Kind = SerialProcJITMetadata
+				prepared.Function = function
+				prepared.jitEntry = proc.Compiled
 				return prepared
 			}
 		}
@@ -369,8 +404,16 @@ func PrepareSerialProc(source Scmer) SerialProc {
 			prepared.jitArity = len(params)
 			return prepared
 		}
+		if jitEnabled {
+			prepared.Kind = SerialProcJITMetadata
+			prepared.Function = proc.jitFunction()
+			if prepared.Function == nil {
+				prepared.Function = proc.Compiled.Native
+			}
+			prepared.jitEntry = proc.Compiled
+			return prepared
+		}
 		prepared.Kind = SerialProcGeneral
-		prepared.borrowed = prepareSerialInterpreter(source)
 		return prepared
 	}
 	body := serialProcBody(proc.Body)
@@ -417,7 +460,6 @@ func PrepareSerialProc(source Scmer) SerialProc {
 	}
 
 	prepared.Kind = SerialProcGeneral
-	prepared.borrowed = prepareSerialInterpreter(source)
 	return prepared
 }
 
@@ -490,6 +532,8 @@ func (p *SerialProc) Call(args []Scmer) Scmer {
 		return p.Function(append([]Scmer(nil), args...)...)
 	case SerialProcJIT:
 		return p.CallPrepared(p.PrepareCallFrame(args))
+	case SerialProcJITMetadata:
+		return p.jitEntry.callFunction(p.Function, args)
 	case SerialProcNativeArgConstant:
 		call := p.nativeArgs
 		if p.ConstantFirst {
