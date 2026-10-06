@@ -172,14 +172,14 @@ test_cases:
     expect:
       data:
       - amount: 6
-  - name: Composite presence compares tuple join with the existing membership alternative
+  - name: Composite presence exposes null-rejected tuple edges to join search
     sql: >
       EXPLAIN REORDER SELECT a.id AS left_id, b.id AS right_id
       FROM composite_presence_left a CROSS JOIN composite_presence_right b
       WHERE EXISTS (SELECT 1 FROM composite_presence_fact f
                     WHERE f.left_id=a.id AND f.right_id=b.id)
     expect:
-      result_contains: ['presence_join_alternatives', 'membership_cost', 'tuple_join_cost']
+      result_contains: ['null_rejected_aliases', 'join_plan']
 
   - name: Repeated join costs remain monotone beyond the integer range
     scm: |

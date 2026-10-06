@@ -5400,23 +5400,7 @@ the logical lookup still carries an alias which no longer exists. */
 
 (define join_reorder_node_using (lambda (stage_catalog node planning_session tx)
 	(if (query_block? node)
-		(begin
-			(define exposed (expose_null_rejected_join_edges node))
-			(define exposed_plan (reorder_query_block_with_candidate_strategy_using stage_catalog exposed planning_session tx))
-			(if (equal? (qb_sources exposed) (qb_sources node)) exposed_plan (begin
-				/* Exposing tuple joins expands the search space; retain the original
-				membership alternative instead of making full grouping dominant. */
-				(define original_plan (reorder_query_block_with_candidate_strategy_using stage_catalog node planning_session tx))
-				(define exposed_cost (qassoc_get (qb_facts exposed_plan) (quote join_estimated_cost) nil))
-				(define original_cost (qassoc_get (qb_facts original_plan) (quote join_estimated_cost) nil))
-				(define keep_membership (and (number? original_cost)
-					(and (number? exposed_cost) (< original_cost exposed_cost))))
-				(query_block_with_reorder_facts
-					(if keep_membership original_plan exposed_plan)
-					(list (list (quote presence_join_alternatives) (list
-						(list (quote membership_cost) original_cost)
-						(list (quote tuple_join_cost) exposed_cost)
-						(list (quote chosen) (if keep_membership (quote membership) (quote tuple_join))))))))))
+		(reorder_query_block_with_candidate_strategy_using stage_catalog (expose_null_rejected_join_edges node) planning_session tx)
 		(if (union_block? node)
 			(make_union_block
 				(union_mode node)
