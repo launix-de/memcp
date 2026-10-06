@@ -21,6 +21,7 @@ import "sync"
 import "time"
 import "unsafe"
 import "context"
+import "container/heap"
 import "runtime"
 import "sync/atomic"
 
@@ -428,7 +429,226 @@ func WithSession(session Scmer, fn Scmer) Scmer {
 	return Apply(callable)
 }
 
+// orderedProducerBatch owns its row arrays. Producers may borrow native call
+// frames, so emit copies each complete row before crossing the stream boundary.
+// Queue and current batch sizes are bounded independently of result cardinality.
+type orderedProducerBatch struct {
+	rows    [][]Scmer
+	failure any
+}
+
+type orderedProducerCursor struct {
+	input   <-chan orderedProducerBatch
+	rows    [][]Scmer
+	index   int
+	ordinal int
+}
+
+type orderedProducerHeap struct {
+	cursors   []*orderedProducerCursor
+	positions []int
+	relations []SerialProc
+}
+
+func (h orderedProducerHeap) Len() int      { return len(h.cursors) }
+func (h orderedProducerHeap) Swap(i, j int) { h.cursors[i], h.cursors[j] = h.cursors[j], h.cursors[i] }
+func (h orderedProducerHeap) Less(i, j int) bool {
+	a, b := h.cursors[i], h.cursors[j]
+	left, right := a.rows[a.index], b.rows[b.index]
+	var args [2]Scmer
+	for k, position := range h.positions {
+		args[0], args[1] = left[position], right[position]
+		if ToBool(h.relations[k].Call(args[:])) {
+			return true
+		}
+		args[0], args[1] = right[position], left[position]
+		if ToBool(h.relations[k].Call(args[:])) {
+			return false
+		}
+	}
+	return a.ordinal < b.ordinal
+}
+func (h *orderedProducerHeap) Push(v any) { h.cursors = append(h.cursors, v.(*orderedProducerCursor)) }
+func (h *orderedProducerHeap) Pop() any {
+	n := len(h.cursors) - 1
+	v := h.cursors[n]
+	h.cursors[n] = nil
+	h.cursors = h.cursors[:n]
+	return v
+}
+
+// scanOrderMerge merges already ordered, complete-row producers. It does not
+// acquire storage locks or retain an invocation beyond the call. Cleanup joins
+// every producer, including on consumer failure/cancellation; producers whose
+// storage operator does not support braking finish with emission disabled.
+func scanOrderMerge(a ...Scmer) Scmer {
+	ctx := executionContextFrom(a[0])
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	producers := asSlice(a[1], "scan_order_merge producers")
+	positions := asSlice(a[2], "scan_order_merge positions")
+	relations := asSlice(a[3], "scan_order_merge relations")
+	offset, limit := int(ToInt(a[4])), int(ToInt(a[5]))
+	if offset < 0 || limit < -1 || len(positions) != len(relations) {
+		panic("scan_order_merge: invalid order/window")
+	}
+	h := orderedProducerHeap{positions: make([]int, len(positions)), relations: make([]SerialProc, len(relations))}
+	for i := range positions {
+		h.positions[i] = int(ToInt(positions[i]))
+		if h.positions[i] < 0 {
+			panic("scan_order_merge: negative order position")
+		}
+		h.relations[i] = PrepareSerialProc(relations[i])
+	}
+	if limit == 0 {
+		return NewNil()
+	}
+	stop := make(chan struct{})
+	var workers sync.WaitGroup
+	var failureMu sync.Mutex
+	var producerFailure any
+	defer func() {
+		failure := recover()
+		close(stop)
+		workers.Wait()
+		if failure != nil {
+			panic(failure)
+		}
+		// A producer which finishes after LIMIT must not silently lose a failure.
+		if producerFailure != nil {
+			panic(producerFailure)
+		}
+	}()
+	for ordinal, producer := range producers {
+		input := make(chan orderedProducerBatch, 1)
+		program := PrepareSerialProc(producer)
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			defer close(input)
+			defer func() {
+				if failure := recover(); failure != nil {
+					failureMu.Lock()
+					if producerFailure == nil {
+						producerFailure = failure
+					}
+					failureMu.Unlock()
+					select {
+					case input <- orderedProducerBatch{failure: failure}:
+					case <-stop:
+					}
+				}
+			}()
+			const batchSize = 64
+			batch := make([][]Scmer, 0, batchSize)
+			flush := func() bool {
+				if len(batch) == 0 {
+					return true
+				}
+				select {
+				case input <- orderedProducerBatch{rows: batch}:
+					batch = make([][]Scmer, 0, batchSize)
+					return true
+				case <-stop:
+					return false
+				case <-ctx.Done():
+					panic(ctx.Err())
+				}
+			}
+			var mu sync.Mutex
+			emit := NewFunc(func(values ...Scmer) Scmer {
+				mu.Lock()
+				defer mu.Unlock()
+				select {
+				case <-stop:
+					return NewBool(false)
+				default:
+				}
+				if len(values) != 1 {
+					panic("scan_order_merge: emit expects one row")
+				}
+				row := asSlice(values[0], "scan_order_merge row")
+				for _, position := range h.positions {
+					if position >= len(row) {
+						panic("scan_order_merge: order position outside row")
+					}
+				}
+				batch = append(batch, append([]Scmer(nil), row...))
+				if len(batch) == batchSize {
+					return NewBool(flush())
+				}
+				return NewBool(true)
+			})
+			program.Call([]Scmer{emit})
+			flush()
+		}()
+		h.cursors = append(h.cursors, &orderedProducerCursor{input: input, ordinal: ordinal})
+	}
+	next := func(cursor *orderedProducerCursor) bool {
+		if cursor.index+1 < len(cursor.rows) {
+			cursor.index++
+			return true
+		}
+		select {
+		case batch, ok := <-cursor.input:
+			if !ok {
+				cursor.rows = nil
+				return false
+			}
+			if batch.failure != nil {
+				panic(batch.failure)
+			}
+			cursor.rows, cursor.index = batch.rows, 0
+			return len(cursor.rows) > 0
+		case <-ctx.Done():
+			panic(ctx.Err())
+		}
+	}
+	live := h.cursors[:0]
+	for _, cursor := range h.cursors {
+		if next(cursor) {
+			live = append(live, cursor)
+		}
+	}
+	h.cursors = live
+	heap.Init(&h)
+	consumer := PrepareSerialProc(a[6])
+	var args [1]Scmer
+	seen, emitted := 0, 0
+	for h.Len() > 0 {
+		cursor := h.cursors[0]
+		if seen >= offset {
+			args[0] = NewSlice(cursor.rows[cursor.index])
+			consumer.Call(args[:])
+			emitted++
+			if limit >= 0 && emitted >= limit {
+				break
+			}
+		}
+		seen++
+		if next(cursor) {
+			heap.Fix(&h, 0)
+		} else {
+			heap.Pop(&h)
+		}
+	}
+	return NewNil()
+}
+
 func init_sync() {
+	Declare(&Globalenv, &Declaration{
+		Name: "scan_order_merge", Fn: scanOrderMerge,
+		Type: &TypeDescriptor{Kind: "func", Description: "Bounded merge of ordered complete-row producers", HasSideEffects: true,
+			Params: []*TypeDescriptor{
+				{Kind: "any", Label: "tx"},
+				{Kind: "list", Label: "producers", Element: &TypeDescriptor{Kind: "func", CrossGoroutine: true, Params: []*TypeDescriptor{{Kind: "func", Label: "emit", Params: []*TypeDescriptor{{Kind: "list", Label: "row"}}, Return: &TypeDescriptor{Kind: "any"}}}, Return: &TypeDescriptor{Kind: "any"}}},
+				{Kind: "list", Label: "positions"}, {Kind: "list", Label: "relations"},
+				{Kind: "number", Label: "offset"}, {Kind: "number", Label: "limit"},
+				{Kind: "func", Label: "consumer", Params: []*TypeDescriptor{{Kind: "list", Label: "row"}}, Return: &TypeDescriptor{Kind: "any"}},
+			}, Return: &TypeDescriptor{Kind: "any"},
+		},
+	})
 	DeclareTitle("Sync")
 	Declare(&Globalenv, &Declaration{
 		Name: "newpromise",

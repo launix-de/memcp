@@ -4181,8 +4181,11 @@ coercion and collations do not have the same ordering proof. */
 (define order_expr_unique_lookup_source (lambda (sources driver default_alias expr stages condition)
 	(begin
 		(define columns (join_column_recipe sources default_alias (list expr)))
-		(define referenced (filter (cdr sources) (lambda (src)
-			(not (empty_list? (qassoc_get columns (source_alias src) '()))))))
+		/* The source catalog is immutable; candidate drivers need not be its
+		first entry. Exclude the actual driver, not the catalog head. */
+		(define referenced (filter sources (lambda (src)
+			(and (not (equal? (source_alias src) (source_alias driver)))
+				(not (empty_list? (qassoc_get columns (source_alias src) '())))))))
 		(if (and (equal? (count referenced) 1) (source_is_unique_lookup? sources default_alias driver (car referenced) stages condition))
 			(car referenced)
 			nil))))

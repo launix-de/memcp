@@ -14,7 +14,7 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 #
 # UNION ALL support
-# fuchsbriefe uses 18+ UNION ALL queries combining file sources from multiple tables
+# Combines file sources and joined branches with ordered delivery.
 # Implementation: (begin) block with two scans
 
 metadata:
@@ -50,8 +50,68 @@ setup:
   - sql: "INSERT INTO ua_order_b VALUES ('alpha'), (NULL)"
   - sql: "CREATE TABLE ua_event (id INT PRIMARY KEY, occurred_at INT)"
   - sql: "INSERT INTO ua_event VALUES (1, 5), (2, 15), (3, 25)"
+  - sql: "DROP TABLE IF EXISTS ua_parallel"
+  - sql: "CREATE TABLE ua_parallel (ID INT) ENGINE=memory"
+  - scm: |
+      (begin
+        (define previous (settings "ShardSize"))
+        (try (lambda () (begin
+          (settings "ShardSize" 250)
+          (insert (table "memcp-tests" "ua_parallel") '("ID")
+            (map (produceN 1001) (lambda (i) (list (+ i 1)))))
+          (rebuild (table "memcp-tests" "ua_parallel") true false)
+          (settings "ShardSize" previous) true))
+          (lambda (failure) (begin (settings "ShardSize" previous) (error failure)))))
 
 test_cases:
+
+  - name: "Ordered UNION streams rejecting unique lookup continuations"
+    sql: |
+      SELECT f.ID AS id, r.ID AS job FROM ua_fop_files f
+      JOIN renderjob r ON f.ID = r.ID - 100 WHERE r.result <> 1
+      UNION ALL
+      SELECT ID AS id, 0 AS job FROM ua_fop_files WHERE ID <= 2
+      ORDER BY id DESC, job ASC LIMIT 3 OFFSET 1
+    expect:
+      rows: 3
+      data:
+        - id: 2
+          job: 0
+        - id: 2
+          job: 102
+        - id: 1
+          job: 0
+    performance_rows: 3
+    threshold_ms: 1000
+    timing_aggregation: total
+    warmup: 0
+    timing_samples: 4
+
+  - name: "Ordered UNION unique join uses native merge"
+    sql: |
+      EXPLAIN SELECT f.ID AS id, r.ID AS job FROM ua_fop_files f
+      JOIN renderjob r ON f.ID = r.ID - 100 WHERE r.result <> 1
+      UNION ALL SELECT ID AS id, 0 AS job FROM ua_fop_files WHERE ID <= 2
+      ORDER BY id DESC, job ASC LIMIT 3 OFFSET 1
+    expect:
+      result_contains: [scan_order_multi]
+      result_not_contains: [__union_materialized_]
+
+  - name: "Ordered UNION preserves one-to-many join multiplicity"
+    sql: |
+      SELECT f.ID AS id, r.ID AS job FROM ua_fop_files f
+      JOIN renderjob r ON f.ID = r.result
+      UNION ALL SELECT 3 AS id, 0 AS job
+      ORDER BY id ASC, job ASC LIMIT 3 OFFSET 1
+    expect:
+      rows: 3
+      data:
+        - id: 3
+          job: 0
+        - id: 3
+          job: 102
+        - id: 3
+          job: 103
 
   - name: "Materialized grouped UNION orders ties and NULLs before slicing"
     sql: |
@@ -68,6 +128,37 @@ test_cases:
         - value: 1
           amount: 1
 
+
+  - name: "Ordered UNION merges multiplying joined producers with NULL keys"
+    sql: |
+      SELECT r.result AS value, r.ID AS job FROM renderjob r
+      JOIN ua_order_a a ON a.value IS NULL
+      UNION ALL SELECT NULL AS value, 0 AS job
+      ORDER BY value ASC, job DESC LIMIT 3 OFFSET 1
+    expect:
+      rows: 3
+      data:
+        - value: 1
+          job: 101
+        - value: 3
+          job: 103
+        - value: 3
+          job: 102
+    performance_rows: 3
+    threshold_ms: 1000
+    timing_aggregation: total
+    warmup: 0
+    timing_samples: 4
+
+  - name: "Joined producer UNION has no full UNION collector"
+    sql: |
+      EXPLAIN SELECT r.result AS value, r.ID AS job FROM renderjob r
+      JOIN ua_order_a a ON a.value IS NULL
+      UNION ALL SELECT NULL AS value, 0 AS job
+      ORDER BY value ASC, job DESC LIMIT 3 OFFSET 1
+    expect:
+      result_contains: [scan_order_merge]
+      result_not_contains: [__union_materialized_]
 
   # === Basic UNION ALL ===
 
@@ -669,7 +760,156 @@ test_cases:
     expect:
       error: true
 
+  - name: "Ordered joined producers keep lexicographic product order"
+    sql: |
+      SELECT r.ID AS job, a.value AS value FROM renderjob r CROSS JOIN ua_order_a a
+      UNION ALL SELECT 0 AS job, 'sentinel' AS value
+      ORDER BY job ASC, value ASC
+    expect:
+      rows: 7
+      data:
+        - {job: 0, value: sentinel}
+        - {job: 101, value: null}
+        - {job: 101, value: beta}
+        - {job: 102, value: null}
+        - {job: 102, value: beta}
+        - {job: 103, value: null}
+        - {job: 103, value: beta}
+    performance_rows: 7
+    threshold_ms: 1000
+    timing_aggregation: total
+    warmup: 0
+    timing_samples: 4
+
+  - name: "UNION delivery order reaches join search before physical lowering"
+    sql: |
+      EXPLAIN
+      SELECT r.ID AS job, a.value AS value FROM renderjob r CROSS JOIN ua_order_a a
+      UNION ALL SELECT 0 AS job, 'sentinel' AS value
+      ORDER BY job ASC, value ASC
+    expect:
+      contains: [scan_order_merge]
+      not_contains: [__union_materialized_, __join_materialized_]
+
+  - name: "Computed lookup keys remain storage order carriers in UNION branches"
+    sql: |
+      SELECT r.ID AS job, f.name AS name FROM renderjob r
+      JOIN ua_fop_files f ON f.ID = r.result
+      UNION ALL SELECT 0, 'image2.png'
+      ORDER BY name ASC, job DESC
+    expect:
+      rows: 4
+      data:
+        - {job: 101, name: image1.png}
+        - {job: 0, name: image2.png}
+        - {job: 103, name: image3.png}
+        - {job: 102, name: image3.png}
+
+  - name: "Lookup sort carriers do not collect joined UNION rows"
+    sql: |
+      EXPLAIN
+      SELECT r.ID AS job, f.name AS name FROM renderjob r
+      JOIN ua_fop_files f ON f.ID = r.result
+      UNION ALL SELECT 0, 'image2.png'
+      ORDER BY name ASC, job DESC
+    expect:
+      not_contains: [__union_materialized_, __join_materialized_, .prejoin:]
+
+  - name: "Lookup order carrier may precede the driver in the source catalog"
+    scm: |
+      (begin
+        (define lookup '("f" "memcp-tests" "ua_fop_files" false nil))
+        (define driver '("r" "memcp-tests" "renderjob" false nil))
+        (define label (list (quote get_column) "f" false "name" false))
+        (define job (list (quote get_column) "r" false "ID" false))
+        (order_items_supported_by_join_driver? (list lookup driver) "f" driver
+          (list (list label (quote <)) (list job (quote >))) '()
+          (list (quote equal??) (list (quote get_column) "f" false "ID" false)
+                               (list (quote get_column) "r" false "result" false))))
+    expect:
+      data: [true]
+
+  - name: "Reversed source catalog preserves lookup order and multiplicity"
+    sql: |
+      SELECT f.name AS name, r.ID AS job FROM ua_fop_files f
+      JOIN renderjob r ON f.ID = r.result
+      UNION ALL SELECT 'image2.png', 0
+      ORDER BY name ASC, job DESC
+    expect:
+      rows: 4
+      data:
+        - {name: image1.png, job: 101}
+        - {name: image2.png, job: 0}
+        - {name: image3.png, job: 103}
+        - {name: image3.png, job: 102}
+
+  - name: "Grouped presence branches stream complete joined rows"
+    sql: |
+      SELECT f.name AS name, r.ID AS job FROM ua_fop_files f CROSS JOIN renderjob r
+      WHERE EXISTS (SELECT 1 FROM ua_event e WHERE e.id = f.ID AND e.id = r.result)
+      UNION ALL SELECT 'image2.png', 0
+      ORDER BY name ASC, job DESC
+    expect:
+      rows: 4
+      data:
+        - {name: image1.png, job: 101}
+        - {name: image2.png, job: 0}
+        - {name: image3.png, job: 103}
+        - {name: image3.png, job: 102}
+    performance_rows: 4
+    threshold_ms: 1000
+    timing_aggregation: total
+    warmup: 0
+    timing_samples: 4
+
+  - name: "Grouped presence UNION has no complete join or UNION collector"
+    sql: |
+      EXPLAIN
+      SELECT f.name AS name, r.ID AS job FROM ua_fop_files f CROSS JOIN renderjob r
+      WHERE EXISTS (SELECT 1 FROM ua_event e WHERE e.id = f.ID AND e.id = r.result)
+      UNION ALL SELECT 'image2.png', 0
+      ORDER BY name ASC, job DESC
+    expect:
+      not_contains: [__union_materialized_, __join_materialized_]
+
+  - name: "Shared inner presence key keeps both nullable outer bindings"
+    sql: |
+      SELECT a.value AS left_value, b.value AS right_value,
+        EXISTS (SELECT 1 FROM ua_order_a i WHERE i.value = a.value AND i.value = b.value) AS present
+      FROM ua_order_a a CROSS JOIN ua_order_a b
+      ORDER BY left_value, right_value
+    expect:
+      rows: 4
+      data:
+        - {left_value: null, right_value: null, present: false}
+        - {left_value: null, right_value: beta, present: false}
+        - {left_value: beta, right_value: null, present: false}
+        - {left_value: beta, right_value: beta, present: true}
+
+  - name: "Shared outer presence binding constrains every inner key"
+    sql: |
+      SELECT value FROM ua_order_a a
+      WHERE EXISTS (SELECT 1 FROM ua_order_a i CROSS JOIN ua_order_b j
+        WHERE i.value = a.value AND j.value = a.value)
+    expect:
+      rows: 0
+
+  - name: "Joined branch order barrier retains rows from parallel shards"
+    sql: |
+      SELECT p.ID AS id, a.value AS label,
+        CASE WHEN a.value IS NULL THEN p.ID ELSE -p.ID END AS rank
+      FROM ua_parallel p CROSS JOIN ua_order_a a
+      UNION ALL SELECT 0, 'sentinel', 0
+      ORDER BY rank, label, id
+    expect:
+      rows: 2003
+      data:
+        - {id: 1001, label: beta, rank: -1001}
+        - {id: 1000, label: beta, rank: -1000}
+        - {id: 999, label: beta, rank: -999}
+
 cleanup:
+  - sql: "DROP TABLE IF EXISTS ua_parallel"
   - sql: "DROP TABLE IF EXISTS renderjob"
   - sql: "DROP TABLE IF EXISTS ua_fop_files"
   - sql: "DROP TABLE IF EXISTS ua_order_a"

@@ -5398,13 +5398,54 @@ the logical lookup still carries an alias which no longer exists. */
 									(qb_facts block))
 								facts)))))))))
 
+/* The outer UNION order is a useful delivery property for every unrestricted
+ALL branch. Expose its positional expressions before join search, then restore
+branch-local syntax: the UNION still owns the global window and ordering.
+No physical carrier or operator enters the logical IR. Existing costing compares
+an ordered join pipeline against a selective join followed by sorting. */
+(define union_branch_with_delivery_order (lambda (node branch)
+	(if (and (equal? (union_mode node) (quote all))
+		(and (and (not (empty_list? (union_order node)))
+			(query_block? (car (union_branches node))))
+			(and (query_block? branch)
+				(and (empty_list? (qb_order branch))
+					(and (nil? (qb_limit branch)) (nil? (qb_offset branch)))))))
+		(begin
+			(define first_branch (car (union_branches node)))
+			(define titles (projection_titles (expand_query_block_fields
+				(qb_sources first_branch) (qb_fields first_branch))))
+			(define fields (expand_query_block_fields (qb_sources branch) (qb_fields branch)))
+			(define positions (union_order_positions titles (union_order node)))
+			(define expressions (projection_exprs fields))
+			(if (not (equal? (count titles) (count expressions)))
+				(neumann_fail "join_reorder" "UNION branch column count mismatch") true)
+			(make_query_block (qb_schema branch) (qb_sources branch) fields
+				(qb_where branch) (qb_group branch) (qb_having branch)
+				(map (produceN (count positions)) (lambda (i)
+					(list (nth expressions (nth positions i)) (nth (nth (union_order node) i) 1))))
+				(qb_limit branch) (qb_offset branch) (qb_hidden branch)
+				(qb_stages branch) (qb_facts branch)))
+		branch)))
+
+(define union_branch_restore_local_order (lambda (planned original)
+	(if (and (and (query_block? planned) (query_block? original))
+		(empty_list? (qb_order original)))
+		(make_query_block (qb_schema planned) (qb_sources planned) (qb_fields planned)
+			(qb_where planned) (qb_group planned) (qb_having planned) (qb_order original)
+			(qb_limit planned) (qb_offset planned) (qb_hidden planned)
+			(qb_stages planned) (qb_facts planned)) planned)))
+
 (define join_reorder_node_using (lambda (stage_catalog node planning_session tx)
 	(if (query_block? node)
 		(reorder_query_block_with_candidate_strategy_using stage_catalog (expose_null_rejected_join_edges node) planning_session tx)
 		(if (union_block? node)
 			(make_union_block
 				(union_mode node)
-				(map (union_branches node) (lambda (branch) (join_reorder_node_using stage_catalog branch planning_session tx)))
+				(map (union_branches node) (lambda (branch)
+					(union_branch_restore_local_order
+						(join_reorder_node_using stage_catalog
+							(union_branch_with_delivery_order node branch) planning_session tx)
+						branch)))
 				(union_order node)
 				(union_limit node)
 				(union_offset node)

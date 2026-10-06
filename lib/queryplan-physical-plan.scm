@@ -11135,16 +11135,20 @@ physical decision and preserve its runtime recompile gate. */
 		(define rows (symbol (concat id "_rows")))
 		(define emit (symbol (concat id "_emit")))
 		(define row (symbol (concat id "_row")))
+		(define collect_lock (symbol (concat id "_collect_lock")))
 		(define unordered (build_join_scan_rows schema sources plan default_alias needed_exprs
 			final_condition materialized_fields '() 0 -1 false stages facts))
 		(list (quote begin)
 			(list (quote define) rows (list (quote newsession)))
+			(list (quote define) collect_lock (list (quote mutex)))
 			(list rows "count" 0)
 			(list (quote define) emit (quote resultrow))
 			(list (quote set) (quote resultrow)
-				(list (quote lambda) (list row) (list (quote begin)
-					(list rows (list rows "count") row)
-					(list rows "count" (list (quote +) (list rows "count") 1)))))
+				(list (quote lambda) (list row)
+					(list collect_lock (physical_query_tx_symbol)
+						(list (quote lambda) '() (list (quote begin)
+							(list rows (list rows "count") row)
+							(list rows "count" (list (quote +) (list rows "count") 1)))))))
 			unordered
 			(list (quote set) (quote resultrow) emit)
 			(list (quote map)
@@ -12238,6 +12242,36 @@ once rather than walking position/relation lists on every comparison. */
 				emit)))
 ))
 
+/* Generic ordered branch producers preserve complete-row multiplicity.
+The merge owns only bounded batches; each branch retains the existing order
+lowering and any genuinely necessary branch-local order barrier. */
+(define union_ordered_producer_supported? (lambda (branch)
+	(and (query_block? branch)
+		(and (empty_list? (qb_order branch))
+			(and (nil? (qb_limit branch)) (nil? (qb_offset branch)))))))
+
+(define lower_union_all_ordered_producers (lambda (block titles width order_positions)
+	(begin
+		(define relations (union_order_relations (union_order block)))
+		(define producers (map (union_branches block) (lambda (raw_branch)
+			(begin
+				(define branch (union_align_branch_fields raw_branch titles width))
+				(define exprs (projection_exprs (qb_fields branch)))
+				(define ordered (make_query_block (qb_schema branch) (qb_sources branch)
+					(qb_fields branch) (qb_where branch) (qb_group branch) (qb_having branch)
+					(map (produceN (count order_positions)) (lambda (i)
+						(list (nth exprs (nth order_positions i)) (nth relations i))))
+					nil nil (qb_hidden branch) (qb_stages branch) (qb_facts branch)))
+				(list (quote lambda) (list (quote __union_emit))
+					(list (quote begin)
+						(list (quote set) (quote resultrow) (quote __union_emit))
+						(lower_query_block_with_stages ordered)))))))
+		(list (quote scan_order_merge) (physical_query_tx_symbol)
+			(cons (quote list) producers)
+			(quoted_runtime_list (map order_positions (lambda (i) (+ (* i 2) 1))))
+			(cons (quote list) relations) (coalesceNil (union_offset block) 0)
+			(coalesceNil (union_limit block) -1) (quote resultrow)))))
+
 (define lower_union_all_ordered (lambda (block titles width)
 	(begin
 		(define branches (union_branches block))
@@ -12270,7 +12304,9 @@ once rather than walking position/relation lists on every comparison. */
 				(if (empty_list? prepares)
 					bound_scan_plan
 					(cons (quote begin) (merge (list prepares (list bound_scan_plan))))))
-			(lower_union_all_ordered_materialized block titles width order_positions)))))
+			(if (reduce aligned (lambda (ok branch) (and ok (union_ordered_producer_supported? branch))) true)
+				(lower_union_all_ordered_producers block titles width order_positions)
+				(lower_union_all_ordered_materialized block titles width order_positions))))))
 
 (define union_direct_order_supported? (lambda (block)
 	(begin
@@ -13213,15 +13249,15 @@ opaque implementation detail in EXPLAIN PHYSICAL. */
 					(list "reason" "actual_key_count_target_distinct_estimate_and_page_window")
 					(list "alternatives" (list "prefix_cursor_merge" "ordered_membership_scan" "projected_recset_scan"))))
 				(if (equal? (string head) "recset_project_join")
-				(list (list
-					(list "decision" "recset_project_join_access")
-					(list "chosen" "runtime_cost_minimum")
-					(list "reason" "actual_key_and_target_shard_cardinality")
-					(list "alternatives" (list
-						"indexed_key_probes"
-						"dense_numeric_membership_scan"
-						"dense_generic_membership_scan"))))
-				'())))
+					(list (list
+						(list "decision" "recset_project_join_access")
+						(list "chosen" "runtime_cost_minimum")
+						(list "reason" "actual_key_and_target_shard_cardinality")
+						(list "alternatives" (list
+							"indexed_key_probes"
+							"dense_numeric_membership_scan"
+							"dense_generic_membership_scan"))))
+					'())))
 			(reduce tail (lambda (decisions item)
 				(merge (list decisions (physical_recset_project_join_decisions item)))) own))
 		_ '())))
