@@ -28,7 +28,9 @@ jobs:
     needs: changes
     if: ${{ needs.changes.outputs.relevant == 'true' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # Complete the fixed fresh-fixture verification after the full initial pass;
+    # query deadlines, sample counts and regression gates remain unchanged.
+    timeout-minutes: 90
 
     steps:
       - name: Check out JIT merge candidate
