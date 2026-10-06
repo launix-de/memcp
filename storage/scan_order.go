@@ -1792,6 +1792,7 @@ func (t *table) scanOrderFirst(currentTx *TxContext, accessSchema scm.Scmer, acc
 	} else {
 		mapper = foundShard.OpenMapReducer(callbackCols, mapReduce, mapperAlreadyLocked, 0, nil, currentTx)
 	}
+	defer mapper.Close()
 	result := mapper.Stream(neutral, []uint32{foundID}, nil)
 	mapper.FlushSideEffects()
 	return result

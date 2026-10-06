@@ -28,6 +28,7 @@ package storage
 //	_WithExplicitTx – scan with an explicitly passed transaction
 //	_WithAutocommit – autocommit transaction creation plus scan
 import (
+	"runtime"
 	"strconv"
 	"testing"
 
@@ -478,5 +479,84 @@ func BenchmarkScanUpdate(b *testing.B) {
 			[]string{"id", "$increment:cached_val"}, mapReduceFn,
 			neutral, nilFn, false,
 		)
+	}
+}
+
+// One-row scalar lookups must return their batch workspace even if the mapper
+// panics. Otherwise a full 1024-row buffer is allocated for every returned row.
+func TestScanOrderFirstReusesReadBuffers(t *testing.T) {
+	const dbName = "test_scan_order_first_buffers"
+	databases.Remove(dbName)
+	t.Cleanup(func() { databases.Remove(dbName) })
+	CreateDatabase(dbName, true)
+	tbl, _ := CreateTable(dbName, "items", Memory, true)
+	tbl.CreateColumn("id", "INT", nil, nil)
+	tbl.CreateColumn("label", "VARCHAR", nil, nil)
+	tbl.Insert([]string{"id", "label"}, [][]scm.Scmer{
+		{scm.NewInt(1), scm.NewString("other")},
+		{scm.NewInt(42), scm.NewString("selected")},
+	}, nil, scm.NewNil(), false, nil)
+	if result := GetDatabase(dbName).rebuild(true, false, true); len(result.errors) > 0 {
+		t.Fatalf("rebuild errors: %v", result.errors)
+	}
+	access := scm.NewSlice(newExactScanAccessSchema([]string{"id"}))
+	values := []scm.Scmer{scm.NewInt(42)}
+	columns := []string{"label"}
+	condition := scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewBool(true) })
+	for _, panics := range []bool{false, true} {
+		name := "return"
+		if panics {
+			name = "panic"
+		}
+		t.Run(name, func(t *testing.T) {
+			calls := 0
+			callback := scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+				calls++
+				if args[1].String() != "selected" {
+					t.Fatalf("callback label = %v", args[1])
+				}
+				if panics {
+					panic("first-row callback")
+				}
+				return args[1]
+			})
+			lookup := func() {
+				defer func() {
+					recovered := recover()
+					if panics && recovered != "first-row callback" {
+						t.Fatalf("panic = %v", recovered)
+					}
+					if !panics && recovered != nil {
+						t.Fatalf("unexpected panic: %v", recovered)
+					}
+				}()
+				result := tbl.scan_order(nil, access, values, nil, condition, nil, nil,
+					0, 0, 1, columns, callback, scm.NewNil(), false, scm.NewNil(), nil, scm.NewNil())
+				if panics {
+					t.Fatal("callback panic was lost")
+				}
+				if result.String() != "selected" {
+					t.Fatalf("result = %v", result)
+				}
+			}
+			for i := 0; i < 32; i++ {
+				lookup()
+			}
+			var before, after runtime.MemStats
+			runtime.ReadMemStats(&before)
+			const repeats = 128
+			for i := 0; i < repeats; i++ {
+				lookup()
+			}
+			runtime.ReadMemStats(&after)
+			if calls != 32+repeats {
+				t.Fatalf("callback calls = %d", calls)
+			}
+			// Allow setup/dispatch allocations and occasional pool misses. A
+			// fresh full batch per scalar lookup is substantially larger.
+			if bytes := (after.TotalAlloc - before.TotalAlloc) / repeats; bytes >= 8192 {
+				t.Fatalf("scalar lookup allocated %d bytes per call; read batch workspace was not reused", bytes)
+			}
+		})
 	}
 }
