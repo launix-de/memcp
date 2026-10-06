@@ -135,6 +135,30 @@ setup:
   - sql: "INSERT INTO trace_ref_dense SELECT id + 32, asset_id, enabled FROM trace_ref_dense"
 
 test_cases:
+
+  - name: Join truth key guards ignore aggregates and reject text keys
+    setup:
+      - sql: "DROP TABLE IF EXISTS trace_key_guard"
+      - sql: "CREATE TABLE trace_key_guard (id INT) ENGINE=memory"
+    scm: |
+      (begin
+        (define sess (newsession))
+        (define planning (sql_queryplan_compile_session sess nil))
+        (define src '("key" "memcp-tests" "trace_key_guard" false nil))
+        (join_truth_record_key_guards '() src '("id") planning)
+        (define guard (sql_queryplan_compile_formula nil
+          (sql_queryplan_guard_from_session planning)))
+        (define original (guard sess nil nil nil))
+        (createcolumn (table "memcp-tests" "trace_key_guard")
+          "unrelated_aggregate" "INT" '() '("temp" true) '("id") (lambda (id) (+ id 1)))
+        (define published (guard sess nil nil nil))
+        (droptable "memcp-tests" "trace_key_guard")
+        (createtable "memcp-tests" "trace_key_guard"
+          (list (list "column" "id" "varchar" (list 20) '())) '("engine" "memory") false nil)
+        (list original published (guard sess nil nil nil)))
+    expect: {data: [[true, true, false]]}
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS trace_key_guard"
   - name: Composite presence preserves outer duplicates and rejects NULL keys
     setup:
     - sql: DROP TABLE IF EXISTS composite_presence_left
@@ -288,6 +312,148 @@ test_cases:
     - sql: DROP TABLE composite_presence_right
     - sql: DROP TABLE composite_presence_fact
 
+  - name: Shared projected truth recipes use the current transaction and session
+    scm: |
+      (begin
+        (define recipe (scheme "(session \"get_or_compute_scoped\" (tx_query tx) (concat \"__projected_scalar_recset_test:\" (serialize (list (session \"actor\")))) tx (lambda (tx) (list tx (session \"actor\"))))"))
+        (define plan (deduplicate_projected_truth_recipes (cons 'list (list recipe recipe))))
+        (define run (eval (list 'lambda (list 'tx 'session) plan)))
+        (define first (newsession))
+        (define second (newsession))
+        (first "actor" 7)
+        (second "actor" 9)
+        (list (run nil first) (run nil second)))
+    expect: {data: [[[[null, 7], [null, 7]], [[null, 9], [null, 9]]]]}
+
+  - name: Shared truth producer preserves ordered keyset fusion
+    scm: |
+      (begin
+        (define recipe (scheme "(session \"get_or_compute_scoped\" (tx_query tx) (concat \"__projected_scalar_recset_fusion:\" (serialize (list (session \"actor\")))) tx (lambda (tx) (begin (define local_carrier (scan_recset tx (table \"memcp-tests\" \"trace_ref_dense\") '() '() '(\"id\") (lambda (id) (equal? id (session \"actor\"))))) (recset_project_join tx local_carrier '(\"asset_id\") (table \"memcp-tests\" \"trace_asset\") '(\"id\")))))"))
+        (define scan (cons 'scan_order (merge (list (list 'tx recipe) (produceN 10)))))
+        (define factored (deduplicate_projected_truth_recipes (list 'list scan scan)))
+        (define fused (lower_ordered_keyset_scans factored))
+        (define scans (nth fused (- (count fused) 1)))
+        (define session (newsession))
+        (session "actor" 1)
+        (define run (eval (list 'lambda (list 'tx 'session)
+          (deduplicate_projected_truth_recipes (list 'list recipe recipe)))))
+        (and (equal? (car (nth scans 1)) 'scan_order_keys)
+          (and (equal? (car (nth scans 2)) 'scan_order_keys)
+            (equal? (map (run nil session) recset_count) '(1 1)))))
+    expect: {data: [true]}
+
+  - name: Generated join truth access preserves nonempty and empty runtime carriers
+    scm: |
+      (begin
+        (define src '("a" "memcp-tests" "trace_asset" false nil))
+        (define input (source_table_expr src))
+        (define narrow (scheme "(scan_recset nil (table \"memcp-tests\" \"trace_asset\") '() '() '(\"id\") (lambda (id) (equal? id 1)))"))
+        (define absent (scheme "(scan_recset nil (table \"memcp-tests\" \"trace_asset\") '() '() '(\"id\") (lambda (id) (equal? id -1)))"))
+        (list
+          (recset_count (eval (join_truth_access_source '() src input (list nil narrow))))
+          (recset_count (eval (join_truth_access_source '() src input (list absent))))
+          (equal? (eval (join_truth_access_source '() src input (list nil)))
+                  (table "memcp-tests" "trace_asset"))))
+    expect: {data: [[1, 0, true]]}
+
+  - name: Join truth projection uses exact current carrier and keeps physical identities
+    scm: |
+      (begin
+        (define lookup (table "memcp-tests" "trace_ref_dense"))
+        (define driver (table "memcp-tests" "trace_asset"))
+        (define narrow (scan_recset nil lookup '() '() '("id") (lambda (id) (equal? id 1))))
+        (define broad (scan_recset nil lookup '() '() '() (lambda () true)))
+        (define absent (scan_recset nil lookup '() '() '("id") (lambda (id) (equal? id -1))))
+        (list
+          (recset_count (join_truth_project_if_cheaper nil (lambda () narrow) lookup '("asset_id") driver '("id") 2048))
+          (nil? (join_truth_project_if_cheaper nil (lambda () broad) lookup '("asset_id") driver '("id") 2048))
+          (recset_count (join_truth_project_if_cheaper nil (lambda () absent) lookup '("asset_id") driver '("id") 2048))))
+    expect: {data: [[1, true, 0]]}
+
+  - name: Bounded join truth probes do not force a rejected producer
+    scm: |
+      (begin
+        (define lookup (table "memcp-tests" "trace_ref_dense"))
+        (define driver (table "memcp-tests" "trace_asset"))
+        (nil? (join_truth_project_if_cheaper nil
+          (lambda () (error "bounded probes must keep their existing access"))
+          lookup '("asset_id") driver '("id") 1)))
+    expect: {data: [true]}
+
+  - name: Join truth projection excludes text equality from physical key comparison
+    scm: |
+      (join_truth_direct_key_column? '() '("a" "memcp-tests" "trace_asset" false nil) "filename")
+    expect: {data: [false]}
+
+  - name: Join truth memo identity distinguishes aligned projection keys
+    scm: |
+      (begin
+        (define src '("a" "memcp-tests" "trace_asset" false nil))
+        (define lookup '("d" "memcp-tests" "trace_ref_dense" false nil))
+        (define driver (table "memcp-tests" "trace_asset"))
+        (define relation (table "memcp-tests" "trace_ref_dense"))
+        (define predicate (list 'equal?? (list 'get_column "d" false "id" false) 2))
+        (define carrier (scan_recset nil relation '() '() '("id") (lambda (id) (equal? id 2))))
+        (define session (newsession))
+        (define memo (lambda (keys)
+          (session "get_or_compute_scoped" (tx_query nil)
+            (join_truth_projection_key src lookup predicate keys '("id") 2048) nil
+            (lambda (tx) (join_truth_project_if_cheaper tx (lambda () carrier)
+              relation keys driver '("id") 2048)))))
+        (define first (memo '("asset_id")))
+        (define second (memo '("id")))
+        (list (recset_count first) (recset_count second)
+          (recset_count (recset_intersect nil (list first second)))))
+    expect: {data: [[1, 1, 0]]}
+
+  - name: Inner join truth prefilter retains duplicate lookup multiplicity
+    sql: |
+      SELECT COUNT(*) AS amount
+      FROM trace_ref_dense d JOIN trace_asset a ON a.id=d.asset_id
+      WHERE COALESCE((SELECT s.enabled FROM trace_ref_b s WHERE s.asset_id=a.id LIMIT 1), FALSE)
+    expect: {data: [{amount: 64}]}
+
+  - name: Join truth requirements exclude nullable ON predicates
+    scm: |
+      (begin
+        (define tree (make_join_optimizer_node 'left-outer
+          (make_join_optimizer_leaf "a") (make_join_optimizer_leaf "b")
+          (list (list '("a" "b") 0.1 'outer-on "b" false nil 0.1))))
+        (equal? (join_truth_required_condition true tree) true))
+    expect: {data: [true]}
+
+  - name: Inner predicates inside a nullable subtree are not mandatory
+    scm: |
+      (begin
+        (define nullable (make_join_optimizer_node 'inner
+          (make_join_optimizer_leaf "b") (make_join_optimizer_leaf "c")
+          (list (list '("b" "c") 0.1 'inner-on "c" false nil 0.1))))
+        (define tree (make_join_optimizer_node 'left-outer
+          (make_join_optimizer_leaf "a") nullable '()))
+        (and (equal? (join_truth_required_condition true tree) true)
+          (equal? (car (join_truth_required_tree_facts tree)) '("a"))))
+    expect: {data: [true]}
+
+  - name: Nullable ON truth cannot restrict an earlier inner relation
+    sql: |
+      SELECT COUNT(*) AS amount
+      FROM trace_asset a JOIN trace_ref_dense d ON d.asset_id=a.id
+      LEFT JOIN trace_ref_b b ON b.asset_id=a.id AND d.id=-1
+      WHERE COALESCE((SELECT x.enabled FROM trace_ref_dense x WHERE x.id=d.id LIMIT 1), FALSE)
+    expect: {data: [{amount: 64}]}
+
+  - name: Left join retains unmatched rows with nullable truth in ON
+    sql: |
+      SELECT d.id AS ref_id, a.id AS asset_id
+      FROM trace_ref_b d LEFT JOIN trace_asset a
+        ON a.id=d.asset_id AND COALESCE((SELECT s.enabled FROM trace_ref_c s WHERE s.asset_id=a.id LIMIT 1), FALSE)
+      ORDER BY d.id
+    expect:
+      data:
+        - {ref_id: 1, asset_id: null}
+        - {ref_id: 17, asset_id: null}
+        - {ref_id: 257, asset_id: null}
+
   - name: "ordered UNION scalar probes use the multi-scan carrier"
     sql: |
       EXPLAIN
@@ -435,6 +601,10 @@ test_cases:
       result_not_contains:
         - "group_cache_create"
         - ".grp:"
+        - "__union_materialized_"
+        - "__join_materialized_"
+        - "scan_order_merge"
+        - "scan_order_multi"
 
   - name: "Selective nested UNION EXISTS keeps bounded physical probes"
     max_time: 1.0

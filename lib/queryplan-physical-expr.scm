@@ -4296,10 +4296,16 @@ not the null-safe domain equality used for session and grouped bindings. */
 (define order_prefix_column_nonnull? (lambda (src col condition)
 	(or (source_column_guaranteed_nonnull? src col)
 		(reduce (split_and_terms condition) (lambda (found term)
-			(or found (match (equality_term_operands term)
-				'(left right) (or (equal? (direct_column_name_for_alias src left) col)
-					(equal? (direct_column_name_for_alias src right) col))
-				_ false))) false))))
+			(or found (or
+				/* An explicit row truth filter proves the distinguishing key
+				non-NULL even when the declared UNIQUE key allows NULLs. */
+				(match term
+					'(not '(nil? expr)) (equal? (direct_column_name_for_alias src expr) col)
+					_ false)
+				(match (equality_term_operands term)
+					'(left right) (or (equal? (direct_column_name_for_alias src left) col)
+						(equal? (direct_column_name_for_alias src right) col))
+					_ false)))) false))))
 
 (define order_prefix_distinguishes_source_rows? (lambda (all_sources src default_alias items stages condition bound_sources)
 	(or (source_is_unique_lookup_from_sources? all_sources default_alias bound_sources src stages condition)

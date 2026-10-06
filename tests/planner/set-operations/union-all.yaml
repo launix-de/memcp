@@ -90,6 +90,30 @@ setup:
 
 test_cases:
 
+  - name: "Non-NULL truth filters prove distinguishing nullable UNIQUE prefixes"
+    scm: |
+      (begin
+        (define src '("e" "memcp-tests" "ua_event" false nil))
+        (list
+          (order_prefix_column_nonnull? src "id"
+            (scheme "(not (nil? (get_column \"e\" false \"id\" false)))"))
+          (order_prefix_column_nonnull? src "id"
+            (scheme "(or (not (nil? (get_column \"e\" false \"id\" false))) true)"))
+          (order_prefix_column_nonnull? src "id"
+            (scheme "(not (nil? (get_column \"e\" false \"occurred_at\" false)))"))))
+    expect: {data: [[true, false, false]]}
+
+  - name: "Filtered nullable UNIQUE prefixes stream ordered joined producers"
+    sql: |
+      EXPLAIN SELECT e.id AS id, r.ID AS job
+      FROM ua_event e CROSS JOIN renderjob r WHERE e.id IS NOT NULL
+      UNION ALL SELECT 99 AS id, 0 AS job
+      ORDER BY id ASC, job ASC
+    expect:
+      result_contains: [scan_order_merge]
+      result_not_contains: [__join_materialized_, __union_materialized_]
+
+
   - name: "Ordered UNION streams rejecting unique lookup continuations"
     sql: |
       SELECT f.ID AS id, r.ID AS job FROM ua_fop_files f
