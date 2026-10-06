@@ -687,6 +687,7 @@ func (db *database) ensureLoaded() {
 			t.publishTopologyLocked()
 			t.initializeLegacyPlannerRowEstimate()
 			t.publishShowColumnsSnapshot()
+			t.restoreKeyFrequencies()
 			t.restoreFilterFeedback()
 		}
 		// FK declarations are authoritative, while their system triggers are

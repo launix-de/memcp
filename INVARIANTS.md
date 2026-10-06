@@ -830,6 +830,44 @@ opt into automatic A/B with `metadata.perf_ci: true`; discovery requires a
 unless a case overrides it. SCM cases with `threshold_ms` must use the same
 warmup, repetitions and A/B timing gate as SQL, with explicit result validation.
 
+### Rebuild-collected numeric key frequencies
+
+Ordinary, noncomputed columns with at least 4096 main-generation rows may retain
+at most 32 numeric heavy keys. A rebuild-local Misra-Gries collector has at most
+64 counters; its cancellation count bounds approximation error. Counters no
+larger than that error are excluded from the heavy keys, so unique late arrivals
+use the tail average instead of a spurious heavy-key estimate. Collection is
+part of the existing rebuild statistics pass, not a scan hot-path observation.
+The population is all inspected main rows, so these are priors, never current
+visibility proofs. NULL is counted separately. Incomplete/mixed numeric domains
+and nonfinite values do not publish numeric frequency hints.
+
+A heavy key uses its bounded count estimate. Other keys use remaining non-NULL
+mass divided by remaining distinct keys, with the existing NDV upper bound. When
+no counters were cancelled the collector knows the complete numeric domain.
+This is a categorical tail average, not interpolation between key values.
+Only a complete simple scalar equality may consume this prior through
+`scan_selectivity_estimate`; a residual conjunction must not inherit one
+conjunct's rate. Exact predicate feedback stays first. Positive sampling budgets
+remain permitted; a frequency prior must not suppress them.
+
+Frequency payloads are immutable and published in the existing atomic column
+and table metadata snapshots. Retained summaries and their name arrays are
+charged to table metadata memory once. Reads neither lock nor access shards. Optional
+`key_frequencies` version 1 schema hints restore before database publication,
+without loading columns. Invalid versions/entries are ignored; memory/cache and
+hidden tables omit durable hints. No runtime generation, shard pointer, session
+binding, or executable code is serialized.
+
+Logical choices consume the existing bound-metadata guards: the bound rate and
+its source, including an unknown prior, are concrete guarded inputs. Changes to
+unrelated keys and publication tokens alone are not invalidation reasons. The
+conservative equality guard remains until a logical candidate cost crossover
+has been derived. `scan_order_keys` reads current keyset frequencies on every
+invocation and compares its existing seek, ordered-rejection and projection
+costs; its internal crossover is re-evaluated without recompiling the envelope.
+Summing a deduplicated numeric keyset examines only the retained top keys.
+
 ## Canonical Naming and Reuse
 
 Helper identities must be canonical.

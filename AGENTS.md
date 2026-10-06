@@ -130,6 +130,15 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
 - `storageShard.filterFeedback` contains immutable observations published with one best-effort CAS after a complete shard scan. Readers may load these atomics without shard locks or concurrency rights; they must not inspect shard containers. `table.filterFeedback` publishes an immutable, bounded merged snapshot. Generation IDs are scalar planner-statistics tokens, never retained shard/topology pointers. No feedback synchronization or publication is permitted inside element or filter-batch loops. `tableShowColumnsSnapshot.filterSchema` is immutable column-semantics metadata published through the existing atomic snapshot. Optional `table.RestoredFilterFeedback` is touched only during schema loading before table publication and cleared after restoring historical aggregates; schema saves serialize an atomic table-feedback snapshot without accessing shard state.
 - When adding new storage fields, document the locking discipline and update this section.
 
+- `column.PlannerStats.KeyFrequency` is an immutable, bounded numeric summary
+  collected by a rebuild-local collector. No shared counters are updated while
+  iterating values. Planner and ordered-keyset reads use the atomically published
+  `tableShowColumnsSnapshot` and never load or lock shards. Snapshot column names
+  are immutable metadata. `table.RestoredKeyFrequencies` is consumed only during
+  schema loading before database publication; schema checkpoints serialize the
+  immutable summary without reading shard state. Versioned optional hints never
+  establish uniqueness, membership, or visibility.
+
 - `table.cacheTriggerSources` is an immutable reverse dependency list published
   with atomic CAS during trigger registration. `TriggerDescription.cacheTarget`
   is a runtime table identity protected by the source table mutex and omitted
