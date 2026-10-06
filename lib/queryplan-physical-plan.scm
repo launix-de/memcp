@@ -12777,6 +12777,26 @@ prepare bindings; no key enumeration or storage artifact enters logical IR. */
 				planner_membership_scan_row_ns
 				planner_membership_recset_build_row_ns
 				planner_membership_ordered_recset_sort_unit_ns))
+		'(session_symbol "get_or_compute_scoped" scope_symbol key tx producer)
+		(if (and (equal? session_symbol (physical_query_session_symbol))
+			(equal? scope_symbol (physical_query_scope_symbol)))
+			(match producer
+				((symbol lambda) params body)
+				(if (equal? params (list tx))
+					(begin
+						(define replacement (ordered_keyset_scan_source body))
+						/* Share the source keys and descriptor, so the ordered operator
+						can still compare prefix cursors against target projection.
+						The memo keeps its scope, invocation key and explicit transaction.
+						Use a distinct identity: other consumers may need the original
+						projected RecSet rather than this bounded access descriptor. */
+						(if (nil? replacement) nil
+							(list session_symbol "get_or_compute_scoped" scope_symbol
+								(list (quote concat) "__ordered_keyset:" key) tx
+								(list (quote lambda) params replacement))))
+					nil)
+				_ nil)
+			nil)
 		(cons head tail) (if (or (equal? head (quote begin)) (equal? head (quote !begin)))
 			(begin
 				(define replacement (ordered_keyset_scan_source (nth tail (- (count tail) 1))))
