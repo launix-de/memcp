@@ -56,3 +56,13 @@ func TestMultiplyFloatingModeBeforeIntegerOverflow(t *testing.T) {
 		t.Fatalf("NULL did not propagate: %v", got)
 	}
 }
+
+func TestMultiplyIntegralFloatResultTag(t *testing.T) {
+	mul := declarations["*"].Fn
+	if got := mul(NewFloat(2), NewFloat(3), NewFloat(4), NewFloat(5)); !got.IsInt() || got.Int() != 120 {
+		t.Fatalf("integral literal product changed its integer tag: %v", got)
+	}
+	if got := mul(NewFloat(0.5), NewInt(2)); !got.IsFloat() || got.Float() != 1 {
+		t.Fatalf("fractional operand lost floating result: %v", got)
+	}
+}

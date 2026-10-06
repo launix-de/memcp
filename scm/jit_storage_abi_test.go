@@ -1155,3 +1155,17 @@ func TestJITMultiplyFloatingModeBeforeIntegerOverflow(t *testing.T) {
 		}
 	}
 }
+
+func TestJITMultiplyIntegralFloatResultTag(t *testing.T) {
+	fn := CompileJITStorageGetValue(func(ctx *JITContext, source, target JITValueDesc) JITValueDesc {
+		source.Type = tagInt
+		ctx.Env = &JITEnv{Numbered: []JITValueDesc{source}}
+		return jitCompileExpr(ctx, NewSlice([]Scmer{NewSymbol("*"), NewNthLocalVar(0), NewFloat(3), NewFloat(4), NewFloat(5)}), ctx.SliceBase, target)
+	})
+	if fn == nil {
+		t.Fatal("integral floating multiplication did not compile")
+	}
+	if got := fn(2); !got.IsInt() || got.Int() != 120 {
+		t.Fatalf("integral literal product changed its integer tag: %v", got)
+	}
+}
