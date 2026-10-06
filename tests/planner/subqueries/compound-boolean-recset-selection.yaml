@@ -10,6 +10,9 @@ metadata:
   isolated: true
 
 setup:
+  - sql: "DROP TABLE IF EXISTS cbr_duplicate_scope"
+  - sql: "CREATE TABLE cbr_duplicate_scope (id INT, priority INT, allowed BOOL)"
+  - sql: "INSERT INTO cbr_duplicate_scope VALUES (1, 1, FALSE), (1, 2, TRUE), (2, 1, TRUE), (2, 2, FALSE), (3, 1, NULL), (3, 2, TRUE)"
   - sql: "DROP TABLE IF EXISTS cbr_global_acl"
   - sql: "DROP TABLE IF EXISTS cbr_node_acl"
   - sql: "DROP TABLE IF EXISTS cbr_node"
@@ -575,7 +578,72 @@ test_cases:
     expect:
       rows: 0
 
+  - name: "inner relational driver retains scalar first row over duplicate keys"
+    sql: |
+      SELECT COUNT(*) AS permitted FROM
+        (SELECT DISTINCT scope_id FROM cbr_large_item) keys
+        CROSS JOIN cbr_large_item i
+      WHERE keys.scope_id = i.scope_id AND COALESCE((
+        SELECT s.allowed FROM cbr_duplicate_scope s
+        WHERE s.id = i.scope_id ORDER BY s.priority LIMIT 1
+      ), FALSE)
+    expect:
+      rows: 1
+      data: [{permitted: 1250}]
+
+  - name: "inner carrier observes the current session key"
+    session_id: "cbr-inner-carrier"
+    setup:
+      - sql: "SET @cbr_actor = 2"
+    sql: |
+      SELECT COUNT(*) AS permitted FROM
+        (SELECT DISTINCT scope_id FROM cbr_large_item) keys
+        CROSS JOIN cbr_large_item i
+      WHERE keys.scope_id = i.scope_id AND COALESCE((
+        SELECT s.allowed AND s.id = @cbr_actor FROM cbr_duplicate_scope s
+        WHERE s.id = i.scope_id ORDER BY s.priority LIMIT 1
+      ), FALSE)
+    expect:
+      rows: 1
+      data: [{permitted: 1250}]
+
+  - name: "inner carrier does not reuse a different session key"
+    session_id: "cbr-inner-carrier"
+    setup:
+      - sql: "SET @cbr_actor = 1"
+    sql: |
+      SELECT COUNT(*) AS permitted FROM
+        (SELECT DISTINCT scope_id FROM cbr_large_item) keys
+        CROSS JOIN cbr_large_item i
+      WHERE keys.scope_id = i.scope_id AND COALESCE((
+        SELECT s.allowed AND s.id = @cbr_actor FROM cbr_duplicate_scope s
+        WHERE s.id = i.scope_id ORDER BY s.priority LIMIT 1
+      ), FALSE)
+    expect:
+      rows: 1
+      data: [{permitted: 0}]
+
+  - name: "nullable relation retains rejected outer rows"
+    sql: |
+      SELECT COUNT(*) AS retained, COUNT(allowed.id) AS matched
+      FROM cbr_item outer_item LEFT JOIN cbr_large_item allowed
+        ON allowed.id = outer_item.id AND COALESCE((
+          SELECT s.allowed FROM cbr_duplicate_scope s
+          WHERE s.id = allowed.scope_id ORDER BY s.priority LIMIT 1
+        ), FALSE)
+    expect:
+      rows: 1
+      data: [{retained: 900, matched: 225}]
+
+  - name: "inner scalar duplicates without LIMIT still error"
+    sql: |
+      SELECT COUNT(*) FROM cbr_large_item i CROSS JOIN cbr_singleton one
+      WHERE COALESCE((SELECT s.allowed FROM cbr_duplicate_scope s
+        WHERE s.id = i.scope_id), FALSE)
+    expect: {error: true}
+
 cleanup:
+  - sql: "DROP TABLE IF EXISTS cbr_duplicate_scope"
   - sql: "DROP TABLE IF EXISTS cbr_global_acl"
   - sql: "DROP TABLE IF EXISTS cbr_node_acl"
   - sql: "DROP TABLE IF EXISTS cbr_node"

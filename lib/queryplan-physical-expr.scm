@@ -2276,19 +2276,34 @@ choice at the consuming join edge. */
 	(begin
 		(define source_parts
 			(scalar_first_probe_recset_source_parts
-				all_stages stage requested_col share_result true planning_session))
+				all_stages stage requested_col false true planning_session))
 		(define source_key_cols (nth source_parts 2))
 		(if (not (equal? (count source_key_cols) 1))
 			(neumann_fail "build_queryplan" "projected scalar RecSet has no resolved row-domain key")
 			true)
-		(list (quote begin)
+		(define projected (list (quote begin)
 			(car source_parts)
 			(list (quote recset_project_join)
 				(physical_query_tx_symbol)
 				(cadr source_parts)
 				(quoted_runtime_list source_key_cols)
 				(source_table_expr target_src)
-				(quoted_runtime_list (list target_col)))))))
+				(quoted_runtime_list (list target_col)))))
+		/* This carrier covers the complete row-key domain, not the current
+		consumer row. Its only invocation bindings are the explicit session
+		coordinates of the decorrelated stage. Share the completed projection
+		within one query generation, including those coordinates in its identity;
+		never retain a RecSet across queries or transaction visibility changes. */
+		(if share_result
+			(list (physical_query_session_symbol) "get_or_compute_scoped"
+				(physical_query_scope_symbol)
+				(list (quote concat)
+					(concat "__projected_scalar_recset_" (stable_structural_hash
+						(list (gs_id stage) requested_col (source_table_expr target_src) target_col) true) ":")
+					(list (quote serialize) (cons (quote list) (group_stage_session_domain_keys stage))))
+				(physical_query_tx_symbol)
+				(list (quote lambda) (list (physical_query_tx_symbol)) projected))
+			projected))))
 
 /* Select one physical realization at the consumer which owns this probe.
 Logical decorrelation contributes the stage shape; the current scan node
