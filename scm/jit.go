@@ -3694,6 +3694,34 @@ func (ctx *JITContext) collectLiveFPRegsForCall(buf *[16]Reg) []Reg {
 	return buf[:count]
 }
 
+// jitFPCallBoundary saves unboxed values in the fixed JIT frame. Go and JIT
+// callees may clobber every XMM register even when they return boxed Scmer.
+// Scalar FP values are not GC roots; stack growth relocates their frame homes.
+type jitFPCallBoundary struct {
+	ctx   *JITContext
+	regs  [16]Reg
+	offs  [16]int32
+	count int
+}
+
+func (ctx *JITContext) preserveFPRegistersForCall() jitFPCallBoundary {
+	boundary := jitFPCallBoundary{ctx: ctx}
+	var live [16]Reg
+	for index, reg := range ctx.collectLiveFPRegsForCall(&live) {
+		boundary.regs[index] = reg
+		boundary.offs[index] = ctx.AllocSpill(8)
+		ctx.EmitStoreFPRegMem(reg, ctx.FrameReg, boundary.offs[index])
+		boundary.count++
+	}
+	return boundary
+}
+
+func (boundary *jitFPCallBoundary) restore() {
+	for index := 0; index < boundary.count; index++ {
+		boundary.ctx.EmitLoadFPRegMem(boundary.regs[index], boundary.ctx.FrameReg, boundary.offs[index])
+	}
+}
+
 // EmitGoCall emits a call to a Go function from JIT code.
 // argWords: registers holding argument words in Go ABI order.
 // numResultWords: how many result words to capture.
@@ -4107,18 +4135,7 @@ func (ctx *JITContext) emitGoCall(funcAddr uint64, argWords []goCallArgWord, num
 	// Owner-aware liveness with conservative fallback.
 	var liveRegsArr [16]Reg
 	liveRegs := ctx.collectLiveRegsForCall(&liveRegsArr)
-	var liveFPRegsArr [16]Reg
-	liveFPRegs := ctx.collectLiveFPRegsForCall(&liveFPRegsArr)
-	var liveFPOffs [16]int32
-	for index, reg := range liveFPRegs {
-		liveFPOffs[index] = ctx.AllocSpill(8)
-		ctx.EmitStoreFPRegMem(reg, ctx.FrameReg, liveFPOffs[index])
-	}
-	restoreLiveFP := func() {
-		for index, reg := range liveFPRegs {
-			ctx.EmitLoadFPRegMem(reg, ctx.FrameReg, liveFPOffs[index])
-		}
-	}
+	liveFP := ctx.preserveFPRegistersForCall()
 	// A requested result register is dead immediately before the call: argument
 	// setup has already consumed its old value and the call deliberately
 	// overwrites it. Saving and restoring such a register only to overwrite it
@@ -4231,7 +4248,7 @@ func (ctx *JITContext) emitGoCall(funcAddr uint64, argWords []goCallArgWord, num
 		ctx.emitCallIndirectWithSetup(funcAddr, func(callFrameBytes int32) {
 			emitArgSetup(callFrameBytes)
 		}, nil)
-		restoreLiveFP()
+		liveFP.restore()
 		if ctx.SliceBaseTracksRSP && ctx.SliceBase != RegRSP {
 			ctx.emitMovRegReg(ctx.SliceBase, RegRSP)
 		}
@@ -4310,7 +4327,7 @@ func (ctx *JITContext) emitGoCall(funcAddr uint64, argWords []goCallArgWord, num
 	ctx.emitCallIndirectWithSetup(funcAddr, func(callFrameBytes int32) {
 		emitArgSetup(stackArgBaseDisp + callFrameBytes)
 	}, transientRoots)
-	restoreLiveFP()
+	liveFP.restore()
 
 	// Store results to reserved stack slots (above saved regs + padding)
 	paddingSize := 0

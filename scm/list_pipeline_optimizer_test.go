@@ -145,6 +145,29 @@ func TestJITNativeFloatSumPreservesNumericAndNilSemantics(t *testing.T) {
 	}
 }
 
+// A native mapper can use any XMM register; the fused running total must
+// survive both dynamic function dispatch and its boxed result conversion.
+func TestJITNativeFloatSumPreservesAcrossNativeMapperCalls(t *testing.T) {
+	if !jitEnabled {
+		t.Skip("requires GOEXPERIMENT=jit")
+	}
+	optimized, env := optimizeListPipeline(t, `(lambda (values mapper)
+		(sum_float_map values (lambda (unused value) (mapper value)) 0.0))`)
+	compiled := jitCompile(Eval(optimized, env))
+	if compiled.Proc() == nil || compiled.Proc().Compiled == nil {
+		t.Fatal("native callback float sum did not compile")
+	}
+	mapper := NewFunc(func(args ...Scmer) Scmer {
+		return declarations["*"].Fn(args[0], NewFloat(1.5))
+	})
+	if got := Apply(compiled, NewSlice([]Scmer{NewFloat(1.25), NewInt(2)}), mapper); !Equal(got, NewFloat(4.875)) {
+		t.Fatalf("native callback float sum = %s, want 4.875", String(got))
+	}
+	if got := Apply(compiled, NewSlice([]Scmer{NewFloat(1.25), NewNil(), NewInt(2)}), mapper); !got.IsNil() {
+		t.Fatalf("native callback float sum with nil = %s, want nil", String(got))
+	}
+}
+
 func benchmarkJITFloatSum(b *testing.B, source string) {
 	if !jitEnabled {
 		b.Skip("requires GOEXPERIMENT=jit")
