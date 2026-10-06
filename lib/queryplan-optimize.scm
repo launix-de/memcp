@@ -1874,6 +1874,15 @@ particular star shape. */
 			(planner_record_statistics_dependency
 				table_expr (table_planner_statistics table_value) planning_session))) nil)))
 
+/* Cardinality-only physical decisions must not depend on unrelated columns
+or their NDV. Canonical caches can add aggregate columns while retaining the
+same row domain; that publication does not change a scan multiplicity. */
+(define planner_record_source_row_count_guard (lambda (src rows planning_session)
+	(planner_record_guard_condition
+		(list (quote equal?)
+			(list (quote planner_source_row_count) (list (quote quote) src))
+			rows) planning_session)))
+
 (define planner_table_statistics_aliases (lambda (sources)
 	(map (filter sources source_is_base_table?) source_alias)))
 
