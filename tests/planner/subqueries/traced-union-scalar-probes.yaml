@@ -172,6 +172,32 @@ test_cases:
     expect:
       data:
       - amount: 6
+  - name: Composite presence compares tuple join with the existing membership alternative
+    sql: >
+      EXPLAIN REORDER SELECT a.id AS left_id, b.id AS right_id
+      FROM composite_presence_left a CROSS JOIN composite_presence_right b
+      WHERE EXISTS (SELECT 1 FROM composite_presence_fact f
+                    WHERE f.left_id=a.id AND f.right_id=b.id)
+    expect:
+      result_contains: ['presence_join_alternatives', 'membership_cost', 'tuple_join_cost']
+
+  - name: Repeated join costs remain monotone beyond the integer range
+    scm: |
+      (begin
+        (define base (planner_join_work_cost 1000000000000000 0.5))
+        (> (qassoc_get (planner_repeat_execution_cost base 8) 'total_ns 0)
+           (qassoc_get base 'total_ns 0)))
+    expect: {data: [true]}
+
+  - name: Cartesian join cardinality does not wrap before applying its ceiling
+    scm: |
+      (begin
+        (define left (join_order_leaf_plan '("left" 1000000000000000)))
+        (define right (join_order_leaf_plan '("right" 1000000000000000)))
+        (equal? (join_order_join_cardinality '() 'inner left right)
+                (simplify "1e30")))
+    expect: {data: [true]}
+
   - name: Composite presence scalar count retains duplicate fact multiplicity
     sql: SELECT a.id AS left_id, b.id AS right_id, (SELECT COUNT(*) FROM composite_presence_fact
       f WHERE f.left_id=a.id AND f.right_id=b.id) AS amount FROM composite_presence_left

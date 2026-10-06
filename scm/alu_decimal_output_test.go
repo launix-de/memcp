@@ -38,3 +38,21 @@ func TestRoundSQLDecimalOutput(t *testing.T) {
 		})
 	}
 }
+
+func TestMultiplyFloatingModeBeforeIntegerOverflow(t *testing.T) {
+	for _, args := range [][]Scmer{
+		{NewFloat(1), NewInt(1_000_000_000_000_000), NewInt(20_000)},
+		{NewInt(1_000_000_000_000_000), NewInt(20_000), NewFloat(1)},
+	} {
+		got := declarations["*"].Fn(args...)
+		if !got.IsFloat() || got.Float() != 2e19 {
+			t.Fatalf("floating product wrapped or lost its type: %v", got)
+		}
+	}
+	if got := declarations["*"].Fn(NewInt(3), NewInt(4)); !got.IsInt() || got.Int() != 12 {
+		t.Fatalf("integer product changed: %v", got)
+	}
+	if got := declarations["*"].Fn(NewFloat(1), NewNil()); !got.IsNil() {
+		t.Fatalf("NULL did not propagate: %v", got)
+	}
+}

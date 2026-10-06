@@ -711,10 +711,10 @@ exact bounded fallback may prefer it while those intervals overlap. */
 /* Calibrated generic storage facts. They are deliberately free of SQL
 semantics; SCM combines them according to the candidate being evaluated. */
 (define planner_scan_cost (lambda (rows confidence)
-	(planner_cost 4000 (* rows 54) 0 0 0 0 0 0 rows confidence)))
+	(planner_cost 4000 (* rows 54.0) 0 0 0 0 0 0 rows confidence)))
 
 (define planner_join_work_cost (lambda (rows confidence)
-	(planner_cost 0 0 (* rows 1240) 0 0 0 0 0 rows confidence)))
+	(planner_cost 0 0 (* rows 1240.0) 0 0 0 0 0 rows confidence)))
 
 (define join_order_set_subset? (lambda (required available)
 	(reduce (coalesceNil required '()) (lambda (ok alias)
@@ -802,12 +802,14 @@ plan = (tree aliases cardinality cost size atomic driver-cardinality left right 
 	(equal? (join_order_plan_pending_kind plan) (quote left-outer))))
 
 (define planner_scan_cost_expr (lambda (rows)
-	(list (quote +) 4000 (list (quote *) rows 54))))
+	(list (quote +) 4000 (list (quote *) rows 54.0))))
 
 (define join_order_leaf_plan (lambda (node)
 	(begin
 		(define row_expr (if (> (count node) 2) (nth node 2) (cadr node)))
-		(define rows (max 1 (cadr node)))
+		/* Keep cardinality arithmetic approximate and positive. Integer products
+		can wrap before the cardinality ceiling or cost comparison sees them. */
+		(define rows (+ 0.0 (max 1 (cadr node))))
 		(list
 			(list (quote join-leaf) (car node) '())
 			(list (car node))
@@ -817,9 +819,9 @@ plan = (tree aliases cardinality cost size atomic driver-cardinality left right 
 			false
 			rows
 			nil nil
-			(list (quote max) 1 row_expr)
-			(planner_scan_cost_expr (list (quote max) 1 row_expr))
-			(list (quote max) 1 row_expr)
+			(list (quote +) 0.0 (list (quote max) 1 row_expr))
+			(planner_scan_cost_expr (list (quote +) 0.0 (list (quote max) 1 row_expr)))
+			(list (quote +) 0.0 (list (quote max) 1 row_expr))
 			(planner_scan_cost rows 0.5)
 			(join_order_node_kind node)
 			(join_order_node_requirements node)))))
@@ -917,17 +919,21 @@ scan lowerer. Its execution work repeats; compilation, retained memory and
 reusable builds do not. A keyed leaf keeps its one-time scan/index estimate,
 with per-binding lookup work charged by the join below. */
 (define planner_repeat_execution_cost (lambda (cost repetitions)
-	(planner_cost
-		(* repetitions (qassoc_get cost (quote startup_ns) 0))
-		(* repetitions (qassoc_get cost (quote row_ns) 0))
-		(* repetitions (qassoc_get cost (quote probe_ns) 0))
-		(* repetitions (qassoc_get cost (quote batch_startup_ns) 0))
-		(* repetitions (qassoc_get cost (quote batch_row_ns) 0))
-		(qassoc_get cost (quote build_ns) 0)
-		(qassoc_get cost (quote memory_bytes) 0)
-		(qassoc_get cost (quote compile_ns) 0)
-		(qassoc_get cost (quote expected_rows) 0)
-		(qassoc_get cost (quote confidence) 0.5))))
+	(begin
+		/* Nested execution counts may exceed int64 even for small real tables.
+		Convert before multiplying, not after an overflowing product. */
+		(define repetitions (+ 0.0 repetitions))
+		(planner_cost
+			(* repetitions (qassoc_get cost (quote startup_ns) 0))
+			(* repetitions (qassoc_get cost (quote row_ns) 0))
+			(* repetitions (qassoc_get cost (quote probe_ns) 0))
+			(* repetitions (qassoc_get cost (quote batch_startup_ns) 0))
+			(* repetitions (qassoc_get cost (quote batch_row_ns) 0))
+			(qassoc_get cost (quote build_ns) 0)
+			(qassoc_get cost (quote memory_bytes) 0)
+			(qassoc_get cost (quote compile_ns) 0)
+			(qassoc_get cost (quote expected_rows) 0)
+			(qassoc_get cost (quote confidence) 0.5)))))
 
 (define join_order_join_plan (lambda (universe predicates left right)
 	(if (or (nil? left) (nil? right))
@@ -973,7 +979,7 @@ with per-binding lookup work charged by the join below. */
 										(qassoc_get (join_order_plan_cost_domain right) (quote build_ns) 0)
 										(qassoc_get (join_order_plan_cost_domain right) (quote compile_ns) 0))))
 							(list (quote *)
-								(list (quote max) cardinality_expr (join_order_plan_cardinality_expr left)) 1240))
+								(list (quote max) cardinality_expr (join_order_plan_cardinality_expr left)) 1240.0))
 						(join_order_plan_driver_expr left)
 						cost_domain
 						(nth shape 1)
@@ -5394,7 +5400,23 @@ the logical lookup still carries an alias which no longer exists. */
 
 (define join_reorder_node_using (lambda (stage_catalog node planning_session tx)
 	(if (query_block? node)
-		(reorder_query_block_with_candidate_strategy_using stage_catalog (expose_null_rejected_join_edges node) planning_session tx)
+		(begin
+			(define exposed (expose_null_rejected_join_edges node))
+			(define exposed_plan (reorder_query_block_with_candidate_strategy_using stage_catalog exposed planning_session tx))
+			(if (equal? (qb_sources exposed) (qb_sources node)) exposed_plan (begin
+				/* Exposing tuple joins expands the search space; retain the original
+				membership alternative instead of making full grouping dominant. */
+				(define original_plan (reorder_query_block_with_candidate_strategy_using stage_catalog node planning_session tx))
+				(define exposed_cost (qassoc_get (qb_facts exposed_plan) (quote join_estimated_cost) nil))
+				(define original_cost (qassoc_get (qb_facts original_plan) (quote join_estimated_cost) nil))
+				(define keep_membership (and (number? original_cost)
+					(and (number? exposed_cost) (< original_cost exposed_cost))))
+				(query_block_with_reorder_facts
+					(if keep_membership original_plan exposed_plan)
+					(list (list (quote presence_join_alternatives) (list
+						(list (quote membership_cost) original_cost)
+						(list (quote tuple_join_cost) exposed_cost)
+						(list (quote chosen) (if keep_membership (quote membership) (quote tuple_join))))))))))
 		(if (union_block? node)
 			(make_union_block
 				(union_mode node)

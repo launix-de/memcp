@@ -1135,3 +1135,23 @@ func BenchmarkJITFloatingFilterBatch(b *testing.B) {
 		}
 	}
 }
+
+func TestJITMultiplyFloatingModeBeforeIntegerOverflow(t *testing.T) {
+	for _, first := range []bool{false, true} {
+		args := []Scmer{NewSymbol("*"), NewInt(1_000_000_000_000_000), NewNthLocalVar(0), NewFloat(1)}
+		if first {
+			args = []Scmer{NewSymbol("*"), NewFloat(1), NewInt(1_000_000_000_000_000), NewNthLocalVar(0)}
+		}
+		fn := CompileJITStorageGetValue(func(ctx *JITContext, source, target JITValueDesc) JITValueDesc {
+			source.Type = tagInt
+			ctx.Env = &JITEnv{Numbered: []JITValueDesc{source}}
+			return jitCompileExpr(ctx, NewSlice(args), ctx.SliceBase, target)
+		})
+		if fn == nil {
+			t.Fatal("floating multiplication did not compile")
+		}
+		if got := fn(20_000); !got.IsFloat() || got.Float() != 2e19 {
+			t.Fatalf("first=%v: floating product wrapped or lost its type: %v", first, got)
+		}
+	}
+}

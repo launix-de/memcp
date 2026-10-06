@@ -825,6 +825,7 @@ test_cases:
   timing_samples: 4
   timing_aggregation: total
   threshold_ms: 120000
+  timeout: 120
 - name: 'Perf: full tenant hierarchy across sparse years'
   sql: SELECT `nav_department` AS `nav_department`, `amount` AS `amount`, `indent` AS `indent`, `nav_year` AS `nav_year`,
     `kind` AS `kind`, `name` AS `name`, `nav_check` AS `nav_check`, `nav_site` AS `nav_site`, 1 FROM (SELECT 0 AS
