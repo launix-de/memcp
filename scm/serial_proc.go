@@ -31,6 +31,9 @@ const (
 	SerialProcNativeArgConstant
 	SerialProcJIT
 	SerialProcRetainingNative
+	// Metadata callbacks retain a relocatable funcval in the caller's descriptor,
+	// rather than a heap Go closure which can capture an interior stack Proc.
+	SerialProcJITMetadata
 )
 
 // SerialProc exposes trivial executable shapes to physical operators. Callers
@@ -356,6 +359,12 @@ func classifySerialProc(source Scmer) SerialProc {
 				prepared.jitArity = len(params)
 				return prepared
 			}
+			if jitEnabled {
+				prepared.Kind = SerialProcJITMetadata
+				prepared.Function = function
+				prepared.jitEntry = proc.Compiled
+				return prepared
+			}
 		}
 		prepared.Kind = SerialProcNative
 		if declaration := DeclarationForValue(source); declaration == nil || declaration.RetainsCallArgs {
@@ -393,6 +402,15 @@ func classifySerialProc(source Scmer) SerialProc {
 			}
 			prepared.jitEntry = proc.Compiled
 			prepared.jitArity = len(params)
+			return prepared
+		}
+		if jitEnabled {
+			prepared.Kind = SerialProcJITMetadata
+			prepared.Function = proc.jitFunction()
+			if prepared.Function == nil {
+				prepared.Function = proc.Compiled.Native
+			}
+			prepared.jitEntry = proc.Compiled
 			return prepared
 		}
 		prepared.Kind = SerialProcGeneral
@@ -514,6 +532,8 @@ func (p *SerialProc) Call(args []Scmer) Scmer {
 		return p.Function(append([]Scmer(nil), args...)...)
 	case SerialProcJIT:
 		return p.CallPrepared(p.PrepareCallFrame(args))
+	case SerialProcJITMetadata:
+		return p.jitEntry.callFunction(p.Function, args)
 	case SerialProcNativeArgConstant:
 		call := p.nativeArgs
 		if p.ConstantFirst {
