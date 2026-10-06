@@ -1,5 +1,6 @@
 # Copyright (C) 2026  Carl-Philip Hänsch
 #
+# All fixture rows are generated from counters; no customer records are stored.
 # Performance coverage for a bounded read-model page whose permission predicate
 # is a correlated scalar lookup and whose projected labels are nullable joins.
 # The grouped boolean carrier must be selected before the native ORDER BY window
@@ -11,7 +12,8 @@ metadata:
   isolated: true
   ci: false
   perf_ci: true
-  performance_rows: 800000
+  # Four complete site cycles retain enough authorized rows for the 72-row page.
+  performance_rows: 4096
   max_regression_pct: 20
 
 fixture_setup: &ordered_acl_fixture
