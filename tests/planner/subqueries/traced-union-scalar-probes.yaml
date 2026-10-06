@@ -181,6 +181,74 @@ test_cases:
     expect:
       result_contains: ['null_rejected_aliases', 'join_plan']
 
+  - name: A scan cost charges indexed startup per invocation rather than visited row
+    scm: |
+      (begin
+        (define src '("a" "memcp-tests" "trace_asset" false nil))
+        (define block (make_query_block "memcp-tests" (list src) '("id" 1)
+          true '() nil '() nil nil '() '() '()))
+        (define cost (join_optimizer_nested_scan_cost '() (list src) "a"
+          (extract_join_hypergraph block)
+          (list (list 'tree (make_join_optimizer_leaf "a"))) nil))
+        (and (equal? (qassoc_get cost 'startup_ns 0) planner_membership_scan_invocation_ns)
+          (equal? (qassoc_get cost 'probe_ns 0) 0)
+          (equal? (qassoc_get cost 'row_ns 0)
+            (* 2048 (+ planner_membership_scan_row_ns planner_membership_map_column_row_ns)))))
+    expect: {data: [true]}
+
+  - name: Composite lookup domain counts each binding relation once
+    scm: |
+      (begin
+        (define left '("a" "memcp-tests" "trace_host" false nil))
+        (define right '("b" "memcp-tests" "trace_box" false nil))
+        (define fact (list "f" "memcp-tests" "trace_message" true
+          (list 'and
+            (list 'equal?? (list 'get_column "f" false "box_id" false) (list 'get_column "a" false "id" false))
+            (list 'equal?? (list 'get_column "f" false "folder_id" false) (list 'get_column "a" false "kind" false))
+            (list 'equal?? (list 'get_column "f" false "id" false) (list 'get_column "b" false "id" false)))))
+        (define sources (list left right fact))
+        (define block (make_query_block "memcp-tests" sources '("id" 1)
+          true '() nil '() nil nil '() '() '()))
+        (equal? (join_optimizer_composite_lookup_rows '() sources "a"
+          (extract_join_hypergraph block) fact nil) 4))
+    expect: {data: [true]}
+
+  - name: Selective composite presence keeps the costed bound-domain alternative
+    sql: |
+      EXPLAIN REORDER SELECT a.id AS left_id,b.id AS right_id
+      FROM trace_ref_dense a CROSS JOIN trace_ref_dense b
+      WHERE a.id=1 AND b.id=1 AND EXISTS
+        (SELECT 1 FROM trace_ref_dense f WHERE f.id=a.id AND f.asset_id=b.id)
+    expect:
+      result_contains: ['composite_presence_costs', 'composite_presence_choice', 'bound_domain']
+
+  - name: Broad composite presence retains the joined-domain alternative
+    sql: |
+      EXPLAIN REORDER SELECT a.id AS left_id,b.id AS right_id
+      FROM trace_ref_dense a CROSS JOIN trace_ref_dense b
+      WHERE EXISTS (SELECT 1 FROM trace_ref_dense f WHERE f.id=a.id AND f.asset_id=b.id)
+    expect:
+      result_contains: ['composite_presence_costs', 'composite_presence_choice', 'joined_domain']
+
+  - name: Selective composite presence preserves its complete bound result
+    sql: |
+      SELECT a.id AS left_id,b.id AS right_id
+      FROM trace_ref_dense a CROSS JOIN trace_ref_dense b
+      WHERE a.id=1 AND b.id=1 AND EXISTS
+        (SELECT 1 FROM trace_ref_dense f WHERE f.id=a.id AND f.asset_id=b.id)
+    expect:
+      rows: 1
+      data: [{left_id: 1, right_id: 1}]
+
+  - name: Broad composite presence counts only populated key tuples
+    sql: |
+      SELECT COUNT(*) AS amount
+      FROM trace_ref_dense a CROSS JOIN trace_ref_dense b
+      WHERE EXISTS (SELECT 1 FROM trace_ref_dense f WHERE f.id=a.id AND f.asset_id=b.id)
+    expect:
+      rows: 1
+      data: [{amount: 64}]
+
   - name: Repeated join costs remain monotone beyond the integer range
     scm: |
       (begin

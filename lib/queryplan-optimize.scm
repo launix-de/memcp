@@ -5398,9 +5398,214 @@ the logical lookup still carries an alias which no longer exists. */
 									(qb_facts block))
 								facts)))))))))
 
+(define join_optimizer_bound_key_distinct (lambda (stages sources default_alias src key_col probe_condition planning_session)
+	(begin
+		(define stage (join_optimizer_source_stage stages src))
+		(define input (if (group_stage? stage) (gs_input stage) src))
+		(define input_col (if (group_stage? stage)
+			(begin
+				(define position (projection_expr_position
+					(merge (map (group_key_cols (gs_keys stage)) (lambda (col) (list col col)))) key_col 0))
+				(if (nil? position) nil (direct_column_name_for_alias input (nth (gs_keys stage) position)))) key_col))
+		(planner_record_table_statistics_guards (list input) planning_session)
+		(define stats (planner_column_statistics input input_col))
+		(define prior (qassoc_get stats (quote distinct) nil))
+		/* This NDV is an actual decision input. Retain a scalar metadata guard;
+		never rerun the join search or inspect a shard from a cached-plan guard. */
+		(if (source_is_base_table? input)
+			(planner_record_guard_condition (list (quote equal?)
+				(list (quote planner_column_distinct_estimate) (planner_quoted_value input) input_col)
+				prior) planning_session) nil)
+		(coalesceNil prior
+			(reduce (split_and_terms probe_condition) (lambda (found term)
+				(coalesceNil found
+					(match term
+						'(op left right) (if (or (equal? op (quote equal?)) (equal? op (quote equal??)))
+							(begin
+								(define other (if (equal? (direct_column_name_for_alias src left) key_col) right
+									(if (equal? (direct_column_name_for_alias src right) key_col) left nil)))
+								(define binder (find sources (lambda (candidate)
+									(not (nil? (direct_column_name_for_alias candidate other)))) nil))
+								(if (nil? binder) nil
+									(begin
+										(planner_record_table_statistics_guards (list binder) planning_session)
+										/* A declared singleton key has the table's row count as NDV.
+										Do not manufacture this inference for a nonunique binding. */
+										(if (contains? (source_unique_key_sets binder)
+											(list (direct_column_name_for_alias binder other)))
+											(planner_source_row_count binder) nil)))) nil)
+						_ nil))) nil) 1))))
+
+/* This estimate describes invocation-owned nested scans. A bushy join has
+a different preparation/materialization contract and must keep its own cost. */
+(define join_optimizer_nested_scan_tree? (lambda (tree)
+	(match tree
+		((symbol join-leaf) _alias _predicates) true
+		((quote join-leaf) _alias _predicates) true
+		((symbol join-leaf) _alias) true
+		((quote join-leaf) _alias) true
+		((symbol join-node) _kind left right _predicates)
+		(and (single_source? (join_optimizer_tree_aliases right))
+			(join_optimizer_nested_scan_tree? left))
+		((quote join-node) _kind left right _predicates)
+		(and (single_source? (join_optimizer_tree_aliases right))
+			(join_optimizer_nested_scan_tree? left))
+		_ false)))
+
+(define join_optimizer_nested_scan_cost (lambda (stages sources default_alias graph planned planning_session)
+	(begin
+		(define ordered (join_optimizer_sources_for_order sources
+			(join_optimizer_tree_aliases (qassoc_get planned (quote tree) nil))))
+		(define predicates (join_optimizer_costed_predicates graph))
+		(define condition (combine_where_terms (map predicates (lambda (entry)
+			(qassoc_get entry (quote predicate) true))) true))
+		(define state (reduce ordered (lambda (state src)
+			(begin
+				(define bound (nth state 0))
+				(define invocations (nth state 1))
+				(define base_rows (max 1 (planner_estimate_planning_value
+					(planner_source_row_estimate_using_stages stages src) 1000000)))
+				(define probe_condition (lookup_probe_condition_from_sources sources default_alias bound src condition))
+				(define key_sets (unique_lookup_key_sets src stages))
+				(define keys (if (empty_list? key_sets) '() (car key_sets)))
+				(define bound_keys (filter keys (lambda (col)
+					(reduce (split_and_terms probe_condition) (lambda (found term)
+						(or found (unique_lookup_join_term? default_alias src col term))) false))))
+				(define point (source_is_unique_lookup_from_sources? sources default_alias bound src stages condition))
+				(define per_invocation (if point 1
+					(/ base_rows (reduce bound_keys (lambda (distinct col)
+						/* Correlated key columns do not justify multiplying NDVs.
+						Use the strongest single-key bound until joint statistics exist. */
+						(max distinct (join_optimizer_bound_key_distinct stages sources default_alias
+							src col probe_condition planning_session))) 1))))
+				(define available (append (source_aliases bound) (source_alias src)))
+				(define filters (filter predicates (lambda (entry)
+					(begin
+						(define aliases (qassoc_get entry (quote aliases) '()))
+						(and (contains? aliases (source_alias src))
+							(and (join_order_set_subset? aliases available)
+								(not (reduce bound_keys (lambda (key_term col)
+									(or key_term (unique_lookup_join_term? default_alias src col
+										(qassoc_get entry (quote predicate) true)))) false))))))))
+				(define outer (source_outer? src))
+				(define post_filter? (lambda (entry)
+					(and outer (equal? (qassoc_get entry (quote origin) nil) (quote where)))))
+				(define match_selectivity (join_optimizer_product (map
+					(filter filters (lambda (entry) (not (post_filter? entry)))) (lambda (entry)
+						(join_optimizer_expr_selectivity sources default_alias
+							(qassoc_get entry (quote predicate) true) planning_session)))))
+				(define post_selectivity (join_optimizer_product (map
+					(filter filters post_filter?) (lambda (entry)
+						(join_optimizer_expr_selectivity sources default_alias
+							(qassoc_get entry (quote predicate) true) planning_session)))))
+				(define visited (* invocations (max 1 per_invocation)))
+				(define matched (* visited match_selectivity))
+				(define output (max 1 (* (if outer (max invocations matched) matched) post_selectivity)))
+				(list (append bound src) output
+					(+ (nth state 2) (if (empty_list? bound_keys)
+						(* invocations planner_membership_scan_invocation_ns) 0))
+					(+ (nth state 3) (* visited
+						(+ planner_membership_scan_row_ns planner_membership_map_column_row_ns)))
+					(+ (nth state 4) (if (empty_list? bound_keys) 0
+						(* invocations planner_membership_direct_probe_row_ns))))))
+			(list '() 1 0 0 0)))
+		(define preparation (qassoc_get planned (quote cost_components) '()))
+		(planner_cost (nth state 2) (nth state 3) (nth state 4) 0 0
+			(qassoc_get preparation (quote build_ns) 0) 0
+			(qassoc_get preparation (quote compile_ns) 0) (nth state 1) 0.75))))
+
+(define join_optimizer_composite_lookup_rows (lambda (stage_catalog sources default_alias graph src planning_session)
+	(begin
+		(define aliases (filter (join_hypergraph_expr_aliases default_alias (source_aliases sources) (source_join_expr src))
+			(lambda (alias) (not (equal? alias (source_alias src))))))
+		(join_optimizer_product (map aliases (lambda (alias)
+			(join_optimizer_source_rows stage_catalog sources default_alias graph
+				(join_optimizer_source_by_alias sources alias) planning_session)))))))
+
+/* Producer preparation is query-wide work. Guard its base inputs through
+published scalar statistics, and count a canonical logical producer once
+even when the same stage is bound through more than one source alias. */
+(define join_optimizer_stage_input_cost_guards (lambda (input planning_session)
+	(if (union_block? input)
+		(map (union_branches input) (lambda (branch)
+			(join_optimizer_stage_input_cost_guards branch planning_session)))
+		(planner_record_table_statistics_guards
+			(if (query_block? input) (qb_sources input) (list input)) planning_session))))
+
+(define join_optimizer_block_nested_scan_cost (lambda (stages block planning_session)
+	(begin
+		(define tree (qassoc_get (qb_facts block) (quote join_plan) nil))
+		(define prior (qassoc_get (qb_facts block) (quote join_cost) '()))
+		/* A bushy candidate retains the calibrated cost of its own subtree
+		preparation; it is not flattened into fictitious nested invocations. */
+		(if (not (join_optimizer_nested_scan_tree? tree)) prior
+			(join_optimizer_nested_scan_cost stages (qb_sources block)
+				(qassoc_get (qb_facts block) (quote default_alias) (source_alias (car (qb_sources block))))
+				(extract_join_hypergraph block)
+				(list (list (quote tree) tree)
+					(list (quote cost_components) prior)) planning_session)))))
+
+(define join_optimizer_composite_presence_costs (lambda (stages changed basic promoted probe planning_session)
+	(begin
+		(define graph (extract_join_hypergraph basic))
+		(define sources (qb_sources basic))
+		(define default_alias (qassoc_get (qb_facts basic) (quote default_alias) (source_alias (car sources))))
+		/* Multiple columns of one outer relation share an invocation domain.
+		Multiply distinct relation domains, never individual key-column NDVs. */
+		(define probe_rows (reduce changed (lambda (total src)
+			(+ total (join_optimizer_composite_lookup_rows stages sources default_alias graph src planning_session))) 0))
+		(define producer_ids (merge_unique (map changed (lambda (src)
+			(list (stage_output_relation_id (source_relation src)))))))
+		(define preparation_rows (planner_add_estimates (map producer_ids (lambda (id)
+			(begin
+				(define stage (stage_by_id stages id))
+				(join_optimizer_stage_input_cost_guards (gs_input stage) planning_session)
+				(planner_stage_input_rows (gs_input stage)))))))
+		(define promoted_cost (join_optimizer_block_nested_scan_cost stages promoted planning_session))
+		(define probe_cost (join_optimizer_block_nested_scan_cost stages probe planning_session))
+		/* Missing producer cardinality is not evidence that preparation is free. */
+		(if (not (number? preparation_rows)) nil (list
+			(planner_cost_add promoted_cost
+				(planner_cost 0 0 0 0 0
+					(* preparation_rows planner_group_relation_build_row_ns) 0 0
+					(qassoc_get promoted_cost (quote expected_rows) 0) 0.7)
+				(qassoc_get promoted_cost (quote expected_rows) 0) 0.7)
+			(planner_cost_add probe_cost (planner_membership_direct_probe_cost probe_rows)
+				(qassoc_get probe_cost (quote expected_rows) 0)
+				(min 0.75 (qassoc_get probe_cost (quote confidence) 0.5))))))))
+
+/* A null-rejected composite presence join has two legal implementations:
+an indexed lookup over the bound outer domain, or a reusable tuple relation.
+Retain both searches only for blocks whose composite edge changes. The
+ordinary binary-edge promotion and every original predicate stay intact. */
 (define join_reorder_node_using (lambda (stage_catalog node planning_session tx)
 	(if (query_block? node)
-		(reorder_query_block_with_candidate_strategy_using stage_catalog (expose_null_rejected_join_edges node) planning_session tx)
+		(begin
+			(define exposed (expose_null_rejected_join_edges node true))
+			(define promoted (reorder_query_block_with_candidate_strategy_using stage_catalog exposed planning_session tx))
+			(define has_composite_presence (reduce (qb_sources node) (lambda (found src)
+				(or found (and (source_outer? src)
+					(and (not (source_outer? (join_optimizer_source_by_alias (qb_sources exposed) (source_alias src))))
+						(presence_stage_output_source? stage_catalog src))))) false))
+			(if (not has_composite_presence) promoted
+				(begin
+					(define basic (expose_null_rejected_join_edges node false))
+					(define changed (filter (qb_sources basic) (lambda (src)
+						(and (source_outer? src) (not (source_outer? (join_optimizer_source_by_alias (qb_sources exposed) (source_alias src))))))))
+					(if (or (empty_list? changed) (reduce changed (lambda (unsupported src)
+						(or unsupported (not (presence_stage_output_source? stage_catalog src)))) false))
+						promoted
+						(begin
+							(define probe (reorder_query_block_with_candidate_strategy_using stage_catalog basic planning_session tx))
+							(define costs (join_optimizer_composite_presence_costs stage_catalog changed basic promoted probe planning_session))
+							(if (nil? costs) promoted
+								(begin
+									(define bound_domain_wins (planner_cost_clear_winner? (cadr costs) (car costs)))
+									(query_block_with_reorder_facts
+										(if bound_domain_wins probe promoted)
+										(list (list (quote composite_presence_costs) costs)
+											(list (quote composite_presence_choice)
+												(if bound_domain_wins "bound_domain" "joined_domain")))))))))))
 		(if (union_block? node)
 			(make_union_block
 				(union_mode node)
@@ -7074,7 +7279,7 @@ propagation because NOT reverses FALSE. */
 		(equal? alias (source_alias src))
 		_ (join_null_propagating? src expr))))
 
-(define expose_null_rejected_join_edges (lambda (block)
+(define expose_null_rejected_join_edges (lambda (block promote_composite)
 	(begin
 		(define rejected (map (filter (qb_sources block) (lambda (src)
 			(and (source_outer? src)
@@ -7094,7 +7299,7 @@ propagation because NOT reverses FALSE. */
 				(and (contains? rejected (source_alias src))
 					(or (reduce join_terms (lambda (found term)
 						(or found (join_null_propagating? src term))) false)
-						(and (stage_output_relation? (source_relation src))
+						(and promote_composite (stage_output_relation? (source_relation src))
 							/* A composite presence edge connecting multiple outer relations
 							can replace their Cartesian enumeration with existing tuples. */
 							(> (count (join_hypergraph_expr_aliases_using nil alias_index
