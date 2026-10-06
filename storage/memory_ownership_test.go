@@ -17,7 +17,10 @@ Copyright (C) 2026  Carl-Philip Hänsch
 package storage
 
 import (
+	"bytes"
 	"io"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -323,4 +326,156 @@ func resumeOwnershipTestCache() {
 	GlobalCache.runDone = make(chan struct{})
 	GlobalCache.stopped.Store(false)
 	go GlobalCache.run()
+}
+
+// Count payload visits independently from elapsed time: ordinary cache reuse
+// must not traverse retained values, even when the measured size is unchanged.
+type countedMemoryPayload struct {
+	visits atomic.Int64
+}
+
+func (v *countedMemoryPayload) ComputeSize() uint {
+	v.visits.Add(1)
+	return 128
+}
+
+func TestTempColumnAccountingDoesNotTraverseRetainedProxyValues(t *testing.T) {
+	payload := new(countedMemoryPayload)
+	proxy := &StorageComputeProxy{delta: make(map[uint32]scm.Scmer)}
+	for i := uint32(0); i < 4096; i++ {
+		proxy.SetValue(i, scm.NewAny(payload))
+	}
+	col := &column{Name: "cached", IsTemp: true}
+	tbl := &table{Columns: []*column{col}}
+	shard := &storageShard{t: tbl, columns: map[string]ColumnStorage{"cached": proxy}}
+	want := int64(proxy.ComputeSize())
+	payload.visits.Store(0)
+	for i := 0; i < 16; i++ {
+		tbl.updateTempColumnMemory(col, []*storageShard{shard})
+	}
+	if got := payload.visits.Load(); got != 0 {
+		t.Fatalf("cache accounting revisited retained payloads %d times", got)
+	}
+	if got := shard.tempColumnBytes[col]; got != want {
+		t.Fatalf("published bytes = %d, want %d", got, want)
+	}
+}
+
+func BenchmarkTempColumnAccountingRetainedProxy(b *testing.B) {
+	proxy := &StorageComputeProxy{delta: make(map[uint32]scm.Scmer)}
+	for i := uint32(0); i < 60000; i++ {
+		proxy.SetValue(i, scm.NewString("retained-value-with-an-owned-payload"))
+	}
+	col := &column{Name: "cached", IsTemp: true}
+	tbl := &table{Columns: []*column{col}}
+	shard := &storageShard{t: tbl, columns: map[string]ColumnStorage{"cached": proxy}}
+	shards := []*storageShard{shard}
+	tbl.updateTempColumnMemory(col, shards)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		tbl.updateTempColumnMemory(col, shards)
+	}
+}
+
+func TestComputeProxyIncrementalMemoryTracksMutations(t *testing.T) {
+	proxy := &StorageComputeProxy{delta: make(map[uint32]scm.Scmer)}
+	check := func(label string) {
+		t.Helper()
+		if got, want := proxy.ownedMemory(), proxy.ComputeSize(); got != want {
+			t.Fatalf("%s: incremental bytes = %d, diagnostic bytes = %d", label, got, want)
+		}
+	}
+	proxy.SetValue(0, scm.NewString("first-owned-string"))
+	check("insert")
+	proxy.SetValue(0, scm.NewString("a much longer replacement string with a different allocation"))
+	check("grow")
+	proxy.SetValue(0, scm.NewInt(17))
+	check("shrink")
+	proxy.SetValue(1, scm.NewSlice([]scm.Scmer{scm.NewString("nested"), scm.NewInt(3)}))
+	check("nested")
+	proxy.Invalidate(1)
+	check("remove")
+	proxy.IncrementalUpdate(0, scm.NewInt(5))
+	check("increment")
+	proxy.InvalidateAll()
+	check("reset")
+
+	// A completed mutable main generation records its exclusive size once.
+	main := &StorageSCMER{values: []scm.Scmer{scm.NewString("main"), scm.NewInt(8)}}
+	proxy.main, proxy.mainBytes = main, ownedColumnMemory(main)
+	proxy.count, proxy.compressed = 2, true
+	check("main generation")
+	proxy.SetValue(0, scm.NewSlice([]scm.Scmer{scm.NewString("replacement"), scm.NewInt(9)}))
+	check("main update")
+	proxy.SetValue(0, scm.NewInt(1))
+	check("main shrink")
+	proxy.IncrementalUpdate(1, scm.NewInt(2))
+	check("main override")
+	proxy.InvalidateAll()
+	check("reset with main")
+}
+
+func TestComputeProxyMemoryRestoresAndClones(t *testing.T) {
+	for _, compressed := range []bool{false, true} {
+		original := &StorageComputeProxy{delta: make(map[uint32]scm.Scmer), count: 2}
+		original.SetValue(0, scm.NewString("persisted-owned-value"))
+		original.SetValue(1, scm.NewInt(29))
+		if compressed {
+			original.main = &StorageSCMER{values: []scm.Scmer{scm.NewString("persisted-owned-value"), scm.NewInt(29)}}
+			original.mainBytes = ownedColumnMemory(original.main)
+			original.delta, original.deltaBytes = make(map[uint32]scm.Scmer), 0
+			original.compressed = true
+		}
+		var wire bytes.Buffer
+		original.Serialize(&wire)
+		magic, err := wire.ReadByte()
+		if err != nil || magic != 50 {
+			t.Fatalf("proxy magic = %d, err = %v", magic, err)
+		}
+		restored := new(StorageComputeProxy)
+		restored.Deserialize(&wire)
+		if got, want := restored.ownedMemory(), restored.ComputeSize(); got != want {
+			t.Fatalf("restore compressed=%v: bytes %d != %d", compressed, got, want)
+		}
+		clone := cloneComputeProxyRows(restored, &storageShard{}, []uint32{1, 0})
+		if got, want := clone.ownedMemory(), clone.ComputeSize(); got != want {
+			t.Fatalf("clone compressed=%v: bytes %d != %d", compressed, got, want)
+		}
+		if clone.GetValue(0).Int() != 29 || !scm.Equal(clone.GetValue(1), scm.NewString("persisted-owned-value")) {
+			t.Fatal("clone lost cached values")
+		}
+	}
+}
+
+func TestComputeProxyMemoryKeepsDictionaryOwnershipSeparate(t *testing.T) {
+	main := &StorageString{compressed: true, compressedDict: []byte("compressed")}
+	proxy := &StorageComputeProxy{main: main, mainBytes: ownedColumnMemory(main), delta: make(map[uint32]scm.Scmer)}
+	before := proxy.ownedMemory()
+	main.dictionary = "separately-owned-decoded-dictionary"
+	if got := proxy.ownedMemory(); got != before {
+		t.Fatalf("proxy charged decoded dictionary: %d != %d", got, before)
+	}
+	want := proxy.ComputeSize() - materializedDictionaryMemory(proxy)
+	if got := proxy.ownedMemory(); got != want {
+		t.Fatalf("exclusive bytes = %d, want %d", got, want)
+	}
+}
+
+func TestComputeProxyMemoryConcurrentPublication(t *testing.T) {
+	proxy := &StorageComputeProxy{delta: make(map[uint32]scm.Scmer)}
+	var workers sync.WaitGroup
+	for worker := uint32(0); worker < 4; worker++ {
+		workers.Add(1)
+		go func(worker uint32) {
+			defer workers.Done()
+			for i := uint32(0); i < 512; i++ {
+				proxy.SetValue(worker*512+i, scm.NewString("parallel-owned-value"))
+				_ = proxy.ownedMemory()
+			}
+		}(worker)
+	}
+	workers.Wait()
+	if got, want := proxy.ownedMemory(), proxy.ComputeSize(); got != want {
+		t.Fatalf("concurrent bytes = %d, want %d", got, want)
+	}
 }

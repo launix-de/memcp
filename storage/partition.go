@@ -1006,7 +1006,7 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension, maint
 								reader := oldShard.ColumnReaderTx(nil, col.Name, true)
 								for _, item := range items {
 									val := reader(uint32(item))
-									newProxy.delta[newIdx] = val
+									newProxy.setDeltaValueLocked(newIdx, val)
 									newProxy.validMask.AtomicSet(uint(newIdx), true)
 									newIdx++
 								}

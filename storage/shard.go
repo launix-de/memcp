@@ -405,6 +405,9 @@ func ownedColumnMemory(storage ColumnStorage) uint {
 	if storage == nil {
 		return 0
 	}
+	if proxy, ok := storage.(*StorageComputeProxy); ok {
+		return proxy.ownedMemory()
+	}
 	size := storage.ComputeSize()
 	materialized := materializedDictionaryMemory(storage)
 	visitColumnCaches(storage, false, func(owner any) bool {

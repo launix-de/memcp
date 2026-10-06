@@ -130,6 +130,14 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
 - `storageShard.filterFeedback` contains immutable observations published with one best-effort CAS after a complete shard scan. Readers may load these atomics without shard locks or concurrency rights; they must not inspect shard containers. `table.filterFeedback` publishes an immutable, bounded merged snapshot. Generation IDs are scalar planner-statistics tokens, never retained shard/topology pointers. No feedback synchronization or publication is permitted inside element or filter-batch loops. `tableShowColumnsSnapshot.filterSchema` is immutable column-semantics metadata published through the existing atomic snapshot. Optional `table.RestoredFilterFeedback` is touched only during schema loading before table publication and cleared after restoring historical aggregates; schema saves serialize an atomic table-feedback snapshot without accessing shard state.
 - When adding new storage fields, document the locking discipline and update this section.
 
+- `StorageComputeProxy.deltaBytes` and `mainBytes` are exclusive retained-payload
+  accounting protected by the proxy mutex (or exclusive unpublished generation
+  ownership during construction/load). Delta writes count only the changed
+  payload; completed main generations establish their size once. Temp-column
+  cache publication reads these counters and the O(1) bitmap size, never traverses
+  retained rows. Counters are reconstructed on load and are not persisted.
+  CacheManager publication remains outside row loops under existing shard locks.
+
 - `column.PlannerStats.KeyFrequency` is an immutable, bounded numeric summary
   collected by a rebuild-local collector. No shared counters are updated while
   iterating values. Planner and ordered-keyset reads use the atomically published
