@@ -6380,7 +6380,7 @@ so complex ACL trees receive the same per-node physical choices as any scan. */
 		(define membership_batch (symbol "__ordered_membership_batch"))
 		(define late_batch (symbol "__ordered_late_batch"))
 		(define membership_exprs (map memberships (lambda (membership)
-			(batch_membership_expr src membership input_batch))))
+			(batch_membership_expr src membership input_batch false))))
 		(if (reduce membership_exprs (lambda (unsupported expr)
 			(or unsupported (nil? expr))) false)
 			nil

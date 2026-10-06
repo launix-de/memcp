@@ -4970,54 +4970,128 @@ travel through the forward/reverse join; keys owned by an enclosing scan or
 session remain exact filters on the candidate relation. A driver-dependent
 computed key cannot be evaluated on candidate rows and makes this alternative
 infeasible instead of silently dropping that key. */
-(define batch_membership_base_expr (lambda (target_src stage target_col batch_expr)
+/* Both projection directions share the same complete positional domain proof.
+Computed driver keys remain infeasible; enclosing/session keys stay exact RHS
+filters. Neither direction stores invocation bindings in a shared cache. */
+(define batch_membership_base_parts (lambda (target_src stage target_col)
 	(begin
 		(define input (gs_input stage))
 		(define src (recset_domain_source input))
 		(define keys (gs_keys stage))
 		(define lookup (qassoc_get (gs_facts stage) (quote lookup-keys) '()))
-		(if (or (nil? src) (not (equal? (count keys) (count lookup))))
-			nil
+		(if (or (nil? src) (not (equal? (count keys) (count lookup)))) nil
 			(begin
 				(define parts (map (produceN (count keys)) (lambda (idx)
 					(begin
 						(define source_col (direct_column_name_for_alias src (nth keys idx)))
 						(define driver_col (direct_column_name_for_alias target_src (nth lookup idx)))
 						(if (or (nil? source_col)
-							(and (nil? driver_col) (expr_refs_sources? nil (list target_src) (nth lookup idx))))
-							nil
+							(and (nil? driver_col) (expr_refs_sources? nil (list target_src) (nth lookup idx)))) nil
 							(list source_col driver_col (if (nil? driver_col)
 								(list (quote equal??) (nth keys idx) (nth lookup idx)) true)))))))
-				(if (contains? parts nil)
-					nil
+				(if (contains? parts nil) nil
 					(begin
 						(define joins (filter parts (lambda (part) (not (nil? (cadr part))))))
-						(if (not (contains? (map joins cadr) target_col))
-							nil
-							(begin
-								(define condition (combine_where_terms (cons
-									(if (query_block? input)
-										(combine_where (qb_where input) (source_join_expr src))
-										(coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
-									(map parts (lambda (part) (nth part 2)))) true))
-								(define filtercols (extract_columns_for_alias src condition))
-								(define source_candidates (list (quote recset_project_join)
-									(physical_query_tx_symbol) batch_expr
-									(quoted_runtime_list (map joins cadr)) (source_table_expr src)
-									(quoted_runtime_list (map joins car))))
-								(define source_matches (compile_scan_plan (quote scan_recset)
-									(physical_query_tx_symbol) source_candidates
-									(cons (quote list) filtercols)
-									(list (quote lambda)
-										(map filtercols (lambda (col) (symbol (concat (source_alias src) "." col))))
-										(lower_column_expr_for_alias src condition))))
-								(list (quote recset_intersect) (physical_query_tx_symbol)
-									(cons (quote list) (list batch_expr
-										(list (quote recset_project_join) (physical_query_tx_symbol) source_matches
-											(quoted_runtime_list (map joins car)) (source_table_expr target_src)
-											(quoted_runtime_list (map joins cadr)))))))))))))))
+						(if (not (contains? (map joins cadr) target_col)) nil
+							(list src joins (combine_where_terms (cons
+								(if (query_block? input) (combine_where (qb_where input) (source_join_expr src))
+									(coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
+								(map parts (lambda (part) (nth part 2)))) true)
+								(map (filter parts (lambda (part) (nil? (cadr part)))) car))))))))))
 
-(define batch_membership_expr (lambda (target_src membership batch_expr)
+(define batch_membership_base_expr (lambda (target_src stage target_col batch_expr source_first)
+	(match (batch_membership_base_parts target_src stage target_col)
+		'(src joins condition bound_cols) (begin
+			(define filtercols (extract_columns_for_alias src condition))
+			(define source_candidates (if source_first (source_table_expr src)
+				(list (quote recset_project_join) (physical_query_tx_symbol) batch_expr
+					(quoted_runtime_list (map joins cadr)) (source_table_expr src)
+					(quoted_runtime_list (map joins car)))))
+			(define source_matches (compile_scan_plan (quote scan_recset)
+				(physical_query_tx_symbol) source_candidates (cons (quote list) filtercols)
+				(list (quote lambda)
+					(map filtercols (lambda (col) (symbol (concat (source_alias src) "." col))))
+					(lower_column_expr_for_alias src condition))))
+			(list (quote recset_intersect) (physical_query_tx_symbol)
+				(cons (quote list) (list batch_expr
+					(list (quote recset_project_join) (physical_query_tx_symbol) source_matches
+						(quoted_runtime_list (map joins car)) (source_table_expr target_src)
+						(quoted_runtime_list (map joins cadr)))))))
+		_ nil)))
+
+/* A dense key projection must pay its target traversal, not pretend every
+key denotes one row. Bounds owned by an enclosing scan can instead be applied
+before projection. Use the strongest individual NDV, not a product which would
+assume independent correlated columns. All decision inputs are scalar guards. */
+(define membership_projection_column_distinct (lambda (src col planning_session)
+	(begin
+		(define stats (planner_column_statistics src col))
+		(define distinct (qassoc_get stats (quote distinct) nil))
+		(planner_record_guard_condition
+			(list (quote and)
+				(list (quote equal?) (list (quote planner_column_distinct_estimate)
+					(planner_quoted_value src) col) distinct)
+				(list (quote equal?) (list (quote qassoc_get)
+					(list (quote planner_column_statistics) (planner_quoted_value src) col)
+					(quoted_runtime_list (quote distinct_source)) nil)
+					(planner_quoted_value (qassoc_get stats (quote distinct_source) nil)))) planning_session)
+		(if (equal? (qassoc_get stats (quote distinct_source) nil) (quote fallback_row_count))
+			1 (max 1 (coalesceNil distinct 1))))))
+
+(define membership_prefiltered_projection_work (lambda (target_src membership driver_rows facts planning_session)
+	(match (batch_membership_base_parts target_src (car membership) (nth membership 2))
+		'(src joins condition bound_cols) (begin
+			(define rows (planner_source_row_count src))
+			(if (or (not (number? rows)) (or (not (number? driver_rows))
+				(or (empty_list? bound_cols) (expr_refs_sources? nil (list target_src) condition)))) facts
+				(begin
+					(planner_record_source_row_count_guard src rows planning_session)
+					(planner_record_source_row_count_guard target_src
+						(planner_source_row_count target_src) planning_session)
+					(define join_distinct (reduce joins (lambda (n part)
+						(max n (membership_projection_column_distinct src (car part) planning_session))) 1))
+					(define bound_distinct (reduce bound_cols (lambda (n col)
+						(max n (membership_projection_column_distinct src col planning_session))) 1))
+					(define expression_work (physical_expression_work_profile src condition planning_session))
+					(define filter_work (merge (list (list
+						(list (quote membership_candidate_filter_columns)
+							(count (extract_columns_for_alias src condition)))
+						(list (quote membership_candidate_expression_operations)
+							(qassoc_get expression_work (quote operations) 0))) facts)))
+					(define projected_rows (* rows (min 1 (/ driver_rows join_distinct))))
+					(define bound_rows (/ rows bound_distinct))
+					(define forward (merge (list (list
+						(list (quote membership_prefiltered_candidate_rows) projected_rows)
+						/* The projector can scan its entire target when no reusable
+						index exists. Cost that traversal; cache readiness is not a
+						planner fact or a reason to underprice a cold projection. */
+						(list (quote membership_prefiltered_projection_read_rows) rows)
+						(list (quote membership_prefiltered_projection_back_read_rows)
+							(planner_source_row_count target_src))) filter_work)))
+					(define reverse (merge (list (list
+						(list (quote membership_prefiltered_candidate_rows) bound_rows)
+						(list (quote membership_prefiltered_projection_read_rows) 0)
+						(list (quote membership_prefiltered_projection_back_read_rows)
+							(planner_source_row_count target_src))
+						(list (quote membership_prefiltered_filter_first) true)) filter_work)))
+					(define candidate_rows (coalesceNil (qassoc_get facts (quote membership_candidate_estimated_rows) nil) rows))
+					(define forward_cost (membership_prefiltered_candidate_cost rows candidate_rows driver_rows forward))
+					(define reverse_cost (membership_prefiltered_candidate_cost rows candidate_rows driver_rows reverse))
+					(define id (concat "membership_projection_order:" (gs_id (car membership)) ":" (source_alias target_src)))
+					(define normal (if (planner_cost_better? reverse_cost forward_cost) "filter_first" "project_first"))
+					(define chosen (planner_physical_choice id normal '("project_first" "filter_first") planning_session))
+					(planner_record_physical_decision (list
+						(list "decision_id" id) (list "decision" "membership_projection_order")
+						(list "chosen" chosen) (list "normally_chosen" normal)
+						(list "inputs" (list (list "source_rows" rows) (list "driver_rows" driver_rows)
+							(list "join_distinct" join_distinct) (list "bound_distinct" bound_distinct)))
+						(list "alternatives" (list
+							(list (list "plan" "project_first") (list "cost" (planner_cost_explain forward_cost)))
+							(list (list "plan" "filter_first") (list "cost" (planner_cost_explain reverse_cost)))))) planning_session)
+					(if (equal? chosen "filter_first") reverse forward))))
+		_ facts)))
+
+(define batch_membership_expr (lambda (target_src membership batch_expr source_first)
 	(begin
 		(define stage (nth membership 0))
 		(define target_col (nth membership 2))
@@ -5048,7 +5122,7 @@ infeasible instead of silently dropping that key. */
 									(list (quote recset_union)
 										(physical_query_tx_symbol)
 										(cons (quote list) branches))))))))
-				(batch_membership_base_expr target_src stage target_col batch_expr))))))
+				(batch_membership_base_expr target_src stage target_col batch_expr source_first))))))
 
 /* A stage's own group-cache is keyed positionally by its gs_keys, named
 k0, k1, ... regardless of what those key expressions look like -- so the
@@ -5598,7 +5672,7 @@ filter; they must not reconstruct the choice from enclosing block facts. */
 			cost formula owns the number of rows that actually reach those branches. */
 			(max (coalesceNil downstream_probe_branches 0)
 				(qassoc_get facts (quote membership_downstream_probe_branches) 0))))
-		(define preparation_facts (qassoc_set consumer_facts
+		(define initial_preparation_facts (qassoc_set consumer_facts
 			(quote membership_downstream_full_preparation_branches)
 			(min (qassoc_get consumer_facts (quote membership_downstream_probe_branches) 0)
 				(max (coalesceNil downstream_full_preparation_branches 0)
@@ -5707,6 +5781,10 @@ filter; they must not reconstruct the choice from enclosing block facts. */
 					ordered_driver_keyset_supported)
 					"driver_order_membership_probe"
 					"driver_filter_join_probe"))
+				(define preparation_facts (if (nil? prefiltered_driver_expr) initial_preparation_facts
+					(membership_prefiltered_projection_work src membership
+						(qassoc_get facts (quote membership_driver_rows) nil)
+						initial_preparation_facts planning_session)))
 				(define candidate_cost (if known
 					(membership_projection_cost candidate_input_rows candidate_rows driver_rows preparation_facts)
 					nil))
@@ -5734,7 +5812,8 @@ filter; they must not reconstruct the choice from enclosing block facts. */
 				(define prefiltered_driver_var (symbol "__prefiltered_membership_recset"))
 				(define prefiltered_body (if (nil? prefiltered_driver_expr)
 					nil
-					(batch_membership_expr src membership prefiltered_driver_var)))
+					(batch_membership_expr src membership prefiltered_driver_var
+						(qassoc_get preparation_facts (quote membership_prefiltered_filter_first) false))))
 				(define prefiltered_expr (if (nil? prefiltered_body)
 					nil
 					(list
