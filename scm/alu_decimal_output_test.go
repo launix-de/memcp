@@ -16,7 +16,10 @@ Copyright (C) 2026  Carl-Philip Hänsch
 */
 package scm
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
 func TestRoundSQLDecimalOutput(t *testing.T) {
 	tests := []struct {
@@ -64,5 +67,22 @@ func TestMultiplyIntegralFloatResultTag(t *testing.T) {
 	}
 	if got := mul(NewFloat(0.5), NewInt(2)); !got.IsFloat() || got.Float() != 1 {
 		t.Fatalf("fractional operand lost floating result: %v", got)
+	}
+}
+
+func TestMultiplyMixedFloatPreservesExactWideIntegers(t *testing.T) {
+	for _, value := range []int64{1<<53 + 1, math.MaxInt64, math.MinInt64} {
+		for _, args := range [][]Scmer{
+			{NewInt(value), NewFloat(1)},
+			{NewFloat(1), NewInt(value)},
+		} {
+			got := declarations["*"].Fn(args...)
+			if !got.IsInt() || got.Int() != value {
+				t.Fatalf("exact wide integer rounded: got %v, want %d", got, value)
+			}
+		}
+	}
+	if got := declarations["*"].Fn(NewInt(math.MaxInt64), NewInt(2), NewFloat(0)); !got.IsInt() || got.Int() != 0 {
+		t.Fatalf("late zero lost integral result: %v", got)
 	}
 }

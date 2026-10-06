@@ -881,7 +881,7 @@ ceiling explicitly; a literal 1e300 silently capped every join at one row. */
 				(* value (join_order_pred_selectivity predicate))
 				value)) 1))
 		(define joined (*
-			(join_order_plan_cardinality left)
+			(+ 0.0 (join_order_plan_cardinality left))
 			(join_order_plan_cardinality right)
 			join_selectivity))
 		(define extended (if (equal? kind (quote left-outer))
@@ -902,7 +902,7 @@ ceiling explicitly; a literal 1e300 silently capped every join at one row. */
 				(join_order_plan_aliases left) (join_order_plan_aliases right) combined)))
 			join_order_pred_selectivity_expr))
 		(define joined_expr (list (quote *)
-			(join_order_plan_cardinality_expr left)
+			(list (quote +) 0.0 (join_order_plan_cardinality_expr left))
 			(join_order_plan_cardinality_expr right)
 			(join_order_product_expr join_selectivities)))
 		(define extended_expr (if (equal? kind (quote left-outer))

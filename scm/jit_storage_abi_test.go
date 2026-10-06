@@ -1169,3 +1169,20 @@ func TestJITMultiplyIntegralFloatResultTag(t *testing.T) {
 		t.Fatalf("integral literal product changed its integer tag: %v", got)
 	}
 }
+
+func TestJITMultiplyMixedFloatPreservesExactWideIntegers(t *testing.T) {
+	for _, value := range []int64{1<<53 + 1, math.MaxInt64, math.MinInt64} {
+		fn := CompileJITStorageGetValue(func(ctx *JITContext, source, target JITValueDesc) JITValueDesc {
+			source.Type = tagInt
+			ctx.Env = &JITEnv{Numbered: []JITValueDesc{source}}
+			expr := NewSlice([]Scmer{NewSymbol("*"), NewInt(value), NewNthLocalVar(0), NewFloat(1)})
+			return jitCompileExpr(ctx, expr, ctx.SliceBase, target)
+		})
+		if fn == nil {
+			t.Fatal("wide mixed multiplication did not compile")
+		}
+		if got := fn(1); !got.IsInt() || got.Int() != value {
+			t.Fatalf("exact wide integer rounded: got %v, want %d", got, value)
+		}
+	}
+}
